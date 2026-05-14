@@ -5,12 +5,18 @@ from __future__ import annotations
 import argparse
 import json
 import subprocess
+import time
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Mapping, Sequence
+from typing import Any, Callable, Mapping, Sequence
 
 from ..config_models import load_settings_from_files
+from ..execution.ibkr_paper_strategy_bridge import (
+    IbkrPaperStrategyBridgeConfig,
+    run_ibkr_paper_strategy_bridge,
+    write_ibkr_paper_strategy_bridge_artifacts,
+)
 from ..execution.ibkr_paper_strategy_porting import lane_submit_bridge_adapter
 from .probationary_runtime import _active_probationary_paper_lane_specs
 
@@ -31,8 +37,10 @@ RESULT_CLASSIFICATIONS = (
     "LEAK_TEST_PASS_FULL_ROUND_TRIP",
     "LEAK_TEST_PASS_BLOCKED_SAFELY",
     "LEAK_TEST_ENTRY_NOT_FILLED_CANCELLED",
+    "LEAK_TEST_ENTRY_REJECTED",
     "LEAK_TEST_ENTRY_FILL_LIFECYCLE_GAP",
     "LEAK_TEST_EXIT_NOT_FILLED_CANCELLED",
+    "LEAK_TEST_EXIT_REJECTED",
     "LEAK_TEST_EXIT_FILL_LIFECYCLE_GAP",
     "LEAK_TEST_BROKER_LIFECYCLE_MISMATCH",
     "LEAK_TEST_RUNTIME_RESTORE_FAILURE",
@@ -52,6 +60,8 @@ RESULT_CLASSIFICATIONS = (
     "LEAK_TEST_LANE_NOT_FOUND",
     "LEAK_TEST_APPLY_REQUIRES_EXPLICIT_APPROVAL_NOT_IMPLEMENTED",
 )
+LEAK_TEST_OUTPUT_ROOT = Path("outputs") / "reports" / "track_b_paper_leak_test"
+PORTFOLIO_STATE_PATH = Path("outputs") / "reports" / "track_b_portfolio" / "latest_track_b_portfolio_state.json"
 
 
 @dataclass(frozen=True)
@@ -82,6 +92,7 @@ class LeakTestSafetySnapshot:
     runtime_command: str | None
     runtime_from_dev_root: bool
     runtime_from_documents_or_icloud: bool
+    duplicate_runtime_submitter_count: int
     active_leak_test_lane_id: str | None
     existing_positions: tuple[dict[str, Any], ...]
     existing_open_orders: tuple[dict[str, Any], ...]
@@ -129,6 +140,50 @@ class LeakTestConcurrentScenario:
 
 
 @dataclass(frozen=True)
+class LeakTestOrderResult:
+    phase: str
+    classification: str
+    terminal_status: str
+    order_id: str | None
+    client_id: int | None
+    perm_id: int | None
+    fill_price: float | None
+    fill_timestamp: str | None
+    execution_price_source: str | None
+    raw_classification: str | None
+    detail: str | None
+    report: dict[str, Any]
+
+
+@dataclass(frozen=True)
+class LeakTestApplyResult:
+    lane_id: str
+    strategy_id: str
+    symbol: str
+    localSymbol: str | None
+    expiry: str | None
+    conId: int | None
+    entry_execution_intent: str
+    entry_execution_intent_source: str
+    pre_apply_blockers: tuple[str, ...]
+    dry_run: bool
+    entry: LeakTestOrderResult | None
+    lifecycle_open_result: str | None
+    reconciliation_after_entry: dict[str, Any] | None
+    exit_policy: str | None
+    exit_reason: str | None
+    exit: LeakTestOrderResult | None
+    lifecycle_close_result: str | None
+    reconciliation_after_exit: dict[str, Any] | None
+    realized_pnl_estimate: float | None
+    portfolio_artifact_status: str | None
+    runtime_pid: int | None
+    runtime_cwd: str | None
+    live_money_eligible: bool
+    mutation_performed: bool
+
+
+@dataclass(frozen=True)
 class LeakTestReport:
     mode: str
     generated_at: str
@@ -141,6 +196,7 @@ class LeakTestReport:
     concurrent_scenarios: tuple[LeakTestConcurrentScenario, ...]
     recommended_first_isolated_sequence: tuple[str, ...]
     recommended_first_concurrent_scenario_id: str | None
+    apply_result: LeakTestApplyResult | None
     result_classification: str
     notes: tuple[str, ...]
 
@@ -175,6 +231,33 @@ def _runtime_command_for_pid(pid: int | None) -> str | None:
         return None
     command = completed.stdout.strip()
     return command or None
+
+
+def _duplicate_runtime_submitter_count(*, repo_root: Path, operator_status: Mapping[str, Any]) -> int:
+    explicit = operator_status.get("duplicate_runtime_submitter_count")
+    if explicit is not None:
+        return _int_value(explicit)
+    try:
+        completed = subprocess.run(
+            ["ps", "-efww"],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=2,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return 0
+    repo_text = str(repo_root)
+    count = 0
+    for line in completed.stdout.splitlines():
+        if "probationary-paper-soak" not in line:
+            continue
+        if repo_text not in line:
+            continue
+        if "Documents/MGC-v05l" in line or "Mobile Documents" in line:
+            continue
+        count += 1
+    return count
 
 
 def _contract_local_symbol(symbol: str, contract_month: str | None) -> str | None:
@@ -300,14 +383,20 @@ def build_safety_snapshot(
         runtime_command=command,
         runtime_from_dev_root=repo_root_text in cwd_or_command,
         runtime_from_documents_or_icloud=("Documents/MGC-v05l" in cwd_or_command or "Mobile Documents" in cwd_or_command),
+        duplicate_runtime_submitter_count=_duplicate_runtime_submitter_count(
+            repo_root=repo_root,
+            operator_status=operator_payload,
+        ),
         active_leak_test_lane_id=str(active_payload.get("lane_id") or "").strip() or None,
         existing_positions=_existing_positions_from_reconciliation(reconciliation_payload),
         existing_open_orders=_existing_open_orders_from_reconciliation(reconciliation_payload),
     )
 
 
-def _unresolved_state_blockers(safety: LeakTestSafetySnapshot) -> list[str]:
+def _unresolved_state_blockers(*, repo_root: Path, safety: LeakTestSafetySnapshot) -> list[str]:
     blockers: list[str] = []
+    if str(repo_root.resolve()) != "/Users/patrick/Dev/MGC-v05l-automation":
+        blockers.append("repo_root_not_dev_checkout")
     if safety.account_id not in {None, PAPER_ACCOUNT_ID}:
         blockers.append("account_not_DUM882026")
     if safety.classification != RECONCILED_CLASSIFICATION or not safety.broker_reconciled:
@@ -326,6 +415,8 @@ def _unresolved_state_blockers(safety: LeakTestSafetySnapshot) -> list[str]:
         blockers.append("runtime_not_verified_from_dev_root")
     if safety.runtime_from_documents_or_icloud:
         blockers.append("runtime_from_documents_or_icloud")
+    if safety.duplicate_runtime_submitter_count > 1:
+        blockers.append("duplicate_runtime_submitters")
     return blockers
 
 
@@ -449,6 +540,9 @@ def _lane_plan(
     if route != "ibkr_paper_bridge_submit_capable":
         isolated_blockers.append("route_not_guarded_paper_bridge")
         concurrent_blockers.append("route_not_guarded_paper_bridge")
+    if not _contract_local_symbol(symbol, contract_month) or not contract_month:
+        isolated_blockers.append("contract_identity_unresolved")
+        concurrent_blockers.append("contract_identity_unresolved")
     warnings: list[str] = []
     if getattr(spec, "non_approved", False):
         warnings.append("lane_marked_non_approved_candidate")
@@ -619,7 +713,7 @@ def build_plan_only_report(
         active_leak_test=active_leak_test,
         runtime_command=runtime_command,
     )
-    unresolved_blockers = _unresolved_state_blockers(safety)
+    unresolved_blockers = _unresolved_state_blockers(repo_root=repo_root, safety=safety)
     lanes = tuple(
         lane
         for spec in _active_probationary_paper_lane_specs(settings)
@@ -643,10 +737,11 @@ def build_plan_only_report(
         concurrent_scenarios=scenarios,
         recommended_first_isolated_sequence=recommended_isolated,
         recommended_first_concurrent_scenario_id=recommended_concurrent,
+        apply_result=None,
         result_classification="LEAK_TEST_PLAN_ONLY",
         notes=(
             "Plan-only mode performs no broker mutation.",
-            "Apply mode is intentionally not implemented in this first deliverable.",
+            "Single-lane apply exists but is broker-mutating unless --dry-run is used.",
             "Existing clean managed positions may coexist when exposure policy allows; unresolved broker/lifecycle state still blocks.",
         ),
     )
@@ -681,6 +776,7 @@ def build_concurrent_plan_report(
         concurrent_scenarios=plan.concurrent_scenarios,
         recommended_first_isolated_sequence=plan.recommended_first_isolated_sequence,
         recommended_first_concurrent_scenario_id=plan.recommended_first_concurrent_scenario_id,
+        apply_result=None,
         result_classification="LEAK_TEST_CONCURRENT_PLAN_ONLY",
         notes=(
             "Concurrent-plan mode proposes multi-position scenarios only.",
@@ -723,8 +819,273 @@ def build_single_lane_dry_run_report(
         concurrent_scenarios=plan.concurrent_scenarios,
         recommended_first_isolated_sequence=plan.recommended_first_isolated_sequence,
         recommended_first_concurrent_scenario_id=plan.recommended_first_concurrent_scenario_id,
+        apply_result=None,
         result_classification=classification if lanes else "LEAK_TEST_LANE_NOT_FOUND",
         notes=("Dry-run validates preconditions and does not call the broker route.",),
+    )
+
+
+def _guarded_bridge_route(config: IbkrPaperStrategyBridgeConfig) -> dict[str, Any]:
+    artifacts = run_ibkr_paper_strategy_bridge(config=config)
+    output_dir = config.repo_root / (config.output_dir or LEAK_TEST_OUTPUT_ROOT / "bridge")
+    write_ibkr_paper_strategy_bridge_artifacts(output_dir=output_dir, artifacts=artifacts)
+    return {"classification": artifacts.classification, "report": artifacts.report}
+
+
+def _default_reconciliation_reader(repo_root: Path, stage: str) -> dict[str, Any]:
+    del stage
+    return _read_json(repo_root / RECONCILIATION_PATH)
+
+
+def _bridge_action_for_lane(lane: LeakTestLanePlan) -> str:
+    text = f"{lane.lane_id} {lane.display_name} {lane.strategy_id}".upper()
+    if "SHORT" in text:
+        return "SELL"
+    return "BUY"
+
+
+def _close_action_for_entry(entry_action: str) -> str:
+    return "SELL" if entry_action == "BUY" else "BUY"
+
+
+def _intent_type_for_action(action: str, *, close: bool) -> str:
+    if close:
+        return "SELL_TO_CLOSE" if action == "SELL" else "BUY_TO_CLOSE"
+    return "BUY_TO_OPEN" if action == "BUY" else "SELL_TO_OPEN"
+
+
+def _limit_price_model_for_action(action: str) -> str:
+    if action == "SELL":
+        return "DELAYED_BID_MINUS_1T_MARKETABLE_SELL"
+    return "DELAYED_ASK_PLUS_1T_MARKETABLE_BUY"
+
+
+def _bridge_config_for_apply(
+    *,
+    repo_root: Path,
+    lane: LeakTestLanePlan,
+    action: str,
+    intent_type: str,
+    reason: str,
+    max_wait_seconds: float,
+    safety: LeakTestSafetySnapshot,
+    lifecycle_id: str | None = None,
+) -> IbkrPaperStrategyBridgeConfig:
+    return IbkrPaperStrategyBridgeConfig(
+        repo_root=repo_root,
+        mode="PAPER",
+        host="127.0.0.1",
+        port=7497,
+        client_id=10940,
+        account_id=PAPER_ACCOUNT_ID,
+        strategy_id=lane.lane_id,
+        symbol=lane.symbol,
+        contract_month=str(lane.expiry or ""),
+        action=action,
+        quantity=1.0,
+        order_type="LMT",
+        limit_price_model=_limit_price_model_for_action(action),
+        time_in_force="DAY",
+        reason=reason,
+        risk_tags=("TRACK_B_LEAK_TEST", intent_type),
+        paper_only=True,
+        submit=True,
+        timeout_seconds=max_wait_seconds,
+        daily_order_cap=1,
+        caller_path="manual_strategy_bridge_cli",
+        output_dir=LEAK_TEST_OUTPUT_ROOT / lane.lane_id,
+        caller_metadata={
+            "lane_id": lane.lane_id,
+            "strategy_id": lane.strategy_id,
+            "route_destination": lane.expected_route,
+            "intent_type": intent_type,
+            "account_id": PAPER_ACCOUNT_ID,
+            "con_id": lane.conId,
+            "local_symbol": lane.localSymbol,
+            "lifecycle_id": lifecycle_id,
+            "runtime_pid": safety.runtime_pid,
+            "runtime_cwd": safety.runtime_cwd,
+            "leak_test": True,
+            "live_money_eligible": False,
+        },
+    )
+
+
+def _nested(payload: Mapping[str, Any], *keys: str) -> Any:
+    current: Any = payload
+    for key in keys:
+        if not isinstance(current, Mapping):
+            return None
+        current = current.get(key)
+    return current
+
+
+def _float_or_none(value: Any) -> float | None:
+    if value in {None, ""}:
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _order_result_from_bridge(*, phase: str, route_result: Mapping[str, Any]) -> LeakTestOrderResult:
+    report = dict(route_result.get("report") or {})
+    raw_classification = str(route_result.get("classification") or report.get("classification") or "").strip()
+    delegated = dict(report.get("delegated_result") or {})
+    delegated_report = dict(delegated.get("report") or {})
+    lifecycle = dict(
+        delegated_report.get("submit_cancel_lifecycle")
+        or delegated_report.get("lifecycle")
+        or delegated.get("submit_cancel_lifecycle")
+        or {}
+    )
+    pricing = dict(report.get("entry_execution_pricing") or delegated.get("entry_execution_pricing") or {})
+    status = str(lifecycle.get("status") or "").strip().lower()
+    if raw_classification == "PAPER_STRATEGY_ORDER_FILLED" or status in {"filled", "filled_flat", "passed"}:
+        classification = "FILLED"
+        terminal_status = "filled"
+    elif raw_classification in {"PAPER_STRATEGY_ORDER_NOT_FILLED_CANCELLED", "PAPER_STRATEGY_ENTRY_MISSED_CANCELLED_ACCEPTED"}:
+        classification = "NOT_FILLED_CANCELLED"
+        terminal_status = "not_filled_cancelled"
+    elif raw_classification == "PAPER_STRATEGY_ORDER_REJECTED":
+        classification = "REJECTED"
+        terminal_status = "rejected"
+    elif raw_classification == "PAPER_STRATEGY_INTENT_BLOCKED":
+        classification = "BLOCKED"
+        terminal_status = "blocked"
+    else:
+        classification = "UNKNOWN"
+        terminal_status = "unknown"
+    return LeakTestOrderResult(
+        phase=phase,
+        classification=classification,
+        terminal_status=terminal_status,
+        order_id=str(
+            lifecycle.get("order_id")
+            or lifecycle.get("broker_order_id")
+            or delegated_report.get("order_id")
+            or delegated.get("broker_order_id")
+            or ""
+        )
+        or None,
+        client_id=_int_value(
+            lifecycle.get("client_id")
+            or delegated_report.get("client_id")
+            or delegated.get("client_id")
+            or _nested(report, "caller_metadata", "client_id")
+        )
+        or None,
+        perm_id=_int_value(lifecycle.get("perm_id") or delegated_report.get("perm_id") or delegated.get("perm_id")) or None,
+        fill_price=_float_or_none(
+            lifecycle.get("fill_price")
+            or lifecycle.get("filled_avg_price")
+            or delegated_report.get("fill_price")
+            or delegated.get("fill_price")
+        ),
+        fill_timestamp=str(
+            lifecycle.get("fill_timestamp")
+            or lifecycle.get("filled_at")
+            or delegated_report.get("fill_timestamp")
+            or delegated.get("fill_timestamp")
+            or ""
+        )
+        or None,
+        execution_price_source=str(pricing.get("execution_price_source") or "") or None,
+        raw_classification=raw_classification or None,
+        detail=str(report.get("detail") or delegated.get("detail") or lifecycle.get("detail") or "") or None,
+        report=report,
+    )
+
+
+def _reconciliation_ok(reconciliation: Mapping[str, Any]) -> bool:
+    return (
+        str(reconciliation.get("classification") or "") == RECONCILED_CLASSIFICATION
+        and reconciliation.get("broker_reconciled") is True
+        and _int_value(reconciliation.get("review_required_count")) == 0
+    )
+
+
+def _lifecycle_open_matches_lane(reconciliation: Mapping[str, Any], lane: LeakTestLanePlan) -> bool:
+    for row in _list_payload(reconciliation.get("track_b_lifecycle_positions")):
+        if str(row.get("lane_id") or "") == lane.lane_id:
+            return True
+        if lane.lane_id in str(row.get("strategy_id") or ""):
+            return True
+    return False
+
+
+def _lifecycle_id_for_lane(reconciliation: Mapping[str, Any], lane: LeakTestLanePlan) -> str | None:
+    for row in _list_payload(reconciliation.get("track_b_lifecycle_positions")):
+        if str(row.get("lane_id") or "") == lane.lane_id or lane.lane_id in str(row.get("strategy_id") or ""):
+            lifecycle_id = str(row.get("lifecycle_id") or "").strip()
+            if lifecycle_id:
+                return lifecycle_id
+    return None
+
+
+def _reconciliation_is_flat(reconciliation: Mapping[str, Any]) -> bool:
+    return (
+        _reconciliation_ok(reconciliation)
+        and _int_value(reconciliation.get("track_b_broker_position_count")) == 0
+        and _int_value(reconciliation.get("lifecycle_open_position_count")) == 0
+        and _int_value(reconciliation.get("track_b_broker_open_order_count"))
+        + _int_value(reconciliation.get("lifecycle_open_order_count"))
+        == 0
+    )
+
+
+def _wait_for_reconciliation(
+    *,
+    repo_root: Path,
+    stage: str,
+    max_wait_seconds: float,
+    reader: Callable[[Path, str], dict[str, Any]],
+    predicate: Callable[[Mapping[str, Any]], bool],
+) -> dict[str, Any]:
+    deadline = time.monotonic() + max(0.0, max_wait_seconds)
+    latest = reader(repo_root, stage)
+    while time.monotonic() <= deadline:
+        latest = reader(repo_root, stage)
+        if predicate(latest):
+            return latest
+        if max_wait_seconds <= 0:
+            return latest
+        time.sleep(min(1.0, max(0.0, deadline - time.monotonic())))
+    return latest
+
+
+def _portfolio_status(repo_root: Path) -> str | None:
+    payload = _read_json(repo_root / PORTFOLIO_STATE_PATH)
+    if not payload:
+        return None
+    return str((payload.get("portfolio_summary") or {}).get("status") or payload.get("status") or "") or None
+
+
+def _realized_pnl_estimate(*, exit_result: LeakTestOrderResult | None, portfolio_status: str | None) -> float | None:
+    del portfolio_status
+    if exit_result is None:
+        return None
+    value = _nested(exit_result.report, "delegated_result", "realized_pnl")
+    if value is None:
+        value = _nested(exit_result.report, "delegated_result", "report", "realized_pnl")
+    return _float_or_none(value)
+
+
+def _empty_order_result(phase: str, classification: str, detail: str | None = None) -> LeakTestOrderResult:
+    return LeakTestOrderResult(
+        phase=phase,
+        classification=classification,
+        terminal_status=classification.lower(),
+        order_id=None,
+        client_id=None,
+        perm_id=None,
+        fill_price=None,
+        fill_timestamp=None,
+        execution_price_source=None,
+        raw_classification=None,
+        detail=detail,
+        report={},
     )
 
 
@@ -737,8 +1098,13 @@ def build_single_lane_apply_report(
     active_leak_test: Mapping[str, Any] | None = None,
     runtime_command: str | None = None,
     exposure_policy: LeakTestExposurePolicy | None = None,
+    dry_run: bool = False,
+    max_wait_seconds: float = 90.0,
+    force_exit_after_entry: bool = True,
+    guarded_route_runner: Callable[[IbkrPaperStrategyBridgeConfig], dict[str, Any]] = _guarded_bridge_route,
+    reconciliation_reader: Callable[[Path, str], dict[str, Any]] = _default_reconciliation_reader,
 ) -> LeakTestReport:
-    dry_run = build_single_lane_dry_run_report(
+    dry_run_report = build_single_lane_dry_run_report(
         repo_root=repo_root,
         lane_id=lane_id,
         reconciliation=reconciliation,
@@ -747,26 +1113,218 @@ def build_single_lane_apply_report(
         runtime_command=runtime_command,
         exposure_policy=exposure_policy,
     )
-    if not dry_run.lanes:
+    if not dry_run_report.lanes:
         classification = "LEAK_TEST_LANE_NOT_FOUND"
-    elif not dry_run.lanes[0].safe_to_test:
+        apply_result = None
+    elif not dry_run_report.lanes[0].safe_to_test:
         classification = "LEAK_TEST_PASS_BLOCKED_SAFELY"
+        lane = dry_run_report.lanes[0]
+        apply_result = LeakTestApplyResult(
+            lane_id=lane.lane_id,
+            strategy_id=lane.strategy_id,
+            symbol=lane.symbol,
+            localSymbol=lane.localSymbol,
+            expiry=lane.expiry,
+            conId=lane.conId,
+            entry_execution_intent=lane.entry_execution_intent,
+            entry_execution_intent_source="inferred" if lane.entry_execution_intent.endswith("_INFERRED") else "explicit",
+            pre_apply_blockers=lane.isolated_blockers,
+            dry_run=False,
+            entry=None,
+            lifecycle_open_result=None,
+            reconciliation_after_entry=None,
+            exit_policy=None,
+            exit_reason=None,
+            exit=None,
+            lifecycle_close_result=None,
+            reconciliation_after_exit=None,
+            realized_pnl_estimate=None,
+            portfolio_artifact_status=None,
+            runtime_pid=dry_run_report.safety.runtime_pid,
+            runtime_cwd=dry_run_report.safety.runtime_cwd,
+            live_money_eligible=False,
+            mutation_performed=False,
+        )
+    elif dry_run:
+        lane = dry_run_report.lanes[0]
+        classification = "LEAK_TEST_DRY_RUN_READY"
+        apply_result = LeakTestApplyResult(
+            lane_id=lane.lane_id,
+            strategy_id=lane.strategy_id,
+            symbol=lane.symbol,
+            localSymbol=lane.localSymbol,
+            expiry=lane.expiry,
+            conId=lane.conId,
+            entry_execution_intent=lane.entry_execution_intent,
+            entry_execution_intent_source="inferred" if lane.entry_execution_intent.endswith("_INFERRED") else "explicit",
+            pre_apply_blockers=(),
+            dry_run=True,
+            entry=_empty_order_result("entry", "DRY_RUN", "Dry-run did not invoke the guarded PAPER route."),
+            lifecycle_open_result=None,
+            reconciliation_after_entry=None,
+            exit_policy=None,
+            exit_reason=None,
+            exit=None,
+            lifecycle_close_result=None,
+            reconciliation_after_exit=None,
+            realized_pnl_estimate=None,
+            portfolio_artifact_status=None,
+            runtime_pid=dry_run_report.safety.runtime_pid,
+            runtime_cwd=dry_run_report.safety.runtime_cwd,
+            live_money_eligible=False,
+            mutation_performed=False,
+        )
     else:
-        classification = "LEAK_TEST_APPLY_REQUIRES_EXPLICIT_APPROVAL_NOT_IMPLEMENTED"
+        lane = dry_run_report.lanes[0]
+        entry_action = _bridge_action_for_lane(lane)
+        entry_intent_type = _intent_type_for_action(entry_action, close=False)
+        entry_config = _bridge_config_for_apply(
+            repo_root=repo_root,
+            lane=lane,
+            action=entry_action,
+            intent_type=entry_intent_type,
+            reason="LEAK_TEST_ENTRY",
+            max_wait_seconds=max_wait_seconds,
+            safety=dry_run_report.safety,
+        )
+        entry_result = _order_result_from_bridge(
+            phase="entry",
+            route_result=guarded_route_runner(entry_config),
+        )
+        mutation_performed = True
+        lifecycle_open_result: str | None = None
+        reconciliation_after_entry: dict[str, Any] | None = None
+        exit_result: LeakTestOrderResult | None = None
+        lifecycle_close_result: str | None = None
+        reconciliation_after_exit: dict[str, Any] | None = None
+        exit_policy: str | None = None
+        exit_reason: str | None = None
+        if entry_result.classification == "BLOCKED":
+            classification = "LEAK_TEST_PASS_BLOCKED_SAFELY"
+            reconciliation_after_exit = reconciliation_reader(repo_root, "entry_blocked")
+        elif entry_result.classification == "REJECTED":
+            classification = "LEAK_TEST_ENTRY_REJECTED"
+            reconciliation_after_exit = reconciliation_reader(repo_root, "entry_rejected")
+        elif entry_result.classification == "NOT_FILLED_CANCELLED":
+            classification = "LEAK_TEST_ENTRY_NOT_FILLED_CANCELLED"
+            reconciliation_after_exit = reconciliation_reader(repo_root, "entry_not_filled_cancelled")
+        elif entry_result.classification != "FILLED":
+            classification = "LEAK_TEST_PASS_BLOCKED_SAFELY"
+            reconciliation_after_exit = reconciliation_reader(repo_root, "entry_unknown")
+        else:
+            reconciliation_after_entry = _wait_for_reconciliation(
+                repo_root=repo_root,
+                stage="after_entry",
+                max_wait_seconds=max_wait_seconds,
+                reader=reconciliation_reader,
+                predicate=lambda payload: _reconciliation_ok(payload) and _lifecycle_open_matches_lane(payload, lane),
+            )
+            lifecycle_open_result = (
+                "LIFECYCLE_OPEN_MATCHED"
+                if _reconciliation_ok(reconciliation_after_entry) and _lifecycle_open_matches_lane(reconciliation_after_entry, lane)
+                else "LIFECYCLE_OPEN_GAP"
+            )
+            if lifecycle_open_result != "LIFECYCLE_OPEN_MATCHED":
+                classification = "LEAK_TEST_ENTRY_FILL_LIFECYCLE_GAP"
+            elif not force_exit_after_entry:
+                classification = "LEAK_TEST_PASS_CONCURRENT_OPEN"
+            else:
+                lifecycle_id = _lifecycle_id_for_lane(reconciliation_after_entry, lane)
+                exit_action = _close_action_for_entry(entry_action)
+                exit_intent_type = _intent_type_for_action(exit_action, close=True)
+                exit_policy = "GUARDED_PAPER_CLOSE"
+                exit_reason = "LEAK_TEST_CONTROLLED_EXIT"
+                exit_config = _bridge_config_for_apply(
+                    repo_root=repo_root,
+                    lane=lane,
+                    action=exit_action,
+                    intent_type=exit_intent_type,
+                    reason=exit_reason,
+                    max_wait_seconds=max_wait_seconds,
+                    safety=dry_run_report.safety,
+                    lifecycle_id=lifecycle_id,
+                )
+                exit_result = _order_result_from_bridge(
+                    phase="exit",
+                    route_result=guarded_route_runner(exit_config),
+                )
+                if exit_result.classification == "REJECTED":
+                    classification = "LEAK_TEST_EXIT_REJECTED"
+                    reconciliation_after_exit = reconciliation_reader(repo_root, "exit_rejected")
+                elif exit_result.classification in {"BLOCKED", "NOT_FILLED_CANCELLED"}:
+                    classification = "LEAK_TEST_EXIT_NOT_FILLED_CANCELLED"
+                    reconciliation_after_exit = reconciliation_reader(repo_root, "exit_not_filled_cancelled")
+                elif exit_result.classification != "FILLED":
+                    classification = "LEAK_TEST_EXIT_NOT_FILLED_CANCELLED"
+                    reconciliation_after_exit = reconciliation_reader(repo_root, "exit_unknown")
+                else:
+                    reconciliation_after_exit = _wait_for_reconciliation(
+                        repo_root=repo_root,
+                        stage="after_exit",
+                        max_wait_seconds=max_wait_seconds,
+                        reader=reconciliation_reader,
+                        predicate=_reconciliation_is_flat,
+                    )
+                    lifecycle_close_result = (
+                        "LIFECYCLE_CLOSED_FLAT"
+                        if _reconciliation_is_flat(reconciliation_after_exit)
+                        else "LIFECYCLE_CLOSE_GAP"
+                    )
+                    classification = (
+                        "LEAK_TEST_PASS_FULL_ROUND_TRIP"
+                        if lifecycle_close_result == "LIFECYCLE_CLOSED_FLAT"
+                        else "LEAK_TEST_EXIT_FILL_LIFECYCLE_GAP"
+                    )
+        if reconciliation_after_exit is not None and not _reconciliation_ok(reconciliation_after_exit):
+            if _int_value(reconciliation_after_exit.get("review_required_count")):
+                classification = "LEAK_TEST_REVIEW_REQUIRED"
+            elif classification == "LEAK_TEST_PASS_FULL_ROUND_TRIP":
+                classification = "LEAK_TEST_BROKER_LIFECYCLE_MISMATCH"
+        portfolio_status = _portfolio_status(repo_root)
+        apply_result = LeakTestApplyResult(
+            lane_id=lane.lane_id,
+            strategy_id=lane.strategy_id,
+            symbol=lane.symbol,
+            localSymbol=lane.localSymbol,
+            expiry=lane.expiry,
+            conId=lane.conId,
+            entry_execution_intent=lane.entry_execution_intent,
+            entry_execution_intent_source="inferred" if lane.entry_execution_intent.endswith("_INFERRED") else "explicit",
+            pre_apply_blockers=(),
+            dry_run=False,
+            entry=entry_result,
+            lifecycle_open_result=lifecycle_open_result,
+            reconciliation_after_entry=reconciliation_after_entry,
+            exit_policy=exit_policy,
+            exit_reason=exit_reason,
+            exit=exit_result,
+            lifecycle_close_result=lifecycle_close_result,
+            reconciliation_after_exit=reconciliation_after_exit,
+            realized_pnl_estimate=_realized_pnl_estimate(exit_result=exit_result, portfolio_status=portfolio_status),
+            portfolio_artifact_status=portfolio_status,
+            runtime_pid=dry_run_report.safety.runtime_pid,
+            runtime_cwd=dry_run_report.safety.runtime_cwd,
+            live_money_eligible=False,
+            mutation_performed=mutation_performed,
+        )
     return LeakTestReport(
         mode="single-lane-apply",
-        generated_at=dry_run.generated_at,
-        account_id=dry_run.account_id,
+        generated_at=dry_run_report.generated_at,
+        account_id=dry_run_report.account_id,
         live_money_eligible=False,
-        mutation_performed=False,
-        safety=dry_run.safety,
-        exposure_policy=dry_run.exposure_policy,
-        lanes=dry_run.lanes,
-        concurrent_scenarios=dry_run.concurrent_scenarios,
-        recommended_first_isolated_sequence=dry_run.recommended_first_isolated_sequence,
-        recommended_first_concurrent_scenario_id=dry_run.recommended_first_concurrent_scenario_id,
+        mutation_performed=bool(apply_result and apply_result.mutation_performed),
+        safety=dry_run_report.safety,
+        exposure_policy=dry_run_report.exposure_policy,
+        lanes=dry_run_report.lanes,
+        concurrent_scenarios=dry_run_report.concurrent_scenarios,
+        recommended_first_isolated_sequence=dry_run_report.recommended_first_isolated_sequence,
+        recommended_first_concurrent_scenario_id=dry_run_report.recommended_first_concurrent_scenario_id,
+        apply_result=apply_result,
         result_classification=classification,
-        notes=("No broker mutation is implemented in this first deliverable.",),
+        notes=(
+            "Single-lane apply uses only the existing guarded PAPER bridge route.",
+            "Dry-run mode performs no broker mutation.",
+        ),
     )
 
 
@@ -786,6 +1344,10 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         default="plan-only",
     )
     parser.add_argument("--lane-id", default="")
+    parser.add_argument("--max-wait-seconds", type=float, default=90.0)
+    parser.add_argument("--dry-run", action="store_true")
+    parser.add_argument("--force-exit-after-entry", action="store_true", default=True)
+    parser.add_argument("--no-force-exit-after-entry", dest="force_exit_after_entry", action="store_false")
     return parser
 
 
@@ -799,7 +1361,13 @@ def main(argv: Sequence[str] | None = None) -> int:
     elif args.mode == "single-lane-dry-run":
         report = build_single_lane_dry_run_report(repo_root=repo_root, lane_id=str(args.lane_id))
     else:
-        report = build_single_lane_apply_report(repo_root=repo_root, lane_id=str(args.lane_id))
+        report = build_single_lane_apply_report(
+            repo_root=repo_root,
+            lane_id=str(args.lane_id),
+            dry_run=bool(args.dry_run),
+            max_wait_seconds=float(args.max_wait_seconds),
+            force_exit_after_entry=bool(args.force_exit_after_entry),
+        )
     print(json.dumps(report_to_dict(report), indent=2, sort_keys=True))
     return 0
 

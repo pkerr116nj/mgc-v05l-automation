@@ -82,6 +82,37 @@ def _lane(report, lane_id: str = LANE_ID):
     return next(lane for lane in report.lanes if lane.lane_id == lane_id)
 
 
+def _bridge_result(classification: str, *, status: str = "filled") -> dict[str, object]:
+    return {
+        "classification": classification,
+        "report": {
+            "classification": classification,
+            "detail": classification,
+            "entry_execution_pricing": {"execution_price_source": "RUNTIME_DATABENTO_1M_CLOSE"},
+            "delegated_result": {
+                "classification": f"{classification}_DELEGATED",
+                "report": {
+                    "submit_cancel_lifecycle": {
+                        "status": status,
+                        "broker_order_id": "11",
+                        "client_id": 10940,
+                        "perm_id": 984270669,
+                        "fill_price": "29492.75",
+                        "fill_timestamp": "2026-05-14T13:04:48.414655+00:00",
+                    }
+                },
+            },
+        },
+    }
+
+
+def _reader_for(stages: dict[str, dict[str, object]]):
+    def _reader(_repo_root: Path, stage: str) -> dict[str, object]:
+        return stages.get(stage, _clean_flat_reconciliation())
+
+    return _reader
+
+
 def test_plan_mode_lists_guarded_lanes_without_broker_mutation() -> None:
     report = build_plan_only_report(
         repo_root=REPO_ROOT,
@@ -299,17 +330,139 @@ def test_live_money_and_paper_proof_flags_block() -> None:
     assert report.live_money_eligible is False
 
 
-def test_safe_apply_is_not_implemented_in_first_deliverable() -> None:
+def test_apply_refuses_when_duplicate_runtime_submitter_exists() -> None:
+    report = build_single_lane_apply_report(
+        repo_root=REPO_ROOT,
+        lane_id=LANE_ID,
+        reconciliation=_clean_flat_reconciliation(),
+        operator_status={**_operator_status(), "duplicate_runtime_submitter_count": 2},
+        runtime_command=_runtime_command(),
+    )
+
+    assert report.result_classification == "LEAK_TEST_PASS_BLOCKED_SAFELY"
+    assert "duplicate_runtime_submitters" in report.lanes[0].blockers
+
+
+def test_apply_refuses_when_lane_not_candidate() -> None:
+    report = build_single_lane_apply_report(
+        repo_root=REPO_ROOT,
+        lane_id="not_a_candidate_lane",
+        reconciliation=_clean_flat_reconciliation(),
+        operator_status=_operator_status(),
+        runtime_command=_runtime_command(),
+    )
+
+    assert report.result_classification == "LEAK_TEST_LANE_NOT_FOUND"
+    assert report.mutation_performed is False
+
+
+def test_apply_dry_run_mutates_nothing() -> None:
+    def _must_not_run(_config):
+        raise AssertionError("guarded route must not be invoked in dry-run")
+
     report = build_single_lane_apply_report(
         repo_root=REPO_ROOT,
         lane_id=LANE_ID,
         reconciliation=_clean_flat_reconciliation(),
         operator_status=_operator_status(),
         runtime_command=_runtime_command(),
+        dry_run=True,
+        guarded_route_runner=_must_not_run,
     )
 
-    assert report.result_classification == "LEAK_TEST_APPLY_REQUIRES_EXPLICIT_APPROVAL_NOT_IMPLEMENTED"
+    assert report.result_classification == "LEAK_TEST_DRY_RUN_READY"
     assert report.mutation_performed is False
+    assert report.apply_result is not None
+    assert report.apply_result.dry_run is True
+
+
+def test_apply_blocked_entry_returns_safe_classification() -> None:
+    report = build_single_lane_apply_report(
+        repo_root=REPO_ROOT,
+        lane_id=LANE_ID,
+        reconciliation=_clean_flat_reconciliation(),
+        operator_status=_operator_status(),
+        runtime_command=_runtime_command(),
+        guarded_route_runner=lambda _config: _bridge_result("PAPER_STRATEGY_INTENT_BLOCKED", status="blocked"),
+    )
+
+    assert report.result_classification == "LEAK_TEST_PASS_BLOCKED_SAFELY"
+    assert report.mutation_performed is True
+    assert report.apply_result is not None
+    assert report.apply_result.entry is not None
+    assert report.apply_result.entry.classification == "BLOCKED"
+
+
+def test_apply_filled_entry_and_filled_exit_returns_full_round_trip_pass() -> None:
+    calls = []
+
+    def _runner(config):
+        calls.append(config)
+        return _bridge_result("PAPER_STRATEGY_ORDER_FILLED")
+
+    report = build_single_lane_apply_report(
+        repo_root=REPO_ROOT,
+        lane_id=LANE_ID,
+        reconciliation=_clean_flat_reconciliation(),
+        operator_status=_operator_status(),
+        runtime_command=_runtime_command(),
+        guarded_route_runner=_runner,
+        reconciliation_reader=_reader_for(
+            {
+                "after_entry": _clean_managed_position_reconciliation(symbol="MNQ", lane_id=LANE_ID),
+                "after_exit": _clean_flat_reconciliation(),
+            }
+        ),
+        max_wait_seconds=0,
+    )
+
+    assert report.result_classification == "LEAK_TEST_PASS_FULL_ROUND_TRIP"
+    assert report.mutation_performed is True
+    assert len(calls) == 2
+    assert calls[0].caller_metadata["intent_type"] == "BUY_TO_OPEN"
+    assert calls[1].caller_metadata["intent_type"] == "SELL_TO_CLOSE"
+    assert report.apply_result is not None
+    assert report.apply_result.lifecycle_open_result == "LIFECYCLE_OPEN_MATCHED"
+    assert report.apply_result.lifecycle_close_result == "LIFECYCLE_CLOSED_FLAT"
+
+
+def test_apply_entry_fill_lifecycle_gap_reports_failure() -> None:
+    report = build_single_lane_apply_report(
+        repo_root=REPO_ROOT,
+        lane_id=LANE_ID,
+        reconciliation=_clean_flat_reconciliation(),
+        operator_status=_operator_status(),
+        runtime_command=_runtime_command(),
+        guarded_route_runner=lambda _config: _bridge_result("PAPER_STRATEGY_ORDER_FILLED"),
+        reconciliation_reader=_reader_for({"after_entry": _clean_flat_reconciliation()}),
+        max_wait_seconds=0,
+    )
+
+    assert report.result_classification == "LEAK_TEST_ENTRY_FILL_LIFECYCLE_GAP"
+    assert report.apply_result is not None
+    assert report.apply_result.lifecycle_open_result == "LIFECYCLE_OPEN_GAP"
+
+
+def test_apply_exit_fill_lifecycle_gap_reports_failure() -> None:
+    report = build_single_lane_apply_report(
+        repo_root=REPO_ROOT,
+        lane_id=LANE_ID,
+        reconciliation=_clean_flat_reconciliation(),
+        operator_status=_operator_status(),
+        runtime_command=_runtime_command(),
+        guarded_route_runner=lambda _config: _bridge_result("PAPER_STRATEGY_ORDER_FILLED"),
+        reconciliation_reader=_reader_for(
+            {
+                "after_entry": _clean_managed_position_reconciliation(symbol="MNQ", lane_id=LANE_ID),
+                "after_exit": _clean_managed_position_reconciliation(symbol="MNQ", lane_id=LANE_ID),
+            }
+        ),
+        max_wait_seconds=0,
+    )
+
+    assert report.result_classification == "LEAK_TEST_EXIT_FILL_LIFECYCLE_GAP"
+    assert report.apply_result is not None
+    assert report.apply_result.lifecycle_close_result == "LIFECYCLE_CLOSE_GAP"
 
 
 def test_result_classifications_cover_future_round_trip_outcomes() -> None:
@@ -317,8 +470,10 @@ def test_result_classifications_cover_future_round_trip_outcomes() -> None:
         "LEAK_TEST_PASS_FULL_ROUND_TRIP",
         "LEAK_TEST_PASS_BLOCKED_SAFELY",
         "LEAK_TEST_ENTRY_NOT_FILLED_CANCELLED",
+        "LEAK_TEST_ENTRY_REJECTED",
         "LEAK_TEST_ENTRY_FILL_LIFECYCLE_GAP",
         "LEAK_TEST_EXIT_NOT_FILLED_CANCELLED",
+        "LEAK_TEST_EXIT_REJECTED",
         "LEAK_TEST_EXIT_FILL_LIFECYCLE_GAP",
         "LEAK_TEST_BROKER_LIFECYCLE_MISMATCH",
         "LEAK_TEST_RUNTIME_RESTORE_FAILURE",
