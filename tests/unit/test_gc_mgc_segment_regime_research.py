@@ -44,7 +44,9 @@ def test_trade_date_and_segment_label_follow_gold_session_boundaries() -> None:
     assert trade_date_for_timestamp(asia_dt) == date(2026, 4, 21)
     assert trade_date_for_timestamp(ny_dt) == date(2026, 4, 21)
     assert label_gold_segment(asia_dt) == "SESSION_OPEN"
+    assert label_gold_segment(datetime.fromisoformat("2026-04-21T01:15:00-04:00")) == "ASIA_LATE"
     assert label_gold_segment(ny_dt) == "US_EARLY"
+    assert label_gold_segment(datetime.fromisoformat("2026-04-21T13:35:00-04:00")) == "US_LATE"
 
 
 def test_build_segment_regime_rows_emits_gold_native_long_and_short_labels() -> None:

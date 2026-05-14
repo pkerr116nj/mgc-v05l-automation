@@ -47,7 +47,7 @@ BREAKOUT_METALS_US_UNKNOWN_CONTINUATION = ApprovedQuantLaneSpec(
     family="breakout_continuation",
     direction="LONG",
     symbols=("GC", "MGC", "HG", "PL"),
-    allowed_sessions=("US", "UNKNOWN"),
+    allowed_sessions=("US",),
     excluded_sessions=("ASIA", "LONDON"),
     permanent_exclusions=("6J", "LONDON", "broad_fx_metals_breakout", "cross_universe_breakout"),
     behavioral_thesis=(
@@ -55,7 +55,7 @@ BREAKOUT_METALS_US_UNKNOWN_CONTINUATION = ApprovedQuantLaneSpec(
     ),
     indispensable_conditions=(
         "metals_only_membership",
-        "us_unknown_session_restriction",
+        "us_session_restriction",
         "regime_up",
         "compression_60",
         "compression_5",
@@ -71,13 +71,13 @@ BREAKOUT_METALS_US_UNKNOWN_CONTINUATION = ApprovedQuantLaneSpec(
         "two_consecutive_rolling_30_trade_windows_negative_net_020",
         "persistent_negative_net_025",
         "one_symbol_pnl_story",
-        "unexplained_unknown_session_dominance",
+        "unexplained_us_session_dominance",
     ),
     fragility_notes=(
         "breakout_up_threshold_near_030",
         "close_pos_threshold_near_068",
         "compression_cutoffs_may_shift_with_volatility",
-        "unknown_session_should_be_monitored_for_label_drift",
+        "session_label_drift_should_be_monitored",
     ),
     monitoring_metrics=(
         "signal_count_by_symbol",
@@ -115,7 +115,7 @@ FAILED_MOVE_NO_US_REVERSAL_SHORT = ApprovedQuantLaneSpec(
     family="failed_move_reversal",
     direction="SHORT",
     symbols=("CL", "ES", "6E", "6J", "QC"),
-    allowed_sessions=("ASIA", "LONDON", "UNKNOWN"),
+    allowed_sessions=("ASIA", "LONDON"),
     excluded_sessions=("US",),
     permanent_exclusions=("US", "ZT", "soft_reversal_score_required", "broad_failed_move_family"),
     behavioral_thesis=(

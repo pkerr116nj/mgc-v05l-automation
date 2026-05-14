@@ -605,7 +605,7 @@ def _build_current_active_baseline_status(*, snapshot: dict[str, Any]) -> dict[s
         "approved_lane_count": len(rows),
         "lanes": rows,
         "first_formal_review_checkpoint": _first_formal_review_checkpoint(snapshot),
-        "carryforward_note": "Approved quant baselines are frozen. Monitoring focuses on post-cost stability, attribution, drift versus approval baseline, and UNKNOWN-session labeling quality.",
+        "carryforward_note": "Approved quant baselines are frozen. Monitoring focuses on post-cost stability, attribution, drift versus approval baseline, and session-labeling quality.",
     }
 
 
@@ -623,7 +623,7 @@ def _first_formal_review_checkpoint(snapshot: dict[str, Any]) -> dict[str, Any]:
         "evidence_to_examine": [
             "rolling post-cost expectancy by lane at 0.20R and 0.25R",
             "symbol attribution and symbol breadth",
-            "session attribution and any UNKNOWN-session dependence",
+            "session attribution and session-labeling drift",
             "drift versus frozen approval baseline reference",
             "single-symbol dependence and slice weakness flags",
             "latest daily and weekly warning flags",

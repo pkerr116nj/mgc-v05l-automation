@@ -11225,11 +11225,11 @@ def test_dashboard_snapshot_includes_strategy_execution_likelihood_statistics(tm
     assert len(likelihood_rows) == 1
     row = likelihood_rows[0]
     assert row["entry_count"] == 3
-    assert row["entries_by_session_bucket"]["ASIA_EARLY"] == 2
+    assert row["entries_by_session_bucket"]["SESSION_OPEN"] == 2
     assert row["entries_by_session_bucket"]["LONDON_OPEN"] == 1
-    assert row["most_common_session_bucket"] == "ASIA_EARLY"
+    assert row["most_common_session_bucket"] == "SESSION_OPEN"
     assert row["expected_fire_cadence"] in {"frequent", "occasional", "rare"}
-    assert "ASIA_EARLY" in row["most_likely_next_window"]
+    assert "SESSION_OPEN" in row["most_likely_next_window"]
     assert row["operator_interpretation_state"] == "outside_usual_window"
 
     strategy_performance_path = repo_root / "outputs" / "operator_dashboard" / "paper_strategy_performance_snapshot.json"

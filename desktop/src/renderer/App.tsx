@@ -1667,6 +1667,29 @@ function restoredPaperRuntimeCanSubmit(row: JsonRecord): boolean {
   return liveIntent.submit_allowed === true;
 }
 
+function restoredPaperRuntimeHasIntentEvidence(row: JsonRecord): boolean {
+  const liveIntent = asRecord(row.latest_live_strategy_intent);
+  const blockedIntent = asRecord(row.latest_blocked_strategy_intent);
+  const nestedBlockedIntent = asRecord(liveIntent.blocked_strategy_intent);
+  return Object.keys(liveIntent).length > 0 || Object.keys(blockedIntent).length > 0 || Object.keys(nestedBlockedIntent).length > 0;
+}
+
+function restoredPaperRuntimeSubmitAuthorityState(row: JsonRecord): string {
+  if (restoredPaperRuntimeCanSubmit(row)) return "AUTHORIZED";
+  if (row.live_money_eligible === true) return "UNSAFE_LIVE_MONEY";
+  if (restoredPaperRuntimeHasIntentEvidence(row)) return "GUARDED_ROUTE_BLOCKED";
+  if (row.eligible_now === true) return "IDLE_AWAITING_SETUP";
+  return "LANE_GATED";
+}
+
+function restoredPaperRuntimeSubmitAuthorityTone(row: JsonRecord): Tone {
+  const state = restoredPaperRuntimeSubmitAuthorityState(row);
+  if (state === "AUTHORIZED") return "warn";
+  if (state === "UNSAFE_LIVE_MONEY" || state === "GUARDED_ROUTE_BLOCKED") return "danger";
+  if (state === "IDLE_AWAITING_SETUP") return "muted";
+  return "good";
+}
+
 function restoredPaperRuntimeSubmitAuthorityReason(row: JsonRecord): string {
   const liveIntent = asRecord(row.latest_live_strategy_intent);
   const blockedIntent = asRecord(row.latest_blocked_strategy_intent);
@@ -1722,10 +1745,10 @@ function restoredPaperRuntimeSubmitAuthorityReason(row: JsonRecord): string {
     return "Blocked intent exists, but exact blocker detail was not published.";
   }
   if (row.eligible_now === true) {
-    return "Route/session eligible, but no current signal/candidate/live intent is present for this lane.";
+    return "Idle: route/session eligible; no current signal/candidate/live intent is present for this lane.";
   }
   const blocker = restoredPaperRuntimeBlocker(row);
-  return blocker === "None" ? "No current signal/candidate; submit authority absent." : `Lane is not route-eligible: ${blocker}`;
+  return blocker === "None" ? "Idle: no current signal/candidate is present." : `Lane is not route-eligible: ${blocker}`;
 }
 
 function restoredPaperRuntimeLaneRows(dashboard: JsonRecord): JsonRecord[] {
@@ -1746,6 +1769,7 @@ function restoredPaperRuntimeLaneRows(dashboard: JsonRecord): JsonRecord[] {
       latest_input_freshness: restoredPaperRuntimeFreshness(row),
       route_eligibility: row.eligible_now === true ? "ELIGIBLE_NOW" : `GATED: ${restoredPaperRuntimeBlocker(row)}`,
       can_submit: restoredPaperRuntimeCanSubmit(row),
+      submit_authority_state: restoredPaperRuntimeSubmitAuthorityState(row),
       submit_authority_reason: restoredPaperRuntimeSubmitAuthorityReason(row),
       live_money_eligible: row.live_money_eligible === true,
       enabled_active: row.entries_enabled === true ? "enabled / active runtime" : "disabled",
@@ -1771,7 +1795,7 @@ function RestoredPaperRuntimeLaneTable(props: { rows: JsonRecord[] }) {
         <MetricCard label="MGC" value={formatValue(summary.MGC ?? 0)} tone={(summary.MGC ?? 0) === 7 ? "good" : "warn"} />
         <MetricCard label="MNQ" value={formatValue(summary.MNQ ?? 0)} tone={(summary.MNQ ?? 0) === 10 ? "good" : "warn"} />
         <MetricCard label="Live Money Eligible" value={props.rows.some((row) => row.live_money_eligible === true) ? "Unsafe" : "False for all"} tone={props.rows.some((row) => row.live_money_eligible === true) ? "danger" : "good"} />
-        <MetricCard label="Can Submit Now" value={props.rows.filter((row) => row.can_submit === true).length} tone={props.rows.some((row) => row.can_submit === true) ? "warn" : "good"} />
+        <MetricCard label="Authorized Intents Now" value={props.rows.filter((row) => row.can_submit === true).length} tone={props.rows.some((row) => row.can_submit === true) ? "warn" : "muted"} />
       </div>
       <DataTable
         rows={props.rows}
@@ -1787,8 +1811,8 @@ function RestoredPaperRuntimeLaneTable(props: { rows: JsonRecord[] }) {
           { key: "blocker", label: "Blocker / Reason", render: (row) => formatValue(row.latest_blocker) },
           { key: "freshness", label: "Latest Input Freshness", render: (row) => formatValue(row.latest_input_freshness) },
           { key: "route", label: "Route Eligibility", render: (row) => formatValue(row.route_eligibility) },
-          { key: "can_submit", label: "Can Submit", render: (row) => <Badge label={formatValue(row.can_submit)} tone={row.can_submit === true ? "warn" : "good"} /> },
-          { key: "submit_reason", label: "Submit Authority Reason", render: (row) => formatValue(row.submit_authority_reason) },
+          { key: "submit_state", label: "Submit State", render: (row) => <Badge label={formatValue(row.submit_authority_state)} tone={restoredPaperRuntimeSubmitAuthorityTone(row)} /> },
+          { key: "submit_reason", label: "Submit State Reason", render: (row) => formatValue(row.submit_authority_reason) },
           { key: "live_money", label: "Live Money", render: (row) => <Badge label={formatValue(row.live_money_eligible)} tone={row.live_money_eligible === true ? "danger" : "good"} /> },
         ]}
       />
@@ -3322,7 +3346,7 @@ function TrackBStatusPage(props: { dashboard?: JsonRecord | null; trackB: Deskto
     : phase1GcClassification;
   const phase1GcSubmitState = phase1GcCanSubmit
     ? "GUARDED_ROUTE_SUBMIT_AUTHORIZED_BY_CURRENT_GATES"
-    : "NOT_CURRENTLY_AUTHORIZED_TO_SUBMIT_ABSENT_SIGNAL";
+    : "IDLE_AWAITING_CURRENT_SIGNAL_OR_CANDIDATE";
   const legacyShadowNonAuthoritativeForGc = phase1GcReadinessAvailable;
   const buildMetadata = props.buildMetadata ?? null;
   const available = props.trackB?.available === true;
@@ -3381,8 +3405,8 @@ function TrackBStatusPage(props: { dashboard?: JsonRecord | null; trackB: Deskto
         <MetricCard label="Candidate Ready" value={formatValue(phase1GcCandidateReady)} tone={phase1GcCandidateReady ? "good" : "warn"} />
         <MetricCard label="Paper Watch Ready" value={formatValue(phase1GcReadyForWatch)} tone={phase1GcReadyForWatch ? "good" : "warn"} />
         <MetricCard label="Realtime Feed" value={formatValue(phase1GcRealtimeConfirmed)} tone={phase1GcRealtimeConfirmed ? "good" : "warn"} />
-        <MetricCard label="Can Submit" value={formatValue(phase1GcCanSubmit)} tone={phase1GcCanSubmit ? "warn" : "good"} />
-        <MetricCard label="Submit Authority" value={phase1GcSubmitState} tone={phase1GcCanSubmit ? "warn" : "good"} />
+        <MetricCard label="Current Signal Submit" value={phase1GcCanSubmit ? "Authorized" : "Idle"} tone={phase1GcCanSubmit ? "warn" : "muted"} />
+        <MetricCard label="Submit State" value={phase1GcSubmitState} tone={phase1GcCanSubmit ? "warn" : "muted"} />
         <MetricCard label="Live Money Eligible" value={formatValue(phase1GcLiveMoney)} tone={phase1GcLiveMoney ? "danger" : "good"} />
         <MetricCard label="Preflight Age" value={formatValue(phase1GcReadiness.age_seconds)} tone={phase1GcReadiness.stale === true ? "warn" : "good"} />
         <MetricCard label="Runtime Candles" value={formatValue(phase1GcReadiness.runtime_candles_ready)} tone={phase1GcReadiness.runtime_candles_ready === true ? "good" : "warn"} />
@@ -3448,7 +3472,7 @@ function TrackBStatusPage(props: { dashboard?: JsonRecord | null; trackB: Deskto
             <MetricCard label="Open Orders Complete" value={formatValue(brokerTruthRefreshStatus.open_orders_complete)} tone={brokerTruthRefreshStatus.open_orders_complete === true ? "good" : "warn"} />
             <MetricCard label="Positions" value={formatValue(brokerTruthRefreshStatus.position_count)} />
             <MetricCard label="Open Orders" value={formatValue(brokerTruthRefreshStatus.open_order_count)} tone={Number(brokerTruthRefreshStatus.open_order_count ?? 0) === 0 ? "good" : "warn"} />
-            <MetricCard label="Submit Authority" value={formatValue(brokerTruthRefreshStatus.submit_authority)} tone={brokerTruthRefreshStatus.submit_authority === true ? "danger" : "good"} />
+            <MetricCard label="Broker Submit Gate" value={brokerTruthRefreshStatus.submit_authority === true ? "Enabled" : "Disabled"} tone={brokerTruthRefreshStatus.submit_authority === true ? "danger" : "good"} />
             <MetricCard label="Live Money" value={formatValue(brokerTruthRefreshStatus.live_money_eligible)} tone={brokerTruthRefreshStatus.live_money_eligible === true ? "danger" : "good"} />
           </div>
         </Section>
@@ -4069,7 +4093,11 @@ function TrackBPaperTradingPage(props: { dashboard: JsonRecord | null; trackB: D
             <MetricCard label="Candidate Approved" value={formatValue(phase1GcReadiness.paper_candidate_approved)} tone={phase1GcReadiness.paper_candidate_approved === true ? "good" : "warn"} />
             <MetricCard label="Realtime Feed" value={formatValue(phase1GcReadiness.realtime_feed_confirmed)} tone={phase1GcReadiness.realtime_feed_confirmed === true ? "good" : "warn"} />
             <MetricCard label="Preflight" value={formatValue(phase1GcReadiness.preflight_status)} tone={statusTone(phase1GcReadiness.preflight_status)} />
-            <MetricCard label="Can Submit" value={formatValue(phase1GcReadiness.can_submit)} tone={phase1GcReadiness.can_submit === true ? "warn" : "good"} />
+            <MetricCard
+              label="Current Signal Submit"
+              value={phase1GcReadiness.can_submit === true ? "Authorized" : "Idle"}
+              tone={phase1GcReadiness.can_submit === true ? "warn" : "muted"}
+            />
             <MetricCard label="Live Money" value={formatValue(phase1GcReadiness.live_money_eligible)} tone={phase1GcReadiness.live_money_eligible === true ? "danger" : "good"} />
             <MetricCard label="Preflight Age" value={formatValue(phase1GcReadiness.age_seconds)} tone={phase1GcReadiness.stale === true ? "warn" : "good"} />
           </div>
@@ -4097,7 +4125,7 @@ function TrackBPaperTradingPage(props: { dashboard: JsonRecord | null; trackB: D
             <MetricCard label="Open Orders Complete" value={formatValue(brokerTruthRefreshStatus.open_orders_complete)} tone={brokerTruthRefreshStatus.open_orders_complete === true ? "good" : "warn"} />
             <MetricCard label="Positions" value={formatValue(brokerTruthRefreshStatus.position_count)} />
             <MetricCard label="Open Orders" value={formatValue(brokerTruthRefreshStatus.open_order_count)} tone={Number(brokerTruthRefreshStatus.open_order_count ?? 0) === 0 ? "good" : "warn"} />
-            <MetricCard label="Submit Authority" value={formatValue(brokerTruthRefreshStatus.submit_authority)} tone={brokerTruthRefreshStatus.submit_authority === true ? "danger" : "good"} />
+            <MetricCard label="Broker Submit Gate" value={brokerTruthRefreshStatus.submit_authority === true ? "Enabled" : "Disabled"} tone={brokerTruthRefreshStatus.submit_authority === true ? "danger" : "good"} />
             <MetricCard label="Live Money" value={formatValue(brokerTruthRefreshStatus.live_money_eligible)} tone={brokerTruthRefreshStatus.live_money_eligible === true ? "danger" : "good"} />
           </div>
         ) : null}
@@ -4653,7 +4681,7 @@ function blockerClassInfo(
     return { label: "Waiting For Bar", tone: "warn", reason: String(readinessRow?.tradability_reason ?? "The lane is session-eligible and healthy, but it is waiting for the next completed decision bar.") };
   }
   if (tradabilityStatus === "SESSION_ELIGIBLE_NO_SETUP") {
-    return { label: "No Setup", tone: "warn", reason: String(readinessRow?.tradability_reason ?? "The lane is session-eligible and evaluated, but no setup is currently present.") };
+    return { label: "No Setup", tone: "muted", reason: String(readinessRow?.tradability_reason ?? "The lane is session-eligible and evaluated, but no setup is currently present.") };
   }
   if (tradabilityStatus === "HALTED_BY_RISK" || haltReason || String(row?.risk_state ?? "").toUpperCase() !== "OK") {
     return { label: "Risk", tone: "danger", reason: String((readinessRow?.tradability_reason ?? haltReason) || "Risk gating is blocking new entries.") };
@@ -13045,8 +13073,8 @@ function backendUrlStateLabel(backendUrl: string | null | undefined, backendStat
     { label: "Session Eligible", value: String(readinessLaneStatusSummary.session_eligible_lanes_count ?? 0), tone: Number(readinessLaneStatusSummary.session_eligible_lanes_count ?? 0) > 0 ? "good" : "warn" },
     { label: "Live-Capable", value: String(readinessLaneStatusSummary.live_capable_count ?? 0), tone: Number(readinessLaneStatusSummary.live_capable_count ?? 0) > 0 ? "good" : "muted" },
     { label: "Waiting For Bar", value: String(readinessLaneStatusSummary.waiting_for_bar_count ?? readinessLaneStatusSummary.waiting_for_completed_bar_count ?? 0), tone: Number(readinessLaneStatusSummary.waiting_for_bar_count ?? readinessLaneStatusSummary.waiting_for_completed_bar_count ?? 0) > 0 ? "warn" : "muted" },
-    { label: "No Setup", value: String(readinessLaneStatusSummary.no_setup_count ?? 0), tone: Number(readinessLaneStatusSummary.no_setup_count ?? 0) > 0 ? "warn" : "muted" },
-    { label: "Actionable Now", value: String(readinessLaneStatusSummary.actionable_now_count ?? 0), tone: Number(readinessLaneStatusSummary.actionable_now_count ?? 0) > 0 ? "good" : "warn" },
+    { label: "No Setup", value: String(readinessLaneStatusSummary.no_setup_count ?? 0), tone: "muted" },
+    { label: "Actionable Now", value: String(readinessLaneStatusSummary.actionable_now_count ?? 0), tone: Number(readinessLaneStatusSummary.actionable_now_count ?? 0) > 0 ? "good" : "muted" },
     { label: "True Blocked", value: String(readinessLaneStatusSummary.true_blocked_count ?? readinessLaneStatusSummary.blocked_lanes_count ?? 0), tone: Number(readinessLaneStatusSummary.true_blocked_count ?? readinessLaneStatusSummary.blocked_lanes_count ?? 0) > 0 ? "warn" : "good" },
     { label: "Market Data Stale", value: String(readinessLaneStatusSummary.market_data_stale_count ?? 0), tone: Number(readinessLaneStatusSummary.market_data_stale_count ?? 0) > 0 ? "danger" : "good" },
     { label: "Loaded, Not Ready This Bar", value: String(loadedNotEligibleRows.length), tone: loadedNotEligibleRows.length ? "warn" : "good" },

@@ -135,7 +135,7 @@ def test_operator_surface_exposes_exact_contract_and_rollup_integrity() -> None:
                         "family": "breakout_continuation",
                         "direction": "LONG",
                         "symbols": ["GC", "MGC"],
-                        "allowed_sessions": ["US", "UNKNOWN"],
+                        "allowed_sessions": ["US"],
                     },
                     "warning_flags": [],
                     "unknown_session_warning": {"flag": False},
@@ -216,13 +216,14 @@ def test_operator_surface_exposes_exact_contract_and_rollup_integrity() -> None:
     assert summary["Approved Quant"] == "1"
     assert summary["Admitted Paper"] == "1"
     assert summary["Canary"] == "1"
-    readiness_cards = {row["label"]: row["value"] for row in surface["readiness"]["cards"]}
-    assert readiness_cards["Session Eligible"] == "13"
-    assert readiness_cards["Waiting For 3m Bar"] == "13"
+    readiness_card_rows = {row["label"]: row for row in surface["readiness"]["cards"]}
+    readiness_cards = {label: row["value"] for label, row in readiness_card_rows.items()}
+    assert readiness_cards["Session Eligible Now"] == "13"
+    assert readiness_cards["Waiting For Bar"] == "13"
     assert readiness_cards["No Setup"] == "11"
+    assert readiness_card_rows["No Setup"]["level"] == "muted"
     assert readiness_cards["Actionable Now"] == "0"
-    assert readiness_cards["Blocked Lanes"] == "0"
-    assert readiness_cards["Ready This Bar"] == "0"
+    assert readiness_cards["True Blocked"] == "0"
 
     secondary_context = surface["secondary_context"]
     assert secondary_context["status_counts"]["stale"] >= 1

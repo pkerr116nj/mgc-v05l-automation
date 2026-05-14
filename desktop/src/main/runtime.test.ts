@@ -643,8 +643,10 @@ test("Track B PAPER trading renderer is standalone read-only blotter view", () =
   assert.match(appTsx, /Artifact-derived PAPER lifecycle view/);
   assert.match(appTsx, /TRACK_B_PAPER_READY_NO_SIGNAL/);
   assert.match(appTsx, /Track B PAPER evaluating live decision bars; no trade signals observed/);
-  assert.match(appTsx, /Submit Authority Reason/);
-  assert.match(appTsx, /Route\/session eligible, but no current signal\/candidate\/live intent is present for this lane/);
+  assert.match(appTsx, /Submit State/);
+  assert.match(appTsx, /IDLE_AWAITING_SETUP/);
+  assert.match(appTsx, /Submit State Reason/);
+  assert.match(appTsx, /Idle: route\/session eligible; no current signal\/candidate\/live intent is present for this lane/);
   assert.match(appTsx, /Latest signal\/intent is stale/);
   assert.doesNotMatch(appTsx, /page === "track-b-paper"[\s\S]{0,3000}runDashboardAction/);
   assert.doesNotMatch(appTsx, /page === "track-b-paper"[\s\S]{0,3000}paper_proof_cli/);

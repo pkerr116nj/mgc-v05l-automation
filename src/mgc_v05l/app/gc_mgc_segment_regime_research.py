@@ -132,8 +132,8 @@ SEGMENTS: tuple[GoldSegmentDefinition, ...] = (
     GoldSegmentDefinition(
         segment_id="ASIA_LATE",
         start_time=time(20, 30),
-        end_time=time(23, 0),
-        description="Late Asia continuation / digestion window.",
+        end_time=time(3, 0),
+        description="Late Asia continuation / overnight digestion window before London opens.",
     ),
     GoldSegmentDefinition(
         segment_id="LONDON_EARLY",
@@ -158,6 +158,12 @@ SEGMENTS: tuple[GoldSegmentDefinition, ...] = (
         start_time=time(11, 0),
         end_time=time(13, 30),
         description="Late NY continuation / fade window.",
+    ),
+    GoldSegmentDefinition(
+        segment_id="US_LATE",
+        start_time=time(13, 30),
+        end_time=time(16, 0),
+        description="Late US trend continuation / afternoon risk window.",
     ),
 )
 
@@ -688,7 +694,7 @@ def label_gold_segment(timestamp: datetime) -> str | None:
         return "SESSION_OPEN"
     if time(19, 0) <= local_time < time(20, 30):
         return "ASIA_EARLY"
-    if time(20, 30) <= local_time < time(23, 0):
+    if time(20, 30) <= local_time or local_time < time(3, 0):
         return "ASIA_LATE"
     if time(3, 0) <= local_time < time(5, 30):
         return "LONDON_EARLY"

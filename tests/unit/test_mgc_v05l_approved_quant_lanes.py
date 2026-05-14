@@ -63,7 +63,7 @@ def _trade(
 def test_approved_quant_lane_specs_preserve_authoritative_scope() -> None:
     specs = {spec.lane_id: spec for spec in approved_quant_lane_specs()}
     assert tuple(specs["phase2c.breakout.metals_only.us_unknown.baseline"].symbols) == ("GC", "MGC", "HG", "PL")
-    assert tuple(specs["phase2c.breakout.metals_only.us_unknown.baseline"].allowed_sessions) == ("US", "UNKNOWN")
+    assert tuple(specs["phase2c.breakout.metals_only.us_unknown.baseline"].allowed_sessions) == ("US",)
     assert tuple(specs["phase2c.breakout.metals_only.us_unknown.baseline"].excluded_sessions) == ("ASIA", "LONDON")
     assert specs["phase2c.breakout.metals_only.us_unknown.baseline"].hold_bars == 24
     assert specs["phase2c.breakout.metals_only.us_unknown.baseline"].target_r is None
@@ -75,7 +75,7 @@ def test_approved_quant_lane_specs_preserve_authoritative_scope() -> None:
         "cross_universe_breakout",
     )
     assert tuple(specs["phase2c.failed.core4_plus_qc.no_us.baseline"].symbols) == ("CL", "ES", "6E", "6J", "QC")
-    assert tuple(specs["phase2c.failed.core4_plus_qc.no_us.baseline"].allowed_sessions) == ("ASIA", "LONDON", "UNKNOWN")
+    assert tuple(specs["phase2c.failed.core4_plus_qc.no_us.baseline"].allowed_sessions) == ("ASIA", "LONDON")
     assert tuple(specs["phase2c.failed.core4_plus_qc.no_us.baseline"].excluded_sessions) == ("US",)
     assert specs["phase2c.failed.core4_plus_qc.no_us.baseline"].target_r == 1.5
     assert specs["phase2c.failed.core4_plus_qc.no_us.baseline"].exit_style == "target_stop_time_plus_structure"
@@ -91,10 +91,10 @@ def test_approved_quant_lane_specs_preserve_authoritative_scope() -> None:
 def test_approved_quant_lane_scope_fingerprints_fail_loudly_on_scope_drift() -> None:
     specs = {spec.lane_id: spec for spec in approved_quant_lane_specs()}
     assert approved_quant_lane_scope_fingerprint(specs["phase2c.breakout.metals_only.us_unknown.baseline"]) == (
-        "c44dd8343e6a0052822c5c183b2e76e26d026a59d82c8a0d7174b11aa0c4c218"
+        "9c34888fdabbc4360f9ade6e9d53a1c1e3b80c98877748e53cff2794f0b32fb9"
     )
     assert approved_quant_lane_scope_fingerprint(specs["phase2c.failed.core4_plus_qc.no_us.baseline"]) == (
-        "b76dd8bdd067ddc2aa07a764bc3dd4c046dfe22fb2b11d0527b57638a5619e30"
+        "7f0013b4e40d5b705cacc40403cf52226c7621d377af0cefff5b0e875f1f027e"
     )
 
 
@@ -146,7 +146,7 @@ def test_breakout_lane_status_suspends_when_breadth_and_concentration_fail() -> 
             lane_id=BREAKOUT_METALS_US_UNKNOWN_CONTINUATION.lane_id,
             lane_name=BREAKOUT_METALS_US_UNKNOWN_CONTINUATION.lane_name,
             symbol="GC",
-            session_label="UNKNOWN",
+            session_label="US",
             index=index,
             gross_r=0.35,
         )

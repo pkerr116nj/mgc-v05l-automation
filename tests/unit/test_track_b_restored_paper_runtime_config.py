@@ -86,6 +86,44 @@ def test_selected_asia_london_lanes_are_session_open_eligible_only() -> None:
             assert "SESSION_OPEN" not in restriction.split("/")
 
 
+def test_restored_london_late_and_us_lanes_keep_explicit_session_scopes() -> None:
+    settings = _load_restored_settings()
+    lanes = {str(row["lane_id"]): row for row in settings.probationary_paper_lane_specs}
+
+    expected_scopes = {
+        "gc_1x_asia_london_participation__asia_london_long_v5": {
+            "SESSION_OPEN",
+            "ASIA_EARLY",
+            "ASIA_LATE",
+            "LONDON_EARLY",
+            "LONDON_LATE",
+        },
+        "mgc_1x_asia_london_participation__asia_london_short_v2": {
+            "SESSION_OPEN",
+            "ASIA_EARLY",
+            "ASIA_LATE",
+            "LONDON_EARLY",
+            "LONDON_LATE",
+        },
+        "gc_1x_all_lanes__ny_early_short": {"NY_EARLY"},
+        "mgc_1x_all_lanes__ny_early_short": {"NY_EARLY"},
+        "gc_1x_all_lanes__us_midday_short": {"US_MIDDAY"},
+        "mgc_1x_all_lanes__us_midday_short": {"US_MIDDAY"},
+        "gc_1x_all_lanes__ny_late_short": {"NY_LATE"},
+        "mnq_1x_ny_early_core__us_early_long": {"US_EARLY"},
+        "mnq_1x_ny_early_core__us_midday_long": {"US_MIDDAY"},
+        "mnq_1x_ny_early_core__us_late_long": {"US_LATE"},
+        "mgc_us_late_pause_resume_long": {"US_LATE"},
+        "pl_us_late_pause_resume_long": {"US_LATE"},
+    }
+
+    assert expected_scopes.keys() <= lanes.keys()
+    for lane_id, expected in expected_scopes.items():
+        row = lanes[lane_id]
+        assert set(row.get("allowed_sessions") or []) == expected
+        assert set(str(row.get("session_restriction") or "").split("/")) == expected
+
+
 def test_default_paper_soak_bootstrap_includes_restored_package_last() -> None:
     script = RUN_SCRIPT.read_text(encoding="utf-8")
     restored = '${REPO_ROOT}/config/probationary_pattern_engine_paper_track_b_restored.yaml'

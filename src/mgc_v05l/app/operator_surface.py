@@ -905,7 +905,7 @@ def _legacy_readiness_alias(payload: dict[str, Any]) -> dict[str, Any]:
             {"label": "Session Eligible Now", "value": str(values.get("session_eligible_lanes_count") or 0), "level": "ok" if values.get("session_eligible_lanes_count") else "muted"},
             {"label": "Live-Capable", "value": str(values.get("live_capable_count") or 0), "level": "ok" if values.get("live_capable_count") else "muted"},
             {"label": "Waiting For Bar", "value": str(values.get("waiting_for_bar_count") or values.get("waiting_for_completed_bar_count") or 0), "level": "warning" if (values.get("waiting_for_bar_count") or values.get("waiting_for_completed_bar_count")) else "muted"},
-            {"label": "No Setup", "value": str(values.get("no_setup_count") or 0), "level": "warning" if values.get("no_setup_count") else "muted"},
+            {"label": "No Setup", "value": str(values.get("no_setup_count") or 0), "level": "muted"},
             {"label": "Actionable Now", "value": str(values.get("actionable_now_count") or 0), "level": "ok" if values.get("actionable_now_count") else "muted"},
             {"label": "True Blocked", "value": str(values.get("true_blocked_count") or values.get("blocked_lanes_count") or 0), "level": "danger" if (values.get("true_blocked_count") or values.get("blocked_lanes_count")) else "ok"},
             {"label": "Market Data Stale", "value": str(values.get("market_data_stale_count") or 0), "level": "danger" if values.get("market_data_stale_count") else "ok"},

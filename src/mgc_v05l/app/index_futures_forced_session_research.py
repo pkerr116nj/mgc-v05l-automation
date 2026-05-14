@@ -215,7 +215,7 @@ def run_index_futures_forced_session_research(
             "session_windows_et": {
                 "SESSION_OPEN": "18:00-19:00",
                 "ASIA_EARLY": "19:00-20:30",
-                "ASIA_LATE": "20:30-23:00",
+                "ASIA_LATE": "20:30-03:00",
                 "LONDON_EARLY": "03:00-05:30",
                 "LONDON_LATE": "05:30-08:20",
                 "US_EARLY": "08:20-11:00",
@@ -257,7 +257,7 @@ def label_stock_index_segment(timestamp: datetime) -> str | None:
         return "SESSION_OPEN"
     if time(19, 0) <= local_time < time(20, 30):
         return "ASIA_EARLY"
-    if time(20, 30) <= local_time < time(23, 0):
+    if time(20, 30) <= local_time or local_time < time(3, 0):
         return "ASIA_LATE"
     if time(3, 0) <= local_time < time(5, 30):
         return "LONDON_EARLY"
@@ -300,7 +300,7 @@ def _segment_window_for_trade_date(*, trade_day: date, segment_id: str) -> tuple
     windows = {
         "SESSION_OPEN": (time(18, 0), time(19, 0)),
         "ASIA_EARLY": (time(19, 0), time(20, 30)),
-        "ASIA_LATE": (time(20, 30), time(23, 0)),
+        "ASIA_LATE": (time(20, 30), time(3, 0)),
         "LONDON_EARLY": (time(3, 0), time(5, 30)),
         "LONDON_LATE": (time(5, 30), time(8, 20)),
         "US_EARLY": (time(8, 20), time(11, 0)),

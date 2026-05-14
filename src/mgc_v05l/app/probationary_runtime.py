@@ -8506,11 +8506,14 @@ def _gold_session_restriction_matches_time(local_time: dt_time, restriction: str
     windows = {
         "SESSION_OPEN": (dt_time(18, 0), dt_time(19, 0)),
         "ASIA_EARLY": (dt_time(19, 0), dt_time(20, 30)),
-        "ASIA_LATE": (dt_time(20, 30), dt_time(23, 0)),
+        "ASIA_LATE": (dt_time(20, 30), dt_time(3, 0)),
         "LONDON_EARLY": (dt_time(3, 0), dt_time(5, 30)),
         "LONDON_LATE": (dt_time(5, 30), dt_time(8, 20)),
         "US_EARLY": (dt_time(8, 20), dt_time(11, 0)),
         "NY_EARLY": (dt_time(8, 20), dt_time(11, 0)),
+        "US_PREOPEN_OPENING": (dt_time(9, 0), dt_time(9, 30)),
+        "US_CASH_OPEN_IMPULSE": (dt_time(9, 30), dt_time(10, 0)),
+        "US_OPEN_LATE": (dt_time(10, 0), dt_time(10, 30)),
         "US_MIDDAY": (dt_time(11, 0), dt_time(13, 30)),
         "US_LATE": (dt_time(13, 30), dt_time(16, 0)),
         "NY_LATE": (dt_time(11, 0), dt_time(13, 30)),
@@ -8519,6 +8522,8 @@ def _gold_session_restriction_matches_time(local_time: dt_time, restriction: str
     if window is None:
         return False
     start, end = window
+    if end <= start:
+        return local_time >= start or local_time < end
     return start <= local_time < end
 
 

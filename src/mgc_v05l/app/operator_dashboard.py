@@ -145,7 +145,20 @@ ATP_COMPANION_BENCHMARK_RUNTIME_KIND = "atp_companion_benchmark_paper"
 GC_MGC_ACCEPTANCE_RUNTIME_KIND = "gc_mgc_london_open_acceptance_temp_paper"
 GC_MGC_FORCED_SESSION_RUNTIME_KIND = "gc_mgc_forced_session_candidate_runtime"
 INDEX_FUTURES_FORCED_SESSION_RUNTIME_KIND = "index_futures_forced_session_candidate_runtime"
-STRATEGY_HISTORY_SESSION_BUCKETS = ("ASIA_EARLY", "ASIA_LATE", "LONDON_OPEN", "LONDON_LATE", "US_MIDDAY", "US_LATE", "UNKNOWN")
+STRATEGY_HISTORY_SESSION_BUCKETS = (
+    "SESSION_OPEN",
+    "ASIA_EARLY",
+    "ASIA_LATE",
+    "LONDON_OPEN",
+    "LONDON_LATE",
+    "US_EARLY",
+    "US_PREOPEN_OPENING",
+    "US_CASH_OPEN_IMPULSE",
+    "US_OPEN_LATE",
+    "US_MIDDAY",
+    "US_LATE",
+    "UNKNOWN",
+)
 DASHBOARD_PAYLOAD_SCHEMA_VERSION = 2
 DEFAULT_DASHBOARD_HTTP_MAX_WORKERS = max(4, min(16, (os.cpu_count() or 4) * 2))
 _TRANSPORT_LOGGER = logging.getLogger(__name__)
@@ -23371,9 +23384,11 @@ def _market_data_semantics(*, running: bool, market_data_ok: bool, freshness: st
 def _broad_trading_session_for_timestamp(timestamp: datetime) -> str:
     local_dt = timestamp.astimezone(NEW_YORK_TZ) if timestamp.tzinfo is not None else timestamp.replace(tzinfo=NEW_YORK_TZ)
     local_time = local_dt.timetz().replace(tzinfo=None)
+    if time(18, 0) < local_time < time(19, 0):
+        return "SESSION_OPEN"
     if time(19, 0) <= local_time < time(20, 30):
         return "ASIA_EARLY"
-    if time(20, 30) <= local_time < time(23, 0):
+    if time(20, 30) <= local_time or local_time < time(3, 0):
         return "ASIA_LATE"
     if time(3, 0) <= local_time < time(5, 30):
         return "LONDON_EARLY"
