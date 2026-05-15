@@ -1618,6 +1618,68 @@ def test_leak_test_entry_uses_lane_strategy_for_exposure(tmp_path: Path) -> None
     assert bridge_module._exposure_strategy_id_for_bridge(config=config) == "gc_1x_asia_london_participation__asia_london_long_v5"
 
 
+def test_close_submit_unknown_persists_known_managed_exit_order_state(tmp_path: Path) -> None:
+    config = _config(
+        tmp_path,
+        strategy_id="gc_1x_asia_london_participation__asia_london_long_v5",
+        symbol="GC",
+        contract_month="202606",
+        action="SELL",
+        submit=True,
+        caller_path="track_b_paper_leak_test_apply",
+        output_dir=Path("outputs") / "reports" / "track_b_paper_leak_test" / "gc_lane",
+        caller_metadata={
+            "caller_type": "track_b_paper_leak_test",
+            "lane_id": "gc_1x_asia_london_participation__asia_london_long_v5",
+            "strategy_id": "asia_london_participation_core_v1__GC",
+            "intent_type": "SELL_TO_CLOSE",
+            "account_id": "DUM882026",
+            "local_symbol": "GCM6",
+            "lifecycle_id": "bridge_fill_gc-test",
+        },
+    )
+
+    persistence = bridge_module._persist_known_managed_exit_order_after_submit(
+        config=config,
+        intent=_intent_from_config(config),
+        delegated_result={
+            "classification": "PAPER_CLOSE_UNKNOWN_NEEDS_MANUAL_TWS_REVIEW",
+            "report": {
+                "submit_cancel_lifecycle": {
+                    "status": "manual_confirmation_unavailable",
+                    "submitted_order_id": 5,
+                    "submitted_perm_id": None,
+                    "open_order_after_submit": {"client_id": 11940},
+                }
+            },
+        },
+        qualified_contract_report=_qualified_contract_report(),
+        entry_execution_pricing={"limit_price": 4556.0},
+        exit_attempt_policy=None,
+    )
+
+    assert persistence == {
+        "persisted": True,
+        "path": str(tmp_path / "outputs" / "track_b_execution_core" / "managed_exit_orders" / "latest_known_managed_exit_orders.json"),
+        "broker_order_id": "5",
+        "client_id": 11940,
+        "perm_id": None,
+        "lifecycle_id": "bridge_fill_gc-test",
+        "managed_order_status": "KNOWN_MANAGED_EXIT_ORDER_WORKING",
+    }
+    state_path = tmp_path / "outputs" / "track_b_execution_core" / "managed_exit_orders" / "latest_known_managed_exit_orders.json"
+    payload = json.loads(state_path.read_text(encoding="utf-8"))
+    row = payload["known_managed_exit_orders"][0]
+    assert row["broker_order_id"] == "5"
+    assert row["strategy_id"] == "asia_london_participation_core_v1__GC"
+    assert row["lane_id"] == "gc_1x_asia_london_participation__asia_london_long_v5"
+    assert row["local_symbol"] == "GCM6"
+    assert row["action"] == "SELL"
+    assert row["limit_price"] == 4556.0
+    assert row["paper_proof_invoked"] is False
+    assert row["live_money_eligible"] is False
+
+
 def test_leak_test_submit_handshake_failure_reports_paper_connection_config(tmp_path: Path) -> None:
     auth_path, digest = _write_leak_authorization(tmp_path)
     governance_status = _healthy_lane_governance()

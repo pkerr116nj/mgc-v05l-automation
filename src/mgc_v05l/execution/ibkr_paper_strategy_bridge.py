@@ -133,6 +133,12 @@ _ENTRY_RUNTIME_CANDLE_PATH = (
 )
 _SCHEMA_ACTIONS = {"BUY", "SELL", "HOLD", "EXIT", "NO_ACTION"}
 _ARTIFACT_STEM = "ibkr_paper_strategy_bridge"
+_KNOWN_MANAGED_EXIT_STATE_PATH = (
+    Path("outputs")
+    / "track_b_execution_core"
+    / "managed_exit_orders"
+    / "latest_known_managed_exit_orders.json"
+)
 _APPROVED_RUNTIME_CALLER_PATHS = {
     "probationary_paper_runtime_lane",
     "supervised_paper_runtime_bridge",
@@ -742,6 +748,7 @@ def run_ibkr_paper_strategy_bridge(
 
         delegated_result = None
         prepared_submit_bundle = None
+        known_managed_exit_order_persistence = None
         classification = "PAPER_STRATEGY_BRIDGE_READY"
         _record_bridge_audit(
             audit_events,
@@ -776,6 +783,14 @@ def run_ibkr_paper_strategy_bridge(
                 entry_execution_pricing=entry_execution_pricing,
             )
             classification = _map_delegate_classification(delegated_result)
+            known_managed_exit_order_persistence = _persist_known_managed_exit_order_after_submit(
+                config=config,
+                intent=intent,
+                delegated_result=delegated_result,
+                qualified_contract_report=qualified_contract_report,
+                entry_execution_pricing=entry_execution_pricing,
+                exit_attempt_policy=exit_attempt_policy,
+            )
             _record_bridge_audit(
                 audit_events,
                 event_type="delegated_manual_harness_completed",
@@ -788,8 +803,17 @@ def run_ibkr_paper_strategy_bridge(
                     "entry_execution_pricing": entry_execution_pricing,
                     "caller_metadata": dict(config.caller_metadata or {}),
                     "intent": intent.to_dict(),
+                    "known_managed_exit_order_persistence": known_managed_exit_order_persistence,
                 },
             )
+            if known_managed_exit_order_persistence:
+                _record_bridge_audit(
+                    audit_events,
+                    event_type="known_managed_exit_order_persisted",
+                    detail="The bridge persisted a known managed exit order after a close submit reached broker order identity.",
+                    config=config,
+                    extra={"known_managed_exit_order_persistence": known_managed_exit_order_persistence},
+                )
         report = _build_report(
             config=config,
             classification=classification,
@@ -818,6 +842,8 @@ def run_ibkr_paper_strategy_bridge(
             errors=list(runtime.collector.errors),
             connection_diagnostics=_bridge_connection_diagnostics(config=config, runtime=runtime),
         )
+        if known_managed_exit_order_persistence:
+            report["known_managed_exit_order_persistence"] = known_managed_exit_order_persistence
         return IbkrPaperStrategyBridgeArtifacts(classification=classification, report=report, audit_events=audit_events)
     except Exception as exc:
         classification = "PAPER_STRATEGY_INTENT_BLOCKED"
@@ -2207,6 +2233,162 @@ def _resolve_strategy_identity(strategy_id: str) -> dict[str, Any]:
 
 def _submitted_order_count(audit_events: list[dict[str, Any]]) -> int:
     return sum(1 for row in audit_events if str(row.get("event_type") or "").strip() == "delegated_manual_harness_completed")
+
+
+def _persist_known_managed_exit_order_after_submit(
+    *,
+    config: IbkrPaperStrategyBridgeConfig,
+    intent: IbkrPaperStrategyOrderIntent,
+    delegated_result: dict[str, Any] | None,
+    qualified_contract_report: dict[str, Any],
+    entry_execution_pricing: dict[str, Any],
+    exit_attempt_policy: ExitAttemptPolicy | None,
+) -> dict[str, Any] | None:
+    if not config.submit or not _is_close_intent(config=config, intent=intent):
+        return None
+    delegated = dict(delegated_result or {})
+    delegated_report = dict(delegated.get("report") or {})
+    lifecycle = dict(
+        delegated_report.get("submit_cancel_lifecycle")
+        or delegated_report.get("lifecycle")
+        or delegated.get("submit_cancel_lifecycle")
+        or {}
+    )
+    status = str(lifecycle.get("status") or delegated.get("status") or "").strip().lower()
+    if status in {
+        "filled",
+        "filled_flat",
+        "partial_fill_cancelled",
+        "fill_timeout_cancelled",
+        "manual_confirmation_timeout_order_cancelled",
+        "manual_confirmation_rejected_no_order",
+        "rejected",
+        "cancel_verification_failed",
+    }:
+        return None
+    broker_order_id = _submitted_broker_order_id(delegated=delegated, delegated_report=delegated_report, lifecycle=lifecycle)
+    if broker_order_id is None:
+        return None
+    metadata = dict(config.caller_metadata or {})
+    qualified = dict(qualified_contract_report.get("qualified_contract") or {})
+    open_after_submit = dict(lifecycle.get("open_order_after_submit") or {})
+    client_id = _int_or_none(
+        lifecycle.get("client_id")
+        or delegated_report.get("client_id")
+        or delegated.get("client_id")
+        or open_after_submit.get("client_id")
+        or config.client_id
+    )
+    perm_id = _int_or_none(
+        lifecycle.get("submitted_perm_id")
+        or lifecycle.get("perm_id")
+        or delegated_report.get("submitted_perm_id")
+        or delegated_report.get("perm_id")
+        or delegated.get("submitted_perm_id")
+        or delegated.get("perm_id")
+    )
+    now = datetime.now(timezone.utc)
+    state_path = _known_managed_exit_state_path(config.repo_root)
+    existing = _load_known_managed_exit_state(state_path)
+    order_row = {
+        "managed_order_status": "KNOWN_MANAGED_EXIT_ORDER_WORKING",
+        "source": "IBKR_PAPER_STRATEGY_BRIDGE_DELEGATED_CLOSE_SUBMIT",
+        "source_artifact_path": str(_bridge_report_path(config)),
+        "lifecycle_id": str(
+            metadata.get("lifecycle_id")
+            or metadata.get("position_lifecycle_id")
+            or metadata.get("managed_lifecycle_id")
+            or ""
+        )
+        or None,
+        "strategy_id": str(metadata.get("strategy_id") or _exposure_strategy_id_for_bridge(config=config) or "").strip() or None,
+        "lane_id": str(metadata.get("lane_id") or config.strategy_id or "").strip() or None,
+        "account_id": str(metadata.get("account_id") or config.account_id or "").strip() or None,
+        "symbol": str(qualified.get("symbol") or config.symbol or intent.symbol or "").strip().upper() or None,
+        "local_symbol": str(metadata.get("local_symbol") or qualified.get("local_symbol") or "").strip() or None,
+        "expiry": str(qualified.get("expiry") or config.contract_month or intent.contract_month or "").strip() or None,
+        "con_id": _int_or_none(metadata.get("con_id") or qualified.get("con_id")),
+        "action": str(intent.action or config.action or "").strip().upper() or None,
+        "qty": float(config.quantity or intent.quantity or 0.0),
+        "quantity": float(config.quantity or intent.quantity or 0.0),
+        "order_type": str(config.order_type or intent.order_type or "").strip().upper() or None,
+        "limit_price": entry_execution_pricing.get("limit_price"),
+        "stop_price": entry_execution_pricing.get("stop_price"),
+        "tif": str(config.time_in_force or intent.time_in_force or "").strip().upper() or None,
+        "broker_order_id": str(broker_order_id),
+        "client_id": client_id,
+        "perm_id": perm_id,
+        "submitted_at": now.isoformat(),
+        "exit_reason": str(config.reason or intent.reason or "").strip() or None,
+        "exit_urgency": None if exit_attempt_policy is None else exit_attempt_policy.exit_urgency,
+        "hard_exit": None if exit_attempt_policy is None else exit_attempt_policy.hard_exit,
+        "discretionary_exit": None if exit_attempt_policy is None else exit_attempt_policy.discretionary_exit,
+        "delegated_classification": delegated.get("classification"),
+        "delegated_status": status or None,
+        "paper_proof_invoked": False,
+        "live_money_eligible": False,
+    }
+    rows = [
+        dict(row)
+        for row in list(existing.get("known_managed_exit_orders") or [])
+        if str(row.get("broker_order_id") or row.get("order_id") or "") != str(broker_order_id)
+    ]
+    rows.append(order_row)
+    payload = {
+        "schema_version": "track_b_known_managed_exit_orders_v1",
+        "generated_at": now.isoformat(),
+        "paper_proof_invoked": False,
+        "live_money_eligible": False,
+        "known_managed_exit_orders": rows,
+        "resolved_known_managed_exit_orders": list(existing.get("resolved_known_managed_exit_orders") or []),
+    }
+    state_path.parent.mkdir(parents=True, exist_ok=True)
+    state_path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    return {
+        "persisted": True,
+        "path": str(state_path),
+        "broker_order_id": str(broker_order_id),
+        "client_id": client_id,
+        "perm_id": perm_id,
+        "lifecycle_id": order_row["lifecycle_id"],
+        "managed_order_status": order_row["managed_order_status"],
+    }
+
+
+def _submitted_broker_order_id(
+    *,
+    delegated: dict[str, Any],
+    delegated_report: dict[str, Any],
+    lifecycle: dict[str, Any],
+) -> int | None:
+    return _int_or_none(
+        lifecycle.get("submitted_order_id")
+        or lifecycle.get("order_id")
+        or lifecycle.get("broker_order_id")
+        or delegated_report.get("submitted_order_id")
+        or delegated_report.get("order_id")
+        or delegated.get("submitted_order_id")
+        or delegated.get("broker_order_id")
+    )
+
+
+def _known_managed_exit_state_path(repo_root: Path) -> Path:
+    return repo_root / _KNOWN_MANAGED_EXIT_STATE_PATH
+
+
+def _bridge_report_path(config: IbkrPaperStrategyBridgeConfig) -> Path:
+    output_dir = Path(config.output_dir or Path("outputs") / "reports" / _ARTIFACT_STEM)
+    if not output_dir.is_absolute():
+        output_dir = config.repo_root / output_dir
+    return output_dir / f"{_ARTIFACT_STEM}_report.json"
+
+
+def _load_known_managed_exit_state(path: Path) -> dict[str, Any]:
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+    return payload if isinstance(payload, dict) else {}
 
 
 def _load_bridge_audit_history(output_dir: Path | None) -> list[dict[str, Any]]:
