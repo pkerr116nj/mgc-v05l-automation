@@ -183,6 +183,18 @@ def test_long_stop_combined_with_time_exit_maps_to_hard_protective() -> None:
     assert urgency["hard_exit"] is True
 
 
+def test_leak_test_controlled_exit_maps_to_hard_protective() -> None:
+    urgency = classify_exit_urgency(
+        explicit_hard_exit=None,
+        reason_values=("LEAK_TEST_CONTROLLED_EXIT",),
+        reason_source="unit_test",
+    )
+
+    assert urgency["exit_urgency"] == "HARD_PROTECTIVE"
+    assert urgency["hard_exit"] is True
+    assert "LEAK_TEST_CONTROLLED_EXIT" in urgency["hard_exit_reason_matches"]
+
+
 def test_time_exit_alone_remains_discretionary_by_default() -> None:
     urgency = classify_exit_urgency(
         explicit_hard_exit=None,
@@ -268,6 +280,28 @@ def test_hard_protective_buy_limit_below_market_after_timeout_requires_reprice()
 
     assert policy.classification == "KNOWN_MANAGED_HARD_EXIT_ORDER_REPRICE_REQUIRED"
     assert policy.marketable_by_runtime_context is False
+
+
+def test_leak_test_controlled_exit_limit_after_timeout_requires_reprice() -> None:
+    now = datetime(2026, 5, 15, 9, 30, tzinfo=UTC)
+
+    policy = classify_managed_exit_working_order(
+        order={
+            "action": "SELL",
+            "order_type": "LMT",
+            "limit_price": "4570.1",
+            "submitted_at": (now - timedelta(seconds=315)).isoformat(),
+            "exit_reason": "LEAK_TEST_CONTROLLED_EXIT",
+            "status": "Submitted",
+        },
+        now=now,
+        runtime_market_reference=4557.6,
+    )
+
+    assert policy.exit_urgency == "HARD_PROTECTIVE"
+    assert policy.hard_exit is True
+    assert policy.classification == "KNOWN_MANAGED_HARD_EXIT_ORDER_REPRICE_REQUIRED"
+    assert policy.recommended_action == "PREPARE_EXACT_CANCEL_REPLACE_FOR_KNOWN_MANAGED_ORDER"
 
 
 def test_hard_protective_working_order_inside_timeout_is_normal() -> None:
