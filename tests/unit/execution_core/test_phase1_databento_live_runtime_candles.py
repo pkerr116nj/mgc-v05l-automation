@@ -419,7 +419,7 @@ def test_fresh_merged_legacy_live_artifact_can_satisfy_phase1_contract(tmp_path:
     assert payload["historical_seed_ready"] is False
 
 
-def test_all_10_phase1_symbols_are_requested_and_fail_closed_without_records(tmp_path: Path) -> None:
+def test_all_phase1_symbols_are_requested_and_fail_closed_without_records(tmp_path: Path) -> None:
     runner = RecordingRunner({})
 
     result = build_phase1_databento_live_runtime_candles(config=_config(tmp_path), live_runner=runner)
@@ -428,7 +428,7 @@ def test_all_10_phase1_symbols_are_requested_and_fail_closed_without_records(tmp
     assert {config.databento_continuous_symbol for config in runner.configs} == {
         f"{symbol}.v.0" for symbol in PHASE1_RUNTIME_TICKER_ORDER
     }
-    assert result.report["phase1_symbol_count"] == 10
+    assert result.report["phase1_symbol_count"] == len(PHASE1_RUNTIME_TICKER_ORDER)
     assert result.report["realtime_feed_confirmed_count"] == 0
     assert all(row["realtime_feed_confirmed"] is False for row in result.report["rows"])
     assert all(row["can_submit"] is False for row in result.report["rows"])
@@ -466,7 +466,7 @@ def test_multi_symbol_subscriptions_run_concurrently(tmp_path: Path) -> None:
     result = build_phase1_databento_live_runtime_candles(config=_config(tmp_path, max_workers=1), live_runner=runner)
 
     assert started == set(PHASE1_RUNTIME_TICKER_ORDER)
-    assert result.report["phase1_symbol_count"] == 10
+    assert result.report["phase1_symbol_count"] == len(PHASE1_RUNTIME_TICKER_ORDER)
 
 
 def test_sunday_evening_globex_timestamp_is_accepted_as_asia_session(tmp_path: Path) -> None:

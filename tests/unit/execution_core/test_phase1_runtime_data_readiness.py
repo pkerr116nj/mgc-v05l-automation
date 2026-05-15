@@ -9,6 +9,7 @@ from mgc_v05l.execution_core.phase1_runtime_data_readiness import (
     build_phase1_runtime_data_readiness,
     write_phase1_runtime_data_readiness_artifacts,
 )
+from mgc_v05l.execution_core.phase1_runtime_ticker_registry import PHASE1_RUNTIME_TICKER_ORDER
 
 
 NOW = datetime(2026, 5, 9, 14, 0, tzinfo=timezone.utc)
@@ -136,10 +137,10 @@ def test_research_artifact_path_is_rejected_as_runtime_truth(tmp_path: Path) -> 
     assert gc["candle_checks"]["1m"]["reason"] == "RESEARCH_ONLY_UNSAFE"
 
 
-def test_all_10_tickers_appear_and_missing_features_are_explicit(tmp_path: Path) -> None:
+def test_all_phase1_tickers_appear_and_missing_features_are_explicit(tmp_path: Path) -> None:
     artifacts = build_phase1_runtime_data_readiness(config=_config(tmp_path))
 
-    assert [row["symbol"] for row in artifacts.rows] == ["GC", "NQ", "ES", "MGC", "MNQ", "MES", "ZT", "ZF", "ZN", "ZB"]
+    assert [row["symbol"] for row in artifacts.rows] == list(PHASE1_RUNTIME_TICKER_ORDER)
     assert all(row["runtime_candles_ready"] is False for row in artifacts.rows)
     assert all(row["runtime_candles_block_reason"] == "RUNTIME_CANDLES_MISSING" for row in artifacts.rows)
     assert all(row["derived_features_ready"] is False for row in artifacts.rows)
@@ -154,6 +155,6 @@ def test_writes_latest_runtime_data_readiness_artifact(tmp_path: Path) -> None:
 
     path = tmp_path / "outputs" / "reports" / "phase1_runtime_data_readiness" / "latest_phase1_runtime_data_readiness.json"
     payload = json.loads(path.read_text(encoding="utf-8"))
-    assert payload["row_count"] == 10
+    assert payload["row_count"] == len(PHASE1_RUNTIME_TICKER_ORDER)
     assert payload["archive_artifact_used"] is False
     assert payload["research_artifact_used"] is False
