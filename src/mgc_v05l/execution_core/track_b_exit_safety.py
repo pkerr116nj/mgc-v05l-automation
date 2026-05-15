@@ -28,6 +28,20 @@ _EXIT_NOT_FILLED_CANCELLED_CLASSIFICATIONS = {
     "PAPER_CLOSE_NOT_FILLED_CANCELLED",
     "PAPER_STRATEGY_ORDER_NOT_FILLED_CANCELLED",
 }
+_HARD_PROTECTIVE_EXIT_REASON_TOKENS = (
+    "LONG_STOP",
+    "SHORT_STOP",
+    "LONG_INTEGRITY_FAIL",
+    "SHORT_INTEGRITY_FAIL",
+    "FORCED_SESSION_INITIAL_STOP",
+    "HARD_STOP",
+    "PROTECTIVE_STOP",
+    "FORCED_SAFETY_STOP",
+    "RISK_STOP",
+    "MAX_LOSS",
+    "STOP",
+    "INTEGRITY_FAIL",
+)
 
 
 class TrackBStaleDataState(str, Enum):
@@ -89,7 +103,10 @@ class ExitAttemptPolicy:
     not_filled_cancelled_count: int
     execution_policy: str
     escalation_level: int
+    exit_urgency: str
     hard_exit: bool
+    hard_exit_reason_matches: list[str]
+    exit_reason_source: str | None
     discretionary_exit: bool
     limit_offset_ticks: float
     fill_timeout_seconds: float
@@ -107,7 +124,10 @@ class ExitAttemptPolicy:
             "not_filled_cancelled_count": int(self.not_filled_cancelled_count),
             "execution_policy": self.execution_policy,
             "escalation_level": int(self.escalation_level),
+            "exit_urgency": self.exit_urgency,
             "hard_exit": self.hard_exit,
+            "hard_exit_reason_matches": list(self.hard_exit_reason_matches),
+            "exit_reason_source": self.exit_reason_source,
             "discretionary_exit": self.discretionary_exit,
             "limit_offset_ticks": float(self.limit_offset_ticks),
             "fill_timeout_seconds": float(self.fill_timeout_seconds),
@@ -327,6 +347,8 @@ def classify_exit_attempt_policy(
     action: str | None,
     hard_exit: bool,
     discretionary_exit: bool | None = None,
+    exit_reasons: list[Any] | tuple[Any, ...] | None = None,
+    exit_reason_source: str | None = None,
     broker_position_quantity: float | int | None = None,
     broker_reconciled: bool = True,
     open_order_count: int = 0,
@@ -342,7 +364,10 @@ def classify_exit_attempt_policy(
             not_filled_cancelled_count=0,
             execution_policy="NOT_AN_EXIT",
             escalation_level=0,
+            exit_urgency="NOT_AN_EXIT",
             hard_exit=False,
+            hard_exit_reason_matches=[],
+            exit_reason_source=None,
             discretionary_exit=False,
             limit_offset_ticks=1.0,
             fill_timeout_seconds=60.0,
@@ -370,7 +395,12 @@ def classify_exit_attempt_policy(
     )
     working_exit_order_present = int(open_order_count or 0) > 0
     broker_lifecycle_mismatch = not bool(broker_reconciled)
-    is_hard_exit = bool(hard_exit)
+    urgency = classify_exit_urgency(
+        explicit_hard_exit=hard_exit,
+        reason_values=exit_reasons or (),
+        reason_source=exit_reason_source,
+    )
+    is_hard_exit = bool(urgency["hard_exit"])
     is_discretionary_exit = bool(discretionary_exit) if discretionary_exit is not None else not is_hard_exit
     execution_policy, escalation_level, limit_offset_ticks, fill_timeout_seconds = _exit_execution_policy(
         not_filled_cancelled_count=not_filled_cancelled_count,
@@ -399,7 +429,10 @@ def classify_exit_attempt_policy(
         not_filled_cancelled_count=not_filled_cancelled_count,
         execution_policy=execution_policy,
         escalation_level=escalation_level,
+        exit_urgency=str(urgency["exit_urgency"]),
         hard_exit=is_hard_exit,
+        hard_exit_reason_matches=list(urgency["hard_exit_reason_matches"]),
+        exit_reason_source=urgency.get("exit_reason_source"),
         discretionary_exit=is_discretionary_exit,
         limit_offset_ticks=limit_offset_ticks,
         fill_timeout_seconds=fill_timeout_seconds,
@@ -410,6 +443,40 @@ def classify_exit_attempt_policy(
         broker_lifecycle_mismatch=broker_lifecycle_mismatch,
         working_exit_order_present=working_exit_order_present,
     )
+
+
+def classify_exit_urgency(
+    *,
+    explicit_hard_exit: object = None,
+    reason_values: list[Any] | tuple[Any, ...] = (),
+    reason_source: str | None = None,
+) -> dict[str, Any]:
+    """Classify managed close urgency from canonical and free-text reasons.
+
+    Stop/integrity-fail reasons are protective even when another layer forgot to
+    set the historical hard_exit boolean. A false explicit value can force
+    discretionary behavior only when no protective reason is present.
+    """
+
+    explicit = _bool_or_none(explicit_hard_exit)
+    reason_tokens = _normalized_exit_reason_tokens(reason_values)
+    matches = [
+        token
+        for token in _HARD_PROTECTIVE_EXIT_REASON_TOKENS
+        if any(token in reason for reason in reason_tokens)
+    ]
+    hard = bool(matches)
+    if explicit is True:
+        hard = True
+    elif explicit is False and not matches:
+        hard = False
+    return {
+        "exit_urgency": "HARD_PROTECTIVE" if hard else "DISCRETIONARY",
+        "hard_exit": hard,
+        "hard_exit_reason_matches": matches,
+        "exit_reason_source": reason_source,
+        "normalized_reasons": reason_tokens,
+    }
 
 
 def classify_stale_data(
@@ -621,6 +688,35 @@ def _float_or_none(value: object) -> float | None:
         return None
 
 
+def _bool_or_none(value: object) -> bool | None:
+    if isinstance(value, bool):
+        return value
+    text = str(value or "").strip().lower()
+    if text in {"true", "1", "yes"}:
+        return True
+    if text in {"false", "0", "no"}:
+        return False
+    return None
+
+
+def _normalized_exit_reason_tokens(values: list[Any] | tuple[Any, ...]) -> list[str]:
+    tokens: list[str] = []
+    for value in values:
+        if value is None:
+            continue
+        if isinstance(value, Mapping):
+            tokens.extend(_normalized_exit_reason_tokens(tuple(value.values())))
+            continue
+        if isinstance(value, (list, tuple, set)):
+            tokens.extend(_normalized_exit_reason_tokens(tuple(value)))
+            continue
+        text = str(value or "").strip()
+        if not text:
+            continue
+        tokens.append(text.upper().replace("-", "_").replace(" ", "_"))
+    return tokens
+
+
 def _managed_order_age_seconds(order: Mapping[str, Any], now: datetime) -> float | None:
     submitted_at = _first_time(
         order.get("submitted_at"),
@@ -634,35 +730,20 @@ def _managed_order_age_seconds(order: Mapping[str, Any], now: datetime) -> float
 
 
 def _managed_exit_is_hard(order: Mapping[str, Any]) -> bool:
-    explicit = order.get("hard_exit")
-    if isinstance(explicit, bool):
-        return explicit
-    text = str(explicit or "").strip().lower()
-    if text in {"true", "1", "yes"}:
-        return True
-    if text in {"false", "0", "no"}:
-        return False
-    reason_text = " ".join(
-        str(value or "")
-        for value in (
-            order.get("exit_reason"),
-            order.get("reason"),
-            order.get("reason_code"),
-            order.get("exit_family"),
-            order.get("risk_tags"),
-            order.get("order_intent_id"),
-        )
-    ).upper()
-    hard_tokens = (
-        "FORCED_SESSION",
-        "HARD",
-        "PROTECTIVE",
-        "STOP",
-        "INTEGRITY_FAIL",
-        "MAX_LOSS",
-        "RISK_STOP",
+    return bool(
+        classify_exit_urgency(
+            explicit_hard_exit=order.get("hard_exit"),
+            reason_values=(
+                order.get("exit_reason"),
+                order.get("reason"),
+                order.get("reason_code"),
+                order.get("exit_family"),
+                order.get("risk_tags"),
+                order.get("order_intent_id"),
+            ),
+            reason_source="managed_exit_order",
+        )["hard_exit"]
     )
-    return any(token in reason_text for token in hard_tokens)
 
 
 def _managed_exit_urgency(order: Mapping[str, Any]) -> str:

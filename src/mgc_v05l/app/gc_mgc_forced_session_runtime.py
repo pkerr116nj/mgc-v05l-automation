@@ -10,6 +10,7 @@ from typing import Any
 from ..domain.enums import LongEntryFamily, OrderIntentType, PositionSide, ShortEntryFamily
 from ..domain.models import Bar, FeaturePacket, SignalPacket, StrategyState
 from ..execution.order_models import OrderIntent
+from ..execution_core.track_b_exit_safety import classify_exit_urgency
 from ..strategy.exit_engine import ExitDecision
 from ..strategy.strategy_engine import StrategyEngine, _empty_signal_packet_payload
 from .gc_mgc_segment_regime_research import label_gold_segment, trade_date_for_timestamp
@@ -171,13 +172,19 @@ class GcMgcForcedSessionStrategyEngine(StrategyEngine):
         exit_decision: ExitDecision,
     ):
         if state.position_side != PositionSide.FLAT:
-            custom_exit = self._forced_session_exit_intent(bar=bar, state=state)
+            custom_exit = self._forced_session_exit_intent(bar=bar, state=state, exit_decision=exit_decision)
             if custom_exit is not None:
                 return custom_exit
             return None
         return super()._maybe_create_order_intent(bar, signal_packet, state, exit_decision)
 
-    def _forced_session_exit_intent(self, *, bar: Bar, state: StrategyState) -> OrderIntent | None:
+    def _forced_session_exit_intent(
+        self,
+        *,
+        bar: Bar,
+        state: StrategyState,
+        exit_decision: ExitDecision,
+    ) -> OrderIntent | None:
         definition = self._runtime_definition
         if definition is None or state.open_broker_order_id is not None or not state.exits_enabled:
             return None
@@ -188,7 +195,15 @@ class GcMgcForcedSessionStrategyEngine(StrategyEngine):
 
         current_segment = label_gold_segment(bar.end_ts)
         if current_segment != definition.segment_id:
-            return _build_forced_exit_intent(bar=bar, quantity=quantity, side=state.position_side, reason_code="segment_overrun")
+            return _build_forced_exit_intent(
+                bar=bar,
+                quantity=quantity,
+                side=state.position_side,
+                reason_code=_forced_session_exit_reason_code(
+                    fallback="segment_overrun",
+                    exit_decision=exit_decision,
+                ),
+            )
 
         segment_bars = self._segment_bars_for_timestamp(bar.end_ts)
         entry_index = _entry_index_for_state(segment_bars=segment_bars, state=state)
@@ -242,7 +257,10 @@ class GcMgcForcedSessionStrategyEngine(StrategyEngine):
             bar=bar,
             quantity=quantity,
             side=state.position_side,
-            reason_code=reason_code or "forced_session_exit",
+            reason_code=_forced_session_exit_reason_code(
+                fallback=reason_code or "forced_session_exit",
+                exit_decision=exit_decision,
+            ),
         )
 
     def _segment_bars_for_timestamp(self, timestamp) -> list[Bar]:
@@ -355,3 +373,15 @@ def _build_forced_exit_intent(
         created_at=bar.end_ts,
         reason_code=reason_code,
     )
+
+
+def _forced_session_exit_reason_code(*, fallback: str, exit_decision: ExitDecision) -> str:
+    reasons = tuple(reason.value for reason in exit_decision.all_true_reasons)
+    urgency = classify_exit_urgency(
+        explicit_hard_exit=None,
+        reason_values=(fallback, reasons),
+        reason_source="gc_mgc_forced_session_runtime",
+    )
+    if urgency["hard_exit"] and exit_decision.primary_reason is not None:
+        return exit_decision.primary_reason.value
+    return fallback

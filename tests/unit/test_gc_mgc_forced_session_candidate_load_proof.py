@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from types import SimpleNamespace
 
+from mgc_v05l.domain.enums import ExitReason
 from mgc_v05l.app.gc_mgc_forced_session_candidate_admission_plan import (
     run_gc_mgc_forced_session_candidate_admission_plan,
 )
@@ -16,6 +18,7 @@ from mgc_v05l.app.gc_mgc_forced_session_runtime import (
     LONDON_EARLY_LONG_SOURCE,
     NY_EARLY_SHORT_SOURCE,
     NY_LATE_SHORT_SOURCE,
+    _forced_session_exit_reason_code,
 )
 
 
@@ -63,6 +66,30 @@ def test_candidate_load_proof_loads_custom_runtime_package(tmp_path: Path) -> No
         NY_EARLY_SHORT_SOURCE,
         NY_LATE_SHORT_SOURCE,
     }
+
+
+def test_forced_session_exit_preserves_hard_protective_engine_reason() -> None:
+    reason = _forced_session_exit_reason_code(
+        fallback="segment_overrun",
+        exit_decision=SimpleNamespace(
+            primary_reason=ExitReason.LONG_STOP,
+            all_true_reasons=(ExitReason.LONG_STOP, ExitReason.LONG_INTEGRITY_FAIL, ExitReason.LONG_TIME_EXIT),
+        ),
+    )
+
+    assert reason == "LONG_STOP"
+
+
+def test_forced_session_exit_keeps_segment_overrun_for_time_only_exit() -> None:
+    reason = _forced_session_exit_reason_code(
+        fallback="segment_overrun",
+        exit_decision=SimpleNamespace(
+            primary_reason=ExitReason.LONG_TIME_EXIT,
+            all_true_reasons=(ExitReason.LONG_TIME_EXIT,),
+        ),
+    )
+
+    assert reason == "segment_overrun"
 
 
 def _synthetic_candidate_system() -> dict[str, object]:

@@ -4,6 +4,7 @@ from datetime import UTC, datetime, timedelta
 
 from mgc_v05l.execution_core.track_b_exit_safety import (
     classify_exit_attempt_policy,
+    classify_exit_urgency,
     classify_managed_exit_working_order,
 )
 
@@ -33,6 +34,7 @@ def test_hard_exit_not_filled_cancelled_escalates_execution_policy() -> None:
     assert policy.escalation_level == 1
     assert policy.limit_offset_ticks == 4.0
     assert policy.block_submit is False
+    assert policy.exit_urgency == "HARD_PROTECTIVE"
 
 
 def test_repeated_cancelled_hard_exits_stop_before_indefinite_loop() -> None:
@@ -144,6 +146,84 @@ def test_policy_is_paper_only_metadata_and_has_no_live_money_eligibility() -> No
     ).to_json_dict()
 
     assert "live_money_eligible" not in policy
+
+
+def test_long_stop_maps_to_hard_protective_exit_urgency() -> None:
+    urgency = classify_exit_urgency(
+        explicit_hard_exit=None,
+        reason_values=("LONG_STOP",),
+        reason_source="unit_test",
+    )
+
+    assert urgency["exit_urgency"] == "HARD_PROTECTIVE"
+    assert urgency["hard_exit"] is True
+    assert "LONG_STOP" in urgency["hard_exit_reason_matches"]
+
+
+def test_long_integrity_fail_maps_to_hard_protective_exit_urgency() -> None:
+    urgency = classify_exit_urgency(
+        explicit_hard_exit=None,
+        reason_values=("LONG_INTEGRITY_FAIL",),
+        reason_source="unit_test",
+    )
+
+    assert urgency["exit_urgency"] == "HARD_PROTECTIVE"
+    assert urgency["hard_exit"] is True
+    assert "LONG_INTEGRITY_FAIL" in urgency["hard_exit_reason_matches"]
+
+
+def test_long_stop_combined_with_time_exit_maps_to_hard_protective() -> None:
+    urgency = classify_exit_urgency(
+        explicit_hard_exit=False,
+        reason_values=("LONG_TIME_EXIT", ["LONG_STOP"]),
+        reason_source="unit_test",
+    )
+
+    assert urgency["exit_urgency"] == "HARD_PROTECTIVE"
+    assert urgency["hard_exit"] is True
+
+
+def test_time_exit_alone_remains_discretionary_by_default() -> None:
+    urgency = classify_exit_urgency(
+        explicit_hard_exit=None,
+        reason_values=("LONG_TIME_EXIT",),
+        reason_source="unit_test",
+    )
+
+    assert urgency["exit_urgency"] == "DISCRETIONARY"
+    assert urgency["hard_exit"] is False
+
+
+def test_profit_taking_reason_remains_discretionary() -> None:
+    urgency = classify_exit_urgency(
+        explicit_hard_exit=None,
+        reason_values=("profit_taking_limit",),
+        reason_source="unit_test",
+    )
+
+    assert urgency["exit_urgency"] == "DISCRETIONARY"
+    assert urgency["hard_exit"] is False
+
+
+def test_exit_attempt_policy_promotes_stop_reason_even_if_legacy_metadata_says_discretionary() -> None:
+    policy = classify_exit_attempt_policy(
+        history_events=[],
+        lifecycle_id="life-1",
+        intent_type="SELL_TO_CLOSE",
+        action="SELL",
+        hard_exit=False,
+        discretionary_exit=None,
+        exit_reasons=["LONG_TIME_EXIT", "LONG_STOP"],
+        exit_reason_source="unit_test",
+        broker_position_quantity=1,
+        broker_reconciled=True,
+        open_order_count=0,
+    )
+
+    assert policy.hard_exit is True
+    assert policy.discretionary_exit is False
+    assert policy.execution_policy == "HARD_MARKETABLE_LIMIT_1T"
+    assert policy.exit_urgency == "HARD_PROTECTIVE"
 
 
 def test_hard_protective_sell_limit_above_market_after_timeout_requires_reprice() -> None:

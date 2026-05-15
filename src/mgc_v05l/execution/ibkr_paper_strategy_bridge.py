@@ -53,7 +53,11 @@ from .ibkr_position_reconciliation import (
 )
 from .ibkr_read_only_verifier import _wait_for_connection_ready, IbkrReadOnlyApiTransportConfig
 from .track_b_phase1_submit_authority import evaluate_phase1_broker_reconciliation_submit_gate
-from ..execution_core.track_b_exit_safety import ExitAttemptPolicy, classify_exit_attempt_policy
+from ..execution_core.track_b_exit_safety import (
+    ExitAttemptPolicy,
+    classify_exit_attempt_policy,
+    classify_exit_urgency,
+)
 from ..execution_core.track_b_paper_broker_reconciliation import (
     ReconciliationConfig,
     reconcile_track_b_paper_broker_truth,
@@ -678,6 +682,7 @@ def run_ibkr_paper_strategy_bridge(
             quote_context=quote_context,
             qualified_contract_report=qualified_contract_report,
             entry_attempt_memory=entry_attempt_memory,
+            exit_attempt_policy=exit_attempt_policy,
         )
         dynamic_checks = _build_preflight_checks(
             config=config,
@@ -1321,6 +1326,19 @@ def _build_preflight_checks(
         _check("strategy_allowed_state", True, True, "The bridge remains manual-only and the shadow ledger stays separate from broker execution."),
     ]
     if _is_close_intent(config=config, intent=intent):
+        checks.append(
+            _check(
+                "exit_execution_price_source",
+                not bool(pricing.get("block_submit")),
+                True,
+                str(pricing.get("block_reason") or "")
+                or (
+                    f"Exit execution pricing uses {pricing.get('execution_price_source')} with urgency {pricing.get('exit_urgency')}."
+                    if pricing
+                    else "Exit execution pricing did not produce a blocking price-source condition."
+                ),
+            )
+        )
         checks.append(
             _check(
                 "broker_position_present_for_close",
@@ -2096,6 +2114,7 @@ def _build_report(
         "exit_attempt_policy": exit_attempt_policy.to_json_dict(),
         "entry_attempt_memory": entry_attempt_memory,
         "entry_execution_pricing": entry_execution_pricing,
+        "exit_execution_pricing": entry_execution_pricing if bool(entry_execution_pricing.get("is_close")) else None,
         "prepared_submit_bundle": prepared_submit_bundle,
         "delegated_result": delegated_result,
         "callback_timeline_event_count": callback_timeline_event_count,
@@ -2220,6 +2239,7 @@ def _exit_attempt_policy_for_bridge(
     ).strip() or None
     hard_exit = _hard_exit_from_metadata(config=config, metadata=metadata)
     discretionary_exit = _bool_or_none(metadata.get("discretionary_exit"))
+    reason_values = _exit_reason_values_from_metadata(config=config, metadata=metadata)
     return classify_exit_attempt_policy(
         history_events=history_events,
         lifecycle_id=lifecycle_id,
@@ -2227,6 +2247,8 @@ def _exit_attempt_policy_for_bridge(
         action=intent.action,
         hard_exit=hard_exit,
         discretionary_exit=discretionary_exit,
+        exit_reasons=reason_values,
+        exit_reason_source="bridge_caller_metadata",
         broker_position_quantity=current_position_quantity,
         broker_reconciled=bool(phase1_gate.get("ready")),
         open_order_count=int(open_orders.get("open_order_count") or 0),
@@ -2309,8 +2331,29 @@ def _entry_execution_pricing_for_bridge(
     quote_context: dict[str, Any],
     qualified_contract_report: dict[str, Any],
     entry_attempt_memory: dict[str, Any] | None = None,
+    exit_attempt_policy: ExitAttemptPolicy | None = None,
     now: datetime | None = None,
 ) -> dict[str, Any]:
+    if _is_close_intent(config=config, intent=intent):
+        if exit_attempt_policy is None:
+            metadata = dict(config.caller_metadata or {})
+            exit_attempt_policy = classify_exit_attempt_policy(
+                history_events=[],
+                lifecycle_id=str(metadata.get("lifecycle_id") or "") or None,
+                intent_type=str(metadata.get("intent_type") or "").strip().upper() or None,
+                action=intent.action,
+                hard_exit=_hard_exit_from_metadata(config=config, metadata=metadata),
+                exit_reasons=_exit_reason_values_from_metadata(config=config, metadata=metadata),
+                exit_reason_source="bridge_caller_metadata",
+            )
+        return _exit_execution_pricing_for_bridge(
+            config=config,
+            intent=intent,
+            quote_context=quote_context,
+            qualified_contract_report=qualified_contract_report,
+            exit_attempt_policy=exit_attempt_policy,
+            now=now,
+        )
     if not _is_entry_intent(config=config, intent=intent):
         return {
             "is_entry": False,
@@ -2486,6 +2529,119 @@ def _entry_execution_pricing_for_bridge(
         "block_reason": block_reason,
         "live_money_eligible": False,
         "entry_attempt_memory": dict(entry_attempt_memory or {}),
+    }
+
+
+def _exit_execution_pricing_for_bridge(
+    *,
+    config: IbkrPaperStrategyBridgeConfig,
+    intent: IbkrPaperStrategyOrderIntent,
+    quote_context: dict[str, Any],
+    qualified_contract_report: dict[str, Any],
+    exit_attempt_policy: ExitAttemptPolicy,
+    now: datetime | None = None,
+) -> dict[str, Any]:
+    now = now or datetime.now(timezone.utc)
+    min_tick = _qualified_contract_min_tick(qualified_contract_report) or 0.25
+    action = str(intent.action or "").strip().upper()
+    delayed_bid = _float_or_none(quote_context.get("bid_price"))
+    delayed_ask = _float_or_none(quote_context.get("ask_price"))
+    delayed_last = _float_or_none(quote_context.get("last_price"))
+    delayed_reference = delayed_bid if action == "SELL" else delayed_ask
+    if delayed_reference is None:
+        delayed_reference = delayed_last
+    delayed_quote_limit = None
+    if delayed_reference is not None:
+        offset = float(exit_attempt_policy.limit_offset_ticks) * float(min_tick)
+        delayed_quote_limit = (
+            float(delayed_reference) - offset
+            if action == "SELL"
+            else float(delayed_reference) + offset
+        )
+        delayed_quote_limit = _round_price_to_tick(delayed_quote_limit, float(min_tick))
+    runtime_snapshot = _load_entry_runtime_market_snapshot(
+        repo_root=config.repo_root,
+        symbol=str(intent.symbol or config.symbol or "").strip().upper(),
+        now=now,
+    )
+    runtime_price = _float_or_none(runtime_snapshot.get("runtime_last_or_close"))
+    runtime_fresh = bool(runtime_snapshot.get("runtime_data_fresh")) and runtime_price is not None
+    selected_limit = None
+    execution_price_source = "UNKNOWN"
+    block_submit = False
+    block_reason = None
+    if runtime_fresh:
+        offset = float(exit_attempt_policy.limit_offset_ticks) * float(min_tick)
+        selected_limit = (
+            float(runtime_price) - offset
+            if action == "SELL"
+            else float(runtime_price) + offset
+        )
+        selected_limit = _round_price_to_tick(selected_limit, float(min_tick))
+        execution_price_source = _ENTRY_RUNTIME_PRICE_SOURCE
+    elif exit_attempt_policy.hard_exit:
+        block_submit = True
+        block_reason = "LOW_CONFIDENCE_PRICE_SOURCE"
+        execution_price_source = _ENTRY_DELAYED_DIAGNOSTIC_SOURCE
+    elif delayed_quote_limit is not None:
+        execution_price_source = "IBKR_DELAYED_PASSIVE_DIAGNOSTIC"
+    limit_vs_runtime = (
+        None
+        if selected_limit is None or runtime_price is None
+        else _signed_limit_distance(action=action, limit_price=selected_limit, reference_price=runtime_price)
+    )
+    limit_vs_delayed = (
+        None
+        if selected_limit is None or delayed_reference is None
+        else _signed_limit_distance(action=action, limit_price=selected_limit, reference_price=delayed_reference)
+    )
+    delayed_limit_vs_runtime = (
+        None
+        if delayed_quote_limit is None or runtime_price is None
+        else _signed_limit_distance(action=action, limit_price=delayed_quote_limit, reference_price=runtime_price)
+    )
+    delayed_limit_vs_delayed = (
+        None
+        if delayed_quote_limit is None or delayed_reference is None
+        else _signed_limit_distance(action=action, limit_price=delayed_quote_limit, reference_price=delayed_reference)
+    )
+    return {
+        "is_entry": False,
+        "is_close": True,
+        "exit_urgency": exit_attempt_policy.exit_urgency,
+        "hard_exit": exit_attempt_policy.hard_exit,
+        "hard_exit_reason_matches": list(exit_attempt_policy.hard_exit_reason_matches),
+        "exit_reason_source": exit_attempt_policy.exit_reason_source,
+        "selected_exit_policy": exit_attempt_policy.execution_policy,
+        "timeout_seconds": exit_attempt_policy.fill_timeout_seconds,
+        "fill_timeout_seconds": exit_attempt_policy.fill_timeout_seconds,
+        "escalation_level": exit_attempt_policy.escalation_level,
+        "limit_offset_ticks": exit_attempt_policy.limit_offset_ticks,
+        "execution_price_source": execution_price_source,
+        "broker_quote_type": _broker_quote_type(quote_context),
+        "delayed_bid": delayed_bid,
+        "delayed_ask": delayed_ask,
+        "delayed_last": delayed_last,
+        "runtime_reference_price": runtime_price,
+        "runtime_last_or_close": runtime_price,
+        "runtime_candle_timestamp": runtime_snapshot.get("runtime_candle_timestamp"),
+        "runtime_data_age_seconds": runtime_snapshot.get("runtime_data_age_seconds"),
+        "runtime_data_fresh": runtime_fresh,
+        "runtime_source_artifact_path": runtime_snapshot.get("source_artifact_path"),
+        "limit_price": selected_limit,
+        "limit_vs_runtime_price_points": limit_vs_runtime,
+        "limit_vs_broker_delayed_quote_points": limit_vs_delayed,
+        "marketable_by_runtime_context": limit_vs_runtime is not None and float(limit_vs_runtime) >= 0.0,
+        "marketable_by_delayed_quote": limit_vs_delayed is not None and float(limit_vs_delayed) >= 0.0,
+        "delayed_quote_limit_price": delayed_quote_limit,
+        "delayed_quote_limit_vs_runtime_price_points": delayed_limit_vs_runtime,
+        "delayed_quote_limit_vs_broker_delayed_quote_points": delayed_limit_vs_delayed,
+        "delayed_quote_limit_marketable_by_runtime_context": delayed_limit_vs_runtime is not None and float(delayed_limit_vs_runtime) >= 0.0,
+        "delayed_quote_limit_marketable_by_delayed_quote": delayed_limit_vs_delayed is not None and float(delayed_limit_vs_delayed) >= 0.0,
+        "block_submit": block_submit,
+        "block_reason": block_reason,
+        "low_confidence_price_source": bool(block_submit),
+        "live_money_eligible": False,
     }
 
 
@@ -2774,17 +2930,32 @@ def _signed_limit_distance(*, action: str, limit_price: float, reference_price: 
 
 def _hard_exit_from_metadata(*, config: IbkrPaperStrategyBridgeConfig, metadata: dict[str, Any]) -> bool:
     explicit = _bool_or_none(metadata.get("hard_exit"))
-    if explicit is not None:
-        return explicit
-    reason_text = " ".join(
-        [
-            str(config.reason or ""),
-            str(metadata.get("exit_reason") or ""),
-            str(metadata.get("exit_family") or ""),
-            " ".join(str(tag or "") for tag in config.risk_tags),
-        ]
-    ).upper()
-    return any(token in reason_text for token in ("HARD", "STOP", "PROTECTIVE", "FORCED_SESSION"))
+    urgency = classify_exit_urgency(
+        explicit_hard_exit=explicit,
+        reason_values=_exit_reason_values_from_metadata(config=config, metadata=metadata),
+        reason_source="bridge_caller_metadata",
+    )
+    return bool(urgency["hard_exit"])
+
+
+def _exit_reason_values_from_metadata(
+    *,
+    config: IbkrPaperStrategyBridgeConfig,
+    metadata: dict[str, Any],
+) -> tuple[Any, ...]:
+    return (
+        config.reason,
+        metadata.get("exit_reason"),
+        metadata.get("reason"),
+        metadata.get("reason_code"),
+        metadata.get("close_reason"),
+        metadata.get("primary_reason"),
+        metadata.get("all_true_reasons"),
+        metadata.get("exit_family"),
+        metadata.get("risk_tags"),
+        tuple(config.risk_tags),
+        metadata.get("order_intent_id"),
+    )
 
 
 def _bool_or_none(value: object) -> bool | None:

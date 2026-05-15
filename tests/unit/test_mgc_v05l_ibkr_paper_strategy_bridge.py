@@ -17,6 +17,7 @@ from mgc_v05l.execution.ibkr_paper_strategy_bridge import (
     _build_preflight_checks,
     _build_static_preflight_checks,
     _entry_execution_pricing_for_bridge,
+    _exit_attempt_policy_for_bridge,
     _map_delegate_classification,
     _quote_is_fresh,
     evaluate_strategy_bridge_caller,
@@ -736,6 +737,132 @@ def test_entry_execution_pricing_failure_is_a_blocking_preflight_check(tmp_path:
     assert failure["passed"] is False
     assert failure["blocking"] is True
     assert failure["detail"] == "DELAYED_QUOTE_NOT_EXECUTION_SAFE"
+
+
+def test_stop_exit_uses_hard_policy_and_runtime_price_source(tmp_path: Path) -> None:
+    _write_runtime_1m_candle(
+        tmp_path,
+        symbol="MGC",
+        close=4570.8,
+        bar_end="2026-05-14T12:25:00+00:00",
+    )
+    metadata = {
+        **_approved_runtime_metadata(
+            strategy_id="mgc_1x_all_lanes__london_early_long",
+            source_instrument="MGC",
+            executable_proxy="MGC",
+            action="SELL",
+            intent_type="SELL_TO_CLOSE",
+            bridge_proxy_mode="MGC_SIGNAL_DIRECT_PHASE1",
+        ),
+        "lifecycle_id": "bridge_fill_MGC|1m|2026-05-15T07:06:00Z|BUY_TO_OPEN",
+        "exit_reason": "LONG_TIME_EXIT",
+        "all_true_reasons": ["LONG_STOP", "LONG_INTEGRITY_FAIL", "LONG_TIME_EXIT"],
+        "hard_exit": False,
+    }
+    config = _config(
+        tmp_path,
+        strategy_id="mgc_1x_all_lanes__london_early_long",
+        symbol="MGC",
+        action="SELL",
+        limit_price_model="DELAYED_BID_MINUS_1T_MARKETABLE_SELL",
+        caller_metadata=metadata,
+        reason="segment_overrun",
+    )
+    intent = _intent_from_config(config)
+    policy = _exit_attempt_policy_for_bridge(
+        config=config,
+        intent=intent,
+        history_events=[],
+        current_position_quantity=1.0,
+        open_orders={"open_order_count": 0},
+        phase1_gate={"ready": True},
+    )
+    pricing = _entry_execution_pricing_for_bridge(
+        config=config,
+        intent=intent,
+        quote_context=_quote_context(bid=4560.1, ask=4560.3, last=4560.0),
+        qualified_contract_report=_qualified_contract_report(min_tick=0.1),
+        exit_attempt_policy=policy,
+        now=datetime(2026, 5, 14, 12, 25, 30, tzinfo=timezone.utc),
+    )
+
+    assert policy.hard_exit is True
+    assert policy.discretionary_exit is False
+    assert policy.execution_policy == "HARD_MARKETABLE_LIMIT_1T"
+    assert pricing["exit_urgency"] == "HARD_PROTECTIVE"
+    assert pricing["hard_exit_reason_matches"] == ["LONG_STOP", "LONG_INTEGRITY_FAIL", "STOP", "INTEGRITY_FAIL"]
+    assert pricing["selected_exit_policy"] == "HARD_MARKETABLE_LIMIT_1T"
+    assert pricing["execution_price_source"] == "RUNTIME_DATABENTO_1M_CLOSE"
+    assert pricing["runtime_reference_price"] == 4570.8
+    assert pricing["limit_price"] == 4570.7
+    assert pricing["marketable_by_runtime_context"] is True
+    assert pricing["block_submit"] is False
+    assert pricing["live_money_eligible"] is False
+
+
+def test_delayed_only_stop_exit_blocks_as_low_confidence_price_source(tmp_path: Path) -> None:
+    metadata = {
+        **_approved_runtime_metadata(
+            strategy_id="mgc_1x_all_lanes__london_early_long",
+            source_instrument="MGC",
+            executable_proxy="MGC",
+            action="SELL",
+            intent_type="SELL_TO_CLOSE",
+            bridge_proxy_mode="MGC_SIGNAL_DIRECT_PHASE1",
+        ),
+        "lifecycle_id": "bridge_fill_MGC|1m|2026-05-15T07:06:00Z|BUY_TO_OPEN",
+        "exit_reason": "LONG_STOP",
+    }
+    config = _config(
+        tmp_path,
+        strategy_id="mgc_1x_all_lanes__london_early_long",
+        symbol="MGC",
+        action="SELL",
+        limit_price_model="DELAYED_BID_MINUS_1T_MARKETABLE_SELL",
+        caller_metadata=metadata,
+        reason="segment_overrun",
+    )
+    intent = _intent_from_config(config)
+    policy = _exit_attempt_policy_for_bridge(
+        config=config,
+        intent=intent,
+        history_events=[],
+        current_position_quantity=1.0,
+        open_orders={"open_order_count": 0},
+        phase1_gate={"ready": True},
+    )
+    pricing = _entry_execution_pricing_for_bridge(
+        config=config,
+        intent=intent,
+        quote_context=_quote_context(bid=4570.1, ask=4570.3, last=4570.0),
+        qualified_contract_report=_qualified_contract_report(min_tick=0.1),
+        exit_attempt_policy=policy,
+        now=datetime(2026, 5, 14, 12, 25, 30, tzinfo=timezone.utc),
+    )
+    checks = _build_preflight_checks(
+        config=config,
+        intent=intent,
+        selected_account_id="DUM882026",
+        open_orders={"open_order_count": 0},
+        current_position_quantity=1.0,
+        quote_context=_quote_context(bid=4570.1, ask=4570.3, last=4570.0),
+        exact_contract_report={"exact_contract": {}},
+        qualified_contract_report=_qualified_contract_report(min_tick=0.1),
+        audit_events=[],
+        exit_attempt_policy=policy,
+        entry_execution_pricing=pricing,
+    )
+
+    assert policy.hard_exit is True
+    assert pricing["execution_price_source"] == "IBKR_DELAYED_DIAGNOSTIC_ONLY"
+    assert pricing["block_submit"] is True
+    assert pricing["block_reason"] == "LOW_CONFIDENCE_PRICE_SOURCE"
+    assert pricing["delayed_quote_limit_marketable_by_delayed_quote"] is True
+    failure = next(row for row in checks if row["name"] == "exit_execution_price_source")
+    assert failure["passed"] is False
+    assert failure["blocking"] is True
+    assert failure["detail"] == "LOW_CONFIDENCE_PRICE_SOURCE"
 
 
 def test_entry_attempt_memory_counts_repeated_not_filled_cancelled_attempts(tmp_path: Path) -> None:
