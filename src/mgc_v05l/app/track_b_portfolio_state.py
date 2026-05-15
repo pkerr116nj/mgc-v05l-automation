@@ -25,6 +25,13 @@ DEFAULT_MARKET_DATA_ROOT = REPO_ROOT / "outputs" / "track_b_execution_core" / "p
 DEFAULT_RUNTIME_FEED_ROOT = REPO_ROOT / "outputs" / "track_b_execution_core" / "databento_live_runtime_feed"
 DEFAULT_REPORT_ROOT = REPO_ROOT / "outputs" / "reports" / "track_b_portfolio"
 DEFAULT_OUTPUT_PATH = DEFAULT_REPORT_ROOT / "latest_track_b_portfolio_state.json"
+DEFAULT_BROKER_RECONCILIATION_PATH = (
+    REPO_ROOT
+    / "outputs"
+    / "reports"
+    / "track_b_paper_broker_reconciliation"
+    / "latest_track_b_paper_broker_reconciliation.json"
+)
 DEFAULT_PORTFOLIO_TIMESERIES_PATH = DEFAULT_REPORT_ROOT / "track_b_portfolio_timeseries.jsonl"
 DEFAULT_CALENDAR_PATH = DEFAULT_REPORT_ROOT / "calendar" / "latest_track_b_pnl_calendar.json"
 DEFAULT_DAILY_HISTORY_PATH = DEFAULT_REPORT_ROOT / "calendar" / "track_b_daily_pnl.jsonl"
@@ -61,6 +68,7 @@ class TrackBPortfolioConfig:
     market_data_root: Path = DEFAULT_MARKET_DATA_ROOT
     runtime_feed_root: Path = DEFAULT_RUNTIME_FEED_ROOT
     output_path: Path = DEFAULT_OUTPUT_PATH
+    broker_reconciliation_path: Path = DEFAULT_BROKER_RECONCILIATION_PATH
     portfolio_timeseries_path: Path = DEFAULT_PORTFOLIO_TIMESERIES_PATH
     calendar_path: Path = DEFAULT_CALENDAR_PATH
     daily_history_path: Path = DEFAULT_DAILY_HISTORY_PATH
@@ -135,6 +143,7 @@ def build_track_b_portfolio_state(
     open_orders_snapshot = _load_json(open_orders_path)
     lifecycle_status = _load_json(config.lifecycle_position_status_path)
     reconciled_lifecycle_status = _load_json(config.reconciled_lifecycle_position_status_path)
+    broker_reconciliation_report = _load_json(config.broker_reconciliation_path)
     pnl_summary = _select_pnl_summary(config)
     trade_summary = _load_json(config.trade_summary_path)
     git_metadata = _git_metadata(config.repo_root)
@@ -202,13 +211,35 @@ def build_track_b_portfolio_state(
                     details={"lifecycle_position": lifecycle_only},
                 )
     if broker_open_orders:
+        known_managed_exit_orders = broker_reconciliation_report.get("known_managed_exit_orders")
+        stale_managed_exit_order_count = int(broker_reconciliation_report.get("stale_managed_exit_order_count") or 0)
+        hard_exit_order_not_marketable_count = int(broker_reconciliation_report.get("hard_exit_order_not_marketable_count") or 0)
         _add_alert(
             alerts,
             severity="YELLOW",
             code="OPEN_ORDERS",
             message="Broker truth reports Track B open orders tied to portfolio positions or symbols.",
-            details={"open_order_count": len(broker_open_orders), "open_orders": broker_open_orders},
+            details={
+                "open_order_count": len(broker_open_orders),
+                "open_orders": broker_open_orders,
+                "known_managed_exit_order_count": int(broker_reconciliation_report.get("known_managed_exit_order_count") or 0),
+                "stale_managed_exit_order_count": stale_managed_exit_order_count,
+                "hard_exit_order_not_marketable_count": hard_exit_order_not_marketable_count,
+                "known_managed_exit_orders": known_managed_exit_orders if isinstance(known_managed_exit_orders, list) else [],
+            },
         )
+        if stale_managed_exit_order_count or hard_exit_order_not_marketable_count:
+            _add_alert(
+                alerts,
+                severity="YELLOW",
+                code="STALE_MANAGED_EXIT_ORDER",
+                message="A known managed exit order is stale or no longer marketable under the managed-exit policy.",
+                details={
+                    "stale_managed_exit_order_count": stale_managed_exit_order_count,
+                    "hard_exit_order_not_marketable_count": hard_exit_order_not_marketable_count,
+                    "known_managed_exit_orders": known_managed_exit_orders if isinstance(known_managed_exit_orders, list) else [],
+                },
+            )
 
     market_prices = _load_market_prices(config=config, roots={str(item["track_b_root"]) for item in broker_positions}, now=actual_now, alerts=alerts)
     rows = _open_position_rows(
@@ -291,6 +322,12 @@ def build_track_b_portfolio_state(
         "submit_authority": _submit_authority_from_payloads(broker_status, trade_summary, pnl_summary),
         "live_money_eligible": False,
         "broker_open_order_count": len(broker_open_orders),
+        "known_managed_exit_order_count": int(broker_reconciliation_report.get("known_managed_exit_order_count") or 0),
+        "stale_managed_exit_order_count": int(broker_reconciliation_report.get("stale_managed_exit_order_count") or 0),
+        "hard_exit_order_not_marketable_count": int(broker_reconciliation_report.get("hard_exit_order_not_marketable_count") or 0),
+        "known_managed_exit_orders": broker_reconciliation_report.get("known_managed_exit_orders")
+        if isinstance(broker_reconciliation_report.get("known_managed_exit_orders"), list)
+        else [],
         "matched_position_count": len(match_report["matches"]),
         "unmatched_broker_positions": match_report["unmatched_broker_positions"],
         "unmatched_lifecycle_positions": match_report["unmatched_lifecycle_positions"],
@@ -298,6 +335,7 @@ def build_track_b_portfolio_state(
             "broker_status": str(config.broker_status_path),
             "positions_snapshot": str(positions_path),
             "open_orders_snapshot": str(open_orders_path),
+            "broker_reconciliation": str(config.broker_reconciliation_path),
             "lifecycle_position_status": str(config.lifecycle_position_status_path),
             "reconciled_lifecycle_position_status": str(config.reconciled_lifecycle_position_status_path),
         },

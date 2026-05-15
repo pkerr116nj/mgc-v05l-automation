@@ -1,6 +1,11 @@
 from __future__ import annotations
 
-from mgc_v05l.execution_core.track_b_exit_safety import classify_exit_attempt_policy
+from datetime import UTC, datetime, timedelta
+
+from mgc_v05l.execution_core.track_b_exit_safety import (
+    classify_exit_attempt_policy,
+    classify_managed_exit_working_order,
+)
 
 
 def _cancelled_event(lifecycle_id: str) -> dict[str, object]:
@@ -139,3 +144,90 @@ def test_policy_is_paper_only_metadata_and_has_no_live_money_eligibility() -> No
     ).to_json_dict()
 
     assert "live_money_eligible" not in policy
+
+
+def test_hard_protective_sell_limit_above_market_after_timeout_requires_reprice() -> None:
+    now = datetime(2026, 5, 15, 9, 30, tzinfo=UTC)
+
+    policy = classify_managed_exit_working_order(
+        order={
+            "action": "SELL",
+            "order_type": "LMT",
+            "limit_price": "4574.7",
+            "submitted_at": (now - timedelta(minutes=10)).isoformat(),
+            "exit_reason": "forced_session_initial_stop",
+            "status": "Submitted",
+        },
+        now=now,
+        runtime_market_reference=4556.9,
+        runtime_market_reference_source="runtime/GC/1m",
+    )
+
+    assert policy.classification == "KNOWN_MANAGED_HARD_EXIT_ORDER_REPRICE_REQUIRED"
+    assert policy.hard_exit is True
+    assert policy.marketable_by_runtime_context is False
+    assert policy.stale_by_policy is True
+    assert policy.recommended_action == "PREPARE_EXACT_CANCEL_REPLACE_FOR_KNOWN_MANAGED_ORDER"
+
+
+def test_hard_protective_buy_limit_below_market_after_timeout_requires_reprice() -> None:
+    now = datetime(2026, 5, 15, 9, 30, tzinfo=UTC)
+
+    policy = classify_managed_exit_working_order(
+        order={
+            "action": "BUY",
+            "order_type": "LMT",
+            "limit_price": "100.0",
+            "submitted_at": (now - timedelta(minutes=10)).isoformat(),
+            "exit_reason": "SHORT_INTEGRITY_FAIL",
+            "status": "Submitted",
+        },
+        now=now,
+        runtime_market_reference=101.0,
+    )
+
+    assert policy.classification == "KNOWN_MANAGED_HARD_EXIT_ORDER_REPRICE_REQUIRED"
+    assert policy.marketable_by_runtime_context is False
+
+
+def test_hard_protective_working_order_inside_timeout_is_normal() -> None:
+    now = datetime(2026, 5, 15, 9, 30, tzinfo=UTC)
+
+    policy = classify_managed_exit_working_order(
+        order={
+            "action": "SELL",
+            "order_type": "LMT",
+            "limit_price": "99.0",
+            "submitted_at": (now - timedelta(seconds=30)).isoformat(),
+            "exit_reason": "LONG_STOP",
+            "status": "Submitted",
+        },
+        now=now,
+        runtime_market_reference=100.0,
+    )
+
+    assert policy.classification == "KNOWN_MANAGED_EXIT_ORDER_WORKING_NORMAL"
+    assert policy.marketable_by_runtime_context is True
+    assert policy.stale_by_policy is False
+
+
+def test_discretionary_passive_exit_does_not_hard_reprice() -> None:
+    now = datetime(2026, 5, 15, 9, 30, tzinfo=UTC)
+
+    policy = classify_managed_exit_working_order(
+        order={
+            "action": "SELL",
+            "order_type": "LMT",
+            "limit_price": "105.0",
+            "submitted_at": (now - timedelta(minutes=20)).isoformat(),
+            "exit_reason": "profit_taking_limit",
+            "hard_exit": False,
+            "status": "Submitted",
+        },
+        now=now,
+        runtime_market_reference=100.0,
+    )
+
+    assert policy.hard_exit is False
+    assert policy.classification == "KNOWN_MANAGED_EXIT_ORDER_STALE_REVIEW"
+    assert policy.recommended_action == "REVIEW_DISCRETIONARY_WORKING_EXIT_ORDER"

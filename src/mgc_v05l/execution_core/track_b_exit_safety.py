@@ -20,6 +20,8 @@ RUNTIME_CANDLE_FRESHNESS_SECONDS_BY_TIMEFRAME = {
 
 DEFAULT_BRIDGE_TERMINAL_EVENT_GRACE_SECONDS = 180.0
 DEFAULT_HARD_EXIT_MAX_NOT_FILLED_CANCELLED = 3
+DEFAULT_MANAGED_HARD_EXIT_WORKING_TIMEOUT_SECONDS = 60.0
+DEFAULT_MANAGED_DISCRETIONARY_EXIT_STALE_SECONDS = 900.0
 
 _EXIT_CLOSE_INTENT_TYPES = {"SELL_TO_CLOSE", "BUY_TO_CLOSE"}
 _EXIT_NOT_FILLED_CANCELLED_CLASSIFICATIONS = {
@@ -116,6 +118,205 @@ class ExitAttemptPolicy:
             "broker_lifecycle_mismatch": self.broker_lifecycle_mismatch,
             "working_exit_order_present": self.working_exit_order_present,
         }
+
+
+@dataclass(frozen=True)
+class ManagedExitWorkingOrderPolicy:
+    classification: str
+    order_age_seconds: float | None
+    exit_urgency: str
+    hard_exit: bool
+    order_type: str | None
+    action: str | None
+    limit_price: float | None
+    stop_price: float | None
+    runtime_market_reference: float | None
+    runtime_market_reference_source: str | None
+    distance_from_market_points: float | None
+    marketable_by_runtime_context: bool | None
+    stale_by_policy: bool
+    recommended_action: str
+    reason: str
+
+    def to_json_dict(self) -> dict[str, Any]:
+        return {
+            "classification": self.classification,
+            "order_age_seconds": None if self.order_age_seconds is None else round(float(self.order_age_seconds), 3),
+            "exit_urgency": self.exit_urgency,
+            "hard_exit": self.hard_exit,
+            "order_type": self.order_type,
+            "action": self.action,
+            "limit_price": self.limit_price,
+            "stop_price": self.stop_price,
+            "runtime_market_reference": self.runtime_market_reference,
+            "runtime_market_reference_source": self.runtime_market_reference_source,
+            "distance_from_market_points": None
+            if self.distance_from_market_points is None
+            else round(float(self.distance_from_market_points), 8),
+            "marketable_by_runtime_context": self.marketable_by_runtime_context,
+            "stale_by_policy": self.stale_by_policy,
+            "recommended_action": self.recommended_action,
+            "reason": self.reason,
+        }
+
+
+def classify_managed_exit_working_order(
+    *,
+    order: Mapping[str, Any],
+    now: datetime,
+    runtime_market_reference: float | int | None = None,
+    runtime_market_reference_source: str | None = None,
+    hard_exit_timeout_seconds: float = DEFAULT_MANAGED_HARD_EXIT_WORKING_TIMEOUT_SECONDS,
+    discretionary_stale_seconds: float = DEFAULT_MANAGED_DISCRETIONARY_EXIT_STALE_SECONDS,
+) -> ManagedExitWorkingOrderPolicy:
+    """Classify an already-working managed exit order without mutating it."""
+
+    status = str(order.get("status") or order.get("broker_order_status") or "").strip().upper()
+    if status in {"FILLED", "EXECUTED"}:
+        return ManagedExitWorkingOrderPolicy(
+            classification="KNOWN_MANAGED_EXIT_ORDER_FILLED",
+            order_age_seconds=_managed_order_age_seconds(order, now),
+            exit_urgency=_managed_exit_urgency(order),
+            hard_exit=_managed_exit_is_hard(order),
+            order_type=_clean_text(order.get("order_type") or order.get("orderType")),
+            action=_clean_text(order.get("action") or order.get("order_action")),
+            limit_price=_float_or_none(order.get("limit_price") or order.get("lmtPrice") or order.get("order_limit_price")),
+            stop_price=_float_or_none(order.get("stop_price") or order.get("auxPrice")),
+            runtime_market_reference=_float_or_none(runtime_market_reference),
+            runtime_market_reference_source=runtime_market_reference_source,
+            distance_from_market_points=None,
+            marketable_by_runtime_context=None,
+            stale_by_policy=False,
+            recommended_action="VERIFY_LIFECYCLE_CLOSE_AND_CLEAR_PENDING_ORDER",
+            reason="Broker order status is filled.",
+        )
+    if status in {"CANCELLED", "CANCELED", "EXPIRED", "INACTIVE"}:
+        return ManagedExitWorkingOrderPolicy(
+            classification="KNOWN_MANAGED_EXIT_ORDER_CANCELLED_OR_EXPIRED",
+            order_age_seconds=_managed_order_age_seconds(order, now),
+            exit_urgency=_managed_exit_urgency(order),
+            hard_exit=_managed_exit_is_hard(order),
+            order_type=_clean_text(order.get("order_type") or order.get("orderType")),
+            action=_clean_text(order.get("action") or order.get("order_action")),
+            limit_price=_float_or_none(order.get("limit_price") or order.get("lmtPrice") or order.get("order_limit_price")),
+            stop_price=_float_or_none(order.get("stop_price") or order.get("auxPrice")),
+            runtime_market_reference=_float_or_none(runtime_market_reference),
+            runtime_market_reference_source=runtime_market_reference_source,
+            distance_from_market_points=None,
+            marketable_by_runtime_context=None,
+            stale_by_policy=False,
+            recommended_action="CLEAR_OR_CLASSIFY_PENDING_ORDER_STATE",
+            reason="Broker order status is terminal without a fill.",
+        )
+
+    action = _upper_text(order.get("action") or order.get("order_action"))
+    order_type = _upper_text(order.get("order_type") or order.get("orderType"))
+    limit_price = _float_or_none(order.get("limit_price") or order.get("lmtPrice") or order.get("order_limit_price"))
+    stop_price = _float_or_none(order.get("stop_price") or order.get("auxPrice"))
+    market_reference = _float_or_none(runtime_market_reference)
+    age_seconds = _managed_order_age_seconds(order, now)
+    hard_exit = _managed_exit_is_hard(order)
+    exit_urgency = _managed_exit_urgency(order)
+    stale_threshold = float(hard_exit_timeout_seconds if hard_exit else discretionary_stale_seconds)
+    stale_by_policy = bool(age_seconds is not None and age_seconds > stale_threshold)
+    marketable = _managed_exit_marketable_by_runtime_context(
+        action=action,
+        order_type=order_type,
+        limit_price=limit_price,
+        stop_price=stop_price,
+        runtime_market_reference=market_reference,
+    )
+    distance = _managed_exit_distance_from_market(action=action, limit_price=limit_price, runtime_market_reference=market_reference)
+
+    if order_type == "LMT" and limit_price is None:
+        return ManagedExitWorkingOrderPolicy(
+            classification="KNOWN_MANAGED_EXIT_ORDER_STATE_GAP",
+            order_age_seconds=age_seconds,
+            exit_urgency=exit_urgency,
+            hard_exit=hard_exit,
+            order_type=order_type,
+            action=action,
+            limit_price=limit_price,
+            stop_price=stop_price,
+            runtime_market_reference=market_reference,
+            runtime_market_reference_source=runtime_market_reference_source,
+            distance_from_market_points=distance,
+            marketable_by_runtime_context=marketable,
+            stale_by_policy=stale_by_policy,
+            recommended_action="PERSIST_ORDER_PRICE_OR_OPERATOR_REVIEW",
+            reason="Known managed limit exit order is missing its limit price.",
+        )
+    if hard_exit and stale_by_policy and marketable is False:
+        return ManagedExitWorkingOrderPolicy(
+            classification="KNOWN_MANAGED_HARD_EXIT_ORDER_REPRICE_REQUIRED",
+            order_age_seconds=age_seconds,
+            exit_urgency=exit_urgency,
+            hard_exit=hard_exit,
+            order_type=order_type,
+            action=action,
+            limit_price=limit_price,
+            stop_price=stop_price,
+            runtime_market_reference=market_reference,
+            runtime_market_reference_source=runtime_market_reference_source,
+            distance_from_market_points=distance,
+            marketable_by_runtime_context=marketable,
+            stale_by_policy=True,
+            recommended_action="PREPARE_EXACT_CANCEL_REPLACE_FOR_KNOWN_MANAGED_ORDER",
+            reason="Hard/protective managed exit is stale and no longer marketable against runtime market context.",
+        )
+    if hard_exit and stale_by_policy:
+        return ManagedExitWorkingOrderPolicy(
+            classification="KNOWN_MANAGED_EXIT_ORDER_STALE_REVIEW",
+            order_age_seconds=age_seconds,
+            exit_urgency=exit_urgency,
+            hard_exit=hard_exit,
+            order_type=order_type,
+            action=action,
+            limit_price=limit_price,
+            stop_price=stop_price,
+            runtime_market_reference=market_reference,
+            runtime_market_reference_source=runtime_market_reference_source,
+            distance_from_market_points=distance,
+            marketable_by_runtime_context=marketable,
+            stale_by_policy=True,
+            recommended_action="REVIEW_WORKING_HARD_EXIT_ORDER_STATUS",
+            reason="Hard/protective managed exit exceeded its working timeout.",
+        )
+    if not hard_exit and stale_by_policy:
+        return ManagedExitWorkingOrderPolicy(
+            classification="KNOWN_MANAGED_EXIT_ORDER_STALE_REVIEW",
+            order_age_seconds=age_seconds,
+            exit_urgency=exit_urgency,
+            hard_exit=False,
+            order_type=order_type,
+            action=action,
+            limit_price=limit_price,
+            stop_price=stop_price,
+            runtime_market_reference=market_reference,
+            runtime_market_reference_source=runtime_market_reference_source,
+            distance_from_market_points=distance,
+            marketable_by_runtime_context=marketable,
+            stale_by_policy=True,
+            recommended_action="REVIEW_DISCRETIONARY_WORKING_EXIT_ORDER",
+            reason="Discretionary managed exit has worked beyond the discretionary stale threshold.",
+        )
+    return ManagedExitWorkingOrderPolicy(
+        classification="KNOWN_MANAGED_EXIT_ORDER_WORKING_NORMAL",
+        order_age_seconds=age_seconds,
+        exit_urgency=exit_urgency,
+        hard_exit=hard_exit,
+        order_type=order_type,
+        action=action,
+        limit_price=limit_price,
+        stop_price=stop_price,
+        runtime_market_reference=market_reference,
+        runtime_market_reference_source=runtime_market_reference_source,
+        distance_from_market_points=distance,
+        marketable_by_runtime_context=marketable,
+        stale_by_policy=False,
+        recommended_action="KEEP_OBSERVING_KNOWN_MANAGED_EXIT_ORDER",
+        reason="Known managed exit order remains inside its working-order policy window.",
+    )
 
 
 def classify_exit_attempt_policy(
@@ -404,6 +605,113 @@ def _parse_time(value: object) -> datetime | None:
 def _clean_text(value: object) -> str | None:
     text = str(value or "").strip()
     return text or None
+
+
+def _upper_text(value: object) -> str | None:
+    text = _clean_text(value)
+    return text.upper() if text else None
+
+
+def _float_or_none(value: object) -> float | None:
+    if value in {None, ""}:
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _managed_order_age_seconds(order: Mapping[str, Any], now: datetime) -> float | None:
+    submitted_at = _first_time(
+        order.get("submitted_at"),
+        order.get("acknowledged_at"),
+        order.get("created_at"),
+        order.get("updated_at"),
+    )
+    if submitted_at is None:
+        return None
+    return max(0.0, (now.astimezone(UTC) - submitted_at).total_seconds())
+
+
+def _managed_exit_is_hard(order: Mapping[str, Any]) -> bool:
+    explicit = order.get("hard_exit")
+    if isinstance(explicit, bool):
+        return explicit
+    text = str(explicit or "").strip().lower()
+    if text in {"true", "1", "yes"}:
+        return True
+    if text in {"false", "0", "no"}:
+        return False
+    reason_text = " ".join(
+        str(value or "")
+        for value in (
+            order.get("exit_reason"),
+            order.get("reason"),
+            order.get("reason_code"),
+            order.get("exit_family"),
+            order.get("risk_tags"),
+            order.get("order_intent_id"),
+        )
+    ).upper()
+    hard_tokens = (
+        "FORCED_SESSION",
+        "HARD",
+        "PROTECTIVE",
+        "STOP",
+        "INTEGRITY_FAIL",
+        "MAX_LOSS",
+        "RISK_STOP",
+    )
+    return any(token in reason_text for token in hard_tokens)
+
+
+def _managed_exit_urgency(order: Mapping[str, Any]) -> str:
+    return "HARD_PROTECTIVE" if _managed_exit_is_hard(order) else "DISCRETIONARY"
+
+
+def _managed_exit_marketable_by_runtime_context(
+    *,
+    action: str | None,
+    order_type: str | None,
+    limit_price: float | None,
+    stop_price: float | None,
+    runtime_market_reference: float | None,
+) -> bool | None:
+    if runtime_market_reference is None:
+        return None
+    normalized_action = str(action or "").strip().upper()
+    normalized_order_type = str(order_type or "").strip().upper()
+    if normalized_order_type == "MKT":
+        return True
+    if normalized_order_type == "LMT":
+        if limit_price is None:
+            return None
+        if normalized_action == "SELL":
+            return float(limit_price) <= float(runtime_market_reference)
+        if normalized_action == "BUY":
+            return float(limit_price) >= float(runtime_market_reference)
+    if normalized_order_type in {"STP", "STOP"} and stop_price is not None:
+        if normalized_action == "SELL":
+            return float(runtime_market_reference) <= float(stop_price)
+        if normalized_action == "BUY":
+            return float(runtime_market_reference) >= float(stop_price)
+    return None
+
+
+def _managed_exit_distance_from_market(
+    *,
+    action: str | None,
+    limit_price: float | None,
+    runtime_market_reference: float | None,
+) -> float | None:
+    if limit_price is None or runtime_market_reference is None:
+        return None
+    normalized_action = str(action or "").strip().upper()
+    if normalized_action == "SELL":
+        return float(runtime_market_reference) - float(limit_price)
+    if normalized_action == "BUY":
+        return float(limit_price) - float(runtime_market_reference)
+    return float(limit_price) - float(runtime_market_reference)
 
 
 def _event_matches_lifecycle(event: Mapping[str, Any], lifecycle_id: str | None) -> bool:

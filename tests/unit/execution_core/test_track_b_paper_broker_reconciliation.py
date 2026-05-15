@@ -373,6 +373,97 @@ def test_runtime_restore_known_managed_exit_order_is_not_unknown_open_order_bloc
     assert known_order["source_artifact_path"] == str(restore_path)
 
 
+def test_known_hard_managed_exit_order_reports_stale_non_marketable_policy(tmp_path: Path) -> None:
+    open_position = {
+        "strategy_id": "gc_mgc_forced_session_baseline_v2__gc_1x_all_lanes__london_early_long",
+        "lifecycle_id": "bridge_fill_GC|1m|2026-05-15T07:06:00Z|BUY_TO_OPEN",
+        "instrument_family": "GC",
+        "contract_key": "GC-202606",
+        "local_symbol": "GCM6",
+        "con_id": 430360630,
+        "side": "LONG",
+        "quantity": "1",
+        "avg_entry_price": "4574.6",
+    }
+    config = _write_base_artifacts(tmp_path, open_position=open_position)
+    _write_market_price(config, "GC", close=4556.9)
+    live_status = json.loads(config.live_position_status_path.read_text(encoding="utf-8"))
+    live_status["known_managed_exit_orders"] = [
+        {
+            "managed_order_status": "KNOWN_MANAGED_EXIT_ORDER_WORKING",
+            "lifecycle_id": "bridge_fill_GC|1m|2026-05-15T07:06:00Z|BUY_TO_OPEN",
+            "strategy_id": "gc_mgc_forced_session_baseline_v2__gc_1x_all_lanes__london_early_long",
+            "lane_id": "gc_1x_all_lanes__london_early_long",
+            "order_intent_id": "GC|1m|2026-05-15T08:06:00Z|SELL_TO_CLOSE",
+            "broker_order_id": "1",
+            "client_id": 10815,
+            "perm_id": 614029377,
+            "symbol": "GC",
+            "local_symbol": "GCM6",
+            "con_id": 430360630,
+            "action": "SELL",
+            "order_type": "LMT",
+            "limit_price": "4574.7",
+            "quantity": "1",
+            "submitted_at": "2026-05-11T11:50:00+00:00",
+            "exit_reason": "forced_session_initial_stop",
+        }
+    ]
+    _write_json(config.live_position_status_path, live_status)
+    _write_broker_truth(
+        config,
+        positions=[
+            {
+                "account_id": "DUM882026",
+                "symbol": "GC",
+                "local_symbol": "GCM6",
+                "security_type": "FUT",
+                "quantity": "1",
+                "average_cost": "457460.0",
+                "multiplier": "100",
+                "con_id": 430360630,
+            }
+        ],
+        open_orders=[
+            {
+                "broker_order_id": "1",
+                "client_id": 10815,
+                "perm_id": 614029377,
+                "symbol": "GC",
+                "local_symbol": "GCM6",
+                "security_type": "FUT",
+                "expiry": "20260626",
+                "con_id": 430360630,
+                "action": "SELL",
+                "order_type": "LMT",
+                "quantity": "1",
+                "remaining_quantity": "1",
+                "status": "Submitted",
+            }
+        ],
+    )
+
+    report = reconcile_track_b_paper_broker_truth(config=config, now=NOW)
+
+    assert report["broker_reconciled"] is True
+    assert report["stale_managed_exit_order_count"] == 1
+    assert report["hard_exit_order_not_marketable_count"] == 1
+    order = report["known_managed_exit_orders"][0]
+    assert order["managed_order_status"] == "KNOWN_MANAGED_HARD_EXIT_ORDER_REPRICE_REQUIRED"
+    assert order["managed_order_policy"]["exit_urgency"] == "HARD_PROTECTIVE"
+    assert order["order_limit_price"] == 4574.7
+    assert order["runtime_market_reference"] == 4556.9
+    assert order["marketable_by_runtime_context"] is False
+    proposal = order["guarded_cancel_replace_proposal"]
+    assert proposal["enabled"] is False
+    assert proposal["requires_explicit_operator_authorization"] is True
+    assert proposal["cancel_identity"]["broker_order_id"] == "1"
+    assert proposal["replacement_order"]["limit_price"] == 4556.8
+    assert proposal["replacement_order"]["price_source"] == "RUNTIME_MARKET_REFERENCE_PLUS_HARD_EXIT_ONE_TICK"
+    reconciled_position = json.loads(config.reconciled_live_position_status_path.read_text(encoding="utf-8"))
+    assert reconciled_position["stale_managed_exit_order_count"] == 1
+
+
 def test_blocks_when_broker_truth_is_stale_or_incomplete(tmp_path: Path) -> None:
     config = _write_base_artifacts(tmp_path)
     _write_broker_truth(config, generated_at="2026-05-11T11:55:00+00:00", positions_complete=False)
@@ -487,6 +578,7 @@ def _write_base_artifacts(
         repo_root=tmp_path,
         ledger_root=ledger_root,
         broker_truth_root=broker_root,
+        market_data_root=tmp_path / "outputs" / "track_b_execution_core" / "phase1_runtime_market_data",
         report_path=report_path,
         max_age_seconds=120.0,
     )
@@ -585,6 +677,24 @@ def _write_broker_truth(
             "auto_open_orders_requested": False,
             "order_binding_requested": False,
             "open_orders": open_orders_payload,
+        },
+    )
+
+
+def _write_market_price(config: ReconciliationConfig, root: str, *, close: float) -> None:
+    path = config.market_data_root / root / "1m" / "latest_runtime_candles.json"
+    _write_json(
+        path,
+        {
+            "generated_at": "2026-05-11T11:59:30+00:00",
+            "candles": [
+                {
+                    "bar_start": "2026-05-11T11:58:00+00:00",
+                    "bar_end": "2026-05-11T11:59:00+00:00",
+                    "close": close,
+                    "completed": True,
+                }
+            ],
         },
     )
 

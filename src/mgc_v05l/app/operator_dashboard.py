@@ -17586,6 +17586,15 @@ def _compact_track_b_paper_broker_reconciliation_status(payload: dict[str, Any],
         "symbols": payload.get("symbols") if isinstance(payload.get("symbols"), list) else [],
         "track_b_broker_position_count": payload.get("track_b_broker_position_count"),
         "track_b_broker_open_order_count": payload.get("track_b_broker_open_order_count"),
+        "known_managed_exit_order_count": payload.get("known_managed_exit_order_count"),
+        "stale_managed_exit_order_count": payload.get("stale_managed_exit_order_count"),
+        "hard_exit_order_not_marketable_count": payload.get("hard_exit_order_not_marketable_count"),
+        "known_managed_exit_orders": payload.get("known_managed_exit_orders")
+        if isinstance(payload.get("known_managed_exit_orders"), list)
+        else [],
+        "stale_managed_exit_orders": payload.get("stale_managed_exit_orders")
+        if isinstance(payload.get("stale_managed_exit_orders"), list)
+        else [],
         "lifecycle_open_position_count": payload.get("lifecycle_open_position_count"),
         "lifecycle_open_order_count": payload.get("lifecycle_open_order_count"),
         "review_required_count": payload.get("review_required_count"),

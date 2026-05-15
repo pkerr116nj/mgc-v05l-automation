@@ -20,11 +20,13 @@ from mgc_v05l.execution_core.phase1_runtime_ticker_registry import PHASE1_RUNTIM
 from mgc_v05l.execution_core.track_b_exit_safety import (
     DEFAULT_BRIDGE_TERMINAL_EVENT_GRACE_SECONDS,
     bridge_terminal_event_grace_state,
+    classify_managed_exit_working_order,
 )
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 DEFAULT_LEDGER_ROOT = REPO_ROOT / "outputs" / "track_b_execution_core" / "paper_trade_ledger"
 DEFAULT_BROKER_TRUTH_ROOT = REPO_ROOT / "outputs" / "reports" / "ibkr_read_only_verification"
+DEFAULT_MARKET_DATA_ROOT = REPO_ROOT / "outputs" / "track_b_execution_core" / "phase1_runtime_market_data"
 DEFAULT_REPORT_PATH = (
     REPO_ROOT
     / "outputs"
@@ -34,6 +36,19 @@ DEFAULT_REPORT_PATH = (
 )
 DEFAULT_MAX_AGE_SECONDS = float(os.environ.get("TRACK_B_BROKER_TRUTH_MAX_AGE_SECONDS", "120"))
 PAPER_ACCOUNT = "DUM882026"
+DEFAULT_MIN_TICK_BY_ROOT = {
+    "GC": 0.1,
+    "MGC": 0.1,
+    "NQ": 0.25,
+    "MNQ": 0.25,
+    "ES": 0.25,
+    "MES": 0.25,
+    "PL": 0.1,
+    "ZT": 0.0078125,
+    "ZF": 0.0078125,
+    "ZN": 0.015625,
+    "ZB": 0.03125,
+}
 
 
 @dataclass(frozen=True)
@@ -41,6 +56,7 @@ class ReconciliationConfig:
     repo_root: Path = REPO_ROOT
     ledger_root: Path = DEFAULT_LEDGER_ROOT
     broker_truth_root: Path = DEFAULT_BROKER_TRUTH_ROOT
+    market_data_root: Path = DEFAULT_MARKET_DATA_ROOT
     report_path: Path = DEFAULT_REPORT_PATH
     max_age_seconds: float = DEFAULT_MAX_AGE_SECONDS
     bridge_terminal_event_grace_seconds: float = DEFAULT_BRIDGE_TERMINAL_EVENT_GRACE_SECONDS
@@ -138,12 +154,28 @@ def reconcile_track_b_paper_broker_truth(
         lifecycle_status=live_position_status,
         position_match_report=position_match_report,
         runtime_restore_orders=_runtime_restore_known_managed_exit_orders(config.repo_root, config.symbols),
+        config=config,
+        now=actual_now,
     )
     unknown_track_b_open_orders = _unknown_track_b_open_orders(
         broker_open_orders=track_b_open_orders,
         known_managed_exit_orders=known_managed_exit_orders,
     )
     broker_cost_basis_adjustments = _broker_cost_basis_adjustments_from_match_report(position_match_report)
+    stale_managed_exit_orders = [
+        row
+        for row in known_managed_exit_orders
+        if str(row.get("managed_order_policy", {}).get("stale_by_policy") or "").lower() == "true"
+    ]
+    hard_exit_order_not_marketable = [
+        row
+        for row in known_managed_exit_orders
+        if row.get("managed_order_policy", {}).get("classification")
+        in {
+            "KNOWN_MANAGED_HARD_EXIT_ORDER_NOT_MARKETABLE",
+            "KNOWN_MANAGED_HARD_EXIT_ORDER_REPRICE_REQUIRED",
+        }
+    ]
     if position_match_report["matched"] is not True:
         blockers.append(position_match_report["blocker"])
     if unknown_track_b_open_orders:
@@ -192,10 +224,14 @@ def reconcile_track_b_paper_broker_truth(
         "track_b_broker_position_count": len(track_b_positions),
         "track_b_broker_open_order_count": len(track_b_open_orders),
         "known_managed_exit_order_count": len(known_managed_exit_orders),
+        "stale_managed_exit_order_count": len(stale_managed_exit_orders),
+        "hard_exit_order_not_marketable_count": len(hard_exit_order_not_marketable),
         "unknown_broker_open_order_count": len(unknown_track_b_open_orders),
         "track_b_broker_positions": track_b_positions,
         "track_b_broker_open_orders": track_b_open_orders,
         "known_managed_exit_orders": known_managed_exit_orders,
+        "stale_managed_exit_orders": stale_managed_exit_orders,
+        "hard_exit_order_not_marketable_orders": hard_exit_order_not_marketable,
         "unknown_broker_open_orders": unknown_track_b_open_orders,
         "track_b_lifecycle_positions": lifecycle_positions,
         "position_match_report": position_match_report,
@@ -423,6 +459,8 @@ def _known_managed_exit_orders(
     broker_open_orders: Sequence[Mapping[str, Any]],
     lifecycle_status: Mapping[str, Any],
     position_match_report: Mapping[str, Any],
+    config: ReconciliationConfig,
+    now: datetime,
     runtime_restore_orders: Sequence[Mapping[str, Any]] = (),
 ) -> list[dict[str, Any]]:
     declared_orders = _declared_known_managed_exit_orders(lifecycle_status)
@@ -439,7 +477,8 @@ def _known_managed_exit_orders(
         for declared in declared_orders:
             if not _broker_order_matches_declared_managed_exit(broker_order=broker_order, declared=declared):
                 continue
-            if not _declared_managed_exit_matches_open_position(declared=declared, matched_positions=matched_positions):
+            matched_position = _matched_position_for_declared_managed_exit(declared=declared, matched_positions=matched_positions)
+            if matched_position is None:
                 continue
             row = dict(broker_order)
             row["managed_order_status"] = "KNOWN_MANAGED_EXIT_ORDER_WORKING"
@@ -447,6 +486,31 @@ def _known_managed_exit_orders(
             row["strategy_id"] = declared.get("strategy_id")
             row["lane_id"] = declared.get("lane_id")
             row["order_intent_id"] = declared.get("order_intent_id")
+            _merge_missing_managed_exit_order_fields(row, declared)
+            _merge_missing_managed_exit_order_fields(row, _managed_exit_identity_from_match(matched_position))
+            _enrich_managed_exit_order_from_prepared_artifact(row, config.repo_root)
+            market_reference = _runtime_market_reference(config=config, root=str(row.get("track_b_root") or row.get("symbol") or ""))
+            policy = classify_managed_exit_working_order(
+                order=row,
+                now=now,
+                runtime_market_reference=market_reference.get("price"),
+                runtime_market_reference_source=market_reference.get("source_artifact_path"),
+            )
+            policy_payload = policy.to_json_dict()
+            row["managed_order_policy"] = policy_payload
+            row["managed_order_status"] = policy_payload["classification"]
+            row["exit_urgency"] = policy_payload["exit_urgency"]
+            row["order_age_seconds"] = policy_payload["order_age_seconds"]
+            row["order_limit_price"] = policy_payload["limit_price"]
+            row["runtime_market_reference"] = policy_payload["runtime_market_reference"]
+            row["runtime_market_reference_source"] = policy_payload["runtime_market_reference_source"]
+            row["distance_from_market_points"] = policy_payload["distance_from_market_points"]
+            row["marketable_by_runtime_context"] = policy_payload["marketable_by_runtime_context"]
+            row["stale_by_policy"] = policy_payload["stale_by_policy"]
+            row["recommended_action"] = policy_payload["recommended_action"]
+            proposal = _guarded_cancel_replace_proposal(row, policy_payload)
+            if proposal:
+                row["guarded_cancel_replace_proposal"] = proposal
             row["source"] = declared.get("source") or "TRACK_B_LIFECYCLE_PENDING_EXIT_ORDER"
             source_artifact_path = declared.get("source_artifact_path")
             if source_artifact_path:
@@ -469,6 +533,167 @@ def _runtime_restore_known_managed_exit_orders(repo_root: Path, symbols: Sequenc
         if row is not None:
             rows.append(row)
     return rows
+
+
+def _merge_missing_managed_exit_order_fields(row: dict[str, Any], declared: Mapping[str, Any]) -> None:
+    for key in (
+        "submitted_at",
+        "acknowledged_at",
+        "lifecycle_id",
+        "exit_reason",
+        "reason_code",
+        "hard_exit",
+        "exit_family",
+        "action",
+        "order_action",
+        "order_type",
+        "limit_price",
+        "stop_price",
+        "tif",
+        "time_in_force",
+        "quantity",
+        "con_id",
+        "conId",
+    ):
+        if _missing_value(row.get(key)) and not _missing_value(declared.get(key)):
+            row[key] = declared.get(key)
+
+
+def _enrich_managed_exit_order_from_prepared_artifact(row: dict[str, Any], repo_root: Path) -> None:
+    lane_id = str(row.get("lane_id") or "").strip()
+    if not lane_id:
+        return
+    base = (
+        repo_root
+        / "outputs"
+        / "reports"
+        / "ibkr_runtime_route_dispatch"
+        / lane_id
+        / "prepared_manual_harness"
+    )
+    for filename in ("ibkr_manual_paper_close_test_frozen_preview.json", "ibkr_manual_paper_close_test_report.json"):
+        payload = _load_json(base / filename)
+        if not payload:
+            continue
+        requested_order = payload.get("requested_order")
+        if not isinstance(requested_order, Mapping):
+            requested_order = _nested_mapping(payload, "frozen_preview", "requested_order")
+        if not requested_order:
+            continue
+        action = str(requested_order.get("action") or "").strip().upper()
+        row_action = str(row.get("action") or "").strip().upper()
+        if action and row_action and action != row_action:
+            continue
+        symbol = str(requested_order.get("symbol") or "").strip().upper()
+        row_symbol = str(row.get("symbol") or "").strip().upper()
+        if symbol and row_symbol and symbol != row_symbol:
+            continue
+        for source_key, target_key in (
+            ("order_type", "order_type"),
+            ("limit_price", "limit_price"),
+            ("stop_price", "stop_price"),
+            ("time_in_force", "tif"),
+            ("quantity", "quantity"),
+        ):
+            if _missing_value(row.get(target_key)) and not _missing_value(requested_order.get(source_key)):
+                row[target_key] = requested_order.get(source_key)
+        row["order_price_source_artifact_path"] = str(base / filename)
+        return
+
+
+def _runtime_market_reference(*, config: ReconciliationConfig, root: str) -> dict[str, Any]:
+    normalized_root = str(root or "").strip().upper()
+    if not normalized_root:
+        return {}
+    path = config.market_data_root / normalized_root / "1m" / "latest_runtime_candles.json"
+    payload = _load_json(path)
+    if not payload:
+        return {}
+    candle = _latest_runtime_candle(payload)
+    if not candle:
+        return {}
+    price = _decimal_value(candle.get("close") or candle.get("last") or candle.get("price"))
+    if price is None:
+        return {}
+    return {
+        "price": float(price),
+        "bar_start": candle.get("bar_start"),
+        "bar_end": candle.get("bar_end"),
+        "generated_at": payload.get("generated_at"),
+        "source_artifact_path": str(path),
+    }
+
+
+def _guarded_cancel_replace_proposal(row: Mapping[str, Any], policy: Mapping[str, Any]) -> dict[str, Any] | None:
+    if policy.get("recommended_action") != "PREPARE_EXACT_CANCEL_REPLACE_FOR_KNOWN_MANAGED_ORDER":
+        return None
+    root = str(row.get("track_b_root") or row.get("symbol") or "").strip().upper()
+    market_reference = _decimal_value(policy.get("runtime_market_reference"))
+    if market_reference is None:
+        return None
+    tick = Decimal(str(DEFAULT_MIN_TICK_BY_ROOT.get(root, 0.25)))
+    action = str(row.get("action") or "").strip().upper()
+    if action == "SELL":
+        replacement_limit = market_reference - tick
+    elif action == "BUY":
+        replacement_limit = market_reference + tick
+    else:
+        return None
+    replacement_limit = _round_decimal_to_tick(replacement_limit, tick)
+    return {
+        "enabled": False,
+        "requires_explicit_operator_authorization": True,
+        "broker_mutation_performed": False,
+        "allowed_route": "GUARDED_TRACK_B_PAPER_CANCEL_REPLACE_ONLY",
+        "forbidden_routes": ["broad_cancel", "reqGlobalCancel", "paper_proof", "live_money"],
+        "cancel_identity": {
+            "account_id": row.get("account_id") or PAPER_ACCOUNT,
+            "broker_order_id": row.get("broker_order_id"),
+            "client_id": row.get("client_id"),
+            "perm_id": row.get("perm_id"),
+            "symbol": row.get("symbol"),
+            "local_symbol": row.get("local_symbol") or row.get("localSymbol"),
+            "expiry": row.get("expiry"),
+            "con_id": row.get("con_id") or row.get("conId"),
+            "action": row.get("action"),
+            "quantity": row.get("quantity"),
+        },
+        "replacement_order": {
+            "account_id": row.get("account_id") or PAPER_ACCOUNT,
+            "symbol": row.get("symbol"),
+            "local_symbol": row.get("local_symbol") or row.get("localSymbol"),
+            "expiry": row.get("expiry"),
+            "con_id": row.get("con_id") or row.get("conId"),
+            "action": row.get("action"),
+            "quantity": row.get("quantity"),
+            "order_type": "LMT",
+            "tif": row.get("tif") or row.get("time_in_force") or "DAY",
+            "limit_price": float(replacement_limit),
+            "price_source": "RUNTIME_MARKET_REFERENCE_PLUS_HARD_EXIT_ONE_TICK",
+            "runtime_market_reference": float(market_reference),
+            "min_tick": float(tick),
+        },
+    }
+
+
+def _round_decimal_to_tick(price: Decimal, tick: Decimal) -> Decimal:
+    if tick <= 0:
+        return price
+    ticks = (price / tick).to_integral_value()
+    return ticks * tick
+
+
+def _latest_runtime_candle(payload: Mapping[str, Any]) -> Mapping[str, Any]:
+    for key in ("candles", "bars"):
+        rows = payload.get(key)
+        if isinstance(rows, list) and rows:
+            last = rows[-1]
+            return last if isinstance(last, Mapping) else {}
+    return payload
+
+
+def _missing_value(value: Any) -> bool:
+    return value is None or value == ""
 
 
 def _managed_exit_order_from_restore_payload(
@@ -622,7 +847,11 @@ def _broker_order_matches_declared_managed_exit(*, broker_order: Mapping[str, An
     return True
 
 
-def _declared_managed_exit_matches_open_position(*, declared: Mapping[str, Any], matched_positions: Sequence[Mapping[str, Any]]) -> bool:
+def _matched_position_for_declared_managed_exit(
+    *,
+    declared: Mapping[str, Any],
+    matched_positions: Sequence[Mapping[str, Any]],
+) -> dict[str, Any] | None:
     lifecycle_id = str(declared.get("lifecycle_id") or "").strip()
     for match in matched_positions:
         lifecycle_position = match.get("lifecycle_position") if isinstance(match.get("lifecycle_position"), Mapping) else {}
@@ -632,8 +861,20 @@ def _declared_managed_exit_matches_open_position(*, declared: Mapping[str, Any],
         position_local_symbol = str(lifecycle_position.get("local_symbol") or lifecycle_position.get("localSymbol") or "").strip().upper()
         if local_symbol and position_local_symbol and local_symbol != position_local_symbol:
             continue
-        return True
-    return False
+        return dict(match)
+    return None
+
+
+def _managed_exit_identity_from_match(match: Mapping[str, Any]) -> dict[str, Any]:
+    broker_position = match.get("broker_position") if isinstance(match.get("broker_position"), Mapping) else {}
+    lifecycle_position = match.get("lifecycle_position") if isinstance(match.get("lifecycle_position"), Mapping) else {}
+    return {
+        "lifecycle_id": lifecycle_position.get("lifecycle_id"),
+        "con_id": lifecycle_position.get("con_id") or lifecycle_position.get("conId") or broker_position.get("con_id") or broker_position.get("conId"),
+        "local_symbol": lifecycle_position.get("local_symbol") or lifecycle_position.get("localSymbol") or broker_position.get("local_symbol") or broker_position.get("localSymbol"),
+        "expiry": lifecycle_position.get("expiry") or broker_position.get("expiry"),
+        "symbol": lifecycle_position.get("instrument_family") or broker_position.get("symbol"),
+    }
 
 
 def _unknown_track_b_open_orders(
@@ -719,7 +960,10 @@ def _write_reconciled_summaries(
             "broker_track_b_position_count": broker_position_count,
             "broker_track_b_open_order_count": int(report.get("track_b_broker_open_order_count") or 0),
             "known_managed_exit_order_count": int(report.get("known_managed_exit_order_count") or 0),
+            "stale_managed_exit_order_count": int(report.get("stale_managed_exit_order_count") or 0),
+            "hard_exit_order_not_marketable_count": int(report.get("hard_exit_order_not_marketable_count") or 0),
             "known_managed_exit_orders": [dict(item) for item in report.get("known_managed_exit_orders", []) if isinstance(item, Mapping)],
+            "stale_managed_exit_orders": [dict(item) for item in report.get("stale_managed_exit_orders", []) if isinstance(item, Mapping)],
             "broker_reconciled_state": reconciled_state,
             "broker_track_b_positions": [dict(item) for item in broker_positions],
             "broker_cost_basis_adjustments": broker_cost_basis_adjustments,
@@ -1060,6 +1304,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--repo-root", default=str(REPO_ROOT))
     parser.add_argument("--ledger-root", default=None)
     parser.add_argument("--broker-truth-root", default=None)
+    parser.add_argument("--market-data-root", default=None)
     parser.add_argument("--report-path", default=None)
     parser.add_argument("--max-age-seconds", type=float, default=DEFAULT_MAX_AGE_SECONDS)
     parser.add_argument("--bridge-terminal-event-grace-seconds", type=float, default=DEFAULT_BRIDGE_TERMINAL_EVENT_GRACE_SECONDS)
@@ -1075,6 +1320,9 @@ def main(argv: list[str] | None = None) -> int:
         repo_root=repo_root,
         ledger_root=Path(args.ledger_root) if args.ledger_root else repo_root / "outputs" / "track_b_execution_core" / "paper_trade_ledger",
         broker_truth_root=Path(args.broker_truth_root) if args.broker_truth_root else repo_root / "outputs" / "reports" / "ibkr_read_only_verification",
+        market_data_root=Path(args.market_data_root)
+        if args.market_data_root
+        else repo_root / "outputs" / "track_b_execution_core" / "phase1_runtime_market_data",
         report_path=Path(args.report_path)
         if args.report_path
         else repo_root
