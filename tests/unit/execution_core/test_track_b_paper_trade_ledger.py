@@ -8,6 +8,7 @@ from mgc_v05l.execution_core.operator_status import OperatorStatusInputs, create
 from mgc_v05l.execution_core.track_b_paper_trade_ledger import (
     reconcile_app_only_unfilled_managed_lifecycles,
     reconcile_ibkr_contract_rejected_managed_lifecycles,
+    reconcile_leak_test_adopted_entry_settled_flat_lifecycles,
     reconcile_manually_flattened_proof_lifecycle,
     update_track_b_paper_trade_ledger_from_filled_bridge_result,
     update_track_b_paper_trade_ledger_from_runner_report,
@@ -1138,3 +1139,140 @@ def test_operator_status_exposes_compact_paper_results(tmp_path: Path) -> None:
     assert result.report["latest_trade_ledger_path"] == str(ledger.ledger_jsonl)
     assert result.report["latest_live_position_status_path"] == str(ledger.live_position_status_json)
     assert result.report["latest_pnl_summary_path"] == str(ledger.pnl_summary_json)
+
+
+def test_leak_test_adopted_entry_settled_flat_archives_lifecycle_only_row(tmp_path: Path) -> None:
+    output_root = tmp_path / "paper_trade_ledger"
+    open_payload = {
+        "classification": "PAPER_STRATEGY_ORDER_FILLED_PERSISTED",
+        "strategy_id": "pl_us_late_pause_resume_long",
+        "lane_id": "pl_us_late_pause_resume_long",
+        "instrument": "PL",
+        "symbol": "PL",
+        "action": "BUY",
+        "quantity": 1,
+        "order_intent_id": "d89d2455-10c4-4ae8-bf30-6a5dd3cd88d7",
+        "intent_type": "BUY_TO_OPEN",
+        "decision_bar_timestamp": "2026-05-15T15:49:42.830385+00:00",
+        "broker_order_id": "25",
+        "account_id": "DUM882026",
+        "perm_id": None,
+        "client_id": None,
+        "exec_id": None,
+        "local_symbol": "PLN6",
+        "con_id": 644855286,
+        "contract": {"symbol": "PL", "local_symbol": "PLN6", "expiry": "20260729", "multiplier": "50"},
+        "fill_price": "1989.2504",
+        "fill_timestamp": "2026-05-15T15:50:24.150574+00:00",
+        "bridge_classification": "PAPER_STRATEGY_ORDER_FILLED",
+        "entry_source": "LEAK_TEST_ENTRY",
+        "source": "TRACK_B_PAPER_LIFECYCLE_ADOPTION",
+        "source_artifact_paths": ["outputs/reports/track_b_paper_lifecycle_adoption/adopt.json"],
+        "route_destination": "ibkr_paper_bridge_submit_capable",
+        "paper_proof_invoked": False,
+        "live_money_readiness": False,
+        "review_required": False,
+    }
+    ledger = update_track_b_paper_trade_ledger_from_filled_bridge_result(
+        filled_bridge_result=open_payload,
+        filled_bridge_result_json=write_json(tmp_path / "adopt.json", open_payload),
+        output_root=output_root,
+        now=aware_now(),
+    )
+    write_json(
+        tmp_path / "positions.json",
+        {
+            "positions": [
+                {
+                    "account_id": "DUM882026",
+                    "symbol": "PL",
+                    "local_symbol": "PLN6",
+                    "con_id": 644855286,
+                    "quantity": "0.0",
+                }
+            ]
+        },
+    )
+    write_json(tmp_path / "orders.json", {"open_orders": []})
+
+    result = reconcile_leak_test_adopted_entry_settled_flat_lifecycles(
+        lifecycle_ids=["bridge_fill_d89d2455-10c4-4ae8-bf30-6a5dd3cd88d7"],
+        ledger_jsonl=ledger.ledger_jsonl,
+        output_root=output_root,
+        diagnostics_root=tmp_path / "diagnostics",
+        broker_positions_snapshot_json=tmp_path / "positions.json",
+        broker_open_orders_snapshot_json=tmp_path / "orders.json",
+        now=aware_now(),
+    )
+
+    assert result.reconciliation_record_written is True
+    assert result.live_position_status["open_position_count"] == 0
+    rows = [json.loads(line) for line in ledger.ledger_jsonl.read_text(encoding="utf-8").splitlines()]
+    assert rows[-1]["new_artifact_classification"] == "LEAK_TEST_ADOPTED_ENTRY_SETTLED_FLAT_REVIEWED"
+    recent = result.trade_summary["recent_trades"][0]
+    assert recent["artifact_reconciliation_classification"] == "LEAK_TEST_ADOPTED_ENTRY_SETTLED_FLAT_REVIEWED"
+    assert recent["excluded_from_strategy_managed_pnl"] is True
+
+
+def test_leak_test_adopted_entry_settled_flat_refuses_when_broker_position_remains(tmp_path: Path) -> None:
+    output_root = tmp_path / "paper_trade_ledger"
+    open_payload = {
+        "classification": "PAPER_STRATEGY_ORDER_FILLED_PERSISTED",
+        "strategy_id": "pl_us_late_pause_resume_long",
+        "lane_id": "pl_us_late_pause_resume_long",
+        "instrument": "PL",
+        "symbol": "PL",
+        "action": "BUY",
+        "quantity": 1,
+        "order_intent_id": "d89d2455-10c4-4ae8-bf30-6a5dd3cd88d7",
+        "intent_type": "BUY_TO_OPEN",
+        "decision_bar_timestamp": "2026-05-15T15:49:42.830385+00:00",
+        "broker_order_id": "25",
+        "account_id": "DUM882026",
+        "local_symbol": "PLN6",
+        "con_id": 644855286,
+        "contract": {"symbol": "PL", "local_symbol": "PLN6", "expiry": "20260729", "multiplier": "50"},
+        "fill_price": "1989.2504",
+        "fill_timestamp": "2026-05-15T15:50:24.150574+00:00",
+        "bridge_classification": "PAPER_STRATEGY_ORDER_FILLED",
+        "entry_source": "LEAK_TEST_ENTRY",
+        "source": "TRACK_B_PAPER_LIFECYCLE_ADOPTION",
+        "paper_proof_invoked": False,
+        "live_money_readiness": False,
+        "review_required": False,
+    }
+    ledger = update_track_b_paper_trade_ledger_from_filled_bridge_result(
+        filled_bridge_result=open_payload,
+        filled_bridge_result_json=write_json(tmp_path / "adopt.json", open_payload),
+        output_root=output_root,
+        now=aware_now(),
+    )
+    write_json(
+        tmp_path / "positions.json",
+        {
+            "positions": [
+                {
+                    "account_id": "DUM882026",
+                    "symbol": "PL",
+                    "local_symbol": "PLN6",
+                    "con_id": 644855286,
+                    "quantity": "1.0",
+                }
+            ]
+        },
+    )
+    write_json(tmp_path / "orders.json", {"open_orders": []})
+
+    result = reconcile_leak_test_adopted_entry_settled_flat_lifecycles(
+        lifecycle_ids=["bridge_fill_d89d2455-10c4-4ae8-bf30-6a5dd3cd88d7"],
+        ledger_jsonl=ledger.ledger_jsonl,
+        output_root=output_root,
+        diagnostics_root=tmp_path / "diagnostics",
+        broker_positions_snapshot_json=tmp_path / "positions.json",
+        broker_open_orders_snapshot_json=tmp_path / "orders.json",
+        now=aware_now(),
+    )
+
+    assert result.reconciliation_record_written is False
+    assert result.reconciliation_report["targets"][0]["remaining_blocker"] == "BROKER_POSITION_STILL_OPEN"
+    assert result.live_position_status["open_position_count"] == 1

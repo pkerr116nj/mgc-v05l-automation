@@ -47,6 +47,7 @@ PNL_SCHEMA_VERSION = "track_b_pnl_summary_v1"
 MANUALLY_FLATTENED_REVIEWED = "MANUALLY_FLATTENED_REVIEWED"
 APP_ONLY_UNFILLED_REVIEWED = "APP_ONLY_UNFILLED_REVIEWED"
 IBKR_CONTRACT_REJECTED_REVIEWED = "IBKR_CONTRACT_REJECTED_REVIEWED"
+LEAK_TEST_ADOPTED_ENTRY_SETTLED_FLAT_REVIEWED = "LEAK_TEST_ADOPTED_ENTRY_SETTLED_FLAT_REVIEWED"
 VOID_MALFORMED_STALE_ARTIFACT = "VOID_MALFORMED_STALE_ARTIFACT"
 MALFORMED_BROKER_BACKED_MANUALLY_RECONCILED_ARTIFACT = (
     "MALFORMED_BROKER_BACKED_MANUALLY_RECONCILED_ARTIFACT"
@@ -199,6 +200,140 @@ def reconcile_app_only_unfilled_managed_lifecycles(
             "app_only_position_from_unfilled_entry_count": summaries["trade_summary"].get(
                 "app_only_position_from_unfilled_entry_count"
             ),
+        },
+        "broker_mutation_attempted": False,
+        "submit_attempted": False,
+        "paper_proof_cli_invoked": False,
+    }
+    _write_json(reconciliation_report_json, report)
+    return TrackBArtifactReconciliationResult(
+        ledger_jsonl=ledger_path,
+        trade_summary_json=trade_summary_json,
+        live_position_status_json=live_position_status_json,
+        pnl_summary_json=pnl_summary_json,
+        reconciliation_report_json=reconciliation_report_json,
+        reconciliation_record_written=bool(reconciliation_records),
+        reconciliation_report=report,
+        trade_summary=summaries["trade_summary"],
+        live_position_status=summaries["live_position_status"],
+        pnl_summary=summaries["pnl_summary"],
+    )
+
+
+def reconcile_leak_test_adopted_entry_settled_flat_lifecycles(
+    *,
+    lifecycle_ids: Iterable[str] | None = None,
+    ledger_jsonl: Path = DEFAULT_TRACK_B_PAPER_TRADE_LEDGER_JSONL,
+    output_root: Path = DEFAULT_TRACK_B_PAPER_TRADE_LEDGER_OUTPUT_ROOT,
+    diagnostics_root: Path = Path("outputs/track_b_execution_core/diagnostics"),
+    broker_positions_snapshot_json: Path = Path(
+        "outputs/reports/ibkr_read_only_verification/ibkr_positions_snapshot.json"
+    ),
+    broker_open_orders_snapshot_json: Path = Path(
+        "outputs/reports/ibkr_read_only_verification/ibkr_open_orders_snapshot.json"
+    ),
+    now: datetime | None = None,
+) -> TrackBArtifactReconciliationResult:
+    """Archive leak-test adopted entries when fresh broker truth settles flat.
+
+    This handles an IBKR PAPER timing edge where an unknown-after-submit leak-test
+    entry is adopted from a partial broker position snapshot, then later broker
+    truth proves the exact contract is flat and no open order remains. It only
+    updates local lifecycle artifacts and never mutates broker state.
+    """
+
+    actual_now = now or datetime.now(UTC)
+    require_aware_datetime(actual_now, "now")
+    ledger_path = Path(ledger_jsonl)
+    root = Path(output_root)
+    root.mkdir(parents=True, exist_ok=True)
+    diagnostics_root.mkdir(parents=True, exist_ok=True)
+    if not ledger_path.exists():
+        ledger_path.parent.mkdir(parents=True, exist_ok=True)
+        ledger_path.touch()
+    trade_summary_json = root / "latest_track_b_paper_trade_summary.json"
+    live_position_status_json = root / "latest_track_b_live_position_status.json"
+    pnl_summary_json = root / "latest_track_b_pnl_summary.json"
+    reconciliation_report_json = diagnostics_root / "latest_track_b_leak_test_adoption_settled_flat_report.json"
+
+    records = _read_ledger_records(ledger_path)
+    requested_ids = {str(item) for item in lifecycle_ids or [] if str(item)}
+    positions_snapshot = _load_json_path(broker_positions_snapshot_json)
+    orders_snapshot = _load_json_path(broker_open_orders_snapshot_json)
+    targets = _leak_test_adopted_entry_settled_flat_targets(records, requested_ids=requested_ids)
+    existing_resolutions = {
+        str(item.get("lifecycle_id"))
+        for item in records
+        if _is_reconciliation_record(item)
+        and item.get("new_artifact_classification") == LEAK_TEST_ADOPTED_ENTRY_SETTLED_FLAT_REVIEWED
+    }
+    reconciliation_records: list[dict[str, Any]] = []
+    target_reports: list[dict[str, Any]] = []
+    for target in targets:
+        lifecycle_id = str(target.get("lifecycle_id") or "")
+        evidence = _leak_test_adopted_entry_settled_flat_evidence(
+            target=target,
+            positions_snapshot=positions_snapshot,
+            orders_snapshot=orders_snapshot,
+        )
+        already_archived = lifecycle_id in existing_resolutions
+        can_archive = evidence["settled_flat_confirmed"] and not already_archived
+        target_reports.append(
+            {
+                "lifecycle_id": lifecycle_id,
+                "strategy_id": target.get("strategy_id"),
+                "contract_key": target.get("contract_key"),
+                "local_symbol": target.get("local_symbol"),
+                "prior_artifact_state": _prior_artifact_state(target),
+                "settled_flat_evidence": evidence,
+                "already_archived": already_archived,
+                "reconciliation_action": LEAK_TEST_ADOPTED_ENTRY_SETTLED_FLAT_REVIEWED
+                if evidence["settled_flat_confirmed"]
+                else "NO_ARCHIVE_REVIEW_REQUIRED",
+                "remaining_blocker": None if evidence["settled_flat_confirmed"] else evidence["blocker"],
+            }
+        )
+        if can_archive:
+            reconciliation_records.append(
+                _leak_test_adopted_entry_settled_flat_reconciliation_record(
+                    target=target,
+                    evidence=evidence,
+                    now=actual_now,
+                )
+            )
+
+    if reconciliation_records:
+        with ledger_path.open("a", encoding="utf-8") as handle:
+            for record in reconciliation_records:
+                handle.write(json.dumps(to_jsonable(record), sort_keys=True) + "\n")
+                records.append(record)
+
+    summaries = build_track_b_paper_trade_summaries(
+        ledger_records=records,
+        ledger_jsonl=ledger_path,
+        trade_summary_json=trade_summary_json,
+        live_position_status_json=live_position_status_json,
+        pnl_summary_json=pnl_summary_json,
+        now=actual_now,
+    )
+    _write_json(trade_summary_json, summaries["trade_summary"])
+    _write_json(live_position_status_json, summaries["live_position_status"])
+    _write_json(pnl_summary_json, summaries["pnl_summary"])
+    report = {
+        "schema_version": RECONCILIATION_SCHEMA_VERSION,
+        "generated_at": actual_now.isoformat(),
+        "reconciliation_action": LEAK_TEST_ADOPTED_ENTRY_SETTLED_FLAT_REVIEWED,
+        "reconciliation_source": "LEAK_TEST_ADOPTION_PARTIAL_IDENTITY_BROKER_TRUTH_SETTLED_FLAT",
+        "requested_lifecycle_ids": sorted(requested_ids),
+        "target_count": len(targets),
+        "reconciliation_record_count": len(reconciliation_records),
+        "targets": target_reports,
+        "compact_summaries_updated": True,
+        "post_reconciliation_summary": {
+            "open_position_count": summaries["trade_summary"].get("open_position_count"),
+            "review_required_count": summaries["trade_summary"].get("review_required_count"),
+            "managed_strategy_trade_count": summaries["trade_summary"].get("managed_strategy_trade_count"),
+            "meaningful_strategy_trade_count": summaries["trade_summary"].get("meaningful_strategy_trade_count"),
         },
         "broker_mutation_attempted": False,
         "submit_attempted": False,
@@ -1483,6 +1618,159 @@ def _app_only_unfilled_reconciliation_record(
     }
 
 
+def _leak_test_adopted_entry_settled_flat_targets(
+    records: Iterable[Mapping[str, Any]],
+    *,
+    requested_ids: set[str],
+) -> list[dict[str, Any]]:
+    latest_by_lifecycle: dict[str, dict[str, Any]] = {}
+    for item in records:
+        if _is_reconciliation_record(item):
+            continue
+        lifecycle_id = str(item.get("lifecycle_id") or "")
+        if not lifecycle_id:
+            continue
+        if requested_ids and lifecycle_id not in requested_ids:
+            continue
+        if item.get("paper_lifecycle_type") != "STRATEGY_MANAGED":
+            continue
+        if str(item.get("final_position_status") or "") != "OPEN_MANAGED":
+            continue
+        if item.get("broker_backed_position_confirmed") is not True:
+            continue
+        source_text = " ".join(
+            str(item.get(key) or "")
+            for key in (
+                "filled_bridge_result_path",
+                "strategy_paper_runner_report_path",
+                "entry_source",
+                "source",
+                "runtime_decision_source",
+            )
+        ).lower()
+        if "leak_test" not in source_text and "track_b_paper_lifecycle_adoption" not in source_text:
+            continue
+        latest_by_lifecycle[lifecycle_id] = dict(item)
+    return list(latest_by_lifecycle.values())
+
+
+def _leak_test_adopted_entry_settled_flat_evidence(
+    *,
+    target: Mapping[str, Any],
+    positions_snapshot: Mapping[str, Any],
+    orders_snapshot: Mapping[str, Any],
+) -> dict[str, Any]:
+    account_id = str(target.get("account_id") or PAPER_ACCOUNT_ID)
+    symbol = str(target.get("instrument_family") or target.get("symbol") or "").upper()
+    local_symbol = str(target.get("local_symbol") or "").upper()
+    con_id = _int(target.get("con_id"))
+    position_rows = [row for row in _snapshot_rows(positions_snapshot) if _row_matches_contract(row, account_id, symbol, local_symbol, con_id)]
+    order_rows = [row for row in _snapshot_rows(orders_snapshot) if _row_matches_contract(row, account_id, symbol, local_symbol, con_id)]
+    nonzero_positions = [row for row in position_rows if _decimal(row.get("quantity")) != Decimal("0")]
+    open_orders = [row for row in order_rows if _decimal(row.get("quantity") or row.get("total_quantity") or row.get("remaining_quantity")) != Decimal("0")]
+    partial_identity = (
+        target.get("entry_client_id") in {None, ""}
+        or target.get("entry_perm_id") in {None, ""}
+        or target.get("entry_exec_id") in {None, ""}
+    )
+    broker_flat = not nonzero_positions
+    no_open_orders = not open_orders
+    leak_test_adoption = target.get("broker_backed_position_confirmed") is True and target.get("entry_submit_attempted") is True
+    confirmed = broker_flat and no_open_orders and leak_test_adoption
+    blocker = None
+    if not leak_test_adoption:
+        blocker = "TARGET_IS_NOT_LEAK_TEST_ADOPTION"
+    elif not broker_flat:
+        blocker = "BROKER_POSITION_STILL_OPEN"
+    elif not no_open_orders:
+        blocker = "BROKER_OPEN_ORDER_PRESENT"
+    return {
+        "settled_flat_confirmed": confirmed,
+        "blocker": blocker,
+        "account_id": account_id,
+        "symbol": symbol,
+        "local_symbol": local_symbol,
+        "con_id": con_id,
+        "position_rows": position_rows,
+        "open_order_rows": open_orders,
+        "broker_flat": broker_flat,
+        "open_orders_zero": no_open_orders,
+        "entry_order_id": target.get("entry_order_id"),
+        "partial_broker_identity": partial_identity,
+        "broker_backed_position_was_previously_confirmed": target.get("broker_backed_position_confirmed") is True,
+        "paper_proof_cli_invoked": False,
+    }
+
+
+def _leak_test_adopted_entry_settled_flat_reconciliation_record(
+    *,
+    target: Mapping[str, Any],
+    evidence: Mapping[str, Any],
+    now: datetime,
+) -> dict[str, Any]:
+    return {
+        "ledger_schema_version": LEDGER_SCHEMA_VERSION,
+        "record_type": "ARTIFACT_RECONCILIATION",
+        "reconciliation_schema_version": RECONCILIATION_SCHEMA_VERSION,
+        "trade_id": f"{target.get('trade_id')}:leak_test_adopted_entry_settled_flat_review",
+        "lifecycle_id": target.get("lifecycle_id"),
+        "strategy_id": target.get("strategy_id"),
+        "instrument_family": target.get("instrument_family"),
+        "contract_key": target.get("contract_key"),
+        "local_symbol": target.get("local_symbol"),
+        "con_id": target.get("con_id"),
+        "account_id": target.get("account_id"),
+        "prior_artifact_classification": target.get("paper_lifecycle_classification"),
+        "prior_review_required": target.get("review_required"),
+        "reconciliation_action": LEAK_TEST_ADOPTED_ENTRY_SETTLED_FLAT_REVIEWED,
+        "new_artifact_classification": LEAK_TEST_ADOPTED_ENTRY_SETTLED_FLAT_REVIEWED,
+        "final_position_status": LEAK_TEST_ADOPTED_ENTRY_SETTLED_FLAT_REVIEWED,
+        "review_required": False,
+        "broker_reconciled": False,
+        "broker_backed_position_confirmed": False,
+        "historical_broker_backed_exposure_confirmed": True,
+        "excluded_from_strategy_managed_pnl": True,
+        "excluded_from_clean_trade_stats": True,
+        "entry_order_id": evidence.get("entry_order_id"),
+        "broker_flat": evidence.get("broker_flat"),
+        "open_orders_zero": evidence.get("open_orders_zero"),
+        "partial_broker_identity": evidence.get("partial_broker_identity"),
+        "broker_mutation_attempted": False,
+        "submit_attempted": False,
+        "paper_proof_cli_invoked": False,
+        "source": "LEAK_TEST_ADOPTION_PARTIAL_IDENTITY_BROKER_TRUTH_SETTLED_FLAT",
+        "paper_lifecycle_report_path": target.get("paper_lifecycle_report_path"),
+        "created_at": now.isoformat(),
+    }
+
+
+def _snapshot_rows(snapshot: Mapping[str, Any]) -> list[Mapping[str, Any]]:
+    rows = snapshot.get("positions") or snapshot.get("open_orders") or snapshot.get("orders") or snapshot.get("rows") or []
+    return [row for row in rows if isinstance(row, Mapping)]
+
+
+def _row_matches_contract(
+    row: Mapping[str, Any],
+    account_id: str,
+    symbol: str,
+    local_symbol: str,
+    con_id: int | None,
+) -> bool:
+    row_account = str(row.get("account_id") or row.get("account") or "")
+    row_symbol = str(row.get("symbol") or row.get("track_b_root") or "").upper()
+    row_local = str(row.get("local_symbol") or "").upper()
+    row_con_id = _int(row.get("con_id") or row.get("conId") or row.get("qualified_contract_identifier"))
+    if row_account and row_account != account_id:
+        return False
+    if symbol and row_symbol and row_symbol != symbol:
+        return False
+    if local_symbol and row_local and row_local != local_symbol:
+        return False
+    if con_id is not None and row_con_id is not None and row_con_id != con_id:
+        return False
+    return bool(symbol or local_symbol or con_id is not None)
+
+
 def _ibkr_contract_rejected_targets(
     records: Iterable[Mapping[str, Any]],
     *,
@@ -1631,6 +1919,12 @@ def _apply_manual_flat_reconciliations(records: list[dict[str, Any]]) -> list[di
         if _is_reconciliation_record(item)
         and item.get("new_artifact_classification") == IBKR_CONTRACT_REJECTED_REVIEWED
     }
+    leak_test_settled_flat_lifecycle_ids = {
+        str(item.get("lifecycle_id"))
+        for item in records
+        if _is_reconciliation_record(item)
+        and item.get("new_artifact_classification") == LEAK_TEST_ADOPTED_ENTRY_SETTLED_FLAT_REVIEWED
+    }
     offsetting_entry_reclassified_lifecycle_ids = {
         str(item.get("lifecycle_id"))
         for item in records
@@ -1647,6 +1941,7 @@ def _apply_manual_flat_reconciliations(records: list[dict[str, Any]]) -> list[di
         not reconciled_lifecycle_ids
         and not app_only_reviewed_lifecycle_ids
         and not ibkr_rejected_reviewed_lifecycle_ids
+        and not leak_test_settled_flat_lifecycle_ids
         and not offsetting_entry_reclassified_lifecycle_ids
         and not malformed_reconciliations_by_lifecycle_id
     ):
@@ -1690,6 +1985,21 @@ def _apply_manual_flat_reconciliations(records: list[dict[str, Any]]) -> list[di
             row["paper_lifecycle_classification"] = IBKR_CONTRACT_REJECTED_REVIEWED
             row["final_position_status"] = IBKR_CONTRACT_REJECTED_REVIEWED
             row["final_broker_state_classification"] = IBKR_CONTRACT_REJECTED_REVIEWED
+        if (
+            not _is_reconciliation_record(row)
+            and str(row.get("lifecycle_id") or "") in leak_test_settled_flat_lifecycle_ids
+            and row.get("paper_lifecycle_type") == "STRATEGY_MANAGED"
+        ):
+            row["artifact_reconciliation_classification"] = LEAK_TEST_ADOPTED_ENTRY_SETTLED_FLAT_REVIEWED
+            row["leak_test_adopted_entry_settled_flat_reviewed"] = True
+            row["historical_broker_backed_exposure_confirmed"] = row.get("broker_backed_position_confirmed") is True
+            row["excluded_from_strategy_managed_pnl"] = True
+            row["excluded_from_clean_trade_stats"] = True
+            row["review_required"] = False
+            row["prior_paper_lifecycle_classification"] = row.get("paper_lifecycle_classification")
+            row["paper_lifecycle_classification"] = LEAK_TEST_ADOPTED_ENTRY_SETTLED_FLAT_REVIEWED
+            row["final_position_status"] = LEAK_TEST_ADOPTED_ENTRY_SETTLED_FLAT_REVIEWED
+            row["final_broker_state_classification"] = LEAK_TEST_ADOPTED_ENTRY_SETTLED_FLAT_REVIEWED
         if (
             not _is_reconciliation_record(row)
             and str(row.get("lifecycle_id") or "") in offsetting_entry_reclassified_lifecycle_ids
@@ -1828,6 +2138,15 @@ def _decimal(value: object) -> Decimal | None:
     return parsed if parsed.is_finite() else None
 
 
+def _int(value: object) -> int | None:
+    if value in {None, ""}:
+        return None
+    try:
+        return int(str(value))
+    except (TypeError, ValueError):
+        return None
+
+
 def _decimal_text(value: Decimal | None) -> str | None:
     if value is None:
         return None
@@ -1960,6 +2279,9 @@ def _is_manual_flat_reviewed(item: Mapping[str, Any]) -> bool:
         or item.get("artifact_reconciliation_classification") == IBKR_CONTRACT_REJECTED_REVIEWED
         or item.get("new_artifact_classification") == IBKR_CONTRACT_REJECTED_REVIEWED
         or item.get("ibkr_contract_rejected_reviewed") is True
+        or item.get("artifact_reconciliation_classification") == LEAK_TEST_ADOPTED_ENTRY_SETTLED_FLAT_REVIEWED
+        or item.get("new_artifact_classification") == LEAK_TEST_ADOPTED_ENTRY_SETTLED_FLAT_REVIEWED
+        or item.get("leak_test_adopted_entry_settled_flat_reviewed") is True
         or item.get("artifact_reconciliation_classification") == OPPOSITE_ENTRY_OFFSET_EXISTING_POSITION_RECLASSIFIED
         or item.get("new_artifact_classification") == OPPOSITE_ENTRY_OFFSET_EXISTING_POSITION_RECLASSIFIED
         or item.get("opposite_entry_offset_existing_position_reclassified") is True
