@@ -17595,6 +17595,11 @@ def _compact_track_b_paper_broker_reconciliation_status(payload: dict[str, Any],
         "stale_managed_exit_orders": payload.get("stale_managed_exit_orders")
         if isinstance(payload.get("stale_managed_exit_orders"), list)
         else [],
+        "broker_truth_settlement": payload.get("broker_truth_settlement")
+        if isinstance(payload.get("broker_truth_settlement"), dict)
+        else {},
+        "broker_truth_settlement_seconds": payload.get("broker_truth_settlement_seconds"),
+        "broker_truth_settlement_poll_seconds": payload.get("broker_truth_settlement_poll_seconds"),
         "lifecycle_open_position_count": payload.get("lifecycle_open_position_count"),
         "lifecycle_open_order_count": payload.get("lifecycle_open_order_count"),
         "review_required_count": payload.get("review_required_count"),

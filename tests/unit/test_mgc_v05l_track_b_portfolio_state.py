@@ -85,6 +85,36 @@ def test_broker_lifecycle_mismatch_creates_red_alert(tmp_path: Path) -> None:
     assert mnq["review_required"] is True
 
 
+def test_broker_truth_settlement_waiting_is_yellow_not_blocked(tmp_path: Path) -> None:
+    config = _write_base_runtime(tmp_path)
+    positions_payload = _read_json(config.positions_snapshot_path)
+    positions_payload["positions"] = [row for row in positions_payload["positions"] if row.get("symbol") == "PL"]
+    _write_json(config.positions_snapshot_path, positions_payload)
+    _write_json(
+        config.broker_reconciliation_path,
+        {
+            "classification": "WAITING_FOR_BROKER_TRUTH_SETTLEMENT",
+            "broker_reconciled": False,
+            "known_managed_exit_order_count": 0,
+            "stale_managed_exit_order_count": 0,
+            "hard_exit_order_not_marketable_count": 0,
+            "broker_truth_settlement": {
+                "classification": "WAITING_FOR_BROKER_TRUTH_SETTLEMENT",
+                "event": {"event_type": "ENTRY_FILL_EXPECTING_BROKER_POSITION", "broker_order_id": "1"},
+                "window_seconds": 300,
+            },
+        },
+    )
+
+    state = build_track_b_portfolio_state(config=config, now=NOW, write=False)
+
+    assert state["portfolio_summary"]["status"] == "DEGRADED"
+    assert state["broker_reconciliation"]["classification"] == "WAITING_FOR_BROKER_TRUTH_SETTLEMENT"
+    assert state["broker_reconciliation"]["status"] == "SETTLEMENT_WAITING"
+    assert _alert(state, "BROKER_TRUTH_SETTLEMENT_WAITING")["severity"] == "YELLOW"
+    assert not any(alert["code"] == "BROKER_LIFECYCLE_MISMATCH" for alert in state["alerts"])
+
+
 def test_leak_test_adopted_position_is_not_labeled_clean_adoption(tmp_path: Path) -> None:
     config = _write_base_runtime(tmp_path)
     positions_snapshot = _read_json(config.positions_snapshot_path)
@@ -413,6 +443,8 @@ def _write_base_runtime(
         market_data_root=tmp_path / "outputs/track_b_execution_core/phase1_runtime_market_data",
         runtime_feed_root=tmp_path / "outputs/track_b_execution_core/databento_live_runtime_feed",
         output_path=tmp_path / "outputs/reports/track_b_portfolio/latest_track_b_portfolio_state.json",
+        broker_reconciliation_path=tmp_path
+        / "outputs/reports/track_b_paper_broker_reconciliation/latest_track_b_paper_broker_reconciliation.json",
         calendar_path=tmp_path / "outputs/reports/track_b_portfolio/calendar/latest_track_b_pnl_calendar.json",
         daily_history_path=tmp_path / "outputs/reports/track_b_portfolio/calendar/track_b_daily_pnl.jsonl",
         broker_max_age_seconds=120,

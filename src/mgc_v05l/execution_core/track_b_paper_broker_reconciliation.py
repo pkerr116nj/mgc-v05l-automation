@@ -35,6 +35,8 @@ DEFAULT_REPORT_PATH = (
     / "latest_track_b_paper_broker_reconciliation.json"
 )
 DEFAULT_MAX_AGE_SECONDS = float(os.environ.get("TRACK_B_BROKER_TRUTH_MAX_AGE_SECONDS", "120"))
+DEFAULT_BROKER_TRUTH_SETTLEMENT_SECONDS = float(os.environ.get("TRACK_B_PAPER_BROKER_TRUTH_SETTLEMENT_SECONDS", "300"))
+DEFAULT_BROKER_TRUTH_SETTLEMENT_POLL_SECONDS = float(os.environ.get("TRACK_B_PAPER_BROKER_TRUTH_SETTLEMENT_POLL_SECONDS", "15"))
 PAPER_ACCOUNT = "DUM882026"
 DEFAULT_MIN_TICK_BY_ROOT = {
     "GC": 0.1,
@@ -60,6 +62,8 @@ class ReconciliationConfig:
     report_path: Path = DEFAULT_REPORT_PATH
     max_age_seconds: float = DEFAULT_MAX_AGE_SECONDS
     bridge_terminal_event_grace_seconds: float = DEFAULT_BRIDGE_TERMINAL_EVENT_GRACE_SECONDS
+    broker_truth_settlement_seconds: float = DEFAULT_BROKER_TRUTH_SETTLEMENT_SECONDS
+    broker_truth_settlement_poll_seconds: float = DEFAULT_BROKER_TRUTH_SETTLEMENT_POLL_SECONDS
     account: str = PAPER_ACCOUNT
     symbols: tuple[str, ...] = PHASE1_RUNTIME_TICKER_ORDER
 
@@ -161,6 +165,18 @@ def reconcile_track_b_paper_broker_truth(
         broker_open_orders=track_b_open_orders,
         known_managed_exit_orders=known_managed_exit_orders,
     )
+    broker_truth_settlement = _broker_truth_settlement_state(
+        position_match_report=position_match_report,
+        broker_positions=track_b_positions,
+        lifecycle_positions=lifecycle_positions,
+        broker_open_orders=track_b_open_orders,
+        unknown_open_orders=unknown_track_b_open_orders,
+        trade_summary=trade_summary,
+        live_position_status=live_position_status,
+        broker_status=broker_status,
+        config=config,
+        now=actual_now,
+    )
     broker_cost_basis_adjustments = _broker_cost_basis_adjustments_from_match_report(position_match_report)
     stale_managed_exit_orders = [
         row
@@ -177,7 +193,20 @@ def reconcile_track_b_paper_broker_truth(
         }
     ]
     if position_match_report["matched"] is not True:
-        blockers.append(position_match_report["blocker"])
+        settlement_classification = str(broker_truth_settlement.get("classification") or "")
+        if settlement_classification == "WAITING_FOR_BROKER_TRUTH_SETTLEMENT":
+            pass
+        elif settlement_classification in {"BROKER_TRUTH_SETTLEMENT_TIMEOUT", "BROKER_TRUTH_SETTLEMENT_CONTRADICTORY_STATE"}:
+            blockers.append(
+                {
+                    "code": settlement_classification,
+                    "detail": broker_truth_settlement.get("detail"),
+                    "broker_truth_settlement": broker_truth_settlement,
+                    "position_match_blocker": position_match_report.get("blocker"),
+                }
+            )
+        else:
+            blockers.append(position_match_report["blocker"])
     if unknown_track_b_open_orders:
         blockers.append(
             {
@@ -188,8 +217,19 @@ def reconcile_track_b_paper_broker_truth(
             }
         )
 
-    reconciled = not blockers
-    if reconciled and known_managed_exit_orders:
+    settlement_waiting = broker_truth_settlement.get("classification") == "WAITING_FOR_BROKER_TRUTH_SETTLEMENT"
+    settlement_resolved = broker_truth_settlement.get("classification") == "BROKER_TRUTH_SETTLEMENT_RESOLVED"
+    reconciled = not blockers and position_match_report["matched"] is True
+    if settlement_waiting:
+        classification = "WAITING_FOR_BROKER_TRUTH_SETTLEMENT"
+    elif settlement_resolved:
+        classification = "BROKER_TRUTH_SETTLEMENT_RESOLVED"
+    elif blockers and broker_truth_settlement.get("classification") in {
+        "BROKER_TRUTH_SETTLEMENT_TIMEOUT",
+        "BROKER_TRUTH_SETTLEMENT_CONTRADICTORY_STATE",
+    }:
+        classification = str(broker_truth_settlement.get("classification"))
+    elif reconciled and known_managed_exit_orders:
         classification = "TRACK_B_PAPER_BROKER_RECONCILED_WITH_KNOWN_MANAGED_EXIT_ORDER"
     else:
         classification = "TRACK_B_PAPER_BROKER_RECONCILED" if reconciled else "TRACK_B_PAPER_BROKER_RECONCILIATION_BLOCKED"
@@ -203,6 +243,8 @@ def reconcile_track_b_paper_broker_truth(
         "symbols": list(config.symbols),
         "max_age_seconds": config.max_age_seconds,
         "bridge_terminal_event_grace_seconds": config.bridge_terminal_event_grace_seconds,
+        "broker_truth_settlement_seconds": config.broker_truth_settlement_seconds,
+        "broker_truth_settlement_poll_seconds": config.broker_truth_settlement_poll_seconds,
         "submit_authority": False,
         "paper_proof_invoked": False,
         "live_money_eligible": False,
@@ -237,6 +279,7 @@ def reconcile_track_b_paper_broker_truth(
         "position_match_report": position_match_report,
         "broker_cost_basis_adjustments": broker_cost_basis_adjustments,
         "bridge_terminal_event_grace": terminal_event_grace,
+        "broker_truth_settlement": broker_truth_settlement,
         "lifecycle_open_position_count": _int_value(live_position_status.get("open_position_count")),
         "lifecycle_open_order_count": _int_value(live_position_status.get("open_order_count")),
         "review_required_count": _max_int(
@@ -452,6 +495,165 @@ def _bridge_terminal_event_grace_for_flat_lifecycle(
 
 def _terminal_trade_has_order_identity(trade: Mapping[str, Any]) -> bool:
     return bool(trade.get("exit_timestamp") and trade.get("exit_order_id") and (trade.get("contract_key") or trade.get("local_symbol")))
+
+
+def _broker_truth_settlement_state(
+    *,
+    position_match_report: Mapping[str, Any],
+    broker_positions: Sequence[Mapping[str, Any]],
+    lifecycle_positions: Sequence[Mapping[str, Any]],
+    broker_open_orders: Sequence[Mapping[str, Any]],
+    unknown_open_orders: Sequence[Mapping[str, Any]],
+    trade_summary: Mapping[str, Any],
+    live_position_status: Mapping[str, Any],
+    broker_status: Mapping[str, Any],
+    config: ReconciliationConfig,
+    now: datetime,
+) -> dict[str, Any]:
+    base = {
+        "window_seconds": config.broker_truth_settlement_seconds,
+        "poll_seconds": config.broker_truth_settlement_poll_seconds,
+        "live_money_eligible": False,
+        "paper_proof_invoked": False,
+    }
+    if broker_status.get("live_money_eligible") is True:
+        return {**base, "classification": "BROKER_TRUTH_SETTLEMENT_CONTRADICTORY_STATE", "detail": "live_money_eligible=true blocks settlement waiting"}
+    if broker_status.get("paper_proof_invoked") is True:
+        return {**base, "classification": "BROKER_TRUTH_SETTLEMENT_CONTRADICTORY_STATE", "detail": "paper_proof_invoked=true blocks settlement waiting"}
+    if position_match_report.get("matched") is True:
+        event = _previous_waiting_settlement_event(
+            trade_summary=trade_summary,
+            live_position_status=live_position_status,
+        )
+        if event and (_event_age_seconds(event, now) or config.broker_truth_settlement_seconds + 1) <= config.broker_truth_settlement_seconds:
+            return {**base, "classification": "BROKER_TRUTH_SETTLEMENT_RESOLVED", "detail": "Broker truth and lifecycle are matched after a recent known broker-effect event.", "event": event}
+        return {**base, "classification": "BROKER_TRUTH_SETTLEMENT_NOT_APPLICABLE", "detail": "broker and lifecycle already match"}
+    if unknown_open_orders:
+        return {
+            **base,
+            "classification": "BROKER_TRUTH_SETTLEMENT_CONTRADICTORY_STATE",
+            "detail": "unknown broker open orders block settlement waiting",
+            "unknown_open_order_count": len(unknown_open_orders),
+            "unknown_open_orders": [dict(row) for row in unknown_open_orders],
+        }
+    event = _settlement_event_for_mismatch(
+        position_match_report=position_match_report,
+        trade_summary=trade_summary,
+        live_position_status=live_position_status,
+        config=config,
+        now=now,
+    )
+    if not event:
+        return {**base, "classification": "BROKER_TRUTH_SETTLEMENT_NOT_APPLICABLE", "detail": "No exact known broker-effect event explains the mismatch."}
+    event_age = _event_age_seconds(event, now)
+    payload = {
+        **base,
+        "event": event,
+        "event_age_seconds": event_age,
+        "broker_position_count": len(broker_positions),
+        "lifecycle_position_count": len(lifecycle_positions),
+        "open_order_count": len(broker_open_orders),
+    }
+    if event_age is None:
+        return {**payload, "classification": "BROKER_TRUTH_SETTLEMENT_CONTRADICTORY_STATE", "detail": "Known broker-effect event is missing a usable timestamp."}
+    if event_age <= config.broker_truth_settlement_seconds:
+        return {**payload, "classification": "WAITING_FOR_BROKER_TRUTH_SETTLEMENT", "detail": "Mismatch is temporarily tolerated because it is explained by a recent attributed PAPER broker-effect event."}
+    return {**payload, "classification": "BROKER_TRUTH_SETTLEMENT_TIMEOUT", "detail": "Broker truth did not settle inside the configured PAPER settlement window."}
+
+
+def _previous_waiting_settlement_event(
+    *,
+    trade_summary: Mapping[str, Any],
+    live_position_status: Mapping[str, Any],
+) -> dict[str, Any] | None:
+    for source in (live_position_status, trade_summary):
+        settlement = source.get("broker_truth_settlement")
+        if not isinstance(settlement, Mapping):
+            continue
+        if settlement.get("classification") != "WAITING_FOR_BROKER_TRUTH_SETTLEMENT":
+            continue
+        event = settlement.get("event")
+        if isinstance(event, Mapping):
+            return dict(event)
+    return None
+
+
+def _settlement_event_for_mismatch(
+    *,
+    position_match_report: Mapping[str, Any],
+    trade_summary: Mapping[str, Any],
+    live_position_status: Mapping[str, Any],
+    config: ReconciliationConfig,
+    now: datetime,
+) -> dict[str, Any] | None:
+    unmatched_lifecycle = [row for row in position_match_report.get("unmatched_lifecycle_positions", []) if isinstance(row, Mapping)]
+    mismatches = [row for row in position_match_report.get("mismatches", []) if isinstance(row, Mapping)]
+    unmatched_broker = [row.get("broker_position") for row in mismatches if isinstance(row.get("broker_position"), Mapping)]
+    if unmatched_lifecycle and not unmatched_broker:
+        return _entry_settlement_event(unmatched_lifecycle[0], config=config)
+    if unmatched_broker and not unmatched_lifecycle:
+        for trade in trade_summary.get("recent_trades", []) or []:
+            if not isinstance(trade, Mapping):
+                continue
+            event = _close_settlement_event(trade, config=config)
+            if event and any(_event_matches_position(event, broker) for broker in unmatched_broker if isinstance(broker, Mapping)):
+                return event
+    return None
+
+
+def _entry_settlement_event(lifecycle: Mapping[str, Any], *, config: ReconciliationConfig) -> dict[str, Any] | None:
+    order_id = lifecycle.get("entry_order_id") or _nested_mapping(lifecycle, "entry_broker_identity").get("broker_order_id")
+    timestamp = lifecycle.get("entry_timestamp") or lifecycle.get("entry_time") or lifecycle.get("as_of")
+    if not order_id or not timestamp:
+        return None
+    return {
+        "event_type": "ENTRY_FILL_EXPECTING_BROKER_POSITION",
+        "account_id": lifecycle.get("account_id") or config.account,
+        "contract_key": lifecycle.get("contract_key") or lifecycle.get("position_key"),
+        "local_symbol": lifecycle.get("local_symbol") or lifecycle.get("localSymbol"),
+        "con_id": lifecycle.get("con_id") or _nested_mapping(lifecycle, "entry_broker_identity").get("con_id"),
+        "broker_order_id": str(order_id),
+        "event_time": str(timestamp),
+        "lifecycle_id": lifecycle.get("lifecycle_id"),
+        "strategy_id": lifecycle.get("strategy_id"),
+    }
+
+
+def _close_settlement_event(trade: Mapping[str, Any], *, config: ReconciliationConfig) -> dict[str, Any] | None:
+    if not _terminal_trade_has_order_identity(trade):
+        return None
+    return {
+        "event_type": "EXIT_FILL_EXPECTING_BROKER_FLAT",
+        "account_id": trade.get("account_id") or config.account,
+        "contract_key": trade.get("contract_key"),
+        "local_symbol": trade.get("local_symbol") or trade.get("localSymbol"),
+        "con_id": trade.get("con_id"),
+        "broker_order_id": str(trade.get("exit_order_id")),
+        "event_time": str(trade.get("exit_timestamp")),
+        "lifecycle_id": trade.get("lifecycle_id"),
+        "strategy_id": trade.get("strategy_id"),
+    }
+
+
+def _event_age_seconds(event: Mapping[str, Any], now: datetime) -> float | None:
+    event_time = _parse_time(event.get("event_time") or event.get("filled_at") or event.get("submitted_at"))
+    if event_time is None:
+        return None
+    return max((now - event_time).total_seconds(), 0.0)
+
+
+def _event_matches_position(event: Mapping[str, Any], position: Mapping[str, Any]) -> bool:
+    event_con_id = _int_or_none(event.get("con_id"))
+    position_con_id = _int_or_none(position.get("con_id") or position.get("conId"))
+    if event_con_id is not None and position_con_id is not None and event_con_id != position_con_id:
+        return False
+    event_local = str(event.get("local_symbol") or "").upper()
+    position_local = str(position.get("local_symbol") or position.get("localSymbol") or "").upper()
+    if event_local and position_local and event_local != position_local:
+        return False
+    event_root = _track_b_root(event, PHASE1_RUNTIME_TICKER_ORDER)
+    position_root = _track_b_root(position, PHASE1_RUNTIME_TICKER_ORDER)
+    return event_root is not None and event_root == position_root
 
 
 def _known_managed_exit_orders(
@@ -1308,6 +1510,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--report-path", default=None)
     parser.add_argument("--max-age-seconds", type=float, default=DEFAULT_MAX_AGE_SECONDS)
     parser.add_argument("--bridge-terminal-event-grace-seconds", type=float, default=DEFAULT_BRIDGE_TERMINAL_EVENT_GRACE_SECONDS)
+    parser.add_argument("--broker-truth-settlement-seconds", type=float, default=DEFAULT_BROKER_TRUTH_SETTLEMENT_SECONDS)
+    parser.add_argument("--broker-truth-settlement-poll-seconds", type=float, default=DEFAULT_BROKER_TRUTH_SETTLEMENT_POLL_SECONDS)
     parser.add_argument("--account", default=PAPER_ACCOUNT)
     parser.add_argument("--symbols", default=",".join(PHASE1_RUNTIME_TICKER_ORDER))
     return parser
@@ -1332,6 +1536,8 @@ def main(argv: list[str] | None = None) -> int:
         / "latest_track_b_paper_broker_reconciliation.json",
         max_age_seconds=args.max_age_seconds,
         bridge_terminal_event_grace_seconds=args.bridge_terminal_event_grace_seconds,
+        broker_truth_settlement_seconds=args.broker_truth_settlement_seconds,
+        broker_truth_settlement_poll_seconds=args.broker_truth_settlement_poll_seconds,
         account=str(args.account),
         symbols=tuple(symbol.strip().upper() for symbol in str(args.symbols).split(",") if symbol.strip()),
     )

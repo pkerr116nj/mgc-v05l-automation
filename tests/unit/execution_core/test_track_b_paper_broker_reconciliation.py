@@ -525,6 +525,151 @@ def test_bridge_terminal_event_grace_expires_and_fails_closed(tmp_path: Path) ->
     assert any(blocker["code"] == "BROKER_TRUTH_STATUS_STALE" for blocker in report["blockers"])
 
 
+def test_known_entry_fill_waits_for_broker_truth_settlement(tmp_path: Path) -> None:
+    config = _write_base_artifacts(
+        tmp_path,
+        open_position={
+            "strategy_id": "atp_companion_v1__production_track_gc_asia_us",
+            "lifecycle_id": "bridge_fill_gc_leak_test",
+            "instrument_family": "GC",
+            "contract_key": "GC-202606",
+            "local_symbol": "GCM6",
+            "side": "LONG",
+            "quantity": "1",
+            "avg_entry_price": "4550.0",
+            "entry_order_id": "8",
+            "entry_timestamp": "2026-05-11T11:59:00+00:00",
+            "con_id": 430360630,
+        },
+    )
+    _write_broker_truth(config, positions=[])
+
+    report = reconcile_track_b_paper_broker_truth(config=config, now=NOW)
+
+    assert report["classification"] == "WAITING_FOR_BROKER_TRUTH_SETTLEMENT"
+    assert report["broker_reconciled"] is False
+    assert report["broker_truth_settlement"]["classification"] == "WAITING_FOR_BROKER_TRUTH_SETTLEMENT"
+    assert report["broker_truth_settlement"]["event"]["broker_order_id"] == "8"
+    assert not any(blocker["code"] == "TRACK_B_BROKER_LIFECYCLE_POSITION_COUNT_MISMATCH" for blocker in report["blockers"])
+
+
+def test_broker_truth_settlement_resolves_when_position_matches_within_window(tmp_path: Path) -> None:
+    open_position = {
+        "strategy_id": "atp_companion_v1__production_track_gc_asia_us",
+        "lifecycle_id": "bridge_fill_gc_leak_test",
+        "instrument_family": "GC",
+        "contract_key": "GC-202606",
+        "local_symbol": "GCM6",
+        "side": "LONG",
+        "quantity": "1",
+        "avg_entry_price": "4550.0",
+        "entry_order_id": "8",
+        "entry_timestamp": "2026-05-11T11:59:00+00:00",
+        "con_id": 430360630,
+    }
+    config = _write_base_artifacts(tmp_path, open_position=open_position)
+    live_position_status = json.loads(config.live_position_status_path.read_text(encoding="utf-8"))
+    live_position_status["broker_truth_settlement"] = {
+        "classification": "WAITING_FOR_BROKER_TRUTH_SETTLEMENT",
+        "event": {
+            "event_type": "ENTRY_FILL_EXPECTING_BROKER_POSITION",
+            "broker_order_id": "8",
+            "contract_key": "GC-202606",
+            "local_symbol": "GCM6",
+            "quantity": "1",
+            "side": "LONG",
+            "event_time": "2026-05-11T11:59:00+00:00",
+        },
+    }
+    _write_json(config.live_position_status_path, live_position_status)
+    _write_broker_truth(
+        config,
+        positions=[
+            {
+                "account_id": "DUM882026",
+                "symbol": "GC",
+                "local_symbol": "GCM6",
+                "security_type": "FUT",
+                "quantity": "1",
+                "average_cost": "455000",
+                "multiplier": "100",
+                "con_id": 430360630,
+            }
+        ],
+    )
+
+    report = reconcile_track_b_paper_broker_truth(config=config, now=NOW)
+
+    assert report["classification"] == "BROKER_TRUTH_SETTLEMENT_RESOLVED"
+    assert report["broker_reconciled"] is True
+    assert report["broker_truth_settlement"]["classification"] == "BROKER_TRUTH_SETTLEMENT_RESOLVED"
+
+
+def test_broker_truth_settlement_timeout_blocks(tmp_path: Path) -> None:
+    config = _write_base_artifacts(
+        tmp_path,
+        open_position={
+            "strategy_id": "atp_companion_v1__production_track_gc_asia_us",
+            "lifecycle_id": "bridge_fill_gc_leak_test",
+            "instrument_family": "GC",
+            "contract_key": "GC-202606",
+            "local_symbol": "GCM6",
+            "side": "LONG",
+            "quantity": "1",
+            "avg_entry_price": "4550.0",
+            "entry_order_id": "8",
+            "entry_timestamp": "2026-05-11T11:50:00+00:00",
+            "con_id": 430360630,
+        },
+    )
+    _write_broker_truth(config, positions=[])
+
+    report = reconcile_track_b_paper_broker_truth(config=config, now=NOW)
+
+    assert report["classification"] == "BROKER_TRUTH_SETTLEMENT_TIMEOUT"
+    assert report["broker_reconciled"] is False
+    assert any(blocker["code"] == "BROKER_TRUTH_SETTLEMENT_TIMEOUT" for blocker in report["blockers"])
+
+
+def test_unknown_open_order_does_not_enter_settlement_wait(tmp_path: Path) -> None:
+    config = _write_base_artifacts(
+        tmp_path,
+        open_position={
+            "strategy_id": "atp_companion_v1__production_track_gc_asia_us",
+            "lifecycle_id": "bridge_fill_gc_leak_test",
+            "instrument_family": "GC",
+            "contract_key": "GC-202606",
+            "local_symbol": "GCM6",
+            "side": "LONG",
+            "quantity": "1",
+            "avg_entry_price": "4550.0",
+            "entry_order_id": "8",
+            "entry_timestamp": "2026-05-11T11:59:00+00:00",
+            "con_id": 430360630,
+        },
+    )
+    _write_broker_truth(
+        config,
+        positions=[],
+        open_orders=[
+            {
+                "account_id": "DUM882026",
+                "symbol": "GC",
+                "local_symbol": "GCM6",
+                "order_id": "99",
+                "action": "BUY",
+                "quantity": "1",
+            }
+        ],
+    )
+
+    report = reconcile_track_b_paper_broker_truth(config=config, now=NOW)
+
+    assert report["classification"] == "BROKER_TRUTH_SETTLEMENT_CONTRADICTORY_STATE"
+    assert report["broker_truth_settlement"]["classification"] == "BROKER_TRUTH_SETTLEMENT_CONTRADICTORY_STATE"
+    assert any(blocker["code"] == "UNKNOWN_BROKER_OPEN_ORDER" for blocker in report["blockers"])
+
+
 def test_blocks_when_lifecycle_reports_review_required(tmp_path: Path) -> None:
     config = _write_base_artifacts(tmp_path, review_required_count=1)
     _write_broker_truth(config)

@@ -15,6 +15,7 @@ from mgc_v05l.app.track_b_paper_leak_test import (
     build_single_lane_apply_report,
     build_single_lane_dry_run_report,
     build_leak_test_authorization,
+    _classify_exit_plan,
     report_to_dict,
 )
 
@@ -353,11 +354,42 @@ def test_plan_mode_lists_guarded_lanes_without_broker_mutation() -> None:
     assert lane.expiry == "202606"
     assert lane.entry_execution_intent == "PARTICIPATE_NOW"
     assert lane.expected_route == "ibkr_paper_bridge_submit_capable"
+    assert lane.exit_plan_classification == "STRATEGY_MANAGED_EXIT"
+    assert lane.exit_plan_source == "runtime_strategy_exit_policy"
     assert lane.safe_to_test is True
     assert lane.safe_for_isolated_test is True
     assert lane.safe_for_concurrent_test is True
     assert payload["concurrent_scenarios"]
     assert payload["mutation_performed"] is False
+
+
+def test_atp_lane_without_native_exit_uses_leak_test_controlled_exit() -> None:
+    lane_id = "atp_companion_v1_gc_asia_us_production_track_5m"
+    report = build_plan_only_report(
+        repo_root=REPO_ROOT,
+        reconciliation=_clean_flat_reconciliation(),
+        operator_status=_operator_status(),
+        runtime_command=_runtime_command(),
+    )
+
+    lane = _lane(report, lane_id=lane_id)
+
+    assert lane.exit_plan_classification == "LEAK_TEST_CONTROLLED_EXIT"
+    assert lane.exit_plan_source == "guarded_track_b_paper_leak_test_close"
+    assert lane.safe_for_isolated_test is True
+
+
+def test_lane_without_native_or_controlled_exit_path_blocks() -> None:
+    class Spec:
+        lane_id = "diagnostic_lane_without_exit"
+        standalone_strategy_id = "diagnostic_lane_without_exit"
+        runtime_kind = "diagnostic_only"
+        strategy_family = "diagnostic_only"
+
+    plan = _classify_exit_plan(spec=Spec(), route="diagnostic_only")
+
+    assert plan["classification"] == "NO_EXIT_PLAN_BLOCKER"
+    assert "no_exit_plan_available" in plan["blockers"]
 
 
 def test_dry_run_performs_no_broker_mutation() -> None:

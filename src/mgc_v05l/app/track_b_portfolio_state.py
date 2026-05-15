@@ -152,6 +152,13 @@ def build_track_b_portfolio_state(
     broker_open_orders = _track_b_broker_open_orders(open_orders_snapshot, config.symbols)
     lifecycle_positions = _track_b_lifecycle_positions(lifecycle_status, config.symbols)
     match_report = _match_broker_to_lifecycle(broker_positions, lifecycle_positions, config.symbols)
+    settlement_classification = str(broker_reconciliation_report.get("classification") or "")
+    settlement_waiting = settlement_classification == "WAITING_FOR_BROKER_TRUTH_SETTLEMENT"
+    broker_truth_settlement = broker_reconciliation_report.get("broker_truth_settlement")
+    effective_match_report = match_report
+    if settlement_waiting:
+        match_report = {**match_report, "settlement_waiting": True}
+        effective_match_report = {**match_report, "status": "MATCHED", "matches": match_report.get("matches", [])}
     alerts: list[dict[str, Any]] = []
     live_money_inputs = _live_money_input_flags(
         broker_status,
@@ -182,7 +189,15 @@ def build_track_b_portfolio_state(
         alerts=alerts,
     )
 
-    if match_report["status"] != "MATCHED":
+    if match_report["status"] != "MATCHED" and settlement_waiting:
+        _add_alert(
+            alerts,
+            severity="YELLOW",
+            code="BROKER_TRUTH_SETTLEMENT_WAITING",
+            message="Broker truth and lifecycle are temporarily out of sync after a known PAPER broker-effect event.",
+            details=broker_truth_settlement if isinstance(broker_truth_settlement, Mapping) else {"classification": settlement_classification},
+        )
+    elif match_report["status"] != "MATCHED":
         _add_alert(
             alerts,
             severity="RED",
@@ -245,7 +260,7 @@ def build_track_b_portfolio_state(
     rows = _open_position_rows(
         broker_positions=broker_positions,
         broker_open_orders=broker_open_orders,
-        match_report=match_report,
+        match_report=effective_match_report,
         market_prices=market_prices,
         config=config,
         now=actual_now,
@@ -256,7 +271,8 @@ def build_track_b_portfolio_state(
         alerts=alerts,
     )
 
-    if any(row.get("review_required") is True for row in rows) or _review_required_count(trade_summary, pnl_summary, lifecycle_status):
+    row_review_required = any(row.get("review_required") is True for row in rows)
+    if (row_review_required and not settlement_waiting) or _review_required_count(trade_summary, pnl_summary, lifecycle_status):
         _add_alert(
             alerts,
             severity="RED",
@@ -306,13 +322,16 @@ def build_track_b_portfolio_state(
         "open_order_count": len(broker_open_orders),
         "review_required_count": review_required_count,
     }
-    status = _overall_status(freshness, match_report, alerts)
+    effective_match_report = {**match_report, "status": "MATCHED"} if settlement_waiting else match_report
+    status = _overall_status(freshness, effective_match_report, alerts)
     portfolio_summary["status"] = _portfolio_status(status)
     broker_reconciliation = {
-        "status": match_report["status"],
-        "classification": _broker_reconciliation_classification(match_report, freshness, broker_status, trade_summary),
+        "status": "SETTLEMENT_WAITING" if settlement_waiting else match_report["status"],
+        "classification": settlement_classification
+        if settlement_waiting
+        else _broker_reconciliation_classification(match_report, freshness, broker_status, trade_summary),
         "broker_reconciled": match_report["status"] == "MATCHED",
-        "blockers": _reconciliation_blockers(match_report, freshness, alerts),
+        "blockers": _reconciliation_blockers(effective_match_report, freshness, alerts),
         "review_required_count": review_required_count,
         "open_order_count": len(broker_open_orders),
         "broker_position_count": len(broker_positions),
@@ -328,6 +347,7 @@ def build_track_b_portfolio_state(
         "known_managed_exit_orders": broker_reconciliation_report.get("known_managed_exit_orders")
         if isinstance(broker_reconciliation_report.get("known_managed_exit_orders"), list)
         else [],
+        "broker_truth_settlement": broker_truth_settlement if isinstance(broker_truth_settlement, Mapping) else {},
         "matched_position_count": len(match_report["matches"]),
         "unmatched_broker_positions": match_report["unmatched_broker_positions"],
         "unmatched_lifecycle_positions": match_report["unmatched_lifecycle_positions"],

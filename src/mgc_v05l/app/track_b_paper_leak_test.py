@@ -110,6 +110,14 @@ RESULT_CLASSIFICATIONS = (
     "LEAK_TEST_ENTRY_BROKER_FILLED_BUT_RESULT_UNKNOWN",
     "LEAK_TEST_OPEN_ORDER_AMBIGUITY",
     "LEAK_TEST_UNKNOWN_AFTER_SUBMIT_RESOLVED_NO_BROKER_EFFECT",
+    "LEAK_TEST_CONTROLLED_EXIT_REQUIRED",
+    "NO_EXIT_PLAN_BLOCKER",
+)
+EXIT_PLAN_CLASSIFICATIONS = (
+    "STRATEGY_MANAGED_EXIT",
+    "LEAK_TEST_CONTROLLED_EXIT",
+    "SUPERVISED_REMEDIATION_EXIT",
+    "NO_EXIT_PLAN_BLOCKER",
 )
 LEAK_TEST_OUTPUT_ROOT = Path("outputs") / "reports" / "track_b_paper_leak_test"
 PORTFOLIO_STATE_PATH = Path("outputs") / "reports" / "track_b_portfolio" / "latest_track_b_portfolio_state.json"
@@ -161,6 +169,9 @@ class LeakTestLanePlan:
     conId: int | None
     entry_execution_intent: str
     entry_price_source: str
+    exit_plan_classification: str
+    exit_plan_source: str
+    exit_plan_blockers: tuple[str, ...]
     expected_route: str
     expected_contract: dict[str, Any]
     safe_to_test: bool
@@ -703,6 +714,22 @@ def _exposure_policy_blockers(
     return blockers
 
 
+def _classify_exit_plan(*, spec: Any, route: str) -> dict[str, Any]:
+    lane_id = str(getattr(spec, "lane_id", "") or "")
+    strategy_id = str(getattr(spec, "standalone_strategy_id", "") or lane_id)
+    runtime_kind = str(getattr(spec, "runtime_kind", "") or "").lower()
+    strategy_family = str(getattr(spec, "strategy_family", "") or "").lower()
+    has_native_exit = any(
+        token in " ".join((lane_id.lower(), strategy_id.lower(), runtime_kind, strategy_family))
+        for token in ("forced_session", "exit_engine", "managed_exit", "stop")
+    )
+    if has_native_exit:
+        return {"classification": "STRATEGY_MANAGED_EXIT", "source": "runtime_strategy_exit_policy", "blockers": []}
+    if route == "ibkr_paper_bridge_submit_capable":
+        return {"classification": "LEAK_TEST_CONTROLLED_EXIT", "source": "guarded_track_b_paper_leak_test_close", "blockers": []}
+    return {"classification": "NO_EXIT_PLAN_BLOCKER", "source": "none", "blockers": ["no_exit_plan_available"]}
+
+
 def _lane_plan(
     *,
     spec: Any,
@@ -718,6 +745,7 @@ def _lane_plan(
     symbol = str(target.get("symbol") or spec.symbol).upper()
     contract_month = str(target.get("contract_month") or "").strip() or None
     entry_intent = str(adapter.get("entry_execution_intent") or "PARTICIPATE_NOW_INFERRED").strip()
+    exit_plan = _classify_exit_plan(spec=spec, route=route)
     base_blockers = list(unresolved_blockers)
     isolated_blockers = list(base_blockers)
     isolated_blockers.extend(
@@ -745,6 +773,9 @@ def _lane_plan(
     if route != "ibkr_paper_bridge_submit_capable":
         isolated_blockers.append("route_not_guarded_paper_bridge")
         concurrent_blockers.append("route_not_guarded_paper_bridge")
+    if exit_plan["classification"] == "NO_EXIT_PLAN_BLOCKER":
+        isolated_blockers.extend(exit_plan["blockers"])
+        concurrent_blockers.extend(exit_plan["blockers"])
     if not _contract_local_symbol(symbol, contract_month) or not contract_month:
         isolated_blockers.append("contract_identity_unresolved")
         concurrent_blockers.append("contract_identity_unresolved")
@@ -763,6 +794,9 @@ def _lane_plan(
         conId=None,
         entry_execution_intent=entry_intent,
         entry_price_source="PLAN_ONLY_NOT_PRICED",
+        exit_plan_classification=str(exit_plan["classification"]),
+        exit_plan_source=str(exit_plan["source"]),
+        exit_plan_blockers=tuple(exit_plan["blockers"]),
         expected_route=route,
         expected_contract=target,
         safe_to_test=not isolated_blockers,
