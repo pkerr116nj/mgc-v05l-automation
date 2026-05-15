@@ -1273,6 +1273,43 @@ def test_unknown_after_submit_retries_adoption_after_broker_truth_settles(tmp_pa
     assert report.apply_result.lifecycle_close_result == "LIFECYCLE_CLOSED_FLAT"
 
 
+def test_unknown_after_submit_adoption_retry_stops_when_broker_position_stays_unadopted(tmp_path: Path) -> None:
+    adoption_calls = []
+
+    def _adopt(**kwargs):
+        adoption_calls.append(kwargs["entry_result"])
+        return _adoption_refused_waiting_for_broker_truth()
+
+    def _refresh(_repo_root, _stage):
+        return _clean_flat_reconciliation(
+            broker_reconciled=False,
+            classification="TRACK_B_PAPER_BROKER_RECONCILIATION_BLOCKED",
+            track_b_broker_position_count=1,
+            lifecycle_open_position_count=0,
+            track_b_broker_positions=[{"symbol": "MNQ", "local_symbol": "MNQM6", "quantity": "1"}],
+        )
+
+    report = build_single_lane_apply_report(
+        repo_root=REPO_ROOT,
+        lane_id=LANE_ID,
+        reconciliation=_clean_flat_reconciliation(),
+        operator_status=_operator_status(),
+        runtime_command=_runtime_command(),
+        authorization_path=_authorization_path(tmp_path),
+        guarded_route_runner=lambda _config: _unknown_bridge_result(submit_attempted=True),
+        readiness_checker=_ready_precheck,
+        post_submit_broker_state_refresher=_refresh,
+        lifecycle_adoption_runner=_adopt,
+        max_wait_seconds=0,
+    )
+
+    assert report.result_classification == "LEAK_TEST_ENTRY_FILL_LIFECYCLE_GAP"
+    assert report.apply_result is not None
+    assert report.apply_result.lifecycle_open_result == "LIFECYCLE_OPEN_GAP"
+    assert report.apply_result.exit is None
+    assert len(adoption_calls) == 2
+
+
 def test_unknown_after_submit_with_open_order_is_open_order_ambiguity(tmp_path: Path) -> None:
     report = build_single_lane_apply_report(
         repo_root=REPO_ROOT,

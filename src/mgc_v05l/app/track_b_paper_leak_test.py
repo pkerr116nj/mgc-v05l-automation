@@ -2040,6 +2040,7 @@ def build_single_lane_apply_report(
                 exit_reason = None
         def _adopt_entry_until_reconciled(stage: str) -> tuple[dict[str, Any], dict[str, Any]]:
             deadline = time.monotonic() + max(0.0, max_wait_seconds)
+            broker_position_match_retry_count = 0
             latest_report: dict[str, Any] = {}
             latest_reconciliation: dict[str, Any] = {}
             while True:
@@ -2077,6 +2078,13 @@ def build_single_lane_apply_report(
                 if _reconciliation_ok(latest_reconciliation) and _lifecycle_open_matches_lane(latest_reconciliation, lane):
                     return latest_report, latest_reconciliation
                 if _broker_position_matches_lane(latest_reconciliation, lane):
+                    if broker_position_match_retry_count >= 1:
+                        return latest_report, latest_reconciliation
+                    broker_position_match_retry_count += 1
+                    if max_wait_seconds > 0:
+                        if time.monotonic() >= deadline:
+                            return latest_report, latest_reconciliation
+                        time.sleep(min(5.0, max(0.0, deadline - time.monotonic())))
                     continue
                 if max_wait_seconds <= 0 or time.monotonic() >= deadline:
                     return latest_report, latest_reconciliation
