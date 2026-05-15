@@ -1489,13 +1489,17 @@ def _build_static_preflight_checks(
     monitor_exact_contract = dict(monitor_status.get("exact_contract") or {})
     monitor_health = str(monitor_status.get("health_classification") or monitor_status.get("monitor_health") or "").strip().upper()
     monitor_account_matches = str(monitor_status.get("account_id") or "").strip() == config.account_id
-    governance_row = dict(governance_status.get("selected_strategy") or {})
     expected_target = _bridge_phase1_target(config=config, intent=intent)
     expected_label = _phase1_target_detail_label(expected_target)
     lane_adapter = dict(expected_target.get("lane_adapter") or {})
     runtime_route = _authorized_supervised_runtime_route_check(config=config, intent=intent)
     leak_test_authorization = _leak_test_authorization_check(config=config, intent=intent)
     phase1_reconciliation_gate = _phase1_reconciliation_gate_for_bridge(config=config, intent=intent)
+    governance_status = _governance_status_after_phase1_reconciliation_refresh(
+        governance_status=governance_status,
+        phase1_reconciliation_gate=phase1_reconciliation_gate,
+    )
+    governance_row = dict(governance_status.get("selected_strategy") or {})
     monitor_contract_matches = _monitor_exact_contract_matches_target(
         monitor_exact_contract=monitor_exact_contract,
         target=expected_target,
@@ -1866,6 +1870,77 @@ def _phase1_reconciliation_gate_check(
     ):
         check[key] = phase1_reconciliation_gate.get(key)
     return check
+
+
+def _governance_status_after_phase1_reconciliation_refresh(
+    *,
+    governance_status: dict[str, Any],
+    phase1_reconciliation_gate: dict[str, Any],
+) -> dict[str, Any]:
+    if not bool(phase1_reconciliation_gate.get("stale_reconciliation_refresh_attempted")):
+        return governance_status
+    if not bool(phase1_reconciliation_gate.get("ready")):
+        return governance_status
+    refresh_result = dict(phase1_reconciliation_gate.get("stale_reconciliation_refresh_result") or {})
+    if str(refresh_result.get("classification") or "").strip() != "TRACK_B_PHASE1_RECONCILIATION_REFRESH_CLEAN":
+        return governance_status
+
+    stale_blocker = "phase1_broker_reconciliation_not_clear"
+    selected = dict(governance_status.get("selected_strategy") or {})
+    if not selected:
+        return governance_status
+    status_block_reasons = [
+        str(reason or "").strip()
+        for reason in list(governance_status.get("block_reasons") or [])
+        if str(reason or "").strip()
+    ]
+    selected_block_reasons = [
+        str(reason or "").strip()
+        for reason in list(selected.get("submit_block_reasons") or [])
+        if str(reason or "").strip()
+    ]
+    if stale_blocker not in set(status_block_reasons + selected_block_reasons):
+        return governance_status
+
+    refreshed_status = dict(governance_status)
+    refreshed_selected = dict(selected)
+    refreshed_selected["phase1_broker_reconciliation_gate"] = {
+        "classification": phase1_reconciliation_gate.get("classification"),
+        "ready": phase1_reconciliation_gate.get("ready"),
+        "block_reasons": list(phase1_reconciliation_gate.get("block_reasons") or []),
+        "detail": phase1_reconciliation_gate.get("detail"),
+        "generated_at": phase1_reconciliation_gate.get("generated_at"),
+        "age_seconds": phase1_reconciliation_gate.get("age_seconds"),
+        "source": "bridge_read_only_refresh",
+    }
+
+    remaining_selected_reasons = [reason for reason in selected_block_reasons if reason != stale_blocker]
+    remaining_status_reasons = [reason for reason in status_block_reasons if reason != stale_blocker]
+    remaining_reasons = list(dict.fromkeys(remaining_selected_reasons + remaining_status_reasons))
+    refreshed_selected["submit_block_reasons"] = remaining_reasons
+    strategy_status = str(refreshed_selected.get("strategy_status") or "").strip().upper()
+    refreshed_selected["submit_allowed"] = not remaining_reasons and strategy_status not in {
+        "PAUSED",
+        "DISABLED",
+        "KILL_CANDIDATE",
+    }
+    refreshed_status["selected_strategy"] = refreshed_selected
+    refreshed_status["submit_allowed"] = bool(refreshed_selected.get("submit_allowed"))
+    refreshed_status["block_reasons"] = remaining_reasons
+
+    if bool(refreshed_status.get("submit_allowed")):
+        refreshed_status["detail"] = (
+            "Paper strategy governance consumed the bridge read-only Phase-1 reconciliation refresh; "
+            "fresh reconciliation is clean and other governance gates remain enforced."
+        )
+    else:
+        blockers = list(refreshed_status.get("block_reasons") or [])
+        refreshed_status["detail"] = (
+            "Paper strategy governance blocked submit after bridge read-only Phase-1 reconciliation refresh: "
+            f"{', '.join(blockers) or 'unknown_reason'}"
+        )
+    refreshed_status["phase1_reconciliation_refresh_consumed"] = True
+    return refreshed_status
 
 
 def _runtime_exit_override_identity_is_current(*, config: IbkrPaperStrategyBridgeConfig) -> bool:
