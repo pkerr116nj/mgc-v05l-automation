@@ -54,6 +54,10 @@ from .ibkr_position_reconciliation import (
 from .ibkr_read_only_verifier import _wait_for_connection_ready, IbkrReadOnlyApiTransportConfig
 from .track_b_phase1_submit_authority import evaluate_phase1_broker_reconciliation_submit_gate
 from ..execution_core.track_b_exit_safety import ExitAttemptPolicy, classify_exit_attempt_policy
+from ..execution_core.track_b_paper_broker_reconciliation import (
+    ReconciliationConfig,
+    reconcile_track_b_paper_broker_truth,
+)
 
 _EXPECTED_MODE = "PAPER"
 _EXPECTED_HOST = "127.0.0.1"
@@ -654,7 +658,7 @@ def run_ibkr_paper_strategy_bridge(
             positions_snapshot=positions,
             contract_report={"qualified_contract": qualified_contract_report.get("qualified_contract") or {}},
         )
-        phase1_gate = evaluate_phase1_broker_reconciliation_submit_gate(repo_root=config.repo_root)
+        phase1_gate = _phase1_reconciliation_gate_for_bridge(config=config, intent=intent)
         exit_attempt_policy = _exit_attempt_policy_for_bridge(
             config=config,
             intent=intent,
@@ -1409,7 +1413,7 @@ def _build_static_preflight_checks(
     lane_adapter = dict(expected_target.get("lane_adapter") or {})
     runtime_route = _authorized_supervised_runtime_route_check(config=config, intent=intent)
     leak_test_authorization = _leak_test_authorization_check(config=config, intent=intent)
-    phase1_reconciliation_gate = evaluate_phase1_broker_reconciliation_submit_gate(repo_root=config.repo_root)
+    phase1_reconciliation_gate = _phase1_reconciliation_gate_for_bridge(config=config, intent=intent)
     monitor_contract_matches = _monitor_exact_contract_matches_target(
         monitor_exact_contract=monitor_exact_contract,
         target=expected_target,
@@ -1453,6 +1457,10 @@ def _build_static_preflight_checks(
     caller_path = str(config.caller_path or "").strip()
     leak_test_authorized = caller_path == _LEAK_TEST_CALLER_PATH and bool(leak_test_authorization.get("passed"))
     deprecated_root_detail = _deprecated_submit_root_detail(Path(config.repo_root))
+    phase1_reconciliation_check = _phase1_reconciliation_gate_check(
+        config=config,
+        phase1_reconciliation_gate=phase1_reconciliation_gate,
+    )
     return [
         _check("approved_paper_caller_path", caller_gate["passed"], True, caller_gate["detail"]),
         dict(runtime_route.get("metadata_check") or _runtime_caller_metadata_check(config=config, intent=intent)),
@@ -1575,12 +1583,7 @@ def _build_static_preflight_checks(
             True,
             monitor_detail if bool(monitor_authority.get("authoritative")) else monitor_authority_detail,
         ),
-        _check(
-            "phase1_broker_reconciliation_submit_gate",
-            (not config.submit) or bool(phase1_reconciliation_gate.get("ready")),
-            True,
-            str(phase1_reconciliation_gate.get("detail") or "Current Phase-1 broker reconciliation is required."),
-        ),
+        phase1_reconciliation_check,
         _check(
             "paper_strategy_governance_runtime_present",
             (not config.submit) or bool(governance_status),
@@ -1646,6 +1649,137 @@ def _governance_exit_override_allowed(
     if str(selected.get("strategy_status") or "").strip().upper() in {"PAUSED", "DISABLED", "KILL_CANDIDATE"}:
         return False
     return True
+
+
+def _phase1_reconciliation_gate_for_bridge(
+    *,
+    config: IbkrPaperStrategyBridgeConfig,
+    intent: IbkrPaperStrategyOrderIntent,
+) -> dict[str, Any]:
+    gate = dict(evaluate_phase1_broker_reconciliation_submit_gate(repo_root=config.repo_root))
+    gate.setdefault("stale_reconciliation_refresh_attempted", False)
+    gate.setdefault("stale_reconciliation_refresh_result", None)
+    gate.setdefault("refreshed_reconciliation_age", None)
+    gate.setdefault("exit_allowed_after_refresh", False)
+    gate.setdefault("exit_block_reason", None)
+    if not config.submit or not _is_close_intent(config=config, intent=intent):
+        return gate
+    reasons = {
+        str(reason or "").strip()
+        for reason in list(gate.get("block_reasons") or [])
+        if str(reason or "").strip()
+    }
+    if "phase1_broker_reconciliation_stale" not in reasons:
+        return gate
+    non_stale_reasons = sorted(reasons - {"phase1_broker_reconciliation_stale"})
+    if non_stale_reasons:
+        gate["exit_block_reason"] = "stale_reconciliation_plus_non_stale_blockers"
+        return gate
+    if not _runtime_exit_override_identity_is_current(config=config):
+        gate["exit_block_reason"] = "runtime_identity_not_current_for_stale_reconciliation_refresh"
+        return gate
+
+    refresh_result = _refresh_phase1_broker_reconciliation_artifacts(config=config)
+    refreshed_gate = dict(evaluate_phase1_broker_reconciliation_submit_gate(repo_root=config.repo_root))
+    refreshed_gate["stale_reconciliation_refresh_attempted"] = True
+    refreshed_gate["stale_reconciliation_refresh_result"] = refresh_result
+    refreshed_gate["refreshed_reconciliation_age"] = refreshed_gate.get("age_seconds")
+    refreshed_gate["exit_allowed_after_refresh"] = bool(refreshed_gate.get("ready"))
+    refreshed_gate["exit_block_reason"] = (
+        None
+        if refreshed_gate.get("ready")
+        else ",".join(str(reason) for reason in list(refreshed_gate.get("block_reasons") or []))
+        or str(refresh_result.get("classification") or "stale_reconciliation_refresh_failed")
+    )
+    if refreshed_gate.get("ready"):
+        refreshed_gate["detail"] = (
+            "Stale Phase-1 broker reconciliation was refreshed read-only and is now clean for this managed exit; "
+            "route/governance/exposure gates still apply."
+        )
+    return refreshed_gate
+
+
+def _refresh_phase1_broker_reconciliation_artifacts(*, config: IbkrPaperStrategyBridgeConfig) -> dict[str, Any]:
+    try:
+        from ..app.ibkr_broker_truth_refresher import BrokerTruthRefreshConfig, run_broker_truth_refresh_once
+
+        broker_status = run_broker_truth_refresh_once(
+            config=BrokerTruthRefreshConfig(
+                repo_root=config.repo_root,
+                output_dir=config.repo_root / "outputs" / "reports" / "ibkr_read_only_verification",
+                status_path=config.repo_root
+                / "outputs"
+                / "reports"
+                / "ibkr_read_only_verification"
+                / "ibkr_broker_truth_refresh_status.json",
+                var_status_path=config.repo_root / "var" / "ibkr_broker_truth_refresh_status.json",
+                mode="PAPER",
+                host=config.host,
+                port=int(config.port),
+                client_id=11080,
+                account_id=config.account_id,
+                read_only=True,
+                timeout_seconds=max(float(config.timeout_seconds), 8.0),
+            )
+        )
+        reconciliation = reconcile_track_b_paper_broker_truth(
+            config=ReconciliationConfig(
+                repo_root=config.repo_root,
+                ledger_root=config.repo_root / "outputs" / "track_b_execution_core" / "paper_trade_ledger",
+                broker_truth_root=config.repo_root / "outputs" / "reports" / "ibkr_read_only_verification",
+                report_path=config.repo_root
+                / "outputs"
+                / "reports"
+                / "track_b_paper_broker_reconciliation"
+                / "latest_track_b_paper_broker_reconciliation.json",
+                account=config.account_id,
+            )
+        )
+    except Exception as exc:  # pragma: no cover - explicit unit tests patch the refresh path
+        return {
+            "classification": "TRACK_B_PHASE1_RECONCILIATION_REFRESH_FAILED",
+            "error_type": type(exc).__name__,
+            "error": str(exc),
+            "live_money_eligible": False,
+        }
+    return {
+        "classification": (
+            "TRACK_B_PHASE1_RECONCILIATION_REFRESH_CLEAN"
+            if reconciliation.get("broker_reconciled") is True
+            else "TRACK_B_PHASE1_RECONCILIATION_REFRESH_BLOCKED"
+        ),
+        "broker_truth_refresh_classification": broker_status.get("classification"),
+        "broker_truth_refresh_generated_at": broker_status.get("generated_at"),
+        "reconciliation_classification": reconciliation.get("classification"),
+        "reconciliation_generated_at": reconciliation.get("generated_at"),
+        "broker_reconciled": reconciliation.get("broker_reconciled"),
+        "review_required_count": reconciliation.get("review_required_count"),
+        "track_b_broker_open_order_count": reconciliation.get("track_b_broker_open_order_count"),
+        "track_b_broker_position_count": reconciliation.get("track_b_broker_position_count"),
+        "live_money_eligible": False,
+    }
+
+
+def _phase1_reconciliation_gate_check(
+    *,
+    config: IbkrPaperStrategyBridgeConfig,
+    phase1_reconciliation_gate: dict[str, Any],
+) -> dict[str, Any]:
+    check = _check(
+        "phase1_broker_reconciliation_submit_gate",
+        (not config.submit) or bool(phase1_reconciliation_gate.get("ready")),
+        True,
+        str(phase1_reconciliation_gate.get("detail") or "Current Phase-1 broker reconciliation is required."),
+    )
+    for key in (
+        "stale_reconciliation_refresh_attempted",
+        "stale_reconciliation_refresh_result",
+        "refreshed_reconciliation_age",
+        "exit_allowed_after_refresh",
+        "exit_block_reason",
+    ):
+        check[key] = phase1_reconciliation_gate.get(key)
+    return check
 
 
 def _runtime_exit_override_identity_is_current(*, config: IbkrPaperStrategyBridgeConfig) -> bool:
