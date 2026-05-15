@@ -388,6 +388,14 @@ def _select_exit_bridge_report_evidence(
     )
     if direct_evidence is not None:
         return direct_evidence
+    unattended_evidence = _unattended_close_evidence_from_report(
+        config=config,
+        report=report,
+        report_path=report_path,
+        failures=failures,
+    )
+    if unattended_evidence is not None:
+        return unattended_evidence
     delegated = report.get("delegated_result") if isinstance(report.get("delegated_result"), Mapping) else {}
     delegated_report = delegated.get("report") if isinstance(delegated.get("report"), Mapping) else {}
     lifecycle = (
@@ -445,6 +453,80 @@ def _select_exit_bridge_report_evidence(
         "classification": "PAPER_STRATEGY_ORDER_FILLED_PERSISTED_FROM_BRIDGE_REPORT",
         "bridge_classification": report.get("classification"),
         "source": "IBKR_PAPER_STRATEGY_BRIDGE_REPORT",
+        "source_path": str(report_path),
+        "order_intent_id": config.exit_intent_id,
+        "intent_type": "SELL_TO_CLOSE",
+        "action": config.exit_action,
+        "symbol": config.symbol,
+        "local_symbol": config.local_symbol,
+        "con_id": config.con_id,
+        "quantity": _decimal_text(config.quantity),
+        "broker_order_id": str(latest_status.get("order_id") or lifecycle.get("submitted_order_id") or ""),
+        "client_id": config.exit_client_id,
+        "perm_id": config.exit_perm_id,
+        "exec_id": execution.get("execution_id") or execution.get("exec_id"),
+        "fill_price": _decimal_text(config.exit_price),
+        "fill_timestamp": _canonical_time(config.exit_fill_time),
+    }
+
+
+def _unattended_close_evidence_from_report(
+    *,
+    config: LifecycleCloseCleanupConfig,
+    report: Mapping[str, Any],
+    report_path: Path,
+    failures: list[str],
+) -> dict[str, Any] | None:
+    if str(report.get("classification") or "") != "IBKR_UNATTENDED_CLOSE_FILLED_FLAT":
+        return None
+    lifecycle = report.get("lifecycle") if isinstance(report.get("lifecycle"), Mapping) else {}
+    latest_status = lifecycle.get("latest_order_status") if isinstance(lifecycle.get("latest_order_status"), Mapping) else {}
+    close_verification = (
+        lifecycle.get("close_position_verification")
+        if isinstance(lifecycle.get("close_position_verification"), Mapping)
+        else {}
+    )
+    executions = lifecycle.get("executions_after_submit")
+    execution_matches = [
+        dict(row)
+        for row in (executions if isinstance(executions, list) else [])
+        if isinstance(row, Mapping)
+        and str(row.get("symbol") or "").upper() == config.symbol
+        and str(row.get("account_id") or "") == config.account_id
+        and _int(row.get("con_id")) == config.con_id
+        and str(row.get("local_symbol") or "").upper() == config.local_symbol
+        and _decimal(row.get("quantity")) == config.quantity
+        and _decimal(row.get("price")) == config.exit_price
+    ]
+    unique_by_exec_id: dict[str, dict[str, Any]] = {}
+    for row in execution_matches:
+        key = str(row.get("execution_id") or row.get("exec_id") or len(unique_by_exec_id))
+        unique_by_exec_id.setdefault(key, row)
+    execution_matches = list(unique_by_exec_id.values())
+    if str(latest_status.get("status") or "").upper() != "FILLED":
+        failures.append("Unattended close report latest order status is not Filled.")
+    if _int(latest_status.get("client_id")) != config.exit_client_id:
+        failures.append("Unattended close report client id mismatch.")
+    if _int(latest_status.get("perm_id")) != config.exit_perm_id:
+        failures.append("Unattended close report perm id mismatch.")
+    if _decimal(latest_status.get("filled")) != config.quantity:
+        failures.append("Unattended close report filled quantity mismatch.")
+    if _decimal(latest_status.get("avg_fill_price")) != config.exit_price:
+        failures.append("Unattended close report fill price mismatch.")
+    if len(execution_matches) != 1:
+        failures.append(f"Expected exactly one matching SELL_TO_CLOSE execution in unattended close report, found {len(execution_matches)}.")
+        return execution_matches[0] if execution_matches else None
+    if not bool(close_verification.get("verified")):
+        failures.append("Unattended close report close-position verification is not marked verified.")
+    if _decimal(close_verification.get("exact_position_quantity")) != Decimal("0"):
+        failures.append("Unattended close report exact position quantity is not flat.")
+    execution = execution_matches[0]
+    if not _same_time(execution.get("executed_at"), config.exit_fill_time):
+        failures.append("Unattended close report execution fill time mismatch.")
+    return {
+        "classification": "PAPER_STRATEGY_ORDER_FILLED_PERSISTED_FROM_UNATTENDED_CLOSE_REPORT",
+        "bridge_classification": report.get("classification"),
+        "source": "IBKR_UNATTENDED_PAPER_CLOSE_REPORT",
         "source_path": str(report_path),
         "order_intent_id": config.exit_intent_id,
         "intent_type": "SELL_TO_CLOSE",

@@ -1102,6 +1102,7 @@ def _manual_like_config(config: IbkrUnattendedPaperCloseConfig) -> Any:
             "delayed_quote_max_age_seconds": config.delayed_quote_max_age_seconds,
             "fill_limit_offset_ticks": config.limit_offset_ticks,
             "post_approval_observation_seconds": config.observation_seconds,
+            "execution_pricing_context": None,
         },
     )()
 

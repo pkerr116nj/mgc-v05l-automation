@@ -123,6 +123,58 @@ def test_cleanup_accepts_direct_filled_bridge_close_artifact(tmp_path: Path) -> 
     assert result.report["post_cleanup_prediction"]["reconciliation_would_clear"] is True
 
 
+def test_cleanup_accepts_unattended_close_filled_flat_report(tmp_path: Path) -> None:
+    _write_cleanup_fixture(tmp_path, include_exit=False)
+    report_path = tmp_path / "outputs" / "reports" / "ibkr_unattended_paper_close_test" / "ibkr_unattended_paper_close_test_report.json"
+    _write_json(
+        report_path,
+        {
+            "classification": "IBKR_UNATTENDED_CLOSE_FILLED_FLAT",
+            "lifecycle": {
+                "submitted_order_id": 1,
+                "submitted_perm_id": DEFAULT_EXIT_PERM_ID,
+                "latest_order_status": {
+                    "status": "Filled",
+                    "order_id": 1,
+                    "client_id": DEFAULT_EXIT_CLIENT_ID,
+                    "perm_id": DEFAULT_EXIT_PERM_ID,
+                    "filled": 1.0,
+                    "avg_fill_price": 29389.5,
+                },
+                "executions_after_submit": [
+                    {
+                        "account_id": "DUM882026",
+                        "broker_order_id": 1,
+                        "client_id": DEFAULT_EXIT_CLIENT_ID,
+                        "con_id": 770561201,
+                        "executed_at": "2026-05-13T11:00:38.198088+00:00",
+                        "execution_id": "0000e1a7.6a07901e.01.01",
+                        "local_symbol": "MNQM6",
+                        "perm_id": DEFAULT_EXIT_PERM_ID,
+                        "price": 29389.5,
+                        "quantity": 1.0,
+                        "side": "SLD",
+                        "symbol": "MNQ",
+                    }
+                ],
+                "close_position_verification": {"verified": True, "exact_position_quantity": 0.0},
+            },
+        },
+    )
+
+    result = run_track_b_paper_lifecycle_close_cleanup(
+        config=LifecycleCloseCleanupConfig(
+            repo_root=tmp_path,
+            exit_bridge_report_path=report_path.relative_to(tmp_path),
+        ),
+        now=NOW,
+    )
+
+    assert result.classification == "TRACK_B_PAPER_LIFECYCLE_CLOSE_CLEANUP_DRY_RUN_READY"
+    assert result.report["bridge_evidence"]["exit"]["source"] == "IBKR_UNATTENDED_PAPER_CLOSE_REPORT"
+    assert result.report["post_cleanup_prediction"]["reconciliation_would_clear"] is True
+
+
 def test_second_apply_is_idempotent(tmp_path: Path) -> None:
     _write_cleanup_fixture(tmp_path)
     config = LifecycleCloseCleanupConfig(repo_root=tmp_path, apply=True)
