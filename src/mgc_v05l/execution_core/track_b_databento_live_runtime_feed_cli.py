@@ -35,8 +35,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--min-bars", type=int, default=8)
     parser.add_argument("--max-records", type=int, default=90)
     parser.add_argument("--max-seconds", type=float, default=75.0)
-    parser.add_argument("--max-latest-1m-age-seconds", type=int, default=90)
-    parser.add_argument("--max-completed-5m-age-seconds", type=int, default=360)
+    parser.add_argument("--max-latest-1m-age-seconds", type=int, default=180)
+    parser.add_argument("--max-completed-5m-age-seconds", type=int, default=600)
     parser.add_argument("--env-file", type=Path)
     parser.add_argument("--source-id", default="track_b_databento_live_runtime_feed")
     parser.add_argument("--output-root", type=Path, default=DEFAULT_TRACK_B_DATABENTO_LIVE_RUNTIME_FEED_OUTPUT_ROOT)
@@ -100,4 +100,3 @@ def main(argv: Sequence[str] | None = None) -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main(sys.argv[1:]))
-

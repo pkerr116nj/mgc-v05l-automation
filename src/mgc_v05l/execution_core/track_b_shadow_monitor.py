@@ -186,8 +186,8 @@ class TrackBShadowMonitorConfig:
     provider_stype_out: str = "instrument_id"
     prefer_raw_local_symbol_for_runtime_fetch: bool = True
     allow_fresh_runtime_artifact_fallback: bool = True
-    max_latest_1m_age_seconds: int = 900
-    max_completed_5m_age_seconds: int = 900
+    max_latest_1m_age_seconds: int = 180
+    max_completed_5m_age_seconds: int = 600
     live_execution_min_1m_bars: int = 3
     live_execution_min_completed_5m_bars: int = 1
     startup_backfill_context_enabled: bool = True

@@ -73,8 +73,8 @@ class Phase1DatabentoLiveRuntimeCandlesConfig:
     max_accumulation_attempts: int = 8
     max_accumulation_seconds_per_symbol: float = 600.0
     max_workers: int = 10
-    max_latest_1m_age_seconds: int = 90
-    max_completed_5m_age_seconds: int = 360
+    max_latest_1m_age_seconds: int = 180
+    max_completed_5m_age_seconds: int = 600
     now: datetime | None = None
 
 

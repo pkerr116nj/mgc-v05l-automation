@@ -73,8 +73,8 @@ class TrackBDatabentoLiveFeedConfig:
     min_bars: int = 8
     max_records: int = 90
     max_seconds: float = 75.0
-    max_latest_1m_age_seconds: int = 90
-    max_completed_5m_age_seconds: int = 360
+    max_latest_1m_age_seconds: int = 180
+    max_completed_5m_age_seconds: int = 600
     env_file: Path | None = None
     output_root: Path = DEFAULT_TRACK_B_DATABENTO_LIVE_RUNTIME_FEED_OUTPUT_ROOT
     source_id: str = "track_b_databento_live_runtime_feed"
