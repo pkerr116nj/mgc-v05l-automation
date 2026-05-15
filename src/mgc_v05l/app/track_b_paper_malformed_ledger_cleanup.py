@@ -1,10 +1,10 @@
-"""Supervised PAPER-only cleanup for one malformed stale compact-ledger row.
+"""Supervised PAPER-only cleanup for one malformed compact-ledger row.
 
 This command is intentionally artifact-only. It never connects to IBKR, never
-submits/cancels/closes an order, and dry-run is the default. The only apply
-action is appending an explicit ARTIFACT_RECONCILIATION record that voids one
-exact malformed stale ledger row after already-written evidence proves it is
-not a valid broker-backed open position.
+submits/cancels/closes an order, and dry-run is the default. The apply action
+only appends an ARTIFACT_RECONCILIATION record that supersedes one exact
+malformed lifecycle row after already-written evidence proves it is flat and
+manual-reconciliation reviewed.
 """
 
 from __future__ import annotations
@@ -20,6 +20,7 @@ from typing import Any, Mapping, Sequence
 from mgc_v05l.execution_core.track_b_paper_trade_ledger import (
     DEFAULT_TRACK_B_PAPER_TRADE_LEDGER_OUTPUT_ROOT,
     LEDGER_SCHEMA_VERSION,
+    MALFORMED_BROKER_BACKED_MANUALLY_RECONCILED_ARTIFACT,
     RECONCILIATION_SCHEMA_VERSION,
     VOID_MALFORMED_STALE_ARTIFACT,
     build_track_b_paper_trade_summaries,
@@ -42,6 +43,7 @@ DEFAULT_OUTPUT_ROOT = Path("outputs") / "reports" / "track_b_paper_malformed_led
 DEFAULT_LANE_ROOT = Path("outputs") / "probationary_pattern_engine" / "paper_session" / "lanes"
 DEFAULT_BROKER_TRUTH_ROOT = Path("outputs") / "reports" / "ibkr_read_only_verification"
 DEFAULT_SESSION_CLOSE_ROOT = Path("outputs") / "operator_dashboard" / "paper_session_close_reviews"
+DEFAULT_MANUAL_RECONCILIATION_ROOT = Path("outputs") / "reports" / "mnq_manual_reconciliation_close"
 
 
 @dataclass(frozen=True)
@@ -64,6 +66,7 @@ class MalformedLedgerCleanupConfig:
     lane_root: Path = DEFAULT_LANE_ROOT
     broker_truth_root: Path = DEFAULT_BROKER_TRUTH_ROOT
     session_close_root: Path = DEFAULT_SESSION_CLOSE_ROOT
+    manual_reconciliation_root: Path = DEFAULT_MANUAL_RECONCILIATION_ROOT
     ledger_root: Path = DEFAULT_TRACK_B_PAPER_TRADE_LEDGER_OUTPUT_ROOT
 
 
@@ -90,6 +93,9 @@ def run_track_b_paper_malformed_ledger_cleanup(
     trades_path = lane_dir / "trades.jsonl"
     broker_positions_path = repo_root / config.broker_truth_root / "ibkr_positions_snapshot.json"
     broker_orders_path = repo_root / config.broker_truth_root / "ibkr_open_orders_snapshot.json"
+    manual_reconciliation_review_path = (
+        repo_root / config.manual_reconciliation_root / "mnq_manual_reconciliation_close_review.json"
+    )
 
     failures: list[str] = []
     ledger_records = _read_jsonl(ledger_jsonl)
@@ -98,6 +104,7 @@ def run_track_b_paper_malformed_ledger_cleanup(
     trade_rows = _read_jsonl(trades_path)
     broker_positions = _read_json(broker_positions_path)
     broker_orders = _read_json(broker_orders_path)
+    manual_reconciliation_review = _read_json(manual_reconciliation_review_path)
 
     target = _select_exact_target(config=config, rows=ledger_records, failures=failures)
     malformed_identity = _malformed_identity_evidence(config=config, target=target, failures=failures)
@@ -126,6 +133,12 @@ def run_track_b_paper_malformed_ledger_cleanup(
         orders_snapshot=broker_orders,
         positions_path=broker_positions_path,
         orders_path=broker_orders_path,
+        failures=failures,
+    )
+    manual_reconciliation_evidence = _manual_reconciliation_evidence(
+        config=config,
+        review=manual_reconciliation_review,
+        path=manual_reconciliation_review_path,
         failures=failures,
     )
     already_applied = _already_voided(config=config, rows=ledger_records)
@@ -186,12 +199,13 @@ def run_track_b_paper_malformed_ledger_cleanup(
             "durable_fill_absence": durable_fill_evidence,
             "session_close_no_fill": session_close_evidence,
             "broker_flat": broker_flat_evidence,
+            "manual_reconciliation_close": manual_reconciliation_evidence,
         },
         "write_plan": {
             "would_append_reconciliation_record": valid and not already_applied,
             "would_update_compact_summaries": valid,
             "rows_that_would_change": [] if target is None else [_row_identity(target)],
-            "action": VOID_MALFORMED_STALE_ARTIFACT,
+            "action": MALFORMED_BROKER_BACKED_MANUALLY_RECONCILED_ARTIFACT,
             "preserve_original_row": True,
             "ledger_path": str(ledger_jsonl),
         },
@@ -351,10 +365,12 @@ def _durable_fill_evidence(
         for row in trade_rows
         if _matches_malformed_entry_evidence(config, row)
     ]
-    if bridge_matches or trade_matches:
-        failures.append("Durable May 8 MNQ fill/trade evidence exists; refusing malformed-artifact void.")
     return {
         "confirmed_absent": not bridge_matches and not trade_matches,
+        "note": (
+            "Durable fill evidence no longer voids broker-backed provenance by itself; "
+            "manual reconciliation close evidence decides whether the malformed row can be superseded."
+        ),
         "filled_bridge_results_path": str(filled_bridge_results_path),
         "trades_path": str(trades_path),
         "matching_filled_bridge_result_count": len(bridge_matches),
@@ -431,6 +447,86 @@ def _broker_flat_evidence(
     }
 
 
+def _manual_reconciliation_evidence(
+    *,
+    config: MalformedLedgerCleanupConfig,
+    review: Mapping[str, Any],
+    path: Path,
+    failures: list[str],
+) -> dict[str, Any]:
+    source_exec = review.get("possible_source_execution") if isinstance(review.get("possible_source_execution"), Mapping) else {}
+    cleanup_exec = review.get("close_execution") if isinstance(review.get("close_execution"), Mapping) else {}
+    source_matches = _execution_matches(
+        config=config,
+        execution=source_exec,
+        side="BOT",
+        price=config.entry_price,
+    )
+    cleanup_matches = _execution_matches(
+        config=config,
+        execution=cleanup_exec,
+        side="SLD",
+        price=None,
+    )
+    broker_position_after = _decimal(review.get("broker_position_after"))
+    confirmed = (
+        bool(review)
+        and source_matches
+        and cleanup_matches
+        and broker_position_after == Decimal("0")
+        and review.get("strategy_managed_exit") is False
+        and review.get("strategy_pnl") is False
+    )
+    if not confirmed:
+        failures.append("Manual reconciliation close evidence is missing or does not match the malformed MNQ row.")
+    return {
+        "confirmed": confirmed,
+        "path": str(path),
+        "classification": review.get("classification"),
+        "review_required": review.get("review_required"),
+        "broker_position_after": review.get("broker_position_after"),
+        "strategy_managed_exit": review.get("strategy_managed_exit"),
+        "strategy_pnl": review.get("strategy_pnl"),
+        "source_bot_execution": _execution_compact(source_exec),
+        "cleanup_sld_execution": _execution_compact(cleanup_exec),
+    }
+
+
+def _execution_matches(
+    *,
+    config: MalformedLedgerCleanupConfig,
+    execution: Mapping[str, Any],
+    side: str,
+    price: Decimal | None,
+) -> bool:
+    if not execution:
+        return False
+    price_matches = True if price is None else _decimal(execution.get("price")) == price
+    return (
+        str(execution.get("symbol") or "").upper() == config.symbol
+        and str(execution.get("local_symbol") or execution.get("localSymbol") or "").upper() == config.local_symbol
+        and _int(execution.get("con_id")) == config.con_id
+        and _decimal(execution.get("quantity")) == config.quantity
+        and str(execution.get("side") or "").upper() == side
+        and price_matches
+    )
+
+
+def _execution_compact(execution: Mapping[str, Any]) -> dict[str, Any]:
+    return {
+        "execution_id": execution.get("execution_id") or execution.get("exec_id"),
+        "side": execution.get("side"),
+        "price": execution.get("price"),
+        "quantity": execution.get("quantity"),
+        "client_id": execution.get("client_id"),
+        "broker_order_id": execution.get("broker_order_id"),
+        "perm_id": execution.get("perm_id"),
+        "con_id": execution.get("con_id"),
+        "local_symbol": execution.get("local_symbol") or execution.get("localSymbol"),
+        "executed_at": execution.get("executed_at"),
+    }
+
+
 def _malformed_reconciliation_record(
     *,
     config: MalformedLedgerCleanupConfig,
@@ -441,7 +537,7 @@ def _malformed_reconciliation_record(
         "ledger_schema_version": LEDGER_SCHEMA_VERSION,
         "record_type": "ARTIFACT_RECONCILIATION",
         "reconciliation_schema_version": RECONCILIATION_SCHEMA_VERSION,
-        "trade_id": f"{target.get('trade_id')}:void_malformed_stale_artifact",
+        "trade_id": f"{target.get('trade_id')}:manual_reconciliation_superseded",
         "lifecycle_id": target.get("lifecycle_id"),
         "strategy_id": target.get("strategy_id"),
         "instrument_family": target.get("instrument_family"),
@@ -452,22 +548,32 @@ def _malformed_reconciliation_record(
         "prior_artifact_classification": target.get("paper_lifecycle_classification"),
         "prior_final_position_status": target.get("final_position_status"),
         "prior_review_required": target.get("review_required"),
-        "reconciliation_action": VOID_MALFORMED_STALE_ARTIFACT,
-        "new_artifact_classification": VOID_MALFORMED_STALE_ARTIFACT,
-        "final_position_status": VOID_MALFORMED_STALE_ARTIFACT,
+        "reconciliation_action": "SUPERSEDED_MANUAL_RECONCILIATION_REQUIRED",
+        "new_artifact_classification": MALFORMED_BROKER_BACKED_MANUALLY_RECONCILED_ARTIFACT,
+        "final_position_status": MALFORMED_BROKER_BACKED_MANUALLY_RECONCILED_ARTIFACT,
         "review_required": False,
         "broker_reconciled": False,
-        "broker_backed_position_confirmed": False,
+        "broker_backed_position_confirmed": True,
+        "historical_broker_backed_exposure_confirmed": True,
+        "manual_reconciliation_required": True,
+        "excluded_from_strategy_managed_pnl": True,
+        "excluded_from_clean_trade_stats": True,
         "broker_flat_confirmed": True,
         "broker_open_order_count": 0,
         "source": "SUPERVISED_PAPER_ONLY_MALFORMED_STALE_LEDGER_CLEANUP",
+        "manual_reconciliation_review_path": str(
+            config.manual_reconciliation_root / "mnq_manual_reconciliation_close_review.json"
+        ),
         "reason_codes": [
             "MALFORMED_LIFECYCLE_ID_BUG",
-            "SOURCE_INTENT_BLOCKED_OR_MISSING_BROKER_IDENTITY",
-            "DURABLE_FILL_EVIDENCE_ABSENT",
-            "SESSION_CLOSE_SIGNAL_NO_FILL",
+            "BROKER_BACKED_EXPOSURE_CONFIRMED_HISTORICALLY",
+            "MANUAL_RECONCILIATION_CLOSE_CONFIRMED",
+            "NOT_STRATEGY_MANAGED_EXIT",
+            "EXCLUDED_FROM_STRATEGY_PNL",
             "BROKER_TRUTH_FLAT_OPEN_ORDERS_ZERO",
         ],
+        "original_entry_timestamp": target.get("entry_timestamp"),
+        "original_entry_fill_price": target.get("entry_fill_price"),
         "broker_mutation_attempted": False,
         "submit_attempted": False,
         "cancel_attempted": False,
@@ -483,7 +589,8 @@ def _already_voided(config: MalformedLedgerCleanupConfig, rows: Sequence[Mapping
     return any(
         str(row.get("lifecycle_id") or "") == config.lifecycle_id
         and row.get("record_type") == "ARTIFACT_RECONCILIATION"
-        and row.get("new_artifact_classification") == VOID_MALFORMED_STALE_ARTIFACT
+        and row.get("new_artifact_classification")
+        in {VOID_MALFORMED_STALE_ARTIFACT, MALFORMED_BROKER_BACKED_MANUALLY_RECONCILED_ARTIFACT}
         for row in rows
     )
 
@@ -774,6 +881,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--broker-truth-root", default=str(DEFAULT_BROKER_TRUTH_ROOT))
     parser.add_argument("--lane-root", default=str(DEFAULT_LANE_ROOT))
     parser.add_argument("--session-close-root", default=str(DEFAULT_SESSION_CLOSE_ROOT))
+    parser.add_argument("--manual-reconciliation-root", default=str(DEFAULT_MANUAL_RECONCILIATION_ROOT))
     parser.add_argument("--ledger-root", default=str(DEFAULT_TRACK_B_PAPER_TRADE_LEDGER_OUTPUT_ROOT))
     parser.add_argument("--apply", action="store_true", help="Append the reconciliation record. Omit for dry-run.")
     return parser
@@ -807,6 +915,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             lane_root=Path(args.lane_root),
             broker_truth_root=Path(args.broker_truth_root),
             session_close_root=Path(args.session_close_root),
+            manual_reconciliation_root=Path(args.manual_reconciliation_root),
             ledger_root=Path(args.ledger_root),
         )
     )

@@ -15,6 +15,7 @@ from mgc_v05l.execution_core.track_b_paper_broker_reconciliation import (
     reconcile_track_b_paper_broker_truth,
 )
 from mgc_v05l.execution_core.track_b_paper_trade_ledger import (
+    MALFORMED_BROKER_BACKED_MANUALLY_RECONCILED_ARTIFACT,
     VOID_MALFORMED_STALE_ARTIFACT,
     build_track_b_paper_trade_summaries,
 )
@@ -66,7 +67,11 @@ def test_apply_supersedes_only_exact_malformed_row(tmp_path: Path) -> None:
     assert len(rows) == 3
     assert rows[-1]["record_type"] == "ARTIFACT_RECONCILIATION"
     assert rows[-1]["lifecycle_id"] == DEFAULT_LIFECYCLE_ID
-    assert rows[-1]["new_artifact_classification"] == VOID_MALFORMED_STALE_ARTIFACT
+    assert rows[-1]["new_artifact_classification"] == MALFORMED_BROKER_BACKED_MANUALLY_RECONCILED_ARTIFACT
+    assert rows[-1]["reconciliation_action"] == "SUPERSEDED_MANUAL_RECONCILIATION_REQUIRED"
+    assert rows[-1]["historical_broker_backed_exposure_confirmed"] is True
+    assert rows[-1]["excluded_from_strategy_managed_pnl"] is True
+    assert rows[-1]["manual_reconciliation_review_path"].endswith("mnq_manual_reconciliation_close_review.json")
     assert rows[-1]["submit_attempted"] is False
     assert rows[-1]["place_order_attempted"] is False
     assert rows[1]["lifecycle_id"] == "bridge_fill_MNQ|1m|2026-05-09T12:00:00Z|BUY_TO_OPEN"
@@ -110,7 +115,7 @@ def test_refuses_if_open_orders_exist(tmp_path: Path) -> None:
     assert len(_read_jsonl(_ledger_path(tmp_path))) == 1
 
 
-def test_refuses_if_durable_may8_fill_evidence_exists(tmp_path: Path) -> None:
+def test_durable_may8_fill_evidence_is_preserved_when_manual_close_matches(tmp_path: Path) -> None:
     _write_cleanup_fixture(tmp_path, include_may8_filled_bridge_result=True)
 
     result = run_track_b_paper_malformed_ledger_cleanup(
@@ -118,9 +123,11 @@ def test_refuses_if_durable_may8_fill_evidence_exists(tmp_path: Path) -> None:
         now=NOW,
     )
 
-    assert result.classification == "TRACK_B_MALFORMED_LEDGER_CLEANUP_REFUSED"
-    assert any("Durable May 8 MNQ fill" in failure for failure in result.report["failures"])
-    assert len(_read_jsonl(_ledger_path(tmp_path))) == 1
+    rows = _read_jsonl(_ledger_path(tmp_path))
+    assert result.classification == "TRACK_B_MALFORMED_LEDGER_CLEANUP_APPLIED"
+    assert result.report["evidence"]["durable_fill_absence"]["matching_filled_bridge_result_count"] == 1
+    assert result.report["evidence"]["manual_reconciliation_close"]["confirmed"] is True
+    assert rows[-1]["new_artifact_classification"] == MALFORMED_BROKER_BACKED_MANUALLY_RECONCILED_ARTIFACT
 
 
 def test_refuses_if_lifecycle_contract_or_conid_mismatch(tmp_path: Path) -> None:
@@ -166,6 +173,64 @@ def test_reconciliation_clears_after_malformed_row_superseded_and_other_row_clos
     assert report["lifecycle_open_position_count"] == 0
 
 
+def test_manual_reconciled_malformed_row_excluded_from_open_positions_and_pnl(tmp_path: Path) -> None:
+    _write_cleanup_fixture(tmp_path)
+
+    run_track_b_paper_malformed_ledger_cleanup(
+        config=MalformedLedgerCleanupConfig(repo_root=tmp_path, apply=True),
+        now=NOW,
+    )
+    ledger = _ledger_path(tmp_path)
+    summaries = build_track_b_paper_trade_summaries(
+        ledger_records=_read_jsonl(ledger),
+        ledger_jsonl=ledger,
+        trade_summary_json=ledger.parent / "latest_track_b_paper_trade_summary.json",
+        live_position_status_json=ledger.parent / "latest_track_b_live_position_status.json",
+        pnl_summary_json=ledger.parent / "latest_track_b_pnl_summary.json",
+        now=NOW,
+    )
+
+    assert summaries["trade_summary"]["open_position_count"] == 0
+    assert summaries["trade_summary"]["open_position_record_count"] == 0
+    assert summaries["trade_summary"]["broker_backed_trade_count"] == 0
+    assert summaries["pnl_summary"]["total_realized_pnl_today"] == "0"
+    recent = summaries["trade_summary"]["recent_trades"][0]
+    assert recent["final_position_status"] == MALFORMED_BROKER_BACKED_MANUALLY_RECONCILED_ARTIFACT
+    assert recent["historical_broker_backed_exposure_confirmed"] is True
+    assert recent["broker_backed_position_confirmed"] is False
+
+
+def test_legacy_void_classification_still_preserves_historical_broker_exposure(tmp_path: Path) -> None:
+    _write_cleanup_fixture(tmp_path)
+    ledger = _ledger_path(tmp_path)
+    rows = _read_jsonl(ledger)
+    rows.append(
+        {
+            "record_type": "ARTIFACT_RECONCILIATION",
+            "lifecycle_id": DEFAULT_LIFECYCLE_ID,
+            "new_artifact_classification": VOID_MALFORMED_STALE_ARTIFACT,
+            "created_at": NOW.isoformat(),
+        }
+    )
+    _write_jsonl(ledger, rows)
+
+    summaries = build_track_b_paper_trade_summaries(
+        ledger_records=_read_jsonl(ledger),
+        ledger_jsonl=ledger,
+        trade_summary_json=ledger.parent / "latest_track_b_paper_trade_summary.json",
+        live_position_status_json=ledger.parent / "latest_track_b_live_position_status.json",
+        pnl_summary_json=ledger.parent / "latest_track_b_pnl_summary.json",
+        now=NOW,
+    )
+
+    recent = summaries["trade_summary"]["recent_trades"][0]
+    assert summaries["trade_summary"]["open_position_count"] == 0
+    assert summaries["pnl_summary"]["total_realized_pnl_today"] == "0"
+    assert recent["artifact_reconciliation_classification"] == VOID_MALFORMED_STALE_ARTIFACT
+    assert recent["historical_broker_backed_exposure_confirmed"] is True
+    assert recent["excluded_from_strategy_managed_pnl"] is True
+
+
 def _write_cleanup_fixture(
     tmp_path: Path,
     *,
@@ -194,6 +259,7 @@ def _write_cleanup_fixture(
     _write_jsonl(_lane_path(tmp_path) / "filled_bridge_results.jsonl", filled_rows)
     _write_jsonl(_lane_path(tmp_path) / "trades.jsonl", [])
     _write_session_close_review(tmp_path)
+    _write_manual_reconciliation_review(tmp_path)
     _write_broker_truth(tmp_path, broker_mnq_qty=broker_mnq_qty, open_order_count=open_order_count)
 
 
@@ -315,6 +381,47 @@ def _write_session_close_review(tmp_path: Path) -> None:
                     "fill_count": 0,
                 }
             ]
+        },
+    )
+
+
+def _write_manual_reconciliation_review(tmp_path: Path) -> None:
+    _write_json(
+        tmp_path / "outputs" / "reports" / "mnq_manual_reconciliation_close" / "mnq_manual_reconciliation_close_review.json",
+        {
+            "classification": "UNKNOWN_REQUIRES_REVIEW_CLOSED_FLAT",
+            "broker_position_after": 0.0,
+            "review_required": True,
+            "strategy_managed_exit": False,
+            "strategy_pnl": False,
+            "possible_source_execution": {
+                "account_id": "DUM882026",
+                "broker_order_id": 2,
+                "client_id": 10902,
+                "con_id": 770561201,
+                "executed_at": "2026-05-08T18:17:41.701603+00:00",
+                "execution_id": "0000e1a7.6a015c30.01.01",
+                "local_symbol": "MNQM6",
+                "perm_id": 895323400,
+                "price": 29307.75,
+                "quantity": 1.0,
+                "side": "BOT",
+                "symbol": "MNQ",
+            },
+            "close_execution": {
+                "account_id": "DUM882026",
+                "broker_order_id": 1,
+                "client_id": 9085,
+                "con_id": 770561201,
+                "executed_at": "2026-05-08T18:17:41.701706+00:00",
+                "execution_id": "0000e1a7.6a016db1.01.01",
+                "local_symbol": "MNQM6",
+                "perm_id": 895323723,
+                "price": 29287.25,
+                "quantity": 1.0,
+                "side": "SLD",
+                "symbol": "MNQ",
+            },
         },
     )
 
