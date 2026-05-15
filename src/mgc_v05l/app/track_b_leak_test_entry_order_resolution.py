@@ -26,7 +26,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--mode", default="PAPER")
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=7497)
-    parser.add_argument("--tws-client-id", type=int, default=10942)
+    parser.add_argument("--tws-client-id", type=int, default=None)
     parser.add_argument("--account-id", default="DUM882026")
     parser.add_argument("--output-dir", type=Path, default=None)
     parser.add_argument("--apply", action="store_true", help="Cancel the exact known leak-test entry order.")
@@ -46,7 +46,7 @@ def main(argv: list[str] | None = None) -> int:
         mode=str(args.mode or "").strip().upper(),
         host=str(args.host or "").strip(),
         port=int(args.port),
-        tws_client_id=int(args.tws_client_id),
+        tws_client_id=int(args.tws_client_id or args.client_id or default_config.tws_client_id),
         account_id=str(args.account_id or "").strip(),
         output_dir=args.output_dir if args.output_dir is not None else default_config.output_dir,
         apply=bool(args.apply),
