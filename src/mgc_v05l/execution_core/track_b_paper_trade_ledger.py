@@ -1163,6 +1163,7 @@ def _trade_record_from_filled_bridge_result(
         "lifecycle_id": lifecycle_id,
         "signal_id": order_intent_id or lifecycle_id,
         "strategy_id": strategy_id,
+        "lane_id": filled_bridge_result.get("lane_id"),
         "instrument_family": symbol,
         "contract_key": _contract_key_from_bridge_result(filled_bridge_result, contract),
         "local_symbol": filled_bridge_result.get("local_symbol") or contract.get("local_symbol"),
@@ -1269,6 +1270,7 @@ def _closed_trade_record_from_filled_bridge_result(
             "exit_perm_id": filled_bridge_result.get("perm_id"),
             "exit_client_id": filled_bridge_result.get("client_id"),
             "exit_exec_id": filled_bridge_result.get("exec_id") or filled_bridge_result.get("execution_id"),
+            "exit_fill_confirmed": True,
             "exit_broker_identity": {
                 "account_id": filled_bridge_result.get("account_id"),
                 "broker_order_id": filled_bridge_result.get("broker_order_id"),
@@ -1314,7 +1316,8 @@ def _matching_open_bridge_record(
             continue
         if contract_key and str(item.get("contract_key") or "") != contract_key:
             continue
-        if account_id and str(item.get("account_id") or "") != account_id:
+        existing_account_id = str(item.get("account_id") or "")
+        if account_id and existing_account_id and existing_account_id != account_id:
             continue
         candidates.append(dict(item))
     if not candidates:
@@ -2237,7 +2240,7 @@ def _has_entry_fill(item: Mapping[str, Any]) -> bool:
 
 
 def _has_exit_fill(item: Mapping[str, Any]) -> bool:
-    return item.get("exit_fill_price") not in {None, ""}
+    return item.get("exit_fill_confirmed") is True or item.get("exit_fill_price") not in {None, ""}
 
 
 def _managed_transmission_classification(

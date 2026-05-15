@@ -138,6 +138,69 @@ def test_direct_bridge_close_fill_persists_closed_flat_record(tmp_path: Path) ->
     assert result.pnl_summary["completed_trades"] == 1
 
 
+def test_flat_confirmed_direct_close_counts_as_closed_when_price_unknown(tmp_path: Path) -> None:
+    output_root = tmp_path / "ledger"
+    open_payload = {
+        "classification": "PAPER_STRATEGY_ORDER_FILLED_PERSISTED",
+        "strategy_id": "atp_companion_v1__production_track_gc_asia_us_selective_v1",
+        "lane_id": "atp_companion_v1_gc_asia_us_production_track_selective_v1",
+        "instrument": "GC",
+        "symbol": "GC",
+        "action": "BUY",
+        "quantity": 1,
+        "order_intent_id": "GC|leak_test|BUY_TO_OPEN",
+        "intent_type": "BUY_TO_OPEN",
+        "broker_order_id": "26",
+        "account_id": None,
+        "perm_id": None,
+        "client_id": 11940,
+        "exec_id": None,
+        "local_symbol": "GCM6",
+        "con_id": 430360630,
+        "contract": {"symbol": "GC", "local_symbol": "GCM6", "expiry": "202606", "multiplier": "100"},
+        "fill_price": "4566.0",
+        "fill_timestamp": "2026-05-15T15:40:00+00:00",
+        "bridge_classification": "PAPER_STRATEGY_ORDER_FILLED",
+        "paper_proof_invoked": False,
+        "live_money_readiness": False,
+        "review_required": False,
+    }
+    close_payload = {
+        **open_payload,
+        "action": "SELL",
+        "order_intent_id": "GC|managed_exit_disappeared|27",
+        "intent_type": "SELL_TO_CLOSE",
+        "broker_order_id": "27",
+        "account_id": "DUM882026",
+        "fill_price": None,
+        "fill_price_source": "UNKNOWN_BROKER_POSITION_FLAT",
+        "realized_pnl_unknown": True,
+        "fill_timestamp": "2026-05-15T15:45:00+00:00",
+    }
+
+    update_track_b_paper_trade_ledger_from_filled_bridge_result(
+        filled_bridge_result=open_payload,
+        filled_bridge_result_json=write_json(tmp_path / "open.json", open_payload),
+        output_root=output_root,
+        now=aware_now(),
+    )
+    result = update_track_b_paper_trade_ledger_from_filled_bridge_result(
+        filled_bridge_result=close_payload,
+        filled_bridge_result_json=write_json(tmp_path / "close.json", close_payload),
+        output_root=output_root,
+        now=aware_now(),
+    )
+
+    assert result.trade_record_written is True
+    assert result.trade_record is not None
+    assert result.trade_record["final_position_status"] == "CLOSED_FLAT"
+    assert result.trade_record["lane_id"] == open_payload["lane_id"]
+    assert result.trade_record["exit_fill_confirmed"] is True
+    assert result.trade_record["exit_fill_price"] is None
+    assert result.live_position_status["open_position_count"] == 0
+    assert result.pnl_summary["completed_trades"] == 1
+
+
 def write_json(path: Path, payload: dict[str, object]) -> Path:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")

@@ -150,6 +150,38 @@ def _unknown_bridge_result(*, submit_attempted: bool) -> dict[str, object]:
     }
 
 
+def _unknown_close_bridge_result(*, lifecycle_id: str) -> dict[str, object]:
+    return {
+        "classification": "PAPER_STRATEGY_NEEDS_MANUAL_REVIEW",
+        "report": {
+            "classification": "PAPER_STRATEGY_NEEDS_MANUAL_REVIEW",
+            "detail": "Unknown manual close state.",
+            "entry_execution_pricing": {"execution_price_source": "RUNTIME_DATABENTO_1M_CLOSE"},
+            "known_managed_exit_order_persistence": {
+                "persisted": True,
+                "lifecycle_id": lifecycle_id,
+                "broker_order_id": "27",
+                "client_id": 11940,
+                "perm_id": None,
+                "action": "SELL",
+                "quantity": "1",
+            },
+            "delegated_result": {
+                "classification": "PAPER_CLOSE_UNKNOWN_NEEDS_MANUAL_TWS_REVIEW",
+                "report": {
+                    "classification": "PAPER_CLOSE_UNKNOWN_NEEDS_MANUAL_TWS_REVIEW",
+                    "submit_cancel_lifecycle": {
+                        "status": "manual_confirmation_unavailable",
+                        "submitted_order_id": 27,
+                        "manual_confirmation": {"state": "SUBMIT_SENT_AWAITING_TWS_MANUAL_CONFIRMATION"},
+                        "open_order_after_submit": {"open_order_count": 0, "open_orders": []},
+                    },
+                },
+            },
+        },
+    }
+
+
 def _blocked_after_submit_bridge_result() -> dict[str, object]:
     return {
         "classification": "PAPER_STRATEGY_INTENT_BLOCKED",
@@ -1369,6 +1401,68 @@ def test_apply_filled_entry_and_filled_exit_returns_full_round_trip_pass(tmp_pat
     assert calls[1].caller_metadata["intent_type"] == "SELL_TO_CLOSE"
     assert report.apply_result is not None
     assert report.apply_result.lifecycle_open_result == "LIFECYCLE_OPEN_MATCHED"
+    assert report.apply_result.lifecycle_close_result == "LIFECYCLE_CLOSED_FLAT"
+
+
+def test_unknown_managed_exit_with_broker_flat_resolves_lifecycle_close(tmp_path: Path) -> None:
+    calls = []
+    refresh_calls = []
+    resolution_calls = []
+    lifecycle_id = "bridge_fill_MNQ|1m|2026-05-14T17:52:00Z|BUY_TO_OPEN"
+
+    def _runner(config):
+        calls.append(config)
+        return _bridge_result("PAPER_STRATEGY_ORDER_FILLED") if len(calls) == 1 else _unknown_close_bridge_result(lifecycle_id=lifecycle_id)
+
+    def _refresh(_repo_root: Path, stage: str) -> dict[str, object]:
+        refresh_calls.append(stage)
+        if stage.endswith("after_managed_exit_resolution"):
+            return _clean_flat_reconciliation()
+        return _clean_flat_reconciliation(
+            broker_reconciled=False,
+            classification="TRACK_B_PAPER_BROKER_RECONCILIATION_BLOCKED",
+            track_b_broker_position_count=0,
+            lifecycle_open_position_count=1,
+            track_b_lifecycle_positions=[_managed_position(symbol="MNQ", lane_id=LANE_ID)],
+            blockers=["TRACK_B_BROKER_LIFECYCLE_POSITION_COUNT_MISMATCH"],
+        )
+
+    def _resolve(**kwargs):
+        resolution_calls.append(kwargs)
+        return {"classification": "KNOWN_MANAGED_EXIT_ORDER_FILLED_CLOSE_PERSISTENCE_GAP"}
+
+    report = build_single_lane_apply_report(
+        repo_root=REPO_ROOT,
+        lane_id=LANE_ID,
+        reconciliation=_clean_flat_reconciliation(),
+        operator_status=_operator_status(),
+        runtime_command=_runtime_command(),
+        authorization_path=_authorization_path(tmp_path),
+        guarded_route_runner=_runner,
+        readiness_checker=_ready_precheck,
+        post_submit_broker_state_refresher=_refresh,
+        lifecycle_adoption_runner=_adoption_applied,
+        managed_exit_resolution_runner=_resolve,
+        reconciliation_reader=_reader_for(
+            {
+                "after_entry": _clean_managed_position_reconciliation(symbol="MNQ", lane_id=LANE_ID),
+            }
+        ),
+        max_wait_seconds=0,
+    )
+
+    assert report.result_classification == "LEAK_TEST_PASS_FULL_ROUND_TRIP"
+    assert refresh_calls == [
+        "entry_after_adoption_attempt",
+        "exit_unknown_post_submit",
+        "exit_unknown_post_submit_after_managed_exit_resolution",
+    ]
+    assert len(resolution_calls) == 1
+    assert resolution_calls[0]["lifecycle_id"] == lifecycle_id
+    assert report.apply_result is not None
+    assert report.apply_result.exit is not None
+    assert report.apply_result.exit.order_id == "27"
+    assert report.apply_result.exit.client_id == 11940
     assert report.apply_result.lifecycle_close_result == "LIFECYCLE_CLOSED_FLAT"
 
 

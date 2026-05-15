@@ -26,6 +26,10 @@ from ..execution_core.track_b_paper_broker_reconciliation import (
     ReconciliationConfig,
     reconcile_track_b_paper_broker_truth,
 )
+from ..execution_core.track_b_managed_exit_order_resolution import (
+    ManagedExitOrderResolutionConfig,
+    resolve_known_managed_exit_order_disappearance,
+)
 from .ibkr_broker_truth_refresher import BrokerTruthRefreshConfig, run_broker_truth_refresh_once
 from .probationary_runtime import _active_probationary_paper_lane_specs
 from .track_b_paper_lifecycle_adoption import LifecycleAdoptionConfig, run_track_b_paper_lifecycle_adoption
@@ -1129,6 +1133,34 @@ def _default_lifecycle_adoption_runner(
     return result.report
 
 
+def _default_managed_exit_resolution_runner(
+    *,
+    repo_root: Path,
+    lane: LeakTestLanePlan,
+    exit_result: LeakTestOrderResult,
+    lifecycle_id: str,
+) -> dict[str, Any]:
+    if not exit_result.order_id:
+        return {
+            "classification": "KNOWN_MANAGED_EXIT_ORDER_DISAPPEARED_REVIEW_REQUIRED",
+            "detail": "Cannot resolve managed exit without a broker order id.",
+        }
+    report = resolve_known_managed_exit_order_disappearance(
+        config=ManagedExitOrderResolutionConfig(
+            repo_root=repo_root,
+            lifecycle_id=lifecycle_id,
+            broker_order_id=str(exit_result.order_id),
+            client_id=exit_result.client_id,
+            perm_id=exit_result.perm_id,
+            symbol=lane.symbol,
+            local_symbol=lane.localSymbol,
+            con_id=lane.conId,
+            apply=True,
+        )
+    )
+    return dict(report)
+
+
 def _default_reconciliation_reader(repo_root: Path, stage: str) -> dict[str, Any]:
     del stage
     return _read_json(repo_root / RECONCILIATION_PATH)
@@ -1651,6 +1683,8 @@ def _order_result_from_bridge(*, phase: str, route_result: Mapping[str, Any]) ->
             lifecycle.get("submitted_order_id")
             or lifecycle.get("order_id")
             or lifecycle.get("broker_order_id")
+            or _nested(report, "known_managed_exit_order_persistence", "broker_order_id")
+            or _nested(report, "known_leak_test_entry_order_persistence", "broker_order_id")
             or delegated_report.get("submitted_order_id")
             or delegated_report.get("order_id")
             or delegated.get("submitted_order_id")
@@ -1662,10 +1696,19 @@ def _order_result_from_bridge(*, phase: str, route_result: Mapping[str, Any]) ->
             lifecycle.get("client_id")
             or delegated_report.get("client_id")
             or delegated.get("client_id")
+            or _nested(report, "known_managed_exit_order_persistence", "client_id")
+            or _nested(report, "known_leak_test_entry_order_persistence", "client_id")
             or _nested(report, "caller_metadata", "client_id")
         )
         or None,
-        perm_id=_int_value(lifecycle.get("perm_id") or delegated_report.get("perm_id") or delegated.get("perm_id")) or None,
+        perm_id=_int_value(
+            lifecycle.get("perm_id")
+            or delegated_report.get("perm_id")
+            or delegated.get("perm_id")
+            or _nested(report, "known_managed_exit_order_persistence", "perm_id")
+            or _nested(report, "known_leak_test_entry_order_persistence", "perm_id")
+        )
+        or None,
         fill_price=_float_or_none(
             lifecycle.get("fill_price")
             or lifecycle.get("filled_avg_price")
@@ -1877,6 +1920,7 @@ def build_single_lane_apply_report(
     reconciliation_reader: Callable[[Path, str], dict[str, Any]] = _default_reconciliation_reader,
     post_submit_broker_state_refresher: Callable[[Path, str], dict[str, Any]] = _default_post_submit_broker_state_refresher,
     lifecycle_adoption_runner: Callable[..., dict[str, Any]] = _default_lifecycle_adoption_runner,
+    managed_exit_resolution_runner: Callable[..., dict[str, Any]] = _default_managed_exit_resolution_runner,
     readiness_checker: Callable[[Path, LeakTestLanePlan, LeakTestSafetySnapshot], dict[str, Any]] | None = None,
     concurrent_tolerant: bool = False,
 ) -> LeakTestReport:
@@ -2142,6 +2186,7 @@ def build_single_lane_apply_report(
                 if exit_result.submit_attempted and exit_result.classification == "BLOCKED":
                     reconciliation_after_exit = post_submit_broker_state_refresher(repo_root, "exit_blocked_post_submit")
                     classification = _unknown_post_submit_classification(reconciliation_after_exit)
+                    _resolve_unknown_exit_if_broker_flat("exit_blocked_post_submit", lifecycle_id)
                 else:
                     classification = "LEAK_TEST_EXIT_NOT_FILLED_CANCELLED"
                     reconciliation_after_exit = reconciliation_reader(repo_root, "exit_not_filled_cancelled")
@@ -2149,6 +2194,7 @@ def build_single_lane_apply_report(
                 if exit_result.submit_attempted:
                     reconciliation_after_exit = post_submit_broker_state_refresher(repo_root, "exit_unknown_post_submit")
                     classification = _unknown_post_submit_classification(reconciliation_after_exit)
+                    _resolve_unknown_exit_if_broker_flat("exit_unknown_post_submit", lifecycle_id)
                 else:
                     classification = "LEAK_TEST_EXIT_NOT_FILLED_CANCELLED"
                     reconciliation_after_exit = reconciliation_reader(repo_root, "exit_unknown_before_submit")
@@ -2170,6 +2216,47 @@ def build_single_lane_apply_report(
                     if lifecycle_close_result == "LIFECYCLE_CLOSED_FLAT"
                     else "LEAK_TEST_EXIT_FILL_LIFECYCLE_GAP"
                 )
+
+        def _resolve_unknown_exit_if_broker_flat(stage: str, lifecycle_id: str | None) -> bool:
+            nonlocal classification
+            nonlocal lifecycle_close_result
+            nonlocal reconciliation_after_exit
+            if exit_result is None or not exit_result.submit_attempted or not lifecycle_id:
+                return False
+            if not exit_result.order_id:
+                return False
+            current_reconciliation = reconciliation_after_exit or {}
+            if _int_value(current_reconciliation.get("track_b_broker_open_order_count")):
+                return False
+            if _int_value(current_reconciliation.get("unknown_broker_open_order_count")):
+                return False
+            if _int_value(current_reconciliation.get("track_b_broker_position_count")):
+                return False
+            if _int_value(current_reconciliation.get("lifecycle_open_position_count")) == 0:
+                return False
+            resolution = managed_exit_resolution_runner(
+                repo_root=repo_root,
+                lane=lane,
+                exit_result=exit_result,
+                lifecycle_id=lifecycle_id,
+            )
+            if str(resolution.get("classification") or "") != "KNOWN_MANAGED_EXIT_ORDER_FILLED_CLOSE_PERSISTENCE_GAP":
+                return False
+            reconciliation_after_exit = post_submit_broker_state_refresher(
+                repo_root,
+                f"{stage}_after_managed_exit_resolution",
+            )
+            lifecycle_close_result = (
+                "LIFECYCLE_CLOSED_FLAT"
+                if _reconciliation_is_flat(reconciliation_after_exit)
+                else "LIFECYCLE_CLOSE_GAP"
+            )
+            classification = (
+                "LEAK_TEST_PASS_FULL_ROUND_TRIP"
+                if lifecycle_close_result == "LIFECYCLE_CLOSED_FLAT"
+                else "LEAK_TEST_EXIT_FILL_LIFECYCLE_GAP"
+            )
+            return True
         if not mutation_performed and classification in {
             "LEAK_TEST_AUTHORIZATION_MISSING",
             "LEAK_TEST_AUTHORIZATION_EXPIRED",
@@ -2236,6 +2323,7 @@ def build_single_lane_apply_report(
                     if exit_result.submit_attempted and exit_result.classification == "BLOCKED":
                         reconciliation_after_exit = post_submit_broker_state_refresher(repo_root, "exit_blocked_post_submit")
                         classification = _unknown_post_submit_classification(reconciliation_after_exit)
+                        _resolve_unknown_exit_if_broker_flat("exit_blocked_post_submit", lifecycle_id)
                     else:
                         classification = "LEAK_TEST_EXIT_NOT_FILLED_CANCELLED"
                         reconciliation_after_exit = reconciliation_reader(repo_root, "exit_not_filled_cancelled")
@@ -2243,6 +2331,7 @@ def build_single_lane_apply_report(
                     if exit_result.submit_attempted:
                         reconciliation_after_exit = post_submit_broker_state_refresher(repo_root, "exit_unknown_post_submit")
                         classification = _unknown_post_submit_classification(reconciliation_after_exit)
+                        _resolve_unknown_exit_if_broker_flat("exit_unknown_post_submit", lifecycle_id)
                     else:
                         classification = "LEAK_TEST_EXIT_NOT_FILLED_CANCELLED"
                         reconciliation_after_exit = reconciliation_reader(repo_root, "exit_unknown_before_submit")
