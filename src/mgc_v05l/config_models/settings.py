@@ -101,7 +101,7 @@ class StrategySettings(BaseModel):
     order_lifecycle_watchdog_interval_seconds: int = 15
     order_ack_timeout_seconds: int = 30
     order_fill_timeout_seconds: int = 180
-    order_timeout_reconcile_grace_seconds: int = 30
+    order_timeout_reconcile_grace_seconds: int = 60
     order_timeout_retry_limit: int = 0
     runtime_supervisor_restart_window_seconds: int = 900
     runtime_supervisor_max_auto_restarts_per_window: int = 3

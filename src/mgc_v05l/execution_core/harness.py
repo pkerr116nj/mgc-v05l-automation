@@ -68,8 +68,8 @@ class HarnessConfig:
     max_quote_age_seconds: Decimal = Decimal("30")
     max_distance_ticks: Decimal = Decimal("10")
     max_distance_percent: Decimal = Decimal("0.25")
-    open_fill_timeout_seconds: Decimal = Decimal("30")
-    close_fill_timeout_seconds: Decimal = Decimal("30")
+    open_fill_timeout_seconds: Decimal = Decimal("60")
+    close_fill_timeout_seconds: Decimal = Decimal("60")
     cancel_timeout_seconds: Decimal = Decimal("10")
     output_root: Path = DEFAULT_OUTPUT_ROOT
     confirm_paper_only: bool = True

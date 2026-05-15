@@ -56,7 +56,7 @@ reconciliation_heartbeat_interval_seconds: 60
 order_lifecycle_watchdog_interval_seconds: 15
 order_ack_timeout_seconds: 30
 order_fill_timeout_seconds: 180
-order_timeout_reconcile_grace_seconds: 30
+order_timeout_reconcile_grace_seconds: 60
 order_timeout_retry_limit: 0
 runtime_supervisor_restart_window_seconds: 900
 runtime_supervisor_max_auto_restarts_per_window: 3

@@ -38,8 +38,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--time-in-force", default="DAY", help="Initial scope only allows DAY.")
     parser.add_argument("--test-mode", default="PAPER_RESTING_TEST", choices=("PAPER_RESTING_TEST", "PAPER_FILL_TEST", "PAPER_CLOSE_TEST"), help="Manual test mode. PAPER_FILL_TEST is intended for one controlled paper fill attempt. PAPER_CLOSE_TEST is intended for one controlled paper close attempt.")
     parser.add_argument("--timeout-seconds", type=float, default=15.0, help="Truth refresh and lifecycle timeout in seconds.")
-    parser.add_argument("--fill-timeout-seconds", type=float, default=8.0, help="How long PAPER_FILL_TEST waits for broker-truth fill verification before canceling.")
-    parser.add_argument("--post-approval-observation-seconds", type=float, default=15.0, help="How long the manual harness keeps observing broker truth after TWS approval before declaring a fill-timeout path.")
+    parser.add_argument("--fill-timeout-seconds", type=float, default=60.0, help="How long PAPER_FILL_TEST waits for broker-truth fill verification before canceling.")
+    parser.add_argument("--post-approval-observation-seconds", type=float, default=75.0, help="How long the manual harness keeps observing broker truth after TWS approval before declaring a fill-timeout path.")
     parser.add_argument("--fill-limit-offset-ticks", type=float, default=1.0, help="Tick offset applied above delayed ask/last for PAPER_FILL_TEST BUY previews and below delayed bid/last for PAPER_CLOSE_TEST SELL previews.")
     parser.add_argument(
         "--manual-confirmation-timeout-seconds",
