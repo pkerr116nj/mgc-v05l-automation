@@ -97,7 +97,7 @@ class IbkrPaperAdapter:
         submit_enabled: bool = False,
         module_loader: Callable[[str], Any] | None = None,
         request_timeout_seconds: float = 30.0,
-        fill_timeout_seconds: float = 30.0,
+        fill_timeout_seconds: float = 60.0,
         cancel_timeout_seconds: float = 10.0,
     ) -> None:
         self.mode = str(mode or "").strip().upper()
@@ -567,6 +567,24 @@ class IbkrPaperAdapter:
             bridge.cancelOrder(local_order_id, "")
         except TypeError:
             bridge.cancelOrder(local_order_id)
+
+    def register_existing_order_for_cancel(
+        self,
+        *,
+        submit_attempt: SubmitAttempt,
+        order_intent: OrderIntent,
+        broker_order_id: str,
+        created_at: datetime,
+    ) -> None:
+        """Register an already-working known order so exact cancel callbacks correlate."""
+
+        self.register_submit_context(
+            submit_attempt=submit_attempt,
+            order_intent=order_intent,
+            created_at=created_at,
+        )
+        self._local_order_to_submit[str(broker_order_id)] = submit_attempt.submit_attempt_id
+        self._cancel_ready.setdefault(submit_attempt.submit_attempt_id, threading.Event())
 
     def wait_for_cancel(self, *, submit_attempt_id: str, timeout_seconds: float | None = None) -> None:
         self._wait(
