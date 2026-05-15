@@ -1936,8 +1936,12 @@ def build_single_lane_apply_report(
         }:
             pass
         elif entry_result.classification == "BLOCKED":
-            classification = "LEAK_TEST_PASS_BLOCKED_SAFELY"
-            reconciliation_after_exit = reconciliation_reader(repo_root, "entry_blocked")
+            if entry_result.submit_attempted:
+                reconciliation_after_exit = post_submit_broker_state_refresher(repo_root, "entry_blocked_post_submit")
+                classification = _unknown_post_submit_classification(reconciliation_after_exit)
+            else:
+                classification = "LEAK_TEST_PASS_BLOCKED_SAFELY"
+                reconciliation_after_exit = reconciliation_reader(repo_root, "entry_blocked")
         elif entry_result.classification == "REJECTED":
             classification = "LEAK_TEST_ENTRY_REJECTED"
             reconciliation_after_exit = reconciliation_reader(repo_root, "entry_rejected")
@@ -1993,8 +1997,12 @@ def build_single_lane_apply_report(
                     classification = "LEAK_TEST_EXIT_REJECTED"
                     reconciliation_after_exit = reconciliation_reader(repo_root, "exit_rejected")
                 elif exit_result.classification in {"BLOCKED", "NOT_FILLED_CANCELLED"}:
-                    classification = "LEAK_TEST_EXIT_NOT_FILLED_CANCELLED"
-                    reconciliation_after_exit = reconciliation_reader(repo_root, "exit_not_filled_cancelled")
+                    if exit_result.submit_attempted and exit_result.classification == "BLOCKED":
+                        reconciliation_after_exit = post_submit_broker_state_refresher(repo_root, "exit_blocked_post_submit")
+                        classification = _unknown_post_submit_classification(reconciliation_after_exit)
+                    else:
+                        classification = "LEAK_TEST_EXIT_NOT_FILLED_CANCELLED"
+                        reconciliation_after_exit = reconciliation_reader(repo_root, "exit_not_filled_cancelled")
                 elif exit_result.classification != "FILLED":
                     if exit_result.submit_attempted:
                         reconciliation_after_exit = post_submit_broker_state_refresher(repo_root, "exit_unknown_post_submit")

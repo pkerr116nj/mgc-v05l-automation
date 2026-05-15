@@ -94,6 +94,17 @@ def _lane(report, lane_id: str = LANE_ID):
 
 
 def _bridge_result(classification: str, *, status: str = "filled") -> dict[str, object]:
+    lifecycle: dict[str, object] = {"status": status}
+    if status != "blocked":
+        lifecycle.update(
+            {
+                "broker_order_id": "11",
+                "client_id": 10940,
+                "perm_id": 984270669,
+                "fill_price": "29492.75",
+                "fill_timestamp": "2026-05-14T13:04:48.414655+00:00",
+            }
+        )
     return {
         "classification": classification,
         "report": {
@@ -102,16 +113,7 @@ def _bridge_result(classification: str, *, status: str = "filled") -> dict[str, 
             "entry_execution_pricing": {"execution_price_source": "RUNTIME_DATABENTO_1M_CLOSE"},
             "delegated_result": {
                 "classification": f"{classification}_DELEGATED",
-                "report": {
-                    "submit_cancel_lifecycle": {
-                        "status": status,
-                        "broker_order_id": "11",
-                        "client_id": 10940,
-                        "perm_id": 984270669,
-                        "fill_price": "29492.75",
-                        "fill_timestamp": "2026-05-14T13:04:48.414655+00:00",
-                    }
-                },
+                "report": {"submit_cancel_lifecycle": lifecycle},
             },
         },
     }
@@ -141,6 +143,29 @@ def _unknown_bridge_result(*, submit_attempted: bool) -> dict[str, object]:
                 "report": {
                     "classification": "PAPER_ORDER_UNKNOWN_NEEDS_MANUAL_TWS_REVIEW",
                     "submit_cancel_lifecycle": lifecycle,
+                },
+            },
+        },
+    }
+
+
+def _blocked_after_submit_bridge_result() -> dict[str, object]:
+    return {
+        "classification": "PAPER_STRATEGY_INTENT_BLOCKED",
+        "report": {
+            "classification": "PAPER_STRATEGY_INTENT_BLOCKED",
+            "detail": "Delegated manual state blocked after submit.",
+            "entry_execution_pricing": {"execution_price_source": "RUNTIME_DATABENTO_1M_CLOSE"},
+            "delegated_result": {
+                "classification": "PAPER_ORDER_UNKNOWN_NEEDS_MANUAL_TWS_REVIEW",
+                "report": {
+                    "classification": "PAPER_ORDER_UNKNOWN_NEEDS_MANUAL_TWS_REVIEW",
+                    "submit_cancel_lifecycle": {
+                        "status": "manual_confirmation_unavailable",
+                        "submitted_order_id": 1,
+                        "manual_confirmation": {"state": "SUBMIT_SENT_AWAITING_TWS_MANUAL_CONFIRMATION"},
+                        "open_order_after_submit": {"open_order_count": 0, "open_orders": []},
+                    },
                 },
             },
         },
@@ -925,6 +950,40 @@ def test_apply_blocked_entry_returns_safe_classification(tmp_path: Path) -> None
     assert report.apply_result is not None
     assert report.apply_result.entry is not None
     assert report.apply_result.entry.classification == "BLOCKED"
+    assert report.apply_result.entry.submit_attempted is False
+
+
+def test_blocked_entry_after_submit_requires_broker_refresh_and_is_not_safe(tmp_path: Path) -> None:
+    refresh_calls = []
+
+    def _refresh(_repo_root: Path, stage: str) -> dict[str, object]:
+        refresh_calls.append(stage)
+        return _clean_flat_reconciliation(
+            broker_reconciled=False,
+            classification="TRACK_B_PAPER_BROKER_RECONCILIATION_BLOCKED",
+            track_b_broker_position_count=1,
+            lifecycle_open_position_count=0,
+            track_b_broker_positions=[{"symbol": "GC", "local_symbol": "GCM6", "quantity": "1"}],
+        )
+
+    report = build_single_lane_apply_report(
+        repo_root=REPO_ROOT,
+        lane_id=LANE_ID,
+        reconciliation=_clean_flat_reconciliation(),
+        operator_status=_operator_status(),
+        runtime_command=_runtime_command(),
+        authorization_path=_authorization_path(tmp_path),
+        guarded_route_runner=lambda _config: _blocked_after_submit_bridge_result(),
+        readiness_checker=_ready_precheck,
+        post_submit_broker_state_refresher=_refresh,
+    )
+
+    assert report.result_classification == "LEAK_TEST_ENTRY_BROKER_FILLED_BUT_RESULT_UNKNOWN"
+    assert refresh_calls == ["entry_blocked_post_submit"]
+    assert report.apply_result is not None
+    assert report.apply_result.entry is not None
+    assert report.apply_result.entry.classification == "BLOCKED"
+    assert report.apply_result.entry.submit_attempted is True
 
 
 def test_unknown_result_before_submit_can_block_safely_without_refresh(tmp_path: Path) -> None:
