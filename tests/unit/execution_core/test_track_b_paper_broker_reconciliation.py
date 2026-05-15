@@ -270,6 +270,68 @@ def test_known_managed_exit_order_is_not_unknown_open_order_blocker(tmp_path: Pa
     assert reconciled_position["known_managed_exit_orders"][0]["broker_order_id"] == "1"
 
 
+def test_known_leak_test_entry_order_is_not_unknown_open_order_blocker(tmp_path: Path) -> None:
+    config = _write_base_artifacts(tmp_path)
+    state_path = tmp_path / "outputs" / "track_b_execution_core" / "leak_test_entry_orders" / "latest_known_leak_test_entry_orders.json"
+    _write_json(
+        state_path,
+        {
+            "schema_version": "track_b_known_leak_test_entry_orders_v1",
+            "paper_proof_invoked": False,
+            "live_money_eligible": False,
+            "known_leak_test_entry_orders": [
+                {
+                    "managed_order_status": "KNOWN_LEAK_TEST_ENTRY_ORDER_WORKING",
+                    "source": "IBKR_PAPER_STRATEGY_BRIDGE_DELEGATED_LEAK_TEST_ENTRY_SUBMIT",
+                    "broker_order_id": "12",
+                    "client_id": 11940,
+                    "perm_id": 614043263,
+                    "strategy_id": "gc_mgc_forced_session_baseline_v2__gc_1x_all_lanes__london_early_long",
+                    "lane_id": "gc_1x_all_lanes__london_early_long",
+                    "account_id": "DUM882026",
+                    "symbol": "GC",
+                    "local_symbol": "GCM6",
+                    "con_id": 430360630,
+                    "action": "BUY",
+                    "quantity": "1",
+                    "limit_price": "4556.0",
+                }
+            ],
+        },
+    )
+    _write_broker_truth(
+        config,
+        open_orders=[
+            {
+                "broker_order_id": "12",
+                "client_id": 11940,
+                "perm_id": 614043263,
+                "symbol": "GC",
+                "local_symbol": "GCM6",
+                "security_type": "FUT",
+                "expiry": "20260626",
+                "con_id": 430360630,
+                "action": "BUY",
+                "order_type": "LMT",
+                "limit_price": "4556.0",
+                "quantity": "1",
+                "remaining_quantity": "1",
+                "status": "Submitted",
+            }
+        ],
+    )
+
+    report = reconcile_track_b_paper_broker_truth(config=config, now=NOW)
+
+    assert report["classification"] == "TRACK_B_PAPER_BROKER_RECONCILED_WITH_KNOWN_LEAK_TEST_ENTRY_ORDER"
+    assert report["broker_reconciled"] is True
+    assert report["known_leak_test_entry_order_count"] == 1
+    assert report["unknown_broker_open_order_count"] == 0
+    assert report["blockers"] == []
+    reconciled_position = json.loads(config.reconciled_live_position_status_path.read_text(encoding="utf-8"))
+    assert reconciled_position["known_leak_test_entry_orders"][0]["broker_order_id"] == "12"
+
+
 def test_runtime_restore_known_managed_exit_order_is_not_unknown_open_order_blocker(tmp_path: Path) -> None:
     open_position = {
         "strategy_id": "gc_mgc_forced_session_baseline_v2__gc_1x_all_lanes__london_early_long",

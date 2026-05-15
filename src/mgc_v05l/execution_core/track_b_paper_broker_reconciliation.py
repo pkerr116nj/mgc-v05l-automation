@@ -41,6 +41,13 @@ DEFAULT_KNOWN_MANAGED_EXIT_ORDERS_PATH = (
     / "managed_exit_orders"
     / "latest_known_managed_exit_orders.json"
 )
+DEFAULT_KNOWN_LEAK_TEST_ENTRY_ORDERS_PATH = (
+    REPO_ROOT
+    / "outputs"
+    / "track_b_execution_core"
+    / "leak_test_entry_orders"
+    / "latest_known_leak_test_entry_orders.json"
+)
 DEFAULT_MAX_AGE_SECONDS = float(os.environ.get("TRACK_B_BROKER_TRUTH_MAX_AGE_SECONDS", "120"))
 DEFAULT_BROKER_TRUTH_SETTLEMENT_SECONDS = float(os.environ.get("TRACK_B_PAPER_BROKER_TRUTH_SETTLEMENT_SECONDS", "300"))
 DEFAULT_BROKER_TRUTH_SETTLEMENT_POLL_SECONDS = float(os.environ.get("TRACK_B_PAPER_BROKER_TRUTH_SETTLEMENT_POLL_SECONDS", "15"))
@@ -169,9 +176,16 @@ def reconcile_track_b_paper_broker_truth(
         config=config,
         now=actual_now,
     )
+    known_leak_test_entry_orders = _known_leak_test_entry_orders(
+        broker_open_orders=track_b_open_orders,
+        config=config,
+        persisted_known_orders=_persisted_known_leak_test_entry_orders(config.repo_root, config.symbols),
+        artifact_known_orders=_artifact_known_leak_test_entry_orders(config.repo_root, config.symbols),
+    )
     unknown_track_b_open_orders = _unknown_track_b_open_orders(
         broker_open_orders=track_b_open_orders,
         known_managed_exit_orders=known_managed_exit_orders,
+        known_leak_test_entry_orders=known_leak_test_entry_orders,
     )
     broker_truth_settlement = _broker_truth_settlement_state(
         position_match_report=position_match_report,
@@ -220,7 +234,7 @@ def reconcile_track_b_paper_broker_truth(
             {
                 "code": "UNKNOWN_BROKER_OPEN_ORDER",
                 "legacy_code": "TRACK_B_BROKER_OPEN_ORDER_PRESENT",
-                "detail": "IBKR broker truth reports Track B futures open orders that are not attributed to a managed exit.",
+                "detail": "IBKR broker truth reports Track B futures open orders that are not attributed to a known managed exit or leak-test entry.",
                 "open_orders": unknown_track_b_open_orders,
             }
         )
@@ -239,6 +253,8 @@ def reconcile_track_b_paper_broker_truth(
         classification = str(broker_truth_settlement.get("classification"))
     elif reconciled and known_managed_exit_orders:
         classification = "TRACK_B_PAPER_BROKER_RECONCILED_WITH_KNOWN_MANAGED_EXIT_ORDER"
+    elif reconciled and known_leak_test_entry_orders:
+        classification = "TRACK_B_PAPER_BROKER_RECONCILED_WITH_KNOWN_LEAK_TEST_ENTRY_ORDER"
     else:
         classification = "TRACK_B_PAPER_BROKER_RECONCILED" if reconciled else "TRACK_B_PAPER_BROKER_RECONCILIATION_BLOCKED"
     report = {
@@ -274,12 +290,14 @@ def reconcile_track_b_paper_broker_truth(
         "track_b_broker_position_count": len(track_b_positions),
         "track_b_broker_open_order_count": len(track_b_open_orders),
         "known_managed_exit_order_count": len(known_managed_exit_orders),
+        "known_leak_test_entry_order_count": len(known_leak_test_entry_orders),
         "stale_managed_exit_order_count": len(stale_managed_exit_orders),
         "hard_exit_order_not_marketable_count": len(hard_exit_order_not_marketable),
         "unknown_broker_open_order_count": len(unknown_track_b_open_orders),
         "track_b_broker_positions": track_b_positions,
         "track_b_broker_open_orders": track_b_open_orders,
         "known_managed_exit_orders": known_managed_exit_orders,
+        "known_leak_test_entry_orders": known_leak_test_entry_orders,
         "stale_managed_exit_orders": stale_managed_exit_orders,
         "hard_exit_order_not_marketable_orders": hard_exit_order_not_marketable,
         "unknown_broker_open_orders": unknown_track_b_open_orders,
@@ -768,6 +786,178 @@ def _persisted_known_managed_exit_orders(repo_root: Path, symbols: Sequence[str]
     return rows
 
 
+def _persisted_known_leak_test_entry_orders(repo_root: Path, symbols: Sequence[str]) -> list[dict[str, Any]]:
+    path = repo_root / DEFAULT_KNOWN_LEAK_TEST_ENTRY_ORDERS_PATH.relative_to(REPO_ROOT)
+    payload = _load_json(path)
+    rows_payload = payload.get("known_leak_test_entry_orders") if isinstance(payload, Mapping) else None
+    if not isinstance(rows_payload, list):
+        return []
+    return _filter_known_leak_test_entry_orders(rows_payload, symbols)
+
+
+def _artifact_known_leak_test_entry_orders(repo_root: Path, symbols: Sequence[str]) -> list[dict[str, Any]]:
+    root = repo_root / "outputs" / "reports" / "track_b_paper_leak_test"
+    try:
+        report_paths = sorted(root.glob("*/ibkr_paper_strategy_bridge_report.json"))
+    except OSError:
+        return []
+    rows: list[dict[str, Any]] = []
+    for report_path in report_paths:
+        report = _load_json(report_path)
+        row = _known_leak_test_entry_order_from_bridge_report(report, source_path=report_path)
+        if row is not None:
+            rows.append(row)
+    return _filter_known_leak_test_entry_orders(rows, symbols)
+
+
+def _filter_known_leak_test_entry_orders(rows_payload: Sequence[Mapping[str, Any]], symbols: Sequence[str]) -> list[dict[str, Any]]:
+    allowed_symbols = {item.upper() for item in symbols}
+    rows: list[dict[str, Any]] = []
+    for item in rows_payload:
+        if not isinstance(item, Mapping):
+            continue
+        symbol = str(item.get("symbol") or "").strip().upper()
+        if symbol and symbol not in allowed_symbols:
+            continue
+        status = str(item.get("managed_order_status") or item.get("status") or "").strip().upper()
+        if status in {"CANCELLED", "CANCELED", "REJECTED", "FILLED", "EXPIRED"}:
+            continue
+        action = str(item.get("action") or "").strip().upper()
+        if action not in {"BUY", "SELL", "BUY_TO_OPEN", "SELL_TO_OPEN"}:
+            continue
+        rows.append(dict(item))
+    return rows
+
+
+def _known_leak_test_entry_order_from_bridge_report(
+    report: Mapping[str, Any],
+    *,
+    source_path: Path,
+) -> dict[str, Any] | None:
+    if not isinstance(report, Mapping):
+        return None
+    metadata = dict(report.get("caller_metadata") or {})
+    if metadata.get("leak_test") is not True and str(metadata.get("caller_type") or "") != "track_b_paper_leak_test":
+        return None
+    delegated = dict(report.get("delegated_result") or {})
+    delegated_report = dict(delegated.get("report") or {})
+    lifecycle = dict(
+        delegated_report.get("submit_cancel_lifecycle")
+        or delegated_report.get("lifecycle")
+        or delegated.get("submit_cancel_lifecycle")
+        or {}
+    )
+    broker_order_id = _int_or_none(
+        lifecycle.get("submitted_order_id")
+        or lifecycle.get("order_id")
+        or lifecycle.get("broker_order_id")
+        or delegated_report.get("submitted_order_id")
+        or delegated_report.get("order_id")
+        or delegated.get("submitted_order_id")
+        or delegated.get("broker_order_id")
+    )
+    if broker_order_id is None:
+        return None
+    intent = dict(report.get("intent") or {})
+    action = str(intent.get("action") or report.get("action") or metadata.get("intent_action") or "").strip().upper()
+    if action not in {"BUY", "SELL", "BUY_TO_OPEN", "SELL_TO_OPEN"}:
+        return None
+    qualified = dict((report.get("qualified_contract_report") or {}).get("qualified_contract") or {})
+    pricing = dict(report.get("entry_execution_pricing") or delegated.get("entry_execution_pricing") or {})
+    return {
+        "managed_order_status": "KNOWN_LEAK_TEST_ENTRY_ORDER_WORKING",
+        "source": "TRACK_B_PAPER_LEAK_TEST_BRIDGE_REPORT",
+        "source_artifact_path": str(source_path),
+        "strategy_id": metadata.get("strategy_id"),
+        "lane_id": metadata.get("lane_id") or report.get("strategy_id"),
+        "account_id": metadata.get("account_id") or report.get("account_id") or PAPER_ACCOUNT,
+        "symbol": str(qualified.get("symbol") or report.get("symbol") or intent.get("symbol") or "").strip().upper() or None,
+        "local_symbol": metadata.get("local_symbol") or qualified.get("local_symbol"),
+        "expiry": qualified.get("expiry") or report.get("contract_month") or intent.get("contract_month"),
+        "con_id": _int_or_none(metadata.get("con_id") or qualified.get("con_id")),
+        "action": action.replace("_TO_OPEN", ""),
+        "qty": _float_or_none(intent.get("quantity") or report.get("quantity") or metadata.get("quantity")) or 1.0,
+        "quantity": _float_or_none(intent.get("quantity") or report.get("quantity") or metadata.get("quantity")) or 1.0,
+        "order_type": intent.get("order_type") or report.get("order_type"),
+        "limit_price": pricing.get("limit_price") or intent.get("limit_price") or report.get("limit_price"),
+        "tif": intent.get("time_in_force") or report.get("time_in_force") or "DAY",
+        "broker_order_id": str(broker_order_id),
+        "client_id": _int_or_none(
+            lifecycle.get("client_id") or delegated_report.get("client_id") or delegated.get("client_id")
+        ),
+        "perm_id": _int_or_none(lifecycle.get("perm_id") or delegated_report.get("perm_id") or delegated.get("perm_id")),
+        "submitted_at": lifecycle.get("submitted_at") or delegated_report.get("submitted_at") or report.get("generated_at"),
+        "reason": report.get("reason") or intent.get("reason") or "LEAK_TEST_ENTRY",
+        "entry_execution_intent": pricing.get("entry_execution_intent") or report.get("entry_execution_intent"),
+        "execution_price_source": pricing.get("execution_price_source"),
+        "paper_proof_invoked": False,
+        "live_money_eligible": False,
+    }
+
+
+def _known_leak_test_entry_orders(
+    *,
+    broker_open_orders: Sequence[Mapping[str, Any]],
+    config: ReconciliationConfig,
+    persisted_known_orders: Sequence[Mapping[str, Any]] = (),
+    artifact_known_orders: Sequence[Mapping[str, Any]] = (),
+) -> list[dict[str, Any]]:
+    declared_orders: list[dict[str, Any]] = []
+    declared_orders.extend(dict(row) for row in persisted_known_orders if isinstance(row, Mapping))
+    declared_orders.extend(dict(row) for row in artifact_known_orders if isinstance(row, Mapping))
+    if not declared_orders:
+        return []
+    known: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for broker_order in broker_open_orders:
+        for declared in declared_orders:
+            if not _broker_order_matches_declared_leak_test_entry(broker_order=broker_order, declared=declared):
+                continue
+            row = dict(broker_order)
+            row["managed_order_status"] = "KNOWN_LEAK_TEST_ENTRY_ORDER_WORKING"
+            for key in (
+                "strategy_id",
+                "lane_id",
+                "source",
+                "source_artifact_path",
+                "entry_execution_intent",
+                "execution_price_source",
+                "reason",
+                "submitted_at",
+            ):
+                if _missing_value(row.get(key)) and not _missing_value(declared.get(key)):
+                    row[key] = declared.get(key)
+            _merge_missing_managed_exit_order_fields(row, declared)
+            row["source"] = declared.get("source") or "TRACK_B_PAPER_LEAK_TEST_KNOWN_ENTRY_ORDER"
+            row["known_identity"] = True
+            order_id = _order_id_text(row)
+            if order_id and order_id in seen:
+                break
+            if order_id:
+                seen.add(order_id)
+            known.append(row)
+            break
+    return known
+
+
+def _broker_order_matches_declared_leak_test_entry(
+    *,
+    broker_order: Mapping[str, Any],
+    declared: Mapping[str, Any],
+) -> bool:
+    return (
+        _order_id_text(broker_order) == _order_id_text(declared)
+        and _optional_int_matches(broker_order, declared, "client_id")
+        and _optional_int_matches(broker_order, declared, "perm_id")
+        and _optional_text_matches(broker_order, declared, "account_id")
+        and _optional_text_matches(broker_order, declared, "symbol")
+        and _optional_text_matches(broker_order, declared, "local_symbol")
+        and _optional_int_matches(broker_order, declared, "con_id")
+        and _optional_action_matches(broker_order, declared)
+        and _optional_quantity_matches(broker_order, declared)
+    )
+
+
 def _merge_missing_managed_exit_order_fields(row: dict[str, Any], declared: Mapping[str, Any]) -> None:
     for key in (
         "submitted_at",
@@ -1114,8 +1304,10 @@ def _unknown_track_b_open_orders(
     *,
     broker_open_orders: Sequence[Mapping[str, Any]],
     known_managed_exit_orders: Sequence[Mapping[str, Any]],
+    known_leak_test_entry_orders: Sequence[Mapping[str, Any]] = (),
 ) -> list[dict[str, Any]]:
     known_ids = {_order_id_text(row) for row in known_managed_exit_orders if _order_id_text(row)}
+    known_ids.update(_order_id_text(row) for row in known_leak_test_entry_orders if _order_id_text(row))
     unknown: list[dict[str, Any]] = []
     for row in broker_open_orders:
         if _order_id_text(row) in known_ids:
@@ -1193,9 +1385,11 @@ def _write_reconciled_summaries(
             "broker_track_b_position_count": broker_position_count,
             "broker_track_b_open_order_count": int(report.get("track_b_broker_open_order_count") or 0),
             "known_managed_exit_order_count": int(report.get("known_managed_exit_order_count") or 0),
+            "known_leak_test_entry_order_count": int(report.get("known_leak_test_entry_order_count") or 0),
             "stale_managed_exit_order_count": int(report.get("stale_managed_exit_order_count") or 0),
             "hard_exit_order_not_marketable_count": int(report.get("hard_exit_order_not_marketable_count") or 0),
             "known_managed_exit_orders": [dict(item) for item in report.get("known_managed_exit_orders", []) if isinstance(item, Mapping)],
+            "known_leak_test_entry_orders": [dict(item) for item in report.get("known_leak_test_entry_orders", []) if isinstance(item, Mapping)],
             "stale_managed_exit_orders": [dict(item) for item in report.get("stale_managed_exit_orders", []) if isinstance(item, Mapping)],
             "broker_reconciled_state": reconciled_state,
             "broker_track_b_positions": [dict(item) for item in broker_positions],
@@ -1474,6 +1668,11 @@ def _decimal_value(value: Any) -> Decimal | None:
         return None
 
 
+def _float_or_none(value: Any) -> float | None:
+    decimal = _decimal_value(value)
+    return None if decimal is None else float(decimal)
+
+
 def _int_value(value: Any) -> int:
     try:
         return int(value or 0)
@@ -1488,6 +1687,42 @@ def _int_or_none(value: Any) -> int | None:
         return int(value)
     except (TypeError, ValueError):
         return None
+
+
+def _optional_int_matches(left: Mapping[str, Any], right: Mapping[str, Any], key: str) -> bool:
+    left_value = _int_or_none(left.get(key) or left.get(_camel_case(key)))
+    right_value = _int_or_none(right.get(key) or right.get(_camel_case(key)))
+    return left_value is None or right_value is None or left_value == right_value
+
+
+def _optional_text_matches(left: Mapping[str, Any], right: Mapping[str, Any], key: str) -> bool:
+    left_value = str(left.get(key) or left.get(_camel_case(key)) or "").strip().upper()
+    right_value = str(right.get(key) or right.get(_camel_case(key)) or "").strip().upper()
+    return not left_value or not right_value or left_value == right_value
+
+
+def _optional_action_matches(left: Mapping[str, Any], right: Mapping[str, Any]) -> bool:
+    left_action = str(left.get("action") or left.get("order_action") or "").strip().upper()
+    right_action = str(right.get("action") or right.get("order_action") or "").strip().upper()
+    right_action = right_action.replace("_TO_OPEN", "").replace("_TO_CLOSE", "")
+    left_action = left_action.replace("_TO_OPEN", "").replace("_TO_CLOSE", "")
+    return not left_action or not right_action or left_action == right_action
+
+
+def _optional_quantity_matches(left: Mapping[str, Any], right: Mapping[str, Any]) -> bool:
+    left_quantity = _decimal_value(
+        left.get("quantity")
+        or left.get("qty")
+        or left.get("total_quantity")
+        or left.get("totalQuantity")
+    )
+    right_quantity = _decimal_value(
+        right.get("quantity")
+        or right.get("qty")
+        or right.get("total_quantity")
+        or right.get("totalQuantity")
+    )
+    return left_quantity is None or right_quantity is None or abs(left_quantity) == abs(right_quantity)
 
 
 def _max_int(*values: Any) -> int:

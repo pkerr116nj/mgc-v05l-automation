@@ -1680,6 +1680,71 @@ def test_close_submit_unknown_persists_known_managed_exit_order_state(tmp_path: 
     assert row["live_money_eligible"] is False
 
 
+def test_leak_test_entry_unknown_persists_known_entry_order_state(tmp_path: Path) -> None:
+    config = _config(
+        tmp_path,
+        strategy_id="gc_1x_all_lanes__london_early_long",
+        symbol="GC",
+        contract_month="202606",
+        action="BUY",
+        submit=True,
+        caller_path="track_b_paper_leak_test_apply",
+        output_dir=Path("outputs") / "reports" / "track_b_paper_leak_test" / "gc_1x_all_lanes__london_early_long",
+        caller_metadata={
+            "caller_type": "track_b_paper_leak_test",
+            "lane_id": "gc_1x_all_lanes__london_early_long",
+            "strategy_id": "gc_mgc_forced_session_baseline_v2__gc_1x_all_lanes__london_early_long",
+            "intent_type": "BUY_TO_OPEN",
+            "account_id": "DUM882026",
+            "local_symbol": "GCM6",
+            "con_id": 430360630,
+            "leak_test": True,
+        },
+    )
+
+    persistence = bridge_module._persist_known_leak_test_entry_order_after_submit(
+        config=config,
+        intent=_intent_from_config(config),
+        delegated_result={
+            "classification": "PAPER_STRATEGY_NEEDS_MANUAL_REVIEW",
+            "report": {
+                "submit_cancel_lifecycle": {
+                    "status": "manual_confirmation_unavailable",
+                    "submitted_order_id": 12,
+                    "submitted_perm_id": 614043263,
+                    "open_order_after_submit": {"client_id": 11940},
+                }
+            },
+        },
+        qualified_contract_report=_qualified_contract_report(),
+        entry_execution_pricing={
+            "limit_price": 4556.0,
+            "entry_execution_intent": "PARTICIPATE_NOW",
+            "execution_price_source": "RUNTIME_DATABENTO_1M_CLOSE",
+        },
+    )
+
+    state_path = tmp_path / "outputs" / "track_b_execution_core" / "leak_test_entry_orders" / "latest_known_leak_test_entry_orders.json"
+    assert persistence == {
+        "persisted": True,
+        "path": str(state_path),
+        "broker_order_id": "12",
+        "client_id": 11940,
+        "perm_id": 614043263,
+        "managed_order_status": "KNOWN_LEAK_TEST_ENTRY_ORDER_WORKING",
+    }
+    payload = json.loads(state_path.read_text(encoding="utf-8"))
+    row = payload["known_leak_test_entry_orders"][0]
+    assert row["broker_order_id"] == "12"
+    assert row["strategy_id"] == "gc_mgc_forced_session_baseline_v2__gc_1x_all_lanes__london_early_long"
+    assert row["lane_id"] == "gc_1x_all_lanes__london_early_long"
+    assert row["local_symbol"] == "GCM6"
+    assert row["action"] == "BUY"
+    assert row["execution_price_source"] == "RUNTIME_DATABENTO_1M_CLOSE"
+    assert row["paper_proof_invoked"] is False
+    assert row["live_money_eligible"] is False
+
+
 def test_leak_test_submit_handshake_failure_reports_paper_connection_config(tmp_path: Path) -> None:
     auth_path, digest = _write_leak_authorization(tmp_path)
     governance_status = _healthy_lane_governance()
