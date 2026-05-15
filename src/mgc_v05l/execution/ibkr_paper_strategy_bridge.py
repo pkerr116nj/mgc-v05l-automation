@@ -562,8 +562,12 @@ def run_ibkr_paper_strategy_bridge(
                     "mode": config.mode,
                     "host": config.host,
                     "port": config.port,
+                    "client_id": config.client_id,
+                    "account_id": config.account_id,
                     "read_only_preflight": True,
+                    "timeout_seconds": config.timeout_seconds,
                 },
+                "connection_diagnostics": _bridge_connection_diagnostics(config=config),
                 "intent": intent.to_dict(),
                 "caller_gate": caller_gate,
                 "caller_metadata": dict(config.caller_metadata or {}),
@@ -722,6 +726,7 @@ def run_ibkr_paper_strategy_bridge(
                 entry_execution_pricing=entry_execution_pricing,
                 callback_timeline_event_count=len(_build_callback_timeline(runtime)),
                 errors=list(runtime.collector.errors),
+                connection_diagnostics=_bridge_connection_diagnostics(config=config, runtime=runtime),
             )
             return IbkrPaperStrategyBridgeArtifacts(classification=classification, report=report, audit_events=audit_events)
 
@@ -801,6 +806,7 @@ def run_ibkr_paper_strategy_bridge(
             entry_execution_pricing=entry_execution_pricing,
             callback_timeline_event_count=len(_build_callback_timeline(runtime)),
             errors=list(runtime.collector.errors),
+            connection_diagnostics=_bridge_connection_diagnostics(config=config, runtime=runtime),
         )
         return IbkrPaperStrategyBridgeArtifacts(classification=classification, report=report, audit_events=audit_events)
     except Exception as exc:
@@ -819,9 +825,16 @@ def run_ibkr_paper_strategy_bridge(
                 "mode": config.mode,
                 "host": config.host,
                 "port": config.port,
+                "client_id": config.client_id,
+                "account_id": config.account_id,
                 "read_only_preflight": True,
+                "timeout_seconds": config.timeout_seconds,
             },
+            "connection_diagnostics": _bridge_connection_diagnostics(config=config, runtime=runtime, exc=exc),
             "intent": intent.to_dict(),
+            "caller_gate": caller_gate,
+            "caller_metadata": dict(config.caller_metadata or {}),
+            "environment_lock_check": environment_lock,
             "paper_strategy_monitor_status": monitor_status,
             "paper_strategy_governance_status": governance_status,
             "paper_strategy_exposure_status": exposure_status,
@@ -1906,6 +1919,7 @@ def _build_report(
     entry_execution_pricing: dict[str, Any],
     callback_timeline_event_count: int,
     errors: list[dict[str, Any]],
+    connection_diagnostics: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     strategy_identity = _resolve_strategy_identity(intent.strategy_id)
     return {
@@ -1916,8 +1930,12 @@ def _build_report(
             "mode": config.mode,
             "host": config.host,
             "port": config.port,
+            "client_id": config.client_id,
+            "account_id": config.account_id,
             "read_only_preflight": True,
+            "timeout_seconds": config.timeout_seconds,
         },
+        "connection_diagnostics": connection_diagnostics or _bridge_connection_diagnostics(config=config),
         "intent": intent.to_dict(),
         "strategy_identity": strategy_identity,
         "selected_account_id": selected_account_id,
@@ -1949,6 +1967,60 @@ def _build_report(
         "callback_timeline_event_count": callback_timeline_event_count,
         "errors": errors,
     }
+
+
+def _bridge_connection_diagnostics(
+    *,
+    config: IbkrPaperStrategyBridgeConfig,
+    runtime: _Runtime | None = None,
+    exc: BaseException | None = None,
+) -> dict[str, Any]:
+    collector = getattr(runtime, "collector", None) if runtime is not None else None
+    transport = getattr(runtime, "transport", None) if runtime is not None else None
+    session = getattr(runtime, "session", None) if runtime is not None else None
+    session_state = getattr(session, "state", None) if session is not None else None
+    errors = list(getattr(collector, "errors", []) or []) if collector is not None else []
+    latest_error = None
+    latest_error_fn = getattr(collector, "latest_error", None) if collector is not None else None
+    if callable(latest_error_fn):
+        try:
+            latest_error = latest_error_fn(codes=_SEVERE_CONNECTION_ERROR_CODES) or latest_error_fn()
+        except Exception:
+            latest_error = None
+    return {
+        "config_source": "IbkrPaperStrategyBridgeConfig",
+        "mode": config.mode,
+        "host": config.host,
+        "port": int(config.port),
+        "client_id": int(config.client_id),
+        "account_id": config.account_id,
+        "caller_path": config.caller_path,
+        "caller_type": str((config.caller_metadata or {}).get("caller_type") or "").strip() or None,
+        "read_only": True,
+        "read_only_preflight": True,
+        "timeout_seconds": float(config.timeout_seconds),
+        "session_read_only": getattr(session_state, "read_only", None),
+        "session_gateway_mode": getattr(session_state, "gateway_mode", None),
+        "session_live_orders_enabled": bool(getattr(getattr(session, "order_id_policy", None), "live_orders_enabled", False)),
+        "transport_class": type(transport).__name__ if transport is not None else None,
+        "collector_class": type(collector).__name__ if collector is not None else None,
+        "server_version": _safe_transport_call(transport, "server_version"),
+        "tws_connection_time": _safe_transport_call(transport, "tws_connection_time"),
+        "connection_error_type": type(exc).__name__ if exc is not None else None,
+        "connection_error_message": str(exc) if exc is not None else None,
+        "latest_error": latest_error,
+        "error_count": len(errors),
+    }
+
+
+def _safe_transport_call(transport: Any, method_name: str) -> Any:
+    method = getattr(transport, method_name, None)
+    if not callable(method):
+        return None
+    try:
+        return method()
+    except Exception:
+        return None
 
 
 def _resolve_strategy_identity(strategy_id: str) -> dict[str, Any]:

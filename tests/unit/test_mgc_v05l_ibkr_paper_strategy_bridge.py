@@ -172,6 +172,36 @@ def _write_phase1_reconciliation(
     )
 
 
+def _write_fresh_broker_truth(tmp_path: Path) -> None:
+    broker_root = tmp_path / "outputs" / "reports" / "ibkr_read_only_verification"
+    broker_root.mkdir(parents=True, exist_ok=True)
+    generated_at = "2999-01-01T00:00:00+00:00"
+    (broker_root / "ibkr_positions_snapshot.json").write_text(
+        json.dumps(
+            {
+                "ok": True,
+                "positions_complete": True,
+                "generated_at": generated_at,
+                "selected_account_id": "DUM882026",
+                "positions": [],
+            }
+        ),
+        encoding="utf-8",
+    )
+    (broker_root / "ibkr_open_orders_snapshot.json").write_text(
+        json.dumps(
+            {
+                "ok": True,
+                "open_orders_complete": True,
+                "generated_at": generated_at,
+                "selected_account_id": "DUM882026",
+                "open_orders": [],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+
 @pytest.fixture(autouse=True)
 def _default_phase1_reconciliation(tmp_path: Path) -> None:
     _write_phase1_reconciliation(tmp_path)
@@ -200,6 +230,36 @@ def _config(tmp_path: Path, **overrides: object) -> IbkrPaperStrategyBridgeConfi
     }
     payload.update(overrides)
     return IbkrPaperStrategyBridgeConfig(**payload)
+
+
+class _HandshakeFailureTransport:
+    def __init__(self, *, client: object, collector: object, config: object, module_loader: object | None = None) -> None:
+        del client, module_loader
+        self.collector = collector
+        self.config = config
+        self.disconnected = False
+
+    def connect(self) -> None:
+        self.collector.error(
+            code=502,
+            message="Couldn't connect to TWS",
+            request_id=-1,
+        )
+
+    def run_loop(self) -> None:
+        return None
+
+    def is_connected(self) -> bool:
+        return False
+
+    def server_version(self) -> int | None:
+        return None
+
+    def tws_connection_time(self) -> str | None:
+        return None
+
+    def disconnect(self) -> None:
+        self.disconnected = True
 
 
 def _approved_runtime_metadata(
@@ -1321,6 +1381,69 @@ def test_leak_test_caller_with_valid_authorization_satisfies_manual_bundle_gate(
     assert checks["approved_paper_caller_path"]["passed"] is True
     assert checks["leak_test_authorization"]["passed"] is True
     assert checks["manual_harness_bundle_present_for_submit"]["passed"] is True
+
+
+def test_leak_test_submit_handshake_failure_reports_paper_connection_config(tmp_path: Path) -> None:
+    auth_path, digest = _write_leak_authorization(tmp_path)
+    governance_status = _healthy_lane_governance()
+    governance_status["generated_at"] = "2999-01-01T00:00:00+00:00"
+    governance_status["strategies"] = [governance_status["selected_strategy"]]
+    _write_runtime_files(tmp_path, governance_status=governance_status)
+    _write_fresh_broker_truth(tmp_path)
+
+    artifacts = run_ibkr_paper_strategy_bridge(
+        config=_config(
+            tmp_path,
+            strategy_id="gc_1x_asia_london_participation__asia_london_long_v5",
+            symbol="GC",
+            contract_month="202606",
+            client_id=10940,
+            submit=True,
+            timeout_seconds=0.01,
+            caller_path="track_b_paper_leak_test_apply",
+            leak_test_authorization_path=auth_path,
+            leak_test_authorization_digest=digest,
+            caller_metadata={
+                "caller_type": "track_b_paper_leak_test",
+                "lane_id": "gc_1x_asia_london_participation__asia_london_long_v5",
+                "strategy_id": "asia_london_participation_core_v1__GC",
+                "route_destination": "ibkr_paper_bridge_submit_capable",
+                "intent_type": "BUY_TO_OPEN",
+                "intent_action": "BUY",
+                "account_id": "DUM882026",
+                "mode": "PAPER",
+                "host": "127.0.0.1",
+                "port": 7497,
+                "local_symbol": "GCM6",
+                "paper_only": True,
+                "live_money_eligible": False,
+            },
+        ),
+        transport_factory=_HandshakeFailureTransport,
+        sleep_fn=lambda _seconds: None,
+    )
+
+    report = artifacts.report
+    diagnostics = report["connection_diagnostics"]
+    assert artifacts.classification == "PAPER_STRATEGY_INTENT_BLOCKED"
+    assert "handshake failed" in report["detail"]
+    assert report["environment"]["host"] == "127.0.0.1"
+    assert report["environment"]["port"] == 7497
+    assert report["environment"]["client_id"] == 10940
+    assert report["environment"]["account_id"] == "DUM882026"
+    assert report["caller_metadata"]["caller_type"] == "track_b_paper_leak_test"
+    assert diagnostics["host"] == "127.0.0.1"
+    assert diagnostics["port"] == 7497
+    assert diagnostics["client_id"] == 10940
+    assert diagnostics["account_id"] == "DUM882026"
+    assert diagnostics["read_only_preflight"] is True
+    assert diagnostics["session_read_only"] is True
+    assert diagnostics["session_gateway_mode"] == "paper"
+    assert diagnostics["session_live_orders_enabled"] is False
+    assert diagnostics["transport_class"] == "_HandshakeFailureTransport"
+    assert diagnostics["connection_error_type"] == "IbkrPaperStrategyBridgeError"
+    assert diagnostics["latest_error"]["code"] == 502
+    assert report["errors"][0]["code"] == 502
 
 
 def test_submit_is_blocked_when_paper_strategy_monitor_disallows_submit(tmp_path: Path) -> None:
