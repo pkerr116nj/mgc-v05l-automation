@@ -1744,8 +1744,9 @@ def _phase1_reconciliation_gate_for_bridge(
     gate.setdefault("refreshed_reconciliation_age", None)
     gate.setdefault("exit_allowed_after_refresh", False)
     gate.setdefault("exit_block_reason", None)
-    if not config.submit or not _is_close_intent(config=config, intent=intent):
+    if not config.submit:
         return gate
+    is_close_intent = _is_close_intent(config=config, intent=intent)
     reasons = {
         str(reason or "").strip()
         for reason in list(gate.get("block_reasons") or [])
@@ -1757,7 +1758,7 @@ def _phase1_reconciliation_gate_for_bridge(
     if non_stale_reasons:
         gate["exit_block_reason"] = "stale_reconciliation_plus_non_stale_blockers"
         return gate
-    if not _runtime_exit_override_identity_is_current(config=config):
+    if is_close_intent and not _runtime_exit_override_identity_is_current(config=config):
         gate["exit_block_reason"] = "runtime_identity_not_current_for_stale_reconciliation_refresh"
         return gate
 
@@ -1767,6 +1768,7 @@ def _phase1_reconciliation_gate_for_bridge(
     refreshed_gate["stale_reconciliation_refresh_result"] = refresh_result
     refreshed_gate["refreshed_reconciliation_age"] = refreshed_gate.get("age_seconds")
     refreshed_gate["exit_allowed_after_refresh"] = bool(refreshed_gate.get("ready"))
+    refreshed_gate["submit_allowed_after_refresh"] = bool(refreshed_gate.get("ready"))
     refreshed_gate["exit_block_reason"] = (
         None
         if refreshed_gate.get("ready")
@@ -1775,7 +1777,7 @@ def _phase1_reconciliation_gate_for_bridge(
     )
     if refreshed_gate.get("ready"):
         refreshed_gate["detail"] = (
-            "Stale Phase-1 broker reconciliation was refreshed read-only and is now clean for this managed exit; "
+            "Stale Phase-1 broker reconciliation was refreshed read-only and is now clean for this submit attempt; "
             "route/governance/exposure gates still apply."
         )
     return refreshed_gate
@@ -1838,6 +1840,7 @@ def _refresh_phase1_broker_reconciliation_artifacts(*, config: IbkrPaperStrategy
         "review_required_count": reconciliation.get("review_required_count"),
         "track_b_broker_open_order_count": reconciliation.get("track_b_broker_open_order_count"),
         "track_b_broker_position_count": reconciliation.get("track_b_broker_position_count"),
+        "unknown_broker_open_order_count": reconciliation.get("unknown_broker_open_order_count"),
         "live_money_eligible": False,
     }
 
@@ -1858,6 +1861,7 @@ def _phase1_reconciliation_gate_check(
         "stale_reconciliation_refresh_result",
         "refreshed_reconciliation_age",
         "exit_allowed_after_refresh",
+        "submit_allowed_after_refresh",
         "exit_block_reason",
     ):
         check[key] = phase1_reconciliation_gate.get(key)

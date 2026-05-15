@@ -2315,17 +2315,81 @@ def test_managed_exit_blocks_if_refreshed_phase1_reconciliation_has_open_orders(
     assert "TRACK_B_BROKER_OPEN_ORDER_PRESENT" in str(phase1["exit_block_reason"])
 
 
-def test_new_entry_does_not_refresh_stale_phase1_reconciliation(
+def test_new_entry_refreshes_stale_phase1_reconciliation_before_block(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _write_phase1_reconciliation(tmp_path, generated_at="2000-01-01T00:00:00+00:00")
+    calls: list[Path] = []
+
+    def _fake_refresh(*, config: IbkrPaperStrategyBridgeConfig) -> dict[str, object]:
+        calls.append(config.repo_root)
+        _write_phase1_reconciliation(tmp_path)
+        return {"classification": "TRACK_B_PHASE1_RECONCILIATION_REFRESH_CLEAN"}
+
+    monkeypatch.setattr(bridge_module, "_refresh_phase1_broker_reconciliation_artifacts", _fake_refresh)
+    config = _config(
+        tmp_path,
+        submit=True,
+        caller_path="probationary_paper_runtime_lane",
+        caller_metadata=_approved_runtime_metadata(
+            strategy_id="ATP_COMPANION_V1_ASIA_US",
+            runtime_pid=os.getpid(),
+            runtime_cwd=str(tmp_path),
+        ),
+    )
+    intent = IbkrPaperStrategyOrderIntent(
+        strategy_id=config.strategy_id,
+        symbol=config.symbol,
+        contract_month=config.contract_month,
+        action=config.action,
+        quantity=config.quantity,
+        order_type=config.order_type,
+        limit_price_model=config.limit_price_model,
+        time_in_force=config.time_in_force,
+        reason=config.reason,
+        timestamp="2026-05-15T07:48:00+00:00",
+        risk_tags=config.risk_tags,
+        paper_only=config.paper_only,
+    )
+
+    checks = _build_static_preflight_checks(
+        config=config,
+        intent=intent,
+        environment_lock=evaluate_paper_preview_environment_lock(mode=config.mode, host=config.host, port=config.port),
+        caller_gate={"passed": True, "detail": "approved runtime caller"},
+        monitor_status={},
+        governance_status=_healthy_governance(),
+        exposure_status=_healthy_exposure(),
+    )
+
+    phase1 = next(row for row in checks if row["name"] == "phase1_broker_reconciliation_submit_gate")
+    assert calls == [tmp_path]
+    assert phase1["passed"] is True
+    assert phase1["stale_reconciliation_refresh_attempted"] is True
+    assert phase1["submit_allowed_after_refresh"] is True
+
+
+def test_new_entry_blocks_if_stale_phase1_reconciliation_refresh_is_incomplete(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     _write_phase1_reconciliation(tmp_path, generated_at="2000-01-01T00:00:00+00:00")
 
-    def _unexpected_refresh(*, config: IbkrPaperStrategyBridgeConfig) -> dict[str, object]:
+    def _fake_refresh(*, config: IbkrPaperStrategyBridgeConfig) -> dict[str, object]:
         del config
-        raise AssertionError("entries must not refresh stale phase1 reconciliation in the bridge")
+        _write_phase1_reconciliation(
+            tmp_path,
+            classification="TRACK_B_PAPER_BROKER_RECONCILIATION_BLOCKED",
+            broker_reconciled=False,
+            block_reasons=["BROKER_TRUTH_STATUS_FLAG_MISMATCH"],
+        )
+        return {
+            "classification": "TRACK_B_PHASE1_RECONCILIATION_REFRESH_BLOCKED",
+            "broker_truth_refresh_classification": "BROKER_TRUTH_REFRESH_FAILED",
+        }
 
-    monkeypatch.setattr(bridge_module, "_refresh_phase1_broker_reconciliation_artifacts", _unexpected_refresh)
+    monkeypatch.setattr(bridge_module, "_refresh_phase1_broker_reconciliation_artifacts", _fake_refresh)
     config = _config(
         tmp_path,
         submit=True,
@@ -2363,7 +2427,9 @@ def test_new_entry_does_not_refresh_stale_phase1_reconciliation(
 
     phase1 = next(row for row in checks if row["name"] == "phase1_broker_reconciliation_submit_gate")
     assert phase1["passed"] is False
-    assert phase1["stale_reconciliation_refresh_attempted"] is False
+    assert phase1["stale_reconciliation_refresh_attempted"] is True
+    assert phase1["submit_allowed_after_refresh"] is False
+    assert "BROKER_TRUTH_STATUS_FLAG_MISMATCH" in str(phase1["exit_block_reason"])
 
 
 def test_entry_cannot_bypass_backend_readiness_governance_block(tmp_path: Path) -> None:

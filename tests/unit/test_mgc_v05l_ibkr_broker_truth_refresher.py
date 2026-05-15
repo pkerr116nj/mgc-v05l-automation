@@ -14,15 +14,24 @@ from mgc_v05l.app.ibkr_broker_truth_refresher import (
 from mgc_v05l.execution.ibkr_read_only_verifier import IbkrReadOnlyVerificationArtifacts
 
 
-def _artifacts(*, classification: str = "IBKR_READ_ONLY_CONNECTED", positions_complete: bool = True, open_orders_complete: bool = True) -> IbkrReadOnlyVerificationArtifacts:
+def _artifacts(
+    *,
+    classification: str = "IBKR_READ_ONLY_CONNECTED",
+    positions_complete: bool = True,
+    open_orders_complete: bool = True,
+    errors: list[dict[str, object]] | None = None,
+    account_ok: bool | None = None,
+) -> IbkrReadOnlyVerificationArtifacts:
+    account_truth_ok = account_ok if account_ok is not None else classification != "IBKR_READ_ONLY_BLOCKED"
     return IbkrReadOnlyVerificationArtifacts(
         classification=classification,
         connection_report={
             "classification": classification,
-            "connection_check": {"host": "127.0.0.1", "port": 7497, "client_id": 9077},
-            "account_truth_check": {"ok": classification != "IBKR_READ_ONLY_BLOCKED"},
+            "connection_check": {"host": "127.0.0.1", "port": 7497, "client_id": 9077, "connected": True},
+            "account_truth_check": {"ok": account_truth_ok},
             "position_truth_check": {"ok": positions_complete},
             "open_order_truth_check": {"ok": open_orders_complete},
+            "errors": errors or [],
         },
         account_truth_snapshot={"selected_account_id": "DUM882026"},
         positions_snapshot={
@@ -108,6 +117,56 @@ def test_broker_truth_refresh_failure_is_not_treated_as_clear_truth(tmp_path: Pa
     assert status["open_orders_complete"] is False
     assert status["submit_authority"] is False
     assert status["live_money_eligible"] is False
+
+
+def test_broker_truth_refresh_ignores_benign_2100_after_complete_snapshots(tmp_path: Path) -> None:
+    fixed_time = datetime(2026, 5, 11, 12, 0, tzinfo=timezone.utc)
+    status = build_broker_truth_refresh_status(
+        config=BrokerTruthRefreshConfig(repo_root=tmp_path, output_dir=tmp_path),
+        started_at=fixed_time,
+        completed_at=fixed_time,
+        artifacts=_artifacts(
+            classification="IBKR_READ_ONLY_BLOCKED",
+            positions_complete=True,
+            open_orders_complete=True,
+            account_ok=True,
+            errors=[
+                {"code": 2104, "message": "Market data farm connection is OK:usfuture"},
+                {"code": 2100, "message": "API client has been unsubscribed from account data."},
+            ],
+        ),
+        error=None,
+    )
+
+    assert status["classification"] == "BROKER_TRUTH_REFRESH_READY"
+    assert status["last_success"] is True
+    assert status["benign_account_unsubscribe_ignored"] is True
+    assert status["positions_complete"] is True
+    assert status["open_orders_complete"] is True
+    assert status["submit_authority"] is False
+
+
+def test_broker_truth_refresh_blocks_2100_before_complete_snapshots(tmp_path: Path) -> None:
+    fixed_time = datetime(2026, 5, 11, 12, 0, tzinfo=timezone.utc)
+    status = build_broker_truth_refresh_status(
+        config=BrokerTruthRefreshConfig(repo_root=tmp_path, output_dir=tmp_path),
+        started_at=fixed_time,
+        completed_at=fixed_time,
+        artifacts=_artifacts(
+            classification="IBKR_READ_ONLY_BLOCKED",
+            positions_complete=False,
+            open_orders_complete=True,
+            account_ok=True,
+            errors=[{"code": 2100, "message": "API client has been unsubscribed from account data."}],
+        ),
+        error=None,
+    )
+
+    assert status["classification"] == "BROKER_TRUTH_REFRESH_FAILED"
+    assert status["last_success"] is False
+    assert status["benign_account_unsubscribe_ignored"] is False
+    assert status["positions_complete"] is False
+    assert status["submit_authority"] is False
 
 
 def test_broker_truth_refresher_source_has_no_broker_mutation_or_paper_proof() -> None:

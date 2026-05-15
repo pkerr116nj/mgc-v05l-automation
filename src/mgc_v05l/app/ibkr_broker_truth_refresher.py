@@ -133,9 +133,18 @@ def build_broker_truth_refresh_status(
     connection = dict(artifacts.connection_report) if artifacts is not None else {}
     positions_complete = positions.get("positions_complete") is True
     open_orders_complete = open_orders.get("open_orders_complete") is True
+    benign_account_unsubscribe_ignored = _benign_account_unsubscribe_after_complete_truth(
+        artifacts=artifacts,
+        connection=connection,
+        positions=positions,
+        open_orders=open_orders,
+        positions_complete=positions_complete,
+        open_orders_complete=open_orders_complete,
+        error=error,
+    )
     success = (
         artifacts is not None
-        and artifacts.classification != "IBKR_READ_ONLY_BLOCKED"
+        and (artifacts.classification != "IBKR_READ_ONLY_BLOCKED" or benign_account_unsubscribe_ignored)
         and positions.get("ok") is True
         and open_orders.get("ok") is True
         and positions_complete
@@ -169,6 +178,7 @@ def build_broker_truth_refresh_status(
         "open_orders_complete": open_orders_complete,
         "position_count": position_count,
         "open_order_count": open_order_count,
+        "benign_account_unsubscribe_ignored": benign_account_unsubscribe_ignored,
         "positions_snapshot_path": str(config.output_dir / "ibkr_positions_snapshot.json"),
         "open_orders_snapshot_path": str(config.output_dir / "ibkr_open_orders_snapshot.json"),
         "connection_report_path": str(config.output_dir / "ibkr_read_only_connection_report.json"),
@@ -179,6 +189,53 @@ def build_broker_truth_refresh_status(
         "live_money_eligible": False,
         "paper_proof_invoked": False,
     }
+
+
+def _benign_account_unsubscribe_after_complete_truth(
+    *,
+    artifacts: IbkrReadOnlyVerificationArtifacts | None,
+    connection: dict[str, Any],
+    positions: dict[str, Any],
+    open_orders: dict[str, Any],
+    positions_complete: bool,
+    open_orders_complete: bool,
+    error: str | None,
+) -> bool:
+    if artifacts is None or error is not None:
+        return False
+    if artifacts.classification != "IBKR_READ_ONLY_BLOCKED":
+        return False
+    if positions.get("ok") is not True or open_orders.get("ok") is not True:
+        return False
+    if not positions_complete or not open_orders_complete:
+        return False
+    checks = (
+        dict(connection.get("connection_check") or {}),
+        dict(connection.get("account_truth_check") or {}),
+        dict(connection.get("position_truth_check") or {}),
+        dict(connection.get("open_order_truth_check") or {}),
+    )
+    if any(check.get("ok") is False or check.get("connected") is False for check in checks):
+        return False
+    severe_errors = []
+    benign_unsubscribe_seen = False
+    for row in list(connection.get("errors") or []):
+        if not isinstance(row, dict):
+            severe_errors.append(row)
+            continue
+        try:
+            code = int(row.get("code"))
+        except (TypeError, ValueError):
+            severe_errors.append(row)
+            continue
+        message = str(row.get("message") or "")
+        if code == 2100 and "unsubscribed from account data" in message.lower():
+            benign_unsubscribe_seen = True
+            continue
+        if code in {2104, 2106, 2158} and "connection is OK" in message:
+            continue
+        severe_errors.append(row)
+    return benign_unsubscribe_seen and not severe_errors
 
 
 def write_broker_truth_refresh_status(*, status_path: Path, var_status_path: Path, status: dict[str, Any]) -> None:
