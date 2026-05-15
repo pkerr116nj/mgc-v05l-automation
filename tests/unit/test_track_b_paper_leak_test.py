@@ -111,6 +111,36 @@ def _bridge_result(classification: str, *, status: str = "filled") -> dict[str, 
     }
 
 
+def _unknown_bridge_result(*, submit_attempted: bool) -> dict[str, object]:
+    lifecycle: dict[str, object] = {
+        "status": "manual_confirmation_unavailable" if submit_attempted else "blocked_before_submit",
+        "detail": "Manual confirmation unavailable.",
+    }
+    if submit_attempted:
+        lifecycle.update(
+            {
+                "submitted_order_id": 1,
+                "manual_confirmation": {"state": "SUBMIT_SENT_AWAITING_TWS_MANUAL_CONFIRMATION"},
+                "open_order_after_submit": {"open_order_count": 0, "open_orders": []},
+            }
+        )
+    return {
+        "classification": "PAPER_STRATEGY_NEEDS_MANUAL_REVIEW",
+        "report": {
+            "classification": "PAPER_STRATEGY_NEEDS_MANUAL_REVIEW",
+            "detail": "Unknown manual state.",
+            "entry_execution_pricing": {"execution_price_source": "RUNTIME_DATABENTO_1M_CLOSE"},
+            "delegated_result": {
+                "classification": "PAPER_ORDER_UNKNOWN_NEEDS_MANUAL_TWS_REVIEW",
+                "report": {
+                    "classification": "PAPER_ORDER_UNKNOWN_NEEDS_MANUAL_TWS_REVIEW",
+                    "submit_cancel_lifecycle": lifecycle,
+                },
+            },
+        },
+    }
+
+
 def _reader_for(stages: dict[str, dict[str, object]]):
     def _reader(_repo_root: Path, stage: str) -> dict[str, object]:
         return stages.get(stage, _clean_flat_reconciliation())
@@ -829,6 +859,102 @@ def test_apply_blocked_entry_returns_safe_classification(tmp_path: Path) -> None
     assert report.apply_result.entry.classification == "BLOCKED"
 
 
+def test_unknown_result_before_submit_can_block_safely_without_refresh(tmp_path: Path) -> None:
+    refresh_calls = []
+
+    report = build_single_lane_apply_report(
+        repo_root=REPO_ROOT,
+        lane_id=LANE_ID,
+        reconciliation=_clean_flat_reconciliation(),
+        operator_status=_operator_status(),
+        runtime_command=_runtime_command(),
+        authorization_path=_authorization_path(tmp_path),
+        guarded_route_runner=lambda _config: _unknown_bridge_result(submit_attempted=False),
+        readiness_checker=_ready_precheck,
+        post_submit_broker_state_refresher=lambda _repo_root, stage: refresh_calls.append(stage) or _clean_flat_reconciliation(),
+    )
+
+    assert report.result_classification == "LEAK_TEST_PASS_BLOCKED_SAFELY"
+    assert refresh_calls == []
+    assert report.apply_result is not None
+    assert report.apply_result.entry is not None
+    assert report.apply_result.entry.submit_attempted is False
+
+
+def test_unknown_after_submit_requires_broker_refresh_and_stops(tmp_path: Path) -> None:
+    refresh_calls = []
+
+    def _refresh(_repo_root: Path, stage: str) -> dict[str, object]:
+        refresh_calls.append(stage)
+        return _clean_flat_reconciliation()
+
+    report = build_single_lane_apply_report(
+        repo_root=REPO_ROOT,
+        lane_id=LANE_ID,
+        reconciliation=_clean_flat_reconciliation(),
+        operator_status=_operator_status(),
+        runtime_command=_runtime_command(),
+        authorization_path=_authorization_path(tmp_path),
+        guarded_route_runner=lambda _config: _unknown_bridge_result(submit_attempted=True),
+        readiness_checker=_ready_precheck,
+        post_submit_broker_state_refresher=_refresh,
+    )
+
+    assert report.result_classification == "LEAK_TEST_UNKNOWN_AFTER_SUBMIT_RESOLVED_NO_BROKER_EFFECT"
+    assert refresh_calls == ["entry_unknown_post_submit"]
+    assert report.apply_result is not None
+    assert report.apply_result.entry is not None
+    assert report.apply_result.entry.submit_attempted is True
+    assert report.apply_result.exit is None
+
+
+def test_unknown_after_submit_with_broker_position_is_not_safe_block(tmp_path: Path) -> None:
+    report = build_single_lane_apply_report(
+        repo_root=REPO_ROOT,
+        lane_id=LANE_ID,
+        reconciliation=_clean_flat_reconciliation(),
+        operator_status=_operator_status(),
+        runtime_command=_runtime_command(),
+        authorization_path=_authorization_path(tmp_path),
+        guarded_route_runner=lambda _config: _unknown_bridge_result(submit_attempted=True),
+        readiness_checker=_ready_precheck,
+        post_submit_broker_state_refresher=lambda _repo_root, _stage: _clean_flat_reconciliation(
+            broker_reconciled=False,
+            classification="TRACK_B_PAPER_BROKER_RECONCILIATION_BLOCKED",
+            track_b_broker_position_count=1,
+            lifecycle_open_position_count=0,
+            track_b_broker_positions=[{"symbol": "MGC", "local_symbol": "MGCM6", "quantity": "1"}],
+        ),
+    )
+
+    assert report.result_classification == "LEAK_TEST_ENTRY_BROKER_FILLED_BUT_RESULT_UNKNOWN"
+    assert report.apply_result is not None
+    assert report.apply_result.exit is None
+
+
+def test_unknown_after_submit_with_open_order_is_open_order_ambiguity(tmp_path: Path) -> None:
+    report = build_single_lane_apply_report(
+        repo_root=REPO_ROOT,
+        lane_id=LANE_ID,
+        reconciliation=_clean_flat_reconciliation(),
+        operator_status=_operator_status(),
+        runtime_command=_runtime_command(),
+        authorization_path=_authorization_path(tmp_path),
+        guarded_route_runner=lambda _config: _unknown_bridge_result(submit_attempted=True),
+        readiness_checker=_ready_precheck,
+        post_submit_broker_state_refresher=lambda _repo_root, _stage: _clean_flat_reconciliation(
+            broker_reconciled=False,
+            classification="TRACK_B_PAPER_BROKER_RECONCILIATION_BLOCKED",
+            track_b_broker_open_order_count=1,
+            track_b_broker_open_orders=[{"symbol": "MGC", "local_symbol": "MGCM6", "quantity": "1"}],
+        ),
+    )
+
+    assert report.result_classification == "LEAK_TEST_OPEN_ORDER_AMBIGUITY"
+    assert report.apply_result is not None
+    assert report.apply_result.exit is None
+
+
 def test_apply_filled_entry_and_filled_exit_returns_full_round_trip_pass(tmp_path: Path) -> None:
     calls = []
 
@@ -940,6 +1066,11 @@ def test_result_classifications_cover_future_round_trip_outcomes() -> None:
         "LEAK_TEST_PRECHECK_SELECTED_LANE_MARKET_DATA_STALE",
         "LEAK_TEST_MARKET_DATA_MICRO_STALE_RETRYABLE",
         "LEAK_TEST_PRECHECK_READY",
+        "LEAK_TEST_SUBMIT_STATE_AMBIGUOUS_BROKER_REFRESH_REQUIRED",
+        "LEAK_TEST_ORDER_STATE_UNKNOWN_REVIEW_REQUIRED",
+        "LEAK_TEST_ENTRY_BROKER_FILLED_BUT_RESULT_UNKNOWN",
+        "LEAK_TEST_OPEN_ORDER_AMBIGUITY",
+        "LEAK_TEST_UNKNOWN_AFTER_SUBMIT_RESOLVED_NO_BROKER_EFFECT",
     }
     assert required.issubset(set(RESULT_CLASSIFICATIONS))
 

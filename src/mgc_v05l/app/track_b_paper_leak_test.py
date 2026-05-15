@@ -19,6 +19,11 @@ from ..execution.ibkr_paper_strategy_bridge import (
     write_ibkr_paper_strategy_bridge_artifacts,
 )
 from ..execution.ibkr_paper_strategy_porting import lane_submit_bridge_adapter
+from ..execution_core.track_b_paper_broker_reconciliation import (
+    ReconciliationConfig,
+    reconcile_track_b_paper_broker_truth,
+)
+from .ibkr_broker_truth_refresher import BrokerTruthRefreshConfig, run_broker_truth_refresh_once
 from .probationary_runtime import _active_probationary_paper_lane_specs
 
 
@@ -96,6 +101,11 @@ RESULT_CLASSIFICATIONS = (
     "LEAK_TEST_PRECHECK_SELECTED_LANE_MARKET_DATA_STALE",
     "LEAK_TEST_MARKET_DATA_MICRO_STALE_RETRYABLE",
     "LEAK_TEST_PRECHECK_READY",
+    "LEAK_TEST_SUBMIT_STATE_AMBIGUOUS_BROKER_REFRESH_REQUIRED",
+    "LEAK_TEST_ORDER_STATE_UNKNOWN_REVIEW_REQUIRED",
+    "LEAK_TEST_ENTRY_BROKER_FILLED_BUT_RESULT_UNKNOWN",
+    "LEAK_TEST_OPEN_ORDER_AMBIGUITY",
+    "LEAK_TEST_UNKNOWN_AFTER_SUBMIT_RESOLVED_NO_BROKER_EFFECT",
 )
 LEAK_TEST_OUTPUT_ROOT = Path("outputs") / "reports" / "track_b_paper_leak_test"
 PORTFOLIO_STATE_PATH = Path("outputs") / "reports" / "track_b_portfolio" / "latest_track_b_portfolio_state.json"
@@ -190,6 +200,7 @@ class LeakTestOrderResult:
     raw_classification: str | None
     detail: str | None
     report: dict[str, Any]
+    submit_attempted: bool = False
 
 
 @dataclass(frozen=True)
@@ -988,6 +999,34 @@ def _default_reconciliation_reader(repo_root: Path, stage: str) -> dict[str, Any
     return _read_json(repo_root / RECONCILIATION_PATH)
 
 
+def _default_post_submit_broker_state_refresher(repo_root: Path, stage: str) -> dict[str, Any]:
+    status = run_broker_truth_refresh_once(
+        config=BrokerTruthRefreshConfig(
+            repo_root=repo_root,
+            output_dir=repo_root / "outputs" / "reports" / "ibkr_read_only_verification",
+            status_path=repo_root / "outputs" / "reports" / "ibkr_read_only_verification" / "ibkr_broker_truth_refresh_status.json",
+            var_status_path=repo_root / "var" / "ibkr_broker_truth_refresh_status.json",
+            mode="PAPER",
+            client_id=11080,
+            account_id=PAPER_ACCOUNT_ID,
+            read_only=True,
+            timeout_seconds=12.0,
+        )
+    )
+    reconciliation = reconcile_track_b_paper_broker_truth(
+        config=ReconciliationConfig(
+            repo_root=repo_root,
+            ledger_root=repo_root / "outputs" / "track_b_execution_core" / "paper_trade_ledger",
+            broker_truth_root=repo_root / "outputs" / "reports" / "ibkr_read_only_verification",
+            report_path=repo_root / RECONCILIATION_PATH,
+            account=PAPER_ACCOUNT_ID,
+        )
+    )
+    reconciliation["_post_submit_broker_truth_refresh_status"] = status
+    reconciliation["_post_submit_refresh_stage"] = stage
+    return reconciliation
+
+
 def _bridge_action_for_lane(lane: LeakTestLanePlan) -> str:
     text = f"{lane.lane_id} {lane.display_name} {lane.strategy_id}".upper()
     if "SHORT" in text:
@@ -1448,6 +1487,12 @@ def _order_result_from_bridge(*, phase: str, route_result: Mapping[str, Any]) ->
     )
     pricing = dict(report.get("entry_execution_pricing") or delegated.get("entry_execution_pricing") or {})
     status = str(lifecycle.get("status") or "").strip().lower()
+    submit_attempted = _bridge_submit_attempted(
+        report=report,
+        delegated=delegated,
+        delegated_report=delegated_report,
+        lifecycle=lifecycle,
+    )
     if raw_classification == "PAPER_STRATEGY_ORDER_FILLED" or status in {"filled", "filled_flat", "passed"}:
         classification = "FILLED"
         terminal_status = "filled"
@@ -1468,9 +1513,12 @@ def _order_result_from_bridge(*, phase: str, route_result: Mapping[str, Any]) ->
         classification=classification,
         terminal_status=terminal_status,
         order_id=str(
-            lifecycle.get("order_id")
+            lifecycle.get("submitted_order_id")
+            or lifecycle.get("order_id")
             or lifecycle.get("broker_order_id")
+            or delegated_report.get("submitted_order_id")
             or delegated_report.get("order_id")
+            or delegated.get("submitted_order_id")
             or delegated.get("broker_order_id")
             or ""
         )
@@ -1501,7 +1549,53 @@ def _order_result_from_bridge(*, phase: str, route_result: Mapping[str, Any]) ->
         raw_classification=raw_classification or None,
         detail=str(report.get("detail") or delegated.get("detail") or lifecycle.get("detail") or "") or None,
         report=report,
+        submit_attempted=submit_attempted,
     )
+
+
+def _bridge_submit_attempted(
+    *,
+    report: Mapping[str, Any],
+    delegated: Mapping[str, Any],
+    delegated_report: Mapping[str, Any],
+    lifecycle: Mapping[str, Any],
+) -> bool:
+    if _int_value(
+        lifecycle.get("submitted_order_id")
+        or lifecycle.get("order_id")
+        or lifecycle.get("broker_order_id")
+        or delegated_report.get("submitted_order_id")
+        or delegated_report.get("order_id")
+        or delegated.get("submitted_order_id")
+        or delegated.get("broker_order_id")
+    ):
+        return True
+    manual_confirmation = dict(lifecycle.get("manual_confirmation") or delegated_report.get("manual_confirmation") or {})
+    manual_state = str(manual_confirmation.get("state") or "").upper()
+    if "SUBMIT_SENT" in manual_state or "AWAITING_TWS" in manual_state:
+        return True
+    if lifecycle.get("open_order_after_submit") or delegated_report.get("open_order_after_submit"):
+        return True
+    text = " ".join(
+        str(value or "")
+        for value in (
+            report.get("classification"),
+            delegated.get("classification"),
+            delegated_report.get("classification"),
+            lifecycle.get("status"),
+        )
+    ).upper()
+    return "AFTER_SUBMIT" in text or "POST_SUBMIT" in text
+
+
+def _unknown_post_submit_classification(reconciliation: Mapping[str, Any]) -> str:
+    if _int_value(reconciliation.get("track_b_broker_open_order_count")):
+        return "LEAK_TEST_OPEN_ORDER_AMBIGUITY"
+    if _int_value(reconciliation.get("track_b_broker_position_count")):
+        return "LEAK_TEST_ENTRY_BROKER_FILLED_BUT_RESULT_UNKNOWN"
+    if not _reconciliation_ok(reconciliation):
+        return "LEAK_TEST_ORDER_STATE_UNKNOWN_REVIEW_REQUIRED"
+    return "LEAK_TEST_UNKNOWN_AFTER_SUBMIT_RESOLVED_NO_BROKER_EFFECT"
 
 
 def _reconciliation_ok(reconciliation: Mapping[str, Any]) -> bool:
@@ -1611,6 +1705,7 @@ def build_single_lane_apply_report(
     authorization_path: Path | None = None,
     guarded_route_runner: Callable[[IbkrPaperStrategyBridgeConfig], dict[str, Any]] = _guarded_bridge_route,
     reconciliation_reader: Callable[[Path, str], dict[str, Any]] = _default_reconciliation_reader,
+    post_submit_broker_state_refresher: Callable[[Path, str], dict[str, Any]] = _default_post_submit_broker_state_refresher,
     readiness_checker: Callable[[Path, LeakTestLanePlan, LeakTestSafetySnapshot], dict[str, Any]] | None = None,
 ) -> LeakTestReport:
     dry_run_report = build_single_lane_dry_run_report(
@@ -1787,8 +1882,12 @@ def build_single_lane_apply_report(
             classification = "LEAK_TEST_ENTRY_NOT_FILLED_CANCELLED"
             reconciliation_after_exit = reconciliation_reader(repo_root, "entry_not_filled_cancelled")
         elif entry_result.classification != "FILLED":
-            classification = "LEAK_TEST_PASS_BLOCKED_SAFELY"
-            reconciliation_after_exit = reconciliation_reader(repo_root, "entry_unknown")
+            if entry_result.submit_attempted:
+                reconciliation_after_exit = post_submit_broker_state_refresher(repo_root, "entry_unknown_post_submit")
+                classification = _unknown_post_submit_classification(reconciliation_after_exit)
+            else:
+                classification = "LEAK_TEST_PASS_BLOCKED_SAFELY"
+                reconciliation_after_exit = reconciliation_reader(repo_root, "entry_unknown_before_submit")
         else:
             reconciliation_after_entry = _wait_for_reconciliation(
                 repo_root=repo_root,
@@ -1834,8 +1933,12 @@ def build_single_lane_apply_report(
                     classification = "LEAK_TEST_EXIT_NOT_FILLED_CANCELLED"
                     reconciliation_after_exit = reconciliation_reader(repo_root, "exit_not_filled_cancelled")
                 elif exit_result.classification != "FILLED":
-                    classification = "LEAK_TEST_EXIT_NOT_FILLED_CANCELLED"
-                    reconciliation_after_exit = reconciliation_reader(repo_root, "exit_unknown")
+                    if exit_result.submit_attempted:
+                        reconciliation_after_exit = post_submit_broker_state_refresher(repo_root, "exit_unknown_post_submit")
+                        classification = _unknown_post_submit_classification(reconciliation_after_exit)
+                    else:
+                        classification = "LEAK_TEST_EXIT_NOT_FILLED_CANCELLED"
+                        reconciliation_after_exit = reconciliation_reader(repo_root, "exit_unknown_before_submit")
                 else:
                     reconciliation_after_exit = _wait_for_reconciliation(
                         repo_root=repo_root,
