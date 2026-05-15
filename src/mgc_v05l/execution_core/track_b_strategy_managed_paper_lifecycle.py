@@ -72,6 +72,12 @@ class TrackBStrategyManagedPaperLifecycleConfig:
     managed_exit_policy_id: str | None = None
     managed_exit_policy_max_completed_5m_bars: int = 3
     completed_5m_bars_since_entry: int | None = None
+    completed_5m_bars_since_signal: int | None = None
+    fill_timestamp_source: str | None = None
+    data_freshness_state: str = "FRESH"
+    broker_truth_state: str = "FRESH"
+    suppress_discretionary_exits_due_to_stale_data: bool = False
+    block_new_entries_due_to_stale_data: bool = False
     submit_enabled: bool = False
     host: str = "127.0.0.1"
     port: int = 7497
@@ -142,6 +148,7 @@ def run_track_b_strategy_managed_paper_lifecycle(
 
     guard_blocker = _guard_blocker(config)
     existing_review = _existing_review_required_blocker(config)
+    stale_entry_blocker = _stale_new_entry_blocker(config)
     exit_policy_id = _normalized_exit_policy(config.managed_exit_policy_id)
     if guard_blocker:
         classification = TrackBManagedPaperLifecycleClassification.REVIEW_REQUIRED
@@ -151,6 +158,10 @@ def run_track_b_strategy_managed_paper_lifecycle(
         classification = TrackBManagedPaperLifecycleClassification.BLOCKED_EXISTING_REVIEW_REQUIRED
         primary_blocker = existing_review
         required_next_action = "Resolve the existing review-required PAPER position before new managed entries."
+    elif stale_entry_blocker:
+        classification = TrackBManagedPaperLifecycleClassification.LIFECYCLE_NOT_AVAILABLE
+        primary_blocker = stale_entry_blocker
+        required_next_action = "Wait for Track B market/broker truth freshness to recover before new managed entries."
     elif exit_policy_id in {"", TrackBManagedExitPolicy.EXIT_NOT_AVAILABLE.value}:
         classification = TrackBManagedPaperLifecycleClassification.EXIT_POLICY_MISSING
         primary_blocker = f"{config.strategy_id} has no managed PAPER exit policy."
@@ -393,6 +404,12 @@ def _open_state(
         "entry_timestamp": entry_fill.get("filled_at") or entry_fill.get("timestamp"),
         "current_state": TrackBManagedPaperLifecycleClassification.OPEN_MANAGED.value,
         "open_position_age_completed_5m_bars": int(config.completed_5m_bars_since_entry or 0),
+        "bars_since_fill": int(config.completed_5m_bars_since_entry or 0),
+        "bars_since_signal": None if config.completed_5m_bars_since_signal is None else int(config.completed_5m_bars_since_signal),
+        "fill_timestamp_source": config.fill_timestamp_source or "BROKER_ENTRY_FILL",
+        "data_freshness_state": str(config.data_freshness_state or "FRESH"),
+        "broker_truth_state": str(config.broker_truth_state or "FRESH"),
+        "suppressed_due_to_stale_data": False,
         "managed_exit_policy_id": _normalized_exit_policy(config.managed_exit_policy_id),
         "managed_exit_policy_max_completed_5m_bars": int(config.managed_exit_policy_max_completed_5m_bars),
         "expected_exit_condition": _expected_exit_condition(config),
@@ -444,6 +461,14 @@ def _build_report(
         "open_position_age_completed_5m_bars": None
         if open_state is None
         else open_state.get("open_position_age_completed_5m_bars"),
+        "bars_since_fill": None if open_state is None else open_state.get("bars_since_fill"),
+        "bars_since_signal": None if open_state is None else open_state.get("bars_since_signal"),
+        "fill_timestamp_source": None if open_state is None else open_state.get("fill_timestamp_source"),
+        "mfe": None,
+        "mae": None,
+        "data_freshness_state": str(config.data_freshness_state or "FRESH"),
+        "broker_truth_state": str(config.broker_truth_state or "FRESH"),
+        "suppressed_due_to_stale_data": bool(config.suppress_discretionary_exits_due_to_stale_data and close_intent is None),
         "expected_exit_condition": _expected_exit_condition(config),
         "close_intent_status": _close_intent_status(classification, close_intent),
         "strategy_managed_lifecycle_classification": classification.value,
@@ -501,6 +526,15 @@ def _guard_blocker(config: TrackBStrategyManagedPaperLifecycleConfig) -> str | N
     if not config.local_symbol:
         return "Strategy-managed PAPER lifecycle requires an allowlisted local symbol."
     return None
+
+
+def _stale_new_entry_blocker(config: TrackBStrategyManagedPaperLifecycleConfig) -> str | None:
+    if config.block_new_entries_due_to_stale_data is not True:
+        return None
+    return (
+        "Track B staged stale-data model blocks new managed entries: "
+        f"data_freshness_state={config.data_freshness_state}; broker_truth_state={config.broker_truth_state}."
+    )
 
 
 def _managed_submit_blocked_reason(
@@ -591,6 +625,8 @@ def _default_exit_policy(
     open_state: Mapping[str, Any],
 ) -> Mapping[str, Any] | None:
     policy_id = _normalized_exit_policy(config.managed_exit_policy_id)
+    if _discretionary_exits_suppressed(config, policy_id):
+        return None
     if policy_id == TrackBManagedExitPolicy.DIAGNOSTIC_TIME_EXIT_IMMEDIATE.value:
         return {
             "intent_schema_version": "track_b_strategy_managed_paper_close_intent_v1",
@@ -605,7 +641,18 @@ def _default_exit_policy(
             "order_action": "SELL" if open_state.get("side") == "LONG" else "BUY",
             "quantity": config.quantity,
             "close_limit_price": _decimal_text(config.close_limit_price),
+            "exit_family": "DIAGNOSTIC_TIME",
             "close_reason": "DIAGNOSTIC_TIME_EXIT_IMMEDIATE",
+            "hard_exit": False,
+            "discretionary_exit": True,
+            "bars_since_fill": int(config.completed_5m_bars_since_entry or 0),
+            "bars_since_signal": None if config.completed_5m_bars_since_signal is None else int(config.completed_5m_bars_since_signal),
+            "fill_timestamp_source": config.fill_timestamp_source or "BROKER_ENTRY_FILL",
+            "mfe": None,
+            "mae": None,
+            "data_freshness_state": str(config.data_freshness_state or "FRESH"),
+            "broker_truth_state": str(config.broker_truth_state or "FRESH"),
+            "suppressed_due_to_stale_data": False,
         }
     if policy_id == TrackBManagedExitPolicy.PAPER_DIAGNOSTIC_TIME_BOXED_3X5M_EXIT_V1.value:
         elapsed = int(config.completed_5m_bars_since_entry or 0)
@@ -625,12 +672,32 @@ def _default_exit_policy(
             "order_action": "SELL" if open_state.get("side") == "LONG" else "BUY",
             "quantity": config.quantity,
             "close_limit_price": _decimal_text(config.close_limit_price),
+            "exit_family": "DIAGNOSTIC_TIME",
             "close_reason": "TIME_BOXED_EXIT",
+            "hard_exit": False,
+            "discretionary_exit": True,
             "managed_exit_policy_id": policy_id,
             "elapsed_completed_5m_bars": elapsed,
             "required_completed_5m_bars": required,
+            "bars_since_fill": elapsed,
+            "bars_since_signal": None if config.completed_5m_bars_since_signal is None else int(config.completed_5m_bars_since_signal),
+            "fill_timestamp_source": config.fill_timestamp_source or "BROKER_ENTRY_FILL",
+            "mfe": None,
+            "mae": None,
+            "data_freshness_state": str(config.data_freshness_state or "FRESH"),
+            "broker_truth_state": str(config.broker_truth_state or "FRESH"),
+            "suppressed_due_to_stale_data": False,
         }
     return None
+
+
+def _discretionary_exits_suppressed(config: TrackBStrategyManagedPaperLifecycleConfig, policy_id: str) -> bool:
+    if config.suppress_discretionary_exits_due_to_stale_data is not True:
+        return False
+    return policy_id in {
+        TrackBManagedExitPolicy.DIAGNOSTIC_TIME_EXIT_IMMEDIATE.value,
+        TrackBManagedExitPolicy.PAPER_DIAGNOSTIC_TIME_BOXED_3X5M_EXIT_V1.value,
+    }
 
 
 def _default_close_submitter(

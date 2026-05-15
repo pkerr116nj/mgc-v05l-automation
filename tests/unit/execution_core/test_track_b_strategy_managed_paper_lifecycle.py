@@ -75,9 +75,20 @@ def fake_stages(*, close: bool = False) -> TrackBStrategyManagedPaperLifecycleSt
             "order_action": "SELL",
             "quantity": 1,
             "close_limit_price": "4705.1",
+            "exit_family": "DIAGNOSTIC_TIME",
             "close_reason": "TIME_BOXED_EXIT" if time_boxed_ready else "DIAGNOSTIC_TIME_EXIT_IMMEDIATE",
+            "hard_exit": False,
+            "discretionary_exit": True,
             "elapsed_completed_5m_bars": config.completed_5m_bars_since_entry,
             "required_completed_5m_bars": config.managed_exit_policy_max_completed_5m_bars,
+            "bars_since_fill": int(config.completed_5m_bars_since_entry or 0),
+            "bars_since_signal": None if config.completed_5m_bars_since_signal is None else int(config.completed_5m_bars_since_signal),
+            "fill_timestamp_source": config.fill_timestamp_source or "BROKER_ENTRY_FILL",
+            "mfe": None,
+            "mae": None,
+            "data_freshness_state": config.data_freshness_state,
+            "broker_truth_state": config.broker_truth_state,
+            "suppressed_due_to_stale_data": False,
         }
 
     def close_submitter(
@@ -374,6 +385,32 @@ def test_time_boxed_exit_policy_creates_close_intent_after_required_completed_ba
     assert result.report["close_intent_status"] == "CLOSE_INTENT_CREATED"
     assert result.report["broker_state_mutated"] is True
     assert result.report["paper_proof_invoked"] is False
+    assert result.report["bars_since_fill"] == 3
+    assert result.report["close_intent"]["bars_since_fill"] == 3
+    assert result.report["close_intent"]["fill_timestamp_source"] == "BROKER_ENTRY_FILL"
+    assert result.report["close_intent"]["hard_exit"] is False
+    assert result.report["close_intent"]["discretionary_exit"] is True
+
+
+def test_degraded_stale_data_blocks_new_entries_before_exit_panic(tmp_path: Path) -> None:
+    result = run_track_b_strategy_managed_paper_lifecycle(
+        config=base_config(
+            tmp_path,
+            managed_exit_policy_id=TrackBManagedExitPolicy.PAPER_DIAGNOSTIC_TIME_BOXED_3X5M_EXIT_V1.value,
+            data_freshness_state="DEGRADED_BLOCK_NEW_ENTRIES",
+            block_new_entries_due_to_stale_data=True,
+            submit_enabled=True,
+        ),
+        stages=fake_stages(),
+        lifecycle_id="degraded-block-new-entry",
+        now=aware_now(),
+    )
+
+    assert result.classification == TrackBManagedPaperLifecycleClassification.LIFECYCLE_NOT_AVAILABLE
+    assert "blocks new managed entries" in result.report["primary_blocker"]
+    assert result.report["submit_attempted"] is False
+    assert result.report["broker_state_mutated"] is False
+    assert result.report["live_money_readiness"] is False
 
 
 def test_maintenance_open_managed_age_zero_keeps_waiting_without_entry_resubmit(tmp_path: Path) -> None:

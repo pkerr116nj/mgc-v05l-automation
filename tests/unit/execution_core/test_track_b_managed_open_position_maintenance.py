@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import json
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Mapping
 
@@ -25,7 +25,11 @@ def write_json(path: Path, payload: Mapping[str, Any]) -> Path:
     return path
 
 
-def lifecycle_payload() -> dict[str, Any]:
+def lifecycle_payload(
+    *,
+    entry_filled_at: str = "2026-05-07T16:26:07+00:00",
+    signal_timestamp: str | None = None,
+) -> dict[str, Any]:
     lifecycle_id = "strategy_managed_fe30248d4d6c42acaf106c8313b0b33b"
     return {
         "schema_version": "track_b_strategy_managed_paper_lifecycle_v1",
@@ -57,6 +61,8 @@ def lifecycle_payload() -> dict[str, Any]:
             "side": "LONG",
             "order_action": "BUY",
             "quantity": 1,
+            "signal_timestamp": signal_timestamp,
+            "decision_bar_timestamp": signal_timestamp,
             "latest_decision_bar_source": "DATABENTO_LIVE_ARTIFACT",
             "entry_limit_price": "28729",
             "managed_exit_policy_id": "PAPER_DIAGNOSTIC_TIME_BOXED_3X5M_EXIT_V1",
@@ -72,7 +78,7 @@ def lifecycle_payload() -> dict[str, Any]:
             "execution_id": "exec-1",
             "price": "28729",
             "quantity": "1",
-            "filled_at": "2026-05-07T16:26:07+00:00",
+            "filled_at": entry_filled_at,
         },
         "close_intent": None,
         "close_submit_attempt": None,
@@ -83,7 +89,14 @@ def lifecycle_payload() -> dict[str, Any]:
     }
 
 
-def seed_open_position(tmp_path: Path, *, completed_timestamps: list[str]) -> TrackBManagedOpenPositionMaintenanceConfig:
+def seed_open_position(
+    tmp_path: Path,
+    *,
+    completed_timestamps: list[str],
+    entry_filled_at: str = "2026-05-07T16:26:07+00:00",
+    signal_timestamp: str | None = None,
+    latest_1m_age_seconds: float | None = None,
+) -> TrackBManagedOpenPositionMaintenanceConfig:
     lifecycle_id = "strategy_managed_fe30248d4d6c42acaf106c8313b0b33b"
     lifecycle_path = (
         tmp_path
@@ -91,7 +104,7 @@ def seed_open_position(tmp_path: Path, *, completed_timestamps: list[str]) -> Tr
         / lifecycle_id
         / "track_b_strategy_managed_paper_lifecycle_report.json"
     )
-    payload = lifecycle_payload()
+    payload = lifecycle_payload(entry_filled_at=entry_filled_at, signal_timestamp=signal_timestamp)
     payload["report_json_path"] = str(lifecycle_path)
     payload["latest_report_json_path"] = str(tmp_path / "managed" / "latest_track_b_strategy_managed_paper_lifecycle_report.json")
     write_json(lifecycle_path, payload)
@@ -131,7 +144,15 @@ def seed_open_position(tmp_path: Path, *, completed_timestamps: list[str]) -> Tr
     )
     write_json(
         tmp_path / "live" / "latest_live_mnq_1m_candles.json",
-        {"candles": [{"candle_timestamp": completed_timestamps[-1] if completed_timestamps else "2026-05-07T16:30:00+00:00", "close": "28720"}]},
+        {
+            "latest_1m_age_seconds": latest_1m_age_seconds,
+            "candles": [
+                {
+                    "candle_timestamp": completed_timestamps[-1] if completed_timestamps else "2026-05-07T16:30:00+00:00",
+                    "close": "28720",
+                }
+            ],
+        },
     )
     return TrackBManagedOpenPositionMaintenanceConfig(
         mode="PAPER",
@@ -238,3 +259,73 @@ def test_open_managed_position_age_three_submits_close_and_clears_open_summary(t
     assert summary["managed_strategy_trade_count"] == 1
     assert summary["completed_trade_count"] == 1
     assert positions["open_position_count"] == 0
+
+
+def test_gc_style_recent_fill_clock_does_not_use_stale_signal_age(tmp_path: Path) -> None:
+    old_signal_bars = [
+        (datetime(2026, 5, 6, 15, 15, tzinfo=timezone.utc) + timedelta(minutes=5 * index)).isoformat()
+        for index in range(302)
+    ]
+    cfg = seed_open_position(
+        tmp_path,
+        signal_timestamp="2026-05-06T15:10:00+00:00",
+        entry_filled_at="2026-05-07T16:44:08+00:00",
+        completed_timestamps=old_signal_bars,
+    )
+
+    result = run_track_b_managed_open_position_maintenance(
+        config=cfg,
+        lifecycle_stages=fake_close_stages(),
+        now=aware_now(),
+    )
+
+    position = result.report["positions"][0]
+    assert position["bars_since_fill"] == 0
+    assert position["bars_since_signal"] == 302
+    assert position["close_intent_created"] is False
+    assert position["fill_timestamp_source"] == "BROKER_ENTRY_FILL"
+
+
+def test_stale_restrict_state_suppresses_discretionary_time_exit(tmp_path: Path) -> None:
+    cfg = seed_open_position(
+        tmp_path,
+        latest_1m_age_seconds=500.0,
+        completed_timestamps=[
+            "2026-05-07T16:30:00+00:00",
+            "2026-05-07T16:35:00+00:00",
+            "2026-05-07T16:40:00+00:00",
+        ],
+    )
+
+    result = run_track_b_managed_open_position_maintenance(
+        config=cfg,
+        lifecycle_stages=fake_close_stages(),
+        now=aware_now(),
+    )
+
+    position = result.report["positions"][0]
+    assert position["data_freshness_state"] == "STALE_RESTRICT_DISCRETIONARY_EXITS"
+    assert position["suppressed_due_to_stale_data"] is True
+    assert position["close_intent_created"] is False
+
+
+def test_micro_stale_warns_without_becoming_emergency_exit_state(tmp_path: Path) -> None:
+    cfg = seed_open_position(
+        tmp_path,
+        latest_1m_age_seconds=200.0,
+        completed_timestamps=[
+            "2026-05-07T16:30:00+00:00",
+            "2026-05-07T16:35:00+00:00",
+        ],
+    )
+
+    result = run_track_b_managed_open_position_maintenance(
+        config=cfg,
+        lifecycle_stages=fake_close_stages(),
+        now=aware_now(),
+    )
+
+    position = result.report["positions"][0]
+    assert position["data_freshness_state"] == "MICRO_STALE_WARNING"
+    assert position["suppressed_due_to_stale_data"] is False
+    assert position["close_intent_created"] is False

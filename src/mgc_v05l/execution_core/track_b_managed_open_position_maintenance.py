@@ -17,6 +17,14 @@ from typing import Any, Mapping
 
 from .models import require_aware_datetime, to_jsonable
 from .track_b_databento_live_runtime_feed import DEFAULT_TRACK_B_DATABENTO_LIVE_RUNTIME_FEED_OUTPUT_ROOT
+from .track_b_exit_safety import (
+    DEFAULT_BRIDGE_TERMINAL_EVENT_GRACE_SECONDS,
+    RUNTIME_CANDLE_FRESHNESS_SECONDS_BY_TIMEFRAME,
+    TrackBStaleDataState,
+    bridge_terminal_event_grace_state,
+    classify_broker_truth_freshness,
+    classify_market_data_freshness,
+)
 from .track_b_paper_trade_ledger import (
     DEFAULT_TRACK_B_LIVE_POSITION_STATUS_JSON,
     DEFAULT_TRACK_B_PAPER_TRADE_LEDGER_OUTPUT_ROOT,
@@ -62,6 +70,8 @@ class TrackBManagedOpenPositionMaintenanceConfig:
     live_position_status_json: Path = DEFAULT_TRACK_B_LIVE_POSITION_STATUS_JSON
     diagnostic_json: Path = DEFAULT_TRACK_B_MANAGED_OPEN_POSITION_MAINTENANCE_JSON
     paper_exit_price_offset_ticks: int = 2
+    broker_truth_max_age_seconds: float = 120.0
+    bridge_terminal_event_grace_seconds: float = DEFAULT_BRIDGE_TERMINAL_EVENT_GRACE_SECONDS
 
 
 @dataclass(frozen=True)
@@ -131,14 +141,56 @@ def run_track_b_managed_open_position_maintenance(
 
         instrument = str(position.get("instrument_family") or lifecycle_report.get("instrument_family") or "")
         completed_payload = _read_json(_completed_5m_path(actual_config.live_runtime_feed_output_root, instrument))
+        live_1m_payload = _read_json(_live_1m_path(actual_config.live_runtime_feed_output_root, instrument))
+        entry_timestamp = _entry_timestamp(lifecycle_report)
+        signal_timestamp = _signal_timestamp(lifecycle_report)
         completed_timestamps = _completed_bar_timestamps_after_entry(
             completed_payload=completed_payload,
-            entry_timestamp=_entry_timestamp(lifecycle_report),
+            entry_timestamp=entry_timestamp,
         )
         completed_bars_since_entry = len(completed_timestamps)
+        completed_bars_since_signal = len(
+            _completed_bar_timestamps_after_entry(
+                completed_payload=completed_payload,
+                entry_timestamp=signal_timestamp,
+            )
+        )
+        market_data_state = classify_market_data_freshness(
+            latest_1m_age_seconds=_latest_age_seconds(
+                payload=live_1m_payload,
+                now=actual_now,
+                explicit_age_keys=("latest_1m_age_seconds", "latest_1m_candle_age_seconds"),
+            ),
+            latest_completed_5m_age_seconds=_latest_age_seconds(
+                payload=completed_payload,
+                now=actual_now,
+                explicit_age_keys=("latest_completed_5m_age_seconds", "latest_completed_5m_candle_age_seconds"),
+            ),
+            latest_1m_threshold_seconds=RUNTIME_CANDLE_FRESHNESS_SECONDS_BY_TIMEFRAME["1m"],
+            completed_5m_threshold_seconds=RUNTIME_CANDLE_FRESHNESS_SECONDS_BY_TIMEFRAME["5m"],
+        )
+        close_fill = lifecycle_report.get("close_fill") if isinstance(lifecycle_report.get("close_fill"), Mapping) else None
+        broker_truth_state = (
+            bridge_terminal_event_grace_state(
+                event=close_fill,
+                now=actual_now,
+                account_id=str(lifecycle_report.get("account_id") or actual_config.account_id),
+                contract_key=str(lifecycle_report.get("contract_key") or position.get("contract_key") or ""),
+                local_symbol=str(lifecycle_report.get("local_symbol") or position.get("local_symbol") or ""),
+                con_id=_int_or_none(lifecycle_report.get("con_id") or position.get("con_id")),
+                ttl_seconds=actual_config.bridge_terminal_event_grace_seconds,
+            )
+            if close_fill
+            else classify_broker_truth_freshness(age_seconds=0.0, max_age_seconds=actual_config.broker_truth_max_age_seconds)
+        )
+        broker_state_value = getattr(broker_truth_state, "state", TrackBStaleDataState.FRESH)
+        suppress_discretionary_exit = market_data_state.suppress_discretionary_exits or broker_state_value in {
+            TrackBStaleDataState.STALE_RESTRICT_DISCRETIONARY_EXITS,
+            TrackBStaleDataState.SEVERE_STALE_EMERGENCY_REVIEW,
+        }
         managed_exit_policy_id = str(lifecycle_report.get("managed_exit_policy_id") or "")
         required_bars = int(lifecycle_report.get("managed_exit_policy_max_completed_5m_bars") or 3)
-        exit_eligible = completed_bars_since_entry >= required_bars
+        exit_eligible = completed_bars_since_entry >= required_bars and not suppress_discretionary_exit
         close_limit_price = _derive_close_limit_price(
             live_runtime_feed_output_root=actual_config.live_runtime_feed_output_root,
             instrument=instrument,
@@ -151,7 +203,11 @@ def run_track_b_managed_open_position_maintenance(
             lifecycle_report=lifecycle_report,
             position=position,
             completed_bars_since_entry=completed_bars_since_entry,
+            completed_bars_since_signal=completed_bars_since_signal,
             close_limit_price=close_limit_price,
+            data_freshness_state=market_data_state.state.value,
+            broker_truth_state=broker_state_value.value,
+            suppress_discretionary_exit=suppress_discretionary_exit,
         )
         result = maintain_open_track_b_strategy_managed_paper_lifecycle(
             config=lifecycle_config,
@@ -174,7 +230,22 @@ def run_track_b_managed_open_position_maintenance(
                 "maintenance_invoked": True,
                 "latest_completed_5m_bar_timestamp": completed_timestamps[-1] if completed_timestamps else None,
                 "completed_bars_since_entry": completed_bars_since_entry,
+                "bars_since_fill": completed_bars_since_entry,
+                "bars_since_signal": completed_bars_since_signal,
+                "fill_timestamp_source": "BROKER_ENTRY_FILL",
                 "completed_5m_bar_timestamps_since_entry": completed_timestamps,
+                "data_freshness": market_data_state.to_json_dict(),
+                "data_freshness_state": market_data_state.state.value,
+                "broker_truth_state": broker_state_value.value,
+                "broker_truth_freshness": broker_truth_state.to_json_dict(),
+                "bridge_terminal_event_grace": broker_truth_state.to_json_dict() if close_fill else None,
+                "suppressed_due_to_stale_data": suppress_discretionary_exit,
+                "exit_family": "DIAGNOSTIC_TIME" if managed_exit_policy_id else None,
+                "exit_reason": result.report.get("close_intent", {}).get("close_reason") if isinstance(result.report.get("close_intent"), Mapping) else None,
+                "hard_exit": bool((result.report.get("close_intent") or {}).get("hard_exit")) if isinstance(result.report.get("close_intent"), Mapping) else False,
+                "discretionary_exit": bool((result.report.get("close_intent") or {}).get("discretionary_exit")) if isinstance(result.report.get("close_intent"), Mapping) else False,
+                "mfe": None,
+                "mae": None,
                 "exit_policy_id": managed_exit_policy_id,
                 "required_completed_5m_bars": required_bars,
                 "exit_eligible": exit_eligible,
@@ -251,7 +322,11 @@ def _lifecycle_config_from_report(
     lifecycle_report: Mapping[str, Any],
     position: Mapping[str, Any],
     completed_bars_since_entry: int,
+    completed_bars_since_signal: int | None,
     close_limit_price: str | None,
+    data_freshness_state: str,
+    broker_truth_state: str,
+    suppress_discretionary_exit: bool,
 ) -> TrackBStrategyManagedPaperLifecycleConfig:
     entry_intent = lifecycle_report.get("entry_intent") if isinstance(lifecycle_report.get("entry_intent"), Mapping) else {}
     canonical_contract_fields = (
@@ -281,6 +356,11 @@ def _lifecycle_config_from_report(
         managed_exit_policy_id=str(lifecycle_report.get("managed_exit_policy_id") or entry_intent.get("managed_exit_policy_id") or ""),
         managed_exit_policy_max_completed_5m_bars=int(lifecycle_report.get("managed_exit_policy_max_completed_5m_bars") or 3),
         completed_5m_bars_since_entry=completed_bars_since_entry,
+        completed_5m_bars_since_signal=completed_bars_since_signal,
+        fill_timestamp_source="BROKER_ENTRY_FILL",
+        data_freshness_state=data_freshness_state,
+        broker_truth_state=broker_truth_state,
+        suppress_discretionary_exits_due_to_stale_data=suppress_discretionary_exit,
         submit_enabled=maintenance_config.submit_enabled,
         host=maintenance_config.host,
         port=maintenance_config.port,
@@ -390,6 +470,52 @@ def _derive_close_limit_price(
 def _entry_timestamp(lifecycle_report: Mapping[str, Any]) -> str | None:
     entry_fill = lifecycle_report.get("entry_fill") if isinstance(lifecycle_report.get("entry_fill"), Mapping) else {}
     return entry_fill.get("filled_at") or entry_fill.get("timestamp") or lifecycle_report.get("entry_timestamp")
+
+
+def _signal_timestamp(lifecycle_report: Mapping[str, Any]) -> str | None:
+    entry_intent = lifecycle_report.get("entry_intent") if isinstance(lifecycle_report.get("entry_intent"), Mapping) else {}
+    return (
+        entry_intent.get("signal_timestamp")
+        or entry_intent.get("decision_bar_timestamp")
+        or lifecycle_report.get("signal_timestamp")
+        or lifecycle_report.get("decision_bar_timestamp")
+    )
+
+
+def _latest_age_seconds(
+    *,
+    payload: Mapping[str, Any],
+    now: datetime,
+    explicit_age_keys: tuple[str, ...],
+) -> float | None:
+    for key in explicit_age_keys:
+        value = payload.get(key)
+        if value not in {None, ""}:
+            try:
+                return max(0.0, float(value))
+            except (TypeError, ValueError):
+                continue
+    timestamp = _latest_payload_timestamp(payload)
+    return None if timestamp is None else max(0.0, (now.astimezone(UTC) - timestamp).total_seconds())
+
+
+def _latest_payload_timestamp(payload: Mapping[str, Any]) -> datetime | None:
+    for key in (
+        "latest_1m_timestamp",
+        "latest_1m_candle_timestamp",
+        "latest_completed_5m_timestamp",
+        "latest_completed_5m_candle_timestamp",
+        "candle_timestamp",
+        "last_candle_timestamp",
+        "generated_at",
+    ):
+        parsed = _parse_time(payload.get(key))
+        if parsed is not None:
+            return parsed
+    candles = [item for item in payload.get("candles", []) or [] if isinstance(item, Mapping)]
+    if candles:
+        return _parse_time(candles[-1].get("candle_timestamp") or candles[-1].get("timestamp"))
+    return None
 
 
 def _read_json(path: Path | str | None) -> dict[str, Any]:
