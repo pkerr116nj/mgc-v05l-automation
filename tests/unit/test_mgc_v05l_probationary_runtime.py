@@ -5798,6 +5798,189 @@ def test_known_managed_exit_order_adoption_refuses_wrong_action(tmp_path: Path) 
     assert lane.execution_engine.pending_executions() == []
 
 
+def test_non_owner_same_symbol_exposure_does_not_kill_startup_restore(tmp_path: Path) -> None:
+    lane_id = "gc_1x_asia_london_participation__asia_london_long_v5"
+    lane = _seed_test_lane(
+        tmp_path,
+        lane_id=lane_id,
+        symbol="GC",
+        source="asiaEarlyNormalBreakoutRetestHoldTurn",
+        session_restriction="ASIA_LATE",
+        point_value=Decimal("100"),
+    )
+    broker = probationary_runtime_module._IbkrPaperBridgeRuntimeBroker(  # noqa: SLF001
+        lane_id=lane_id,
+        source_symbol="GC",
+        bridge_adapter={
+            "current_order_destination": "ibkr_paper_bridge_submit_capable",
+            "bridge_execution_target": {"symbol": "GC", "contract_month": "202606", "local_symbol": "GCM6"},
+        },
+        repo_root=tmp_path,
+        bridge_runner=lambda *, config: pytest.fail("bridge runner should not be invoked"),
+    )
+    broker.connect()
+    lane.execution_engine = ExecutionEngine(broker=broker)
+    lane.strategy_engine._execution_engine = lane.execution_engine  # noqa: SLF001
+    report_root = tmp_path / "outputs" / "reports" / "track_b_paper_broker_reconciliation"
+    report_root.mkdir(parents=True)
+    (report_root / "latest_track_b_paper_broker_reconciliation.json").write_text(
+        json.dumps(
+            {
+                "classification": "TRACK_B_PAPER_BROKER_RECONCILIATION_BLOCKED",
+                "broker_reconciled": False,
+                "live_money_eligible": False,
+                "paper_proof_invoked": False,
+                "review_required_count": 0,
+                "track_b_broker_position_count": 1,
+                "lifecycle_open_position_count": 1,
+                "track_b_broker_open_order_count": 1,
+                "lifecycle_open_order_count": 0,
+                "blockers": [{"code": "UNKNOWN_BROKER_OPEN_ORDER"}],
+                "position_match_report": {
+                    "matched": True,
+                    "state": "BROKER_AND_LIFECYCLE_OPEN_MATCHED",
+                    "matches": [
+                        {
+                            "root": "GC",
+                            "quantity": "1.0",
+                            "broker_position": {
+                                "account_id": "DUM882026",
+                                "symbol": "GC",
+                                "track_b_root": "GC",
+                                "local_symbol": "GCM6",
+                                "expiry": "20260626",
+                                "quantity": "1.0",
+                            },
+                            "lifecycle_position": {
+                                "strategy_id": "gc_mgc_forced_session_baseline_v2__gc_1x_all_lanes__london_early_long",
+                                "lifecycle_id": "bridge_fill_GC|1m|2026-05-15T07:06:00Z|BUY_TO_OPEN",
+                                "track_b_root": "GC",
+                                "local_symbol": "GCM6",
+                                "quantity": "1",
+                                "side": "LONG",
+                            },
+                        }
+                    ],
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    broker.restore_state(
+        position=PaperPosition(quantity=1, average_price=Decimal("4574.6")),
+        open_order_ids=["1"],
+        order_status={"1": OrderStatus.ACKNOWLEDGED},
+        last_fill_timestamp=None,
+    )
+    lane.strategy_engine._state = replace(  # noqa: SLF001
+        lane.strategy_engine.state,
+        strategy_status=StrategyStatus.IN_LONG_K,
+        position_side=PositionSide.LONG,
+        internal_position_qty=1,
+        broker_position_qty=1,
+        entry_price=Decimal("4574.6"),
+        reconcile_required=True,
+        fault_code="reconciliation_open_order_uncertainty",
+    )
+    lane.strategy_engine._persist_state(  # noqa: SLF001
+        lane.strategy_engine.state,
+        transition_label="seed_stale_non_owner_position",
+    )
+
+    suppression = probationary_runtime_module._maybe_suppress_non_owner_track_b_symbol_truth_for_restore(  # noqa: SLF001
+        repo_root=tmp_path,
+        strategy_engine=lane.strategy_engine,
+        execution_engine=lane.execution_engine,
+        lane_id=lane_id,
+        symbol="GC",
+        expected_strategy_ids=("gc_1x_asia_london_participation__asia_london_long_v5",),
+    )
+    reconciliation = _reconcile_paper_runtime(
+        repositories=lane.repositories,
+        strategy_engine=lane.strategy_engine,
+        execution_engine=lane.execution_engine,
+        trigger="startup",
+        apply_repairs=True,
+    )
+
+    assert suppression is not None
+    assert suppression["classification"] == "NON_OWNER_TRACK_B_SYMBOL_EXPOSURE_SUPPRESSED"
+    assert lane.strategy_engine.state.position_side is PositionSide.FLAT
+    assert lane.strategy_engine.state.reconcile_required is False
+    assert broker.snapshot_state()["position_quantity"] == 0
+    assert broker.snapshot_state()["open_order_ids"] == []
+    assert reconciliation["clean"] is True
+
+
+def test_owner_same_symbol_exposure_is_not_suppressed(tmp_path: Path) -> None:
+    lane_id = "gc_1x_all_lanes__london_early_long"
+    lane = _seed_test_lane(
+        tmp_path,
+        lane_id=lane_id,
+        symbol="GC",
+        source="asiaEarlyNormalBreakoutRetestHoldTurn",
+        session_restriction="LONDON_EARLY",
+        point_value=Decimal("100"),
+    )
+    broker = probationary_runtime_module._IbkrPaperBridgeRuntimeBroker(  # noqa: SLF001
+        lane_id=lane_id,
+        source_symbol="GC",
+        bridge_adapter={
+            "current_order_destination": "ibkr_paper_bridge_submit_capable",
+            "bridge_execution_target": {"symbol": "GC", "contract_month": "202606", "local_symbol": "GCM6"},
+        },
+        repo_root=tmp_path,
+        bridge_runner=lambda *, config: pytest.fail("bridge runner should not be invoked"),
+    )
+    broker.connect()
+    lane.execution_engine = ExecutionEngine(broker=broker)
+    lane.strategy_engine._execution_engine = lane.execution_engine  # noqa: SLF001
+    report_root = tmp_path / "outputs" / "reports" / "track_b_paper_broker_reconciliation"
+    report_root.mkdir(parents=True)
+    (report_root / "latest_track_b_paper_broker_reconciliation.json").write_text(
+        json.dumps(
+            {
+                "classification": "TRACK_B_PAPER_BROKER_RECONCILIATION_BLOCKED",
+                "live_money_eligible": False,
+                "paper_proof_invoked": False,
+                "review_required_count": 0,
+                "track_b_broker_position_count": 1,
+                "lifecycle_open_position_count": 1,
+                "blockers": [{"code": "UNKNOWN_BROKER_OPEN_ORDER"}],
+                "position_match_report": {
+                    "matched": True,
+                    "state": "BROKER_AND_LIFECYCLE_OPEN_MATCHED",
+                    "matches": [
+                        {
+                            "root": "GC",
+                            "broker_position": {"symbol": "GC", "track_b_root": "GC", "quantity": "1.0"},
+                            "lifecycle_position": {
+                                "strategy_id": "gc_mgc_forced_session_baseline_v2__gc_1x_all_lanes__london_early_long",
+                                "lifecycle_id": "bridge_fill_GC|1m|2026-05-15T07:06:00Z|BUY_TO_OPEN",
+                                "track_b_root": "GC",
+                                "quantity": "1",
+                                "side": "LONG",
+                            },
+                        }
+                    ],
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    suppression = probationary_runtime_module._maybe_suppress_non_owner_track_b_symbol_truth_for_restore(  # noqa: SLF001
+        repo_root=tmp_path,
+        strategy_engine=lane.strategy_engine,
+        execution_engine=lane.execution_engine,
+        lane_id=lane_id,
+        symbol="GC",
+        expected_strategy_ids=("gc_mgc_forced_session_baseline_v2__gc_1x_all_lanes__london_early_long",),
+    )
+
+    assert suppression is None
+
+
 @pytest.mark.parametrize(
     ("symbol", "lane_id", "contract_month", "expiry", "local_symbol", "multiplier", "average_cost", "entry_price"),
     [

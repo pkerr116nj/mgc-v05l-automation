@@ -3846,6 +3846,24 @@ class ProbationaryPaperLaneRuntime:
                     "restored_open_position_from_clean_track_b_broker_reconciliation",
                     track_b_restore=track_b_restore,
                 )
+        non_owner_symbol_exposure = _maybe_suppress_non_owner_track_b_symbol_truth_for_restore(
+            repo_root=Path(__file__).resolve().parents[3],
+            strategy_engine=self.strategy_engine,
+            execution_engine=self.execution_engine,
+            lane_id=self.spec.lane_id,
+            symbol=self.spec.symbol,
+            expected_strategy_ids=(
+                self.spec.standalone_strategy_id,
+                self.spec.strategy_identity_root,
+                self.spec.shared_strategy_identity,
+            ),
+        )
+        if non_owner_symbol_exposure is not None:
+            restore_adjustments.append("suppress_non_owner_track_b_symbol_truth_for_restore")
+            self._write_startup_phase_marker(
+                "non_owner_track_b_symbol_truth_suppressed_for_restore",
+                non_owner_symbol_exposure=non_owner_symbol_exposure,
+            )
         if (
             self.spec.lane_mode == PAPER_EXECUTION_CANARY_MODE
             and self.strategy_engine.state.operator_halt
@@ -10840,6 +10858,7 @@ class _IbkrPaperBridgeRuntimeBroker:
         self._last_broker_truth_snapshot: dict[str, Any] = {}
         self._broker_truth_snapshot_injected = False
         self._broker_truth_snapshot_injected_until: datetime | None = None
+        self._external_truth_suppressed_for_restore: dict[str, Any] | None = None
         self._last_submit_context: dict[str, Any] = {
             "lane_id": self._lane_id,
             "source_symbol": self._source_symbol,
@@ -11086,6 +11105,9 @@ class _IbkrPaperBridgeRuntimeBroker:
         self._order_status = dict(order_status)
         self._last_fill_timestamp = last_fill_timestamp
 
+    def suppress_external_truth_for_restore(self, payload: dict[str, Any]) -> None:
+        self._external_truth_suppressed_for_restore = dict(payload or {})
+
     def refresh_from_snapshot(self, payload: dict[str, Any]) -> None:
         self._last_broker_truth_snapshot = dict(payload or {})
         self._broker_truth_snapshot_injected = True
@@ -11101,6 +11123,21 @@ class _IbkrPaperBridgeRuntimeBroker:
         return dict(self._last_broker_truth_snapshot)
 
     def snapshot_state(self) -> dict[str, Any]:
+        if self._external_truth_suppressed_for_restore is not None:
+            return {
+                "connected": self._connected,
+                "truth_complete": True,
+                "position_quantity": self._position.quantity,
+                "average_price": str(self._position.average_price) if self._position.average_price is not None else None,
+                "open_order_ids": list(self._open_order_ids),
+                "order_status": {key: status.value for key, status in self._order_status.items()},
+                "order_metadata": {key: dict(value) for key, value in self._order_metadata.items()},
+                "last_fill_timestamp": self._last_fill_timestamp.isoformat() if self._last_fill_timestamp is not None else None,
+                "route_destination": self.route_destination,
+                "last_submit_context": dict(self._last_submit_context),
+                "broker_truth_source": "ibkr_read_only_suppressed_non_owner_restore",
+                "external_truth_suppressed_for_restore": dict(self._external_truth_suppressed_for_restore),
+            }
         broker_truth_snapshot = self._current_broker_truth_snapshot()
         if broker_truth_snapshot:
             health = dict(broker_truth_snapshot.get("health") or {})
@@ -17262,6 +17299,138 @@ def _load_track_b_reconciled_open_position_restore_plan(
         symbol=symbol,
         expected_strategy_ids=expected_strategy_ids,
     )
+
+
+def _track_b_report_has_only_open_order_blockers(report: dict[str, Any]) -> bool:
+    blockers = report.get("blockers")
+    if not blockers:
+        return True
+    if not isinstance(blockers, list):
+        return False
+    allowed_codes = {"UNKNOWN_BROKER_OPEN_ORDER", "TRACK_B_BROKER_OPEN_ORDER_PRESENT"}
+    for blocker in blockers:
+        if not isinstance(blocker, dict):
+            return False
+        code = str(blocker.get("code") or blocker.get("legacy_code") or "").strip().upper()
+        legacy = str(blocker.get("legacy_code") or "").strip().upper()
+        if code not in allowed_codes and legacy not in allowed_codes:
+            return False
+    return True
+
+
+def _track_b_report_positions_match_without_review(report: dict[str, Any]) -> bool:
+    if bool(report.get("live_money_eligible")) or bool(report.get("paper_proof_invoked")):
+        return False
+    if int(_decimal_from_any(report.get("review_required_count")) or Decimal("0")) != 0:
+        return False
+    match_report = report.get("position_match_report") if isinstance(report.get("position_match_report"), dict) else {}
+    if str(match_report.get("state") or "") != "BROKER_AND_LIFECYCLE_OPEN_MATCHED":
+        return False
+    if match_report.get("matched") is False:
+        return False
+    if not _track_b_report_has_only_open_order_blockers(report):
+        return False
+    broker_count = _decimal_from_any(report.get("track_b_broker_position_count"))
+    lifecycle_count = _decimal_from_any(report.get("lifecycle_open_position_count"))
+    if broker_count is None or lifecycle_count is None or broker_count != lifecycle_count:
+        return False
+    return True
+
+
+def _maybe_suppress_non_owner_track_b_symbol_truth_for_restore(
+    *,
+    repo_root: Path,
+    strategy_engine: StrategyEngine,
+    execution_engine: ExecutionEngine,
+    lane_id: str,
+    symbol: str,
+    expected_strategy_ids: Sequence[str] = (),
+) -> dict[str, Any] | None:
+    state = strategy_engine.state
+    if state.open_broker_order_id:
+        return None
+    if execution_engine.pending_executions():
+        return None
+    broker = execution_engine.broker
+    if not isinstance(broker, _IbkrPaperBridgeRuntimeBroker):
+        return None
+    path = (
+        repo_root
+        / "outputs"
+        / "reports"
+        / "track_b_paper_broker_reconciliation"
+        / "latest_track_b_paper_broker_reconciliation.json"
+    )
+    try:
+        report = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    if not isinstance(report, dict) or not _track_b_report_positions_match_without_review(report):
+        return None
+    normalized_symbol = str(symbol or "").strip().upper()
+    match_report = report.get("position_match_report") if isinstance(report.get("position_match_report"), dict) else {}
+    matches = match_report.get("matches") if isinstance(match_report.get("matches"), list) else []
+    same_symbol_owner_rows: list[dict[str, Any]] = []
+    current_lane_owns_symbol = False
+    for row in matches:
+        if not isinstance(row, dict):
+            continue
+        broker_position = row.get("broker_position") if isinstance(row.get("broker_position"), dict) else {}
+        lifecycle_position = row.get("lifecycle_position") if isinstance(row.get("lifecycle_position"), dict) else {}
+        lifecycle_root = str(lifecycle_position.get("track_b_root") or lifecycle_position.get("instrument_family") or "").strip().upper()
+        broker_root = str(broker_position.get("track_b_root") or broker_position.get("symbol") or row.get("root") or "").strip().upper()
+        if normalized_symbol and normalized_symbol not in {lifecycle_root, broker_root}:
+            continue
+        strategy_id = lifecycle_position.get("strategy_id")
+        if _strategy_id_matches_lane(strategy_id, lane_id, expected_strategy_ids):
+            current_lane_owns_symbol = True
+            break
+        same_symbol_owner_rows.append(
+            {
+                "strategy_id": strategy_id,
+                "lifecycle_id": lifecycle_position.get("lifecycle_id"),
+                "local_symbol": lifecycle_position.get("local_symbol") or broker_position.get("local_symbol"),
+                "quantity": lifecycle_position.get("quantity") or broker_position.get("quantity"),
+                "side": lifecycle_position.get("side"),
+            }
+        )
+    if current_lane_owns_symbol or not same_symbol_owner_rows:
+        return None
+    broker.restore_state(
+        position=PaperPosition(quantity=0, average_price=None),
+        open_order_ids=[],
+        order_status={},
+        last_fill_timestamp=_latest_fill_timestamp_from_rows(execution_engine.broker.snapshot_state().get("fills") or []),
+    )
+    suppression_payload = {
+        "classification": "NON_OWNER_TRACK_B_SYMBOL_EXPOSURE_SUPPRESSED",
+        "lane_id": lane_id,
+        "symbol": normalized_symbol,
+        "owner_positions": same_symbol_owner_rows,
+        "reconciliation_classification": report.get("classification"),
+        "open_order_count": report.get("track_b_broker_open_order_count"),
+    }
+    broker.suppress_external_truth_for_restore(suppression_payload)
+    strategy_engine._state = replace(  # noqa: SLF001
+        state,
+        strategy_status=StrategyStatus.READY,
+        position_side=PositionSide.FLAT,
+        broker_position_qty=0,
+        internal_position_qty=0,
+        entry_price=None,
+        entry_timestamp=None,
+        open_entry_legs=(),
+        entries_enabled=False,
+        exits_enabled=False,
+        reconcile_required=False,
+        fault_code=None,
+        updated_at=datetime.now(timezone.utc),
+    )
+    strategy_engine._persist_state(  # noqa: SLF001
+        strategy_engine.state,
+        transition_label="non_owner_track_b_symbol_exposure_restore_suppressed",
+    )
+    return suppression_payload
 
 
 def _restore_open_position_from_track_b_reconciliation(
