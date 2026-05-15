@@ -543,6 +543,19 @@ def _evaluate_strategy_gate(
     if semantics.operation == "OPEN":
         if strategy_state in {"LONG", "SHORT"}:
             block_reasons.append("duplicate_strategy_entry_while_position_open")
+        aggregate_signed_quantity = round(float(aggregate_state.get("strategy_attributed_position_sum") or 0.0), 8)
+        if (
+            semantics.direction == "LONG"
+            and aggregate_signed_quantity < 0.0
+            and not bool(config.allow_long_and_short_netting)
+        ):
+            block_reasons.append("opposite_direction_strategy_exposure")
+        if (
+            semantics.direction == "SHORT"
+            and aggregate_signed_quantity > 0.0
+            and not bool(config.allow_long_and_short_netting)
+        ):
+            block_reasons.append("opposite_direction_strategy_exposure")
         if float(config.max_per_strategy_mgc_contracts) > 0.0 and owned_quantity + quantity > float(config.max_per_strategy_mgc_contracts):
             block_reasons.append("per_strategy_contract_limit_exceeded")
         if config.max_total_mgc_contracts is not None:

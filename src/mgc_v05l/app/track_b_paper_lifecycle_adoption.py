@@ -47,6 +47,12 @@ class LifecycleAdoptionConfig:
     expiry: str = DEFAULT_EXPIRY
     quantity: Decimal = DEFAULT_QUANTITY
     apply: bool = False
+    allow_leak_test_synthetic_intent: bool = False
+    expected_broker_order_id: str | None = None
+    expected_client_id: int | None = None
+    expected_perm_id: int | None = None
+    expected_exec_id: str | None = None
+    expected_fill_price: Decimal | None = None
     output_root: Path = DEFAULT_OUTPUT_ROOT
     lane_root: Path = DEFAULT_LANE_ROOT
     bridge_root: Path = DEFAULT_BRIDGE_ROOT
@@ -93,10 +99,12 @@ def run_track_b_paper_lifecycle_adoption(
     )
     intent = _select_intent(
         intents=intents,
+        bridge_report=bridge_report,
         lane_id=config.lane_id,
         order_intent_id=config.order_intent_id,
         symbol=config.symbol,
         quantity=config.quantity,
+        allow_leak_test_synthetic_intent=config.allow_leak_test_synthetic_intent,
         failures=failures,
     )
     route_identity = _validate_route_identity(
@@ -114,6 +122,11 @@ def run_track_b_paper_lifecycle_adoption(
         expiry=config.expiry,
         quantity=config.quantity,
         intent=intent,
+        expected_broker_order_id=config.expected_broker_order_id,
+        expected_client_id=config.expected_client_id,
+        expected_perm_id=config.expected_perm_id,
+        expected_exec_id=config.expected_exec_id,
+        expected_fill_price=config.expected_fill_price,
         failures=failures,
     )
 
@@ -305,10 +318,12 @@ def _select_broker_position(
 def _select_intent(
     *,
     intents: Sequence[Mapping[str, Any]],
+    bridge_report: Mapping[str, Any],
     lane_id: str,
     order_intent_id: str | None,
     symbol: str,
     quantity: Decimal,
+    allow_leak_test_synthetic_intent: bool,
     failures: list[str],
 ) -> dict[str, Any] | None:
     rows = [
@@ -322,10 +337,75 @@ def _select_intent(
     ]
     if order_intent_id:
         rows = [row for row in rows if str(row.get("order_intent_id") or "") == order_intent_id]
+    if len(rows) != 1 and allow_leak_test_synthetic_intent:
+        synthetic = _synthetic_leak_test_intent_from_bridge(
+            bridge_report=bridge_report,
+            lane_id=lane_id,
+            order_intent_id=order_intent_id,
+            symbol=symbol,
+            quantity=quantity,
+            failures=failures,
+        )
+        if synthetic is not None:
+            return synthetic
     if len(rows) != 1:
         failures.append(f"Expected exactly one filled matching order intent, found {len(rows)}.")
         return rows[0] if rows else None
     return rows[0]
+
+
+def _synthetic_leak_test_intent_from_bridge(
+    *,
+    bridge_report: Mapping[str, Any],
+    lane_id: str,
+    order_intent_id: str | None,
+    symbol: str,
+    quantity: Decimal,
+    failures: list[str],
+) -> dict[str, Any] | None:
+    intent_payload = bridge_report.get("intent") if isinstance(bridge_report.get("intent"), Mapping) else {}
+    caller_metadata = bridge_report.get("caller_metadata") if isinstance(bridge_report.get("caller_metadata"), Mapping) else {}
+    delegated = bridge_report.get("delegated_result") if isinstance(bridge_report.get("delegated_result"), Mapping) else {}
+    if not intent_payload:
+        return None
+    if caller_metadata.get("leak_test") is not True and "TRACK_B_LEAK_TEST" not in set(intent_payload.get("risk_tags") or []):
+        return None
+    if str(bridge_report.get("classification") or "") != "PAPER_STRATEGY_ORDER_FILLED":
+        return None
+    if str(delegated.get("classification") or "") != "PAPER_ORDER_FILLED":
+        return None
+    if str(intent_payload.get("strategy_id") or "") != lane_id:
+        failures.append("Synthetic leak-test intent bridge lane mismatch.")
+        return None
+    if str(intent_payload.get("symbol") or "").upper() != symbol.upper():
+        failures.append("Synthetic leak-test intent symbol mismatch.")
+        return None
+    if _decimal(intent_payload.get("quantity")) != quantity:
+        failures.append("Synthetic leak-test intent quantity mismatch.")
+        return None
+    bridge_intent_id = str(intent_payload.get("intent_id") or "")
+    if order_intent_id and bridge_intent_id and order_intent_id != bridge_intent_id:
+        failures.append("Synthetic leak-test intent id mismatch.")
+        return None
+    intent_type = str(caller_metadata.get("intent_type") or intent_payload.get("intent_type") or "BUY_TO_OPEN").upper()
+    return {
+        "order_intent_id": order_intent_id or bridge_intent_id,
+        "lane_id": lane_id,
+        "strategy_id": lane_id,
+        "standalone_strategy_id": caller_metadata.get("strategy_id") or lane_id,
+        "symbol": symbol,
+        "instrument": symbol,
+        "intent_type": intent_type,
+        "quantity": _decimal_text(quantity),
+        "broker_order_id": _nested(bridge_report, "delegated_result", "report", "submit_cancel_lifecycle", "submitted_order_id")
+        or _nested(bridge_report, "delegated_result", "report", "submit_cancel_lifecycle", "latest_order_status", "order_id"),
+        "broker_order_status": "FILLED",
+        "reason_code": intent_payload.get("reason") or "LEAK_TEST_ENTRY",
+        "decision_bar_timestamp": intent_payload.get("timestamp"),
+        "signal_timestamp": intent_payload.get("timestamp"),
+        "synthetic_leak_test_intent": True,
+        "source": "TRACK_B_PAPER_LEAK_TEST_BRIDGE_REPORT",
+    }
 
 
 def _validate_route_identity(
@@ -360,6 +440,11 @@ def _extract_bridge_evidence(
     expiry: str,
     quantity: Decimal,
     intent: Mapping[str, Any] | None,
+    expected_broker_order_id: str | None,
+    expected_client_id: int | None,
+    expected_perm_id: int | None,
+    expected_exec_id: str | None,
+    expected_fill_price: Decimal | None,
     failures: list[str],
 ) -> dict[str, Any] | None:
     if not bridge_report:
@@ -411,6 +496,12 @@ def _extract_bridge_evidence(
     broker_order_id = str((intent or {}).get("broker_order_id") or "")
     if broker_order_id and str(latest_status.get("order_id") or "") != broker_order_id:
         failures.append("Bridge latest order id does not match intent broker_order_id.")
+    if expected_broker_order_id is not None and str(latest_status.get("order_id") or "") != str(expected_broker_order_id):
+        failures.append("Bridge latest order id does not match expected broker_order_id.")
+    if expected_client_id is not None and _decimal(latest_status.get("client_id")) != Decimal(expected_client_id):
+        failures.append("Bridge latest client id does not match expected client_id.")
+    if expected_perm_id is not None and _decimal(latest_status.get("perm_id")) != Decimal(expected_perm_id):
+        failures.append("Bridge latest perm id does not match expected perm_id.")
 
     executions = []
     for source in (
@@ -436,6 +527,12 @@ def _extract_bridge_evidence(
         return None
 
     execution = next(iter(matching_executions.values()))
+    if expected_exec_id is not None and str(execution.get("execution_id") or "") != str(expected_exec_id):
+        failures.append("Bridge execution id does not match expected exec_id.")
+    execution_price = _decimal(execution.get("price") or latest_status.get("avg_fill_price"))
+    expected_fill_decimal = _decimal(expected_fill_price)
+    if expected_fill_decimal is not None and execution_price != expected_fill_decimal:
+        failures.append("Bridge execution fill price does not match expected fill_price.")
     contract = next(
         (dict(item) for item in contract_candidates if _contract_matches(item, symbol=symbol, local_symbol=local_symbol, expiry=expiry)),
         {},
@@ -458,6 +555,10 @@ def _extract_bridge_evidence(
         "order_status_updated_at": latest_status.get("updated_at"),
         "latest_order_status": dict(latest_status),
         "selected_execution": execution,
+        "entry_execution_intent": _nested(bridge_report, "entry_execution_pricing", "entry_execution_intent"),
+        "entry_price_source": _nested(bridge_report, "entry_execution_pricing", "execution_price_source"),
+        "leak_test": bool(_nested(bridge_report, "caller_metadata", "leak_test")),
+        "authorization_digest": _nested(bridge_report, "caller_metadata", "authorization_digest"),
     }
 
 
@@ -482,7 +583,11 @@ def _build_fill_payload(
     strategy_id = str(intent.get("standalone_strategy_id") or intent.get("strategy_id") or config.lane_id)
     return {
         "source": "TRACK_B_PAPER_LIFECYCLE_ADOPTION",
-        "classification": "PAPER_FILL_LIFECYCLE_ADOPTION_RECONSTRUCTED",
+        "classification": "LEAK_TEST_FILL_LIFECYCLE_ADOPTION_RECONSTRUCTED"
+        if bridge_evidence.get("leak_test")
+        else "PAPER_FILL_LIFECYCLE_ADOPTION_RECONSTRUCTED",
+        "leak_test": bool(bridge_evidence.get("leak_test")),
+        "entry_source": "LEAK_TEST_ENTRY" if bridge_evidence.get("leak_test") else "SUPERVISED_ADOPTION",
         "adopted_at": now.isoformat(),
         "paper_only": True,
         "live_money_eligible": False,
@@ -508,6 +613,10 @@ def _build_fill_payload(
         "client_id": bridge_evidence.get("client_id"),
         "execution_id": bridge_evidence.get("execution_id"),
         "exec_id": bridge_evidence.get("execution_id"),
+        "entry_execution_intent": bridge_evidence.get("entry_execution_intent"),
+        "entry_price_source": bridge_evidence.get("entry_price_source"),
+        "execution_price_source": bridge_evidence.get("entry_price_source"),
+        "authorization_digest": bridge_evidence.get("authorization_digest"),
         "broker_status": "FILLED",
         "broker_position_quantity": str(broker_position.get("quantity") or ""),
         "broker_average_cost": str(broker_position.get("average_cost") or ""),
@@ -521,6 +630,10 @@ def _build_fill_payload(
         "paper_proof_invoked": False,
         "broker_mutated_by_adoption": False,
         "review_required": False,
+        "source_artifact_paths": [
+            str(config.broker_truth_path),
+            str(config.bridge_root / config.lane_id / "ibkr_paper_strategy_bridge_report.json"),
+        ],
     }
 
 
@@ -536,6 +649,8 @@ def _build_trade_payload(fill_payload: Mapping[str, Any]) -> dict[str, Any]:
         "lifecycle_id": lifecycle_id,
         "final_position_status": "OPEN_MANAGED",
         "paper_lifecycle_type": "STRATEGY_MANAGED",
+        "leak_test": bool(fill_payload.get("leak_test")),
+        "entry_source": fill_payload.get("entry_source"),
         "account_id": fill_payload.get("account_id"),
         "lane_id": fill_payload.get("lane_id"),
         "strategy_id": strategy_id,
@@ -559,11 +674,14 @@ def _build_trade_payload(fill_payload: Mapping[str, Any]) -> dict[str, Any]:
         "entry_perm_id": fill_payload.get("perm_id"),
         "entry_client_id": fill_payload.get("client_id"),
         "entry_exec_id": fill_payload.get("execution_id"),
+        "entry_execution_intent": fill_payload.get("entry_execution_intent"),
+        "entry_price_source": fill_payload.get("entry_price_source"),
         "broker_average_price": fill_payload.get("broker_average_price"),
         "broker_cost_basis_adjustment": fill_payload.get("broker_cost_basis_adjustment"),
         "live_money_eligible": False,
         "paper_proof_invoked": False,
         "broker_mutated_by_adoption": False,
+        "source_artifact_paths": fill_payload.get("source_artifact_paths") or [],
     }
 
 
@@ -598,6 +716,11 @@ def _build_filled_bridge_result(fill_payload: Mapping[str, Any]) -> dict[str, An
         "fill_price": fill_payload.get("fill_price"),
         "fill_timestamp": fill_payload.get("fill_timestamp"),
         "bridge_classification": fill_payload.get("bridge_classification"),
+        "leak_test": bool(fill_payload.get("leak_test")),
+        "entry_source": fill_payload.get("entry_source"),
+        "entry_execution_intent": fill_payload.get("entry_execution_intent"),
+        "entry_price_source": fill_payload.get("entry_price_source"),
+        "source_artifact_paths": fill_payload.get("source_artifact_paths") or [],
         "route_destination": fill_payload.get("route_destination"),
         "paper_proof_invoked": False,
         "live_money_readiness": False,
@@ -751,6 +874,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--local-symbol", default=DEFAULT_LOCAL_SYMBOL)
     parser.add_argument("--expiry", default=DEFAULT_EXPIRY)
     parser.add_argument("--quantity", default=str(DEFAULT_QUANTITY))
+    parser.add_argument("--allow-leak-test-synthetic-intent", action="store_true")
+    parser.add_argument("--expected-broker-order-id", default=None)
+    parser.add_argument("--expected-client-id", type=int, default=None)
+    parser.add_argument("--expected-perm-id", type=int, default=None)
+    parser.add_argument("--expected-exec-id", default=None)
+    parser.add_argument("--expected-fill-price", default=None)
     parser.add_argument("--output-root", default=str(DEFAULT_OUTPUT_ROOT))
     parser.add_argument("--broker-truth-path", default=str(DEFAULT_BROKER_TRUTH_PATH))
     parser.add_argument("--lane-root", default=str(DEFAULT_LANE_ROOT))
@@ -765,6 +894,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     quantity = _decimal(args.quantity)
     if quantity is None:
         raise SystemExit("--quantity must be decimal")
+    expected_fill_price = _decimal(args.expected_fill_price)
+    if args.expected_fill_price is not None and expected_fill_price is None:
+        raise SystemExit("--expected-fill-price must be decimal")
     result = run_track_b_paper_lifecycle_adoption(
         config=LifecycleAdoptionConfig(
             repo_root=Path(args.repo_root).expanduser().resolve(),
@@ -776,6 +908,12 @@ def main(argv: Sequence[str] | None = None) -> int:
             expiry=str(args.expiry),
             quantity=quantity,
             apply=bool(args.apply),
+            allow_leak_test_synthetic_intent=bool(args.allow_leak_test_synthetic_intent),
+            expected_broker_order_id=args.expected_broker_order_id,
+            expected_client_id=args.expected_client_id,
+            expected_perm_id=args.expected_perm_id,
+            expected_exec_id=args.expected_exec_id,
+            expected_fill_price=expected_fill_price,
             output_root=Path(args.output_root),
             lane_root=Path(args.lane_root),
             bridge_root=Path(args.bridge_root),

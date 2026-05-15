@@ -11,6 +11,7 @@ import subprocess
 import time
 from dataclasses import asdict, dataclass
 from datetime import datetime, timedelta, timezone
+from decimal import Decimal
 from pathlib import Path
 from typing import Any, Callable, Mapping, Sequence
 
@@ -27,6 +28,7 @@ from ..execution_core.track_b_paper_broker_reconciliation import (
 )
 from .ibkr_broker_truth_refresher import BrokerTruthRefreshConfig, run_broker_truth_refresh_once
 from .probationary_runtime import _active_probationary_paper_lane_specs
+from .track_b_paper_lifecycle_adoption import LifecycleAdoptionConfig, run_track_b_paper_lifecycle_adoption
 
 
 PAPER_ACCOUNT_ID = "DUM882026"
@@ -1057,6 +1059,33 @@ def _guarded_bridge_route(config: IbkrPaperStrategyBridgeConfig) -> dict[str, An
     return {"classification": artifacts.classification, "report": artifacts.report}
 
 
+def _default_lifecycle_adoption_runner(
+    *,
+    repo_root: Path,
+    lane: LeakTestLanePlan,
+    entry_result: LeakTestOrderResult,
+) -> dict[str, Any]:
+    result = run_track_b_paper_lifecycle_adoption(
+        config=LifecycleAdoptionConfig(
+            repo_root=repo_root,
+            lane_id=lane.lane_id,
+            account_id=PAPER_ACCOUNT_ID,
+            symbol=lane.symbol,
+            local_symbol=lane.localSymbol,
+            expiry=lane.expiry,
+            quantity=Decimal("1"),
+            apply=True,
+            allow_leak_test_synthetic_intent=True,
+            expected_broker_order_id=entry_result.order_id,
+            expected_client_id=entry_result.client_id,
+            expected_perm_id=entry_result.perm_id,
+            expected_fill_price=Decimal(str(entry_result.fill_price)) if entry_result.fill_price is not None else None,
+            bridge_root=LEAK_TEST_OUTPUT_ROOT,
+        )
+    )
+    return result.report
+
+
 def _default_reconciliation_reader(repo_root: Path, stage: str) -> dict[str, Any]:
     del stage
     return _read_json(repo_root / RECONCILIATION_PATH)
@@ -1769,6 +1798,7 @@ def build_single_lane_apply_report(
     guarded_route_runner: Callable[[IbkrPaperStrategyBridgeConfig], dict[str, Any]] = _guarded_bridge_route,
     reconciliation_reader: Callable[[Path, str], dict[str, Any]] = _default_reconciliation_reader,
     post_submit_broker_state_refresher: Callable[[Path, str], dict[str, Any]] = _default_post_submit_broker_state_refresher,
+    lifecycle_adoption_runner: Callable[..., dict[str, Any]] = _default_lifecycle_adoption_runner,
     readiness_checker: Callable[[Path, LeakTestLanePlan, LeakTestSafetySnapshot], dict[str, Any]] | None = None,
 ) -> LeakTestReport:
     dry_run_report = build_single_lane_dry_run_report(
@@ -1956,6 +1986,13 @@ def build_single_lane_apply_report(
                 classification = "LEAK_TEST_PASS_BLOCKED_SAFELY"
                 reconciliation_after_exit = reconciliation_reader(repo_root, "entry_unknown_before_submit")
         else:
+            post_submit_broker_state_refresher(repo_root, "entry_filled_before_lifecycle_adoption")
+            adoption_report = lifecycle_adoption_runner(
+                repo_root=repo_root,
+                lane=lane,
+                entry_result=entry_result,
+            )
+            adoption_classification = str(adoption_report.get("classification") or "")
             reconciliation_after_entry = _wait_for_reconciliation(
                 repo_root=repo_root,
                 stage="after_entry",
@@ -1965,7 +2002,9 @@ def build_single_lane_apply_report(
             )
             lifecycle_open_result = (
                 "LIFECYCLE_OPEN_MATCHED"
-                if _reconciliation_ok(reconciliation_after_entry) and _lifecycle_open_matches_lane(reconciliation_after_entry, lane)
+                if adoption_classification == "TRACK_B_PAPER_LIFECYCLE_ADOPTION_APPLIED"
+                and _reconciliation_ok(reconciliation_after_entry)
+                and _lifecycle_open_matches_lane(reconciliation_after_entry, lane)
                 else "LIFECYCLE_OPEN_GAP"
             )
             if lifecycle_open_result != "LIFECYCLE_OPEN_MATCHED":

@@ -72,6 +72,71 @@ def test_updates_open_position_from_direct_bridge_fill_artifact(tmp_path: Path) 
     assert position["entry_broker_identity"]["broker_order_id"] == "1"
 
 
+def test_direct_bridge_close_fill_persists_closed_flat_record(tmp_path: Path) -> None:
+    output_root = tmp_path / "ledger"
+    open_payload = {
+        "classification": "PAPER_STRATEGY_ORDER_FILLED_PERSISTED",
+        "strategy_id": "index_futures_ny_intraday_forced_core_v2__mnq_1x_ny_early_core__us_early_long",
+        "lane_id": "mnq_1x_ny_early_core__us_early_long",
+        "instrument": "MNQ",
+        "symbol": "MNQ",
+        "action": "BUY",
+        "quantity": 1,
+        "order_intent_id": "MNQ|1m|2026-05-14T12:26:00Z|BUY_TO_OPEN",
+        "intent_type": "BUY_TO_OPEN",
+        "decision_bar_timestamp": "2026-05-14T12:26:00+00:00",
+        "broker_order_id": "1",
+        "account_id": "DUM882026",
+        "perm_id": 984265750,
+        "client_id": 11099,
+        "exec_id": "0000e1a7.6a09f918.01.01",
+        "local_symbol": "MNQM6",
+        "con_id": 770561201,
+        "contract": {"symbol": "MNQ", "local_symbol": "MNQM6", "expiry": "202606", "multiplier": "2"},
+        "fill_price": "29561.5",
+        "fill_timestamp": "2026-05-14T12:26:53.964662+00:00",
+        "bridge_classification": "PAPER_STRATEGY_ORDER_FILLED",
+        "route_destination": "ibkr_paper_bridge_submit_capable",
+        "paper_proof_invoked": False,
+        "live_money_readiness": False,
+        "review_required": False,
+    }
+    close_payload = {
+        **open_payload,
+        "action": "SELL",
+        "order_intent_id": "MNQ|1m|2026-05-14T13:03:00Z|SELL_TO_CLOSE",
+        "intent_type": "SELL_TO_CLOSE",
+        "broker_order_id": "11",
+        "perm_id": 984270669,
+        "client_id": 10864,
+        "exec_id": "0000e1a7.6a0a0b1e.01.01",
+        "fill_price": "29492.75",
+        "fill_timestamp": "2026-05-14T13:04:48.414655+00:00",
+    }
+
+    update_track_b_paper_trade_ledger_from_filled_bridge_result(
+        filled_bridge_result=open_payload,
+        filled_bridge_result_json=write_json(tmp_path / "open.json", open_payload),
+        output_root=output_root,
+        now=aware_now(),
+    )
+    result = update_track_b_paper_trade_ledger_from_filled_bridge_result(
+        filled_bridge_result=close_payload,
+        filled_bridge_result_json=write_json(tmp_path / "close.json", close_payload),
+        output_root=output_root,
+        now=aware_now(),
+    )
+
+    assert result.trade_record_written is True
+    assert result.trade_record is not None
+    assert result.trade_record["final_position_status"] == "CLOSED_FLAT"
+    assert result.trade_record["exit_order_id"] == "11"
+    assert result.trade_record["exit_fill_price"] == "29492.75"
+    assert result.trade_record["realized_pnl"] == "-137.5"
+    assert result.live_position_status["open_position_count"] == 0
+    assert result.pnl_summary["completed_trades"] == 1
+
+
 def write_json(path: Path, payload: dict[str, object]) -> Path:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")

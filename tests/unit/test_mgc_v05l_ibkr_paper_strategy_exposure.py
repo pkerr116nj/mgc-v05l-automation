@@ -370,6 +370,73 @@ def test_flat_mnq_sell_to_open_short_entry_is_allowed(tmp_path: Path) -> None:
     assert gate["block_reasons"] == []
 
 
+def test_blocks_opposite_direction_open_against_existing_phase1_position(tmp_path: Path) -> None:
+    existing_lifecycle_id = "bridge_fill_3c23e0f6-b19f-42e5-9582-28dee7b600b7"
+    _write_monitor(tmp_path, broker_quantity=0.0)
+    _write_ledger(tmp_path, [])
+    _write_governance(
+        tmp_path,
+        [
+            _governance_row(
+                "atp_companion_v1_gc_asia_promotion_1_075r_favorable_only_5m",
+                "atp_companion_v1__paper_gc_asia__promotion_1_075r_favorable_only_5m",
+            ),
+            _governance_row(
+                "atp_companion_v1_gc_asia_us_production_track_selective_v1",
+                "atp_companion_v1__production_track_gc_asia_us_selective_v1",
+            ),
+        ],
+    )
+    _write_phase1_reconciliation(
+        tmp_path,
+        lifecycle_positions=[
+            {
+                "account_id": "DUM882026",
+                "strategy_id": "atp_companion_v1__production_track_gc_asia_us_selective_v1",
+                "track_b_root": "GC",
+                "instrument_family": "GC",
+                "contract_key": "GC-202606",
+                "local_symbol": "GCM6",
+                "con_id": 430360630,
+                "quantity": "1",
+                "side": "LONG",
+                "avg_entry_price": "4578.5",
+                "entry_order_id": "3",
+                "lifecycle_id": existing_lifecycle_id,
+            }
+        ],
+    )
+    _write_broker_positions_snapshot(
+        tmp_path,
+        positions=[
+            {
+                "account_id": "DUM882026",
+                "symbol": "GC",
+                "local_symbol": "GCM6",
+                "con_id": 430360630,
+                "quantity": "1.0",
+            }
+        ],
+    )
+    _write_broker_open_orders_snapshot(tmp_path, open_orders=[])
+
+    gate = evaluate_paper_strategy_exposure_gate(
+        repo_root=tmp_path,
+        strategy_id="atp_companion_v1_gc_asia_promotion_1_075r_favorable_only_5m",
+        bridge_strategy_id="atp_companion_v1__paper_gc_asia__promotion_1_075r_favorable_only_5m",
+        executable_symbol="GC",
+        action="SELL",
+        intent_type="SELL_TO_OPEN",
+        quantity=1.0,
+    )
+
+    assert gate["submit_allowed"] is False
+    assert gate["classification"] == "PAPER_EXPOSURE_BLOCKED_STRATEGY_LIMIT"
+    assert "opposite_direction_strategy_exposure" in gate["block_reasons"]
+    assert gate["aggregate_strategy_position_sum"] == 1.0
+    assert gate["aggregate_broker_position"] == 1.0
+
+
 def test_pl_lane_can_exit_turn_owner_from_clean_phase1_reconciliation(tmp_path: Path) -> None:
     lifecycle_id = "bridge_fill_PL|1m|2026-05-14T17:52:00Z|BUY_TO_OPEN"
     _write_monitor(tmp_path, broker_quantity=0.0)

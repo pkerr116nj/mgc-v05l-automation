@@ -106,6 +106,81 @@ def test_lifecycle_adoption_is_idempotent(tmp_path: Path) -> None:
     assert second.report["post_adoption"]["compact_ledger_trade_record_written"] is False
 
 
+def test_gc_leak_test_lifecycle_adoption_synthesizes_intent_and_reconstructs_ledger(tmp_path: Path) -> None:
+    repo = _write_gc_leak_test_evidence(tmp_path)
+
+    result = run_track_b_paper_lifecycle_adoption(
+        config=LifecycleAdoptionConfig(
+            repo_root=repo,
+            lane_id="atp_companion_v1_gc_asia_us_production_track_selective_v1",
+            symbol="GC",
+            local_symbol="GCM6",
+            expiry="20260626",
+            bridge_root=Path("outputs/reports/track_b_paper_leak_test"),
+            allow_leak_test_synthetic_intent=True,
+            expected_broker_order_id="3",
+            expected_client_id=11940,
+            expected_perm_id=614029068,
+            expected_exec_id="0000e1a7.6a0cd6e8.01.01",
+            expected_fill_price="4578.5",
+            apply=True,
+        ),
+        now=_now(),
+    )
+
+    assert result.classification == "TRACK_B_PAPER_LIFECYCLE_ADOPTION_APPLIED"
+    lane_dir = repo / "outputs/probationary_pattern_engine/paper_session/lanes/atp_companion_v1_gc_asia_us_production_track_selective_v1"
+    fill_rows = _read_jsonl(lane_dir / "fills.jsonl")
+    trade_rows = _read_jsonl(lane_dir / "trades.jsonl")
+    assert len(fill_rows) == 1
+    assert len(trade_rows) == 1
+    assert fill_rows[0]["leak_test"] is True
+    assert fill_rows[0]["entry_source"] == "LEAK_TEST_ENTRY"
+    assert fill_rows[0]["strategy_id"] == "atp_companion_v1__production_track_gc_asia_us_selective_v1"
+    assert fill_rows[0]["broker_order_id"] == "3"
+    assert fill_rows[0]["perm_id"] == 614029068
+    assert fill_rows[0]["client_id"] == 11940
+    assert fill_rows[0]["execution_id"] == "0000e1a7.6a0cd6e8.01.01"
+    assert fill_rows[0]["entry_execution_intent"] == "PARTICIPATE_NOW"
+    assert fill_rows[0]["entry_price_source"] == "RUNTIME_DATABENTO_1M_CLOSE"
+    assert trade_rows[0]["final_position_status"] == "OPEN_MANAGED"
+    assert trade_rows[0]["leak_test"] is True
+    live_positions = _read_json(repo / "outputs/track_b_execution_core/paper_trade_ledger/latest_track_b_live_position_status.json")
+    assert live_positions["open_position_count"] == 1
+    position = live_positions["positions_by_instrument"]["GC-202606"]
+    assert position["local_symbol"] == "GCM6"
+    assert position["entry_perm_id"] == 614029068
+    assert position["strategy_id"] == "atp_companion_v1__production_track_gc_asia_us_selective_v1"
+
+
+def test_gc_leak_test_lifecycle_adoption_refuses_exact_identity_mismatch(tmp_path: Path) -> None:
+    repo = _write_gc_leak_test_evidence(tmp_path)
+
+    result = run_track_b_paper_lifecycle_adoption(
+        config=LifecycleAdoptionConfig(
+            repo_root=repo,
+            lane_id="atp_companion_v1_gc_asia_us_production_track_selective_v1",
+            symbol="GC",
+            local_symbol="GCM6",
+            expiry="20260626",
+            bridge_root=Path("outputs/reports/track_b_paper_leak_test"),
+            allow_leak_test_synthetic_intent=True,
+            expected_broker_order_id="3",
+            expected_client_id=11940,
+            expected_perm_id=614029999,
+            expected_exec_id="0000e1a7.6a0cd6e8.01.01",
+            expected_fill_price="4578.5",
+            apply=True,
+        ),
+        now=_now(),
+    )
+
+    assert result.classification == "TRACK_B_PAPER_LIFECYCLE_ADOPTION_REFUSED"
+    assert "Bridge latest perm id does not match expected perm_id." in result.report["failures"]
+    lane_dir = repo / "outputs/probationary_pattern_engine/paper_session/lanes/atp_companion_v1_gc_asia_us_production_track_selective_v1"
+    assert _read_jsonl(lane_dir / "fills.jsonl") == []
+
+
 def _write_pl_evidence(tmp_path: Path, *, broker_local_symbol: str = "PLN6") -> Path:
     repo = tmp_path
     lane_dir = repo / "outputs/probationary_pattern_engine/paper_session/lanes/atp_companion_v1_pl_asia_us"
@@ -237,6 +312,123 @@ def _write_pl_evidence(tmp_path: Path, *, broker_local_symbol: str = "PLN6") -> 
                                 "quantity": "1.0",
                                 "symbol": "PL",
                             },
+                        ],
+                    },
+                },
+            },
+        },
+    )
+    return repo
+
+
+def _write_gc_leak_test_evidence(tmp_path: Path) -> Path:
+    repo = tmp_path
+    lane_id = "atp_companion_v1_gc_asia_us_production_track_selective_v1"
+    lane_dir = repo / "outputs/probationary_pattern_engine/paper_session/lanes" / lane_id
+    bridge_dir = repo / "outputs/reports/track_b_paper_leak_test" / lane_id
+    broker_dir = repo / "outputs/reports/ibkr_read_only_verification"
+    lane_dir.mkdir(parents=True, exist_ok=True)
+    bridge_dir.mkdir(parents=True, exist_ok=True)
+    broker_dir.mkdir(parents=True, exist_ok=True)
+    (lane_dir / "order_intents.jsonl").write_text("", encoding="utf-8")
+    (lane_dir / "fills.jsonl").write_text("", encoding="utf-8")
+    (lane_dir / "trades.jsonl").write_text("", encoding="utf-8")
+    _write_json(
+        broker_dir / "ibkr_positions_snapshot.json",
+        {
+            "account": "DUM882026",
+            "selected_account_id": "DUM882026",
+            "generated_at": "2026-05-15T06:34:20.588499+00:00",
+            "mode": "PAPER",
+            "positions": [
+                {
+                    "account_id": "DUM882026",
+                    "average_cost": "457852.52",
+                    "currency": "USD",
+                    "expiry": "20260626",
+                    "local_symbol": "GCM6",
+                    "multiplier": "100",
+                    "quantity": "1.0",
+                    "security_type": "FUT",
+                    "symbol": "GC",
+                    "updated_at": "2026-05-15T06:34:20.436452+00:00",
+                }
+            ],
+        },
+    )
+    _write_json(
+        bridge_dir / "ibkr_paper_strategy_bridge_report.json",
+        {
+            "classification": "PAPER_STRATEGY_ORDER_FILLED",
+            "selected_account_id": "DUM882026",
+            "environment": {"mode": "PAPER", "host": "127.0.0.1", "port": 7497, "client_id": 10940},
+            "caller_metadata": {
+                "leak_test": True,
+                "strategy_id": "atp_companion_v1__production_track_gc_asia_us_selective_v1",
+                "lane_id": lane_id,
+                "authorization_digest": "b6e18cf95416671adfcc8659b56170074ff5e025d77ac148c45ea09c5ed5ef34",
+            },
+            "strategy_identity": {"strategy_id": lane_id},
+            "intent": {
+                "action": "BUY",
+                "intent_id": "3c23e0f6-b19f-42e5-9582-28dee7b600b7",
+                "strategy_id": lane_id,
+                "symbol": "GC",
+                "quantity": 1.0,
+                "paper_only": True,
+                "reason": "LEAK_TEST_ENTRY",
+                "risk_tags": ["TRACK_B_LEAK_TEST", "BUY_TO_OPEN"],
+                "timestamp": "2026-05-15T06:29:12.256499+00:00",
+            },
+            "entry_execution_pricing": {
+                "entry_execution_intent": "PARTICIPATE_NOW",
+                "execution_price_source": "RUNTIME_DATABENTO_1M_CLOSE",
+                "limit_price": 4578.5,
+                "runtime_last_or_close": 4578.4,
+            },
+            "exact_contract_report": {
+                "exact_contract": {
+                    "broker_symbol": "GC",
+                    "con_id": 430360630,
+                    "expiry": "20260626",
+                    "local_symbol": "GCM6",
+                    "multiplier": "100",
+                }
+            },
+            "delegated_result": {
+                "classification": "PAPER_ORDER_FILLED",
+                "report": {
+                    "preview_payload": {
+                        "contract": {
+                            "symbol": "GC",
+                            "expiry": "202606",
+                            "local_symbol": "GCM6",
+                            "multiplier": "100",
+                            "qualified_contract_identifier": 430360630,
+                        }
+                    },
+                    "submit_cancel_lifecycle": {
+                        "status": "filled",
+                        "submitted_order_id": 3,
+                        "latest_order_status": {
+                            "status": "Filled",
+                            "order_id": 3,
+                            "perm_id": 614029068,
+                            "client_id": 11940,
+                            "filled": 1.0,
+                            "avg_fill_price": 4578.5,
+                            "updated_at": "2026-05-15T06:29:56.936703+00:00",
+                        },
+                        "executions_after_submit": [
+                            {
+                                "account_id": "DUM882026",
+                                "broker_order_id": "3",
+                                "executed_at": "2026-05-15T06:29:56.936139+00:00",
+                                "execution_id": "0000e1a7.6a0cd6e8.01.01",
+                                "price": "4578.5",
+                                "quantity": "1.0",
+                                "symbol": "GC",
+                            }
                         ],
                     },
                 },

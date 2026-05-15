@@ -183,6 +183,14 @@ def _ready_precheck(_repo_root, _lane, _safety):
     return {"classification": "LEAK_TEST_PRECHECK_READY", "ready": True, "blockers": ()}
 
 
+def _adoption_applied(**_kwargs):
+    return {"classification": "TRACK_B_PAPER_LIFECYCLE_ADOPTION_APPLIED"}
+
+
+def _adoption_refused(**_kwargs):
+    return {"classification": "TRACK_B_PAPER_LIFECYCLE_ADOPTION_REFUSED", "failures": ["test refusal"]}
+
+
 def _stale_precheck(_repo_root, _lane, _safety):
     return {
         "classification": "LEAK_TEST_PRECHECK_GOVERNANCE_NOT_READY",
@@ -1098,6 +1106,8 @@ def test_apply_filled_entry_and_filled_exit_returns_full_round_trip_pass(tmp_pat
         authorization_path=_authorization_path(tmp_path),
         guarded_route_runner=_runner,
         readiness_checker=_ready_precheck,
+        post_submit_broker_state_refresher=lambda _repo_root, _stage: _clean_flat_reconciliation(),
+        lifecycle_adoption_runner=_adoption_applied,
         reconciliation_reader=_reader_for(
             {
                 "after_entry": _clean_managed_position_reconciliation(symbol="MNQ", lane_id=LANE_ID),
@@ -1129,6 +1139,13 @@ def test_apply_entry_fill_lifecycle_gap_reports_failure(tmp_path: Path) -> None:
         authorization_path=_authorization_path(tmp_path),
         guarded_route_runner=lambda _config: _bridge_result("PAPER_STRATEGY_ORDER_FILLED"),
         readiness_checker=_ready_precheck,
+        post_submit_broker_state_refresher=lambda _repo_root, _stage: _clean_flat_reconciliation(
+            broker_reconciled=False,
+            classification="TRACK_B_PAPER_BROKER_RECONCILIATION_BLOCKED",
+            track_b_broker_position_count=1,
+            lifecycle_open_position_count=0,
+        ),
+        lifecycle_adoption_runner=_adoption_refused,
         reconciliation_reader=_reader_for({"after_entry": _clean_flat_reconciliation()}),
         max_wait_seconds=0,
     )
@@ -1148,6 +1165,8 @@ def test_apply_exit_fill_lifecycle_gap_reports_failure(tmp_path: Path) -> None:
         authorization_path=_authorization_path(tmp_path),
         guarded_route_runner=lambda _config: _bridge_result("PAPER_STRATEGY_ORDER_FILLED"),
         readiness_checker=_ready_precheck,
+        post_submit_broker_state_refresher=lambda _repo_root, _stage: _clean_flat_reconciliation(),
+        lifecycle_adoption_runner=_adoption_applied,
         reconciliation_reader=_reader_for(
             {
                 "after_entry": _clean_managed_position_reconciliation(symbol="MNQ", lane_id=LANE_ID),

@@ -19,6 +19,7 @@ from typing import Any, Mapping, Sequence
 from mgc_v05l.execution_core.track_b_paper_trade_ledger import (
     DEFAULT_TRACK_B_PAPER_TRADE_LEDGER_OUTPUT_ROOT,
     LEDGER_SCHEMA_VERSION,
+    OPPOSITE_ENTRY_OFFSET_EXISTING_POSITION_RECLASSIFIED,
     build_track_b_paper_trade_summaries,
 )
 
@@ -99,6 +100,8 @@ class LifecycleCloseCleanupConfig:
     ledger_root: Path = DEFAULT_TRACK_B_PAPER_TRADE_LEDGER_OUTPUT_ROOT
     exit_bridge_report_path: Path | None = None
     allow_ledger_entry_evidence: bool = False
+    allow_offsetting_open_intent_as_close: bool = False
+    offsetting_open_lifecycle_id: str | None = None
 
 
 @dataclass(frozen=True)
@@ -154,10 +157,19 @@ def run_track_b_paper_lifecycle_close_cleanup(
         failures.append("Additional open MNQ lifecycle row has incomplete/non-matching identity evidence.")
 
     close_record = _build_close_record(config=config, target=target, exit_evidence=exit_evidence, now=actual_now)
+    offsetting_reconciliation_record = _build_offsetting_entry_reconciliation_record(
+        config=config,
+        rows=ledger_records,
+        exit_evidence=exit_evidence,
+        now=actual_now,
+    )
     already_applied = _already_has_matching_close(config=config, rows=ledger_records)
+    offsetting_already_reconciled = _offsetting_entry_already_reconciled(config=config, rows=ledger_records)
     simulated_records = list(ledger_records)
     if close_record is not None and not already_applied:
         simulated_records.append(close_record)
+    if offsetting_reconciliation_record is not None and not offsetting_already_reconciled:
+        simulated_records.append(offsetting_reconciliation_record)
     summaries = _build_summaries(
         records=simulated_records,
         ledger_jsonl=ledger_jsonl,
@@ -209,6 +221,9 @@ def run_track_b_paper_lifecycle_close_cleanup(
         "broker_flat_evidence": broker_flat_evidence,
         "write_plan": {
             "would_append_close_record": valid and not already_applied,
+            "would_append_offsetting_entry_reconciliation": valid
+            and offsetting_reconciliation_record is not None
+            and not offsetting_already_reconciled,
             "would_update_compact_summaries": valid,
             "rows_that_would_change": [] if target is None else [_row_identity(target)],
             "ledger_path": str(ledger_jsonl),
@@ -230,15 +245,23 @@ def run_track_b_paper_lifecycle_close_cleanup(
     report["audit_path"] = str(audit_path)
     latest_audit_path = _write_latest_audit(repo_root, config.output_root, report)
 
-    if valid and config.apply and close_record is not None and not already_applied:
+    if valid and config.apply and (
+        (close_record is not None and not already_applied)
+        or (offsetting_reconciliation_record is not None and not offsetting_already_reconciled)
+    ):
         ledger_jsonl.parent.mkdir(parents=True, exist_ok=True)
         with ledger_jsonl.open("a", encoding="utf-8") as handle:
-            handle.write(json.dumps(_jsonable(close_record), sort_keys=True) + "\n")
+            if close_record is not None and not already_applied:
+                handle.write(json.dumps(_jsonable(close_record), sort_keys=True) + "\n")
+            if offsetting_reconciliation_record is not None and not offsetting_already_reconciled:
+                handle.write(json.dumps(_jsonable(offsetting_reconciliation_record), sort_keys=True) + "\n")
         _write_summaries(summaries=summaries, output_root=repo_root / config.ledger_root)
         post_report = dict(report)
         post_report["classification"] = "TRACK_B_PAPER_LIFECYCLE_CLOSE_CLEANUP_APPLIED"
         post_report["post_apply"] = {
-            "close_record_written": True,
+            "close_record_written": close_record is not None and not already_applied,
+            "offsetting_entry_reconciliation_written": offsetting_reconciliation_record is not None
+            and not offsetting_already_reconciled,
             "compact_summaries_updated": True,
             "reconciliation_would_clear": reconciliation_prediction["would_clear"],
         }
@@ -364,6 +387,33 @@ def _select_exit_bridge_evidence(
         and str(row.get("classification") or "") == "PAPER_STRATEGY_ORDER_FILLED_PERSISTED"
         and str(row.get("bridge_classification") or "") == "PAPER_STRATEGY_ORDER_FILLED"
     ]
+    if len(matches) != 1 and config.allow_offsetting_open_intent_as_close:
+        offsetting_matches = [
+            dict(row)
+            for row in rows
+            if str(row.get("order_intent_id") or "") == config.exit_intent_id
+            and _offsetting_open_intent_matches_close(row, config=config)
+            and str(row.get("symbol") or row.get("instrument") or "").upper() == config.symbol
+            and str(row.get("local_symbol") or _nested(row, "contract", "local_symbol") or "").upper()
+            == config.local_symbol
+            and _int(row.get("con_id") or _nested(row, "contract", "qualified_contract_identifier")) == config.con_id
+            and _decimal(row.get("quantity")) == config.quantity
+            and _decimal(row.get("fill_price")) == config.exit_price
+            and _same_time(row.get("fill_timestamp"), config.exit_fill_time)
+            and _int(row.get("client_id")) == config.exit_client_id
+            and _int(row.get("perm_id")) == config.exit_perm_id
+            and str(row.get("classification") or "") == "PAPER_STRATEGY_ORDER_FILLED_PERSISTED"
+            and str(row.get("bridge_classification") or "") == "PAPER_STRATEGY_ORDER_FILLED"
+        ]
+        if len(offsetting_matches) == 1:
+            return {
+                **offsetting_matches[0],
+                "classification": "PAPER_STRATEGY_ORDER_FILLED_PERSISTED_OFFSETTING_OPEN_RECLASSIFIED_AS_CLOSE",
+                "original_intent_type": offsetting_matches[0].get("intent_type"),
+                "intent_type": "SELL_TO_CLOSE" if config.side == "LONG" else "BUY_TO_CLOSE",
+                "source": "OPPOSITE_OPEN_INTENT_OFFSET_EXISTING_MANAGED_POSITION",
+                "reclassified_offsetting_open_intent": True,
+            }
     if len(matches) != 1:
         failures.append(f"Expected exactly one matching SELL_TO_CLOSE bridge fill, found {len(matches)}.")
         return matches[0] if matches else None
@@ -641,6 +691,8 @@ def _ambiguous_open_mnq_rows(
     rows: Sequence[Mapping[str, Any]],
     target: Mapping[str, Any] | None,
 ) -> list[dict[str, Any]]:
+    if config.symbol != "MNQ":
+        return []
     latest_by_lifecycle: dict[str, dict[str, Any]] = {}
     for row in rows:
         lifecycle_id = str(row.get("lifecycle_id") or "")
@@ -729,6 +781,73 @@ def _build_close_record(
     return row
 
 
+def _build_offsetting_entry_reconciliation_record(
+    *,
+    config: LifecycleCloseCleanupConfig,
+    rows: Sequence[Mapping[str, Any]],
+    exit_evidence: Mapping[str, Any] | None,
+    now: datetime,
+) -> dict[str, Any] | None:
+    if exit_evidence is None or exit_evidence.get("reclassified_offsetting_open_intent") is not True:
+        return None
+    lifecycle_id = config.offsetting_open_lifecycle_id or f"bridge_fill_{config.exit_intent_id}"
+    target = next(
+        (
+            dict(row)
+            for row in rows
+            if str(row.get("lifecycle_id") or "") == lifecycle_id
+            and str(row.get("final_position_status") or "") == "OPEN_MANAGED"
+        ),
+        None,
+    )
+    if target is None:
+        return None
+    return {
+        "ledger_schema_version": LEDGER_SCHEMA_VERSION,
+        "record_type": "ARTIFACT_RECONCILIATION",
+        "reconciliation_schema_version": "track_b_artifact_reconciliation_v1",
+        "trade_id": f"{target.get('trade_id')}:opposite_entry_offset_reclassified",
+        "lifecycle_id": lifecycle_id,
+        "strategy_id": target.get("strategy_id"),
+        "instrument_family": target.get("instrument_family"),
+        "contract_key": target.get("contract_key"),
+        "local_symbol": target.get("local_symbol"),
+        "con_id": target.get("con_id"),
+        "account_id": target.get("account_id"),
+        "prior_artifact_classification": target.get("paper_lifecycle_classification"),
+        "prior_review_required": target.get("review_required"),
+        "reconciliation_action": OPPOSITE_ENTRY_OFFSET_EXISTING_POSITION_RECLASSIFIED,
+        "new_artifact_classification": OPPOSITE_ENTRY_OFFSET_EXISTING_POSITION_RECLASSIFIED,
+        "final_position_status": OPPOSITE_ENTRY_OFFSET_EXISTING_POSITION_RECLASSIFIED,
+        "review_required": False,
+        "broker_reconciled": False,
+        "offsetting_existing_lifecycle_id": config.entry_lifecycle_id,
+        "offsetting_order_intent_id": config.exit_intent_id,
+        "offsetting_broker_order_id": str(exit_evidence.get("broker_order_id") or ""),
+        "offsetting_client_id": config.exit_client_id,
+        "offsetting_perm_id": config.exit_perm_id,
+        "offsetting_exec_id": exit_evidence.get("exec_id") or exit_evidence.get("execution_id"),
+        "offsetting_fill_price": _decimal_text(config.exit_price),
+        "offsetting_fill_time": _canonical_time(config.exit_fill_time),
+        "broker_flat_confirmed": True,
+        "broker_mutation_attempted": False,
+        "submit_attempted": False,
+        "paper_proof_cli_invoked": False,
+        "source": "VERIFIED_OFFSETTING_OPEN_INTENT_AND_BROKER_FLAT_TRUTH",
+        "created_at": now.isoformat(),
+    }
+
+
+def _offsetting_entry_already_reconciled(config: LifecycleCloseCleanupConfig, rows: Sequence[Mapping[str, Any]]) -> bool:
+    lifecycle_id = config.offsetting_open_lifecycle_id or f"bridge_fill_{config.exit_intent_id}"
+    for row in rows:
+        if str(row.get("lifecycle_id") or "") != lifecycle_id:
+            continue
+        if str(row.get("new_artifact_classification") or "") == OPPOSITE_ENTRY_OFFSET_EXISTING_POSITION_RECLASSIFIED:
+            return True
+    return False
+
+
 def _already_has_matching_close(config: LifecycleCloseCleanupConfig, rows: Sequence[Mapping[str, Any]]) -> bool:
     for row in rows:
         if str(row.get("lifecycle_id") or "") != config.entry_lifecycle_id:
@@ -757,6 +876,16 @@ def _exit_action_matches(value: object, expected: str) -> bool:
     if actual_action == expected_action:
         return True
     return expected_action == "SELL_TO_CLOSE" and actual_action == "SELL"
+
+
+def _offsetting_open_intent_matches_close(row: Mapping[str, Any], *, config: LifecycleCloseCleanupConfig) -> bool:
+    intent_type = str(row.get("intent_type") or "").strip().upper()
+    action = str(row.get("action") or row.get("side") or "").strip().upper()
+    if config.side == "LONG":
+        return intent_type == "SELL_TO_OPEN" and action == "SELL" and config.exit_action.upper() in {"SELL", "SELL_TO_CLOSE"}
+    if config.side == "SHORT":
+        return intent_type == "BUY_TO_OPEN" and action == "BUY" and config.exit_action.upper() in {"BUY", "BUY_TO_CLOSE"}
+    return False
 
 
 def _build_summaries(
@@ -1035,6 +1164,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--ledger-root", default=str(DEFAULT_TRACK_B_PAPER_TRADE_LEDGER_OUTPUT_ROOT))
     parser.add_argument("--exit-bridge-report-path", default=None)
     parser.add_argument("--allow-ledger-entry-evidence", action="store_true")
+    parser.add_argument("--allow-offsetting-open-intent-as-close", action="store_true")
+    parser.add_argument("--offsetting-open-lifecycle-id", default=None)
     parser.add_argument("--allow-ambiguous-mnq-rows", action="store_true")
     parser.add_argument("--apply", action="store_true", help="Actually append lifecycle artifacts. Omit for dry-run.")
     return parser
@@ -1079,6 +1210,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             ledger_root=Path(args.ledger_root),
             exit_bridge_report_path=Path(args.exit_bridge_report_path) if args.exit_bridge_report_path else None,
             allow_ledger_entry_evidence=bool(args.allow_ledger_entry_evidence),
+            allow_offsetting_open_intent_as_close=bool(args.allow_offsetting_open_intent_as_close),
+            offsetting_open_lifecycle_id=str(args.offsetting_open_lifecycle_id) if args.offsetting_open_lifecycle_id else None,
         )
     )
     print(json.dumps({"classification": result.classification, "audit_path": str(result.audit_path)}, indent=2))

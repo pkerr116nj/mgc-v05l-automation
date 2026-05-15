@@ -484,7 +484,13 @@ def _open_position_rows(
             root=root,
             local_symbol=str(broker.get("local_symbol") or broker.get("localSymbol") or ""),
         )
-        entry_source = "SUPERVISED_ADOPTION" if adoption else _entry_source(lifecycle)
+        entry_source = (
+            "LEAK_TEST_ENTRY"
+            if adoption.get("leak_test")
+            else "SUPERVISED_ADOPTION"
+            if adoption
+            else _entry_source(lifecycle)
+        )
         entry_time, entry_time_source = _entry_time(lifecycle, entry_source)
         if entry_time is None and adoption:
             entry_time = str(adoption.get("fill_timestamp") or adoption.get("executed_at") or "") or None
@@ -519,7 +525,16 @@ def _open_position_rows(
                 position_key=broker_key,
                 details=cost_basis_adjustment,
             )
-        if entry_source == "SUPERVISED_ADOPTION":
+        if entry_source == "LEAK_TEST_ENTRY":
+            _add_alert(
+                alerts,
+                severity="YELLOW",
+                code="LEAK_TEST_MANAGED_POSITION",
+                message="Position is a managed Track B PAPER leak-test position; keep it separate from clean strategy samples.",
+                position_key=broker_key,
+                details={"entry_source": entry_source, "strategy_id": _value(lifecycle, "strategy_id")},
+            )
+        elif entry_source == "SUPERVISED_ADOPTION":
             _add_alert(
                 alerts,
                 severity="YELLOW",
@@ -814,6 +829,8 @@ def _position_status(
         return "REVIEW_REQUIRED"
     if not lifecycle_reconciled:
         return "BROKER_ONLY"
+    if entry_source == "LEAK_TEST_ENTRY":
+        return "LEAK_TEST_MANAGED_POSITION"
     if entry_source == "SUPERVISED_ADOPTION":
         return "ADOPTED"
     return "MANAGED"
@@ -830,6 +847,8 @@ def _position_data_quality_flags(
     flags: list[str] = []
     if not lifecycle_reconciled:
         flags.append("BROKER_ONLY_OR_UNRECONCILED")
+    if entry_source == "LEAK_TEST_ENTRY":
+        flags.append("LEAK_TEST_ENTRY")
     if entry_source == "SUPERVISED_ADOPTION":
         flags.append("SUPERVISED_ADOPTION")
     if bars_warning:
@@ -1327,7 +1346,7 @@ def _entry_source(lifecycle: Mapping[str, Any] | None) -> str:
     if not lifecycle:
         return "UNKNOWN"
     explicit = str(lifecycle.get("entry_source") or lifecycle.get("fill_source") or "").strip().upper()
-    if explicit in {"NORMAL_FILL", "WATCHDOG_OBSERVED_FILL", "SUPERVISED_ADOPTION", "UNKNOWN"}:
+    if explicit in {"NORMAL_FILL", "WATCHDOG_OBSERVED_FILL", "SUPERVISED_ADOPTION", "LEAK_TEST_ENTRY", "UNKNOWN"}:
         return explicit
     text = json.dumps(lifecycle, sort_keys=True).lower()
     if "lifecycle_adoption" in text or "supervised_adoption" in text or "adoption" in text:
@@ -1348,7 +1367,7 @@ def _adoption_evidence(
     local_symbol: str,
 ) -> dict[str, Any]:
     strategy_id = str(_value(lifecycle, "strategy_id") or "")
-    for raw_path in _extract_source_paths(lifecycle_status):
+    for raw_path in [*_extract_source_paths(lifecycle_status), *_extract_source_paths(lifecycle or {})]:
         if "lifecycle_adoption" not in raw_path:
             continue
         path = Path(raw_path)
@@ -1370,6 +1389,8 @@ def _adoption_evidence(
                     "lane_id": report.get("lane_id") or payload.get("lane_id"),
                     "fill_timestamp": payload.get("fill_timestamp") or payload.get("executed_at"),
                     "classification": report.get("classification"),
+                    "leak_test": payload.get("leak_test") is True or payload.get("entry_source") == "LEAK_TEST_ENTRY",
+                    "entry_source": payload.get("entry_source"),
                 }
     return {}
 
@@ -1381,7 +1402,7 @@ def _entry_time(lifecycle: Mapping[str, Any] | None, entry_source: str) -> tuple
         value = lifecycle.get(key)
         if value:
             if key in {"entry_timestamp", "fill_timestamp", "executed_at"}:
-                source = "FILL_TIME_ANCHOR" if entry_source in {"NORMAL_FILL", "WATCHDOG_OBSERVED_FILL", "SUPERVISED_ADOPTION"} else "LIFECYCLE_TIMESTAMP"
+                source = "FILL_TIME_ANCHOR" if entry_source in {"NORMAL_FILL", "WATCHDOG_OBSERVED_FILL", "SUPERVISED_ADOPTION", "LEAK_TEST_ENTRY"} else "LIFECYCLE_TIMESTAMP"
             else:
                 source = "LIFECYCLE_CREATED_AT"
             return str(value), source

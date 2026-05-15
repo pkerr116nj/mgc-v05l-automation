@@ -85,6 +85,77 @@ def test_broker_lifecycle_mismatch_creates_red_alert(tmp_path: Path) -> None:
     assert mnq["review_required"] is True
 
 
+def test_leak_test_adopted_position_is_not_labeled_clean_adoption(tmp_path: Path) -> None:
+    config = _write_base_runtime(tmp_path)
+    positions_snapshot = _read_json(config.positions_snapshot_path)
+    positions_snapshot["positions"] = [
+        {
+            "account_id": "DUM882026",
+            "symbol": "GC",
+            "local_symbol": "GCM6",
+            "security_type": "FUT",
+            "expiry": "20260626",
+            "quantity": "1.0",
+            "average_cost": "457852.52",
+            "multiplier": "100",
+        }
+    ]
+    _write_json(config.positions_snapshot_path, positions_snapshot)
+    _write_candles(config, "GC", "4579.5")
+    adoption_path = tmp_path / "outputs/reports/track_b_paper_lifecycle_adoption/gc_leak_test_adopt.json"
+    _write_json(
+        adoption_path,
+        {
+            "classification": "TRACK_B_PAPER_LIFECYCLE_ADOPTION_APPLIED",
+            "symbol": "GC",
+            "local_symbol": "GCM6",
+            "lane_id": "atp_companion_v1_gc_asia_us_production_track_selective_v1",
+            "fill_payload": {
+                "symbol": "GC",
+                "local_symbol": "GCM6",
+                "strategy_id": "atp_companion_v1__production_track_gc_asia_us_selective_v1",
+                "lane_id": "atp_companion_v1_gc_asia_us_production_track_selective_v1",
+                "fill_timestamp": "2026-05-15T06:29:56+00:00",
+                "entry_source": "LEAK_TEST_ENTRY",
+                "leak_test": True,
+            },
+        },
+    )
+    lifecycle_status = _read_json(config.lifecycle_position_status_path)
+    gc_position = {
+        "strategy_id": "atp_companion_v1__production_track_gc_asia_us_selective_v1",
+        "lane_id": "atp_companion_v1_gc_asia_us_production_track_selective_v1",
+        "lifecycle_id": "bridge_fill_3c23e0f6-b19f-42e5-9582-28dee7b600b7",
+        "contract_key": "GC-202606",
+        "instrument_family": "GC",
+        "local_symbol": "GCM6",
+        "side": "LONG",
+        "quantity": "1",
+        "avg_entry_price": "4578.5",
+        "entry_timestamp": "2026-05-15T06:29:56+00:00",
+        "entry_exec_id": "0000e1a7.6a0cd6e8.01.01",
+        "entry_perm_id": 614029068,
+        "entry_client_id": 11940,
+        "entry_order_id": "3",
+        "source_artifact_paths": [str(adoption_path)],
+    }
+    lifecycle_status["positions_by_instrument"] = {"GC-202606": gc_position}
+    lifecycle_status["positions_by_strategy"] = {
+        "atp_companion_v1__production_track_gc_asia_us_selective_v1": gc_position
+    }
+    lifecycle_status["open_position_count"] = 1
+    _write_json(config.lifecycle_position_status_path, lifecycle_status)
+
+    state = build_track_b_portfolio_state(config=config, now=NOW, write=False)
+
+    row = state["open_positions"][0]
+    assert row["entry_source"] == "LEAK_TEST_ENTRY"
+    assert row["status"] == "LEAK_TEST_MANAGED_POSITION"
+    assert "LEAK_TEST_ENTRY" in row["data_quality"]
+    assert not any(alert["code"] == "BROKER_ONLY_POSITION" for alert in state["alerts"])
+    assert _alert(state, "LEAK_TEST_MANAGED_POSITION")["severity"] == "YELLOW"
+
+
 def test_lifecycle_only_position_creates_red_alert(tmp_path: Path) -> None:
     config = _write_base_runtime(tmp_path)
     positions_snapshot = _read_json(config.positions_snapshot_path)

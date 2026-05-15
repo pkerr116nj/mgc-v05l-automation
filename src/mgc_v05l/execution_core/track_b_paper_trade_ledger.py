@@ -48,6 +48,16 @@ MANUALLY_FLATTENED_REVIEWED = "MANUALLY_FLATTENED_REVIEWED"
 APP_ONLY_UNFILLED_REVIEWED = "APP_ONLY_UNFILLED_REVIEWED"
 IBKR_CONTRACT_REJECTED_REVIEWED = "IBKR_CONTRACT_REJECTED_REVIEWED"
 VOID_MALFORMED_STALE_ARTIFACT = "VOID_MALFORMED_STALE_ARTIFACT"
+MALFORMED_BROKER_BACKED_MANUALLY_RECONCILED_ARTIFACT = (
+    "MALFORMED_BROKER_BACKED_MANUALLY_RECONCILED_ARTIFACT"
+)
+OPPOSITE_ENTRY_OFFSET_EXISTING_POSITION_RECLASSIFIED = (
+    "OPPOSITE_ENTRY_OFFSET_EXISTING_POSITION_RECLASSIFIED"
+)
+MALFORMED_MANUAL_RECONCILIATION_CLASSIFICATIONS = {
+    VOID_MALFORMED_STALE_ARTIFACT,
+    MALFORMED_BROKER_BACKED_MANUALLY_RECONCILED_ARTIFACT,
+}
 POINT_VALUE_BY_FAMILY = {
     "MGC": Decimal("10"),
     "GC": Decimal("100"),
@@ -551,6 +561,7 @@ def update_track_b_paper_trade_ledger_from_filled_bridge_result(
     trade_record = _trade_record_from_filled_bridge_result(
         filled_bridge_result=filled_bridge_result,
         filled_bridge_result_json=filled_bridge_result_json,
+        existing_records=existing_records,
         now=actual_now,
     )
     wrote = False
@@ -980,6 +991,7 @@ def _trade_record_from_filled_bridge_result(
     *,
     filled_bridge_result: Mapping[str, Any],
     filled_bridge_result_json: Path | None,
+    existing_records: Iterable[Mapping[str, Any]],
     now: datetime,
 ) -> dict[str, Any] | None:
     classification = str(filled_bridge_result.get("classification") or "")
@@ -991,6 +1003,13 @@ def _trade_record_from_filled_bridge_result(
         return None
     intent_type = str(filled_bridge_result.get("intent_type") or "").upper()
     action = str(filled_bridge_result.get("action") or filled_bridge_result.get("side") or "").upper()
+    if intent_type in {"SELL_TO_CLOSE", "BUY_TO_CLOSE"}:
+        return _closed_trade_record_from_filled_bridge_result(
+            filled_bridge_result=filled_bridge_result,
+            filled_bridge_result_json=filled_bridge_result_json,
+            existing_records=existing_records,
+            now=now,
+        )
     if intent_type not in {"BUY_TO_OPEN", "SELL_TO_OPEN"}:
         return None
     side = "LONG" if intent_type == "BUY_TO_OPEN" or action == "BUY" else "SHORT"
@@ -1071,6 +1090,101 @@ def _trade_record_from_filled_bridge_result(
         "source": "TRACK_B_DIRECT_BRIDGE_FILL_ARTIFACT",
         "broker_reconciled": False,
     }
+
+
+def _closed_trade_record_from_filled_bridge_result(
+    *,
+    filled_bridge_result: Mapping[str, Any],
+    filled_bridge_result_json: Path | None,
+    existing_records: Iterable[Mapping[str, Any]],
+    now: datetime,
+) -> dict[str, Any] | None:
+    contract = filled_bridge_result.get("contract") if isinstance(filled_bridge_result.get("contract"), Mapping) else {}
+    contract_key = _contract_key_from_bridge_result(filled_bridge_result, contract)
+    strategy_id = str(filled_bridge_result.get("strategy_id") or filled_bridge_result.get("lane_id") or "UNKNOWN")
+    account_id = str(filled_bridge_result.get("account_id") or "").strip()
+    open_record = _matching_open_bridge_record(
+        existing_records=existing_records,
+        strategy_id=strategy_id,
+        contract_key=contract_key,
+        account_id=account_id,
+    )
+    if open_record is None:
+        return None
+    quantity = _decimal(open_record.get("quantity") or filled_bridge_result.get("quantity"))
+    entry_fill_price = _decimal(open_record.get("entry_fill_price"))
+    exit_fill_price = _decimal(filled_bridge_result.get("fill_price"))
+    instrument_family = str(open_record.get("instrument_family") or filled_bridge_result.get("instrument") or "")
+    side = str(open_record.get("side") or "UNKNOWN")
+    realized = _realized_pnl(
+        side=side,
+        quantity=quantity,
+        entry=entry_fill_price,
+        exit=exit_fill_price,
+        instrument_family=instrument_family,
+    )
+    tick_size = TICK_SIZE_BY_FAMILY.get(instrument_family)
+    points = _points_pnl(side=side, entry=entry_fill_price, exit=exit_fill_price)
+    ticks = None if points is None or tick_size in {None, Decimal("0")} else points / tick_size
+    close_record = dict(open_record)
+    close_record.update(
+        {
+            "exit_timestamp": filled_bridge_result.get("fill_timestamp") or filled_bridge_result.get("created_at"),
+            "exit_order_id": filled_bridge_result.get("broker_order_id"),
+            "exit_perm_id": filled_bridge_result.get("perm_id"),
+            "exit_client_id": filled_bridge_result.get("client_id"),
+            "exit_exec_id": filled_bridge_result.get("exec_id") or filled_bridge_result.get("execution_id"),
+            "exit_broker_identity": {
+                "account_id": filled_bridge_result.get("account_id"),
+                "broker_order_id": filled_bridge_result.get("broker_order_id"),
+                "perm_id": filled_bridge_result.get("perm_id"),
+                "client_id": filled_bridge_result.get("client_id"),
+                "exec_id": filled_bridge_result.get("exec_id") or filled_bridge_result.get("execution_id"),
+                "con_id": filled_bridge_result.get("con_id") or contract.get("qualified_contract_identifier"),
+                "local_symbol": filled_bridge_result.get("local_symbol") or contract.get("local_symbol"),
+            },
+            "exit_fill_price": _decimal_text(exit_fill_price),
+            "realized_pnl": _decimal_text(realized),
+            "ticks_pnl": _decimal_text(ticks),
+            "points_pnl": _decimal_text(points),
+            "paper_lifecycle_classification": "TRACK_B_STRATEGY_PAPER_CLOSED_FLAT",
+            "final_broker_state_classification": "TRACK_B_STRATEGY_PAPER_CLOSED_FLAT",
+            "final_position_status": "CLOSED_FLAT",
+            "review_required": bool(filled_bridge_result.get("review_required")) or False,
+            "filled_bridge_close_result_path": str(filled_bridge_result_json) if filled_bridge_result_json else None,
+            "close_bridge_classification": filled_bridge_result.get("bridge_classification"),
+            "created_at": now.isoformat(),
+            "broker_reconciled": False,
+        }
+    )
+    return close_record
+
+
+def _matching_open_bridge_record(
+    *,
+    existing_records: Iterable[Mapping[str, Any]],
+    strategy_id: str,
+    contract_key: str | None,
+    account_id: str,
+) -> dict[str, Any] | None:
+    candidates = []
+    for item in existing_records:
+        if _is_reconciliation_record(item):
+            continue
+        if not _is_open_position_record(item):
+            continue
+        if str(item.get("source") or "") != "TRACK_B_DIRECT_BRIDGE_FILL_ARTIFACT":
+            continue
+        if str(item.get("strategy_id") or "") != strategy_id:
+            continue
+        if contract_key and str(item.get("contract_key") or "") != contract_key:
+            continue
+        if account_id and str(item.get("account_id") or "") != account_id:
+            continue
+        candidates.append(dict(item))
+    if not candidates:
+        return None
+    return max(candidates, key=lambda item: str(item.get("entry_timestamp") or item.get("created_at") or ""))
 
 
 def _contract_key_from_bridge_result(
@@ -1517,17 +1631,24 @@ def _apply_manual_flat_reconciliations(records: list[dict[str, Any]]) -> list[di
         if _is_reconciliation_record(item)
         and item.get("new_artifact_classification") == IBKR_CONTRACT_REJECTED_REVIEWED
     }
-    voided_malformed_lifecycle_ids = {
+    offsetting_entry_reclassified_lifecycle_ids = {
         str(item.get("lifecycle_id"))
         for item in records
         if _is_reconciliation_record(item)
-        and item.get("new_artifact_classification") == VOID_MALFORMED_STALE_ARTIFACT
+        and item.get("new_artifact_classification") == OPPOSITE_ENTRY_OFFSET_EXISTING_POSITION_RECLASSIFIED
+    }
+    malformed_reconciliations_by_lifecycle_id = {
+        str(item.get("lifecycle_id")): str(item.get("new_artifact_classification"))
+        for item in records
+        if _is_reconciliation_record(item)
+        and item.get("new_artifact_classification") in MALFORMED_MANUAL_RECONCILIATION_CLASSIFICATIONS
     }
     if (
         not reconciled_lifecycle_ids
         and not app_only_reviewed_lifecycle_ids
         and not ibkr_rejected_reviewed_lifecycle_ids
-        and not voided_malformed_lifecycle_ids
+        and not offsetting_entry_reclassified_lifecycle_ids
+        and not malformed_reconciliations_by_lifecycle_id
     ):
         return records
     normalized: list[dict[str, Any]] = []
@@ -1571,18 +1692,39 @@ def _apply_manual_flat_reconciliations(records: list[dict[str, Any]]) -> list[di
             row["final_broker_state_classification"] = IBKR_CONTRACT_REJECTED_REVIEWED
         if (
             not _is_reconciliation_record(row)
-            and str(row.get("lifecycle_id") or "") in voided_malformed_lifecycle_ids
+            and str(row.get("lifecycle_id") or "") in offsetting_entry_reclassified_lifecycle_ids
             and row.get("paper_lifecycle_type") == "STRATEGY_MANAGED"
         ):
-            row["artifact_reconciliation_classification"] = VOID_MALFORMED_STALE_ARTIFACT
-            row["malformed_stale_artifact_voided"] = True
+            row["artifact_reconciliation_classification"] = OPPOSITE_ENTRY_OFFSET_EXISTING_POSITION_RECLASSIFIED
+            row["opposite_entry_offset_existing_position_reclassified"] = True
             row["review_required"] = False
-            row["broker_backed_position_confirmed"] = False
-            row["entry_fill_confirmed"] = False
             row["prior_paper_lifecycle_classification"] = row.get("paper_lifecycle_classification")
-            row["paper_lifecycle_classification"] = VOID_MALFORMED_STALE_ARTIFACT
-            row["final_position_status"] = VOID_MALFORMED_STALE_ARTIFACT
-            row["final_broker_state_classification"] = VOID_MALFORMED_STALE_ARTIFACT
+            row["paper_lifecycle_classification"] = OPPOSITE_ENTRY_OFFSET_EXISTING_POSITION_RECLASSIFIED
+            row["final_position_status"] = OPPOSITE_ENTRY_OFFSET_EXISTING_POSITION_RECLASSIFIED
+            row["final_broker_state_classification"] = OPPOSITE_ENTRY_OFFSET_EXISTING_POSITION_RECLASSIFIED
+        if (
+            not _is_reconciliation_record(row)
+            and str(row.get("lifecycle_id") or "") in malformed_reconciliations_by_lifecycle_id
+            and row.get("paper_lifecycle_type") == "STRATEGY_MANAGED"
+        ):
+            classification = malformed_reconciliations_by_lifecycle_id[str(row.get("lifecycle_id") or "")]
+            row["artifact_reconciliation_classification"] = classification
+            if classification == VOID_MALFORMED_STALE_ARTIFACT:
+                row["malformed_stale_artifact_voided"] = True
+                if row.get("broker_backed_position_confirmed") is True:
+                    row["historical_broker_backed_exposure_confirmed"] = True
+                    row["excluded_from_strategy_managed_pnl"] = True
+                    row["excluded_from_clean_trade_stats"] = True
+            else:
+                row["malformed_broker_backed_manually_reconciled"] = True
+                row["historical_broker_backed_exposure_confirmed"] = True
+                row["excluded_from_strategy_managed_pnl"] = True
+                row["excluded_from_clean_trade_stats"] = True
+            row["review_required"] = False
+            row["prior_paper_lifecycle_classification"] = row.get("paper_lifecycle_classification")
+            row["paper_lifecycle_classification"] = classification
+            row["final_position_status"] = classification
+            row["final_broker_state_classification"] = classification
         normalized.append(row)
     return normalized
 
@@ -1818,9 +1960,16 @@ def _is_manual_flat_reviewed(item: Mapping[str, Any]) -> bool:
         or item.get("artifact_reconciliation_classification") == IBKR_CONTRACT_REJECTED_REVIEWED
         or item.get("new_artifact_classification") == IBKR_CONTRACT_REJECTED_REVIEWED
         or item.get("ibkr_contract_rejected_reviewed") is True
+        or item.get("artifact_reconciliation_classification") == OPPOSITE_ENTRY_OFFSET_EXISTING_POSITION_RECLASSIFIED
+        or item.get("new_artifact_classification") == OPPOSITE_ENTRY_OFFSET_EXISTING_POSITION_RECLASSIFIED
+        or item.get("opposite_entry_offset_existing_position_reclassified") is True
         or item.get("artifact_reconciliation_classification") == VOID_MALFORMED_STALE_ARTIFACT
         or item.get("new_artifact_classification") == VOID_MALFORMED_STALE_ARTIFACT
         or item.get("malformed_stale_artifact_voided") is True
+        or item.get("artifact_reconciliation_classification")
+        == MALFORMED_BROKER_BACKED_MANUALLY_RECONCILED_ARTIFACT
+        or item.get("new_artifact_classification") == MALFORMED_BROKER_BACKED_MANUALLY_RECONCILED_ARTIFACT
+        or item.get("malformed_broker_backed_manually_reconciled") is True
     )
 
 
@@ -1924,6 +2073,12 @@ def _compact_trade_row(item: Mapping[str, Any]) -> dict[str, Any]:
         "entry_submit_attempted": entry_submit_attempted,
         "entry_fill_confirmed": _has_entry_fill(item),
         "broker_backed_position_confirmed": _is_broker_backed_trade_record(item),
+        "historical_broker_backed_exposure_confirmed": item.get("historical_broker_backed_exposure_confirmed")
+        is True
+        or item.get("broker_backed_position_confirmed") is True,
+        "excluded_from_strategy_managed_pnl": item.get("excluded_from_strategy_managed_pnl") is True,
+        "excluded_from_clean_trade_stats": item.get("excluded_from_clean_trade_stats") is True,
+        "manual_reconciliation_event": item.get("malformed_broker_backed_manually_reconciled") is True,
         "app_only_no_broker_transmission": app_only_no_broker_transmission,
         "transmission_classification": item.get("transmission_classification")
         or (
