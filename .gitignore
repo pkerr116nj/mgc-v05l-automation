@@ -15,6 +15,8 @@ __pycache__/
 var/
 tmp/
 outputs/
+examples/track_b_shadow_listener/inbox/[0-9]*_*.json
+examples/track_b_shadow_listener/processed/[0-9]*_*.json
 desktop/node_modules/
 desktop/dist/
 desktop/release/
