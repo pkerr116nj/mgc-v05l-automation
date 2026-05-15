@@ -197,6 +197,7 @@ def run_track_b_paper_lifecycle_adoption(
     }
     report: dict[str, Any] = {
         "classification": classification,
+        "adoption_input_classification": (bridge_evidence or {}).get("adoption_input_classification"),
         "mode": mode,
         "generated_at": actual_now.isoformat(),
         "paper_only": True,
@@ -749,6 +750,7 @@ def _extract_partial_leak_test_broker_position_evidence(
         "leak_test": True,
         "authorization_digest": _nested(bridge_report, "caller_metadata", "authorization_digest"),
         "evidence_classification": "LEAK_TEST_BROKER_POSITION_CONFIRMED_PARTIAL_IDENTITY",
+        "adoption_input_classification": "LEAK_TEST_BROKER_BACKED_ENTRY_REQUIRES_LIFECYCLE_ADOPTION",
         "broker_position_confirmed": True,
         "identity_completeness": "PARTIAL" if missing_fields else "COMPLETE",
         "missing_broker_identity_fields": missing_fields,
@@ -848,6 +850,7 @@ def _build_fill_payload(
         "execution_price_source": bridge_evidence.get("entry_price_source"),
         "fill_price_source": bridge_evidence.get("fill_price_source") or "BRIDGE_EXECUTION_EVIDENCE",
         "evidence_classification": bridge_evidence.get("evidence_classification"),
+        "adoption_input_classification": bridge_evidence.get("adoption_input_classification"),
         "identity_completeness": bridge_evidence.get("identity_completeness") or "COMPLETE",
         "missing_broker_identity_fields": bridge_evidence.get("missing_broker_identity_fields") or [],
         "broker_position_confirmed": bool(bridge_evidence.get("broker_position_confirmed")),
