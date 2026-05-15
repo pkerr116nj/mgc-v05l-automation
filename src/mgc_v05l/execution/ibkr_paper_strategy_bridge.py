@@ -513,21 +513,22 @@ def run_ibkr_paper_strategy_bridge(
     monitor_status = load_paper_strategy_monitor_status(repo_root=config.repo_root)
     governance_status = load_paper_strategy_governance_status(repo_root=config.repo_root, strategy_id=config.strategy_id)
     governance_row = dict(governance_status.get("selected_strategy") or {})
+    metadata = dict(config.caller_metadata or {})
     exposure_status = evaluate_paper_strategy_exposure_gate(
         repo_root=config.repo_root,
-        strategy_id=config.strategy_id,
+        strategy_id=_exposure_strategy_id_for_bridge(config=config),
         bridge_strategy_id=str(governance_row.get("bridge_strategy_id") or "").strip() or None,
         action=config.action,
-        intent_type=str((config.caller_metadata or {}).get("intent_type") or "").strip().upper() or None,
+        intent_type=str(metadata.get("intent_type") or "").strip().upper() or None,
         quantity=config.quantity,
         executable_symbol=config.symbol,
-        account_id=str((config.caller_metadata or {}).get("account_id") or config.account_id or "").strip() or None,
-        con_id=_int_or_none((config.caller_metadata or {}).get("con_id")),
-        local_symbol=str((config.caller_metadata or {}).get("local_symbol") or "").strip() or None,
+        account_id=str(metadata.get("account_id") or config.account_id or "").strip() or None,
+        con_id=_int_or_none(metadata.get("con_id")),
+        local_symbol=str(metadata.get("local_symbol") or "").strip() or None,
         lifecycle_id=str(
-            (config.caller_metadata or {}).get("lifecycle_id")
-            or (config.caller_metadata or {}).get("position_lifecycle_id")
-            or (config.caller_metadata or {}).get("managed_lifecycle_id")
+            metadata.get("lifecycle_id")
+            or metadata.get("position_lifecycle_id")
+            or metadata.get("managed_lifecycle_id")
             or ""
         ).strip()
         or None,
@@ -1154,7 +1155,8 @@ def _leak_test_authorization_check(
         )
     metadata = dict(config.caller_metadata or {})
     intent_type = str(metadata.get("intent_type") or "").strip().upper()
-    expected_action = authorization.get("exit_action") if intent_type.endswith("_TO_CLOSE") else authorization.get("action")
+    expected_action = str(intent.action or config.action or "").strip().upper()
+    authorization_action_field = "exit_action" if intent_type.endswith("_TO_CLOSE") else "action"
     expected = {
         "artifact_type": _LEAK_TEST_AUTHORIZATION_ARTIFACT_TYPE,
         "account_id": _EXPECTED_ACCOUNT_ID,
@@ -1162,7 +1164,7 @@ def _leak_test_authorization_check(
         "lane_id": config.strategy_id,
         "symbol": str(config.symbol or intent.symbol or "").strip().upper(),
         "expiry": str(config.contract_month or intent.contract_month or "").strip(),
-        "action": expected_action,
+        authorization_action_field: expected_action,
         "qty": 1,
         "repo_root": str(config.repo_root),
     }
@@ -1192,6 +1194,17 @@ def _leak_test_authorization_check(
         True,
         "Dedicated leak-test bridge caller supplied a valid lane-specific authorization artifact.",
     )
+
+
+def _exposure_strategy_id_for_bridge(*, config: IbkrPaperStrategyBridgeConfig) -> str:
+    metadata = dict(config.caller_metadata or {})
+    caller_path = str(config.caller_path or "").strip()
+    intent_type = str(metadata.get("intent_type") or "").strip().upper()
+    if caller_path == _LEAK_TEST_CALLER_PATH and intent_type in {"SELL_TO_CLOSE", "BUY_TO_CLOSE"}:
+        lifecycle_owner_strategy_id = str(metadata.get("strategy_id") or "").strip()
+        if lifecycle_owner_strategy_id:
+            return lifecycle_owner_strategy_id
+    return str(config.strategy_id or "").strip()
 
 
 def _authorized_supervised_runtime_route_check(

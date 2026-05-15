@@ -1512,6 +1512,112 @@ def test_leak_test_caller_with_valid_authorization_satisfies_manual_bundle_gate(
     assert checks["manual_harness_bundle_present_for_submit"]["passed"] is True
 
 
+def test_leak_test_close_authorization_checks_exit_action_not_entry_action(tmp_path: Path) -> None:
+    auth_path, digest = _write_leak_authorization(tmp_path, action="BUY")
+    config = _config(
+        tmp_path,
+        strategy_id="gc_1x_asia_london_participation__asia_london_long_v5",
+        symbol="GC",
+        contract_month="202606",
+        action="SELL",
+        submit=True,
+        caller_path="track_b_paper_leak_test_apply",
+        leak_test_authorization_path=auth_path,
+        leak_test_authorization_digest=digest,
+        caller_metadata={
+            "caller_type": "track_b_paper_leak_test",
+            "lane_id": "gc_1x_asia_london_participation__asia_london_long_v5",
+            "strategy_id": "asia_london_participation_core_v1__GC",
+            "route_destination": "ibkr_paper_bridge_submit_capable",
+            "intent_type": "SELL_TO_CLOSE",
+            "intent_action": "SELL",
+            "account_id": "DUM882026",
+            "mode": "PAPER",
+            "host": "127.0.0.1",
+            "port": 7497,
+            "local_symbol": "GCM6",
+            "paper_only": True,
+            "live_money_eligible": False,
+        },
+    )
+
+    check = bridge_module._leak_test_authorization_check(config=config, intent=_intent_from_config(config))
+
+    assert check["passed"] is True
+
+
+def test_leak_test_close_authorization_rejects_wrong_exit_action(tmp_path: Path) -> None:
+    auth_path, _digest = _write_leak_authorization(tmp_path, action="BUY")
+    payload = json.loads(auth_path.read_text(encoding="utf-8"))
+    payload["exit_action"] = "BUY"
+    payload["digest"] = _leak_auth_digest(payload)
+    auth_path.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
+    config = _config(
+        tmp_path,
+        strategy_id="gc_1x_asia_london_participation__asia_london_long_v5",
+        symbol="GC",
+        contract_month="202606",
+        action="SELL",
+        submit=True,
+        caller_path="track_b_paper_leak_test_apply",
+        leak_test_authorization_path=auth_path,
+        leak_test_authorization_digest=str(payload["digest"]),
+        caller_metadata={
+            "caller_type": "track_b_paper_leak_test",
+            "lane_id": "gc_1x_asia_london_participation__asia_london_long_v5",
+            "strategy_id": "asia_london_participation_core_v1__GC",
+            "route_destination": "ibkr_paper_bridge_submit_capable",
+            "intent_type": "SELL_TO_CLOSE",
+            "intent_action": "SELL",
+            "account_id": "DUM882026",
+            "mode": "PAPER",
+            "host": "127.0.0.1",
+            "port": 7497,
+            "local_symbol": "GCM6",
+            "paper_only": True,
+            "live_money_eligible": False,
+        },
+    )
+
+    check = bridge_module._leak_test_authorization_check(config=config, intent=_intent_from_config(config))
+
+    assert check["passed"] is False
+    assert "exit_action" in str(check["detail"])
+
+
+def test_leak_test_close_uses_lifecycle_owner_strategy_for_exposure(tmp_path: Path) -> None:
+    config = _config(
+        tmp_path,
+        strategy_id="gc_1x_asia_london_participation__asia_london_long_v5",
+        action="SELL",
+        caller_path="track_b_paper_leak_test_apply",
+        caller_metadata={
+            "caller_type": "track_b_paper_leak_test",
+            "lane_id": "gc_1x_asia_london_participation__asia_london_long_v5",
+            "strategy_id": "asia_london_participation_core_v1__GC",
+            "intent_type": "SELL_TO_CLOSE",
+        },
+    )
+
+    assert bridge_module._exposure_strategy_id_for_bridge(config=config) == "asia_london_participation_core_v1__GC"
+
+
+def test_leak_test_entry_uses_lane_strategy_for_exposure(tmp_path: Path) -> None:
+    config = _config(
+        tmp_path,
+        strategy_id="gc_1x_asia_london_participation__asia_london_long_v5",
+        caller_path="track_b_paper_leak_test_apply",
+        caller_metadata={
+            "caller_type": "track_b_paper_leak_test",
+            "lane_id": "gc_1x_asia_london_participation__asia_london_long_v5",
+            "strategy_id": "asia_london_participation_core_v1__GC",
+            "intent_type": "BUY_TO_OPEN",
+        },
+    )
+
+    assert bridge_module._exposure_strategy_id_for_bridge(config=config) == "gc_1x_asia_london_participation__asia_london_long_v5"
+
+
 def test_leak_test_submit_handshake_failure_reports_paper_connection_config(tmp_path: Path) -> None:
     auth_path, digest = _write_leak_authorization(tmp_path)
     governance_status = _healthy_lane_governance()
