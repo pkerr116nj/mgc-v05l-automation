@@ -34,6 +34,13 @@ DEFAULT_REPORT_PATH = (
     / "track_b_paper_broker_reconciliation"
     / "latest_track_b_paper_broker_reconciliation.json"
 )
+DEFAULT_KNOWN_MANAGED_EXIT_ORDERS_PATH = (
+    REPO_ROOT
+    / "outputs"
+    / "track_b_execution_core"
+    / "managed_exit_orders"
+    / "latest_known_managed_exit_orders.json"
+)
 DEFAULT_MAX_AGE_SECONDS = float(os.environ.get("TRACK_B_BROKER_TRUTH_MAX_AGE_SECONDS", "120"))
 DEFAULT_BROKER_TRUTH_SETTLEMENT_SECONDS = float(os.environ.get("TRACK_B_PAPER_BROKER_TRUTH_SETTLEMENT_SECONDS", "300"))
 DEFAULT_BROKER_TRUTH_SETTLEMENT_POLL_SECONDS = float(os.environ.get("TRACK_B_PAPER_BROKER_TRUTH_SETTLEMENT_POLL_SECONDS", "15"))
@@ -158,6 +165,7 @@ def reconcile_track_b_paper_broker_truth(
         lifecycle_status=live_position_status,
         position_match_report=position_match_report,
         runtime_restore_orders=_runtime_restore_known_managed_exit_orders(config.repo_root, config.symbols),
+        persisted_known_orders=_persisted_known_managed_exit_orders(config.repo_root, config.symbols),
         config=config,
         now=actual_now,
     )
@@ -664,9 +672,11 @@ def _known_managed_exit_orders(
     config: ReconciliationConfig,
     now: datetime,
     runtime_restore_orders: Sequence[Mapping[str, Any]] = (),
+    persisted_known_orders: Sequence[Mapping[str, Any]] = (),
 ) -> list[dict[str, Any]]:
     declared_orders = _declared_known_managed_exit_orders(lifecycle_status)
     declared_orders.extend(dict(row) for row in runtime_restore_orders if isinstance(row, Mapping))
+    declared_orders.extend(dict(row) for row in persisted_known_orders if isinstance(row, Mapping))
     if not declared_orders:
         return []
     matched_positions = [
@@ -734,6 +744,27 @@ def _runtime_restore_known_managed_exit_orders(repo_root: Path, symbols: Sequenc
         row = _managed_exit_order_from_restore_payload(payload, source_path=restore_path, symbols=symbols)
         if row is not None:
             rows.append(row)
+    return rows
+
+
+def _persisted_known_managed_exit_orders(repo_root: Path, symbols: Sequence[str]) -> list[dict[str, Any]]:
+    path = repo_root / DEFAULT_KNOWN_MANAGED_EXIT_ORDERS_PATH.relative_to(REPO_ROOT)
+    payload = _load_json(path)
+    rows_payload = payload.get("known_managed_exit_orders") if isinstance(payload, Mapping) else None
+    if not isinstance(rows_payload, list):
+        return []
+    allowed_symbols = {item.upper() for item in symbols}
+    rows: list[dict[str, Any]] = []
+    for item in rows_payload:
+        if not isinstance(item, Mapping):
+            continue
+        symbol = str(item.get("symbol") or "").strip().upper()
+        if symbol and symbol not in allowed_symbols:
+            continue
+        status = str(item.get("managed_order_status") or item.get("status") or "").strip().upper()
+        if status in {"CANCELLED", "CANCELED", "REJECTED", "FILLED", "EXPIRED"}:
+            continue
+        rows.append(dict(item))
     return rows
 
 
