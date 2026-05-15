@@ -1038,6 +1038,7 @@ def build_single_lane_dry_run_report(
     write_authorization: bool = False,
     authorization_ttl_seconds: float = 600.0,
     authorization_output_path: Path | None = None,
+    concurrent_tolerant: bool = False,
 ) -> LeakTestReport:
     plan = build_plan_only_report(
         repo_root=repo_root,
@@ -1049,10 +1050,13 @@ def build_single_lane_dry_run_report(
     )
     lanes = tuple(lane for lane in plan.lanes if lane.lane_id == lane_id)
     classification = "LEAK_TEST_PASS_BLOCKED_SAFELY"
-    if lanes and lanes[0].safe_to_test:
+    lane_ready = bool(lanes) and (
+        lanes[0].safe_for_concurrent_test if concurrent_tolerant else lanes[0].safe_to_test
+    )
+    if lane_ready:
         classification = "LEAK_TEST_DRY_RUN_READY"
     authorization_artifact: dict[str, Any] | None = None
-    if write_authorization and lanes and lanes[0].safe_to_test:
+    if write_authorization and lane_ready:
         lane = lanes[0]
         authorization_artifact = build_leak_test_authorization(
             repo_root=repo_root,
@@ -1081,6 +1085,11 @@ def build_single_lane_dry_run_report(
         result_classification=classification if lanes else "LEAK_TEST_LANE_NOT_FOUND",
         notes=(
             "Dry-run validates preconditions and does not call the broker route.",
+            (
+                "Concurrent-tolerant mode uses concurrent exposure policy for lane eligibility."
+                if concurrent_tolerant
+                else "Isolated mode requires no existing positions."
+            ),
             "Authorization artifact written for one explicit lane/action." if authorization_artifact else "No authorization artifact written.",
         ),
     )
@@ -1869,6 +1878,7 @@ def build_single_lane_apply_report(
     post_submit_broker_state_refresher: Callable[[Path, str], dict[str, Any]] = _default_post_submit_broker_state_refresher,
     lifecycle_adoption_runner: Callable[..., dict[str, Any]] = _default_lifecycle_adoption_runner,
     readiness_checker: Callable[[Path, LeakTestLanePlan, LeakTestSafetySnapshot], dict[str, Any]] | None = None,
+    concurrent_tolerant: bool = False,
 ) -> LeakTestReport:
     dry_run_report = build_single_lane_dry_run_report(
         repo_root=repo_root,
@@ -1878,13 +1888,19 @@ def build_single_lane_apply_report(
         active_leak_test=active_leak_test,
         runtime_command=runtime_command,
         exposure_policy=exposure_policy,
+        concurrent_tolerant=concurrent_tolerant,
     )
     if not dry_run_report.lanes:
         classification = "LEAK_TEST_LANE_NOT_FOUND"
         apply_result = None
-    elif not dry_run_report.lanes[0].safe_to_test:
+    elif not (
+        dry_run_report.lanes[0].safe_for_concurrent_test
+        if concurrent_tolerant
+        else dry_run_report.lanes[0].safe_to_test
+    ):
         classification = "LEAK_TEST_PASS_BLOCKED_SAFELY"
         lane = dry_run_report.lanes[0]
+        selected_blockers = lane.concurrent_blockers if concurrent_tolerant else lane.isolated_blockers
         apply_result = LeakTestApplyResult(
             lane_id=lane.lane_id,
             strategy_id=lane.strategy_id,
@@ -1894,7 +1910,7 @@ def build_single_lane_apply_report(
             conId=lane.conId,
             entry_execution_intent=lane.entry_execution_intent,
             entry_execution_intent_source="inferred" if lane.entry_execution_intent.endswith("_INFERRED") else "explicit",
-            pre_apply_blockers=lane.isolated_blockers,
+            pre_apply_blockers=selected_blockers,
             authorization_status=None,
             authorization_path=str(authorization_path) if authorization_path is not None else None,
             pre_apply_readiness=None,
@@ -2292,6 +2308,11 @@ def build_single_lane_apply_report(
         result_classification=classification,
         notes=(
             "Single-lane apply uses only the existing guarded PAPER bridge route.",
+            (
+                "Concurrent-tolerant mode allows clean managed existing positions when exposure policy allows."
+                if concurrent_tolerant
+                else "Isolated mode requires no existing positions."
+            ),
             "Dry-run mode performs no broker mutation.",
         ),
     )
@@ -2321,6 +2342,11 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--authorization-ttl-seconds", type=float, default=600.0)
     parser.add_argument("--force-exit-after-entry", action="store_true", default=True)
     parser.add_argument("--no-force-exit-after-entry", dest="force_exit_after_entry", action="store_false")
+    parser.add_argument(
+        "--concurrent-tolerant",
+        action="store_true",
+        help="Use concurrent exposure policy for single-lane dry-run/apply eligibility instead of isolated flat-only gates.",
+    )
     return parser
 
 
@@ -2338,6 +2364,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             write_authorization=bool(args.write_authorization),
             authorization_ttl_seconds=float(args.authorization_ttl_seconds),
             authorization_output_path=args.authorization_path,
+            concurrent_tolerant=bool(args.concurrent_tolerant),
         )
     else:
         report = build_single_lane_apply_report(
@@ -2348,6 +2375,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             max_wait_seconds=float(args.max_wait_seconds),
             force_exit_after_entry=bool(args.force_exit_after_entry),
             authorization_path=args.authorization_path,
+            concurrent_tolerant=bool(args.concurrent_tolerant),
         )
     print(json.dumps(report_to_dict(report), indent=2, sort_keys=True))
     return 0

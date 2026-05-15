@@ -610,6 +610,61 @@ def test_clean_managed_position_does_not_automatically_block_concurrent_entry_wh
     assert lane.concurrent_blockers == ()
 
 
+def test_concurrent_tolerant_dry_run_can_authorize_with_clean_managed_position(tmp_path: Path) -> None:
+    authorization_path = tmp_path / "leak_test_authorization.json"
+
+    report = build_single_lane_dry_run_report(
+        repo_root=REPO_ROOT,
+        lane_id=LANE_ID,
+        reconciliation=_clean_managed_position_reconciliation(symbol="PL"),
+        operator_status=_operator_status(),
+        runtime_command=_runtime_command(),
+        exposure_policy=LeakTestExposurePolicy(max_total_open_positions=3, max_positions_per_symbol=1),
+        write_authorization=True,
+        authorization_output_path=authorization_path,
+        concurrent_tolerant=True,
+    )
+
+    assert report.result_classification == "LEAK_TEST_DRY_RUN_READY"
+    assert report.authorization_artifact is not None
+    assert authorization_path.exists()
+    assert _lane(report).safe_for_isolated_test is False
+    assert _lane(report).safe_for_concurrent_test is True
+
+
+def test_concurrent_tolerant_apply_uses_concurrent_blockers() -> None:
+    report = build_single_lane_apply_report(
+        repo_root=REPO_ROOT,
+        lane_id=LANE_ID,
+        reconciliation=_clean_managed_position_reconciliation(symbol="PL"),
+        operator_status=_operator_status(),
+        runtime_command=_runtime_command(),
+        exposure_policy=LeakTestExposurePolicy(max_total_open_positions=3, max_positions_per_symbol=1),
+        concurrent_tolerant=True,
+    )
+
+    assert report.result_classification == "LEAK_TEST_AUTHORIZATION_MISSING"
+    assert report.apply_result is not None
+    assert report.apply_result.pre_apply_blockers == ()
+
+
+def test_concurrent_tolerant_apply_blocks_duplicate_same_lane_position() -> None:
+    report = build_single_lane_apply_report(
+        repo_root=REPO_ROOT,
+        lane_id=LANE_ID,
+        reconciliation=_clean_managed_position_reconciliation(symbol="MNQ", lane_id=LANE_ID),
+        operator_status=_operator_status(),
+        runtime_command=_runtime_command(),
+        exposure_policy=LeakTestExposurePolicy(max_total_open_positions=3, max_positions_per_symbol=2, allow_same_symbol_multiple_strategies=True),
+        concurrent_tolerant=True,
+    )
+
+    assert report.result_classification == "LEAK_TEST_PASS_BLOCKED_SAFELY"
+    assert report.apply_result is not None
+    assert "duplicate_same_lane_position" in report.apply_result.pre_apply_blockers
+    assert "existing_positions_present_for_isolated_round_trip" not in report.apply_result.pre_apply_blockers
+
+
 def test_unresolved_broker_lifecycle_mismatch_blocks_concurrent_entry() -> None:
     report = build_concurrent_plan_report(
         repo_root=REPO_ROOT,
