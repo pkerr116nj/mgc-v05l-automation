@@ -63,7 +63,12 @@ def test_ibkr_callback_adapter_accumulates_read_only_truth_buffers() -> None:
         },
         status="Submitted",
         quantity="1",
+        action="SELL",
+        order_type="LMT",
+        tif="DAY",
         filled_quantity="0",
+        remaining_quantity="1",
+        limit_price="2450.5",
         occurred_at=now,
     )
     adapter.open_order_end(occurred_at=now)
@@ -109,6 +114,11 @@ def test_ibkr_callback_adapter_accumulates_read_only_truth_buffers() -> None:
     assert client.balances()[0].buying_power == "100000"
     assert client.positions()[0].contract.symbol == "MGC"
     assert client.open_orders()[0].broker_order_id == 7001
+    assert client.open_orders()[0].action == "SELL"
+    assert client.open_orders()[0].order_type == "LMT"
+    assert client.open_orders()[0].tif == "DAY"
+    assert client.open_orders()[0].remaining_quantity == "1"
+    assert client.open_orders()[0].limit_price == "2450.5"
     assert client.completed_orders()[0].broker_order_id == 6998
     assert client.executions()[0].execution_id == "exec-1"
 

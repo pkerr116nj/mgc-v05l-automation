@@ -154,7 +154,11 @@ class IbkrReadOnlyCallbackAdapter:
         contract: IbkrContractDescriptor | dict[str, Any],
         status: str,
         quantity: str | Decimal | int | float,
+        action: str | None = None,
+        order_type: str | None = None,
+        tif: str | None = None,
         filled_quantity: str | Decimal | int | float | None = None,
+        remaining_quantity: str | Decimal | int | float | None = None,
         limit_price: str | Decimal | int | float | None = None,
         stop_price: str | Decimal | int | float | None = None,
         occurred_at: datetime | None = None,
@@ -168,7 +172,11 @@ class IbkrReadOnlyCallbackAdapter:
                 contract=_coerce_contract(contract),
                 status=str(status).strip(),
                 quantity=str(quantity),
+                action=_stringify_optional(action),
+                order_type=_stringify_optional(order_type),
+                tif=_stringify_optional(tif),
                 filled_quantity=_stringify_optional(filled_quantity),
+                remaining_quantity=_stringify_optional(remaining_quantity),
                 limit_price=_stringify_optional(limit_price),
                 stop_price=_stringify_optional(stop_price),
                 updated_at=occurred_at or datetime.now(timezone.utc),
@@ -291,4 +299,3 @@ def _int_or_none(value: Any) -> int | None:
     if value in (None, ""):
         return None
     return int(value)
-

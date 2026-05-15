@@ -3804,6 +3804,19 @@ class ProbationaryPaperLaneRuntime:
         if adoption is not None:
             restore_adjustments.append("adopt_ibkr_bridge_position_for_exit_management")
             self._write_startup_phase_marker("broker_position_adopted_for_exit_management", adoption=adoption)
+        managed_exit_order_adoption = _maybe_adopt_known_managed_exit_order_for_restore(
+            repositories=self.repositories,
+            strategy_engine=self.strategy_engine,
+            execution_engine=self.execution_engine,
+            lane_id=self.spec.lane_id,
+            repo_root=Path(__file__).resolve().parents[3],
+        )
+        if managed_exit_order_adoption is not None:
+            restore_adjustments.append("adopt_known_managed_exit_order_for_restore")
+            self._write_startup_phase_marker(
+                "known_managed_exit_order_adopted_for_restore",
+                adoption=managed_exit_order_adoption,
+            )
         track_b_restore = None
         if (
             self.strategy_engine.state.reconcile_required
@@ -11673,7 +11686,7 @@ def _latest_lane_bridge_delegation_evidence(
         lines = audit_path.read_text(encoding="utf-8").splitlines()
     except Exception:
         return None
-    intent_action = "BUY" if intent_type is OrderIntentType.BUY_TO_OPEN else "SELL"
+    intent_action = "BUY" if intent_type in {OrderIntentType.BUY_TO_OPEN, OrderIntentType.BUY_TO_CLOSE} else "SELL"
     saw_intent_ready = False
     latest_delegated: dict[str, Any] | None = None
     for line in lines[-200:]:
@@ -11732,6 +11745,258 @@ def _adopted_broker_position_order_id(broker_snapshot: dict[str, Any]) -> str:
     symbol = str(position.get("symbol") or "").strip().upper() or "UNKNOWN"
     local_symbol = str(position.get("local_symbol") or "").strip().upper() or "UNKNOWN"
     return f"adopted-broker-truth-{symbol}-{local_symbol}"
+
+
+def _maybe_adopt_known_managed_exit_order_for_restore(
+    *,
+    repositories: RepositorySet,
+    strategy_engine: StrategyEngine,
+    execution_engine: ExecutionEngine,
+    lane_id: str,
+    repo_root: Path,
+) -> dict[str, Any] | None:
+    broker = execution_engine.broker
+    if not isinstance(broker, _IbkrPaperBridgeRuntimeBroker):
+        return None
+    if execution_engine.pending_executions() or strategy_engine.state.open_broker_order_id:
+        return None
+    state = strategy_engine.state
+    signed_quantity = _strategy_state_to_signed_quantity(state)
+    if signed_quantity == 0:
+        return None
+    broker_snapshot = broker.snapshot_state()
+    if not broker_snapshot.get("connected") or not broker_snapshot.get("truth_complete"):
+        return None
+    raw_broker_truth = broker.load_snapshot(force_refresh=True)
+    broker_position = broker._matching_broker_truth_position(snapshot=raw_broker_truth)  # noqa: SLF001
+    broker_quantity = _signed_ibkr_runtime_position_quantity(broker_position or {})
+    if broker_quantity != signed_quantity:
+        return None
+    open_orders = list(broker_snapshot.get("external_broker_open_orders") or [])
+    if not open_orders:
+        open_orders = broker._matching_broker_truth_open_orders(snapshot=raw_broker_truth)  # noqa: SLF001
+    if len(open_orders) != 1:
+        return None
+    order_row = dict(open_orders[0])
+    order_id = _ibkr_runtime_order_id(order_row)
+    if not order_id:
+        return None
+    if not _broker_open_order_matches_managed_exit_position(order_row=order_row, state=state, broker=broker):
+        return None
+    intent_row = _latest_exit_intent_for_managed_order_adoption(
+        repositories=repositories,
+        symbol=broker._target_symbol(),  # noqa: SLF001
+        position_side=state.position_side,
+    )
+    if intent_row is None:
+        return None
+    intent = decode_order_intent(dict(intent_row))
+    bridge_evidence = _latest_lane_bridge_delegation_evidence(
+        repo_root=repo_root,
+        lane_id=lane_id,
+        intent_type=intent.intent_type,
+    )
+    preview_evidence = _latest_lane_prepared_close_preview_evidence(
+        repo_root=repo_root,
+        lane_id=lane_id,
+        order_row=order_row,
+        intent_type=intent.intent_type,
+        broker=broker,
+    )
+    if bridge_evidence is None and preview_evidence is None and not _broker_open_order_has_explicit_close_action(order_row, state.position_side):
+        return None
+    observed_at = datetime.now(timezone.utc)
+    status_text = str(order_row.get("status") or order_row.get("order_status") or OrderStatus.ACKNOWLEDGED.value).strip().upper()
+    submitted_at = _parse_iso_datetime_or_none(order_row.get("submitted_at") or order_row.get("created_at") or order_row.get("updated_at")) or observed_at
+    acknowledged_at = _parse_iso_datetime_or_none(order_row.get("acknowledged_at") or order_row.get("updated_at")) or observed_at
+    repositories.order_intents.save(
+        intent,
+        order_status=OrderStatus.ACKNOWLEDGED,
+        broker_order_id=order_id,
+        submitted_at=submitted_at,
+        acknowledged_at=acknowledged_at,
+        broker_order_status=status_text or OrderStatus.ACKNOWLEDGED.value,
+        last_status_checked_at=observed_at,
+    )
+    pending = PendingExecution(
+        intent=intent,
+        broker_order_id=order_id,
+        submitted_at=submitted_at,
+        acknowledged_at=acknowledged_at,
+        broker_order_status=status_text or OrderStatus.ACKNOWLEDGED.value,
+        last_status_checked_at=observed_at,
+        retry_count=int(intent_row.get("retry_count") or 0),
+        signal_bar_id=None,
+        long_entry_family=LongEntryFamily.NONE,
+        short_entry_family=ShortEntryFamily.NONE,
+        short_entry_source=None,
+    )
+    execution_engine.restore_pending_execution(pending)
+    strategy_engine._state = replace(  # noqa: SLF001
+        strategy_engine.state,
+        open_broker_order_id=order_id,
+        last_order_intent_id=intent.order_intent_id,
+        entries_enabled=False,
+        exits_enabled=True,
+        reconcile_required=False,
+        fault_code=None,
+        updated_at=observed_at,
+    )
+    strategy_engine._persist_state(  # noqa: SLF001
+        strategy_engine.state,
+        transition_label="known_managed_exit_order_restored",
+    )
+    broker.restore_state(
+        position=PaperPosition(quantity=signed_quantity, average_price=state.entry_price),
+        open_order_ids=[order_id],
+        order_status={order_id: OrderStatus.ACKNOWLEDGED},
+        last_fill_timestamp=_latest_fill_timestamp_from_rows(repositories.fills.list_all()),
+    )
+    return {
+        "classification": "KNOWN_MANAGED_EXIT_ORDER_WORKING",
+        "lane_id": lane_id,
+        "strategy_id": getattr(strategy_engine._settings, "standalone_strategy_id", None),  # noqa: SLF001
+        "order_intent_id": intent.order_intent_id,
+        "intent_type": intent.intent_type.value,
+        "broker_order_id": order_id,
+        "client_id": _first_present(order_row.get("client_id"), order_row.get("clientId")),
+        "perm_id": _first_present(order_row.get("perm_id"), order_row.get("permId")),
+        "status": status_text or OrderStatus.ACKNOWLEDGED.value,
+        "symbol": broker._target_symbol(),  # noqa: SLF001
+        "local_symbol": order_row.get("local_symbol") or order_row.get("localSymbol"),
+        "con_id": _first_present(order_row.get("con_id"), order_row.get("conId"), order_row.get("qualified_contract_identifier")),
+        "quantity": intent.quantity,
+        "exit_reason": intent.reason_code,
+        "bridge_evidence": bridge_evidence,
+        "preview_evidence": preview_evidence,
+    }
+
+
+def _latest_exit_intent_for_managed_order_adoption(
+    *,
+    repositories: RepositorySet,
+    symbol: str,
+    position_side: PositionSide,
+) -> dict[str, Any] | None:
+    target_symbol = str(symbol or "").strip().upper()
+    expected_intent = OrderIntentType.SELL_TO_CLOSE if position_side is PositionSide.LONG else OrderIntentType.BUY_TO_CLOSE
+    candidates: list[dict[str, Any]] = []
+    for row in repositories.order_intents.list_all():
+        if str(row.get("symbol") or row.get("instrument") or "").strip().upper() != target_symbol:
+            continue
+        if str(row.get("intent_type") or "").strip().upper() != expected_intent.value:
+            continue
+        if str(row.get("order_status") or "").strip().upper() in {OrderStatus.FILLED.value, OrderStatus.CANCELLED.value, "CANCELED"}:
+            continue
+        candidates.append(dict(row))
+    return max(candidates, key=_intent_row_sort_key, default=None)
+
+
+def _broker_open_order_matches_managed_exit_position(
+    *,
+    order_row: dict[str, Any],
+    state: Any,
+    broker: _IbkrPaperBridgeRuntimeBroker,
+) -> bool:
+    target = broker._bridge_target()  # noqa: SLF001
+    target_symbol = broker._target_symbol()  # noqa: SLF001
+    order_symbol = str(order_row.get("symbol") or "").strip().upper()
+    if order_symbol and order_symbol != target_symbol:
+        return False
+    order_local = str(order_row.get("local_symbol") or order_row.get("localSymbol") or "").strip().upper()
+    target_local = str(target.get("local_symbol") or target.get("localSymbol") or "").strip().upper()
+    if order_local and target_local and order_local != target_local:
+        return False
+    order_con_id = str(order_row.get("con_id") or order_row.get("conId") or order_row.get("qualified_contract_identifier") or "").strip()
+    target_con_id = str(target.get("con_id") or target.get("conId") or "").strip()
+    if order_con_id and target_con_id and order_con_id != target_con_id:
+        return False
+    order_expiry = str(order_row.get("expiry") or order_row.get("lastTradeDateOrContractMonth") or "").strip()
+    target_expiry = str(target.get("expiry") or "").strip()
+    target_contract_month = str(target.get("contract_month") or "").strip()
+    if target_expiry and order_expiry and order_expiry != target_expiry:
+        return False
+    if target_contract_month and order_expiry and not order_expiry.startswith(target_contract_month):
+        return False
+    quantity = _decimal_from_any(
+        order_row.get("remaining_quantity")
+        or order_row.get("remainingQuantity")
+        or order_row.get("total_quantity")
+        or order_row.get("totalQuantity")
+        or order_row.get("quantity")
+    )
+    if quantity is None or int(abs(quantity)) != int(abs(state.internal_position_qty)):
+        return False
+    return True
+
+
+def _broker_open_order_has_explicit_close_action(order_row: dict[str, Any], position_side: PositionSide) -> bool:
+    action = str(order_row.get("action") or order_row.get("order_action") or "").strip().upper()
+    if not action:
+        return False
+    return action == ("SELL" if position_side is PositionSide.LONG else "BUY")
+
+
+def _latest_lane_prepared_close_preview_evidence(
+    *,
+    repo_root: Path,
+    lane_id: str,
+    order_row: dict[str, Any],
+    intent_type: OrderIntentType,
+    broker: _IbkrPaperBridgeRuntimeBroker,
+) -> dict[str, Any] | None:
+    preview_path = (
+        Path(repo_root)
+        / "outputs"
+        / "reports"
+        / "ibkr_runtime_route_dispatch"
+        / str(lane_id)
+        / "prepared_manual_harness"
+        / "ibkr_manual_paper_close_test_frozen_preview.json"
+    )
+    preview = _load_json_mapping(preview_path)
+    if not preview:
+        return None
+    expected_action = "SELL" if intent_type is OrderIntentType.SELL_TO_CLOSE else "BUY"
+    preview_action = str(preview.get("action") or preview.get("order_action") or "").strip().upper()
+    if preview_action and preview_action != expected_action:
+        return None
+    client_id = str(order_row.get("client_id") or order_row.get("clientId") or "").strip()
+    preview_client_id = str(
+        preview.get("client_id")
+        or _nested_get(preview, "environment", "client_id")
+        or _nested_get(preview, "connection", "client_id")
+        or ""
+    ).strip()
+    if client_id and preview_client_id and client_id != preview_client_id:
+        return None
+    contract = dict(preview.get("contract") or {})
+    target = broker._bridge_target()  # noqa: SLF001
+    expected_symbol = broker._target_symbol()  # noqa: SLF001
+    preview_symbol = str(contract.get("symbol") or contract.get("broker_symbol") or "").strip().upper()
+    if preview_symbol and preview_symbol != expected_symbol:
+        return None
+    preview_local = str(contract.get("local_symbol") or contract.get("localSymbol") or "").strip().upper()
+    order_local = str(order_row.get("local_symbol") or order_row.get("localSymbol") or "").strip().upper()
+    target_local = str(target.get("local_symbol") or target.get("localSymbol") or "").strip().upper()
+    if preview_local and order_local and preview_local != order_local:
+        return None
+    if preview_local and target_local and preview_local != target_local:
+        return None
+    preview_con_id = str(contract.get("con_id") or contract.get("conId") or contract.get("qualified_contract_identifier") or "").strip()
+    order_con_id = str(order_row.get("con_id") or order_row.get("conId") or order_row.get("qualified_contract_identifier") or "").strip()
+    target_con_id = str(target.get("con_id") or target.get("conId") or "").strip()
+    if preview_con_id and order_con_id and preview_con_id != order_con_id:
+        return None
+    if preview_con_id and target_con_id and preview_con_id != target_con_id:
+        return None
+    return {
+        "preview_path": str(preview_path),
+        "action": preview_action or expected_action,
+        "client_id": preview_client_id or None,
+        "local_symbol": preview_local or None,
+        "con_id": preview_con_id or None,
+    }
 
 
 def _runtime_bridge_config_for_lane(

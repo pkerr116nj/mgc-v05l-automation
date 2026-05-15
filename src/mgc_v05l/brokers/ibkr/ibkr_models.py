@@ -93,7 +93,11 @@ class IbkrOpenOrderRecord:
     contract: IbkrContractDescriptor
     status: str
     quantity: str
+    action: str | None = None
+    order_type: str | None = None
+    tif: str | None = None
     filled_quantity: str | None = None
+    remaining_quantity: str | None = None
     limit_price: str | None = None
     stop_price: str | None = None
     updated_at: datetime | None = None

@@ -190,7 +190,84 @@ def test_blocks_when_track_b_open_order_exists(tmp_path: Path) -> None:
     report = reconcile_track_b_paper_broker_truth(config=config, now=NOW)
 
     assert report["classification"] == "TRACK_B_PAPER_BROKER_RECONCILIATION_BLOCKED"
-    assert any(blocker["code"] == "TRACK_B_BROKER_OPEN_ORDER_PRESENT" for blocker in report["blockers"])
+    assert any(blocker["code"] == "UNKNOWN_BROKER_OPEN_ORDER" for blocker in report["blockers"])
+
+
+def test_known_managed_exit_order_is_not_unknown_open_order_blocker(tmp_path: Path) -> None:
+    open_position = {
+        "strategy_id": "gc_1x_all_lanes__london_early_long",
+        "lifecycle_id": "bridge_fill_GC|1m|2026-05-15T07:06:00Z|BUY_TO_OPEN",
+        "instrument_family": "GC",
+        "contract_key": "GC-202606",
+        "local_symbol": "GCM6",
+        "con_id": 430360630,
+        "side": "LONG",
+        "quantity": "1",
+        "avg_entry_price": "4574.6",
+    }
+    config = _write_base_artifacts(tmp_path, open_position=open_position)
+    live_status = json.loads(config.live_position_status_path.read_text(encoding="utf-8"))
+    live_status["known_managed_exit_orders"] = [
+        {
+            "managed_order_status": "KNOWN_MANAGED_EXIT_ORDER_WORKING",
+            "lifecycle_id": "bridge_fill_GC|1m|2026-05-15T07:06:00Z|BUY_TO_OPEN",
+            "strategy_id": "gc_1x_all_lanes__london_early_long",
+            "lane_id": "gc_1x_all_lanes__london_early_long",
+            "order_intent_id": "GC|1m|2026-05-15T08:06:00Z|SELL_TO_CLOSE",
+            "broker_order_id": "1",
+            "client_id": 10815,
+            "perm_id": 614029377,
+            "symbol": "GC",
+            "local_symbol": "GCM6",
+            "con_id": 430360630,
+            "action": "SELL",
+            "quantity": "1",
+        }
+    ]
+    _write_json(config.live_position_status_path, live_status)
+    _write_broker_truth(
+        config,
+        positions=[
+            {
+                "account_id": "DUM882026",
+                "symbol": "GC",
+                "local_symbol": "GCM6",
+                "security_type": "FUT",
+                "quantity": "1",
+                "average_cost": "457460.0",
+                "multiplier": "100",
+                "con_id": 430360630,
+            }
+        ],
+        open_orders=[
+            {
+                "broker_order_id": "1",
+                "client_id": 10815,
+                "perm_id": 614029377,
+                "symbol": "GC",
+                "local_symbol": "GCM6",
+                "security_type": "FUT",
+                "expiry": "20260626",
+                "con_id": 430360630,
+                "action": "SELL",
+                "order_type": "LMT",
+                "limit_price": "4574.7",
+                "quantity": "1",
+                "remaining_quantity": "1",
+                "status": "Submitted",
+            }
+        ],
+    )
+
+    report = reconcile_track_b_paper_broker_truth(config=config, now=NOW)
+
+    assert report["classification"] == "TRACK_B_PAPER_BROKER_RECONCILED_WITH_KNOWN_MANAGED_EXIT_ORDER"
+    assert report["broker_reconciled"] is True
+    assert report["known_managed_exit_order_count"] == 1
+    assert report["unknown_broker_open_order_count"] == 0
+    assert report["blockers"] == []
+    reconciled_position = json.loads(config.reconciled_live_position_status_path.read_text(encoding="utf-8"))
+    assert reconciled_position["known_managed_exit_orders"][0]["broker_order_id"] == "1"
 
 
 def test_blocks_when_broker_truth_is_stale_or_incomplete(tmp_path: Path) -> None:
@@ -204,6 +281,54 @@ def test_blocks_when_broker_truth_is_stale_or_incomplete(tmp_path: Path) -> None
     assert "BROKER_TRUTH_STATUS_FLAG_MISMATCH" in codes
     assert "BROKER_TRUTH_SNAPSHOT_INCOMPLETE" in codes
     assert report["broker_reconciled"] is False
+
+
+def test_bridge_terminal_event_grace_prevents_short_broker_truth_lag_block(tmp_path: Path) -> None:
+    config = _write_base_artifacts(
+        tmp_path,
+        recent_trades=[
+            {
+                "account_id": "DUM882026",
+                "contract_key": "GC-202606",
+                "local_symbol": "GCM6",
+                "con_id": 470332,
+                "exit_timestamp": "2026-05-11T11:59:15+00:00",
+                "exit_order_id": "1234",
+            }
+        ],
+    )
+    _write_broker_truth(config, generated_at="2026-05-11T11:57:00+00:00")
+
+    report = reconcile_track_b_paper_broker_truth(config=config, now=NOW)
+
+    assert report["classification"] == "TRACK_B_PAPER_BROKER_RECONCILED"
+    assert report["bridge_terminal_event_grace"]["applied"] is True
+    assert report["bridge_terminal_event_grace"]["downgraded_stale_blockers"]
+    assert not any(blocker["code"] == "BROKER_TRUTH_STATUS_STALE" for blocker in report["blockers"])
+    assert report["live_money_eligible"] is False
+
+
+def test_bridge_terminal_event_grace_expires_and_fails_closed(tmp_path: Path) -> None:
+    config = _write_base_artifacts(
+        tmp_path,
+        recent_trades=[
+            {
+                "account_id": "DUM882026",
+                "contract_key": "GC-202606",
+                "local_symbol": "GCM6",
+                "con_id": 470332,
+                "exit_timestamp": "2026-05-11T11:40:00+00:00",
+                "exit_order_id": "1234",
+            }
+        ],
+    )
+    _write_broker_truth(config, generated_at="2026-05-11T11:57:00+00:00")
+
+    report = reconcile_track_b_paper_broker_truth(config=config, now=NOW)
+
+    assert report["classification"] == "TRACK_B_PAPER_BROKER_RECONCILIATION_BLOCKED"
+    assert report["bridge_terminal_event_grace"]["applied"] is False
+    assert any(blocker["code"] == "BROKER_TRUTH_STATUS_STALE" for blocker in report["blockers"])
 
 
 def test_blocks_when_lifecycle_reports_review_required(tmp_path: Path) -> None:
@@ -248,6 +373,7 @@ def _write_base_artifacts(
     *,
     review_required_count: int = 0,
     open_position: dict[str, object] | None = None,
+    recent_trades: list[dict[str, object]] | None = None,
 ) -> ReconciliationConfig:
     ledger_root = tmp_path / "outputs" / "track_b_execution_core" / "paper_trade_ledger"
     broker_root = tmp_path / "outputs" / "reports" / "ibkr_read_only_verification"
@@ -269,7 +395,7 @@ def _write_base_artifacts(
             "paper_trades_attempted_count": 2,
             "open_position_count": 1 if open_position else 0,
             "review_required_count": review_required_count,
-            "recent_trades": [],
+            "recent_trades": recent_trades or [],
         },
     )
     _write_json(

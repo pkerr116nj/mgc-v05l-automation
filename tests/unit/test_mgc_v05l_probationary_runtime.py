@@ -5599,6 +5599,205 @@ def test_submit_capable_broker_position_adoption_restores_exit_managed_state(tmp
     assert repositories.fills.list_all()[0]["broker_order_id"] == "adopted-broker-truth-GC-GCM6"
 
 
+def test_known_managed_exit_order_adoption_restores_pending_state(tmp_path: Path) -> None:
+    lane_id = "gc_1x_all_lanes__london_early_long"
+    lane = _seed_test_lane(
+        tmp_path,
+        lane_id=lane_id,
+        symbol="GC",
+        source="asiaEarlyNormalBreakoutRetestHoldTurn",
+        session_restriction="LONDON_EARLY",
+        point_value=Decimal("100"),
+    )
+    broker = probationary_runtime_module._IbkrPaperBridgeRuntimeBroker(  # noqa: SLF001
+        lane_id=lane_id,
+        source_symbol="GC",
+        bridge_adapter={
+            "current_order_destination": "ibkr_paper_bridge_submit_capable",
+            "bridge_proxy_mode": "GC_SIGNAL_DIRECT_PHASE1",
+            "bridge_execution_target": {
+                "symbol": "GC",
+                "contract_month": "202606",
+                "local_symbol": "GCM6",
+                "con_id": 430360630,
+            },
+        },
+        repo_root=tmp_path,
+        bridge_runner=lambda *, config: pytest.fail("bridge runner should not be invoked"),
+    )
+    broker.connect()
+    lane.execution_engine = ExecutionEngine(broker=broker)
+    lane.strategy_engine._execution_engine = lane.execution_engine  # noqa: SLF001
+    entry_time = datetime(2026, 5, 15, 7, 6, tzinfo=timezone.utc)
+    lane.strategy_engine._state = replace(  # noqa: SLF001
+        lane.strategy_engine.state,
+        strategy_status=StrategyStatus.IN_LONG_K,
+        position_side=PositionSide.LONG,
+        internal_position_qty=1,
+        broker_position_qty=1,
+        entry_price=Decimal("4574.6"),
+        entry_timestamp=entry_time,
+        last_order_intent_id="GC|1m|2026-05-15T07:06:00Z|BUY_TO_OPEN",
+    )
+    lane.strategy_engine._persist_state(lane.strategy_engine.state, transition_label="seed_long")  # noqa: SLF001
+    exit_intent = OrderIntent(
+        order_intent_id="GC|1m|2026-05-15T08:06:00Z|SELL_TO_CLOSE",
+        bar_id="GC|1m|2026-05-15T08:06:00Z",
+        symbol="GC",
+        intent_type=OrderIntentType.SELL_TO_CLOSE,
+        quantity=1,
+        created_at=datetime(2026, 5, 15, 8, 6, tzinfo=timezone.utc),
+        reason_code="forced_session_ema_structure_break",
+    )
+    lane.repositories.order_intents.save(exit_intent, order_status=OrderStatus.REJECTED, broker_order_id=None)
+    truth_root = tmp_path / "outputs" / "reports" / "ibkr_read_only_verification"
+    truth_root.mkdir(parents=True)
+    generated_at = datetime.now(timezone.utc).isoformat()
+    (truth_root / "ibkr_positions_snapshot.json").write_text(
+        json.dumps(
+            {
+                "ok": True,
+                "generated_at": generated_at,
+                "selected_account_id": "DUM882026",
+                "positions": [
+                    {
+                        "account_id": "DUM882026",
+                        "symbol": "GC",
+                        "security_type": "FUT",
+                        "expiry": "20260626",
+                        "local_symbol": "GCM6",
+                        "con_id": 430360630,
+                        "multiplier": "100",
+                        "quantity": "1.0",
+                        "average_cost": "457460.0",
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    (truth_root / "ibkr_open_orders_snapshot.json").write_text(
+        json.dumps(
+            {
+                "ok": True,
+                "generated_at": generated_at,
+                "selected_account_id": "DUM882026",
+                "open_orders": [
+                    {
+                        "account_id": "DUM882026",
+                        "broker_order_id": "1",
+                        "client_id": 10815,
+                        "perm_id": 614029377,
+                        "symbol": "GC",
+                        "local_symbol": "GCM6",
+                        "expiry": "20260626",
+                        "con_id": 430360630,
+                        "action": "SELL",
+                        "order_type": "LMT",
+                        "limit_price": "4574.7",
+                        "quantity": "1",
+                        "remaining_quantity": "1",
+                        "status": "Submitted",
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    adoption = probationary_runtime_module._maybe_adopt_known_managed_exit_order_for_restore(  # noqa: SLF001
+        repositories=lane.repositories,
+        strategy_engine=lane.strategy_engine,
+        execution_engine=lane.execution_engine,
+        lane_id=lane_id,
+        repo_root=tmp_path,
+    )
+    reconciliation = _reconcile_paper_runtime(
+        repositories=lane.repositories,
+        strategy_engine=lane.strategy_engine,
+        execution_engine=lane.execution_engine,
+        trigger="startup",
+        apply_repairs=True,
+    )
+
+    assert adoption is not None
+    assert adoption["classification"] == "KNOWN_MANAGED_EXIT_ORDER_WORKING"
+    assert adoption["broker_order_id"] == "1"
+    assert lane.strategy_engine.state.open_broker_order_id == "1"
+    assert [pending.broker_order_id for pending in lane.execution_engine.pending_executions()] == ["1"]
+    intent_rows = lane.repositories.order_intents.list_all()
+    assert intent_rows[-1]["broker_order_id"] == "1"
+    assert intent_rows[-1]["order_status"] == OrderStatus.ACKNOWLEDGED.value
+    assert reconciliation["clean"] is True
+
+
+def test_known_managed_exit_order_adoption_refuses_wrong_action(tmp_path: Path) -> None:
+    lane_id = "gc_1x_all_lanes__london_early_long"
+    lane = _seed_test_lane(
+        tmp_path,
+        lane_id=lane_id,
+        symbol="GC",
+        source="asiaEarlyNormalBreakoutRetestHoldTurn",
+        session_restriction="LONDON_EARLY",
+        point_value=Decimal("100"),
+    )
+    broker = probationary_runtime_module._IbkrPaperBridgeRuntimeBroker(  # noqa: SLF001
+        lane_id=lane_id,
+        source_symbol="GC",
+        bridge_adapter={
+            "current_order_destination": "ibkr_paper_bridge_submit_capable",
+            "bridge_proxy_mode": "GC_SIGNAL_DIRECT_PHASE1",
+            "bridge_execution_target": {"symbol": "GC", "contract_month": "202606", "local_symbol": "GCM6"},
+        },
+        repo_root=tmp_path,
+        bridge_runner=lambda *, config: pytest.fail("bridge runner should not be invoked"),
+    )
+    broker.connect()
+    lane.execution_engine = ExecutionEngine(broker=broker)
+    lane.strategy_engine._execution_engine = lane.execution_engine  # noqa: SLF001
+    lane.strategy_engine._state = replace(  # noqa: SLF001
+        lane.strategy_engine.state,
+        strategy_status=StrategyStatus.IN_LONG_K,
+        position_side=PositionSide.LONG,
+        internal_position_qty=1,
+        broker_position_qty=1,
+        entry_price=Decimal("4574.6"),
+    )
+    exit_intent = OrderIntent(
+        order_intent_id="GC|1m|2026-05-15T08:06:00Z|SELL_TO_CLOSE",
+        bar_id="GC|1m|2026-05-15T08:06:00Z",
+        symbol="GC",
+        intent_type=OrderIntentType.SELL_TO_CLOSE,
+        quantity=1,
+        created_at=datetime(2026, 5, 15, 8, 6, tzinfo=timezone.utc),
+        reason_code="forced_session_ema_structure_break",
+    )
+    lane.repositories.order_intents.save(exit_intent, order_status=OrderStatus.REJECTED, broker_order_id=None)
+    truth_root = tmp_path / "outputs" / "reports" / "ibkr_read_only_verification"
+    truth_root.mkdir(parents=True)
+    generated_at = datetime.now(timezone.utc).isoformat()
+    (truth_root / "ibkr_positions_snapshot.json").write_text(
+        json.dumps({"ok": True, "generated_at": generated_at, "selected_account_id": "DUM882026", "positions": [{"symbol": "GC", "local_symbol": "GCM6", "quantity": "1.0", "average_cost": "457460.0", "multiplier": "100"}]}),
+        encoding="utf-8",
+    )
+    (truth_root / "ibkr_open_orders_snapshot.json").write_text(
+        json.dumps({"ok": True, "generated_at": generated_at, "selected_account_id": "DUM882026", "open_orders": [{"broker_order_id": "1", "symbol": "GC", "local_symbol": "GCM6", "action": "BUY", "quantity": "1", "status": "Submitted"}]}),
+        encoding="utf-8",
+    )
+
+    adoption = probationary_runtime_module._maybe_adopt_known_managed_exit_order_for_restore(  # noqa: SLF001
+        repositories=lane.repositories,
+        strategy_engine=lane.strategy_engine,
+        execution_engine=lane.execution_engine,
+        lane_id=lane_id,
+        repo_root=tmp_path,
+    )
+
+    assert adoption is None
+    assert lane.strategy_engine.state.open_broker_order_id is None
+    assert lane.execution_engine.pending_executions() == []
+
+
 @pytest.mark.parametrize(
     ("symbol", "lane_id", "contract_month", "expiry", "local_symbol", "multiplier", "average_cost", "entry_price"),
     [
