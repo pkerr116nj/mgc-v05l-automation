@@ -1750,6 +1750,41 @@ def _lifecycle_id_for_lane(reconciliation: Mapping[str, Any], lane: LeakTestLane
     return None
 
 
+def _broker_position_matches_lane(reconciliation: Mapping[str, Any], lane: LeakTestLanePlan) -> bool:
+    expected_symbol = str(lane.symbol or "").upper()
+    expected_local = str(lane.localSymbol or _contract_local_symbol(expected_symbol, lane.expiry) or "").upper()
+    expected_month = str(lane.expiry or "")[:6]
+    for row in _list_payload(reconciliation.get("track_b_broker_positions")):
+        row_symbol = str(row.get("symbol") or "").upper()
+        row_local = str(row.get("local_symbol") or row.get("localSymbol") or "").upper()
+        row_expiry = str(row.get("expiry") or row.get("contract_month") or "")[:6]
+        qty = _float_or_none(row.get("quantity") or row.get("qty") or row.get("position"))
+        if qty is None or qty == 0:
+            continue
+        if expected_symbol and row_symbol != expected_symbol:
+            continue
+        if expected_local and row_local and row_local != expected_local:
+            continue
+        if expected_month and row_expiry and row_expiry != expected_month:
+            continue
+        return True
+    return False
+
+
+def _adoption_waiting_for_broker_truth(adoption_report: Mapping[str, Any]) -> bool:
+    failures = adoption_report.get("failures")
+    if isinstance(failures, (str, bytes)) or not isinstance(failures, Sequence):
+        failures = []
+    failure_text = " ".join(str(item) for item in failures)
+    return (
+        str(adoption_report.get("classification") or "") == "TRACK_B_PAPER_LIFECYCLE_ADOPTION_REFUSED"
+        and (
+            "Expected exactly one matching broker position, found 0" in failure_text
+            or "requires exact broker position truth" in failure_text
+        )
+    )
+
+
 def _reconciliation_is_flat(reconciliation: Mapping[str, Any]) -> bool:
     return (
         _reconciliation_ok(reconciliation)
@@ -1987,6 +2022,50 @@ def build_single_lane_apply_report(
                 reconciliation_after_exit = None
                 exit_policy = None
                 exit_reason = None
+        def _adopt_entry_until_reconciled(stage: str) -> tuple[dict[str, Any], dict[str, Any]]:
+            deadline = time.monotonic() + max(0.0, max_wait_seconds)
+            latest_report: dict[str, Any] = {}
+            latest_reconciliation: dict[str, Any] = {}
+            while True:
+                latest_report = lifecycle_adoption_runner(
+                    repo_root=repo_root,
+                    lane=lane,
+                    entry_result=entry_result,
+                )
+                adoption_classification = str(latest_report.get("classification") or "")
+                if adoption_classification == "TRACK_B_PAPER_LIFECYCLE_ADOPTION_APPLIED":
+                    latest_reconciliation = post_submit_broker_state_refresher(
+                        repo_root,
+                        f"{stage}_after_adoption_attempt",
+                    )
+                    if _reconciliation_ok(latest_reconciliation) and _lifecycle_open_matches_lane(
+                        latest_reconciliation, lane
+                    ):
+                        return latest_report, latest_reconciliation
+                    latest_reconciliation = _wait_for_reconciliation(
+                        repo_root=repo_root,
+                        stage="after_entry",
+                        max_wait_seconds=max_wait_seconds,
+                        reader=reconciliation_reader,
+                        predicate=lambda payload: _reconciliation_ok(payload)
+                        and _lifecycle_open_matches_lane(payload, lane),
+                    )
+                    return latest_report, latest_reconciliation
+                if not _adoption_waiting_for_broker_truth(latest_report):
+                    latest_reconciliation = reconciliation_reader(repo_root, f"{stage}_adoption_refused")
+                    return latest_report, latest_reconciliation
+                latest_reconciliation = post_submit_broker_state_refresher(
+                    repo_root,
+                    f"{stage}_after_adoption_attempt",
+                )
+                if _reconciliation_ok(latest_reconciliation) and _lifecycle_open_matches_lane(latest_reconciliation, lane):
+                    return latest_report, latest_reconciliation
+                if _broker_position_matches_lane(latest_reconciliation, lane):
+                    continue
+                if max_wait_seconds <= 0 or time.monotonic() >= deadline:
+                    return latest_report, latest_reconciliation
+                time.sleep(min(5.0, max(0.0, deadline - time.monotonic())))
+
         def _adopt_unknown_entry_and_optionally_exit() -> None:
             nonlocal classification
             nonlocal lifecycle_open_result
@@ -1996,19 +2075,8 @@ def build_single_lane_apply_report(
             nonlocal reconciliation_after_exit
             nonlocal exit_policy
             nonlocal exit_reason
-            adoption_report = lifecycle_adoption_runner(
-                repo_root=repo_root,
-                lane=lane,
-                entry_result=entry_result,
-            )
+            adoption_report, reconciliation_after_entry = _adopt_entry_until_reconciled("entry")
             adoption_classification = str(adoption_report.get("classification") or "")
-            reconciliation_after_entry = _wait_for_reconciliation(
-                repo_root=repo_root,
-                stage="after_entry",
-                max_wait_seconds=max_wait_seconds,
-                reader=reconciliation_reader,
-                predicate=lambda payload: _reconciliation_ok(payload) and _lifecycle_open_matches_lane(payload, lane),
-            )
             lifecycle_open_result = (
                 "LIFECYCLE_OPEN_MATCHED"
                 if adoption_classification == "TRACK_B_PAPER_LIFECYCLE_ADOPTION_APPLIED"
@@ -2115,32 +2183,8 @@ def build_single_lane_apply_report(
                 classification = "LEAK_TEST_PASS_BLOCKED_SAFELY"
                 reconciliation_after_exit = reconciliation_reader(repo_root, "entry_unknown_before_submit")
         else:
-            post_submit_broker_state_refresher(repo_root, "entry_filled_before_lifecycle_adoption")
-            adoption_report = lifecycle_adoption_runner(
-                repo_root=repo_root,
-                lane=lane,
-                entry_result=entry_result,
-            )
-            adoption_classification = str(adoption_report.get("classification") or "")
-            reconciliation_after_entry = _wait_for_reconciliation(
-                repo_root=repo_root,
-                stage="after_entry",
-                max_wait_seconds=max_wait_seconds,
-                reader=reconciliation_reader,
-                predicate=lambda payload: _reconciliation_ok(payload) and _lifecycle_open_matches_lane(payload, lane),
-            )
-            lifecycle_open_result = (
-                "LIFECYCLE_OPEN_MATCHED"
-                if adoption_classification == "TRACK_B_PAPER_LIFECYCLE_ADOPTION_APPLIED"
-                and _reconciliation_ok(reconciliation_after_entry)
-                and _lifecycle_open_matches_lane(reconciliation_after_entry, lane)
-                else "LIFECYCLE_OPEN_GAP"
-            )
-            if lifecycle_open_result != "LIFECYCLE_OPEN_MATCHED":
-                classification = "LEAK_TEST_ENTRY_FILL_LIFECYCLE_GAP"
-            elif not force_exit_after_entry:
-                classification = "LEAK_TEST_PASS_CONCURRENT_OPEN"
-            else:
+            _adopt_unknown_entry_and_optionally_exit()
+            if lifecycle_open_result == "LIFECYCLE_OPEN_MATCHED" and force_exit_after_entry and exit_result is None:
                 lifecycle_id = _lifecycle_id_for_lane(reconciliation_after_entry, lane)
                 exit_action = _close_action_for_entry(entry_action)
                 exit_intent_type = _intent_type_for_action(exit_action, close=True)
