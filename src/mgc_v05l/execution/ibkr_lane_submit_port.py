@@ -305,6 +305,8 @@ def _map_bridge_classification(classification: str) -> str:
         return "PAPER_LANE_ORDER_FILLED"
     if normalized == "PAPER_STRATEGY_ORDER_WORKING":
         return "PAPER_LANE_ORDER_WORKING"
+    if normalized == "PAPER_STRATEGY_ORDER_NOT_FILLED_CANCELLED":
+        return "PAPER_LANE_ORDER_NOT_FILLED_CANCELLED"
     if normalized == "PAPER_STRATEGY_ORDER_REJECTED":
         return "PAPER_LANE_ORDER_REJECTED"
     if normalized == "PAPER_STRATEGY_NEEDS_MANUAL_REVIEW":
