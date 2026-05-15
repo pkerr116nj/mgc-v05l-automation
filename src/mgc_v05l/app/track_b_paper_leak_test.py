@@ -1953,6 +1953,97 @@ def build_single_lane_apply_report(
                 reconciliation_after_exit = None
                 exit_policy = None
                 exit_reason = None
+        def _adopt_unknown_entry_and_optionally_exit() -> None:
+            nonlocal classification
+            nonlocal lifecycle_open_result
+            nonlocal reconciliation_after_entry
+            nonlocal exit_result
+            nonlocal lifecycle_close_result
+            nonlocal reconciliation_after_exit
+            nonlocal exit_policy
+            nonlocal exit_reason
+            adoption_report = lifecycle_adoption_runner(
+                repo_root=repo_root,
+                lane=lane,
+                entry_result=entry_result,
+            )
+            adoption_classification = str(adoption_report.get("classification") or "")
+            reconciliation_after_entry = _wait_for_reconciliation(
+                repo_root=repo_root,
+                stage="after_entry",
+                max_wait_seconds=max_wait_seconds,
+                reader=reconciliation_reader,
+                predicate=lambda payload: _reconciliation_ok(payload) and _lifecycle_open_matches_lane(payload, lane),
+            )
+            lifecycle_open_result = (
+                "LIFECYCLE_OPEN_MATCHED"
+                if adoption_classification == "TRACK_B_PAPER_LIFECYCLE_ADOPTION_APPLIED"
+                and _reconciliation_ok(reconciliation_after_entry)
+                and _lifecycle_open_matches_lane(reconciliation_after_entry, lane)
+                else "LIFECYCLE_OPEN_GAP"
+            )
+            if lifecycle_open_result != "LIFECYCLE_OPEN_MATCHED":
+                classification = "LEAK_TEST_ENTRY_FILL_LIFECYCLE_GAP"
+                return
+            if not force_exit_after_entry:
+                classification = "LEAK_TEST_PASS_CONCURRENT_OPEN"
+                reconciliation_after_exit = reconciliation_after_entry
+                return
+            lifecycle_id = _lifecycle_id_for_lane(reconciliation_after_entry, lane)
+            exit_action = _close_action_for_entry(entry_action)
+            exit_intent_type = _intent_type_for_action(exit_action, close=True)
+            exit_policy = "GUARDED_PAPER_CLOSE"
+            exit_reason = "LEAK_TEST_CONTROLLED_EXIT"
+            exit_config = _bridge_config_for_apply(
+                repo_root=repo_root,
+                lane=lane,
+                action=exit_action,
+                intent_type=exit_intent_type,
+                reason=exit_reason,
+                max_wait_seconds=max_wait_seconds,
+                safety=dry_run_report.safety,
+                authorization_validation=authorization_validation,
+                lifecycle_id=lifecycle_id,
+            )
+            exit_result = _order_result_from_bridge(
+                phase="exit",
+                route_result=guarded_route_runner(exit_config),
+            )
+            if exit_result.classification == "REJECTED":
+                classification = "LEAK_TEST_EXIT_REJECTED"
+                reconciliation_after_exit = reconciliation_reader(repo_root, "exit_rejected")
+            elif exit_result.classification in {"BLOCKED", "NOT_FILLED_CANCELLED"}:
+                if exit_result.submit_attempted and exit_result.classification == "BLOCKED":
+                    reconciliation_after_exit = post_submit_broker_state_refresher(repo_root, "exit_blocked_post_submit")
+                    classification = _unknown_post_submit_classification(reconciliation_after_exit)
+                else:
+                    classification = "LEAK_TEST_EXIT_NOT_FILLED_CANCELLED"
+                    reconciliation_after_exit = reconciliation_reader(repo_root, "exit_not_filled_cancelled")
+            elif exit_result.classification != "FILLED":
+                if exit_result.submit_attempted:
+                    reconciliation_after_exit = post_submit_broker_state_refresher(repo_root, "exit_unknown_post_submit")
+                    classification = _unknown_post_submit_classification(reconciliation_after_exit)
+                else:
+                    classification = "LEAK_TEST_EXIT_NOT_FILLED_CANCELLED"
+                    reconciliation_after_exit = reconciliation_reader(repo_root, "exit_unknown_before_submit")
+            else:
+                reconciliation_after_exit = _wait_for_reconciliation(
+                    repo_root=repo_root,
+                    stage="after_exit",
+                    max_wait_seconds=max_wait_seconds,
+                    reader=reconciliation_reader,
+                    predicate=_reconciliation_is_flat,
+                )
+                lifecycle_close_result = (
+                    "LIFECYCLE_CLOSED_FLAT"
+                    if _reconciliation_is_flat(reconciliation_after_exit)
+                    else "LIFECYCLE_CLOSE_GAP"
+                )
+                classification = (
+                    "LEAK_TEST_PASS_FULL_ROUND_TRIP"
+                    if lifecycle_close_result == "LIFECYCLE_CLOSED_FLAT"
+                    else "LEAK_TEST_EXIT_FILL_LIFECYCLE_GAP"
+                )
         if not mutation_performed and classification in {
             "LEAK_TEST_AUTHORIZATION_MISSING",
             "LEAK_TEST_AUTHORIZATION_EXPIRED",
@@ -1969,6 +2060,8 @@ def build_single_lane_apply_report(
             if entry_result.submit_attempted:
                 reconciliation_after_exit = post_submit_broker_state_refresher(repo_root, "entry_blocked_post_submit")
                 classification = _unknown_post_submit_classification(reconciliation_after_exit)
+                if classification == "LEAK_TEST_ENTRY_BROKER_FILLED_BUT_RESULT_UNKNOWN":
+                    _adopt_unknown_entry_and_optionally_exit()
             else:
                 classification = "LEAK_TEST_PASS_BLOCKED_SAFELY"
                 reconciliation_after_exit = reconciliation_reader(repo_root, "entry_blocked")
@@ -1982,6 +2075,8 @@ def build_single_lane_apply_report(
             if entry_result.submit_attempted:
                 reconciliation_after_exit = post_submit_broker_state_refresher(repo_root, "entry_unknown_post_submit")
                 classification = _unknown_post_submit_classification(reconciliation_after_exit)
+                if classification == "LEAK_TEST_ENTRY_BROKER_FILLED_BUT_RESULT_UNKNOWN":
+                    _adopt_unknown_entry_and_optionally_exit()
             else:
                 classification = "LEAK_TEST_PASS_BLOCKED_SAFELY"
                 reconciliation_after_exit = reconciliation_reader(repo_root, "entry_unknown_before_submit")

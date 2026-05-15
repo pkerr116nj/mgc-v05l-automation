@@ -181,6 +181,103 @@ def test_gc_leak_test_lifecycle_adoption_refuses_exact_identity_mismatch(tmp_pat
     assert _read_jsonl(lane_dir / "fills.jsonl") == []
 
 
+def test_gc_leak_test_unknown_after_submit_adopts_partial_broker_confirmed_fill(tmp_path: Path) -> None:
+    repo = _write_gc_leak_test_evidence(tmp_path)
+    bridge_path = repo / "outputs/reports/track_b_paper_leak_test/atp_companion_v1_gc_asia_us_production_track_selective_v1/ibkr_paper_strategy_bridge_report.json"
+    bridge = _read_json(bridge_path)
+    bridge["classification"] = "PAPER_STRATEGY_NEEDS_MANUAL_REVIEW"
+    bridge["delegated_result"] = {
+        "classification": "PAPER_ORDER_UNKNOWN_NEEDS_MANUAL_TWS_REVIEW",
+        "report": {
+            "classification": "PAPER_ORDER_UNKNOWN_NEEDS_MANUAL_TWS_REVIEW",
+            "submit_cancel_lifecycle": {
+                "status": "manual_confirmation_unavailable",
+                "submitted_order_id": 4,
+                "manual_confirmation": {"state": "SUBMIT_SENT_AWAITING_TWS_MANUAL_CONFIRMATION"},
+                "open_order_after_submit": {"open_order_count": 0, "open_orders": []},
+            },
+        },
+    }
+    bridge["intent"]["intent_id"] = "fe71aeca-0141-460a-9fb7-3be1c27be2c5"
+    bridge["entry_execution_pricing"]["limit_price"] = 4556.0
+    bridge["entry_execution_pricing"]["runtime_last_or_close"] = 4555.9
+    _write_json(bridge_path, bridge)
+    broker_path = repo / "outputs/reports/ibkr_read_only_verification/ibkr_positions_snapshot.json"
+    broker = _read_json(broker_path)
+    broker["positions"][0]["average_cost"] = "455512.52"
+    broker["positions"][0]["updated_at"] = "2026-05-15T12:00:34.123456+00:00"
+    _write_json(broker_path, broker)
+
+    result = run_track_b_paper_lifecycle_adoption(
+        config=LifecycleAdoptionConfig(
+            repo_root=repo,
+            lane_id="atp_companion_v1_gc_asia_us_production_track_selective_v1",
+            symbol="GC",
+            local_symbol="GCM6",
+            expiry="20260626",
+            bridge_root=Path("outputs/reports/track_b_paper_leak_test"),
+            allow_leak_test_synthetic_intent=True,
+            expected_broker_order_id="4",
+            apply=True,
+        ),
+        now=_now(),
+    )
+
+    assert result.classification == "TRACK_B_PAPER_LIFECYCLE_ADOPTION_APPLIED"
+    lane_dir = repo / "outputs/probationary_pattern_engine/paper_session/lanes/atp_companion_v1_gc_asia_us_production_track_selective_v1"
+    fill_rows = _read_jsonl(lane_dir / "fills.jsonl")
+    assert len(fill_rows) == 1
+    assert fill_rows[0]["broker_order_id"] == "4"
+    assert fill_rows[0]["fill_price"] == "4555.1252"
+    assert fill_rows[0]["fill_price_source"] == "BROKER_POSITION_AVERAGE_PRICE"
+    assert fill_rows[0]["identity_completeness"] == "PARTIAL"
+    assert fill_rows[0]["missing_broker_identity_fields"] == ["client_id", "perm_id", "execution_id"]
+    assert fill_rows[0]["evidence_classification"] == "LEAK_TEST_BROKER_POSITION_CONFIRMED_PARTIAL_IDENTITY"
+    assert fill_rows[0]["leak_test"] is True
+    assert fill_rows[0]["review_required"] is False
+    live_positions = _read_json(repo / "outputs/track_b_execution_core/paper_trade_ledger/latest_track_b_live_position_status.json")
+    assert live_positions["open_position_count"] == 1
+    assert live_positions["positions_by_instrument"]["GC-202606"]["entry_order_id"] == "4"
+
+
+def test_gc_leak_test_partial_adoption_refuses_order_id_mismatch(tmp_path: Path) -> None:
+    repo = _write_gc_leak_test_evidence(tmp_path)
+    bridge_path = repo / "outputs/reports/track_b_paper_leak_test/atp_companion_v1_gc_asia_us_production_track_selective_v1/ibkr_paper_strategy_bridge_report.json"
+    bridge = _read_json(bridge_path)
+    bridge["classification"] = "PAPER_STRATEGY_NEEDS_MANUAL_REVIEW"
+    bridge["delegated_result"] = {
+        "classification": "PAPER_ORDER_UNKNOWN_NEEDS_MANUAL_TWS_REVIEW",
+        "report": {
+            "classification": "PAPER_ORDER_UNKNOWN_NEEDS_MANUAL_TWS_REVIEW",
+            "submit_cancel_lifecycle": {
+                "status": "manual_confirmation_unavailable",
+                "submitted_order_id": 4,
+            },
+        },
+    }
+    _write_json(bridge_path, bridge)
+
+    result = run_track_b_paper_lifecycle_adoption(
+        config=LifecycleAdoptionConfig(
+            repo_root=repo,
+            lane_id="atp_companion_v1_gc_asia_us_production_track_selective_v1",
+            symbol="GC",
+            local_symbol="GCM6",
+            expiry="20260626",
+            bridge_root=Path("outputs/reports/track_b_paper_leak_test"),
+            allow_leak_test_synthetic_intent=True,
+            expected_broker_order_id="5",
+            apply=True,
+        ),
+        now=_now(),
+    )
+
+    assert result.classification == "TRACK_B_PAPER_LIFECYCLE_ADOPTION_REFUSED"
+    assert "Bridge submitted order id does not match expected broker_order_id." in result.report["failures"]
+    lane_dir = repo / "outputs/probationary_pattern_engine/paper_session/lanes/atp_companion_v1_gc_asia_us_production_track_selective_v1"
+    assert _read_jsonl(lane_dir / "fills.jsonl") == []
+
+
 def _write_pl_evidence(tmp_path: Path, *, broker_local_symbol: str = "PLN6") -> Path:
     repo = tmp_path
     lane_dir = repo / "outputs/probationary_pattern_engine/paper_session/lanes/atp_companion_v1_pl_asia_us"

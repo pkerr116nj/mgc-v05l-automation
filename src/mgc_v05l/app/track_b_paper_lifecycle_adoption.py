@@ -113,8 +113,11 @@ def run_track_b_paper_lifecycle_adoption(
         symbol=config.symbol,
         failures=failures,
     )
+    broker_average_price = _broker_average_price(broker_position)
     bridge_evidence = _extract_bridge_evidence(
         bridge_report=bridge_report,
+        broker_position=broker_position,
+        broker_average_price=broker_average_price,
         lane_id=config.lane_id,
         account_id=config.account_id,
         symbol=config.symbol,
@@ -130,7 +133,6 @@ def run_track_b_paper_lifecycle_adoption(
         failures=failures,
     )
 
-    broker_average_price = _broker_average_price(broker_position)
     fill_price = _decimal(bridge_evidence.get("fill_price")) if bridge_evidence else None
     cost_basis_adjustment = None
     if broker_average_price is not None and fill_price is not None:
@@ -370,9 +372,17 @@ def _synthetic_leak_test_intent_from_bridge(
         return None
     if caller_metadata.get("leak_test") is not True and "TRACK_B_LEAK_TEST" not in set(intent_payload.get("risk_tags") or []):
         return None
-    if str(bridge_report.get("classification") or "") != "PAPER_STRATEGY_ORDER_FILLED":
+    leak_test_fill_classes = {
+        "PAPER_STRATEGY_ORDER_FILLED",
+        "PAPER_STRATEGY_NEEDS_MANUAL_REVIEW",
+    }
+    delegated_fill_classes = {
+        "PAPER_ORDER_FILLED",
+        "PAPER_ORDER_UNKNOWN_NEEDS_MANUAL_TWS_REVIEW",
+    }
+    if str(bridge_report.get("classification") or "") not in leak_test_fill_classes:
         return None
-    if str(delegated.get("classification") or "") != "PAPER_ORDER_FILLED":
+    if str(delegated.get("classification") or "") not in delegated_fill_classes:
         return None
     if str(intent_payload.get("strategy_id") or "") != lane_id:
         failures.append("Synthetic leak-test intent bridge lane mismatch.")
@@ -433,6 +443,8 @@ def _validate_route_identity(
 def _extract_bridge_evidence(
     *,
     bridge_report: Mapping[str, Any],
+    broker_position: Mapping[str, Any] | None,
+    broker_average_price: Decimal | None,
     lane_id: str,
     account_id: str,
     symbol: str,
@@ -450,6 +462,43 @@ def _extract_bridge_evidence(
     if not bridge_report:
         failures.append("Missing bridge report evidence.")
         return None
+    delegated = bridge_report.get("delegated_result") if isinstance(bridge_report.get("delegated_result"), Mapping) else {}
+    delegated_report = delegated.get("report") if isinstance(delegated.get("report"), Mapping) else {}
+    lifecycle = (
+        delegated_report.get("submit_cancel_lifecycle")
+        if isinstance(delegated_report.get("submit_cancel_lifecycle"), Mapping)
+        else {}
+    )
+    latest_status = lifecycle.get("latest_order_status") if isinstance(lifecycle.get("latest_order_status"), Mapping) else {}
+    executions = _bridge_execution_rows(lifecycle)
+    if _is_partial_leak_test_broker_position_evidence(
+        bridge_report=bridge_report,
+        delegated=delegated,
+        lifecycle=lifecycle,
+        latest_status=latest_status,
+        executions=executions,
+    ):
+        return _extract_partial_leak_test_broker_position_evidence(
+            bridge_report=bridge_report,
+            delegated=delegated,
+            lifecycle=lifecycle,
+            latest_status=latest_status,
+            executions=executions,
+            broker_position=broker_position,
+            broker_average_price=broker_average_price,
+            lane_id=lane_id,
+            account_id=account_id,
+            symbol=symbol,
+            local_symbol=local_symbol,
+            expiry=expiry,
+            quantity=quantity,
+            expected_broker_order_id=expected_broker_order_id,
+            expected_client_id=expected_client_id,
+            expected_perm_id=expected_perm_id,
+            expected_exec_id=expected_exec_id,
+            expected_fill_price=expected_fill_price,
+            failures=failures,
+        )
     if str(bridge_report.get("classification") or "") != "PAPER_STRATEGY_ORDER_FILLED":
         failures.append("Bridge report classification is not PAPER_STRATEGY_ORDER_FILLED.")
     environment = bridge_report.get("environment") if isinstance(bridge_report.get("environment"), Mapping) else {}
@@ -478,16 +527,8 @@ def _extract_bridge_evidence(
     if not any(_contract_matches(item, symbol=symbol, local_symbol=local_symbol, expiry=expiry) for item in contract_candidates):
         failures.append("Bridge contract evidence does not match symbol/localSymbol/expiry.")
 
-    delegated = bridge_report.get("delegated_result") if isinstance(bridge_report.get("delegated_result"), Mapping) else {}
     if str(delegated.get("classification") or "") != "PAPER_ORDER_FILLED":
         failures.append("Delegated bridge classification is not PAPER_ORDER_FILLED.")
-    delegated_report = delegated.get("report") if isinstance(delegated.get("report"), Mapping) else {}
-    lifecycle = (
-        delegated_report.get("submit_cancel_lifecycle")
-        if isinstance(delegated_report.get("submit_cancel_lifecycle"), Mapping)
-        else {}
-    )
-    latest_status = lifecycle.get("latest_order_status") if isinstance(lifecycle.get("latest_order_status"), Mapping) else {}
     if str(latest_status.get("status") or "").upper() != "FILLED":
         failures.append("Bridge latest order status is not FILLED.")
     if _decimal(latest_status.get("filled")) != quantity:
@@ -503,13 +544,6 @@ def _extract_bridge_evidence(
     if expected_perm_id is not None and _decimal(latest_status.get("perm_id")) != Decimal(expected_perm_id):
         failures.append("Bridge latest perm id does not match expected perm_id.")
 
-    executions = []
-    for source in (
-        lifecycle.get("executions_after_submit"),
-        _nested(lifecycle, "fill_verification", "executions_after_submit"),
-    ):
-        if isinstance(source, list):
-            executions.extend(dict(item) for item in source if isinstance(item, Mapping))
     matching_executions: dict[str, dict[str, Any]] = {}
     for execution in executions:
         if str(execution.get("account_id") or "") != account_id:
@@ -562,6 +596,202 @@ def _extract_bridge_evidence(
     }
 
 
+def _is_partial_leak_test_broker_position_evidence(
+    *,
+    bridge_report: Mapping[str, Any],
+    delegated: Mapping[str, Any],
+    lifecycle: Mapping[str, Any],
+    latest_status: Mapping[str, Any],
+    executions: Sequence[Mapping[str, Any]],
+) -> bool:
+    intent_payload = bridge_report.get("intent") if isinstance(bridge_report.get("intent"), Mapping) else {}
+    caller_metadata = bridge_report.get("caller_metadata") if isinstance(bridge_report.get("caller_metadata"), Mapping) else {}
+    if caller_metadata.get("leak_test") is not True and "TRACK_B_LEAK_TEST" not in set(intent_payload.get("risk_tags") or []):
+        return False
+    if str(bridge_report.get("classification") or "") == "PAPER_STRATEGY_ORDER_FILLED" and str(delegated.get("classification") or "") == "PAPER_ORDER_FILLED":
+        return False
+    known_submit = any(_bridge_known_order_ids(lifecycle=lifecycle, latest_status=latest_status, delegated=delegated))
+    return (
+        str(delegated.get("classification") or "") == "PAPER_ORDER_UNKNOWN_NEEDS_MANUAL_TWS_REVIEW"
+        or str(bridge_report.get("classification") or "") == "PAPER_STRATEGY_NEEDS_MANUAL_REVIEW"
+        or known_submit
+        or bool(executions)
+    )
+
+
+def _extract_partial_leak_test_broker_position_evidence(
+    *,
+    bridge_report: Mapping[str, Any],
+    delegated: Mapping[str, Any],
+    lifecycle: Mapping[str, Any],
+    latest_status: Mapping[str, Any],
+    executions: Sequence[Mapping[str, Any]],
+    broker_position: Mapping[str, Any] | None,
+    broker_average_price: Decimal | None,
+    lane_id: str,
+    account_id: str,
+    symbol: str,
+    local_symbol: str,
+    expiry: str,
+    quantity: Decimal,
+    expected_broker_order_id: str | None,
+    expected_client_id: int | None,
+    expected_perm_id: int | None,
+    expected_exec_id: str | None,
+    expected_fill_price: Decimal | None,
+    failures: list[str],
+) -> dict[str, Any] | None:
+    local_failures: list[str] = []
+    if broker_position is None:
+        local_failures.append("Partial leak-test adoption requires exact broker position truth.")
+    if expected_broker_order_id is None:
+        local_failures.append("Partial leak-test adoption requires expected broker_order_id evidence.")
+    environment = bridge_report.get("environment") if isinstance(bridge_report.get("environment"), Mapping) else {}
+    if str(environment.get("mode") or "").upper() != "PAPER":
+        local_failures.append("Bridge environment is not PAPER.")
+    if str(bridge_report.get("selected_account_id") or "") != account_id:
+        local_failures.append("Bridge selected account does not match expected PAPER account.")
+    strategy_identity = (
+        bridge_report.get("strategy_identity") if isinstance(bridge_report.get("strategy_identity"), Mapping) else {}
+    )
+    if str(strategy_identity.get("strategy_id") or "") != lane_id:
+        local_failures.append("Bridge strategy identity does not match lane_id.")
+    intent_payload = bridge_report.get("intent") if isinstance(bridge_report.get("intent"), Mapping) else {}
+    caller_metadata = bridge_report.get("caller_metadata") if isinstance(bridge_report.get("caller_metadata"), Mapping) else {}
+    if caller_metadata.get("leak_test") is not True and "TRACK_B_LEAK_TEST" not in set(intent_payload.get("risk_tags") or []):
+        local_failures.append("Partial adoption is restricted to Track B leak-test bridge evidence.")
+    if str(intent_payload.get("strategy_id") or "") != lane_id:
+        local_failures.append("Bridge intent strategy_id does not match lane_id.")
+    if str(intent_payload.get("symbol") or "").upper() != symbol.upper():
+        local_failures.append("Bridge intent symbol mismatch.")
+    if _decimal(intent_payload.get("quantity")) != quantity:
+        local_failures.append("Bridge intent quantity mismatch.")
+    exact_contract = _nested(bridge_report, "exact_contract_report", "exact_contract")
+    qualified_contract = _nested(bridge_report, "qualified_contract_report", "qualified_contract")
+    preview_contract = _nested(bridge_report, "delegated_result", "report", "preview_payload", "contract")
+    contract_candidates = [item for item in (exact_contract, qualified_contract, preview_contract) if isinstance(item, Mapping)]
+    if not any(_contract_matches(item, symbol=symbol, local_symbol=local_symbol, expiry=expiry) for item in contract_candidates):
+        local_failures.append("Bridge contract evidence does not match symbol/localSymbol/expiry.")
+    known_order_ids = _bridge_known_order_ids(lifecycle=lifecycle, latest_status=latest_status, delegated=delegated)
+    if expected_broker_order_id is not None and known_order_ids and str(expected_broker_order_id) not in known_order_ids:
+        local_failures.append("Bridge submitted order id does not match expected broker_order_id.")
+    known_client_id = _first_nonempty(
+        latest_status.get("client_id"),
+        lifecycle.get("client_id"),
+        lifecycle.get("submitted_client_id"),
+    )
+    if expected_client_id is not None and known_client_id is not None and _decimal(known_client_id) != Decimal(expected_client_id):
+        local_failures.append("Bridge latest client id does not match expected client_id.")
+    known_perm_id = _first_nonempty(
+        latest_status.get("perm_id"),
+        lifecycle.get("perm_id"),
+        lifecycle.get("submitted_perm_id"),
+    )
+    if expected_perm_id is not None and known_perm_id is not None and _decimal(known_perm_id) != Decimal(expected_perm_id):
+        local_failures.append("Bridge latest perm id does not match expected perm_id.")
+    matching_executions = [
+        dict(row)
+        for row in executions
+        if str(row.get("account_id") or "") == account_id
+        and str(row.get("symbol") or "").upper() == symbol.upper()
+        and _decimal(row.get("quantity")) == quantity
+    ]
+    execution = matching_executions[-1] if matching_executions else {}
+    known_exec_id = execution.get("execution_id")
+    if expected_exec_id is not None and known_exec_id is not None and str(known_exec_id) != str(expected_exec_id):
+        local_failures.append("Bridge execution id does not match expected exec_id.")
+    expected_fill_decimal = _decimal(expected_fill_price)
+    execution_price = _decimal(execution.get("price") or latest_status.get("avg_fill_price") or latest_status.get("last_fill_price"))
+    if expected_fill_decimal is not None and execution_price is not None and execution_price != expected_fill_decimal:
+        local_failures.append("Bridge execution fill price does not match expected fill_price.")
+    if local_failures:
+        failures.extend(local_failures)
+        return None
+    contract = next(
+        (dict(item) for item in contract_candidates if _contract_matches(item, symbol=symbol, local_symbol=local_symbol, expiry=expiry)),
+        {},
+    )
+    con_id = contract.get("con_id") or contract.get("qualified_contract_identifier")
+    broker_order_id = str(expected_broker_order_id or next(iter(known_order_ids), "") or "")
+    client_id = expected_client_id if expected_client_id is not None else known_client_id
+    perm_id = expected_perm_id if expected_perm_id is not None else known_perm_id
+    execution_id = expected_exec_id if expected_exec_id is not None else known_exec_id
+    fill_price = expected_fill_decimal or execution_price or broker_average_price
+    missing_fields = [
+        field
+        for field, value in (
+            ("client_id", client_id),
+            ("perm_id", perm_id),
+            ("execution_id", execution_id),
+        )
+        if value in {None, ""}
+    ]
+    return {
+        "account_id": account_id,
+        "symbol": symbol,
+        "local_symbol": local_symbol,
+        "expiry": expiry,
+        "contract_month": str(preview_contract.get("expiry") or expiry[:6]) if isinstance(preview_contract, Mapping) else expiry[:6],
+        "multiplier": str(contract.get("multiplier") or broker_position.get("multiplier") or ""),
+        "con_id": con_id,
+        "broker_order_id": broker_order_id,
+        "perm_id": perm_id,
+        "client_id": client_id,
+        "execution_id": execution_id,
+        "fill_price": _decimal_text(fill_price) or "",
+        "fill_price_source": "BROKER_POSITION_AVERAGE_PRICE" if execution_price is None and expected_fill_decimal is None else "BRIDGE_OR_OPERATOR_EVIDENCE",
+        "fill_timestamp": execution.get("executed_at") or latest_status.get("updated_at") or broker_position.get("updated_at"),
+        "order_status_updated_at": latest_status.get("updated_at"),
+        "latest_order_status": dict(latest_status),
+        "selected_execution": dict(execution),
+        "entry_execution_intent": _nested(bridge_report, "entry_execution_pricing", "entry_execution_intent"),
+        "entry_price_source": _nested(bridge_report, "entry_execution_pricing", "execution_price_source"),
+        "leak_test": True,
+        "authorization_digest": _nested(bridge_report, "caller_metadata", "authorization_digest"),
+        "evidence_classification": "LEAK_TEST_BROKER_POSITION_CONFIRMED_PARTIAL_IDENTITY",
+        "broker_position_confirmed": True,
+        "identity_completeness": "PARTIAL" if missing_fields else "COMPLETE",
+        "missing_broker_identity_fields": missing_fields,
+        "delegated_classification": delegated.get("classification"),
+        "bridge_classification": bridge_report.get("classification"),
+    }
+
+
+def _bridge_execution_rows(lifecycle: Mapping[str, Any]) -> list[dict[str, Any]]:
+    executions: list[dict[str, Any]] = []
+    for source in (
+        lifecycle.get("executions_after_submit"),
+        _nested(lifecycle, "fill_verification", "executions_after_submit"),
+    ):
+        if isinstance(source, list):
+            executions.extend(dict(item) for item in source if isinstance(item, Mapping))
+    return executions
+
+
+def _bridge_known_order_ids(
+    *,
+    lifecycle: Mapping[str, Any],
+    latest_status: Mapping[str, Any],
+    delegated: Mapping[str, Any],
+) -> set[str]:
+    values = (
+        lifecycle.get("submitted_order_id"),
+        lifecycle.get("broker_order_id"),
+        lifecycle.get("order_id"),
+        latest_status.get("order_id"),
+        delegated.get("submitted_order_id"),
+        delegated.get("order_id"),
+    )
+    return {str(value) for value in values if value not in {None, ""}}
+
+
+def _first_nonempty(*values: Any) -> Any:
+    for value in values:
+        if value not in {None, ""}:
+            return value
+    return None
+
+
 def _build_fill_payload(
     *,
     config: LifecycleAdoptionConfig,
@@ -578,7 +808,7 @@ def _build_fill_payload(
     order_intent_id = str(intent.get("order_intent_id") or config.order_intent_id or "")
     intent_type = str(intent.get("intent_type") or "BUY_TO_OPEN").upper()
     action = "BUY" if intent_type == "BUY_TO_OPEN" else "SELL"
-    fill_price = str(bridge_evidence.get("fill_price") or "")
+    fill_price = str(bridge_evidence.get("fill_price") or _decimal_text(broker_average_price) or "")
     fill_timestamp = str(bridge_evidence.get("fill_timestamp") or bridge_evidence.get("order_status_updated_at") or now.isoformat())
     strategy_id = str(intent.get("standalone_strategy_id") or intent.get("strategy_id") or config.lane_id)
     return {
@@ -616,6 +846,11 @@ def _build_fill_payload(
         "entry_execution_intent": bridge_evidence.get("entry_execution_intent"),
         "entry_price_source": bridge_evidence.get("entry_price_source"),
         "execution_price_source": bridge_evidence.get("entry_price_source"),
+        "fill_price_source": bridge_evidence.get("fill_price_source") or "BRIDGE_EXECUTION_EVIDENCE",
+        "evidence_classification": bridge_evidence.get("evidence_classification"),
+        "identity_completeness": bridge_evidence.get("identity_completeness") or "COMPLETE",
+        "missing_broker_identity_fields": bridge_evidence.get("missing_broker_identity_fields") or [],
+        "broker_position_confirmed": bool(bridge_evidence.get("broker_position_confirmed")),
         "authorization_digest": bridge_evidence.get("authorization_digest"),
         "broker_status": "FILLED",
         "broker_position_quantity": str(broker_position.get("quantity") or ""),

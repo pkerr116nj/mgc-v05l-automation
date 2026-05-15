@@ -984,14 +984,18 @@ def test_blocked_entry_after_submit_requires_broker_refresh_and_is_not_safe(tmp_
         guarded_route_runner=lambda _config: _blocked_after_submit_bridge_result(),
         readiness_checker=_ready_precheck,
         post_submit_broker_state_refresher=_refresh,
+        lifecycle_adoption_runner=_adoption_refused,
+        reconciliation_reader=_reader_for({"after_entry": _clean_flat_reconciliation()}),
+        max_wait_seconds=0,
     )
 
-    assert report.result_classification == "LEAK_TEST_ENTRY_BROKER_FILLED_BUT_RESULT_UNKNOWN"
+    assert report.result_classification == "LEAK_TEST_ENTRY_FILL_LIFECYCLE_GAP"
     assert refresh_calls == ["entry_blocked_post_submit"]
     assert report.apply_result is not None
     assert report.apply_result.entry is not None
     assert report.apply_result.entry.classification == "BLOCKED"
     assert report.apply_result.entry.submit_attempted is True
+    assert report.apply_result.lifecycle_open_result == "LIFECYCLE_OPEN_GAP"
 
 
 def test_unknown_result_before_submit_can_block_safely_without_refresh(tmp_path: Path) -> None:
@@ -1060,11 +1064,63 @@ def test_unknown_after_submit_with_broker_position_is_not_safe_block(tmp_path: P
             lifecycle_open_position_count=0,
             track_b_broker_positions=[{"symbol": "MGC", "local_symbol": "MGCM6", "quantity": "1"}],
         ),
+        lifecycle_adoption_runner=_adoption_refused,
+        reconciliation_reader=_reader_for({"after_entry": _clean_flat_reconciliation()}),
+        max_wait_seconds=0,
     )
 
-    assert report.result_classification == "LEAK_TEST_ENTRY_BROKER_FILLED_BUT_RESULT_UNKNOWN"
+    assert report.result_classification == "LEAK_TEST_ENTRY_FILL_LIFECYCLE_GAP"
     assert report.apply_result is not None
+    assert report.apply_result.lifecycle_open_result == "LIFECYCLE_OPEN_GAP"
     assert report.apply_result.exit is None
+
+
+def test_unknown_after_submit_with_broker_position_adopts_and_runs_exit(tmp_path: Path) -> None:
+    calls = []
+    adoption_calls = []
+
+    def _runner(config):
+        calls.append(config)
+        return _unknown_bridge_result(submit_attempted=True) if len(calls) == 1 else _bridge_result("PAPER_STRATEGY_ORDER_FILLED")
+
+    def _adopt(**kwargs):
+        adoption_calls.append(kwargs["entry_result"])
+        return _adoption_applied()
+
+    report = build_single_lane_apply_report(
+        repo_root=REPO_ROOT,
+        lane_id=LANE_ID,
+        reconciliation=_clean_flat_reconciliation(),
+        operator_status=_operator_status(),
+        runtime_command=_runtime_command(),
+        authorization_path=_authorization_path(tmp_path),
+        guarded_route_runner=_runner,
+        readiness_checker=_ready_precheck,
+        post_submit_broker_state_refresher=lambda _repo_root, _stage: _clean_flat_reconciliation(
+            broker_reconciled=False,
+            classification="TRACK_B_PAPER_BROKER_RECONCILIATION_BLOCKED",
+            track_b_broker_position_count=1,
+            lifecycle_open_position_count=0,
+            track_b_broker_positions=[{"symbol": "MNQ", "local_symbol": "MNQM6", "quantity": "1"}],
+        ),
+        lifecycle_adoption_runner=_adopt,
+        reconciliation_reader=_reader_for(
+            {
+                "after_entry": _clean_managed_position_reconciliation(symbol="MNQ", lane_id=LANE_ID),
+                "after_exit": _clean_flat_reconciliation(),
+            }
+        ),
+        max_wait_seconds=0,
+    )
+
+    assert report.result_classification == "LEAK_TEST_PASS_FULL_ROUND_TRIP"
+    assert len(calls) == 2
+    assert len(adoption_calls) == 1
+    assert adoption_calls[0].classification != "FILLED"
+    assert adoption_calls[0].submit_attempted is True
+    assert report.apply_result is not None
+    assert report.apply_result.lifecycle_open_result == "LIFECYCLE_OPEN_MATCHED"
+    assert report.apply_result.lifecycle_close_result == "LIFECYCLE_CLOSED_FLAT"
 
 
 def test_unknown_after_submit_with_open_order_is_open_order_ambiguity(tmp_path: Path) -> None:
