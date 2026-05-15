@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import argparse
+import errno
 import hashlib
 import json
+import os
 import subprocess
 import time
 from dataclasses import asdict, dataclass
@@ -135,6 +137,7 @@ class LeakTestSafetySnapshot:
     live_money_eligible: bool
     paper_proof_invoked: bool
     runtime_pid: int | None
+    runtime_pid_active: bool
     runtime_cwd: str | None
     runtime_command: str | None
     runtime_from_dev_root: bool
@@ -373,6 +376,46 @@ def _runtime_command_for_pid(pid: int | None) -> str | None:
     return command or None
 
 
+def _runtime_pid_is_active(pid: int | None) -> bool:
+    if pid is None or pid <= 0:
+        return False
+    try:
+        os.kill(pid, 0)
+    except OSError as exc:
+        if exc.errno == errno.EPERM:
+            return True
+        return False
+    return True
+
+
+def _path_equals(path_value: object, expected: Path) -> bool:
+    if not path_value:
+        return False
+    try:
+        return Path(str(path_value)).expanduser().resolve() == expected.resolve()
+    except (OSError, RuntimeError, ValueError):
+        return False
+
+
+def _documents_or_icloud_runtime_submitter_exists() -> bool:
+    try:
+        completed = subprocess.run(
+            ["ps", "-efww"],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=2,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return False
+    for line in completed.stdout.splitlines():
+        if "probationary-paper-soak" not in line:
+            continue
+        if "Documents/MGC-v05l" in line or "Mobile Documents" in line:
+            return True
+    return False
+
+
 def _duplicate_runtime_submitter_count(*, repo_root: Path, operator_status: Mapping[str, Any]) -> int:
     explicit = operator_status.get("duplicate_runtime_submitter_count")
     if explicit is not None:
@@ -501,12 +544,29 @@ def build_safety_snapshot(
     operator_payload = dict(operator_status or _read_json(repo_root / OPERATOR_STATUS_PATH))
     active_payload = dict(active_leak_test or _read_json(repo_root / ACTIVE_LEAK_TEST_PATH))
     runtime_pid = _int_value(operator_payload.get("source_runtime_pid")) or None
-    command = runtime_command if runtime_command is not None else _runtime_command_for_pid(runtime_pid)
+    artifact_command = (
+        operator_payload.get("source_runtime_command")
+        or operator_payload.get("runtime_command")
+        or " ".join(str(part) for part in operator_payload.get("source_runtime_argv", ()) if part)
+    )
+    command = str(runtime_command or artifact_command or _runtime_command_for_pid(runtime_pid) or "") or None
     runtime_cwd = operator_payload.get("source_runtime_cwd") or operator_payload.get("runtime_cwd")
+    runtime_repo_root = operator_payload.get("source_runtime_repo_root") or operator_payload.get("runtime_repo_root")
     runtime_cwd_text = str(runtime_cwd) if runtime_cwd else None
-    repo_root_text = str(repo_root)
+    repo_root_text = str(repo_root.resolve())
     command_text = str(command or "")
-    cwd_or_command = f"{runtime_cwd_text or ''} {command_text}"
+    cwd_or_repo_matches = _path_equals(runtime_cwd, repo_root) or _path_equals(runtime_repo_root, repo_root)
+    command_matches = not command_text or repo_root_text in command_text
+    nested_runtime = (
+        "Documents/MGC-v05l" in str(runtime_cwd or "")
+        or "Mobile Documents" in str(runtime_cwd or "")
+        or "Documents/MGC-v05l" in str(runtime_repo_root or "")
+        or "Mobile Documents" in str(runtime_repo_root or "")
+        or "Documents/MGC-v05l" in command_text
+        or "Mobile Documents" in command_text
+        or _documents_or_icloud_runtime_submitter_exists()
+    )
+    pid_active = _runtime_pid_is_active(runtime_pid)
     return LeakTestSafetySnapshot(
         account_id=_account_from_reconciliation(reconciliation_payload),
         classification=str(reconciliation_payload.get("classification") or "") or None,
@@ -519,10 +579,11 @@ def build_safety_snapshot(
         live_money_eligible=bool(reconciliation_payload.get("live_money_eligible") is True),
         paper_proof_invoked=bool(reconciliation_payload.get("paper_proof_invoked") is True),
         runtime_pid=runtime_pid,
+        runtime_pid_active=pid_active,
         runtime_cwd=runtime_cwd_text,
         runtime_command=command,
-        runtime_from_dev_root=repo_root_text in cwd_or_command,
-        runtime_from_documents_or_icloud=("Documents/MGC-v05l" in cwd_or_command or "Mobile Documents" in cwd_or_command),
+        runtime_from_dev_root=pid_active and cwd_or_repo_matches and command_matches,
+        runtime_from_documents_or_icloud=nested_runtime,
         duplicate_runtime_submitter_count=_duplicate_runtime_submitter_count(
             repo_root=repo_root,
             operator_status=operator_payload,
@@ -551,6 +612,8 @@ def _unresolved_state_blockers(*, repo_root: Path, safety: LeakTestSafetySnapsho
         blockers.append("paper_proof_invoked_true")
     if safety.runtime_pid is None:
         blockers.append("runtime_pid_missing")
+    elif not safety.runtime_pid_active:
+        blockers.append("runtime_pid_not_active")
     if not safety.runtime_from_dev_root:
         blockers.append("runtime_not_verified_from_dev_root")
     if safety.runtime_from_documents_or_icloud:

@@ -8356,6 +8356,37 @@ def _promote_probationary_duplicate_lane_database(path: Path) -> None:
     duplicate_path.replace(canonical_path)
 
 
+def _current_runtime_identity_payload() -> dict[str, Any]:
+    cwd = Path.cwd().resolve()
+    repo_root: str | None = None
+    for candidate in (cwd, *cwd.parents):
+        if (candidate / ".git").exists():
+            repo_root = str(candidate)
+            break
+    git_head: str | None = None
+    if repo_root is not None:
+        git_dir = Path(repo_root) / ".git"
+        head_path = git_dir / "HEAD"
+        try:
+            head_text = head_path.read_text(encoding="utf-8").strip()
+            if head_text.startswith("ref: "):
+                ref_path = git_dir / head_text.removeprefix("ref: ").strip()
+                git_head = ref_path.read_text(encoding="utf-8").strip() if ref_path.exists() else None
+            elif head_text:
+                git_head = head_text
+        except OSError:
+            git_head = None
+    argv = [str(part) for part in sys.argv]
+    return {
+        "source_runtime_pid": os.getpid(),
+        "source_runtime_cwd": str(cwd),
+        "source_runtime_repo_root": repo_root,
+        "source_runtime_command": " ".join(argv),
+        "source_runtime_argv": argv,
+        "source_runtime_git_head": git_head,
+    }
+
+
 def _write_probationary_paper_config_in_force(
     settings: StrategySettings,
     lanes: Sequence[ProbationaryPaperLaneRuntime],
@@ -8366,7 +8397,7 @@ def _write_probationary_paper_config_in_force(
     generated_at = datetime.now(timezone.utc).isoformat()
     payload = {
         "generated_at": generated_at,
-        "source_runtime_pid": os.getpid(),
+        **_current_runtime_identity_payload(),
         "active_lane_ids": [lane.spec.lane_id for lane in lanes],
         "loss_halts_disabled": bool(getattr(settings, "probationary_paper_disable_loss_halts", False)),
         "desk_halt_new_entries_loss": str(settings.probationary_paper_desk_halt_new_entries_loss),
@@ -9209,7 +9240,7 @@ def _write_probationary_paper_risk_artifacts(
         runtime_dir / "paper_risk_runtime_state.json",
         {
             "generated_at": generated_at,
-            "source_runtime_pid": os.getpid(),
+            **_current_runtime_identity_payload(),
             "session_date": risk_state.session_date,
             "loss_halts_disabled": bool(getattr(settings, "probationary_paper_disable_loss_halts", False)),
             "desk_halt_new_entries_triggered": risk_state.desk_halt_new_entries_triggered,
@@ -9401,7 +9432,7 @@ def _write_probationary_supervisor_operator_status(
     global_operator_halt = executable_lane_count > 0 and halted_lane_count == executable_lane_count
     payload = {
         "generated_at": generated_at,
-        "source_runtime_pid": os.getpid(),
+        **_current_runtime_identity_payload(),
         "active_lane_ids": [lane.spec.lane_id for lane in lanes],
         "updated_at": generated_at,
         "health": {

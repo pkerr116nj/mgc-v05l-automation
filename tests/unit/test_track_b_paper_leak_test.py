@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import hashlib
+import os
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -27,7 +28,12 @@ def _runtime_command() -> str:
 
 
 def _operator_status() -> dict[str, object]:
-    return {"source_runtime_pid": 12345}
+    return {
+        "source_runtime_pid": os.getpid(),
+        "source_runtime_cwd": str(REPO_ROOT),
+        "source_runtime_repo_root": str(REPO_ROOT),
+        "source_runtime_command": _runtime_command(),
+    }
 
 
 def _clean_flat_reconciliation(**overrides: object) -> dict[str, object]:
@@ -660,6 +666,68 @@ def test_apply_refuses_when_duplicate_runtime_submitter_exists() -> None:
 
     assert report.result_classification == "LEAK_TEST_PASS_BLOCKED_SAFELY"
     assert "duplicate_runtime_submitters" in report.lanes[0].blockers
+
+
+def test_operator_status_with_active_pid_and_dev_cwd_passes_runtime_verification() -> None:
+    report = build_single_lane_dry_run_report(
+        repo_root=REPO_ROOT,
+        lane_id=LANE_ID,
+        reconciliation=_clean_flat_reconciliation(),
+        operator_status=_operator_status(),
+    )
+
+    assert report.safety.runtime_pid_active is True
+    assert report.safety.runtime_from_dev_root is True
+    assert "runtime_not_verified_from_dev_root" not in report.lanes[0].blockers
+    assert "runtime_pid_not_active" not in report.lanes[0].blockers
+
+
+def test_operator_status_missing_cwd_blocks_runtime_verification() -> None:
+    operator_status = {
+        "source_runtime_pid": os.getpid(),
+        "source_runtime_command": _runtime_command(),
+    }
+
+    report = build_single_lane_apply_report(
+        repo_root=REPO_ROOT,
+        lane_id=LANE_ID,
+        reconciliation=_clean_flat_reconciliation(),
+        operator_status=operator_status,
+    )
+
+    assert report.result_classification == "LEAK_TEST_PASS_BLOCKED_SAFELY"
+    assert "runtime_not_verified_from_dev_root" in report.lanes[0].blockers
+
+
+def test_operator_status_dead_pid_blocks_runtime_verification() -> None:
+    report = build_single_lane_apply_report(
+        repo_root=REPO_ROOT,
+        lane_id=LANE_ID,
+        reconciliation=_clean_flat_reconciliation(),
+        operator_status={**_operator_status(), "source_runtime_pid": 99999999},
+    )
+
+    assert report.result_classification == "LEAK_TEST_PASS_BLOCKED_SAFELY"
+    assert "runtime_pid_not_active" in report.lanes[0].blockers
+
+
+def test_operator_status_documents_cwd_blocks_runtime_verification() -> None:
+    documents_root = "/Users/patrick/Documents/MGC-v05l-automation"
+    report = build_single_lane_apply_report(
+        repo_root=REPO_ROOT,
+        lane_id=LANE_ID,
+        reconciliation=_clean_flat_reconciliation(),
+        operator_status={
+            **_operator_status(),
+            "source_runtime_cwd": documents_root,
+            "source_runtime_repo_root": documents_root,
+            "source_runtime_command": f"python -m mgc_v05l.app.main probationary-paper-soak --config {documents_root}/config/base.yaml",
+        },
+    )
+
+    assert report.result_classification == "LEAK_TEST_PASS_BLOCKED_SAFELY"
+    assert "runtime_not_verified_from_dev_root" in report.lanes[0].blockers
+    assert "runtime_from_documents_or_icloud" in report.lanes[0].blockers
 
 
 def test_apply_refuses_when_lane_not_candidate() -> None:

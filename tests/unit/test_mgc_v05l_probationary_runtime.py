@@ -8945,6 +8945,10 @@ def test_supervisor_operator_status_keeps_lane_specific_halts_from_poisoning_glo
     payload = json.loads(status_path.read_text(encoding="utf-8"))
     assert payload["generated_at"]
     assert payload["source_runtime_pid"] > 0
+    assert payload["source_runtime_cwd"]
+    assert payload["source_runtime_command"]
+    assert isinstance(payload["source_runtime_argv"], list)
+    assert "source_runtime_git_head" in payload
     assert payload["active_lane_ids"] == ["mgc_lane", "gc_lane"]
     assert payload["entries_enabled"] is True
     assert payload["operator_halt"] is False
