@@ -137,6 +137,7 @@ def reconcile_track_b_paper_broker_truth(
         broker_open_orders=track_b_open_orders,
         lifecycle_status=live_position_status,
         position_match_report=position_match_report,
+        runtime_restore_orders=_runtime_restore_known_managed_exit_orders(config.repo_root, config.symbols),
     )
     unknown_track_b_open_orders = _unknown_track_b_open_orders(
         broker_open_orders=track_b_open_orders,
@@ -422,8 +423,10 @@ def _known_managed_exit_orders(
     broker_open_orders: Sequence[Mapping[str, Any]],
     lifecycle_status: Mapping[str, Any],
     position_match_report: Mapping[str, Any],
+    runtime_restore_orders: Sequence[Mapping[str, Any]] = (),
 ) -> list[dict[str, Any]]:
     declared_orders = _declared_known_managed_exit_orders(lifecycle_status)
+    declared_orders.extend(dict(row) for row in runtime_restore_orders if isinstance(row, Mapping))
     if not declared_orders:
         return []
     matched_positions = [
@@ -445,9 +448,108 @@ def _known_managed_exit_orders(
             row["lane_id"] = declared.get("lane_id")
             row["order_intent_id"] = declared.get("order_intent_id")
             row["source"] = declared.get("source") or "TRACK_B_LIFECYCLE_PENDING_EXIT_ORDER"
+            source_artifact_path = declared.get("source_artifact_path")
+            if source_artifact_path:
+                row["source_artifact_path"] = source_artifact_path
             known.append(row)
             break
     return known
+
+
+def _runtime_restore_known_managed_exit_orders(repo_root: Path, symbols: Sequence[str]) -> list[dict[str, Any]]:
+    lanes_root = repo_root / "outputs" / "probationary_pattern_engine" / "paper_session" / "lanes"
+    rows: list[dict[str, Any]] = []
+    try:
+        restore_paths = sorted(lanes_root.glob("*/restore_validation_latest.json"))
+    except OSError:
+        return rows
+    for restore_path in restore_paths:
+        payload = _load_json(restore_path)
+        row = _managed_exit_order_from_restore_payload(payload, source_path=restore_path, symbols=symbols)
+        if row is not None:
+            rows.append(row)
+    return rows
+
+
+def _managed_exit_order_from_restore_payload(
+    payload: Mapping[str, Any],
+    *,
+    source_path: Path,
+    symbols: Sequence[str],
+) -> dict[str, Any] | None:
+    restored = payload.get("restored_state_summary")
+    if not isinstance(restored, Mapping):
+        return None
+    pending_order_ids = [
+        str(item).strip()
+        for item in restored.get("pending_broker_order_ids", []) or []
+        if str(item).strip()
+    ]
+    open_order_id = str(restored.get("open_broker_order_id") or "").strip()
+    order_id = open_order_id or (pending_order_ids[0] if pending_order_ids else "")
+    if not order_id:
+        return None
+    latest_intent_state = str(restored.get("latest_order_intent_state") or "").strip().upper()
+    if latest_intent_state in {"CANCELLED", "CANCELED", "REJECTED", "FILLED", "EXPIRED"}:
+        return None
+    latest_intent = payload.get("pre_restore_state_summary", {})
+    latest_intent = latest_intent.get("latest_order_intent") if isinstance(latest_intent, Mapping) else {}
+    if not isinstance(latest_intent, Mapping):
+        latest_intent = {}
+    intent_type = str(latest_intent.get("intent_type") or restored.get("last_order_intent_id") or "").upper()
+    if "SELL_TO_CLOSE" not in intent_type and "BUY_TO_CLOSE" not in intent_type:
+        return None
+    symbol = str(latest_intent.get("symbol") or latest_intent.get("instrument") or payload.get("symbol") or payload.get("instrument") or "").strip().upper()
+    if symbol and symbol not in {item.upper() for item in symbols}:
+        return None
+    broker_position = _first_mapping(
+        _nested_mapping(restored, "broker_snapshot", "broker_truth_position"),
+        _nested_mapping(payload, "pre_restore_state_summary", "broker_snapshot", "broker_truth_position"),
+    )
+    local_symbol = str(broker_position.get("local_symbol") or broker_position.get("localSymbol") or "").strip()
+    expiry = str(broker_position.get("expiry") or "").strip()
+    con_id = broker_position.get("con_id") or broker_position.get("conId")
+    action = "SELL" if "SELL_TO_CLOSE" in intent_type else "BUY"
+    return {
+        "managed_order_status": "KNOWN_MANAGED_EXIT_ORDER_WORKING",
+        "source": "TRACK_B_RUNTIME_RESTORE_PENDING_EXIT_ORDER",
+        "source_artifact_path": str(source_path),
+        "lifecycle_id": _matched_lifecycle_id_for_restore(payload, local_symbol=local_symbol),
+        "strategy_id": latest_intent.get("standalone_strategy_id") or latest_intent.get("strategy_id"),
+        "lane_id": latest_intent.get("lane_id") or payload.get("lane_id"),
+        "order_intent_id": latest_intent.get("order_intent_id") or restored.get("last_order_intent_id"),
+        "broker_order_id": order_id,
+        "symbol": symbol,
+        "local_symbol": local_symbol,
+        "expiry": expiry,
+        "con_id": con_id,
+        "action": action,
+        "quantity": latest_intent.get("quantity") or "1",
+        "submitted_at": latest_intent.get("submitted_at") or latest_intent.get("acknowledged_at"),
+        "exit_reason": latest_intent.get("reason_code"),
+    }
+
+
+def _matched_lifecycle_id_for_restore(payload: Mapping[str, Any], *, local_symbol: str) -> str | None:
+    # Runtime restore artifacts are lane-local, so they may not duplicate the
+    # lifecycle id. Prefer a direct value, then fall back to the latest fill for
+    # the same restored position; the final broker/lifecycle match check still
+    # verifies the open lifecycle position before this can become known-managed.
+    restored = payload.get("restored_state_summary")
+    if isinstance(restored, Mapping):
+        lifecycle_id = str(restored.get("lifecycle_id") or "").strip()
+        if lifecycle_id:
+            return lifecycle_id
+    pre_restore = payload.get("pre_restore_state_summary")
+    latest_fill = pre_restore.get("latest_fill") if isinstance(pre_restore, Mapping) else None
+    if isinstance(latest_fill, Mapping):
+        lifecycle_id = str(latest_fill.get("lifecycle_id") or "").strip()
+        if lifecycle_id:
+            return lifecycle_id
+        fill_local_symbol = str(latest_fill.get("local_symbol") or latest_fill.get("localSymbol") or "").strip().upper()
+        if local_symbol and fill_local_symbol and local_symbol.upper() != fill_local_symbol:
+            return None
+    return None
 
 
 def _declared_known_managed_exit_orders(lifecycle_status: Mapping[str, Any]) -> list[dict[str, Any]]:
@@ -921,6 +1023,22 @@ def _load_json(path: Path) -> dict[str, Any]:
     except (FileNotFoundError, json.JSONDecodeError, OSError):
         return {}
     return payload if isinstance(payload, dict) else {}
+
+
+def _first_mapping(*values: object) -> dict[str, Any]:
+    for value in values:
+        if isinstance(value, Mapping):
+            return dict(value)
+    return {}
+
+
+def _nested_mapping(value: object, *keys: str) -> dict[str, Any]:
+    current: object = value
+    for key in keys:
+        if not isinstance(current, Mapping):
+            return {}
+        current = current.get(key)
+    return dict(current) if isinstance(current, Mapping) else {}
 
 
 def _path_from_payload(value: Any, *, default: Path) -> Path:

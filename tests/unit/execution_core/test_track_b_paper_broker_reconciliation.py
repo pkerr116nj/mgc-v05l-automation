@@ -270,6 +270,109 @@ def test_known_managed_exit_order_is_not_unknown_open_order_blocker(tmp_path: Pa
     assert reconciled_position["known_managed_exit_orders"][0]["broker_order_id"] == "1"
 
 
+def test_runtime_restore_known_managed_exit_order_is_not_unknown_open_order_blocker(tmp_path: Path) -> None:
+    open_position = {
+        "strategy_id": "gc_mgc_forced_session_baseline_v2__gc_1x_all_lanes__london_early_long",
+        "lifecycle_id": "bridge_fill_GC|1m|2026-05-15T07:06:00Z|BUY_TO_OPEN",
+        "instrument_family": "GC",
+        "contract_key": "GC-202606",
+        "local_symbol": "GCM6",
+        "con_id": 430360630,
+        "side": "LONG",
+        "quantity": "1",
+        "avg_entry_price": "4574.6",
+    }
+    config = _write_base_artifacts(tmp_path, open_position=open_position)
+    restore_path = (
+        config.repo_root
+        / "outputs"
+        / "probationary_pattern_engine"
+        / "paper_session"
+        / "lanes"
+        / "gc_1x_all_lanes__london_early_long"
+        / "restore_validation_latest.json"
+    )
+    _write_json(
+        restore_path,
+        {
+            "lane_id": "gc_1x_all_lanes__london_early_long",
+            "symbol": "GC",
+            "pre_restore_state_summary": {
+                "latest_order_intent": {
+                    "order_intent_id": "GC|1m|2026-05-15T08:06:00Z|SELL_TO_CLOSE",
+                    "intent_type": "SELL_TO_CLOSE",
+                    "standalone_strategy_id": "gc_mgc_forced_session_baseline_v2__gc_1x_all_lanes__london_early_long",
+                    "lane_id": "gc_1x_all_lanes__london_early_long",
+                    "instrument": "GC",
+                    "symbol": "GC",
+                    "quantity": 1,
+                    "reason_code": "forced_session_initial_stop",
+                    "submitted_at": "2026-05-15T08:50:35.730818+00:00",
+                }
+            },
+            "restored_state_summary": {
+                "latest_order_intent_state": "ACKNOWLEDGED",
+                "last_order_intent_id": "GC|1m|2026-05-15T08:06:00Z|SELL_TO_CLOSE",
+                "open_broker_order_id": "1",
+                "pending_broker_order_ids": ["1"],
+                "pending_execution_count": 1,
+                "broker_snapshot": {
+                    "broker_truth_position": {
+                        "symbol": "GC",
+                        "local_symbol": "GCM6",
+                        "expiry": "20260626",
+                        "con_id": 430360630,
+                    }
+                },
+            },
+        },
+    )
+    _write_broker_truth(
+        config,
+        positions=[
+            {
+                "account_id": "DUM882026",
+                "symbol": "GC",
+                "local_symbol": "GCM6",
+                "security_type": "FUT",
+                "quantity": "1",
+                "average_cost": "457460.0",
+                "multiplier": "100",
+                "con_id": 430360630,
+            }
+        ],
+        open_orders=[
+            {
+                "broker_order_id": "1",
+                "client_id": 10815,
+                "perm_id": 614029377,
+                "symbol": "GC",
+                "local_symbol": "GCM6",
+                "security_type": "FUT",
+                "expiry": "20260626",
+                "con_id": 430360630,
+                "action": "SELL",
+                "order_type": "LMT",
+                "limit_price": "4574.7",
+                "quantity": "1",
+                "remaining_quantity": "1",
+                "status": "Submitted",
+            }
+        ],
+    )
+
+    report = reconcile_track_b_paper_broker_truth(config=config, now=NOW)
+
+    assert report["classification"] == "TRACK_B_PAPER_BROKER_RECONCILED_WITH_KNOWN_MANAGED_EXIT_ORDER"
+    assert report["broker_reconciled"] is True
+    assert report["known_managed_exit_order_count"] == 1
+    assert report["unknown_broker_open_order_count"] == 0
+    assert report["blockers"] == []
+    known_order = report["known_managed_exit_orders"][0]
+    assert known_order["source"] == "TRACK_B_RUNTIME_RESTORE_PENDING_EXIT_ORDER"
+    assert known_order["source_artifact_path"] == str(restore_path)
+
+
 def test_blocks_when_broker_truth_is_stale_or_incomplete(tmp_path: Path) -> None:
     config = _write_base_artifacts(tmp_path)
     _write_broker_truth(config, generated_at="2026-05-11T11:55:00+00:00", positions_complete=False)
