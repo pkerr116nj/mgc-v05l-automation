@@ -11,6 +11,10 @@ from typing import Any
 from .ibkr_paper_strategy_governance import load_paper_strategy_governance_status
 from .ibkr_paper_strategy_monitor import load_paper_strategy_monitor_status
 from .track_b_phase1_submit_authority import evaluate_phase1_broker_reconciliation_submit_gate
+from ..execution_core.track_b_submit_intent_ownership import (
+    DEFAULT_TRACK_B_SUBMIT_INTENT_OWNERSHIP_JSONL,
+    load_unresolved_submit_intent_ownership_records,
+)
 
 _DEFAULT_OUTPUT_DIR = Path("outputs") / "reports" / "paper_strategy_exposure"
 _DEFAULT_LEDGER_PATH = Path("var") / "paper_strategy_position_ledger.json"
@@ -22,6 +26,8 @@ _DEFAULT_AUDIT_JSONL = "paper_exposure_gate_audit.jsonl"
 _DEFAULT_BROKER_POSITIONS_SNAPSHOT = Path("outputs") / "reports" / "ibkr_read_only_verification" / "ibkr_positions_snapshot.json"
 _DEFAULT_BROKER_OPEN_ORDERS_SNAPSHOT = Path("outputs") / "reports" / "ibkr_read_only_verification" / "ibkr_open_orders_snapshot.json"
 _DEFAULT_INDEX_EXPOSURE_SNAPSHOT = Path("outputs") / "reports" / "ibkr_mnq_nq_scope_support" / "paper_index_exposure_state.json"
+_DEFAULT_SUBMIT_INTENT_OWNERSHIP_PATH = DEFAULT_TRACK_B_SUBMIT_INTENT_OWNERSHIP_JSONL
+_UNRESOLVED_SUBMIT_INTENT_BLOCK_REASON = "TRACK_B_UNRESOLVED_SUBMIT_INTENT_BLOCKS_NEW_ENTRY"
 _SUPPORTED_ENTRY_ACTIONS = {"BUY"}
 _SUPPORTED_EXIT_ACTIONS = {"SELL", "EXIT"}
 _DEFAULT_MAX_TOTAL_MGC_CONTRACTS = 20.0
@@ -55,6 +61,7 @@ class IbkrPaperStrategyExposureConfig:
     con_id: int | None = None
     local_symbol: str | None = None
     lifecycle_id: str | None = None
+    submit_intent_ownership_path: Path = _DEFAULT_SUBMIT_INTENT_OWNERSHIP_PATH
 
 
 @dataclass(frozen=True)
@@ -100,10 +107,12 @@ def run_ibkr_paper_strategy_exposure(
         phase1_reconciliation_gate=phase1_reconciliation_gate,
         strategy_rows=strategy_exposure_rows,
     )
+    unresolved_submit_intents = _load_unresolved_submit_intents(config)
     selected_strategy_gate = _evaluate_strategy_gate(
         config=config,
         strategy_rows=strategy_exposure_rows,
         aggregate_state=aggregate_state,
+        unresolved_submit_intents=unresolved_submit_intents,
     )
     classification = str(
         selected_strategy_gate.get("classification")
@@ -148,6 +157,7 @@ def run_ibkr_paper_strategy_exposure(
             "rows": strategy_exposure_rows,
         },
         "aggregate_exposure_state": aggregate_state,
+        "unresolved_submit_intent_ownership_count": len(unresolved_submit_intents),
     }
     _record_audit(
         audit_events,
@@ -220,6 +230,7 @@ def evaluate_paper_strategy_exposure_gate(
             con_id=con_id,
             local_symbol=local_symbol,
             lifecycle_id=lifecycle_id,
+            submit_intent_ownership_path=_DEFAULT_SUBMIT_INTENT_OWNERSHIP_PATH,
         )
     )
     return dict(artifacts.report.get("selected_strategy_gate") or {})
@@ -481,6 +492,7 @@ def _evaluate_strategy_gate(
     config: IbkrPaperStrategyExposureConfig,
     strategy_rows: list[dict[str, Any]],
     aggregate_state: dict[str, Any],
+    unresolved_submit_intents: list[dict[str, Any]],
 ) -> dict[str, Any]:
     requested_strategy = str(config.strategy_id or "").strip()
     requested_bridge_strategy = str(config.bridge_strategy_id or "").strip()
@@ -541,6 +553,14 @@ def _evaluate_strategy_gate(
     stacking_observed = False
 
     if semantics.operation == "OPEN":
+        submit_intent_blocker = _unresolved_submit_intent_new_entry_blocker(
+            config=config,
+            requested_strategy=requested_strategy,
+            requested_bridge_strategy=requested_bridge_strategy,
+            unresolved_submit_intents=unresolved_submit_intents,
+        )
+        if submit_intent_blocker:
+            block_reasons.append(_UNRESOLVED_SUBMIT_INTENT_BLOCK_REASON)
         if strategy_state in {"LONG", "SHORT"}:
             block_reasons.append("duplicate_strategy_entry_while_position_open")
         aggregate_signed_quantity = round(float(aggregate_state.get("strategy_attributed_position_sum") or 0.0), 8)
@@ -577,6 +597,9 @@ def _evaluate_strategy_gate(
             elif "configured_aggregate_contract_limit_exceeded" in block_reasons:
                 classification = "PAPER_EXPOSURE_BLOCKED_AGGREGATE_LIMIT"
                 detail = "The requested entry would exceed the explicit aggregate contract cap."
+            elif _UNRESOLVED_SUBMIT_INTENT_BLOCK_REASON in block_reasons:
+                classification = "PAPER_EXPOSURE_BLOCKED_UNRESOLVED_SUBMIT_INTENT"
+                detail = "Unresolved Track B submit-intent ownership must be recovered, adopted, or terminally resolved before a new entry can submit."
             else:
                 classification = "PAPER_EXPOSURE_BLOCKED_STRATEGY_LIMIT"
                 detail = "The requested entry violates per-strategy exposure ownership or limits."
@@ -645,9 +668,12 @@ def _evaluate_strategy_gate(
         "aggregate_broker_position": aggregate_state.get("broker_net_position"),
         "aggregate_strategy_position_sum": aggregate_state.get("strategy_attributed_position_sum"),
         "broker_truth": aggregate_state.get("broker_truth"),
+        "unresolved_submit_intent_ownership_blocker": submit_intent_blocker if semantics.operation == "OPEN" else None,
         "blocker_classification": (
             "PHASE1_BROKER_RECONCILIATION_NOT_CLEAR"
             if "phase1_broker_reconciliation_not_clear" in block_reasons
+            else _UNRESOLVED_SUBMIT_INTENT_BLOCK_REASON
+            if _UNRESOLVED_SUBMIT_INTENT_BLOCK_REASON in block_reasons
             else "BROKER_LEDGER_POSITION_MISMATCH"
             if any(reason in block_reasons for reason in {"ledger_broker_mismatch", "orphan_broker_position"})
             else ("BROKER_TRUTH_STALE_OR_MISSING" if "broker_position_truth_stale_or_missing" in block_reasons else None)
@@ -659,6 +685,7 @@ def _evaluate_strategy_gate(
                 "orphan_broker_position",
                 "broker_position_truth_stale_or_missing",
                 "phase1_broker_reconciliation_not_clear",
+                _UNRESOLVED_SUBMIT_INTENT_BLOCK_REASON,
             }
         ),
     }
@@ -690,6 +717,110 @@ def _filter_owned_rows_for_requested_exit_identity(
             continue
         filtered.append(dict(row))
     return filtered
+
+
+def _load_unresolved_submit_intents(config: IbkrPaperStrategyExposureConfig) -> list[dict[str, Any]]:
+    path = config.submit_intent_ownership_path
+    if not path.is_absolute():
+        path = config.repo_root / path
+    return [dict(row) for row in load_unresolved_submit_intent_ownership_records(path)]
+
+
+def _unresolved_submit_intent_new_entry_blocker(
+    *,
+    config: IbkrPaperStrategyExposureConfig,
+    requested_strategy: str,
+    requested_bridge_strategy: str,
+    unresolved_submit_intents: list[dict[str, Any]],
+) -> dict[str, Any] | None:
+    matching_records: list[dict[str, Any]] = []
+    for record in unresolved_submit_intents:
+        match_reason = _unresolved_submit_intent_match_reason(
+            record=record,
+            config=config,
+            requested_strategy=requested_strategy,
+            requested_bridge_strategy=requested_bridge_strategy,
+        )
+        if not match_reason:
+            continue
+        matching_records.append(
+            {
+                "ownership_intent_id": record.get("ownership_intent_id"),
+                "state": record.get("state"),
+                "match_reason": match_reason,
+                "account_id": record.get("account_id"),
+                "lane_id": record.get("lane_id"),
+                "strategy_id": record.get("strategy_id"),
+                "symbol": record.get("symbol"),
+                "local_symbol": record.get("local_symbol"),
+                "expiry": record.get("expiry"),
+                "con_id": record.get("con_id"),
+                "action": record.get("action"),
+                "qty": record.get("qty"),
+                "created_at": record.get("created_at"),
+                "updated_at": record.get("updated_at"),
+            }
+        )
+    if not matching_records:
+        return None
+    return {
+        "classification": _UNRESOLVED_SUBMIT_INTENT_BLOCK_REASON,
+        "detail": "Unresolved Track B submit-intent ownership overlaps this new entry by account/contract, lane/strategy, or instrument.",
+        "matching_record_count": len(matching_records),
+        "matching_records": matching_records,
+    }
+
+
+def _unresolved_submit_intent_match_reason(
+    *,
+    record: dict[str, Any],
+    config: IbkrPaperStrategyExposureConfig,
+    requested_strategy: str,
+    requested_bridge_strategy: str,
+) -> str | None:
+    record_lane = str(record.get("lane_id") or "").strip()
+    record_strategy = str(record.get("strategy_id") or "").strip()
+    requested_ids = {requested_strategy, requested_bridge_strategy}
+    requested_ids.discard("")
+    if requested_ids.intersection({record_lane, record_strategy}):
+        return "same_lane_or_strategy"
+    if _unresolved_submit_intent_same_account_contract(record=record, config=config):
+        return "same_account_contract"
+    if _unresolved_submit_intent_same_instrument(record=record, executable_symbol=config.executable_symbol):
+        return "same_instrument"
+    return None
+
+
+def _unresolved_submit_intent_same_account_contract(
+    *,
+    record: dict[str, Any],
+    config: IbkrPaperStrategyExposureConfig,
+) -> bool:
+    if str(record.get("account_id") or "") != "DUM882026":
+        return False
+    config_con_id = _int_or_none(config.con_id)
+    record_con_id = _int_or_none(record.get("con_id"))
+    if config_con_id is not None and record_con_id is not None:
+        return config_con_id == record_con_id
+    config_local = str(config.local_symbol or "").strip().upper()
+    record_local = str(record.get("local_symbol") or "").strip().upper()
+    if config_local and record_local:
+        return config_local == record_local
+    return False
+
+
+def _unresolved_submit_intent_same_instrument(*, record: dict[str, Any], executable_symbol: str) -> bool:
+    executable = str(executable_symbol or "").strip().upper()
+    record_symbol = str(record.get("symbol") or "").strip().upper()
+    record_local = str(record.get("local_symbol") or "").strip().upper()
+    return bool(executable) and (record_symbol == executable or record_local.startswith(executable))
+
+
+def _int_or_none(value: Any) -> int | None:
+    try:
+        return int(str(value))
+    except (TypeError, ValueError):
+        return None
 
 
 def _broker_net_position_for_symbol(

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
@@ -9,6 +10,11 @@ from mgc_v05l.execution.ibkr_paper_strategy_exposure import (
     IbkrPaperStrategyExposureConfig,
     evaluate_paper_strategy_exposure_gate,
     run_ibkr_paper_strategy_exposure,
+)
+from mgc_v05l.execution_core.track_b_submit_intent_ownership import (
+    SubmitIntentOwnershipRecord,
+    SubmitIntentOwnershipState,
+    append_submit_intent_ownership_record,
 )
 
 
@@ -188,6 +194,57 @@ def _governance_row(strategy_id: str, bridge_strategy_id: str, *, status: str = 
     }
 
 
+def _write_submit_intent_ownership(
+    tmp_path: Path,
+    *,
+    state: SubmitIntentOwnershipState = SubmitIntentOwnershipState.BROKER_RESULT_UNKNOWN_REFRESH_REQUIRED,
+    lane_id: str = "gc_1x_all_lanes__asia_early_long",
+    strategy_id: str = "gold_forced_session_baseline_v2__GC",
+    symbol: str = "GC",
+    local_symbol: str = "GCM6",
+    con_id: int = 430360630,
+) -> None:
+    record = SubmitIntentOwnershipRecord(
+        mode="PAPER",
+        account_id="DUM882026",
+        lane_id=lane_id,
+        strategy_id=strategy_id,
+        intent_type="BUY_TO_OPEN",
+        action="BUY",
+        symbol=symbol,
+        local_symbol=local_symbol,
+        expiry="20260626",
+        con_id=con_id,
+        qty=1,
+        order_type="LMT",
+        limit_price="4556.0",
+        time_in_force="DAY",
+        repo_root=str(tmp_path),
+        git_head="abc123",
+        created_at=datetime(2026, 5, 15, 12, 0, tzinfo=UTC),
+        state=state,
+        ownership_intent_id=f"submit_owner_{lane_id}_{con_id}_{state.value}".replace("/", "_"),
+        lifecycle_id=f"reserved_submit_{lane_id}_{con_id}",
+        lifecycle_id_reserved_only=True,
+        lifecycle_position_open=False,
+        live_money_eligible=False,
+        paper_proof_invoked=False,
+    )
+    append_submit_intent_ownership_record(
+        record,
+        jsonl_path=tmp_path
+        / "outputs"
+        / "track_b_execution_core"
+        / "submit_intent_ownership"
+        / "track_b_submit_intent_ownership.jsonl",
+        latest_path=tmp_path
+        / "outputs"
+        / "track_b_execution_core"
+        / "submit_intent_ownership"
+        / "latest_track_b_submit_intent_ownership.json",
+    )
+
+
 def test_allows_second_strategy_buy_when_another_strategy_is_already_long(tmp_path: Path) -> None:
     _write_monitor(tmp_path, broker_quantity=1.0)
     _write_ledger(tmp_path, [_position("ATP_COMPANION_V1_ASIA_US")])
@@ -210,6 +267,157 @@ def test_allows_second_strategy_buy_when_another_strategy_is_already_long(tmp_pa
     assert gate["classification"] == "PAPER_EXPOSURE_STACK_ALLOWED"
     assert gate["submit_allowed"] is True
     assert gate["max_total_mgc_contracts"] == 20.0
+
+
+def test_blocks_new_entry_by_unresolved_same_account_contract_submit_intent(tmp_path: Path) -> None:
+    _write_monitor(tmp_path, broker_quantity=0.0)
+    _write_ledger(tmp_path, [])
+    _write_governance(tmp_path, [_governance_row("mgc_1x_asia_london_participation__asia_london_long_v5", "asia_london_participation_core_v1__MGC")])
+    _write_submit_intent_ownership(
+        tmp_path,
+        lane_id="other_mgc_lane",
+        strategy_id="other_mgc_strategy",
+        symbol="MGC",
+        local_symbol="MGCM6",
+        con_id=712565978,
+    )
+
+    gate = evaluate_paper_strategy_exposure_gate(
+        repo_root=tmp_path,
+        strategy_id="mgc_1x_asia_london_participation__asia_london_long_v5",
+        bridge_strategy_id="asia_london_participation_core_v1__MGC",
+        action="BUY",
+        intent_type="BUY_TO_OPEN",
+        quantity=1.0,
+        executable_symbol="MGC",
+        con_id=712565978,
+        local_symbol="MGCM6",
+    )
+
+    assert gate["classification"] == "PAPER_EXPOSURE_BLOCKED_UNRESOLVED_SUBMIT_INTENT"
+    assert gate["submit_allowed"] is False
+    assert gate["blocker_classification"] == "TRACK_B_UNRESOLVED_SUBMIT_INTENT_BLOCKS_NEW_ENTRY"
+    assert "TRACK_B_UNRESOLVED_SUBMIT_INTENT_BLOCKS_NEW_ENTRY" in gate["block_reasons"]
+    blocker = gate["unresolved_submit_intent_ownership_blocker"]
+    assert blocker["matching_records"][0]["match_reason"] == "same_account_contract"
+
+
+def test_blocks_new_entry_by_unresolved_same_lane_submit_intent(tmp_path: Path) -> None:
+    _write_monitor(tmp_path, broker_quantity=0.0)
+    _write_ledger(tmp_path, [])
+    _write_governance(tmp_path, [_governance_row("mgc_1x_asia_london_participation__asia_london_long_v5", "asia_london_participation_core_v1__MGC")])
+    _write_submit_intent_ownership(
+        tmp_path,
+        lane_id="mgc_1x_asia_london_participation__asia_london_long_v5",
+        strategy_id="unrelated_bridge_strategy",
+        symbol="NQ",
+        local_symbol="NQM6",
+        con_id=12345,
+    )
+
+    gate = evaluate_paper_strategy_exposure_gate(
+        repo_root=tmp_path,
+        strategy_id="mgc_1x_asia_london_participation__asia_london_long_v5",
+        bridge_strategy_id="asia_london_participation_core_v1__MGC",
+        action="BUY",
+        intent_type="BUY_TO_OPEN",
+        quantity=1.0,
+        executable_symbol="MGC",
+    )
+
+    assert gate["classification"] == "PAPER_EXPOSURE_BLOCKED_UNRESOLVED_SUBMIT_INTENT"
+    assert gate["submit_allowed"] is False
+    assert gate["unresolved_submit_intent_ownership_blocker"]["matching_records"][0]["match_reason"] == "same_lane_or_strategy"
+
+
+def test_terminal_submit_intent_does_not_block_new_entry(tmp_path: Path) -> None:
+    _write_monitor(tmp_path, broker_quantity=0.0)
+    _write_ledger(tmp_path, [])
+    _write_governance(tmp_path, [_governance_row("mgc_1x_asia_london_participation__asia_london_long_v5", "asia_london_participation_core_v1__MGC")])
+    _write_submit_intent_ownership(
+        tmp_path,
+        state=SubmitIntentOwnershipState.NO_BROKER_EFFECT_CONFIRMED,
+        lane_id="mgc_1x_asia_london_participation__asia_london_long_v5",
+        strategy_id="asia_london_participation_core_v1__MGC",
+        symbol="MGC",
+        local_symbol="MGCM6",
+        con_id=712565978,
+    )
+
+    gate = evaluate_paper_strategy_exposure_gate(
+        repo_root=tmp_path,
+        strategy_id="mgc_1x_asia_london_participation__asia_london_long_v5",
+        bridge_strategy_id="asia_london_participation_core_v1__MGC",
+        action="BUY",
+        intent_type="BUY_TO_OPEN",
+        quantity=1.0,
+        executable_symbol="MGC",
+        con_id=712565978,
+        local_symbol="MGCM6",
+    )
+
+    assert gate["classification"] == "PAPER_EXPOSURE_ATTRIBUTION_READY"
+    assert gate["submit_allowed"] is True
+    assert gate["unresolved_submit_intent_ownership_blocker"] is None
+
+
+def test_review_required_submit_intent_blocks_same_instrument_new_entry(tmp_path: Path) -> None:
+    _write_monitor(tmp_path, broker_quantity=0.0)
+    _write_ledger(tmp_path, [])
+    _write_governance(tmp_path, [_governance_row("mgc_1x_asia_london_participation__asia_london_long_v5", "asia_london_participation_core_v1__MGC")])
+    _write_submit_intent_ownership(
+        tmp_path,
+        state=SubmitIntentOwnershipState.REVIEW_REQUIRED,
+        lane_id="other_mgc_lane",
+        strategy_id="other_mgc_strategy",
+        symbol="MGC",
+        local_symbol="MGCM6",
+        con_id=712565978,
+    )
+
+    gate = evaluate_paper_strategy_exposure_gate(
+        repo_root=tmp_path,
+        strategy_id="mgc_1x_asia_london_participation__asia_london_long_v5",
+        bridge_strategy_id="asia_london_participation_core_v1__MGC",
+        action="BUY",
+        intent_type="BUY_TO_OPEN",
+        quantity=1.0,
+        executable_symbol="MGC",
+    )
+
+    assert gate["classification"] == "PAPER_EXPOSURE_BLOCKED_UNRESOLVED_SUBMIT_INTENT"
+    assert gate["submit_allowed"] is False
+    assert gate["unresolved_submit_intent_ownership_blocker"]["matching_records"][0]["state"] == "REVIEW_REQUIRED"
+
+
+def test_unresolved_submit_intent_does_not_block_managed_close(tmp_path: Path) -> None:
+    _write_monitor(tmp_path, broker_quantity=1.0)
+    _write_ledger(tmp_path, [_position("ATP_COMPANION_V1_ASIA_US")])
+    _write_governance(tmp_path, [_governance_row("atp_companion_v1_asia_us", "ATP_COMPANION_V1_ASIA_US")])
+    _write_submit_intent_ownership(
+        tmp_path,
+        lane_id="atp_companion_v1_asia_us",
+        strategy_id="ATP_COMPANION_V1_ASIA_US",
+        symbol="MGC",
+        local_symbol="MGCM6",
+        con_id=712565978,
+    )
+
+    gate = evaluate_paper_strategy_exposure_gate(
+        repo_root=tmp_path,
+        strategy_id="atp_companion_v1_asia_us",
+        bridge_strategy_id="ATP_COMPANION_V1_ASIA_US",
+        action="SELL",
+        intent_type="SELL_TO_CLOSE",
+        quantity=1.0,
+        executable_symbol="MGC",
+        con_id=712565978,
+        local_symbol="MGCM6",
+    )
+
+    assert gate["classification"] == "PAPER_EXPOSURE_EXIT_ALLOWED"
+    assert gate["submit_allowed"] is True
+    assert "TRACK_B_UNRESOLVED_SUBMIT_INTENT_BLOCKS_NEW_ENTRY" not in gate["block_reasons"]
 
 
 def test_phase1_reconciliation_blocked_overrides_legacy_monitor_submit_allowed(tmp_path: Path) -> None:
