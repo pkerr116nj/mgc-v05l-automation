@@ -19,6 +19,12 @@ git rev-parse --show-toplevel
 
 Both commands must resolve to `/Users/patrick/Dev/MGC-v05l-automation`.
 
+## Generated Runtime State
+
+`var/per_strategy_paper_status.json` and `var/strategy_probation_dashboard.json` are generated hot-path runtime artifacts. They are intentionally untracked/ignored and must not be treated as committed source.
+
+Governance/runtime tooling must regenerate these files before monday-live readiness when they are missing or stale. Missing, stale, or invalid state must fail closed and must never grant submit authority.
+
 ## Environment Setup
 
 1. Create a Python 3.11+ virtual environment.
