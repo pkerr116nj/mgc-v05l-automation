@@ -9,14 +9,23 @@ source "${SCRIPT_DIR}/common_env.sh"
 PID_FILE="${OPERATOR_DASHBOARD_PID_FILE:-${REPO_ROOT}/outputs/operator_dashboard/runtime/operator_dashboard.pid}"
 INFO_FILE="${OPERATOR_DASHBOARD_INFO_FILE:-${REPO_ROOT}/outputs/operator_dashboard/runtime/operator_dashboard.json}"
 
-if [[ ! -f "${PID_FILE}" ]]; then
-  echo "No operator dashboard PID file found at ${PID_FILE}."
+if [[ ! -f "${PID_FILE}" ]] && [[ ! -f "${INFO_FILE}" ]]; then
+  echo "No operator dashboard PID or info file found at ${PID_FILE} / ${INFO_FILE}."
   exit 1
 fi
 
-PID="$(cat "${PID_FILE}")"
+PID=""
+if [[ -f "${PID_FILE}" ]]; then
+  PID="$(cat "${PID_FILE}")"
+fi
+if [[ -z "${PID}" ]] && [[ -f "${INFO_FILE}" ]]; then
+  DASHBOARD_URL="$("${PYTHON_BIN}" -c 'import json, sys; print(json.load(open(sys.argv[1], "r", encoding="utf-8")).get("url") or "")' "${INFO_FILE}" 2>/dev/null || true)"
+  if [[ -n "${DASHBOARD_URL}" ]]; then
+    PID="$("${PYTHON_BIN}" -c 'import json, sys, urllib.request; print(json.loads(urllib.request.urlopen(sys.argv[1].rstrip("/") + "/health", timeout=2).read().decode("utf-8")).get("pid") or "")' "${DASHBOARD_URL}" 2>/dev/null || true)"
+  fi
+fi
 if [[ -z "${PID}" ]]; then
-  echo "PID file is empty: ${PID_FILE}" >&2
+  echo "No operator dashboard PID could be resolved from ${PID_FILE} or ${INFO_FILE}." >&2
   exit 1
 fi
 

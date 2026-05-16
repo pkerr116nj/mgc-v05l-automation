@@ -488,6 +488,7 @@ if [[ -f "${INFO_FILE}" ]]; then
   fi
   if [[ -n "${DASHBOARD_URL_EXISTING}" ]] && health_check "${DASHBOARD_URL_EXISTING%/}/health"; then
     EXISTING_BUILD="$(read_health_field "${DASHBOARD_URL_EXISTING%/}/health" build_stamp 2>/dev/null || true)"
+    EXISTING_HEALTH_PID="$(read_health_field "${DASHBOARD_URL_EXISTING%/}/health" pid 2>/dev/null || true)"
     EXISTING_STARTED="$(read_health_field "${DASHBOARD_URL_EXISTING%/}/health" started_at 2>/dev/null || true)"
     EXISTING_HEALTH_STATUS="$(read_health_field "${DASHBOARD_URL_EXISTING%/}/health" status 2>/dev/null || true)"
     EXISTING_HEALTH_READY="$(read_health_field "${DASHBOARD_URL_EXISTING%/}/health" ready 2>/dev/null || true)"
@@ -495,12 +496,19 @@ if [[ -f "${INFO_FILE}" ]]; then
       emit_startup_marker "HEALTH_REACHABLE" "1"
       emit_startup_marker "BUILD_MISMATCH" "1"
       echo "Existing dashboard build mismatch: running ${EXISTING_BUILD}, local ${LOCAL_BUILD_STAMP}. Restarting." >&2
-      if [[ -n "${PID_EXISTING}" ]] && stop_dashboard_process "${PID_EXISTING}"; then
+      RECOVERY_PID="${PID_EXISTING}"
+      if [[ -z "${RECOVERY_PID}" ]]; then
+        RECOVERY_PID="${EXISTING_HEALTH_PID}"
+      fi
+      if [[ -z "${RECOVERY_PID}" ]]; then
+        RECOVERY_PID="$(listener_pid_for_port "${BOUND_PORT_EXISTING:-${PORT}}" || true)"
+      fi
+      if [[ -n "${RECOVERY_PID}" ]] && stop_dashboard_process "${RECOVERY_PID}"; then
         rm -f "${PID_FILE}" "${INFO_FILE}"
       else
         emit_startup_failure \
           "build_mismatch" \
-          "Could not stop the old dashboard instance cleanly. PID: ${PID_EXISTING:-unknown}" \
+          "Could not stop the old dashboard instance cleanly. PID: ${RECOVERY_PID:-${PID_EXISTING:-${EXISTING_HEALTH_PID:-unknown}}}" \
           "Stop the old local dashboard instance, then retry Start/Restart Dashboard/API."
         exit 1
       fi
@@ -530,10 +538,14 @@ if [[ -f "${INFO_FILE}" ]]; then
           "Wait for the dashboard readiness contract to stabilize, then retry Start/Restart Dashboard/API."
         exit 1
       fi
-      if [[ -n "${PID_EXISTING}" ]]; then
-        start_dashboard_readiness_heartbeat "reuse_existing" "${PID_EXISTING}" "${PID_EXISTING}"
+      REUSE_PID="${PID_EXISTING}"
+      if [[ -z "${REUSE_PID}" ]]; then
+        REUSE_PID="${EXISTING_HEALTH_PID}"
       fi
-      report_success "${DASHBOARD_URL_EXISTING}" "${BOUND_HOST_EXISTING:-${HOST}}" "${BOUND_PORT_EXISTING:-${PORT}}" "${PID_EXISTING:-unknown}" "${EXISTING_BUILD:-${LOCAL_BUILD_STAMP}}" "${EXISTING_STARTED:-unknown}" 1 "${EXISTING_HEALTH_STATUS:-unknown}" "${EXISTING_HEALTH_READY:-false}"
+      if [[ -n "${REUSE_PID}" ]]; then
+        start_dashboard_readiness_heartbeat "reuse_existing" "${REUSE_PID}" "${REUSE_PID}"
+      fi
+      report_success "${DASHBOARD_URL_EXISTING}" "${BOUND_HOST_EXISTING:-${HOST}}" "${BOUND_PORT_EXISTING:-${PORT}}" "${REUSE_PID:-unknown}" "${EXISTING_BUILD:-${LOCAL_BUILD_STAMP}}" "${EXISTING_STARTED:-unknown}" 1 "${EXISTING_HEALTH_STATUS:-unknown}" "${EXISTING_HEALTH_READY:-false}"
       if [[ ${OPEN_BROWSER} -eq 1 ]]; then
         if ! open_browser "${DASHBOARD_URL_EXISTING}"; then
           echo "Dashboard is healthy, but browser auto-open failed. Open this URL manually: ${DASHBOARD_URL_EXISTING}" >&2
