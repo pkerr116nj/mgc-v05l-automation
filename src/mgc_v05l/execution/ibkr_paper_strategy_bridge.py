@@ -62,6 +62,13 @@ from ..execution_core.track_b_paper_broker_reconciliation import (
     ReconciliationConfig,
     reconcile_track_b_paper_broker_truth,
 )
+from ..execution_core.track_b_submit_intent_ownership import (
+    DEFAULT_TRACK_B_SUBMIT_INTENT_OWNERSHIP_JSONL,
+    DEFAULT_TRACK_B_SUBMIT_INTENT_OWNERSHIP_LATEST_JSON,
+    SubmitIntentOwnershipRecord,
+    SubmitIntentOwnershipState,
+    append_submit_intent_ownership_record,
+)
 
 _EXPECTED_MODE = "PAPER"
 _EXPECTED_HOST = "127.0.0.1"
@@ -547,6 +554,8 @@ def run_ibkr_paper_strategy_bridge(
     )
     bridge_audit_history = _load_bridge_audit_history(config.output_dir)
     runtime: _Runtime | None = None
+    submit_intent_ownership_pre_submit: dict[str, Any] | None = None
+    submit_intent_ownership_update: dict[str, Any] | None = None
     _record_bridge_audit(
         audit_events,
         event_type="intent_received",
@@ -783,13 +792,52 @@ def run_ibkr_paper_strategy_bridge(
                 },
             )
         if config.submit:
-            delegated_result = _delegate_to_manual_harness(
+            submit_intent_ownership_pre_submit = _persist_submit_intent_ownership_before_delegate(
                 config=config,
                 intent=intent,
-                exit_attempt_policy=exit_attempt_policy,
+                qualified_contract_report=qualified_contract_report,
+                positions=positions,
+                open_orders=open_orders,
+                paper_strategy_governance_status=governance_status,
+                paper_strategy_exposure_status=exposure_status,
                 entry_execution_pricing=entry_execution_pricing,
+                phase1_gate=phase1_gate,
             )
+            _record_bridge_audit(
+                audit_events,
+                event_type="submit_intent_ownership_pre_submit_persisted",
+                detail="The bridge durably persisted submit ownership immediately before delegated PAPER submit.",
+                config=config,
+                extra={"submit_intent_ownership": submit_intent_ownership_pre_submit},
+            )
+            try:
+                delegated_result = _delegate_to_manual_harness(
+                    config=config,
+                    intent=intent,
+                    exit_attempt_policy=exit_attempt_policy,
+                    entry_execution_pricing=entry_execution_pricing,
+                )
+            except Exception as delegate_exc:
+                submit_intent_ownership_update = _persist_submit_intent_ownership_delegate_exception(
+                    config=config,
+                    pre_submit_record=submit_intent_ownership_pre_submit,
+                    exc=delegate_exc,
+                )
+                _record_bridge_audit(
+                    audit_events,
+                    event_type="submit_intent_ownership_delegate_exception_recorded",
+                    detail="Delegated PAPER submit raised after durable ownership persistence; ownership remains recoverable.",
+                    config=config,
+                    extra={"submit_intent_ownership": submit_intent_ownership_update},
+                )
+                raise
             classification = _map_delegate_classification(delegated_result)
+            submit_intent_ownership_update = _persist_submit_intent_ownership_after_delegate(
+                config=config,
+                intent=intent,
+                pre_submit_record=submit_intent_ownership_pre_submit,
+                delegated_result=delegated_result,
+            )
             known_managed_exit_order_persistence = _persist_known_managed_exit_order_after_submit(
                 config=config,
                 intent=intent,
@@ -819,7 +867,15 @@ def run_ibkr_paper_strategy_bridge(
                     "intent": intent.to_dict(),
                     "known_managed_exit_order_persistence": known_managed_exit_order_persistence,
                     "known_leak_test_entry_order_persistence": known_leak_test_entry_order_persistence,
+                    "submit_intent_ownership": submit_intent_ownership_update,
                 },
+            )
+            _record_bridge_audit(
+                audit_events,
+                event_type="submit_intent_ownership_state_updated",
+                detail="The bridge updated durable submit ownership after delegated PAPER submit returned.",
+                config=config,
+                extra={"submit_intent_ownership": submit_intent_ownership_update},
             )
             if known_managed_exit_order_persistence:
                 _record_bridge_audit(
@@ -869,6 +925,10 @@ def run_ibkr_paper_strategy_bridge(
             report["known_managed_exit_order_persistence"] = known_managed_exit_order_persistence
         if known_leak_test_entry_order_persistence:
             report["known_leak_test_entry_order_persistence"] = known_leak_test_entry_order_persistence
+        if submit_intent_ownership_pre_submit:
+            report["submit_intent_ownership_pre_submit"] = submit_intent_ownership_pre_submit
+        if submit_intent_ownership_update:
+            report["submit_intent_ownership_update"] = submit_intent_ownership_update
         return IbkrPaperStrategyBridgeArtifacts(classification=classification, report=report, audit_events=audit_events)
     except Exception as exc:
         classification = "PAPER_STRATEGY_INTENT_BLOCKED"
@@ -899,6 +959,8 @@ def run_ibkr_paper_strategy_bridge(
             "paper_strategy_monitor_status": monitor_status,
             "paper_strategy_governance_status": governance_status,
             "paper_strategy_exposure_status": exposure_status,
+            "submit_intent_ownership_pre_submit": submit_intent_ownership_pre_submit,
+            "submit_intent_ownership_update": submit_intent_ownership_update,
             "detail": str(exc),
             "errors": [] if runtime is None else list(runtime.collector.errors),
         }
@@ -2265,6 +2327,302 @@ def _build_report(
     }
 
 
+def _persist_submit_intent_ownership_before_delegate(
+    *,
+    config: IbkrPaperStrategyBridgeConfig,
+    intent: IbkrPaperStrategyOrderIntent,
+    qualified_contract_report: dict[str, Any],
+    positions: dict[str, Any],
+    open_orders: dict[str, Any],
+    paper_strategy_governance_status: dict[str, Any],
+    paper_strategy_exposure_status: dict[str, Any],
+    entry_execution_pricing: dict[str, Any],
+    phase1_gate: dict[str, Any],
+) -> dict[str, Any]:
+    metadata = dict(config.caller_metadata or {})
+    qualified = dict(qualified_contract_report.get("qualified_contract") or {})
+    now = datetime.now(timezone.utc)
+    is_entry = _is_entry_intent(config=config, intent=intent)
+    record = SubmitIntentOwnershipRecord(
+        mode=config.mode,
+        account_id=str(metadata.get("account_id") or config.account_id or "").strip(),
+        lane_id=str(metadata.get("lane_id") or config.strategy_id or "").strip(),
+        strategy_id=str(metadata.get("strategy_id") or _exposure_strategy_id_for_bridge(config=config) or "").strip(),
+        intent_type=_submit_ownership_intent_type(config=config, intent=intent),
+        action=str(intent.action or config.action or "").strip().upper(),
+        symbol=str(qualified.get("symbol") or config.symbol or intent.symbol or "").strip().upper(),
+        local_symbol=str(metadata.get("local_symbol") or qualified.get("local_symbol") or "").strip(),
+        expiry=str(qualified.get("expiry") or config.contract_month or intent.contract_month or "").strip(),
+        con_id=_int_or_none(metadata.get("con_id") or qualified.get("con_id")) or "",
+        qty=float(config.quantity or intent.quantity or 0.0),
+        order_type=str(config.order_type or intent.order_type or "").strip().upper(),
+        limit_price=_submit_ownership_limit_price(entry_execution_pricing),
+        time_in_force=str(config.time_in_force or intent.time_in_force or "").strip().upper(),
+        repo_root=str(config.repo_root),
+        git_head=str(metadata.get("git_head") or _repo_git_head(config.repo_root) or "").strip(),
+        created_at=now,
+        lifecycle_id=None
+        if is_entry
+        else str(
+            metadata.get("lifecycle_id")
+            or metadata.get("position_lifecycle_id")
+            or metadata.get("managed_lifecycle_id")
+            or ""
+        ).strip()
+        or None,
+        lifecycle_id_reserved_only=is_entry,
+        lifecycle_position_open=False,
+        caller_path=str(config.caller_path or "").strip() or None,
+        caller_type=str(metadata.get("caller_type") or "").strip() or None,
+        authorization_path=str(config.leak_test_authorization_path) if config.leak_test_authorization_path else None,
+        authorization_digest=str(config.leak_test_authorization_digest or config.approval_digest or "").strip() or None,
+        runtime_pid=_int_or_none(metadata.get("runtime_pid") or metadata.get("source_runtime_pid")),
+        runtime_cwd=str(metadata.get("runtime_cwd") or metadata.get("source_runtime_cwd") or "").strip() or None,
+        execution_price_source=str(entry_execution_pricing.get("execution_price_source") or "").strip() or None,
+        runtime_reference_price=_text_or_none(
+            entry_execution_pricing.get("runtime_reference_price")
+            or entry_execution_pricing.get("runtime_close")
+            or entry_execution_pricing.get("runtime_market_reference")
+        ),
+        pre_submit_reconciliation_classification=str(
+            phase1_gate.get("classification") or phase1_gate.get("gate_classification") or ""
+        ).strip()
+        or None,
+        governance_classification=str(paper_strategy_governance_status.get("classification") or "").strip() or None,
+        exposure_classification=str(paper_strategy_exposure_status.get("classification") or "").strip() or None,
+        open_order_count=_int_or_none(open_orders.get("open_order_count") or open_orders.get("count")) or 0,
+        unknown_open_order_count=_int_or_none(
+            open_orders.get("unknown_open_order_count") or open_orders.get("unknown_order_count")
+        )
+        or 0,
+        review_required_count=_int_or_none(
+            phase1_gate.get("review_required_count") or positions.get("review_required_count") or 0
+        )
+        or 0,
+        live_money_eligible=False,
+        paper_proof_invoked=False,
+        source_artifact_paths=tuple(
+            path
+            for path in (
+                str(_bridge_report_path(config)),
+                str(config.leak_test_authorization_path) if config.leak_test_authorization_path else None,
+            )
+            if path
+        ),
+        extra={
+            "reason": intent.reason,
+            "intent_id": intent.intent_id or intent.default_intent_id,
+            "caller_metadata": metadata,
+            "qualified_contract_identifier": qualified_contract_report.get("qualified_contract_identifier"),
+            "pre_submit_reconciliation": phase1_gate,
+            "governance_block_reasons": paper_strategy_governance_status.get("block_reasons"),
+            "exposure_block_reasons": paper_strategy_exposure_status.get("block_reasons"),
+        },
+    )
+    result = append_submit_intent_ownership_record(
+        record,
+        jsonl_path=config.repo_root / DEFAULT_TRACK_B_SUBMIT_INTENT_OWNERSHIP_JSONL,
+        latest_path=config.repo_root / DEFAULT_TRACK_B_SUBMIT_INTENT_OWNERSHIP_LATEST_JSON,
+    )
+    return {
+        "persisted": True,
+        "state": result.record.get("state"),
+        "ownership_intent_id": result.record.get("ownership_intent_id"),
+        "lifecycle_id": result.record.get("lifecycle_id"),
+        "lifecycle_id_reserved_only": result.record.get("lifecycle_id_reserved_only"),
+        "lifecycle_position_open": result.record.get("lifecycle_position_open"),
+        "digest": result.record.get("digest"),
+        "jsonl_path": str(result.jsonl_path),
+        "latest_path": str(result.latest_path),
+        "record": result.record,
+    }
+
+
+def _persist_submit_intent_ownership_after_delegate(
+    *,
+    config: IbkrPaperStrategyBridgeConfig,
+    intent: IbkrPaperStrategyOrderIntent,
+    pre_submit_record: dict[str, Any] | None,
+    delegated_result: dict[str, Any] | None,
+) -> dict[str, Any] | None:
+    if not pre_submit_record:
+        return None
+    pre_record = dict(pre_submit_record.get("record") or {})
+    delegated = dict(delegated_result or {})
+    delegated_report = dict(delegated.get("report") or {})
+    lifecycle = dict(
+        delegated_report.get("submit_cancel_lifecycle")
+        or delegated_report.get("lifecycle")
+        or delegated.get("submit_cancel_lifecycle")
+        or {}
+    )
+    mapped = _map_delegate_classification(delegated)
+    state = _submit_ownership_state_for_delegate(
+        mapped_classification=mapped,
+        delegated=delegated,
+        lifecycle=lifecycle,
+    )
+    broker_order_id = _submitted_broker_order_id(delegated=delegated, delegated_report=delegated_report, lifecycle=lifecycle)
+    update_record = _submit_ownership_update_payload(
+        pre_record=pre_record,
+        state=state,
+        broker_order_id=broker_order_id,
+        client_id=_submitted_client_id(config=config, delegated=delegated, delegated_report=delegated_report, lifecycle=lifecycle),
+        perm_id=_submitted_perm_id(delegated=delegated, delegated_report=delegated_report, lifecycle=lifecycle),
+        exec_id=_submitted_exec_id(delegated=delegated, delegated_report=delegated_report, lifecycle=lifecycle),
+        extra={
+            "delegated_classification": delegated.get("classification"),
+            "bridge_classification": mapped,
+            "delegated_status": lifecycle.get("status") or delegated.get("status"),
+            "delegated_detail": delegated.get("detail"),
+        },
+    )
+    result = append_submit_intent_ownership_record(
+        update_record,
+        jsonl_path=config.repo_root / DEFAULT_TRACK_B_SUBMIT_INTENT_OWNERSHIP_JSONL,
+        latest_path=config.repo_root / DEFAULT_TRACK_B_SUBMIT_INTENT_OWNERSHIP_LATEST_JSON,
+    )
+    return {
+        "persisted": True,
+        "state": result.record.get("state"),
+        "ownership_intent_id": result.record.get("ownership_intent_id"),
+        "lifecycle_id": result.record.get("lifecycle_id"),
+        "broker_order_id": result.record.get("broker_order_id"),
+        "client_id": result.record.get("client_id"),
+        "perm_id": result.record.get("perm_id"),
+        "exec_id": result.record.get("exec_id"),
+        "digest": result.record.get("digest"),
+        "jsonl_path": str(result.jsonl_path),
+        "latest_path": str(result.latest_path),
+        "record": result.record,
+    }
+
+
+def _persist_submit_intent_ownership_delegate_exception(
+    *,
+    config: IbkrPaperStrategyBridgeConfig,
+    pre_submit_record: dict[str, Any] | None,
+    exc: BaseException,
+) -> dict[str, Any] | None:
+    if not pre_submit_record:
+        return None
+    pre_record = dict(pre_submit_record.get("record") or {})
+    update_record = _submit_ownership_update_payload(
+        pre_record=pre_record,
+        state=SubmitIntentOwnershipState.BROKER_RESULT_UNKNOWN_REFRESH_REQUIRED,
+        extra={
+            "delegated_exception_type": type(exc).__name__,
+            "delegated_exception_message": str(exc),
+        },
+    )
+    result = append_submit_intent_ownership_record(
+        update_record,
+        jsonl_path=config.repo_root / DEFAULT_TRACK_B_SUBMIT_INTENT_OWNERSHIP_JSONL,
+        latest_path=config.repo_root / DEFAULT_TRACK_B_SUBMIT_INTENT_OWNERSHIP_LATEST_JSON,
+    )
+    return {
+        "persisted": True,
+        "state": result.record.get("state"),
+        "ownership_intent_id": result.record.get("ownership_intent_id"),
+        "lifecycle_id": result.record.get("lifecycle_id"),
+        "digest": result.record.get("digest"),
+        "jsonl_path": str(result.jsonl_path),
+        "latest_path": str(result.latest_path),
+        "record": result.record,
+    }
+
+
+def _submit_ownership_update_payload(
+    *,
+    pre_record: dict[str, Any],
+    state: SubmitIntentOwnershipState,
+    broker_order_id: int | None = None,
+    client_id: int | None = None,
+    perm_id: int | None = None,
+    exec_id: str | None = None,
+    extra: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    payload = dict(pre_record)
+    payload["state"] = state.value
+    payload["updated_at"] = datetime.now(timezone.utc).isoformat()
+    if broker_order_id is not None:
+        payload["broker_order_id"] = str(broker_order_id)
+    if client_id is not None:
+        payload["client_id"] = int(client_id)
+    if perm_id is not None:
+        payload["perm_id"] = int(perm_id)
+    if exec_id:
+        payload["exec_id"] = str(exec_id)
+    merged_extra = dict(payload.get("extra") or {})
+    merged_extra.update(extra or {})
+    payload["extra"] = merged_extra
+    payload.pop("digest", None)
+    return payload
+
+
+def _submit_ownership_state_for_delegate(
+    *,
+    mapped_classification: str,
+    delegated: dict[str, Any],
+    lifecycle: dict[str, Any],
+) -> SubmitIntentOwnershipState:
+    delegated_classification = str(delegated.get("classification") or "").strip().upper()
+    lifecycle_status = str(lifecycle.get("status") or delegated.get("status") or "").strip().lower()
+    if mapped_classification == "PAPER_STRATEGY_ORDER_FILLED":
+        return SubmitIntentOwnershipState.BROKER_POSITION_OBSERVED_ADOPTION_REQUIRED
+    if mapped_classification == "PAPER_STRATEGY_ORDER_WORKING":
+        return SubmitIntentOwnershipState.BROKER_ORDER_WORKING
+    if mapped_classification in {
+        "PAPER_STRATEGY_ORDER_NOT_FILLED_CANCELLED",
+        "PAPER_STRATEGY_ENTRY_MISSED_CANCELLED_ACCEPTED",
+    }:
+        return SubmitIntentOwnershipState.NOT_FILLED_CANCELLED
+    if mapped_classification == "PAPER_STRATEGY_ORDER_REJECTED":
+        return SubmitIntentOwnershipState.REJECTED
+    if mapped_classification == "PAPER_STRATEGY_NEEDS_MANUAL_REVIEW" or "UNKNOWN" in delegated_classification:
+        return SubmitIntentOwnershipState.BROKER_RESULT_UNKNOWN_REFRESH_REQUIRED
+    if lifecycle_status in {"manual_confirmation_unavailable", "unknown_needs_review", "submit_verification_failed"}:
+        return SubmitIntentOwnershipState.BROKER_RESULT_UNKNOWN_REFRESH_REQUIRED
+    return SubmitIntentOwnershipState.REVIEW_REQUIRED
+
+
+def _submit_ownership_intent_type(*, config: IbkrPaperStrategyBridgeConfig, intent: IbkrPaperStrategyOrderIntent) -> str:
+    metadata = dict(config.caller_metadata or {})
+    intent_type = str(metadata.get("intent_type") or "").strip().upper()
+    if intent_type:
+        return intent_type
+    return "ENTRY" if _is_entry_intent(config=config, intent=intent) else "EXIT"
+
+
+def _submit_ownership_limit_price(entry_execution_pricing: dict[str, Any]) -> str:
+    for key in ("limit_price", "order_limit_price", "selected_limit_price"):
+        value = entry_execution_pricing.get(key)
+        if value not in {None, ""}:
+            return str(value)
+    return ""
+
+
+def _repo_git_head(repo_root: Path) -> str | None:
+    git_dir = Path(repo_root) / ".git"
+    head_path = git_dir / "HEAD"
+    try:
+        head = head_path.read_text(encoding="utf-8").strip()
+    except OSError:
+        return None
+    if head.startswith("ref:"):
+        ref = head.split(":", 1)[1].strip()
+        try:
+            return (git_dir / ref).read_text(encoding="utf-8").strip()
+        except OSError:
+            return None
+    return head or None
+
+
+def _text_or_none(value: object) -> str | None:
+    text = str(value or "").strip()
+    return text or None
+
+
 def _bridge_connection_diagnostics(
     *,
     config: IbkrPaperStrategyBridgeConfig,
@@ -2575,6 +2933,63 @@ def _submitted_broker_order_id(
         or delegated_report.get("order_id")
         or delegated.get("submitted_order_id")
         or delegated.get("broker_order_id")
+    )
+
+
+def _submitted_client_id(
+    *,
+    config: IbkrPaperStrategyBridgeConfig,
+    delegated: dict[str, Any],
+    delegated_report: dict[str, Any],
+    lifecycle: dict[str, Any],
+) -> int | None:
+    open_after_submit = dict(lifecycle.get("open_order_after_submit") or {})
+    return _int_or_none(
+        lifecycle.get("client_id")
+        or delegated_report.get("client_id")
+        or delegated.get("client_id")
+        or open_after_submit.get("client_id")
+        or config.client_id
+    )
+
+
+def _submitted_perm_id(
+    *,
+    delegated: dict[str, Any],
+    delegated_report: dict[str, Any],
+    lifecycle: dict[str, Any],
+) -> int | None:
+    open_after_submit = dict(lifecycle.get("open_order_after_submit") or {})
+    return _int_or_none(
+        lifecycle.get("submitted_perm_id")
+        or lifecycle.get("perm_id")
+        or delegated_report.get("submitted_perm_id")
+        or delegated_report.get("perm_id")
+        or delegated.get("submitted_perm_id")
+        or delegated.get("perm_id")
+        or open_after_submit.get("perm_id")
+    )
+
+
+def _submitted_exec_id(
+    *,
+    delegated: dict[str, Any],
+    delegated_report: dict[str, Any],
+    lifecycle: dict[str, Any],
+) -> str | None:
+    open_after_submit = dict(lifecycle.get("open_order_after_submit") or {})
+    return (
+        str(
+            lifecycle.get("exec_id")
+            or lifecycle.get("execution_id")
+            or delegated_report.get("exec_id")
+            or delegated_report.get("execution_id")
+            or delegated.get("exec_id")
+            or delegated.get("execution_id")
+            or open_after_submit.get("exec_id")
+            or ""
+        ).strip()
+        or None
     )
 
 

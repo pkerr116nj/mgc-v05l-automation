@@ -1469,6 +1469,13 @@ def test_submit_requires_manual_harness_bundle(tmp_path: Path) -> None:
 
     assert artifacts.classification == "PAPER_STRATEGY_INTENT_BLOCKED"
     assert "manual-harness frozen preview" in json.dumps(artifacts.report)
+    assert not (
+        tmp_path
+        / "outputs"
+        / "track_b_execution_core"
+        / "submit_intent_ownership"
+        / "track_b_submit_intent_ownership.jsonl"
+    ).exists()
 
 
 def test_leak_test_caller_requires_valid_authorization(tmp_path: Path) -> None:
@@ -1774,6 +1781,197 @@ def test_leak_test_entry_unknown_persists_known_entry_order_state(tmp_path: Path
     assert row["execution_price_source"] == "RUNTIME_DATABENTO_1M_CLOSE"
     assert row["paper_proof_invoked"] is False
     assert row["live_money_eligible"] is False
+
+
+def test_submit_intent_ownership_pre_submit_writes_reserved_entry_context(tmp_path: Path) -> None:
+    config = _config(
+        tmp_path,
+        strategy_id="mnq_1x_ny_early_core__us_midday_long",
+        symbol="MNQ",
+        contract_month="202606",
+        submit=True,
+        caller_metadata=_approved_runtime_metadata(
+            strategy_id="mnq_1x_ny_early_core__us_midday_long",
+            source_instrument="MNQ",
+            executable_proxy="MNQ",
+            intent_type="BUY_TO_OPEN",
+        )
+        | {"git_head": "abc123"},
+    )
+    record = bridge_module._persist_submit_intent_ownership_before_delegate(
+        config=config,
+        intent=_intent_from_config(config),
+        qualified_contract_report=_qualified_contract_report(),
+        positions={"review_required_count": 0},
+        open_orders={"open_order_count": 0, "unknown_open_order_count": 0},
+        paper_strategy_governance_status={"classification": "PAPER_STRATEGY_GOVERNANCE_READY"},
+        paper_strategy_exposure_status={"classification": "PAPER_EXPOSURE_ENTRY_ALLOWED"},
+        entry_execution_pricing={
+            "limit_price": 29752.25,
+            "entry_execution_intent": "PARTICIPATE_NOW",
+            "execution_price_source": "RUNTIME_DATABENTO_1M_CLOSE",
+            "runtime_reference_price": 29752.0,
+        },
+        phase1_gate={"classification": "PHASE1_BROKER_RECONCILIATION_CLEAR", "review_required_count": 0},
+    )
+
+    jsonl = tmp_path / "outputs" / "track_b_execution_core" / "submit_intent_ownership" / "track_b_submit_intent_ownership.jsonl"
+    latest = tmp_path / "outputs" / "track_b_execution_core" / "submit_intent_ownership" / "latest_track_b_submit_intent_ownership.json"
+    payload = json.loads(jsonl.read_text(encoding="utf-8").splitlines()[0])
+    assert record["state"] == "PRE_SUBMIT_INTENT_DURABLE"
+    assert payload["state"] == "PRE_SUBMIT_INTENT_DURABLE"
+    assert payload["lifecycle_id"].startswith("reserved_submit_")
+    assert payload["lifecycle_id_reserved_only"] is True
+    assert payload["lifecycle_position_open"] is False
+    assert payload["symbol"] == "MNQ"
+    assert payload["local_symbol"] == "MNQM6"
+    assert payload["execution_price_source"] == "RUNTIME_DATABENTO_1M_CLOSE"
+    assert latest.exists()
+    assert not (tmp_path / "var" / "paper_strategy_position_ledger.json").exists()
+
+
+def test_submit_intent_ownership_delegate_exception_leaves_recoverable_intent(tmp_path: Path) -> None:
+    config = _config(
+        tmp_path,
+        strategy_id="mnq_1x_ny_early_core__us_midday_long",
+        symbol="MNQ",
+        contract_month="202606",
+        submit=True,
+        caller_metadata=_approved_runtime_metadata(
+            strategy_id="mnq_1x_ny_early_core__us_midday_long",
+            source_instrument="MNQ",
+            executable_proxy="MNQ",
+            intent_type="BUY_TO_OPEN",
+        )
+        | {"git_head": "abc123"},
+    )
+    pre_submit = bridge_module._persist_submit_intent_ownership_before_delegate(
+        config=config,
+        intent=_intent_from_config(config),
+        qualified_contract_report=_qualified_contract_report(),
+        positions={},
+        open_orders={},
+        paper_strategy_governance_status={"classification": "PAPER_STRATEGY_GOVERNANCE_READY"},
+        paper_strategy_exposure_status={"classification": "PAPER_EXPOSURE_ENTRY_ALLOWED"},
+        entry_execution_pricing={"limit_price": 29752.25, "execution_price_source": "RUNTIME_DATABENTO_1M_CLOSE"},
+        phase1_gate={"classification": "PHASE1_BROKER_RECONCILIATION_CLEAR"},
+    )
+
+    update = bridge_module._persist_submit_intent_ownership_delegate_exception(
+        config=config,
+        pre_submit_record=pre_submit,
+        exc=RuntimeError("delegate crashed after durable intent"),
+    )
+
+    assert update["state"] == "BROKER_RESULT_UNKNOWN_REFRESH_REQUIRED"
+    assert update["ownership_intent_id"] == pre_submit["ownership_intent_id"]
+    jsonl = tmp_path / "outputs" / "track_b_execution_core" / "submit_intent_ownership" / "track_b_submit_intent_ownership.jsonl"
+    records = [json.loads(line) for line in jsonl.read_text(encoding="utf-8").splitlines()]
+    assert [row["state"] for row in records] == [
+        "PRE_SUBMIT_INTENT_DURABLE",
+        "BROKER_RESULT_UNKNOWN_REFRESH_REQUIRED",
+    ]
+    assert "delegate crashed" in records[-1]["extra"]["delegated_exception_message"]
+
+
+@pytest.mark.parametrize(
+    ("delegated_result", "expected_state"),
+    [
+        (
+            {
+                "classification": "PAPER_ORDER_UNKNOWN_NEEDS_MANUAL_TWS_REVIEW",
+                "report": {"lifecycle": {"status": "unknown_needs_review", "submitted_order_id": 28, "client_id": 11940}},
+            },
+            "BROKER_RESULT_UNKNOWN_REFRESH_REQUIRED",
+        ),
+        (
+            {
+                "classification": "PAPER_ORDER_WORKING",
+                "report": {
+                    "lifecycle": {
+                        "status": "submitted",
+                        "submitted_order_id": 29,
+                        "client_id": 11940,
+                        "submitted_perm_id": 614044377,
+                    }
+                },
+            },
+            "BROKER_ORDER_WORKING",
+        ),
+        (
+            {
+                "classification": "PAPER_ORDER_SUBMITTED_NOT_FILLED_CANCELLED",
+                "report": {"lifecycle": {"status": "fill_timeout_cancelled", "submitted_order_id": 30}},
+            },
+            "NOT_FILLED_CANCELLED",
+        ),
+        (
+            {
+                "classification": "PAPER_ORDER_REJECTED",
+                "report": {"lifecycle": {"status": "rejected", "submitted_order_id": 31}},
+            },
+            "REJECTED",
+        ),
+        (
+            {
+                "classification": "PAPER_FILL_TEST_PASSED",
+                "report": {
+                    "lifecycle": {
+                        "status": "filled",
+                        "submitted_order_id": 32,
+                        "client_id": 11940,
+                        "submitted_perm_id": 614044378,
+                        "exec_id": "0000e1a7.test",
+                    }
+                },
+            },
+            "BROKER_POSITION_OBSERVED_ADOPTION_REQUIRED",
+        ),
+    ],
+)
+def test_submit_intent_ownership_post_delegate_state_updates(
+    tmp_path: Path,
+    delegated_result: dict[str, object],
+    expected_state: str,
+) -> None:
+    config = _config(
+        tmp_path,
+        strategy_id="mnq_1x_ny_early_core__us_midday_long",
+        symbol="MNQ",
+        contract_month="202606",
+        submit=True,
+        caller_metadata=_approved_runtime_metadata(
+            strategy_id="mnq_1x_ny_early_core__us_midday_long",
+            source_instrument="MNQ",
+            executable_proxy="MNQ",
+            intent_type="BUY_TO_OPEN",
+        )
+        | {"git_head": "abc123"},
+    )
+    intent = _intent_from_config(config)
+    pre_submit = bridge_module._persist_submit_intent_ownership_before_delegate(
+        config=config,
+        intent=intent,
+        qualified_contract_report=_qualified_contract_report(),
+        positions={},
+        open_orders={},
+        paper_strategy_governance_status={"classification": "PAPER_STRATEGY_GOVERNANCE_READY"},
+        paper_strategy_exposure_status={"classification": "PAPER_EXPOSURE_ENTRY_ALLOWED"},
+        entry_execution_pricing={"limit_price": 29752.25, "execution_price_source": "RUNTIME_DATABENTO_1M_CLOSE"},
+        phase1_gate={"classification": "PHASE1_BROKER_RECONCILIATION_CLEAR"},
+    )
+
+    update = bridge_module._persist_submit_intent_ownership_after_delegate(
+        config=config,
+        intent=intent,
+        pre_submit_record=pre_submit,
+        delegated_result=delegated_result,  # type: ignore[arg-type]
+    )
+
+    assert update["state"] == expected_state
+    assert update["ownership_intent_id"] == pre_submit["ownership_intent_id"]
+    if expected_state in {"BROKER_ORDER_WORKING", "BROKER_POSITION_OBSERVED_ADOPTION_REQUIRED"}:
+        assert update["broker_order_id"] is not None
 
 
 def test_leak_test_submit_handshake_failure_reports_paper_connection_config(tmp_path: Path) -> None:
