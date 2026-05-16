@@ -8,6 +8,11 @@ from mgc_v05l.execution_core.track_b_paper_broker_reconciliation import (
     ReconciliationConfig,
     reconcile_track_b_paper_broker_truth,
 )
+from mgc_v05l.execution_core.track_b_submit_intent_ownership import (
+    SubmitIntentOwnershipRecord,
+    SubmitIntentOwnershipState,
+    append_submit_intent_ownership_record,
+)
 
 
 NOW = datetime(2026, 5, 11, 12, 0, tzinfo=timezone.utc)
@@ -65,6 +70,110 @@ def test_blocks_when_track_b_broker_position_exists_but_lifecycle_is_flat(tmp_pa
     assert report["broker_reconciled"] is False
     assert any(blocker["code"] == "TRACK_B_BROKER_LIFECYCLE_POSITION_COUNT_MISMATCH" for blocker in report["blockers"])
     assert not config.reconciled_live_position_status_path.exists()
+
+
+def test_broker_only_position_with_matching_submit_intent_is_adoption_required(tmp_path: Path) -> None:
+    config = _write_base_artifacts(tmp_path)
+    _write_submit_intent_ownership(config)
+    _write_broker_truth(
+        config,
+        positions=[
+            {
+                "account_id": "DUM882026",
+                "symbol": "MGC",
+                "local_symbol": "MGCM6",
+                "expiry": "20260626",
+                "con_id": 712565978,
+                "security_type": "FUT",
+                "quantity": "1",
+            }
+        ],
+    )
+
+    report = reconcile_track_b_paper_broker_truth(config=config, now=NOW)
+
+    assert report["classification"] == "TRACK_B_PAPER_BROKER_RECONCILIATION_BLOCKED"
+    assert report["broker_reconciled"] is False
+    assert report["submit_intent_ownership_reconciliation"]["classification"] == "SUBMIT_INTENT_BROKER_POSITION_ADOPTION_REQUIRED"
+    assert any(blocker["code"] == "SUBMIT_INTENT_BROKER_POSITION_ADOPTION_REQUIRED" for blocker in report["blockers"])
+    assert not any(blocker["code"] == "TRACK_B_BROKER_LIFECYCLE_POSITION_COUNT_MISMATCH" for blocker in report["blockers"])
+
+
+def test_competing_submit_intents_block_review_required(tmp_path: Path) -> None:
+    config = _write_base_artifacts(tmp_path)
+    _write_submit_intent_ownership(config, broker_order_id="28")
+    _write_submit_intent_ownership(config, broker_order_id="29")
+    _write_broker_truth(
+        config,
+        positions=[
+            {
+                "account_id": "DUM882026",
+                "symbol": "MGC",
+                "local_symbol": "MGCM6",
+                "expiry": "20260626",
+                "con_id": 712565978,
+                "security_type": "FUT",
+                "quantity": "1",
+            }
+        ],
+    )
+
+    report = reconcile_track_b_paper_broker_truth(config=config, now=NOW)
+
+    assert report["classification"] == "TRACK_B_PAPER_BROKER_RECONCILIATION_BLOCKED"
+    assert report["submit_intent_ownership_reconciliation"]["classification"] == "SUBMIT_INTENT_COMPETING_UNRESOLVED_REVIEW_REQUIRED"
+    assert any(blocker["code"] == "SUBMIT_INTENT_COMPETING_UNRESOLVED_REVIEW_REQUIRED" for blocker in report["blockers"])
+
+
+def test_mismatched_submit_intent_does_not_anonymously_match_broker_position(tmp_path: Path) -> None:
+    config = _write_base_artifacts(tmp_path)
+    _write_submit_intent_ownership(config, action="SELL")
+    _write_broker_truth(
+        config,
+        positions=[
+            {
+                "account_id": "DUM882026",
+                "symbol": "MGC",
+                "local_symbol": "MGCM6",
+                "expiry": "20260626",
+                "con_id": 712565978,
+                "security_type": "FUT",
+                "quantity": "1",
+            }
+        ],
+    )
+
+    report = reconcile_track_b_paper_broker_truth(config=config, now=NOW)
+
+    assert report["classification"] == "TRACK_B_PAPER_BROKER_RECONCILIATION_BLOCKED"
+    assert report["submit_intent_ownership_reconciliation"]["classification"] == "SUBMIT_INTENT_IDENTITY_MISMATCH_REVIEW_REQUIRED"
+    assert any(blocker["code"] == "SUBMIT_INTENT_IDENTITY_MISMATCH_REVIEW_REQUIRED" for blocker in report["blockers"])
+
+
+def test_stale_submit_intent_does_not_adopt_broker_only_position(tmp_path: Path) -> None:
+    config = _write_base_artifacts(tmp_path)
+    _write_submit_intent_ownership(config, created_at="2026-05-11T11:50:00+00:00")
+    _write_broker_truth(
+        config,
+        positions=[
+            {
+                "account_id": "DUM882026",
+                "symbol": "MGC",
+                "local_symbol": "MGCM6",
+                "expiry": "20260626",
+                "con_id": 712565978,
+                "security_type": "FUT",
+                "quantity": "1",
+            }
+        ],
+    )
+
+    report = reconcile_track_b_paper_broker_truth(config=config, now=NOW)
+
+    assert report["classification"] == "TRACK_B_PAPER_BROKER_RECONCILIATION_BLOCKED"
+    assert report["submit_intent_ownership_reconciliation"]["classification"] == "SUBMIT_INTENT_IDENTITY_MISMATCH_REVIEW_REQUIRED"
+    assert any(blocker["code"] == "SUBMIT_INTENT_IDENTITY_MISMATCH_REVIEW_REQUIRED" for blocker in report["blockers"])
+    assert not any(blocker["code"] == "SUBMIT_INTENT_BROKER_POSITION_ADOPTION_REQUIRED" for blocker in report["blockers"])
 
 
 def test_count_mismatch_still_reports_cost_basis_for_matched_positions(tmp_path: Path) -> None:
@@ -783,6 +892,83 @@ def test_broker_truth_settlement_timeout_blocks(tmp_path: Path) -> None:
     assert any(blocker["code"] == "BROKER_TRUTH_SETTLEMENT_TIMEOUT" for blocker in report["blockers"])
 
 
+def test_unresolved_submit_intent_without_broker_effect_waits_inside_window(tmp_path: Path) -> None:
+    config = _write_base_artifacts(tmp_path)
+    _write_submit_intent_ownership(config, created_at="2026-05-11T11:59:00+00:00")
+    _write_broker_truth(config, positions=[])
+
+    report = reconcile_track_b_paper_broker_truth(config=config, now=NOW)
+
+    assert report["classification"] == "SUBMIT_INTENT_NO_BROKER_EFFECT_PENDING_SETTLEMENT"
+    assert report["broker_reconciled"] is False
+    assert report["submit_intent_ownership_reconciliation"]["classification"] == "SUBMIT_INTENT_NO_BROKER_EFFECT_PENDING_SETTLEMENT"
+    assert report["blockers"] == []
+
+
+def test_unresolved_submit_intent_without_broker_effect_times_out(tmp_path: Path) -> None:
+    config = _write_base_artifacts(tmp_path)
+    _write_submit_intent_ownership(config, created_at="2026-05-11T11:50:00+00:00")
+    _write_broker_truth(config, positions=[])
+
+    report = reconcile_track_b_paper_broker_truth(config=config, now=NOW)
+
+    assert report["classification"] == "TRACK_B_PAPER_BROKER_RECONCILIATION_BLOCKED"
+    assert report["broker_reconciled"] is False
+    assert report["submit_intent_ownership_reconciliation"]["classification"] == "SUBMIT_INTENT_NO_BROKER_EFFECT_TIMEOUT"
+    assert any(blocker["code"] == "SUBMIT_INTENT_NO_BROKER_EFFECT_TIMEOUT" for blocker in report["blockers"])
+
+
+def test_unsafe_unresolved_submit_intent_blocks_reconciliation(tmp_path: Path) -> None:
+    config = _write_base_artifacts(tmp_path)
+    record = _write_submit_intent_ownership(config, created_at="2026-05-11T11:59:00+00:00")
+    path = config.repo_root / "outputs/track_b_execution_core/submit_intent_ownership/track_b_submit_intent_ownership.jsonl"
+    tampered = dict(record)
+    tampered["live_money_eligible"] = True
+    path.write_text(json.dumps(tampered, sort_keys=True) + "\n", encoding="utf-8")
+    _write_broker_truth(config, positions=[])
+
+    report = reconcile_track_b_paper_broker_truth(config=config, now=NOW)
+
+    assert report["classification"] == "TRACK_B_PAPER_BROKER_RECONCILIATION_BLOCKED"
+    assert report["submit_intent_ownership_reconciliation"]["classification"] == "SUBMIT_INTENT_IDENTITY_MISMATCH_REVIEW_REQUIRED"
+    assert any(blocker["code"] == "SUBMIT_INTENT_IDENTITY_MISMATCH_REVIEW_REQUIRED" for blocker in report["blockers"])
+
+
+def test_unknown_open_order_blocks_even_with_matching_submit_intent(tmp_path: Path) -> None:
+    config = _write_base_artifacts(tmp_path)
+    _write_submit_intent_ownership(config, created_at="2026-05-11T11:59:00+00:00")
+    _write_broker_truth(
+        config,
+        positions=[],
+        open_orders=[
+            {
+                "account_id": "DUM882026",
+                "symbol": "MGC",
+                "local_symbol": "MGCM6",
+                "expiry": "20260626",
+                "con_id": 712565978,
+                "order_id": "99",
+                "action": "BUY",
+                "quantity": "1",
+            }
+        ],
+    )
+
+    report = reconcile_track_b_paper_broker_truth(config=config, now=NOW)
+
+    assert report["classification"] == "TRACK_B_PAPER_BROKER_RECONCILIATION_BLOCKED"
+    assert any(blocker["code"] == "UNKNOWN_BROKER_OPEN_ORDER" for blocker in report["blockers"])
+    assert report["submit_intent_ownership_reconciliation"]["classification"] == "SUBMIT_INTENT_OPEN_ORDER_AMBIGUITY"
+
+
+def test_reconciliation_module_has_no_broker_mutation_symbols() -> None:
+    source = Path("src/mgc_v05l/execution_core/track_b_paper_broker_reconciliation.py").read_text(encoding="utf-8")
+    assert "placeOrder" not in source
+    assert "cancelOrder" not in source
+    assert "IbkrClient" not in source
+    assert "IbkrSession" not in source
+
+
 def test_unknown_open_order_does_not_enter_settlement_wait(tmp_path: Path) -> None:
     config = _write_base_artifacts(
         tmp_path,
@@ -976,6 +1162,68 @@ def _write_broker_truth(
             "open_orders": open_orders_payload,
         },
     )
+
+
+def _write_submit_intent_ownership(
+    config: ReconciliationConfig,
+    *,
+    broker_order_id: str = "28",
+    action: str = "BUY",
+    created_at: str = "2026-05-11T11:59:00+00:00",
+    live_money_eligible: bool = False,
+    paper_proof_invoked: bool = False,
+) -> dict[str, object]:
+    parsed_created_at = datetime.fromisoformat(created_at.replace("Z", "+00:00"))
+    record = SubmitIntentOwnershipRecord(
+        mode="PAPER",
+        account_id="DUM882026",
+        lane_id="atp_companion_v1_asia_us",
+        strategy_id="atp_companion_v1__benchmark_mgc_asia_us",
+        intent_type="BUY_TO_OPEN" if action == "BUY" else "SELL_TO_OPEN",
+        action=action,
+        symbol="MGC",
+        local_symbol="MGCM6",
+        expiry="20260626",
+        con_id=712565978,
+        qty=1,
+        order_type="LMT",
+        limit_price="4543.2",
+        time_in_force="DAY",
+        repo_root=str(config.repo_root),
+        git_head="abc123",
+        created_at=parsed_created_at,
+        state=SubmitIntentOwnershipState.BROKER_RESULT_UNKNOWN_REFRESH_REQUIRED,
+        ownership_intent_id=f"submit_owner_test_{broker_order_id}",
+        lifecycle_id=f"reserved_submit_atp_companion_v1_asia_us_{broker_order_id}",
+        lifecycle_id_reserved_only=True,
+        lifecycle_position_open=False,
+        caller_path="track_b_paper_leak_test_apply",
+        caller_type="track_b_paper_leak_test",
+        execution_price_source="RUNTIME_DATABENTO_1M_CLOSE",
+        runtime_reference_price="4543.1",
+        pre_submit_reconciliation_classification="PHASE1_BROKER_RECONCILIATION_CLEAR",
+        governance_classification="PAPER_STRATEGY_GOVERNANCE_READY",
+        exposure_classification="PAPER_EXPOSURE_ENTRY_ALLOWED",
+        open_order_count=0,
+        unknown_open_order_count=0,
+        review_required_count=0,
+        live_money_eligible=live_money_eligible,
+        paper_proof_invoked=paper_proof_invoked,
+        broker_order_id=broker_order_id,
+        client_id=11940,
+        perm_id=614044377,
+        extra={
+            "reason": "LEAK_TEST_ENTRY",
+            "delegated_classification": "PAPER_ORDER_UNKNOWN_NEEDS_MANUAL_TWS_REVIEW",
+            "bridge_classification": "PAPER_STRATEGY_NEEDS_MANUAL_REVIEW",
+        },
+    )
+    result = append_submit_intent_ownership_record(
+        record,
+        jsonl_path=config.repo_root / "outputs/track_b_execution_core/submit_intent_ownership/track_b_submit_intent_ownership.jsonl",
+        latest_path=config.repo_root / "outputs/track_b_execution_core/submit_intent_ownership/latest_track_b_submit_intent_ownership.json",
+    )
+    return result.record
 
 
 def _write_market_price(config: ReconciliationConfig, root: str, *, close: float) -> None:

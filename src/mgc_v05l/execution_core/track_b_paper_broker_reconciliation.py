@@ -22,6 +22,10 @@ from mgc_v05l.execution_core.track_b_exit_safety import (
     bridge_terminal_event_grace_state,
     classify_managed_exit_working_order,
 )
+from mgc_v05l.execution_core.track_b_submit_intent_ownership import (
+    DEFAULT_TRACK_B_SUBMIT_INTENT_OWNERSHIP_JSONL,
+    load_unresolved_submit_intent_ownership_records,
+)
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 DEFAULT_LEDGER_ROOT = REPO_ROOT / "outputs" / "track_b_execution_core" / "paper_trade_ledger"
@@ -48,6 +52,7 @@ DEFAULT_KNOWN_LEAK_TEST_ENTRY_ORDERS_PATH = (
     / "leak_test_entry_orders"
     / "latest_known_leak_test_entry_orders.json"
 )
+DEFAULT_SUBMIT_INTENT_OWNERSHIP_PATH = REPO_ROOT / DEFAULT_TRACK_B_SUBMIT_INTENT_OWNERSHIP_JSONL
 DEFAULT_MAX_AGE_SECONDS = float(os.environ.get("TRACK_B_BROKER_TRUTH_MAX_AGE_SECONDS", "120"))
 DEFAULT_BROKER_TRUTH_SETTLEMENT_SECONDS = float(os.environ.get("TRACK_B_PAPER_BROKER_TRUTH_SETTLEMENT_SECONDS", "300"))
 DEFAULT_BROKER_TRUTH_SETTLEMENT_POLL_SECONDS = float(os.environ.get("TRACK_B_PAPER_BROKER_TRUTH_SETTLEMENT_POLL_SECONDS", "15"))
@@ -80,6 +85,7 @@ class ReconciliationConfig:
     broker_truth_settlement_poll_seconds: float = DEFAULT_BROKER_TRUTH_SETTLEMENT_POLL_SECONDS
     account: str = PAPER_ACCOUNT
     symbols: tuple[str, ...] = PHASE1_RUNTIME_TICKER_ORDER
+    submit_intent_ownership_path: Path = DEFAULT_SUBMIT_INTENT_OWNERSHIP_PATH
 
     @property
     def trade_summary_path(self) -> Path:
@@ -187,6 +193,16 @@ def reconcile_track_b_paper_broker_truth(
         known_managed_exit_orders=known_managed_exit_orders,
         known_leak_test_entry_orders=known_leak_test_entry_orders,
     )
+    unresolved_submit_intents = _unresolved_submit_intent_ownership_records(config)
+    submit_intent_ownership_reconciliation = _submit_intent_ownership_reconciliation_state(
+        unresolved_submit_intents=unresolved_submit_intents,
+        broker_positions=track_b_positions,
+        lifecycle_positions=lifecycle_positions,
+        unknown_open_orders=unknown_track_b_open_orders,
+        position_match_report=position_match_report,
+        config=config,
+        now=actual_now,
+    )
     broker_truth_settlement = _broker_truth_settlement_state(
         position_match_report=position_match_report,
         broker_positions=track_b_positions,
@@ -215,8 +231,31 @@ def reconcile_track_b_paper_broker_truth(
         }
     ]
     if position_match_report["matched"] is not True:
+        submit_intent_classification = str(submit_intent_ownership_reconciliation.get("classification") or "")
         settlement_classification = str(broker_truth_settlement.get("classification") or "")
-        if settlement_classification == "WAITING_FOR_BROKER_TRUTH_SETTLEMENT":
+        if submit_intent_classification == "SUBMIT_INTENT_BROKER_POSITION_ADOPTION_REQUIRED":
+            blockers.append(
+                {
+                    "code": "SUBMIT_INTENT_BROKER_POSITION_ADOPTION_REQUIRED",
+                    "legacy_code": "TRACK_B_BROKER_LIFECYCLE_POSITION_COUNT_MISMATCH",
+                    "detail": "Broker position is attributed to a durable unresolved Track B submit intent and requires lifecycle adoption.",
+                    "submit_intent_ownership_reconciliation": submit_intent_ownership_reconciliation,
+                    "position_match_blocker": position_match_report.get("blocker"),
+                }
+            )
+        elif submit_intent_classification in {
+            "SUBMIT_INTENT_COMPETING_UNRESOLVED_REVIEW_REQUIRED",
+            "SUBMIT_INTENT_IDENTITY_MISMATCH_REVIEW_REQUIRED",
+        }:
+            blockers.append(
+                {
+                    "code": submit_intent_classification,
+                    "detail": submit_intent_ownership_reconciliation.get("detail"),
+                    "submit_intent_ownership_reconciliation": submit_intent_ownership_reconciliation,
+                    "position_match_blocker": position_match_report.get("blocker"),
+                }
+            )
+        elif settlement_classification == "WAITING_FOR_BROKER_TRUTH_SETTLEMENT":
             pass
         elif settlement_classification in {"BROKER_TRUTH_SETTLEMENT_TIMEOUT", "BROKER_TRUTH_SETTLEMENT_CONTRADICTORY_STATE"}:
             blockers.append(
@@ -229,6 +268,18 @@ def reconcile_track_b_paper_broker_truth(
             )
         else:
             blockers.append(position_match_report["blocker"])
+    elif submit_intent_ownership_reconciliation.get("classification") in {
+        "SUBMIT_INTENT_NO_BROKER_EFFECT_TIMEOUT",
+        "SUBMIT_INTENT_COMPETING_UNRESOLVED_REVIEW_REQUIRED",
+        "SUBMIT_INTENT_IDENTITY_MISMATCH_REVIEW_REQUIRED",
+    }:
+        blockers.append(
+            {
+                "code": submit_intent_ownership_reconciliation.get("classification"),
+                "detail": submit_intent_ownership_reconciliation.get("detail"),
+                "submit_intent_ownership_reconciliation": submit_intent_ownership_reconciliation,
+            }
+        )
     if unknown_track_b_open_orders:
         blockers.append(
             {
@@ -241,8 +292,15 @@ def reconcile_track_b_paper_broker_truth(
 
     settlement_waiting = broker_truth_settlement.get("classification") == "WAITING_FOR_BROKER_TRUTH_SETTLEMENT"
     settlement_resolved = broker_truth_settlement.get("classification") == "BROKER_TRUTH_SETTLEMENT_RESOLVED"
-    reconciled = not blockers and position_match_report["matched"] is True
-    if settlement_waiting:
+    submit_intent_pending = (
+        submit_intent_ownership_reconciliation.get("classification") == "SUBMIT_INTENT_NO_BROKER_EFFECT_PENDING_SETTLEMENT"
+        and not unknown_track_b_open_orders
+        and position_match_report["matched"] is True
+    )
+    reconciled = not blockers and position_match_report["matched"] is True and not submit_intent_pending
+    if submit_intent_pending:
+        classification = "SUBMIT_INTENT_NO_BROKER_EFFECT_PENDING_SETTLEMENT"
+    elif settlement_waiting:
         classification = "WAITING_FOR_BROKER_TRUTH_SETTLEMENT"
     elif settlement_resolved:
         classification = "BROKER_TRUTH_SETTLEMENT_RESOLVED"
@@ -291,6 +349,7 @@ def reconcile_track_b_paper_broker_truth(
         "track_b_broker_open_order_count": len(track_b_open_orders),
         "known_managed_exit_order_count": len(known_managed_exit_orders),
         "known_leak_test_entry_order_count": len(known_leak_test_entry_orders),
+        "unresolved_submit_intent_ownership_count": len(unresolved_submit_intents),
         "stale_managed_exit_order_count": len(stale_managed_exit_orders),
         "hard_exit_order_not_marketable_count": len(hard_exit_order_not_marketable),
         "unknown_broker_open_order_count": len(unknown_track_b_open_orders),
@@ -298,6 +357,8 @@ def reconcile_track_b_paper_broker_truth(
         "track_b_broker_open_orders": track_b_open_orders,
         "known_managed_exit_orders": known_managed_exit_orders,
         "known_leak_test_entry_orders": known_leak_test_entry_orders,
+        "unresolved_submit_intent_ownership_records": unresolved_submit_intents,
+        "submit_intent_ownership_reconciliation": submit_intent_ownership_reconciliation,
         "stale_managed_exit_orders": stale_managed_exit_orders,
         "hard_exit_order_not_marketable_orders": hard_exit_order_not_marketable,
         "unknown_broker_open_orders": unknown_track_b_open_orders,
@@ -585,6 +646,309 @@ def _broker_truth_settlement_state(
     if event_age <= config.broker_truth_settlement_seconds:
         return {**payload, "classification": "WAITING_FOR_BROKER_TRUTH_SETTLEMENT", "detail": "Mismatch is temporarily tolerated because it is explained by a recent attributed PAPER broker-effect event."}
     return {**payload, "classification": "BROKER_TRUTH_SETTLEMENT_TIMEOUT", "detail": "Broker truth did not settle inside the configured PAPER settlement window."}
+
+
+def _unresolved_submit_intent_ownership_records(config: ReconciliationConfig) -> list[dict[str, Any]]:
+    path = _repo_scoped_path(config.repo_root, config.submit_intent_ownership_path)
+    rows = load_unresolved_submit_intent_ownership_records(path)
+    allowed_symbols = {item.upper() for item in config.symbols}
+    return [
+        dict(row)
+        for row in rows
+        if str(row.get("symbol") or "").strip().upper() in allowed_symbols
+    ]
+
+
+def _repo_scoped_path(repo_root: Path, path: Path) -> Path:
+    candidate = Path(path)
+    if not candidate.is_absolute():
+        return repo_root / candidate
+    try:
+        return repo_root / candidate.relative_to(REPO_ROOT)
+    except ValueError:
+        return candidate
+
+
+def _submit_intent_ownership_reconciliation_state(
+    *,
+    unresolved_submit_intents: Sequence[Mapping[str, Any]],
+    broker_positions: Sequence[Mapping[str, Any]],
+    lifecycle_positions: Sequence[Mapping[str, Any]],
+    unknown_open_orders: Sequence[Mapping[str, Any]],
+    position_match_report: Mapping[str, Any],
+    config: ReconciliationConfig,
+    now: datetime,
+) -> dict[str, Any]:
+    base = {
+        "source": "TRACK_B_SUBMIT_INTENT_OWNERSHIP",
+        "window_seconds": config.broker_truth_settlement_seconds,
+        "unresolved_count": len(unresolved_submit_intents),
+        "unresolved_records": [dict(row) for row in unresolved_submit_intents],
+        "live_money_eligible": False,
+        "paper_proof_invoked": False,
+    }
+    if not unresolved_submit_intents:
+        return {**base, "classification": "SUBMIT_INTENT_OWNERSHIP_NOT_APPLICABLE", "detail": "No unresolved submit-intent ownership records."}
+    unsafe = [
+        dict(row)
+        for row in unresolved_submit_intents
+        if str(row.get("mode") or "").upper() != "PAPER"
+        or str(row.get("account_id") or "") != config.account
+        or row.get("live_money_eligible") is not False
+        or row.get("paper_proof_invoked") is not False
+    ]
+    if unsafe:
+        return {
+            **base,
+            "classification": "SUBMIT_INTENT_IDENTITY_MISMATCH_REVIEW_REQUIRED",
+            "detail": "Unresolved submit-intent ownership contains unsafe or non-PAPER/account-mismatched records.",
+            "mismatched_records": unsafe,
+        }
+    if unknown_open_orders:
+        return {
+            **base,
+            "classification": "SUBMIT_INTENT_OPEN_ORDER_AMBIGUITY",
+            "detail": "Unknown broker open orders block submit-intent settlement/adoption attribution.",
+        }
+    if position_match_report.get("matched") is True and lifecycle_positions:
+        return {**base, "classification": "SUBMIT_INTENT_OWNERSHIP_NOT_APPLICABLE", "detail": "Broker and lifecycle are already matched."}
+
+    unmatched_broker_positions = _unmatched_broker_positions_from_match_report(position_match_report)
+    if unmatched_broker_positions:
+        return _submit_intent_state_for_unmatched_broker_positions(
+            base=base,
+            unresolved_submit_intents=unresolved_submit_intents,
+            unmatched_broker_positions=unmatched_broker_positions,
+            config=config,
+            now=now,
+        )
+    if not broker_positions and not lifecycle_positions:
+        return _submit_intent_state_for_no_broker_effect(
+            base=base,
+            unresolved_submit_intents=unresolved_submit_intents,
+            config=config,
+            now=now,
+        )
+    return {**base, "classification": "SUBMIT_INTENT_OWNERSHIP_NOT_APPLICABLE", "detail": "Submit-intent ownership does not explain current broker/lifecycle state."}
+
+
+def _unmatched_broker_positions_from_match_report(position_match_report: Mapping[str, Any]) -> list[dict[str, Any]]:
+    mismatches = [row for row in position_match_report.get("mismatches", []) or [] if isinstance(row, Mapping)]
+    positions = [
+        dict(row.get("broker_position"))
+        for row in mismatches
+        if isinstance(row.get("broker_position"), Mapping)
+    ]
+    if positions:
+        return positions
+    broker_rows = position_match_report.get("broker")
+    lifecycle_rows = position_match_report.get("lifecycle")
+    if isinstance(broker_rows, list) and not lifecycle_rows:
+        return [dict(row) for row in broker_rows if isinstance(row, Mapping)]
+    return []
+
+
+def _submit_intent_state_for_unmatched_broker_positions(
+    *,
+    base: Mapping[str, Any],
+    unresolved_submit_intents: Sequence[Mapping[str, Any]],
+    unmatched_broker_positions: Sequence[Mapping[str, Any]],
+    config: ReconciliationConfig,
+    now: datetime,
+) -> dict[str, Any]:
+    if len(unmatched_broker_positions) != 1:
+        return {
+            **base,
+            "classification": "SUBMIT_INTENT_IDENTITY_MISMATCH_REVIEW_REQUIRED",
+            "detail": "Submit-intent attribution requires exactly one unmatched broker position.",
+            "unmatched_broker_positions": [dict(row) for row in unmatched_broker_positions],
+        }
+    broker_position = dict(unmatched_broker_positions[0])
+    same_contract = [
+        dict(row)
+        for row in unresolved_submit_intents
+        if _submit_intent_contract_matches_broker_position(row, broker_position, config.symbols)
+    ]
+    exact_matches = [
+        row
+        for row in same_contract
+        if _submit_intent_matches_broker_position(row, broker_position, config=config)
+    ]
+    current_matches: list[dict[str, Any]] = []
+    stale_or_unusable_matches: list[dict[str, Any]] = []
+    for row in exact_matches:
+        event_age = _submit_intent_age_seconds(row, now)
+        if event_age is None or event_age > config.broker_truth_settlement_seconds:
+            stale_or_unusable_matches.append(row)
+        else:
+            current_matches.append(row)
+    if len(current_matches) > 1 or (current_matches and stale_or_unusable_matches):
+        return {
+            **base,
+            "classification": "SUBMIT_INTENT_COMPETING_UNRESOLVED_REVIEW_REQUIRED",
+            "detail": "Multiple current or stale unresolved submit-intent ownership records match the same broker position.",
+            "broker_position": broker_position,
+            "matching_submit_intents": current_matches,
+            "stale_or_unusable_submit_intents": stale_or_unusable_matches,
+        }
+    if len(current_matches) == 1:
+        event_age = _submit_intent_age_seconds(current_matches[0], now)
+        return {
+            **base,
+            "classification": "SUBMIT_INTENT_BROKER_POSITION_ADOPTION_REQUIRED",
+            "detail": "Broker position is exactly attributed to one unresolved Track B submit intent and needs lifecycle adoption.",
+            "broker_position": broker_position,
+            "matching_submit_intent": current_matches[0],
+            "event_age_seconds": event_age,
+        }
+    if stale_or_unusable_matches:
+        return {
+            **base,
+            "classification": "SUBMIT_INTENT_IDENTITY_MISMATCH_REVIEW_REQUIRED",
+            "detail": "Matching submit-intent ownership records are missing timestamps or outside the uncertainty window.",
+            "broker_position": broker_position,
+            "stale_or_unusable_submit_intents": stale_or_unusable_matches,
+        }
+    if same_contract:
+        return {
+            **base,
+            "classification": "SUBMIT_INTENT_IDENTITY_MISMATCH_REVIEW_REQUIRED",
+            "detail": "Unresolved submit-intent ownership records share the broker contract but fail side/qty/account identity.",
+            "broker_position": broker_position,
+            "mismatched_submit_intents": same_contract,
+        }
+    return {
+        **base,
+        "classification": "SUBMIT_INTENT_NO_MATCHING_RECORD",
+        "detail": "Broker-only Track B position has no matching unresolved submit-intent ownership record.",
+        "broker_position": broker_position,
+    }
+
+
+def _submit_intent_state_for_no_broker_effect(
+    *,
+    base: Mapping[str, Any],
+    unresolved_submit_intents: Sequence[Mapping[str, Any]],
+    config: ReconciliationConfig,
+    now: datetime,
+) -> dict[str, Any]:
+    comparable_records = [
+        dict(row)
+        for row in unresolved_submit_intents
+        if _submit_intent_is_entry(row)
+    ]
+    if not comparable_records:
+        return {**base, "classification": "SUBMIT_INTENT_OWNERSHIP_NOT_APPLICABLE", "detail": "No unresolved entry submit intents require broker-effect settlement."}
+    grouped: dict[tuple[str, str, str, str, str], list[dict[str, Any]]] = {}
+    for row in comparable_records:
+        grouped.setdefault(_submit_intent_competition_key(row), []).append(row)
+    competing = [rows for rows in grouped.values() if len(rows) > 1]
+    if competing:
+        return {
+            **base,
+            "classification": "SUBMIT_INTENT_COMPETING_UNRESOLVED_REVIEW_REQUIRED",
+            "detail": "Multiple unresolved submit intents compete for the same account/contract/side window.",
+            "competing_submit_intents": competing,
+        }
+    newest = max(comparable_records, key=lambda row: _submit_intent_age_seconds(row, now) or 0.0)
+    age = _submit_intent_age_seconds(newest, now)
+    if age is None:
+        return {
+            **base,
+            "classification": "SUBMIT_INTENT_IDENTITY_MISMATCH_REVIEW_REQUIRED",
+            "detail": "Unresolved submit intent is missing a usable timestamp.",
+            "matching_submit_intent": newest,
+        }
+    payload = {
+        **base,
+        "matching_submit_intent": newest,
+        "event_age_seconds": age,
+    }
+    if age <= config.broker_truth_settlement_seconds:
+        return {
+            **payload,
+            "classification": "SUBMIT_INTENT_NO_BROKER_EFFECT_PENDING_SETTLEMENT",
+            "detail": "No broker effect is visible yet, but the unresolved submit intent remains inside the uncertainty window.",
+        }
+    return {
+        **payload,
+        "classification": "SUBMIT_INTENT_NO_BROKER_EFFECT_TIMEOUT",
+        "detail": "No broker effect appeared for the unresolved submit intent inside the configured uncertainty window.",
+    }
+
+
+def _submit_intent_contract_matches_broker_position(
+    submit_intent: Mapping[str, Any],
+    broker_position: Mapping[str, Any],
+    symbols: Sequence[str],
+) -> bool:
+    intent_root = _track_b_root(submit_intent, symbols)
+    broker_root = _track_b_root(broker_position, symbols)
+    if intent_root is None or intent_root != broker_root:
+        return False
+    intent_local = str(submit_intent.get("local_symbol") or "").upper()
+    broker_local = str(broker_position.get("local_symbol") or broker_position.get("localSymbol") or "").upper()
+    if intent_local and broker_local and intent_local != broker_local:
+        return False
+    intent_con_id = _int_or_none(submit_intent.get("con_id"))
+    broker_con_id = _int_or_none(broker_position.get("con_id") or broker_position.get("conId"))
+    if intent_con_id is not None and broker_con_id is not None and intent_con_id != broker_con_id:
+        return False
+    intent_expiry = str(submit_intent.get("expiry") or "")
+    broker_expiry = str(broker_position.get("expiry") or broker_position.get("lastTradeDateOrContractMonth") or "")
+    if intent_expiry and broker_expiry and intent_expiry != broker_expiry:
+        return False
+    return True
+
+
+def _submit_intent_matches_broker_position(
+    submit_intent: Mapping[str, Any],
+    broker_position: Mapping[str, Any],
+    config: ReconciliationConfig,
+) -> bool:
+    if str(submit_intent.get("mode") or "").upper() != "PAPER":
+        return False
+    if str(submit_intent.get("account_id") or "") != config.account:
+        return False
+    if submit_intent.get("live_money_eligible") is not False or submit_intent.get("paper_proof_invoked") is not False:
+        return False
+    if not _submit_intent_contract_matches_broker_position(submit_intent, broker_position, config.symbols):
+        return False
+    broker_qty = _decimal_value(broker_position.get("quantity"))
+    intent_qty = _decimal_value(submit_intent.get("qty") or submit_intent.get("quantity"))
+    if broker_qty is None or intent_qty is None or abs(broker_qty) != abs(intent_qty):
+        return False
+    expected_action = "BUY" if broker_qty > 0 else "SELL"
+    if str(submit_intent.get("action") or "").upper().replace("_TO_OPEN", "") != expected_action:
+        return False
+    return _submit_intent_is_entry(submit_intent)
+
+
+def _submit_intent_is_entry(submit_intent: Mapping[str, Any]) -> bool:
+    intent_type = str(submit_intent.get("intent_type") or "").upper()
+    action = str(submit_intent.get("action") or "").upper()
+    return intent_type in {"BUY_TO_OPEN", "SELL_TO_OPEN", "ENTRY"} or action in {"BUY", "SELL"}
+
+
+def _submit_intent_competition_key(submit_intent: Mapping[str, Any]) -> tuple[str, str, str, str, str]:
+    return (
+        str(submit_intent.get("account_id") or ""),
+        str(submit_intent.get("symbol") or "").upper(),
+        str(submit_intent.get("local_symbol") or "").upper(),
+        str(submit_intent.get("expiry") or ""),
+        str(submit_intent.get("action") or "").upper().replace("_TO_OPEN", ""),
+    )
+
+
+def _submit_intent_age_seconds(submit_intent: Mapping[str, Any], now: datetime) -> float | None:
+    timestamp = _parse_time(
+        submit_intent.get("updated_at")
+        or submit_intent.get("created_at")
+        or submit_intent.get("submitted_at")
+    )
+    if timestamp is None:
+        return None
+    return max((now - timestamp).total_seconds(), 0.0)
 
 
 def _previous_waiting_settlement_event(
