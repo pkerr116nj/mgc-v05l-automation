@@ -306,11 +306,11 @@ PYTHONPYCACHEPREFIX=.pycache python3 -m compileall src tests docs
 - secrets and token files must not be committed
 
 Additional docs:
-- [Developer Runbook](/Users/patrick/Documents/MGC-v05l-automation/docs/DEVELOPER_RUNBOOK.md)
-- [Schwab Market Data Adapter Notes](/Users/patrick/Documents/MGC-v05l-automation/docs/SCHWAB_MARKET_DATA_ADAPTER.md)
-- [Research Schema Extension](/Users/patrick/Documents/MGC-v05l-automation/docs/RESEARCH_SCHEMA_EXTENSION.md)
-- [EMA Momentum Research Features](/Users/patrick/Documents/MGC-v05l-automation/docs/EMA_MOMENTUM_RESEARCH_FEATURES.md)
-- [EMA Momentum Research Evaluator](/Users/patrick/Documents/MGC-v05l-automation/docs/EMA_MOMENTUM_RESEARCH_EVALUATOR.md)
-- [EMA Momentum Research Report](/Users/patrick/Documents/MGC-v05l-automation/docs/EMA_MOMENTUM_RESEARCH_REPORT.md)
-- [EMA Momentum Structure Labels](/Users/patrick/Documents/MGC-v05l-automation/docs/EMA_MOMENTUM_STRUCTURE_LABELS.md)
-- [EMA Momentum Research Visualization](/Users/patrick/Documents/MGC-v05l-automation/docs/EMA_MOMENTUM_RESEARCH_VISUALIZATION.md)
+- [Developer Runbook](docs/DEVELOPER_RUNBOOK.md)
+- [Schwab Market Data Adapter Notes](docs/SCHWAB_MARKET_DATA_ADAPTER.md)
+- [Research Schema Extension](docs/RESEARCH_SCHEMA_EXTENSION.md)
+- [EMA Momentum Research Features](docs/EMA_MOMENTUM_RESEARCH_FEATURES.md)
+- [EMA Momentum Research Evaluator](docs/EMA_MOMENTUM_RESEARCH_EVALUATOR.md)
+- [EMA Momentum Research Report](docs/EMA_MOMENTUM_RESEARCH_REPORT.md)
+- [EMA Momentum Structure Labels](docs/EMA_MOMENTUM_STRUCTURE_LABELS.md)
+- [EMA Momentum Research Visualization](docs/EMA_MOMENTUM_RESEARCH_VISUALIZATION.md)

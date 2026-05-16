@@ -1,5 +1,24 @@
 # Developer Runbook
 
+## Active Repo Root
+
+The active development checkout is:
+
+```text
+/Users/patrick/Dev/MGC-v05l-automation
+```
+
+Treat `/Users/patrick/Documents/MGC-v05l-automation` as stale/reference-only unless it is explicitly reactivated.
+
+Before any code change, test run, staging, or commit, verify the active root:
+
+```bash
+pwd
+git rev-parse --show-toplevel
+```
+
+Both commands must resolve to `/Users/patrick/Dev/MGC-v05l-automation`.
+
 ## Environment Setup
 
 1. Create a Python 3.11+ virtual environment.
