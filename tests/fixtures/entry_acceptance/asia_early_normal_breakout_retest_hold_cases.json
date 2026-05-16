@@ -1,0 +1,231 @@
+{
+  "completed_candles": [
+    {
+      "timestamp": "2026-05-08T14:00:00+00:00",
+      "open": 100.0,
+      "high": 100.65,
+      "low": 99.9,
+      "close": 100.55,
+      "volume": 100,
+      "timeframe": "5m",
+      "completed": true
+    },
+    {
+      "timestamp": "2026-05-08T14:05:00+00:00",
+      "open": 100.55,
+      "high": 101.2,
+      "low": 100.45,
+      "close": 101.1,
+      "volume": 101,
+      "timeframe": "5m",
+      "completed": true
+    },
+    {
+      "timestamp": "2026-05-08T14:10:00+00:00",
+      "open": 101.1,
+      "high": 101.75,
+      "low": 101.0,
+      "close": 101.65,
+      "volume": 102,
+      "timeframe": "5m",
+      "completed": true
+    },
+    {
+      "timestamp": "2026-05-08T14:15:00+00:00",
+      "open": 101.65,
+      "high": 102.3,
+      "low": 101.55,
+      "close": 102.2,
+      "volume": 103,
+      "timeframe": "5m",
+      "completed": true
+    },
+    {
+      "timestamp": "2026-05-08T14:20:00+00:00",
+      "open": 102.2,
+      "high": 102.28,
+      "low": 101.9,
+      "close": 102.02,
+      "volume": 104,
+      "timeframe": "5m",
+      "completed": true
+    },
+    {
+      "timestamp": "2026-05-08T14:25:00+00:00",
+      "open": 102.02,
+      "high": 102.1,
+      "low": 101.72,
+      "close": 101.84,
+      "volume": 105,
+      "timeframe": "5m",
+      "completed": true
+    },
+    {
+      "timestamp": "2026-05-08T14:30:00+00:00",
+      "open": 101.84,
+      "high": 102.36,
+      "low": 101.76,
+      "close": 102.26,
+      "volume": 106,
+      "timeframe": "5m",
+      "completed": true
+    },
+    {
+      "timestamp": "2026-05-08T14:35:00+00:00",
+      "open": 102.26,
+      "high": 102.78,
+      "low": 102.18,
+      "close": 102.68,
+      "volume": 107,
+      "timeframe": "5m",
+      "completed": true
+    }
+  ],
+  "base_event": {
+    "account_id": "DUM882026",
+    "expected_account_id": "DUM882026",
+    "contract_key": "MGC-202606",
+    "instrument_family": "MGC",
+    "strategy_id": "ASIA_EARLY_NORMAL_BREAKOUT_RETEST_HOLD_LONG_V1",
+    "signal_family": "ASIA_EARLY_NORMAL_BREAKOUT_RETEST_HOLD_LONG_V1",
+    "lane_id": "mgc_asia_early_normal_breakout_retest_hold_long",
+    "rule_mode": "ASIA_EARLY_NORMAL_BREAKOUT_RETEST_HOLD_LONG_V1",
+    "source_id": "fixture_breakout_retest_hold_long",
+    "timeframe": "5m",
+    "candle_timestamp": "2026-05-08T14:35:00+00:00",
+    "observed_at": "2026-05-08T14:40:00+00:00",
+    "generated_at": "2026-05-08T14:40:00+00:00",
+    "open": "101.80",
+    "high": "102.50",
+    "low": "101.70",
+    "close": "102.30",
+    "last": "102.30",
+    "volume": "120",
+    "quote_provider_mode": "REALTIME",
+    "input_quote_provider_mode": "REALTIME",
+    "realtime_quote_received": true,
+    "current_quote_available": true,
+    "quote_freshness_verdict": "CURRENT_QUOTE_FRESHNESS_ACCEPTED_STRICT_MAX_AGE",
+    "metadata": {
+      "source_payload_path": "outputs/track_b_execution_core/runtime/mgc_5m_latest.json",
+      "source_bar_count": 8,
+      "signal_side_if_ready": "LONG",
+      "quote_provider_mode": "REALTIME",
+      "realtime_quote_received": true,
+      "current_quote_available": true,
+      "asia_early_normal_breakout_retest_hold_long_state": {
+        "derivative_phase": "ASIA_EARLY",
+        "session_asia": true,
+        "allow_asia": true,
+        "asia_early_or_gc_mgc_london_open": true,
+        "no_first_bull_snap_turn": true,
+        "prior_bars_since_long_setup_gt_anti_churn": true,
+        "timeframe": "5m"
+      },
+      "asia_early_normal_breakout_retest_hold_long_features": {
+        "feature_version": "asia_early_normal_breakout_retest_hold_long_v1_phase1",
+        "calibration_profile": "probationary_baseline_v1",
+        "breakout_bar_slope_is_flat": true,
+        "breakout_bar_expansion_is_normal": true,
+        "breakout_breaks_prior_1_high": true,
+        "signal_retests_and_holds_breakout_level": true,
+        "breakout_normalized_slope": "0.05",
+        "breakout_abs_slope_max": "0.20",
+        "breakout_range_expansion_ratio": "1.00",
+        "breakout_min_range_expansion_ratio": "0.85",
+        "breakout_max_range_expansion_ratio": "1.25",
+        "breakout_level": "102.00",
+        "retest_depth_ticks_or_points": "0.10",
+        "retest_depth_normalized": "0.10",
+        "hold_margin_ticks_or_points": "0.30",
+        "hold_margin_normalized": "0.30",
+        "bars_since_breakout": 1,
+        "bars_since_retest": 0,
+        "range_expansion_ratio": "1.00",
+        "close_location": "0.75",
+        "body_to_range_ratio": "0.625",
+        "prior_bars_since_long_setup": 1000,
+        "anti_churn_bars": 2,
+        "anti_churn_margin_bars": 998,
+        "churn_score": "0.00",
+        "snap_turn_conflict_strength": "0.00"
+      }
+    },
+    "paper_proof_cli_called": false,
+    "submit_allowed": false,
+    "submit_attempted": false,
+    "broker_state_mutated": false,
+    "live_money_readiness": false
+  },
+  "cases": [
+    {
+      "case_id": "exact_breakout_retest_hold",
+      "expected_acceptance_class": "EXACT_STRUCTURAL_MATCH",
+      "now": "2026-05-08T14:40:00+00:00"
+    },
+    {
+      "case_id": "near_soft_retest_hold_weakness",
+      "expected_acceptance_class": "NEAR_STRUCTURAL_MATCH",
+      "now": "2026-05-08T14:40:00+00:00",
+      "feature_overrides": {
+        "breakout_bar_expansion_is_normal": false,
+        "breakout_range_expansion_ratio": "1.27",
+        "range_expansion_ratio": "1.27",
+        "hold_margin_ticks_or_points": "0.02",
+        "hold_margin_normalized": "0.02",
+        "retest_depth_ticks_or_points": "0.04",
+        "retest_depth_normalized": "0.04"
+      }
+    },
+    {
+      "case_id": "degraded_valid_marginal_range_participation",
+      "expected_acceptance_class": "DEGRADED_BUT_VALID_MATCH",
+      "now": "2026-05-08T14:40:00+00:00",
+      "state_overrides": {
+        "asia_early_or_gc_mgc_london_open": false
+      },
+      "feature_overrides": {
+        "breakout_bar_slope_is_flat": false,
+        "breakout_bar_expansion_is_normal": false,
+        "breakout_normalized_slope": "0.24",
+        "breakout_range_expansion_ratio": "1.31",
+        "range_expansion_ratio": "1.31",
+        "hold_margin_ticks_or_points": "0.01",
+        "hold_margin_normalized": "0.01",
+        "churn_score": "0.40"
+      },
+      "participation_quality": {
+        "long_hold_quality": "DEGRADING",
+        "short_hold_quality": "NEUTRAL",
+        "continuation_confidence": 0.45,
+        "confidence": 0.70
+      }
+    },
+    {
+      "case_id": "invalid_missing_retest_hold",
+      "expected_acceptance_class": "STRUCTURALLY_INVALID",
+      "now": "2026-05-08T14:40:00+00:00",
+      "feature_overrides": {
+        "signal_retests_and_holds_breakout_level": false,
+        "hold_margin_ticks_or_points": "-0.10",
+        "hold_margin_normalized": "-0.10"
+      },
+      "expected_failure_reasons": [
+        "MISSING_REQUIRED_PREDICATES"
+      ]
+    },
+    {
+      "case_id": "low_confidence_stale_malformed_provenance",
+      "expected_acceptance_class": "LOW_CONFIDENCE_INSUFFICIENT_DATA",
+      "now": "2026-05-08T16:00:00+00:00",
+      "metadata_remove": [
+        "source_payload_path"
+      ],
+      "input_source_category": "UNKNOWN",
+      "expected_failure_reasons": [
+        "MISSING_PROVENANCE",
+        "STALE_INPUT"
+      ]
+    }
+  ]
+}
