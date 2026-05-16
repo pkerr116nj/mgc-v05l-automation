@@ -459,7 +459,20 @@ def build_asia_early_normal_breakout_retest_hold_candidate_metadata(
             ),
             "breakout_level": _optional_float(feature_payload.get("breakout_level")),
             "breakout_range_expansion_ratio": _optional_float(feature_payload.get("breakout_range_expansion_ratio")),
-            "hold_margin": _breakout_retest_hold_margin(event_payload=event_payload, features=feature_payload),
+            "retest_depth_ticks_or_points": _optional_float(feature_payload.get("retest_depth_ticks_or_points")),
+            "retest_depth_normalized": _optional_float(feature_payload.get("retest_depth_normalized")),
+            "hold_margin_ticks_or_points": _breakout_retest_hold_margin(event_payload=event_payload, features=feature_payload),
+            "hold_margin_normalized": _optional_float(feature_payload.get("hold_margin_normalized")),
+            "bars_since_breakout": _optional_float(feature_payload.get("bars_since_breakout")),
+            "bars_since_retest": _optional_float(feature_payload.get("bars_since_retest")),
+            "range_expansion_ratio": _optional_float(feature_payload.get("range_expansion_ratio")),
+            "close_location": _optional_float(feature_payload.get("close_location")),
+            "body_to_range_ratio": _optional_float(feature_payload.get("body_to_range_ratio")),
+            "churn_score": _optional_float(feature_payload.get("churn_score")),
+            "prior_bars_since_long_setup": _optional_float(feature_payload.get("prior_bars_since_long_setup")),
+            "anti_churn_bars": _optional_float(feature_payload.get("anti_churn_bars")),
+            "anti_churn_margin_bars": _optional_float(feature_payload.get("anti_churn_margin_bars")),
+            "snap_turn_conflict_strength": _optional_float(feature_payload.get("snap_turn_conflict_strength")),
         },
         "required_predicates": list(ASIA_EARLY_NORMAL_BREAKOUT_RETEST_HOLD_LONG_REQUIRED_PREDICATES),
         "matched_predicates": [*matched_required, *matched_context],
@@ -1182,6 +1195,10 @@ def _breakout_retest_hold_failure_flags(
         flags.append("SNAP_TURN_CONFLICT")
     if "prior_bars_since_long_setup_gt_anti_churn" in missing_context:
         flags.append("ANTI_CHURN_CONFLICT")
+    if (_optional_float(features.get("churn_score")) or 0.0) >= 0.50:
+        flags.append("ANTI_CHURN_PRESSURE")
+    if (_optional_float(features.get("snap_turn_conflict_strength")) or 0.0) >= 0.50:
+        flags.append("SNAP_TURN_PRESSURE")
     if _breakout_retest_hold_range_score(features) < 0.55:
         flags.append("RANGE_EXPANSION_OUT_OF_BOUNDS")
     if _breakout_retest_hold_slope_score(features) < 0.55:
@@ -1203,6 +1220,14 @@ def _breakout_retest_hold_structural_score(
 
 
 def _breakout_retest_hold_directional_score(event_payload: Mapping[str, Any]) -> float:
+    metadata = event_payload.get("metadata") if isinstance(event_payload.get("metadata"), Mapping) else {}
+    feature_payload = metadata.get(ASIA_EARLY_NORMAL_BREAKOUT_RETEST_HOLD_LONG_FEATURES_KEY)
+    features = feature_payload if isinstance(feature_payload, Mapping) else {}
+    close_location = _optional_float(features.get("close_location"))
+    body_to_range = _optional_float(features.get("body_to_range_ratio"))
+    if close_location is not None and body_to_range is not None:
+        return _clamp01((_clamp01(close_location) * 0.60) + (_clamp01(body_to_range) * 0.40))
+
     open_price = _optional_float(event_payload.get("open"))
     high = _optional_float(event_payload.get("high"))
     low = _optional_float(event_payload.get("low"))
@@ -1227,7 +1252,7 @@ def _breakout_retest_hold_timing_score(state: Mapping[str, Any]) -> float:
 def _breakout_retest_hold_range_score(features: Mapping[str, Any]) -> float:
     if features.get("breakout_bar_expansion_is_normal") is True:
         return 0.92
-    ratio = _optional_float(features.get("breakout_range_expansion_ratio"))
+    ratio = _optional_float(features.get("range_expansion_ratio") or features.get("breakout_range_expansion_ratio"))
     minimum = _optional_float(features.get("breakout_min_range_expansion_ratio"))
     maximum = _optional_float(features.get("breakout_max_range_expansion_ratio"))
     if ratio is None or minimum is None or maximum is None or minimum >= maximum:
@@ -1258,12 +1283,18 @@ def _breakout_retest_hold_retest_score(
 ) -> float:
     if features.get("signal_retests_and_holds_breakout_level") is not True:
         return 0.20
+    margin_normalized = _optional_float(features.get("hold_margin_normalized"))
+    retest_depth_normalized = _optional_float(features.get("retest_depth_normalized"))
     margin = _breakout_retest_hold_margin(event_payload=event_payload, features=features)
-    if margin is None:
+    if margin_normalized is None and retest_depth_normalized is None and margin is None:
         return 0.86
-    if margin >= 0:
-        return _clamp01(0.82 + min(0.12, margin * 0.10))
-    return _clamp01(0.55 + max(-0.30, margin * 0.10))
+    resolved_margin = margin_normalized if margin_normalized is not None else margin
+    resolved_depth = retest_depth_normalized if retest_depth_normalized is not None else 0.0
+    assert resolved_margin is not None
+    margin_component = 0.62 + min(0.25, max(-0.25, resolved_margin) * 0.35)
+    depth_component = 0.24 if resolved_depth > 0 else 0.16
+    excessive_depth_penalty = min(0.20, max(0.0, resolved_depth - 0.75) * 0.20)
+    return _clamp01(margin_component + depth_component - excessive_depth_penalty)
 
 
 def _breakout_retest_hold_margin(
@@ -1271,6 +1302,9 @@ def _breakout_retest_hold_margin(
     event_payload: Mapping[str, Any],
     features: Mapping[str, Any],
 ) -> float | None:
+    explicit = _optional_float(features.get("hold_margin_ticks_or_points"))
+    if explicit is not None:
+        return explicit
     close = _optional_float(event_payload.get("close") or event_payload.get("last"))
     breakout_level = _optional_float(features.get("breakout_level"))
     if close is None or breakout_level is None:

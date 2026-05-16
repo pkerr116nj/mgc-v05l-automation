@@ -335,6 +335,17 @@ def test_asia_early_normal_breakout_retest_hold_exact_current_pass_scores_exact(
     assert report["candidate_side"] == "LONG"
     assert report["runtime_trade_eligible"] is False
     assert report["order_intent_created"] is False
+    context = payload["candidate"]["breakout_retest_hold_context"]
+    assert context["retest_depth_ticks_or_points"] == 0.1
+    assert context["hold_margin_ticks_or_points"] == 0.3
+    assert context["hold_margin_normalized"] == 0.3
+    assert context["bars_since_breakout"] == 1.0
+    assert context["bars_since_retest"] == 0.0
+    assert context["range_expansion_ratio"] == 1.0
+    assert context["close_location"] == 0.75
+    assert context["body_to_range_ratio"] == 0.625
+    assert context["churn_score"] == 0.0
+    assert context["snap_turn_conflict_strength"] == 0.0
 
 
 def test_asia_early_normal_breakout_retest_hold_one_soft_weakness_scores_near() -> None:
@@ -371,6 +382,10 @@ def test_asia_early_normal_breakout_retest_hold_multiple_margins_scores_degraded
     features["breakout_range_expansion_ratio"] = "1.31"
     features["breakout_bar_slope_is_flat"] = False
     features["breakout_normalized_slope"] = "0.24"
+    features["hold_margin_ticks_or_points"] = "0.01"
+    features["hold_margin_normalized"] = "0.01"
+    features["churn_score"] = "0.75"
+    features["snap_turn_conflict_strength"] = "1.00"
 
     payload = build_asia_early_normal_breakout_retest_hold_entry_acceptance_payload(
         event_payload=event,
@@ -401,6 +416,36 @@ def test_asia_early_normal_breakout_retest_hold_missing_breakout_or_hold_scores_
     assert report["acceptance_class"] == STRUCTURALLY_INVALID
     assert "MISSING_REQUIRED_PREDICATES" in report["failure_reasons"]
     assert "breakout_breaks_prior_1_high" in payload["candidate"]["missing_required_predicates"]
+
+
+def test_asia_early_normal_breakout_retest_hold_missing_numerics_degrades_gracefully() -> None:
+    event = _asia_breakout_event()
+    features = _asia_breakout_features(event)
+    for field in (
+        "retest_depth_ticks_or_points",
+        "retest_depth_normalized",
+        "hold_margin_ticks_or_points",
+        "hold_margin_normalized",
+        "bars_since_breakout",
+        "bars_since_retest",
+        "range_expansion_ratio",
+        "close_location",
+        "body_to_range_ratio",
+        "churn_score",
+        "snap_turn_conflict_strength",
+    ):
+        features.pop(field)
+
+    payload = build_asia_early_normal_breakout_retest_hold_entry_acceptance_payload(
+        event_payload=event,
+        completed_candles=_bullish_candles(),
+        input_source_path="outputs/track_b_execution_core/runtime/mgc_5m_latest.json",
+    )
+
+    report = build_entry_acceptance_state(payload, now=_now(_bullish_candles()))
+
+    assert report["acceptance_class"] == EXACT_STRUCTURAL_MATCH
+    assert report["failure_reasons"] == []
 
 
 def test_asia_early_normal_breakout_retest_hold_stale_provenance_scores_low_confidence() -> None:
@@ -590,6 +635,20 @@ def _asia_breakout_event(**overrides: Any) -> dict[str, Any]:
                 "breakout_min_range_expansion_ratio": "0.85",
                 "breakout_max_range_expansion_ratio": "1.25",
                 "breakout_level": "102.00",
+                "retest_depth_ticks_or_points": "0.10",
+                "retest_depth_normalized": "0.10",
+                "hold_margin_ticks_or_points": "0.30",
+                "hold_margin_normalized": "0.30",
+                "bars_since_breakout": 1,
+                "bars_since_retest": 0,
+                "range_expansion_ratio": "1.00",
+                "close_location": "0.75",
+                "body_to_range_ratio": "0.625",
+                "prior_bars_since_long_setup": 1000,
+                "anti_churn_bars": 2,
+                "anti_churn_margin_bars": 998,
+                "churn_score": "0.00",
+                "snap_turn_conflict_strength": "0.00",
             },
         },
         "paper_proof_cli_called": False,

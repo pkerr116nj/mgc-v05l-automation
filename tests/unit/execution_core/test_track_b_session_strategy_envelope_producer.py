@@ -167,6 +167,25 @@ def test_producer_emits_valid_session_strategy_envelopes(tmp_path: Path) -> None
         "asia_early_normal_breakout_retest_hold_long_features"
         in result.asia_early_normal_breakout_retest_hold_long_event["metadata"]
     )
+    asia_early_long_features = result.asia_early_normal_breakout_retest_hold_long_event["metadata"][
+        "asia_early_normal_breakout_retest_hold_long_features"
+    ]
+    for field in (
+        "retest_depth_ticks_or_points",
+        "retest_depth_normalized",
+        "hold_margin_ticks_or_points",
+        "hold_margin_normalized",
+        "bars_since_breakout",
+        "range_expansion_ratio",
+        "close_location",
+        "body_to_range_ratio",
+        "prior_bars_since_long_setup",
+        "anti_churn_bars",
+        "anti_churn_margin_bars",
+        "churn_score",
+        "snap_turn_conflict_strength",
+    ):
+        assert field in asia_early_long_features
     assert "us_derivative_bear_turn_features" in result.us_derivative_bear_turn_event["metadata"]
     assert "us_late_pause_resume_long_state" in result.us_late_pause_resume_long_event["metadata"]
     assert result.report["broker_state_mutated"] is False

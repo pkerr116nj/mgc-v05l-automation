@@ -701,6 +701,20 @@ def _asia_early_normal_breakout_retest_hold_long_event(
         "breakout_min_range_expansion_ratio": ASIA_EARLY_BREAKOUT_RETEST_HOLD_BREAKOUT_MIN_RANGE_EXPANSION_RATIO,
         "breakout_max_range_expansion_ratio": ASIA_EARLY_BREAKOUT_RETEST_HOLD_BREAKOUT_MAX_RANGE_EXPANSION_RATIO,
         "breakout_level": breakout["breakout_level"],
+        "retest_depth_ticks_or_points": breakout["retest_depth_ticks_or_points"],
+        "retest_depth_normalized": breakout["retest_depth_normalized"],
+        "hold_margin_ticks_or_points": breakout["hold_margin_ticks_or_points"],
+        "hold_margin_normalized": breakout["hold_margin_normalized"],
+        "bars_since_breakout": breakout["bars_since_breakout"],
+        "bars_since_retest": breakout["bars_since_retest"],
+        "range_expansion_ratio": breakout["range_expansion_ratio"],
+        "close_location": breakout["close_location"],
+        "body_to_range_ratio": breakout["body_to_range_ratio"],
+        "prior_bars_since_long_setup": prior_long,
+        "anti_churn_bars": ANTI_CHURN_BARS,
+        "anti_churn_margin_bars": prior_long - ANTI_CHURN_BARS,
+        "churn_score": _churn_score(prior_long),
+        "snap_turn_conflict_strength": Decimal("0") if bull_snap.get("first_bull_snap_turn") is not True else Decimal("1"),
         "breakout_bar_slope_is_flat": breakout["breakout_bar_slope_is_flat"],
         "breakout_bar_expansion_is_normal": breakout["breakout_bar_expansion_is_normal"],
         "breakout_breaks_prior_1_high": breakout["breakout_breaks_prior_1_high"],
@@ -993,6 +1007,15 @@ def _asia_early_breakout_retest_context(
             "breakout_normalized_slope": Decimal("0"),
             "breakout_range_expansion_ratio": Decimal("0"),
             "breakout_level": None,
+            "retest_depth_ticks_or_points": None,
+            "retest_depth_normalized": None,
+            "hold_margin_ticks_or_points": None,
+            "hold_margin_normalized": None,
+            "bars_since_breakout": None,
+            "bars_since_retest": None,
+            "range_expansion_ratio": Decimal("0"),
+            "close_location": None,
+            "body_to_range_ratio": None,
             "breakout_bar_slope_is_flat": False,
             "breakout_bar_expansion_is_normal": False,
             "breakout_breaks_prior_1_high": False,
@@ -1005,10 +1028,23 @@ def _asia_early_breakout_retest_context(
     breakout_normalized_slope = _normalized(breakout_features.velocity, breakout_features.atr)
     breakout_range_expansion_ratio = _range_over_atr(breakout_bar, breakout_features)
     breakout_level = breakout_bar.high
+    signal_retests = signal_bar.low <= breakout_level
+    signal_holds = signal_bar.close >= breakout_level
+    retest_depth = max(Decimal("0"), breakout_level - signal_bar.low)
+    hold_margin = signal_bar.close - breakout_level
     return {
         "breakout_normalized_slope": breakout_normalized_slope,
         "breakout_range_expansion_ratio": breakout_range_expansion_ratio,
         "breakout_level": breakout_level,
+        "retest_depth_ticks_or_points": retest_depth,
+        "retest_depth_normalized": _normalized(retest_depth, feature_history[-1].atr),
+        "hold_margin_ticks_or_points": hold_margin,
+        "hold_margin_normalized": _normalized(hold_margin, feature_history[-1].atr),
+        "bars_since_breakout": 1,
+        "bars_since_retest": 0 if signal_retests else None,
+        "range_expansion_ratio": breakout_range_expansion_ratio,
+        "close_location": _bar_close_location(signal_bar),
+        "body_to_range_ratio": _bar_body_to_range_ratio(signal_bar),
         "breakout_bar_slope_is_flat": (
             abs(breakout_normalized_slope) <= ASIA_EARLY_BREAKOUT_RETEST_HOLD_BREAKOUT_ABS_SLOPE_MAX
         ),
@@ -1017,7 +1053,7 @@ def _asia_early_breakout_retest_context(
             and breakout_range_expansion_ratio < ASIA_EARLY_BREAKOUT_RETEST_HOLD_BREAKOUT_MAX_RANGE_EXPANSION_RATIO
         ),
         "breakout_breaks_prior_1_high": breakout_bar.high > prior_bar.high and breakout_bar.close >= prior_bar.close,
-        "signal_retests_and_holds_breakout_level": signal_bar.low <= breakout_level and signal_bar.close >= breakout_level,
+        "signal_retests_and_holds_breakout_level": signal_retests and signal_holds,
     }
 
 
@@ -1080,6 +1116,26 @@ def _us_late_long_recent_context(
 
 def _range_over_atr(candle: _RuntimeCandle, features: _FeaturePacket) -> Decimal:
     return Decimal("0") if features.atr <= 0 else (candle.high - candle.low) / features.atr
+
+
+def _bar_close_location(candle: _RuntimeCandle) -> Decimal | None:
+    candle_range = candle.high - candle.low
+    if candle_range <= 0:
+        return None
+    return (candle.close - candle.low) / candle_range
+
+
+def _bar_body_to_range_ratio(candle: _RuntimeCandle) -> Decimal | None:
+    candle_range = candle.high - candle.low
+    if candle_range <= 0:
+        return None
+    return abs(candle.close - candle.open) / candle_range
+
+
+def _churn_score(prior_bars_since_setup: int) -> Decimal:
+    if prior_bars_since_setup > ANTI_CHURN_BARS:
+        return Decimal("0")
+    return Decimal(ANTI_CHURN_BARS + 1 - prior_bars_since_setup) / Decimal(ANTI_CHURN_BARS + 1)
 
 
 def _normalized(value: Decimal, atr: Decimal) -> Decimal:
