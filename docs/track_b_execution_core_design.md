@@ -1433,3 +1433,97 @@ Real IBKR paper test:
 10. Only after tests and review, run the CLI against TWS paper for the one real proof trade.
 
 No implementation should begin until this design is reviewed or explicitly approved.
+
+## Track B Participation / Exit Quality Layer Design
+
+Status: approved for implementation slice 1 only.
+
+Purpose: produce an offline, non-authoritative market-quality artifact that helps distinguish healthy continuation/pullback behavior from trend decay or reversal risk. This is not a strategy, not a signal generator, and not a broker authority surface.
+
+Lead input surface:
+
+- Completed `5m` OHLCV candles only.
+- `1m` candles may become secondary confirmation later, but are not V1 lead input.
+- Inputs must include freshness and provenance fields such as `input_source_path`, `input_source_category`, `input_mode`, `source_id`, `generated_at`, `instrument`, `timeframe`, latest completed candle timestamp, completed-candle status, and runtime provenance when applicable.
+- Research artifacts must not be consumed as runtime truth. Runtime evaluation must fail closed when only research provenance is present.
+
+State taxonomy:
+
+- `PERSISTENT_BULLISH_PRESSURE`
+- `PERSISTENT_BEARISH_PRESSURE`
+- `BULLISH_IMPULSE_ONLY`
+- `BEARISH_IMPULSE_ONLY`
+- `BULLISH_IMPULSE_DECAYING`
+- `BEARISH_IMPULSE_DECAYING`
+- `BULLISH_HEALTHY_PULLBACK`
+- `BEARISH_HEALTHY_PULLBACK`
+- `BULLISH_CONTINUATION_CONFIRMED`
+- `BEARISH_CONTINUATION_CONFIRMED`
+- `BULLISH_PARTICIPATION_COLLAPSE`
+- `BEARISH_PARTICIPATION_COLLAPSE`
+- `CHOP_BALANCED`
+- `LOW_CONFIDENCE_THIN_DATA`
+
+V1 features:
+
+- Body strength.
+- Close location in range.
+- Close-to-close pressure.
+- Directional persistence.
+- Range expansion/contraction.
+- Pullback depth.
+- Pullback recovery.
+- Impulse decay.
+- Optional volume confirmation only when volume provenance is reliable.
+
+Required outputs:
+
+- `participation_state`
+- `long_hold_quality`
+- `short_hold_quality`
+- `long_exit_urgency_context`
+- `short_exit_urgency_context`
+- `continuation_confidence`
+- `pullback_health`
+- `confidence`
+- `confidence_failure_reasons`
+- Explanation fields such as `state_reasons`, `warnings`, and feature summaries.
+
+Recognized `confidence_failure_reasons` values:
+
+- `THIN_DATA`
+- `STALE_INPUT`
+- `RESEARCH_SOURCE_NOT_RUNTIME_ELIGIBLE`
+- `INCOMPLETE_CANDLES`
+- `MIXED_TIMEFRAME`
+- `MALFORMED_CANDLES`
+- `LOW_RANGE_QUALITY`
+- `MISSING_PROVENANCE`
+
+State transitions:
+
+- Impulse -> accepted pullback -> continuation.
+- Impulse -> pullback failure -> participation collapse.
+- Persistent pressure -> impulse decay.
+- Chop/balanced -> low confidence when data quality, freshness, or provenance fails.
+
+Hard safety and architecture rules:
+
+- No broker mutation.
+- No strategy authority.
+- No direct trade command.
+- No broker imports.
+- No `submit`, `cancel`, `close`, `placeOrder`, flatten, or order-intent authority.
+- No live broker state reads.
+- No research artifacts as runtime truth.
+- Artifact-only output.
+- Fail closed on stale, thin, incomplete, mixed-timeframe, malformed, low-range-quality, or missing-provenance data.
+- `runtime_trade_eligible` must always be `false`.
+
+Proposed latest artifact path:
+
+```text
+outputs/track_b_execution_core/participation_quality/latest_participation_quality_state.json
+```
+
+Implementation slice 1 is limited to the pure offline classifier module and unit tests. It must not integrate with strategies, runtime broker state, generated runtime artifacts, dashboard authority, or order-routing components.
