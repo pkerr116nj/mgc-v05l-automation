@@ -1,0 +1,24 @@
+{
+  "instrument": "MGC",
+  "test_fixture": true,
+  "candles": [
+    {"timestamp": "2026-05-08T14:00:00+00:00", "open": 100.0, "high": 100.33, "low": 99.92, "close": 100.25, "volume": 100, "timeframe": "5m", "completed": true},
+    {"timestamp": "2026-05-08T14:05:00+00:00", "open": 100.25, "high": 100.58, "low": 100.17, "close": 100.5, "volume": 101, "timeframe": "5m", "completed": true},
+    {"timestamp": "2026-05-08T14:10:00+00:00", "open": 100.5, "high": 100.83, "low": 100.42, "close": 100.75, "volume": 102, "timeframe": "5m", "completed": true},
+    {"timestamp": "2026-05-08T14:15:00+00:00", "open": 100.75, "high": 101.08, "low": 100.67, "close": 101.0, "volume": 103, "timeframe": "5m", "completed": true},
+    {"timestamp": "2026-05-08T14:20:00+00:00", "open": 101.0, "high": 101.33, "low": 100.92, "close": 101.25, "volume": 104, "timeframe": "5m", "completed": true},
+    {"timestamp": "2026-05-08T14:25:00+00:00", "open": 101.25, "high": 101.58, "low": 101.17, "close": 101.5, "volume": 105, "timeframe": "5m", "completed": true},
+    {"timestamp": "2026-05-08T14:30:00+00:00", "open": 101.5, "high": 101.83, "low": 101.42, "close": 101.75, "volume": 106, "timeframe": "5m", "completed": true},
+    {"timestamp": "2026-05-08T14:35:00+00:00", "open": 101.75, "high": 102.08, "low": 101.67, "close": 102.0, "volume": 107, "timeframe": "5m", "completed": true},
+    {"timestamp": "2026-05-08T14:40:00+00:00", "open": 102.0, "high": 102.33, "low": 101.92, "close": 102.25, "volume": 108, "timeframe": "5m", "completed": true},
+    {"timestamp": "2026-05-08T14:45:00+00:00", "open": 102.25, "high": 102.58, "low": 102.17, "close": 102.5, "volume": 109, "timeframe": "5m", "completed": true},
+    {"timestamp": "2026-05-08T14:50:00+00:00", "open": 102.5, "high": 102.83, "low": 102.42, "close": 102.75, "volume": 110, "timeframe": "5m", "completed": true},
+    {"timestamp": "2026-05-08T14:55:00+00:00", "open": 102.75, "high": 103.08, "low": 102.67, "close": 103.0, "volume": 111, "timeframe": "5m", "completed": true}
+  ],
+  "lifecycle_position": {"position_id": "pos-healthy", "strategy_id": "strategy-a", "lane_id": "lane-a", "symbol": "MGC", "side": "LONG", "quantity": 1, "entry_timestamp": "2026-05-08T14:00:00+00:00"},
+  "entry_acceptance_context": {"entry_type": "BREAKOUT_RETEST", "entry_quality": "ACCEPTED", "entry_timeframe": "5m", "acceptance_reason": "fixture"},
+  "participation_quality_context": {"participation_state": "BULLISH_HEALTHY_PULLBACK", "long_hold_quality": "SUPPORTIVE", "long_exit_urgency_context": "LOW", "pullback_health": "HEALTHY", "continuation_confidence": 0.72, "confidence": 0.8, "confidence_failure_reasons": []},
+  "position_metrics": {"mfe_points": 1.4, "mae_points": 0.35, "current_favorable_points": 1.1, "bars_since_fill": 5, "max_bars_in_trade": 12, "protective_stop_breached": false},
+  "reconciliation_context": {"status": "MATCHED", "source": "fixture"},
+  "timeframe_context": {"entry_timeframe": "5m", "exit_management_timeframe": "5m", "fast_reaction_timeframe": "1m", "trend_context_timeframe": "15m", "timeframe_source": "fixture", "base_timeframe_if_derived": "1m", "aggregation_method": "completed_bar_aggregation", "anchor_rule": "right_closed_session_anchor", "timeframe_alignment_status": "ALIGNED"}
+}
