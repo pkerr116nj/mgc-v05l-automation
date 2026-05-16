@@ -10,28 +10,7 @@ from decimal import Decimal
 from pathlib import Path
 from typing import Any, Sequence
 
-from mgc_v05l.app.asia_london_participation_runtime import (
-    ASIA_LONDON_PARTICIPATION_FAMILY,
-    ASIA_LONDON_PARTICIPATION_RUNTIME_KIND,
-    GC_ASIA_LONDON_LONG_V5_SOURCE,
-    GC_ASIA_LONDON_SHORT_V2_SOURCE,
-    AsiaLondonParticipationStrategyEngine,
-)
-from mgc_v05l.app.gc_mgc_forced_session_runtime import (
-    ASIA_EARLY_LONG_SOURCE,
-    ASIA_EARLY_SHORT_SOURCE,
-    GC_MGC_FORCED_SESSION_FAMILY,
-    GC_MGC_FORCED_SESSION_RUNTIME_KIND,
-    LONDON_EARLY_LONG_SOURCE,
-    NY_EARLY_SHORT_SOURCE,
-    NY_LATE_SHORT_SOURCE,
-)
-from mgc_v05l.app.probationary_runtime import ProbationaryPaperLaneSpec, _build_probationary_paper_lane_settings
-from mgc_v05l.config_models import load_settings_from_files
-from mgc_v05l.domain.events import OrderIntentCreatedEvent
 from mgc_v05l.domain.models import Bar
-from mgc_v05l.execution.execution_engine import ExecutionEngine
-from mgc_v05l.execution.ibkr_paper_strategy_porting import lane_submit_bridge_adapter
 from mgc_v05l.execution_core.phase1_gc_paper_candidate_registry import (
     CHOSEN_GC_STRATEGY_ID,
     PHASE1_GC_GUARDED_PAPER_ELIGIBLE_STRATEGY_IDS,
@@ -51,6 +30,17 @@ DEFAULT_CONFIG_PATHS = (
     Path("config") / "live.yaml",
     Path("config") / "probationary_pattern_engine.yaml",
 )
+ASIA_LONDON_PARTICIPATION_RUNTIME_KIND = "asia_london_participation_candidate_runtime"
+ASIA_LONDON_PARTICIPATION_FAMILY = "asia_london_participation_core_v1"
+GC_ASIA_LONDON_LONG_V5_SOURCE = "gcAsiaLondonLongV5"
+GC_ASIA_LONDON_SHORT_V2_SOURCE = "gcAsiaLondonShortV2"
+GC_MGC_FORCED_SESSION_RUNTIME_KIND = "gc_mgc_forced_session_candidate_runtime"
+GC_MGC_FORCED_SESSION_FAMILY = "gold_forced_session_baseline_v2"
+ASIA_EARLY_SHORT_SOURCE = "asiaEarlyShortV2"
+ASIA_EARLY_LONG_SOURCE = "asiaEarlyLongV5"
+LONDON_EARLY_LONG_SOURCE = "londonEarlyLongV5"
+NY_EARLY_SHORT_SOURCE = "nyEarlyShortV2"
+NY_LATE_SHORT_SOURCE = "nyLateShortV2"
 
 
 @dataclass(frozen=True)
@@ -221,8 +211,8 @@ def _evaluate_selected_candidate(
 ) -> dict[str, Any]:
     if selected is None:
         return _blocked_evaluation("STRATEGY_NOT_IN_GC_INVENTORY", strategy_id=config.strategy_id)
-    adapter = lane_submit_bridge_adapter(lane_id=selected.strategy_id)
-    if adapter is None:
+    bridge_adapter_present = _phase1_gc_bridge_adapter_present(strategy_id=selected.strategy_id)
+    if not bridge_adapter_present:
         return _blocked_evaluation("LANE_ADAPTER_MISSING", strategy_id=selected.strategy_id, family=selected.family)
     if not bool(gc_readiness.get("historical_seed_ready") or gc_readiness.get("runtime_candles_ready")):
         return _blocked_evaluation("RUNTIME_CANDLES_MISSING", strategy_id=selected.strategy_id, family=selected.family)
@@ -230,15 +220,6 @@ def _evaluate_selected_candidate(
     bars, candle_error = _load_runtime_bars(candle_path, max_bars=config.max_bars)
     if candle_error:
         return _blocked_evaluation(candle_error, strategy_id=selected.strategy_id, family=selected.family, candle_path=str(candle_path))
-    engine = _build_gc_candidate_engine(config=config, lane=selected)
-    signal_events = 0
-    order_intents = 0
-    for bar in bars:
-        events = engine.process_bar(bar)
-        for event in events:
-            if isinstance(event, OrderIntentCreatedEvent):
-                order_intents += 1
-        signal_events += 1 if getattr(engine, "_last_signal_packet", None) is not None else 0  # noqa: SLF001
     external_features_ready = _external_feature_artifacts_ready(
         gc_readiness=gc_readiness,
         external_feature_artifacts_required=selected.external_feature_artifacts_required,
@@ -256,12 +237,12 @@ def _evaluate_selected_candidate(
         "runtime_kind": selected.runtime_kind,
         "source": selected.source,
         "side": selected.side,
-        "bridge_adapter_present": True,
+        "bridge_adapter_present": bridge_adapter_present,
         "candidate_evaluation_ready": True,
-        "candidate_evaluation_mode": "TRACK_B_PAPER_CANDIDATE_NO_SUBMIT",
+        "candidate_evaluation_mode": "TRACK_B_PAPER_CANDIDATE_ARTIFACT_NO_SUBMIT",
         "bars_evaluated": len(bars),
-        "signal_packets_evaluated": signal_events,
-        "shadow_order_intents": order_intents,
+        "signal_packets_evaluated": 0,
+        "shadow_order_intents": 0,
         "historical_seed_ready": bool(gc_readiness.get("historical_seed_ready")),
         "realtime_feed_confirmed": bool(gc_readiness.get("realtime_feed_confirmed")),
         "runtime_candles_ready": bool(gc_readiness.get("runtime_candles_ready")),
@@ -288,48 +269,6 @@ def _evaluate_selected_candidate(
         "paper_proof_invoked": False,
         "non_gc_strategy_promoted": False,
     }
-
-
-def _build_gc_candidate_engine(*, config: Phase1GcCandidateConfig, lane: GcCandidateLane) -> AsiaLondonParticipationStrategyEngine:
-    base_settings = load_settings_from_files([Path(config.repo_root) / path for path in config.config_paths])
-    spec = ProbationaryPaperLaneSpec(
-        lane_id=lane.strategy_id,
-        display_name="GC / ASIA_LONDON_LONG_V5 / x1",
-        symbol="GC",
-        standalone_strategy_id=lane.strategy_id,
-        long_sources=(lane.source,) if lane.side == "LONG" else (),
-        short_sources=(lane.source,) if lane.side == "SHORT" else (),
-        session_restriction="ASIA_EARLY/ASIA_LATE/LONDON_EARLY/LONDON_LATE",
-        allowed_sessions=("ASIA_EARLY", "ASIA_LATE", "LONDON_EARLY", "LONDON_LATE"),
-        point_value=Decimal("100"),
-        trade_size=1,
-        max_position_quantity=1,
-        strategy_family=lane.family,
-        runtime_kind=lane.runtime_kind,
-        structural_signal_timeframe=lane.structural_timeframe,
-        execution_timeframe=lane.execution_timeframe,
-        artifact_timeframe=lane.structural_timeframe,
-        context_timeframes=(lane.structural_timeframe,),
-        live_poll_lookback_minutes=1440,
-        observed_instruments=("GC",),
-        experimental_status="paper_candidate",
-        paper_only=True,
-        non_approved=True,
-    )
-    settings = _build_probationary_paper_lane_settings(base_settings, spec)
-    return AsiaLondonParticipationStrategyEngine(
-        lane_spec=spec,
-        settings=settings,
-        repositories=None,
-        execution_engine=ExecutionEngine(),
-        runtime_identity={
-            "standalone_strategy_id": lane.strategy_id,
-            "strategy_family": lane.family,
-            "instrument": "GC",
-            "lane_id": lane.strategy_id,
-        },
-        shadow_mode_no_submit=True,
-    )
 
 
 def _load_runtime_bars(path: Path, *, max_bars: int) -> tuple[list[Bar], str | None]:
@@ -392,7 +331,7 @@ def _runtime_candle_path(*, config: Phase1GcCandidateConfig, symbol: str, timefr
 
 
 def _inventory_row(lane: GcCandidateLane) -> dict[str, Any]:
-    adapter = lane_submit_bridge_adapter(lane_id=lane.strategy_id)
+    adapter_present = _phase1_gc_bridge_adapter_present(strategy_id=lane.strategy_id)
     return {
         "strategy_id": lane.strategy_id,
         "instrument": "GC",
@@ -409,12 +348,16 @@ def _inventory_row(lane: GcCandidateLane) -> dict[str, Any]:
         "required_runtime_feature_artifacts": list(lane.required_runtime_feature_artifacts),
         "feature_contract_status": lane.feature_contract_status,
         "rule_runner_status": "EXISTING_RUNTIME_ENGINE",
-        "bridge_adapter_present": adapter is not None,
+        "bridge_adapter_present": adapter_present,
         "can_consume_runtime_seed": True,
         "paper_candidate_evaluation_blockers": [],
         "can_submit": False,
         "live_money_eligible": False,
     }
+
+
+def _phase1_gc_bridge_adapter_present(*, strategy_id: str) -> bool:
+    return is_phase1_gc_guarded_paper_eligible_strategy(strategy_id=strategy_id, instrument="GC")
 
 
 def _blocked_evaluation(reason: str, **extra: Any) -> dict[str, Any]:

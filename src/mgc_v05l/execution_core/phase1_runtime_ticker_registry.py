@@ -9,7 +9,7 @@ from __future__ import annotations
 from dataclasses import asdict, dataclass
 from typing import Any, Literal
 
-from mgc_v05l.execution.ibkr_phase1_futures_scope import (
+from mgc_v05l.phase1_futures_scope import (
     phase1_execution_symbol_for_source,
     phase1_execution_target_for_source,
     supported_phase1_source_instruments,

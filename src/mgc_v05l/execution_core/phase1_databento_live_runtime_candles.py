@@ -25,7 +25,6 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable, Mapping, Protocol, Sequence
 
-from mgc_v05l.app.session_phase_labels import label_session_phase, session_restriction_matches_timestamp
 from mgc_v05l.execution_core.phase1_databento_historical_seed import _aggregate_bars
 from mgc_v05l.execution_core.phase1_runtime_ticker_registry import (
     PHASE1_RUNTIME_TICKER_ORDER,
@@ -39,6 +38,7 @@ from mgc_v05l.execution_core.track_b_databento_live_runtime_feed import (
     _record_to_candle,
 )
 from mgc_v05l.execution_core.track_b_runtime_candle_capture_cli import _load_databento_api_key
+from mgc_v05l.session_phase_labels import label_session_phase, session_restriction_matches_timestamp
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 DEFAULT_RUNTIME_CANDLE_ROOT = Path("outputs") / "track_b_execution_core" / "phase1_runtime_market_data"
