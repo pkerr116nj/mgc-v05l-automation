@@ -21,6 +21,22 @@ DEFAULT_CANDLE_TIMEFRAME = "5m"
 DEFAULT_ENTRY_ACCEPTANCE_ARTIFACT_PATH = (
     "outputs/track_b_execution_core/entry_acceptance/latest_entry_acceptance_state.json"
 )
+ASIA_EARLY_NORMAL_BREAKOUT_RETEST_HOLD_LONG_FAMILY = "asiaEarlyNormalBreakoutRetestHoldLong"
+ASIA_EARLY_NORMAL_BREAKOUT_RETEST_HOLD_LONG_RULE_ID = "ASIA_EARLY_NORMAL_BREAKOUT_RETEST_HOLD_LONG_V1"
+ASIA_EARLY_NORMAL_BREAKOUT_RETEST_HOLD_LONG_STATE_KEY = "asia_early_normal_breakout_retest_hold_long_state"
+ASIA_EARLY_NORMAL_BREAKOUT_RETEST_HOLD_LONG_FEATURES_KEY = "asia_early_normal_breakout_retest_hold_long_features"
+ASIA_EARLY_NORMAL_BREAKOUT_RETEST_HOLD_LONG_REQUIRED_PREDICATES = (
+    "breakout_breaks_prior_1_high",
+    "signal_retests_and_holds_breakout_level",
+)
+ASIA_EARLY_NORMAL_BREAKOUT_RETEST_HOLD_LONG_CONTEXT_PREDICATES = (
+    "asia_early_or_gc_mgc_london_open",
+    "allow_asia",
+    "no_first_bull_snap_turn",
+    "prior_bars_since_long_setup_gt_anti_churn",
+    "breakout_bar_slope_is_flat",
+    "breakout_bar_expansion_is_normal",
+)
 
 
 class AcceptanceClass(str, Enum):
@@ -329,6 +345,149 @@ def build_entry_acceptance_state(
         "feature_summary": _round_mapping(features),
         "safety_flags": _safety_flags(),
         **_safety_flags(),
+    }
+
+
+def build_asia_early_normal_breakout_retest_hold_entry_acceptance_payload(
+    *,
+    event_payload: Mapping[str, Any],
+    completed_candles: Sequence[Mapping[str, Any]],
+    participation_quality: Mapping[str, Any] | None = None,
+    input_source_path: str | Path | None = None,
+    input_source_category: str = SOURCE_CATEGORY_RUNTIME,
+    input_mode: str = INPUT_MODE_RUNTIME_DECISION,
+) -> dict[str, Any]:
+    """Map the existing breakout/retest/hold envelope into advisory scorer input.
+
+    The adapter is deliberately offline and behavior-neutral: it does not call
+    the strategy runner, emit signals, or create any order/lifecycle authority.
+    """
+
+    metadata = event_payload.get("metadata") if isinstance(event_payload.get("metadata"), Mapping) else {}
+    state = metadata.get(ASIA_EARLY_NORMAL_BREAKOUT_RETEST_HOLD_LONG_STATE_KEY)
+    features = metadata.get(ASIA_EARLY_NORMAL_BREAKOUT_RETEST_HOLD_LONG_FEATURES_KEY)
+    state_payload = state if isinstance(state, Mapping) else {}
+    feature_payload = features if isinstance(features, Mapping) else {}
+    timeframe = _normalize_timeframe(
+        _string_or_none(state_payload.get("timeframe"))
+        or _string_or_none(event_payload.get("timeframe"))
+        or DEFAULT_CANDLE_TIMEFRAME
+    )
+    candidate = build_asia_early_normal_breakout_retest_hold_candidate_metadata(event_payload=event_payload)
+    payload: dict[str, Any] = {
+        "instrument": _string_or_none(event_payload.get("instrument_family")) or "MGC",
+        "source_id": _string_or_none(event_payload.get("source_id")),
+        "input_source_path": (
+            str(input_source_path)
+            if input_source_path is not None
+            else _string_or_none(metadata.get("source_payload_path"))
+        ),
+        "input_source_category": input_source_category,
+        "input_mode": input_mode,
+        "candidate": candidate,
+        "candles": list(completed_candles),
+        "timeframe_context": {
+            "primary_timeframe": timeframe,
+            "candidate_timeframe": timeframe,
+            "context_timeframe": timeframe,
+            "exit_management_timeframe": timeframe,
+            "fast_reaction_timeframe": timeframe,
+            "timeframe_source": TIMEFRAME_SOURCE_NATIVE,
+            "base_timeframe_if_derived": None,
+            "aggregation_method": None,
+            "anchor_rule": None,
+            "timeframe_alignment_status": TIMEFRAME_ALIGNMENT_ALIGNED,
+        },
+        "runtime_provenance": {
+            "source_id": _string_or_none(event_payload.get("source_id")),
+            "source_payload_path": _string_or_none(metadata.get("source_payload_path")),
+            "source_bar_count": metadata.get("source_bar_count"),
+            "event_generated_at": _string_or_none(event_payload.get("generated_at") or event_payload.get("observed_at")),
+        },
+    }
+    if participation_quality is not None:
+        payload["participation_quality"] = dict(participation_quality)
+    return payload
+
+
+def build_asia_early_normal_breakout_retest_hold_candidate_metadata(
+    *,
+    event_payload: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Build scorer candidate metadata from a session-strategy envelope."""
+
+    metadata = event_payload.get("metadata") if isinstance(event_payload.get("metadata"), Mapping) else {}
+    state = metadata.get(ASIA_EARLY_NORMAL_BREAKOUT_RETEST_HOLD_LONG_STATE_KEY)
+    features = metadata.get(ASIA_EARLY_NORMAL_BREAKOUT_RETEST_HOLD_LONG_FEATURES_KEY)
+    state_payload = state if isinstance(state, Mapping) else {}
+    feature_payload = features if isinstance(features, Mapping) else {}
+    matched_required, missing_required = _predicate_partition(
+        feature_payload,
+        ASIA_EARLY_NORMAL_BREAKOUT_RETEST_HOLD_LONG_REQUIRED_PREDICATES,
+    )
+    matched_context, missing_context = _predicate_partition(
+        {**state_payload, **feature_payload},
+        ASIA_EARLY_NORMAL_BREAKOUT_RETEST_HOLD_LONG_CONTEXT_PREDICATES,
+    )
+    near_miss_predicates = _near_miss_predicates_for_breakout_retest_hold(
+        state=state_payload,
+        features=feature_payload,
+        missing_context=missing_context,
+    )
+    failure_risk_flags = _breakout_retest_hold_failure_flags(
+        state=state_payload,
+        features=feature_payload,
+        missing_required=missing_required,
+        missing_context=missing_context,
+    )
+    return {
+        "candidate_id": _string_or_none(event_payload.get("lane_id")) or "mgc_asia_early_normal_breakout_retest_hold_long",
+        "candidate_family": ASIA_EARLY_NORMAL_BREAKOUT_RETEST_HOLD_LONG_FAMILY,
+        "side": CandidateSide.LONG.value,
+        "rule_id": _string_or_none(event_payload.get("strategy_id"))
+        or ASIA_EARLY_NORMAL_BREAKOUT_RETEST_HOLD_LONG_RULE_ID,
+        "source_event_strategy_id": _string_or_none(event_payload.get("strategy_id")),
+        "session_context": {
+            "derivative_phase": _string_or_none(state_payload.get("derivative_phase")),
+            "session_asia": state_payload.get("session_asia") is True,
+            "timing_session_fit": _breakout_retest_hold_timing_score(state_payload),
+        },
+        "breakout_retest_hold_context": {
+            "breakout_breaks_prior_1_high": feature_payload.get("breakout_breaks_prior_1_high") is True,
+            "signal_retests_and_holds_breakout_level": (
+                feature_payload.get("signal_retests_and_holds_breakout_level") is True
+            ),
+            "breakout_level": _optional_float(feature_payload.get("breakout_level")),
+            "breakout_range_expansion_ratio": _optional_float(feature_payload.get("breakout_range_expansion_ratio")),
+            "hold_margin": _breakout_retest_hold_margin(event_payload=event_payload, features=feature_payload),
+        },
+        "required_predicates": list(ASIA_EARLY_NORMAL_BREAKOUT_RETEST_HOLD_LONG_REQUIRED_PREDICATES),
+        "matched_predicates": [*matched_required, *matched_context],
+        "missing_predicates": missing_required,
+        "context_missing_predicates": missing_context,
+        "missing_required_predicates": missing_required,
+        "near_miss_predicates": near_miss_predicates,
+        "structural_similarity": _breakout_retest_hold_structural_score(
+            matched_required=matched_required,
+            missing_required=missing_required,
+            near_miss_predicates=near_miss_predicates,
+        ),
+        "directional_alignment": _breakout_retest_hold_directional_score(event_payload),
+        "timing_session_fit": _breakout_retest_hold_timing_score(state_payload),
+        "volatility_range_fit": _breakout_retest_hold_range_score(feature_payload),
+        "pullback_retest_quality": _breakout_retest_hold_retest_score(
+            event_payload=event_payload,
+            features=feature_payload,
+        ),
+        "failure_risk_score": _breakout_retest_hold_failure_risk_score(failure_risk_flags),
+        "failure_risk_flags": failure_risk_flags,
+        "candidate_timeframe": _normalize_timeframe(
+            _string_or_none(state_payload.get("timeframe"))
+            or _string_or_none(event_payload.get("timeframe"))
+            or DEFAULT_CANDLE_TIMEFRAME
+        ),
+        "feature_version": _string_or_none(feature_payload.get("feature_version")),
+        "calibration_profile": _string_or_none(feature_payload.get("calibration_profile")),
     }
 
 
@@ -980,6 +1139,151 @@ def _context_failure_reasons(dimensions: Mapping[str, float]) -> tuple[str, ...]
     if dimensions["pullback_retest_quality"] < 0.45:
         failures.append("WEAK_PULLBACK_RETEST_QUALITY")
     return tuple(failures)
+
+
+def _predicate_partition(mapping: Mapping[str, Any], predicates: Sequence[str]) -> tuple[list[str], list[str]]:
+    matched: list[str] = []
+    missing: list[str] = []
+    for predicate in predicates:
+        if mapping.get(predicate) is True:
+            matched.append(predicate)
+        else:
+            missing.append(predicate)
+    return matched, missing
+
+
+def _near_miss_predicates_for_breakout_retest_hold(
+    *,
+    state: Mapping[str, Any],
+    features: Mapping[str, Any],
+    missing_context: Sequence[str],
+) -> list[str]:
+    near_misses: list[str] = []
+    if "breakout_bar_expansion_is_normal" in missing_context and _breakout_retest_hold_range_score(features) >= 0.70:
+        near_misses.append("breakout_range_expansion_near_normal")
+    if "breakout_bar_slope_is_flat" in missing_context and _breakout_retest_hold_slope_score(features) >= 0.70:
+        near_misses.append("breakout_slope_near_flat")
+    if "asia_early_or_gc_mgc_london_open" in missing_context and state.get("session_asia") is True:
+        near_misses.append("session_window_near_preferred")
+    return near_misses
+
+
+def _breakout_retest_hold_failure_flags(
+    *,
+    state: Mapping[str, Any],
+    features: Mapping[str, Any],
+    missing_required: Sequence[str],
+    missing_context: Sequence[str],
+) -> list[str]:
+    flags: list[str] = []
+    if missing_required:
+        flags.append("FAILED_BREAKOUT_RETEST_HOLD_STRUCTURE")
+    if "no_first_bull_snap_turn" in missing_context:
+        flags.append("SNAP_TURN_CONFLICT")
+    if "prior_bars_since_long_setup_gt_anti_churn" in missing_context:
+        flags.append("ANTI_CHURN_CONFLICT")
+    if _breakout_retest_hold_range_score(features) < 0.55:
+        flags.append("RANGE_EXPANSION_OUT_OF_BOUNDS")
+    if _breakout_retest_hold_slope_score(features) < 0.55:
+        flags.append("BREAKOUT_SLOPE_NOT_FLAT")
+    if state.get("allow_asia") is False:
+        flags.append("SESSION_NOT_ALLOWED")
+    return _dedupe(flags)
+
+
+def _breakout_retest_hold_structural_score(
+    *,
+    matched_required: Sequence[str],
+    missing_required: Sequence[str],
+    near_miss_predicates: Sequence[str],
+) -> float:
+    if missing_required:
+        return 0.25 if matched_required else 0.10
+    return _clamp01(0.96 - (0.10 * len(near_miss_predicates)))
+
+
+def _breakout_retest_hold_directional_score(event_payload: Mapping[str, Any]) -> float:
+    open_price = _optional_float(event_payload.get("open"))
+    high = _optional_float(event_payload.get("high"))
+    low = _optional_float(event_payload.get("low"))
+    close = _optional_float(event_payload.get("close") or event_payload.get("last"))
+    if open_price is None or high is None or low is None or close is None or high <= low:
+        return 0.70
+    body_score = _clamp01(((close - open_price) / (high - low) + 1.0) / 2.0)
+    close_location = _clamp01((close - low) / (high - low))
+    return _clamp01((body_score * 0.45) + (close_location * 0.55))
+
+
+def _breakout_retest_hold_timing_score(state: Mapping[str, Any]) -> float:
+    if state.get("asia_early_or_gc_mgc_london_open") is True and state.get("allow_asia") is True:
+        return 0.96
+    if state.get("session_asia") is True and state.get("allow_asia") is True:
+        return 0.72
+    if state.get("allow_asia") is True:
+        return 0.55
+    return 0.25
+
+
+def _breakout_retest_hold_range_score(features: Mapping[str, Any]) -> float:
+    if features.get("breakout_bar_expansion_is_normal") is True:
+        return 0.92
+    ratio = _optional_float(features.get("breakout_range_expansion_ratio"))
+    minimum = _optional_float(features.get("breakout_min_range_expansion_ratio"))
+    maximum = _optional_float(features.get("breakout_max_range_expansion_ratio"))
+    if ratio is None or minimum is None or maximum is None or minimum >= maximum:
+        return 0.55
+    if minimum <= ratio <= maximum:
+        return 0.90
+    nearest_bound = minimum if ratio < minimum else maximum
+    tolerance = max(0.01, maximum - minimum)
+    distance = abs(ratio - nearest_bound) / tolerance
+    return _clamp01(0.78 - min(0.40, distance * 0.35))
+
+
+def _breakout_retest_hold_slope_score(features: Mapping[str, Any]) -> float:
+    if features.get("breakout_bar_slope_is_flat") is True:
+        return 0.92
+    slope = _optional_float(features.get("breakout_normalized_slope"))
+    max_abs = _optional_float(features.get("breakout_abs_slope_max"))
+    if slope is None or max_abs is None or max_abs <= 0:
+        return 0.55
+    excess = max(0.0, abs(slope) - max_abs) / max_abs
+    return _clamp01(0.78 - min(0.45, excess * 0.35))
+
+
+def _breakout_retest_hold_retest_score(
+    *,
+    event_payload: Mapping[str, Any],
+    features: Mapping[str, Any],
+) -> float:
+    if features.get("signal_retests_and_holds_breakout_level") is not True:
+        return 0.20
+    margin = _breakout_retest_hold_margin(event_payload=event_payload, features=features)
+    if margin is None:
+        return 0.86
+    if margin >= 0:
+        return _clamp01(0.82 + min(0.12, margin * 0.10))
+    return _clamp01(0.55 + max(-0.30, margin * 0.10))
+
+
+def _breakout_retest_hold_margin(
+    *,
+    event_payload: Mapping[str, Any],
+    features: Mapping[str, Any],
+) -> float | None:
+    close = _optional_float(event_payload.get("close") or event_payload.get("last"))
+    breakout_level = _optional_float(features.get("breakout_level"))
+    if close is None or breakout_level is None:
+        return None
+    return close - breakout_level
+
+
+def _breakout_retest_hold_failure_risk_score(flags: Sequence[str]) -> float:
+    if not flags:
+        return 0.95
+    severe = {"FAILED_BREAKOUT_RETEST_HOLD_STRUCTURE", "SNAP_TURN_CONFLICT", "SESSION_NOT_ALLOWED"}
+    penalty = 0.10 * len(flags) + 0.12 * sum(1 for flag in flags if flag in severe)
+    return _clamp01(1.0 - min(0.70, penalty))
 
 
 def _freshness_status(

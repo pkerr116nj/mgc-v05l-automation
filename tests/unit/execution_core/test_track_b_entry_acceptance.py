@@ -18,8 +18,13 @@ from mgc_v05l.execution_core.track_b_entry_acceptance import (
     STALE_INPUT,
     STRUCTURALLY_INVALID,
     THIN_DATA,
+    build_asia_early_normal_breakout_retest_hold_entry_acceptance_payload,
     build_entry_acceptance_state,
     write_entry_acceptance_state,
+)
+from mgc_v05l.execution_core.track_b_strategy_rule_runner import (
+    TrackBStrategyRuleRunnerVerdict,
+    run_track_b_strategy_rule,
 )
 
 
@@ -316,6 +321,154 @@ def test_no_broker_order_or_lifecycle_mutation_imports_or_calls() -> None:
     assert violations == []
 
 
+def test_asia_early_normal_breakout_retest_hold_exact_current_pass_scores_exact() -> None:
+    payload = build_asia_early_normal_breakout_retest_hold_entry_acceptance_payload(
+        event_payload=_asia_breakout_event(),
+        completed_candles=_bullish_candles(),
+        input_source_path="outputs/track_b_execution_core/runtime/mgc_5m_latest.json",
+    )
+
+    report = build_entry_acceptance_state(payload, now=_now(_bullish_candles()))
+
+    assert report["acceptance_class"] == EXACT_STRUCTURAL_MATCH
+    assert report["candidate_family"] == "asiaEarlyNormalBreakoutRetestHoldLong"
+    assert report["candidate_side"] == "LONG"
+    assert report["runtime_trade_eligible"] is False
+    assert report["order_intent_created"] is False
+
+
+def test_asia_early_normal_breakout_retest_hold_one_soft_weakness_scores_near() -> None:
+    event = _asia_breakout_event()
+    features = _asia_breakout_features(event)
+    features["breakout_bar_expansion_is_normal"] = False
+    features["breakout_range_expansion_ratio"] = "1.27"
+
+    payload = build_asia_early_normal_breakout_retest_hold_entry_acceptance_payload(
+        event_payload=event,
+        completed_candles=_bullish_candles(),
+        input_source_path="outputs/track_b_execution_core/runtime/mgc_5m_latest.json",
+    )
+
+    report = build_entry_acceptance_state(payload, now=_now(_bullish_candles()))
+
+    assert report["acceptance_class"] == NEAR_STRUCTURAL_MATCH
+    assert "breakout_range_expansion_near_normal" in payload["candidate"]["near_miss_predicates"]
+    assert "MISSING_REQUIRED_PREDICATES" not in report["failure_reasons"]
+
+
+def test_asia_early_normal_breakout_retest_hold_multiple_margins_scores_degraded() -> None:
+    event = _asia_breakout_event(close="102.01")
+    metadata = event["metadata"]
+    assert isinstance(metadata, dict)
+    state = metadata["asia_early_normal_breakout_retest_hold_long_state"]
+    features = metadata["asia_early_normal_breakout_retest_hold_long_features"]
+    assert isinstance(state, dict)
+    assert isinstance(features, dict)
+    state["asia_early_or_gc_mgc_london_open"] = False
+    state["no_first_bull_snap_turn"] = False
+    state["prior_bars_since_long_setup_gt_anti_churn"] = False
+    features["breakout_bar_expansion_is_normal"] = False
+    features["breakout_range_expansion_ratio"] = "1.31"
+    features["breakout_bar_slope_is_flat"] = False
+    features["breakout_normalized_slope"] = "0.24"
+
+    payload = build_asia_early_normal_breakout_retest_hold_entry_acceptance_payload(
+        event_payload=event,
+        completed_candles=_bullish_candles(),
+        input_source_path="outputs/track_b_execution_core/runtime/mgc_5m_latest.json",
+    )
+
+    report = build_entry_acceptance_state(payload, now=_now(_bullish_candles()))
+
+    assert report["acceptance_class"] == DEGRADED_BUT_VALID_MATCH
+    assert report["entry_quality_context"]["quality_label"] == "MARGINAL"
+    assert "MISSING_REQUIRED_PREDICATES" not in report["failure_reasons"]
+
+
+def test_asia_early_normal_breakout_retest_hold_missing_breakout_or_hold_scores_invalid() -> None:
+    event = _asia_breakout_event()
+    features = _asia_breakout_features(event)
+    features["breakout_breaks_prior_1_high"] = False
+
+    payload = build_asia_early_normal_breakout_retest_hold_entry_acceptance_payload(
+        event_payload=event,
+        completed_candles=_bullish_candles(),
+        input_source_path="outputs/track_b_execution_core/runtime/mgc_5m_latest.json",
+    )
+
+    report = build_entry_acceptance_state(payload, now=_now(_bullish_candles()))
+
+    assert report["acceptance_class"] == STRUCTURALLY_INVALID
+    assert "MISSING_REQUIRED_PREDICATES" in report["failure_reasons"]
+    assert "breakout_breaks_prior_1_high" in payload["candidate"]["missing_required_predicates"]
+
+
+def test_asia_early_normal_breakout_retest_hold_stale_provenance_scores_low_confidence() -> None:
+    candles = _bullish_candles()
+    payload = build_asia_early_normal_breakout_retest_hold_entry_acceptance_payload(
+        event_payload=_asia_breakout_event(),
+        completed_candles=candles,
+        input_source_path="outputs/track_b_execution_core/runtime/mgc_5m_latest.json",
+    )
+
+    report = build_entry_acceptance_state(payload, now=_now(candles) + timedelta(hours=1))
+
+    assert report["acceptance_class"] == LOW_CONFIDENCE_INSUFFICIENT_DATA
+    assert STALE_INPUT in report["failure_reasons"]
+
+
+def test_asia_early_normal_breakout_retest_hold_rule_output_unchanged_by_adapter(tmp_path: Path) -> None:
+    event = _asia_breakout_event()
+    before = run_track_b_strategy_rule(
+        input_event_payload=event,
+        input_event_path=tmp_path / "breakout_retest_hold_long_state.json",
+        inbox_dir=tmp_path / "inbox",
+        expected_account_id="DUM882026",
+        source_id="unit_test_breakout_retest_hold_long",
+        rule_id="ASIA_EARLY_NORMAL_BREAKOUT_RETEST_HOLD_LONG_V1",
+        rule_mode="ASIA_EARLY_NORMAL_BREAKOUT_RETEST_HOLD_LONG_V1",
+        emit_signal=True,
+        output_root=tmp_path / "rule_reports_before",
+        strategy_adapter_output_root=tmp_path / "adapter_reports_before",
+        candle_producer_output_root=tmp_path / "candle_reports_before",
+        writer_output_root=tmp_path / "writer_reports_before",
+        runner_id="rule-runner-breakout-retest-before",
+        now=BASE_TS,
+    )
+
+    payload = build_asia_early_normal_breakout_retest_hold_entry_acceptance_payload(
+        event_payload=event,
+        completed_candles=_bullish_candles(),
+        input_source_path="outputs/track_b_execution_core/runtime/mgc_5m_latest.json",
+    )
+    report = build_entry_acceptance_state(payload, now=_now(_bullish_candles()))
+
+    after = run_track_b_strategy_rule(
+        input_event_payload=event,
+        input_event_path=tmp_path / "breakout_retest_hold_long_state.json",
+        inbox_dir=tmp_path / "inbox_after",
+        expected_account_id="DUM882026",
+        source_id="unit_test_breakout_retest_hold_long",
+        rule_id="ASIA_EARLY_NORMAL_BREAKOUT_RETEST_HOLD_LONG_V1",
+        rule_mode="ASIA_EARLY_NORMAL_BREAKOUT_RETEST_HOLD_LONG_V1",
+        emit_signal=True,
+        output_root=tmp_path / "rule_reports_after",
+        strategy_adapter_output_root=tmp_path / "adapter_reports_after",
+        candle_producer_output_root=tmp_path / "candle_reports_after",
+        writer_output_root=tmp_path / "writer_reports_after",
+        runner_id="rule-runner-breakout-retest-after",
+        now=BASE_TS,
+    )
+
+    assert report["strategy_authority"] is False
+    assert before.verdict == TrackBStrategyRuleRunnerVerdict.EMITTED_SIGNAL
+    assert after.verdict == before.verdict
+    assert after.report["decision"] == before.report["decision"] == "LONG"
+    assert after.report["signal_emitted"] == before.report["signal_emitted"] is True
+    assert after.report["submit_attempted"] == before.report["submit_attempted"] is False
+    assert after.report["broker_state_mutated"] == before.report["broker_state_mutated"] is False
+
+
 def _evaluate(
     candidate: dict[str, Any],
     *,
@@ -380,6 +533,81 @@ def _candidate(
     if missing_required_predicates:
         candidate["missing_required_predicates"] = missing_required_predicates
     return candidate
+
+
+def _asia_breakout_event(**overrides: Any) -> dict[str, Any]:
+    event: dict[str, Any] = {
+        "account_id": "DUM882026",
+        "expected_account_id": "DUM882026",
+        "contract_key": "MGC-202606",
+        "instrument_family": "MGC",
+        "strategy_id": "ASIA_EARLY_NORMAL_BREAKOUT_RETEST_HOLD_LONG_V1",
+        "signal_family": "ASIA_EARLY_NORMAL_BREAKOUT_RETEST_HOLD_LONG_V1",
+        "lane_id": "mgc_asia_early_normal_breakout_retest_hold_long",
+        "rule_mode": "ASIA_EARLY_NORMAL_BREAKOUT_RETEST_HOLD_LONG_V1",
+        "source_id": "unit_test_breakout_retest_hold_long",
+        "timeframe": "5m",
+        "candle_timestamp": BASE_TS.isoformat(),
+        "observed_at": BASE_TS.isoformat(),
+        "generated_at": BASE_TS.isoformat(),
+        "open": "101.80",
+        "high": "102.50",
+        "low": "101.70",
+        "close": "102.30",
+        "last": "102.30",
+        "volume": "120",
+        "quote_provider_mode": "REALTIME",
+        "input_quote_provider_mode": "REALTIME",
+        "realtime_quote_received": True,
+        "current_quote_available": True,
+        "quote_freshness_verdict": "CURRENT_QUOTE_FRESHNESS_ACCEPTED_STRICT_MAX_AGE",
+        "metadata": {
+            "source_payload_path": "outputs/track_b_execution_core/runtime/mgc_5m_latest.json",
+            "source_bar_count": 12,
+            "signal_side_if_ready": "LONG",
+            "quote_provider_mode": "REALTIME",
+            "realtime_quote_received": True,
+            "current_quote_available": True,
+            "asia_early_normal_breakout_retest_hold_long_state": {
+                "derivative_phase": "ASIA_EARLY",
+                "session_asia": True,
+                "allow_asia": True,
+                "asia_early_or_gc_mgc_london_open": True,
+                "no_first_bull_snap_turn": True,
+                "prior_bars_since_long_setup_gt_anti_churn": True,
+                "timeframe": "5m",
+            },
+            "asia_early_normal_breakout_retest_hold_long_features": {
+                "feature_version": "asia_early_normal_breakout_retest_hold_long_v1_phase1",
+                "calibration_profile": "probationary_baseline_v1",
+                "breakout_bar_slope_is_flat": True,
+                "breakout_bar_expansion_is_normal": True,
+                "breakout_breaks_prior_1_high": True,
+                "signal_retests_and_holds_breakout_level": True,
+                "breakout_normalized_slope": "0.05",
+                "breakout_abs_slope_max": "0.20",
+                "breakout_range_expansion_ratio": "1.00",
+                "breakout_min_range_expansion_ratio": "0.85",
+                "breakout_max_range_expansion_ratio": "1.25",
+                "breakout_level": "102.00",
+            },
+        },
+        "paper_proof_cli_called": False,
+        "submit_allowed": False,
+        "submit_attempted": False,
+        "broker_state_mutated": False,
+        "live_money_readiness": False,
+    }
+    event.update(overrides)
+    return event
+
+
+def _asia_breakout_features(event: dict[str, Any]) -> dict[str, Any]:
+    metadata = event["metadata"]
+    assert isinstance(metadata, dict)
+    features = metadata["asia_early_normal_breakout_retest_hold_long_features"]
+    assert isinstance(features, dict)
+    return features
 
 
 def _bullish_candles() -> list[dict[str, Any]]:
