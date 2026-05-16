@@ -8,6 +8,11 @@ from mgc_v05l.app.track_b_paper_lifecycle_adoption import (
     LifecycleAdoptionConfig,
     run_track_b_paper_lifecycle_adoption,
 )
+from mgc_v05l.execution_core.track_b_submit_intent_ownership import (
+    SubmitIntentOwnershipRecord,
+    SubmitIntentOwnershipState,
+    append_submit_intent_ownership_record,
+)
 
 
 def test_pl_lifecycle_adoption_reconstructs_fill_trade_and_ledger(tmp_path: Path) -> None:
@@ -287,6 +292,153 @@ def test_mgc_leak_test_unknown_after_submit_adopts_exact_order_client_perm_ident
     assert position["entry_client_id"] == 11940
     assert position["entry_perm_id"] == 614044377
     assert position["strategy_id"] == "atp_companion_v1__benchmark_mgc_asia_us"
+
+
+def test_unknown_after_submit_matching_submit_intent_adopts_reserved_lifecycle_id(tmp_path: Path) -> None:
+    repo = _write_mgc_leak_test_unknown_after_submit_evidence(tmp_path)
+    bridge_path = repo / "outputs/reports/track_b_paper_leak_test/atp_companion_v1_asia_us/ibkr_paper_strategy_bridge_report.json"
+    bridge_path.unlink()
+    ownership = _write_mgc_submit_intent_ownership(repo)
+
+    result = run_track_b_paper_lifecycle_adoption(
+        config=LifecycleAdoptionConfig(
+            repo_root=repo,
+            lane_id="atp_companion_v1_asia_us",
+            symbol="MGC",
+            local_symbol="MGCM6",
+            expiry="20260626",
+            bridge_root=Path("outputs/reports/track_b_paper_leak_test"),
+            allow_leak_test_synthetic_intent=True,
+            expected_broker_order_id="28",
+            expected_client_id=11940,
+            expected_perm_id=614044377,
+            apply=True,
+        ),
+        now=_now(),
+    )
+
+    assert result.classification == "TRACK_B_PAPER_LIFECYCLE_ADOPTION_APPLIED"
+    assert result.report["submit_intent_ownership_evidence"]["selected"]["ownership_intent_id"] == ownership["ownership_intent_id"]
+    lane_dir = repo / "outputs/probationary_pattern_engine/paper_session/lanes/atp_companion_v1_asia_us"
+    fill_rows = _read_jsonl(lane_dir / "fills.jsonl")
+    trade_rows = _read_jsonl(lane_dir / "trades.jsonl")
+    assert fill_rows[0]["ownership_intent_id"] == ownership["ownership_intent_id"]
+    assert fill_rows[0]["reserved_lifecycle_id"] == ownership["lifecycle_id"]
+    assert fill_rows[0]["lifecycle_id"] == ownership["lifecycle_id"]
+    assert fill_rows[0]["submit_intent_ownership_evidence"] is True
+    assert fill_rows[0]["broker_order_id"] == "28"
+    assert fill_rows[0]["client_id"] == 11940
+    assert fill_rows[0]["perm_id"] == 614044377
+    assert trade_rows[0]["lifecycle_id"] == ownership["lifecycle_id"]
+    assert trade_rows[0]["ownership_intent_id"] == ownership["ownership_intent_id"]
+    live_positions = _read_json(repo / "outputs/track_b_execution_core/paper_trade_ledger/latest_track_b_live_position_status.json")
+    assert live_positions["open_position_count"] == 1
+
+
+def test_bridge_report_fallback_still_adopts_without_submit_intent(tmp_path: Path) -> None:
+    repo = _write_mgc_leak_test_unknown_after_submit_evidence(tmp_path)
+
+    result = run_track_b_paper_lifecycle_adoption(
+        config=LifecycleAdoptionConfig(
+            repo_root=repo,
+            lane_id="atp_companion_v1_asia_us",
+            symbol="MGC",
+            local_symbol="MGCM6",
+            expiry="20260626",
+            bridge_root=Path("outputs/reports/track_b_paper_leak_test"),
+            allow_leak_test_synthetic_intent=True,
+            expected_broker_order_id="28",
+            expected_client_id=11940,
+            expected_perm_id=614044377,
+            apply=True,
+        ),
+        now=_now(),
+    )
+
+    assert result.classification == "TRACK_B_PAPER_LIFECYCLE_ADOPTION_APPLIED"
+    assert result.report["submit_intent_ownership_evidence"]["selected"] is None
+    fill_rows = _read_jsonl(repo / "outputs/probationary_pattern_engine/paper_session/lanes/atp_companion_v1_asia_us/fills.jsonl")
+    assert fill_rows[0].get("ownership_intent_id") is None
+
+
+def test_lifecycle_adoption_refuses_competing_submit_intent_ownership_records(tmp_path: Path) -> None:
+    repo = _write_mgc_leak_test_unknown_after_submit_evidence(tmp_path)
+    _write_mgc_submit_intent_ownership(repo, broker_order_id="28")
+    _write_mgc_submit_intent_ownership(repo, broker_order_id="29")
+
+    result = run_track_b_paper_lifecycle_adoption(
+        config=LifecycleAdoptionConfig(
+            repo_root=repo,
+            lane_id="atp_companion_v1_asia_us",
+            symbol="MGC",
+            local_symbol="MGCM6",
+            expiry="20260626",
+            bridge_root=Path("outputs/reports/track_b_paper_leak_test"),
+            allow_leak_test_synthetic_intent=True,
+            apply=True,
+        ),
+        now=_now(),
+    )
+
+    assert result.classification == "TRACK_B_PAPER_LIFECYCLE_ADOPTION_REFUSED"
+    assert "Competing unresolved submit-intent ownership records" in " ".join(result.report["failures"])
+
+
+def test_lifecycle_adoption_refuses_mismatched_submit_intent_identity(tmp_path: Path) -> None:
+    repo = _write_mgc_leak_test_unknown_after_submit_evidence(tmp_path)
+    _write_mgc_submit_intent_ownership(repo, action="SELL")
+
+    result = run_track_b_paper_lifecycle_adoption(
+        config=LifecycleAdoptionConfig(
+            repo_root=repo,
+            lane_id="atp_companion_v1_asia_us",
+            symbol="MGC",
+            local_symbol="MGCM6",
+            expiry="20260626",
+            bridge_root=Path("outputs/reports/track_b_paper_leak_test"),
+            allow_leak_test_synthetic_intent=True,
+            expected_broker_order_id="28",
+            apply=True,
+        ),
+        now=_now(),
+    )
+
+    assert result.classification == "TRACK_B_PAPER_LIFECYCLE_ADOPTION_REFUSED"
+    assert "account/qty/side/order identity did not match" in " ".join(result.report["failures"])
+
+
+def test_lifecycle_adoption_refuses_unsafe_submit_intent_ownership_record(tmp_path: Path) -> None:
+    repo = _write_mgc_leak_test_unknown_after_submit_evidence(tmp_path)
+    record = _write_mgc_submit_intent_ownership(repo)
+    path = repo / "outputs/track_b_execution_core/submit_intent_ownership/track_b_submit_intent_ownership.jsonl"
+    tampered = dict(record)
+    tampered["live_money_eligible"] = True
+    path.write_text(json.dumps(tampered, sort_keys=True) + "\n", encoding="utf-8")
+
+    result = run_track_b_paper_lifecycle_adoption(
+        config=LifecycleAdoptionConfig(
+            repo_root=repo,
+            lane_id="atp_companion_v1_asia_us",
+            symbol="MGC",
+            local_symbol="MGCM6",
+            expiry="20260626",
+            bridge_root=Path("outputs/reports/track_b_paper_leak_test"),
+            allow_leak_test_synthetic_intent=True,
+            expected_broker_order_id="28",
+            apply=True,
+        ),
+        now=_now(),
+    )
+
+    assert result.classification == "TRACK_B_PAPER_LIFECYCLE_ADOPTION_REFUSED"
+    assert "unsafe live_money_eligible/paper_proof flags" in " ".join(result.report["failures"])
+
+
+def test_lifecycle_adoption_module_has_no_broker_mutation_symbols() -> None:
+    source = Path("src/mgc_v05l/app/track_b_paper_lifecycle_adoption.py").read_text(encoding="utf-8")
+    assert "placeOrder" not in source
+    assert "cancelOrder" not in source
+    assert "reqGlobalCancel" not in source
 
 
 def test_gc_leak_test_partial_adoption_refuses_order_id_mismatch(tmp_path: Path) -> None:
@@ -694,6 +846,70 @@ def _write_mgc_leak_test_unknown_after_submit_evidence(tmp_path: Path) -> Path:
         },
     )
     return repo
+
+
+def _write_mgc_submit_intent_ownership(
+    repo: Path,
+    *,
+    broker_order_id: str = "28",
+    action: str = "BUY",
+    live_money_eligible: bool = False,
+    paper_proof_invoked: bool = False,
+) -> dict[str, object]:
+    record = SubmitIntentOwnershipRecord(
+        mode="PAPER",
+        account_id="DUM882026",
+        lane_id="atp_companion_v1_asia_us",
+        strategy_id="atp_companion_v1__benchmark_mgc_asia_us",
+        intent_type="BUY_TO_OPEN" if action == "BUY" else "SELL_TO_OPEN",
+        action=action,
+        symbol="MGC",
+        local_symbol="MGCM6",
+        expiry="20260626",
+        con_id=712565978,
+        qty=1,
+        order_type="LMT",
+        limit_price="4543.2",
+        time_in_force="DAY",
+        repo_root=str(repo),
+        git_head="abc123",
+        created_at=_now().replace(microsecond=int(broker_order_id)),
+        state=SubmitIntentOwnershipState.BROKER_RESULT_UNKNOWN_REFRESH_REQUIRED,
+        lifecycle_id=f"reserved_submit_atp_companion_v1_asia_us_20260515T204947393217Z_test_{broker_order_id}",
+        lifecycle_id_reserved_only=True,
+        lifecycle_position_open=False,
+        caller_path="track_b_paper_leak_test_apply",
+        caller_type="track_b_paper_leak_test",
+        authorization_path=str(repo / "outputs/reports/track_b_paper_leak_test/atp_companion_v1_asia_us/track_b_paper_leak_test_authorization.json"),
+        authorization_digest="80c2b3d4c8193aa7b7d055520e542b9a74454cd19a7d90491e942f77daa466ce",
+        execution_price_source="RUNTIME_DATABENTO_1M_CLOSE",
+        runtime_reference_price="4543.1",
+        pre_submit_reconciliation_classification="PHASE1_BROKER_RECONCILIATION_CLEAR",
+        governance_classification="PAPER_STRATEGY_GOVERNANCE_READY",
+        exposure_classification="PAPER_EXPOSURE_ENTRY_ALLOWED",
+        open_order_count=0,
+        unknown_open_order_count=0,
+        review_required_count=0,
+        live_money_eligible=live_money_eligible,
+        paper_proof_invoked=paper_proof_invoked,
+        broker_order_id=broker_order_id,
+        client_id=11940,
+        perm_id=614044377,
+        source_artifact_paths=(
+            str(repo / "outputs/reports/track_b_paper_leak_test/atp_companion_v1_asia_us/ibkr_paper_strategy_bridge_report.json"),
+        ),
+        extra={
+            "reason": "LEAK_TEST_ENTRY",
+            "delegated_classification": "PAPER_ORDER_UNKNOWN_NEEDS_MANUAL_TWS_REVIEW",
+            "bridge_classification": "PAPER_STRATEGY_NEEDS_MANUAL_REVIEW",
+        },
+    )
+    result = append_submit_intent_ownership_record(
+        record,
+        jsonl_path=repo / "outputs/track_b_execution_core/submit_intent_ownership/track_b_submit_intent_ownership.jsonl",
+        latest_path=repo / "outputs/track_b_execution_core/submit_intent_ownership/latest_track_b_submit_intent_ownership.json",
+    )
+    return result.record
 
 
 def _now() -> datetime:

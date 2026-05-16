@@ -20,6 +20,10 @@ from mgc_v05l.execution.ibkr_paper_strategy_porting import lane_submit_bridge_ad
 from mgc_v05l.execution_core.track_b_paper_trade_ledger import (
     update_track_b_paper_trade_ledger_from_filled_bridge_result,
 )
+from mgc_v05l.execution_core.track_b_submit_intent_ownership import (
+    DEFAULT_TRACK_B_SUBMIT_INTENT_OWNERSHIP_JSONL,
+    load_unresolved_submit_intent_ownership_records,
+)
 
 PAPER_ACCOUNT_ID = "DUM882026"
 DEFAULT_LANE_ID = "atp_companion_v1_pl_asia_us"
@@ -34,6 +38,7 @@ DEFAULT_BROKER_TRUTH_PATH = (
     Path("outputs") / "reports" / "ibkr_read_only_verification" / "ibkr_positions_snapshot.json"
 )
 DEFAULT_LEDGER_ROOT = Path("outputs") / "track_b_execution_core" / "paper_trade_ledger"
+DEFAULT_SUBMIT_INTENT_OWNERSHIP_PATH = DEFAULT_TRACK_B_SUBMIT_INTENT_OWNERSHIP_JSONL
 
 
 @dataclass(frozen=True)
@@ -58,6 +63,7 @@ class LifecycleAdoptionConfig:
     bridge_root: Path = DEFAULT_BRIDGE_ROOT
     broker_truth_path: Path = DEFAULT_BROKER_TRUTH_PATH
     ledger_root: Path = DEFAULT_LEDGER_ROOT
+    submit_intent_ownership_path: Path = DEFAULT_SUBMIT_INTENT_OWNERSHIP_PATH
 
 
 @dataclass(frozen=True)
@@ -82,10 +88,12 @@ def run_track_b_paper_lifecycle_adoption(
     order_intents_path = lane_dir / "order_intents.jsonl"
     fills_path = lane_dir / "fills.jsonl"
     trades_path = lane_dir / "trades.jsonl"
+    submit_intent_ownership_path = repo_root / config.submit_intent_ownership_path
 
     broker_truth = _read_json(broker_truth_path)
     bridge_report = _read_json(bridge_path)
     intents = _read_jsonl(order_intents_path)
+    submit_intent_ownership_records = load_unresolved_submit_intent_ownership_records(submit_intent_ownership_path)
     adapter = lane_submit_bridge_adapter(lane_id=config.lane_id)
 
     broker_position = _select_broker_position(
@@ -97,9 +105,23 @@ def run_track_b_paper_lifecycle_adoption(
         quantity=config.quantity,
         failures=failures,
     )
+    submit_intent_ownership = _select_submit_intent_ownership(
+        records=submit_intent_ownership_records,
+        account_id=config.account_id,
+        lane_id=config.lane_id,
+        symbol=config.symbol,
+        local_symbol=config.local_symbol,
+        expiry=config.expiry,
+        quantity=config.quantity,
+        expected_broker_order_id=config.expected_broker_order_id,
+        expected_client_id=config.expected_client_id,
+        expected_perm_id=config.expected_perm_id,
+        failures=failures,
+    )
     intent = _select_intent(
         intents=intents,
         bridge_report=bridge_report,
+        submit_intent_ownership=submit_intent_ownership,
         lane_id=config.lane_id,
         order_intent_id=config.order_intent_id,
         symbol=config.symbol,
@@ -114,23 +136,42 @@ def run_track_b_paper_lifecycle_adoption(
         failures=failures,
     )
     broker_average_price = _broker_average_price(broker_position)
-    bridge_evidence = _extract_bridge_evidence(
-        bridge_report=bridge_report,
-        broker_position=broker_position,
-        broker_average_price=broker_average_price,
-        lane_id=config.lane_id,
-        account_id=config.account_id,
-        symbol=config.symbol,
-        local_symbol=config.local_symbol,
-        expiry=config.expiry,
-        quantity=config.quantity,
-        intent=intent,
-        expected_broker_order_id=config.expected_broker_order_id,
-        expected_client_id=config.expected_client_id,
-        expected_perm_id=config.expected_perm_id,
-        expected_exec_id=config.expected_exec_id,
-        expected_fill_price=config.expected_fill_price,
-        failures=failures,
+    bridge_evidence = (
+        _extract_submit_intent_ownership_evidence(
+            submit_intent_ownership=submit_intent_ownership,
+            broker_position=broker_position,
+            broker_average_price=broker_average_price,
+            account_id=config.account_id,
+            symbol=config.symbol,
+            local_symbol=config.local_symbol,
+            expiry=config.expiry,
+            quantity=config.quantity,
+            expected_broker_order_id=config.expected_broker_order_id,
+            expected_client_id=config.expected_client_id,
+            expected_perm_id=config.expected_perm_id,
+            expected_exec_id=config.expected_exec_id,
+            expected_fill_price=config.expected_fill_price,
+            failures=failures,
+        )
+        if submit_intent_ownership is not None
+        else _extract_bridge_evidence(
+            bridge_report=bridge_report,
+            broker_position=broker_position,
+            broker_average_price=broker_average_price,
+            lane_id=config.lane_id,
+            account_id=config.account_id,
+            symbol=config.symbol,
+            local_symbol=config.local_symbol,
+            expiry=config.expiry,
+            quantity=config.quantity,
+            intent=intent,
+            expected_broker_order_id=config.expected_broker_order_id,
+            expected_client_id=config.expected_client_id,
+            expected_perm_id=config.expected_perm_id,
+            expected_exec_id=config.expected_exec_id,
+            expected_fill_price=config.expected_fill_price,
+            failures=failures,
+        )
     )
 
     fill_price = _decimal(bridge_evidence.get("fill_price")) if bridge_evidence else None
@@ -224,6 +265,11 @@ def run_track_b_paper_lifecycle_adoption(
         "bridge_evidence": {
             "path": str(bridge_path),
             "selected": bridge_evidence,
+        },
+        "submit_intent_ownership_evidence": {
+            "path": str(submit_intent_ownership_path),
+            "selected": submit_intent_ownership,
+            "unresolved_record_count": len(submit_intent_ownership_records),
         },
         "intent_evidence": {
             "path": str(order_intents_path),
@@ -322,6 +368,7 @@ def _select_intent(
     *,
     intents: Sequence[Mapping[str, Any]],
     bridge_report: Mapping[str, Any],
+    submit_intent_ownership: Mapping[str, Any] | None,
     lane_id: str,
     order_intent_id: str | None,
     symbol: str,
@@ -340,6 +387,14 @@ def _select_intent(
     ]
     if order_intent_id:
         rows = [row for row in rows if str(row.get("order_intent_id") or "") == order_intent_id]
+    if len(rows) != 1 and submit_intent_ownership is not None:
+        return _intent_from_submit_intent_ownership(
+            submit_intent_ownership=submit_intent_ownership,
+            lane_id=lane_id,
+            order_intent_id=order_intent_id,
+            symbol=symbol,
+            quantity=quantity,
+        )
     if len(rows) != 1 and allow_leak_test_synthetic_intent:
         synthetic = _synthetic_leak_test_intent_from_bridge(
             bridge_report=bridge_report,
@@ -355,6 +410,36 @@ def _select_intent(
         failures.append(f"Expected exactly one filled matching order intent, found {len(rows)}.")
         return rows[0] if rows else None
     return rows[0]
+
+
+def _intent_from_submit_intent_ownership(
+    *,
+    submit_intent_ownership: Mapping[str, Any],
+    lane_id: str,
+    order_intent_id: str | None,
+    symbol: str,
+    quantity: Decimal,
+) -> dict[str, Any]:
+    ownership_intent_id = str(submit_intent_ownership.get("ownership_intent_id") or "")
+    intent_type = str(submit_intent_ownership.get("intent_type") or "BUY_TO_OPEN").upper()
+    return {
+        "order_intent_id": order_intent_id or ownership_intent_id,
+        "lane_id": lane_id,
+        "strategy_id": submit_intent_ownership.get("strategy_id") or lane_id,
+        "standalone_strategy_id": submit_intent_ownership.get("strategy_id") or lane_id,
+        "symbol": symbol,
+        "instrument": symbol,
+        "intent_type": intent_type,
+        "quantity": _decimal_text(quantity),
+        "broker_order_id": submit_intent_ownership.get("broker_order_id"),
+        "broker_order_status": "FILLED",
+        "reason_code": _nested(submit_intent_ownership, "extra", "reason") or "LEAK_TEST_ENTRY",
+        "decision_bar_timestamp": submit_intent_ownership.get("created_at"),
+        "signal_timestamp": submit_intent_ownership.get("created_at"),
+        "ownership_intent_id": ownership_intent_id,
+        "reserved_lifecycle_id": submit_intent_ownership.get("lifecycle_id"),
+        "source": "TRACK_B_SUBMIT_INTENT_OWNERSHIP",
+    }
 
 
 def _synthetic_leak_test_intent_from_bridge(
@@ -416,6 +501,181 @@ def _synthetic_leak_test_intent_from_bridge(
         "signal_timestamp": intent_payload.get("timestamp"),
         "synthetic_leak_test_intent": True,
         "source": "TRACK_B_PAPER_LEAK_TEST_BRIDGE_REPORT",
+    }
+
+
+def _select_submit_intent_ownership(
+    *,
+    records: Sequence[Mapping[str, Any]],
+    account_id: str,
+    lane_id: str,
+    symbol: str,
+    local_symbol: str,
+    expiry: str,
+    quantity: Decimal,
+    expected_broker_order_id: str | None,
+    expected_client_id: int | None,
+    expected_perm_id: int | None,
+    failures: list[str],
+) -> dict[str, Any] | None:
+    target_action = "BUY" if quantity > 0 else "SELL"
+    target_contract_records = [
+        dict(row)
+        for row in records
+        if str(row.get("symbol") or "").upper() == symbol.upper()
+        and str(row.get("local_symbol") or "").upper() == local_symbol.upper()
+        and str(row.get("expiry") or "") == str(expiry)
+    ]
+    target_lane_records = [
+        row
+        for row in target_contract_records
+        if str(row.get("mode") or "").upper() == "PAPER"
+        and str(row.get("account_id") or "") == account_id
+        and str(row.get("lane_id") or "") == lane_id
+    ]
+    unsafe_records = [
+        row
+        for row in target_contract_records
+        if row.get("live_money_eligible") is not False or row.get("paper_proof_invoked") is not False
+    ]
+    if unsafe_records:
+        failures.append("Submit-intent ownership record has unsafe live_money_eligible/paper_proof flags.")
+        return None
+
+    matches = [
+        row
+        for row in target_lane_records
+        if _decimal(row.get("qty")) == abs(quantity)
+        and str(row.get("action") or "").upper() == target_action
+        and str(row.get("intent_type") or "").upper() in {"BUY_TO_OPEN", "SELL_TO_OPEN", "ENTRY"}
+    ]
+    if expected_broker_order_id is not None:
+        matches = [row for row in matches if str(row.get("broker_order_id") or "") == str(expected_broker_order_id)]
+    if expected_client_id is not None:
+        matches = [row for row in matches if _decimal(row.get("client_id")) == Decimal(expected_client_id)]
+    if expected_perm_id is not None:
+        matches = [row for row in matches if _decimal(row.get("perm_id")) == Decimal(expected_perm_id)]
+
+    adoptable_states = {
+        "BROKER_RESULT_UNKNOWN_REFRESH_REQUIRED",
+        "BROKER_ORDER_WORKING",
+        "BROKER_POSITION_OBSERVED_ADOPTION_REQUIRED",
+    }
+    matches = [row for row in matches if str(row.get("state") or "").upper() in adoptable_states]
+    if len(matches) > 1:
+        failures.append(
+            "Competing unresolved submit-intent ownership records match the same account/contract/side adoption window."
+        )
+        return None
+    if len(matches) == 1:
+        return matches[0]
+    if target_lane_records:
+        failures.append("Submit-intent ownership record exists for target contract but account/qty/side/order identity did not match.")
+    return None
+
+
+def _extract_submit_intent_ownership_evidence(
+    *,
+    submit_intent_ownership: Mapping[str, Any],
+    broker_position: Mapping[str, Any] | None,
+    broker_average_price: Decimal | None,
+    account_id: str,
+    symbol: str,
+    local_symbol: str,
+    expiry: str,
+    quantity: Decimal,
+    expected_broker_order_id: str | None,
+    expected_client_id: int | None,
+    expected_perm_id: int | None,
+    expected_exec_id: str | None,
+    expected_fill_price: Decimal | None,
+    failures: list[str],
+) -> dict[str, Any] | None:
+    local_failures: list[str] = []
+    if broker_position is None:
+        local_failures.append("Submit-intent adoption requires exact broker position truth.")
+    if str(submit_intent_ownership.get("mode") or "").upper() != "PAPER":
+        local_failures.append("Submit-intent ownership record is not PAPER mode.")
+    if str(submit_intent_ownership.get("account_id") or "") != account_id:
+        local_failures.append("Submit-intent ownership account does not match expected PAPER account.")
+    if submit_intent_ownership.get("live_money_eligible") is not False:
+        local_failures.append("Submit-intent ownership live_money_eligible must be false.")
+    if submit_intent_ownership.get("paper_proof_invoked") is not False:
+        local_failures.append("Submit-intent ownership paper_proof_invoked must be false.")
+    if str(submit_intent_ownership.get("symbol") or "").upper() != symbol.upper():
+        local_failures.append("Submit-intent ownership symbol mismatch.")
+    if str(submit_intent_ownership.get("local_symbol") or "").upper() != local_symbol.upper():
+        local_failures.append("Submit-intent ownership local_symbol mismatch.")
+    if str(submit_intent_ownership.get("expiry") or "") != str(expiry):
+        local_failures.append("Submit-intent ownership expiry mismatch.")
+    if _decimal(submit_intent_ownership.get("qty")) != abs(quantity):
+        local_failures.append("Submit-intent ownership quantity mismatch.")
+    target_action = "BUY" if quantity > 0 else "SELL"
+    if str(submit_intent_ownership.get("action") or "").upper() != target_action:
+        local_failures.append("Submit-intent ownership action is not consistent with broker position side.")
+    broker_order_id = str(submit_intent_ownership.get("broker_order_id") or "")
+    if expected_broker_order_id is not None and broker_order_id != str(expected_broker_order_id):
+        local_failures.append("Submit-intent ownership broker_order_id does not match expected broker_order_id.")
+    client_id = submit_intent_ownership.get("client_id")
+    if expected_client_id is not None and _decimal(client_id) != Decimal(expected_client_id):
+        local_failures.append("Submit-intent ownership client_id does not match expected client_id.")
+    perm_id = submit_intent_ownership.get("perm_id")
+    if expected_perm_id is not None and _decimal(perm_id) != Decimal(expected_perm_id):
+        local_failures.append("Submit-intent ownership perm_id does not match expected perm_id.")
+    execution_id = submit_intent_ownership.get("exec_id")
+    if expected_exec_id is not None and str(execution_id or "") != str(expected_exec_id):
+        local_failures.append("Submit-intent ownership exec_id does not match expected exec_id.")
+    expected_fill_decimal = _decimal(expected_fill_price)
+    if expected_fill_decimal is not None and broker_average_price is not None and broker_average_price != expected_fill_decimal:
+        local_failures.append("Broker average price does not match expected fill_price.")
+    if local_failures:
+        failures.extend(local_failures)
+        return None
+
+    fill_price = expected_fill_decimal or broker_average_price
+    missing_fields = [
+        field
+        for field, value in (
+            ("broker_order_id", broker_order_id),
+            ("client_id", client_id),
+            ("perm_id", perm_id),
+            ("execution_id", execution_id),
+        )
+        if value in {None, ""}
+    ]
+    return {
+        "account_id": account_id,
+        "symbol": symbol,
+        "local_symbol": local_symbol,
+        "expiry": expiry,
+        "contract_month": expiry[:6],
+        "multiplier": str((broker_position or {}).get("multiplier") or ""),
+        "con_id": submit_intent_ownership.get("con_id"),
+        "broker_order_id": broker_order_id,
+        "perm_id": perm_id,
+        "client_id": client_id,
+        "execution_id": execution_id,
+        "fill_price": _decimal_text(fill_price) or "",
+        "fill_price_source": "BROKER_POSITION_AVERAGE_PRICE",
+        "fill_timestamp": (broker_position or {}).get("updated_at") or submit_intent_ownership.get("updated_at"),
+        "order_status_updated_at": submit_intent_ownership.get("updated_at"),
+        "latest_order_status": {},
+        "selected_execution": {},
+        "entry_execution_intent": _nested(submit_intent_ownership, "extra", "entry_execution_intent"),
+        "entry_price_source": submit_intent_ownership.get("execution_price_source"),
+        "leak_test": str(submit_intent_ownership.get("caller_path") or "") == "track_b_paper_leak_test_apply",
+        "authorization_digest": submit_intent_ownership.get("authorization_digest"),
+        "ownership_intent_id": submit_intent_ownership.get("ownership_intent_id"),
+        "reserved_lifecycle_id": submit_intent_ownership.get("lifecycle_id"),
+        "submit_intent_state": submit_intent_ownership.get("state"),
+        "evidence_classification": "SUBMIT_INTENT_BROKER_POSITION_CONFIRMED_PARTIAL_IDENTITY",
+        "adoption_input_classification": "SUBMIT_INTENT_BROKER_BACKED_ENTRY_REQUIRES_LIFECYCLE_ADOPTION",
+        "broker_position_confirmed": True,
+        "identity_completeness": "PARTIAL" if missing_fields else "COMPLETE",
+        "missing_broker_identity_fields": missing_fields,
+        "delegated_classification": _nested(submit_intent_ownership, "extra", "delegated_classification"),
+        "bridge_classification": _nested(submit_intent_ownership, "extra", "bridge_classification"),
+        "source_artifact_paths": submit_intent_ownership.get("source_artifact_paths") or [],
     }
 
 
@@ -828,6 +1088,10 @@ def _build_fill_payload(
         "strategy_id": strategy_id,
         "standalone_strategy_id": strategy_id,
         "order_intent_id": order_intent_id,
+        "ownership_intent_id": bridge_evidence.get("ownership_intent_id"),
+        "reserved_lifecycle_id": bridge_evidence.get("reserved_lifecycle_id"),
+        "lifecycle_id": bridge_evidence.get("reserved_lifecycle_id"),
+        "submit_intent_state": bridge_evidence.get("submit_intent_state"),
         "intent_type": intent_type,
         "action": action,
         "symbol": config.symbol,
@@ -855,6 +1119,7 @@ def _build_fill_payload(
         "missing_broker_identity_fields": bridge_evidence.get("missing_broker_identity_fields") or [],
         "broker_position_confirmed": bool(bridge_evidence.get("broker_position_confirmed")),
         "authorization_digest": bridge_evidence.get("authorization_digest"),
+        "submit_intent_ownership_evidence": bool(bridge_evidence.get("ownership_intent_id")),
         "broker_status": "FILLED",
         "broker_position_quantity": str(broker_position.get("quantity") or ""),
         "broker_average_cost": str(broker_position.get("average_cost") or ""),
@@ -871,6 +1136,7 @@ def _build_fill_payload(
         "source_artifact_paths": [
             str(config.broker_truth_path),
             str(config.bridge_root / config.lane_id / "ibkr_paper_strategy_bridge_report.json"),
+            *[str(path) for path in (bridge_evidence.get("source_artifact_paths") or [])],
         ],
     }
 
@@ -878,13 +1144,19 @@ def _build_fill_payload(
 def _build_trade_payload(fill_payload: Mapping[str, Any]) -> dict[str, Any]:
     order_intent_id = str(fill_payload.get("order_intent_id") or "")
     strategy_id = str(fill_payload.get("strategy_id") or fill_payload.get("lane_id") or "UNKNOWN")
-    lifecycle_id = f"bridge_fill_{order_intent_id}" if order_intent_id else f"bridge_fill_{fill_payload.get('broker_order_id')}"
+    lifecycle_id = str(
+        fill_payload.get("lifecycle_id")
+        or (f"bridge_fill_{order_intent_id}" if order_intent_id else f"bridge_fill_{fill_payload.get('broker_order_id')}")
+    )
     side = "LONG" if str(fill_payload.get("intent_type") or "").upper() == "BUY_TO_OPEN" else "SHORT"
     return {
         "source": "TRACK_B_PAPER_LIFECYCLE_ADOPTION",
         "classification": "PAPER_TRADE_LIFECYCLE_ADOPTION_RECONSTRUCTED_OPEN",
         "trade_id": f"{strategy_id}:{lifecycle_id}",
         "lifecycle_id": lifecycle_id,
+        "ownership_intent_id": fill_payload.get("ownership_intent_id"),
+        "reserved_lifecycle_id": fill_payload.get("reserved_lifecycle_id"),
+        "submit_intent_state": fill_payload.get("submit_intent_state"),
         "final_position_status": "OPEN_MANAGED",
         "paper_lifecycle_type": "STRATEGY_MANAGED",
         "leak_test": bool(fill_payload.get("leak_test")),
@@ -914,6 +1186,7 @@ def _build_trade_payload(fill_payload: Mapping[str, Any]) -> dict[str, Any]:
         "entry_exec_id": fill_payload.get("execution_id"),
         "entry_execution_intent": fill_payload.get("entry_execution_intent"),
         "entry_price_source": fill_payload.get("entry_price_source"),
+        "submit_intent_ownership_evidence": fill_payload.get("submit_intent_ownership_evidence"),
         "broker_average_price": fill_payload.get("broker_average_price"),
         "broker_cost_basis_adjustment": fill_payload.get("broker_cost_basis_adjustment"),
         "live_money_eligible": False,
@@ -933,6 +1206,10 @@ def _build_filled_bridge_result(fill_payload: Mapping[str, Any]) -> dict[str, An
         "action": fill_payload.get("action"),
         "quantity": fill_payload.get("quantity"),
         "order_intent_id": fill_payload.get("order_intent_id"),
+        "ownership_intent_id": fill_payload.get("ownership_intent_id"),
+        "reserved_lifecycle_id": fill_payload.get("reserved_lifecycle_id"),
+        "lifecycle_id": fill_payload.get("lifecycle_id"),
+        "submit_intent_state": fill_payload.get("submit_intent_state"),
         "intent_type": fill_payload.get("intent_type"),
         "decision_bar_timestamp": fill_payload.get("decision_bar_timestamp"),
         "broker_order_id": fill_payload.get("broker_order_id"),
@@ -958,6 +1235,7 @@ def _build_filled_bridge_result(fill_payload: Mapping[str, Any]) -> dict[str, An
         "entry_source": fill_payload.get("entry_source"),
         "entry_execution_intent": fill_payload.get("entry_execution_intent"),
         "entry_price_source": fill_payload.get("entry_price_source"),
+        "submit_intent_ownership_evidence": fill_payload.get("submit_intent_ownership_evidence"),
         "source_artifact_paths": fill_payload.get("source_artifact_paths") or [],
         "route_destination": fill_payload.get("route_destination"),
         "paper_proof_invoked": False,
