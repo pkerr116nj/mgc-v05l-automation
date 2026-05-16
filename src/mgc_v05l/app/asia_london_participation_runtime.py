@@ -261,6 +261,7 @@ class AsiaLondonParticipationStrategyEngine(StrategyEngine):
         if quantity <= 0:
             return None
 
+        current_segment = _label_segment_for_symbol(symbol=str(bar.symbol or ""), timestamp=bar.end_ts)
         hold_bars = self._hold_bars_for_timestamp(bar.end_ts)
         entry_segment_bars = self._entry_segment_bars_for_timestamp(bar.end_ts)
         if not hold_bars or len(entry_segment_bars) < definition.setup_bar_count:
@@ -275,6 +276,8 @@ class AsiaLondonParticipationStrategyEngine(StrategyEngine):
         closes = [float(candidate.close) for candidate in hold_bars]
         ema_values = _long_ema(closes, length=definition.exit_ema_length)
         current_index = len(hold_bars) - 1
+        current = hold_bars[current_index]
+        previous = hold_bars[current_index - 1] if current_index > 0 else current
 
         if definition.side == "LONG":
             stop_price = round(float(setup_low - definition.tick_size), 4)
@@ -285,8 +288,17 @@ class AsiaLondonParticipationStrategyEngine(StrategyEngine):
                 fallback_entry_bar=definition.fallback_entry_bar,
                 exit_ema_length=definition.exit_ema_length,
             )
-            exit_index, _exit_price, exit_reason = _find_long_exit(
+            historical_exit_index, _exit_price, historical_exit_reason = _find_long_exit(
                 segment_bars=hold_bars,
+                entry_index=entry_index,
+                stop_price=stop_price,
+                ema_values=ema_values,
+                spec=spec,
+            )
+            exit_reason = _current_long_exit_reason(
+                current=current,
+                previous=previous,
+                current_index=current_index,
                 entry_index=entry_index,
                 stop_price=stop_price,
                 ema_values=ema_values,
@@ -301,15 +313,40 @@ class AsiaLondonParticipationStrategyEngine(StrategyEngine):
                 tick_size=definition.tick_size,
                 exit_ema_length=definition.exit_ema_length,
             )
-            exit_index, _exit_price, exit_reason = _find_short_exit(
+            historical_exit_index, _exit_price, historical_exit_reason = _find_short_exit(
                 segment_bars=hold_bars,
                 entry_index=entry_index,
                 stop_price=stop_price,
                 ema_values=ema_values,
                 spec=spec,
             )
+            exit_reason = _current_short_exit_reason(
+                current=current,
+                previous=previous,
+                current_index=current_index,
+                entry_index=entry_index,
+                stop_price=stop_price,
+                ema_values=ema_values,
+                spec=spec,
+            )
 
-        if exit_index != current_index:
+        if exit_reason is None and _is_adopted_broker_truth_entry(state=state, repositories=getattr(self, "_repositories", None)):
+            if historical_exit_index < current_index:
+                exit_reason = f"adopted_{historical_exit_reason}_catchup"
+            elif current_segment not in HOLD_SEGMENTS:
+                exit_reason = f"adopted_{historical_exit_reason}_catchup"
+
+        if exit_reason is None and current_segment not in HOLD_SEGMENTS:
+            exit_reason = "segment_overrun"
+
+        if exit_reason is None and _is_last_bar_of_hold_window(
+            bar=current,
+            symbol=str(current.symbol or ""),
+            timeframe=getattr(self, "_primary_context_timeframe", current.timeframe),
+        ):
+            exit_reason = "segment_close"
+
+        if exit_reason is None:
             return None
 
         return _build_exit_intent(
@@ -441,6 +478,72 @@ def _entry_index_for_state(*, segment_bars: list[Bar], state: StrategyState) -> 
         if candidate.end_ts >= state.entry_timestamp:
             return index
     return None
+
+
+def _current_long_exit_reason(
+    *,
+    current: Bar,
+    previous: Bar,
+    current_index: int,
+    entry_index: int,
+    stop_price: float,
+    ema_values: list[float | None],
+    spec: ForcedSegmentLongSpec,
+) -> str | None:
+    if float(current.low) <= stop_price:
+        return "initial_stop"
+    if spec.exit_mode == "ema_structure" and current_index > entry_index:
+        ema_value = ema_values[current_index]
+        if ema_value is not None and float(current.close) < ema_value and float(current.close) < float(previous.low):
+            return "ema_structure_break"
+    return None
+
+
+def _current_short_exit_reason(
+    *,
+    current: Bar,
+    previous: Bar,
+    current_index: int,
+    entry_index: int,
+    stop_price: float,
+    ema_values: list[float | None],
+    spec: NyEarlyShortSpec,
+) -> str | None:
+    if float(current.high) >= stop_price:
+        return "initial_stop"
+    if spec.exit_mode == "ema_structure" and current_index > entry_index:
+        ema_value = ema_values[current_index]
+        if ema_value is not None and float(current.close) > ema_value and float(current.close) > float(previous.high):
+            return "ema_structure_break"
+    return None
+
+
+def _is_last_bar_of_hold_window(*, bar: Bar, symbol: str, timeframe: str) -> bool:
+    from ..market_data.timeframes import timeframe_minutes
+
+    next_end = bar.end_ts + timedelta(minutes=timeframe_minutes(timeframe))
+    return _label_segment_for_symbol(symbol=symbol, timestamp=next_end) not in HOLD_SEGMENTS
+
+
+def _is_adopted_broker_truth_entry(*, state: StrategyState, repositories: Any | None) -> bool:
+    if repositories is None or state.entry_bar_id is None:
+        return False
+    try:
+        fills = repositories.fills.list_all()
+    except Exception:
+        return False
+    entry_prefix = f"{state.entry_bar_id}|"
+    for row in reversed(fills):
+        broker_order_id = str(row.get("broker_order_id") or "")
+        if not broker_order_id.startswith("adopted-broker-truth-"):
+            continue
+        intent_type = str(row.get("intent_type") or "").upper()
+        if intent_type not in {"BUY_TO_OPEN", "SELL_TO_OPEN"}:
+            continue
+        order_intent_id = str(row.get("order_intent_id") or "")
+        if order_intent_id == state.entry_bar_id or order_intent_id.startswith(entry_prefix):
+            return True
+    return False
 
 
 def _build_exit_intent(

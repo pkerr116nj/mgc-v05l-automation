@@ -5,10 +5,13 @@ import json
 from datetime import datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
+from types import SimpleNamespace
 from zoneinfo import ZoneInfo
 
 import mgc_v05l.app.asia_london_participation_runtime as asia_runtime
+from mgc_v05l.domain.enums import LongEntryFamily, PositionSide, ShortEntryFamily, StrategyStatus
 from mgc_v05l.domain.models import Bar
+from mgc_v05l.domain.models import StrategyState
 
 
 def _bar(symbol: str, end_ts: datetime, *, open_px: str, high_px: str, low_px: str, close_px: str, volume: int = 100) -> Bar:
@@ -29,6 +32,84 @@ def _bar(symbol: str, end_ts: datetime, *, open_px: str, high_px: str, low_px: s
         session_us=False,
         session_allowed=True,
     )
+
+
+def _long_state(*, entry_bar_id: str, entry_timestamp: datetime) -> StrategyState:
+    return StrategyState(
+        strategy_status=StrategyStatus.IN_LONG_K,
+        position_side=PositionSide.LONG,
+        broker_position_qty=1,
+        internal_position_qty=1,
+        entry_price=Decimal("100.0"),
+        entry_timestamp=entry_timestamp,
+        entry_bar_id=entry_bar_id,
+        long_entry_family=LongEntryFamily.K,
+        bars_in_trade=1,
+        long_be_armed=False,
+        short_be_armed=False,
+        last_swing_low=None,
+        last_swing_high=None,
+        asia_reclaim_bar_low=None,
+        asia_reclaim_bar_high=None,
+        asia_reclaim_bar_vwap=None,
+        bars_since_bull_snap=None,
+        bars_since_bear_snap=None,
+        bars_since_asia_reclaim=None,
+        bars_since_asia_vwap_signal=None,
+        bars_since_long_setup=None,
+        bars_since_short_setup=None,
+        last_signal_bar_id=entry_bar_id,
+        last_order_intent_id=None,
+        open_broker_order_id=None,
+        entries_enabled=True,
+        exits_enabled=True,
+        operator_halt=False,
+        same_underlying_entry_hold=False,
+        same_underlying_hold_reason=None,
+        reconcile_required=False,
+        fault_code=None,
+        updated_at=entry_timestamp,
+        short_entry_family=ShortEntryFamily.NONE,
+    )
+
+
+def _participation_engine(*, symbol: str = "GC", adopted: bool = False):
+    engine = object.__new__(asia_runtime.AsiaLondonParticipationStrategyEngine)
+    engine._lane_spec = SimpleNamespace(symbol=symbol)
+    engine._runtime_definition = asia_runtime.ASIA_LONDON_RUNTIME_BY_SOURCE[asia_runtime.GC_ASIA_LONDON_LONG_V5_SOURCE]
+    engine._primary_context_timeframe = "5m"
+    if adopted:
+        engine._repositories = SimpleNamespace(
+            fills=SimpleNamespace(
+                list_all=lambda: [
+                    {
+                        "broker_order_id": "adopted-broker-truth-GC-GCM6",
+                        "intent_type": "BUY_TO_OPEN",
+                        "order_intent_id": "GC|5m|2026-05-12T23:20:00+00:00|BUY_TO_OPEN",
+                    }
+                ]
+            )
+        )
+    else:
+        engine._repositories = None
+    return engine
+
+
+def _long_hold_bars() -> list[Bar]:
+    start = datetime(2026, 5, 12, 19, 0, tzinfo=ZoneInfo("America/New_York"))
+    bars = [
+        _bar("GC", start + timedelta(minutes=5 * index), open_px="100.4", high_px="100.8", low_px="100.0", close_px="100.5")
+        for index in range(4)
+    ]
+    bars.extend(
+        [
+            _bar("GC", start + timedelta(minutes=20), open_px="100.5", high_px="101.0", low_px="100.4", close_px="100.8"),
+            _bar("GC", start + timedelta(minutes=25), open_px="100.8", high_px="101.0", low_px="99.8", close_px="99.8"),
+            _bar("GC", start + timedelta(minutes=30), open_px="100.3", high_px="101.0", low_px="100.2", close_px="100.5"),
+            _bar("GC", start + timedelta(minutes=35), open_px="100.5", high_px="100.7", low_px="99.7", close_px="99.7"),
+        ]
+    )
+    return bars
 
 
 def test_asia_london_live_observation_writes_predicate_and_near_miss_artifacts(tmp_path: Path, monkeypatch) -> None:
@@ -98,3 +179,61 @@ def test_asia_london_live_observation_ignores_instrumentation_write_timeouts(mon
     monkeypatch.setattr(asia_runtime, "_append_csv_record", _raise_timeout)
 
     asia_runtime._record_asia_london_live_observation(row)  # noqa: SLF001
+
+
+def test_participation_exit_uses_current_bar_when_prior_stop_was_stale() -> None:
+    engine = _participation_engine()
+    bars = _long_hold_bars()
+    engine._bar_history = bars
+    state = _long_state(entry_bar_id=bars[4].bar_id, entry_timestamp=bars[4].end_ts)
+
+    intent = engine._participation_exit_intent(bar=bars[-1], state=state)  # noqa: SLF001
+
+    assert intent is not None
+    assert intent.intent_type.value == "SELL_TO_CLOSE"
+    assert intent.reason_code == "asia_london_initial_stop"
+    assert intent.bar_id == bars[-1].bar_id
+
+
+def test_participation_exit_catches_up_adopted_prior_stop() -> None:
+    engine = _participation_engine(adopted=True)
+    bars = _long_hold_bars()[:-1]
+    bars.append(
+        _bar(
+            "GC",
+            bars[-1].end_ts + timedelta(minutes=5),
+            open_px="100.6",
+            high_px="101.0",
+            low_px="100.4",
+            close_px="100.7",
+        )
+    )
+    engine._bar_history = bars
+    state = _long_state(entry_bar_id=bars[4].bar_id, entry_timestamp=bars[4].end_ts)
+
+    intent = engine._participation_exit_intent(bar=bars[-1], state=state)  # noqa: SLF001
+
+    assert intent is not None
+    assert intent.intent_type.value == "SELL_TO_CLOSE"
+    assert intent.reason_code == "asia_london_adopted_initial_stop_catchup"
+
+
+def test_participation_exit_flattens_segment_overrun() -> None:
+    engine = _participation_engine()
+    bars = _long_hold_bars()[:-1]
+    current = _bar(
+        "GC",
+        datetime(2026, 5, 13, 8, 25, tzinfo=ZoneInfo("America/New_York")),
+        open_px="101.0",
+        high_px="101.3",
+        low_px="100.8",
+        close_px="101.1",
+    )
+    engine._bar_history = [*bars, current]
+    state = _long_state(entry_bar_id=bars[4].bar_id, entry_timestamp=bars[4].end_ts)
+
+    intent = engine._participation_exit_intent(bar=current, state=state)  # noqa: SLF001
+
+    assert intent is not None
+    assert intent.intent_type.value == "SELL_TO_CLOSE"
+    assert intent.reason_code == "asia_london_segment_overrun"
