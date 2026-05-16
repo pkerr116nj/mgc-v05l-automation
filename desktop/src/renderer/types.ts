@@ -143,6 +143,17 @@ export interface DesktopState {
     missingReason: string | null;
     loadedAt: string;
   };
+  trackBPortfolio: {
+    portfolioStatePath: string;
+    pnlCalendarPath: string;
+    portfolioAvailable: boolean;
+    calendarAvailable: boolean;
+    malformed: boolean;
+    portfolio: JsonRecord | null;
+    calendar: JsonRecord | null;
+    missingReason: string | null;
+    loadedAt: string;
+  };
   refreshedAt: string;
 }
 

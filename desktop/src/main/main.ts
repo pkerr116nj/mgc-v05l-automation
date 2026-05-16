@@ -258,7 +258,7 @@ async function runRendererSelfTest(window: BrowserWindow): Promise<void> {
   try {
     const result = await window.webContents.executeJavaScript(`
       (async () => {
-        const expected = ["home","runtime","strategies","positions","market","replay","logs","configuration","diagnostics","settings"];
+        const expected = ["home","track-b-portfolio","track-b-pnl-calendar","runtime","strategies","positions","market","replay","logs","configuration","diagnostics","settings"];
         const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
         await wait(1200);
         const navItems = Array.from(document.querySelectorAll(".nav-item")).map((node) => ({

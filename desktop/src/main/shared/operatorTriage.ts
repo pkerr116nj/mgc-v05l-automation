@@ -401,6 +401,8 @@ function summarizeTrackBPaperReadiness(payload: JsonRecord): TrackBPaperReadines
   const featureBlockedRows = instruments.filter((row) => row.context_ready === false || row.feature_context_ready === false);
   const reviewRequired = payload.critical === true || Number(payload.review_required_count ?? 0) > 0;
   const diagnosticStale = zeroActivity.stale === true || String(zeroActivity.diagnosis_classification ?? "") === "STALE_DIAGNOSTIC";
+  const phase1GcClassification = String(phase1Gc.classification ?? "").trim();
+  const phase1GcCurrent = phase1Gc.available === true && Boolean(phase1GcClassification) && phase1GcClassification !== "PHASE1_GC_PREFLIGHT_NOT_PROVIDED";
   const phase1GcReadyForWatch = phase1Gc.ready_for_guarded_paper_watch === true && phase1Gc.live_money_eligible !== true;
   const auditClassification = String(completedAudit.classification ?? "").trim().toUpperCase();
   const latestMonitorVerdict = String(zeroActivity.latest_monitor_verdict ?? "").trim().toUpperCase();
@@ -429,6 +431,12 @@ function summarizeTrackBPaperReadiness(payload: JsonRecord): TrackBPaperReadines
   } else if (phase1GcReadyForWatch) {
     code = "GC_PHASE1_READY_FOR_GUARDED_PAPER_WATCH";
     message = "GC Phase-1 candidate is ready for guarded PAPER watch after current monday-live preflight; legacy lifecycle diagnostics remain read-only context.";
+  } else if (phase1GcCurrent) {
+    code = phase1GcClassification;
+    const blocker = firstNonEmptyString(phase1Gc.blocker, phase1Gc.detail);
+    message = phase1Gc.stale === true
+      ? "GC Phase-1 preflight is stale; legacy lifecycle diagnostics remain read-only context."
+      : `GC Phase-1 guarded PAPER watch is not ready${blocker ? `: ${blocker}.` : "."} Legacy lifecycle diagnostics remain read-only context.`;
   } else if (diagnosticStale) {
     code = "TRACK_B_PAPER_DIAGNOSTIC_STALE";
     message = "Track B PAPER diagnostic is stale; refresh or inspect the latest monitor artifact.";

@@ -141,6 +141,18 @@ function makeDesktopState(overrides: Partial<DesktopState> = {}): DesktopState {
       loadedAt: new Date().toISOString(),
       ...(overrides.trackB ?? {}),
     },
+    trackBPortfolio: {
+      portfolioStatePath: "/tmp/latest_track_b_portfolio_state.json",
+      pnlCalendarPath: "/tmp/latest_track_b_pnl_calendar.json",
+      portfolioAvailable: false,
+      calendarAvailable: false,
+      malformed: false,
+      portfolio: null,
+      calendar: null,
+      missingReason: "No Track B portfolio artifacts found.",
+      loadedAt: new Date().toISOString(),
+      ...(overrides.trackBPortfolio ?? {}),
+    },
     refreshedAt: new Date().toISOString(),
     ...overrides,
   };

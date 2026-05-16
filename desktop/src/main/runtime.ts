@@ -143,6 +143,7 @@ export interface DesktopState {
   };
   localAuth: LocalOperatorAuthState;
   trackB: TrackBReadOnlyStatus;
+  trackBPortfolio: TrackBPortfolioReadOnlyStatus;
   refreshedAt: string;
 }
 
@@ -151,6 +152,18 @@ export interface TrackBReadOnlyStatus {
   available: boolean;
   malformed: boolean;
   status: JsonRecord | null;
+  missingReason: string | null;
+  loadedAt: string;
+}
+
+export interface TrackBPortfolioReadOnlyStatus {
+  portfolioStatePath: string;
+  pnlCalendarPath: string;
+  portfolioAvailable: boolean;
+  calendarAvailable: boolean;
+  malformed: boolean;
+  portfolio: JsonRecord | null;
+  calendar: JsonRecord | null;
   missingReason: string | null;
   loadedAt: string;
 }
@@ -267,6 +280,8 @@ const REPO_ROOT = resolveWorkspaceRepoRoot();
 const DESKTOP_ROOT = path.join(REPO_ROOT, "desktop");
 const OUTPUT_ROOT = path.join(REPO_ROOT, "outputs", "operator_dashboard");
 const TRACK_B_OPERATOR_STATUS_LATEST_FILE = path.join(REPO_ROOT, "outputs", "track_b_execution_core", "operator_status", "latest_operator_status_summary.json");
+const TRACK_B_PORTFOLIO_STATE_LATEST_FILE = path.join(REPO_ROOT, "outputs", "reports", "track_b_portfolio", "latest_track_b_portfolio_state.json");
+const TRACK_B_PNL_CALENDAR_LATEST_FILE = path.join(REPO_ROOT, "outputs", "reports", "track_b_portfolio", "calendar", "latest_track_b_pnl_calendar.json");
 const RUNTIME_ROOT = path.join(OUTPUT_ROOT, "runtime");
 const DEFAULT_INFO_FILE = path.join(RUNTIME_ROOT, "operator_dashboard.json");
 const DEFAULT_LOG_FILE = path.join(RUNTIME_ROOT, "operator_dashboard.log");
@@ -1633,6 +1648,50 @@ async function buildTrackBReadOnlyStatus(): Promise<TrackBReadOnlyStatus> {
   }
 }
 
+function trackBPortfolioStatePath(): string {
+  const explicit = String(process.env.MGC_TRACK_B_PORTFOLIO_STATE_PATH || "").trim();
+  return explicit || TRACK_B_PORTFOLIO_STATE_LATEST_FILE;
+}
+
+function trackBPnlCalendarPath(): string {
+  const explicit = String(process.env.MGC_TRACK_B_PNL_CALENDAR_PATH || "").trim();
+  return explicit || TRACK_B_PNL_CALENDAR_LATEST_FILE;
+}
+
+async function buildTrackBPortfolioReadOnlyStatus(): Promise<TrackBPortfolioReadOnlyStatus> {
+  const portfolioStatePath = trackBPortfolioStatePath();
+  const pnlCalendarPath = trackBPnlCalendarPath();
+  const loadedAt = new Date().toISOString();
+  const portfolio = await readJsonFile<JsonRecord>(portfolioStatePath);
+  const calendar = await readJsonFile<JsonRecord>(pnlCalendarPath);
+  const portfolioMalformed = portfolio !== null && (typeof portfolio !== "object" || Array.isArray(portfolio));
+  const calendarMalformed = calendar !== null && (typeof calendar !== "object" || Array.isArray(calendar));
+  const missing: string[] = [];
+  if (!portfolio) {
+    missing.push(`Portfolio state artifact missing at ${portfolioStatePath}.`);
+  }
+  if (!calendar) {
+    missing.push(`P&L calendar artifact missing at ${pnlCalendarPath}.`);
+  }
+  if (portfolioMalformed) {
+    missing.push(`Portfolio state artifact is malformed at ${portfolioStatePath}.`);
+  }
+  if (calendarMalformed) {
+    missing.push(`P&L calendar artifact is malformed at ${pnlCalendarPath}.`);
+  }
+  return {
+    portfolioStatePath,
+    pnlCalendarPath,
+    portfolioAvailable: Boolean(portfolio) && !portfolioMalformed,
+    calendarAvailable: Boolean(calendar) && !calendarMalformed,
+    malformed: portfolioMalformed || calendarMalformed,
+    portfolio: portfolioMalformed ? null : portfolio,
+    calendar: calendarMalformed ? null : calendar,
+    missingReason: missing.length ? missing.join(" ") : null,
+    loadedAt,
+  };
+}
+
 function looksLikeDashboardSnapshot(payload: JsonRecord | null | undefined): payload is JsonRecord {
   if (!payload || typeof payload !== "object") {
     return false;
@@ -2072,6 +2131,7 @@ async function loadDesktopStateFixtureState(): Promise<DesktopState> {
   const override = await readJsonFile<JsonRecord>(DESKTOP_STATE_FIXTURE_PATH);
   const localAuth = await buildLocalOperatorAuthState();
   const trackB = await buildTrackBReadOnlyStatus();
+  const trackBPortfolio = await buildTrackBPortfolioReadOnlyStatus();
   const base: DesktopState = {
     connection: "unavailable",
     dashboard: null,
@@ -2138,6 +2198,7 @@ async function loadDesktopStateFixtureState(): Promise<DesktopState> {
     },
     localAuth,
     trackB,
+    trackBPortfolio,
     refreshedAt: nowIso(),
   };
   if (!override) {
@@ -4036,6 +4097,7 @@ async function probeDesktopState(
   const packagedLocalLaunch = packagedLocalBundleLaunchContext();
   const localAuth = await buildLocalOperatorAuthState();
   const trackB = await buildTrackBReadOnlyStatus();
+  const trackBPortfolio = await buildTrackBPortfolioReadOnlyStatus();
   const { urls, infoFiles } = await candidateUrls();
   const errors: string[] = [];
   const packagedBridge = await loadPackagedAttachedSnapshotBridge({ includeHeavyPayload });
@@ -4145,6 +4207,7 @@ async function probeDesktopState(
       },
       localAuth,
       trackB,
+      trackBPortfolio,
       refreshedAt: new Date().toISOString(),
     };
     const syncedState = applyHistoricalPlaybackSyncWarning(state, historicalPlaybackSync);
@@ -4191,6 +4254,7 @@ async function probeDesktopState(
       },
       localAuth,
       trackB,
+      trackBPortfolio,
       refreshedAt: new Date().toISOString(),
     };
     const syncedState = applyHistoricalPlaybackSyncWarning(state, historicalPlaybackSync);
@@ -4229,6 +4293,7 @@ async function probeDesktopState(
     },
     localAuth,
     trackB,
+    trackBPortfolio,
     refreshedAt: new Date().toISOString(),
   };
   await writeDesktopStartupStatus(state);

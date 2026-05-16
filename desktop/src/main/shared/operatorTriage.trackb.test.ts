@@ -182,6 +182,43 @@ test("GC Phase-1 preflight readiness overrides stale legacy zero-activity diagno
   assert.equal(contract.operator_triage.hard_gates.find((gate) => gate.key === "market-data")?.status, "pass");
 });
 
+test("GC Phase-1 blocked readiness overrides stale legacy zero-activity diagnostic", () => {
+  const contract = buildOperatorTriageContract(baseInput({
+    trackBPaperTrading: {
+      available: true,
+      review_required_count: 0,
+      phase1_gc_readiness: {
+        available: true,
+        classification: "GC_PHASE1_PREFLIGHT_BLOCKED",
+        ready_for_guarded_paper_watch: false,
+        strategy_id: "gc_1x_asia_london_participation__asia_london_long_v5",
+        blocker: "paper_trade_allowed_true: paper_trade_allowed=False",
+        candidate_evaluation_ready: true,
+        paper_candidate_approved: true,
+        realtime_feed_confirmed: true,
+        can_submit: false,
+        live_money_eligible: false,
+      },
+      startup_readiness_diagnostic: {
+        instruments: {},
+      },
+      zero_activity_diagnostic: {
+        stale: true,
+        diagnosis_classification: "STALE_DIAGNOSTIC",
+        generated_at: "2026-05-06T19:43:32Z",
+        signals_seen: 0,
+      },
+    },
+  }));
+
+  assert.equal(contract.operator_triage.track_b_paper_status_code, "GC_PHASE1_PREFLIGHT_BLOCKED");
+  assert.equal(
+    contract.operator_triage.track_b_paper_status_message,
+    "GC Phase-1 guarded PAPER watch is not ready: paper_trade_allowed_true: paper_trade_allowed=False. Legacy lifecycle diagnostics remain read-only context.",
+  );
+  assert.equal(contract.operator_triage.root_cause.code, "GC_PHASE1_PREFLIGHT_BLOCKED");
+});
+
 test("Track B PAPER feature-context blocker stays separate from live market-data freshness", () => {
   const contract = buildOperatorTriageContract(baseInput({
     trackBPaperTrading: {

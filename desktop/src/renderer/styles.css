@@ -3664,6 +3664,55 @@ input {
   font-size: 11px;
 }
 
+.track-b-calendar-grid .calendar-day-cell {
+  min-height: 150px;
+  gap: 9px;
+  overflow: hidden;
+}
+
+.track-b-calendar-grid .calendar-day-meta {
+  font-size: 15px;
+  line-height: 1.15;
+  letter-spacing: 0;
+}
+
+.calendar-day-markers {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+  min-width: 0;
+}
+
+.calendar-day-marker {
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  border-radius: 5px;
+  border: 1px solid rgba(124, 138, 160, 0.32);
+  padding: 3px 5px;
+  font-size: 10px;
+  line-height: 1;
+  letter-spacing: 0.04em;
+  color: var(--muted);
+  background: rgba(16, 23, 34, 0.72);
+}
+
+.calendar-day-marker.good {
+  color: var(--good);
+  border-color: rgba(98, 197, 117, 0.46);
+}
+
+.calendar-day-marker.warn {
+  color: var(--warn);
+  border-color: rgba(214, 168, 61, 0.5);
+}
+
+.calendar-day-marker.danger {
+  color: var(--danger);
+  border-color: rgba(215, 107, 100, 0.56);
+}
+
 .calendar-day-meta,
 .calendar-day-weekend {
   display: grid;
