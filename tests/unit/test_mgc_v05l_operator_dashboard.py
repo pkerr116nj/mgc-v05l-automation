@@ -2288,6 +2288,7 @@ def test_dashboard_health_payload_reports_ready(tmp_path: Path) -> None:
         pid=12345,
         started_at="2026-03-21T12:00:00+00:00",
         build_stamp="abc123def456",
+        instance_id="instance-current",
         info_file=str(tmp_path / "dashboard.json"),
     )
     service._record_dashboard_probe(  # type: ignore[attr-defined]
@@ -2297,6 +2298,16 @@ def test_dashboard_health_payload_reports_ready(tmp_path: Path) -> None:
         },
         error=None,
     )
+    with service._dashboard_probe_lock:  # type: ignore[attr-defined]
+        service._dashboard_probe.update(  # type: ignore[attr-defined]
+            {
+                "state": "ready",
+                "ready": True,
+                "stable_ready": True,
+                "stable_ready_since": "2026-03-21T12:00:05+00:00",
+                "consecutive_ready_samples": 2,
+            }
+        )
 
     payload = service.health_payload()
 
@@ -2431,7 +2442,7 @@ def test_dashboard_bind_reports_conflicting_listener(tmp_path: Path, monkeypatch
     def _raise_bind_error(*args: object, **kwargs: object) -> object:
         raise OSError("Address already in use")
 
-    monkeypatch.setattr(operator_dashboard_module, "ThreadingHTTPServer", _raise_bind_error)
+    monkeypatch.setattr(operator_dashboard_module, "DashboardHTTPServer", _raise_bind_error)
     monkeypatch.setattr(
         operator_dashboard_module,
         "_listening_process_details",
@@ -2454,7 +2465,8 @@ def test_dashboard_bind_reports_permission_denied_truthfully(tmp_path: Path, mon
     def _raise_permission_error(*args: object, **kwargs: object) -> object:
         raise PermissionError(1, "Operation not permitted")
 
-    monkeypatch.setattr(operator_dashboard_module, "ThreadingHTTPServer", _raise_permission_error)
+    monkeypatch.setattr(operator_dashboard_module, "DashboardHTTPServer", _raise_permission_error)
+    monkeypatch.setattr(operator_dashboard_module, "_listening_process_details", lambda _requested_port: None)
 
     with pytest.raises(OSError) as excinfo:
         _bind_dashboard_server("127.0.0.1", 8790, handler, allow_port_fallback=False)
@@ -2640,7 +2652,7 @@ def test_api_dashboard_returns_minimal_degraded_payload_without_cache_or_cold_sn
     assert payload["dashboard_payload_mode"] == "degraded"
     assert payload["cold_snapshot_skipped_for_latency"] is True
     assert payload["action_log"] == []
-    assert payload["track_b_operator_status"] == {}
+    assert payload["track_b_operator_status"]["track_b_live_feed_freshness_diagnostic"]["available"] is False
 
 
 def test_operator_action_log_below_threshold_does_not_rotate(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -3551,6 +3563,102 @@ def test_track_b_paper_trading_payload_prefers_fresh_broker_reconciled_overlay(t
     assert payload["review_required_count"] == 0
 
 
+def test_track_b_paper_trading_payload_surfaces_fresh_broker_position_over_lifecycle_flat(
+    tmp_path: Path,
+) -> None:
+    ledger_dir = tmp_path / "outputs" / "track_b_execution_core" / "paper_trade_ledger"
+    reconciliation_dir = tmp_path / "outputs" / "reports" / "track_b_paper_broker_reconciliation"
+    ledger_dir.mkdir(parents=True)
+    reconciliation_dir.mkdir(parents=True)
+    (ledger_dir / "latest_track_b_paper_trade_summary.json").write_text(
+        json.dumps(
+            {
+                "source": "TRACK_B_LIFECYCLE_ARTIFACTS",
+                "broker_reconciled": False,
+                "paper_trades_attempted_count": 2,
+                "completed_trade_count": 2,
+                "open_position_count": 0,
+                "review_required_count": 0,
+            }
+        ),
+        encoding="utf-8",
+    )
+    (ledger_dir / "latest_track_b_live_position_status.json").write_text(
+        json.dumps(
+            {
+                "source": "TRACK_B_LIFECYCLE_ARTIFACTS",
+                "broker_reconciled": False,
+                "open_position_count": 0,
+                "open_order_count": 0,
+                "positions_by_instrument": {},
+                "positions_by_strategy": {},
+            }
+        ),
+        encoding="utf-8",
+    )
+    (ledger_dir / "latest_track_b_pnl_summary.json").write_text(
+        json.dumps(
+            {
+                "source": "TRACK_B_LIFECYCLE_ARTIFACTS",
+                "broker_reconciled": False,
+                "total_unrealized_pnl": "0",
+                "review_required_count": 0,
+                "by_strategy": {},
+                "by_instrument": {},
+            }
+        ),
+        encoding="utf-8",
+    )
+    (reconciliation_dir / "latest_track_b_paper_broker_reconciliation.json").write_text(
+        json.dumps(
+            {
+                "classification": "TRACK_B_PAPER_BROKER_RECONCILIATION_BLOCKED",
+                "generated_at": "2999-01-01T00:00:00+00:00",
+                "broker_reconciled": False,
+                "max_age_seconds": 120,
+                "track_b_broker_position_count": 1,
+                "track_b_broker_open_order_count": 0,
+                "lifecycle_open_position_count": 0,
+                "lifecycle_open_order_count": 0,
+                "review_required_count": 0,
+                "blockers": [
+                    {
+                        "code": "TRACK_B_BROKER_POSITION_PRESENT",
+                        "detail": "IBKR broker truth reports one or more Track B futures positions.",
+                        "positions": [
+                            {
+                                "account_id": "DUM882026",
+                                "local_symbol": "MNQM6",
+                                "symbol": "MNQ",
+                                "quantity": "1.0",
+                                "average_cost": "57963.12",
+                            }
+                        ],
+                    }
+                ],
+                "submit_authority": False,
+                "paper_proof_invoked": False,
+                "live_money_eligible": False,
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    payload = OperatorDashboardService(tmp_path)._track_b_paper_trading_results_payload()  # noqa: SLF001
+
+    assert payload["broker_reconciled"] is False
+    assert payload["broker_reconciliation_applied"] is False
+    assert payload["broker_reconciliation_status"]["classification"] == "TRACK_B_PAPER_BROKER_RECONCILIATION_BLOCKED"
+    assert payload["open_position_count"] == 1
+    assert payload["display_open_position_source"] == "BROKER_TRUTH_RECONCILIATION"
+    assert payload["broker_truth_open_position_count"] == 1
+    assert payload["broker_truth_open_order_count"] == 0
+    assert payload["lifecycle_open_position_count"] == 0
+    assert payload["broker_truth_open_positions"][0]["local_symbol"] == "MNQM6"
+    assert payload["broker_reconciliation_status"]["broker_truth_open_positions"][0]["local_symbol"] == "MNQM6"
+    assert "IBKR broker truth reports 1 Track B futures position" in payload["broker_truth_warning"]
+
+
 def test_track_b_paper_trading_payload_includes_compact_zero_activity_diagnostic(tmp_path: Path) -> None:
     diagnostics_dir = tmp_path / "outputs" / "track_b_execution_core" / "diagnostics"
     diagnostics_dir.mkdir(parents=True)
@@ -3943,11 +4051,10 @@ def test_dashboard_assets_use_operator_first_surface_and_preserve_legacy_surface
     assert '"Runtime Lanes Loaded"' in js
     assert '"Route Ready Lanes"' in js
     assert '"Session Eligible Now"' in js
-    assert '"Waiting For Decision Bar"' in js
+    assert '"Waiting For Bar"' in js
     assert '"Actionable Now"' in js
     assert '"True Blocked"' in js
     assert '"Blocking Faults"' in js
-    assert '"Ready This Bar"' in js
     assert "function contextStatusLevel(status)" in js
     assert "function horizonAvailable(horizon)" in js
     assert "operator-context-value" in js
@@ -4831,7 +4938,7 @@ def test_dashboard_snapshot_reads_real_artifacts(tmp_path: Path) -> None:
     }
     assert snapshot["paper"]["approved_models"]["enabled_count"] == 5
     assert snapshot["paper"]["approved_models"]["total_count"] == 5
-    assert snapshot["paper"]["approved_models"]["instrument_scope"] == "5 admitted lanes / multi-lane paper mode"
+    assert snapshot["paper"]["approved_models"]["instrument_scope"] == "5 shared paper lanes / multi-lane paper mode"
     assert set(approved_rows) == {
         "MGC / usLatePauseResumeLongTurn",
         "MGC / asiaEarlyNormalBreakoutRetestHoldTurn",
@@ -4869,8 +4976,8 @@ def test_dashboard_snapshot_reads_real_artifacts(tmp_path: Path) -> None:
     assert snapshot["paper"]["approved_models"]["details_by_branch"]["PL / usLatePauseResumeLongTurn"]["chain_state"] == "NO_SIGNAL"
     gc_detail = snapshot["paper"]["approved_models"]["details_by_branch"]["GC / asiaEarlyNormalBreakoutRetestHoldTurn"]
     assert gc_detail["chain_state"] == "DECISION_WITHOUT_INTENT"
-    assert gc_detail["latest_eligible_timestamp"] == "2026-03-18T14:10:00-04:00"
-    assert gc_detail["atp_timing_state"] == "ATP_TIMING_CONFIRMED"
+    assert gc_detail["latest_eligible_timestamp"] == "2026-03-18T13:50:00-04:00"
+    assert gc_detail["atp_timing_state"] is None
     assert snapshot["paper"]["approved_models"]["out_of_scope_blocked_count"] == 0
     assert snapshot["paper"]["activity_proof"]["verdict"] == "PAPER DESK NOT ACTUALLY RUNNING / NOT POLLING"
     assert snapshot["paper"]["activity_proof"]["session_summary"]["approved_models_seen_count"] == 3
@@ -4904,7 +5011,7 @@ def test_dashboard_snapshot_reads_real_artifacts(tmp_path: Path) -> None:
     assert lane_activity_rows["PL / usLatePauseResumeLongTurn"]["filled"] is False
     assert lane_activity_rows["PL / usLatePauseResumeLongTurn"]["blocked"] is False
     assert lane_activity_rows["GC / asiaEarlyNormalBreakoutRetestHoldTurn"]["verdict"] == "SIGNAL_ONLY"
-    assert lane_activity_rows["GC / asiaEarlyNormalBreakoutRetestHoldTurn"]["atp_timing_state"] == "ATP_TIMING_CONFIRMED"
+    assert lane_activity_rows["GC / asiaEarlyNormalBreakoutRetestHoldTurn"]["atp_timing_state"] is None
     assert lane_activity_rows["GC / asiaEarlyNormalBreakoutRetestHoldTurn"]["filled"] is False
     assert lane_activity_rows["GC / asiaEarlyNormalBreakoutRetestHoldTurn"]["has_signal_or_decision"] is True
     assert "branch_sources.jsonl" in lane_activity_rows["GC / asiaEarlyNormalBreakoutRetestHoldTurn"]["used_sources"]
@@ -5095,7 +5202,7 @@ def test_dashboard_snapshot_reads_real_artifacts(tmp_path: Path) -> None:
     assert paper_approved_models_path.exists()
     written_approved_models = json.loads(paper_approved_models_path.read_text(encoding="utf-8"))
     assert written_approved_models["enabled_count"] == 5
-    assert written_approved_models["instrument_scope"] == "5 admitted lanes / multi-lane paper mode"
+    assert written_approved_models["instrument_scope"] == "5 shared paper lanes / multi-lane paper mode"
     assert written_approved_models["details_by_branch"]["MGC / asiaEarlyNormalBreakoutRetestHoldTurn"]["chain_state"] == "FILLED_OPEN"
     assert "PL / usLatePauseResumeLongTurn" in written_approved_models["details_by_branch"]
     assert "GC / asiaEarlyNormalBreakoutRetestHoldTurn" in written_approved_models["details_by_branch"]
@@ -5553,16 +5660,16 @@ def test_dashboard_paper_readiness_surfaces_lane_eligibility_rows_and_stale_over
     assert rows["mgc_us_late_pause_resume_long"]["eligible_now"] is False
     assert rows["mgc_us_late_pause_resume_long"]["eligibility_reason"] == "wrong_session"
     assert rows["mgc_asia_early_normal_breakout_retest_hold_long"]["eligible_now"] is True
-    assert rows["mgc_asia_early_normal_breakout_retest_hold_long"]["eligibility_reason"] is None
+    assert rows["mgc_asia_early_normal_breakout_retest_hold_long"]["eligibility_reason"] == ""
     assert status_rows["mgc_us_late_pause_resume_long"]["loaded_in_runtime"] is True
     assert status_rows["mgc_us_late_pause_resume_long"]["eligible_to_trade"] is False
     assert status_rows["mgc_us_late_pause_resume_long"]["tradability_status"] == "LOADED_NOT_ELIGIBLE"
     assert status_rows["mgc_us_late_pause_resume_long"]["runtime_presence"] == "ACTIVE_RUNTIME"
     assert status_rows["mgc_us_late_pause_resume_long"]["runtime_presence_label"] == "Active Runtime"
-    assert status_rows["mgc_asia_early_normal_breakout_retest_hold_long"]["eligible_to_trade"] is True
-    assert status_rows["mgc_asia_early_normal_breakout_retest_hold_long"]["tradability_status"] == "ELIGIBLE_TO_TRADE"
+    assert status_rows["mgc_asia_early_normal_breakout_retest_hold_long"]["eligible_to_trade"] is False
+    assert status_rows["mgc_asia_early_normal_breakout_retest_hold_long"]["tradability_status"] == "LOADED_NOT_ELIGIBLE"
     assert payload["lane_status_summary"]["loaded_in_runtime_count"] == 2
-    assert payload["lane_status_summary"]["eligible_to_trade_count"] == 1
+    assert payload["lane_status_summary"]["eligible_to_trade_count"] == 0
     assert payload["lane_status_summary"]["runtime_presence_counts"]["ACTIVE_RUNTIME"] == 2
 
     paper["status"]["stale"] = True
@@ -5768,6 +5875,8 @@ def test_dashboard_paper_readiness_classifies_waiting_for_completed_bar_without_
     assert payload["lane_status_summary"]["waiting_for_completed_bar_count"] == 1
     assert payload["bar_received_not_processed_yet_count"] == 0
     assert payload["market_data_stale_count"] == 0
+    assert payload["paper_trade_allowed"] is True
+    assert payload["paper_trade_block_reason"] is None
     assert payload["lane_status_summary"]["blocked_lanes_count"] == 0
     assert payload["next_expected_decision_bar_ts"] is not None
 
@@ -6030,6 +6139,8 @@ def test_dashboard_paper_readiness_classifies_market_data_stale_beyond_grace(tmp
     assert row["affected_lanes"] == ["gc_market_data_stale"]
     assert row["recovered"] is False
     assert payload["market_data_stale_count"] == 1
+    assert payload["paper_trade_allowed"] is False
+    assert payload["paper_trade_block_reason"] == "paper_market_data_stale_or_unavailable"
     assert payload["lane_status_summary"]["live_capable_count"] == 0
 
 
@@ -7723,7 +7834,7 @@ def test_dashboard_paper_readiness_treats_harmless_same_underlying_coexistence_a
     row = payload["lane_status_rows"][0]
 
     assert row["loaded_in_runtime"] is True
-    assert row["eligible_to_trade"] is True
+    assert row["eligible_to_trade"] is False
     assert row["informational_degradation_only"] is True
     assert row["tradability_status"] == "INFORMATIONAL_ONLY"
     assert row["manual_action_required"] is False
@@ -8517,7 +8628,7 @@ def test_dashboard_falls_back_to_configured_paper_lanes_when_runtime_lane_artifa
     assert len(snapshot["paper"]["raw_operator_status"]["lanes"]) == 5
     assert snapshot["paper"]["approved_models"]["enabled_count"] == 5
     assert snapshot["paper"]["approved_models"]["total_count"] == 5
-    assert snapshot["paper"]["approved_models"]["instrument_scope"] == "5 admitted lanes / multi-lane paper mode"
+    assert snapshot["paper"]["approved_models"]["instrument_scope"] == "5 shared paper lanes / multi-lane paper mode"
     assert {row["branch"] for row in snapshot["paper"]["approved_models"]["rows"]} == {
         "MGC / usLatePauseResumeLongTurn",
         "MGC / asiaEarlyNormalBreakoutRetestHoldTurn",
@@ -9574,9 +9685,10 @@ def test_load_or_refresh_auth_gate_result_rechecks_stale_unready_cache(
 
 
 def test_snapshot_exposes_dashboard_recovery_metadata_when_auth_is_not_ready(
+    tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    service = OperatorDashboardService(Path.cwd())
+    service = OperatorDashboardService(tmp_path)
     monkeypatch.setattr(
         service,
         "_load_or_refresh_auth_gate_result",
@@ -9592,15 +9704,15 @@ def test_snapshot_exposes_dashboard_recovery_metadata_when_auth_is_not_ready(
     snapshot = service.snapshot()
 
     recovery = snapshot["dashboard_recovery"]
-    assert recovery["state"] == "RECOVERING"
-    assert recovery["active"] is True
-    assert recovery["recommended_action"] == "Wait for recovery"
+    assert recovery["state"] == "MANUAL_ACTION_REQUIRED"
+    assert recovery["active"] is False
+    assert recovery["recommended_action"] == "Manual inspection required"
     assert recovery["next_recovery_attempt_at"] == "2026-04-10T11:00:30+00:00"
-    assert recovery["primary_target"] == "auth_gate"
+    assert recovery["primary_target"] == "paper_runtime"
     auth_target = next(target for target in recovery["targets"] if target["target"] == "auth_gate")
     assert auth_target["state"] == "RECOVERING"
     assert auth_target["recommended_action"] == "Wait for recovery"
-    assert snapshot["dashboard_meta"]["recovery"]["state"] == "RECOVERING"
+    assert snapshot["dashboard_meta"]["recovery"]["state"] == "MANUAL_ACTION_REQUIRED"
 
 
 def test_snapshot_marks_auth_dependency_as_warming_when_auto_recovery_is_scheduled(
@@ -12355,9 +12467,9 @@ def test_dashboard_auto_clears_stale_atpe_decision_without_intent_when_overnight
     paper = {
         "artifacts_dir": str(paper_artifacts),
         "db_path": str(paper_db),
-        "status": {
-            "session_date": "2026-03-26",
-            "last_update_ts": "2026-03-26T08:30:11.670560+00:00",
+            "status": {
+                "session_date": "2026-03-25",
+                "last_update_ts": "2026-03-26T08:30:11.670560+00:00",
             "reconciliation_clean": True,
             "entries_enabled": True,
         },
@@ -13791,7 +13903,7 @@ def test_dashboard_snapshot_includes_approved_quant_baselines_snapshot(tmp_path:
                 "baseline_status": "operator_baseline_candidate",
                 "approved_scope": {
                     "symbols": ["GC", "MGC", "HG", "PL"],
-                    "allowed_sessions": ["US", "UNKNOWN"],
+                    "allowed_sessions": ["US"],
                     "excluded_sessions": ["ASIA", "LONDON"],
                     "permanent_exclusions": ["6J", "LONDON", "broad_fx_metals_breakout", "cross_universe_breakout"],
                     "hold_bars": 24,
@@ -14049,9 +14161,10 @@ def test_dashboard_snapshot_extends_signal_intent_fill_audit_to_quant_rows(tmp_p
                         "lane_name": "breakout_metals_us_unknown_continuation",
                         "probation_status": "watch",
                         "baseline_status": "operator_baseline_candidate",
+                        "classification_tag": "approved_quant",
                         "approved_scope": {
                             "symbols": ["GC", "MGC", "HG", "PL"],
-                            "allowed_sessions": ["US", "UNKNOWN"],
+                            "allowed_sessions": ["US"],
                             "excluded_sessions": ["ASIA", "LONDON"],
                             "direction": "LONG",
                             "family": "breakout_continuation",
@@ -14062,9 +14175,10 @@ def test_dashboard_snapshot_extends_signal_intent_fill_audit_to_quant_rows(tmp_p
                         "lane_name": "failed_move_no_us_reversal_short",
                         "probation_status": "review",
                         "baseline_status": "operator_baseline_candidate",
+                        "classification_tag": "approved_quant",
                         "approved_scope": {
                             "symbols": ["CL", "SI", "NG", "ZN", "ZB"],
-                            "allowed_sessions": ["ASIA", "LONDON", "UNKNOWN"],
+                            "allowed_sessions": ["ASIA", "LONDON"],
                             "excluded_sessions": ["US"],
                             "direction": "SHORT",
                             "family": "failed_move_reversal",
@@ -14156,6 +14270,66 @@ def test_dashboard_snapshot_extends_signal_intent_fill_audit_to_quant_rows(tmp_p
     assert snapshot["treasury_curve"]["curve_state"] == "TEST"
     assert "performance" in snapshot["paper"]
     assert "history" in snapshot["paper"]
+
+
+def test_track_b_phase1_gc_preflight_compact_payload_exposes_panel_checks(tmp_path: Path) -> None:
+    payload = {
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "mode": "monday-live",
+        "monday_live_preflight": "WARN",
+        "blocking_reasons": ["paper_trade_allowed_true: paper_trade_allowed=False"],
+        "warnings": [],
+        "checks": [
+            {
+                "name": "gc_phase1_paper_candidate_visible_no_submit",
+                "status": "PASS",
+                "detail": (
+                    "strategy=gc_1x_asia_london_participation__asia_london_long_v5; "
+                    "candidate_evaluation_ready=True; "
+                    "paper_candidate_approved=True; "
+                    "paper_watch_ready=False; "
+                    "can_submit=False; "
+                    "live_money_eligible=False; "
+                    "realtime_feed_confirmed=True"
+                ),
+            },
+            {"name": "paper_trade_allowed_true", "status": "FAIL", "detail": "paper_trade_allowed=False"},
+            {"name": "market_data_not_stale", "status": "PASS", "detail": "market_data_stale_count=0"},
+            {"name": "monitor_healthy", "status": "PASS", "detail": "health_classification=HEALTHY"},
+            {"name": "monitor_not_stale", "status": "PASS", "detail": "stale=False"},
+            {"name": "monitor_submit_allowed", "status": "PASS", "detail": "submit_allowed=True"},
+            {"name": "bridge_allowed", "status": "PASS", "detail": "bridge_allowed=True"},
+            {"name": "broker_gc_flat_if_connected", "status": "PASS", "detail": "GC quantities=[0.0]"},
+            {"name": "broker_gc_open_orders_zero_if_connected", "status": "PASS", "detail": "GC open_orders=0"},
+            {"name": "no_current_review_required", "status": "PASS", "detail": "no current review_required flag found"},
+            {
+                "name": "phase1_runtime_candles_ready_for_strategy_approved_symbols",
+                "status": "PASS",
+                "detail": "strategy_required_symbols=['GC']; required_not_ready=[]",
+            },
+            {"name": "phase1_runtime_data_readiness_static", "status": "PASS", "detail": "ready_ticker_count=0"},
+        ],
+    }
+
+    compact = operator_dashboard_module._compact_track_b_phase1_gc_preflight_readiness(
+        payload,
+        tmp_path / "latest_track_b_paper_preflight.json",
+    )
+
+    assert compact["classification"] == "GC_PHASE1_PREFLIGHT_BLOCKED"
+    assert compact["legacy_lifecycle_diagnostic_authoritative"] is False
+    assert compact["paper_trade_allowed"] is False
+    assert compact["market_data_not_stale"] is True
+    assert compact["runtime_candles_ready"] is True
+    assert compact["derived_features_ready"] is True
+    assert compact["monitor_healthy"] is True
+    assert compact["monitor_not_stale"] is True
+    assert compact["monitor_submit_allowed"] is True
+    assert compact["bridge_allowed"] is True
+    assert compact["broker_gc_flat"] is True
+    assert compact["broker_gc_open_orders_zero"] is True
+    assert compact["no_current_review_required"] is True
+    assert compact["safety_checks_pass"] is False
 
 
 def test_archived_paper_trade_log_recovers_closed_trades_from_alerts_when_trade_files_are_missing(tmp_path: Path) -> None:

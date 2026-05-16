@@ -99,6 +99,13 @@ def build_tracked_paper_strategies_payload(
             or []
         )
     ]
+    approved_model_rows = [dict(row) for row in list((paper.get("approved_models") or {}).get("rows") or [])]
+    temporary_rows.extend(
+        row
+        for row in approved_model_rows
+        if str(row.get("lane_id") or "").strip()
+        and str(row.get("lane_id") or "").strip() not in {str(existing.get("lane_id") or "").strip() for existing in temporary_rows}
+    )
     trade_log_rows = [dict(row) for row in list((paper.get("strategy_performance") or {}).get("trade_log") or [])]
     rows: list[dict[str, Any]] = []
     details_by_id: dict[str, dict[str, Any]] = {}
@@ -436,8 +443,6 @@ def _build_tracked_strategy_detail(
 
 
 def _matches_definition(row: dict[str, Any], definition: TrackedPaperStrategyDefinition) -> bool:
-    if not bool(row.get("temporary_paper_strategy")):
-        return False
     lane_id = str(row.get("lane_id") or "")
     runtime_kind = str(row.get("runtime_kind") or "")
     source_family = str(row.get("strategy_family") or row.get("source_family") or "")
@@ -723,6 +728,7 @@ def _current_position_state(
     average_price = (
         _decimal_or_none(latest_snapshot.get("position_average_price"))
         or _decimal_or_none(latest_snapshot.get("payload", {}).get("position_average_price"))
+        or _decimal_or_none(_value_from_rows(matched_rows, "entry_price"))
         or _decimal_or_none(latest_trade.get("entry_price") if latest_trade and str(latest_trade.get("status") or "").upper() == "OPEN" else None)
         or _decimal_or_none(latest_fill.get("fill_price"))
     )
