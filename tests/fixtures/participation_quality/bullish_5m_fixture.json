@@ -1,0 +1,127 @@
+{
+  "candles": [
+    {
+      "close": 2301.5,
+      "completed": true,
+      "high": 2301.8,
+      "low": 2299.8,
+      "open": 2300.0,
+      "timeframe": "5m",
+      "timestamp": "2026-05-08T13:05:00+00:00",
+      "volume": 100
+    },
+    {
+      "close": 2303.0,
+      "completed": true,
+      "high": 2303.3,
+      "low": 2301.3,
+      "open": 2301.5,
+      "timeframe": "5m",
+      "timestamp": "2026-05-08T13:10:00+00:00",
+      "volume": 110
+    },
+    {
+      "close": 2304.5,
+      "completed": true,
+      "high": 2304.8,
+      "low": 2302.8,
+      "open": 2303.0,
+      "timeframe": "5m",
+      "timestamp": "2026-05-08T13:15:00+00:00",
+      "volume": 120
+    },
+    {
+      "close": 2306.0,
+      "completed": true,
+      "high": 2306.3,
+      "low": 2304.3,
+      "open": 2304.5,
+      "timeframe": "5m",
+      "timestamp": "2026-05-08T13:20:00+00:00",
+      "volume": 130
+    },
+    {
+      "close": 2307.5,
+      "completed": true,
+      "high": 2307.8,
+      "low": 2305.8,
+      "open": 2306.0,
+      "timeframe": "5m",
+      "timestamp": "2026-05-08T13:25:00+00:00",
+      "volume": 140
+    },
+    {
+      "close": 2309.0,
+      "completed": true,
+      "high": 2309.3,
+      "low": 2307.3,
+      "open": 2307.5,
+      "timeframe": "5m",
+      "timestamp": "2026-05-08T13:30:00+00:00",
+      "volume": 150
+    },
+    {
+      "close": 2310.5,
+      "completed": true,
+      "high": 2310.8,
+      "low": 2308.8,
+      "open": 2309.0,
+      "timeframe": "5m",
+      "timestamp": "2026-05-08T13:35:00+00:00",
+      "volume": 160
+    },
+    {
+      "close": 2312.0,
+      "completed": true,
+      "high": 2312.3,
+      "low": 2310.3,
+      "open": 2310.5,
+      "timeframe": "5m",
+      "timestamp": "2026-05-08T13:40:00+00:00",
+      "volume": 170
+    },
+    {
+      "close": 2313.5,
+      "completed": true,
+      "high": 2313.8,
+      "low": 2311.8,
+      "open": 2312.0,
+      "timeframe": "5m",
+      "timestamp": "2026-05-08T13:45:00+00:00",
+      "volume": 180
+    },
+    {
+      "close": 2315.0,
+      "completed": true,
+      "high": 2315.3,
+      "low": 2313.3,
+      "open": 2313.5,
+      "timeframe": "5m",
+      "timestamp": "2026-05-08T13:50:00+00:00",
+      "volume": 190
+    },
+    {
+      "close": 2316.5,
+      "completed": true,
+      "high": 2316.8,
+      "low": 2314.8,
+      "open": 2315.0,
+      "timeframe": "5m",
+      "timestamp": "2026-05-08T13:55:00+00:00",
+      "volume": 200
+    },
+    {
+      "close": 2318.0,
+      "completed": true,
+      "high": 2318.3,
+      "low": 2316.3,
+      "open": 2316.5,
+      "timeframe": "5m",
+      "timestamp": "2026-05-08T14:00:00+00:00",
+      "volume": 210
+    }
+  ],
+  "instrument": "MGC",
+  "source_id": "participation_quality_cli_fixture",
+  "test_fixture": true
+}
