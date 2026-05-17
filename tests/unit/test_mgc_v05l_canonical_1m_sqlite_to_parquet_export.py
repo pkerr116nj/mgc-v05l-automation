@@ -164,6 +164,70 @@ def test_apply_refuses_to_overwrite_existing_partition(tmp_path: Path) -> None:
     assert target.read_text(encoding="utf-8") == "existing"
 
 
+def test_skip_existing_valid_partition_is_recorded_without_overwrite(tmp_path: Path) -> None:
+    source = tmp_path / "canonical.sqlite3"
+    _create_sqlite(source, symbol="GC")
+    output_root = tmp_path / "warehouse"
+    first = run_export(_config(source=source, output_root=output_root, mode="apply", symbols=("GC",)))
+    target = output_root / "base_1m" / "futures" / "GC" / "2024" / "Q1" / "bars.parquet"
+    before_bytes = target.read_bytes()
+
+    second = run_export(
+        _config(source=source, output_root=output_root, mode="apply", symbols=("GC",), skip_existing=True)
+    )
+
+    assert second["partition_count"] == 1
+    assert second["skipped_partition_count"] == 1
+    assert second["written_partition_count"] == 0
+    assert second["skipped_row_count"] == 5
+    assert second["partitions"][0]["partition_action"] == "skip_existing"
+    assert target.read_bytes() == before_bytes
+    assert Path(first["manifest_path"]).exists()
+    assert Path(second["manifest_path"]).exists()
+
+
+def test_skip_existing_invalid_partition_fails(tmp_path: Path) -> None:
+    source = tmp_path / "canonical.sqlite3"
+    _create_sqlite(source, symbol="GC")
+    output_root = tmp_path / "warehouse"
+    run_export(_config(source=source, output_root=output_root, mode="apply", symbols=("GC",)))
+    partition_manifest_path = (
+        output_root / "base_1m" / "futures" / "GC" / "2024" / "Q1" / "partition_manifest.json"
+    )
+    partition_manifest = json.loads(partition_manifest_path.read_text(encoding="utf-8"))
+    partition_manifest["data_source"] = "wrong_source"
+    partition_manifest_path.write_text(json.dumps(partition_manifest), encoding="utf-8")
+
+    with pytest.raises(SystemExit) as excinfo:
+        run_export(_config(source=source, output_root=output_root, mode="apply", symbols=("GC",), skip_existing=True))
+
+    assert "invalid_existing_partition" in str(excinfo.value)
+    assert "EXISTING_DATA_SOURCE_MISMATCH" in str(excinfo.value)
+
+
+def test_skip_existing_writes_missing_partition_only(tmp_path: Path) -> None:
+    source = tmp_path / "canonical.sqlite3"
+    _create_sqlite(source, symbol="GC")
+    _append_rows(source, symbol="MGC")
+    output_root = tmp_path / "warehouse"
+    run_export(_config(source=source, output_root=output_root, mode="apply", symbols=("GC",)))
+    gc_target = output_root / "base_1m" / "futures" / "GC" / "2024" / "Q1" / "bars.parquet"
+    mgc_target = output_root / "base_1m" / "futures" / "MGC" / "2024" / "Q1" / "bars.parquet"
+    gc_before = gc_target.read_bytes()
+
+    result = run_export(
+        _config(source=source, output_root=output_root, mode="apply", symbols=("GC", "MGC"), skip_existing=True)
+    )
+
+    assert result["partition_count"] == 2
+    assert result["skipped_partition_count"] == 1
+    assert result["written_partition_count"] == 1
+    assert result["written_row_count"] == 5
+    assert result["skipped_row_count"] == 5
+    assert gc_target.read_bytes() == gc_before
+    assert mgc_target.exists()
+
+
 def test_source_sqlite_is_not_mutated(tmp_path: Path) -> None:
     source = tmp_path / "canonical.sqlite3"
     _create_sqlite(source, symbol="GC")
@@ -204,6 +268,7 @@ def test_cli_entrypoint_prints_summary(tmp_path: Path, capsys: pytest.CaptureFix
             "all",
             "--no-delete",
             "--no-source-mutation",
+            "--skip-existing",
         ]
     )
     captured = json.loads(capsys.readouterr().out)
@@ -263,6 +328,7 @@ def _config(
     timeframe: str = "1m",
     no_delete: bool = True,
     no_source_mutation: bool = True,
+    skip_existing: bool = False,
 ) -> ExportConfig:
     return ExportConfig(
         mode=mode,
@@ -278,6 +344,7 @@ def _config(
         validations=("row-counts", "min-max-timestamps", "no-duplicates", "ohlc", "source", "timezone"),
         no_delete=no_delete,
         no_source_mutation=no_source_mutation,
+        skip_existing=skip_existing,
     )
 
 

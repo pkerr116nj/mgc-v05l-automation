@@ -57,6 +57,7 @@ class ExportConfig:
     validations: tuple[str, ...]
     no_delete: bool
     no_source_mutation: bool
+    skip_existing: bool
 
 
 @dataclass(frozen=True)
@@ -81,7 +82,7 @@ def main(argv: Sequence[str] | None = None) -> int:
 
 def run_export(config: ExportConfig) -> dict[str, Any]:
     _validate_config(config)
-    run_id = f"{datetime.now(UTC).strftime('%Y%m%dT%H%M%SZ')}__canonical_1m_sqlite_to_parquet"
+    run_id = f"{datetime.now(UTC).strftime('%Y%m%dT%H%M%S%fZ')}__canonical_1m_sqlite_to_parquet"
     partition_specs = _partition_specs(config)
     partition_results: list[dict[str, Any]] = []
     validation_failures: list[dict[str, Any]] = []
@@ -98,13 +99,31 @@ def run_export(config: ExportConfig) -> dict[str, Any]:
                         "failure_reasons": validation["failure_reasons"],
                     }
                 )
+            partition_path = _partition_path(config, spec)
+            partition_manifest_path = _partition_manifest_path(config, spec)
+            existing_validation: dict[str, Any] | None = None
+            partition_action = "write"
+            if partition_path.exists() or partition_manifest_path.exists():
+                if config.skip_existing:
+                    existing_validation = _validate_existing_partition(
+                        config=config,
+                        spec=spec,
+                        expected_validation=validation,
+                        partition_path=partition_path,
+                        partition_manifest_path=partition_manifest_path,
+                    )
+                    partition_action = "skip_existing"
+                else:
+                    partition_action = "would_refuse_existing"
             partition_results.append(
                 {
                     "spec": spec,
                     "rows": rows,
                     "validation": validation,
-                    "partition_path": _partition_path(config, spec),
-                    "partition_manifest_path": _partition_manifest_path(config, spec),
+                    "existing_validation": existing_validation,
+                    "partition_action": partition_action,
+                    "partition_path": partition_path,
+                    "partition_manifest_path": partition_manifest_path,
                 }
             )
 
@@ -126,6 +145,8 @@ def run_export(config: ExportConfig) -> dict[str, Any]:
     if config.mode == "apply":
         _assert_targets_do_not_exist(partition_results, config=config, run_id=run_id)
         for result in partition_results:
+            if result["partition_action"] == "skip_existing":
+                continue
             materialize_parquet_dataset(result["partition_path"], result["rows"])
             write_storage_manifest(
                 result["partition_manifest_path"],
@@ -141,13 +162,24 @@ def run_export(config: ExportConfig) -> dict[str, Any]:
         "source_sqlite": str(config.source_sqlite.resolve()),
         "output_root": str(config.output_root.resolve()),
         "partition_count": len(partition_results),
+        "written_partition_count": sum(1 for result in partition_results if result["partition_action"] == "write"),
+        "skipped_partition_count": sum(1 for result in partition_results if result["partition_action"] == "skip_existing"),
         "row_count": sum(int(result["validation"]["row_count"]) for result in partition_results),
+        "written_row_count": sum(
+            int(result["validation"]["row_count"]) for result in partition_results if result["partition_action"] == "write"
+        ),
+        "skipped_row_count": sum(
+            int(result["validation"]["row_count"])
+            for result in partition_results
+            if result["partition_action"] == "skip_existing"
+        ),
         "partitions": [
             {
                 "partition_id": result["spec"].partition_id,
                 "symbol": result["spec"].symbol,
                 "year": result["spec"].year,
                 "quarter": f"Q{result['spec'].quarter}",
+                "partition_action": result["partition_action"],
                 "row_count": result["validation"]["row_count"],
                 "partition_path": str(result["partition_path"]),
                 "partition_manifest_path": str(result["partition_manifest_path"]),
@@ -180,6 +212,11 @@ def _parse_args(argv: Sequence[str] | None) -> ExportConfig:
     parser.add_argument("--validate", default=",".join(ALL_VALIDATIONS))
     parser.add_argument("--no-delete", action="store_true")
     parser.add_argument("--no-source-mutation", action="store_true")
+    parser.add_argument(
+        "--skip-existing",
+        action="store_true",
+        help="Validate existing partition artifacts and skip them instead of overwriting.",
+    )
     args = parser.parse_args(argv)
     return ExportConfig(
         mode=str(args.mode),
@@ -195,6 +232,7 @@ def _parse_args(argv: Sequence[str] | None) -> ExportConfig:
         validations=tuple(_parse_validations(str(args.validate))),
         no_delete=bool(args.no_delete),
         no_source_mutation=bool(args.no_source_mutation),
+        skip_existing=bool(args.skip_existing),
     )
 
 
@@ -307,7 +345,7 @@ def _validate_partition(*, rows: list[dict[str, Any]], config: ExportConfig, spe
     negative_volume_count = sum(1 for row in rows if row["volume"] < 0)
     wrong_source_count = sum(1 for row in rows if row["data_source"] != config.data_source)
     wrong_timeframe_count = sum(1 for row in rows if row["timeframe"] != config.timeframe)
-    non_utc_count = sum(1 for timestamp in timestamps if timestamp.tzinfo != UTC)
+    non_utc_count = sum(1 for timestamp in timestamps if not _is_utc_timestamp(timestamp))
 
     if VALIDATION_ROW_COUNTS in config.validations and not rows:
         failures.append("NO_ROWS_FOR_PARTITION")
@@ -344,9 +382,103 @@ def _validate_partition(*, rows: list[dict[str, Any]], config: ExportConfig, spe
     }
 
 
+def _validate_existing_partition(
+    *,
+    config: ExportConfig,
+    spec: PartitionSpec,
+    expected_validation: Mapping[str, Any],
+    partition_path: Path,
+    partition_manifest_path: Path,
+) -> dict[str, Any]:
+    if not partition_path.exists() or not partition_manifest_path.exists():
+        raise SystemExit(
+            json.dumps(
+                {
+                    "invalid_existing_partition": {
+                        "partition_id": spec.partition_id,
+                        "reason": "MISSING_PARTITION_FILE_OR_MANIFEST",
+                        "partition_path": str(partition_path),
+                        "partition_manifest_path": str(partition_manifest_path),
+                    }
+                },
+                sort_keys=True,
+            )
+        )
+    try:
+        existing_rows = _read_parquet_rows(partition_path)
+        existing_manifest = json.loads(partition_manifest_path.read_text(encoding="utf-8"))
+    except Exception as exc:  # noqa: BLE001 - surface exact corrupted artifact reason in CLI failure.
+        raise SystemExit(
+            json.dumps(
+                {
+                    "invalid_existing_partition": {
+                        "partition_id": spec.partition_id,
+                        "reason": "UNREADABLE_EXISTING_PARTITION",
+                        "detail": str(exc),
+                    }
+                },
+                sort_keys=True,
+            )
+        ) from exc
+    existing_validation = _validate_partition(rows=existing_rows, config=config, spec=spec)
+    mismatch_reasons = _existing_partition_mismatches(
+        expected_validation=expected_validation,
+        existing_validation=existing_validation,
+        existing_manifest=existing_manifest,
+        config=config,
+        spec=spec,
+    )
+    if mismatch_reasons or existing_validation["failure_reasons"]:
+        raise SystemExit(
+            json.dumps(
+                {
+                    "invalid_existing_partition": {
+                        "partition_id": spec.partition_id,
+                        "failure_reasons": [*existing_validation["failure_reasons"], *mismatch_reasons],
+                    }
+                },
+                sort_keys=True,
+            )
+        )
+    return existing_validation
+
+
+def _read_parquet_rows(path: Path) -> list[dict[str, Any]]:
+    try:
+        import pyarrow.parquet as pq  # type: ignore
+    except ModuleNotFoundError as exc:
+        raise RuntimeError("skip-existing validation requires pyarrow to read existing Parquet partitions.") from exc
+    return list(pq.read_table(path).to_pylist())
+
+
+def _existing_partition_mismatches(
+    *,
+    expected_validation: Mapping[str, Any],
+    existing_validation: Mapping[str, Any],
+    existing_manifest: Mapping[str, Any],
+    config: ExportConfig,
+    spec: PartitionSpec,
+) -> list[str]:
+    mismatch_reasons: list[str] = []
+    for key in ("row_count", "min_timestamp_utc", "max_timestamp_utc"):
+        if expected_validation.get(key) != existing_validation.get(key):
+            mismatch_reasons.append(f"EXISTING_{key.upper()}_MISMATCH")
+    if existing_manifest.get("source_sqlite_path") != str(config.source_sqlite.resolve()):
+        mismatch_reasons.append("EXISTING_SOURCE_SQLITE_PATH_MISMATCH")
+    if existing_manifest.get("symbol") != spec.symbol:
+        mismatch_reasons.append("EXISTING_SYMBOL_MISMATCH")
+    if existing_manifest.get("timeframe") != config.timeframe:
+        mismatch_reasons.append("EXISTING_TIMEFRAME_MISMATCH")
+    if existing_manifest.get("data_source") != config.data_source:
+        mismatch_reasons.append("EXISTING_DATA_SOURCE_MISMATCH")
+    return mismatch_reasons
+
+
 def _assert_targets_do_not_exist(partition_results: list[dict[str, Any]], *, config: ExportConfig, run_id: str) -> None:
     targets = [_manifest_path(config, run_id), _validation_summary_path(config, run_id)]
     for result in partition_results:
+        if result["partition_action"] == "skip_existing":
+            continue
         targets.append(result["partition_path"])
         targets.append(result["partition_manifest_path"])
     existing = [str(path) for path in targets if path.exists()]
@@ -376,18 +508,31 @@ def _build_manifest(
         "output_root": str(config.output_root.resolve()),
         "layout": "outputs/research_warehouse/base_1m/futures/<SYMBOL>/<YEAR>/Q<q>/bars.parquet",
         "partition_count": len(partition_results),
+        "written_partition_count": sum(1 for result in partition_results if result["partition_action"] == "write"),
+        "skipped_partition_count": sum(1 for result in partition_results if result["partition_action"] == "skip_existing"),
         "row_count": sum(int(result["validation"]["row_count"]) for result in partition_results),
+        "written_row_count": sum(
+            int(result["validation"]["row_count"]) for result in partition_results if result["partition_action"] == "write"
+        ),
+        "skipped_row_count": sum(
+            int(result["validation"]["row_count"])
+            for result in partition_results
+            if result["partition_action"] == "skip_existing"
+        ),
         "partitions": [
             {
                 "partition_id": result["spec"].partition_id,
+                "partition_action": result["partition_action"],
                 "partition_path": str(result["partition_path"]),
                 "partition_manifest_path": str(result["partition_manifest_path"]),
                 "validation": result["validation"],
+                "existing_validation": result["existing_validation"],
             }
             for result in partition_results
         ],
         "no_delete": config.no_delete,
         "no_source_mutation": config.no_source_mutation,
+        "skip_existing": config.skip_existing,
         "source_mutated": False,
         "deleted_outputs": False,
         "runtime_activity": False,
@@ -409,7 +554,17 @@ def _build_validation_summary(
         "query_bounds": {"start": config.start.isoformat(), "end": config.end.isoformat()},
         "validation_set": list(config.validations),
         "partition_count": len(validations),
+        "written_partition_count": sum(1 for result in partition_results if result["partition_action"] == "write"),
+        "skipped_partition_count": sum(1 for result in partition_results if result["partition_action"] == "skip_existing"),
         "row_count": sum(int(item["row_count"]) for item in validations),
+        "written_row_count": sum(
+            int(result["validation"]["row_count"]) for result in partition_results if result["partition_action"] == "write"
+        ),
+        "skipped_row_count": sum(
+            int(result["validation"]["row_count"])
+            for result in partition_results
+            if result["partition_action"] == "skip_existing"
+        ),
         "duplicate_timestamp_count": sum(int(item["duplicate_timestamp_count"]) for item in validations),
         "ohlc_invalid_count": sum(int(item["ohlc_invalid_count"]) for item in validations),
         "negative_volume_count": sum(int(item["negative_volume_count"]) for item in validations),
@@ -514,6 +669,10 @@ def _summary(result: Mapping[str, Any]) -> dict[str, Any]:
         "manifest_path": result.get("manifest_path"),
         "validation_summary_path": result.get("validation_summary_path"),
         "validation_failure_reasons": result.get("validation_summary", {}).get("failure_reasons", []),
+        "written_partition_count": result.get("written_partition_count"),
+        "skipped_partition_count": result.get("skipped_partition_count"),
+        "written_row_count": result.get("written_row_count"),
+        "skipped_row_count": result.get("skipped_row_count"),
         "wrote_outputs": result.get("wrote_outputs"),
         "source_mutated": result.get("source_mutated"),
         "deleted_outputs": result.get("deleted_outputs"),
@@ -545,6 +704,10 @@ def _parse_timestamp(value: str) -> datetime:
 
 def _to_utc(value: datetime) -> datetime:
     return value.astimezone(UTC)
+
+
+def _is_utc_timestamp(value: datetime) -> bool:
+    return value.tzinfo is not None and value.utcoffset() == timedelta(0)
 
 
 if __name__ == "__main__":
