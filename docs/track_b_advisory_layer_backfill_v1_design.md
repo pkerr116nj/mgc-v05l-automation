@@ -2,6 +2,8 @@
 
 Status: architecture/design only. This document does not add a runtime producer, broker activity, lane execution, paper activity, generated outputs, historical batch launch, Parquet generation, or SQLite migration.
 
+Key decision: v1 uses episode-centric backfill first, not global-bar backfill. Advisory states are attached to exact-baseline trade episodes and bounded replay windows before any broader market-state archive is considered.
+
 ## 1. Scope And Goals
 
 Track B now has four reusable advisory layers:
@@ -20,6 +22,15 @@ The backfill goal is to create a bounded historical advisory-state archive that 
 
 The archive is not intended to become runtime truth. It is a research and replay artifact built from explicit historical inputs and versioned advisory evaluators.
 
+V1 should be optimized for the first target:
+
+- instruments: GC and MGC.
+- strategy family: exact baseline.
+- years: 2020 through 2026.
+- replay window: 48 bars after entry.
+- base market data: canonical 1m Parquet hot research cache when available, with SQLite retained as source/provenance.
+- derived market data: deterministic replay windows derived from the hot cache, not from runtime captures.
+
 ## 2. Episode-Centric Versus Global-Bar-Centric Design
 
 The archive should be episode-centric rather than global-bar-centric.
@@ -37,6 +48,8 @@ Recommended v1 scope:
 
 This keeps storage and compute bounded while still supporting fixed 36b, adaptive 24/36, participation-aware exits, and future sizing research.
 
+V1 should explicitly avoid producing lifecycle, participation, regime, or sizing rows for bars that are not part of an entry candidate, trade episode, or bounded replay window. A later global-bar regime archive may be useful, but it is not the first implementation.
+
 ## 3. Recommended Storage
 
 ### Parquet
@@ -51,6 +64,14 @@ Reasons:
 - works with Python, DuckDB, Polars, Spark, and pandas.
 
 Parquet files should contain advisory state rows, not raw candle data. Raw market bars should remain in their existing source datasets and be referenced through provenance fields.
+
+The preferred source for historical bars is the hot research cache:
+
+```text
+outputs/research_warehouse/base_1m/futures/<SYMBOL>/<YEAR>/Q<q>/bars.parquet
+```
+
+SQLite remains the provenance source. Advisory backfill manifests should record both the Parquet partition paths used for speed and the original SQLite source metadata carried by those partitions.
 
 ### Manifests
 
@@ -93,26 +114,12 @@ outputs/track_b_execution_core/advisory_backfill/
   manifests/
     build_id=YYYYMMDDTHHMMSSZ__track_b_advisory_v1.json
   parquet/
-    layer=lifecycle_awareness/
-      strategy_family=exact_baseline/
-        instrument=MGC/
-          year=2020/
-            part-000.parquet
-    layer=participation_pressure/
-      strategy_family=exact_baseline/
-        instrument=MGC/
-          year=2020/
-            part-000.parquet
-    layer=regime_session/
-      strategy_family=exact_baseline/
-        instrument=MGC/
-          year=2020/
-            part-000.parquet
-    layer=sizing_position_management/
-      strategy_family=exact_baseline/
-        instrument=MGC/
-          year=2020/
-            part-000.parquet
+    layer=lifecycle_awareness/strategy_family=exact_baseline/instrument=MGC/year=2020/part-000.parquet
+    layer=participation_pressure/strategy_family=exact_baseline/instrument=MGC/year=2020/part-000.parquet
+    layer=regime_session/strategy_family=exact_baseline/instrument=MGC/year=2020/part-000.parquet
+    layer=sizing_position_management/strategy_family=exact_baseline/instrument=MGC/year=2020/part-000.parquet
+  episodes/
+    strategy_family=exact_baseline/instrument=MGC/year=2020/episodes.parquet
   catalog/
     advisory_backfill_index.sqlite
 ```
@@ -138,11 +145,16 @@ All layers should share a core envelope:
 - `root_symbol`
 - `contract_symbol`
 - `timeframe`
+- `base_timeframe`
+- `derived_timeframe`
 - `session_bucket`
 - `episode_id`
 - `candidate_id`
 - `position_id`
 - `replay_window_id`
+- `episode_sequence`
+- `entry_side`
+- `entry_price`
 - `entry_timestamp`
 - `evaluation_timestamp`
 - `exit_timestamp`
@@ -155,7 +167,11 @@ All layers should share a core envelope:
 - `input_source_category`
 - `input_dataset_id`
 - `input_dataset_version`
+- `input_parquet_partition_path`
+- `input_partition_manifest_path`
+- `source_sqlite_path`
 - `input_row_hash`
+- `source_window_hash`
 - `provenance_status`
 - `freshness_status`
 - `runtime_eligible`
@@ -172,6 +188,25 @@ Layer-specific state fields should remain explicit:
 - Sizing / Position Management: `initial_size_context`, `in_position_size_context`, `add_size_context`, `strategy_family`, `exit_profile`, `instrument`, `timeframe`.
 
 Nested original evaluator output may be stored as compact JSON for audit, but research-facing fields should be promoted to typed columns.
+
+The episode index should be a separate reusable table with one row per exact-baseline episode:
+
+- `episode_id`
+- `strategy_family`
+- `instrument`
+- `entry_timestamp`
+- `entry_side`
+- `entry_price`
+- `fixed_exit_timestamp_36b`
+- `episode_year`
+- `source_candidate_id`
+- `source_trade_id`
+- `source_backtest_run_id`
+- `source_parquet_partitions`
+- `episode_status`
+- `episode_failure_reasons`
+
+The advisory layer rows should reference `episode_id`; they should not duplicate all episode metadata.
 
 ## 6. Provenance, Freshness, And Runtime-Boundary Rules
 
@@ -191,6 +226,17 @@ Required rules:
 
 Historical backfills may use historical truth that would not have been available in live runtime only when the manifest labels the build as post-hoc research. Runtime replay builds must use only the information available as of the evaluation timestamp.
 
+When using `outputs/research_warehouse/base_1m`, provenance must include:
+
+- base 1m partition path.
+- base 1m partition manifest path.
+- source SQLite path from the base partition manifest.
+- base export run id.
+- query bounds used to assemble the 48-bar window.
+- whether any derived 5m or higher timeframe window was produced during backfill.
+
+If a required base partition is missing, stale, inconsistent with its manifest, or fails row/timestamp validation, the advisory build must fail closed for that episode batch.
+
 ## 7. Replay And Backtest Integration Points
 
 The archive should integrate with replay/backtest tools at episode boundaries.
@@ -204,6 +250,18 @@ Expected integration points:
 - operator UI prototypes: browse advisory histories for representative episodes without touching live runtime paths.
 
 Replay consumers should read the archive as advisory annotations. They should not treat it as a strategy authority source.
+
+Backtests should join advisory rows by `episode_id` and `evaluation_timestamp`, not by raw bar timestamp alone. This avoids accidental use of advisory states from unrelated candidate families or global market contexts.
+
+Fixed 36b replay should first consume:
+
+- `episode_index` for exact-baseline entries and fixed exits.
+- Lifecycle Awareness rows for bars 0 through 48.
+- Participation / Pressure rows aligned to each evaluation timestamp.
+- Regime State rows aligned to each evaluation timestamp.
+- Sizing / Position Management rows at entry and in-position offsets.
+
+Adaptive 24/36 replay can later compare its decisions against the same advisory timeline without changing the baseline archive.
 
 ## 8. Bounded-Partition Strategy
 
@@ -228,6 +286,18 @@ Recommended row grain:
 - one row per layer per episode evaluation timestamp.
 - one row per layer per entry candidate when evaluating initial sizing.
 - one row per layer per 48-bar replay window offset when evaluating in-position context.
+
+For the first target, annual layer partitions should be sufficient:
+
+```text
+outputs/track_b_execution_core/advisory_backfill/parquet/
+  layer=lifecycle_awareness/strategy_family=exact_baseline/instrument=GC/year=2024/part-000.parquet
+  layer=participation_pressure/strategy_family=exact_baseline/instrument=GC/year=2024/part-000.parquet
+  layer=regime_session/strategy_family=exact_baseline/instrument=GC/year=2024/part-000.parquet
+  layer=sizing_position_management/strategy_family=exact_baseline/instrument=GC/year=2024/part-000.parquet
+```
+
+If annual files become too large, shard by quarter using the same year-quarter convention as the base 1m cache. Do not shard by episode unless a specific consumer needs small random reads.
 
 ## 9. Rebuild And Invalidation Policy
 
@@ -291,6 +361,8 @@ Recommended first bounded target:
 - lifecycle window: 48 bars from entry.
 - timeframe: the baseline evaluation timeframe used by the strategy replay.
 - exit comparison: fixed 36b baseline first; adaptive 24/36 as a later join.
+- source bars: read from `outputs/research_warehouse/base_1m/futures/GC` and `outputs/research_warehouse/base_1m/futures/MGC` when partitions exist and validate.
+- fallback source: SQLite-backed canonical 1m only for missing or invalid hot-cache partitions, and only through a read-only export/rebuild path reviewed separately.
 
 Why this target:
 
@@ -300,6 +372,13 @@ Why this target:
 - 48 bars covers newly opened, working, fixed 36b exit horizon, late decay, and post-exit comparison windows.
 
 The first run should be a dry-run design implementation with tiny sample output, then a bounded yearly build, then the full 2020-2026 build only after manifest validation.
+
+Suggested first implementation order:
+
+1. Build a pure episode indexer for exact-baseline GC/MGC episodes.
+2. Build a dry-run advisory backfill planner that resolves required base 1m partitions and estimates advisory row counts.
+3. Backfill one symbol/year sample to a temporary reviewed output root.
+4. Backfill GC/MGC 2020-2026 only after validation and manifest review.
 
 ## 12. Expected Compute And Storage Footprint
 
@@ -329,11 +408,28 @@ The first implementation should measure:
 - Parquet file count.
 - manifest generation time.
 
+Expected first-target sizing should be calculated from the exact-baseline episode index, not from raw 1m bar counts. A simple planning formula is:
+
+```text
+episode_count * 49 evaluation points * 4 advisory layers
+```
+
+The 49 evaluation points include entry offset 0 plus 48 post-entry bars. For example:
+
+- 1,000 episodes -> 196,000 advisory rows.
+- 5,000 episodes -> 980,000 advisory rows.
+- 10,000 episodes -> 1,960,000 advisory rows.
+
+Enum-heavy Parquet rows should remain modest. Expect tens to low hundreds of megabytes for GC/MGC exact-baseline v1 unless full nested evaluator payloads are retained per row. Store compact nested payloads only when they are needed for audit.
+
+The 21-symbol futures universe is a later expansion. The base 1m hot cache currently makes it feasible to plan, but advisory row count should still be based on episode density, not global bars. If 21-symbol exact-baseline episodes are roughly 5x to 10x GC/MGC, expect about 10 million to 20 million advisory rows for the same 49-point, four-layer archive.
+
 ## 13. Future Extension Points
 
 Future extensions:
 
 - add Exit Context as a fifth advisory archive layer.
+- expand from GC/MGC exact-baseline to the 21-symbol futures universe after episode-index validation.
 - add operator-facing episode browser backed by Parquet or SQLite catalog.
 - add DuckDB query examples for research notebooks.
 - add incremental backfill by strategy family and year.
