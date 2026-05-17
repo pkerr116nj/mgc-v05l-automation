@@ -98,6 +98,8 @@ class Episode:
     base_1m_manifest: Mapping[str, Any]
     window_bars: tuple[Mapping[str, Any], ...]
     spillover_partitions_read: tuple[str, ...]
+    source_partition_id: str
+    ownership_partition_id: str
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -115,6 +117,8 @@ def run_backfill_pilot(config: BackfillPilotConfig) -> dict[str, Any]:
     source_git_commit = _source_git_commit()
     planned_partitions = _planned_partitions(config)
     expected_counts = _expected_episode_counts(config)
+    all_episodes: list[Episode] = []
+    source_partition_records: list[dict[str, Any]] = []
     partition_results: list[dict[str, Any]] = []
     failed_partitions: list[dict[str, Any]] = []
 
@@ -140,6 +144,30 @@ def run_backfill_pilot(config: BackfillPilotConfig) -> dict[str, Any]:
             base_manifest_path=base_manifest_path,
             base_manifest=base_manifest,
         )
+        all_episodes.extend(episodes)
+        source_partition_records.append(
+            {
+                "spec": spec,
+                "raw_candidate_count": len(candidates),
+                "skipped_by_dedupe": len(candidates) - len(deduped),
+                "episode_count": len(episodes),
+                "source_inputs": {
+                    "candidate_path": str(candidate_path),
+                    "derived_bars_path": str(derived_bars_path),
+                    "base_1m_partition_path": str(base_partition_path),
+                    "base_1m_manifest_path": str(base_manifest_path),
+                },
+                "spillover_summary": spillover_summary,
+            }
+        )
+
+    ownership_groups = _episodes_by_ownership_partition(all_episodes)
+    for spec, episodes in ownership_groups:
+        source_records = [
+            record
+            for record in source_partition_records
+            if any(episode.source_partition_id == record["spec"].partition_id for episode in episodes)
+        ]
         advisory_rows_by_layer, episode_rows = _materialize_partition_rows(
             config=config,
             spec=spec,
@@ -155,8 +183,8 @@ def run_backfill_pilot(config: BackfillPilotConfig) -> dict[str, Any]:
             spec=spec,
             episodes=episodes,
             advisory_rows_by_layer=advisory_rows_by_layer,
-            raw_candidate_count=len(candidates),
-            skipped_by_dedupe=len(candidates) - len(deduped),
+            raw_candidate_count=sum(int(record["raw_candidate_count"]) for record in source_records),
+            skipped_by_dedupe=sum(int(record["skipped_by_dedupe"]) for record in source_records),
         )
         if partition_validation["failure_reasons"]:
             failed_partitions.append(
@@ -171,18 +199,17 @@ def run_backfill_pilot(config: BackfillPilotConfig) -> dict[str, Any]:
             spec=spec,
             build_created_at=build_created_at,
             source_git_commit=source_git_commit,
-            raw_candidate_count=len(candidates),
-            skipped_by_dedupe=len(candidates) - len(deduped),
+            raw_candidate_count=sum(int(record["raw_candidate_count"]) for record in source_records),
+            skipped_by_dedupe=sum(int(record["skipped_by_dedupe"]) for record in source_records),
             episode_count=len(episodes),
             advisory_rows_by_layer=advisory_rows_by_layer,
             output_paths=output_paths,
             source_inputs={
-                "candidate_path": str(candidate_path),
-                "derived_bars_path": str(derived_bars_path),
-                "base_1m_partition_path": str(base_partition_path),
-                "base_1m_manifest_path": str(base_manifest_path),
+                record["spec"].partition_id: record["source_inputs"]
+                for record in source_records
             },
-            spillover_summary=spillover_summary,
+            source_partition_ids=[record["spec"].partition_id for record in source_records],
+            spillover_summary=_merge_spillover_summaries(source_records),
             validation_summary=partition_validation,
         )
         partition_action = "write"
@@ -205,8 +232,8 @@ def run_backfill_pilot(config: BackfillPilotConfig) -> dict[str, Any]:
         partition_results.append(
             {
                 "spec": spec,
-                "raw_candidate_count": len(candidates),
-                "skipped_by_dedupe": len(candidates) - len(deduped),
+                "raw_candidate_count": sum(int(record["raw_candidate_count"]) for record in source_records),
+                "skipped_by_dedupe": sum(int(record["skipped_by_dedupe"]) for record in source_records),
                 "episode_count": len(episodes),
                 "advisory_rows_by_layer": advisory_rows_by_layer,
                 "episode_rows": episode_rows,
@@ -215,7 +242,8 @@ def run_backfill_pilot(config: BackfillPilotConfig) -> dict[str, Any]:
                 "partition_validation": partition_validation,
                 "partition_action": partition_action,
                 "existing_validation": existing_validation,
-                "spillover_summary": spillover_summary,
+                "spillover_summary": _merge_spillover_summaries(source_records),
+                "source_partition_ids": [record["spec"].partition_id for record in source_records],
             }
         )
 
@@ -233,6 +261,8 @@ def run_backfill_pilot(config: BackfillPilotConfig) -> dict[str, Any]:
                 {
                     "compatibility_uncertain": True,
                     "failure_reasons": reconciliation_failures,
+                    "boundary_shifted_episodes": _boundary_shifted_episodes(partition_results),
+                    "episode_quarter_ownership_rule": "ENTRY_DECISION_TIMESTAMP_UTC",
                     "expected_episode_counts": expected_counts,
                     "observed_quarter_episode_counts": quarter_counts,
                     "observed_total_episodes": total_episodes,
@@ -270,6 +300,7 @@ def run_backfill_pilot(config: BackfillPilotConfig) -> dict[str, Any]:
         "end": config.end.isoformat() if config.end else None,
         "episode_window_bars": config.window_bars,
         "dedupe_bars": config.dedupe_bars,
+        "episode_quarter_ownership_rule": "ENTRY_DECISION_TIMESTAMP_UTC",
         "episode_centric": True,
         "global_bar_backfill": False,
         "planned_partitions": [_partition_summary(result) for result in partition_results],
@@ -284,6 +315,7 @@ def run_backfill_pilot(config: BackfillPilotConfig) -> dict[str, Any]:
         "advisory_row_count": sum(_partition_advisory_row_count(result) for result in partition_results),
         "advisory_row_count_by_layer": _run_layer_counts(partition_results),
         "observed_quarter_episode_counts": quarter_counts,
+        "boundary_shifted_episodes": _boundary_shifted_episodes(partition_results),
         "expected_episode_counts": expected_counts,
         "spillover_partitions_read": sorted(
             {
@@ -429,6 +461,51 @@ def _next_partition_spec(spec: PartitionSpec) -> PartitionSpec:
     return PartitionSpec(symbol=spec.symbol, year=spec.year, quarter=f"Q{quarter_number + 1}")
 
 
+def _ownership_partition_spec(*, symbol: str, entry_ts: datetime) -> PartitionSpec:
+    """Own advisory episodes by deduped candidate/decision timestamp in UTC.
+
+    The exact-baseline research report counts match the candidate/decision
+    timestamp normalized to UTC. Source shard ids can reflect session-local
+    quarter boundaries, so reconciliation and output partitioning use this
+    UTC ownership rule instead.
+    """
+
+    utc_ts = _coerce_ts(entry_ts)
+    return PartitionSpec(symbol=symbol, year=utc_ts.year, quarter=f"Q{_quarter_number(utc_ts)}")
+
+
+def _episodes_by_ownership_partition(episodes: Sequence[Episode]) -> list[tuple[PartitionSpec, list[Episode]]]:
+    grouped: dict[str, list[Episode]] = {}
+    specs: dict[str, PartitionSpec] = {}
+    for episode in episodes:
+        spec = _ownership_partition_spec(symbol=episode.symbol, entry_ts=episode.decision_ts)
+        grouped.setdefault(spec.partition_id, []).append(episode)
+        specs[spec.partition_id] = spec
+    return [(specs[key], grouped[key]) for key in sorted(grouped)]
+
+
+def _merge_spillover_summaries(records: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
+    return {
+        "spillover_partitions_read": sorted(
+            {
+                partition
+                for record in records
+                for partition in record["spillover_summary"].get("spillover_partitions_read", [])
+            }
+        ),
+        "episodes_requiring_spillover": [
+            episode
+            for record in records
+            for episode in record["spillover_summary"].get("episodes_requiring_spillover", [])
+        ],
+        "missing_spillover_failures": [
+            failure
+            for record in records
+            for failure in record["spillover_summary"].get("missing_spillover_failures", [])
+        ],
+    }
+
+
 def _load_base_1m_manifest(partition_path: Path, manifest_path: Path) -> Mapping[str, Any]:
     if not partition_path.exists():
         raise SystemExit(f"required base 1m Parquet hot-cache partition not found: {partition_path}")
@@ -538,6 +615,7 @@ def _build_episodes(
         side = str(candidate.get("side") or "UNKNOWN").upper()
         entry_bar = window[0]
         entry_price = float(entry_bar["close"])
+        ownership_spec = _ownership_partition_spec(symbol=symbol, entry_ts=decision_ts)
         episode_id = _stable_id(symbol, str(candidate.get("candidate_id")), decision_ts.isoformat(), str(sequence))
         episodes.append(
             Episode(
@@ -556,6 +634,8 @@ def _build_episodes(
                 base_1m_manifest=base_manifest,
                 window_bars=window,
                 spillover_partitions_read=spillover_partitions_read,
+                source_partition_id=spec.partition_id,
+                ownership_partition_id=ownership_spec.partition_id,
             )
         )
     return episodes, {
@@ -822,6 +902,9 @@ def _episode_index_row(
         "source_backtest_run_id": f"exact_baseline_{spec.shard_id}",
         "source_parquet_partitions": [str(episode.candidate_path), str(episode.derived_bars_path)],
         "spillover_partitions_read": list(episode.spillover_partitions_read),
+        "source_partition_id": episode.source_partition_id,
+        "ownership_partition_id": episode.ownership_partition_id,
+        "ownership_rule": "ENTRY_DECISION_TIMESTAMP_UTC",
         "episode_status": "VALID_WINDOW",
         "episode_failure_reasons": [],
         "runtime_eligible": False,
@@ -909,6 +992,7 @@ def _partition_validation_summary(
         "episode_count": len(episodes),
         "raw_candidate_count": raw_candidate_count,
         "skipped_by_dedupe": skipped_by_dedupe,
+        "episode_quarter_ownership_rule": "ENTRY_DECISION_TIMESTAMP_UTC",
         "spillover_partitions_read": sorted(
             {partition for episode in episodes for partition in episode.spillover_partitions_read}
         ),
@@ -943,6 +1027,7 @@ def _partition_manifest(
     advisory_rows_by_layer: Mapping[str, Sequence[Mapping[str, Any]]],
     output_paths: Mapping[str, Path],
     source_inputs: Mapping[str, str],
+    source_partition_ids: Sequence[str],
     spillover_summary: Mapping[str, Any],
     validation_summary: Mapping[str, Any],
 ) -> dict[str, Any]:
@@ -954,6 +1039,7 @@ def _partition_manifest(
         "source_git_commit": source_git_commit,
         "strategy_family": STRATEGY_FAMILY,
         "exit_profile": EXIT_PROFILE,
+        "episode_quarter_ownership_rule": "ENTRY_DECISION_TIMESTAMP_UTC",
         "partition_id": spec.partition_id,
         "symbol": spec.symbol,
         "year": spec.year,
@@ -963,6 +1049,7 @@ def _partition_manifest(
         "episode_centric": True,
         "global_bar_backfill": False,
         "source_inputs": dict(source_inputs),
+        "source_partition_ids": sorted(source_partition_ids),
         "spillover_partitions_read": list(spillover_summary.get("spillover_partitions_read", [])),
         "episodes_requiring_spillover": list(spillover_summary.get("episodes_requiring_spillover", [])),
         "missing_spillover_failures": list(spillover_summary.get("missing_spillover_failures", [])),
@@ -1072,6 +1159,7 @@ def _run_validation_summary(
         "failed_partition_count": sum(1 for result in partition_results if result["partition_action"].startswith("failed")),
         "episode_count": sum(int(result["episode_count"]) for result in partition_results),
         "observed_quarter_episode_counts": dict(quarter_counts),
+        "boundary_shifted_episodes": _boundary_shifted_episodes(partition_results),
         "expected_episode_counts": dict(expected_counts),
         "spillover_partitions_read": sorted(
             {
@@ -1205,6 +1293,26 @@ def _run_layer_counts(partition_results: Sequence[Mapping[str, Any]]) -> dict[st
         for layer, rows in result["advisory_rows_by_layer"].items():
             totals[layer] += len(rows)
     return totals
+
+
+def _boundary_shifted_episodes(partition_results: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
+    shifted: list[dict[str, Any]] = []
+    for result in partition_results:
+        for row in result["episode_rows"]:
+            source_partition_id = str(row.get("source_partition_id", ""))
+            ownership_partition_id = str(row.get("ownership_partition_id", ""))
+            if source_partition_id and ownership_partition_id and source_partition_id != ownership_partition_id:
+                shifted.append(
+                    {
+                        "episode_id": row["episode_id"],
+                        "candidate_id": row["source_candidate_id"],
+                        "instrument": row["instrument"],
+                        "entry_timestamp": row["entry_timestamp"],
+                        "source_partition_id": source_partition_id,
+                        "ownership_partition_id": ownership_partition_id,
+                    }
+                )
+    return shifted
 
 
 def _summary(result: Mapping[str, Any]) -> dict[str, Any]:

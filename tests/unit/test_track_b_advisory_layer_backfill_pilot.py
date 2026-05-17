@@ -214,6 +214,7 @@ def test_boundary_candidate_reads_next_quarter_bars_but_writes_entry_partition(t
     )
 
     assert result["episode_count"] == 1
+    assert result["observed_quarter_episode_counts"] == {"2024Q1": 1}
     assert result["planned_partitions"][0]["spillover_partitions_read"] == ["GC_2024Q2"]
     assert result["planned_partitions"][0]["episodes_requiring_spillover"] == ["GC:candidate:offset-3"]
     assert (
@@ -248,7 +249,97 @@ def test_boundary_candidate_reads_next_quarter_bars_but_writes_entry_partition(t
     )
     partition_manifest = json.loads(partition_manifest_path.read_text(encoding="utf-8"))
     assert partition_manifest["spillover_partitions_read"] == ["GC_2024Q2"]
+    assert partition_manifest["episode_quarter_ownership_rule"] == "ENTRY_DECISION_TIMESTAMP_UTC"
     assert partition_manifest["missing_spillover_failures"] == []
+
+
+def test_utc_entry_ownership_can_write_to_different_quarter_than_source_shard(tmp_path: Path) -> None:
+    candidate_root = tmp_path / "candidate_partitions"
+    base_root = tmp_path / "base_1m" / "futures"
+    output_root = tmp_path / "advisory"
+    _write_symbol_inputs(
+        candidate_root,
+        base_root,
+        "GC",
+        year=2024,
+        quarter="Q1",
+        start=datetime(2024, 4, 1, 0, 5, tzinfo=UTC),
+        candidate_offsets=(0,),
+        bars_count=5,
+    )
+
+    result = run_backfill_pilot(
+        _config(
+            candidate_root=candidate_root,
+            base_root=base_root,
+            output_root=output_root,
+            symbols=("GC",),
+            expected_episodes=1,
+        )
+    )
+
+    assert result["observed_quarter_episode_counts"] == {"2024Q2": 1}
+    assert result["boundary_shifted_episodes"][0]["source_partition_id"] == "GC_2024Q1"
+    assert result["boundary_shifted_episodes"][0]["ownership_partition_id"] == "GC_2024Q2"
+    assert (
+        output_root
+        / "parquet"
+        / "layer=lifecycle_awareness"
+        / "strategy_family=exact_baseline"
+        / "instrument=GC"
+        / "year=2024"
+        / "Q2"
+        / "advisory_rows.parquet"
+    ).exists()
+    assert not (
+        output_root
+        / "parquet"
+        / "layer=lifecycle_awareness"
+        / "strategy_family=exact_baseline"
+        / "instrument=GC"
+        / "year=2024"
+        / "Q1"
+        / "advisory_rows.parquet"
+    ).exists()
+
+
+def test_total_match_but_quarter_mismatch_fails_with_boundary_diagnostic(tmp_path: Path) -> None:
+    candidate_root = tmp_path / "candidate_partitions"
+    base_root = tmp_path / "base_1m" / "futures"
+    output_root = tmp_path / "advisory"
+    _write_symbol_inputs(
+        candidate_root,
+        base_root,
+        "GC",
+        year=2024,
+        quarter="Q1",
+        start=datetime(2024, 4, 1, 0, 5, tzinfo=UTC),
+        candidate_offsets=(0,),
+        bars_count=5,
+    )
+    expected_path = tmp_path / "expected.json"
+    expected_path.write_text(json.dumps({"by_year_quarter": {"2024Q1": 1}}))
+
+    with pytest.raises(SystemExit) as excinfo:
+        run_backfill_pilot(
+            BackfillPilotConfig(
+                **{
+                    **_config(
+                        candidate_root=candidate_root,
+                        base_root=base_root,
+                        output_root=output_root,
+                        symbols=("GC",),
+                        expected_episodes=1,
+                    ).__dict__,
+                    "expected_episode_counts_json": expected_path,
+                }
+            )
+        )
+
+    assert "EXPECTED_QUARTER_EPISODE_COUNT_MISMATCH:2024Q1" in str(excinfo.value)
+    assert "boundary_shifted_episodes" in str(excinfo.value)
+    assert "GC_2024Q2" in str(excinfo.value)
+    assert not output_root.exists()
 
 
 def test_boundary_candidate_missing_next_quarter_fails_clearly(tmp_path: Path) -> None:
