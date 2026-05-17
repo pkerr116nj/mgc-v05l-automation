@@ -97,6 +97,7 @@ class Episode:
     base_1m_manifest_path: Path
     base_1m_manifest: Mapping[str, Any]
     window_bars: tuple[Mapping[str, Any], ...]
+    spillover_partitions_read: tuple[str, ...]
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -126,7 +127,9 @@ def run_backfill_pilot(config: BackfillPilotConfig) -> dict[str, Any]:
         candidates = _load_parquet_rows(candidate_path)
         bars = _load_parquet_rows(derived_bars_path)
         deduped = _dedupe_candidates(candidates, dedupe_bars=config.dedupe_bars)
-        episodes = _build_episodes(
+        episodes, spillover_summary = _build_episodes(
+            config=config,
+            spec=spec,
             symbol=spec.symbol,
             candidate_rows=deduped,
             bar_rows=bars,
@@ -179,6 +182,7 @@ def run_backfill_pilot(config: BackfillPilotConfig) -> dict[str, Any]:
                 "base_1m_partition_path": str(base_partition_path),
                 "base_1m_manifest_path": str(base_manifest_path),
             },
+            spillover_summary=spillover_summary,
             validation_summary=partition_validation,
         )
         partition_action = "write"
@@ -211,6 +215,7 @@ def run_backfill_pilot(config: BackfillPilotConfig) -> dict[str, Any]:
                 "partition_validation": partition_validation,
                 "partition_action": partition_action,
                 "existing_validation": existing_validation,
+                "spillover_summary": spillover_summary,
             }
         )
 
@@ -280,6 +285,23 @@ def run_backfill_pilot(config: BackfillPilotConfig) -> dict[str, Any]:
         "advisory_row_count_by_layer": _run_layer_counts(partition_results),
         "observed_quarter_episode_counts": quarter_counts,
         "expected_episode_counts": expected_counts,
+        "spillover_partitions_read": sorted(
+            {
+                partition
+                for result in partition_results
+                for partition in result["spillover_summary"].get("spillover_partitions_read", [])
+            }
+        ),
+        "episodes_requiring_spillover": [
+            episode
+            for result in partition_results
+            for episode in result["spillover_summary"].get("episodes_requiring_spillover", [])
+        ],
+        "missing_spillover_failures": [
+            failure
+            for result in partition_results
+            for failure in result["spillover_summary"].get("missing_spillover_failures", [])
+        ],
         "runtime_seconds": runtime_seconds,
         "output_paths": {key: str(value) for key, value in run_output_paths.items()},
         "validation_summary_path": str(run_output_paths["validation_summary"]),
@@ -400,6 +422,13 @@ def _base_1m_partition_path(config: BackfillPilotConfig, spec: PartitionSpec) ->
     return config.base_1m_root / spec.symbol / str(spec.year) / spec.quarter / "bars.parquet"
 
 
+def _next_partition_spec(spec: PartitionSpec) -> PartitionSpec:
+    quarter_number = int(spec.quarter.removeprefix("Q"))
+    if quarter_number == 4:
+        return PartitionSpec(symbol=spec.symbol, year=spec.year + 1, quarter="Q1")
+    return PartitionSpec(symbol=spec.symbol, year=spec.year, quarter=f"Q{quarter_number + 1}")
+
+
 def _load_base_1m_manifest(partition_path: Path, manifest_path: Path) -> Mapping[str, Any]:
     if not partition_path.exists():
         raise SystemExit(f"required base 1m Parquet hot-cache partition not found: {partition_path}")
@@ -435,6 +464,8 @@ def _dedupe_candidates(rows: Sequence[Mapping[str, Any]], *, dedupe_bars: int) -
 
 def _build_episodes(
     *,
+    config: BackfillPilotConfig,
+    spec: PartitionSpec,
     symbol: str,
     candidate_rows: Sequence[Mapping[str, Any]],
     bar_rows: Sequence[Mapping[str, Any]],
@@ -444,11 +475,15 @@ def _build_episodes(
     base_partition_path: Path,
     base_manifest_path: Path,
     base_manifest: Mapping[str, Any],
-) -> list[Episode]:
+) -> tuple[list[Episode], dict[str, Any]]:
     sorted_bars = sorted(bar_rows, key=lambda item: _coerce_ts(item["bar_ts"]))
-    bar_index = {_coerce_ts(row["bar_ts"]): index for index, row in enumerate(sorted_bars)}
+    partition_ids_by_ts: dict[datetime, str] = {_coerce_ts(row["bar_ts"]): spec.partition_id for row in sorted_bars}
+    spillover_rows_by_partition: dict[str, list[dict[str, Any]]] = {}
     episodes: list[Episode] = []
+    episodes_requiring_spillover: list[str] = []
+    missing_spillover_failures: list[dict[str, Any]] = []
     for sequence, candidate in enumerate(candidate_rows):
+        bar_index = {_coerce_ts(row["bar_ts"]): index for index, row in enumerate(sorted_bars)}
         decision_ts = _coerce_ts(candidate["decision_ts"])
         if decision_ts not in bar_index:
             raise SystemExit(f"candidate decision_ts missing from derived bars: {symbol} {decision_ts.isoformat()}")
@@ -456,10 +491,50 @@ def _build_episodes(
         stop_index = start_index + window_bars + 1
         window = tuple(sorted_bars[start_index:stop_index])
         if len(window) != window_bars + 1:
-            raise SystemExit(
-                f"insufficient derived bars for {symbol} candidate {candidate.get('candidate_id')}: "
-                f"expected {window_bars + 1}, observed {len(window)}"
+            next_spec = _next_partition_spec(spec)
+            next_path = _derived_bars_path(config, next_spec)
+            if not next_path.exists():
+                failure = {
+                    "candidate_id": str(candidate.get("candidate_id")),
+                    "entry_partition": spec.partition_id,
+                    "required_spillover_partition": next_spec.partition_id,
+                    "missing_path": str(next_path),
+                    "expected_window_bars": window_bars + 1,
+                    "observed_window_bars": len(window),
+                    "failure_reason": "BOUNDARY_SPILLOVER_MISSING",
+                }
+                missing_spillover_failures.append(failure)
+                raise SystemExit(json.dumps({"boundary_spillover_missing": failure}, sort_keys=True))
+            if next_spec.partition_id not in spillover_rows_by_partition:
+                next_rows = _load_parquet_rows(next_path)
+                spillover_rows_by_partition[next_spec.partition_id] = next_rows
+                sorted_bars = sorted([*sorted_bars, *next_rows], key=lambda item: _coerce_ts(item["bar_ts"]))
+                for row in next_rows:
+                    partition_ids_by_ts[_coerce_ts(row["bar_ts"])] = next_spec.partition_id
+            bar_index = {_coerce_ts(row["bar_ts"]): index for index, row in enumerate(sorted_bars)}
+            start_index = bar_index[decision_ts]
+            window = tuple(sorted_bars[start_index:stop_index])
+            if len(window) != window_bars + 1:
+                failure = {
+                    "candidate_id": str(candidate.get("candidate_id")),
+                    "entry_partition": spec.partition_id,
+                    "required_spillover_partition": next_spec.partition_id,
+                    "expected_window_bars": window_bars + 1,
+                    "observed_window_bars": len(window),
+                    "failure_reason": "BOUNDARY_SPILLOVER_INSUFFICIENT",
+                }
+                missing_spillover_failures.append(failure)
+                raise SystemExit(json.dumps({"boundary_spillover_missing": failure}, sort_keys=True))
+            episodes_requiring_spillover.append(str(candidate.get("candidate_id")))
+        spillover_partitions_read = tuple(
+            sorted(
+                {
+                    partition_ids_by_ts[_coerce_ts(row["bar_ts"])]
+                    for row in window
+                    if partition_ids_by_ts.get(_coerce_ts(row["bar_ts"])) != spec.partition_id
+                }
             )
+        )
         side = str(candidate.get("side") or "UNKNOWN").upper()
         entry_bar = window[0]
         entry_price = float(entry_bar["close"])
@@ -480,9 +555,14 @@ def _build_episodes(
                 base_1m_manifest_path=base_manifest_path,
                 base_1m_manifest=base_manifest,
                 window_bars=window,
+                spillover_partitions_read=spillover_partitions_read,
             )
         )
-    return episodes
+    return episodes, {
+        "spillover_partitions_read": sorted(spillover_rows_by_partition),
+        "episodes_requiring_spillover": episodes_requiring_spillover,
+        "missing_spillover_failures": missing_spillover_failures,
+    }
 
 
 def _materialize_partition_rows(
@@ -741,6 +821,7 @@ def _episode_index_row(
         "source_trade_id": "",
         "source_backtest_run_id": f"exact_baseline_{spec.shard_id}",
         "source_parquet_partitions": [str(episode.candidate_path), str(episode.derived_bars_path)],
+        "spillover_partitions_read": list(episode.spillover_partitions_read),
         "episode_status": "VALID_WINDOW",
         "episode_failure_reasons": [],
         "runtime_eligible": False,
@@ -828,6 +909,13 @@ def _partition_validation_summary(
         "episode_count": len(episodes),
         "raw_candidate_count": raw_candidate_count,
         "skipped_by_dedupe": skipped_by_dedupe,
+        "spillover_partitions_read": sorted(
+            {partition for episode in episodes for partition in episode.spillover_partitions_read}
+        ),
+        "episodes_requiring_spillover": [
+            episode.candidate_id for episode in episodes if episode.spillover_partitions_read
+        ],
+        "missing_spillover_failures": [],
         "window_bars": config.window_bars,
         "expected_rows_per_layer": expected_rows_per_layer,
         "advisory_row_count_by_layer": {layer: len(rows) for layer, rows in advisory_rows_by_layer.items()},
@@ -855,6 +943,7 @@ def _partition_manifest(
     advisory_rows_by_layer: Mapping[str, Sequence[Mapping[str, Any]]],
     output_paths: Mapping[str, Path],
     source_inputs: Mapping[str, str],
+    spillover_summary: Mapping[str, Any],
     validation_summary: Mapping[str, Any],
 ) -> dict[str, Any]:
     return {
@@ -874,6 +963,9 @@ def _partition_manifest(
         "episode_centric": True,
         "global_bar_backfill": False,
         "source_inputs": dict(source_inputs),
+        "spillover_partitions_read": list(spillover_summary.get("spillover_partitions_read", [])),
+        "episodes_requiring_spillover": list(spillover_summary.get("episodes_requiring_spillover", [])),
+        "missing_spillover_failures": list(spillover_summary.get("missing_spillover_failures", [])),
         "raw_candidate_count": raw_candidate_count,
         "skipped_by_dedupe": skipped_by_dedupe,
         "episode_count": episode_count,
@@ -926,6 +1018,9 @@ def _validate_existing_partition(
         "episode_count",
         "advisory_row_count",
         "advisory_row_count_by_layer",
+        "spillover_partitions_read",
+        "episodes_requiring_spillover",
+        "missing_spillover_failures",
         "source_inputs",
     )
     for key in comparable_keys:
@@ -978,6 +1073,23 @@ def _run_validation_summary(
         "episode_count": sum(int(result["episode_count"]) for result in partition_results),
         "observed_quarter_episode_counts": dict(quarter_counts),
         "expected_episode_counts": dict(expected_counts),
+        "spillover_partitions_read": sorted(
+            {
+                partition
+                for result in partition_results
+                for partition in result["spillover_summary"].get("spillover_partitions_read", [])
+            }
+        ),
+        "episodes_requiring_spillover": [
+            episode
+            for result in partition_results
+            for episode in result["spillover_summary"].get("episodes_requiring_spillover", [])
+        ],
+        "missing_spillover_failures": [
+            failure
+            for result in partition_results
+            for failure in result["spillover_summary"].get("missing_spillover_failures", [])
+        ],
         "window_bars": config.window_bars,
         "advisory_row_count_by_layer": _run_layer_counts(partition_results),
         "advisory_row_count": sum(_partition_advisory_row_count(result) for result in partition_results),
@@ -1073,6 +1185,8 @@ def _partition_summary(result: Mapping[str, Any]) -> dict[str, Any]:
         "partition_action": result["partition_action"],
         "episode_count": result["episode_count"],
         "advisory_row_count": _partition_advisory_row_count(result),
+        "spillover_partitions_read": list(result["spillover_summary"].get("spillover_partitions_read", [])),
+        "episodes_requiring_spillover": list(result["spillover_summary"].get("episodes_requiring_spillover", [])),
         "partition_manifest_path": str(result["output_paths"]["partition_manifest"]),
     }
 

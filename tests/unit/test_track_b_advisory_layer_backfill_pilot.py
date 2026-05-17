@@ -178,6 +178,111 @@ def test_multi_quarter_run_reconciles_and_writes_partitioned_outputs(tmp_path: P
     ).exists()
 
 
+def test_boundary_candidate_reads_next_quarter_bars_but_writes_entry_partition(tmp_path: Path) -> None:
+    candidate_root = tmp_path / "candidate_partitions"
+    base_root = tmp_path / "base_1m" / "futures"
+    output_root = tmp_path / "advisory"
+    _write_symbol_inputs(
+        candidate_root,
+        base_root,
+        "GC",
+        year=2024,
+        quarter="Q1",
+        start=datetime(2024, 3, 31, 23, 40, tzinfo=UTC),
+        candidate_offsets=(3,),
+        bars_count=5,
+    )
+    _write_symbol_inputs(
+        candidate_root,
+        base_root,
+        "GC",
+        year=2024,
+        quarter="Q2",
+        start=datetime(2024, 4, 1, 0, 5, tzinfo=UTC),
+        candidate_offsets=(),
+        bars_count=5,
+    )
+
+    result = run_backfill_pilot(
+        _config(
+            candidate_root=candidate_root,
+            base_root=base_root,
+            output_root=output_root,
+            symbols=("GC",),
+            expected_episodes=1,
+        )
+    )
+
+    assert result["episode_count"] == 1
+    assert result["planned_partitions"][0]["spillover_partitions_read"] == ["GC_2024Q2"]
+    assert result["planned_partitions"][0]["episodes_requiring_spillover"] == ["GC:candidate:offset-3"]
+    assert (
+        output_root
+        / "parquet"
+        / "layer=lifecycle_awareness"
+        / "strategy_family=exact_baseline"
+        / "instrument=GC"
+        / "year=2024"
+        / "Q1"
+        / "advisory_rows.parquet"
+    ).exists()
+    assert not (
+        output_root
+        / "parquet"
+        / "layer=lifecycle_awareness"
+        / "strategy_family=exact_baseline"
+        / "instrument=GC"
+        / "year=2024"
+        / "Q2"
+        / "advisory_rows.parquet"
+    ).exists()
+
+    partition_manifest_path = (
+        output_root
+        / "partitions"
+        / "strategy_family=exact_baseline"
+        / "instrument=GC"
+        / "year=2024"
+        / "Q1"
+        / "partition_manifest.json"
+    )
+    partition_manifest = json.loads(partition_manifest_path.read_text(encoding="utf-8"))
+    assert partition_manifest["spillover_partitions_read"] == ["GC_2024Q2"]
+    assert partition_manifest["missing_spillover_failures"] == []
+
+
+def test_boundary_candidate_missing_next_quarter_fails_clearly(tmp_path: Path) -> None:
+    candidate_root = tmp_path / "candidate_partitions"
+    base_root = tmp_path / "base_1m" / "futures"
+    output_root = tmp_path / "advisory"
+    _write_symbol_inputs(
+        candidate_root,
+        base_root,
+        "GC",
+        year=2024,
+        quarter="Q1",
+        start=datetime(2024, 3, 31, 23, 40, tzinfo=UTC),
+        candidate_offsets=(3,),
+        bars_count=5,
+    )
+
+    with pytest.raises(SystemExit) as excinfo:
+        run_backfill_pilot(
+            _config(
+                candidate_root=candidate_root,
+                base_root=base_root,
+                output_root=output_root,
+                symbols=("GC",),
+                expected_episodes=1,
+            )
+        )
+
+    assert "boundary_spillover_missing" in str(excinfo.value)
+    assert "BOUNDARY_SPILLOVER_MISSING" in str(excinfo.value)
+    assert "expected_window_bars" in str(excinfo.value)
+    assert not output_root.exists()
+
+
 def test_skip_existing_valid_partition_is_validated_and_recorded(tmp_path: Path) -> None:
     candidate_root = tmp_path / "candidate_partitions"
     base_root = tmp_path / "base_1m" / "futures"
@@ -394,6 +499,8 @@ def _write_symbol_inputs(
     year: int = 2024,
     quarter: str = "Q1",
     start: datetime | None = None,
+    candidate_offsets: tuple[int, ...] = (0, 4, 13),
+    bars_count: int = 20,
 ) -> None:
     shard = f"{year}{quarter}"
     candidate_path = (
@@ -422,11 +529,15 @@ def _write_symbol_inputs(
     hot_manifest_path = hot_cache_path.parent / "partition_manifest.json"
     start = start or datetime(year, 1, 1, 0, 0, tzinfo=UTC)
     candidates = [
-        _candidate(symbol, start, shard=shard),
-        _candidate(symbol, start + timedelta(minutes=20), suffix="deduped-away", shard=shard),
-        _candidate(symbol, start + timedelta(minutes=65), suffix="second", shard=shard),
+        _candidate(
+            symbol,
+            start + timedelta(minutes=5 * offset),
+            suffix=f"offset-{offset}",
+            shard=shard,
+        )
+        for offset in candidate_offsets
     ]
-    derived_bars = [_bar(symbol, start + timedelta(minutes=5 * index), index) for index in range(20)]
+    derived_bars = [_bar(symbol, start + timedelta(minutes=5 * index), index) for index in range(bars_count)]
     base_bars = [
         {
             "instrument": symbol,
@@ -438,7 +549,7 @@ def _write_symbol_inputs(
             "volume": 10 + index,
             "data_source": "historical_1m_canonical",
         }
-        for index in range(20)
+        for index in range(max(20, bars_count * 5))
     ]
     materialize_parquet_dataset(candidate_path, candidates)
     materialize_parquet_dataset(bars_path, derived_bars)
