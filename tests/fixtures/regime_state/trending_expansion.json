@@ -1,0 +1,31 @@
+{
+  "candles": [
+    {"close": 100.35, "completed": true, "high": 100.45, "low": 99.9, "open": 100.0, "timeframe": "5m", "timestamp": "2026-05-08T14:00:00+00:00", "volume": 100},
+    {"close": 100.7, "completed": true, "high": 100.8, "low": 100.25, "open": 100.35, "timeframe": "5m", "timestamp": "2026-05-08T14:05:00+00:00", "volume": 101},
+    {"close": 101.05, "completed": true, "high": 101.15, "low": 100.6, "open": 100.7, "timeframe": "5m", "timestamp": "2026-05-08T14:10:00+00:00", "volume": 102},
+    {"close": 101.4, "completed": true, "high": 101.5, "low": 100.95, "open": 101.05, "timeframe": "5m", "timestamp": "2026-05-08T14:15:00+00:00", "volume": 103},
+    {"close": 101.75, "completed": true, "high": 101.85, "low": 101.3, "open": 101.4, "timeframe": "5m", "timestamp": "2026-05-08T14:20:00+00:00", "volume": 104},
+    {"close": 102.1, "completed": true, "high": 102.2, "low": 101.65, "open": 101.75, "timeframe": "5m", "timestamp": "2026-05-08T14:25:00+00:00", "volume": 105},
+    {"close": 102.45, "completed": true, "high": 102.55, "low": 102.0, "open": 102.1, "timeframe": "5m", "timestamp": "2026-05-08T14:30:00+00:00", "volume": 106},
+    {"close": 102.8, "completed": true, "high": 102.9, "low": 102.35, "open": 102.45, "timeframe": "5m", "timestamp": "2026-05-08T14:35:00+00:00", "volume": 107},
+    {"close": 103.65, "completed": true, "high": 103.8, "low": 102.65, "open": 102.8, "timeframe": "5m", "timestamp": "2026-05-08T14:40:00+00:00", "volume": 108},
+    {"close": 104.5, "completed": true, "high": 104.65, "low": 103.5, "open": 103.65, "timeframe": "5m", "timestamp": "2026-05-08T14:45:00+00:00", "volume": 109},
+    {"close": 105.35, "completed": true, "high": 105.5, "low": 104.35, "open": 104.5, "timeframe": "5m", "timestamp": "2026-05-08T14:50:00+00:00", "volume": 110},
+    {"close": 106.2, "completed": true, "high": 106.35, "low": 105.2, "open": 105.35, "timeframe": "5m", "timestamp": "2026-05-08T14:55:00+00:00", "volume": 111}
+  ],
+  "input_mode": "TEST",
+  "input_source_category": "TEST_FIXTURE",
+  "input_source_path": "tests/fixtures/regime_state/trending_expansion.json",
+  "instrument": "MGC",
+  "source_id": "fixture-regime-trending-expansion",
+  "test_fixture": true,
+  "timeframe_context": {
+    "aggregation_method": "NATIVE_PROVIDER_CANDLES",
+    "anchor_rule": "UTC_5M_BOUNDARY",
+    "base_timeframe_if_derived": null,
+    "context_timeframe": "5m",
+    "primary_timeframe": "5m",
+    "timeframe_alignment_status": "ALIGNED",
+    "timeframe_source": "NATIVE"
+  }
+}

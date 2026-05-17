@@ -1,0 +1,31 @@
+{
+  "candles": [
+    {"close": 100.45, "completed": true, "high": 100.65, "low": 99.8, "open": 100.0, "timeframe": "5m", "timestamp": "2026-05-08T14:00:00+00:00", "volume": 100},
+    {"close": 100.0, "completed": true, "high": 100.65, "low": 99.8, "open": 100.45, "timeframe": "5m", "timestamp": "2026-05-08T14:05:00+00:00", "volume": 101},
+    {"close": 100.45, "completed": true, "high": 100.65, "low": 99.8, "open": 100.0, "timeframe": "5m", "timestamp": "2026-05-08T14:10:00+00:00", "volume": 102},
+    {"close": 100.0, "completed": true, "high": 100.65, "low": 99.8, "open": 100.45, "timeframe": "5m", "timestamp": "2026-05-08T14:15:00+00:00", "volume": 103},
+    {"close": 100.45, "completed": true, "high": 100.65, "low": 99.8, "open": 100.0, "timeframe": "5m", "timestamp": "2026-05-08T14:20:00+00:00", "volume": 104},
+    {"close": 100.0, "completed": true, "high": 100.65, "low": 99.8, "open": 100.45, "timeframe": "5m", "timestamp": "2026-05-08T14:25:00+00:00", "volume": 105},
+    {"close": 100.45, "completed": true, "high": 100.65, "low": 99.8, "open": 100.0, "timeframe": "5m", "timestamp": "2026-05-08T14:30:00+00:00", "volume": 106},
+    {"close": 100.0, "completed": true, "high": 100.65, "low": 99.8, "open": 100.45, "timeframe": "5m", "timestamp": "2026-05-08T14:35:00+00:00", "volume": 107},
+    {"close": 100.45, "completed": true, "high": 100.65, "low": 99.8, "open": 100.0, "timeframe": "5m", "timestamp": "2026-05-08T14:40:00+00:00", "volume": 108},
+    {"close": 100.0, "completed": true, "high": 100.65, "low": 99.8, "open": 100.45, "timeframe": "5m", "timestamp": "2026-05-08T14:45:00+00:00", "volume": 109},
+    {"close": 100.45, "completed": true, "high": 100.65, "low": 99.8, "open": 100.0, "timeframe": "5m", "timestamp": "2026-05-08T14:50:00+00:00", "volume": 110},
+    {"close": 100.0, "completed": true, "high": 100.65, "low": 99.8, "open": 100.45, "timeframe": "5m", "timestamp": "2026-05-08T14:55:00+00:00", "volume": 111}
+  ],
+  "input_mode": "TEST",
+  "input_source_category": "TEST_FIXTURE",
+  "input_source_path": "tests/fixtures/regime_state/chop_balanced.json",
+  "instrument": "MGC",
+  "source_id": "fixture-regime-chop-balanced",
+  "test_fixture": true,
+  "timeframe_context": {
+    "aggregation_method": "NATIVE_PROVIDER_CANDLES",
+    "anchor_rule": "UTC_5M_BOUNDARY",
+    "base_timeframe_if_derived": null,
+    "context_timeframe": "5m",
+    "primary_timeframe": "5m",
+    "timeframe_alignment_status": "ALIGNED",
+    "timeframe_source": "NATIVE"
+  }
+}
