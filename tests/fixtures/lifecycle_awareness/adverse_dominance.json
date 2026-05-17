@@ -1,0 +1,67 @@
+{
+  "source_id": "fixture-adverse-dominance",
+  "input_source_category": "TEST_FIXTURE",
+  "input_mode": "TEST",
+  "lifecycle_position_record": {
+    "lifecycle_position_id": "life-fixture-adverse",
+    "strategy_id": "strategy-alpha",
+    "lane_id": "lane-paper",
+    "instrument": "MGC",
+    "contract_key": "MGC-202606",
+    "side": "LONG",
+    "quantity": 1,
+    "entry_timestamp": "2026-05-08T14:00:00+00:00",
+    "fill_timestamp": "2026-05-08T14:00:00+00:00",
+    "average_fill_price": 2400.0,
+    "lifecycle_status": "OPEN_MANAGED",
+    "lifecycle_owned": true
+  },
+  "entry_metadata": {
+    "strategy_family": "asiaEarlyNormalBreakoutRetestHoldLong",
+    "entry_timeframe": "5m",
+    "entry_acceptance_class": "EXACT_STRUCTURAL_MATCH",
+    "confidence": 0.77
+  },
+  "broker_reconciliation_context": {
+    "status": "MATCHED",
+    "source": "fixture-read-only"
+  },
+  "timeframe_context": {
+    "lifecycle_evaluation_timeframe": "5m",
+    "fast_reaction_timeframe": "1m",
+    "trend_context_timeframe": "15m",
+    "timeframe_source": "NATIVE",
+    "base_timeframe_if_derived": null,
+    "aggregation_method": "NATIVE_PROVIDER_CANDLES",
+    "anchor_rule": "UTC_5M_BOUNDARY",
+    "timeframe_alignment_status": "ALIGNED"
+  },
+  "mfe_mae_context": {
+    "mfe_points": 0.8,
+    "mae_points": 1.9,
+    "mfe_ticks": 8,
+    "mae_ticks": 19,
+    "mfe_dollars": 8,
+    "mae_dollars": 19
+  },
+  "unrealized_progress_context": {
+    "current_unrealized_points": -1.1,
+    "current_unrealized_ticks": -11,
+    "current_unrealized_dollars": -11
+  },
+  "position_age_context": {
+    "bars_since_entry": 5,
+    "wall_clock_seconds_since_entry": 1500,
+    "session_seconds_since_entry": 1500
+  },
+  "candles": [
+    {"timestamp": "2026-05-08T14:00:00+00:00", "open": 2400.00, "high": 2400.37, "low": 2399.80, "close": 2400.12, "timeframe": "5m", "completed": true},
+    {"timestamp": "2026-05-08T14:05:00+00:00", "open": 2400.10, "high": 2400.47, "low": 2399.90, "close": 2400.22, "timeframe": "5m", "completed": true},
+    {"timestamp": "2026-05-08T14:10:00+00:00", "open": 2400.20, "high": 2400.57, "low": 2400.00, "close": 2400.32, "timeframe": "5m", "completed": true},
+    {"timestamp": "2026-05-08T14:15:00+00:00", "open": 2400.30, "high": 2400.67, "low": 2400.10, "close": 2400.42, "timeframe": "5m", "completed": true},
+    {"timestamp": "2026-05-08T14:20:00+00:00", "open": 2400.40, "high": 2400.77, "low": 2400.20, "close": 2400.52, "timeframe": "5m", "completed": true},
+    {"timestamp": "2026-05-08T14:25:00+00:00", "open": 2400.50, "high": 2400.87, "low": 2400.30, "close": 2400.62, "timeframe": "5m", "completed": true},
+    {"timestamp": "2026-05-08T14:30:00+00:00", "open": 2400.60, "high": 2400.97, "low": 2400.40, "close": 2400.72, "timeframe": "5m", "completed": true},
+    {"timestamp": "2026-05-08T14:35:00+00:00", "open": 2400.70, "high": 2401.07, "low": 2400.50, "close": 2400.82, "timeframe": "5m", "completed": true}
+  ]
+}
