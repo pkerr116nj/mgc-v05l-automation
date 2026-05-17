@@ -28,7 +28,9 @@ def test_fixed_36_exits_at_36_bars(tmp_path: Path) -> None:
     assert fixed["episodes"] == 1
     assert fixed["branch_counts"] == {"fixed_36b": 1}
     assert fixed["stats"]["trade_count"] == 1
-    assert fixed["stats"]["average_return"] == pytest.approx(3.7)
+    assert fixed["stats"]["round_trip_cost_points"] == pytest.approx(0.5)
+    assert fixed["stats"]["average_gross_return"] == pytest.approx(3.7)
+    assert fixed["stats"]["average_return"] == pytest.approx(3.2)
 
 
 def test_adaptive_exits_at_24_when_conditions_fail(tmp_path: Path) -> None:
@@ -46,7 +48,8 @@ def test_adaptive_exits_at_24_when_conditions_fail(tmp_path: Path) -> None:
     adaptive = report["candidate_results"]["track_b_exact_baseline_adaptive_24_to_36_exit_v1"]
     assert adaptive["episodes"] == 1
     assert adaptive["branch_counts"] == {"exit_24b": 1}
-    assert adaptive["stats"]["average_return"] == pytest.approx(-0.2)
+    assert adaptive["stats"]["average_gross_return"] == pytest.approx(-0.2)
+    assert adaptive["stats"]["average_return"] == pytest.approx(-0.7)
 
 
 def test_adaptive_extends_to_36_when_conditions_pass(tmp_path: Path) -> None:
@@ -64,7 +67,8 @@ def test_adaptive_extends_to_36_when_conditions_pass(tmp_path: Path) -> None:
     adaptive = report["candidate_results"]["track_b_exact_baseline_adaptive_24_to_36_exit_v1"]
     assert adaptive["episodes"] == 1
     assert adaptive["branch_counts"] == {"extend_to_36b": 1}
-    assert adaptive["stats"]["average_return"] == pytest.approx(4.0)
+    assert adaptive["stats"]["average_gross_return"] == pytest.approx(4.0)
+    assert adaptive["stats"]["average_return"] == pytest.approx(3.5)
 
 
 def test_only_exact_rule_flag_rows_are_eligible(tmp_path: Path) -> None:

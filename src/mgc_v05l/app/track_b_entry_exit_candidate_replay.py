@@ -273,6 +273,7 @@ def _evaluate_candidate(
     bars_by_instrument: Mapping[str, Sequence[Mapping[str, Any]]],
     episodes_by_instrument: Mapping[str, Sequence[ExactEpisode]],
 ) -> dict[str, Any]:
+    round_trip_cost = _candidate_round_trip_cost(candidate)
     trades: list[dict[str, Any]] = []
     for instrument, episodes in episodes_by_instrument.items():
         bars = bars_by_instrument.get(instrument, ())
@@ -281,7 +282,10 @@ def _evaluate_candidate(
             if trade is not None:
                 trades.append(trade)
     by_instrument = {
-        instrument: _trade_stats([trade for trade in trades if trade["instrument"] == instrument])
+        instrument: _trade_stats(
+            [trade for trade in trades if trade["instrument"] == instrument],
+            round_trip_cost=round_trip_cost,
+        )
         for instrument in sorted({str(trade["instrument"]) for trade in trades})
     }
     return {
@@ -290,10 +294,14 @@ def _evaluate_candidate(
         "status": candidate.status,
         "authority_flags": dict(AUTHORITY_FLAGS),
         "episodes": len(trades),
-        "stats": _trade_stats(trades),
+        "stats": _trade_stats(trades, round_trip_cost=round_trip_cost),
         "branch_counts": dict(Counter(str(trade.get("exit_branch") or "unknown") for trade in trades)),
         "by_instrument": by_instrument,
     }
+
+
+def _candidate_round_trip_cost(candidate: TrackBEntryExitResearchCandidate) -> float:
+    return float(candidate.exit_definition.get("cost_assumption_points_round_trip") or 0.0)
 
 
 def _candidate_trade(
@@ -422,14 +430,21 @@ def _extension_diagnostics(*, progress: float, mfe: float, adverse_mae: float) -
     }
 
 
-def _trade_stats(trades: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
-    returns = [float(trade["gross_return"]) for trade in trades]
+def _trade_stats(
+    trades: Sequence[Mapping[str, Any]],
+    *,
+    round_trip_cost: float = 0.0,
+) -> dict[str, Any]:
+    gross_returns = [float(trade["gross_return"]) for trade in trades]
+    returns = [value - round_trip_cost for value in gross_returns]
     positives = [value for value in returns if value > 0]
     negatives = [value for value in returns if value < 0]
     mfes = [float(trade["mfe"]) for trade in trades]
     maes = [float(trade["mae"]) for trade in trades]
     return {
         "trade_count": len(trades),
+        "round_trip_cost_points": _round(round_trip_cost),
+        "average_gross_return": _round(sum(gross_returns) / len(gross_returns)) if gross_returns else None,
         "average_return": _round(sum(returns) / len(returns)) if returns else None,
         "median_return": _round(median(returns)) if returns else None,
         "win_rate": _round(len(positives) / len(returns)) if returns else None,
