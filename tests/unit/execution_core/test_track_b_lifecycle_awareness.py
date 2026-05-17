@@ -22,6 +22,7 @@ from mgc_v05l.execution_core.track_b_lifecycle_awareness import (
     EXIT_PENDING_OBSERVED,
     build_lifecycle_awareness_state,
 )
+from mgc_v05l.execution_core.track_b_participation_quality import participation_pressure_context_v1
 
 
 BASE_TS = datetime(2026, 5, 8, 14, 0, tzinfo=UTC)
@@ -108,6 +109,35 @@ def test_closed_or_flat_classification() -> None:
     assert report["hold_quality_context"] == "NO_POSITION"
     assert report["reduce_size_context"] == "NO_POSITION"
     assert report["exit_urgency_context"] == "NONE"
+
+
+def test_lifecycle_awareness_passes_through_participation_pressure_context_without_authority() -> None:
+    payload = _payload(mfe_points=2.4, mae_points=0.35, current_unrealized_points=1.9, bars_since_entry=5)
+    pressure_context = participation_pressure_context_v1(
+        {
+            "schema_version": "track_b_participation_quality_state_v1",
+            "participation_state": "BULLISH_HEALTHY_PULLBACK",
+            "long_hold_quality": "SUPPORTIVE",
+            "long_exit_urgency_context": "LOW",
+            "continuation_confidence": 0.72,
+            "pullback_health": "HEALTHY",
+            "confidence": 0.8,
+            "confidence_failure_reasons": [],
+            "state_reasons": ["pullback depth is controlled."],
+            "warnings": [],
+            "feature_summary": {},
+        },
+        side="LONG",
+    )
+    payload["participation_pressure_context_v1"] = pressure_context
+
+    report = build_lifecycle_awareness_state(payload, now=_now(payload["candles"]))
+
+    assert report["lifecycle_awareness_state"] == FAVORABLE_EXPANSION
+    assert report["participation_pressure_context_v1"] == pressure_context
+    assert report["strategy_authority"] is False
+    assert report["order_intent_created"] is False
+    assert report["lifecycle_mutated"] is False
 
 
 def test_malformed_thin_stale_and_unreconciled_fail_closed() -> None:

@@ -1489,6 +1489,13 @@ Required outputs:
 - `confidence_failure_reasons`
 - Explanation fields such as `state_reasons`, `warnings`, and feature summaries.
 
+Participation / Pressure compatibility contract:
+
+- The Participation / Pressure Layer terminology is currently implemented by the existing Participation Quality Layer in `src/mgc_v05l/execution_core/track_b_participation_quality.py`.
+- `participation_pressure_context_v1` is the compatibility contract name for consumers such as Lifecycle Awareness, Exit Context, Operator UI explainability, and future sizing or position-management architecture.
+- The contract is a thin projection of existing participation-quality output. It preserves fail-closed states and exposes advisory pressure context fields such as `pressure_state`, `directional_bias`, selected-side hold quality, exit urgency, confidence, reasons, warnings, and failure reasons.
+- The compatibility context does not replace `participation_quality`; it does not create a runtime producer, strategy signal, order intent, lifecycle mutation, broker action, or trade authority.
+
 Recognized `confidence_failure_reasons` values:
 
 - `THIN_DATA`

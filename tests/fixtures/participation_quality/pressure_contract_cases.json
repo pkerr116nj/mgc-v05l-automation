@@ -1,0 +1,144 @@
+{
+  "cases": [
+    {
+      "case_id": "bullish_persistent_pressure",
+      "participation_quality_state": {
+        "schema_version": "track_b_participation_quality_state_v1",
+        "participation_state": "PERSISTENT_BULLISH_PRESSURE",
+        "long_hold_quality": "SUPPORTIVE",
+        "short_hold_quality": "HOSTILE",
+        "long_exit_urgency_context": "LOW",
+        "short_exit_urgency_context": "HIGH",
+        "continuation_confidence": 0.72,
+        "pullback_health": "NONE",
+        "confidence": 0.83,
+        "confidence_failure_reasons": [],
+        "state_reasons": ["bullish pressure is persistent."],
+        "warnings": [],
+        "feature_summary": {"net_pressure": 0.48, "fast_net_pressure": 0.45}
+      },
+      "expected_pressure_state": "PERSISTENT_BULLISH_PRESSURE",
+      "expected_directional_bias": "BULLISH"
+    },
+    {
+      "case_id": "bearish_persistent_pressure",
+      "participation_quality_state": {
+        "schema_version": "track_b_participation_quality_state_v1",
+        "participation_state": "PERSISTENT_BEARISH_PRESSURE",
+        "long_hold_quality": "HOSTILE",
+        "short_hold_quality": "SUPPORTIVE",
+        "long_exit_urgency_context": "HIGH",
+        "short_exit_urgency_context": "LOW",
+        "continuation_confidence": 0.7,
+        "pullback_health": "NONE",
+        "confidence": 0.81,
+        "confidence_failure_reasons": [],
+        "state_reasons": ["bearish pressure is persistent."],
+        "warnings": [],
+        "feature_summary": {"net_pressure": -0.46, "fast_net_pressure": -0.44}
+      },
+      "expected_pressure_state": "PERSISTENT_BEARISH_PRESSURE",
+      "expected_directional_bias": "BEARISH"
+    },
+    {
+      "case_id": "healthy_pullback",
+      "participation_quality_state": {
+        "schema_version": "track_b_participation_quality_state_v1",
+        "participation_state": "BULLISH_HEALTHY_PULLBACK",
+        "long_hold_quality": "SUPPORTIVE",
+        "short_hold_quality": "HOSTILE",
+        "long_exit_urgency_context": "LOW",
+        "short_exit_urgency_context": "ELEVATED",
+        "continuation_confidence": 0.64,
+        "pullback_health": "HEALTHY",
+        "confidence": 0.76,
+        "confidence_failure_reasons": [],
+        "state_reasons": ["pullback depth is controlled."],
+        "warnings": [],
+        "feature_summary": {"pullback_depth": 0.35, "pullback_recovery": 0.22}
+      },
+      "expected_pressure_state": "BULLISH_HEALTHY_PULLBACK",
+      "expected_directional_bias": "BULLISH"
+    },
+    {
+      "case_id": "impulse_decaying",
+      "participation_quality_state": {
+        "schema_version": "track_b_participation_quality_state_v1",
+        "participation_state": "BULLISH_IMPULSE_DECAYING",
+        "long_hold_quality": "DEGRADING",
+        "short_hold_quality": "NEUTRAL",
+        "long_exit_urgency_context": "ELEVATED",
+        "short_exit_urgency_context": "LOW",
+        "continuation_confidence": 0.32,
+        "pullback_health": "QUESTIONABLE",
+        "confidence": 0.69,
+        "confidence_failure_reasons": [],
+        "state_reasons": ["fast-window pressure is deteriorating."],
+        "warnings": [],
+        "feature_summary": {"impulse_decay": 0.48}
+      },
+      "expected_pressure_state": "BULLISH_IMPULSE_DECAYING",
+      "expected_directional_bias": "BULLISH"
+    },
+    {
+      "case_id": "participation_collapse",
+      "participation_quality_state": {
+        "schema_version": "track_b_participation_quality_state_v1",
+        "participation_state": "BULLISH_PARTICIPATION_COLLAPSE",
+        "long_hold_quality": "HOSTILE",
+        "short_hold_quality": "NEUTRAL",
+        "long_exit_urgency_context": "HIGH",
+        "short_exit_urgency_context": "LOW",
+        "continuation_confidence": 0.12,
+        "pullback_health": "FAILED",
+        "confidence": 0.78,
+        "confidence_failure_reasons": [],
+        "state_reasons": ["pullback failure indicates collapse."],
+        "warnings": [],
+        "feature_summary": {"pullback_depth": 0.82}
+      },
+      "expected_pressure_state": "BULLISH_PARTICIPATION_COLLAPSE",
+      "expected_directional_bias": "BULLISH"
+    },
+    {
+      "case_id": "chop_balanced",
+      "participation_quality_state": {
+        "schema_version": "track_b_participation_quality_state_v1",
+        "participation_state": "CHOP_BALANCED",
+        "long_hold_quality": "NEUTRAL",
+        "short_hold_quality": "NEUTRAL",
+        "long_exit_urgency_context": "LOW",
+        "short_exit_urgency_context": "LOW",
+        "continuation_confidence": 0.0,
+        "pullback_health": "NONE",
+        "confidence": 0.55,
+        "confidence_failure_reasons": [],
+        "state_reasons": ["pressure is alternating."],
+        "warnings": [],
+        "feature_summary": {"alternation_score": 0.78}
+      },
+      "expected_pressure_state": "CHOP_BALANCED",
+      "expected_directional_bias": "BALANCED"
+    },
+    {
+      "case_id": "stale_thin_fail_closed",
+      "participation_quality_state": {
+        "schema_version": "track_b_participation_quality_state_v1",
+        "participation_state": "LOW_CONFIDENCE_THIN_DATA",
+        "long_hold_quality": "UNKNOWN",
+        "short_hold_quality": "UNKNOWN",
+        "long_exit_urgency_context": "UNKNOWN",
+        "short_exit_urgency_context": "UNKNOWN",
+        "continuation_confidence": 0.0,
+        "pullback_health": "UNKNOWN",
+        "confidence": 0.0,
+        "confidence_failure_reasons": ["THIN_DATA", "STALE_INPUT"],
+        "state_reasons": ["input confidence is insufficient."],
+        "warnings": ["latest completed candle is stale."],
+        "feature_summary": {}
+      },
+      "expected_pressure_state": "LOW_CONFIDENCE_THIN_DATA",
+      "expected_directional_bias": "UNKNOWN"
+    }
+  ]
+}

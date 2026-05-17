@@ -23,6 +23,7 @@ from mgc_v05l.execution_core.track_b_participation_quality import (
     STALE_INPUT,
     THIN_DATA,
     build_participation_quality_state,
+    participation_pressure_context_v1,
     write_participation_quality_state,
 )
 
@@ -232,6 +233,37 @@ def test_artifact_write_to_tmp_path(tmp_path: Path) -> None:
     assert written["artifact_path"] == str(output_path.resolve())
     assert written["participation_state"] == PERSISTENT_BULLISH_PRESSURE
     assert written["runtime_trade_eligible"] is False
+
+
+def test_participation_pressure_context_contract_from_report_fixtures() -> None:
+    cases = json.loads(Path("tests/fixtures/participation_quality/pressure_contract_cases.json").read_text(encoding="utf-8"))["cases"]
+
+    for case in cases:
+        context = participation_pressure_context_v1(case["participation_quality_state"])
+
+        assert context["schema_version"] == "participation_pressure_context_v1"
+        assert context["pressure_state"] == case["expected_pressure_state"]
+        assert context["directional_bias"] == case["expected_directional_bias"]
+        assert context["pressure_reasons"] == case["participation_quality_state"]["state_reasons"]
+        assert context["failure_reasons"] == case["participation_quality_state"]["confidence_failure_reasons"]
+        assert context["strategy_authority"] is False
+        assert context["broker_state_mutated"] is False
+        assert context["submit_attempted"] is False
+        assert context["order_intent_created"] is False
+        assert context["lifecycle_mutated"] is False
+        assert context["runtime_trade_eligible"] is False
+
+
+def test_participation_pressure_context_preserves_fail_closed_state() -> None:
+    report = _evaluate(_persistent_candles("bullish")[:6])
+    context = participation_pressure_context_v1(report)
+
+    assert report["participation_state"] == LOW_CONFIDENCE_THIN_DATA
+    assert context["pressure_state"] == LOW_CONFIDENCE_THIN_DATA
+    assert context["directional_bias"] == "UNKNOWN"
+    assert context["hold_quality_context"] == "LOW_CONFIDENCE"
+    assert context["exit_urgency_context"] == "LOW_CONFIDENCE"
+    assert THIN_DATA in context["failure_reasons"]
 
 
 def _evaluate(candles: list[dict[str, Any]]) -> dict[str, Any]:

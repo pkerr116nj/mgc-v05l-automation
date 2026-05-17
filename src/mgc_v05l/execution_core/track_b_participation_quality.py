@@ -15,6 +15,7 @@ from pathlib import Path
 from typing import Any, Mapping, Sequence
 
 SCHEMA_VERSION = "track_b_participation_quality_state_v1"
+PARTICIPATION_PRESSURE_CONTEXT_VERSION = "participation_pressure_context_v1"
 PRODUCER_NAME = "TrackBParticipationQualityLayer"
 DEFAULT_CANDLE_TIMEFRAME = "5m"
 REPO_ROOT = Path(__file__).resolve().parents[3]
@@ -208,7 +209,7 @@ def build_participation_quality_state(
     confidence = _state_confidence(state, features, completed_count=len(validation.candles), thresholds=resolved_thresholds)
     qualities = _quality_context(state)
 
-    return {
+    report = {
         "schema_version": SCHEMA_VERSION,
         "producer": PRODUCER_NAME,
         "authority_mode": "QUALITY_CONTEXT_ONLY",
@@ -238,6 +239,7 @@ def build_participation_quality_state(
         "warnings": list(validation.warnings),
         **_safety_flags(),
     }
+    return {**report, PARTICIPATION_PRESSURE_CONTEXT_VERSION: participation_pressure_context_v1(report)}
 
 
 def write_participation_quality_state(
@@ -267,6 +269,50 @@ def write_participation_quality_state(
     resolved_path.parent.mkdir(parents=True, exist_ok=True)
     resolved_path.write_text(json.dumps(report, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     return report
+
+
+def participation_pressure_context_v1(report: Mapping[str, Any], *, side: str | None = None) -> dict[str, Any]:
+    """Project participation-quality output into the Participation / Pressure contract.
+
+    This is a compatibility shape for advisory consumers. It does not add
+    authority and must remain a pure read-only projection of an existing
+    participation-quality report.
+    """
+
+    pressure_state = str(report.get("participation_state") or LOW_CONFIDENCE_THIN_DATA)
+    selected_side = _normalize_side(side) or _default_side_for_state(pressure_state)
+    hold_key = "short_hold_quality" if selected_side == "SHORT" else "long_hold_quality"
+    urgency_key = "short_exit_urgency_context" if selected_side == "SHORT" else "long_exit_urgency_context"
+    hold_quality = _string_or_none(report.get(hold_key)) or "LOW_CONFIDENCE"
+    exit_urgency = _string_or_none(report.get(urgency_key)) or "LOW_CONFIDENCE"
+    if pressure_state == LOW_CONFIDENCE_THIN_DATA:
+        hold_quality = "LOW_CONFIDENCE"
+        exit_urgency = "LOW_CONFIDENCE"
+    return {
+        "schema_version": PARTICIPATION_PRESSURE_CONTEXT_VERSION,
+        "producer": PRODUCER_NAME,
+        "authority_mode": "ADVISORY_CONTEXT_ONLY",
+        "source_participation_schema_version": report.get("schema_version"),
+        "source_participation_state": pressure_state,
+        "pressure_state": pressure_state,
+        "directional_bias": _directional_bias(pressure_state),
+        "selected_side": selected_side,
+        "hold_quality_context": hold_quality,
+        "exit_urgency_context": exit_urgency,
+        "pressure_confidence": _round(_optional_finite_float(report.get("confidence")) or 0.0),
+        "continuation_confidence": _round(_optional_finite_float(report.get("continuation_confidence")) or 0.0),
+        "pullback_health": _string_or_none(report.get("pullback_health")) or "UNKNOWN",
+        "pressure_reasons": list(report.get("state_reasons") or []),
+        "warning_reasons": list(report.get("warnings") or []),
+        "failure_reasons": list(report.get("confidence_failure_reasons") or []),
+        "feature_summary": dict(_as_mapping(report.get("feature_summary"))),
+        "strategy_authority": False,
+        "broker_state_mutated": False,
+        "submit_attempted": False,
+        "order_intent_created": False,
+        "lifecycle_mutated": False,
+        "runtime_trade_eligible": False,
+    }
 
 
 def _validate_completed_5m_candles(
@@ -705,7 +751,7 @@ def _low_confidence_report(
     latest = validation.candles[-1].timestamp if validation.candles else None
     qualities = _quality_context(LOW_CONFIDENCE_THIN_DATA)
     reasons = _dedupe(validation.confidence_failure_reasons)
-    return {
+    report = {
         "schema_version": SCHEMA_VERSION,
         "producer": PRODUCER_NAME,
         "authority_mode": "QUALITY_CONTEXT_ONLY",
@@ -735,6 +781,7 @@ def _low_confidence_report(
         "warnings": list(validation.warnings),
         **_safety_flags(),
     }
+    return {**report, PARTICIPATION_PRESSURE_CONTEXT_VERSION: participation_pressure_context_v1(report)}
 
 
 def _safety_flags() -> dict[str, bool]:
@@ -751,6 +798,29 @@ def _safety_flags() -> dict[str, bool]:
         "live_money_eligible": False,
         "live_money_readiness": False,
     }
+
+
+def _directional_bias(state: str) -> str:
+    if state.startswith("BULLISH") or state == PERSISTENT_BULLISH_PRESSURE:
+        return "BULLISH"
+    if state.startswith("BEARISH") or state == PERSISTENT_BEARISH_PRESSURE:
+        return "BEARISH"
+    if state == CHOP_BALANCED:
+        return "BALANCED"
+    return "UNKNOWN"
+
+
+def _default_side_for_state(state: str) -> str:
+    if _directional_bias(state) == "BEARISH":
+        return "SHORT"
+    return "LONG"
+
+
+def _normalize_side(value: str | None) -> str | None:
+    normalized = str(value or "").strip().upper()
+    if normalized in {"LONG", "SHORT"}:
+        return normalized
+    return None
 
 
 def _provenance_failure_reasons(input_context: Mapping[str, Any]) -> list[str]:
@@ -846,6 +916,12 @@ def _string_or_none(value: Any) -> str | None:
         return None
     text = str(value).strip()
     return text or None
+
+
+def _as_mapping(value: Any) -> Mapping[str, Any]:
+    if isinstance(value, Mapping):
+        return value
+    return {}
 
 
 def _failure_state_reasons(failures: Sequence[str]) -> tuple[str, ...]:

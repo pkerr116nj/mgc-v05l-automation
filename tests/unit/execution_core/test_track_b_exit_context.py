@@ -20,6 +20,7 @@ from mgc_v05l.execution_core.track_b_exit_context import (
     build_exit_context_state,
     write_exit_context_state,
 )
+from mgc_v05l.execution_core.track_b_participation_quality import participation_pressure_context_v1
 
 
 BASE_TS = datetime(2026, 5, 8, 14, 0, tzinfo=UTC)
@@ -78,6 +79,36 @@ def test_participation_collapse_flags_high_urgency_context() -> None:
     assert report["hold_quality_context"] == "HOSTILE"
     assert report["reduce_size_context"] == "REDUCE_SIZE_CONTEXT"
     assert report["scale_up_context"] == "NO_ADD_DEGRADED_ENTRY_OR_WEAK_PARTICIPATION"
+
+
+def test_exit_context_consumes_participation_pressure_contract() -> None:
+    payload = _payload(_candles())
+    pressure_context = participation_pressure_context_v1(
+        {
+            "schema_version": "track_b_participation_quality_state_v1",
+            "participation_state": "BULLISH_PARTICIPATION_COLLAPSE",
+            "long_hold_quality": "HOSTILE",
+            "long_exit_urgency_context": "HIGH",
+            "continuation_confidence": 0.12,
+            "pullback_health": "FAILED",
+            "confidence": 0.78,
+            "confidence_failure_reasons": [],
+            "state_reasons": ["pullback failure indicates collapse."],
+            "warnings": [],
+            "feature_summary": {},
+        },
+        side="LONG",
+    )
+    payload.pop("participation_quality_context")
+    payload["participation_pressure_context_v1"] = pressure_context
+
+    report = build_exit_context_state(payload, now=_now(payload["candles"]))
+
+    assert report["exit_profile_context"] == PARTICIPATION_COLLAPSE_EXIT
+    assert report["participation_quality_context"]["participation_state"] == "BULLISH_PARTICIPATION_COLLAPSE"
+    assert report["participation_quality_context"]["side_hold_quality"] == "HOSTILE"
+    assert report["order_intent_created"] is False
+    assert report["lifecycle_mutated"] is False
 
 
 def test_hard_protective_stop_context() -> None:

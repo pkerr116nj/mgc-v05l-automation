@@ -449,6 +449,7 @@ def _build_report(
         "completed_candles_used": len(candle_validation.candles),
         **position,
         "entry_context": dict(entry_context),
+        "participation_pressure_context_v1": _participation_pressure_context(payload),
         "broker_reconciliation_status": reconciliation["status"],
         "broker_reconciliation_context": dict(reconciliation),
         "lifecycle_awareness_state": lifecycle_awareness_state,
@@ -612,6 +613,13 @@ def _entry_failures(entry_context: Mapping[str, Any]) -> list[str]:
     if not entry_context["strategy_family"] or not entry_context["entry_timeframe"]:
         return [MISSING_ENTRY_CONTEXT]
     return []
+
+
+def _participation_pressure_context(payload: Mapping[str, Any]) -> dict[str, Any] | None:
+    raw = payload.get("participation_pressure_context_v1") or payload.get("participation_pressure_context")
+    if isinstance(raw, Mapping):
+        return dict(raw)
+    return None
 
 
 def _reconciliation_context(payload: Mapping[str, Any]) -> dict[str, Any]:

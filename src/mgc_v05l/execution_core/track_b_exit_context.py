@@ -488,12 +488,23 @@ def _entry_context(payload: Mapping[str, Any]) -> dict[str, Any]:
 
 
 def _participation_context(payload: Mapping[str, Any]) -> dict[str, Any]:
+    raw_pressure = _as_mapping(payload.get("participation_pressure_context_v1") or payload.get("participation_pressure_context"))
     raw = _as_mapping(payload.get("participation_quality_context") or payload.get("participation"))
     side = str(_as_mapping(payload.get("lifecycle_position") or payload.get("position")).get("side") or payload.get("side") or "").strip().upper()
     side_hold_key = "long_hold_quality" if side == "LONG" else "short_hold_quality"
     side_urgency_key = "long_exit_urgency_context" if side == "LONG" else "short_exit_urgency_context"
+    if raw_pressure and not raw:
+        return {
+            "participation_state": _string_or_none(raw_pressure.get("pressure_state") or raw_pressure.get("source_participation_state")),
+            "side_hold_quality": _string_or_none(raw_pressure.get("hold_quality_context")),
+            "side_exit_urgency_context": _string_or_none(raw_pressure.get("exit_urgency_context")),
+            "pullback_health": _string_or_none(raw_pressure.get("pullback_health")),
+            "continuation_confidence": _optional_finite_float(raw_pressure.get("continuation_confidence")),
+            "confidence": _optional_finite_float(raw_pressure.get("pressure_confidence")),
+            "confidence_failure_reasons": list(raw_pressure.get("failure_reasons") or []),
+        }
     return {
-        "participation_state": _string_or_none(raw.get("participation_state")),
+        "participation_state": _string_or_none(raw.get("participation_state") or raw.get("pressure_state")),
         "side_hold_quality": _string_or_none(raw.get(side_hold_key) or raw.get("hold_quality")),
         "side_exit_urgency_context": _string_or_none(raw.get(side_urgency_key) or raw.get("exit_urgency_context")),
         "pullback_health": _string_or_none(raw.get("pullback_health")),
