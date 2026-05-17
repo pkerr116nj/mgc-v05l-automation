@@ -6,6 +6,15 @@ from pathlib import Path
 import pytest
 
 from mgc_v05l.app.ibkr_account_truth import main
+from mgc_v05l.brokers.ibkr import (
+    IbkrClient,
+    IbkrSession,
+    build_default_ibkr_order_id_policy,
+)
+from mgc_v05l.execution.ibkr_account_truth import (
+    _wait_for_api_handshake,
+    _wait_for_managed_accounts,
+)
 
 
 def _fixture_payload(*, managed_accounts="DU1234567", selected_account_id: str | None = None) -> dict:
@@ -191,3 +200,23 @@ def test_failure_writes_safety_audit_artifact(tmp_path: Path) -> None:
     audit = json.loads((output_dir / "reports" / "ibkr_account_truth_audit.json").read_text(encoding="utf-8"))
     assert audit["status"] == "failed"
     assert audit["orders_allowed"] is False
+
+
+def test_real_api_wait_accepts_managed_accounts_seen_during_handshake() -> None:
+    client = IbkrClient(
+        IbkrSession(
+            host="127.0.0.1",
+            port=7497,
+            client_id=91,
+            account_id="DU1234567",
+            gateway_mode="paper",
+            read_only=True,
+            order_id_policy=build_default_ibkr_order_id_policy(client_id=91, live_orders_enabled=False),
+        )
+    )
+    client.record_managed_accounts(("DU1234567",))
+
+    _wait_for_api_handshake(client=client, timeout_seconds=0.01, sleep_fn=lambda _: None)
+    _wait_for_managed_accounts(client=client, timeout_seconds=0.01, sleep_fn=lambda _: None)
+
+    assert client.connection_state().managed_accounts == ("DU1234567",)

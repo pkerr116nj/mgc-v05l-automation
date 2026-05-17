@@ -14,8 +14,16 @@ DEFAULT_MANAGER_PID_FILE="${DEFAULT_RUNTIME_DIR}/operator_dashboard_manager.pid"
 DEFAULT_MANAGER_LOG_FILE="${DEFAULT_RUNTIME_DIR}/operator_dashboard_manager.log"
 DEFAULT_DASHBOARD_PID_FILE="${DEFAULT_RUNTIME_DIR}/operator_dashboard.pid"
 DEFAULT_PAPER_PID_FILE="${REPO_ROOT}/outputs/probationary_pattern_engine/paper_session/runtime/probationary_paper.pid"
+DEFAULT_PAPER_LOG_FILE="${REPO_ROOT}/outputs/probationary_pattern_engine/paper_session/runtime/probationary_paper.log"
 DEFAULT_DASHBOARD_URL="${MGC_OPERATOR_DASHBOARD_URL:-http://127.0.0.1:8790/}"
 SERVICE_HOST_AUTOSTART_BRIDGE_SUPERVISOR="${MGC_SERVICE_HOST_AUTOSTART_RESEARCH_RUNTIME_BRIDGE_SUPERVISOR:-1}"
+DEFAULT_HEADLESS_PAPER_CONFIG_PATHS=(
+  "${REPO_ROOT}/config/base.yaml"
+  "${REPO_ROOT}/config/live.yaml"
+  "${REPO_ROOT}/config/probationary_pattern_engine.yaml"
+  "${REPO_ROOT}/config/headless_supervised_paper_runtime.yaml"
+  "${REPO_ROOT}/config/probationary_pattern_engine_paper.yaml"
+)
 
 WAIT_TIMEOUT_SECONDS=120
 POLL_INTERVAL_SECONDS=3
@@ -26,9 +34,15 @@ MANAGER_PID_FILE="${DEFAULT_MANAGER_PID_FILE}"
 MANAGER_LOG_FILE="${DEFAULT_MANAGER_LOG_FILE}"
 DASHBOARD_PID_FILE="${DEFAULT_DASHBOARD_PID_FILE}"
 PAPER_PID_FILE="${DEFAULT_PAPER_PID_FILE}"
+PAPER_LOG_FILE="${DEFAULT_PAPER_LOG_FILE}"
 DASHBOARD_URL="${DEFAULT_DASHBOARD_URL}"
 START_PAPER=1
 START_DASHBOARD=1
+
+HEADLESS_PAPER_CONFIG_PATHS="${MGC_HEADLESS_SUPERVISED_PAPER_CONFIG_PATHS:-${MGC_PROBATIONARY_PAPER_CONFIG_PATHS:-}}"
+if [[ -z "${HEADLESS_PAPER_CONFIG_PATHS}" ]]; then
+  HEADLESS_PAPER_CONFIG_PATHS="$(IFS=:; printf '%s' "${DEFAULT_HEADLESS_PAPER_CONFIG_PATHS[*]}")"
+fi
 
 while (($# > 0)); do
   case "$1" in
@@ -109,6 +123,80 @@ ensure_dir "$(dirname "${STARTUP_FILE}")"
 ensure_dir "$(dirname "${MANAGER_PID_FILE}")"
 ensure_dir "$(dirname "${MANAGER_LOG_FILE}")"
 ensure_dir "$(dirname "${DASHBOARD_PID_FILE}")"
+ensure_dir "$(dirname "${PAPER_LOG_FILE}")"
+
+read_pid_file() {
+  local pid_file="$1"
+  if [[ ! -f "${pid_file}" ]]; then
+    return 1
+  fi
+  tr -d '[:space:]' < "${pid_file}" 2>/dev/null
+}
+
+pid_file_alive() {
+  local pid_file="$1"
+  local pid
+  pid="$(read_pid_file "${pid_file}" || true)"
+  [[ -n "${pid}" ]] && kill -0 "${pid}" 2>/dev/null
+}
+
+launchctl_submit_available() {
+  command -v launchctl >/dev/null 2>&1
+}
+
+screen_available() {
+  command -v screen >/dev/null 2>&1
+}
+
+screen_session_name() {
+  local suffix="$1"
+  printf 'mgc_%s_%s_%s' "${suffix}" "$(date +%Y%m%d%H%M%S)" "$$"
+}
+
+launch_screen_paper_runtime() {
+  local session_name
+  session_name="$(screen_session_name "paper_runtime")"
+  printf '%s\n' "${session_name}" > "${PAPER_PID_FILE}.screen_session"
+  MGC_HEADLESS_PAPER_PID_FILE="${PAPER_PID_FILE}" \
+    MGC_HEADLESS_PAPER_LOG_FILE="${PAPER_LOG_FILE}" \
+    MGC_HEADLESS_SCRIPT_DIR="${SCRIPT_DIR}" \
+    MGC_PROBATIONARY_PAPER_CONFIG_PATHS="${HEADLESS_PAPER_CONFIG_PATHS}" \
+    screen -dmS "${session_name}" /bin/zsh -lc \
+    'echo "$$" > "${MGC_HEADLESS_PAPER_PID_FILE}"; exec bash "${MGC_HEADLESS_SCRIPT_DIR}/run_probationary_paper_soak.sh" >> "${MGC_HEADLESS_PAPER_LOG_FILE}" 2>&1'
+}
+
+launch_screen_dashboard_manager() {
+  local session_name
+  session_name="$(screen_session_name "dashboard")"
+  printf '%s\n' "${session_name}" > "${MANAGER_PID_FILE}.screen_session"
+  MGC_HEADLESS_MANAGER_PID_FILE="${MANAGER_PID_FILE}" \
+    MGC_HEADLESS_MANAGER_LOG_FILE="${MANAGER_LOG_FILE}" \
+    MGC_HEADLESS_SCRIPT_DIR="${SCRIPT_DIR}" \
+    screen -dmS "${session_name}" /bin/zsh -lc \
+    'echo "$$" > "${MGC_HEADLESS_MANAGER_PID_FILE}"; exec bash "${MGC_HEADLESS_SCRIPT_DIR}/run_operator_dashboard.sh" --no-open-browser >> "${MGC_HEADLESS_MANAGER_LOG_FILE}" 2>&1'
+}
+
+launch_detached_paper_runtime() {
+  local label="com.mgc-v05l.headless-supervised-paper.runtime.$(date +%Y%m%d%H%M%S).$$"
+  printf '%s\n' "${label}" > "${PAPER_PID_FILE}.launchctl_label"
+  launchctl submit -l "${label}" -- /usr/bin/env \
+    MGC_HEADLESS_PAPER_PID_FILE="${PAPER_PID_FILE}" \
+    MGC_HEADLESS_PAPER_LOG_FILE="${PAPER_LOG_FILE}" \
+    MGC_HEADLESS_SCRIPT_DIR="${SCRIPT_DIR}" \
+    MGC_PROBATIONARY_PAPER_CONFIG_PATHS="${HEADLESS_PAPER_CONFIG_PATHS}" \
+    /bin/zsh -lc 'echo "$$" > "${MGC_HEADLESS_PAPER_PID_FILE}"; exec bash "${MGC_HEADLESS_SCRIPT_DIR}/run_probationary_paper_soak.sh" >> "${MGC_HEADLESS_PAPER_LOG_FILE}" 2>&1'
+}
+
+launch_detached_dashboard_manager() {
+  local label="com.mgc-v05l.headless-supervised-paper.dashboard.$(date +%Y%m%d%H%M%S).$$"
+  printf '%s\n' "${label}" > "${MANAGER_PID_FILE}.launchctl_label"
+  launchctl submit -l "${label}" -- /usr/bin/env \
+    MGC_HEADLESS_MANAGER_PID_FILE="${MANAGER_PID_FILE}" \
+    MGC_HEADLESS_MANAGER_LOG_FILE="${MANAGER_LOG_FILE}" \
+    MGC_HEADLESS_SCRIPT_DIR="${SCRIPT_DIR}" \
+    MGC_SERVICE_HOST_AUTOSTART_RESEARCH_RUNTIME_BRIDGE_SUPERVISOR="${SERVICE_HOST_AUTOSTART_BRIDGE_SUPERVISOR}" \
+    /bin/zsh -lc 'echo "$$" > "${MGC_HEADLESS_MANAGER_PID_FILE}"; exec bash "${MGC_HEADLESS_SCRIPT_DIR}/run_operator_dashboard.sh" --no-open-browser >> "${MGC_HEADLESS_MANAGER_LOG_FILE}" 2>&1'
+}
 
 write_startup_summary() {
   local startup_state="$1"
@@ -140,15 +228,19 @@ start_paper_runtime() {
   if [[ "${START_PAPER}" -ne 1 ]]; then
     return 0
   fi
-  if [[ -f "${PAPER_PID_FILE}" ]]; then
-    local existing_pid
-    existing_pid="$(cat "${PAPER_PID_FILE}" 2>/dev/null || true)"
-    if [[ -n "${existing_pid}" ]] && kill -0 "${existing_pid}" 2>/dev/null; then
-      return 0
-    fi
+  if pid_file_alive "${PAPER_PID_FILE}"; then
+    return 0
+  fi
+  if screen_available; then
+    launch_screen_paper_runtime
+    return 0
+  fi
+  if launchctl_submit_available; then
+    launch_detached_paper_runtime
+    return 0
   fi
   local output
-  output="$(bash "${SCRIPT_DIR}/run_probationary_paper_soak.sh" --background 2>&1)" && return 0
+  output="$(MGC_PROBATIONARY_PAPER_CONFIG_PATHS="${HEADLESS_PAPER_CONFIG_PATHS}" bash "${SCRIPT_DIR}/run_probationary_paper_soak.sh" --background 2>&1)" && return 0
   if [[ "${output}" == *"already running"* ]]; then
     return 0
   fi
@@ -170,27 +262,42 @@ start_dashboard_manager() {
       sleep 1
     fi
   done
-  if [[ -f "${DASHBOARD_PID_FILE}" ]]; then
-    local dashboard_pid
-    dashboard_pid="$(cat "${DASHBOARD_PID_FILE}" 2>/dev/null || true)"
-    if [[ -n "${dashboard_pid}" ]] && kill -0 "${dashboard_pid}" 2>/dev/null; then
-      return 0
-    fi
+  if pid_file_alive "${DASHBOARD_PID_FILE}"; then
+    return 0
   fi
-  if [[ -f "${MANAGER_PID_FILE}" ]]; then
-    local existing_pid
-    existing_pid="$(cat "${MANAGER_PID_FILE}" 2>/dev/null || true)"
-    if [[ -n "${existing_pid}" ]] && kill -0 "${existing_pid}" 2>/dev/null; then
-      return 0
-    fi
+  if pid_file_alive "${MANAGER_PID_FILE}"; then
+    return 0
   fi
   if curl -fsS "${DASHBOARD_URL%/}/health" >/dev/null 2>&1; then
+    return 0
+  fi
+  if screen_available; then
+    launch_screen_dashboard_manager
+    return 0
+  fi
+  if launchctl_submit_available; then
+    launch_detached_dashboard_manager
     return 0
   fi
   MGC_SERVICE_HOST_AUTOSTART_RESEARCH_RUNTIME_BRIDGE_SUPERVISOR="${SERVICE_HOST_AUTOSTART_BRIDGE_SUPERVISOR}" \
     nohup bash "${SCRIPT_DIR}/run_operator_dashboard.sh" --no-open-browser >> "${MANAGER_LOG_FILE}" 2>&1 &
   local manager_pid=$!
   echo "${manager_pid}" > "${MANAGER_PID_FILE}"
+}
+
+ready_processes_and_endpoints_alive() {
+  if [[ "${START_PAPER}" -eq 1 ]] && ! pid_file_alive "${PAPER_PID_FILE}"; then
+    return 1
+  fi
+  if [[ "${START_DASHBOARD}" -eq 1 ]] && ! pid_file_alive "${DASHBOARD_PID_FILE}"; then
+    return 1
+  fi
+  if [[ "${START_DASHBOARD}" -eq 1 ]] && ! pid_file_alive "${MANAGER_PID_FILE}"; then
+    return 1
+  fi
+  curl -fsS "${DASHBOARD_URL%/}/health" >/dev/null 2>&1 || return 1
+  curl -fsS "${DASHBOARD_URL%/}/api/dashboard" >/dev/null 2>&1 || return 1
+  return 0
 }
 
 read_contract_field() {
@@ -235,9 +342,12 @@ while (( SECONDS < deadline )); do
     --output "${STATUS_FILE}" \
     --markdown-output "${MARKDOWN_FILE}" >/dev/null
   if [[ "$(read_contract_field "app_usable_for_supervised_paper")" == "true" ]]; then
-    write_startup_summary "READY" "Headless supervised paper host is usable." "true"
-    cat "${STATUS_FILE}"
-    exit 0
+    if ready_processes_and_endpoints_alive; then
+      write_startup_summary "READY" "Headless supervised paper host is usable." "true"
+      cat "${STATUS_FILE}"
+      exit 0
+    fi
+    last_reason="Headless supervised paper host reported usable before required processes/endpoints were stable."
   fi
   last_reason="$(read_contract_field "unusable_reason")"
   sleep "${POLL_INTERVAL_SECONDS}"

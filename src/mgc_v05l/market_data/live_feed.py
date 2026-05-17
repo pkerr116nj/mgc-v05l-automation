@@ -33,6 +33,7 @@ from .timeframes import timeframe_minutes
 _DATABENTO_LIVE_POLL_SAFETY_DELAY_SECONDS = 10
 _DATABENTO_LIVE_GATEWAY_PORT = 13000
 _DATABENTO_LIVE_SESSION_WAIT_SECONDS = 8.0
+_DATABENTO_LIVE_REPLAY_LOOKBACK_CAP_MINUTES = 10
 _MARKET_DATA_STALE_GRACE_SECONDS = 10.0
 _MARKET_DATA_RECOVERY_COOLDOWN_SECONDS = 45.0
 _MARKET_DATA_RECOVERY_WINDOW_SECONDS = 300.0
@@ -357,10 +358,9 @@ class _DatabentoRawLiveSession:
                 raise RuntimeError(f"Databento live authentication failed: {auth_response}")
 
             timeframe_duration = timedelta(minutes=timeframe_minutes(self._internal_timeframe))
-            replay_start = (
-                self._last_stream_end - timeframe_duration
-                if self._last_stream_end is not None
-                else datetime.now(UTC) - timedelta(minutes=self._lookback_minutes)
+            replay_start = self._next_replay_start(
+                now_utc=datetime.now(UTC),
+                timeframe_duration=timeframe_duration,
             )
             subscribe_line = (
                 f"schema={self._schema_name}|stype_in={self._stype_in}|symbols={self._request_symbol}"
@@ -438,6 +438,17 @@ class _DatabentoRawLiveSession:
             session_us=True,
             session_allowed=True,
         )
+
+    def _next_replay_start(self, *, now_utc: datetime, timeframe_duration: timedelta) -> datetime:
+        bounded_replay_floor = now_utc.astimezone(UTC) - timedelta(
+            minutes=max(1, min(int(self._lookback_minutes), _DATABENTO_LIVE_REPLAY_LOOKBACK_CAP_MINUTES))
+        )
+        replay_start = (
+            self._last_stream_end - timeframe_duration
+            if self._last_stream_end is not None
+            else bounded_replay_floor
+        )
+        return max(replay_start.astimezone(UTC), bounded_replay_floor)
 
 
 class DatabentoRawLivePollingClient:

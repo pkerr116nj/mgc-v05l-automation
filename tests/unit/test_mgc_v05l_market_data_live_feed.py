@@ -8,6 +8,7 @@ import mgc_v05l.market_data.live_feed as live_feed_module
 from mgc_v05l.domain.models import Bar
 from mgc_v05l.market_data.live_feed import (
     DatabentoHistoricalPollingClient,
+    _DATABENTO_LIVE_REPLAY_LOOKBACK_CAP_MINUTES,
     databento_live_auth_response,
     HistoricalPollingLiveClient,
     LivePollingService,
@@ -357,6 +358,23 @@ def test_databento_raw_live_session_accepts_nested_header_timestamp() -> None:
     assert bar.start_ts == datetime.fromisoformat("2026-04-30T20:36:00+00:00")
     assert bar.end_ts == datetime.fromisoformat("2026-04-30T20:37:00+00:00")
     assert bar.close == Decimal("4630.500000000")
+
+
+def test_databento_raw_live_session_caps_initial_replay_start_for_reopen() -> None:
+    now = datetime.fromisoformat("2026-05-17T22:04:07+00:00")
+    session = _DatabentoRawLiveSession(
+        api_key="test-key",
+        dataset="GLBX.MDP3",
+        request_symbol="MGC.v.0",
+        stype_in="continuous",
+        schema_name="ohlcv-1m",
+        internal_symbol="MGC",
+        internal_timeframe="1m",
+        lookback_minutes=180,
+    )
+    replay_start = session._next_replay_start(now_utc=now, timeframe_duration=timedelta(minutes=1))  # noqa: SLF001
+
+    assert replay_start == now - timedelta(minutes=_DATABENTO_LIVE_REPLAY_LOOKBACK_CAP_MINUTES)
 
 
 def test_live_polling_service_triggers_stale_recovery_attempt() -> None:

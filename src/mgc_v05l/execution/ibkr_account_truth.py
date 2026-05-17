@@ -142,11 +142,16 @@ def capture_real_ibkr_paper_truth(
         except NotImplementedError:
             run_loop_started = False
 
+        if run_loop_started:
+            _wait_for_api_handshake(
+                client=client,
+                timeout_seconds=min(5.0, capture_config.timeout_seconds),
+                sleep_fn=sleep_fn,
+            )
         client.request_managed_accounts()
         bridge.reqManagedAccts()
-        _wait_for_event_types(
+        _wait_for_managed_accounts(
             client=client,
-            required_event_types={"managed_accounts"},
             timeout_seconds=capture_config.timeout_seconds,
             sleep_fn=sleep_fn,
         )
@@ -404,6 +409,39 @@ def _wait_for_event_types(
         sleep_fn(0.05)
     missing = ", ".join(sorted(required_event_types - seen))
     raise IbkrAccountTruthError(f"Timed out waiting for IBKR read-only truth events: {missing}.")
+
+
+def _wait_for_api_handshake(
+    *,
+    client: IbkrClient,
+    timeout_seconds: float,
+    sleep_fn: Callable[[float], None],
+) -> None:
+    deadline = time.monotonic() + float(timeout_seconds)
+    while time.monotonic() < deadline:
+        if client.connection_state().managed_accounts:
+            return
+        for event in client.drain_events():
+            if event.event_type in {"next_valid_id", "managed_accounts"}:
+                return
+        sleep_fn(0.05)
+
+
+def _wait_for_managed_accounts(
+    *,
+    client: IbkrClient,
+    timeout_seconds: float,
+    sleep_fn: Callable[[float], None],
+) -> None:
+    deadline = time.monotonic() + float(timeout_seconds)
+    while time.monotonic() < deadline:
+        if client.connection_state().managed_accounts:
+            return
+        for event in client.drain_events():
+            if event.event_type == "managed_accounts":
+                return
+        sleep_fn(0.05)
+    raise IbkrAccountTruthError("Timed out waiting for IBKR read-only truth events: managed_accounts.")
 
 
 def _build_audit_payload(
