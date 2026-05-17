@@ -93,6 +93,48 @@ Tracked close-but-no note:
 - the `breakout expansion_state = NORMAL` containment rule is what made the promoted branch
   isolation-clean, so the excluded expanded traffic should only be revisited later with more data
 
+## 2026-05-17: Track B Entry Acceptance exact-baseline exit research candidates
+
+The exact-baseline exit study has been promoted into two formal Track B
+research candidates for `asiaEarlyNormalBreakoutRetestHoldLong`. These are
+research/offline definitions only: no live strategy behavior changed, no PAPER
+wiring was added, and the candidates do not grant submit or lifecycle authority.
+
+| Candidate | Entry basis | Exit definition | Evidence note |
+| --- | --- | --- | --- |
+| `track_b_exact_baseline_fixed_36b_exit_v1` | current exact-rule baseline episodes only | fixed 36 completed 5m bars | best average return in the exact-baseline exit study |
+| `track_b_exact_baseline_adaptive_24_to_36_exit_v1` | current exact-rule baseline episodes only | default 24 completed 5m bars, extend to 36 only when 24b progress, MFE/MAE, and giveback conditions support continuation | better PF/DD profile; risk-managed variant, not the raw-return winner |
+
+Evidence provenance:
+
+- Study path: `outputs/reports/entry_acceptance_research/full_history_batch/exact_baseline_exit_study/`
+- Fixed-exit report: `outputs/reports/entry_acceptance_research/full_history_batch/exact_baseline_exit_study/exact_baseline_exit_improvement_study_v1.md`
+- Adaptive 24/36 report: `outputs/reports/entry_acceptance_research/full_history_batch/exact_baseline_exit_study/exact_baseline_24_vs_36_extension_rule_study_v1.md`
+- Date range: `2020-01-01` through `2026-04-22`
+- Instruments: GC and MGC, combined exact-rule baseline evidence
+
+Summary evidence at 0.5 points round-trip cost, next-bar-open entry:
+
+| Candidate | Episodes | Avg return | Median | Win rate | PF proxy | Max DD proxy |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| Fixed 36b | 856 | 0.306308 | -0.4 | 0.467290 | 1.107389 | 254.5 |
+| Adaptive 24/36 | 856 | 0.273832 | -0.4 | 0.455607 | 1.113051 | 228.2 |
+
+The fixed 36b candidate is the raw-return winner. The adaptive 24/36 candidate
+is carried forward because it improves the PF/DD profile by requiring evidence
+at 24 bars before extending to 36 bars.
+
+Authority boundary:
+
+- `research_offline_only=true`
+- `paper_eligible=false`
+- `live_eligible=false`
+- `runtime_wired=false`
+- `strategy_behavior_changes=false`
+- `broker_state_mutated=false`
+- `order_intent_created=false`
+- `lifecycle_mutated=false`
+
 Tracked close-but-no note:
 - `ASIA_EARLY SHORT breakout_retest_hold + breakout->retest expansion_state = EXPANDED -> EXPANDED`
   was tested and failed direct replay A/B
