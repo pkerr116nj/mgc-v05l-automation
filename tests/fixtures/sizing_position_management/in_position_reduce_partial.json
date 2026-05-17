@@ -1,0 +1,38 @@
+{
+  "entry_acceptance_context": {
+    "acceptance_class": "EXACT_STRUCTURAL_MATCH",
+    "candidate_timeframe": "5m",
+    "confidence": 0.88,
+    "instrument": "MGC",
+    "strategy_family": "gc_1x_adaptive"
+  },
+  "exit_context": {
+    "confidence": 0.7,
+    "exit_profile_context": "DEFENSIVE_TIGHT",
+    "exit_urgency_context": "ELEVATED",
+    "failure_reasons": []
+  },
+  "lifecycle_awareness_context": {
+    "confidence": 0.66,
+    "exit_urgency_context": "ELEVATED",
+    "failure_reasons": [],
+    "hold_quality_context": "WEAK_HOLD",
+    "lifecycle_awareness_state": "DECAYING"
+  },
+  "participation_pressure_context_v1": {
+    "directional_bias": "MIXED",
+    "exit_urgency_context": "ELEVATED",
+    "failure_reasons": [],
+    "hold_quality_context": "WEAK",
+    "pressure_confidence": 0.6,
+    "pressure_state": "BULLISH_PARTICIPATION_COLLAPSE"
+  },
+  "regime_session_context_v1": {
+    "confidence": 0.7,
+    "directional_context": "DIRECTIONAL_MIXED",
+    "failure_reasons": [],
+    "liquidity_state": "LIQUIDITY_NORMAL",
+    "market_regime_state": "REGIME_COMPRESSION",
+    "trend_chop_state": "COMPRESSION_COILING"
+  }
+}

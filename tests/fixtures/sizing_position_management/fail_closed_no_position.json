@@ -1,0 +1,32 @@
+{
+  "entry_acceptance_context": {
+    "acceptance_class": "EXACT_STRUCTURAL_MATCH",
+    "candidate_timeframe": "5m",
+    "confidence": 0.9,
+    "instrument": "MGC",
+    "strategy_family": "gc_1x_exact_baseline"
+  },
+  "lifecycle_awareness_context": {
+    "confidence": 0.0,
+    "failure_reasons": [
+      "STALE_INPUT",
+      "UNRECONCILED_POSITION_CONTEXT"
+    ],
+    "lifecycle_awareness_state": "LOW_CONFIDENCE_STALE_OR_UNRECONCILED"
+  },
+  "participation_pressure_context_v1": {
+    "failure_reasons": [
+      "THIN_DATA"
+    ],
+    "pressure_confidence": 0.0,
+    "pressure_state": "LOW_CONFIDENCE_THIN_DATA"
+  },
+  "regime_session_context_v1": {
+    "confidence": 0.0,
+    "failure_reasons": [
+      "STALE_INPUT"
+    ],
+    "liquidity_state": "LIQUIDITY_STALE_OR_INCOMPLETE",
+    "market_regime_state": "REGIME_THIN_OR_STALE"
+  }
+}
