@@ -307,7 +307,7 @@ def test_multi_family_research_analytics_payload_merges_family_roots(tmp_path: P
                 "target_id": "phase2c.breakout.metals_only.us_unknown.baseline::GC",
                 "label": "Approved Quant Breakout / GC",
                 "symbol": "GC",
-                "allowed_sessions": ["US", "UNKNOWN"],
+                "allowed_sessions": ["US"],
                 "scope_bundle_id": "scope123",
                 "scope_bundle_manifest_path": str(scope_manifest_path),
                 "analytics_publish": True,

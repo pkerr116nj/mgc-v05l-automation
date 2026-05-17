@@ -17,7 +17,7 @@ def test_dashboard_lane_registry_auto_surfaces_new_admitted_lane_without_templat
                     "approved_exit_label": "time_stop_only.h24",
                     "approved_scope": {
                         "symbols": ["GC", "MGC", "HG", "PL"],
-                        "allowed_sessions": ["US", "UNKNOWN"],
+                        "allowed_sessions": ["US"],
                     },
                     "post_cost_monitoring_read": {"label": "stable_positive_post_cost"},
                     "symbol_attribution_summary": ["GC +0.100R (4)"],
