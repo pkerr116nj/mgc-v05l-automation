@@ -17,14 +17,22 @@ from mgc_v05l.execution_core.phase1_runtime_data_readiness import (
     Phase1RuntimeDataReadinessConfig,
     build_phase1_runtime_data_readiness,
 )
-from mgc_v05l.execution_core.phase1_runtime_ticker_registry import PHASE1_RUNTIME_TICKER_ORDER
 from mgc_v05l.execution_core.track_b_databento_live_runtime_feed import (
     TrackBDatabentoLiveFeedConfig,
     TrackBDatabentoLiveFeedResult,
     TrackBDatabentoLiveFeedVerdict,
 )
+from mgc_v05l.execution_core.track_b_live_market_data_symbols import load_track_b_live_market_data_symbols
 
 NOW = datetime(2026, 5, 11, 0, 13, tzinfo=timezone.utc)
+
+
+def _configured_live_symbols() -> tuple[str, ...]:
+    return tuple(row.symbol for row in load_track_b_live_market_data_symbols().enabled_symbols())
+
+
+def _configured_databento_symbols() -> tuple[str, ...]:
+    return tuple(row.databento_symbol for row in load_track_b_live_market_data_symbols().enabled_symbols())
 
 
 @dataclass
@@ -421,14 +429,15 @@ def test_fresh_merged_legacy_live_artifact_can_satisfy_phase1_contract(tmp_path:
 
 def test_all_phase1_symbols_are_requested_and_fail_closed_without_records(tmp_path: Path) -> None:
     runner = RecordingRunner({})
+    configured_symbols = _configured_live_symbols()
 
     result = build_phase1_databento_live_runtime_candles(config=_config(tmp_path), live_runner=runner)
 
-    assert {config.instrument_family for config in runner.configs} == set(PHASE1_RUNTIME_TICKER_ORDER)
-    assert {config.databento_continuous_symbol for config in runner.configs} == {
-        f"{symbol}.v.0" for symbol in PHASE1_RUNTIME_TICKER_ORDER
-    }
-    assert result.report["phase1_symbol_count"] == len(PHASE1_RUNTIME_TICKER_ORDER)
+    assert {config.instrument_family for config in runner.configs} == set(configured_symbols)
+    assert {config.databento_continuous_symbol for config in runner.configs} == set(_configured_databento_symbols())
+    assert result.report["symbols"] == list(configured_symbols)
+    assert result.report["requested_symbols"] == list(_configured_databento_symbols())
+    assert result.report["phase1_symbol_count"] == len(configured_symbols)
     assert result.report["realtime_feed_confirmed_count"] == 0
     assert all(row["realtime_feed_confirmed"] is False for row in result.report["rows"])
     assert all(row["can_submit"] is False for row in result.report["rows"])
@@ -436,7 +445,8 @@ def test_all_phase1_symbols_are_requested_and_fail_closed_without_records(tmp_pa
 
 
 def test_multi_symbol_subscriptions_run_concurrently(tmp_path: Path) -> None:
-    barrier = threading.Barrier(len(PHASE1_RUNTIME_TICKER_ORDER))
+    configured_symbols = _configured_live_symbols()
+    barrier = threading.Barrier(len(configured_symbols))
     started: set[str] = set()
     lock = threading.Lock()
 
@@ -465,8 +475,8 @@ def test_multi_symbol_subscriptions_run_concurrently(tmp_path: Path) -> None:
 
     result = build_phase1_databento_live_runtime_candles(config=_config(tmp_path, max_workers=1), live_runner=runner)
 
-    assert started == set(PHASE1_RUNTIME_TICKER_ORDER)
-    assert result.report["phase1_symbol_count"] == len(PHASE1_RUNTIME_TICKER_ORDER)
+    assert started == set(configured_symbols)
+    assert result.report["phase1_symbol_count"] == len(configured_symbols)
 
 
 def test_sunday_evening_globex_timestamp_is_accepted_as_asia_session(tmp_path: Path) -> None:
@@ -513,6 +523,29 @@ def test_live_listener_follows_databento_session_pattern_and_writes_raw_stream_p
     assert str(result.raw_dbn_path).endswith(".dbn")
     assert "phase1_databento_live_raw_dbn" in str(result.raw_dbn_path)
     assert result.status["databento_pattern"] == "db.Live + add_stream(raw DBN) + subscribe before start + start + block_for_close"
+    assert result.status["can_submit"] is False
+    assert result.status["live_money_eligible"] is False
+
+
+def test_live_listener_default_symbols_come_from_enabled_namelist_rows(tmp_path: Path) -> None:
+    client = FakeLiveClient([])
+    namelist = load_track_b_live_market_data_symbols()
+
+    result = run_phase1_databento_live_listener(
+        config=_listener_config(tmp_path, symbols=None),
+        live_client_factory=lambda _key: client,
+        now_func=lambda: NOW,
+    )
+
+    assert result.status["symbols"] == [row.symbol for row in namelist.enabled_symbols()]
+    assert result.status["requested_symbols"] == [row.databento_symbol for row in namelist.enabled_symbols()]
+    assert result.status["required_for_readiness_symbols"] == [
+        row.symbol for row in namelist.required_for_readiness_symbols()
+    ]
+    assert result.status["optional_symbols"] == [row.symbol for row in namelist.optional_symbols()]
+    assert result.status["disabled_symbols"] == [row.symbol for row in namelist.disabled_symbols()]
+    assert client.subscribe_kwargs is not None
+    assert client.subscribe_kwargs["symbols"] == [row.databento_symbol for row in namelist.enabled_symbols()]
     assert result.status["can_submit"] is False
     assert result.status["live_money_eligible"] is False
 

@@ -26,16 +26,18 @@ from pathlib import Path
 from typing import Any, Callable, Mapping, Protocol, Sequence
 
 from mgc_v05l.execution_core.phase1_databento_historical_seed import _aggregate_bars
-from mgc_v05l.execution_core.phase1_runtime_ticker_registry import (
-    PHASE1_RUNTIME_TICKER_ORDER,
-    PHASE1_RUNTIME_TIMEFRAMES,
-)
+from mgc_v05l.execution_core.phase1_runtime_ticker_registry import PHASE1_RUNTIME_TIMEFRAMES
 from mgc_v05l.execution_core.track_b_databento_live_runtime_feed import (
     DEFAULT_TRACK_B_DATABENTO_LIVE_RUNTIME_FEED_OUTPUT_ROOT,
     TrackBDatabentoLiveFeedConfig,
     TrackBDatabentoLiveFeedResult,
     run_track_b_databento_live_runtime_feed,
     _record_to_candle,
+)
+from mgc_v05l.execution_core.track_b_live_market_data_symbols import (
+    DEFAULT_TRACK_B_LIVE_MARKET_DATA_SYMBOLS_PATH,
+    TrackBLiveMarketDataSymbol,
+    load_track_b_live_market_data_symbols,
 )
 from mgc_v05l.execution_core.track_b_runtime_candle_capture_cli import _load_databento_api_key
 from mgc_v05l.session_phase_labels import label_session_phase, session_restriction_matches_timestamp
@@ -59,7 +61,8 @@ class Phase1DatabentoLiveRuntimeCandlesConfig:
     runtime_candle_root: Path = DEFAULT_RUNTIME_CANDLE_ROOT
     report_dir: Path = DEFAULT_REPORT_DIR
     legacy_live_output_root: Path = DEFAULT_TRACK_B_DATABENTO_LIVE_RUNTIME_FEED_OUTPUT_ROOT
-    symbols: tuple[str, ...] = PHASE1_RUNTIME_TICKER_ORDER
+    live_market_data_symbols_path: Path = DEFAULT_TRACK_B_LIVE_MARKET_DATA_SYMBOLS_PATH
+    symbols: tuple[str, ...] | None = None
     dataset: str = DEFAULT_DATABENTO_DATASET
     schema: str = "ohlcv-1m"
     stype_in: str = "continuous"
@@ -107,12 +110,47 @@ LiveClientFactory = Callable[[str], DatabentoLiveSession]
 
 
 @dataclass(frozen=True)
+class _Phase1LiveSymbolSelection:
+    config_path: Path
+    config_version: int
+    rows: tuple[TrackBLiveMarketDataSymbol, ...]
+    disabled_rows: tuple[TrackBLiveMarketDataSymbol, ...]
+
+    @property
+    def symbols(self) -> tuple[str, ...]:
+        return tuple(row.symbol for row in self.rows)
+
+    @property
+    def requested_symbols(self) -> tuple[str, ...]:
+        return tuple(row.databento_symbol for row in self.rows)
+
+    @property
+    def required_symbols(self) -> tuple[str, ...]:
+        return tuple(row.symbol for row in self.rows if row.required_for_readiness)
+
+    @property
+    def optional_symbols(self) -> tuple[str, ...]:
+        return tuple(row.symbol for row in self.rows if not row.required_for_readiness)
+
+    @property
+    def disabled_symbols(self) -> tuple[str, ...]:
+        return tuple(row.symbol for row in self.disabled_rows)
+
+    def by_symbol(self) -> dict[str, TrackBLiveMarketDataSymbol]:
+        return {row.symbol: row for row in self.rows}
+
+    def row_for(self, symbol: str) -> TrackBLiveMarketDataSymbol:
+        return self.by_symbol()[symbol]
+
+
+@dataclass(frozen=True)
 class Phase1DatabentoLiveListenerConfig:
     repo_root: Path = REPO_ROOT
     runtime_candle_root: Path = DEFAULT_RUNTIME_CANDLE_ROOT
     report_dir: Path = DEFAULT_REPORT_DIR
     raw_dbn_root: Path = DEFAULT_RAW_DBN_ROOT
-    symbols: tuple[str, ...] = PHASE1_RUNTIME_TICKER_ORDER
+    live_market_data_symbols_path: Path = DEFAULT_TRACK_B_LIVE_MARKET_DATA_SYMBOLS_PATH
+    symbols: tuple[str, ...] | None = None
     dataset: str = DEFAULT_DATABENTO_DATASET
     schema: str = "ohlcv-1m"
     stype_in: str = "continuous"
@@ -142,13 +180,19 @@ def build_phase1_databento_live_runtime_candles(
 ) -> Phase1DatabentoLiveRuntimeCandlesResult:
     now = _coerce_now(config.now)
     runner = live_runner or _default_live_runner
-    symbols = tuple(str(symbol).strip().upper() for symbol in config.symbols if str(symbol).strip())
+    selection = _phase1_live_symbol_selection(
+        repo_root=config.repo_root,
+        path=config.live_market_data_symbols_path,
+        requested_symbols=config.symbols,
+    )
+    symbols = selection.symbols
     rows_by_symbol: dict[str, dict[str, Any]] = {}
     artifacts_written: list[Path] = []
 
     def produce_symbol(symbol: str) -> tuple[str, dict[str, Any], list[Path]]:
         return _produce_symbol_with_accumulation(
             config=config,
+            live_symbol=selection.row_for(symbol),
             symbol=symbol,
             now=now,
             runner=runner,
@@ -165,22 +209,42 @@ def build_phase1_databento_live_runtime_candles(
 
     rows = [rows_by_symbol[symbol] for symbol in symbols if symbol in rows_by_symbol]
     confirmed_count = sum(1 for row in rows if row.get("realtime_feed_confirmed") is True)
+    required_confirmed_count = sum(
+        1 for row in rows if row.get("required_for_readiness") is True and row.get("realtime_feed_confirmed") is True
+    )
     report = {
         "schema_version": "phase1_databento_live_runtime_candles_v1",
         "generated_at": now.isoformat(),
         "repo_root": str(Path(config.repo_root)),
+        "live_market_data_symbols_path": str(selection.config_path),
+        "live_market_data_symbols_version": selection.config_version,
         "source": SOURCE_ID,
         "source_id": config.source_id,
-        "dataset": config.dataset,
-        "schema": config.schema,
+        "dataset": _single_dataset(selection=selection, fallback=config.dataset),
+        "schema": _single_schema(selection=selection, fallback=config.schema),
         "symbols": list(symbols),
+        "requested_symbols": list(selection.requested_symbols),
+        "required_for_readiness_symbols": list(selection.required_symbols),
+        "optional_symbols": list(selection.optional_symbols),
+        "disabled_symbols": list(selection.disabled_symbols),
         "phase1_symbol_count": len(symbols),
         "realtime_feed_confirmed_count": confirmed_count,
+        "readiness_required_confirmed_count": required_confirmed_count,
         "realtime_feed_confirmed_symbols": [
             row["symbol"] for row in rows if row.get("realtime_feed_confirmed") is True
         ],
         "realtime_feed_blocked_symbols": [
             row["symbol"] for row in rows if row.get("realtime_feed_confirmed") is not True
+        ],
+        "required_for_readiness_blocked_symbols": [
+            row["symbol"]
+            for row in rows
+            if row.get("required_for_readiness") is True and row.get("realtime_feed_confirmed") is not True
+        ],
+        "optional_degraded_symbols": [
+            row["symbol"]
+            for row in rows
+            if row.get("required_for_readiness") is not True and row.get("realtime_feed_confirmed") is not True
         ],
         "historical_seed_ready": False,
         "research_artifact_used": False,
@@ -188,7 +252,7 @@ def build_phase1_databento_live_runtime_candles(
         "can_submit": False,
         "live_money_eligible": False,
         "final_classification": "PHASE1_REALTIME_MARKET_DATA_CONFIRMED"
-        if rows and confirmed_count == len(rows)
+        if rows and _readiness_confirmed(selection=selection, confirmed_count=confirmed_count, required_confirmed_count=required_confirmed_count)
         else "PHASE1_REALTIME_MARKET_DATA_PARTIAL_OR_BLOCKED",
         "rows": rows,
     }
@@ -216,12 +280,23 @@ def run_phase1_databento_live_listener(
 
     clock = now_func or (lambda: datetime.now(timezone.utc))
     started_at = _coerce_now(config.now or clock())
-    symbols = _validated_phase1_symbols(config.symbols)
-    requested_symbols = [_continuous_symbol(symbol) for symbol in symbols]
+    selection = _phase1_live_symbol_selection(
+        repo_root=config.repo_root,
+        path=config.live_market_data_symbols_path,
+        requested_symbols=config.symbols,
+    )
+    symbols = selection.symbols
+    requested_symbols = list(selection.requested_symbols)
     run_id = config.run_id or f"phase1_databento_live_listener_{uuid.uuid4().hex}"
     raw_dbn_path = _resolve_path(config.repo_root, config.raw_dbn_root) / f"{run_id}.dbn"
     raw_dbn_path.parent.mkdir(parents=True, exist_ok=True)
-    state = _LiveListenerState(config=config, symbols=symbols, raw_dbn_path=raw_dbn_path, started_at=started_at, clock=clock)
+    state = _LiveListenerState(
+        config=config,
+        selection=selection,
+        raw_dbn_path=raw_dbn_path,
+        started_at=started_at,
+        clock=clock,
+    )
 
     api_key, credential_status, credential_source = _load_databento_api_key(config.env_file)
     if not api_key:
@@ -240,8 +315,8 @@ def run_phase1_databento_live_listener(
         client.add_callback(state.on_record, state.on_error)
         client.add_stream(raw_dbn_path, exception_callback=state.on_error)
         subscribe_kwargs: dict[str, Any] = {
-            "dataset": config.dataset,
-            "schema": config.schema,
+            "dataset": _single_dataset(selection=selection, fallback=config.dataset),
+            "schema": _single_schema(selection=selection, fallback=config.schema),
             "symbols": requested_symbols,
             "stype_in": config.stype_in,
         }
@@ -281,7 +356,11 @@ def run_phase1_databento_live_listener(
         credential_status=credential_status,
         credential_source=credential_source,
         final_classification="PHASE1_REALTIME_MARKET_DATA_CONFIRMED"
-        if state.confirmed_symbol_count() == len(symbols)
+        if _readiness_confirmed(
+            selection=selection,
+            confirmed_count=state.confirmed_symbol_count(),
+            required_confirmed_count=state.required_confirmed_symbol_count(),
+        )
         else "PHASE1_REALTIME_MARKET_DATA_PARTIAL_OR_BLOCKED",
     )
     _write_listener_status(config=config, status=final_status)
@@ -297,23 +376,25 @@ class _LiveListenerState:
         self,
         *,
         config: Phase1DatabentoLiveListenerConfig,
-        symbols: tuple[str, ...],
+        selection: _Phase1LiveSymbolSelection,
         raw_dbn_path: Path,
         started_at: datetime,
         clock: Callable[[], datetime],
     ) -> None:
         self.config = config
-        self.symbols = symbols
+        self.selection = selection
+        self.symbols = selection.symbols
+        self.live_symbol_by_symbol = selection.by_symbol()
         self.raw_dbn_path = raw_dbn_path
         self.started_at = started_at
         self.clock = clock
         self.lock = threading.Lock()
-        self.bars_by_symbol: dict[str, list[dict[str, Any]]] = {symbol: [] for symbol in symbols}
+        self.bars_by_symbol: dict[str, list[dict[str, Any]]] = {symbol: [] for symbol in self.symbols}
         self.instrument_id_to_symbol: dict[str, str] = {}
         self.provider_errors: list[str] = []
         self.system_messages: list[dict[str, Any]] = []
         self.latest_record_at: datetime | None = None
-        self.latest_completed_bar_by_symbol: dict[str, str | None] = {symbol: None for symbol in symbols}
+        self.latest_completed_bar_by_symbol: dict[str, str | None] = {symbol: None for symbol in self.symbols}
         self.records_received = 0
         self.ohlcv_records_received = 0
         self.artifacts_written: list[Path] = []
@@ -350,6 +431,7 @@ class _LiveListenerState:
             self.bars_by_symbol[symbol] = _dedupe_phase1_bars(bars)[-int(self.config.max_bars) :]
             written = _write_symbol_runtime_artifacts_from_bars(
                 config=self.config,
+                live_symbol=self.live_symbol_by_symbol[symbol],
                 symbol=symbol,
                 bars=self.bars_by_symbol[symbol],
                 generated_at=now,
@@ -366,7 +448,28 @@ class _LiveListenerState:
             self._write_status_locked(provider_status="ERROR")
 
     def confirmed_symbol_count(self) -> int:
-        return sum(1 for symbol in self.symbols if _all_timeframes_confirmed(config=self.config, symbol=symbol, now=_coerce_now(self.clock())))
+        return sum(
+            1
+            for symbol in self.symbols
+            if _all_timeframes_confirmed(
+                config=self.config,
+                live_symbol=self.live_symbol_by_symbol[symbol],
+                symbol=symbol,
+                now=_coerce_now(self.clock()),
+            )
+        )
+
+    def required_confirmed_symbol_count(self) -> int:
+        return sum(
+            1
+            for symbol in self.selection.required_symbols
+            if _all_timeframes_confirmed(
+                config=self.config,
+                live_symbol=self.live_symbol_by_symbol[symbol],
+                symbol=symbol,
+                now=_coerce_now(self.clock()),
+            )
+        )
 
     def status(
         self,
@@ -404,25 +507,43 @@ class _LiveListenerState:
         generated_at = _coerce_now(self.clock())
         rows = []
         for symbol in self.symbols:
+            live_symbol = self.live_symbol_by_symbol[symbol]
             rows.append(
                 {
                     "symbol": symbol,
+                    "required_for_readiness": live_symbol.required_for_readiness,
+                    "databento_symbol": live_symbol.databento_symbol,
+                    "dataset": live_symbol.dataset,
+                    "schema": live_symbol.schema,
                     "bar_count": len(self.bars_by_symbol.get(symbol, [])),
                     "latest_completed_bar_ts": self.latest_completed_bar_by_symbol.get(symbol),
-                    "realtime_feed_confirmed": _all_timeframes_confirmed(config=self.config, symbol=symbol, now=generated_at),
+                    "realtime_feed_confirmed": _all_timeframes_confirmed(
+                        config=self.config,
+                        live_symbol=live_symbol,
+                        symbol=symbol,
+                        now=generated_at,
+                    ),
                 }
             )
+        required_confirmed_count = sum(
+            1 for row in rows if row["required_for_readiness"] is True and row["realtime_feed_confirmed"]
+        )
         return {
             "schema_version": "phase1_databento_live_listener_status_v1",
             "generated_at": generated_at.isoformat(),
             "repo_root": str(Path(self.config.repo_root)),
+            "live_market_data_symbols_path": str(self.selection.config_path),
+            "live_market_data_symbols_version": self.selection.config_version,
             "source": SOURCE_ID,
             "source_id": self.config.source_id,
-            "dataset": self.config.dataset,
-            "schema": self.config.schema,
+            "dataset": _single_dataset(selection=self.selection, fallback=self.config.dataset),
+            "schema": _single_schema(selection=self.selection, fallback=self.config.schema),
             "stype_in": self.config.stype_in,
             "symbols": list(self.symbols),
-            "requested_symbols": [_continuous_symbol(symbol) for symbol in self.symbols],
+            "requested_symbols": list(self.selection.requested_symbols),
+            "required_for_readiness_symbols": list(self.selection.required_symbols),
+            "optional_symbols": list(self.selection.optional_symbols),
+            "disabled_symbols": list(self.selection.disabled_symbols),
             "subscribe_kwargs": self.subscribe_kwargs,
             "provider_status": provider_status,
             "subscription_status": self.subscription_status,
@@ -436,6 +557,17 @@ class _LiveListenerState:
             "credential_status": credential_status,
             "credential_source": credential_source,
             "realtime_feed_confirmed_count": sum(1 for row in rows if row["realtime_feed_confirmed"]),
+            "readiness_required_confirmed_count": required_confirmed_count,
+            "required_for_readiness_blocked_symbols": [
+                row["symbol"]
+                for row in rows
+                if row["required_for_readiness"] is True and row["realtime_feed_confirmed"] is not True
+            ],
+            "optional_degraded_symbols": [
+                row["symbol"]
+                for row in rows
+                if row["required_for_readiness"] is not True and row["realtime_feed_confirmed"] is not True
+            ],
             "rows": rows,
             "historical_seed_ready": False,
             "research_artifact_used": False,
@@ -472,13 +604,63 @@ def _block_for_bounded_smoke(*, client: DatabentoLiveSession, timeout: float) ->
             raise
 
 
-def _validated_phase1_symbols(symbols: Sequence[str]) -> tuple[str, ...]:
-    allowed = set(PHASE1_RUNTIME_TICKER_ORDER)
-    parsed = tuple(str(symbol).strip().upper() for symbol in symbols if str(symbol).strip())
-    invalid = [symbol for symbol in parsed if symbol not in allowed]
-    if invalid:
-        raise ValueError(f"Unsupported Phase-1 Databento live symbols: {', '.join(invalid)}")
-    return parsed
+def _phase1_live_symbol_selection(
+    *,
+    repo_root: Path,
+    path: Path,
+    requested_symbols: Sequence[str] | None,
+) -> _Phase1LiveSymbolSelection:
+    config_path = _resolve_namelist_path(repo_root=repo_root, path=path)
+    namelist = load_track_b_live_market_data_symbols(config_path)
+    enabled_by_symbol = {row.symbol: row for row in namelist.enabled_symbols()}
+    if requested_symbols is None:
+        rows = tuple(enabled_by_symbol.values())
+    else:
+        parsed = tuple(str(symbol).strip().upper() for symbol in requested_symbols if str(symbol).strip())
+        unknown = [symbol for symbol in parsed if symbol not in namelist.by_symbol()]
+        if unknown:
+            raise ValueError(f"Unsupported Phase-1 Databento live symbols: {', '.join(unknown)}")
+        rows = tuple(enabled_by_symbol[symbol] for symbol in parsed if symbol in enabled_by_symbol)
+    if not rows:
+        raise ValueError("No enabled Phase-1 Databento live symbols selected from Track B live market-data namelist.")
+    return _Phase1LiveSymbolSelection(
+        config_path=config_path,
+        config_version=namelist.version,
+        rows=rows,
+        disabled_rows=namelist.disabled_symbols(),
+    )
+
+
+def _resolve_namelist_path(*, repo_root: Path, path: Path) -> Path:
+    if path.is_absolute():
+        return path
+    repo_relative = Path(repo_root) / path
+    return repo_relative if repo_relative.exists() else path
+
+
+def _single_dataset(*, selection: _Phase1LiveSymbolSelection, fallback: str) -> str:
+    datasets = {row.dataset for row in selection.rows if row.dataset}
+    if len(datasets) > 1:
+        raise ValueError(f"Phase-1 Databento live listener requires one dataset per session; got {sorted(datasets)}.")
+    return next(iter(datasets), fallback)
+
+
+def _single_schema(*, selection: _Phase1LiveSymbolSelection, fallback: str) -> str:
+    schemas = {row.schema for row in selection.rows if row.schema}
+    if len(schemas) > 1:
+        raise ValueError(f"Phase-1 Databento live listener requires one schema per session; got {sorted(schemas)}.")
+    return next(iter(schemas), fallback)
+
+
+def _readiness_confirmed(
+    *,
+    selection: _Phase1LiveSymbolSelection,
+    confirmed_count: int,
+    required_confirmed_count: int,
+) -> bool:
+    if selection.required_symbols:
+        return required_confirmed_count == len(selection.required_symbols)
+    return confirmed_count == len(selection.symbols)
 
 
 def _symbol_mapping_from_record(*, record: Any, symbols: Sequence[str]) -> tuple[str, str] | None:
@@ -559,6 +741,7 @@ def _dedupe_phase1_bars(bars: Sequence[Mapping[str, Any]]) -> list[dict[str, Any
 def _write_symbol_runtime_artifacts_from_bars(
     *,
     config: Phase1DatabentoLiveListenerConfig,
+    live_symbol: TrackBLiveMarketDataSymbol,
     symbol: str,
     bars: Sequence[Mapping[str, Any]],
     generated_at: datetime,
@@ -570,6 +753,7 @@ def _write_symbol_runtime_artifacts_from_bars(
     for timeframe in PHASE1_RUNTIME_TIMEFRAMES:
         payload = _runtime_payload_for_service(
             config=config,
+            live_symbol=live_symbol,
             symbol=symbol,
             timeframe=timeframe,
             generated_at=generated_at,
@@ -579,7 +763,13 @@ def _write_symbol_runtime_artifacts_from_bars(
         path = _runtime_candle_path_for_listener(config=config, symbol=symbol, timeframe=timeframe)
         existing = _read_json(path)
         if payload["realtime_feed_confirmed"] is not True and isinstance(existing, dict):
-            if _phase1_payload_confirmed_fresh(payload=existing, symbol=symbol, timeframe=timeframe, now=generated_at):
+            if _phase1_payload_confirmed_fresh(
+                payload=existing,
+                live_symbol=live_symbol,
+                symbol=symbol,
+                timeframe=timeframe,
+                now=generated_at,
+            ):
                 continue
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
@@ -590,6 +780,7 @@ def _write_symbol_runtime_artifacts_from_bars(
 def _runtime_payload_for_service(
     *,
     config: Phase1DatabentoLiveListenerConfig,
+    live_symbol: TrackBLiveMarketDataSymbol,
     symbol: str,
     timeframe: str,
     generated_at: datetime,
@@ -599,9 +790,9 @@ def _runtime_payload_for_service(
     generated_at = _coerce_now(generated_at)
     normalized_bars = [dict(bar) for bar in bars]
     last_completed = _parse_datetime(normalized_bars[-1].get("bar_end")) if normalized_bars else None
-    freshness_seconds = FRESHNESS_SECONDS_BY_TIMEFRAME[timeframe]
+    freshness_seconds = _freshness_seconds_for_timeframe(live_symbol=live_symbol, timeframe=timeframe)
     age_seconds = None if last_completed is None else max(0.0, (generated_at - last_completed).total_seconds())
-    min_bars = _min_bars_for_timeframe_value(min_bars=config.min_bars, timeframe=timeframe)
+    min_bars = _min_bars_for_timeframe_value(min_bars=live_symbol.min_confirmed_bars, timeframe=timeframe)
     fresh = age_seconds is not None and age_seconds <= freshness_seconds
     complete = len(normalized_bars) >= min_bars
     realtime_confirmed = fresh and complete
@@ -613,10 +804,13 @@ def _runtime_payload_for_service(
         "instrument": symbol,
         "root": symbol,
         "timeframe": timeframe,
-        "dataset": config.dataset,
-        "request_symbol": _continuous_symbol(symbol),
-        "schema": config.schema,
+        "dataset": live_symbol.dataset,
+        "request_symbol": live_symbol.databento_symbol,
+        "schema": live_symbol.schema,
         "stype_in": config.stype_in,
+        "required_for_readiness": live_symbol.required_for_readiness,
+        "execution_symbol": live_symbol.execution_symbol,
+        "reference_symbol": live_symbol.reference_symbol,
         "bar_count": len(normalized_bars),
         "first_bar_ts": normalized_bars[0].get("bar_end") if normalized_bars else None,
         "last_completed_bar_ts": None if last_completed is None else last_completed.isoformat(),
@@ -640,12 +834,24 @@ def _runtime_payload_for_service(
     }
 
 
-def _all_timeframes_confirmed(*, config: Phase1DatabentoLiveListenerConfig, symbol: str, now: datetime) -> bool:
+def _all_timeframes_confirmed(
+    *,
+    config: Phase1DatabentoLiveListenerConfig,
+    live_symbol: TrackBLiveMarketDataSymbol,
+    symbol: str,
+    now: datetime,
+) -> bool:
     for timeframe in PHASE1_RUNTIME_TIMEFRAMES:
         payload = _read_json(_runtime_candle_path_for_listener(config=config, symbol=symbol, timeframe=timeframe))
         if not isinstance(payload, dict):
             return False
-        if not _phase1_payload_confirmed_fresh(payload=payload, symbol=symbol, timeframe=timeframe, now=now):
+        if not _phase1_payload_confirmed_fresh(
+            payload=payload,
+            live_symbol=live_symbol,
+            symbol=symbol,
+            timeframe=timeframe,
+            now=now,
+        ):
             return False
     return True
 
@@ -681,6 +887,7 @@ def _sanitize_provider_error(exc: Exception) -> str:
 def _produce_symbol_with_accumulation(
     *,
     config: Phase1DatabentoLiveRuntimeCandlesConfig,
+    live_symbol: TrackBLiveMarketDataSymbol,
     symbol: str,
     now: datetime,
     runner: LiveRunner,
@@ -692,10 +899,11 @@ def _produce_symbol_with_accumulation(
     errors: list[str] = []
     for attempt in range(1, attempts + 1):
         try:
-            live_result = runner(_live_config_for_symbol(config=config, symbol=symbol))
+            live_result = runner(_live_config_for_symbol(config=config, live_symbol=live_symbol, symbol=symbol))
         except Exception as exc:  # noqa: BLE001 - provider/runtime errors become fail-closed rows.
             errors.append(str(exc))
             last_row = _blocked_row(
+                live_symbol=live_symbol,
                 symbol=symbol,
                 reason="DATABENTO_LIVE_PRODUCER_ERROR",
                 detail=str(exc),
@@ -704,6 +912,7 @@ def _produce_symbol_with_accumulation(
             continue
         row, _written = _row_and_artifacts_for_live_result(
             config=config,
+            live_symbol=live_symbol,
             symbol=symbol,
             now=now,
             live_result=live_result,
@@ -715,6 +924,7 @@ def _produce_symbol_with_accumulation(
         if row.get("realtime_feed_confirmed") is True:
             final_row, written = _row_and_artifacts_for_live_result(
                 config=config,
+                live_symbol=live_symbol,
                 symbol=symbol,
                 now=now,
                 live_result=live_result,
@@ -723,7 +933,7 @@ def _produce_symbol_with_accumulation(
             )
             return symbol, final_row, written
 
-    preserved_row = _preserved_existing_confirmed_row(config=config, symbol=symbol, now=now)
+    preserved_row = _preserved_existing_confirmed_row(config=config, live_symbol=live_symbol, symbol=symbol, now=now)
     if preserved_row is not None:
         preserved_row["attempt_count"] = attempts
         preserved_row["latest_attempt_block_reason"] = None if last_row is None else last_row.get("block_reason")
@@ -733,6 +943,7 @@ def _produce_symbol_with_accumulation(
     if last_result is not None:
         final_row, written = _row_and_artifacts_for_live_result(
             config=config,
+            live_symbol=live_symbol,
             symbol=symbol,
             now=now,
             live_result=last_result,
@@ -741,6 +952,7 @@ def _produce_symbol_with_accumulation(
         )
         return symbol, final_row, written
     return symbol, _blocked_row(
+        live_symbol=live_symbol,
         symbol=symbol,
         reason="DATABENTO_LIVE_PRODUCER_ERROR",
         detail="; ".join(errors[-3:]),
@@ -760,6 +972,7 @@ def _accumulation_attempts(config: Phase1DatabentoLiveRuntimeCandlesConfig) -> i
 def _row_and_artifacts_for_live_result(
     *,
     config: Phase1DatabentoLiveRuntimeCandlesConfig,
+    live_symbol: TrackBLiveMarketDataSymbol,
     symbol: str,
     now: datetime,
     live_result: TrackBDatabentoLiveFeedResult,
@@ -771,6 +984,7 @@ def _row_and_artifacts_for_live_result(
     if not live_connected:
         return (
             _blocked_row(
+                live_symbol=live_symbol,
                 symbol=symbol,
                 reason=str(live_result.report.get("primary_blocker") or "DATABENTO_LIVE_NOT_CONNECTED"),
                 detail=str(live_result.report.get("live_runtime_feed_verdict") or ""),
@@ -784,6 +998,7 @@ def _row_and_artifacts_for_live_result(
     payloads = {
         timeframe: _runtime_payload(
             config=config,
+            live_symbol=live_symbol,
             symbol=symbol,
             timeframe=timeframe,
             generated_at=_parse_datetime(live_result.report.get("generated_at")) or now,
@@ -810,7 +1025,10 @@ def _row_and_artifacts_for_live_result(
     return (
         {
             "symbol": symbol,
-            "requested_symbol": _continuous_symbol(symbol),
+            "requested_symbol": live_symbol.databento_symbol,
+            "required_for_readiness": live_symbol.required_for_readiness,
+            "execution_symbol": live_symbol.execution_symbol,
+            "reference_symbol": live_symbol.reference_symbol,
             "live_feed_connected": True,
             "runtime_candles_written": sorted(payloads),
             "bar_counts": {timeframe: payload["bar_count"] for timeframe, payload in payloads.items()},
@@ -833,6 +1051,7 @@ def _row_and_artifacts_for_live_result(
 def _preserved_existing_confirmed_row(
     *,
     config: Phase1DatabentoLiveRuntimeCandlesConfig,
+    live_symbol: TrackBLiveMarketDataSymbol,
     symbol: str,
     now: datetime,
 ) -> dict[str, Any] | None:
@@ -843,12 +1062,21 @@ def _preserved_existing_confirmed_row(
             payload = json.loads(path.read_text(encoding="utf-8"))
         except Exception:
             return None
-        if not _phase1_payload_confirmed_fresh(payload=payload, symbol=symbol, timeframe=timeframe, now=now):
+        if not _phase1_payload_confirmed_fresh(
+            payload=payload,
+            live_symbol=live_symbol,
+            symbol=symbol,
+            timeframe=timeframe,
+            now=now,
+        ):
             return None
         payloads[timeframe] = payload
     return {
         "symbol": symbol,
-        "requested_symbol": _continuous_symbol(symbol),
+        "requested_symbol": live_symbol.databento_symbol,
+        "required_for_readiness": live_symbol.required_for_readiness,
+        "execution_symbol": live_symbol.execution_symbol,
+        "reference_symbol": live_symbol.reference_symbol,
         "live_feed_connected": True,
         "runtime_candles_written": [],
         "bar_counts": {timeframe: payload.get("bar_count") for timeframe, payload in payloads.items()},
@@ -868,6 +1096,7 @@ def _preserved_existing_confirmed_row(
 def _phase1_payload_confirmed_fresh(
     *,
     payload: Mapping[str, Any],
+    live_symbol: TrackBLiveMarketDataSymbol,
     symbol: str,
     timeframe: str,
     now: datetime,
@@ -885,26 +1114,29 @@ def _phase1_payload_confirmed_fresh(
     generated_at = _parse_datetime(payload.get("generated_at"))
     if generated_at is None:
         return False
-    return max(0.0, (now - generated_at).total_seconds()) <= FRESHNESS_SECONDS_BY_TIMEFRAME[timeframe]
+    return max(0.0, (now - generated_at).total_seconds()) <= _freshness_seconds_for_timeframe(
+        live_symbol=live_symbol,
+        timeframe=timeframe,
+    )
 
 
 def _live_config_for_symbol(
-    *, config: Phase1DatabentoLiveRuntimeCandlesConfig, symbol: str
+    *, config: Phase1DatabentoLiveRuntimeCandlesConfig, live_symbol: TrackBLiveMarketDataSymbol, symbol: str
 ) -> TrackBDatabentoLiveFeedConfig:
     return TrackBDatabentoLiveFeedConfig(
         contract_key=f"{symbol}-PHASE1",
         instrument_family=symbol,
         local_symbol=symbol,
-        databento_continuous_symbol=_continuous_symbol(symbol),
-        dataset=config.dataset,
-        schema=config.schema,
+        databento_continuous_symbol=live_symbol.databento_symbol,
+        dataset=live_symbol.dataset,
+        schema=live_symbol.schema,
         stype_in=config.stype_in,
         stype_out=config.stype_out,
         max_bars=config.max_bars,
-        min_bars=config.min_bars,
+        min_bars=live_symbol.min_confirmed_bars,
         max_records=config.max_records,
         max_seconds=config.max_seconds_per_symbol,
-        max_latest_1m_age_seconds=config.max_latest_1m_age_seconds,
+        max_latest_1m_age_seconds=live_symbol.freshness_threshold_seconds,
         max_completed_5m_age_seconds=config.max_completed_5m_age_seconds,
         env_file=config.env_file,
         output_root=_resolve_path(config.repo_root, config.legacy_live_output_root),
@@ -981,6 +1213,7 @@ def _timeframe_bars(one_minute: list[dict[str, Any]]) -> dict[str, list[dict[str
 def _runtime_payload(
     *,
     config: Phase1DatabentoLiveRuntimeCandlesConfig,
+    live_symbol: TrackBLiveMarketDataSymbol,
     symbol: str,
     timeframe: str,
     generated_at: datetime,
@@ -990,9 +1223,9 @@ def _runtime_payload(
 ) -> dict[str, Any]:
     generated_at = _coerce_now(generated_at)
     last_completed = _parse_datetime(bars[-1].get("bar_end")) if bars else None
-    freshness_seconds = FRESHNESS_SECONDS_BY_TIMEFRAME[timeframe]
+    freshness_seconds = _freshness_seconds_for_timeframe(live_symbol=live_symbol, timeframe=timeframe)
     age_seconds = None if last_completed is None else max(0.0, (generated_at - last_completed).total_seconds())
-    min_bars = _min_bars_for_timeframe(config=config, timeframe=timeframe)
+    min_bars = _min_bars_for_timeframe_value(min_bars=live_symbol.min_confirmed_bars, timeframe=timeframe)
     fresh = age_seconds is not None and age_seconds <= freshness_seconds
     complete = len(bars) >= min_bars
     realtime_confirmed = live_connected and fresh and complete
@@ -1004,9 +1237,12 @@ def _runtime_payload(
         "instrument": symbol,
         "root": symbol,
         "timeframe": timeframe,
-        "dataset": config.dataset,
-        "request_symbol": _continuous_symbol(symbol),
-        "schema": config.schema,
+        "dataset": live_symbol.dataset,
+        "request_symbol": live_symbol.databento_symbol,
+        "schema": live_symbol.schema,
+        "required_for_readiness": live_symbol.required_for_readiness,
+        "execution_symbol": live_symbol.execution_symbol,
+        "reference_symbol": live_symbol.reference_symbol,
         "bar_count": len(bars),
         "first_bar_ts": bars[0].get("bar_end") if bars else None,
         "last_completed_bar_ts": None if last_completed is None else last_completed.isoformat(),
@@ -1041,10 +1277,6 @@ def _realtime_block_reason(*, fresh: bool, complete: bool, connected: bool) -> s
     return "REALTIME_FEED_NOT_CONFIRMED"
 
 
-def _min_bars_for_timeframe(*, config: Phase1DatabentoLiveRuntimeCandlesConfig, timeframe: str) -> int:
-    return _min_bars_for_timeframe_value(min_bars=config.min_bars, timeframe=timeframe)
-
-
 def _min_bars_for_timeframe_value(*, min_bars: int, timeframe: str) -> int:
     if timeframe == "1m":
         return max(int(min_bars), 1)
@@ -1055,8 +1287,15 @@ def _min_bars_for_timeframe_value(*, min_bars: int, timeframe: str) -> int:
     return 1
 
 
+def _freshness_seconds_for_timeframe(*, live_symbol: TrackBLiveMarketDataSymbol, timeframe: str) -> float:
+    if timeframe == "1m":
+        return float(live_symbol.freshness_threshold_seconds)
+    return max(float(live_symbol.freshness_threshold_seconds), FRESHNESS_SECONDS_BY_TIMEFRAME[timeframe])
+
+
 def _blocked_row(
     *,
+    live_symbol: TrackBLiveMarketDataSymbol,
     symbol: str,
     reason: str,
     detail: str = "",
@@ -1065,7 +1304,10 @@ def _blocked_row(
 ) -> dict[str, Any]:
     return {
         "symbol": symbol,
-        "requested_symbol": _continuous_symbol(symbol),
+        "requested_symbol": live_symbol.databento_symbol,
+        "required_for_readiness": live_symbol.required_for_readiness,
+        "execution_symbol": live_symbol.execution_symbol,
+        "reference_symbol": live_symbol.reference_symbol,
         "live_feed_connected": False,
         "runtime_candles_written": [],
         "realtime_feed_confirmed": False,
@@ -1093,10 +1335,6 @@ def _runtime_candle_path(*, config: Phase1DatabentoLiveRuntimeCandlesConfig, sym
 
 def _resolve_path(repo_root: Path, value: Path) -> Path:
     return value if value.is_absolute() else Path(repo_root) / value
-
-
-def _continuous_symbol(symbol: str) -> str:
-    return f"{symbol}.v.0"
 
 
 def _parse_datetime(value: Any) -> datetime | None:
@@ -1127,7 +1365,8 @@ def build_parser() -> argparse.ArgumentParser:
         description="Run the Phase-1 Databento Live listener. No broker or submit paths are invoked."
     )
     parser.add_argument("--mode", choices=("service", "legacy-sample"), default="service")
-    parser.add_argument("--symbols", default=",".join(PHASE1_RUNTIME_TICKER_ORDER))
+    parser.add_argument("--symbols", help="Optional comma-separated enabled namelist symbols. Omit to use all enabled rows.")
+    parser.add_argument("--live-market-data-symbols-path", type=Path, default=DEFAULT_TRACK_B_LIVE_MARKET_DATA_SYMBOLS_PATH)
     parser.add_argument("--repo-root", default=str(REPO_ROOT))
     parser.add_argument("--runtime-candle-root", default=str(DEFAULT_RUNTIME_CANDLE_ROOT))
     parser.add_argument("--report-dir", default=str(DEFAULT_REPORT_DIR))
@@ -1152,7 +1391,9 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main(argv: Sequence[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
-    symbols = tuple(symbol.strip().upper() for symbol in str(args.symbols).split(",") if symbol.strip())
+    symbols = None
+    if args.symbols:
+        symbols = tuple(symbol.strip().upper() for symbol in str(args.symbols).split(",") if symbol.strip())
     if args.mode == "service":
         result = run_phase1_databento_live_listener(
             config=Phase1DatabentoLiveListenerConfig(
@@ -1160,6 +1401,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 runtime_candle_root=Path(args.runtime_candle_root),
                 report_dir=Path(args.report_dir),
                 raw_dbn_root=Path(args.raw_dbn_root),
+                live_market_data_symbols_path=Path(args.live_market_data_symbols_path),
                 symbols=symbols,
                 dataset=args.dataset,
                 schema=args.schema,
@@ -1193,6 +1435,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             runtime_candle_root=Path(args.runtime_candle_root),
             report_dir=Path(args.report_dir),
             legacy_live_output_root=Path(args.legacy_live_output_root),
+            live_market_data_symbols_path=Path(args.live_market_data_symbols_path),
             symbols=symbols,
             dataset=args.dataset,
             schema=args.schema,
