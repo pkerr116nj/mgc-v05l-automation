@@ -53,6 +53,7 @@ def gather_supervisor_inputs(*, repo_root: Path) -> dict[str, Any]:
     canonical = _read_json(paths["canonical_readiness"])
     ibkr_connectivity = _read_json(paths["ibkr_connectivity"])
     broker_truth = _read_json(paths["broker_truth"])
+    broker_truth_lease = _read_json(paths["broker_truth_lease"])
     reconciliation = _read_json(paths["reconciliation"])
     operator_status = _read_json(paths["runtime_health"])
     lane_quarantine = _read_json(paths["lane_quarantine"])
@@ -65,6 +66,10 @@ def gather_supervisor_inputs(*, repo_root: Path) -> dict[str, Any]:
         "canonical_readiness": canonical,
         "ibkr_connectivity": _with_available(ibkr_connectivity, paths["ibkr_connectivity"]),
         "broker_truth": _with_available(broker_truth or _mapping(canonical.get("broker_truth")), paths["broker_truth"]),
+        "broker_truth_lease": _with_available(
+            broker_truth_lease or _mapping(canonical.get("broker_truth_lease")),
+            paths["broker_truth_lease"],
+        ),
         "market_data": _with_available(market_data or _mapping(canonical.get("market_data")), paths["market_data"]),
         "runtime": _with_available(runtime, paths["runtime_health"]),
         "lane_quarantine": _with_available(lane_quarantine or _mapping(canonical.get("lane_quarantine")), paths["lane_quarantine"]),
@@ -126,6 +131,7 @@ def _artifact_paths(repo_root: Path) -> dict[str, Path]:
     reports_root = repo_root / "outputs" / "reports"
     return {
         "canonical_readiness": repo_root / "outputs" / "operator_dashboard" / "runtime" / "latest_canonical_readiness.json",
+        "broker_truth_lease": repo_root / "outputs" / "operator_dashboard" / "runtime" / "latest_broker_truth_lease.json",
         "ibkr_connectivity": reports_root / "ibkr_connectivity_watchdog" / "latest_ibkr_connectivity_watchdog.json",
         "broker_truth": reports_root / "ibkr_read_only_verification" / "ibkr_broker_truth_refresh_status.json",
         "reconciliation": reports_root

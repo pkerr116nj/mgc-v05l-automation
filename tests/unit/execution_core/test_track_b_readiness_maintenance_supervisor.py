@@ -86,6 +86,99 @@ def test_broker_truth_stale_with_last_good_preserved_refreshes_truth_and_blocks_
     assert _warning_codes(result) >= {"broker_truth_last_good_preserved"}
 
 
+def test_expired_entry_lease_with_dead_broker_refresher_restarts_sidecar_first() -> None:
+    inputs = base_inputs()
+    inputs["canonical_readiness"] = {"canonical_readiness": "NOT_READY_DEPENDENCY", "live_money_eligible": False}
+    inputs["broker_truth_lease"] = {
+        "lease_state": "EXPIRED_BLOCK_NEW_ENTRIES",
+        "submit_entry_allowed": False,
+        "live_money_eligible": False,
+    }
+    inputs["root_guard"] = {
+        "root_match": True,
+        "processes": [{"name": "broker_truth_refresher", "running": False}],
+    }
+
+    result = classify_readiness_maintenance(inputs)
+
+    assert result["supervisor_state"] == "REPAIRING_RECOMMENDED"
+    assert result["recommended_actions"][:3] == ["BLOCK_SUBMIT", "REFRESH_BROKER_TRUTH", "RESTART_SIDECAR"]
+    assert result["submit_block_required"] is True
+    assert result["blockers"][0]["code"] == "broker_truth_lease_expired"
+
+
+def test_expired_entry_lease_with_failed_latest_attempt_retries_and_rotates_client_id() -> None:
+    inputs = base_inputs()
+    inputs["broker_truth_lease"] = {
+        "lease_state": "EXPIRED_BLOCK_NEW_ENTRIES",
+        "submit_entry_allowed": False,
+        "live_money_eligible": False,
+    }
+    inputs["broker_truth"]["latest_attempt_status"] = {
+        "classification": "BROKER_TRUTH_REFRESH_FAILED",
+        "last_failure": True,
+    }
+
+    result = classify_readiness_maintenance(inputs)
+
+    assert result["supervisor_state"] == "REPAIRING_RECOMMENDED"
+    assert result["recommended_actions"][:2] == ["BLOCK_SUBMIT", "REFRESH_BROKER_TRUTH"]
+    assert {"RETRY", "ROTATE_CLIENT_ID"}.issubset(result["recommended_actions"])
+    assert result["retry_count"] == 1
+
+
+def test_active_degraded_lease_recommends_repair_without_operator_required() -> None:
+    inputs = base_inputs()
+    inputs["broker_truth_lease"] = {
+        "lease_state": "ACTIVE_DEGRADED_REFRESH_FAILING",
+        "submit_entry_allowed": True,
+        "live_money_eligible": False,
+    }
+    inputs["broker_truth"]["latest_attempt_status"] = {
+        "classification": "BROKER_TRUTH_REFRESH_FAILED",
+        "last_failure": True,
+    }
+
+    result = classify_readiness_maintenance(inputs)
+
+    assert result["supervisor_state"] == "DEGRADED"
+    assert {"REFRESH_BROKER_TRUTH", "RETRY", "ROTATE_CLIENT_ID"}.issubset(result["recommended_actions"])
+    assert result["operator_action_required"] is False
+    assert _warning_codes(result) >= {"broker_truth_lease_degraded_refresh_failing"}
+
+
+def test_invalidated_unknown_open_orders_requires_operator_not_sidecar_repair() -> None:
+    inputs = base_inputs()
+    inputs["broker_truth_lease"] = {
+        "lease_state": "INVALIDATED_UNKNOWN_OPEN_ORDERS",
+        "submit_entry_allowed": False,
+        "live_money_eligible": False,
+    }
+
+    result = classify_readiness_maintenance(inputs)
+
+    assert result["supervisor_state"] == "OPERATOR_REQUIRED"
+    assert {"BLOCK_SUBMIT", "ALERT_OPERATOR"}.issubset(result["recommended_actions"])
+    assert "RESTART_SIDECAR" not in result["recommended_actions"]
+    assert result["blockers"][0]["code"] == "broker_truth_lease_unknown_open_orders"
+
+
+def test_expired_lease_broker_repair_precedes_market_data_repair() -> None:
+    inputs = base_inputs()
+    inputs["broker_truth_lease"] = {
+        "lease_state": "EXPIRED_EXITS_ONLY",
+        "submit_entry_allowed": False,
+        "live_money_eligible": False,
+    }
+    inputs["market_data"] = {"classification": "DATABENTO_SOCKET_CLOSED", "fresh": False, "socket_closed": True}
+
+    result = classify_readiness_maintenance(inputs)
+
+    assert result["recommended_actions"][:2] == ["BLOCK_SUBMIT", "REFRESH_BROKER_TRUTH"]
+    assert "RECONNECT_MARKET_DATA" in result["recommended_actions"]
+    assert result["blockers"][0]["code"] == "broker_truth_lease_expired"
+
+
 def test_databento_socket_close_reconnects_market_data_and_blocks_submit() -> None:
     inputs = base_inputs()
     inputs["market_data"] = {"classification": "DATABENTO_SOCKET_CLOSED", "fresh": False, "socket_closed": True}

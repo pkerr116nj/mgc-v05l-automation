@@ -66,6 +66,7 @@ def classify_readiness_maintenance(inputs: Mapping[str, Any]) -> dict[str, Any]:
     root_guard = _mapping(inputs.get("root_guard") or inputs.get("root_guard_summary"))
     ibkr = _mapping(inputs.get("ibkr_connectivity"))
     broker_truth = _mapping(inputs.get("broker_truth"))
+    broker_truth_lease = _mapping(inputs.get("broker_truth_lease") or canonical.get("broker_truth_lease"))
     market_data = _mapping(inputs.get("market_data"))
     runtime = _mapping(inputs.get("runtime"))
     lane_quarantine = _mapping(inputs.get("lane_quarantine"))
@@ -88,6 +89,7 @@ def classify_readiness_maintenance(inputs: Mapping[str, Any]) -> dict[str, Any]:
         decisions.block("wrong_root_process", "Wrong-root process detected by root guard or canonical readiness.")
         return decisions.result(inputs=inputs)
 
+    _classify_broker_truth_lease(broker_truth_lease, broker_truth, root_guard, decisions)
     _classify_ibkr_connectivity(ibkr, decisions)
     _classify_broker_truth(broker_truth, decisions)
     _classify_market_data(market_data, runtime, canonical, decisions)
@@ -158,6 +160,58 @@ def _classify_ibkr_connectivity(ibkr: Mapping[str, Any], decisions: "_DecisionBu
         decisions.add_action("ALERT_OPERATOR", "TWS API modal/block condition requires operator inspection.")
         decisions.add_action("BLOCK_SUBMIT", "Submit must remain blocked while TWS API may be blocked.")
         decisions.block("api_modal_or_blocked_suspected", "IBKR watchdog suspects a modal/API-block condition.")
+
+
+def _classify_broker_truth_lease(
+    broker_truth_lease: Mapping[str, Any],
+    broker_truth: Mapping[str, Any],
+    root_guard: Mapping[str, Any],
+    decisions: "_DecisionBuilder",
+) -> None:
+    if not broker_truth_lease:
+        return
+    lease_state = str(broker_truth_lease.get("lease_state") or broker_truth_lease.get("state") or "").upper()
+    if not lease_state:
+        return
+    if lease_state == "ACTIVE":
+        return
+    if lease_state == "ACTIVE_DEGRADED_REFRESH_FAILING":
+        decisions.set_state("DEGRADED")
+        decisions.add_action("REFRESH_BROKER_TRUTH", "Broker-truth lease is valid but broker refresh is degraded.")
+        if _latest_broker_attempt_failed(broker_truth):
+            decisions.add_action("RETRY", "Retry read-only broker truth refresh while the lease remains valid.")
+            decisions.add_action("ROTATE_CLIENT_ID", "Rotate broker-truth refresher client id if repeated refresh failures persist.")
+        if _broker_truth_refresher_dead(root_guard):
+            decisions.add_action("RESTART_SIDECAR", "Broker-truth refresher sidecar is not running.")
+        decisions.warn(
+            "broker_truth_lease_degraded_refresh_failing",
+            "Broker-truth lease remains valid, but refresh attempts are failing.",
+        )
+        decisions.retry(retry_count=1, cooldown_seconds=60)
+        return
+    if lease_state in {"EXPIRED_BLOCK_NEW_ENTRIES", "EXPIRED_EXITS_ONLY"}:
+        decisions.set_state("REPAIRING_RECOMMENDED")
+        decisions.add_action("BLOCK_SUBMIT", "Submit must remain blocked while the broker-truth lease is expired.")
+        decisions.add_action("REFRESH_BROKER_TRUTH", "Refresh broker truth to renew the expired broker-truth lease.")
+        if _broker_truth_refresher_dead(root_guard):
+            decisions.add_action("RESTART_SIDECAR", "Broker-truth refresher sidecar is not running.")
+        if _latest_broker_attempt_failed(broker_truth):
+            decisions.add_action("RETRY", "Retry read-only broker truth refresh after the latest broker attempt failed.")
+            decisions.add_action("ROTATE_CLIENT_ID", "Rotate broker-truth client id if retry shows collision or repeated 502/timeout.")
+        decisions.block("broker_truth_lease_expired", f"Broker-truth lease is {lease_state}.")
+        decisions.retry(retry_count=1, cooldown_seconds=60)
+        return
+    if lease_state == "INVALIDATED_UNKNOWN_OPEN_ORDERS":
+        decisions.set_state("OPERATOR_REQUIRED")
+        decisions.add_action("BLOCK_SUBMIT", "Submit must remain blocked because broker open-order state is unknown.")
+        decisions.add_action("ALERT_OPERATOR", "Unknown broker open orders require operator review before repair.")
+        decisions.block("broker_truth_lease_unknown_open_orders", "Broker-truth lease was invalidated by unknown open orders.")
+        return
+    if lease_state.startswith("INVALIDATED_") or lease_state == "OPERATOR_REQUIRED":
+        decisions.set_state("OPERATOR_REQUIRED")
+        decisions.add_action("BLOCK_SUBMIT", "Submit must remain blocked because the broker-truth lease is invalidated.")
+        decisions.add_action("ALERT_OPERATOR", "Broker-truth lease invalidation requires operator review.")
+        decisions.block("broker_truth_lease_invalidated", f"Broker-truth lease is {lease_state}.")
 
 
 def _classify_broker_truth(broker_truth: Mapping[str, Any], decisions: "_DecisionBuilder") -> None:
@@ -401,6 +455,7 @@ def _input_summary(inputs: Mapping[str, Any]) -> dict[str, Any]:
         "canonical_readiness": _canonical_state(_mapping(inputs.get("canonical_readiness"))),
         "ibkr_connectivity": _classification(inputs.get("ibkr_connectivity")),
         "broker_truth": _classification(inputs.get("broker_truth")),
+        "broker_truth_lease": _classification(inputs.get("broker_truth_lease")),
         "market_data": _classification(inputs.get("market_data")),
         "runtime": _classification(inputs.get("runtime")),
         "lane_quarantine": _classification(inputs.get("lane_quarantine")),
@@ -411,8 +466,22 @@ def _input_summary(inputs: Mapping[str, Any]) -> dict[str, Any]:
 
 def _classification(value: Any) -> str | None:
     payload = _mapping(value)
-    raw = payload.get("classification") or payload.get("state") or payload.get("status")
+    raw = payload.get("classification") or payload.get("lease_state") or payload.get("state") or payload.get("status")
     return str(raw) if raw is not None else None
+
+
+def _latest_broker_attempt_failed(broker_truth: Mapping[str, Any]) -> bool:
+    latest = _mapping(broker_truth.get("latest_attempt_status"))
+    classification = str(latest.get("classification") or broker_truth.get("classification") or "").upper()
+    return _bool(latest.get("last_failure")) or classification.endswith("FAILED") or "FAILED" in classification
+
+
+def _broker_truth_refresher_dead(root_guard: Mapping[str, Any]) -> bool:
+    for row in list(root_guard.get("processes") or []):
+        process = _mapping(row)
+        if process.get("name") == "broker_truth_refresher":
+            return process.get("running") is False
+    return False
 
 
 def _canonical_state(canonical: Mapping[str, Any]) -> str:

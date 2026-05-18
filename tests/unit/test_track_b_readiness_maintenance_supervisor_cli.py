@@ -24,6 +24,7 @@ def seed_clean_artifacts(repo_root: Path) -> None:
             "market_data": {"fresh": True},
             "lane_quarantine": {"quarantine_count": 0},
             "broker_truth": {"fresh": True, "positions_complete": True, "open_orders_complete": True},
+            "broker_truth_lease": {"lease_state": "ACTIVE", "live_money_eligible": False},
             "phase1_reconciliation": {
                 "classification": "TRACK_B_PAPER_BROKER_RECONCILED",
                 "fresh": True,
@@ -31,6 +32,16 @@ def seed_clean_artifacts(repo_root: Path) -> None:
                 "review_required_count": 0,
                 "lifecycle_open_position_count": 0,
             },
+        },
+    )
+    write_json(
+        repo_root / "outputs" / "operator_dashboard" / "runtime" / "latest_broker_truth_lease.json",
+        {
+            "generated_at": "2026-05-18T13:29:59+00:00",
+            "lease_state": "ACTIVE",
+            "submit_entry_allowed": True,
+            "submit_exit_allowed": True,
+            "live_money_eligible": False,
         },
     )
     write_json(
@@ -138,6 +149,43 @@ def test_degraded_broker_truth_exits_1(tmp_path: Path) -> None:
     artifact = json.loads(decision_artifact(tmp_path).read_text(encoding="utf-8"))
     assert artifact["supervisor_state"] == "DEGRADED"
     assert {"REFRESH_BROKER_TRUTH", "BLOCK_SUBMIT"}.issubset(artifact["recommended_actions"])
+
+
+def test_expired_broker_truth_lease_uses_broker_repair_priority(tmp_path: Path) -> None:
+    seed_clean_artifacts(tmp_path)
+    canonical_path = tmp_path / "outputs" / "operator_dashboard" / "runtime" / "latest_canonical_readiness.json"
+    canonical = json.loads(canonical_path.read_text(encoding="utf-8"))
+    canonical["canonical_readiness"] = "NOT_READY_DEPENDENCY"
+    canonical["root_guard_summary"] = {
+        "root_match": True,
+        "processes": [{"name": "broker_truth_refresher", "running": False}],
+    }
+    write_json(canonical_path, canonical)
+    write_json(
+        tmp_path / "outputs" / "operator_dashboard" / "runtime" / "latest_broker_truth_lease.json",
+        {
+            "generated_at": "2026-05-18T13:30:00+00:00",
+            "lease_state": "EXPIRED_BLOCK_NEW_ENTRIES",
+            "submit_entry_allowed": False,
+            "submit_exit_allowed": False,
+            "live_money_eligible": False,
+        },
+    )
+    write_json(
+        tmp_path
+        / "outputs"
+        / "probationary_pattern_engine"
+        / "paper_session"
+        / "runtime"
+        / "market_data_transport_probe.json",
+        {"generated_at": "2026-05-18T13:30:00+00:00", "classification": "DATABENTO_SOCKET_CLOSED", "fresh": False},
+    )
+
+    assert cli.main(["--repo-root", str(tmp_path)]) == 1
+    artifact = json.loads(decision_artifact(tmp_path).read_text(encoding="utf-8"))
+    assert artifact["recommended_actions"][:3] == ["BLOCK_SUBMIT", "REFRESH_BROKER_TRUTH", "RESTART_SIDECAR"]
+    assert "RECONNECT_MARKET_DATA" in artifact["recommended_actions"]
+    assert artifact["blockers"][0]["code"] == "broker_truth_lease_expired"
 
 
 def test_tws_not_listening_exits_2(tmp_path: Path) -> None:
