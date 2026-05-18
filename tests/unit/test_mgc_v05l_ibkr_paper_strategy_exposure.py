@@ -262,6 +262,7 @@ def test_allows_second_strategy_buy_when_another_strategy_is_already_long(tmp_pa
         bridge_strategy_id="gold_forced_session_baseline_v2__GC",
         action="BUY",
         quantity=1.0,
+        allow_stacking=True,
     )
 
     assert gate["classification"] == "PAPER_EXPOSURE_STACK_ALLOWED"
@@ -438,6 +439,7 @@ def test_phase1_reconciliation_blocked_overrides_legacy_monitor_submit_allowed(t
         bridge_strategy_id="gold_forced_session_baseline_v2__GC",
         action="BUY",
         quantity=1.0,
+        allow_stacking=True,
     )
 
     assert gate["classification"] == "PAPER_EXPOSURE_BLOCKED_PHASE1_RECONCILIATION"
@@ -633,6 +635,128 @@ def test_blocks_opposite_direction_open_against_existing_phase1_position(tmp_pat
         strategy_id="atp_companion_v1_gc_asia_promotion_1_075r_favorable_only_5m",
         bridge_strategy_id="atp_companion_v1__paper_gc_asia__promotion_1_075r_favorable_only_5m",
         executable_symbol="GC",
+        action="SELL",
+        intent_type="SELL_TO_OPEN",
+        quantity=1.0,
+    )
+
+    assert gate["submit_allowed"] is False
+    assert gate["classification"] == "PAPER_EXPOSURE_BLOCKED_STRATEGY_LIMIT"
+    assert "opposite_direction_strategy_exposure" in gate["block_reasons"]
+    assert gate["aggregate_strategy_position_sum"] == 1.0
+    assert gate["aggregate_broker_position"] == 1.0
+
+
+def test_mgc_plus_one_blocks_session_coverage_review_long_without_pyramiding(tmp_path: Path) -> None:
+    _write_monitor(tmp_path, broker_quantity=0.0)
+    _write_ledger(tmp_path, [])
+    _write_governance(
+        tmp_path,
+        [
+            _governance_row(
+                "mgc_asia_late_flat_pullback_pause_resume_long",
+                "ASIA_LATE_FLAT_PULLBACK_PAUSE_RESUME_LONG_V1",
+            ),
+        ],
+    )
+    _write_phase1_reconciliation(
+        tmp_path,
+        lifecycle_positions=[
+            {
+                "account_id": "DUM882026",
+                "strategy_id": "ASIA_EARLY_NORMAL_BREAKOUT_RETEST_HOLD_LONG_V1",
+                "track_b_root": "MGC",
+                "instrument_family": "MGC",
+                "contract_key": "MGC-202606",
+                "local_symbol": "MGCM6",
+                "con_id": 712565978,
+                "quantity": "1",
+                "side": "LONG",
+                "avg_entry_price": "4586.7",
+                "entry_order_id": "7",
+                "lifecycle_id": "bridge_fill_existing_mgc_plus_one",
+            }
+        ],
+    )
+    _write_broker_positions_snapshot(
+        tmp_path,
+        positions=[{"account_id": "DUM882026", "symbol": "MGC", "local_symbol": "MGCM6", "con_id": 712565978, "quantity": "1.0"}],
+    )
+    _write_broker_open_orders_snapshot(tmp_path, open_orders=[])
+
+    gate = evaluate_paper_strategy_exposure_gate(
+        repo_root=tmp_path,
+        strategy_id="mgc_asia_late_flat_pullback_pause_resume_long",
+        bridge_strategy_id="ASIA_LATE_FLAT_PULLBACK_PAUSE_RESUME_LONG_V1",
+        executable_symbol="MGC",
+        action="BUY",
+        intent_type="BUY_TO_OPEN",
+        quantity=1.0,
+    )
+
+    assert gate["submit_allowed"] is False
+    assert gate["classification"] == "PAPER_EXPOSURE_BLOCKED_STRATEGY_LIMIT"
+    assert "strategy_stacking_disabled" in gate["block_reasons"]
+    assert gate["aggregate_strategy_position_sum"] == 1.0
+    assert gate["aggregate_broker_position"] == 1.0
+
+    explicit_pyramid_gate = evaluate_paper_strategy_exposure_gate(
+        repo_root=tmp_path,
+        strategy_id="mgc_asia_late_flat_pullback_pause_resume_long",
+        bridge_strategy_id="ASIA_LATE_FLAT_PULLBACK_PAUSE_RESUME_LONG_V1",
+        executable_symbol="MGC",
+        action="BUY",
+        intent_type="BUY_TO_OPEN",
+        quantity=1.0,
+        allow_stacking=True,
+    )
+
+    assert explicit_pyramid_gate["submit_allowed"] is True
+    assert "strategy_stacking_disabled" not in explicit_pyramid_gate["block_reasons"]
+
+
+def test_mgc_plus_one_blocks_session_coverage_review_short_without_reversal_policy(tmp_path: Path) -> None:
+    _write_monitor(tmp_path, broker_quantity=0.0)
+    _write_ledger(tmp_path, [])
+    _write_governance(
+        tmp_path,
+        [
+            _governance_row(
+                "mgc_london_late_pause_resume_short",
+                "LONDON_LATE_PAUSE_RESUME_SHORT_V1",
+            ),
+        ],
+    )
+    _write_phase1_reconciliation(
+        tmp_path,
+        lifecycle_positions=[
+            {
+                "account_id": "DUM882026",
+                "strategy_id": "ASIA_EARLY_NORMAL_BREAKOUT_RETEST_HOLD_LONG_V1",
+                "track_b_root": "MGC",
+                "instrument_family": "MGC",
+                "contract_key": "MGC-202606",
+                "local_symbol": "MGCM6",
+                "con_id": 712565978,
+                "quantity": "1",
+                "side": "LONG",
+                "avg_entry_price": "4586.7",
+                "entry_order_id": "7",
+                "lifecycle_id": "bridge_fill_existing_mgc_plus_one",
+            }
+        ],
+    )
+    _write_broker_positions_snapshot(
+        tmp_path,
+        positions=[{"account_id": "DUM882026", "symbol": "MGC", "local_symbol": "MGCM6", "con_id": 712565978, "quantity": "1.0"}],
+    )
+    _write_broker_open_orders_snapshot(tmp_path, open_orders=[])
+
+    gate = evaluate_paper_strategy_exposure_gate(
+        repo_root=tmp_path,
+        strategy_id="mgc_london_late_pause_resume_short",
+        bridge_strategy_id="LONDON_LATE_PAUSE_RESUME_SHORT_V1",
+        executable_symbol="MGC",
         action="SELL",
         intent_type="SELL_TO_OPEN",
         quantity=1.0,
@@ -1023,6 +1147,7 @@ def test_does_not_impose_aggregate_cap_of_one_by_default(tmp_path: Path) -> None
         bridge_strategy_id="gold_forced_session_baseline_v2__GC",
         action="BUY",
         quantity=1.0,
+        allow_stacking=True,
     )
 
     assert gate["submit_allowed"] is True

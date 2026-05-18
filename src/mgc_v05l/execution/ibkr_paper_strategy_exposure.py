@@ -47,7 +47,7 @@ class IbkrPaperStrategyExposureConfig:
     action: str | None = None
     intent_type: str | None = None
     quantity: float = 1.0
-    allow_stacking: bool = True
+    allow_stacking: bool = False
     max_total_mgc_contracts: float | None = _DEFAULT_MAX_TOTAL_MGC_CONTRACTS
     max_total_gc_equivalent: float = _DEFAULT_MAX_TOTAL_GC_EQUIVALENT
     max_per_strategy_mgc_contracts: float = _DEFAULT_MAX_PER_STRATEGY_MGC_CONTRACTS
@@ -192,7 +192,7 @@ def evaluate_paper_strategy_exposure_gate(
     quantity: float,
     bridge_strategy_id: str | None = None,
     executable_symbol: str = "MGC",
-    allow_stacking: bool = True,
+    allow_stacking: bool = False,
     max_total_mgc_contracts: float | None = None,
     max_total_gc_equivalent: float = _DEFAULT_MAX_TOTAL_GC_EQUIVALENT,
     max_per_strategy_mgc_contracts: float = _DEFAULT_MAX_PER_STRATEGY_MGC_CONTRACTS,
