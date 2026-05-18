@@ -130,6 +130,32 @@ def test_clean_ready_state_writes_artifact_and_exits_0(tmp_path: Path, capsys) -
     assert "canonical_readiness" in artifact["source_artifact_timestamps"]
 
 
+def test_stale_legacy_market_probe_does_not_override_fresh_canonical_market_data(tmp_path: Path) -> None:
+    seed_clean_artifacts(tmp_path)
+    write_json(
+        tmp_path
+        / "outputs"
+        / "probationary_pattern_engine"
+        / "paper_session"
+        / "runtime"
+        / "market_data_transport_probe.json",
+        {
+            "generated_at": "2026-05-18T12:00:00+00:00",
+            "classification": "DATABENTO_SOCKET_CLOSED",
+            "fresh": False,
+            "socket_closed": True,
+        },
+    )
+
+    assert cli.main(["--repo-root", str(tmp_path)]) == 0
+    artifact = json.loads(decision_artifact(tmp_path).read_text(encoding="utf-8"))
+    assert artifact["supervisor_state"] == "RECOVERED"
+    assert artifact["recommended_actions"] == ["NO_ACTION"]
+    assert artifact["submit_block_required"] is False
+    assert artifact["input_summary"]["market_data"] == "MARKET_DATA_FRESH"
+    assert artifact["source_artifacts"]["market_data"].endswith("latest_canonical_readiness.json")
+
+
 def test_degraded_broker_truth_exits_1(tmp_path: Path) -> None:
     seed_clean_artifacts(tmp_path)
     write_json(
@@ -159,6 +185,12 @@ def test_expired_broker_truth_lease_uses_broker_repair_priority(tmp_path: Path) 
     canonical["root_guard_summary"] = {
         "root_match": True,
         "processes": [{"name": "broker_truth_refresher", "running": False}],
+    }
+    canonical["market_data"] = {
+        "classification": "DATABENTO_SOCKET_CLOSED",
+        "fresh": False,
+        "socket_closed": True,
+        "source": "phase1_databento_live_listener",
     }
     write_json(canonical_path, canonical)
     write_json(
@@ -241,6 +273,18 @@ def test_quarantined_lane_exits_1(tmp_path: Path) -> None:
 
 def test_stale_reconciliation_exits_1(tmp_path: Path) -> None:
     seed_clean_artifacts(tmp_path)
+    canonical_path = tmp_path / "outputs" / "operator_dashboard" / "runtime" / "latest_canonical_readiness.json"
+    canonical = json.loads(canonical_path.read_text(encoding="utf-8"))
+    canonical["canonical_readiness"] = "NOT_READY_RECONCILIATION"
+    canonical["phase1_reconciliation"] = {
+        "classification": "TRACK_B_PAPER_BROKER_RECONCILED",
+        "fresh": False,
+        "broker_reconciled": True,
+        "review_required_count": 0,
+        "lifecycle_open_position_count": 0,
+        "live_money_eligible": False,
+    }
+    write_json(canonical_path, canonical)
     write_json(
         tmp_path
         / "outputs"
@@ -263,8 +307,87 @@ def test_stale_reconciliation_exits_1(tmp_path: Path) -> None:
     assert "REFRESH_RECONCILIATION" in artifact["recommended_actions"]
 
 
+def test_raw_reconciliation_without_fresh_field_uses_canonical_clean_fresh_status(tmp_path: Path) -> None:
+    seed_clean_artifacts(tmp_path)
+    write_json(
+        tmp_path
+        / "outputs"
+        / "reports"
+        / "track_b_paper_broker_reconciliation"
+        / "latest_track_b_paper_broker_reconciliation.json",
+        {
+            "generated_at": "2026-05-18T13:29:59+00:00",
+            "classification": "TRACK_B_PAPER_BROKER_RECONCILED",
+            "broker_reconciled": True,
+            "review_required_count": 0,
+            "lifecycle_open_position_count": 0,
+            "track_b_broker_open_order_count": 0,
+            "live_money_eligible": False,
+        },
+    )
+
+    assert cli.main(["--repo-root", str(tmp_path)]) == 0
+    artifact = json.loads(decision_artifact(tmp_path).read_text(encoding="utf-8"))
+    assert artifact["supervisor_state"] == "RECOVERED"
+    assert "REFRESH_RECONCILIATION" not in artifact["recommended_actions"]
+    assert artifact["input_summary"]["reconciliation"] == "TRACK_B_PAPER_BROKER_RECONCILED"
+
+
+def test_required_phase1_symbol_stale_blocks_even_if_legacy_probe_is_fresh(tmp_path: Path) -> None:
+    seed_clean_artifacts(tmp_path)
+    canonical_path = tmp_path / "outputs" / "operator_dashboard" / "runtime" / "latest_canonical_readiness.json"
+    canonical = json.loads(canonical_path.read_text(encoding="utf-8"))
+    canonical["canonical_readiness"] = "NOT_READY_DEPENDENCY"
+    canonical["ready_submit_capable"] = False
+    canonical["market_data"] = {
+        "classification": "MARKET_DATA_NOT_FRESH",
+        "fresh": False,
+        "market_data_ok": False,
+        "source": "phase1_databento_live_listener",
+        "required_symbols": ["MGC", "MNQ"],
+        "required_blocked_symbols": ["MGC"],
+        "blockers": [
+            {
+                "code": "market_data_not_fresh",
+                "detail": "MGC required Phase-1 live bar is stale.",
+                "source": "phase1_databento_live_listener",
+                "symbol": "MGC",
+            }
+        ],
+    }
+    write_json(canonical_path, canonical)
+    write_json(
+        tmp_path
+        / "outputs"
+        / "probationary_pattern_engine"
+        / "paper_session"
+        / "runtime"
+        / "market_data_transport_probe.json",
+        {"generated_at": "2026-05-18T13:29:59+00:00", "classification": "MARKET_DATA_FRESH", "fresh": True},
+    )
+
+    assert cli.main(["--repo-root", str(tmp_path)]) == 1
+    artifact = json.loads(decision_artifact(tmp_path).read_text(encoding="utf-8"))
+    assert {"RECONNECT_MARKET_DATA", "BLOCK_SUBMIT"}.issubset(artifact["recommended_actions"])
+    assert artifact["blockers"][0]["code"] == "market_data_degraded"
+    assert artifact["source_artifacts"]["market_data"].endswith("latest_canonical_readiness.json")
+
+
 def test_operator_required_lifecycle_state_exits_2(tmp_path: Path) -> None:
     seed_clean_artifacts(tmp_path)
+    canonical_path = tmp_path / "outputs" / "operator_dashboard" / "runtime" / "latest_canonical_readiness.json"
+    canonical = json.loads(canonical_path.read_text(encoding="utf-8"))
+    canonical["canonical_readiness"] = "NOT_READY_RECONCILIATION"
+    canonical["phase1_reconciliation"] = {
+        "classification": "TRACK_B_PAPER_BROKER_RECONCILIATION_BLOCKED",
+        "fresh": True,
+        "broker_reconciled": False,
+        "broker_flat": False,
+        "lifecycle_open_position_count": 1,
+        "review_required_count": 1,
+        "live_money_eligible": False,
+    }
+    write_json(canonical_path, canonical)
     write_json(
         tmp_path
         / "outputs"

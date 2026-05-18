@@ -54,13 +54,35 @@ def gather_supervisor_inputs(*, repo_root: Path) -> dict[str, Any]:
     ibkr_connectivity = _read_json(paths["ibkr_connectivity"])
     broker_truth = _read_json(paths["broker_truth"])
     broker_truth_lease = _read_json(paths["broker_truth_lease"])
-    reconciliation = _read_json(paths["reconciliation"])
+    raw_reconciliation = _read_json(paths["reconciliation"])
     operator_status = _read_json(paths["runtime_health"])
     lane_quarantine = _read_json(paths["lane_quarantine"])
-    market_data = _read_json(paths["market_data"])
+    legacy_market_data = _read_json(paths["market_data"])
     root_guard = _mapping(canonical.get("root_guard_summary"))
 
     runtime = _runtime_input(operator_status=operator_status, canonical=canonical)
+    market_data, market_data_source_path = _market_data_input(
+        canonical=canonical,
+        legacy_market_data=legacy_market_data,
+        paths=paths,
+    )
+    reconciliation, reconciliation_source_path = _reconciliation_input(
+        canonical=canonical,
+        raw_reconciliation=raw_reconciliation,
+        paths=paths,
+    )
+    source_paths = {key: str(path) for key, path in paths.items()}
+    source_paths["market_data"] = str(market_data_source_path)
+    source_paths["reconciliation"] = str(reconciliation_source_path)
+    source_timestamps = {key: _artifact_timestamp(path, _read_json(path)) for key, path in paths.items()}
+    source_timestamps["market_data"] = _artifact_timestamp(
+        market_data_source_path,
+        canonical if market_data_source_path == paths["canonical_readiness"] else legacy_market_data,
+    )
+    source_timestamps["reconciliation"] = _artifact_timestamp(
+        reconciliation_source_path,
+        canonical if reconciliation_source_path == paths["canonical_readiness"] else raw_reconciliation,
+    )
     return {
         "generated_at": canonical.get("generated_at") or broker_truth.get("generated_at") or ibkr_connectivity.get("generated_at"),
         "canonical_readiness": canonical,
@@ -70,14 +92,14 @@ def gather_supervisor_inputs(*, repo_root: Path) -> dict[str, Any]:
             broker_truth_lease or _mapping(canonical.get("broker_truth_lease")),
             paths["broker_truth_lease"],
         ),
-        "market_data": _with_available(market_data or _mapping(canonical.get("market_data")), paths["market_data"]),
+        "market_data": _with_available(market_data, market_data_source_path),
         "runtime": _with_available(runtime, paths["runtime_health"]),
         "lane_quarantine": _with_available(lane_quarantine or _mapping(canonical.get("lane_quarantine")), paths["lane_quarantine"]),
-        "reconciliation": _with_available(reconciliation or _mapping(canonical.get("phase1_reconciliation")), paths["reconciliation"]),
+        "reconciliation": _with_available(reconciliation, reconciliation_source_path),
         "root_guard": root_guard,
         "artifact_pressure": _read_json(paths["artifact_pressure"]),
-        "_source_paths": {key: str(path) for key, path in paths.items()},
-        "_source_timestamps": {key: _artifact_timestamp(path, _read_json(path)) for key, path in paths.items()},
+        "_source_paths": source_paths,
+        "_source_timestamps": source_timestamps,
     }
 
 
@@ -173,6 +195,40 @@ def _runtime_input(*, operator_status: Mapping[str, Any], canonical: Mapping[str
         or canonical_runtime.get("loaded_lane_count"),
         "live_money_eligible": operator_status.get("live_money_eligible") is True,
     }
+
+
+def _market_data_input(
+    *,
+    canonical: Mapping[str, Any],
+    legacy_market_data: Mapping[str, Any],
+    paths: Mapping[str, Path],
+) -> tuple[dict[str, Any], Path]:
+    canonical_market_data = _mapping(canonical.get("market_data"))
+    if canonical_market_data:
+        payload = dict(canonical_market_data)
+        if "classification" not in payload:
+            payload["classification"] = "MARKET_DATA_FRESH" if payload.get("fresh") is True else "MARKET_DATA_NOT_FRESH"
+        payload["normalized_from"] = "canonical_readiness"
+        if legacy_market_data:
+            payload["legacy_probe_path"] = str(paths["market_data"])
+            payload["legacy_probe_generated_at"] = legacy_market_data.get("generated_at")
+        return payload, paths["canonical_readiness"]
+    return dict(legacy_market_data), paths["market_data"]
+
+
+def _reconciliation_input(
+    *,
+    canonical: Mapping[str, Any],
+    raw_reconciliation: Mapping[str, Any],
+    paths: Mapping[str, Path],
+) -> tuple[dict[str, Any], Path]:
+    canonical_reconciliation = _mapping(canonical.get("phase1_reconciliation"))
+    if canonical_reconciliation:
+        payload = {**dict(raw_reconciliation), **canonical_reconciliation}
+        payload["normalized_from"] = "canonical_readiness"
+        payload["raw_reconciliation_path"] = str(paths["reconciliation"])
+        return payload, paths["reconciliation"]
+    return dict(raw_reconciliation), paths["reconciliation"]
 
 
 def _with_available(payload: Mapping[str, Any], path: Path) -> dict[str, Any]:
