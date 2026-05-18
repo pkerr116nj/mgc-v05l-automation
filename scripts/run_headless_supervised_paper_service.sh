@@ -42,6 +42,18 @@ PAPER_LOG_FILE="${DEFAULT_PAPER_LOG_FILE}"
 DASHBOARD_URL="${DEFAULT_DASHBOARD_URL}"
 START_PAPER=1
 START_DASHBOARD=1
+BROKER_TRUTH_REFRESH_PROFILE="${MGC_HEADLESS_BROKER_TRUTH_REFRESH_PROFILE:-${MGC_OPERATIONAL_PROFILE:-headless_paper}}"
+STRICT_BROKER_TRUTH_REFRESH="${MGC_HEADLESS_STRICT_BROKER_TRUTH_REFRESH:-0}"
+START_BROKER_TRUTH_REFRESH="${MGC_HEADLESS_START_BROKER_TRUTH_REFRESH:-}"
+DEFAULT_START_BROKER_TRUTH_REFRESH=1
+case "$(printf '%s' "${BROKER_TRUTH_REFRESH_PROFILE}" | tr '[:upper:]' '[:lower:]')" in
+  dev|development|test|local)
+    DEFAULT_START_BROKER_TRUTH_REFRESH=0
+    ;;
+esac
+if [[ -z "${START_BROKER_TRUTH_REFRESH}" ]]; then
+  START_BROKER_TRUTH_REFRESH="${DEFAULT_START_BROKER_TRUTH_REFRESH}"
+fi
 
 HEADLESS_PAPER_CONFIG_PATHS="${MGC_HEADLESS_SUPERVISED_PAPER_CONFIG_PATHS:-${MGC_PROBATIONARY_PAPER_CONFIG_PATHS:-}}"
 if [[ -z "${HEADLESS_PAPER_CONFIG_PATHS}" ]]; then
@@ -130,6 +142,18 @@ while (($# > 0)); do
       START_DASHBOARD=0
       shift
       ;;
+    --start-broker-truth-refresh)
+      START_BROKER_TRUTH_REFRESH=1
+      shift
+      ;;
+    --no-start-broker-truth-refresh)
+      START_BROKER_TRUTH_REFRESH=0
+      shift
+      ;;
+    --strict-broker-truth-refresh)
+      STRICT_BROKER_TRUTH_REFRESH=1
+      shift
+      ;;
     *)
       echo "Unsupported argument: $1" >&2
       exit 1
@@ -153,6 +177,17 @@ read_pid_file() {
     return 1
   fi
   tr -d '[:space:]' < "${pid_file}" 2>/dev/null
+}
+
+truthy_flag() {
+  case "$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]')" in
+    1|true|yes|y|on)
+      return 0
+      ;;
+    *)
+      return 1
+      ;;
+  esac
 }
 
 pid_file_alive() {
@@ -307,6 +342,14 @@ start_dashboard_manager() {
   echo "${manager_pid}" > "${MANAGER_PID_FILE}"
 }
 
+start_broker_truth_refresher() {
+  if ! truthy_flag "${START_BROKER_TRUTH_REFRESH}"; then
+    return 0
+  fi
+  TRACK_B_BROKER_TRUTH_REFRESH_SECONDS="${TRACK_B_BROKER_TRUTH_REFRESH_SECONDS:-60}" \
+    TRACK_B_BROKER_TRUTH_REFRESH_CLIENT_ID="${TRACK_B_BROKER_TRUTH_REFRESH_CLIENT_ID:-9077}" \
+    bash "${SCRIPT_DIR}/start-track-b-broker-truth-refresh" >/dev/null
+}
 
 ready_processes_and_endpoints_alive() {
   if [[ "${START_PAPER}" -eq 1 ]] && ! pid_file_alive "${PAPER_PID_FILE}"; then
@@ -438,6 +481,13 @@ fi
 if ! start_dashboard_manager; then
   write_startup_summary "BLOCKED" "Failed to start the operator dashboard manager." "false"
   exit 1
+fi
+if ! start_broker_truth_refresher; then
+  if truthy_flag "${STRICT_BROKER_TRUTH_REFRESH}"; then
+    write_startup_summary "BLOCKED" "Failed to start the read-only broker-truth refresh sidecar in strict mode." "false"
+    exit 1
+  fi
+  echo "Warning: failed to start read-only broker-truth refresh sidecar; canonical readiness remains authoritative and will fail closed if broker truth is stale." >&2
 fi
 
 set +e

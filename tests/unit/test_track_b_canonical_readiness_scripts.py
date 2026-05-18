@@ -39,6 +39,28 @@ def test_launch_script_passes_canonical_readiness_paths_to_status_script() -> No
     assert "Headless supervised paper host is READY_SUBMIT_CAPABLE." in script
 
 
+def test_launch_script_uses_profile_aware_broker_truth_sidecar_policy() -> None:
+    script = RUN_SCRIPT.read_text(encoding="utf-8")
+
+    assert "BROKER_TRUTH_REFRESH_PROFILE" in script
+    assert "DEFAULT_START_BROKER_TRUTH_REFRESH=1" in script
+    assert "dev|development|test|local)" in script
+    assert "DEFAULT_START_BROKER_TRUTH_REFRESH=0" in script
+    assert "--start-broker-truth-refresh)" in script
+    assert "--no-start-broker-truth-refresh)" in script
+    assert "--strict-broker-truth-refresh)" in script
+    assert "truthy_flag \"${START_BROKER_TRUTH_REFRESH}\"" in script
+
+
+def test_launch_script_refresher_failure_is_sidecar_warning_unless_strict() -> None:
+    script = RUN_SCRIPT.read_text(encoding="utf-8")
+
+    assert "Failed to start the read-only broker-truth refresh sidecar in strict mode." in script
+    assert "canonical readiness remains authoritative and will fail closed" in script
+    assert "write_startup_summary \"BLOCKED\" \"Failed to start the read-only broker-truth refresh service.\"" not in script
+    assert script.index("start_broker_truth_refresher") < script.index("refresh_canonical_readiness_for_launch \"post-launch\"")
+
+
 def test_scripts_do_not_add_broker_order_api_calls() -> None:
     combined = "\n".join(
         [
