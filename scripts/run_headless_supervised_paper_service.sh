@@ -12,11 +12,13 @@ DEFAULT_MARKDOWN_FILE="${DEFAULT_RUNTIME_DIR}/headless_supervised_paper_status.m
 DEFAULT_CANONICAL_READINESS_FILE="${DEFAULT_RUNTIME_DIR}/latest_canonical_readiness.json"
 DEFAULT_CANONICAL_READINESS_SUMMARY_FILE="${DEFAULT_RUNTIME_DIR}/latest_canonical_readiness_summary.json"
 DEFAULT_STARTUP_FILE="${DEFAULT_RUNTIME_DIR}/headless_supervised_paper_service_startup.json"
+DEFAULT_REQUESTED_CONFIG_PATHS_FILE="${DEFAULT_RUNTIME_DIR}/headless_supervised_paper_requested_config_paths.txt"
 DEFAULT_MANAGER_PID_FILE="${DEFAULT_RUNTIME_DIR}/operator_dashboard_manager.pid"
 DEFAULT_MANAGER_LOG_FILE="${DEFAULT_RUNTIME_DIR}/operator_dashboard_manager.log"
 DEFAULT_DASHBOARD_PID_FILE="${DEFAULT_RUNTIME_DIR}/operator_dashboard.pid"
 DEFAULT_PAPER_PID_FILE="${REPO_ROOT}/outputs/probationary_pattern_engine/paper_session/runtime/probationary_paper.pid"
 DEFAULT_PAPER_LOG_FILE="${REPO_ROOT}/outputs/probationary_pattern_engine/paper_session/runtime/probationary_paper.log"
+DEFAULT_PAPER_CONFIG_PATHS_FILE="${REPO_ROOT}/outputs/probationary_pattern_engine/paper_session/runtime/paper_runtime_config_paths.txt"
 DEFAULT_DASHBOARD_URL="${MGC_OPERATOR_DASHBOARD_URL:-http://127.0.0.1:8790/}"
 SERVICE_HOST_AUTOSTART_BRIDGE_SUPERVISOR="${MGC_SERVICE_HOST_AUTOSTART_RESEARCH_RUNTIME_BRIDGE_SUPERVISOR:-1}"
 DEFAULT_HEADLESS_PAPER_CONFIG_PATHS=(
@@ -34,11 +36,13 @@ MARKDOWN_FILE="${DEFAULT_MARKDOWN_FILE}"
 CANONICAL_READINESS_FILE="${DEFAULT_CANONICAL_READINESS_FILE}"
 CANONICAL_READINESS_SUMMARY_FILE="${DEFAULT_CANONICAL_READINESS_SUMMARY_FILE}"
 STARTUP_FILE="${DEFAULT_STARTUP_FILE}"
+REQUESTED_CONFIG_PATHS_FILE="${DEFAULT_REQUESTED_CONFIG_PATHS_FILE}"
 MANAGER_PID_FILE="${DEFAULT_MANAGER_PID_FILE}"
 MANAGER_LOG_FILE="${DEFAULT_MANAGER_LOG_FILE}"
 DASHBOARD_PID_FILE="${DEFAULT_DASHBOARD_PID_FILE}"
 PAPER_PID_FILE="${DEFAULT_PAPER_PID_FILE}"
 PAPER_LOG_FILE="${DEFAULT_PAPER_LOG_FILE}"
+PAPER_CONFIG_PATHS_FILE="${DEFAULT_PAPER_CONFIG_PATHS_FILE}"
 DASHBOARD_URL="${DEFAULT_DASHBOARD_URL}"
 START_PAPER=1
 START_DASHBOARD=1
@@ -59,6 +63,7 @@ HEADLESS_PAPER_CONFIG_PATHS="${MGC_HEADLESS_SUPERVISED_PAPER_CONFIG_PATHS:-${MGC
 if [[ -z "${HEADLESS_PAPER_CONFIG_PATHS}" ]]; then
   HEADLESS_PAPER_CONFIG_PATHS="$(IFS=:; printf '%s' "${DEFAULT_HEADLESS_PAPER_CONFIG_PATHS[*]}")"
 fi
+REQUIRED_PAPER_CONFIG_PATHS="${MGC_HEADLESS_REQUIRED_PAPER_CONFIGS:-${MGC_HEADLESS_REQUIRED_PAPER_CONFIG_PATHS:-}}"
 
 while (($# > 0)); do
   case "$1" in
@@ -118,6 +123,14 @@ while (($# > 0)); do
       STARTUP_FILE="${1#*=}"
       shift
       ;;
+    --requested-config-paths-output)
+      REQUESTED_CONFIG_PATHS_FILE="$2"
+      shift 2
+      ;;
+    --requested-config-paths-output=*)
+      REQUESTED_CONFIG_PATHS_FILE="${1#*=}"
+      shift
+      ;;
     --dashboard-url)
       DASHBOARD_URL="$2"
       shift 2
@@ -132,6 +145,14 @@ while (($# > 0)); do
       ;;
     --dashboard-pid-file=*)
       DASHBOARD_PID_FILE="${1#*=}"
+      shift
+      ;;
+    --paper-config-paths-file)
+      PAPER_CONFIG_PATHS_FILE="$2"
+      shift 2
+      ;;
+    --paper-config-paths-file=*)
+      PAPER_CONFIG_PATHS_FILE="${1#*=}"
       shift
       ;;
     --no-start-paper)
@@ -166,10 +187,12 @@ ensure_dir "$(dirname "${MARKDOWN_FILE}")"
 ensure_dir "$(dirname "${CANONICAL_READINESS_FILE}")"
 ensure_dir "$(dirname "${CANONICAL_READINESS_SUMMARY_FILE}")"
 ensure_dir "$(dirname "${STARTUP_FILE}")"
+ensure_dir "$(dirname "${REQUESTED_CONFIG_PATHS_FILE}")"
 ensure_dir "$(dirname "${MANAGER_PID_FILE}")"
 ensure_dir "$(dirname "${MANAGER_LOG_FILE}")"
 ensure_dir "$(dirname "${DASHBOARD_PID_FILE}")"
 ensure_dir "$(dirname "${PAPER_LOG_FILE}")"
+ensure_dir "$(dirname "${PAPER_CONFIG_PATHS_FILE}")"
 
 read_pid_file() {
   local pid_file="$1"
@@ -197,6 +220,110 @@ pid_file_alive() {
   [[ -n "${pid}" ]] && kill -0 "${pid}" 2>/dev/null
 }
 
+split_config_paths() {
+  local raw="$1"
+  "${PYTHON_BIN}" - <<'PY' "${REPO_ROOT}" "${raw}"
+import sys
+from pathlib import Path
+
+repo_root = Path(sys.argv[1])
+raw = sys.argv[2]
+for item in raw.replace(",", ":").split(":"):
+    item = item.strip()
+    if not item:
+        continue
+    path = Path(item)
+    if not path.is_absolute():
+        path = repo_root / path
+    print(path.resolve())
+PY
+}
+
+persist_requested_config_paths() {
+  split_config_paths "${HEADLESS_PAPER_CONFIG_PATHS}" > "${REQUESTED_CONFIG_PATHS_FILE}"
+  cp "${REQUESTED_CONFIG_PATHS_FILE}" "${PAPER_CONFIG_PATHS_FILE}"
+}
+
+requested_config_paths_arg() {
+  "${PYTHON_BIN}" - <<'PY' "${REQUESTED_CONFIG_PATHS_FILE}"
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+try:
+    rows = [line.strip() for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
+except OSError:
+    rows = []
+print(":".join(rows))
+PY
+}
+
+assert_required_config_paths_present() {
+  local required_raw="$1"
+  if [[ -z "${required_raw}" ]]; then
+    return 0
+  fi
+  "${PYTHON_BIN}" - <<'PY' "${REPO_ROOT}" "${REQUESTED_CONFIG_PATHS_FILE}" "${required_raw}"
+import sys
+from pathlib import Path
+
+repo_root = Path(sys.argv[1])
+requested_file = Path(sys.argv[2])
+required_raw = sys.argv[3]
+requested = {Path(line.strip()).resolve() for line in requested_file.read_text(encoding="utf-8").splitlines() if line.strip()}
+missing = []
+for item in required_raw.replace(",", ":").split(":"):
+    item = item.strip()
+    if not item:
+        continue
+    path = Path(item)
+    if not path.is_absolute():
+        path = repo_root / path
+    if path.resolve() not in requested:
+        missing.append(str(path.resolve()))
+if missing:
+    print("Missing required paper config path(s): " + ", ".join(missing), file=sys.stderr)
+    raise SystemExit(1)
+PY
+}
+
+assert_runtime_config_paths_match_request() {
+  local phase="$1"
+  if [[ "${START_PAPER}" -ne 1 ]]; then
+    return 0
+  fi
+  local pid
+  pid="$(read_pid_file "${PAPER_PID_FILE}" || true)"
+  if [[ -z "${pid}" ]] || ! kill -0 "${pid}" 2>/dev/null; then
+    echo "Paper runtime PID is unavailable during ${phase}." >&2
+    return 1
+  fi
+  "${PYTHON_BIN}" - <<'PY' "${pid}" "${REQUESTED_CONFIG_PATHS_FILE}" "${phase}"
+import subprocess
+import sys
+from pathlib import Path
+
+pid = sys.argv[1]
+requested_file = Path(sys.argv[2])
+phase = sys.argv[3]
+requested = [line.strip() for line in requested_file.read_text(encoding="utf-8").splitlines() if line.strip()]
+try:
+    command = subprocess.check_output(["ps", "-p", pid, "-o", "command="], text=True).strip()
+except (OSError, subprocess.CalledProcessError) as exc:
+    print(f"Unable to inspect paper runtime command during {phase}: {exc}", file=sys.stderr)
+    raise SystemExit(1)
+missing = [path for path in requested if path not in command]
+if missing:
+    print(
+        f"Paper runtime config path mismatch during {phase}; missing from active command: "
+        + ", ".join(missing),
+        file=sys.stderr,
+    )
+    print(f"Active command: {command}", file=sys.stderr)
+    raise SystemExit(1)
+PY
+}
+
 launchctl_submit_available() {
   command -v launchctl >/dev/null 2>&1
 }
@@ -217,7 +344,7 @@ launch_screen_paper_runtime() {
   MGC_HEADLESS_PAPER_PID_FILE="${PAPER_PID_FILE}" \
     MGC_HEADLESS_PAPER_LOG_FILE="${PAPER_LOG_FILE}" \
     MGC_HEADLESS_SCRIPT_DIR="${SCRIPT_DIR}" \
-    MGC_PROBATIONARY_PAPER_CONFIG_PATHS="${HEADLESS_PAPER_CONFIG_PATHS}" \
+    MGC_PROBATIONARY_PAPER_CONFIG_PATHS="$(requested_config_paths_arg)" \
     screen -dmS "${session_name}" /bin/zsh -lc \
     'echo "$$" > "${MGC_HEADLESS_PAPER_PID_FILE}"; exec bash "${MGC_HEADLESS_SCRIPT_DIR}/run_probationary_paper_soak.sh" >> "${MGC_HEADLESS_PAPER_LOG_FILE}" 2>&1'
 }
@@ -240,7 +367,7 @@ launch_detached_paper_runtime() {
     MGC_HEADLESS_PAPER_PID_FILE="${PAPER_PID_FILE}" \
     MGC_HEADLESS_PAPER_LOG_FILE="${PAPER_LOG_FILE}" \
     MGC_HEADLESS_SCRIPT_DIR="${SCRIPT_DIR}" \
-    MGC_PROBATIONARY_PAPER_CONFIG_PATHS="${HEADLESS_PAPER_CONFIG_PATHS}" \
+    MGC_PROBATIONARY_PAPER_CONFIG_PATHS="$(requested_config_paths_arg)" \
     /bin/zsh -lc 'echo "$$" > "${MGC_HEADLESS_PAPER_PID_FILE}"; exec bash "${MGC_HEADLESS_SCRIPT_DIR}/run_probationary_paper_soak.sh" >> "${MGC_HEADLESS_PAPER_LOG_FILE}" 2>&1'
 }
 
@@ -281,12 +408,20 @@ with open(path, "w", encoding="utf-8") as handle:
 PY
 }
 
+stop_paper_runtime_best_effort() {
+  if [[ "${START_PAPER}" -ne 1 ]]; then
+    return 0
+  fi
+  bash "${SCRIPT_DIR}/stop_probationary_paper_soak.sh" >/dev/null 2>&1 || true
+}
+
 start_paper_runtime() {
   if [[ "${START_PAPER}" -ne 1 ]]; then
     return 0
   fi
   if pid_file_alive "${PAPER_PID_FILE}"; then
-    return 0
+    assert_runtime_config_paths_match_request "pre-existing-runtime"
+    return $?
   fi
   if screen_available; then
     launch_screen_paper_runtime
@@ -297,12 +432,17 @@ start_paper_runtime() {
     return 0
   fi
   local output
-  output="$(MGC_PROBATIONARY_PAPER_CONFIG_PATHS="${HEADLESS_PAPER_CONFIG_PATHS}" bash "${SCRIPT_DIR}/run_probationary_paper_soak.sh" --background 2>&1)" && return 0
+  output="$(MGC_PROBATIONARY_PAPER_CONFIG_PATHS="$(requested_config_paths_arg)" bash "${SCRIPT_DIR}/run_probationary_paper_soak.sh" --background 2>&1)" && return 0
   if [[ "${output}" == *"already running"* ]]; then
     return 0
   fi
   echo "${output}" >&2
   return 1
+}
+
+refresh_phase1_reconciliation_for_launch() {
+  "${PYTHON_BIN}" -m mgc_v05l.execution_core.track_b_paper_broker_reconciliation \
+    --repo-root "${REPO_ROOT}" >/dev/null
 }
 
 start_dashboard_manager() {
@@ -462,6 +602,9 @@ fail_fast_if_hard_canonical_blocker() {
   classification="$(canonical_readiness_classification)"
   case "${classification}" in
     NOT_READY_WRONG_ROOT|NOT_READY_CONFIG|NOT_READY_RECONCILIATION)
+      if [[ "${phase}" != "pre-launch" ]]; then
+        stop_paper_runtime_best_effort
+      fi
       write_startup_summary "BLOCKED" "Canonical readiness ${classification} during ${phase}." "false"
       cat "${STARTUP_FILE}"
       exit 2
@@ -469,6 +612,12 @@ fail_fast_if_hard_canonical_blocker() {
   esac
 }
 
+persist_requested_config_paths
+if ! assert_required_config_paths_present "${REQUIRED_PAPER_CONFIG_PATHS}"; then
+  write_startup_summary "BLOCKED" "Requested paper runtime config stack is missing required config paths." "false"
+  cat "${STARTUP_FILE}"
+  exit 2
+fi
 set +e
 refresh_canonical_readiness_for_launch "pre-launch"
 set -e
@@ -477,6 +626,11 @@ fail_fast_if_hard_canonical_blocker "pre-launch"
 if ! start_paper_runtime; then
   write_startup_summary "BLOCKED" "Failed to start the supervised paper runtime." "false"
   exit 1
+fi
+if ! assert_runtime_config_paths_match_request "post-start"; then
+  stop_paper_runtime_best_effort
+  write_startup_summary "BLOCKED" "Active paper runtime config paths did not match requested launch config stack." "false"
+  exit 2
 fi
 if ! start_dashboard_manager; then
   write_startup_summary "BLOCKED" "Failed to start the operator dashboard manager." "false"
@@ -511,6 +665,20 @@ while (( SECONDS < deadline )); do
   fail_fast_if_hard_canonical_blocker "status-refresh"
   if [[ "$(read_contract_field "app_usable_for_supervised_paper")" == "true" ]]; then
     if ready_processes_and_endpoints_alive; then
+      if ! assert_runtime_config_paths_match_request "pre-success"; then
+        stop_paper_runtime_best_effort
+        write_startup_summary "BLOCKED" "Active paper runtime config paths did not match requested launch config stack before success." "false"
+        exit 2
+      fi
+      if ! refresh_phase1_reconciliation_for_launch; then
+        stop_paper_runtime_best_effort
+        write_startup_summary "BLOCKED" "Failed to refresh Phase-1 reconciliation before claiming launch success." "false"
+        exit 2
+      fi
+      set +e
+      refresh_canonical_readiness_for_launch "pre-success"
+      set -e
+      fail_fast_if_hard_canonical_blocker "pre-success"
       canonical_state="$(canonical_readiness_classification)"
       if [[ "${canonical_state}" != "READY_SUBMIT_CAPABLE" ]]; then
         write_startup_summary "READY" "Headless supervised paper host is usable for ${canonical_state}." "true"

@@ -81,6 +81,39 @@ def test_launch_script_uses_profile_aware_broker_truth_sidecar_policy() -> None:
     assert "truthy_flag \"${START_BROKER_TRUTH_REFRESH}\"" in script
 
 
+def test_launch_script_makes_explicit_config_stack_authoritative() -> None:
+    script = RUN_SCRIPT.read_text(encoding="utf-8")
+
+    assert "DEFAULT_REQUESTED_CONFIG_PATHS_FILE" in script
+    assert "DEFAULT_PAPER_CONFIG_PATHS_FILE" in script
+    assert "MGC_HEADLESS_REQUIRED_PAPER_CONFIGS" in script
+    assert "MGC_HEADLESS_REQUIRED_PAPER_CONFIG_PATHS" in script
+    assert "persist_requested_config_paths" in script
+    assert "assert_required_config_paths_present" in script
+    assert "Requested paper runtime config stack is missing required config paths." in script
+    assert "assert_runtime_config_paths_match_request" in script
+    assert "cp \"${REQUESTED_CONFIG_PATHS_FILE}\" \"${PAPER_CONFIG_PATHS_FILE}\"" in script
+    assert "MGC_PROBATIONARY_PAPER_CONFIG_PATHS=\"$(requested_config_paths_arg)\"" in script
+    assert "pre-existing-runtime" in script
+    assert "post-start" in script
+    assert "pre-success" in script
+    assert "Active paper runtime config paths did not match requested launch config stack" in script
+
+
+def test_launch_script_refreshes_reconciliation_before_success_and_stops_on_hard_blocks() -> None:
+    script = RUN_SCRIPT.read_text(encoding="utf-8")
+
+    assert "refresh_phase1_reconciliation_for_launch" in script
+    assert "mgc_v05l.execution_core.track_b_paper_broker_reconciliation" in script
+    assert "refresh_phase1_reconciliation_for_launch" in script
+    assert "refresh_canonical_readiness_for_launch \"pre-success\"" in script
+    assert "Failed to refresh Phase-1 reconciliation before claiming launch success." in script
+    assert "stop_paper_runtime_best_effort" in script
+    assert script.index("refresh_phase1_reconciliation_for_launch") < script.index(
+        "Headless supervised paper host is READY_SUBMIT_CAPABLE."
+    )
+
+
 def test_launch_script_refresher_failure_is_sidecar_warning_unless_strict() -> None:
     script = RUN_SCRIPT.read_text(encoding="utf-8")
 
