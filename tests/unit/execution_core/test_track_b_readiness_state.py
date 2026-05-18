@@ -113,6 +113,81 @@ def test_stale_broker_truth_blocks_submit() -> None:
     assert result["readiness_blockers"][0]["code"] == "broker_truth_not_fresh_or_complete"
 
 
+def test_active_broker_truth_lease_clears_broker_freshness_blocker() -> None:
+    inputs = _clean_inputs()
+    inputs["broker_truth"]["fresh"] = False
+    inputs["broker_truth"]["positions_complete"] = False
+    inputs["broker_truth_lease"] = {
+        "available": True,
+        "lease_state": "ACTIVE",
+        "submit_entry_allowed": True,
+        "submit_exit_allowed": True,
+        "live_money_eligible": False,
+    }
+
+    result = classify_canonical_readiness(inputs)
+
+    assert result["canonical_readiness"] == "READY_SUBMIT_CAPABLE"
+    assert {row["code"] for row in result["readiness_blockers"]} == set()
+    assert result["broker_truth_lease"]["lease_state"] == "ACTIVE"
+
+
+def test_degraded_broker_truth_lease_warns_without_dependency_blocker() -> None:
+    inputs = _clean_inputs()
+    inputs["broker_truth"]["fresh"] = False
+    inputs["broker_truth"]["latest_attempt_status"] = {
+        "classification": "BROKER_TRUTH_REFRESH_FAILED",
+        "last_failure": True,
+    }
+    inputs["broker_truth_lease"] = {
+        "available": True,
+        "lease_state": "ACTIVE_DEGRADED_REFRESH_FAILING",
+        "submit_entry_allowed": True,
+        "submit_exit_allowed": True,
+        "live_money_eligible": False,
+    }
+
+    result = classify_canonical_readiness(inputs)
+
+    assert result["canonical_readiness"] == "READY_SUBMIT_CAPABLE"
+    warning_codes = {row["code"] for row in result["readiness_warnings"]}
+    assert "latest_broker_attempt_failed" in warning_codes
+    assert "broker_truth_lease_degraded_refresh_failing" in warning_codes
+    assert {row["code"] for row in result["readiness_blockers"]} == set()
+
+
+def test_expired_broker_truth_lease_blocks_submit_capable_state() -> None:
+    inputs = _clean_inputs()
+    inputs["broker_truth_lease"] = {
+        "available": True,
+        "lease_state": "EXPIRED_BLOCK_NEW_ENTRIES",
+        "submit_entry_allowed": False,
+        "submit_exit_allowed": False,
+        "live_money_eligible": False,
+    }
+
+    result = classify_canonical_readiness(inputs)
+
+    assert result["canonical_readiness"] == "NOT_READY_DEPENDENCY"
+    assert result["readiness_blockers"][0]["code"] == "broker_truth_lease_expired"
+
+
+def test_invalidated_unknown_open_orders_lease_blocks_submit_capable_state() -> None:
+    inputs = _clean_inputs()
+    inputs["broker_truth_lease"] = {
+        "available": True,
+        "lease_state": "INVALIDATED_UNKNOWN_OPEN_ORDERS",
+        "submit_entry_allowed": False,
+        "submit_exit_allowed": False,
+        "live_money_eligible": False,
+    }
+
+    result = classify_canonical_readiness(inputs)
+
+    assert result["canonical_readiness"] == "NOT_READY_DEPENDENCY"
+    assert result["readiness_blockers"][0]["code"] == "broker_truth_lease_unknown_open_orders"
+
+
 def test_broker_truth_uses_fresh_complete_last_good_when_latest_attempt_failed() -> None:
     now = datetime(2026, 5, 18, 12, 0, tzinfo=timezone.utc)
     result = _broker_truth_input(
@@ -162,6 +237,22 @@ def test_live_money_eligible_true_blocks_paper_readiness() -> None:
 
     assert result["canonical_readiness"] == "NOT_READY_CONFIG"
     assert result["readiness_blockers"][0]["code"] == "live_money_eligible_true"
+
+
+def test_broker_truth_lease_live_money_flag_blocks_paper_readiness() -> None:
+    inputs = _clean_inputs()
+    inputs["broker_truth_lease"] = {
+        "available": True,
+        "lease_state": "ACTIVE",
+        "submit_entry_allowed": True,
+        "submit_exit_allowed": True,
+        "live_money_eligible": True,
+    }
+
+    result = classify_canonical_readiness(inputs)
+
+    assert result["canonical_readiness"] == "NOT_READY_CONFIG"
+    assert result["readiness_blockers"][0]["source"] == "paper_safety"
 
 
 def test_lane_quarantine_with_other_eligible_lanes_keeps_submit_ready_with_warning() -> None:

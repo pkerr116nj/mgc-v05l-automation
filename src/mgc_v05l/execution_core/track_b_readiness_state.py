@@ -22,6 +22,9 @@ DEFAULT_TRACK_B_EXPECTED_ACTIVE_ROOT = Path("/Users/patrick/Dev/MGC-v05l-automat
 DEFAULT_CANONICAL_READINESS_ARTIFACT = (
     Path("outputs") / "operator_dashboard" / "runtime" / "latest_canonical_readiness.json"
 )
+DEFAULT_BROKER_TRUTH_LEASE_ARTIFACT = (
+    Path("outputs") / "operator_dashboard" / "runtime" / "latest_broker_truth_lease.json"
+)
 CANONICAL_READINESS_STATES = {
     "READY_SUBMIT_CAPABLE",
     "READY_OBSERVATION_ONLY",
@@ -34,6 +37,8 @@ CANONICAL_READINESS_STATES = {
 BROKER_FRESHNESS_DEFAULT_SECONDS = 150.0
 RECONCILIATION_FRESHNESS_DEFAULT_SECONDS = 180.0
 MARKET_DATA_FRESHNESS_DEFAULT_SECONDS = 180.0
+BROKER_TRUTH_LEASE_READY_STATES = {"ACTIVE", "ACTIVE_DEGRADED_REFRESH_FAILING"}
+BROKER_TRUTH_LEASE_EXPIRED_STATES = {"EXPIRED_BLOCK_NEW_ENTRIES", "EXPIRED_EXITS_ONLY"}
 
 
 def build_canonical_readiness(
@@ -76,6 +81,7 @@ def classify_canonical_readiness(inputs: Mapping[str, Any]) -> dict[str, Any]:
     generated_at = str(inputs.get("generated_at") or datetime.now(timezone.utc).isoformat())
     root_guard = _mapping(inputs.get("root_guard_summary"))
     broker_truth = _mapping(inputs.get("broker_truth"))
+    broker_truth_lease = _mapping(inputs.get("broker_truth_lease"))
     latest_attempt = _mapping(broker_truth.get("latest_attempt_status"))
     reconciliation = _mapping(inputs.get("phase1_reconciliation"))
     runtime = _mapping(inputs.get("runtime"))
@@ -116,8 +122,11 @@ def classify_canonical_readiness(inputs: Mapping[str, Any]) -> dict[str, Any]:
             source="root_guard",
         )
 
-    if _bool(inputs.get("live_money_eligible")) or _bool(broker_truth.get("live_money_eligible")) or _bool(
-        reconciliation.get("live_money_eligible")
+    if (
+        _bool(inputs.get("live_money_eligible"))
+        or _bool(broker_truth.get("live_money_eligible"))
+        or _bool(broker_truth_lease.get("live_money_eligible"))
+        or _bool(reconciliation.get("live_money_eligible"))
     ):
         block(
             "live_money_eligible_true",
@@ -148,7 +157,89 @@ def classify_canonical_readiness(inputs: Mapping[str, Any]) -> dict[str, Any]:
             "Latest broker-truth attempt failed; preserved last-good truth is used only while fresh.",
             source="broker_truth",
         )
-    if broker_ambiguous:
+    broker_lease_available = _bool(broker_truth_lease.get("available"))
+    broker_lease_state = str(broker_truth_lease.get("lease_state") or "").upper()
+    broker_lease_satisfies_dependency = False
+    if broker_lease_available:
+        if broker_lease_state in BROKER_TRUTH_LEASE_READY_STATES:
+            broker_lease_satisfies_dependency = True
+            if broker_lease_state == "ACTIVE_DEGRADED_REFRESH_FAILING":
+                warn(
+                    "broker_truth_lease_degraded_refresh_failing",
+                    "Broker-truth lease remains valid while latest broker refresh attempts are failing.",
+                    source="broker_truth_lease",
+                )
+        elif broker_lease_state in BROKER_TRUTH_LEASE_EXPIRED_STATES:
+            block(
+                "broker_truth_lease_expired",
+                "Broker-truth lease is expired; submit-capable PAPER readiness is blocked.",
+                source="broker_truth_lease",
+            )
+            return _readiness_result(
+                generated_at=generated_at,
+                state="NOT_READY_DEPENDENCY",
+                reasons=reasons,
+                blockers=blockers,
+                warnings=warnings,
+                inputs=inputs,
+            )
+        elif broker_lease_state == "INVALIDATED_UNKNOWN_OPEN_ORDERS":
+            block(
+                "broker_truth_lease_unknown_open_orders",
+                "Broker-truth lease is invalidated by unknown open orders.",
+                source="broker_truth_lease",
+            )
+            return _readiness_result(
+                generated_at=generated_at,
+                state="NOT_READY_DEPENDENCY",
+                reasons=reasons,
+                blockers=blockers,
+                warnings=warnings,
+                inputs=inputs,
+            )
+        elif broker_lease_state.startswith("INVALIDATED_"):
+            block(
+                "broker_truth_lease_invalidated",
+                "Broker-truth lease is invalidated by a broker/lifecycle contradiction.",
+                source="broker_truth_lease",
+            )
+            return _readiness_result(
+                generated_at=generated_at,
+                state="NOT_READY_DEPENDENCY",
+                reasons=reasons,
+                blockers=blockers,
+                warnings=warnings,
+                inputs=inputs,
+            )
+        elif broker_lease_state == "OPERATOR_REQUIRED":
+            block(
+                "broker_truth_lease_operator_required",
+                "Broker-truth lease requires operator review before submit-capable PAPER readiness.",
+                source="broker_truth_lease",
+            )
+            return _readiness_result(
+                generated_at=generated_at,
+                state="NOT_READY_DEPENDENCY",
+                reasons=reasons,
+                blockers=blockers,
+                warnings=warnings,
+                inputs=inputs,
+            )
+        else:
+            block(
+                "broker_truth_lease_unknown_state",
+                "Broker-truth lease artifact has an unknown state; preserving fail-closed readiness.",
+                source="broker_truth_lease",
+            )
+            return _readiness_result(
+                generated_at=generated_at,
+                state="NOT_READY_DEPENDENCY",
+                reasons=reasons,
+                blockers=blockers,
+                warnings=warnings,
+                inputs=inputs,
+            )
+    if broker_ambiguous and not broker_lease_satisfies_dependency:
         block(
             "broker_truth_not_fresh_or_complete",
             "Fresh complete broker truth is required before Track B PAPER submit capability.",
@@ -292,6 +383,7 @@ def build_readiness_inputs(
 ) -> dict[str, Any]:
     now = _ensure_utc(now or datetime.now(timezone.utc))
     broker_truth = _broker_truth_input(_mapping(artifacts.get("broker_truth_status")), now=now)
+    broker_truth_lease = _broker_truth_lease_input(_mapping(artifacts.get("broker_truth_lease")), now=now)
     reconciliation = _reconciliation_input(_mapping(artifacts.get("phase1_reconciliation")), now=now)
     operator_status = _mapping(artifacts.get("operator_status"))
     config_in_force = _mapping(artifacts.get("config_in_force"))
@@ -304,6 +396,7 @@ def build_readiness_inputs(
         _bool(source.get("live_money_eligible"))
         for source in (
             broker_truth,
+            broker_truth_lease,
             reconciliation,
             lane_quarantine,
             submit_bridge,
@@ -321,6 +414,7 @@ def build_readiness_inputs(
         "backend": backend,
         "runtime": runtime,
         "broker_truth": broker_truth,
+        "broker_truth_lease": broker_truth_lease,
         "phase1_reconciliation": reconciliation,
         "market_data": market_data,
         "lane_quarantine": lane_quarantine,
@@ -426,6 +520,7 @@ def _load_readiness_artifacts(repo_root: Path) -> dict[str, Any]:
             / "latest_track_b_paper_broker_reconciliation.json"
         ),
         "dashboard_health": _read_json(dashboard_runtime / "headless_supervised_paper_health.json"),
+        "broker_truth_lease": _read_json(repo_root / DEFAULT_BROKER_TRUTH_LEASE_ARTIFACT),
     }
 
 
@@ -585,6 +680,40 @@ def _broker_truth_input(payload: Mapping[str, Any], *, now: datetime) -> dict[st
         "using_last_successful_broker_truth": using_last_good,
         "live_money_eligible": payload.get("live_money_eligible") is True or source.get("live_money_eligible") is True,
         "submit_authority": payload.get("submit_authority") is True or source.get("submit_authority") is True,
+    }
+
+
+def _broker_truth_lease_input(payload: Mapping[str, Any], *, now: datetime) -> dict[str, Any]:
+    if not payload:
+        return {
+            "available": False,
+            "lease_state": "BROKER_TRUTH_LEASE_MISSING",
+            "live_money_eligible": False,
+        }
+    lease_state = str(payload.get("lease_state") or payload.get("state") or "").upper()
+    generated_at = payload.get("generated_at")
+    valid_until = payload.get("valid_until")
+    entry_valid_until = payload.get("entry_valid_until") or valid_until
+    exit_valid_until = payload.get("exit_valid_until") or valid_until
+    return {
+        "available": True,
+        "lease_state": lease_state,
+        "generated_at": generated_at,
+        "age_seconds": _age_seconds(generated_at, now),
+        "valid_until": valid_until,
+        "entry_valid_until": entry_valid_until,
+        "exit_valid_until": exit_valid_until,
+        "entry_seconds_remaining": _seconds_until(entry_valid_until, now),
+        "exit_seconds_remaining": _seconds_until(exit_valid_until, now),
+        "submit_entry_allowed": payload.get("submit_entry_allowed") is True,
+        "submit_exit_allowed": payload.get("submit_exit_allowed") is True,
+        "warnings": list(payload.get("warnings") or []),
+        "blockers": list(payload.get("blockers") or []),
+        "contradiction_details": list(payload.get("contradiction_details") or []),
+        "operator_action_required": payload.get("operator_action_required") is True,
+        "account_id": payload.get("account_id"),
+        "source_artifacts": dict(_mapping(payload.get("source_artifacts"))),
+        "live_money_eligible": payload.get("live_money_eligible") is True,
     }
 
 
@@ -775,6 +904,7 @@ def _readiness_result(
         "backend": _mapping(inputs.get("backend")),
         "runtime": _mapping(inputs.get("runtime")),
         "broker_truth": _mapping(inputs.get("broker_truth")),
+        "broker_truth_lease": _mapping(inputs.get("broker_truth_lease")),
         "phase1_reconciliation": _mapping(inputs.get("phase1_reconciliation")),
         "market_data": _mapping(inputs.get("market_data")),
         "lane_quarantine": _mapping(inputs.get("lane_quarantine")),
@@ -899,6 +1029,13 @@ def _age_seconds(value: Any, now: datetime) -> float | None:
     if parsed is None:
         return None
     return max((now - parsed).total_seconds(), 0.0)
+
+
+def _seconds_until(value: Any, now: datetime) -> float | None:
+    parsed = _parse_iso(value)
+    if parsed is None:
+        return None
+    return (parsed - now).total_seconds()
 
 
 def _float_value(value: Any, default: float) -> float:
