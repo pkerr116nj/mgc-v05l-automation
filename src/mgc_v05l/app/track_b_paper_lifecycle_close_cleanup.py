@@ -44,6 +44,8 @@ DEFAULT_EXIT_PERM_ID = 852752717
 DEFAULT_OUTPUT_ROOT = Path("outputs") / "reports" / "track_b_paper_lifecycle_close_cleanup"
 DEFAULT_LANE_ROOT = Path("outputs") / "probationary_pattern_engine" / "paper_session" / "lanes"
 DEFAULT_BROKER_TRUTH_ROOT = Path("outputs") / "reports" / "ibkr_read_only_verification"
+EVIDENCE_KIND_AUTO = "auto"
+EVIDENCE_KIND_IBKR_POSITION_RECONCILED_FLAT = "ibkr-position-reconciled-flat"
 POINT_VALUE_BY_SYMBOL = {
     "GC": Decimal("100"),
     "NQ": Decimal("20"),
@@ -99,6 +101,7 @@ class LifecycleCloseCleanupConfig:
     broker_truth_root: Path = DEFAULT_BROKER_TRUTH_ROOT
     ledger_root: Path = DEFAULT_TRACK_B_PAPER_TRADE_LEDGER_OUTPUT_ROOT
     exit_bridge_report_path: Path | None = None
+    evidence_kind: str = EVIDENCE_KIND_AUTO
     allow_ledger_entry_evidence: bool = False
     allow_offsetting_open_intent_as_close: bool = False
     offsetting_open_lifecycle_id: str | None = None
@@ -182,6 +185,8 @@ def run_track_b_paper_lifecycle_close_cleanup(
         positions_snapshot=broker_positions,
         orders_snapshot=broker_orders,
     )
+    if close_record is not None and not reconciliation_prediction["would_clear"]:
+        failures.append("Post-cleanup reconciliation prediction would not clear.")
     valid = not failures
     if valid and already_applied:
         classification = "TRACK_B_PAPER_LIFECYCLE_CLOSE_CLEANUP_ALREADY_APPLIED"
@@ -430,6 +435,16 @@ def _select_exit_bridge_report_evidence(
         failures.append("Exit bridge report path is missing.")
         return None
     report = _read_json(report_path)
+    if config.evidence_kind == EVIDENCE_KIND_IBKR_POSITION_RECONCILED_FLAT:
+        return _ibkr_position_reconciled_flat_evidence_from_report(
+            config=config,
+            report=report,
+            report_path=report_path,
+            failures=failures,
+        )
+    if config.evidence_kind not in {EVIDENCE_KIND_AUTO, ""}:
+        failures.append(f"Unsupported close cleanup evidence kind: {config.evidence_kind}.")
+        return None
     direct_evidence = _direct_filled_bridge_exit_evidence_from_report(
         config=config,
         report=report,
@@ -518,6 +533,163 @@ def _select_exit_bridge_report_evidence(
         "fill_price": _decimal_text(config.exit_price),
         "fill_timestamp": _canonical_time(config.exit_fill_time),
     }
+
+
+def _ibkr_position_reconciled_flat_evidence_from_report(
+    *,
+    config: LifecycleCloseCleanupConfig,
+    report: Mapping[str, Any],
+    report_path: Path,
+    failures: list[str],
+) -> dict[str, Any] | None:
+    initial_failure_count = len(failures)
+    if str(report.get("classification") or "") != "IBKR_POSITION_RECONCILED_FLAT":
+        failures.append("IBKR manual-close evidence classification is not IBKR_POSITION_RECONCILED_FLAT.")
+    if report.get("read_only") is not True:
+        failures.append("IBKR manual-close evidence is not marked read-only.")
+    if str(report.get("account_id") or "") != config.account_id:
+        failures.append("IBKR manual-close evidence account mismatch.")
+
+    contract = _nested(report, "contract_report", "exact_contract")
+    contract = contract if isinstance(contract, Mapping) else {}
+    contract_symbol = contract.get("symbol") or contract.get("broker_symbol") or contract.get("internal_symbol")
+    contract_checks = {
+        "symbol": str(contract_symbol or "").upper() == config.symbol,
+        "local_symbol": str(contract.get("local_symbol") or contract.get("localSymbol") or "").upper()
+        == config.local_symbol,
+        "con_id": _int(contract.get("con_id") or contract.get("conId")) == config.con_id,
+    }
+    failed_contract_checks = [name for name, passed in contract_checks.items() if not passed]
+    if failed_contract_checks:
+        failures.append(
+            "IBKR manual-close evidence contract mismatch: " + ", ".join(failed_contract_checks) + "."
+        )
+
+    flat_quantity = _decimal(_nested(report, "diagnosis", "latest_exact_position_quantity"))
+    if flat_quantity != Decimal("0"):
+        failures.append("IBKR manual-close evidence current position is not flat.")
+
+    open_orders, open_order_count = _ibkr_position_report_open_orders(report)
+    if open_order_count != 0:
+        failures.append("IBKR manual-close evidence open orders are not zero.")
+
+    execution_rows = _nested(report, "execution_truth", "matching_execution_rows")
+    execution_matches = [
+        dict(row)
+        for row in (execution_rows if isinstance(execution_rows, list) else [])
+        if isinstance(row, Mapping)
+        and _ibkr_manual_close_execution_matches(row, config=config)
+    ]
+    if len(execution_matches) != 1:
+        failures.append(
+            f"Expected exactly one matching IBKR manual closing execution, found {len(execution_matches)}."
+        )
+        return execution_matches[0] if execution_matches else None
+
+    execution = execution_matches[0]
+    execution_id = str(execution.get("execution_id") or execution.get("exec_id") or "")
+    if not execution_id:
+        failures.append("IBKR manual-close execution id is missing.")
+    if _int(execution.get("perm_id")) != config.exit_perm_id:
+        failures.append("IBKR manual-close execution perm id mismatch.")
+    if _int(execution.get("client_id")) != config.exit_client_id:
+        failures.append("IBKR manual-close execution client id mismatch.")
+    if not _same_time(execution.get("executed_at"), config.exit_fill_time):
+        failures.append("IBKR manual-close execution fill time mismatch.")
+    if not _time_after(execution.get("executed_at"), config.entry_fill_time):
+        failures.append("IBKR manual-close execution is not after lifecycle entry time.")
+
+    completed_rows = _nested(report, "execution_truth", "matching_completed_order_rows")
+    completed_matches = [
+        dict(row)
+        for row in (completed_rows if isinstance(completed_rows, list) else [])
+        if isinstance(row, Mapping)
+        and str(row.get("account_id") or "") == config.account_id
+        and _int(row.get("perm_id")) == config.exit_perm_id
+        and _int(row.get("client_id")) == config.exit_client_id
+        and _int(row.get("con_id") or _nested(row, "contract", "con_id")) == config.con_id
+        and str(row.get("symbol") or "").upper() == config.symbol
+        and str(row.get("local_symbol") or "").upper() == config.local_symbol
+    ]
+    if len(completed_matches) != 1:
+        failures.append(
+            f"Expected exactly one matching IBKR completed order row, found {len(completed_matches)}."
+        )
+        completed = {}
+    else:
+        completed = completed_matches[0]
+        if str(completed.get("status") or "").upper() != "FILLED":
+            failures.append("IBKR manual-close completed order status is not Filled.")
+
+    if len(failures) > initial_failure_count:
+        return None
+
+    return {
+        "classification": "IBKR_POSITION_RECONCILED_FLAT_MANUAL_CLOSE_EVIDENCE",
+        "ibkr_position_reconciliation_classification": report.get("classification"),
+        "source": "IBKR_POSITION_RECONCILED_FLAT_READ_ONLY_EXECUTION_REPORT",
+        "source_path": str(report_path),
+        "operator_manual_paper_close": True,
+        "close_reason": "Operator manual PAPER close with IBKR read-only execution evidence.",
+        "close_reconciliation_source": "OPERATOR_MANUAL_PAPER_CLOSE_WITH_IBKR_READ_ONLY_EXECUTION_EVIDENCE",
+        "order_intent_id": config.exit_intent_id,
+        "intent_type": "SELL_TO_CLOSE" if config.side == "LONG" else "BUY_TO_CLOSE",
+        "action": config.exit_action,
+        "symbol": config.symbol,
+        "local_symbol": config.local_symbol,
+        "con_id": config.con_id,
+        "quantity": _decimal_text(config.quantity),
+        "broker_order_id": str(execution.get("broker_order_id") or ""),
+        "client_id": config.exit_client_id,
+        "perm_id": config.exit_perm_id,
+        "exec_id": execution_id,
+        "execution_id": execution_id,
+        "fill_price": _decimal_text(config.exit_price),
+        "fill_timestamp": _canonical_time(config.exit_fill_time),
+        "evidence_fields": {
+            "account_id": report.get("account_id"),
+            "classification": report.get("classification"),
+            "read_only": report.get("read_only"),
+            "generated_at": report.get("generated_at"),
+            "contract": dict(contract),
+            "current_position_quantity": _decimal_text(flat_quantity),
+            "open_order_count": open_order_count,
+            "open_orders": open_orders,
+            "execution": execution,
+            "completed_order": completed,
+            "diagnosis": report.get("diagnosis"),
+        },
+    }
+
+
+def _ibkr_manual_close_execution_matches(row: Mapping[str, Any], *, config: LifecycleCloseCleanupConfig) -> bool:
+    closing_sides = {"SLD", "SELL", "SELL_TO_CLOSE"} if config.side == "LONG" else {"BOT", "BUY", "BUY_TO_CLOSE"}
+    return (
+        str(row.get("account_id") or "") == config.account_id
+        and str(row.get("symbol") or "").upper() == config.symbol
+        and str(row.get("local_symbol") or row.get("localSymbol") or "").upper() == config.local_symbol
+        and _int(row.get("con_id") or row.get("conId")) == config.con_id
+        and str(row.get("side") or row.get("action") or "").upper() in closing_sides
+        and _decimal(row.get("quantity")) == config.quantity
+        and _decimal(row.get("price")) == config.exit_price
+        and _int(row.get("perm_id")) == config.exit_perm_id
+    )
+
+
+def _ibkr_position_report_open_orders(report: Mapping[str, Any]) -> tuple[list[Any], int | None]:
+    provider_open_orders = _nested(report, "provider_snapshot", "open_orders")
+    provider_open_order_ids = _nested(report, "provider_snapshot", "open_order_ids")
+    orders_open_rows = _nested(report, "provider_snapshot", "orders", "open_rows")
+    open_orders = []
+    if isinstance(provider_open_orders, list):
+        open_orders.extend(provider_open_orders)
+    if isinstance(provider_open_order_ids, list):
+        open_orders.extend(provider_open_order_ids)
+    if isinstance(orders_open_rows, list):
+        open_orders.extend(orders_open_rows)
+    if provider_open_orders is None and provider_open_order_ids is None and orders_open_rows is None:
+        return [], None
+    return open_orders, len(open_orders)
 
 
 def _unattended_close_evidence_from_report(
@@ -766,7 +938,18 @@ def _build_close_record(
             "ticks_pnl": _decimal_text(ticks),
             "review_required": False,
             "broker_reconciled": False,
-            "close_reconciliation_source": "VERIFIED_SELL_TO_CLOSE_BRIDGE_FILL_AND_BROKER_FLAT_TRUTH",
+            "close_reconciliation_source": exit_evidence.get(
+                "close_reconciliation_source",
+                "VERIFIED_SELL_TO_CLOSE_BRIDGE_FILL_AND_BROKER_FLAT_TRUTH",
+            ),
+            "close_reason": exit_evidence.get(
+                "close_reason", "Verified PAPER close fill with broker flat truth."
+            ),
+            "close_reconciliation_evidence_source": exit_evidence.get("source"),
+            "close_reconciliation_evidence_path": exit_evidence.get("source_path"),
+            "close_reconciliation_evidence_classification": exit_evidence.get("classification"),
+            "close_reconciliation_evidence_fields": exit_evidence.get("evidence_fields"),
+            "operator_manual_paper_close": bool(exit_evidence.get("operator_manual_paper_close")),
             "close_reconciliation_applied_at": now.isoformat(),
             "broker_mutation_attempted_by_cleanup": False,
             "submit_attempted_by_cleanup": False,
@@ -1094,6 +1277,15 @@ def _same_time(left: object, right: object) -> bool:
         return False
 
 
+def _time_after(left: object, right: object) -> bool:
+    if not left or not right:
+        return False
+    try:
+        return datetime.fromisoformat(_canonical_time(left)) > datetime.fromisoformat(_canonical_time(right))
+    except ValueError:
+        return False
+
+
 def _decimal(value: Any) -> Decimal | None:
     if value is None or value == "":
         return None
@@ -1163,6 +1355,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--lane-root", default=str(DEFAULT_LANE_ROOT))
     parser.add_argument("--ledger-root", default=str(DEFAULT_TRACK_B_PAPER_TRADE_LEDGER_OUTPUT_ROOT))
     parser.add_argument("--exit-bridge-report-path", default=None)
+    parser.add_argument(
+        "--evidence-kind",
+        default=EVIDENCE_KIND_AUTO,
+        choices=(EVIDENCE_KIND_AUTO, EVIDENCE_KIND_IBKR_POSITION_RECONCILED_FLAT),
+        help="Explicit non-bridge evidence mode for guarded close cleanup.",
+    )
     parser.add_argument("--allow-ledger-entry-evidence", action="store_true")
     parser.add_argument("--allow-offsetting-open-intent-as-close", action="store_true")
     parser.add_argument("--offsetting-open-lifecycle-id", default=None)
@@ -1209,6 +1407,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             broker_truth_root=Path(args.broker_truth_root),
             ledger_root=Path(args.ledger_root),
             exit_bridge_report_path=Path(args.exit_bridge_report_path) if args.exit_bridge_report_path else None,
+            evidence_kind=str(args.evidence_kind),
             allow_ledger_entry_evidence=bool(args.allow_ledger_entry_evidence),
             allow_offsetting_open_intent_as_close=bool(args.allow_offsetting_open_intent_as_close),
             offsetting_open_lifecycle_id=str(args.offsetting_open_lifecycle_id) if args.offsetting_open_lifecycle_id else None,

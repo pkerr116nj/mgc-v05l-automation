@@ -10,6 +10,7 @@ from mgc_v05l.app.track_b_paper_lifecycle_close_cleanup import (
     DEFAULT_EXIT_CLIENT_ID,
     DEFAULT_EXIT_INTENT_ID,
     DEFAULT_EXIT_PERM_ID,
+    EVIDENCE_KIND_IBKR_POSITION_RECONCILED_FLAT,
     LifecycleCloseCleanupConfig,
     POINT_VALUE_BY_SYMBOL,
     TICK_SIZE_BY_SYMBOL,
@@ -315,6 +316,155 @@ def test_ambiguous_older_mnq_open_row_is_flagged_and_blocks_cleanup(tmp_path: Pa
     assert len(_read_jsonl(_ledger_path(tmp_path))) == 2
 
 
+def test_cleanup_accepts_ibkr_position_reconciled_flat_manual_close_evidence(tmp_path: Path) -> None:
+    report_path = _write_mgc_manual_close_fixture(tmp_path)
+
+    result = run_track_b_paper_lifecycle_close_cleanup(
+        config=_mgc_manual_close_config(tmp_path, report_path=report_path),
+        now=NOW,
+    )
+
+    assert result.classification == "TRACK_B_PAPER_LIFECYCLE_CLOSE_CLEANUP_DRY_RUN_READY"
+    assert result.report["bridge_evidence"]["exit"]["source"] == "IBKR_POSITION_RECONCILED_FLAT_READ_ONLY_EXECUTION_REPORT"
+    assert result.report["bridge_evidence"]["exit"]["evidence_fields"]["execution"]["execution_id"] == "0000e1a7.6a100c1e.01.01"
+    assert result.report["close_record"]["close_reconciliation_source"] == (
+        "OPERATOR_MANUAL_PAPER_CLOSE_WITH_IBKR_READ_ONLY_EXECUTION_EVIDENCE"
+    )
+    assert result.report["close_record"]["close_reason"] == "Operator manual PAPER close with IBKR read-only execution evidence."
+    assert result.report["close_record"]["realized_pnl"] == "66.03"
+    assert result.report["close_record"]["operator_manual_paper_close"] is True
+    assert result.report["post_cleanup_prediction"]["reconciliation_would_clear"] is True
+    assert result.report["submit_attempted"] is False
+    assert result.report["place_order_attempted"] is False
+    assert result.report["broker_mutated"] is False
+    assert len(_read_jsonl(_ledger_path(tmp_path))) == 1
+
+
+def test_ibkr_manual_close_evidence_rejects_missing_execution_id(tmp_path: Path) -> None:
+    report_path = _write_mgc_manual_close_fixture(tmp_path, execution_overrides={"execution_id": ""})
+
+    result = run_track_b_paper_lifecycle_close_cleanup(
+        config=_mgc_manual_close_config(tmp_path, report_path=report_path, apply=True),
+        now=NOW,
+    )
+
+    assert result.classification == "TRACK_B_PAPER_LIFECYCLE_CLOSE_CLEANUP_REFUSED"
+    assert any("execution id is missing" in failure for failure in result.report["failures"])
+    assert len(_read_jsonl(_ledger_path(tmp_path))) == 1
+
+
+def test_ibkr_manual_close_evidence_rejects_wrong_account_contract_or_conid(tmp_path: Path) -> None:
+    report_path = _write_mgc_manual_close_fixture(
+        tmp_path,
+        account_id="DUOTHER",
+        contract_overrides={"local_symbol": "MGCZ6", "con_id": 712565979},
+        execution_overrides={"account_id": "DUOTHER", "local_symbol": "MGCZ6", "con_id": 712565979},
+    )
+
+    result = run_track_b_paper_lifecycle_close_cleanup(
+        config=_mgc_manual_close_config(tmp_path, report_path=report_path, apply=True),
+        now=NOW,
+    )
+
+    assert result.classification == "TRACK_B_PAPER_LIFECYCLE_CLOSE_CLEANUP_REFUSED"
+    assert any("account mismatch" in failure for failure in result.report["failures"])
+    assert any("contract mismatch" in failure for failure in result.report["failures"])
+    assert len(_read_jsonl(_ledger_path(tmp_path))) == 1
+
+
+def test_ibkr_manual_close_evidence_rejects_non_flat_broker_truth(tmp_path: Path) -> None:
+    report_path = _write_mgc_manual_close_fixture(tmp_path, broker_qty="1")
+
+    result = run_track_b_paper_lifecycle_close_cleanup(
+        config=_mgc_manual_close_config(tmp_path, report_path=report_path, apply=True),
+        now=NOW,
+    )
+
+    assert result.classification == "TRACK_B_PAPER_LIFECYCLE_CLOSE_CLEANUP_REFUSED"
+    assert any("non-flat MGC" in failure for failure in result.report["failures"])
+    assert len(_read_jsonl(_ledger_path(tmp_path))) == 1
+
+
+def test_ibkr_manual_close_evidence_rejects_nonzero_open_orders(tmp_path: Path) -> None:
+    report_path = _write_mgc_manual_close_fixture(tmp_path, broker_open_order_count=1, evidence_open_orders=[{"order_id": 1}])
+
+    result = run_track_b_paper_lifecycle_close_cleanup(
+        config=_mgc_manual_close_config(tmp_path, report_path=report_path, apply=True),
+        now=NOW,
+    )
+
+    assert result.classification == "TRACK_B_PAPER_LIFECYCLE_CLOSE_CLEANUP_REFUSED"
+    assert any("open orders are not zero" in failure for failure in result.report["failures"])
+    assert len(_read_jsonl(_ledger_path(tmp_path))) == 1
+
+
+def test_ibkr_manual_close_evidence_rejects_execution_before_lifecycle_entry(tmp_path: Path) -> None:
+    report_path = _write_mgc_manual_close_fixture(
+        tmp_path,
+        execution_overrides={"executed_at": "2026-05-15T20:00:00+00:00"},
+    )
+
+    result = run_track_b_paper_lifecycle_close_cleanup(
+        config=_mgc_manual_close_config(
+            tmp_path,
+            report_path=report_path,
+            exit_fill_time="2026-05-15T20:00:00+00:00",
+            apply=True,
+        ),
+        now=NOW,
+    )
+
+    assert result.classification == "TRACK_B_PAPER_LIFECYCLE_CLOSE_CLEANUP_REFUSED"
+    assert any("not after lifecycle entry" in failure for failure in result.report["failures"])
+    assert len(_read_jsonl(_ledger_path(tmp_path))) == 1
+
+
+def test_ibkr_manual_close_evidence_rejects_quantity_mismatch(tmp_path: Path) -> None:
+    report_path = _write_mgc_manual_close_fixture(tmp_path, execution_overrides={"quantity": 2.0})
+
+    result = run_track_b_paper_lifecycle_close_cleanup(
+        config=_mgc_manual_close_config(tmp_path, report_path=report_path, apply=True),
+        now=NOW,
+    )
+
+    assert result.classification == "TRACK_B_PAPER_LIFECYCLE_CLOSE_CLEANUP_REFUSED"
+    assert any("matching IBKR manual closing execution, found 0" in failure for failure in result.report["failures"])
+    assert len(_read_jsonl(_ledger_path(tmp_path))) == 1
+
+
+def test_ibkr_manual_close_evidence_rejects_multiple_matching_executions(tmp_path: Path) -> None:
+    report_path = _write_mgc_manual_close_fixture(tmp_path, duplicate_matching_execution=True)
+
+    result = run_track_b_paper_lifecycle_close_cleanup(
+        config=_mgc_manual_close_config(tmp_path, report_path=report_path, apply=True),
+        now=NOW,
+    )
+
+    assert result.classification == "TRACK_B_PAPER_LIFECYCLE_CLOSE_CLEANUP_REFUSED"
+    assert any("matching IBKR manual closing execution, found 2" in failure for failure in result.report["failures"])
+    assert len(_read_jsonl(_ledger_path(tmp_path))) == 1
+
+
+def test_ibkr_manual_close_apply_appends_exactly_one_close_record(tmp_path: Path) -> None:
+    report_path = _write_mgc_manual_close_fixture(tmp_path)
+
+    result = run_track_b_paper_lifecycle_close_cleanup(
+        config=_mgc_manual_close_config(tmp_path, report_path=report_path, apply=True),
+        now=NOW,
+    )
+
+    assert result.classification == "TRACK_B_PAPER_LIFECYCLE_CLOSE_CLEANUP_APPLIED"
+    rows = _read_jsonl(_ledger_path(tmp_path))
+    assert len(rows) == 2
+    assert rows[-1]["lifecycle_id"] == "bridge_fill_39c8aa13-3875-42a8-a027-e31ffb085bc4"
+    assert rows[-1]["final_position_status"] == "CLOSED_FLAT"
+    assert rows[-1]["exit_exec_id"] == "0000e1a7.6a100c1e.01.01"
+    assert rows[-1]["broker_mutation_attempted_by_cleanup"] is False
+    assert rows[-1]["submit_attempted_by_cleanup"] is False
+    assert rows[-1]["cancel_attempted_by_cleanup"] is False
+    assert rows[-1]["place_order_attempted_by_cleanup"] is False
+
+
 def _pl_cleanup_config(tmp_path: Path, *, apply: bool) -> LifecycleCloseCleanupConfig:
     return LifecycleCloseCleanupConfig(
         repo_root=tmp_path,
@@ -336,6 +486,188 @@ def _pl_cleanup_config(tmp_path: Path, *, apply: bool) -> LifecycleCloseCleanupC
         allow_ledger_entry_evidence=True,
         apply=apply,
     )
+
+
+def _mgc_manual_close_config(
+    tmp_path: Path,
+    *,
+    report_path: Path,
+    exit_fill_time: str = "2026-05-18T09:38:37.539694+00:00",
+    apply: bool = False,
+) -> LifecycleCloseCleanupConfig:
+    return LifecycleCloseCleanupConfig(
+        repo_root=tmp_path,
+        lane_id="atp_companion_v1_asia_us",
+        strategy_id="atp_companion_v1__benchmark_mgc_asia_us",
+        symbol="MGC",
+        local_symbol="MGCM6",
+        con_id=712565978,
+        side="LONG",
+        entry_lifecycle_id="bridge_fill_39c8aa13-3875-42a8-a027-e31ffb085bc4",
+        entry_fill_time="2026-05-15T20:57:36.975006+00:00",
+        entry_price=Decimal("4543.297"),
+        exit_intent_id="operator_manual_close_mgc_20260518_perm_1626698929",
+        exit_action="SELL",
+        exit_price=Decimal("4549.9"),
+        exit_fill_time=exit_fill_time,
+        exit_client_id=0,
+        exit_perm_id=1626698929,
+        exit_bridge_report_path=report_path.relative_to(tmp_path),
+        evidence_kind=EVIDENCE_KIND_IBKR_POSITION_RECONCILED_FLAT,
+        allow_ledger_entry_evidence=True,
+        apply=apply,
+    )
+
+
+def _write_mgc_manual_close_fixture(
+    tmp_path: Path,
+    *,
+    account_id: str = "DUM882026",
+    broker_qty: str = "0.0",
+    broker_open_order_count: int = 0,
+    evidence_open_orders: list[dict[str, object]] | None = None,
+    contract_overrides: dict[str, object] | None = None,
+    execution_overrides: dict[str, object] | None = None,
+    duplicate_matching_execution: bool = False,
+) -> Path:
+    _write_jsonl(
+        _ledger_path(tmp_path),
+        [
+            {
+                "ledger_schema_version": "track_b_paper_trade_ledger_v1",
+                "trade_id": "atp_companion_v1__benchmark_mgc_asia_us:bridge_fill_39c8aa13-3875-42a8-a027-e31ffb085bc4",
+                "strategy_id": "atp_companion_v1__benchmark_mgc_asia_us",
+                "lifecycle_id": "bridge_fill_39c8aa13-3875-42a8-a027-e31ffb085bc4",
+                "instrument_family": "MGC",
+                "contract_key": "MGC-202606",
+                "local_symbol": "MGCM6",
+                "con_id": 712565978,
+                "side": "LONG",
+                "quantity": "1",
+                "entry_timestamp": "2026-05-15T20:57:36.975006+00:00",
+                "entry_fill_price": "4543.297",
+                "entry_order_id": "28",
+                "entry_perm_id": 614044377,
+                "entry_client_id": 11940,
+                "entry_broker_identity": {
+                    "account_id": "DUM882026",
+                    "broker_order_id": "28",
+                    "client_id": 11940,
+                    "con_id": 712565978,
+                    "exec_id": "0000e1a7.6a090ac9.01.01",
+                    "local_symbol": "MGCM6",
+                    "perm_id": 614044377,
+                },
+                "exit_fill_price": None,
+                "paper_lifecycle_type": "STRATEGY_MANAGED",
+                "paper_lifecycle_classification": "TRACK_B_STRATEGY_PAPER_OPEN_MANAGED",
+                "final_position_status": "OPEN_MANAGED",
+                "broker_backed_position_confirmed": True,
+                "review_required": False,
+                "source": "TRACK_B_DIRECT_BRIDGE_FILL_ARTIFACT",
+            }
+        ],
+    )
+    _write_jsonl(
+        tmp_path
+        / "outputs"
+        / "probationary_pattern_engine"
+        / "paper_session"
+        / "lanes"
+        / "atp_companion_v1_asia_us"
+        / "filled_bridge_results.jsonl",
+        [],
+    )
+    _write_broker_truth_for_symbol(
+        tmp_path,
+        symbol="MGC",
+        local_symbol="MGCM6",
+        expiry="20260626",
+        qty=broker_qty,
+        multiplier="10",
+        open_order_count=broker_open_order_count,
+    )
+
+    contract = {
+        "symbol": "MGC",
+        "con_id": 712565978,
+        "expiry": "20260626",
+        "local_symbol": "MGCM6",
+        "multiplier": "10",
+        "security_type": "FUT",
+        "exchange": "COMEX",
+        "currency": "USD",
+    }
+    if contract_overrides:
+        contract.update(contract_overrides)
+    execution = {
+        "account_id": account_id,
+        "broker_order_id": 0,
+        "client_id": 0,
+        "con_id": 712565978,
+        "executed_at": "2026-05-18T09:38:37.539694+00:00",
+        "execution_id": "0000e1a7.6a100c1e.01.01",
+        "expiry": "20260626",
+        "local_symbol": "MGCM6",
+        "multiplier": "10",
+        "perm_id": 1626698929,
+        "price": 4549.9,
+        "quantity": 1.0,
+        "security_type": "FUT",
+        "side": "SLD",
+        "symbol": "MGC",
+    }
+    if execution_overrides:
+        execution.update(execution_overrides)
+    execution_rows = [execution]
+    if duplicate_matching_execution:
+        execution_rows.append({**execution, "execution_id": "0000e1a7.6a100c1e.01.02"})
+    completed_order = {
+        "account_id": account_id,
+        "broker_order_id": 0,
+        "client_id": 0,
+        "con_id": 712565978,
+        "local_symbol": "MGCM6",
+        "perm_id": 1626698929,
+        "status": "Filled",
+        "symbol": "MGC",
+    }
+    report_path = (
+        tmp_path
+        / "outputs"
+        / "reports"
+        / "ibkr_position_reconciliation_mgc_manual_close_20260518"
+        / "ibkr_position_reconciliation_report.json"
+    )
+    _write_json(
+        report_path,
+        {
+            "classification": "IBKR_POSITION_RECONCILED_FLAT",
+            "generated_at": "2026-05-18T09:38:37.548206+00:00",
+            "read_only": True,
+            "account_id": account_id,
+            "contract_report": {"exact_contract": contract},
+            "diagnosis": {
+                "latest_exact_position_quantity": 0.0,
+                "latest_matching_execution_quantity": 1.0,
+                "latest_matching_execution_side": "SLD",
+                "latest_matching_execution_time": "2026-05-18T09:38:37.539694+00:00",
+                "latest_matching_perm_id": 1626698929,
+            },
+            "provider_snapshot": {
+                "open_orders": evidence_open_orders or [],
+                "open_order_ids": [],
+                "orders": {"open_rows": []},
+            },
+            "execution_truth": {
+                "matching_execution_count": len(execution_rows),
+                "matching_execution_rows": execution_rows,
+                "matching_completed_order_count": 1,
+                "matching_completed_order_rows": [completed_order],
+            },
+        },
+    )
+    return report_path
 
 
 def _write_pl_cleanup_fixture(tmp_path: Path) -> None:
@@ -568,6 +900,7 @@ def _write_broker_truth_for_symbol(
     qty: str,
     multiplier: str,
     average_cost: str = "0.0",
+    open_order_count: int = 0,
 ) -> None:
     broker_root = tmp_path / "outputs" / "reports" / "ibkr_read_only_verification"
     positions_path = broker_root / "ibkr_positions_snapshot.json"
@@ -585,7 +918,7 @@ def _write_broker_truth_for_symbol(
             "positions_complete": True,
             "open_orders_complete": True,
             "position_count": 1,
-            "open_order_count": 0,
+            "open_order_count": open_order_count,
             "positions_snapshot_path": str(positions_path),
             "open_orders_snapshot_path": str(orders_path),
             "submit_authority": False,
@@ -627,8 +960,8 @@ def _write_broker_truth_for_symbol(
             "request_method": "reqAllOpenOrders",
             "auto_open_orders_requested": False,
             "order_binding_requested": False,
-            "open_order_count": 0,
-            "open_orders": [],
+            "open_order_count": open_order_count,
+            "open_orders": [{"order_id": 1}] if open_order_count else [],
         },
     )
 
