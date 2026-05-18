@@ -93,12 +93,72 @@ def test_broker_truth_refresh_once_uses_read_only_verifier_and_writes_status(tmp
     assert status["open_orders_complete"] is True
     assert status["position_count"] == 2
     assert status["open_order_count"] == 0
+    assert status["fresh"] is True
     assert status["submit_authority"] is False
     assert status["live_money_eligible"] is False
     assert status["paper_proof_invoked"] is False
-    assert load_broker_truth_refresh_status(status_path=config.status_path)["classification"] == "BROKER_TRUTH_REFRESH_READY"
+    loaded = load_broker_truth_refresh_status(status_path=config.status_path)
+    assert loaded["source_classification"] == "BROKER_TRUTH_REFRESH_READY"
+    assert loaded["classification"] in {"BROKER_TRUTH_REFRESH_FRESH", "BROKER_TRUTH_REFRESH_STALE"}
+    assert loaded["fresh"] is (loaded["classification"] == "BROKER_TRUTH_REFRESH_FRESH")
     assert (tmp_path / "var" / "ibkr_broker_truth_refresh_status.json").exists()
     assert calls
+
+
+def test_failed_refresh_preserves_last_successful_canonical_truth(tmp_path: Path) -> None:
+    fixed_time = datetime(2999, 5, 18, 10, 0, tzinfo=timezone.utc)
+    config = BrokerTruthRefreshConfig(
+        repo_root=tmp_path,
+        output_dir=tmp_path / "outputs" / "reports" / "ibkr_read_only_verification",
+        status_path=tmp_path / "outputs" / "reports" / "ibkr_read_only_verification" / "ibkr_broker_truth_refresh_status.json",
+        var_status_path=tmp_path / "var" / "ibkr_broker_truth_refresh_status.json",
+    )
+
+    good_artifacts = _artifacts()
+    good_artifacts.positions_snapshot["marker"] = "last-good"
+    failed_artifacts = _artifacts(
+        classification="IBKR_READ_ONLY_BLOCKED",
+        positions_complete=False,
+        open_orders_complete=False,
+    )
+    failed_artifacts.positions_snapshot["marker"] = "failed-attempt"
+
+    def writer(*, output_dir: Path, artifacts: IbkrReadOnlyVerificationArtifacts) -> None:
+        output_dir.mkdir(parents=True, exist_ok=True)
+        (output_dir / "ibkr_positions_snapshot.json").write_text(json.dumps(artifacts.positions_snapshot), encoding="utf-8")
+        (output_dir / "ibkr_open_orders_snapshot.json").write_text(json.dumps(artifacts.open_orders_snapshot), encoding="utf-8")
+
+    first = run_broker_truth_refresh_once(
+        config=config,
+        verifier=lambda *, config: good_artifacts,
+        artifact_writer=writer,
+        now_fn=lambda: fixed_time,
+    )
+    second = run_broker_truth_refresh_once(
+        config=config,
+        verifier=lambda *, config: failed_artifacts,
+        artifact_writer=writer,
+        now_fn=lambda: fixed_time,
+    )
+
+    canonical_positions = json.loads((config.output_dir / "ibkr_positions_snapshot.json").read_text(encoding="utf-8"))
+    attempt_positions = json.loads((config.output_dir / "latest_attempt" / "ibkr_positions_snapshot.json").read_text(encoding="utf-8"))
+    latest_attempt_status = json.loads((config.output_dir / "ibkr_broker_truth_latest_attempt_status.json").read_text(encoding="utf-8"))
+    loaded = load_broker_truth_refresh_status(status_path=config.status_path)
+
+    assert first["classification"] == "BROKER_TRUTH_REFRESH_READY"
+    assert second["classification"] == "BROKER_TRUTH_REFRESH_LAST_SUCCESS_PRESERVED"
+    assert second["last_success"] is True
+    assert second["positions_complete"] is True
+    assert second["open_orders_complete"] is True
+    assert second["latest_attempt_status"]["classification"] == "BROKER_TRUTH_REFRESH_FAILED"
+    assert second["last_successful_broker_truth"]["positions_snapshot_path"] == str(config.output_dir / "ibkr_positions_snapshot.json")
+    assert latest_attempt_status["classification"] == "BROKER_TRUTH_REFRESH_FAILED"
+    assert canonical_positions["marker"] == "last-good"
+    assert attempt_positions["marker"] == "failed-attempt"
+    assert loaded["source_classification"] == "BROKER_TRUTH_REFRESH_LAST_SUCCESS_PRESERVED"
+    assert loaded["last_successful_broker_truth"]["fresh"] is True
+    assert loaded["latest_attempt_status"]["classification"] == "BROKER_TRUTH_REFRESH_FAILED"
 
 
 def test_broker_truth_refresh_failure_is_not_treated_as_clear_truth(tmp_path: Path) -> None:
@@ -117,6 +177,34 @@ def test_broker_truth_refresh_failure_is_not_treated_as_clear_truth(tmp_path: Pa
     assert status["open_orders_complete"] is False
     assert status["submit_authority"] is False
     assert status["live_money_eligible"] is False
+
+
+def test_load_broker_truth_refresh_status_recomputes_stale_age_and_blocks_fresh_flag(tmp_path: Path) -> None:
+    status_path = tmp_path / "ibkr_broker_truth_refresh_status.json"
+    status_path.write_text(
+        json.dumps(
+            {
+                "classification": "BROKER_TRUTH_REFRESH_READY",
+                "generated_at": "2026-05-11T12:00:00+00:00",
+                "last_success": True,
+                "positions_complete": True,
+                "open_orders_complete": True,
+                "refresh_seconds": 60,
+                "submit_authority": False,
+                "live_money_eligible": False,
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    loaded = load_broker_truth_refresh_status(status_path=status_path)
+
+    assert loaded["source_classification"] == "BROKER_TRUTH_REFRESH_READY"
+    assert loaded["classification"] == "BROKER_TRUTH_REFRESH_STALE"
+    assert loaded["fresh"] is False
+    assert loaded["age_seconds"] > loaded["freshness_threshold_seconds"]
+    assert loaded["submit_authority"] is False
+    assert loaded["live_money_eligible"] is False
 
 
 def test_broker_truth_refresh_ignores_benign_2100_after_complete_snapshots(tmp_path: Path) -> None:

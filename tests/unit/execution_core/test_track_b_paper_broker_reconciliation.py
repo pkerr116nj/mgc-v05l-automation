@@ -49,6 +49,52 @@ def test_reconciles_flat_lifecycle_with_fresh_broker_truth_and_unrelated_positio
     assert reconciled_position["paper_proof_invoked"] is False
 
 
+def test_reconciliation_reports_last_successful_truth_and_latest_attempt(tmp_path: Path) -> None:
+    config = _write_base_artifacts(tmp_path)
+    _write_broker_truth(config)
+    status = json.loads(config.broker_status_path.read_text(encoding="utf-8"))
+    status.update(
+        {
+            "classification": "BROKER_TRUTH_REFRESH_LAST_SUCCESS_PRESERVED",
+            "last_failure": True,
+            "last_failure_at": "2026-05-11T11:59:50+00:00",
+            "latest_attempt_status": {
+                "classification": "BROKER_TRUTH_REFRESH_FAILED",
+                "generated_at": "2026-05-11T11:59:50+00:00",
+                "positions_complete": False,
+                "open_orders_complete": False,
+                "position_count": 0,
+                "open_order_count": 0,
+                "submit_authority": False,
+                "live_money_eligible": False,
+                "paper_proof_invoked": False,
+            },
+            "last_successful_broker_truth": {
+                "classification": "BROKER_TRUTH_REFRESH_LAST_SUCCESS_PRESERVED",
+                "generated_at": "2026-05-11T11:59:30+00:00",
+                "positions_complete": True,
+                "open_orders_complete": True,
+                "position_count": 0,
+                "open_order_count": 0,
+                "positions_snapshot_path": str(config.broker_truth_root / "ibkr_positions_snapshot.json"),
+                "open_orders_snapshot_path": str(config.broker_truth_root / "ibkr_open_orders_snapshot.json"),
+                "submit_authority": False,
+                "live_money_eligible": False,
+                "paper_proof_invoked": False,
+            },
+        }
+    )
+    _write_json(config.broker_status_path, status)
+
+    report = reconcile_track_b_paper_broker_truth(config=config, now=NOW)
+
+    assert report["classification"] == "TRACK_B_PAPER_BROKER_RECONCILED"
+    assert report["broker_reconciled"] is True
+    assert report["last_successful_broker_truth"]["positions_complete"] is True
+    assert report["latest_attempt_status"]["classification"] == "BROKER_TRUTH_REFRESH_FAILED"
+    assert report["latest_attempt_status"]["positions_complete"] is False
+
+
 def test_blocks_when_track_b_broker_position_exists_but_lifecycle_is_flat(tmp_path: Path) -> None:
     config = _write_base_artifacts(tmp_path)
     _write_broker_truth(

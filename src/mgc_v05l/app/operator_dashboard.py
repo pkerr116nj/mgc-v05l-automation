@@ -17633,7 +17633,7 @@ def _compact_track_b_broker_truth_refresh_status(payload: dict[str, Any], path: 
         refresh_seconds = 60.0
     freshness_threshold_seconds = max(refresh_seconds * 2.5, refresh_seconds + 30.0)
     fresh = bool(
-        payload.get("classification") == "BROKER_TRUTH_REFRESH_READY"
+        payload.get("classification") in {"BROKER_TRUTH_REFRESH_READY", "BROKER_TRUTH_REFRESH_LAST_SUCCESS_PRESERVED"}
         and payload.get("last_success") is True
         and payload.get("positions_complete") is True
         and payload.get("open_orders_complete") is True
@@ -17666,6 +17666,12 @@ def _compact_track_b_broker_truth_refresh_status(payload: dict[str, Any], path: 
         "open_order_count": payload.get("open_order_count"),
         "positions_snapshot_path": payload.get("positions_snapshot_path"),
         "open_orders_snapshot_path": payload.get("open_orders_snapshot_path"),
+        "last_successful_broker_truth": payload.get("last_successful_broker_truth")
+        if isinstance(payload.get("last_successful_broker_truth"), dict)
+        else {},
+        "latest_attempt_status": payload.get("latest_attempt_status")
+        if isinstance(payload.get("latest_attempt_status"), dict)
+        else {},
         "live_money_eligible": payload.get("live_money_eligible") is True,
         "submit_authority": payload.get("submit_authority") is True,
         "paper_proof_invoked": payload.get("paper_proof_invoked") is True,

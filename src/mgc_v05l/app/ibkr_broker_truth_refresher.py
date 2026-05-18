@@ -71,17 +71,37 @@ def run_broker_truth_refresh_once(
     error: str | None = None
     try:
         artifacts = verifier(config=_verification_config(config))
-        artifact_writer(output_dir=config.output_dir, artifacts=artifacts)
     except Exception as exc:  # pragma: no cover - exercised with explicit unit fake
         error = str(exc)
     completed_at = now_fn()
-    status = build_broker_truth_refresh_status(
-        config=config,
+    attempt_dir = config.output_dir / "latest_attempt"
+    attempt_config = BrokerTruthRefreshConfig(**{**config.__dict__, "output_dir": attempt_dir})
+    attempt_status = build_broker_truth_refresh_status(
+        config=config if _artifacts_are_complete_success(artifacts=artifacts, error=error) else attempt_config,
         started_at=started_at,
         completed_at=completed_at,
         artifacts=artifacts,
         error=error,
     )
+    attempt_status_path = config.output_dir / "ibkr_broker_truth_latest_attempt_status.json"
+    if attempt_status["classification"] == "BROKER_TRUTH_REFRESH_READY":
+        if artifacts is not None:
+            artifact_writer(output_dir=config.output_dir, artifacts=artifacts)
+        status = _status_with_attempt_metadata(
+            status=attempt_status,
+            attempt_status=attempt_status,
+            attempt_status_path=attempt_status_path,
+        )
+    else:
+        if artifacts is not None:
+            artifact_writer(output_dir=attempt_dir, artifacts=artifacts)
+        previous_status = _read_json(config.status_path)
+        status = _preserve_last_successful_status(
+            previous_status=previous_status,
+            attempt_status=attempt_status,
+            attempt_status_path=attempt_status_path,
+        )
+    _write_json_atomically(attempt_status_path, attempt_status)
     write_broker_truth_refresh_status(status_path=config.status_path, var_status_path=config.var_status_path, status=status)
     return status
 
@@ -153,7 +173,9 @@ def build_broker_truth_refresh_status(
     )
     position_count = int(positions.get("position_count") or 0)
     open_order_count = int(open_orders.get("open_order_count") or 0)
-    age_seconds = max((datetime.now(timezone.utc) - completed_at.astimezone(timezone.utc)).total_seconds(), 0.0)
+    age_seconds = 0.0
+    freshness_threshold_seconds = _freshness_threshold_seconds(config.refresh_seconds)
+    fresh = bool(success and age_seconds <= freshness_threshold_seconds)
     last_error = error or _connection_detail(connection) if not success else None
     return {
         "schema_version": "track_b_broker_truth_refresh_status_v1",
@@ -174,6 +196,8 @@ def build_broker_truth_refresh_status(
         "last_failure": not bool(success),
         "last_error": last_error,
         "age_seconds": age_seconds,
+        "freshness_threshold_seconds": freshness_threshold_seconds,
+        "fresh": fresh,
         "positions_complete": positions_complete,
         "open_orders_complete": open_orders_complete,
         "position_count": position_count,
@@ -185,6 +209,110 @@ def build_broker_truth_refresh_status(
         "started_at": started_at.astimezone(timezone.utc).isoformat(),
         "completed_at": generated_at,
         "verifier_classification": artifacts.classification if artifacts is not None else "NOT_RUN",
+        "submit_authority": False,
+        "live_money_eligible": False,
+        "paper_proof_invoked": False,
+    }
+
+
+def _artifacts_are_complete_success(*, artifacts: IbkrReadOnlyVerificationArtifacts | None, error: str | None) -> bool:
+    if artifacts is None or error is not None:
+        return False
+    status = build_broker_truth_refresh_status(
+        config=BrokerTruthRefreshConfig(output_dir=Path(".")),
+        started_at=datetime.now(timezone.utc),
+        completed_at=datetime.now(timezone.utc),
+        artifacts=artifacts,
+        error=error,
+    )
+    return status.get("classification") == "BROKER_TRUTH_REFRESH_READY"
+
+
+def _status_with_attempt_metadata(
+    *,
+    status: dict[str, Any],
+    attempt_status: dict[str, Any],
+    attempt_status_path: Path,
+) -> dict[str, Any]:
+    return {
+        **status,
+        "latest_attempt_status_path": str(attempt_status_path),
+        "latest_attempt_status": _compact_attempt_status(attempt_status),
+        "last_successful_broker_truth": _last_successful_broker_truth(status),
+    }
+
+
+def _preserve_last_successful_status(
+    *,
+    previous_status: dict[str, Any],
+    attempt_status: dict[str, Any],
+    attempt_status_path: Path,
+) -> dict[str, Any]:
+    if not _is_successful_canonical_status(previous_status):
+        return _status_with_attempt_metadata(
+            status=attempt_status,
+            attempt_status=attempt_status,
+            attempt_status_path=attempt_status_path,
+        )
+    preserved = {
+        **previous_status,
+        "classification": "BROKER_TRUTH_REFRESH_LAST_SUCCESS_PRESERVED",
+        "last_failure": True,
+        "last_failure_at": attempt_status.get("generated_at"),
+        "last_error": attempt_status.get("last_error") or attempt_status.get("verifier_classification"),
+        "latest_attempt_status_path": str(attempt_status_path),
+        "latest_attempt_status": _compact_attempt_status(attempt_status),
+    }
+    preserved["last_successful_broker_truth"] = _last_successful_broker_truth(preserved)
+    return preserved
+
+
+def _is_successful_canonical_status(status: dict[str, Any]) -> bool:
+    if not isinstance(status, dict):
+        return False
+    return (
+        status.get("last_success") is True
+        and status.get("read_only") is True
+        and status.get("positions_complete") is True
+        and status.get("open_orders_complete") is True
+        and bool(status.get("positions_snapshot_path"))
+        and bool(status.get("open_orders_snapshot_path"))
+    )
+
+
+def _compact_attempt_status(status: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "classification": status.get("classification"),
+        "generated_at": status.get("generated_at"),
+        "last_success": status.get("last_success") is True,
+        "last_failure": status.get("last_failure") is True,
+        "last_error": status.get("last_error"),
+        "positions_complete": status.get("positions_complete") is True,
+        "open_orders_complete": status.get("open_orders_complete") is True,
+        "position_count": status.get("position_count"),
+        "open_order_count": status.get("open_order_count"),
+        "positions_snapshot_path": status.get("positions_snapshot_path"),
+        "open_orders_snapshot_path": status.get("open_orders_snapshot_path"),
+        "verifier_classification": status.get("verifier_classification"),
+        "submit_authority": False,
+        "live_money_eligible": False,
+        "paper_proof_invoked": False,
+    }
+
+
+def _last_successful_broker_truth(status: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "classification": status.get("classification"),
+        "generated_at": status.get("generated_at"),
+        "latest_refresh_time": status.get("latest_refresh_time"),
+        "last_success_at": status.get("last_success_at"),
+        "account": status.get("account"),
+        "positions_complete": status.get("positions_complete") is True,
+        "open_orders_complete": status.get("open_orders_complete") is True,
+        "position_count": status.get("position_count"),
+        "open_order_count": status.get("open_order_count"),
+        "positions_snapshot_path": status.get("positions_snapshot_path"),
+        "open_orders_snapshot_path": status.get("open_orders_snapshot_path"),
         "submit_authority": False,
         "live_money_eligible": False,
         "paper_proof_invoked": False,
@@ -260,7 +388,86 @@ def load_broker_truth_refresh_status(*, status_path: Path = DEFAULT_STATUS_PATH)
             "available": False,
             "live_money_eligible": False,
         }
-    return {**payload, "available": True, "path": str(status_path)}
+    return _with_current_freshness({**payload, "available": True, "path": str(status_path)})
+
+
+def _with_current_freshness(payload: dict[str, Any]) -> dict[str, Any]:
+    source_classification = str(payload.get("classification") or "BROKER_TRUTH_REFRESH_STATUS_UNKNOWN")
+    age_seconds = _payload_age_seconds(payload.get("generated_at"))
+    try:
+        refresh_seconds = float(payload.get("refresh_seconds") or DEFAULT_REFRESH_SECONDS)
+    except (TypeError, ValueError):
+        refresh_seconds = DEFAULT_REFRESH_SECONDS
+    freshness_threshold_seconds = _freshness_threshold_seconds(refresh_seconds)
+    fresh = bool(
+        source_classification in {"BROKER_TRUTH_REFRESH_READY", "BROKER_TRUTH_REFRESH_LAST_SUCCESS_PRESERVED"}
+        and payload.get("last_success") is True
+        and payload.get("positions_complete") is True
+        and payload.get("open_orders_complete") is True
+        and age_seconds is not None
+        and age_seconds <= freshness_threshold_seconds
+    )
+    classification = "BROKER_TRUTH_REFRESH_FRESH" if fresh else source_classification
+    if source_classification in {"BROKER_TRUTH_REFRESH_READY", "BROKER_TRUTH_REFRESH_LAST_SUCCESS_PRESERVED"} and not fresh:
+        classification = "BROKER_TRUTH_REFRESH_STALE"
+    last_successful = payload.get("last_successful_broker_truth")
+    latest_attempt = payload.get("latest_attempt_status")
+    return {
+        **payload,
+        "source_classification": source_classification,
+        "classification": classification,
+        "age_seconds": age_seconds,
+        "freshness_threshold_seconds": freshness_threshold_seconds,
+        "fresh": fresh,
+        "last_successful_broker_truth": _with_truth_age(last_successful, refresh_seconds)
+        if isinstance(last_successful, dict)
+        else _with_truth_age(_last_successful_broker_truth(payload), refresh_seconds),
+        "latest_attempt_status": _with_truth_age(latest_attempt, refresh_seconds)
+        if isinstance(latest_attempt, dict)
+        else latest_attempt,
+    }
+
+
+def _with_truth_age(payload: dict[str, Any], refresh_seconds: float) -> dict[str, Any]:
+    generated_at = payload.get("generated_at") or payload.get("last_success_at") or payload.get("latest_refresh_time")
+    age_seconds = _payload_age_seconds(generated_at)
+    threshold = _freshness_threshold_seconds(refresh_seconds)
+    return {
+        **payload,
+        "age_seconds": age_seconds,
+        "freshness_threshold_seconds": threshold,
+        "fresh": bool(age_seconds is not None and age_seconds <= threshold),
+    }
+
+
+def _read_json(path: Path) -> dict[str, Any]:
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+    return payload if isinstance(payload, dict) else {}
+
+
+def _payload_age_seconds(value: object) -> float | None:
+    if not value:
+        return None
+    try:
+        parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return max((datetime.now(timezone.utc) - parsed.astimezone(timezone.utc)).total_seconds(), 0.0)
+
+
+def _freshness_threshold_seconds(refresh_seconds: float) -> float:
+    try:
+        value = float(refresh_seconds)
+    except (TypeError, ValueError):
+        value = DEFAULT_REFRESH_SECONDS
+    if value <= 0:
+        value = DEFAULT_REFRESH_SECONDS
+    return max(value * 2.5, value + 30.0)
 
 
 def build_parser() -> argparse.ArgumentParser:

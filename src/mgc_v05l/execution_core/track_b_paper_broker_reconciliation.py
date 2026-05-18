@@ -340,6 +340,12 @@ def reconcile_track_b_paper_broker_truth(
             "positions_snapshot": str(positions_path),
             "open_orders_snapshot": str(open_orders_path),
         },
+        "last_successful_broker_truth": broker_status.get("last_successful_broker_truth")
+        if isinstance(broker_status.get("last_successful_broker_truth"), Mapping)
+        else _last_successful_broker_truth_from_status(broker_status),
+        "latest_attempt_status": broker_status.get("latest_attempt_status")
+        if isinstance(broker_status.get("latest_attempt_status"), Mapping)
+        else {},
         "reconciled_artifacts": {
             "trade_summary": str(config.reconciled_trade_summary_path),
             "live_position_status": str(config.reconciled_live_position_status_path),
@@ -502,6 +508,25 @@ def _validate_snapshot(
                 "actual": payload.get("request_method"),
             }
         )
+
+
+def _last_successful_broker_truth_from_status(status: Mapping[str, Any]) -> dict[str, Any]:
+    return {
+        "classification": status.get("classification"),
+        "generated_at": status.get("generated_at"),
+        "latest_refresh_time": status.get("latest_refresh_time"),
+        "last_success_at": status.get("last_success_at"),
+        "account": status.get("account"),
+        "positions_complete": status.get("positions_complete") is True,
+        "open_orders_complete": status.get("open_orders_complete") is True,
+        "position_count": status.get("position_count"),
+        "open_order_count": status.get("open_order_count"),
+        "positions_snapshot_path": status.get("positions_snapshot_path"),
+        "open_orders_snapshot_path": status.get("open_orders_snapshot_path"),
+        "submit_authority": False,
+        "live_money_eligible": False,
+        "paper_proof_invoked": False,
+    }
 
 
 def _validate_lifecycle_read_model(
