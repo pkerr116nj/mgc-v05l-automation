@@ -3986,11 +3986,38 @@ class ProbationaryPaperLaneRuntime:
             return False
         return True
 
+    def _uses_phase1_runtime_artifact_market_data(self) -> bool:
+        return (
+            self.settings.mode is RuntimeMode.PAPER
+            and self.settings.probationary_paper_market_data_source
+            is ProbationaryPaperMarketDataSource.PHASE1_RUNTIME_ARTIFACT
+        )
+
+    def _poll_live_bars_since(self, since: datetime | None) -> list[Bar]:
+        return self.live_polling_service.poll_bars(
+            SchwabLivePollRequest(
+                internal_symbol=self.settings.symbol,
+                since=since,
+            ),
+            internal_timeframe=self.settings.resolved_execution_timeframe,
+            default_is_final=True,
+        )
+
+    def _record_market_data_observation_bars(self, bars: Sequence[Bar]) -> None:
+        data_source = str(
+            getattr(self.live_polling_service, "data_source", "runtime_market_data_observation")
+        )
+        for bar in bars:
+            self.repositories.bars.save(bar, data_source=data_source)
+            self.repositories.processed_bars.mark_processed(bar)
+
     def poll_and_process(self) -> tuple[int, dict[str, Any], Path]:
         observed_at = datetime.now(self.settings.timezone_info)
         latest_processed_end_ts = self.repositories.processed_bars.latest_end_ts()
         bars: list[Bar] = []
-        if not self._should_skip_live_poll(observed_at):
+        strategy_poll_allowed = not self._should_skip_live_poll(observed_at)
+        observation_only_poll = (not strategy_poll_allowed) and self._uses_phase1_runtime_artifact_market_data()
+        if strategy_poll_allowed or observation_only_poll:
             poll_since = latest_processed_end_ts
             if (
                 self._paper_route_canary_overlay_active()
@@ -4001,24 +4028,20 @@ class ProbationaryPaperLaneRuntime:
             ):
                 # Start on a completed-minute boundary so we do not skip the latest closed bar.
                 poll_since = _paper_route_canary_recovery_poll_since(observed_at)
-            bars = self.live_polling_service.poll_bars(
-                SchwabLivePollRequest(
-                    internal_symbol=self.settings.symbol,
-                    since=poll_since,
-                ),
-                internal_timeframe=self.settings.resolved_execution_timeframe,
-                default_is_final=True,
-            )
-        for bar in bars:
-            self.strategy_engine.process_bar(bar)
-            self._apply_canary_lifecycle(bar)
-            if not isinstance(self.execution_engine.broker, PaperBroker):
-                _run_live_strategy_fill_sync(
-                    repositories=self.repositories,
-                    strategy_engine=self.strategy_engine,
-                    execution_engine=self.execution_engine,
-                    observed_at=bar.end_ts,
-                )
+            bars = self._poll_live_bars_since(poll_since)
+        if observation_only_poll:
+            self._record_market_data_observation_bars(bars)
+        else:
+            for bar in bars:
+                self.strategy_engine.process_bar(bar)
+                self._apply_canary_lifecycle(bar)
+                if not isinstance(self.execution_engine.broker, PaperBroker):
+                    _run_live_strategy_fill_sync(
+                        repositories=self.repositories,
+                        strategy_engine=self.strategy_engine,
+                        execution_engine=self.execution_engine,
+                        observed_at=bar.end_ts,
+                    )
         cadence = _runtime_cadence_payload(self.settings, self.strategy_engine)
         heartbeat_reconciliation, reconciliation, _ = _run_reconciliation_heartbeat(
             settings=self.settings,

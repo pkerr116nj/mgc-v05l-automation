@@ -67,7 +67,7 @@ from mgc_v05l.app.probationary_runtime import (
     submit_probationary_operator_control,
 )
 from mgc_v05l.domain.enums import LongEntryFamily, OrderIntentType, OrderStatus, PositionSide, ShortEntryFamily, StrategyStatus
-from mgc_v05l.config_models import RuntimeMode, load_settings_from_files
+from mgc_v05l.config_models import ProbationaryPaperMarketDataSource, RuntimeMode, load_settings_from_files
 from mgc_v05l.config_models.settings import EnvironmentMode, ExecutionTimeframeRole
 from mgc_v05l.execution.execution_engine import ExecutionEngine
 from mgc_v05l.execution.live_strategy_broker import LiveStrategyPilotBroker
@@ -2891,6 +2891,152 @@ def test_probationary_paper_lane_skips_live_poll_when_flat_and_out_of_session(
     payload = json.loads((lane_settings.probationary_artifacts_path / "operator_status.json").read_text(encoding="utf-8"))
     assert live_polling_service.calls == 0
     assert payload["new_bars_last_cycle"] == 0
+
+
+def test_phase1_artifact_lane_observes_market_data_when_flat_and_out_of_session(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = _build_probationary_paper_settings(tmp_path).model_copy(
+        update={"probationary_paper_market_data_source": ProbationaryPaperMarketDataSource.PHASE1_RUNTIME_ARTIFACT}
+    )
+    spec = next(
+        spec
+        for spec in _load_probationary_paper_lane_specs(settings)
+        if spec.lane_id == "mgc_us_late_pause_resume_long"
+    )
+    lane_settings = _build_probationary_paper_lane_settings(settings, spec)
+    repositories = RepositorySet(build_engine(lane_settings.database_url))
+    structured_logger = StructuredLogger(lane_settings.probationary_artifacts_path)
+    alert_dispatcher = AlertDispatcher(structured_logger)
+    strategy_engine = StrategyEngine(
+        settings=lane_settings,
+        repositories=repositories,
+        execution_engine=ExecutionEngine(broker=PaperBroker()),
+        structured_logger=structured_logger,
+        alert_dispatcher=alert_dispatcher,
+    )
+    observed_bar = _build_bar(datetime(2026, 4, 2, 15, 55, tzinfo=ZoneInfo("America/New_York")), symbol=spec.symbol)
+    observed_bar = replace(
+        observed_bar,
+        bar_id=(
+            f"{spec.symbol}|{lane_settings.resolved_execution_timeframe}|"
+            f"{observed_bar.end_ts.astimezone(ZoneInfo('UTC')).isoformat()}"
+        ),
+        timeframe=lane_settings.resolved_execution_timeframe,
+    )
+    process_calls: list[Bar] = []
+    strategy_engine.process_bar = lambda bar: process_calls.append(bar)  # type: ignore[method-assign]
+
+    class FakeLivePollingService:
+        data_source = "phase1_runtime_artifact"
+
+        def __init__(self) -> None:
+            self.calls: list[tuple[tuple[object, ...], dict[str, object]]] = []
+
+        def poll_bars(self, *args, **kwargs):
+            self.calls.append((args, kwargs))
+            return [observed_bar]
+
+    live_polling_service = FakeLivePollingService()
+    lane_runtime = ProbationaryPaperLaneRuntime(
+        spec=spec,
+        settings=lane_settings,
+        repositories=repositories,
+        strategy_engine=strategy_engine,
+        execution_engine=ExecutionEngine(broker=PaperBroker()),
+        live_polling_service=live_polling_service,
+        structured_logger=ProbationaryLaneStructuredLogger(
+            lane_id=spec.lane_id,
+            symbol=spec.symbol,
+            root_logger=StructuredLogger(tmp_path / "root"),
+            lane_logger=structured_logger,
+        ),
+        alert_dispatcher=alert_dispatcher,
+    )
+    monkeypatch.setattr(probationary_runtime_module, "_session_restriction_matches_now", lambda now, restriction: False)
+
+    lane_runtime.poll_and_process()
+
+    payload = json.loads((lane_settings.probationary_artifacts_path / "operator_status.json").read_text(encoding="utf-8"))
+    assert len(live_polling_service.calls) == 1
+    assert process_calls == []
+    assert repositories.bars.count() == 1
+    assert repositories.processed_bars.latest_end_ts() == observed_bar.end_ts
+    assert payload["last_processed_bar_end_ts"] == observed_bar.end_ts.isoformat()
+    assert payload["new_bars_last_cycle"] == 1
+    assert repositories.order_intents.list_all() == []
+    with repositories.engine.begin() as connection:
+        assert len(connection.execute(select(signals_table)).all()) == 0
+
+
+def test_phase1_artifact_lane_evaluates_strategy_when_in_session(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = _build_probationary_paper_settings(tmp_path).model_copy(
+        update={"probationary_paper_market_data_source": ProbationaryPaperMarketDataSource.PHASE1_RUNTIME_ARTIFACT}
+    )
+    spec = next(
+        spec
+        for spec in _load_probationary_paper_lane_specs(settings)
+        if spec.lane_id == "mgc_us_late_pause_resume_long"
+    )
+    lane_settings = _build_probationary_paper_lane_settings(settings, spec)
+    repositories = RepositorySet(build_engine(lane_settings.database_url))
+    structured_logger = StructuredLogger(lane_settings.probationary_artifacts_path)
+    alert_dispatcher = AlertDispatcher(structured_logger)
+    strategy_engine = StrategyEngine(
+        settings=lane_settings,
+        repositories=repositories,
+        execution_engine=ExecutionEngine(broker=PaperBroker()),
+        structured_logger=structured_logger,
+        alert_dispatcher=alert_dispatcher,
+    )
+    observed_bar = _build_bar(datetime(2026, 4, 2, 15, 55, tzinfo=ZoneInfo("America/New_York")), symbol=spec.symbol)
+    observed_bar = replace(
+        observed_bar,
+        bar_id=(
+            f"{spec.symbol}|{lane_settings.resolved_execution_timeframe}|"
+            f"{observed_bar.end_ts.astimezone(ZoneInfo('UTC')).isoformat()}"
+        ),
+        timeframe=lane_settings.resolved_execution_timeframe,
+    )
+    process_calls: list[Bar] = []
+    strategy_engine.process_bar = lambda bar: process_calls.append(bar)  # type: ignore[method-assign]
+
+    class FakeLivePollingService:
+        data_source = "phase1_runtime_artifact"
+
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def poll_bars(self, *args, **kwargs):
+            self.calls += 1
+            return [observed_bar]
+
+    live_polling_service = FakeLivePollingService()
+    lane_runtime = ProbationaryPaperLaneRuntime(
+        spec=spec,
+        settings=lane_settings,
+        repositories=repositories,
+        strategy_engine=strategy_engine,
+        execution_engine=ExecutionEngine(broker=PaperBroker()),
+        live_polling_service=live_polling_service,
+        structured_logger=ProbationaryLaneStructuredLogger(
+            lane_id=spec.lane_id,
+            symbol=spec.symbol,
+            root_logger=StructuredLogger(tmp_path / "root"),
+            lane_logger=structured_logger,
+        ),
+        alert_dispatcher=alert_dispatcher,
+    )
+    monkeypatch.setattr(probationary_runtime_module, "_session_restriction_matches_now", lambda now, restriction: True)
+
+    lane_runtime.poll_and_process()
+
+    assert live_polling_service.calls == 1
+    assert process_calls == [observed_bar]
 
 
 def test_probationary_paper_lane_keeps_live_poll_when_position_open_out_of_session(
