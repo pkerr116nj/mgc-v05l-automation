@@ -12,6 +12,8 @@ DEFAULT_STATUS_FILE="${DEFAULT_RUNTIME_DIR}/headless_supervised_paper_status.jso
 DEFAULT_MARKDOWN_FILE="${DEFAULT_RUNTIME_DIR}/headless_supervised_paper_status.md"
 DEFAULT_CANONICAL_READINESS_FILE="${DEFAULT_RUNTIME_DIR}/latest_canonical_readiness.json"
 DEFAULT_CANONICAL_READINESS_SUMMARY_FILE="${DEFAULT_RUNTIME_DIR}/latest_canonical_readiness_summary.json"
+DEFAULT_MAINTENANCE_SUPERVISOR_FILE="${DEFAULT_RUNTIME_DIR}/latest_maintenance_supervisor_decision.json"
+DEFAULT_MAINTENANCE_SUPERVISOR_SUMMARY_FILE="${DEFAULT_RUNTIME_DIR}/latest_maintenance_supervisor_summary.json"
 DEFAULT_STARTUP_FILE="${REPO_ROOT}/outputs/operator_dashboard/startup_control_plane_snapshot.json"
 DEFAULT_OPERABILITY_FILE="${REPO_ROOT}/outputs/operator_dashboard/supervised_paper_operability_snapshot.json"
 DEFAULT_INFO_FILE="${DEFAULT_RUNTIME_DIR}/operator_dashboard.json"
@@ -26,6 +28,8 @@ STATUS_FILE="${DEFAULT_STATUS_FILE}"
 MARKDOWN_FILE="${DEFAULT_MARKDOWN_FILE}"
 CANONICAL_READINESS_FILE="${DEFAULT_CANONICAL_READINESS_FILE}"
 CANONICAL_READINESS_SUMMARY_FILE="${DEFAULT_CANONICAL_READINESS_SUMMARY_FILE}"
+MAINTENANCE_SUPERVISOR_FILE="${DEFAULT_MAINTENANCE_SUPERVISOR_FILE}"
+MAINTENANCE_SUPERVISOR_SUMMARY_FILE="${DEFAULT_MAINTENANCE_SUPERVISOR_SUMMARY_FILE}"
 HEALTH_FILE="${DEFAULT_HEALTH_FILE}"
 DASHBOARD_URL="${DEFAULT_URL}"
 HEALTH_ATTEMPTS="${DEFAULT_HEALTH_ATTEMPTS}"
@@ -76,6 +80,22 @@ while (($# > 0)); do
       CANONICAL_READINESS_SUMMARY_FILE="${1#*=}"
       shift
       ;;
+    --maintenance-supervisor-output)
+      MAINTENANCE_SUPERVISOR_FILE="$2"
+      shift 2
+      ;;
+    --maintenance-supervisor-output=*)
+      MAINTENANCE_SUPERVISOR_FILE="${1#*=}"
+      shift
+      ;;
+    --maintenance-supervisor-summary-output)
+      MAINTENANCE_SUPERVISOR_SUMMARY_FILE="$2"
+      shift 2
+      ;;
+    --maintenance-supervisor-summary-output=*)
+      MAINTENANCE_SUPERVISOR_SUMMARY_FILE="${1#*=}"
+      shift
+      ;;
     --dashboard-url)
       DASHBOARD_URL="$2"
       shift 2
@@ -113,6 +133,8 @@ ensure_dir "$(dirname "${HEALTH_FILE}")"
 ensure_dir "$(dirname "${DASHBOARD_PAYLOAD_FILE}")"
 ensure_dir "$(dirname "${CANONICAL_READINESS_FILE}")"
 ensure_dir "$(dirname "${CANONICAL_READINESS_SUMMARY_FILE}")"
+ensure_dir "$(dirname "${MAINTENANCE_SUPERVISOR_FILE}")"
+ensure_dir "$(dirname "${MAINTENANCE_SUPERVISOR_SUMMARY_FILE}")"
 
 refresh_canonical_readiness() {
   local tmp_summary
@@ -227,6 +249,101 @@ status_path.write_text(json.dumps(status, indent=2, sort_keys=True) + "\n", enco
 PY
 }
 
+refresh_maintenance_supervisor() {
+  local tmp_summary
+  tmp_summary="${MAINTENANCE_SUPERVISOR_SUMMARY_FILE}.tmp"
+  rm -f "${tmp_summary}"
+  if "${PYTHON_BIN}" -m mgc_v05l.app.track_b_readiness_maintenance_supervisor \
+    --repo-root "${REPO_ROOT}" \
+    --output-path "${MAINTENANCE_SUPERVISOR_FILE}" \
+    --json > "${tmp_summary}"; then
+    mv "${tmp_summary}" "${MAINTENANCE_SUPERVISOR_SUMMARY_FILE}"
+    return 0
+  fi
+  local exit_code=$?
+  if [[ -s "${tmp_summary}" ]]; then
+    mv "${tmp_summary}" "${MAINTENANCE_SUPERVISOR_SUMMARY_FILE}"
+  else
+    rm -f "${tmp_summary}"
+  fi
+  return "${exit_code}"
+}
+
+print_maintenance_supervisor_summary() {
+  "${PYTHON_BIN}" - <<'PY' "${MAINTENANCE_SUPERVISOR_SUMMARY_FILE}" >&2
+import json
+import sys
+from pathlib import Path
+
+try:
+    payload = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
+except (OSError, json.JSONDecodeError):
+    payload = {"supervisor_state": "BLOCKED", "recommended_actions": ["supervisor_summary_missing"]}
+
+print("maintenance_supervisor_summary:")
+for key in (
+    "supervisor_state",
+    "recommended_actions",
+    "action_scope",
+    "blockers",
+    "warnings",
+    "operator_action_required",
+    "submit_block_required",
+):
+    value = payload.get(key)
+    if isinstance(value, list):
+        value = ",".join(str(item) for item in value) if value else "none"
+    print(f"  {key}={value}")
+PY
+}
+
+merge_maintenance_supervisor_status() {
+  "${PYTHON_BIN}" - <<'PY' "${STATUS_FILE}" "${MAINTENANCE_SUPERVISOR_FILE}" "${MAINTENANCE_SUPERVISOR_SUMMARY_FILE}"
+import json
+import sys
+from pathlib import Path
+
+status_path = Path(sys.argv[1])
+decision_path = Path(sys.argv[2])
+summary_path = Path(sys.argv[3])
+
+try:
+    status = json.loads(status_path.read_text(encoding="utf-8"))
+except (OSError, json.JSONDecodeError):
+    status = {}
+try:
+    decision = json.loads(decision_path.read_text(encoding="utf-8"))
+except (OSError, json.JSONDecodeError):
+    decision = {}
+try:
+    summary = json.loads(summary_path.read_text(encoding="utf-8"))
+except (OSError, json.JSONDecodeError):
+    summary = {}
+
+status["maintenance_supervisor"] = {
+    "supervisor_state": summary.get("supervisor_state") or decision.get("supervisor_state") or "BLOCKED",
+    "recommended_actions": summary.get("recommended_actions") or decision.get("recommended_actions") or [],
+    "action_scope": summary.get("action_scope") or decision.get("action_scope") or [],
+    "operator_action_required": summary.get("operator_action_required") is True
+    or decision.get("operator_action_required") is True,
+    "submit_block_required": summary.get("submit_block_required") is True
+    or decision.get("submit_block_required") is True,
+    "blockers": summary.get("blockers") or [row.get("code") for row in decision.get("blockers") or [] if isinstance(row, dict)],
+    "warnings": summary.get("warnings") or [row.get("code") for row in decision.get("warnings") or [] if isinstance(row, dict)],
+    "artifact": str(decision_path),
+    "summary_artifact": str(summary_path),
+}
+status["maintenance_supervisor_state"] = status["maintenance_supervisor"]["supervisor_state"]
+status["maintenance_supervisor_recommended_actions"] = status["maintenance_supervisor"]["recommended_actions"]
+status["maintenance_supervisor_operator_action_required"] = status["maintenance_supervisor"]["operator_action_required"]
+status["maintenance_supervisor_submit_block_required"] = status["maintenance_supervisor"]["submit_block_required"]
+status["paper_only"] = True
+status["live_money_eligible"] = False
+
+status_path.write_text(json.dumps(status, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+PY
+}
+
 canonical_readiness_exit_for_classification() {
   case "$1" in
     READY_SUBMIT_CAPABLE|READY_OBSERVATION_ONLY)
@@ -242,6 +359,13 @@ canonical_readiness_exit_for_classification() {
 }
 
 print_canonical_readiness_summary
+
+set +e
+refresh_maintenance_supervisor
+maintenance_supervisor_exit_code=$?
+set -e
+
+print_maintenance_supervisor_summary
 
 fetch_health_snapshot() {
   local tmp_file
@@ -313,6 +437,7 @@ fi
   --markdown-output "${MARKDOWN_FILE}" >/dev/null
 
 merge_canonical_readiness_status
+merge_maintenance_supervisor_status
 cat "${STATUS_FILE}"
 canonical_state="$(canonical_readiness_classification)"
 canonical_readiness_exit_for_classification "${canonical_state}"

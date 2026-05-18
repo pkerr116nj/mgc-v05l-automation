@@ -24,6 +24,35 @@ def test_status_script_produces_canonical_readiness_without_dashboard_ownership(
     assert script.index("refresh_canonical_readiness") < script.index("fetch_health_snapshot")
 
 
+def test_status_script_surfaces_advisory_maintenance_supervisor_decision() -> None:
+    script = STATUS_SCRIPT.read_text(encoding="utf-8")
+
+    assert "mgc_v05l.app.track_b_readiness_maintenance_supervisor" in script
+    assert "--repo-root \"${REPO_ROOT}\"" in script
+    assert "--output-path \"${MAINTENANCE_SUPERVISOR_FILE}\"" in script
+    assert "DEFAULT_MAINTENANCE_SUPERVISOR_FILE" in script
+    assert "DEFAULT_MAINTENANCE_SUPERVISOR_SUMMARY_FILE" in script
+    assert "refresh_maintenance_supervisor" in script
+    assert "print_maintenance_supervisor_summary" in script
+    assert "merge_maintenance_supervisor_status" in script
+    assert "status[\"maintenance_supervisor\"]" in script
+    assert "status[\"maintenance_supervisor_state\"]" in script
+    assert "status[\"maintenance_supervisor_recommended_actions\"]" in script
+    assert "operator_action_required" in script
+    assert "submit_block_required" in script
+    assert script.index("refresh_canonical_readiness") < script.index("refresh_maintenance_supervisor")
+    assert script.index("merge_canonical_readiness_status") < script.index("merge_maintenance_supervisor_status")
+
+
+def test_status_script_keeps_readiness_exit_code_primary_over_supervisor() -> None:
+    script = STATUS_SCRIPT.read_text(encoding="utf-8")
+
+    assert "maintenance_supervisor_exit_code=$?" in script
+    assert "canonical_state=\"$(canonical_readiness_classification)\"" in script
+    assert script.rstrip().endswith('canonical_readiness_exit_for_classification "${canonical_state}"')
+    assert "exit_code_for_state" not in script
+
+
 def test_launch_script_passes_canonical_readiness_paths_to_status_script() -> None:
     script = RUN_SCRIPT.read_text(encoding="utf-8")
 
