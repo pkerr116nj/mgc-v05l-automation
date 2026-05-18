@@ -114,6 +114,27 @@ _PL_PHASE1_SUBMIT_LANE_IDS = (
     "atp_companion_v1_pl_asia_us_risk_shaped_v1",
     "pl_us_late_pause_resume_long",
 )
+_GOLD_FORCED_SESSION_LANE_ID_MIGRATIONS: dict[str, dict[str, Any]] = {
+    "mgc_1x_all_lanes__us_early_short": {
+        "canonical_lane_id": "mgc_1x_all_lanes__us_early_short",
+        "legacy_lane_id": "mgc_1x_all_lanes__ny_early_short",
+        "strategy_family": "gold_forced_session_baseline_v2",
+        "package_id": "mgc_1x_all_lanes",
+        "instrument": "MGC",
+        "canonical_session": "US_EARLY",
+        "legacy_session": "NY_EARLY",
+        "source_variant": "nyEarlyShortV2",
+        "source_artifact": (
+            "outputs/reports/gc_mgc_forced_session_candidate_admission_archive_v4/"
+            "mgc_1x_all_lanes.paper_package.json"
+        ),
+        "migration_reason": (
+            "Candidate archive v4 renamed the NY_EARLY forced-session lane to the current "
+            "gold segment label US_EARLY while retaining the nyEarlyShortV2 signal source."
+        ),
+        "review_status": "EXPLICIT_LANE_ID_MIGRATION_REVIEWED",
+    }
+}
 _NEXT_NON_ATP_SUBMIT_LANE_ID = "gc_1x_all_lanes__asia_early_long"
 _FIRST_NON_ATP_SUBMIT_LANE_ID = "gc_1x_asia_london_participation__asia_london_long_v5"
 _ATP_CONTRACT = {
@@ -149,6 +170,20 @@ _SUBMIT_CAPABLE_LANE_ADAPTERS |= {
     }
     for lane_id in _MGC_PHASE1_SUBMIT_LANE_IDS
 }
+for lane_id, migration in _GOLD_FORCED_SESSION_LANE_ID_MIGRATIONS.items():
+    if migration.get("instrument") != "MGC":
+        continue
+    legacy_adapter = _SUBMIT_CAPABLE_LANE_ADAPTERS.get(str(migration.get("legacy_lane_id") or ""))
+    if legacy_adapter is None:
+        continue
+    _SUBMIT_CAPABLE_LANE_ADAPTERS[lane_id] = {
+        **legacy_adapter,
+        "lane_id": lane_id,
+        "lane_id_migration": dict(migration),
+        "legacy_lane_id": migration["legacy_lane_id"],
+        "canonical_session": migration["canonical_session"],
+        "legacy_session": migration["legacy_session"],
+    }
 _SUBMIT_CAPABLE_LANE_ADAPTERS |= {
     lane_id: {
         "lane_id": lane_id,

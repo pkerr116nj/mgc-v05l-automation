@@ -40,7 +40,7 @@ EXPECTED_LANES = {
         "session": "US_EARLY",
         "long_sources": (),
         "short_sources": ("nyEarlyShortV2",),
-        "governance": "alias_or_migration_required",
+        "governance": "recognized",
     },
     "mgc_1x_all_lanes__us_midday_short": {
         "session": "US_MIDDAY",
@@ -137,7 +137,7 @@ def test_mgc_forced_session_review_overlay_is_not_in_active_runtime_inputs() -> 
         assert lane_id not in active_payload
 
 
-def test_mgc_forced_session_review_governance_surfaces_us_early_alias_gap() -> None:
+def test_mgc_forced_session_review_governance_recognizes_us_early_migration() -> None:
     settings = _load_review_settings()
     lanes = {str(row["lane_id"]): row for row in settings.probationary_paper_lane_specs}
 
@@ -147,10 +147,18 @@ def test_mgc_forced_session_review_governance_surfaces_us_early_alias_gap() -> N
     }
 
     assert governance_review == {lane_id: expected["governance"] for lane_id, expected in EXPECTED_LANES.items()}
-    assert governance_review["mgc_1x_all_lanes__us_early_short"] == "alias_or_migration_required"
+    assert governance_review["mgc_1x_all_lanes__us_early_short"] == "recognized"
     assert lane_submit_bridge_adapter(lane_id="mgc_1x_all_lanes__ny_early_short") is not None
+    adapter = lane_submit_bridge_adapter(lane_id="mgc_1x_all_lanes__us_early_short")
+    assert adapter is not None
+    assert adapter["source_instrument"] == "MGC"
+    assert adapter["lane_id"] == "mgc_1x_all_lanes__us_early_short"
+    assert adapter["legacy_lane_id"] == "mgc_1x_all_lanes__ny_early_short"
+    assert adapter["lane_id_migration"]["review_status"] == "EXPLICIT_LANE_ID_MIGRATION_REVIEWED"
+    assert adapter["lane_id_migration"]["canonical_session"] == "US_EARLY"
+    assert adapter["lane_id_migration"]["legacy_session"] == "NY_EARLY"
     assert lanes["mgc_1x_all_lanes__us_early_short"]["review_blocker"] == (
-        "REQUIRES_US_EARLY_ROUTE_GOVERNANCE_ALIAS_OR_MIGRATION_BEFORE_ACTIVATION"
+        "REQUIRES_EXPLICIT_APPROVAL_AND_RESTART_BEFORE_ACTIVATION_US_EARLY_MIGRATION_REVIEWED"
     )
 
 

@@ -7,6 +7,7 @@ from mgc_v05l.execution.ibkr_paper_strategy_porting import (
     IbkrPaperStrategyPortingConfig,
     lane_submit_bridge_adapter,
     run_ibkr_paper_strategy_porting,
+    submit_capable_lane_adapters,
     write_ibkr_paper_strategy_porting_artifacts,
 )
 
@@ -216,6 +217,7 @@ def test_restored_track_b_lanes_are_wired_for_ibkr_paper_submit() -> None:
         "mgc_1x_all_lanes__asia_early_short": "MGC",
         "mgc_1x_all_lanes__london_early_long": "MGC",
         "mgc_1x_all_lanes__ny_early_short": "MGC",
+        "mgc_1x_all_lanes__us_early_short": "MGC",
         "mgc_1x_all_lanes__us_midday_short": "MGC",
     }
 
@@ -226,6 +228,49 @@ def test_restored_track_b_lanes_are_wired_for_ibkr_paper_submit() -> None:
         assert adapter["current_order_destination"] == "ibkr_paper_bridge_submit_capable"
         assert adapter["source_instrument"] == expected_symbol
         assert adapter["bridge_execution_target"]["symbol"] == expected_symbol
+
+
+def test_mgc_forced_session_us_early_lane_uses_explicit_migration_metadata() -> None:
+    adapter = lane_submit_bridge_adapter(lane_id="mgc_1x_all_lanes__us_early_short")
+
+    assert adapter is not None
+    assert adapter["lane_id"] == "mgc_1x_all_lanes__us_early_short"
+    assert adapter["source_instrument"] == "MGC"
+    assert adapter["bridge_execution_target"]["symbol"] == "MGC"
+    assert adapter["legacy_lane_id"] == "mgc_1x_all_lanes__ny_early_short"
+    assert adapter["canonical_session"] == "US_EARLY"
+    assert adapter["legacy_session"] == "NY_EARLY"
+    assert adapter["lane_id_migration"] == {
+        "canonical_lane_id": "mgc_1x_all_lanes__us_early_short",
+        "legacy_lane_id": "mgc_1x_all_lanes__ny_early_short",
+        "strategy_family": "gold_forced_session_baseline_v2",
+        "package_id": "mgc_1x_all_lanes",
+        "instrument": "MGC",
+        "canonical_session": "US_EARLY",
+        "legacy_session": "NY_EARLY",
+        "source_variant": "nyEarlyShortV2",
+        "source_artifact": (
+            "outputs/reports/gc_mgc_forced_session_candidate_admission_archive_v4/"
+            "mgc_1x_all_lanes.paper_package.json"
+        ),
+        "migration_reason": (
+            "Candidate archive v4 renamed the NY_EARLY forced-session lane to the current "
+            "gold segment label US_EARLY while retaining the nyEarlyShortV2 signal source."
+        ),
+        "review_status": "EXPLICIT_LANE_ID_MIGRATION_REVIEWED",
+    }
+
+
+def test_mgc_forced_session_lane_migration_does_not_enable_wildcards() -> None:
+    adapters = submit_capable_lane_adapters()
+
+    assert lane_submit_bridge_adapter(lane_id="mgc_1x_all_lanes__us_early_short") is not None
+    assert lane_submit_bridge_adapter(lane_id="mgc_1x_all_lanes__us_early_long") is None
+    assert lane_submit_bridge_adapter(lane_id="mgc_1x_all_lanes__london_early_short") is None
+    assert lane_submit_bridge_adapter(lane_id="mgc_1x_all_lanes__us_midday_long") is None
+    assert lane_submit_bridge_adapter(lane_id="mgc_10x_all_lanes_gc_equivalent__us_early_short") is None
+    assert "mgc_1x_all_lanes__us_early_short" in adapters
+    assert "mgc_1x_all_lanes__ny_early_short" in adapters
 
 
 def test_dormant_paper_config_lanes_are_wired_for_ibkr_paper_submit() -> None:
