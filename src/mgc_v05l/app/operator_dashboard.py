@@ -45,6 +45,7 @@ from ..execution_core.track_b_strategy_registry import (
     PAPER_DIAGNOSTIC_TIME_BOXED_3X5M_EXIT_V1,
     get_track_b_strategy_registry,
 )
+from ..execution_core.track_b_readiness_state import DEFAULT_CANONICAL_READINESS_ARTIFACT
 from ..execution.ibkr_paper_strategy_monitor import load_paper_strategy_monitor_status
 from ..execution.track_b_phase1_submit_authority import evaluate_phase1_broker_reconciliation_submit_gate
 from ..market_data import (
@@ -482,6 +483,7 @@ class OperatorDashboardService:
         self._startup_control_plane_path = self._dashboard_artifacts_dir / "startup_control_plane_snapshot.json"
         self._supervised_paper_operability_path = self._dashboard_artifacts_dir / "supervised_paper_operability_snapshot.json"
         self._dashboard_snapshot_path = self._dashboard_artifacts_dir / "dashboard_api_snapshot.json"
+        self._canonical_readiness_path = self._repo_root / DEFAULT_CANONICAL_READINESS_ARTIFACT
         self._desktop_dashboard_cache_path = _desktop_dashboard_cache_path()
         self._desktop_dashboard_cache_path.parent.mkdir(parents=True, exist_ok=True)
         self._bootstrap_prerequisites_path = (
@@ -1374,6 +1376,11 @@ class OperatorDashboardService:
                 snapshot_warnings = list(_SNAPSHOT_WARNINGS.get() or [])
                 degraded_sections = _summarize_snapshot_warnings(snapshot_warnings)
                 runtime_config_warning_payload = self._paper_runtime_config_warning_payload()
+                canonical_readiness_payload = _load_json_file(self._canonical_readiness_path)
+                canonical_readiness_summary = _canonical_readiness_dashboard_summary(
+                    canonical_readiness_payload,
+                    self._canonical_readiness_path,
+                )
                 dashboard_payload: dict[str, Any] = {
                     "payload_version": DASHBOARD_PAYLOAD_SCHEMA_VERSION,
                     "generated_at": generated_at,
@@ -1431,6 +1438,13 @@ class OperatorDashboardService:
                     "degraded_sections": degraded_sections,
                     "dashboard_warnings": snapshot_warnings,
                     **runtime_config_warning_payload,
+                    "canonical_readiness": canonical_readiness_summary["canonical_readiness"],
+                    "readiness_reasons": canonical_readiness_summary["readiness_reasons"],
+                    "readiness_blockers": canonical_readiness_summary["readiness_blockers"],
+                    "readiness_warnings": canonical_readiness_summary["readiness_warnings"],
+                    "operator_action_required": canonical_readiness_summary["operator_action_required"],
+                    "root_guard_summary": canonical_readiness_summary["root_guard_summary"],
+                    "canonical_readiness_artifact": canonical_readiness_summary,
                     "bootstrap_prerequisites": self._dashboard_bootstrap_prerequisites_payload(),
                     "market_context": market_context,
                     "treasury_curve": treasury_curve,
@@ -5930,6 +5944,7 @@ class OperatorDashboardService:
                 "application/x-ndjson; charset=utf-8",
             ),
             "startup-control-plane": (self._startup_control_plane_path, "application/json; charset=utf-8"),
+            "canonical-readiness": (self._canonical_readiness_path, "application/json; charset=utf-8"),
             "auth-gate-latest": (self._auth_cache_path, "application/json; charset=utf-8"),
             "production-link-snapshot": (self._production_link_snapshot_path, "application/json; charset=utf-8"),
             "production-link-pilot-status": (
@@ -17688,6 +17703,42 @@ def _compact_track_b_broker_truth_refresh_status(payload: dict[str, Any], path: 
         "live_money_eligible": payload.get("live_money_eligible") is True,
         "submit_authority": payload.get("submit_authority") is True,
         "paper_proof_invoked": payload.get("paper_proof_invoked") is True,
+    }
+
+
+def _canonical_readiness_dashboard_summary(payload: dict[str, Any], path: Path) -> dict[str, Any]:
+    if not payload:
+        return {
+            "available": False,
+            "path": str(path),
+            "canonical_readiness": "NOT_READY_CONFIG",
+            "readiness_reasons": ["Canonical readiness artifact is missing."],
+            "readiness_blockers": [
+                {
+                    "code": "canonical_readiness_artifact_missing",
+                    "detail": "Run the independent Track B readiness classifier to publish the canonical artifact.",
+                    "source": "canonical_readiness",
+                }
+            ],
+            "readiness_warnings": [],
+            "operator_action_required": True,
+            "root_guard_summary": {},
+        }
+    state = str(payload.get("canonical_readiness") or payload.get("state") or "NOT_READY_CONFIG")
+    return {
+        "available": True,
+        "path": str(path),
+        "schema_version": payload.get("schema_version"),
+        "generated_at": payload.get("generated_at"),
+        "canonical_readiness": state,
+        "readiness_reasons": list(payload.get("readiness_reasons") or []),
+        "readiness_blockers": list(payload.get("readiness_blockers") or []),
+        "readiness_warnings": list(payload.get("readiness_warnings") or []),
+        "operator_action_required": payload.get("operator_action_required") is True,
+        "root_guard_summary": dict(payload.get("root_guard_summary") or {}),
+        "ready_submit_capable": payload.get("ready_submit_capable") is True,
+        "paper_only": payload.get("paper_only") is True,
+        "live_money_eligible": payload.get("live_money_eligible") is True,
     }
 
 

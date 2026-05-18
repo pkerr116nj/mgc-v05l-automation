@@ -26,6 +26,7 @@ from mgc_v05l.app.operator_dashboard import (
     _archived_paper_trade_log_rows,
     _bind_dashboard_server,
     _build_handler,
+    _canonical_readiness_dashboard_summary,
     _json_ready,
     _market_index_rows,
     _market_data_semantics,
@@ -161,6 +162,32 @@ def _init_empty_dashboard_db(path: Path) -> None:
         connection.commit()
     finally:
         connection.close()
+
+
+def test_canonical_readiness_dashboard_summary_consumes_artifact() -> None:
+    payload = {
+        "schema_version": "track_b_canonical_readiness_v1",
+        "generated_at": "2026-05-18T12:00:00+00:00",
+        "paper_only": True,
+        "canonical_readiness": "READY_SUBMIT_CAPABLE",
+        "ready_submit_capable": True,
+        "readiness_reasons": ["ready"],
+        "readiness_blockers": [],
+        "readiness_warnings": [{"code": "latest_broker_attempt_failed"}],
+        "operator_action_required": False,
+        "root_guard_summary": {"root_match": True},
+        "live_money_eligible": False,
+    }
+
+    summary = _canonical_readiness_dashboard_summary(
+        payload,
+        Path("outputs/operator_dashboard/runtime/latest_canonical_readiness.json"),
+    )
+
+    assert summary["available"] is True
+    assert summary["canonical_readiness"] == "READY_SUBMIT_CAPABLE"
+    assert summary["ready_submit_capable"] is True
+    assert summary["root_guard_summary"]["root_match"] is True
 
 
 def _write_lane_bar_authority_db(
