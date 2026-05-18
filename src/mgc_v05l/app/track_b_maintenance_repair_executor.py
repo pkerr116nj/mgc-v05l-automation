@@ -12,6 +12,7 @@ import argparse
 import json
 import os
 import subprocess
+import sys
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -440,7 +441,13 @@ def _pid_alive(pid: int) -> bool:
 
 
 def _python_bin(config: RepairExecutorConfig) -> str:
-    return str(config.python_bin or os.environ.get("PYTHON_BIN") or "python")
+    explicit = config.python_bin or os.environ.get("PYTHON_BIN")
+    if explicit:
+        return str(explicit)
+    repo_venv = Path(config.repo_root).expanduser().resolve() / ".venv" / "bin" / "python"
+    if repo_venv.exists():
+        return str(repo_venv)
+    return sys.executable
 
 
 def _completed_process_payload(command: Sequence[str], completed: Any) -> dict[str, Any]:

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import inspect
 import json
+import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
@@ -61,6 +62,10 @@ def config(repo_root: Path, *, apply: bool = False, cooldown_seconds: int = 300,
     )
 
 
+def default_python_config(repo_root: Path, *, apply: bool = False) -> RepairExecutorConfig:
+    return RepairExecutorConfig(repo_root=repo_root, apply=apply, max_retries=2)
+
+
 def test_dry_run_dead_sidecar_recommends_restart(tmp_path: Path) -> None:
     seed_artifacts(tmp_path, actions=["RESTART_SIDECAR"])
 
@@ -93,6 +98,47 @@ def test_apply_starts_sidecar_using_safe_command_mock(tmp_path: Path) -> None:
     assert commands[0] == ["bash", str(tmp_path / "scripts" / "start-track-b-broker-truth-refresh")]
     assert commands[1][:3] == ["python-test", "-m", "mgc_v05l.app.track_b_canonical_readiness"]
     assert result["canonical_readiness_rerun"]["returncode"] == 0
+
+
+def test_apply_canonical_rerun_uses_current_interpreter_not_bare_python(tmp_path: Path, monkeypatch) -> None:
+    seed_artifacts(tmp_path, actions=["RESTART_SIDECAR"])
+    monkeypatch.delenv("PYTHON_BIN", raising=False)
+    commands: list[list[str]] = []
+
+    def runner(command, **kwargs):  # type: ignore[no-untyped-def]
+        commands.append(list(command))
+        return SimpleNamespace(returncode=0, stdout="ok", stderr="")
+
+    result = run_repair_executor(
+        config=default_python_config(tmp_path, apply=True),
+        command_runner=runner,
+        pid_checker=lambda pid: False,
+        now_fn=now,
+    )
+
+    assert result["classification"] == "TRACK_B_MAINTENANCE_REPAIR_APPLIED"
+    assert commands[1][:3] == [sys.executable, "-m", "mgc_v05l.app.track_b_canonical_readiness"]
+    assert commands[1][0] != "python"
+
+
+def test_default_python_bin_prefers_repo_venv(tmp_path: Path, monkeypatch) -> None:
+    seed_artifacts(tmp_path, actions=["REFRESH_BROKER_TRUTH"])
+    monkeypatch.delenv("PYTHON_BIN", raising=False)
+    venv_python = tmp_path / ".venv" / "bin" / "python"
+    venv_python.parent.mkdir(parents=True)
+    venv_python.write_text("# placeholder\n", encoding="utf-8")
+    (tmp_path / "var").mkdir()
+    (tmp_path / "var" / "track_b_broker_truth_refresh_service.pid").write_text("123\n", encoding="utf-8")
+
+    result = run_repair_executor(
+        config=default_python_config(tmp_path),
+        pid_checker=lambda pid: True,
+        now_fn=now,
+    )
+
+    assert result["classification"] == "TRACK_B_MAINTENANCE_REPAIR_DRY_RUN_READY"
+    assert result["commands"][0][:3] == [str(venv_python), "-m", "mgc_v05l.app.ibkr_broker_truth_refresher"]
+    assert result["commands"][0][0] != "python"
 
 
 def test_live_sidecar_with_no_relevant_recommendation_has_no_action(tmp_path: Path) -> None:
