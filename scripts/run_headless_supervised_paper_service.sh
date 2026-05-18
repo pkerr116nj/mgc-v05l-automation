@@ -9,6 +9,8 @@ source "${SCRIPT_DIR}/common_env.sh"
 DEFAULT_RUNTIME_DIR="${REPO_ROOT}/outputs/operator_dashboard/runtime"
 DEFAULT_STATUS_FILE="${DEFAULT_RUNTIME_DIR}/headless_supervised_paper_status.json"
 DEFAULT_MARKDOWN_FILE="${DEFAULT_RUNTIME_DIR}/headless_supervised_paper_status.md"
+DEFAULT_CANONICAL_READINESS_FILE="${DEFAULT_RUNTIME_DIR}/latest_canonical_readiness.json"
+DEFAULT_CANONICAL_READINESS_SUMMARY_FILE="${DEFAULT_RUNTIME_DIR}/latest_canonical_readiness_summary.json"
 DEFAULT_STARTUP_FILE="${DEFAULT_RUNTIME_DIR}/headless_supervised_paper_service_startup.json"
 DEFAULT_MANAGER_PID_FILE="${DEFAULT_RUNTIME_DIR}/operator_dashboard_manager.pid"
 DEFAULT_MANAGER_LOG_FILE="${DEFAULT_RUNTIME_DIR}/operator_dashboard_manager.log"
@@ -29,6 +31,8 @@ WAIT_TIMEOUT_SECONDS=120
 POLL_INTERVAL_SECONDS=3
 STATUS_FILE="${DEFAULT_STATUS_FILE}"
 MARKDOWN_FILE="${DEFAULT_MARKDOWN_FILE}"
+CANONICAL_READINESS_FILE="${DEFAULT_CANONICAL_READINESS_FILE}"
+CANONICAL_READINESS_SUMMARY_FILE="${DEFAULT_CANONICAL_READINESS_SUMMARY_FILE}"
 STARTUP_FILE="${DEFAULT_STARTUP_FILE}"
 MANAGER_PID_FILE="${DEFAULT_MANAGER_PID_FILE}"
 MANAGER_LOG_FILE="${DEFAULT_MANAGER_LOG_FILE}"
@@ -78,6 +82,22 @@ while (($# > 0)); do
       MARKDOWN_FILE="${1#*=}"
       shift
       ;;
+    --canonical-readiness-output)
+      CANONICAL_READINESS_FILE="$2"
+      shift 2
+      ;;
+    --canonical-readiness-output=*)
+      CANONICAL_READINESS_FILE="${1#*=}"
+      shift
+      ;;
+    --canonical-readiness-summary-output)
+      CANONICAL_READINESS_SUMMARY_FILE="$2"
+      shift 2
+      ;;
+    --canonical-readiness-summary-output=*)
+      CANONICAL_READINESS_SUMMARY_FILE="${1#*=}"
+      shift
+      ;;
     --startup-output)
       STARTUP_FILE="$2"
       shift 2
@@ -119,6 +139,8 @@ done
 
 ensure_dir "$(dirname "${STATUS_FILE}")"
 ensure_dir "$(dirname "${MARKDOWN_FILE}")"
+ensure_dir "$(dirname "${CANONICAL_READINESS_FILE}")"
+ensure_dir "$(dirname "${CANONICAL_READINESS_SUMMARY_FILE}")"
 ensure_dir "$(dirname "${STARTUP_FILE}")"
 ensure_dir "$(dirname "${MANAGER_PID_FILE}")"
 ensure_dir "$(dirname "${MANAGER_LOG_FILE}")"
@@ -285,6 +307,7 @@ start_dashboard_manager() {
   echo "${manager_pid}" > "${MANAGER_PID_FILE}"
 }
 
+
 ready_processes_and_endpoints_alive() {
   if [[ "${START_PAPER}" -eq 1 ]] && ! pid_file_alive "${PAPER_PID_FILE}"; then
     return 1
@@ -324,6 +347,90 @@ else:
 PY
 }
 
+canonical_readiness_classification() {
+  "${PYTHON_BIN}" - <<'PY' "${CANONICAL_READINESS_SUMMARY_FILE}"
+import json
+import sys
+from pathlib import Path
+
+try:
+    payload = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
+except (OSError, json.JSONDecodeError):
+    payload = {}
+print(payload.get("classification") or "NOT_READY_CONFIG")
+PY
+}
+
+print_canonical_readiness_summary() {
+  local phase="$1"
+  "${PYTHON_BIN}" - <<'PY' "${CANONICAL_READINESS_SUMMARY_FILE}" "${phase}" >&2
+import json
+import sys
+from pathlib import Path
+
+try:
+    payload = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
+except (OSError, json.JSONDecodeError):
+    payload = {"classification": "NOT_READY_CONFIG", "blockers": ["canonical_readiness_summary_missing"]}
+
+print(f"canonical_readiness_summary[{sys.argv[2]}]:")
+for key in (
+    "classification",
+    "blockers",
+    "warnings",
+    "root_match",
+    "broker_truth_fresh",
+    "reconciliation_state",
+    "eligible_lane_count",
+    "quarantine_count",
+):
+    value = payload.get(key)
+    if isinstance(value, list):
+        value = ",".join(str(item) for item in value) if value else "none"
+    print(f"  {key}={value}")
+PY
+}
+
+refresh_canonical_readiness_for_launch() {
+  local phase="$1"
+  local tmp_summary
+  tmp_summary="${CANONICAL_READINESS_SUMMARY_FILE}.tmp"
+  rm -f "${tmp_summary}"
+  set +e
+  "${PYTHON_BIN}" -m mgc_v05l.app.track_b_canonical_readiness \
+    --repo-root "${REPO_ROOT}" \
+    --expected-root "${REPO_ROOT}" \
+    --output-path "${CANONICAL_READINESS_FILE}" \
+    --json > "${tmp_summary}"
+  local exit_code=$?
+  set -e
+  if [[ -s "${tmp_summary}" ]]; then
+    mv "${tmp_summary}" "${CANONICAL_READINESS_SUMMARY_FILE}"
+  else
+    rm -f "${tmp_summary}"
+  fi
+  print_canonical_readiness_summary "${phase}"
+  return "${exit_code}"
+}
+
+fail_fast_if_hard_canonical_blocker() {
+  local phase="$1"
+  local classification
+  classification="$(canonical_readiness_classification)"
+  case "${classification}" in
+    NOT_READY_WRONG_ROOT|NOT_READY_CONFIG|NOT_READY_RECONCILIATION)
+      write_startup_summary "BLOCKED" "Canonical readiness ${classification} during ${phase}." "false"
+      cat "${STARTUP_FILE}"
+      exit 2
+      ;;
+  esac
+}
+
+set +e
+refresh_canonical_readiness_for_launch "pre-launch"
+set -e
+fail_fast_if_hard_canonical_blocker "pre-launch"
+
 if ! start_paper_runtime; then
   write_startup_summary "BLOCKED" "Failed to start the supervised paper runtime." "false"
   exit 1
@@ -333,23 +440,48 @@ if ! start_dashboard_manager; then
   exit 1
 fi
 
+set +e
+refresh_canonical_readiness_for_launch "post-launch"
+set -e
+fail_fast_if_hard_canonical_blocker "post-launch"
+
 deadline=$((SECONDS + WAIT_TIMEOUT_SECONDS))
 last_reason="Headless supervised paper host is still warming."
 
 while (( SECONDS < deadline )); do
+  set +e
   bash "${SCRIPT_DIR}/show_headless_supervised_paper_status.sh" \
     --dashboard-url "${DASHBOARD_URL}" \
     --output "${STATUS_FILE}" \
-    --markdown-output "${MARKDOWN_FILE}" >/dev/null
+    --markdown-output "${MARKDOWN_FILE}" \
+    --canonical-readiness-output "${CANONICAL_READINESS_FILE}" \
+    --canonical-readiness-summary-output "${CANONICAL_READINESS_SUMMARY_FILE}" >/dev/null
+  status_exit_code=$?
+  set -e
+  fail_fast_if_hard_canonical_blocker "status-refresh"
   if [[ "$(read_contract_field "app_usable_for_supervised_paper")" == "true" ]]; then
     if ready_processes_and_endpoints_alive; then
-      write_startup_summary "READY" "Headless supervised paper host is usable." "true"
+      canonical_state="$(canonical_readiness_classification)"
+      if [[ "${canonical_state}" != "READY_SUBMIT_CAPABLE" ]]; then
+        write_startup_summary "READY" "Headless supervised paper host is usable for ${canonical_state}." "true"
+        cat "${STATUS_FILE}"
+        exit 0
+      fi
+      write_startup_summary "READY" "Headless supervised paper host is READY_SUBMIT_CAPABLE." "true"
       cat "${STATUS_FILE}"
       exit 0
     fi
     last_reason="Headless supervised paper host reported usable before required processes/endpoints were stable."
   fi
-  last_reason="$(read_contract_field "unusable_reason")"
+  if [[ "${status_exit_code}" -eq 1 ]]; then
+    last_reason="Canonical readiness is DEGRADED_NO_SUBMIT."
+  elif [[ "${status_exit_code}" -eq 2 ]]; then
+    last_reason="Canonical readiness is $(canonical_readiness_classification)."
+  fi
+  contract_reason="$(read_contract_field "unusable_reason")"
+  if [[ -n "${contract_reason}" ]]; then
+    last_reason="${contract_reason}"
+  fi
   sleep "${POLL_INTERVAL_SECONDS}"
 done
 
