@@ -219,6 +219,20 @@ class ProbationaryPaperSummary:
     stop_reason: str | None
 
 
+LANE_STARTUP_RECONCILIATION_READY = "READY"
+LANE_STARTUP_RECONCILIATION_BLOCKED = "BLOCKED"
+LANE_STARTUP_RECONCILIATION_QUARANTINED = "QUARANTINED"
+LANE_STARTUP_RECONCILIATION_FATAL_RUNTIME_BLOCKER = "FATAL_RUNTIME_BLOCKER"
+
+
+@dataclass(frozen=True)
+class LaneStartupReconciliationDecision:
+    classification: str
+    reason_code: str | None = None
+    reason: str | None = None
+    operator_action_required: bool = False
+
+
 @dataclass(frozen=True)
 class ProbationaryPaperReadiness:
     artifact_path: str
@@ -6903,6 +6917,57 @@ class ProbationaryPaperSupervisor:
         self._alert_dispatcher = alert_dispatcher
         self._stop_requested = False
         self._runtime_registry = runtime_registry
+        self._lane_quarantine: dict[str, dict[str, Any]] = {}
+
+    def _record_lane_quarantine(
+        self,
+        *,
+        lane: ProbationaryPaperLaneRuntime,
+        decision: LaneStartupReconciliationDecision,
+    ) -> None:
+        now = datetime.now(timezone.utc).isoformat()
+        existing = dict(self._lane_quarantine.get(lane.spec.lane_id) or {})
+        retry_count = int(existing.get("retry_count") or 0) + 1
+        record = {
+            "lane_id": lane.spec.lane_id,
+            "display_name": lane.spec.display_name,
+            "symbol": lane.spec.symbol,
+            "classification": LANE_STARTUP_RECONCILIATION_QUARANTINED,
+            "startup_reconciliation_classification": decision.classification,
+            "reason_code": decision.reason_code or "paper_startup_reconciliation_failed",
+            "reason": decision.reason or "Lane startup reconciliation failed; lane quarantined.",
+            "first_failure_at": existing.get("first_failure_at") or now,
+            "last_retry_at": now,
+            "retry_count": retry_count,
+            "operator_action_required": True,
+            "paper_submit_capable": False,
+            "submit_eligible": False,
+            "observation_allowed": False,
+            "retry_backoff_seconds": min(300, 2 ** min(retry_count - 1, 8)),
+            "source": "startup_reconciliation",
+            "source_runtime_pid": os.getpid(),
+        }
+        self._lane_quarantine[lane.spec.lane_id] = record
+        self._alert_dispatcher.emit(
+            severity="ACTION",
+            code="paper_lane_startup_reconciliation_quarantined",
+            message=(
+                f"Lane {lane.spec.lane_id} failed startup reconciliation and was quarantined; "
+                "remaining healthy lanes may continue."
+            ),
+            payload=record,
+            category="state_restore_failure",
+            title="Paper Lane Quarantined",
+            dedup_key=f"{lane.spec.lane_id}:paper_lane_startup_reconciliation_quarantined",
+            recommended_action="Inspect lane restore/reconciliation evidence before reactivating this lane.",
+            active=True,
+        )
+
+    def _lane_is_quarantined(self, lane: ProbationaryPaperLaneRuntime) -> bool:
+        return lane.spec.lane_id in self._lane_quarantine
+
+    def _healthy_lanes(self) -> list[ProbationaryPaperLaneRuntime]:
+        return [lane for lane in self._lanes if not self._lane_is_quarantined(lane)]
 
     def run(self, poll_once: bool = False, max_cycles: int | None = None) -> ProbationaryPaperSummary:
         stop_reason: str | None = None
@@ -6914,6 +6979,13 @@ class ProbationaryPaperSupervisor:
             for lane in self._lanes:
                 startup_reason = lane.restore_startup()
                 if startup_reason is not None:
+                    decision = _classify_lane_startup_reconciliation(
+                        lane=lane,
+                        startup_reason=startup_reason,
+                    )
+                    if decision.classification == LANE_STARTUP_RECONCILIATION_QUARANTINED:
+                        self._record_lane_quarantine(lane=lane, decision=decision)
+                        continue
                     stop_reason = f"{lane.spec.lane_id}:{startup_reason}"
                     _write_probationary_supervisor_operator_status(
                         settings=self._settings,
@@ -6922,8 +6994,23 @@ class ProbationaryPaperSupervisor:
                         risk_state=risk_state,
                         latest_operator_control=None,
                         lane_metrics=None,
+                        lane_quarantine=self._lane_quarantine,
                     )
                     return self._finalize_summary(new_bars=0, reconciliation_clean=False, stop_reason=stop_reason)
+
+            if not self._healthy_lanes():
+                stop_reason = "all_lanes_quarantined_startup_reconciliation"
+                _write_probationary_supervisor_operator_status(
+                    settings=self._settings,
+                    lanes=self._lanes,
+                    structured_logger=self._structured_logger,
+                    risk_state=risk_state,
+                    latest_operator_control=None,
+                    lane_metrics=None,
+                    lane_quarantine=self._lane_quarantine,
+                    reconciliation_clean=False,
+                )
+                return self._finalize_summary(new_bars=0, reconciliation_clean=False, stop_reason=stop_reason)
 
             cycles = 0
             new_bars = 0
@@ -6957,8 +7044,9 @@ class ProbationaryPaperSupervisor:
 
                 reconciliation_clean = True
                 market_data_failures: list[dict[str, Any]] = []
-                higher_priority_signals = _probationary_supervisor_higher_priority_signals(self._lanes)
-                for lane in self._lanes:
+                active_lanes = self._healthy_lanes()
+                higher_priority_signals = _probationary_supervisor_higher_priority_signals(active_lanes)
+                for lane in active_lanes:
                     try:
                         if getattr(lane.spec, "runtime_kind", "") in {
                             ATPE_CANARY_RUNTIME_KIND,
@@ -7045,6 +7133,7 @@ class ProbationaryPaperSupervisor:
                     market_data_ok=not market_data_failures,
                     market_data_failures=market_data_failures,
                     reconciliation_clean=reconciliation_clean,
+                    lane_quarantine=self._lane_quarantine,
                 )
 
                 if not reconciliation_clean:
@@ -8645,6 +8734,7 @@ def _probationary_lane_eligibility_snapshot(
     lane: ProbationaryPaperLaneRuntime,
     risk_state: ProbationaryPaperRiskRuntimeState,
     now: datetime,
+    quarantine: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     eligibility_hook = getattr(lane, "eligibility_snapshot", None)
     if callable(eligibility_hook):
@@ -8669,7 +8759,11 @@ def _probationary_lane_eligibility_snapshot(
     blocker_reason = None
     blocker_detail = None
 
-    if state.fault_code is not None:
+    if quarantine is not None:
+        eligible_now = False
+        blocker_reason = "lane_quarantined"
+        blocker_detail = str(quarantine.get("reason_code") or "startup_reconciliation_failed")
+    elif state.fault_code is not None:
         eligible_now = False
         blocker_reason = "fault"
         blocker_detail = state.fault_code
@@ -8724,6 +8818,67 @@ def _lane_status_row_extras(lane: ProbationaryPaperLaneRuntime) -> dict[str, Any
     if callable(hook):
         return dict(hook())
     return {}
+
+
+def _startup_restore_validation_for_lane(lane: ProbationaryPaperLaneRuntime) -> dict[str, Any]:
+    extras = _lane_status_row_extras(lane)
+    validation = extras.get("startup_restore_validation")
+    return dict(validation) if isinstance(validation, dict) else {}
+
+
+def _classify_lane_startup_reconciliation(
+    *,
+    lane: ProbationaryPaperLaneRuntime,
+    startup_reason: str,
+) -> LaneStartupReconciliationDecision:
+    if not startup_reason:
+        return LaneStartupReconciliationDecision(classification=LANE_STARTUP_RECONCILIATION_READY)
+    if startup_reason != "paper_startup_reconciliation_failed":
+        return LaneStartupReconciliationDecision(
+            classification=LANE_STARTUP_RECONCILIATION_FATAL_RUNTIME_BLOCKER,
+            reason_code=startup_reason,
+            reason="Startup failed for a reason outside lane-scoped reconciliation quarantine policy.",
+            operator_action_required=True,
+        )
+    validation = _startup_restore_validation_for_lane(lane)
+    reconciliation = dict(validation.get("reconciliation_summary") or {})
+    restore_result = str(validation.get("restore_result") or "").upper()
+    classification = str(validation.get("restore_classification") or reconciliation.get("classification") or "")
+    fault_code = str(validation.get("fault_code") or reconciliation.get("resulting_fault_code") or "")
+    if (
+        restore_result == "FAULT"
+        or bool(reconciliation.get("requires_fault"))
+        or classification
+        in {
+            "broker_unavailable_incomplete_truth",
+            "persistence_state_corruption",
+        }
+        or fault_code
+        in {
+            "reconciliation_broker_unavailable",
+            "reconciliation_persistence_state_corruption",
+            "reconciliation_unsafe_opposite_side_exposure",
+        }
+    ):
+        return LaneStartupReconciliationDecision(
+            classification=LANE_STARTUP_RECONCILIATION_FATAL_RUNTIME_BLOCKER,
+            reason_code=startup_reason,
+            reason="Startup reconciliation indicates broker/account-wide ambiguity or unsafe state.",
+            operator_action_required=True,
+        )
+    if restore_result in {"RECONCILING", ""} or validation.get("unresolved_restore_issue"):
+        return LaneStartupReconciliationDecision(
+            classification=LANE_STARTUP_RECONCILIATION_QUARANTINED,
+            reason_code=startup_reason,
+            reason="Lane startup reconciliation remained unresolved; lane is quarantined fail-closed.",
+            operator_action_required=True,
+        )
+    return LaneStartupReconciliationDecision(
+        classification=LANE_STARTUP_RECONCILIATION_BLOCKED,
+        reason_code=startup_reason,
+        reason="Lane startup reconciliation blocked for review.",
+        operator_action_required=True,
+    )
 
 
 def _runtime_cadence_payload_from_research_bars(
@@ -9385,6 +9540,7 @@ def _write_probationary_supervisor_operator_status(
     market_data_ok: bool = True,
     market_data_failures: Sequence[dict[str, Any]] | None = None,
     reconciliation_clean: bool | None = None,
+    lane_quarantine: dict[str, dict[str, Any]] | None = None,
 ) -> Path:
     now_local = datetime.now(settings.timezone_info)
     generated_at = datetime.now(timezone.utc).isoformat()
@@ -9395,7 +9551,14 @@ def _write_probationary_supervisor_operator_status(
         ATP_COMPANION_BENCHMARK_RUNTIME_KIND,
         GC_MGC_ACCEPTANCE_RUNTIME_KIND,
     }
-    executable_lanes = [lane for lane in lanes if getattr(lane.spec, "runtime_kind", "") not in non_authority_runtime_kinds] or list(lanes)
+    quarantine_by_lane = {str(key): dict(value) for key, value in (lane_quarantine or {}).items()}
+    quarantined_lane_ids = set(quarantine_by_lane)
+    executable_lanes = [
+        lane
+        for lane in lanes
+        if getattr(lane.spec, "runtime_kind", "") not in non_authority_runtime_kinds
+        and lane.spec.lane_id not in quarantined_lane_ids
+    ] or [lane for lane in lanes if lane.spec.lane_id not in quarantined_lane_ids]
     all_flat = all(lane.strategy_engine.state.position_side == PositionSide.FLAT for lane in lanes)
     broker_ok = all(lane.execution_engine.broker.is_connected() for lane in lanes)
     if reconciliation_clean is None:
@@ -9465,6 +9628,11 @@ def _write_probationary_supervisor_operator_status(
         "generated_at": generated_at,
         **_current_runtime_identity_payload(),
         "active_lane_ids": [lane.spec.lane_id for lane in lanes],
+        "healthy_lane_ids": [lane.spec.lane_id for lane in lanes if lane.spec.lane_id not in quarantined_lane_ids],
+        "quarantined_lane_ids": sorted(quarantined_lane_ids),
+        "lane_quarantine": [quarantine_by_lane[lane_id] for lane_id in sorted(quarantine_by_lane)],
+        "lane_quarantine_count": len(quarantine_by_lane),
+        "operator_action_required": any(bool(row.get("operator_action_required")) for row in quarantine_by_lane.values()),
         "updated_at": generated_at,
         "health": {
             "market_data_ok": market_data_ok,
@@ -9621,16 +9789,52 @@ def _write_probationary_supervisor_operator_status(
                 ),
                 "artifacts_dir": str(lane.settings.probationary_artifacts_path),
                 "database_url": lane.settings.database_url,
+                "startup_reconciliation_classification": (
+                    quarantine_by_lane.get(lane.spec.lane_id, {}).get("startup_reconciliation_classification")
+                    or LANE_STARTUP_RECONCILIATION_READY
+                ),
+                "quarantine_state": (
+                    LANE_STARTUP_RECONCILIATION_QUARANTINED
+                    if lane.spec.lane_id in quarantine_by_lane
+                    else LANE_STARTUP_RECONCILIATION_READY
+                ),
+                "quarantined": lane.spec.lane_id in quarantine_by_lane,
+                "quarantine_reason": quarantine_by_lane.get(lane.spec.lane_id, {}).get("reason"),
+                "quarantine_reason_code": quarantine_by_lane.get(lane.spec.lane_id, {}).get("reason_code"),
+                "quarantine_first_failure_at": quarantine_by_lane.get(lane.spec.lane_id, {}).get("first_failure_at"),
+                "quarantine_retry_count": quarantine_by_lane.get(lane.spec.lane_id, {}).get("retry_count", 0),
+                "quarantine_last_retry_at": quarantine_by_lane.get(lane.spec.lane_id, {}).get("last_retry_at"),
+                "quarantine_operator_action_required": bool(
+                    quarantine_by_lane.get(lane.spec.lane_id, {}).get("operator_action_required", False)
+                ),
                 **_probationary_lane_eligibility_snapshot(
                     lane=lane,
                     risk_state=risk_state,
                     now=now_local,
+                    quarantine=quarantine_by_lane.get(lane.spec.lane_id),
                 ),
                 **_lane_status_row_extras(lane),
             }
             for lane in lanes
         ],
     }
+    runtime_dir = settings.probationary_artifacts_path / "runtime"
+    runtime_dir.mkdir(parents=True, exist_ok=True)
+    structured_logger._write_json(  # noqa: SLF001
+        runtime_dir / "paper_lane_quarantine_status.json",
+        {
+            "generated_at": generated_at,
+            **_current_runtime_identity_payload(),
+            "classification": "PAPER_LANE_QUARANTINE_ACTIVE" if quarantine_by_lane else "PAPER_LANE_QUARANTINE_CLEAR",
+            "paper_only": True,
+            "live_money_eligible": False,
+            "quarantine_count": len(quarantine_by_lane),
+            "quarantined_lane_ids": sorted(quarantined_lane_ids),
+            "healthy_lane_ids": [lane.spec.lane_id for lane in lanes if lane.spec.lane_id not in quarantined_lane_ids],
+            "operator_action_required": any(bool(row.get("operator_action_required")) for row in quarantine_by_lane.values()),
+            "lanes": [quarantine_by_lane[lane_id] for lane_id in sorted(quarantine_by_lane)],
+        },
+    )
     return structured_logger.write_operator_status(payload)
 
 

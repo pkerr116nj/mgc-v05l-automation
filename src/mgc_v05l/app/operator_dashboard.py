@@ -7406,6 +7406,7 @@ class OperatorDashboardService:
             current_strategy_status_upper = current_strategy_status.upper()
             risk_state = str(row.get("risk_state") or "OK").strip() or "OK"
             risk_state_upper = risk_state.upper()
+            quarantined = bool(row.get("quarantined") or row.get("quarantine_state") == "QUARANTINED")
             eligible_now = bool(row.get("eligible_now"))
             eligibility_reason = row.get("eligibility_reason")
             execution_timeframe = _execution_timeframe_for_row(row)
@@ -7445,6 +7446,9 @@ class OperatorDashboardService:
             if not runtime_running:
                 eligible_now = False
                 eligibility_reason = "stopped_runtime"
+            elif quarantined:
+                eligible_now = False
+                eligibility_reason = "lane_quarantined"
             elif runtime_stale and not runtime_stale_suppressed:
                 eligible_now = False
                 eligibility_reason = "stale_runtime"
@@ -8017,6 +8021,15 @@ class OperatorDashboardService:
                     "route_ready": route_ready,
                     "entries_enabled": bool(row.get("entries_enabled", True)),
                     "operator_halt": bool(row.get("operator_halt")),
+                    "quarantined": quarantined,
+                    "quarantine_state": row.get("quarantine_state"),
+                    "quarantine_reason": row.get("quarantine_reason"),
+                    "quarantine_reason_code": row.get("quarantine_reason_code"),
+                    "quarantine_first_failure_at": row.get("quarantine_first_failure_at"),
+                    "quarantine_retry_count": int(row.get("quarantine_retry_count") or 0),
+                    "quarantine_last_retry_at": row.get("quarantine_last_retry_at"),
+                    "quarantine_operator_action_required": bool(row.get("quarantine_operator_action_required")),
+                    "startup_reconciliation_classification": row.get("startup_reconciliation_classification"),
                     "setup_evaluated": setup_evaluated,
                     "no_setup_present": no_setup_present,
                     "blocked_lane": blocked_lane,

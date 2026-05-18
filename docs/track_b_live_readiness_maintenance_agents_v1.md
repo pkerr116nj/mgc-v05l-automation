@@ -656,6 +656,17 @@ Tests:
 - prevent one quarantined lane from killing observation for unrelated clean lanes
 - require operator review before unquarantine or activation
 
+Initial runtime slice:
+
+- lane startup reconciliation now classifies outcomes as `READY`, `BLOCKED`,
+  `QUARANTINED`, or `FATAL_RUNTIME_BLOCKER`
+- lane-scoped startup reconciliation failures are recorded in the operator
+  status and `paper_lane_quarantine_status.json`
+- quarantined lanes are skipped by the supervisor loop and excluded from
+  runtime submit/eligibility counts
+- broker-wide, account-wide, persistence-corruption, and unsafe opposite-side
+  exposure conditions remain fatal runtime blockers
+
 Tests:
 
 - MNQ lane startup reconciliation failure quarantines that lane

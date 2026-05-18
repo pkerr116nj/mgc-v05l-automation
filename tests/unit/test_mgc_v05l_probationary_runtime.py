@@ -9378,6 +9378,156 @@ def test_probationary_supervisor_survives_lane_auth_read_failure(tmp_path: Path,
     assert failures[0]["lane_id"] == "gc_lane"
 
 
+def _prepare_supervisor_test_lane(lane: SimpleNamespace, *, source: str = "usLatePauseResumeLongTurn") -> SimpleNamespace:
+    lane.spec.long_sources = (source,)
+    lane.spec.short_sources = ()
+    lane.spec.point_value = lane.point_value
+    lane.spec.runtime_kind = "strategy_engine"
+    lane.spec.strategy_family = "unit_test_family"
+    lane.spec.strategy_identity_root = lane.spec.lane_id
+    lane.spec.shared_strategy_identity = lane.spec.lane_id
+    return lane
+
+
+def test_probationary_supervisor_quarantines_lane_startup_reconciliation_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = _build_probationary_paper_settings(tmp_path)
+    root_logger = StructuredLogger(tmp_path / "root")
+    failing_lane = _prepare_supervisor_test_lane(
+        _seed_test_lane(
+            tmp_path,
+            lane_id="mnq_1x_asia_london_participation__asia_london_long_v5",
+            symbol="MNQ",
+            source="usLatePauseResumeLongTurn",
+            session_restriction="US_LATE",
+            point_value=Decimal("2"),
+        )
+    )
+    healthy_lane = _prepare_supervisor_test_lane(
+        _seed_test_lane(
+            tmp_path,
+            lane_id="mnq_1x_asia_london_participation__asia_london_long_v6",
+            symbol="MNQ",
+            source="usLatePauseResumeLongTurn",
+            session_restriction="US_LATE",
+            point_value=Decimal("2"),
+        )
+    )
+    failing_lane.restore_startup = lambda: "paper_startup_reconciliation_failed"
+    failing_lane.supervisor_status_extras = lambda: {
+        "startup_restore_validation": {
+            "restore_result": "RECONCILING",
+            "restore_classification": "unsafe_ambiguity",
+            "clean": False,
+            "unresolved_restore_issue": True,
+            "reconciliation_summary": {
+                "classification": "unsafe_ambiguity",
+                "resulting_fault_code": "reconciliation_unsafe_ambiguity",
+            },
+        }
+    }
+    failing_lane.poll_and_process = lambda: pytest.fail("quarantined lane must not be polled")
+    healthy_lane.restore_startup = lambda: None
+    healthy_lane.poll_and_process = lambda: (0, {"clean": True}, None)
+
+    supervisor = probationary_runtime_module.ProbationaryPaperSupervisor(
+        settings=settings,
+        lanes=[failing_lane, healthy_lane],
+        structured_logger=root_logger,
+        alert_dispatcher=AlertDispatcher(root_logger),
+    )
+    monkeypatch.setattr(supervisor, "_install_signal_handlers", lambda: {})
+    monkeypatch.setattr(supervisor, "_restore_signal_handlers", lambda _previous: None)
+
+    summary = supervisor.run(poll_once=True)
+
+    assert summary.reconciliation_clean is True
+    assert summary.stop_reason is None
+    status_payload = json.loads(Path(summary.operator_status_path).read_text(encoding="utf-8"))
+    assert status_payload["active_lane_ids"] == [
+        "mnq_1x_asia_london_participation__asia_london_long_v5",
+        "mnq_1x_asia_london_participation__asia_london_long_v6",
+    ]
+    assert status_payload["healthy_lane_ids"] == ["mnq_1x_asia_london_participation__asia_london_long_v6"]
+    assert status_payload["quarantined_lane_ids"] == ["mnq_1x_asia_london_participation__asia_london_long_v5"]
+    assert status_payload["lane_quarantine_count"] == 1
+    assert status_payload["operator_action_required"] is True
+    assert status_payload["usable_lane_count"] == 1
+    lane_rows = {row["lane_id"]: row for row in status_payload["lanes"]}
+    quarantined = lane_rows["mnq_1x_asia_london_participation__asia_london_long_v5"]
+    assert quarantined["quarantined"] is True
+    assert quarantined["quarantine_state"] == "QUARANTINED"
+    assert quarantined["startup_reconciliation_classification"] == "QUARANTINED"
+    assert quarantined["eligible_now"] is False
+    assert quarantined["eligibility_reason"] == "lane_quarantined"
+    assert quarantined["quarantine_retry_count"] == 1
+    assert quarantined["quarantine_first_failure_at"]
+    assert quarantined["quarantine_last_retry_at"]
+    assert quarantined["quarantine_operator_action_required"] is True
+    assert lane_rows["mnq_1x_asia_london_participation__asia_london_long_v6"]["quarantined"] is False
+
+    quarantine_payload = json.loads(
+        (settings.probationary_artifacts_path / "runtime" / "paper_lane_quarantine_status.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    assert quarantine_payload["classification"] == "PAPER_LANE_QUARANTINE_ACTIVE"
+    assert quarantine_payload["live_money_eligible"] is False
+    assert quarantine_payload["quarantine_count"] == 1
+    assert quarantine_payload["lanes"][0]["paper_submit_capable"] is False
+
+
+def test_probationary_supervisor_broker_wide_startup_ambiguity_still_blocks_runtime(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = _build_probationary_paper_settings(tmp_path)
+    root_logger = StructuredLogger(tmp_path / "root")
+    lane = _prepare_supervisor_test_lane(
+        _seed_test_lane(
+            tmp_path,
+            lane_id="mnq_1x_asia_london_participation__asia_london_long_v5",
+            symbol="MNQ",
+            source="usLatePauseResumeLongTurn",
+            session_restriction="US_LATE",
+            point_value=Decimal("2"),
+        )
+    )
+    lane.restore_startup = lambda: "paper_startup_reconciliation_failed"
+    lane.supervisor_status_extras = lambda: {
+        "startup_restore_validation": {
+            "restore_result": "RECONCILING",
+            "restore_classification": "broker_unavailable_incomplete_truth",
+            "clean": False,
+            "unresolved_restore_issue": True,
+            "reconciliation_summary": {
+                "classification": "broker_unavailable_incomplete_truth",
+                "resulting_fault_code": "reconciliation_broker_unavailable",
+            },
+        }
+    }
+    lane.poll_and_process = lambda: pytest.fail("fatal startup blocker must stop before polling")
+
+    supervisor = probationary_runtime_module.ProbationaryPaperSupervisor(
+        settings=settings,
+        lanes=[lane],
+        structured_logger=root_logger,
+        alert_dispatcher=AlertDispatcher(root_logger),
+    )
+    monkeypatch.setattr(supervisor, "_install_signal_handlers", lambda: {})
+    monkeypatch.setattr(supervisor, "_restore_signal_handlers", lambda _previous: None)
+
+    summary = supervisor.run(poll_once=True)
+
+    assert summary.reconciliation_clean is False
+    assert summary.stop_reason == "mnq_1x_asia_london_participation__asia_london_long_v5:paper_startup_reconciliation_failed"
+    status_payload = json.loads(Path(summary.operator_status_path).read_text(encoding="utf-8"))
+    assert status_payload["lane_quarantine_count"] == 0
+    assert status_payload["quarantined_lane_ids"] == []
+
+
 def test_probationary_paper_risk_controls_clear_stale_lane_risk_when_lane_is_rearmed(tmp_path: Path) -> None:
     settings = _build_probationary_paper_settings(tmp_path)
     root_logger = StructuredLogger(tmp_path / "root")

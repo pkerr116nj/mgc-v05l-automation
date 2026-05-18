@@ -5681,6 +5681,34 @@ def test_dashboard_paper_readiness_surfaces_lane_eligibility_rows_and_stale_over
     assert stale_rows["mgc_asia_early_normal_breakout_retest_hold_long"]["eligibility_reason"] == "stale_runtime"
     assert stale_status_rows["mgc_asia_early_normal_breakout_retest_hold_long"]["tradability_status"] == "LOADED_NOT_ELIGIBLE"
 
+    paper["status"]["stale"] = False
+    paper["raw_operator_status"]["lanes"][1].update(
+        {
+            "quarantined": True,
+            "quarantine_state": "QUARANTINED",
+            "quarantine_reason": "Lane startup reconciliation remained unresolved; lane is quarantined fail-closed.",
+            "quarantine_reason_code": "paper_startup_reconciliation_failed",
+            "quarantine_first_failure_at": "2026-05-18T10:55:00+00:00",
+            "quarantine_retry_count": 1,
+            "quarantine_last_retry_at": "2026-05-18T10:55:00+00:00",
+            "quarantine_operator_action_required": True,
+            "startup_reconciliation_classification": "QUARANTINED",
+        }
+    )
+    quarantined_payload = service._paper_readiness_payload(paper)
+    quarantined_rows = {row["lane_id"]: row for row in quarantined_payload["lane_eligibility_rows"]}
+    quarantined_status_rows = {row["lane_id"]: row for row in quarantined_payload["lane_status_rows"]}
+
+    assert quarantined_rows["mgc_asia_early_normal_breakout_retest_hold_long"]["eligible_now"] is False
+    assert quarantined_rows["mgc_asia_early_normal_breakout_retest_hold_long"]["eligibility_reason"] == "lane_quarantined"
+    assert quarantined_status_rows["mgc_asia_early_normal_breakout_retest_hold_long"]["eligible_to_trade"] is False
+    assert quarantined_status_rows["mgc_asia_early_normal_breakout_retest_hold_long"]["quarantined"] is True
+    assert quarantined_status_rows["mgc_asia_early_normal_breakout_retest_hold_long"]["quarantine_reason_code"] == (
+        "paper_startup_reconciliation_failed"
+    )
+    assert quarantined_status_rows["mgc_asia_early_normal_breakout_retest_hold_long"]["quarantine_operator_action_required"] is True
+    assert quarantined_payload["lane_status_summary"]["eligible_to_trade_count"] == 0
+
 
 def test_decision_bar_seconds_prefers_execution_timeframe_over_context() -> None:
     row = {
