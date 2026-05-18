@@ -1,0 +1,156 @@
+version: 1
+symbols:
+  - symbol: GC
+    enabled: true
+    required_for_readiness: true
+    asset_class: futures
+    execution_symbol: MGC
+    reference_symbol: GC
+    databento_symbol: GC.v.0
+    dataset: GLBX.MDP3
+    schema: ohlcv-1m
+    venue: CME Globex
+    timezone: America/New_York
+    min_confirmed_bars: 8
+    freshness_threshold_seconds: 180
+    notes: Full-size gold reference feed for MGC execution lanes.
+  - symbol: MGC
+    enabled: true
+    required_for_readiness: true
+    asset_class: futures
+    execution_symbol: MGC
+    reference_symbol: GC
+    databento_symbol: MGC.v.0
+    dataset: GLBX.MDP3
+    schema: ohlcv-1m
+    venue: CME Globex
+    timezone: America/New_York
+    min_confirmed_bars: 8
+    freshness_threshold_seconds: 180
+    notes: Micro gold execution feed; pair remains explicit with GC.
+  - symbol: ES
+    enabled: true
+    required_for_readiness: true
+    asset_class: futures
+    execution_symbol: MES
+    reference_symbol: ES
+    databento_symbol: ES.v.0
+    dataset: GLBX.MDP3
+    schema: ohlcv-1m
+    venue: CME Globex
+    timezone: America/New_York
+    min_confirmed_bars: 8
+    freshness_threshold_seconds: 180
+    notes: Full-size S&P reference feed for MES execution lanes.
+  - symbol: MES
+    enabled: true
+    required_for_readiness: true
+    asset_class: futures
+    execution_symbol: MES
+    reference_symbol: ES
+    databento_symbol: MES.v.0
+    dataset: GLBX.MDP3
+    schema: ohlcv-1m
+    venue: CME Globex
+    timezone: America/New_York
+    min_confirmed_bars: 8
+    freshness_threshold_seconds: 180
+    notes: Micro S&P execution feed; pair remains explicit with ES.
+  - symbol: NQ
+    enabled: true
+    required_for_readiness: true
+    asset_class: futures
+    execution_symbol: MNQ
+    reference_symbol: NQ
+    databento_symbol: NQ.v.0
+    dataset: GLBX.MDP3
+    schema: ohlcv-1m
+    venue: CME Globex
+    timezone: America/New_York
+    min_confirmed_bars: 8
+    freshness_threshold_seconds: 180
+    notes: Full-size Nasdaq reference feed for MNQ execution lanes.
+  - symbol: MNQ
+    enabled: true
+    required_for_readiness: true
+    asset_class: futures
+    execution_symbol: MNQ
+    reference_symbol: NQ
+    databento_symbol: MNQ.v.0
+    dataset: GLBX.MDP3
+    schema: ohlcv-1m
+    venue: CME Globex
+    timezone: America/New_York
+    min_confirmed_bars: 8
+    freshness_threshold_seconds: 180
+    notes: Micro Nasdaq execution feed; pair remains explicit with NQ.
+  - symbol: ZT
+    enabled: true
+    required_for_readiness: false
+    asset_class: futures
+    execution_symbol: ZT
+    reference_symbol: ZT
+    databento_symbol: ZT.v.0
+    dataset: GLBX.MDP3
+    schema: ohlcv-1m
+    venue: CME Globex
+    timezone: America/New_York
+    min_confirmed_bars: 8
+    freshness_threshold_seconds: 300
+    notes: Optional two-year Treasury context feed.
+  - symbol: ZF
+    enabled: true
+    required_for_readiness: false
+    asset_class: futures
+    execution_symbol: ZF
+    reference_symbol: ZF
+    databento_symbol: ZF.v.0
+    dataset: GLBX.MDP3
+    schema: ohlcv-1m
+    venue: CME Globex
+    timezone: America/New_York
+    min_confirmed_bars: 8
+    freshness_threshold_seconds: 300
+    notes: Optional five-year Treasury context feed.
+  - symbol: ZN
+    enabled: true
+    required_for_readiness: false
+    asset_class: futures
+    execution_symbol: ZN
+    reference_symbol: ZN
+    databento_symbol: ZN.v.0
+    dataset: GLBX.MDP3
+    schema: ohlcv-1m
+    venue: CME Globex
+    timezone: America/New_York
+    min_confirmed_bars: 8
+    freshness_threshold_seconds: 300
+    notes: Optional ten-year Treasury context feed.
+  - symbol: ZB
+    enabled: true
+    required_for_readiness: false
+    asset_class: futures
+    execution_symbol: ZB
+    reference_symbol: ZB
+    databento_symbol: ZB.v.0
+    dataset: GLBX.MDP3
+    schema: ohlcv-1m
+    venue: CME Globex
+    timezone: America/New_York
+    min_confirmed_bars: 8
+    freshness_threshold_seconds: 300
+    notes: Optional long-bond Treasury context feed.
+  - symbol: PL
+    enabled: true
+    required_for_readiness: false
+    asset_class: futures
+    execution_symbol: PL
+    reference_symbol: PL
+    databento_symbol: PL.v.0
+    dataset: GLBX.MDP3
+    schema: ohlcv-1m
+    venue: CME Globex
+    timezone: America/New_York
+    min_confirmed_bars: 8
+    freshness_threshold_seconds: 300
+    notes: Optional platinum context feed.
