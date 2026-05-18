@@ -5,6 +5,7 @@ from pathlib import Path
 
 from mgc_v05l.execution_core.track_b_readiness_state import (
     _broker_truth_input,
+    _market_data_input,
     build_root_process_guard,
     classify_canonical_readiness,
     write_canonical_readiness_artifact,
@@ -67,12 +68,254 @@ def _clean_inputs() -> dict:
     }
 
 
+def _phase1_listener_status(*, rows: list[dict], generated_at: str = "2026-05-18T11:59:50+00:00", **overrides: object) -> dict:
+    payload = {
+        "schema_version": "phase1_databento_live_listener_status_v1",
+        "generated_at": generated_at,
+        "source": "DATABENTO_REALTIME_PHASE1",
+        "provider_status": "RUNNING",
+        "listener_alive": True,
+        "historical_seed_ready": False,
+        "research_artifact_used": False,
+        "archive_artifact_used": False,
+        "databento_live_api_replay": False,
+        "symbols": [row["symbol"] for row in rows],
+        "required_for_readiness_symbols": [
+            row["symbol"] for row in rows if row.get("required_for_readiness") is True
+        ],
+        "optional_symbols": [
+            row["symbol"] for row in rows if row.get("required_for_readiness") is not True
+        ],
+        "rows": rows,
+    }
+    payload.update(overrides)
+    return payload
+
+
+def _listener_row(
+    symbol: str,
+    *,
+    required: bool = True,
+    realtime_feed_confirmed: bool = True,
+    latest_completed_bar_ts: str = "2026-05-18T11:59:00+00:00",
+    bar_count: int = 10,
+    min_confirmed_bars: int = 8,
+    freshness_threshold_seconds: int = 180,
+    source: str = "DATABENTO_REALTIME_PHASE1",
+    **overrides: object,
+) -> dict:
+    row = {
+        "symbol": symbol,
+        "required_for_readiness": required,
+        "realtime_feed_confirmed": realtime_feed_confirmed,
+        "latest_completed_bar_ts": latest_completed_bar_ts,
+        "bar_count": bar_count,
+        "min_confirmed_bars": min_confirmed_bars,
+        "freshness_threshold_seconds": freshness_threshold_seconds,
+        "source": source,
+        "historical_seed_ready": False,
+        "research_artifact_used": False,
+        "archive_artifact_used": False,
+        "databento_live_api_replay": False,
+        "databento_symbol": f"{symbol}.v.0",
+        "dataset": "GLBX.MDP3",
+        "schema": "ohlcv-1m",
+    }
+    row.update(overrides)
+    return row
+
+
 def test_clean_submit_capable_state_returns_ready_submit_capable() -> None:
     result = classify_canonical_readiness(_clean_inputs())
 
     assert result["canonical_readiness"] == "READY_SUBMIT_CAPABLE"
     assert result["ready_submit_capable"] is True
     assert result["readiness_blockers"] == []
+
+
+def test_required_symbol_fresh_from_phase1_listener_satisfies_market_data() -> None:
+    now = datetime(2026, 5, 18, 12, 0, tzinfo=timezone.utc)
+    inputs = _clean_inputs()
+    inputs["market_data"] = _market_data_input(
+        {},
+        {},
+        _phase1_listener_status(rows=[_listener_row("MGC")]),
+        now=now,
+    )
+
+    result = classify_canonical_readiness(inputs)
+
+    assert result["canonical_readiness"] == "READY_SUBMIT_CAPABLE"
+    assert result["market_data"]["source"] == "phase1_databento_live_listener"
+    assert result["market_data"]["required_blocked_symbols"] == []
+
+
+def test_required_symbol_stale_from_phase1_listener_blocks_market_data() -> None:
+    now = datetime(2026, 5, 18, 12, 0, tzinfo=timezone.utc)
+    inputs = _clean_inputs()
+    inputs["market_data"] = _market_data_input(
+        {},
+        {},
+        _phase1_listener_status(
+            rows=[_listener_row("MGC", latest_completed_bar_ts="2026-05-18T11:40:00+00:00")]
+        ),
+        now=now,
+    )
+
+    result = classify_canonical_readiness(inputs)
+
+    assert result["canonical_readiness"] == "NOT_READY_DEPENDENCY"
+    assert result["readiness_blockers"][0]["code"] == "market_data_not_fresh"
+    assert result["market_data"]["required_blocked_symbols"] == ["MGC"]
+
+
+def test_required_symbol_unconfirmed_or_under_min_bars_blocks_market_data() -> None:
+    now = datetime(2026, 5, 18, 12, 0, tzinfo=timezone.utc)
+    inputs = _clean_inputs()
+    inputs["market_data"] = _market_data_input(
+        {},
+        {},
+        _phase1_listener_status(rows=[_listener_row("MGC", realtime_feed_confirmed=False, bar_count=2)]),
+        now=now,
+    )
+
+    result = classify_canonical_readiness(inputs)
+
+    assert result["canonical_readiness"] == "NOT_READY_DEPENDENCY"
+    assert result["readiness_blockers"][0]["code"] == "market_data_not_fresh"
+    assert result["market_data"]["rows"][0]["realtime_feed_confirmed"] is False
+
+
+def test_required_symbol_confirmed_but_under_min_bars_blocks_market_data() -> None:
+    now = datetime(2026, 5, 18, 12, 0, tzinfo=timezone.utc)
+    inputs = _clean_inputs()
+    inputs["market_data"] = _market_data_input(
+        {},
+        {},
+        _phase1_listener_status(
+            rows=[
+                _listener_row(
+                    "MGC",
+                    realtime_feed_confirmed=True,
+                    bar_count=2,
+                    min_confirmed_bars=8,
+                )
+            ]
+        ),
+        now=now,
+    )
+
+    result = classify_canonical_readiness(inputs)
+
+    assert result["canonical_readiness"] == "NOT_READY_DEPENDENCY"
+    assert result["readiness_blockers"][0]["code"] == "market_data_not_fresh"
+    assert result["market_data"]["rows"][0]["bar_count"] == 2
+    assert result["market_data"]["rows"][0]["min_confirmed_bars"] == 8
+
+
+def test_optional_symbol_stale_warns_without_hard_market_data_blocker() -> None:
+    now = datetime(2026, 5, 18, 12, 0, tzinfo=timezone.utc)
+    inputs = _clean_inputs()
+    inputs["market_data"] = _market_data_input(
+        {},
+        {},
+        _phase1_listener_status(
+            rows=[
+                _listener_row("MGC", required=True),
+                _listener_row(
+                    "PL",
+                    required=False,
+                    latest_completed_bar_ts="2026-05-18T11:40:00+00:00",
+                    freshness_threshold_seconds=180,
+                ),
+            ]
+        ),
+        now=now,
+    )
+
+    result = classify_canonical_readiness(inputs)
+
+    assert result["canonical_readiness"] == "READY_SUBMIT_CAPABLE"
+    assert result["market_data"]["optional_degraded_symbols"] == ["PL"]
+    assert "optional_market_data_degraded" in {row["code"] for row in result["readiness_warnings"]}
+    assert result["readiness_blockers"] == []
+
+
+def test_invalid_phase1_listener_provenance_blocks_market_data() -> None:
+    now = datetime(2026, 5, 18, 12, 0, tzinfo=timezone.utc)
+    inputs = _clean_inputs()
+    inputs["market_data"] = _market_data_input(
+        {},
+        {},
+        _phase1_listener_status(rows=[_listener_row("MGC")], source="DATABENTO_HISTORICAL_SEED"),
+        now=now,
+    )
+
+    result = classify_canonical_readiness(inputs)
+
+    assert result["canonical_readiness"] == "NOT_READY_DEPENDENCY"
+    assert result["readiness_blockers"][0]["code"] == "market_data_invalid_provenance"
+
+
+def test_absent_phase1_listener_status_preserves_operator_runtime_fallback() -> None:
+    now = datetime(2026, 5, 18, 12, 0, tzinfo=timezone.utc)
+    market_data = _market_data_input(
+        {
+            "last_processed_bar_end_ts": "2026-05-18T11:59:00+00:00",
+            "health": {"market_data_ok": True},
+        },
+        {"runtime_ready": True},
+        {},
+        now=now,
+    )
+
+    assert market_data["fresh"] is True
+    assert market_data["source"] == "operator_runtime_fallback"
+    assert market_data["fallback_used"] is True
+
+
+def test_stale_phase1_listener_status_can_use_explicit_fresh_runtime_fallback() -> None:
+    now = datetime(2026, 5, 18, 12, 0, tzinfo=timezone.utc)
+    market_data = _market_data_input(
+        {
+            "last_processed_bar_end_ts": "2026-05-18T11:59:00+00:00",
+            "health": {"market_data_ok": True},
+        },
+        {"runtime_ready": True},
+        _phase1_listener_status(rows=[_listener_row("MGC")], generated_at="2026-05-18T11:00:00+00:00"),
+        now=now,
+    )
+
+    assert market_data["fresh"] is True
+    assert market_data["source"] == "operator_runtime_fallback"
+    assert market_data["listener_global_issue"] is True
+    assert market_data["warnings"][0]["code"] == "phase1_listener_status_fallback_used"
+
+
+def test_research_historical_seed_listener_artifacts_are_rejected() -> None:
+    now = datetime(2026, 5, 18, 12, 0, tzinfo=timezone.utc)
+    inputs = _clean_inputs()
+    inputs["market_data"] = _market_data_input(
+        {},
+        {},
+        _phase1_listener_status(
+            rows=[
+                _listener_row(
+                    "MGC",
+                    historical_seed_ready=True,
+                    research_artifact_used=True,
+                )
+            ],
+            historical_seed_ready=True,
+            research_artifact_used=True,
+        ),
+        now=now,
+    )
+
+    result = classify_canonical_readiness(inputs)
+
+    assert result["canonical_readiness"] == "NOT_READY_DEPENDENCY"
+    assert result["readiness_blockers"][0]["code"] == "market_data_invalid_provenance"
 
 
 def test_wrong_root_blocks() -> None:

@@ -16,6 +16,12 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Mapping, Sequence
 
+from mgc_v05l.execution_core.track_b_live_market_data_symbols import (
+    DEFAULT_TRACK_B_LIVE_MARKET_DATA_SYMBOLS_PATH,
+    TrackBLiveMarketDataSymbol,
+    load_track_b_live_market_data_symbols,
+)
+
 REPO_ROOT = Path(__file__).resolve().parents[3]
 TRACK_B_EXPECTED_ACTIVE_ROOT_ENV = "MGC_TRACK_B_EXPECTED_ACTIVE_ROOT"
 DEFAULT_TRACK_B_EXPECTED_ACTIVE_ROOT = Path("/Users/patrick/Dev/MGC-v05l-automation")
@@ -24,6 +30,12 @@ DEFAULT_CANONICAL_READINESS_ARTIFACT = (
 )
 DEFAULT_BROKER_TRUTH_LEASE_ARTIFACT = (
     Path("outputs") / "operator_dashboard" / "runtime" / "latest_broker_truth_lease.json"
+)
+DEFAULT_PHASE1_DATABENTO_LIVE_LISTENER_STATUS_ARTIFACT = (
+    Path("outputs")
+    / "reports"
+    / "phase1_databento_live_runtime_candles"
+    / "latest_phase1_databento_live_listener_status.json"
 )
 CANONICAL_READINESS_STATES = {
     "READY_SUBMIT_CAPABLE",
@@ -37,6 +49,7 @@ CANONICAL_READINESS_STATES = {
 BROKER_FRESHNESS_DEFAULT_SECONDS = 150.0
 RECONCILIATION_FRESHNESS_DEFAULT_SECONDS = 180.0
 MARKET_DATA_FRESHNESS_DEFAULT_SECONDS = 180.0
+MARKET_DATA_REQUIRED_SOURCE = "DATABENTO_REALTIME_PHASE1"
 BROKER_TRUTH_LEASE_READY_STATES = {"ACTIVE", "ACTIVE_DEGRADED_REFRESH_FAILING"}
 BROKER_TRUTH_LEASE_EXPIRED_STATES = {"EXPIRED_BLOCK_NEW_ENTRIES", "EXPIRED_EXITS_ONLY"}
 
@@ -292,6 +305,14 @@ def classify_canonical_readiness(inputs: Mapping[str, Any]) -> dict[str, Any]:
     submit_authority_explicit = _bool(submit_bridge.get("submit_authority_explicit"))
     quarantine_count = int(lane_quarantine.get("quarantine_count") or 0)
 
+    for row in list(market_data.get("warnings") or []):
+        if isinstance(row, Mapping):
+            warn(
+                str(row.get("code") or "market_data_warning"),
+                str(row.get("detail") or "Market-data warning."),
+                source=str(row.get("source") or "market_data"),
+            )
+
     if quarantine_count > 0:
         warn(
             "lane_quarantine_active",
@@ -326,9 +347,17 @@ def classify_canonical_readiness(inputs: Mapping[str, Any]) -> dict[str, Any]:
         )
 
     if not live_bars_fresh:
+        market_data_blockers = [row for row in list(market_data.get("blockers") or []) if isinstance(row, Mapping)]
+        if market_data_blockers:
+            primary_market_data_blocker = market_data_blockers[0]
+            code = str(primary_market_data_blocker.get("code") or "market_data_not_fresh")
+            detail = str(primary_market_data_blocker.get("detail") or "Runtime market-data/live-bar freshness is not current.")
+        else:
+            code = "market_data_not_fresh"
+            detail = "Runtime market-data/live-bar freshness is not current."
         block(
-            "market_data_not_fresh",
-            "Runtime market-data/live-bar freshness is not current.",
+            code,
+            detail,
             source="market_data",
         )
         return _readiness_result(
@@ -389,7 +418,13 @@ def build_readiness_inputs(
     config_in_force = _mapping(artifacts.get("config_in_force"))
     lane_quarantine = _lane_quarantine_input(_mapping(artifacts.get("lane_quarantine")))
     runtime = _runtime_input(operator_status, config_in_force, root_guard)
-    market_data = _market_data_input(operator_status, _mapping(artifacts.get("market_data_probe")), now=now)
+    market_data = _market_data_input(
+        operator_status,
+        _mapping(artifacts.get("market_data_probe")),
+        _mapping(artifacts.get("phase1_databento_live_listener_status")),
+        repo_root=repo_root,
+        now=now,
+    )
     submit_bridge = _submit_bridge_input(repo_root, operator_status, _mapping(artifacts.get("live_timing_summary")))
     backend = _backend_input(_mapping(artifacts.get("dashboard_health")), root_guard)
     live_money_eligible = any(
@@ -521,6 +556,9 @@ def _load_readiness_artifacts(repo_root: Path) -> dict[str, Any]:
         ),
         "dashboard_health": _read_json(dashboard_runtime / "headless_supervised_paper_health.json"),
         "broker_truth_lease": _read_json(repo_root / DEFAULT_BROKER_TRUTH_LEASE_ARTIFACT),
+        "phase1_databento_live_listener_status": _read_json(
+            repo_root / DEFAULT_PHASE1_DATABENTO_LIVE_LISTENER_STATUS_ARTIFACT
+        ),
     }
 
 
@@ -748,6 +786,44 @@ def _reconciliation_input(payload: Mapping[str, Any], *, now: datetime) -> dict[
 def _market_data_input(
     operator_status: Mapping[str, Any],
     market_probe: Mapping[str, Any],
+    phase1_listener_status: Mapping[str, Any] | None = None,
+    *,
+    repo_root: Path = REPO_ROOT,
+    now: datetime,
+) -> dict[str, Any]:
+    fallback = _fallback_market_data_input(operator_status, market_probe, now=now)
+    listener_payload = _mapping(phase1_listener_status)
+    if not listener_payload:
+        fallback["source"] = "operator_runtime_fallback"
+        fallback["listener_available"] = False
+        fallback["fallback_used"] = True
+        return fallback
+
+    listener = _phase1_listener_market_data_input(listener_payload, repo_root=repo_root, now=now)
+    if listener["fresh"]:
+        return listener
+    listener_global_issue = listener.get("listener_global_issue") is True
+    if listener_global_issue and fallback["fresh"]:
+        fallback["source"] = "operator_runtime_fallback"
+        fallback["listener_available"] = True
+        fallback["listener_status"] = listener.get("listener_status")
+        fallback["listener_global_issue"] = True
+        fallback["listener_blockers"] = list(listener.get("blockers") or [])
+        fallback["fallback_used"] = True
+        fallback["warnings"] = [
+            {
+                "code": "phase1_listener_status_fallback_used",
+                "detail": "Phase-1 listener status is stale/down; fresh explicit runtime fallback evidence is being used.",
+                "source": "market_data",
+            }
+        ]
+        return fallback
+    return listener
+
+
+def _fallback_market_data_input(
+    operator_status: Mapping[str, Any],
+    market_probe: Mapping[str, Any],
     *,
     now: datetime,
 ) -> dict[str, Any]:
@@ -758,6 +834,7 @@ def _market_data_input(
     market_data_ok = health.get("market_data_ok") is True or probe_ready
     fresh = bool(market_data_ok and age_seconds is not None and age_seconds <= MARKET_DATA_FRESHNESS_DEFAULT_SECONDS)
     return {
+        "source": "operator_runtime_fallback",
         "fresh": fresh,
         "market_data_ok": market_data_ok,
         "last_processed_bar_end_ts": last_bar,
@@ -765,7 +842,278 @@ def _market_data_input(
         "freshness_threshold_seconds": MARKET_DATA_FRESHNESS_DEFAULT_SECONDS,
         "probe_status": market_probe.get("status"),
         "probe_runtime_ready": market_probe.get("runtime_ready"),
+        "warnings": [],
+        "blockers": [],
     }
+
+
+def _phase1_listener_market_data_input(
+    payload: Mapping[str, Any],
+    *,
+    repo_root: Path,
+    now: datetime,
+) -> dict[str, Any]:
+    source = str(payload.get("source") or payload.get("source_id") or "").strip()
+    generated_at = payload.get("generated_at")
+    status_age_seconds = _age_seconds(generated_at, now)
+    live_rows = _phase1_live_symbol_rows(payload, repo_root=repo_root)
+    required_symbols = _symbols_from_payload_or_rows(payload.get("required_for_readiness_symbols"), live_rows, required=True)
+    optional_symbols = _symbols_from_payload_or_rows(payload.get("optional_symbols"), live_rows, required=False)
+    listener_threshold = _listener_status_freshness_threshold(live_rows)
+    provider_status = str(payload.get("provider_status") or "").upper()
+    listener_status_fresh = bool(status_age_seconds is not None and status_age_seconds <= listener_threshold)
+    listener_down = provider_status in {
+        "BLOCKED_MISSING_CREDENTIALS",
+        "ERROR",
+        "STOPPED_WITH_ERRORS",
+        "PROVIDER_LIVE_UNAVAILABLE",
+    }
+    blockers: list[dict[str, Any]] = []
+    warnings: list[dict[str, Any]] = []
+    rows: list[dict[str, Any]] = []
+
+    if source != MARKET_DATA_REQUIRED_SOURCE:
+        blockers.append(
+            {
+                "code": "market_data_invalid_provenance",
+                "detail": "Phase-1 listener market-data source is not DATABENTO_REALTIME_PHASE1.",
+                "source": "phase1_databento_live_listener",
+            }
+        )
+    if _provenance_forbidden(payload):
+        blockers.append(
+            {
+                "code": "market_data_invalid_provenance",
+                "detail": "Phase-1 listener status indicates historical/replay/research/archive market data.",
+                "source": "phase1_databento_live_listener",
+            }
+        )
+    if not listener_status_fresh:
+        blockers.append(
+            {
+                "code": "phase1_listener_status_stale",
+                "detail": "Phase-1 Databento listener status artifact is stale.",
+                "source": "phase1_databento_live_listener",
+            }
+        )
+    if listener_down:
+        blockers.append(
+            {
+                "code": "phase1_listener_status_down",
+                "detail": "Phase-1 Databento listener status reports a down/error state.",
+                "source": "phase1_databento_live_listener",
+            }
+        )
+
+    row_by_symbol = {str(row.get("symbol") or "").strip().upper(): row for row in live_rows if str(row.get("symbol") or "").strip()}
+    for symbol in [*required_symbols, *optional_symbols]:
+        row = _mapping(row_by_symbol.get(symbol))
+        evaluated = _evaluate_phase1_listener_symbol(symbol=symbol, row=row, required=symbol in required_symbols, now=now)
+        rows.append(evaluated)
+        if evaluated["ready"] is True:
+            continue
+        issue = {
+            "code": "market_data_not_fresh" if evaluated["required"] else "optional_market_data_degraded",
+            "detail": evaluated["block_reason"],
+            "source": "phase1_databento_live_listener",
+            "symbol": symbol,
+        }
+        if evaluated["required"]:
+            blockers.append(issue)
+        else:
+            warnings.append(issue)
+
+    fresh = bool(required_symbols and not blockers)
+    return {
+        "source": "phase1_databento_live_listener",
+        "available": True,
+        "fresh": fresh,
+        "market_data_ok": fresh,
+        "listener_available": True,
+        "listener_status": provider_status,
+        "listener_alive": payload.get("listener_alive") is True,
+        "listener_status_fresh": listener_status_fresh,
+        "listener_global_issue": bool(not listener_status_fresh or listener_down),
+        "generated_at": generated_at,
+        "age_seconds": status_age_seconds,
+        "freshness_threshold_seconds": listener_threshold,
+        "required_symbols": required_symbols,
+        "optional_symbols": optional_symbols,
+        "required_blocked_symbols": [row["symbol"] for row in rows if row["required"] and row["ready"] is not True],
+        "optional_degraded_symbols": [row["symbol"] for row in rows if not row["required"] and row["ready"] is not True],
+        "rows": rows,
+        "warnings": warnings,
+        "blockers": blockers,
+        "historical_seed_ready": payload.get("historical_seed_ready") is True,
+        "research_artifact_used": payload.get("research_artifact_used") is True,
+        "archive_artifact_used": payload.get("archive_artifact_used") is True,
+        "databento_live_api_replay": payload.get("databento_live_api_replay") is True,
+    }
+
+
+def _phase1_live_symbol_rows(payload: Mapping[str, Any], *, repo_root: Path) -> list[dict[str, Any]]:
+    namelist_rows = _load_market_data_namelist_rows(repo_root)
+    by_symbol: dict[str, dict[str, Any]] = {row["symbol"]: row for row in namelist_rows}
+    status_rows = [row for row in list(payload.get("rows") or []) if isinstance(row, Mapping)]
+    for status_row in status_rows:
+        symbol = str(status_row.get("symbol") or "").strip().upper()
+        if not symbol:
+            continue
+        merged = dict(by_symbol.get(symbol) or {})
+        merged.update(dict(status_row))
+        merged["symbol"] = symbol
+        by_symbol[symbol] = merged
+    ordered_symbols = [
+        str(symbol).strip().upper()
+        for symbol in list(payload.get("symbols") or by_symbol)
+        if str(symbol).strip().upper() in by_symbol
+    ]
+    return [by_symbol[symbol] for symbol in ordered_symbols]
+
+
+def _load_market_data_namelist_rows(repo_root: Path) -> list[dict[str, Any]]:
+    config_path = repo_root / DEFAULT_TRACK_B_LIVE_MARKET_DATA_SYMBOLS_PATH
+    if not config_path.exists():
+        config_path = DEFAULT_TRACK_B_LIVE_MARKET_DATA_SYMBOLS_PATH
+    try:
+        namelist = load_track_b_live_market_data_symbols(config_path)
+    except Exception:
+        return []
+    return [_live_market_data_symbol_row(row) for row in namelist.enabled_symbols()]
+
+
+def _live_market_data_symbol_row(row: TrackBLiveMarketDataSymbol) -> dict[str, Any]:
+    return {
+        "symbol": row.symbol,
+        "required_for_readiness": row.required_for_readiness,
+        "databento_symbol": row.databento_symbol,
+        "dataset": row.dataset,
+        "schema": row.schema,
+        "freshness_threshold_seconds": row.freshness_threshold_seconds,
+        "min_confirmed_bars": row.min_confirmed_bars,
+    }
+
+
+def _symbols_from_payload_or_rows(value: Any, rows: Sequence[Mapping[str, Any]], *, required: bool) -> list[str]:
+    symbols = [str(symbol).strip().upper() for symbol in list(value or []) if str(symbol).strip()]
+    if symbols:
+        return symbols
+    return [
+        str(row.get("symbol") or "").strip().upper()
+        for row in rows
+        if str(row.get("symbol") or "").strip()
+        and (row.get("required_for_readiness") is True) is required
+    ]
+
+
+def _evaluate_phase1_listener_symbol(
+    *,
+    symbol: str,
+    row: Mapping[str, Any],
+    required: bool,
+    now: datetime,
+) -> dict[str, Any]:
+    if not row:
+        return _phase1_symbol_evaluation(symbol=symbol, row=row, required=required, ready=False, block_reason=f"{symbol} listener row missing.")
+    if _provenance_forbidden(row):
+        return _phase1_symbol_evaluation(
+            symbol=symbol,
+            row=row,
+            required=required,
+            ready=False,
+            block_reason=f"{symbol} listener row uses historical/replay/research/archive data.",
+        )
+    if row.get("source") not in {None, "", MARKET_DATA_REQUIRED_SOURCE}:
+        return _phase1_symbol_evaluation(
+            symbol=symbol,
+            row=row,
+            required=required,
+            ready=False,
+            block_reason=f"{symbol} listener row has invalid provenance source.",
+        )
+    latest_completed = (
+        row.get("latest_completed_bar_ts")
+        or row.get("last_completed_bar_ts")
+        or row.get("bar_end")
+        or row.get("generated_at")
+    )
+    age_seconds = _age_seconds(latest_completed, now)
+    threshold = _float_value(row.get("freshness_threshold_seconds"), MARKET_DATA_FRESHNESS_DEFAULT_SECONDS)
+    bar_count = _first_int(row.get("bar_count"), row.get("confirmed_bar_count"), row.get("bars_available")) or 0
+    min_bars = _first_int(row.get("min_confirmed_bars"), row.get("minimum_bar_count")) or 1
+    confirmed = row.get("realtime_feed_confirmed") is True
+    fresh = age_seconds is not None and age_seconds <= threshold
+    ready = bool(confirmed and fresh and bar_count >= min_bars)
+    if ready:
+        block_reason = "READY"
+    elif not confirmed:
+        block_reason = f"{symbol} realtime feed is not confirmed."
+    elif bar_count < min_bars:
+        block_reason = f"{symbol} has {bar_count} confirmed bar(s), below required {min_bars}."
+    elif not fresh:
+        block_reason = f"{symbol} latest confirmed bar is stale."
+    else:
+        block_reason = f"{symbol} market data is not ready."
+    return _phase1_symbol_evaluation(
+        symbol=symbol,
+        row=row,
+        required=required,
+        ready=ready,
+        block_reason=block_reason,
+        age_seconds=age_seconds,
+        threshold=threshold,
+        bar_count=bar_count,
+        min_bars=min_bars,
+    )
+
+
+def _phase1_symbol_evaluation(
+    *,
+    symbol: str,
+    row: Mapping[str, Any],
+    required: bool,
+    ready: bool,
+    block_reason: str,
+    age_seconds: float | None = None,
+    threshold: float | None = None,
+    bar_count: int | None = None,
+    min_bars: int | None = None,
+) -> dict[str, Any]:
+    return {
+        "symbol": symbol,
+        "required": required,
+        "ready": ready,
+        "realtime_feed_confirmed": row.get("realtime_feed_confirmed") is True,
+        "latest_completed_bar_ts": row.get("latest_completed_bar_ts") or row.get("last_completed_bar_ts"),
+        "age_seconds": age_seconds,
+        "freshness_threshold_seconds": threshold,
+        "bar_count": bar_count,
+        "min_confirmed_bars": min_bars,
+        "databento_symbol": row.get("databento_symbol"),
+        "dataset": row.get("dataset"),
+        "schema": row.get("schema"),
+        "block_reason": block_reason,
+    }
+
+
+def _listener_status_freshness_threshold(rows: Sequence[Mapping[str, Any]]) -> float:
+    thresholds = [
+        _float_value(row.get("freshness_threshold_seconds"), MARKET_DATA_FRESHNESS_DEFAULT_SECONDS)
+        for row in rows
+        if row.get("required_for_readiness") is True
+    ]
+    return max(thresholds or [MARKET_DATA_FRESHNESS_DEFAULT_SECONDS])
+
+
+def _provenance_forbidden(payload: Mapping[str, Any]) -> bool:
+    return bool(
+        payload.get("historical_seed_ready") is True
+        or payload.get("historical_seed_used") is True
+        or payload.get("databento_live_api_replay") is True
+        or payload.get("replay_artifact_used") is True
+        or payload.get("research_artifact_used") is True
+        or payload.get("archive_artifact_used") is True
+    )
 
 
 def _lane_quarantine_input(payload: Mapping[str, Any]) -> dict[str, Any]:
