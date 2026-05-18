@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+import json
 from decimal import Decimal
 from datetime import datetime, timedelta
+from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
 import mgc_v05l.market_data.live_feed as live_feed_module
 from mgc_v05l.domain.models import Bar
 from mgc_v05l.market_data.live_feed import (
@@ -12,12 +15,15 @@ from mgc_v05l.market_data.live_feed import (
     databento_live_auth_response,
     HistoricalPollingLiveClient,
     LivePollingService,
+    Phase1RuntimeArtifactPollingClient,
     databento_live_effective_end,
     databento_live_format_timestamp,
     _DatabentoRawLiveSession,
 )
 from mgc_v05l.market_data.databento_provider import DatabentoHttpError
 from mgc_v05l.market_data.schwab_models import SchwabLivePollRequest
+from mgc_v05l.persistence import build_engine
+from mgc_v05l.persistence.repositories import RepositorySet
 
 
 class _RecordingHistoricalClient:
@@ -130,6 +136,193 @@ class _FixedDateTime(datetime):
     def now(cls, tz=None):
         value = cls.fixed_now
         return value if tz is None else value.astimezone(tz)
+
+
+def _write_phase1_runtime_artifact(
+    root: Path,
+    *,
+    symbol: str = "MNQ",
+    timeframe: str = "1m",
+    generated_at: str = "2026-05-18T12:00:10+00:00",
+    bars: list[dict] | None = None,
+    **overrides,
+) -> Path:
+    path = root / symbol / timeframe / "latest_runtime_candles.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    payload = {
+        "generated_at": generated_at,
+        "source": "DATABENTO_REALTIME_PHASE1",
+        "symbol": symbol,
+        "instrument": symbol,
+        "timeframe": timeframe,
+        "freshness_seconds": 180,
+        "historical_seed_ready": False,
+        "research_artifact_used": False,
+        "archive_artifact_used": False,
+        "databento_live_api_replay": False,
+        "bars": bars
+        if bars is not None
+        else [
+            {
+                "bar_start": "2026-05-18T11:59:00+00:00",
+                "bar_end": "2026-05-18T12:00:00+00:00",
+                "open": 100,
+                "high": 101,
+                "low": 99,
+                "close": 100.5,
+                "volume": 10,
+                "completed": True,
+            }
+        ],
+    }
+    payload.update(overrides)
+    path.write_text(json.dumps(payload, sort_keys=True, indent=2) + "\n", encoding="utf-8")
+    return path
+
+
+def test_phase1_runtime_artifact_polling_client_reads_fresh_completed_bars_and_filters_since(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "phase1_runtime_market_data"
+    _write_phase1_runtime_artifact(
+        root,
+        bars=[
+            {
+                "bar_start": "2026-05-18T11:58:00+00:00",
+                "bar_end": "2026-05-18T11:59:00+00:00",
+                "open": 100,
+                "high": 101,
+                "low": 99,
+                "close": 100,
+                "volume": 10,
+                "completed": True,
+            },
+            {
+                "bar_start": "2026-05-18T11:59:00+00:00",
+                "bar_end": "2026-05-18T12:00:00+00:00",
+                "open": 100,
+                "high": 102,
+                "low": 99,
+                "close": 101,
+                "volume": 11,
+                "completed": True,
+            },
+            {
+                "bar_start": "2026-05-18T11:59:00+00:00",
+                "bar_end": "2026-05-18T12:00:00+00:00",
+                "open": 100,
+                "high": 102,
+                "low": 99,
+                "close": 101,
+                "volume": 11,
+                "completed": True,
+            },
+            {
+                "bar_start": "2026-05-18T12:00:00+00:00",
+                "bar_end": "2026-05-18T12:01:00+00:00",
+                "open": 101,
+                "high": 103,
+                "low": 100,
+                "close": 102,
+                "volume": 12,
+                "completed": False,
+            },
+        ],
+    )
+    client = Phase1RuntimeArtifactPollingClient(
+        artifact_root=root,
+        now_fn=lambda: datetime.fromisoformat("2026-05-18T12:00:20+00:00"),
+    )
+
+    bars = client.poll_live_bars(
+        None,
+        "1m",
+        SchwabLivePollRequest(
+            internal_symbol="MNQ",
+            since=datetime.fromisoformat("2026-05-18T11:59:00+00:00"),
+        ),
+    )
+
+    assert [bar.end_ts.isoformat() for bar in bars] == ["2026-05-18T12:00:00+00:00"]
+    assert bars[0].symbol == "MNQ"
+    assert bars[0].bar_id.startswith("MNQ|1m|")
+
+
+def test_phase1_runtime_artifact_polling_client_rejects_wrong_symbol_or_timeframe(tmp_path: Path) -> None:
+    root = tmp_path / "phase1_runtime_market_data"
+    _write_phase1_runtime_artifact(root, symbol="MNQ", timeframe="1m")
+    artifact_path = root / "MNQ" / "1m" / "latest_runtime_candles.json"
+    payload = json.loads(artifact_path.read_text(encoding="utf-8"))
+    payload["symbol"] = "MES"
+    artifact_path.write_text(json.dumps(payload), encoding="utf-8")
+    client = Phase1RuntimeArtifactPollingClient(
+        artifact_root=root,
+        now_fn=lambda: datetime.fromisoformat("2026-05-18T12:00:20+00:00"),
+    )
+
+    with pytest.raises(RuntimeError, match="symbol mismatch"):
+        client.poll_live_bars(None, "1m", SchwabLivePollRequest(internal_symbol="MNQ"))
+
+    _write_phase1_runtime_artifact(root, symbol="MNQ", timeframe="1m")
+    payload = json.loads(artifact_path.read_text(encoding="utf-8"))
+    payload["timeframe"] = "3m"
+    artifact_path.write_text(json.dumps(payload), encoding="utf-8")
+    with pytest.raises(RuntimeError, match="timeframe mismatch"):
+        client.poll_live_bars(None, "1m", SchwabLivePollRequest(internal_symbol="MNQ"))
+
+
+def test_phase1_runtime_artifact_polling_client_rejects_forbidden_provenance(tmp_path: Path) -> None:
+    root = tmp_path / "phase1_runtime_market_data"
+    _write_phase1_runtime_artifact(root, source="DATABENTO_HISTORICAL_SEED")
+    client = Phase1RuntimeArtifactPollingClient(
+        artifact_root=root,
+        now_fn=lambda: datetime.fromisoformat("2026-05-18T12:00:20+00:00"),
+    )
+
+    with pytest.raises(RuntimeError, match="invalid provenance"):
+        client.poll_live_bars(None, "1m", SchwabLivePollRequest(internal_symbol="MNQ"))
+
+    _write_phase1_runtime_artifact(root, research_artifact_used=True)
+    with pytest.raises(RuntimeError, match="historical/replay/research/archive"):
+        client.poll_live_bars(None, "1m", SchwabLivePollRequest(internal_symbol="MNQ"))
+
+
+def test_phase1_runtime_artifact_polling_client_rejects_stale_or_empty_artifact(tmp_path: Path) -> None:
+    root = tmp_path / "phase1_runtime_market_data"
+    _write_phase1_runtime_artifact(root, generated_at="2026-05-18T11:00:00+00:00")
+    client = Phase1RuntimeArtifactPollingClient(
+        artifact_root=root,
+        now_fn=lambda: datetime.fromisoformat("2026-05-18T12:00:20+00:00"),
+    )
+
+    with pytest.raises(RuntimeError, match="stale"):
+        client.poll_live_bars(None, "1m", SchwabLivePollRequest(internal_symbol="MNQ"))
+
+    _write_phase1_runtime_artifact(root, bars=[])
+    with pytest.raises(RuntimeError, match="no completed bars"):
+        client.poll_live_bars(None, "1m", SchwabLivePollRequest(internal_symbol="MNQ"))
+
+
+def test_live_polling_service_persists_phase1_artifact_bars_without_duplicate_insertions(tmp_path: Path) -> None:
+    root = tmp_path / "phase1_runtime_market_data"
+    _write_phase1_runtime_artifact(root)
+    repositories = RepositorySet(build_engine(f"sqlite:///{tmp_path / 'lane.sqlite3'}"))
+    service = LivePollingService(
+        adapter=None,
+        client=Phase1RuntimeArtifactPollingClient(
+            artifact_root=root,
+            now_fn=lambda: datetime.fromisoformat("2026-05-18T12:00:20+00:00"),
+        ),
+        repositories=repositories,
+        data_source="phase1_runtime_artifact",
+        provider="databento_phase1_runtime_artifact",
+        provenance_tag="DATABENTO_REALTIME_PHASE1",
+    )
+
+    service.poll_bars(SchwabLivePollRequest(internal_symbol="MNQ"), internal_timeframe="1m")
+    service.poll_bars(SchwabLivePollRequest(internal_symbol="MNQ"), internal_timeframe="1m")
+
+    assert repositories.bars.count() == 1
 
 
 def test_historical_polling_live_client_caps_stale_since_window() -> None:

@@ -30,6 +30,11 @@ class MarketDataProvider(str, Enum):
     SCHWAB = "schwab"
 
 
+class ProbationaryPaperMarketDataSource(str, Enum):
+    PROVIDER_LIVE_POLL = "provider_live_poll"
+    PHASE1_RUNTIME_ARTIFACT = "phase1_runtime_artifact"
+
+
 class ExecutionPricingPolicy(str, Enum):
     MARKET_DATA = "market_data"
     BROKER_QUOTE_FALLBACK = "broker_quote_fallback"
@@ -296,6 +301,9 @@ class StrategySettings(BaseModel):
     probationary_artifacts_dir: str = "./outputs/probationary"
     live_poll_interval_seconds: int = 30
     live_poll_lookback_minutes: int = 180
+    probationary_paper_market_data_source: ProbationaryPaperMarketDataSource = (
+        ProbationaryPaperMarketDataSource.PROVIDER_LIVE_POLL
+    )
     live_strategy_pilot_enabled: bool = False
     live_strategy_pilot_submit_enabled: bool = False
     live_strategy_pilot_single_cycle_mode: bool = True

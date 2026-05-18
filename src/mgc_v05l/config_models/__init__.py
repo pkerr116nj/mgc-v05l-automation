@@ -10,6 +10,7 @@ from .settings import (
     ExecutionTimeframeRole,
     MarketDataProvider,
     ParticipationPolicy,
+    ProbationaryPaperMarketDataSource,
     RuntimeMode,
     StrategySettings,
 )
@@ -23,6 +24,7 @@ __all__ = [
     "ExecutionTimeframeRole",
     "MarketDataProvider",
     "ParticipationPolicy",
+    "ProbationaryPaperMarketDataSource",
     "RuntimeMode",
     "StrategySettings",
     "load_data_storage_policy",

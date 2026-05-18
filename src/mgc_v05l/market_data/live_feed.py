@@ -11,7 +11,8 @@ import time
 from copy import deepcopy
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
-from collections.abc import Iterable, Sequence
+from pathlib import Path
+from collections.abc import Iterable, Mapping, Sequence
 from typing import Any, Callable, Optional
 
 from ..domain.models import Bar
@@ -28,7 +29,7 @@ from .schwab_models import (
     SchwabLivePollingClient,
     SchwabLiveStreamClient,
 )
-from .timeframes import timeframe_minutes
+from .timeframes import normalize_timeframe_label, timeframe_minutes
 
 _DATABENTO_LIVE_POLL_SAFETY_DELAY_SECONDS = 10
 _DATABENTO_LIVE_GATEWAY_PORT = 13000
@@ -38,6 +39,11 @@ _MARKET_DATA_STALE_GRACE_SECONDS = 10.0
 _MARKET_DATA_RECOVERY_COOLDOWN_SECONDS = 45.0
 _MARKET_DATA_RECOVERY_WINDOW_SECONDS = 300.0
 _MARKET_DATA_RECOVERY_MAX_ATTEMPTS_PER_WINDOW = 3
+_PHASE1_RUNTIME_ARTIFACT_SOURCE = "DATABENTO_REALTIME_PHASE1"
+_PHASE1_RUNTIME_ARTIFACT_FRESHNESS_DEFAULT_SECONDS = 180.0
+_PHASE1_RUNTIME_ARTIFACT_DEFAULT_ROOT = (
+    Path(__file__).resolve().parents[3] / "outputs" / "track_b_execution_core" / "phase1_runtime_market_data"
+)
 
 
 def databento_live_effective_end(
@@ -214,6 +220,36 @@ def _parse_optional_datetime(raw_value: Any) -> datetime | None:
     return parsed.astimezone(UTC)
 
 
+def _ensure_datetime_utc(value: datetime) -> datetime:
+    if value.tzinfo is None or value.utcoffset() is None:
+        return value.replace(tzinfo=UTC)
+    return value.astimezone(UTC)
+
+
+def _float_value(raw_value: Any, default: float) -> float:
+    try:
+        return float(raw_value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _phase1_artifact_forbidden_provenance(payload: Mapping[str, Any]) -> bool:
+    forbidden_flag_names = {
+        "historical_seed_ready",
+        "research_artifact_used",
+        "archive_artifact_used",
+        "databento_live_api_replay",
+        "replay_artifact_used",
+    }
+    if any(payload.get(name) is True for name in forbidden_flag_names):
+        return True
+    source_text = " ".join(
+        str(payload.get(name) or "")
+        for name in ("source", "source_id", "provenance", "artifact_kind", "artifact_role")
+    ).lower()
+    return any(token in source_text for token in ("historical", "seed", "replay", "research", "archive"))
+
+
 def _databento_retry_bounds_from_error(
     error: Exception,
     *,
@@ -266,6 +302,12 @@ def _parse_databento_price(raw_value: Any) -> Decimal:
         return Decimal(raw_value) / Decimal("1000000000")
     if isinstance(raw_value, float):
         return Decimal(str(raw_value))
+    return Decimal(str(raw_value))
+
+
+def _decimal_from_artifact(raw_value: Any, *, field_name: str) -> Decimal:
+    if raw_value is None:
+        raise RuntimeError(f"Phase-1 runtime candle artifact row is missing {field_name}.")
     return Decimal(str(raw_value))
 
 
@@ -522,6 +564,181 @@ class DatabentoRawLivePollingClient:
                 else "No active Databento live session matched the stale symbol/timeframe."
             ),
         }
+
+
+class Phase1RuntimeArtifactPollingClient:
+    """Reads canonical Phase-1 runtime candle artifacts as a PAPER live polling source."""
+
+    def __init__(
+        self,
+        *,
+        artifact_root: str | Path | None = None,
+        required_source: str = _PHASE1_RUNTIME_ARTIFACT_SOURCE,
+        now_fn: Callable[[], datetime] | None = None,
+    ) -> None:
+        self._artifact_root = Path(artifact_root) if artifact_root is not None else _PHASE1_RUNTIME_ARTIFACT_DEFAULT_ROOT
+        self._required_source = str(required_source)
+        self._now_fn = now_fn
+
+    def artifact_path(self, *, internal_symbol: str, internal_timeframe: str) -> Path:
+        symbol = str(internal_symbol or "").strip().upper()
+        timeframe = normalize_timeframe_label(internal_timeframe)
+        return self._artifact_root / symbol / timeframe / "latest_runtime_candles.json"
+
+    def poll_live_bars(
+        self,
+        _external_symbol: str | None,
+        external_timeframe: str,
+        request: SchwabLivePollRequest,
+    ) -> list[Bar]:
+        internal_symbol = str(request.internal_symbol or "").strip().upper()
+        internal_timeframe = normalize_timeframe_label(external_timeframe)
+        path = self.artifact_path(internal_symbol=internal_symbol, internal_timeframe=internal_timeframe)
+        payload = self._read_payload(path)
+        self._validate_payload(payload, internal_symbol=internal_symbol, internal_timeframe=internal_timeframe, path=path)
+        bars = self._bars_from_payload(payload, internal_symbol=internal_symbol, internal_timeframe=internal_timeframe)
+        self._validate_freshness(payload, bars=bars, path=path)
+        if request.since is not None:
+            since = request.since.astimezone(UTC)
+            bars = [bar for bar in bars if bar.end_ts.astimezone(UTC) > since]
+        deduped: dict[datetime, Bar] = {}
+        for bar in bars:
+            deduped[bar.end_ts.astimezone(UTC)] = bar
+        return [deduped[key] for key in sorted(deduped)]
+
+    def recover_live_bars(
+        self,
+        *,
+        internal_symbol: str,
+        internal_timeframe: str,
+        reason: str,
+    ) -> dict[str, Any]:
+        path = self.artifact_path(internal_symbol=internal_symbol, internal_timeframe=internal_timeframe)
+        return {
+            "action": "phase1_runtime_artifact_refresh_wait",
+            "ok": path.exists(),
+            "detail": f"Phase-1 artifact source is file-backed; waiting for listener artifact refresh after {reason}.",
+            "artifact_path": str(path),
+        }
+
+    @staticmethod
+    def _read_payload(path: Path) -> dict[str, Any]:
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except FileNotFoundError as exc:
+            raise RuntimeError(f"Phase-1 runtime candle artifact is missing: {path}") from exc
+        except json.JSONDecodeError as exc:
+            raise RuntimeError(f"Phase-1 runtime candle artifact is not valid JSON: {path}") from exc
+        if not isinstance(payload, dict):
+            raise RuntimeError(f"Phase-1 runtime candle artifact must contain a JSON object: {path}")
+        return payload
+
+    def _validate_payload(
+        self,
+        payload: Mapping[str, Any],
+        *,
+        internal_symbol: str,
+        internal_timeframe: str,
+        path: Path,
+    ) -> None:
+        source = str(payload.get("source") or payload.get("provenance") or payload.get("source_id") or "").strip()
+        if source != self._required_source:
+            raise RuntimeError(
+                f"Phase-1 runtime candle artifact has invalid provenance {source!r}; expected {self._required_source}: {path}"
+            )
+        if _phase1_artifact_forbidden_provenance(payload):
+            raise RuntimeError(f"Phase-1 runtime candle artifact uses historical/replay/research/archive evidence: {path}")
+        payload_symbol = str(payload.get("symbol") or payload.get("instrument") or payload.get("root") or "").strip().upper()
+        if payload_symbol != internal_symbol:
+            raise RuntimeError(
+                f"Phase-1 runtime candle artifact symbol mismatch: expected {internal_symbol}, found {payload_symbol or '<missing>'}: {path}"
+            )
+        payload_timeframe = normalize_timeframe_label(str(payload.get("timeframe") or ""))
+        if payload_timeframe != internal_timeframe:
+            raise RuntimeError(
+                f"Phase-1 runtime candle artifact timeframe mismatch: expected {internal_timeframe}, found {payload_timeframe}: {path}"
+            )
+
+    def _validate_freshness(self, payload: Mapping[str, Any], *, bars: Sequence[Bar], path: Path) -> None:
+        if not bars:
+            raise RuntimeError(f"Phase-1 runtime candle artifact contains no completed bars: {path}")
+        now = self._now()
+        latest_bar_end = max(bar.end_ts for bar in bars).astimezone(UTC)
+        threshold_seconds = _float_value(
+            payload.get("freshness_seconds"),
+            _PHASE1_RUNTIME_ARTIFACT_FRESHNESS_DEFAULT_SECONDS,
+        )
+        latest_age_seconds = max((now - latest_bar_end).total_seconds(), 0.0)
+        if latest_age_seconds > threshold_seconds:
+            raise RuntimeError(
+                "Phase-1 runtime candle artifact is stale: "
+                f"latest_bar={latest_bar_end.isoformat()} age_seconds={latest_age_seconds:.3f} "
+                f"threshold_seconds={threshold_seconds:.3f} path={path}"
+            )
+        generated_at = _parse_optional_datetime(payload.get("generated_at"))
+        if generated_at is not None:
+            generated_age_seconds = max((now - generated_at.astimezone(UTC)).total_seconds(), 0.0)
+            if generated_age_seconds > threshold_seconds:
+                raise RuntimeError(
+                    "Phase-1 runtime candle artifact metadata is stale: "
+                    f"generated_at={generated_at.isoformat()} age_seconds={generated_age_seconds:.3f} "
+                    f"threshold_seconds={threshold_seconds:.3f} path={path}"
+                )
+
+    def _bars_from_payload(
+        self,
+        payload: Mapping[str, Any],
+        *,
+        internal_symbol: str,
+        internal_timeframe: str,
+    ) -> list[Bar]:
+        raw_bars = payload.get("bars")
+        if not isinstance(raw_bars, list):
+            raise RuntimeError("Phase-1 runtime candle artifact must expose a bars list.")
+        bars: list[Bar] = []
+        duration = timedelta(minutes=timeframe_minutes(internal_timeframe))
+        for raw_row in raw_bars:
+            if not isinstance(raw_row, Mapping):
+                continue
+            if raw_row.get("completed") is not True and raw_row.get("is_final") is not True:
+                continue
+            row_symbol = str(raw_row.get("symbol") or raw_row.get("instrument") or internal_symbol).strip().upper()
+            if row_symbol != internal_symbol:
+                raise RuntimeError(
+                    f"Phase-1 runtime candle artifact row symbol mismatch: expected {internal_symbol}, found {row_symbol}."
+                )
+            end_ts = _parse_optional_datetime(raw_row.get("bar_end") or raw_row.get("end_ts") or raw_row.get("timestamp"))
+            if end_ts is None:
+                raise RuntimeError("Phase-1 runtime candle artifact row is missing bar_end/end_ts.")
+            start_ts = _parse_optional_datetime(raw_row.get("bar_start") or raw_row.get("start_ts"))
+            if start_ts is None:
+                start_ts = end_ts - duration
+            bars.append(
+                Bar(
+                    bar_id=build_bar_id(internal_symbol, internal_timeframe, end_ts),
+                    symbol=internal_symbol,
+                    timeframe=internal_timeframe,
+                    start_ts=start_ts,
+                    end_ts=end_ts,
+                    open=_decimal_from_artifact(raw_row.get("open"), field_name="open"),
+                    high=_decimal_from_artifact(raw_row.get("high"), field_name="high"),
+                    low=_decimal_from_artifact(raw_row.get("low"), field_name="low"),
+                    close=_decimal_from_artifact(raw_row.get("close"), field_name="close"),
+                    volume=max(0, int(Decimal(str(raw_row.get("volume") or 0)))),
+                    is_final=True,
+                    session_asia=raw_row.get("session_asia") is True,
+                    session_london=raw_row.get("session_london") is True,
+                    session_us=raw_row.get("session_us") is True or not any(
+                        raw_row.get(key) is True for key in ("session_asia", "session_london")
+                    ),
+                    session_allowed=raw_row.get("session_allowed") is not False,
+                )
+            )
+        return sorted(bars, key=lambda row: row.end_ts)
+
+    def _now(self) -> datetime:
+        value = self._now_fn() if self._now_fn is not None else datetime.now(UTC)
+        return _ensure_datetime_utc(value)
 
 
 class LivePollingService:

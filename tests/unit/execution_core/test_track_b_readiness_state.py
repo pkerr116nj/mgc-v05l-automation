@@ -32,6 +32,10 @@ def _clean_inputs() -> dict:
             "eligible_lane_count": 3,
             "entries_enabled": True,
             "operator_halt": False,
+            "last_processed_bar_end_ts": "2026-05-18T11:59:00+00:00",
+            "runtime_ingestion_fresh": True,
+            "ingestion_age_seconds": 60.0,
+            "ingestion_freshness_threshold_seconds": 180.0,
         },
         "broker_truth": {
             "available": True,
@@ -239,6 +243,26 @@ def test_optional_symbol_stale_warns_without_hard_market_data_blocker() -> None:
     assert result["market_data"]["optional_degraded_symbols"] == ["PL"]
     assert "optional_market_data_degraded" in {row["code"] for row in result["readiness_warnings"]}
     assert result["readiness_blockers"] == []
+
+
+def test_submit_capable_blocks_when_runtime_ingestion_is_stale_even_if_phase1_listener_is_fresh() -> None:
+    now = datetime(2026, 5, 18, 12, 0, tzinfo=timezone.utc)
+    inputs = _clean_inputs()
+    inputs["runtime"]["last_processed_bar_end_ts"] = "2026-05-18T11:44:00+00:00"
+    inputs["runtime"]["runtime_ingestion_fresh"] = False
+    inputs["runtime"]["ingestion_age_seconds"] = 960.0
+    inputs["market_data"] = _market_data_input(
+        {},
+        {},
+        _phase1_listener_status(rows=[_listener_row("MGC")]),
+        now=now,
+    )
+
+    result = classify_canonical_readiness(inputs)
+
+    assert result["canonical_readiness"] == "NOT_READY_DEPENDENCY"
+    assert result["readiness_blockers"][0]["code"] == "runtime_ingestion_not_fresh"
+    assert result["market_data"]["fresh"] is True
 
 
 def test_invalid_phase1_listener_provenance_blocks_market_data() -> None:

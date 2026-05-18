@@ -380,6 +380,21 @@ def classify_canonical_readiness(inputs: Mapping[str, Any]) -> dict[str, Any]:
             inputs=inputs,
         )
 
+    if not _bool(runtime.get("runtime_ingestion_fresh")):
+        block(
+            "runtime_ingestion_not_fresh",
+            "PAPER runtime has eligible lanes but has not ingested a fresh runtime bar; Phase-1 producer freshness alone is not submit-capable proof.",
+            source="runtime",
+        )
+        return _readiness_result(
+            generated_at=generated_at,
+            state="NOT_READY_DEPENDENCY",
+            reasons=reasons,
+            blockers=blockers,
+            warnings=warnings,
+            inputs=inputs,
+        )
+
     if submit_route_ready and submit_authority_explicit:
         reasons.append("PAPER runtime, broker truth, reconciliation, live bars, and submit route are ready.")
         return _readiness_result(
@@ -417,7 +432,7 @@ def build_readiness_inputs(
     operator_status = _mapping(artifacts.get("operator_status"))
     config_in_force = _mapping(artifacts.get("config_in_force"))
     lane_quarantine = _lane_quarantine_input(_mapping(artifacts.get("lane_quarantine")))
-    runtime = _runtime_input(operator_status, config_in_force, root_guard)
+    runtime = _runtime_input(operator_status, config_in_force, root_guard, now=now)
     market_data = _market_data_input(
         operator_status,
         _mapping(artifacts.get("market_data_probe")),
@@ -637,6 +652,8 @@ def _runtime_input(
     operator_status: Mapping[str, Any],
     config_in_force: Mapping[str, Any],
     root_guard: Mapping[str, Any],
+    *,
+    now: datetime,
 ) -> dict[str, Any]:
     active_lane_ids = [str(value) for value in list(operator_status.get("active_lane_ids") or []) if str(value)]
     lane_rows = [row for row in list(operator_status.get("lanes") or []) if isinstance(row, Mapping)]
@@ -656,6 +673,12 @@ def _runtime_input(
     health = _mapping(operator_status.get("health"))
     health_status = str(health.get("health_status") or operator_status.get("strategy_status") or "").upper()
     faulted = bool(operator_status.get("fault_code")) or health_status.startswith("FAULT")
+    last_processed_bar_end_ts = operator_status.get("last_processed_bar_end_ts")
+    ingestion_age_seconds = _age_seconds(last_processed_bar_end_ts, now)
+    ingestion_threshold = MARKET_DATA_FRESHNESS_DEFAULT_SECONDS
+    runtime_ingestion_fresh = bool(
+        ingestion_age_seconds is not None and ingestion_age_seconds <= ingestion_threshold
+    )
     return {
         "running": process_running,
         "healthy": bool(process_running and not faulted and operator_status.get("operator_halt") is not True),
@@ -665,6 +688,10 @@ def _runtime_input(
         "loaded_lane_count": len(active_lane_ids) or len(configured_lanes),
         "eligible_lane_count": eligible_count,
         "active_lane_ids": active_lane_ids,
+        "last_processed_bar_end_ts": last_processed_bar_end_ts,
+        "ingestion_age_seconds": ingestion_age_seconds,
+        "ingestion_freshness_threshold_seconds": ingestion_threshold,
+        "runtime_ingestion_fresh": runtime_ingestion_fresh,
         "live_money_eligible": operator_status.get("live_money_eligible") is True,
     }
 

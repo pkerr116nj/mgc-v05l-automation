@@ -29,6 +29,7 @@ from ..config_models import (
     ExecutionTimeframeRole,
     MarketDataProvider,
     ParticipationPolicy,
+    ProbationaryPaperMarketDataSource,
     RuntimeMode,
     StrategySettings,
     load_settings_from_files,
@@ -76,6 +77,7 @@ from ..market_data import (
 )
 from ..market_data.live_feed import (
     DatabentoRawLivePollingClient,
+    Phase1RuntimeArtifactPollingClient,
     databento_live_auth_response,
     databento_live_effective_end,
     databento_live_gateway_host,
@@ -8575,6 +8577,7 @@ def _write_probationary_paper_config_in_force(
                 "database_url": lane.settings.database_url,
                 "artifacts_dir": str(lane.settings.probationary_artifacts_path),
                 "live_poll_lookback_minutes": lane.settings.live_poll_lookback_minutes,
+                "probationary_paper_market_data_source": lane.settings.probationary_paper_market_data_source.value,
                 **_lane_config_row_extras(lane),
             }
             for lane in lanes
@@ -15732,6 +15735,27 @@ def _build_live_polling_service(
     repositories: RepositorySet,
     schwab_config_path: str | Path | None,
 ) -> LivePollingService:
+    if (
+        settings.mode is RuntimeMode.PAPER
+        and settings.probationary_paper_market_data_source
+        is ProbationaryPaperMarketDataSource.PHASE1_RUNTIME_ARTIFACT
+    ):
+        return LivePollingService(
+            adapter=None,
+            client=Phase1RuntimeArtifactPollingClient(
+                artifact_root=Path(__file__).resolve().parents[3]
+                / "outputs"
+                / "track_b_execution_core"
+                / "phase1_runtime_market_data",
+            ),
+            repositories=repositories,
+            canonical_maintenance=CanonicalMarketDataMaintenanceService(database_url=settings.database_url),
+            data_source="phase1_runtime_artifact",
+            provider="databento_phase1_runtime_artifact",
+            provenance_tag="DATABENTO_REALTIME_PHASE1",
+            dataset="GLBX.MDP3",
+            schema_name="ohlcv-1m",
+        )
     if settings.market_data_provider is MarketDataProvider.DATABENTO:
         provider = DatabentoMarketDataProvider(
             settings,
