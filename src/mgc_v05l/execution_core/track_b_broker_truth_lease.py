@@ -1,0 +1,599 @@
+"""Pure Track B PAPER broker-truth lease evaluator.
+
+The evaluator consumes already-produced broker truth, reconciliation, lifecycle,
+and order-intent summaries. It does not connect to brokers, execute repairs,
+restart services, mutate lifecycle, or transmit orders.
+"""
+
+from __future__ import annotations
+
+import hashlib
+import json
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
+from typing import Any, Mapping, Sequence
+
+LEASE_STATES = {
+    "ACTIVE",
+    "ACTIVE_DEGRADED_REFRESH_FAILING",
+    "EXPIRED_BLOCK_NEW_ENTRIES",
+    "EXPIRED_EXITS_ONLY",
+    "INVALIDATED_CONTRADICTION",
+    "INVALIDATED_UNKNOWN_OPEN_ORDERS",
+    "INVALIDATED_MANUAL_BROKER_ACTION",
+    "OPERATOR_REQUIRED",
+}
+
+DEFAULT_LEASE_ARTIFACT = Path("outputs") / "operator_dashboard" / "runtime" / "latest_broker_truth_lease.json"
+DEFAULT_LEASE_HISTORY = Path("outputs") / "operator_dashboard" / "runtime" / "broker_truth_lease_history.jsonl"
+
+
+def classify_broker_truth_lease(inputs: Mapping[str, Any]) -> dict[str, Any]:
+    """Classify a broker-truth account safety lease from supplied artifacts."""
+
+    current_time = _parse_time(inputs.get("current_time") or inputs.get("generated_at")) or datetime.now(timezone.utc)
+    generated_at = current_time.isoformat()
+    account_id = str(inputs.get("account_id") or "").strip()
+    policy = _mapping(inputs.get("policy"))
+    max_entry_age_seconds = _float(policy.get("max_entry_age_seconds"), 0.0)
+    max_exit_age_seconds = _float(policy.get("max_exit_age_seconds"), max_entry_age_seconds)
+    degraded_refresh_grace_seconds = _float(policy.get("degraded_refresh_grace_seconds"), max_entry_age_seconds)
+    allowed_instruments = _string_set(inputs.get("allowed_instruments") or inputs.get("allowed_scope"))
+
+    broker_truth = _mapping(inputs.get("last_successful_broker_truth") or inputs.get("broker_truth"))
+    latest_attempt = _mapping(inputs.get("latest_attempt_status"))
+    reconciliation = _mapping(inputs.get("reconciliation") or inputs.get("phase1_reconciliation"))
+    lifecycle = _mapping(inputs.get("lifecycle") or inputs.get("lifecycle_state"))
+    order_state = _mapping(inputs.get("order_state") or inputs.get("order_intent_state") or inputs.get("open_order_state"))
+    source_paths = _mapping(inputs.get("source_artifact_paths") or inputs.get("source_artifacts"))
+    source_timestamps = dict(_mapping(inputs.get("source_artifact_timestamps") or {}))
+
+    broker_truth_time = _parse_time(
+        broker_truth.get("generated_at")
+        or broker_truth.get("last_success_at")
+        or broker_truth.get("latest_refresh_time")
+        or broker_truth.get("completed_at")
+    )
+    entry_valid_until = _add_seconds(broker_truth_time, max_entry_age_seconds)
+    exit_valid_until = _add_seconds(broker_truth_time, max_exit_age_seconds)
+    valid_until = entry_valid_until
+
+    builder = _LeaseBuilder(
+        generated_at=generated_at,
+        account_id=account_id,
+        broker_truth=broker_truth,
+        latest_attempt=latest_attempt,
+        reconciliation=reconciliation,
+        lifecycle=lifecycle,
+        order_state=order_state,
+        allowed_instruments=allowed_instruments,
+        source_paths=source_paths,
+        source_timestamps=source_timestamps,
+    )
+
+    live_money_sources = {
+        "inputs": inputs,
+        "broker_truth": broker_truth,
+        "latest_attempt_status": latest_attempt,
+        "reconciliation": reconciliation,
+        "lifecycle": lifecycle,
+        "order_state": order_state,
+    }
+    if any(_bool(_mapping(value).get("live_money_eligible")) for value in live_money_sources.values()):
+        builder.invalidate(
+            "INVALIDATED_CONTRADICTION",
+            "live_money_eligible_enabled",
+            "Live-money eligibility is forbidden for Track B PAPER leases.",
+            operator_action_required=True,
+        )
+    elif not broker_truth:
+        builder.invalidate(
+            "OPERATOR_REQUIRED",
+            "broker_truth_missing",
+            "Last successful broker truth is missing.",
+            operator_action_required=True,
+        )
+    elif account_id and str(broker_truth.get("account") or broker_truth.get("account_id") or "").strip() not in {"", account_id}:
+        builder.invalidate(
+            "INVALIDATED_CONTRADICTION",
+            "wrong_account",
+            "Broker truth account does not match the configured PAPER account.",
+            operator_action_required=True,
+        )
+    elif not _bool(broker_truth.get("positions_complete")):
+        builder.invalidate(
+            "OPERATOR_REQUIRED",
+            "positions_incomplete",
+            "Broker position truth is incomplete.",
+            operator_action_required=True,
+        )
+    elif _unknown_open_orders(
+        broker_truth=broker_truth,
+        latest_attempt=latest_attempt,
+        reconciliation=reconciliation,
+        order_state=order_state,
+        allowed_instruments=allowed_instruments,
+    ):
+        builder.invalidate(
+            "INVALIDATED_UNKNOWN_OPEN_ORDERS",
+            "unknown_open_orders",
+            "Broker open-order truth is incomplete or unknown open orders are present.",
+            operator_action_required=True,
+        )
+    elif _manual_broker_action_detected(lifecycle=lifecycle, reconciliation=reconciliation, order_state=order_state):
+        builder.invalidate(
+            "INVALIDATED_MANUAL_BROKER_ACTION",
+            "manual_broker_action",
+            "Manual broker action or stale lifecycle after manual broker action is unresolved.",
+            operator_action_required=True,
+        )
+    else:
+        latest_contradiction = _latest_success_contradiction(
+            latest_attempt=latest_attempt,
+            account_id=account_id,
+            allowed_instruments=allowed_instruments,
+            lifecycle=lifecycle,
+            order_state=order_state,
+        )
+        broker_position_contradiction = _broker_position_contradiction(
+            broker_truth=broker_truth,
+            reconciliation=reconciliation,
+            lifecycle=lifecycle,
+            allowed_instruments=allowed_instruments,
+        )
+        if latest_contradiction:
+            builder.invalidate(
+                "INVALIDATED_CONTRADICTION",
+                latest_contradiction["code"],
+                latest_contradiction["detail"],
+                operator_action_required=True,
+            )
+        elif broker_position_contradiction:
+            builder.invalidate(
+                "INVALIDATED_CONTRADICTION",
+                broker_position_contradiction["code"],
+                broker_position_contradiction["detail"],
+                operator_action_required=True,
+            )
+        elif not _reconciliation_clean(reconciliation):
+            builder.invalidate(
+                "OPERATOR_REQUIRED",
+                "reconciliation_not_clean",
+                "Phase-1 reconciliation is not clean.",
+                operator_action_required=True,
+            )
+        elif broker_truth_time is None or entry_valid_until is None or exit_valid_until is None:
+            builder.invalidate(
+                "OPERATOR_REQUIRED",
+                "broker_truth_time_missing",
+                "Broker truth generated_at/last_success_at timestamp is missing or invalid.",
+                operator_action_required=True,
+            )
+        elif current_time <= entry_valid_until:
+            if _latest_attempt_failed_after_success(latest_attempt=latest_attempt, broker_truth_time=broker_truth_time):
+                builder.state = "ACTIVE_DEGRADED_REFRESH_FAILING"
+                builder.warn(
+                    "broker_truth_refresh_failing",
+                    "Latest broker-truth refresh failed; active lease is preserved until entry validity expires.",
+                )
+                latest_time = _parse_time(latest_attempt.get("generated_at"))
+                if latest_time is not None and current_time > latest_time + timedelta(seconds=degraded_refresh_grace_seconds):
+                    builder.warn(
+                        "broker_truth_refresh_failure_grace_exceeded",
+                        "Latest broker-truth refresh failure is older than degraded refresh grace.",
+                    )
+            else:
+                builder.state = "ACTIVE"
+        elif _lifecycle_has_owned_position(lifecycle) and current_time <= exit_valid_until:
+            builder.state = "EXPIRED_EXITS_ONLY"
+            builder.block("entry_lease_expired", "Entry lease expired; new entries are blocked.")
+        else:
+            builder.state = "EXPIRED_BLOCK_NEW_ENTRIES"
+            builder.block("entry_lease_expired", "Entry lease expired; new entries are blocked.")
+
+    submit_entry_allowed = builder.state in {"ACTIVE", "ACTIVE_DEGRADED_REFRESH_FAILING"} and valid_until is not None and current_time <= valid_until
+    submit_exit_allowed = (
+        builder.state in {"ACTIVE", "ACTIVE_DEGRADED_REFRESH_FAILING"}
+        and exit_valid_until is not None
+        and current_time <= exit_valid_until
+    ) or (builder.state == "EXPIRED_EXITS_ONLY" and exit_valid_until is not None and current_time <= exit_valid_until)
+
+    if builder.state.startswith("INVALIDATED") or builder.state == "OPERATOR_REQUIRED":
+        submit_entry_allowed = False
+        submit_exit_allowed = False
+    if builder.state == "EXPIRED_BLOCK_NEW_ENTRIES":
+        submit_entry_allowed = False
+        submit_exit_allowed = False
+    if builder.state == "EXPIRED_EXITS_ONLY":
+        submit_entry_allowed = False
+
+    payload = {
+        "schema_version": "track_b_broker_truth_lease_v1",
+        "lease_id": _lease_id(account_id=account_id, broker_truth=broker_truth, reconciliation=reconciliation),
+        "account_id": account_id,
+        "mode": "PAPER",
+        "paper_only": True,
+        "live_money_eligible": False,
+        "generated_at": generated_at,
+        "broker_truth_generated_at": _iso_or_none(broker_truth_time),
+        "reconciliation_generated_at": reconciliation.get("generated_at"),
+        "valid_until": _iso_or_none(valid_until),
+        "entry_valid_until": _iso_or_none(entry_valid_until),
+        "exit_valid_until": _iso_or_none(exit_valid_until),
+        "max_entry_age_seconds": max_entry_age_seconds,
+        "max_exit_age_seconds": max_exit_age_seconds,
+        "degraded_refresh_grace_seconds": degraded_refresh_grace_seconds,
+        "lease_state": builder.state,
+        "positions_snapshot_path": broker_truth.get("positions_snapshot_path"),
+        "open_orders_snapshot_path": broker_truth.get("open_orders_snapshot_path"),
+        "broker_truth_status_path": source_paths.get("broker_truth_status") or source_paths.get("broker_truth"),
+        "reconciliation_path": source_paths.get("reconciliation"),
+        "positions": _scoped_positions(broker_truth, allowed_instruments),
+        "open_orders": _scoped_open_orders(broker_truth, allowed_instruments),
+        "track_b_broker_position_count": int(reconciliation.get("track_b_broker_position_count") or 0),
+        "track_b_broker_open_order_count": int(reconciliation.get("track_b_broker_open_order_count") or 0),
+        "unknown_broker_open_order_count": int(
+            reconciliation.get("unknown_broker_open_order_count")
+            or order_state.get("unknown_open_order_count")
+            or 0
+        ),
+        "lifecycle_open_position_count": int(
+            reconciliation.get("lifecycle_open_position_count")
+            or lifecycle.get("open_position_count")
+            or len(lifecycle.get("open_positions") or [])
+            or 0
+        ),
+        "lifecycle_open_order_count": int(
+            reconciliation.get("lifecycle_open_order_count")
+            or lifecycle.get("open_order_count")
+            or order_state.get("lifecycle_open_order_count")
+            or 0
+        ),
+        "review_required_count": int(reconciliation.get("review_required_count") or 0),
+        "broker_reconciled": _bool(reconciliation.get("broker_reconciled")),
+        "lifecycle_match_status": lifecycle.get("match_status") or reconciliation.get("position_match_report", {}).get("state"),
+        "order_intent_match_status": order_state.get("match_status")
+        or reconciliation.get("submit_intent_ownership_reconciliation", {}).get("classification"),
+        "allowed_instruments": sorted(allowed_instruments),
+        "allowed_contracts": list(inputs.get("allowed_contracts") or []),
+        "allowed_lane_ids": list(inputs.get("allowed_lane_ids") or []),
+        "submit_entry_allowed": bool(submit_entry_allowed),
+        "submit_exit_allowed": bool(submit_exit_allowed),
+        "warnings": list(builder.warnings),
+        "blockers": list(builder.blockers),
+        "contradiction_details": list(builder.contradiction_details),
+        "operator_action_required": bool(builder.operator_action_required),
+        "source_artifact_paths": dict(source_paths),
+        "source_artifact_timestamps": _source_timestamps(
+            explicit=source_timestamps,
+            broker_truth=broker_truth,
+            latest_attempt=latest_attempt,
+            reconciliation=reconciliation,
+            lifecycle=lifecycle,
+            order_state=order_state,
+        ),
+        "latest_attempt_classification": latest_attempt.get("classification"),
+        "latest_attempt_generated_at": latest_attempt.get("generated_at"),
+        "latest_attempt_error": latest_attempt.get("last_error") or latest_attempt.get("error"),
+    }
+    return payload
+
+
+def write_broker_truth_lease(
+    *,
+    output_path: Path,
+    lease: Mapping[str, Any],
+    history_path: Path | None = None,
+) -> None:
+    """Write the lease artifact and optional JSONL history; no actions are executed."""
+
+    path = Path(output_path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(f".{path.name}.tmp")
+    tmp.write_text(json.dumps(dict(lease), indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    tmp.replace(path)
+
+    if history_path is not None:
+        history = Path(history_path)
+        history.parent.mkdir(parents=True, exist_ok=True)
+        with history.open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps(dict(lease), sort_keys=True) + "\n")
+
+
+class _LeaseBuilder:
+    def __init__(
+        self,
+        *,
+        generated_at: str,
+        account_id: str,
+        broker_truth: Mapping[str, Any],
+        latest_attempt: Mapping[str, Any],
+        reconciliation: Mapping[str, Any],
+        lifecycle: Mapping[str, Any],
+        order_state: Mapping[str, Any],
+        allowed_instruments: set[str],
+        source_paths: Mapping[str, Any],
+        source_timestamps: Mapping[str, Any],
+    ) -> None:
+        self.generated_at = generated_at
+        self.account_id = account_id
+        self.broker_truth = broker_truth
+        self.latest_attempt = latest_attempt
+        self.reconciliation = reconciliation
+        self.lifecycle = lifecycle
+        self.order_state = order_state
+        self.allowed_instruments = allowed_instruments
+        self.source_paths = source_paths
+        self.source_timestamps = source_timestamps
+        self.state = "OPERATOR_REQUIRED"
+        self.warnings: list[dict[str, str]] = []
+        self.blockers: list[dict[str, str]] = []
+        self.contradiction_details: list[dict[str, str]] = []
+        self.operator_action_required = False
+
+    def warn(self, code: str, detail: str) -> None:
+        if not any(row.get("code") == code for row in self.warnings):
+            self.warnings.append({"code": code, "detail": detail})
+
+    def block(self, code: str, detail: str) -> None:
+        if not any(row.get("code") == code for row in self.blockers):
+            self.blockers.append({"code": code, "detail": detail})
+
+    def invalidate(self, state: str, code: str, detail: str, *, operator_action_required: bool) -> None:
+        self.state = state if state in LEASE_STATES else "OPERATOR_REQUIRED"
+        self.block(code, detail)
+        self.contradiction_details.append({"code": code, "detail": detail})
+        self.operator_action_required = operator_action_required
+
+
+def _mapping(value: Any) -> dict[str, Any]:
+    return dict(value) if isinstance(value, Mapping) else {}
+
+
+def _bool(value: Any) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return bool(value)
+    if isinstance(value, str):
+        return value.strip().lower() in {"1", "true", "yes", "y", "on"}
+    return False
+
+
+def _float(value: Any, default: float) -> float:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _parse_time(value: Any) -> datetime | None:
+    if isinstance(value, datetime):
+        return value if value.tzinfo is not None else value.replace(tzinfo=timezone.utc)
+    if not isinstance(value, str) or not value.strip():
+        return None
+    text = value.strip()
+    if text.endswith("Z"):
+        text = f"{text[:-1]}+00:00"
+    try:
+        parsed = datetime.fromisoformat(text)
+    except ValueError:
+        return None
+    return parsed if parsed.tzinfo is not None else parsed.replace(tzinfo=timezone.utc)
+
+
+def _add_seconds(value: datetime | None, seconds: float) -> datetime | None:
+    if value is None:
+        return None
+    return value + timedelta(seconds=max(0.0, seconds))
+
+
+def _iso_or_none(value: datetime | None) -> str | None:
+    return value.isoformat() if value is not None else None
+
+
+def _string_set(value: Any) -> set[str]:
+    if isinstance(value, str):
+        return {value.strip().upper()} if value.strip() else set()
+    if isinstance(value, Sequence):
+        return {str(item).strip().upper() for item in value if str(item).strip()}
+    return set()
+
+
+def _symbol(row: Mapping[str, Any]) -> str:
+    return str(row.get("symbol") or row.get("internal_symbol") or row.get("broker_symbol") or "").strip().upper()
+
+
+def _quantity(row: Mapping[str, Any]) -> float:
+    return _float(row.get("quantity", row.get("position", row.get("qty", 0))), 0.0)
+
+
+def _in_scope(row: Mapping[str, Any], allowed_instruments: set[str]) -> bool:
+    symbol = _symbol(row)
+    return not allowed_instruments or symbol in allowed_instruments
+
+
+def _scoped_positions(broker_truth: Mapping[str, Any], allowed_instruments: set[str]) -> list[dict[str, Any]]:
+    positions = broker_truth.get("positions") or broker_truth.get("track_b_broker_positions") or []
+    return [dict(row) for row in positions if isinstance(row, Mapping) and _in_scope(row, allowed_instruments)]
+
+
+def _scoped_open_orders(broker_truth: Mapping[str, Any], allowed_instruments: set[str]) -> list[dict[str, Any]]:
+    open_orders = broker_truth.get("open_orders") or broker_truth.get("track_b_broker_open_orders") or []
+    return [dict(row) for row in open_orders if isinstance(row, Mapping) and _in_scope(row, allowed_instruments)]
+
+
+def _unknown_open_orders(
+    *,
+    broker_truth: Mapping[str, Any],
+    latest_attempt: Mapping[str, Any],
+    reconciliation: Mapping[str, Any],
+    order_state: Mapping[str, Any],
+    allowed_instruments: set[str],
+) -> bool:
+    if not _bool(broker_truth.get("open_orders_complete")):
+        return True
+    if int(reconciliation.get("unknown_broker_open_order_count") or order_state.get("unknown_open_order_count") or 0) > 0:
+        return True
+    for row in _scoped_open_orders(broker_truth, allowed_instruments):
+        if not _bool(row.get("known") if "known" in row else row.get("owned", True)):
+            return True
+    if _latest_attempt_success(latest_attempt) and not _bool(latest_attempt.get("open_orders_complete")):
+        return True
+    for row in _scoped_open_orders(latest_attempt, allowed_instruments):
+        if not _bool(row.get("known") if "known" in row else row.get("owned", True)):
+            return True
+    return False
+
+
+def _manual_broker_action_detected(
+    *,
+    lifecycle: Mapping[str, Any],
+    reconciliation: Mapping[str, Any],
+    order_state: Mapping[str, Any],
+) -> bool:
+    flags = (
+        lifecycle.get("manual_broker_action_detected"),
+        lifecycle.get("manual_close_detected"),
+        lifecycle.get("stale_after_manual_close"),
+        reconciliation.get("manual_broker_action_detected"),
+        reconciliation.get("manual_close_detected"),
+        order_state.get("manual_broker_action_detected"),
+    )
+    return any(_bool(flag) for flag in flags)
+
+
+def _latest_attempt_success(latest_attempt: Mapping[str, Any]) -> bool:
+    classification = str(latest_attempt.get("classification") or latest_attempt.get("verifier_classification") or "").upper()
+    if not classification:
+        return _bool(latest_attempt.get("last_success")) and not _bool(latest_attempt.get("last_failure"))
+    if any(token in classification for token in ("FAILED", "BLOCKED", "TIMEOUT", "INCOMPLETE")):
+        return False
+    return any(token in classification for token in ("READY", "CONNECTED", "RECONCILED")) or _bool(latest_attempt.get("last_success"))
+
+
+def _latest_attempt_failed_after_success(*, latest_attempt: Mapping[str, Any], broker_truth_time: datetime) -> bool:
+    classification = str(latest_attempt.get("classification") or latest_attempt.get("verifier_classification") or "").upper()
+    failed = _bool(latest_attempt.get("last_failure")) or any(
+        token in classification for token in ("FAILED", "BLOCKED", "TIMEOUT", "INCOMPLETE")
+    )
+    latest_time = _parse_time(latest_attempt.get("generated_at"))
+    return bool(failed and latest_time is not None and latest_time >= broker_truth_time)
+
+
+def _latest_success_contradiction(
+    *,
+    latest_attempt: Mapping[str, Any],
+    account_id: str,
+    allowed_instruments: set[str],
+    lifecycle: Mapping[str, Any],
+    order_state: Mapping[str, Any],
+) -> dict[str, str] | None:
+    if not _latest_attempt_success(latest_attempt):
+        return None
+    latest_account = str(latest_attempt.get("account") or latest_attempt.get("account_id") or "").strip()
+    if account_id and latest_account and latest_account != account_id:
+        return {"code": "wrong_account", "detail": "Latest successful broker truth uses a different account."}
+    if int(latest_attempt.get("unknown_broker_open_order_count") or order_state.get("unknown_open_order_count") or 0) > 0:
+        return {"code": "unknown_open_orders", "detail": "Latest successful broker truth reports unknown open orders."}
+    positions = [row for row in _scoped_positions(latest_attempt, allowed_instruments) if abs(_quantity(row)) > 1e-9]
+    if positions and not _lifecycle_positions_match(positions=positions, lifecycle=lifecycle):
+        return {"code": "unexpected_broker_position", "detail": "Latest successful broker truth reports unexpected position."}
+    return None
+
+
+def _broker_position_contradiction(
+    *,
+    broker_truth: Mapping[str, Any],
+    reconciliation: Mapping[str, Any],
+    lifecycle: Mapping[str, Any],
+    allowed_instruments: set[str],
+) -> dict[str, str] | None:
+    nonzero_positions = [row for row in _scoped_positions(broker_truth, allowed_instruments) if abs(_quantity(row)) > 1e-9]
+    if not nonzero_positions:
+        if _lifecycle_has_owned_position(lifecycle) and not _reconciliation_clean(reconciliation):
+            return {
+                "code": "lifecycle_broker_position_mismatch",
+                "detail": "Lifecycle reports an owned position but broker truth is flat and reconciliation is not clean.",
+            }
+        return None
+    if not _lifecycle_positions_match(positions=nonzero_positions, lifecycle=lifecycle):
+        return {"code": "unexpected_broker_position", "detail": "Broker truth reports an unexpected in-scope position."}
+    return None
+
+
+def _lifecycle_has_owned_position(lifecycle: Mapping[str, Any]) -> bool:
+    if int(lifecycle.get("owned_open_position_count") or lifecycle.get("open_position_count") or 0) > 0:
+        return True
+    return any(isinstance(row, Mapping) and _bool(row.get("owned", True)) for row in lifecycle.get("open_positions") or [])
+
+
+def _lifecycle_positions_match(*, positions: Sequence[Mapping[str, Any]], lifecycle: Mapping[str, Any]) -> bool:
+    lifecycle_positions = [row for row in lifecycle.get("open_positions") or [] if isinstance(row, Mapping)]
+    if not lifecycle_positions:
+        return False
+    for broker_row in positions:
+        symbol = _symbol(broker_row)
+        quantity = _quantity(broker_row)
+        matched = False
+        for lifecycle_row in lifecycle_positions:
+            if _symbol(lifecycle_row) == symbol and abs(_quantity(lifecycle_row) - quantity) <= 1e-9:
+                matched = True
+                break
+        if not matched:
+            return False
+    return True
+
+
+def _reconciliation_clean(reconciliation: Mapping[str, Any]) -> bool:
+    return (
+        str(reconciliation.get("classification") or "") == "TRACK_B_PAPER_BROKER_RECONCILED"
+        and _bool(reconciliation.get("broker_reconciled"))
+        and int(reconciliation.get("review_required_count") or 0) == 0
+    )
+
+
+def _source_timestamps(
+    *,
+    explicit: Mapping[str, Any],
+    broker_truth: Mapping[str, Any],
+    latest_attempt: Mapping[str, Any],
+    reconciliation: Mapping[str, Any],
+    lifecycle: Mapping[str, Any],
+    order_state: Mapping[str, Any],
+) -> dict[str, Any]:
+    result = dict(explicit)
+    defaults = {
+        "broker_truth": broker_truth.get("generated_at") or broker_truth.get("last_success_at"),
+        "latest_attempt": latest_attempt.get("generated_at"),
+        "reconciliation": reconciliation.get("generated_at"),
+        "lifecycle": lifecycle.get("generated_at"),
+        "order_state": order_state.get("generated_at"),
+    }
+    for key, value in defaults.items():
+        if value is not None and key not in result:
+            result[key] = value
+    return result
+
+
+def _lease_id(*, account_id: str, broker_truth: Mapping[str, Any], reconciliation: Mapping[str, Any]) -> str:
+    material = json.dumps(
+        {
+            "account_id": account_id,
+            "broker_truth_generated_at": broker_truth.get("generated_at") or broker_truth.get("last_success_at"),
+            "reconciliation_generated_at": reconciliation.get("generated_at"),
+            "broker_truth_classification": broker_truth.get("classification"),
+            "reconciliation_classification": reconciliation.get("classification"),
+        },
+        sort_keys=True,
+    )
+    return f"btlease-{hashlib.sha256(material.encode('utf-8')).hexdigest()[:16]}"
+
+
+__all__ = [
+    "DEFAULT_LEASE_ARTIFACT",
+    "DEFAULT_LEASE_HISTORY",
+    "LEASE_STATES",
+    "classify_broker_truth_lease",
+    "write_broker_truth_lease",
+]
