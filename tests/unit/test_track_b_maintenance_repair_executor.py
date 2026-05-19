@@ -48,6 +48,11 @@ def seed_artifacts(repo_root: Path, *, actions: list[str] | None = None, state: 
         {
             "canonical_readiness": "NOT_READY_DEPENDENCY",
             "live_money_eligible": False,
+            "broker_truth_lease": {
+                "lease_state": "ACTIVE_DEGRADED_REFRESH_FAILING",
+                "live_money_eligible": False,
+                "blockers": [],
+            },
         },
     )
 
@@ -55,6 +60,17 @@ def seed_artifacts(repo_root: Path, *, actions: list[str] | None = None, state: 
 def config(repo_root: Path, *, apply: bool = False, cooldown_seconds: int = 300, max_retries: int = 2) -> RepairExecutorConfig:
     return RepairExecutorConfig(
         repo_root=repo_root,
+        apply=apply,
+        cooldown_seconds=cooldown_seconds,
+        max_retries=max_retries,
+        python_bin="python-test",
+    )
+
+
+def phase1_config(repo_root: Path, *, apply: bool = False, cooldown_seconds: int = 300, max_retries: int = 2) -> RepairExecutorConfig:
+    return RepairExecutorConfig(
+        repo_root=repo_root,
+        action="phase1-reconciliation",
         apply=apply,
         cooldown_seconds=cooldown_seconds,
         max_retries=max_retries,
@@ -221,6 +237,101 @@ def test_history_artifact_appended(tmp_path: Path) -> None:
     rows = [json.loads(line) for line in history.read_text(encoding="utf-8").splitlines()]
     assert len(rows) == 2
     assert rows[0]["classification"] == "TRACK_B_MAINTENANCE_REPAIR_DRY_RUN_READY"
+
+
+def test_phase1_reconciliation_dry_run_recommends_refresh(tmp_path: Path) -> None:
+    seed_artifacts(tmp_path, actions=["REFRESH_RECONCILIATION"])
+
+    result = run_repair_executor(config=phase1_config(tmp_path), pid_checker=lambda pid: True, now_fn=now)
+
+    assert result["classification"] == "TRACK_B_MAINTENANCE_REPAIR_DRY_RUN_READY"
+    assert result["action"] == "phase1-reconciliation"
+    assert result["repair_action"] == "REFRESH_PHASE1_RECONCILIATION"
+    assert result["would_execute"] is True
+    assert result["commands"][0][:3] == ["python-test", "-m", "mgc_v05l.execution_core.track_b_paper_broker_reconciliation"]
+    assert "--repo-root" in result["commands"][0]
+    assert result["authority"]["runtime_restart_allowed"] is False
+
+
+def test_phase1_reconciliation_apply_uses_safe_python_and_reruns_readiness(tmp_path: Path) -> None:
+    seed_artifacts(tmp_path, actions=["REFRESH_RECONCILIATION"])
+    commands: list[list[str]] = []
+
+    def runner(command, **kwargs):  # type: ignore[no-untyped-def]
+        commands.append(list(command))
+        return SimpleNamespace(returncode=0, stdout="ok", stderr="")
+
+    result = run_repair_executor(
+        config=phase1_config(tmp_path, apply=True),
+        command_runner=runner,
+        pid_checker=lambda pid: True,
+        now_fn=now,
+    )
+
+    assert result["classification"] == "TRACK_B_MAINTENANCE_REPAIR_APPLIED"
+    assert commands[0][:3] == ["python-test", "-m", "mgc_v05l.execution_core.track_b_paper_broker_reconciliation"]
+    assert commands[1][:3] == ["python-test", "-m", "mgc_v05l.app.track_b_canonical_readiness"]
+    assert result["canonical_readiness_rerun"]["returncode"] == 0
+    latest = tmp_path / "outputs" / "operator_dashboard" / "runtime" / "latest_maintenance_repair_result.json"
+    history = tmp_path / "outputs" / "operator_dashboard" / "runtime" / "maintenance_repair_history.jsonl"
+    assert json.loads(latest.read_text(encoding="utf-8"))["action"] == "phase1-reconciliation"
+    assert json.loads(history.read_text(encoding="utf-8").splitlines()[-1])["repair_action"] == "REFRESH_PHASE1_RECONCILIATION"
+
+
+def test_phase1_reconciliation_apply_failure_blocks_success(tmp_path: Path) -> None:
+    seed_artifacts(tmp_path, actions=["REFRESH_RECONCILIATION"])
+
+    def runner(command, **kwargs):  # type: ignore[no-untyped-def]
+        return SimpleNamespace(returncode=1, stdout="", stderr="reconciliation dirty")
+
+    result = run_repair_executor(
+        config=phase1_config(tmp_path, apply=True),
+        command_runner=runner,
+        pid_checker=lambda pid: True,
+        now_fn=now,
+    )
+
+    assert result["classification"] == "TRACK_B_MAINTENANCE_REPAIR_APPLY_FAILED"
+    assert result["executed"] is True
+    assert result["canonical_readiness_rerun"] is None
+
+
+def test_phase1_reconciliation_operator_required_blocks_apply(tmp_path: Path) -> None:
+    seed_artifacts(tmp_path, actions=["REFRESH_RECONCILIATION"], state="OPERATOR_REQUIRED")
+
+    result = run_repair_executor(config=phase1_config(tmp_path, apply=True), pid_checker=lambda pid: True, now_fn=now)
+
+    assert result["classification"] == "TRACK_B_MAINTENANCE_REPAIR_APPLY_BLOCKED"
+    assert "OPERATOR_REQUIRED" in result["blocked_reason"]
+    assert result["executed"] is False
+
+
+def test_phase1_reconciliation_live_money_blocks_apply(tmp_path: Path) -> None:
+    seed_artifacts(tmp_path, actions=["REFRESH_RECONCILIATION"])
+    canonical_path = tmp_path / "outputs" / "operator_dashboard" / "runtime" / "latest_canonical_readiness.json"
+    canonical = json.loads(canonical_path.read_text(encoding="utf-8"))
+    canonical["live_money_eligible"] = True
+    write_json(canonical_path, canonical)
+
+    result = run_repair_executor(config=phase1_config(tmp_path, apply=True), pid_checker=lambda pid: True, now_fn=now)
+
+    assert result["classification"] == "TRACK_B_MAINTENANCE_REPAIR_APPLY_BLOCKED"
+    assert "Live-money" in result["blocked_reason"]
+    assert result["executed"] is False
+
+
+def test_phase1_reconciliation_invalid_lease_blocks_apply(tmp_path: Path) -> None:
+    seed_artifacts(tmp_path, actions=["REFRESH_RECONCILIATION"])
+    canonical_path = tmp_path / "outputs" / "operator_dashboard" / "runtime" / "latest_canonical_readiness.json"
+    canonical = json.loads(canonical_path.read_text(encoding="utf-8"))
+    canonical["broker_truth_lease"]["lease_state"] = "INVALIDATED_UNKNOWN_OPEN_ORDERS"
+    write_json(canonical_path, canonical)
+
+    result = run_repair_executor(config=phase1_config(tmp_path, apply=True), pid_checker=lambda pid: True, now_fn=now)
+
+    assert result["classification"] == "TRACK_B_MAINTENANCE_REPAIR_APPLY_BLOCKED"
+    assert "INVALIDATED_UNKNOWN_OPEN_ORDERS" in result["blocked_reason"]
+    assert result["executed"] is False
 
 
 def test_cli_defaults_to_dry_run(tmp_path: Path, capsys) -> None:
