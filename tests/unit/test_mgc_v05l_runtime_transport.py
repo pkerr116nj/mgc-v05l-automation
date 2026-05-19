@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 import socket
-from datetime import timezone
+from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -15,7 +15,7 @@ from mgc_v05l.app.probationary_runtime import (
     ProbationaryRuntimeTransportFailure,
     _run_probationary_runtime_market_data_transport_probe,
 )
-from mgc_v05l.config_models import MarketDataProvider
+from mgc_v05l.config_models import MarketDataProvider, ProbationaryPaperMarketDataSource, RuntimeMode
 
 
 def test_runtime_transport_probe_writes_dns_failure_artifact(monkeypatch, tmp_path: Path) -> None:
@@ -195,3 +195,119 @@ def test_runtime_transport_probe_uses_databento_without_touching_schwab(
     assert payload["target_host"] == "glbx-mdp3.lsg.databento.com"
     assert payload["authenticated_probe_succeeds"] is True
     assert provider_instances
+
+
+def test_phase1_artifact_paper_transport_probe_skips_direct_databento_dns(
+    monkeypatch, tmp_path: Path
+) -> None:
+    settings = SimpleNamespace(
+        probationary_artifacts_path=tmp_path / "outputs" / "probationary_pattern_engine" / "paper_session",
+        symbol="MGC",
+        timeframe="1m",
+        timezone_info=timezone.utc,
+        live_poll_lookback_minutes=180,
+        resolved_execution_timeframe="1m",
+        resolved_context_timeframes=("3m",),
+        market_data_provider=MarketDataProvider.DATABENTO,
+        mode=RuntimeMode.PAPER,
+        probationary_paper_market_data_source=ProbationaryPaperMarketDataSource.PHASE1_RUNTIME_ARTIFACT,
+    )
+    checked: list[tuple[str, str]] = []
+
+    def _unexpected_provider(*_args, **_kwargs):
+        raise AssertionError("Direct Databento provider should not be built for phase1_runtime_artifact startup.")
+
+    def _unexpected_dns(*_args, **_kwargs):
+        raise AssertionError("Direct Databento DNS probe should not run for phase1_runtime_artifact startup.")
+
+    class _FakePhase1ArtifactClient:
+        def __init__(self, *, artifact_root=None, required_source=None, now_fn=None):
+            assert required_source == "DATABENTO_REALTIME_PHASE1"
+            self.artifact_root = artifact_root
+
+        def artifact_path(self, *, internal_symbol: str, internal_timeframe: str) -> Path:
+            return tmp_path / "phase1_runtime_market_data" / internal_symbol / internal_timeframe / "latest_runtime_candles.json"
+
+        def poll_live_bars(self, _external_symbol, external_timeframe, request):
+            checked.append((request.internal_symbol, external_timeframe))
+            return [SimpleNamespace(end_ts=datetime(2026, 5, 19, 7, 9, tzinfo=timezone.utc))]
+
+    monkeypatch.setattr(
+        "mgc_v05l.app.probationary_runtime.DatabentoMarketDataProvider",
+        _unexpected_provider,
+    )
+    monkeypatch.setattr(socket, "getaddrinfo", _unexpected_dns)
+    monkeypatch.setattr(
+        "mgc_v05l.app.probationary_runtime.Phase1RuntimeArtifactPollingClient",
+        _FakePhase1ArtifactClient,
+    )
+
+    payload = _run_probationary_runtime_market_data_transport_probe(
+        settings=settings,
+        schwab_config_path=tmp_path / "schwab.local.json",
+    )
+
+    assert payload["status"] == "ok"
+    assert payload["runtime_ready"] is True
+    assert payload["market_data_source"] == "phase1_runtime_artifact"
+    assert payload["required_provenance"] == "DATABENTO_REALTIME_PHASE1"
+    assert payload["direct_databento_transport_probe_attempted"] is False
+    assert payload["phase1_artifact_probe_succeeds"] is True
+    assert checked == [("MGC", "1m"), ("MGC", "3m")]
+    artifact_path = Path(payload["artifact_path"])
+    assert artifact_path.exists()
+    stored = json.loads(artifact_path.read_text(encoding="utf-8"))
+    assert stored["direct_databento_transport_probe_attempted"] is False
+    assert stored["phase1_artifact_probe_succeeds"] is True
+
+
+def test_phase1_artifact_paper_transport_probe_fails_closed_on_stale_artifact(
+    monkeypatch, tmp_path: Path
+) -> None:
+    settings = SimpleNamespace(
+        probationary_artifacts_path=tmp_path / "outputs" / "probationary_pattern_engine" / "paper_session",
+        symbol="MNQ",
+        timeframe="1m",
+        timezone_info=timezone.utc,
+        live_poll_lookback_minutes=180,
+        resolved_execution_timeframe="1m",
+        resolved_context_timeframes=(),
+        market_data_provider=MarketDataProvider.DATABENTO,
+        mode=RuntimeMode.PAPER,
+        probationary_paper_market_data_source=ProbationaryPaperMarketDataSource.PHASE1_RUNTIME_ARTIFACT,
+    )
+
+    class _FakePhase1ArtifactClient:
+        def __init__(self, *, artifact_root=None, required_source=None, now_fn=None):
+            self.artifact_root = artifact_root
+
+        def artifact_path(self, *, internal_symbol: str, internal_timeframe: str) -> Path:
+            return tmp_path / "phase1_runtime_market_data" / internal_symbol / internal_timeframe / "latest_runtime_candles.json"
+
+        def poll_live_bars(self, *_args, **_kwargs):
+            raise RuntimeError("Phase-1 runtime candle artifact is stale")
+
+    monkeypatch.setattr(
+        "mgc_v05l.app.probationary_runtime.Phase1RuntimeArtifactPollingClient",
+        _FakePhase1ArtifactClient,
+    )
+    monkeypatch.setattr(
+        socket,
+        "getaddrinfo",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("Direct Databento DNS probe should not run for phase1 artifact failures.")
+        ),
+    )
+
+    with pytest.raises(ProbationaryRuntimeTransportFailure) as excinfo:
+        _run_probationary_runtime_market_data_transport_probe(
+            settings=settings,
+            schwab_config_path=tmp_path / "schwab.local.json",
+        )
+
+    payload = excinfo.value.payload
+    assert payload["failure_kind"] == "phase1_runtime_artifact_unhealthy"
+    assert payload["market_data_source"] == "phase1_runtime_artifact"
+    assert payload["phase1_artifact_probe_attempted"] is True
+    assert payload["phase1_artifact_probe_succeeds"] is False
+    assert "stale" in payload["exception_text"]

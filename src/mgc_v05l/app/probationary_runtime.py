@@ -123,7 +123,7 @@ from .execution_truth import (
 )
 from ..strategy.strategy_engine import StrategyEngine
 from ..market_data.schwab_auth import SchwabAuthError, SchwabOAuthClient, SchwabTokenStore
-from ..market_data.timeframes import timeframe_minutes
+from ..market_data.timeframes import normalize_timeframe_label, timeframe_minutes
 from ..market_data.schwab_http import SchwabHttpError, UrllibJsonTransport
 from .approved_quant_lanes.engine import ApprovedQuantStrategyEngine
 from .approved_quant_lanes.specs import ApprovedQuantLaneSpec, approved_quant_lane_specs
@@ -15869,6 +15869,137 @@ def _write_probationary_runtime_transport_failure(settings: StrategySettings, pa
     return path
 
 
+def _uses_phase1_runtime_artifact_market_data(settings: StrategySettings) -> bool:
+    return (
+        getattr(settings, "mode", None) is RuntimeMode.PAPER
+        and getattr(settings, "probationary_paper_market_data_source", None)
+        is ProbationaryPaperMarketDataSource.PHASE1_RUNTIME_ARTIFACT
+    )
+
+
+def _phase1_runtime_artifact_probe_symbols(settings: StrategySettings) -> list[str]:
+    symbols: set[str] = set()
+    try:
+        for spec in _load_probationary_paper_lane_specs(settings):
+            symbol = str(spec.symbol or "").strip().upper()
+            if symbol:
+                symbols.add(symbol)
+    except Exception:
+        # The transport probe is also used in small unit-test settings objects;
+        # fall back to the top-level symbol when lane metadata is unavailable.
+        pass
+    fallback_symbol = str(getattr(settings, "symbol", "") or "").strip().upper()
+    if fallback_symbol:
+        symbols.add(fallback_symbol)
+    return sorted(symbols)
+
+
+def _phase1_runtime_artifact_probe_timeframes(settings: StrategySettings) -> list[str]:
+    raw_timeframes = [
+        getattr(settings, "resolved_execution_timeframe", None),
+        *list(getattr(settings, "resolved_context_timeframes", ()) or ()),
+    ]
+    normalized: list[str] = []
+    for raw in raw_timeframes:
+        if raw is None:
+            continue
+        timeframe = normalize_timeframe_label(str(raw))
+        if timeframe not in normalized:
+            normalized.append(timeframe)
+    return normalized or ["1m"]
+
+
+def _phase1_runtime_artifact_transport_probe(settings: StrategySettings) -> dict[str, Any]:
+    artifact_root = (
+        Path(__file__).resolve().parents[3]
+        / "outputs"
+        / "track_b_execution_core"
+        / "phase1_runtime_market_data"
+    )
+    client = Phase1RuntimeArtifactPollingClient(
+        artifact_root=artifact_root,
+        required_source="DATABENTO_REALTIME_PHASE1",
+    )
+    generated_at = datetime.now(timezone.utc).isoformat()
+    symbols = _phase1_runtime_artifact_probe_symbols(settings)
+    timeframes = _phase1_runtime_artifact_probe_timeframes(settings)
+    checked_artifacts: list[dict[str, Any]] = []
+    failure_base = {
+        "generated_at": generated_at,
+        "blocker_label": "market_data_transport_failure",
+        "cwd": os.getcwd(),
+        "market_data_source": "phase1_runtime_artifact",
+        "required_provenance": "DATABENTO_REALTIME_PHASE1",
+        "probe_symbols": symbols,
+        "probe_timeframes": timeframes,
+        "proxy_env": _probationary_runtime_transport_env(),
+        "python_executable": sys.executable,
+        "venv_prefix": sys.prefix,
+        "pid": os.getpid(),
+        "runtime_ready": False,
+        "status": "failed",
+        "next_fix": (
+            "Refresh the Phase-1 Databento runtime candle listener/artifacts; "
+            "artifact-backed PAPER runtime startup does not require direct Databento DNS/socket access."
+        ),
+    }
+    try:
+        for symbol in symbols:
+            for timeframe in timeframes:
+                path = client.artifact_path(internal_symbol=symbol, internal_timeframe=timeframe)
+                bars = client.poll_live_bars(
+                    None,
+                    timeframe,
+                    SchwabLivePollRequest(internal_symbol=symbol, since=None),
+                )
+                checked_artifacts.append(
+                    {
+                        "symbol": symbol,
+                        "timeframe": timeframe,
+                        "artifact_path": str(path),
+                        "latest_bar_end_ts": max(bar.end_ts for bar in bars).astimezone(timezone.utc).isoformat(),
+                        "bar_count": len(bars),
+                    }
+                )
+    except Exception as exc:
+        failure_payload = {
+            **failure_base,
+            "failure_kind": "phase1_runtime_artifact_unhealthy",
+            "phase1_artifact_probe_attempted": True,
+            "phase1_artifact_probe_succeeds": False,
+            "checked_artifacts": checked_artifacts,
+            "exception_text": str(exc),
+            "message": "Phase-1 runtime artifact health check failed for artifact-backed PAPER runtime startup.",
+        }
+        failure_path = _write_probationary_runtime_transport_failure(settings, failure_payload)
+        failure_payload["artifact_path"] = str(failure_path)
+        raise ProbationaryRuntimeTransportFailure(failure_payload) from exc
+
+    success_payload = {
+        "generated_at": generated_at,
+        "blocker_label": "market_data_transport_probe",
+        "cwd": os.getcwd(),
+        "market_data_source": "phase1_runtime_artifact",
+        "required_provenance": "DATABENTO_REALTIME_PHASE1",
+        "probe_symbols": symbols,
+        "probe_timeframes": timeframes,
+        "checked_artifacts": checked_artifacts,
+        "status": "ok",
+        "runtime_ready": True,
+        "direct_databento_transport_probe_attempted": False,
+        "phase1_artifact_probe_attempted": True,
+        "phase1_artifact_probe_succeeds": True,
+        "proxy_env": _probationary_runtime_transport_env(),
+        "python_executable": sys.executable,
+        "venv_prefix": sys.prefix,
+        "pid": os.getpid(),
+    }
+    _clear_probationary_runtime_transport_failure(settings)
+    artifact_path = _write_probationary_runtime_transport_probe(settings, success_payload)
+    success_payload["artifact_path"] = str(artifact_path)
+    return success_payload
+
+
 def _probationary_runtime_transport_diagnostic_payload(
     settings: StrategySettings,
     schwab_config,
@@ -15983,6 +16114,11 @@ def _run_probationary_runtime_market_data_transport_probe(
     adapter: SchwabMarketDataAdapter | None = None,
     oauth_client: SchwabOAuthClient | None = None,
 ) -> dict[str, Any]:
+    if _uses_phase1_runtime_artifact_market_data(settings):
+        payload = _phase1_runtime_artifact_transport_probe(settings)
+        print(f"Probationary paper runtime artifact preflight: {json.dumps(payload, sort_keys=True)}", flush=True)
+        return payload
+
     if settings.market_data_provider is MarketDataProvider.DATABENTO:
         provider = DatabentoMarketDataProvider(
             settings,
