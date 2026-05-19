@@ -55,10 +55,13 @@ def test_post_04_plus_10m_is_accepted_and_non_routing(tmp_path):
     assert decision["candidate_id"] == observer.CANDIDATE_ID
     assert decision["non_authoritative"] is True
     assert decision["diagnostic_only"] is True
+    assert decision["observer_only"] is True
     assert decision["order_intent_created"] is False
     assert decision["route_attempted"] is False
     assert decision["broker_state_mutated"] is False
+    assert decision["broker_mutation"] is False
     assert decision["lifecycle_mutated"] is False
+    assert decision["lifecycle_mutation"] is False
     assert decision["route_capable"] is False
     assert decision["submit_capable"] is False
 
