@@ -163,6 +163,7 @@ def _write_backend_source_readiness(
     launch_allowed: bool = True,
     supervised_usable: bool = True,
     temp_paper_blocked: bool = False,
+    lane_eligibility_rows: list[dict[str, object]] | None = None,
 ) -> None:
     output_dir = tmp_path / "outputs" / "operator_dashboard"
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -176,6 +177,7 @@ def _write_backend_source_readiness(
                 "market_data_stale_count": market_data_stale_count,
                 "bar_authority_unavailable_count": bar_authority_unavailable_count,
                 "blocking_fault_count": blocking_fault_count,
+                "lane_eligibility_rows": list(lane_eligibility_rows or []),
             }
         ),
         encoding="utf-8",
@@ -660,6 +662,150 @@ def test_governance_blocks_healthy_monitor_when_source_readiness_is_not_live(tmp
     assert "freshness_window_seconds=120.0" in nq["backend_source_readiness_detail"]
     assert nq["submit_allowed"] is False
 
+
+
+def test_governance_scopes_market_data_stale_faults_to_strategy_instrument(tmp_path: Path) -> None:
+    _write_monitor(
+        tmp_path,
+        broker_position_quantity=0.0,
+        ledger_position_quantity=0.0,
+    )
+    _write_ledger(tmp_path)
+    _write_dashboard(tmp_path)
+    _write_backend_source_readiness(
+        tmp_path,
+        market_data_stale_count=1,
+        lane_eligibility_rows=[
+            {
+                "lane_id": "mgc_1x_asia_london_participation__asia_london_long_v5",
+                "symbol": "MGC",
+                "affected_symbols": ["MGC"],
+                "market_data_stale": True,
+                "reason": "no_mgc_completed_bar",
+            }
+        ],
+    )
+    _write_signal_audit(tmp_path)
+    _write_strategy_performance(tmp_path)
+
+    artifacts = run_ibkr_paper_strategy_governance(config=_config(tmp_path))
+
+    nq = next(row for row in artifacts.performance_rows if row["strategy_id"] == "nq_1x_ny_early_core__us_late_long")
+    assert nq["backend_source_readiness"]["readiness_scope"] == "instrument_scoped"
+    assert nq["backend_source_readiness"]["required_instruments"] == ["NQ"]
+    assert nq["backend_source_readiness"]["market_data_stale_count"] == 0
+    assert nq["backend_source_readiness"]["global_market_data_stale_count"] == 1
+    assert "source_market_data_stale" not in nq["backend_source_readiness"]["block_reasons"]
+    assert "backend_or_source_not_live_ready" not in nq["submit_block_reasons"]
+    assert nq["submit_allowed"] is True
+
+
+def test_governance_blocks_strategy_on_own_instrument_market_data_stale_fault(tmp_path: Path) -> None:
+    _write_monitor(
+        tmp_path,
+        broker_position_quantity=0.0,
+        ledger_position_quantity=0.0,
+    )
+    _write_ledger(tmp_path)
+    _write_dashboard(tmp_path)
+    _write_backend_source_readiness(
+        tmp_path,
+        market_data_stale_count=1,
+        lane_eligibility_rows=[
+            {
+                "lane_id": "nq_1x_ny_early_core__us_late_long",
+                "symbol": "NQ",
+                "affected_symbols": ["NQ"],
+                "market_data_stale": True,
+                "reason": "no_nq_completed_bar",
+            }
+        ],
+    )
+    _write_signal_audit(tmp_path)
+    _write_strategy_performance(tmp_path)
+
+    artifacts = run_ibkr_paper_strategy_governance(config=_config(tmp_path))
+
+    nq = next(row for row in artifacts.performance_rows if row["strategy_id"] == "nq_1x_ny_early_core__us_late_long")
+    assert nq["backend_source_readiness"]["readiness_scope"] == "instrument_scoped"
+    assert nq["backend_source_readiness"]["market_data_stale_count"] == 1
+    assert "source_market_data_stale" in nq["backend_source_readiness"]["block_reasons"]
+    assert nq["submit_block_reasons"] == ["backend_or_source_not_live_ready"]
+    assert nq["submit_allowed"] is False
+
+
+def test_governance_does_not_block_mgc_on_unrelated_nq_market_data_stale_fault(tmp_path: Path) -> None:
+    _write_monitor(
+        tmp_path,
+        broker_position_quantity=0.0,
+        ledger_position_quantity=0.0,
+    )
+    _write_ledger(tmp_path)
+    _write_dashboard(tmp_path)
+    _write_backend_source_readiness(
+        tmp_path,
+        market_data_stale_count=1,
+        lane_eligibility_rows=[
+            {
+                "lane_id": "nq_1x_ny_early_core__us_late_long",
+                "symbol": "NQ",
+                "affected_symbols": ["NQ"],
+                "market_data_stale": True,
+                "reason": "no_nq_completed_bar",
+            }
+        ],
+    )
+    _write_signal_audit(tmp_path)
+    _write_strategy_performance(tmp_path)
+
+    artifacts = run_ibkr_paper_strategy_governance(config=_config(tmp_path))
+
+    mgc = next(row for row in artifacts.performance_rows if row["strategy_id"] == "mgc_1x_asia_london_participation__asia_london_long_v5")
+    assert mgc["backend_source_readiness"]["required_instruments"] == ["MGC"]
+    assert mgc["backend_source_readiness"]["market_data_stale_count"] == 0
+    assert mgc["backend_source_readiness"]["global_market_data_stale_count"] == 1
+    assert "source_market_data_stale" not in mgc["backend_source_readiness"]["block_reasons"]
+    assert "backend_or_source_not_live_ready" not in mgc["submit_block_reasons"]
+    assert mgc["submit_allowed"] is True
+
+
+def test_governance_enforces_explicit_cross_instrument_market_data_dependency(tmp_path: Path) -> None:
+    _write_monitor(
+        tmp_path,
+        broker_position_quantity=0.0,
+        ledger_position_quantity=0.0,
+    )
+    _write_ledger(tmp_path)
+    _write_dashboard(tmp_path)
+    _write_backend_source_readiness(
+        tmp_path,
+        market_data_stale_count=1,
+        lane_eligibility_rows=[
+            {
+                "lane_id": "mgc_1x_asia_london_participation__asia_london_long_v5",
+                "symbol": "MGC",
+                "affected_symbols": ["MGC"],
+                "market_data_stale": True,
+                "reason": "no_mgc_completed_bar",
+            }
+        ],
+    )
+    _write_signal_audit(tmp_path)
+    signal_path = tmp_path / "outputs" / "operator_dashboard" / "paper_signal_intent_fill_audit_snapshot.json"
+    signal_payload = json.loads(signal_path.read_text(encoding="utf-8"))
+    for row in signal_payload["rows"]:
+        if row["lane_id"] == "nq_1x_ny_early_core__us_late_long":
+            row["required_market_data_symbols"] = ["NQ", "MGC"]
+    signal_path.write_text(json.dumps(signal_payload), encoding="utf-8")
+    _write_strategy_performance(tmp_path)
+
+    artifacts = run_ibkr_paper_strategy_governance(config=_config(tmp_path))
+
+    nq = next(row for row in artifacts.performance_rows if row["strategy_id"] == "nq_1x_ny_early_core__us_late_long")
+    assert nq["backend_source_readiness"]["required_instruments"] == ["MGC", "NQ"]
+    assert nq["backend_source_readiness"]["market_data_stale_count"] == 1
+    assert "source_market_data_stale" in nq["backend_source_readiness"]["block_reasons"]
+    assert nq["submit_allowed"] is False
 
 def test_load_status_exposes_freshness_threshold_and_age_for_stale_source(tmp_path: Path) -> None:
     _write_monitor(

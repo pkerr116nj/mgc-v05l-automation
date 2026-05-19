@@ -1558,10 +1558,12 @@ def test_result_classifications_cover_future_round_trip_outcomes() -> None:
     assert required.issubset(set(RESULT_CLASSIFICATIONS))
 
 
-def test_production_governance_still_uses_global_market_data_stale_count() -> None:
+def test_production_governance_scopes_market_data_faults_before_blocking() -> None:
     source = (REPO_ROOT / "src/mgc_v05l/execution/ibkr_paper_strategy_governance.py").read_text(encoding="utf-8")
 
-    assert "if market_data_stale_count > 0:" in source
+    assert "_scoped_backend_source_fault_counts" in source
+    assert "required_instruments=_backend_source_required_instruments" in source
+    assert "global_market_data_stale_count" in source
     assert 'block_reasons.append("source_market_data_stale")' in source
 
 

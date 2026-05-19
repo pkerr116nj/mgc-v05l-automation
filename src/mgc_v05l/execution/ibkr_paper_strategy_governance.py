@@ -553,7 +553,17 @@ def _build_governance_row(
         paper_session_lanes_dir=config.paper_session_lanes_dir,
         lane_id=lane_id,
     )
-    backend_source_readiness = _backend_source_live_readiness(config=config)
+    backend_source_readiness = _backend_source_live_readiness(
+        config=config,
+        strategy_id=lane_id,
+        instrument=instrument,
+        required_instruments=_backend_source_required_instruments(
+            inventory_row=inventory_row,
+            performance_row=performance_row,
+            signal_row=signal_row,
+            instrument=instrument,
+        ),
+    )
 
     pause_reasons: list[str] = []
     submit_block_reasons: list[str] = []
@@ -765,7 +775,57 @@ def _selected_governance_block_detail(selected: dict[str, Any]) -> str:
     return detail
 
 
-def _backend_source_live_readiness(*, config: IbkrPaperStrategyGovernanceConfig) -> dict[str, Any]:
+def _backend_source_required_instruments(
+    *,
+    inventory_row: dict[str, Any],
+    performance_row: dict[str, Any],
+    signal_row: dict[str, Any],
+    instrument: str,
+) -> list[str]:
+    required: list[str] = []
+    for row in (inventory_row, performance_row, signal_row):
+        for key in (
+            "required_market_data_symbols",
+            "required_market_data_instruments",
+            "cross_instrument_dependencies",
+            "required_source_symbols",
+            "source_instruments",
+        ):
+            required.extend(_coerce_instrument_list(row.get(key)))
+    required.extend(_coerce_instrument_list(instrument))
+    return sorted(dict.fromkeys(required))
+
+
+def _coerce_instrument_list(value: Any) -> list[str]:
+    if value is None:
+        return []
+    if isinstance(value, str):
+        raw_values = [part.strip() for part in value.replace(";", ",").split(",")]
+    elif isinstance(value, dict):
+        raw_values = []
+        for key in ("symbol", "instrument", "symbols", "instruments"):
+            raw_values.extend(_coerce_instrument_list(value.get(key)))
+        return raw_values
+    else:
+        try:
+            raw_values = list(value)
+        except TypeError:
+            raw_values = [value]
+    normalized: list[str] = []
+    for raw_value in raw_values:
+        symbol = str(raw_value or "").strip().upper()
+        if symbol:
+            normalized.append(symbol)
+    return normalized
+
+
+def _backend_source_live_readiness(
+    *,
+    config: IbkrPaperStrategyGovernanceConfig,
+    strategy_id: str | None = None,
+    instrument: str | None = None,
+    required_instruments: list[str] | None = None,
+) -> dict[str, Any]:
     freshness_window = float(config.freshness_window_seconds)
     readiness = _load_json(config.repo_root / _DEFAULT_PAPER_READINESS_SNAPSHOT_PATH)
     startup = _load_json(config.repo_root / _DEFAULT_STARTUP_CONTROL_PLANE_SNAPSHOT_PATH)
@@ -810,12 +870,19 @@ def _backend_source_live_readiness(*, config: IbkrPaperStrategyGovernanceConfig)
     if temp_status["present"] and not temp_status["fresh"]:
         block_reasons.append("backend_readiness_artifact_stale")
 
+    required_instrument_list = sorted(dict.fromkeys(_coerce_instrument_list(required_instruments) or _coerce_instrument_list(instrument)))
+    source_faults = _scoped_backend_source_fault_counts(
+        readiness=readiness,
+        strategy_id=strategy_id,
+        required_instruments=required_instrument_list,
+    )
+    market_data_stale_count = int(source_faults.get("market_data_stale_count") or 0)
+    bar_authority_unavailable_count = int(source_faults.get("bar_authority_unavailable_count") or 0)
+    blocking_fault_count = int(source_faults.get("blocking_fault_count") or 0)
+
     paper_runtime_ready = bool(readiness.get("paper_runtime_ready"))
     runtime_running = bool(readiness.get("runtime_running"))
     paper_trade_allowed = bool(readiness.get("paper_trade_allowed"))
-    market_data_stale_count = int(readiness.get("market_data_stale_count") or 0)
-    bar_authority_unavailable_count = int(readiness.get("bar_authority_unavailable_count") or 0)
-    blocking_fault_count = int(readiness.get("blocking_fault_count") or 0)
     startup_ready = str(startup.get("overall_state") or "").strip().upper() == "READY"
     supervised_usable = bool(supervised.get("app_usable_for_supervised_paper"))
     temp_paper_blocked = bool(temp_integrity.get("temp_paper_blocked"))
@@ -850,6 +917,7 @@ def _backend_source_live_readiness(*, config: IbkrPaperStrategyGovernanceConfig)
         startup=startup,
         supervised=supervised,
         temp_integrity=temp_integrity,
+        source_faults=source_faults,
     )
     return {
         "live_ready": live_ready,
@@ -863,11 +931,121 @@ def _backend_source_live_readiness(*, config: IbkrPaperStrategyGovernanceConfig)
         "market_data_stale_count": market_data_stale_count,
         "bar_authority_unavailable_count": bar_authority_unavailable_count,
         "blocking_fault_count": blocking_fault_count,
+        "global_market_data_stale_count": int(readiness.get("market_data_stale_count") or 0),
+        "global_bar_authority_unavailable_count": int(readiness.get("bar_authority_unavailable_count") or 0),
+        "global_blocking_fault_count": int(readiness.get("blocking_fault_count") or 0),
+        "readiness_scope": source_faults.get("readiness_scope"),
+        "required_instruments": required_instrument_list,
+        "relevant_lane_ids": list(source_faults.get("relevant_lane_ids") or []),
         "startup_control_plane_ready": startup_ready,
         "supervised_paper_usable": supervised_usable,
         "temp_paper_blocked": temp_paper_blocked,
         "source": "operator_dashboard_readiness_artifacts",
     }
+
+
+def _scoped_backend_source_fault_counts(
+    *,
+    readiness: dict[str, Any],
+    strategy_id: str | None,
+    required_instruments: list[str],
+) -> dict[str, Any]:
+    global_counts = {
+        "market_data_stale_count": int(readiness.get("market_data_stale_count") or 0),
+        "bar_authority_unavailable_count": int(readiness.get("bar_authority_unavailable_count") or 0),
+        "blocking_fault_count": int(readiness.get("blocking_fault_count") or 0),
+    }
+    lane_rows = list(readiness.get("lane_eligibility_rows") or readiness.get("lane_status_rows") or [])
+    if not lane_rows:
+        return {
+            **global_counts,
+            "readiness_scope": "global_fallback",
+            "relevant_lane_ids": [],
+        }
+
+    relevant_rows = [
+        row
+        for row in lane_rows
+        if _readiness_row_applies_to_strategy(
+            row=dict(row),
+            strategy_id=strategy_id,
+            required_instruments=required_instruments,
+        )
+    ]
+    return {
+        "market_data_stale_count": sum(1 for row in relevant_rows if _readiness_row_market_data_stale(dict(row))),
+        "bar_authority_unavailable_count": sum(1 for row in relevant_rows if _readiness_row_bar_authority_unavailable(dict(row))),
+        "blocking_fault_count": sum(1 for row in relevant_rows if _readiness_row_blocking_fault(dict(row))),
+        "readiness_scope": "instrument_scoped",
+        "required_instruments": list(required_instruments),
+        "relevant_lane_ids": [str(row.get("lane_id") or row.get("strategy_id") or "").strip() for row in relevant_rows if str(row.get("lane_id") or row.get("strategy_id") or "").strip()],
+        "global_market_data_stale_count": global_counts["market_data_stale_count"],
+        "global_bar_authority_unavailable_count": global_counts["bar_authority_unavailable_count"],
+        "global_blocking_fault_count": global_counts["blocking_fault_count"],
+    }
+
+
+def _readiness_row_applies_to_strategy(*, row: dict[str, Any], strategy_id: str | None, required_instruments: list[str]) -> bool:
+    row_strategy_id = str(row.get("lane_id") or row.get("strategy_id") or "").strip()
+    if row_strategy_id and strategy_id and row_strategy_id == str(strategy_id).strip():
+        return True
+    row_instruments = _coerce_instrument_list(row.get("symbol"))
+    row_instruments.extend(_coerce_instrument_list(row.get("instrument")))
+    row_instruments.extend(_coerce_instrument_list(row.get("affected_symbols")))
+    row_instruments.extend(_coerce_instrument_list(row.get("affected_instruments")))
+    return bool(set(row_instruments).intersection(required_instruments))
+
+
+def _readiness_row_market_data_stale(row: dict[str, Any]) -> bool:
+    return bool(row.get("market_data_stale")) or _readiness_row_has_any_token(
+        row,
+        {
+            "MARKET_DATA_STALE",
+            "NO_NEW_COMPLETED_BAR",
+            "NO_COMPLETED_BAR",
+        },
+    )
+
+
+def _readiness_row_bar_authority_unavailable(row: dict[str, Any]) -> bool:
+    return bool(row.get("bar_authority_unavailable")) or _readiness_row_has_any_token(
+        row,
+        {
+            "BAR_AUTHORITY_UNAVAILABLE",
+            "NO_BAR_AUTHORITY",
+        },
+    )
+
+
+def _readiness_row_blocking_fault(row: dict[str, Any]) -> bool:
+    return bool(row.get("blocking_fault") or row.get("faulted") or row.get("blocking_fault_active"))
+
+
+def _readiness_row_has_any_token(row: dict[str, Any], tokens: set[str]) -> bool:
+    for key in (
+        "bar_state",
+        "state",
+        "status",
+        "reason",
+        "reject_reason",
+        "no_trade_reason",
+        "dominant_reason",
+        "no_trade_dominant_reason",
+        "bar_authority_reason",
+    ):
+        value = row.get(key)
+        if isinstance(value, list):
+            values = value
+        else:
+            values = [value]
+        for item in values:
+            if str(item or "").strip().upper() in tokens:
+                return True
+    for key in ("block_reasons", "reject_reasons", "reasons"):
+        for item in list(row.get(key) or []):
+            if str(item or "").strip().upper() in tokens:
+                return True
+    return False
 
 
 def _backend_readiness_artifacts_newer_than(*, repo_root: Path, generated_at: datetime | None) -> bool:
@@ -912,6 +1090,7 @@ def _backend_source_readiness_detail(
     startup: dict[str, Any],
     supervised: dict[str, Any],
     temp_integrity: dict[str, Any],
+    source_faults: dict[str, Any],
 ) -> str:
     readiness_status = artifacts["paper_readiness"]
     startup_status = artifacts["startup_control_plane"]
@@ -928,9 +1107,14 @@ def _backend_source_readiness_detail(
         f"runtime_running={bool(readiness.get('runtime_running'))} "
         f"paper_runtime_ready={bool(readiness.get('paper_runtime_ready'))} "
         f"paper_trade_allowed={bool(readiness.get('paper_trade_allowed'))} "
-        f"market_data_stale_count={int(readiness.get('market_data_stale_count') or 0)} "
-        f"bar_authority_unavailable_count={int(readiness.get('bar_authority_unavailable_count') or 0)} "
-        f"blocking_fault_count={int(readiness.get('blocking_fault_count') or 0)}; "
+        f"market_data_stale_count={int(source_faults.get('market_data_stale_count') or 0)} "
+        f"bar_authority_unavailable_count={int(source_faults.get('bar_authority_unavailable_count') or 0)} "
+        f"blocking_fault_count={int(source_faults.get('blocking_fault_count') or 0)} "
+        f"readiness_scope={source_faults.get('readiness_scope')} "
+        f"required_instruments={list(source_faults.get('required_instruments') or [])} "
+        f"global_market_data_stale_count={int(readiness.get('market_data_stale_count') or 0)} "
+        f"global_bar_authority_unavailable_count={int(readiness.get('bar_authority_unavailable_count') or 0)} "
+        f"global_blocking_fault_count={int(readiness.get('blocking_fault_count') or 0)}; "
         f"startup_generated_at={startup_status.get('generated_at')} "
         f"startup_age_seconds={_round_age(startup_status.get('age_seconds'))} "
         f"startup_ready={str(startup.get('overall_state') or '').strip().upper() == 'READY'}; "
