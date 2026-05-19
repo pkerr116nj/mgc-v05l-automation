@@ -100,11 +100,11 @@ def test_launch_script_makes_explicit_config_stack_authoritative() -> None:
     assert "Active paper runtime config paths did not match requested launch config stack" in script
 
 
-def test_launch_script_screen_wrapper_uses_resolved_paths_and_env() -> None:
+def test_launch_script_non_screen_wrapper_uses_resolved_paths_and_env() -> None:
     script = RUN_SCRIPT.read_text(encoding="utf-8")
 
-    assert "write_paper_screen_wrapper" in script
-    assert "local wrapper_path=\"${PAPER_PID_FILE}.screen_wrapper.sh\"" in script
+    assert "write_paper_runtime_wrapper" in script
+    assert "local wrapper_path=\"${PAPER_PID_FILE}.runtime_wrapper.sh\"" in script
     assert "requested_stack=\"$(requested_config_paths_arg)\"" in script
     assert "required_stack=\"$(resolved_config_paths_arg \"${REQUIRED_PAPER_CONFIG_PATHS}\")\"" in script
     assert "export REPO_ROOT={q(repo_root)}" in script
@@ -113,8 +113,21 @@ def test_launch_script_screen_wrapper_uses_resolved_paths_and_env() -> None:
     assert "export MGC_HEADLESS_SUPERVISED_PAPER_CONFIG_PATHS={q(requested_stack)}" in script
     assert "export MGC_HEADLESS_REQUIRED_PAPER_CONFIGS={q(required_stack)}" in script
     assert "export MGC_HEADLESS_REQUIRED_PAPER_CONFIG_PATHS={q(required_stack)}" in script
-    assert "headless_screen_wrapper_start" in script
-    assert "screen -dmS \"${session_name}\" /bin/bash \"${wrapper_path}\"" in script
+    assert "headless_runtime_wrapper_start" in script
+    assert "headless_runtime_wrapper_exec" in script
+
+
+def test_launch_script_defaults_to_non_screen_background_runtime_launch() -> None:
+    script = RUN_SCRIPT.read_text(encoding="utf-8")
+
+    assert "DEFAULT_PAPER_WRAPPER_PID_FILE" in script
+    assert "PAPER_WRAPPER_PID_FILE" in script
+    assert "launch_background_paper_runtime" in script
+    assert "nohup /bin/bash \"${wrapper_path}\" >> \"${PAPER_LOG_FILE}\" 2>&1 &" in script
+    assert "echo \"$!\" > \"${PAPER_WRAPPER_PID_FILE}\"" in script
+    assert "launch_background_paper_runtime\n  return 0" in script
+    assert "launch_screen_paper_runtime" not in script
+    assert "screen -dmS \"${session_name}\" /bin/bash \"${wrapper_path}\"" not in script
 
 
 def test_launch_script_polls_for_late_post_start_runtime_pid() -> None:
@@ -142,10 +155,12 @@ def test_launch_script_pid_polling_fails_closed_for_wrong_root_or_config() -> No
     assert 'runtime_markers = ("mgc_v05l.app.main", "probationary-paper-soak")' in script
     assert "RUNTIME_PID_PENDING" in script
     assert "RUNTIME_PID_UNAVAILABLE: Paper runtime PID is unavailable during ${phase}." in script
+    assert "RUNTIME_EXITED_BEFORE_PID" in script
     assert "Paper runtime root mismatch during {phase}" in script
     assert "Paper runtime config path mismatch during {phase}" in script
     assert "raise SystemExit(2)" in script
     assert "2)\n        return 2" in script
+    assert "3)\n        return 3" in script
     assert "stop_paper_runtime_best_effort" in script
     assert script.index("Paper runtime root mismatch during {phase}") < script.index("missing = [path for path in requested")
 
@@ -170,6 +185,7 @@ def test_launch_script_reports_missing_runtime_pid_separately_from_config_mismat
     assert "wait_rc=$?" in post_start
     assert "if [[ \"${wait_rc}\" -eq 1 ]]" in post_start
     assert "Paper runtime PID unavailable during post-start." in post_start
+    assert "Paper runtime exited before a valid Python runtime PID became available during post-start." in post_start
     assert "Active paper runtime config paths did not match requested launch config stack." in post_start
 
 

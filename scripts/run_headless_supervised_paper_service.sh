@@ -17,6 +17,7 @@ DEFAULT_MANAGER_PID_FILE="${DEFAULT_RUNTIME_DIR}/operator_dashboard_manager.pid"
 DEFAULT_MANAGER_LOG_FILE="${DEFAULT_RUNTIME_DIR}/operator_dashboard_manager.log"
 DEFAULT_DASHBOARD_PID_FILE="${DEFAULT_RUNTIME_DIR}/operator_dashboard.pid"
 DEFAULT_PAPER_PID_FILE="${REPO_ROOT}/outputs/probationary_pattern_engine/paper_session/runtime/probationary_paper.pid"
+DEFAULT_PAPER_WRAPPER_PID_FILE="${REPO_ROOT}/outputs/probationary_pattern_engine/paper_session/runtime/probationary_paper.wrapper.pid"
 DEFAULT_PAPER_LOG_FILE="${REPO_ROOT}/outputs/probationary_pattern_engine/paper_session/runtime/probationary_paper.log"
 DEFAULT_PAPER_CONFIG_PATHS_FILE="${REPO_ROOT}/outputs/probationary_pattern_engine/paper_session/runtime/paper_runtime_config_paths.txt"
 DEFAULT_DASHBOARD_URL="${MGC_OPERATOR_DASHBOARD_URL:-http://127.0.0.1:8790/}"
@@ -42,6 +43,7 @@ MANAGER_PID_FILE="${DEFAULT_MANAGER_PID_FILE}"
 MANAGER_LOG_FILE="${DEFAULT_MANAGER_LOG_FILE}"
 DASHBOARD_PID_FILE="${DEFAULT_DASHBOARD_PID_FILE}"
 PAPER_PID_FILE="${DEFAULT_PAPER_PID_FILE}"
+PAPER_WRAPPER_PID_FILE="${DEFAULT_PAPER_WRAPPER_PID_FILE}"
 PAPER_LOG_FILE="${DEFAULT_PAPER_LOG_FILE}"
 PAPER_CONFIG_PATHS_FILE="${DEFAULT_PAPER_CONFIG_PATHS_FILE}"
 DASHBOARD_URL="${DEFAULT_DASHBOARD_URL}"
@@ -201,6 +203,7 @@ ensure_dir "$(dirname "${MANAGER_PID_FILE}")"
 ensure_dir "$(dirname "${MANAGER_LOG_FILE}")"
 ensure_dir "$(dirname "${DASHBOARD_PID_FILE}")"
 ensure_dir "$(dirname "${PAPER_LOG_FILE}")"
+ensure_dir "$(dirname "${PAPER_WRAPPER_PID_FILE}")"
 ensure_dir "$(dirname "${PAPER_CONFIG_PATHS_FILE}")"
 
 read_pid_file() {
@@ -323,8 +326,14 @@ assert_runtime_config_paths_match_request() {
     return 0
   fi
   local pid
+  local wrapper_pid
   pid="$(read_pid_file "${PAPER_PID_FILE}" || true)"
   if [[ -z "${pid}" ]] || ! kill -0 "${pid}" 2>/dev/null; then
+    wrapper_pid="$(read_pid_file "${PAPER_WRAPPER_PID_FILE}" || true)"
+    if [[ -n "${wrapper_pid}" ]] && ! kill -0 "${wrapper_pid}" 2>/dev/null; then
+      echo "RUNTIME_EXITED_BEFORE_PID: Paper runtime wrapper exited before a valid Python runtime PID became available during ${phase}." >&2
+      return 3
+    fi
     echo "RUNTIME_PID_UNAVAILABLE: Paper runtime PID is unavailable during ${phase}." >&2
     return 1
   fi
@@ -397,6 +406,9 @@ wait_for_runtime_config_paths_match_request() {
       2)
         return 2
         ;;
+      3)
+        return 3
+        ;;
     esac
     if (( SECONDS >= deadline )); then
       break
@@ -420,8 +432,8 @@ screen_session_name() {
   printf 'mgc_%s_%s_%s' "${suffix}" "$(date +%Y%m%d%H%M%S)" "$$"
 }
 
-write_paper_screen_wrapper() {
-  local wrapper_path="${PAPER_PID_FILE}.screen_wrapper.sh"
+write_paper_runtime_wrapper() {
+  local wrapper_path="${PAPER_PID_FILE}.runtime_wrapper.sh"
   local requested_stack
   local required_stack
   requested_stack="$(requested_config_paths_arg)"
@@ -472,12 +484,13 @@ export MGC_HEADLESS_REQUIRED_PAPER_CONFIGS={q(required_stack)}
 export MGC_HEADLESS_REQUIRED_PAPER_CONFIG_PATHS={q(required_stack)}
 mkdir -p "$(dirname "$MGC_HEADLESS_PAPER_PID_FILE")" "$(dirname "$MGC_HEADLESS_PAPER_LOG_FILE")"
 {{
-  printf '%s\\n' "headless_screen_wrapper_start generated_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  printf '%s\\n' "headless_runtime_wrapper_start generated_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
   printf '%s\\n' "repo_root=$REPO_ROOT"
   printf '%s\\n' "python_bin=$PYTHON_BIN"
   printf '%s\\n' "config_stack=$MGC_PROBATIONARY_PAPER_CONFIG_PATHS"
 }} >> "$MGC_HEADLESS_PAPER_LOG_FILE"
 echo "$$" > "$MGC_HEADLESS_PAPER_PID_FILE"
+printf '%s\\n' "headless_runtime_wrapper_exec generated_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$MGC_HEADLESS_PAPER_LOG_FILE"
 exec bash "$MGC_HEADLESS_SCRIPT_DIR/run_probationary_paper_soak.sh" >> "$MGC_HEADLESS_PAPER_LOG_FILE" 2>&1
 """
 path.write_text(payload, encoding="utf-8")
@@ -486,13 +499,14 @@ print(path)
 PY
 }
 
-launch_screen_paper_runtime() {
-  local session_name
+launch_background_paper_runtime() {
   local wrapper_path
-  session_name="$(screen_session_name "paper_runtime")"
-  printf '%s\n' "${session_name}" > "${PAPER_PID_FILE}.screen_session"
-  wrapper_path="$(write_paper_screen_wrapper)"
-  screen -dmS "${session_name}" /bin/bash "${wrapper_path}"
+  wrapper_path="$(write_paper_runtime_wrapper)"
+  (
+    cd "${REPO_ROOT}"
+    nohup /bin/bash "${wrapper_path}" >> "${PAPER_LOG_FILE}" 2>&1 &
+    echo "$!" > "${PAPER_WRAPPER_PID_FILE}"
+  )
 }
 
 launch_screen_dashboard_manager() {
@@ -510,7 +524,7 @@ launch_detached_paper_runtime() {
   local label="com.mgc-v05l.headless-supervised-paper.runtime.$(date +%Y%m%d%H%M%S).$$"
   local wrapper_path
   printf '%s\n' "${label}" > "${PAPER_PID_FILE}.launchctl_label"
-  wrapper_path="$(write_paper_screen_wrapper)"
+  wrapper_path="$(write_paper_runtime_wrapper)"
   launchctl submit -l "${label}" -- /bin/bash "${wrapper_path}"
 }
 
@@ -555,6 +569,11 @@ stop_paper_runtime_best_effort() {
   if [[ "${START_PAPER}" -ne 1 ]]; then
     return 0
   fi
+  local wrapper_pid
+  wrapper_pid="$(read_pid_file "${PAPER_WRAPPER_PID_FILE}" || true)"
+  if [[ -n "${wrapper_pid}" ]] && kill -0 "${wrapper_pid}" 2>/dev/null; then
+    kill "${wrapper_pid}" >/dev/null 2>&1 || true
+  fi
   bash "${SCRIPT_DIR}/stop_probationary_paper_soak.sh" >/dev/null 2>&1 || true
 }
 
@@ -566,21 +585,8 @@ start_paper_runtime() {
     assert_runtime_config_paths_match_request "pre-existing-runtime"
     return $?
   fi
-  if screen_available; then
-    launch_screen_paper_runtime
-    return 0
-  fi
-  if launchctl_submit_available; then
-    launch_detached_paper_runtime
-    return 0
-  fi
-  local output
-  output="$(MGC_PROBATIONARY_PAPER_CONFIG_PATHS="$(requested_config_paths_arg)" bash "${SCRIPT_DIR}/run_probationary_paper_soak.sh" --background 2>&1)" && return 0
-  if [[ "${output}" == *"already running"* ]]; then
-    return 0
-  fi
-  echo "${output}" >&2
-  return 1
+  launch_background_paper_runtime
+  return 0
 }
 
 refresh_phase1_reconciliation_for_launch() {
@@ -778,6 +784,8 @@ if [[ "${wait_rc}" -ne 0 ]]; then
   stop_paper_runtime_best_effort
   if [[ "${wait_rc}" -eq 1 ]]; then
     write_startup_summary "BLOCKED" "Paper runtime PID unavailable during post-start." "false"
+  elif [[ "${wait_rc}" -eq 3 ]]; then
+    write_startup_summary "BLOCKED" "Paper runtime exited before a valid Python runtime PID became available during post-start." "false"
   else
     write_startup_summary "BLOCKED" "Active paper runtime config paths did not match requested launch config stack." "false"
   fi
