@@ -158,10 +158,22 @@ def test_operator_surface_exposes_exact_contract_and_rollup_integrity() -> None:
         "rollup_integrity",
     }
     assert surface["runtime_readiness"]["paper_enabled"] is True
+    assert surface["runtime_readiness"]["paper_runtime_ready"] is True
     assert surface["runtime_readiness"]["entries_enabled"] is True
     assert surface["runtime_readiness"]["paper_trade_allowed"] is True
+    assert surface["runtime_readiness"]["paper_only"] is True
     assert surface["runtime_readiness"]["paper_trade_block_reason"] is None
     assert surface["runtime_readiness"]["paper_readiness_source"] == "src/mgc_v05l/app/operator_dashboard.py:_paper_readiness_payload"
+    truth = surface["runtime_readiness"]["authoritative_runtime_truth"]
+    assert truth["state"] == "TRADE_CAPABLE_WAITING_FOR_SETUP"
+    assert truth["runtime_running"] is True
+    assert truth["paper_runtime_ready"] is True
+    assert truth["paper_trade_allowed"] is True
+    assert truth["paper_only"] is True
+    assert truth["route_capable_now"] is True
+    assert truth["lanes_loaded"] == 44
+    assert truth["route_ready_lanes"] == 44
+    assert truth["actionable_signals"] == 0
     assert surface["runtime_readiness"]["values"]["session_eligible_lanes_count"] == 13
     assert surface["runtime_readiness"]["values"]["session_eligible_count"] == 13
     assert surface["runtime_readiness"]["values"]["waiting_for_completed_bar_count"] == 13
@@ -237,6 +249,49 @@ def test_operator_surface_exposes_exact_contract_and_rollup_integrity() -> None:
     assert secondary_context["items"][1]["label"] == "Major Equity Indices"
     assert secondary_context["items"][3]["label"] == "Treasury Curve Current"
     assert secondary_context["items"][4]["label"] == "Treasury Curve Prior"
+
+
+def test_operator_surface_runtime_down_is_loud_and_not_route_capable() -> None:
+    surface = build_operator_surface(
+        generated_at="2026-05-19T22:00:00+00:00",
+        global_payload={
+            "paper_label": "STOPPED",
+            "current_session_date": "2026-05-19",
+            "market_data_label": "LIVE",
+            "runtime_health_label": "STOPPED",
+            "fault_state": "CLEAR",
+        },
+        auth_status={"runtime_ready": True},
+        paper={
+            "running": False,
+            "status": {"entries_enabled": False, "operator_halt": False},
+            "readiness": {
+                "runtime_phase": "STOPPED",
+                "entries_enabled": False,
+                "paper_trade_allowed": False,
+                "paper_trade_block_reason": "paper runtime is stopped",
+                "lane_status_summary": {
+                    "runtime_lanes_loaded_count": 15,
+                    "route_ready_lanes_count": 0,
+                    "session_eligible_lanes_count": 0,
+                },
+            },
+            "exceptions": {"exceptions": []},
+            "config_in_force": {"lanes": [{"lane_id": "mnq_lane", "live_money_eligible": False}]},
+        },
+        approved_quant_baselines={},
+        market_context={},
+        treasury_curve={},
+    )
+
+    readiness = surface["runtime_readiness"]
+    truth = readiness["authoritative_runtime_truth"]
+    assert truth["state"] == "RUNTIME_DOWN"
+    assert truth["status_line"] == "RUNTIME DOWN | PAPER_ONLY | no lanes can trade"
+    assert truth["route_capable_now"] is False
+    assert truth["paper_only"] is True
+    assert readiness["paper_trade_allowed"] is False
+    assert readiness["values"]["authoritative_runtime_truth"] == truth
 
 
 def test_operator_surface_runtime_readiness_only_blocks_on_blocking_faults() -> None:

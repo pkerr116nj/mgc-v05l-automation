@@ -4036,12 +4036,12 @@ def test_dashboard_assets_use_operator_first_surface_and_preserve_legacy_surface
     css = Path("src/mgc_v05l/app/dashboard_assets/operator_dashboard.css").read_text(encoding="utf-8")
 
     assert 'data-lane-section="' not in html
-    assert "<h2>Runtime / Readiness</h2>" in html
+    assert "<h2>Execution Truth</h2>" in html
     assert "<h2>Portfolio P&amp;L / Risk</h2>" in html
     assert "<h2>Instrument Rollup</h2>" in html
     assert "<h2>Current Active Positions</h2>" in html
-    assert "<h2>Unified Active Lane / Instrument Surface</h2>" in html
-    assert "<h2>Experimental Paper Strategy / Paper Only</h2>" in html
+    assert "<h2>Active Lanes / Instruments</h2>" in html
+    assert "<h2>Experimental Paper / Diagnostics</h2>" in html
     assert "<h2>Unified Active Lane Table</h2>" not in html
     assert "<h2>Secondary Market Context</h2>" in html
     assert "<h2>Diagnostics / Evidence</h2>" in html
@@ -4075,13 +4075,13 @@ def test_dashboard_assets_use_operator_first_surface_and_preserve_legacy_surface
     assert "function renderOperatorInstrumentRollup(payload)" in js
     assert "function renderOperatorActivePositions(payload)" in js
     assert "function renderOperatorContext(payload)" in js
-    assert '"Runtime Lanes Loaded"' in js
-    assert '"Route Ready Lanes"' in js
-    assert '"Session Eligible Now"' in js
+    assert '"Lanes Loaded"' in js
+    assert '"Route-Ready Lanes"' in js
+    assert '"Session Eligible"' in js
     assert '"Waiting For Bar"' in js
-    assert '"Actionable Now"' in js
-    assert '"True Blocked"' in js
-    assert '"Blocking Faults"' in js
+    assert '"Actionable Signals"' in js
+    assert '"Current Blockers"' in js
+    assert '"Stale Market Data"' in js
     assert "function contextStatusLevel(status)" in js
     assert "function horizonAvailable(horizon)" in js
     assert "operator-context-value" in js

@@ -155,6 +155,11 @@ h3 {
 }
 
 .operator-readiness-panel { grid-area: readiness; }
+.operator-readiness-panel.runtime-down-panel,
+.operator-readiness-panel.runtime-blocked-panel {
+  border-color: rgba(255, 123, 123, 0.52);
+  box-shadow: 0 0 0 1px rgba(255, 123, 123, 0.08), 0 14px 28px rgba(0, 0, 0, 0.24);
+}
 .operator-risk-strip-panel { grid-area: riskstrip; }
 .operator-instrument-rollup-panel { grid-area: instrument; }
 .operator-active-positions-panel { grid-area: positions; }
@@ -552,6 +557,16 @@ h3 {
 .stat.wide {
   grid-column: 1 / -1;
 }
+
+.stat-ok { border-color: rgba(125, 242, 200, 0.24); }
+.stat-accent { border-color: rgba(125, 242, 200, 0.32); }
+.stat-info { border-color: rgba(109, 207, 246, 0.24); }
+.stat-warning { border-color: rgba(255, 207, 90, 0.32); }
+.stat-danger {
+  border-color: rgba(255, 123, 123, 0.42);
+  background: rgba(255, 123, 123, 0.055);
+}
+.stat-muted { opacity: 0.86; }
 
 .label {
   display: block;

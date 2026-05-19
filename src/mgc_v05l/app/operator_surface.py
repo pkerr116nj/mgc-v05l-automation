@@ -190,14 +190,47 @@ def _build_runtime_readiness(
         or "src/mgc_v05l/app/operator_dashboard.py:_paper_readiness_payload"
     )
     paper_readiness_timestamp = readiness.get("paper_readiness_timestamp") or readiness.get("generated_at")
+    paper_runtime_ready = bool(
+        readiness.get("paper_runtime_ready")
+        if isinstance(readiness.get("paper_runtime_ready"), bool)
+        else paper_enabled and runtime_status == "RUNNING" and entries_enabled and not bool(readiness.get("operator_halt"))
+    )
+    live_money_eligible = _paper_live_money_eligible(paper=paper, readiness=readiness)
+    authoritative_truth = _build_authoritative_runtime_truth(
+        runtime_status=runtime_status,
+        paper_enabled=paper_enabled,
+        paper_runtime_ready=paper_runtime_ready,
+        paper_trade_allowed=paper_trade_allowed,
+        paper_trade_block_reason=paper_trade_block_reason,
+        entries_enabled=entries_enabled,
+        live_money_eligible=live_money_eligible,
+        runtime_lanes_loaded_count=runtime_lanes_loaded_count,
+        route_ready_lanes_count=route_ready_lanes_count,
+        session_eligible_lanes_count=session_eligible_lanes_count,
+        actionable_now_count=actionable_now_count,
+        waiting_for_completed_bar_count=waiting_for_completed_bar_count,
+        no_setup_count=no_setup_count,
+        blocked_lanes_count=blocked_lanes_count,
+        true_blocked_count=int(readiness.get("true_blocked_count") or blocked_lanes_count),
+        market_data_stale_count=int(readiness.get("market_data_stale_count") or market_data_stale_count),
+        blocking_faults_count=len(blocking_faults),
+        current_detected_phase_label=current_detected_phase_label,
+        next_expected_decision_bar_ts=next_expected_decision_bar_ts,
+        paper_readiness_source=paper_readiness_source,
+        paper_readiness_timestamp=paper_readiness_timestamp,
+    )
     payload = {
         "runtime_status": runtime_status,
         "paper_enabled": paper_enabled,
+        "paper_runtime_ready": paper_runtime_ready,
         "entries_enabled": entries_enabled,
         "auth_readiness": auth_readiness,
         "market_data_readiness": market_data_readiness,
         "paper_trade_allowed": paper_trade_allowed,
         "paper_trade_block_reason": paper_trade_block_reason,
+        "live_money_eligible": live_money_eligible,
+        "paper_only": not live_money_eligible,
+        "authoritative_runtime_truth": authoritative_truth,
         "paper_readiness_source": paper_readiness_source,
         "paper_readiness_timestamp": paper_readiness_timestamp,
         "blocking_faults": blocking_faults,
@@ -206,14 +239,12 @@ def _build_runtime_readiness(
         "degraded_informational_feeds": degraded_informational_feeds,
         "active_instruments_count": active_instruments_count,
         "active_lanes_count": active_lane_count,
-        "status_line": (
-            f"runtime={runtime_status} | paper={'ENABLED' if paper_enabled else 'DISABLED'} | "
-            f"entries={'ENABLED' if entries_enabled else 'HALTED'} | "
+        "status_line": authoritative_truth["status_line"],
+        "diagnostic_status_line": (
             f"auth={'READY' if auth_readiness else 'NOT_READY'} | "
-            f"market_data={market_data_readiness} | faults={len(blocking_faults)} | advisory={len(advisory_faults)} | "
+            f"market_data={market_data_readiness} | advisory={len(advisory_faults)} | "
             f"runtime_recovery={runtime_recovery_state} | restart_budget={runtime_recovery_attempts}/{runtime_recovery_attempt_budget or '?'} | "
-            f"live_capable={live_capable_count} | session_eligible={session_eligible_lanes_count} | waiting_bar={waiting_for_completed_bar_count} | "
-            f"no_setup={no_setup_count} | actionable={actionable_now_count} | blocked={blocked_lanes_count} | stale={market_data_stale_count} | "
+            f"live_capable={live_capable_count} | stale_runtime_blocks={stale_runtime_blocked_count} | "
             f"bootstrap_issues={len(bootstrap_issues)}"
         ),
         "field_sources": {
@@ -238,6 +269,7 @@ def _build_runtime_readiness(
     payload["values"] = {
         "runtime_status": runtime_status,
         "paper_enabled": paper_enabled,
+        "paper_runtime_ready": paper_runtime_ready,
         "entries_enabled": entries_enabled,
         "auth_readiness": auth_readiness,
         "market_data_readiness": market_data_readiness,
@@ -253,6 +285,9 @@ def _build_runtime_readiness(
         "blocking_faults_active": payload["blocking_faults_active"],
         "paper_trade_allowed": paper_trade_allowed,
         "paper_trade_block_reason": paper_trade_block_reason,
+        "live_money_eligible": live_money_eligible,
+        "paper_only": not live_money_eligible,
+        "authoritative_runtime_truth": authoritative_truth,
         "paper_readiness_source": paper_readiness_source,
         "paper_readiness_timestamp": paper_readiness_timestamp,
         "degraded_informational_feeds": degraded_informational_feeds,
@@ -282,6 +317,123 @@ def _build_runtime_readiness(
     }
     payload["bootstrap_prerequisites"] = bootstrap_prerequisites
     return payload
+
+
+def _paper_live_money_eligible(*, paper: dict[str, Any], readiness: dict[str, Any]) -> bool:
+    if readiness.get("live_money_eligible") is True:
+        return True
+    for key in ("approved_models", "non_approved_lanes"):
+        for row in list((paper.get(key) or {}).get("rows") or []):
+            if row.get("live_money_eligible") is True:
+                return True
+    for row in list((paper.get("config_in_force") or {}).get("lanes") or []):
+        if row.get("live_money_eligible") is True:
+            return True
+    return False
+
+
+def _build_authoritative_runtime_truth(
+    *,
+    runtime_status: str,
+    paper_enabled: bool,
+    paper_runtime_ready: bool,
+    paper_trade_allowed: bool,
+    paper_trade_block_reason: str | None,
+    entries_enabled: bool,
+    live_money_eligible: bool,
+    runtime_lanes_loaded_count: int,
+    route_ready_lanes_count: int,
+    session_eligible_lanes_count: int,
+    actionable_now_count: int,
+    waiting_for_completed_bar_count: int,
+    no_setup_count: int,
+    blocked_lanes_count: int,
+    true_blocked_count: int,
+    market_data_stale_count: int,
+    blocking_faults_count: int,
+    current_detected_phase_label: str,
+    next_expected_decision_bar_ts: Any,
+    paper_readiness_source: str,
+    paper_readiness_timestamp: Any,
+) -> dict[str, Any]:
+    paper_only = not live_money_eligible
+    route_capable_now = bool(paper_trade_allowed and route_ready_lanes_count > 0 and paper_only)
+    current_blockers = max(true_blocked_count, blocked_lanes_count, market_data_stale_count, blocking_faults_count)
+    if not paper_enabled:
+        state = "RUNTIME_DOWN"
+        blocker = "Paper runtime process is not running."
+    elif not paper_runtime_ready:
+        state = "RUNTIME_NOT_READY"
+        blocker = paper_trade_block_reason or "Paper runtime has not converged to ready."
+    elif live_money_eligible:
+        state = "LIVE_MONEY_UNSAFE"
+        blocker = "live_money_eligible=true"
+    elif not entries_enabled:
+        state = "ENTRIES_HALTED"
+        blocker = "Entries are halted."
+    elif blocking_faults_count:
+        state = "BLOCKING_FAULT"
+        blocker = f"{blocking_faults_count} blocking fault(s)."
+    elif not paper_trade_allowed:
+        state = "PAPER_TRADE_BLOCKED"
+        blocker = paper_trade_block_reason or "paper_trade_allowed=false"
+    elif route_ready_lanes_count <= 0:
+        state = "NO_ROUTE_READY_LANES"
+        blocker = "No lanes are currently route-ready."
+    elif actionable_now_count > 0:
+        state = "ACTIONABLE_SIGNAL_PRESENT"
+        blocker = None
+    elif session_eligible_lanes_count <= 0:
+        state = "OUT_OF_SESSION"
+        blocker = "No lanes are session-eligible right now."
+    elif no_setup_count > 0 or waiting_for_completed_bar_count > 0:
+        state = "TRADE_CAPABLE_WAITING_FOR_SETUP"
+        blocker = None
+    else:
+        state = "TRADE_CAPABLE_IDLE"
+        blocker = None
+
+    if state == "RUNTIME_DOWN":
+        status_line = "RUNTIME DOWN | PAPER_ONLY | no lanes can trade"
+    else:
+        status_line = (
+            f"{state} | PAPER_ONLY={'YES' if paper_only else 'NO'} | "
+            f"runtime={'RUNNING' if paper_enabled else 'STOPPED'} | ready={'YES' if paper_runtime_ready else 'NO'} | "
+            f"trade_allowed={'YES' if paper_trade_allowed else 'NO'} | loaded={runtime_lanes_loaded_count} | "
+            f"route_ready={route_ready_lanes_count} | session_eligible={session_eligible_lanes_count} | "
+            f"signals={actionable_now_count} | blockers={current_blockers}"
+        )
+    return {
+        "state": state,
+        "status_line": status_line,
+        "primary_blocker": blocker,
+        "runtime_running": paper_enabled,
+        "paper_runtime_ready": paper_runtime_ready,
+        "paper_trade_allowed": paper_trade_allowed,
+        "paper_only": paper_only,
+        "live_money_eligible": live_money_eligible,
+        "route_capable_now": route_capable_now,
+        "entries_enabled": entries_enabled,
+        "lanes_loaded": runtime_lanes_loaded_count,
+        "route_ready_lanes": route_ready_lanes_count,
+        "session_eligible_lanes": session_eligible_lanes_count,
+        "actionable_signals": actionable_now_count,
+        "current_blockers": current_blockers,
+        "waiting_for_bar": waiting_for_completed_bar_count,
+        "no_setup": no_setup_count,
+        "market_data_stale": market_data_stale_count,
+        "blocking_faults": blocking_faults_count,
+        "current_detected_phase_label": current_detected_phase_label,
+        "next_expected_decision_bar_ts": next_expected_decision_bar_ts,
+        "authority_scope": "AUTHORITATIVE_FOR_OPERATOR_PRESENTATION",
+        "source": paper_readiness_source,
+        "source_timestamp": paper_readiness_timestamp,
+        "non_goals": [
+            "does_not_change_strategy_logic",
+            "does_not_change_routing_authority",
+            "does_not_change_broker_lifecycle",
+        ],
+    }
 
 
 def _build_operator_metrics_portfolio(

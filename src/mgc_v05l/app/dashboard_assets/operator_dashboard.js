@@ -873,7 +873,13 @@ function renderOperatorSurface(payload) {
 }
 
 function renderOperatorReadiness(payload) {
-  text("operator-readiness-status", payload.status_line || "-");
+  const truth = payload.authoritative_runtime_truth || payload.values?.authoritative_runtime_truth || {};
+  text("operator-readiness-status", truth.status_line || payload.status_line || "-");
+  const panel = document.querySelector(".operator-readiness-panel");
+  if (panel) {
+    panel.classList.toggle("runtime-down-panel", truth.state === "RUNTIME_DOWN");
+    panel.classList.toggle("runtime-blocked-panel", ["RUNTIME_NOT_READY", "LIVE_MONEY_UNSAFE", "PAPER_TRADE_BLOCKED", "BLOCKING_FAULT"].includes(truth.state));
+  }
   const cards = document.getElementById("operator-readiness-cards");
   if (cards) {
     cards.innerHTML = renderOperatorMetricCards(buildOperatorReadinessCards(payload));
@@ -1112,7 +1118,7 @@ function renderOperatorMetricCards(cards) {
   return safeCards
     .map(
       (card) => `
-        <div class="stat">
+        <div class="stat ${card.level ? `stat-${escapeHtml(card.level)}` : ""}">
           <span class="label">${escapeHtml(card.label || "-")}</span>
           <span class="value mono">${escapeHtml(card.value ?? "-")}</span>
         </div>
@@ -1151,34 +1157,37 @@ function horizonAvailable(horizon) {
 
 function buildOperatorReadinessCards(payload) {
   const values = payload.values || payload;
+  const truth = payload.authoritative_runtime_truth || values.authoritative_runtime_truth || {};
   return [
-    { label: "System Health", value: values.runtime_status || "Unavailable" },
-    { label: "Paper Runtime", value: values.paper_enabled ? "RUNNING" : "STOPPED" },
-    { label: "Entries", value: values.entries_enabled ? "ENABLED" : "HALTED" },
-    { label: "Auth", value: values.auth_readiness ? "READY" : "NOT_READY" },
-    { label: "Market Data", value: values.market_data_readiness || "Unavailable" },
-    { label: "Runtime Lanes Loaded", value: String(values.runtime_lanes_loaded_count ?? 0) },
-    { label: "Route Ready Lanes", value: String(values.route_ready_lanes_count ?? 0) },
-    { label: "Session Eligible Now", value: String(values.session_eligible_lanes_count ?? 0) },
-    { label: "Live-Capable", value: String(values.live_capable_count ?? 0) },
-    { label: "Waiting For Bar", value: String(values.waiting_for_bar_count ?? values.waiting_for_completed_bar_count ?? 0) },
-    { label: "No Setup", value: String(values.no_setup_count ?? 0) },
-    { label: "Actionable Now", value: String(values.actionable_now_count ?? 0) },
-    { label: "True Blocked", value: String(values.true_blocked_count ?? values.blocked_lanes_count ?? 0) },
-    { label: "Market Data Stale", value: String(values.market_data_stale_count ?? 0) },
-    { label: "Blocking Faults", value: String(values.blocking_faults_count ?? 0) },
+    { label: "PAPER Runtime", value: truth.runtime_running ? "RUNNING" : "STOPPED", level: truth.runtime_running ? "ok" : "danger" },
+    { label: "PAPER Ready", value: truth.paper_runtime_ready ? "READY" : "NOT_READY", level: truth.paper_runtime_ready ? "ok" : "danger" },
+    { label: "Trade Allowed", value: truth.paper_trade_allowed ? "YES" : "NO", level: truth.paper_trade_allowed ? "ok" : "danger" },
+    { label: "PAPER Only", value: truth.paper_only === false ? "NO" : "YES", level: truth.paper_only === false ? "danger" : "ok" },
+    { label: "Lanes Loaded", value: String(truth.lanes_loaded ?? values.runtime_lanes_loaded_count ?? 0), level: (truth.lanes_loaded ?? values.runtime_lanes_loaded_count ?? 0) ? "ok" : "danger" },
+    { label: "Route-Ready Lanes", value: String(truth.route_ready_lanes ?? values.route_ready_lanes_count ?? 0), level: (truth.route_ready_lanes ?? values.route_ready_lanes_count ?? 0) ? "ok" : "warning" },
+    { label: "Session Eligible", value: String(truth.session_eligible_lanes ?? values.session_eligible_lanes_count ?? 0), level: (truth.session_eligible_lanes ?? values.session_eligible_lanes_count ?? 0) ? "info" : "muted" },
+    { label: "Actionable Signals", value: String(truth.actionable_signals ?? values.actionable_now_count ?? 0), level: (truth.actionable_signals ?? values.actionable_now_count ?? 0) ? "accent" : "muted" },
+    { label: "Current Blockers", value: String(truth.current_blockers ?? values.true_blocked_count ?? values.blocked_lanes_count ?? 0), level: (truth.current_blockers ?? values.true_blocked_count ?? values.blocked_lanes_count ?? 0) ? "danger" : "ok" },
+    { label: "Waiting For Bar", value: String(truth.waiting_for_bar ?? values.waiting_for_bar_count ?? values.waiting_for_completed_bar_count ?? 0), level: (truth.waiting_for_bar ?? values.waiting_for_bar_count ?? values.waiting_for_completed_bar_count ?? 0) ? "warning" : "muted" },
+    { label: "No Setup", value: String(truth.no_setup ?? values.no_setup_count ?? 0), level: (truth.no_setup ?? values.no_setup_count ?? 0) ? "muted" : "ok" },
+    { label: "Stale Market Data", value: String(truth.market_data_stale ?? values.market_data_stale_count ?? 0), level: (truth.market_data_stale ?? values.market_data_stale_count ?? 0) ? "danger" : "ok" },
   ];
 }
 
 function buildOperatorReadinessNotes(payload) {
   const values = payload.values || payload;
+  const truth = payload.authoritative_runtime_truth || values.authoritative_runtime_truth || {};
   const rows = [];
-  rows.push(`Auth readiness: ${values.auth_readiness ? "READY" : "NOT_READY"}`);
-  rows.push(`Degraded informational feeds: ${(values.degraded_informational_feeds || []).join(", ") || "None"}`);
+  if (truth.state) rows.push(`Authoritative state: ${truth.state}`);
+  if (truth.primary_blocker) rows.push(`Primary blocker: ${truth.primary_blocker}`);
+  rows.push(`Route capable now: ${truth.route_capable_now ? "YES" : "NO"}`);
+  rows.push(`Paper-only guard: ${truth.paper_only === false ? "FAILED" : "ENFORCED"}`);
   rows.push(`Broad session: ${values.current_broad_trading_session || "-"}`);
   rows.push(`Phase label: ${values.current_detected_phase_label || "-"}`);
   rows.push(`Next decision bar: ${values.next_expected_decision_bar_ts || "-"}`);
-  rows.push(`Stale-runtime effective blocks: ${values.stale_runtime_blocked_count ?? 0}`);
+  rows.push(`Truth source: ${truth.source || values.paper_readiness_source || "-"}`);
+  const degradedFeeds = values.degraded_informational_feeds || [];
+  if (degradedFeeds.length) rows.push(`Informational feeds degraded: ${degradedFeeds.join(", ")}`);
   const bootstrap = payload.bootstrap_prerequisites || {};
   const bootstrapItems = Array.isArray(bootstrap.items) ? bootstrap.items : [];
   if (bootstrapItems.length) {
