@@ -12,6 +12,7 @@ from ..execution.order_models import OrderIntent
 from ..strategy.exit_engine import ExitDecision
 from ..strategy.strategy_engine import StrategyEngine, _empty_signal_packet_payload
 from .index_futures_forced_session_research import label_stock_index_segment, stock_index_trade_date_for_timestamp
+from .operational_maturation_runtime import operational_entry_reason
 
 
 INDEX_FUTURES_FORCED_SESSION_RUNTIME_KIND = "index_futures_forced_session_candidate_runtime"
@@ -117,6 +118,28 @@ class IndexFuturesForcedSessionStrategyEngine(StrategyEngine):
 
         current_index = len(segment_bars) - 1
         if current_index < definition.setup_bar_count:
+            return SignalPacket(**payload)
+
+        operational_reason = operational_entry_reason(
+            lane_spec=self._lane_spec,
+            segment_bars=segment_bars,
+            current_index=current_index,
+            setup_bar_count=definition.setup_bar_count,
+            tick_size=definition.tick_size,
+        )
+        if operational_reason is not None:
+            payload.update(
+                {
+                    "long_entry_raw": definition.side == "LONG",
+                    "short_entry_raw": definition.side == "SHORT",
+                    "recent_long_setup": definition.side == "LONG",
+                    "recent_short_setup": definition.side == "SHORT",
+                    "long_entry": definition.side == "LONG",
+                    "short_entry": definition.side == "SHORT",
+                    "long_entry_source": definition.source_id if definition.side == "LONG" else None,
+                    "short_entry_source": definition.source_id if definition.side == "SHORT" else None,
+                }
+            )
             return SignalPacket(**payload)
 
         preferred_trigger = False

@@ -29,6 +29,7 @@ from .gc_mgc_segment_forced_session_short_research import (
 )
 from .gc_mgc_segment_regime_research import label_gold_segment, trade_date_for_timestamp
 from .index_futures_forced_session_research import label_stock_index_segment, stock_index_trade_date_for_timestamp
+from .operational_maturation_runtime import operational_entry_reason
 
 
 ASIA_LONDON_PARTICIPATION_RUNTIME_KIND = "asia_london_participation_candidate_runtime"
@@ -164,6 +165,42 @@ class AsiaLondonParticipationStrategyEngine(StrategyEngine):
             return SignalPacket(**payload)
 
         segment_bars = self._entry_segment_bars_for_timestamp(current_bar.end_ts)
+        current_index = len(segment_bars) - 1
+        operational_reason = operational_entry_reason(
+            lane_spec=self._lane_spec,
+            segment_bars=segment_bars,
+            current_index=current_index,
+            setup_bar_count=definition.setup_bar_count,
+            tick_size=definition.tick_size,
+        )
+        if operational_reason is not None:
+            _record_asia_london_live_observation(
+                _build_asia_london_live_observation(
+                    lane_id=lane_id,
+                    definition=definition,
+                    current_bar=current_bar,
+                    session_label=session_label,
+                    segment_bars=segment_bars,
+                    strict_gate_pass=True,
+                    strict_gate_fail_reason=None,
+                    entry_index=current_index,
+                    entry_reason=operational_reason,
+                    floor_reason=None,
+                )
+            )
+            payload.update(
+                {
+                    "long_entry_raw": definition.side == "LONG",
+                    "short_entry_raw": definition.side == "SHORT",
+                    "recent_long_setup": definition.side == "LONG",
+                    "recent_short_setup": definition.side == "SHORT",
+                    "long_entry": definition.side == "LONG",
+                    "short_entry": definition.side == "SHORT",
+                    "long_entry_source": definition.source_id if definition.side == "LONG" else None,
+                    "short_entry_source": definition.source_id if definition.side == "SHORT" else None,
+                }
+            )
+            return SignalPacket(**payload)
         if len(segment_bars) <= definition.fallback_entry_bar:
             _record_asia_london_live_observation(
                 _build_asia_london_live_observation(
