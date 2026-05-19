@@ -32,6 +32,12 @@ from ..domain.models import Bar, FeaturePacket, SignalPacket, StrategyState
 from ..execution.execution_engine import ExecutionEngine
 from ..execution.order_models import FillEvent, OrderIntent
 from ..execution.paper_broker import PaperBroker
+from ..execution_core.track_b_no_trade_diagnostics import (
+    NoTradeFinalDecision,
+    build_no_trade_diagnostic,
+    diagnostics_root_from_artifact_dir,
+    write_no_trade_diagnostic,
+)
 from ..indicators.feature_engine import IncrementalFeatureComputer, compute_features
 from ..market_data.bar_builder import BarBuilder
 from ..market_data.bar_store import BarStore
@@ -291,6 +297,9 @@ class StrategyEngine:
         self._last_exit_decision_summary: dict[str, object] = {}
         self._latest_shadow_intent_summary: dict[str, object] = {}
         self._latest_live_intent_summary: dict[str, object] = {}
+        self._no_trade_diagnostics_root = diagnostics_root_from_artifact_dir(
+            structured_logger.artifact_dir if structured_logger is not None else None
+        )
         self._restore_processing_context()
 
     def process_bar(self, bar: Bar) -> list[DomainEvent]:
@@ -340,6 +349,14 @@ class StrategyEngine:
         if current_context_feature is None or not self._bar_history:
             self._last_execution_bar_id = execution_bar.bar_id
             self._last_execution_bar_evaluated_at = execution_bar.end_ts
+            self._emit_no_trade_diagnostic(
+                bar=execution_bar,
+                signal_packet=signal_packet,
+                strategy_evaluated=False,
+                setup_detected=False,
+                blocker_reason="context_feature_history_not_ready",
+                final_decision=NoTradeFinalDecision.NO_SETUP,
+            )
             self._bar_store.mark_processed(execution_bar)
             self._persist_bar_artifacts(execution_bar, feature_packet, signal_packet)
             self._last_feature_packet = feature_packet
@@ -391,9 +408,18 @@ class StrategyEngine:
                 )
             )
 
+        diagnostic_blocker_reason: str | None = None
+        diagnostic_final_decision: NoTradeFinalDecision | None = None
+        diagnostic_order_intent_created = False
+        diagnostic_would_route = False
+        diagnostic_order_intent_id: str | None = None
+        diagnostic_submit_blocker: str | None = None
+
         violations = validate_state(working_state)
         if violations:
             fault_code = "; ".join(violations)
+            diagnostic_blocker_reason = f"strategy_invariant_fault: {fault_code}"
+            diagnostic_final_decision = NoTradeFinalDecision.FILTER_REJECTED
             working_state = transition_to_fault(working_state, execution_bar.end_ts, fault_code)
             events.append(FaultRaisedEvent(fault_code=fault_code, occurred_at=execution_bar.end_ts))
             if self._alert_dispatcher is not None:
@@ -407,6 +433,7 @@ class StrategyEngine:
         else:
             maybe_intent = self._maybe_create_order_intent(execution_bar, signal_packet, working_state, exit_decision)
             if maybe_intent is not None:
+                diagnostic_order_intent_id = maybe_intent.order_intent_id
                 long_entry_family = self._resolve_long_entry_family(signal_packet)
                 short_entry_family = (
                     self._resolve_short_entry_family(signal_packet)
@@ -439,6 +466,7 @@ class StrategyEngine:
                         )
                     )
                     self._emit_shadow_submit_suppressed_alert(maybe_intent, execution_bar.end_ts)
+                    diagnostic_order_intent_created = True
                 else:
                     live_intent_summary = self._build_live_intent_summary(
                         bar=execution_bar,
@@ -457,6 +485,9 @@ class StrategyEngine:
                         else None
                     )
                     if submit_blocker is not None:
+                        diagnostic_submit_blocker = submit_blocker
+                        diagnostic_blocker_reason = submit_blocker
+                        diagnostic_final_decision = NoTradeFinalDecision.GOVERNANCE_BLOCKED
                         self._latest_live_intent_summary = {
                             **live_intent_summary,
                             "submit_attempt_id": self._pre_submit_attempt_id(maybe_intent, execution_bar.end_ts),
@@ -497,6 +528,7 @@ class StrategyEngine:
                             short_entry_source=short_entry_source,
                         )
                         if pending is not None:
+                            diagnostic_order_intent_created = True
                             self._latest_live_intent_summary = {
                                 **self._latest_live_intent_summary,
                                 "submit_attempt_id": pending.submit_attempt_id,
@@ -621,6 +653,12 @@ class StrategyEngine:
                                 )
                         else:
                             failure = self._execution_engine.last_submit_failure()
+                            diagnostic_blocker_reason = (
+                                failure.error
+                                if failure is not None and failure.order_intent_id == maybe_intent.order_intent_id
+                                else "Execution engine rejected the intent due to an existing pending or opposite-side conflict."
+                            )
+                            diagnostic_final_decision = NoTradeFinalDecision.EXPOSURE_BLOCKED
                             self._latest_live_intent_summary = {
                                 **self._latest_live_intent_summary,
                                 "submit_failure": {
@@ -638,9 +676,37 @@ class StrategyEngine:
                                 occurred_at=execution_bar.end_ts,
                                 default_reason="Execution engine rejected the intent due to an existing pending or opposite-side conflict.",
                             )
+            elif diagnostic_blocker_reason is None:
+                diagnostic_blocker_reason = self._infer_no_trade_blocker_reason(
+                    bar=execution_bar,
+                    signal_packet=signal_packet,
+                    state=working_state,
+                    exit_decision=exit_decision,
+                )
 
         self._last_execution_bar_id = execution_bar.bar_id
         self._last_execution_bar_evaluated_at = execution_bar.end_ts
+        self._emit_no_trade_diagnostic(
+            bar=execution_bar,
+            signal_packet=signal_packet,
+            strategy_evaluated=True,
+            setup_detected=_signal_present(signal_packet),
+            blocker_reason=diagnostic_blocker_reason,
+            submit_blocker=diagnostic_submit_blocker,
+            final_decision=diagnostic_final_decision,
+            order_intent_created=diagnostic_order_intent_created,
+            would_route=diagnostic_would_route,
+            order_intent_id=diagnostic_order_intent_id,
+            extra={
+                "position_side": working_state.position_side.value,
+                "entries_enabled": working_state.entries_enabled,
+                "exits_enabled": working_state.exits_enabled,
+                "operator_halt": working_state.operator_halt,
+                "same_underlying_entry_hold": working_state.same_underlying_entry_hold,
+                "long_entry_source": signal_packet.long_entry_source,
+                "short_entry_source": signal_packet.short_entry_source,
+            },
+        )
         self._bar_store.mark_processed(execution_bar)
         self._persist_bar_artifacts(execution_bar, feature_packet, signal_packet)
         self._last_feature_packet = feature_packet
@@ -648,6 +714,86 @@ class StrategyEngine:
         self._state = working_state
         self._persist_state(self._state, transition_label="bar_close")
         return events
+
+    def _emit_no_trade_diagnostic(
+        self,
+        *,
+        bar: Bar,
+        signal_packet: SignalPacket,
+        strategy_evaluated: bool,
+        setup_detected: bool,
+        blocker_reason: str | None = None,
+        submit_blocker: str | None = None,
+        final_decision: NoTradeFinalDecision | None = None,
+        order_intent_created: bool = False,
+        would_route: bool = False,
+        order_intent_id: str | None = None,
+        extra: dict[str, object] | None = None,
+    ) -> None:
+        try:
+            payload = build_no_trade_diagnostic(
+                lane_id=str(self._runtime_identity.get("lane_id") or self._settings.probationary_paper_lane_id or ""),
+                symbol=self._settings.symbol,
+                session=label_session_phase(bar.end_ts),
+                bar_timestamp=bar.end_ts,
+                bar_id=bar.bar_id,
+                session_allowed=bar.session_allowed,
+                market_data_fresh=True,
+                strategy_evaluated=strategy_evaluated,
+                signal_packet=signal_packet,
+                setup_detected=setup_detected,
+                blocker_reason=blocker_reason,
+                submit_blocker=submit_blocker,
+                final_decision=final_decision,
+                order_intent_created=order_intent_created,
+                would_route=would_route,
+                order_intent_id=order_intent_id,
+                runtime_identity=self._runtime_identity,
+                extra=extra,
+            )
+            write_no_trade_diagnostic(payload, diagnostics_root=self._no_trade_diagnostics_root)
+        except Exception as exc:
+            if self._alert_dispatcher is not None:
+                self._alert_dispatcher.emit(
+                    "warning",
+                    "no_trade_diagnostic_write_failed",
+                    str(exc),
+                    {"bar_id": bar.bar_id, "lane_id": self._runtime_identity.get("lane_id")},
+                )
+
+    def _infer_no_trade_blocker_reason(
+        self,
+        *,
+        bar: Bar,
+        signal_packet: SignalPacket,
+        state: StrategyState,
+        exit_decision: ExitDecision,
+    ) -> str | None:
+        if not bar.session_allowed:
+            return "session_not_allowed"
+        if state.operator_halt:
+            return "operator_halt"
+        if state.position_side == PositionSide.FLAT:
+            if not state.entries_enabled:
+                return "entries_disabled"
+            if state.same_underlying_entry_hold and (signal_packet.long_entry or signal_packet.short_entry):
+                return str(state.same_underlying_hold_reason or "same_underlying_entry_hold")
+            if len(self._bar_history) < self._settings.warmup_bars_required():
+                return "warmup_incomplete"
+            if signal_packet.long_entry and not self._entry_side_is_currently_allowed("LONG", state):
+                return "long_entry_side_not_allowed"
+            if signal_packet.short_entry and not self._entry_side_is_currently_allowed("SHORT", state):
+                return "short_entry_side_not_allowed"
+            if _signal_present(signal_packet):
+                return "entry_signal_filtered_or_controls_not_satisfied"
+            return "no_setup_detected"
+        if not state.exits_enabled:
+            return "exits_disabled"
+        if state.position_side == PositionSide.LONG and not exit_decision.long_exit:
+            return "long_position_exit_not_signaled"
+        if state.position_side == PositionSide.SHORT and not exit_decision.short_exit:
+            return "short_position_exit_not_signaled"
+        return None
 
     def apply_fill(
         self,
