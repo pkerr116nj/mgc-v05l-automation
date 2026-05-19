@@ -23699,25 +23699,10 @@ def _market_data_semantics(*, running: bool, market_data_ok: bool, freshness: st
 
 
 def _broad_trading_session_for_timestamp(timestamp: datetime) -> str:
-    local_dt = timestamp.astimezone(NEW_YORK_TZ) if timestamp.tzinfo is not None else timestamp.replace(tzinfo=NEW_YORK_TZ)
-    local_time = local_dt.timetz().replace(tzinfo=None)
-    if time(18, 0) < local_time < time(19, 0):
-        return "SESSION_OPEN"
-    if time(19, 0) <= local_time < time(20, 30):
-        return "ASIA_EARLY"
-    if time(20, 30) <= local_time or local_time < time(3, 0):
-        return "ASIA_LATE"
-    if time(3, 0) <= local_time < time(5, 30):
+    phase = label_session_phase(timestamp)
+    if phase == "LONDON_OPEN":
         return "LONDON_EARLY"
-    if time(5, 30) <= local_time < time(8, 20):
-        return "LONDON_LATE"
-    if time(8, 20) <= local_time < time(11, 0):
-        return "US_EARLY"
-    if time(11, 0) <= local_time < time(13, 30):
-        return "US_MIDDAY"
-    if time(13, 30) <= local_time < time(16, 0):
-        return "US_LATE"
-    return "UNCLASSIFIED"
+    return phase
 
 
 def _decision_bar_seconds_for_row(row: dict[str, Any]) -> int:

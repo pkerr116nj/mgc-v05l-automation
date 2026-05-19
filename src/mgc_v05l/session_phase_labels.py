@@ -10,8 +10,8 @@ NEW_YORK = ZoneInfo("America/New_York")
 
 _SESSION_WINDOWS: dict[str, tuple[time, time]] = {
     "SESSION_OPEN": (time(18, 0), time(19, 0)),
-    "ASIA_EARLY": (time(19, 0), time(20, 30)),
-    "ASIA_LATE": (time(20, 30), time(3, 0)),
+    "ASIA_EARLY": (time(19, 0), time(22, 0)),
+    "ASIA_LATE": (time(22, 0), time(3, 0)),
     "ASIA": (time(18, 0), time(3, 0)),
     "LONDON_OPEN": (time(3, 0), time(5, 30)),
     "LONDON_EARLY": (time(3, 0), time(5, 30)),
@@ -44,9 +44,9 @@ def label_session_phase(timestamp: datetime) -> str:
         return "SESSION_RESET_1800"
     if time(18, 0) < local_time < time(19, 0) and _is_futures_reopen_day(local_dt):
         return "SESSION_OPEN"
-    if time(19, 0) <= local_time < time(20, 30):
+    if time(19, 0) <= local_time < time(22, 0):
         return "ASIA_EARLY"
-    if time(20, 30) <= local_time or local_time < time(3, 0):
+    if time(22, 0) <= local_time or local_time < time(3, 0):
         return "ASIA_LATE"
     if time(3, 0) <= local_time < time(5, 30):
         return "LONDON_OPEN"

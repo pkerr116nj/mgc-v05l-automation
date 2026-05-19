@@ -258,7 +258,8 @@ def test_replay_reporting_builds_trade_ledger_summary_and_artifacts(tmp_path) ->
 def test_session_phase_labels_cover_requested_research_windows() -> None:
     assert label_session_phase(datetime.fromisoformat("2026-03-13T18:00:00-04:00")) == "SESSION_RESET_1800"
     assert label_session_phase(datetime.fromisoformat("2026-03-13T19:00:00-04:00")) == "ASIA_EARLY"
-    assert label_session_phase(datetime.fromisoformat("2026-03-13T21:00:00-04:00")) == "ASIA_LATE"
+    assert label_session_phase(datetime.fromisoformat("2026-03-13T21:00:00-04:00")) == "ASIA_EARLY"
+    assert label_session_phase(datetime.fromisoformat("2026-03-13T22:00:00-04:00")) == "ASIA_LATE"
     assert label_session_phase(datetime.fromisoformat("2026-03-13T03:30:00-04:00")) == "LONDON_OPEN"
     assert label_session_phase(datetime.fromisoformat("2026-03-13T06:00:00-04:00")) == "LONDON_LATE"
     assert label_session_phase(datetime.fromisoformat("2026-03-13T09:15:00-04:00")) == "US_PREOPEN_OPENING"

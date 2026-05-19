@@ -8718,8 +8718,8 @@ def _gold_session_restriction_matches_time(local_time: dt_time, restriction: str
     normalized = str(restriction or "").upper()
     windows = {
         "SESSION_OPEN": (dt_time(18, 0), dt_time(19, 0)),
-        "ASIA_EARLY": (dt_time(19, 0), dt_time(20, 30)),
-        "ASIA_LATE": (dt_time(20, 30), dt_time(3, 0)),
+        "ASIA_EARLY": (dt_time(19, 0), dt_time(22, 0)),
+        "ASIA_LATE": (dt_time(22, 0), dt_time(3, 0)),
         "LONDON_EARLY": (dt_time(3, 0), dt_time(5, 30)),
         "LONDON_LATE": (dt_time(5, 30), dt_time(8, 20)),
         "US_EARLY": (dt_time(8, 20), dt_time(11, 0)),

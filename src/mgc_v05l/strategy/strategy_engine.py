@@ -46,7 +46,7 @@ from ..signals.asia_vwap_reclaim import evaluate_asia_vwap_reclaim
 from ..signals.bear_snap import evaluate_bear_snap
 from ..signals.bull_snap import evaluate_bull_snap
 from ..signals.entry_resolver import resolve_entries
-from ..app.session_phase_labels import phase_coarse_session_group, session_restriction_matches_timestamp
+from ..app.session_phase_labels import label_session_phase, phase_coarse_session_group, session_restriction_matches_timestamp
 from .exit_engine import ExitDecision, evaluate_exits
 from .invariants import validate_state
 from .risk_engine import compute_risk_context
@@ -2319,8 +2319,8 @@ def _bar_matches_probationary_session_restriction(bar: Bar, restriction: str, ti
 def _gold_probationary_session_matches_time(local_time: time, restriction: str) -> bool:
     windows = {
         "SESSION_OPEN": (time(18, 0), time(19, 0)),
-        "ASIA_EARLY": (time(19, 0), time(20, 30)),
-        "ASIA_LATE": (time(20, 30), time(3, 0)),
+        "ASIA_EARLY": (time(19, 0), time(22, 0)),
+        "ASIA_LATE": (time(22, 0), time(3, 0)),
         "LONDON_EARLY": (time(3, 0), time(5, 30)),
         "LONDON_LATE": (time(5, 30), time(8, 20)),
         "US_EARLY": (time(8, 20), time(11, 0)),
@@ -2353,32 +2353,8 @@ def _gc_mgc_asia_retest_hold_london_open_extension_matches(bar: Bar, source: str
 
 
 def label_session_phase_for_bar(bar: Bar, timezone_info) -> str:
-    local_time = bar.end_ts.astimezone(timezone_info).time()
-    if local_time == time(18, 0):
-        return "SESSION_RESET_1800"
-    if time(18, 0) < local_time < time(20, 30):
-        return "ASIA_EARLY"
-    if time(20, 30) <= local_time or local_time < time(3, 0):
-        return "ASIA_LATE"
-    if time(3, 0) <= local_time < time(5, 30):
-        return "LONDON_OPEN"
-    if time(5, 30) <= local_time < time(8, 20):
-        return "LONDON_LATE"
-    if time(8, 20) <= local_time < time(9, 0):
-        return "US_EARLY"
-    if time(9, 0) <= local_time < time(9, 30):
-        return "US_PREOPEN_OPENING"
-    if time(9, 30) <= local_time < time(10, 0):
-        return "US_CASH_OPEN_IMPULSE"
-    if time(10, 0) <= local_time < time(10, 30):
-        return "US_OPEN_LATE"
-    if time(10, 30) <= local_time < time(11, 0):
-        return "US_EARLY"
-    if time(11, 0) <= local_time < time(13, 30):
-        return "US_MIDDAY"
-    if time(13, 30) <= local_time < time(16, 0):
-        return "US_LATE"
-    return "UNCLASSIFIED"
+    observed_ts = bar.end_ts.astimezone(timezone_info) if bar.end_ts.tzinfo is not None else bar.end_ts.replace(tzinfo=timezone_info)
+    return label_session_phase(observed_ts)
 
 
 def _phase_coarse_session_group(phase: str) -> str:

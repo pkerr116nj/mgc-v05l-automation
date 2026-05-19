@@ -59,6 +59,19 @@ def test_session_open_is_standalone_sunday_through_thursday() -> None:
     assert session_restriction_matches_timestamp(friday_open, "SESSION_OPEN") is False
 
 
+def test_track_b_asia_early_extends_to_2200_for_live_operator_semantics() -> None:
+    asia_early = datetime.fromisoformat("2026-05-18T20:40:00-04:00")
+    asia_late_start = datetime.fromisoformat("2026-05-18T22:00:00-04:00")
+
+    assert label_session_phase(asia_early) == "ASIA_EARLY"
+    assert session_restriction_matches_timestamp(asia_early, "ASIA_EARLY") is True
+    assert session_restriction_matches_timestamp(asia_early, "ASIA_LATE") is False
+    assert _broad_trading_session_for_timestamp(asia_early) == "ASIA_EARLY"
+
+    assert label_session_phase(asia_late_start) == "ASIA_LATE"
+    assert session_restriction_matches_timestamp(asia_late_start, "ASIA_LATE") is True
+
+
 def test_late_asia_covers_overnight_before_london_open() -> None:
     late_asia = datetime.fromisoformat("2026-05-14T01:15:00-04:00")
     london_open = datetime.fromisoformat("2026-05-14T03:00:00-04:00")
@@ -132,6 +145,29 @@ def test_strategy_runtime_bar_label_uses_late_asia_until_london_open() -> None:
     )
 
     assert label_session_phase_for_bar(bar, ZoneInfo("America/New_York")) == "ASIA_LATE"
+
+
+def test_strategy_runtime_bar_label_keeps_2040_in_asia_early() -> None:
+    end_ts = datetime.fromisoformat("2026-05-18T20:40:00-04:00")
+    bar = Bar(
+        bar_id="GC|1m|2026-05-19T00:40:00Z",
+        symbol="GC",
+        timeframe="1m",
+        start_ts=end_ts - timedelta(minutes=1),
+        end_ts=end_ts,
+        open=Decimal("100"),
+        high=Decimal("101"),
+        low=Decimal("99"),
+        close=Decimal("100.5"),
+        volume=1,
+        is_final=True,
+        session_asia=True,
+        session_london=False,
+        session_us=False,
+        session_allowed=True,
+    )
+
+    assert label_session_phase_for_bar(bar, ZoneInfo("America/New_York")) == "ASIA_EARLY"
 
 
 def test_strategy_runtime_bar_label_uses_us_early_around_comex_open() -> None:
