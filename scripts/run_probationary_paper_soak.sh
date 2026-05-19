@@ -31,12 +31,16 @@ DEFAULT_CONFIGS=(
 )
 ATPE_CANARY_CONFIG="${REPO_ROOT}/config/probationary_pattern_engine_paper_atpe_canary.yaml"
 GC_MGC_ACCEPTANCE_CONFIG="${REPO_ROOT}/config/probationary_pattern_engine_paper_gc_mgc_acceptance.yaml"
-DEFAULT_RUNTIME_DIR="${REPO_ROOT}/outputs/probationary_pattern_engine/paper_session/runtime"
+DEFAULT_RUNTIME_DIR="${MGC_PROBATIONARY_PAPER_RUNTIME_DIR:-${REPO_ROOT}/outputs/probationary_pattern_engine/paper_session/runtime}"
 DEFAULT_PID_FILE="${DEFAULT_RUNTIME_DIR}/probationary_paper.pid"
 DEFAULT_LOG_FILE="${DEFAULT_RUNTIME_DIR}/probationary_paper.log"
 DEFAULT_CONFIG_PATHS_FILE="${DEFAULT_RUNTIME_DIR}/paper_runtime_config_paths.txt"
+DEFAULT_LAUNCH_STATUS_FILE="${DEFAULT_RUNTIME_DIR}/probationary_paper_launch_status.json"
 CANARY_ENABLE_SENTINEL="${DEFAULT_RUNTIME_DIR}/enable_paper_route_canary.flag"
 CONFIG_OVERRIDE_RAW="${MGC_PROBATIONARY_PAPER_CONFIG_PATHS:-}"
+LAUNCH_PYTHON_BIN="${MGC_PROBATIONARY_PAPER_LAUNCH_PYTHON_BIN:-${PYTHON_BIN}}"
+BACKGROUND_VERIFY_ATTEMPTS="${MGC_PROBATIONARY_PAPER_BACKGROUND_VERIFY_ATTEMPTS:-10}"
+BACKGROUND_VERIFY_POLL_SECONDS="${MGC_PROBATIONARY_PAPER_BACKGROUND_VERIFY_POLL_SECONDS:-0.2}"
 
 ARGS=()
 CONFIG_SET=0
@@ -49,6 +53,7 @@ ENABLE_PAPER_ROUTE_CANARY_FLAG=0
 PID_FILE="${DEFAULT_PID_FILE}"
 LOG_FILE="${DEFAULT_LOG_FILE}"
 CONFIG_PATHS_FILE="${DEFAULT_CONFIG_PATHS_FILE}"
+LAUNCH_STATUS_FILE="${DEFAULT_LAUNCH_STATUS_FILE}"
 
 while (($# > 0)); do
   case "$1" in
@@ -86,6 +91,22 @@ while (($# > 0)); do
       ;;
     --log-file=*)
       LOG_FILE="${1#*=}"
+      shift
+      ;;
+    --config-paths-file)
+      CONFIG_PATHS_FILE="$2"
+      shift 2
+      ;;
+    --config-paths-file=*)
+      CONFIG_PATHS_FILE="${1#*=}"
+      shift
+      ;;
+    --launch-status-file)
+      LAUNCH_STATUS_FILE="$2"
+      shift 2
+      ;;
+    --launch-status-file=*)
+      LAUNCH_STATUS_FILE="${1#*=}"
       shift
       ;;
     --config)
@@ -173,6 +194,77 @@ else
   rm -f "${CANARY_ENABLE_SENTINEL}"
 fi
 
+write_launch_status() {
+  local classification="$1"
+  local pid="${2:-}"
+  local detail="${3:-}"
+  local child_exit_code="${4:-}"
+  ensure_dir "$(dirname "${LAUNCH_STATUS_FILE}")"
+  LAUNCH_STATUS_FILE="${LAUNCH_STATUS_FILE}" \
+  LAUNCH_CLASSIFICATION="${classification}" \
+  LAUNCH_PID="${pid}" \
+  LAUNCH_DETAIL="${detail}" \
+  LAUNCH_CHILD_EXIT_CODE="${child_exit_code}" \
+  LAUNCH_PID_FILE="${PID_FILE}" \
+  LAUNCH_LOG_FILE="${LOG_FILE}" \
+  LAUNCH_CONFIG_PATHS_FILE="${CONFIG_PATHS_FILE}" \
+  LAUNCH_REPO_ROOT="${REPO_ROOT}" \
+  LAUNCH_CWD="$(pwd)" \
+  LAUNCH_PYTHON_BIN="${LAUNCH_PYTHON_BIN}" \
+  LAUNCH_BACKGROUND_VERIFY_ATTEMPTS="${BACKGROUND_VERIFY_ATTEMPTS}" \
+  LAUNCH_BACKGROUND_VERIFY_POLL_SECONDS="${BACKGROUND_VERIFY_POLL_SECONDS}" \
+  "${PYTHON_BIN}" -c '
+import json
+import os
+from datetime import datetime, timezone
+
+config_paths = [item for item in os.environ.get("LAUNCH_FINAL_ARGS", "").split(os.pathsep) if item]
+payload = {
+    "generated_at": datetime.now(timezone.utc).isoformat(),
+    "classification": os.environ["LAUNCH_CLASSIFICATION"],
+    "pid": int(os.environ["LAUNCH_PID"]) if os.environ.get("LAUNCH_PID", "").isdigit() else None,
+    "pid_file": os.environ["LAUNCH_PID_FILE"],
+    "log_file": os.environ["LAUNCH_LOG_FILE"],
+    "config_paths_file": os.environ["LAUNCH_CONFIG_PATHS_FILE"],
+    "repo_root": os.environ["LAUNCH_REPO_ROOT"],
+    "cwd": os.environ["LAUNCH_CWD"],
+    "python_bin": os.environ["LAUNCH_PYTHON_BIN"],
+    "detail": os.environ.get("LAUNCH_DETAIL") or None,
+    "child_exit_code": int(os.environ["LAUNCH_CHILD_EXIT_CODE"]) if os.environ.get("LAUNCH_CHILD_EXIT_CODE", "").isdigit() else None,
+    "background_verify_attempts": int(os.environ["LAUNCH_BACKGROUND_VERIFY_ATTEMPTS"]),
+    "background_verify_poll_seconds": float(os.environ["LAUNCH_BACKGROUND_VERIFY_POLL_SECONDS"]),
+    "config_paths": config_paths,
+    "paper_only": True,
+    "live_money_eligible": False,
+    "paper_proof_invoked": False,
+    "submit_authority": False,
+}
+with open(os.environ["LAUNCH_STATUS_FILE"], "w", encoding="utf-8") as fh:
+    json.dump(payload, fh, indent=2, sort_keys=True)
+    fh.write("\n")
+'
+}
+
+background_child_stayed_alive() {
+  local pid="$1"
+  local attempt=0
+  while [[ ${attempt} -lt ${BACKGROUND_VERIFY_ATTEMPTS} ]]; do
+    if ! kill -0 "${pid}" 2>/dev/null; then
+      return 1
+    fi
+    sleep "${BACKGROUND_VERIFY_POLL_SECONDS}"
+    attempt=$((attempt + 1))
+  done
+  kill -0 "${pid}" 2>/dev/null
+}
+
+remove_pid_file_if_matches() {
+  local pid="$1"
+  if [[ -f "${PID_FILE}" ]] && [[ "$(cat "${PID_FILE}")" == "${pid}" ]]; then
+    rm -f "${PID_FILE}"
+  fi
+}
+
 persist_runtime_config_paths() {
   local path
   local persisted=()
@@ -224,6 +316,23 @@ if schwab_runtime_dependency_required && [[ -f "${DEFAULT_SCHWAB_CONFIG}" ]]; th
 fi
 persist_runtime_config_paths
 
+LAUNCH_CONFIG_PATHS=()
+index=0
+while [[ ${index} -lt ${#FINAL_ARGS[@]} ]]; do
+  arg="${FINAL_ARGS[${index}]}"
+  if [[ "${arg}" == "--config" ]]; then
+    index=$((index + 1))
+    if [[ ${index} -lt ${#FINAL_ARGS[@]} ]]; then
+      LAUNCH_CONFIG_PATHS+=("${FINAL_ARGS[${index}]}")
+    fi
+  elif [[ "${arg}" == --config=* ]]; then
+    LAUNCH_CONFIG_PATHS+=("${arg#*=}")
+  fi
+  index=$((index + 1))
+done
+LAUNCH_FINAL_ARGS="$(IFS=":"; printf "%s" "${LAUNCH_CONFIG_PATHS[*]:-}")"
+export LAUNCH_FINAL_ARGS
+
 if [[ ${NETWORK_PREFLIGHT_ONLY} -eq 1 ]]; then
   echo "Runtime network preflight completed; skipping probationary paper soak launch."
   exit 0
@@ -239,14 +348,28 @@ if [[ ${BACKGROUND} -eq 1 ]]; then
       exit 1
     fi
   fi
-  nohup "${PYTHON_BIN}" -m mgc_v05l.app.main probationary-paper-soak "${FINAL_ARGS[@]}" >> "${LOG_FILE}" 2>&1 &
+  nohup "${LAUNCH_PYTHON_BIN}" -m mgc_v05l.app.main probationary-paper-soak "${FINAL_ARGS[@]}" >> "${LOG_FILE}" 2>&1 &
   paper_pid=$!
-  echo "${paper_pid}" > "${PID_FILE}"
-  echo "Probationary paper soak running in background."
-  echo "PID: ${paper_pid}"
-  echo "PID file: ${PID_FILE}"
-  echo "Log file: ${LOG_FILE}"
-  exit 0
+  if background_child_stayed_alive "${paper_pid}"; then
+    echo "${paper_pid}" > "${PID_FILE}"
+    write_launch_status "PROBATIONARY_PAPER_BACKGROUND_STARTED" "${paper_pid}" "background child remained alive through launch verification" ""
+    echo "Probationary paper soak running in background."
+    echo "PID: ${paper_pid}"
+    echo "PID file: ${PID_FILE}"
+    echo "Log file: ${LOG_FILE}"
+    echo "Launch status: ${LAUNCH_STATUS_FILE}"
+    exit 0
+  fi
+  set +e
+  wait "${paper_pid}"
+  child_exit_code=$?
+  set -e
+  remove_pid_file_if_matches "${paper_pid}"
+  write_launch_status "PROBATIONARY_PAPER_BACKGROUND_START_FAILED" "${paper_pid}" "background child exited before launch verification completed" "${child_exit_code}"
+  echo "Probationary paper soak failed to remain running in background." >&2
+  echo "Launch status: ${LAUNCH_STATUS_FILE}" >&2
+  echo "Log file: ${LOG_FILE}" >&2
+  exit 1
 fi
 
 exec "${PYTHON_BIN}" -m mgc_v05l.app.main probationary-paper-soak "${FINAL_ARGS[@]}"
