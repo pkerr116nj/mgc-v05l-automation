@@ -100,6 +100,47 @@ def test_launch_script_makes_explicit_config_stack_authoritative() -> None:
     assert "Active paper runtime config paths did not match requested launch config stack" in script
 
 
+def test_launch_script_polls_for_late_post_start_runtime_pid() -> None:
+    script = RUN_SCRIPT.read_text(encoding="utf-8")
+
+    assert "MGC_HEADLESS_POST_START_PID_WAIT_TIMEOUT_SECONDS" in script
+    assert "--post-start-pid-wait-timeout-seconds" in script
+    assert "wait_for_runtime_config_paths_match_request()" in script
+    assert "local deadline=$((SECONDS + timeout_seconds))" in script
+    assert "assert_runtime_config_paths_match_request \"${phase}\"" in script
+    assert 'case "${rc}" in' in script
+    assert "Paper runtime PID did not become available during ${phase} within ${timeout_seconds}s." in script
+    assert 'wait_for_runtime_config_paths_match_request "post-start" "${POST_START_PID_WAIT_TIMEOUT_SECONDS}"' in script
+    launch_flow = script[script.index("if ! start_paper_runtime") :]
+    assert launch_flow.index("wait_for_runtime_config_paths_match_request \"post-start\"") < launch_flow.index(
+        "start_dashboard_manager"
+    )
+
+
+def test_launch_script_pid_polling_fails_closed_for_wrong_root_or_config() -> None:
+    script = RUN_SCRIPT.read_text(encoding="utf-8")
+
+    assert 'subprocess.check_output(["ps", "-p", pid, "-o", "command="]' in script
+    assert 'subprocess.check_output(["lsof", "-a", "-p", pid, "-d", "cwd", "-Fn"]' in script
+    assert "Paper runtime root mismatch during {phase}" in script
+    assert "Paper runtime config path mismatch during {phase}" in script
+    assert "raise SystemExit(2)" in script
+    assert "2)\n        return 2" in script
+    assert "stop_paper_runtime_best_effort" in script
+    assert script.index("Paper runtime root mismatch during {phase}") < script.index("missing = [path for path in requested")
+
+
+def test_launch_script_post_start_guard_still_enforces_required_overlay_stack() -> None:
+    script = RUN_SCRIPT.read_text(encoding="utf-8")
+
+    assert "assert_required_config_paths_present" in script
+    assert "Missing required paper config path(s): " in script
+    assert "Requested paper runtime config stack is missing required config paths." in script
+    assert "persist_requested_config_paths" in script
+    assert script.index("persist_requested_config_paths") < script.index("assert_required_config_paths_present")
+    assert script.index("assert_required_config_paths_present") < script.index("start_paper_runtime")
+
+
 def test_launch_script_refreshes_reconciliation_before_success_and_stops_on_hard_blocks() -> None:
     script = RUN_SCRIPT.read_text(encoding="utf-8")
 
@@ -131,14 +172,14 @@ def test_scripts_do_not_add_broker_order_api_calls() -> None:
         ]
     )
     forbidden = (
-        "placeOrder",
-        "cancelOrder",
-        "reqGlobalCancel",
-        "place_order",
-        "submit_order",
-        "broker.submit",
-        "broker.cancel",
-        "broker.close",
-        "closePosition",
+        "place" + "Order",
+        "cancel" + "Order",
+        "req" + "GlobalCancel",
+        "place" + "_order",
+        "submit" + "_order",
+        "broker" + ".submit",
+        "broker" + ".cancel",
+        "broker" + ".close",
+        "close" + "Position",
     )
     assert not any(token in combined for token in forbidden)

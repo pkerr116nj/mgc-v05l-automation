@@ -31,6 +31,7 @@ DEFAULT_HEADLESS_PAPER_CONFIG_PATHS=(
 
 WAIT_TIMEOUT_SECONDS=120
 POLL_INTERVAL_SECONDS=3
+POST_START_PID_WAIT_TIMEOUT_SECONDS="${MGC_HEADLESS_POST_START_PID_WAIT_TIMEOUT_SECONDS:-30}"
 STATUS_FILE="${DEFAULT_STATUS_FILE}"
 MARKDOWN_FILE="${DEFAULT_MARKDOWN_FILE}"
 CANONICAL_READINESS_FILE="${DEFAULT_CANONICAL_READINESS_FILE}"
@@ -81,6 +82,14 @@ while (($# > 0)); do
       ;;
     --poll-interval-seconds=*)
       POLL_INTERVAL_SECONDS="${1#*=}"
+      shift
+      ;;
+    --post-start-pid-wait-timeout-seconds)
+      POST_START_PID_WAIT_TIMEOUT_SECONDS="$2"
+      shift 2
+      ;;
+    --post-start-pid-wait-timeout-seconds=*)
+      POST_START_PID_WAIT_TIMEOUT_SECONDS="${1#*=}"
       shift
       ;;
     --status-output)
@@ -298,7 +307,7 @@ assert_runtime_config_paths_match_request() {
     echo "Paper runtime PID is unavailable during ${phase}." >&2
     return 1
   fi
-  "${PYTHON_BIN}" - <<'PY' "${pid}" "${REQUESTED_CONFIG_PATHS_FILE}" "${phase}"
+  "${PYTHON_BIN}" - <<'PY' "${pid}" "${REQUESTED_CONFIG_PATHS_FILE}" "${phase}" "${REPO_ROOT}"
 import subprocess
 import sys
 from pathlib import Path
@@ -306,12 +315,27 @@ from pathlib import Path
 pid = sys.argv[1]
 requested_file = Path(sys.argv[2])
 phase = sys.argv[3]
+repo_root = Path(sys.argv[4]).resolve()
 requested = [line.strip() for line in requested_file.read_text(encoding="utf-8").splitlines() if line.strip()]
 try:
     command = subprocess.check_output(["ps", "-p", pid, "-o", "command="], text=True).strip()
 except (OSError, subprocess.CalledProcessError) as exc:
     print(f"Unable to inspect paper runtime command during {phase}: {exc}", file=sys.stderr)
-    raise SystemExit(1)
+    raise SystemExit(2)
+try:
+    cwd_output = subprocess.check_output(["lsof", "-a", "-p", pid, "-d", "cwd", "-Fn"], text=True).strip()
+except (OSError, subprocess.CalledProcessError) as exc:
+    print(f"Unable to inspect paper runtime cwd during {phase}: {exc}", file=sys.stderr)
+    raise SystemExit(2)
+cwd_rows = [line[1:] for line in cwd_output.splitlines() if line.startswith("n")]
+cwd = Path(cwd_rows[-1]).resolve() if cwd_rows else None
+if cwd != repo_root:
+    print(
+        f"Paper runtime root mismatch during {phase}; expected {repo_root}, observed {cwd}",
+        file=sys.stderr,
+    )
+    print(f"Active command: {command}", file=sys.stderr)
+    raise SystemExit(2)
 missing = [path for path in requested if path not in command]
 if missing:
     print(
@@ -320,8 +344,38 @@ if missing:
         file=sys.stderr,
     )
     print(f"Active command: {command}", file=sys.stderr)
-    raise SystemExit(1)
+    raise SystemExit(2)
 PY
+}
+
+wait_for_runtime_config_paths_match_request() {
+  local phase="$1"
+  local timeout_seconds="$2"
+  local deadline=$((SECONDS + timeout_seconds))
+  local rc=1
+  if [[ "${START_PAPER}" -ne 1 ]]; then
+    return 0
+  fi
+  while (( SECONDS <= deadline )); do
+    set +e
+    assert_runtime_config_paths_match_request "${phase}"
+    rc=$?
+    set -e
+    case "${rc}" in
+      0)
+        return 0
+        ;;
+      2)
+        return 2
+        ;;
+    esac
+    if (( SECONDS >= deadline )); then
+      break
+    fi
+    sleep "${POLL_INTERVAL_SECONDS}"
+  done
+  echo "Paper runtime PID did not become available during ${phase} within ${timeout_seconds}s." >&2
+  return 1
 }
 
 launchctl_submit_available() {
@@ -627,7 +681,7 @@ if ! start_paper_runtime; then
   write_startup_summary "BLOCKED" "Failed to start the supervised paper runtime." "false"
   exit 1
 fi
-if ! assert_runtime_config_paths_match_request "post-start"; then
+if ! wait_for_runtime_config_paths_match_request "post-start" "${POST_START_PID_WAIT_TIMEOUT_SECONDS}"; then
   stop_paper_runtime_best_effort
   write_startup_summary "BLOCKED" "Active paper runtime config paths did not match requested launch config stack." "false"
   exit 2
