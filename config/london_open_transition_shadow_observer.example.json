@@ -1,0 +1,20 @@
+{
+  "candidate_id": "gc_mgc_london_open_post_04_transition_shadow_v1",
+  "mode": "research_shadow_only",
+  "enabled_by_default": false,
+  "route_capable": false,
+  "submit_capable": false,
+  "live_money_eligible": false,
+  "canonical_session_labels_changed": false,
+  "global_session_policy_widened": false,
+  "window_timezone": "America/New_York",
+  "post_04_window_start_exclusive": "04:00",
+  "post_04_window_end_inclusive": "04:10",
+  "observed_session_label_required": "LONDON_OPEN",
+  "allowed_instruments": ["GC", "MGC"],
+  "allowed_direction": "long",
+  "allowed_range_regimes": ["range_normal", "range_expanded"],
+  "rejected_range_regimes": ["range_compressed"],
+  "required_market_data_provenance": "DATABENTO_REALTIME_PHASE1",
+  "output_root": "outputs/reports/track_b_london_open_transition_shadow"
+}
