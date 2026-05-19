@@ -245,6 +245,7 @@ class StrategyEngine:
         runtime_identity: Optional[dict[str, object]] = None,
         shadow_mode_no_submit: bool = False,
         submit_gate_evaluator: Optional[Callable[[Bar, StrategyState, OrderIntent], str | None]] = None,
+        route_hold_evaluator: Optional[Callable[[Bar, StrategyState, OrderIntent], str | None]] = None,
     ) -> None:
         self._settings = settings
         self._repositories = repositories
@@ -267,6 +268,7 @@ class StrategyEngine:
         self._alert_dispatcher = alert_dispatcher
         self._shadow_mode_no_submit = shadow_mode_no_submit
         self._submit_gate_evaluator = submit_gate_evaluator
+        self._route_hold_evaluator = route_hold_evaluator
         self._use_incremental_features = use_incremental_features
         self._incremental_feature_computer = (
             IncrementalFeatureComputer(settings) if use_incremental_features else None
@@ -301,6 +303,12 @@ class StrategyEngine:
             structured_logger.artifact_dir if structured_logger is not None else None
         )
         self._restore_processing_context()
+
+    def set_route_hold_evaluator(
+        self,
+        evaluator: Callable[[Bar, StrategyState, OrderIntent], str | None] | None,
+    ) -> None:
+        self._route_hold_evaluator = evaluator
 
     def process_bar(self, bar: Bar) -> list[DomainEvent]:
         """Process a single completed bar and return emitted domain events."""
@@ -414,6 +422,8 @@ class StrategyEngine:
         diagnostic_would_route = False
         diagnostic_order_intent_id: str | None = None
         diagnostic_submit_blocker: str | None = None
+        diagnostic_setup_detected_override: bool | None = None
+        diagnostic_extra: dict[str, object] = {}
 
         violations = validate_state(working_state)
         if violations:
@@ -479,55 +489,94 @@ class StrategyEngine:
                         short_entry_family=short_entry_family,
                         short_entry_source=short_entry_source,
                     )
-                    submit_blocker = (
-                        self._submit_gate_evaluator(execution_bar, working_state, maybe_intent)
-                        if self._submit_gate_evaluator is not None
+                    submit_attempt_was_executed = False
+                    pending = None
+                    route_hold_blocker = (
+                        self._route_hold_evaluator(execution_bar, working_state, maybe_intent)
+                        if self._route_hold_evaluator is not None
                         else None
                     )
-                    if submit_blocker is not None:
-                        diagnostic_submit_blocker = submit_blocker
-                        diagnostic_blocker_reason = submit_blocker
-                        diagnostic_final_decision = NoTradeFinalDecision.GOVERNANCE_BLOCKED
+                    if route_hold_blocker is not None:
+                        diagnostic_blocker_reason = route_hold_blocker
+                        diagnostic_setup_detected_override = True
+                        diagnostic_final_decision = (
+                            NoTradeFinalDecision.STARTUP_CATCHUP_DIAGNOSTIC_ONLY
+                            if str(route_hold_blocker).startswith("STARTUP_CATCHUP_DIAGNOSTIC_ONLY")
+                            else NoTradeFinalDecision.STARTUP_CATCHUP_NOT_ROUTABLE
+                            if str(route_hold_blocker).startswith("STARTUP_CATCHUP_NOT_ROUTABLE")
+                            else NoTradeFinalDecision.ROUTE_HELD_UNTIL_READINESS_CONVERGED
+                        )
+                        diagnostic_extra.update(
+                            {
+                                "startup_route_hold_blocker": route_hold_blocker,
+                                "route_held_until_readiness_converged": True,
+                                "intended_intent_type": maybe_intent.intent_type.value,
+                                "intended_action": maybe_intent.intent_type.value,
+                                "intended_quantity": maybe_intent.quantity,
+                                "intended_reason_code": maybe_intent.reason_code,
+                                "intended_signal_id": maybe_intent.signal_id,
+                            }
+                        )
                         self._latest_live_intent_summary = {
                             **live_intent_summary,
                             "submit_attempt_id": self._pre_submit_attempt_id(maybe_intent, execution_bar.end_ts),
-                            "submit_gate_blocker": submit_blocker,
+                            "startup_route_hold_blocker": route_hold_blocker,
+                            "submit_gate_blocker": None,
                             "submit_attempted": False,
                             "submit_suppressed": True,
+                            "route_held_until_readiness_converged": True,
                         }
                     else:
-                        self._latest_live_intent_summary = {
-                            **live_intent_summary,
-                            "submit_gate_blocker": None,
-                            "submit_attempted": True,
-                            "submit_suppressed": False,
-                        }
-                    if submit_blocker is not None:
-                        blocked_payload = self._persist_blocked_strategy_intent(
-                            maybe_intent,
-                            occurred_at=execution_bar.end_ts,
-                            reason=submit_blocker,
-                            submit_attempt_id=self._pre_submit_attempt_id(maybe_intent, execution_bar.end_ts),
+                        submit_blocker = (
+                            self._submit_gate_evaluator(execution_bar, working_state, maybe_intent)
+                            if self._submit_gate_evaluator is not None
+                            else None
                         )
-                        self._emit_order_rejection_alert(
-                            maybe_intent,
-                            execution_bar.end_ts,
-                            reason=submit_blocker,
-                            submit_attempt_id=self._pre_submit_attempt_id(maybe_intent, execution_bar.end_ts),
-                        )
-                        self._latest_live_intent_summary = {
-                            **self._latest_live_intent_summary,
-                            "blocked_strategy_intent": blocked_payload,
-                        }
-                    else:
-                        pending = self._execution_engine.submit_intent(
-                            maybe_intent,
-                            signal_bar_id=execution_bar.bar_id if maybe_intent.is_entry else None,
-                            long_entry_family=long_entry_family,
-                            short_entry_family=short_entry_family,
-                            short_entry_source=short_entry_source,
-                        )
-                        if pending is not None:
+                        if submit_blocker is not None:
+                            diagnostic_submit_blocker = submit_blocker
+                            diagnostic_blocker_reason = submit_blocker
+                            diagnostic_final_decision = NoTradeFinalDecision.GOVERNANCE_BLOCKED
+                            self._latest_live_intent_summary = {
+                                **live_intent_summary,
+                                "submit_attempt_id": self._pre_submit_attempt_id(maybe_intent, execution_bar.end_ts),
+                                "submit_gate_blocker": submit_blocker,
+                                "submit_attempted": False,
+                                "submit_suppressed": True,
+                            }
+                        else:
+                            self._latest_live_intent_summary = {
+                                **live_intent_summary,
+                                "submit_gate_blocker": None,
+                                "submit_attempted": True,
+                                "submit_suppressed": False,
+                            }
+                        if submit_blocker is not None:
+                            blocked_payload = self._persist_blocked_strategy_intent(
+                                maybe_intent,
+                                occurred_at=execution_bar.end_ts,
+                                reason=submit_blocker,
+                                submit_attempt_id=self._pre_submit_attempt_id(maybe_intent, execution_bar.end_ts),
+                            )
+                            self._emit_order_rejection_alert(
+                                maybe_intent,
+                                execution_bar.end_ts,
+                                reason=submit_blocker,
+                                submit_attempt_id=self._pre_submit_attempt_id(maybe_intent, execution_bar.end_ts),
+                            )
+                            self._latest_live_intent_summary = {
+                                **self._latest_live_intent_summary,
+                                "blocked_strategy_intent": blocked_payload,
+                            }
+                        else:
+                            pending = self._execution_engine.submit_intent(
+                                maybe_intent,
+                                signal_bar_id=execution_bar.bar_id if maybe_intent.is_entry else None,
+                                long_entry_family=long_entry_family,
+                                short_entry_family=short_entry_family,
+                                short_entry_source=short_entry_source,
+                            )
+                            submit_attempt_was_executed = True
+                        if submit_attempt_was_executed and pending is not None:
                             diagnostic_order_intent_created = True
                             self._latest_live_intent_summary = {
                                 **self._latest_live_intent_summary,
@@ -651,7 +700,7 @@ class StrategyEngine:
                                     pending_broker_order_id=pending.broker_order_id,
                                     submit_attempt_id=pending.submit_attempt_id,
                                 )
-                        else:
+                        elif submit_attempt_was_executed:
                             failure = self._execution_engine.last_submit_failure()
                             diagnostic_blocker_reason = (
                                 failure.error
@@ -690,7 +739,11 @@ class StrategyEngine:
             bar=execution_bar,
             signal_packet=signal_packet,
             strategy_evaluated=True,
-            setup_detected=_signal_present(signal_packet),
+            setup_detected=(
+                diagnostic_setup_detected_override
+                if diagnostic_setup_detected_override is not None
+                else _signal_present(signal_packet)
+            ),
             blocker_reason=diagnostic_blocker_reason,
             submit_blocker=diagnostic_submit_blocker,
             final_decision=diagnostic_final_decision,
@@ -705,6 +758,7 @@ class StrategyEngine:
                 "same_underlying_entry_hold": working_state.same_underlying_entry_hold,
                 "long_entry_source": signal_packet.long_entry_source,
                 "short_entry_source": signal_packet.short_entry_source,
+                **diagnostic_extra,
             },
         )
         self._bar_store.mark_processed(execution_bar)

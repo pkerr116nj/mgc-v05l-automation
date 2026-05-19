@@ -3723,10 +3723,17 @@ class ProbationaryPaperLaneRuntime:
         )
         self._order_timeout_watchdog = _initial_order_timeout_watchdog_status(self.settings)
         self._startup_restore_validation: dict[str, Any] = {}
+        self._runtime_started_at = datetime.now(timezone.utc)
+        self._startup_route_enable_after_ts: datetime | None = None
+        self._startup_route_hold_released_at: datetime | None = None
+        self._startup_route_convergence_source: dict[str, Any] = {}
         self._canary_reference_session_date: date | None = None
         self._canary_reference_close: Decimal | None = None
         self._force_fire_canary_entry_attempted_token: str | None = None
         self._force_fire_canary_exit_attempted_token: str | None = None
+        set_route_hold = getattr(self.strategy_engine, "set_route_hold_evaluator", None)
+        if callable(set_route_hold):
+            set_route_hold(self._startup_route_hold_blocker)
         set_logger = getattr(self.live_polling_service, "set_recovery_event_logger", None)
         if callable(set_logger):
             set_logger(self.structured_logger.log_market_data_recovery_event)
@@ -3780,6 +3787,80 @@ class ProbationaryPaperLaneRuntime:
         )
         self.structured_logger.log_live_timing_event(payload)
         return self.structured_logger.write_live_timing_state(payload)
+
+    def _startup_route_hold_reason_for_bar(self, bar: Bar) -> str | None:
+        if self._startup_route_enable_after_ts is None:
+            return (
+                "STARTUP_CATCHUP_DIAGNOSTIC_ONLY: startup canonical readiness has "
+                "not converged for this runtime yet"
+            )
+        bar_end = bar.end_ts.astimezone(timezone.utc)
+        if bar_end <= self._startup_route_enable_after_ts:
+            return (
+                "STARTUP_CATCHUP_DIAGNOSTIC_ONLY: decision bar "
+                f"{bar_end.isoformat()} is not after runtime_route_enable_after_ts "
+                f"{self._startup_route_enable_after_ts.isoformat()}"
+            )
+        return None
+
+    def _startup_route_hold_blocker(self, bar: Bar, state: Any, intent: OrderIntent) -> str | None:
+        del state, intent
+        return self._startup_route_hold_reason_for_bar(bar)
+
+    def _startup_readiness_convergence_snapshot(self) -> dict[str, Any]:
+        repo_root = Path(__file__).resolve().parents[3]
+        path = repo_root / "outputs" / "operator_dashboard" / "runtime" / "latest_canonical_readiness.json"
+        payload = _read_json(path)
+        canonical = str(payload.get("canonical_readiness") or payload.get("state") or "").strip().upper()
+        generated_at = _parse_iso_datetime_or_none(payload.get("generated_at"))
+        generated_after_runtime_start = (
+            generated_at is not None
+            and generated_at.astimezone(timezone.utc) >= self._runtime_started_at.astimezone(timezone.utc)
+        )
+        blockers = list(payload.get("readiness_blockers") or [])
+        runtime = dict(payload.get("runtime") or {})
+        phase1 = dict(payload.get("phase1_reconciliation") or {})
+        broker_lease = dict(payload.get("broker_truth_lease") or {})
+        clean = (
+            canonical == "READY_SUBMIT_CAPABLE"
+            and generated_after_runtime_start
+            and not blockers
+            and payload.get("live_money_eligible") is False
+            and runtime.get("runtime_ingestion_fresh") is True
+            and phase1.get("classification") == "TRACK_B_PAPER_BROKER_RECONCILED"
+            and broker_lease.get("lease_state") in {"ACTIVE", "ACTIVE_DEGRADED_REFRESH_FAILING"}
+        )
+        return {
+            "path": str(path),
+            "available": bool(payload),
+            "clean": clean,
+            "canonical_readiness": canonical or None,
+            "generated_at": payload.get("generated_at"),
+            "generated_after_runtime_start": generated_after_runtime_start,
+            "runtime_started_at": self._runtime_started_at.isoformat(),
+            "readiness_blocker_count": len(blockers),
+            "runtime_ingestion_fresh": runtime.get("runtime_ingestion_fresh"),
+            "reconciliation_state": phase1.get("classification"),
+            "broker_truth_lease_state": broker_lease.get("lease_state"),
+            "live_money_eligible": payload.get("live_money_eligible"),
+        }
+
+    def _maybe_release_startup_route_hold(self, observed_at: datetime) -> None:
+        if self._startup_route_enable_after_ts is not None:
+            return
+        convergence = self._startup_readiness_convergence_snapshot()
+        self._startup_route_convergence_source = convergence
+        if not convergence.get("clean"):
+            return
+        enable_after = observed_at.astimezone(timezone.utc)
+        self._startup_route_enable_after_ts = enable_after
+        self._startup_route_hold_released_at = datetime.now(timezone.utc)
+        self._write_startup_phase_marker(
+            "startup_route_hold_released",
+            runtime_route_enable_after_ts=enable_after.isoformat(),
+            startup_route_hold_released_at=self._startup_route_hold_released_at.isoformat(),
+            startup_route_convergence_source=convergence,
+        )
 
     def restore_startup(self) -> str | None:
         restore_started_at = datetime.now(timezone.utc)
@@ -4013,6 +4094,7 @@ class ProbationaryPaperLaneRuntime:
 
     def poll_and_process(self) -> tuple[int, dict[str, Any], Path]:
         observed_at = datetime.now(self.settings.timezone_info)
+        self._maybe_release_startup_route_hold(observed_at)
         latest_processed_end_ts = self.repositories.processed_bars.latest_end_ts()
         bars: list[Bar] = []
         strategy_poll_allowed = not self._should_skip_live_poll(observed_at)
@@ -4106,6 +4188,18 @@ class ProbationaryPaperLaneRuntime:
                 "heartbeat_reconciliation": self._heartbeat_reconciliation,
                 "order_timeout_watchdog": self._order_timeout_watchdog,
                 "startup_restore_validation": self._startup_restore_validation,
+                "startup_route_hold_active": self._startup_route_enable_after_ts is None,
+                "runtime_route_enable_after_ts": (
+                    self._startup_route_enable_after_ts.isoformat()
+                    if self._startup_route_enable_after_ts is not None
+                    else None
+                ),
+                "startup_route_hold_released_at": (
+                    self._startup_route_hold_released_at.isoformat()
+                    if self._startup_route_hold_released_at is not None
+                    else None
+                ),
+                "startup_route_convergence_source": dict(self._startup_route_convergence_source),
                 "exit_parity_summary": _build_exit_parity_summary(
                     repositories=self.repositories,
                     strategy_engine=self.strategy_engine,
@@ -4125,12 +4219,15 @@ class ProbationaryPaperLaneRuntime:
                 ),
             }
         )
+        self._maybe_release_startup_route_hold(datetime.now(self.settings.timezone_info))
         self._write_exit_parity_summary(datetime.now(timezone.utc))
         self._write_live_timing_summary(datetime.now(timezone.utc))
         return len(bars), effective_reconciliation, status_path
 
     def _apply_canary_lifecycle(self, bar: Bar) -> None:
         if self.spec.lane_mode != PAPER_EXECUTION_CANARY_MODE:
+            return
+        if self._startup_route_hold_reason_for_bar(bar) is not None:
             return
         session_date = bar.end_ts.astimezone(self.settings.timezone_info).date()
         if self._should_submit_force_fire_canary_entry():

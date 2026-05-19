@@ -7366,6 +7366,253 @@ def test_submit_capable_lane_bridge_block_does_not_create_local_fill(tmp_path: P
     assert probationary_runtime_module.IBKR_RUNTIME_ROUTE_MISS_BLOCKED_PREFIX in failure.error
 
 
+def test_startup_catchup_signal_is_diagnostic_only_before_readiness_convergence(tmp_path: Path) -> None:
+    settings = _build_probationary_settings(tmp_path)
+    repositories = RepositorySet(build_engine(settings.database_url))
+    artifact_dir = tmp_path / "outputs" / "probationary_pattern_engine" / "paper_session" / "lanes" / "startup_hold"
+    structured_logger = StructuredLogger(artifact_dir)
+    alert_dispatcher = AlertDispatcher(structured_logger, repositories.alerts, source_subsystem="startup_route_hold_test")
+    bridge_calls: list[dict[str, object]] = []
+
+    def fake_bridge_runner(*, config):
+        bridge_calls.append({"strategy_id": config.strategy_id, "symbol": config.symbol, "action": config.action})
+        return probationary_runtime_module.IbkrPaperStrategyBridgeArtifacts(
+            classification="PAPER_STRATEGY_INTENT_BLOCKED",
+            report={"detail": "should_not_be_called_for_startup_catchup"},
+            audit_events=[],
+        )
+
+    broker = probationary_runtime_module._IbkrPaperBridgeRuntimeBroker(  # noqa: SLF001
+        lane_id="mgc_1x_all_lanes__london_early_long",
+        source_symbol="MGC",
+        bridge_adapter={
+            "current_order_destination": "ibkr_paper_bridge_submit_capable",
+            "bridge_proxy_mode": "MGC_SIGNAL_DIRECT_PHASE1",
+            "bridge_execution_target": {"symbol": "MGC", "contract_month": "202606"},
+        },
+        repo_root=tmp_path,
+        bridge_runner=fake_bridge_runner,
+    )
+    execution_engine = ExecutionEngine(broker=broker)
+    strategy_engine = StrategyEngine(
+        settings=settings.model_copy(update={"symbol": "MGC"}),
+        repositories=repositories,
+        execution_engine=execution_engine,
+        structured_logger=structured_logger,
+        alert_dispatcher=alert_dispatcher,
+        runtime_identity={
+            "standalone_strategy_id": "gc_mgc_forced_session_baseline_v2__mgc_1x_all_lanes__london_early_long",
+            "strategy_family": "gold_forced_session_baseline_v2",
+            "instrument": "MGC",
+            "lane_id": "mgc_1x_all_lanes__london_early_long",
+        },
+        route_hold_evaluator=lambda bar, state, intent: "STARTUP_CATCHUP_DIAGNOSTIC_ONLY: readiness not converged",
+    )
+    finalized_bar = _build_bar(datetime(2026, 5, 19, 3, 4, tzinfo=ZoneInfo("America/New_York")))
+    _seed_strategy_warmup(strategy_engine, finalized_bar)
+    forced_intent = OrderIntent(
+        order_intent_id=f"{finalized_bar.bar_id}|{OrderIntentType.BUY_TO_OPEN.value}",
+        bar_id=finalized_bar.bar_id,
+        symbol="MGC",
+        intent_type=OrderIntentType.BUY_TO_OPEN,
+        quantity=1,
+        created_at=finalized_bar.end_ts,
+        reason_code="londonEarlyLongV5",
+        signal_id=f"{finalized_bar.bar_id}|signal|LONG|londonEarlyLongV5",
+    )
+    strategy_engine._maybe_create_order_intent = lambda *args, **kwargs: forced_intent  # type: ignore[method-assign]
+
+    strategy_engine.process_bar(finalized_bar)
+
+    assert bridge_calls == []
+    assert repositories.order_intents.list_all() == []
+    assert repositories.fills.list_all() == []
+    assert not (structured_logger.artifact_dir / "blocked_strategy_intent_latest.json").exists()
+    latest_diag = json.loads(
+        (
+            tmp_path
+            / "outputs"
+            / "track_b_execution_core"
+            / "no_trade_diagnostics"
+            / "latest_no_trade_diagnostics.json"
+        ).read_text(encoding="utf-8")
+    )
+    assert latest_diag["lane_id"] == "mgc_1x_all_lanes__london_early_long"
+    assert latest_diag["order_intent_id"] == forced_intent.order_intent_id
+    assert latest_diag["setup_detected"] is True
+    assert latest_diag["final_decision"] == "STARTUP_CATCHUP_DIAGNOSTIC_ONLY"
+    assert "readiness not converged" in latest_diag["blocker_reason"]
+    assert latest_diag["extra"]["route_held_until_readiness_converged"] is True
+    assert latest_diag["extra"]["intended_intent_type"] == OrderIntentType.BUY_TO_OPEN.value
+    assert latest_diag["extra"]["intended_quantity"] == 1
+
+
+def test_stale_lane_db_to_fresh_artifact_jump_is_diagnostic_only(tmp_path: Path) -> None:
+    settings = _build_probationary_settings(tmp_path)
+    repositories = RepositorySet(build_engine(settings.database_url))
+    artifact_dir = tmp_path / "outputs" / "probationary_pattern_engine" / "paper_session" / "lanes" / "startup_gap"
+    structured_logger = StructuredLogger(artifact_dir)
+    alert_dispatcher = AlertDispatcher(structured_logger, repositories.alerts, source_subsystem="startup_route_hold_test")
+    bridge_calls: list[dict[str, object]] = []
+
+    def fake_bridge_runner(*, config):
+        bridge_calls.append({"strategy_id": config.strategy_id, "symbol": config.symbol, "action": config.action})
+        return probationary_runtime_module.IbkrPaperStrategyBridgeArtifacts(
+            classification="PAPER_STRATEGY_INTENT_BLOCKED",
+            report={"detail": "should_not_route_stale_to_fresh_jump"},
+            audit_events=[],
+        )
+
+    broker = probationary_runtime_module._IbkrPaperBridgeRuntimeBroker(  # noqa: SLF001
+        lane_id="mgc_1x_all_lanes__london_early_long",
+        source_symbol="MGC",
+        bridge_adapter={
+            "current_order_destination": "ibkr_paper_bridge_submit_capable",
+            "bridge_proxy_mode": "MGC_SIGNAL_DIRECT_PHASE1",
+            "bridge_execution_target": {"symbol": "MGC", "contract_month": "202606"},
+        },
+        repo_root=tmp_path,
+        bridge_runner=fake_bridge_runner,
+    )
+    execution_engine = ExecutionEngine(broker=broker)
+    enable_after = datetime(2026, 5, 19, 7, 22, 56, tzinfo=timezone.utc)
+    strategy_engine = StrategyEngine(
+        settings=settings.model_copy(update={"symbol": "MGC"}),
+        repositories=repositories,
+        execution_engine=execution_engine,
+        structured_logger=structured_logger,
+        alert_dispatcher=alert_dispatcher,
+        runtime_identity={
+            "standalone_strategy_id": "gc_mgc_forced_session_baseline_v2__mgc_1x_all_lanes__london_early_long",
+            "strategy_family": "gold_forced_session_baseline_v2",
+            "instrument": "MGC",
+            "lane_id": "mgc_1x_all_lanes__london_early_long",
+        },
+        route_hold_evaluator=(
+            lambda bar, state, intent: "STARTUP_CATCHUP_DIAGNOSTIC_ONLY: stale-to-fresh catch-up gap"
+            if bar.end_ts <= enable_after
+            else None
+        ),
+    )
+    stale_to_fresh_jump_bar = _build_bar(datetime(2026, 5, 19, 3, 6, tzinfo=ZoneInfo("America/New_York")))
+    _seed_strategy_warmup(strategy_engine, stale_to_fresh_jump_bar)
+    forced_intent = OrderIntent(
+        order_intent_id=f"{stale_to_fresh_jump_bar.bar_id}|{OrderIntentType.BUY_TO_OPEN.value}",
+        bar_id=stale_to_fresh_jump_bar.bar_id,
+        symbol="MGC",
+        intent_type=OrderIntentType.BUY_TO_OPEN,
+        quantity=1,
+        created_at=stale_to_fresh_jump_bar.end_ts,
+        reason_code="londonEarlyLongV5",
+        signal_id=f"{stale_to_fresh_jump_bar.bar_id}|signal|LONG|londonEarlyLongV5",
+    )
+    strategy_engine._maybe_create_order_intent = lambda *args, **kwargs: forced_intent  # type: ignore[method-assign]
+
+    strategy_engine.process_bar(stale_to_fresh_jump_bar)
+
+    assert bridge_calls == []
+    assert repositories.order_intents.list_all() == []
+    latest_diag = json.loads(
+        (
+            tmp_path
+            / "outputs"
+            / "track_b_execution_core"
+            / "no_trade_diagnostics"
+            / "latest_no_trade_diagnostics.json"
+        ).read_text(encoding="utf-8")
+    )
+    assert latest_diag["setup_detected"] is True
+    assert latest_diag["final_decision"] == "STARTUP_CATCHUP_DIAGNOSTIC_ONLY"
+    assert "stale-to-fresh catch-up gap" in latest_diag["blocker_reason"]
+    assert latest_diag["extra"]["startup_route_hold_blocker"] == latest_diag["blocker_reason"]
+
+
+def test_first_bar_after_startup_route_enable_can_use_guarded_route(tmp_path: Path) -> None:
+    settings = _build_probationary_settings(tmp_path)
+    repositories = RepositorySet(build_engine(settings.database_url))
+    structured_logger = StructuredLogger(
+        tmp_path / "outputs" / "probationary_pattern_engine" / "paper_session" / "lanes" / "startup_hold_released"
+    )
+    alert_dispatcher = AlertDispatcher(structured_logger, repositories.alerts, source_subsystem="startup_route_hold_test")
+    bridge_calls: list[dict[str, object]] = []
+
+    def fake_bridge_runner(*, config):
+        bridge_calls.append({"strategy_id": config.strategy_id, "symbol": config.symbol, "action": config.action})
+        return probationary_runtime_module.IbkrPaperStrategyBridgeArtifacts(
+            classification="PAPER_STRATEGY_INTENT_BLOCKED",
+            report={"detail": "guarded_route_called_after_startup_hold"},
+            audit_events=[],
+        )
+
+    broker = probationary_runtime_module._IbkrPaperBridgeRuntimeBroker(  # noqa: SLF001
+        lane_id="mgc_1x_all_lanes__london_early_long",
+        source_symbol="MGC",
+        bridge_adapter={
+            "current_order_destination": "ibkr_paper_bridge_submit_capable",
+            "bridge_proxy_mode": "MGC_SIGNAL_DIRECT_PHASE1",
+            "bridge_execution_target": {"symbol": "MGC", "contract_month": "202606"},
+        },
+        repo_root=tmp_path,
+        bridge_runner=fake_bridge_runner,
+    )
+    enable_after = datetime(2026, 5, 19, 7, 22, 56, tzinfo=timezone.utc)
+    execution_engine = ExecutionEngine(broker=broker)
+    strategy_engine = StrategyEngine(
+        settings=settings.model_copy(update={"symbol": "MGC"}),
+        repositories=repositories,
+        execution_engine=execution_engine,
+        structured_logger=structured_logger,
+        alert_dispatcher=alert_dispatcher,
+        runtime_identity={
+            "standalone_strategy_id": "gc_mgc_forced_session_baseline_v2__mgc_1x_all_lanes__london_early_long",
+            "strategy_family": "gold_forced_session_baseline_v2",
+            "instrument": "MGC",
+            "lane_id": "mgc_1x_all_lanes__london_early_long",
+        },
+        route_hold_evaluator=(
+            lambda bar, state, intent: "STARTUP_CATCHUP_DIAGNOSTIC_ONLY: catch-up gap"
+            if bar.end_ts <= enable_after
+            else None
+        ),
+    )
+    catchup_bar = _build_bar(datetime(2026, 5, 19, 3, 6, tzinfo=ZoneInfo("America/New_York")))
+    fresh_bar = _build_bar(datetime(2026, 5, 19, 3, 23, tzinfo=ZoneInfo("America/New_York")))
+    _seed_strategy_warmup(strategy_engine, catchup_bar)
+
+    def forced_intent_for_bar(bar, *args, **kwargs):
+        return OrderIntent(
+            order_intent_id=f"{bar.bar_id}|{OrderIntentType.BUY_TO_OPEN.value}",
+            bar_id=bar.bar_id,
+            symbol="MGC",
+            intent_type=OrderIntentType.BUY_TO_OPEN,
+            quantity=1,
+            created_at=bar.end_ts,
+            reason_code="londonEarlyLongV5",
+            signal_id=f"{bar.bar_id}|signal|LONG|londonEarlyLongV5",
+        )
+
+    strategy_engine._maybe_create_order_intent = forced_intent_for_bar  # type: ignore[method-assign]
+
+    strategy_engine.process_bar(catchup_bar)
+    assert bridge_calls == []
+    assert repositories.order_intents.list_all() == []
+
+    strategy_engine.process_bar(fresh_bar)
+
+    assert bridge_calls == [
+        {
+            "strategy_id": "mgc_1x_all_lanes__london_early_long",
+            "symbol": "MGC",
+            "action": "BUY",
+        }
+    ]
+    intent_rows = repositories.order_intents.list_all()
+    assert len(intent_rows) == 1
+    assert intent_rows[0]["order_intent_id"].endswith(f"|{OrderIntentType.BUY_TO_OPEN.value}")
+    assert intent_rows[0]["order_status"] == OrderStatus.REJECTED.value
+    assert intent_rows[0]["broker_order_id"] is None
+
+
 def test_internal_only_lane_still_creates_explicit_internal_only_fill_label(tmp_path: Path) -> None:
     settings = _build_probationary_settings(tmp_path).model_copy(update={"symbol": "GC"})
     repositories = RepositorySet(build_engine(settings.database_url))
