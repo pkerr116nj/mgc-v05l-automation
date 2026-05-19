@@ -93,11 +93,28 @@ def test_launch_script_makes_explicit_config_stack_authoritative() -> None:
     assert "Requested paper runtime config stack is missing required config paths." in script
     assert "assert_runtime_config_paths_match_request" in script
     assert "cp \"${REQUESTED_CONFIG_PATHS_FILE}\" \"${PAPER_CONFIG_PATHS_FILE}\"" in script
-    assert "MGC_PROBATIONARY_PAPER_CONFIG_PATHS=\"$(requested_config_paths_arg)\"" in script
+    assert "export MGC_PROBATIONARY_PAPER_CONFIG_PATHS={q(requested_stack)}" in script
     assert "pre-existing-runtime" in script
     assert "post-start" in script
     assert "pre-success" in script
     assert "Active paper runtime config paths did not match requested launch config stack" in script
+
+
+def test_launch_script_screen_wrapper_uses_resolved_paths_and_env() -> None:
+    script = RUN_SCRIPT.read_text(encoding="utf-8")
+
+    assert "write_paper_screen_wrapper" in script
+    assert "local wrapper_path=\"${PAPER_PID_FILE}.screen_wrapper.sh\"" in script
+    assert "requested_stack=\"$(requested_config_paths_arg)\"" in script
+    assert "required_stack=\"$(resolved_config_paths_arg \"${REQUIRED_PAPER_CONFIG_PATHS}\")\"" in script
+    assert "export REPO_ROOT={q(repo_root)}" in script
+    assert "export PYTHON_BIN={q(python_bin)}" in script
+    assert "export PYTHONPATH={q(str(Path(repo_root) / \"src\"))}" in script
+    assert "export MGC_HEADLESS_SUPERVISED_PAPER_CONFIG_PATHS={q(requested_stack)}" in script
+    assert "export MGC_HEADLESS_REQUIRED_PAPER_CONFIGS={q(required_stack)}" in script
+    assert "export MGC_HEADLESS_REQUIRED_PAPER_CONFIG_PATHS={q(required_stack)}" in script
+    assert "headless_screen_wrapper_start" in script
+    assert "screen -dmS \"${session_name}\" /bin/bash \"${wrapper_path}\"" in script
 
 
 def test_launch_script_polls_for_late_post_start_runtime_pid() -> None:
@@ -109,7 +126,7 @@ def test_launch_script_polls_for_late_post_start_runtime_pid() -> None:
     assert "local deadline=$((SECONDS + timeout_seconds))" in script
     assert "assert_runtime_config_paths_match_request \"${phase}\"" in script
     assert 'case "${rc}" in' in script
-    assert "Paper runtime PID did not become available during ${phase} within ${timeout_seconds}s." in script
+    assert "RUNTIME_PID_UNAVAILABLE: Paper runtime PID did not become available during ${phase} within ${timeout_seconds}s." in script
     assert 'wait_for_runtime_config_paths_match_request "post-start" "${POST_START_PID_WAIT_TIMEOUT_SECONDS}"' in script
     launch_flow = script[script.index("if ! start_paper_runtime") :]
     assert launch_flow.index("wait_for_runtime_config_paths_match_request \"post-start\"") < launch_flow.index(
@@ -122,6 +139,9 @@ def test_launch_script_pid_polling_fails_closed_for_wrong_root_or_config() -> No
 
     assert 'subprocess.check_output(["ps", "-p", pid, "-o", "command="]' in script
     assert 'subprocess.check_output(["lsof", "-a", "-p", pid, "-d", "cwd", "-Fn"]' in script
+    assert 'runtime_markers = ("mgc_v05l.app.main", "probationary-paper-soak")' in script
+    assert "RUNTIME_PID_PENDING" in script
+    assert "RUNTIME_PID_UNAVAILABLE: Paper runtime PID is unavailable during ${phase}." in script
     assert "Paper runtime root mismatch during {phase}" in script
     assert "Paper runtime config path mismatch during {phase}" in script
     assert "raise SystemExit(2)" in script
@@ -139,6 +159,18 @@ def test_launch_script_post_start_guard_still_enforces_required_overlay_stack() 
     assert "persist_requested_config_paths" in script
     assert script.index("persist_requested_config_paths") < script.index("assert_required_config_paths_present")
     assert script.index("assert_required_config_paths_present") < script.index("start_paper_runtime")
+
+
+def test_launch_script_reports_missing_runtime_pid_separately_from_config_mismatch() -> None:
+    script = RUN_SCRIPT.read_text(encoding="utf-8")
+
+    assert "RUNTIME_PID_UNAVAILABLE" in script
+    assert "Active paper runtime config paths did not match requested launch config stack." in script
+    post_start = script[script.index('wait_for_runtime_config_paths_match_request "post-start"') :]
+    assert "wait_rc=$?" in post_start
+    assert "if [[ \"${wait_rc}\" -eq 1 ]]" in post_start
+    assert "Paper runtime PID unavailable during post-start." in post_start
+    assert "Active paper runtime config paths did not match requested launch config stack." in post_start
 
 
 def test_launch_script_refreshes_reconciliation_before_success_and_stops_on_hard_blocks() -> None:

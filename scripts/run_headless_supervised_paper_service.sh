@@ -267,6 +267,27 @@ print(":".join(rows))
 PY
 }
 
+resolved_config_paths_arg() {
+  local raw="$1"
+  "${PYTHON_BIN}" - <<'PY' "${REPO_ROOT}" "${raw}"
+import sys
+from pathlib import Path
+
+repo_root = Path(sys.argv[1])
+raw = sys.argv[2]
+rows = []
+for item in raw.replace(",", ":").split(":"):
+    item = item.strip()
+    if not item:
+        continue
+    path = Path(item)
+    if not path.is_absolute():
+        path = repo_root / path
+    rows.append(str(path.resolve()))
+print(":".join(rows))
+PY
+}
+
 assert_required_config_paths_present() {
   local required_raw="$1"
   if [[ -z "${required_raw}" ]]; then
@@ -304,7 +325,7 @@ assert_runtime_config_paths_match_request() {
   local pid
   pid="$(read_pid_file "${PAPER_PID_FILE}" || true)"
   if [[ -z "${pid}" ]] || ! kill -0 "${pid}" 2>/dev/null; then
-    echo "Paper runtime PID is unavailable during ${phase}." >&2
+    echo "RUNTIME_PID_UNAVAILABLE: Paper runtime PID is unavailable during ${phase}." >&2
     return 1
   fi
   "${PYTHON_BIN}" - <<'PY' "${pid}" "${REQUESTED_CONFIG_PATHS_FILE}" "${phase}" "${REPO_ROOT}"
@@ -322,6 +343,14 @@ try:
 except (OSError, subprocess.CalledProcessError) as exc:
     print(f"Unable to inspect paper runtime command during {phase}: {exc}", file=sys.stderr)
     raise SystemExit(2)
+runtime_markers = ("mgc_v05l.app.main", "probationary-paper-soak")
+if not all(marker in command for marker in runtime_markers):
+    print(
+        f"RUNTIME_PID_PENDING: PID {pid} is alive during {phase} but has not execed the Python paper runtime yet.",
+        file=sys.stderr,
+    )
+    print(f"Active command: {command}", file=sys.stderr)
+    raise SystemExit(1)
 try:
     cwd_output = subprocess.check_output(["lsof", "-a", "-p", pid, "-d", "cwd", "-Fn"], text=True).strip()
 except (OSError, subprocess.CalledProcessError) as exc:
@@ -374,7 +403,7 @@ wait_for_runtime_config_paths_match_request() {
     fi
     sleep "${POLL_INTERVAL_SECONDS}"
   done
-  echo "Paper runtime PID did not become available during ${phase} within ${timeout_seconds}s." >&2
+  echo "RUNTIME_PID_UNAVAILABLE: Paper runtime PID did not become available during ${phase} within ${timeout_seconds}s." >&2
   return 1
 }
 
@@ -391,16 +420,79 @@ screen_session_name() {
   printf 'mgc_%s_%s_%s' "${suffix}" "$(date +%Y%m%d%H%M%S)" "$$"
 }
 
+write_paper_screen_wrapper() {
+  local wrapper_path="${PAPER_PID_FILE}.screen_wrapper.sh"
+  local requested_stack
+  local required_stack
+  requested_stack="$(requested_config_paths_arg)"
+  required_stack="$(resolved_config_paths_arg "${REQUIRED_PAPER_CONFIG_PATHS}")"
+  "${PYTHON_BIN}" - <<'PY' \
+    "${wrapper_path}" \
+    "${REPO_ROOT}" \
+    "${PYTHON_BIN}" \
+    "${SCRIPT_DIR}" \
+    "${PAPER_PID_FILE}" \
+    "${PAPER_LOG_FILE}" \
+    "${requested_stack}" \
+    "${required_stack}"
+import shlex
+import sys
+from pathlib import Path
+
+(
+    wrapper_path,
+    repo_root,
+    python_bin,
+    script_dir,
+    pid_file,
+    log_file,
+    requested_stack,
+    required_stack,
+) = sys.argv[1:]
+
+q = shlex.quote
+path = Path(wrapper_path)
+path.parent.mkdir(parents=True, exist_ok=True)
+payload = f"""#!/usr/bin/env bash
+set -euo pipefail
+cd {q(repo_root)}
+export REPO_ROOT={q(repo_root)}
+export PYTHON_BIN={q(python_bin)}
+if [[ -n "${{PYTHONPATH:-}}" ]]; then
+  export PYTHONPATH={q(str(Path(repo_root) / "src"))}:$PYTHONPATH
+else
+  export PYTHONPATH={q(str(Path(repo_root) / "src"))}
+fi
+export MGC_HEADLESS_PAPER_PID_FILE={q(pid_file)}
+export MGC_HEADLESS_PAPER_LOG_FILE={q(log_file)}
+export MGC_HEADLESS_SCRIPT_DIR={q(script_dir)}
+export MGC_PROBATIONARY_PAPER_CONFIG_PATHS={q(requested_stack)}
+export MGC_HEADLESS_SUPERVISED_PAPER_CONFIG_PATHS={q(requested_stack)}
+export MGC_HEADLESS_REQUIRED_PAPER_CONFIGS={q(required_stack)}
+export MGC_HEADLESS_REQUIRED_PAPER_CONFIG_PATHS={q(required_stack)}
+mkdir -p "$(dirname "$MGC_HEADLESS_PAPER_PID_FILE")" "$(dirname "$MGC_HEADLESS_PAPER_LOG_FILE")"
+{{
+  printf '%s\\n' "headless_screen_wrapper_start generated_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  printf '%s\\n' "repo_root=$REPO_ROOT"
+  printf '%s\\n' "python_bin=$PYTHON_BIN"
+  printf '%s\\n' "config_stack=$MGC_PROBATIONARY_PAPER_CONFIG_PATHS"
+}} >> "$MGC_HEADLESS_PAPER_LOG_FILE"
+echo "$$" > "$MGC_HEADLESS_PAPER_PID_FILE"
+exec bash "$MGC_HEADLESS_SCRIPT_DIR/run_probationary_paper_soak.sh" >> "$MGC_HEADLESS_PAPER_LOG_FILE" 2>&1
+"""
+path.write_text(payload, encoding="utf-8")
+path.chmod(0o755)
+print(path)
+PY
+}
+
 launch_screen_paper_runtime() {
   local session_name
+  local wrapper_path
   session_name="$(screen_session_name "paper_runtime")"
   printf '%s\n' "${session_name}" > "${PAPER_PID_FILE}.screen_session"
-  MGC_HEADLESS_PAPER_PID_FILE="${PAPER_PID_FILE}" \
-    MGC_HEADLESS_PAPER_LOG_FILE="${PAPER_LOG_FILE}" \
-    MGC_HEADLESS_SCRIPT_DIR="${SCRIPT_DIR}" \
-    MGC_PROBATIONARY_PAPER_CONFIG_PATHS="$(requested_config_paths_arg)" \
-    screen -dmS "${session_name}" /bin/zsh -lc \
-    'echo "$$" > "${MGC_HEADLESS_PAPER_PID_FILE}"; exec bash "${MGC_HEADLESS_SCRIPT_DIR}/run_probationary_paper_soak.sh" >> "${MGC_HEADLESS_PAPER_LOG_FILE}" 2>&1'
+  wrapper_path="$(write_paper_screen_wrapper)"
+  screen -dmS "${session_name}" /bin/bash "${wrapper_path}"
 }
 
 launch_screen_dashboard_manager() {
@@ -416,13 +508,10 @@ launch_screen_dashboard_manager() {
 
 launch_detached_paper_runtime() {
   local label="com.mgc-v05l.headless-supervised-paper.runtime.$(date +%Y%m%d%H%M%S).$$"
+  local wrapper_path
   printf '%s\n' "${label}" > "${PAPER_PID_FILE}.launchctl_label"
-  launchctl submit -l "${label}" -- /usr/bin/env \
-    MGC_HEADLESS_PAPER_PID_FILE="${PAPER_PID_FILE}" \
-    MGC_HEADLESS_PAPER_LOG_FILE="${PAPER_LOG_FILE}" \
-    MGC_HEADLESS_SCRIPT_DIR="${SCRIPT_DIR}" \
-    MGC_PROBATIONARY_PAPER_CONFIG_PATHS="$(requested_config_paths_arg)" \
-    /bin/zsh -lc 'echo "$$" > "${MGC_HEADLESS_PAPER_PID_FILE}"; exec bash "${MGC_HEADLESS_SCRIPT_DIR}/run_probationary_paper_soak.sh" >> "${MGC_HEADLESS_PAPER_LOG_FILE}" 2>&1'
+  wrapper_path="$(write_paper_screen_wrapper)"
+  launchctl submit -l "${label}" -- /bin/bash "${wrapper_path}"
 }
 
 launch_detached_dashboard_manager() {
@@ -681,9 +770,17 @@ if ! start_paper_runtime; then
   write_startup_summary "BLOCKED" "Failed to start the supervised paper runtime." "false"
   exit 1
 fi
-if ! wait_for_runtime_config_paths_match_request "post-start" "${POST_START_PID_WAIT_TIMEOUT_SECONDS}"; then
+set +e
+wait_for_runtime_config_paths_match_request "post-start" "${POST_START_PID_WAIT_TIMEOUT_SECONDS}"
+wait_rc=$?
+set -e
+if [[ "${wait_rc}" -ne 0 ]]; then
   stop_paper_runtime_best_effort
-  write_startup_summary "BLOCKED" "Active paper runtime config paths did not match requested launch config stack." "false"
+  if [[ "${wait_rc}" -eq 1 ]]; then
+    write_startup_summary "BLOCKED" "Paper runtime PID unavailable during post-start." "false"
+  else
+    write_startup_summary "BLOCKED" "Active paper runtime config paths did not match requested launch config stack." "false"
+  fi
   exit 2
 fi
 if ! start_dashboard_manager; then
