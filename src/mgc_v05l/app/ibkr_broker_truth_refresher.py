@@ -44,7 +44,7 @@ class BrokerTruthRefreshConfig:
     timeout_seconds: float = 8.0
     skip_market_data_probe: bool = True
     skip_duplicate_client_id_probe: bool = True
-    refresh_lease_artifact: bool = False
+    refresh_lease_artifact: bool = True
     gc_expiry: str = "202606"
     mgc_expiry: str = "202606"
 
@@ -106,7 +106,7 @@ def run_broker_truth_refresh_once(
         )
     _write_json_atomically(attempt_status_path, attempt_status)
     write_broker_truth_refresh_status(status_path=config.status_path, var_status_path=config.var_status_path, status=status)
-    lease_status = _refresh_broker_truth_lease_if_enabled(config=config)
+    lease_status = _refresh_broker_truth_lease_if_enabled(config=config, current_time=completed_at.isoformat())
     if lease_status:
         status = {**status, "broker_truth_lease_refresh": lease_status}
         write_broker_truth_refresh_status(status_path=config.status_path, var_status_path=config.var_status_path, status=status)
@@ -375,7 +375,7 @@ def _benign_account_unsubscribe_after_complete_truth(
     return benign_unsubscribe_seen and not severe_errors
 
 
-def _refresh_broker_truth_lease_if_enabled(*, config: BrokerTruthRefreshConfig) -> dict[str, Any]:
+def _refresh_broker_truth_lease_if_enabled(*, config: BrokerTruthRefreshConfig, current_time: str | None = None) -> dict[str, Any]:
     if not config.refresh_lease_artifact:
         return {}
     try:
@@ -428,7 +428,7 @@ def _refresh_broker_truth_lease_if_enabled(*, config: BrokerTruthRefreshConfig) 
             repo_root=repo_root,
             account_id=config.account_id,
             allowed_instruments=["MGC", "MNQ", "GC"],
-            current_time=None,
+            current_time=current_time,
             policy={
                 "max_entry_age_seconds": 300.0,
                 "max_exit_age_seconds": 900.0,
