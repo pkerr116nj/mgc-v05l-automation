@@ -39,6 +39,16 @@ Hard gates remain mandatory:
 
 B+ diagnostics are sidecar metadata on runtime intent summaries. The SignalPacket source id and OrderIntent.reason_code stay on the canonical source id so approved-source governance remains intact.
 
+## Diagnostic Artifacts
+
+Every live scorer invocation writes diagnostic-only score payloads, including rejected B+ evaluations:
+
+- Lane latest: `outputs/probationary_pattern_engine/paper_session/lanes/<lane_id>/b_plus_setup_score_latest.json`
+- Lane history: `outputs/probationary_pattern_engine/paper_session/lanes/<lane_id>/b_plus_setup_score_events.jsonl`
+- Session aggregate: `outputs/probationary_pattern_engine/paper_session/b_plus_setup_score_events.jsonl`
+
+These artifacts are explicitly non-authoritative. They do not create order intents, do not attempt routes, do not mutate broker or lifecycle state, and do not change live-money eligibility.
+
 ## Non-Goals
 
 - No production promotion.

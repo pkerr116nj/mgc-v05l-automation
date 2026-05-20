@@ -17,6 +17,7 @@ from .operational_maturation_runtime import (
     b_plus_diagnostic_payload,
     b_plus_session_key,
     b_plus_setup_score,
+    emit_b_plus_diagnostic,
     operational_entry_reason,
 )
 
@@ -194,6 +195,7 @@ class IndexFuturesForcedSessionStrategyEngine(StrategyEngine):
                     source_id=definition.source_id,
                     side=definition.side,
                 )
+                emit_b_plus_diagnostic(lane_spec=self._lane_spec, payload=self._latest_b_plus_setup_score)
                 if b_plus_result.b_plus_match:
                     used_b_plus_keys = set(used_b_plus_keys)
                     used_b_plus_keys.add(b_plus_key)

@@ -8,7 +8,11 @@ from zoneinfo import ZoneInfo
 import mgc_v05l.app.asia_london_participation_runtime as asia_runtime
 import mgc_v05l.app.gc_mgc_forced_session_runtime as gold_runtime
 import mgc_v05l.app.index_futures_forced_session_runtime as index_runtime
-from mgc_v05l.app.operational_maturation_runtime import b_plus_setup_score
+from mgc_v05l.app.operational_maturation_runtime import (
+    b_plus_diagnostic_payload,
+    b_plus_setup_score,
+    emit_b_plus_diagnostic,
+)
 from mgc_v05l.domain.models import Bar
 
 
@@ -319,3 +323,52 @@ def test_b_plus_runtime_fails_closed_for_live_money_eligible_lane() -> None:
     signal = engine._evaluate_signals(_packet(bars[-1]), [])  # noqa: SLF001
 
     assert signal.long_entry is False
+
+
+def test_b_plus_rejected_score_diagnostic_is_persisted_without_route_authority(tmp_path) -> None:
+    start = datetime(2026, 5, 20, 8, 20, tzinfo=ZoneInfo("America/New_York"))
+    bars = [_bar("MNQ", start + timedelta(minutes=3 * index), close="100.05") for index in range(1, 6)]
+    lane_spec = SimpleNamespace(
+        symbol="MNQ",
+        lane_id="mnq_test",
+        artifacts_dir=str(tmp_path / "lanes" / "mnq_test"),
+        required_market_data_provenance="DATABENTO_REALTIME_PHASE1",
+        market_data_source="phase1_runtime_artifact",
+        runtime_overlay_params={**_b_plus_params(), "operational_maturation_b_plus_threshold": 0.84},
+        paper_only=True,
+        live_money_eligible=False,
+    )
+    result = b_plus_setup_score(
+        lane_spec=lane_spec,
+        segment_bars=bars,
+        current_index=4,
+        setup_bar_count=4,
+        tick_size=0.1,
+        side="LONG",
+        exact_match=False,
+        preferred_or_near_trigger=False,
+        fallback_entry_bar=8,
+    )
+    payload = b_plus_diagnostic_payload(
+        result=result,
+        bar=bars[-1],
+        lane_id="mnq_test",
+        source_id=index_runtime.INDEX_NY_EARLY_LONG_SOURCE,
+        side="LONG",
+    )
+
+    written = emit_b_plus_diagnostic(lane_spec=lane_spec, payload=payload)
+
+    assert result.b_plus_match is False
+    assert len(written) == 3
+    latest = (tmp_path / "lanes" / "mnq_test" / "b_plus_setup_score_latest.json").read_text()
+    history = (tmp_path / "lanes" / "mnq_test" / "b_plus_setup_score_events.jsonl").read_text()
+    aggregate = (tmp_path / "b_plus_setup_score_events.jsonl").read_text()
+    for text in (latest, history, aggregate):
+        assert '"b_plus_match": false' in text
+        assert '"diagnostic_only": true' in text
+        assert '"route_authority_changed": false' in text
+        assert '"order_intent_created_by_diagnostic": false' in text
+        assert '"route_attempted_by_diagnostic": false' in text
+        assert '"broker_mutation": false' in text
+        assert '"lifecycle_mutation": false' in text

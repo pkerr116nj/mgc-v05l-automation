@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import json
 from dataclasses import asdict, dataclass
+from datetime import UTC, datetime
+from pathlib import Path
 from typing import Any
 
 from ..execution_core.track_b_entry_acceptance import (
@@ -328,8 +331,51 @@ def b_plus_diagnostic_payload(*, result: BPlusSetupScore, bar: Any, lane_id: str
         "b_plus_setup_score": True,
         "paper_only": True,
         "live_money_eligible": False,
+        "diagnostic_only": True,
+        "route_authority_changed": False,
+        "order_intent_created_by_diagnostic": False,
+        "route_attempted_by_diagnostic": False,
+        "broker_mutation": False,
+        "lifecycle_mutation": False,
         "labels": list(B_PLUS_SETUP_SCORE_LABELS),
     }
+
+
+def emit_b_plus_diagnostic(*, lane_spec: Any, payload: dict[str, Any]) -> tuple[Path, ...]:
+    """Persist a PAPER-only B+ scorer observation without affecting routing.
+
+    The runtime calls this for accepted and rejected scorer evaluations so score
+    distributions are visible before an accepted B+ entry appears. Failures are
+    deliberately swallowed because diagnostics must not alter strategy behavior.
+    """
+
+    artifacts_dir_raw = getattr(lane_spec, "artifacts_dir", None)
+    if not artifacts_dir_raw:
+        return ()
+    try:
+        artifacts_dir = Path(str(artifacts_dir_raw))
+        event = {
+            **payload,
+            "diagnostic_generated_at": datetime.now(UTC).isoformat(),
+            "diagnostic_artifact_schema": "track_b_b_plus_setup_score_diagnostic_v1",
+        }
+        artifacts_dir.mkdir(parents=True, exist_ok=True)
+        latest_path = artifacts_dir / "b_plus_setup_score_latest.json"
+        history_path = artifacts_dir / "b_plus_setup_score_events.jsonl"
+        latest_path.write_text(json.dumps(event, indent=2, sort_keys=True, default=_json_default) + "\n", encoding="utf-8")
+        with history_path.open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps(event, sort_keys=True, default=_json_default) + "\n")
+
+        written = [latest_path, history_path]
+        if artifacts_dir.parent.name == "lanes":
+            session_dir = artifacts_dir.parent.parent
+            session_history = session_dir / "b_plus_setup_score_events.jsonl"
+            with session_history.open("a", encoding="utf-8") as handle:
+                handle.write(json.dumps(event, sort_keys=True, default=_json_default) + "\n")
+            written.append(session_history)
+        return tuple(written)
+    except Exception:
+        return ()
 
 
 def _b_plus_dimension_scores(*, components: dict[str, bool], preferred_or_near_trigger: bool) -> dict[str, float]:
@@ -423,3 +469,7 @@ def _coerce_float(value: Any, *, default: float) -> float:
         return float(value)
     except (TypeError, ValueError):
         return default
+
+
+def _json_default(value: Any) -> str:
+    return str(value)
