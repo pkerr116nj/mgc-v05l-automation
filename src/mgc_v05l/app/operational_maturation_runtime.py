@@ -307,6 +307,10 @@ def augment_intent_summary_with_b_plus(summary: dict[str, object], engine: Any, 
     }
 
 
+def b_plus_can_promote_to_order_intent(engine: Any) -> bool:
+    return not bool(getattr(engine, "_startup_restore_in_progress", False))
+
+
 def b_plus_diagnostic_payload(*, result: BPlusSetupScore, bar: Any, lane_id: str, source_id: str, side: str) -> dict[str, Any]:
     return {
         "bar_id": getattr(bar, "bar_id", None),

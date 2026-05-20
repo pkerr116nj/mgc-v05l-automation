@@ -1512,7 +1512,11 @@ class StrategyEngine:
         self._feature_history = list(self._context_feature_histories.get(self._primary_context_timeframe, []))
         if self._feature_history:
             self._last_feature_packet = self._feature_history[-1]
-            self._latest_context_signal_packet = self._evaluate_signals(self._feature_history[-1], self._feature_history)
+            self._startup_restore_in_progress = True
+            try:
+                self._latest_context_signal_packet = self._evaluate_signals(self._feature_history[-1], self._feature_history)
+            finally:
+                self._startup_restore_in_progress = False
         if self._execution_bar_history:
             self._last_execution_bar_id = self._execution_bar_history[-1].bar_id
             self._last_execution_bar_evaluated_at = self._execution_bar_history[-1].end_ts

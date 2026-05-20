@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import ast
 import json
+from dataclasses import replace
 from datetime import datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
@@ -16,7 +17,9 @@ from mgc_v05l.app.operational_maturation_runtime import (
     b_plus_setup_score,
     emit_b_plus_diagnostic,
 )
+from mgc_v05l.domain.enums import AddDirectionPolicy, OrderIntentType, ParticipationPolicy, StrategyStatus
 from mgc_v05l.domain.models import Bar
+from mgc_v05l.strategy.trade_state import build_initial_state
 
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -83,6 +86,27 @@ def _active_overlay_lanes() -> list[dict[str, object]]:
         if line.startswith("probationary_paper_lanes_json: ")
     )
     return list(json.loads(ast.literal_eval(raw)))
+
+
+def _ready_state(at: datetime):
+    return replace(build_initial_state(at), strategy_status=StrategyStatus.READY)
+
+
+def _intent_settings(symbol: str = "MNQ") -> SimpleNamespace:
+    return SimpleNamespace(
+        symbol=symbol,
+        trade_size=1,
+        warmup_bars_required=lambda: 1,
+        add_direction_policy=AddDirectionPolicy.SAME_DIRECTION_ONLY,
+        participation_policy=ParticipationPolicy.SINGLE_ENTRY_ONLY,
+        max_concurrent_entries=1,
+        max_adds_after_entry=0,
+        max_position_quantity=1,
+    )
+
+
+def _exit_decision() -> SimpleNamespace:
+    return SimpleNamespace(long_exit=False, short_exit=False, primary_reason=None)
 
 
 def test_gold_operational_maturation_bar5_entry_is_opt_in() -> None:
@@ -488,3 +512,92 @@ def test_b_plus_rejected_score_diagnostic_is_persisted_without_route_authority(t
         assert '"route_attempted_by_diagnostic": false' in text
         assert '"broker_mutation": false' in text
         assert '"lifecycle_mutation": false' in text
+
+
+def test_accepted_b_plus_match_creates_normal_paper_order_intent_candidate(tmp_path) -> None:
+    start = datetime(2026, 5, 20, 8, 20, tzinfo=ZoneInfo("America/New_York"))
+    bars = [_bar("MNQ", start + timedelta(minutes=3 * index), close="100.70") for index in range(1, 6)]
+    engine = object.__new__(index_runtime.IndexFuturesForcedSessionStrategyEngine)
+    engine._lane_spec = SimpleNamespace(
+        symbol="MNQ",
+        lane_id="mnq_test",
+        artifacts_dir=str(tmp_path / "lanes" / "mnq_test"),
+        runtime_overlay_params=_b_plus_params(),
+        paper_only=True,
+        live_money_eligible=False,
+        required_market_data_provenance="DATABENTO_REALTIME_PHASE1",
+        market_data_source="phase1_runtime_artifact",
+    )
+    engine._runtime_definition = index_runtime.INDEX_FORCED_SESSION_RUNTIME_BY_SOURCE[index_runtime.INDEX_NY_EARLY_LONG_SOURCE]
+    engine._bar_history = bars
+    engine._settings = _intent_settings("MNQ")
+
+    signal = engine._evaluate_signals(_packet(bars[-1]), [])  # noqa: SLF001
+    intent = engine._maybe_create_order_intent(bars[-1], signal, _ready_state(bars[-1].end_ts), _exit_decision())  # noqa: SLF001
+
+    assert signal.long_entry is True
+    assert signal.long_entry_source == index_runtime.INDEX_NY_EARLY_LONG_SOURCE
+    assert intent is not None
+    assert intent.intent_type == OrderIntentType.BUY_TO_OPEN
+    assert intent.symbol == "MNQ"
+    assert intent.reason_code == index_runtime.INDEX_NY_EARLY_LONG_SOURCE
+    assert engine._latest_b_plus_setup_score["b_plus_match"] is True
+    assert engine._latest_b_plus_setup_score["diagnostic_only"] is True
+    assert engine._latest_b_plus_setup_score["route_attempted_by_diagnostic"] is False
+
+
+def test_rejected_b_plus_match_does_not_create_order_intent_candidate(tmp_path) -> None:
+    start = datetime(2026, 5, 20, 8, 20, tzinfo=ZoneInfo("America/New_York"))
+    bars = [_bar("MNQ", start + timedelta(minutes=3 * index), close="100.05") for index in range(1, 6)]
+    engine = object.__new__(index_runtime.IndexFuturesForcedSessionStrategyEngine)
+    engine._lane_spec = SimpleNamespace(
+        symbol="MNQ",
+        lane_id="mnq_test",
+        artifacts_dir=str(tmp_path / "lanes" / "mnq_test"),
+        runtime_overlay_params={**_b_plus_params(), "operational_maturation_b_plus_threshold": 0.84},
+        paper_only=True,
+        live_money_eligible=False,
+        required_market_data_provenance="DATABENTO_REALTIME_PHASE1",
+        market_data_source="phase1_runtime_artifact",
+    )
+    engine._runtime_definition = index_runtime.INDEX_FORCED_SESSION_RUNTIME_BY_SOURCE[index_runtime.INDEX_NY_EARLY_LONG_SOURCE]
+    engine._bar_history = bars
+    engine._settings = _intent_settings("MNQ")
+
+    signal = engine._evaluate_signals(_packet(bars[-1]), [])  # noqa: SLF001
+    intent = engine._maybe_create_order_intent(bars[-1], signal, _ready_state(bars[-1].end_ts), _exit_decision())  # noqa: SLF001
+
+    assert engine._latest_b_plus_setup_score["b_plus_match"] is False
+    assert signal.long_entry is False
+    assert intent is None
+
+
+def test_startup_restore_b_plus_is_diagnostic_only_and_does_not_consume_session_key(tmp_path) -> None:
+    start = datetime(2026, 5, 20, 8, 20, tzinfo=ZoneInfo("America/New_York"))
+    bars = [_bar("MNQ", start + timedelta(minutes=3 * index), close="100.70") for index in range(1, 6)]
+    engine = object.__new__(index_runtime.IndexFuturesForcedSessionStrategyEngine)
+    engine._lane_spec = SimpleNamespace(
+        symbol="MNQ",
+        lane_id="mnq_test",
+        artifacts_dir=str(tmp_path / "lanes" / "mnq_test"),
+        runtime_overlay_params=_b_plus_params(),
+        paper_only=True,
+        live_money_eligible=False,
+        required_market_data_provenance="DATABENTO_REALTIME_PHASE1",
+        market_data_source="phase1_runtime_artifact",
+    )
+    engine._runtime_definition = index_runtime.INDEX_FORCED_SESSION_RUNTIME_BY_SOURCE[index_runtime.INDEX_NY_EARLY_LONG_SOURCE]
+    engine._bar_history = bars
+    engine._startup_restore_in_progress = True
+
+    restore_signal = engine._evaluate_signals(_packet(bars[-1]), [])  # noqa: SLF001
+
+    assert engine._latest_b_plus_setup_score["b_plus_match"] is True
+    assert restore_signal.long_entry is False
+    assert not getattr(engine, "_b_plus_session_keys", set())
+
+    engine._startup_restore_in_progress = False
+    live_signal = engine._evaluate_signals(_packet(bars[-1]), [])  # noqa: SLF001
+
+    assert live_signal.long_entry is True
+    assert getattr(engine, "_b_plus_session_keys", set())

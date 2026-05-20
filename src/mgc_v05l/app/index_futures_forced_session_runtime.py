@@ -14,6 +14,7 @@ from ..strategy.strategy_engine import StrategyEngine, _empty_signal_packet_payl
 from .index_futures_forced_session_research import label_stock_index_segment, stock_index_trade_date_for_timestamp
 from .operational_maturation_runtime import (
     augment_intent_summary_with_b_plus,
+    b_plus_can_promote_to_order_intent,
     b_plus_diagnostic_payload,
     b_plus_session_key,
     b_plus_setup_score,
@@ -196,7 +197,7 @@ class IndexFuturesForcedSessionStrategyEngine(StrategyEngine):
                     side=definition.side,
                 )
                 emit_b_plus_diagnostic(lane_spec=self._lane_spec, payload=self._latest_b_plus_setup_score)
-                if b_plus_result.b_plus_match:
+                if b_plus_result.b_plus_match and b_plus_can_promote_to_order_intent(self):
                     used_b_plus_keys = set(used_b_plus_keys)
                     used_b_plus_keys.add(b_plus_key)
                     self._b_plus_session_keys = used_b_plus_keys
