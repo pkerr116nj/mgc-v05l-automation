@@ -59,6 +59,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from mgc_v05l.execution_core.track_b_readiness_authority import build_track_b_readiness_authority
+
 
 MODE = os.environ["PREFLIGHT_MODE"]
 REPO_ROOT = Path(os.environ["PREFLIGHT_REPO_ROOT"])
@@ -626,32 +628,30 @@ add(
     f"timestamp_delta_seconds={timestamp_delta_seconds}; tolerance_seconds=5.0",
 )
 
-readiness_path = REPO_ROOT / "outputs/operator_dashboard/paper_readiness_snapshot.json"
-readiness, readiness_err = read_json(readiness_path)
-paper_trade_allowed = None
-market_data_stale_count = None
-paper_runtime_running = None
-if isinstance(readiness, dict):
-    paper_trade_allowed = readiness.get("paper_trade_allowed")
-    market_data_stale_count = readiness.get("market_data_stale_count")
-    paper_runtime_running = readiness.get("runtime_running")
+readiness_authority = build_track_b_readiness_authority(repo_root=REPO_ROOT, expected_root=REPO_ROOT)
+authority_blockers = tuple(readiness_authority.get("blockers") or ())
+paper_trade_allowed = readiness_authority.get("paper_trade_allowed")
+paper_runtime_running = readiness_authority.get("runtime_running")
+canonical_readiness = readiness_authority.get("canonical_readiness")
+market_data_not_stale = "runtime_ingestion_not_fresh" not in authority_blockers
 stale_is_blocking = MODE == "monday-live"
 paper_trade_allowed_blocks = stale_is_blocking and paper_runtime_running is not False
+authority_detail = (
+    f"source={readiness_authority.get('source')}; canonical_readiness={canonical_readiness}; "
+    f"paper_trade_allowed={paper_trade_allowed}; runtime_running={paper_runtime_running}; "
+    f"blockers={list(authority_blockers)}"
+)
 add(
     "paper_trade_allowed_true",
     paper_trade_allowed is True,
     paper_trade_allowed_blocks,
-    (
-        f"paper_trade_allowed={paper_trade_allowed}; runtime_running={paper_runtime_running}"
-        if readiness_err is None
-        else readiness_err
-    ),
+    authority_detail,
 )
 add(
     "market_data_not_stale",
-    market_data_stale_count == 0,
+    market_data_not_stale,
     stale_is_blocking,
-    f"market_data_stale_count={market_data_stale_count}" if readiness_err is None else readiness_err,
+    authority_detail,
 )
 
 phase1_reconciliation_path = (
@@ -922,10 +922,17 @@ current_review_required = False
 review_sources = []
 for path in (
     REPO_ROOT / "outputs/probationary_pattern_engine/paper_session/operator_status.json",
-    REPO_ROOT / "outputs/operator_dashboard/paper_readiness_snapshot.json",
+    phase1_reconciliation_path,
 ):
     payload, err = read_json(path)
-    if isinstance(payload, dict) and payload.get("review_required") is True:
+    if not isinstance(payload, dict):
+        continue
+    review_required_count = 0
+    try:
+        review_required_count = int(payload.get("review_required_count") or 0)
+    except Exception:
+        review_required_count = 0
+    if payload.get("review_required") is True or review_required_count > 0:
         current_review_required = True
         review_sources.append(str(path))
 add(

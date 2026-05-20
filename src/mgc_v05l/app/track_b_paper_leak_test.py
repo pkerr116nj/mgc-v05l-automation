@@ -26,6 +26,7 @@ from ..execution_core.track_b_paper_broker_reconciliation import (
     ReconciliationConfig,
     reconcile_track_b_paper_broker_truth,
 )
+from ..execution_core.track_b_readiness_authority import build_track_b_readiness_authority
 from ..execution_core.track_b_managed_exit_order_resolution import (
     ManagedExitOrderResolutionConfig,
     resolve_known_managed_exit_order_disappearance,
@@ -1441,6 +1442,21 @@ def _pre_apply_readiness_check(
     now: datetime | None = None,
 ) -> dict[str, Any]:
     current = now or _utc_now()
+    readiness_authority = build_track_b_readiness_authority(
+        repo_root=repo_root,
+        expected_root=repo_root,
+        now=current,
+        safety={
+            "classification": safety.classification,
+            "broker_reconciled": safety.broker_reconciled,
+            "review_required_count": safety.review_required_count,
+            "open_order_count": safety.open_order_count,
+            "live_money_eligible": safety.live_money_eligible,
+            "paper_proof_invoked": safety.paper_proof_invoked,
+            "runtime_pid_active": safety.runtime_pid_active,
+            "runtime_from_dev_root": safety.runtime_from_dev_root,
+        },
+    )
     paper_readiness = _read_json(repo_root / PAPER_READINESS_SNAPSHOT_PATH)
     startup = _read_json(repo_root / STARTUP_CONTROL_PLANE_SNAPSHOT_PATH)
     supervised = _read_json(repo_root / SUPERVISED_PAPER_OPERABILITY_SNAPSHOT_PATH)
@@ -1474,22 +1490,25 @@ def _pre_apply_readiness_check(
             required=False,
         ),
     }
-    required_stale = [
+    presentation_stale = [
         name
         for name in ("paper_readiness", "startup_control_plane", "supervised_paper_operability")
         if not bool(artifacts[name].get("fresh"))
     ]
     if temp_integrity and not bool(artifacts["temporary_paper_runtime_integrity"].get("fresh")):
-        required_stale.append("temporary_paper_runtime_integrity")
+        presentation_stale.append("temporary_paper_runtime_integrity")
+    paper_readiness_fresh = bool(artifacts["paper_readiness"].get("fresh"))
     lane_rows = [
         row
         for row in list(paper_readiness.get("lane_eligibility_rows") or [])
         if isinstance(row, Mapping)
         and (row.get("lane_id") == lane.lane_id or row.get("strategy_id") in {lane.lane_id, lane.strategy_id})
-    ]
-    all_lane_rows = [row for row in list(paper_readiness.get("lane_eligibility_rows") or []) if isinstance(row, Mapping)]
+    ] if paper_readiness_fresh else []
+    all_lane_rows = [
+        row for row in list(paper_readiness.get("lane_eligibility_rows") or []) if isinstance(row, Mapping)
+    ] if paper_readiness_fresh else []
     lane_row = dict(lane_rows[0]) if lane_rows else {}
-    market_data_stale_count = _int_value(paper_readiness.get("market_data_stale_count"))
+    market_data_stale_count = _int_value(paper_readiness.get("market_data_stale_count")) if paper_readiness_fresh else 0
     selected_lane_stale = _lane_market_data_stale(lane_row)
     selected_lane_micro_stale = selected_lane_stale and _lane_market_data_micro_stale(lane_row, safety=safety)
     unrelated_stale_rows = [
@@ -1504,10 +1523,25 @@ def _pre_apply_readiness_check(
     blockers: list[str] = []
     warnings: list[str] = []
     classification = "LEAK_TEST_PRECHECK_READY"
-    if required_stale:
-        blockers.append("backend_readiness_artifact_stale")
+    presentation_snapshots_fresh = all(
+        bool(artifacts[name].get("fresh"))
+        for name in ("paper_readiness", "startup_control_plane", "supervised_paper_operability")
+    )
+    authority_blockers = tuple(str(blocker) for blocker in readiness_authority.get("blockers") or ())
+    legacy_presentation_fallback = bool(
+        not readiness_authority.get("ready")
+        and "canonical_readiness_missing" in authority_blockers
+        and "canonical_readiness_stale" not in authority_blockers
+        and presentation_snapshots_fresh
+    )
+    if presentation_stale:
+        warnings.append("presentation_readiness_snapshot_stale_diagnostic_only")
+    if legacy_presentation_fallback:
+        warnings.append("legacy_presentation_readiness_fallback_used")
+    if not bool(readiness_authority.get("ready")) and not legacy_presentation_fallback:
+        blockers.extend(authority_blockers)
         classification = "LEAK_TEST_PRECHECK_GOVERNANCE_NOT_READY"
-    elif not lane_row:
+    elif paper_readiness_fresh and not lane_row:
         blockers.append("selected_lane_market_data_unavailable")
         classification = "LEAK_TEST_PRECHECK_SELECTED_LANE_MARKET_DATA_STALE"
     elif selected_lane_micro_stale and listener_running and supervisor_running:
@@ -1539,6 +1573,7 @@ def _pre_apply_readiness_check(
         "blockers": tuple(dict.fromkeys(blockers)),
         "warnings": tuple(dict.fromkeys(warnings)),
         "artifacts": artifacts,
+        "readiness_authority": readiness_authority,
         "market_data_scope": "SELECTED_LANE",
         "market_data_stale_count": market_data_stale_count,
         "selected_lane_market_data_fresh": selected_lane_data_fresh,
@@ -1546,11 +1581,25 @@ def _pre_apply_readiness_check(
         "selected_lane_required_timeframe": _lane_required_timeframe(lane_row, lane),
         "unrelated_market_data_stale_count": len(unrelated_stale_rows),
         "unrelated_market_data_stale_lanes": tuple(_market_data_stale_summary(row) for row in unrelated_stale_rows),
-        "bar_authority_unavailable_count": _int_value(paper_readiness.get("bar_authority_unavailable_count")),
-        "blocking_fault_count": _int_value(paper_readiness.get("blocking_fault_count")),
-        "runtime_running": bool(paper_readiness.get("runtime_running")),
-        "paper_runtime_ready": bool(paper_readiness.get("paper_runtime_ready")),
-        "paper_trade_allowed": bool(paper_readiness.get("paper_trade_allowed")),
+        "bar_authority_unavailable_count": (
+            _int_value(paper_readiness.get("bar_authority_unavailable_count")) if paper_readiness_fresh else 0
+        ),
+        "blocking_fault_count": _int_value(paper_readiness.get("blocking_fault_count")) if paper_readiness_fresh else 0,
+        "runtime_running": bool(
+            paper_readiness.get("runtime_running")
+            if legacy_presentation_fallback
+            else readiness_authority.get("runtime_running")
+        ),
+        "paper_runtime_ready": bool(
+            paper_readiness.get("paper_runtime_ready")
+            if legacy_presentation_fallback
+            else readiness_authority.get("paper_runtime_ready")
+        ),
+        "paper_trade_allowed": bool(
+            paper_readiness.get("paper_trade_allowed")
+            if legacy_presentation_fallback
+            else readiness_authority.get("paper_trade_allowed")
+        ),
         "startup_overall_state": startup.get("overall_state"),
         "supervised_paper_usable": bool(supervised.get("app_usable_for_supervised_paper")),
         "temp_paper_blocked": bool(temp_integrity.get("temp_paper_blocked")),
