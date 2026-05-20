@@ -77,7 +77,9 @@ from ..market_data import (
 )
 from ..market_data.live_feed import (
     DatabentoRawLivePollingClient,
+    Phase1RuntimeArtifactError,
     Phase1RuntimeArtifactPollingClient,
+    Phase1RuntimeArtifactStaleError,
     databento_live_auth_response,
     databento_live_effective_end,
     databento_live_gateway_host,
@@ -7179,6 +7181,36 @@ class ProbationaryPaperSupervisor:
                             )
                         else:
                             lane_new_bars, reconciliation, _ = lane.poll_and_process()
+                    except Phase1RuntimeArtifactError as exc:
+                        failure_payload = _probationary_phase1_artifact_failure_payload(lane=lane, exc=exc)
+                        market_data_failures.append(failure_payload)
+                        _write_probationary_runtime_transport_failure(
+                            lane.settings,
+                            {
+                                **failure_payload,
+                                "blocker_label": failure_payload["failure_kind"],
+                                "runtime_ready": False,
+                                "status": "lane_not_ready",
+                                "next_fix": (
+                                    "Paper runtime stayed alive, but this lane will not evaluate or route until its "
+                                    "own Phase-1 runtime candle artifact is fresh and authoritative again."
+                                ),
+                            },
+                        )
+                        self._alert_dispatcher.emit(
+                            severity="WARNING",
+                            code="paper_lane_phase1_runtime_artifact_not_ready",
+                            message=(
+                                f"Lane {lane.spec.lane_id} has a Phase-1 runtime artifact blocker; "
+                                "keeping unrelated lanes alive and retrying next cycle."
+                            ),
+                            payload=failure_payload,
+                            category="market_data_transport",
+                            title="Paper Lane Phase-1 Artifact Not Ready",
+                            dedup_key=f"{lane.spec.lane_id}:paper_lane_phase1_runtime_artifact_not_ready",
+                            active=True,
+                        )
+                        continue
                     except (SchwabHttpError, SchwabAuthError, TimeoutError, OSError, json.JSONDecodeError) as exc:
                         failure_payload = {
                             "generated_at": datetime.now(timezone.utc).isoformat(),
@@ -8852,6 +8884,50 @@ def _phase_coarse_session_group(current_phase: str) -> str:
     return shared_phase_coarse_session_group(current_phase)
 
 
+def _probationary_phase1_artifact_failure_payload(*, lane: Any, exc: Phase1RuntimeArtifactError) -> dict[str, Any]:
+    failure_kind = (
+        "phase1_runtime_artifact_stale"
+        if isinstance(exc, Phase1RuntimeArtifactStaleError)
+        else "phase1_runtime_artifact_not_ready"
+    )
+    return {
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "lane_id": lane.spec.lane_id,
+        "display_name": lane.spec.display_name,
+        "symbol": lane.spec.symbol,
+        "instrument": lane.spec.symbol,
+        "timeframe": getattr(lane.settings, "resolved_execution_timeframe", None),
+        "exception_text": str(exc),
+        "exception_type": type(exc).__name__,
+        "failure_kind": failure_kind,
+        "blocker_reason": failure_kind,
+        "runtime_pid": os.getpid(),
+        "paper_only": True,
+        "live_money_eligible": False,
+        "route_allowed": False,
+        "submit_allowed": False,
+    }
+
+
+def _lane_market_data_failure_overrides(failure: dict[str, Any] | None) -> dict[str, Any]:
+    if not failure:
+        return {
+            "market_data_not_ready": False,
+            "market_data_blocker_reason": None,
+            "market_data_blocker_detail": None,
+        }
+    reason = str(failure.get("failure_kind") or "market_data_not_ready")
+    return {
+        "eligible_now": False,
+        "eligibility_reason": reason,
+        "eligibility_detail": failure.get("exception_text"),
+        "market_data_not_ready": True,
+        "market_data_blocker_reason": reason,
+        "market_data_blocker_detail": failure.get("exception_text"),
+        "market_data_blocker_generated_at": failure.get("generated_at"),
+    }
+
+
 def _probationary_lane_eligibility_snapshot(
     *,
     lane: ProbationaryPaperLaneRuntime,
@@ -9676,6 +9752,12 @@ def _write_probationary_supervisor_operator_status(
     }
     quarantine_by_lane = {str(key): dict(value) for key, value in (lane_quarantine or {}).items()}
     quarantined_lane_ids = set(quarantine_by_lane)
+    market_data_failure_by_lane = {
+        str(row.get("lane_id")): dict(row)
+        for row in (market_data_failures or [])
+        if row.get("lane_id")
+    }
+    market_data_blocked_lane_ids = set(market_data_failure_by_lane)
     executable_lanes = [
         lane
         for lane in lanes
@@ -9741,7 +9823,8 @@ def _write_probationary_supervisor_operator_status(
     usable_lane_count = sum(
         1
         for lane in executable_lanes
-        if lane.strategy_engine.state.entries_enabled
+        if lane.spec.lane_id not in market_data_blocked_lane_ids
+        and lane.strategy_engine.state.entries_enabled
         and not lane.strategy_engine.state.operator_halt
         and lane.strategy_engine.state.fault_code is None
     )
@@ -9936,6 +10019,7 @@ def _write_probationary_supervisor_operator_status(
                     now=now_local,
                     quarantine=quarantine_by_lane.get(lane.spec.lane_id),
                 ),
+                **_lane_market_data_failure_overrides(market_data_failure_by_lane.get(lane.spec.lane_id)),
                 **_lane_status_row_extras(lane),
             }
             for lane in lanes

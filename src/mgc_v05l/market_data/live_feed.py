@@ -307,8 +307,16 @@ def _parse_databento_price(raw_value: Any) -> Decimal:
 
 def _decimal_from_artifact(raw_value: Any, *, field_name: str) -> Decimal:
     if raw_value is None:
-        raise RuntimeError(f"Phase-1 runtime candle artifact row is missing {field_name}.")
+        raise Phase1RuntimeArtifactError(f"Phase-1 runtime candle artifact row is missing {field_name}.")
     return Decimal(str(raw_value))
+
+
+class Phase1RuntimeArtifactError(RuntimeError):
+    """Phase-1 runtime candle artifact cannot safely provide live PAPER bars."""
+
+
+class Phase1RuntimeArtifactStaleError(Phase1RuntimeArtifactError):
+    """Phase-1 runtime candle artifact exists but is too stale to route from."""
 
 
 class _DatabentoRawLiveSession:
@@ -626,11 +634,11 @@ class Phase1RuntimeArtifactPollingClient:
         try:
             payload = json.loads(path.read_text(encoding="utf-8"))
         except FileNotFoundError as exc:
-            raise RuntimeError(f"Phase-1 runtime candle artifact is missing: {path}") from exc
+            raise Phase1RuntimeArtifactError(f"Phase-1 runtime candle artifact is missing: {path}") from exc
         except json.JSONDecodeError as exc:
-            raise RuntimeError(f"Phase-1 runtime candle artifact is not valid JSON: {path}") from exc
+            raise Phase1RuntimeArtifactError(f"Phase-1 runtime candle artifact is not valid JSON: {path}") from exc
         if not isinstance(payload, dict):
-            raise RuntimeError(f"Phase-1 runtime candle artifact must contain a JSON object: {path}")
+            raise Phase1RuntimeArtifactError(f"Phase-1 runtime candle artifact must contain a JSON object: {path}")
         return payload
 
     def _validate_payload(
@@ -643,25 +651,25 @@ class Phase1RuntimeArtifactPollingClient:
     ) -> None:
         source = str(payload.get("source") or payload.get("provenance") or payload.get("source_id") or "").strip()
         if source != self._required_source:
-            raise RuntimeError(
+            raise Phase1RuntimeArtifactError(
                 f"Phase-1 runtime candle artifact has invalid provenance {source!r}; expected {self._required_source}: {path}"
             )
         if _phase1_artifact_forbidden_provenance(payload):
-            raise RuntimeError(f"Phase-1 runtime candle artifact uses historical/replay/research/archive evidence: {path}")
+            raise Phase1RuntimeArtifactError(f"Phase-1 runtime candle artifact uses historical/replay/research/archive evidence: {path}")
         payload_symbol = str(payload.get("symbol") or payload.get("instrument") or payload.get("root") or "").strip().upper()
         if payload_symbol != internal_symbol:
-            raise RuntimeError(
+            raise Phase1RuntimeArtifactError(
                 f"Phase-1 runtime candle artifact symbol mismatch: expected {internal_symbol}, found {payload_symbol or '<missing>'}: {path}"
             )
         payload_timeframe = normalize_timeframe_label(str(payload.get("timeframe") or ""))
         if payload_timeframe != internal_timeframe:
-            raise RuntimeError(
+            raise Phase1RuntimeArtifactError(
                 f"Phase-1 runtime candle artifact timeframe mismatch: expected {internal_timeframe}, found {payload_timeframe}: {path}"
             )
 
     def _validate_freshness(self, payload: Mapping[str, Any], *, bars: Sequence[Bar], path: Path) -> None:
         if not bars:
-            raise RuntimeError(f"Phase-1 runtime candle artifact contains no completed bars: {path}")
+            raise Phase1RuntimeArtifactError(f"Phase-1 runtime candle artifact contains no completed bars: {path}")
         now = self._now()
         latest_bar_end = max(bar.end_ts for bar in bars).astimezone(UTC)
         threshold_seconds = _float_value(
@@ -670,7 +678,7 @@ class Phase1RuntimeArtifactPollingClient:
         )
         latest_age_seconds = max((now - latest_bar_end).total_seconds(), 0.0)
         if latest_age_seconds > threshold_seconds:
-            raise RuntimeError(
+            raise Phase1RuntimeArtifactStaleError(
                 "Phase-1 runtime candle artifact is stale: "
                 f"latest_bar={latest_bar_end.isoformat()} age_seconds={latest_age_seconds:.3f} "
                 f"threshold_seconds={threshold_seconds:.3f} path={path}"
@@ -679,7 +687,7 @@ class Phase1RuntimeArtifactPollingClient:
         if generated_at is not None:
             generated_age_seconds = max((now - generated_at.astimezone(UTC)).total_seconds(), 0.0)
             if generated_age_seconds > threshold_seconds:
-                raise RuntimeError(
+                raise Phase1RuntimeArtifactStaleError(
                     "Phase-1 runtime candle artifact metadata is stale: "
                     f"generated_at={generated_at.isoformat()} age_seconds={generated_age_seconds:.3f} "
                     f"threshold_seconds={threshold_seconds:.3f} path={path}"
@@ -694,7 +702,7 @@ class Phase1RuntimeArtifactPollingClient:
     ) -> list[Bar]:
         raw_bars = payload.get("bars")
         if not isinstance(raw_bars, list):
-            raise RuntimeError("Phase-1 runtime candle artifact must expose a bars list.")
+            raise Phase1RuntimeArtifactError("Phase-1 runtime candle artifact must expose a bars list.")
         bars: list[Bar] = []
         duration = timedelta(minutes=timeframe_minutes(internal_timeframe))
         for raw_row in raw_bars:
@@ -709,7 +717,7 @@ class Phase1RuntimeArtifactPollingClient:
                 )
             end_ts = _parse_optional_datetime(raw_row.get("bar_end") or raw_row.get("end_ts") or raw_row.get("timestamp"))
             if end_ts is None:
-                raise RuntimeError("Phase-1 runtime candle artifact row is missing bar_end/end_ts.")
+                raise Phase1RuntimeArtifactError("Phase-1 runtime candle artifact row is missing bar_end/end_ts.")
             start_ts = _parse_optional_datetime(raw_row.get("bar_start") or raw_row.get("start_ts"))
             if start_ts is None:
                 start_ts = end_ts - duration

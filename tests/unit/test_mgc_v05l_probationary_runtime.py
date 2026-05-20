@@ -75,7 +75,7 @@ from mgc_v05l.execution.order_models import FillEvent
 from mgc_v05l.execution.paper_broker import PaperBroker, PaperPosition
 from mgc_v05l.domain.models import Bar, SignalPacket
 from mgc_v05l.execution.order_models import OrderIntent
-from mgc_v05l.market_data.live_feed import LivePollingService, _latest_completed_bar_end
+from mgc_v05l.market_data.live_feed import LivePollingService, Phase1RuntimeArtifactStaleError, _latest_completed_bar_end
 from mgc_v05l.market_data.schwab_auth import SchwabAuthError
 from mgc_v05l.market_data.session_clock import classify_sessions
 from mgc_v05l.market_data.schwab_adapter import SchwabMarketDataAdapter
@@ -9769,6 +9769,85 @@ def test_probationary_supervisor_survives_lane_auth_read_failure(tmp_path: Path,
     assert len(failures) == 1
     assert failures[0]["exception_type"] == "SchwabAuthError"
     assert failures[0]["lane_id"] == "gc_lane"
+
+
+def test_probationary_supervisor_scopes_phase1_stale_artifact_to_affected_lane(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = _build_probationary_paper_settings(tmp_path)
+    root_logger = StructuredLogger(tmp_path / "root")
+    stale_mnq_lane = _prepare_supervisor_test_lane(
+        _seed_test_lane(
+            tmp_path,
+            lane_id="mnq_lane",
+            symbol="MNQ",
+            source="usLatePauseResumeLongTurn",
+            session_restriction="US_LATE",
+            point_value=Decimal("2"),
+        )
+    )
+    healthy_mgc_lane = _prepare_supervisor_test_lane(
+        _seed_test_lane(
+            tmp_path,
+            lane_id="mgc_lane",
+            symbol="MGC",
+            source="usLatePauseResumeLongTurn",
+            session_restriction="US_LATE",
+            point_value=Decimal("10"),
+        )
+    )
+    stale_mnq_lane.restore_startup = lambda: None
+    healthy_mgc_lane.restore_startup = lambda: None
+    stale_mnq_lane.poll_and_process = lambda: (_ for _ in ()).throw(
+        Phase1RuntimeArtifactStaleError(
+            "Phase-1 runtime candle artifact is stale: latest_bar=2026-05-20T10:39:00+00:00 "
+            "age_seconds=202.436 threshold_seconds=180.000 "
+            "path=/phase1_runtime_market_data/MNQ/1m/latest_runtime_candles.json"
+        )
+    )
+    mgc_poll = {"called": False}
+
+    def _healthy_mgc_poll():
+        mgc_poll["called"] = True
+        return 2, {"clean": True}, None
+
+    healthy_mgc_lane.poll_and_process = _healthy_mgc_poll
+
+    supervisor = probationary_runtime_module.ProbationaryPaperSupervisor(
+        settings=settings,
+        lanes=[stale_mnq_lane, healthy_mgc_lane],
+        structured_logger=root_logger,
+        alert_dispatcher=AlertDispatcher(root_logger),
+    )
+    monkeypatch.setattr(supervisor, "_install_signal_handlers", lambda: {})
+    monkeypatch.setattr(supervisor, "_restore_signal_handlers", lambda _previous: None)
+
+    summary = supervisor.run(poll_once=True)
+
+    assert summary.reconciliation_clean is True
+    assert summary.stop_reason is None
+    assert summary.new_bars == 2
+    assert mgc_poll["called"] is True
+    assert stale_mnq_lane.repositories.order_intents.list_all() == []
+    assert healthy_mgc_lane.repositories.order_intents.list_all() == []
+
+    status_payload = json.loads(Path(summary.operator_status_path).read_text(encoding="utf-8"))
+    assert status_payload["health"]["market_data_ok"] is False
+    assert status_payload["usable_lane_count"] == 1
+    failures = list(status_payload.get("market_data_failures") or [])
+    assert len(failures) == 1
+    assert failures[0]["lane_id"] == "mnq_lane"
+    assert failures[0]["symbol"] == "MNQ"
+    assert failures[0]["failure_kind"] == "phase1_runtime_artifact_stale"
+    assert failures[0]["route_allowed"] is False
+    assert failures[0]["submit_allowed"] is False
+    lane_rows = {row["lane_id"]: row for row in status_payload["lanes"]}
+    assert lane_rows["mnq_lane"]["eligible_now"] is False
+    assert lane_rows["mnq_lane"]["eligibility_reason"] == "phase1_runtime_artifact_stale"
+    assert lane_rows["mnq_lane"]["market_data_not_ready"] is True
+    assert "MNQ/1m/latest_runtime_candles.json" in lane_rows["mnq_lane"]["market_data_blocker_detail"]
+    assert lane_rows["mgc_lane"]["market_data_not_ready"] is False
 
 
 def _prepare_supervisor_test_lane(lane: SimpleNamespace, *, source: str = "usLatePauseResumeLongTurn") -> SimpleNamespace:
