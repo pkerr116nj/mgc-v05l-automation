@@ -212,6 +212,48 @@ def _write_backend_source_readiness(
     )
 
 
+
+def _write_canonical_readiness(
+    tmp_path: Path,
+    *,
+    generated_at: str = "2999-01-01T00:00:00+00:00",
+    state: str = "READY_SUBMIT_CAPABLE",
+    runtime_running: bool = True,
+    runtime_healthy: bool = True,
+    runtime_ingestion_fresh: bool = True,
+    root_match: bool = True,
+    live_money_eligible: bool = False,
+) -> None:
+    path = tmp_path / "outputs" / "operator_dashboard" / "runtime" / "latest_canonical_readiness.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        json.dumps(
+            {
+                "schema_version": "track_b_canonical_readiness_v1",
+                "generated_at": generated_at,
+                "paper_only": True,
+                "canonical_readiness": state,
+                "state": state,
+                "ready_submit_capable": state == "READY_SUBMIT_CAPABLE",
+                "readiness_blockers": [] if state == "READY_SUBMIT_CAPABLE" else [{"code": "runtime_not_submit_capable"}],
+                "readiness_warnings": [],
+                "root_guard_summary": {"root_match": root_match},
+                "runtime": {
+                    "running": runtime_running,
+                    "healthy": runtime_healthy,
+                    "runtime_ingestion_fresh": runtime_ingestion_fresh,
+                    "eligible_lane_count": 15 if state == "READY_SUBMIT_CAPABLE" else 0,
+                    "loaded_lane_count": 15,
+                    "live_money_eligible": live_money_eligible,
+                },
+                "broker_truth_lease": {"lease_state": "ACTIVE"},
+                "phase1_reconciliation": {"classification": "TRACK_B_PAPER_BROKER_RECONCILED"},
+                "live_money_eligible": live_money_eligible,
+            }
+        ),
+        encoding="utf-8",
+    )
+
 def _write_signal_audit(tmp_path: Path) -> None:
     path = tmp_path / "outputs" / "operator_dashboard" / "paper_signal_intent_fill_audit_snapshot.json"
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -630,6 +672,109 @@ def test_governance_uses_operator_readiness_not_monitor_backend_reason_when_fres
     assert "backend_or_source_not_live_ready" not in nq["submit_block_reasons"]
     assert nq["submit_allowed"] is True
 
+
+
+def test_governance_uses_fresh_canonical_readiness_over_stale_dashboard_snapshot(tmp_path: Path) -> None:
+    _write_monitor(
+        tmp_path,
+        broker_position_quantity=0.0,
+        ledger_position_quantity=0.0,
+    )
+    _write_ledger(tmp_path)
+    _write_dashboard(tmp_path)
+    _write_backend_source_readiness(
+        tmp_path,
+        generated_at="2026-04-29T12:28:50.338596+00:00",
+        runtime_running=False,
+        paper_runtime_ready=False,
+        paper_trade_allowed=False,
+    )
+    _write_canonical_readiness(tmp_path)
+    _write_signal_audit(tmp_path)
+    _write_strategy_performance(tmp_path)
+
+    artifacts = run_ibkr_paper_strategy_governance(config=_config(tmp_path))
+
+    nq = next(row for row in artifacts.performance_rows if row["strategy_id"] == "nq_1x_ny_early_core__us_late_long")
+    assert nq["backend_source_readiness"]["source"] == "canonical_track_b_runtime_readiness"
+    assert nq["backend_source_readiness"]["canonical_readiness_authoritative"] is True
+    assert nq["backend_source_readiness"]["live_ready"] is True
+    assert nq["backend_source_readiness"]["paper_trade_allowed"] is True
+    assert nq["live_money_eligible"] is False
+    assert "backend_or_source_not_live_ready" not in nq["submit_block_reasons"]
+    assert nq["submit_allowed"] is True
+
+
+def test_governance_blocks_when_canonical_runtime_down_even_if_dashboard_snapshot_allows(tmp_path: Path) -> None:
+    _write_monitor(
+        tmp_path,
+        broker_position_quantity=0.0,
+        ledger_position_quantity=0.0,
+    )
+    _write_ledger(tmp_path)
+    _write_dashboard(tmp_path)
+    _write_backend_source_readiness(tmp_path)
+    _write_canonical_readiness(
+        tmp_path,
+        state="READY_OBSERVATION_ONLY",
+        runtime_running=False,
+        runtime_healthy=False,
+        runtime_ingestion_fresh=False,
+    )
+    _write_signal_audit(tmp_path)
+    _write_strategy_performance(tmp_path)
+
+    artifacts = run_ibkr_paper_strategy_governance(config=_config(tmp_path))
+
+    nq = next(row for row in artifacts.performance_rows if row["strategy_id"] == "nq_1x_ny_early_core__us_late_long")
+    assert nq["backend_source_readiness"]["live_ready"] is False
+    assert "canonical_readiness_not_submit_capable" in nq["backend_source_readiness"]["block_reasons"]
+    assert "paper_runtime_not_running" in nq["backend_source_readiness"]["block_reasons"]
+    assert nq["submit_block_reasons"] == ["backend_or_source_not_live_ready"]
+    assert nq["submit_allowed"] is False
+
+
+def test_governance_blocks_when_canonical_readiness_is_stale(tmp_path: Path) -> None:
+    _write_monitor(
+        tmp_path,
+        broker_position_quantity=0.0,
+        ledger_position_quantity=0.0,
+    )
+    _write_ledger(tmp_path)
+    _write_dashboard(tmp_path)
+    _write_backend_source_readiness(tmp_path)
+    _write_canonical_readiness(tmp_path, generated_at="2026-04-29T12:28:50.338596+00:00")
+    _write_signal_audit(tmp_path)
+    _write_strategy_performance(tmp_path)
+
+    artifacts = run_ibkr_paper_strategy_governance(config=_config(tmp_path))
+
+    nq = next(row for row in artifacts.performance_rows if row["strategy_id"] == "nq_1x_ny_early_core__us_late_long")
+    assert nq["backend_source_readiness"]["live_ready"] is False
+    assert "canonical_readiness_artifact_stale" in nq["backend_source_readiness"]["block_reasons"]
+    assert nq["submit_allowed"] is False
+
+
+def test_governance_blocks_when_canonical_live_money_eligible_is_true(tmp_path: Path) -> None:
+    _write_monitor(
+        tmp_path,
+        broker_position_quantity=0.0,
+        ledger_position_quantity=0.0,
+    )
+    _write_ledger(tmp_path)
+    _write_dashboard(tmp_path)
+    _write_backend_source_readiness(tmp_path)
+    _write_canonical_readiness(tmp_path, live_money_eligible=True)
+    _write_signal_audit(tmp_path)
+    _write_strategy_performance(tmp_path)
+
+    artifacts = run_ibkr_paper_strategy_governance(config=_config(tmp_path))
+
+    nq = next(row for row in artifacts.performance_rows if row["strategy_id"] == "nq_1x_ny_early_core__us_late_long")
+    assert nq["backend_source_readiness"]["live_ready"] is False
+    assert "canonical_live_money_eligible_true" in nq["backend_source_readiness"]["block_reasons"]
+    assert nq["live_money_eligible"] is False
+    assert nq["submit_allowed"] is False
 
 def test_governance_blocks_healthy_monitor_when_source_readiness_is_not_live(tmp_path: Path) -> None:
     _write_monitor(

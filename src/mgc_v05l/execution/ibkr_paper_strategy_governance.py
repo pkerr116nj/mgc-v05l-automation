@@ -30,6 +30,7 @@ _DEFAULT_PERFORMANCE_SNAPSHOT_PATH = Path("outputs") / "operator_dashboard" / "p
 _DEFAULT_SIGNAL_AUDIT_PATH = Path("outputs") / "operator_dashboard" / "paper_signal_intent_fill_audit_snapshot.json"
 _DEFAULT_DASHBOARD_SNAPSHOT_PATH = Path("outputs") / "operator_dashboard" / "dashboard_api_snapshot.json"
 _DEFAULT_PAPER_READINESS_SNAPSHOT_PATH = Path("outputs") / "operator_dashboard" / "paper_readiness_snapshot.json"
+_DEFAULT_CANONICAL_READINESS_PATH = Path("outputs") / "operator_dashboard" / "runtime" / "latest_canonical_readiness.json"
 _DEFAULT_STARTUP_CONTROL_PLANE_SNAPSHOT_PATH = Path("outputs") / "operator_dashboard" / "startup_control_plane_snapshot.json"
 _DEFAULT_SUPERVISED_PAPER_OPERABILITY_SNAPSHOT_PATH = Path("outputs") / "operator_dashboard" / "supervised_paper_operability_snapshot.json"
 _DEFAULT_TEMP_PAPER_INTEGRITY_SNAPSHOT_PATH = Path("outputs") / "operator_dashboard" / "paper_temporary_paper_runtime_integrity_snapshot.json"
@@ -827,11 +828,18 @@ def _backend_source_live_readiness(
     required_instruments: list[str] | None = None,
 ) -> dict[str, Any]:
     freshness_window = float(config.freshness_window_seconds)
+    canonical = _load_json(config.repo_root / _DEFAULT_CANONICAL_READINESS_PATH)
     readiness = _load_json(config.repo_root / _DEFAULT_PAPER_READINESS_SNAPSHOT_PATH)
     startup = _load_json(config.repo_root / _DEFAULT_STARTUP_CONTROL_PLANE_SNAPSHOT_PATH)
     supervised = _load_json(config.repo_root / _DEFAULT_SUPERVISED_PAPER_OPERABILITY_SNAPSHOT_PATH)
     temp_integrity = _load_json(config.repo_root / _DEFAULT_TEMP_PAPER_INTEGRITY_SNAPSHOT_PATH)
     artifacts = {
+        "canonical_readiness": _artifact_status(
+            config.repo_root / _DEFAULT_CANONICAL_READINESS_PATH,
+            canonical,
+            freshness_window_seconds=freshness_window,
+            required=False,
+        ),
         "paper_readiness": _artifact_status(
             config.repo_root / _DEFAULT_PAPER_READINESS_SNAPSHOT_PATH,
             readiness,
@@ -854,44 +862,70 @@ def _backend_source_live_readiness(
             required=False,
         ),
     }
-    required_artifacts = [
-        artifacts["paper_readiness"],
-        artifacts["startup_control_plane"],
-        artifacts["supervised_paper_operability"],
-    ]
     block_reasons: list[str] = []
-    missing_required = [row["label"] for row in required_artifacts if not row["present"]]
-    stale_required = [row["label"] for row in required_artifacts if row["present"] and not row["fresh"]]
-    if missing_required:
-        block_reasons.append("backend_readiness_artifact_missing")
-    if stale_required:
-        block_reasons.append("backend_readiness_artifact_stale")
-    temp_status = artifacts["temporary_paper_runtime_integrity"]
-    if temp_status["present"] and not temp_status["fresh"]:
-        block_reasons.append("backend_readiness_artifact_stale")
-
     required_instrument_list = sorted(dict.fromkeys(_coerce_instrument_list(required_instruments) or _coerce_instrument_list(instrument)))
-    source_faults = _scoped_backend_source_fault_counts(
-        readiness=readiness,
-        strategy_id=strategy_id,
-        required_instruments=required_instrument_list,
+    canonical_status = artifacts["canonical_readiness"]
+    canonical_present = bool(canonical)
+    canonical_fresh = bool(canonical_status["fresh"])
+    canonical_authoritative = bool(canonical_present and canonical_fresh)
+    if canonical_present and not canonical_fresh:
+        block_reasons.append("canonical_readiness_artifact_stale")
+
+    source_faults = (
+        {
+            "market_data_stale_count": 0,
+            "bar_authority_unavailable_count": 0,
+            "blocking_fault_count": 0,
+            "readiness_scope": "canonical_track_b_runtime_readiness",
+            "required_instruments": required_instrument_list,
+            "relevant_lane_ids": [],
+            "global_market_data_stale_count": int(readiness.get("market_data_stale_count") or 0),
+            "global_bar_authority_unavailable_count": int(readiness.get("bar_authority_unavailable_count") or 0),
+            "global_blocking_fault_count": int(readiness.get("blocking_fault_count") or 0),
+        }
+        if canonical_authoritative
+        else _scoped_backend_source_fault_counts(
+            readiness=readiness,
+            strategy_id=strategy_id,
+            required_instruments=required_instrument_list,
+        )
     )
     market_data_stale_count = int(source_faults.get("market_data_stale_count") or 0)
     bar_authority_unavailable_count = int(source_faults.get("bar_authority_unavailable_count") or 0)
     blocking_fault_count = int(source_faults.get("blocking_fault_count") or 0)
 
-    paper_runtime_ready = bool(readiness.get("paper_runtime_ready"))
-    runtime_running = bool(readiness.get("runtime_running"))
-    paper_trade_allowed = bool(readiness.get("paper_trade_allowed"))
-    startup_ready = str(startup.get("overall_state") or "").strip().upper() == "READY"
-    supervised_usable = bool(supervised.get("app_usable_for_supervised_paper"))
+    canonical_state = str(canonical.get("canonical_readiness") or canonical.get("state") or "").strip().upper()
+    canonical_runtime = dict(canonical.get("runtime") or {})
+    canonical_root_guard = dict(canonical.get("root_guard_summary") or {})
+    if canonical_authoritative:
+        runtime_running = bool(canonical_runtime.get("running"))
+        paper_runtime_ready = bool(
+            runtime_running
+            and canonical_runtime.get("healthy") is True
+            and canonical_runtime.get("runtime_ingestion_fresh") is True
+        )
+        paper_trade_allowed = canonical_state == "READY_SUBMIT_CAPABLE"
+        startup_ready = canonical_state in {"READY_SUBMIT_CAPABLE", "READY_OBSERVATION_ONLY"}
+        supervised_usable = paper_trade_allowed
+    else:
+        paper_runtime_ready = bool(readiness.get("paper_runtime_ready"))
+        runtime_running = bool(readiness.get("runtime_running"))
+        paper_trade_allowed = bool(readiness.get("paper_trade_allowed"))
+        startup_ready = str(startup.get("overall_state") or "").strip().upper() == "READY"
+        supervised_usable = bool(supervised.get("app_usable_for_supervised_paper"))
     temp_paper_blocked = bool(temp_integrity.get("temp_paper_blocked"))
 
-    if readiness and not runtime_running:
+    if canonical_authoritative and canonical.get("live_money_eligible") is True:
+        block_reasons.append("canonical_live_money_eligible_true")
+    if canonical_authoritative and canonical_root_guard.get("root_match") is not True:
+        block_reasons.append("canonical_root_not_matched")
+    if canonical_authoritative and canonical_state != "READY_SUBMIT_CAPABLE":
+        block_reasons.append("canonical_readiness_not_submit_capable")
+    if (readiness or canonical_authoritative) and not runtime_running:
         block_reasons.append("paper_runtime_not_running")
-    if readiness and not paper_runtime_ready:
+    if (readiness or canonical_authoritative) and not paper_runtime_ready:
         block_reasons.append("paper_runtime_not_ready")
-    if readiness and not paper_trade_allowed:
+    if (readiness or canonical_authoritative) and not paper_trade_allowed:
         block_reasons.append("paper_trade_not_allowed")
     if market_data_stale_count > 0:
         block_reasons.append("source_market_data_stale")
@@ -899,10 +933,25 @@ def _backend_source_live_readiness(
         block_reasons.append("bar_authority_unavailable")
     if blocking_fault_count > 0:
         block_reasons.append("blocking_faults_present")
-    if startup and not startup_ready:
-        block_reasons.append("startup_control_plane_not_ready")
-    if supervised and not supervised_usable:
-        block_reasons.append("supervised_paper_not_usable")
+    if not canonical_authoritative:
+        required_artifacts = [
+            artifacts["paper_readiness"],
+            artifacts["startup_control_plane"],
+            artifacts["supervised_paper_operability"],
+        ]
+        missing_required = [row["label"] for row in required_artifacts if not row["present"]]
+        stale_required = [row["label"] for row in required_artifacts if row["present"] and not row["fresh"]]
+        if missing_required:
+            block_reasons.append("backend_readiness_artifact_missing")
+        if stale_required:
+            block_reasons.append("backend_readiness_artifact_stale")
+        if startup and not startup_ready:
+            block_reasons.append("startup_control_plane_not_ready")
+        if supervised and not supervised_usable:
+            block_reasons.append("supervised_paper_not_usable")
+    temp_status = artifacts["temporary_paper_runtime_integrity"]
+    if not canonical_authoritative and temp_status["present"] and not temp_status["fresh"]:
+        block_reasons.append("backend_readiness_artifact_stale")
     if temp_paper_blocked:
         block_reasons.append("temp_paper_blocked")
 
@@ -918,6 +967,13 @@ def _backend_source_live_readiness(
         supervised=supervised,
         temp_integrity=temp_integrity,
         source_faults=source_faults,
+        canonical=canonical,
+        canonical_authoritative=canonical_authoritative,
+        runtime_running=runtime_running,
+        paper_runtime_ready=paper_runtime_ready,
+        paper_trade_allowed=paper_trade_allowed,
+        startup_ready=startup_ready,
+        supervised_usable=supervised_usable,
     )
     return {
         "live_ready": live_ready,
@@ -940,7 +996,11 @@ def _backend_source_live_readiness(
         "startup_control_plane_ready": startup_ready,
         "supervised_paper_usable": supervised_usable,
         "temp_paper_blocked": temp_paper_blocked,
-        "source": "operator_dashboard_readiness_artifacts",
+        "canonical_readiness": canonical_state or None,
+        "canonical_readiness_authoritative": canonical_authoritative,
+        "canonical_readiness_artifact": artifacts["canonical_readiness"],
+        "presentation_readiness_authority": "DIAGNOSTIC_ONLY_WHEN_CANONICAL_PRESENT",
+        "source": "canonical_track_b_runtime_readiness" if canonical_present else "operator_dashboard_readiness_artifacts",
     }
 
 
@@ -1052,6 +1112,7 @@ def _backend_readiness_artifacts_newer_than(*, repo_root: Path, generated_at: da
     if generated_at is None:
         return False
     for relative_path in (
+        _DEFAULT_CANONICAL_READINESS_PATH,
         _DEFAULT_PAPER_READINESS_SNAPSHOT_PATH,
         _DEFAULT_STARTUP_CONTROL_PLANE_SNAPSHOT_PATH,
         _DEFAULT_SUPERVISED_PAPER_OPERABILITY_SNAPSHOT_PATH,
@@ -1091,6 +1152,13 @@ def _backend_source_readiness_detail(
     supervised: dict[str, Any],
     temp_integrity: dict[str, Any],
     source_faults: dict[str, Any],
+    canonical: dict[str, Any] | None = None,
+    canonical_authoritative: bool = False,
+    runtime_running: bool = False,
+    paper_runtime_ready: bool = False,
+    paper_trade_allowed: bool = False,
+    startup_ready: bool = False,
+    supervised_usable: bool = False,
 ) -> str:
     readiness_status = artifacts["paper_readiness"]
     startup_status = artifacts["startup_control_plane"]
@@ -1098,15 +1166,17 @@ def _backend_source_readiness_detail(
     temp_status = artifacts["temporary_paper_runtime_integrity"]
     return (
         f"backend/source readiness {'ready' if live_ready else 'not live-ready'} "
-        f"from operator_dashboard_readiness_artifacts; "
+        f"from {'canonical_track_b_runtime_readiness' if canonical_authoritative else 'operator_dashboard_readiness_artifacts'}; "
         f"block_reasons={block_reasons}; "
+        f"canonical_readiness={(canonical or {}).get('canonical_readiness') or (canonical or {}).get('state')} "
+        f"canonical_authoritative={canonical_authoritative}; "
         f"freshness_window_seconds={freshness_window_seconds}; "
         f"paper_readiness_generated_at={readiness_status.get('generated_at')} "
         f"paper_readiness_age_seconds={_round_age(readiness_status.get('age_seconds'))} "
         f"paper_readiness_fresh={readiness_status.get('fresh')}; "
-        f"runtime_running={bool(readiness.get('runtime_running'))} "
-        f"paper_runtime_ready={bool(readiness.get('paper_runtime_ready'))} "
-        f"paper_trade_allowed={bool(readiness.get('paper_trade_allowed'))} "
+        f"runtime_running={runtime_running} "
+        f"paper_runtime_ready={paper_runtime_ready} "
+        f"paper_trade_allowed={paper_trade_allowed} "
         f"market_data_stale_count={int(source_faults.get('market_data_stale_count') or 0)} "
         f"bar_authority_unavailable_count={int(source_faults.get('bar_authority_unavailable_count') or 0)} "
         f"blocking_fault_count={int(source_faults.get('blocking_fault_count') or 0)} "
@@ -1117,10 +1187,10 @@ def _backend_source_readiness_detail(
         f"global_blocking_fault_count={int(readiness.get('blocking_fault_count') or 0)}; "
         f"startup_generated_at={startup_status.get('generated_at')} "
         f"startup_age_seconds={_round_age(startup_status.get('age_seconds'))} "
-        f"startup_ready={str(startup.get('overall_state') or '').strip().upper() == 'READY'}; "
+        f"startup_ready={startup_ready}; "
         f"supervised_generated_at={supervised_status.get('generated_at')} "
         f"supervised_age_seconds={_round_age(supervised_status.get('age_seconds'))} "
-        f"supervised_usable={bool(supervised.get('app_usable_for_supervised_paper'))}; "
+        f"supervised_usable={supervised_usable}; "
         f"temp_integrity_present={temp_status.get('present')} "
         f"temp_integrity_fresh={temp_status.get('fresh')} "
         f"temp_paper_blocked={bool(temp_integrity.get('temp_paper_blocked'))}"
