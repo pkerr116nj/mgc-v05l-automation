@@ -26,6 +26,9 @@ DEFAULT_HEARTBEAT_PATH = REPO_ROOT / "var" / "track_b_operator_readiness_refresh
 DEFAULT_CANONICAL_READINESS_PATH = (
     REPO_ROOT / "outputs" / "operator_dashboard" / "runtime" / "latest_canonical_readiness.json"
 )
+DEFAULT_CANONICAL_READINESS_SUMMARY_PATH = (
+    REPO_ROOT / "outputs" / "operator_dashboard" / "runtime" / "latest_canonical_readiness_summary.json"
+)
 DEFAULT_SERVICE_PID_PATH = REPO_ROOT / "var" / "track_b_operator_readiness_refresh_service.pid"
 DEFAULT_CHILD_PID_PATH = REPO_ROOT / "var" / "track_b_operator_readiness_refresh_child.pid"
 DEFAULT_SUPERVISOR_STATUS_PATH = REPO_ROOT / "var" / "track_b_operator_readiness_refresh_supervisor.json"
@@ -49,6 +52,7 @@ class RefreshConfig:
     status_path: Path = DEFAULT_STATUS_PATH
     heartbeat_path: Path | None = None
     canonical_readiness_path: Path = DEFAULT_CANONICAL_READINESS_PATH
+    canonical_readiness_summary_path: Path = DEFAULT_CANONICAL_READINESS_SUMMARY_PATH
     refresh_seconds: float = DEFAULT_REFRESH_SECONDS
     preflight_mode: str = DEFAULT_PREFLIGHT_MODE
     timeout_seconds: float = 120.0
@@ -65,6 +69,7 @@ def refresh_once(*, config: RefreshConfig, runner: Runner | None = None) -> dict
         repo_root=repo_root,
         preflight_mode=config.preflight_mode,
         canonical_readiness_path=config.canonical_readiness_path,
+        canonical_readiness_summary_path=config.canonical_readiness_summary_path,
     )
     results: list[RefreshCommandResult] = []
     for name, command in commands:
@@ -155,6 +160,8 @@ def run_supervisor(
             str(config.status_path),
             "--canonical-readiness-path",
             str(config.canonical_readiness_path),
+            "--canonical-readiness-summary-path",
+            str(config.canonical_readiness_summary_path),
             "--refresh-seconds",
             str(config.refresh_seconds),
             "--preflight-mode",
@@ -184,6 +191,7 @@ def run_supervisor(
             "status_path": str(config.status_path),
             "heartbeat_path": None if config.heartbeat_path is None else str(config.heartbeat_path),
             "canonical_readiness_path": str(config.canonical_readiness_path),
+            "canonical_readiness_summary_path": str(config.canonical_readiness_summary_path),
             "service_pid_path": str(service_pid_path),
             "child_pid_path": str(child_pid_path),
             "command": _child_command(),
@@ -280,7 +288,13 @@ def read_status(*, status_path: Path = DEFAULT_STATUS_PATH) -> dict[str, Any]:
     return _status_with_freshness(payload)
 
 
-def _refresh_commands(*, repo_root: Path, preflight_mode: str, canonical_readiness_path: Path | None = None) -> list[tuple[str, list[str]]]:
+def _refresh_commands(
+    *,
+    repo_root: Path,
+    preflight_mode: str,
+    canonical_readiness_path: Path | None = None,
+    canonical_readiness_summary_path: Path | None = None,
+) -> list[tuple[str, list[str]]]:
     python_bin = str(repo_root / ".venv" / "bin" / "python")
     canonical_path = canonical_readiness_path or (
         repo_root / "outputs" / "operator_dashboard" / "runtime" / "latest_canonical_readiness.json"
@@ -337,6 +351,11 @@ def _refresh_commands(*, repo_root: Path, preflight_mode: str, canonical_readine
                 str(repo_root),
                 "--output-path",
                 str(canonical_path),
+                "--summary-output-path",
+                str(
+                    canonical_readiness_summary_path
+                    or canonical_path.with_name("latest_canonical_readiness_summary.json")
+                ),
                 "--json",
             ],
         ),
@@ -445,6 +464,7 @@ def _status_payload(
                 / "latest_track_b_paper_broker_reconciliation.json"
             ),
             "canonical_readiness": str(config.canonical_readiness_path),
+            "canonical_readiness_summary": str(config.canonical_readiness_summary_path),
         },
         "commands": [
             {
@@ -546,6 +566,10 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--status-path", default=str(DEFAULT_STATUS_PATH))
     parser.add_argument("--heartbeat-path", default=str(DEFAULT_HEARTBEAT_PATH))
     parser.add_argument("--canonical-readiness-path", default=str(DEFAULT_CANONICAL_READINESS_PATH))
+    parser.add_argument(
+        "--canonical-readiness-summary-path",
+        default=str(DEFAULT_CANONICAL_READINESS_SUMMARY_PATH),
+    )
     parser.add_argument("--service-pid-path", default=str(DEFAULT_SERVICE_PID_PATH))
     parser.add_argument("--child-pid-path", default=str(DEFAULT_CHILD_PID_PATH))
     parser.add_argument("--supervisor-status-path", default=str(DEFAULT_SUPERVISOR_STATUS_PATH))
@@ -568,6 +592,7 @@ def main(argv: list[str] | None = None) -> int:
         status_path=Path(args.status_path),
         heartbeat_path=None if args.no_heartbeat else Path(args.heartbeat_path),
         canonical_readiness_path=Path(args.canonical_readiness_path),
+        canonical_readiness_summary_path=Path(args.canonical_readiness_summary_path),
         refresh_seconds=args.refresh_seconds,
         preflight_mode=args.preflight_mode,
         timeout_seconds=args.timeout_seconds,

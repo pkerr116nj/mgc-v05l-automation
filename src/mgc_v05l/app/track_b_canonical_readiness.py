@@ -35,6 +35,11 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help="Canonical readiness JSON path. Relative paths are resolved under --repo-root.",
     )
+    parser.add_argument(
+        "--summary-output-path",
+        default=None,
+        help="Compact canonical readiness summary JSON path. Relative paths are resolved under --repo-root.",
+    )
     parser.add_argument("--json", action="store_true", help="Print the compact readiness summary as JSON.")
     return parser
 
@@ -50,6 +55,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         output_path=output_path,
     )
     summary = compact_readiness_summary(payload)
+    summary_output_path = _resolve_optional_output_path(repo_root, args.summary_output_path)
+    if summary_output_path is not None:
+        _write_json_atomic(summary_output_path, summary)
     print_summary(summary, as_json=args.json)
     return exit_code_for_classification(str(summary["classification"]))
 
@@ -59,6 +67,20 @@ def _resolve_output_path(repo_root: Path, output_path: str | None) -> Path:
         path = Path(output_path).expanduser()
         return path if path.is_absolute() else repo_root / path
     return repo_root / DEFAULT_CANONICAL_READINESS_ARTIFACT
+
+
+def _resolve_optional_output_path(repo_root: Path, output_path: str | None) -> Path | None:
+    if not output_path:
+        return None
+    path = Path(output_path).expanduser()
+    return path if path.is_absolute() else repo_root / path
+
+
+def _write_json_atomic(path: Path, payload: Mapping[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(f".{path.name}.tmp")
+    tmp.write_text(json.dumps(dict(payload), indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    tmp.replace(path)
 
 
 def compact_readiness_summary(payload: Mapping[str, Any]) -> dict[str, Any]:

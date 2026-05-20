@@ -35,6 +35,7 @@ def test_refresh_commands_are_read_only_and_cover_dashboard_artifacts(tmp_path: 
     assert names.index("track_b_paper_broker_reconciliation") < names.index("track_b_paper_preflight")
     assert names.index("track_b_paper_preflight") < names.index("canonical_readiness")
     assert "placeOrder" not in flattened
+    assert "--summary-output-path" in flattened
     assert "cancelOrder" not in flattened
     assert "reqGlobalCancel" not in flattened
     assert "paper_proof" not in flattened
@@ -61,6 +62,7 @@ def test_refresh_once_writes_status_and_keeps_submit_authority_false(tmp_path: P
     assert payload["live_money_eligible"] is False
     assert "latest_track_b_paper_preflight.json" in payload["refreshed_artifacts"]["track_b_paper_preflight"]
     assert "latest_canonical_readiness.json" in payload["refreshed_artifacts"]["canonical_readiness"]
+    assert "latest_canonical_readiness_summary.json" in payload["refreshed_artifacts"]["canonical_readiness_summary"]
     assert json.loads(status_path.read_text(encoding="utf-8"))["classification"] == payload["classification"]
 
 
@@ -225,6 +227,7 @@ def test_run_supervisor_writes_supervisor_status_and_pid_files(monkeypatch, tmp_
     assert started
     assert "--service" in started[0]
     assert "--canonical-readiness-path" in started[0]
+    assert "--canonical-readiness-summary-path" in started[0]
     assert status["schema_version"] == "track_b_operator_readiness_refresh_supervisor_v1"
     assert status["submit_authority"] is False
     assert status["paper_proof_invoked"] is False

@@ -127,6 +127,31 @@ def test_produces_artifact_without_dashboard(tmp_path: Path, monkeypatch, capsys
     assert summary["root_match"] is True
 
 
+def test_main_writes_summary_output_when_requested(tmp_path: Path, monkeypatch) -> None:
+    output = tmp_path / "readiness.json"
+    summary_output = tmp_path / "summary.json"
+    monkeypatch.setattr(
+        cli,
+        "write_canonical_readiness_artifact",
+        lambda **kwargs: _write_and_return(output, _payload("READY_SUBMIT_CAPABLE")),
+    )
+
+    exit_code = cli.main(
+        [
+            "--repo-root",
+            str(tmp_path),
+            "--output-path",
+            str(output),
+            "--summary-output-path",
+            str(summary_output),
+        ]
+    )
+
+    summary = json.loads(summary_output.read_text(encoding="utf-8"))
+    assert exit_code == 0
+    assert summary["classification"] == "READY_SUBMIT_CAPABLE"
+
+
 def test_wrong_root_exits_2(tmp_path: Path, monkeypatch) -> None:
     output = tmp_path / "readiness.json"
     monkeypatch.setattr(cli, "write_canonical_readiness_artifact", lambda **kwargs: _write_and_return(output, _payload("NOT_READY_WRONG_ROOT")))
@@ -162,6 +187,9 @@ def test_json_summary_contains_compact_fields(capsys) -> None:
     assert sorted(summary) == [
         "blockers",
         "broker_truth_fresh",
+        "broker_truth_lease_age_seconds",
+        "broker_truth_lease_entry_seconds_remaining",
+        "broker_truth_lease_state",
         "classification",
         "eligible_lane_count",
         "quarantine_count",

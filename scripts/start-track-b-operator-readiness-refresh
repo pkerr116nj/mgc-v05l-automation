@@ -12,6 +12,7 @@ LOG_FILE="${REPO_ROOT}/var/track_b_operator_readiness_refresh_service.log"
 STATUS_PATH="${REPO_ROOT}/outputs/reports/track_b_operator_readiness_refresher/latest_track_b_operator_readiness_refresher_status.json"
 HEARTBEAT_PATH="${REPO_ROOT}/var/track_b_operator_readiness_refresh_heartbeat.json"
 CANONICAL_READINESS_PATH="${REPO_ROOT}/outputs/operator_dashboard/runtime/latest_canonical_readiness.json"
+CANONICAL_READINESS_SUMMARY_PATH="${REPO_ROOT}/outputs/operator_dashboard/runtime/latest_canonical_readiness_summary.json"
 SUPERVISOR_STATUS_PATH="${REPO_ROOT}/var/track_b_operator_readiness_refresh_supervisor.json"
 REFRESH_SECONDS="${TRACK_B_OPERATOR_READINESS_REFRESH_SECONDS:-60}"
 PREFLIGHT_MODE="${TRACK_B_OPERATOR_READINESS_PREFLIGHT_MODE:-monday-live}"
@@ -21,6 +22,7 @@ ensure_dir "$(dirname "${PID_FILE}")"
 ensure_dir "$(dirname "${LOG_FILE}")"
 ensure_dir "$(dirname "${STATUS_PATH}")"
 ensure_dir "$(dirname "${CANONICAL_READINESS_PATH}")"
+ensure_dir "$(dirname "${CANONICAL_READINESS_SUMMARY_PATH}")"
 
 pid_is_running() {
   local pid="$1"
@@ -99,6 +101,7 @@ supervisor_pid="$("${PYTHON_BIN}" - \
   "${STATUS_PATH}" \
   "${HEARTBEAT_PATH}" \
   "${CANONICAL_READINESS_PATH}" \
+  "${CANONICAL_READINESS_SUMMARY_PATH}" \
   "${SUPERVISOR_STATUS_PATH}" \
   "${REFRESH_SECONDS}" \
   "${PREFLIGHT_MODE}" <<'PYLAUNCH'
@@ -115,9 +118,10 @@ child_pid_file = Path(sys.argv[5])
 status_path = Path(sys.argv[6])
 heartbeat_path = Path(sys.argv[7])
 canonical_readiness_path = Path(sys.argv[8])
-supervisor_status_path = Path(sys.argv[9])
-refresh_seconds = sys.argv[10]
-preflight_mode = sys.argv[11]
+canonical_readiness_summary_path = Path(sys.argv[9])
+supervisor_status_path = Path(sys.argv[10])
+refresh_seconds = sys.argv[11]
+preflight_mode = sys.argv[12]
 
 env = dict(os.environ)
 existing_pythonpath = env.get("PYTHONPATH", "")
@@ -135,6 +139,8 @@ cmd = [
     str(heartbeat_path),
     "--canonical-readiness-path",
     str(canonical_readiness_path),
+    "--canonical-readiness-summary-path",
+    str(canonical_readiness_summary_path),
     "--service-pid-path",
     str(pid_file),
     "--child-pid-path",
