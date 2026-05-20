@@ -78,7 +78,9 @@ from ..market_data import (
 from ..market_data.live_feed import (
     DatabentoRawLivePollingClient,
     Phase1RuntimeArtifactError,
+    Phase1RuntimeArtifactMissingError,
     Phase1RuntimeArtifactPollingClient,
+    Phase1RuntimeArtifactRecoverableError,
     Phase1RuntimeArtifactStaleError,
     databento_live_auth_response,
     databento_live_effective_end,
@@ -7181,7 +7183,7 @@ class ProbationaryPaperSupervisor:
                             )
                         else:
                             lane_new_bars, reconciliation, _ = lane.poll_and_process()
-                    except Phase1RuntimeArtifactError as exc:
+                    except Phase1RuntimeArtifactRecoverableError as exc:
                         failure_payload = _probationary_phase1_artifact_failure_payload(lane=lane, exc=exc)
                         market_data_failures.append(failure_payload)
                         _write_probationary_runtime_transport_failure(
@@ -8884,12 +8886,19 @@ def _phase_coarse_session_group(current_phase: str) -> str:
     return shared_phase_coarse_session_group(current_phase)
 
 
-def _probationary_phase1_artifact_failure_payload(*, lane: Any, exc: Phase1RuntimeArtifactError) -> dict[str, Any]:
-    failure_kind = (
-        "phase1_runtime_artifact_stale"
-        if isinstance(exc, Phase1RuntimeArtifactStaleError)
-        else "phase1_runtime_artifact_not_ready"
-    )
+def _probationary_phase1_artifact_failure_payload(*, lane: Any, exc: Phase1RuntimeArtifactRecoverableError) -> dict[str, Any]:
+    if isinstance(exc, Phase1RuntimeArtifactStaleError):
+        failure_kind = "phase1_runtime_artifact_stale"
+        data_state = "DATA_STALE_INSTRUMENT"
+        lane_state = "LANE_NOT_READY_DATA_STALE"
+    elif isinstance(exc, Phase1RuntimeArtifactMissingError):
+        failure_kind = "phase1_runtime_artifact_missing"
+        data_state = "DATA_MISSING_INSTRUMENT"
+        lane_state = "LANE_NOT_READY_DATA_MISSING"
+    else:
+        failure_kind = "phase1_runtime_artifact_not_ready"
+        data_state = "DATA_NOT_READY_INSTRUMENT"
+        lane_state = "LANE_NOT_READY_DATA"
     return {
         "generated_at": datetime.now(timezone.utc).isoformat(),
         "lane_id": lane.spec.lane_id,
@@ -8901,6 +8910,11 @@ def _probationary_phase1_artifact_failure_payload(*, lane: Any, exc: Phase1Runti
         "exception_type": type(exc).__name__,
         "failure_kind": failure_kind,
         "blocker_reason": failure_kind,
+        "data_state": data_state,
+        "lane_runtime_state": lane_state,
+        "recovery_state": "RECOVERING_DATA_FRESHNESS",
+        "scope": "INSTRUMENT_SCOPED_NOT_READY",
+        "recoverable_without_restart": True,
         "runtime_pid": os.getpid(),
         "paper_only": True,
         "live_money_eligible": False,
@@ -8925,6 +8939,10 @@ def _lane_market_data_failure_overrides(failure: dict[str, Any] | None) -> dict[
         "market_data_blocker_reason": reason,
         "market_data_blocker_detail": failure.get("exception_text"),
         "market_data_blocker_generated_at": failure.get("generated_at"),
+        "data_state": failure.get("data_state"),
+        "lane_runtime_state": failure.get("lane_runtime_state"),
+        "recovery_state": failure.get("recovery_state"),
+        "recoverable_without_restart": failure.get("recoverable_without_restart"),
     }
 
 

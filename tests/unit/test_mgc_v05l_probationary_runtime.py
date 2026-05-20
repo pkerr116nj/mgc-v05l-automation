@@ -75,7 +75,13 @@ from mgc_v05l.execution.order_models import FillEvent
 from mgc_v05l.execution.paper_broker import PaperBroker, PaperPosition
 from mgc_v05l.domain.models import Bar, SignalPacket
 from mgc_v05l.execution.order_models import OrderIntent
-from mgc_v05l.market_data.live_feed import LivePollingService, Phase1RuntimeArtifactStaleError, _latest_completed_bar_end
+from mgc_v05l.market_data.live_feed import (
+    LivePollingService,
+    Phase1RuntimeArtifactError,
+    Phase1RuntimeArtifactMissingError,
+    Phase1RuntimeArtifactStaleError,
+    _latest_completed_bar_end,
+)
 from mgc_v05l.market_data.schwab_auth import SchwabAuthError
 from mgc_v05l.market_data.session_clock import classify_sessions
 from mgc_v05l.market_data.schwab_adapter import SchwabMarketDataAdapter
@@ -9840,14 +9846,218 @@ def test_probationary_supervisor_scopes_phase1_stale_artifact_to_affected_lane(
     assert failures[0]["lane_id"] == "mnq_lane"
     assert failures[0]["symbol"] == "MNQ"
     assert failures[0]["failure_kind"] == "phase1_runtime_artifact_stale"
+    assert failures[0]["data_state"] == "DATA_STALE_INSTRUMENT"
+    assert failures[0]["lane_runtime_state"] == "LANE_NOT_READY_DATA_STALE"
+    assert failures[0]["recovery_state"] == "RECOVERING_DATA_FRESHNESS"
+    assert failures[0]["recoverable_without_restart"] is True
     assert failures[0]["route_allowed"] is False
     assert failures[0]["submit_allowed"] is False
     lane_rows = {row["lane_id"]: row for row in status_payload["lanes"]}
     assert lane_rows["mnq_lane"]["eligible_now"] is False
     assert lane_rows["mnq_lane"]["eligibility_reason"] == "phase1_runtime_artifact_stale"
     assert lane_rows["mnq_lane"]["market_data_not_ready"] is True
+    assert lane_rows["mnq_lane"]["data_state"] == "DATA_STALE_INSTRUMENT"
+    assert lane_rows["mnq_lane"]["lane_runtime_state"] == "LANE_NOT_READY_DATA_STALE"
+    assert lane_rows["mnq_lane"]["recovery_state"] == "RECOVERING_DATA_FRESHNESS"
     assert "MNQ/1m/latest_runtime_candles.json" in lane_rows["mnq_lane"]["market_data_blocker_detail"]
     assert lane_rows["mgc_lane"]["market_data_not_ready"] is False
+
+
+def test_probationary_supervisor_scopes_phase1_stale_mgc_to_mgc_lane_only(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = _build_probationary_paper_settings(tmp_path)
+    root_logger = StructuredLogger(tmp_path / "root")
+    stale_mgc_lane = _prepare_supervisor_test_lane(
+        _seed_test_lane(
+            tmp_path,
+            lane_id="mgc_lane",
+            symbol="MGC",
+            source="usLatePauseResumeLongTurn",
+            session_restriction="US_LATE",
+            point_value=Decimal("10"),
+        )
+    )
+    healthy_mnq_lane = _prepare_supervisor_test_lane(
+        _seed_test_lane(
+            tmp_path,
+            lane_id="mnq_lane",
+            symbol="MNQ",
+            source="usLatePauseResumeLongTurn",
+            session_restriction="US_LATE",
+            point_value=Decimal("2"),
+        )
+    )
+    stale_mgc_lane.restore_startup = lambda: None
+    healthy_mnq_lane.restore_startup = lambda: None
+    stale_mgc_lane.poll_and_process = lambda: (_ for _ in ()).throw(
+        Phase1RuntimeArtifactStaleError(
+            "Phase-1 runtime candle artifact is stale: latest_bar=2026-05-20T10:39:00+00:00 "
+            "age_seconds=202.436 threshold_seconds=180.000 "
+            "path=/phase1_runtime_market_data/MGC/1m/latest_runtime_candles.json"
+        )
+    )
+    healthy_mnq_lane.poll_and_process = lambda: (1, {"clean": True}, None)
+
+    supervisor = probationary_runtime_module.ProbationaryPaperSupervisor(
+        settings=settings,
+        lanes=[stale_mgc_lane, healthy_mnq_lane],
+        structured_logger=root_logger,
+        alert_dispatcher=AlertDispatcher(root_logger),
+    )
+    monkeypatch.setattr(supervisor, "_install_signal_handlers", lambda: {})
+    monkeypatch.setattr(supervisor, "_restore_signal_handlers", lambda _previous: None)
+
+    summary = supervisor.run(poll_once=True)
+
+    assert summary.reconciliation_clean is True
+    assert summary.stop_reason is None
+    assert summary.new_bars == 1
+    status_payload = json.loads(Path(summary.operator_status_path).read_text(encoding="utf-8"))
+    lane_rows = {row["lane_id"]: row for row in status_payload["lanes"]}
+    assert lane_rows["mgc_lane"]["eligible_now"] is False
+    assert lane_rows["mgc_lane"]["data_state"] == "DATA_STALE_INSTRUMENT"
+    assert lane_rows["mnq_lane"]["market_data_not_ready"] is False
+    assert stale_mgc_lane.repositories.order_intents.list_all() == []
+    assert healthy_mnq_lane.repositories.order_intents.list_all() == []
+
+
+def test_probationary_supervisor_missing_phase1_artifact_is_recoverable_lane_state(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = _build_probationary_paper_settings(tmp_path)
+    root_logger = StructuredLogger(tmp_path / "root")
+    lane = _prepare_supervisor_test_lane(
+        _seed_test_lane(
+            tmp_path,
+            lane_id="mnq_lane",
+            symbol="MNQ",
+            source="usLatePauseResumeLongTurn",
+            session_restriction="US_LATE",
+            point_value=Decimal("2"),
+        )
+    )
+    lane.restore_startup = lambda: None
+    lane.poll_and_process = lambda: (_ for _ in ()).throw(
+        Phase1RuntimeArtifactMissingError(
+            "Phase-1 runtime candle artifact is missing: /phase1_runtime_market_data/MNQ/1m/latest_runtime_candles.json"
+        )
+    )
+
+    supervisor = probationary_runtime_module.ProbationaryPaperSupervisor(
+        settings=settings,
+        lanes=[lane],
+        structured_logger=root_logger,
+        alert_dispatcher=AlertDispatcher(root_logger),
+    )
+    monkeypatch.setattr(supervisor, "_install_signal_handlers", lambda: {})
+    monkeypatch.setattr(supervisor, "_restore_signal_handlers", lambda _previous: None)
+
+    summary = supervisor.run(poll_once=True)
+
+    assert summary.stop_reason is None
+    status_payload = json.loads(Path(summary.operator_status_path).read_text(encoding="utf-8"))
+    lane_row = status_payload["lanes"][0]
+    assert lane_row["eligible_now"] is False
+    assert lane_row["eligibility_reason"] == "phase1_runtime_artifact_missing"
+    assert lane_row["data_state"] == "DATA_MISSING_INSTRUMENT"
+    assert lane_row["lane_runtime_state"] == "LANE_NOT_READY_DATA_MISSING"
+    assert lane_row["recovery_state"] == "RECOVERING_DATA_FRESHNESS"
+    assert lane.repositories.order_intents.list_all() == []
+
+
+def test_probationary_supervisor_restores_lane_after_phase1_artifact_recovers(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = _build_probationary_paper_settings(tmp_path)
+    root_logger = StructuredLogger(tmp_path / "root")
+    lane = _prepare_supervisor_test_lane(
+        _seed_test_lane(
+            tmp_path,
+            lane_id="mnq_lane",
+            symbol="MNQ",
+            source="usLatePauseResumeLongTurn",
+            session_restriction="US_LATE",
+            point_value=Decimal("2"),
+        )
+    )
+    lane.restore_startup = lambda: None
+    lane.eligibility_snapshot = lambda _now: {
+        "eligible_now": True,
+        "eligibility_reason": None,
+        "eligibility_detail": None,
+        "allowed_session_match": True,
+        "warmup_complete": True,
+        "warmup_bars_loaded": 20,
+        "warmup_bars_required": 1,
+        "latest_completed_bar_end_ts": "2026-05-20T11:00:00+00:00",
+        "last_processed_bar_end_ts": "2026-05-20T10:59:00+00:00",
+    }
+    calls = {"count": 0}
+
+    def _poll_once_then_recover():
+        calls["count"] += 1
+        if calls["count"] == 1:
+            raise Phase1RuntimeArtifactStaleError("Phase-1 runtime candle artifact is stale: MNQ 1m")
+        return 1, {"clean": True}, None
+
+    lane.poll_and_process = _poll_once_then_recover
+    supervisor = probationary_runtime_module.ProbationaryPaperSupervisor(
+        settings=settings,
+        lanes=[lane],
+        structured_logger=root_logger,
+        alert_dispatcher=AlertDispatcher(root_logger),
+    )
+    monkeypatch.setattr(supervisor, "_install_signal_handlers", lambda: {})
+    monkeypatch.setattr(supervisor, "_restore_signal_handlers", lambda _previous: None)
+
+    degraded = supervisor.run(poll_once=True)
+    degraded_status = json.loads(Path(degraded.operator_status_path).read_text(encoding="utf-8"))
+    recovered = supervisor.run(poll_once=True)
+
+    assert degraded_status["lanes"][0]["data_state"] == "DATA_STALE_INSTRUMENT"
+    recovered_status = json.loads(Path(recovered.operator_status_path).read_text(encoding="utf-8"))
+    assert recovered_status["health"]["market_data_ok"] is True
+    assert recovered_status["lanes"][0]["eligible_now"] is True
+    assert recovered_status["lanes"][0]["market_data_not_ready"] is False
+    assert recovered_status["lanes"][0]["market_data_blocker_reason"] is None
+    assert recovered.new_bars == 1
+
+
+def test_probationary_supervisor_keeps_artifact_schema_errors_fatal(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = _build_probationary_paper_settings(tmp_path)
+    root_logger = StructuredLogger(tmp_path / "root")
+    lane = _prepare_supervisor_test_lane(
+        _seed_test_lane(
+            tmp_path,
+            lane_id="mnq_lane",
+            symbol="MNQ",
+            source="usLatePauseResumeLongTurn",
+            session_restriction="US_LATE",
+            point_value=Decimal("2"),
+        )
+    )
+    lane.restore_startup = lambda: None
+    lane.poll_and_process = lambda: (_ for _ in ()).throw(
+        Phase1RuntimeArtifactError("Phase-1 runtime candle artifact must expose a bars list.")
+    )
+    supervisor = probationary_runtime_module.ProbationaryPaperSupervisor(
+        settings=settings,
+        lanes=[lane],
+        structured_logger=root_logger,
+        alert_dispatcher=AlertDispatcher(root_logger),
+    )
+    monkeypatch.setattr(supervisor, "_install_signal_handlers", lambda: {})
+    monkeypatch.setattr(supervisor, "_restore_signal_handlers", lambda _previous: None)
+
+    with pytest.raises(Phase1RuntimeArtifactError, match="must expose a bars list"):
+        supervisor.run(poll_once=True)
 
 
 def _prepare_supervisor_test_lane(lane: SimpleNamespace, *, source: str = "usLatePauseResumeLongTurn") -> SimpleNamespace:

@@ -315,7 +315,15 @@ class Phase1RuntimeArtifactError(RuntimeError):
     """Phase-1 runtime candle artifact cannot safely provide live PAPER bars."""
 
 
-class Phase1RuntimeArtifactStaleError(Phase1RuntimeArtifactError):
+class Phase1RuntimeArtifactRecoverableError(Phase1RuntimeArtifactError):
+    """Phase-1 artifact outage that can recover without restarting PAPER runtime."""
+
+
+class Phase1RuntimeArtifactMissingError(Phase1RuntimeArtifactRecoverableError):
+    """Phase-1 runtime candle artifact is missing or lacks completed bars."""
+
+
+class Phase1RuntimeArtifactStaleError(Phase1RuntimeArtifactRecoverableError):
     """Phase-1 runtime candle artifact exists but is too stale to route from."""
 
 
@@ -634,7 +642,7 @@ class Phase1RuntimeArtifactPollingClient:
         try:
             payload = json.loads(path.read_text(encoding="utf-8"))
         except FileNotFoundError as exc:
-            raise Phase1RuntimeArtifactError(f"Phase-1 runtime candle artifact is missing: {path}") from exc
+            raise Phase1RuntimeArtifactMissingError(f"Phase-1 runtime candle artifact is missing: {path}") from exc
         except json.JSONDecodeError as exc:
             raise Phase1RuntimeArtifactError(f"Phase-1 runtime candle artifact is not valid JSON: {path}") from exc
         if not isinstance(payload, dict):
@@ -669,7 +677,7 @@ class Phase1RuntimeArtifactPollingClient:
 
     def _validate_freshness(self, payload: Mapping[str, Any], *, bars: Sequence[Bar], path: Path) -> None:
         if not bars:
-            raise Phase1RuntimeArtifactError(f"Phase-1 runtime candle artifact contains no completed bars: {path}")
+            raise Phase1RuntimeArtifactMissingError(f"Phase-1 runtime candle artifact contains no completed bars: {path}")
         now = self._now()
         latest_bar_end = max(bar.end_ts for bar in bars).astimezone(UTC)
         threshold_seconds = _float_value(
@@ -712,7 +720,7 @@ class Phase1RuntimeArtifactPollingClient:
                 continue
             row_symbol = str(raw_row.get("symbol") or raw_row.get("instrument") or internal_symbol).strip().upper()
             if row_symbol != internal_symbol:
-                raise RuntimeError(
+                raise Phase1RuntimeArtifactError(
                     f"Phase-1 runtime candle artifact row symbol mismatch: expected {internal_symbol}, found {row_symbol}."
                 )
             end_ts = _parse_optional_datetime(raw_row.get("bar_end") or raw_row.get("end_ts") or raw_row.get("timestamp"))
