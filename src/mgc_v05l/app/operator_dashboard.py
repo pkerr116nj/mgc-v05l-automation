@@ -1381,6 +1381,12 @@ class OperatorDashboardService:
                     canonical_readiness_payload,
                     self._canonical_readiness_path,
                 )
+                track_b_paper_trading = self._track_b_paper_trading_results_payload()
+                operator_readiness_refresh_status = (
+                    track_b_paper_trading.get("operator_readiness_refresh_status")
+                    if isinstance(track_b_paper_trading, dict)
+                    else {}
+                )
                 operator_surface_runtime = operator_surface.get("runtime_readiness") if isinstance(operator_surface, dict) else None
                 if isinstance(operator_surface_runtime, dict):
                     operator_surface_runtime["canonical_readiness"] = canonical_readiness_summary["canonical_readiness"]
@@ -1388,6 +1394,7 @@ class OperatorDashboardService:
                     operator_surface_runtime["readiness_warnings"] = canonical_readiness_summary["readiness_warnings"]
                     operator_surface_runtime["broker_truth_lease"] = canonical_readiness_summary.get("broker_truth_lease") or {}
                     operator_surface_runtime["broker_truth"] = canonical_readiness_summary.get("broker_truth") or {}
+                    operator_surface_runtime["operator_readiness_refresh_status"] = operator_readiness_refresh_status
                     truth = operator_surface_runtime.get("authoritative_runtime_truth")
                     if isinstance(truth, dict):
                         broker_truth_lease = canonical_readiness_summary.get("broker_truth_lease") or {}
@@ -1395,6 +1402,15 @@ class OperatorDashboardService:
                         truth["broker_truth_lease_state"] = broker_truth_lease.get("lease_state")
                         truth["broker_truth_lease_age_seconds"] = broker_truth_lease.get("age_seconds")
                         truth["broker_truth_lease_entry_seconds_remaining"] = broker_truth_lease.get("entry_seconds_remaining")
+                        if isinstance(operator_readiness_refresh_status, dict):
+                            truth["operator_readiness_refresh_classification"] = operator_readiness_refresh_status.get("classification")
+                            truth["operator_readiness_refresh_age_seconds"] = operator_readiness_refresh_status.get("age_seconds")
+                            truth["operator_readiness_refresh_fresh"] = operator_readiness_refresh_status.get("fresh")
+                            truth["operator_readiness_refresh_service_running"] = operator_readiness_refresh_status.get("service_running")
+                            truth["operator_readiness_refresh_heartbeat_fresh"] = operator_readiness_refresh_status.get("heartbeat_fresh")
+                            truth["operator_readiness_refresh_heartbeat_age_seconds"] = operator_readiness_refresh_status.get("heartbeat_age_seconds")
+                            truth["operator_readiness_refresh_last_success"] = operator_readiness_refresh_status.get("last_success")
+                            truth["operator_readiness_refresh_last_failure"] = operator_readiness_refresh_status.get("last_failure")
                 dashboard_payload: dict[str, Any] = {
                     "payload_version": DASHBOARD_PAYLOAD_SCHEMA_VERSION,
                     "generated_at": generated_at,
@@ -1488,7 +1504,7 @@ class OperatorDashboardService:
                     "production_link": production_link,
                     "same_underlying_conflicts": same_underlying_conflicts,
                     "track_b_operator_status": self._latest_track_b_operator_status_payload(),
-                    "track_b_paper_trading": self._track_b_paper_trading_results_payload(),
+                    "track_b_paper_trading": track_b_paper_trading,
                 }
                 _write_json_file(self._dashboard_snapshot_path, dashboard_payload)
                 return dashboard_payload
@@ -1928,6 +1944,18 @@ class OperatorDashboardService:
             / "track_b_operator_readiness_refresher"
             / "latest_track_b_operator_readiness_refresher_status.json"
         )
+        operator_readiness_refresh_heartbeat_path = (
+            self._repo_root / "var" / "track_b_operator_readiness_refresh_heartbeat.json"
+        )
+        operator_readiness_refresh_supervisor_path = (
+            self._repo_root / "var" / "track_b_operator_readiness_refresh_supervisor.json"
+        )
+        operator_readiness_refresh_service_pid_path = (
+            self._repo_root / "var" / "track_b_operator_readiness_refresh_service.pid"
+        )
+        operator_readiness_refresh_child_pid_path = (
+            self._repo_root / "var" / "track_b_operator_readiness_refresh_child.pid"
+        )
         broker_truth_refresh_status_path = reports_root / "ibkr_read_only_verification" / "ibkr_broker_truth_refresh_status.json"
         broker_reconciliation_report_path = (
             reports_root
@@ -1947,6 +1975,8 @@ class OperatorDashboardService:
         monitor_liveness_diagnostic = _load_json_file(monitor_liveness_diagnostic_path)
         track_b_preflight = _load_json_file(track_b_preflight_path)
         operator_readiness_refresh_status = _load_json_file(operator_readiness_refresh_status_path)
+        operator_readiness_refresh_heartbeat = _load_json_file(operator_readiness_refresh_heartbeat_path)
+        operator_readiness_refresh_supervisor = _load_json_file(operator_readiness_refresh_supervisor_path)
         broker_truth_refresh_status = _load_json_file(broker_truth_refresh_status_path)
         broker_reconciliation_report = _load_json_file(broker_reconciliation_report_path)
         trade_summary = trade_summary if isinstance(trade_summary, dict) else {}
@@ -1975,6 +2005,12 @@ class OperatorDashboardService:
         track_b_preflight = track_b_preflight if isinstance(track_b_preflight, dict) else {}
         operator_readiness_refresh_status = (
             operator_readiness_refresh_status if isinstance(operator_readiness_refresh_status, dict) else {}
+        )
+        operator_readiness_refresh_heartbeat = (
+            operator_readiness_refresh_heartbeat if isinstance(operator_readiness_refresh_heartbeat, dict) else {}
+        )
+        operator_readiness_refresh_supervisor = (
+            operator_readiness_refresh_supervisor if isinstance(operator_readiness_refresh_supervisor, dict) else {}
         )
         broker_truth_refresh_status = broker_truth_refresh_status if isinstance(broker_truth_refresh_status, dict) else {}
         broker_reconciliation_report = (
@@ -2107,6 +2143,12 @@ class OperatorDashboardService:
                 "operator_readiness_refresh_status": _track_b_paper_artifact_status(
                     operator_readiness_refresh_status_path
                 ),
+                "operator_readiness_refresh_heartbeat": _track_b_paper_artifact_status(
+                    operator_readiness_refresh_heartbeat_path
+                ),
+                "operator_readiness_refresh_supervisor": _track_b_paper_artifact_status(
+                    operator_readiness_refresh_supervisor_path
+                ),
                 "broker_reconciliation_report": _track_b_paper_artifact_status(broker_reconciliation_report_path),
             },
             "broker_reconciliation_status": broker_reconciliation_status,
@@ -2114,6 +2156,12 @@ class OperatorDashboardService:
             "operator_readiness_refresh_status": _compact_track_b_operator_readiness_refresh_status(
                 operator_readiness_refresh_status,
                 operator_readiness_refresh_status_path,
+                heartbeat_payload=operator_readiness_refresh_heartbeat,
+                heartbeat_path=operator_readiness_refresh_heartbeat_path,
+                supervisor_payload=operator_readiness_refresh_supervisor,
+                supervisor_path=operator_readiness_refresh_supervisor_path,
+                service_pid_path=operator_readiness_refresh_service_pid_path,
+                child_pid_path=operator_readiness_refresh_child_pid_path,
             ),
             "phase1_gc_readiness": _compact_track_b_phase1_gc_preflight_readiness(
                 track_b_preflight,
@@ -17621,24 +17669,97 @@ def _compact_track_b_phase1_gc_preflight_readiness(payload: dict[str, Any], path
     }
 
 
-def _compact_track_b_operator_readiness_refresh_status(payload: dict[str, Any], path: Path) -> dict[str, Any]:
+def _compact_track_b_operator_readiness_refresh_status(
+    payload: dict[str, Any],
+    path: Path,
+    *,
+    heartbeat_payload: dict[str, Any] | None = None,
+    heartbeat_path: Path | None = None,
+    supervisor_payload: dict[str, Any] | None = None,
+    supervisor_path: Path | None = None,
+    service_pid_path: Path | None = None,
+    child_pid_path: Path | None = None,
+) -> dict[str, Any]:
+    service_pid = _read_pid(service_pid_path) if service_pid_path is not None else None
+    child_pid = _read_pid(child_pid_path) if child_pid_path is not None else None
+    service_running = _pid_running(service_pid_path) if service_pid_path is not None else None
+    child_running = _pid_running(child_pid_path) if child_pid_path is not None else None
+    heartbeat_payload = heartbeat_payload if isinstance(heartbeat_payload, dict) else {}
+    supervisor_payload = supervisor_payload if isinstance(supervisor_payload, dict) else {}
+    heartbeat_generated_at = heartbeat_payload.get("generated_at")
+    heartbeat_age_seconds = _dashboard_payload_age_seconds(heartbeat_generated_at)
+    supervisor_generated_at = supervisor_payload.get("generated_at")
+    supervisor_age_seconds = _dashboard_payload_age_seconds(supervisor_generated_at)
+
+    def _threshold(source: dict[str, Any]) -> float:
+        try:
+            return max(float(source.get("refresh_seconds") or 60.0) * 2.5, 180.0)
+        except (TypeError, ValueError):
+            return 180.0
+
+    heartbeat_threshold_seconds = _threshold(heartbeat_payload or payload)
+    heartbeat_available = bool(heartbeat_payload)
+    heartbeat_fresh = bool(
+        heartbeat_available
+        and heartbeat_age_seconds is not None
+        and heartbeat_age_seconds <= heartbeat_threshold_seconds
+    )
+    supervisor_available = bool(supervisor_payload)
+    supervisor_fresh = bool(
+        supervisor_available
+        and supervisor_age_seconds is not None
+        and supervisor_age_seconds <= heartbeat_threshold_seconds
+    )
+    base = {
+        "service_pid": service_pid,
+        "child_pid": child_pid,
+        "service_running": service_running,
+        "child_running": child_running,
+        "heartbeat_available": heartbeat_available,
+        "heartbeat_path": str(heartbeat_path) if heartbeat_path is not None else None,
+        "heartbeat_generated_at": heartbeat_generated_at,
+        "heartbeat_age_seconds": heartbeat_age_seconds,
+        "heartbeat_freshness_threshold_seconds": heartbeat_threshold_seconds,
+        "heartbeat_fresh": heartbeat_fresh,
+        "supervisor_available": supervisor_available,
+        "supervisor_path": str(supervisor_path) if supervisor_path is not None else None,
+        "supervisor_generated_at": supervisor_generated_at,
+        "supervisor_age_seconds": supervisor_age_seconds,
+        "supervisor_fresh": supervisor_fresh,
+        "supervisor_classification": supervisor_payload.get("classification"),
+        "supervisor_restart_count": supervisor_payload.get("restart_count"),
+        "submit_authority": False,
+        "paper_proof_invoked": False,
+        "live_money_eligible": False,
+    }
     if not payload:
+        classification = "TRACK_B_OPERATOR_READINESS_REFRESH_STATUS_MISSING"
+        if service_running is False or child_running is False:
+            classification = "TRACK_B_OPERATOR_READINESS_REFRESH_SERVICE_NOT_RUNNING"
         return {
             "available": False,
             "path": str(path),
-            "classification": "TRACK_B_OPERATOR_READINESS_REFRESH_STATUS_MISSING",
+            "classification": classification,
             "fresh": False,
             "last_success": False,
-            "submit_authority": False,
-            "paper_proof_invoked": False,
-            "live_money_eligible": False,
+            "last_failure": False,
+            **base,
         }
     generated_at = payload.get("generated_at")
     age_seconds = _dashboard_payload_age_seconds(generated_at)
-    freshness_threshold_seconds = max(float(payload.get("refresh_seconds") or 60.0) * 2.5, 180.0)
+    freshness_threshold_seconds = _threshold(payload)
     fresh = bool(age_seconds is not None and age_seconds <= freshness_threshold_seconds)
     source_classification = str(payload.get("classification") or "TRACK_B_OPERATOR_READINESS_REFRESH_UNKNOWN")
-    classification = source_classification if fresh else "TRACK_B_OPERATOR_READINESS_REFRESH_STALE"
+    last_failure = bool(payload.get("last_failure") is True or source_classification.endswith("FAILED"))
+    classification = source_classification
+    if service_running is False or child_running is False:
+        classification = "TRACK_B_OPERATOR_READINESS_REFRESH_SERVICE_NOT_RUNNING"
+    elif heartbeat_path is not None and not heartbeat_fresh:
+        classification = "TRACK_B_OPERATOR_READINESS_REFRESH_HEARTBEAT_STALE"
+    elif not fresh:
+        classification = "TRACK_B_OPERATOR_READINESS_REFRESH_STALE"
+    elif last_failure:
+        classification = "TRACK_B_OPERATOR_READINESS_REFRESH_FAILED"
     return {
         "available": True,
         "path": str(path),
@@ -17650,12 +17771,12 @@ def _compact_track_b_operator_readiness_refresh_status(payload: dict[str, Any], 
         "source_classification": source_classification,
         "last_success": bool(payload.get("last_success") is True),
         "last_success_at": payload.get("last_success_at"),
+        "last_failure": last_failure,
+        "last_failure_at": payload.get("last_failure_at"),
         "preflight_mode": payload.get("preflight_mode"),
         "refresh_seconds": payload.get("refresh_seconds"),
         "refreshed_artifacts": payload.get("refreshed_artifacts") if isinstance(payload.get("refreshed_artifacts"), dict) else {},
-        "submit_authority": bool(payload.get("submit_authority") is True),
-        "paper_proof_invoked": bool(payload.get("paper_proof_invoked") is True),
-        "live_money_eligible": bool(payload.get("live_money_eligible") is True),
+        **base,
     }
 
 

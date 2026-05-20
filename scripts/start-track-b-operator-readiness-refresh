@@ -7,25 +7,101 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "${SCRIPT_DIR}/common_env.sh"
 
 PID_FILE="${REPO_ROOT}/var/track_b_operator_readiness_refresh_service.pid"
+CHILD_PID_FILE="${REPO_ROOT}/var/track_b_operator_readiness_refresh_child.pid"
 LOG_FILE="${REPO_ROOT}/var/track_b_operator_readiness_refresh_service.log"
+STATUS_PATH="${REPO_ROOT}/outputs/reports/track_b_operator_readiness_refresher/latest_track_b_operator_readiness_refresher_status.json"
+HEARTBEAT_PATH="${REPO_ROOT}/var/track_b_operator_readiness_refresh_heartbeat.json"
+CANONICAL_READINESS_PATH="${REPO_ROOT}/outputs/operator_dashboard/runtime/latest_canonical_readiness.json"
+SUPERVISOR_STATUS_PATH="${REPO_ROOT}/var/track_b_operator_readiness_refresh_supervisor.json"
 REFRESH_SECONDS="${TRACK_B_OPERATOR_READINESS_REFRESH_SECONDS:-60}"
 PREFLIGHT_MODE="${TRACK_B_OPERATOR_READINESS_PREFLIGHT_MODE:-monday-live}"
+ALLOW_DUPLICATE="${TRACK_B_OPERATOR_READINESS_ALLOW_DUPLICATE:-0}"
 
 ensure_dir "$(dirname "${PID_FILE}")"
 ensure_dir "$(dirname "${LOG_FILE}")"
+ensure_dir "$(dirname "${STATUS_PATH}")"
+ensure_dir "$(dirname "${CANONICAL_READINESS_PATH}")"
 
-if [[ -f "${PID_FILE}" ]]; then
-  existing_pid="$(cat "${PID_FILE}" 2>/dev/null || true)"
-  if [[ -n "${existing_pid}" ]] && kill -0 "${existing_pid}" 2>/dev/null; then
-    echo "Track B operator readiness refresh service is already running with pid ${existing_pid}."
+pid_is_running() {
+  local pid="$1"
+  [[ -n "${pid}" ]] || return 1
+  "${PYTHON_BIN}" - "${pid}" <<'PYPID'
+import os
+import sys
+try:
+    os.kill(int(sys.argv[1]), 0)
+except ProcessLookupError:
+    raise SystemExit(1)
+except PermissionError:
+    raise SystemExit(0)
+except Exception:
+    raise SystemExit(1)
+raise SystemExit(0)
+PYPID
+}
+
+read_pid_file() {
+  local path="$1"
+  [[ -f "${path}" ]] || return 1
+  tr -d '[:space:]' < "${path}" 2>/dev/null
+}
+
+existing_supervisor_pid="$(read_pid_file "${PID_FILE}" || true)"
+if pid_is_running "${existing_supervisor_pid}"; then
+  echo "Track B operator readiness refresh supervisor is already running with pid ${existing_supervisor_pid}."
+  bash "${SCRIPT_DIR}/status-track-b-operator-readiness-refresh"
+  exit 0
+fi
+rm -f "${PID_FILE}"
+
+existing_child_pid="$(read_pid_file "${CHILD_PID_FILE}" || true)"
+if pid_is_running "${existing_child_pid}"; then
+  if [[ "${ALLOW_DUPLICATE}" != "1" ]]; then
+    echo "Track B operator readiness refresh child is already running with pid ${existing_child_pid}." >&2
     bash "${SCRIPT_DIR}/status-track-b-operator-readiness-refresh"
-    exit 0
+    exit 1
   fi
-  rm -f "${PID_FILE}"
+else
+  rm -f "${CHILD_PID_FILE}"
 fi
 
-service_pid="$(
-"${PYTHON_BIN}" - <<'PY' "${REPO_ROOT}" "${PYTHON_BIN}" "${LOG_FILE}" "${REFRESH_SECONDS}" "${PREFLIGHT_MODE}"
+if [[ "${ALLOW_DUPLICATE}" != "1" ]]; then
+  duplicate_count="$("${PYTHON_BIN}" - <<'PYDUP'
+import subprocess
+try:
+    output = subprocess.check_output(["/bin/ps", "-axo", "pid=,command="], text=True)
+except Exception:
+    print(0)
+    raise SystemExit(0)
+count = 0
+for line in output.splitlines():
+    if "mgc_v05l.app.track_b_operator_readiness_refresher" not in line:
+        continue
+    if " --service" not in line and " --supervisor" not in line:
+        continue
+    count += 1
+print(count)
+PYDUP
+)"
+  if [[ "${duplicate_count}" != "0" ]]; then
+    echo "Refusing to start duplicate Track B operator readiness refresher; set TRACK_B_OPERATOR_READINESS_ALLOW_DUPLICATE=1 to override." >&2
+    bash "${SCRIPT_DIR}/status-track-b-operator-readiness-refresh" || true
+    exit 1
+  fi
+fi
+
+supervisor_pid="$("${PYTHON_BIN}" - \
+  "${REPO_ROOT}" \
+  "${PYTHON_BIN}" \
+  "${LOG_FILE}" \
+  "${PID_FILE}" \
+  "${CHILD_PID_FILE}" \
+  "${STATUS_PATH}" \
+  "${HEARTBEAT_PATH}" \
+  "${CANONICAL_READINESS_PATH}" \
+  "${SUPERVISOR_STATUS_PATH}" \
+  "${REFRESH_SECONDS}" \
+  "${PREFLIGHT_MODE}" <<'PYLAUNCH'
 import os
 import subprocess
 import sys
@@ -34,8 +110,14 @@ from pathlib import Path
 repo_root = Path(sys.argv[1])
 python_bin = sys.argv[2]
 log_file = Path(sys.argv[3])
-refresh_seconds = sys.argv[4]
-preflight_mode = sys.argv[5]
+pid_file = Path(sys.argv[4])
+child_pid_file = Path(sys.argv[5])
+status_path = Path(sys.argv[6])
+heartbeat_path = Path(sys.argv[7])
+canonical_readiness_path = Path(sys.argv[8])
+supervisor_status_path = Path(sys.argv[9])
+refresh_seconds = sys.argv[10]
+preflight_mode = sys.argv[11]
 
 env = dict(os.environ)
 existing_pythonpath = env.get("PYTHONPATH", "")
@@ -44,9 +126,21 @@ cmd = [
     python_bin,
     "-m",
     "mgc_v05l.app.track_b_operator_readiness_refresher",
-    "--service",
+    "--supervisor",
     "--repo-root",
     str(repo_root),
+    "--status-path",
+    str(status_path),
+    "--heartbeat-path",
+    str(heartbeat_path),
+    "--canonical-readiness-path",
+    str(canonical_readiness_path),
+    "--service-pid-path",
+    str(pid_file),
+    "--child-pid-path",
+    str(child_pid_file),
+    "--supervisor-status-path",
+    str(supervisor_status_path),
     "--refresh-seconds",
     refresh_seconds,
     "--preflight-mode",
@@ -54,7 +148,7 @@ cmd = [
 ]
 log_file.parent.mkdir(parents=True, exist_ok=True)
 with log_file.open("ab") as log_handle, open(os.devnull, "rb") as devnull:
-    proc = subprocess.Popen(
+    process = subprocess.Popen(
         cmd,
         cwd=str(repo_root),
         env=env,
@@ -64,11 +158,12 @@ with log_file.open("ab") as log_handle, open(os.devnull, "rb") as devnull:
         start_new_session=True,
         close_fds=True,
     )
-print(proc.pid)
-PY
+print(process.pid)
+PYLAUNCH
 )"
-echo "${service_pid}" > "${PID_FILE}"
-echo "Started Track B operator readiness refresh service with pid ${service_pid}."
+
+echo "${supervisor_pid}" > "${PID_FILE}"
+echo "Started Track B operator readiness refresh supervisor with pid ${supervisor_pid}."
 echo "Cadence seconds: ${REFRESH_SECONDS}"
 echo "Preflight mode: ${PREFLIGHT_MODE}"
 echo "Log file: ${LOG_FILE}"

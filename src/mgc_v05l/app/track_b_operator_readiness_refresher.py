@@ -23,6 +23,12 @@ DEFAULT_STATUS_PATH = (
     / "latest_track_b_operator_readiness_refresher_status.json"
 )
 DEFAULT_HEARTBEAT_PATH = REPO_ROOT / "var" / "track_b_operator_readiness_refresh_heartbeat.json"
+DEFAULT_CANONICAL_READINESS_PATH = (
+    REPO_ROOT / "outputs" / "operator_dashboard" / "runtime" / "latest_canonical_readiness.json"
+)
+DEFAULT_SERVICE_PID_PATH = REPO_ROOT / "var" / "track_b_operator_readiness_refresh_service.pid"
+DEFAULT_CHILD_PID_PATH = REPO_ROOT / "var" / "track_b_operator_readiness_refresh_child.pid"
+DEFAULT_SUPERVISOR_STATUS_PATH = REPO_ROOT / "var" / "track_b_operator_readiness_refresh_supervisor.json"
 DEFAULT_REFRESH_SECONDS = 60.0
 DEFAULT_PREFLIGHT_MODE = "monday-live"
 
@@ -42,6 +48,7 @@ class RefreshConfig:
     repo_root: Path = REPO_ROOT
     status_path: Path = DEFAULT_STATUS_PATH
     heartbeat_path: Path | None = None
+    canonical_readiness_path: Path = DEFAULT_CANONICAL_READINESS_PATH
     refresh_seconds: float = DEFAULT_REFRESH_SECONDS
     preflight_mode: str = DEFAULT_PREFLIGHT_MODE
     timeout_seconds: float = 120.0
@@ -54,11 +61,15 @@ def refresh_once(*, config: RefreshConfig, runner: Runner | None = None) -> dict
     repo_root = Path(config.repo_root)
     runner = runner or _run_command
     started = _utc_now()
-    commands = _refresh_commands(repo_root=repo_root, preflight_mode=config.preflight_mode)
+    commands = _refresh_commands(
+        repo_root=repo_root,
+        preflight_mode=config.preflight_mode,
+        canonical_readiness_path=config.canonical_readiness_path,
+    )
     results: list[RefreshCommandResult] = []
     for name, command in commands:
         command_started = time.monotonic()
-        completed = runner(command, repo_root, config.timeout_seconds)
+        completed = _run_safely(runner, command, repo_root, config.timeout_seconds)
         results.append(
             RefreshCommandResult(
                 name=name,
@@ -69,7 +80,7 @@ def refresh_once(*, config: RefreshConfig, runner: Runner | None = None) -> dict
                 duration_seconds=round(time.monotonic() - command_started, 3),
             )
         )
-    succeeded = all(result.returncode == 0 for result in results)
+    succeeded = all(_command_result_succeeded(result) for result in results)
     payload = _status_payload(
         config=config,
         started_at=started,
@@ -121,6 +132,136 @@ def run_service(*, config: RefreshConfig) -> int:
     return 0
 
 
+def run_supervisor(
+    *,
+    config: RefreshConfig,
+    service_pid_path: Path = DEFAULT_SERVICE_PID_PATH,
+    child_pid_path: Path = DEFAULT_CHILD_PID_PATH,
+    supervisor_status_path: Path = DEFAULT_SUPERVISOR_STATUS_PATH,
+) -> int:
+    stopping = False
+    child: subprocess.Popen[str] | None = None
+    restart_count = 0
+
+    def _child_command() -> list[str]:
+        command = [
+            sys.executable,
+            "-m",
+            "mgc_v05l.app.track_b_operator_readiness_refresher",
+            "--service",
+            "--repo-root",
+            str(config.repo_root),
+            "--status-path",
+            str(config.status_path),
+            "--canonical-readiness-path",
+            str(config.canonical_readiness_path),
+            "--refresh-seconds",
+            str(config.refresh_seconds),
+            "--preflight-mode",
+            config.preflight_mode,
+            "--timeout-seconds",
+            str(config.timeout_seconds),
+        ]
+        if config.heartbeat_path is None:
+            command.append("--no-heartbeat")
+        else:
+            command.extend(["--heartbeat-path", str(config.heartbeat_path)])
+        return command
+
+    def _write_supervisor_status(classification: str, reason: str | None = None) -> None:
+        payload = {
+            "schema_version": "track_b_operator_readiness_refresh_supervisor_v1",
+            "generated_at": _utc_now().isoformat(),
+            "classification": classification,
+            "reason": reason,
+            "repo_root": str(config.repo_root),
+            "pid": os.getpid(),
+            "child_pid": None if child is None else child.pid,
+            "child_running": bool(child is not None and child.poll() is None),
+            "restart_count": restart_count,
+            "refresh_seconds": config.refresh_seconds,
+            "preflight_mode": config.preflight_mode,
+            "status_path": str(config.status_path),
+            "heartbeat_path": None if config.heartbeat_path is None else str(config.heartbeat_path),
+            "canonical_readiness_path": str(config.canonical_readiness_path),
+            "service_pid_path": str(service_pid_path),
+            "child_pid_path": str(child_pid_path),
+            "command": _child_command(),
+            "submit_authority": False,
+            "paper_proof_invoked": False,
+            "live_money_eligible": False,
+        }
+        _write_json_atomic(supervisor_status_path, payload)
+
+    def _child_env() -> dict[str, str]:
+        env = dict(os.environ)
+        existing_pythonpath = env.get("PYTHONPATH", "")
+        env["PYTHONPATH"] = f"{config.repo_root / 'src'}{':' + existing_pythonpath if existing_pythonpath else ''}"
+        return env
+
+    def _start_child(reason: str) -> None:
+        nonlocal child, restart_count
+        if child is not None and child.poll() is None:
+            return
+        restart_count += 1
+        with open(os.devnull, "rb") as devnull:
+            child = subprocess.Popen(
+                _child_command(),
+                cwd=config.repo_root,
+                env=_child_env(),
+                stdin=devnull,
+                text=True,
+                start_new_session=True,
+                close_fds=True,
+            )
+        child_pid_path.parent.mkdir(parents=True, exist_ok=True)
+        child_pid_path.write_text(f"{child.pid}\n", encoding="utf-8")
+        _write_supervisor_status("TRACK_B_OPERATOR_READINESS_REFRESH_SUPERVISOR_RUNNING", reason)
+
+    def _stop_child() -> None:
+        nonlocal child
+        if child is not None and child.poll() is None:
+            child.terminate()
+            try:
+                child.wait(timeout=10)
+            except subprocess.TimeoutExpired:
+                child.kill()
+                child.wait(timeout=10)
+        child = None
+        try:
+            child_pid_path.unlink()
+        except FileNotFoundError:
+            pass
+
+    def _handle_stop(signum: int, _frame: Any) -> None:
+        nonlocal stopping
+        stopping = True
+        _write_supervisor_status("TRACK_B_OPERATOR_READINESS_REFRESH_SUPERVISOR_STOPPING", f"signal={signum}")
+        _stop_child()
+
+    signal.signal(signal.SIGTERM, _handle_stop)
+    signal.signal(signal.SIGINT, _handle_stop)
+    service_pid_path.parent.mkdir(parents=True, exist_ok=True)
+    service_pid_path.write_text(f"{os.getpid()}\n", encoding="utf-8")
+    try:
+        _start_child("initial_start")
+        while not stopping:
+            time.sleep(5.0)
+            if child is None or child.poll() is not None:
+                code = None if child is None else child.poll()
+                _start_child(f"child_exited_returncode={code}")
+            else:
+                _write_supervisor_status("TRACK_B_OPERATOR_READINESS_REFRESH_SUPERVISOR_RUNNING")
+    finally:
+        _stop_child()
+        try:
+            service_pid_path.unlink()
+        except FileNotFoundError:
+            pass
+        _write_supervisor_status("TRACK_B_OPERATOR_READINESS_REFRESH_SUPERVISOR_STOPPED")
+    return 0
+
+
 def read_status(*, status_path: Path = DEFAULT_STATUS_PATH) -> dict[str, Any]:
     try:
         payload = json.loads(Path(status_path).read_text(encoding="utf-8"))
@@ -139,8 +280,11 @@ def read_status(*, status_path: Path = DEFAULT_STATUS_PATH) -> dict[str, Any]:
     return _status_with_freshness(payload)
 
 
-def _refresh_commands(*, repo_root: Path, preflight_mode: str) -> list[tuple[str, list[str]]]:
+def _refresh_commands(*, repo_root: Path, preflight_mode: str, canonical_readiness_path: Path | None = None) -> list[tuple[str, list[str]]]:
     python_bin = str(repo_root / ".venv" / "bin" / "python")
+    canonical_path = canonical_readiness_path or (
+        repo_root / "outputs" / "operator_dashboard" / "runtime" / "latest_canonical_readiness.json"
+    )
     return [
         (
             "phase1_runtime_data_readiness",
@@ -181,7 +325,51 @@ def _refresh_commands(*, repo_root: Path, preflight_mode: str) -> list[tuple[str
                 preflight_mode,
             ],
         ),
+        (
+            "canonical_readiness",
+            [
+                python_bin,
+                "-m",
+                "mgc_v05l.app.track_b_canonical_readiness",
+                "--repo-root",
+                str(repo_root),
+                "--expected-root",
+                str(repo_root),
+                "--output-path",
+                str(canonical_path),
+                "--json",
+            ],
+        ),
     ]
+
+
+def _command_result_succeeded(result: RefreshCommandResult) -> bool:
+    if result.returncode == 0:
+        return True
+    if result.name == "canonical_readiness" and result.returncode in {1, 2}:
+        return '"classification"' in result.stdout_tail
+    return False
+
+
+def _run_safely(
+    runner: Runner,
+    command: Sequence[str],
+    repo_root: Path,
+    timeout_seconds: float,
+) -> subprocess.CompletedProcess[str]:
+    try:
+        return runner(command, repo_root, timeout_seconds)
+    except subprocess.TimeoutExpired as exc:
+        stdout = exc.stdout if isinstance(exc.stdout, str) else str(exc.stdout or "")
+        stderr = exc.stderr if isinstance(exc.stderr, str) else str(exc.stderr or "")
+        return subprocess.CompletedProcess(
+            list(command),
+            124,
+            stdout=stdout,
+            stderr=f"refresh command timed out after {timeout_seconds}s: {stderr}".strip(),
+        )
+    except Exception as exc:  # defensive: the service must report failure instead of dying silently.
+        return subprocess.CompletedProcess(list(command), 1, stdout="", stderr=f"refresh command exception: {exc}")
 
 
 def _run_command(command: Sequence[str], repo_root: Path, timeout_seconds: float) -> subprocess.CompletedProcess[str]:
@@ -214,6 +402,8 @@ def _status_payload(
         "last_refresh_finished_at": now.isoformat(),
         "last_success": succeeded,
         "last_success_at": now.isoformat() if succeeded else None,
+        "last_failure": not succeeded,
+        "last_failure_at": None if succeeded else now.isoformat(),
         "classification": (
             "TRACK_B_OPERATOR_READINESS_REFRESH_READY"
             if succeeded
@@ -254,12 +444,14 @@ def _status_payload(
                 / "track_b_paper_broker_reconciliation"
                 / "latest_track_b_paper_broker_reconciliation.json"
             ),
+            "canonical_readiness": str(config.canonical_readiness_path),
         },
         "commands": [
             {
                 "name": result.name,
                 "command": result.command,
                 "returncode": result.returncode,
+                "succeeded": _command_result_succeeded(result),
                 "duration_seconds": result.duration_seconds,
                 "stdout_tail": result.stdout_tail,
                 "stderr_tail": result.stderr_tail,
@@ -307,6 +499,8 @@ def _write_heartbeat(*, config: RefreshConfig, payload: dict[str, Any], refresh_
             "refresh_running": refresh_running,
             "last_success": payload.get("last_success"),
             "last_success_at": payload.get("last_success_at"),
+            "last_failure": payload.get("last_failure"),
+            "last_failure_at": payload.get("last_failure_at"),
             "submit_authority": False,
             "paper_proof_invoked": False,
             "live_money_eligible": False,
@@ -351,6 +545,10 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--repo-root", default=str(REPO_ROOT))
     parser.add_argument("--status-path", default=str(DEFAULT_STATUS_PATH))
     parser.add_argument("--heartbeat-path", default=str(DEFAULT_HEARTBEAT_PATH))
+    parser.add_argument("--canonical-readiness-path", default=str(DEFAULT_CANONICAL_READINESS_PATH))
+    parser.add_argument("--service-pid-path", default=str(DEFAULT_SERVICE_PID_PATH))
+    parser.add_argument("--child-pid-path", default=str(DEFAULT_CHILD_PID_PATH))
+    parser.add_argument("--supervisor-status-path", default=str(DEFAULT_SUPERVISOR_STATUS_PATH))
     parser.add_argument("--no-heartbeat", action="store_true")
     parser.add_argument("--refresh-seconds", type=float, default=float(os.environ.get("TRACK_B_OPERATOR_READINESS_REFRESH_SECONDS", DEFAULT_REFRESH_SECONDS)))
     parser.add_argument("--preflight-mode", choices=("monday-live", "weekend-static"), default=DEFAULT_PREFLIGHT_MODE)
@@ -358,6 +556,7 @@ def build_parser() -> argparse.ArgumentParser:
     mode = parser.add_mutually_exclusive_group()
     mode.add_argument("--once", action="store_true", help="Run one refresh pass and exit.")
     mode.add_argument("--service", action="store_true", help="Run refreshes until stopped.")
+    mode.add_argument("--supervisor", action="store_true", help="Supervise the refresher service and restart it if it exits.")
     mode.add_argument("--status", action="store_true", help="Print latest refresher status.")
     return parser
 
@@ -368,6 +567,7 @@ def main(argv: list[str] | None = None) -> int:
         repo_root=Path(args.repo_root),
         status_path=Path(args.status_path),
         heartbeat_path=None if args.no_heartbeat else Path(args.heartbeat_path),
+        canonical_readiness_path=Path(args.canonical_readiness_path),
         refresh_seconds=args.refresh_seconds,
         preflight_mode=args.preflight_mode,
         timeout_seconds=args.timeout_seconds,
@@ -377,6 +577,13 @@ def main(argv: list[str] | None = None) -> int:
         return 0
     if args.service:
         return run_service(config=config)
+    if args.supervisor:
+        return run_supervisor(
+            config=config,
+            service_pid_path=Path(args.service_pid_path),
+            child_pid_path=Path(args.child_pid_path),
+            supervisor_status_path=Path(args.supervisor_status_path),
+        )
     payload = refresh_once(config=config)
     print(json.dumps(payload, indent=2, sort_keys=True))
     return 0 if payload.get("last_success") is True else 1

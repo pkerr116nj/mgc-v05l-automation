@@ -7,43 +7,63 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "${SCRIPT_DIR}/common_env.sh"
 
 PID_FILE="${REPO_ROOT}/var/track_b_operator_readiness_refresh_service.pid"
+CHILD_PID_FILE="${REPO_ROOT}/var/track_b_operator_readiness_refresh_child.pid"
 STATUS_PATH="${REPO_ROOT}/outputs/reports/track_b_operator_readiness_refresher/latest_track_b_operator_readiness_refresher_status.json"
+HEARTBEAT_PATH="${REPO_ROOT}/var/track_b_operator_readiness_refresh_heartbeat.json"
+SUPERVISOR_STATUS_PATH="${REPO_ROOT}/var/track_b_operator_readiness_refresh_supervisor.json"
 
 pid_is_running() {
   local pid="$1"
   [[ -n "${pid}" ]] || return 1
-  if kill -0 "${pid}" 2>/dev/null; then
-    return 0
-  fi
-  ps -p "${pid}" >/dev/null 2>&1
+  "${PYTHON_BIN}" - "${pid}" <<'PYPID'
+import os
+import sys
+try:
+    os.kill(int(sys.argv[1]), 0)
+except ProcessLookupError:
+    raise SystemExit(1)
+except PermissionError:
+    raise SystemExit(0)
+except Exception:
+    raise SystemExit(1)
+raise SystemExit(0)
+PYPID
 }
 
-status_is_fresh() {
-  [[ -f "${STATUS_PATH}" ]] || return 1
-  "${PYTHON_BIN}" - "${STATUS_PATH}" <<'PY'
+read_pid_file() {
+  local path="$1"
+  [[ -f "${path}" ]] || return 1
+  tr -d '[:space:]' < "${path}" 2>/dev/null
+}
+
+fresh_json_artifact() {
+  local path="$1"
+  local threshold_seconds="$2"
+  [[ -f "${path}" ]] || return 1
+  "${PYTHON_BIN}" - "${path}" "${threshold_seconds}" <<'PYFRESH'
 import datetime as dt
 import json
 import sys
+from pathlib import Path
 
 try:
-    payload = json.load(open(sys.argv[1], encoding="utf-8"))
-    raw = payload.get("generated_at")
+    payload = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
+    raw = payload.get("generated_at") or payload.get("last_refresh_finished_at")
     ts = dt.datetime.fromisoformat(str(raw).replace("Z", "+00:00"))
     if ts.tzinfo is None:
         ts = ts.replace(tzinfo=dt.timezone.utc)
     age = (dt.datetime.now(dt.timezone.utc) - ts.astimezone(dt.timezone.utc)).total_seconds()
+    threshold = float(sys.argv[2])
 except Exception:
     raise SystemExit(1)
-raise SystemExit(0 if age <= 180 else 1)
-PY
+raise SystemExit(0 if age <= threshold else 1)
+PYFRESH
 }
 
 "${PYTHON_BIN}" -m mgc_v05l.app.track_b_operator_readiness_refresher --status
-if [[ -f "${PID_FILE}" ]]; then
-  service_pid="$(cat "${PID_FILE}" 2>/dev/null || true)"
-else
-  service_pid=""
-fi
+
+service_pid="$(read_pid_file "${PID_FILE}" || true)"
+child_pid="$(read_pid_file "${CHILD_PID_FILE}" || true)"
 
 if pid_is_running "${service_pid}"; then
   echo "service_running=true pid=${service_pid}"
@@ -51,8 +71,61 @@ else
   echo "service_running=false pid=${service_pid}"
 fi
 
-if status_is_fresh; then
+if pid_is_running "${child_pid}"; then
+  echo "child_running=true pid=${child_pid}"
+else
+  echo "child_running=false pid=${child_pid}"
+fi
+
+if fresh_json_artifact "${HEARTBEAT_PATH}" 180; then
+  echo "heartbeat_fresh=true"
+else
+  echo "heartbeat_fresh=false"
+fi
+
+if fresh_json_artifact "${STATUS_PATH}" 180; then
   echo "status_fresh=true"
 else
   echo "status_fresh=false"
 fi
+
+"${PYTHON_BIN}" - <<'PYSUMMARY' "${STATUS_PATH}" "${HEARTBEAT_PATH}" "${SUPERVISOR_STATUS_PATH}"
+import datetime as dt
+import json
+import sys
+from pathlib import Path
+
+def read(path: str) -> dict:
+    try:
+        payload = json.loads(Path(path).read_text(encoding="utf-8"))
+        return payload if isinstance(payload, dict) else {}
+    except Exception:
+        return {}
+
+def age(payload: dict) -> float | None:
+    raw = payload.get("generated_at") or payload.get("last_refresh_finished_at")
+    if not raw:
+        return None
+    try:
+        ts = dt.datetime.fromisoformat(str(raw).replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if ts.tzinfo is None:
+        ts = ts.replace(tzinfo=dt.timezone.utc)
+    return max((dt.datetime.now(dt.timezone.utc) - ts.astimezone(dt.timezone.utc)).total_seconds(), 0.0)
+
+status = read(sys.argv[1])
+heartbeat = read(sys.argv[2])
+supervisor = read(sys.argv[3])
+refresh_age = age(status)
+heartbeat_age = age(heartbeat)
+print(f"last_success={str(status.get('last_success') is True).lower()}")
+print(f"last_failure={str(status.get('last_failure') is True).lower()}")
+print(f"refresh_age_seconds={'' if refresh_age is None else round(refresh_age, 3)}")
+print(f"heartbeat_age_seconds={'' if heartbeat_age is None else round(heartbeat_age, 3)}")
+print(f"classification={status.get('classification') or 'TRACK_B_OPERATOR_READINESS_REFRESH_STATUS_MISSING'}")
+print(f"supervisor_classification={supervisor.get('classification') or 'TRACK_B_OPERATOR_READINESS_REFRESH_SUPERVISOR_MISSING'}")
+print(f"submit_authority={str(status.get('submit_authority') is True).lower()}")
+print(f"paper_proof_invoked={str(status.get('paper_proof_invoked') is True).lower()}")
+print(f"live_money_eligible={str(status.get('live_money_eligible') is True).lower()}")
+PYSUMMARY

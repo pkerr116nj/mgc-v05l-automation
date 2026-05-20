@@ -3250,6 +3250,34 @@ def test_operator_readiness_refresh_status_marks_stale_ready_as_stale() -> None:
     assert compact["fresh"] is False
     assert compact["last_success"] is True
 
+
+def test_operator_readiness_refresh_status_marks_missing_service_loudly(tmp_path: Path) -> None:
+    compact = operator_dashboard_module._compact_track_b_operator_readiness_refresh_status(
+        {
+            "classification": "TRACK_B_OPERATOR_READINESS_REFRESH_READY",
+            "generated_at": "2999-01-01T00:00:00+00:00",
+            "last_success": True,
+            "refresh_seconds": 60.0,
+            "submit_authority": False,
+            "paper_proof_invoked": False,
+            "live_money_eligible": False,
+        },
+        tmp_path / "latest_track_b_operator_readiness_refresher_status.json",
+        heartbeat_payload={
+            "classification": "TRACK_B_OPERATOR_READINESS_REFRESH_READY",
+            "generated_at": "2999-01-01T00:00:00+00:00",
+            "refresh_seconds": 60.0,
+        },
+        heartbeat_path=tmp_path / "heartbeat.json",
+        service_pid_path=tmp_path / "missing_service.pid",
+        child_pid_path=tmp_path / "missing_child.pid",
+    )
+
+    assert compact["classification"] == "TRACK_B_OPERATOR_READINESS_REFRESH_SERVICE_NOT_RUNNING"
+    assert compact["service_running"] is False
+    assert compact["heartbeat_fresh"] is True
+    assert compact["last_success"] is True
+
 def test_track_b_paper_trading_payload_reads_compact_summaries_without_full_ledger_scan(tmp_path: Path) -> None:
     ledger_dir = tmp_path / "outputs" / "track_b_execution_core" / "paper_trade_ledger"
     operator_status_dir = tmp_path / "outputs" / "track_b_execution_core" / "operator_status"
@@ -3446,8 +3474,10 @@ def test_track_b_paper_trading_payload_reads_compact_summaries_without_full_ledg
     assert payload["broker_truth_refresh_status"]["account"] == "DUM882026"
     assert payload["broker_truth_refresh_status"]["submit_authority"] is False
     assert payload["broker_truth_refresh_status"]["live_money_eligible"] is False
-    assert payload["operator_readiness_refresh_status"]["classification"] == "TRACK_B_OPERATOR_READINESS_REFRESH_READY"
+    assert payload["operator_readiness_refresh_status"]["classification"] == "TRACK_B_OPERATOR_READINESS_REFRESH_SERVICE_NOT_RUNNING"
+    assert payload["operator_readiness_refresh_status"]["source_classification"] == "TRACK_B_OPERATOR_READINESS_REFRESH_READY"
     assert payload["operator_readiness_refresh_status"]["fresh"] is True
+    assert payload["operator_readiness_refresh_status"]["service_running"] is False
 
     assert payload["operator_readiness_refresh_status"]["last_success"] is True
     assert payload["operator_readiness_refresh_status"]["submit_authority"] is False
