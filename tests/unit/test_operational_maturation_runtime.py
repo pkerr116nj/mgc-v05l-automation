@@ -88,6 +88,11 @@ def _active_overlay_lanes() -> list[dict[str, object]]:
     return list(json.loads(ast.literal_eval(raw)))
 
 
+def test_active_overlay_enables_paper_execution_test_mule_switch() -> None:
+    payload = ACTIVE_15_LANE_OVERLAY.read_text(encoding="utf-8")
+    assert "probationary_paper_execution_test_mule_enabled: true" in payload
+
+
 def _ready_state(at: datetime):
     return replace(build_initial_state(at), strategy_status=StrategyStatus.READY)
 

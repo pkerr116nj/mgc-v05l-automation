@@ -48,6 +48,7 @@ _GC_PHASE1_SUBMIT_LANE_IDS = (
     "gc_asia_early_normal_breakout_retest_hold_long",
 )
 _MGC_PHASE1_SUBMIT_LANE_IDS = (
+    "track_b_paper_execution_test_mule_v1__mgc",
     "atp_companion_v1_asia_us",
     "atp_companion_v1_asia_us_5m",
     "atp_companion_v1_mgc_asia_promotion_1_075r_favorable_only",
@@ -78,6 +79,7 @@ _NQ_PHASE1_SUBMIT_LANE_IDS = (
     "nq_1x_ny_early_core__us_midday_short_breakdown",
 )
 _MNQ_PHASE1_SUBMIT_LANE_IDS = (
+    "track_b_paper_execution_test_mule_v1__mnq",
     "mnq_1x_asia_london_participation__asia_london_long_v5",
     "mnq_1x_asia_london_participation__asia_london_long_v6",
     "mnq_1x_asia_london_participation__asia_london_short_v2",

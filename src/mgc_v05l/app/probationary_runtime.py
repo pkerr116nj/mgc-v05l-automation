@@ -428,6 +428,20 @@ PAPER_ROUTE_CANARY_LANE_ID = "ibkr_paper_route_canary"
 PAPER_ROUTE_CANARY_LABEL = "PAPER_ROUTE_CANARY"
 PAPER_ROUTE_CANARY_SYMBOL = "MGC"
 PAPER_ROUTE_CANARY_EXPERIMENTAL_STATUS = "paper_route_canary"
+PAPER_EXECUTION_TEST_MULE_MODE = "TRACK_B_PAPER_EXECUTION_TEST_MULE_V1"
+PAPER_EXECUTION_TEST_MULE_RUNTIME_KIND = "track_b_paper_execution_test_mule_v1"
+PAPER_EXECUTION_TEST_MULE_SIGNAL_SOURCE = "trackBPaperExecutionTestMuleV1"
+PAPER_EXECUTION_TEST_MULE_ENTRY_REASON = "trackBPaperExecutionTestMuleEntry"
+PAPER_EXECUTION_TEST_MULE_TIMED_EXIT_REASON = "trackBPaperExecutionTestMuleTimedExit"
+PAPER_EXECUTION_TEST_MULE_PROFIT_EXIT_REASON = "trackBPaperExecutionTestMuleProfitTarget"
+PAPER_EXECUTION_TEST_MULE_MAX_LOSS_EXIT_REASON = "trackBPaperExecutionTestMuleMaxLoss"
+PAPER_EXECUTION_TEST_MULE_LABEL = (
+    "PAPER_ONLY TEST_MULE OPERATIONAL_THROUGHPUT NON_PRODUCTION_ALPHA NOT_PROMOTION_ELIGIBLE"
+)
+PAPER_EXECUTION_TEST_MULE_LANE_IDS = {
+    "MGC": "track_b_paper_execution_test_mule_v1__mgc",
+    "MNQ": "track_b_paper_execution_test_mule_v1__mnq",
+}
 
 def _paper_route_canary_enable_sentinel_path() -> Path:
     return (
@@ -4229,6 +4243,9 @@ class ProbationaryPaperLaneRuntime:
         return len(bars), effective_reconciliation, status_path
 
     def _apply_canary_lifecycle(self, bar: Bar) -> None:
+        if self.spec.lane_mode == PAPER_EXECUTION_TEST_MULE_MODE:
+            self._apply_execution_test_mule_lifecycle(bar)
+            return
         if self.spec.lane_mode != PAPER_EXECUTION_CANARY_MODE:
             return
         if self._startup_route_hold_reason_for_bar(bar) is not None:
@@ -4263,6 +4280,132 @@ class ProbationaryPaperLaneRuntime:
                 bar.end_ts,
                 reason_code=PAPER_EXECUTION_CANARY_EXIT_REASON,
             )
+
+    def _execution_test_mule_params(self) -> dict[str, Any]:
+        return dict(self.spec.runtime_overlay_params or {})
+
+    def _execution_test_mule_enabled(self) -> bool:
+        params = self._execution_test_mule_params()
+        return (
+            self.settings.mode is RuntimeMode.PAPER
+            and self.spec.paper_only is True
+            and bool(params.get("test_mule_enabled", True))
+            and bool(params.get("live_money_eligible")) is False
+        )
+
+    def _execution_test_mule_decimal_param(self, key: str, default: str) -> Decimal:
+        value = self._execution_test_mule_params().get(key, default)
+        return Decimal(str(value))
+
+    def _execution_test_mule_int_param(self, key: str, default: int) -> int:
+        value = self._execution_test_mule_params().get(key, default)
+        return int(value)
+
+    def _execution_test_mule_last_entry_ts(self) -> datetime | None:
+        latest: datetime | None = None
+        for row in self.repositories.order_intents.list_all():
+            if str(row.get("reason_code") or "") != PAPER_EXECUTION_TEST_MULE_ENTRY_REASON:
+                continue
+            if str(row.get("intent_type") or "").upper() not in {"BUY_TO_OPEN", "SELL_TO_OPEN"}:
+                continue
+            created_at = _parse_iso_datetime_or_none(row.get("created_at"))
+            if created_at is not None and (latest is None or created_at > latest):
+                latest = created_at
+        return latest
+
+    def _execution_test_mule_entry_frequency_blocked(self, bar: Bar) -> bool:
+        latest = self._execution_test_mule_last_entry_ts()
+        if latest is None:
+            return False
+        cap_minutes = self._execution_test_mule_int_param("frequency_cap_minutes", 20)
+        return bar.end_ts.astimezone(timezone.utc) < latest.astimezone(timezone.utc) + timedelta(minutes=cap_minutes)
+
+    def _execution_test_mule_symbol_exposure_present(self) -> bool:
+        path = (
+            Path(__file__).resolve().parents[3]
+            / "outputs"
+            / "reports"
+            / "track_b_paper_broker_reconciliation"
+            / "latest_track_b_paper_broker_reconciliation.json"
+        )
+        payload = _read_json(path)
+        if not payload:
+            return True
+        symbol = str(self.spec.symbol or "").strip().upper()
+        for row in list(payload.get("track_b_broker_positions") or []) + list(payload.get("track_b_lifecycle_positions") or []):
+            row_symbol = str(row.get("symbol") or row.get("track_b_root") or row.get("instrument_family") or "").strip().upper()
+            quantity = Decimal(str(row.get("quantity") or "0"))
+            if row_symbol == symbol and quantity != 0:
+                return True
+        return False
+
+    def _execution_test_mule_entry_side(self, bar: Bar) -> str | None:
+        tick_size = self._execution_test_mule_decimal_param("tick_size", "0.25" if self.spec.symbol == "MNQ" else "0.1")
+        min_body_ticks = self._execution_test_mule_decimal_param("min_body_ticks", "1")
+        body = Decimal(str(bar.close)) - Decimal(str(bar.open))
+        if abs(body) < tick_size * min_body_ticks:
+            return None
+        return "LONG" if body > 0 else "SHORT"
+
+    def _execution_test_mule_exit_reason(self, bar: Bar) -> str | None:
+        state = self.strategy_engine.state
+        if state.position_side == PositionSide.FLAT or state.internal_position_qty <= 0:
+            return None
+        entry_price = state.entry_price
+        tick_size = self._execution_test_mule_decimal_param("tick_size", "0.25" if self.spec.symbol == "MNQ" else "0.1")
+        if entry_price is not None:
+            target = tick_size * self._execution_test_mule_decimal_param("profit_target_ticks", "8")
+            max_loss = tick_size * self._execution_test_mule_decimal_param("max_loss_ticks", "12")
+            if state.position_side == PositionSide.LONG:
+                if Decimal(str(bar.high)) >= Decimal(str(entry_price)) + target:
+                    return PAPER_EXECUTION_TEST_MULE_PROFIT_EXIT_REASON
+                if Decimal(str(bar.low)) <= Decimal(str(entry_price)) - max_loss:
+                    return PAPER_EXECUTION_TEST_MULE_MAX_LOSS_EXIT_REASON
+            elif state.position_side == PositionSide.SHORT:
+                if Decimal(str(bar.low)) <= Decimal(str(entry_price)) - target:
+                    return PAPER_EXECUTION_TEST_MULE_PROFIT_EXIT_REASON
+                if Decimal(str(bar.high)) >= Decimal(str(entry_price)) + max_loss:
+                    return PAPER_EXECUTION_TEST_MULE_MAX_LOSS_EXIT_REASON
+        entry_ts = state.entry_timestamp
+        if entry_ts is not None:
+            hold_minutes = self._execution_test_mule_int_param("hold_minutes", 20)
+            if bar.end_ts.astimezone(timezone.utc) >= entry_ts.astimezone(timezone.utc) + timedelta(minutes=hold_minutes):
+                return PAPER_EXECUTION_TEST_MULE_TIMED_EXIT_REASON
+        return None
+
+    def _apply_execution_test_mule_lifecycle(self, bar: Bar) -> None:
+        if not self._execution_test_mule_enabled():
+            return
+        if self._startup_route_hold_reason_for_bar(bar) is not None:
+            return
+        state = self.strategy_engine.state
+        if state.open_broker_order_id is not None or state.fault_code is not None:
+            return
+        if state.position_side != PositionSide.FLAT or state.internal_position_qty > 0:
+            reason = self._execution_test_mule_exit_reason(bar)
+            if reason is not None:
+                self.strategy_engine.submit_operator_flatten_intent(bar.end_ts, reason_code=reason)
+            return
+        if not _session_restriction_matches_now(bar.end_ts, self.spec.session_restriction):
+            return
+        if self._execution_test_mule_symbol_exposure_present():
+            return
+        if not state.entries_enabled or state.operator_halt or state.same_underlying_entry_hold:
+            return
+        if self._execution_test_mule_entry_frequency_blocked(bar):
+            return
+        side = self._execution_test_mule_entry_side(bar)
+        if side is None:
+            return
+        self.strategy_engine.submit_runtime_entry_intent(
+            bar,
+            side=side,
+            signal_source=PAPER_EXECUTION_TEST_MULE_SIGNAL_SOURCE,
+            reason_code=PAPER_EXECUTION_TEST_MULE_ENTRY_REASON,
+            symbol=self.spec.symbol,
+            long_entry_family=LongEntryFamily.K if side == "LONG" else LongEntryFamily.NONE,
+            short_entry_family=ShortEntryFamily.BEAR_SNAP if side == "SHORT" else ShortEntryFamily.NONE,
+        )
 
     def _should_submit_canary_entry(self, bar: Bar, session_date: date) -> bool:
         if self._canary_entry_count(session_date) >= max(1, self.spec.canary_max_entries_per_session):
@@ -7911,6 +8054,8 @@ def _configured_probationary_paper_lane_rows(settings: StrategySettings) -> list
         raw_specs.extend(_atpe_probationary_paper_lane_rows(settings))
     if settings.probationary_gc_mgc_acceptance_enabled:
         raw_specs.extend(_gc_mgc_acceptance_probationary_paper_lane_rows(settings))
+    if settings.probationary_paper_execution_test_mule_enabled:
+        raw_specs.extend(_paper_execution_test_mule_lane_rows(settings))
     return raw_specs
 
 
@@ -8109,6 +8254,69 @@ def _gc_mgc_acceptance_probationary_paper_lane_rows(settings: StrategySettings) 
                 "non_approved": True,
                 "observer_variant_id": GC_MGC_ACCEPTANCE_SOURCE_FAMILY,
                 "observer_side": "LONG",
+            }
+        )
+    return rows
+
+
+def _paper_execution_test_mule_lane_rows(settings: StrategySettings) -> list[dict[str, Any]]:
+    del settings
+    rows: list[dict[str, Any]] = []
+    for symbol, lane_id in PAPER_EXECUTION_TEST_MULE_LANE_IDS.items():
+        point_value = Decimal("2") if symbol == "MNQ" else Decimal("10")
+        tick_size = "0.25" if symbol == "MNQ" else "0.1"
+        rows.append(
+            {
+                "lane_id": lane_id,
+                "display_name": f"Track B PAPER Execution Test Mule V1 / {symbol}",
+                "symbol": symbol,
+                "long_sources": [PAPER_EXECUTION_TEST_MULE_SIGNAL_SOURCE],
+                "short_sources": [PAPER_EXECUTION_TEST_MULE_SIGNAL_SOURCE],
+                "session_restriction": "ASIA/LONDON/US",
+                "allowed_sessions": ["ASIA", "LONDON", "US"],
+                "point_value": str(point_value),
+                "trade_size": 1,
+                "max_concurrent_entries": 1,
+                "max_position_quantity": 1,
+                "max_adds_after_entry": 0,
+                "catastrophic_open_loss": "-250",
+                "lane_mode": PAPER_EXECUTION_TEST_MULE_MODE,
+                "strategy_family": PAPER_EXECUTION_TEST_MULE_RUNTIME_KIND,
+                "strategy_identity_root": PAPER_EXECUTION_TEST_MULE_RUNTIME_KIND,
+                "standalone_strategy_id": lane_id,
+                "runtime_kind": PAPER_EXECUTION_TEST_MULE_RUNTIME_KIND,
+                "execution_timeframe": "1m",
+                "structural_signal_timeframe": "1m",
+                "artifact_timeframe": "1m",
+                "context_timeframes": ["1m"],
+                "live_poll_lookback_minutes": 1440,
+                "database_url": f"sqlite:///./mgc_v05l.probationary.paper__{lane_id}.sqlite3",
+                "artifacts_dir": f"./outputs/probationary_pattern_engine/paper_session/lanes/{lane_id}",
+                "observed_instruments": [symbol],
+                "experimental_status": "PAPER_ONLY_TEST_MULE_OPERATIONAL_THROUGHPUT",
+                "paper_only": True,
+                "non_approved": True,
+                "exclude_from_strategy_performance": True,
+                "identity_components": ["paper", symbol.lower(), PAPER_EXECUTION_TEST_MULE_RUNTIME_KIND],
+                "runtime_overlay_params": {
+                    "test_mule_enabled": True,
+                    "test_mule_label": PAPER_EXECUTION_TEST_MULE_LABEL,
+                    "paper_only": True,
+                    "live_money_eligible": False,
+                    "non_production_alpha": True,
+                    "not_promotion_eligible": True,
+                    "entry_rule": "completed_1m_candle_body_direction",
+                    "frequency_cap_minutes": 20,
+                    "hold_minutes": 20,
+                    "min_body_ticks": 1,
+                    "tick_size": tick_size,
+                    "profit_target_ticks": 8 if symbol == "MGC" else 20,
+                    "max_loss_ticks": 12 if symbol == "MGC" else 30,
+                    "max_contracts": 1,
+                    "one_open_position_per_instrument": True,
+                    "respect_existing_track_b_symbol_exposure": True,
+                    "normal_order_intent_path_only": True,
+                },
             }
         )
     return rows
@@ -8358,6 +8566,20 @@ def _build_probationary_paper_lanes(
                 )
             )
             continue
+        if spec.runtime_kind == PAPER_EXECUTION_TEST_MULE_RUNTIME_KIND:
+            lanes.append(
+                ProbationaryPaperLaneRuntime(
+                    spec=spec,
+                    settings=lane_settings,
+                    repositories=repositories,
+                    strategy_engine=strategy_engine,
+                    execution_engine=execution_engine,
+                    live_polling_service=_build_live_polling_service(lane_settings, repositories, schwab_config_path),
+                    structured_logger=lane_logger,
+                    alert_dispatcher=alert_dispatcher,
+                )
+            )
+            continue
         if spec.runtime_kind == ASIA_LONDON_PARTICIPATION_RUNTIME_KIND:
             lanes.append(
                 ProbationaryPaperLaneRuntime(
@@ -8565,7 +8787,7 @@ def _build_probationary_paper_lane_settings(
         )
     if spec.live_poll_lookback_minutes is not None:
         updates["live_poll_lookback_minutes"] = spec.live_poll_lookback_minutes
-    if spec.lane_mode == PAPER_EXECUTION_CANARY_MODE:
+    if spec.lane_mode in {PAPER_EXECUTION_CANARY_MODE, PAPER_EXECUTION_TEST_MULE_MODE}:
         updates.update(
             {
                 "use_long_swing_exit": False,

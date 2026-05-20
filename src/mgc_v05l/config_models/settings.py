@@ -313,6 +313,7 @@ class StrategySettings(BaseModel):
     probationary_paper_execution_canary_enabled: bool = False
     probationary_paper_execution_canary_json: str = "{}"
     probationary_paper_execution_canary_force_fire_once_token: str = ""
+    probationary_paper_execution_test_mule_enabled: bool = False
     probationary_atpe_canary_enabled: bool = False
     probationary_atpe_canary_instruments_json: str = '["MES","MNQ"]'
     probationary_atpe_canary_live_poll_lookback_minutes: int = 1440
