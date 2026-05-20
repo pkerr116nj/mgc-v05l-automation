@@ -75,6 +75,7 @@ AUTHORIZATION_DIGEST_FIELDS = (
     "safety_snapshot",
 )
 READINESS_FRESHNESS_WINDOW_SECONDS = 120.0
+LEAK_TEST_MARKETABLE_LIMIT_OFFSET_TICKS = 16.0
 RESULT_CLASSIFICATIONS = (
     "LEAK_TEST_PASS_FULL_ROUND_TRIP",
     "LEAK_TEST_PASS_BLOCKED_SAFELY",
@@ -1652,6 +1653,10 @@ def _bridge_config_for_apply(
             "caller_type": "track_b_paper_leak_test",
             "lane_id": lane.lane_id,
             "strategy_id": lane.strategy_id,
+            "entry_execution_policy": "MARKETABLE_LIMIT_FROM_RUNTIME_TAPE",
+            "entry_execution_intent": "PARTICIPATE_NOW",
+            "leak_test_marketable_limit_offset_ticks": LEAK_TEST_MARKETABLE_LIMIT_OFFSET_TICKS,
+            "limit_price_reference_source": "PHASE1_RUNTIME_1M_CLOSE",
             "route_destination": lane.expected_route,
             "intent_type": intent_type,
             "intent_action": action,

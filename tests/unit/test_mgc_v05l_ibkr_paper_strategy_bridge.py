@@ -511,6 +511,115 @@ def test_entry_pricing_prefers_fresh_runtime_candle_when_delayed_ask_is_too_low(
     assert pricing["live_money_eligible"] is False
 
 
+def test_leak_test_buy_entry_uses_bounded_marketable_runtime_offset(tmp_path: Path) -> None:
+    _write_runtime_1m_candle(tmp_path, symbol="MNQ", close=29321.0)
+    config = _config(
+        tmp_path,
+        strategy_id="mnq_1x_ny_early_core__us_early_long",
+        symbol="MNQ",
+        contract_month="202606",
+        caller_path="track_b_paper_leak_test_apply",
+        caller_metadata={
+            "leak_test": True,
+            "intent_type": "BUY_TO_OPEN",
+            "entry_execution_policy": "MARKETABLE_LIMIT_FROM_RUNTIME_TAPE",
+            "entry_execution_intent": "PARTICIPATE_NOW",
+            "leak_test_marketable_limit_offset_ticks": 16,
+            "live_money_eligible": False,
+            "paper_only": True,
+        },
+    )
+
+    pricing = _entry_execution_pricing_for_bridge(
+        config=config,
+        intent=_intent_from_config(config),
+        quote_context=_quote_context(ask=29308.0),
+        qualified_contract_report=_qualified_contract_report(min_tick=0.25),
+        now=datetime(2026, 5, 14, 12, 25, 30, tzinfo=timezone.utc),
+    )
+
+    assert pricing["execution_price_source"] == "RUNTIME_DATABENTO_1M_CLOSE"
+    assert pricing["limit_offset_ticks"] == 16.0
+    assert pricing["runtime_last_or_close"] == 29321.0
+    assert pricing["limit_price"] == 29325.0
+    assert pricing["limit_vs_runtime_price_points"] == 4.0
+    assert pricing["marketable_by_runtime_context"] is True
+    assert pricing["block_submit"] is False
+    assert pricing["live_money_eligible"] is False
+
+
+def test_leak_test_sell_entry_uses_bounded_marketable_runtime_offset(tmp_path: Path) -> None:
+    _write_runtime_1m_candle(tmp_path, symbol="MNQ", close=29321.0)
+    config = _config(
+        tmp_path,
+        strategy_id="mnq_1x_ny_early_core__us_early_short",
+        symbol="MNQ",
+        contract_month="202606",
+        action="SELL",
+        limit_price_model="DELAYED_BID_MINUS_1T_MARKETABLE_SELL",
+        caller_path="track_b_paper_leak_test_apply",
+        caller_metadata={
+            "leak_test": True,
+            "intent_type": "SELL_TO_OPEN",
+            "entry_execution_policy": "MARKETABLE_LIMIT_FROM_RUNTIME_TAPE",
+            "entry_execution_intent": "PARTICIPATE_NOW",
+            "leak_test_marketable_limit_offset_ticks": 16,
+            "live_money_eligible": False,
+            "paper_only": True,
+        },
+    )
+
+    pricing = _entry_execution_pricing_for_bridge(
+        config=config,
+        intent=_intent_from_config(config),
+        quote_context=_quote_context(bid=29330.0),
+        qualified_contract_report=_qualified_contract_report(min_tick=0.25),
+        now=datetime(2026, 5, 14, 12, 25, 30, tzinfo=timezone.utc),
+    )
+
+    assert pricing["execution_price_source"] == "RUNTIME_DATABENTO_1M_CLOSE"
+    assert pricing["limit_offset_ticks"] == 16.0
+    assert pricing["runtime_last_or_close"] == 29321.0
+    assert pricing["limit_price"] == 29317.0
+    assert pricing["limit_vs_runtime_price_points"] == 4.0
+    assert pricing["marketable_by_runtime_context"] is True
+    assert pricing["block_submit"] is False
+
+
+def test_leak_test_entry_blocks_when_runtime_reference_is_stale(tmp_path: Path) -> None:
+    _write_runtime_1m_candle(tmp_path, symbol="MNQ", close=29321.0)
+    config = _config(
+        tmp_path,
+        strategy_id="mnq_1x_ny_early_core__us_early_long",
+        symbol="MNQ",
+        contract_month="202606",
+        caller_path="track_b_paper_leak_test_apply",
+        caller_metadata={
+            "leak_test": True,
+            "intent_type": "BUY_TO_OPEN",
+            "entry_execution_policy": "MARKETABLE_LIMIT_FROM_RUNTIME_TAPE",
+            "entry_execution_intent": "PARTICIPATE_NOW",
+            "leak_test_marketable_limit_offset_ticks": 16,
+            "live_money_eligible": False,
+            "paper_only": True,
+        },
+    )
+
+    pricing = _entry_execution_pricing_for_bridge(
+        config=config,
+        intent=_intent_from_config(config),
+        quote_context=_quote_context(ask=29308.0),
+        qualified_contract_report=_qualified_contract_report(min_tick=0.25),
+        now=datetime(2026, 5, 14, 12, 30, 1, tzinfo=timezone.utc),
+    )
+
+    assert pricing["execution_price_source"] == "IBKR_DELAYED_DIAGNOSTIC_ONLY"
+    assert pricing["runtime_data_fresh"] is False
+    assert pricing["limit_price"] is None
+    assert pricing["block_submit"] is True
+    assert pricing["block_reason"] == "DELAYED_QUOTE_NOT_EXECUTION_SAFE"
+
+
 def test_entry_pricing_blocks_marketable_entry_when_only_delayed_quote_is_available(tmp_path: Path) -> None:
     config = _config(
         tmp_path,

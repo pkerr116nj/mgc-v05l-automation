@@ -126,6 +126,7 @@ _ENTRY_RUNTIME_CANDLE_MAX_AGE_SECONDS = 180.0
 _ENTRY_RUNTIME_LIMIT_OFFSET_TICKS = 1.0
 _ENTRY_AGGRESSIVE_LIMIT_OFFSET_TICKS = 2.0
 _ENTRY_MAX_LIMIT_OFFSET_TICKS = 4.0
+_LEAK_TEST_MAX_LIMIT_OFFSET_TICKS = 40.0
 _ENTRY_PARTICIPATE_TIMEOUT_SECONDS = 60.0
 _ENTRY_DYNAMIC_TIMEOUT_SECONDS = 180.0
 _ENTRY_RESTING_TIMEOUT_SECONDS = 300.0
@@ -3222,9 +3223,7 @@ def _entry_execution_pricing_for_bridge(
     execution_price_source = None
     block_submit = False
     block_reason = None
-    limit_offset_ticks = _ENTRY_RUNTIME_LIMIT_OFFSET_TICKS
-    if policy == _ENTRY_POLICY_AGGRESSIVE_WITH_CAP:
-        limit_offset_ticks = min(_ENTRY_AGGRESSIVE_LIMIT_OFFSET_TICKS, _ENTRY_MAX_LIMIT_OFFSET_TICKS)
+    limit_offset_ticks = _entry_marketable_limit_offset_ticks(config=config, policy=policy)
     if entry_intent in {_ENTRY_INTENT_RESTING_PULLBACK_LIMIT, _ENTRY_INTENT_PASSIVE_ONLY}:
         if strategy_limit_price is not None:
             selected_limit = _round_price_to_tick(float(strategy_limit_price), float(min_tick))
@@ -3554,6 +3553,24 @@ def _entry_has_resting_price_metadata(*, config: IbkrPaperStrategyBridgeConfig) 
             "entry_pullback_offset_ticks",
         )
     )
+
+
+def _entry_marketable_limit_offset_ticks(
+    *,
+    config: IbkrPaperStrategyBridgeConfig,
+    policy: str,
+) -> float:
+    metadata = dict(config.caller_metadata or {})
+    if config.caller_path == _LEAK_TEST_CALLER_PATH and metadata.get("leak_test") is True:
+        explicit = _float_or_none(
+            metadata.get("leak_test_marketable_limit_offset_ticks")
+            or metadata.get("entry_marketable_limit_offset_ticks")
+        )
+        if explicit is not None and explicit > 0:
+            return min(max(float(explicit), _ENTRY_RUNTIME_LIMIT_OFFSET_TICKS), _LEAK_TEST_MAX_LIMIT_OFFSET_TICKS)
+    if policy == _ENTRY_POLICY_AGGRESSIVE_WITH_CAP:
+        return min(_ENTRY_AGGRESSIVE_LIMIT_OFFSET_TICKS, _ENTRY_MAX_LIMIT_OFFSET_TICKS)
+    return _ENTRY_RUNTIME_LIMIT_OFFSET_TICKS
 
 
 def _strategy_entry_limit_price(*, config: IbkrPaperStrategyBridgeConfig) -> float | None:
