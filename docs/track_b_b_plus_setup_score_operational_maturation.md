@@ -15,16 +15,16 @@ The existing implementation is research/advisory only. It deliberately emits QUA
 The Entry Acceptance Layer now exposes generic consumption levels that upstream strategy documents or overlays can declare:
 
 - EXACT: exact structural match, score >= 0.85.
-- B_PLUS: upper near-match, score >= 0.80 and structural similarity >= 0.72.
+- B_PLUS: upper near-match, default score >= 0.80 and structural similarity >= 0.72; the active PAPER-only operational maturation overlay may declare a lower non-production threshold for bounded execution-stack exercise.
 - NEAR: canonical near-match, score >= 0.70.
 - DEGRADED: degraded-but-valid advisory context, score >= 0.50.
 - INVALID and LOW_CONFIDENCE: fail-closed/non-actionable.
 
-The B+ runtime overlay consumes only the B_PLUS level. This keeps the 80 percent operational maturation path aligned with the prior near-match research instead of creating a separate scoring model.
+The B+ runtime overlay consumes only the B_PLUS level. This keeps the operational maturation path aligned with the prior near-match research instead of creating a separate scoring model. For the current PAPER-only throughput pass, the active 15-lane overlay sets `operational_maturation_b_plus_threshold=0.775`; this is NON_PRODUCTION and NOT_PROMOTION_ELIGIBLE.
 
 ## Runtime Boundaries
 
-The active overlay config/probationary_pattern_engine_paper_mnq_mgc_plus_mnq_us_intraday_review.yaml declares operational_maturation_entry_acceptance_level: B_PLUS for the 15 PAPER lanes. It also disables the older timed-entry maturation shortcut so B+ is the operational escalation path for tonight.
+The active overlay config/probationary_pattern_engine_paper_mnq_mgc_plus_mnq_us_intraday_review.yaml declares operational_maturation_entry_acceptance_level: B_PLUS and `operational_maturation_b_plus_threshold=0.775` for the 15 PAPER lanes. It also disables the older timed-entry maturation shortcut so B+ is the operational escalation path for tonight.
 
 Hard gates remain mandatory:
 

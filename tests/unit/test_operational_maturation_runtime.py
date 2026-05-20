@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+import ast
+import json
 from datetime import datetime, timedelta
 from decimal import Decimal
+from pathlib import Path
 from types import SimpleNamespace
 from zoneinfo import ZoneInfo
 
@@ -14,6 +17,10 @@ from mgc_v05l.app.operational_maturation_runtime import (
     emit_b_plus_diagnostic,
 )
 from mgc_v05l.domain.models import Bar
+
+
+REPO_ROOT = Path(__file__).resolve().parents[2]
+ACTIVE_15_LANE_OVERLAY = REPO_ROOT / "config" / "probationary_pattern_engine_paper_mnq_mgc_plus_mnq_us_intraday_review.yaml"
 
 
 def _bar(symbol: str, end_ts: datetime, *, timeframe: str = "3m", close: str = "100.20") -> Bar:
@@ -60,6 +67,22 @@ def _b_plus_params() -> dict[str, object]:
 
 def _packet(bar: Bar) -> SimpleNamespace:
     return SimpleNamespace(bar_id=bar.bar_id)
+
+
+def _b_plus_boundary_short_bars(start: datetime) -> list[Bar]:
+    bars = [_bar("MNQ", start + timedelta(minutes=3 * index), close="100.20") for index in range(1, 12)]
+    bars[-2] = _bar("MNQ", start + timedelta(minutes=30), close="100.05")
+    bars[-1] = _bar("MNQ", start + timedelta(minutes=33), close="100.20")
+    return bars
+
+
+def _active_overlay_lanes() -> list[dict[str, object]]:
+    raw = next(
+        line.split(": ", 1)[1]
+        for line in ACTIVE_15_LANE_OVERLAY.read_text(encoding="utf-8").splitlines()
+        if line.startswith("probationary_paper_lanes_json: ")
+    )
+    return list(json.loads(ast.literal_eval(raw)))
 
 
 def test_gold_operational_maturation_bar5_entry_is_opt_in() -> None:
@@ -213,6 +236,79 @@ def test_b_plus_score_below_threshold_cannot_route() -> None:
     assert result.reason.startswith("b_plus_score_below_threshold")
 
 
+def test_active_overlay_sets_paper_b_plus_threshold_to_0775_for_all_lanes() -> None:
+    lanes = _active_overlay_lanes()
+
+    assert len(lanes) == 15
+    assert {
+        lane["runtime_overlay_params"]["operational_maturation_b_plus_threshold"]  # type: ignore[index]
+        for lane in lanes
+    } == {0.775}
+    assert all(lane["runtime_overlay_params"]["live_money_eligible"] is False for lane in lanes)  # type: ignore[index]
+
+
+def test_b_plus_score_07775_routes_with_paper_operational_threshold() -> None:
+    start = datetime(2026, 5, 20, 8, 20, tzinfo=ZoneInfo("America/New_York"))
+    bars = _b_plus_boundary_short_bars(start)
+    lane_spec = SimpleNamespace(
+        symbol="MNQ",
+        required_market_data_provenance="DATABENTO_REALTIME_PHASE1",
+        market_data_source="phase1_runtime_artifact",
+        runtime_overlay_params={**_b_plus_params(), "operational_maturation_b_plus_threshold": 0.775},
+        paper_only=True,
+        live_money_eligible=False,
+    )
+
+    result = b_plus_setup_score(
+        lane_spec=lane_spec,
+        segment_bars=bars,
+        current_index=10,
+        setup_bar_count=4,
+        tick_size=0.1,
+        side="SHORT",
+        exact_match=False,
+        preferred_or_near_trigger=False,
+        fallback_entry_bar=8,
+    )
+
+    assert result.score == 0.7775
+    assert result.threshold == 0.775
+    assert result.b_plus_match is True
+    assert result.live_money_eligible is False
+    assert result.mandatory_gate_failures == ()
+
+
+def test_b_plus_score_below_0775_cannot_route() -> None:
+    start = datetime(2026, 5, 20, 8, 20, tzinfo=ZoneInfo("America/New_York"))
+    bars = _b_plus_boundary_short_bars(start)
+    bars[-1] = _bar("MNQ", start + timedelta(minutes=33), close="100.70")
+    lane_spec = SimpleNamespace(
+        symbol="MNQ",
+        required_market_data_provenance="DATABENTO_REALTIME_PHASE1",
+        market_data_source="phase1_runtime_artifact",
+        runtime_overlay_params={**_b_plus_params(), "operational_maturation_b_plus_threshold": 0.775},
+        paper_only=True,
+        live_money_eligible=False,
+    )
+
+    result = b_plus_setup_score(
+        lane_spec=lane_spec,
+        segment_bars=bars,
+        current_index=10,
+        setup_bar_count=4,
+        tick_size=0.1,
+        side="SHORT",
+        exact_match=False,
+        preferred_or_near_trigger=False,
+        fallback_entry_bar=8,
+    )
+
+    assert result.score < 0.775
+    assert result.threshold == 0.775
+    assert result.b_plus_match is False
+    assert result.reason.startswith("b_plus_score_below_threshold")
+
+
 def test_b_plus_wrong_direction_and_wrong_provenance_fail_closed() -> None:
     start = datetime(2026, 5, 19, 19, 0, tzinfo=ZoneInfo("America/New_York"))
     bars = [_bar("MGC", start + timedelta(minutes=3 * index)) for index in range(1, 6)]
@@ -252,11 +348,31 @@ def test_b_plus_wrong_direction_and_wrong_provenance_fail_closed() -> None:
         preferred_or_near_trigger=True,
         fallback_entry_bar=8,
     )
+    stale_provenance = b_plus_setup_score(
+        lane_spec=SimpleNamespace(
+            symbol="MGC",
+            required_market_data_provenance="DATABENTO_REALTIME_PHASE1",
+            market_data_source="phase1_runtime_artifact",
+            runtime_overlay_params={**_b_plus_params(), "operational_maturation_b_plus_phase1_artifact_fresh": False},
+            paper_only=True,
+            live_money_eligible=False,
+        ),
+        segment_bars=bars,
+        current_index=4,
+        setup_bar_count=4,
+        tick_size=0.1,
+        side="LONG",
+        exact_match=False,
+        preferred_or_near_trigger=True,
+        fallback_entry_bar=8,
+    )
 
     assert wrong_direction.b_plus_match is False
     assert "direction_unknown" in wrong_direction.mandatory_gate_failures
     assert wrong_provenance.b_plus_match is False
     assert "wrong_provenance" in wrong_provenance.mandatory_gate_failures
+    assert stale_provenance.b_plus_match is False
+    assert "stale_phase1_artifact" in stale_provenance.mandatory_gate_failures
 
 
 def test_b_plus_runtime_respects_session_gate_before_route() -> None:
