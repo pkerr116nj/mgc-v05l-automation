@@ -20,6 +20,9 @@ from mgc_v05l.execution_core.track_b_entry_acceptance import (
     THIN_DATA,
     build_asia_early_normal_breakout_retest_hold_entry_acceptance_payload,
     build_entry_acceptance_state,
+    entry_acceptance_level_from_report,
+    entry_acceptance_level_policy,
+    entry_acceptance_report_satisfies_level,
     write_entry_acceptance_state,
 )
 from mgc_v05l.execution_core.track_b_strategy_rule_runner import (
@@ -63,6 +66,42 @@ def test_near_structural_match() -> None:
     assert 0.70 <= report["acceptance_score"] < 0.85
     assert report["entry_quality_context"]["quality_label"] == "ACCEPTABLE"
     assert report["suggested_exit_profile_context"]["profile_hint"] == "TIGHTER_INVALIDATION"
+
+
+
+def test_b_plus_acceptance_level_is_upper_near_band() -> None:
+    candidate = _candidate(
+        structural_similarity=0.82,
+        directional_alignment=0.92,
+        timing_session_fit=0.92,
+        volatility_range_fit=0.82,
+        pullback_retest_quality=0.82,
+        failure_risk_score=0.92,
+    )
+
+    report = _evaluate(candidate)
+
+    assert report["acceptance_class"] == NEAR_STRUCTURAL_MATCH
+    assert entry_acceptance_level_from_report(report) == "B_PLUS"
+    assert entry_acceptance_report_satisfies_level(report, "B_PLUS") is True
+    assert entry_acceptance_level_policy("B_PLUS").route_authority is False
+
+
+def test_lower_near_acceptance_level_does_not_satisfy_b_plus() -> None:
+    report = _evaluate(
+        _candidate(
+            structural_similarity=0.74,
+            directional_alignment=0.75,
+            timing_session_fit=0.74,
+            volatility_range_fit=0.70,
+            pullback_retest_quality=0.72,
+            failure_risk_score=0.80,
+        )
+    )
+
+    assert report["acceptance_class"] == NEAR_STRUCTURAL_MATCH
+    assert entry_acceptance_level_from_report(report) == "NEAR"
+    assert entry_acceptance_report_satisfies_level(report, "B_PLUS") is False
 
 
 def test_degraded_but_valid() -> None:

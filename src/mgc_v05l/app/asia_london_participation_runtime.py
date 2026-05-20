@@ -29,7 +29,13 @@ from .gc_mgc_segment_forced_session_short_research import (
 )
 from .gc_mgc_segment_regime_research import label_gold_segment, trade_date_for_timestamp
 from .index_futures_forced_session_research import label_stock_index_segment, stock_index_trade_date_for_timestamp
-from .operational_maturation_runtime import operational_entry_reason
+from .operational_maturation_runtime import (
+    augment_intent_summary_with_b_plus,
+    b_plus_diagnostic_payload,
+    b_plus_session_key,
+    b_plus_setup_score,
+    operational_entry_reason,
+)
 
 
 ASIA_LONDON_PARTICIPATION_RUNTIME_KIND = "asia_london_participation_candidate_runtime"
@@ -243,6 +249,49 @@ class AsiaLondonParticipationStrategyEngine(StrategyEngine):
                 floor_reason=floor_reason,
             )
         )
+        if not strict_gate_pass:
+            b_plus_key = b_plus_session_key(
+                lane_id=str(getattr(self._lane_spec, "lane_id", "") or definition.lane_id),
+                segment_id=ENTRY_SEGMENT,
+                bar=current_bar,
+            )
+            used_b_plus_keys = getattr(self, "_b_plus_session_keys", set())
+            if b_plus_key not in used_b_plus_keys:
+                b_plus_result = b_plus_setup_score(
+                    lane_spec=self._lane_spec,
+                    segment_bars=segment_bars,
+                    current_index=current_index,
+                    setup_bar_count=definition.setup_bar_count,
+                    tick_size=definition.tick_size,
+                    side=definition.side,
+                    exact_match=False,
+                    preferred_or_near_trigger=entry_index is not None and abs(entry_index - current_index) <= 2,
+                    fallback_entry_bar=definition.fallback_entry_bar,
+                )
+                self._latest_b_plus_setup_score = b_plus_diagnostic_payload(
+                    result=b_plus_result,
+                    bar=current_bar,
+                    lane_id=str(getattr(self._lane_spec, "lane_id", "") or definition.lane_id),
+                    source_id=definition.source_id,
+                    side=definition.side,
+                )
+                if b_plus_result.b_plus_match:
+                    used_b_plus_keys = set(used_b_plus_keys)
+                    used_b_plus_keys.add(b_plus_key)
+                    self._b_plus_session_keys = used_b_plus_keys
+                    payload.update(
+                        {
+                            "long_entry_raw": definition.side == "LONG",
+                            "short_entry_raw": definition.side == "SHORT",
+                            "recent_long_setup": definition.side == "LONG",
+                            "recent_short_setup": definition.side == "SHORT",
+                            "long_entry": definition.side == "LONG",
+                            "short_entry": definition.side == "SHORT",
+                            "long_entry_source": definition.source_id if definition.side == "LONG" else None,
+                            "short_entry_source": definition.source_id if definition.side == "SHORT" else None,
+                        }
+                    )
+                    return SignalPacket(**payload)
         if entry_index != len(segment_bars) - 1:
             return SignalPacket(**payload)
         if floor_reason is not None:
@@ -261,6 +310,12 @@ class AsiaLondonParticipationStrategyEngine(StrategyEngine):
             }
         )
         return SignalPacket(**payload)
+
+    def _build_live_intent_summary(self, **kwargs: Any) -> dict[str, object]:
+        return augment_intent_summary_with_b_plus(super()._build_live_intent_summary(**kwargs), self, kwargs["bar"])
+
+    def _build_shadow_intent_summary(self, **kwargs: Any) -> dict[str, object]:
+        return augment_intent_summary_with_b_plus(super()._build_shadow_intent_summary(**kwargs), self, kwargs["bar"])
 
     def _resolve_long_entry_family(self, signal_packet: SignalPacket) -> LongEntryFamily:
         if signal_packet.long_entry_source in {

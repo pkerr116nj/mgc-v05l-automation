@@ -8,6 +8,7 @@ from zoneinfo import ZoneInfo
 import mgc_v05l.app.asia_london_participation_runtime as asia_runtime
 import mgc_v05l.app.gc_mgc_forced_session_runtime as gold_runtime
 import mgc_v05l.app.index_futures_forced_session_runtime as index_runtime
+from mgc_v05l.app.operational_maturation_runtime import b_plus_setup_score
 from mgc_v05l.domain.models import Bar
 
 
@@ -39,6 +40,17 @@ def _op_params() -> dict[str, object]:
         "operational_maturation_forced_entry_bar": 5,
         "operational_maturation_entry_catchup_bars": 2,
         "operational_maturation_min_setup_range_ticks": 2,
+    }
+
+
+def _b_plus_params() -> dict[str, object]:
+    return {
+        **_op_params(),
+        "operational_maturation_timed_entry_enabled": False,
+        "operational_maturation_b_plus_enabled": True,
+        "operational_maturation_entry_acceptance_level": "B_PLUS",
+        "operational_maturation_b_plus_threshold": 0.80,
+        "operational_maturation_b_plus_max_entry_bar": 10,
     }
 
 
@@ -135,4 +147,175 @@ def test_operational_maturation_fails_closed_for_live_money_eligible_lane() -> N
     engine._bar_history = bars
 
     signal = engine._evaluate_signals(_packet(bars[-1]), [])  # noqa: SLF001
+    assert signal.long_entry is False
+
+
+def test_b_plus_setup_score_uses_upper_near_acceptance_level() -> None:
+    start = datetime(2026, 5, 19, 19, 0, tzinfo=ZoneInfo("America/New_York"))
+    bars = [_bar("MGC", start + timedelta(minutes=3 * index), close="100.70") for index in range(1, 6)]
+    lane_spec = SimpleNamespace(
+        symbol="MGC",
+        required_market_data_provenance="DATABENTO_REALTIME_PHASE1",
+        market_data_source="phase1_runtime_artifact",
+        runtime_overlay_params=_b_plus_params(),
+        paper_only=True,
+        live_money_eligible=False,
+    )
+
+    result = b_plus_setup_score(
+        lane_spec=lane_spec,
+        segment_bars=bars,
+        current_index=4,
+        setup_bar_count=4,
+        tick_size=0.1,
+        side="LONG",
+        exact_match=False,
+        preferred_or_near_trigger=True,
+        fallback_entry_bar=8,
+    )
+
+    assert result.b_plus_match is True
+    assert result.acceptance_level == "B_PLUS"
+    assert result.acceptance_class == "NEAR_STRUCTURAL_MATCH"
+    assert result.score >= 0.80
+    assert result.dimension_scores["structural_similarity"] >= 0.72
+
+
+def test_b_plus_score_below_threshold_cannot_route() -> None:
+    start = datetime(2026, 5, 19, 19, 0, tzinfo=ZoneInfo("America/New_York"))
+    bars = [_bar("MGC", start + timedelta(minutes=3 * index), close="100.05") for index in range(1, 6)]
+    lane_spec = SimpleNamespace(
+        symbol="MGC",
+        required_market_data_provenance="DATABENTO_REALTIME_PHASE1",
+        market_data_source="phase1_runtime_artifact",
+        runtime_overlay_params={**_b_plus_params(), "operational_maturation_b_plus_threshold": 0.84},
+        paper_only=True,
+        live_money_eligible=False,
+    )
+
+    result = b_plus_setup_score(
+        lane_spec=lane_spec,
+        segment_bars=bars,
+        current_index=4,
+        setup_bar_count=4,
+        tick_size=0.1,
+        side="LONG",
+        exact_match=False,
+        preferred_or_near_trigger=False,
+        fallback_entry_bar=8,
+    )
+
+    assert result.b_plus_match is False
+    assert result.reason.startswith("b_plus_score_below_threshold")
+
+
+def test_b_plus_wrong_direction_and_wrong_provenance_fail_closed() -> None:
+    start = datetime(2026, 5, 19, 19, 0, tzinfo=ZoneInfo("America/New_York"))
+    bars = [_bar("MGC", start + timedelta(minutes=3 * index)) for index in range(1, 6)]
+    wrong_direction = b_plus_setup_score(
+        lane_spec=SimpleNamespace(
+            symbol="MGC",
+            required_market_data_provenance="DATABENTO_REALTIME_PHASE1",
+            market_data_source="phase1_runtime_artifact",
+            runtime_overlay_params=_b_plus_params(),
+            paper_only=True,
+            live_money_eligible=False,
+        ),
+        segment_bars=bars,
+        current_index=4,
+        setup_bar_count=4,
+        tick_size=0.1,
+        side="SIDEWAYS",
+        exact_match=False,
+        preferred_or_near_trigger=True,
+        fallback_entry_bar=8,
+    )
+    wrong_provenance = b_plus_setup_score(
+        lane_spec=SimpleNamespace(
+            symbol="MGC",
+            required_market_data_provenance="RESEARCH_BACKTEST",
+            market_data_source="phase1_runtime_artifact",
+            runtime_overlay_params=_b_plus_params(),
+            paper_only=True,
+            live_money_eligible=False,
+        ),
+        segment_bars=bars,
+        current_index=4,
+        setup_bar_count=4,
+        tick_size=0.1,
+        side="LONG",
+        exact_match=False,
+        preferred_or_near_trigger=True,
+        fallback_entry_bar=8,
+    )
+
+    assert wrong_direction.b_plus_match is False
+    assert "direction_unknown" in wrong_direction.mandatory_gate_failures
+    assert wrong_provenance.b_plus_match is False
+    assert "wrong_provenance" in wrong_provenance.mandatory_gate_failures
+
+
+def test_b_plus_runtime_respects_session_gate_before_route() -> None:
+    engine = object.__new__(index_runtime.IndexFuturesForcedSessionStrategyEngine)
+    engine._lane_spec = SimpleNamespace(
+        symbol="MNQ",
+        lane_id="mnq_test",
+        runtime_overlay_params=_b_plus_params(),
+        paper_only=True,
+        live_money_eligible=False,
+        required_market_data_provenance="DATABENTO_REALTIME_PHASE1",
+        market_data_source="phase1_runtime_artifact",
+    )
+    engine._runtime_definition = index_runtime.INDEX_FORCED_SESSION_RUNTIME_BY_SOURCE[index_runtime.INDEX_NY_EARLY_LONG_SOURCE]
+    outside_session_bar = _bar("MNQ", datetime(2026, 5, 20, 13, 0, tzinfo=ZoneInfo("America/New_York")))
+    engine._bar_history = [outside_session_bar]
+
+    signal = engine._evaluate_signals(_packet(outside_session_bar), [])  # noqa: SLF001
+
+    assert signal.long_entry is False
+    assert not hasattr(engine, "_latest_b_plus_setup_score")
+
+
+def test_b_plus_runtime_can_route_near_miss_when_paper_only() -> None:
+    start = datetime(2026, 5, 20, 8, 20, tzinfo=ZoneInfo("America/New_York"))
+    bars = [_bar("MNQ", start + timedelta(minutes=3 * index), close="100.70") for index in range(1, 6)]
+    engine = object.__new__(index_runtime.IndexFuturesForcedSessionStrategyEngine)
+    engine._lane_spec = SimpleNamespace(
+        symbol="MNQ",
+        lane_id="mnq_test",
+        runtime_overlay_params=_b_plus_params(),
+        paper_only=True,
+        live_money_eligible=False,
+        required_market_data_provenance="DATABENTO_REALTIME_PHASE1",
+        market_data_source="phase1_runtime_artifact",
+    )
+    engine._runtime_definition = index_runtime.INDEX_FORCED_SESSION_RUNTIME_BY_SOURCE[index_runtime.INDEX_NY_EARLY_LONG_SOURCE]
+    engine._bar_history = bars
+
+    signal = engine._evaluate_signals(_packet(bars[-1]), [])  # noqa: SLF001
+
+    assert signal.long_entry is True
+    assert signal.long_entry_source == index_runtime.INDEX_NY_EARLY_LONG_SOURCE
+    assert engine._latest_b_plus_setup_score["b_plus_match"] is True
+    assert engine._latest_b_plus_setup_score["live_money_eligible"] is False
+
+
+def test_b_plus_runtime_fails_closed_for_live_money_eligible_lane() -> None:
+    start = datetime(2026, 5, 20, 8, 20, tzinfo=ZoneInfo("America/New_York"))
+    bars = [_bar("MNQ", start + timedelta(minutes=3 * index), close="100.70") for index in range(1, 6)]
+    engine = object.__new__(index_runtime.IndexFuturesForcedSessionStrategyEngine)
+    engine._lane_spec = SimpleNamespace(
+        symbol="MNQ",
+        lane_id="mnq_test",
+        runtime_overlay_params=_b_plus_params(),
+        paper_only=True,
+        live_money_eligible=True,
+        required_market_data_provenance="DATABENTO_REALTIME_PHASE1",
+        market_data_source="phase1_runtime_artifact",
+    )
+    engine._runtime_definition = index_runtime.INDEX_FORCED_SESSION_RUNTIME_BY_SOURCE[index_runtime.INDEX_NY_EARLY_LONG_SOURCE]
+    engine._bar_history = bars
+
+    signal = engine._evaluate_signals(_packet(bars[-1]), [])  # noqa: SLF001
+
     assert signal.long_entry is False

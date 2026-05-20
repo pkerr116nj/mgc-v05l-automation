@@ -52,11 +52,26 @@ class CandidateSide(str, Enum):
     SHORT = "SHORT"
 
 
+class EntryAcceptanceLevel(str, Enum):
+    EXACT = "EXACT"
+    B_PLUS = "B_PLUS"
+    NEAR = "NEAR"
+    DEGRADED = "DEGRADED"
+    INVALID = "INVALID"
+    LOW_CONFIDENCE = "LOW_CONFIDENCE"
+
+
 EXACT_STRUCTURAL_MATCH = AcceptanceClass.EXACT_STRUCTURAL_MATCH.value
 NEAR_STRUCTURAL_MATCH = AcceptanceClass.NEAR_STRUCTURAL_MATCH.value
 DEGRADED_BUT_VALID_MATCH = AcceptanceClass.DEGRADED_BUT_VALID_MATCH.value
 STRUCTURALLY_INVALID = AcceptanceClass.STRUCTURALLY_INVALID.value
 LOW_CONFIDENCE_INSUFFICIENT_DATA = AcceptanceClass.LOW_CONFIDENCE_INSUFFICIENT_DATA.value
+ENTRY_ACCEPTANCE_LEVEL_EXACT = EntryAcceptanceLevel.EXACT.value
+ENTRY_ACCEPTANCE_LEVEL_B_PLUS = EntryAcceptanceLevel.B_PLUS.value
+ENTRY_ACCEPTANCE_LEVEL_NEAR = EntryAcceptanceLevel.NEAR.value
+ENTRY_ACCEPTANCE_LEVEL_DEGRADED = EntryAcceptanceLevel.DEGRADED.value
+ENTRY_ACCEPTANCE_LEVEL_INVALID = EntryAcceptanceLevel.INVALID.value
+ENTRY_ACCEPTANCE_LEVEL_LOW_CONFIDENCE = EntryAcceptanceLevel.LOW_CONFIDENCE.value
 
 THIN_DATA = "THIN_DATA"
 STALE_INPUT = "STALE_INPUT"
@@ -123,6 +138,24 @@ class EntryAcceptanceThresholds:
     degraded_score: float = 0.50
     invalid_score: float = 0.50
     contradiction_alignment: float = 0.25
+    b_plus_score: float = 0.80
+
+
+@dataclass(frozen=True)
+class EntryAcceptanceLevelPolicy:
+    """Generic strategy-declared acceptance level policy.
+
+    This describes the layer level a strategy is willing to consume. It does
+    not itself grant route authority; governance and runtime safety remain
+    separate gates.
+    """
+
+    level: str
+    min_score: float
+    min_structural_similarity: float
+    accepted_classes: tuple[str, ...]
+    advisory_level: bool = True
+    route_authority: bool = False
 
 
 @dataclass(frozen=True)
@@ -200,6 +233,100 @@ class _TimeframeContext:
             "timeframe_alignment_status": self.timeframe_alignment_status,
         }
 
+
+
+def entry_acceptance_level_policy(
+    level: str | EntryAcceptanceLevel,
+    *,
+    thresholds: EntryAcceptanceThresholds | None = None,
+) -> EntryAcceptanceLevelPolicy:
+    """Return the generic policy for a strategy-declared acceptance level.
+
+    Levels are intentionally strategy-consumption labels. They preserve the
+    canonical acceptance-class bands while allowing upstream strategy documents
+    or overlays to declare whether a lane consumes exact-only, B+, near, or
+    degraded candidates.
+    """
+
+    resolved = thresholds or EntryAcceptanceThresholds()
+    normalized = str(level.value if isinstance(level, EntryAcceptanceLevel) else level or "").strip().upper()
+    if normalized == ENTRY_ACCEPTANCE_LEVEL_EXACT:
+        return EntryAcceptanceLevelPolicy(
+            level=ENTRY_ACCEPTANCE_LEVEL_EXACT,
+            min_score=resolved.exact_score,
+            min_structural_similarity=0.92,
+            accepted_classes=(EXACT_STRUCTURAL_MATCH,),
+        )
+    if normalized in {ENTRY_ACCEPTANCE_LEVEL_B_PLUS, "B_PLUS_SETUP_SCORE", "B+"}:
+        return EntryAcceptanceLevelPolicy(
+            level=ENTRY_ACCEPTANCE_LEVEL_B_PLUS,
+            min_score=resolved.b_plus_score,
+            min_structural_similarity=0.72,
+            accepted_classes=(NEAR_STRUCTURAL_MATCH,),
+        )
+    if normalized == ENTRY_ACCEPTANCE_LEVEL_NEAR:
+        return EntryAcceptanceLevelPolicy(
+            level=ENTRY_ACCEPTANCE_LEVEL_NEAR,
+            min_score=resolved.near_score,
+            min_structural_similarity=0.72,
+            accepted_classes=(NEAR_STRUCTURAL_MATCH,),
+        )
+    if normalized == ENTRY_ACCEPTANCE_LEVEL_DEGRADED:
+        return EntryAcceptanceLevelPolicy(
+            level=ENTRY_ACCEPTANCE_LEVEL_DEGRADED,
+            min_score=resolved.degraded_score,
+            min_structural_similarity=0.50,
+            accepted_classes=(DEGRADED_BUT_VALID_MATCH,),
+        )
+    if normalized == ENTRY_ACCEPTANCE_LEVEL_LOW_CONFIDENCE:
+        return EntryAcceptanceLevelPolicy(
+            level=ENTRY_ACCEPTANCE_LEVEL_LOW_CONFIDENCE,
+            min_score=0.0,
+            min_structural_similarity=0.0,
+            accepted_classes=(LOW_CONFIDENCE_INSUFFICIENT_DATA,),
+        )
+    return EntryAcceptanceLevelPolicy(
+        level=ENTRY_ACCEPTANCE_LEVEL_INVALID,
+        min_score=0.0,
+        min_structural_similarity=0.0,
+        accepted_classes=(STRUCTURALLY_INVALID,),
+    )
+
+
+def entry_acceptance_level_from_report(report: Mapping[str, Any]) -> str:
+    """Map an acceptance-layer report to the generic level vocabulary."""
+
+    acceptance_class = str(report.get("acceptance_class") or "")
+    score = _optional_float(report.get("acceptance_score")) or 0.0
+    dimensions = report.get("dimension_scores") if isinstance(report.get("dimension_scores"), Mapping) else {}
+    structural = _optional_float(dimensions.get("structural_similarity")) if isinstance(dimensions, Mapping) else None
+    thresholds = EntryAcceptanceThresholds()
+    if acceptance_class == EXACT_STRUCTURAL_MATCH and score >= thresholds.exact_score:
+        return ENTRY_ACCEPTANCE_LEVEL_EXACT
+    if acceptance_class == NEAR_STRUCTURAL_MATCH and score >= thresholds.b_plus_score and (structural is None or structural >= 0.72):
+        return ENTRY_ACCEPTANCE_LEVEL_B_PLUS
+    if acceptance_class == NEAR_STRUCTURAL_MATCH and score >= thresholds.near_score:
+        return ENTRY_ACCEPTANCE_LEVEL_NEAR
+    if acceptance_class == DEGRADED_BUT_VALID_MATCH and score >= thresholds.degraded_score:
+        return ENTRY_ACCEPTANCE_LEVEL_DEGRADED
+    if acceptance_class == LOW_CONFIDENCE_INSUFFICIENT_DATA:
+        return ENTRY_ACCEPTANCE_LEVEL_LOW_CONFIDENCE
+    return ENTRY_ACCEPTANCE_LEVEL_INVALID
+
+
+def entry_acceptance_report_satisfies_level(report: Mapping[str, Any], level: str | EntryAcceptanceLevel) -> bool:
+    """Return whether an advisory report satisfies a strategy-declared level."""
+
+    policy = entry_acceptance_level_policy(level)
+    acceptance_class = str(report.get("acceptance_class") or "")
+    score = _optional_float(report.get("acceptance_score")) or 0.0
+    dimensions = report.get("dimension_scores") if isinstance(report.get("dimension_scores"), Mapping) else {}
+    structural = _optional_float(dimensions.get("structural_similarity")) if isinstance(dimensions, Mapping) else 0.0
+    return (
+        acceptance_class in policy.accepted_classes
+        and score >= policy.min_score
+        and (structural or 0.0) >= policy.min_structural_similarity
+    )
 
 def build_entry_acceptance_state(
     payload: Mapping[str, Any],

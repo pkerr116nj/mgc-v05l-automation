@@ -156,6 +156,23 @@ The layer cannot make a reliable structural judgment. Examples include stale dat
 
 Expected score range: `0.00` to `0.30`. Confidence must be `0.0` when a hard provenance or freshness failure blocks evaluation.
 
+## Generic Strategy Consumption Levels
+
+Entry Acceptance classes are layer output. Strategies or operational overlays should declare the generic acceptance level they are willing to consume upstream from the layer, rather than embedding one-off scorer thresholds inside each runtime adapter.
+
+Initial generic levels:
+
+| Level | Minimum score | Structural floor | Intended use |
+| --- | ---: | ---: | --- |
+| EXACT | 0.85 | 0.92 | Production-quality exact structural consumption. |
+| B_PLUS | 0.80 | 0.72 | PAPER-only operational maturation upper-near consumption when exact predicates do not fire. |
+| NEAR | 0.70 | 0.72 | Research/advisory near-match context. |
+| DEGRADED | 0.50 | 0.50 | Marginal advisory context only. |
+| INVALID | 0.00 | 0.00 | Fail-closed/non-actionable context. |
+| LOW_CONFIDENCE | 0.00 | 0.00 | Fail-closed insufficient data/provenance context. |
+
+The level declaration does not grant route authority. Runtime route authority still requires paper/live scope, session correctness, own-instrument data freshness/provenance, governance, exposure, bridge, and broker reconciliation gates.
+
 ## Scoring Dimensions
 
 The `acceptance_score` is a deterministic advisory score from `0.0` to `1.0`. V1 should use explicit rules and transparent dimension scores, not fitting or optimization.
