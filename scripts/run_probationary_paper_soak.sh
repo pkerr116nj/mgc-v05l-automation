@@ -249,13 +249,26 @@ background_child_stayed_alive() {
   local pid="$1"
   local attempt=0
   while [[ ${attempt} -lt ${BACKGROUND_VERIFY_ATTEMPTS} ]]; do
-    if ! kill -0 "${pid}" 2>/dev/null; then
+    if ! process_alive_not_zombie "${pid}"; then
       return 1
     fi
     sleep "${BACKGROUND_VERIFY_POLL_SECONDS}"
     attempt=$((attempt + 1))
   done
-  kill -0 "${pid}" 2>/dev/null
+  process_alive_not_zombie "${pid}"
+}
+
+process_alive_not_zombie() {
+  local pid="$1"
+  local stat
+  if ! kill -0 "${pid}" 2>/dev/null; then
+    return 1
+  fi
+  stat="$(ps -p "${pid}" -o stat= 2>/dev/null || true)"
+  if [[ "${stat}" == Z* ]]; then
+    return 1
+  fi
+  return 0
 }
 
 remove_pid_file_if_matches() {

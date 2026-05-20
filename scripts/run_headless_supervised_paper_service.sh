@@ -502,6 +502,14 @@ PY
 launch_background_paper_runtime() {
   local wrapper_path
   wrapper_path="$(write_paper_runtime_wrapper)"
+  rm -f "${PAPER_WRAPPER_PID_FILE}"
+  if screen_available; then
+    local session_name
+    session_name="$(screen_session_name "paper_runtime")"
+    printf '%s\n' "${session_name}" > "${PAPER_PID_FILE}.screen_session"
+    screen -dmS "${session_name}" /bin/bash "${wrapper_path}"
+    return 0
+  fi
   (
     cd "${REPO_ROOT}"
     nohup /bin/bash "${wrapper_path}" >> "${PAPER_LOG_FILE}" 2>&1 &
