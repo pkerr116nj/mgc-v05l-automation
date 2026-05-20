@@ -22,6 +22,7 @@ from mgc_v05l.execution_core.track_b_paper_trade_ledger import (
 )
 from mgc_v05l.execution_core.track_b_submit_intent_ownership import (
     DEFAULT_TRACK_B_SUBMIT_INTENT_OWNERSHIP_JSONL,
+    append_submit_intent_ownership_record,
     load_unresolved_submit_intent_ownership_records,
 )
 
@@ -235,6 +236,11 @@ def run_track_b_paper_lifecycle_adoption(
             "would_update": valid,
             "already_present": None,
         },
+        "submit_intent_ownership": {
+            "path": str(submit_intent_ownership_path),
+            "would_resolve": valid and submit_intent_ownership is not None,
+            "already_present": submit_intent_ownership is None,
+        },
     }
     report: dict[str, Any] = {
         "classification": classification,
@@ -310,6 +316,14 @@ def run_track_b_paper_lifecycle_adoption(
             output_root=repo_root / config.ledger_root,
             now=actual_now,
         )
+        ownership_resolution = _resolve_submit_intent_ownership_after_adoption(
+            submit_intent_ownership=submit_intent_ownership,
+            fill_payload=fill_payload,
+            trade_payload=trade_payload,
+            audit_path=audit_path,
+            jsonl_path=submit_intent_ownership_path,
+            now=actual_now,
+        )
         post_report = dict(report)
         post_report["classification"] = "TRACK_B_PAPER_LIFECYCLE_ADOPTION_APPLIED"
         post_report["post_adoption"] = {
@@ -317,6 +331,8 @@ def run_track_b_paper_lifecycle_adoption(
             "trade_written": not trade_already_present,
             "compact_ledger_trade_record_written": ledger_result.trade_record_written,
             "compact_ledger_live_position_status": ledger_result.live_position_status,
+            "submit_intent_ownership_resolved": ownership_resolution is not None,
+            "submit_intent_ownership_resolution": ownership_resolution,
         }
         post_report["audit_path"] = str(audit_path)
         audit_path = _write_audit(repo_root, config.output_root, post_report, actual_now=actual_now, suffix="post")
@@ -329,6 +345,60 @@ def run_track_b_paper_lifecycle_adoption(
         audit_path=audit_path,
         latest_audit_path=latest_audit_path,
     )
+
+
+def _resolve_submit_intent_ownership_after_adoption(
+    *,
+    submit_intent_ownership: Mapping[str, Any] | None,
+    fill_payload: Mapping[str, Any],
+    trade_payload: Mapping[str, Any],
+    audit_path: Path,
+    jsonl_path: Path,
+    now: datetime,
+) -> dict[str, Any] | None:
+    if submit_intent_ownership is None:
+        return None
+    lifecycle_id = str(trade_payload.get("lifecycle_id") or fill_payload.get("lifecycle_id") or "")
+    if not lifecycle_id:
+        return None
+    resolved = dict(submit_intent_ownership)
+    resolved["state"] = "LIFECYCLE_OPEN_PERSISTED"
+    resolved["updated_at"] = now.isoformat()
+    resolved["lifecycle_id"] = lifecycle_id
+    resolved["lifecycle_id_reserved_only"] = False
+    resolved["lifecycle_position_open"] = True
+    resolved["open_order_count"] = 0
+    resolved["unknown_open_order_count"] = 0
+    resolved["review_required_count"] = 0
+    resolved["live_money_eligible"] = False
+    resolved["paper_proof_invoked"] = False
+    resolved["broker_order_id"] = str(fill_payload.get("broker_order_id") or resolved.get("broker_order_id") or "")
+    resolved["client_id"] = fill_payload.get("client_id") or resolved.get("client_id")
+    resolved["perm_id"] = fill_payload.get("perm_id") or resolved.get("perm_id")
+    resolved["exec_id"] = fill_payload.get("execution_id") or fill_payload.get("exec_id") or resolved.get("exec_id")
+    source_paths = [str(path) for path in (resolved.get("source_artifact_paths") or [])]
+    source_paths.append(str(audit_path))
+    resolved["source_artifact_paths"] = tuple(dict.fromkeys(source_paths))
+    extra = dict(resolved.get("extra") or {})
+    extra.update(
+        {
+            "adoption_classification": "TRACK_B_PAPER_LIFECYCLE_ADOPTION_APPLIED",
+            "adoption_resolution": "BROKER_BACKED_ENTRY_ADOPTED_FROM_BROKER_POSITION",
+            "adoption_audit_path": str(audit_path),
+            "lifecycle_id": lifecycle_id,
+        }
+    )
+    resolved["extra"] = extra
+    latest_path = jsonl_path.parent / "latest_track_b_submit_intent_ownership.json"
+    store_result = append_submit_intent_ownership_record(resolved, jsonl_path=jsonl_path, latest_path=latest_path)
+    return {
+        "classification": "SUBMIT_INTENT_OWNERSHIP_RESOLVED_LIFECYCLE_OPEN_PERSISTED",
+        "ownership_intent_id": store_result.record.get("ownership_intent_id"),
+        "state": store_result.record.get("state"),
+        "lifecycle_id": store_result.record.get("lifecycle_id"),
+        "jsonl_path": str(store_result.jsonl_path),
+        "latest_path": str(store_result.latest_path),
+    }
 
 
 def _select_broker_position(

@@ -345,9 +345,18 @@ def load_unresolved_submit_intent_ownership_records(
 
 
 def _latest_view(*, records: list[dict[str, Any]], generated_at: str) -> dict[str, Any]:
+    latest_by_id: dict[str, dict[str, Any]] = {}
+    anonymous_records: list[dict[str, Any]] = []
+    for record in records:
+        ownership_id = str(record.get("ownership_intent_id") or "")
+        if ownership_id:
+            latest_by_id[ownership_id] = record
+        else:
+            anonymous_records.append(record)
+    latest_records = [*latest_by_id.values(), *anonymous_records]
     unresolved = [
         record
-        for record in records
+        for record in latest_records
         if str(record.get("state") or "").upper() in UNRESOLVED_STATES
     ]
     return {
@@ -356,6 +365,7 @@ def _latest_view(*, records: list[dict[str, Any]], generated_at: str) -> dict[st
         "paper_proof_invoked": False,
         "live_money_eligible": False,
         "record_count": len(records),
+        "latest_ownership_record_count": len(latest_records),
         "unresolved_count": len(unresolved),
         "unresolved_submit_intent_ownership": unresolved,
         "latest_record": records[-1] if records else None,

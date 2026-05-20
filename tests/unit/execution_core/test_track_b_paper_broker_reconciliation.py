@@ -141,7 +141,21 @@ def test_broker_only_position_with_matching_submit_intent_is_adoption_required(t
     assert report["classification"] == "TRACK_B_PAPER_BROKER_RECONCILIATION_BLOCKED"
     assert report["broker_reconciled"] is False
     assert report["submit_intent_ownership_reconciliation"]["classification"] == "SUBMIT_INTENT_BROKER_POSITION_ADOPTION_REQUIRED"
+    remediation = report["broker_backed_entry_adoption"]
+    assert remediation["classification"] == "BROKER_BACKED_ENTRY_ADOPTION_REQUIRED"
+    assert remediation["ownership_intent_id"].startswith("submit_owner_")
+    assert remediation["broker_order_id"] == "28"
+    assert remediation["perm_id"] == 614044377
+    assert remediation["contract"] == {
+        "symbol": "MGC",
+        "local_symbol": "MGCM6",
+        "expiry": "20260626",
+        "con_id": 712565978,
+    }
+    assert remediation["qty"] == 1
     assert any(blocker["code"] == "SUBMIT_INTENT_BROKER_POSITION_ADOPTION_REQUIRED" for blocker in report["blockers"])
+    blocker = next(blocker for blocker in report["blockers"] if blocker["code"] == "SUBMIT_INTENT_BROKER_POSITION_ADOPTION_REQUIRED")
+    assert blocker["broker_backed_entry_adoption"]["classification"] == "BROKER_BACKED_ENTRY_ADOPTION_REQUIRED"
     assert not any(blocker["code"] == "TRACK_B_BROKER_LIFECYCLE_POSITION_COUNT_MISMATCH" for blocker in report["blockers"])
 
 

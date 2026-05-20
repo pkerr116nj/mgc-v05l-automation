@@ -122,9 +122,13 @@ def test_unresolved_intent_loading_uses_latest_state_per_ownership_id(tmp_path: 
     )
 
     unresolved = load_unresolved_submit_intent_ownership_records(jsonl)
+    latest_payload = json.loads(latest.read_text(encoding="utf-8"))
 
     assert len(unresolved) == 1
     assert unresolved[0]["lane_id"] == "other_lane"
+    assert latest_payload["unresolved_count"] == 1
+    assert latest_payload["latest_ownership_record_count"] == 2
+    assert [row["lane_id"] for row in latest_payload["unresolved_submit_intent_ownership"]] == ["other_lane"]
 
 
 def test_module_has_no_broker_imports_or_mutation_symbols() -> None:

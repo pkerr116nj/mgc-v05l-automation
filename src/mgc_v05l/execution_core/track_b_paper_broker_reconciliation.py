@@ -203,6 +203,9 @@ def reconcile_track_b_paper_broker_truth(
         config=config,
         now=actual_now,
     )
+    broker_backed_entry_adoption = _broker_backed_entry_adoption_remediation(
+        submit_intent_ownership_reconciliation
+    )
     broker_truth_settlement = _broker_truth_settlement_state(
         position_match_report=position_match_report,
         broker_positions=track_b_positions,
@@ -240,6 +243,7 @@ def reconcile_track_b_paper_broker_truth(
                     "legacy_code": "TRACK_B_BROKER_LIFECYCLE_POSITION_COUNT_MISMATCH",
                     "detail": "Broker position is attributed to a durable unresolved Track B submit intent and requires lifecycle adoption.",
                     "submit_intent_ownership_reconciliation": submit_intent_ownership_reconciliation,
+                    "broker_backed_entry_adoption": broker_backed_entry_adoption,
                     "position_match_blocker": position_match_report.get("blocker"),
                 }
             )
@@ -365,6 +369,7 @@ def reconcile_track_b_paper_broker_truth(
         "known_leak_test_entry_orders": known_leak_test_entry_orders,
         "unresolved_submit_intent_ownership_records": unresolved_submit_intents,
         "submit_intent_ownership_reconciliation": submit_intent_ownership_reconciliation,
+        "broker_backed_entry_adoption": broker_backed_entry_adoption,
         "stale_managed_exit_orders": stale_managed_exit_orders,
         "hard_exit_order_not_marketable_orders": hard_exit_order_not_marketable,
         "unknown_broker_open_orders": unknown_track_b_open_orders,
@@ -755,6 +760,37 @@ def _submit_intent_ownership_reconciliation_state(
             now=now,
         )
     return {**base, "classification": "SUBMIT_INTENT_OWNERSHIP_NOT_APPLICABLE", "detail": "Submit-intent ownership does not explain current broker/lifecycle state."}
+
+
+def _broker_backed_entry_adoption_remediation(
+    submit_intent_ownership_reconciliation: Mapping[str, Any],
+) -> dict[str, Any] | None:
+    if str(submit_intent_ownership_reconciliation.get("classification") or "") != "SUBMIT_INTENT_BROKER_POSITION_ADOPTION_REQUIRED":
+        return None
+    submit_intent = submit_intent_ownership_reconciliation.get("matching_submit_intent")
+    broker_position = submit_intent_ownership_reconciliation.get("broker_position")
+    if not isinstance(submit_intent, Mapping) or not isinstance(broker_position, Mapping):
+        return None
+    return {
+        "classification": "BROKER_BACKED_ENTRY_ADOPTION_REQUIRED",
+        "detail": "Broker-backed PAPER entry is attributed to a durable submit intent but no lifecycle OPEN_MANAGED record exists.",
+        "ownership_intent_id": submit_intent.get("ownership_intent_id"),
+        "order_intent_id": submit_intent.get("order_intent_id") or submit_intent.get("ownership_intent_id"),
+        "broker_order_id": submit_intent.get("broker_order_id"),
+        "client_id": submit_intent.get("client_id"),
+        "perm_id": submit_intent.get("perm_id"),
+        "contract": {
+            "symbol": submit_intent.get("symbol") or broker_position.get("symbol"),
+            "local_symbol": submit_intent.get("local_symbol") or broker_position.get("local_symbol"),
+            "expiry": submit_intent.get("expiry") or broker_position.get("expiry"),
+            "con_id": submit_intent.get("con_id") or broker_position.get("con_id"),
+        },
+        "qty": submit_intent.get("qty") or broker_position.get("quantity"),
+        "broker_position_quantity": broker_position.get("quantity"),
+        "live_money_eligible": False,
+        "paper_proof_invoked": False,
+        "required_action": "Run guarded PAPER lifecycle adoption for this exact ownership/order/contract before allowing submit.",
+    }
 
 
 def _unmatched_broker_positions_from_match_report(position_match_report: Mapping[str, Any]) -> list[dict[str, Any]]:

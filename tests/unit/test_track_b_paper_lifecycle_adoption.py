@@ -12,6 +12,7 @@ from mgc_v05l.execution_core.track_b_submit_intent_ownership import (
     SubmitIntentOwnershipRecord,
     SubmitIntentOwnershipState,
     append_submit_intent_ownership_record,
+    load_unresolved_submit_intent_ownership_records,
 )
 
 
@@ -319,6 +320,10 @@ def test_unknown_after_submit_matching_submit_intent_adopts_reserved_lifecycle_i
 
     assert result.classification == "TRACK_B_PAPER_LIFECYCLE_ADOPTION_APPLIED"
     assert result.report["submit_intent_ownership_evidence"]["selected"]["ownership_intent_id"] == ownership["ownership_intent_id"]
+    ownership_resolution = result.report["post_adoption"]["submit_intent_ownership_resolution"]
+    assert ownership_resolution["classification"] == "SUBMIT_INTENT_OWNERSHIP_RESOLVED_LIFECYCLE_OPEN_PERSISTED"
+    assert ownership_resolution["ownership_intent_id"] == ownership["ownership_intent_id"]
+    assert ownership_resolution["state"] == "LIFECYCLE_OPEN_PERSISTED"
     lane_dir = repo / "outputs/probationary_pattern_engine/paper_session/lanes/atp_companion_v1_asia_us"
     fill_rows = _read_jsonl(lane_dir / "fills.jsonl")
     trade_rows = _read_jsonl(lane_dir / "trades.jsonl")
@@ -333,6 +338,12 @@ def test_unknown_after_submit_matching_submit_intent_adopts_reserved_lifecycle_i
     assert trade_rows[0]["ownership_intent_id"] == ownership["ownership_intent_id"]
     live_positions = _read_json(repo / "outputs/track_b_execution_core/paper_trade_ledger/latest_track_b_live_position_status.json")
     assert live_positions["open_position_count"] == 1
+    ownership_path = repo / "outputs/track_b_execution_core/submit_intent_ownership/track_b_submit_intent_ownership.jsonl"
+    unresolved = load_unresolved_submit_intent_ownership_records(ownership_path)
+    assert unresolved == []
+    latest_ownership = _read_json(repo / "outputs/track_b_execution_core/submit_intent_ownership/latest_track_b_submit_intent_ownership.json")
+    assert latest_ownership["unresolved_count"] == 0
+    assert latest_ownership["latest_record"]["state"] == "LIFECYCLE_OPEN_PERSISTED"
 
 
 def test_bridge_report_fallback_still_adopts_without_submit_intent(tmp_path: Path) -> None:
