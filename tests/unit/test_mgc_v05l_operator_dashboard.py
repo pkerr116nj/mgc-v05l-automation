@@ -176,6 +176,9 @@ def test_canonical_readiness_dashboard_summary_consumes_artifact() -> None:
         "readiness_warnings": [{"code": "latest_broker_attempt_failed"}],
         "operator_action_required": False,
         "root_guard_summary": {"root_match": True},
+        "broker_truth": {"fresh": True, "open_order_count": 0},
+        "broker_truth_lease": {"lease_state": "EXPIRED_BLOCK_NEW_ENTRIES", "age_seconds": 23400.0},
+        "phase1_reconciliation": {"classification": "TRACK_B_PAPER_BROKER_RECONCILED"},
         "live_money_eligible": False,
     }
 
@@ -188,6 +191,9 @@ def test_canonical_readiness_dashboard_summary_consumes_artifact() -> None:
     assert summary["canonical_readiness"] == "READY_SUBMIT_CAPABLE"
     assert summary["ready_submit_capable"] is True
     assert summary["root_guard_summary"]["root_match"] is True
+    assert summary["broker_truth"]["fresh"] is True
+    assert summary["broker_truth_lease"]["lease_state"] == "EXPIRED_BLOCK_NEW_ENTRIES"
+    assert summary["phase1_reconciliation"]["classification"] == "TRACK_B_PAPER_BROKER_RECONCILED"
 
 
 def _write_lane_bar_authority_db(
@@ -4054,6 +4060,7 @@ def test_dashboard_assets_use_operator_first_surface_and_preserve_legacy_surface
     assert 'data-action="start-atp-companion-paper"' not in html
     assert 'data-action="atp-companion-paper-flatten-and-halt"' not in html
     assert "renderOperatorCanarySummary" in js
+    assert "Broker truth lease:" in js
     assert "renderTemporaryPaperStrategies" in js
     assert "tracked-paper-start" not in js
     assert ".operator-canary-panel" in css

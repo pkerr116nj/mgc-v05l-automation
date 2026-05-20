@@ -1180,6 +1180,8 @@ function buildOperatorReadinessNotes(payload) {
   const rows = [];
   if (truth.state) rows.push(`Authoritative state: ${truth.state}`);
   if (truth.primary_blocker) rows.push(`Primary blocker: ${truth.primary_blocker}`);
+  if (truth.canonical_readiness) rows.push(`Canonical readiness: ${truth.canonical_readiness}`);
+  if (truth.broker_truth_lease_state) rows.push(`Broker truth lease: ${truth.broker_truth_lease_state} | age=${truth.broker_truth_lease_age_seconds ?? "-"}s | entry_ttl=${truth.broker_truth_lease_entry_seconds_remaining ?? "-"}s`);
   rows.push(`Route capable now: ${truth.route_capable_now ? "YES" : "NO"}`);
   rows.push(`Paper-only guard: ${truth.paper_only === false ? "FAILED" : "ENFORCED"}`);
   rows.push(`Broad session: ${values.current_broad_trading_session || "-"}`);

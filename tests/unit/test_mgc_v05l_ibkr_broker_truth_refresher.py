@@ -105,6 +105,34 @@ def test_broker_truth_refresh_once_uses_read_only_verifier_and_writes_status(tmp
     assert calls
 
 
+def test_broker_truth_refresh_writes_heartbeat_when_configured(tmp_path: Path) -> None:
+    fixed_time = datetime(2026, 5, 11, 12, 0, tzinfo=timezone.utc)
+    heartbeat_path = tmp_path / "var" / "track_b_broker_truth_refresh_heartbeat.json"
+    config = BrokerTruthRefreshConfig(
+        repo_root=tmp_path,
+        output_dir=tmp_path / "outputs" / "reports" / "ibkr_read_only_verification",
+        status_path=tmp_path / "outputs" / "reports" / "ibkr_read_only_verification" / "ibkr_broker_truth_refresh_status.json",
+        var_status_path=tmp_path / "var" / "ibkr_broker_truth_refresh_status.json",
+        heartbeat_path=heartbeat_path,
+    )
+
+    status = run_broker_truth_refresh_once(
+        config=config,
+        verifier=lambda *, config: _artifacts(),
+        artifact_writer=lambda *, output_dir, artifacts: output_dir.mkdir(parents=True, exist_ok=True),
+        now_fn=lambda: fixed_time,
+    )
+
+    heartbeat = json.loads(heartbeat_path.read_text(encoding="utf-8"))
+    assert status["classification"] == "BROKER_TRUTH_REFRESH_READY"
+    assert heartbeat["service"] == "track_b_ibkr_broker_truth_refresh"
+    assert heartbeat["repo_root"] == str(tmp_path)
+    assert heartbeat["classification"] == "BROKER_TRUTH_REFRESH_READY"
+    assert heartbeat["last_success"] is True
+    assert heartbeat["submit_authority"] is False
+    assert heartbeat["live_money_eligible"] is False
+
+
 def test_failed_refresh_preserves_last_successful_canonical_truth(tmp_path: Path) -> None:
     fixed_time = datetime(2999, 5, 18, 10, 0, tzinfo=timezone.utc)
     config = BrokerTruthRefreshConfig(

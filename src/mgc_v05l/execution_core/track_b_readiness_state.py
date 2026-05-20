@@ -760,16 +760,25 @@ def _broker_truth_lease_input(payload: Mapping[str, Any], *, now: datetime) -> d
     valid_until = payload.get("valid_until")
     entry_valid_until = payload.get("entry_valid_until") or valid_until
     exit_valid_until = payload.get("exit_valid_until") or valid_until
+    entry_seconds_remaining = _seconds_until(entry_valid_until, now)
+    exit_seconds_remaining = _seconds_until(exit_valid_until, now)
+    effective_lease_state = lease_state
+    if lease_state in BROKER_TRUTH_LEASE_READY_STATES:
+        if entry_seconds_remaining is not None and entry_seconds_remaining <= 0:
+            effective_lease_state = "EXPIRED_EXITS_ONLY"
+        if exit_seconds_remaining is not None and exit_seconds_remaining <= 0:
+            effective_lease_state = "EXPIRED_BLOCK_NEW_ENTRIES"
     return {
         "available": True,
-        "lease_state": lease_state,
+        "lease_state": effective_lease_state,
+        "source_lease_state": lease_state,
         "generated_at": generated_at,
         "age_seconds": _age_seconds(generated_at, now),
         "valid_until": valid_until,
         "entry_valid_until": entry_valid_until,
         "exit_valid_until": exit_valid_until,
-        "entry_seconds_remaining": _seconds_until(entry_valid_until, now),
-        "exit_seconds_remaining": _seconds_until(exit_valid_until, now),
+        "entry_seconds_remaining": entry_seconds_remaining,
+        "exit_seconds_remaining": exit_seconds_remaining,
         "submit_entry_allowed": payload.get("submit_entry_allowed") is True,
         "submit_exit_allowed": payload.get("submit_exit_allowed") is True,
         "warnings": list(payload.get("warnings") or []),

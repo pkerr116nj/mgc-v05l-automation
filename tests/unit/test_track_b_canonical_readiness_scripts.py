@@ -12,6 +12,8 @@ def test_status_script_produces_canonical_readiness_without_dashboard_ownership(
     script = STATUS_SCRIPT.read_text(encoding="utf-8")
 
     assert "mgc_v05l.app.track_b_canonical_readiness" in script
+    assert "mgc_v05l.app.track_b_broker_truth_lease" in script
+    assert script.index("refresh_broker_truth_lease") < script.index("refresh_canonical_readiness")
     assert "--repo-root \"${REPO_ROOT}\"" in script
     assert "--expected-root \"${REPO_ROOT}\"" in script
     assert "--output-path \"${CANONICAL_READINESS_FILE}\"" in script
@@ -65,6 +67,9 @@ def test_launch_script_passes_canonical_readiness_paths_to_status_script() -> No
     assert "--canonical-readiness-output \"${CANONICAL_READINESS_FILE}\"" in script
     assert "--canonical-readiness-summary-output \"${CANONICAL_READINESS_SUMMARY_FILE}\"" in script
     assert "mgc_v05l.app.track_b_canonical_readiness" in script
+    assert "mgc_v05l.app.track_b_broker_truth_lease" in script
+    assert "refresh_broker_truth_lease_for_launch" in script
+    assert "broker_truth_lease_state" in script
     assert "Headless supervised paper host is READY_SUBMIT_CAPABLE." in script
 
 

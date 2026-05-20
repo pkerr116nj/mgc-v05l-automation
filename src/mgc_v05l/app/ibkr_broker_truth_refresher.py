@@ -22,6 +22,7 @@ REPO_ROOT = Path(__file__).resolve().parents[3]
 DEFAULT_OUTPUT_DIR = REPO_ROOT / "outputs" / "reports" / "ibkr_read_only_verification"
 DEFAULT_STATUS_PATH = DEFAULT_OUTPUT_DIR / "ibkr_broker_truth_refresh_status.json"
 DEFAULT_VAR_STATUS_PATH = REPO_ROOT / "var" / "ibkr_broker_truth_refresh_status.json"
+DEFAULT_HEARTBEAT_PATH = REPO_ROOT / "var" / "track_b_broker_truth_refresh_heartbeat.json"
 DEFAULT_REFRESH_SECONDS = 60.0
 DEFAULT_CLIENT_ID = 9077
 
@@ -32,6 +33,7 @@ class BrokerTruthRefreshConfig:
     output_dir: Path = DEFAULT_OUTPUT_DIR
     status_path: Path = DEFAULT_STATUS_PATH
     var_status_path: Path = DEFAULT_VAR_STATUS_PATH
+    heartbeat_path: Path | None = None
     refresh_seconds: float = DEFAULT_REFRESH_SECONDS
     mode: str = "PAPER"
     host: str = "127.0.0.1"
@@ -42,6 +44,7 @@ class BrokerTruthRefreshConfig:
     timeout_seconds: float = 8.0
     skip_market_data_probe: bool = True
     skip_duplicate_client_id_probe: bool = True
+    refresh_lease_artifact: bool = False
     gc_expiry: str = "202606"
     mgc_expiry: str = "202606"
 
@@ -103,6 +106,11 @@ def run_broker_truth_refresh_once(
         )
     _write_json_atomically(attempt_status_path, attempt_status)
     write_broker_truth_refresh_status(status_path=config.status_path, var_status_path=config.var_status_path, status=status)
+    lease_status = _refresh_broker_truth_lease_if_enabled(config=config)
+    if lease_status:
+        status = {**status, "broker_truth_lease_refresh": lease_status}
+        write_broker_truth_refresh_status(status_path=config.status_path, var_status_path=config.var_status_path, status=status)
+    _write_broker_truth_heartbeat(config=config, status=status, cycle=None)
     return status
 
 
@@ -133,6 +141,7 @@ def run_broker_truth_refresh_service(
             var_status_path=config.var_status_path,
             status=latest_status,
         )
+        _write_broker_truth_heartbeat(config=config, status=latest_status, cycle=cycle)
         if max_cycles > 0 and cycle >= max_cycles:
             break
         sleep_fn(float(config.refresh_seconds))
@@ -366,6 +375,106 @@ def _benign_account_unsubscribe_after_complete_truth(
     return benign_unsubscribe_seen and not severe_errors
 
 
+def _refresh_broker_truth_lease_if_enabled(*, config: BrokerTruthRefreshConfig) -> dict[str, Any]:
+    if not config.refresh_lease_artifact:
+        return {}
+    try:
+        from mgc_v05l.app.track_b_broker_truth_lease import (
+            compact_lease_summary,
+            gather_lease_inputs,
+        )
+        from mgc_v05l.execution_core.track_b_broker_truth_lease import (
+            DEFAULT_LEASE_ARTIFACT,
+            DEFAULT_LEASE_HISTORY,
+            classify_broker_truth_lease,
+            write_broker_truth_lease,
+        )
+
+        repo_root = Path(config.repo_root).expanduser().resolve()
+        output_path = repo_root / DEFAULT_LEASE_ARTIFACT
+        history_path = repo_root / DEFAULT_LEASE_HISTORY
+        paths = {
+            "broker_truth_status": config.status_path,
+            "latest_attempt": config.output_dir / "ibkr_broker_truth_latest_attempt_status.json",
+            "reconciliation": repo_root
+            / "outputs"
+            / "reports"
+            / "track_b_paper_broker_reconciliation"
+            / "latest_track_b_paper_broker_reconciliation.json",
+            "lifecycle": repo_root
+            / "outputs"
+            / "track_b_execution_core"
+            / "paper_trade_ledger"
+            / "latest_track_b_live_position_status.json",
+            "order_state": repo_root
+            / "outputs"
+            / "track_b_execution_core"
+            / "paper_trade_ledger"
+            / "latest_track_b_paper_trade_summary.json",
+            "canonical_readiness": repo_root
+            / "outputs"
+            / "operator_dashboard"
+            / "runtime"
+            / "latest_canonical_readiness.json",
+            "maintenance_supervisor": repo_root
+            / "outputs"
+            / "operator_dashboard"
+            / "runtime"
+            / "latest_maintenance_supervisor_decision.json",
+            "output": output_path,
+            "history": history_path,
+        }
+        inputs = gather_lease_inputs(
+            repo_root=repo_root,
+            account_id=config.account_id,
+            allowed_instruments=["MGC", "MNQ", "GC"],
+            current_time=None,
+            policy={
+                "max_entry_age_seconds": 300.0,
+                "max_exit_age_seconds": 900.0,
+                "degraded_refresh_grace_seconds": 120.0,
+            },
+            paths=paths,
+        )
+        lease = classify_broker_truth_lease(inputs)
+        write_broker_truth_lease(output_path=output_path, lease=lease, history_path=history_path)
+        summary = compact_lease_summary(lease)
+        return {"ok": True, **summary}
+    except Exception as exc:  # pragma: no cover - defensive status path
+        return {"ok": False, "error": str(exc), "live_money_eligible": False}
+
+
+def _write_broker_truth_heartbeat(*, config: BrokerTruthRefreshConfig, status: dict[str, Any], cycle: int | None) -> None:
+    if config.heartbeat_path is None:
+        return
+    now = datetime.now(timezone.utc).isoformat()
+    heartbeat = {
+        "schema_version": "track_b_broker_truth_refresh_heartbeat_v1",
+        "generated_at": now,
+        "service": "track_b_ibkr_broker_truth_refresh",
+        "pid": os.getpid(),
+        "repo_root": str(Path(config.repo_root).expanduser().resolve()),
+        "mode": config.mode,
+        "account": config.account_id,
+        "client_id": int(config.client_id),
+        "read_only": bool(config.read_only),
+        "refresh_seconds": float(config.refresh_seconds),
+        "cycle": cycle if cycle is not None else status.get("cycle"),
+        "status_generated_at": status.get("generated_at"),
+        "classification": status.get("classification"),
+        "last_success": status.get("last_success") is True,
+        "last_failure": status.get("last_failure") is True,
+        "fresh": status.get("fresh") is True,
+        "broker_truth_lease_refresh": status.get("broker_truth_lease_refresh")
+        if isinstance(status.get("broker_truth_lease_refresh"), dict)
+        else {},
+        "submit_authority": False,
+        "live_money_eligible": False,
+        "paper_proof_invoked": False,
+    }
+    _write_json_atomically(config.heartbeat_path, heartbeat)
+
+
 def write_broker_truth_refresh_status(*, status_path: Path, var_status_path: Path, status: dict[str, Any]) -> None:
     _write_json_atomically(status_path, status)
     _write_json_atomically(var_status_path, status)
@@ -487,6 +596,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--output-dir", type=Path, default=DEFAULT_OUTPUT_DIR)
     parser.add_argument("--status-path", type=Path, default=DEFAULT_STATUS_PATH)
     parser.add_argument("--var-status-path", type=Path, default=DEFAULT_VAR_STATUS_PATH)
+    parser.add_argument("--heartbeat-path", type=Path, default=DEFAULT_HEARTBEAT_PATH)
+    parser.add_argument("--no-lease-refresh", action="store_true")
     parser.add_argument("--max-cycles", type=int, default=0)
     parser.add_argument("--gc-expiry", default="202606")
     parser.add_argument("--mgc-expiry", default="202606")
@@ -500,6 +611,8 @@ def main(argv: list[str] | None = None) -> int:
         output_dir=Path(args.output_dir),
         status_path=Path(args.status_path),
         var_status_path=Path(args.var_status_path),
+        heartbeat_path=Path(args.heartbeat_path) if args.heartbeat_path else None,
+        refresh_lease_artifact=not bool(args.no_lease_refresh),
         refresh_seconds=float(args.refresh_seconds),
         mode=str(args.mode or "").strip().upper(),
         host=str(args.host or "").strip(),

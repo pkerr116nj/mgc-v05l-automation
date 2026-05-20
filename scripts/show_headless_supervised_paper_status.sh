@@ -136,6 +136,18 @@ ensure_dir "$(dirname "${CANONICAL_READINESS_SUMMARY_FILE}")"
 ensure_dir "$(dirname "${MAINTENANCE_SUPERVISOR_FILE}")"
 ensure_dir "$(dirname "${MAINTENANCE_SUPERVISOR_SUMMARY_FILE}")"
 
+refresh_broker_truth_lease() {
+  "${PYTHON_BIN}" -m mgc_v05l.app.track_b_broker_truth_lease \
+    --repo-root "${REPO_ROOT}" \
+    --no-history \
+    --json >/dev/null
+}
+
+set +e
+refresh_broker_truth_lease
+broker_truth_lease_exit_code=$?
+set -e
+
 refresh_canonical_readiness() {
   local tmp_summary
   tmp_summary="${CANONICAL_READINESS_SUMMARY_FILE}.tmp"
@@ -194,6 +206,9 @@ for key in (
     "warnings",
     "root_match",
     "broker_truth_fresh",
+    "broker_truth_lease_state",
+    "broker_truth_lease_age_seconds",
+    "broker_truth_lease_entry_seconds_remaining",
     "reconciliation_state",
     "eligible_lane_count",
     "quarantine_count",
@@ -206,7 +221,7 @@ PY
 }
 
 merge_canonical_readiness_status() {
-  "${PYTHON_BIN}" - <<'PY' "${STATUS_FILE}" "${CANONICAL_READINESS_FILE}" "${CANONICAL_READINESS_SUMMARY_FILE}"
+  "${PYTHON_BIN}" - <<'PY' "${STATUS_FILE}" "${CANONICAL_READINESS_FILE}" "${CANONICAL_READINESS_SUMMARY_FILE}" "${broker_truth_lease_exit_code}"
 import json
 import sys
 from pathlib import Path
@@ -235,7 +250,12 @@ status["canonical_readiness_artifact"] = str(readiness_path)
 status["readiness_blockers"] = readiness.get("readiness_blockers") or []
 status["readiness_warnings"] = readiness.get("readiness_warnings") or []
 status["root_guard_summary"] = readiness.get("root_guard_summary") or {}
+broker_truth_lease = readiness.get("broker_truth_lease") or {}
 status["broker_truth_fresh"] = (readiness.get("broker_truth") or {}).get("fresh") is True
+status["broker_truth_lease_state"] = broker_truth_lease.get("lease_state")
+status["broker_truth_lease_age_seconds"] = broker_truth_lease.get("age_seconds")
+status["broker_truth_lease_entry_seconds_remaining"] = broker_truth_lease.get("entry_seconds_remaining")
+status["broker_truth_lease_exit_code"] = int(sys.argv[4])
 status["eligible_lane_count"] = int((readiness.get("runtime") or {}).get("eligible_lane_count") or 0)
 status["quarantine_count"] = int((readiness.get("lane_quarantine") or {}).get("quarantine_count") or 0)
 status["lane_quarantine"] = readiness.get("lane_quarantine") or {}

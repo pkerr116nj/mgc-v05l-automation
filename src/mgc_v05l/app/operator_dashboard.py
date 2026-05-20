@@ -1381,6 +1381,20 @@ class OperatorDashboardService:
                     canonical_readiness_payload,
                     self._canonical_readiness_path,
                 )
+                operator_surface_runtime = operator_surface.get("runtime_readiness") if isinstance(operator_surface, dict) else None
+                if isinstance(operator_surface_runtime, dict):
+                    operator_surface_runtime["canonical_readiness"] = canonical_readiness_summary["canonical_readiness"]
+                    operator_surface_runtime["readiness_blockers"] = canonical_readiness_summary["readiness_blockers"]
+                    operator_surface_runtime["readiness_warnings"] = canonical_readiness_summary["readiness_warnings"]
+                    operator_surface_runtime["broker_truth_lease"] = canonical_readiness_summary.get("broker_truth_lease") or {}
+                    operator_surface_runtime["broker_truth"] = canonical_readiness_summary.get("broker_truth") or {}
+                    truth = operator_surface_runtime.get("authoritative_runtime_truth")
+                    if isinstance(truth, dict):
+                        broker_truth_lease = canonical_readiness_summary.get("broker_truth_lease") or {}
+                        truth["canonical_readiness"] = canonical_readiness_summary["canonical_readiness"]
+                        truth["broker_truth_lease_state"] = broker_truth_lease.get("lease_state")
+                        truth["broker_truth_lease_age_seconds"] = broker_truth_lease.get("age_seconds")
+                        truth["broker_truth_lease_entry_seconds_remaining"] = broker_truth_lease.get("entry_seconds_remaining")
                 dashboard_payload: dict[str, Any] = {
                     "payload_version": DASHBOARD_PAYLOAD_SCHEMA_VERSION,
                     "generated_at": generated_at,
@@ -17723,6 +17737,9 @@ def _canonical_readiness_dashboard_summary(payload: dict[str, Any], path: Path) 
             "readiness_warnings": [],
             "operator_action_required": True,
             "root_guard_summary": {},
+            "broker_truth": {},
+            "broker_truth_lease": {},
+            "phase1_reconciliation": {},
         }
     state = str(payload.get("canonical_readiness") or payload.get("state") or "NOT_READY_CONFIG")
     return {
@@ -17736,6 +17753,9 @@ def _canonical_readiness_dashboard_summary(payload: dict[str, Any], path: Path) 
         "readiness_warnings": list(payload.get("readiness_warnings") or []),
         "operator_action_required": payload.get("operator_action_required") is True,
         "root_guard_summary": dict(payload.get("root_guard_summary") or {}),
+        "broker_truth": dict(payload.get("broker_truth") or {}),
+        "broker_truth_lease": dict(payload.get("broker_truth_lease") or {}),
+        "phase1_reconciliation": dict(payload.get("phase1_reconciliation") or {}),
         "ready_submit_capable": payload.get("ready_submit_capable") is True,
         "paper_only": payload.get("paper_only") is True,
         "live_money_eligible": payload.get("live_money_eligible") is True,

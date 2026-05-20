@@ -594,6 +594,13 @@ refresh_phase1_reconciliation_for_launch() {
     --repo-root "${REPO_ROOT}" >/dev/null
 }
 
+refresh_broker_truth_lease_for_launch() {
+  "${PYTHON_BIN}" -m mgc_v05l.app.track_b_broker_truth_lease \
+    --repo-root "${REPO_ROOT}" \
+    --no-history \
+    --json >/dev/null
+}
+
 start_dashboard_manager() {
   if [[ "${START_DASHBOARD}" -ne 1 ]]; then
     return 0
@@ -712,6 +719,9 @@ for key in (
     "warnings",
     "root_match",
     "broker_truth_fresh",
+    "broker_truth_lease_state",
+    "broker_truth_lease_age_seconds",
+    "broker_truth_lease_entry_seconds_remaining",
     "reconciliation_state",
     "eligible_lane_count",
     "quarantine_count",
@@ -725,6 +735,7 @@ PY
 
 refresh_canonical_readiness_for_launch() {
   local phase="$1"
+  refresh_broker_truth_lease_for_launch || true
   local tmp_summary
   tmp_summary="${CANONICAL_READINESS_SUMMARY_FILE}.tmp"
   rm -f "${tmp_summary}"

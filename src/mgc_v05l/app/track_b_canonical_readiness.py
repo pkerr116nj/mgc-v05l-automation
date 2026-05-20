@@ -63,6 +63,7 @@ def _resolve_output_path(repo_root: Path, output_path: str | None) -> Path:
 
 def compact_readiness_summary(payload: Mapping[str, Any]) -> dict[str, Any]:
     broker_truth = _mapping(payload.get("broker_truth"))
+    broker_truth_lease = _mapping(payload.get("broker_truth_lease"))
     phase1_reconciliation = _mapping(payload.get("phase1_reconciliation"))
     runtime = _mapping(payload.get("runtime"))
     lane_quarantine = _mapping(payload.get("lane_quarantine"))
@@ -73,6 +74,9 @@ def compact_readiness_summary(payload: Mapping[str, Any]) -> dict[str, Any]:
         "warnings": _codes(payload.get("readiness_warnings")),
         "root_match": root_guard.get("root_match") is True,
         "broker_truth_fresh": broker_truth.get("fresh") is True,
+        "broker_truth_lease_state": broker_truth_lease.get("lease_state") or "BROKER_TRUTH_LEASE_MISSING",
+        "broker_truth_lease_age_seconds": broker_truth_lease.get("age_seconds"),
+        "broker_truth_lease_entry_seconds_remaining": broker_truth_lease.get("entry_seconds_remaining"),
         "reconciliation_state": phase1_reconciliation.get("classification")
         or "TRACK_B_PAPER_BROKER_RECONCILIATION_UNKNOWN",
         "eligible_lane_count": int(runtime.get("eligible_lane_count") or 0),
@@ -90,6 +94,9 @@ def print_summary(summary: Mapping[str, Any], *, as_json: bool) -> None:
         "warnings",
         "root_match",
         "broker_truth_fresh",
+        "broker_truth_lease_state",
+        "broker_truth_lease_age_seconds",
+        "broker_truth_lease_entry_seconds_remaining",
         "reconciliation_state",
         "eligible_lane_count",
         "quarantine_count",
