@@ -17,7 +17,15 @@ from mgc_v05l.app.operational_maturation_runtime import (
     b_plus_setup_score,
     emit_b_plus_diagnostic,
 )
-from mgc_v05l.domain.enums import AddDirectionPolicy, OrderIntentType, ParticipationPolicy, StrategyStatus
+from mgc_v05l.domain.enums import (
+    AddDirectionPolicy,
+    ExitReason,
+    LongEntryFamily,
+    OrderIntentType,
+    ParticipationPolicy,
+    PositionSide,
+    StrategyStatus,
+)
 from mgc_v05l.domain.models import Bar
 from mgc_v05l.strategy.trade_state import build_initial_state
 
@@ -110,8 +118,136 @@ def _intent_settings(symbol: str = "MNQ") -> SimpleNamespace:
     )
 
 
-def _exit_decision() -> SimpleNamespace:
-    return SimpleNamespace(long_exit=False, short_exit=False, primary_reason=None)
+def _exit_decision(reason: ExitReason | None = None) -> SimpleNamespace:
+    return SimpleNamespace(
+        long_exit=reason is not None,
+        short_exit=False,
+        primary_reason=reason,
+        all_true_reasons=(reason,) if reason is not None else (),
+    )
+
+
+def _managed_long_state(at: datetime, *, open_broker_order_id: str | None = None):
+    return replace(
+        build_initial_state(at),
+        strategy_status=StrategyStatus.IN_LONG_K,
+        position_side=PositionSide.LONG,
+        broker_position_qty=1,
+        internal_position_qty=1,
+        entry_price=Decimal("100"),
+        entry_timestamp=at - timedelta(minutes=12),
+        entry_bar_id="entry-bar",
+        long_entry_family=LongEntryFamily.K,
+        bars_in_trade=8,
+        open_broker_order_id=open_broker_order_id,
+    )
+
+
+def _index_forced_session_engine(tmp_path: Path | None = None):
+    engine = object.__new__(index_runtime.IndexFuturesForcedSessionStrategyEngine)
+    engine._lane_spec = SimpleNamespace(
+        symbol="MNQ",
+        lane_id="mnq_1x_ny_early_core__us_early_long",
+        artifacts_dir=str(tmp_path / "lanes" / "mnq_test") if tmp_path is not None else None,
+        runtime_overlay_params=_b_plus_params() if tmp_path is not None else {},
+        paper_only=True,
+        live_money_eligible=False,
+    )
+    engine._runtime_definition = index_runtime.INDEX_FORCED_SESSION_RUNTIME_BY_SOURCE[index_runtime.INDEX_NY_EARLY_LONG_SOURCE]
+    engine._settings = _intent_settings("MNQ")
+    engine._primary_context_timeframe = "3m"
+    return engine
+
+
+def test_index_forced_session_long_stop_generates_managed_sell_to_close() -> None:
+    bar = _bar("MNQ", datetime(2026, 5, 20, 8, 35, tzinfo=ZoneInfo("America/New_York")))
+    engine = _index_forced_session_engine()
+    engine._bar_history = [bar]
+
+    intent = engine._maybe_create_order_intent(
+        bar,
+        SimpleNamespace(long_entry=False, short_entry=False),
+        _managed_long_state(bar.end_ts),
+        _exit_decision(ExitReason.LONG_STOP),
+    )
+
+    assert intent is not None
+    assert intent.intent_type == OrderIntentType.SELL_TO_CLOSE
+    assert intent.symbol == "MNQ"
+    assert intent.quantity == 1
+    assert intent.reason_code == "LONG_STOP"
+
+
+def test_index_forced_session_long_time_exit_generates_managed_sell_to_close() -> None:
+    bar = _bar("MNQ", datetime(2026, 5, 20, 8, 35, tzinfo=ZoneInfo("America/New_York")))
+    engine = _index_forced_session_engine()
+    engine._bar_history = [bar]
+
+    intent = engine._maybe_create_order_intent(
+        bar,
+        SimpleNamespace(long_entry=False, short_entry=False),
+        _managed_long_state(bar.end_ts),
+        _exit_decision(ExitReason.LONG_TIME_EXIT),
+    )
+
+    assert intent is not None
+    assert intent.intent_type == OrderIntentType.SELL_TO_CLOSE
+    assert intent.reason_code == "LONG_TIME_EXIT"
+
+
+def test_index_b_plus_originated_position_uses_same_managed_exit_path(tmp_path: Path) -> None:
+    bar = _bar("MNQ", datetime(2026, 5, 20, 8, 35, tzinfo=ZoneInfo("America/New_York")))
+    engine = _index_forced_session_engine(tmp_path)
+    engine._bar_history = [bar]
+    engine._latest_b_plus_setup_score = {"b_plus_match": True}
+    engine._b_plus_session_keys = {"mnq-test-session"}
+
+    intent = engine._maybe_create_order_intent(
+        bar,
+        SimpleNamespace(long_entry=False, short_entry=False),
+        _managed_long_state(bar.end_ts),
+        _exit_decision(ExitReason.LONG_STOP),
+    )
+
+    assert intent is not None
+    assert intent.intent_type == OrderIntentType.SELL_TO_CLOSE
+    assert intent.reason_code == "LONG_STOP"
+
+
+def test_index_forced_session_does_not_duplicate_close_when_order_already_open() -> None:
+    bar = _bar("MNQ", datetime(2026, 5, 20, 8, 35, tzinfo=ZoneInfo("America/New_York")))
+    engine = _index_forced_session_engine()
+    engine._bar_history = [bar]
+
+    intent = engine._maybe_create_order_intent(
+        bar,
+        SimpleNamespace(long_entry=False, short_entry=False),
+        _managed_long_state(bar.end_ts, open_broker_order_id="existing-close-order"),
+        _exit_decision(ExitReason.LONG_STOP),
+    )
+
+    assert intent is None
+
+
+def test_gold_forced_session_falls_back_to_managed_exit_when_custom_exit_absent() -> None:
+    bar = _bar("MGC", datetime(2026, 5, 19, 19, 15, tzinfo=ZoneInfo("America/New_York")))
+    engine = object.__new__(gold_runtime.GcMgcForcedSessionStrategyEngine)
+    engine._lane_spec = SimpleNamespace(symbol="MGC", lane_id="mgc_test", runtime_overlay_params={}, paper_only=True, live_money_eligible=False)
+    engine._runtime_definition = gold_runtime.FORCED_SESSION_RUNTIME_BY_SOURCE[gold_runtime.ASIA_EARLY_LONG_SOURCE]
+    engine._settings = _intent_settings("MGC")
+    engine._primary_context_timeframe = "3m"
+    engine._bar_history = [bar]
+
+    intent = engine._maybe_create_order_intent(
+        bar,
+        SimpleNamespace(long_entry=False, short_entry=False),
+        _managed_long_state(bar.end_ts),
+        _exit_decision(ExitReason.LONG_TIME_EXIT),
+    )
+
+    assert intent is not None
+    assert intent.intent_type == OrderIntentType.SELL_TO_CLOSE
+    assert intent.reason_code == "LONG_TIME_EXIT"
 
 
 def test_gold_operational_maturation_bar5_entry_is_opt_in() -> None:

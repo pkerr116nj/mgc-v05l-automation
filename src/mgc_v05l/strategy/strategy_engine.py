@@ -1894,7 +1894,12 @@ class StrategyEngine:
                     )
             return None
 
-        if state.position_side == PositionSide.LONG and state.exits_enabled and exit_decision.long_exit:
+        if (
+            state.position_side == PositionSide.LONG
+            and state.open_broker_order_id is None
+            and state.exits_enabled
+            and exit_decision.long_exit
+        ):
             return OrderIntent(
                 order_intent_id=f"{bar.bar_id}|{OrderIntentType.SELL_TO_CLOSE.value}",
                 bar_id=bar.bar_id,
@@ -1910,7 +1915,12 @@ class StrategyEngine:
                 ),
             )
 
-        if state.position_side == PositionSide.SHORT and state.exits_enabled and exit_decision.short_exit:
+        if (
+            state.position_side == PositionSide.SHORT
+            and state.open_broker_order_id is None
+            and state.exits_enabled
+            and exit_decision.short_exit
+        ):
             return OrderIntent(
                 order_intent_id=f"{bar.bar_id}|{OrderIntentType.BUY_TO_CLOSE.value}",
                 bar_id=bar.bar_id,

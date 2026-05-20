@@ -1,5 +1,6 @@
 """Integration tests for the strategy engine orchestration shell."""
 
+import json
 from dataclasses import replace
 from datetime import datetime, timedelta
 from decimal import Decimal
@@ -7,7 +8,7 @@ from pathlib import Path
 from zoneinfo import ZoneInfo
 
 from mgc_v05l.config_models.settings import RuntimeMode, StrategySettings
-from mgc_v05l.domain.enums import LongEntryFamily, PositionSide, ReplayFillPolicy, StrategyStatus, VwapPolicy
+from mgc_v05l.domain.enums import LongEntryFamily, OrderIntentType, OrderStatus, PositionSide, ReplayFillPolicy, StrategyStatus, VwapPolicy
 from mgc_v05l.domain.events import ExitEvaluatedEvent, FillReceivedEvent, OrderIntentCreatedEvent
 from mgc_v05l.domain.models import Bar
 from mgc_v05l.app.container import build_application_container
@@ -17,6 +18,7 @@ from mgc_v05l.market_data.replay_feed import ReplayFeed
 from mgc_v05l.persistence.db import build_engine
 from mgc_v05l.persistence.repositories import RepositorySet
 from mgc_v05l.persistence.state_repository import StateRepository
+from mgc_v05l.monitoring.logger import StructuredLogger
 from mgc_v05l.strategy.strategy_engine import StrategyEngine
 from mgc_v05l.strategy.trade_state import build_initial_state
 
@@ -185,6 +187,53 @@ def test_strategy_engine_creates_exit_intent_for_in_position_time_exit() -> None
 
     assert any(isinstance(event, ExitEvaluatedEvent) for event in events)
     assert any(isinstance(event, OrderIntentCreatedEvent) for event in events)
+
+
+def test_strategy_engine_persists_blocked_exit_intent_loudly(tmp_path: Path) -> None:
+    settings = _build_replay_settings(tmp_path / "blocked-exit.sqlite3")
+    repositories = RepositorySet(build_engine(settings.database_url))
+    logger = StructuredLogger(tmp_path / "artifacts")
+    ny = ZoneInfo("America/New_York")
+    initial_state = replace(
+        build_initial_state(datetime.now(ZoneInfo("UTC"))),
+        strategy_status=StrategyStatus.IN_LONG_K,
+        position_side=PositionSide.LONG,
+        internal_position_qty=1,
+        broker_position_qty=1,
+        entry_price=Decimal("100"),
+        entry_timestamp=datetime.now(ZoneInfo("UTC")),
+        entry_bar_id="entry-bar",
+        long_entry_family=LongEntryFamily.K,
+        bars_in_trade=5,
+    )
+    engine = StrategyEngine(
+        settings=settings,
+        initial_state=initial_state,
+        repositories=repositories,
+        structured_logger=logger,
+        submit_gate_evaluator=lambda _bar, _state, intent: (
+            "phase1_broker_reconciliation_not_clear"
+            if intent.intent_type == OrderIntentType.SELL_TO_CLOSE
+            else None
+        ),
+    )
+    bar = _build_bar(datetime(2026, 3, 13, 8, 35, tzinfo=ny), "100", "101", "99.5", "100")
+
+    events = engine.process_bar(bar)
+
+    assert any(isinstance(event, ExitEvaluatedEvent) for event in events)
+    assert not any(isinstance(event, OrderIntentCreatedEvent) for event in events)
+    rows = repositories.order_intents.list_all()
+    assert len(rows) == 1
+    assert rows[0]["intent_type"] == OrderIntentType.SELL_TO_CLOSE.value
+    assert rows[0]["order_status"] == OrderStatus.REJECTED.value
+    assert rows[0]["broker_order_status"] == "PRE_SUBMIT_BLOCKED"
+
+    latest = json.loads((logger.artifact_dir / "blocked_strategy_intent_latest.json").read_text(encoding="utf-8"))
+    assert latest["intent_type"] == OrderIntentType.SELL_TO_CLOSE.value
+    assert latest["submit_allowed"] is False
+    assert latest["exact_blocker_reason"] == "phase1_broker_reconciliation_not_clear"
+    assert latest["paper_proof_invoked"] is False
 
 
 def test_strategy_replay_path_runs_bars_to_intents_fills_and_exit(tmp_path: Path) -> None:

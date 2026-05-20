@@ -252,10 +252,12 @@ class GcMgcForcedSessionStrategyEngine(StrategyEngine):
         exit_decision: ExitDecision,
     ):
         if state.position_side != PositionSide.FLAT:
+            if state.open_broker_order_id is not None or not state.exits_enabled:
+                return None
             custom_exit = self._forced_session_exit_intent(bar=bar, state=state, exit_decision=exit_decision)
             if custom_exit is not None:
                 return custom_exit
-            return None
+            return super()._maybe_create_order_intent(bar, signal_packet, state, exit_decision)
         return super()._maybe_create_order_intent(bar, signal_packet, state, exit_decision)
 
     def _forced_session_exit_intent(
