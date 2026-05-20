@@ -136,6 +136,12 @@ ensure_dir "$(dirname "${CANONICAL_READINESS_SUMMARY_FILE}")"
 ensure_dir "$(dirname "${MAINTENANCE_SUPERVISOR_FILE}")"
 ensure_dir "$(dirname "${MAINTENANCE_SUPERVISOR_SUMMARY_FILE}")"
 
+refresh_operator_readiness_artifacts() {
+  "${PYTHON_BIN}" -m mgc_v05l.app.track_b_operator_readiness_refresher \
+    --repo-root "${REPO_ROOT}" \
+    --once >/dev/null
+}
+
 refresh_broker_truth_lease() {
   "${PYTHON_BIN}" -m mgc_v05l.app.track_b_broker_truth_lease \
     --repo-root "${REPO_ROOT}" \
@@ -144,6 +150,8 @@ refresh_broker_truth_lease() {
 }
 
 set +e
+refresh_operator_readiness_artifacts
+operator_readiness_refresh_exit_code=$?
 refresh_broker_truth_lease
 broker_truth_lease_exit_code=$?
 set -e
@@ -221,7 +229,7 @@ PY
 }
 
 merge_canonical_readiness_status() {
-  "${PYTHON_BIN}" - <<'PY' "${STATUS_FILE}" "${CANONICAL_READINESS_FILE}" "${CANONICAL_READINESS_SUMMARY_FILE}" "${broker_truth_lease_exit_code}"
+  "${PYTHON_BIN}" - <<'PY' "${STATUS_FILE}" "${CANONICAL_READINESS_FILE}" "${CANONICAL_READINESS_SUMMARY_FILE}" "${broker_truth_lease_exit_code}" "${operator_readiness_refresh_exit_code}"
 import json
 import sys
 from pathlib import Path
@@ -256,6 +264,7 @@ status["broker_truth_lease_state"] = broker_truth_lease.get("lease_state")
 status["broker_truth_lease_age_seconds"] = broker_truth_lease.get("age_seconds")
 status["broker_truth_lease_entry_seconds_remaining"] = broker_truth_lease.get("entry_seconds_remaining")
 status["broker_truth_lease_exit_code"] = int(sys.argv[4])
+status["operator_readiness_refresh_exit_code"] = int(sys.argv[5])
 status["eligible_lane_count"] = int((readiness.get("runtime") or {}).get("eligible_lane_count") or 0)
 status["quarantine_count"] = int((readiness.get("lane_quarantine") or {}).get("quarantine_count") or 0)
 status["lane_quarantine"] = readiness.get("lane_quarantine") or {}

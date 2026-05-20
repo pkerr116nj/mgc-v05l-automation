@@ -17637,6 +17637,8 @@ def _compact_track_b_operator_readiness_refresh_status(payload: dict[str, Any], 
     age_seconds = _dashboard_payload_age_seconds(generated_at)
     freshness_threshold_seconds = max(float(payload.get("refresh_seconds") or 60.0) * 2.5, 180.0)
     fresh = bool(age_seconds is not None and age_seconds <= freshness_threshold_seconds)
+    source_classification = str(payload.get("classification") or "TRACK_B_OPERATOR_READINESS_REFRESH_UNKNOWN")
+    classification = source_classification if fresh else "TRACK_B_OPERATOR_READINESS_REFRESH_STALE"
     return {
         "available": True,
         "path": str(path),
@@ -17644,7 +17646,8 @@ def _compact_track_b_operator_readiness_refresh_status(payload: dict[str, Any], 
         "age_seconds": age_seconds,
         "freshness_threshold_seconds": freshness_threshold_seconds,
         "fresh": fresh,
-        "classification": str(payload.get("classification") or "TRACK_B_OPERATOR_READINESS_REFRESH_UNKNOWN"),
+        "classification": classification,
+        "source_classification": source_classification,
         "last_success": bool(payload.get("last_success") is True),
         "last_success_at": payload.get("last_success_at"),
         "preflight_mode": payload.get("preflight_mode"),

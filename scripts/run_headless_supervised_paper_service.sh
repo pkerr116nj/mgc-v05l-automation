@@ -594,6 +594,12 @@ refresh_phase1_reconciliation_for_launch() {
     --repo-root "${REPO_ROOT}" >/dev/null
 }
 
+refresh_operator_readiness_for_launch() {
+  "${PYTHON_BIN}" -m mgc_v05l.app.track_b_operator_readiness_refresher \
+    --repo-root "${REPO_ROOT}" \
+    --once >/dev/null
+}
+
 refresh_broker_truth_lease_for_launch() {
   "${PYTHON_BIN}" -m mgc_v05l.app.track_b_broker_truth_lease \
     --repo-root "${REPO_ROOT}" \
@@ -735,6 +741,7 @@ PY
 
 refresh_canonical_readiness_for_launch() {
   local phase="$1"
+  refresh_operator_readiness_for_launch || true
   refresh_broker_truth_lease_for_launch || true
   local tmp_summary
   tmp_summary="${CANONICAL_READINESS_SUMMARY_FILE}.tmp"

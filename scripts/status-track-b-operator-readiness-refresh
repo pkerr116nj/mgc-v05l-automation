@@ -45,8 +45,14 @@ else
   service_pid=""
 fi
 
-if pid_is_running "${service_pid}" || status_is_fresh; then
-  echo "running=true pid=${service_pid}"
+if pid_is_running "${service_pid}"; then
+  echo "service_running=true pid=${service_pid}"
 else
-  echo "running=false"
+  echo "service_running=false pid=${service_pid}"
+fi
+
+if status_is_fresh; then
+  echo "status_fresh=true"
+else
+  echo "status_fresh=false"
 fi

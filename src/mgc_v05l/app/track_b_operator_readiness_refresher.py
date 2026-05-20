@@ -22,6 +22,7 @@ DEFAULT_STATUS_PATH = (
     / "track_b_operator_readiness_refresher"
     / "latest_track_b_operator_readiness_refresher_status.json"
 )
+DEFAULT_HEARTBEAT_PATH = REPO_ROOT / "var" / "track_b_operator_readiness_refresh_heartbeat.json"
 DEFAULT_REFRESH_SECONDS = 60.0
 DEFAULT_PREFLIGHT_MODE = "monday-live"
 
@@ -40,6 +41,7 @@ class RefreshCommandResult:
 class RefreshConfig:
     repo_root: Path = REPO_ROOT
     status_path: Path = DEFAULT_STATUS_PATH
+    heartbeat_path: Path | None = None
     refresh_seconds: float = DEFAULT_REFRESH_SECONDS
     preflight_mode: str = DEFAULT_PREFLIGHT_MODE
     timeout_seconds: float = 120.0
@@ -75,6 +77,7 @@ def refresh_once(*, config: RefreshConfig, runner: Runner | None = None) -> dict
         succeeded=succeeded,
     )
     _write_json_atomic(config.status_path, payload)
+    _write_heartbeat(config=config, payload=payload, refresh_running=False)
     return payload
 
 
@@ -97,10 +100,20 @@ def run_service(*, config: RefreshConfig) -> int:
             "live_money_eligible": False,
         }
         _write_json_atomic(config.status_path, payload)
+        _write_heartbeat(config=config, payload=payload, refresh_running=False)
 
     signal.signal(signal.SIGTERM, _handle_stop)
     signal.signal(signal.SIGINT, _handle_stop)
     while not stopping:
+        _write_heartbeat(
+            config=config,
+            payload={
+                "classification": "TRACK_B_OPERATOR_READINESS_REFRESH_RUNNING",
+                "last_success": None,
+                "last_success_at": None,
+            },
+            refresh_running=True,
+        )
         refresh_once(config=config)
         deadline = time.monotonic() + max(config.refresh_seconds, 1.0)
         while not stopping and time.monotonic() < deadline:
@@ -110,18 +123,20 @@ def run_service(*, config: RefreshConfig) -> int:
 
 def read_status(*, status_path: Path = DEFAULT_STATUS_PATH) -> dict[str, Any]:
     try:
-        return json.loads(Path(status_path).read_text(encoding="utf-8"))
+        payload = json.loads(Path(status_path).read_text(encoding="utf-8"))
     except FileNotFoundError:
         return {
             "schema_version": "track_b_operator_readiness_refresher_status_v1",
             "generated_at": _utc_now().isoformat(),
             "classification": "TRACK_B_OPERATOR_READINESS_REFRESH_STATUS_MISSING",
             "path": str(status_path),
+            "fresh": False,
             "refresh_running": False,
             "submit_authority": False,
             "paper_proof_invoked": False,
             "live_money_eligible": False,
         }
+    return _status_with_freshness(payload)
 
 
 def _refresh_commands(*, repo_root: Path, preflight_mode: str) -> list[tuple[str, list[str]]]:
@@ -148,15 +163,6 @@ def _refresh_commands(*, repo_root: Path, preflight_mode: str) -> list[tuple[str
             ],
         ),
         (
-            "track_b_paper_preflight",
-            [
-                "/bin/bash",
-                str(repo_root / "scripts" / "track_b_paper_preflight.sh"),
-                "--mode",
-                preflight_mode,
-            ],
-        ),
-        (
             "track_b_paper_broker_reconciliation",
             [
                 python_bin,
@@ -164,6 +170,15 @@ def _refresh_commands(*, repo_root: Path, preflight_mode: str) -> list[tuple[str
                 "mgc_v05l.execution_core.track_b_paper_broker_reconciliation",
                 "--repo-root",
                 str(repo_root),
+            ],
+        ),
+        (
+            "track_b_paper_preflight",
+            [
+                "/bin/bash",
+                str(repo_root / "scripts" / "track_b_paper_preflight.sh"),
+                "--mode",
+                preflight_mode,
             ],
         ),
     ]
@@ -254,6 +269,64 @@ def _status_payload(
     }
 
 
+def _status_with_freshness(payload: dict[str, Any]) -> dict[str, Any]:
+    generated_at = payload.get("generated_at")
+    age_seconds = _age_seconds(generated_at)
+    try:
+        refresh_seconds = float(payload.get("refresh_seconds") or DEFAULT_REFRESH_SECONDS)
+    except (TypeError, ValueError):
+        refresh_seconds = DEFAULT_REFRESH_SECONDS
+    threshold = max(refresh_seconds * 2.5, 180.0)
+    fresh = bool(age_seconds is not None and age_seconds <= threshold)
+    source_classification = str(payload.get("classification") or "TRACK_B_OPERATOR_READINESS_REFRESH_UNKNOWN")
+    enriched = dict(payload)
+    enriched["source_classification"] = source_classification
+    enriched["age_seconds"] = age_seconds
+    enriched["freshness_threshold_seconds"] = threshold
+    enriched["fresh"] = fresh
+    if not fresh and source_classification not in {
+        "TRACK_B_OPERATOR_READINESS_REFRESH_STATUS_MISSING",
+        "TRACK_B_OPERATOR_READINESS_REFRESH_RUNNING",
+    }:
+        enriched["classification"] = "TRACK_B_OPERATOR_READINESS_REFRESH_STALE"
+    return enriched
+
+
+def _write_heartbeat(*, config: RefreshConfig, payload: dict[str, Any], refresh_running: bool) -> None:
+    if config.heartbeat_path is None:
+        return
+    heartbeat = _status_with_freshness(
+        {
+            "schema_version": "track_b_operator_readiness_refresher_heartbeat_v1",
+            "generated_at": _utc_now().isoformat(),
+            "classification": payload.get("classification"),
+            "repo_root": str(config.repo_root),
+            "status_path": str(config.status_path),
+            "refresh_seconds": config.refresh_seconds,
+            "preflight_mode": config.preflight_mode,
+            "refresh_running": refresh_running,
+            "last_success": payload.get("last_success"),
+            "last_success_at": payload.get("last_success_at"),
+            "submit_authority": False,
+            "paper_proof_invoked": False,
+            "live_money_eligible": False,
+        }
+    )
+    _write_json_atomic(config.heartbeat_path, heartbeat)
+
+
+def _age_seconds(value: Any) -> float | None:
+    if not value:
+        return None
+    try:
+        timestamp = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if timestamp.tzinfo is None:
+        timestamp = timestamp.replace(tzinfo=timezone.utc)
+    return max((_utc_now() - timestamp.astimezone(timezone.utc)).total_seconds(), 0.0)
+
+
 def _tail(value: str, *, max_chars: int = 2000) -> str:
     text = str(value or "").strip()
     if len(text) <= max_chars:
@@ -277,6 +350,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Refresh read-only Track B operator readiness artifacts.")
     parser.add_argument("--repo-root", default=str(REPO_ROOT))
     parser.add_argument("--status-path", default=str(DEFAULT_STATUS_PATH))
+    parser.add_argument("--heartbeat-path", default=str(DEFAULT_HEARTBEAT_PATH))
+    parser.add_argument("--no-heartbeat", action="store_true")
     parser.add_argument("--refresh-seconds", type=float, default=float(os.environ.get("TRACK_B_OPERATOR_READINESS_REFRESH_SECONDS", DEFAULT_REFRESH_SECONDS)))
     parser.add_argument("--preflight-mode", choices=("monday-live", "weekend-static"), default=DEFAULT_PREFLIGHT_MODE)
     parser.add_argument("--timeout-seconds", type=float, default=120.0)
@@ -292,6 +367,7 @@ def main(argv: list[str] | None = None) -> int:
     config = RefreshConfig(
         repo_root=Path(args.repo_root),
         status_path=Path(args.status_path),
+        heartbeat_path=None if args.no_heartbeat else Path(args.heartbeat_path),
         refresh_seconds=args.refresh_seconds,
         preflight_mode=args.preflight_mode,
         timeout_seconds=args.timeout_seconds,

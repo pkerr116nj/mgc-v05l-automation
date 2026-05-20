@@ -21,8 +21,8 @@ def test_refresh_commands_are_read_only_and_cover_dashboard_artifacts(tmp_path: 
     assert names == [
         "phase1_runtime_data_readiness",
         "phase1_ticker_readiness_matrix",
-        "track_b_paper_preflight",
         "track_b_paper_broker_reconciliation",
+        "track_b_paper_preflight",
     ]
     assert "--mode monday-live" in flattened
     assert "phase1_runtime_data_readiness" in flattened
@@ -58,6 +58,31 @@ def test_refresh_once_writes_status_and_keeps_submit_authority_false(tmp_path: P
     assert json.loads(status_path.read_text(encoding="utf-8"))["classification"] == payload["classification"]
 
 
+
+def test_refresh_once_writes_heartbeat_when_configured(tmp_path: Path) -> None:
+    def fake_runner(command: Sequence[str], _repo_root: Path, _timeout_seconds: float) -> subprocess.CompletedProcess[str]:
+        return subprocess.CompletedProcess(list(command), 0, stdout="ok", stderr="")
+
+    heartbeat_path = tmp_path / "heartbeat.json"
+    payload = refresh_once(
+        config=RefreshConfig(
+            repo_root=tmp_path,
+            status_path=tmp_path / "status.json",
+            heartbeat_path=heartbeat_path,
+        ),
+        runner=fake_runner,
+    )
+
+    heartbeat = json.loads(heartbeat_path.read_text(encoding="utf-8"))
+    assert payload["classification"] == "TRACK_B_OPERATOR_READINESS_REFRESH_READY"
+    assert heartbeat["schema_version"] == "track_b_operator_readiness_refresher_heartbeat_v1"
+    assert heartbeat["classification"] == "TRACK_B_OPERATOR_READINESS_REFRESH_READY"
+    assert heartbeat["fresh"] is True
+    assert heartbeat["refresh_running"] is False
+    assert heartbeat["submit_authority"] is False
+    assert heartbeat["paper_proof_invoked"] is False
+    assert heartbeat["live_money_eligible"] is False
+
 def test_refresh_once_fails_closed_when_a_refresh_command_fails(tmp_path: Path) -> None:
     def fake_runner(command: Sequence[str], _repo_root: Path, _timeout_seconds: float) -> subprocess.CompletedProcess[str]:
         name = " ".join(command)
@@ -72,8 +97,8 @@ def test_refresh_once_fails_closed_when_a_refresh_command_fails(tmp_path: Path) 
     assert payload["last_success"] is False
     assert payload["last_success_at"] is None
     assert payload["submit_authority"] is False
-    assert payload["commands"][2]["name"] == "track_b_paper_preflight"
-    assert payload["commands"][2]["returncode"] == 1
+    assert payload["commands"][3]["name"] == "track_b_paper_preflight"
+    assert payload["commands"][3]["returncode"] == 1
 
 
 def test_missing_status_is_safe_and_non_authoritative(tmp_path: Path) -> None:
@@ -84,3 +109,29 @@ def test_missing_status_is_safe_and_non_authoritative(tmp_path: Path) -> None:
     assert payload["submit_authority"] is False
     assert payload["paper_proof_invoked"] is False
     assert payload["live_money_eligible"] is False
+
+
+def test_stale_status_is_reclassified_loudly(tmp_path: Path) -> None:
+    status_path = tmp_path / "status.json"
+    status_path.write_text(
+        json.dumps(
+            {
+                "schema_version": "track_b_operator_readiness_refresher_status_v1",
+                "generated_at": "2000-01-01T00:00:00+00:00",
+                "classification": "TRACK_B_OPERATOR_READINESS_REFRESH_READY",
+                "last_success": True,
+                "refresh_seconds": 60.0,
+                "submit_authority": False,
+                "paper_proof_invoked": False,
+                "live_money_eligible": False,
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    payload = read_status(status_path=status_path)
+
+    assert payload["classification"] == "TRACK_B_OPERATOR_READINESS_REFRESH_STALE"
+    assert payload["source_classification"] == "TRACK_B_OPERATOR_READINESS_REFRESH_READY"
+    assert payload["fresh"] is False
+    assert payload["freshness_threshold_seconds"] == 180.0

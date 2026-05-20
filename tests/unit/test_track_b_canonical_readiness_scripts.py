@@ -6,13 +6,26 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parents[2]
 RUN_SCRIPT = REPO_ROOT / "scripts" / "run_headless_supervised_paper_service.sh"
 STATUS_SCRIPT = REPO_ROOT / "scripts" / "show_headless_supervised_paper_status.sh"
+OPERATOR_READINESS_STATUS_SCRIPT = REPO_ROOT / "scripts" / "status-track-b-operator-readiness-refresh"
 
+
+
+def test_operator_readiness_status_distinguishes_service_liveness_from_fresh_artifact() -> None:
+    script = OPERATOR_READINESS_STATUS_SCRIPT.read_text(encoding="utf-8")
+
+    assert "service_running=true" in script
+    assert "service_running=false" in script
+    assert "status_fresh=true" in script
+    assert "status_fresh=false" in script
+    assert 'pid_is_running "${service_pid}" || status_is_fresh' not in script
 
 def test_status_script_produces_canonical_readiness_without_dashboard_ownership() -> None:
     script = STATUS_SCRIPT.read_text(encoding="utf-8")
 
     assert "mgc_v05l.app.track_b_canonical_readiness" in script
+    assert "mgc_v05l.app.track_b_operator_readiness_refresher" in script
     assert "mgc_v05l.app.track_b_broker_truth_lease" in script
+    assert script.index("refresh_operator_readiness_artifacts") < script.index("refresh_broker_truth_lease")
     assert script.index("refresh_broker_truth_lease") < script.index("refresh_canonical_readiness")
     assert "--repo-root \"${REPO_ROOT}\"" in script
     assert "--expected-root \"${REPO_ROOT}\"" in script
@@ -67,8 +80,11 @@ def test_launch_script_passes_canonical_readiness_paths_to_status_script() -> No
     assert "--canonical-readiness-output \"${CANONICAL_READINESS_FILE}\"" in script
     assert "--canonical-readiness-summary-output \"${CANONICAL_READINESS_SUMMARY_FILE}\"" in script
     assert "mgc_v05l.app.track_b_canonical_readiness" in script
+    assert "mgc_v05l.app.track_b_operator_readiness_refresher" in script
     assert "mgc_v05l.app.track_b_broker_truth_lease" in script
+    assert "refresh_operator_readiness_for_launch" in script
     assert "refresh_broker_truth_lease_for_launch" in script
+    assert script.index("refresh_operator_readiness_for_launch || true") < script.index("refresh_broker_truth_lease_for_launch || true")
     assert "broker_truth_lease_state" in script
     assert "Headless supervised paper host is READY_SUBMIT_CAPABLE." in script
 

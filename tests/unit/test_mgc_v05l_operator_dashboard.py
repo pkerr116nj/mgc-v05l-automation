@@ -3230,6 +3230,26 @@ def test_track_b_operator_status_overlay_does_not_scan_full_paper_ledger(tmp_pat
     assert payload["track_b_paper_results_broker_reconciled"] is False
 
 
+
+def test_operator_readiness_refresh_status_marks_stale_ready_as_stale() -> None:
+    compact = operator_dashboard_module._compact_track_b_operator_readiness_refresh_status(
+        {
+            "classification": "TRACK_B_OPERATOR_READINESS_REFRESH_READY",
+            "generated_at": "2000-01-01T00:00:00+00:00",
+            "last_success": True,
+            "refresh_seconds": 60.0,
+            "submit_authority": False,
+            "paper_proof_invoked": False,
+            "live_money_eligible": False,
+        },
+        Path("outputs/reports/track_b_operator_readiness_refresher/latest_track_b_operator_readiness_refresher_status.json"),
+    )
+
+    assert compact["classification"] == "TRACK_B_OPERATOR_READINESS_REFRESH_STALE"
+    assert compact["source_classification"] == "TRACK_B_OPERATOR_READINESS_REFRESH_READY"
+    assert compact["fresh"] is False
+    assert compact["last_success"] is True
+
 def test_track_b_paper_trading_payload_reads_compact_summaries_without_full_ledger_scan(tmp_path: Path) -> None:
     ledger_dir = tmp_path / "outputs" / "track_b_execution_core" / "paper_trade_ledger"
     operator_status_dir = tmp_path / "outputs" / "track_b_execution_core" / "operator_status"
