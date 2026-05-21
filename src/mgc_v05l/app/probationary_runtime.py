@@ -11571,6 +11571,7 @@ class _IbkrPaperBridgeRuntimeBroker:
                 **self._last_submit_context,
                 "bridge_classification": artifacts.classification,
                 "bridge_detail": report.get("detail"),
+                "broker_effect_classification": report.get("broker_effect_classification"),
                 "bridge_gate_trace": list(report.get("preflight_checks") or []),
                 "exit_attempt_policy": dict(report.get("exit_attempt_policy") or {}),
             }

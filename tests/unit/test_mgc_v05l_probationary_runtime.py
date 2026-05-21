@@ -7242,6 +7242,57 @@ def test_midday_runtime_bridge_block_writes_route_proof_traces(tmp_path: Path) -
     assert broker_truth_rows[-1]["classification"] == "MIDDAY_ROUTE_PROOF_BLOCKED_BY_REAL_GATE"
 
 
+def test_pre_submit_no_broker_effect_bridge_block_does_not_escape_execution_engine(tmp_path: Path) -> None:
+    def fake_bridge_runner(*, config):
+        return probationary_runtime_module.IbkrPaperStrategyBridgeArtifacts(
+            classification="PAPER_STRATEGY_INTENT_BLOCKED",
+            report={
+                "detail": "Paper strategy bridge could not prepare a valid frozen manual submit bundle.",
+                "broker_effect_classification": "PRE_SUBMIT_BLOCKED_NO_BROKER_EFFECT",
+                "submit_intent_ownership_update": {
+                    "state": "NO_BROKER_EFFECT_CONFIRMED",
+                    "broker_effect_classification": "PRE_SUBMIT_BLOCKED_NO_BROKER_EFFECT",
+                },
+            },
+            audit_events=[],
+        )
+
+    broker = probationary_runtime_module._IbkrPaperBridgeRuntimeBroker(  # noqa: SLF001
+        lane_id="track_b_paper_execution_test_mule_v1__mgc",
+        source_symbol="MGC",
+        bridge_adapter={
+            "current_order_destination": "ibkr_paper_bridge_submit_capable",
+            "bridge_proxy_mode": "MGC_SIGNAL_DIRECT_PHASE1",
+            "bridge_execution_target": {"symbol": "MGC", "contract_month": "202606"},
+        },
+        repo_root=tmp_path,
+        bridge_runner=fake_bridge_runner,
+    )
+    engine = ExecutionEngine(broker)
+    order_intent = OrderIntent(
+        order_intent_id="MGC|1m|2026-05-21T05:43:00Z|SELL_TO_OPEN",
+        bar_id="MGC|1m|2026-05-21T05:43:00Z",
+        symbol="MGC",
+        intent_type=OrderIntentType.SELL_TO_OPEN,
+        quantity=1,
+        created_at=datetime(2026, 5, 21, 5, 43, tzinfo=timezone.utc),
+        reason_code="track_b_paper_execution_test_mule_v1",
+    )
+
+    pending = engine.submit_intent(order_intent)
+
+    assert pending is None
+    failure = engine.last_submit_failure()
+    assert failure is not None
+    assert failure.failure_stage == "broker_submit"
+    assert failure.error.startswith("BLOCKED_NOT_SENT_TO_BROKER")
+    submit_attempt = engine.last_submit_attempt()
+    assert submit_attempt is not None
+    assert submit_attempt["broker_effect_classification"] == "PRE_SUBMIT_BLOCKED_NO_BROKER_EFFECT"
+    assert broker.get_open_orders() == []
+    assert broker.get_position()["quantity"] == 0
+
+
 def test_midday_runtime_bridge_success_writes_route_proof_traces(tmp_path: Path) -> None:
     def fake_bridge_runner(*, config):
         return probationary_runtime_module.IbkrPaperStrategyBridgeArtifacts(

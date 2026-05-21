@@ -10,6 +10,10 @@ from types import SimpleNamespace
 import pytest
 
 import mgc_v05l.execution.ibkr_paper_strategy_bridge as bridge_module
+from mgc_v05l.execution.ibkr_manual_paper_submit import (
+    IbkrManualPaperSubmitArtifacts,
+    frozen_preview_path_for_config,
+)
 from mgc_v05l.execution.ibkr_paper_strategy_bridge import (
     IbkrPaperStrategyBridgeConfig,
     IbkrPaperStrategyOrderIntent,
@@ -26,6 +30,9 @@ from mgc_v05l.execution.ibkr_paper_strategy_bridge import (
     strategy_order_intent_schema,
     write_ibkr_paper_strategy_bridge_artifacts,
     write_strategy_order_intent_schema_file,
+)
+from mgc_v05l.execution_core.track_b_submit_intent_ownership import (
+    load_unresolved_submit_intent_ownership_records,
 )
 from mgc_v05l.execution.ibkr_paper_strategy_monitor import load_paper_strategy_monitor_status
 from mgc_v05l.execution.ibkr_paper_order_preview import evaluate_paper_preview_environment_lock
@@ -1981,6 +1988,143 @@ def test_submit_intent_ownership_delegate_exception_leaves_recoverable_intent(tm
         "BROKER_RESULT_UNKNOWN_REFRESH_REQUIRED",
     ]
     assert "delegate crashed" in records[-1]["extra"]["delegated_exception_message"]
+
+
+def test_pre_submit_no_broker_effect_exception_resolves_submit_ownership(tmp_path: Path) -> None:
+    config = _config(
+        tmp_path,
+        strategy_id="track_b_paper_execution_test_mule_v1__mgc",
+        symbol="MGC",
+        contract_month="202606",
+        submit=True,
+        caller_metadata=_approved_runtime_metadata(
+            strategy_id="track_b_paper_execution_test_mule_v1__mgc",
+            source_instrument="MGC",
+            executable_proxy="MGC",
+            action="SELL",
+            intent_type="SELL_TO_OPEN",
+            bridge_proxy_mode="MGC_SIGNAL_DIRECT_PHASE1",
+        )
+        | {"git_head": "abc123"},
+    )
+    pre_submit = bridge_module._persist_submit_intent_ownership_before_delegate(
+        config=config,
+        intent=_intent_from_config(config),
+        qualified_contract_report={
+            "ok": True,
+            "qualified_contract": {
+                "symbol": "MGC",
+                "expiry": "20260626",
+                "con_id": 712565978,
+                "local_symbol": "MGCM6",
+                "min_tick": 0.1,
+            },
+            "qualified_contract_identifier": "712565978",
+            "api_contract_details": [{"min_tick": 0.1, "multiplier": "10"}],
+        },
+        positions={},
+        open_orders={},
+        paper_strategy_governance_status={"classification": "PAPER_STRATEGY_GOVERNANCE_READY"},
+        paper_strategy_exposure_status={"classification": "PAPER_EXPOSURE_ENTRY_ALLOWED"},
+        entry_execution_pricing={"limit_price": 4526.3, "execution_price_source": "RUNTIME_DATABENTO_1M_CLOSE"},
+        phase1_gate={"classification": "PHASE1_BROKER_RECONCILIATION_CLEAR"},
+    )
+
+    update = bridge_module._persist_submit_intent_ownership_delegate_exception(
+        config=config,
+        pre_submit_record=pre_submit,
+        exc=bridge_module.IbkrPaperStrategyPreSubmitNoBrokerEffectError(
+            "Paper strategy bridge could not prepare a valid frozen manual submit bundle."
+        ),
+    )
+
+    jsonl = tmp_path / "outputs" / "track_b_execution_core" / "submit_intent_ownership" / "track_b_submit_intent_ownership.jsonl"
+    records = [json.loads(line) for line in jsonl.read_text(encoding="utf-8").splitlines()]
+    assert update["state"] == "NO_BROKER_EFFECT_CONFIRMED"
+    assert update["broker_effect_classification"] == "PRE_SUBMIT_BLOCKED_NO_BROKER_EFFECT"
+    assert records[-1]["extra"]["submit_sent"] is False
+    assert records[-1]["extra"]["broker_effect"] is False
+    assert load_unresolved_submit_intent_ownership_records(jsonl) == []
+
+
+def test_mgc_sell_to_open_mule_prepares_entry_fill_bundle(monkeypatch, tmp_path: Path) -> None:
+    captured: list[dict[str, object]] = []
+
+    def fake_manual_submit(*, config, stack_provider):
+        del stack_provider
+        preview_path = frozen_preview_path_for_config(config)
+        assert preview_path is not None
+        preview_path.parent.mkdir(parents=True, exist_ok=True)
+        preview_path.write_text("{}", encoding="utf-8")
+        captured.append(
+            {
+                "action": config.action,
+                "symbol": config.symbol,
+                "test_mode": config.test_mode,
+                "submit": config.submit,
+            }
+        )
+        return IbkrManualPaperSubmitArtifacts(
+            classification="PAPER_FILL_TEST_PREVIEW_READY",
+            report={
+                "preview": {
+                    "preview_digest": "digest-123",
+                    "expected_approval_phrase": "APPROVE PAPER DIGEST digest-123",
+                },
+                "submit_cancel_lifecycle": {"detail": "preview ready"},
+            },
+            audit_events=[],
+            open_order_before={},
+            open_order_after_submit={},
+            open_order_after_cancel={},
+        )
+
+    monkeypatch.setattr(bridge_module, "run_ibkr_manual_paper_submit_test", fake_manual_submit)
+    config = _config(
+        tmp_path,
+        strategy_id="track_b_paper_execution_test_mule_v1__mgc",
+        symbol="MGC",
+        contract_month="202606",
+        action="SELL",
+        limit_price_model="DELAYED_BID_MINUS_1T_MARKETABLE_SELL",
+        caller_metadata=_approved_runtime_metadata(
+            strategy_id="track_b_paper_execution_test_mule_v1__mgc",
+            source_instrument="MGC",
+            executable_proxy="MGC",
+            action="SELL",
+            intent_type="SELL_TO_OPEN",
+            bridge_proxy_mode="MGC_SIGNAL_DIRECT_PHASE1",
+        ),
+    )
+
+    intent = _intent_from_config(config)
+    bundle = bridge_module._prepare_manual_submit_bundle(
+        config=config,
+        intent=intent,
+        exit_attempt_policy=_exit_attempt_policy_for_bridge(
+            config=config,
+            intent=intent,
+            history_events=[],
+            current_position_quantity=0.0,
+            open_orders={"open_order_count": 0},
+            phase1_gate={"ready": True},
+        ),
+        entry_execution_pricing={
+            "is_entry": True,
+            "limit_price": 4526.3,
+            "execution_price_source": "RUNTIME_DATABENTO_1M_CLOSE",
+        },
+    )
+
+    assert bundle["preview_digest"] == "digest-123"
+    assert captured == [
+        {
+            "action": "SELL",
+            "symbol": "MGC",
+            "test_mode": "PAPER_FILL_TEST",
+            "submit": False,
+        }
+    ]
 
 
 @pytest.mark.parametrize(

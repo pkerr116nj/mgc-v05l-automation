@@ -207,6 +207,10 @@ class IbkrPaperStrategyBridgeError(RuntimeError):
     """Raised when the IBKR paper strategy bridge fails closed."""
 
 
+class IbkrPaperStrategyPreSubmitNoBrokerEffectError(IbkrPaperStrategyBridgeError):
+    """Raised when the bridge failed before any broker submit could occur."""
+
+
 @dataclass(frozen=True)
 class IbkrPaperStrategyOrderIntent:
     strategy_id: str
@@ -557,6 +561,7 @@ def run_ibkr_paper_strategy_bridge(
     runtime: _Runtime | None = None
     submit_intent_ownership_pre_submit: dict[str, Any] | None = None
     submit_intent_ownership_update: dict[str, Any] | None = None
+    broker_effect_classification: str | None = None
     _record_bridge_audit(
         audit_events,
         event_type="intent_received",
@@ -824,12 +829,19 @@ def run_ibkr_paper_strategy_bridge(
                     pre_submit_record=submit_intent_ownership_pre_submit,
                     exc=delegate_exc,
                 )
+                broker_effect_classification = _broker_effect_classification_for_delegate_exception(delegate_exc)
                 _record_bridge_audit(
                     audit_events,
                     event_type="submit_intent_ownership_delegate_exception_recorded",
-                    detail="Delegated PAPER submit raised after durable ownership persistence; ownership remains recoverable.",
+                    detail=(
+                        "Delegated PAPER submit raised after durable ownership persistence; "
+                        f"broker_effect_classification={broker_effect_classification}."
+                    ),
                     config=config,
-                    extra={"submit_intent_ownership": submit_intent_ownership_update},
+                    extra={
+                        "broker_effect_classification": broker_effect_classification,
+                        "submit_intent_ownership": submit_intent_ownership_update,
+                    },
                 )
                 raise
             classification = _map_delegate_classification(delegated_result)
@@ -838,6 +850,12 @@ def run_ibkr_paper_strategy_bridge(
                 intent=intent,
                 pre_submit_record=submit_intent_ownership_pre_submit,
                 delegated_result=delegated_result,
+            )
+            broker_effect_classification = (
+                None
+                if submit_intent_ownership_update is None
+                else str(submit_intent_ownership_update.get("broker_effect_classification") or "").strip()
+                or None
             )
             known_managed_exit_order_persistence = _persist_known_managed_exit_order_after_submit(
                 config=config,
@@ -930,6 +948,8 @@ def run_ibkr_paper_strategy_bridge(
             report["submit_intent_ownership_pre_submit"] = submit_intent_ownership_pre_submit
         if submit_intent_ownership_update:
             report["submit_intent_ownership_update"] = submit_intent_ownership_update
+        if broker_effect_classification:
+            report["broker_effect_classification"] = broker_effect_classification
         return IbkrPaperStrategyBridgeArtifacts(classification=classification, report=report, audit_events=audit_events)
     except Exception as exc:
         classification = "PAPER_STRATEGY_INTENT_BLOCKED"
@@ -962,6 +982,7 @@ def run_ibkr_paper_strategy_bridge(
             "paper_strategy_exposure_status": exposure_status,
             "submit_intent_ownership_pre_submit": submit_intent_ownership_pre_submit,
             "submit_intent_ownership_update": submit_intent_ownership_update,
+            "broker_effect_classification": _broker_effect_classification_for_delegate_exception(exc),
             "detail": str(exc),
             "errors": [] if runtime is None else list(runtime.collector.errors),
         }
@@ -2113,24 +2134,29 @@ def _delegate_to_manual_harness(
     )
     if manual_frozen_preview_path is None or approval_digest is None or approval_phrase is None:
         if not supervised_runtime_route and not leak_test_route:
-            raise IbkrPaperStrategyBridgeError(
+            raise IbkrPaperStrategyPreSubmitNoBrokerEffectError(
                 "Bridge submit delegation requires a previously generated manual-harness frozen preview plus the exact approval digest and approval phrase."
             )
-        prepared = _prepare_manual_submit_bundle(
-            config=config,
-            intent=intent,
-            exit_attempt_policy=exit_attempt_policy,
-            entry_execution_pricing=entry_execution_pricing,
-            stack_provider=(lambda: []),
-        )
+        try:
+            prepared = _prepare_manual_submit_bundle(
+                config=config,
+                intent=intent,
+                exit_attempt_policy=exit_attempt_policy,
+                entry_execution_pricing=entry_execution_pricing,
+                stack_provider=(lambda: []),
+            )
+        except IbkrPaperStrategyPreSubmitNoBrokerEffectError:
+            raise
+        except IbkrPaperStrategyBridgeError as exc:
+            raise IbkrPaperStrategyPreSubmitNoBrokerEffectError(str(exc)) from exc
         manual_frozen_preview_path = Path(str(prepared.get("frozen_preview_path") or ""))
         approval_digest = str(prepared.get("preview_digest") or "")
         approval_phrase = str(prepared.get("expected_approval_phrase") or "")
         if not manual_frozen_preview_path.exists() or not approval_digest or not approval_phrase:
-            raise IbkrPaperStrategyBridgeError(
+            raise IbkrPaperStrategyPreSubmitNoBrokerEffectError(
                 "Approved supervised PAPER runtime/leak-test route could not prepare a valid internal frozen preview bundle."
             )
-    test_mode = "PAPER_FILL_TEST" if intent.action == "BUY" else "PAPER_CLOSE_TEST"
+    test_mode = _intent_test_mode(config=config, intent=intent)
     delegated_output_dir = (Path(config.output_dir) / "delegated_manual_harness") if config.output_dir is not None else None
     expected_target = _bridge_phase1_target(config=config, intent=intent)
     limit_override = _entry_limit_override(entry_execution_pricing)
@@ -2464,14 +2490,23 @@ def _persist_submit_intent_ownership_after_delegate(
         lifecycle=lifecycle,
     )
     broker_order_id = _submitted_broker_order_id(delegated=delegated, delegated_report=delegated_report, lifecycle=lifecycle)
+    perm_id = _submitted_perm_id(delegated=delegated, delegated_report=delegated_report, lifecycle=lifecycle)
+    broker_effect_classification = _broker_effect_classification_for_delegate_result(
+        mapped_classification=mapped,
+        delegated=delegated,
+        lifecycle=lifecycle,
+        broker_order_id=broker_order_id,
+        perm_id=perm_id,
+    )
     update_record = _submit_ownership_update_payload(
         pre_record=pre_record,
         state=state,
         broker_order_id=broker_order_id,
         client_id=_submitted_client_id(config=config, delegated=delegated, delegated_report=delegated_report, lifecycle=lifecycle),
-        perm_id=_submitted_perm_id(delegated=delegated, delegated_report=delegated_report, lifecycle=lifecycle),
+        perm_id=perm_id,
         exec_id=_submitted_exec_id(delegated=delegated, delegated_report=delegated_report, lifecycle=lifecycle),
         extra={
+            "broker_effect_classification": broker_effect_classification,
             "delegated_classification": delegated.get("classification"),
             "bridge_classification": mapped,
             "delegated_status": lifecycle.get("status") or delegated.get("status"),
@@ -2489,6 +2524,7 @@ def _persist_submit_intent_ownership_after_delegate(
         "ownership_intent_id": result.record.get("ownership_intent_id"),
         "lifecycle_id": result.record.get("lifecycle_id"),
         "broker_order_id": result.record.get("broker_order_id"),
+        "broker_effect_classification": broker_effect_classification,
         "client_id": result.record.get("client_id"),
         "perm_id": result.record.get("perm_id"),
         "exec_id": result.record.get("exec_id"),
@@ -2508,10 +2544,17 @@ def _persist_submit_intent_ownership_delegate_exception(
     if not pre_submit_record:
         return None
     pre_record = dict(pre_submit_record.get("record") or {})
+    broker_effect_classification = _broker_effect_classification_for_delegate_exception(exc)
+    no_broker_effect = broker_effect_classification == "PRE_SUBMIT_BLOCKED_NO_BROKER_EFFECT"
     update_record = _submit_ownership_update_payload(
         pre_record=pre_record,
-        state=SubmitIntentOwnershipState.BROKER_RESULT_UNKNOWN_REFRESH_REQUIRED,
+        state=SubmitIntentOwnershipState.NO_BROKER_EFFECT_CONFIRMED
+        if no_broker_effect
+        else SubmitIntentOwnershipState.BROKER_RESULT_UNKNOWN_REFRESH_REQUIRED,
         extra={
+            "broker_effect_classification": broker_effect_classification,
+            "submit_sent": False if no_broker_effect else None,
+            "broker_effect": False if no_broker_effect else None,
             "delegated_exception_type": type(exc).__name__,
             "delegated_exception_message": str(exc),
         },
@@ -2524,6 +2567,7 @@ def _persist_submit_intent_ownership_delegate_exception(
     return {
         "persisted": True,
         "state": result.record.get("state"),
+        "broker_effect_classification": broker_effect_classification,
         "ownership_intent_id": result.record.get("ownership_intent_id"),
         "lifecycle_id": result.record.get("lifecycle_id"),
         "digest": result.record.get("digest"),
@@ -2531,6 +2575,33 @@ def _persist_submit_intent_ownership_delegate_exception(
         "latest_path": str(result.latest_path),
         "record": result.record,
     }
+
+
+def _broker_effect_classification_for_delegate_exception(exc: BaseException) -> str:
+    if isinstance(exc, IbkrPaperStrategyPreSubmitNoBrokerEffectError):
+        return "PRE_SUBMIT_BLOCKED_NO_BROKER_EFFECT"
+    return "SUBMIT_UNKNOWN_REVIEW_REQUIRED"
+
+
+def _broker_effect_classification_for_delegate_result(
+    *,
+    mapped_classification: str,
+    delegated: dict[str, Any],
+    lifecycle: dict[str, Any],
+    broker_order_id: int | None,
+    perm_id: int | None,
+) -> str:
+    if broker_order_id is not None or perm_id is not None:
+        return "BROKER_EFFECT_CONFIRMED"
+    delegated_classification = str(delegated.get("classification") or "").strip().upper()
+    lifecycle_status = str(lifecycle.get("status") or delegated.get("status") or "").strip().lower()
+    if mapped_classification == "PAPER_STRATEGY_NEEDS_MANUAL_REVIEW" or "UNKNOWN" in delegated_classification:
+        return "SUBMIT_UNKNOWN_REVIEW_REQUIRED"
+    if lifecycle_status in {"manual_confirmation_unavailable", "unknown_needs_review", "submit_verification_failed"}:
+        return "SUBMIT_UNKNOWN_REVIEW_REQUIRED"
+    if mapped_classification == "PAPER_STRATEGY_INTENT_BLOCKED":
+        return "PRE_SUBMIT_BLOCKED_NO_BROKER_EFFECT"
+    return "BROKER_EFFECT_UNKNOWN"
 
 
 def _submit_ownership_update_payload(
@@ -3840,7 +3911,7 @@ def _prepare_manual_submit_bundle(
     entry_execution_pricing: dict[str, Any] | None = None,
     stack_provider: Callable[[], list[Any]] = inspect.stack,
 ) -> dict[str, Any]:
-    test_mode = _intent_test_mode(intent)
+    test_mode = _intent_test_mode(config=config, intent=intent)
     delegated_output_dir = (Path(config.output_dir) / "prepared_manual_harness") if config.output_dir is not None else None
     expected_target = _bridge_phase1_target(config=config, intent=intent)
     limit_override = _entry_limit_override(entry_execution_pricing)
@@ -3887,7 +3958,9 @@ def _prepare_manual_submit_bundle(
     preview_digest = preview.get("preview_digest")
     expected_phrase = preview.get("expected_approval_phrase")
     if frozen_preview_path is None or not Path(frozen_preview_path).exists() or not preview_digest or not expected_phrase:
-        raise IbkrPaperStrategyBridgeError("Paper strategy bridge could not prepare a valid frozen manual submit bundle.")
+        raise IbkrPaperStrategyPreSubmitNoBrokerEffectError(
+            "Paper strategy bridge could not prepare a valid frozen manual submit bundle."
+        )
     return {
         "classification": artifacts.classification,
         "detail": artifacts.report.get("submit_cancel_lifecycle", {}).get("detail"),
@@ -3901,9 +3974,17 @@ def _prepare_manual_submit_bundle(
     }
 
 
-def _intent_test_mode(intent: IbkrPaperStrategyOrderIntent) -> str:
+def _intent_test_mode(*, config: IbkrPaperStrategyBridgeConfig, intent: IbkrPaperStrategyOrderIntent) -> str:
     action = str(intent.action or "").strip().upper()
+    metadata = dict(config.caller_metadata or {})
+    intent_type = str(metadata.get("intent_type") or "").strip().upper()
     price_model = str(intent.limit_price_model or "").strip().upper()
+    if intent_type in {"SELL_TO_CLOSE", "BUY_TO_CLOSE"}:
+        return "PAPER_CLOSE_TEST"
+    if intent_type in {"BUY_TO_OPEN", "SELL_TO_OPEN"}:
+        if price_model == "DELAYED_BID_MINUS_1T_RESTING_BUY":
+            return "PAPER_RESTING_TEST"
+        return "PAPER_FILL_TEST"
     if action == "SELL":
         return "PAPER_CLOSE_TEST"
     if price_model == "DELAYED_BID_MINUS_1T_RESTING_BUY":
