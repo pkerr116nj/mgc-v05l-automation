@@ -1118,11 +1118,15 @@ PY
 }
 
 launch_background_paper_runtime() {
+  local launch_rc
   rm -f "${PAPER_WRAPPER_PID_FILE}"
   rm -f "${PAPER_PID_FILE}.screen_session"
   if launchctl_submit_available; then
+    set +e
     launch_detached_paper_runtime
-    return 0
+    launch_rc=$?
+    set -e
+    return "${launch_rc}"
   fi
   echo "CANONICAL_PAPER_LAUNCHER_UNAVAILABLE: launchctl is required for supervised PAPER runtime launch; screen/nohup fallback is disabled for automatic runtime start." >&2
   return 1
@@ -1154,6 +1158,8 @@ launch_detached_paper_runtime() {
   set -e
   if [[ "${launchctl_rc}" -ne 0 ]]; then
     write_launchctl_runtime_status "LAUNCHCTL_SUBMIT_FAILED" "${launchctl_rc}" "false" "launchctl submit failed before runtime wrapper could be verified"
+    launchctl remove "${label}" >/dev/null 2>&1 || true
+    rm -f "${PAPER_PID_FILE}.launchctl_label"
     return "${launchctl_rc}"
   fi
   write_launchctl_runtime_status "LAUNCHCTL_SUBMIT_ACCEPTED" "${launchctl_rc}" "false" "launchctl submit returned successfully; waiting for runtime PID"

@@ -261,7 +261,9 @@ def test_launch_script_uses_launchctl_paper_runtime_contract_without_screen_fall
     assert "screen -dmS \"${session_name}\" /bin/bash \"${wrapper_path}\"" not in launch_function
     assert "nohup /bin/bash \"${wrapper_path}\" >> \"${PAPER_LOG_FILE}\" 2>&1 &" not in launch_function
     assert "echo \"$!\" > \"${PAPER_WRAPPER_PID_FILE}\"" not in launch_function
-    assert "launch_background_paper_runtime\n  return 0" in script
+    assert "launch_background_paper_runtime\n    return 0" not in launch_function
+    assert "launch_rc=$?" in launch_function
+    assert "return \"${launch_rc}\"" in launch_function
     assert "launchctl submit -l \"${label}\" -- /bin/bash \"${wrapper_path}\" >\"${PAPER_LAUNCHCTL_STDOUT_FILE}\" 2>\"${PAPER_LAUNCHCTL_STDERR_FILE}\"" in script
     assert "write_launchctl_runtime_status \"LAUNCHCTL_SUBMIT_ACCEPTED\"" in script
     assert "write_launchctl_runtime_status \"LAUNCHCTL_SUBMIT_FAILED\"" in script
@@ -270,6 +272,24 @@ def test_launch_script_uses_launchctl_paper_runtime_contract_without_screen_fall
     )
     assert launch_function.index("launchctl_submit_available") < launch_function.index(
         "launch_detached_paper_runtime"
+    )
+    assert launch_function.index("launch_detached_paper_runtime") < launch_function.index("return \"${launch_rc}\"")
+
+
+def test_launch_script_propagates_launchctl_submit_failure_before_pid_polling() -> None:
+    script = RUN_SCRIPT.read_text(encoding="utf-8")
+
+    paper_launch = script[script.index("launch_background_paper_runtime()") : script.index("launch_screen_dashboard_manager()")]
+    detached_launch = script[script.index("launch_detached_paper_runtime()") : script.index("launch_detached_dashboard_manager()")]
+    start_flow = script[script.index("if ! start_paper_runtime") :]
+
+    assert "return 0" not in paper_launch
+    assert "return \"${launch_rc}\"" in paper_launch
+    assert "write_launchctl_runtime_status \"LAUNCHCTL_SUBMIT_FAILED\"" in detached_launch
+    assert "launchctl remove \"${label}\"" in detached_launch
+    assert "rm -f \"${PAPER_PID_FILE}.launchctl_label\"" in detached_launch
+    assert start_flow.index("if ! start_paper_runtime") < start_flow.index(
+        'wait_for_runtime_config_paths_match_request "post-start"'
     )
 
 
