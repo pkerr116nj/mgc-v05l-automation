@@ -13,7 +13,12 @@ from mgc_v05l.execution_core.track_b_runtime_truth_contract import (
     HEARTBEAT_HEALTHY,
     HEARTBEAT_PROCESS_DOWN,
     HEARTBEAT_WRONG_ROOT,
+    CONFIG_STACK_SAFE,
+    CONFIG_STACK_UNSAFE,
     LAUNCH_CONFLICTING_WRITER_BLOCKED,
+    LAUNCHCTL_NO_RUNTIME_JOB_EVIDENCE,
+    LAUNCHCTL_RUNTIME_JOB_ACCEPTED,
+    LAUNCHCTL_STALE_RUNTIME_JOB_BLOCKED,
     LAUNCH_PID_ACCEPTED,
     LAUNCH_STALE_PID_CLEANUP_ALLOWED,
     LAUNCH_STALE_PID_CLEANUP_BLOCKED,
@@ -32,6 +37,8 @@ from mgc_v05l.execution_core.track_b_runtime_truth_contract import (
     build_runtime_truth_contract,
     classify_freshness,
     classify_heartbeat,
+    classify_launchctl_runtime_jobs,
+    classify_paper_config_stack_safety,
     classify_pid_metadata,
     classify_runtime_launch_guard,
     classify_writer_authority,
@@ -343,3 +350,75 @@ def test_launch_guard_detects_duplicate_and_mismatched_runtime_generation() -> N
     assert result["duplicate_writer_detected"] is True
     assert result["generation_mismatches"] == ["pid_metadata_runtime_truth_mismatch"]
     assert "duplicate_runtime_writer_detected" in result["blockers"]
+
+
+def test_launchctl_runtime_job_classifier_blocks_stale_loaded_label() -> None:
+    result = classify_launchctl_runtime_jobs(
+        (
+            {
+                "label": "com.mgc-v05l.headless-supervised-paper.runtime.20260521120000.111",
+                "pid": "-",
+                "status": "0",
+            },
+        ),
+        expected_label="com.mgc-v05l.headless-supervised-paper.runtime.20260521120500.222",
+    )
+
+    assert result["classification"] == LAUNCHCTL_STALE_RUNTIME_JOB_BLOCKED
+    assert result["launch_allowed"] is False
+    assert result["stale_runtime_labels"] == [
+        "com.mgc-v05l.headless-supervised-paper.runtime.20260521120000.111"
+    ]
+    assert "stale_launchctl_runtime_job_loaded" in result["blockers"]
+
+
+def test_launchctl_runtime_job_classifier_accepts_current_loaded_label() -> None:
+    label = "com.mgc-v05l.headless-supervised-paper.runtime.20260521120500.222"
+
+    result = classify_launchctl_runtime_jobs(({"label": label, "pid": "1234", "status": "0"},), expected_label=label)
+
+    assert result["classification"] == LAUNCHCTL_RUNTIME_JOB_ACCEPTED
+    assert result["launch_allowed"] is True
+    assert result["stale_runtime_labels"] == []
+
+
+def test_launchctl_runtime_job_classifier_ignores_unrelated_jobs() -> None:
+    result = classify_launchctl_runtime_jobs(
+        (
+            {"label": "com.mgc_v05l.track_b_sunday_preflight", "pid": "-", "status": "0"},
+            {"label": "com.apple.example", "pid": "1", "status": "0"},
+        )
+    )
+
+    assert result["classification"] == LAUNCHCTL_NO_RUNTIME_JOB_EVIDENCE
+    assert result["launch_allowed"] is True
+
+
+def test_paper_config_stack_safety_rejects_documents_root_and_no_mule_temp_overlay() -> None:
+    result = classify_paper_config_stack_safety(
+        (
+            "/Users/patrick/Dev/MGC-v05l-automation/config/base.yaml",
+            "/Users/patrick/Documents/MGC-v05l-automation/config/no_mule_temp_overlay.yaml",
+        ),
+        expected_root="/Users/patrick/Dev/MGC-v05l-automation",
+    )
+
+    assert result["classification"] == CONFIG_STACK_UNSAFE
+    assert result["launch_allowed"] is False
+    assert "config_path_deprecated_documents_root" in result["blockers"]
+    assert "config_path_outside_expected_root" in result["blockers"]
+    assert "config_path_temp_or_no_mule_overlay" in result["blockers"]
+
+
+def test_paper_config_stack_safety_accepts_dev_root_stack() -> None:
+    result = classify_paper_config_stack_safety(
+        (
+            "/Users/patrick/Dev/MGC-v05l-automation/config/base.yaml",
+            "/Users/patrick/Dev/MGC-v05l-automation/config/probationary_pattern_engine_paper_mnq_mgc_plus_mnq_us_intraday_review.yaml",
+        ),
+        expected_root="/Users/patrick/Dev/MGC-v05l-automation",
+    )
+
+    assert result["classification"] == CONFIG_STACK_SAFE
+    assert result["launch_allowed"] is True
+    assert result["blockers"] == []

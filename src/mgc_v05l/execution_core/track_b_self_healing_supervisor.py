@@ -172,6 +172,9 @@ def classify_track_b_self_healing_health(inputs: Mapping[str, Any]) -> dict[str,
     duplicate_submitters = _int(broker_safety.get("duplicate_conflicting_runtime_count"))
     if duplicate_submitters:
         blockers.append("duplicate_conflicting_runtimes")
+    stale_launchctl_jobs = _int(broker_safety.get("stale_launchctl_runtime_job_count"))
+    if stale_launchctl_jobs:
+        blockers.append("stale_launchctl_runtime_job_loaded")
 
     live_money_eligible = _bool(broker_safety.get("live_money_eligible")) or any(
         _bool(_mapping(agent).get("live_money_eligible")) for agent in agents.values()
@@ -180,7 +183,9 @@ def classify_track_b_self_healing_health(inputs: Mapping[str, Any]) -> dict[str,
         blockers.append("live_money_eligible_true")
 
     wrong_root = any("wrong_root" in result["blockers"] for result in agent_results.values())
-    restart_blocked = bool(unsafe_broker_blockers or live_money_eligible or wrong_root or duplicate_submitters)
+    restart_blocked = bool(
+        unsafe_broker_blockers or live_money_eligible or wrong_root or duplicate_submitters or stale_launchctl_jobs
+    )
     required_unhealthy = any(
         result["required"] and result["health_state"] != "HEALTHY" for result in agent_results.values()
     )
@@ -203,7 +208,7 @@ def classify_track_b_self_healing_health(inputs: Mapping[str, Any]) -> dict[str,
     restart_control = classify_restart_budget_state(
         restart_candidates=restart_candidates,
         broker_reconciliation_clean=not unsafe_broker_blockers,
-        duplicate_writer_detected=bool(duplicate_submitters),
+        duplicate_writer_detected=bool(duplicate_submitters or stale_launchctl_jobs),
         now=_parse_datetime(generated_at) or datetime.now(timezone.utc),
         restart_attempt_count=_int(restart_policy.get("restart_attempt_count")),
         restart_window_seconds=_int_or_default(
@@ -244,6 +249,7 @@ def classify_track_b_self_healing_health(inputs: Mapping[str, Any]) -> dict[str,
         "registry": tuple(contract.as_dict() for contract in registry_by_id.values()),
         "agents": agent_results,
         "broker_safety": dict(broker_safety),
+        "stale_launchctl_runtime_job_count": stale_launchctl_jobs,
     }
 
 
@@ -574,6 +580,14 @@ def _read_safety_state(repo_root: Path) -> dict[str, Any]:
     reconciliation = _read_json(repo_root / PHASE1_RECONCILIATION_ARTIFACT)
     canonical = _read_json(repo_root / DEFAULT_CANONICAL_READINESS_ARTIFACT)
     broker_lease = _read_json(repo_root / DEFAULT_BROKER_TRUTH_LEASE_ARTIFACT)
+    launch_guard = _read_json(
+        repo_root
+        / "outputs"
+        / "probationary_pattern_engine"
+        / "paper_session"
+        / "runtime"
+        / "probationary_paper.pid.json.launch_guard.json"
+    )
     ownership = reconciliation.get("submit_intent_ownership_reconciliation")
     ownership = ownership if isinstance(ownership, Mapping) else {}
     unresolved_ownership_count = (
@@ -594,6 +608,7 @@ def _read_safety_state(repo_root: Path) -> dict[str, Any]:
         "lifecycle_open_position_count": reconciliation.get("lifecycle_open_position_count"),
         "unresolved_submit_intent_ownership_count": unresolved_ownership_count,
         "live_money_eligible": _bool(reconciliation.get("live_money_eligible")) or _bool(canonical.get("live_money_eligible")),
+        "stale_launchctl_runtime_job_count": _int(launch_guard.get("stale_launchctl_runtime_job_count")),
     }
 
 

@@ -313,6 +313,19 @@ def test_duplicate_writer_restart_control_blocks_restart() -> None:
     assert result["restart_allowed"] is False
 
 
+def test_stale_launchctl_runtime_job_blocks_self_healing_restart() -> None:
+    inputs = _inputs()
+    inputs["agents"]["paper_runtime"]["process_running"] = False
+    inputs["broker_safety"]["stale_launchctl_runtime_job_count"] = 1
+
+    result = classify_track_b_self_healing_health(inputs)
+
+    assert result["classification"] == "AUTO_RESTART_BLOCKED"
+    assert result["auto_restart_allowed"] is False
+    assert result["restart_control"]["classification"] == RESTART_BLOCKED_DUPLICATE_WRITER
+    assert "stale_launchctl_runtime_job_loaded" in result["blockers"]
+
+
 def test_reconciliation_block_restart_control_blocks_restart() -> None:
     result = classify_restart_budget_state(
         restart_candidates=("paper_runtime",),

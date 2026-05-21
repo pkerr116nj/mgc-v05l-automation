@@ -46,6 +46,13 @@ LAUNCH_CONFLICTING_WRITER_BLOCKED = "LAUNCH_CONFLICTING_WRITER_BLOCKED"
 LAUNCH_WRONG_ROOT_BLOCKED = "LAUNCH_WRONG_ROOT_BLOCKED"
 LAUNCH_ZOMBIE_PID_REJECTED = "LAUNCH_ZOMBIE_PID_REJECTED"
 
+LAUNCHCTL_NO_RUNTIME_JOB_EVIDENCE = "LAUNCHCTL_NO_RUNTIME_JOB_EVIDENCE"
+LAUNCHCTL_RUNTIME_JOB_ACCEPTED = "LAUNCHCTL_RUNTIME_JOB_ACCEPTED"
+LAUNCHCTL_STALE_RUNTIME_JOB_BLOCKED = "LAUNCHCTL_STALE_RUNTIME_JOB_BLOCKED"
+
+CONFIG_STACK_SAFE = "CONFIG_STACK_SAFE"
+CONFIG_STACK_UNSAFE = "CONFIG_STACK_UNSAFE"
+
 RECOVERY_OBSERVE_ONLY = "OBSERVE_ONLY"
 RECOVERY_RESTART_ELIGIBLE = "RESTART_ELIGIBLE"
 RECOVERY_BLOCKED = "RECOVERY_BLOCKED"
@@ -293,6 +300,81 @@ def classify_runtime_launch_guard(
         "duplicate_writer_detected": bool(duplicate_writer_detected),
         "blockers": blockers,
         "warnings": warnings,
+    }
+
+
+def classify_launchctl_runtime_jobs(
+    jobs: Sequence[Mapping[str, Any]],
+    *,
+    expected_label: str | None = None,
+    runtime_label_prefix: str = "com.mgc-v05l.headless-supervised-paper.runtime.",
+) -> dict[str, Any]:
+    """Classify loaded launchctl PAPER runtime labels before start/restart.
+
+    Launchctl labels are restart-capable supervision evidence. A loaded label
+    that is not the exact current launcher label is unsafe because it can
+    resurrect an old wrapper/config/commit after the PID file has gone stale.
+    """
+
+    expected = str(expected_label or "").strip()
+    runtime_jobs = [
+        dict(row)
+        for row in jobs
+        if str(row.get("label") or row.get("Label") or "").startswith(runtime_label_prefix)
+    ]
+    if not runtime_jobs:
+        return {
+            "classification": LAUNCHCTL_NO_RUNTIME_JOB_EVIDENCE,
+            "loaded_runtime_job_count": 0,
+            "loaded_runtime_labels": [],
+            "stale_runtime_labels": [],
+            "expected_label": expected or None,
+            "launch_allowed": True,
+            "blockers": [],
+        }
+    loaded_labels = [str(row.get("label") or row.get("Label") or "") for row in runtime_jobs]
+    stale_labels = [label for label in loaded_labels if not expected or label != expected]
+    classification = LAUNCHCTL_RUNTIME_JOB_ACCEPTED if not stale_labels else LAUNCHCTL_STALE_RUNTIME_JOB_BLOCKED
+    return {
+        "classification": classification,
+        "loaded_runtime_job_count": len(runtime_jobs),
+        "loaded_runtime_labels": loaded_labels,
+        "stale_runtime_labels": stale_labels,
+        "expected_label": expected or None,
+        "launch_allowed": classification != LAUNCHCTL_STALE_RUNTIME_JOB_BLOCKED,
+        "blockers": ["stale_launchctl_runtime_job_loaded"] if stale_labels else [],
+    }
+
+
+def classify_paper_config_stack_safety(
+    config_paths: Sequence[str],
+    *,
+    expected_root: str,
+) -> dict[str, Any]:
+    """Classify runtime config stack safety before a PAPER launch."""
+
+    root = str(expected_root).rstrip("/")
+    blockers: list[str] = []
+    rows: list[str] = []
+    for raw in config_paths:
+        path = str(raw or "").strip()
+        if not path:
+            continue
+        rows.append(path)
+        lowered = path.lower()
+        if "/documents/" in lowered or "icloud" in lowered:
+            blockers.append("config_path_deprecated_documents_root")
+        if not path.startswith(f"{root}/"):
+            blockers.append("config_path_outside_expected_root")
+        name = path.rsplit("/", 1)[-1].lower()
+        if "no_mule" in name or "no-mule" in name or "temp" in name or "temporary" in name:
+            blockers.append("config_path_temp_or_no_mule_overlay")
+    return {
+        "classification": CONFIG_STACK_SAFE if not blockers else CONFIG_STACK_UNSAFE,
+        "config_paths": rows,
+        "expected_root": root,
+        "launch_allowed": not blockers,
+        "blockers": sorted(set(blockers)),
     }
 
 

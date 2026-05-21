@@ -351,6 +351,27 @@ if missing:
 PY
 }
 
+assert_requested_config_stack_safe() {
+  "${PYTHON_BIN}" - <<'PY' "${REPO_ROOT}" "${REQUESTED_CONFIG_PATHS_FILE}"
+import json
+import sys
+from pathlib import Path
+
+from mgc_v05l.execution_core.track_b_runtime_truth_contract import classify_paper_config_stack_safety
+
+repo_root = Path(sys.argv[1]).resolve()
+requested_file = Path(sys.argv[2])
+try:
+    rows = [line.strip() for line in requested_file.read_text(encoding="utf-8").splitlines() if line.strip()]
+except OSError:
+    rows = []
+classification = classify_paper_config_stack_safety(rows, expected_root=str(repo_root))
+if not classification["launch_allowed"]:
+    print("Unsafe PAPER runtime config stack: " + json.dumps(classification, sort_keys=True), file=sys.stderr)
+    raise SystemExit(2)
+PY
+}
+
 assert_runtime_config_paths_match_request() {
   local phase="$1"
   if [[ "${START_PAPER}" -ne 1 ]]; then
@@ -458,6 +479,8 @@ classify_paper_runtime_launch_guard() {
     "${PAPER_CONFIG_IN_FORCE_FILE}" \
     "${PAPER_OPERATOR_STATUS_FILE}" \
     "${PAPER_RECONCILIATION_FILE}" \
+    "${PAPER_PID_FILE}" \
+    "$(requested_config_fingerprint)" \
     "${REPO_ROOT}"
 import json
 import os
@@ -467,6 +490,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from mgc_v05l.execution_core.track_b_runtime_truth_contract import (
+    classify_launchctl_runtime_jobs,
     classify_pid_metadata,
     classify_runtime_launch_guard,
 )
@@ -478,6 +502,8 @@ from mgc_v05l.execution_core.track_b_runtime_truth_contract import (
     config_path,
     operator_path,
     reconciliation_path,
+    pid_path,
+    expected_config_fingerprint,
     expected_root,
 ) = sys.argv[1:]
 expected_root = str(Path(expected_root).resolve())
@@ -540,6 +566,35 @@ runtime_truth = read_json(truth_path)
 config_in_force = read_json(config_path)
 operator_status = read_json(operator_path)
 reconciliation = read_json(reconciliation_path)
+label_path = Path(f"{pid_path}.launchctl_label")
+try:
+    expected_launchctl_label = label_path.read_text(encoding="utf-8").strip()
+except OSError:
+    expected_launchctl_label = ""
+
+def launchctl_runtime_jobs() -> list[dict]:
+    try:
+        proc = subprocess.run(
+            ["launchctl", "list"],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=3,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return []
+    jobs = []
+    for line in proc.stdout.splitlines():
+        parts = line.split()
+        if len(parts) < 3 or parts[0] == "PID":
+            continue
+        jobs.append({"pid": parts[0], "status": parts[1], "label": parts[2]})
+    return jobs
+
+launchctl_jobs = classify_launchctl_runtime_jobs(
+    launchctl_runtime_jobs(),
+    expected_label=expected_launchctl_label,
+)
 probe = process_probe(pid_metadata.get("pid"))
 pid_metadata_state = classify_pid_metadata(
     pid_metadata,
@@ -557,6 +612,12 @@ runtime_instance_ids = {
     if row.get("runtime_instance_id")
 }
 duplicate_writer_detected = runtime_truth_duplicate or (probe.get("running") is True and len(runtime_instance_ids) > 1)
+if launchctl_jobs.get("classification") == "LAUNCHCTL_STALE_RUNTIME_JOB_BLOCKED":
+    duplicate_writer_detected = True
+try:
+    current_commit = subprocess.check_output(["git", "-C", expected_root, "rev-parse", "HEAD"], text=True, timeout=3).strip()
+except (OSError, subprocess.SubprocessError):
+    current_commit = ""
 guard = classify_runtime_launch_guard(
     pid_metadata_state=pid_metadata_state,
     pid_metadata=pid_metadata,
@@ -567,6 +628,27 @@ guard = classify_runtime_launch_guard(
     process_running=probe.get("running"),
     duplicate_writer_detected=duplicate_writer_detected,
 )
+stale_source_commit = bool(current_commit and pid_metadata.get("source_commit") and pid_metadata.get("source_commit") != current_commit)
+stale_config_fingerprint = bool(
+    expected_config_fingerprint
+    and pid_metadata.get("config_fingerprint")
+    and pid_metadata.get("config_fingerprint") != expected_config_fingerprint
+)
+if launchctl_jobs.get("classification") == "LAUNCHCTL_STALE_RUNTIME_JOB_BLOCKED":
+    guard["classification"] = "LAUNCH_CONFLICTING_WRITER_BLOCKED"
+    guard["launch_allowed"] = False
+    guard["cleanup_allowed"] = False
+    guard["active_runtime_accepted"] = False
+    guard.setdefault("blockers", []).extend(launchctl_jobs.get("blockers") or [])
+if probe.get("running") is True and (stale_source_commit or stale_config_fingerprint):
+    guard["classification"] = "LAUNCH_CONFLICTING_WRITER_BLOCKED"
+    guard["launch_allowed"] = False
+    guard["cleanup_allowed"] = False
+    guard["active_runtime_accepted"] = False
+    if stale_source_commit:
+        guard.setdefault("blockers", []).append("runtime_source_commit_mismatch")
+    if stale_config_fingerprint:
+        guard.setdefault("blockers", []).append("runtime_config_fingerprint_mismatch")
 guard.update(
     {
         "schema_version": "track_b_paper_runtime_launch_guard_v1",
@@ -583,6 +665,12 @@ guard.update(
         "reconciliation_artifact": reconciliation_path,
         "process_probe": probe,
         "reconciliation_classification": reconciliation.get("classification"),
+        "launchctl_runtime_jobs": launchctl_jobs,
+        "stale_launchctl_runtime_job_count": len(launchctl_jobs.get("stale_runtime_labels") or []),
+        "expected_source_commit": current_commit,
+        "source_commit_mismatch": stale_source_commit,
+        "expected_config_fingerprint": expected_config_fingerprint,
+        "config_fingerprint_mismatch": stale_config_fingerprint,
     }
 )
 path = Path(guard_path)
@@ -638,6 +726,7 @@ screen_session_name() {
 prepare_paper_runtime_generation() {
   PAPER_RUNTIME_LAUNCH_STARTED_AT="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
   PAPER_RUNTIME_INSTANCE_ID="track-b-paper-runtime-$(date -u +%Y%m%dT%H%M%SZ)-$$"
+  PAPER_RUNTIME_EXPECTED_SOURCE_COMMIT="$(git -C "${REPO_ROOT}" rev-parse HEAD)"
   PAPER_RUNTIME_RESTART_GENERATION="$(
     "${PYTHON_BIN}" -c 'import json, sys; from pathlib import Path; path=Path(sys.argv[1]);
 try:
@@ -738,7 +827,8 @@ write_paper_runtime_wrapper() {
     "${PAPER_RUNTIME_RESTART_GENERATION}" \
     "${PAPER_RUNTIME_LAUNCH_STARTED_AT}" \
     "$$" \
-    "${PAPER_RUNTIME_CONFIG_FINGERPRINT}"
+    "${PAPER_RUNTIME_CONFIG_FINGERPRINT}" \
+    "${PAPER_RUNTIME_EXPECTED_SOURCE_COMMIT}"
 import shlex
 import sys
 from pathlib import Path
@@ -758,6 +848,7 @@ from pathlib import Path
     launch_started_at,
     launcher_pid,
     config_fingerprint,
+    expected_source_commit,
 ) = sys.argv[1:]
 
 q = shlex.quote
@@ -787,6 +878,7 @@ export MGC_TRACK_B_PAPER_LAUNCH_STARTED_AT={q(launch_started_at)}
 export MGC_TRACK_B_PAPER_LAUNCHER_PID={q(launcher_pid)}
 export MGC_TRACK_B_EXPECTED_PROJECT_ROOT={q(repo_root)}
 export MGC_TRACK_B_PAPER_CONFIG_FINGERPRINT={q(config_fingerprint)}
+export MGC_TRACK_B_EXPECTED_SOURCE_COMMIT={q(expected_source_commit)}
 mkdir -p "$(dirname "$MGC_HEADLESS_PAPER_PID_FILE")" "$(dirname "$MGC_HEADLESS_PAPER_LOG_FILE")"
 {{
   printf '%s\\n' "headless_runtime_wrapper_start generated_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
@@ -794,6 +886,11 @@ mkdir -p "$(dirname "$MGC_HEADLESS_PAPER_PID_FILE")" "$(dirname "$MGC_HEADLESS_P
   printf '%s\\n' "python_bin=$PYTHON_BIN"
   printf '%s\\n' "config_stack=$MGC_PROBATIONARY_PAPER_CONFIG_PATHS"
 }} >> "$MGC_HEADLESS_PAPER_LOG_FILE"
+current_commit="$(git -C "$REPO_ROOT" rev-parse HEAD)"
+if [[ "$current_commit" != "$MGC_TRACK_B_EXPECTED_SOURCE_COMMIT" ]]; then
+  printf '%s\n' "headless_runtime_wrapper_fence_blocked reason=source_commit_mismatch expected=$MGC_TRACK_B_EXPECTED_SOURCE_COMMIT observed=$current_commit generated_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$MGC_HEADLESS_PAPER_LOG_FILE"
+  exit 23
+fi
 echo "$$" > "$MGC_HEADLESS_PAPER_PID_FILE"
 {q(python_bin)} - <<'RUNTIME_PID_METADATA_PY' "$MGC_TRACK_B_PAPER_PID_METADATA_FILE" "$$" "$MGC_TRACK_B_RUNTIME_INSTANCE_ID" "$MGC_TRACK_B_PAPER_RUNTIME_RESTART_GENERATION" "$REPO_ROOT"
 import json
@@ -1139,6 +1236,11 @@ fail_fast_if_hard_canonical_blocker() {
 persist_requested_config_paths
 if ! assert_required_config_paths_present "${REQUIRED_PAPER_CONFIG_PATHS}"; then
   write_startup_summary "BLOCKED" "Requested paper runtime config stack is missing required config paths." "false"
+  cat "${STARTUP_FILE}"
+  exit 2
+fi
+if ! assert_requested_config_stack_safe; then
+  write_startup_summary "BLOCKED" "Requested paper runtime config stack is unsafe." "false"
   cat "${STARTUP_FILE}"
   exit 2
 fi
