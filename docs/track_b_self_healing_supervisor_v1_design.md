@@ -98,3 +98,20 @@ The command writes:
 `outputs/operator_dashboard/runtime/latest_track_b_self_healing_health.json`
 
 It prints the overall classification, per-agent health state, restart eligibility, restart candidates, restart blockers, and operator-required agents. The dashboard surfaces the same classification in Execution Truth, but it remains advisory only. Canonical readiness, broker lease, and reconciliation remain the submit/precheck authority.
+
+
+## Slice 3 Sidecar Restart Actions
+
+Slice 3 adds dry-run/apply restart planning for sidecar/support services only. The default status script remains safe to run as a dry-run:
+
+`bash scripts/status-track-b-self-healing-supervisor --dry-run`
+
+Apply mode is explicit:
+
+`bash scripts/status-track-b-self-healing-supervisor --apply`
+
+Apply mode can restart only sidecars with an `AUTO_RESTART_ELIGIBLE` plan and clean safety gates. The PAPER runtime remains excluded from automatic restart. Restart attempts append to:
+
+`outputs/operator_dashboard/runtime/self_healing_restart_audit.jsonl`
+
+Every apply attempt also updates `latest_track_b_self_healing_health.json` with `last_restart_plan` and `last_restart_attempt`. Restarts are blocked by unknown/open orders, lifecycle review-required state, reconciliation mismatch, `live_money_eligible=true`, wrong root, duplicate conflicting runtimes, cooldown, or max-attempt limits.

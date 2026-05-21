@@ -12,4 +12,5 @@ OUTPUT_PATH="${REPO_ROOT}/outputs/operator_dashboard/runtime/latest_track_b_self
   --repo-root "${REPO_ROOT}" \
   --expected-root "${REPO_ROOT}" \
   --output-path "${OUTPUT_PATH}" \
-  --write
+  --write \
+  "$@"
