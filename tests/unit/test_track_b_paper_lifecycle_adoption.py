@@ -14,6 +14,10 @@ from mgc_v05l.execution_core.track_b_submit_intent_ownership import (
     append_submit_intent_ownership_record,
     load_unresolved_submit_intent_ownership_records,
 )
+from mgc_v05l.execution_core.track_b_position_management_manifest import (
+    create_or_update_position_management_manifest,
+    manifest_path_for_intent,
+)
 
 
 def test_pl_lifecycle_adoption_reconstructs_fill_trade_and_ledger(tmp_path: Path) -> None:
@@ -300,6 +304,21 @@ def test_unknown_after_submit_matching_submit_intent_adopts_reserved_lifecycle_i
     bridge_path = repo / "outputs/reports/track_b_paper_leak_test/atp_companion_v1_asia_us/ibkr_paper_strategy_bridge_report.json"
     bridge_path.unlink()
     ownership = _write_mgc_submit_intent_ownership(repo)
+    create_or_update_position_management_manifest(
+        entry_intent_id=str(ownership["ownership_intent_id"]),
+        lane_id="atp_companion_v1_asia_us",
+        strategy_id="atp_companion_v1__benchmark_mgc_asia_us",
+        instrument_family="MGC",
+        contract_key="MGC-202606",
+        local_symbol="MGCM6",
+        con_id=712565978,
+        side="LONG",
+        quantity=1,
+        managed_exit_policy_id="PAPER_DIAGNOSTIC_TIME_BOXED_3X5M_EXIT_V1",
+        lifecycle_status="INTENT_CREATED",
+        output_root=repo / "outputs/track_b_execution_core/position_management_manifests",
+        now=_now(),
+    )
 
     result = run_track_b_paper_lifecycle_adoption(
         config=LifecycleAdoptionConfig(
@@ -336,6 +355,16 @@ def test_unknown_after_submit_matching_submit_intent_adopts_reserved_lifecycle_i
     assert fill_rows[0]["perm_id"] == 614044377
     assert trade_rows[0]["lifecycle_id"] == ownership["lifecycle_id"]
     assert trade_rows[0]["ownership_intent_id"] == ownership["ownership_intent_id"]
+    assert trade_rows[0]["managed_exit_policy_id"] == "PAPER_DIAGNOSTIC_TIME_BOXED_3X5M_EXIT_V1"
+    manifest_path = manifest_path_for_intent(
+        str(ownership["ownership_intent_id"]),
+        output_root=repo / "outputs/track_b_execution_core/position_management_manifests",
+    )
+    manifest = _read_json(manifest_path)
+    assert manifest["lifecycle_status"] == "OPEN_MANAGED"
+    assert manifest["lifecycle_id"] == ownership["lifecycle_id"]
+    assert manifest["broker_ownership_identity"]["broker_order_id"] == "28"
+    assert manifest["broker_ownership_identity"]["perm_id"] == 614044377
     live_positions = _read_json(repo / "outputs/track_b_execution_core/paper_trade_ledger/latest_track_b_live_position_status.json")
     assert live_positions["open_position_count"] == 1
     ownership_path = repo / "outputs/track_b_execution_core/submit_intent_ownership/track_b_submit_intent_ownership.jsonl"

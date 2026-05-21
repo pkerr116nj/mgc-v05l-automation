@@ -20,6 +20,10 @@ from mgc_v05l.execution.ibkr_paper_strategy_porting import lane_submit_bridge_ad
 from mgc_v05l.execution_core.track_b_paper_trade_ledger import (
     update_track_b_paper_trade_ledger_from_filled_bridge_result,
 )
+from mgc_v05l.execution_core.track_b_position_management_manifest import (
+    DEFAULT_TRACK_B_POSITION_MANAGEMENT_MANIFEST_ROOT,
+    resolve_management_metadata,
+)
 from mgc_v05l.execution_core.track_b_submit_intent_ownership import (
     DEFAULT_TRACK_B_SUBMIT_INTENT_OWNERSHIP_JSONL,
     append_submit_intent_ownership_record,
@@ -314,6 +318,7 @@ def run_track_b_paper_lifecycle_adoption(
             filled_bridge_result=filled_bridge_result,
             filled_bridge_result_json=audit_path,
             output_root=repo_root / config.ledger_root,
+            position_management_manifest_root=repo_root / DEFAULT_TRACK_B_POSITION_MANAGEMENT_MANIFEST_ROOT,
             now=actual_now,
         )
         ownership_resolution = _resolve_submit_intent_ownership_after_adoption(
@@ -1143,6 +1148,20 @@ def _build_fill_payload(
     fill_price = str(bridge_evidence.get("fill_price") or _decimal_text(broker_average_price) or "")
     fill_timestamp = str(bridge_evidence.get("fill_timestamp") or bridge_evidence.get("order_status_updated_at") or now.isoformat())
     strategy_id = str(intent.get("standalone_strategy_id") or intent.get("strategy_id") or config.lane_id)
+    management_metadata = resolve_management_metadata(
+        source={
+            **intent,
+            **bridge_evidence,
+            "lane_id": config.lane_id,
+            "strategy_id": strategy_id,
+            "order_intent_id": order_intent_id,
+            "symbol": config.symbol,
+            "local_symbol": config.local_symbol,
+            "quantity": _decimal_text(config.quantity),
+            "action": action,
+        },
+        output_root=config.repo_root / DEFAULT_TRACK_B_POSITION_MANAGEMENT_MANIFEST_ROOT,
+    )
     return {
         "source": "TRACK_B_PAPER_LIFECYCLE_ADOPTION",
         "classification": "LEAK_TEST_FILL_LIFECYCLE_ADOPTION_RECONSTRUCTED"
@@ -1182,6 +1201,10 @@ def _build_fill_payload(
         "entry_execution_intent": bridge_evidence.get("entry_execution_intent"),
         "entry_price_source": bridge_evidence.get("entry_price_source"),
         "execution_price_source": bridge_evidence.get("entry_price_source"),
+        "managed_exit_policy_id": management_metadata.managed_exit_policy_id,
+        "position_management_metadata_source": management_metadata.source,
+        "position_management_metadata_classification": management_metadata.classification,
+        "position_management_metadata_blockers": list(management_metadata.blockers),
         "fill_price_source": bridge_evidence.get("fill_price_source") or "BRIDGE_EXECUTION_EVIDENCE",
         "evidence_classification": bridge_evidence.get("evidence_classification"),
         "adoption_input_classification": bridge_evidence.get("adoption_input_classification"),
@@ -1307,6 +1330,10 @@ def _build_filled_bridge_result(fill_payload: Mapping[str, Any]) -> dict[str, An
         "entry_source": fill_payload.get("entry_source"),
         "entry_execution_intent": fill_payload.get("entry_execution_intent"),
         "entry_price_source": fill_payload.get("entry_price_source"),
+        "managed_exit_policy_id": fill_payload.get("managed_exit_policy_id"),
+        "position_management_metadata_source": fill_payload.get("position_management_metadata_source"),
+        "position_management_metadata_classification": fill_payload.get("position_management_metadata_classification"),
+        "position_management_metadata_blockers": fill_payload.get("position_management_metadata_blockers") or [],
         "submit_intent_ownership_evidence": fill_payload.get("submit_intent_ownership_evidence"),
         "source_artifact_paths": fill_payload.get("source_artifact_paths") or [],
         "route_destination": fill_payload.get("route_destination"),

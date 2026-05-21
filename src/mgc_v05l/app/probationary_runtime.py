@@ -17,7 +17,7 @@ from dataclasses import asdict, dataclass, field, replace
 from datetime import date, datetime, time as dt_time, timedelta, timezone
 from decimal import Decimal
 from pathlib import Path
-from typing import Any, Iterable, Sequence
+from typing import Any, Iterable, Mapping, Sequence
 from urllib.parse import urlencode, urlparse
 from zoneinfo import ZoneInfo
 
@@ -58,6 +58,11 @@ from ..execution.track_b_phase1_submit_authority import evaluate_phase1_broker_r
 from ..execution.live_strategy_broker import LiveStrategyPilotBroker
 from ..execution.order_models import FillEvent, OrderIntent
 from ..execution.paper_broker import PaperBroker, PaperPosition
+from ..execution_core.track_b_position_management_manifest import (
+    DEFAULT_TRACK_B_POSITION_MANAGEMENT_MANIFEST_ROOT,
+    create_manifest_from_order_intent,
+    update_manifest_from_filled_bridge_result,
+)
 from ..execution.reconciliation import (
     RECONCILIATION_CLASS_BROKER_UNAVAILABLE,
     RECONCILIATION_CLASS_SAFE_REPAIR,
@@ -454,6 +459,7 @@ PAPER_EXECUTION_TEST_MULE_LANE_IDS = {
     "MGC": "track_b_paper_execution_test_mule_v1__mgc",
     "MNQ": "track_b_paper_execution_test_mule_v1__mnq",
 }
+PAPER_EXECUTION_TEST_MULE_MANAGED_EXIT_POLICY_ID = "PAPER_DIAGNOSTIC_TIME_BOXED_3X5M_EXIT_V1"
 
 def _paper_route_canary_enable_sentinel_path() -> Path:
     return (
@@ -8348,6 +8354,7 @@ def _paper_execution_test_mule_lane_rows(settings: StrategySettings) -> list[dic
                 "artifacts_dir": f"./outputs/probationary_pattern_engine/paper_session/lanes/{lane_id}",
                 "observed_instruments": [symbol],
                 "experimental_status": "PAPER_ONLY_TEST_MULE_OPERATIONAL_THROUGHPUT",
+                "managed_exit_policy_id": PAPER_EXECUTION_TEST_MULE_MANAGED_EXIT_POLICY_ID,
                 "paper_only": True,
                 "non_approved": True,
                 "exclude_from_strategy_performance": True,
@@ -8524,6 +8531,8 @@ def _build_probationary_paper_lanes(
         )
         alert_dispatcher = AlertDispatcher(lane_logger, repositories.alerts, source_subsystem="probationary_paper_lane")
         bridge_adapter = lane_submit_bridge_adapter(lane_id=spec.lane_id)
+        if bridge_adapter is not None:
+            bridge_adapter = {**bridge_adapter, "managed_exit_policy_id": spec.managed_exit_policy_id}
         broker = (
             _IbkrPaperBridgeRuntimeBroker(
                 lane_id=spec.lane_id,
@@ -11878,6 +11887,18 @@ class _IbkrPaperBridgeRuntimeBroker:
         broker_order_id: str | None = None
         status: OrderStatus | None = None
         try:
+            manifest_result = _create_runtime_bridge_position_manifest(
+                order_intent=order_intent,
+                bridge_config=bridge_config,
+                bridge_adapter=self._bridge_adapter,
+                repo_root=self._repo_root,
+                source_symbol=self._source_symbol,
+            )
+            if order_intent.is_entry and manifest_result is None:
+                raise RuntimeError(
+                    "POSITION_MANAGEMENT_MANIFEST_REQUIRED: submit-capable Track B entries require a complete "
+                    "position-management manifest before broker submit."
+                )
             artifacts = self._bridge_runner(config=bridge_config)
             report = dict(artifacts.report or {})
             self._last_bridge_report = report
@@ -11921,6 +11942,17 @@ class _IbkrPaperBridgeRuntimeBroker:
                 self._apply_filled_position(order_intent=order_intent, fill_price=fill_price)
                 fill_timestamp = _extract_bridge_fill_timestamp(report)
                 self._last_fill_timestamp = fill_timestamp or order_intent.created_at
+                _update_runtime_bridge_position_manifest_from_fill(
+                    order_intent=order_intent,
+                    bridge_config=bridge_config,
+                    bridge_adapter=self._bridge_adapter,
+                    report=report,
+                    broker_order_id=broker_order_id,
+                    order_metadata=order_metadata,
+                    manifest_result=manifest_result,
+                    repo_root=self._repo_root,
+                    source_symbol=self._source_symbol,
+                )
             else:
                 self._open_order_ids = []
             bridge_truth_snapshot = _bridge_verified_truth_snapshot(report)
@@ -13054,9 +13086,110 @@ def _runtime_bridge_config_for_lane(
             "bridge_proxy_mode": str(bridge_adapter.get("bridge_proxy_mode") or ""),
             "intent_action": action,
             "intent_type": order_intent.intent_type.value,
+            "managed_exit_policy_id": bridge_adapter.get("managed_exit_policy_id"),
             **_runtime_bridge_entry_execution_metadata(bridge_adapter),
         },
         output_dir=repo_root / "outputs" / "reports" / "ibkr_runtime_route_dispatch" / str(lane_id),
+    )
+
+
+def _create_runtime_bridge_position_manifest(
+    *,
+    order_intent: OrderIntent,
+    bridge_config: IbkrPaperStrategyBridgeConfig,
+    bridge_adapter: dict[str, Any],
+    repo_root: Path,
+    source_symbol: str,
+) -> Any | None:
+    if not order_intent.is_entry:
+        return None
+    bridge_target = dict(bridge_adapter.get("bridge_execution_target") or {})
+    caller_metadata = dict(bridge_config.caller_metadata or {})
+    runtime_identity = {
+        **caller_metadata,
+        "lane_id": bridge_config.strategy_id,
+        "strategy_id": bridge_config.strategy_id,
+        "standalone_strategy_id": bridge_config.strategy_id,
+        "instrument": str(source_symbol).upper(),
+        "local_symbol": bridge_target.get("local_symbol"),
+        "con_id": bridge_target.get("con_id") or bridge_target.get("qualified_contract_identifier"),
+        "contract_key": bridge_target.get("contract_key") or bridge_config.contract_month,
+        "managed_exit_policy_id": caller_metadata.get("managed_exit_policy_id") or bridge_adapter.get("managed_exit_policy_id"),
+    }
+    if not str(runtime_identity.get("managed_exit_policy_id") or "").strip():
+        return None
+    manifest_result = create_manifest_from_order_intent(
+        order_intent=order_intent,
+        runtime_identity=runtime_identity,
+        output_root=Path(repo_root) / DEFAULT_TRACK_B_POSITION_MANAGEMENT_MANIFEST_ROOT,
+        now=order_intent.created_at,
+    )
+    if manifest_result is None:
+        return None
+    manifest = dict(manifest_result.manifest)
+    if not str(manifest.get("managed_exit_policy_id") or "").strip():
+        return None
+    return manifest_result
+
+
+def _update_runtime_bridge_position_manifest_from_fill(
+    *,
+    order_intent: OrderIntent,
+    bridge_config: IbkrPaperStrategyBridgeConfig,
+    bridge_adapter: dict[str, Any],
+    report: Mapping[str, Any],
+    broker_order_id: str,
+    order_metadata: Mapping[str, Any],
+    manifest_result: Any | None,
+    repo_root: Path,
+    source_symbol: str,
+) -> None:
+    if not order_intent.is_entry:
+        return
+    manifest = dict(getattr(manifest_result, "manifest", {}) or {})
+    bridge_target = dict(bridge_adapter.get("bridge_execution_target") or {})
+    local_symbol = (
+        order_metadata.get("local_symbol")
+        or report.get("local_symbol")
+        or bridge_target.get("local_symbol")
+    )
+    con_id = (
+        order_metadata.get("con_id")
+        or report.get("con_id")
+        or bridge_target.get("con_id")
+        or bridge_target.get("qualified_contract_identifier")
+    )
+    manifest_contract = manifest.get("contract") if isinstance(manifest.get("contract"), Mapping) else {}
+    contract_key = report.get("contract_key") or manifest_contract.get("contract_key")
+    if not contract_key:
+        contract_key = f"{str(source_symbol).upper()}-{bridge_config.contract_month}" if bridge_config.contract_month else None
+    update_manifest_from_filled_bridge_result(
+        filled_bridge_result={
+            **dict(report),
+            "order_intent_id": order_intent.order_intent_id,
+            "lane_id": bridge_config.strategy_id,
+            "strategy_id": bridge_config.strategy_id,
+            "instrument": str(source_symbol).upper(),
+            "symbol": str(source_symbol).upper(),
+            "action": bridge_config.action,
+            "quantity": order_intent.quantity,
+            "broker_order_id": broker_order_id,
+            "perm_id": order_metadata.get("perm_id") or report.get("perm_id"),
+            "client_id": order_metadata.get("client_id") or report.get("client_id"),
+            "exec_id": order_metadata.get("execution_id") or report.get("exec_id") or report.get("execution_id"),
+            "account_id": "DUM882026",
+            "local_symbol": local_symbol,
+            "con_id": con_id,
+            "contract_key": contract_key,
+            "managed_exit_policy_id": manifest.get("managed_exit_policy_id")
+            or dict(bridge_config.caller_metadata or {}).get("managed_exit_policy_id")
+            or bridge_adapter.get("managed_exit_policy_id"),
+            "fill_price": order_metadata.get("fill_price") or report.get("fill_price") or report.get("entry_fill_price"),
+            "fill_timestamp": order_metadata.get("fill_timestamp") or report.get("fill_timestamp") or report.get("entry_timestamp"),
+            "lifecycle_id": report.get("lifecycle_id") or f"bridge_fill_{order_intent.order_intent_id}",
+        },
+        output_root=Path(repo_root) / DEFAULT_TRACK_B_POSITION_MANAGEMENT_MANIFEST_ROOT,
+        now=order_intent.created_at,
     )
 
 

@@ -30,6 +30,11 @@ DEFAULT_TRACK_B_PROBATIONARY_LANE_CONFIG_YAML = Path(
 )
 OPEN_MANAGED_METADATA_INCOMPLETE = "OPEN_MANAGED_METADATA_INCOMPLETE"
 POSITION_MANAGEMENT_MANIFEST_SCHEMA_VERSION = "track_b_position_management_manifest_v1"
+PAPER_EXECUTION_TEST_MULE_MANAGED_EXIT_POLICY_ID = "PAPER_DIAGNOSTIC_TIME_BOXED_3X5M_EXIT_V1"
+PAPER_EXECUTION_TEST_MULE_LANE_IDS = {
+    "track_b_paper_execution_test_mule_v1__mgc",
+    "track_b_paper_execution_test_mule_v1__mnq",
+}
 
 
 @dataclass(frozen=True)
@@ -82,6 +87,7 @@ def create_or_update_position_management_manifest(
     config_fingerprint: str | None = None,
     policy_config_refs: Mapping[str, Any] | None = None,
     broker_ownership_identity: Mapping[str, Any] | None = None,
+    lifecycle_id: str | None = None,
     output_root: Path = DEFAULT_TRACK_B_POSITION_MANAGEMENT_MANIFEST_ROOT,
     existing_manifest: Mapping[str, Any] | None = None,
     now: datetime | None = None,
@@ -116,6 +122,7 @@ def create_or_update_position_management_manifest(
         "managed_exit_policy_id": _first_text(managed_exit_policy_id, existing.get("managed_exit_policy_id")),
         "policy_config_refs": dict(policy_config_refs or existing.get("policy_config_refs") or {}),
         "broker_ownership_identity": dict(broker_ownership_identity or existing.get("broker_ownership_identity") or {}),
+        "lifecycle_id": _first_text(lifecycle_id, existing.get("lifecycle_id")),
         "lifecycle_status": str(lifecycle_status),
         "created_at": created_at,
         "updated_at": actual_now.isoformat(),
@@ -178,6 +185,8 @@ def update_manifest_from_filled_bridge_result(
         "client_id": filled_bridge_result.get("client_id"),
         "exec_id": filled_bridge_result.get("exec_id") or filled_bridge_result.get("execution_id"),
         "account_id": filled_bridge_result.get("account_id"),
+        "fill_price": filled_bridge_result.get("fill_price") or filled_bridge_result.get("entry_fill_price"),
+        "fill_timestamp": filled_bridge_result.get("fill_timestamp") or filled_bridge_result.get("entry_timestamp"),
     }
     resolution = resolve_management_metadata(
         source=filled_bridge_result,
@@ -197,6 +206,7 @@ def update_manifest_from_filled_bridge_result(
         lifecycle_status="OPEN_MANAGED" if resolution.complete else OPEN_MANAGED_METADATA_INCOMPLETE,
         policy_config_refs={"metadata_source": resolution.source},
         broker_ownership_identity=identity,
+        lifecycle_id=_first_text(filled_bridge_result.get("lifecycle_id")),
         output_root=output_root,
         existing_manifest=existing,
         now=now,
@@ -262,9 +272,15 @@ def _policy_from_lane_registry(
     for path in paths:
         for lane in _lane_rows_from_path(Path(path)):
             if lane_id and str(lane.get("lane_id") or "") == lane_id:
-                return _first_text(lane.get("managed_exit_policy_id"))
+                policy = _first_text(lane.get("managed_exit_policy_id"))
+                if policy:
+                    return policy
             if strategy_id and str(lane.get("standalone_strategy_id") or "") == strategy_id:
-                return _first_text(lane.get("managed_exit_policy_id"))
+                policy = _first_text(lane.get("managed_exit_policy_id"))
+                if policy:
+                    return policy
+    if lane_id in PAPER_EXECUTION_TEST_MULE_LANE_IDS or strategy_id in PAPER_EXECUTION_TEST_MULE_LANE_IDS:
+        return PAPER_EXECUTION_TEST_MULE_MANAGED_EXIT_POLICY_ID
     return None
 
 

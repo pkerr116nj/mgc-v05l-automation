@@ -85,7 +85,63 @@ def test_fill_updates_manifest_to_open_managed_with_broker_identity(tmp_path: Pa
 
     assert result is not None
     assert result.manifest["lifecycle_status"] == "OPEN_MANAGED"
+    assert result.manifest["lifecycle_id"] is None
     assert result.manifest["broker_ownership_identity"]["broker_order_id"] == "1"
+
+
+def test_fill_update_persists_lifecycle_and_fill_identity(tmp_path: Path) -> None:
+    intent_id = "MGC|1m|2026-05-21T19:46:00Z|BUY_TO_OPEN"
+    create_or_update_position_management_manifest(
+        entry_intent_id=intent_id,
+        lane_id="track_b_paper_execution_test_mule_v1__mgc",
+        strategy_id="track_b_paper_execution_test_mule_v1__mgc",
+        instrument_family="MGC",
+        contract_key="MGC-202606",
+        local_symbol="MGCM6",
+        con_id=712565978,
+        side="LONG",
+        quantity=1,
+        managed_exit_policy_id="PAPER_DIAGNOSTIC_TIME_BOXED_3X5M_EXIT_V1",
+        lifecycle_status="INTENT_CREATED",
+        output_root=tmp_path,
+        now=aware_now(),
+    )
+
+    result = update_manifest_from_filled_bridge_result(
+        filled_bridge_result={
+            "order_intent_id": intent_id,
+            "lifecycle_id": f"bridge_fill_{intent_id}",
+            "lane_id": "track_b_paper_execution_test_mule_v1__mgc",
+            "strategy_id": "track_b_paper_execution_test_mule_v1__mgc",
+            "instrument": "MGC",
+            "action": "BUY",
+            "quantity": 1,
+            "broker_order_id": "20",
+            "perm_id": 1948384228,
+            "client_id": 17086,
+            "exec_id": "exec-1",
+            "account_id": "DUM882026",
+            "local_symbol": "MGCM6",
+            "con_id": 712565978,
+            "fill_price": "4543",
+            "fill_timestamp": "2026-05-21T20:21:35.305374+00:00",
+        },
+        output_root=tmp_path,
+        now=aware_now(),
+    )
+
+    assert result is not None
+    assert result.manifest["lifecycle_status"] == "OPEN_MANAGED"
+    assert result.manifest["lifecycle_id"] == f"bridge_fill_{intent_id}"
+    assert result.manifest["broker_ownership_identity"] == {
+        "account_id": "DUM882026",
+        "broker_order_id": "20",
+        "client_id": 17086,
+        "exec_id": "exec-1",
+        "fill_price": "4543",
+        "fill_timestamp": "2026-05-21T20:21:35.305374+00:00",
+        "perm_id": 1948384228,
+    }
 
 
 def test_metadata_recovers_from_lane_registry_when_manifest_missing(tmp_path: Path) -> None:
@@ -109,6 +165,23 @@ def test_metadata_recovers_from_lane_registry_when_manifest_missing(tmp_path: Pa
         source={"lane_id": "mnq_1x_ny_early_core__us_midday_long"},
         output_root=tmp_path / "manifests",
         lane_registry_paths=(registry,),
+    )
+
+    assert result.complete is True
+    assert result.source == "lane_registry"
+    assert result.managed_exit_policy_id == "PAPER_DIAGNOSTIC_TIME_BOXED_3X5M_EXIT_V1"
+
+
+def test_metadata_recovers_test_mule_policy_without_registry() -> None:
+    result = resolve_management_metadata(
+        source={
+            "lane_id": "track_b_paper_execution_test_mule_v1__mgc",
+            "strategy_id": "track_b_paper_execution_test_mule_v1__mgc",
+            "order_intent_id": "intent-1",
+            "side": "LONG",
+            "quantity": 1,
+            "local_symbol": "MGCM6",
+        },
     )
 
     assert result.complete is True

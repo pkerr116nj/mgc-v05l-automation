@@ -3755,6 +3755,13 @@ def test_probationary_operator_flatten_and_halt_submits_paper_exit_intent(tmp_pa
         execution_engine=execution_engine,
         structured_logger=structured_logger,
         alert_dispatcher=alert_dispatcher,
+        runtime_identity={
+            "standalone_strategy_id": "es_1x_ny_early_core__us_early_long",
+            "strategy_family": "ES_RUNTIME",
+            "instrument": "ES",
+            "lane_id": "es_1x_ny_early_core__us_early_long",
+            "managed_exit_policy_id": "PAPER_DIAGNOSTIC_TIME_BOXED_3X5M_EXIT_V1",
+        },
     )
     engine._state = replace(  # noqa: SLF001
         engine.state,
@@ -3782,6 +3789,13 @@ def test_probationary_operator_flatten_and_halt_submits_paper_exit_intent(tmp_pa
         execution_engine=execution_engine,
         structured_logger=structured_logger,
         alert_dispatcher=alert_dispatcher,
+        runtime_identity={
+            "standalone_strategy_id": "mgc_1x_asia_london_participation__asia_london_long_v5",
+            "strategy_family": "gold_forced_session_baseline_v2",
+            "instrument": "MGC",
+            "lane_id": "mgc_1x_asia_london_participation__asia_london_long_v5",
+            "managed_exit_policy_id": "PAPER_DIAGNOSTIC_TIME_BOXED_3X5M_EXIT_V1",
+        },
     )
 
     assert result is not None
@@ -5284,7 +5298,14 @@ def test_current_supervised_route_rejects_legacy_submit_gate_wiring(tmp_path: Pa
             {
                 "current_order_destination": "ibkr_paper_bridge_submit_capable",
                 "bridge_proxy_mode": "ES_SIGNAL_DIRECT_PHASE1",
-                "bridge_execution_target": {"symbol": "ES", "contract_month": "202606"},
+                "bridge_execution_target": {
+                    "symbol": "ES",
+                    "contract_month": "202606",
+                    "contract_key": "ES-202606",
+                    "local_symbol": "ESM6",
+                    "qualified_contract_identifier": 12345,
+                },
+                "managed_exit_policy_id": "PAPER_DIAGNOSTIC_TIME_BOXED_3X5M_EXIT_V1",
             },
             OrderIntentType.BUY_TO_OPEN,
             "BUY",
@@ -5296,7 +5317,14 @@ def test_current_supervised_route_rejects_legacy_submit_gate_wiring(tmp_path: Pa
             {
                 "current_order_destination": "ibkr_paper_bridge_submit_capable",
                 "bridge_proxy_mode": "GC_SIGNAL_DIRECT_PHASE1",
-                "bridge_execution_target": {"symbol": "GC", "contract_month": "202606"},
+                "bridge_execution_target": {
+                    "symbol": "GC",
+                    "contract_month": "202606",
+                    "contract_key": "GC-202606",
+                    "local_symbol": "GCM6",
+                    "qualified_contract_identifier": 712565978,
+                },
+                "managed_exit_policy_id": "PAPER_DIAGNOSTIC_TIME_BOXED_3X5M_EXIT_V1",
             },
             OrderIntentType.SELL_TO_OPEN,
             "SELL",
@@ -5335,7 +5363,7 @@ def test_midday_runtime_bridge_config_carries_approved_supervised_paper_caller_m
     assert config.submit is True
     assert config.symbol == expected_proxy
     assert config.action == expected_action
-    assert config.caller_metadata == {
+    assert config.caller_metadata.items() >= {
         "caller_type": "supervised_paper_runtime",
         "strategy_id": lane_id,
         "lane_id": lane_id,
@@ -5350,7 +5378,102 @@ def test_midday_runtime_bridge_config_carries_approved_supervised_paper_caller_m
         "bridge_proxy_mode": str(bridge_adapter["bridge_proxy_mode"]),
         "intent_action": expected_action,
         "intent_type": intent_type.value,
+    }.items()
+    assert config.caller_metadata["runtime_cwd"]
+    assert config.caller_metadata["runtime_pid"]
+
+
+def test_runtime_bridge_manifest_created_before_submit_for_mgc_and_mnq_mules(tmp_path: Path) -> None:
+    for symbol, lane_id, local_symbol, con_id in (
+        ("MGC", "track_b_paper_execution_test_mule_v1__mgc", "MGCM6", 712565978),
+        ("MNQ", "track_b_paper_execution_test_mule_v1__mnq", "MNQM6", 770561201),
+    ):
+        order_intent = OrderIntent(
+            order_intent_id=f"{symbol}|1m|2026-05-21T19:46:00Z|BUY_TO_OPEN",
+            bar_id=f"{symbol}|1m|2026-05-21T19:46:00Z",
+            symbol=symbol,
+            intent_type=OrderIntentType.BUY_TO_OPEN,
+            quantity=1,
+            created_at=datetime(2026, 5, 21, 19, 46, tzinfo=timezone.utc),
+            reason_code="trackBPaperExecutionTestMuleEntry",
+        )
+        bridge_adapter = {
+            "current_order_destination": "ibkr_paper_bridge_submit_capable",
+            "bridge_proxy_mode": f"{symbol}_SIGNAL_DIRECT_PHASE1",
+            "bridge_execution_target": {
+                "symbol": symbol,
+                "contract_month": "202606",
+                "contract_key": f"{symbol}-202606",
+                "local_symbol": local_symbol,
+                "qualified_contract_identifier": con_id,
+            },
+            "managed_exit_policy_id": "PAPER_DIAGNOSTIC_TIME_BOXED_3X5M_EXIT_V1",
+        }
+        config = probationary_runtime_module._runtime_bridge_config_for_lane(  # noqa: SLF001
+            repo_root=tmp_path,
+            lane_id=lane_id,
+            source_symbol=symbol,
+            order_intent=order_intent,
+            bridge_adapter=bridge_adapter,
+        )
+
+        result = probationary_runtime_module._create_runtime_bridge_position_manifest(  # noqa: SLF001
+            order_intent=order_intent,
+            bridge_config=config,
+            bridge_adapter=bridge_adapter,
+            repo_root=tmp_path,
+            source_symbol=symbol,
+        )
+
+        assert result is not None
+        assert result.manifest["entry_intent_id"] == order_intent.order_intent_id
+        assert result.manifest["lane_id"] == lane_id
+        assert result.manifest["managed_exit_policy_id"] == "PAPER_DIAGNOSTIC_TIME_BOXED_3X5M_EXIT_V1"
+        assert result.manifest["contract"]["local_symbol"] == local_symbol
+
+
+def test_runtime_bridge_manifest_created_before_submit_for_b_plus_entry(tmp_path: Path) -> None:
+    order_intent = OrderIntent(
+        order_intent_id="MNQ|1m|2026-05-21T15:07:00Z|BUY_TO_OPEN",
+        bar_id="MNQ|1m|2026-05-21T15:07:00Z",
+        symbol="MNQ",
+        intent_type=OrderIntentType.BUY_TO_OPEN,
+        quantity=1,
+        created_at=datetime(2026, 5, 21, 15, 7, tzinfo=timezone.utc),
+        reason_code="B_PLUS_SETUP_SCORE",
+    )
+    bridge_adapter = {
+        "current_order_destination": "ibkr_paper_bridge_submit_capable",
+        "bridge_proxy_mode": "MNQ_SIGNAL_DIRECT_PHASE1",
+        "bridge_execution_target": {
+            "symbol": "MNQ",
+            "contract_month": "202606",
+            "contract_key": "MNQ-202606",
+            "local_symbol": "MNQM6",
+            "qualified_contract_identifier": 770561201,
+        },
+        "managed_exit_policy_id": "PAPER_DIAGNOSTIC_TIME_BOXED_3X5M_EXIT_V1",
     }
+    config = probationary_runtime_module._runtime_bridge_config_for_lane(  # noqa: SLF001
+        repo_root=tmp_path,
+        lane_id="mnq_1x_ny_early_core__us_midday_long",
+        source_symbol="MNQ",
+        order_intent=order_intent,
+        bridge_adapter=bridge_adapter,
+    )
+
+    result = probationary_runtime_module._create_runtime_bridge_position_manifest(  # noqa: SLF001
+        order_intent=order_intent,
+        bridge_config=config,
+        bridge_adapter=bridge_adapter,
+        repo_root=tmp_path,
+        source_symbol="MNQ",
+    )
+
+    assert result is not None
+    assert result.manifest["entry_intent_id"] == order_intent.order_intent_id
+    assert result.manifest["lane_id"] == "mnq_1x_ny_early_core__us_midday_long"
+    assert result.manifest["managed_exit_policy_id"] == "PAPER_DIAGNOSTIC_TIME_BOXED_3X5M_EXIT_V1"
 
 
 def test_submit_capable_lane_entry_invokes_ibkr_bridge_without_local_fill(tmp_path: Path) -> None:
@@ -5378,10 +5501,22 @@ def test_submit_capable_lane_entry_invokes_ibkr_bridge_without_local_fill(tmp_pa
     broker = probationary_runtime_module._IbkrPaperBridgeRuntimeBroker(  # noqa: SLF001
         lane_id="es_1x_ny_early_core__us_early_long",
         source_symbol="ES",
-        bridge_adapter={"current_order_destination": "ibkr_paper_bridge_submit_capable", "bridge_proxy_mode": "ES_SIGNAL_DIRECT_PHASE1", "bridge_execution_target": {"symbol": "ES", "contract_month": "202606"}},
+        bridge_adapter={
+            "current_order_destination": "ibkr_paper_bridge_submit_capable",
+            "bridge_proxy_mode": "ES_SIGNAL_DIRECT_PHASE1",
+            "bridge_execution_target": {
+                "symbol": "ES",
+                "contract_month": "202606",
+                "contract_key": "ES-202606",
+                "local_symbol": "ESM6",
+                "qualified_contract_identifier": 12345,
+            },
+            "managed_exit_policy_id": "PAPER_DIAGNOSTIC_TIME_BOXED_3X5M_EXIT_V1",
+        },
         repo_root=tmp_path,
         bridge_runner=fake_bridge_runner,
     )
+    broker.connect()
     execution_engine = ExecutionEngine(broker=broker)
     strategy_engine = StrategyEngine(
         settings=settings.model_copy(update={"symbol": "ES"}),
@@ -5420,6 +5555,133 @@ def test_submit_capable_lane_entry_invokes_ibkr_bridge_without_local_fill(tmp_pa
     assert intent_rows[0]["broker_order_id"] == "ibkr-runtime-entry-1"
     assert not str(intent_rows[0]["broker_order_id"]).startswith("paper-")
     assert execution_engine.last_submit_attempt()["route_destination"] == "ibkr_paper_bridge_submit_capable"
+
+
+def test_submit_capable_entry_blocks_before_bridge_when_manifest_policy_missing(tmp_path: Path) -> None:
+    broker = probationary_runtime_module._IbkrPaperBridgeRuntimeBroker(  # noqa: SLF001
+        lane_id="mnq_1x_ny_early_core__us_midday_long",
+        source_symbol="MNQ",
+        bridge_adapter={
+            "current_order_destination": "ibkr_paper_bridge_submit_capable",
+            "bridge_proxy_mode": "MNQ_SIGNAL_DIRECT_PHASE1",
+            "bridge_execution_target": {
+                "symbol": "MNQ",
+                "contract_month": "202606",
+                "contract_key": "MNQ-202606",
+                "local_symbol": "MNQM6",
+                "qualified_contract_identifier": 770561201,
+            },
+        },
+        repo_root=tmp_path,
+        bridge_runner=lambda *, config: pytest.fail("bridge runner should not be invoked without manifest policy"),
+    )
+    broker.connect()
+    order_intent = OrderIntent(
+        order_intent_id="MNQ|1m|2026-05-21T15:07:00Z|BUY_TO_OPEN",
+        bar_id="MNQ|1m|2026-05-21T15:07:00Z",
+        symbol="MNQ",
+        intent_type=OrderIntentType.BUY_TO_OPEN,
+        quantity=1,
+        created_at=datetime(2026, 5, 21, 15, 7, tzinfo=timezone.utc),
+        reason_code="missing_manifest_policy_test",
+    )
+
+    with pytest.raises(RuntimeError, match="POSITION_MANAGEMENT_MANIFEST_REQUIRED"):
+        broker.submit_order(order_intent)
+
+    manifest_root = tmp_path / "outputs" / "track_b_execution_core" / "position_management_manifests"
+    assert not list(manifest_root.glob("*.json")) if manifest_root.exists() else True
+
+
+def test_runtime_bridge_filled_entry_updates_position_manifest(tmp_path: Path) -> None:
+    def fake_bridge_runner(*, config):
+        return probationary_runtime_module.IbkrPaperStrategyBridgeArtifacts(
+            classification="PAPER_STRATEGY_ORDER_FILLED",
+            report={
+                "detail": "entry filled",
+                "broker_order_id": "20",
+                "delegated_result": {
+                    "report": {
+                        "preview_payload": {
+                            "contract": {
+                                "symbol": "MGC",
+                                "local_symbol": "MGCM6",
+                                "qualified_contract_identifier": 712565978,
+                            },
+                        },
+                        "submit_cancel_lifecycle": {
+                            "submitted_order_id": 20,
+                            "submitted_perm_id": 1948384228,
+                            "latest_order_status": {
+                                "order_id": 20,
+                                "perm_id": 1948384228,
+                                "client_id": 17086,
+                                "status": "Filled",
+                                "avg_fill_price": 4543.0,
+                                "updated_at": "2026-05-21T20:21:35.305374+00:00",
+                            },
+                            "executions_after_submit": [
+                                {
+                                    "broker_order_id": 20,
+                                    "execution_id": "exec-20",
+                                    "symbol": "MGC",
+                                    "local_symbol": "MGCM6",
+                                    "account_id": "DUM882026",
+                                    "price": 4543.0,
+                                    "quantity": 1,
+                                    "executed_at": "2026-05-21T20:21:35.305374+00:00",
+                                }
+                            ],
+                        },
+                    },
+                },
+            },
+            audit_events=[],
+        )
+
+    broker = probationary_runtime_module._IbkrPaperBridgeRuntimeBroker(  # noqa: SLF001
+        lane_id="track_b_paper_execution_test_mule_v1__mgc",
+        source_symbol="MGC",
+        bridge_adapter={
+            "current_order_destination": "ibkr_paper_bridge_submit_capable",
+            "bridge_proxy_mode": "MGC_SIGNAL_DIRECT_PHASE1",
+            "bridge_execution_target": {
+                "symbol": "MGC",
+                "contract_month": "202606",
+                "contract_key": "MGC-202606",
+                "local_symbol": "MGCM6",
+                "qualified_contract_identifier": 712565978,
+            },
+            "managed_exit_policy_id": "PAPER_DIAGNOSTIC_TIME_BOXED_3X5M_EXIT_V1",
+        },
+        repo_root=tmp_path,
+        bridge_runner=fake_bridge_runner,
+    )
+    broker.connect()
+    order_intent = OrderIntent(
+        order_intent_id="MGC|1m|2026-05-21T19:46:00Z|BUY_TO_OPEN",
+        bar_id="MGC|1m|2026-05-21T19:46:00Z",
+        symbol="MGC",
+        intent_type=OrderIntentType.BUY_TO_OPEN,
+        quantity=1,
+        created_at=datetime(2026, 5, 21, 19, 46, tzinfo=timezone.utc),
+        reason_code="trackBPaperExecutionTestMuleEntry",
+    )
+
+    assert broker.submit_order(order_intent) == "20"
+
+    manifest_files = list(
+        (tmp_path / "outputs" / "track_b_execution_core" / "position_management_manifests").glob("*.json")
+    )
+    assert len(manifest_files) == 1
+    manifest = json.loads(manifest_files[0].read_text(encoding="utf-8"))
+    assert manifest["lifecycle_status"] == "OPEN_MANAGED"
+    assert manifest["lifecycle_id"] == f"bridge_fill_{order_intent.order_intent_id}"
+    assert manifest["broker_ownership_identity"]["broker_order_id"] == "20"
+    assert manifest["broker_ownership_identity"]["perm_id"] == 1948384228
+    assert manifest["broker_ownership_identity"]["fill_price"] == "4543.0"
+    assert manifest["broker_ownership_identity"]["fill_timestamp"] == "2026-05-21T20:21:35.305374+00:00"
+    assert manifest["managed_exit_policy_id"] == "PAPER_DIAGNOSTIC_TIME_BOXED_3X5M_EXIT_V1"
 
 
 def test_submit_capable_lane_records_cancelled_unfilled_exit_as_terminal_order(tmp_path: Path) -> None:
@@ -5462,6 +5724,7 @@ def test_submit_capable_lane_records_cancelled_unfilled_exit_as_terminal_order(t
         repo_root=tmp_path,
         bridge_runner=fake_bridge_runner,
     )
+    broker.connect()
     execution_engine = ExecutionEngine(broker=broker)
     exit_intent = OrderIntent(
         order_intent_id="MNQ|1m|2026-05-13T10:15:00Z|SELL_TO_CLOSE",
@@ -6577,11 +6840,19 @@ def test_submit_capable_pending_order_is_not_due_for_replay_fill(tmp_path: Path)
         bridge_adapter={
             "current_order_destination": "ibkr_paper_bridge_submit_capable",
             "bridge_proxy_mode": "MGC_SIGNAL_DIRECT_PHASE1",
-            "bridge_execution_target": {"symbol": "MGC", "contract_month": "202606"},
+            "bridge_execution_target": {
+                "symbol": "MGC",
+                "contract_month": "202606",
+                "contract_key": "MGC-202606",
+                "local_symbol": "MGCM6",
+                "qualified_contract_identifier": 712565978,
+            },
+            "managed_exit_policy_id": "PAPER_DIAGNOSTIC_TIME_BOXED_3X5M_EXIT_V1",
         },
         repo_root=tmp_path,
         bridge_runner=fake_bridge_runner,
     )
+    broker.connect()
     execution_engine = ExecutionEngine(broker=broker)
     strategy_engine = StrategyEngine(
         settings=settings.model_copy(update={"symbol": "MGC"}),
@@ -6589,6 +6860,13 @@ def test_submit_capable_pending_order_is_not_due_for_replay_fill(tmp_path: Path)
         execution_engine=execution_engine,
         structured_logger=structured_logger,
         alert_dispatcher=alert_dispatcher,
+        runtime_identity={
+            "standalone_strategy_id": "mgc_1x_asia_london_participation__asia_london_long_v5",
+            "strategy_family": "gold_forced_session_baseline_v2",
+            "instrument": "MGC",
+            "lane_id": "mgc_1x_asia_london_participation__asia_london_long_v5",
+            "managed_exit_policy_id": "PAPER_DIAGNOSTIC_TIME_BOXED_3X5M_EXIT_V1",
+        },
     )
     finalized_bar = _build_bar(datetime(2026, 5, 12, 5, 45, tzinfo=ZoneInfo("America/New_York")))
     _seed_strategy_warmup(strategy_engine, finalized_bar)
@@ -6969,16 +7247,25 @@ def test_submit_capable_lane_filled_bridge_result_persists_fill_not_blocked(tmp_
         bridge_adapter={
             "current_order_destination": "ibkr_paper_bridge_submit_capable",
             "bridge_proxy_mode": "MNQ_SIGNAL_DIRECT_PHASE1",
-            "bridge_execution_target": {"symbol": "MNQ", "contract_month": "202606"},
+            "bridge_execution_target": {
+                "symbol": "MNQ",
+                "contract_month": "202606",
+                "contract_key": "MNQ-202606",
+                "local_symbol": "MNQM6",
+                "qualified_contract_identifier": 770561201,
+            },
+            "managed_exit_policy_id": "PAPER_DIAGNOSTIC_TIME_BOXED_3X5M_EXIT_V1",
         },
         repo_root=tmp_path,
         bridge_runner=fake_bridge_runner,
     )
+    broker.connect()
     runtime_identity = {
         "standalone_strategy_id": "mnq_1x_ny_early_core__us_late_long",
         "strategy_family": "MNQ_RUNTIME",
         "instrument": "MNQ",
         "lane_id": "mnq_1x_ny_early_core__us_late_long",
+        "managed_exit_policy_id": "PAPER_DIAGNOSTIC_TIME_BOXED_3X5M_EXIT_V1",
     }
     execution_engine = ExecutionEngine(broker=broker)
     strategy_engine = StrategyEngine(
@@ -7072,16 +7359,25 @@ def test_submit_capable_lane_filled_bridge_persistence_failure_marks_review_requ
         bridge_adapter={
             "current_order_destination": "ibkr_paper_bridge_submit_capable",
             "bridge_proxy_mode": "MNQ_SIGNAL_DIRECT_PHASE1",
-            "bridge_execution_target": {"symbol": "MNQ", "contract_month": "202606"},
+            "bridge_execution_target": {
+                "symbol": "MNQ",
+                "contract_month": "202606",
+                "contract_key": "MNQ-202606",
+                "local_symbol": "MNQM6",
+                "qualified_contract_identifier": 770561201,
+            },
+            "managed_exit_policy_id": "PAPER_DIAGNOSTIC_TIME_BOXED_3X5M_EXIT_V1",
         },
         repo_root=tmp_path,
         bridge_runner=fake_bridge_runner,
     )
+    broker.connect()
     runtime_identity = {
         "standalone_strategy_id": "mnq_1x_ny_early_core__us_late_long",
         "strategy_family": "MNQ_RUNTIME",
         "instrument": "MNQ",
         "lane_id": "mnq_1x_ny_early_core__us_late_long",
+        "managed_exit_policy_id": "PAPER_DIAGNOSTIC_TIME_BOXED_3X5M_EXIT_V1",
     }
     execution_engine = ExecutionEngine(broker=broker)
     strategy_engine = StrategyEngine(
@@ -7200,7 +7496,14 @@ def test_submit_capable_lane_exit_invokes_ibkr_bridge_without_local_fill(tmp_pat
             {
                 "current_order_destination": "ibkr_paper_bridge_submit_capable",
                 "bridge_proxy_mode": "ES_SIGNAL_DIRECT_PHASE1",
-                "bridge_execution_target": {"symbol": "ES", "contract_month": "202606"},
+                "bridge_execution_target": {
+                    "symbol": "ES",
+                    "contract_month": "202606",
+                    "contract_key": "ES-202606",
+                    "local_symbol": "ESM6",
+                    "qualified_contract_identifier": 12345,
+                },
+                "managed_exit_policy_id": "PAPER_DIAGNOSTIC_TIME_BOXED_3X5M_EXIT_V1",
             },
             OrderIntentType.BUY_TO_OPEN,
             "BUY",
@@ -7267,30 +7570,27 @@ def test_midday_runtime_bridge_runner_receives_supervised_paper_caller_context(
     with pytest.raises(RuntimeError, match="BLOCKED_NOT_SENT_TO_BROKER: downstream_gate_failed"):
         broker.submit_order(order_intent)
 
-    assert captured == [
-        {
-            "caller_path": "probationary_paper_runtime_lane",
-            "caller_metadata": {
-                "caller_type": "supervised_paper_runtime",
-                "strategy_id": lane_id,
-                "lane_id": lane_id,
-                "source_instrument": source_symbol,
-                "executable_proxy": expected_proxy,
-                "paper_only": True,
-                "mode": "PAPER",
-                "host": "127.0.0.1",
-                "port": 7497,
-                "account_id": "DUM882026",
-                "route_destination": "ibkr_paper_bridge_submit_capable",
-                "bridge_proxy_mode": str(bridge_adapter["bridge_proxy_mode"]),
-                "intent_action": expected_action,
-                "intent_type": intent_type.value,
-            },
-            "strategy_id": lane_id,
-            "symbol": expected_proxy,
-            "action": expected_action,
-        }
-    ]
+    assert len(captured) == 1
+    assert captured[0]["caller_path"] == "probationary_paper_runtime_lane"
+    assert captured[0]["caller_metadata"].items() >= {
+        "caller_type": "supervised_paper_runtime",
+        "strategy_id": lane_id,
+        "lane_id": lane_id,
+        "source_instrument": source_symbol,
+        "executable_proxy": expected_proxy,
+        "paper_only": True,
+        "mode": "PAPER",
+        "host": "127.0.0.1",
+        "port": 7497,
+        "account_id": "DUM882026",
+        "route_destination": "ibkr_paper_bridge_submit_capable",
+        "bridge_proxy_mode": str(bridge_adapter["bridge_proxy_mode"]),
+        "intent_action": expected_action,
+        "intent_type": intent_type.value,
+    }.items()
+    assert captured[0]["strategy_id"] == lane_id
+    assert captured[0]["symbol"] == expected_proxy
+    assert captured[0]["action"] == expected_action
     assert broker.last_submit_context()["caller_path"] == "probationary_paper_runtime_lane"
     assert broker.last_submit_context()["caller_metadata"]["caller_type"] == "supervised_paper_runtime"
     assert broker.last_submit_context()["bridge_detail"] == "downstream_gate_failed"
@@ -7316,7 +7616,14 @@ def test_midday_runtime_bridge_block_writes_route_proof_traces(tmp_path: Path) -
         bridge_adapter={
             "current_order_destination": "ibkr_paper_bridge_submit_capable",
             "bridge_proxy_mode": "GC_SIGNAL_DIRECT_PHASE1",
-            "bridge_execution_target": {"symbol": "GC", "contract_month": "202606"},
+            "bridge_execution_target": {
+                "symbol": "GC",
+                "contract_month": "202606",
+                "contract_key": "GC-202606",
+                "local_symbol": "GCM6",
+                "qualified_contract_identifier": 712565978,
+            },
+            "managed_exit_policy_id": "PAPER_DIAGNOSTIC_TIME_BOXED_3X5M_EXIT_V1",
         },
         repo_root=tmp_path,
         bridge_runner=fake_bridge_runner,
@@ -7366,7 +7673,14 @@ def test_pre_submit_no_broker_effect_bridge_block_does_not_escape_execution_engi
         bridge_adapter={
             "current_order_destination": "ibkr_paper_bridge_submit_capable",
             "bridge_proxy_mode": "MGC_SIGNAL_DIRECT_PHASE1",
-            "bridge_execution_target": {"symbol": "MGC", "contract_month": "202606"},
+            "bridge_execution_target": {
+                "symbol": "MGC",
+                "contract_month": "202606",
+                "contract_key": "MGC-202606",
+                "local_symbol": "MGCM6",
+                "qualified_contract_identifier": 712565978,
+            },
+            "managed_exit_policy_id": "PAPER_DIAGNOSTIC_TIME_BOXED_3X5M_EXIT_V1",
         },
         repo_root=tmp_path,
         bridge_runner=fake_bridge_runner,
@@ -7394,6 +7708,13 @@ def test_pre_submit_no_broker_effect_bridge_block_does_not_escape_execution_engi
     assert submit_attempt["broker_effect_classification"] == "PRE_SUBMIT_BLOCKED_NO_BROKER_EFFECT"
     assert broker.get_open_orders() == []
     assert broker.get_position()["quantity"] == 0
+    manifest_files = list(
+        (tmp_path / "outputs" / "track_b_execution_core" / "position_management_manifests").glob("*.json")
+    )
+    assert len(manifest_files) == 1
+    manifest = json.loads(manifest_files[0].read_text(encoding="utf-8"))
+    assert manifest["lifecycle_status"] == "INTENT_CREATED"
+    assert not manifest["broker_ownership_identity"]
 
 
 def test_midday_runtime_bridge_success_writes_route_proof_traces(tmp_path: Path) -> None:
@@ -7427,7 +7748,14 @@ def test_midday_runtime_bridge_success_writes_route_proof_traces(tmp_path: Path)
         bridge_adapter={
             "current_order_destination": "ibkr_paper_bridge_submit_capable",
             "bridge_proxy_mode": "ES_SIGNAL_DIRECT_PHASE1",
-            "bridge_execution_target": {"symbol": "ES", "contract_month": "202606"},
+            "bridge_execution_target": {
+                "symbol": "ES",
+                "contract_month": "202606",
+                "contract_key": "ES-202606",
+                "local_symbol": "ESM6",
+                "qualified_contract_identifier": 12345,
+            },
+            "managed_exit_policy_id": "PAPER_DIAGNOSTIC_TIME_BOXED_3X5M_EXIT_V1",
         },
         repo_root=tmp_path,
         bridge_runner=fake_bridge_runner,
@@ -7471,15 +7799,28 @@ def test_submit_capable_lane_bridge_block_does_not_create_local_fill(tmp_path: P
     broker = probationary_runtime_module._IbkrPaperBridgeRuntimeBroker(  # noqa: SLF001
         lane_id="mnq_1x_ny_early_core__us_early_long",
         source_symbol="MNQ",
-        bridge_adapter={"current_order_destination": "ibkr_paper_bridge_submit_capable", "bridge_proxy_mode": "MNQ_SIGNAL_DIRECT_PHASE1", "bridge_execution_target": {"symbol": "MNQ", "contract_month": "202606"}},
+        bridge_adapter={
+            "current_order_destination": "ibkr_paper_bridge_submit_capable",
+            "bridge_proxy_mode": "MNQ_SIGNAL_DIRECT_PHASE1",
+            "bridge_execution_target": {
+                "symbol": "MNQ",
+                "contract_month": "202606",
+                "contract_key": "MNQ-202606",
+                "local_symbol": "MNQM6",
+                "qualified_contract_identifier": 770561201,
+            },
+            "managed_exit_policy_id": "PAPER_DIAGNOSTIC_TIME_BOXED_3X5M_EXIT_V1",
+        },
         repo_root=tmp_path,
         bridge_runner=fake_bridge_runner,
     )
+    broker.connect()
     runtime_identity = {
         "standalone_strategy_id": "mnq_1x_ny_early_core__us_early_long",
         "strategy_family": "MNQ_RUNTIME",
         "instrument": "MNQ",
         "lane_id": "mnq_1x_ny_early_core__us_early_long",
+        "managed_exit_policy_id": "PAPER_DIAGNOSTIC_TIME_BOXED_3X5M_EXIT_V1",
     }
     execution_engine = ExecutionEngine(broker=broker)
     strategy_engine = StrategyEngine(
