@@ -9,6 +9,8 @@ eligibility.
 from __future__ import annotations
 
 import json
+import os
+import subprocess
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -266,11 +268,24 @@ def _agent_contracts(repo_root: Path) -> tuple[AgentContract, ...]:
             display_name="Broker truth refresher",
             expected_command_fragments=("mgc_v05l.app.ibkr_broker_truth_refresher", "--service", "--read-only"),
             pid_paths=(str(root / "var" / "track_b_broker_truth_refresh_service.pid"),),
-            heartbeat_artifacts=(),
+            heartbeat_artifacts=(
+                ArtifactContract(
+                    "broker_truth_heartbeat",
+                    str(root / "var" / "track_b_broker_truth_refresh_heartbeat.json"),
+                    150.0,
+                    True,
+                ),
+            ),
             status_artifacts=(
                 ArtifactContract(
                     "broker_truth_status",
-                    str(root / "outputs" / "reports" / "ibkr_broker_truth_refresh" / "latest_broker_truth_refresh_status.json"),
+                    str(
+                        root
+                        / "outputs"
+                        / "reports"
+                        / "ibkr_read_only_verification"
+                        / "ibkr_broker_truth_refresh_status.json"
+                    ),
                     150.0,
                     True,
                     ("generated_at", "last_success_at", "completed_at"),
@@ -399,9 +414,10 @@ def _read_agent_state(
     running = False
     root_ok = True
     command_ok = True
+    probe_process = process_probe or _default_process_probe
     for pid_path in contract.pid_paths:
         pid = _read_pid(Path(pid_path))
-        probe = _mapping(process_probe(pid)) if pid and process_probe else {}
+        probe = _mapping(probe_process(pid)) if pid else {}
         if pid and probe:
             running = running or _bool(probe.get("running"))
             cwd = str(probe.get("cwd") or "")
@@ -558,6 +574,48 @@ def _read_pid(path: Path) -> int | None:
         return int(text)
     except ValueError:
         return None
+
+
+def _default_process_probe(pid: int) -> dict[str, Any]:
+    running = False
+    try:
+        os.kill(pid, 0)
+        running = True
+    except PermissionError:
+        running = True
+    except ProcessLookupError:
+        running = False
+    except OSError:
+        running = False
+    command = ""
+    cwd = ""
+    if running:
+        try:
+            proc = subprocess.run(
+                ["ps", "-p", str(pid), "-o", "command="],
+                check=False,
+                capture_output=True,
+                text=True,
+                timeout=2,
+            )
+            command = proc.stdout.strip()
+        except (OSError, subprocess.SubprocessError):
+            command = ""
+        try:
+            proc = subprocess.run(
+                ["lsof", "-a", "-p", str(pid), "-d", "cwd", "-Fn"],
+                check=False,
+                capture_output=True,
+                text=True,
+                timeout=2,
+            )
+            for line in proc.stdout.splitlines():
+                if line.startswith("n"):
+                    cwd = line[1:]
+                    break
+        except (OSError, subprocess.SubprocessError):
+            cwd = ""
+    return {"pid": pid, "running": running, "command": command, "cwd": cwd}
 
 
 def _read_json(path: Path) -> dict[str, Any]:

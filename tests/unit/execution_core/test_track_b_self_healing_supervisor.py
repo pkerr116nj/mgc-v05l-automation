@@ -1,17 +1,40 @@
 from __future__ import annotations
 
+import json
 from datetime import datetime, timezone
+from pathlib import Path
 
 from mgc_v05l.execution_core.track_b_self_healing_supervisor import (
     DEFAULT_SELF_HEALING_HEALTH_ARTIFACT,
     build_track_b_self_healing_agent_registry,
+    build_track_b_self_healing_health,
     classify_track_b_self_healing_health,
+    write_track_b_self_healing_health,
 )
 
 
 NOW = datetime(2026, 5, 21, 3, 45, tzinfo=timezone.utc)
 DEV_ROOT = "/Users/patrick/Dev/MGC-v05l-automation"
 RECONCILED = "TRACK_B_PAPER_BROKER_RECONCILED"
+
+
+def test_writer_builds_and_writes_self_healing_artifact(tmp_path: Path) -> None:
+    _write_runtime_artifacts(tmp_path)
+    health = build_track_b_self_healing_health(
+        repo_root=tmp_path,
+        expected_root=tmp_path,
+        now=NOW,
+        process_probe=_process_probe(tmp_path),
+    )
+    output = tmp_path / DEFAULT_SELF_HEALING_HEALTH_ARTIFACT
+    write_track_b_self_healing_health(output_path=output, health=health)
+
+    written = json.loads(output.read_text(encoding="utf-8"))
+    assert written["classification"] == "SELF_HEALING_READY"
+    assert written["auto_restart_allowed"] is False
+    assert written["live_money_eligible"] is False
+    assert written["agents"]["paper_runtime"]["restart_eligible"] is False
+    assert written["agents"]["broker_truth_refresher"]["health_state"] == "HEALTHY"
 
 
 def test_registry_defines_expected_track_b_agents() -> None:
@@ -159,3 +182,61 @@ def _agent(*, required: bool = True) -> dict:
         ),
         "live_money_eligible": False,
     }
+
+
+def _write_runtime_artifacts(repo_root: Path) -> None:
+    def write(rel: str, payload: dict) -> None:
+        path = repo_root / rel
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(payload), encoding="utf-8")
+
+    fresh = {"generated_at": NOW.isoformat(), "classification": "HEALTHY", "live_money_eligible": False}
+    write("outputs/reports/phase1_databento_live_runtime_candles/latest_phase1_databento_live_listener_status.json", {**fresh, "latest_record_at": NOW.isoformat()})
+    write("outputs/reports/phase1_databento_live_runtime_candles/latest_phase1_databento_live_supervisor_status.json", fresh)
+    write("var/track_b_broker_truth_refresh_heartbeat.json", fresh)
+    write("outputs/reports/ibkr_read_only_verification/ibkr_broker_truth_refresh_status.json", {**fresh, "last_success_at": NOW.isoformat()})
+    write("outputs/operator_dashboard/runtime/latest_broker_truth_lease.json", {**fresh, "lease_state": "ACTIVE"})
+    write("var/track_b_operator_readiness_refresh_heartbeat.json", fresh)
+    write("outputs/reports/track_b_operator_readiness_refresher/latest_track_b_operator_readiness_refresher_status.json", {**fresh, "last_refresh_finished_at": NOW.isoformat()})
+    write("outputs/operator_dashboard/runtime/latest_canonical_readiness.json", {**fresh, "canonical_readiness": "READY_SUBMIT_CAPABLE"})
+    write("outputs/probationary_pattern_engine/paper_session/operator_status.json", fresh)
+    write(
+        "outputs/reports/track_b_paper_broker_reconciliation/latest_track_b_paper_broker_reconciliation.json",
+        {
+            **fresh,
+            "classification": RECONCILED,
+            "broker_reconciled": True,
+            "unknown_broker_open_order_count": 0,
+            "track_b_broker_open_order_count": 0,
+            "review_required_count": 0,
+            "lifecycle_open_position_count": 0,
+        },
+    )
+    pid_paths = (
+        "var/phase1_databento_live_candles_service.pid",
+        "var/phase1_databento_live_candles_child.pid",
+        "var/track_b_broker_truth_refresh_service.pid",
+        "var/track_b_operator_readiness_refresh_service.pid",
+        "var/track_b_operator_readiness_refresh_child.pid",
+        "outputs/probationary_pattern_engine/paper_session/runtime/probationary_paper.pid",
+    )
+    for idx, rel in enumerate(pid_paths, start=1001):
+        path = repo_root / rel
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(str(idx), encoding="utf-8")
+
+
+def _process_probe(repo_root: Path):
+    commands = {
+        1001: "python -m mgc_v05l.execution_core.phase1_databento_live_runtime_candles --mode service",
+        1002: "python -m mgc_v05l.execution_core.phase1_databento_live_runtime_candles --mode service",
+        1003: "python -m mgc_v05l.app.ibkr_broker_truth_refresher --service --read-only",
+        1004: "python -m mgc_v05l.app.track_b_operator_readiness_refresher --service",
+        1005: "python -m mgc_v05l.app.track_b_operator_readiness_refresher --service",
+        1006: "python -m mgc_v05l.app.main probationary-paper-soak",
+    }
+
+    def probe(pid: int) -> dict:
+        return {"running": pid in commands, "cwd": str(repo_root), "command": commands.get(pid, "")}
+
+    return probe

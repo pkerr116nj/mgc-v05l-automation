@@ -85,3 +85,16 @@ The V1 supervisor may produce an artifact and dashboard/status warnings. It may 
 ## Recommended Second Slice
 
 Add a CLI/status script that writes `latest_track_b_self_healing_health.json`, surfaces it in Execution Truth, and optionally restarts only sidecars whose contracts are `AUTO_RESTART_ELIGIBLE`. Keep PAPER runtime restart behind an explicit operator approval gate.
+
+
+## Slice 2 Status Writer
+
+Slice 2 adds the read-only status writer and dashboard visibility. Operators can refresh and inspect the advisory contract with:
+
+`bash scripts/status-track-b-self-healing-supervisor`
+
+The command writes:
+
+`outputs/operator_dashboard/runtime/latest_track_b_self_healing_health.json`
+
+It prints the overall classification, per-agent health state, restart eligibility, restart candidates, restart blockers, and operator-required agents. The dashboard surfaces the same classification in Execution Truth, but it remains advisory only. Canonical readiness, broker lease, and reconciliation remain the submit/precheck authority.

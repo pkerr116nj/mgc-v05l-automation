@@ -3231,6 +3231,40 @@ def test_track_b_operator_status_overlay_does_not_scan_full_paper_ledger(tmp_pat
 
 
 
+def test_self_healing_health_compact_is_advisory_only() -> None:
+    compact = operator_dashboard_module._compact_track_b_self_healing_health(
+        {
+            "generated_at": "2999-01-01T00:00:00+00:00",
+            "classification": "AUTO_RESTART_ELIGIBLE",
+            "auto_restart_allowed": True,
+            "restart_candidates": ["broker_truth_refresher"],
+            "blockers": [],
+            "warnings": ["broker_truth_refresher_not_running"],
+            "live_money_eligible": False,
+            "agents": {
+                "broker_truth_refresher": {
+                    "display_name": "Broker truth refresher",
+                    "health_state": "UNHEALTHY",
+                    "process_running": False,
+                    "restart_eligible": True,
+                    "restart_candidate": True,
+                    "restart_blockers": ["unknown_open_orders"],
+                }
+            },
+        },
+        Path("outputs/operator_dashboard/runtime/latest_track_b_self_healing_health.json"),
+    )
+
+    assert compact["classification"] == "AUTO_RESTART_ELIGIBLE"
+    assert compact["advisory_only"] is True
+    assert compact["canonical_readiness_authority"] is False
+    assert compact["submit_authority"] is False
+    assert compact["paper_proof_invoked"] is False
+    assert compact["live_money_eligible"] is False
+    assert compact["restart_candidates"] == ["broker_truth_refresher"]
+    assert compact["agents"][0]["restart_candidate"] is True
+
+
 def test_operator_readiness_refresh_status_marks_stale_ready_as_stale() -> None:
     compact = operator_dashboard_module._compact_track_b_operator_readiness_refresh_status(
         {
@@ -3284,11 +3318,13 @@ def test_track_b_paper_trading_payload_reads_compact_summaries_without_full_ledg
     monitor_dir = tmp_path / "outputs" / "track_b_execution_core" / "track_b_shadow_monitor"
     broker_truth_dir = tmp_path / "outputs" / "reports" / "ibkr_read_only_verification"
     readiness_refresh_dir = tmp_path / "outputs" / "reports" / "track_b_operator_readiness_refresher"
+    runtime_dir = tmp_path / "outputs" / "operator_dashboard" / "runtime"
     ledger_dir.mkdir(parents=True)
     operator_status_dir.mkdir(parents=True)
     monitor_dir.mkdir(parents=True)
     broker_truth_dir.mkdir(parents=True)
     readiness_refresh_dir.mkdir(parents=True)
+    runtime_dir.mkdir(parents=True)
     (operator_status_dir / "latest_operator_status_summary.json").write_text(
         json.dumps({"schema_version": "track_b_operator_status_v1", "live_money_readiness": False}),
         encoding="utf-8",
@@ -3450,6 +3486,31 @@ def test_track_b_paper_trading_payload_reads_compact_summaries_without_full_ledg
         ),
         encoding="utf-8",
     )
+    (runtime_dir / "latest_track_b_self_healing_health.json").write_text(
+        json.dumps(
+            {
+                "generated_at": "2999-01-01T00:00:00+00:00",
+                "classification": "SELF_HEALING_READY",
+                "auto_restart_allowed": False,
+                "restart_candidates": [],
+                "operator_required_agents": [],
+                "blockers": [],
+                "warnings": [],
+                "live_money_eligible": False,
+                "agents": {
+                    "paper_runtime": {
+                        "display_name": "Track B PAPER runtime",
+                        "health_state": "HEALTHY",
+                        "process_running": True,
+                        "restart_eligible": False,
+                        "restart_candidate": False,
+                        "restart_blockers": ["runtime_restart_requires_explicit_operator_approval"],
+                    }
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
 
     payload = OperatorDashboardService(tmp_path)._track_b_paper_trading_results_payload()  # noqa: SLF001
 
@@ -3483,6 +3544,12 @@ def test_track_b_paper_trading_payload_reads_compact_summaries_without_full_ledg
     assert payload["operator_readiness_refresh_status"]["submit_authority"] is False
     assert payload["operator_readiness_refresh_status"]["paper_proof_invoked"] is False
     assert payload["operator_readiness_refresh_status"]["live_money_eligible"] is False
+    assert payload["self_healing_health"]["classification"] == "SELF_HEALING_READY"
+    assert payload["self_healing_health"]["advisory_only"] is True
+    assert payload["self_healing_health"]["canonical_readiness_authority"] is False
+    assert payload["self_healing_health"]["auto_restart_allowed"] is False
+    assert payload["self_healing_health"]["submit_authority"] is False
+    assert payload["self_healing_health"]["live_money_eligible"] is False
     assert payload["recent_trades"][0]["strategy_id"] == "MNQ_US_DERIVATIVE_BEAR_TURN_V1"
     assert payload["strategy_performance"][0]["strategy"] == "MNQ_US_DERIVATIVE_BEAR_TURN_V1"
     assert payload["instrument_performance"][0]["instrument"] == "MNQ-202606"
@@ -4105,6 +4172,8 @@ def test_dashboard_assets_use_operator_first_surface_and_preserve_legacy_surface
     assert 'class="diagnostics-toggle"' in html
     assert 'class="diagnostics-stack"' in html
     assert 'id="operator-readiness-cards"' in html
+    assert "Self-Healing" in js
+    assert "self_healing_classification" in js
     assert 'id="operator-canary-cards"' in html
     assert 'id="temporary-paper-strategies-table"' in html
     assert 'data-action="start-atp-companion-paper"' not in html

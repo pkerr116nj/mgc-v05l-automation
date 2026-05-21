@@ -1,0 +1,15 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck disable=SC1091
+source "${SCRIPT_DIR}/common_env.sh"
+
+OUTPUT_PATH="${REPO_ROOT}/outputs/operator_dashboard/runtime/latest_track_b_self_healing_health.json"
+
+"${PYTHON_BIN}" -m mgc_v05l.app.track_b_self_healing_supervisor \
+  --repo-root "${REPO_ROOT}" \
+  --expected-root "${REPO_ROOT}" \
+  --output-path "${OUTPUT_PATH}" \
+  --write

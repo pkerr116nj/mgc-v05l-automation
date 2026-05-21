@@ -1162,6 +1162,7 @@ function buildOperatorReadinessCards(payload) {
     { label: "PAPER Runtime", value: truth.runtime_running ? "RUNNING" : "STOPPED", level: truth.runtime_running ? "ok" : "danger" },
     { label: "PAPER Ready", value: truth.paper_runtime_ready ? "READY" : "NOT_READY", level: truth.paper_runtime_ready ? "ok" : "danger" },
     { label: "Trade Allowed", value: truth.paper_trade_allowed ? "YES" : "NO", level: truth.paper_trade_allowed ? "ok" : "danger" },
+    { label: "Self-Healing", value: truth.self_healing_classification || "UNKNOWN", level: selfHealingLevel(truth.self_healing_classification) },
     { label: "PAPER Only", value: truth.paper_only === false ? "NO" : "YES", level: truth.paper_only === false ? "danger" : "ok" },
     { label: "Lanes Loaded", value: String(truth.lanes_loaded ?? values.runtime_lanes_loaded_count ?? 0), level: (truth.lanes_loaded ?? values.runtime_lanes_loaded_count ?? 0) ? "ok" : "danger" },
     { label: "Route-Ready Lanes", value: String(truth.route_ready_lanes ?? values.route_ready_lanes_count ?? 0), level: (truth.route_ready_lanes ?? values.route_ready_lanes_count ?? 0) ? "ok" : "warning" },
@@ -1174,6 +1175,13 @@ function buildOperatorReadinessCards(payload) {
   ];
 }
 
+function selfHealingLevel(classification) {
+  if (classification === "SELF_HEALING_READY") return "ok";
+  if (classification === "AUTO_RESTART_ELIGIBLE") return "warning";
+  if (["DEGRADED_RECOVERABLE", "AUTO_RESTART_BLOCKED", "OPERATOR_REQUIRED", "UNSAFE_BROKER_STATE", "SELF_HEALING_STATUS_STALE"].includes(classification)) return "danger";
+  return "muted";
+}
+
 function buildOperatorReadinessNotes(payload) {
   const values = payload.values || payload;
   const truth = payload.authoritative_runtime_truth || values.authoritative_runtime_truth || {};
@@ -1182,6 +1190,11 @@ function buildOperatorReadinessNotes(payload) {
   if (truth.primary_blocker) rows.push(`Primary blocker: ${truth.primary_blocker}`);
   if (truth.canonical_readiness) rows.push(`Canonical readiness: ${truth.canonical_readiness}`);
   if (truth.broker_truth_lease_state) rows.push(`Broker truth lease: ${truth.broker_truth_lease_state} | age=${truth.broker_truth_lease_age_seconds ?? "-"}s | entry_ttl=${truth.broker_truth_lease_entry_seconds_remaining ?? "-"}s`);
+  if (truth.self_healing_classification) {
+    rows.push(`Self-healing: ${truth.self_healing_classification} | advisory=${truth.self_healing_advisory_only === false ? "NO" : "YES"} | auto_restart=${truth.self_healing_auto_restart_allowed ? "YES" : "NO"}`);
+  }
+  const selfHealingBlockers = Array.isArray(truth.self_healing_blockers) ? truth.self_healing_blockers : [];
+  if (selfHealingBlockers.length) rows.push(`Self-healing blockers: ${selfHealingBlockers.join(", ")}`);
   rows.push(`Route capable now: ${truth.route_capable_now ? "YES" : "NO"}`);
   rows.push(`Paper-only guard: ${truth.paper_only === false ? "FAILED" : "ENFORCED"}`);
   rows.push(`Broad session: ${values.current_broad_trading_session || "-"}`);

@@ -1387,6 +1387,11 @@ class OperatorDashboardService:
                     if isinstance(track_b_paper_trading, dict)
                     else {}
                 )
+                self_healing_health = (
+                    track_b_paper_trading.get("self_healing_health")
+                    if isinstance(track_b_paper_trading, dict)
+                    else {}
+                )
                 operator_surface_runtime = operator_surface.get("runtime_readiness") if isinstance(operator_surface, dict) else None
                 if isinstance(operator_surface_runtime, dict):
                     operator_surface_runtime["canonical_readiness"] = canonical_readiness_summary["canonical_readiness"]
@@ -1395,6 +1400,7 @@ class OperatorDashboardService:
                     operator_surface_runtime["broker_truth_lease"] = canonical_readiness_summary.get("broker_truth_lease") or {}
                     operator_surface_runtime["broker_truth"] = canonical_readiness_summary.get("broker_truth") or {}
                     operator_surface_runtime["operator_readiness_refresh_status"] = operator_readiness_refresh_status
+                    operator_surface_runtime["self_healing_health"] = self_healing_health
                     truth = operator_surface_runtime.get("authoritative_runtime_truth")
                     if isinstance(truth, dict):
                         broker_truth_lease = canonical_readiness_summary.get("broker_truth_lease") or {}
@@ -1411,6 +1417,15 @@ class OperatorDashboardService:
                             truth["operator_readiness_refresh_heartbeat_age_seconds"] = operator_readiness_refresh_status.get("heartbeat_age_seconds")
                             truth["operator_readiness_refresh_last_success"] = operator_readiness_refresh_status.get("last_success")
                             truth["operator_readiness_refresh_last_failure"] = operator_readiness_refresh_status.get("last_failure")
+                        if isinstance(self_healing_health, dict):
+                            truth["self_healing_classification"] = self_healing_health.get("classification")
+                            truth["self_healing_fresh"] = self_healing_health.get("fresh")
+                            truth["self_healing_advisory_only"] = True
+                            truth["self_healing_auto_restart_allowed"] = self_healing_health.get("auto_restart_allowed")
+                            truth["self_healing_restart_candidates"] = self_healing_health.get("restart_candidates") or []
+                            truth["self_healing_operator_required_agents"] = self_healing_health.get("operator_required_agents") or []
+                            truth["self_healing_blockers"] = self_healing_health.get("blockers") or []
+                            truth["self_healing_warnings"] = self_healing_health.get("warnings") or []
                 dashboard_payload: dict[str, Any] = {
                     "payload_version": DASHBOARD_PAYLOAD_SCHEMA_VERSION,
                     "generated_at": generated_at,
@@ -1962,6 +1977,13 @@ class OperatorDashboardService:
             / "track_b_paper_broker_reconciliation"
             / "latest_track_b_paper_broker_reconciliation.json"
         )
+        self_healing_health_path = (
+            self._repo_root
+            / "outputs"
+            / "operator_dashboard"
+            / "runtime"
+            / "latest_track_b_self_healing_health.json"
+        )
         trade_summary = _load_json_file(trade_summary_path)
         live_position_status = _load_json_file(live_position_status_path)
         pnl_summary = _load_json_file(pnl_summary_path)
@@ -1979,6 +2001,7 @@ class OperatorDashboardService:
         operator_readiness_refresh_supervisor = _load_json_file(operator_readiness_refresh_supervisor_path)
         broker_truth_refresh_status = _load_json_file(broker_truth_refresh_status_path)
         broker_reconciliation_report = _load_json_file(broker_reconciliation_report_path)
+        self_healing_health = _load_json_file(self_healing_health_path)
         trade_summary = trade_summary if isinstance(trade_summary, dict) else {}
         live_position_status = live_position_status if isinstance(live_position_status, dict) else {}
         pnl_summary = pnl_summary if isinstance(pnl_summary, dict) else {}
@@ -2016,6 +2039,7 @@ class OperatorDashboardService:
         broker_reconciliation_report = (
             broker_reconciliation_report if isinstance(broker_reconciliation_report, dict) else {}
         )
+        self_healing_health = self_healing_health if isinstance(self_healing_health, dict) else {}
         broker_reconciliation_status = _compact_track_b_paper_broker_reconciliation_status(
             broker_reconciliation_report,
             broker_reconciliation_report_path,
@@ -2023,6 +2047,10 @@ class OperatorDashboardService:
         broker_truth_refresh_compact = _compact_track_b_broker_truth_refresh_status(
             broker_truth_refresh_status,
             broker_truth_refresh_status_path,
+        )
+        self_healing_health_compact = _compact_track_b_self_healing_health(
+            self_healing_health,
+            self_healing_health_path,
         )
         broker_reconciliation_applied = False
         if _track_b_broker_reconciliation_overlay_ready(broker_reconciliation_report):
@@ -2150,6 +2178,7 @@ class OperatorDashboardService:
                     operator_readiness_refresh_supervisor_path
                 ),
                 "broker_reconciliation_report": _track_b_paper_artifact_status(broker_reconciliation_report_path),
+                "self_healing_health": _track_b_paper_artifact_status(self_healing_health_path),
             },
             "broker_reconciliation_status": broker_reconciliation_status,
             "broker_reconciliation_applied": broker_reconciliation_applied,
@@ -2168,6 +2197,7 @@ class OperatorDashboardService:
                 track_b_preflight_path,
             ),
             "broker_truth_refresh_status": broker_truth_refresh_compact,
+            "self_healing_health": self_healing_health_compact,
             "paper_trades_attempted_count": trade_summary.get("paper_trades_attempted_count", 0),
             "completed_trade_count": trade_summary.get("completed_trade_count", trade_summary.get("closed_trade_count", 0)),
             "managed_strategy_trade_count": trade_summary.get("managed_strategy_trade_count", 0),
@@ -17668,6 +17698,78 @@ def _compact_track_b_phase1_gc_preflight_readiness(payload: dict[str, Any], path
         "detail": gc_detail,
     }
 
+
+
+def _compact_track_b_self_healing_health(payload: dict[str, Any], path: Path) -> dict[str, Any]:
+    payload = payload if isinstance(payload, dict) else {}
+    generated_at = payload.get("generated_at")
+    age_seconds = _dashboard_payload_age_seconds(generated_at)
+    agents_payload = payload.get("agents") if isinstance(payload.get("agents"), dict) else {}
+    agents: list[dict[str, Any]] = []
+    for agent_id, row in sorted(agents_payload.items()):
+        if not isinstance(row, dict):
+            continue
+        blockers = row.get("blockers") if isinstance(row.get("blockers"), (list, tuple)) else []
+        warnings = row.get("warnings") if isinstance(row.get("warnings"), (list, tuple)) else []
+        restart_blockers = row.get("restart_blockers") if isinstance(row.get("restart_blockers"), (list, tuple)) else []
+        agents.append(
+            {
+                "agent_id": agent_id,
+                "display_name": row.get("display_name") or agent_id,
+                "health_state": row.get("health_state"),
+                "process_running": row.get("process_running"),
+                "restart_eligible": row.get("restart_eligible"),
+                "restart_candidate": row.get("restart_candidate"),
+                "operator_required": row.get("operator_required"),
+                "blockers": list(blockers),
+                "warnings": list(warnings),
+                "restart_blockers": list(restart_blockers),
+            }
+        )
+    if not payload:
+        return {
+            "available": False,
+            "path": str(path),
+            "classification": "SELF_HEALING_STATUS_MISSING",
+            "fresh": False,
+            "advisory_only": True,
+            "canonical_readiness_authority": False,
+            "auto_restart_allowed": False,
+            "restart_candidates": [],
+            "operator_required_agents": [],
+            "blockers": ["self_healing_health_missing"],
+            "warnings": [],
+            "agents": [],
+            "submit_authority": False,
+            "paper_proof_invoked": False,
+            "live_money_eligible": False,
+        }
+    threshold_seconds = 180.0
+    fresh = bool(age_seconds is not None and age_seconds <= threshold_seconds)
+    classification = str(payload.get("classification") or "SELF_HEALING_STATUS_UNKNOWN")
+    if not fresh:
+        classification = "SELF_HEALING_STATUS_STALE"
+    return {
+        "available": True,
+        "path": str(path),
+        "generated_at": generated_at,
+        "age_seconds": age_seconds,
+        "freshness_threshold_seconds": threshold_seconds,
+        "fresh": fresh,
+        "classification": classification,
+        "source_classification": payload.get("classification"),
+        "advisory_only": True,
+        "canonical_readiness_authority": False,
+        "auto_restart_allowed": bool(payload.get("auto_restart_allowed") is True) and fresh,
+        "restart_candidates": list(payload.get("restart_candidates") or []),
+        "operator_required_agents": list(payload.get("operator_required_agents") or []),
+        "blockers": list(payload.get("blockers") or []),
+        "warnings": list(payload.get("warnings") or []),
+        "agents": agents,
+        "submit_authority": False,
+        "paper_proof_invoked": False,
+        "live_money_eligible": bool(payload.get("live_money_eligible") is True),
+    }
 
 def _compact_track_b_operator_readiness_refresh_status(
     payload: dict[str, Any],
