@@ -13,6 +13,12 @@ from mgc_v05l.execution_core.track_b_runtime_truth_contract import (
     HEARTBEAT_HEALTHY,
     HEARTBEAT_PROCESS_DOWN,
     HEARTBEAT_WRONG_ROOT,
+    LAUNCH_CONFLICTING_WRITER_BLOCKED,
+    LAUNCH_PID_ACCEPTED,
+    LAUNCH_STALE_PID_CLEANUP_ALLOWED,
+    LAUNCH_STALE_PID_CLEANUP_BLOCKED,
+    LAUNCH_WRONG_ROOT_BLOCKED,
+    LAUNCH_ZOMBIE_PID_REJECTED,
     PID_METADATA_MISSING,
     PID_METADATA_OK,
     PID_METADATA_STALE,
@@ -27,6 +33,7 @@ from mgc_v05l.execution_core.track_b_runtime_truth_contract import (
     classify_freshness,
     classify_heartbeat,
     classify_pid_metadata,
+    classify_runtime_launch_guard,
     classify_writer_authority,
     runtime_generation_mismatches,
     validate_runtime_truth_contract,
@@ -254,3 +261,85 @@ def test_runtime_generation_mismatches_detect_artifact_identity_split() -> None:
         config_in_force=stale_config,
         operator_status=stale_operator,
     ) == ("config_in_force_runtime_truth_mismatch", "operator_status_runtime_truth_mismatch")
+
+
+def test_launch_guard_accepts_active_matching_runtime() -> None:
+    truth = {"runtime_instance_id": "runtime-a", "restart_generation": 2}
+    result = classify_runtime_launch_guard(
+        pid_metadata_state=PID_METADATA_OK,
+        pid_metadata=truth,
+        runtime_truth=truth,
+        config_in_force=truth,
+        operator_status=truth,
+        broker_clean=True,
+        process_running=True,
+    )
+
+    assert result["classification"] == LAUNCH_PID_ACCEPTED
+    assert result["active_runtime_accepted"] is True
+    assert result["launch_allowed"] is False
+    assert result["broker_mutation"] is False
+
+
+def test_launch_guard_allows_dead_stale_pid_cleanup_only_when_broker_clean() -> None:
+    stale = classify_runtime_launch_guard(
+        pid_metadata_state=PID_PROCESS_DEAD,
+        broker_clean=True,
+        process_running=False,
+    )
+    blocked = classify_runtime_launch_guard(
+        pid_metadata_state=PID_PROCESS_DEAD,
+        broker_clean=False,
+        process_running=False,
+    )
+
+    assert stale["classification"] == LAUNCH_STALE_PID_CLEANUP_ALLOWED
+    assert stale["cleanup_allowed"] is True
+    assert stale["launch_allowed"] is True
+    assert blocked["classification"] == LAUNCH_STALE_PID_CLEANUP_BLOCKED
+    assert "broker_state_not_clean_for_pid_cleanup" in blocked["blockers"]
+
+
+def test_launch_guard_blocks_live_wrong_root_runtime() -> None:
+    result = classify_runtime_launch_guard(
+        pid_metadata_state=PID_WRONG_ROOT,
+        broker_clean=True,
+        process_running=True,
+    )
+
+    assert result["classification"] == LAUNCH_WRONG_ROOT_BLOCKED
+    assert result["launch_allowed"] is False
+    assert "live_runtime_wrong_root" in result["blockers"]
+
+
+def test_launch_guard_rejects_zombie_pid() -> None:
+    result = classify_runtime_launch_guard(
+        pid_metadata_state=PID_PROCESS_ZOMBIE,
+        broker_clean=True,
+        process_running=False,
+    )
+
+    assert result["classification"] == LAUNCH_ZOMBIE_PID_REJECTED
+    assert result["cleanup_allowed"] is False
+    assert "zombie_runtime_pid" in result["blockers"]
+
+
+def test_launch_guard_detects_duplicate_and_mismatched_runtime_generation() -> None:
+    truth = {"runtime_instance_id": "runtime-a", "restart_generation": 2}
+    stale_pid = {"runtime_instance_id": "runtime-old", "restart_generation": 1}
+    result = classify_runtime_launch_guard(
+        pid_metadata_state=PID_METADATA_OK,
+        pid_metadata=stale_pid,
+        runtime_truth=truth,
+        config_in_force=truth,
+        operator_status=truth,
+        broker_clean=True,
+        process_running=True,
+        duplicate_writer_detected=True,
+    )
+
+    assert result["classification"] == LAUNCH_CONFLICTING_WRITER_BLOCKED
+    assert result["launch_allowed"] is False
+    assert result["duplicate_writer_detected"] is True
+    assert result["generation_mismatches"] == ["pid_metadata_runtime_truth_mismatch"]
+    assert "duplicate_runtime_writer_detected" in result["blockers"]

@@ -112,10 +112,37 @@ def test_status_script_surfaces_runtime_generation_evidence_only() -> None:
     assert "paper_runtime_generation_mismatches" in script
     assert "paper_runtime_generation_duplicate_writer_state" in script
     assert "classify_pid_metadata" in script
+    assert "classify_runtime_launch_guard" in script
     assert "runtime_generation_mismatches" in script
+    assert "paper_runtime_launch_guard_classification" in script
+    assert "paper_runtime_generation_config_in_force_freshness" in script
+    assert "paper_runtime_generation_operator_status_freshness" in script
+    assert "paper_runtime_generation_runtime_truth_freshness" in script
     assert script.index("merge_paper_runtime_truth_status") < script.index("merge_paper_runtime_generation_status")
     assert "ready_submit_capable\" = pid_metadata" not in script
     assert "paper_trade_allowed\" = pid_metadata" not in script
+
+
+def test_launch_script_uses_generation_guard_for_stale_pid_and_duplicate_writers() -> None:
+    script = RUN_SCRIPT.read_text(encoding="utf-8")
+
+    assert "classify_paper_runtime_launch_guard" in script
+    assert "track_b_paper_runtime_launch_guard_v1" in script
+    assert "classify_runtime_launch_guard" in script
+    assert "LAUNCH_PID_ACCEPTED" in script
+    assert "LAUNCH_STALE_PID_CLEANUP_ALLOWED" in script
+    assert "LAUNCH_CONFLICTING_WRITER_BLOCKED" in script
+    assert "LAUNCH_WRONG_ROOT_BLOCKED" in script
+    assert "LAUNCH_ZOMBIE_PID_REJECTED" in script
+    assert "PAPER_RUNTIME_LAUNCH_GUARD_BLOCKED" in script
+    assert 'cleanup_stale_paper_pid_metadata_if_allowed' in script
+    assert 'rm -f "${PAPER_PID_FILE}" "${PAPER_PID_METADATA_FILE}"' in script
+    assert 'broker_clean = str(reconciliation.get("classification") or "") == "TRACK_B_PAPER_BROKER_RECONCILED"' in script
+    assert script.index("classify_paper_runtime_launch_guard()") < script.index("start_paper_runtime()")
+    start_flow = script[script.index("start_paper_runtime()") :]
+    assert start_flow.index("guard_classification=\"$(classify_paper_runtime_launch_guard)\"") < start_flow.index(
+        "launch_background_paper_runtime"
+    )
 
 
 def test_status_script_keeps_readiness_exit_code_primary_over_supervisor() -> None:

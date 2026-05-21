@@ -18,6 +18,11 @@ DEFAULT_MANAGER_LOG_FILE="${DEFAULT_RUNTIME_DIR}/operator_dashboard_manager.log"
 DEFAULT_DASHBOARD_PID_FILE="${DEFAULT_RUNTIME_DIR}/operator_dashboard.pid"
 DEFAULT_PAPER_PID_FILE="${REPO_ROOT}/outputs/probationary_pattern_engine/paper_session/runtime/probationary_paper.pid"
 DEFAULT_PAPER_PID_METADATA_FILE="${DEFAULT_PAPER_PID_FILE}.json"
+DEFAULT_PAPER_RUNTIME_TRUTH_FILE="${REPO_ROOT}/outputs/probationary_pattern_engine/paper_session/runtime/paper_runtime_truth.json"
+DEFAULT_PAPER_CONFIG_IN_FORCE_FILE="${REPO_ROOT}/outputs/probationary_pattern_engine/paper_session/runtime/paper_config_in_force.json"
+DEFAULT_PAPER_OPERATOR_STATUS_FILE="${REPO_ROOT}/outputs/probationary_pattern_engine/paper_session/runtime/operator_status.json"
+DEFAULT_PAPER_RECONCILIATION_FILE="${REPO_ROOT}/outputs/reports/track_b_paper_broker_reconciliation/latest_track_b_paper_broker_reconciliation.json"
+DEFAULT_PAPER_LAUNCH_GUARD_FILE="${DEFAULT_PAPER_PID_METADATA_FILE}.launch_guard.json"
 DEFAULT_PAPER_WRAPPER_PID_FILE="${REPO_ROOT}/outputs/probationary_pattern_engine/paper_session/runtime/probationary_paper.wrapper.pid"
 DEFAULT_PAPER_LOG_FILE="${REPO_ROOT}/outputs/probationary_pattern_engine/paper_session/runtime/probationary_paper.log"
 DEFAULT_PAPER_CONFIG_PATHS_FILE="${REPO_ROOT}/outputs/probationary_pattern_engine/paper_session/runtime/paper_runtime_config_paths.txt"
@@ -45,6 +50,11 @@ MANAGER_LOG_FILE="${DEFAULT_MANAGER_LOG_FILE}"
 DASHBOARD_PID_FILE="${DEFAULT_DASHBOARD_PID_FILE}"
 PAPER_PID_FILE="${DEFAULT_PAPER_PID_FILE}"
 PAPER_PID_METADATA_FILE="${DEFAULT_PAPER_PID_METADATA_FILE}"
+PAPER_RUNTIME_TRUTH_FILE="${DEFAULT_PAPER_RUNTIME_TRUTH_FILE}"
+PAPER_CONFIG_IN_FORCE_FILE="${DEFAULT_PAPER_CONFIG_IN_FORCE_FILE}"
+PAPER_OPERATOR_STATUS_FILE="${DEFAULT_PAPER_OPERATOR_STATUS_FILE}"
+PAPER_RECONCILIATION_FILE="${DEFAULT_PAPER_RECONCILIATION_FILE}"
+PAPER_LAUNCH_GUARD_FILE="${DEFAULT_PAPER_LAUNCH_GUARD_FILE}"
 PAPER_WRAPPER_PID_FILE="${DEFAULT_PAPER_WRAPPER_PID_FILE}"
 PAPER_LOG_FILE="${DEFAULT_PAPER_LOG_FILE}"
 PAPER_CONFIG_PATHS_FILE="${DEFAULT_PAPER_CONFIG_PATHS_FILE}"
@@ -206,6 +216,7 @@ ensure_dir "$(dirname "${MANAGER_LOG_FILE}")"
 ensure_dir "$(dirname "${DASHBOARD_PID_FILE}")"
 ensure_dir "$(dirname "${PAPER_LOG_FILE}")"
 ensure_dir "$(dirname "${PAPER_PID_METADATA_FILE}")"
+ensure_dir "$(dirname "${PAPER_LAUNCH_GUARD_FILE}")"
 ensure_dir "$(dirname "${PAPER_WRAPPER_PID_FILE}")"
 ensure_dir "$(dirname "${PAPER_CONFIG_PATHS_FILE}")"
 
@@ -437,6 +448,178 @@ wait_for_runtime_config_paths_match_request() {
   done
   echo "RUNTIME_PID_UNAVAILABLE: Paper runtime PID did not become available during ${phase} within ${timeout_seconds}s." >&2
   return 1
+}
+
+classify_paper_runtime_launch_guard() {
+  "${PYTHON_BIN}" - <<'PY' \
+    "${PAPER_LAUNCH_GUARD_FILE}" \
+    "${PAPER_PID_METADATA_FILE}" \
+    "${PAPER_RUNTIME_TRUTH_FILE}" \
+    "${PAPER_CONFIG_IN_FORCE_FILE}" \
+    "${PAPER_OPERATOR_STATUS_FILE}" \
+    "${PAPER_RECONCILIATION_FILE}" \
+    "${REPO_ROOT}"
+import json
+import os
+import subprocess
+import sys
+from datetime import datetime, timezone
+from pathlib import Path
+
+from mgc_v05l.execution_core.track_b_runtime_truth_contract import (
+    classify_pid_metadata,
+    classify_runtime_launch_guard,
+)
+
+(
+    guard_path,
+    metadata_path,
+    truth_path,
+    config_path,
+    operator_path,
+    reconciliation_path,
+    expected_root,
+) = sys.argv[1:]
+expected_root = str(Path(expected_root).resolve())
+
+def read_json(raw_path: str) -> dict:
+    path = Path(raw_path)
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+    return payload if isinstance(payload, dict) else {}
+
+def process_probe(pid: object) -> dict:
+    try:
+        pid_int = int(pid)
+    except (TypeError, ValueError):
+        return {"running": False, "zombie": False, "cwd": None, "command": ""}
+    try:
+        os.kill(pid_int, 0)
+        running = True
+    except PermissionError:
+        running = True
+    except OSError:
+        running = False
+    command = ""
+    stat = ""
+    cwd = None
+    if running:
+        try:
+            proc = subprocess.run(
+                ["ps", "-p", str(pid_int), "-o", "stat=", "-o", "command="],
+                check=False,
+                capture_output=True,
+                text=True,
+                timeout=2,
+            )
+            line = proc.stdout.strip()
+            if line:
+                parts = line.split(maxsplit=1)
+                stat = parts[0]
+                command = parts[1] if len(parts) > 1 else ""
+        except (OSError, subprocess.SubprocessError):
+            pass
+        try:
+            proc = subprocess.run(
+                ["lsof", "-a", "-p", str(pid_int), "-d", "cwd", "-Fn"],
+                check=False,
+                capture_output=True,
+                text=True,
+                timeout=2,
+            )
+            rows = [row[1:] for row in proc.stdout.splitlines() if row.startswith("n")]
+            cwd = str(Path(rows[-1]).resolve()) if rows else None
+        except (OSError, subprocess.SubprocessError):
+            cwd = None
+    return {"running": running, "zombie": stat.startswith("Z"), "cwd": cwd, "command": command}
+
+pid_metadata = read_json(metadata_path)
+runtime_truth = read_json(truth_path)
+config_in_force = read_json(config_path)
+operator_status = read_json(operator_path)
+reconciliation = read_json(reconciliation_path)
+probe = process_probe(pid_metadata.get("pid"))
+pid_metadata_state = classify_pid_metadata(
+    pid_metadata,
+    now=datetime.now(timezone.utc),
+    freshness_ttl_seconds=float(pid_metadata.get("freshness_ttl_seconds") or 180.0),
+    process_probe=probe,
+    expected_root=expected_root,
+)
+broker_clean = str(reconciliation.get("classification") or "") == "TRACK_B_PAPER_BROKER_RECONCILED"
+runtime_truth_duplicate = bool((runtime_truth.get("duplicate_writer_detection") or {}).get("duplicate_writer_detected"))
+identity_rows = [pid_metadata, runtime_truth, config_in_force, operator_status]
+runtime_instance_ids = {
+    str(row.get("runtime_instance_id"))
+    for row in identity_rows
+    if row.get("runtime_instance_id")
+}
+duplicate_writer_detected = runtime_truth_duplicate or (probe.get("running") is True and len(runtime_instance_ids) > 1)
+guard = classify_runtime_launch_guard(
+    pid_metadata_state=pid_metadata_state,
+    pid_metadata=pid_metadata,
+    runtime_truth=runtime_truth,
+    config_in_force=config_in_force,
+    operator_status=operator_status,
+    broker_clean=broker_clean,
+    process_running=probe.get("running"),
+    duplicate_writer_detected=duplicate_writer_detected,
+)
+guard.update(
+    {
+        "schema_version": "track_b_paper_runtime_launch_guard_v1",
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "evidence_only_for_readiness": True,
+        "restart_authority": False,
+        "readiness_authority": False,
+        "paper_only": True,
+        "live_money_eligible": False,
+        "pid_metadata_artifact": metadata_path,
+        "runtime_truth_artifact": truth_path,
+        "config_in_force_artifact": config_path,
+        "operator_status_artifact": operator_path,
+        "reconciliation_artifact": reconciliation_path,
+        "process_probe": probe,
+        "reconciliation_classification": reconciliation.get("classification"),
+    }
+)
+path = Path(guard_path)
+path.parent.mkdir(parents=True, exist_ok=True)
+tmp = path.with_name(f".{path.name}.tmp")
+tmp.write_text(json.dumps(guard, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+tmp.replace(path)
+print(guard["classification"])
+PY
+}
+
+launch_guard_field() {
+  local field="$1"
+  "${PYTHON_BIN}" - <<'PY' "${PAPER_LAUNCH_GUARD_FILE}" "${field}"
+import json
+import sys
+from pathlib import Path
+
+try:
+    payload = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
+except (OSError, json.JSONDecodeError):
+    payload = {}
+value = payload.get(sys.argv[2])
+if isinstance(value, bool):
+    print("true" if value else "false")
+elif value is None:
+    print("")
+else:
+    print(value)
+PY
+}
+
+cleanup_stale_paper_pid_metadata_if_allowed() {
+  if [[ "$(launch_guard_field "cleanup_allowed")" != "true" ]]; then
+    return 1
+  fi
+  rm -f "${PAPER_PID_FILE}" "${PAPER_PID_METADATA_FILE}"
 }
 
 launchctl_submit_available() {
@@ -734,6 +917,27 @@ start_paper_runtime() {
   if [[ "${START_PAPER}" -ne 1 ]]; then
     return 0
   fi
+  local guard_classification
+  guard_classification="$(classify_paper_runtime_launch_guard)"
+  case "${guard_classification}" in
+    LAUNCH_PID_ACCEPTED)
+      assert_runtime_config_paths_match_request "pre-existing-runtime"
+      return $?
+      ;;
+    LAUNCH_STALE_PID_CLEANUP_ALLOWED)
+      cleanup_stale_paper_pid_metadata_if_allowed || true
+      ;;
+    LAUNCH_NO_PID_METADATA)
+      ;;
+    LAUNCH_CONFLICTING_WRITER_BLOCKED|LAUNCH_WRONG_ROOT_BLOCKED|LAUNCH_ZOMBIE_PID_REJECTED|LAUNCH_STALE_PID_CLEANUP_BLOCKED)
+      echo "PAPER_RUNTIME_LAUNCH_GUARD_BLOCKED: ${guard_classification}; see ${PAPER_LAUNCH_GUARD_FILE}" >&2
+      return 2
+      ;;
+    *)
+      echo "PAPER_RUNTIME_LAUNCH_GUARD_BLOCKED: unexpected ${guard_classification}; see ${PAPER_LAUNCH_GUARD_FILE}" >&2
+      return 2
+      ;;
+  esac
   if pid_file_alive "${PAPER_PID_FILE}"; then
     assert_runtime_config_paths_match_request "pre-existing-runtime"
     return $?

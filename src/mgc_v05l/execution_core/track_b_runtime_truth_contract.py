@@ -38,6 +38,14 @@ PID_PROCESS_DEAD = "PID_PROCESS_DEAD"
 PID_PROCESS_ZOMBIE = "PID_PROCESS_ZOMBIE"
 PID_WRONG_ROOT = "PID_WRONG_ROOT"
 
+LAUNCH_PID_ACCEPTED = "LAUNCH_PID_ACCEPTED"
+LAUNCH_NO_PID_METADATA = "LAUNCH_NO_PID_METADATA"
+LAUNCH_STALE_PID_CLEANUP_ALLOWED = "LAUNCH_STALE_PID_CLEANUP_ALLOWED"
+LAUNCH_STALE_PID_CLEANUP_BLOCKED = "LAUNCH_STALE_PID_CLEANUP_BLOCKED"
+LAUNCH_CONFLICTING_WRITER_BLOCKED = "LAUNCH_CONFLICTING_WRITER_BLOCKED"
+LAUNCH_WRONG_ROOT_BLOCKED = "LAUNCH_WRONG_ROOT_BLOCKED"
+LAUNCH_ZOMBIE_PID_REJECTED = "LAUNCH_ZOMBIE_PID_REJECTED"
+
 RECOVERY_OBSERVE_ONLY = "OBSERVE_ONLY"
 RECOVERY_RESTART_ELIGIBLE = "RESTART_ELIGIBLE"
 RECOVERY_BLOCKED = "RECOVERY_BLOCKED"
@@ -203,6 +211,89 @@ def runtime_generation_mismatches(
         if pair != truth_pair:
             mismatches.append(f"{label}_runtime_truth_mismatch")
     return tuple(mismatches)
+
+
+def classify_runtime_launch_guard(
+    *,
+    pid_metadata_state: str,
+    pid_metadata: Mapping[str, Any] | None = None,
+    runtime_truth: Mapping[str, Any] | None = None,
+    config_in_force: Mapping[str, Any] | None = None,
+    operator_status: Mapping[str, Any] | None = None,
+    broker_clean: bool,
+    process_running: bool | None = None,
+    duplicate_writer_detected: bool = False,
+) -> dict[str, Any]:
+    """Classify whether a launcher may reuse, clean, or must block PID truth.
+
+    This helper is intentionally side-effect free. It does not refresh broker
+    truth, kill processes, or delete files; callers perform those actions only
+    after checking the returned classification.
+    """
+
+    mismatches = runtime_generation_mismatches(
+        pid_metadata=pid_metadata,
+        runtime_truth=runtime_truth,
+        config_in_force=config_in_force,
+        operator_status=operator_status,
+    )
+    blockers: list[str] = []
+    warnings: list[str] = []
+    cleanup_allowed = False
+    launch_allowed = False
+    active_runtime_accepted = False
+
+    mismatch_blocks = pid_metadata_state == PID_METADATA_OK or process_running is True
+
+    if duplicate_writer_detected:
+        blockers.append("duplicate_runtime_writer_detected")
+    if mismatch_blocks:
+        blockers.extend(mismatches)
+
+    if pid_metadata_state == PID_METADATA_OK:
+        active_runtime_accepted = not blockers
+        launch_allowed = False
+        classification = LAUNCH_PID_ACCEPTED if active_runtime_accepted else LAUNCH_CONFLICTING_WRITER_BLOCKED
+    elif pid_metadata_state == PID_METADATA_MISSING:
+        classification = LAUNCH_NO_PID_METADATA if not blockers else LAUNCH_CONFLICTING_WRITER_BLOCKED
+        launch_allowed = not blockers
+    elif pid_metadata_state == PID_WRONG_ROOT:
+        classification = LAUNCH_WRONG_ROOT_BLOCKED
+        blockers.append("live_runtime_wrong_root")
+    elif pid_metadata_state == PID_PROCESS_ZOMBIE:
+        classification = LAUNCH_ZOMBIE_PID_REJECTED
+        blockers.append("zombie_runtime_pid")
+    elif pid_metadata_state in {PID_PROCESS_DEAD, PID_METADATA_STALE}:
+        if process_running is True:
+            classification = LAUNCH_CONFLICTING_WRITER_BLOCKED
+            blockers.append("stale_pid_metadata_for_live_process")
+        elif broker_clean and not blockers:
+            classification = LAUNCH_STALE_PID_CLEANUP_ALLOWED
+            cleanup_allowed = True
+            launch_allowed = True
+            warnings.append("stale_pid_cleanup_requires_dead_process_and_clean_broker")
+        else:
+            classification = LAUNCH_STALE_PID_CLEANUP_BLOCKED
+            if not broker_clean:
+                blockers.append("broker_state_not_clean_for_pid_cleanup")
+    else:
+        classification = LAUNCH_CONFLICTING_WRITER_BLOCKED
+        blockers.append(f"unknown_pid_metadata_state:{pid_metadata_state}")
+
+    return {
+        "classification": classification,
+        "cleanup_allowed": cleanup_allowed,
+        "launch_allowed": launch_allowed,
+        "active_runtime_accepted": active_runtime_accepted,
+        "broker_clean_required_for_cleanup": True,
+        "broker_clean": bool(broker_clean),
+        "broker_mutation": False,
+        "pid_metadata_state": pid_metadata_state,
+        "generation_mismatches": list(mismatches),
+        "duplicate_writer_detected": bool(duplicate_writer_detected),
+        "blockers": blockers,
+        "warnings": warnings,
+    }
 
 
 def build_runtime_truth_contract(

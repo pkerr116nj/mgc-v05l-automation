@@ -18,6 +18,7 @@ DEFAULT_PAPER_RUNTIME_TRUTH_FILE="${REPO_ROOT}/outputs/probationary_pattern_engi
 DEFAULT_PAPER_PID_METADATA_FILE="${REPO_ROOT}/outputs/probationary_pattern_engine/paper_session/runtime/probationary_paper.pid.json"
 DEFAULT_PAPER_CONFIG_IN_FORCE_FILE="${REPO_ROOT}/outputs/probationary_pattern_engine/paper_session/runtime/paper_config_in_force.json"
 DEFAULT_PAPER_OPERATOR_STATUS_FILE="${REPO_ROOT}/outputs/probationary_pattern_engine/paper_session/operator_status.json"
+DEFAULT_PAPER_RECONCILIATION_FILE="${REPO_ROOT}/outputs/reports/track_b_paper_broker_reconciliation/latest_track_b_paper_broker_reconciliation.json"
 DEFAULT_STARTUP_FILE="${REPO_ROOT}/outputs/operator_dashboard/startup_control_plane_snapshot.json"
 DEFAULT_OPERABILITY_FILE="${REPO_ROOT}/outputs/operator_dashboard/supervised_paper_operability_snapshot.json"
 DEFAULT_INFO_FILE="${DEFAULT_RUNTIME_DIR}/operator_dashboard.json"
@@ -414,7 +415,7 @@ PY
 }
 
 merge_paper_runtime_generation_status() {
-  "${PYTHON_BIN}" - <<'PY' "${STATUS_FILE}" "${DEFAULT_PAPER_PID_METADATA_FILE}" "${DEFAULT_PAPER_RUNTIME_TRUTH_FILE}" "${DEFAULT_PAPER_CONFIG_IN_FORCE_FILE}" "${DEFAULT_PAPER_OPERATOR_STATUS_FILE}" "${REPO_ROOT}"
+  "${PYTHON_BIN}" - <<'PY' "${STATUS_FILE}" "${DEFAULT_PAPER_PID_METADATA_FILE}" "${DEFAULT_PAPER_RUNTIME_TRUTH_FILE}" "${DEFAULT_PAPER_CONFIG_IN_FORCE_FILE}" "${DEFAULT_PAPER_OPERATOR_STATUS_FILE}" "${DEFAULT_PAPER_RECONCILIATION_FILE}" "${REPO_ROOT}"
 import json
 import os
 import subprocess
@@ -423,7 +424,9 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from mgc_v05l.execution_core.track_b_runtime_truth_contract import (
+    classify_freshness,
     classify_pid_metadata,
+    classify_runtime_launch_guard,
     runtime_generation_mismatches,
 )
 
@@ -432,7 +435,8 @@ metadata_path = Path(sys.argv[2])
 truth_path = Path(sys.argv[3])
 config_path = Path(sys.argv[4])
 operator_path = Path(sys.argv[5])
-expected_root = str(Path(sys.argv[6]).resolve())
+reconciliation_path = Path(sys.argv[6])
+expected_root = str(Path(sys.argv[7]).resolve())
 
 def read_json(path: Path) -> dict:
     try:
@@ -483,6 +487,7 @@ pid_metadata = read_json(metadata_path)
 runtime_truth = read_json(truth_path)
 config_in_force = read_json(config_path)
 operator_status = read_json(operator_path)
+reconciliation = read_json(reconciliation_path)
 probe = process_probe(pid_metadata.get("pid"))
 metadata_state = classify_pid_metadata(
     pid_metadata,
@@ -501,6 +506,27 @@ duplicate_writer_detected = bool(
     (runtime_truth.get("duplicate_writer_detection") or {}).get("duplicate_writer_detected")
     or len({str(row.get("runtime_instance_id")) for row in (pid_metadata, runtime_truth, config_in_force, operator_status) if row.get("runtime_instance_id")}) > 1
 )
+broker_clean = str(reconciliation.get("classification") or "") == "TRACK_B_PAPER_BROKER_RECONCILED"
+launch_guard = classify_runtime_launch_guard(
+    pid_metadata_state=metadata_state,
+    pid_metadata=pid_metadata,
+    runtime_truth=runtime_truth,
+    config_in_force=config_in_force,
+    operator_status=operator_status,
+    broker_clean=broker_clean,
+    process_running=probe.get("running"),
+    duplicate_writer_detected=duplicate_writer_detected,
+)
+
+def artifact_freshness(payload: dict, present: bool) -> dict:
+    timestamp = payload.get("generated_at") or payload.get("updated_at") or payload.get("last_heartbeat_at")
+    ttl = float(payload.get("freshness_ttl_seconds") or 180.0)
+    return classify_freshness(
+        generated_at=timestamp,
+        freshness_ttl_seconds=ttl,
+        now=datetime.now(timezone.utc),
+        artifact_present=present,
+    ).as_dict()
 
 status["paper_runtime_generation_evidence_only"] = True
 status["paper_runtime_pid_metadata_artifact"] = str(metadata_path)
@@ -509,9 +535,19 @@ status["paper_runtime_pid_metadata"] = pid_metadata
 status["paper_runtime_pid_metadata_state"] = metadata_state
 status["paper_runtime_pid_metadata_process_probe"] = probe
 status["paper_runtime_generation_mismatches"] = list(mismatches)
+status["paper_runtime_generation_runtime_truth_freshness"] = artifact_freshness(runtime_truth, bool(runtime_truth))
+status["paper_runtime_generation_config_in_force_freshness"] = artifact_freshness(config_in_force, bool(config_in_force))
+status["paper_runtime_generation_operator_status_freshness"] = artifact_freshness(operator_status, bool(operator_status))
 status["paper_runtime_generation_duplicate_writer_state"] = (
     "DUPLICATE_WRITER_DETECTED" if duplicate_writer_detected else "NO_DUPLICATE_WRITER_EVIDENCE"
 )
+status["paper_runtime_launch_guard"] = launch_guard
+status["paper_runtime_launch_guard_classification"] = launch_guard.get("classification")
+status["paper_runtime_launch_guard_cleanup_allowed"] = launch_guard.get("cleanup_allowed")
+status["paper_runtime_launch_guard_launch_allowed"] = launch_guard.get("launch_allowed")
+status["paper_runtime_launch_guard_blockers"] = launch_guard.get("blockers")
+status["paper_runtime_launch_guard_broker_clean"] = launch_guard.get("broker_clean")
+status["paper_runtime_reconciliation_artifact"] = str(reconciliation_path)
 status["paper_runtime_generation_runtime_instance_id"] = runtime_truth.get("runtime_instance_id") or pid_metadata.get("runtime_instance_id")
 status["paper_runtime_generation_restart_generation"] = runtime_truth.get("restart_generation") or pid_metadata.get("restart_generation")
 status["paper_only"] = True
