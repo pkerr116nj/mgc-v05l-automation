@@ -39,6 +39,16 @@ SELF_HEALING_CLASSIFICATIONS = {
     "UNSAFE_BROKER_STATE",
 }
 
+RESTART_ALLOWED = "RESTART_ALLOWED"
+RESTART_COOLDOWN_ACTIVE = "RESTART_COOLDOWN_ACTIVE"
+RESTART_BUDGET_EXHAUSTED = "RESTART_BUDGET_EXHAUSTED"
+RESTART_BLOCKED_DUPLICATE_WRITER = "RESTART_BLOCKED_DUPLICATE_WRITER"
+RESTART_BLOCKED_RECONCILIATION = "RESTART_BLOCKED_RECONCILIATION"
+RESTART_NOT_NEEDED_HEALTHY = "RESTART_NOT_NEEDED_HEALTHY"
+
+DEFAULT_RESTART_WINDOW_SECONDS = 900
+DEFAULT_MAX_RESTART_ATTEMPTS = 3
+
 
 @dataclass(frozen=True)
 class ArtifactContract:
@@ -136,6 +146,7 @@ def classify_track_b_self_healing_health(inputs: Mapping[str, Any]) -> dict[str,
     registry_by_id = {contract.agent_id: contract for contract in _agent_contracts(Path(expected_root))}
     agents = _mapping(inputs.get("agents"))
     broker_safety = _mapping(inputs.get("broker_safety"))
+    restart_policy = _mapping(inputs.get("restart_policy"))
 
     blockers: list[str] = []
     warnings: list[str] = []
@@ -189,12 +200,40 @@ def classify_track_b_self_healing_health(inputs: Mapping[str, Any]) -> dict[str,
     else:
         classification = "SELF_HEALING_READY"
 
-    auto_restart_allowed = classification == "AUTO_RESTART_ELIGIBLE"
+    restart_control = classify_restart_budget_state(
+        restart_candidates=restart_candidates,
+        broker_reconciliation_clean=not unsafe_broker_blockers,
+        duplicate_writer_detected=bool(duplicate_submitters),
+        now=_parse_datetime(generated_at) or datetime.now(timezone.utc),
+        restart_attempt_count=_int(restart_policy.get("restart_attempt_count")),
+        restart_window_seconds=_int_or_default(
+            restart_policy.get("restart_window_seconds"),
+            DEFAULT_RESTART_WINDOW_SECONDS,
+        ),
+        max_restart_attempts=_int_or_default(
+            restart_policy.get("max_restart_attempts"),
+            DEFAULT_MAX_RESTART_ATTEMPTS,
+        ),
+        cooldown_until=str(restart_policy.get("cooldown_until") or ""),
+        healthy_runtime=not required_unhealthy and not blockers,
+    )
+    if restart_control["classification"] == RESTART_COOLDOWN_ACTIVE:
+        blockers.append("restart_cooldown_active")
+    elif restart_control["classification"] == RESTART_BUDGET_EXHAUSTED:
+        blockers.append("restart_max_attempts_exceeded")
+    elif restart_control["classification"] == RESTART_BLOCKED_DUPLICATE_WRITER:
+        blockers.append("duplicate_conflicting_runtimes")
+    elif restart_control["classification"] == RESTART_BLOCKED_RECONCILIATION:
+        blockers.append("broker_reconciliation_mismatch")
+    auto_restart_allowed = classification == "AUTO_RESTART_ELIGIBLE" and restart_control["classification"] == RESTART_ALLOWED
+    if classification == "AUTO_RESTART_ELIGIBLE" and not auto_restart_allowed:
+        classification = "AUTO_RESTART_BLOCKED"
     return {
         "schema_version": "track_b_self_healing_health_v1",
         "generated_at": generated_at,
         "classification": classification,
         "auto_restart_allowed": auto_restart_allowed,
+        "restart_control": restart_control,
         "restart_candidates": tuple(restart_candidates),
         "operator_required_agents": tuple(operator_required_agents),
         "blockers": tuple(_dedupe(blockers)),
@@ -205,6 +244,64 @@ def classify_track_b_self_healing_health(inputs: Mapping[str, Any]) -> dict[str,
         "registry": tuple(contract.as_dict() for contract in registry_by_id.values()),
         "agents": agent_results,
         "broker_safety": dict(broker_safety),
+    }
+
+
+def classify_restart_budget_state(
+    *,
+    restart_candidates: Sequence[str],
+    broker_reconciliation_clean: bool,
+    duplicate_writer_detected: bool,
+    now: datetime,
+    restart_attempt_count: int = 0,
+    restart_window_seconds: int = DEFAULT_RESTART_WINDOW_SECONDS,
+    max_restart_attempts: int = DEFAULT_MAX_RESTART_ATTEMPTS,
+    cooldown_until: str | None = None,
+    healthy_runtime: bool = False,
+) -> dict[str, Any]:
+    """Classify restart budget/cooldown state without performing a restart."""
+
+    current = _ensure_utc(now)
+    cooldown_ts = _parse_datetime(cooldown_until)
+    cooldown_active = bool(cooldown_ts and cooldown_ts > current)
+    budget_exhausted = bool(restart_attempt_count >= max_restart_attempts > 0)
+    if healthy_runtime:
+        classification = RESTART_NOT_NEEDED_HEALTHY
+        crash_loop_state = "HEALTHY_RUNTIME_BUDGET_RESET"
+        restart_attempt_count = 0
+        budget_exhausted = False
+        cooldown_active = False
+    elif duplicate_writer_detected:
+        classification = RESTART_BLOCKED_DUPLICATE_WRITER
+        crash_loop_state = "DUPLICATE_WRITER_BLOCK"
+    elif not broker_reconciliation_clean:
+        classification = RESTART_BLOCKED_RECONCILIATION
+        crash_loop_state = "BROKER_RECONCILIATION_BLOCK"
+    elif not restart_candidates:
+        classification = RESTART_NOT_NEEDED_HEALTHY
+        crash_loop_state = "NO_RESTART_CANDIDATE"
+    elif cooldown_active:
+        classification = RESTART_COOLDOWN_ACTIVE
+        crash_loop_state = "COOLDOWN_ACTIVE"
+    elif budget_exhausted:
+        classification = RESTART_BUDGET_EXHAUSTED
+        crash_loop_state = "BUDGET_EXHAUSTED"
+    else:
+        classification = RESTART_ALLOWED
+        crash_loop_state = "RESTART_CANDIDATE_WITHIN_BUDGET"
+    return {
+        "classification": classification,
+        "restart_allowed": classification == RESTART_ALLOWED,
+        "restart_attempt_count": restart_attempt_count,
+        "restart_window_seconds": int(restart_window_seconds),
+        "max_restart_attempts": int(max_restart_attempts),
+        "cooldown_until": cooldown_ts.isoformat() if cooldown_ts else None,
+        "cooldown_active": cooldown_active,
+        "crash_loop_state": crash_loop_state,
+        "max_restart_budget_exhausted": budget_exhausted,
+        "restart_candidates": tuple(restart_candidates),
+        "broker_reconciliation_clean": bool(broker_reconciliation_clean),
+        "duplicate_writer_detected": bool(duplicate_writer_detected),
     }
 
 
@@ -707,6 +804,13 @@ def _int(value: object) -> int:
         return int(value or 0)
     except (TypeError, ValueError):
         return 0
+
+
+def _int_or_default(value: object, default: int) -> int:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return int(default)
 
 
 def _dedupe(values: Sequence[str]) -> list[str]:

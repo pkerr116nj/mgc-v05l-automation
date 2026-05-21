@@ -38,6 +38,13 @@ DEFAULT_PHASE1_DATABENTO_LIVE_LISTENER_STATUS_ARTIFACT = (
     / "phase1_databento_live_runtime_candles"
     / "latest_phase1_databento_live_listener_status.json"
 )
+DEFAULT_PAPER_RUNTIME_TRUTH_ARTIFACT = (
+    Path("outputs")
+    / "probationary_pattern_engine"
+    / "paper_session"
+    / "runtime"
+    / "paper_runtime_truth.json"
+)
 CANONICAL_READINESS_STATES = {
     "READY_SUBMIT_CAPABLE",
     "READY_OBSERVATION_ONLY",
@@ -99,6 +106,7 @@ def classify_canonical_readiness(inputs: Mapping[str, Any]) -> dict[str, Any]:
     latest_attempt = _mapping(broker_truth.get("latest_attempt_status"))
     reconciliation = _mapping(inputs.get("phase1_reconciliation"))
     runtime = _mapping(inputs.get("runtime"))
+    runtime_truth_heartbeat = _mapping(inputs.get("runtime_truth_heartbeat"))
     backend = _mapping(inputs.get("backend"))
     market_data = _mapping(inputs.get("market_data"))
     lane_quarantine = _mapping(inputs.get("lane_quarantine"))
@@ -296,6 +304,12 @@ def classify_canonical_readiness(inputs: Mapping[str, Any]) -> dict[str, Any]:
             "Dashboard/backend is not healthy; classifier remains authoritative from local artifacts.",
             source="backend",
         )
+    if runtime_truth_heartbeat.get("available") is True and runtime_truth_heartbeat.get("fresh") is False:
+        warn(
+            "runtime_truth_heartbeat_stale",
+            "PAPER runtime truth heartbeat is present but stale; canonical readiness keeps existing submit gates authoritative.",
+            source="runtime_truth_heartbeat",
+        )
 
     runtime_running = _bool(runtime.get("running"))
     runtime_healthy = _bool(runtime.get("healthy"))
@@ -434,6 +448,10 @@ def build_readiness_inputs(
     config_in_force = _mapping(artifacts.get("config_in_force"))
     lane_quarantine = _lane_quarantine_input(_mapping(artifacts.get("lane_quarantine")))
     runtime = _runtime_input(operator_status, config_in_force, root_guard, now=now)
+    runtime_truth_heartbeat = _runtime_truth_heartbeat_input(
+        _mapping(artifacts.get("paper_runtime_truth")),
+        now=now,
+    )
     market_data = _market_data_input(
         operator_status,
         _mapping(artifacts.get("market_data_probe")),
@@ -452,6 +470,7 @@ def build_readiness_inputs(
             lane_quarantine,
             submit_bridge,
             runtime,
+            runtime_truth_heartbeat,
         )
         if isinstance(source, Mapping)
     )
@@ -464,6 +483,7 @@ def build_readiness_inputs(
         "root_guard_summary": dict(root_guard),
         "backend": backend,
         "runtime": runtime,
+        "runtime_truth_heartbeat": runtime_truth_heartbeat,
         "broker_truth": broker_truth,
         "broker_truth_lease": broker_truth_lease,
         "phase1_reconciliation": reconciliation,
@@ -575,6 +595,7 @@ def _load_readiness_artifacts(repo_root: Path) -> dict[str, Any]:
         "phase1_databento_live_listener_status": _read_json(
             repo_root / DEFAULT_PHASE1_DATABENTO_LIVE_LISTENER_STATUS_ARTIFACT
         ),
+        "paper_runtime_truth": _read_json(repo_root / DEFAULT_PAPER_RUNTIME_TRUTH_ARTIFACT),
     }
 
 
@@ -694,6 +715,46 @@ def _runtime_input(
         "ingestion_freshness_threshold_seconds": ingestion_threshold,
         "runtime_ingestion_fresh": runtime_ingestion_fresh,
         "live_money_eligible": operator_status.get("live_money_eligible") is True,
+    }
+
+
+def _runtime_truth_heartbeat_input(payload: Mapping[str, Any], *, now: datetime) -> dict[str, Any]:
+    if not payload:
+        return {
+            "available": False,
+            "fresh": False,
+            "evidence_only": True,
+            "readiness_authority": False,
+            "restart_authority": False,
+            "live_money_eligible": False,
+        }
+    timestamp = payload.get("last_success_at") or payload.get("generated_at")
+    age_seconds = _age_seconds(timestamp, now)
+    threshold = _float_value(payload.get("freshness_ttl_seconds"), MARKET_DATA_FRESHNESS_DEFAULT_SECONDS)
+    fresh = bool(age_seconds is not None and age_seconds <= threshold)
+    return {
+        "available": True,
+        "fresh": fresh,
+        "generated_at": payload.get("generated_at"),
+        "last_success_at": payload.get("last_success_at"),
+        "age_seconds": age_seconds,
+        "freshness_ttl_seconds": threshold,
+        "heartbeat_state": payload.get("heartbeat_state"),
+        "freshness_state": payload.get("freshness_state"),
+        "writer_authority": payload.get("writer_authority"),
+        "runtime_instance_id": payload.get("runtime_instance_id"),
+        "restart_generation": payload.get("restart_generation"),
+        "producer_pid": payload.get("producer_pid"),
+        "producer_root": payload.get("producer_root"),
+        "source_commit": payload.get("source_commit"),
+        "lane_count": payload.get("lane_count"),
+        "b_plus_threshold": payload.get("b_plus_threshold"),
+        "test_mule_enabled": payload.get("test_mule_enabled"),
+        "duplicate_writer_detection": _mapping(payload.get("duplicate_writer_detection")),
+        "evidence_only": True,
+        "readiness_authority": False,
+        "restart_authority": False,
+        "live_money_eligible": payload.get("live_money_eligible") is True,
     }
 
 
@@ -1288,6 +1349,7 @@ def _readiness_result(
         "root_guard_summary": dict(root_guard),
         "backend": _mapping(inputs.get("backend")),
         "runtime": _mapping(inputs.get("runtime")),
+        "runtime_truth_heartbeat": _mapping(inputs.get("runtime_truth_heartbeat")),
         "broker_truth": _mapping(inputs.get("broker_truth")),
         "broker_truth_lease": _mapping(inputs.get("broker_truth_lease")),
         "phase1_reconciliation": _mapping(inputs.get("phase1_reconciliation")),

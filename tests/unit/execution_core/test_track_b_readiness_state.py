@@ -135,6 +135,54 @@ def test_clean_submit_capable_state_returns_ready_submit_capable() -> None:
     assert result["canonical_readiness"] == "READY_SUBMIT_CAPABLE"
     assert result["ready_submit_capable"] is True
     assert result["readiness_blockers"] == []
+    assert result["runtime_truth_heartbeat"] == {}
+
+
+def test_runtime_truth_heartbeat_is_evidence_without_readiness_authority() -> None:
+    inputs = _clean_inputs()
+    inputs["runtime_truth_heartbeat"] = {
+        "available": True,
+        "fresh": False,
+        "heartbeat_state": "ARTIFACT_STALE",
+        "writer_authority": "SINGLE_WRITER",
+        "runtime_instance_id": "runtime-a",
+        "restart_generation": 4,
+        "evidence_only": True,
+        "readiness_authority": False,
+        "restart_authority": False,
+        "live_money_eligible": False,
+    }
+
+    result = classify_canonical_readiness(inputs)
+
+    assert result["canonical_readiness"] == "READY_SUBMIT_CAPABLE"
+    assert result["ready_submit_capable"] is True
+    assert result["runtime_truth_heartbeat"]["runtime_instance_id"] == "runtime-a"
+    warning_codes = {row["code"] for row in result["readiness_warnings"]}
+    assert "runtime_truth_heartbeat_stale" in warning_codes
+
+
+def test_runtime_truth_heartbeat_cannot_override_runtime_down() -> None:
+    inputs = _clean_inputs()
+    inputs["runtime"]["running"] = False
+    inputs["runtime_truth_heartbeat"] = {
+        "available": True,
+        "fresh": True,
+        "heartbeat_state": "HEALTHY",
+        "writer_authority": "SINGLE_WRITER",
+        "runtime_instance_id": "runtime-a",
+        "restart_generation": 4,
+        "evidence_only": True,
+        "readiness_authority": False,
+        "restart_authority": False,
+        "live_money_eligible": False,
+    }
+
+    result = classify_canonical_readiness(inputs)
+
+    assert result["canonical_readiness"] == "READY_OBSERVATION_ONLY"
+    assert result["ready_submit_capable"] is False
+    assert result["runtime_truth_heartbeat"]["heartbeat_state"] == "HEALTHY"
 
 
 def test_required_symbol_fresh_from_phase1_listener_satisfies_market_data() -> None:

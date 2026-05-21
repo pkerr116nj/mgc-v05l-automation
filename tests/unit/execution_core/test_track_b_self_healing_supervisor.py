@@ -6,8 +6,15 @@ from pathlib import Path
 
 from mgc_v05l.execution_core.track_b_self_healing_supervisor import (
     DEFAULT_SELF_HEALING_HEALTH_ARTIFACT,
+    RESTART_ALLOWED,
+    RESTART_BUDGET_EXHAUSTED,
+    RESTART_BLOCKED_DUPLICATE_WRITER,
+    RESTART_BLOCKED_RECONCILIATION,
+    RESTART_COOLDOWN_ACTIVE,
+    RESTART_NOT_NEEDED_HEALTHY,
     build_track_b_self_healing_agent_registry,
     build_track_b_self_healing_health,
+    classify_restart_budget_state,
     classify_track_b_self_healing_health,
     write_track_b_self_healing_health,
 )
@@ -73,6 +80,7 @@ def test_dead_required_sidecar_is_auto_restart_eligible_when_broker_state_is_saf
 
     assert result["classification"] == "AUTO_RESTART_ELIGIBLE"
     assert result["auto_restart_allowed"] is True
+    assert result["restart_control"]["classification"] == RESTART_ALLOWED
     assert result["restart_candidates"] == ("broker_truth_refresher",)
     assert "broker_truth_refresher_not_running" in result["agents"]["broker_truth_refresher"]["blockers"]
 
@@ -88,6 +96,7 @@ def test_unknown_open_orders_block_auto_restart() -> None:
 
     assert result["classification"] == "UNSAFE_BROKER_STATE"
     assert result["auto_restart_allowed"] is False
+    assert result["restart_control"]["classification"] == RESTART_BLOCKED_RECONCILIATION
     assert "unknown_open_orders" in result["blockers"]
     assert "broker_reconciliation_mismatch" in result["blockers"]
     assert result["restart_candidates"] == ("broker_truth_refresher",)
@@ -236,6 +245,84 @@ def test_operator_required_state_wins_over_restart_candidate() -> None:
     assert result["classification"] == "OPERATOR_REQUIRED"
     assert result["operator_required_agents"] == ("broker_truth_refresher",)
     assert result["auto_restart_allowed"] is False
+
+
+def test_restart_cooldown_blocks_auto_restart() -> None:
+    inputs = _inputs()
+    inputs["agents"]["paper_runtime"]["process_running"] = False
+    inputs["restart_policy"] = {
+        "restart_attempt_count": 1,
+        "restart_window_seconds": 900,
+        "max_restart_attempts": 3,
+        "cooldown_until": "2026-05-21T03:50:00+00:00",
+    }
+
+    result = classify_track_b_self_healing_health(inputs)
+
+    assert result["classification"] == "AUTO_RESTART_BLOCKED"
+    assert result["auto_restart_allowed"] is False
+    assert result["restart_control"]["classification"] == RESTART_COOLDOWN_ACTIVE
+    assert "restart_cooldown_active" in result["blockers"]
+
+
+def test_repeated_failures_exhaust_restart_budget() -> None:
+    inputs = _inputs()
+    inputs["agents"]["paper_runtime"]["process_running"] = False
+    inputs["restart_policy"] = {
+        "restart_attempt_count": 3,
+        "restart_window_seconds": 900,
+        "max_restart_attempts": 3,
+    }
+
+    result = classify_track_b_self_healing_health(inputs)
+
+    assert result["classification"] == "AUTO_RESTART_BLOCKED"
+    assert result["restart_control"]["classification"] == RESTART_BUDGET_EXHAUSTED
+    assert result["restart_control"]["max_restart_budget_exhausted"] is True
+    assert "restart_max_attempts_exceeded" in result["blockers"]
+
+
+def test_healthy_runtime_resets_restart_budget_view() -> None:
+    result = classify_track_b_self_healing_health(
+        {
+            **_inputs(),
+            "restart_policy": {
+                "restart_attempt_count": 2,
+                "restart_window_seconds": 900,
+                "max_restart_attempts": 3,
+                "cooldown_until": "2026-05-21T03:50:00+00:00",
+            },
+        }
+    )
+
+    assert result["classification"] == "SELF_HEALING_READY"
+    assert result["restart_control"]["classification"] == RESTART_NOT_NEEDED_HEALTHY
+    assert result["restart_control"]["restart_attempt_count"] == 0
+    assert result["restart_control"]["crash_loop_state"] == "HEALTHY_RUNTIME_BUDGET_RESET"
+
+
+def test_duplicate_writer_restart_control_blocks_restart() -> None:
+    result = classify_restart_budget_state(
+        restart_candidates=("paper_runtime",),
+        broker_reconciliation_clean=True,
+        duplicate_writer_detected=True,
+        now=NOW,
+    )
+
+    assert result["classification"] == RESTART_BLOCKED_DUPLICATE_WRITER
+    assert result["restart_allowed"] is False
+
+
+def test_reconciliation_block_restart_control_blocks_restart() -> None:
+    result = classify_restart_budget_state(
+        restart_candidates=("paper_runtime",),
+        broker_reconciliation_clean=False,
+        duplicate_writer_detected=False,
+        now=NOW,
+    )
+
+    assert result["classification"] == RESTART_BLOCKED_RECONCILIATION
+    assert result["restart_allowed"] is False
 
 
 def _inputs() -> dict:
