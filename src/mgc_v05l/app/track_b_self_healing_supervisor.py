@@ -31,9 +31,27 @@ DEFAULT_RESTART_AUDIT_ARTIFACT = (
 DEFAULT_RESTART_COOLDOWN_SECONDS = 300.0
 DEFAULT_RESTART_MAX_ATTEMPTS = 3
 DEFAULT_RESTART_WINDOW_SECONDS = 900.0
+DEFAULT_RESTART_COMMAND_TIMEOUT_SECONDS = 180.0
 AUTO_RESTART_ELIGIBLE = "AUTO_RESTART_ELIGIBLE"
 PAPER_RUNTIME_AGENT_ID = "paper_runtime"
 ACTIVE_BROKER_LEASE_STATES = {"ACTIVE", "ACTIVE_DEGRADED_REFRESH_FAILING"}
+PAPER_RUNTIME_CONFIG_STACK = (
+    "config/base.yaml",
+    "config/live.yaml",
+    "config/probationary_pattern_engine.yaml",
+    "config/headless_supervised_paper_runtime.yaml",
+    "config/probationary_pattern_engine_paper.yaml",
+    "config/probationary_pattern_engine_paper_mnq_mgc_plus_mnq_us_intraday_review.yaml",
+)
+RETRYABLE_PAPER_LAUNCH_FAILURES = {
+    "LAUNCHCTL_SUBMIT_FAILED",
+    "RUNTIME_PID_UNAVAILABLE_AFTER_LAUNCHCTL_SUBMIT",
+    "WRAPPER_PRE_EXEC_FAILURE",
+}
+IMMEDIATE_RETRY_PAPER_LAUNCH_FAILURES = {"LAUNCHCTL_SUBMIT_FAILED"}
+DEFAULT_PAPER_LAUNCH_STATUS_ARTIFACT = (
+    Path("outputs") / "probationary_pattern_engine" / "paper_session" / "runtime" / "probationary_paper_launch_status.json"
+)
 
 RECOVERY_RESTART_COMMANDS: dict[str, tuple[tuple[str, ...], ...]] = {
     "broker_truth_refresher": (
@@ -51,6 +69,11 @@ RECOVERY_RESTART_COMMANDS: dict[str, tuple[tuple[str, ...], ...]] = {
     "paper_runtime": (
         ("bash", "scripts/stop_probationary_paper_soak.sh"),
         (
+            "env",
+            "MGC_HEADLESS_SUPERVISED_PAPER_CONFIG_PATHS="
+            + ":".join(str(REPO_ROOT / item) for item in PAPER_RUNTIME_CONFIG_STACK),
+            "MGC_HEADLESS_REQUIRED_PAPER_CONFIGS="
+            + ":".join(str(REPO_ROOT / item) for item in PAPER_RUNTIME_CONFIG_STACK),
             "bash",
             "scripts/run_headless_supervised_paper_service.sh",
             "--no-start-dashboard",
@@ -105,6 +128,8 @@ def run_track_b_self_healing_status(
         "runtime_restart_eligible": runtime_restart["eligible"],
         "runtime_restart_blockers": runtime_restart["blockers"],
         "runtime_restart_cooldown_state": runtime_restart["cooldown_state"],
+        "retry_policy_classification": action["plan"].get("retry_policy_classification"),
+        "retry_policy": action["plan"].get("retry_policy"),
     }
     if action.get("attempt"):
         health = {**health, "last_restart_attempt": action["attempt"]}
@@ -160,12 +185,16 @@ def plan_track_b_self_healing_restarts(
     health_blockers = list(health.get("blockers") or [])
     actions: list[dict[str, Any]] = []
     blocked: list[dict[str, Any]] = []
+    retry_policy_rows: dict[str, Any] = {}
 
     global_blockers = _global_restart_blockers(health)
     if classification != AUTO_RESTART_ELIGIBLE:
         global_blockers.append(f"classification_not_{AUTO_RESTART_ELIGIBLE}")
+    candidate_blockers = _candidate_agent_blockers(agents=agents, restart_candidates=restart_candidates)
     if health_blockers:
-        global_blockers.extend(str(item) for item in health_blockers)
+        global_blockers.extend(
+            str(item) for item in health_blockers if str(item) not in candidate_blockers
+        )
 
     for agent_id in restart_candidates:
         row = agents.get(agent_id) if isinstance(agents.get(agent_id), Mapping) else {}
@@ -178,8 +207,18 @@ def plan_track_b_self_healing_restarts(
             max_attempts=max_attempts,
             window_seconds=window_seconds,
         )
+        retry_policy = _agent_retry_policy(
+            agent_id=agent_id,
+            audit_entries=audit_entries,
+            now=current,
+            cooldown_seconds=cooldown_seconds,
+            max_attempts=max_attempts,
+            window_seconds=window_seconds,
+        )
+        retry_policy_rows[agent_id] = retry_policy
         if agent_id == PAPER_RUNTIME_AGENT_ID:
             agent_blockers.extend(_runtime_restart_blockers(health=health, agent=row))
+            agent_blockers.extend(str(item) for item in retry_policy.get("blockers") or [])
         all_blockers = _dedupe([*global_blockers, *agent_blockers])
         commands = RECOVERY_RESTART_COMMANDS.get(agent_id)
         if all_blockers or not commands:
@@ -193,6 +232,7 @@ def plan_track_b_self_healing_restarts(
                 "display_name": row.get("display_name") or agent_id,
                 "reason": tuple(row.get("blockers") or ("sidecar_unhealthy",)),
                 "commands": tuple(tuple(command) for command in commands),
+                "retry_policy": retry_policy,
             }
         )
 
@@ -210,6 +250,8 @@ def plan_track_b_self_healing_restarts(
         "blocked": tuple(blocked),
         "global_blockers": tuple(_dedupe(global_blockers)),
         "paper_runtime_auto_restart_allowed": any(row.get("agent_id") == PAPER_RUNTIME_AGENT_ID for row in actions),
+        "retry_policy": retry_policy_rows,
+        "retry_policy_classification": _plan_retry_policy_classification(retry_policy_rows),
         "cooldown_seconds": cooldown_seconds,
         "max_attempts": max_attempts,
         "window_seconds": window_seconds,
@@ -282,13 +324,14 @@ def _apply_restart_plan(
         for command in action.get("commands") or []:
             result = dict(command_runner(tuple(command), repo_root))
             command_results.append(result)
-            if int(result.get("returncode") or 0) != 0:
+            if int(result.get("returncode") or 0) != 0 and not _nonfatal_restart_command_result(agent_id, tuple(command), result):
                 agent_ok = False
                 break
         results.append(
             {
                 "agent_id": agent_id,
                 "classification": "RESTART_SUCCEEDED" if agent_ok else "RESTART_FAILED",
+                "failure_class": _command_failure_class(command_results),
                 "commands": command_results,
             }
         )
@@ -351,6 +394,14 @@ def _runtime_restart_blockers(*, health: Mapping[str, Any], agent: Mapping[str, 
     return _dedupe(blockers)
 
 
+def _candidate_agent_blockers(*, agents: Mapping[str, Any], restart_candidates: Sequence[str]) -> set[str]:
+    blockers: set[str] = set()
+    for agent_id in restart_candidates:
+        row = agents.get(agent_id) if isinstance(agents.get(agent_id), Mapping) else {}
+        blockers.update(str(item) for item in row.get("blockers") or [])
+    return blockers
+
+
 def _runtime_restart_summary(plan: Mapping[str, Any], attempt: Mapping[str, Any] | None) -> dict[str, Any]:
     eligible = any(row.get("agent_id") == PAPER_RUNTIME_AGENT_ID for row in plan.get("actions") or [])
     blockers: list[str] = []
@@ -392,6 +443,10 @@ def _agent_restart_blockers(
     if agent.get("operator_required") is True:
         blockers.append("operator_required")
     recent = _recent_agent_attempts(audit_entries=audit_entries, agent_id=agent_id, now=now, window_seconds=window_seconds)
+    if agent_id == PAPER_RUNTIME_AGENT_ID:
+        # Paper runtime launch failures have their own class-aware progressive
+        # retry policy. Generic cooldown still applies to other agents.
+        return _dedupe(blockers)
     if recent:
         last_ts = _parse_datetime(recent[-1].get("generated_at"))
         if last_ts is not None and (now - last_ts).total_seconds() < cooldown_seconds:
@@ -399,6 +454,166 @@ def _agent_restart_blockers(
     if len(recent) >= max_attempts:
         blockers.append("restart_max_attempts_exceeded")
     return _dedupe(blockers)
+
+
+def _agent_retry_policy(
+    *,
+    agent_id: str,
+    audit_entries: Sequence[Mapping[str, Any]],
+    now: datetime,
+    cooldown_seconds: float,
+    max_attempts: int,
+    window_seconds: float,
+) -> dict[str, Any]:
+    if agent_id != PAPER_RUNTIME_AGENT_ID:
+        return {
+            "classification": "RESTART_ALLOWED",
+            "retry_attempt_count": len(
+                _recent_agent_attempts(
+                    audit_entries=audit_entries,
+                    agent_id=agent_id,
+                    now=now,
+                    window_seconds=window_seconds,
+                )
+            ),
+            "cooldown_state": "CLEAR",
+            "next_retry_allowed_at": None,
+            "budget_exhausted": False,
+            "last_attempt_result": None,
+            "blockers": (),
+        }
+    recent_results = _recent_agent_results(
+        audit_entries=audit_entries,
+        agent_id=agent_id,
+        now=now,
+        window_seconds=window_seconds,
+    )
+    last_result = recent_results[-1] if recent_results else None
+    failure_class = _restart_result_failure_class(last_result) if last_result else None
+    same_class_count = sum(1 for row in recent_results if _restart_result_failure_class(row) == failure_class) if failure_class else 0
+    cooldown_until = None
+    cooldown_active = False
+    blockers: list[str] = []
+
+    if not last_result or str(last_result.get("classification") or "") == "RESTART_SUCCEEDED":
+        classification = "RESTART_ALLOWED"
+    elif failure_class not in RETRYABLE_PAPER_LAUNCH_FAILURES:
+        classification = "RESTART_BLOCKED_NON_RETRYABLE_FAILURE"
+        blockers.append("paper_runtime_last_failure_not_retryable")
+    elif same_class_count >= max_attempts:
+        classification = "RESTART_BUDGET_EXHAUSTED"
+        blockers.append("restart_max_attempts_exceeded")
+    else:
+        last_ts = _parse_datetime(last_result.get("generated_at"))
+        if failure_class in IMMEDIATE_RETRY_PAPER_LAUNCH_FAILURES and same_class_count == 1:
+            classification = "RESTART_RETRY_IMMEDIATE"
+        elif last_ts is not None and (now - last_ts).total_seconds() < cooldown_seconds:
+            cooldown_until = last_ts + timedelta(seconds=cooldown_seconds)
+            cooldown_active = True
+            classification = "RESTART_COOLDOWN_ACTIVE"
+            blockers.append("restart_cooldown_active")
+        else:
+            classification = "RESTART_RETRY_AFTER_COOLDOWN"
+
+    return {
+        "classification": classification,
+        "retry_attempt_count": len(recent_results),
+        "failure_class": failure_class,
+        "failure_class_attempt_count": same_class_count,
+        "restart_window_seconds": window_seconds,
+        "max_attempts_per_class": max_attempts,
+        "cooldown_state": "ACTIVE" if cooldown_active else "CLEAR",
+        "cooldown_until": cooldown_until.isoformat() if cooldown_until else None,
+        "next_retry_allowed_at": cooldown_until.isoformat() if cooldown_until else now.isoformat(),
+        "budget_exhausted": classification == "RESTART_BUDGET_EXHAUSTED",
+        "last_attempt_result": dict(last_result) if isinstance(last_result, Mapping) else None,
+        "blockers": tuple(_dedupe(blockers)),
+    }
+
+
+def _recent_agent_results(
+    *,
+    audit_entries: Sequence[Mapping[str, Any]],
+    agent_id: str,
+    now: datetime,
+    window_seconds: float,
+) -> list[dict[str, Any]]:
+    cutoff = now - timedelta(seconds=window_seconds)
+    recent: list[dict[str, Any]] = []
+    for entry in audit_entries:
+        ts = _parse_datetime(entry.get("generated_at"))
+        if ts is None or ts < cutoff:
+            continue
+        for result in entry.get("results") or []:
+            if isinstance(result, Mapping) and result.get("agent_id") == agent_id:
+                if _audit_result_is_nonfatal_stop_only(agent_id, result):
+                    continue
+                recent.append({"generated_at": entry.get("generated_at"), **dict(result)})
+                break
+    return recent
+
+
+def _restart_result_failure_class(result: Mapping[str, Any] | None) -> str | None:
+    if not isinstance(result, Mapping):
+        return None
+    if str(result.get("classification") or "") == "RESTART_SUCCEEDED":
+        return None
+    explicit = str(result.get("failure_class") or "").strip()
+    if explicit:
+        return explicit
+    for command in result.get("commands") or []:
+        if not isinstance(command, Mapping):
+            continue
+        classification = str(command.get("launch_status_classification") or "").strip()
+        if classification:
+            return classification
+    return str(result.get("classification") or "").strip() or None
+
+
+def _command_failure_class(command_results: Sequence[Mapping[str, Any]]) -> str | None:
+    for result in reversed(list(command_results)):
+        classification = str(result.get("launch_status_classification") or "").strip()
+        if classification:
+            return classification
+    for result in reversed(list(command_results)):
+        if int(result.get("returncode") or 0) != 0:
+            return str(result.get("classification") or "COMMAND_FAILED")
+    return None
+
+
+def _nonfatal_restart_command_result(agent_id: str, command: Sequence[str], result: Mapping[str, Any]) -> bool:
+    if agent_id != PAPER_RUNTIME_AGENT_ID:
+        return False
+    if not any(str(part).endswith("stop_probationary_paper_soak.sh") for part in command):
+        return False
+    text = f"{result.get('stdout_tail') or ''}\n{result.get('stderr_tail') or ''}"
+    return "No probationary paper PID file found" in text
+
+
+def _audit_result_is_nonfatal_stop_only(agent_id: str, result: Mapping[str, Any]) -> bool:
+    if agent_id != PAPER_RUNTIME_AGENT_ID:
+        return False
+    commands = [row for row in result.get("commands") or [] if isinstance(row, Mapping)]
+    if len(commands) != 1:
+        return False
+    command = commands[0].get("command") if isinstance(commands[0].get("command"), Sequence) else ()
+    return _nonfatal_restart_command_result(agent_id, tuple(str(part) for part in command), commands[0])
+
+
+def _plan_retry_policy_classification(rows: Mapping[str, Any]) -> str:
+    if not rows:
+        return "RESTART_ALLOWED"
+    if any(_truthy(row.get("budget_exhausted")) for row in rows.values() if isinstance(row, Mapping)):
+        return "RESTART_BUDGET_EXHAUSTED"
+    if any(str(row.get("classification") or "") == "RESTART_COOLDOWN_ACTIVE" for row in rows.values() if isinstance(row, Mapping)):
+        return "RESTART_COOLDOWN_ACTIVE"
+    if any(str(row.get("classification") or "").startswith("RESTART_BLOCKED") for row in rows.values() if isinstance(row, Mapping)):
+        return "RESTART_BLOCKED"
+    if any(str(row.get("classification") or "") == "RESTART_RETRY_IMMEDIATE" for row in rows.values() if isinstance(row, Mapping)):
+        return "RESTART_RETRY_IMMEDIATE"
+    if any(str(row.get("classification") or "") == "RESTART_RETRY_AFTER_COOLDOWN" for row in rows.values() if isinstance(row, Mapping)):
+        return "RESTART_RETRY_AFTER_COOLDOWN"
+    return "RESTART_ALLOWED"
 
 
 def _recent_agent_attempts(
@@ -446,20 +661,56 @@ def _append_audit(path: Path, payload: Mapping[str, Any]) -> None:
 
 
 def _run_restart_command(command: Sequence[str], repo_root: Path) -> dict[str, Any]:
-    proc = subprocess.run(
-        list(command),
-        cwd=str(repo_root),
-        check=False,
-        capture_output=True,
-        text=True,
-        timeout=60,
-    )
-    return {
+    try:
+        proc = subprocess.run(
+            list(command),
+            cwd=str(repo_root),
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=DEFAULT_RESTART_COMMAND_TIMEOUT_SECONDS,
+        )
+    except subprocess.TimeoutExpired as exc:
+        result = {
+            "command": list(command),
+            "returncode": 124,
+            "classification": "RESTART_COMMAND_TIMEOUT",
+            "stdout_tail": str(exc.stdout or "")[-2000:],
+            "stderr_tail": str(exc.stderr or "")[-2000:],
+            "timeout_seconds": DEFAULT_RESTART_COMMAND_TIMEOUT_SECONDS,
+        }
+        if _is_paper_runtime_start_command(command):
+            launch_status = _read_json(repo_root / DEFAULT_PAPER_LAUNCH_STATUS_ARTIFACT)
+            if launch_status:
+                result["launch_status_classification"] = launch_status.get("classification")
+                result["launch_status_artifact"] = str(repo_root / DEFAULT_PAPER_LAUNCH_STATUS_ARTIFACT)
+                result["launchctl_exit_code"] = launch_status.get("launchctl_exit_code")
+        return result
+    result = {
         "command": list(command),
         "returncode": proc.returncode,
         "stdout_tail": proc.stdout[-2000:],
         "stderr_tail": proc.stderr[-2000:],
     }
+    if _is_paper_runtime_start_command(command):
+        launch_status = _read_json(repo_root / DEFAULT_PAPER_LAUNCH_STATUS_ARTIFACT)
+        if launch_status:
+            result["launch_status_classification"] = launch_status.get("classification")
+            result["launch_status_artifact"] = str(repo_root / DEFAULT_PAPER_LAUNCH_STATUS_ARTIFACT)
+            result["launchctl_exit_code"] = launch_status.get("launchctl_exit_code")
+    return result
+
+
+def _read_json(path: Path) -> dict[str, Any]:
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+    return payload if isinstance(payload, dict) else {}
+
+
+def _is_paper_runtime_start_command(command: Sequence[str]) -> bool:
+    return any(str(part).endswith("run_headless_supervised_paper_service.sh") for part in command)
 
 
 def _normalize_mode(value: str) -> str:
