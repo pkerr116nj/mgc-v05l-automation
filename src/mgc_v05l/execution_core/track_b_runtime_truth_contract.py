@@ -43,11 +43,17 @@ REQUIRED_CONTRACT_FIELDS = {
     "producer_pid",
     "producer_root",
     "generated_at",
+    "last_success_at",
     "freshness_ttl_seconds",
     "freshness_state",
     "heartbeat_state",
     "writer_authority",
+    "source_commit",
+    "config_fingerprint",
     "runtime_mode",
+    "restart_generation",
+    "duplicate_writer_detection",
+    "stale_reason",
     "recovery_state",
 }
 

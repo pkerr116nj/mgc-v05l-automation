@@ -14,6 +14,7 @@ DEFAULT_CANONICAL_READINESS_FILE="${DEFAULT_RUNTIME_DIR}/latest_canonical_readin
 DEFAULT_CANONICAL_READINESS_SUMMARY_FILE="${DEFAULT_RUNTIME_DIR}/latest_canonical_readiness_summary.json"
 DEFAULT_MAINTENANCE_SUPERVISOR_FILE="${DEFAULT_RUNTIME_DIR}/latest_maintenance_supervisor_decision.json"
 DEFAULT_MAINTENANCE_SUPERVISOR_SUMMARY_FILE="${DEFAULT_RUNTIME_DIR}/latest_maintenance_supervisor_summary.json"
+DEFAULT_PAPER_RUNTIME_TRUTH_FILE="${REPO_ROOT}/outputs/probationary_pattern_engine/paper_session/runtime/paper_runtime_truth.json"
 DEFAULT_STARTUP_FILE="${REPO_ROOT}/outputs/operator_dashboard/startup_control_plane_snapshot.json"
 DEFAULT_OPERABILITY_FILE="${REPO_ROOT}/outputs/operator_dashboard/supervised_paper_operability_snapshot.json"
 DEFAULT_INFO_FILE="${DEFAULT_RUNTIME_DIR}/operator_dashboard.json"
@@ -373,6 +374,42 @@ status_path.write_text(json.dumps(status, indent=2, sort_keys=True) + "\n", enco
 PY
 }
 
+merge_paper_runtime_truth_status() {
+  "${PYTHON_BIN}" - <<'PY' "${STATUS_FILE}" "${DEFAULT_PAPER_RUNTIME_TRUTH_FILE}"
+import json
+import sys
+from pathlib import Path
+
+status_path = Path(sys.argv[1])
+truth_path = Path(sys.argv[2])
+
+try:
+    status = json.loads(status_path.read_text(encoding="utf-8"))
+except (OSError, json.JSONDecodeError):
+    status = {}
+try:
+    truth = json.loads(truth_path.read_text(encoding="utf-8"))
+except (OSError, json.JSONDecodeError):
+    truth = {}
+
+status["paper_runtime_truth_artifact"] = str(truth_path)
+status["paper_runtime_truth_evidence_only"] = True
+status["paper_runtime_truth"] = truth
+status["paper_runtime_truth_present"] = bool(truth)
+status["paper_runtime_truth_freshness_state"] = truth.get("freshness_state")
+status["paper_runtime_truth_heartbeat_state"] = truth.get("heartbeat_state")
+status["paper_runtime_truth_writer_authority"] = truth.get("writer_authority")
+status["paper_runtime_truth_runtime_instance_id"] = truth.get("runtime_instance_id")
+status["paper_runtime_truth_lane_count"] = truth.get("lane_count")
+status["paper_runtime_truth_b_plus_threshold"] = truth.get("b_plus_threshold")
+status["paper_runtime_truth_test_mule_enabled"] = truth.get("test_mule_enabled")
+status["paper_only"] = True
+status["live_money_eligible"] = False
+
+status_path.write_text(json.dumps(status, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+PY
+}
+
 canonical_readiness_exit_for_classification() {
   case "$1" in
     READY_SUBMIT_CAPABLE|READY_OBSERVATION_ONLY)
@@ -467,6 +504,7 @@ fi
 
 merge_canonical_readiness_status
 merge_maintenance_supervisor_status
+merge_paper_runtime_truth_status
 cat "${STATUS_FILE}"
 canonical_state="$(canonical_readiness_classification)"
 canonical_readiness_exit_for_classification "${canonical_state}"

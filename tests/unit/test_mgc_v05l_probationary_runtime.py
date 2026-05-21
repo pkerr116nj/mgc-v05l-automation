@@ -48,6 +48,7 @@ from mgc_v05l.app.probationary_runtime import (
     _atp_us_late_overlay_abort_reasons,
     _build_probationary_paper_soak_validation_runtime,
     _build_probationary_paper_soak_validation_settings,
+    _build_probationary_paper_runtime_truth,
     build_probationary_paper_readiness,
     build_probationary_paper_runner,
     _build_exit_parity_summary,
@@ -55,6 +56,7 @@ from mgc_v05l.app.probationary_runtime import (
     _process_running,
     _track_b_reconciled_open_position_restore_plan_from_report,
     _write_current_probationary_runtime_pidfile,
+    _write_probationary_paper_runtime_truth,
     _run_probationary_live_timing_validation,
     _paper_soak_validation_bars,
     run_probationary_paper_soak_validation,
@@ -129,6 +131,66 @@ def _build_probationary_settings(tmp_path: Path):
             override_path,
         ]
     )
+
+
+def test_paper_runtime_truth_artifact_schema_contains_operational_fields(tmp_path: Path) -> None:
+    settings = SimpleNamespace(
+        probationary_artifacts_path=tmp_path / "paper_session",
+        probationary_paper_execution_test_mule_enabled=True,
+    )
+    runtime_dir = settings.probationary_artifacts_path / "runtime"
+    runtime_dir.mkdir(parents=True)
+    config_payload = {
+        "generated_at": "2026-05-21T12:00:00+00:00",
+        "active_lane_ids": ["lane-a", "lane-b"],
+    }
+    (runtime_dir / "paper_config_in_force.json").write_text(json.dumps(config_payload), encoding="utf-8")
+    started_at = datetime(2026, 5, 21, 12, 0, tzinfo=timezone.utc)
+
+    path = _write_probationary_paper_runtime_truth(
+        settings=settings,  # type: ignore[arg-type]
+        lanes=(),
+        runtime_instance_id="track-b-paper-runtime-test",
+        runtime_started_at=started_at,
+        lane_count=2,
+        b_plus_threshold=0.775,
+        test_mule_enabled=True,
+    )
+
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    assert path == runtime_dir / "paper_runtime_truth.json"
+    assert payload["schema_version"] == "track_b_runtime_truth_contract_v1"
+    assert payload["service_name"] == "track_b_paper_runtime"
+    assert payload["runtime_instance_id"] == "track-b-paper-runtime-test"
+    assert payload["runtime_mode"] == "PAPER"
+    assert payload["lane_count"] == 2
+    assert payload["b_plus_threshold"] == 0.775
+    assert payload["test_mule_enabled"] is True
+    assert payload["config_fingerprint"].startswith("sha256:")
+    assert payload["submit_authority"] is False
+    assert payload["readiness_authority"] is False
+    assert payload["restart_authority"] is False
+
+
+def test_paper_runtime_truth_builder_represents_duplicate_writer_indicator(tmp_path: Path) -> None:
+    settings = SimpleNamespace(
+        probationary_artifacts_path=tmp_path / "paper_session",
+        probationary_paper_execution_test_mule_enabled=False,
+    )
+    started_at = datetime(2026, 5, 21, 12, 0, tzinfo=timezone.utc)
+
+    payload = _build_probationary_paper_runtime_truth(
+        settings=settings,  # type: ignore[arg-type]
+        lanes=(),
+        runtime_instance_id="track-b-paper-runtime-test",
+        runtime_started_at=started_at,
+        lane_count=0,
+        operator_status={"duplicate_runtime_submitter_count": 2},
+    )
+
+    assert payload["writer_authority"] == "DUPLICATE_WRITER_DETECTED"
+    assert payload["duplicate_writer_detection"]["duplicate_writer_detected"] is True
+    assert payload["duplicate_writer_detection"]["duplicate_runtime_submitter_count"] == 2
 
 
 def _research_bar_1m(index: int, *, instrument: str = "GC", close: str = "100") -> ResearchBar:

@@ -129,6 +129,61 @@ def test_runtime_degraded_becomes_restart_candidate_for_clean_broker_state() -> 
     assert "paper_runtime_not_running" in result["agents"]["paper_runtime"]["blockers"]
 
 
+def test_paper_runtime_truth_is_optional_evidence_not_restart_authority(tmp_path: Path) -> None:
+    _write_runtime_artifacts(tmp_path)
+    truth_path = (
+        tmp_path
+        / "outputs"
+        / "probationary_pattern_engine"
+        / "paper_session"
+        / "runtime"
+        / "paper_runtime_truth.json"
+    )
+    truth_path.write_text(
+        json.dumps(
+            {
+                "schema_version": "track_b_runtime_truth_contract_v1",
+                "runtime_instance_id": "track-b-paper-runtime-test",
+                "service_name": "track_b_paper_runtime",
+                "producer_pid": 1006,
+                "producer_root": str(tmp_path),
+                "generated_at": NOW.isoformat(),
+                "last_success_at": NOW.isoformat(),
+                "freshness_ttl_seconds": 180.0,
+                "freshness_state": "FRESH",
+                "heartbeat_state": "HEALTHY",
+                "writer_authority": "SINGLE_WRITER",
+                "source_commit": "abc123",
+                "config_fingerprint": "sha256:deadbeef",
+                "runtime_mode": "PAPER",
+                "restart_generation": 0,
+                "duplicate_writer_detection": {"duplicate_writer_detected": False},
+                "stale_reason": None,
+                "recovery_state": "OBSERVE_ONLY",
+                "lane_count": 17,
+                "b_plus_threshold": 0.775,
+                "test_mule_enabled": True,
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    health = build_track_b_self_healing_health(
+        repo_root=tmp_path,
+        expected_root=tmp_path,
+        now=NOW,
+        process_probe=_process_probe(tmp_path),
+    )
+
+    paper_runtime = health["agents"]["paper_runtime"]
+    truth_row = next(row for row in paper_runtime["artifacts"] if row["label"] == "paper_runtime_truth")
+    assert health["classification"] == "SELF_HEALING_READY"
+    assert health["auto_restart_allowed"] is False
+    assert truth_row["required"] is False
+    assert truth_row["fresh"] is True
+    assert truth_row["payload"]["lane_count"] == 17
+
+
 def test_operator_required_state_wins_over_restart_candidate() -> None:
     inputs = _inputs()
     inputs["agents"]["broker_truth_refresher"]["classification"] = "BROKER_TRUTH_REFRESH_OPERATOR_REQUIRED"

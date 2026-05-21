@@ -93,6 +93,17 @@ from ..persistence import build_engine
 from ..persistence.repositories import RepositorySet, decode_order_intent
 from ..persistence.tables import bars_table, fills_table, order_intents_table, signals_table
 from ..production_link import ProductionLinkService
+from ..execution_core.track_b_runtime_truth_contract import (
+    HEARTBEAT_HEALTHY,
+    HEARTBEAT_WRONG_ROOT,
+    RECOVERY_OBSERVE_ONLY,
+    WRITER_DUPLICATE,
+    WRITER_SINGLE,
+    build_runtime_truth_contract,
+    classify_heartbeat,
+    classify_writer_authority,
+    validate_runtime_truth_contract,
+)
 from ..research.trend_participation.canary import _CANARY_LANES
 from ..research.trend_participation.canary import atpe_runtime_lane_id, atpe_runtime_lane_name
 from ..research.trend_participation.engine import DEFAULT_POINT_VALUES as ATPE_POINT_VALUES
@@ -167,6 +178,7 @@ _RUNTIME_SIGNAL_RESTORE_LIMIT = 512
 _RUNTIME_EVENT_RESTORE_LIMIT = 512
 _RUNTIME_TRADE_RESTORE_LIMIT = 128
 _RUNTIME_PROCESSED_BAR_RESTORE_LIMIT = 720
+PAPER_RUNTIME_TRUTH_TTL_SECONDS = 180.0
 
 
 @dataclass(frozen=True)
@@ -6831,6 +6843,7 @@ class ProbationaryPaperRunner:
         self._order_timeout_watchdog = _initial_order_timeout_watchdog_status(self._settings)
         self._startup_restore_validation: dict[str, Any] = {}
         self._runtime_started_at = datetime.now(timezone.utc)
+        self._runtime_instance_id = _paper_runtime_instance_id(started_at=self._runtime_started_at)
         set_logger = getattr(self._live_polling_service, "set_recovery_event_logger", None)
         if callable(set_logger):
             set_logger(self._structured_logger.log_market_data_recovery_event)
@@ -6935,6 +6948,15 @@ class ProbationaryPaperRunner:
                             ),
                         ),
                     }
+                )
+                _write_probationary_paper_runtime_truth(
+                    settings=self._settings,
+                    lanes=(),
+                    runtime_instance_id=self._runtime_instance_id,
+                    runtime_started_at=self._runtime_started_at,
+                    lane_count=1,
+                    b_plus_threshold=None,
+                    test_mule_enabled=False,
                 )
                 self._structured_logger.write_live_timing_state(
                     _build_live_timing_summary(
@@ -7187,6 +7209,8 @@ class ProbationaryPaperSupervisor:
         self._stop_requested = False
         self._runtime_registry = runtime_registry
         self._lane_quarantine: dict[str, dict[str, Any]] = {}
+        self._runtime_started_at = datetime.now(timezone.utc)
+        self._runtime_instance_id = _paper_runtime_instance_id(started_at=self._runtime_started_at)
 
     def _record_lane_quarantine(
         self,
@@ -7243,6 +7267,12 @@ class ProbationaryPaperSupervisor:
         previous_handlers = self._install_signal_handlers()
         try:
             _write_probationary_paper_config_in_force(self._settings, self._lanes, self._structured_logger)
+            _write_probationary_paper_runtime_truth(
+                settings=self._settings,
+                lanes=self._lanes,
+                runtime_instance_id=self._runtime_instance_id,
+                runtime_started_at=self._runtime_started_at,
+            )
             risk_state = _load_probationary_paper_risk_state(self._settings)
 
             for lane in self._lanes:
@@ -7433,6 +7463,12 @@ class ProbationaryPaperSupervisor:
                     market_data_failures=market_data_failures,
                     reconciliation_clean=reconciliation_clean,
                     lane_quarantine=self._lane_quarantine,
+                )
+                _write_probationary_paper_runtime_truth(
+                    settings=self._settings,
+                    lanes=self._lanes,
+                    runtime_instance_id=self._runtime_instance_id,
+                    runtime_started_at=self._runtime_started_at,
                 )
 
                 if not reconciliation_clean:
@@ -8960,6 +8996,175 @@ def _write_probationary_paper_config_in_force(
         ],
     }
     return structured_logger._write_json(runtime_dir / "paper_config_in_force.json", payload)  # noqa: SLF001
+
+
+def _paper_runtime_truth_path(settings: StrategySettings) -> Path:
+    return settings.probationary_artifacts_path / "runtime" / "paper_runtime_truth.json"
+
+
+def _paper_runtime_instance_id(*, started_at: datetime) -> str:
+    stamp = started_at.astimezone(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    return f"track-b-paper-runtime-{stamp}-{os.getpid()}"
+
+
+def _paper_runtime_restart_generation() -> int:
+    raw = os.environ.get("MGC_TRACK_B_PAPER_RUNTIME_RESTART_GENERATION") or os.environ.get("MGC_TRACK_B_RESTART_GENERATION")
+    try:
+        return max(int(raw or 0), 0)
+    except ValueError:
+        return 0
+
+
+def _probationary_config_fingerprint(payload: dict[str, Any]) -> str | None:
+    if not payload:
+        return None
+    digest = hashlib.sha256(json.dumps(payload, sort_keys=True, separators=(",", ":"), default=str).encode("utf-8")).hexdigest()
+    return f"sha256:{digest}"
+
+
+def _probationary_b_plus_threshold(lanes: Sequence[ProbationaryPaperLaneRuntime]) -> float | None:
+    thresholds = {
+        float(lane.spec.runtime_overlay_params["operational_maturation_b_plus_threshold"])
+        for lane in lanes
+        if isinstance(getattr(lane.spec, "runtime_overlay_params", None), dict)
+        and "operational_maturation_b_plus_threshold" in lane.spec.runtime_overlay_params
+    }
+    if len(thresholds) == 1:
+        return next(iter(thresholds))
+    return None
+
+
+def _probationary_duplicate_writer_detection(operator_status: dict[str, Any] | None = None) -> dict[str, Any]:
+    explicit = 0
+    if operator_status:
+        try:
+            explicit = int(operator_status.get("duplicate_runtime_submitter_count") or 0)
+        except (TypeError, ValueError):
+            explicit = 0
+    duplicate = explicit > 1
+    return {
+        "duplicate_writer_detected": duplicate,
+        "duplicate_runtime_submitter_count": explicit,
+        "source": "operator_status" if operator_status else "runtime_self_report",
+    }
+
+
+def _build_probationary_paper_runtime_truth(
+    *,
+    settings: StrategySettings,
+    lanes: Sequence[ProbationaryPaperLaneRuntime],
+    runtime_instance_id: str,
+    runtime_started_at: datetime,
+    lane_count: int | None = None,
+    b_plus_threshold: float | None = None,
+    test_mule_enabled: bool | None = None,
+    now: datetime | None = None,
+    operator_status: dict[str, Any] | None = None,
+    config_payload: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    observed_at = now or datetime.now(timezone.utc)
+    runtime_identity = _current_runtime_identity_payload()
+    config_in_force = config_payload
+    if config_in_force is None:
+        config_in_force = _read_json(settings.probationary_artifacts_path / "runtime" / "paper_config_in_force.json")
+    duplicate_writer_detection = _probationary_duplicate_writer_detection(operator_status)
+    writer_authority = classify_writer_authority(
+        [
+            {
+                "process_running": True,
+                "heartbeat_state": HEARTBEAT_HEALTHY,
+            },
+            *(
+                [
+                    {
+                        "process_running": True,
+                        "heartbeat_state": HEARTBEAT_HEALTHY,
+                    }
+                ]
+                if duplicate_writer_detection["duplicate_writer_detected"]
+                else []
+            ),
+        ]
+    )
+    expected_root = str(Path(__file__).resolve().parents[3])
+    producer_root = str(runtime_identity.get("source_runtime_cwd") or "")
+    root_ok = Path(producer_root).expanduser().resolve() == Path(expected_root).expanduser().resolve()
+    heartbeat_state = classify_heartbeat(
+        process_running=True,
+        root_ok=root_ok,
+        command_ok=True,
+        freshness_state="FRESH",
+    )
+    if not root_ok:
+        heartbeat_state = HEARTBEAT_WRONG_ROOT
+    active_lane_count = lane_count if lane_count is not None else len(lanes)
+    resolved_b_plus_threshold = b_plus_threshold if b_plus_threshold is not None else _probationary_b_plus_threshold(lanes)
+    resolved_test_mule_enabled = (
+        test_mule_enabled
+        if test_mule_enabled is not None
+        else bool(getattr(settings, "probationary_paper_execution_test_mule_enabled", False))
+    )
+    payload = build_runtime_truth_contract(
+        runtime_instance_id=runtime_instance_id,
+        service_name="track_b_paper_runtime",
+        producer_pid=os.getpid(),
+        producer_root=producer_root,
+        generated_at=observed_at,
+        last_success_at=observed_at,
+        freshness_ttl_seconds=PAPER_RUNTIME_TRUTH_TTL_SECONDS,
+        heartbeat_state=heartbeat_state,
+        writer_authority=WRITER_DUPLICATE if writer_authority == WRITER_DUPLICATE else WRITER_SINGLE,
+        runtime_mode="PAPER",
+        recovery_state=RECOVERY_OBSERVE_ONLY,
+        source_commit=str(runtime_identity.get("source_runtime_git_head") or ""),
+        config_fingerprint=_probationary_config_fingerprint(config_in_force),
+        restart_generation=_paper_runtime_restart_generation(),
+        duplicate_writer_detection=duplicate_writer_detection,
+        extra={
+            "runtime_started_at": runtime_started_at.astimezone(timezone.utc).isoformat(),
+            "paper_runtime_truth_path": str(_paper_runtime_truth_path(settings)),
+            "paper_config_in_force_path": str(settings.probationary_artifacts_path / "runtime" / "paper_config_in_force.json"),
+            "lane_count": active_lane_count,
+            "b_plus_threshold": resolved_b_plus_threshold,
+            "test_mule_enabled": resolved_test_mule_enabled,
+            "paper_only": True,
+            "live_money_eligible": False,
+            "submit_authority": False,
+            "readiness_authority": False,
+            "restart_authority": False,
+        },
+    )
+    validate_runtime_truth_contract(payload)
+    return payload
+
+
+def _write_probationary_paper_runtime_truth(
+    *,
+    settings: StrategySettings,
+    lanes: Sequence[ProbationaryPaperLaneRuntime],
+    runtime_instance_id: str,
+    runtime_started_at: datetime,
+    lane_count: int | None = None,
+    b_plus_threshold: float | None = None,
+    test_mule_enabled: bool | None = None,
+    operator_status: dict[str, Any] | None = None,
+) -> Path:
+    path = _paper_runtime_truth_path(settings)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    payload = _build_probationary_paper_runtime_truth(
+        settings=settings,
+        lanes=lanes,
+        runtime_instance_id=runtime_instance_id,
+        runtime_started_at=runtime_started_at,
+        lane_count=lane_count,
+        b_plus_threshold=b_plus_threshold,
+        test_mule_enabled=test_mule_enabled,
+        operator_status=operator_status,
+    )
+    tmp = path.with_name(f".{path.name}.tmp")
+    tmp.write_text(json.dumps(payload, indent=2, sort_keys=True, default=str) + "\n", encoding="utf-8")
+    tmp.replace(path)
+    return path
 
 
 def _load_probationary_paper_risk_state(settings: StrategySettings) -> ProbationaryPaperRiskRuntimeState:

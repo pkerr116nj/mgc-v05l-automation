@@ -141,6 +141,42 @@ def test_build_runtime_truth_contract_is_paper_only_and_schema_valid() -> None:
     assert validate_runtime_truth_contract(payload) == ()
 
 
+def test_runtime_truth_contract_can_represent_stale_heartbeat_artifact() -> None:
+    payload = build_runtime_truth_contract(
+        runtime_instance_id="track-b-paper-20260521-120000-123",
+        service_name="paper_runtime",
+        producer_pid=123,
+        producer_root="/Users/patrick/Dev/MGC-v05l-automation",
+        generated_at=NOW,
+        last_success_at="2026-05-21T11:56:59+00:00",
+        freshness_ttl_seconds=180,
+        heartbeat_state=HEARTBEAT_ARTIFACT_STALE,
+        writer_authority=WRITER_SINGLE,
+    )
+
+    assert payload["freshness_state"] == FRESHNESS_STALE
+    assert payload["stale_reason"] == "age_seconds>180"
+    assert payload["heartbeat_state"] == HEARTBEAT_ARTIFACT_STALE
+
+
+def test_runtime_truth_contract_can_represent_wrong_root_writer() -> None:
+    payload = build_runtime_truth_contract(
+        runtime_instance_id="track-b-paper-20260521-120000-123",
+        service_name="paper_runtime",
+        producer_pid=123,
+        producer_root="/Users/patrick/Documents/MGC-v05l-automation",
+        generated_at=NOW,
+        last_success_at=NOW,
+        freshness_ttl_seconds=180,
+        heartbeat_state=HEARTBEAT_WRONG_ROOT,
+        writer_authority=WRITER_SINGLE,
+    )
+
+    assert payload["producer_root"] == "/Users/patrick/Documents/MGC-v05l-automation"
+    assert payload["heartbeat_state"] == HEARTBEAT_WRONG_ROOT
+    assert validate_runtime_truth_contract(payload) == ()
+
+
 def test_validate_runtime_truth_contract_rejects_live_mode() -> None:
     payload = build_runtime_truth_contract(
         runtime_instance_id="track-b-paper-20260521-120000-123",

@@ -87,6 +87,20 @@ def test_status_script_surfaces_advisory_maintenance_supervisor_decision() -> No
     assert script.index("merge_canonical_readiness_status") < script.index("merge_maintenance_supervisor_status")
 
 
+def test_status_script_reads_paper_runtime_truth_as_evidence_only() -> None:
+    script = STATUS_SCRIPT.read_text(encoding="utf-8")
+
+    assert "DEFAULT_PAPER_RUNTIME_TRUTH_FILE" in script
+    assert "paper_runtime_truth.json" in script
+    assert "merge_paper_runtime_truth_status" in script
+    assert "paper_runtime_truth_evidence_only" in script
+    assert "paper_runtime_truth_writer_authority" in script
+    assert "paper_runtime_truth_b_plus_threshold" in script
+    assert script.index("merge_canonical_readiness_status") < script.index("merge_paper_runtime_truth_status")
+    assert "ready_submit_capable\" = truth" not in script
+    assert "paper_trade_allowed\" = truth" not in script
+
+
 def test_status_script_keeps_readiness_exit_code_primary_over_supervisor() -> None:
     script = STATUS_SCRIPT.read_text(encoding="utf-8")
 
