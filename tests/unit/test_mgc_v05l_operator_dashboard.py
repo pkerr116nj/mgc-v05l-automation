@@ -4174,6 +4174,9 @@ def test_dashboard_assets_use_operator_first_surface_and_preserve_legacy_surface
     assert 'id="operator-readiness-cards"' in html
     assert "Self-Healing" in js
     assert "self_healing_classification" in js
+    assert "Optional Degradation" in js
+    assert "Non-blocking readiness warnings" in js
+    assert "Diagnostic-only stale surfaces" in js
     assert 'id="operator-canary-cards"' in html
     assert 'id="temporary-paper-strategies-table"' in html
     assert 'data-action="start-atp-companion-paper"' not in html

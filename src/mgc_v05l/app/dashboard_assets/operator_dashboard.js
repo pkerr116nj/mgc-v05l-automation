@@ -1169,7 +1169,10 @@ function buildOperatorReadinessCards(payload) {
     { label: "Session Eligible", value: String(truth.session_eligible_lanes ?? values.session_eligible_lanes_count ?? 0), level: (truth.session_eligible_lanes ?? values.session_eligible_lanes_count ?? 0) ? "info" : "muted" },
     { label: "Actionable Signals", value: String(truth.actionable_signals ?? values.actionable_now_count ?? 0), level: (truth.actionable_signals ?? values.actionable_now_count ?? 0) ? "accent" : "muted" },
     { label: "Current Blockers", value: String(truth.current_blockers ?? values.true_blocked_count ?? values.blocked_lanes_count ?? 0), level: (truth.current_blockers ?? values.true_blocked_count ?? values.blocked_lanes_count ?? 0) ? "danger" : "ok" },
-    { label: "Waiting For Bar", value: String(truth.waiting_for_bar ?? values.waiting_for_bar_count ?? values.waiting_for_completed_bar_count ?? 0), level: (truth.waiting_for_bar ?? values.waiting_for_bar_count ?? values.waiting_for_completed_bar_count ?? 0) ? "warning" : "muted" },
+    { label: "Warnings", value: String(truth.warning_count ?? values.readiness_warning_count ?? 0), level: (truth.blocking_warning_count ?? 0) ? "danger" : (truth.warning_count ?? values.readiness_warning_count ?? 0) ? "info" : "muted" },
+    { label: "Optional Degradation", value: String(truth.optional_service_degraded_count ?? values.optional_service_degraded_count ?? 0), level: (truth.optional_service_degraded_count ?? values.optional_service_degraded_count ?? 0) ? "muted" : "ok" },
+    { label: "Diagnostic Only", value: String(truth.diagnostic_only_warning_count ?? values.diagnostic_only_warning_count ?? 0), level: (truth.diagnostic_only_warning_count ?? values.diagnostic_only_warning_count ?? 0) ? "muted" : "ok" },
+    { label: "Waiting For Bar", value: String(truth.waiting_for_bar ?? values.waiting_for_bar_count ?? values.waiting_for_completed_bar_count ?? 0), level: (truth.waiting_for_bar ?? values.waiting_for_bar_count ?? values.waiting_for_completed_bar_count ?? 0) ? "info" : "muted" },
     { label: "No Setup", value: String(truth.no_setup ?? values.no_setup_count ?? 0), level: (truth.no_setup ?? values.no_setup_count ?? 0) ? "muted" : "ok" },
     { label: "Stale Market Data", value: String(truth.market_data_stale ?? values.market_data_stale_count ?? 0), level: (truth.market_data_stale ?? values.market_data_stale_count ?? 0) ? "danger" : "ok" },
   ];
@@ -1202,6 +1205,15 @@ function buildOperatorReadinessNotes(payload) {
   rows.push(`Next decision bar: ${values.next_expected_decision_bar_ts || "-"}`);
   rows.push(`Truth source: ${truth.source || values.paper_readiness_source || "-"}`);
   const degradedFeeds = values.degraded_informational_feeds || [];
+  const warningPresentation = payload.readiness_warning_presentation || values.readiness_warning_presentation || {};
+  const optionalWarnings = Array.isArray(warningPresentation.optional_service_degraded) ? warningPresentation.optional_service_degraded : [];
+  const nonBlockingWarnings = Array.isArray(warningPresentation.non_blocking) ? warningPresentation.non_blocking : [];
+  const diagnosticWarnings = Array.isArray(warningPresentation.diagnostic_only) ? warningPresentation.diagnostic_only : [];
+  const blockingWarnings = Array.isArray(warningPresentation.blocking) ? warningPresentation.blocking : [];
+  if (blockingWarnings.length) rows.push(`Blocking readiness warnings: ${blockingWarnings.map((row) => row.code || row.detail || "blocking_warning").join(", ")}`);
+  if (nonBlockingWarnings.length) rows.push(`Non-blocking readiness warnings: ${nonBlockingWarnings.map((row) => row.code || row.detail || "warning").join(", ")}`);
+  if (optionalWarnings.length) rows.push(`Optional/service degradation: ${optionalWarnings.map((row) => row.code || row.symbol || row.detail || "optional_degradation").join(", ")}`);
+  if (diagnosticWarnings.length) rows.push(`Diagnostic-only stale surfaces: ${diagnosticWarnings.map((row) => row.code || row.detail || "diagnostic_only").join(", ")}`);
   if (degradedFeeds.length) rows.push(`Informational feeds degraded: ${degradedFeeds.join(", ")}`);
   const bootstrap = payload.bootstrap_prerequisites || {};
   const bootstrapItems = Array.isArray(bootstrap.items) ? bootstrap.items : [];

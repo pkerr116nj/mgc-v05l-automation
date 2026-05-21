@@ -1088,7 +1088,7 @@ class OperatorDashboardService:
                     startup_control_plane=startup_control_plane,
                     paper=paper,
                 )
-                from .operator_surface import build_operator_surface
+                from .operator_surface import _classify_readiness_warnings, build_operator_surface
 
                 operator_surface = build_operator_surface(
                     generated_at=generated_at,
@@ -1397,6 +1397,15 @@ class OperatorDashboardService:
                     operator_surface_runtime["canonical_readiness"] = canonical_readiness_summary["canonical_readiness"]
                     operator_surface_runtime["readiness_blockers"] = canonical_readiness_summary["readiness_blockers"]
                     operator_surface_runtime["readiness_warnings"] = canonical_readiness_summary["readiness_warnings"]
+                    readiness_warning_presentation = _classify_readiness_warnings(canonical_readiness_summary["readiness_warnings"])
+                    operator_surface_runtime["readiness_warning_presentation"] = readiness_warning_presentation
+                    runtime_values = operator_surface_runtime.get("values")
+                    if isinstance(runtime_values, dict):
+                        runtime_values["readiness_warning_count"] = readiness_warning_presentation["total_count"]
+                        runtime_values["readiness_warning_presentation"] = readiness_warning_presentation
+                        runtime_values["non_blocking_warning_count"] = readiness_warning_presentation["non_blocking_count"]
+                        runtime_values["optional_service_degraded_count"] = readiness_warning_presentation["optional_service_degraded_count"]
+                        runtime_values["diagnostic_only_warning_count"] = readiness_warning_presentation["diagnostic_only_count"]
                     operator_surface_runtime["broker_truth_lease"] = canonical_readiness_summary.get("broker_truth_lease") or {}
                     operator_surface_runtime["broker_truth"] = canonical_readiness_summary.get("broker_truth") or {}
                     operator_surface_runtime["operator_readiness_refresh_status"] = operator_readiness_refresh_status
@@ -1405,6 +1414,29 @@ class OperatorDashboardService:
                     if isinstance(truth, dict):
                         broker_truth_lease = canonical_readiness_summary.get("broker_truth_lease") or {}
                         truth["canonical_readiness"] = canonical_readiness_summary["canonical_readiness"]
+                        truth["warning_count"] = (
+                            readiness_warning_presentation["non_blocking_count"]
+                            + readiness_warning_presentation["optional_service_degraded_count"]
+                            + readiness_warning_presentation["diagnostic_only_count"]
+                        )
+                        truth["blocking_warning_count"] = readiness_warning_presentation["blocking_count"]
+                        truth["non_blocking_warning_count"] = readiness_warning_presentation["non_blocking_count"]
+                        truth["optional_service_degraded_count"] = readiness_warning_presentation["optional_service_degraded_count"]
+                        truth["diagnostic_only_warning_count"] = readiness_warning_presentation["diagnostic_only_count"]
+                        truth["current_blockers"] = max(int(truth.get("current_blockers") or 0), readiness_warning_presentation["blocking_count"])
+                        if (
+                            truth.get("paper_trade_allowed") is True
+                            and truth.get("paper_runtime_ready") is True
+                            and truth.get("paper_only") is not False
+                            and int(truth.get("current_blockers") or 0) == 0
+                        ):
+                            truth["status_line"] = (
+                                f"TRADE_CAPABLE | PAPER_ONLY | warnings={truth['warning_count']} | "
+                                f"state={truth.get('state') or 'TRADE_CAPABLE'} | "
+                                f"runtime={'RUNNING' if truth.get('runtime_running') else 'STOPPED'} | ready=YES | "
+                                f"loaded={truth.get('lanes_loaded') or 0} | route_ready={truth.get('route_ready_lanes') or 0} | "
+                                f"session_eligible={truth.get('session_eligible_lanes') or 0} | signals={truth.get('actionable_signals') or 0}"
+                            )
                         truth["broker_truth_lease_state"] = broker_truth_lease.get("lease_state")
                         truth["broker_truth_lease_age_seconds"] = broker_truth_lease.get("age_seconds")
                         truth["broker_truth_lease_entry_seconds_remaining"] = broker_truth_lease.get("entry_seconds_remaining")

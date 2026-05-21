@@ -171,6 +171,8 @@ def test_operator_surface_exposes_exact_contract_and_rollup_integrity() -> None:
     assert truth["paper_trade_allowed"] is True
     assert truth["paper_only"] is True
     assert truth["route_capable_now"] is True
+    assert truth["warning_count"] == 0
+    assert truth["status_line"].startswith("TRADE_CAPABLE | PAPER_ONLY | warnings=0")
     assert truth["lanes_loaded"] == 44
     assert truth["route_ready_lanes"] == 44
     assert truth["actionable_signals"] == 0
@@ -293,6 +295,62 @@ def test_operator_surface_runtime_down_is_loud_and_not_route_capable() -> None:
     assert readiness["paper_trade_allowed"] is False
     assert readiness["values"]["authoritative_runtime_truth"] == truth
 
+
+
+def test_operator_surface_trade_capable_with_optional_warnings_stays_healthy() -> None:
+    surface = build_operator_surface(
+        generated_at="2026-05-21T04:32:00+00:00",
+        global_payload={
+            "paper_label": "RUNNING",
+            "current_session_date": "2026-05-21",
+            "market_data_label": "LIVE",
+            "runtime_health_label": "HEALTHY",
+            "fault_state": "CLEAR",
+        },
+        auth_status={"runtime_ready": True},
+        paper={
+            "running": True,
+            "status": {"entries_enabled": True, "operator_halt": False},
+            "readiness": {
+                "runtime_phase": "RUNNING",
+                "entries_enabled": True,
+                "paper_trade_allowed": True,
+                "paper_trade_block_reason": None,
+                "paper_runtime_ready": True,
+                "readiness_warnings": [
+                    {"code": "backend_not_healthy", "source": "backend"},
+                    {"code": "optional_market_data_degraded", "source": "phase1_databento_live_listener", "symbol": "ZF"},
+                    {"code": "canonical_summary_stale_diagnostic_only", "source": "operator_surface"},
+                ],
+                "lane_status_summary": {
+                    "runtime_lanes_loaded_count": 15,
+                    "route_ready_lanes_count": 15,
+                    "session_eligible_lanes_count": 5,
+                    "waiting_for_completed_bar_count": 5,
+                    "blocked_lanes_count": 0,
+                    "market_data_stale_count": 0,
+                    "true_blocked_count": 0,
+                },
+            },
+            "exceptions": {"exceptions": []},
+            "config_in_force": {"lanes": [{"lane_id": "mnq_lane", "live_money_eligible": False}]},
+        },
+        approved_quant_baselines={},
+        market_context={"feed_label": "OPTIONAL", "feed_state": "DEGRADED"},
+        treasury_curve={},
+    )
+
+    readiness = surface["runtime_readiness"]
+    truth = readiness["authoritative_runtime_truth"]
+    warnings = readiness["readiness_warning_presentation"]
+    assert truth["state"] == "TRADE_CAPABLE_WAITING_FOR_SETUP"
+    assert truth["status_line"].startswith("TRADE_CAPABLE | PAPER_ONLY | warnings=3")
+    assert truth["current_blockers"] == 0
+    assert truth["paper_trade_allowed"] is True
+    assert truth["optional_service_degraded_count"] == 2
+    assert truth["diagnostic_only_warning_count"] == 1
+    assert warnings["blocking_count"] == 0
+    assert {row["classification"] for row in warnings["warnings"]} == {"OPTIONAL_SERVICE_DEGRADED", "DIAGNOSTIC_ONLY"}
 
 def test_operator_surface_runtime_readiness_only_blocks_on_blocking_faults() -> None:
     watch_surface = build_operator_surface(

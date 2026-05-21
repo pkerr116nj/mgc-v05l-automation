@@ -12,6 +12,28 @@ from .strategy_identity import build_standalone_strategy_identity
 _OD_FILE = "src/mgc_v05l/app/operator_dashboard.py"
 _OS_FILE = "src/mgc_v05l/app/operator_surface.py"
 _AQ_FILE = "src/mgc_v05l/app/approved_quant_lanes/dashboard_payloads.py"
+_OPTIONAL_SERVICE_WARNING_CODES = {
+    "backend_not_healthy",
+    "optional_market_data_degraded",
+}
+_DIAGNOSTIC_ONLY_WARNING_CODES = {
+    "canonical_summary_not_generated_with_full_artifact",
+    "canonical_summary_stale_diagnostic_only",
+    "dashboard_snapshot_stale",
+    "operator_snapshot_stale",
+    "presentation_snapshot_stale",
+}
+_BLOCKING_WARNING_CODES = {
+    "broker_reconciliation_not_clean",
+    "broker_truth_lease_expired",
+    "broker_truth_lease_invalidated",
+    "broker_truth_lease_not_active",
+    "live_money_eligible_true",
+    "market_data_not_fresh",
+    "runtime_ingestion_not_fresh",
+    "runtime_not_healthy",
+    "runtime_not_running",
+}
 
 
 def build_operator_surface(
@@ -152,6 +174,7 @@ def _build_runtime_readiness(
         ).items()
         if not bool(item.get("available"))
     ]
+    readiness_warning_presentation = _classify_readiness_warnings(readiness.get("readiness_warnings"))
     bootstrap_items = list(bootstrap_prerequisites.get("items") or [])
     bootstrap_issues = [str(item.get("label") or item.get("key") or "") for item in bootstrap_items if str(item.get("status") or "") != "ready"]
     active_lane_count = len(_unique_lane_ids(active_rows, enabled_only=True))
@@ -214,6 +237,10 @@ def _build_runtime_readiness(
         true_blocked_count=int(readiness.get("true_blocked_count") or blocked_lanes_count),
         market_data_stale_count=int(readiness.get("market_data_stale_count") or market_data_stale_count),
         blocking_faults_count=len(blocking_faults),
+        blocking_warning_count=readiness_warning_presentation["blocking_count"],
+        non_blocking_warning_count=readiness_warning_presentation["non_blocking_count"],
+        optional_service_degraded_count=readiness_warning_presentation["optional_service_degraded_count"],
+        diagnostic_only_warning_count=readiness_warning_presentation["diagnostic_only_count"],
         current_detected_phase_label=current_detected_phase_label,
         next_expected_decision_bar_ts=next_expected_decision_bar_ts,
         paper_readiness_source=paper_readiness_source,
@@ -233,6 +260,7 @@ def _build_runtime_readiness(
         "authoritative_runtime_truth": authoritative_truth,
         "paper_readiness_source": paper_readiness_source,
         "paper_readiness_timestamp": paper_readiness_timestamp,
+        "readiness_warning_presentation": readiness_warning_presentation,
         "blocking_faults": blocking_faults,
         "advisory_faults": advisory_faults,
         "blocking_faults_active": bool(blocking_faults),
@@ -282,6 +310,11 @@ def _build_runtime_readiness(
         "runtime_recovery_last_result": runtime_recovery.get("last_restart_result"),
         "blocking_faults_count": len(blocking_faults),
         "advisory_faults_count": len(advisory_faults),
+        "readiness_warning_count": readiness_warning_presentation["total_count"],
+        "readiness_warning_presentation": readiness_warning_presentation,
+        "non_blocking_warning_count": readiness_warning_presentation["non_blocking_count"],
+        "optional_service_degraded_count": readiness_warning_presentation["optional_service_degraded_count"],
+        "diagnostic_only_warning_count": readiness_warning_presentation["diagnostic_only_count"],
         "blocking_faults_active": payload["blocking_faults_active"],
         "paper_trade_allowed": paper_trade_allowed,
         "paper_trade_block_reason": paper_trade_block_reason,
@@ -319,6 +352,44 @@ def _build_runtime_readiness(
     return payload
 
 
+
+def _classify_readiness_warnings(warnings: Any) -> dict[str, Any]:
+    rows = warnings if isinstance(warnings, list) else []
+    classified: list[dict[str, Any]] = []
+    counts = {
+        "BLOCKING": 0,
+        "NON_BLOCKING_WARNING": 0,
+        "OPTIONAL_SERVICE_DEGRADED": 0,
+        "DIAGNOSTIC_ONLY": 0,
+    }
+    for raw in rows:
+        row = dict(raw) if isinstance(raw, dict) else {"code": str(raw)}
+        code = str(row.get("code") or row.get("name") or "").strip()
+        severity = str(row.get("severity") or "").strip().upper()
+        source = str(row.get("source") or "").strip()
+        if severity == "BLOCKING" or code in _BLOCKING_WARNING_CODES:
+            classification = "BLOCKING"
+        elif code in _OPTIONAL_SERVICE_WARNING_CODES:
+            classification = "OPTIONAL_SERVICE_DEGRADED"
+        elif code in _DIAGNOSTIC_ONLY_WARNING_CODES or source in {"dashboard", "operator_surface", "presentation_snapshot"}:
+            classification = "DIAGNOSTIC_ONLY"
+        else:
+            classification = "NON_BLOCKING_WARNING"
+        counts[classification] += 1
+        classified.append({**row, "classification": classification})
+    return {
+        "warnings": classified,
+        "total_count": len(classified),
+        "blocking_count": counts["BLOCKING"],
+        "non_blocking_count": counts["NON_BLOCKING_WARNING"],
+        "optional_service_degraded_count": counts["OPTIONAL_SERVICE_DEGRADED"],
+        "diagnostic_only_count": counts["DIAGNOSTIC_ONLY"],
+        "blocking": [row for row in classified if row["classification"] == "BLOCKING"],
+        "non_blocking": [row for row in classified if row["classification"] == "NON_BLOCKING_WARNING"],
+        "optional_service_degraded": [row for row in classified if row["classification"] == "OPTIONAL_SERVICE_DEGRADED"],
+        "diagnostic_only": [row for row in classified if row["classification"] == "DIAGNOSTIC_ONLY"],
+    }
+
 def _paper_live_money_eligible(*, paper: dict[str, Any], readiness: dict[str, Any]) -> bool:
     if readiness.get("live_money_eligible") is True:
         return True
@@ -351,6 +422,10 @@ def _build_authoritative_runtime_truth(
     true_blocked_count: int,
     market_data_stale_count: int,
     blocking_faults_count: int,
+    blocking_warning_count: int,
+    non_blocking_warning_count: int,
+    optional_service_degraded_count: int,
+    diagnostic_only_warning_count: int,
     current_detected_phase_label: str,
     next_expected_decision_bar_ts: Any,
     paper_readiness_source: str,
@@ -358,7 +433,14 @@ def _build_authoritative_runtime_truth(
 ) -> dict[str, Any]:
     paper_only = not live_money_eligible
     route_capable_now = bool(paper_trade_allowed and route_ready_lanes_count > 0 and paper_only)
-    current_blockers = max(true_blocked_count, blocked_lanes_count, market_data_stale_count, blocking_faults_count)
+    current_blockers = max(
+        true_blocked_count,
+        blocked_lanes_count,
+        market_data_stale_count,
+        blocking_faults_count,
+        blocking_warning_count,
+    )
+    warning_count = non_blocking_warning_count + optional_service_degraded_count + diagnostic_only_warning_count
     if not paper_enabled:
         state = "RUNTIME_DOWN"
         blocker = "Paper runtime process is not running."
@@ -395,13 +477,20 @@ def _build_authoritative_runtime_truth(
 
     if state == "RUNTIME_DOWN":
         status_line = "RUNTIME DOWN | PAPER_ONLY | no lanes can trade"
+    elif paper_trade_allowed and paper_runtime_ready and paper_only and not current_blockers:
+        status_line = (
+            f"TRADE_CAPABLE | PAPER_ONLY | warnings={warning_count} | "
+            f"state={state} | runtime={'RUNNING' if paper_enabled else 'STOPPED'} | ready=YES | "
+            f"loaded={runtime_lanes_loaded_count} | route_ready={route_ready_lanes_count} | "
+            f"session_eligible={session_eligible_lanes_count} | signals={actionable_now_count}"
+        )
     else:
         status_line = (
             f"{state} | PAPER_ONLY={'YES' if paper_only else 'NO'} | "
             f"runtime={'RUNNING' if paper_enabled else 'STOPPED'} | ready={'YES' if paper_runtime_ready else 'NO'} | "
             f"trade_allowed={'YES' if paper_trade_allowed else 'NO'} | loaded={runtime_lanes_loaded_count} | "
             f"route_ready={route_ready_lanes_count} | session_eligible={session_eligible_lanes_count} | "
-            f"signals={actionable_now_count} | blockers={current_blockers}"
+            f"signals={actionable_now_count} | blockers={current_blockers} | warnings={warning_count}"
         )
     return {
         "state": state,
@@ -419,6 +508,11 @@ def _build_authoritative_runtime_truth(
         "session_eligible_lanes": session_eligible_lanes_count,
         "actionable_signals": actionable_now_count,
         "current_blockers": current_blockers,
+        "warning_count": warning_count,
+        "blocking_warning_count": blocking_warning_count,
+        "non_blocking_warning_count": non_blocking_warning_count,
+        "optional_service_degraded_count": optional_service_degraded_count,
+        "diagnostic_only_warning_count": diagnostic_only_warning_count,
         "waiting_for_bar": waiting_for_completed_bar_count,
         "no_setup": no_setup_count,
         "market_data_stale": market_data_stale_count,
