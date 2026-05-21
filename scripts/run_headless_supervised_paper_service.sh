@@ -913,6 +913,21 @@ payload = {
     "restart_generation": restart_generation,
     "launch_started_at": launch_started_at or None,
     "launchctl_label": label or None,
+    "launchctl_command": [
+        "launchctl",
+        "submit",
+        "-l",
+        label,
+        "-o",
+        stdout_file,
+        "-e",
+        stderr_file,
+        "--",
+        "/bin/bash",
+        wrapper_path,
+    ]
+    if label
+    else None,
     "wrapper_path": wrapper_path,
     "pid_file": pid_file,
     "pid_metadata_file": pid_metadata_file,
@@ -1153,7 +1168,11 @@ launch_detached_paper_runtime() {
   rm -f "${PAPER_WRAPPER_STATUS_FILE}" "${PAPER_LAUNCHCTL_STDOUT_FILE}" "${PAPER_LAUNCHCTL_STDERR_FILE}"
   wrapper_path="$(write_paper_runtime_wrapper)"
   set +e
-  launchctl submit -l "${label}" -- /bin/bash "${wrapper_path}" >"${PAPER_LAUNCHCTL_STDOUT_FILE}" 2>"${PAPER_LAUNCHCTL_STDERR_FILE}"
+  launchctl submit \
+    -l "${label}" \
+    -o "${PAPER_LAUNCHCTL_STDOUT_FILE}" \
+    -e "${PAPER_LAUNCHCTL_STDERR_FILE}" \
+    -- /bin/bash "${wrapper_path}"
   launchctl_rc=$?
   set -e
   if [[ "${launchctl_rc}" -ne 0 ]]; then

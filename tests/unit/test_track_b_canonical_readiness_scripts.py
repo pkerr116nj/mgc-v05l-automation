@@ -264,7 +264,11 @@ def test_launch_script_uses_launchctl_paper_runtime_contract_without_screen_fall
     assert "launch_background_paper_runtime\n    return 0" not in launch_function
     assert "launch_rc=$?" in launch_function
     assert "return \"${launch_rc}\"" in launch_function
-    assert "launchctl submit -l \"${label}\" -- /bin/bash \"${wrapper_path}\" >\"${PAPER_LAUNCHCTL_STDOUT_FILE}\" 2>\"${PAPER_LAUNCHCTL_STDERR_FILE}\"" in script
+    assert "-o \"${PAPER_LAUNCHCTL_STDOUT_FILE}\"" in script
+    assert "-e \"${PAPER_LAUNCHCTL_STDERR_FILE}\"" in script
+    assert "-- /bin/bash \"${wrapper_path}\"" in script
+    assert ">\"${PAPER_LAUNCHCTL_STDOUT_FILE}\" 2>\"${PAPER_LAUNCHCTL_STDERR_FILE}\"" not in script
+    assert '"launchctl_command": [' in script
     assert "write_launchctl_runtime_status \"LAUNCHCTL_SUBMIT_ACCEPTED\"" in script
     assert "write_launchctl_runtime_status \"LAUNCHCTL_SUBMIT_FAILED\"" in script
     assert launch_function.index("rm -f \"${PAPER_WRAPPER_PID_FILE}\"") < launch_function.index(
