@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -uo pipefail
 
-REPO_ROOT="/Users/patrick/Dev/MGC-v05l-automation"
+REPO_ROOT="${TRACK_B_PROJECT_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)}"
 OUT_DIR="${REPO_ROOT}/outputs/reports/track_b_paper_preflight"
 OUT_JSON="${OUT_DIR}/latest_track_b_paper_preflight.json"
 REQUIRED_PATCH_COMMITS="d7b126c10d 35064b698c 94695132b1 520bd7313f 57402b55a7 155cea2bfa a47a6f6806 83ed3578c2"

@@ -1,12 +1,11 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-EXPECTED_REPO_ROOT="/Users/patrick/Dev/MGC-v05l-automation"
-REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
-SCRIPT_PATH="${EXPECTED_REPO_ROOT}/scripts/track_b_paper_preflight.sh"
+REPO_ROOT="${TRACK_B_PROJECT_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)}"
+SCRIPT_PATH="${REPO_ROOT}/scripts/track_b_paper_preflight.sh"
 LABEL="com.mgc_v05l.track_b_sunday_preflight"
 PLIST_PATH="${HOME}/Library/LaunchAgents/${LABEL}.plist"
-OUT_DIR="${EXPECTED_REPO_ROOT}/outputs/reports/track_b_paper_preflight"
+OUT_DIR="${REPO_ROOT}/outputs/reports/track_b_paper_preflight"
 STDOUT_LOG="${OUT_DIR}/sunday_static_preflight.stdout.log"
 STDERR_LOG="${OUT_DIR}/sunday_static_preflight.stderr.log"
 COMMAND_STRING="/bin/bash ${SCRIPT_PATH} --mode weekend-static"
@@ -16,9 +15,14 @@ refuse() {
   exit 1
 }
 
-[[ "${REPO_ROOT}" == "${EXPECTED_REPO_ROOT}" ]] || refuse "repo root is ${REPO_ROOT}, expected ${EXPECTED_REPO_ROOT}"
 [[ -f "${SCRIPT_PATH}" ]] || refuse "target script missing: ${SCRIPT_PATH}"
 [[ -x "${SCRIPT_PATH}" ]] || refuse "target script is not executable: ${SCRIPT_PATH}"
+
+case "${REPO_ROOT}" in
+  *"/Users/patrick/Documents"*|*"Mobile Documents"*|*"iCloud"*)
+    refuse "Repo root references deprecated Documents/iCloud root: ${REPO_ROOT}"
+    ;;
+esac
 
 case "${COMMAND_STRING}" in
   *"/Users/patrick/Documents"*|*"Mobile Documents"*|*"iCloud"*)
@@ -67,7 +71,7 @@ cat > "${TMP_PLIST}" <<PLIST
     <integer>0</integer>
   </dict>
   <key>WorkingDirectory</key>
-  <string>${EXPECTED_REPO_ROOT}</string>
+  <string>${REPO_ROOT}</string>
   <key>StandardOutPath</key>
   <string>${STDOUT_LOG}</string>
   <key>StandardErrorPath</key>

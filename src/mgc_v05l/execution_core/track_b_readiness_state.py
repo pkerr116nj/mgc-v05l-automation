@@ -16,15 +16,16 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Mapping, Sequence
 
+from mgc_v05l.paths import PROJECT_ROOT, is_archived_project_root
 from mgc_v05l.execution_core.track_b_live_market_data_symbols import (
     DEFAULT_TRACK_B_LIVE_MARKET_DATA_SYMBOLS_PATH,
     TrackBLiveMarketDataSymbol,
     load_track_b_live_market_data_symbols,
 )
 
-REPO_ROOT = Path(__file__).resolve().parents[3]
+REPO_ROOT = PROJECT_ROOT
 TRACK_B_EXPECTED_ACTIVE_ROOT_ENV = "MGC_TRACK_B_EXPECTED_ACTIVE_ROOT"
-DEFAULT_TRACK_B_EXPECTED_ACTIVE_ROOT = Path("/Users/patrick/Dev/MGC-v05l-automation")
+DEFAULT_TRACK_B_EXPECTED_ACTIVE_ROOT = PROJECT_ROOT
 DEFAULT_CANONICAL_READINESS_ARTIFACT = (
     Path("outputs") / "operator_dashboard" / "runtime" / "latest_canonical_readiness.json"
 )
@@ -1347,6 +1348,8 @@ def _pid_running(pid: int) -> bool:
 def _path_matches_root(path: Path | None, root: Path) -> bool | None:
     if path is None:
         return None
+    if is_archived_project_root(path):
+        return False
     try:
         path_resolved = path.resolve()
         root_resolved = root.resolve()
