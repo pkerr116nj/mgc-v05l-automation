@@ -9,6 +9,7 @@ from mgc_v05l.execution_core.track_b_managed_open_position_maintenance import (
     TrackBManagedOpenPositionMaintenanceConfig,
     run_track_b_managed_open_position_maintenance,
 )
+from mgc_v05l.execution_core.track_b_position_management_manifest import OPEN_MANAGED_METADATA_INCOMPLETE
 from mgc_v05l.execution_core.track_b_strategy_managed_paper_lifecycle import (
     TrackBStrategyManagedPaperLifecycleConfig,
     TrackBStrategyManagedPaperLifecycleStages,
@@ -215,6 +216,78 @@ def test_open_managed_position_age_two_keeps_waiting(tmp_path: Path) -> None:
     position = result.report["positions"][0]
     assert position["completed_bars_since_entry"] == 2
     assert position["exit_eligible"] is False
+    assert position["close_intent_created"] is False
+    assert position["close_submitted"] is False
+
+
+def test_missing_exit_policy_recovers_from_lane_registry(tmp_path: Path) -> None:
+    cfg = seed_open_position(
+        tmp_path,
+        completed_timestamps=[
+            "2026-05-07T16:30:00+00:00",
+            "2026-05-07T16:35:00+00:00",
+            "2026-05-07T16:40:00+00:00",
+        ],
+    )
+    lifecycle_path = tmp_path / "managed" / "strategy_managed_fe30248d4d6c42acaf106c8313b0b33b" / "track_b_strategy_managed_paper_lifecycle_report.json"
+    payload = json.loads(lifecycle_path.read_text(encoding="utf-8"))
+    payload["managed_exit_policy_id"] = None
+    payload["entry_intent"]["managed_exit_policy_id"] = None
+    lifecycle_path.write_text(json.dumps(payload), encoding="utf-8")
+    registry = tmp_path / "paper_config_in_force.json"
+    write_json(
+        registry,
+        {
+            "lanes": [
+                {
+                    "lane_id": "mnq_1x_ny_early_core__us_midday_long",
+                    "standalone_strategy_id": "MNQ_FIRST_BULL_SNAP_TURN_V1",
+                    "managed_exit_policy_id": "PAPER_DIAGNOSTIC_TIME_BOXED_3X5M_EXIT_V1",
+                }
+            ]
+        },
+    )
+    cfg = TrackBManagedOpenPositionMaintenanceConfig(
+        **{**cfg.__dict__, "lane_registry_paths": (registry,)}
+    )
+
+    result = run_track_b_managed_open_position_maintenance(
+        config=cfg,
+        lifecycle_stages=fake_close_stages(),
+        now=aware_now(),
+    )
+
+    position = result.report["positions"][0]
+    assert position["exit_policy_id"] == "PAPER_DIAGNOSTIC_TIME_BOXED_3X5M_EXIT_V1"
+    assert position["close_intent_created"] is True
+    assert position["close_submitted"] is True
+
+
+def test_missing_exit_policy_is_incomplete_and_does_not_submit(tmp_path: Path) -> None:
+    cfg = seed_open_position(
+        tmp_path,
+        completed_timestamps=[
+            "2026-05-07T16:30:00+00:00",
+            "2026-05-07T16:35:00+00:00",
+            "2026-05-07T16:40:00+00:00",
+        ],
+    )
+    lifecycle_path = tmp_path / "managed" / "strategy_managed_fe30248d4d6c42acaf106c8313b0b33b" / "track_b_strategy_managed_paper_lifecycle_report.json"
+    payload = json.loads(lifecycle_path.read_text(encoding="utf-8"))
+    payload["managed_exit_policy_id"] = None
+    payload["entry_intent"]["managed_exit_policy_id"] = None
+    payload["strategy_id"] = "UNKNOWN_STRATEGY_WITHOUT_POLICY"
+    lifecycle_path.write_text(json.dumps(payload), encoding="utf-8")
+
+    result = run_track_b_managed_open_position_maintenance(
+        config=cfg,
+        lifecycle_stages=fake_close_stages(),
+        now=aware_now(),
+    )
+
+    position = result.report["positions"][0]
+    assert position["final_classification"] == OPEN_MANAGED_METADATA_INCOMPLETE
+    assert position["review_required"] is True
     assert position["close_intent_created"] is False
     assert position["close_submitted"] is False
 

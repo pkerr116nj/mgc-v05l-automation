@@ -17,6 +17,10 @@ from typing import Any, Mapping
 
 from .models import require_aware_datetime, to_jsonable
 from .track_b_paper_trade_ledger import DEFAULT_TRACK_B_PAPER_TRADE_LEDGER_OUTPUT_ROOT
+from .track_b_position_management_manifest import (
+    DEFAULT_TRACK_B_POSITION_MANAGEMENT_MANIFEST_ROOT,
+    create_or_update_position_management_manifest,
+)
 
 
 DEFAULT_TRACK_B_STRATEGY_TRADE_INTENT_OUTPUT_ROOT = Path(
@@ -58,6 +62,7 @@ class TrackBStrategyTradeIntentConfig:
     lifecycle_mode: str = "STRATEGY_MANAGED"
     output_root: Path = DEFAULT_TRACK_B_STRATEGY_TRADE_INTENT_OUTPUT_ROOT
     paper_trade_ledger_output_root: Path = DEFAULT_TRACK_B_PAPER_TRADE_LEDGER_OUTPUT_ROOT
+    position_management_manifest_root: Path = DEFAULT_TRACK_B_POSITION_MANAGEMENT_MANIFEST_ROOT
     live_position_status_json: Path | None = None
     source_artifact_paths: Mapping[str, Any] | None = None
 
@@ -97,6 +102,29 @@ def create_track_b_strategy_trade_intent(
         latest_json=latest_json,
         jsonl=jsonl,
     )
+    if intent_created:
+        manifest = create_or_update_position_management_manifest(
+            entry_intent_id=actual_intent_id,
+            lane_id=strategy_report.get("lane_id"),
+            strategy_id=config.strategy_id,
+            instrument_family=config.instrument_family,
+            contract_key=config.contract_key,
+            local_symbol=config.local_symbol,
+            con_id=config.con_id,
+            side=report.get("side"),
+            quantity=config.quantity,
+            managed_exit_policy_id=config.managed_exit_policy_id,
+            lifecycle_status="INTENT_CREATED",
+            policy_config_refs={
+                "source": "track_b_strategy_trade_intent",
+                "strategy_registry_id": strategy_report.get("strategy_registry_id"),
+                "strategy_registry_rule_id": strategy_report.get("strategy_registry_rule_id"),
+            },
+            output_root=config.position_management_manifest_root,
+            now=actual_now,
+        )
+        report["position_management_manifest_path"] = str(manifest.manifest_path)
+        report["position_management_manifest_status"] = manifest.manifest["lifecycle_status"]
     _write_intent_artifacts(latest_json=latest_json, jsonl=jsonl, report=report)
     return TrackBStrategyTradeIntentResult(
         classification=classification,

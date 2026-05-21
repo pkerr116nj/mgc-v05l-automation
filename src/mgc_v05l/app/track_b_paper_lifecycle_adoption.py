@@ -1256,6 +1256,8 @@ def _build_trade_payload(fill_payload: Mapping[str, Any]) -> dict[str, Any]:
         "entry_exec_id": fill_payload.get("execution_id"),
         "entry_execution_intent": fill_payload.get("entry_execution_intent"),
         "entry_price_source": fill_payload.get("entry_price_source"),
+        "managed_exit_policy_id": fill_payload.get("managed_exit_policy_id"),
+        "position_management_manifest_path": fill_payload.get("position_management_manifest_path"),
         "submit_intent_ownership_evidence": fill_payload.get("submit_intent_ownership_evidence"),
         "broker_average_price": fill_payload.get("broker_average_price"),
         "broker_cost_basis_adjustment": fill_payload.get("broker_cost_basis_adjustment"),

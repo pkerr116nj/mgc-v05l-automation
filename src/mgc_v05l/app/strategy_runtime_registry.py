@@ -55,6 +55,7 @@ class StandaloneStrategyDefinition:
     database_url: str | None = None
     artifacts_dir: str | None = None
     point_value: Decimal | None = None
+    managed_exit_policy_id: str | None = None
     legacy_derived_identity: bool = False
 
     @property
@@ -76,6 +77,7 @@ class StandaloneStrategyDefinition:
             "max_position_quantity": self.max_position_quantity,
             "max_adds_after_entry": self.max_adds_after_entry,
             "add_direction_policy": self.add_direction_policy.value,
+            "managed_exit_policy_id": self.managed_exit_policy_id,
         }
 
 
@@ -349,6 +351,9 @@ def _coerce_runtime_definition_rows(
                 database_url=str(raw.get("database_url") or _derive_runtime_database_url(settings.database_url, lane_id or identity["standalone_strategy_id"])),
                 artifacts_dir=str(raw.get("artifacts_dir") or (settings.probationary_artifacts_path / "lanes" / (lane_id or identity["standalone_strategy_id"]))),
                 point_value=Decimal(str(raw["point_value"])) if raw.get("point_value") is not None else None,
+                managed_exit_policy_id=(
+                    str(raw["managed_exit_policy_id"]) if raw.get("managed_exit_policy_id") else None
+                ),
                 legacy_derived_identity=False,
             )
         )

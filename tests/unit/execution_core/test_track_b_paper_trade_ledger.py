@@ -13,6 +13,10 @@ from mgc_v05l.execution_core.track_b_paper_trade_ledger import (
     update_track_b_paper_trade_ledger_from_filled_bridge_result,
     update_track_b_paper_trade_ledger_from_runner_report,
 )
+from mgc_v05l.execution_core.track_b_position_management_manifest import (
+    OPEN_MANAGED_METADATA_INCOMPLETE,
+    create_or_update_position_management_manifest,
+)
 
 
 def aware_now() -> datetime:
@@ -71,6 +75,102 @@ def test_updates_open_position_from_direct_bridge_fill_artifact(tmp_path: Path) 
     assert position["entry_perm_id"] == 1984099439
     assert position["entry_client_id"] == 10905
     assert position["entry_broker_identity"]["broker_order_id"] == "1"
+
+
+def test_direct_bridge_fill_inherits_exit_policy_from_manifest(tmp_path: Path) -> None:
+    manifest_root = tmp_path / "manifests"
+    intent_id = "MNQ|1m|2026-05-21T15:07:00Z|BUY_TO_OPEN"
+    create_or_update_position_management_manifest(
+        entry_intent_id=intent_id,
+        lane_id="mnq_1x_ny_early_core__us_midday_long",
+        strategy_id="index_futures_ny_intraday_forced_core_v2__mnq_1x_ny_early_core__us_midday_long",
+        instrument_family="MNQ",
+        contract_key="MNQ-202606",
+        local_symbol="MNQM6",
+        con_id=770561201,
+        side="LONG",
+        quantity=1,
+        managed_exit_policy_id="PAPER_DIAGNOSTIC_TIME_BOXED_3X5M_EXIT_V1",
+        lifecycle_status="INTENT_CREATED",
+        output_root=manifest_root,
+        now=aware_now(),
+    )
+    payload = {
+        "classification": "PAPER_STRATEGY_ORDER_FILLED_PERSISTED",
+        "strategy_id": "index_futures_ny_intraday_forced_core_v2__mnq_1x_ny_early_core__us_midday_long",
+        "lane_id": "mnq_1x_ny_early_core__us_midday_long",
+        "instrument": "MNQ",
+        "symbol": "MNQ",
+        "action": "BUY",
+        "quantity": 1,
+        "order_intent_id": intent_id,
+        "intent_type": "BUY_TO_OPEN",
+        "decision_bar_timestamp": "2026-05-21T15:07:00+00:00",
+        "broker_order_id": "1",
+        "account_id": "DUM882026",
+        "perm_id": 1948367784,
+        "client_id": 11194,
+        "exec_id": "0000e1a7.6a19013e.01.01",
+        "local_symbol": "MNQM6",
+        "con_id": 770561201,
+        "contract": {"symbol": "MNQ", "local_symbol": "MNQM6", "expiry": "202606", "multiplier": "2"},
+        "fill_price": "29150.0",
+        "fill_timestamp": "2026-05-21T15:08:57.079226+00:00",
+        "bridge_classification": "PAPER_STRATEGY_ORDER_FILLED",
+        "paper_proof_invoked": False,
+        "live_money_readiness": False,
+        "review_required": False,
+    }
+
+    result = update_track_b_paper_trade_ledger_from_filled_bridge_result(
+        filled_bridge_result=payload,
+        filled_bridge_result_json=write_json(tmp_path / "fill.json", payload),
+        output_root=tmp_path / "ledger",
+        position_management_manifest_root=manifest_root,
+        lane_registry_paths=(),
+        now=aware_now(),
+    )
+
+    assert result.trade_record is not None
+    assert result.trade_record["managed_exit_policy_id"] == "PAPER_DIAGNOSTIC_TIME_BOXED_3X5M_EXIT_V1"
+    assert result.trade_record["position_management_metadata_source"] == "manifest"
+    assert result.trade_record["review_required"] is False
+
+
+def test_direct_bridge_fill_missing_policy_is_review_required_incomplete(tmp_path: Path) -> None:
+    payload = {
+        "classification": "PAPER_STRATEGY_ORDER_FILLED_PERSISTED",
+        "strategy_id": "unknown_strategy",
+        "lane_id": "unknown_lane",
+        "instrument": "MNQ",
+        "symbol": "MNQ",
+        "action": "BUY",
+        "quantity": 1,
+        "order_intent_id": "MNQ|1m|2026-05-21T15:07:00Z|BUY_TO_OPEN",
+        "intent_type": "BUY_TO_OPEN",
+        "broker_order_id": "1",
+        "local_symbol": "MNQM6",
+        "con_id": 770561201,
+        "contract": {"symbol": "MNQ", "local_symbol": "MNQM6", "expiry": "202606", "multiplier": "2"},
+        "fill_price": "29150.0",
+        "fill_timestamp": "2026-05-21T15:08:57.079226+00:00",
+        "paper_proof_invoked": False,
+        "live_money_readiness": False,
+    }
+
+    result = update_track_b_paper_trade_ledger_from_filled_bridge_result(
+        filled_bridge_result=payload,
+        filled_bridge_result_json=write_json(tmp_path / "fill.json", payload),
+        output_root=tmp_path / "ledger",
+        position_management_manifest_root=tmp_path / "manifests",
+        lane_registry_paths=(tmp_path / "missing.json",),
+        now=aware_now(),
+    )
+
+    assert result.trade_record is not None
+    assert result.trade_record["managed_exit_policy_id"] is None
+    assert result.trade_record["paper_lifecycle_classification"] == OPEN_MANAGED_METADATA_INCOMPLETE
+    assert result.trade_record["review_required"] is True
 
 
 def test_direct_bridge_close_fill_persists_closed_flat_record(tmp_path: Path) -> None:

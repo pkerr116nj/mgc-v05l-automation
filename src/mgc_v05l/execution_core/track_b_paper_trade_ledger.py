@@ -16,6 +16,12 @@ from pathlib import Path
 from typing import Any, Iterable, Mapping
 
 from .models import require_aware_datetime, to_jsonable
+from .track_b_position_management_manifest import (
+    DEFAULT_TRACK_B_POSITION_MANAGEMENT_MANIFEST_ROOT,
+    OPEN_MANAGED_METADATA_INCOMPLETE,
+    resolve_management_metadata,
+    update_manifest_from_filled_bridge_result,
+)
 
 
 DEFAULT_TRACK_B_PAPER_TRADE_LEDGER_OUTPUT_ROOT = Path("outputs/track_b_execution_core/paper_trade_ledger")
@@ -672,6 +678,8 @@ def update_track_b_paper_trade_ledger_from_filled_bridge_result(
     filled_bridge_result: Mapping[str, Any],
     filled_bridge_result_json: Path | None = None,
     output_root: Path = DEFAULT_TRACK_B_PAPER_TRADE_LEDGER_OUTPUT_ROOT,
+    position_management_manifest_root: Path = DEFAULT_TRACK_B_POSITION_MANAGEMENT_MANIFEST_ROOT,
+    lane_registry_paths: Iterable[Path] | None = None,
     now: datetime | None = None,
 ) -> TrackBPaperTradeLedgerResult:
     """Append a compact open-position row from a direct IBKR bridge fill artifact.
@@ -697,6 +705,8 @@ def update_track_b_paper_trade_ledger_from_filled_bridge_result(
         filled_bridge_result=filled_bridge_result,
         filled_bridge_result_json=filled_bridge_result_json,
         existing_records=existing_records,
+        position_management_manifest_root=position_management_manifest_root,
+        lane_registry_paths=lane_registry_paths,
         now=actual_now,
     )
     wrote = False
@@ -1127,6 +1137,8 @@ def _trade_record_from_filled_bridge_result(
     filled_bridge_result: Mapping[str, Any],
     filled_bridge_result_json: Path | None,
     existing_records: Iterable[Mapping[str, Any]],
+    position_management_manifest_root: Path,
+    lane_registry_paths: Iterable[Path] | None,
     now: datetime,
 ) -> dict[str, Any] | None:
     classification = str(filled_bridge_result.get("classification") or "")
@@ -1157,6 +1169,26 @@ def _trade_record_from_filled_bridge_result(
     contract = filled_bridge_result.get("contract") if isinstance(filled_bridge_result.get("contract"), Mapping) else {}
     quantity = _decimal(filled_bridge_result.get("quantity"))
     entry_fill_price = _decimal(filled_bridge_result.get("fill_price"))
+    manifest_update = update_manifest_from_filled_bridge_result(
+        filled_bridge_result=filled_bridge_result,
+        output_root=position_management_manifest_root,
+        now=now,
+    )
+    metadata = resolve_management_metadata(
+        source={
+            **dict(filled_bridge_result),
+            "position_management_manifest_path": str(manifest_update.manifest_path)
+            if manifest_update is not None
+            else filled_bridge_result.get("position_management_manifest_path"),
+        },
+        output_root=position_management_manifest_root,
+        lane_registry_paths=lane_registry_paths,
+    )
+    lifecycle_classification = (
+        "TRACK_B_STRATEGY_PAPER_OPEN_MANAGED"
+        if metadata.complete
+        else OPEN_MANAGED_METADATA_INCOMPLETE
+    )
     return {
         "ledger_schema_version": LEDGER_SCHEMA_VERSION,
         "trade_id": f"{strategy_id}:{lifecycle_id}",
@@ -1203,17 +1235,22 @@ def _trade_record_from_filled_bridge_result(
         "slippage_vs_reference": None,
         "strategy_verdict": "TRACK_B_STRATEGY_PAPER_RUNNER_DIRECT_BRIDGE_FILLED",
         "paper_lifecycle_type": "STRATEGY_MANAGED",
-        "paper_lifecycle_classification": "TRACK_B_STRATEGY_PAPER_OPEN_MANAGED",
+        "paper_lifecycle_classification": lifecycle_classification,
         "paper_proof_classification": None,
-        "managed_exit_policy_id": filled_bridge_result.get("managed_exit_policy_id"),
+        "managed_exit_policy_id": metadata.managed_exit_policy_id,
+        "position_management_manifest_path": str(manifest_update.manifest_path)
+        if manifest_update is not None
+        else filled_bridge_result.get("position_management_manifest_path"),
+        "position_management_metadata_source": metadata.source,
+        "position_management_metadata_blockers": list(metadata.blockers),
         "entry_submit_attempted": True,
         "entry_fill_confirmed": True,
         "broker_backed_position_confirmed": True,
         "app_only_no_broker_transmission": False,
         "transmission_classification": "BROKER_BACKED_POSITION_CONFIRMED",
-        "final_broker_state_classification": "TRACK_B_STRATEGY_PAPER_OPEN_MANAGED",
+        "final_broker_state_classification": lifecycle_classification,
         "final_position_status": "OPEN_MANAGED",
-        "review_required": bool(filled_bridge_result.get("review_required")) or False,
+        "review_required": bool(filled_bridge_result.get("review_required")) or not metadata.complete,
         "paper_lifecycle_report_path": None,
         "decision_journal_record_id": None,
         "decision_journal_record_path": None,

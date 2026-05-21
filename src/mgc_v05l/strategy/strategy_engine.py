@@ -38,6 +38,13 @@ from ..execution_core.track_b_no_trade_diagnostics import (
     diagnostics_root_from_artifact_dir,
     write_no_trade_diagnostic,
 )
+from ..execution_core.track_b_position_management_manifest import (
+    DEFAULT_TRACK_B_POSITION_MANAGEMENT_MANIFEST_ROOT,
+    OPEN_MANAGED_METADATA_INCOMPLETE,
+    create_manifest_from_order_intent,
+    resolve_management_metadata,
+    update_manifest_from_filled_bridge_result,
+)
 from ..indicators.feature_engine import IncrementalFeatureComputer, compute_features
 from ..market_data.bar_builder import BarBuilder
 from ..market_data.bar_store import BarStore
@@ -489,6 +496,28 @@ class StrategyEngine:
                         short_entry_family=short_entry_family,
                         short_entry_source=short_entry_source,
                     )
+                    position_manifest_blocker: str | None = None
+                    position_manifest = None
+                    if maybe_intent.is_entry:
+                        position_manifest = create_manifest_from_order_intent(
+                            order_intent=maybe_intent,
+                            runtime_identity=self._runtime_identity,
+                            output_root=DEFAULT_TRACK_B_POSITION_MANAGEMENT_MANIFEST_ROOT,
+                            now=execution_bar.end_ts,
+                        )
+                        live_intent_summary = {
+                            **live_intent_summary,
+                            "position_management_manifest_path": str(position_manifest.manifest_path)
+                            if position_manifest is not None
+                            else None,
+                            "managed_exit_policy_id": None
+                            if position_manifest is None
+                            else position_manifest.manifest.get("managed_exit_policy_id"),
+                        }
+                        if not (position_manifest and position_manifest.manifest.get("managed_exit_policy_id")):
+                            position_manifest_blocker = (
+                                f"{OPEN_MANAGED_METADATA_INCOMPLETE}: missing managed_exit_policy_id"
+                            )
                     submit_attempt_was_executed = False
                     pending = None
                     route_hold_blocker = (
@@ -532,6 +561,7 @@ class StrategyEngine:
                             if self._submit_gate_evaluator is not None
                             else None
                         )
+                        submit_blocker = position_manifest_blocker or submit_blocker
                         if submit_blocker is not None:
                             diagnostic_submit_blocker = submit_blocker
                             diagnostic_blocker_reason = submit_blocker
@@ -2235,6 +2265,39 @@ class StrategyEngine:
     ) -> dict[str, object]:
         submit_attempt = self._execution_engine.last_submit_attempt() or {}
         status_payload = self._execution_engine.broker.get_order_status(pending.broker_order_id) or {}
+        manifest_update = update_manifest_from_filled_bridge_result(
+            filled_bridge_result={
+                "order_intent_id": pending.intent.order_intent_id,
+                "strategy_id": self._runtime_identity.get("standalone_strategy_id") or self._runtime_identity.get("strategy_id"),
+                "lane_id": self._runtime_identity.get("lane_id"),
+                "instrument": self._runtime_identity.get("instrument") or pending.intent.symbol,
+                "symbol": pending.intent.symbol,
+                "action": _intent_side(pending.intent),
+                "quantity": pending.intent.quantity,
+                "broker_order_id": pending.broker_order_id,
+                "account_id": status_payload.get("account_id") or submit_attempt.get("account_id"),
+                "perm_id": status_payload.get("perm_id") or submit_attempt.get("perm_id"),
+                "client_id": status_payload.get("client_id") or submit_attempt.get("client_id"),
+                "exec_id": status_payload.get("execution_id") or submit_attempt.get("execution_id"),
+                "local_symbol": status_payload.get("local_symbol") or submit_attempt.get("local_symbol"),
+                "con_id": status_payload.get("con_id") or submit_attempt.get("con_id"),
+                "contract": status_payload.get("contract") or dict(submit_attempt.get("bridge_order_metadata") or {}).get("contract"),
+                "managed_exit_policy_id": self._runtime_identity.get("managed_exit_policy_id"),
+            },
+            output_root=DEFAULT_TRACK_B_POSITION_MANAGEMENT_MANIFEST_ROOT,
+        )
+        manifest = manifest_update.manifest if manifest_update is not None else {}
+        metadata = resolve_management_metadata(
+            source={
+                "order_intent_id": pending.intent.order_intent_id,
+                "lane_id": self._runtime_identity.get("lane_id"),
+                "strategy_id": self._runtime_identity.get("standalone_strategy_id") or self._runtime_identity.get("strategy_id"),
+                "managed_exit_policy_id": self._runtime_identity.get("managed_exit_policy_id"),
+                "position_management_manifest_path": str(manifest_update.manifest_path)
+                if manifest_update is not None
+                else None,
+            }
+        )
         payload: dict[str, object] = {
             "schema_version": "strategy_managed_filled_bridge_result_v1",
             "artifact_type": "filled_bridge_result",
@@ -2265,6 +2328,12 @@ class StrategyEngine:
             "bridge_classification": submit_attempt.get("bridge_classification"),
             "bridge_order_status": submit_attempt.get("bridge_order_status"),
             "route_destination": submit_attempt.get("route_destination"),
+            "managed_exit_policy_id": metadata.managed_exit_policy_id,
+            "position_management_manifest_path": str(manifest_update.manifest_path)
+            if manifest_update is not None
+            else None,
+            "position_management_manifest_status": manifest.get("lifecycle_status"),
+            "position_management_metadata_source": metadata.source,
             "intended_lifecycle_mode": "STRATEGY_MANAGED",
             "lifecycle_state": self._state.strategy_status.value,
             "position_side": self._state.position_side.value,

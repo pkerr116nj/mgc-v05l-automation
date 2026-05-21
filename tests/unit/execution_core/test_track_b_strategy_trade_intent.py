@@ -33,6 +33,7 @@ def config(tmp_path: Path, **overrides: object) -> TrackBStrategyTradeIntentConf
         "managed_exit_policy_id": "DIAGNOSTIC_TIME_EXIT_IMMEDIATE",
         "output_root": tmp_path / "intents",
         "paper_trade_ledger_output_root": tmp_path / "ledger",
+        "position_management_manifest_root": tmp_path / "manifests",
     }
     payload.update(overrides)
     return TrackBStrategyTradeIntentConfig(**payload)
@@ -80,8 +81,15 @@ def test_real_hard_signal_creates_persisted_strategy_trade_intent(tmp_path: Path
     assert result.report["lifecycle_mode"] == "STRATEGY_MANAGED"
     assert result.report["paper_proof_invoked"] is False
     assert result.report["broker_state_mutated"] is False
+    manifest_path = Path(result.report["position_management_manifest_path"])
+    assert manifest_path.exists()
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    assert manifest["entry_intent_id"] == "intent-001"
+    assert manifest["managed_exit_policy_id"] == "DIAGNOSTIC_TIME_EXIT_IMMEDIATE"
+    assert manifest["lifecycle_status"] == "INTENT_CREATED"
     assert json.loads(result.latest_intent_json.read_text(encoding="utf-8"))["intent_created"] is True
-    assert result.intent_jsonl.read_text(encoding="utf-8").count("intent-001") == 1
+    intent_rows = [json.loads(line) for line in result.intent_jsonl.read_text(encoding="utf-8").splitlines()]
+    assert [row["intent_id"] for row in intent_rows] == ["intent-001"]
 
 
 def test_no_signal_writes_blocked_status_but_no_intent(tmp_path: Path) -> None:

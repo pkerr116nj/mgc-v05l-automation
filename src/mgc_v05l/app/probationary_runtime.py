@@ -638,6 +638,7 @@ def _probationary_lane_spec_runtime_row(
         "observed_instruments": list(spec.observed_instruments),
         "quality_bucket_policy": spec.quality_bucket_policy,
         "experimental_status": spec.experimental_status,
+        "managed_exit_policy_id": spec.managed_exit_policy_id,
         "paper_only": spec.paper_only,
         "non_approved": spec.non_approved,
         "observer_variant_id": spec.observer_variant_id,
@@ -748,6 +749,7 @@ class ProbationaryPaperLaneSpec:
     paper_only: bool = False
     non_approved: bool = False
     exclude_from_strategy_performance: bool = False
+    managed_exit_policy_id: str | None = None
     observer_variant_id: str | None = None
     observer_side: str | None = None
     identity_components: tuple[str, ...] = ()
@@ -8203,6 +8205,11 @@ def _coerce_probationary_paper_lane_specs(
                 experimental_status=(
                     str(raw_spec["experimental_status"]) if raw_spec.get("experimental_status") else None
                 ),
+                managed_exit_policy_id=(
+                    str(raw_spec["managed_exit_policy_id"])
+                    if raw_spec.get("managed_exit_policy_id")
+                    else None
+                ),
                 paper_only=bool(raw_spec.get("paper_only", False)),
                 non_approved=bool(raw_spec.get("non_approved", False)),
                 exclude_from_strategy_performance=bool(raw_spec.get("exclude_from_strategy_performance", False)),
@@ -8494,6 +8501,7 @@ def _build_probationary_paper_lanes(
                     "observed_instruments": list(spec.observed_instruments),
                     "quality_bucket_policy": spec.quality_bucket_policy,
                     "experimental_status": spec.experimental_status,
+                    "managed_exit_policy_id": spec.managed_exit_policy_id,
                     "paper_only": spec.paper_only,
                     "non_approved": spec.non_approved,
                     "observer_variant_id": spec.observer_variant_id,

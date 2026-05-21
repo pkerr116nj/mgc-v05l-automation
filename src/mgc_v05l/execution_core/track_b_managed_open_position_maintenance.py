@@ -31,6 +31,11 @@ from .track_b_paper_trade_ledger import (
     DEFAULT_TRACK_B_PAPER_TRADE_SUMMARY_JSON,
     update_track_b_paper_trade_ledger_from_runner_report,
 )
+from .track_b_position_management_manifest import (
+    DEFAULT_TRACK_B_POSITION_MANAGEMENT_MANIFEST_ROOT,
+    OPEN_MANAGED_METADATA_INCOMPLETE,
+    resolve_management_metadata,
+)
 from .track_b_strategy_managed_paper_lifecycle import (
     DEFAULT_TRACK_B_STRATEGY_MANAGED_PAPER_LIFECYCLE_OUTPUT_ROOT,
     TrackBManagedPaperLifecycleClassification,
@@ -66,6 +71,8 @@ class TrackBManagedOpenPositionMaintenanceConfig:
     live_runtime_feed_output_root: Path = DEFAULT_TRACK_B_DATABENTO_LIVE_RUNTIME_FEED_OUTPUT_ROOT
     managed_lifecycle_output_root: Path = DEFAULT_TRACK_B_STRATEGY_MANAGED_PAPER_LIFECYCLE_OUTPUT_ROOT
     paper_trade_ledger_output_root: Path = DEFAULT_TRACK_B_PAPER_TRADE_LEDGER_OUTPUT_ROOT
+    position_management_manifest_root: Path = DEFAULT_TRACK_B_POSITION_MANAGEMENT_MANIFEST_ROOT
+    lane_registry_paths: tuple[Path, ...] = ()
     paper_trade_summary_json: Path = DEFAULT_TRACK_B_PAPER_TRADE_SUMMARY_JSON
     live_position_status_json: Path = DEFAULT_TRACK_B_LIVE_POSITION_STATUS_JSON
     diagnostic_json: Path = DEFAULT_TRACK_B_MANAGED_OPEN_POSITION_MAINTENANCE_JSON
@@ -188,9 +195,45 @@ def run_track_b_managed_open_position_maintenance(
             TrackBStaleDataState.STALE_RESTRICT_DISCRETIONARY_EXITS,
             TrackBStaleDataState.SEVERE_STALE_EMERGENCY_REVIEW,
         }
-        managed_exit_policy_id = str(lifecycle_report.get("managed_exit_policy_id") or "")
+        metadata = resolve_management_metadata(
+            source={**dict(lifecycle_report), **dict(position)},
+            output_root=actual_config.position_management_manifest_root,
+            lane_registry_paths=actual_config.lane_registry_paths,
+        )
+        managed_exit_policy_id = str(metadata.managed_exit_policy_id or "")
+        if managed_exit_policy_id:
+            lifecycle_report = {**dict(lifecycle_report), "managed_exit_policy_id": managed_exit_policy_id}
         required_bars = int(lifecycle_report.get("managed_exit_policy_max_completed_5m_bars") or 3)
         exit_eligible = completed_bars_since_entry >= required_bars and not suppress_discretionary_exit
+        if not metadata.complete:
+            position_reports.append(
+                {
+                    **base_position_report,
+                    "maintenance_invoked": False,
+                    "latest_completed_5m_bar_timestamp": completed_timestamps[-1] if completed_timestamps else None,
+                    "completed_bars_since_entry": completed_bars_since_entry,
+                    "bars_since_fill": completed_bars_since_entry,
+                    "data_freshness": market_data_state.to_json_dict(),
+                    "data_freshness_state": market_data_state.state.value,
+                    "broker_truth_state": broker_state_value.value,
+                    "suppressed_due_to_stale_data": suppress_discretionary_exit,
+                    "exit_policy_id": None,
+                    "required_completed_5m_bars": required_bars,
+                    "exit_eligible": False,
+                    "close_intent_created": False,
+                    "close_submitted": False,
+                    "close_filled": False,
+                    "final_classification": OPEN_MANAGED_METADATA_INCOMPLETE,
+                    "final_position_status": "OPEN_MANAGED",
+                    "review_required": True,
+                    "blocker": OPEN_MANAGED_METADATA_INCOMPLETE,
+                    "position_management_metadata_blockers": list(metadata.blockers),
+                    "position_management_manifest_path": None
+                    if metadata.manifest_path is None
+                    else str(metadata.manifest_path),
+                }
+            )
+            continue
         close_limit_price = _derive_close_limit_price(
             live_runtime_feed_output_root=actual_config.live_runtime_feed_output_root,
             instrument=instrument,
