@@ -236,12 +236,16 @@ def reconcile_track_b_paper_broker_truth(
     if position_match_report["matched"] is not True:
         submit_intent_classification = str(submit_intent_ownership_reconciliation.get("classification") or "")
         settlement_classification = str(broker_truth_settlement.get("classification") or "")
-        if submit_intent_classification == "SUBMIT_INTENT_BROKER_POSITION_ADOPTION_REQUIRED":
+        if submit_intent_classification in {
+            "SUBMIT_INTENT_BROKER_POSITION_ADOPTION_REQUIRED",
+            "SUBMIT_INTENT_BROKER_POSITIONS_ADOPTION_REQUIRED",
+        }:
             blockers.append(
                 {
-                    "code": "SUBMIT_INTENT_BROKER_POSITION_ADOPTION_REQUIRED",
+                    "code": submit_intent_classification,
                     "legacy_code": "TRACK_B_BROKER_LIFECYCLE_POSITION_COUNT_MISMATCH",
-                    "detail": "Broker position is attributed to a durable unresolved Track B submit intent and requires lifecycle adoption.",
+                    "detail": submit_intent_ownership_reconciliation.get("detail")
+                    or "Broker position is attributed to a durable unresolved Track B submit intent and requires lifecycle adoption.",
                     "submit_intent_ownership_reconciliation": submit_intent_ownership_reconciliation,
                     "broker_backed_entry_adoption": broker_backed_entry_adoption,
                     "position_match_blocker": position_match_report.get("blocker"),
@@ -765,10 +769,39 @@ def _submit_intent_ownership_reconciliation_state(
 def _broker_backed_entry_adoption_remediation(
     submit_intent_ownership_reconciliation: Mapping[str, Any],
 ) -> dict[str, Any] | None:
-    if str(submit_intent_ownership_reconciliation.get("classification") or "") != "SUBMIT_INTENT_BROKER_POSITION_ADOPTION_REQUIRED":
+    classification = str(submit_intent_ownership_reconciliation.get("classification") or "")
+    if classification == "SUBMIT_INTENT_BROKER_POSITIONS_ADOPTION_REQUIRED":
+        remediations = []
+        for item in submit_intent_ownership_reconciliation.get("matching_adoptions") or []:
+            if not isinstance(item, Mapping):
+                continue
+            remediation = _broker_backed_entry_adoption_item(
+                submit_intent=item.get("matching_submit_intent"),
+                broker_position=item.get("broker_position"),
+            )
+            if remediation is not None:
+                remediations.append(remediation)
+        return {
+            "classification": "BROKER_BACKED_ENTRIES_ADOPTION_REQUIRED",
+            "detail": "Multiple broker-backed PAPER entries are each attributed to durable submit intents but no lifecycle OPEN_MANAGED records exist.",
+            "adoption_count": len(remediations),
+            "adoptions": remediations,
+            "live_money_eligible": False,
+            "paper_proof_invoked": False,
+            "required_action": "Run guarded PAPER lifecycle adoption for each exact ownership/order/contract before allowing submit.",
+        }
+    if classification != "SUBMIT_INTENT_BROKER_POSITION_ADOPTION_REQUIRED":
         return None
     submit_intent = submit_intent_ownership_reconciliation.get("matching_submit_intent")
     broker_position = submit_intent_ownership_reconciliation.get("broker_position")
+    return _broker_backed_entry_adoption_item(submit_intent=submit_intent, broker_position=broker_position)
+
+
+def _broker_backed_entry_adoption_item(
+    *,
+    submit_intent: object,
+    broker_position: object,
+) -> dict[str, Any] | None:
     if not isinstance(submit_intent, Mapping) or not isinstance(broker_position, Mapping):
         return None
     return {
@@ -818,6 +851,23 @@ def _submit_intent_state_for_unmatched_broker_positions(
     now: datetime,
 ) -> dict[str, Any]:
     if len(unmatched_broker_positions) != 1:
+        per_position = [
+            _submit_intent_match_for_broker_position(
+                broker_position=dict(position),
+                unresolved_submit_intents=unresolved_submit_intents,
+                config=config,
+                now=now,
+            )
+            for position in unmatched_broker_positions
+        ]
+        if per_position and all(item.get("classification") == "SUBMIT_INTENT_BROKER_POSITION_ADOPTION_REQUIRED" for item in per_position):
+            return {
+                **base,
+                "classification": "SUBMIT_INTENT_BROKER_POSITIONS_ADOPTION_REQUIRED",
+                "detail": "Each unmatched broker position is exactly attributed to one unresolved Track B submit intent and needs lifecycle adoption.",
+                "matching_adoptions": per_position,
+                "unmatched_broker_positions": [dict(row) for row in unmatched_broker_positions],
+            }
         return {
             **base,
             "classification": "SUBMIT_INTENT_IDENTITY_MISMATCH_REVIEW_REQUIRED",
@@ -825,6 +875,25 @@ def _submit_intent_state_for_unmatched_broker_positions(
             "unmatched_broker_positions": [dict(row) for row in unmatched_broker_positions],
         }
     broker_position = dict(unmatched_broker_positions[0])
+    return {
+        **base,
+        **_submit_intent_match_for_broker_position(
+            broker_position=broker_position,
+            unresolved_submit_intents=unresolved_submit_intents,
+            config=config,
+            now=now,
+        ),
+    }
+
+
+def _submit_intent_match_for_broker_position(
+    *,
+    broker_position: Mapping[str, Any],
+    unresolved_submit_intents: Sequence[Mapping[str, Any]],
+    config: ReconciliationConfig,
+    now: datetime,
+) -> dict[str, Any]:
+    broker_position = dict(broker_position)
     same_contract = [
         dict(row)
         for row in unresolved_submit_intents
@@ -845,7 +914,6 @@ def _submit_intent_state_for_unmatched_broker_positions(
             current_matches.append(row)
     if len(current_matches) > 1 or (current_matches and stale_or_unusable_matches):
         return {
-            **base,
             "classification": "SUBMIT_INTENT_COMPETING_UNRESOLVED_REVIEW_REQUIRED",
             "detail": "Multiple current or stale unresolved submit-intent ownership records match the same broker position.",
             "broker_position": broker_position,
@@ -855,7 +923,6 @@ def _submit_intent_state_for_unmatched_broker_positions(
     if len(current_matches) == 1:
         event_age = _submit_intent_age_seconds(current_matches[0], now)
         return {
-            **base,
             "classification": "SUBMIT_INTENT_BROKER_POSITION_ADOPTION_REQUIRED",
             "detail": "Broker position is exactly attributed to one unresolved Track B submit intent and needs lifecycle adoption.",
             "broker_position": broker_position,
@@ -864,7 +931,6 @@ def _submit_intent_state_for_unmatched_broker_positions(
         }
     if stale_or_unusable_matches:
         return {
-            **base,
             "classification": "SUBMIT_INTENT_IDENTITY_MISMATCH_REVIEW_REQUIRED",
             "detail": "Matching submit-intent ownership records are missing timestamps or outside the uncertainty window.",
             "broker_position": broker_position,
@@ -872,14 +938,12 @@ def _submit_intent_state_for_unmatched_broker_positions(
         }
     if same_contract:
         return {
-            **base,
             "classification": "SUBMIT_INTENT_IDENTITY_MISMATCH_REVIEW_REQUIRED",
             "detail": "Unresolved submit-intent ownership records share the broker contract but fail side/qty/account identity.",
             "broker_position": broker_position,
             "mismatched_submit_intents": same_contract,
         }
     return {
-        **base,
         "classification": "SUBMIT_INTENT_NO_MATCHING_RECORD",
         "detail": "Broker-only Track B position has no matching unresolved submit-intent ownership record.",
         "broker_position": broker_position,

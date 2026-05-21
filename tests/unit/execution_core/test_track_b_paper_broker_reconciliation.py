@@ -159,6 +159,79 @@ def test_broker_only_position_with_matching_submit_intent_is_adoption_required(t
     assert not any(blocker["code"] == "TRACK_B_BROKER_LIFECYCLE_POSITION_COUNT_MISMATCH" for blocker in report["blockers"])
 
 
+def test_multiple_mule_broker_only_positions_get_per_position_adoption_required(tmp_path: Path) -> None:
+    config = _write_base_artifacts(tmp_path)
+    _write_submit_intent_ownership(
+        config,
+        lane_id="track_b_paper_execution_test_mule_v1__mgc",
+        strategy_id="track_b_paper_execution_test_mule_v1__mgc",
+        broker_order_id="1",
+        ownership_intent_id="submit_owner_test_mgc_1",
+        client_id=10869,
+        perm_id=1948358479,
+        symbol="MGC",
+        local_symbol="MGCM6",
+        expiry="20260626",
+        con_id=712565978,
+        created_at="2026-05-11T11:59:00+00:00",
+    )
+    _write_submit_intent_ownership(
+        config,
+        lane_id="track_b_paper_execution_test_mule_v1__mnq",
+        strategy_id="track_b_paper_execution_test_mule_v1__mnq",
+        broker_order_id="1",
+        ownership_intent_id="submit_owner_test_mnq_1",
+        client_id=10968,
+        perm_id=1948358488,
+        symbol="MNQ",
+        local_symbol="MNQM6",
+        expiry="20260618",
+        con_id=770561201,
+        created_at="2026-05-11T11:59:05+00:00",
+    )
+    _write_broker_truth(
+        config,
+        positions=[
+            {
+                "account_id": "DUM882026",
+                "symbol": "MGC",
+                "local_symbol": "MGCM6",
+                "expiry": "20260626",
+                "con_id": 712565978,
+                "security_type": "FUT",
+                "quantity": "1",
+            },
+            {
+                "account_id": "DUM882026",
+                "symbol": "MNQ",
+                "local_symbol": "MNQM6",
+                "expiry": "20260618",
+                "con_id": 770561201,
+                "security_type": "FUT",
+                "quantity": "1",
+            },
+        ],
+    )
+
+    report = reconcile_track_b_paper_broker_truth(config=config, now=NOW)
+
+    assert report["classification"] == "TRACK_B_PAPER_BROKER_RECONCILIATION_BLOCKED"
+    assert report["broker_reconciled"] is False
+    ownership = report["submit_intent_ownership_reconciliation"]
+    assert ownership["classification"] == "SUBMIT_INTENT_BROKER_POSITIONS_ADOPTION_REQUIRED"
+    assert len(ownership["matching_adoptions"]) == 2
+    remediation = report["broker_backed_entry_adoption"]
+    assert remediation["classification"] == "BROKER_BACKED_ENTRIES_ADOPTION_REQUIRED"
+    assert remediation["adoption_count"] == 2
+    assert {item["contract"]["symbol"] for item in remediation["adoptions"]} == {"MGC", "MNQ"}
+    assert {item["ownership_intent_id"] for item in remediation["adoptions"]} == {
+        "submit_owner_test_mgc_1",
+        "submit_owner_test_mnq_1",
+    }
+    assert any(blocker["code"] == "SUBMIT_INTENT_BROKER_POSITIONS_ADOPTION_REQUIRED" for blocker in report["blockers"])
+    assert not any(blocker["code"] == "TRACK_B_BROKER_LIFECYCLE_POSITION_COUNT_MISMATCH" for blocker in report["blockers"])
+
+
 def test_competing_submit_intents_block_review_required(tmp_path: Path) -> None:
     config = _write_base_artifacts(tmp_path)
     _write_submit_intent_ownership(config, broker_order_id="28")
@@ -1232,19 +1305,28 @@ def _write_submit_intent_ownership(
     created_at: str = "2026-05-11T11:59:00+00:00",
     live_money_eligible: bool = False,
     paper_proof_invoked: bool = False,
+    lane_id: str = "atp_companion_v1_asia_us",
+    strategy_id: str = "atp_companion_v1__benchmark_mgc_asia_us",
+    symbol: str = "MGC",
+    local_symbol: str = "MGCM6",
+    expiry: str = "20260626",
+    con_id: int = 712565978,
+    client_id: int = 11940,
+    perm_id: int = 614044377,
+    ownership_intent_id: str | None = None,
 ) -> dict[str, object]:
     parsed_created_at = datetime.fromisoformat(created_at.replace("Z", "+00:00"))
     record = SubmitIntentOwnershipRecord(
         mode="PAPER",
         account_id="DUM882026",
-        lane_id="atp_companion_v1_asia_us",
-        strategy_id="atp_companion_v1__benchmark_mgc_asia_us",
+        lane_id=lane_id,
+        strategy_id=strategy_id,
         intent_type="BUY_TO_OPEN" if action == "BUY" else "SELL_TO_OPEN",
         action=action,
-        symbol="MGC",
-        local_symbol="MGCM6",
-        expiry="20260626",
-        con_id=712565978,
+        symbol=symbol,
+        local_symbol=local_symbol,
+        expiry=expiry,
+        con_id=con_id,
         qty=1,
         order_type="LMT",
         limit_price="4543.2",
@@ -1253,8 +1335,8 @@ def _write_submit_intent_ownership(
         git_head="abc123",
         created_at=parsed_created_at,
         state=SubmitIntentOwnershipState.BROKER_RESULT_UNKNOWN_REFRESH_REQUIRED,
-        ownership_intent_id=f"submit_owner_test_{broker_order_id}",
-        lifecycle_id=f"reserved_submit_atp_companion_v1_asia_us_{broker_order_id}",
+        ownership_intent_id=ownership_intent_id or f"submit_owner_test_{broker_order_id}",
+        lifecycle_id=f"reserved_submit_{lane_id}_{broker_order_id}",
         lifecycle_id_reserved_only=True,
         lifecycle_position_open=False,
         caller_path="track_b_paper_leak_test_apply",
@@ -1270,8 +1352,8 @@ def _write_submit_intent_ownership(
         live_money_eligible=live_money_eligible,
         paper_proof_invoked=paper_proof_invoked,
         broker_order_id=broker_order_id,
-        client_id=11940,
-        perm_id=614044377,
+        client_id=client_id,
+        perm_id=perm_id,
         extra={
             "reason": "LEAK_TEST_ENTRY",
             "delegated_classification": "PAPER_ORDER_UNKNOWN_NEEDS_MANUAL_TWS_REVIEW",
