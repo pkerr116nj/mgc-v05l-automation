@@ -32,7 +32,7 @@ DEFAULT_CANONICAL_READINESS_SUMMARY_PATH = (
 DEFAULT_SERVICE_PID_PATH = REPO_ROOT / "var" / "track_b_operator_readiness_refresh_service.pid"
 DEFAULT_CHILD_PID_PATH = REPO_ROOT / "var" / "track_b_operator_readiness_refresh_child.pid"
 DEFAULT_SUPERVISOR_STATUS_PATH = REPO_ROOT / "var" / "track_b_operator_readiness_refresh_supervisor.json"
-DEFAULT_REFRESH_SECONDS = 60.0
+DEFAULT_REFRESH_SECONDS = 15.0
 DEFAULT_PREFLIGHT_MODE = "monday-live"
 
 
@@ -331,15 +331,6 @@ def _refresh_commands(
             ],
         ),
         (
-            "track_b_paper_preflight",
-            [
-                "/bin/bash",
-                str(repo_root / "scripts" / "track_b_paper_preflight.sh"),
-                "--mode",
-                preflight_mode,
-            ],
-        ),
-        (
             "canonical_readiness",
             [
                 python_bin,
@@ -357,6 +348,15 @@ def _refresh_commands(
                     or canonical_path.with_name("latest_canonical_readiness_summary.json")
                 ),
                 "--json",
+            ],
+        ),
+        (
+            "track_b_paper_preflight",
+            [
+                "/bin/bash",
+                str(repo_root / "scripts" / "track_b_paper_preflight.sh"),
+                "--mode",
+                preflight_mode,
             ],
         ),
     ]

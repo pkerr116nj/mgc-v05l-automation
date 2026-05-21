@@ -695,7 +695,7 @@ def _runtime_input(
     health = _mapping(operator_status.get("health"))
     health_status = str(health.get("health_status") or operator_status.get("strategy_status") or "").upper()
     faulted = bool(operator_status.get("fault_code")) or health_status.startswith("FAULT")
-    last_processed_bar_end_ts = operator_status.get("last_processed_bar_end_ts")
+    last_processed_bar_end_ts = _latest_runtime_processed_bar_ts(operator_status)
     ingestion_age_seconds = _age_seconds(last_processed_bar_end_ts, now)
     ingestion_threshold = MARKET_DATA_FRESHNESS_DEFAULT_SECONDS
     runtime_ingestion_fresh = bool(
@@ -716,6 +716,24 @@ def _runtime_input(
         "runtime_ingestion_fresh": runtime_ingestion_fresh,
         "live_money_eligible": operator_status.get("live_money_eligible") is True,
     }
+
+
+def _latest_runtime_processed_bar_ts(operator_status: Mapping[str, Any]) -> Any:
+    candidates: list[tuple[datetime, Any]] = []
+
+    def _add(value: Any) -> None:
+        parsed = _parse_iso(value)
+        if parsed is not None:
+            candidates.append((parsed, value))
+
+    _add(operator_status.get("last_processed_bar_end_ts"))
+    for row in list(operator_status.get("lanes") or []):
+        if isinstance(row, Mapping):
+            _add(row.get("last_processed_bar_end_ts"))
+    if not candidates:
+        return operator_status.get("last_processed_bar_end_ts")
+    candidates.sort(key=lambda item: item[0])
+    return candidates[-1][1]
 
 
 def _runtime_truth_heartbeat_input(payload: Mapping[str, Any], *, now: datetime) -> dict[str, Any]:
@@ -925,7 +943,7 @@ def _fallback_market_data_input(
     *,
     now: datetime,
 ) -> dict[str, Any]:
-    last_bar = operator_status.get("last_processed_bar_end_ts") or operator_status.get("updated_at")
+    last_bar = _latest_runtime_processed_bar_ts(operator_status) or operator_status.get("updated_at")
     age_seconds = _age_seconds(last_bar, now)
     probe_ready = market_probe.get("runtime_ready") is True or market_probe.get("status") == "ok"
     health = _mapping(operator_status.get("health"))

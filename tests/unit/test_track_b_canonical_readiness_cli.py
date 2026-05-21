@@ -192,11 +192,13 @@ def test_json_summary_contains_compact_fields(capsys) -> None:
         "broker_truth_lease_state",
         "classification",
         "eligible_lane_count",
+        "generated_at",
         "quarantine_count",
         "reconciliation_state",
         "root_match",
         "warnings",
     ]
+    assert summary["generated_at"] == "2026-05-18T12:00:00+00:00"
 
 
 def test_cli_source_has_no_broker_order_api_calls() -> None:

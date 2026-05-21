@@ -91,6 +91,7 @@ def compact_readiness_summary(payload: Mapping[str, Any]) -> dict[str, Any]:
     lane_quarantine = _mapping(payload.get("lane_quarantine"))
     root_guard = _mapping(payload.get("root_guard_summary"))
     return {
+        "generated_at": payload.get("generated_at"),
         "classification": str(payload.get("canonical_readiness") or payload.get("state") or "NOT_READY_CONFIG"),
         "blockers": _codes(payload.get("readiness_blockers")),
         "warnings": _codes(payload.get("readiness_warnings")),

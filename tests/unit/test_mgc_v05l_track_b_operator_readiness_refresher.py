@@ -23,8 +23,8 @@ def test_refresh_commands_are_read_only_and_cover_dashboard_artifacts(tmp_path: 
         "phase1_runtime_data_readiness",
         "phase1_ticker_readiness_matrix",
         "track_b_paper_broker_reconciliation",
-        "track_b_paper_preflight",
         "canonical_readiness",
+        "track_b_paper_preflight",
     ]
     assert "--mode monday-live" in flattened
     assert "phase1_runtime_data_readiness" in flattened
@@ -32,8 +32,8 @@ def test_refresh_commands_are_read_only_and_cover_dashboard_artifacts(tmp_path: 
     assert "track_b_paper_preflight.sh" in flattened
     assert "track_b_paper_broker_reconciliation" in flattened
     assert "track_b_canonical_readiness" in flattened
-    assert names.index("track_b_paper_broker_reconciliation") < names.index("track_b_paper_preflight")
-    assert names.index("track_b_paper_preflight") < names.index("canonical_readiness")
+    assert names.index("track_b_paper_broker_reconciliation") < names.index("canonical_readiness")
+    assert names.index("canonical_readiness") < names.index("track_b_paper_preflight")
     assert "placeOrder" not in flattened
     assert "--summary-output-path" in flattened
     assert "cancelOrder" not in flattened
@@ -105,9 +105,9 @@ def test_refresh_once_treats_non_ready_canonical_readiness_as_refreshed_state(tm
 
     assert payload["classification"] == "TRACK_B_OPERATOR_READINESS_REFRESH_READY"
     assert payload["last_success"] is True
-    assert payload["commands"][4]["name"] == "canonical_readiness"
-    assert payload["commands"][4]["returncode"] == 2
-    assert payload["commands"][4]["succeeded"] is True
+    assert payload["commands"][3]["name"] == "canonical_readiness"
+    assert payload["commands"][3]["returncode"] == 2
+    assert payload["commands"][3]["succeeded"] is True
 
 
 def test_refresh_once_fails_closed_when_a_refresh_command_fails(tmp_path: Path) -> None:
@@ -125,8 +125,8 @@ def test_refresh_once_fails_closed_when_a_refresh_command_fails(tmp_path: Path) 
     assert payload["last_success_at"] is None
     assert payload["submit_authority"] is False
     assert payload["last_failure"] is True
-    assert payload["commands"][3]["name"] == "track_b_paper_preflight"
-    assert payload["commands"][3]["returncode"] == 1
+    assert payload["commands"][4]["name"] == "track_b_paper_preflight"
+    assert payload["commands"][4]["returncode"] == 1
 
 
 def test_missing_status_is_safe_and_non_authoritative(tmp_path: Path) -> None:
@@ -178,8 +178,8 @@ def test_refresh_once_reports_runner_exceptions_without_dying(tmp_path: Path) ->
 
     assert payload["classification"] == "TRACK_B_OPERATOR_READINESS_REFRESH_FAILED"
     assert payload["last_failure"] is True
-    assert payload["commands"][3]["returncode"] == 1
-    assert "refresh command exception" in payload["commands"][3]["stderr_tail"]
+    assert payload["commands"][4]["returncode"] == 1
+    assert "refresh command exception" in payload["commands"][4]["stderr_tail"]
 
 
 def test_run_supervisor_writes_supervisor_status_and_pid_files(monkeypatch, tmp_path: Path) -> None:

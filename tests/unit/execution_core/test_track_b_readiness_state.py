@@ -6,6 +6,7 @@ from pathlib import Path
 from mgc_v05l.execution_core.track_b_readiness_state import (
     _broker_truth_input,
     _market_data_input,
+    _runtime_input,
     build_root_process_guard,
     classify_canonical_readiness,
     write_canonical_readiness_artifact,
@@ -311,6 +312,34 @@ def test_submit_capable_blocks_when_runtime_ingestion_is_stale_even_if_phase1_li
     assert result["canonical_readiness"] == "NOT_READY_DEPENDENCY"
     assert result["readiness_blockers"][0]["code"] == "runtime_ingestion_not_fresh"
     assert result["market_data"]["fresh"] is True
+
+
+def test_runtime_ingestion_uses_latest_lane_processed_bar_when_top_level_lags() -> None:
+    now = datetime(2026, 5, 18, 12, 0, tzinfo=timezone.utc)
+    runtime = _runtime_input(
+        {
+            "strategy_status": "RUNNING",
+            "operator_halt": False,
+            "entries_enabled": True,
+            "active_lane_ids": ["lane_a", "lane_b"],
+            "last_processed_bar_end_ts": "2026-05-18T11:44:00+00:00",
+            "lanes": [
+                {"lane_id": "lane_a", "last_processed_bar_end_ts": "2026-05-18T11:59:00+00:00"},
+                {"lane_id": "lane_b", "last_processed_bar_end_ts": "2026-05-18T11:58:00+00:00"},
+            ],
+        },
+        {"lanes": [{"id": "lane_a"}, {"id": "lane_b"}]},
+        {
+            "processes": [
+                {"name": "paper_runtime", "running": True},
+            ]
+        },
+        now=now,
+    )
+
+    assert runtime["last_processed_bar_end_ts"] == "2026-05-18T11:59:00+00:00"
+    assert runtime["runtime_ingestion_fresh"] is True
+    assert runtime["ingestion_age_seconds"] == 60.0
 
 
 def test_invalid_phase1_listener_provenance_blocks_market_data() -> None:
