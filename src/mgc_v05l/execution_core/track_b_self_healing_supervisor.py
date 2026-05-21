@@ -353,13 +353,17 @@ def _agent_contracts(repo_root: Path) -> tuple[AgentContract, ...]:
                 ArtifactContract("canonical_readiness", str(root / DEFAULT_CANONICAL_READINESS_ARTIFACT), 180.0, True),
             ),
             required=True,
-            restart_eligible=False,
-            restart_command=None,
+            restart_eligible=True,
+            restart_command="bash scripts/run_headless_supervised_paper_service.sh --no-start-dashboard",
             restart_blockers=(
                 *_global_restart_blockers(),
-                "runtime_restart_requires_explicit_operator_approval",
+                "broker_truth_lease_not_active",
+                "unresolved_submit_ownership",
+                "phase1_not_healthy_for_runtime_restart",
+                "restart_cooldown_active",
+                "restart_max_attempts_exceeded",
             ),
-            operator_required_states=("OPEN_MANAGED_POSITION_PRESENT", "RUNTIME_RESTART_OPERATOR_APPROVAL_REQUIRED"),
+            operator_required_states=("OPEN_MANAGED_POSITION_REVIEW_REQUIRED", "RUNTIME_RESTART_BROKER_STATE_AMBIGUOUS"),
         ),
         AgentContract(
             agent_id="operator_dashboard_backend",
@@ -444,13 +448,26 @@ def _read_agent_state(
 def _read_safety_state(repo_root: Path) -> dict[str, Any]:
     reconciliation = _read_json(repo_root / PHASE1_RECONCILIATION_ARTIFACT)
     canonical = _read_json(repo_root / DEFAULT_CANONICAL_READINESS_ARTIFACT)
+    broker_lease = _read_json(repo_root / DEFAULT_BROKER_TRUTH_LEASE_ARTIFACT)
+    ownership = reconciliation.get("submit_intent_ownership_reconciliation")
+    ownership = ownership if isinstance(ownership, Mapping) else {}
+    unresolved_ownership_count = (
+        reconciliation.get("unresolved_submit_intent_ownership_count")
+        or reconciliation.get("unresolved_submit_ownership_count")
+        or ownership.get("unresolved_count")
+        or ownership.get("unresolved_submit_intent_ownership_count")
+        or 0
+    )
     return {
         "classification": reconciliation.get("classification"),
         "broker_reconciled": reconciliation.get("broker_reconciled"),
+        "broker_truth_lease_state": broker_lease.get("lease_state") or broker_lease.get("state"),
         "unknown_open_order_count": reconciliation.get("unknown_broker_open_order_count"),
         "track_b_broker_open_order_count": reconciliation.get("track_b_broker_open_order_count"),
+        "track_b_broker_position_count": reconciliation.get("track_b_broker_position_count"),
         "review_required_count": reconciliation.get("review_required_count"),
         "lifecycle_open_position_count": reconciliation.get("lifecycle_open_position_count"),
+        "unresolved_submit_intent_ownership_count": unresolved_ownership_count,
         "live_money_eligible": _bool(reconciliation.get("live_money_eligible")) or _bool(canonical.get("live_money_eligible")),
     }
 
@@ -522,6 +539,8 @@ def _broker_safety_blockers(safety: Mapping[str, Any]) -> list[str]:
         blockers.append("unknown_open_orders")
     if _int(safety.get("review_required_count")):
         blockers.append("lifecycle_review_required")
+    if _int(safety.get("unresolved_submit_intent_ownership_count")):
+        blockers.append("unresolved_submit_ownership")
     if classification and classification != RECONCILED_CLASSIFICATION:
         blockers.append("broker_reconciliation_mismatch")
     if safety.get("broker_reconciled") is False:

@@ -26,15 +26,16 @@ from mgc_v05l.execution_core.track_b_self_healing_supervisor import (
 )
 
 DEFAULT_RESTART_AUDIT_ARTIFACT = (
-    Path("outputs") / "operator_dashboard" / "runtime" / "self_healing_restart_audit.jsonl"
+    Path("outputs") / "operator_dashboard" / "runtime" / "self_healing_recovery_audit.jsonl"
 )
 DEFAULT_RESTART_COOLDOWN_SECONDS = 300.0
 DEFAULT_RESTART_MAX_ATTEMPTS = 3
 DEFAULT_RESTART_WINDOW_SECONDS = 900.0
 AUTO_RESTART_ELIGIBLE = "AUTO_RESTART_ELIGIBLE"
 PAPER_RUNTIME_AGENT_ID = "paper_runtime"
+ACTIVE_BROKER_LEASE_STATES = {"ACTIVE", "ACTIVE_DEGRADED_REFRESH_FAILING"}
 
-SIDECAR_RESTART_COMMANDS: dict[str, tuple[tuple[str, ...], ...]] = {
+RECOVERY_RESTART_COMMANDS: dict[str, tuple[tuple[str, ...], ...]] = {
     "broker_truth_refresher": (
         ("bash", "scripts/stop-track-b-broker-truth-refresh"),
         ("bash", "scripts/start-track-b-broker-truth-refresh"),
@@ -46,6 +47,18 @@ SIDECAR_RESTART_COMMANDS: dict[str, tuple[tuple[str, ...], ...]] = {
     "phase1_candle_supervisor": (
         ("bash", "scripts/stop-phase1-databento-live-candles"),
         ("bash", "scripts/start-phase1-databento-live-candles"),
+    ),
+    "paper_runtime": (
+        ("bash", "scripts/stop_probationary_paper_soak.sh"),
+        (
+            "bash",
+            "scripts/run_headless_supervised_paper_service.sh",
+            "--no-start-dashboard",
+            "--wait-timeout-seconds",
+            "120",
+            "--post-start-pid-wait-timeout-seconds",
+            "45",
+        ),
     ),
 }
 
@@ -81,14 +94,22 @@ def run_track_b_self_healing_status(
         now=current,
         command_runner=command_runner,
     )
+    runtime_restart = _runtime_restart_summary(action["plan"], action.get("attempt"))
     health = {
         **health,
         "health_contract_artifact_path": str(target),
         "restart_audit_artifact_path": str(audit_target),
+        "recovery_audit_artifact_path": str(audit_target),
         "last_restart_plan": action["plan"],
+        "recovery_classification": action["plan"].get("classification"),
+        "runtime_restart_eligible": runtime_restart["eligible"],
+        "runtime_restart_blockers": runtime_restart["blockers"],
+        "runtime_restart_cooldown_state": runtime_restart["cooldown_state"],
     }
     if action.get("attempt"):
         health = {**health, "last_restart_attempt": action["attempt"]}
+    if runtime_restart.get("last_attempt"):
+        health = {**health, "last_runtime_restart_attempt": runtime_restart["last_attempt"]}
     if write:
         write_track_b_self_healing_health(output_path=target, health=health)
     return health
@@ -157,8 +178,10 @@ def plan_track_b_self_healing_restarts(
             max_attempts=max_attempts,
             window_seconds=window_seconds,
         )
+        if agent_id == PAPER_RUNTIME_AGENT_ID:
+            agent_blockers.extend(_runtime_restart_blockers(health=health, agent=row))
         all_blockers = _dedupe([*global_blockers, *agent_blockers])
-        commands = SIDECAR_RESTART_COMMANDS.get(agent_id)
+        commands = RECOVERY_RESTART_COMMANDS.get(agent_id)
         if all_blockers or not commands:
             if not commands:
                 all_blockers.append("restart_command_not_supported")
@@ -186,7 +209,7 @@ def plan_track_b_self_healing_restarts(
         "actions": tuple(actions),
         "blocked": tuple(blocked),
         "global_blockers": tuple(_dedupe(global_blockers)),
-        "paper_runtime_auto_restart_allowed": False,
+        "paper_runtime_auto_restart_allowed": any(row.get("agent_id") == PAPER_RUNTIME_AGENT_ID for row in actions),
         "cooldown_seconds": cooldown_seconds,
         "max_attempts": max_attempts,
         "window_seconds": window_seconds,
@@ -207,6 +230,10 @@ def render_track_b_self_healing_status(health: Mapping[str, Any]) -> str:
         f"live_money_eligible={str(health.get('live_money_eligible') is True).lower()}",
         f"artifact_path={health.get('health_contract_artifact_path') or DEFAULT_SELF_HEALING_HEALTH_ARTIFACT}",
         f"audit_path={health.get('restart_audit_artifact_path') or DEFAULT_RESTART_AUDIT_ARTIFACT}",
+        f"recovery_classification={health.get('recovery_classification') or plan.get('classification') or 'RESTART_PLAN_NOT_EVALUATED'}",
+        f"runtime_restart_eligible={str(health.get('runtime_restart_eligible') is True).lower()}",
+        f"runtime_restart_blockers={_csv(health.get('runtime_restart_blockers'))}",
+        f"runtime_restart_cooldown={health.get('runtime_restart_cooldown_state') or '-'}",
         f"restart_plan={plan.get('classification') or 'RESTART_PLAN_NOT_EVALUATED'}",
         f"restart_plan_actions={_csv([row.get('agent_id') for row in plan.get('actions', [])])}",
         f"restart_plan_blocked={_csv([row.get('agent_id') for row in plan.get('blocked', [])])}",
@@ -286,8 +313,12 @@ def _global_restart_blockers(health: Mapping[str, Any]) -> list[str]:
         blockers.append("unknown_open_orders")
     if int(broker_safety.get("track_b_broker_open_order_count") or 0):
         blockers.append("open_orders_present")
+    if int(broker_safety.get("unknown_broker_open_order_count") or 0):
+        blockers.append("unknown_open_orders")
     if int(broker_safety.get("review_required_count") or 0):
         blockers.append("lifecycle_review_required")
+    if int(broker_safety.get("unresolved_submit_intent_ownership_count") or 0):
+        blockers.append("unresolved_submit_ownership")
     if broker_safety.get("broker_reconciled") is False:
         blockers.append("broker_reconciliation_mismatch")
     if broker_safety.get("duplicate_conflicting_runtime_count"):
@@ -297,6 +328,50 @@ def _global_restart_blockers(health: Mapping[str, Any]) -> list[str]:
         if isinstance(row, Mapping) and row.get("root_ok") is False:
             blockers.append("wrong_root")
     return _dedupe(blockers)
+
+
+def _runtime_restart_blockers(*, health: Mapping[str, Any], agent: Mapping[str, Any]) -> list[str]:
+    blockers: list[str] = []
+    broker_safety = health.get("broker_safety") if isinstance(health.get("broker_safety"), Mapping) else {}
+    lease_state = str(broker_safety.get("broker_truth_lease_state") or "").strip().upper()
+    if lease_state and lease_state not in ACTIVE_BROKER_LEASE_STATES:
+        blockers.append("broker_truth_lease_not_active")
+    if not lease_state:
+        blockers.append("broker_truth_lease_state_missing")
+    if str(broker_safety.get("classification") or "").strip().upper() != "TRACK_B_PAPER_BROKER_RECONCILED":
+        blockers.append("broker_reconciliation_mismatch")
+    if broker_safety.get("broker_reconciled") is not True:
+        blockers.append("broker_reconciliation_mismatch")
+    agents = health.get("agents") if isinstance(health.get("agents"), Mapping) else {}
+    phase1 = agents.get("phase1_candle_supervisor") if isinstance(agents.get("phase1_candle_supervisor"), Mapping) else {}
+    if phase1.get("health_state") != "HEALTHY":
+        blockers.append("phase1_not_healthy_for_runtime_restart")
+    if agent.get("process_running") is True and agent.get("health_state") == "HEALTHY":
+        blockers.append("paper_runtime_not_dead_or_stale")
+    return _dedupe(blockers)
+
+
+def _runtime_restart_summary(plan: Mapping[str, Any], attempt: Mapping[str, Any] | None) -> dict[str, Any]:
+    eligible = any(row.get("agent_id") == PAPER_RUNTIME_AGENT_ID for row in plan.get("actions") or [])
+    blockers: list[str] = []
+    for row in plan.get("blocked") or []:
+        if isinstance(row, Mapping) and row.get("agent_id") == PAPER_RUNTIME_AGENT_ID:
+            blockers.extend(str(item) for item in row.get("blockers") or [])
+    if not eligible and not blockers and plan.get("health_classification") == AUTO_RESTART_ELIGIBLE:
+        blockers.append("paper_runtime_not_restart_candidate")
+    cooldown_state = "ACTIVE" if "restart_cooldown_active" in blockers else "CLEAR"
+    last_attempt = None
+    if isinstance(attempt, Mapping):
+        for row in attempt.get("results") or []:
+            if isinstance(row, Mapping) and row.get("agent_id") == PAPER_RUNTIME_AGENT_ID:
+                last_attempt = row
+                break
+    return {
+        "eligible": eligible,
+        "blockers": tuple(_dedupe(blockers)),
+        "cooldown_state": cooldown_state,
+        "last_attempt": last_attempt,
+    }
 
 
 def _agent_restart_blockers(
@@ -310,8 +385,6 @@ def _agent_restart_blockers(
     window_seconds: float,
 ) -> list[str]:
     blockers: list[str] = []
-    if agent_id == PAPER_RUNTIME_AGENT_ID:
-        blockers.append("paper_runtime_auto_restart_forbidden")
     if agent.get("restart_eligible") is not True:
         blockers.append("agent_restart_not_eligible")
     if agent.get("restart_candidate") is not True:

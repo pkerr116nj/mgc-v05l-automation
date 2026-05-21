@@ -2,9 +2,9 @@
 
 ## Purpose
 
-Track B PAPER needs a supervisor that can make stale or dead operational agents impossible to miss, and eventually restart safe sidecars without creating broker/order risk. This first slice is deliberately read-only. It defines the health contract and a classifier that says whether self-healing is ready, degraded, restart-eligible, blocked, operator-required, or unsafe because broker/lifecycle truth is ambiguous.
+Track B PAPER needs a supervisor that can keep normal runtime infrastructure near 100% uptime without keeping operator approval on the critical path for ordinary process failures. The strategic direction is resilient infrastructure: detect, recover, verify, and resume when broker/lifecycle/reconciliation state is provably clean.
 
-The supervisor must never submit, cancel, close, flatten, mutate lifecycle, invoke `paper_proof`, or grant live-money eligibility.
+Operator escalation is reserved for ambiguous broker-state or risk conditions. The supervisor must never submit, cancel, close, flatten, mutate lifecycle, invoke `paper_proof`, or grant live-money eligibility.
 
 ## Authority Boundary
 
@@ -76,7 +76,7 @@ Auto-restart is blocked if any of these are true:
 - Wrong-root process.
 - Duplicate conflicting runtimes.
 
-The PAPER runtime is not auto-restart eligible in V1. A future slice may add explicit operator-approved runtime restart plans after broker/lifecycle state is proven safe and flat.
+The PAPER runtime is auto-restart eligible only when broker lease, reconciliation, open-order, position/lifecycle, ownership, root, duplicate-runtime, and cooldown gates are clean. Runtime restart is infrastructure recovery only; it must never create trading actions.
 
 ## Intended V1 Behavior
 
@@ -102,7 +102,7 @@ It prints the overall classification, per-agent health state, restart eligibilit
 
 ## Slice 3 Sidecar Restart Actions
 
-Slice 3 adds dry-run/apply restart planning for sidecar/support services only. The default status script remains safe to run as a dry-run:
+Slice 3 added dry-run/apply restart planning for sidecar/support services only. The default status script remains safe to run as a dry-run:
 
 `bash scripts/status-track-b-self-healing-supervisor --dry-run`
 
@@ -115,3 +115,28 @@ Apply mode can restart only sidecars with an `AUTO_RESTART_ELIGIBLE` plan and cl
 `outputs/operator_dashboard/runtime/self_healing_restart_audit.jsonl`
 
 Every apply attempt also updates `latest_track_b_self_healing_health.json` with `last_restart_plan` and `last_restart_attempt`. Restarts are blocked by unknown/open orders, lifecycle review-required state, reconciliation mismatch, `live_money_eligible=true`, wrong root, duplicate conflicting runtimes, cooldown, or max-attempt limits.
+
+
+## Slice 4 Autonomous Runtime Recovery
+
+Slice 4 aligns the supervisor with the 100% uptime objective by allowing autonomous PAPER runtime restart when the runtime is dead, stale, or missing and broker state is clean. This removes permanent operator approval from ordinary PAPER runtime process recovery.
+
+Runtime restart is allowed only when all of these are true:
+
+- Broker-truth lease is active/fresh.
+- Phase-1 broker reconciliation is `TRACK_B_PAPER_BROKER_RECONCILED`.
+- Broker open orders are zero and unknown open orders are zero.
+- Track B broker positions are zero, or are cleanly lifecycle-managed without review-required state.
+- Lifecycle review-required count is zero.
+- Unresolved submit ownership count is zero.
+- `live_money_eligible=false`.
+- Expected Dev root is verified.
+- No duplicate/conflicting active runtime exists.
+- Phase-1 service is healthy enough for startup preflight.
+- Cooldown and max-attempt policy allow another restart.
+
+Runtime restart is blocked for broker ambiguity: unknown/open orders, review-required lifecycle, unresolved ownership, broker/lifecycle mismatch, invalid/expired broker lease, blocked reconciliation, live-money eligibility, wrong root, duplicate conflicting runtime, cooldown, or max-attempt exhaustion.
+
+Runtime restart uses the repaired supervised launcher and appends recovery audit rows to:
+
+`outputs/operator_dashboard/runtime/self_healing_recovery_audit.jsonl`

@@ -33,7 +33,7 @@ def test_writer_builds_and_writes_self_healing_artifact(tmp_path: Path) -> None:
     assert written["classification"] == "SELF_HEALING_READY"
     assert written["auto_restart_allowed"] is False
     assert written["live_money_eligible"] is False
-    assert written["agents"]["paper_runtime"]["restart_eligible"] is False
+    assert written["agents"]["paper_runtime"]["restart_eligible"] is True
     assert written["agents"]["broker_truth_refresher"]["health_state"] == "HEALTHY"
 
 
@@ -50,8 +50,9 @@ def test_registry_defines_expected_track_b_agents() -> None:
     } <= agent_ids
     paper_runtime = next(row for row in registry if row["agent_id"] == "paper_runtime")
     assert paper_runtime["required"] is True
-    assert paper_runtime["restart_eligible"] is False
-    assert "runtime_restart_requires_explicit_operator_approval" in paper_runtime["restart_blockers"]
+    assert paper_runtime["restart_eligible"] is True
+    assert "broker_truth_lease_not_active" in paper_runtime["restart_blockers"]
+    assert "unresolved_submit_ownership" in paper_runtime["restart_blockers"]
 
 
 def test_healthy_required_agents_are_self_healing_ready() -> None:
@@ -116,16 +117,16 @@ def test_wrong_root_blocks_restart() -> None:
     assert "wrong_root" in result["blockers"]
 
 
-def test_runtime_degraded_requires_operator_approval_not_auto_restart() -> None:
+def test_runtime_degraded_becomes_restart_candidate_for_clean_broker_state() -> None:
     inputs = _inputs()
     inputs["agents"]["paper_runtime"]["process_running"] = False
 
     result = classify_track_b_self_healing_health(inputs)
 
-    assert result["classification"] == "DEGRADED_RECOVERABLE"
-    assert result["auto_restart_allowed"] is False
-    assert result["restart_candidates"] == ()
-    assert "paper_runtime_restart_not_eligible" in result["agents"]["paper_runtime"]["blockers"]
+    assert result["classification"] == "AUTO_RESTART_ELIGIBLE"
+    assert result["auto_restart_allowed"] is True
+    assert result["restart_candidates"] == ("paper_runtime",)
+    assert "paper_runtime_not_running" in result["agents"]["paper_runtime"]["blockers"]
 
 
 def test_operator_required_state_wins_over_restart_candidate() -> None:
@@ -155,8 +156,11 @@ def _inputs() -> dict:
             "broker_reconciled": True,
             "unknown_open_order_count": 0,
             "track_b_broker_open_order_count": 0,
+            "track_b_broker_position_count": 0,
             "review_required_count": 0,
             "lifecycle_open_position_count": 0,
+            "unresolved_submit_intent_ownership_count": 0,
+            "broker_truth_lease_state": "ACTIVE",
             "live_money_eligible": False,
             "duplicate_conflicting_runtime_count": 0,
         },
