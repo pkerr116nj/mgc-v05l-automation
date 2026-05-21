@@ -36,6 +36,13 @@ bash scripts/run_headless_supervised_paper_service.sh
 
 This helper waits for the service-first path to reach the headless operability contract and then exits with a proof artifact. It is a bootstrap/verification helper, not the preferred long-lived host process.
 
+For the PAPER runtime child, this helper uses a deterministic launchctl-backed
+wrapper contract. Automatic PAPER runtime startup does not use `screen` or a
+plain `nohup` fallback. If launchctl cannot start the wrapper, the helper fails
+closed and writes a blocked startup artifact instead of reporting a false
+success. The wrapper must publish a live Dev-root PID whose command, cwd, and
+requested config stack match before startup can be classified as usable.
+
 ## Headless Proof Artifacts
 
 Authoritative headless artifacts:
@@ -43,6 +50,9 @@ Authoritative headless artifacts:
 - `outputs/operator_dashboard/runtime/headless_supervised_paper_status.json`
 - `outputs/operator_dashboard/runtime/headless_supervised_paper_status.md`
 - `outputs/operator_dashboard/runtime/headless_supervised_paper_service_startup.json`
+- `outputs/probationary_pattern_engine/paper_session/runtime/probationary_paper.pid`
+- `outputs/probationary_pattern_engine/paper_session/runtime/probationary_paper.pid.launchctl_label`
+- `outputs/probationary_pattern_engine/paper_session/runtime/paper_runtime_config_paths.txt`
 
 Supporting backend artifacts:
 
@@ -59,6 +69,8 @@ Headless supervised paper is usable only when:
 - startup control plane is `READY`
 - supervised paper operability is `USABLE`
 - paper runtime is running and ready
+- paper runtime PID is a live non-zombie Dev-root process
+- paper runtime command contains the requested config stack
 - packaged Electron launch is not required
 
 ## If The UI Will Not Launch

@@ -500,21 +500,14 @@ PY
 }
 
 launch_background_paper_runtime() {
-  local wrapper_path
-  wrapper_path="$(write_paper_runtime_wrapper)"
   rm -f "${PAPER_WRAPPER_PID_FILE}"
-  if screen_available; then
-    local session_name
-    session_name="$(screen_session_name "paper_runtime")"
-    printf '%s\n' "${session_name}" > "${PAPER_PID_FILE}.screen_session"
-    screen -dmS "${session_name}" /bin/bash "${wrapper_path}"
+  rm -f "${PAPER_PID_FILE}.screen_session"
+  if launchctl_submit_available; then
+    launch_detached_paper_runtime
     return 0
   fi
-  (
-    cd "${REPO_ROOT}"
-    nohup /bin/bash "${wrapper_path}" >> "${PAPER_LOG_FILE}" 2>&1 &
-    echo "$!" > "${PAPER_WRAPPER_PID_FILE}"
-  )
+  echo "CANONICAL_PAPER_LAUNCHER_UNAVAILABLE: launchctl is required for supervised PAPER runtime launch; screen/nohup fallback is disabled for automatic runtime start." >&2
+  return 1
 }
 
 launch_screen_dashboard_manager() {
@@ -532,6 +525,7 @@ launch_detached_paper_runtime() {
   local label="com.mgc-v05l.headless-supervised-paper.runtime.$(date +%Y%m%d%H%M%S).$$"
   local wrapper_path
   printf '%s\n' "${label}" > "${PAPER_PID_FILE}.launchctl_label"
+  rm -f "${PAPER_PID_FILE}.screen_session"
   wrapper_path="$(write_paper_runtime_wrapper)"
   launchctl submit -l "${label}" -- /bin/bash "${wrapper_path}"
 }

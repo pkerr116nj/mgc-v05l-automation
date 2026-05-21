@@ -53,7 +53,7 @@ It does not execute restarts.
 | Phase-1 candle supervisor/listener | Yes | Yes | `mgc_v05l.execution_core.phase1_databento_live_runtime_candles --mode service` | `var/phase1_databento_live_candles_service.pid`, `var/phase1_databento_live_candles_child.pid`, cwd must be Dev root | `outputs/reports/phase1_databento_live_runtime_candles/latest_phase1_databento_live_listener_status.json`, `latest_phase1_databento_live_supervisor_status.json` | 180s | Databento env/auth missing |
 | Broker truth refresher | Yes | Yes | `mgc_v05l.app.ibkr_broker_truth_refresher --service --read-only` | `var/track_b_broker_truth_refresh_service.pid`, cwd must be Dev root | `outputs/reports/ibkr_broker_truth_refresh/latest_broker_truth_refresh_status.json`, `outputs/operator_dashboard/runtime/latest_broker_truth_lease.json` | 150s | TWS/manual review required |
 | Operator readiness refresher | Yes | Yes | `mgc_v05l.app.track_b_operator_readiness_refresher --service` | `var/track_b_operator_readiness_refresh_service.pid`, `var/track_b_operator_readiness_refresh_child.pid`, cwd must be Dev root | `var/track_b_operator_readiness_refresh_heartbeat.json`, `outputs/reports/track_b_operator_readiness_refresher/latest_track_b_operator_readiness_refresher_status.json`, canonical readiness | 180s | Readiness refresh operator-required |
-| PAPER runtime | Yes | No in V1 | `mgc_v05l.app.main probationary-paper-soak` | `outputs/probationary_pattern_engine/paper_session/runtime/probationary_paper.pid`, cwd must be Dev root | `outputs/probationary_pattern_engine/paper_session/operator_status.json`, canonical readiness | 180s | Open managed position or runtime restart approval required |
+| PAPER runtime | Yes | Yes, when broker state is clean | `mgc_v05l.app.main probationary-paper-soak` launched by `scripts/run_headless_supervised_paper_service.sh` through the canonical launchctl wrapper | `outputs/probationary_pattern_engine/paper_session/runtime/probationary_paper.pid`, cwd must be Dev root, requested config stack must match | `outputs/probationary_pattern_engine/paper_session/operator_status.json`, canonical readiness | 180s | Open managed position, unsafe reconciliation, duplicate writer, or wrong root |
 | Operator dashboard/backend | No | Yes | `mgc_v05l.app.operator_dashboard` | `outputs/operator_dashboard/runtime/operator_dashboard.pid`, cwd must be Dev root | `outputs/operator_dashboard/runtime/operator_dashboard.json`, `operator_dashboard_readiness.json` | 180s | Port conflict |
 
 ## Classifications
@@ -140,3 +140,12 @@ Runtime restart is blocked for broker ambiguity: unknown/open orders, review-req
 Runtime restart uses the repaired supervised launcher and appends recovery audit rows to:
 
 `outputs/operator_dashboard/runtime/self_healing_recovery_audit.jsonl`
+
+The canonical runtime launcher is `scripts/run_headless_supervised_paper_service.sh`.
+For the PAPER runtime child, that launcher uses a launchctl-backed wrapper and
+then verifies the live child PID, Dev-root cwd, command markers, and requested
+config stack before it can report success. Automatic runtime recovery does not
+use `screen`, and the old plain background/nohup path is not accepted as a
+successful supervised PAPER runtime contract. If launchctl is unavailable or the
+child exits before publishing a valid Python runtime PID, startup is classified
+as blocked and the runtime is stopped best-effort.

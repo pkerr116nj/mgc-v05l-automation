@@ -166,7 +166,7 @@ def test_launch_script_non_screen_wrapper_uses_resolved_paths_and_env() -> None:
     assert "headless_runtime_wrapper_exec" in script
 
 
-def test_launch_script_prefers_screen_paper_runtime_launch_before_nohup_fallback() -> None:
+def test_launch_script_uses_launchctl_paper_runtime_contract_without_screen_fallback() -> None:
     script = RUN_SCRIPT.read_text(encoding="utf-8")
 
     assert "DEFAULT_PAPER_WRAPPER_PID_FILE" in script
@@ -174,14 +174,33 @@ def test_launch_script_prefers_screen_paper_runtime_launch_before_nohup_fallback
     assert "launch_background_paper_runtime" in script
     launch_function = script[script.index("launch_background_paper_runtime()") : script.index("launch_screen_dashboard_manager()")]
     assert "rm -f \"${PAPER_WRAPPER_PID_FILE}\"" in launch_function
-    assert "screen_available" in launch_function
-    assert "screen -dmS \"${session_name}\" /bin/bash \"${wrapper_path}\"" in launch_function
-    assert "nohup /bin/bash \"${wrapper_path}\" >> \"${PAPER_LOG_FILE}\" 2>&1 &" in script
-    assert "echo \"$!\" > \"${PAPER_WRAPPER_PID_FILE}\"" in script
+    assert "rm -f \"${PAPER_PID_FILE}.screen_session\"" in launch_function
+    assert "launchctl_submit_available" in launch_function
+    assert "launch_detached_paper_runtime" in launch_function
+    assert "CANONICAL_PAPER_LAUNCHER_UNAVAILABLE" in launch_function
+    assert "screen_available" not in launch_function
+    assert "screen -dmS \"${session_name}\" /bin/bash \"${wrapper_path}\"" not in launch_function
+    assert "nohup /bin/bash \"${wrapper_path}\" >> \"${PAPER_LOG_FILE}\" 2>&1 &" not in launch_function
+    assert "echo \"$!\" > \"${PAPER_WRAPPER_PID_FILE}\"" not in launch_function
     assert "launch_background_paper_runtime\n  return 0" in script
-    assert "launchctl submit -l \"${label}\" -- /bin/bash \"${wrapper_path}\"" not in launch_function
-    assert launch_function.index("rm -f \"${PAPER_WRAPPER_PID_FILE}\"") < launch_function.index("screen_available")
-    assert launch_function.index("screen_available") < launch_function.index("nohup /bin/bash")
+    assert "launchctl submit -l \"${label}\" -- /bin/bash \"${wrapper_path}\"" in script
+    assert launch_function.index("rm -f \"${PAPER_WRAPPER_PID_FILE}\"") < launch_function.index(
+        "launchctl_submit_available"
+    )
+    assert launch_function.index("launchctl_submit_available") < launch_function.index(
+        "launch_detached_paper_runtime"
+    )
+
+
+def test_launch_script_retains_screen_only_for_dashboard_manager_not_paper_runtime() -> None:
+    script = RUN_SCRIPT.read_text(encoding="utf-8")
+
+    paper_launch = script[script.index("launch_background_paper_runtime()") : script.index("launch_screen_dashboard_manager()")]
+    dashboard_launch = script[script.index("launch_screen_dashboard_manager()") : script.index("launch_detached_paper_runtime()")]
+
+    assert "screen_available" not in paper_launch
+    assert "screen -dmS" not in paper_launch
+    assert "screen -dmS" in dashboard_launch
 
 
 def test_launch_script_polls_for_late_post_start_runtime_pid() -> None:
