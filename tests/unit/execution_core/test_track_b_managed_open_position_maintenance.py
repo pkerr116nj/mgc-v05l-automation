@@ -147,7 +147,7 @@ def seed_open_position(
         tmp_path / "live" / "latest_live_mnq_1m_candles.json",
         {
             "latest_1m_age_seconds": latest_1m_age_seconds,
-            "candles": [
+            "bars": [
                 {
                     "candle_timestamp": completed_timestamps[-1] if completed_timestamps else "2026-05-07T16:30:00+00:00",
                     "close": "28720",
@@ -332,6 +332,94 @@ def test_open_managed_position_age_three_submits_close_and_clears_open_summary(t
     assert summary["managed_strategy_trade_count"] == 1
     assert summary["completed_trade_count"] == 1
     assert positions["open_position_count"] == 0
+
+
+def test_uses_canonical_phase1_runtime_market_data_root(tmp_path: Path) -> None:
+    cfg = seed_open_position(tmp_path, completed_timestamps=[])
+    phase1_root = tmp_path / "phase1_runtime_market_data"
+    write_json(
+        phase1_root / "MNQ" / "5m" / "latest_runtime_candles.json",
+        {
+            "symbol": "MNQ",
+            "timeframe": "5m",
+            "generated_at": "2026-05-07T16:45:00+00:00",
+            "last_completed_bar_ts": "2026-05-07T16:40:00+00:00",
+            "realtime_feed_confirmed": True,
+            "bars": [
+                {"bar_end": "2026-05-07T16:30:00+00:00", "close": "28721"},
+                {"bar_end": "2026-05-07T16:35:00+00:00", "close": "28720.5"},
+                {"bar_end": "2026-05-07T16:40:00+00:00", "close": "28720"},
+            ],
+        },
+    )
+    write_json(
+        phase1_root / "MNQ" / "1m" / "latest_runtime_candles.json",
+        {
+            "symbol": "MNQ",
+            "timeframe": "1m",
+            "generated_at": "2026-05-07T16:45:00+00:00",
+            "last_completed_bar_ts": "2026-05-07T16:44:00+00:00",
+            "realtime_feed_confirmed": True,
+            "candles": [
+                {"bar_end": "2026-05-07T16:44:00+00:00", "close": "28720"},
+            ],
+        },
+    )
+    cfg = TrackBManagedOpenPositionMaintenanceConfig(
+        **{**cfg.__dict__, "live_runtime_feed_output_root": phase1_root}
+    )
+
+    result = run_track_b_managed_open_position_maintenance(
+        config=cfg,
+        lifecycle_stages=fake_close_stages(),
+        now=aware_now(),
+    )
+
+    position = result.report["positions"][0]
+    assert position["completed_bars_since_entry"] == 3
+    assert position["data_freshness_state"] == "FRESH"
+    assert position["exit_eligible"] is True
+    assert position["close_intent_created"] is True
+
+
+def test_submit_disabled_maintenance_is_diagnostic_only(tmp_path: Path) -> None:
+    cfg = seed_open_position(
+        tmp_path,
+        completed_timestamps=[
+            "2026-05-07T16:30:00+00:00",
+            "2026-05-07T16:35:00+00:00",
+            "2026-05-07T16:40:00+00:00",
+        ],
+    )
+    cfg = TrackBManagedOpenPositionMaintenanceConfig(
+        **{**cfg.__dict__, "submit_enabled": False}
+    )
+
+    result = run_track_b_managed_open_position_maintenance(
+        config=cfg,
+        lifecycle_stages=fake_close_stages(),
+        now=aware_now(),
+    )
+
+    position = result.report["positions"][0]
+    assert position["maintenance_mode"] == "DIAGNOSTIC_DRY_RUN_SUBMIT_DISABLED"
+    assert position["exit_eligible"] is True
+    assert position["close_intent_created"] is True
+    assert position["close_submitted"] is False
+    assert position["final_position_status"] == "OPEN_MANAGED"
+    assert result.report["broker_state_mutated"] is False
+    assert result.report["submit_attempted"] is False
+    lifecycle = json.loads(
+        (
+            tmp_path
+            / "managed"
+            / "strategy_managed_fe30248d4d6c42acaf106c8313b0b33b"
+            / "track_b_strategy_managed_paper_lifecycle_report.json"
+        ).read_text()
+    )
+    assert lifecycle["final_position_status"] == "OPEN_MANAGED"
+    summary = json.loads((tmp_path / "ledger" / "latest_track_b_live_position_status.json").read_text())
+    assert summary["review_required_positions"] == []
 
 
 def test_gc_style_recent_fill_clock_does_not_use_stale_signal_age(tmp_path: Path) -> None:

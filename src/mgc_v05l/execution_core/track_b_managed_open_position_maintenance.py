@@ -49,6 +49,7 @@ from .track_b_strategy_managed_paper_lifecycle import (
 DEFAULT_TRACK_B_MANAGED_OPEN_POSITION_MAINTENANCE_JSON = (
     Path("outputs/track_b_execution_core/diagnostics") / "latest_track_b_managed_open_position_maintenance.json"
 )
+DEFAULT_TRACK_B_PHASE1_RUNTIME_MARKET_DATA_ROOT = Path("outputs/track_b_execution_core/phase1_runtime_market_data")
 
 TICK_SIZE_BY_INSTRUMENT = {
     "MGC": Decimal("0.1"),
@@ -68,7 +69,7 @@ class TrackBManagedOpenPositionMaintenanceConfig:
     order_type: str = "LMT"
     time_in_force: str = "DAY"
     live_money_readiness: bool = False
-    live_runtime_feed_output_root: Path = DEFAULT_TRACK_B_DATABENTO_LIVE_RUNTIME_FEED_OUTPUT_ROOT
+    live_runtime_feed_output_root: Path = DEFAULT_TRACK_B_PHASE1_RUNTIME_MARKET_DATA_ROOT
     managed_lifecycle_output_root: Path = DEFAULT_TRACK_B_STRATEGY_MANAGED_PAPER_LIFECYCLE_OUTPUT_ROOT
     paper_trade_ledger_output_root: Path = DEFAULT_TRACK_B_PAPER_TRADE_LEDGER_OUTPUT_ROOT
     position_management_manifest_root: Path = DEFAULT_TRACK_B_POSITION_MANAGEMENT_MANIFEST_ROOT
@@ -252,6 +253,49 @@ def run_track_b_managed_open_position_maintenance(
             broker_truth_state=broker_state_value.value,
             suppress_discretionary_exit=suppress_discretionary_exit,
         )
+        if actual_config.submit_enabled is not True:
+            position_reports.append(
+                {
+                    **base_position_report,
+                    "maintenance_invoked": True,
+                    "maintenance_mode": "DIAGNOSTIC_DRY_RUN_SUBMIT_DISABLED",
+                    "latest_completed_5m_bar_timestamp": completed_timestamps[-1] if completed_timestamps else None,
+                    "completed_bars_since_entry": completed_bars_since_entry,
+                    "bars_since_fill": completed_bars_since_entry,
+                    "bars_since_signal": completed_bars_since_signal,
+                    "fill_timestamp_source": "BROKER_ENTRY_FILL",
+                    "completed_5m_bar_timestamps_since_entry": completed_timestamps,
+                    "data_freshness": market_data_state.to_json_dict(),
+                    "data_freshness_state": market_data_state.state.value,
+                    "broker_truth_state": broker_state_value.value,
+                    "broker_truth_freshness": broker_truth_state.to_json_dict(),
+                    "bridge_terminal_event_grace": None,
+                    "suppressed_due_to_stale_data": suppress_discretionary_exit,
+                    "exit_family": "DIAGNOSTIC_TIME" if managed_exit_policy_id else None,
+                    "exit_reason": "TIME_BOXED_EXIT" if exit_eligible else None,
+                    "hard_exit": False,
+                    "discretionary_exit": bool(exit_eligible),
+                    "mfe": None,
+                    "mae": None,
+                    "exit_policy_id": managed_exit_policy_id,
+                    "required_completed_5m_bars": required_bars,
+                    "exit_eligible": exit_eligible,
+                    "close_limit_price": close_limit_price,
+                    "close_intent_created": bool(exit_eligible),
+                    "close_submitted": False,
+                    "close_filled": False,
+                    "close_order_id": None,
+                    "close_submit_timestamp": None,
+                    "close_fill_timestamp": None,
+                    "exit_price": None,
+                    "realized_pnl": None,
+                    "final_classification": lifecycle_report.get("paper_lifecycle_classification"),
+                    "final_position_status": lifecycle_report.get("final_position_status") or "OPEN_MANAGED",
+                    "review_required": lifecycle_report.get("review_required") is True,
+                    "blocker": "SUBMIT_DISABLED_DRY_RUN" if exit_eligible else None,
+                }
+            )
+            continue
         result = maintain_open_track_b_strategy_managed_paper_lifecycle(
             config=lifecycle_config,
             existing_lifecycle_report=lifecycle_report,
@@ -463,10 +507,16 @@ def _record_lifecycle_update_in_ledger(
 
 
 def _completed_5m_path(root: Path, instrument: str) -> Path:
+    canonical = Path(root) / str(instrument).upper() / "5m" / "latest_runtime_candles.json"
+    if canonical.exists():
+        return canonical
     return Path(root) / f"latest_live_{instrument.lower()}_completed_5m_candles.json"
 
 
 def _live_1m_path(root: Path, instrument: str) -> Path:
+    canonical = Path(root) / str(instrument).upper() / "1m" / "latest_runtime_candles.json"
+    if canonical.exists():
+        return canonical
     return Path(root) / f"latest_live_{instrument.lower()}_1m_candles.json"
 
 
@@ -477,10 +527,10 @@ def _completed_bar_timestamps_after_entry(
 ) -> list[str]:
     entry = _parse_time(entry_timestamp)
     values: list[str] = []
-    for candle in completed_payload.get("candles", []) or []:
+    for candle in _payload_bars(completed_payload):
         if not isinstance(candle, Mapping):
             continue
-        timestamp = str(candle.get("candle_timestamp") or candle.get("timestamp") or "")
+        timestamp = str(candle.get("candle_timestamp") or candle.get("timestamp") or candle.get("bar_end") or "")
         parsed = _parse_time(timestamp)
         if parsed is None:
             continue
@@ -498,7 +548,7 @@ def _derive_close_limit_price(
     offset_ticks: int,
 ) -> str | None:
     payload = _read_json(_live_1m_path(live_runtime_feed_output_root, instrument))
-    candles = [item for item in payload.get("candles", []) or [] if isinstance(item, Mapping)]
+    candles = _payload_bars(payload)
     if not candles:
         return None
     last = _decimal(candles[-1].get("close") or candles[-1].get("last_price"))
@@ -548,17 +598,24 @@ def _latest_payload_timestamp(payload: Mapping[str, Any]) -> datetime | None:
         "latest_1m_candle_timestamp",
         "latest_completed_5m_timestamp",
         "latest_completed_5m_candle_timestamp",
+        "last_completed_bar_ts",
         "candle_timestamp",
         "last_candle_timestamp",
+        "bar_end",
         "generated_at",
     ):
         parsed = _parse_time(payload.get(key))
         if parsed is not None:
             return parsed
-    candles = [item for item in payload.get("candles", []) or [] if isinstance(item, Mapping)]
+    candles = _payload_bars(payload)
     if candles:
-        return _parse_time(candles[-1].get("candle_timestamp") or candles[-1].get("timestamp"))
+        return _parse_time(candles[-1].get("candle_timestamp") or candles[-1].get("timestamp") or candles[-1].get("bar_end"))
     return None
+
+
+def _payload_bars(payload: Mapping[str, Any]) -> list[Mapping[str, Any]]:
+    raw = payload.get("candles") or payload.get("bars") or payload.get("completed_5m_candles") or []
+    return [item for item in raw if isinstance(item, Mapping)] if isinstance(raw, list) else []
 
 
 def _read_json(path: Path | str | None) -> dict[str, Any]:
