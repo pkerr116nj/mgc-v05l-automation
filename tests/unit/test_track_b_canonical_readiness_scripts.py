@@ -101,6 +101,23 @@ def test_status_script_reads_paper_runtime_truth_as_evidence_only() -> None:
     assert "paper_trade_allowed\" = truth" not in script
 
 
+def test_status_script_surfaces_runtime_generation_evidence_only() -> None:
+    script = STATUS_SCRIPT.read_text(encoding="utf-8")
+
+    assert "DEFAULT_PAPER_PID_METADATA_FILE" in script
+    assert "probationary_paper.pid.json" in script
+    assert "merge_paper_runtime_generation_status" in script
+    assert "paper_runtime_generation_evidence_only" in script
+    assert "paper_runtime_pid_metadata_state" in script
+    assert "paper_runtime_generation_mismatches" in script
+    assert "paper_runtime_generation_duplicate_writer_state" in script
+    assert "classify_pid_metadata" in script
+    assert "runtime_generation_mismatches" in script
+    assert script.index("merge_paper_runtime_truth_status") < script.index("merge_paper_runtime_generation_status")
+    assert "ready_submit_capable\" = pid_metadata" not in script
+    assert "paper_trade_allowed\" = pid_metadata" not in script
+
+
 def test_status_script_keeps_readiness_exit_code_primary_over_supervisor() -> None:
     script = STATUS_SCRIPT.read_text(encoding="utf-8")
 
@@ -176,8 +193,28 @@ def test_launch_script_non_screen_wrapper_uses_resolved_paths_and_env() -> None:
     assert "export MGC_HEADLESS_SUPERVISED_PAPER_CONFIG_PATHS={q(requested_stack)}" in script
     assert "export MGC_HEADLESS_REQUIRED_PAPER_CONFIGS={q(required_stack)}" in script
     assert "export MGC_HEADLESS_REQUIRED_PAPER_CONFIG_PATHS={q(required_stack)}" in script
+    assert "export MGC_TRACK_B_RUNTIME_INSTANCE_ID={q(runtime_instance_id)}" in script
+    assert "export MGC_TRACK_B_PAPER_RUNTIME_RESTART_GENERATION={q(restart_generation)}" in script
+    assert "export MGC_TRACK_B_PAPER_PID_METADATA_FILE={q(pid_metadata_file)}" in script
+    assert "export MGC_TRACK_B_PAPER_CONFIG_FINGERPRINT={q(config_fingerprint)}" in script
     assert "headless_runtime_wrapper_start" in script
     assert "headless_runtime_wrapper_exec" in script
+
+
+def test_launch_script_creates_generation_metadata_before_paper_start() -> None:
+    script = RUN_SCRIPT.read_text(encoding="utf-8")
+
+    assert "DEFAULT_PAPER_PID_METADATA_FILE" in script
+    assert "prepare_paper_runtime_generation" in script
+    assert "track_b_paper_runtime_pid_metadata_v1" in script
+    assert "PAPER_RUNTIME_INSTANCE_ID=\"track-b-paper-runtime-$(date -u +%Y%m%dT%H%M%SZ)-$$\"" in script
+    assert "PAPER_RUNTIME_RESTART_GENERATION" in script
+    assert "PAPER_RUNTIME_CONFIG_FINGERPRINT" in script
+    assert "\"pid\": None" in script
+    assert "\"launcher_pid\": int(launcher_pid)" in script
+    assert "\"expected_project_root\": str(root)" in script
+    assert "MGC_TRACK_B_PAPER_LAUNCH_STARTED_AT" in script
+    assert script.index("prepare_paper_runtime_generation") < script.index("wrapper_path=\"$(write_paper_runtime_wrapper)\"")
 
 
 def test_launch_script_uses_launchctl_paper_runtime_contract_without_screen_fallback() -> None:

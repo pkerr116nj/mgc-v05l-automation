@@ -17,6 +17,7 @@ DEFAULT_MANAGER_PID_FILE="${DEFAULT_RUNTIME_DIR}/operator_dashboard_manager.pid"
 DEFAULT_MANAGER_LOG_FILE="${DEFAULT_RUNTIME_DIR}/operator_dashboard_manager.log"
 DEFAULT_DASHBOARD_PID_FILE="${DEFAULT_RUNTIME_DIR}/operator_dashboard.pid"
 DEFAULT_PAPER_PID_FILE="${REPO_ROOT}/outputs/probationary_pattern_engine/paper_session/runtime/probationary_paper.pid"
+DEFAULT_PAPER_PID_METADATA_FILE="${DEFAULT_PAPER_PID_FILE}.json"
 DEFAULT_PAPER_WRAPPER_PID_FILE="${REPO_ROOT}/outputs/probationary_pattern_engine/paper_session/runtime/probationary_paper.wrapper.pid"
 DEFAULT_PAPER_LOG_FILE="${REPO_ROOT}/outputs/probationary_pattern_engine/paper_session/runtime/probationary_paper.log"
 DEFAULT_PAPER_CONFIG_PATHS_FILE="${REPO_ROOT}/outputs/probationary_pattern_engine/paper_session/runtime/paper_runtime_config_paths.txt"
@@ -43,6 +44,7 @@ MANAGER_PID_FILE="${DEFAULT_MANAGER_PID_FILE}"
 MANAGER_LOG_FILE="${DEFAULT_MANAGER_LOG_FILE}"
 DASHBOARD_PID_FILE="${DEFAULT_DASHBOARD_PID_FILE}"
 PAPER_PID_FILE="${DEFAULT_PAPER_PID_FILE}"
+PAPER_PID_METADATA_FILE="${DEFAULT_PAPER_PID_METADATA_FILE}"
 PAPER_WRAPPER_PID_FILE="${DEFAULT_PAPER_WRAPPER_PID_FILE}"
 PAPER_LOG_FILE="${DEFAULT_PAPER_LOG_FILE}"
 PAPER_CONFIG_PATHS_FILE="${DEFAULT_PAPER_CONFIG_PATHS_FILE}"
@@ -203,6 +205,7 @@ ensure_dir "$(dirname "${MANAGER_PID_FILE}")"
 ensure_dir "$(dirname "${MANAGER_LOG_FILE}")"
 ensure_dir "$(dirname "${DASHBOARD_PID_FILE}")"
 ensure_dir "$(dirname "${PAPER_LOG_FILE}")"
+ensure_dir "$(dirname "${PAPER_PID_METADATA_FILE}")"
 ensure_dir "$(dirname "${PAPER_WRAPPER_PID_FILE}")"
 ensure_dir "$(dirname "${PAPER_CONFIG_PATHS_FILE}")"
 
@@ -267,6 +270,23 @@ try:
 except OSError:
     rows = []
 print(":".join(rows))
+PY
+}
+
+requested_config_fingerprint() {
+  "${PYTHON_BIN}" - <<'PY' "${REQUESTED_CONFIG_PATHS_FILE}"
+import hashlib
+import json
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+try:
+    rows = [line.strip() for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
+except OSError:
+    rows = []
+digest = hashlib.sha256(json.dumps(rows, separators=(",", ":"), sort_keys=True).encode("utf-8")).hexdigest()
+print(f"sha256:{digest}")
 PY
 }
 
@@ -432,6 +452,89 @@ screen_session_name() {
   printf 'mgc_%s_%s_%s' "${suffix}" "$(date +%Y%m%d%H%M%S)" "$$"
 }
 
+prepare_paper_runtime_generation() {
+  PAPER_RUNTIME_LAUNCH_STARTED_AT="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  PAPER_RUNTIME_INSTANCE_ID="track-b-paper-runtime-$(date -u +%Y%m%dT%H%M%SZ)-$$"
+  PAPER_RUNTIME_RESTART_GENERATION="$(
+    "${PYTHON_BIN}" -c 'import json, sys; from pathlib import Path; path=Path(sys.argv[1]);
+try:
+    payload=json.loads(path.read_text(encoding="utf-8"))
+except (OSError, json.JSONDecodeError):
+    payload={}
+try:
+    generation=int(payload.get("restart_generation") or 0)+1
+except (TypeError, ValueError):
+    generation=1
+print(max(generation, 1))' "${PAPER_PID_METADATA_FILE}"
+  )"
+  PAPER_RUNTIME_CONFIG_FINGERPRINT="$(requested_config_fingerprint)"
+  "${PYTHON_BIN}" - <<'PY' \
+    "${PAPER_PID_METADATA_FILE}" \
+    "${PAPER_RUNTIME_INSTANCE_ID}" \
+    "${PAPER_RUNTIME_RESTART_GENERATION}" \
+    "${PAPER_RUNTIME_LAUNCH_STARTED_AT}" \
+    "$$" \
+    "${REPO_ROOT}" \
+    "${PAPER_RUNTIME_CONFIG_FINGERPRINT}" \
+    "${REQUESTED_CONFIG_PATHS_FILE}"
+import json
+import subprocess
+import sys
+from pathlib import Path
+
+(
+    metadata_path,
+    runtime_instance_id,
+    restart_generation,
+    launch_started_at,
+    launcher_pid,
+    repo_root,
+    config_fingerprint,
+    requested_config_paths_file,
+) = sys.argv[1:]
+root = Path(repo_root).resolve()
+try:
+    source_commit = subprocess.check_output(["git", "-C", str(root), "rev-parse", "HEAD"], text=True).strip()
+except (OSError, subprocess.CalledProcessError):
+    source_commit = None
+try:
+    config_paths = [
+        line.strip()
+        for line in Path(requested_config_paths_file).read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+except OSError:
+    config_paths = []
+payload = {
+    "schema_version": "track_b_paper_runtime_pid_metadata_v1",
+    "service_name": "track_b_paper_runtime",
+    "pid": None,
+    "runtime_instance_id": runtime_instance_id,
+    "restart_generation": int(restart_generation),
+    "launch_started_at": launch_started_at,
+    "generated_at": launch_started_at,
+    "launcher_pid": int(launcher_pid),
+    "expected_project_root": str(root),
+    "root": str(root),
+    "source_commit": source_commit,
+    "config_fingerprint": config_fingerprint,
+    "launcher_config_fingerprint": config_fingerprint,
+    "requested_config_paths": config_paths,
+    "runtime_mode": "PAPER",
+    "paper_only": True,
+    "live_money_eligible": False,
+    "submit_authority": False,
+    "readiness_authority": False,
+    "restart_authority": False,
+}
+path = Path(metadata_path)
+path.parent.mkdir(parents=True, exist_ok=True)
+tmp = path.with_name(f".{path.name}.tmp")
+tmp.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+tmp.replace(path)
+PY
+}
+
 write_paper_runtime_wrapper() {
   local wrapper_path="${PAPER_PID_FILE}.runtime_wrapper.sh"
   local requested_stack
@@ -444,9 +547,15 @@ write_paper_runtime_wrapper() {
     "${PYTHON_BIN}" \
     "${SCRIPT_DIR}" \
     "${PAPER_PID_FILE}" \
+    "${PAPER_PID_METADATA_FILE}" \
     "${PAPER_LOG_FILE}" \
     "${requested_stack}" \
-    "${required_stack}"
+    "${required_stack}" \
+    "${PAPER_RUNTIME_INSTANCE_ID}" \
+    "${PAPER_RUNTIME_RESTART_GENERATION}" \
+    "${PAPER_RUNTIME_LAUNCH_STARTED_AT}" \
+    "$$" \
+    "${PAPER_RUNTIME_CONFIG_FINGERPRINT}"
 import shlex
 import sys
 from pathlib import Path
@@ -457,9 +566,15 @@ from pathlib import Path
     python_bin,
     script_dir,
     pid_file,
+    pid_metadata_file,
     log_file,
     requested_stack,
     required_stack,
+    runtime_instance_id,
+    restart_generation,
+    launch_started_at,
+    launcher_pid,
+    config_fingerprint,
 ) = sys.argv[1:]
 
 q = shlex.quote
@@ -476,12 +591,19 @@ else
   export PYTHONPATH={q(str(Path(repo_root) / "src"))}
 fi
 export MGC_HEADLESS_PAPER_PID_FILE={q(pid_file)}
+export MGC_TRACK_B_PAPER_PID_METADATA_FILE={q(pid_metadata_file)}
 export MGC_HEADLESS_PAPER_LOG_FILE={q(log_file)}
 export MGC_HEADLESS_SCRIPT_DIR={q(script_dir)}
 export MGC_PROBATIONARY_PAPER_CONFIG_PATHS={q(requested_stack)}
 export MGC_HEADLESS_SUPERVISED_PAPER_CONFIG_PATHS={q(requested_stack)}
 export MGC_HEADLESS_REQUIRED_PAPER_CONFIGS={q(required_stack)}
 export MGC_HEADLESS_REQUIRED_PAPER_CONFIG_PATHS={q(required_stack)}
+export MGC_TRACK_B_RUNTIME_INSTANCE_ID={q(runtime_instance_id)}
+export MGC_TRACK_B_PAPER_RUNTIME_RESTART_GENERATION={q(restart_generation)}
+export MGC_TRACK_B_PAPER_LAUNCH_STARTED_AT={q(launch_started_at)}
+export MGC_TRACK_B_PAPER_LAUNCHER_PID={q(launcher_pid)}
+export MGC_TRACK_B_EXPECTED_PROJECT_ROOT={q(repo_root)}
+export MGC_TRACK_B_PAPER_CONFIG_FINGERPRINT={q(config_fingerprint)}
 mkdir -p "$(dirname "$MGC_HEADLESS_PAPER_PID_FILE")" "$(dirname "$MGC_HEADLESS_PAPER_LOG_FILE")"
 {{
   printf '%s\\n' "headless_runtime_wrapper_start generated_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
@@ -490,6 +612,34 @@ mkdir -p "$(dirname "$MGC_HEADLESS_PAPER_PID_FILE")" "$(dirname "$MGC_HEADLESS_P
   printf '%s\\n' "config_stack=$MGC_PROBATIONARY_PAPER_CONFIG_PATHS"
 }} >> "$MGC_HEADLESS_PAPER_LOG_FILE"
 echo "$$" > "$MGC_HEADLESS_PAPER_PID_FILE"
+{q(python_bin)} - <<'RUNTIME_PID_METADATA_PY' "$MGC_TRACK_B_PAPER_PID_METADATA_FILE" "$$" "$MGC_TRACK_B_RUNTIME_INSTANCE_ID" "$MGC_TRACK_B_PAPER_RUNTIME_RESTART_GENERATION" "$REPO_ROOT"
+import json
+import sys
+from datetime import datetime, timezone
+from pathlib import Path
+
+path = Path(sys.argv[1])
+pid = int(sys.argv[2])
+runtime_instance_id = sys.argv[3]
+restart_generation = int(sys.argv[4])
+repo_root = sys.argv[5]
+try:
+    payload = json.loads(path.read_text(encoding="utf-8"))
+except (OSError, json.JSONDecodeError):
+    payload = {{}}
+payload.update({{
+    "pid": pid,
+    "producer_pid": pid,
+    "runtime_instance_id": runtime_instance_id,
+    "restart_generation": restart_generation,
+    "root": repo_root,
+    "producer_root": repo_root,
+    "generated_at": datetime.now(timezone.utc).isoformat(),
+}})
+tmp = path.with_name(f".{{path.name}}.tmp")
+tmp.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\\n", encoding="utf-8")
+tmp.replace(path)
+RUNTIME_PID_METADATA_PY
 printf '%s\\n' "headless_runtime_wrapper_exec generated_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$MGC_HEADLESS_PAPER_LOG_FILE"
 exec bash "$MGC_HEADLESS_SCRIPT_DIR/run_probationary_paper_soak.sh" >> "$MGC_HEADLESS_PAPER_LOG_FILE" 2>&1
 """
@@ -524,6 +674,7 @@ launch_screen_dashboard_manager() {
 launch_detached_paper_runtime() {
   local label="com.mgc-v05l.headless-supervised-paper.runtime.$(date +%Y%m%d%H%M%S).$$"
   local wrapper_path
+  prepare_paper_runtime_generation
   printf '%s\n' "${label}" > "${PAPER_PID_FILE}.launchctl_label"
   rm -f "${PAPER_PID_FILE}.screen_session"
   wrapper_path="$(write_paper_runtime_wrapper)"

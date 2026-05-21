@@ -184,6 +184,49 @@ def test_paper_runtime_truth_is_optional_evidence_not_restart_authority(tmp_path
     assert truth_row["payload"]["lane_count"] == 17
 
 
+def test_paper_runtime_pid_metadata_is_optional_generation_evidence(tmp_path: Path) -> None:
+    _write_runtime_artifacts(tmp_path)
+    metadata_path = (
+        tmp_path
+        / "outputs"
+        / "probationary_pattern_engine"
+        / "paper_session"
+        / "runtime"
+        / "probationary_paper.pid.json"
+    )
+    metadata_path.write_text(
+        json.dumps(
+            {
+                "schema_version": "track_b_paper_runtime_pid_metadata_v1",
+                "runtime_instance_id": "track-b-paper-runtime-test",
+                "restart_generation": 3,
+                "pid": 1006,
+                "root": str(tmp_path),
+                "source_commit": "abc123",
+                "generated_at": NOW.isoformat(),
+                "launch_started_at": NOW.isoformat(),
+                "paper_only": True,
+                "live_money_eligible": False,
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    health = build_track_b_self_healing_health(
+        repo_root=tmp_path,
+        expected_root=tmp_path,
+        now=NOW,
+        process_probe=_process_probe(tmp_path),
+    )
+
+    paper_runtime = health["agents"]["paper_runtime"]
+    metadata_row = next(row for row in paper_runtime["artifacts"] if row["label"] == "paper_runtime_pid_metadata")
+    assert health["classification"] == "SELF_HEALING_READY"
+    assert metadata_row["required"] is False
+    assert metadata_row["fresh"] is True
+    assert metadata_row["payload"]["restart_generation"] == 3
+
+
 def test_operator_required_state_wins_over_restart_candidate() -> None:
     inputs = _inputs()
     inputs["agents"]["broker_truth_refresher"]["classification"] = "BROKER_TRUTH_REFRESH_OPERATOR_REQUIRED"

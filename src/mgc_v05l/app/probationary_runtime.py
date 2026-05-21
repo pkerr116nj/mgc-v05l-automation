@@ -6904,6 +6904,8 @@ class ProbationaryPaperRunner:
                 status_path = self._structured_logger.write_operator_status(
                     {
                         "updated_at": datetime.now(timezone.utc).isoformat(),
+                        **_paper_runtime_generation_payload(self._runtime_instance_id),
+                        **_current_runtime_identity_payload(),
                         "health": asdict(snapshot),
                         **_runtime_cadence_payload(self._settings, self._strategy_engine),
                         "last_processed_bar_end_ts": (
@@ -7266,7 +7268,12 @@ class ProbationaryPaperSupervisor:
         stop_reason: str | None = None
         previous_handlers = self._install_signal_handlers()
         try:
-            _write_probationary_paper_config_in_force(self._settings, self._lanes, self._structured_logger)
+            _write_probationary_paper_config_in_force(
+                self._settings,
+                self._lanes,
+                self._structured_logger,
+                runtime_instance_id=self._runtime_instance_id,
+            )
             _write_probationary_paper_runtime_truth(
                 settings=self._settings,
                 lanes=self._lanes,
@@ -7294,6 +7301,7 @@ class ProbationaryPaperSupervisor:
                         latest_operator_control=None,
                         lane_metrics=None,
                         lane_quarantine=self._lane_quarantine,
+                        runtime_instance_id=self._runtime_instance_id,
                     )
                     return self._finalize_summary(new_bars=0, reconciliation_clean=False, stop_reason=stop_reason)
 
@@ -7308,6 +7316,7 @@ class ProbationaryPaperSupervisor:
                     lane_metrics=None,
                     lane_quarantine=self._lane_quarantine,
                     reconciliation_clean=False,
+                    runtime_instance_id=self._runtime_instance_id,
                 )
                 return self._finalize_summary(new_bars=0, reconciliation_clean=False, stop_reason=stop_reason)
 
@@ -7339,6 +7348,7 @@ class ProbationaryPaperSupervisor:
                         risk_state=risk_state,
                         latest_operator_control=control_result,
                         lane_metrics=None,
+                        runtime_instance_id=self._runtime_instance_id,
                     )
 
                 reconciliation_clean = True
@@ -7463,6 +7473,7 @@ class ProbationaryPaperSupervisor:
                     market_data_failures=market_data_failures,
                     reconciliation_clean=reconciliation_clean,
                     lane_quarantine=self._lane_quarantine,
+                    runtime_instance_id=self._runtime_instance_id,
                 )
                 _write_probationary_paper_runtime_truth(
                     settings=self._settings,
@@ -8925,12 +8936,14 @@ def _write_probationary_paper_config_in_force(
     settings: StrategySettings,
     lanes: Sequence[ProbationaryPaperLaneRuntime],
     structured_logger: StructuredLogger,
+    runtime_instance_id: str | None = None,
 ) -> Path:
     runtime_dir = settings.probationary_artifacts_path / "runtime"
     runtime_dir.mkdir(parents=True, exist_ok=True)
     generated_at = datetime.now(timezone.utc).isoformat()
     payload = {
         "generated_at": generated_at,
+        **_paper_runtime_generation_payload(runtime_instance_id),
         **_current_runtime_identity_payload(),
         "active_lane_ids": [lane.spec.lane_id for lane in lanes],
         "loss_halts_disabled": bool(getattr(settings, "probationary_paper_disable_loss_halts", False)),
@@ -9003,6 +9016,9 @@ def _paper_runtime_truth_path(settings: StrategySettings) -> Path:
 
 
 def _paper_runtime_instance_id(*, started_at: datetime) -> str:
+    env_value = str(os.environ.get("MGC_TRACK_B_RUNTIME_INSTANCE_ID") or "").strip()
+    if env_value:
+        return env_value
     stamp = started_at.astimezone(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     return f"track-b-paper-runtime-{stamp}-{os.getpid()}"
 
@@ -9013,6 +9029,46 @@ def _paper_runtime_restart_generation() -> int:
         return max(int(raw or 0), 0)
     except ValueError:
         return 0
+
+
+def _optional_int(value: object | None) -> int | None:
+    try:
+        return int(str(value or "").strip())
+    except ValueError:
+        return None
+
+
+def _paper_runtime_pid_metadata_path(settings: StrategySettings) -> Path:
+    raw = str(os.environ.get("MGC_TRACK_B_PAPER_PID_METADATA_FILE") or "").strip()
+    if raw:
+        return Path(raw).expanduser()
+    return settings.probationary_artifacts_path / "runtime" / "probationary_paper.pid.json"
+
+
+def _paper_runtime_generation_payload(runtime_instance_id: str | None = None) -> dict[str, Any]:
+    payload: dict[str, Any] = {
+        "runtime_instance_id": runtime_instance_id or str(os.environ.get("MGC_TRACK_B_RUNTIME_INSTANCE_ID") or ""),
+        "restart_generation": _paper_runtime_restart_generation(),
+    }
+    launch_started_at = str(os.environ.get("MGC_TRACK_B_PAPER_LAUNCH_STARTED_AT") or "").strip()
+    launcher_pid = str(os.environ.get("MGC_TRACK_B_PAPER_LAUNCHER_PID") or "").strip()
+    expected_root = str(os.environ.get("MGC_TRACK_B_EXPECTED_PROJECT_ROOT") or "").strip()
+    pid_metadata_file = str(os.environ.get("MGC_TRACK_B_PAPER_PID_METADATA_FILE") or "").strip()
+    launcher_config_fingerprint = str(os.environ.get("MGC_TRACK_B_PAPER_CONFIG_FINGERPRINT") or "").strip()
+    if launch_started_at:
+        payload["launch_started_at"] = launch_started_at
+    if launcher_pid:
+        try:
+            payload["launcher_pid"] = int(launcher_pid)
+        except ValueError:
+            payload["launcher_pid"] = launcher_pid
+    if expected_root:
+        payload["expected_project_root"] = expected_root
+    if pid_metadata_file:
+        payload["pid_metadata_path"] = pid_metadata_file
+    if launcher_config_fingerprint:
+        payload["launcher_config_fingerprint"] = launcher_config_fingerprint
+    return payload
 
 
 def _probationary_config_fingerprint(payload: dict[str, Any]) -> str | None:
@@ -9124,6 +9180,11 @@ def _build_probationary_paper_runtime_truth(
             "runtime_started_at": runtime_started_at.astimezone(timezone.utc).isoformat(),
             "paper_runtime_truth_path": str(_paper_runtime_truth_path(settings)),
             "paper_config_in_force_path": str(settings.probationary_artifacts_path / "runtime" / "paper_config_in_force.json"),
+            "pid_metadata_path": str(_paper_runtime_pid_metadata_path(settings)),
+            "launch_started_at": os.environ.get("MGC_TRACK_B_PAPER_LAUNCH_STARTED_AT"),
+            "launcher_pid": _optional_int(os.environ.get("MGC_TRACK_B_PAPER_LAUNCHER_PID")),
+            "expected_project_root": os.environ.get("MGC_TRACK_B_EXPECTED_PROJECT_ROOT"),
+            "launcher_config_fingerprint": os.environ.get("MGC_TRACK_B_PAPER_CONFIG_FINGERPRINT"),
             "lane_count": active_lane_count,
             "b_plus_threshold": resolved_b_plus_threshold,
             "test_mule_enabled": resolved_test_mule_enabled,
@@ -9161,6 +9222,47 @@ def _write_probationary_paper_runtime_truth(
         test_mule_enabled=test_mule_enabled,
         operator_status=operator_status,
     )
+    tmp = path.with_name(f".{path.name}.tmp")
+    tmp.write_text(json.dumps(payload, indent=2, sort_keys=True, default=str) + "\n", encoding="utf-8")
+    tmp.replace(path)
+    _write_probationary_paper_pid_metadata(settings=settings, runtime_truth=payload)
+    return path
+
+
+def _write_probationary_paper_pid_metadata(*, settings: StrategySettings, runtime_truth: dict[str, Any]) -> Path:
+    path = _paper_runtime_pid_metadata_path(settings)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    existing = _read_json(path)
+    runtime_identity = _current_runtime_identity_payload()
+    generated_at = str(runtime_truth.get("generated_at") or datetime.now(timezone.utc).isoformat())
+    payload = {
+        **existing,
+        "schema_version": "track_b_paper_runtime_pid_metadata_v1",
+        "service_name": "track_b_paper_runtime",
+        "pid": os.getpid(),
+        "producer_pid": os.getpid(),
+        "runtime_instance_id": runtime_truth.get("runtime_instance_id"),
+        "restart_generation": runtime_truth.get("restart_generation"),
+        "root": runtime_truth.get("producer_root") or runtime_identity.get("source_runtime_cwd"),
+        "producer_root": runtime_truth.get("producer_root") or runtime_identity.get("source_runtime_cwd"),
+        "source_commit": runtime_truth.get("source_commit") or runtime_identity.get("source_runtime_git_head"),
+        "generated_at": generated_at,
+        "launch_started_at": existing.get("launch_started_at") or os.environ.get("MGC_TRACK_B_PAPER_LAUNCH_STARTED_AT"),
+        "launcher_pid": existing.get("launcher_pid") or _optional_int(os.environ.get("MGC_TRACK_B_PAPER_LAUNCHER_PID")),
+        "expected_project_root": existing.get("expected_project_root") or os.environ.get("MGC_TRACK_B_EXPECTED_PROJECT_ROOT"),
+        "config_fingerprint": runtime_truth.get("config_fingerprint"),
+        "launcher_config_fingerprint": existing.get("launcher_config_fingerprint")
+        or os.environ.get("MGC_TRACK_B_PAPER_CONFIG_FINGERPRINT"),
+        "paper_runtime_truth_path": runtime_truth.get("paper_runtime_truth_path") or str(_paper_runtime_truth_path(settings)),
+        "paper_config_in_force_path": runtime_truth.get("paper_config_in_force_path")
+        or str(settings.probationary_artifacts_path / "runtime" / "paper_config_in_force.json"),
+        "runtime_mode": "PAPER",
+        "paper_only": True,
+        "live_money_eligible": False,
+        "submit_authority": False,
+        "readiness_authority": False,
+        "restart_authority": False,
+    }
     tmp = path.with_name(f".{path.name}.tmp")
     tmp.write_text(json.dumps(payload, indent=2, sort_keys=True, default=str) + "\n", encoding="utf-8")
     tmp.replace(path)
@@ -10185,6 +10287,7 @@ def _write_probationary_supervisor_operator_status(
     market_data_failures: Sequence[dict[str, Any]] | None = None,
     reconciliation_clean: bool | None = None,
     lane_quarantine: dict[str, dict[str, Any]] | None = None,
+    runtime_instance_id: str | None = None,
 ) -> Path:
     now_local = datetime.now(settings.timezone_info)
     generated_at = datetime.now(timezone.utc).isoformat()
@@ -10277,6 +10380,7 @@ def _write_probationary_supervisor_operator_status(
     global_operator_halt = executable_lane_count > 0 and halted_lane_count == executable_lane_count
     payload = {
         "generated_at": generated_at,
+        **_paper_runtime_generation_payload(runtime_instance_id),
         **_current_runtime_identity_payload(),
         "active_lane_ids": [lane.spec.lane_id for lane in lanes],
         "healthy_lane_ids": [lane.spec.lane_id for lane in lanes if lane.spec.lane_id not in quarantined_lane_ids],
@@ -10338,6 +10442,8 @@ def _write_probationary_supervisor_operator_status(
         "paper_desk_risk_status_path": str(settings.probationary_artifacts_path / "runtime" / "paper_desk_risk_status.json"),
         "paper_lane_risk_status_path": str(settings.probationary_artifacts_path / "runtime" / "paper_lane_risk_status.json"),
         "paper_config_in_force_path": str(settings.probationary_artifacts_path / "runtime" / "paper_config_in_force.json"),
+        "paper_runtime_truth_path": str(_paper_runtime_truth_path(settings)),
+        "paper_runtime_pid_metadata_path": str(_paper_runtime_pid_metadata_path(settings)),
         "latest_operator_control": latest_operator_control,
         "market_data_failures": [dict(row) for row in (market_data_failures or [])],
         "startup_restore_validation_summary": {

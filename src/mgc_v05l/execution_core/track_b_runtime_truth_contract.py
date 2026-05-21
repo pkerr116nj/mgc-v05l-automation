@@ -31,6 +31,13 @@ WRITER_SINGLE = "SINGLE_WRITER"
 WRITER_DUPLICATE = "DUPLICATE_WRITER_DETECTED"
 WRITER_MISSING = "NO_ACTIVE_WRITER"
 
+PID_METADATA_OK = "PID_METADATA_OK"
+PID_METADATA_MISSING = "PID_METADATA_MISSING"
+PID_METADATA_STALE = "PID_METADATA_STALE"
+PID_PROCESS_DEAD = "PID_PROCESS_DEAD"
+PID_PROCESS_ZOMBIE = "PID_PROCESS_ZOMBIE"
+PID_WRONG_ROOT = "PID_WRONG_ROOT"
+
 RECOVERY_OBSERVE_ONLY = "OBSERVE_ONLY"
 RECOVERY_RESTART_ELIGIBLE = "RESTART_ELIGIBLE"
 RECOVERY_BLOCKED = "RECOVERY_BLOCKED"
@@ -134,6 +141,68 @@ def classify_writer_authority(instances: Sequence[Mapping[str, Any]]) -> str:
     if len(active) > 1:
         return WRITER_DUPLICATE
     return WRITER_SINGLE
+
+
+def classify_pid_metadata(
+    metadata: Mapping[str, Any] | None,
+    *,
+    now: datetime | None = None,
+    freshness_ttl_seconds: float = 180.0,
+    process_probe: Mapping[str, Any] | None = None,
+    expected_root: str | None = None,
+) -> str:
+    """Classify launcher-owned runtime PID metadata without granting authority."""
+
+    if not metadata:
+        return PID_METADATA_MISSING
+    freshness = classify_freshness(
+        generated_at=metadata.get("generated_at") or metadata.get("launch_started_at"),
+        freshness_ttl_seconds=freshness_ttl_seconds,
+        now=now,
+        artifact_present=True,
+    )
+    if freshness.freshness_state != FRESHNESS_FRESH:
+        return PID_METADATA_STALE
+    pid = metadata.get("pid")
+    if pid is None:
+        return PID_PROCESS_DEAD
+    probe = dict(process_probe or {})
+    if probe.get("zombie") is True:
+        return PID_PROCESS_ZOMBIE
+    if probe.get("running") is not True:
+        return PID_PROCESS_DEAD
+    if expected_root:
+        observed_root = str(probe.get("cwd") or metadata.get("root") or metadata.get("producer_root") or "")
+        if observed_root and observed_root != expected_root:
+            return PID_WRONG_ROOT
+    return PID_METADATA_OK
+
+
+def runtime_generation_mismatches(
+    *,
+    pid_metadata: Mapping[str, Any] | None = None,
+    runtime_truth: Mapping[str, Any] | None = None,
+    config_in_force: Mapping[str, Any] | None = None,
+    operator_status: Mapping[str, Any] | None = None,
+) -> tuple[str, ...]:
+    """Return evidence-only generation mismatches across runtime artifacts."""
+
+    rows = {
+        "pid_metadata": _generation_pair(pid_metadata),
+        "runtime_truth": _generation_pair(runtime_truth),
+        "config_in_force": _generation_pair(config_in_force),
+        "operator_status": _generation_pair(operator_status),
+    }
+    truth_pair = rows["runtime_truth"]
+    mismatches: list[str] = []
+    if truth_pair is None:
+        return ()
+    for label, pair in rows.items():
+        if label == "runtime_truth" or pair is None:
+            continue
+        if pair != truth_pair:
+            mismatches.append(f"{label}_runtime_truth_mismatch")
+    return tuple(mismatches)
 
 
 def build_runtime_truth_contract(
@@ -255,3 +324,13 @@ def _ensure_utc(value: datetime) -> datetime:
 def _iso(value: str | datetime | None) -> str | None:
     parsed = _parse_timestamp(value)
     return None if parsed is None else parsed.isoformat()
+
+
+def _generation_pair(payload: Mapping[str, Any] | None) -> tuple[str, str] | None:
+    if not payload:
+        return None
+    runtime_instance_id = payload.get("runtime_instance_id")
+    restart_generation = payload.get("restart_generation")
+    if runtime_instance_id is None or restart_generation is None:
+        return None
+    return (str(runtime_instance_id), str(restart_generation))

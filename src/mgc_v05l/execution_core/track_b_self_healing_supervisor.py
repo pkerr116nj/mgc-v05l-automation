@@ -364,6 +364,20 @@ def _agent_contracts(repo_root: Path) -> tuple[AgentContract, ...]:
                     False,
                     ("last_success_at", "generated_at"),
                 ),
+                ArtifactContract(
+                    "paper_runtime_pid_metadata",
+                    str(
+                        root
+                        / "outputs"
+                        / "probationary_pattern_engine"
+                        / "paper_session"
+                        / "runtime"
+                        / "probationary_paper.pid.json"
+                    ),
+                    180.0,
+                    False,
+                    ("generated_at", "launch_started_at"),
+                ),
                 ArtifactContract("canonical_readiness", str(root / DEFAULT_CANONICAL_READINESS_ARTIFACT), 180.0, True),
             ),
             required=True,

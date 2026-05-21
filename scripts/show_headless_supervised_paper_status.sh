@@ -15,6 +15,9 @@ DEFAULT_CANONICAL_READINESS_SUMMARY_FILE="${DEFAULT_RUNTIME_DIR}/latest_canonica
 DEFAULT_MAINTENANCE_SUPERVISOR_FILE="${DEFAULT_RUNTIME_DIR}/latest_maintenance_supervisor_decision.json"
 DEFAULT_MAINTENANCE_SUPERVISOR_SUMMARY_FILE="${DEFAULT_RUNTIME_DIR}/latest_maintenance_supervisor_summary.json"
 DEFAULT_PAPER_RUNTIME_TRUTH_FILE="${REPO_ROOT}/outputs/probationary_pattern_engine/paper_session/runtime/paper_runtime_truth.json"
+DEFAULT_PAPER_PID_METADATA_FILE="${REPO_ROOT}/outputs/probationary_pattern_engine/paper_session/runtime/probationary_paper.pid.json"
+DEFAULT_PAPER_CONFIG_IN_FORCE_FILE="${REPO_ROOT}/outputs/probationary_pattern_engine/paper_session/runtime/paper_config_in_force.json"
+DEFAULT_PAPER_OPERATOR_STATUS_FILE="${REPO_ROOT}/outputs/probationary_pattern_engine/paper_session/operator_status.json"
 DEFAULT_STARTUP_FILE="${REPO_ROOT}/outputs/operator_dashboard/startup_control_plane_snapshot.json"
 DEFAULT_OPERABILITY_FILE="${REPO_ROOT}/outputs/operator_dashboard/supervised_paper_operability_snapshot.json"
 DEFAULT_INFO_FILE="${DEFAULT_RUNTIME_DIR}/operator_dashboard.json"
@@ -410,6 +413,114 @@ status_path.write_text(json.dumps(status, indent=2, sort_keys=True) + "\n", enco
 PY
 }
 
+merge_paper_runtime_generation_status() {
+  "${PYTHON_BIN}" - <<'PY' "${STATUS_FILE}" "${DEFAULT_PAPER_PID_METADATA_FILE}" "${DEFAULT_PAPER_RUNTIME_TRUTH_FILE}" "${DEFAULT_PAPER_CONFIG_IN_FORCE_FILE}" "${DEFAULT_PAPER_OPERATOR_STATUS_FILE}" "${REPO_ROOT}"
+import json
+import os
+import subprocess
+import sys
+from datetime import datetime, timezone
+from pathlib import Path
+
+from mgc_v05l.execution_core.track_b_runtime_truth_contract import (
+    classify_pid_metadata,
+    runtime_generation_mismatches,
+)
+
+status_path = Path(sys.argv[1])
+metadata_path = Path(sys.argv[2])
+truth_path = Path(sys.argv[3])
+config_path = Path(sys.argv[4])
+operator_path = Path(sys.argv[5])
+expected_root = str(Path(sys.argv[6]).resolve())
+
+def read_json(path: Path) -> dict:
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+    return payload if isinstance(payload, dict) else {}
+
+def process_probe(pid: object) -> dict:
+    try:
+        pid_int = int(pid)
+    except (TypeError, ValueError):
+        return {"running": False, "zombie": False, "cwd": None, "command": ""}
+    try:
+        os.kill(pid_int, 0)
+        running = True
+    except PermissionError:
+        running = True
+    except OSError:
+        running = False
+    command = ""
+    stat = ""
+    cwd = None
+    if running:
+        try:
+            proc = subprocess.run(["ps", "-p", str(pid_int), "-o", "stat=", "-o", "command="], check=False, capture_output=True, text=True, timeout=2)
+            line = proc.stdout.strip()
+            if line:
+                parts = line.split(maxsplit=1)
+                stat = parts[0]
+                command = parts[1] if len(parts) > 1 else ""
+        except (OSError, subprocess.SubprocessError):
+            pass
+        try:
+            proc = subprocess.run(["lsof", "-a", "-p", str(pid_int), "-d", "cwd", "-Fn"], check=False, capture_output=True, text=True, timeout=2)
+            rows = [row[1:] for row in proc.stdout.splitlines() if row.startswith("n")]
+            cwd = str(Path(rows[-1]).resolve()) if rows else None
+        except (OSError, subprocess.SubprocessError):
+            cwd = None
+    return {"running": running, "zombie": stat.startswith("Z"), "cwd": cwd, "command": command}
+
+try:
+    status = json.loads(status_path.read_text(encoding="utf-8"))
+except (OSError, json.JSONDecodeError):
+    status = {}
+
+pid_metadata = read_json(metadata_path)
+runtime_truth = read_json(truth_path)
+config_in_force = read_json(config_path)
+operator_status = read_json(operator_path)
+probe = process_probe(pid_metadata.get("pid"))
+metadata_state = classify_pid_metadata(
+    pid_metadata,
+    now=datetime.now(timezone.utc),
+    freshness_ttl_seconds=float(pid_metadata.get("freshness_ttl_seconds") or 180.0),
+    process_probe=probe,
+    expected_root=expected_root,
+)
+mismatches = runtime_generation_mismatches(
+    pid_metadata=pid_metadata,
+    runtime_truth=runtime_truth,
+    config_in_force=config_in_force,
+    operator_status=operator_status,
+)
+duplicate_writer_detected = bool(
+    (runtime_truth.get("duplicate_writer_detection") or {}).get("duplicate_writer_detected")
+    or len({str(row.get("runtime_instance_id")) for row in (pid_metadata, runtime_truth, config_in_force, operator_status) if row.get("runtime_instance_id")}) > 1
+)
+
+status["paper_runtime_generation_evidence_only"] = True
+status["paper_runtime_pid_metadata_artifact"] = str(metadata_path)
+status["paper_runtime_pid_metadata_present"] = bool(pid_metadata)
+status["paper_runtime_pid_metadata"] = pid_metadata
+status["paper_runtime_pid_metadata_state"] = metadata_state
+status["paper_runtime_pid_metadata_process_probe"] = probe
+status["paper_runtime_generation_mismatches"] = list(mismatches)
+status["paper_runtime_generation_duplicate_writer_state"] = (
+    "DUPLICATE_WRITER_DETECTED" if duplicate_writer_detected else "NO_DUPLICATE_WRITER_EVIDENCE"
+)
+status["paper_runtime_generation_runtime_instance_id"] = runtime_truth.get("runtime_instance_id") or pid_metadata.get("runtime_instance_id")
+status["paper_runtime_generation_restart_generation"] = runtime_truth.get("restart_generation") or pid_metadata.get("restart_generation")
+status["paper_only"] = True
+status["live_money_eligible"] = False
+
+status_path.write_text(json.dumps(status, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+PY
+}
+
 canonical_readiness_exit_for_classification() {
   case "$1" in
     READY_SUBMIT_CAPABLE|READY_OBSERVATION_ONLY)
@@ -505,6 +616,7 @@ fi
 merge_canonical_readiness_status
 merge_maintenance_supervisor_status
 merge_paper_runtime_truth_status
+merge_paper_runtime_generation_status
 cat "${STATUS_FILE}"
 canonical_state="$(canonical_readiness_classification)"
 canonical_readiness_exit_for_classification "${canonical_state}"

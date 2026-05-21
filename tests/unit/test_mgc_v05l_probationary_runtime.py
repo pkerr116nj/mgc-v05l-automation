@@ -49,6 +49,7 @@ from mgc_v05l.app.probationary_runtime import (
     _build_probationary_paper_soak_validation_runtime,
     _build_probationary_paper_soak_validation_settings,
     _build_probationary_paper_runtime_truth,
+    _paper_runtime_instance_id,
     build_probationary_paper_readiness,
     build_probationary_paper_runner,
     _build_exit_parity_summary,
@@ -170,6 +171,11 @@ def test_paper_runtime_truth_artifact_schema_contains_operational_fields(tmp_pat
     assert payload["submit_authority"] is False
     assert payload["readiness_authority"] is False
     assert payload["restart_authority"] is False
+    metadata = json.loads((runtime_dir / "probationary_paper.pid.json").read_text(encoding="utf-8"))
+    assert metadata["runtime_instance_id"] == "track-b-paper-runtime-test"
+    assert metadata["restart_generation"] == payload["restart_generation"]
+    assert metadata["pid"] == payload["producer_pid"]
+    assert metadata["submit_authority"] is False
 
 
 def test_paper_runtime_truth_builder_represents_duplicate_writer_indicator(tmp_path: Path) -> None:
@@ -191,6 +197,41 @@ def test_paper_runtime_truth_builder_represents_duplicate_writer_indicator(tmp_p
     assert payload["writer_authority"] == "DUPLICATE_WRITER_DETECTED"
     assert payload["duplicate_writer_detection"]["duplicate_writer_detected"] is True
     assert payload["duplicate_writer_detection"]["duplicate_runtime_submitter_count"] == 2
+
+
+def test_paper_runtime_generation_env_is_reused_in_truth_and_metadata(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    metadata_path = tmp_path / "paper_session" / "runtime" / "probationary_paper.pid.json"
+    monkeypatch.setenv("MGC_TRACK_B_RUNTIME_INSTANCE_ID", "runtime-from-launcher")
+    monkeypatch.setenv("MGC_TRACK_B_PAPER_RUNTIME_RESTART_GENERATION", "42")
+    monkeypatch.setenv("MGC_TRACK_B_PAPER_PID_METADATA_FILE", str(metadata_path))
+    monkeypatch.setenv("MGC_TRACK_B_PAPER_LAUNCH_STARTED_AT", "2026-05-21T11:59:00Z")
+    monkeypatch.setenv("MGC_TRACK_B_PAPER_LAUNCHER_PID", "321")
+    monkeypatch.setenv("MGC_TRACK_B_EXPECTED_PROJECT_ROOT", "/Users/patrick/Dev/MGC-v05l-automation")
+    monkeypatch.setenv("MGC_TRACK_B_PAPER_CONFIG_FINGERPRINT", "sha256:launcher")
+    settings = SimpleNamespace(
+        probationary_artifacts_path=tmp_path / "paper_session",
+        probationary_paper_execution_test_mule_enabled=False,
+    )
+    started_at = datetime(2026, 5, 21, 12, 0, tzinfo=timezone.utc)
+
+    assert _paper_runtime_instance_id(started_at=started_at) == "runtime-from-launcher"
+    path = _write_probationary_paper_runtime_truth(
+        settings=settings,  # type: ignore[arg-type]
+        lanes=(),
+        runtime_instance_id="runtime-from-launcher",
+        runtime_started_at=started_at,
+        lane_count=0,
+    )
+
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+    assert payload["runtime_instance_id"] == "runtime-from-launcher"
+    assert payload["restart_generation"] == 42
+    assert payload["launch_started_at"] == "2026-05-21T11:59:00Z"
+    assert payload["launcher_pid"] == 321
+    assert metadata["runtime_instance_id"] == "runtime-from-launcher"
+    assert metadata["restart_generation"] == 42
+    assert metadata["launcher_config_fingerprint"] == "sha256:launcher"
 
 
 def _research_bar_1m(index: int, *, instrument: str = "GC", close: str = "100") -> ResearchBar:
