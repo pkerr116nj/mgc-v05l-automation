@@ -9733,6 +9733,81 @@ def test_paper_runtime_recovery_success_clears_stopped_runtime_surface(
     assert second_payload["restart_suppressed"] is False
 
 
+def test_paper_runtime_recovery_running_state_prunes_stale_command_output(tmp_path: Path) -> None:
+    service = OperatorDashboardService(tmp_path)
+    stale_output = (
+        "Launching probationary paper soak with repo bootstrap.\n"
+        "Schwab config: /Users/patrick/Documents/MGC-v05l-automation/config/schwab.local.json\n"
+        "PID file: /Users/patrick/Documents/MGC-v05l-automation/outputs/probationary_pattern_engine/paper_session/runtime/probationary_paper.pid"
+    )
+    service._write_paper_runtime_recovery_state(
+        {
+            "status": "AUTO_RESTART_SUPPRESSED",
+            "attempted_at": "2026-05-21T05:29:11+00:00",
+            "succeeded_at": "2026-05-21T05:29:11+00:00",
+            "last_restart_result": "SUPPRESSED",
+            "output": stale_output,
+        }
+    )
+
+    payload, refreshed_paper, result = service._paper_runtime_recovery_payload(
+        paper={
+            "running": True,
+            "readiness": {"runtime_phase": "RUNNING"},
+            "entry_eligibility": {},
+            "operator_state": {},
+            "status": {"session_date": "2026-05-21"},
+            "non_approved_lanes": {"rows": []},
+        },
+        auth_status={"runtime_ready": True},
+        carry_forward={"active": False},
+        pre_session_review={"required": False, "completed": True},
+        closeout_state={"unresolved_open_intents": 0},
+    )
+
+    persisted = json.loads(service._paper_runtime_recovery_path.read_text(encoding="utf-8"))
+    assert service._paper_runtime_recovery_path.name == "paper_runtime_recovery.json"
+    assert payload["status"] == "RUNNING"
+    assert payload["operator_message"] == "Paper runtime is active."
+    assert payload["manual_action_required"] is False
+    assert refreshed_paper is None
+    assert result is None
+    assert "output" not in payload
+    assert "latest_command_output" not in payload
+    assert "output" not in persisted
+    assert "latest_command_output" not in persisted
+    assert "/Users/patrick/Documents/" not in json.dumps(persisted)
+
+
+def test_paper_runtime_recovery_ignores_numbered_legacy_copies(tmp_path: Path) -> None:
+    service = OperatorDashboardService(tmp_path)
+    service._write_paper_runtime_recovery_state(
+        {
+            "status": "RUNNING",
+            "operator_message": "Paper runtime is active.",
+            "manual_action_required": False,
+        }
+    )
+    legacy_copy = service._dashboard_artifacts_dir / "paper_runtime_recovery 2.json"
+    legacy_copy.write_text(
+        json.dumps(
+            {
+                "status": "STOPPED_MANUAL_REQUIRED",
+                "operator_message": "Legacy copy should not be authoritative.",
+                "manual_action_required": True,
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    payload = service._paper_runtime_recovery_state()
+
+    assert service._paper_runtime_recovery_path == service._dashboard_artifacts_dir / "paper_runtime_recovery.json"
+    assert payload["status"] == "RUNNING"
+    assert payload["manual_action_required"] is False
+
+
 def test_restart_paper_with_temp_paper_ignores_missing_pid_and_surfaces_auth_blocker(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

@@ -14845,7 +14845,7 @@ class OperatorDashboardService:
         attempts_used = len(attempts_in_window)
         attempts_max = int(policy["max_auto_restarts_per_window"])
         attempts_remaining = max(attempts_max - attempts_used, 0)
-        return {
+        payload = {
             "status": status,
             "supervisor_status": status,
             "reason_code": reason_code,
@@ -14859,7 +14859,6 @@ class OperatorDashboardService:
             "attempted_at": attempted_at,
             "succeeded_at": succeeded_at,
             "failed_at": failed_at,
-            "output": output,
             "last_runtime_stop_detected_at": last_runtime_stop_detected_at,
             "last_restart_attempt_at": attempted_at,
             "last_restart_result": last_restart_result,
@@ -14881,6 +14880,10 @@ class OperatorDashboardService:
             "supervisor_updated_at": now.isoformat(),
             "recent_events": recent_events,
         }
+        output_text = str(output or "").strip()
+        if output_text:
+            payload["latest_command_output"] = output_text
+        return payload
 
     def _paper_runtime_recovery_snapshot_context(
         self,
@@ -14926,7 +14929,7 @@ class OperatorDashboardService:
             attempted_at=attempted_at or current_state.get("attempted_at"),
             succeeded_at=current_state.get("succeeded_at"),
             failed_at=attempted_at if status in {"AUTO_RESTART_FAILED", "AUTO_RESTART_SUPPRESSED"} else current_state.get("failed_at"),
-            output=output or current_state.get("output"),
+            output=output,
             last_runtime_stop_detected_at=current_state.get("last_runtime_stop_detected_at"),
             last_restart_result=current_state.get("last_restart_result"),
             restart_attempt_history=list(current_state.get("restart_attempt_history") or []),
@@ -15029,7 +15032,7 @@ class OperatorDashboardService:
                 attempted_at=current_state.get("attempted_at"),
                 succeeded_at=current_state.get("succeeded_at") or current_state.get("attempted_at"),
                 failed_at=None,
-                output=current_state.get("output"),
+                output=None,
                 last_runtime_stop_detected_at=None,
                 last_restart_result="SUCCEEDED" if recent_success else last_restart_result,
                 restart_attempt_history=restart_attempt_history,
@@ -15055,7 +15058,7 @@ class OperatorDashboardService:
                 attempted_at=current_state.get("attempted_at"),
                 succeeded_at=current_state.get("succeeded_at"),
                 failed_at=current_state.get("failed_at"),
-                output=current_state.get("output"),
+                output=None,
                 last_runtime_stop_detected_at=last_runtime_stop_detected_at,
                 last_restart_result=last_restart_result,
                 restart_attempt_history=restart_attempt_history,
@@ -15188,7 +15191,7 @@ class OperatorDashboardService:
                     attempted_at=current_state.get("attempted_at"),
                     succeeded_at=current_state.get("succeeded_at"),
                     failed_at=current_state.get("failed_at"),
-                    output=current_state.get("output"),
+                    output=None,
                     last_runtime_stop_detected_at=last_runtime_stop_detected_at,
                     last_restart_result=last_restart_result,
                     restart_attempt_history=restart_attempt_history,
@@ -15216,7 +15219,7 @@ class OperatorDashboardService:
                     attempted_at=current_state.get("attempted_at"),
                     succeeded_at=current_state.get("succeeded_at"),
                     failed_at=current_state.get("failed_at"),
-                    output=current_state.get("output"),
+                    output=None,
                     last_runtime_stop_detected_at=last_runtime_stop_detected_at,
                     last_restart_result=last_restart_result,
                     restart_attempt_history=restart_attempt_history,
@@ -15275,7 +15278,7 @@ class OperatorDashboardService:
                 attempted_at=current_state.get("attempted_at"),
                 succeeded_at=current_state.get("succeeded_at"),
                 failed_at=current_state.get("failed_at"),
-                output=current_state.get("output"),
+                output=None,
                 last_runtime_stop_detected_at=last_runtime_stop_detected_at,
                 last_restart_result=last_restart_result or "ATTEMPTED",
                 restart_attempt_history=restart_attempt_history,
@@ -15301,7 +15304,7 @@ class OperatorDashboardService:
                 attempted_at=current_state.get("attempted_at"),
                 succeeded_at=current_state.get("succeeded_at"),
                 failed_at=current_state.get("failed_at"),
-                output=current_state.get("output"),
+                output=None,
                 last_runtime_stop_detected_at=last_runtime_stop_detected_at,
                 last_restart_result=last_restart_result,
                 restart_attempt_history=restart_attempt_history,
