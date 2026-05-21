@@ -1,0 +1,608 @@
+"""Read-only Track B PAPER self-healing health contract.
+
+This first slice defines the supervised agents and classifies whether a future
+self-healing supervisor may even consider restart actions.  It never restarts a
+process, touches broker/order APIs, mutates lifecycle, or grants live-money
+eligibility.
+"""
+
+from __future__ import annotations
+
+import json
+from dataclasses import dataclass
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any, Callable, Mapping, Sequence
+
+from mgc_v05l.execution_core.track_b_readiness_authority import (
+    PHASE1_RECONCILIATION_ARTIFACT,
+    RECONCILED_CLASSIFICATION,
+)
+from mgc_v05l.execution_core.track_b_readiness_state import (
+    DEFAULT_BROKER_TRUTH_LEASE_ARTIFACT,
+    DEFAULT_CANONICAL_READINESS_ARTIFACT,
+    DEFAULT_TRACK_B_EXPECTED_ACTIVE_ROOT,
+)
+
+DEFAULT_SELF_HEALING_HEALTH_ARTIFACT = (
+    Path("outputs") / "operator_dashboard" / "runtime" / "latest_track_b_self_healing_health.json"
+)
+
+SELF_HEALING_CLASSIFICATIONS = {
+    "SELF_HEALING_READY",
+    "DEGRADED_RECOVERABLE",
+    "AUTO_RESTART_ELIGIBLE",
+    "AUTO_RESTART_BLOCKED",
+    "OPERATOR_REQUIRED",
+    "UNSAFE_BROKER_STATE",
+}
+
+
+@dataclass(frozen=True)
+class ArtifactContract:
+    label: str
+    path: str
+    freshness_ttl_seconds: float
+    required: bool = True
+    timestamp_fields: tuple[str, ...] = ("generated_at",)
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "label": self.label,
+            "path": self.path,
+            "freshness_ttl_seconds": self.freshness_ttl_seconds,
+            "required": self.required,
+            "timestamp_fields": self.timestamp_fields,
+        }
+
+
+@dataclass(frozen=True)
+class AgentContract:
+    agent_id: str
+    display_name: str
+    expected_command_fragments: tuple[str, ...]
+    pid_paths: tuple[str, ...]
+    heartbeat_artifacts: tuple[ArtifactContract, ...]
+    status_artifacts: tuple[ArtifactContract, ...]
+    required: bool
+    restart_eligible: bool
+    restart_command: str | None
+    restart_blockers: tuple[str, ...]
+    operator_required_states: tuple[str, ...]
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "agent_id": self.agent_id,
+            "display_name": self.display_name,
+            "expected_command_fragments": self.expected_command_fragments,
+            "pid_paths": self.pid_paths,
+            "heartbeat_artifacts": tuple(item.as_dict() for item in self.heartbeat_artifacts),
+            "status_artifacts": tuple(item.as_dict() for item in self.status_artifacts),
+            "required": self.required,
+            "restart_eligible": self.restart_eligible,
+            "restart_command": self.restart_command,
+            "restart_blockers": self.restart_blockers,
+            "operator_required_states": self.operator_required_states,
+        }
+
+
+def build_track_b_self_healing_agent_registry(*, repo_root: Path | None = None) -> tuple[dict[str, Any], ...]:
+    """Return the static Track B PAPER health contract registry."""
+
+    root = (repo_root or DEFAULT_TRACK_B_EXPECTED_ACTIVE_ROOT).expanduser()
+    return tuple(contract.as_dict() for contract in _agent_contracts(root))
+
+
+def build_track_b_self_healing_health(
+    *,
+    repo_root: Path,
+    expected_root: Path | None = None,
+    now: datetime | None = None,
+    process_probe: Callable[[int], Mapping[str, Any]] | None = None,
+) -> dict[str, Any]:
+    """Read local artifacts/PID files and classify self-healing readiness."""
+
+    repo_root = repo_root.expanduser().resolve()
+    expected_root = (expected_root or DEFAULT_TRACK_B_EXPECTED_ACTIVE_ROOT).expanduser().resolve()
+    current = _ensure_utc(now or datetime.now(timezone.utc))
+    contracts = _agent_contracts(repo_root)
+    agent_inputs: dict[str, Any] = {}
+    for contract in contracts:
+        agent_inputs[contract.agent_id] = _read_agent_state(
+            contract=contract,
+            repo_root=repo_root,
+            expected_root=expected_root,
+            now=current,
+            process_probe=process_probe,
+        )
+    safety = _read_safety_state(repo_root)
+    return classify_track_b_self_healing_health(
+        {
+            "generated_at": current.isoformat(),
+            "expected_root": str(expected_root),
+            "agents": agent_inputs,
+            "broker_safety": safety,
+        }
+    )
+
+
+def classify_track_b_self_healing_health(inputs: Mapping[str, Any]) -> dict[str, Any]:
+    """Pure health classifier for Track B self-healing supervision."""
+
+    generated_at = str(inputs.get("generated_at") or datetime.now(timezone.utc).isoformat())
+    expected_root = str(inputs.get("expected_root") or DEFAULT_TRACK_B_EXPECTED_ACTIVE_ROOT)
+    registry_by_id = {contract.agent_id: contract for contract in _agent_contracts(Path(expected_root))}
+    agents = _mapping(inputs.get("agents"))
+    broker_safety = _mapping(inputs.get("broker_safety"))
+
+    blockers: list[str] = []
+    warnings: list[str] = []
+    restart_candidates: list[str] = []
+    operator_required_agents: list[str] = []
+    agent_results: dict[str, Any] = {}
+
+    unsafe_broker_blockers = _broker_safety_blockers(broker_safety)
+    for blocker in unsafe_broker_blockers:
+        blockers.append(blocker)
+
+    for agent_id, contract in registry_by_id.items():
+        supplied = _mapping(agents.get(agent_id))
+        result = _classify_agent(contract=contract, supplied=supplied, expected_root=expected_root)
+        agent_results[agent_id] = result
+        blockers.extend(result["blockers"])
+        warnings.extend(result["warnings"])
+        if result["operator_required"]:
+            operator_required_agents.append(agent_id)
+        if result["restart_candidate"]:
+            restart_candidates.append(agent_id)
+
+    duplicate_submitters = _int(broker_safety.get("duplicate_conflicting_runtime_count"))
+    if duplicate_submitters:
+        blockers.append("duplicate_conflicting_runtimes")
+
+    live_money_eligible = _bool(broker_safety.get("live_money_eligible")) or any(
+        _bool(_mapping(agent).get("live_money_eligible")) for agent in agents.values()
+    )
+    if live_money_eligible:
+        blockers.append("live_money_eligible_true")
+
+    wrong_root = any("wrong_root" in result["blockers"] for result in agent_results.values())
+    restart_blocked = bool(unsafe_broker_blockers or live_money_eligible or wrong_root or duplicate_submitters)
+    required_unhealthy = any(
+        result["required"] and result["health_state"] != "HEALTHY" for result in agent_results.values()
+    )
+
+    if unsafe_broker_blockers:
+        classification = "UNSAFE_BROKER_STATE"
+    elif operator_required_agents:
+        classification = "OPERATOR_REQUIRED"
+    elif restart_candidates and not restart_blocked:
+        classification = "AUTO_RESTART_ELIGIBLE"
+    elif restart_candidates and restart_blocked:
+        classification = "AUTO_RESTART_BLOCKED"
+    elif required_unhealthy:
+        classification = "DEGRADED_RECOVERABLE"
+    elif blockers:
+        classification = "AUTO_RESTART_BLOCKED"
+    else:
+        classification = "SELF_HEALING_READY"
+
+    auto_restart_allowed = classification == "AUTO_RESTART_ELIGIBLE"
+    return {
+        "schema_version": "track_b_self_healing_health_v1",
+        "generated_at": generated_at,
+        "classification": classification,
+        "auto_restart_allowed": auto_restart_allowed,
+        "restart_candidates": tuple(restart_candidates),
+        "operator_required_agents": tuple(operator_required_agents),
+        "blockers": tuple(_dedupe(blockers)),
+        "warnings": tuple(_dedupe(warnings)),
+        "live_money_eligible": live_money_eligible,
+        "expected_root": expected_root,
+        "health_contract_artifact_path": str(DEFAULT_SELF_HEALING_HEALTH_ARTIFACT),
+        "registry": tuple(contract.as_dict() for contract in registry_by_id.values()),
+        "agents": agent_results,
+        "broker_safety": dict(broker_safety),
+    }
+
+
+def write_track_b_self_healing_health(*, output_path: Path, health: Mapping[str, Any]) -> None:
+    """Write a read-only self-healing health artifact."""
+
+    path = Path(output_path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(f".{path.name}.tmp")
+    tmp.write_text(json.dumps(dict(health), indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    tmp.replace(path)
+
+
+def _agent_contracts(repo_root: Path) -> tuple[AgentContract, ...]:
+    root = repo_root.expanduser()
+    return (
+        AgentContract(
+            agent_id="phase1_candle_supervisor",
+            display_name="Phase-1 candle supervisor/listener",
+            expected_command_fragments=("mgc_v05l.execution_core.phase1_databento_live_runtime_candles", "--mode", "service"),
+            pid_paths=(
+                str(root / "var" / "phase1_databento_live_candles_service.pid"),
+                str(root / "var" / "phase1_databento_live_candles_child.pid"),
+            ),
+            heartbeat_artifacts=(),
+            status_artifacts=(
+                ArtifactContract(
+                    "phase1_listener_status",
+                    str(
+                        root
+                        / "outputs"
+                        / "reports"
+                        / "phase1_databento_live_runtime_candles"
+                        / "latest_phase1_databento_live_listener_status.json"
+                    ),
+                    180.0,
+                    True,
+                    ("latest_record_at", "generated_at"),
+                ),
+                ArtifactContract(
+                    "phase1_supervisor_status",
+                    str(
+                        root
+                        / "outputs"
+                        / "reports"
+                        / "phase1_databento_live_runtime_candles"
+                        / "latest_phase1_databento_live_supervisor_status.json"
+                    ),
+                    180.0,
+                    True,
+                ),
+            ),
+            required=True,
+            restart_eligible=True,
+            restart_command="bash scripts/start-phase1-databento-live-candles",
+            restart_blockers=_global_restart_blockers(),
+            operator_required_states=("PHASE1_DATABENTO_ENV_MISSING", "PHASE1_DATABENTO_AUTH_FAILED"),
+        ),
+        AgentContract(
+            agent_id="broker_truth_refresher",
+            display_name="Broker truth refresher",
+            expected_command_fragments=("mgc_v05l.app.ibkr_broker_truth_refresher", "--service", "--read-only"),
+            pid_paths=(str(root / "var" / "track_b_broker_truth_refresh_service.pid"),),
+            heartbeat_artifacts=(),
+            status_artifacts=(
+                ArtifactContract(
+                    "broker_truth_status",
+                    str(root / "outputs" / "reports" / "ibkr_broker_truth_refresh" / "latest_broker_truth_refresh_status.json"),
+                    150.0,
+                    True,
+                    ("generated_at", "last_success_at", "completed_at"),
+                ),
+                ArtifactContract("broker_truth_lease", str(root / DEFAULT_BROKER_TRUTH_LEASE_ARTIFACT), 150.0, True),
+            ),
+            required=True,
+            restart_eligible=True,
+            restart_command="bash scripts/start-track-b-broker-truth-refresh",
+            restart_blockers=_global_restart_blockers(),
+            operator_required_states=("BROKER_TRUTH_REFRESH_OPERATOR_REQUIRED", "BROKER_TRUTH_REFRESH_TWS_REVIEW_REQUIRED"),
+        ),
+        AgentContract(
+            agent_id="operator_readiness_refresher",
+            display_name="Operator readiness refresher",
+            expected_command_fragments=("mgc_v05l.app.track_b_operator_readiness_refresher", "--service"),
+            pid_paths=(
+                str(root / "var" / "track_b_operator_readiness_refresh_service.pid"),
+                str(root / "var" / "track_b_operator_readiness_refresh_child.pid"),
+            ),
+            heartbeat_artifacts=(
+                ArtifactContract(
+                    "operator_readiness_heartbeat",
+                    str(root / "var" / "track_b_operator_readiness_refresh_heartbeat.json"),
+                    180.0,
+                    True,
+                ),
+            ),
+            status_artifacts=(
+                ArtifactContract(
+                    "operator_readiness_status",
+                    str(
+                        root
+                        / "outputs"
+                        / "reports"
+                        / "track_b_operator_readiness_refresher"
+                        / "latest_track_b_operator_readiness_refresher_status.json"
+                    ),
+                    180.0,
+                    True,
+                    ("generated_at", "last_refresh_finished_at"),
+                ),
+                ArtifactContract("canonical_readiness", str(root / DEFAULT_CANONICAL_READINESS_ARTIFACT), 180.0, True),
+            ),
+            required=True,
+            restart_eligible=True,
+            restart_command="bash scripts/start-track-b-operator-readiness-refresh",
+            restart_blockers=_global_restart_blockers(),
+            operator_required_states=("TRACK_B_OPERATOR_READINESS_REFRESH_OPERATOR_REQUIRED",),
+        ),
+        AgentContract(
+            agent_id="paper_runtime",
+            display_name="Track B PAPER runtime",
+            expected_command_fragments=("mgc_v05l.app.main", "probationary-paper-soak"),
+            pid_paths=(str(root / "outputs" / "probationary_pattern_engine" / "paper_session" / "runtime" / "probationary_paper.pid"),),
+            heartbeat_artifacts=(),
+            status_artifacts=(
+                ArtifactContract(
+                    "operator_status",
+                    str(root / "outputs" / "probationary_pattern_engine" / "paper_session" / "operator_status.json"),
+                    180.0,
+                    True,
+                    ("generated_at", "updated_at"),
+                ),
+                ArtifactContract("canonical_readiness", str(root / DEFAULT_CANONICAL_READINESS_ARTIFACT), 180.0, True),
+            ),
+            required=True,
+            restart_eligible=False,
+            restart_command=None,
+            restart_blockers=(
+                *_global_restart_blockers(),
+                "runtime_restart_requires_explicit_operator_approval",
+            ),
+            operator_required_states=("OPEN_MANAGED_POSITION_PRESENT", "RUNTIME_RESTART_OPERATOR_APPROVAL_REQUIRED"),
+        ),
+        AgentContract(
+            agent_id="operator_dashboard_backend",
+            display_name="Operator dashboard/backend",
+            expected_command_fragments=("mgc_v05l.app.operator_dashboard",),
+            pid_paths=(str(root / "outputs" / "operator_dashboard" / "runtime" / "operator_dashboard.pid"),),
+            heartbeat_artifacts=(),
+            status_artifacts=(
+                ArtifactContract(
+                    "operator_dashboard_info",
+                    str(root / "outputs" / "operator_dashboard" / "runtime" / "operator_dashboard.json"),
+                    180.0,
+                    False,
+                    ("generated_at", "started_at"),
+                ),
+                ArtifactContract(
+                    "operator_dashboard_readiness",
+                    str(root / "outputs" / "operator_dashboard" / "runtime" / "operator_dashboard_readiness.json"),
+                    180.0,
+                    False,
+                ),
+            ),
+            required=False,
+            restart_eligible=True,
+            restart_command="bash scripts/run_operator_dashboard.sh",
+            restart_blockers=("wrong_root", "duplicate_conflicting_runtimes", "live_money_eligible_true"),
+            operator_required_states=("DASHBOARD_PORT_CONFLICT_OPERATOR_REQUIRED",),
+        ),
+    )
+
+
+def _global_restart_blockers() -> tuple[str, ...]:
+    return (
+        "unknown_open_orders",
+        "lifecycle_review_required",
+        "broker_reconciliation_mismatch",
+        "live_money_eligible_true",
+        "wrong_root",
+        "duplicate_conflicting_runtimes",
+    )
+
+
+def _read_agent_state(
+    *,
+    contract: AgentContract,
+    repo_root: Path,
+    expected_root: Path,
+    now: datetime,
+    process_probe: Callable[[int], Mapping[str, Any]] | None,
+) -> dict[str, Any]:
+    pid_rows = []
+    running = False
+    root_ok = True
+    command_ok = True
+    for pid_path in contract.pid_paths:
+        pid = _read_pid(Path(pid_path))
+        probe = _mapping(process_probe(pid)) if pid and process_probe else {}
+        if pid and probe:
+            running = running or _bool(probe.get("running"))
+            cwd = str(probe.get("cwd") or "")
+            command = str(probe.get("command") or "")
+            if cwd and Path(cwd).expanduser().resolve() != expected_root:
+                root_ok = False
+            if command and not all(fragment in command for fragment in contract.expected_command_fragments):
+                command_ok = False
+        pid_rows.append({"path": pid_path, "pid": pid, "probe": dict(probe)})
+    artifact_rows = [
+        _artifact_state(artifact, now=now) for artifact in (*contract.heartbeat_artifacts, *contract.status_artifacts)
+    ]
+    return {
+        "process_running": running,
+        "root_ok": root_ok,
+        "command_ok": command_ok,
+        "pid_files": pid_rows,
+        "artifacts": artifact_rows,
+        "classification": _first_payload_classification(artifact_rows),
+        "live_money_eligible": any(_bool(row.get("payload", {}).get("live_money_eligible")) for row in artifact_rows),
+    }
+
+
+def _read_safety_state(repo_root: Path) -> dict[str, Any]:
+    reconciliation = _read_json(repo_root / PHASE1_RECONCILIATION_ARTIFACT)
+    canonical = _read_json(repo_root / DEFAULT_CANONICAL_READINESS_ARTIFACT)
+    return {
+        "classification": reconciliation.get("classification"),
+        "broker_reconciled": reconciliation.get("broker_reconciled"),
+        "unknown_open_order_count": reconciliation.get("unknown_broker_open_order_count"),
+        "track_b_broker_open_order_count": reconciliation.get("track_b_broker_open_order_count"),
+        "review_required_count": reconciliation.get("review_required_count"),
+        "lifecycle_open_position_count": reconciliation.get("lifecycle_open_position_count"),
+        "live_money_eligible": _bool(reconciliation.get("live_money_eligible")) or _bool(canonical.get("live_money_eligible")),
+    }
+
+
+def _classify_agent(*, contract: AgentContract, supplied: Mapping[str, Any], expected_root: str) -> dict[str, Any]:
+    blockers: list[str] = []
+    warnings: list[str] = []
+    artifacts = tuple(_mapping(item) for item in supplied.get("artifacts") or ())
+    running = _bool(supplied.get("process_running") or supplied.get("running"))
+    root_ok = supplied.get("root_ok", supplied.get("root_match", True)) is not False
+    command_ok = supplied.get("command_ok", True) is not False
+    classification = str(supplied.get("classification") or supplied.get("state") or "").strip().upper()
+
+    if classification in contract.operator_required_states:
+        blockers.append(f"{contract.agent_id}_operator_required")
+    if not root_ok:
+        blockers.append("wrong_root")
+    if not command_ok:
+        blockers.append(f"{contract.agent_id}_command_mismatch")
+    if contract.required and not running:
+        blockers.append(f"{contract.agent_id}_not_running")
+    elif not contract.required and not running:
+        warnings.append(f"{contract.agent_id}_not_running_optional")
+
+    required_artifacts = [item for item in artifacts if item.get("required", True)]
+    stale_required = [str(item.get("label") or item.get("path")) for item in required_artifacts if item.get("fresh") is False]
+    missing_required = [str(item.get("label") or item.get("path")) for item in required_artifacts if item.get("present") is False]
+    for label in missing_required:
+        blockers.append(f"{contract.agent_id}_{label}_missing")
+    for label in stale_required:
+        blockers.append(f"{contract.agent_id}_{label}_stale")
+    for item in artifacts:
+        if not item.get("required", True) and item.get("present") is False:
+            warnings.append(f"{contract.agent_id}_{item.get('label')}_missing_optional")
+        elif not item.get("required", True) and item.get("fresh") is False:
+            warnings.append(f"{contract.agent_id}_{item.get('label')}_stale_optional")
+
+    unhealthy = bool(blockers)
+    restart_candidate = bool(unhealthy and contract.restart_eligible and contract.required)
+    operator_required = bool(classification in contract.operator_required_states or supplied.get("operator_required") is True)
+    if unhealthy and not contract.restart_eligible and contract.required:
+        blockers.append(f"{contract.agent_id}_restart_not_eligible")
+
+    return {
+        "agent_id": contract.agent_id,
+        "display_name": contract.display_name,
+        "required": contract.required,
+        "restart_eligible": contract.restart_eligible,
+        "restart_command": contract.restart_command,
+        "restart_blockers": contract.restart_blockers,
+        "health_state": "HEALTHY" if not unhealthy else "UNHEALTHY",
+        "process_running": running,
+        "root_ok": root_ok,
+        "expected_root": expected_root,
+        "command_ok": command_ok,
+        "classification": classification or None,
+        "restart_candidate": restart_candidate,
+        "operator_required": operator_required,
+        "blockers": tuple(_dedupe(blockers)),
+        "warnings": tuple(_dedupe(warnings)),
+        "artifacts": artifacts,
+    }
+
+
+def _broker_safety_blockers(safety: Mapping[str, Any]) -> list[str]:
+    blockers: list[str] = []
+    classification = str(safety.get("classification") or "").strip().upper()
+    if _int(safety.get("unknown_open_order_count")):
+        blockers.append("unknown_open_orders")
+    if _int(safety.get("review_required_count")):
+        blockers.append("lifecycle_review_required")
+    if classification and classification != RECONCILED_CLASSIFICATION:
+        blockers.append("broker_reconciliation_mismatch")
+    if safety.get("broker_reconciled") is False:
+        blockers.append("broker_reconciliation_mismatch")
+    if _int(safety.get("track_b_broker_open_order_count")) and classification != RECONCILED_CLASSIFICATION:
+        blockers.append("unknown_open_orders")
+    return _dedupe(blockers)
+
+
+def _artifact_state(contract: ArtifactContract, *, now: datetime) -> dict[str, Any]:
+    path = Path(contract.path)
+    payload = _read_json(path)
+    timestamp = None
+    timestamp_source = None
+    for field in contract.timestamp_fields:
+        timestamp = _parse_datetime(payload.get(field))
+        if timestamp is not None:
+            timestamp_source = field
+            break
+    age_seconds = None if timestamp is None else max((now - timestamp).total_seconds(), 0.0)
+    return {
+        "label": contract.label,
+        "path": str(path),
+        "present": bool(payload),
+        "required": contract.required,
+        "generated_at": timestamp.isoformat() if timestamp else None,
+        "timestamp_source": timestamp_source,
+        "age_seconds": age_seconds,
+        "freshness_ttl_seconds": contract.freshness_ttl_seconds,
+        "fresh": bool(payload and age_seconds is not None and age_seconds <= contract.freshness_ttl_seconds),
+        "payload": payload,
+    }
+
+
+def _first_payload_classification(artifact_rows: Sequence[Mapping[str, Any]]) -> str | None:
+    for row in artifact_rows:
+        payload = _mapping(row.get("payload"))
+        value = payload.get("classification") or payload.get("state")
+        if value:
+            return str(value)
+    return None
+
+
+def _read_pid(path: Path) -> int | None:
+    try:
+        text = path.read_text(encoding="utf-8").strip()
+    except OSError:
+        return None
+    try:
+        return int(text)
+    except ValueError:
+        return None
+
+
+def _read_json(path: Path) -> dict[str, Any]:
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+    return payload if isinstance(payload, dict) else {}
+
+
+def _parse_datetime(value: object) -> datetime | None:
+    text = str(value or "").strip()
+    if not text:
+        return None
+    try:
+        parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
+def _ensure_utc(value: datetime) -> datetime:
+    if value.tzinfo is None:
+        return value.replace(tzinfo=timezone.utc)
+    return value.astimezone(timezone.utc)
+
+
+def _mapping(value: Any) -> dict[str, Any]:
+    return dict(value) if isinstance(value, Mapping) else {}
+
+
+def _bool(value: object) -> bool:
+    if isinstance(value, str):
+        return value.strip().lower() in {"1", "true", "yes", "y", "on"}
+    return bool(value)
+
+
+def _int(value: object) -> int:
+    try:
+        return int(value or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
+def _dedupe(values: Sequence[str]) -> list[str]:
+    return list(dict.fromkeys(value for value in values if value))
