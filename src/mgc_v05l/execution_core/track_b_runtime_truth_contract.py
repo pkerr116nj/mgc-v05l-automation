@@ -50,6 +50,13 @@ LAUNCHCTL_NO_RUNTIME_JOB_EVIDENCE = "LAUNCHCTL_NO_RUNTIME_JOB_EVIDENCE"
 LAUNCHCTL_RUNTIME_JOB_ACCEPTED = "LAUNCHCTL_RUNTIME_JOB_ACCEPTED"
 LAUNCHCTL_STALE_RUNTIME_JOB_BLOCKED = "LAUNCHCTL_STALE_RUNTIME_JOB_BLOCKED"
 
+LAUNCHCTL_SUBMIT_ACCEPTED = "LAUNCHCTL_SUBMIT_ACCEPTED"
+LAUNCHCTL_SUBMIT_FAILED = "LAUNCHCTL_SUBMIT_FAILED"
+WRAPPER_PRE_EXEC_FAILURE = "WRAPPER_PRE_EXEC_FAILURE"
+RUNTIME_PID_AVAILABLE = "RUNTIME_PID_AVAILABLE"
+RUNTIME_PID_UNAVAILABLE_AFTER_LAUNCHCTL_SUBMIT = "RUNTIME_PID_UNAVAILABLE_AFTER_LAUNCHCTL_SUBMIT"
+PID_WRITE_PATH_MISMATCH = "PID_WRITE_PATH_MISMATCH"
+
 CONFIG_STACK_SAFE = "CONFIG_STACK_SAFE"
 CONFIG_STACK_UNSAFE = "CONFIG_STACK_UNSAFE"
 
@@ -343,6 +350,60 @@ def classify_launchctl_runtime_jobs(
         "expected_label": expected or None,
         "launch_allowed": classification != LAUNCHCTL_STALE_RUNTIME_JOB_BLOCKED,
         "blockers": ["stale_launchctl_runtime_job_loaded"] if stale_labels else [],
+    }
+
+
+def classify_launchctl_start_attempt(
+    *,
+    launchctl_exit_code: int | None,
+    pid_available: bool,
+    wrapper_status: Mapping[str, Any] | None = None,
+    expected_pid_file: str | None = None,
+) -> dict[str, Any]:
+    """Classify a launchctl-submitted PAPER runtime start attempt.
+
+    The launcher writes this as evidence only. It deliberately does not infer
+    submit readiness, restart authority, or broker state.
+    """
+
+    wrapper = wrapper_status or {}
+    wrapper_classification = str(wrapper.get("classification") or "")
+    observed_pid_file = str(wrapper.get("pid_file") or "").strip()
+    expected_pid = str(expected_pid_file or "").strip()
+    blockers: list[str] = []
+
+    if launchctl_exit_code is not None and int(launchctl_exit_code) != 0:
+        classification = LAUNCHCTL_SUBMIT_FAILED
+        blockers.append("launchctl_submit_failed")
+    elif wrapper_classification == WRAPPER_PRE_EXEC_FAILURE:
+        classification = WRAPPER_PRE_EXEC_FAILURE
+        blockers.append(str(wrapper.get("reason") or "wrapper_pre_exec_failure"))
+    elif expected_pid and observed_pid_file and observed_pid_file != expected_pid:
+        classification = PID_WRITE_PATH_MISMATCH
+        blockers.append("wrapper_pid_file_mismatch")
+    elif pid_available:
+        classification = RUNTIME_PID_AVAILABLE
+    elif launchctl_exit_code == 0:
+        classification = RUNTIME_PID_UNAVAILABLE_AFTER_LAUNCHCTL_SUBMIT
+        blockers.append("runtime_pid_unavailable_after_launchctl_submit")
+    else:
+        classification = RUNTIME_PID_UNAVAILABLE_AFTER_LAUNCHCTL_SUBMIT
+        blockers.append("runtime_pid_unavailable")
+
+    return {
+        "classification": classification,
+        "launchctl_exit_code": launchctl_exit_code,
+        "pid_available": bool(pid_available),
+        "wrapper_classification": wrapper_classification or None,
+        "expected_pid_file": expected_pid or None,
+        "observed_pid_file": observed_pid_file or None,
+        "paper_only": True,
+        "live_money_eligible": False,
+        "broker_mutation": False,
+        "submit_authority": False,
+        "readiness_authority": False,
+        "restart_authority": False,
+        "blockers": blockers,
     }
 
 

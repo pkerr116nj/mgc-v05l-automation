@@ -32,6 +32,7 @@ remove_runtime_launchctl_labels() {
 remove_runtime_launchctl_labels
 
 if [[ ! -f "${PID_FILE}" ]]; then
+  rm -f "${LAUNCHCTL_LABEL_FILE}"
   echo "No probationary paper PID file found at ${PID_FILE}."
   exit 1
 fi

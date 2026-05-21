@@ -6,6 +6,7 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parents[2]
 RUN_SCRIPT = REPO_ROOT / "scripts" / "run_headless_supervised_paper_service.sh"
 STATUS_SCRIPT = REPO_ROOT / "scripts" / "show_headless_supervised_paper_status.sh"
+STOP_PAPER_SCRIPT = REPO_ROOT / "scripts" / "stop_probationary_paper_soak.sh"
 OPERATOR_READINESS_STATUS_SCRIPT = REPO_ROOT / "scripts" / "status-track-b-operator-readiness-refresh"
 OPERATOR_READINESS_START_SCRIPT = REPO_ROOT / "scripts" / "start-track-b-operator-readiness-refresh"
 OPERATOR_READINESS_STOP_SCRIPT = REPO_ROOT / "scripts" / "stop-track-b-operator-readiness-refresh"
@@ -261,7 +262,9 @@ def test_launch_script_uses_launchctl_paper_runtime_contract_without_screen_fall
     assert "nohup /bin/bash \"${wrapper_path}\" >> \"${PAPER_LOG_FILE}\" 2>&1 &" not in launch_function
     assert "echo \"$!\" > \"${PAPER_WRAPPER_PID_FILE}\"" not in launch_function
     assert "launch_background_paper_runtime\n  return 0" in script
-    assert "launchctl submit -l \"${label}\" -- /bin/bash \"${wrapper_path}\"" in script
+    assert "launchctl submit -l \"${label}\" -- /bin/bash \"${wrapper_path}\" >\"${PAPER_LAUNCHCTL_STDOUT_FILE}\" 2>\"${PAPER_LAUNCHCTL_STDERR_FILE}\"" in script
+    assert "write_launchctl_runtime_status \"LAUNCHCTL_SUBMIT_ACCEPTED\"" in script
+    assert "write_launchctl_runtime_status \"LAUNCHCTL_SUBMIT_FAILED\"" in script
     assert launch_function.index("rm -f \"${PAPER_WRAPPER_PID_FILE}\"") < launch_function.index(
         "launchctl_submit_available"
     )
@@ -292,6 +295,8 @@ def test_launch_script_polls_for_late_post_start_runtime_pid() -> None:
     assert 'case "${rc}" in' in script
     assert "RUNTIME_PID_UNAVAILABLE: Paper runtime PID did not become available during ${phase} within ${timeout_seconds}s." in script
     assert 'wait_for_runtime_config_paths_match_request "post-start" "${POST_START_PID_WAIT_TIMEOUT_SECONDS}"' in script
+    assert "write_launchctl_runtime_status \"RUNTIME_PID_UNAVAILABLE_AFTER_LAUNCHCTL_SUBMIT\"" in script
+    assert "write_launchctl_runtime_status \"RUNTIME_PID_AVAILABLE\"" in script
     launch_flow = script[script.index("if ! start_paper_runtime") :]
     assert launch_flow.index("wait_for_runtime_config_paths_match_request \"post-start\"") < launch_flow.index(
         "start_dashboard_manager"
@@ -314,6 +319,27 @@ def test_launch_script_pid_polling_fails_closed_for_wrong_root_or_config() -> No
     assert "3)\n        return 3" in script
     assert "stop_paper_runtime_best_effort" in script
     assert script.index("Paper runtime root mismatch during {phase}") < script.index("missing = [path for path in requested")
+
+
+def test_launch_script_wrapper_writes_pre_exec_status_before_pid() -> None:
+    script = RUN_SCRIPT.read_text(encoding="utf-8")
+
+    wrapper = script[script.index("write_paper_runtime_wrapper()") : script.index("launch_background_paper_runtime()")]
+    assert "MGC_TRACK_B_PAPER_WRAPPER_STATUS_FILE" in wrapper
+    assert "write_wrapper_status \"WRAPPER_STARTED\"" in wrapper
+    assert "write_wrapper_status \"WRAPPER_PRE_EXEC_FAILURE\" \"source_commit_mismatch\"" in wrapper
+    assert "write_wrapper_status \"WRAPPER_EXECING_RUNTIME\"" in wrapper
+    assert wrapper.index("write_wrapper_status \"WRAPPER_STARTED\"") < wrapper.index("echo \"$$\" > \"$MGC_HEADLESS_PAPER_PID_FILE\"")
+
+
+def test_stop_script_clears_stale_launchctl_label_without_pid_file() -> None:
+    script = STOP_PAPER_SCRIPT.read_text(encoding="utf-8")
+
+    no_pid_branch = script[script.index("if [[ ! -f \"${PID_FILE}\" ]]") :]
+    assert "rm -f \"${LAUNCHCTL_LABEL_FILE}\"" in no_pid_branch
+    assert no_pid_branch.index("rm -f \"${LAUNCHCTL_LABEL_FILE}\"") < no_pid_branch.index(
+        "No probationary paper PID file found"
+    )
 
 
 def test_launch_script_post_start_guard_still_enforces_required_overlay_stack() -> None:

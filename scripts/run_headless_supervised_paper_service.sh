@@ -24,8 +24,12 @@ DEFAULT_PAPER_OPERATOR_STATUS_FILE="${REPO_ROOT}/outputs/probationary_pattern_en
 DEFAULT_PAPER_RECONCILIATION_FILE="${REPO_ROOT}/outputs/reports/track_b_paper_broker_reconciliation/latest_track_b_paper_broker_reconciliation.json"
 DEFAULT_PAPER_LAUNCH_GUARD_FILE="${DEFAULT_PAPER_PID_METADATA_FILE}.launch_guard.json"
 DEFAULT_PAPER_WRAPPER_PID_FILE="${REPO_ROOT}/outputs/probationary_pattern_engine/paper_session/runtime/probationary_paper.wrapper.pid"
+DEFAULT_PAPER_WRAPPER_STATUS_FILE="${DEFAULT_PAPER_PID_FILE}.wrapper_status.json"
 DEFAULT_PAPER_LOG_FILE="${REPO_ROOT}/outputs/probationary_pattern_engine/paper_session/runtime/probationary_paper.log"
 DEFAULT_PAPER_CONFIG_PATHS_FILE="${REPO_ROOT}/outputs/probationary_pattern_engine/paper_session/runtime/paper_runtime_config_paths.txt"
+DEFAULT_PAPER_RUNTIME_LAUNCH_STATUS_FILE="${REPO_ROOT}/outputs/probationary_pattern_engine/paper_session/runtime/probationary_paper_launch_status.json"
+DEFAULT_PAPER_LAUNCHCTL_STDOUT_FILE="${DEFAULT_PAPER_PID_FILE}.launchctl_submit.stdout"
+DEFAULT_PAPER_LAUNCHCTL_STDERR_FILE="${DEFAULT_PAPER_PID_FILE}.launchctl_submit.stderr"
 DEFAULT_DASHBOARD_URL="${MGC_OPERATOR_DASHBOARD_URL:-http://127.0.0.1:8790/}"
 SERVICE_HOST_AUTOSTART_BRIDGE_SUPERVISOR="${MGC_SERVICE_HOST_AUTOSTART_RESEARCH_RUNTIME_BRIDGE_SUPERVISOR:-1}"
 DEFAULT_HEADLESS_PAPER_CONFIG_PATHS=(
@@ -56,8 +60,12 @@ PAPER_OPERATOR_STATUS_FILE="${DEFAULT_PAPER_OPERATOR_STATUS_FILE}"
 PAPER_RECONCILIATION_FILE="${DEFAULT_PAPER_RECONCILIATION_FILE}"
 PAPER_LAUNCH_GUARD_FILE="${DEFAULT_PAPER_LAUNCH_GUARD_FILE}"
 PAPER_WRAPPER_PID_FILE="${DEFAULT_PAPER_WRAPPER_PID_FILE}"
+PAPER_WRAPPER_STATUS_FILE="${DEFAULT_PAPER_WRAPPER_STATUS_FILE}"
 PAPER_LOG_FILE="${DEFAULT_PAPER_LOG_FILE}"
 PAPER_CONFIG_PATHS_FILE="${DEFAULT_PAPER_CONFIG_PATHS_FILE}"
+PAPER_RUNTIME_LAUNCH_STATUS_FILE="${DEFAULT_PAPER_RUNTIME_LAUNCH_STATUS_FILE}"
+PAPER_LAUNCHCTL_STDOUT_FILE="${DEFAULT_PAPER_LAUNCHCTL_STDOUT_FILE}"
+PAPER_LAUNCHCTL_STDERR_FILE="${DEFAULT_PAPER_LAUNCHCTL_STDERR_FILE}"
 DASHBOARD_URL="${DEFAULT_DASHBOARD_URL}"
 START_PAPER=1
 START_DASHBOARD=1
@@ -807,6 +815,134 @@ tmp.replace(path)
 PY
 }
 
+write_launchctl_runtime_status() {
+  local classification="$1"
+  local launchctl_exit_code="${2:-}"
+  local pid_available="${3:-false}"
+  local detail="${4:-}"
+  local wrapper_path="${PAPER_PID_FILE}.runtime_wrapper.sh"
+  local label=""
+  if [[ -f "${PAPER_PID_FILE}.launchctl_label" ]]; then
+    label="$(<"${PAPER_PID_FILE}.launchctl_label")"
+  fi
+  "${PYTHON_BIN}" - <<'PY' \
+    "${PAPER_RUNTIME_LAUNCH_STATUS_FILE}" \
+    "${classification}" \
+    "${launchctl_exit_code}" \
+    "${pid_available}" \
+    "${detail}" \
+    "${label}" \
+    "${wrapper_path}" \
+    "${PAPER_PID_FILE}" \
+    "${PAPER_PID_METADATA_FILE}" \
+    "${PAPER_WRAPPER_STATUS_FILE}" \
+    "${PAPER_LAUNCHCTL_STDOUT_FILE}" \
+    "${PAPER_LAUNCHCTL_STDERR_FILE}" \
+    "${REPO_ROOT}" \
+    "${PAPER_RUNTIME_INSTANCE_ID:-}" \
+    "${PAPER_RUNTIME_RESTART_GENERATION:-}" \
+    "${PAPER_RUNTIME_LAUNCH_STARTED_AT:-}" \
+    "${PAPER_RUNTIME_EXPECTED_SOURCE_COMMIT:-}" \
+    "${PAPER_RUNTIME_CONFIG_FINGERPRINT:-}"
+import json
+import sys
+from datetime import datetime, timezone
+from pathlib import Path
+
+from mgc_v05l.execution_core.track_b_runtime_truth_contract import classify_launchctl_start_attempt
+
+(
+    status_path,
+    classification,
+    launchctl_exit_code_raw,
+    pid_available_raw,
+    detail,
+    label,
+    wrapper_path,
+    pid_file,
+    pid_metadata_file,
+    wrapper_status_file,
+    stdout_file,
+    stderr_file,
+    repo_root,
+    runtime_instance_id,
+    restart_generation_raw,
+    launch_started_at,
+    expected_source_commit,
+    config_fingerprint,
+) = sys.argv[1:]
+
+def read_text(path_raw: str) -> str:
+    try:
+        return Path(path_raw).read_text(encoding="utf-8")
+    except OSError:
+        return ""
+
+def read_json(path_raw: str) -> dict:
+    try:
+        payload = json.loads(Path(path_raw).read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+    return payload if isinstance(payload, dict) else {}
+
+try:
+    launchctl_exit_code = int(launchctl_exit_code_raw) if launchctl_exit_code_raw != "" else None
+except ValueError:
+    launchctl_exit_code = None
+pid_available = pid_available_raw.lower() == "true"
+wrapper_status = read_json(wrapper_status_file)
+attempt = classify_launchctl_start_attempt(
+    launchctl_exit_code=launchctl_exit_code,
+    pid_available=pid_available,
+    wrapper_status=wrapper_status,
+    expected_pid_file=pid_file,
+)
+if classification:
+    attempt["classification"] = classification
+try:
+    restart_generation = int(restart_generation_raw) if restart_generation_raw else None
+except ValueError:
+    restart_generation = None
+payload = {
+    "schema_version": "track_b_paper_launchctl_runtime_status_v1",
+    "generated_at": datetime.now(timezone.utc).isoformat(),
+    "classification": attempt["classification"],
+    "attempt_classification": attempt,
+    "detail": detail or None,
+    "runtime_instance_id": runtime_instance_id or None,
+    "restart_generation": restart_generation,
+    "launch_started_at": launch_started_at or None,
+    "launchctl_label": label or None,
+    "wrapper_path": wrapper_path,
+    "pid_file": pid_file,
+    "pid_metadata_file": pid_metadata_file,
+    "wrapper_status_file": wrapper_status_file,
+    "launchctl_stdout_file": stdout_file,
+    "launchctl_stderr_file": stderr_file,
+    "launchctl_exit_code": launchctl_exit_code,
+    "launchctl_stdout": read_text(stdout_file).strip(),
+    "launchctl_stderr": read_text(stderr_file).strip(),
+    "wrapper_status": wrapper_status,
+    "pid_metadata": read_json(pid_metadata_file),
+    "repo_root": repo_root,
+    "expected_source_commit": expected_source_commit or None,
+    "config_fingerprint": config_fingerprint or None,
+    "paper_only": True,
+    "live_money_eligible": False,
+    "paper_proof_invoked": False,
+    "broker_mutation": False,
+    "submit_authority": False,
+    "readiness_authority": False,
+    "restart_authority": False,
+}
+path = Path(status_path)
+path.parent.mkdir(parents=True, exist_ok=True)
+tmp = path.with_name(f".{path.name}.tmp")
+tmp.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+tmp.replace(path)
+PY
+}
+
 write_paper_runtime_wrapper() {
   local wrapper_path="${PAPER_PID_FILE}.runtime_wrapper.sh"
   local requested_stack
@@ -820,6 +956,7 @@ write_paper_runtime_wrapper() {
     "${SCRIPT_DIR}" \
     "${PAPER_PID_FILE}" \
     "${PAPER_PID_METADATA_FILE}" \
+    "${PAPER_WRAPPER_STATUS_FILE}" \
     "${PAPER_LOG_FILE}" \
     "${requested_stack}" \
     "${required_stack}" \
@@ -840,6 +977,7 @@ from pathlib import Path
     script_dir,
     pid_file,
     pid_metadata_file,
+    wrapper_status_file,
     log_file,
     requested_stack,
     required_stack,
@@ -866,6 +1004,7 @@ else
 fi
 export MGC_HEADLESS_PAPER_PID_FILE={q(pid_file)}
 export MGC_TRACK_B_PAPER_PID_METADATA_FILE={q(pid_metadata_file)}
+export MGC_TRACK_B_PAPER_WRAPPER_STATUS_FILE={q(wrapper_status_file)}
 export MGC_HEADLESS_PAPER_LOG_FILE={q(log_file)}
 export MGC_HEADLESS_SCRIPT_DIR={q(script_dir)}
 export MGC_PROBATIONARY_PAPER_CONFIG_PATHS={q(requested_stack)}
@@ -880,6 +1019,53 @@ export MGC_TRACK_B_EXPECTED_PROJECT_ROOT={q(repo_root)}
 export MGC_TRACK_B_PAPER_CONFIG_FINGERPRINT={q(config_fingerprint)}
 export MGC_TRACK_B_EXPECTED_SOURCE_COMMIT={q(expected_source_commit)}
 mkdir -p "$(dirname "$MGC_HEADLESS_PAPER_PID_FILE")" "$(dirname "$MGC_HEADLESS_PAPER_LOG_FILE")"
+write_wrapper_status() {{
+  local classification="$1"
+  local reason="${{2:-}}"
+  {q(python_bin)} - "$MGC_TRACK_B_PAPER_WRAPPER_STATUS_FILE" "$classification" "$reason" "$$" "$REPO_ROOT" "$MGC_TRACK_B_RUNTIME_INSTANCE_ID" "$MGC_TRACK_B_PAPER_RUNTIME_RESTART_GENERATION" "$MGC_HEADLESS_PAPER_PID_FILE" "$MGC_TRACK_B_EXPECTED_SOURCE_COMMIT" "${{current_commit:-}}" <<'WRAPPER_STATUS_PY'
+import json
+import sys
+from datetime import datetime, timezone
+from pathlib import Path
+
+(
+    status_path,
+    classification,
+    reason,
+    pid,
+    repo_root,
+    runtime_instance_id,
+    restart_generation,
+    pid_file,
+    expected_source_commit,
+    observed_source_commit,
+) = sys.argv[1:]
+payload = {{
+    "schema_version": "track_b_paper_runtime_wrapper_status_v1",
+    "generated_at": datetime.now(timezone.utc).isoformat(),
+    "classification": classification,
+    "reason": reason or None,
+    "producer_pid": int(pid),
+    "producer_root": repo_root,
+    "runtime_instance_id": runtime_instance_id,
+    "restart_generation": int(restart_generation),
+    "pid_file": pid_file,
+    "expected_source_commit": expected_source_commit,
+    "observed_source_commit": observed_source_commit or None,
+    "paper_only": True,
+    "live_money_eligible": False,
+    "submit_authority": False,
+    "readiness_authority": False,
+    "restart_authority": False,
+}}
+path = Path(status_path)
+path.parent.mkdir(parents=True, exist_ok=True)
+tmp = path.with_name(f".{{path.name}}.tmp")
+tmp.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\\n", encoding="utf-8")
+tmp.replace(path)
+WRAPPER_STATUS_PY
+}}
+write_wrapper_status "WRAPPER_STARTED" ""
 {{
   printf '%s\\n' "headless_runtime_wrapper_start generated_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
   printf '%s\\n' "repo_root=$REPO_ROOT"
@@ -888,7 +1074,8 @@ mkdir -p "$(dirname "$MGC_HEADLESS_PAPER_PID_FILE")" "$(dirname "$MGC_HEADLESS_P
 }} >> "$MGC_HEADLESS_PAPER_LOG_FILE"
 current_commit="$(git -C "$REPO_ROOT" rev-parse HEAD)"
 if [[ "$current_commit" != "$MGC_TRACK_B_EXPECTED_SOURCE_COMMIT" ]]; then
-  printf '%s\n' "headless_runtime_wrapper_fence_blocked reason=source_commit_mismatch expected=$MGC_TRACK_B_EXPECTED_SOURCE_COMMIT observed=$current_commit generated_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$MGC_HEADLESS_PAPER_LOG_FILE"
+  write_wrapper_status "WRAPPER_PRE_EXEC_FAILURE" "source_commit_mismatch"
+  printf '%s\\n' "headless_runtime_wrapper_fence_blocked reason=source_commit_mismatch expected=$MGC_TRACK_B_EXPECTED_SOURCE_COMMIT observed=$current_commit generated_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$MGC_HEADLESS_PAPER_LOG_FILE"
   exit 23
 fi
 echo "$$" > "$MGC_HEADLESS_PAPER_PID_FILE"
@@ -921,6 +1108,7 @@ tmp.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\\n", encoding="
 tmp.replace(path)
 RUNTIME_PID_METADATA_PY
 printf '%s\\n' "headless_runtime_wrapper_exec generated_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$MGC_HEADLESS_PAPER_LOG_FILE"
+write_wrapper_status "WRAPPER_EXECING_RUNTIME" ""
 exec bash "$MGC_HEADLESS_SCRIPT_DIR/run_probationary_paper_soak.sh" >> "$MGC_HEADLESS_PAPER_LOG_FILE" 2>&1
 """
 path.write_text(payload, encoding="utf-8")
@@ -954,11 +1142,21 @@ launch_screen_dashboard_manager() {
 launch_detached_paper_runtime() {
   local label="com.mgc-v05l.headless-supervised-paper.runtime.$(date +%Y%m%d%H%M%S).$$"
   local wrapper_path
+  local launchctl_rc
   prepare_paper_runtime_generation
   printf '%s\n' "${label}" > "${PAPER_PID_FILE}.launchctl_label"
   rm -f "${PAPER_PID_FILE}.screen_session"
+  rm -f "${PAPER_WRAPPER_STATUS_FILE}" "${PAPER_LAUNCHCTL_STDOUT_FILE}" "${PAPER_LAUNCHCTL_STDERR_FILE}"
   wrapper_path="$(write_paper_runtime_wrapper)"
-  launchctl submit -l "${label}" -- /bin/bash "${wrapper_path}"
+  set +e
+  launchctl submit -l "${label}" -- /bin/bash "${wrapper_path}" >"${PAPER_LAUNCHCTL_STDOUT_FILE}" 2>"${PAPER_LAUNCHCTL_STDERR_FILE}"
+  launchctl_rc=$?
+  set -e
+  if [[ "${launchctl_rc}" -ne 0 ]]; then
+    write_launchctl_runtime_status "LAUNCHCTL_SUBMIT_FAILED" "${launchctl_rc}" "false" "launchctl submit failed before runtime wrapper could be verified"
+    return "${launchctl_rc}"
+  fi
+  write_launchctl_runtime_status "LAUNCHCTL_SUBMIT_ACCEPTED" "${launchctl_rc}" "false" "launchctl submit returned successfully; waiting for runtime PID"
 }
 
 launch_detached_dashboard_manager() {
@@ -1258,6 +1456,13 @@ wait_for_runtime_config_paths_match_request "post-start" "${POST_START_PID_WAIT_
 wait_rc=$?
 set -e
 if [[ "${wait_rc}" -ne 0 ]]; then
+  if [[ "${wait_rc}" -eq 1 ]]; then
+    write_launchctl_runtime_status "RUNTIME_PID_UNAVAILABLE_AFTER_LAUNCHCTL_SUBMIT" "0" "false" "Paper runtime PID unavailable during post-start."
+  elif [[ "${wait_rc}" -eq 3 ]]; then
+    write_launchctl_runtime_status "WRAPPER_PRE_EXEC_FAILURE" "0" "false" "Paper runtime wrapper exited before a valid Python runtime PID became available during post-start."
+  else
+    write_launchctl_runtime_status "PID_WRITE_PATH_MISMATCH" "0" "false" "Active paper runtime config paths did not match requested launch config stack."
+  fi
   stop_paper_runtime_best_effort
   if [[ "${wait_rc}" -eq 1 ]]; then
     write_startup_summary "BLOCKED" "Paper runtime PID unavailable during post-start." "false"
@@ -1268,6 +1473,7 @@ if [[ "${wait_rc}" -ne 0 ]]; then
   fi
   exit 2
 fi
+write_launchctl_runtime_status "RUNTIME_PID_AVAILABLE" "0" "true" "Paper runtime PID and requested config stack verified during post-start."
 if ! start_dashboard_manager; then
   write_startup_summary "BLOCKED" "Failed to start the operator dashboard manager." "false"
   exit 1

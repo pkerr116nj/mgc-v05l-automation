@@ -18,25 +18,31 @@ from mgc_v05l.execution_core.track_b_runtime_truth_contract import (
     LAUNCH_CONFLICTING_WRITER_BLOCKED,
     LAUNCHCTL_NO_RUNTIME_JOB_EVIDENCE,
     LAUNCHCTL_RUNTIME_JOB_ACCEPTED,
+    LAUNCHCTL_SUBMIT_FAILED,
     LAUNCHCTL_STALE_RUNTIME_JOB_BLOCKED,
     LAUNCH_PID_ACCEPTED,
     LAUNCH_STALE_PID_CLEANUP_ALLOWED,
     LAUNCH_STALE_PID_CLEANUP_BLOCKED,
     LAUNCH_WRONG_ROOT_BLOCKED,
     LAUNCH_ZOMBIE_PID_REJECTED,
+    PID_WRITE_PATH_MISMATCH,
     PID_METADATA_MISSING,
     PID_METADATA_OK,
     PID_METADATA_STALE,
     PID_PROCESS_DEAD,
     PID_PROCESS_ZOMBIE,
     PID_WRONG_ROOT,
+    RUNTIME_PID_AVAILABLE,
+    RUNTIME_PID_UNAVAILABLE_AFTER_LAUNCHCTL_SUBMIT,
     SCHEMA_VERSION,
+    WRAPPER_PRE_EXEC_FAILURE,
     WRITER_DUPLICATE,
     WRITER_MISSING,
     WRITER_SINGLE,
     build_runtime_truth_contract,
     classify_freshness,
     classify_heartbeat,
+    classify_launchctl_start_attempt,
     classify_launchctl_runtime_jobs,
     classify_paper_config_stack_safety,
     classify_pid_metadata,
@@ -392,6 +398,74 @@ def test_launchctl_runtime_job_classifier_ignores_unrelated_jobs() -> None:
 
     assert result["classification"] == LAUNCHCTL_NO_RUNTIME_JOB_EVIDENCE
     assert result["launch_allowed"] is True
+
+
+def test_launchctl_start_attempt_surfaces_submit_failure() -> None:
+    result = classify_launchctl_start_attempt(
+        launchctl_exit_code=125,
+        pid_available=False,
+        expected_pid_file="/tmp/runtime/probationary_paper.pid",
+    )
+
+    assert result["classification"] == LAUNCHCTL_SUBMIT_FAILED
+    assert result["blockers"] == ["launchctl_submit_failed"]
+    assert result["broker_mutation"] is False
+    assert result["live_money_eligible"] is False
+
+
+def test_launchctl_start_attempt_surfaces_wrapper_pre_exec_failure() -> None:
+    result = classify_launchctl_start_attempt(
+        launchctl_exit_code=0,
+        pid_available=False,
+        wrapper_status={"classification": WRAPPER_PRE_EXEC_FAILURE, "reason": "source_commit_mismatch"},
+        expected_pid_file="/tmp/runtime/probationary_paper.pid",
+    )
+
+    assert result["classification"] == WRAPPER_PRE_EXEC_FAILURE
+    assert result["blockers"] == ["source_commit_mismatch"]
+    assert result["submit_authority"] is False
+
+
+def test_launchctl_start_attempt_detects_pid_write_path_mismatch() -> None:
+    result = classify_launchctl_start_attempt(
+        launchctl_exit_code=0,
+        pid_available=False,
+        wrapper_status={
+            "classification": "WRAPPER_STARTED",
+            "pid_file": "/tmp/wrong/probationary_paper.pid",
+        },
+        expected_pid_file="/tmp/runtime/probationary_paper.pid",
+    )
+
+    assert result["classification"] == PID_WRITE_PATH_MISMATCH
+    assert result["observed_pid_file"] == "/tmp/wrong/probationary_paper.pid"
+    assert result["expected_pid_file"] == "/tmp/runtime/probationary_paper.pid"
+
+
+def test_launchctl_start_attempt_accepts_available_runtime_pid() -> None:
+    result = classify_launchctl_start_attempt(
+        launchctl_exit_code=0,
+        pid_available=True,
+        wrapper_status={
+            "classification": "WRAPPER_EXECING_RUNTIME",
+            "pid_file": "/tmp/runtime/probationary_paper.pid",
+        },
+        expected_pid_file="/tmp/runtime/probationary_paper.pid",
+    )
+
+    assert result["classification"] == RUNTIME_PID_AVAILABLE
+    assert result["blockers"] == []
+
+
+def test_launchctl_start_attempt_keeps_pid_timeout_explicit() -> None:
+    result = classify_launchctl_start_attempt(
+        launchctl_exit_code=0,
+        pid_available=False,
+        expected_pid_file="/tmp/runtime/probationary_paper.pid",
+    )
+
+    assert result["classification"] == RUNTIME_PID_UNAVAILABLE_AFTER_LAUNCHCTL_SUBMIT
+    assert result["blockers"] == ["runtime_pid_unavailable_after_launchctl_submit"]
 
 
 def test_paper_config_stack_safety_rejects_documents_root_and_no_mule_temp_overlay() -> None:
