@@ -386,6 +386,18 @@ def test_launch_script_reports_missing_runtime_pid_separately_from_config_mismat
     assert "Active paper runtime config paths did not match requested launch config stack." in post_start
 
 
+def test_status_script_reports_late_runtime_convergence_without_authority_inversion() -> None:
+    script = STATUS_SCRIPT.read_text(encoding="utf-8")
+
+    assert "DEFAULT_PAPER_RUNTIME_LAUNCH_STATUS_FILE" in script
+    assert "classify_launch_status_convergence" in script
+    assert "paper_runtime_launch_status_original_classification" in script
+    assert "paper_runtime_launch_status_effective_classification" in script
+    assert "paper_runtime_launch_status_runtime_converged" in script
+    assert "paper_runtime_launch_status_stale_failure_superseded" in script
+    assert script.index("merge_paper_runtime_truth_status") < script.index("merge_paper_runtime_generation_status")
+
+
 def test_launch_script_refreshes_reconciliation_before_success_and_stops_on_hard_blocks() -> None:
     script = RUN_SCRIPT.read_text(encoding="utf-8")
 

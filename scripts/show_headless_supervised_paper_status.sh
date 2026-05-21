@@ -19,6 +19,7 @@ DEFAULT_PAPER_PID_METADATA_FILE="${REPO_ROOT}/outputs/probationary_pattern_engin
 DEFAULT_PAPER_CONFIG_IN_FORCE_FILE="${REPO_ROOT}/outputs/probationary_pattern_engine/paper_session/runtime/paper_config_in_force.json"
 DEFAULT_PAPER_OPERATOR_STATUS_FILE="${REPO_ROOT}/outputs/probationary_pattern_engine/paper_session/operator_status.json"
 DEFAULT_PAPER_RECONCILIATION_FILE="${REPO_ROOT}/outputs/reports/track_b_paper_broker_reconciliation/latest_track_b_paper_broker_reconciliation.json"
+DEFAULT_PAPER_RUNTIME_LAUNCH_STATUS_FILE="${REPO_ROOT}/outputs/probationary_pattern_engine/paper_session/runtime/probationary_paper_launch_status.json"
 DEFAULT_STARTUP_FILE="${REPO_ROOT}/outputs/operator_dashboard/startup_control_plane_snapshot.json"
 DEFAULT_OPERABILITY_FILE="${REPO_ROOT}/outputs/operator_dashboard/supervised_paper_operability_snapshot.json"
 DEFAULT_INFO_FILE="${DEFAULT_RUNTIME_DIR}/operator_dashboard.json"
@@ -415,7 +416,7 @@ PY
 }
 
 merge_paper_runtime_generation_status() {
-  "${PYTHON_BIN}" - <<'PY' "${STATUS_FILE}" "${DEFAULT_PAPER_PID_METADATA_FILE}" "${DEFAULT_PAPER_RUNTIME_TRUTH_FILE}" "${DEFAULT_PAPER_CONFIG_IN_FORCE_FILE}" "${DEFAULT_PAPER_OPERATOR_STATUS_FILE}" "${DEFAULT_PAPER_RECONCILIATION_FILE}" "${REPO_ROOT}"
+  "${PYTHON_BIN}" - <<'PY' "${STATUS_FILE}" "${DEFAULT_PAPER_PID_METADATA_FILE}" "${DEFAULT_PAPER_RUNTIME_TRUTH_FILE}" "${DEFAULT_PAPER_CONFIG_IN_FORCE_FILE}" "${DEFAULT_PAPER_OPERATOR_STATUS_FILE}" "${DEFAULT_PAPER_RECONCILIATION_FILE}" "${DEFAULT_PAPER_RUNTIME_LAUNCH_STATUS_FILE}" "${REPO_ROOT}"
 import json
 import os
 import subprocess
@@ -424,6 +425,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from mgc_v05l.execution_core.track_b_runtime_truth_contract import (
+    classify_launch_status_convergence,
     classify_freshness,
     classify_pid_metadata,
     classify_runtime_launch_guard,
@@ -436,7 +438,8 @@ truth_path = Path(sys.argv[3])
 config_path = Path(sys.argv[4])
 operator_path = Path(sys.argv[5])
 reconciliation_path = Path(sys.argv[6])
-expected_root = str(Path(sys.argv[7]).resolve())
+launch_status_path = Path(sys.argv[7])
+expected_root = str(Path(sys.argv[8]).resolve())
 
 def read_json(path: Path) -> dict:
     try:
@@ -488,6 +491,7 @@ runtime_truth = read_json(truth_path)
 config_in_force = read_json(config_path)
 operator_status = read_json(operator_path)
 reconciliation = read_json(reconciliation_path)
+launch_status = read_json(launch_status_path)
 probe = process_probe(pid_metadata.get("pid"))
 metadata_state = classify_pid_metadata(
     pid_metadata,
@@ -515,6 +519,14 @@ launch_guard = classify_runtime_launch_guard(
     operator_status=operator_status,
     broker_clean=broker_clean,
     process_running=probe.get("running"),
+    duplicate_writer_detected=duplicate_writer_detected,
+)
+launch_status_convergence = classify_launch_status_convergence(
+    launch_status=launch_status,
+    pid_metadata=pid_metadata,
+    runtime_truth=runtime_truth,
+    process_probe=probe,
+    expected_root=expected_root,
     duplicate_writer_detected=duplicate_writer_detected,
 )
 
@@ -547,6 +559,13 @@ status["paper_runtime_launch_guard_cleanup_allowed"] = launch_guard.get("cleanup
 status["paper_runtime_launch_guard_launch_allowed"] = launch_guard.get("launch_allowed")
 status["paper_runtime_launch_guard_blockers"] = launch_guard.get("blockers")
 status["paper_runtime_launch_guard_broker_clean"] = launch_guard.get("broker_clean")
+status["paper_runtime_launch_status_artifact"] = str(launch_status_path)
+status["paper_runtime_launch_status"] = launch_status
+status["paper_runtime_launch_status_original_classification"] = launch_status_convergence.get("original_classification")
+status["paper_runtime_launch_status_effective_classification"] = launch_status_convergence.get("effective_classification")
+status["paper_runtime_launch_status_runtime_converged"] = launch_status_convergence.get("runtime_converged")
+status["paper_runtime_launch_status_stale_failure_superseded"] = launch_status_convergence.get("stale_failure_superseded")
+status["paper_runtime_launch_status_blockers"] = launch_status_convergence.get("blockers")
 status["paper_runtime_reconciliation_artifact"] = str(reconciliation_path)
 status["paper_runtime_generation_runtime_instance_id"] = runtime_truth.get("runtime_instance_id") or pid_metadata.get("runtime_instance_id")
 status["paper_runtime_generation_restart_generation"] = runtime_truth.get("restart_generation") or pid_metadata.get("restart_generation")

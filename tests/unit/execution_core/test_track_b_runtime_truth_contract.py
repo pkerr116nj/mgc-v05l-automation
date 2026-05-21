@@ -15,6 +15,7 @@ from mgc_v05l.execution_core.track_b_runtime_truth_contract import (
     HEARTBEAT_WRONG_ROOT,
     CONFIG_STACK_SAFE,
     CONFIG_STACK_UNSAFE,
+    LATE_RUNTIME_CONVERGED,
     LAUNCH_CONFLICTING_WRITER_BLOCKED,
     LAUNCHCTL_NO_RUNTIME_JOB_EVIDENCE,
     LAUNCHCTL_RUNTIME_JOB_ACCEPTED,
@@ -44,6 +45,7 @@ from mgc_v05l.execution_core.track_b_runtime_truth_contract import (
     classify_heartbeat,
     classify_launchctl_start_attempt,
     classify_launchctl_runtime_jobs,
+    classify_launch_status_convergence,
     classify_paper_config_stack_safety,
     classify_pid_metadata,
     classify_runtime_launch_guard,
@@ -466,6 +468,96 @@ def test_launchctl_start_attempt_keeps_pid_timeout_explicit() -> None:
 
     assert result["classification"] == RUNTIME_PID_UNAVAILABLE_AFTER_LAUNCHCTL_SUBMIT
     assert result["blockers"] == ["runtime_pid_unavailable_after_launchctl_submit"]
+
+
+def test_late_runtime_truth_clears_stale_launch_failure() -> None:
+    result = classify_launch_status_convergence(
+        launch_status={"classification": RUNTIME_PID_UNAVAILABLE_AFTER_LAUNCHCTL_SUBMIT},
+        pid_metadata={
+            "pid": 58328,
+            "runtime_instance_id": "runtime-1",
+            "restart_generation": 2,
+            "root": "/repo",
+        },
+        runtime_truth={
+            "producer_pid": 58328,
+            "runtime_instance_id": "runtime-1",
+            "restart_generation": 2,
+            "producer_root": "/repo",
+            "freshness_state": FRESHNESS_FRESH,
+            "heartbeat_state": HEARTBEAT_HEALTHY,
+            "writer_authority": WRITER_SINGLE,
+            "duplicate_writer_detection": {"duplicate_writer_detected": False},
+        },
+        process_probe={"running": True, "zombie": False, "cwd": "/repo"},
+        expected_root="/repo",
+    )
+
+    assert result["classification"] == LATE_RUNTIME_CONVERGED
+    assert result["original_classification"] == RUNTIME_PID_UNAVAILABLE_AFTER_LAUNCHCTL_SUBMIT
+    assert result["runtime_converged"] is True
+    assert result["stale_failure_superseded"] is True
+    assert result["blockers"] == []
+
+
+def test_real_launch_failure_remains_failed_without_runtime_truth() -> None:
+    result = classify_launch_status_convergence(
+        launch_status={"classification": LAUNCHCTL_SUBMIT_FAILED},
+        pid_metadata={},
+        runtime_truth={},
+        process_probe={"running": False, "zombie": False, "cwd": None},
+        expected_root="/repo",
+    )
+
+    assert result["classification"] == LAUNCHCTL_SUBMIT_FAILED
+    assert result["runtime_converged"] is False
+    assert result["stale_failure_superseded"] is False
+    assert "runtime_process_not_running" in result["blockers"]
+
+
+def test_wrong_root_late_pid_does_not_clear_launch_failure() -> None:
+    result = classify_launch_status_convergence(
+        launch_status={"classification": RUNTIME_PID_UNAVAILABLE_AFTER_LAUNCHCTL_SUBMIT},
+        pid_metadata={"pid": 58328, "runtime_instance_id": "runtime-1", "root": "/wrong"},
+        runtime_truth={
+            "producer_pid": 58328,
+            "runtime_instance_id": "runtime-1",
+            "producer_root": "/wrong",
+            "freshness_state": FRESHNESS_FRESH,
+            "heartbeat_state": HEARTBEAT_HEALTHY,
+            "writer_authority": WRITER_SINGLE,
+        },
+        process_probe={"running": True, "zombie": False, "cwd": "/wrong"},
+        expected_root="/repo",
+    )
+
+    assert result["classification"] == RUNTIME_PID_UNAVAILABLE_AFTER_LAUNCHCTL_SUBMIT
+    assert result["runtime_converged"] is False
+    assert result["stale_failure_superseded"] is False
+    assert "runtime_pid_wrong_root" in result["blockers"]
+
+
+def test_duplicate_writer_late_pid_does_not_clear_launch_failure() -> None:
+    result = classify_launch_status_convergence(
+        launch_status={"classification": RUNTIME_PID_UNAVAILABLE_AFTER_LAUNCHCTL_SUBMIT},
+        pid_metadata={"pid": 58328, "runtime_instance_id": "runtime-1", "root": "/repo"},
+        runtime_truth={
+            "producer_pid": 58328,
+            "runtime_instance_id": "runtime-1",
+            "producer_root": "/repo",
+            "freshness_state": FRESHNESS_FRESH,
+            "heartbeat_state": HEARTBEAT_HEALTHY,
+            "writer_authority": WRITER_DUPLICATE,
+            "duplicate_writer_detection": {"duplicate_writer_detected": True},
+        },
+        process_probe={"running": True, "zombie": False, "cwd": "/repo"},
+        expected_root="/repo",
+    )
+
+    assert result["classification"] == RUNTIME_PID_UNAVAILABLE_AFTER_LAUNCHCTL_SUBMIT
+    assert result["runtime_converged"] is False
+    assert result["stale_failure_superseded"] is False
+    assert "duplicate_runtime_writer_detected" in result["blockers"]
 
 
 def test_paper_config_stack_safety_rejects_documents_root_and_no_mule_temp_overlay() -> None:

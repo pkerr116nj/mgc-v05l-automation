@@ -56,6 +56,7 @@ WRAPPER_PRE_EXEC_FAILURE = "WRAPPER_PRE_EXEC_FAILURE"
 RUNTIME_PID_AVAILABLE = "RUNTIME_PID_AVAILABLE"
 RUNTIME_PID_UNAVAILABLE_AFTER_LAUNCHCTL_SUBMIT = "RUNTIME_PID_UNAVAILABLE_AFTER_LAUNCHCTL_SUBMIT"
 PID_WRITE_PATH_MISMATCH = "PID_WRITE_PATH_MISMATCH"
+LATE_RUNTIME_CONVERGED = "LATE_RUNTIME_CONVERGED"
 
 CONFIG_STACK_SAFE = "CONFIG_STACK_SAFE"
 CONFIG_STACK_UNSAFE = "CONFIG_STACK_UNSAFE"
@@ -404,6 +405,107 @@ def classify_launchctl_start_attempt(
         "readiness_authority": False,
         "restart_authority": False,
         "blockers": blockers,
+    }
+
+
+def classify_launch_status_convergence(
+    *,
+    launch_status: Mapping[str, Any] | None = None,
+    pid_metadata: Mapping[str, Any] | None = None,
+    runtime_truth: Mapping[str, Any] | None = None,
+    process_probe: Mapping[str, Any] | None = None,
+    expected_root: str | None = None,
+    duplicate_writer_detected: bool = False,
+) -> dict[str, Any]:
+    """Classify whether later PID/runtime truth supersedes stale launch status.
+
+    This is display/status evidence only. It does not grant submit readiness,
+    restart authority, or broker safety authority.
+    """
+
+    launch = dict(launch_status or {})
+    metadata = dict(pid_metadata or {})
+    truth = dict(runtime_truth or {})
+    probe = dict(process_probe or {})
+    original = str(launch.get("classification") or "").strip() or None
+    failure_classifications = {
+        LAUNCHCTL_SUBMIT_FAILED,
+        WRAPPER_PRE_EXEC_FAILURE,
+        RUNTIME_PID_UNAVAILABLE_AFTER_LAUNCHCTL_SUBMIT,
+        PID_WRITE_PATH_MISMATCH,
+    }
+    blockers: list[str] = []
+
+    if probe.get("running") is not True:
+        blockers.append("runtime_process_not_running")
+    if probe.get("zombie") is True:
+        blockers.append("runtime_process_zombie")
+
+    observed_root = str(probe.get("cwd") or metadata.get("root") or metadata.get("producer_root") or "").strip()
+    truth_root = str(truth.get("producer_root") or "").strip()
+    expected = str(expected_root or "").strip()
+    if expected:
+        if observed_root and observed_root != expected:
+            blockers.append("runtime_pid_wrong_root")
+        if truth_root and truth_root != expected:
+            blockers.append("runtime_truth_wrong_root")
+
+    metadata_pid = metadata.get("pid") or metadata.get("producer_pid")
+    truth_pid = truth.get("producer_pid")
+    if metadata_pid is None:
+        blockers.append("pid_metadata_missing_pid")
+    if truth_pid is None:
+        blockers.append("runtime_truth_missing_pid")
+    if metadata_pid is not None and truth_pid is not None and str(metadata_pid) != str(truth_pid):
+        blockers.append("pid_metadata_runtime_truth_pid_mismatch")
+
+    metadata_instance = str(metadata.get("runtime_instance_id") or "").strip()
+    truth_instance = str(truth.get("runtime_instance_id") or "").strip()
+    if metadata_instance and truth_instance and metadata_instance != truth_instance:
+        blockers.append("runtime_instance_id_mismatch")
+
+    metadata_generation = metadata.get("restart_generation")
+    truth_generation = truth.get("restart_generation")
+    if (
+        metadata_generation is not None
+        and truth_generation is not None
+        and str(metadata_generation) != str(truth_generation)
+    ):
+        blockers.append("restart_generation_mismatch")
+
+    truth_duplicate = bool((truth.get("duplicate_writer_detection") or {}).get("duplicate_writer_detected"))
+    if duplicate_writer_detected or truth_duplicate or truth.get("writer_authority") == WRITER_DUPLICATE:
+        blockers.append("duplicate_runtime_writer_detected")
+
+    if truth.get("heartbeat_state") not in {None, "", HEARTBEAT_HEALTHY}:
+        blockers.append("runtime_truth_heartbeat_not_healthy")
+    if truth.get("freshness_state") not in {None, "", FRESHNESS_FRESH}:
+        blockers.append("runtime_truth_not_fresh")
+
+    converged = not blockers and bool(metadata) and bool(truth)
+    if converged and original in failure_classifications:
+        effective = LATE_RUNTIME_CONVERGED
+        stale_failure_superseded = True
+    elif converged:
+        effective = RUNTIME_PID_AVAILABLE
+        stale_failure_superseded = False
+    else:
+        effective = original or RUNTIME_PID_UNAVAILABLE_AFTER_LAUNCHCTL_SUBMIT
+        stale_failure_superseded = False
+
+    return {
+        "classification": effective,
+        "effective_classification": effective,
+        "original_classification": original,
+        "runtime_converged": converged,
+        "stale_failure_superseded": stale_failure_superseded,
+        "blockers": blockers,
+        "paper_only": True,
+        "live_money_eligible": False,
+        "broker_mutation": False,
+        "submit_authority": False,
+        "readiness_authority": False,
+        "restart_authority": False,
     }
 
 
