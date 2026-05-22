@@ -298,7 +298,7 @@ def test_position_callback_wrong_exact_identifier_is_captured_not_uncaught(contr
 
     assert paper.callback_errors
     assert paper.callback_errors[0]["callback"] == "position"
-    assert paper.callback_errors[0]["error_type"] == "IbkrPaperCorrelationError"
+    assert paper.callback_errors[0]["error_type"] == "IGNORED_NON_ALLOWLISTED_POSITION"
     assert "allowlist" in str(paper.callback_errors[0]["error_message"])
 
 

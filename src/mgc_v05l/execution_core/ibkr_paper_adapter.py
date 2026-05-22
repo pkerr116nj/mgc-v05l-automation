@@ -790,7 +790,19 @@ class IbkrPaperAdapter:
             self._record_open_order_callback(int(order_id), contract, order, order_state)
 
     def _record_position_callback(self, account: str, contract: Any, pos: float, avg_cost: float) -> None:
-        contract_key = self._contract_key_from_contract(contract)
+        try:
+            contract_key = self._contract_key_from_contract(contract)
+        except IbkrPaperCorrelationError as exc:
+            self.callback_errors.append(
+                {
+                    "callback": "position",
+                    "error_type": "IGNORED_NON_ALLOWLISTED_POSITION",
+                    "error_message": str(exc),
+                    "captured_at": datetime.now(timezone.utc).isoformat(),
+                    "contract": _contract_fields(contract),
+                }
+            )
+            return
         self.record_position_callback(
             run_id="ibkr_position_snapshot",
             account_id=account,
