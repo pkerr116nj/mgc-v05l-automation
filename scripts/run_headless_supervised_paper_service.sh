@@ -72,6 +72,7 @@ START_DASHBOARD=1
 BROKER_TRUTH_REFRESH_PROFILE="${MGC_HEADLESS_BROKER_TRUTH_REFRESH_PROFILE:-${MGC_OPERATIONAL_PROFILE:-headless_paper}}"
 STRICT_BROKER_TRUTH_REFRESH="${MGC_HEADLESS_STRICT_BROKER_TRUTH_REFRESH:-0}"
 START_BROKER_TRUTH_REFRESH="${MGC_HEADLESS_START_BROKER_TRUTH_REFRESH:-}"
+PAPER_RUNTIME_LAUNCH_METHOD="${MGC_HEADLESS_PAPER_LAUNCH_METHOD:-direct}"
 DEFAULT_START_BROKER_TRUTH_REFRESH=1
 case "$(printf '%s' "${BROKER_TRUTH_REFRESH_PROFILE}" | tr '[:upper:]' '[:lower:]')" in
   dev|development|test|local)
@@ -1136,6 +1137,18 @@ launch_background_paper_runtime() {
   local launch_rc
   rm -f "${PAPER_WRAPPER_PID_FILE}"
   rm -f "${PAPER_PID_FILE}.screen_session"
+  case "$(printf '%s' "${PAPER_RUNTIME_LAUNCH_METHOD}" | tr '[:upper:]' '[:lower:]')" in
+    direct|direct-supervisor|probationary)
+      launch_direct_paper_runtime
+      return $?
+      ;;
+    launchctl|diagnostic-launchctl)
+      ;;
+    *)
+      echo "CANONICAL_PAPER_LAUNCHER_UNAVAILABLE: unsupported PAPER launch method ${PAPER_RUNTIME_LAUNCH_METHOD}; use direct or diagnostic launchctl." >&2
+      return 1
+      ;;
+  esac
   if launchctl_submit_available; then
     set +e
     launch_detached_paper_runtime
@@ -1143,8 +1156,31 @@ launch_background_paper_runtime() {
     set -e
     return "${launch_rc}"
   fi
-  echo "CANONICAL_PAPER_LAUNCHER_UNAVAILABLE: launchctl is required for supervised PAPER runtime launch; screen/nohup fallback is disabled for automatic runtime start." >&2
+  echo "CANONICAL_PAPER_LAUNCHER_UNAVAILABLE: launchctl diagnostic launch requested but launchctl is unavailable." >&2
   return 1
+}
+
+launch_direct_paper_runtime() {
+  prepare_paper_runtime_generation
+  MGC_PROBATIONARY_PAPER_CONFIG_PATHS="$(requested_config_paths_arg)" \
+  MGC_HEADLESS_SUPERVISED_PAPER_CONFIG_PATHS="$(requested_config_paths_arg)" \
+  MGC_HEADLESS_REQUIRED_PAPER_CONFIGS="$(resolved_config_paths_arg "${REQUIRED_PAPER_CONFIG_PATHS}")" \
+  MGC_HEADLESS_REQUIRED_PAPER_CONFIG_PATHS="$(resolved_config_paths_arg "${REQUIRED_PAPER_CONFIG_PATHS}")" \
+  MGC_TRACK_B_RUNTIME_INSTANCE_ID="${PAPER_RUNTIME_INSTANCE_ID}" \
+  MGC_TRACK_B_PAPER_RUNTIME_RESTART_GENERATION="${PAPER_RUNTIME_RESTART_GENERATION}" \
+  MGC_TRACK_B_PAPER_LAUNCH_STARTED_AT="${PAPER_RUNTIME_LAUNCH_STARTED_AT}" \
+  MGC_TRACK_B_PAPER_LAUNCHER_PID="$$" \
+  MGC_TRACK_B_EXPECTED_PROJECT_ROOT="${REPO_ROOT}" \
+  MGC_TRACK_B_PAPER_CONFIG_FINGERPRINT="${PAPER_RUNTIME_CONFIG_FINGERPRINT}" \
+  MGC_TRACK_B_EXPECTED_SOURCE_COMMIT="${PAPER_RUNTIME_EXPECTED_SOURCE_COMMIT}" \
+  MGC_PROBATIONARY_PAPER_RUNTIME_TRUTH_FILE="${PAPER_RUNTIME_TRUTH_FILE}" \
+  bash "${SCRIPT_DIR}/run_probationary_paper_soak.sh" \
+    --background \
+    --pid-file "${PAPER_PID_FILE}" \
+    --log-file "${PAPER_LOG_FILE}" \
+    --config-paths-file "${PAPER_CONFIG_PATHS_FILE}" \
+    --launch-status-file "${PAPER_RUNTIME_LAUNCH_STATUS_FILE}" \
+    --schwab-config "${REPO_ROOT}/config/schwab.local.json"
 }
 
 launch_screen_dashboard_manager() {
@@ -1263,7 +1299,7 @@ start_paper_runtime() {
     return $?
   fi
   launch_background_paper_runtime
-  return 0
+  return $?
 }
 
 refresh_phase1_reconciliation_for_launch() {

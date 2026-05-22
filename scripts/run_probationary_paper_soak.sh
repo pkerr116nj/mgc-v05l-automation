@@ -36,11 +36,13 @@ DEFAULT_PID_FILE="${DEFAULT_RUNTIME_DIR}/probationary_paper.pid"
 DEFAULT_LOG_FILE="${DEFAULT_RUNTIME_DIR}/probationary_paper.log"
 DEFAULT_CONFIG_PATHS_FILE="${DEFAULT_RUNTIME_DIR}/paper_runtime_config_paths.txt"
 DEFAULT_LAUNCH_STATUS_FILE="${DEFAULT_RUNTIME_DIR}/probationary_paper_launch_status.json"
+DEFAULT_RUNTIME_TRUTH_FILE="${DEFAULT_RUNTIME_DIR}/paper_runtime_truth.json"
 CANARY_ENABLE_SENTINEL="${DEFAULT_RUNTIME_DIR}/enable_paper_route_canary.flag"
 CONFIG_OVERRIDE_RAW="${MGC_PROBATIONARY_PAPER_CONFIG_PATHS:-}"
 LAUNCH_PYTHON_BIN="${MGC_PROBATIONARY_PAPER_LAUNCH_PYTHON_BIN:-${PYTHON_BIN}}"
-BACKGROUND_VERIFY_ATTEMPTS="${MGC_PROBATIONARY_PAPER_BACKGROUND_VERIFY_ATTEMPTS:-10}"
-BACKGROUND_VERIFY_POLL_SECONDS="${MGC_PROBATIONARY_PAPER_BACKGROUND_VERIFY_POLL_SECONDS:-0.2}"
+BACKGROUND_VERIFY_ATTEMPTS="${MGC_PROBATIONARY_PAPER_BACKGROUND_VERIFY_ATTEMPTS:-60}"
+BACKGROUND_VERIFY_POLL_SECONDS="${MGC_PROBATIONARY_PAPER_BACKGROUND_VERIFY_POLL_SECONDS:-1}"
+RUNTIME_TRUTH_FILE="${MGC_PROBATIONARY_PAPER_RUNTIME_TRUTH_FILE:-${DEFAULT_RUNTIME_TRUTH_FILE}}"
 
 ARGS=()
 CONFIG_SET=0
@@ -208,6 +210,7 @@ write_launch_status() {
   LAUNCH_PID_FILE="${PID_FILE}" \
   LAUNCH_LOG_FILE="${LOG_FILE}" \
   LAUNCH_CONFIG_PATHS_FILE="${CONFIG_PATHS_FILE}" \
+  LAUNCH_RUNTIME_TRUTH_FILE="${RUNTIME_TRUTH_FILE}" \
   LAUNCH_REPO_ROOT="${REPO_ROOT}" \
   LAUNCH_CWD="$(pwd)" \
   LAUNCH_PYTHON_BIN="${LAUNCH_PYTHON_BIN}" \
@@ -226,6 +229,7 @@ payload = {
     "pid_file": os.environ["LAUNCH_PID_FILE"],
     "log_file": os.environ["LAUNCH_LOG_FILE"],
     "config_paths_file": os.environ["LAUNCH_CONFIG_PATHS_FILE"],
+    "runtime_truth_file": os.environ["LAUNCH_RUNTIME_TRUTH_FILE"],
     "repo_root": os.environ["LAUNCH_REPO_ROOT"],
     "cwd": os.environ["LAUNCH_CWD"],
     "python_bin": os.environ["LAUNCH_PYTHON_BIN"],
@@ -247,15 +251,72 @@ with open(os.environ["LAUNCH_STATUS_FILE"], "w", encoding="utf-8") as fh:
 
 background_child_stayed_alive() {
   local pid="$1"
+  local launched_at_epoch="$2"
   local attempt=0
   while [[ ${attempt} -lt ${BACKGROUND_VERIFY_ATTEMPTS} ]]; do
     if ! process_alive_not_zombie "${pid}"; then
       return 1
     fi
+    if runtime_truth_converged_for_pid "${pid}" "${launched_at_epoch}"; then
+      return 0
+    fi
     sleep "${BACKGROUND_VERIFY_POLL_SECONDS}"
     attempt=$((attempt + 1))
   done
-  process_alive_not_zombie "${pid}"
+  runtime_truth_converged_for_pid "${pid}" "${launched_at_epoch}"
+}
+
+runtime_truth_converged_for_pid() {
+  local pid="$1"
+  local launched_at_epoch="$2"
+  if [[ ! -f "${RUNTIME_TRUTH_FILE}" ]]; then
+    return 1
+  fi
+  "${PYTHON_BIN}" - <<'PY' "${RUNTIME_TRUTH_FILE}" "${pid}" "${launched_at_epoch}"
+import json
+import sys
+from datetime import datetime, timezone
+from pathlib import Path
+
+path = Path(sys.argv[1])
+expected_pid = int(sys.argv[2])
+launched_at_epoch = float(sys.argv[3])
+try:
+    payload = json.loads(path.read_text(encoding="utf-8"))
+except (OSError, json.JSONDecodeError):
+    raise SystemExit(1)
+try:
+    producer_pid = int(payload.get("producer_pid"))
+except (TypeError, ValueError):
+    raise SystemExit(1)
+if producer_pid != expected_pid:
+    raise SystemExit(1)
+generated_raw = str(payload.get("generated_at") or "")
+try:
+    generated = datetime.fromisoformat(generated_raw.replace("Z", "+00:00"))
+except ValueError:
+    raise SystemExit(1)
+if generated.tzinfo is None:
+    generated = generated.replace(tzinfo=timezone.utc)
+if generated.timestamp() < launched_at_epoch:
+    raise SystemExit(1)
+if payload.get("heartbeat_state") != "HEALTHY":
+    raise SystemExit(1)
+if payload.get("freshness_state") != "FRESH":
+    raise SystemExit(1)
+if payload.get("writer_authority") != "SINGLE_WRITER":
+    raise SystemExit(1)
+if payload.get("runtime_mode") != "PAPER":
+    raise SystemExit(1)
+if payload.get("live_money_eligible") is not False:
+    raise SystemExit(1)
+raise SystemExit(0)
+PY
+}
+
+background_child_reached_preflight() {
+  local pid="$1"
+  [[ -f "${LOG_FILE}" ]] && grep -q "\"pid\": ${pid}" "${LOG_FILE}" && grep -q "Probationary paper runtime artifact preflight" "${LOG_FILE}"
 }
 
 process_alive_not_zombie() {
@@ -361,11 +422,12 @@ if [[ ${BACKGROUND} -eq 1 ]]; then
       exit 1
     fi
   fi
+  launch_started_epoch="$(date +%s)"
   nohup "${LAUNCH_PYTHON_BIN}" -m mgc_v05l.app.main probationary-paper-soak "${FINAL_ARGS[@]}" >> "${LOG_FILE}" 2>&1 &
   paper_pid=$!
-  if background_child_stayed_alive "${paper_pid}"; then
+  if background_child_stayed_alive "${paper_pid}" "${launch_started_epoch}"; then
     echo "${paper_pid}" > "${PID_FILE}"
-    write_launch_status "PROBATIONARY_PAPER_BACKGROUND_STARTED" "${paper_pid}" "background child remained alive through launch verification" ""
+    write_launch_status "PROBATIONARY_PAPER_BACKGROUND_STARTED" "${paper_pid}" "background child produced fresh runtime truth and remained alive through launch verification" ""
     echo "Probationary paper soak running in background."
     echo "PID: ${paper_pid}"
     echo "PID file: ${PID_FILE}"
@@ -373,12 +435,34 @@ if [[ ${BACKGROUND} -eq 1 ]]; then
     echo "Launch status: ${LAUNCH_STATUS_FILE}"
     exit 0
   fi
+  child_exit_code=""
+  if process_alive_not_zombie "${paper_pid}"; then
+    kill "${paper_pid}" >/dev/null 2>&1 || true
+    sleep 1
+    if process_alive_not_zombie "${paper_pid}"; then
+      kill -TERM "${paper_pid}" >/dev/null 2>&1 || true
+    fi
+    set +e
+    wait "${paper_pid}"
+    child_exit_code=$?
+    set -e
+    remove_pid_file_if_matches "${paper_pid}"
+    write_launch_status "RUNTIME_TRUTH_NOT_CONVERGED" "${paper_pid}" "background child stayed alive but did not produce fresh runtime truth/heartbeat before launch verification timed out" "${child_exit_code}"
+    echo "Probationary paper soak failed to produce runtime truth in background." >&2
+    echo "Launch status: ${LAUNCH_STATUS_FILE}" >&2
+    echo "Log file: ${LOG_FILE}" >&2
+    exit 1
+  fi
   set +e
   wait "${paper_pid}"
   child_exit_code=$?
   set -e
   remove_pid_file_if_matches "${paper_pid}"
-  write_launch_status "PROBATIONARY_PAPER_BACKGROUND_START_FAILED" "${paper_pid}" "background child exited before launch verification completed" "${child_exit_code}"
+  if background_child_reached_preflight "${paper_pid}"; then
+    write_launch_status "RUNTIME_EXITED_AFTER_PREFLIGHT" "${paper_pid}" "background child exited after Phase-1 preflight but before runtime truth/heartbeat convergence" "${child_exit_code}"
+  else
+    write_launch_status "PROBATIONARY_PAPER_BACKGROUND_START_FAILED" "${paper_pid}" "background child exited before launch verification completed" "${child_exit_code}"
+  fi
   echo "Probationary paper soak failed to remain running in background." >&2
   echo "Launch status: ${LAUNCH_STATUS_FILE}" >&2
   echo "Log file: ${LOG_FILE}" >&2

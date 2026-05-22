@@ -308,6 +308,26 @@ def test_launch_script_retains_screen_only_for_dashboard_manager_not_paper_runti
     assert "screen -dmS" in dashboard_launch
 
 
+def test_launch_script_uses_direct_supervisor_as_canonical_paper_launcher() -> None:
+    script = RUN_SCRIPT.read_text(encoding="utf-8")
+
+    assert 'PAPER_RUNTIME_LAUNCH_METHOD="${MGC_HEADLESS_PAPER_LAUNCH_METHOD:-direct}"' in script
+    paper_launch = script[script.index("launch_background_paper_runtime()") : script.index("launch_screen_dashboard_manager()")]
+    assert "launch_direct_paper_runtime" in paper_launch
+    assert "diagnostic-launchctl" in paper_launch
+    assert "MGC_PROBATIONARY_PAPER_RUNTIME_TRUTH_FILE" in script
+    assert "run_probationary_paper_soak.sh" in script
+
+
+def test_launch_script_propagates_paper_runtime_start_failure() -> None:
+    script = RUN_SCRIPT.read_text(encoding="utf-8")
+
+    start_fn = script[script.index("start_paper_runtime()") : script.index("refresh_phase1_reconciliation_for_launch()")]
+    assert "launch_background_paper_runtime" in start_fn
+    assert "return $?" in start_fn
+    assert "launch_background_paper_runtime\n  return 0" not in start_fn
+
+
 def test_launch_script_polls_for_late_post_start_runtime_pid() -> None:
     script = RUN_SCRIPT.read_text(encoding="utf-8")
 
