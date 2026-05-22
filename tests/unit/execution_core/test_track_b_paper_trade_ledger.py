@@ -128,6 +128,7 @@ def test_direct_bridge_fill_inherits_exit_policy_from_manifest(tmp_path: Path) -
         filled_bridge_result_json=write_json(tmp_path / "fill.json", payload),
         output_root=tmp_path / "ledger",
         position_management_manifest_root=manifest_root,
+        managed_lifecycle_output_root=tmp_path / "managed",
         lane_registry_paths=(),
         now=aware_now(),
     )
@@ -139,6 +140,11 @@ def test_direct_bridge_fill_inherits_exit_policy_from_manifest(tmp_path: Path) -
     position = result.live_position_status["positions_by_instrument"]["MNQ-202606"]
     assert position["managed_exit_policy_id"] == "PAPER_DIAGNOSTIC_TIME_BOXED_3X5M_EXIT_V1"
     assert position["position_management_manifest_path"].endswith(".json")
+    lifecycle_path = Path(position["paper_lifecycle_report_path"])
+    assert lifecycle_path.exists()
+    lifecycle = json.loads(lifecycle_path.read_text(encoding="utf-8"))
+    assert lifecycle["paper_lifecycle_classification"] == "TRACK_B_STRATEGY_PAPER_OPEN_MANAGED"
+    assert lifecycle["managed_exit_policy_id"] == "PAPER_DIAGNOSTIC_TIME_BOXED_3X5M_EXIT_V1"
 
 
 def test_direct_bridge_fill_missing_policy_is_review_required_incomplete(tmp_path: Path) -> None:

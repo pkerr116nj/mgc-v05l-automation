@@ -26,6 +26,9 @@ from .track_b_position_management_manifest import (
 
 
 DEFAULT_TRACK_B_PAPER_TRADE_LEDGER_OUTPUT_ROOT = Path("outputs/track_b_execution_core/paper_trade_ledger")
+DEFAULT_TRACK_B_STRATEGY_MANAGED_PAPER_LIFECYCLE_OUTPUT_ROOT = Path(
+    "outputs/track_b_execution_core/track_b_strategy_managed_paper_lifecycle"
+)
 DEFAULT_TRACK_B_PAPER_TRADE_LEDGER_JSONL = (
     DEFAULT_TRACK_B_PAPER_TRADE_LEDGER_OUTPUT_ROOT / "track_b_paper_trade_ledger.jsonl"
 )
@@ -680,6 +683,7 @@ def update_track_b_paper_trade_ledger_from_filled_bridge_result(
     filled_bridge_result_json: Path | None = None,
     output_root: Path = DEFAULT_TRACK_B_PAPER_TRADE_LEDGER_OUTPUT_ROOT,
     position_management_manifest_root: Path = DEFAULT_TRACK_B_POSITION_MANAGEMENT_MANIFEST_ROOT,
+    managed_lifecycle_output_root: Path = DEFAULT_TRACK_B_STRATEGY_MANAGED_PAPER_LIFECYCLE_OUTPUT_ROOT,
     lane_registry_paths: Iterable[Path] | None = None,
     now: datetime | None = None,
 ) -> TrackBPaperTradeLedgerResult:
@@ -707,6 +711,7 @@ def update_track_b_paper_trade_ledger_from_filled_bridge_result(
         filled_bridge_result_json=filled_bridge_result_json,
         existing_records=existing_records,
         position_management_manifest_root=position_management_manifest_root,
+        managed_lifecycle_output_root=managed_lifecycle_output_root,
         lane_registry_paths=lane_registry_paths,
         now=actual_now,
     )
@@ -1139,6 +1144,7 @@ def _trade_record_from_filled_bridge_result(
     filled_bridge_result_json: Path | None,
     existing_records: Iterable[Mapping[str, Any]],
     position_management_manifest_root: Path,
+    managed_lifecycle_output_root: Path,
     lane_registry_paths: Iterable[Path] | None,
     now: datetime,
 ) -> dict[str, Any] | None:
@@ -1202,6 +1208,29 @@ def _trade_record_from_filled_bridge_result(
     )
     lifecycle_classification = str(ledger_projection["paper_lifecycle_classification"])
     final_position_status = str(ledger_projection["final_position_status"])
+    lifecycle_report_path = _string_or_none(
+        filled_bridge_result.get("paper_lifecycle_report_path")
+        or filled_bridge_result.get("managed_lifecycle_report_path")
+    )
+    if final_position_status == "OPEN_MANAGED" and not lifecycle_report_path:
+        from .track_b_strategy_managed_paper_lifecycle import (
+            write_open_managed_lifecycle_report_from_filled_bridge_result,
+        )
+
+        lifecycle_payload = {
+            **dict(filled_bridge_result),
+            "managed_exit_policy_id": metadata.managed_exit_policy_id,
+            "position_management_manifest_path": str(manifest_update.manifest_path)
+            if manifest_update is not None
+            else filled_bridge_result.get("position_management_manifest_path"),
+        }
+        written_lifecycle_report = write_open_managed_lifecycle_report_from_filled_bridge_result(
+            filled_bridge_result=lifecycle_payload,
+            output_root=managed_lifecycle_output_root,
+            now=now,
+        )
+        if written_lifecycle_report is not None:
+            lifecycle_report_path = str(written_lifecycle_report)
     return {
         "ledger_schema_version": LEDGER_SCHEMA_VERSION,
         "trade_id": f"{strategy_id}:{lifecycle_id}",
@@ -1264,10 +1293,7 @@ def _trade_record_from_filled_bridge_result(
         "final_broker_state_classification": lifecycle_classification,
         "final_position_status": final_position_status,
         "review_required": bool(ledger_projection["review_required"]) or not metadata.complete,
-        "paper_lifecycle_report_path": _string_or_none(
-            filled_bridge_result.get("paper_lifecycle_report_path")
-            or filled_bridge_result.get("managed_lifecycle_report_path")
-        ),
+        "paper_lifecycle_report_path": lifecycle_report_path,
         "decision_journal_record_id": None,
         "decision_journal_record_path": None,
         "monitor_report_path": None,

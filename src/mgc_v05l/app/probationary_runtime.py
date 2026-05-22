@@ -58,10 +58,10 @@ from ..execution.track_b_phase1_submit_authority import evaluate_phase1_broker_r
 from ..execution.live_strategy_broker import LiveStrategyPilotBroker
 from ..execution.order_models import FillEvent, OrderIntent
 from ..execution.paper_broker import PaperBroker, PaperPosition
+from ..execution_core.track_b_broker_backed_entry_auto_adoption import auto_adopt_broker_backed_entry
 from ..execution_core.track_b_position_management_manifest import (
     DEFAULT_TRACK_B_POSITION_MANAGEMENT_MANIFEST_ROOT,
     create_manifest_from_order_intent,
-    update_manifest_from_filled_bridge_result,
 )
 from ..execution.reconciliation import (
     RECONCILIATION_CLASS_BROKER_UNAVAILABLE,
@@ -13174,8 +13174,7 @@ def _update_runtime_bridge_position_manifest_from_fill(
     contract_key = report.get("contract_key") or manifest_contract.get("contract_key")
     if not contract_key:
         contract_key = f"{str(source_symbol).upper()}-{bridge_config.contract_month}" if bridge_config.contract_month else None
-    update_manifest_from_filled_bridge_result(
-        filled_bridge_result={
+    filled_bridge_result = {
             **dict(report),
             "order_intent_id": order_intent.order_intent_id,
             "lane_id": bridge_config.strategy_id,
@@ -13185,6 +13184,7 @@ def _update_runtime_bridge_position_manifest_from_fill(
             "action": bridge_config.action,
             "quantity": order_intent.quantity,
             "broker_order_id": broker_order_id,
+            "intent_type": order_intent.intent_type.value,
             "perm_id": order_metadata.get("perm_id") or report.get("perm_id"),
             "client_id": order_metadata.get("client_id") or report.get("client_id"),
             "exec_id": order_metadata.get("execution_id") or report.get("exec_id") or report.get("execution_id"),
@@ -13195,11 +13195,21 @@ def _update_runtime_bridge_position_manifest_from_fill(
             "managed_exit_policy_id": manifest.get("managed_exit_policy_id")
             or dict(bridge_config.caller_metadata or {}).get("managed_exit_policy_id")
             or bridge_adapter.get("managed_exit_policy_id"),
+            "position_management_manifest_path": str(manifest_result.manifest_path)
+            if manifest_result is not None
+            else None,
             "fill_price": order_metadata.get("fill_price") or report.get("fill_price") or report.get("entry_fill_price"),
             "fill_timestamp": order_metadata.get("fill_timestamp") or report.get("fill_timestamp") or report.get("entry_timestamp"),
             "lifecycle_id": report.get("lifecycle_id") or f"bridge_fill_{order_intent.order_intent_id}",
-        },
-        output_root=Path(repo_root) / DEFAULT_TRACK_B_POSITION_MANAGEMENT_MANIFEST_ROOT,
+        }
+    auto_adopt_broker_backed_entry(
+        entry_fill_evidence=filled_bridge_result,
+        paper_trade_ledger_output_root=Path(repo_root) / "outputs" / "track_b_execution_core" / "paper_trade_ledger",
+        position_management_manifest_root=Path(repo_root) / DEFAULT_TRACK_B_POSITION_MANAGEMENT_MANIFEST_ROOT,
+        managed_lifecycle_output_root=Path(repo_root)
+        / "outputs"
+        / "track_b_execution_core"
+        / "track_b_strategy_managed_paper_lifecycle",
         now=order_intent.created_at,
     )
 

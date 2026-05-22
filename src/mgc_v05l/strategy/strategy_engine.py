@@ -39,15 +39,13 @@ from ..execution_core.track_b_no_trade_diagnostics import (
     diagnostics_root_from_artifact_dir,
     write_no_trade_diagnostic,
 )
+from ..execution_core.track_b_broker_backed_entry_auto_adoption import auto_adopt_broker_backed_entry
 from ..execution_core.track_b_position_management_manifest import (
     DEFAULT_TRACK_B_POSITION_MANAGEMENT_MANIFEST_ROOT,
     OPEN_MANAGED_METADATA_INCOMPLETE,
     create_manifest_from_order_intent,
     resolve_management_metadata,
     update_manifest_from_filled_bridge_result,
-)
-from ..execution_core.track_b_strategy_managed_paper_lifecycle import (
-    write_open_managed_lifecycle_report_from_filled_bridge_result,
 )
 from ..indicators.feature_engine import IncrementalFeatureComputer, compute_features
 from ..market_data.bar_builder import BarBuilder
@@ -2354,44 +2352,38 @@ class StrategyEngine:
             "live_money_readiness": False,
             "created_at": datetime.now(timezone.utc).isoformat(),
         }
-        if pending.intent.intent_type in {OrderIntentType.BUY_TO_OPEN, OrderIntentType.SELL_TO_OPEN} and not review_required:
-            lifecycle_output_root = (
-                manifest_update.manifest_path.parent.parent / "track_b_strategy_managed_paper_lifecycle"
-                if manifest_update is not None
-                else None
-            )
-            lifecycle_report_path = write_open_managed_lifecycle_report_from_filled_bridge_result(
-                filled_bridge_result=payload,
-                **({"output_root": lifecycle_output_root} if lifecycle_output_root is not None else {}),
-            )
-            if lifecycle_report_path is not None:
-                payload["paper_lifecycle_report_path"] = str(lifecycle_report_path)
-                payload["managed_lifecycle_report_path"] = str(lifecycle_report_path)
         if error:
             payload["error"] = error
-        if self._structured_logger is not None:
-            if hasattr(self._structured_logger, "log_filled_bridge_result"):
-                self._structured_logger.log_filled_bridge_result(payload)
-            if hasattr(self._structured_logger, "write_filled_bridge_result_state"):
-                self._structured_logger.write_filled_bridge_result_state(payload)
         try:
-            from mgc_v05l.execution_core.track_b_paper_trade_ledger import (
-                update_track_b_paper_trade_ledger_from_filled_bridge_result,
-            )
-
             ledger_output_root = (
                 manifest_update.manifest_path.parent.parent / "paper_trade_ledger"
                 if manifest_update is not None
                 else None
             )
-            update_track_b_paper_trade_ledger_from_filled_bridge_result(
-                filled_bridge_result=payload,
-                **({"output_root": ledger_output_root} if ledger_output_root is not None else {}),
+            lifecycle_output_root = (
+                manifest_update.manifest_path.parent.parent / "track_b_strategy_managed_paper_lifecycle"
+                if manifest_update is not None
+                else None
+            )
+            auto_adoption = auto_adopt_broker_backed_entry(
+                entry_fill_evidence=payload,
+                **({"paper_trade_ledger_output_root": ledger_output_root} if ledger_output_root is not None else {}),
+                **({"position_management_manifest_root": manifest_output_root} if manifest_update is not None else {}),
+                **({"managed_lifecycle_output_root": lifecycle_output_root} if lifecycle_output_root is not None else {}),
             )
             payload["paper_trade_ledger_update_attempted"] = True
+            payload["broker_backed_entry_auto_adoption"] = auto_adoption.classification
+            if auto_adoption.lifecycle_report_path is not None:
+                payload["paper_lifecycle_report_path"] = str(auto_adoption.lifecycle_report_path)
+                payload["managed_lifecycle_report_path"] = str(auto_adoption.lifecycle_report_path)
         except Exception as exc:  # noqa: BLE001 - compact ledger update must not become submit authority.
             payload["paper_trade_ledger_update_attempted"] = True
             payload["paper_trade_ledger_update_error"] = str(exc)
+        if self._structured_logger is not None:
+            if hasattr(self._structured_logger, "log_filled_bridge_result"):
+                self._structured_logger.log_filled_bridge_result(payload)
+            if hasattr(self._structured_logger, "write_filled_bridge_result_state"):
+                self._structured_logger.write_filled_bridge_result_state(payload)
         self._latest_live_intent_summary = {
             **self._latest_live_intent_summary,
             "filled_bridge_result": payload,

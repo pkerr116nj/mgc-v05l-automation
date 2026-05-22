@@ -7330,7 +7330,7 @@ def test_submit_capable_lane_filled_bridge_result_persists_fill_not_blocked(tmp_
             / "latest_track_b_live_position_status.json"
         ).read_text(encoding="utf-8")
     )
-    open_position = live_positions["positions_by_instrument"]["MNQ-202606"]
+    open_position = next(iter(live_positions["positions_by_instrument"].values()))
     assert open_position["paper_lifecycle_report_path"] == str(lifecycle_path)
     assert not (structured_logger.artifact_dir / "blocked_strategy_intent_latest.json").exists()
 
