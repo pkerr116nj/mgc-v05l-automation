@@ -39,6 +39,8 @@ def test_reconciles_flat_lifecycle_with_fresh_broker_truth_and_unrelated_positio
     assert report["broker_reconciled"] is True
     assert report["track_b_broker_position_count"] == 0
     assert report["track_b_broker_open_order_count"] == 0
+    assert report["open_order_truth_classification"] == "NO_OPEN_ORDERS"
+    assert report["open_order_truth"]["source"] == "OPEN_ORDER_TRUTH_BUILDER_DIRECT"
     reconciled_position = json.loads(config.reconciled_live_position_status_path.read_text(encoding="utf-8"))
     assert reconciled_position["source"] == "BROKER_RECONCILED"
     assert reconciled_position["broker_reconciled"] is True
@@ -433,6 +435,81 @@ def test_blocks_when_track_b_open_order_exists(tmp_path: Path) -> None:
 
     assert report["classification"] == "TRACK_B_PAPER_BROKER_RECONCILIATION_BLOCKED"
     assert any(blocker["code"] == "UNKNOWN_BROKER_OPEN_ORDER" for blocker in report["blockers"])
+    assert report["open_order_truth"]["classification"] == "SUSPICIOUS_ORDER_STATE"
+    assert report["open_order_truth"]["summary"]["suspicious_order_count"] == 1
+
+
+def test_duplicate_close_order_uses_open_order_truth_evidence(tmp_path: Path) -> None:
+    config = _write_base_artifacts(tmp_path)
+    _write_broker_truth(
+        config,
+        positions=[
+            {
+                "account_id": "DUM882026",
+                "symbol": "MNQ",
+                "local_symbol": "MNQM6",
+                "security_type": "FUT",
+                "quantity": "1",
+            }
+        ],
+        open_orders=[
+            {
+                "order_id": 27,
+                "perm_id": 347068546,
+                "action": "SELL",
+                "quantity": "1",
+                "contract": {"symbol": "MNQ", "local_symbol": "MNQM6", "security_type": "FUT"},
+            },
+            {
+                "order_id": 28,
+                "perm_id": 347068547,
+                "action": "SELL",
+                "quantity": "1",
+                "contract": {"symbol": "MNQ", "local_symbol": "MNQM6", "security_type": "FUT"},
+            },
+        ],
+    )
+
+    report = reconcile_track_b_paper_broker_truth(config=config, now=NOW)
+
+    assert report["open_order_truth_classification"] == "DUPLICATE_CLOSE_ORDER"
+    assert report["open_order_truth"]["summary"]["duplicate_close_order_group_count"] == 1
+    assert any(blocker["code"] == "DUPLICATE_CLOSE_ORDER" for blocker in report["blockers"])
+
+
+def test_suspicious_sentinel_order_is_visible_from_open_order_truth(tmp_path: Path) -> None:
+    config = _write_base_artifacts(tmp_path)
+    _write_broker_truth(
+        config,
+        positions=[
+            {
+                "account_id": "DUM882026",
+                "symbol": "MNQ",
+                "local_symbol": "MNQM6",
+                "security_type": "FUT",
+                "quantity": "1",
+            }
+        ],
+        open_orders=[
+            {
+                "order_id": 27,
+                "perm_id": 347068546,
+                "action": "SELL",
+                "quantity": "1",
+                "filled_quantity": "1.7976931348623157e+308",
+                "remaining_quantity": None,
+                "contract": {"symbol": "MNQ", "local_symbol": "MNQM6", "security_type": "FUT"},
+            }
+        ],
+    )
+
+    report = reconcile_track_b_paper_broker_truth(config=config, now=NOW)
+
+    assert report["open_order_truth_classification"] == "SUSPICIOUS_ORDER_STATE"
+    order_state = report["open_order_truth"]["order_states"][0]
+    assert "sentinel_filled_quantity" in order_state["suspicious_reasons"]
+    assert "missing_remaining_quantity" in order_state["suspicious_reasons"]
+    assert any(blocker["code"] == "SUSPICIOUS_ORDER_STATE" for blocker in report["blockers"])
 
 
 def test_known_managed_exit_order_is_not_unknown_open_order_blocker(tmp_path: Path) -> None:
@@ -507,6 +584,8 @@ def test_known_managed_exit_order_is_not_unknown_open_order_blocker(tmp_path: Pa
     assert report["broker_reconciled"] is True
     assert report["known_managed_exit_order_count"] == 1
     assert report["unknown_broker_open_order_count"] == 0
+    assert report["open_order_truth_classification"] == "OPEN_CLOSE_ORDER_WORKING"
+    assert report["open_order_truth"]["summary"]["working_close_order_count"] == 1
     assert report["blockers"] == []
     reconciled_position = json.loads(config.reconciled_live_position_status_path.read_text(encoding="utf-8"))
     assert reconciled_position["known_managed_exit_orders"][0]["broker_order_id"] == "1"

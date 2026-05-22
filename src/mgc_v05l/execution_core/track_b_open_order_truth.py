@@ -86,6 +86,20 @@ def build_track_b_open_order_truth(
 ) -> dict[str, Any]:
     actual_now = _ensure_utc(now or datetime.now(UTC))
     reconciliation = _read_json(config.resolve(config.reconciliation_path))
+    return build_track_b_open_order_truth_from_reconciliation(
+        config=config,
+        reconciliation=reconciliation,
+        now=actual_now,
+    )
+
+
+def build_track_b_open_order_truth_from_reconciliation(
+    *,
+    config: TrackBOpenOrderTruthConfig,
+    reconciliation: Mapping[str, Any],
+    now: datetime | None = None,
+) -> dict[str, Any]:
+    actual_now = _ensure_utc(now or datetime.now(UTC))
     position_truth = _read_json(config.resolve(config.position_truth_path))
     live_position_status = _read_json(config.resolve(config.live_position_status_path))
     market_refs = _market_refs(config=config)
@@ -715,5 +729,6 @@ __all__ = [
     "build_dashboard_open_order_truth_projection",
     "build_open_order_truth_events",
     "build_track_b_open_order_truth",
+    "build_track_b_open_order_truth_from_reconciliation",
     "write_track_b_open_order_truth",
 ]

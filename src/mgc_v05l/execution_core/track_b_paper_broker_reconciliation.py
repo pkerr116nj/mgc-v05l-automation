@@ -22,6 +22,12 @@ from mgc_v05l.execution_core.track_b_exit_safety import (
     bridge_terminal_event_grace_state,
     classify_managed_exit_working_order,
 )
+from mgc_v05l.execution_core.track_b_open_order_truth import (
+    DUPLICATE_CLOSE_ORDER,
+    SUSPICIOUS_ORDER_STATE,
+    TrackBOpenOrderTruthConfig,
+    build_track_b_open_order_truth_from_reconciliation,
+)
 from mgc_v05l.execution_core.track_b_submit_intent_ownership import (
     DEFAULT_TRACK_B_SUBMIT_INTENT_OWNERSHIP_JSONL,
     load_unresolved_submit_intent_ownership_records,
@@ -193,6 +199,15 @@ def reconcile_track_b_paper_broker_truth(
         known_managed_exit_orders=known_managed_exit_orders,
         known_leak_test_entry_orders=known_leak_test_entry_orders,
     )
+    open_order_truth_evidence = _open_order_truth_evidence(
+        config=config,
+        now=actual_now,
+        track_b_positions=track_b_positions,
+        track_b_open_orders=track_b_open_orders,
+        lifecycle_positions=lifecycle_positions,
+        known_managed_exit_orders=known_managed_exit_orders,
+        unknown_track_b_open_orders=unknown_track_b_open_orders,
+    )
     unresolved_submit_intents = _unresolved_submit_intent_ownership_records(config)
     submit_intent_ownership_reconciliation = _submit_intent_ownership_reconciliation_state(
         unresolved_submit_intents=unresolved_submit_intents,
@@ -295,6 +310,16 @@ def reconcile_track_b_paper_broker_truth(
                 "legacy_code": "TRACK_B_BROKER_OPEN_ORDER_PRESENT",
                 "detail": "IBKR broker truth reports Track B futures open orders that are not attributed to a known managed exit or leak-test entry.",
                 "open_orders": unknown_track_b_open_orders,
+                "open_order_truth": _open_order_truth_blocker_context(open_order_truth_evidence),
+            }
+        )
+    open_order_truth_classification = str(open_order_truth_evidence.get("classification") or "")
+    if open_order_truth_classification in {DUPLICATE_CLOSE_ORDER, SUSPICIOUS_ORDER_STATE}:
+        blockers.append(
+            {
+                "code": open_order_truth_classification,
+                "detail": "Open Order Truth reports duplicate or suspicious Track B PAPER open-order state.",
+                "open_order_truth": _open_order_truth_blocker_context(open_order_truth_evidence),
             }
         )
 
@@ -367,6 +392,8 @@ def reconcile_track_b_paper_broker_truth(
         "stale_managed_exit_order_count": len(stale_managed_exit_orders),
         "hard_exit_order_not_marketable_count": len(hard_exit_order_not_marketable),
         "unknown_broker_open_order_count": len(unknown_track_b_open_orders),
+        "open_order_truth_classification": open_order_truth_evidence.get("classification"),
+        "open_order_truth": _open_order_truth_report_context(open_order_truth_evidence),
         "track_b_broker_positions": track_b_positions,
         "track_b_broker_open_orders": track_b_open_orders,
         "known_managed_exit_orders": known_managed_exit_orders,
@@ -472,6 +499,84 @@ def _validate_broker_truth(
         blockers.append({"code": "BROKER_TRUTH_UNSAFE_OPEN_ORDER_BINDING", "field": "auto_open_orders_requested", "path": str(open_orders_path)})
     if open_orders_snapshot.get("order_binding_requested") is True:
         blockers.append({"code": "BROKER_TRUTH_UNSAFE_OPEN_ORDER_BINDING", "field": "order_binding_requested", "path": str(open_orders_path)})
+
+
+def _open_order_truth_evidence(
+    *,
+    config: ReconciliationConfig,
+    now: datetime,
+    track_b_positions: Sequence[Mapping[str, Any]],
+    track_b_open_orders: Sequence[Mapping[str, Any]],
+    lifecycle_positions: Sequence[Mapping[str, Any]],
+    known_managed_exit_orders: Sequence[Mapping[str, Any]],
+    unknown_track_b_open_orders: Sequence[Mapping[str, Any]],
+) -> dict[str, Any]:
+    """Build Open Order Truth from the current in-memory reconciliation rows."""
+
+    try:
+        payload = build_track_b_open_order_truth_from_reconciliation(
+            config=TrackBOpenOrderTruthConfig(
+                repo_root=config.repo_root,
+                dashboard_projection_path=None,
+                reconciliation_path=config.report_path,
+                live_position_status_path=config.live_position_status_path,
+                market_data_root=config.market_data_root,
+                artifact_max_age_seconds=config.max_age_seconds,
+            ),
+            reconciliation={
+                "generated_at": now.isoformat(),
+                "live_money_eligible": False,
+                "paper_proof_invoked": False,
+                "track_b_broker_positions": [dict(row) for row in track_b_positions],
+                "track_b_broker_open_orders": [dict(row) for row in track_b_open_orders],
+                "track_b_lifecycle_positions": [dict(row) for row in lifecycle_positions],
+                "known_managed_exit_orders": [dict(row) for row in known_managed_exit_orders],
+                "unknown_broker_open_orders": [dict(row) for row in unknown_track_b_open_orders],
+                "unresolved_submit_intent_ownership_records": [],
+            },
+            now=now,
+        )
+        return {
+            **payload,
+            "broker_reconciliation_evidence_source": "OPEN_ORDER_TRUTH_BUILDER_DIRECT",
+            "broker_reconciliation_open_order_truth_error": None,
+        }
+    except Exception as exc:  # noqa: BLE001 - reconciliation should preserve core blockers and expose evidence failure.
+        return {
+            "classification": "ORDER_TRUTH_STALE",
+            "summary": {},
+            "order_states": [],
+            "broker_reconciliation_evidence_source": "OPEN_ORDER_TRUTH_BUILDER_ERROR",
+            "broker_reconciliation_open_order_truth_error": str(exc),
+        }
+
+
+def _open_order_truth_report_context(open_order_truth: Mapping[str, Any]) -> dict[str, Any]:
+    return {
+        "classification": open_order_truth.get("classification"),
+        "summary": open_order_truth.get("summary") or {},
+        "source": open_order_truth.get("broker_reconciliation_evidence_source"),
+        "error": open_order_truth.get("broker_reconciliation_open_order_truth_error"),
+        "order_states": open_order_truth.get("order_states") or [],
+        "duplicate_close_order_groups": open_order_truth.get("duplicate_close_order_groups") or [],
+        "broker_flat_with_open_close_order": open_order_truth.get("broker_flat_with_open_close_order") or [],
+        "broker_positions_without_close_order": open_order_truth.get("broker_positions_without_close_order") or [],
+    }
+
+
+def _open_order_truth_blocker_context(open_order_truth: Mapping[str, Any]) -> dict[str, Any]:
+    context = _open_order_truth_report_context(open_order_truth)
+    context["order_states"] = [
+        row
+        for row in context.get("order_states", [])
+        if isinstance(row, Mapping)
+        and (
+            row.get("suspicious") is True
+            or row.get("classification") in {DUPLICATE_CLOSE_ORDER, SUSPICIOUS_ORDER_STATE}
+            or row.get("unknown_open_order") is True
+        )
+    ]
+    return context
 
 
 def _validate_snapshot(
