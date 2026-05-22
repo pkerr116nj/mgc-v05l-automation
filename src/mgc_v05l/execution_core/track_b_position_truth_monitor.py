@@ -13,6 +13,18 @@ from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Any, Mapping
 
+from .track_b_open_order_truth import (
+    BROKER_FLAT_WITH_OPEN_CLOSE_ORDER,
+    BROKER_POSITION_WITHOUT_CLOSE_ORDER,
+    CLOSE_ORDER_MARKETABLE_NOT_FILLED,
+    CLOSE_ORDER_STALE,
+    DEFAULT_OPEN_ORDER_TRUTH_ARTIFACT,
+    DUPLICATE_CLOSE_ORDER,
+    OPEN_CLOSE_ORDER_WORKING,
+    SUSPICIOUS_ORDER_STATE,
+    TrackBOpenOrderTruthConfig,
+    build_track_b_open_order_truth,
+)
 
 DEFAULT_POSITION_TRUTH_ARTIFACT = (
     Path("outputs") / "track_b_execution_core" / "position_truth" / "latest_position_truth.json"
@@ -61,10 +73,6 @@ REVIEW_REQUIRED = "REVIEW_REQUIRED"
 UNKNOWN_OPEN_ORDER = "UNKNOWN_OPEN_ORDER"
 RECONCILIATION_BLOCKED = "RECONCILIATION_BLOCKED"
 
-_CLOSE_ACTIONS = {"SELL", "BUY"}
-_SENTINEL_FILLED_QUANTITY = Decimal("1e100")
-
-
 @dataclass(frozen=True)
 class TrackBPositionTruthMonitorConfig:
     repo_root: Path
@@ -76,6 +84,7 @@ class TrackBPositionTruthMonitorConfig:
     runtime_truth_path: Path = DEFAULT_RUNTIME_TRUTH_ARTIFACT
     headless_status_path: Path = DEFAULT_HEADLESS_STATUS_ARTIFACT
     live_position_status_path: Path = DEFAULT_LIVE_POSITION_STATUS_ARTIFACT
+    open_order_truth_path: Path = DEFAULT_OPEN_ORDER_TRUTH_ARTIFACT
     lifecycle_root: Path = DEFAULT_LIFECYCLE_ROOT
     market_data_root: Path = DEFAULT_MARKET_DATA_ROOT
     suspicious_marketable_seconds: float = 60.0
@@ -98,7 +107,7 @@ def build_track_b_position_truth(
     headless_status = _read_json(config.resolve(config.headless_status_path))
     live_position_status = _read_json(config.resolve(config.live_position_status_path))
     lifecycle_reports = _load_lifecycle_reports(config.resolve(config.lifecycle_root))
-    market_refs = _market_refs(config=config)
+    open_order_truth = _open_order_truth_evidence(config=config, now=actual_now)
 
     broker_positions = _list(reconciliation.get("track_b_broker_positions"))
     open_orders = _list(reconciliation.get("track_b_broker_open_orders"))
@@ -111,6 +120,7 @@ def build_track_b_position_truth(
     unresolved_ownership = _list(reconciliation.get("unresolved_submit_intent_ownership_records"))
     unknown_orders = _list(reconciliation.get("unknown_broker_open_orders"))
     known_managed_exit_orders = _list(reconciliation.get("known_managed_exit_orders"))
+    order_states = _list(open_order_truth.get("order_states"))
 
     symbols = _symbols(
         reconciliation=reconciliation,
@@ -130,11 +140,9 @@ def build_track_b_position_truth(
             unresolved_ownership=unresolved_ownership,
             unknown_orders=unknown_orders,
             known_managed_exit_orders=known_managed_exit_orders,
-            lifecycle_reports=lifecycle_reports,
-            market_ref=market_refs.get(symbol, {}),
+            open_order_truth=open_order_truth,
+            order_states=order_states,
             reconciliation=reconciliation,
-            now=actual_now,
-            suspicious_marketable_seconds=config.suspicious_marketable_seconds,
         )
         for symbol in symbols
     ]
@@ -163,8 +171,21 @@ def build_track_b_position_truth(
         "unresolved_submit_ownership": unresolved_ownership,
         "known_managed_exit_orders": known_managed_exit_orders,
         "unknown_broker_open_orders": unknown_orders,
+        "open_order_truth": {
+            "classification": open_order_truth.get("classification"),
+            "summary": open_order_truth.get("summary") or {},
+            "source": open_order_truth.get("position_truth_evidence_source"),
+            "generated_at": open_order_truth.get("generated_at"),
+            "stale_or_missing": open_order_truth.get("position_truth_open_order_truth_stale_or_missing") is True,
+            "artifact_path": str(config.resolve(config.open_order_truth_path)),
+        },
         "position_states": position_states,
-        "summary": _summary(position_states=position_states, reconciliation=reconciliation, runtime_status=runtime_status),
+        "summary": _summary(
+            position_states=position_states,
+            reconciliation=reconciliation,
+            runtime_status=runtime_status,
+            open_order_truth=open_order_truth,
+        ),
         "event_state": _event_state(position_states=position_states, reconciliation=reconciliation, runtime_status=runtime_status),
         "artifact_paths": {
             "latest": str(config.resolve(config.output_path)),
@@ -178,6 +199,7 @@ def build_track_b_position_truth(
             "runtime_truth": str(config.resolve(config.runtime_truth_path)),
             "headless_status": str(config.resolve(config.headless_status_path)),
             "live_position_status": str(config.resolve(config.live_position_status_path)),
+            "open_order_truth": str(config.resolve(config.open_order_truth_path)),
         },
     }
     return payload
@@ -292,11 +314,9 @@ def _classify_symbol(
     unresolved_ownership: list[dict[str, Any]],
     unknown_orders: list[dict[str, Any]],
     known_managed_exit_orders: list[dict[str, Any]],
-    lifecycle_reports: list[dict[str, Any]],
-    market_ref: Mapping[str, Any],
+    open_order_truth: Mapping[str, Any],
+    order_states: list[dict[str, Any]],
     reconciliation: Mapping[str, Any],
-    now: datetime,
-    suspicious_marketable_seconds: float,
 ) -> dict[str, Any]:
     broker_rows = [row for row in broker_positions if _row_symbol(row) == symbol and _quantity(row) != Decimal("0")]
     order_rows = [row for row in open_orders if _row_symbol(row) == symbol]
@@ -305,28 +325,30 @@ def _classify_symbol(
     ownership_rows = [row for row in unresolved_ownership if _row_symbol(row) == symbol]
     unknown_order_rows = [row for row in unknown_orders if _row_symbol(row) == symbol]
     known_exit_rows = [row for row in known_managed_exit_orders if _row_symbol(row) == symbol]
-    suspicious = _suspicious_orders(
-        orders=order_rows,
-        lifecycle_reports=lifecycle_reports,
-        market_ref=market_ref,
-        now=now,
-        suspicious_marketable_seconds=suspicious_marketable_seconds,
-    )
+    symbol_order_states = [row for row in order_states if str(row.get("symbol") or "").upper() == symbol]
+    suspicious = _suspicious_order_findings_from_open_order_truth(symbol_order_states)
+    close_order_states = [row for row in symbol_order_states if row.get("is_close_order") is True]
+    open_order_truth_classes = {str(row.get("classification") or "") for row in symbol_order_states}
+    open_order_truth_classification = str(open_order_truth.get("classification") or "")
     broker_qty = sum((_quantity(row) for row in broker_rows), Decimal("0"))
     lifecycle_qty = sum((_quantity(row) for row in lifecycle_rows), Decimal("0"))
-    has_close_order = any(_is_close_order(row, lifecycle_reports=lifecycle_reports) for row in order_rows)
+    has_close_order = bool(close_order_states or known_exit_rows)
     broker_lifecycle_match = _broker_lifecycle_match(broker_rows=broker_rows, lifecycle_rows=lifecycle_rows)
 
-    if suspicious:
+    if (
+        suspicious
+        or open_order_truth_classification in {DUPLICATE_CLOSE_ORDER, BROKER_FLAT_WITH_OPEN_CLOSE_ORDER}
+        or open_order_truth_classes & {SUSPICIOUS_ORDER_STATE, CLOSE_ORDER_STALE, CLOSE_ORDER_MARKETABLE_NOT_FILLED}
+    ):
         classification = CLOSE_ORDER_SUSPICIOUS
-        detail = "One or more open close orders have suspicious broker/order state."
+        detail = "Open Order Truth reports suspicious or contradictory close-order state."
     elif review_rows:
         classification = REVIEW_REQUIRED
         detail = "Track B lifecycle has review-required position state."
-    elif unknown_order_rows:
+    elif unknown_order_rows or open_order_truth_classes & {"UNKNOWN_OPEN_ORDER"}:
         classification = UNKNOWN_OPEN_ORDER
         detail = "Broker reports an open order that Track B cannot attribute."
-    elif has_close_order or known_exit_rows:
+    elif has_close_order or open_order_truth_classes & {OPEN_CLOSE_ORDER_WORKING}:
         classification = CLOSE_ORDER_WORKING
         detail = "A managed close order is working."
     elif broker_rows and lifecycle_rows and broker_lifecycle_match:
@@ -358,96 +380,39 @@ def _classify_symbol(
         "known_managed_exit_orders": known_exit_rows,
         "unknown_broker_open_orders": unknown_order_rows,
         "suspicious_order_findings": suspicious,
-        "market_reference": dict(market_ref),
+        "open_order_truth_states": symbol_order_states,
+        "open_order_truth_classification": open_order_truth_classification,
+        "open_order_truth_summary": open_order_truth.get("summary") or {},
+        "open_order_truth_stale_or_missing": open_order_truth.get("position_truth_open_order_truth_stale_or_missing") is True,
         "open_managed_valid": classification == OPEN_MANAGED_MATCHED,
     }
 
 
-def _suspicious_orders(
-    *,
-    orders: list[dict[str, Any]],
-    lifecycle_reports: list[dict[str, Any]],
-    market_ref: Mapping[str, Any],
-    now: datetime,
-    suspicious_marketable_seconds: float,
-) -> list[dict[str, Any]]:
+def _suspicious_order_findings_from_open_order_truth(order_states: list[dict[str, Any]]) -> list[dict[str, Any]]:
     findings: list[dict[str, Any]] = []
-    for order in orders:
-        reasons: list[str] = []
-        filled = _decimal_or_none(order.get("filled_quantity") or order.get("filled"))
-        if filled is not None and abs(filled) >= _SENTINEL_FILLED_QUANTITY:
-            reasons.append("sentinel_filled_quantity")
-        if order.get("remaining_quantity") in {None, ""}:
-            reasons.append("missing_remaining_quantity")
-        lifecycle = _lifecycle_report_for_order(order=order, lifecycle_reports=lifecycle_reports)
-        close_attempt = _mapping(lifecycle.get("close_submit_attempt"))
-        diagnostics = _mapping(close_attempt.get("submit_diagnostics"))
-        if close_attempt and diagnostics.get("execDetails_seen") is False:
-            reasons.append("open_close_order_without_execDetails")
-        if _is_marketable_unfilled_beyond_threshold(
-            order=order,
-            lifecycle=close_attempt,
-            market_ref=market_ref,
-            now=now,
-            threshold_seconds=suspicious_marketable_seconds,
-        ):
-            reasons.append("marketable_unfilled_beyond_threshold")
-        if reasons:
-            findings.append(
-                {
-                    "broker_order_id": order.get("broker_order_id") or order.get("order_id"),
-                    "client_id": order.get("client_id"),
-                    "perm_id": order.get("perm_id"),
-                    "local_symbol": order.get("local_symbol"),
-                    "action": order.get("action"),
-                    "limit_price": order.get("limit_price") or order.get("order_limit_price"),
-                    "status": order.get("status"),
-                    "reasons": reasons,
-                }
-            )
+    for state in order_states:
+        reasons = list(state.get("suspicious_reasons") or [])
+        condition_flags = list(state.get("condition_flags") or [])
+        classification = str(state.get("classification") or "")
+        if classification in {SUSPICIOUS_ORDER_STATE, CLOSE_ORDER_STALE, CLOSE_ORDER_MARKETABLE_NOT_FILLED}:
+            reasons.extend(flag for flag in condition_flags if flag not in reasons)
+        if not reasons:
+            continue
+        order = _mapping(state.get("order"))
+        findings.append(
+            {
+                "broker_order_id": state.get("broker_order_id") or order.get("broker_order_id") or order.get("order_id"),
+                "client_id": state.get("client_id") or order.get("client_id"),
+                "perm_id": state.get("perm_id") or order.get("perm_id"),
+                "local_symbol": state.get("local_symbol") or order.get("local_symbol"),
+                "action": state.get("action") or order.get("action"),
+                "limit_price": state.get("limit_price") or order.get("limit_price") or order.get("order_limit_price"),
+                "status": state.get("status") or order.get("status"),
+                "reasons": reasons,
+                "source": "OPEN_ORDER_TRUTH",
+            }
+        )
     return findings
-
-
-def _is_marketable_unfilled_beyond_threshold(
-    *,
-    order: Mapping[str, Any],
-    lifecycle: Mapping[str, Any],
-    market_ref: Mapping[str, Any],
-    now: datetime,
-    threshold_seconds: float,
-) -> bool:
-    limit_price = _decimal_or_none(order.get("limit_price") or order.get("order_limit_price"))
-    reference = _decimal_or_none(market_ref.get("reference_price"))
-    if limit_price is None or reference is None:
-        return False
-    action = str(order.get("action") or "").upper()
-    marketable = (action == "SELL" and reference >= limit_price) or (action == "BUY" and reference <= limit_price)
-    if not marketable:
-        return False
-    submitted_at = _parse_time(lifecycle.get("submitted_at") or order.get("submitted_at") or order.get("created_at"))
-    if submitted_at is None:
-        return False
-    return (now - submitted_at).total_seconds() >= float(threshold_seconds)
-
-
-def _lifecycle_report_for_order(*, order: Mapping[str, Any], lifecycle_reports: list[dict[str, Any]]) -> dict[str, Any]:
-    order_id = str(order.get("broker_order_id") or order.get("order_id") or "")
-    if not order_id:
-        return {}
-    for report in lifecycle_reports:
-        close_attempt = _mapping(report.get("close_submit_attempt"))
-        if str(close_attempt.get("broker_order_id") or "") == order_id:
-            return report
-    return {}
-
-
-def _is_close_order(row: Mapping[str, Any], *, lifecycle_reports: list[dict[str, Any]]) -> bool:
-    action = str(row.get("action") or "").upper()
-    if action not in _CLOSE_ACTIONS:
-        return False
-    if _lifecycle_report_for_order(order=row, lifecycle_reports=lifecycle_reports):
-        return True
-    return str(row.get("track_b_root") or row.get("symbol") or "").upper() in {"MGC", "MNQ", "GC", "NQ", "ES", "MES"}
 
 
 def _review_required_positions(
@@ -466,6 +431,39 @@ def _review_required_positions(
         if report.get("review_required") is True or str(report.get("final_position_status") or "").upper() == "REVIEW_REQUIRED":
             reports.append(report)
     return reports
+
+
+def _open_order_truth_evidence(*, config: TrackBPositionTruthMonitorConfig, now: datetime) -> dict[str, Any]:
+    """Return execution_core Open Order Truth evidence without using dashboard projections."""
+
+    try:
+        payload = build_track_b_open_order_truth(
+            config=TrackBOpenOrderTruthConfig(
+                repo_root=config.repo_root,
+                output_path=config.open_order_truth_path,
+                dashboard_projection_path=None,
+                reconciliation_path=config.reconciliation_path,
+                position_truth_path=config.output_path,
+                live_position_status_path=config.live_position_status_path,
+                market_data_root=config.market_data_root,
+                lifecycle_root=config.lifecycle_root,
+                marketable_unfilled_seconds=config.suspicious_marketable_seconds,
+            ),
+            now=now,
+        )
+        return {
+            **payload,
+            "position_truth_evidence_source": "OPEN_ORDER_TRUTH_BUILDER_DIRECT",
+            "position_truth_open_order_truth_stale_or_missing": False,
+        }
+    except Exception as exc:  # noqa: BLE001 - position truth must fail loud in-artifact.
+        artifact = _read_json(config.resolve(config.open_order_truth_path))
+        return {
+            **artifact,
+            "position_truth_evidence_source": "OPEN_ORDER_TRUTH_AUTHORITY_ARTIFACT_FALLBACK",
+            "position_truth_open_order_truth_stale_or_missing": True,
+            "position_truth_open_order_truth_error": str(exc),
+        }
 
 
 def _runtime_status(*, runtime_truth: Mapping[str, Any], headless_status: Mapping[str, Any], now: datetime) -> dict[str, Any]:
@@ -499,19 +497,35 @@ def _runtime_status(*, runtime_truth: Mapping[str, Any], headless_status: Mappin
     }
 
 
-def _summary(*, position_states: list[dict[str, Any]], reconciliation: Mapping[str, Any], runtime_status: Mapping[str, Any]) -> dict[str, Any]:
+def _summary(
+    *,
+    position_states: list[dict[str, Any]],
+    reconciliation: Mapping[str, Any],
+    runtime_status: Mapping[str, Any],
+    open_order_truth: Mapping[str, Any],
+) -> dict[str, Any]:
     counts: dict[str, int] = {}
     for state in position_states:
         classification = str(state.get("classification") or "UNKNOWN")
         counts[classification] = counts.get(classification, 0) + 1
+    open_order_summary = _mapping(open_order_truth.get("summary"))
     return {
         "overall_classification": "CLEAN_FLAT_READY" if reconciliation.get("broker_reconciled") is True and all(s.get("classification") == FLAT_CLEAN for s in position_states) else "ATTENTION_REQUIRED",
         "classification_counts": counts,
         "broker_reconciled": reconciliation.get("broker_reconciled"),
         "runtime_running": runtime_status.get("runtime_running"),
         "position_count": sum(1 for state in position_states if _decimal_or_none(state.get("broker_quantity")) not in {None, Decimal("0")}),
-        "open_order_count": sum(len(_list(state.get("open_orders"))) for state in position_states),
-        "suspicious_order_count": sum(len(_list(state.get("suspicious_order_findings"))) for state in position_states),
+        "open_order_count": int(open_order_summary.get("open_order_count") or 0),
+        "suspicious_order_count": int(open_order_summary.get("suspicious_order_count") or 0),
+        "working_close_order_count": int(open_order_summary.get("working_close_order_count") or 0),
+        "duplicate_close_order_group_count": int(open_order_summary.get("duplicate_close_order_group_count") or 0),
+        "broker_flat_with_open_close_order_count": int(
+            open_order_summary.get("broker_flat_with_open_close_order_count") or 0
+        ),
+        "broker_position_without_close_order_count": int(
+            open_order_summary.get("broker_position_without_close_order_count") or 0
+        ),
+        "open_order_truth_classification": open_order_truth.get("classification"),
     }
 
 
@@ -603,27 +617,6 @@ def _symbols(
             if symbol:
                 values.add(symbol)
     return sorted(values or {"MGC", "MNQ"})
-
-
-def _market_refs(*, config: TrackBPositionTruthMonitorConfig) -> dict[str, dict[str, Any]]:
-    refs: dict[str, dict[str, Any]] = {}
-    for symbol_dir in config.resolve(config.market_data_root).glob("*"):
-        if not symbol_dir.is_dir():
-            continue
-        symbol = symbol_dir.name.upper()
-        payload = _read_json(symbol_dir / "1m" / "latest_runtime_candles.json")
-        bars = _list(payload.get("candles") or payload.get("bars"))
-        if not bars:
-            continue
-        last = bars[-1]
-        close = last.get("close") or last.get("last_price")
-        refs[symbol] = {
-            "reference_price": close,
-            "reference_source": str(symbol_dir / "1m" / "latest_runtime_candles.json"),
-            "bar_end": last.get("bar_end") or last.get("timestamp") or last.get("candle_timestamp"),
-            "generated_at": payload.get("generated_at"),
-        }
-    return refs
 
 
 def _load_lifecycle_reports(root: Path) -> list[dict[str, Any]]:

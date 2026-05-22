@@ -51,6 +51,9 @@ DEFAULT_LIVE_POSITION_STATUS_ARTIFACT = (
     / "latest_track_b_live_position_status.json"
 )
 DEFAULT_MARKET_DATA_ROOT = Path("outputs") / "track_b_execution_core" / "phase1_runtime_market_data"
+DEFAULT_LIFECYCLE_ROOT = (
+    Path("outputs") / "track_b_execution_core" / "track_b_strategy_managed_paper_lifecycle"
+)
 
 _SENTINEL_FILLED_QUANTITY = Decimal("1e100")
 _WORKING_ORDER_STATUSES = {"SUBMITTED", "PRESUBMITTED", "PENDING_SUBMIT", "APIPENDING"}
@@ -67,6 +70,7 @@ class TrackBOpenOrderTruthConfig:
     position_truth_path: Path = DEFAULT_POSITION_TRUTH_ARTIFACT
     live_position_status_path: Path = DEFAULT_LIVE_POSITION_STATUS_ARTIFACT
     market_data_root: Path = DEFAULT_MARKET_DATA_ROOT
+    lifecycle_root: Path = DEFAULT_LIFECYCLE_ROOT
     artifact_max_age_seconds: float = 180.0
     close_order_stale_seconds: float = 900.0
     marketable_unfilled_seconds: float = 60.0
@@ -85,6 +89,7 @@ def build_track_b_open_order_truth(
     position_truth = _read_json(config.resolve(config.position_truth_path))
     live_position_status = _read_json(config.resolve(config.live_position_status_path))
     market_refs = _market_refs(config=config)
+    lifecycle_reports = _load_lifecycle_reports(config.resolve(config.lifecycle_root))
 
     open_orders = _list(reconciliation.get("track_b_broker_open_orders"))
     broker_positions = _list(reconciliation.get("track_b_broker_positions"))
@@ -102,6 +107,7 @@ def build_track_b_open_order_truth(
             lifecycle_positions=lifecycle_positions,
             unknown_orders=unknown_orders,
             known_managed_exit_orders=known_managed_exit_orders,
+            lifecycle_reports=lifecycle_reports,
             market_ref=market_refs.get(_row_symbol(order), {}),
             now=actual_now,
             close_order_stale_seconds=config.close_order_stale_seconds,
@@ -190,6 +196,7 @@ def build_track_b_open_order_truth(
             "reconciliation": str(config.resolve(config.reconciliation_path)),
             "position_truth": str(config.resolve(config.position_truth_path)),
             "live_position_status": str(config.resolve(config.live_position_status_path)),
+            "lifecycle_root": str(config.resolve(config.lifecycle_root)),
         },
     }
     return payload
@@ -265,12 +272,14 @@ def _classify_order(
     lifecycle_positions: list[dict[str, Any]],
     unknown_orders: list[dict[str, Any]],
     known_managed_exit_orders: list[dict[str, Any]],
+    lifecycle_reports: list[dict[str, Any]],
     market_ref: Mapping[str, Any],
     now: datetime,
     close_order_stale_seconds: float,
     marketable_unfilled_seconds: float,
 ) -> dict[str, Any]:
-    reasons = _suspicious_reasons(order=order)
+    lifecycle_report = _lifecycle_report_for_order(order=order, lifecycle_reports=lifecycle_reports)
+    reasons = _suspicious_reasons(order=order, lifecycle_report=lifecycle_report)
     is_close_order = _is_close_order(
         order=order,
         broker_positions=broker_positions,
@@ -279,6 +288,10 @@ def _classify_order(
     )
     is_unknown = _order_in(order, unknown_orders)
     age_seconds = _order_age_seconds(order, now)
+    close_attempt = _mapping(lifecycle_report.get("close_submit_attempt"))
+    close_attempt_age = _age_seconds(close_attempt.get("submitted_at"), now)
+    if close_attempt_age is not None:
+        age_seconds = max(age_seconds or 0.0, close_attempt_age)
     marketable = _is_marketable(order=order, market_ref=market_ref)
     stale = bool(is_close_order and age_seconds is not None and age_seconds >= float(close_order_stale_seconds))
     flat_with_close = bool(is_close_order and not _matching_broker_positions(order, broker_positions))
@@ -356,13 +369,17 @@ def _overall_classification(
     return NO_OPEN_ORDERS
 
 
-def _suspicious_reasons(*, order: Mapping[str, Any]) -> list[str]:
+def _suspicious_reasons(*, order: Mapping[str, Any], lifecycle_report: Mapping[str, Any]) -> list[str]:
     reasons: list[str] = []
     filled = _decimal_or_none(order.get("filled_quantity") or order.get("filled"))
     if filled is not None and abs(filled) >= _SENTINEL_FILLED_QUANTITY:
         reasons.append("sentinel_filled_quantity")
     if order.get("remaining_quantity") in {None, ""}:
         reasons.append("missing_remaining_quantity")
+    close_attempt = _mapping(lifecycle_report.get("close_submit_attempt"))
+    diagnostics = _mapping(close_attempt.get("submit_diagnostics"))
+    if close_attempt and diagnostics.get("execDetails_seen") is False:
+        reasons.append("open_close_order_without_execDetails")
     return reasons
 
 
@@ -568,6 +585,31 @@ def _market_refs(*, config: TrackBOpenOrderTruthConfig) -> dict[str, dict[str, A
             "generated_at": payload.get("generated_at"),
         }
     return refs
+
+
+def _load_lifecycle_reports(root: Path) -> list[dict[str, Any]]:
+    reports: list[dict[str, Any]] = []
+    if not root.exists():
+        return reports
+    for path in root.glob("*/track_b_strategy_managed_paper_lifecycle_report.json"):
+        payload = _read_json(path)
+        if payload:
+            reports.append({**payload, "report_json_path": str(path)})
+    latest = _read_json(root / "latest_track_b_strategy_managed_paper_lifecycle_report.json")
+    if latest:
+        reports.append({**latest, "report_json_path": str(root / "latest_track_b_strategy_managed_paper_lifecycle_report.json")})
+    return reports
+
+
+def _lifecycle_report_for_order(*, order: Mapping[str, Any], lifecycle_reports: list[dict[str, Any]]) -> dict[str, Any]:
+    order_id = str(order.get("broker_order_id") or order.get("order_id") or "")
+    if not order_id:
+        return {}
+    for report in lifecycle_reports:
+        close_attempt = _mapping(report.get("close_submit_attempt"))
+        if str(close_attempt.get("broker_order_id") or "") == order_id:
+            return report
+    return {}
 
 
 def _contract_key(row: Mapping[str, Any]) -> str:

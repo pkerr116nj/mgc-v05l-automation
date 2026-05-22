@@ -6,6 +6,7 @@ from pathlib import Path
 
 from mgc_v05l.execution_core.track_b_position_truth_monitor import (
     CLOSE_ORDER_SUSPICIOUS,
+    CLOSE_ORDER_WORKING,
     FLAT_CLEAN,
     OPEN_MANAGED_MATCHED,
     TrackBPositionTruthMonitorConfig,
@@ -25,6 +26,8 @@ def test_position_truth_reports_clean_flat(tmp_path: Path) -> None:
     assert payload["read_only"] is True
     assert payload["submit_authority"] is False
     assert payload["summary"]["overall_classification"] == "CLEAN_FLAT_READY"
+    assert payload["open_order_truth"]["classification"] == "NO_OPEN_ORDERS"
+    assert payload["open_order_truth"]["source"] == "OPEN_ORDER_TRUTH_BUILDER_DIRECT"
     assert payload["reconciliation"]["classification"] == "TRACK_B_PAPER_BROKER_RECONCILED"
     assert payload["live_money_eligible"] is False
     assert {row["classification"] for row in payload["position_states"]} == {FLAT_CLEAN}
@@ -42,7 +45,48 @@ def test_position_truth_flags_suspicious_working_close_order(tmp_path: Path) -> 
     assert "missing_remaining_quantity" in reasons
     assert "open_close_order_without_execDetails" in reasons
     assert "marketable_unfilled_beyond_threshold" in reasons
+    assert mnq["suspicious_order_findings"][0]["source"] == "OPEN_ORDER_TRUTH"
     assert payload["summary"]["suspicious_order_count"] == 1
+    assert payload["open_order_truth"]["classification"] == "SUSPICIOUS_ORDER_STATE"
+
+
+def test_position_truth_flags_working_close_order_via_open_order_truth(tmp_path: Path) -> None:
+    _seed_working_mnq_close(tmp_path)
+
+    payload = build_track_b_position_truth(config=TrackBPositionTruthMonitorConfig(repo_root=tmp_path), now=NOW)
+    mnq = _state(payload, "MNQ")
+
+    assert payload["open_order_truth"]["classification"] == "OPEN_CLOSE_ORDER_WORKING"
+    assert payload["summary"]["working_close_order_count"] == 1
+    assert mnq["classification"] == CLOSE_ORDER_WORKING
+    assert mnq["open_order_truth_states"][0]["classification"] == "OPEN_CLOSE_ORDER_WORKING"
+
+
+def test_position_truth_handles_missing_open_order_truth_artifact_with_builder(tmp_path: Path) -> None:
+    _seed_working_mnq_close(tmp_path)
+
+    payload = build_track_b_position_truth(config=TrackBPositionTruthMonitorConfig(repo_root=tmp_path), now=NOW)
+
+    assert payload["open_order_truth"]["source"] == "OPEN_ORDER_TRUTH_BUILDER_DIRECT"
+    assert payload["open_order_truth"]["stale_or_missing"] is False
+    assert not (tmp_path / "outputs" / "track_b_execution_core" / "open_order_truth" / "latest_open_order_truth.json").exists()
+
+
+def test_position_truth_fails_loud_when_open_order_truth_builder_unavailable(tmp_path: Path, monkeypatch) -> None:
+    _seed_clean(tmp_path)
+
+    def _raise(*, config, now):  # noqa: ANN001
+        raise RuntimeError("open order truth unavailable")
+
+    monkeypatch.setattr(
+        "mgc_v05l.execution_core.track_b_position_truth_monitor.build_track_b_open_order_truth",
+        _raise,
+    )
+
+    payload = build_track_b_position_truth(config=TrackBPositionTruthMonitorConfig(repo_root=tmp_path), now=NOW)
+
+    assert payload["open_order_truth"]["source"] == "OPEN_ORDER_TRUTH_AUTHORITY_ARTIFACT_FALLBACK"
+    assert payload["open_order_truth"]["stale_or_missing"] is True
 
 
 def test_stale_runtime_truth_does_not_report_runtime_running(tmp_path: Path) -> None:
@@ -112,6 +156,7 @@ def test_authority_artifact_and_event_log_live_under_execution_core(tmp_path: Pa
 def test_critical_runtime_paths_do_not_consume_dashboard_projection_as_authority() -> None:
     repo_root = Path(__file__).resolve().parents[3]
     forbidden = "outputs/operator_dashboard/runtime/latest_track_b_position_truth.json"
+    forbidden_open_order_truth = "outputs/operator_dashboard/runtime/latest_track_b_open_order_truth.json"
     critical_paths = [
         repo_root / "src/mgc_v05l/app/probationary_runtime.py",
         repo_root / "src/mgc_v05l/execution_core/track_b_readiness_state.py",
@@ -121,7 +166,12 @@ def test_critical_runtime_paths_do_not_consume_dashboard_projection_as_authority
         repo_root / "src/mgc_v05l/app/track_b_readiness_maintenance_supervisor.py",
     ]
 
-    offenders = [str(path) for path in critical_paths if forbidden in path.read_text(encoding="utf-8")]
+    offenders = [
+        str(path)
+        for path in critical_paths
+        if forbidden in path.read_text(encoding="utf-8")
+        or forbidden_open_order_truth in path.read_text(encoding="utf-8")
+    ]
 
     assert offenders == []
 
@@ -261,6 +311,38 @@ def _seed_suspicious_mnq_close(root: Path) -> None:
             },
         },
     )
+
+
+def _seed_working_mnq_close(root: Path) -> None:
+    _seed_clean(root)
+    payload = json.loads(_reconciliation_path(root).read_text(encoding="utf-8"))
+    order = {
+        "symbol": "MNQ",
+        "track_b_root": "MNQ",
+        "local_symbol": "MNQM6",
+        "broker_order_id": 27,
+        "client_id": 17086,
+        "perm_id": 347068546,
+        "action": "SELL",
+        "quantity": "1",
+        "filled_quantity": "0",
+        "remaining_quantity": "1",
+        "order_type": "LMT",
+        "limit_price": "29555.5",
+        "status": "Submitted",
+    }
+    payload.update(
+        {
+            "classification": "BROKER_TRUTH_SETTLEMENT_CONTRADICTORY_STATE",
+            "broker_reconciled": False,
+            "track_b_broker_positions": [
+                {"symbol": "MNQ", "track_b_root": "MNQ", "local_symbol": "MNQM6", "quantity": "1", "average_cost": "59220.12"}
+            ],
+            "track_b_broker_open_orders": [order],
+            "review_required_count": 0,
+        }
+    )
+    _write_json(_reconciliation_path(root), payload)
 
 
 def _state(payload: dict, symbol: str) -> dict:
