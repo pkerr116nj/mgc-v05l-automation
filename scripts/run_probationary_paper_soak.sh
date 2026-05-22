@@ -42,7 +42,12 @@ CONFIG_OVERRIDE_RAW="${MGC_PROBATIONARY_PAPER_CONFIG_PATHS:-}"
 LAUNCH_PYTHON_BIN="${MGC_PROBATIONARY_PAPER_LAUNCH_PYTHON_BIN:-${PYTHON_BIN}}"
 BACKGROUND_VERIFY_ATTEMPTS="${MGC_PROBATIONARY_PAPER_BACKGROUND_VERIFY_ATTEMPTS:-60}"
 BACKGROUND_VERIFY_POLL_SECONDS="${MGC_PROBATIONARY_PAPER_BACKGROUND_VERIFY_POLL_SECONDS:-1}"
+BACKGROUND_OBSERVATION_WINDOW_SECONDS="${MGC_PROBATIONARY_PAPER_BACKGROUND_OBSERVATION_WINDOW_SECONDS:-5}"
 RUNTIME_TRUTH_FILE="${MGC_PROBATIONARY_PAPER_RUNTIME_TRUTH_FILE:-${DEFAULT_RUNTIME_TRUTH_FILE}}"
+LAUNCH_FIRST_TRUTH_GENERATED_AT=""
+LAUNCH_SECOND_TRUTH_GENERATED_AT=""
+LAUNCH_SUSTAINED_CONVERGENCE_CONFIRMED="false"
+LAUNCH_FINAL_PID_ALIVE="false"
 
 ARGS=()
 CONFIG_SET=0
@@ -216,6 +221,11 @@ write_launch_status() {
   LAUNCH_PYTHON_BIN="${LAUNCH_PYTHON_BIN}" \
   LAUNCH_BACKGROUND_VERIFY_ATTEMPTS="${BACKGROUND_VERIFY_ATTEMPTS}" \
   LAUNCH_BACKGROUND_VERIFY_POLL_SECONDS="${BACKGROUND_VERIFY_POLL_SECONDS}" \
+  LAUNCH_OBSERVATION_WINDOW_SECONDS="${BACKGROUND_OBSERVATION_WINDOW_SECONDS}" \
+  LAUNCH_FIRST_TRUTH_GENERATED_AT="${LAUNCH_FIRST_TRUTH_GENERATED_AT}" \
+  LAUNCH_SECOND_TRUTH_GENERATED_AT="${LAUNCH_SECOND_TRUTH_GENERATED_AT}" \
+  LAUNCH_SUSTAINED_CONVERGENCE_CONFIRMED="${LAUNCH_SUSTAINED_CONVERGENCE_CONFIRMED}" \
+  LAUNCH_FINAL_PID_ALIVE="${LAUNCH_FINAL_PID_ALIVE}" \
   "${PYTHON_BIN}" -c '
 import json
 import os
@@ -237,6 +247,11 @@ payload = {
     "child_exit_code": int(os.environ["LAUNCH_CHILD_EXIT_CODE"]) if os.environ.get("LAUNCH_CHILD_EXIT_CODE", "").isdigit() else None,
     "background_verify_attempts": int(os.environ["LAUNCH_BACKGROUND_VERIFY_ATTEMPTS"]),
     "background_verify_poll_seconds": float(os.environ["LAUNCH_BACKGROUND_VERIFY_POLL_SECONDS"]),
+    "observation_window_seconds": float(os.environ["LAUNCH_OBSERVATION_WINDOW_SECONDS"]),
+    "first_truth_generated_at": os.environ.get("LAUNCH_FIRST_TRUTH_GENERATED_AT") or None,
+    "second_truth_generated_at": os.environ.get("LAUNCH_SECOND_TRUTH_GENERATED_AT") or None,
+    "sustained_convergence_confirmed": os.environ.get("LAUNCH_SUSTAINED_CONVERGENCE_CONFIRMED", "").lower() == "true",
+    "final_pid_alive": os.environ.get("LAUNCH_FINAL_PID_ALIVE", "").lower() == "true",
     "config_paths": config_paths,
     "paper_only": True,
     "live_money_eligible": False,
@@ -252,21 +267,49 @@ with open(os.environ["LAUNCH_STATUS_FILE"], "w", encoding="utf-8") as fh:
 background_child_stayed_alive() {
   local pid="$1"
   local launched_at_epoch="$2"
+  local first_truth=""
+  local second_truth=""
+  local first_truth_seen_epoch=""
   local attempt=0
   while [[ ${attempt} -lt ${BACKGROUND_VERIFY_ATTEMPTS} ]]; do
     if ! process_alive_not_zombie "${pid}"; then
+      LAUNCH_FINAL_PID_ALIVE="false"
       return 1
     fi
-    if runtime_truth_converged_for_pid "${pid}" "${launched_at_epoch}"; then
-      return 0
+    if runtime_process_identity_matches "${pid}"; then
+      truth_generated_at="$(runtime_truth_generated_at_for_pid "${pid}" "${launched_at_epoch}" || true)"
+      if [[ -n "${truth_generated_at}" ]]; then
+        if [[ -z "${first_truth}" ]]; then
+          first_truth="${truth_generated_at}"
+          first_truth_seen_epoch="$(date +%s)"
+          LAUNCH_FIRST_TRUTH_GENERATED_AT="${first_truth}"
+        elif [[ "${truth_generated_at}" != "${first_truth}" ]]; then
+          second_truth="${truth_generated_at}"
+          LAUNCH_SECOND_TRUTH_GENERATED_AT="${second_truth}"
+          if (( $(date +%s) - first_truth_seen_epoch >= BACKGROUND_OBSERVATION_WINDOW_SECONDS )); then
+            if process_alive_not_zombie "${pid}" && runtime_process_identity_matches "${pid}"; then
+              LAUNCH_SUSTAINED_CONVERGENCE_CONFIRMED="true"
+              LAUNCH_FINAL_PID_ALIVE="true"
+              return 0
+            fi
+            LAUNCH_FINAL_PID_ALIVE="false"
+            return 1
+          fi
+        fi
+      fi
     fi
     sleep "${BACKGROUND_VERIFY_POLL_SECONDS}"
     attempt=$((attempt + 1))
   done
-  runtime_truth_converged_for_pid "${pid}" "${launched_at_epoch}"
+  if process_alive_not_zombie "${pid}"; then
+    LAUNCH_FINAL_PID_ALIVE="true"
+  else
+    LAUNCH_FINAL_PID_ALIVE="false"
+  fi
+  return 1
 }
 
-runtime_truth_converged_for_pid() {
+runtime_truth_generated_at_for_pid() {
   local pid="$1"
   local launched_at_epoch="$2"
   if [[ ! -f "${RUNTIME_TRUTH_FILE}" ]]; then
@@ -306,9 +349,45 @@ if payload.get("freshness_state") != "FRESH":
     raise SystemExit(1)
 if payload.get("writer_authority") != "SINGLE_WRITER":
     raise SystemExit(1)
+duplicate_writer_detection = payload.get("duplicate_writer_detection")
+if isinstance(duplicate_writer_detection, dict) and duplicate_writer_detection.get("duplicate_writer_detected"):
+    raise SystemExit(1)
 if payload.get("runtime_mode") != "PAPER":
     raise SystemExit(1)
 if payload.get("live_money_eligible") is not False:
+    raise SystemExit(1)
+print(generated.astimezone(timezone.utc).isoformat())
+raise SystemExit(0)
+PY
+}
+
+runtime_process_identity_matches() {
+  local pid="$1"
+  "${PYTHON_BIN}" - <<'PY' "${pid}" "${REPO_ROOT}"
+import subprocess
+import sys
+from pathlib import Path
+
+pid = sys.argv[1]
+repo_root = Path(sys.argv[2]).resolve()
+try:
+    command = subprocess.check_output(["ps", "-p", pid, "-o", "command="], text=True).strip()
+except (OSError, subprocess.CalledProcessError):
+    raise SystemExit(1)
+if "mgc_v05l.app.main" not in command or "probationary-paper-soak" not in command:
+    raise SystemExit(1)
+try:
+    cwd_output = subprocess.check_output(["lsof", "-a", "-p", pid, "-d", "cwd", "-Fn"], text=True).strip()
+except (OSError, subprocess.CalledProcessError):
+    raise SystemExit(1)
+cwd_rows = [line[1:] for line in cwd_output.splitlines() if line.startswith("n")]
+if not cwd_rows:
+    raise SystemExit(1)
+try:
+    cwd = Path(cwd_rows[-1]).resolve()
+except OSError:
+    raise SystemExit(1)
+if cwd != repo_root:
     raise SystemExit(1)
 raise SystemExit(0)
 PY
@@ -447,7 +526,11 @@ if [[ ${BACKGROUND} -eq 1 ]]; then
     child_exit_code=$?
     set -e
     remove_pid_file_if_matches "${paper_pid}"
-    write_launch_status "RUNTIME_TRUTH_NOT_CONVERGED" "${paper_pid}" "background child stayed alive but did not produce fresh runtime truth/heartbeat before launch verification timed out" "${child_exit_code}"
+    if [[ -n "${LAUNCH_FIRST_TRUTH_GENERATED_AT}" ]]; then
+      write_launch_status "RUNTIME_TRUTH_NOT_ADVANCING" "${paper_pid}" "background child stayed alive but runtime truth did not advance during launch observation window" "${child_exit_code}"
+    else
+      write_launch_status "RUNTIME_TRUTH_NOT_CONVERGED" "${paper_pid}" "background child stayed alive but did not produce fresh runtime truth/heartbeat before launch verification timed out" "${child_exit_code}"
+    fi
     echo "Probationary paper soak failed to produce runtime truth in background." >&2
     echo "Launch status: ${LAUNCH_STATUS_FILE}" >&2
     echo "Log file: ${LOG_FILE}" >&2
@@ -458,7 +541,10 @@ if [[ ${BACKGROUND} -eq 1 ]]; then
   child_exit_code=$?
   set -e
   remove_pid_file_if_matches "${paper_pid}"
-  if background_child_reached_preflight "${paper_pid}"; then
+  LAUNCH_FINAL_PID_ALIVE="false"
+  if [[ -n "${LAUNCH_FIRST_TRUTH_GENERATED_AT}" ]]; then
+    write_launch_status "RUNTIME_EXITED_AFTER_INITIAL_TRUTH" "${paper_pid}" "background child emitted initial runtime truth but exited before sustained runtime convergence" "${child_exit_code}"
+  elif background_child_reached_preflight "${paper_pid}"; then
     write_launch_status "RUNTIME_EXITED_AFTER_PREFLIGHT" "${paper_pid}" "background child exited after Phase-1 preflight but before runtime truth/heartbeat convergence" "${child_exit_code}"
   else
     write_launch_status "PROBATIONARY_PAPER_BACKGROUND_START_FAILED" "${paper_pid}" "background child exited before launch verification completed" "${child_exit_code}"
