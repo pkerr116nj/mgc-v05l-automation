@@ -29,6 +29,7 @@ from .track_b_paper_trade_ledger import DEFAULT_TRACK_B_PAPER_TRADE_LEDGER_OUTPU
 DEFAULT_TRACK_B_STRATEGY_MANAGED_PAPER_LIFECYCLE_OUTPUT_ROOT = Path(
     "outputs/track_b_execution_core/track_b_strategy_managed_paper_lifecycle"
 )
+CLOSE_ORDER_ALREADY_WORKING = "CLOSE_ORDER_ALREADY_WORKING"
 
 
 class TrackBManagedPaperLifecycleClassification(str, Enum):
@@ -947,6 +948,25 @@ def _submit_managed_limit_order(
         adapter.require_configured_account()
         open_orders = adapter.refresh_open_orders(contract_key=config.contract_key)
         if open_orders:
+            existing_close = (
+                _existing_working_close_order(
+                    config=config,
+                    close_intent=intent_payload,
+                    open_orders=open_orders,
+                )
+                if intent_kind is IntentKind.CLOSE
+                else None
+            )
+            if existing_close is not None:
+                return {
+                    "submitted": False,
+                    "submit_attempted": False,
+                    "broker_state_mutated": False,
+                    "classification": CLOSE_ORDER_ALREADY_WORKING,
+                    "primary_blocker": "Existing working close order for exact contract/action/quantity blocks duplicate managed PAPER close submit.",
+                    "working_order_count": len(open_orders),
+                    "existing_working_close_order": existing_close,
+                }
             return {
                 "submitted": False,
                 "submit_attempted": False,
@@ -1032,6 +1052,56 @@ def _contract_month(contract_key: str) -> str:
     if "-" not in raw:
         return ""
     return "".join(ch for ch in raw.split("-", 1)[1] if ch.isdigit())[:6]
+
+
+def _existing_working_close_order(
+    *,
+    config: TrackBStrategyManagedPaperLifecycleConfig,
+    close_intent: Mapping[str, Any],
+    open_orders: tuple[Any, ...],
+) -> dict[str, Any] | None:
+    expected_action = str(close_intent.get("order_action") or "").strip().upper()
+    expected_qty = _int_or_none(close_intent.get("quantity") or config.quantity)
+    for order in open_orders:
+        account_id = _order_field(order, "account_id")
+        contract_key = _order_field(order, "contract_key")
+        raw_action = _order_field(order, "action")
+        action = str(getattr(raw_action, "value", raw_action) or "").strip().upper()
+        quantity = _int_or_none(_order_field(order, "quantity"))
+        if account_id and str(account_id) != str(config.account_id):
+            continue
+        if contract_key and str(contract_key) != str(config.contract_key):
+            continue
+        if expected_action and action and action != expected_action:
+            continue
+        if expected_qty is not None and quantity is not None and quantity != expected_qty:
+            continue
+        return _order_snapshot(order)
+    return None
+
+
+def _order_field(order: Any, key: str) -> Any:
+    if isinstance(order, Mapping):
+        return order.get(key)
+    return getattr(order, key, None)
+
+
+def _order_snapshot(order: Any) -> dict[str, Any]:
+    if hasattr(order, "to_json_dict"):
+        snapshot = order.to_json_dict()
+        return dict(snapshot) if isinstance(snapshot, Mapping) else {"raw": snapshot}
+    if isinstance(order, Mapping):
+        return dict(order)
+    return {
+        "broker_order_id": _order_field(order, "broker_order_id"),
+        "perm_id": _order_field(order, "perm_id"),
+        "client_id": _order_field(order, "client_id"),
+        "account_id": _order_field(order, "account_id"),
+        "contract_key": _order_field(order, "contract_key"),
+        "action": _order_field(order, "action"),
+        "quantity": _order_field(order, "quantity"),
+        "status": _order_field(order, "status"),
+    }
 
 
 def _contract_key_from_bridge_payload(payload: Mapping[str, Any]) -> str | None:

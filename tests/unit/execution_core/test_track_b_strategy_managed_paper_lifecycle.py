@@ -5,7 +5,10 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Mapping
 
+from mgc_v05l.execution_core.models import BrokerOrder
+import mgc_v05l.execution_core.track_b_strategy_managed_paper_lifecycle as lifecycle_module
 from mgc_v05l.execution_core.track_b_strategy_managed_paper_lifecycle import (
+    CLOSE_ORDER_ALREADY_WORKING,
     TrackBManagedExitPolicy,
     TrackBManagedPaperLifecycleClassification,
     TrackBStrategyManagedPaperLifecycleConfig,
@@ -512,6 +515,79 @@ def test_maintenance_open_managed_age_three_closes_flat_without_paper_proof(tmp_
     assert result.report["close_fill"]["price"] == "4705.1"
     assert result.report["final_position_status"] == "CLOSED_FLAT"
     assert result.report["paper_proof_invoked"] is False
+
+
+def test_maintenance_blocks_duplicate_working_close_order_before_submit(tmp_path: Path, monkeypatch) -> None:
+    class ExistingCloseAdapter:
+        def __init__(self, **_kwargs: Any) -> None:
+            self.submitted = False
+
+        def connect(self) -> None: ...
+
+        def disconnect(self) -> None: ...
+
+        def managed_accounts(self) -> tuple[str, ...]:
+            return ("DUM882026",)
+
+        def require_configured_account(self) -> str:
+            return "DUM882026"
+
+        def refresh_open_orders(self, *, contract_key: str | None = None) -> tuple[BrokerOrder, ...]:
+            assert contract_key == "MNQ-202606"
+            return (
+                BrokerOrder(
+                    broker_order_event_id="broker-order-existing-close",
+                    run_id="run",
+                    submit_attempt_id="existing-close-submit",
+                    account_id="DUM882026",
+                    broker_order_id="27",
+                    perm_id="347068546",
+                    client_id=17086,
+                    contract_key="MNQ-202606",
+                    action="SELL",
+                    quantity=1,
+                    order_type="LMT",
+                    limit_price="29555.50",
+                    status="Submitted",
+                    filled_quantity=0,
+                    remaining_quantity=1,
+                    average_fill_price=None,
+                    observed_at=aware_now(),
+                ),
+            )
+
+        def submit_limit_order(self, **_kwargs: Any) -> int:
+            self.submitted = True
+            raise AssertionError("duplicate close must not submit")
+
+    monkeypatch.setattr(lifecycle_module, "IbkrPaperAdapter", ExistingCloseAdapter)
+    result = maintain_open_track_b_strategy_managed_paper_lifecycle(
+        config=base_config(
+            tmp_path,
+            strategy_id="track_b_paper_execution_test_mule_v1__mnq",
+            instrument_family="MNQ",
+            contract_key="MNQ-202606",
+            local_symbol="MNQM6",
+            con_id=770561201,
+            side="LONG",
+            entry_limit_price="28729",
+            close_limit_price="28728.5",
+            managed_exit_policy_id=TrackBManagedExitPolicy.PAPER_DIAGNOSTIC_TIME_BOXED_3X5M_EXIT_V1.value,
+            completed_5m_bars_since_entry=3,
+            submit_enabled=True,
+        ),
+        existing_lifecycle_report=open_managed_report(),
+        now=aware_now(),
+    )
+
+    assert result.classification == TrackBManagedPaperLifecycleClassification.REVIEW_REQUIRED
+    assert result.report["close_submit_attempt"]["classification"] == CLOSE_ORDER_ALREADY_WORKING
+    assert result.report["close_submit_attempt"]["submitted"] is False
+    assert result.report["close_submit_attempt"]["broker_state_mutated"] is False
+    assert result.report["close_submit_attempt"]["existing_working_close_order"]["broker_order_id"] == "27"
+    assert result.report["primary_blocker"] == (
+        "Existing working close order for exact contract/action/quantity blocks duplicate managed PAPER close submit."
+    )
 
 
 def test_maintenance_close_submit_without_fill_marks_review_required(tmp_path: Path) -> None:
