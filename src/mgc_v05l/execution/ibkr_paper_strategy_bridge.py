@@ -17,6 +17,7 @@ from typing import Any, Callable
 from ..app.shared_strategy_identities import get_shared_strategy_identity
 from ..brokers.ibkr import IbkrClient, IbkrSession, build_default_ibkr_order_id_policy
 from ..domain.enums import OrderIntentType
+from ..paths import is_archived_project_root
 from .ibkr_manual_paper_submit import (
     _SEVERE_CONNECTION_ERROR_CODES,
     IbkrManualPaperSubmitCollector,
@@ -195,14 +196,6 @@ _BRIDGE_ADDITIONAL_FORBIDDEN_CALLER_PREFIXES = (
     "mgc_v05l.live",
     "mgc_v05l.execution.live_strategy_broker",
 )
-_DEPRECATED_SUBMIT_ROOT_FRAGMENTS = (
-    "/Users/patrick/Documents/MGC-v05l-automation",
-    "/Users/patrick/Documents/",
-    "/Mobile Documents/",
-    "/iCloud",
-)
-
-
 class IbkrPaperStrategyBridgeError(RuntimeError):
     """Raised when the IBKR paper strategy bridge fails closed."""
 
@@ -398,16 +391,16 @@ def _phase1_target_is_configured(target: dict[str, Any]) -> bool:
 
 
 def _deprecated_submit_root_detail(repo_root: Path) -> str | None:
+    raw_root = Path(repo_root).expanduser()
     try:
-        normalized = str(Path(repo_root).expanduser().resolve())
+        resolved_root = raw_root.resolve()
     except OSError:
-        normalized = str(Path(repo_root).expanduser())
-    for fragment in _DEPRECATED_SUBMIT_ROOT_FRAGMENTS:
-        if fragment in normalized:
-            return (
-                "Submit-capable PAPER bridge calls must not originate from deprecated "
-                f"or cloud-synced repo roots; resolved repo_root={normalized}."
-            )
+        resolved_root = raw_root
+    if is_archived_project_root(raw_root) or is_archived_project_root(resolved_root):
+        return (
+            "Submit-capable PAPER bridge calls must not originate from deprecated "
+            f"or cloud-synced repo roots; repo_root={raw_root}; resolved_repo_root={resolved_root}."
+        )
     return None
 
 

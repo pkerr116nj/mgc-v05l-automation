@@ -16,6 +16,7 @@ from pathlib import Path
 from typing import Any, Callable, Mapping, Sequence
 
 from ..config_models import load_settings_from_files
+from ..paths import PROJECT_ROOT, is_archived_project_root
 from ..execution.ibkr_paper_strategy_bridge import (
     IbkrPaperStrategyBridgeConfig,
     run_ibkr_paper_strategy_bridge,
@@ -615,7 +616,7 @@ def build_safety_snapshot(
 
 def _unresolved_state_blockers(*, repo_root: Path, safety: LeakTestSafetySnapshot) -> list[str]:
     blockers: list[str] = []
-    if str(repo_root.resolve()) != "/Users/patrick/Dev/MGC-v05l-automation":
+    if is_archived_project_root(repo_root) or repo_root.resolve() != PROJECT_ROOT:
         blockers.append("repo_root_not_dev_checkout")
     if safety.account_id not in {None, PAPER_ACCOUNT_ID}:
         blockers.append("account_not_DUM882026")

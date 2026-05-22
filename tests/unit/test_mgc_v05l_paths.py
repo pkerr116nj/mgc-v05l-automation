@@ -67,6 +67,13 @@ def test_archived_documents_root_is_rejected() -> None:
         resolve_project_root(env=_clean_env(TRACK_B_PROJECT_ROOT=str(archived)), require_markers=False)
 
 
+def test_archived_do_not_use_documents_root_is_rejected() -> None:
+    archived = Path("/Users/patrick/Documents/MGC-v05l-automation_ARCHIVED_DO_NOT_USE_20260519")
+
+    with pytest.raises(ProjectRootError, match="Refusing archived"):
+        resolve_project_root(env=_clean_env(TRACK_B_PROJECT_ROOT=str(archived)), require_markers=False)
+
+
 def test_archived_documents_root_requires_explicit_test_override() -> None:
     archived = Path("/Users/patrick/Documents/MGC-v05l-automation")
 
