@@ -20,7 +20,7 @@ from typing import Any, Callable, Mapping
 
 from .ibkr_paper_adapter import IbkrPaperAdapter
 from .models import require_aware_datetime, to_jsonable
-from .models import IntentKind, OrderIntent, SubmitAttempt, SubmitAttemptState
+from .models import IntentKind, OrderIntent, PositionState, SubmitAttempt, SubmitAttemptState
 from .preflight import ReadOnlyPreflightConfig
 from .track_b_lifecycle_state_transition import validate_open_managed_evidence
 from .track_b_open_order_truth import (
@@ -992,6 +992,14 @@ def _submit_managed_limit_order(
                 "working_order_count": len(open_orders),
                 "open_order_truth": open_order_truth,
             }
+        if intent_kind is IntentKind.CLOSE:
+            position_blocker = _managed_close_position_guard(
+                config=config,
+                close_intent=intent_payload,
+                adapter=adapter,
+            )
+            if position_blocker is not None:
+                return position_blocker
         broker_order_id = adapter.submit_limit_order(submit_attempt=submit_attempt, order_intent=order_intent)
         broker_order = adapter.wait_for_broker_order(submit_attempt_id=submit_attempt.submit_attempt_id)
         fill = adapter.wait_for_fill(submit_attempt_id=submit_attempt.submit_attempt_id)
@@ -1037,6 +1045,43 @@ def _submit_managed_limit_order(
         }
     finally:
         adapter.disconnect()
+
+
+def _managed_close_position_guard(
+    *,
+    config: TrackBStrategyManagedPaperLifecycleConfig,
+    close_intent: Mapping[str, Any],
+    adapter: IbkrPaperAdapter,
+) -> dict[str, Any] | None:
+    """Fail closed if broker truth does not show the position being closed."""
+
+    try:
+        position = adapter.refresh_positions(contract_key=config.contract_key)
+    except Exception as exc:  # noqa: BLE001 - broker-position absence must block the close submit.
+        return {
+            "submitted": False,
+            "submit_attempted": False,
+            "broker_state_mutated": False,
+            "classification": "BROKER_POSITION_NOT_OPEN_FOR_MANAGED_CLOSE",
+            "primary_blocker": f"Managed PAPER close blocked because broker position is not confirmed for exact contract: {exc}",
+            "close_intent": dict(close_intent),
+        }
+    expected_sign = 1 if str(close_intent.get("side") or config.side).upper() == "LONG" else -1
+    if int(position.signed_quantity) != expected_sign:
+        return {
+            "submitted": False,
+            "submit_attempted": False,
+            "broker_state_mutated": False,
+            "classification": "BROKER_POSITION_NOT_OPEN_FOR_MANAGED_CLOSE",
+            "primary_blocker": (
+                "Managed PAPER close blocked because broker position direction/quantity does not "
+                f"match lifecycle side: expected_signed_quantity={expected_sign}; "
+                f"observed_signed_quantity={position.signed_quantity}."
+            ),
+            "close_intent": dict(close_intent),
+            "broker_position": position.to_json_dict(),
+        }
+    return None
 
 
 def _contract_allowlist_entry(config: TrackBStrategyManagedPaperLifecycleConfig) -> dict[str, Any]:

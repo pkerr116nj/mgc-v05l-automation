@@ -5,7 +5,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Mapping
 
-from mgc_v05l.execution_core.models import BrokerOrder
+from mgc_v05l.execution_core.models import BrokerOrder, PositionSource, PositionState
 from mgc_v05l.execution_core.track_b_open_order_truth import (
     BROKER_FLAT_WITH_OPEN_CLOSE_ORDER,
     DUPLICATE_CLOSE_ORDER,
@@ -787,6 +787,20 @@ def test_maintenance_with_no_open_orders_continues_to_close_submit(tmp_path: Pat
             assert contract_key == "MNQ-202606"
             return ()
 
+        def refresh_positions(self, *, contract_key: str) -> PositionState:
+            assert contract_key == "MNQ-202606"
+            return PositionState(
+                position_state_id="position-mnq-long",
+                run_id="run",
+                source=PositionSource.BROKER,
+                account_id="DUM882026",
+                contract_key="MNQ-202606",
+                signed_quantity=1,
+                average_price="28729",
+                open_order_ids=(),
+                observed_at=aware_now(),
+            )
+
         def submit_limit_order(self, *, submit_attempt, order_intent) -> int:
             assert order_intent.intent_kind.value == "CLOSE"
             return 1002
@@ -853,6 +867,126 @@ def test_maintenance_with_no_open_orders_continues_to_close_submit(tmp_path: Pat
     assert result.classification == TrackBManagedPaperLifecycleClassification.CLOSED_FLAT
     assert result.report["close_submit_attempt"]["submitted"] is True
     assert result.report["close_submit_attempt"]["broker_order_id"] == "1002"
+
+
+def test_maintenance_blocks_close_when_broker_position_missing_before_submit(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    class MissingPositionAdapter:
+        def __init__(self, **_kwargs: Any) -> None: ...
+
+        def connect(self) -> None: ...
+
+        def disconnect(self) -> None: ...
+
+        def managed_accounts(self) -> tuple[str, ...]:
+            return ("DUM882026",)
+
+        def require_configured_account(self) -> str:
+            return "DUM882026"
+
+        def refresh_open_orders(self, *, contract_key: str | None = None) -> tuple[BrokerOrder, ...]:
+            assert contract_key == "MNQ-202606"
+            return ()
+
+        def refresh_positions(self, *, contract_key: str) -> PositionState:
+            assert contract_key == "MNQ-202606"
+            raise RuntimeError("missing position callback for exact contract")
+
+        def submit_limit_order(self, **_kwargs: Any) -> int:
+            raise AssertionError("missing broker position must block managed close submit")
+
+    monkeypatch.setattr(lifecycle_module, "IbkrPaperAdapter", MissingPositionAdapter)
+
+    result = maintain_open_track_b_strategy_managed_paper_lifecycle(
+        config=base_config(
+            tmp_path,
+            strategy_id="track_b_paper_execution_test_mule_v1__mnq",
+            instrument_family="MNQ",
+            contract_key="MNQ-202606",
+            local_symbol="MNQM6",
+            con_id=770561201,
+            side="LONG",
+            close_limit_price="28728.5",
+            managed_exit_policy_id=TrackBManagedExitPolicy.PAPER_DIAGNOSTIC_TIME_BOXED_3X5M_EXIT_V1.value,
+            completed_5m_bars_since_entry=3,
+            submit_enabled=True,
+        ),
+        existing_lifecycle_report=open_managed_report(),
+        now=aware_now(),
+    )
+
+    assert result.classification == TrackBManagedPaperLifecycleClassification.REVIEW_REQUIRED
+    close_attempt = result.report["close_submit_attempt"]
+    assert close_attempt["classification"] == "BROKER_POSITION_NOT_OPEN_FOR_MANAGED_CLOSE"
+    assert close_attempt["submitted"] is False
+    assert close_attempt["broker_state_mutated"] is False
+
+
+def test_maintenance_blocks_close_when_broker_position_direction_mismatches(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    class WrongSidePositionAdapter:
+        def __init__(self, **_kwargs: Any) -> None: ...
+
+        def connect(self) -> None: ...
+
+        def disconnect(self) -> None: ...
+
+        def managed_accounts(self) -> tuple[str, ...]:
+            return ("DUM882026",)
+
+        def require_configured_account(self) -> str:
+            return "DUM882026"
+
+        def refresh_open_orders(self, *, contract_key: str | None = None) -> tuple[BrokerOrder, ...]:
+            assert contract_key == "MNQ-202606"
+            return ()
+
+        def refresh_positions(self, *, contract_key: str) -> PositionState:
+            assert contract_key == "MNQ-202606"
+            return PositionState(
+                position_state_id="position-mnq-short",
+                run_id="run",
+                source=PositionSource.BROKER,
+                account_id="DUM882026",
+                contract_key="MNQ-202606",
+                signed_quantity=-1,
+                average_price="28729",
+                open_order_ids=(),
+                observed_at=aware_now(),
+            )
+
+        def submit_limit_order(self, **_kwargs: Any) -> int:
+            raise AssertionError("wrong-side broker position must block managed close submit")
+
+    monkeypatch.setattr(lifecycle_module, "IbkrPaperAdapter", WrongSidePositionAdapter)
+
+    result = maintain_open_track_b_strategy_managed_paper_lifecycle(
+        config=base_config(
+            tmp_path,
+            strategy_id="track_b_paper_execution_test_mule_v1__mnq",
+            instrument_family="MNQ",
+            contract_key="MNQ-202606",
+            local_symbol="MNQM6",
+            con_id=770561201,
+            side="LONG",
+            close_limit_price="28728.5",
+            managed_exit_policy_id=TrackBManagedExitPolicy.PAPER_DIAGNOSTIC_TIME_BOXED_3X5M_EXIT_V1.value,
+            completed_5m_bars_since_entry=3,
+            submit_enabled=True,
+        ),
+        existing_lifecycle_report=open_managed_report(),
+        now=aware_now(),
+    )
+
+    close_attempt = result.report["close_submit_attempt"]
+    assert close_attempt["classification"] == "BROKER_POSITION_NOT_OPEN_FOR_MANAGED_CLOSE"
+    assert close_attempt["broker_position"]["signed_quantity"] == -1
+    assert close_attempt["submitted"] is False
+    assert close_attempt["broker_state_mutated"] is False
 
 
 def test_maintenance_close_submit_without_fill_marks_review_required(tmp_path: Path) -> None:
