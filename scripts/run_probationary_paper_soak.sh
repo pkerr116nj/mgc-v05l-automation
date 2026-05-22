@@ -51,6 +51,11 @@ LAUNCH_FINAL_PID_ALIVE="false"
 LAUNCH_TERMINATED_BY_VERIFIER="false"
 LAUNCH_TERMINATION_SIGNAL=""
 LAUNCH_TERMINATION_REASON=""
+LAUNCH_STOP_SOURCE=""
+LAUNCH_STOP_REQUESTED_AT=""
+LAUNCH_STOP_OBSERVED_AT=""
+LAUNCH_STOP_EXPECTED_CLEANUP="false"
+LAUNCH_STOP_BROKER_SAFE="false"
 
 ARGS=()
 CONFIG_SET=0
@@ -232,14 +237,33 @@ write_launch_status() {
   LAUNCH_TERMINATED_BY_VERIFIER="${LAUNCH_TERMINATED_BY_VERIFIER}" \
   LAUNCH_TERMINATION_SIGNAL="${LAUNCH_TERMINATION_SIGNAL}" \
   LAUNCH_TERMINATION_REASON="${LAUNCH_TERMINATION_REASON}" \
+  LAUNCH_STOP_SOURCE="${LAUNCH_STOP_SOURCE}" \
+  LAUNCH_STOP_REQUESTED_AT="${LAUNCH_STOP_REQUESTED_AT}" \
+  LAUNCH_STOP_OBSERVED_AT="${LAUNCH_STOP_OBSERVED_AT}" \
+  LAUNCH_STOP_EXPECTED_CLEANUP="${LAUNCH_STOP_EXPECTED_CLEANUP}" \
+  LAUNCH_STOP_BROKER_SAFE="${LAUNCH_STOP_BROKER_SAFE}" \
   "${PYTHON_BIN}" -c '
 import json
 import os
 from datetime import datetime, timezone
+from pathlib import Path
+
+def _git_head(repo_root):
+    try:
+        git_dir = Path(repo_root) / ".git"
+        head = (git_dir / "HEAD").read_text(encoding="utf-8").strip()
+        if head.startswith("ref: "):
+            ref = git_dir / head.removeprefix("ref: ").strip()
+            return ref.read_text(encoding="utf-8").strip() if ref.exists() else None
+        return head or None
+    except OSError:
+        return None
 
 config_paths = [item for item in os.environ.get("LAUNCH_FINAL_ARGS", "").split(os.pathsep) if item]
+generated_at = datetime.now(timezone.utc).isoformat()
+stop_reason = os.environ.get("LAUNCH_TERMINATION_REASON") or None
 payload = {
-    "generated_at": datetime.now(timezone.utc).isoformat(),
+    "generated_at": generated_at,
     "classification": os.environ["LAUNCH_CLASSIFICATION"],
     "pid": int(os.environ["LAUNCH_PID"]) if os.environ.get("LAUNCH_PID", "").isdigit() else None,
     "pid_file": os.environ["LAUNCH_PID_FILE"],
@@ -260,13 +284,26 @@ payload = {
     "final_pid_alive": os.environ.get("LAUNCH_FINAL_PID_ALIVE", "").lower() == "true",
     "terminated_by_launch_verifier": os.environ.get("LAUNCH_TERMINATED_BY_VERIFIER", "").lower() == "true",
     "termination_signal": os.environ.get("LAUNCH_TERMINATION_SIGNAL") or None,
-    "termination_reason": os.environ.get("LAUNCH_TERMINATION_REASON") or None,
+    "termination_reason": stop_reason,
     "config_paths": config_paths,
     "paper_only": True,
     "live_money_eligible": False,
     "paper_proof_invoked": False,
     "submit_authority": False,
 }
+if os.environ.get("LAUNCH_STOP_SOURCE") or stop_reason:
+    payload["stop_provenance"] = {
+        "stop_source": os.environ.get("LAUNCH_STOP_SOURCE") or "unknown",
+        "stop_reason": stop_reason,
+        "runtime_instance_id": os.environ.get("MGC_TRACK_B_RUNTIME_INSTANCE_ID") or None,
+        "restart_generation": int(os.environ.get("MGC_TRACK_B_PAPER_RUNTIME_RESTART_GENERATION") or os.environ.get("MGC_TRACK_B_RESTART_GENERATION") or 0),
+        "source_commit": _git_head(os.environ["LAUNCH_REPO_ROOT"]),
+        "control_action_id": None,
+        "requested_at": os.environ.get("LAUNCH_STOP_REQUESTED_AT") or generated_at,
+        "observed_at": os.environ.get("LAUNCH_STOP_OBSERVED_AT") or generated_at,
+        "expected_cleanup": os.environ.get("LAUNCH_STOP_EXPECTED_CLEANUP", "").lower() == "true",
+        "broker_safe_at_stop": os.environ.get("LAUNCH_STOP_BROKER_SAFE", "").lower() == "true",
+    }
 with open(os.environ["LAUNCH_STATUS_FILE"], "w", encoding="utf-8") as fh:
     json.dump(payload, fh, indent=2, sort_keys=True)
     fh.write("\n")
@@ -528,11 +565,16 @@ if [[ ${BACKGROUND} -eq 1 ]]; then
     LAUNCH_TERMINATED_BY_VERIFIER="true"
     LAUNCH_TERMINATION_SIGNAL="TERM"
     LAUNCH_TERMINATION_REASON="launch_verifier_timeout_before_sustained_runtime_truth"
+    LAUNCH_STOP_SOURCE="launcher"
+    LAUNCH_STOP_REQUESTED_AT="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+    LAUNCH_STOP_EXPECTED_CLEANUP="true"
+    LAUNCH_STOP_BROKER_SAFE="false"
     kill "${paper_pid}" >/dev/null 2>&1 || true
     sleep 1
     if process_alive_not_zombie "${paper_pid}"; then
       kill -TERM "${paper_pid}" >/dev/null 2>&1 || true
     fi
+    LAUNCH_STOP_OBSERVED_AT="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
     set +e
     wait "${paper_pid}"
     child_exit_code=$?
@@ -554,11 +596,21 @@ if [[ ${BACKGROUND} -eq 1 ]]; then
   set -e
   remove_pid_file_if_matches "${paper_pid}"
   LAUNCH_FINAL_PID_ALIVE="false"
+  LAUNCH_STOP_OBSERVED_AT="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  LAUNCH_STOP_REQUESTED_AT="${LAUNCH_STOP_OBSERVED_AT}"
+  LAUNCH_STOP_EXPECTED_CLEANUP="false"
+  LAUNCH_STOP_BROKER_SAFE="false"
   if [[ -n "${LAUNCH_FIRST_TRUTH_GENERATED_AT}" ]]; then
+    LAUNCH_STOP_SOURCE="runtime_internal"
+    LAUNCH_TERMINATION_REASON="runtime_exited_after_initial_truth"
     write_launch_status "RUNTIME_EXITED_AFTER_INITIAL_TRUTH" "${paper_pid}" "background child emitted initial runtime truth but exited before sustained runtime convergence" "${child_exit_code}"
   elif background_child_reached_preflight "${paper_pid}"; then
+    LAUNCH_STOP_SOURCE="runtime_internal"
+    LAUNCH_TERMINATION_REASON="runtime_exited_after_preflight"
     write_launch_status "RUNTIME_EXITED_AFTER_PREFLIGHT" "${paper_pid}" "background child exited after Phase-1 preflight but before runtime truth/heartbeat convergence" "${child_exit_code}"
   else
+    LAUNCH_STOP_SOURCE="unknown"
+    LAUNCH_TERMINATION_REASON="background_start_failed_before_runtime_truth"
     write_launch_status "PROBATIONARY_PAPER_BACKGROUND_START_FAILED" "${paper_pid}" "background child exited before launch verification completed" "${child_exit_code}"
   fi
   echo "Probationary paper soak failed to remain running in background." >&2

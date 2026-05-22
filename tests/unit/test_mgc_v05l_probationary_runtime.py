@@ -9539,6 +9539,132 @@ def test_stop_after_cycle_bound_to_current_runtime_generation_is_safe_when_flat(
     )
 
 
+@pytest.mark.parametrize(
+    ("stop_source", "stop_reason", "expected_cleanup", "broker_safe"),
+    [
+        ("launcher", "launch_verifier_timeout_before_sustained_runtime_truth", True, False),
+        ("operator", "operator_stop_after_cycle", True, True),
+        ("self_healing", "restart_budget_controlled_stop", True, True),
+        ("runtime_internal", "paper_reconciliation_mismatch", False, False),
+        ("stale_control_action", "stale_stop_after_cycle_ignored", False, True),
+        ("signal", "signal_stop_requested", False, True),
+        ("unknown", "unexpected_runtime_exit", False, False),
+    ],
+)
+def test_runtime_stop_provenance_records_stop_source_classification(
+    stop_source: str,
+    stop_reason: str,
+    expected_cleanup: bool,
+    broker_safe: bool,
+) -> None:
+    provenance = probationary_runtime_module._build_probationary_runtime_stop_provenance(
+        stop_source=stop_source,
+        stop_reason=stop_reason,
+        runtime_instance_id="runtime-1",
+        control_result={"command_id": "control-1", "requested_at": "2026-05-22T17:37:00+00:00"},
+        requested_at="2026-05-22T17:37:00+00:00",
+        observed_at="2026-05-22T17:38:00+00:00",
+        expected_cleanup=expected_cleanup,
+        broker_safe_at_stop=broker_safe,
+        source_commit="abc123",
+    )
+
+    assert provenance["stop_source"] == stop_source
+    assert provenance["stop_reason"] == stop_reason
+    assert provenance["runtime_instance_id"] == "runtime-1"
+    assert provenance["restart_generation"] >= 0
+    assert provenance["source_commit"] == "abc123"
+    assert provenance["control_action_id"] == "control-1"
+    assert provenance["requested_at"] == "2026-05-22T17:37:00+00:00"
+    assert provenance["observed_at"] == "2026-05-22T17:38:00+00:00"
+    assert provenance["expected_cleanup"] is expected_cleanup
+    assert provenance["broker_safe_at_stop"] is broker_safe
+
+
+def test_stale_pending_stop_after_cycle_from_prior_generation_is_ignored_and_tagged(tmp_path: Path) -> None:
+    settings = _build_probationary_paper_settings(tmp_path)
+    root_logger = StructuredLogger(tmp_path / "root")
+    lane = _seed_test_lane(
+        tmp_path,
+        lane_id="gc_lane",
+        symbol="GC",
+        source="asiaEarlyNormalBreakoutRetestHoldTurn",
+        session_restriction="ASIA_EARLY",
+        point_value=Decimal("100"),
+    )
+    control_path = settings.probationary_artifacts_path / "runtime" / "operator_control.json"
+    control_path.parent.mkdir(parents=True, exist_ok=True)
+    control_path.write_text(
+        json.dumps(
+            {
+                "action": "stop_after_cycle",
+                "status": "pending",
+                "requested_at": "2026-05-22T17:37:00+00:00",
+                "command_id": "stale-stop-1",
+                "runtime_instance_id": "old-runtime",
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    result = _apply_probationary_supervisor_operator_control(
+        settings=settings,
+        lanes=[lane],
+        structured_logger=root_logger,
+        alert_dispatcher=AlertDispatcher(root_logger),
+        risk_state=ProbationaryPaperRiskRuntimeState(session_date="2026-05-22"),
+        runtime_instance_id="new-runtime",
+    )
+
+    assert result is not None
+    assert result["status"] == "ignored"
+    assert result["stop_source"] == "stale_control_action"
+    assert result["runtime_instance_id"] == "old-runtime"
+    assert result["stop_provenance"]["runtime_instance_id"] == "new-runtime"
+    assert result["stop_provenance"]["control_action_id"] == "stale-stop-1"
+    assert result["stop_provenance"]["stop_source"] == "stale_control_action"
+    assert lane.strategy_engine.state.operator_halt is False
+
+
+def test_probationary_supervisor_unsafe_reconciliation_stop_has_provenance(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = _build_probationary_paper_settings(tmp_path)
+    root_logger = StructuredLogger(tmp_path / "root")
+    lane = _prepare_supervisor_test_lane(
+        _seed_test_lane(
+            tmp_path,
+            lane_id="mnq_lane",
+            symbol="MNQ",
+            source="usLatePauseResumeLongTurn",
+            session_restriction="US_LATE",
+            point_value=Decimal("2"),
+        )
+    )
+    lane.restore_startup = lambda: None
+    lane.poll_and_process = lambda: (0, {"clean": False, "classification": "unsafe_broker_state"}, None)
+    supervisor = probationary_runtime_module.ProbationaryPaperSupervisor(
+        settings=settings,
+        lanes=[lane],
+        structured_logger=root_logger,
+        alert_dispatcher=AlertDispatcher(root_logger),
+    )
+    monkeypatch.setattr(supervisor, "_install_signal_handlers", lambda: {})
+    monkeypatch.setattr(supervisor, "_restore_signal_handlers", lambda _previous: None)
+
+    summary = supervisor.run(poll_once=True)
+
+    assert summary.stop_reason == "paper_reconciliation_mismatch"
+    assert summary.reconciliation_clean is False
+    assert summary.stop_provenance is not None
+    assert summary.stop_provenance["stop_source"] == "runtime_internal"
+    assert summary.stop_provenance["stop_reason"] == "paper_reconciliation_mismatch"
+    assert summary.stop_provenance["expected_cleanup"] is False
+    assert summary.stop_provenance["broker_safe_at_stop"] is False
+
+
 def test_clear_risk_halts_does_not_restore_same_session_readiness_for_realized_loser_limit(tmp_path: Path) -> None:
     settings = _build_probationary_paper_settings(tmp_path)
     root_logger = StructuredLogger(tmp_path / "root")

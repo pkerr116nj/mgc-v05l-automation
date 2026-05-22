@@ -172,6 +172,10 @@ def test_background_launch_rejects_alive_child_without_runtime_truth(tmp_path: P
     assert status["terminated_by_launch_verifier"] is True
     assert status["termination_signal"] == "TERM"
     assert status["termination_reason"] == "launch_verifier_timeout_before_sustained_runtime_truth"
+    assert status["stop_provenance"]["stop_source"] == "launcher"
+    assert status["stop_provenance"]["stop_reason"] == "launch_verifier_timeout_before_sustained_runtime_truth"
+    assert status["stop_provenance"]["expected_cleanup"] is True
+    assert status["stop_provenance"]["broker_safe_at_stop"] is False
     assert status["live_money_eligible"] is False
     assert status["submit_authority"] is False
 
@@ -301,6 +305,8 @@ exit 0
     assert status["first_truth_generated_at"]
     assert status["second_truth_generated_at"] is None
     assert status["final_pid_alive"] is False
+    assert status["stop_provenance"]["stop_source"] == "runtime_internal"
+    assert status["stop_provenance"]["expected_cleanup"] is False
 
 
 def test_background_launch_reports_failed_child_without_stale_pid(tmp_path: Path) -> None:

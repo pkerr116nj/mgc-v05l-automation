@@ -240,6 +240,7 @@ class ProbationaryPaperSummary:
     artifacts_dir: str
     reconciliation_clean: bool
     stop_reason: str | None
+    stop_provenance: dict[str, Any] | None = None
 
 
 LANE_STARTUP_RECONCILIATION_READY = "READY"
@@ -6848,6 +6849,7 @@ class ProbationaryPaperRunner:
         self._structured_logger = structured_logger
         self._alert_dispatcher = alert_dispatcher
         self._stop_requested = False
+        self._stop_signal_payload: dict[str, Any] | None = None
         self._runtime_registry = runtime_registry
         self._last_reconciliation_payload: dict[str, Any] | None = None
         self._heartbeat_reconciliation = _initial_reconciliation_heartbeat_status(
@@ -7007,6 +7009,13 @@ class ProbationaryPaperRunner:
                         artifacts_dir=str(self._structured_logger.artifact_dir),
                         reconciliation_clean=False,
                         stop_reason=stop_reason,
+                        stop_provenance=_build_probationary_runtime_stop_provenance(
+                            stop_source="runtime_internal",
+                            stop_reason=stop_reason,
+                            runtime_instance_id=self._runtime_instance_id,
+                            expected_cleanup=False,
+                            broker_safe_at_stop=False,
+                        ),
                     )
 
                 _sync_runtime_health_alerts(
@@ -7044,11 +7053,23 @@ class ProbationaryPaperRunner:
                         artifacts_dir=str(self._structured_logger.artifact_dir),
                         reconciliation_clean=True,
                         stop_reason=stop_reason,
+                        stop_provenance=_build_probationary_runtime_stop_provenance(
+                            stop_source="operator",
+                            stop_reason=stop_reason,
+                            runtime_instance_id=self._runtime_instance_id,
+                            control_result=control_result,
+                            expected_cleanup=True,
+                            broker_safe_at_stop=True,
+                        ),
                     )
 
                 cycles += 1
                 if poll_once or (max_cycles is not None and cycles >= max_cycles) or self._stop_requested:
                     stop_reason = "signal_stop_requested" if self._stop_requested else stop_reason
+                    stop_source = "signal" if self._stop_requested else "runtime_internal"
+                    requested_at = None
+                    if self._stop_signal_payload:
+                        requested_at = str(self._stop_signal_payload.get("requested_at") or "")
                     return ProbationaryPaperSummary(
                         processed_bars=self._repositories.processed_bars.count(),
                         new_bars=new_bars,
@@ -7061,6 +7082,18 @@ class ProbationaryPaperRunner:
                         artifacts_dir=str(self._structured_logger.artifact_dir),
                         reconciliation_clean=True,
                         stop_reason=stop_reason,
+                        stop_provenance=(
+                            _build_probationary_runtime_stop_provenance(
+                                stop_source=stop_source,
+                                stop_reason=stop_reason,
+                                runtime_instance_id=self._runtime_instance_id,
+                                requested_at=requested_at,
+                                expected_cleanup=not self._stop_requested,
+                                broker_safe_at_stop=True,
+                            )
+                            if stop_reason is not None
+                            else None
+                        ),
                     )
                 time_module.sleep(self._settings.live_poll_interval_seconds)
         finally:
@@ -7174,6 +7207,17 @@ class ProbationaryPaperRunner:
             artifacts_dir=str(self._structured_logger.artifact_dir),
             reconciliation_clean=reconciliation_clean,
             stop_reason=stop_reason,
+            stop_provenance=(
+                _build_probationary_runtime_stop_provenance(
+                    stop_source="runtime_internal",
+                    stop_reason=stop_reason,
+                    runtime_instance_id=self._runtime_instance_id,
+                    expected_cleanup=False,
+                    broker_safe_at_stop=reconciliation_clean,
+                )
+                if stop_reason is not None
+                else None
+            ),
         )
 
     def _install_signal_handlers(self):
@@ -7183,17 +7227,24 @@ class ProbationaryPaperRunner:
         }
 
         def _request_stop(signum, _frame) -> None:
+            requested_at = datetime.now(timezone.utc).isoformat()
             self._stop_requested = True
+            self._stop_signal_payload = {
+                "signal": signum,
+                "requested_at": requested_at,
+                "stop_source": "signal",
+            }
             self._alert_dispatcher.emit(
                 severity="INFO",
                 code="paper_runtime_stop_requested",
                 message=f"Received signal {signum}; stopping after the current cycle.",
                 payload={
                     "signal": signum,
-                    "stop_source": "external_signal",
+                    "stop_source": "signal",
                     "stop_kind": "deferred_safe_cycle_stop",
                     "runtime_instance_id": self._runtime_instance_id,
                     "restart_generation": _paper_runtime_restart_generation(),
+                    "requested_at": requested_at,
                 },
                 category="runtime_recovery",
                 title="Runtime Stop Requested",
@@ -7228,6 +7279,7 @@ class ProbationaryPaperSupervisor:
         self._structured_logger = structured_logger
         self._alert_dispatcher = alert_dispatcher
         self._stop_requested = False
+        self._stop_signal_payload: dict[str, Any] | None = None
         self._runtime_registry = runtime_registry
         self._lane_quarantine: dict[str, dict[str, Any]] = {}
         self._runtime_started_at = datetime.now(timezone.utc)
@@ -7512,6 +7564,13 @@ class ProbationaryPaperSupervisor:
                         artifacts_dir=str(self._structured_logger.artifact_dir),
                         reconciliation_clean=False,
                         stop_reason=stop_reason,
+                        stop_provenance=_build_probationary_runtime_stop_provenance(
+                            stop_source="runtime_internal",
+                            stop_reason=stop_reason,
+                            runtime_instance_id=self._runtime_instance_id,
+                            expected_cleanup=False,
+                            broker_safe_at_stop=False,
+                        ),
                     )
 
                 cycles += 1
@@ -7533,6 +7592,18 @@ class ProbationaryPaperSupervisor:
                         runtime_instance_id=self._runtime_instance_id,
                     ):
                         stop_reason = "operator_stop_after_cycle"
+                    stop_source = "runtime_internal"
+                    requested_at = None
+                    control_for_stop: Mapping[str, Any] | None = None
+                    expected_cleanup = True
+                    if self._stop_requested:
+                        stop_source = "signal"
+                        expected_cleanup = False
+                        if self._stop_signal_payload:
+                            requested_at = str(self._stop_signal_payload.get("requested_at") or "")
+                    elif stop_reason == "operator_stop_after_cycle":
+                        stop_source = "operator"
+                        control_for_stop = control_result
                     return ProbationaryPaperSummary(
                         processed_bars=sum(lane.repositories.processed_bars.count() for lane in self._lanes),
                         new_bars=new_bars,
@@ -7541,6 +7612,19 @@ class ProbationaryPaperSupervisor:
                         artifacts_dir=str(self._structured_logger.artifact_dir),
                         reconciliation_clean=True,
                         stop_reason=stop_reason,
+                        stop_provenance=(
+                            _build_probationary_runtime_stop_provenance(
+                                stop_source=stop_source,
+                                stop_reason=stop_reason,
+                                runtime_instance_id=self._runtime_instance_id,
+                                control_result=control_for_stop,
+                                requested_at=requested_at,
+                                expected_cleanup=expected_cleanup,
+                                broker_safe_at_stop=True,
+                            )
+                            if stop_reason is not None
+                            else None
+                        ),
                     )
                 time_module.sleep(self._settings.live_poll_interval_seconds)
         finally:
@@ -7562,6 +7646,17 @@ class ProbationaryPaperSupervisor:
             artifacts_dir=str(self._structured_logger.artifact_dir),
             reconciliation_clean=reconciliation_clean,
             stop_reason=stop_reason,
+            stop_provenance=(
+                _build_probationary_runtime_stop_provenance(
+                    stop_source="runtime_internal",
+                    stop_reason=stop_reason,
+                    runtime_instance_id=self._runtime_instance_id,
+                    expected_cleanup=False,
+                    broker_safe_at_stop=reconciliation_clean,
+                )
+                if stop_reason is not None
+                else None
+            ),
         )
 
     def _install_signal_handlers(self):
@@ -7571,17 +7666,24 @@ class ProbationaryPaperSupervisor:
         }
 
         def _request_stop(signum, _frame) -> None:
+            requested_at = datetime.now(timezone.utc).isoformat()
             self._stop_requested = True
+            self._stop_signal_payload = {
+                "signal": signum,
+                "requested_at": requested_at,
+                "stop_source": "signal",
+            }
             self._alert_dispatcher.emit(
                 severity="INFO",
                 code="paper_runtime_stop_requested",
                 message=f"Received signal {signum}; stopping after the current cycle.",
                 payload={
                     "signal": signum,
-                    "stop_source": "external_signal",
+                    "stop_source": "signal",
                     "stop_kind": "deferred_safe_cycle_stop",
                     "runtime_instance_id": self._runtime_instance_id,
                     "restart_generation": _paper_runtime_restart_generation(),
+                    "requested_at": requested_at,
                 },
                 category="runtime_recovery",
                 title="Runtime Stop Requested",
@@ -9112,6 +9214,44 @@ def _paper_runtime_generation_payload(runtime_instance_id: str | None = None) ->
     if launcher_config_fingerprint:
         payload["launcher_config_fingerprint"] = launcher_config_fingerprint
     return payload
+
+
+def _control_action_id(control_result: Mapping[str, Any] | None) -> str | None:
+    if not control_result:
+        return None
+    for key in ("control_action_id", "command_id", "action_id", "request_id"):
+        value = str(control_result.get(key) or "").strip()
+        if value:
+            return value
+    return None
+
+
+def _build_probationary_runtime_stop_provenance(
+    *,
+    stop_source: str,
+    stop_reason: str | None,
+    runtime_instance_id: str | None,
+    control_result: Mapping[str, Any] | None = None,
+    requested_at: str | None = None,
+    observed_at: str | None = None,
+    expected_cleanup: bool = False,
+    broker_safe_at_stop: bool = False,
+    source_commit: str | None = None,
+) -> dict[str, Any]:
+    observed = observed_at or datetime.now(timezone.utc).isoformat()
+    identity = _current_runtime_identity_payload()
+    return {
+        "stop_source": stop_source or "unknown",
+        "stop_reason": stop_reason,
+        "runtime_instance_id": runtime_instance_id,
+        "restart_generation": _paper_runtime_restart_generation(),
+        "source_commit": source_commit or identity.get("source_runtime_git_head"),
+        "control_action_id": _control_action_id(control_result),
+        "requested_at": requested_at or (str(control_result.get("requested_at")) if control_result and control_result.get("requested_at") else observed),
+        "observed_at": observed,
+        "expected_cleanup": bool(expected_cleanup),
+        "broker_safe_at_stop": bool(broker_safe_at_stop),
+    }
 
 
 def _probationary_config_fingerprint(payload: dict[str, Any]) -> str | None:
@@ -10905,6 +11045,41 @@ def _apply_probationary_supervisor_operator_control(
         return payload
 
     action = str(payload.get("action", ""))
+    payload_runtime_instance_id = str(payload.get("runtime_instance_id") or "").strip()
+    if (
+        action == "stop_after_cycle"
+        and runtime_instance_id
+        and payload_runtime_instance_id
+        and payload_runtime_instance_id != runtime_instance_id
+    ):
+        result = dict(payload)
+        result["status"] = "ignored"
+        result["ignored_at"] = now.isoformat()
+        result["control_path"] = str(control_path)
+        result["stop_source"] = "stale_control_action"
+        result["message"] = (
+            "Ignored stale Stop After Current Cycle control because it targets runtime "
+            f"{payload_runtime_instance_id}, not current runtime {runtime_instance_id}."
+        )
+        result["stop_provenance"] = _build_probationary_runtime_stop_provenance(
+            stop_source="stale_control_action",
+            stop_reason="stale_stop_after_cycle_ignored",
+            runtime_instance_id=runtime_instance_id,
+            control_result=result,
+            requested_at=str(payload.get("requested_at") or ""),
+            observed_at=now.isoformat(),
+            expected_cleanup=False,
+            broker_safe_at_stop=all(_lane_is_flat_and_safe(lane) for lane in lanes),
+        )
+        _write_probationary_operator_control_payloads(candidate_paths, result)
+        structured_logger.log_operator_control(result)
+        alert_dispatcher.emit(
+            "warning",
+            "stale_operator_control_ignored",
+            result["message"],
+            result,
+        )
+        return result
     result = dict(payload)
     result["applied_at"] = now.isoformat()
     result["control_path"] = str(control_path)
