@@ -322,7 +322,7 @@ def _classify(
         if broker_exposure:
             block("broker_exposure_without_runtime", "Broker exposure exists while runtime is down.")
             return RUNTIME_DOWN_WITH_BROKER_EXPOSURE, blockers, warnings
-        return STALE_PID_METADATA, blockers, warnings
+        return RUNTIME_DOWN_CLEAN, blockers, warnings
     if not runtime_pid_alive:
         if broker_exposure:
             block("broker_exposure_without_runtime", "Broker exposure exists while runtime is down.")

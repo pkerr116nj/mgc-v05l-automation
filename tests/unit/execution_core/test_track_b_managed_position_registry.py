@@ -12,6 +12,7 @@ from mgc_v05l.execution_core.track_b_managed_position_registry import (
     OPEN_MANAGED_CLOSE_WORKING,
     OPEN_MANAGED_EXIT_DUE,
     OPEN_MANAGED_MATCHED,
+    REVIEW_REQUIRED,
     TrackBManagedPositionRegistryConfig,
     build_track_b_managed_position_registry,
     write_track_b_managed_position_registry,
@@ -35,6 +36,45 @@ def test_no_positions_reports_no_managed_positions(tmp_path: Path) -> None:
     assert payload["submit_authority"] is False
     assert payload["paper_proof_invoked"] is False
     assert payload["live_money_eligible"] is False
+
+
+def test_historical_review_required_lifecycle_ignored_when_active_truth_clean_flat(tmp_path: Path) -> None:
+    _seed_base(tmp_path)
+    _write_position_truth_clean_flat(tmp_path)
+    _write_lifecycle_report(
+        tmp_path,
+        lifecycle_id="old_review_required_lifecycle",
+        review_required=True,
+        paper_lifecycle_classification="TRACK_B_STRATEGY_PAPER_REVIEW_REQUIRED",
+    )
+
+    payload = build_track_b_managed_position_registry(
+        config=TrackBManagedPositionRegistryConfig(repo_root=tmp_path),
+        now=NOW,
+    )
+
+    assert payload["classification"] == NO_MANAGED_POSITIONS
+    assert payload["managed_positions"] == []
+    assert payload["review_required_positions"] == []
+
+
+def test_active_review_required_lifecycle_still_surfaces(tmp_path: Path) -> None:
+    review = _lifecycle_position()
+    _seed_base(tmp_path, review_positions=[review])
+    _write_lifecycle_report(
+        tmp_path,
+        lifecycle_id=review["lifecycle_id"],
+        review_required=True,
+        paper_lifecycle_classification="TRACK_B_STRATEGY_PAPER_REVIEW_REQUIRED",
+    )
+
+    payload = build_track_b_managed_position_registry(
+        config=TrackBManagedPositionRegistryConfig(repo_root=tmp_path),
+        now=NOW,
+    )
+
+    assert payload["classification"] == REVIEW_REQUIRED
+    assert payload["managed_positions"][0]["classification"] == REVIEW_REQUIRED
 
 
 def test_valid_lifecycle_and_broker_match_reports_open_managed_matched(tmp_path: Path) -> None:
@@ -276,6 +316,8 @@ def _write_lifecycle_report(
     lifecycle_id: str,
     policy: str = "PAPER_DIAGNOSTIC_TIME_BOXED_3X5M_EXIT_V1",
     bars_since_fill: int = 1,
+    review_required: bool = False,
+    paper_lifecycle_classification: str = "TRACK_B_STRATEGY_PAPER_OPEN_MANAGED",
 ) -> None:
     _write_json(
         root
@@ -297,9 +339,9 @@ def _write_lifecycle_report(
             "managed_exit_policy_max_completed_5m_bars": 3,
             "bars_since_fill": bars_since_fill,
             "open_position_age_completed_5m_bars": bars_since_fill,
-            "paper_lifecycle_classification": "TRACK_B_STRATEGY_PAPER_OPEN_MANAGED",
+            "paper_lifecycle_classification": paper_lifecycle_classification,
             "final_position_status": "OPEN_MANAGED",
-            "review_required": False,
+            "review_required": review_required,
             "entry_intent": {"side": "SHORT", "order_action": "SELL", "quantity": 1},
             "entry_fill": {"price": "29688.69", "filled_at": "2026-05-22T16:20:00+00:00"},
         },
@@ -314,6 +356,20 @@ def _write_lifecycle_report(
             "lifecycle_id": lifecycle_id,
             "managed_exit_policy_id": policy,
             "lifecycle_status": "OPEN_MANAGED",
+        },
+    )
+
+
+def _write_position_truth_clean_flat(root: Path) -> None:
+    _write_json(
+        root / "outputs" / "track_b_execution_core" / "position_truth" / "latest_position_truth.json",
+        {
+            "schema_version": "track_b_position_truth_v1",
+            "generated_at": NOW.isoformat(),
+            "classification": "CLEAN_FLAT_READY",
+            "summary": {"overall_classification": "CLEAN_FLAT_READY", "broker_exposure_present": False},
+            "broker_positions": [],
+            "open_broker_orders": [],
         },
     )
 

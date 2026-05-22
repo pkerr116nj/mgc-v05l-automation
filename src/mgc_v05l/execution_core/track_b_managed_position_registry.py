@@ -96,6 +96,7 @@ def build_track_b_managed_position_registry(
         reconciliation=reconciliation,
         live_position_status=live_position_status,
         lifecycle_reports=lifecycle_reports,
+        position_truth=position_truth,
     )
     open_order_states = _list(open_order_truth.get("order_states"))
     source_stale = _source_stale(
@@ -381,17 +382,51 @@ def _review_required_positions(
     reconciliation: Mapping[str, Any],
     live_position_status: Mapping[str, Any],
     lifecycle_reports: list[dict[str, Any]],
+    position_truth: Mapping[str, Any],
 ) -> list[dict[str, Any]]:
     values = _list(reconciliation.get("review_required_positions")) or _list(
         live_position_status.get("review_required_positions")
     )
     if values:
         return values
+    if not _active_lifecycle_report_evidence(
+        reconciliation=reconciliation,
+        live_position_status=live_position_status,
+        position_truth=position_truth,
+    ):
+        return []
     return [
         report
         for report in lifecycle_reports
         if report.get("review_required") is True or "REVIEW" in str(report.get("paper_lifecycle_classification") or "")
     ]
+
+
+def _active_lifecycle_report_evidence(
+    *,
+    reconciliation: Mapping[str, Any],
+    live_position_status: Mapping[str, Any],
+    position_truth: Mapping[str, Any],
+) -> bool:
+    if _list(reconciliation.get("track_b_broker_positions")):
+        return True
+    if _list(reconciliation.get("track_b_lifecycle_positions")):
+        return True
+    if _list(reconciliation.get("unresolved_submit_intent_ownership_records")):
+        return True
+    if _int_or_none(reconciliation.get("review_required_count")):
+        return True
+    if _int_or_none(reconciliation.get("unresolved_submit_intent_ownership_count")):
+        return True
+    if _int_or_none(live_position_status.get("open_position_count")):
+        return True
+    if _list(live_position_status.get("positions")) or _list(live_position_status.get("open_positions")):
+        return True
+    position_summary = _mapping(position_truth.get("summary"))
+    position_classification = str(position_truth.get("classification") or position_summary.get("overall_classification") or "")
+    if position_classification in {"CLEAN_FLAT_READY", "FLAT_CLEAN"}:
+        return False
+    return position_summary.get("broker_exposure_present") is True
 
 
 def _exit_due(*, lifecycle: Mapping[str, Any] | None, lifecycle_report: Mapping[str, Any], classification: str) -> bool:

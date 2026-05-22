@@ -59,6 +59,17 @@ def test_no_runtime_clean_flat_is_down_clean(tmp_path: Path) -> None:
     assert payload["runtime"]["pid_alive"] is False
 
 
+def test_dead_stale_pid_metadata_clean_flat_is_down_clean_with_warning(tmp_path: Path) -> None:
+    _seed_trade_capable(tmp_path, pid_alive=False)
+
+    payload = _build(tmp_path, pid_alive=False)
+
+    assert payload["classification"] == RUNTIME_DOWN_CLEAN
+    assert payload["runtime"]["pid_alive"] is False
+    assert payload["warnings"][0]["code"] == "stale_pid_metadata"
+    assert payload["blockers"] == []
+
+
 def test_no_runtime_with_broker_exposure_is_loud(tmp_path: Path) -> None:
     _seed_trade_capable(tmp_path, pid_alive=False)
     position_truth = json.loads(_position_truth_path(tmp_path).read_text(encoding="utf-8"))
