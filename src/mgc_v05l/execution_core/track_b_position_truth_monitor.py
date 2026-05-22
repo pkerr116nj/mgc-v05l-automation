@@ -1,4 +1,8 @@
-"""Read-only Track B PAPER position truth and trade-outcome monitor."""
+"""Read-only Track B PAPER position truth and trade-outcome monitor.
+
+Position Truth authority lives in execution_core; dashboard artifacts are
+projections and must not be used as runtime authority.
+"""
 
 from __future__ import annotations
 
@@ -11,10 +15,13 @@ from typing import Any, Mapping
 
 
 DEFAULT_POSITION_TRUTH_ARTIFACT = (
-    Path("outputs") / "operator_dashboard" / "runtime" / "latest_track_b_position_truth.json"
+    Path("outputs") / "track_b_execution_core" / "position_truth" / "latest_position_truth.json"
 )
 DEFAULT_TRADE_OUTCOME_EVENTS = (
-    Path("outputs") / "operator_dashboard" / "runtime" / "track_b_trade_outcome_events.jsonl"
+    Path("outputs") / "track_b_execution_core" / "position_truth" / "track_b_trade_outcome_events.jsonl"
+)
+DEFAULT_DASHBOARD_POSITION_TRUTH_PROJECTION = (
+    Path("outputs") / "operator_dashboard" / "runtime" / "latest_track_b_position_truth.json"
 )
 DEFAULT_RECONCILIATION_ARTIFACT = (
     Path("outputs")
@@ -63,6 +70,7 @@ class TrackBPositionTruthMonitorConfig:
     repo_root: Path
     output_path: Path = DEFAULT_POSITION_TRUTH_ARTIFACT
     event_log_path: Path = DEFAULT_TRADE_OUTCOME_EVENTS
+    dashboard_projection_path: Path | None = DEFAULT_DASHBOARD_POSITION_TRUTH_PROJECTION
     reconciliation_path: Path = DEFAULT_RECONCILIATION_ARTIFACT
     broker_lease_path: Path = DEFAULT_BROKER_LEASE_ARTIFACT
     runtime_truth_path: Path = DEFAULT_RUNTIME_TRUTH_ARTIFACT
@@ -160,7 +168,11 @@ def build_track_b_position_truth(
         "event_state": _event_state(position_states=position_states, reconciliation=reconciliation, runtime_status=runtime_status),
         "artifact_paths": {
             "latest": str(config.resolve(config.output_path)),
+            "authority": str(config.resolve(config.output_path)),
             "event_log": str(config.resolve(config.event_log_path)),
+            "dashboard_projection": None
+            if config.dashboard_projection_path is None
+            else str(config.resolve(config.dashboard_projection_path)),
             "reconciliation": str(config.resolve(config.reconciliation_path)),
             "broker_lease": str(config.resolve(config.broker_lease_path)),
             "runtime_truth": str(config.resolve(config.runtime_truth_path)),
@@ -184,12 +196,31 @@ def write_track_b_position_truth(
     previous = _read_json(output_path)
     events = build_trade_outcome_events(previous=previous, current=payload, now=now)
     _write_json_atomic(output_path, dict(payload))
+    if config.dashboard_projection_path is not None:
+        _write_json_atomic(
+            config.resolve(config.dashboard_projection_path),
+            build_dashboard_position_truth_projection(authority_payload=payload, authority_path=output_path),
+        )
     if events:
         event_log_path.parent.mkdir(parents=True, exist_ok=True)
         with event_log_path.open("a", encoding="utf-8") as handle:
             for event in events:
                 handle.write(json.dumps(event, sort_keys=True) + "\n")
     return output_path, events
+
+
+def build_dashboard_position_truth_projection(*, authority_payload: Mapping[str, Any], authority_path: Path) -> dict[str, Any]:
+    """Build a dashboard-only projection of the execution-core authority payload."""
+
+    return {
+        **dict(authority_payload),
+        "schema_version": "track_b_position_truth_dashboard_projection_v1",
+        "projection_only": True,
+        "not_routing_authority": True,
+        "source_authority_path": str(authority_path),
+        "authority_owner": "execution_core",
+        "operator_dashboard_display_only": True,
+    }
 
 
 def build_trade_outcome_events(
@@ -720,6 +751,7 @@ __all__ = [
     "REVIEW_REQUIRED",
     "UNKNOWN_OPEN_ORDER",
     "TrackBPositionTruthMonitorConfig",
+    "build_dashboard_position_truth_projection",
     "build_track_b_position_truth",
     "build_trade_outcome_events",
     "write_track_b_position_truth",

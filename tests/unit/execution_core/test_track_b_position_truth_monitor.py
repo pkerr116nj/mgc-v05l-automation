@@ -88,6 +88,44 @@ def test_trade_outcome_events_append_only_on_meaningful_changes(tmp_path: Path) 
     assert len(lines) == len(first_events) + len(clean_events)
 
 
+def test_authority_artifact_and_event_log_live_under_execution_core(tmp_path: Path) -> None:
+    config = TrackBPositionTruthMonitorConfig(repo_root=tmp_path)
+    _seed_clean(tmp_path)
+    payload = build_track_b_position_truth(config=config, now=NOW)
+
+    authority_path, _ = write_track_b_position_truth(config=config, payload=payload, now=NOW)
+    dashboard_path = config.resolve(config.dashboard_projection_path)  # type: ignore[arg-type]
+
+    assert authority_path == tmp_path / "outputs" / "track_b_execution_core" / "position_truth" / "latest_position_truth.json"
+    assert config.resolve(config.event_log_path) == (
+        tmp_path / "outputs" / "track_b_execution_core" / "position_truth" / "track_b_trade_outcome_events.jsonl"
+    )
+    assert authority_path.exists()
+    assert dashboard_path.exists()
+    projection = json.loads(dashboard_path.read_text(encoding="utf-8"))
+    assert projection["projection_only"] is True
+    assert projection["not_routing_authority"] is True
+    assert projection["source_authority_path"] == str(authority_path)
+    assert projection["authority_owner"] == "execution_core"
+
+
+def test_critical_runtime_paths_do_not_consume_dashboard_projection_as_authority() -> None:
+    repo_root = Path(__file__).resolve().parents[3]
+    forbidden = "outputs/operator_dashboard/runtime/latest_track_b_position_truth.json"
+    critical_paths = [
+        repo_root / "src/mgc_v05l/app/probationary_runtime.py",
+        repo_root / "src/mgc_v05l/execution_core/track_b_readiness_state.py",
+        repo_root / "src/mgc_v05l/execution_core/track_b_readiness_authority.py",
+        repo_root / "src/mgc_v05l/execution_core/track_b_self_healing_supervisor.py",
+        repo_root / "src/mgc_v05l/app/track_b_self_healing_supervisor.py",
+        repo_root / "src/mgc_v05l/app/track_b_readiness_maintenance_supervisor.py",
+    ]
+
+    offenders = [str(path) for path in critical_paths if forbidden in path.read_text(encoding="utf-8")]
+
+    assert offenders == []
+
+
 def test_open_managed_matched_classification(tmp_path: Path) -> None:
     _seed_open_managed(tmp_path)
 
