@@ -1184,11 +1184,17 @@ def _trade_record_from_filled_bridge_result(
         output_root=position_management_manifest_root,
         lane_registry_paths=lane_registry_paths,
     )
-    lifecycle_classification = (
-        "TRACK_B_STRATEGY_PAPER_OPEN_MANAGED"
-        if metadata.complete
-        else OPEN_MANAGED_METADATA_INCOMPLETE
+    manifest_lifecycle_status = (
+        str((manifest_update.manifest or {}).get("lifecycle_status") or "")
+        if manifest_update is not None
+        else ""
     )
+    lifecycle_classification = "TRACK_B_STRATEGY_PAPER_OPEN_MANAGED"
+    if not metadata.complete:
+        lifecycle_classification = OPEN_MANAGED_METADATA_INCOMPLETE
+    elif manifest_lifecycle_status and manifest_lifecycle_status != "OPEN_MANAGED":
+        lifecycle_classification = manifest_lifecycle_status
+    final_position_status = "OPEN_MANAGED" if lifecycle_classification == "TRACK_B_STRATEGY_PAPER_OPEN_MANAGED" else "REVIEW_REQUIRED"
     return {
         "ledger_schema_version": LEDGER_SCHEMA_VERSION,
         "trade_id": f"{strategy_id}:{lifecycle_id}",
@@ -1249,8 +1255,10 @@ def _trade_record_from_filled_bridge_result(
         "app_only_no_broker_transmission": False,
         "transmission_classification": "BROKER_BACKED_POSITION_CONFIRMED",
         "final_broker_state_classification": lifecycle_classification,
-        "final_position_status": "OPEN_MANAGED",
-        "review_required": bool(filled_bridge_result.get("review_required")) or not metadata.complete,
+        "final_position_status": final_position_status,
+        "review_required": bool(filled_bridge_result.get("review_required"))
+        or not metadata.complete
+        or lifecycle_classification != "TRACK_B_STRATEGY_PAPER_OPEN_MANAGED",
         "paper_lifecycle_report_path": _string_or_none(
             filled_bridge_result.get("paper_lifecycle_report_path")
             or filled_bridge_result.get("managed_lifecycle_report_path")
@@ -2236,7 +2244,14 @@ def _is_open_position_record(item: Mapping[str, Any]) -> bool:
     if _is_reconciliation_record(item) or _is_flat_closed_trade(item) or _is_manual_flat_reviewed(item):
         return False
     if item.get("paper_lifecycle_type") == "STRATEGY_MANAGED":
-        return _has_entry_fill(item) and not _has_exit_fill(item)
+        final_status = item.get("final_position_status")
+        if final_status not in {None, ""}:
+            return final_status == "OPEN_MANAGED" and _has_entry_fill(item) and not _has_exit_fill(item)
+        return (
+            item.get("paper_lifecycle_classification") == "TRACK_B_STRATEGY_PAPER_OPEN_MANAGED"
+            and _has_entry_fill(item)
+            and not _has_exit_fill(item)
+        )
     if _is_proof_canary_record(item):
         return _has_entry_fill(item) and not _has_exit_fill(item)
     return False

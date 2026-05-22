@@ -14,6 +14,7 @@ from mgc_v05l.execution_core.track_b_paper_trade_ledger import (
     update_track_b_paper_trade_ledger_from_runner_report,
 )
 from mgc_v05l.execution_core.track_b_position_management_manifest import (
+    BROKER_BACKED_FILL_EVIDENCE_INCOMPLETE,
     OPEN_MANAGED_METADATA_INCOMPLETE,
     create_or_update_position_management_manifest,
 )
@@ -176,6 +177,45 @@ def test_direct_bridge_fill_missing_policy_is_review_required_incomplete(tmp_pat
     assert result.trade_record["review_required"] is True
 
 
+def test_direct_bridge_entry_without_broker_fill_identity_does_not_open_managed(tmp_path: Path) -> None:
+    payload = {
+        "classification": "PAPER_STRATEGY_ORDER_FILLED_PERSISTED",
+        "strategy_id": "track_b_paper_execution_test_mule_v1__mgc",
+        "lane_id": "track_b_paper_execution_test_mule_v1__mgc",
+        "instrument": "MGC",
+        "symbol": "MGC",
+        "action": "BUY",
+        "quantity": 1,
+        "order_intent_id": "MGC|1m|2026-05-22T01:39:00Z|BUY_TO_OPEN",
+        "intent_type": "BUY_TO_OPEN",
+        "broker_order_id": None,
+        "perm_id": None,
+        "local_symbol": "MGCM6",
+        "con_id": 712565978,
+        "contract": {"symbol": "MGC", "local_symbol": "MGCM6", "expiry": "202606", "multiplier": "10"},
+        "fill_price": None,
+        "fill_timestamp": None,
+        "managed_exit_policy_id": "PAPER_DIAGNOSTIC_TIME_BOXED_3X5M_EXIT_V1",
+        "paper_proof_invoked": False,
+        "live_money_readiness": False,
+    }
+
+    result = update_track_b_paper_trade_ledger_from_filled_bridge_result(
+        filled_bridge_result=payload,
+        filled_bridge_result_json=write_json(tmp_path / "fill.json", payload),
+        output_root=tmp_path / "ledger",
+        position_management_manifest_root=tmp_path / "manifests",
+        lane_registry_paths=(),
+        now=aware_now(),
+    )
+
+    assert result.trade_record is not None
+    assert result.trade_record["paper_lifecycle_classification"] == BROKER_BACKED_FILL_EVIDENCE_INCOMPLETE
+    assert result.trade_record["final_position_status"] == "REVIEW_REQUIRED"
+    assert result.trade_record["review_required"] is True
+    assert result.live_position_status["open_position_count"] == 0
+
+
 def test_direct_bridge_close_fill_persists_closed_flat_record(tmp_path: Path) -> None:
     output_root = tmp_path / "ledger"
     open_payload = {
@@ -264,6 +304,7 @@ def test_flat_confirmed_direct_close_counts_as_closed_when_price_unknown(tmp_pat
         "fill_price": "4566.0",
         "fill_timestamp": "2026-05-15T15:40:00+00:00",
         "bridge_classification": "PAPER_STRATEGY_ORDER_FILLED",
+        "managed_exit_policy_id": "PAPER_DIAGNOSTIC_TIME_BOXED_3X5M_EXIT_V1",
         "paper_proof_invoked": False,
         "live_money_readiness": False,
         "review_required": False,
@@ -1335,6 +1376,7 @@ def test_leak_test_adopted_entry_settled_flat_archives_lifecycle_only_row(tmp_pa
         "source": "TRACK_B_PAPER_LIFECYCLE_ADOPTION",
         "source_artifact_paths": ["outputs/reports/track_b_paper_lifecycle_adoption/adopt.json"],
         "route_destination": "ibkr_paper_bridge_submit_capable",
+        "managed_exit_policy_id": "PAPER_DIAGNOSTIC_TIME_BOXED_3X5M_EXIT_V1",
         "paper_proof_invoked": False,
         "live_money_readiness": False,
         "review_required": False,
@@ -1403,6 +1445,7 @@ def test_leak_test_adopted_entry_settled_flat_refuses_when_broker_position_remai
         "bridge_classification": "PAPER_STRATEGY_ORDER_FILLED",
         "entry_source": "LEAK_TEST_ENTRY",
         "source": "TRACK_B_PAPER_LIFECYCLE_ADOPTION",
+        "managed_exit_policy_id": "PAPER_DIAGNOSTIC_TIME_BOXED_3X5M_EXIT_V1",
         "paper_proof_invoked": False,
         "live_money_readiness": False,
         "review_required": False,

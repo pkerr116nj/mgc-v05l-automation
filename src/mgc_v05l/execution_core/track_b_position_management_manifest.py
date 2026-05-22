@@ -29,6 +29,8 @@ DEFAULT_TRACK_B_PROBATIONARY_LANE_CONFIG_YAML = Path(
     "config/probationary_pattern_engine_paper_mnq_mgc_plus_mnq_us_intraday_review.yaml"
 )
 OPEN_MANAGED_METADATA_INCOMPLETE = "OPEN_MANAGED_METADATA_INCOMPLETE"
+BROKER_BACKED_FILL_EVIDENCE_INCOMPLETE = "BROKER_BACKED_FILL_EVIDENCE_INCOMPLETE"
+BLOCKED_NO_BROKER_EFFECT = "BLOCKED_NO_BROKER_EFFECT"
 POSITION_MANAGEMENT_MANIFEST_SCHEMA_VERSION = "track_b_position_management_manifest_v1"
 PAPER_EXECUTION_TEST_MULE_MANAGED_EXIT_POLICY_ID = "PAPER_DIAGNOSTIC_TIME_BOXED_3X5M_EXIT_V1"
 PAPER_EXECUTION_TEST_MULE_LANE_IDS = {
@@ -97,6 +99,12 @@ def create_or_update_position_management_manifest(
     path = manifest_path_for_intent(entry_intent_id, output_root=output_root)
     existing = dict(existing_manifest or _read_json(path) or {})
     created_at = str(existing.get("created_at") or actual_now.isoformat())
+    requested_lifecycle_status = str(lifecycle_status)
+    broker_identity = dict(broker_ownership_identity or existing.get("broker_ownership_identity") or {})
+    lifecycle_status_blockers = _broker_backed_fill_evidence_blockers(broker_identity)
+    if requested_lifecycle_status == "OPEN_MANAGED" and lifecycle_status_blockers:
+        requested_lifecycle_status = BROKER_BACKED_FILL_EVIDENCE_INCOMPLETE
+
     manifest = {
         "schema_version": POSITION_MANAGEMENT_MANIFEST_SCHEMA_VERSION,
         "runtime_instance_id": _first_text(runtime_instance_id, existing.get("runtime_instance_id"), os.environ.get("MGC_TRACK_B_RUNTIME_INSTANCE_ID")),
@@ -121,9 +129,10 @@ def create_or_update_position_management_manifest(
         "quantity": _first_text(quantity, existing.get("quantity")),
         "managed_exit_policy_id": _first_text(managed_exit_policy_id, existing.get("managed_exit_policy_id")),
         "policy_config_refs": dict(policy_config_refs or existing.get("policy_config_refs") or {}),
-        "broker_ownership_identity": dict(broker_ownership_identity or existing.get("broker_ownership_identity") or {}),
+        "broker_ownership_identity": broker_identity,
         "lifecycle_id": _first_text(lifecycle_id, existing.get("lifecycle_id")),
-        "lifecycle_status": str(lifecycle_status),
+        "lifecycle_status": requested_lifecycle_status,
+        "lifecycle_status_blockers": lifecycle_status_blockers,
         "created_at": created_at,
         "updated_at": actual_now.isoformat(),
         "paper_only": True,
@@ -188,10 +197,18 @@ def update_manifest_from_filled_bridge_result(
         "fill_price": filled_bridge_result.get("fill_price") or filled_bridge_result.get("entry_fill_price"),
         "fill_timestamp": filled_bridge_result.get("fill_timestamp") or filled_bridge_result.get("entry_timestamp"),
     }
+    fill_evidence_blockers = _broker_backed_fill_evidence_blockers(identity)
     resolution = resolve_management_metadata(
         source=filled_bridge_result,
         output_root=output_root,
     )
+    lifecycle_status = OPEN_MANAGED_METADATA_INCOMPLETE
+    if _is_pre_submit_no_broker_effect(filled_bridge_result, identity):
+        lifecycle_status = BLOCKED_NO_BROKER_EFFECT
+    elif resolution.complete and not fill_evidence_blockers:
+        lifecycle_status = "OPEN_MANAGED"
+    elif fill_evidence_blockers:
+        lifecycle_status = BROKER_BACKED_FILL_EVIDENCE_INCOMPLETE
     return create_or_update_position_management_manifest(
         entry_intent_id=intent_id,
         lane_id=_first_text(filled_bridge_result.get("lane_id"), existing.get("lane_id") if existing else None),
@@ -203,7 +220,7 @@ def update_manifest_from_filled_bridge_result(
         side=_side_from_filled_bridge_result(filled_bridge_result),
         quantity=filled_bridge_result.get("quantity"),
         managed_exit_policy_id=resolution.managed_exit_policy_id,
-        lifecycle_status="OPEN_MANAGED" if resolution.complete else OPEN_MANAGED_METADATA_INCOMPLETE,
+        lifecycle_status=lifecycle_status,
         policy_config_refs={"metadata_source": resolution.source},
         broker_ownership_identity=identity,
         lifecycle_id=_first_text(filled_bridge_result.get("lifecycle_id")),
@@ -246,6 +263,19 @@ def lifecycle_metadata_complete(source: Mapping[str, Any]) -> TrackBManagementMe
     if policy and not blockers:
         return TrackBManagementMetadataResolution(policy, "lifecycle", None, "POSITION_MANAGEMENT_METADATA_COMPLETE")
     return TrackBManagementMetadataResolution(policy, "lifecycle" if policy else None, None, OPEN_MANAGED_METADATA_INCOMPLETE, blockers=blockers)
+
+
+def broker_backed_fill_evidence_complete(source: Mapping[str, Any]) -> TrackBManagementMetadataResolution:
+    blockers = tuple(_broker_backed_fill_evidence_blockers(source))
+    if blockers:
+        return TrackBManagementMetadataResolution(
+            None,
+            "broker_fill_identity",
+            None,
+            BROKER_BACKED_FILL_EVIDENCE_INCOMPLETE,
+            blockers=blockers,
+        )
+    return TrackBManagementMetadataResolution(None, "broker_fill_identity", None, "BROKER_BACKED_FILL_EVIDENCE_COMPLETE")
 
 
 def _manifest_path_from_payload(source: Mapping[str, Any], *, output_root: Path) -> Path | None:
@@ -331,6 +361,31 @@ def _missing_required_management_fields(source: Mapping[str, Any], *, manifest: 
         "contract": _first_text(source.get("contract_key"), source.get("local_symbol"), source.get("con_id"), contract.get("contract_key"), contract.get("local_symbol"), contract.get("con_id")),
     }
     return [key for key, value in required.items() if not value]
+
+
+def _broker_backed_fill_evidence_blockers(source: Mapping[str, Any]) -> list[str]:
+    required = {
+        "broker_order_id": _first_text(source.get("broker_order_id"), source.get("order_id")),
+        "fill_price": _first_text(source.get("fill_price"), source.get("entry_fill_price"), source.get("price")),
+        "fill_timestamp": _first_text(
+            source.get("fill_timestamp"),
+            source.get("entry_timestamp"),
+            source.get("filled_at"),
+            source.get("executed_at"),
+        ),
+    }
+    return [key for key, value in required.items() if not value]
+
+
+def _is_pre_submit_no_broker_effect(source: Mapping[str, Any], identity: Mapping[str, Any]) -> bool:
+    effect = str(source.get("broker_effect_classification") or source.get("broker_effect") or "").strip().upper()
+    classification = str(source.get("classification") or "").strip().upper()
+    if "NO_BROKER_EFFECT" in effect or "NO_BROKER_EFFECT" in classification:
+        return True
+    submit_sent = source.get("submit_sent")
+    if submit_sent is False and not _first_text(identity.get("broker_order_id")) and not _first_text(identity.get("perm_id")):
+        return True
+    return False
 
 
 def _read_json(path: Path | None) -> dict[str, Any] | None:

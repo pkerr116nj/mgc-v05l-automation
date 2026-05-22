@@ -12,6 +12,7 @@ from mgc_v05l.execution_core.track_b_strategy_managed_paper_lifecycle import (
     TrackBStrategyManagedPaperLifecycleStages,
     maintain_open_track_b_strategy_managed_paper_lifecycle,
     run_track_b_strategy_managed_paper_lifecycle,
+    write_open_managed_lifecycle_report_from_filled_bridge_result,
 )
 
 
@@ -325,6 +326,35 @@ def test_valid_exit_policy_creates_open_managed_state(tmp_path: Path) -> None:
     assert result.report["close_intent"] is None
     assert result.report["final_position_status"] == "OPEN_MANAGED"
     assert result.report["paper_proof_invoked"] is False
+
+
+def test_direct_bridge_writer_refuses_open_managed_without_broker_fill_identity(tmp_path: Path) -> None:
+    report_path = write_open_managed_lifecycle_report_from_filled_bridge_result(
+        filled_bridge_result={
+            "order_intent_id": "MGC|1m|2026-05-22T01:39:00Z|BUY_TO_OPEN",
+            "intent_type": "BUY_TO_OPEN",
+            "lane_id": "track_b_paper_execution_test_mule_v1__mgc",
+            "strategy_id": "track_b_paper_execution_test_mule_v1__mgc",
+            "instrument": "MGC",
+            "symbol": "MGC",
+            "contract_key": "MGC-202606",
+            "local_symbol": "MGCM6",
+            "con_id": 712565978,
+            "quantity": 1,
+            "managed_exit_policy_id": TrackBManagedExitPolicy.PAPER_DIAGNOSTIC_TIME_BOXED_3X5M_EXIT_V1.value,
+            "broker_order_id": None,
+            "perm_id": None,
+            "fill_price": None,
+            "fill_timestamp": None,
+            "paper_proof_invoked": False,
+            "live_money_readiness": False,
+        },
+        output_root=tmp_path / "managed",
+        now=aware_now(),
+    )
+
+    assert report_path is None
+    assert not list((tmp_path / "managed").glob("**/track_b_strategy_managed_paper_lifecycle_report.json"))
 
 
 def test_exit_policy_generates_close_and_closed_flat(tmp_path: Path) -> None:
