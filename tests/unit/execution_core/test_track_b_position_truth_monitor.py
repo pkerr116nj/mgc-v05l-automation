@@ -27,10 +27,37 @@ def test_position_truth_reports_clean_flat(tmp_path: Path) -> None:
     assert payload["submit_authority"] is False
     assert payload["summary"]["overall_classification"] == "CLEAN_FLAT_READY"
     assert payload["open_order_truth"]["classification"] == "NO_OPEN_ORDERS"
+    assert payload["managed_order_registry"]["classification"] == "NO_MANAGED_ORDERS"
+    assert payload["summary"]["managed_order_count"] == 0
     assert payload["open_order_truth"]["source"] == "OPEN_ORDER_TRUTH_BUILDER_DIRECT"
     assert payload["reconciliation"]["classification"] == "TRACK_B_PAPER_BROKER_RECONCILED"
     assert payload["live_money_eligible"] is False
     assert {row["classification"] for row in payload["position_states"]} == {FLAT_CLEAN}
+
+
+def test_position_truth_surfaces_suspicious_managed_order_evidence(tmp_path: Path) -> None:
+    _seed_clean(tmp_path)
+    _write_json(
+        tmp_path / "outputs" / "track_b_execution_core" / "managed_orders" / "latest_managed_orders.json",
+        {
+            "schema_version": "track_b_managed_order_registry_v1",
+            "generated_at": NOW.isoformat(),
+            "classification": "CLOSE_ORDER_SUSPICIOUS",
+            "summary": {
+                "managed_order_count": 1,
+                "suspicious_order_count": 1,
+                "duplicate_close_order_count": 0,
+                "working_close_order_count": 1,
+                "modifiable_close_order_count": 0,
+            },
+        },
+    )
+
+    payload = build_track_b_position_truth(config=TrackBPositionTruthMonitorConfig(repo_root=tmp_path), now=NOW)
+
+    assert payload["managed_order_registry"]["classification"] == "CLOSE_ORDER_SUSPICIOUS"
+    assert payload["summary"]["managed_order_count"] == 1
+    assert payload["summary"]["managed_order_suspicious_order_count"] == 1
 
 
 def test_position_truth_flags_suspicious_working_close_order(tmp_path: Path) -> None:
@@ -157,6 +184,7 @@ def test_critical_runtime_paths_do_not_consume_dashboard_projection_as_authority
     repo_root = Path(__file__).resolve().parents[3]
     forbidden = "outputs/operator_dashboard/runtime/latest_track_b_position_truth.json"
     forbidden_open_order_truth = "outputs/operator_dashboard/runtime/latest_track_b_open_order_truth.json"
+    forbidden_managed_orders = "outputs/operator_dashboard/runtime/latest_track_b_managed_orders.json"
     critical_paths = [
         repo_root / "src/mgc_v05l/app/probationary_runtime.py",
         repo_root / "src/mgc_v05l/execution_core/track_b_readiness_state.py",
@@ -171,6 +199,7 @@ def test_critical_runtime_paths_do_not_consume_dashboard_projection_as_authority
         for path in critical_paths
         if forbidden in path.read_text(encoding="utf-8")
         or forbidden_open_order_truth in path.read_text(encoding="utf-8")
+        or forbidden_managed_orders in path.read_text(encoding="utf-8")
     ]
 
     assert offenders == []
@@ -223,6 +252,21 @@ def _seed_clean(root: Path) -> None:
             "writer_authority": "SINGLE_WRITER",
             "lane_count": 17,
             "generated_at": NOW.isoformat(),
+        },
+    )
+    _write_json(
+        root / "outputs" / "track_b_execution_core" / "managed_orders" / "latest_managed_orders.json",
+        {
+            "schema_version": "track_b_managed_order_registry_v1",
+            "generated_at": NOW.isoformat(),
+            "classification": "NO_MANAGED_ORDERS",
+            "summary": {
+                "managed_order_count": 0,
+                "suspicious_order_count": 0,
+                "duplicate_close_order_count": 0,
+                "working_close_order_count": 0,
+                "modifiable_close_order_count": 0,
+            },
         },
     )
 

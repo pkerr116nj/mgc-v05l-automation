@@ -41,6 +41,9 @@ def test_reconciles_flat_lifecycle_with_fresh_broker_truth_and_unrelated_positio
     assert report["track_b_broker_open_order_count"] == 0
     assert report["open_order_truth_classification"] == "NO_OPEN_ORDERS"
     assert report["open_order_truth"]["source"] == "OPEN_ORDER_TRUTH_BUILDER_DIRECT"
+    assert report["managed_order_registry_classification"] == "NO_MANAGED_ORDERS"
+    assert report["managed_order_registry"]["source"] == "MANAGED_ORDER_REGISTRY_AUTHORITY_ARTIFACT"
+    assert "outputs/operator_dashboard/runtime/latest_track_b_managed_orders.json" not in report["managed_order_registry"]["artifact_path"]
     reconciled_position = json.loads(config.reconciled_live_position_status_path.read_text(encoding="utf-8"))
     assert reconciled_position["source"] == "BROKER_RECONCILED"
     assert reconciled_position["broker_reconciled"] is True
@@ -1275,6 +1278,11 @@ def _write_base_artifacts(
         broker_truth_root=broker_root,
         market_data_root=tmp_path / "outputs" / "track_b_execution_core" / "phase1_runtime_market_data",
         report_path=report_path,
+        managed_order_registry_path=tmp_path
+        / "outputs"
+        / "track_b_execution_core"
+        / "managed_orders"
+        / "latest_managed_orders.json",
         max_age_seconds=120.0,
     )
     _write_json(
@@ -1310,6 +1318,21 @@ def _write_base_artifacts(
             "review_required_count": review_required_count,
             "by_strategy": {},
             "by_instrument": {},
+        },
+    )
+    _write_json(
+        config.managed_order_registry_path,
+        {
+            "schema_version": "track_b_managed_order_registry_v1",
+            "generated_at": NOW.isoformat(),
+            "classification": "NO_MANAGED_ORDERS",
+            "summary": {
+                "managed_order_count": 0,
+                "working_close_order_count": 0,
+                "suspicious_order_count": 0,
+                "duplicate_close_order_count": 0,
+            },
+            "projection_only": False,
         },
     )
     return config

@@ -40,6 +40,9 @@ DEFAULT_POSITION_TRUTH_ARTIFACT = (
 DEFAULT_OPEN_ORDER_TRUTH_ARTIFACT = (
     Path("outputs") / "track_b_execution_core" / "open_order_truth" / "latest_open_order_truth.json"
 )
+DEFAULT_MANAGED_ORDER_REGISTRY_ARTIFACT = (
+    Path("outputs") / "track_b_execution_core" / "managed_orders" / "latest_managed_orders.json"
+)
 DEFAULT_RECONCILIATION_ARTIFACT = (
     Path("outputs")
     / "reports"
@@ -66,6 +69,7 @@ class TrackBManagedPositionRegistryConfig:
     dashboard_projection_path: Path | None = DEFAULT_DASHBOARD_MANAGED_POSITION_PROJECTION
     position_truth_path: Path = DEFAULT_POSITION_TRUTH_ARTIFACT
     open_order_truth_path: Path = DEFAULT_OPEN_ORDER_TRUTH_ARTIFACT
+    managed_order_registry_path: Path = DEFAULT_MANAGED_ORDER_REGISTRY_ARTIFACT
     reconciliation_path: Path = DEFAULT_RECONCILIATION_ARTIFACT
     live_position_status_path: Path = DEFAULT_LIVE_POSITION_STATUS_ARTIFACT
     lifecycle_root: Path = DEFAULT_LIFECYCLE_ROOT
@@ -84,6 +88,7 @@ def build_track_b_managed_position_registry(
     actual_now = _ensure_utc(now or datetime.now(UTC))
     position_truth = _read_json(config.resolve(config.position_truth_path))
     open_order_truth = _read_json(config.resolve(config.open_order_truth_path))
+    managed_order_registry = _read_json(config.resolve(config.managed_order_registry_path))
     reconciliation = _read_json(config.resolve(config.reconciliation_path))
     live_position_status = _read_json(config.resolve(config.live_position_status_path))
     lifecycle_reports = _load_lifecycle_reports(config.resolve(config.lifecycle_root))
@@ -99,11 +104,13 @@ def build_track_b_managed_position_registry(
         position_truth=position_truth,
     )
     open_order_states = _list(open_order_truth.get("order_states"))
+    managed_order_states = _list(managed_order_registry.get("managed_orders"))
     source_stale = _source_stale(
         now=actual_now,
         config=config,
         position_truth=position_truth,
         open_order_truth=open_order_truth,
+        managed_order_registry=managed_order_registry,
         reconciliation=reconciliation,
     )
     managed_positions = _managed_positions(
@@ -111,6 +118,7 @@ def build_track_b_managed_position_registry(
         lifecycle_positions=lifecycle_positions,
         review_positions=review_positions,
         open_order_states=open_order_states,
+        managed_order_states=managed_order_states,
         lifecycle_reports=lifecycle_reports,
         manifests=manifests,
         source_stale=source_stale,
@@ -139,6 +147,10 @@ def build_track_b_managed_position_registry(
         "source_freshness": source_stale,
         "position_truth": _authority_summary(position_truth, config.resolve(config.position_truth_path)),
         "open_order_truth": _authority_summary(open_order_truth, config.resolve(config.open_order_truth_path)),
+        "managed_order_registry": _authority_summary(
+            managed_order_registry,
+            config.resolve(config.managed_order_registry_path),
+        ),
         "reconciliation": {
             "classification": reconciliation.get("classification"),
             "broker_reconciled": reconciliation.get("broker_reconciled"),
@@ -155,6 +167,17 @@ def build_track_b_managed_position_registry(
             "attention_required_count": sum(1 for item in managed_positions if item.get("attention_required") is True),
             "exit_due_count": sum(1 for item in managed_positions if item.get("exit_due") is True),
             "close_working_count": sum(1 for item in managed_positions if item.get("close_order_state")),
+            "suspicious_managed_order_count": sum(
+                1
+                for item in managed_positions
+                if str(_mapping(item.get("managed_order_state")).get("classification") or "") == "CLOSE_ORDER_SUSPICIOUS"
+            ),
+            "duplicate_close_risk_count": sum(
+                1
+                for item in managed_positions
+                if str(_mapping(item.get("managed_order_state")).get("classification") or "")
+                == "DUPLICATE_CLOSE_ORDER_BLOCKED"
+            ),
             "broker_position_count": len(broker_positions),
             "lifecycle_position_count": len(lifecycle_positions),
             "review_required_count": len(review_positions),
@@ -168,6 +191,7 @@ def build_track_b_managed_position_registry(
             else str(config.resolve(config.dashboard_projection_path)),
             "position_truth": str(config.resolve(config.position_truth_path)),
             "open_order_truth": str(config.resolve(config.open_order_truth_path)),
+            "managed_order_registry": str(config.resolve(config.managed_order_registry_path)),
             "reconciliation": str(config.resolve(config.reconciliation_path)),
             "live_position_status": str(config.resolve(config.live_position_status_path)),
             "lifecycle_root": str(config.resolve(config.lifecycle_root)),
@@ -246,6 +270,7 @@ def _managed_positions(
     lifecycle_positions: list[dict[str, Any]],
     review_positions: list[dict[str, Any]],
     open_order_states: list[dict[str, Any]],
+    managed_order_states: list[dict[str, Any]],
     lifecycle_reports: list[dict[str, Any]],
     manifests: list[dict[str, Any]],
     source_stale: Mapping[str, Any],
@@ -270,13 +295,15 @@ def _managed_positions(
             manifests=manifests,
         )
         close_order_state = _close_order_state(key=key, open_order_states=open_order_states)
+        managed_order_state = _managed_order_state(key=key, managed_order_states=managed_order_states)
+        effective_close_order_state = close_order_state or managed_order_state
         classification = _position_classification(
             broker=broker,
             lifecycle=lifecycle,
             review=review,
             lifecycle_report=lifecycle_report,
             manifest=manifest,
-            close_order_state=close_order_state,
+            close_order_state=effective_close_order_state,
             source_stale=source_stale,
         )
         exit_due = _exit_due(lifecycle=lifecycle, lifecycle_report=lifecycle_report, classification=classification)
@@ -301,7 +328,8 @@ def _managed_positions(
             "bars_since_entry": _bars_since_entry(lifecycle, lifecycle_report),
             "exit_due": bool(exit_due),
             "exit_due_state": _exit_due_state(exit_due),
-            "close_order_state": close_order_state,
+            "close_order_state": effective_close_order_state,
+            "managed_order_state": managed_order_state,
             "reconciliation_status": _reconciliation_status(broker=broker, lifecycle=lifecycle, review=review),
             "attention_required": classification
             in {
@@ -449,12 +477,20 @@ def _close_order_state(*, key: str, open_order_states: list[dict[str, Any]]) -> 
     return None
 
 
+def _managed_order_state(*, key: str, managed_order_states: list[dict[str, Any]]) -> dict[str, Any] | None:
+    for state in managed_order_states:
+        if state.get("is_close_order") is True and _position_key(state) == key:
+            return dict(state)
+    return None
+
+
 def _source_stale(
     *,
     now: datetime,
     config: TrackBManagedPositionRegistryConfig,
     position_truth: Mapping[str, Any],
     open_order_truth: Mapping[str, Any],
+    managed_order_registry: Mapping[str, Any],
     reconciliation: Mapping[str, Any],
 ) -> dict[str, Any]:
     sources = {
@@ -462,6 +498,8 @@ def _source_stale(
         "open_order_truth": open_order_truth.get("generated_at"),
         "reconciliation": reconciliation.get("generated_at"),
     }
+    if managed_order_registry:
+        sources["managed_order_registry"] = managed_order_registry.get("generated_at")
     ages = {name: _age_seconds(value, now) for name, value in sources.items()}
     stale_sources = [
         name

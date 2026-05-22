@@ -138,6 +138,36 @@ def test_close_working_comes_from_open_order_truth(tmp_path: Path) -> None:
     assert payload["managed_positions"][0]["close_order_state"]["broker_order_id"] == "30"
 
 
+def test_close_working_comes_from_managed_order_registry(tmp_path: Path) -> None:
+    lifecycle = _lifecycle_position(bars_since_fill=2)
+    _seed_base(
+        tmp_path,
+        broker_positions=[_broker_position()],
+        lifecycle_positions=[lifecycle],
+        managed_order_states=[
+            {
+                "classification": "WORKING_CLOSE_ORDER",
+                "is_close_order": True,
+                "local_symbol": "MNQM6",
+                "action": "BUY",
+                "quantity": "1",
+                "broker_order_id": "31",
+                "recommended_next_action": "WAIT",
+            }
+        ],
+    )
+    _write_lifecycle_report(tmp_path, lifecycle_id=lifecycle["lifecycle_id"], bars_since_fill=2)
+
+    payload = build_track_b_managed_position_registry(
+        config=TrackBManagedPositionRegistryConfig(repo_root=tmp_path),
+        now=NOW,
+    )
+
+    assert payload["classification"] == OPEN_MANAGED_CLOSE_WORKING
+    assert payload["managed_order_registry"]["classification"] == "WORKING_CLOSE_ORDER"
+    assert payload["managed_positions"][0]["managed_order_state"]["broker_order_id"] == "31"
+
+
 def test_broker_backed_position_without_lifecycle_requires_adoption(tmp_path: Path) -> None:
     _seed_base(tmp_path, broker_positions=[_broker_position()])
 
@@ -204,6 +234,7 @@ def test_dashboard_projection_is_not_authority(tmp_path: Path) -> None:
 def test_critical_paths_do_not_consume_dashboard_projection_as_authority() -> None:
     repo_root = Path(__file__).resolve().parents[3]
     forbidden = "outputs/operator_dashboard/runtime/latest_track_b_managed_positions.json"
+    forbidden_managed_orders = "outputs/operator_dashboard/runtime/latest_track_b_managed_orders.json"
     critical_paths = [
         repo_root / "src/mgc_v05l/app/probationary_runtime.py",
         repo_root / "src/mgc_v05l/execution_core/track_b_runtime_environment_truth.py",
@@ -212,7 +243,12 @@ def test_critical_paths_do_not_consume_dashboard_projection_as_authority() -> No
         repo_root / "src/mgc_v05l/execution_core/track_b_broker_truth_lease.py",
     ]
 
-    offenders = [str(path) for path in critical_paths if forbidden in path.read_text(encoding="utf-8")]
+    offenders = [
+        str(path)
+        for path in critical_paths
+        if forbidden in path.read_text(encoding="utf-8")
+        or forbidden_managed_orders in path.read_text(encoding="utf-8")
+    ]
 
     assert offenders == []
 
@@ -224,11 +260,13 @@ def _seed_base(
     lifecycle_positions: list[dict] | None = None,
     review_positions: list[dict] | None = None,
     order_states: list[dict] | None = None,
+    managed_order_states: list[dict] | None = None,
 ) -> None:
     broker_positions = broker_positions or []
     lifecycle_positions = lifecycle_positions or []
     review_positions = review_positions or []
     order_states = order_states or []
+    managed_order_states = managed_order_states or []
     _write_json(
         root / "outputs" / "reports" / "track_b_paper_broker_reconciliation" / "latest_track_b_paper_broker_reconciliation.json",
         {
@@ -264,6 +302,25 @@ def _seed_base(
             "generated_at": NOW.isoformat(),
             "classification": "NO_OPEN_ORDERS" if not order_states else "OPEN_CLOSE_ORDER_WORKING",
             "order_states": order_states,
+        },
+    )
+    _write_json(
+        root / "outputs" / "track_b_execution_core" / "managed_orders" / "latest_managed_orders.json",
+        {
+            "schema_version": "track_b_managed_order_registry_v1",
+            "generated_at": NOW.isoformat(),
+            "classification": "NO_MANAGED_ORDERS" if not managed_order_states else managed_order_states[0]["classification"],
+            "managed_orders": managed_order_states,
+            "summary": {
+                "managed_order_count": len(managed_order_states),
+                "working_close_order_count": sum(1 for row in managed_order_states if row.get("is_close_order") is True),
+                "suspicious_order_count": sum(
+                    1 for row in managed_order_states if row.get("classification") == "CLOSE_ORDER_SUSPICIOUS"
+                ),
+                "duplicate_close_order_count": sum(
+                    1 for row in managed_order_states if row.get("classification") == "DUPLICATE_CLOSE_ORDER_BLOCKED"
+                ),
+            },
         },
     )
     _write_json(

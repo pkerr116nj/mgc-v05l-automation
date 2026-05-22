@@ -25,6 +25,7 @@ from .track_b_open_order_truth import (
     TrackBOpenOrderTruthConfig,
     build_track_b_open_order_truth,
 )
+from .track_b_managed_order_registry import DEFAULT_MANAGED_ORDER_REGISTRY_ARTIFACT
 
 DEFAULT_POSITION_TRUTH_ARTIFACT = (
     Path("outputs") / "track_b_execution_core" / "position_truth" / "latest_position_truth.json"
@@ -85,6 +86,7 @@ class TrackBPositionTruthMonitorConfig:
     headless_status_path: Path = DEFAULT_HEADLESS_STATUS_ARTIFACT
     live_position_status_path: Path = DEFAULT_LIVE_POSITION_STATUS_ARTIFACT
     open_order_truth_path: Path = DEFAULT_OPEN_ORDER_TRUTH_ARTIFACT
+    managed_order_registry_path: Path = DEFAULT_MANAGED_ORDER_REGISTRY_ARTIFACT
     lifecycle_root: Path = DEFAULT_LIFECYCLE_ROOT
     market_data_root: Path = DEFAULT_MARKET_DATA_ROOT
     suspicious_marketable_seconds: float = 60.0
@@ -108,6 +110,7 @@ def build_track_b_position_truth(
     live_position_status = _read_json(config.resolve(config.live_position_status_path))
     lifecycle_reports = _load_lifecycle_reports(config.resolve(config.lifecycle_root))
     open_order_truth = _open_order_truth_evidence(config=config, now=actual_now)
+    managed_order_registry = _managed_order_registry_evidence(config=config, now=actual_now)
 
     broker_positions = _list(reconciliation.get("track_b_broker_positions"))
     open_orders = _list(reconciliation.get("track_b_broker_open_orders"))
@@ -179,12 +182,21 @@ def build_track_b_position_truth(
             "stale_or_missing": open_order_truth.get("position_truth_open_order_truth_stale_or_missing") is True,
             "artifact_path": str(config.resolve(config.open_order_truth_path)),
         },
+        "managed_order_registry": {
+            "classification": managed_order_registry.get("classification"),
+            "summary": managed_order_registry.get("summary") or {},
+            "generated_at": managed_order_registry.get("generated_at"),
+            "stale_or_missing": managed_order_registry.get("position_truth_managed_order_registry_stale_or_missing")
+            is True,
+            "artifact_path": str(config.resolve(config.managed_order_registry_path)),
+        },
         "position_states": position_states,
         "summary": _summary(
             position_states=position_states,
             reconciliation=reconciliation,
             runtime_status=runtime_status,
             open_order_truth=open_order_truth,
+            managed_order_registry=managed_order_registry,
         ),
         "event_state": _event_state(position_states=position_states, reconciliation=reconciliation, runtime_status=runtime_status),
         "artifact_paths": {
@@ -200,6 +212,7 @@ def build_track_b_position_truth(
             "headless_status": str(config.resolve(config.headless_status_path)),
             "live_position_status": str(config.resolve(config.live_position_status_path)),
             "open_order_truth": str(config.resolve(config.open_order_truth_path)),
+            "managed_order_registry": str(config.resolve(config.managed_order_registry_path)),
         },
     }
     return payload
@@ -466,6 +479,17 @@ def _open_order_truth_evidence(*, config: TrackBPositionTruthMonitorConfig, now:
         }
 
 
+def _managed_order_registry_evidence(*, config: TrackBPositionTruthMonitorConfig, now: datetime) -> dict[str, Any]:
+    artifact = _read_json(config.resolve(config.managed_order_registry_path))
+    age_seconds = _age_seconds(artifact.get("generated_at"), now) if artifact else None
+    stale_or_missing = age_seconds is None or age_seconds > 180.0
+    return {
+        **artifact,
+        "position_truth_managed_order_registry_stale_or_missing": stale_or_missing,
+        "position_truth_managed_order_registry_age_seconds": age_seconds,
+    }
+
+
 def _runtime_status(*, runtime_truth: Mapping[str, Any], headless_status: Mapping[str, Any], now: datetime) -> dict[str, Any]:
     generated_at = _parse_time(runtime_truth.get("generated_at") or runtime_truth.get("last_success_at"))
     ttl_seconds = _float_or_none(runtime_truth.get("freshness_ttl_seconds")) or 180.0
@@ -503,12 +527,14 @@ def _summary(
     reconciliation: Mapping[str, Any],
     runtime_status: Mapping[str, Any],
     open_order_truth: Mapping[str, Any],
+    managed_order_registry: Mapping[str, Any],
 ) -> dict[str, Any]:
     counts: dict[str, int] = {}
     for state in position_states:
         classification = str(state.get("classification") or "UNKNOWN")
         counts[classification] = counts.get(classification, 0) + 1
     open_order_summary = _mapping(open_order_truth.get("summary"))
+    managed_order_summary = _mapping(managed_order_registry.get("summary"))
     return {
         "overall_classification": "CLEAN_FLAT_READY" if reconciliation.get("broker_reconciled") is True and all(s.get("classification") == FLAT_CLEAN for s in position_states) else "ATTENTION_REQUIRED",
         "classification_counts": counts,
@@ -526,6 +552,12 @@ def _summary(
             open_order_summary.get("broker_position_without_close_order_count") or 0
         ),
         "open_order_truth_classification": open_order_truth.get("classification"),
+        "managed_order_registry_classification": managed_order_registry.get("classification"),
+        "managed_order_count": int(managed_order_summary.get("managed_order_count") or 0),
+        "managed_order_suspicious_order_count": int(managed_order_summary.get("suspicious_order_count") or 0),
+        "managed_order_duplicate_close_order_count": int(managed_order_summary.get("duplicate_close_order_count") or 0),
+        "managed_order_working_close_order_count": int(managed_order_summary.get("working_close_order_count") or 0),
+        "managed_order_modifiable_close_order_count": int(managed_order_summary.get("modifiable_close_order_count") or 0),
     }
 
 
@@ -697,6 +729,13 @@ def _parse_time(value: Any) -> datetime | None:
     if parsed.tzinfo is None:
         return parsed.replace(tzinfo=UTC)
     return parsed.astimezone(UTC)
+
+
+def _age_seconds(value: Any, now: datetime) -> float | None:
+    parsed = _parse_time(value)
+    if parsed is None:
+        return None
+    return round(max((now - parsed).total_seconds(), 0.0), 3)
 
 
 def _ensure_utc(value: datetime) -> datetime:

@@ -58,6 +58,13 @@ DEFAULT_KNOWN_LEAK_TEST_ENTRY_ORDERS_PATH = (
     / "leak_test_entry_orders"
     / "latest_known_leak_test_entry_orders.json"
 )
+DEFAULT_MANAGED_ORDER_REGISTRY_ARTIFACT = (
+    REPO_ROOT
+    / "outputs"
+    / "track_b_execution_core"
+    / "managed_orders"
+    / "latest_managed_orders.json"
+)
 DEFAULT_SUBMIT_INTENT_OWNERSHIP_PATH = REPO_ROOT / DEFAULT_TRACK_B_SUBMIT_INTENT_OWNERSHIP_JSONL
 DEFAULT_MAX_AGE_SECONDS = float(os.environ.get("TRACK_B_BROKER_TRUTH_MAX_AGE_SECONDS", "120"))
 DEFAULT_BROKER_TRUTH_SETTLEMENT_SECONDS = float(os.environ.get("TRACK_B_PAPER_BROKER_TRUTH_SETTLEMENT_SECONDS", "300"))
@@ -92,6 +99,7 @@ class ReconciliationConfig:
     account: str = PAPER_ACCOUNT
     symbols: tuple[str, ...] = PHASE1_RUNTIME_TICKER_ORDER
     submit_intent_ownership_path: Path = DEFAULT_SUBMIT_INTENT_OWNERSHIP_PATH
+    managed_order_registry_path: Path = DEFAULT_MANAGED_ORDER_REGISTRY_ARTIFACT
 
     @property
     def trade_summary_path(self) -> Path:
@@ -208,6 +216,7 @@ def reconcile_track_b_paper_broker_truth(
         known_managed_exit_orders=known_managed_exit_orders,
         unknown_track_b_open_orders=unknown_track_b_open_orders,
     )
+    managed_order_registry_evidence = _managed_order_registry_evidence(config=config, now=actual_now)
     unresolved_submit_intents = _unresolved_submit_intent_ownership_records(config)
     submit_intent_ownership_reconciliation = _submit_intent_ownership_reconciliation_state(
         unresolved_submit_intents=unresolved_submit_intents,
@@ -394,6 +403,8 @@ def reconcile_track_b_paper_broker_truth(
         "unknown_broker_open_order_count": len(unknown_track_b_open_orders),
         "open_order_truth_classification": open_order_truth_evidence.get("classification"),
         "open_order_truth": _open_order_truth_report_context(open_order_truth_evidence),
+        "managed_order_registry_classification": managed_order_registry_evidence.get("classification"),
+        "managed_order_registry": managed_order_registry_evidence,
         "track_b_broker_positions": track_b_positions,
         "track_b_broker_open_orders": track_b_open_orders,
         "known_managed_exit_orders": known_managed_exit_orders,
@@ -577,6 +588,21 @@ def _open_order_truth_blocker_context(open_order_truth: Mapping[str, Any]) -> di
         )
     ]
     return context
+
+
+def _managed_order_registry_evidence(*, config: ReconciliationConfig, now: datetime) -> dict[str, Any]:
+    payload = _load_json(config.managed_order_registry_path)
+    age_seconds = _age_seconds(payload.get("generated_at"), now) if payload else None
+    return {
+        "classification": payload.get("classification"),
+        "summary": payload.get("summary") or {},
+        "generated_at": payload.get("generated_at"),
+        "artifact_path": str(config.managed_order_registry_path),
+        "source": "MANAGED_ORDER_REGISTRY_AUTHORITY_ARTIFACT" if payload else "MANAGED_ORDER_REGISTRY_MISSING",
+        "stale_or_missing": age_seconds is None or age_seconds > float(config.max_age_seconds),
+        "age_seconds": age_seconds,
+        "projection_only": payload.get("projection_only") is True,
+    }
 
 
 def _validate_snapshot(
@@ -2253,6 +2279,13 @@ def _parse_time(value: Any) -> datetime | None:
     if parsed.tzinfo is None:
         parsed = parsed.replace(tzinfo=timezone.utc)
     return parsed.astimezone(timezone.utc)
+
+
+def _age_seconds(value: Any, now: datetime) -> float | None:
+    parsed = _parse_time(value)
+    if parsed is None:
+        return None
+    return round(max((now - parsed).total_seconds(), 0.0), 3)
 
 
 def _decimal_value(value: Any) -> Decimal | None:
