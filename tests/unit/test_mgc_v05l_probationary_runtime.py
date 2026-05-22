@@ -55,6 +55,7 @@ from mgc_v05l.app.probationary_runtime import (
     _build_exit_parity_summary,
     _load_open_order_intent_rows,
     _process_running,
+    _stop_after_cycle_is_safe_for_supervisor,
     _track_b_reconciled_open_position_restore_plan_from_report,
     _write_current_probationary_runtime_pidfile,
     _write_probationary_paper_runtime_truth,
@@ -9486,6 +9487,56 @@ def test_clear_risk_halts_requires_manual_resume_after_serious_halt(tmp_path: Pa
     assert resumed is not None
     assert resumed["status"] == "applied"
     assert lane.strategy_engine.state.operator_halt is False
+
+
+def test_stale_stop_after_cycle_from_prior_runtime_generation_is_ignored(tmp_path: Path) -> None:
+    lane = _seed_test_lane(
+        tmp_path,
+        lane_id="gc_lane",
+        symbol="GC",
+        source="asiaEarlyNormalBreakoutRetestHoldTurn",
+        session_restriction="ASIA_EARLY",
+        point_value=Decimal("100"),
+    )
+    stale_control = {
+        "action": "stop_after_cycle",
+        "status": "applied",
+        "runtime_instance_id": "old-runtime",
+    }
+
+    assert (
+        _stop_after_cycle_is_safe_for_supervisor(
+            stale_control,
+            [lane],
+            runtime_instance_id="new-runtime",
+        )
+        is False
+    )
+
+
+def test_stop_after_cycle_bound_to_current_runtime_generation_is_safe_when_flat(tmp_path: Path) -> None:
+    lane = _seed_test_lane(
+        tmp_path,
+        lane_id="gc_lane",
+        symbol="GC",
+        source="asiaEarlyNormalBreakoutRetestHoldTurn",
+        session_restriction="ASIA_EARLY",
+        point_value=Decimal("100"),
+    )
+    control = {
+        "action": "stop_after_cycle",
+        "status": "applied",
+        "runtime_instance_id": "current-runtime",
+    }
+
+    assert (
+        _stop_after_cycle_is_safe_for_supervisor(
+            control,
+            [lane],
+            runtime_instance_id="current-runtime",
+        )
+        is True
+    )
 
 
 def test_clear_risk_halts_does_not_restore_same_session_readiness_for_realized_loser_limit(tmp_path: Path) -> None:

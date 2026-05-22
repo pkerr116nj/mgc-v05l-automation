@@ -166,9 +166,12 @@ def test_background_launch_rejects_alive_child_without_runtime_truth(tmp_path: P
     assert result.returncode != 0
     assert not pid_file.exists()
     status = json.loads(status_file.read_text(encoding="utf-8"))
-    assert status["classification"] == "RUNTIME_TRUTH_NOT_CONVERGED"
+    assert status["classification"] == "LAUNCH_VERIFIER_STOPPED_CHILD_AFTER_TIMEOUT"
     assert status["sustained_convergence_confirmed"] is False
     assert status["final_pid_alive"] is True
+    assert status["terminated_by_launch_verifier"] is True
+    assert status["termination_signal"] == "TERM"
+    assert status["termination_reason"] == "launch_verifier_timeout_before_sustained_runtime_truth"
     assert status["live_money_eligible"] is False
     assert status["submit_authority"] is False
 
@@ -192,11 +195,13 @@ def test_background_launch_rejects_non_advancing_runtime_truth(tmp_path: Path) -
     assert result.returncode != 0
     assert not pid_file.exists()
     status = json.loads(status_file.read_text(encoding="utf-8"))
-    assert status["classification"] == "RUNTIME_TRUTH_NOT_ADVANCING"
+    assert status["classification"] == "LAUNCH_VERIFIER_STOPPED_CHILD_AFTER_TIMEOUT"
     assert status["first_truth_generated_at"]
     assert status["second_truth_generated_at"] is None
     assert status["sustained_convergence_confirmed"] is False
     assert status["final_pid_alive"] is True
+    assert status["terminated_by_launch_verifier"] is True
+    assert status["termination_signal"] == "TERM"
 
 
 def test_background_launch_rejects_duplicate_writer_truth(tmp_path: Path) -> None:
@@ -232,8 +237,9 @@ sleep 1.1
     assert result.returncode != 0
     assert not pid_file.exists()
     status = json.loads(status_file.read_text(encoding="utf-8"))
-    assert status["classification"] == "RUNTIME_TRUTH_NOT_CONVERGED"
+    assert status["classification"] == "LAUNCH_VERIFIER_STOPPED_CHILD_AFTER_TIMEOUT"
     assert status["sustained_convergence_confirmed"] is False
+    assert status["terminated_by_launch_verifier"] is True
 
 
 def test_background_launch_classifies_child_exit_after_preflight(tmp_path: Path) -> None:

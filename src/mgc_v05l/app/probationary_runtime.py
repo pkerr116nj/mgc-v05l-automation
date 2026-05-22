@@ -7188,7 +7188,13 @@ class ProbationaryPaperRunner:
                 severity="INFO",
                 code="paper_runtime_stop_requested",
                 message=f"Received signal {signum}; stopping after the current cycle.",
-                payload={"signal": signum},
+                payload={
+                    "signal": signum,
+                    "stop_source": "external_signal",
+                    "stop_kind": "deferred_safe_cycle_stop",
+                    "runtime_instance_id": self._runtime_instance_id,
+                    "restart_generation": _paper_runtime_restart_generation(),
+                },
                 category="runtime_recovery",
                 title="Runtime Stop Requested",
                 dedup_key=f"paper_runtime_stop_requested:{signum}",
@@ -7346,6 +7352,7 @@ class ProbationaryPaperSupervisor:
                     structured_logger=self._structured_logger,
                     alert_dispatcher=self._alert_dispatcher,
                     risk_state=risk_state,
+                    runtime_instance_id=self._runtime_instance_id,
                 )
                 _apply_probationary_same_underlying_entry_holds(
                     settings=self._settings,
@@ -7512,11 +7519,19 @@ class ProbationaryPaperSupervisor:
                     poll_once
                     or (max_cycles is not None and cycles >= max_cycles)
                     or self._stop_requested
-                    or _stop_after_cycle_is_safe_for_supervisor(control_result, self._lanes)
+                    or _stop_after_cycle_is_safe_for_supervisor(
+                        control_result,
+                        self._lanes,
+                        runtime_instance_id=self._runtime_instance_id,
+                    )
                 ):
                     if self._stop_requested and stop_reason is None:
                         stop_reason = "signal_stop_requested"
-                    elif _stop_after_cycle_is_safe_for_supervisor(control_result, self._lanes):
+                    elif _stop_after_cycle_is_safe_for_supervisor(
+                        control_result,
+                        self._lanes,
+                        runtime_instance_id=self._runtime_instance_id,
+                    ):
                         stop_reason = "operator_stop_after_cycle"
                     return ProbationaryPaperSummary(
                         processed_bars=sum(lane.repositories.processed_bars.count() for lane in self._lanes),
@@ -7561,7 +7576,13 @@ class ProbationaryPaperSupervisor:
                 severity="INFO",
                 code="paper_runtime_stop_requested",
                 message=f"Received signal {signum}; stopping after the current cycle.",
-                payload={"signal": signum},
+                payload={
+                    "signal": signum,
+                    "stop_source": "external_signal",
+                    "stop_kind": "deferred_safe_cycle_stop",
+                    "runtime_instance_id": self._runtime_instance_id,
+                    "restart_generation": _paper_runtime_restart_generation(),
+                },
                 category="runtime_recovery",
                 title="Runtime Stop Requested",
                 dedup_key=f"paper_runtime_stop_requested:{signum}",
@@ -10863,6 +10884,7 @@ def _apply_probationary_supervisor_operator_control(
     structured_logger: StructuredLogger,
     alert_dispatcher: AlertDispatcher,
     risk_state: ProbationaryPaperRiskRuntimeState,
+    runtime_instance_id: str | None = None,
 ) -> dict[str, Any] | None:
     payload, control_path, candidate_paths = _select_probationary_operator_control_payload(settings)
     if payload is None:
@@ -10886,6 +10908,9 @@ def _apply_probationary_supervisor_operator_control(
     result = dict(payload)
     result["applied_at"] = now.isoformat()
     result["control_path"] = str(control_path)
+    if runtime_instance_id:
+        result["runtime_instance_id"] = runtime_instance_id
+        result["restart_generation"] = _paper_runtime_restart_generation()
     target_lane, target_error = _resolve_probationary_supervisor_target_lane(payload, lanes)
     if target_error is not None:
         result.update(target_error)
@@ -11273,12 +11298,16 @@ def _lane_is_flat_and_safe(lane: ProbationaryPaperLaneRuntime) -> bool:
 def _stop_after_cycle_is_safe_for_supervisor(
     control_result: dict[str, Any] | None,
     lanes: Sequence[ProbationaryPaperLaneRuntime],
+    *,
+    runtime_instance_id: str | None = None,
 ) -> bool:
     if control_result is None:
         return False
     if control_result.get("action") != "stop_after_cycle":
         return False
     if control_result.get("status") != "applied":
+        return False
+    if runtime_instance_id and control_result.get("runtime_instance_id") != runtime_instance_id:
         return False
     return all(_lane_is_flat_and_safe(lane) for lane in lanes)
 

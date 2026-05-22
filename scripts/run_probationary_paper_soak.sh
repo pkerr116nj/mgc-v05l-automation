@@ -40,7 +40,7 @@ DEFAULT_RUNTIME_TRUTH_FILE="${DEFAULT_RUNTIME_DIR}/paper_runtime_truth.json"
 CANARY_ENABLE_SENTINEL="${DEFAULT_RUNTIME_DIR}/enable_paper_route_canary.flag"
 CONFIG_OVERRIDE_RAW="${MGC_PROBATIONARY_PAPER_CONFIG_PATHS:-}"
 LAUNCH_PYTHON_BIN="${MGC_PROBATIONARY_PAPER_LAUNCH_PYTHON_BIN:-${PYTHON_BIN}}"
-BACKGROUND_VERIFY_ATTEMPTS="${MGC_PROBATIONARY_PAPER_BACKGROUND_VERIFY_ATTEMPTS:-60}"
+BACKGROUND_VERIFY_ATTEMPTS="${MGC_PROBATIONARY_PAPER_BACKGROUND_VERIFY_ATTEMPTS:-180}"
 BACKGROUND_VERIFY_POLL_SECONDS="${MGC_PROBATIONARY_PAPER_BACKGROUND_VERIFY_POLL_SECONDS:-1}"
 BACKGROUND_OBSERVATION_WINDOW_SECONDS="${MGC_PROBATIONARY_PAPER_BACKGROUND_OBSERVATION_WINDOW_SECONDS:-5}"
 RUNTIME_TRUTH_FILE="${MGC_PROBATIONARY_PAPER_RUNTIME_TRUTH_FILE:-${DEFAULT_RUNTIME_TRUTH_FILE}}"
@@ -48,6 +48,9 @@ LAUNCH_FIRST_TRUTH_GENERATED_AT=""
 LAUNCH_SECOND_TRUTH_GENERATED_AT=""
 LAUNCH_SUSTAINED_CONVERGENCE_CONFIRMED="false"
 LAUNCH_FINAL_PID_ALIVE="false"
+LAUNCH_TERMINATED_BY_VERIFIER="false"
+LAUNCH_TERMINATION_SIGNAL=""
+LAUNCH_TERMINATION_REASON=""
 
 ARGS=()
 CONFIG_SET=0
@@ -226,6 +229,9 @@ write_launch_status() {
   LAUNCH_SECOND_TRUTH_GENERATED_AT="${LAUNCH_SECOND_TRUTH_GENERATED_AT}" \
   LAUNCH_SUSTAINED_CONVERGENCE_CONFIRMED="${LAUNCH_SUSTAINED_CONVERGENCE_CONFIRMED}" \
   LAUNCH_FINAL_PID_ALIVE="${LAUNCH_FINAL_PID_ALIVE}" \
+  LAUNCH_TERMINATED_BY_VERIFIER="${LAUNCH_TERMINATED_BY_VERIFIER}" \
+  LAUNCH_TERMINATION_SIGNAL="${LAUNCH_TERMINATION_SIGNAL}" \
+  LAUNCH_TERMINATION_REASON="${LAUNCH_TERMINATION_REASON}" \
   "${PYTHON_BIN}" -c '
 import json
 import os
@@ -252,6 +258,9 @@ payload = {
     "second_truth_generated_at": os.environ.get("LAUNCH_SECOND_TRUTH_GENERATED_AT") or None,
     "sustained_convergence_confirmed": os.environ.get("LAUNCH_SUSTAINED_CONVERGENCE_CONFIRMED", "").lower() == "true",
     "final_pid_alive": os.environ.get("LAUNCH_FINAL_PID_ALIVE", "").lower() == "true",
+    "terminated_by_launch_verifier": os.environ.get("LAUNCH_TERMINATED_BY_VERIFIER", "").lower() == "true",
+    "termination_signal": os.environ.get("LAUNCH_TERMINATION_SIGNAL") or None,
+    "termination_reason": os.environ.get("LAUNCH_TERMINATION_REASON") or None,
     "config_paths": config_paths,
     "paper_only": True,
     "live_money_eligible": False,
@@ -516,6 +525,9 @@ if [[ ${BACKGROUND} -eq 1 ]]; then
   fi
   child_exit_code=""
   if process_alive_not_zombie "${paper_pid}"; then
+    LAUNCH_TERMINATED_BY_VERIFIER="true"
+    LAUNCH_TERMINATION_SIGNAL="TERM"
+    LAUNCH_TERMINATION_REASON="launch_verifier_timeout_before_sustained_runtime_truth"
     kill "${paper_pid}" >/dev/null 2>&1 || true
     sleep 1
     if process_alive_not_zombie "${paper_pid}"; then
@@ -527,9 +539,9 @@ if [[ ${BACKGROUND} -eq 1 ]]; then
     set -e
     remove_pid_file_if_matches "${paper_pid}"
     if [[ -n "${LAUNCH_FIRST_TRUTH_GENERATED_AT}" ]]; then
-      write_launch_status "RUNTIME_TRUTH_NOT_ADVANCING" "${paper_pid}" "background child stayed alive but runtime truth did not advance during launch observation window" "${child_exit_code}"
+      write_launch_status "LAUNCH_VERIFIER_STOPPED_CHILD_AFTER_TIMEOUT" "${paper_pid}" "launch verifier stopped the background child after runtime truth failed to advance during the bounded observation window" "${child_exit_code}"
     else
-      write_launch_status "RUNTIME_TRUTH_NOT_CONVERGED" "${paper_pid}" "background child stayed alive but did not produce fresh runtime truth/heartbeat before launch verification timed out" "${child_exit_code}"
+      write_launch_status "LAUNCH_VERIFIER_STOPPED_CHILD_AFTER_TIMEOUT" "${paper_pid}" "launch verifier stopped the background child after it failed to produce fresh runtime truth/heartbeat before the bounded verification timeout" "${child_exit_code}"
     fi
     echo "Probationary paper soak failed to produce runtime truth in background." >&2
     echo "Launch status: ${LAUNCH_STATUS_FILE}" >&2
