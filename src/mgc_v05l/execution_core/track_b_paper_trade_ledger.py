@@ -1251,7 +1251,10 @@ def _trade_record_from_filled_bridge_result(
         "final_broker_state_classification": lifecycle_classification,
         "final_position_status": "OPEN_MANAGED",
         "review_required": bool(filled_bridge_result.get("review_required")) or not metadata.complete,
-        "paper_lifecycle_report_path": None,
+        "paper_lifecycle_report_path": _string_or_none(
+            filled_bridge_result.get("paper_lifecycle_report_path")
+            or filled_bridge_result.get("managed_lifecycle_report_path")
+        ),
         "decision_journal_record_id": None,
         "decision_journal_record_path": None,
         "monitor_report_path": None,

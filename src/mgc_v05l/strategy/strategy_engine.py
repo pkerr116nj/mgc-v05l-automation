@@ -7,6 +7,7 @@ import json
 from dataclasses import replace
 from datetime import datetime, time, timezone
 from decimal import Decimal
+from pathlib import Path
 from typing import Callable, Optional
 
 from ..config_models import ExecutionTimeframeRole, StrategySettings
@@ -44,6 +45,9 @@ from ..execution_core.track_b_position_management_manifest import (
     create_manifest_from_order_intent,
     resolve_management_metadata,
     update_manifest_from_filled_bridge_result,
+)
+from ..execution_core.track_b_strategy_managed_paper_lifecycle import (
+    write_open_managed_lifecycle_report_from_filled_bridge_result,
 )
 from ..indicators.feature_engine import IncrementalFeatureComputer, compute_features
 from ..market_data.bar_builder import BarBuilder
@@ -2265,6 +2269,12 @@ class StrategyEngine:
     ) -> dict[str, object]:
         submit_attempt = self._execution_engine.last_submit_attempt() or {}
         status_payload = self._execution_engine.broker.get_order_status(pending.broker_order_id) or {}
+        manifest_path_hint = submit_attempt.get("position_management_manifest_path")
+        manifest_output_root = (
+            Path(str(manifest_path_hint)).parent
+            if manifest_path_hint
+            else DEFAULT_TRACK_B_POSITION_MANAGEMENT_MANIFEST_ROOT
+        )
         manifest_update = update_manifest_from_filled_bridge_result(
             filled_bridge_result={
                 "order_intent_id": pending.intent.order_intent_id,
@@ -2283,8 +2293,9 @@ class StrategyEngine:
                 "con_id": status_payload.get("con_id") or submit_attempt.get("con_id"),
                 "contract": status_payload.get("contract") or dict(submit_attempt.get("bridge_order_metadata") or {}).get("contract"),
                 "managed_exit_policy_id": self._runtime_identity.get("managed_exit_policy_id"),
+                "position_management_manifest_path": submit_attempt.get("position_management_manifest_path"),
             },
-            output_root=DEFAULT_TRACK_B_POSITION_MANAGEMENT_MANIFEST_ROOT,
+            output_root=manifest_output_root,
         )
         manifest = manifest_update.manifest if manifest_update is not None else {}
         metadata = resolve_management_metadata(
@@ -2343,6 +2354,19 @@ class StrategyEngine:
             "live_money_readiness": False,
             "created_at": datetime.now(timezone.utc).isoformat(),
         }
+        if pending.intent.intent_type in {OrderIntentType.BUY_TO_OPEN, OrderIntentType.SELL_TO_OPEN} and not review_required:
+            lifecycle_output_root = (
+                manifest_update.manifest_path.parent.parent / "track_b_strategy_managed_paper_lifecycle"
+                if manifest_update is not None
+                else None
+            )
+            lifecycle_report_path = write_open_managed_lifecycle_report_from_filled_bridge_result(
+                filled_bridge_result=payload,
+                **({"output_root": lifecycle_output_root} if lifecycle_output_root is not None else {}),
+            )
+            if lifecycle_report_path is not None:
+                payload["paper_lifecycle_report_path"] = str(lifecycle_report_path)
+                payload["managed_lifecycle_report_path"] = str(lifecycle_report_path)
         if error:
             payload["error"] = error
         if self._structured_logger is not None:
@@ -2355,7 +2379,15 @@ class StrategyEngine:
                 update_track_b_paper_trade_ledger_from_filled_bridge_result,
             )
 
-            update_track_b_paper_trade_ledger_from_filled_bridge_result(filled_bridge_result=payload)
+            ledger_output_root = (
+                manifest_update.manifest_path.parent.parent / "paper_trade_ledger"
+                if manifest_update is not None
+                else None
+            )
+            update_track_b_paper_trade_ledger_from_filled_bridge_result(
+                filled_bridge_result=payload,
+                **({"output_root": ledger_output_root} if ledger_output_root is not None else {}),
+            )
             payload["paper_trade_ledger_update_attempted"] = True
         except Exception as exc:  # noqa: BLE001 - compact ledger update must not become submit authority.
             payload["paper_trade_ledger_update_attempted"] = True

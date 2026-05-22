@@ -11899,6 +11899,12 @@ class _IbkrPaperBridgeRuntimeBroker:
                     "POSITION_MANAGEMENT_MANIFEST_REQUIRED: submit-capable Track B entries require a complete "
                     "position-management manifest before broker submit."
                 )
+            if manifest_result is not None:
+                self._last_submit_context = {
+                    **self._last_submit_context,
+                    "position_management_manifest_path": str(manifest_result.manifest_path),
+                    "managed_exit_policy_id": (manifest_result.manifest or {}).get("managed_exit_policy_id"),
+                }
             artifacts = self._bridge_runner(config=bridge_config)
             report = dict(artifacts.report or {})
             self._last_bridge_report = report

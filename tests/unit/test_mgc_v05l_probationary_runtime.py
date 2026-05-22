@@ -7312,6 +7312,26 @@ def test_submit_capable_lane_filled_bridge_result_persists_fill_not_blocked(tmp_
     assert filled_latest["exec_id"] == "0000e1a7.6a015c30.01.01"
     assert filled_latest["local_symbol"] == "MNQM6"
     assert filled_latest["con_id"] == 770561201
+    assert filled_latest["managed_exit_policy_id"] == "PAPER_DIAGNOSTIC_TIME_BOXED_3X5M_EXIT_V1"
+    lifecycle_path = Path(filled_latest["paper_lifecycle_report_path"])
+    assert lifecycle_path.exists()
+    lifecycle = json.loads(lifecycle_path.read_text(encoding="utf-8"))
+    assert lifecycle["lifecycle_id"] == f"bridge_fill_{forced_intent.order_intent_id}"
+    assert lifecycle["paper_lifecycle_classification"] == "TRACK_B_STRATEGY_PAPER_OPEN_MANAGED"
+    assert lifecycle["managed_exit_policy_id"] == "PAPER_DIAGNOSTIC_TIME_BOXED_3X5M_EXIT_V1"
+    assert lifecycle["entry_intent"]["side"] == "LONG"
+    assert lifecycle["close_intent_status"] == "WAITING_FOR_EXIT_POLICY_CONDITION"
+    live_positions = json.loads(
+        (
+            tmp_path
+            / "outputs"
+            / "track_b_execution_core"
+            / "paper_trade_ledger"
+            / "latest_track_b_live_position_status.json"
+        ).read_text(encoding="utf-8")
+    )
+    open_position = live_positions["positions_by_instrument"]["MNQ-202606"]
+    assert open_position["paper_lifecycle_report_path"] == str(lifecycle_path)
     assert not (structured_logger.artifact_dir / "blocked_strategy_intent_latest.json").exists()
 
 

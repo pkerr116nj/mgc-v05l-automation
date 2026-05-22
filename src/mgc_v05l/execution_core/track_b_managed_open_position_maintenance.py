@@ -128,6 +128,23 @@ def run_track_b_managed_open_position_maintenance(
             "lifecycle_report_path": str(lifecycle_report_path),
         }
         if not lifecycle_report:
+            lifecycle_report = _recover_missing_lifecycle_report_from_position(
+                position=position,
+                lifecycle_report_path=lifecycle_report_path,
+                maintenance_config=actual_config,
+                now=actual_now,
+            )
+            if lifecycle_report:
+                base_position_report = {
+                    **base_position_report,
+                    "strategy_id": position.get("strategy_id") or lifecycle_report.get("strategy_id"),
+                    "instrument": position.get("instrument_family") or lifecycle_report.get("instrument_family"),
+                    "contract_key": position.get("contract_key") or lifecycle_report.get("contract_key"),
+                    "local_symbol": position.get("local_symbol") or lifecycle_report.get("local_symbol"),
+                    "entry_timestamp": _entry_timestamp(lifecycle_report),
+                    "lifecycle_report_recovered": True,
+                }
+        if not lifecycle_report:
             position_reports.append(
                 {
                     **base_position_report,
@@ -466,6 +483,130 @@ def _lifecycle_config_from_report(
     )
 
 
+def _recover_missing_lifecycle_report_from_position(
+    *,
+    position: Mapping[str, Any],
+    lifecycle_report_path: Path,
+    maintenance_config: TrackBManagedOpenPositionMaintenanceConfig,
+    now: datetime,
+) -> dict[str, Any]:
+    metadata = resolve_management_metadata(
+        source=dict(position),
+        output_root=maintenance_config.position_management_manifest_root,
+        lane_registry_paths=maintenance_config.lane_registry_paths,
+    )
+    if not metadata.complete:
+        return {}
+    lifecycle_id = str(position.get("lifecycle_id") or "").strip()
+    strategy_id = str(position.get("strategy_id") or position.get("lane_id") or "").strip()
+    instrument = str(position.get("instrument_family") or position.get("instrument") or "").upper()
+    contract_key = str(position.get("contract_key") or "").strip()
+    local_symbol = str(position.get("local_symbol") or "").strip()
+    con_id = _int_or_none(position.get("con_id"))
+    quantity = _int_or_none(position.get("quantity"))
+    side = _normalize_side(position.get("side") or position.get("order_action"))
+    entry_timestamp = str(position.get("entry_timestamp") or "").strip()
+    if not all([lifecycle_id, strategy_id, instrument, contract_key, local_symbol, side, entry_timestamp]) or con_id is None or quantity is None:
+        return {}
+    broker_identity = (
+        position.get("entry_broker_identity")
+        if isinstance(position.get("entry_broker_identity"), Mapping)
+        else {}
+    )
+    entry_price = _decimal_text(_decimal(position.get("entry_fill_price") or position.get("avg_entry_price")))
+    report = {
+        "schema_version": "track_b_strategy_managed_paper_lifecycle_v1",
+        "generated_at": now.isoformat(),
+        "lifecycle_id": lifecycle_id,
+        "trade_id": position.get("trade_id") or f"{strategy_id}:{lifecycle_id}",
+        "strategy_id": strategy_id,
+        "instrument_family": instrument,
+        "contract_key": contract_key,
+        "local_symbol": local_symbol,
+        "con_id": con_id,
+        "account_id": position.get("account_id") or maintenance_config.account_id,
+        "expected_account_id": maintenance_config.expected_account_id,
+        "mode": maintenance_config.mode,
+        "managed_exit_policy_id": metadata.managed_exit_policy_id,
+        "managed_exit_policy_max_completed_5m_bars": 3,
+        "open_position_age_completed_5m_bars": 0,
+        "bars_since_fill": 0,
+        "bars_since_signal": 0,
+        "fill_timestamp_source": "BROKER_ENTRY_FILL",
+        "data_freshness_state": "FRESH",
+        "broker_truth_state": "FRESH",
+        "suppressed_due_to_stale_data": False,
+        "expected_exit_condition": "TIME_BOXED_EXIT_AFTER_3_COMPLETED_5M_BARS",
+        "close_intent_status": "WAITING_FOR_EXIT_POLICY_CONDITION",
+        "strategy_managed_lifecycle_classification": TrackBManagedPaperLifecycleClassification.OPEN_MANAGED.value,
+        "paper_lifecycle_classification": TrackBManagedPaperLifecycleClassification.OPEN_MANAGED.value,
+        "submit_enabled": True,
+        "managed_paper_submit_enabled": True,
+        "entry_intent": {
+            "intent_schema_version": "track_b_strategy_managed_paper_entry_intent_v1",
+            "created_at": position.get("signal_timestamp") or entry_timestamp,
+            "lifecycle_id": lifecycle_id,
+            "trade_id": position.get("trade_id") or f"{strategy_id}:{lifecycle_id}",
+            "strategy_id": strategy_id,
+            "instrument_family": instrument,
+            "contract_key": contract_key,
+            "local_symbol": local_symbol,
+            "con_id": con_id,
+            "account_id": position.get("account_id") or maintenance_config.account_id,
+            "expected_account_id": maintenance_config.expected_account_id,
+            "side": side,
+            "order_action": "BUY" if side == "LONG" else "SELL",
+            "quantity": quantity,
+            "signal_timestamp": position.get("signal_timestamp"),
+            "decision_bar_timestamp": position.get("signal_timestamp"),
+            "latest_decision_bar_source": "DATABENTO_LIVE_ARTIFACT",
+            "managed_exit_policy_id": metadata.managed_exit_policy_id,
+            "source_id": "track_b_managed_open_position_maintenance_recovery",
+        },
+        "entry_submit_attempt": {
+            "submitted": True,
+            "submit_attempted": True,
+            "broker_state_mutated": True,
+            "broker_order_id": position.get("entry_order_id") or broker_identity.get("broker_order_id"),
+            "perm_id": position.get("entry_perm_id") or broker_identity.get("perm_id"),
+        },
+        "entry_fill": {
+            "broker_order_id": position.get("entry_order_id") or broker_identity.get("broker_order_id"),
+            "perm_id": position.get("entry_perm_id") or broker_identity.get("perm_id"),
+            "execution_id": position.get("entry_exec_id") or broker_identity.get("exec_id"),
+            "price": entry_price,
+            "quantity": position.get("quantity"),
+            "filled_at": entry_timestamp,
+        },
+        "close_intent": None,
+        "close_submit_attempt": None,
+        "close_fill": None,
+        "realized_pnl": None,
+        "pnl_currency": "USD",
+        "final_position_status": "OPEN_MANAGED",
+        "final_broker_state_classification": TrackBManagedPaperLifecycleClassification.OPEN_MANAGED.value,
+        "review_required": False,
+        "broker_reconciled": False,
+        "source": "TRACK_B_MANAGED_OPEN_POSITION_MAINTENANCE_RECOVERY",
+        "submit_allowed": True,
+        "submit_attempted": True,
+        "paper_proof_invoked": False,
+        "paper_proof_cli_called": False,
+        "broker_state_mutated": True,
+        "live_money_readiness": False,
+        "ui_authority": False,
+        "hidden_submit": False,
+        "primary_blocker": None,
+        "required_next_action": "Position is open under strategy-managed PAPER state; wait for strategy exit policy.",
+        "report_json_path": str(lifecycle_report_path),
+        "latest_report_json_path": str(lifecycle_report_path.parent.parent / "latest_track_b_strategy_managed_paper_lifecycle_report.json"),
+        "position_management_manifest_path": None if metadata.manifest_path is None else str(metadata.manifest_path),
+    }
+    _write_json(lifecycle_report_path, report)
+    _write_json(Path(str(report["latest_report_json_path"])), report)
+    return report
+
+
 def _record_lifecycle_update_in_ledger(
     *,
     maintenance_config: TrackBManagedOpenPositionMaintenanceConfig,
@@ -672,6 +813,15 @@ def _tick_size(instrument: str) -> Decimal:
 
 def _default_exchange(instrument: str) -> str:
     return "CME" if str(instrument).upper() in {"MNQ", "NQ", "ES", "MES"} else "COMEX"
+
+
+def _normalize_side(value: object) -> str:
+    raw = str(value or "").strip().upper()
+    if raw in {"LONG", "BUY", "BUY_TO_OPEN"}:
+        return "LONG"
+    if raw in {"SHORT", "SELL", "SELL_TO_OPEN"}:
+        return "SHORT"
+    return raw
 
 
 def _int_or_none(value: object) -> int | None:

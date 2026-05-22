@@ -347,6 +347,142 @@ def maintain_open_track_b_strategy_managed_paper_lifecycle(
     )
 
 
+def write_open_managed_lifecycle_report_from_filled_bridge_result(
+    *,
+    filled_bridge_result: Mapping[str, Any],
+    output_root: Path = DEFAULT_TRACK_B_STRATEGY_MANAGED_PAPER_LIFECYCLE_OUTPUT_ROOT,
+    now: datetime | None = None,
+) -> Path | None:
+    """Persist an OPEN_MANAGED lifecycle report for a direct bridge entry fill.
+
+    The runtime bridge can submit entries without invoking the managed lifecycle
+    runner. Once the broker fill is known, this creates the lifecycle artifact
+    that managed open-position maintenance uses for deterministic exits.
+    """
+
+    intent_type = str(filled_bridge_result.get("intent_type") or "").upper()
+    if intent_type not in {"BUY_TO_OPEN", "SELL_TO_OPEN"}:
+        return None
+    if filled_bridge_result.get("paper_proof_invoked") is True:
+        return None
+    if filled_bridge_result.get("live_money_readiness") is True:
+        return None
+    policy_id = str(filled_bridge_result.get("managed_exit_policy_id") or "").strip()
+    if not policy_id:
+        return None
+    order_intent_id = str(filled_bridge_result.get("order_intent_id") or "").strip()
+    if not order_intent_id:
+        return None
+    contract = filled_bridge_result.get("contract") if isinstance(filled_bridge_result.get("contract"), Mapping) else {}
+    instrument = str(
+        filled_bridge_result.get("instrument")
+        or filled_bridge_result.get("symbol")
+        or contract.get("symbol")
+        or ""
+    ).upper()
+    contract_key = str(
+        filled_bridge_result.get("contract_key")
+        or contract.get("contract_key")
+        or _contract_key_from_bridge_payload(filled_bridge_result)
+        or ""
+    )
+    local_symbol = str(filled_bridge_result.get("local_symbol") or contract.get("local_symbol") or "")
+    con_id = _int_or_none(
+        filled_bridge_result.get("con_id")
+        or contract.get("qualified_contract_identifier")
+        or contract.get("con_id")
+    )
+    quantity = _int_or_none(filled_bridge_result.get("quantity"))
+    account_id = str(filled_bridge_result.get("account_id") or "DUM882026")
+    if not all([instrument, contract_key, local_symbol, account_id]) or con_id is None or quantity is None:
+        return None
+    actual_now = now or datetime.now(UTC)
+    require_aware_datetime(actual_now, "now")
+    side = "LONG" if intent_type == "BUY_TO_OPEN" else "SHORT"
+    lifecycle_id = str(filled_bridge_result.get("lifecycle_id") or f"bridge_fill_{order_intent_id}")
+    report_json = Path(output_root) / lifecycle_id / "track_b_strategy_managed_paper_lifecycle_report.json"
+    config = TrackBStrategyManagedPaperLifecycleConfig(
+        mode="PAPER",
+        account_id=account_id,
+        expected_account_id=str(filled_bridge_result.get("expected_account_id") or account_id),
+        strategy_id=str(filled_bridge_result.get("strategy_id") or filled_bridge_result.get("lane_id") or ""),
+        instrument_family=instrument,
+        contract_key=contract_key,
+        local_symbol=local_symbol,
+        con_id=con_id,
+        side=side,
+        quantity=quantity,
+        signal_timestamp=str(filled_bridge_result.get("decision_bar_timestamp") or "") or None,
+        decision_bar_timestamp=str(filled_bridge_result.get("decision_bar_timestamp") or "") or None,
+        latest_decision_bar_source="DATABENTO_LIVE_ARTIFACT",
+        managed_exit_policy_id=policy_id,
+        managed_exit_policy_max_completed_5m_bars=3,
+        completed_5m_bars_since_entry=0,
+        completed_5m_bars_since_signal=0,
+        fill_timestamp_source="BROKER_ENTRY_FILL",
+        submit_enabled=True,
+        output_root=Path(output_root),
+        live_money_readiness=False,
+        broker_reconciled=False,
+    )
+    entry_intent = _entry_intent(config=config, lifecycle_id=lifecycle_id, now=actual_now)
+    entry_submit = {
+        "submitted": True,
+        "submit_attempted": True,
+        "broker_state_mutated": True,
+        "broker_order_id": filled_bridge_result.get("broker_order_id"),
+        "perm_id": filled_bridge_result.get("perm_id"),
+        "client_id": filled_bridge_result.get("client_id"),
+        "submitted_at": filled_bridge_result.get("created_at") or actual_now.isoformat(),
+        "submit_attempt_id": filled_bridge_result.get("submit_attempt_id"),
+        "submit_diagnostics": {
+            "canonical_broker_contract_fields": {
+                "symbol": instrument,
+                "contract_key": contract_key,
+                "local_symbol": local_symbol,
+                "con_id": con_id,
+            },
+        },
+    }
+    entry_fill = {
+        "broker_order_id": filled_bridge_result.get("broker_order_id"),
+        "perm_id": filled_bridge_result.get("perm_id"),
+        "execution_id": filled_bridge_result.get("exec_id") or filled_bridge_result.get("execution_id"),
+        "price": _decimal_text(filled_bridge_result.get("fill_price") or filled_bridge_result.get("entry_fill_price")),
+        "quantity": _decimal_text(filled_bridge_result.get("quantity")),
+        "filled_at": filled_bridge_result.get("fill_timestamp") or filled_bridge_result.get("entry_timestamp"),
+    }
+    open_state = _open_state(
+        config=config,
+        lifecycle_id=lifecycle_id,
+        entry_intent=entry_intent,
+        entry_fill=entry_fill,
+    )
+    report = _build_report(
+        config=config,
+        lifecycle_id=lifecycle_id,
+        now=actual_now,
+        classification=TrackBManagedPaperLifecycleClassification.OPEN_MANAGED,
+        entry_intent=entry_intent,
+        entry_submit=entry_submit,
+        entry_fill=entry_fill,
+        open_state=open_state,
+        close_intent=None,
+        close_submit=None,
+        close_fill=None,
+        submit_attempted=True,
+        broker_state_mutated=True,
+        primary_blocker=None,
+        required_next_action="Position is open under strategy-managed PAPER state; wait for strategy exit policy.",
+        report_json=report_json,
+    )
+    manifest_path = filled_bridge_result.get("position_management_manifest_path")
+    if manifest_path:
+        report["position_management_manifest_path"] = str(manifest_path)
+    _write_report(report_json, report)
+    return report_json
+
+
 def _entry_intent(
     *,
     config: TrackBStrategyManagedPaperLifecycleConfig,
@@ -875,6 +1011,30 @@ def _contract_month(contract_key: str) -> str:
     if "-" not in raw:
         return ""
     return "".join(ch for ch in raw.split("-", 1)[1] if ch.isdigit())[:6]
+
+
+def _contract_key_from_bridge_payload(payload: Mapping[str, Any]) -> str | None:
+    contract = payload.get("contract") if isinstance(payload.get("contract"), Mapping) else {}
+    symbol = str(payload.get("instrument") or payload.get("symbol") or contract.get("symbol") or "").upper()
+    month = str(
+        payload.get("contract_month")
+        or contract.get("contract_month")
+        or contract.get("expiry")
+        or ""
+    )
+    digits = "".join(char for char in month if char.isdigit())[:6]
+    if symbol and digits:
+        return f"{symbol}-{digits}"
+    return None
+
+
+def _int_or_none(value: object) -> int | None:
+    if value in {None, ""}:
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
 
 
 def _write_report(report_json: Path, report: Mapping[str, Any]) -> None:

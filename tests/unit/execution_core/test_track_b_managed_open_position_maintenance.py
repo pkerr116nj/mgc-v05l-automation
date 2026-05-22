@@ -5,6 +5,8 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Mapping
 
+import pytest
+
 from mgc_v05l.execution_core.track_b_managed_open_position_maintenance import (
     TrackBManagedOpenPositionMaintenanceConfig,
     run_track_b_managed_open_position_maintenance,
@@ -30,17 +32,25 @@ def lifecycle_payload(
     *,
     entry_filled_at: str = "2026-05-07T16:26:07+00:00",
     signal_timestamp: str | None = None,
+    strategy_id: str = "MNQ_FIRST_BULL_SNAP_TURN_V1",
+    instrument: str = "MNQ",
+    contract_key: str = "MNQ-202606",
+    local_symbol: str = "MNQM6",
+    con_id: int = 770561201,
+    side: str = "LONG",
+    entry_price: str = "28729",
 ) -> dict[str, Any]:
     lifecycle_id = "strategy_managed_fe30248d4d6c42acaf106c8313b0b33b"
+    order_action = "BUY" if side == "LONG" else "SELL"
     return {
         "schema_version": "track_b_strategy_managed_paper_lifecycle_v1",
         "lifecycle_id": lifecycle_id,
-        "trade_id": f"MNQ_FIRST_BULL_SNAP_TURN_V1:{lifecycle_id}",
-        "strategy_id": "MNQ_FIRST_BULL_SNAP_TURN_V1",
-        "instrument_family": "MNQ",
-        "contract_key": "MNQ-202606",
-        "local_symbol": "MNQM6",
-        "con_id": 770561201,
+        "trade_id": f"{strategy_id}:{lifecycle_id}",
+        "strategy_id": strategy_id,
+        "instrument_family": instrument,
+        "contract_key": contract_key,
+        "local_symbol": local_symbol,
+        "con_id": con_id,
         "account_id": "DUM882026",
         "expected_account_id": "DUM882026",
         "mode": "PAPER",
@@ -51,21 +61,21 @@ def lifecycle_payload(
         "final_position_status": "OPEN_MANAGED",
         "entry_intent": {
             "lifecycle_id": lifecycle_id,
-            "trade_id": f"MNQ_FIRST_BULL_SNAP_TURN_V1:{lifecycle_id}",
-            "strategy_id": "MNQ_FIRST_BULL_SNAP_TURN_V1",
-            "instrument_family": "MNQ",
-            "contract_key": "MNQ-202606",
-            "local_symbol": "MNQM6",
-            "con_id": 770561201,
+            "trade_id": f"{strategy_id}:{lifecycle_id}",
+            "strategy_id": strategy_id,
+            "instrument_family": instrument,
+            "contract_key": contract_key,
+            "local_symbol": local_symbol,
+            "con_id": con_id,
             "account_id": "DUM882026",
             "expected_account_id": "DUM882026",
-            "side": "LONG",
-            "order_action": "BUY",
+            "side": side,
+            "order_action": order_action,
             "quantity": 1,
             "signal_timestamp": signal_timestamp,
             "decision_bar_timestamp": signal_timestamp,
             "latest_decision_bar_source": "DATABENTO_LIVE_ARTIFACT",
-            "entry_limit_price": "28729",
+            "entry_limit_price": entry_price,
             "managed_exit_policy_id": "PAPER_DIAGNOSTIC_TIME_BOXED_3X5M_EXIT_V1",
         },
         "entry_submit_attempt": {
@@ -77,7 +87,7 @@ def lifecycle_payload(
         "entry_fill": {
             "broker_order_id": "11",
             "execution_id": "exec-1",
-            "price": "28729",
+            "price": entry_price,
             "quantity": "1",
             "filled_at": entry_filled_at,
         },
@@ -97,6 +107,13 @@ def seed_open_position(
     entry_filled_at: str = "2026-05-07T16:26:07+00:00",
     signal_timestamp: str | None = None,
     latest_1m_age_seconds: float | None = None,
+    strategy_id: str = "MNQ_FIRST_BULL_SNAP_TURN_V1",
+    instrument: str = "MNQ",
+    contract_key: str = "MNQ-202606",
+    local_symbol: str = "MNQM6",
+    con_id: int = 770561201,
+    side: str = "LONG",
+    entry_price: str = "28729",
 ) -> TrackBManagedOpenPositionMaintenanceConfig:
     lifecycle_id = "strategy_managed_fe30248d4d6c42acaf106c8313b0b33b"
     lifecycle_path = (
@@ -105,7 +122,17 @@ def seed_open_position(
         / lifecycle_id
         / "track_b_strategy_managed_paper_lifecycle_report.json"
     )
-    payload = lifecycle_payload(entry_filled_at=entry_filled_at, signal_timestamp=signal_timestamp)
+    payload = lifecycle_payload(
+        entry_filled_at=entry_filled_at,
+        signal_timestamp=signal_timestamp,
+        strategy_id=strategy_id,
+        instrument=instrument,
+        contract_key=contract_key,
+        local_symbol=local_symbol,
+        con_id=con_id,
+        side=side,
+        entry_price=entry_price,
+    )
     payload["report_json_path"] = str(lifecycle_path)
     payload["latest_report_json_path"] = str(tmp_path / "managed" / "latest_track_b_strategy_managed_paper_lifecycle_report.json")
     write_json(lifecycle_path, payload)
@@ -117,14 +144,28 @@ def seed_open_position(
             "open_position_count": 1,
             "open_order_count": 0,
             "positions_by_instrument": {
-                "MNQ-202606": {
+                contract_key: {
                     "lifecycle_id": lifecycle_id,
-                    "strategy_id": "MNQ_FIRST_BULL_SNAP_TURN_V1",
-                    "instrument_family": "MNQ",
-                    "contract_key": "MNQ-202606",
-                    "local_symbol": "MNQM6",
+                    "strategy_id": strategy_id,
+                    "instrument_family": instrument,
+                    "contract_key": contract_key,
+                    "local_symbol": local_symbol,
+                    "con_id": con_id,
+                    "side": side,
                     "quantity": "1",
-                    "avg_entry_price": "28729",
+                    "avg_entry_price": entry_price,
+                    "entry_timestamp": entry_filled_at,
+                    "signal_timestamp": signal_timestamp,
+                    "entry_order_id": "11",
+                    "entry_perm_id": "194800011",
+                    "managed_exit_policy_id": "PAPER_DIAGNOSTIC_TIME_BOXED_3X5M_EXIT_V1",
+                    "entry_broker_identity": {
+                        "broker_order_id": "11",
+                        "perm_id": "194800011",
+                        "exec_id": "exec-1",
+                        "con_id": con_id,
+                        "local_symbol": local_symbol,
+                    },
                     "review_required": False,
                 }
             },
@@ -137,14 +178,14 @@ def seed_open_position(
         {"recent_trades": [], "open_position_count": 1, "review_required_count": 0},
     )
     write_json(
-        tmp_path / "live" / "latest_live_mnq_completed_5m_candles.json",
+        tmp_path / "live" / f"latest_live_{instrument.lower()}_completed_5m_candles.json",
         {
             "candles": [{"candle_timestamp": ts, "close": "28720"} for ts in completed_timestamps],
             "bars_available": len(completed_timestamps),
         },
     )
     write_json(
-        tmp_path / "live" / "latest_live_mnq_1m_candles.json",
+        tmp_path / "live" / f"latest_live_{instrument.lower()}_1m_candles.json",
         {
             "latest_1m_age_seconds": latest_1m_age_seconds,
             "bars": [
@@ -278,6 +319,11 @@ def test_missing_exit_policy_is_incomplete_and_does_not_submit(tmp_path: Path) -
     payload["entry_intent"]["managed_exit_policy_id"] = None
     payload["strategy_id"] = "UNKNOWN_STRATEGY_WITHOUT_POLICY"
     lifecycle_path.write_text(json.dumps(payload), encoding="utf-8")
+    live_status_path = tmp_path / "ledger" / "latest_track_b_live_position_status.json"
+    live_status = json.loads(live_status_path.read_text(encoding="utf-8"))
+    live_status["positions_by_instrument"]["MNQ-202606"]["managed_exit_policy_id"] = None
+    live_status["positions_by_instrument"]["MNQ-202606"]["strategy_id"] = "UNKNOWN_STRATEGY_WITHOUT_POLICY"
+    live_status_path.write_text(json.dumps(live_status), encoding="utf-8")
 
     result = run_track_b_managed_open_position_maintenance(
         config=cfg,
@@ -290,6 +336,46 @@ def test_missing_exit_policy_is_incomplete_and_does_not_submit(tmp_path: Path) -
     assert position["review_required"] is True
     assert position["close_intent_created"] is False
     assert position["close_submitted"] is False
+
+
+def test_missing_lifecycle_report_recovers_from_complete_mule_position_metadata(tmp_path: Path) -> None:
+    cfg = seed_open_position(
+        tmp_path,
+        strategy_id="track_b_paper_execution_test_mule_v1__mgc",
+        instrument="MGC",
+        contract_key="MGC-202606",
+        local_symbol="MGCM6",
+        con_id=712565978,
+        side="LONG",
+        entry_price="4543",
+        completed_timestamps=[
+            "2026-05-07T16:30:00+00:00",
+            "2026-05-07T16:35:00+00:00",
+            "2026-05-07T16:40:00+00:00",
+        ],
+    )
+    lifecycle_path = tmp_path / "managed" / "strategy_managed_fe30248d4d6c42acaf106c8313b0b33b" / "track_b_strategy_managed_paper_lifecycle_report.json"
+    lifecycle_path.unlink()
+    live_status_path = tmp_path / "ledger" / "latest_track_b_live_position_status.json"
+    live_status = json.loads(live_status_path.read_text(encoding="utf-8"))
+    live_status["source_artifact_paths"] = []
+    live_status_path.write_text(json.dumps(live_status), encoding="utf-8")
+
+    result = run_track_b_managed_open_position_maintenance(
+        config=cfg,
+        lifecycle_stages=fake_close_stages(),
+        now=aware_now(),
+    )
+
+    position = result.report["positions"][0]
+    assert position["lifecycle_report_recovered"] is True
+    assert position["exit_policy_id"] == "PAPER_DIAGNOSTIC_TIME_BOXED_3X5M_EXIT_V1"
+    assert position["close_intent_created"] is True
+    assert position["close_submitted"] is True
+    recovered = json.loads(lifecycle_path.read_text(encoding="utf-8"))
+    assert recovered["source"] == "TRACK_B_STRATEGY_MANAGED_LIFECYCLE"
+    assert recovered["entry_intent"]["side"] == "LONG"
+    assert recovered["close_intent"]["order_action"] == "SELL"
 
 
 def test_open_managed_position_age_three_submits_close_and_clears_open_summary(tmp_path: Path) -> None:
@@ -332,6 +418,64 @@ def test_open_managed_position_age_three_submits_close_and_clears_open_summary(t
     assert summary["managed_strategy_trade_count"] == 1
     assert summary["completed_trade_count"] == 1
     assert positions["open_position_count"] == 0
+
+
+@pytest.mark.parametrize(
+    ("instrument", "strategy_id", "contract_key", "local_symbol", "con_id", "side", "expected_close_action"),
+    [
+        ("MGC", "track_b_paper_execution_test_mule_v1__mgc", "MGC-202606", "MGCM6", 712565978, "LONG", "SELL"),
+        ("MGC", "track_b_paper_execution_test_mule_v1__mgc", "MGC-202606", "MGCM6", 712565978, "SHORT", "BUY"),
+        ("MNQ", "track_b_paper_execution_test_mule_v1__mnq", "MNQ-202606", "MNQM6", 770561201, "LONG", "SELL"),
+        ("MNQ", "track_b_paper_execution_test_mule_v1__mnq", "MNQ-202606", "MNQM6", 770561201, "SHORT", "BUY"),
+    ],
+)
+def test_execution_test_mule_time_box_exits_use_correct_close_action(
+    tmp_path: Path,
+    instrument: str,
+    strategy_id: str,
+    contract_key: str,
+    local_symbol: str,
+    con_id: int,
+    side: str,
+    expected_close_action: str,
+) -> None:
+    cfg = seed_open_position(
+        tmp_path,
+        strategy_id=strategy_id,
+        instrument=instrument,
+        contract_key=contract_key,
+        local_symbol=local_symbol,
+        con_id=con_id,
+        side=side,
+        entry_price="4543" if instrument == "MGC" else "28729",
+        completed_timestamps=[
+            "2026-05-07T16:30:00+00:00",
+            "2026-05-07T16:35:00+00:00",
+            "2026-05-07T16:40:00+00:00",
+        ],
+    )
+
+    result = run_track_b_managed_open_position_maintenance(
+        config=cfg,
+        lifecycle_stages=fake_close_stages(),
+        now=aware_now(),
+    )
+
+    position = result.report["positions"][0]
+    assert position["exit_eligible"] is True
+    assert position["close_intent_created"] is True
+    assert position["close_submitted"] is True
+    lifecycle = json.loads(
+        (
+            tmp_path
+            / "managed"
+            / "strategy_managed_fe30248d4d6c42acaf106c8313b0b33b"
+            / "track_b_strategy_managed_paper_lifecycle_report.json"
+        ).read_text()
+    )
+    assert lifecycle["managed_exit_policy_id"] == "PAPER_DIAGNOSTIC_TIME_BOXED_3X5M_EXIT_V1"
+    assert lifecycle["close_intent"]["order_action"] == expected_close_action
+    assert lifecycle["final_position_status"] == "CLOSED_FLAT"
 
 
 def test_uses_canonical_phase1_runtime_market_data_root(tmp_path: Path) -> None:
