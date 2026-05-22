@@ -23,6 +23,16 @@ from .models import require_aware_datetime, to_jsonable
 from .models import IntentKind, OrderIntent, SubmitAttempt, SubmitAttemptState
 from .preflight import ReadOnlyPreflightConfig
 from .track_b_lifecycle_state_transition import validate_open_managed_evidence
+from .track_b_open_order_truth import (
+    BROKER_FLAT_WITH_OPEN_CLOSE_ORDER,
+    CLOSE_ORDER_MARKETABLE_NOT_FILLED,
+    CLOSE_ORDER_STALE,
+    DUPLICATE_CLOSE_ORDER,
+    OPEN_CLOSE_ORDER_WORKING,
+    SUSPICIOUS_ORDER_STATE,
+    TrackBOpenOrderTruthConfig,
+    build_track_b_open_order_truth_from_reconciliation,
+)
 from .track_b_paper_trade_ledger import DEFAULT_TRACK_B_PAPER_TRADE_LEDGER_OUTPUT_ROOT
 
 
@@ -948,11 +958,17 @@ def _submit_managed_limit_order(
         adapter.require_configured_account()
         open_orders = adapter.refresh_open_orders(contract_key=config.contract_key)
         if open_orders:
+            open_order_truth = _managed_close_open_order_truth(
+                config=config,
+                close_intent=intent_payload,
+                open_orders=open_orders,
+            )
             existing_close = (
                 _existing_working_close_order(
                     config=config,
                     close_intent=intent_payload,
                     open_orders=open_orders,
+                    open_order_truth=open_order_truth,
                 )
                 if intent_kind is IntentKind.CLOSE
                 else None
@@ -966,6 +982,7 @@ def _submit_managed_limit_order(
                     "primary_blocker": "Existing working close order for exact contract/action/quantity blocks duplicate managed PAPER close submit.",
                     "working_order_count": len(open_orders),
                     "existing_working_close_order": existing_close,
+                    "open_order_truth": open_order_truth,
                 }
             return {
                 "submitted": False,
@@ -973,6 +990,7 @@ def _submit_managed_limit_order(
                 "broker_state_mutated": False,
                 "primary_blocker": "Existing working order for exact contract blocks managed PAPER submit.",
                 "working_order_count": len(open_orders),
+                "open_order_truth": open_order_truth,
             }
         broker_order_id = adapter.submit_limit_order(submit_attempt=submit_attempt, order_intent=order_intent)
         broker_order = adapter.wait_for_broker_order(submit_attempt_id=submit_attempt.submit_attempt_id)
@@ -1059,25 +1077,194 @@ def _existing_working_close_order(
     config: TrackBStrategyManagedPaperLifecycleConfig,
     close_intent: Mapping[str, Any],
     open_orders: tuple[Any, ...],
+    open_order_truth: Mapping[str, Any] | None = None,
 ) -> dict[str, Any] | None:
     expected_action = str(close_intent.get("order_action") or "").strip().upper()
     expected_qty = _int_or_none(close_intent.get("quantity") or config.quantity)
+    truth = dict(open_order_truth or {})
+    matching_truth_orders = [
+        state
+        for state in truth.get("order_states") or []
+        if isinstance(state, Mapping)
+        and state.get("is_close_order") is True
+        and _order_matches_close_guard(
+            config=config,
+            expected_action=expected_action,
+            expected_qty=expected_qty,
+            order=state.get("order") if isinstance(state.get("order"), Mapping) else state,
+        )
+    ]
+    if matching_truth_orders:
+        snapshot = dict(matching_truth_orders[0].get("order") or {})
+        snapshot["open_order_truth_classification"] = matching_truth_orders[0].get("classification")
+        snapshot["open_order_truth_suspicious_reasons"] = matching_truth_orders[0].get("suspicious_reasons") or []
+        snapshot["open_order_truth_condition_flags"] = matching_truth_orders[0].get("condition_flags") or []
+        if truth.get("classification") in {
+            BROKER_FLAT_WITH_OPEN_CLOSE_ORDER,
+            CLOSE_ORDER_MARKETABLE_NOT_FILLED,
+            CLOSE_ORDER_STALE,
+            DUPLICATE_CLOSE_ORDER,
+            OPEN_CLOSE_ORDER_WORKING,
+            SUSPICIOUS_ORDER_STATE,
+        }:
+            snapshot["open_order_truth_overall_classification"] = truth.get("classification")
+        return snapshot
     for order in open_orders:
-        account_id = _order_field(order, "account_id")
-        contract_key = _order_field(order, "contract_key")
-        raw_action = _order_field(order, "action")
-        action = str(getattr(raw_action, "value", raw_action) or "").strip().upper()
-        quantity = _int_or_none(_order_field(order, "quantity"))
-        if account_id and str(account_id) != str(config.account_id):
-            continue
-        if contract_key and str(contract_key) != str(config.contract_key):
-            continue
-        if expected_action and action and action != expected_action:
-            continue
-        if expected_qty is not None and quantity is not None and quantity != expected_qty:
+        if not _order_matches_close_guard(
+            config=config,
+            expected_action=expected_action,
+            expected_qty=expected_qty,
+            order=_order_snapshot(order),
+        ):
             continue
         return _order_snapshot(order)
     return None
+
+
+def _managed_close_open_order_truth(
+    *,
+    config: TrackBStrategyManagedPaperLifecycleConfig,
+    close_intent: Mapping[str, Any],
+    open_orders: tuple[Any, ...],
+    include_expected_broker_position: bool = True,
+) -> dict[str, Any]:
+    now = datetime.now(UTC)
+    reconciliation = {
+        "classification": "TRACK_B_PAPER_BROKER_RECONCILIATION_OPEN_ORDER_EVIDENCE",
+        "generated_at": now.isoformat(),
+        "broker_reconciled": False,
+        "track_b_broker_positions": [_expected_broker_position(config)]
+        if include_expected_broker_position
+        else [],
+        "track_b_broker_open_orders": [_managed_open_order_truth_row(order) for order in open_orders],
+        "unknown_broker_open_orders": [],
+        "known_managed_exit_orders": [_expected_close_order_marker(config=config, close_intent=close_intent)],
+        "track_b_lifecycle_positions": [_expected_lifecycle_position(config)],
+        "unresolved_submit_intent_ownership_records": [],
+        "track_b_broker_open_order_count": len(open_orders),
+        "track_b_broker_position_count": 1 if include_expected_broker_position else 0,
+        "review_required_count": 0,
+        "unresolved_submit_intent_ownership_count": 0,
+        "live_money_eligible": False,
+        "paper_proof_invoked": False,
+    }
+    truth_config = TrackBOpenOrderTruthConfig(
+        repo_root=Path.cwd(),
+        dashboard_projection_path=None,
+        lifecycle_root=config.output_root,
+    )
+    payload = build_track_b_open_order_truth_from_reconciliation(
+        config=truth_config,
+        reconciliation=reconciliation,
+        now=now,
+    )
+    return {
+        "schema_version": payload.get("schema_version"),
+        "classification": payload.get("classification"),
+        "summary": payload.get("summary") or {},
+        "order_states": payload.get("order_states") or [],
+        "duplicate_close_order_groups": payload.get("duplicate_close_order_groups") or [],
+        "broker_flat_with_open_close_order": payload.get("broker_flat_with_open_close_order") or [],
+        "broker_positions_without_close_order": payload.get("broker_positions_without_close_order") or [],
+        "source": "TRACK_B_OPEN_ORDER_TRUTH_IN_MEMORY_PRE_SUBMIT_EVIDENCE",
+        "authority_owner": "execution_core",
+        "dashboard_projection_consumed": False,
+    }
+
+
+def _managed_open_order_truth_row(order: Any) -> dict[str, Any]:
+    row = _order_snapshot(order)
+    row.setdefault("symbol", _symbol_from_contract_key(str(row.get("contract_key") or "")))
+    row.setdefault("track_b_root", row.get("symbol"))
+    return row
+
+
+def _expected_close_order_marker(
+    *,
+    config: TrackBStrategyManagedPaperLifecycleConfig,
+    close_intent: Mapping[str, Any],
+) -> dict[str, Any]:
+    return {
+        "account_id": config.account_id,
+        "symbol": config.instrument_family,
+        "track_b_root": config.instrument_family,
+        "contract_key": config.contract_key,
+        "local_symbol": config.local_symbol,
+        "con_id": config.con_id,
+        "action": str(close_intent.get("order_action") or "").strip().upper(),
+        "quantity": str(close_intent.get("quantity") or config.quantity or ""),
+        "intent_type": "MANAGED_STRATEGY_CLOSE",
+    }
+
+
+def _expected_broker_position(config: TrackBStrategyManagedPaperLifecycleConfig) -> dict[str, Any]:
+    quantity = _signed_position_quantity(config)
+    return {
+        "account_id": config.account_id,
+        "symbol": config.instrument_family,
+        "track_b_root": config.instrument_family,
+        "contract_key": config.contract_key,
+        "local_symbol": config.local_symbol,
+        "con_id": config.con_id,
+        "quantity": str(quantity),
+    }
+
+
+def _expected_lifecycle_position(config: TrackBStrategyManagedPaperLifecycleConfig) -> dict[str, Any]:
+    return {
+        "account_id": config.account_id,
+        "strategy_id": config.strategy_id,
+        "symbol": config.instrument_family,
+        "track_b_root": config.instrument_family,
+        "contract_key": config.contract_key,
+        "local_symbol": config.local_symbol,
+        "con_id": config.con_id,
+        "side": _position_side(config),
+        "quantity": str(abs(_signed_position_quantity(config))),
+        "managed_exit_policy_id": config.managed_exit_policy_id,
+    }
+
+
+def _signed_position_quantity(config: TrackBStrategyManagedPaperLifecycleConfig) -> int:
+    quantity = int(config.quantity or 0)
+    side = _position_side(config)
+    return -quantity if side == "SHORT" else quantity
+
+
+def _position_side(config: TrackBStrategyManagedPaperLifecycleConfig) -> str:
+    side = str(config.side or "").strip().upper()
+    if side in {"SHORT", "SELL", "SELL_TO_OPEN"}:
+        return "SHORT"
+    return "LONG"
+
+
+def _order_matches_close_guard(
+    *,
+    config: TrackBStrategyManagedPaperLifecycleConfig,
+    expected_action: str,
+    expected_qty: int | None,
+    order: Mapping[str, Any],
+) -> bool:
+    account_id = _order_field(order, "account_id")
+    contract_key = _order_field(order, "contract_key")
+    local_symbol = _order_field(order, "local_symbol")
+    con_id = _order_field(order, "con_id")
+    raw_action = _order_field(order, "action")
+    action = str(getattr(raw_action, "value", raw_action) or "").strip().upper()
+    quantity = _int_or_none(_order_field(order, "quantity"))
+    if account_id and str(account_id) != str(config.account_id):
+        return False
+    if contract_key and str(contract_key) != str(config.contract_key):
+        return False
+    if not contract_key and local_symbol and str(local_symbol) != str(config.local_symbol):
+        return False
+    if not contract_key and not local_symbol and con_id and str(con_id) != str(config.con_id):
+        return False
+    if expected_action and action and action != expected_action:
+        return False
+    if expected_qty is not None and quantity is not None and quantity != expected_qty:
+        return False
+    return True
 
 
 def _order_field(order: Any, key: str) -> Any:
@@ -1098,10 +1285,25 @@ def _order_snapshot(order: Any) -> dict[str, Any]:
         "client_id": _order_field(order, "client_id"),
         "account_id": _order_field(order, "account_id"),
         "contract_key": _order_field(order, "contract_key"),
+        "symbol": _order_field(order, "symbol"),
+        "track_b_root": _order_field(order, "track_b_root"),
+        "local_symbol": _order_field(order, "local_symbol"),
+        "con_id": _order_field(order, "con_id"),
         "action": _order_field(order, "action"),
         "quantity": _order_field(order, "quantity"),
+        "filled_quantity": _order_field(order, "filled_quantity"),
+        "remaining_quantity": _order_field(order, "remaining_quantity"),
+        "limit_price": _order_field(order, "limit_price"),
         "status": _order_field(order, "status"),
+        "updated_at": _order_field(order, "updated_at"),
     }
+
+
+def _symbol_from_contract_key(contract_key: str) -> str:
+    raw = str(contract_key or "").strip().upper()
+    if "-" in raw:
+        return raw.split("-", 1)[0]
+    return raw
 
 
 def _contract_key_from_bridge_payload(payload: Mapping[str, Any]) -> str | None:
