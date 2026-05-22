@@ -17,6 +17,7 @@ from pathlib import Path
 from typing import Any, Callable, Mapping, Sequence
 
 from mgc_v05l.paths import PROJECT_ROOT, is_archived_project_root
+from mgc_v05l.execution_core.track_b_broker_truth_lease import classify_broker_truth_lease
 from mgc_v05l.execution_core.track_b_live_market_data_symbols import (
     DEFAULT_TRACK_B_LIVE_MARKET_DATA_SYMBOLS_PATH,
     TrackBLiveMarketDataSymbol,
@@ -44,6 +45,12 @@ DEFAULT_PAPER_RUNTIME_TRUTH_ARTIFACT = (
     / "paper_session"
     / "runtime"
     / "paper_runtime_truth.json"
+)
+DEFAULT_LIFECYCLE_STATUS_ARTIFACT = (
+    Path("outputs") / "track_b_execution_core" / "paper_trade_ledger" / "latest_track_b_live_position_status.json"
+)
+DEFAULT_ORDER_STATE_ARTIFACT = (
+    Path("outputs") / "track_b_execution_core" / "paper_trade_ledger" / "latest_track_b_paper_trade_summary.json"
 )
 CANONICAL_READINESS_STATES = {
     "READY_SUBMIT_CAPABLE",
@@ -442,7 +449,8 @@ def build_readiness_inputs(
 ) -> dict[str, Any]:
     now = _ensure_utc(now or datetime.now(timezone.utc))
     broker_truth = _broker_truth_input(_mapping(artifacts.get("broker_truth_status")), now=now)
-    broker_truth_lease = _broker_truth_lease_input(_mapping(artifacts.get("broker_truth_lease")), now=now)
+    broker_truth_lease_artifact = _effective_broker_truth_lease_artifact(artifacts, now=now)
+    broker_truth_lease = _broker_truth_lease_input(broker_truth_lease_artifact, now=now)
     reconciliation = _reconciliation_input(_mapping(artifacts.get("phase1_reconciliation")), now=now)
     operator_status = _mapping(artifacts.get("operator_status"))
     config_in_force = _mapping(artifacts.get("config_in_force"))
@@ -562,6 +570,7 @@ def write_canonical_readiness_artifact(
     repo_root = repo_root.resolve()
     output_path = output_path or repo_root / DEFAULT_CANONICAL_READINESS_ARTIFACT
     payload = build_canonical_readiness(repo_root=repo_root, expected_root=expected_root, now=now)
+    _write_refreshed_broker_truth_lease_if_present(repo_root=repo_root, payload=payload)
     output_path.parent.mkdir(parents=True, exist_ok=True)
     _atomic_write_json(output_path, payload)
     return payload
@@ -596,7 +605,120 @@ def _load_readiness_artifacts(repo_root: Path) -> dict[str, Any]:
             repo_root / DEFAULT_PHASE1_DATABENTO_LIVE_LISTENER_STATUS_ARTIFACT
         ),
         "paper_runtime_truth": _read_json(repo_root / DEFAULT_PAPER_RUNTIME_TRUTH_ARTIFACT),
+        "lifecycle_status": _read_json(repo_root / DEFAULT_LIFECYCLE_STATUS_ARTIFACT),
+        "order_state": _read_json(repo_root / DEFAULT_ORDER_STATE_ARTIFACT),
     }
+
+
+def _effective_broker_truth_lease_artifact(artifacts: Mapping[str, Any], *, now: datetime) -> dict[str, Any]:
+    """Return a broker lease derived from current source truth when possible.
+
+    The broker-truth lease is a derived safety artifact. Canonical readiness
+    should not stay blocked by an older lease file after newer authoritative
+    broker truth and reconciliation artifacts have already converged cleanly.
+    Recomputing the lease here keeps the same fail-closed lease classifier for
+    stale or unsafe broker truth while removing stale derived-artifact drift.
+    """
+
+    broker_status = _mapping(artifacts.get("broker_truth_status"))
+    reconciliation = _mapping(artifacts.get("phase1_reconciliation"))
+    existing_lease = _mapping(artifacts.get("broker_truth_lease"))
+    if not broker_status and not reconciliation:
+        return existing_lease
+
+    latest_attempt = _mapping(broker_status.get("latest_attempt_status"))
+    last_success = _mapping(broker_status.get("last_successful_broker_truth")) or broker_status
+    lease = classify_broker_truth_lease(
+        {
+            "account_id": "DUM882026",
+            "allowed_instruments": ["MGC", "MNQ", "GC"],
+            "current_time": now.isoformat(),
+            "policy": {
+                "max_entry_age_seconds": 300.0,
+                "max_exit_age_seconds": 900.0,
+                "degraded_refresh_grace_seconds": 120.0,
+            },
+            "last_successful_broker_truth": last_success,
+            "latest_attempt_status": latest_attempt,
+            "reconciliation": reconciliation,
+            "lifecycle": _lifecycle_summary(_mapping(artifacts.get("lifecycle_status"))),
+            "order_state": _order_state_summary(_mapping(artifacts.get("order_state")), reconciliation),
+            "source_artifact_paths": {
+                "broker_truth_status": str(
+                    Path("outputs")
+                    / "reports"
+                    / "ibkr_read_only_verification"
+                    / "ibkr_broker_truth_refresh_status.json"
+                ),
+                "reconciliation": str(
+                    Path("outputs")
+                    / "reports"
+                    / "track_b_paper_broker_reconciliation"
+                    / "latest_track_b_paper_broker_reconciliation.json"
+                ),
+                "lifecycle": str(DEFAULT_LIFECYCLE_STATUS_ARTIFACT),
+                "order_state": str(DEFAULT_ORDER_STATE_ARTIFACT),
+            },
+            "source_artifact_timestamps": {
+                key: value
+                for key, value in {
+                    "broker_truth_status": _artifact_generated_at(broker_status),
+                    "latest_attempt": _artifact_generated_at(latest_attempt),
+                    "reconciliation": _artifact_generated_at(reconciliation),
+                    "lifecycle": _artifact_generated_at(_mapping(artifacts.get("lifecycle_status"))),
+                    "order_state": _artifact_generated_at(_mapping(artifacts.get("order_state"))),
+                    "previous_lease": _artifact_generated_at(existing_lease),
+                }.items()
+                if value is not None
+            },
+        }
+    )
+    lease["refreshed_by_canonical_readiness"] = True
+    lease["previous_lease_state"] = existing_lease.get("lease_state") or existing_lease.get("state")
+    lease["previous_lease_generated_at"] = existing_lease.get("generated_at")
+    return lease
+
+
+def _write_refreshed_broker_truth_lease_if_present(*, repo_root: Path, payload: Mapping[str, Any]) -> None:
+    lease = _mapping(payload.get("broker_truth_lease"))
+    if lease.get("refreshed_by_canonical_readiness") is not True:
+        return
+    lease_path = repo_root / DEFAULT_BROKER_TRUTH_LEASE_ARTIFACT
+    lease_path.parent.mkdir(parents=True, exist_ok=True)
+    _atomic_write_json(lease_path, lease)
+
+
+def _lifecycle_summary(payload: Mapping[str, Any]) -> dict[str, Any]:
+    if not payload:
+        return {}
+    open_positions = payload.get("open_positions") or payload.get("positions") or payload.get("track_b_lifecycle_positions") or []
+    return {
+        **dict(payload),
+        "open_positions": list(open_positions) if isinstance(open_positions, list) else [],
+        "open_position_count": payload.get("open_position_count")
+        or payload.get("lifecycle_open_position_count")
+        or len(open_positions if isinstance(open_positions, list) else []),
+    }
+
+
+def _order_state_summary(payload: Mapping[str, Any], reconciliation: Mapping[str, Any]) -> dict[str, Any]:
+    return {
+        **dict(payload),
+        "unknown_open_order_count": payload.get("unknown_open_order_count")
+        or reconciliation.get("unknown_broker_open_order_count")
+        or 0,
+        "lifecycle_open_order_count": payload.get("lifecycle_open_order_count")
+        or reconciliation.get("lifecycle_open_order_count")
+        or 0,
+        "unresolved_intent_count": payload.get("unresolved_intent_count")
+        or reconciliation.get("unresolved_submit_intent_ownership_count")
+        or 0,
+    }
+
+
+def _artifact_generated_at(payload: Mapping[str, Any]) -> str | None:
+    value = payload.get("generated_at") or payload.get("last_success_at") or payload.get("latest_refresh_time")
+    return str(value) if value is not None else None
 
 
 def _process_specs(repo_root: Path, artifacts: Mapping[str, Any]) -> list[dict[str, Any]]:
@@ -853,6 +975,8 @@ def _broker_truth_lease_input(payload: Mapping[str, Any], *, now: datetime) -> d
         "lease_state": effective_lease_state,
         "source_lease_state": lease_state,
         "generated_at": generated_at,
+        "broker_truth_generated_at": payload.get("broker_truth_generated_at"),
+        "reconciliation_generated_at": payload.get("reconciliation_generated_at"),
         "age_seconds": _age_seconds(generated_at, now),
         "valid_until": valid_until,
         "entry_valid_until": entry_valid_until,
@@ -866,7 +990,21 @@ def _broker_truth_lease_input(payload: Mapping[str, Any], *, now: datetime) -> d
         "contradiction_details": list(payload.get("contradiction_details") or []),
         "operator_action_required": payload.get("operator_action_required") is True,
         "account_id": payload.get("account_id"),
+        "positions": list(payload.get("positions") or []),
+        "open_orders": list(payload.get("open_orders") or []),
+        "track_b_broker_position_count": payload.get("track_b_broker_position_count"),
+        "track_b_broker_open_order_count": payload.get("track_b_broker_open_order_count"),
+        "unknown_broker_open_order_count": payload.get("unknown_broker_open_order_count"),
+        "review_required_count": payload.get("review_required_count"),
+        "broker_reconciled": payload.get("broker_reconciled") is True,
+        "latest_attempt_classification": payload.get("latest_attempt_classification"),
+        "latest_attempt_generated_at": payload.get("latest_attempt_generated_at"),
+        "latest_attempt_error": payload.get("latest_attempt_error"),
         "source_artifacts": dict(_mapping(payload.get("source_artifacts"))),
+        "source_artifact_paths": dict(_mapping(payload.get("source_artifact_paths"))),
+        "refreshed_by_canonical_readiness": payload.get("refreshed_by_canonical_readiness") is True,
+        "previous_lease_state": payload.get("previous_lease_state"),
+        "previous_lease_generated_at": payload.get("previous_lease_generated_at"),
         "live_money_eligible": payload.get("live_money_eligible") is True,
     }
 

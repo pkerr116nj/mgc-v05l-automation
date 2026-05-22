@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -516,7 +517,7 @@ def test_expired_broker_truth_lease_blocks_submit_capable_state() -> None:
     assert result["readiness_blockers"][0]["code"] == "broker_truth_lease_expired"
 
 
-def test_stale_active_broker_truth_lease_is_reclassified_expired_in_artifact(tmp_path, monkeypatch) -> None:
+def test_canonical_readiness_refreshes_stale_broker_truth_lease_from_fresh_sources(tmp_path, monkeypatch) -> None:
     repo_root = tmp_path
     runtime_dir = repo_root / "outputs" / "probationary_pattern_engine" / "paper_session" / "runtime"
     report_dir = repo_root / "outputs" / "reports"
@@ -576,10 +577,82 @@ def test_stale_active_broker_truth_lease_is_reclassified_expired_in_artifact(tmp
         output_path=lease_dir / "latest_canonical_readiness.json",
         now=now,
     )
+    refreshed_lease = json.loads((lease_dir / "latest_broker_truth_lease.json").read_text(encoding="utf-8"))
+
+    assert result["canonical_readiness"] == "READY_SUBMIT_CAPABLE"
+    assert result["broker_truth_lease"]["source_lease_state"] == "ACTIVE"
+    assert result["broker_truth_lease"]["lease_state"] == "ACTIVE"
+    assert result["broker_truth_lease"]["previous_lease_state"] == "ACTIVE"
+    assert result["broker_truth_lease"]["refreshed_by_canonical_readiness"] is True
+    assert refreshed_lease["lease_state"] == "ACTIVE"
+    assert refreshed_lease["refreshed_by_canonical_readiness"] is True
+    assert result["readiness_blockers"] == []
+
+
+def test_canonical_readiness_keeps_stale_broker_truth_blocked_when_lease_is_refreshed(tmp_path, monkeypatch) -> None:
+    repo_root = tmp_path
+    runtime_dir = repo_root / "outputs" / "probationary_pattern_engine" / "paper_session" / "runtime"
+    report_dir = repo_root / "outputs" / "reports"
+    lease_dir = repo_root / "outputs" / "operator_dashboard" / "runtime"
+    lanes_dir = repo_root / "outputs" / "probationary_pattern_engine" / "paper_session" / "lanes" / "mnq"
+    runtime_dir.mkdir(parents=True)
+    (report_dir / "ibkr_read_only_verification").mkdir(parents=True)
+    (report_dir / "track_b_paper_broker_reconciliation").mkdir(parents=True)
+    lease_dir.mkdir(parents=True)
+    lanes_dir.mkdir(parents=True)
+    now = datetime(2026, 5, 18, 12, 0, tzinfo=timezone.utc)
+    (repo_root / "outputs" / "probationary_pattern_engine" / "paper_session" / "operator_status.json").write_text(
+        (
+            '{'
+            f'"source_runtime_pid":100,"source_runtime_repo_root":"{repo_root}",'
+            '"active_lane_ids":["mnq"],"usable_lane_count":1,"entries_enabled":true,'
+            '"operator_halt":false,"last_processed_bar_end_ts":"2026-05-18T11:59:00+00:00",'
+            '"health":{"market_data_ok":true}}'
+        ),
+        encoding="utf-8",
+    )
+    (runtime_dir / "paper_config_in_force.json").write_text('{"lanes": [{"lane_id": "mnq"}]}', encoding="utf-8")
+    (runtime_dir / "paper_lane_quarantine_status.json").write_text(
+        '{"classification": "PAPER_LANE_QUARANTINE_CLEAR", "quarantine_count": 0, "live_money_eligible": false}',
+        encoding="utf-8",
+    )
+    (runtime_dir / "market_data_transport_probe.json").write_text('{"status": "ok", "runtime_ready": true}', encoding="utf-8")
+    (report_dir / "ibkr_read_only_verification" / "ibkr_broker_truth_refresh_status.json").write_text(
+        '{"classification":"BROKER_TRUTH_REFRESH_READY","generated_at":"2026-05-18T11:40:00+00:00",'
+        '"last_success":true,"positions_complete":true,"open_orders_complete":true,"live_money_eligible":false}',
+        encoding="utf-8",
+    )
+    (report_dir / "track_b_paper_broker_reconciliation" / "latest_track_b_paper_broker_reconciliation.json").write_text(
+        '{"classification":"TRACK_B_PAPER_BROKER_RECONCILED","generated_at":"2026-05-18T11:59:20+00:00",'
+        '"broker_reconciled":true,"review_required_count":0,"lifecycle_open_position_count":0,'
+        '"live_money_eligible":false}',
+        encoding="utf-8",
+    )
+    (lease_dir / "latest_broker_truth_lease.json").write_text(
+        '{"lease_state":"ACTIVE","generated_at":"2026-05-18T05:30:00+00:00",'
+        '"valid_until":"2026-05-18T05:35:00+00:00",'
+        '"entry_valid_until":"2026-05-18T05:35:00+00:00",'
+        '"exit_valid_until":"2026-05-18T05:45:00+00:00",'
+        '"submit_entry_allowed":true,"submit_exit_allowed":true,"live_money_eligible":false}',
+        encoding="utf-8",
+    )
+    (lanes_dir / "live_timing_summary_latest.json").write_text(
+        '{"lane_id":"mnq","broker_truth":{"account_health":{"status":"HEALTHY",'
+        '"route_destination":"ibkr_paper_bridge_submit_capable"}}}',
+        encoding="utf-8",
+    )
+    monkeypatch.setattr("mgc_v05l.execution_core.track_b_readiness_state._pid_running", lambda pid: pid == 100)
+
+    result = write_canonical_readiness_artifact(
+        repo_root=repo_root,
+        expected_root=repo_root,
+        output_path=lease_dir / "latest_canonical_readiness.json",
+        now=now,
+    )
 
     assert result["canonical_readiness"] == "NOT_READY_DEPENDENCY"
-    assert result["broker_truth_lease"]["source_lease_state"] == "ACTIVE"
     assert result["broker_truth_lease"]["lease_state"] == "EXPIRED_BLOCK_NEW_ENTRIES"
+    assert result["broker_truth_lease"]["refreshed_by_canonical_readiness"] is True
     assert result["readiness_blockers"][0]["code"] == "broker_truth_lease_expired"
 
 
