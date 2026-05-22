@@ -90,7 +90,7 @@ def test_fill_updates_manifest_to_open_managed_with_broker_identity(tmp_path: Pa
 
     assert result is not None
     assert result.manifest["lifecycle_status"] == "OPEN_MANAGED"
-    assert result.manifest["lifecycle_id"] is None
+    assert result.manifest["lifecycle_id"] == f"bridge_fill_{intent_id}"
     assert result.manifest["broker_ownership_identity"]["broker_order_id"] == "1"
 
 
@@ -149,6 +149,7 @@ def test_open_managed_requires_broker_fill_identity(tmp_path: Path) -> None:
         managed_exit_policy_id="PAPER_DIAGNOSTIC_TIME_BOXED_3X5M_EXIT_V1",
         lifecycle_status="OPEN_MANAGED",
         broker_ownership_identity={"broker_order_id": "1", "perm_id": 1948412706},
+        lifecycle_id="bridge_fill_MGC|1m|2026-05-22T01:39:00Z|BUY_TO_OPEN",
         output_root=tmp_path,
         now=aware_now(),
     )

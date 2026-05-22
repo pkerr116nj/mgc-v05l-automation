@@ -17,6 +17,15 @@ from pathlib import Path
 from typing import Any, Iterable, Mapping
 
 from .models import require_aware_datetime, to_jsonable
+from .track_b_lifecycle_state_transition import (
+    BLOCKED_NO_BROKER_EFFECT,
+    BROKER_BACKED_FILL_EVIDENCE_INCOMPLETE,
+    OPEN_MANAGED,
+    OPEN_MANAGED_METADATA_INCOMPLETE,
+    broker_backed_fill_evidence_blockers,
+    classify_managed_position_transition,
+    is_pre_submit_no_broker_effect,
+)
 
 
 DEFAULT_TRACK_B_POSITION_MANAGEMENT_MANIFEST_ROOT = Path(
@@ -28,9 +37,6 @@ DEFAULT_TRACK_B_RUNTIME_CONFIG_IN_FORCE_JSON = Path(
 DEFAULT_TRACK_B_PROBATIONARY_LANE_CONFIG_YAML = Path(
     "config/probationary_pattern_engine_paper_mnq_mgc_plus_mnq_us_intraday_review.yaml"
 )
-OPEN_MANAGED_METADATA_INCOMPLETE = "OPEN_MANAGED_METADATA_INCOMPLETE"
-BROKER_BACKED_FILL_EVIDENCE_INCOMPLETE = "BROKER_BACKED_FILL_EVIDENCE_INCOMPLETE"
-BLOCKED_NO_BROKER_EFFECT = "BLOCKED_NO_BROKER_EFFECT"
 POSITION_MANAGEMENT_MANIFEST_SCHEMA_VERSION = "track_b_position_management_manifest_v1"
 PAPER_EXECUTION_TEST_MULE_MANAGED_EXIT_POLICY_ID = "PAPER_DIAGNOSTIC_TIME_BOXED_3X5M_EXIT_V1"
 PAPER_EXECUTION_TEST_MULE_LANE_IDS = {
@@ -101,9 +107,33 @@ def create_or_update_position_management_manifest(
     created_at = str(existing.get("created_at") or actual_now.isoformat())
     requested_lifecycle_status = str(lifecycle_status)
     broker_identity = dict(broker_ownership_identity or existing.get("broker_ownership_identity") or {})
-    lifecycle_status_blockers = _broker_backed_fill_evidence_blockers(broker_identity)
-    if requested_lifecycle_status == "OPEN_MANAGED" and lifecycle_status_blockers:
-        requested_lifecycle_status = BROKER_BACKED_FILL_EVIDENCE_INCOMPLETE
+    transition = classify_managed_position_transition(
+        {
+            **broker_identity,
+            "requested_lifecycle_status": requested_lifecycle_status,
+            "entry_intent_id": entry_intent_id,
+            "lane_id": _first_text(lane_id, existing.get("lane_id")),
+            "strategy_id": _first_text(strategy_id, existing.get("strategy_id")),
+            "contract_key": _first_text(
+                contract_key,
+                existing.get("contract", {}).get("contract_key") if isinstance(existing.get("contract"), Mapping) else None,
+            ),
+            "local_symbol": _first_text(
+                local_symbol,
+                existing.get("contract", {}).get("local_symbol") if isinstance(existing.get("contract"), Mapping) else None,
+            ),
+            "con_id": _first_text(
+                con_id,
+                existing.get("contract", {}).get("con_id") if isinstance(existing.get("contract"), Mapping) else None,
+            ),
+            "side": _first_text(side, existing.get("side")),
+            "quantity": _first_text(quantity, existing.get("quantity")),
+            "managed_exit_policy_id": _first_text(managed_exit_policy_id, existing.get("managed_exit_policy_id")),
+            "lifecycle_id": _first_text(lifecycle_id, existing.get("lifecycle_id")),
+        }
+    )
+    requested_lifecycle_status = transition.classification
+    lifecycle_status_blockers = list(transition.blockers)
 
     manifest = {
         "schema_version": POSITION_MANAGEMENT_MANIFEST_SCHEMA_VERSION,
@@ -197,18 +227,25 @@ def update_manifest_from_filled_bridge_result(
         "fill_price": filled_bridge_result.get("fill_price") or filled_bridge_result.get("entry_fill_price"),
         "fill_timestamp": filled_bridge_result.get("fill_timestamp") or filled_bridge_result.get("entry_timestamp"),
     }
-    fill_evidence_blockers = _broker_backed_fill_evidence_blockers(identity)
     resolution = resolve_management_metadata(
         source=filled_bridge_result,
         output_root=output_root,
     )
-    lifecycle_status = OPEN_MANAGED_METADATA_INCOMPLETE
-    if _is_pre_submit_no_broker_effect(filled_bridge_result, identity):
-        lifecycle_status = BLOCKED_NO_BROKER_EFFECT
-    elif resolution.complete and not fill_evidence_blockers:
-        lifecycle_status = "OPEN_MANAGED"
-    elif fill_evidence_blockers:
-        lifecycle_status = BROKER_BACKED_FILL_EVIDENCE_INCOMPLETE
+    transition = classify_managed_position_transition(
+        {
+            **dict(filled_bridge_result),
+            **identity,
+            "requested_lifecycle_status": OPEN_MANAGED,
+            "entry_intent_id": _first_text(filled_bridge_result.get("entry_intent_id"), filled_bridge_result.get("order_intent_id")),
+            "side": _side_from_filled_bridge_result(filled_bridge_result),
+            "lifecycle_id": _first_text(
+                filled_bridge_result.get("lifecycle_id"),
+                f"bridge_fill_{intent_id}" if intent_id else None,
+            ),
+            "managed_exit_policy_id": resolution.managed_exit_policy_id,
+        }
+    )
+    lifecycle_status = transition.classification
     return create_or_update_position_management_manifest(
         entry_intent_id=intent_id,
         lane_id=_first_text(filled_bridge_result.get("lane_id"), existing.get("lane_id") if existing else None),
@@ -223,7 +260,7 @@ def update_manifest_from_filled_bridge_result(
         lifecycle_status=lifecycle_status,
         policy_config_refs={"metadata_source": resolution.source},
         broker_ownership_identity=identity,
-        lifecycle_id=_first_text(filled_bridge_result.get("lifecycle_id")),
+        lifecycle_id=_first_text(filled_bridge_result.get("lifecycle_id"), f"bridge_fill_{intent_id}" if intent_id else None),
         output_root=output_root,
         existing_manifest=existing,
         now=now,
@@ -266,7 +303,7 @@ def lifecycle_metadata_complete(source: Mapping[str, Any]) -> TrackBManagementMe
 
 
 def broker_backed_fill_evidence_complete(source: Mapping[str, Any]) -> TrackBManagementMetadataResolution:
-    blockers = tuple(_broker_backed_fill_evidence_blockers(source))
+    blockers = tuple(broker_backed_fill_evidence_blockers(source))
     if blockers:
         return TrackBManagementMetadataResolution(
             None,
@@ -363,29 +400,8 @@ def _missing_required_management_fields(source: Mapping[str, Any], *, manifest: 
     return [key for key, value in required.items() if not value]
 
 
-def _broker_backed_fill_evidence_blockers(source: Mapping[str, Any]) -> list[str]:
-    required = {
-        "broker_order_id": _first_text(source.get("broker_order_id"), source.get("order_id")),
-        "fill_price": _first_text(source.get("fill_price"), source.get("entry_fill_price"), source.get("price")),
-        "fill_timestamp": _first_text(
-            source.get("fill_timestamp"),
-            source.get("entry_timestamp"),
-            source.get("filled_at"),
-            source.get("executed_at"),
-        ),
-    }
-    return [key for key, value in required.items() if not value]
-
-
 def _is_pre_submit_no_broker_effect(source: Mapping[str, Any], identity: Mapping[str, Any]) -> bool:
-    effect = str(source.get("broker_effect_classification") or source.get("broker_effect") or "").strip().upper()
-    classification = str(source.get("classification") or "").strip().upper()
-    if "NO_BROKER_EFFECT" in effect or "NO_BROKER_EFFECT" in classification:
-        return True
-    submit_sent = source.get("submit_sent")
-    if submit_sent is False and not _first_text(identity.get("broker_order_id")) and not _first_text(identity.get("perm_id")):
-        return True
-    return False
+    return is_pre_submit_no_broker_effect({**dict(source), **dict(identity)})
 
 
 def _read_json(path: Path | None) -> dict[str, Any] | None:

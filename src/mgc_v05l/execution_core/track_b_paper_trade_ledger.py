@@ -16,6 +16,7 @@ from pathlib import Path
 from typing import Any, Iterable, Mapping
 
 from .models import require_aware_datetime, to_jsonable
+from .track_b_lifecycle_state_transition import TrackBLifecycleTransition, ledger_projection_from_transition
 from .track_b_position_management_manifest import (
     DEFAULT_TRACK_B_POSITION_MANAGEMENT_MANIFEST_ROOT,
     OPEN_MANAGED_METADATA_INCOMPLETE,
@@ -1189,12 +1190,18 @@ def _trade_record_from_filled_bridge_result(
         if manifest_update is not None
         else ""
     )
-    lifecycle_classification = "TRACK_B_STRATEGY_PAPER_OPEN_MANAGED"
-    if not metadata.complete:
-        lifecycle_classification = OPEN_MANAGED_METADATA_INCOMPLETE
-    elif manifest_lifecycle_status and manifest_lifecycle_status != "OPEN_MANAGED":
-        lifecycle_classification = manifest_lifecycle_status
-    final_position_status = "OPEN_MANAGED" if lifecycle_classification == "TRACK_B_STRATEGY_PAPER_OPEN_MANAGED" else "REVIEW_REQUIRED"
+    if manifest_lifecycle_status:
+        transition_classification = manifest_lifecycle_status
+    elif metadata.complete:
+        transition_classification = "OPEN_MANAGED"
+    else:
+        transition_classification = OPEN_MANAGED_METADATA_INCOMPLETE
+    ledger_projection = ledger_projection_from_transition(
+        transition=TrackBLifecycleTransition(transition_classification),
+        broker_bridge_review_required=bool(filled_bridge_result.get("review_required")),
+    )
+    lifecycle_classification = str(ledger_projection["paper_lifecycle_classification"])
+    final_position_status = str(ledger_projection["final_position_status"])
     return {
         "ledger_schema_version": LEDGER_SCHEMA_VERSION,
         "trade_id": f"{strategy_id}:{lifecycle_id}",
@@ -1256,9 +1263,7 @@ def _trade_record_from_filled_bridge_result(
         "transmission_classification": "BROKER_BACKED_POSITION_CONFIRMED",
         "final_broker_state_classification": lifecycle_classification,
         "final_position_status": final_position_status,
-        "review_required": bool(filled_bridge_result.get("review_required"))
-        or not metadata.complete
-        or lifecycle_classification != "TRACK_B_STRATEGY_PAPER_OPEN_MANAGED",
+        "review_required": bool(ledger_projection["review_required"]) or not metadata.complete,
         "paper_lifecycle_report_path": _string_or_none(
             filled_bridge_result.get("paper_lifecycle_report_path")
             or filled_bridge_result.get("managed_lifecycle_report_path")

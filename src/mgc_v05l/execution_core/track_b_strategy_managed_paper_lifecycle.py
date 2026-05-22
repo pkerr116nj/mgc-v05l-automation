@@ -22,7 +22,7 @@ from .ibkr_paper_adapter import IbkrPaperAdapter
 from .models import require_aware_datetime, to_jsonable
 from .models import IntentKind, OrderIntent, SubmitAttempt, SubmitAttemptState
 from .preflight import ReadOnlyPreflightConfig
-from .track_b_position_management_manifest import broker_backed_fill_evidence_complete
+from .track_b_lifecycle_state_transition import validate_open_managed_evidence
 from .track_b_paper_trade_ledger import DEFAULT_TRACK_B_PAPER_TRADE_LEDGER_OUTPUT_ROOT
 
 
@@ -397,15 +397,25 @@ def write_open_managed_lifecycle_report_from_filled_bridge_result(
     account_id = str(filled_bridge_result.get("account_id") or "DUM882026")
     if not all([instrument, contract_key, local_symbol, account_id]) or con_id is None or quantity is None:
         return None
-    fill_evidence = broker_backed_fill_evidence_complete(
+    open_managed_transition = validate_open_managed_evidence(
         {
+            "entry_intent_id": order_intent_id,
+            "lane_id": filled_bridge_result.get("lane_id"),
+            "strategy_id": filled_bridge_result.get("strategy_id") or filled_bridge_result.get("lane_id"),
+            "contract_key": contract_key,
+            "local_symbol": local_symbol,
+            "con_id": con_id,
+            "side": "LONG" if intent_type == "BUY_TO_OPEN" else "SHORT",
+            "quantity": quantity,
+            "lifecycle_id": filled_bridge_result.get("lifecycle_id") or f"bridge_fill_{order_intent_id}",
+            "managed_exit_policy_id": policy_id,
             "broker_order_id": filled_bridge_result.get("broker_order_id"),
             "perm_id": filled_bridge_result.get("perm_id"),
             "fill_price": filled_bridge_result.get("fill_price") or filled_bridge_result.get("entry_fill_price"),
             "fill_timestamp": filled_bridge_result.get("fill_timestamp") or filled_bridge_result.get("entry_timestamp"),
         }
     )
-    if fill_evidence.blockers:
+    if not open_managed_transition.open_managed_allowed:
         return None
     actual_now = now or datetime.now(UTC)
     require_aware_datetime(actual_now, "now")
