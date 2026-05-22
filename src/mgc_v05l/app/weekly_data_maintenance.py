@@ -18,10 +18,11 @@ from pathlib import Path
 from typing import Any, Sequence
 
 from mgc_v05l.execution_core.phase1_runtime_ticker_registry import PHASE1_RUNTIME_TICKER_ORDER
+from mgc_v05l.paths import ARCHIVED_ROOT_FRAGMENTS, PROJECT_ROOT
 
-REPO_ROOT = Path(__file__).resolve().parents[3]
+REPO_ROOT = PROJECT_ROOT
 DEFAULT_OUTPUT_ROOT = Path("outputs") / "reports" / "weekly_data_maintenance"
-DEFAULT_ARCHIVE_STAGING_ROOT = Path("/Users/patrick/Dev/_mgc_v05l_archive_staging")
+DEFAULT_ARCHIVE_STAGING_ROOT = PROJECT_ROOT.parent / "_mgc_v05l_archive_staging"
 DEFAULT_HOT_ROOT = Path("var") / "runtime_market_data"
 DEFAULT_WARM_ROOT = Path("outputs") / "reports"
 ACTIVE_RUNTIME_ROOTS = (
@@ -30,11 +31,7 @@ ACTIVE_RUNTIME_ROOTS = (
     Path("outputs") / "probationary_pattern_engine",
     Path("var"),
 )
-OLD_ROOT_PATTERNS = (
-    "/Users/patrick/Documents/MGC-v05l-automation",
-    "Mobile Documents",
-    "iCloud",
-)
+OLD_ROOT_PATTERNS = ARCHIVED_ROOT_FRAGMENTS
 RUNTIME_PROCESS_PATTERNS = (
     "probationary-paper-soak",
     "run_probationary_paper_soak",

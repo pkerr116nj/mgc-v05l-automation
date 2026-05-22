@@ -12,6 +12,7 @@ from mgc_v05l.app.weekly_data_maintenance import (
     main,
     write_weekly_data_maintenance_report,
 )
+from mgc_v05l.paths import PROJECT_ROOT
 
 
 def _write(path: Path, text: str = "{}") -> None:
@@ -29,15 +30,22 @@ def test_apply_mode_rejected_before_outputs(tmp_path: Path) -> None:
     assert "CONFIRM_DISPOSABLE_BUILD_CLEANUP_REQUIRED" in report["blocking_reasons"]
 
 
-def test_default_symbols_are_phase1_ten(tmp_path: Path) -> None:
+def test_default_symbols_follow_phase1_runtime_registry(tmp_path: Path) -> None:
     report = build_weekly_data_maintenance_report(
         config=WeeklyMaintenanceConfig(repo_root=tmp_path, week_ending=date(2026, 5, 8))
     )
 
     assert tuple(report["symbols"]) == PHASE1_RUNTIME_TICKER_ORDER
-    assert report["phase1_symbol_count"] == 10
+    assert report["phase1_symbol_count"] == len(PHASE1_RUNTIME_TICKER_ORDER)
     assert report["week_start"] == "2026-05-02"
     assert report["week_end"] == "2026-05-08"
+
+
+def test_default_roots_derive_from_canonical_project_root() -> None:
+    assert wdm.REPO_ROOT == PROJECT_ROOT
+    assert wdm.DEFAULT_ARCHIVE_STAGING_ROOT == PROJECT_ROOT.parent / "_mgc_v05l_archive_staging"
+    assert "/Users/patrick/Dev/MGC-v05l-automation" not in str(wdm.DEFAULT_ARCHIVE_STAGING_ROOT)
+    assert not any(pattern.startswith("/Users/patrick/Documents") for pattern in wdm.OLD_ROOT_PATTERNS)
 
 
 def test_active_runtime_files_are_preserved_not_delete_candidates(tmp_path: Path) -> None:
