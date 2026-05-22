@@ -96,13 +96,18 @@ class _FakeStrategyEngine:
         self.state = state
         self.entries: list[dict[str, object]] = []
         self.exits: list[dict[str, object]] = []
+        self.operator_flatten_calls: list[dict[str, object]] = []
 
     def submit_runtime_entry_intent(self, bar: Bar, **kwargs):
         self.entries.append({"bar": bar, **kwargs})
         return SimpleNamespace(order_intent_id=f"{bar.bar_id}|entry")
 
+    def submit_runtime_exit_intent(self, occurred_at: datetime, **kwargs):
+        self.exits.append({"occurred_at": occurred_at, **kwargs})
+        return SimpleNamespace(order_intent_id=f"runtime-exit|{int(occurred_at.timestamp())}")
+
     def submit_operator_flatten_intent(self, occurred_at: datetime, *, reason_code: str):
-        self.exits.append({"occurred_at": occurred_at, "reason_code": reason_code})
+        self.operator_flatten_calls.append({"occurred_at": occurred_at, "reason_code": reason_code})
         return SimpleNamespace(order_intent_id=f"runtime-exit|{int(occurred_at.timestamp())}")
 
 
@@ -260,7 +265,15 @@ def test_mule_exits_by_timed_hold() -> None:
 
     lane._apply_execution_test_mule_lifecycle(bar)
 
-    assert lane.strategy_engine.exits == [{"occurred_at": bar.end_ts, "reason_code": PAPER_EXECUTION_TEST_MULE_TIMED_EXIT_REASON}]
+    assert lane.strategy_engine.operator_flatten_calls == []
+    assert lane.strategy_engine.exits == [
+        {
+            "occurred_at": bar.end_ts,
+            "quantity": 1,
+            "reason_code": PAPER_EXECUTION_TEST_MULE_TIMED_EXIT_REASON,
+            "symbol": "MGC",
+        }
+    ]
 
 
 def test_mule_exits_by_profit_target() -> None:
@@ -270,7 +283,15 @@ def test_mule_exits_by_profit_target() -> None:
 
     lane._apply_execution_test_mule_lifecycle(bar)
 
-    assert lane.strategy_engine.exits == [{"occurred_at": bar.end_ts, "reason_code": PAPER_EXECUTION_TEST_MULE_PROFIT_EXIT_REASON}]
+    assert lane.strategy_engine.operator_flatten_calls == []
+    assert lane.strategy_engine.exits == [
+        {
+            "occurred_at": bar.end_ts,
+            "quantity": 1,
+            "reason_code": PAPER_EXECUTION_TEST_MULE_PROFIT_EXIT_REASON,
+            "symbol": "MGC",
+        }
+    ]
 
 
 def test_mule_exits_by_max_loss() -> None:
@@ -280,7 +301,61 @@ def test_mule_exits_by_max_loss() -> None:
 
     lane._apply_execution_test_mule_lifecycle(bar)
 
-    assert lane.strategy_engine.exits == [{"occurred_at": bar.end_ts, "reason_code": PAPER_EXECUTION_TEST_MULE_MAX_LOSS_EXIT_REASON}]
+    assert lane.strategy_engine.operator_flatten_calls == []
+    assert lane.strategy_engine.exits == [
+        {
+            "occurred_at": bar.end_ts,
+            "quantity": 1,
+            "reason_code": PAPER_EXECUTION_TEST_MULE_MAX_LOSS_EXIT_REASON,
+            "symbol": "MGC",
+        }
+    ]
+
+
+def test_mule_time_boxed_exit_is_strategy_managed_not_operator_flatten() -> None:
+    entry_ts = datetime(2026, 5, 20, 20, 0, tzinfo=timezone.utc)
+    lane = _mule_lane(state=_state(side=PositionSide.SHORT, qty=1, entry_ts=entry_ts, entry_price=Decimal("100")))
+    bar = _bar(entry_ts + timedelta(minutes=21), symbol="MGC", high="100.2", low="99.9")
+
+    lane._apply_execution_test_mule_lifecycle(bar)
+
+    assert lane.strategy_engine.operator_flatten_calls == []
+    assert lane.strategy_engine.exits == [
+        {
+            "occurred_at": bar.end_ts,
+            "quantity": 1,
+            "reason_code": PAPER_EXECUTION_TEST_MULE_TIMED_EXIT_REASON,
+            "symbol": "MGC",
+        }
+    ]
+
+
+def test_mnq_mule_time_boxed_exit_is_strategy_managed_not_operator_flatten() -> None:
+    entry_ts = datetime(2026, 5, 20, 20, 0, tzinfo=timezone.utc)
+    lane = _mule_lane(
+        symbol="MNQ",
+        state=_state(side=PositionSide.LONG, qty=1, entry_ts=entry_ts, entry_price=Decimal("29100")),
+    )
+    bar = _bar(
+        entry_ts + timedelta(minutes=21),
+        symbol="MNQ",
+        open_price="29100",
+        close_price="29101",
+        high="29101",
+        low="29099",
+    )
+
+    lane._apply_execution_test_mule_lifecycle(bar)
+
+    assert lane.strategy_engine.operator_flatten_calls == []
+    assert lane.strategy_engine.exits == [
+        {
+            "occurred_at": bar.end_ts,
+            "quantity": 1,
+            "reason_code": PAPER_EXECUTION_TEST_MULE_TIMED_EXIT_REASON,
+            "symbol": "MNQ",
+        }
+    ]
 
 
 def test_mule_blocks_stale_startup_hold_and_live_money(monkeypatch) -> None:

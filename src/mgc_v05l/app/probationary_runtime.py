@@ -4404,7 +4404,12 @@ class ProbationaryPaperLaneRuntime:
         if state.position_side != PositionSide.FLAT or state.internal_position_qty > 0:
             reason = self._execution_test_mule_exit_reason(bar)
             if reason is not None:
-                self.strategy_engine.submit_operator_flatten_intent(bar.end_ts, reason_code=reason)
+                self.strategy_engine.submit_runtime_exit_intent(
+                    bar.end_ts,
+                    quantity=state.internal_position_qty,
+                    reason_code=reason,
+                    symbol=self.spec.symbol,
+                )
             return
         if not _session_restriction_matches_now(bar.end_ts, self.spec.session_restriction):
             return
