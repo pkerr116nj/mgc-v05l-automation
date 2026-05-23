@@ -36,7 +36,14 @@ def test_clean_flat_runtime_down_is_expected_and_not_blocking(tmp_path: Path) ->
     runtime = _agent(payload, "track_b_paper_runtime")
     assert payload["classification"] == AGENT_HEALTH_READY
     assert runtime["status"] == STOPPED_EXPECTED
+    assert runtime["probe_status"] == STOPPED_EXPECTED
+    assert runtime["probe_reason"] == RUNTIME_DOWN_CLEAN
     assert runtime["reason"] == RUNTIME_DOWN_CLEAN
+    assert runtime["artifact_fresh"] is True
+    assert runtime["heartbeat_fresh"] is True
+    assert runtime["process_alive"] is None
+    assert runtime["root_matches"] is None
+    assert runtime["source_commit_matches"] is None
     assert runtime["blocking_for_proof"] is False
     assert runtime["blocking_for_runtime_submit"] is False
 

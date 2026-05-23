@@ -261,6 +261,9 @@ def _agent_health_row(
     if expected_state == DIAGNOSTIC_OPTIONAL:
         blocking_for_proof = False
         blocking_for_runtime_submit = False
+    runtime_probe = _runtime_probe(runtime_environment_truth) if agent_id == "track_b_paper_runtime" else {}
+    heartbeat_fresh = artifact_status.get("status") == HEALTHY
+    artifact_fresh = artifact_status.get("status") == HEALTHY
     return {
         "agent_id": agent_id,
         "display_name": agent.get("display_name"),
@@ -268,11 +271,18 @@ def _agent_health_row(
         "health_contract_id": agent.get("health_contract_id"),
         "expected_state": expected_state,
         "status": status,
+        "probe_status": status,
+        "probe_reason": reason,
         "heartbeat_path": agent.get("heartbeat_artifact_path"),
         "primary_artifact_path": primary_path,
         "max_age_seconds": None if expected_state in {ON_DEMAND, DIAGNOSTIC_OPTIONAL} else config.artifact_max_age_seconds,
         "last_seen_at": artifact_status.get("last_seen_at"),
         "freshness_age_seconds": artifact_status.get("freshness_age_seconds"),
+        "heartbeat_fresh": heartbeat_fresh,
+        "artifact_fresh": artifact_fresh,
+        "process_alive": runtime_probe.get("process_alive"),
+        "root_matches": runtime_probe.get("root_matches"),
+        "source_commit_matches": runtime_probe.get("source_commit_matches"),
         "required_for_proof": required_for_proof,
         "required_for_runtime_submit": required_for_runtime_submit,
         "blocking_for_proof": blocking_for_proof,
@@ -305,6 +315,15 @@ def _runtime_status(runtime_environment_truth: Mapping[str, Any]) -> tuple[str, 
     if not runtime_environment_truth:
         return MISSING, "runtime_environment_truth_missing"
     return DEGRADED, classification or "runtime_environment_truth_not_clean"
+
+
+def _runtime_probe(runtime_environment_truth: Mapping[str, Any]) -> dict[str, Any]:
+    runtime = _mapping(runtime_environment_truth.get("runtime"))
+    return {
+        "process_alive": runtime.get("pid_alive"),
+        "root_matches": runtime.get("root_match"),
+        "source_commit_matches": runtime.get("commit_matches_head"),
+    }
 
 
 def _phase1_status(phase1_readiness: Mapping[str, Any]) -> tuple[str, str]:
