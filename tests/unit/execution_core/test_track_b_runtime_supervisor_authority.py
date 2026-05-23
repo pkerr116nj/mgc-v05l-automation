@@ -21,6 +21,13 @@ from mgc_v05l.execution_core.track_b_runtime_resume_semantics import (
     RESUME_BLOCKED_OPERATOR_ACK_REQUIRED,
 )
 from mgc_v05l.execution_core.track_b_runtime_supervisor_authority import (
+    CLEANUP_REQUIRED,
+    CRASH_LOOP_HOLD,
+    MANUAL_REVIEW_REQUIRED,
+    MARKET_CLOSED_WAIT,
+    READY_FOR_OPERATOR_START,
+    RUNTIME_ACTIVE_MONITOR,
+    STALE_EVIDENCE_HOLD,
     SUPERVISOR_CLEANUP_REQUIRED_BEFORE_RUNTIME,
     SUPERVISOR_MANUAL_REVIEW_REQUIRED,
     SUPERVISOR_RESTART_BLOCKED_CRASH_LOOP,
@@ -52,9 +59,13 @@ def test_market_closed_waits_without_alarm(tmp_path: Path) -> None:
     payload = build_track_b_runtime_supervisor_authority(config=TrackBRuntimeSupervisorAuthorityConfig(repo_root=tmp_path), now=NOW)
 
     assert payload["classification"] == SUPERVISOR_WAIT_MARKET_CLOSED
+    assert payload["supervisor_mode"] == MARKET_CLOSED_WAIT
     assert payload["recommended_action"] == "WAIT_MARKET_CLOSED"
+    assert payload["recommended_next_command"] == "wait for market reopen; rerun proof readiness before any runtime start"
+    assert payload["proof_window_status"] == "market_closed"
     assert payload["action_allowed"] is True
     assert payload["safe_to_start_runtime"] is False
+    assert payload["decision_precedence"][0]["service"] == "Proof Readiness / Phase-1 Readiness"
 
 
 def test_clean_proof_ready_allows_runtime_start(tmp_path: Path) -> None:
@@ -63,7 +74,12 @@ def test_clean_proof_ready_allows_runtime_start(tmp_path: Path) -> None:
     payload = build_track_b_runtime_supervisor_authority(config=TrackBRuntimeSupervisorAuthorityConfig(repo_root=tmp_path), now=NOW)
 
     assert payload["classification"] == SUPERVISOR_RUNTIME_START_ALLOWED
+    assert payload["supervisor_mode"] == READY_FOR_OPERATOR_START
     assert payload["recommended_action"] == "START_RUNTIME_ALLOWED"
+    assert payload["recommended_next_command"] == (
+        "operator may start Track B PAPER runtime using the repaired direct supervisor launcher"
+    )
+    assert payload["proof_window_status"] == "ready"
     assert payload["action_allowed"] is True
     assert payload["safe_to_start_runtime"] is True
     assert payload["runtime_restart_authority"] is False
@@ -76,7 +92,9 @@ def test_active_healthy_runtime_is_left_running(tmp_path: Path) -> None:
     payload = build_track_b_runtime_supervisor_authority(config=TrackBRuntimeSupervisorAuthorityConfig(repo_root=tmp_path), now=NOW)
 
     assert payload["classification"] == SUPERVISOR_RUNTIME_ALREADY_HEALTHY
+    assert payload["supervisor_mode"] == RUNTIME_ACTIVE_MONITOR
     assert payload["recommended_action"] == "LEAVE_RUNTIME_RUNNING"
+    assert payload["recommended_next_command"] == "monitor active runtime through execution_core shared truth artifacts"
     assert payload["safe_to_leave_runtime_running"] is True
     assert payload["safe_to_start_runtime"] is False
 
@@ -87,7 +105,9 @@ def test_broker_exposure_requires_cleanup(tmp_path: Path) -> None:
     payload = build_track_b_runtime_supervisor_authority(config=TrackBRuntimeSupervisorAuthorityConfig(repo_root=tmp_path), now=NOW)
 
     assert payload["classification"] == SUPERVISOR_CLEANUP_REQUIRED_BEFORE_RUNTIME
+    assert payload["supervisor_mode"] == CLEANUP_REQUIRED
     assert payload["recommended_action"] == "CLEANUP_REQUIRED_BEFORE_RUNTIME"
+    assert payload["recommended_next_command"] == "perform exact scoped cleanup only after operator authorization"
     assert payload["safe_to_start_runtime"] is False
 
 
@@ -97,7 +117,9 @@ def test_suspicious_order_requires_manual_review(tmp_path: Path) -> None:
     payload = build_track_b_runtime_supervisor_authority(config=TrackBRuntimeSupervisorAuthorityConfig(repo_root=tmp_path), now=NOW)
 
     assert payload["classification"] == SUPERVISOR_MANUAL_REVIEW_REQUIRED
+    assert payload["supervisor_mode"] == MANUAL_REVIEW_REQUIRED
     assert payload["recommended_action"] == "MANUAL_REVIEW_REQUIRED"
+    assert payload["recommended_next_command"] == "manual review required before any runtime action"
     assert payload["safe_to_start_runtime"] is False
 
 
@@ -107,8 +129,11 @@ def test_crash_loop_blocks_restart(tmp_path: Path) -> None:
     payload = build_track_b_runtime_supervisor_authority(config=TrackBRuntimeSupervisorAuthorityConfig(repo_root=tmp_path), now=NOW)
 
     assert payload["classification"] == SUPERVISOR_RESTART_BLOCKED_CRASH_LOOP
+    assert payload["supervisor_mode"] == CRASH_LOOP_HOLD
     assert payload["recommended_action"] == "HOLD_DOWN_CRASH_LOOP"
     assert payload["action_allowed"] is False
+    assert payload["operator_ack"]["required"] is True
+    assert payload["operator_ack"]["ack_type"] == "crash_loop_hold"
 
 
 def test_operator_ack_required_blocks_restart(tmp_path: Path) -> None:
@@ -122,7 +147,10 @@ def test_operator_ack_required_blocks_restart(tmp_path: Path) -> None:
     payload = build_track_b_runtime_supervisor_authority(config=TrackBRuntimeSupervisorAuthorityConfig(repo_root=tmp_path), now=NOW)
 
     assert payload["classification"] == SUPERVISOR_RESTART_BLOCKED_OPERATOR_ACK
+    assert payload["supervisor_mode"] == MANUAL_REVIEW_REQUIRED
     assert payload["operator_ack_required"] is True
+    assert payload["operator_ack"]["required"] is True
+    assert payload["operator_ack"]["ack_type"] == "unsafe_stop_or_operator_ack"
     assert payload["recommended_action"] == "HOLD_DOWN_OPERATOR_ACK_REQUIRED"
 
 
@@ -132,7 +160,9 @@ def test_stale_evidence_blocks_supervisor_action(tmp_path: Path) -> None:
     payload = build_track_b_runtime_supervisor_authority(config=TrackBRuntimeSupervisorAuthorityConfig(repo_root=tmp_path), now=NOW)
 
     assert payload["classification"] == SUPERVISOR_SHARED_TRUTH_STALE
+    assert payload["supervisor_mode"] == STALE_EVIDENCE_HOLD
     assert payload["recommended_action"] == "REFRESH_SHARED_TRUTH"
+    assert payload["recommended_next_command"] == "run shared truth refresh and proof readiness"
     assert any("agent_health" in blocker["detail"] for blocker in payload["blockers"])
 
 
@@ -164,6 +194,7 @@ def _seed_base(
     position_classification: str = "CLEAN_FLAT_READY",
     open_order_classification: str = NO_OPEN_ORDERS,
     managed_order_classification: str = NO_MANAGED_ORDERS,
+    order_adjustment_plan_classification: str = "NO_ACTION_NEEDED",
     managed_position_classification: str = NO_MANAGED_POSITIONS,
     reconciliation_classification: str = "TRACK_B_PAPER_BROKER_RECONCILED",
     broker_lease_classification: str = "ACTIVE",
@@ -270,6 +301,10 @@ def _seed_base(
         {"generated_at": NOW.isoformat(), "classification": managed_order_classification},
     )
     _write_json(
+        root / "outputs" / "track_b_execution_core" / "managed_orders" / "latest_order_adjustment_plan.json",
+        {"generated_at": NOW.isoformat(), "classification": order_adjustment_plan_classification},
+    )
+    _write_json(
         root / "outputs" / "track_b_execution_core" / "managed_positions" / "latest_managed_positions.json",
         {"generated_at": NOW.isoformat(), "classification": managed_position_classification},
     )
@@ -284,6 +319,15 @@ def _seed_base(
     _write_json(
         root / "outputs" / "operator_dashboard" / "runtime" / "latest_broker_truth_lease.json",
         {"generated_at": NOW.isoformat(), "classification": broker_lease_classification},
+    )
+    _write_json(
+        root / "outputs" / "reports" / "phase1_runtime_data_readiness" / "latest_phase1_runtime_data_readiness.json",
+        {
+            "generated_at": NOW.isoformat(),
+            "classification": proof_classification,
+            "market_session": {"classification": proof_classification},
+            "rows": [],
+        },
     )
     _write_json(
         root

@@ -2,7 +2,7 @@
 
 Runtime Supervisor Authority lives in execution_core. Dashboard artifacts are
 projections and must not be used as runtime, readiness, restart, broker, or
-routing authority. This v1 service recommends what should happen next with the
+routing authority. This v2 service recommends what should happen next with the
 PAPER runtime only; it never starts, stops, restarts, submits, cancels,
 replaces, closes, or flattens anything.
 """
@@ -31,6 +31,7 @@ from mgc_v05l.execution_core.track_b_managed_position_registry import (
     DEFAULT_MANAGED_POSITION_REGISTRY_ARTIFACT,
     NO_MANAGED_POSITIONS,
 )
+from mgc_v05l.execution_core.track_b_order_adjustment_planner import DEFAULT_ORDER_ADJUSTMENT_PLAN_ARTIFACT
 from mgc_v05l.execution_core.track_b_open_order_truth import DEFAULT_OPEN_ORDER_TRUTH_ARTIFACT, NO_OPEN_ORDERS
 from mgc_v05l.execution_core.track_b_paper_proof_readiness import DEFAULT_OUTPUT_PATH as DEFAULT_PROOF_READINESS_ARTIFACT
 from mgc_v05l.execution_core.track_b_paper_proof_readiness import READY_FOR_PROOF
@@ -65,6 +66,19 @@ SUPERVISOR_MANUAL_REVIEW_REQUIRED = "SUPERVISOR_MANUAL_REVIEW_REQUIRED"
 SUPERVISOR_SHARED_TRUTH_STALE = "SUPERVISOR_SHARED_TRUTH_STALE"
 SUPERVISOR_UNKNOWN_REVIEW_REQUIRED = "SUPERVISOR_UNKNOWN_REVIEW_REQUIRED"
 
+MARKET_CLOSED_WAIT = "MARKET_CLOSED_WAIT"
+READY_FOR_OPERATOR_START = "READY_FOR_OPERATOR_START"
+RUNTIME_ACTIVE_MONITOR = "RUNTIME_ACTIVE_MONITOR"
+CLEANUP_REQUIRED = "CLEANUP_REQUIRED"
+MANUAL_REVIEW_REQUIRED = "MANUAL_REVIEW_REQUIRED"
+CRASH_LOOP_HOLD = "CRASH_LOOP_HOLD"
+STALE_EVIDENCE_HOLD = "STALE_EVIDENCE_HOLD"
+
+PROOF_WINDOW_MARKET_CLOSED = "market_closed"
+PROOF_WINDOW_DATA_STALE = "data_stale"
+PROOF_WINDOW_READY = "ready"
+PROOF_WINDOW_BLOCKED = "blocked"
+
 REPO_ROOT = Path(__file__).resolve().parents[3]
 DEFAULT_RUNTIME_SUPERVISOR_AUTHORITY_ARTIFACT = (
     Path("outputs")
@@ -81,6 +95,7 @@ DEFAULT_SHARED_TRUTH_ARTIFACT = (
 DEFAULT_RUNTIME_STOP_PROVENANCE_ARTIFACT = (
     Path("outputs") / "probationary_pattern_engine" / "paper_session" / "runtime" / "latest_runtime_stop_provenance.json"
 )
+DEFAULT_PHASE1_READINESS_ARTIFACT = Path("outputs") / "reports" / "phase1_runtime_data_readiness" / "latest_phase1_runtime_data_readiness.json"
 
 
 @dataclass(frozen=True)
@@ -101,8 +116,10 @@ class TrackBRuntimeSupervisorAuthorityConfig:
     open_order_truth_path: Path = DEFAULT_OPEN_ORDER_TRUTH_ARTIFACT
     managed_order_registry_path: Path = DEFAULT_MANAGED_ORDER_REGISTRY_ARTIFACT
     managed_position_registry_path: Path = DEFAULT_MANAGED_POSITION_REGISTRY_ARTIFACT
+    order_adjustment_plan_path: Path = DEFAULT_ORDER_ADJUSTMENT_PLAN_ARTIFACT
     reconciliation_path: Path = DEFAULT_RECONCILIATION_ARTIFACT
     broker_lease_path: Path = DEFAULT_LEASE_ARTIFACT
+    phase1_readiness_path: Path = DEFAULT_PHASE1_READINESS_ARTIFACT
     stop_provenance_path: Path = DEFAULT_RUNTIME_STOP_PROVENANCE_ARTIFACT
 
     def resolve(self, path: Path) -> Path:
@@ -129,13 +146,16 @@ def build_track_b_runtime_supervisor_authority(
         "open_order_truth": _read_json(config.resolve(config.open_order_truth_path)),
         "managed_order_registry": _read_json(config.resolve(config.managed_order_registry_path)),
         "managed_position_registry": _read_json(config.resolve(config.managed_position_registry_path)),
+        "order_adjustment_plan": _read_json(config.resolve(config.order_adjustment_plan_path)),
         "reconciliation": _read_json(config.resolve(config.reconciliation_path)),
         "broker_lease": _read_json(config.resolve(config.broker_lease_path)),
+        "phase1_readiness": _read_json(config.resolve(config.phase1_readiness_path)),
         "stop_provenance": _read_json(config.resolve(config.stop_provenance_path)),
     }
     decision = _classify_supervisor(inputs=inputs)
+    v2 = _v2_advisory(decision=decision, inputs=inputs)
     return {
-        "schema_version": "track_b_runtime_supervisor_authority_v1",
+        "schema_version": "track_b_runtime_supervisor_authority_v2",
         "generated_at": actual_now.isoformat(),
         "mode": "PAPER",
         "read_only": True,
@@ -149,9 +169,14 @@ def build_track_b_runtime_supervisor_authority(
         "live_money_eligible": False,
         "supervisor_decision_id": _decision_id(actual_now),
         "classification": decision["classification"],
+        "supervisor_mode": v2["supervisor_mode"],
         "recommended_action": decision["recommended_action"],
+        "recommended_next_command": v2["recommended_next_command"],
         "action_allowed": decision["action_allowed"],
         "operator_ack_required": decision["operator_ack_required"],
+        "operator_ack": v2["operator_ack"],
+        "proof_window_status": v2["proof_window_status"],
+        "decision_precedence": v2["decision_precedence"],
         "safe_to_start_runtime": decision["safe_to_start_runtime"],
         "safe_to_leave_runtime_running": decision["safe_to_leave_runtime_running"],
         "safe_to_stop_runtime": decision["safe_to_stop_runtime"],
@@ -234,8 +259,12 @@ def main(argv: Sequence[str] | None = None) -> int:
             json.dumps(
                 {
                     "classification": payload.get("classification"),
+                    "supervisor_mode": payload.get("supervisor_mode"),
                     "recommended_action": payload.get("recommended_action"),
+                    "recommended_next_command": payload.get("recommended_next_command"),
                     "action_allowed": payload.get("action_allowed"),
+                    "operator_ack": payload.get("operator_ack"),
+                    "proof_window_status": payload.get("proof_window_status"),
                     "reason": payload.get("reason"),
                     "authority_path": str(authority_path),
                     "read_only": True,
@@ -272,6 +301,9 @@ def _classify_supervisor(*, inputs: Mapping[str, Mapping[str, Any]]) -> dict[str
         "DUPLICATE_CLOSE_ORDER_BLOCKED",
         "ORDER_STATE_UNKNOWN_REVIEW_REQUIRED",
         "BROKER_FLAT_WITH_WORKING_CLOSE",
+    } or evidence["order_adjustment_plan_classification"] in {
+        "REVIEW_REQUIRED_SUSPICIOUS_STATE",
+        "DO_NOT_REPLACE_DUPLICATE_RISK",
     }
     if suspicious_order:
         return _decision(
@@ -281,6 +313,7 @@ def _classify_supervisor(*, inputs: Mapping[str, Mapping[str, Any]]) -> dict[str
             blockers=[
                 _blocker("open_order_truth", evidence["open_order_truth_classification"]),
                 _blocker("managed_order_registry", evidence["managed_order_registry_classification"]),
+                _blocker("order_adjustment_plan", evidence["order_adjustment_plan_classification"]),
             ],
         )
 
@@ -336,6 +369,7 @@ def _classify_supervisor(*, inputs: Mapping[str, Mapping[str, Any]]) -> dict[str
             SUPERVISOR_RESTART_BLOCKED_CRASH_LOOP,
             "HOLD_DOWN_CRASH_LOOP",
             f"Crash Loop Protection is {evidence['crash_loop_classification']}.",
+            operator_ack_required=True,
             blockers=[_blocker("crash_loop_protection", evidence["crash_loop_classification"])],
         )
 
@@ -425,6 +459,187 @@ def _decision(
     }
 
 
+def _v2_advisory(*, decision: Mapping[str, Any], inputs: Mapping[str, Mapping[str, Any]]) -> dict[str, Any]:
+    evidence = _evidence(inputs)
+    classification = str(decision.get("classification") or "")
+    supervisor_mode = _supervisor_mode(classification=classification)
+    proof_window_status = _proof_window_status(inputs=inputs, evidence=evidence)
+    return {
+        "supervisor_mode": supervisor_mode,
+        "recommended_next_command": _recommended_next_command(
+            supervisor_mode=supervisor_mode,
+            classification=classification,
+            proof_window_status=proof_window_status,
+        ),
+        "operator_ack": _operator_ack_fields(
+            classification=classification,
+            decision=decision,
+            evidence=evidence,
+        ),
+        "proof_window_status": proof_window_status,
+        "decision_precedence": _decision_precedence(
+            classification=classification,
+            supervisor_mode=supervisor_mode,
+            evidence=evidence,
+        ),
+    }
+
+
+def _supervisor_mode(*, classification: str) -> str:
+    if classification == SUPERVISOR_WAIT_MARKET_CLOSED:
+        return MARKET_CLOSED_WAIT
+    if classification == SUPERVISOR_RUNTIME_START_ALLOWED:
+        return READY_FOR_OPERATOR_START
+    if classification == SUPERVISOR_RUNTIME_ALREADY_HEALTHY:
+        return RUNTIME_ACTIVE_MONITOR
+    if classification == SUPERVISOR_CLEANUP_REQUIRED_BEFORE_RUNTIME:
+        return CLEANUP_REQUIRED
+    if classification in {SUPERVISOR_MANUAL_REVIEW_REQUIRED, SUPERVISOR_RESTART_BLOCKED_OPERATOR_ACK}:
+        return MANUAL_REVIEW_REQUIRED
+    if classification == SUPERVISOR_RESTART_BLOCKED_CRASH_LOOP:
+        return CRASH_LOOP_HOLD
+    if classification == SUPERVISOR_SHARED_TRUTH_STALE:
+        return STALE_EVIDENCE_HOLD
+    return MANUAL_REVIEW_REQUIRED
+
+
+def _recommended_next_command(*, supervisor_mode: str, classification: str, proof_window_status: str) -> str:
+    if supervisor_mode == MARKET_CLOSED_WAIT:
+        return "wait for market reopen; rerun proof readiness before any runtime start"
+    if supervisor_mode == READY_FOR_OPERATOR_START:
+        return "operator may start Track B PAPER runtime using the repaired direct supervisor launcher"
+    if supervisor_mode == RUNTIME_ACTIVE_MONITOR:
+        return "monitor active runtime through execution_core shared truth artifacts"
+    if supervisor_mode == CLEANUP_REQUIRED:
+        return "perform exact scoped cleanup only after operator authorization"
+    if supervisor_mode == CRASH_LOOP_HOLD:
+        return "acknowledge crash-loop hold before any restart planning"
+    if supervisor_mode == STALE_EVIDENCE_HOLD:
+        return "run shared truth refresh and proof readiness"
+    if classification == SUPERVISOR_RESTART_BLOCKED_OPERATOR_ACK:
+        return "provide required operator acknowledgement before restart planning"
+    if proof_window_status == PROOF_WINDOW_DATA_STALE:
+        return "restore Phase-1 market-data freshness before proof"
+    return "manual review required before any runtime action"
+
+
+def _operator_ack_fields(
+    *,
+    classification: str,
+    decision: Mapping[str, Any],
+    evidence: Mapping[str, Any],
+) -> dict[str, Any]:
+    required = bool(decision.get("operator_ack_required"))
+    reason = ""
+    ack_type = None
+    if classification == SUPERVISOR_RESTART_BLOCKED_CRASH_LOOP:
+        required = True
+        reason = f"Crash Loop Protection is {evidence['crash_loop_classification']}."
+        ack_type = "crash_loop_hold"
+    elif classification == SUPERVISOR_RESTART_BLOCKED_OPERATOR_ACK:
+        required = True
+        reason = "Runtime Resume Semantics or Crash Loop Protection requires operator acknowledgement."
+        ack_type = "unsafe_stop_or_operator_ack"
+    elif classification == SUPERVISOR_MANUAL_REVIEW_REQUIRED:
+        reason = "Manual review is required before runtime action."
+        ack_type = "manual_review"
+    return {
+        "required": required,
+        "reason": reason,
+        "ack_type": ack_type,
+        "ack_id_expected": _ack_id_expected(ack_type=ack_type, evidence=evidence) if required else None,
+    }
+
+
+def _ack_id_expected(*, ack_type: str | None, evidence: Mapping[str, Any]) -> str | None:
+    if not ack_type:
+        return None
+    stop = _mapping(evidence.get("stop_provenance"))
+    runtime_instance_id = str(stop.get("runtime_instance_id") or "unknown-runtime")
+    stop_reason = str(stop.get("stop_reason") or evidence.get("crash_loop_classification") or "unknown")
+    return f"track_b_paper_{ack_type}_{runtime_instance_id}_{stop_reason}"
+
+
+def _proof_window_status(*, inputs: Mapping[str, Mapping[str, Any]], evidence: Mapping[str, Any]) -> str:
+    if _market_closed(inputs):
+        return PROOF_WINDOW_MARKET_CLOSED
+    proof_classification = evidence["proof_readiness_classification"]
+    phase1_classification = evidence["phase1_readiness_classification"]
+    phase1_session = evidence["phase1_session_reason"]
+    if proof_classification == READY_FOR_PROOF:
+        return PROOF_WINDOW_READY
+    if phase1_classification and phase1_classification not in {READY_FOR_PROOF, MARKET_CLOSED_NO_FRESH_BARS}:
+        return PROOF_WINDOW_DATA_STALE
+    if phase1_session and phase1_session not in {READY_FOR_PROOF, MARKET_CLOSED_NO_FRESH_BARS}:
+        return PROOF_WINDOW_DATA_STALE
+    if proof_classification and "PHASE1" in proof_classification:
+        return PROOF_WINDOW_DATA_STALE
+    return PROOF_WINDOW_BLOCKED
+
+
+def _decision_precedence(
+    *,
+    classification: str,
+    supervisor_mode: str,
+    evidence: Mapping[str, Any],
+) -> list[dict[str, Any]]:
+    decisive_service = {
+        SUPERVISOR_RUNTIME_ALREADY_HEALTHY: "Runtime Environment Truth",
+        SUPERVISOR_MANUAL_REVIEW_REQUIRED: "Open Order Truth / Managed Order Registry / Order Adjustment Planner",
+        SUPERVISOR_CLEANUP_REQUIRED_BEFORE_RUNTIME: "Position Truth / Managed Position Registry",
+        SUPERVISOR_RESTART_BLOCKED_OPERATOR_ACK: "Runtime Resume Semantics / Crash Loop Protection",
+        SUPERVISOR_RESTART_BLOCKED_CRASH_LOOP: "Crash Loop Protection",
+        SUPERVISOR_WAIT_MARKET_CLOSED: "Proof Readiness / Phase-1 Readiness",
+        SUPERVISOR_SHARED_TRUTH_STALE: "Shared Truth Evidence Freshness",
+        SUPERVISOR_RUNTIME_START_ALLOWED: "Proof Readiness / Runtime Resume Semantics",
+        SUPERVISOR_RUNTIME_START_BLOCKED: "Runtime Resume Semantics",
+        SUPERVISOR_NO_ACTION_NEEDED: "Runtime Environment Truth",
+    }.get(classification, "Runtime Supervisor Authority")
+    return [
+        {
+            "rank": 1,
+            "service": decisive_service,
+            "classification": classification,
+            "supervisor_mode": supervisor_mode,
+            "decisive": True,
+        },
+        {
+            "rank": 2,
+            "service": "Proof Readiness",
+            "classification": evidence["proof_readiness_classification"],
+            "decisive": decisive_service == "Proof Readiness / Phase-1 Readiness",
+        },
+        {
+            "rank": 3,
+            "service": "Runtime Resume Semantics",
+            "classification": evidence["runtime_resume_classification"],
+            "decisive": decisive_service in {
+                "Runtime Resume Semantics / Crash Loop Protection",
+                "Runtime Resume Semantics",
+            },
+        },
+        {
+            "rank": 4,
+            "service": "Crash Loop Protection",
+            "classification": evidence["crash_loop_classification"],
+            "decisive": decisive_service == "Crash Loop Protection",
+        },
+        {
+            "rank": 5,
+            "service": "Shared Truth",
+            "classification": {
+                "position_truth": evidence["position_truth_classification"],
+                "open_order_truth": evidence["open_order_truth_classification"],
+                "managed_order_registry": evidence["managed_order_registry_classification"],
+                "managed_position_registry": evidence["managed_position_registry_classification"],
+                "reconciliation": evidence["reconciliation_classification"],
+                "broker_lease": evidence["broker_lease_classification"],
+            },
+            "decisive": False,
+        },
+    ]
+
+
 def _evidence(inputs: Mapping[str, Mapping[str, Any]]) -> dict[str, Any]:
     return {
         "runtime_environment_truth_classification": _classification(inputs["runtime_environment_truth"]),
@@ -447,9 +662,12 @@ def _evidence(inputs: Mapping[str, Mapping[str, Any]]) -> dict[str, Any]:
         "open_order_truth_classification": _classification(inputs["open_order_truth"]),
         "managed_order_registry_classification": _classification(inputs["managed_order_registry"]),
         "managed_position_registry_classification": _classification(inputs["managed_position_registry"]),
+        "order_adjustment_plan_classification": _classification(inputs["order_adjustment_plan"]),
         "reconciliation_classification": _classification(inputs["reconciliation"]),
         "broker_lease_classification": _classification(inputs["broker_lease"])
         or str(inputs["broker_lease"].get("lease_state") or ""),
+        "phase1_readiness_classification": _classification(inputs["phase1_readiness"]),
+        "phase1_session_reason": _phase1_session_reason(inputs["phase1_readiness"], inputs["proof_readiness"]),
         "stop_provenance": dict(_stop_provenance(inputs["stop_provenance"])),
     }
 
@@ -489,6 +707,9 @@ def _market_closed(inputs: Mapping[str, Mapping[str, Any]]) -> bool:
         return True
     if proof.get("phase1_session_reason") == MARKET_CLOSED_NO_FRESH_BARS:
         return True
+    phase1 = inputs["phase1_readiness"]
+    if _phase1_session_reason(phase1, proof) == MARKET_CLOSED_NO_FRESH_BARS:
+        return True
     if resume.get("classification") == RESUME_BLOCKED_MARKET_CLOSED or resume.get("reason") == MARKET_CLOSED_NO_FRESH_BARS:
         return True
     if self_recover.get("recommendation") == "WAIT_MARKET_CLOSED":
@@ -511,8 +732,10 @@ def _input_artifacts(config: TrackBRuntimeSupervisorAuthorityConfig) -> dict[str
         "open_order_truth": str(config.resolve(config.open_order_truth_path)),
         "managed_order_registry": str(config.resolve(config.managed_order_registry_path)),
         "managed_position_registry": str(config.resolve(config.managed_position_registry_path)),
+        "order_adjustment_plan": str(config.resolve(config.order_adjustment_plan_path)),
         "reconciliation": str(config.resolve(config.reconciliation_path)),
         "broker_lease": str(config.resolve(config.broker_lease_path)),
+        "phase1_readiness": str(config.resolve(config.phase1_readiness_path)),
         "stop_provenance": str(config.resolve(config.stop_provenance_path)),
     }
 
@@ -525,6 +748,17 @@ def _stop_provenance(payload: Mapping[str, Any]) -> Mapping[str, Any]:
 def _position_truth_classification(payload: Mapping[str, Any]) -> str:
     summary = _mapping(payload.get("summary"))
     return str(payload.get("classification") or summary.get("overall_classification") or "")
+
+
+def _phase1_session_reason(phase1_readiness: Mapping[str, Any], proof_readiness: Mapping[str, Any]) -> str:
+    market_session = _mapping(phase1_readiness.get("market_session"))
+    if market_session.get("classification"):
+        return str(market_session.get("classification"))
+    for row in _list(phase1_readiness.get("rows")):
+        for check in _mapping(row.get("candle_checks")).values():
+            if isinstance(check, Mapping) and check.get("reason"):
+                return str(check.get("reason"))
+    return str(proof_readiness.get("phase1_session_reason") or "")
 
 
 def _blocker(code: str, detail: str) -> dict[str, str]:
@@ -562,6 +796,10 @@ def _classification(payload: Mapping[str, Any]) -> str:
 
 def _mapping(value: Any) -> Mapping[str, Any]:
     return value if isinstance(value, Mapping) else {}
+
+
+def _list(value: Any) -> list[Any]:
+    return value if isinstance(value, list) else []
 
 
 if __name__ == "__main__":
