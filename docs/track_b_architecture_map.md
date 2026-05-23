@@ -4,6 +4,13 @@ Track B is the replacement execution spine. Track A remains legacy/reference
 only until specific behavior is intentionally extracted, tested, and re-owned by
 Track B. The long-term destination is not Track B feeding back into Track A.
 
+The application policy doctrine for Track B lives in
+`docs/track_b_application_policy_doctrine.md`. That doctrine is authoritative
+for mode-level interpretation: PAPER and future LIVE share the same
+`execution_core` evidence kernel, but PAPER is a bounded autonomous
+failure-discovery environment while LIVE/PRE-LIVE should eventually use stricter
+capital-preservation policy adapters.
+
 ## Current Chain
 
 Track B is now a PAPER-stage trading engine, not a passive monitor and not a
