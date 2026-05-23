@@ -88,7 +88,7 @@ def build_track_b_paper_proof_readiness(
         symbols=config.required_symbols,
         timeframes=config.required_timeframes,
     )
-    classification, blockers = _classify_proof_readiness(
+    decision = _classify_proof_readiness(
         shared_truth=shared_truth,
         shared_preflight=shared_preflight,
         phase1_checks=phase1_required_checks,
@@ -101,9 +101,13 @@ def build_track_b_paper_proof_readiness(
         "submit_authority": False,
         "paper_proof_invoked": False,
         "live_money_eligible": False,
-        "classification": classification,
-        "ready_for_proof": classification == READY_FOR_PROOF,
-        "blockers": blockers,
+        "classification": decision["classification"],
+        "ready_for_proof": decision["classification"] == READY_FOR_PROOF,
+        "primary_blocker": decision["primary_blocker"],
+        "secondary_warnings": decision["secondary_warnings"],
+        "broker_lease_warning": decision["broker_lease_warning"],
+        "phase1_session_reason": decision["phase1_session_reason"],
+        "blockers": decision["blockers"],
         "shared_truth_preflight": shared_preflight,
         "shared_truth_classifications": _mapping(shared_truth.get("classifications")),
         "phase1_market_session": _mapping(phase1.report.get("market_session")),
@@ -170,30 +174,106 @@ def _classify_proof_readiness(
     shared_truth: Mapping[str, Any],
     shared_preflight: Mapping[str, Any],
     phase1_checks: Sequence[Mapping[str, Any]],
-) -> tuple[str, list[dict[str, Any]]]:
+) -> dict[str, Any]:
     classifications = _mapping(shared_truth.get("classifications"))
     runtime_classification = str(classifications.get("Runtime Environment Truth") or "")
+    shared_blockers = [dict(blocker) for blocker in _list(shared_preflight.get("blockers"))]
+    broker_lease_warning = _broker_lease_warning(classifications=classifications, blockers=shared_blockers)
+    hard_shared_blockers = [
+        blocker for blocker in shared_blockers if not _is_degraded_broker_lease_blocker(blocker)
+    ]
+    missing_or_unready = [dict(check) for check in phase1_checks if check.get("ready") is not True]
+    phase1_closed_market = bool(missing_or_unready) and all(
+        str(check.get("reason") or "") == MARKET_CLOSED_NO_FRESH_BARS for check in missing_or_unready
+    )
+    phase1_blockers = _phase1_blockers(missing_or_unready)
+    phase1_session_reason = _phase1_session_reason(phase1_checks=phase1_checks)
+
     if runtime_classification in {RUNTIME_ACTIVE_TRADE_CAPABLE, RUNTIME_ACTIVE_OBSERVATION_ONLY}:
-        return RUNTIME_ALREADY_ACTIVE, [
+        blockers = [
             {
                 "code": "runtime_already_active",
                 "detail": f"Runtime Environment Truth is {runtime_classification}; proof starts require no active runtime.",
             }
         ]
+        return _decision(
+            classification=RUNTIME_ALREADY_ACTIVE,
+            blockers=blockers,
+            secondary_warnings=_secondary_warnings(shared_blockers=shared_blockers, phase1_blockers=phase1_blockers),
+            broker_lease_warning=broker_lease_warning,
+            phase1_session_reason=phase1_session_reason,
+        )
 
-    shared_blockers = _list(shared_preflight.get("blockers"))
+    if hard_shared_blockers:
+        classification = BROKER_STATE_UNSAFE if _broker_state_unsafe(hard_shared_blockers) else SHARED_TRUTH_BLOCKED
+        return _decision(
+            classification=classification,
+            blockers=hard_shared_blockers,
+            secondary_warnings=_secondary_warnings(
+                shared_blockers=[
+                    blocker for blocker in shared_blockers if blocker not in hard_shared_blockers
+                ],
+                phase1_blockers=phase1_blockers,
+            ),
+            broker_lease_warning=broker_lease_warning,
+            phase1_session_reason=phase1_session_reason,
+        )
+
+    if phase1_closed_market:
+        return _decision(
+            classification=MARKET_CLOSED_NO_FRESH_BARS,
+            blockers=phase1_blockers,
+            secondary_warnings=_secondary_warnings(shared_blockers=shared_blockers, phase1_blockers=[]),
+            broker_lease_warning=broker_lease_warning,
+            phase1_session_reason=phase1_session_reason,
+        )
+
     if shared_blockers:
-        if _broker_state_unsafe(shared_blockers):
-            return BROKER_STATE_UNSAFE, list(shared_blockers)
-        return SHARED_TRUTH_BLOCKED, list(shared_blockers)
+        classification = BROKER_STATE_UNSAFE if _broker_state_unsafe(shared_blockers) else SHARED_TRUTH_BLOCKED
+        return _decision(
+            classification=classification,
+            blockers=shared_blockers,
+            secondary_warnings=[],
+            broker_lease_warning=broker_lease_warning,
+            phase1_session_reason=phase1_session_reason,
+        )
 
-    missing_or_unready = [dict(check) for check in phase1_checks if check.get("ready") is not True]
     if missing_or_unready:
-        if all(str(check.get("reason") or "") == MARKET_CLOSED_NO_FRESH_BARS for check in missing_or_unready):
-            return MARKET_CLOSED_NO_FRESH_BARS, _phase1_blockers(missing_or_unready)
-        return PHASE1_DATA_UNHEALTHY, _phase1_blockers(missing_or_unready)
+        return _decision(
+            classification=PHASE1_DATA_UNHEALTHY,
+            blockers=phase1_blockers,
+            secondary_warnings=[],
+            broker_lease_warning=broker_lease_warning,
+            phase1_session_reason=phase1_session_reason,
+        )
 
-    return READY_FOR_PROOF, []
+    return _decision(
+        classification=READY_FOR_PROOF,
+        blockers=[],
+        secondary_warnings=[],
+        broker_lease_warning=broker_lease_warning,
+        phase1_session_reason=phase1_session_reason,
+    )
+
+
+def _decision(
+    *,
+    classification: str,
+    blockers: Sequence[Mapping[str, Any]],
+    secondary_warnings: Sequence[Mapping[str, Any]],
+    broker_lease_warning: Mapping[str, Any] | None,
+    phase1_session_reason: str | None,
+) -> dict[str, Any]:
+    blocker_list = [dict(blocker) for blocker in blockers]
+    warning_list = [dict(warning) for warning in secondary_warnings]
+    return {
+        "classification": classification,
+        "primary_blocker": blocker_list[0] if blocker_list else None,
+        "secondary_warnings": warning_list,
+        "broker_lease_warning": dict(broker_lease_warning) if broker_lease_warning else None,
+        "phase1_session_reason": phase1_session_reason,
+        "blockers": blocker_list,
+    }
 
 
 def _required_phase1_checks(
@@ -248,6 +328,65 @@ def _phase1_blockers(checks: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]
             }
         )
     return blockers
+
+
+def _secondary_warnings(
+    *,
+    shared_blockers: Sequence[Mapping[str, Any]],
+    phase1_blockers: Sequence[Mapping[str, Any]],
+) -> list[dict[str, Any]]:
+    warnings: list[dict[str, Any]] = []
+    for blocker in shared_blockers:
+        warnings.append(
+            {
+                **dict(blocker),
+                "warning_type": "shared_truth_evidence",
+            }
+        )
+    for blocker in phase1_blockers:
+        warnings.append(
+            {
+                **dict(blocker),
+                "warning_type": "phase1_evidence",
+            }
+        )
+    return warnings
+
+
+def _broker_lease_warning(
+    *,
+    classifications: Mapping[str, Any],
+    blockers: Sequence[Mapping[str, Any]],
+) -> dict[str, Any] | None:
+    lease_state = str(classifications.get("Broker Truth Lease") or "")
+    if lease_state == "ACTIVE":
+        return None
+    blocker = next((dict(row) for row in blockers if str(row.get("code") or "") == "broker_truth_lease_not_clean_for_runtime_start"), {})
+    if not lease_state and not blocker:
+        return None
+    return {
+        "lease_state": lease_state or blocker.get("observed"),
+        "code": blocker.get("code") or "broker_truth_lease_not_active",
+        "detail": blocker.get("detail") or f"Broker Truth Lease is {lease_state}.",
+        "primary_blocker": False,
+    }
+
+
+def _is_degraded_broker_lease_blocker(blocker: Mapping[str, Any]) -> bool:
+    observed = str(blocker.get("observed") or blocker.get("detail") or "")
+    return (
+        str(blocker.get("code") or "") == "broker_truth_lease_not_clean_for_runtime_start"
+        and "ACTIVE_DEGRADED_REFRESH_FAILING" in observed
+    )
+
+
+def _phase1_session_reason(*, phase1_checks: Sequence[Mapping[str, Any]]) -> str | None:
+    for check in phase1_checks:
+        session = _mapping(check.get("market_session"))
+        reason = str(session.get("reason") or "")
+        if reason:
+            return reason
+    return None
 
 
 def _broker_state_unsafe(blockers: Sequence[Mapping[str, Any]]) -> bool:

@@ -44,8 +44,36 @@ def test_clean_shared_truth_and_closed_market_stale_bars_classify_market_closed(
 
     assert payload["classification"] == MARKET_CLOSED_NO_FRESH_BARS
     assert payload["ready_for_proof"] is False
+    assert payload["primary_blocker"]["reason"] == MARKET_CLOSED_NO_FRESH_BARS
     assert {blocker["reason"] for blocker in payload["blockers"]} == {MARKET_CLOSED_NO_FRESH_BARS}
     assert payload["phase1_market_session"]["market_closed"] is True
+    assert payload["phase1_session_reason"] == "WEEKEND_GLOBEX_HALT_SATURDAY"
+
+
+def test_closed_market_with_degraded_broker_lease_keeps_market_closed_primary(tmp_path: Path) -> None:
+    _seed_clean_shared_truth(tmp_path, now=SATURDAY_NOW, broker_refresh_failing=True)
+    _seed_required_phase1_candles(tmp_path, generated_at=datetime(2026, 5, 22, 21, 0, tzinfo=UTC))
+
+    payload = _build(tmp_path, now=SATURDAY_NOW)
+
+    assert payload["classification"] == MARKET_CLOSED_NO_FRESH_BARS
+    assert payload["primary_blocker"]["reason"] == MARKET_CLOSED_NO_FRESH_BARS
+    assert payload["broker_lease_warning"]["lease_state"] == "ACTIVE_DEGRADED_REFRESH_FAILING"
+    assert any(
+        warning.get("code") == "broker_truth_lease_not_clean_for_runtime_start"
+        for warning in payload["secondary_warnings"]
+    )
+
+
+def test_open_market_with_degraded_broker_lease_blocks(tmp_path: Path) -> None:
+    _seed_clean_shared_truth(tmp_path, now=OPEN_NOW, broker_refresh_failing=True)
+    _seed_required_phase1_candles(tmp_path, generated_at=OPEN_NOW)
+
+    payload = _build(tmp_path, now=OPEN_NOW)
+
+    assert payload["classification"] == SHARED_TRUTH_BLOCKED
+    assert payload["primary_blocker"]["code"] == "broker_truth_lease_not_clean_for_runtime_start"
+    assert payload["broker_lease_warning"]["lease_state"] == "ACTIVE_DEGRADED_REFRESH_FAILING"
 
 
 def test_position_exposure_blocks_on_shared_truth_before_phase1(tmp_path: Path) -> None:
@@ -149,9 +177,9 @@ def _build(root: Path, *, now: datetime) -> dict:
     )
 
 
-def _seed_clean_shared_truth(root: Path, *, now: datetime) -> None:
+def _seed_clean_shared_truth(root: Path, *, now: datetime, broker_refresh_failing: bool = False) -> None:
     _write_reconciliation(root, now=now)
-    _write_broker_status(root, now=now)
+    _write_broker_status(root, now=now, broker_refresh_failing=broker_refresh_failing)
     _write_live_position_status(root, now=now)
     _write_trade_summary(root, now=now)
 
@@ -270,6 +298,7 @@ def _write_broker_status(
     now: datetime,
     positions: list[dict] | None = None,
     open_orders: list[dict] | None = None,
+    broker_refresh_failing: bool = False,
 ) -> None:
     payload = {
         "classification": "BROKER_TRUTH_REFRESH_READY",
@@ -281,15 +310,21 @@ def _write_broker_status(
         "open_orders": open_orders or [],
         "live_money_eligible": False,
     }
+    latest_attempt = {
+        **payload,
+        "classification": "BROKER_TRUTH_REFRESH_FAILED" if broker_refresh_failing else "BROKER_TRUTH_REFRESH_READY",
+        "last_failure": broker_refresh_failing,
+        "last_error": "simulated refresh failure" if broker_refresh_failing else None,
+    }
     _write(
         root / "outputs/reports/ibkr_read_only_verification/ibkr_broker_truth_refresh_status.json",
         {
             **payload,
             "last_successful_broker_truth": payload,
-            "latest_attempt_status": payload,
+            "latest_attempt_status": latest_attempt,
         },
     )
-    _write(root / "outputs/reports/ibkr_read_only_verification/ibkr_broker_truth_latest_attempt_status.json", payload)
+    _write(root / "outputs/reports/ibkr_read_only_verification/ibkr_broker_truth_latest_attempt_status.json", latest_attempt)
 
 
 def _write_live_position_status(root: Path, *, now: datetime) -> None:
