@@ -557,6 +557,127 @@ Dashboard implication:
   Track B status tab shows the commit, build timestamp, packaging mode, and
   bundle/source path so stale `/Applications` builds are obvious.
 
+## Shared-Services Control Plane
+
+Track B is converging toward a shared-services control plane. Shared
+`execution_core` authority artifacts are the source of truth for PAPER runtime,
+broker, order, position, readiness, and restart decisions. Dashboard and
+operator artifacts are projections only; they may display shared truth, but they
+must never be consumed for routing, restart, readiness, lifecycle, or broker
+authority.
+
+New Track B code should prefer shared authority services over local raw artifact
+reconstruction. If a status, launcher, remediation, readiness, or self-healing
+path needs open-order, position, runtime, broker, managed-position, or managed
+order evidence, it should consume the shared `execution_core` builder/artifact
+for that evidence rather than rebuilding a private interpretation from broker
+snapshots or historical lifecycle files.
+
+Authority hierarchy:
+
+1. IBKR broker truth and Track B broker reconciliation remain the account,
+   position, order, fill, and broker/lifecycle consistency authority.
+2. Open Order Truth normalizes broker open-order evidence, suspicious order
+   states, duplicate close risk, marketability, and broker-flat/open-close
+   contradictions.
+3. Managed Order Registry projects Track B-managed order identity and
+   read-only adjustment planning context on top of Open Order Truth.
+4. Position Truth summarizes broker positions, lifecycle state, ownership,
+   reconciliation, runtime status, and managed-order evidence per symbol.
+5. Runtime Environment Truth answers whether exactly one PAPER runtime is
+   running correctly from the Dev root on the expected source/config identity.
+6. Managed Position Registry identifies positions Track B is responsible for
+   managing and whether they are matched, exit-due, close-working, adoption
+   required, metadata-incomplete, or review-required.
+7. Proof Readiness combines shared truth, broker lease/reconciliation, and
+   Phase-1 runtime market-data session/freshness into the supervised proof
+   preflight verdict.
+8. Canonical Readiness consumes shared truth/proof-readiness evidence and
+   remains the submit-readiness decision surface.
+9. Self-Healing Restart Evidence consumes shared truth for restart eligibility
+   diagnostics and keeps broker lease degradation distinct from reconciliation
+   danger.
+10. Operator dashboard/status surfaces display projections of this stack. They
+    are never routing, readiness, restart, broker, lifecycle, or order
+    authority.
+
+Authority and status artifact map:
+
+| Service | Artifact | Role |
+| --- | --- |
+| Open Order Truth | `outputs/track_b_execution_core/open_order_truth/latest_open_order_truth.json` | `execution_core` authority |
+| Open Order Truth events | `outputs/track_b_execution_core/open_order_truth/open_order_truth_events.jsonl` | `execution_core` audit |
+| Managed Order Registry | `outputs/track_b_execution_core/managed_orders/latest_managed_orders.json` | `execution_core` authority |
+| Order Adjustment Planner | `outputs/track_b_execution_core/managed_orders/latest_order_adjustment_plan.json` | `execution_core` read-only planning authority |
+| Managed Order events | `outputs/track_b_execution_core/managed_orders/managed_order_events.jsonl` | `execution_core` audit |
+| Position Truth | `outputs/track_b_execution_core/position_truth/latest_position_truth.json` | `execution_core` authority |
+| Position Truth events | `outputs/track_b_execution_core/position_truth/track_b_trade_outcome_events.jsonl` | `execution_core` audit |
+| Runtime Environment Truth | `outputs/track_b_execution_core/runtime_truth/latest_runtime_environment_truth.json` | `execution_core` authority |
+| Runtime Environment events | `outputs/track_b_execution_core/runtime_truth/runtime_environment_events.jsonl` | `execution_core` audit |
+| Managed Position Registry | `outputs/track_b_execution_core/managed_positions/latest_managed_positions.json` | `execution_core` authority |
+| Managed Position events | `outputs/track_b_execution_core/managed_positions/managed_position_events.jsonl` | `execution_core` audit |
+| Shared Truth Refresh CLI | `mgc_v05l.execution_core.track_b_shared_truth_refresh_cli` | `execution_core` refresh orchestrator |
+| Proof Readiness | `outputs/track_b_execution_core/proof_readiness/latest_track_b_paper_proof_readiness.json` | `execution_core` proof preflight authority |
+| Broker reconciliation | `outputs/track_b_execution_core/broker_reconciliation/latest_track_b_paper_broker_reconciliation.json` | `execution_core` reconciliation authority |
+| Broker truth refresh status | `outputs/reports/ibkr_broker_truth_refresh/latest_broker_truth_refresh_status.json` | broker-truth evidence |
+| Broker truth lease | `outputs/operator_dashboard/runtime/latest_broker_truth_lease.json` | current lease status path; migration target for `execution_core` ownership |
+| Canonical readiness | `outputs/operator_dashboard/runtime/latest_canonical_readiness.json` | current readiness decision output consuming shared truth |
+| Canonical readiness summary | `outputs/operator_dashboard/runtime/latest_canonical_readiness_summary.json` | current readiness summary consuming shared truth |
+| Self-healing health | `outputs/operator_dashboard/runtime/latest_track_b_self_healing_health.json` | current restart diagnostic output consuming shared truth |
+
+Dashboard projections may exist for operator visibility, for example
+`outputs/operator_dashboard/runtime/latest_track_b_position_truth.json`,
+`outputs/operator_dashboard/runtime/latest_track_b_runtime_environment_truth.json`,
+`outputs/operator_dashboard/runtime/latest_track_b_open_order_truth.json`,
+`outputs/operator_dashboard/runtime/latest_track_b_managed_positions.json`, and
+`outputs/operator_dashboard/runtime/latest_track_b_managed_orders.json`. Each
+projection must carry `projection_only=true`, `not_routing_authority=true`, and
+`source_authority_path=<execution_core authority path>`. Runtime, readiness,
+self-healing, launch, lifecycle, order, and broker code must not consume those
+dashboard projection paths as authority.
+
+Current consumer migration status:
+
+- The PAPER runtime launch gate runs the Shared Truth Refresh stack before
+  launch readiness evaluation and blocks before start on non-clean authority
+  classifications.
+- Canonical readiness consumes shared truth/proof-readiness evidence, including
+  broker lease degradation and session-aware Phase-1 freshness such as
+  `MARKET_CLOSED_NO_FRESH_BARS`.
+- Self-healing restart diagnostics consume shared truth and classify distinct
+  blockers such as `RESTART_BLOCKED_BROKER_LEASE_DEGRADED`,
+  `RESTART_BLOCKED_OPEN_ORDER_TRUTH`,
+  `RESTART_BLOCKED_MANAGED_ORDER_TRUTH`,
+  `RESTART_BLOCKED_POSITION_TRUTH`, and
+  `RESTART_BLOCKED_RECONCILIATION`.
+- Operator/status displays now include a compact Shared Truth section and mark
+  the displayed data as projection-only.
+- Legacy GC, MGC, MNQ, Phase-1, and instrument-specific status panels that
+  duplicate shared truth are diagnostic-only and not routing authority.
+- Lifecycle transition authority, broker-backed entry auto-adoption, duplicate
+  close prevention, broker-position-before-close guards, and runtime stop
+  provenance are part of the shared control-plane boundary rather than
+  dashboard-owned behavior.
+
+Remaining migration backlog:
+
+- Manual remediation scripts should consume Open Order Truth, Managed Order
+  Registry, Position Truth, Managed Position Registry, and reconciliation
+  evidence as shared inputs instead of rebuilding local broker/order state.
+- The deeper runtime supervisor path should continue migrating from local PID,
+  process, broker, and lease checks to Runtime Environment Truth plus shared
+  proof-readiness evidence.
+- Managed order v2 may add explicit operator-authorized modify-in-place
+  execution, but the v1 Order Adjustment Planner is read-only and must not
+  mutate broker orders.
+- Remaining legacy research/status panels should either consume shared
+  authority or be labeled diagnostic-only.
+- Research/offline root/path migration should keep historical artifacts out of
+  runtime, readiness, broker, lifecycle, and dashboard authority paths.
+- Any new shared service should write its authority artifact under
+  `outputs/track_b_execution_core/`, with dashboard/operator outputs limited to
+  marked projections.
+
 ## Desktop Package / Deploy
 
 Build the local desktop bundle without touching `/Applications`:
