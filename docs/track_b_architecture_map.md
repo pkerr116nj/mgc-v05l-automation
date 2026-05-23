@@ -591,15 +591,18 @@ Authority hierarchy:
    required, metadata-incomplete, or review-required.
 7. Agent Registry declares the expected, optional, and diagnostic Track B
    agents/processes/services and their proof/runtime-submit relevance.
-8. Proof Readiness combines shared truth, broker lease/reconciliation, and
+8. Agent Health attaches read-only health contract semantics to registered
+   agents, including expected stopped/runtime states, artifact freshness, and
+   proof/runtime-submit blocking evidence.
+9. Proof Readiness combines shared truth, broker lease/reconciliation, and
    Phase-1 runtime market-data session/freshness into the supervised proof
    preflight verdict.
-9. Canonical Readiness consumes shared truth/proof-readiness evidence and
+10. Canonical Readiness consumes shared truth/proof-readiness evidence and
    remains the submit-readiness decision surface.
-10. Self-Healing Restart Evidence consumes shared truth for restart eligibility
+11. Self-Healing Restart Evidence consumes shared truth for restart eligibility
    diagnostics and keeps broker lease degradation distinct from reconciliation
    danger.
-11. Operator dashboard/status surfaces display projections of this stack. They
+12. Operator dashboard/status surfaces display projections of this stack. They
     are never routing, readiness, restart, broker, lifecycle, or order
     authority.
 
@@ -619,6 +622,7 @@ Authority and status artifact map:
 | Managed Position Registry | `outputs/track_b_execution_core/managed_positions/latest_managed_positions.json` | `execution_core` authority |
 | Managed Position events | `outputs/track_b_execution_core/managed_positions/managed_position_events.jsonl` | `execution_core` audit |
 | Agent Registry | `outputs/track_b_execution_core/agent_registry/latest_agent_registry.json` | `execution_core` authority |
+| Agent Health | `outputs/track_b_execution_core/agent_health/latest_agent_health.json` | `execution_core` authority |
 | Shared Truth Refresh CLI | `mgc_v05l.execution_core.track_b_shared_truth_refresh_cli` | `execution_core` refresh orchestrator |
 | Proof Readiness | `outputs/track_b_execution_core/proof_readiness/latest_track_b_paper_proof_readiness.json` | `execution_core` proof preflight authority |
 | Broker reconciliation | `outputs/track_b_execution_core/broker_reconciliation/latest_track_b_paper_broker_reconciliation.json` | `execution_core` reconciliation authority |
@@ -632,9 +636,10 @@ Dashboard projections may exist for operator visibility, for example
 `outputs/operator_dashboard/runtime/latest_track_b_position_truth.json`,
 `outputs/operator_dashboard/runtime/latest_track_b_runtime_environment_truth.json`,
 `outputs/operator_dashboard/runtime/latest_track_b_open_order_truth.json`,
-`outputs/operator_dashboard/runtime/latest_track_b_managed_positions.json`, and
-`outputs/operator_dashboard/runtime/latest_track_b_managed_orders.json`, and
-`outputs/operator_dashboard/runtime/latest_track_b_agent_registry.json`. Each
+`outputs/operator_dashboard/runtime/latest_track_b_managed_positions.json`,
+`outputs/operator_dashboard/runtime/latest_track_b_managed_orders.json`,
+`outputs/operator_dashboard/runtime/latest_track_b_agent_registry.json`, and
+`outputs/operator_dashboard/runtime/latest_track_b_agent_health.json`. Each
 projection must carry `projection_only=true`, `not_routing_authority=true`, and
 `source_authority_path=<execution_core authority path>`. Runtime, readiness,
 self-healing, launch, lifecycle, order, and broker code must not consume those
@@ -664,6 +669,8 @@ Current consumer migration status:
   dashboard-owned behavior.
 - Agent Registry v1 declares required, optional, and diagnostic Track B agents
   but does not yet evaluate each agent's live health contract.
+- Agent Health v1 evaluates read-only health contract status for registered
+  agents without granting restart, broker, lifecycle, or routing authority.
 
 Remaining migration backlog:
 
@@ -683,8 +690,8 @@ Remaining migration backlog:
 - Any new shared service should write its authority artifact under
   `outputs/track_b_execution_core/`, with dashboard/operator outputs limited to
   marked projections.
-- Agent health contract v2 should attach concrete heartbeat/probe semantics to
-  each Agent Registry entry without granting restart or broker authority.
+- Agent health contract v2 should add richer per-agent probes and self-recover
+  recommendations without granting restart or broker authority.
 
 ## Desktop Package / Deploy
 
