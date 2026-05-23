@@ -186,9 +186,16 @@ def plan_track_b_self_healing_restarts(
     actions: list[dict[str, Any]] = []
     blocked: list[dict[str, Any]] = []
     retry_policy_rows: dict[str, Any] = {}
+    paper_policy = _paper_recovery_policy_from_health(health)
+    paper_operator_hold_advisory = _paper_policy_allows_operator_hold_advisory(paper_policy)
+    paper_policy_hard_unsafe = _paper_policy_hard_unsafe(paper_policy, health)
 
     global_blockers = _global_restart_blockers(health)
-    if classification != AUTO_RESTART_ELIGIBLE:
+    if paper_policy_hard_unsafe:
+        global_blockers.append("paper_recovery_policy_hard_unsafe")
+    if classification != AUTO_RESTART_ELIGIBLE and not (
+        classification == "OPERATOR_REQUIRED" and paper_operator_hold_advisory and restart_candidates
+    ):
         global_blockers.append(f"classification_not_{AUTO_RESTART_ELIGIBLE}")
     candidate_blockers = _candidate_agent_blockers(agents=agents, restart_candidates=restart_candidates)
     if health_blockers:
@@ -216,6 +223,8 @@ def plan_track_b_self_healing_restarts(
             window_seconds=window_seconds,
         )
         retry_policy_rows[agent_id] = retry_policy
+        if paper_operator_hold_advisory:
+            agent_blockers = [blocker for blocker in agent_blockers if blocker != "operator_required"]
         if agent_id == PAPER_RUNTIME_AGENT_ID:
             agent_blockers.extend(_runtime_restart_blockers(health=health, agent=row))
             agent_blockers.extend(str(item) for item in retry_policy.get("blockers") or [])
@@ -250,6 +259,15 @@ def plan_track_b_self_healing_restarts(
         "blocked": tuple(blocked),
         "global_blockers": tuple(_dedupe(global_blockers)),
         "paper_runtime_auto_restart_allowed": any(row.get("agent_id") == PAPER_RUNTIME_AGENT_ID for row in actions),
+        "paper_recovery_policy_classification": paper_policy["paper_action_policy"],
+        "paper_recovery_policy_severity": paper_policy["severity"],
+        "paper_action_policy": paper_policy["paper_action_policy"],
+        "paper_recovery_diagnostic": _paper_recovery_diagnostic(paper_policy),
+        "autonomous_recovery_allowed": paper_policy["autonomous_recovery_allowed"],
+        "bounded_recovery_budget": paper_policy["bounded_recovery_budget"],
+        "requires_operator_ack_for_paper": paper_policy["requires_operator_ack_for_paper"],
+        "live_action_policy": paper_policy["live_action_policy"],
+        "operator_ack_advisory_only_for_paper": paper_operator_hold_advisory,
         "retry_policy": retry_policy_rows,
         "retry_policy_classification": _plan_retry_policy_classification(retry_policy_rows),
         "cooldown_seconds": cooldown_seconds,
@@ -265,8 +283,15 @@ def render_track_b_self_healing_status(health: Mapping[str, Any]) -> str:
     lines = [
         f"classification={health.get('classification') or 'UNKNOWN'}",
         f"auto_restart_allowed={str(health.get('auto_restart_allowed') is True).lower()}",
+        f"paper_recovery_policy={health.get('paper_recovery_policy_classification') or health.get('paper_action_policy') or '-'}",
+        f"paper_recovery_severity={health.get('paper_recovery_policy_severity') or '-'}",
+        f"paper_recovery_diagnostic={health.get('paper_recovery_diagnostic') or '-'}",
+        f"autonomous_recovery_allowed={str(health.get('autonomous_recovery_allowed') is True).lower()}",
+        f"requires_operator_ack_for_paper={str(health.get('requires_operator_ack_for_paper') is True).lower()}",
+        f"live_action_policy={health.get('live_action_policy') or '-'}",
         f"restart_candidates={_csv(health.get('restart_candidates'))}",
         f"operator_required_agents={_csv(health.get('operator_required_agents'))}",
+        f"operator_ack_advisory_only_for_paper={str(health.get('operator_ack_advisory_only_for_paper') is True).lower()}",
         f"blockers={_csv(health.get('blockers'))}",
         f"warnings={_csv(health.get('warnings'))}",
         f"live_money_eligible={str(health.get('live_money_eligible') is True).lower()}",
@@ -423,6 +448,73 @@ def _runtime_restart_summary(plan: Mapping[str, Any], attempt: Mapping[str, Any]
         "cooldown_state": cooldown_state,
         "last_attempt": last_attempt,
     }
+
+
+def _paper_recovery_policy_from_health(health: Mapping[str, Any]) -> dict[str, Any]:
+    policy = health.get("paper_recovery_policy") if isinstance(health.get("paper_recovery_policy"), Mapping) else {}
+    budget = policy.get("bounded_recovery_budget") if isinstance(policy.get("bounded_recovery_budget"), Mapping) else {}
+    return {
+        "severity": str(
+            health.get("paper_recovery_policy_severity")
+            or policy.get("severity")
+            or ""
+        ),
+        "paper_action_policy": str(
+            health.get("paper_action_policy")
+            or health.get("paper_recovery_policy_classification")
+            or policy.get("paper_action_policy")
+            or ""
+        ),
+        "live_action_policy": str(health.get("live_action_policy") or policy.get("live_action_policy") or ""),
+        "autonomous_recovery_allowed": (
+            health.get("autonomous_recovery_allowed") is True
+            or policy.get("autonomous_recovery_allowed") is True
+        ),
+        "requires_operator_ack_for_paper": (
+            health.get("requires_operator_ack_for_paper") is True
+            or policy.get("requires_operator_ack_for_paper") is True
+        ),
+        "bounded_recovery_budget": dict(
+            health.get("bounded_recovery_budget")
+            if isinstance(health.get("bounded_recovery_budget"), Mapping)
+            else budget
+        ),
+        "reason": str(policy.get("reason") or ""),
+    }
+
+
+def _paper_policy_allows_operator_hold_advisory(policy: Mapping[str, Any]) -> bool:
+    return bool(
+        policy.get("autonomous_recovery_allowed") is True
+        and policy.get("requires_operator_ack_for_paper") is not True
+        and str(policy.get("paper_action_policy") or "") in {
+            "AUTONOMOUS_RETRY_ELIGIBLE",
+            "SCOPED_RECOVERY_ELIGIBLE",
+        }
+    )
+
+
+def _paper_policy_hard_unsafe(policy: Mapping[str, Any], health: Mapping[str, Any]) -> bool:
+    return bool(
+        str(policy.get("paper_action_policy") or "") == "HARD_UNSAFE_HOLD"
+        or health.get("live_money_eligible") is True
+    )
+
+
+def _paper_recovery_diagnostic(policy: Mapping[str, Any]) -> str:
+    action = str(policy.get("paper_action_policy") or "")
+    reason = str(policy.get("reason") or "")
+    if action in {"OBSERVE", "REFRESH_EVIDENCE"} and "MARKET_CLOSED_NO_FRESH_BARS" in reason:
+        return "WAIT_MARKET_CLOSED"
+    if action == "AUTONOMOUS_RETRY_ELIGIBLE":
+        return "BOUNDED_AUTONOMOUS_RETRY"
+    if action == "SCOPED_RECOVERY_ELIGIBLE":
+        return "SCOPED_RECOVERY_ELIGIBLE"
+    if action == "QUARANTINE_OBSERVE_ONLY":
+        return "QUARANTINE_OBSERVE_ONLY"
+    if action == "HARD_UNSAFE_HOLD":
+        return "HARD_UNSAFE_HOLD"
+    return action or "PAPER_RECOVERY_POLICY_MISSING"
 
 
 def _agent_restart_blockers(

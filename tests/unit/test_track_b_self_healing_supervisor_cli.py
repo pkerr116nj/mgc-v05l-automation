@@ -29,6 +29,7 @@ def test_status_writer_writes_and_renders_summary(tmp_path: Path) -> None:
 
     assert output.exists()
     assert "classification=SELF_HEALING_READY" in rendered
+    assert "paper_recovery_policy=" in rendered
     assert "broker_truth_refresher: health=HEALTHY" in rendered
     assert "auto_restart_allowed=false" in rendered
     assert health["generated_at"]
@@ -442,6 +443,67 @@ def test_duplicate_writer_prevents_launch_retry_even_after_retryable_failure() -
     assert "duplicate_conflicting_runtimes" in plan["global_blockers"]
 
 
+def test_paper_policy_makes_operator_hold_advisory_for_restart_plan() -> None:
+    health = _eligible_health("paper_runtime")
+    health["classification"] = "OPERATOR_REQUIRED"
+    health["operator_required_agents"] = ["paper_runtime"]
+    health["agents"]["paper_runtime"]["operator_required"] = True
+    health["paper_recovery_policy"] = _paper_recovery_policy(
+        paper_action_policy="AUTONOMOUS_RETRY_ELIGIBLE",
+        autonomous_recovery_allowed=True,
+    )
+
+    plan = plan_track_b_self_healing_restarts(health=health, now=NOW)
+
+    assert plan["classification"] == "RESTART_PLAN_READY"
+    assert plan["actions"][0]["agent_id"] == "paper_runtime"
+    assert plan["operator_ack_advisory_only_for_paper"] is True
+    assert plan["requires_operator_ack_for_paper"] is False
+    assert plan["paper_recovery_diagnostic"] == "BOUNDED_AUTONOMOUS_RETRY"
+
+
+def test_paper_policy_crash_loop_quarantine_is_not_operator_ack_dependency() -> None:
+    health = _eligible_health("paper_runtime")
+    health["paper_recovery_policy"] = _paper_recovery_policy(
+        paper_action_policy="QUARANTINE_OBSERVE_ONLY",
+        severity="ATTENTION",
+        bounded_recovery_budget={"budget_exhausted": True},
+    )
+    audit = [
+        {
+            "generated_at": NOW.isoformat(),
+            "results": [
+                {
+                    "agent_id": "paper_runtime",
+                    "classification": "RESTART_FAILED",
+                    "failure_class": "LAUNCHCTL_SUBMIT_FAILED",
+                }
+            ],
+        }
+        for _ in range(3)
+    ]
+
+    plan = plan_track_b_self_healing_restarts(health=health, audit_entries=audit, now=NOW)
+
+    assert plan["classification"] == "RESTART_PLAN_BLOCKED"
+    assert plan["retry_policy_classification"] == "RESTART_BUDGET_EXHAUSTED"
+    assert plan["paper_recovery_diagnostic"] == "QUARANTINE_OBSERVE_ONLY"
+    assert plan["requires_operator_ack_for_paper"] is False
+
+
+def test_paper_recovery_dashboard_projection_not_authority() -> None:
+    health = _eligible_health("paper_runtime")
+    health["paper_recovery_policy"] = _paper_recovery_policy(
+        paper_action_policy="AUTONOMOUS_RETRY_ELIGIBLE",
+        autonomous_recovery_allowed=True,
+    )
+
+    plan = plan_track_b_self_healing_restarts(health=health, now=NOW)
+
+    assert plan["paper_recovery_policy_classification"] == "AUTONOMOUS_RETRY_ELIGIBLE"
+    assert "operator_dashboard/runtime/latest_track_b_paper_recovery_policy.json" not in str(plan)
+
+
 def _eligible_health(agent_id: str) -> dict:
     health = {
         "classification": "AUTO_RESTART_ELIGIBLE",
@@ -486,3 +548,29 @@ def _eligible_health(agent_id: str) -> dict:
         },
     }
     return health
+
+
+def _paper_recovery_policy(
+    *,
+    paper_action_policy: str,
+    severity: str = "INFO",
+    autonomous_recovery_allowed: bool = False,
+    bounded_recovery_budget: dict | None = None,
+) -> dict:
+    return {
+        "severity": severity,
+        "paper_action_policy": paper_action_policy,
+        "live_action_policy": "REQUIRE_ACK",
+        "autonomous_recovery_allowed": autonomous_recovery_allowed,
+        "requires_operator_ack_for_paper": False,
+        "bounded_recovery_budget": bounded_recovery_budget
+        or {
+            "max_attempts_per_target": 1,
+            "max_attempts_per_window": 2,
+            "cooldown_seconds": 300,
+            "budget_exhausted": False,
+        },
+        "artifact_paths": {
+            "authority": "outputs/track_b_execution_core/paper_recovery_policy/latest_paper_recovery_policy.json",
+        },
+    }

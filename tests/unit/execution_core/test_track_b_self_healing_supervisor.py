@@ -117,7 +117,7 @@ def test_live_money_blocks_restart_even_with_sidecar_candidate() -> None:
 
     result = classify_track_b_self_healing_health(inputs)
 
-    assert result["classification"] == "AUTO_RESTART_BLOCKED"
+    assert result["classification"] == "UNSAFE_BROKER_STATE"
     assert result["auto_restart_allowed"] is False
     assert "live_money_eligible_true" in result["blockers"]
 
@@ -431,6 +431,111 @@ def test_reconciliation_block_restart_control_blocks_restart() -> None:
     assert result["restart_allowed"] is False
 
 
+def test_paper_recovery_market_closed_is_observe_without_operator_ack() -> None:
+    inputs = _inputs()
+    inputs["paper_recovery_policy"] = _paper_recovery_policy(
+        paper_action_policy="OBSERVE",
+        reason="MARKET_CLOSED_NO_FRESH_BARS",
+        autonomous_recovery_allowed=False,
+    )
+
+    result = classify_track_b_self_healing_health(inputs)
+
+    assert result["classification"] == "SELF_HEALING_READY"
+    assert result["paper_action_policy"] == "OBSERVE"
+    assert result["paper_recovery_diagnostic"] == "WAIT_MARKET_CLOSED"
+    assert result["requires_operator_ack_for_paper"] is False
+
+
+def test_clean_paper_runtime_candidate_reports_autonomous_restart_policy() -> None:
+    inputs = _inputs()
+    inputs["agents"]["paper_runtime"]["process_running"] = False
+    inputs["paper_recovery_policy"] = _paper_recovery_policy(
+        paper_action_policy="AUTONOMOUS_RETRY_ELIGIBLE",
+        autonomous_recovery_allowed=True,
+    )
+
+    result = classify_track_b_self_healing_health(inputs)
+
+    assert result["classification"] == "AUTO_RESTART_ELIGIBLE"
+    assert result["auto_restart_allowed"] is True
+    assert result["paper_recovery_diagnostic"] == "BOUNDED_AUTONOMOUS_RETRY"
+    assert result["autonomous_recovery_allowed"] is True
+    assert result["requires_operator_ack_for_paper"] is False
+
+
+def test_crash_loop_exhausted_is_quarantine_observe_not_paper_ack() -> None:
+    inputs = _inputs()
+    inputs["agents"]["paper_runtime"]["process_running"] = False
+    inputs["restart_policy"] = {
+        "restart_attempt_count": 3,
+        "restart_window_seconds": 900,
+        "max_restart_attempts": 3,
+    }
+    inputs["paper_recovery_policy"] = _paper_recovery_policy(
+        paper_action_policy="QUARANTINE_OBSERVE_ONLY",
+        severity="ATTENTION",
+        bounded_recovery_budget={"budget_exhausted": True},
+    )
+
+    result = classify_track_b_self_healing_health(inputs)
+
+    assert result["classification"] == "AUTO_RESTART_BLOCKED"
+    assert result["restart_control"]["classification"] == RESTART_BUDGET_EXHAUSTED
+    assert result["paper_recovery_diagnostic"] == "QUARANTINE_OBSERVE_ONLY"
+    assert result["requires_operator_ack_for_paper"] is False
+
+
+def test_prior_operator_hold_style_state_becomes_paper_advisory_when_policy_allows_retry() -> None:
+    inputs = _inputs()
+    inputs["agents"]["paper_runtime"]["process_running"] = False
+    inputs["agents"]["paper_runtime"]["classification"] = "RUNTIME_RESTART_BROKER_STATE_AMBIGUOUS"
+    inputs["agents"]["paper_runtime"]["operator_required"] = True
+    inputs["paper_recovery_policy"] = _paper_recovery_policy(
+        paper_action_policy="AUTONOMOUS_RETRY_ELIGIBLE",
+        autonomous_recovery_allowed=True,
+    )
+
+    result = classify_track_b_self_healing_health(inputs)
+
+    assert result["classification"] == "AUTO_RESTART_ELIGIBLE"
+    assert result["operator_required_agents"] == ("paper_runtime",)
+    assert result["operator_ack_advisory_only_for_paper"] is True
+    assert result["requires_operator_ack_for_paper"] is False
+
+
+def test_live_money_remains_hard_unsafe_even_when_paper_policy_allows_retry() -> None:
+    inputs = _inputs()
+    inputs["agents"]["paper_runtime"]["process_running"] = False
+    inputs["broker_safety"]["live_money_eligible"] = True
+    inputs["paper_recovery_policy"] = _paper_recovery_policy(
+        paper_action_policy="AUTONOMOUS_RETRY_ELIGIBLE",
+        autonomous_recovery_allowed=True,
+    )
+
+    result = classify_track_b_self_healing_health(inputs)
+
+    assert result["classification"] == "UNSAFE_BROKER_STATE"
+    assert result["auto_restart_allowed"] is False
+    assert "live_money_eligible_true" in result["blockers"]
+
+
+def test_duplicate_writer_remains_hard_unsafe() -> None:
+    inputs = _inputs()
+    inputs["agents"]["paper_runtime"]["process_running"] = False
+    inputs["broker_safety"]["duplicate_conflicting_runtime_count"] = 1
+    inputs["paper_recovery_policy"] = _paper_recovery_policy(
+        paper_action_policy="AUTONOMOUS_RETRY_ELIGIBLE",
+        autonomous_recovery_allowed=True,
+    )
+
+    result = classify_track_b_self_healing_health(inputs)
+
+    assert result["classification"] == "UNSAFE_BROKER_STATE"
+    assert result["auto_restart_allowed"] is False
+    assert "duplicate_conflicting_runtimes" in result["blockers"]
+
+
 def _inputs() -> dict:
     return {
         "generated_at": NOW.isoformat(),
@@ -454,6 +559,34 @@ def _inputs() -> dict:
             "broker_truth_lease_state": "ACTIVE",
             "live_money_eligible": False,
             "duplicate_conflicting_runtime_count": 0,
+        },
+    }
+
+
+def _paper_recovery_policy(
+    *,
+    paper_action_policy: str,
+    severity: str = "INFO",
+    autonomous_recovery_allowed: bool = False,
+    reason: str = "",
+    bounded_recovery_budget: dict | None = None,
+) -> dict:
+    return {
+        "severity": severity,
+        "paper_action_policy": paper_action_policy,
+        "live_action_policy": "REQUIRE_ACK",
+        "autonomous_recovery_allowed": autonomous_recovery_allowed,
+        "requires_operator_ack_for_paper": False,
+        "reason": reason,
+        "bounded_recovery_budget": bounded_recovery_budget
+        or {
+            "max_attempts_per_target": 1,
+            "max_attempts_per_window": 2,
+            "cooldown_seconds": 300,
+            "budget_exhausted": False,
+        },
+        "artifact_paths": {
+            "authority": "outputs/track_b_execution_core/paper_recovery_policy/latest_paper_recovery_policy.json",
         },
     }
 

@@ -25,6 +25,15 @@ from mgc_v05l.execution_core.track_b_readiness_state import (
     DEFAULT_CANONICAL_READINESS_ARTIFACT,
     DEFAULT_TRACK_B_EXPECTED_ACTIVE_ROOT,
 )
+from mgc_v05l.execution_core.track_b_paper_recovery_policy import (
+    AUTONOMOUS_RETRY_ELIGIBLE as PAPER_POLICY_AUTONOMOUS_RETRY_ELIGIBLE,
+    HARD_UNSAFE_HOLD as PAPER_POLICY_HARD_UNSAFE_HOLD,
+    OBSERVE as PAPER_POLICY_OBSERVE,
+    QUARANTINE_OBSERVE_ONLY as PAPER_POLICY_QUARANTINE_OBSERVE_ONLY,
+    REFRESH_EVIDENCE as PAPER_POLICY_REFRESH_EVIDENCE,
+    SCOPED_RECOVERY_ELIGIBLE as PAPER_POLICY_SCOPED_RECOVERY_ELIGIBLE,
+    DEFAULT_PAPER_RECOVERY_POLICY_ARTIFACT,
+)
 from mgc_v05l.execution_core.track_b_shared_truth_refresh_cli import (
     TrackBSharedTruthRefreshConfig,
     build_runtime_start_preflight_summary,
@@ -152,6 +161,7 @@ def build_track_b_self_healing_health(
             "agents": agent_inputs,
             "broker_safety": safety,
             "shared_truth_restart_evidence": shared_truth,
+            "paper_recovery_policy": _read_json(repo_root / DEFAULT_PAPER_RECOVERY_POLICY_ARTIFACT),
         }
     )
 
@@ -166,6 +176,7 @@ def classify_track_b_self_healing_health(inputs: Mapping[str, Any]) -> dict[str,
     broker_safety = _mapping(inputs.get("broker_safety"))
     restart_policy = _mapping(inputs.get("restart_policy"))
     shared_truth_restart_evidence = _mapping(inputs.get("shared_truth_restart_evidence"))
+    paper_recovery_policy = _paper_recovery_policy_evidence(inputs.get("paper_recovery_policy"))
     if shared_truth_restart_evidence and not _mapping(shared_truth_restart_evidence.get("restart_eligibility")):
         shared_truth_restart_evidence = {
             **shared_truth_restart_evidence,
@@ -213,11 +224,19 @@ def classify_track_b_self_healing_health(inputs: Mapping[str, Any]) -> dict[str,
     if live_money_eligible:
         blockers.append("live_money_eligible_true")
 
+    paper_policy_hard_unsafe = (
+        paper_recovery_policy["paper_action_policy"] == PAPER_POLICY_HARD_UNSAFE_HOLD
+        or live_money_eligible
+    )
+    if paper_policy_hard_unsafe and paper_recovery_policy["paper_action_policy"]:
+        blockers.append("paper_recovery_policy_hard_unsafe")
+
     wrong_root = any("wrong_root" in result["blockers"] for result in agent_results.values())
     restart_blocked = bool(
         unsafe_broker_blockers
         or shared_truth_blockers
         or live_money_eligible
+        or paper_policy_hard_unsafe
         or wrong_root
         or duplicate_submitters
         or stale_launchctl_jobs
@@ -225,10 +244,17 @@ def classify_track_b_self_healing_health(inputs: Mapping[str, Any]) -> dict[str,
     required_unhealthy = any(
         result["required"] and result["health_state"] != "HEALTHY" for result in agent_results.values()
     )
+    paper_operator_hold_advisory = bool(
+        operator_required_agents and _paper_policy_allows_operator_hold_advisory(paper_recovery_policy)
+    )
 
     if unsafe_broker_blockers:
         classification = "UNSAFE_BROKER_STATE"
-    elif operator_required_agents:
+    elif duplicate_submitters:
+        classification = "UNSAFE_BROKER_STATE"
+    elif paper_policy_hard_unsafe:
+        classification = "UNSAFE_BROKER_STATE"
+    elif operator_required_agents and not paper_operator_hold_advisory:
         classification = "OPERATOR_REQUIRED"
     elif restart_candidates and not restart_blocked:
         classification = "AUTO_RESTART_ELIGIBLE"
@@ -277,9 +303,19 @@ def classify_track_b_self_healing_health(inputs: Mapping[str, Any]) -> dict[str,
         "restart_control": restart_control,
         "restart_candidates": tuple(restart_candidates),
         "operator_required_agents": tuple(operator_required_agents),
+        "operator_ack_advisory_only_for_paper": paper_operator_hold_advisory,
         "blockers": tuple(_dedupe(blockers)),
         "warnings": tuple(_dedupe(warnings)),
         "live_money_eligible": live_money_eligible,
+        "paper_recovery_policy": paper_recovery_policy,
+        "paper_recovery_policy_classification": paper_recovery_policy["paper_action_policy"],
+        "paper_recovery_policy_severity": paper_recovery_policy["severity"],
+        "paper_action_policy": paper_recovery_policy["paper_action_policy"],
+        "paper_recovery_diagnostic": _paper_recovery_diagnostic(paper_recovery_policy),
+        "autonomous_recovery_allowed": paper_recovery_policy["autonomous_recovery_allowed"],
+        "bounded_recovery_budget": paper_recovery_policy["bounded_recovery_budget"],
+        "requires_operator_ack_for_paper": paper_recovery_policy["requires_operator_ack_for_paper"],
+        "live_action_policy": paper_recovery_policy["live_action_policy"],
         "expected_root": expected_root,
         "health_contract_artifact_path": str(DEFAULT_SELF_HEALING_HEALTH_ARTIFACT),
         "registry": tuple(contract.as_dict() for contract in registry_by_id.values()),
@@ -841,6 +877,53 @@ def _shared_truth_restart_blockers(evidence: Mapping[str, Any]) -> list[str]:
     if classification == RESTART_ALLOWED_CLEAN:
         return []
     return [f"shared_truth_{classification.lower()}"] or ["shared_truth_restart_blocked"]
+
+
+def _paper_recovery_policy_evidence(value: object) -> dict[str, Any]:
+    policy = _mapping(value)
+    action = str(policy.get("paper_action_policy") or "").strip()
+    severity = str(policy.get("severity") or "").strip()
+    budget = _mapping(policy.get("bounded_recovery_budget"))
+    return {
+        "source": "execution_core_paper_recovery_policy",
+        "projection_consumed": False,
+        "severity": severity,
+        "paper_action_policy": action,
+        "live_action_policy": str(policy.get("live_action_policy") or "").strip(),
+        "autonomous_recovery_allowed": policy.get("autonomous_recovery_allowed") is True,
+        "bounded_recovery_budget": dict(budget),
+        "budget_exhausted": budget.get("budget_exhausted") is True,
+        "requires_operator_ack_for_paper": policy.get("requires_operator_ack_for_paper") is True,
+        "reason": str(policy.get("reason") or "").strip(),
+        "blockers": tuple(str(item) for item in policy.get("blockers") or ()),
+        "warnings": tuple(str(item) for item in policy.get("warnings") or ()),
+        "authority_path": str(_mapping(policy.get("artifact_paths")).get("authority") or DEFAULT_PAPER_RECOVERY_POLICY_ARTIFACT),
+    }
+
+
+def _paper_policy_allows_operator_hold_advisory(policy: Mapping[str, Any]) -> bool:
+    action = str(policy.get("paper_action_policy") or "")
+    return bool(
+        policy.get("autonomous_recovery_allowed") is True
+        and policy.get("requires_operator_ack_for_paper") is not True
+        and action in {PAPER_POLICY_AUTONOMOUS_RETRY_ELIGIBLE, PAPER_POLICY_SCOPED_RECOVERY_ELIGIBLE}
+    )
+
+
+def _paper_recovery_diagnostic(policy: Mapping[str, Any]) -> str:
+    action = str(policy.get("paper_action_policy") or "")
+    reason = str(policy.get("reason") or "")
+    if action in {PAPER_POLICY_OBSERVE, PAPER_POLICY_REFRESH_EVIDENCE} and "MARKET_CLOSED_NO_FRESH_BARS" in reason:
+        return "WAIT_MARKET_CLOSED"
+    if action == PAPER_POLICY_AUTONOMOUS_RETRY_ELIGIBLE:
+        return "BOUNDED_AUTONOMOUS_RETRY"
+    if action == PAPER_POLICY_SCOPED_RECOVERY_ELIGIBLE:
+        return "SCOPED_RECOVERY_ELIGIBLE"
+    if action == PAPER_POLICY_QUARANTINE_OBSERVE_ONLY:
+        return "QUARANTINE_OBSERVE_ONLY"
+    if action == PAPER_POLICY_HARD_UNSAFE_HOLD:
+        return "HARD_UNSAFE_HOLD"
+    return action or "PAPER_RECOVERY_POLICY_MISSING"
 
 
 def _first_shared_truth_service_blocker(classifications: Mapping[str, Any]) -> str | None:
