@@ -22,16 +22,18 @@ from mgc_v05l.execution_core.track_b_runtime_resume_semantics import (
 )
 from mgc_v05l.execution_core.track_b_runtime_supervisor_authority import (
     CLEANUP_REQUIRED,
-    CRASH_LOOP_HOLD,
+    HARD_UNSAFE_HOLD,
     MANUAL_REVIEW_REQUIRED,
     MARKET_CLOSED_WAIT,
+    PAPER_QUARANTINE_OBSERVE_ONLY,
     READY_FOR_OPERATOR_START,
     RUNTIME_ACTIVE_MONITOR,
     STALE_EVIDENCE_HOLD,
     SUPERVISOR_CLEANUP_REQUIRED_BEFORE_RUNTIME,
+    SUPERVISOR_HARD_UNSAFE_HOLD,
     SUPERVISOR_MANUAL_REVIEW_REQUIRED,
+    SUPERVISOR_PAPER_QUARANTINE_OBSERVE_ONLY,
     SUPERVISOR_RESTART_BLOCKED_CRASH_LOOP,
-    SUPERVISOR_RESTART_BLOCKED_OPERATOR_ACK,
     SUPERVISOR_RUNTIME_ALREADY_HEALTHY,
     SUPERVISOR_RUNTIME_START_ALLOWED,
     SUPERVISOR_SHARED_TRUTH_STALE,
@@ -123,20 +125,26 @@ def test_suspicious_order_requires_manual_review(tmp_path: Path) -> None:
     assert payload["safe_to_start_runtime"] is False
 
 
-def test_crash_loop_blocks_restart(tmp_path: Path) -> None:
-    _seed_base(tmp_path, crash_loop_classification=RESTART_COOLDOWN_ACTIVE, crash_loop_restart_blocked=True)
+def test_crash_loop_budget_exhausted_uses_paper_quarantine_not_operator_ack(tmp_path: Path) -> None:
+    _seed_base(
+        tmp_path,
+        crash_loop_classification=RESTART_COOLDOWN_ACTIVE,
+        crash_loop_restart_blocked=True,
+        paper_action_policy="QUARANTINE_OBSERVE_ONLY",
+        paper_autonomous_recovery_allowed=False,
+    )
 
     payload = build_track_b_runtime_supervisor_authority(config=TrackBRuntimeSupervisorAuthorityConfig(repo_root=tmp_path), now=NOW)
 
-    assert payload["classification"] == SUPERVISOR_RESTART_BLOCKED_CRASH_LOOP
-    assert payload["supervisor_mode"] == CRASH_LOOP_HOLD
-    assert payload["recommended_action"] == "HOLD_DOWN_CRASH_LOOP"
+    assert payload["classification"] == SUPERVISOR_PAPER_QUARANTINE_OBSERVE_ONLY
+    assert payload["supervisor_mode"] == PAPER_QUARANTINE_OBSERVE_ONLY
+    assert payload["recommended_action"] == "PAPER_QUARANTINE_OBSERVE_ONLY"
     assert payload["action_allowed"] is False
-    assert payload["operator_ack"]["required"] is True
-    assert payload["operator_ack"]["ack_type"] == "crash_loop_hold"
+    assert payload["operator_ack"]["required"] is False
+    assert payload["evidence_summary"]["paper_action_policy"] == "QUARANTINE_OBSERVE_ONLY"
 
 
-def test_operator_ack_required_blocks_restart(tmp_path: Path) -> None:
+def test_prior_unsafe_stop_with_paper_bounded_retry_allows_start_without_ack(tmp_path: Path) -> None:
     _seed_base(
         tmp_path,
         resume_classification=RESUME_BLOCKED_OPERATOR_ACK_REQUIRED,
@@ -146,12 +154,32 @@ def test_operator_ack_required_blocks_restart(tmp_path: Path) -> None:
 
     payload = build_track_b_runtime_supervisor_authority(config=TrackBRuntimeSupervisorAuthorityConfig(repo_root=tmp_path), now=NOW)
 
-    assert payload["classification"] == SUPERVISOR_RESTART_BLOCKED_OPERATOR_ACK
-    assert payload["supervisor_mode"] == MANUAL_REVIEW_REQUIRED
-    assert payload["operator_ack_required"] is True
-    assert payload["operator_ack"]["required"] is True
-    assert payload["operator_ack"]["ack_type"] == "unsafe_stop_or_operator_ack"
-    assert payload["recommended_action"] == "HOLD_DOWN_OPERATOR_ACK_REQUIRED"
+    assert payload["classification"] == SUPERVISOR_RUNTIME_START_ALLOWED
+    assert payload["supervisor_mode"] == READY_FOR_OPERATOR_START
+    assert payload["operator_ack_required"] is False
+    assert payload["operator_ack"]["required"] is False
+    assert payload["safe_to_start_runtime"] is True
+    assert payload["evidence_summary"]["paper_action_policy"] == "AUTONOMOUS_RETRY_ELIGIBLE"
+
+
+def test_live_money_policy_hard_unsafe_blocks_supervisor(tmp_path: Path) -> None:
+    _seed_base(tmp_path, live_money_eligible=True, paper_action_policy="HARD_UNSAFE_HOLD")
+
+    payload = build_track_b_runtime_supervisor_authority(config=TrackBRuntimeSupervisorAuthorityConfig(repo_root=tmp_path), now=NOW)
+
+    assert payload["classification"] == SUPERVISOR_HARD_UNSAFE_HOLD
+    assert payload["supervisor_mode"] == HARD_UNSAFE_HOLD
+    assert payload["safe_to_start_runtime"] is False
+
+
+def test_duplicate_writer_hard_unsafe_blocks_supervisor(tmp_path: Path) -> None:
+    _seed_base(tmp_path, runtime_classification="DUPLICATE_RUNTIME_WRITERS", duplicate_writer_count=1)
+
+    payload = build_track_b_runtime_supervisor_authority(config=TrackBRuntimeSupervisorAuthorityConfig(repo_root=tmp_path), now=NOW)
+
+    assert payload["classification"] == SUPERVISOR_HARD_UNSAFE_HOLD
+    assert payload["supervisor_mode"] == HARD_UNSAFE_HOLD
+    assert payload["blockers"][0]["code"] == "runtime_environment_truth"
 
 
 def test_stale_evidence_blocks_supervisor_action(tmp_path: Path) -> None:
@@ -201,11 +229,21 @@ def _seed_base(
     crash_loop_classification: str = NO_CRASH_LOOP,
     crash_loop_restart_blocked: bool = False,
     self_recover_recommendation: str = "RESTART_RUNTIME_ALLOWED",
+    paper_action_policy: str = "AUTONOMOUS_RETRY_ELIGIBLE",
+    paper_autonomous_recovery_allowed: bool = True,
+    duplicate_writer_count: int = 0,
+    live_money_eligible: bool = False,
     include_agent_health: bool = True,
 ) -> None:
     _write_json(
         root / "outputs" / "track_b_execution_core" / "runtime_truth" / "latest_runtime_environment_truth.json",
-        {"generated_at": NOW.isoformat(), "classification": runtime_classification},
+        {
+            "generated_at": NOW.isoformat(),
+            "classification": runtime_classification,
+            "writer_authority": "DUPLICATE_WRITER" if duplicate_writer_count else "NO_ACTIVE_WRITER",
+            "duplicate_writer_count": duplicate_writer_count,
+            "live_money_eligible": live_money_eligible,
+        },
     )
     _write_json(
         root / "outputs" / "track_b_execution_core" / "runtime_resume" / "latest_runtime_resume_semantics.json",
@@ -216,11 +254,17 @@ def _seed_base(
             "safe_to_start_runtime": resume_classification == RESUME_ALLOWED_CLEAN,
             "required_operator_ack": resume_required_operator_ack,
             "reason": resume_reason,
+            "live_money_eligible": live_money_eligible,
         },
     )
     _write_json(
         root / "outputs" / "track_b_execution_core" / "self_recover" / "latest_self_recover_rules.json",
-        {"generated_at": NOW.isoformat(), "classification": self_recover_recommendation, "recommendation": self_recover_recommendation},
+        {
+            "generated_at": NOW.isoformat(),
+            "classification": self_recover_recommendation,
+            "recommendation": self_recover_recommendation,
+            "live_money_eligible": live_money_eligible,
+        },
     )
     _write_json(
         root / "outputs" / "track_b_execution_core" / "crash_loop_protection" / "latest_crash_loop_protection.json",
@@ -229,6 +273,7 @@ def _seed_base(
             "classification": crash_loop_classification,
             "restart_blocked": crash_loop_restart_blocked,
             "operator_ack_required": False,
+            "live_money_eligible": live_money_eligible,
         },
     )
     if include_agent_health:
@@ -237,6 +282,7 @@ def _seed_base(
             {
                 "generated_at": NOW.isoformat(),
                 "classification": "AGENT_HEALTH_READY",
+                "live_money_eligible": live_money_eligible,
                 "agents": [
                     {
                         "agent_id": "track_b_paper_runtime",
@@ -263,7 +309,12 @@ def _seed_base(
     )
     _write_json(
         root / "outputs" / "track_b_execution_core" / "proof_readiness" / "latest_track_b_paper_proof_readiness.json",
-        {"generated_at": NOW.isoformat(), "classification": proof_classification, "phase1_session_reason": proof_classification},
+        {
+            "generated_at": NOW.isoformat(),
+            "classification": proof_classification,
+            "phase1_session_reason": proof_classification,
+            "live_money_eligible": live_money_eligible,
+        },
     )
     _write_json(
         root / "outputs" / "track_b_execution_core" / "shared_truth" / "latest_track_b_shared_truth_refresh.json",
@@ -290,15 +341,16 @@ def _seed_base(
             "generated_at": NOW.isoformat(),
             "classification": position_classification,
             "summary": {"overall_classification": position_classification},
+            "live_money_eligible": live_money_eligible,
         },
     )
     _write_json(
         root / "outputs" / "track_b_execution_core" / "open_order_truth" / "latest_open_order_truth.json",
-        {"generated_at": NOW.isoformat(), "classification": open_order_classification},
+        {"generated_at": NOW.isoformat(), "classification": open_order_classification, "live_money_eligible": live_money_eligible},
     )
     _write_json(
         root / "outputs" / "track_b_execution_core" / "managed_orders" / "latest_managed_orders.json",
-        {"generated_at": NOW.isoformat(), "classification": managed_order_classification},
+        {"generated_at": NOW.isoformat(), "classification": managed_order_classification, "live_money_eligible": live_money_eligible},
     )
     _write_json(
         root / "outputs" / "track_b_execution_core" / "managed_orders" / "latest_order_adjustment_plan.json",
@@ -306,7 +358,7 @@ def _seed_base(
     )
     _write_json(
         root / "outputs" / "track_b_execution_core" / "managed_positions" / "latest_managed_positions.json",
-        {"generated_at": NOW.isoformat(), "classification": managed_position_classification},
+        {"generated_at": NOW.isoformat(), "classification": managed_position_classification, "live_money_eligible": live_money_eligible},
     )
     _write_json(
         root
@@ -314,11 +366,11 @@ def _seed_base(
         / "reports"
         / "track_b_paper_broker_reconciliation"
         / "latest_track_b_paper_broker_reconciliation.json",
-        {"generated_at": NOW.isoformat(), "classification": reconciliation_classification},
+        {"generated_at": NOW.isoformat(), "classification": reconciliation_classification, "live_money_eligible": live_money_eligible},
     )
     _write_json(
         root / "outputs" / "operator_dashboard" / "runtime" / "latest_broker_truth_lease.json",
-        {"generated_at": NOW.isoformat(), "classification": broker_lease_classification},
+        {"generated_at": NOW.isoformat(), "classification": broker_lease_classification, "live_money_eligible": live_money_eligible},
     )
     _write_json(
         root / "outputs" / "reports" / "phase1_runtime_data_readiness" / "latest_phase1_runtime_data_readiness.json",
@@ -336,7 +388,30 @@ def _seed_base(
         / "paper_session"
         / "runtime"
         / "latest_runtime_stop_provenance.json",
-        {"generated_at": NOW.isoformat(), "stop_source": "launcher", "stop_reason": "expected_clean_down"},
+        {
+            "generated_at": NOW.isoformat(),
+            "stop_source": "launcher",
+            "stop_reason": "expected_clean_down",
+            "live_money_eligible": live_money_eligible,
+        },
+    )
+    _write_json(
+        root / "outputs" / "track_b_execution_core" / "paper_recovery_policy" / "latest_paper_recovery_policy.json",
+        {
+            "generated_at": NOW.isoformat(),
+            "severity": "UNSAFE" if paper_action_policy == "HARD_UNSAFE_HOLD" else "INFO",
+            "paper_action_policy": paper_action_policy,
+            "live_action_policy": "REQUIRE_ACK",
+            "autonomous_recovery_allowed": paper_autonomous_recovery_allowed,
+            "requires_operator_ack_for_paper": False,
+            "bounded_recovery_budget": {
+                "max_attempts_per_target": 1,
+                "max_attempts_per_window": 2,
+                "cooldown_seconds": 300,
+                "budget_exhausted": paper_action_policy == "QUARANTINE_OBSERVE_ONLY",
+            },
+            "live_money_eligible": live_money_eligible,
+        },
     )
 
 

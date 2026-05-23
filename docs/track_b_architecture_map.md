@@ -736,6 +736,11 @@ Current consumer migration status:
   observation, or scoped recovery eligibility when exact identity is proven.
   Manual gates may exist only as isolated temporary policy adapters, not the
   normal PAPER recovery path.
+- Runtime Resume Semantics and Runtime Supervisor Authority consume PAPER
+  Recovery Policy as advisory evidence. Legacy operator-ack-shaped PAPER states
+  can now become bounded retry or quarantine-observe posture when shared truth
+  is clean enough, while live-money, duplicate-writer, broker/order identity,
+  stale-evidence, and unsafe shared-truth blockers remain hard.
 - Runtime Supervisor Authority v1 recommends the next PAPER runtime action from
   shared authority evidence, but never executes start, stop, restart, broker, or
   lifecycle mutations.

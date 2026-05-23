@@ -65,6 +65,8 @@ SUPERVISOR_CLEANUP_REQUIRED_BEFORE_RUNTIME = "SUPERVISOR_CLEANUP_REQUIRED_BEFORE
 SUPERVISOR_MANUAL_REVIEW_REQUIRED = "SUPERVISOR_MANUAL_REVIEW_REQUIRED"
 SUPERVISOR_SHARED_TRUTH_STALE = "SUPERVISOR_SHARED_TRUTH_STALE"
 SUPERVISOR_UNKNOWN_REVIEW_REQUIRED = "SUPERVISOR_UNKNOWN_REVIEW_REQUIRED"
+SUPERVISOR_PAPER_QUARANTINE_OBSERVE_ONLY = "SUPERVISOR_PAPER_QUARANTINE_OBSERVE_ONLY"
+SUPERVISOR_HARD_UNSAFE_HOLD = "SUPERVISOR_HARD_UNSAFE_HOLD"
 
 MARKET_CLOSED_WAIT = "MARKET_CLOSED_WAIT"
 READY_FOR_OPERATOR_START = "READY_FOR_OPERATOR_START"
@@ -73,6 +75,13 @@ CLEANUP_REQUIRED = "CLEANUP_REQUIRED"
 MANUAL_REVIEW_REQUIRED = "MANUAL_REVIEW_REQUIRED"
 CRASH_LOOP_HOLD = "CRASH_LOOP_HOLD"
 STALE_EVIDENCE_HOLD = "STALE_EVIDENCE_HOLD"
+PAPER_QUARANTINE_OBSERVE_ONLY = "PAPER_QUARANTINE_OBSERVE_ONLY"
+HARD_UNSAFE_HOLD = "HARD_UNSAFE_HOLD"
+
+PAPER_POLICY_AUTONOMOUS_RETRY_ELIGIBLE = "AUTONOMOUS_RETRY_ELIGIBLE"
+PAPER_POLICY_QUARANTINE_OBSERVE_ONLY = "QUARANTINE_OBSERVE_ONLY"
+PAPER_POLICY_HARD_UNSAFE_HOLD = "HARD_UNSAFE_HOLD"
+PAPER_POLICY_OBSERVE = "OBSERVE"
 
 PROOF_WINDOW_MARKET_CLOSED = "market_closed"
 PROOF_WINDOW_DATA_STALE = "data_stale"
@@ -96,6 +105,9 @@ DEFAULT_RUNTIME_STOP_PROVENANCE_ARTIFACT = (
     Path("outputs") / "probationary_pattern_engine" / "paper_session" / "runtime" / "latest_runtime_stop_provenance.json"
 )
 DEFAULT_PHASE1_READINESS_ARTIFACT = Path("outputs") / "reports" / "phase1_runtime_data_readiness" / "latest_phase1_runtime_data_readiness.json"
+DEFAULT_PAPER_RECOVERY_POLICY_ARTIFACT = (
+    Path("outputs") / "track_b_execution_core" / "paper_recovery_policy" / "latest_paper_recovery_policy.json"
+)
 
 
 @dataclass(frozen=True)
@@ -121,6 +133,7 @@ class TrackBRuntimeSupervisorAuthorityConfig:
     broker_lease_path: Path = DEFAULT_LEASE_ARTIFACT
     phase1_readiness_path: Path = DEFAULT_PHASE1_READINESS_ARTIFACT
     stop_provenance_path: Path = DEFAULT_RUNTIME_STOP_PROVENANCE_ARTIFACT
+    paper_recovery_policy_path: Path = DEFAULT_PAPER_RECOVERY_POLICY_ARTIFACT
 
     def resolve(self, path: Path) -> Path:
         return path if path.is_absolute() else self.repo_root / path
@@ -151,6 +164,7 @@ def build_track_b_runtime_supervisor_authority(
         "broker_lease": _read_json(config.resolve(config.broker_lease_path)),
         "phase1_readiness": _read_json(config.resolve(config.phase1_readiness_path)),
         "stop_provenance": _read_json(config.resolve(config.stop_provenance_path)),
+        "paper_recovery_policy": _read_json(config.resolve(config.paper_recovery_policy_path)),
     }
     decision = _classify_supervisor(inputs=inputs)
     v2 = _v2_advisory(decision=decision, inputs=inputs)
@@ -193,7 +207,7 @@ def build_track_b_runtime_supervisor_authority(
         },
         "todo_v2": [
             "Wire self-healing executor to consult this advisory artifact before any runtime action.",
-            "Add operator acknowledgement artifact checks once Runtime Resume Semantics v2 defines them.",
+            "Consume PAPER Recovery Policy as the normal PAPER interpretation layer for bounded recovery posture.",
             "Converge manual remediation scripts on supervisor authority plus shared truth blockers.",
         ],
     }
@@ -281,6 +295,22 @@ def main(argv: Sequence[str] | None = None) -> int:
 def _classify_supervisor(*, inputs: Mapping[str, Mapping[str, Any]]) -> dict[str, Any]:
     evidence = _evidence(inputs)
 
+    if evidence["live_money_eligible"] is True or evidence["paper_action_policy"] == PAPER_POLICY_HARD_UNSAFE_HOLD:
+        return _decision(
+            SUPERVISOR_HARD_UNSAFE_HOLD,
+            "HARD_UNSAFE_HOLD",
+            f"PAPER Recovery Policy is {evidence['paper_action_policy']} ({evidence['paper_policy_severity']}).",
+            blockers=[_blocker("paper_recovery_policy", evidence["paper_action_policy"])],
+        )
+
+    if _duplicate_writer(evidence):
+        return _decision(
+            SUPERVISOR_HARD_UNSAFE_HOLD,
+            "HARD_UNSAFE_HOLD",
+            "Duplicate runtime writer evidence is present.",
+            blockers=[_blocker("runtime_environment_truth", evidence["runtime_environment_truth_classification"])],
+        )
+
     if evidence["runtime_environment_truth_classification"] == RUNTIME_ACTIVE_TRADE_CAPABLE:
         return _decision(
             SUPERVISOR_RUNTIME_ALREADY_HEALTHY,
@@ -353,6 +383,27 @@ def _classify_supervisor(*, inputs: Mapping[str, Mapping[str, Any]]) -> dict[str
         )
 
     if evidence["runtime_resume_required_operator_ack"] is True or evidence["crash_loop_operator_ack_required"] is True:
+        if _paper_policy_bounded_retry(evidence) and _clean_start_facts(evidence):
+            return _decision(
+                SUPERVISOR_RUNTIME_START_ALLOWED,
+                "START_RUNTIME_ALLOWED",
+                "PAPER Recovery Policy permits bounded retry/enhanced observation despite legacy operator-ack evidence.",
+                action_allowed=True,
+                safe_to_start_runtime=True,
+                warnings=[
+                    _blocker(
+                        "paper_recovery_policy",
+                        f"{evidence['paper_action_policy']} severity={evidence['paper_policy_severity']}",
+                    )
+                ],
+            )
+        if _paper_policy_quarantine(evidence):
+            return _decision(
+                SUPERVISOR_PAPER_QUARANTINE_OBSERVE_ONLY,
+                "PAPER_QUARANTINE_OBSERVE_ONLY",
+                "PAPER Recovery Policy converts operator-ack/crash-loop evidence into quarantine-observe posture.",
+                blockers=[_blocker("paper_recovery_policy", evidence["paper_action_policy"])],
+            )
         return _decision(
             SUPERVISOR_RESTART_BLOCKED_OPERATOR_ACK,
             "HOLD_DOWN_OPERATOR_ACK_REQUIRED",
@@ -365,6 +416,14 @@ def _classify_supervisor(*, inputs: Mapping[str, Mapping[str, Any]]) -> dict[str
         )
 
     if evidence["crash_loop_restart_blocked"] is True or evidence["runtime_resume_classification"] == RESUME_BLOCKED_CRASH_LOOP:
+        if _paper_policy_quarantine(evidence):
+            return _decision(
+                SUPERVISOR_PAPER_QUARANTINE_OBSERVE_ONLY,
+                "PAPER_QUARANTINE_OBSERVE_ONLY",
+                "PAPER Recovery Policy marks crash-loop budget exhausted as quarantine-observe, not operator ack.",
+                blockers=[_blocker("paper_recovery_policy", evidence["paper_action_policy"])],
+                warnings=[_blocker("crash_loop_protection", evidence["crash_loop_classification"])],
+            )
         return _decision(
             SUPERVISOR_RESTART_BLOCKED_CRASH_LOOP,
             "HOLD_DOWN_CRASH_LOOP",
@@ -500,6 +559,10 @@ def _supervisor_mode(*, classification: str) -> str:
         return CRASH_LOOP_HOLD
     if classification == SUPERVISOR_SHARED_TRUTH_STALE:
         return STALE_EVIDENCE_HOLD
+    if classification == SUPERVISOR_PAPER_QUARANTINE_OBSERVE_ONLY:
+        return PAPER_QUARANTINE_OBSERVE_ONLY
+    if classification == SUPERVISOR_HARD_UNSAFE_HOLD:
+        return HARD_UNSAFE_HOLD
     return MANUAL_REVIEW_REQUIRED
 
 
@@ -513,11 +576,15 @@ def _recommended_next_command(*, supervisor_mode: str, classification: str, proo
     if supervisor_mode == CLEANUP_REQUIRED:
         return "perform exact scoped cleanup only after operator authorization"
     if supervisor_mode == CRASH_LOOP_HOLD:
-        return "acknowledge crash-loop hold before any restart planning"
+        return "preserve crash-loop evidence; wait for PAPER recovery budget reset or policy refresh"
     if supervisor_mode == STALE_EVIDENCE_HOLD:
         return "run shared truth refresh and proof readiness"
+    if supervisor_mode == PAPER_QUARANTINE_OBSERVE_ONLY:
+        return "quarantine runtime recovery; refresh evidence and preserve abnormal PAPER artifacts"
+    if supervisor_mode == HARD_UNSAFE_HOLD:
+        return "hold runtime recovery until hard unsafe invariant is resolved"
     if classification == SUPERVISOR_RESTART_BLOCKED_OPERATOR_ACK:
-        return "provide required operator acknowledgement before restart planning"
+        return "refresh PAPER recovery policy; operator ack is not a routine PAPER recovery dependency"
     if proof_window_status == PROOF_WINDOW_DATA_STALE:
         return "restore Phase-1 market-data freshness before proof"
     return "manual review required before any runtime action"
@@ -533,11 +600,11 @@ def _operator_ack_fields(
     reason = ""
     ack_type = None
     if classification == SUPERVISOR_RESTART_BLOCKED_CRASH_LOOP:
-        required = True
+        required = bool(evidence.get("paper_requires_operator_ack"))
         reason = f"Crash Loop Protection is {evidence['crash_loop_classification']}."
         ack_type = "crash_loop_hold"
     elif classification == SUPERVISOR_RESTART_BLOCKED_OPERATOR_ACK:
-        required = True
+        required = bool(evidence.get("paper_requires_operator_ack"))
         reason = "Runtime Resume Semantics or Crash Loop Protection requires operator acknowledgement."
         ack_type = "unsafe_stop_or_operator_ack"
     elif classification == SUPERVISOR_MANUAL_REVIEW_REQUIRED:
@@ -589,6 +656,8 @@ def _decision_precedence(
         SUPERVISOR_CLEANUP_REQUIRED_BEFORE_RUNTIME: "Position Truth / Managed Position Registry",
         SUPERVISOR_RESTART_BLOCKED_OPERATOR_ACK: "Runtime Resume Semantics / Crash Loop Protection",
         SUPERVISOR_RESTART_BLOCKED_CRASH_LOOP: "Crash Loop Protection",
+        SUPERVISOR_PAPER_QUARANTINE_OBSERVE_ONLY: "PAPER Recovery Policy",
+        SUPERVISOR_HARD_UNSAFE_HOLD: "PAPER Recovery Policy / Runtime Environment Truth",
         SUPERVISOR_WAIT_MARKET_CLOSED: "Proof Readiness / Phase-1 Readiness",
         SUPERVISOR_SHARED_TRUTH_STALE: "Shared Truth Evidence Freshness",
         SUPERVISOR_RUNTIME_START_ALLOWED: "Proof Readiness / Runtime Resume Semantics",
@@ -620,12 +689,23 @@ def _decision_precedence(
         },
         {
             "rank": 4,
+            "service": "PAPER Recovery Policy",
+            "classification": {
+                "severity": evidence["paper_policy_severity"],
+                "paper_action_policy": evidence["paper_action_policy"],
+                "autonomous_recovery_allowed": evidence["paper_autonomous_recovery_allowed"],
+                "requires_operator_ack_for_paper": evidence["paper_requires_operator_ack"],
+            },
+            "decisive": decisive_service == "PAPER Recovery Policy",
+        },
+        {
+            "rank": 5,
             "service": "Crash Loop Protection",
             "classification": evidence["crash_loop_classification"],
             "decisive": decisive_service == "Crash Loop Protection",
         },
         {
-            "rank": 5,
+            "rank": 6,
             "service": "Shared Truth",
             "classification": {
                 "position_truth": evidence["position_truth_classification"],
@@ -669,6 +749,30 @@ def _evidence(inputs: Mapping[str, Mapping[str, Any]]) -> dict[str, Any]:
         "phase1_readiness_classification": _classification(inputs["phase1_readiness"]),
         "phase1_session_reason": _phase1_session_reason(inputs["phase1_readiness"], inputs["proof_readiness"]),
         "stop_provenance": dict(_stop_provenance(inputs["stop_provenance"])),
+        "paper_recovery_policy": _paper_policy_evidence(inputs["paper_recovery_policy"]),
+        "paper_policy_severity": str(inputs["paper_recovery_policy"].get("severity") or ""),
+        "paper_action_policy": str(inputs["paper_recovery_policy"].get("paper_action_policy") or ""),
+        "paper_live_action_policy": str(inputs["paper_recovery_policy"].get("live_action_policy") or ""),
+        "paper_autonomous_recovery_allowed": inputs["paper_recovery_policy"].get("autonomous_recovery_allowed") is True,
+        "paper_requires_operator_ack": inputs["paper_recovery_policy"].get("requires_operator_ack_for_paper") is True,
+        "paper_bounded_recovery_budget": _mapping(inputs["paper_recovery_policy"].get("bounded_recovery_budget")),
+        "live_money_eligible": _any_true(
+            inputs["runtime_environment_truth"],
+            inputs["runtime_resume_semantics"],
+            inputs["self_recover_rules"],
+            inputs["crash_loop_protection"],
+            inputs["agent_health"],
+            inputs["proof_readiness"],
+            inputs["position_truth"],
+            inputs["open_order_truth"],
+            inputs["managed_order_registry"],
+            inputs["managed_position_registry"],
+            inputs["reconciliation"],
+            inputs["paper_recovery_policy"],
+            key="live_money_eligible",
+        ),
+        "runtime_writer_authority": str(inputs["runtime_environment_truth"].get("writer_authority") or ""),
+        "duplicate_writer_count": int(inputs["runtime_environment_truth"].get("duplicate_writer_count") or 0),
     }
 
 
@@ -679,6 +783,7 @@ def _missing_or_stale_evidence(evidence: Mapping[str, Any]) -> list[str]:
         "runtime_resume_semantics": evidence["runtime_resume_classification"],
         "self_recover_rules": evidence["self_recover_recommendation"],
         "crash_loop_protection": evidence["crash_loop_classification"],
+        "paper_recovery_policy": evidence["paper_action_policy"],
         "agent_health": evidence["agent_health_classification"],
         "agent_registry": evidence["agent_registry_classification"],
         "proof_readiness": evidence["proof_readiness_classification"],
@@ -737,6 +842,51 @@ def _input_artifacts(config: TrackBRuntimeSupervisorAuthorityConfig) -> dict[str
         "broker_lease": str(config.resolve(config.broker_lease_path)),
         "phase1_readiness": str(config.resolve(config.phase1_readiness_path)),
         "stop_provenance": str(config.resolve(config.stop_provenance_path)),
+        "paper_recovery_policy": str(config.resolve(config.paper_recovery_policy_path)),
+    }
+
+
+def _paper_policy_bounded_retry(evidence: Mapping[str, Any]) -> bool:
+    return (
+        evidence["paper_action_policy"] == PAPER_POLICY_AUTONOMOUS_RETRY_ELIGIBLE
+        and evidence["paper_autonomous_recovery_allowed"] is True
+        and evidence["paper_requires_operator_ack"] is False
+    )
+
+
+def _paper_policy_quarantine(evidence: Mapping[str, Any]) -> bool:
+    return evidence["paper_action_policy"] in {PAPER_POLICY_QUARANTINE_OBSERVE_ONLY, PAPER_POLICY_OBSERVE} and evidence[
+        "paper_requires_operator_ack"
+    ] is False
+
+
+def _clean_start_facts(evidence: Mapping[str, Any]) -> bool:
+    return (
+        evidence["proof_readiness_classification"] == READY_FOR_PROOF
+        and evidence["position_truth_classification"] == "CLEAN_FLAT_READY"
+        and evidence["open_order_truth_classification"] == NO_OPEN_ORDERS
+        and evidence["managed_order_registry_classification"] == NO_MANAGED_ORDERS
+        and evidence["managed_position_registry_classification"] == NO_MANAGED_POSITIONS
+        and evidence["reconciliation_classification"] in {"TRACK_B_PAPER_BROKER_RECONCILED", ""}
+    )
+
+
+def _duplicate_writer(evidence: Mapping[str, Any]) -> bool:
+    if evidence["runtime_environment_truth_classification"] == "DUPLICATE_RUNTIME_WRITERS":
+        return True
+    if evidence["runtime_writer_authority"] == "DUPLICATE_WRITER":
+        return True
+    return evidence["duplicate_writer_count"] > 0
+
+
+def _paper_policy_evidence(payload: Mapping[str, Any]) -> dict[str, Any]:
+    return {
+        "severity": payload.get("severity"),
+        "paper_action_policy": payload.get("paper_action_policy"),
+        "live_action_policy": payload.get("live_action_policy"),
+        "autonomous_recovery_allowed": payload.get("autonomous_recovery_allowed"),
+        "requires_operator_ack_for_paper": payload.get("requires_operator_ack_for_paper"),
+        "bounded_recovery_budget": _mapping(payload.get("bounded_recovery_budget")),
     }
 
 
@@ -800,6 +950,10 @@ def _mapping(value: Any) -> Mapping[str, Any]:
 
 def _list(value: Any) -> list[Any]:
     return value if isinstance(value, list) else []
+
+
+def _any_true(*payloads: Mapping[str, Any], key: str) -> bool:
+    return any(payload.get(key) is True for payload in payloads)
 
 
 if __name__ == "__main__":

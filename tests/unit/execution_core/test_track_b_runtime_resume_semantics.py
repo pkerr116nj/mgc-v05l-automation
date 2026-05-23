@@ -17,12 +17,14 @@ from mgc_v05l.execution_core.track_b_runtime_environment_truth import (
 )
 from mgc_v05l.execution_core.track_b_runtime_resume_semantics import (
     RESUME_ALLOWED_CLEAN,
+    RESUME_ALLOWED_PAPER_BOUNDED_RETRY,
     RESUME_BLOCKED_BROKER_EXPOSURE,
     RESUME_BLOCKED_CRASH_LOOP,
+    RESUME_BLOCKED_HARD_UNSAFE,
     RESUME_BLOCKED_MANAGED_POSITION,
     RESUME_BLOCKED_MARKET_CLOSED,
     RESUME_BLOCKED_OPEN_ORDER,
-    RESUME_BLOCKED_OPERATOR_ACK_REQUIRED,
+    RESUME_BLOCKED_PAPER_QUARANTINE_OBSERVE_ONLY,
     RESUME_BLOCKED_RUNTIME_ALREADY_ACTIVE,
     RESUME_BLOCKED_STALE_OR_MISSING_EVIDENCE,
     TrackBRuntimeResumeSemanticsConfig,
@@ -111,14 +113,53 @@ def test_crash_loop_blocks_resume(tmp_path: Path) -> None:
     assert payload["safe_to_start_runtime"] is False
 
 
-def test_prior_unsafe_stop_requires_operator_ack(tmp_path: Path) -> None:
+def test_prior_unsafe_stop_clean_truth_uses_paper_bounded_retry_not_operator_ack(tmp_path: Path) -> None:
     _seed_base(tmp_path, previous_broker_safe_at_stop=False)
 
     payload = build_track_b_runtime_resume_semantics(config=TrackBRuntimeResumeSemanticsConfig(repo_root=tmp_path), now=NOW)
 
-    assert payload["classification"] == RESUME_BLOCKED_OPERATOR_ACK_REQUIRED
-    assert payload["required_operator_ack"] is True
+    assert payload["classification"] == RESUME_ALLOWED_PAPER_BOUNDED_RETRY
+    assert payload["required_operator_ack"] is False
+    assert payload["allowed"] is True
+    assert payload["safe_to_start_runtime"] is True
     assert payload["previous_broker_safe_at_stop"] is False
+    assert payload["evidence"]["paper_action_policy"] == "AUTONOMOUS_RETRY_ELIGIBLE"
+
+
+def test_crash_loop_with_paper_quarantine_blocks_without_operator_ack(tmp_path: Path) -> None:
+    _seed_base(
+        tmp_path,
+        crash_loop_classification=RESTART_COOLDOWN_ACTIVE,
+        crash_loop_restart_blocked=True,
+        paper_action_policy="QUARANTINE_OBSERVE_ONLY",
+        paper_autonomous_recovery_allowed=False,
+    )
+
+    payload = build_track_b_runtime_resume_semantics(config=TrackBRuntimeResumeSemanticsConfig(repo_root=tmp_path), now=NOW)
+
+    assert payload["classification"] == RESUME_BLOCKED_PAPER_QUARANTINE_OBSERVE_ONLY
+    assert payload["required_operator_ack"] is False
+    assert payload["allowed"] is False
+    assert payload["resume_mode"] == "paper_quarantine_observe_only"
+
+
+def test_live_money_policy_hard_unsafe_blocks_resume(tmp_path: Path) -> None:
+    _seed_base(tmp_path, live_money_eligible=True, paper_action_policy="HARD_UNSAFE_HOLD")
+
+    payload = build_track_b_runtime_resume_semantics(config=TrackBRuntimeResumeSemanticsConfig(repo_root=tmp_path), now=NOW)
+
+    assert payload["classification"] == RESUME_BLOCKED_HARD_UNSAFE
+    assert payload["required_operator_ack"] is False
+    assert payload["safe_to_start_runtime"] is False
+
+
+def test_duplicate_writer_hard_unsafe_blocks_resume(tmp_path: Path) -> None:
+    _seed_base(tmp_path, runtime_classification="DUPLICATE_RUNTIME_WRITERS", duplicate_writer_count=1)
+
+    payload = build_track_b_runtime_resume_semantics(config=TrackBRuntimeResumeSemanticsConfig(repo_root=tmp_path), now=NOW)
+
+    assert payload["classification"] == RESUME_BLOCKED_HARD_UNSAFE
+    assert payload["blockers"][0]["code"] == "runtime_environment_truth"
 
 
 def test_missing_evidence_blocks_resume(tmp_path: Path) -> None:
@@ -163,6 +204,10 @@ def _seed_base(
     crash_loop_classification: str = NO_CRASH_LOOP,
     crash_loop_restart_blocked: bool = False,
     previous_broker_safe_at_stop: bool = True,
+    paper_action_policy: str = "AUTONOMOUS_RETRY_ELIGIBLE",
+    paper_autonomous_recovery_allowed: bool = True,
+    duplicate_writer_count: int = 0,
+    live_money_eligible: bool = False,
     include_agent_health: bool = True,
 ) -> None:
     _write_json(
@@ -186,7 +231,13 @@ def _seed_base(
     )
     _write_json(
         root / "outputs" / "track_b_execution_core" / "runtime_truth" / "latest_runtime_environment_truth.json",
-        {"generated_at": NOW.isoformat(), "classification": runtime_classification},
+        {
+            "generated_at": NOW.isoformat(),
+            "classification": runtime_classification,
+            "writer_authority": "DUPLICATE_WRITER" if duplicate_writer_count else "NO_ACTIVE_WRITER",
+            "duplicate_writer_count": duplicate_writer_count,
+            "live_money_eligible": live_money_eligible,
+        },
     )
     if include_agent_health:
         _write_json(
@@ -225,6 +276,7 @@ def _seed_base(
             "classification": crash_loop_classification,
             "restart_blocked": crash_loop_restart_blocked,
             "operator_ack_required": False,
+            "live_money_eligible": live_money_eligible,
         },
     )
     _write_json(
@@ -233,19 +285,20 @@ def _seed_base(
             "generated_at": NOW.isoformat(),
             "classification": position_classification,
             "summary": {"overall_classification": position_classification},
+            "live_money_eligible": live_money_eligible,
         },
     )
     _write_json(
         root / "outputs" / "track_b_execution_core" / "open_order_truth" / "latest_open_order_truth.json",
-        {"generated_at": NOW.isoformat(), "classification": open_order_classification},
+        {"generated_at": NOW.isoformat(), "classification": open_order_classification, "live_money_eligible": live_money_eligible},
     )
     _write_json(
         root / "outputs" / "track_b_execution_core" / "managed_orders" / "latest_managed_orders.json",
-        {"generated_at": NOW.isoformat(), "classification": managed_order_classification},
+        {"generated_at": NOW.isoformat(), "classification": managed_order_classification, "live_money_eligible": live_money_eligible},
     )
     _write_json(
         root / "outputs" / "track_b_execution_core" / "managed_positions" / "latest_managed_positions.json",
-        {"generated_at": NOW.isoformat(), "classification": managed_position_classification},
+        {"generated_at": NOW.isoformat(), "classification": managed_position_classification, "live_money_eligible": live_money_eligible},
     )
     _write_json(
         root
@@ -253,11 +306,11 @@ def _seed_base(
         / "reports"
         / "track_b_paper_broker_reconciliation"
         / "latest_track_b_paper_broker_reconciliation.json",
-        {"generated_at": NOW.isoformat(), "classification": reconciliation_classification},
+        {"generated_at": NOW.isoformat(), "classification": reconciliation_classification, "live_money_eligible": live_money_eligible},
     )
     _write_json(
         root / "outputs" / "operator_dashboard" / "runtime" / "latest_broker_truth_lease.json",
-        {"generated_at": NOW.isoformat(), "classification": broker_lease_classification},
+        {"generated_at": NOW.isoformat(), "classification": broker_lease_classification, "live_money_eligible": live_money_eligible},
     )
     _write_json(
         root
@@ -272,6 +325,25 @@ def _seed_base(
             "stop_reason": "expected_clean_down",
             "runtime_instance_id": "track-b-paper-runtime-test",
             "broker_safe_at_stop": previous_broker_safe_at_stop,
+            "live_money_eligible": live_money_eligible,
+        },
+    )
+    _write_json(
+        root / "outputs" / "track_b_execution_core" / "paper_recovery_policy" / "latest_paper_recovery_policy.json",
+        {
+            "generated_at": NOW.isoformat(),
+            "severity": "UNSAFE" if paper_action_policy == "HARD_UNSAFE_HOLD" else "INFO",
+            "paper_action_policy": paper_action_policy,
+            "live_action_policy": "REQUIRE_ACK",
+            "autonomous_recovery_allowed": paper_autonomous_recovery_allowed,
+            "requires_operator_ack_for_paper": False,
+            "bounded_recovery_budget": {
+                "max_attempts_per_target": 1,
+                "max_attempts_per_window": 2,
+                "cooldown_seconds": 300,
+                "budget_exhausted": paper_action_policy == "QUARANTINE_OBSERVE_ONLY",
+            },
+            "live_money_eligible": live_money_eligible,
         },
     )
 
