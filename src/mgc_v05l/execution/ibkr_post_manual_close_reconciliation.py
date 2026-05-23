@@ -8,6 +8,19 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from mgc_v05l.execution_core.track_b_broker_truth_lease import DEFAULT_LEASE_ARTIFACT
+from mgc_v05l.execution_core.track_b_managed_order_registry import (
+    DEFAULT_MANAGED_ORDER_REGISTRY_ARTIFACT,
+    NO_MANAGED_ORDERS,
+)
+from mgc_v05l.execution_core.track_b_managed_position_registry import DEFAULT_MANAGED_POSITION_REGISTRY_ARTIFACT
+from mgc_v05l.execution_core.track_b_open_order_truth import DEFAULT_OPEN_ORDER_TRUTH_ARTIFACT, NO_OPEN_ORDERS
+from mgc_v05l.execution_core.track_b_position_truth_monitor import DEFAULT_POSITION_TRUTH_ARTIFACT
+from mgc_v05l.execution_core.track_b_runtime_supervisor_authority import (
+    DEFAULT_RUNTIME_SUPERVISOR_AUTHORITY_ARTIFACT,
+)
+from mgc_v05l.execution_core.track_b_shared_truth_refresh_cli import DEFAULT_RECONCILIATION_ARTIFACT
+
 _EXPECTED_ACCOUNT_ID = "DUM882026"
 _EXPECTED_SYMBOL = "MGC"
 _EXPECTED_CONTRACT_MONTH = "202606"
@@ -41,6 +54,15 @@ class IbkrPostManualCloseReconciliationConfig:
     position_reconciliation_report_path: Path | None = None
     observation_dry_run_report_path: Path | None = None
     unattended_close_report_path: Path | None = None
+    require_shared_truth_evidence: bool = True
+    shared_truth_max_age_seconds: float = 600.0
+    open_order_truth_path: Path = DEFAULT_OPEN_ORDER_TRUTH_ARTIFACT
+    managed_order_registry_path: Path = DEFAULT_MANAGED_ORDER_REGISTRY_ARTIFACT
+    position_truth_path: Path = DEFAULT_POSITION_TRUTH_ARTIFACT
+    managed_position_registry_path: Path = DEFAULT_MANAGED_POSITION_REGISTRY_ARTIFACT
+    runtime_supervisor_authority_path: Path = DEFAULT_RUNTIME_SUPERVISOR_AUTHORITY_ARTIFACT
+    reconciliation_path: Path = DEFAULT_RECONCILIATION_ARTIFACT
+    broker_lease_path: Path = DEFAULT_LEASE_ARTIFACT
 
 
 @dataclass(frozen=True)
@@ -54,15 +76,19 @@ class IbkrPostManualCloseReconciliationArtifacts:
 
     @property
     def exit_code(self) -> int:
-        return 0 if self.classification != "IBKR_RECONCILIATION_AMBIGUOUS" else 1
+        return 0 if self.classification not in {"IBKR_RECONCILIATION_AMBIGUOUS", "IBKR_RECONCILIATION_SHARED_TRUTH_BLOCKED"} else 1
 
 
 def run_ibkr_post_manual_close_reconciliation(
     *,
     config: IbkrPostManualCloseReconciliationConfig,
+    now: datetime | None = None,
 ) -> IbkrPostManualCloseReconciliationArtifacts:
     if not bool(config.read_only):
         raise IbkrPostManualCloseReconciliationError("This reconciliation pass is read-only only.")
+    actual_now = now or datetime.now(timezone.utc)
+    if actual_now.tzinfo is None:
+        raise IbkrPostManualCloseReconciliationError("now must be timezone-aware")
     recon = _load_json(_resolve_position_reconciliation_report_path(config))
     dry_run = _load_json(_resolve_observation_dry_run_report_path(config))
     unattended_close = _load_json(_resolve_unattended_close_report_path(config))
@@ -105,9 +131,12 @@ def run_ibkr_post_manual_close_reconciliation(
         exact_position_quantity=exact_position_quantity,
         working_open_order_count=working_open_order_count,
     )
+    shared_truth_evidence = _shared_truth_post_manual_close_evidence(config=config, now=actual_now)
+    if shared_truth_evidence["blockers"]:
+        classification = "IBKR_RECONCILIATION_SHARED_TRUTH_BLOCKED"
     report = {
         "classification": classification,
-        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "generated_at": actual_now.isoformat(),
         "environment": {
             "mode": config.environment_mode,
             "host": config.environment_host,
@@ -159,6 +188,7 @@ def run_ibkr_post_manual_close_reconciliation(
             "execution_row": final_close_execution,
             "completed_order_row": final_close_completed,
         },
+        "shared_truth_evidence": shared_truth_evidence,
         "api_vs_tws_analysis": {
             "prior_tws_visible_working_order_was_real": True,
             "why_single_empty_open_order_response_was_not_authoritative": [
@@ -242,6 +272,8 @@ def render_ibkr_post_manual_close_reconciliation_markdown(report: dict[str, Any]
     current_truth = dict(report.get("current_truth") or {})
     original_order = dict(report.get("original_unattended_close_order") or {})
     final_close_fill = dict(report.get("final_close_fill") or {})
+    shared_truth = dict(report.get("shared_truth_evidence") or {})
+    shared_classes = dict(shared_truth.get("classifications") or {})
     execution_row = dict(final_close_fill.get("execution_row") or {})
     completed_row = dict(final_close_fill.get("completed_order_row") or {})
     lines = [
@@ -252,6 +284,9 @@ def render_ibkr_post_manual_close_reconciliation_markdown(report: dict[str, Any]
         f"- exact MGC contract: `MGC {exact_contract.get('exact_expiry')} / conId={exact_contract.get('con_id')} / localSymbol={exact_contract.get('local_symbol')}`",
         f"- current exact MGC position is `{current_truth.get('exact_position_quantity')}`",
         f"- current open MGC orders are `{current_truth.get('working_mgc_open_order_count')}`",
+        f"- Open Order Truth: `{shared_classes.get('open_order_truth')}`",
+        f"- Managed Order Registry: `{shared_classes.get('managed_order_registry')}`",
+        f"- Runtime Supervisor Authority: `{shared_classes.get('runtime_supervisor_authority')}`",
         f"- original unattended SELL close order permId: `{original_order.get('submitted_perm_id')}`",
         f"- final close fill: `{execution_row.get('side')} {execution_row.get('quantity')} @ {execution_row.get('price')} at {execution_row.get('executed_at')}`",
         f"- completed-order truth for the same permId: `{completed_row.get('status')}`",
@@ -305,6 +340,197 @@ def _resolve_unattended_close_report_path(config: IbkrPostManualCloseReconciliat
         / "ibkr_unattended_paper_close_test"
         / "ibkr_unattended_paper_close_test_report.json"
     )
+
+
+def _shared_truth_post_manual_close_evidence(
+    *,
+    config: IbkrPostManualCloseReconciliationConfig,
+    now: datetime,
+) -> dict[str, Any]:
+    paths = {
+        "open_order_truth": config.open_order_truth_path,
+        "managed_order_registry": config.managed_order_registry_path,
+        "position_truth": config.position_truth_path,
+        "managed_position_registry": config.managed_position_registry_path,
+        "runtime_supervisor_authority": config.runtime_supervisor_authority_path,
+        "reconciliation": config.reconciliation_path,
+        "broker_lease": config.broker_lease_path,
+    }
+    payloads = {name: _read_json(_resolve(config.repo_root, path)) for name, path in paths.items()}
+    classifications = {name: _shared_classification(name=name, payload=payload) for name, payload in payloads.items()}
+    freshness = {
+        name: _shared_freshness(payload=payload, now=now, max_age_seconds=config.shared_truth_max_age_seconds)
+        for name, payload in payloads.items()
+    }
+    blockers: list[str] = []
+    if config.require_shared_truth_evidence:
+        for name, payload in payloads.items():
+            if not payload:
+                blockers.append(f"Shared truth authority artifact missing: {name}.")
+        for name, state in freshness.items():
+            if state["stale_or_missing"]:
+                blockers.append(f"Shared truth authority artifact stale/missing: {name}.")
+
+    if classifications["open_order_truth"] and classifications["open_order_truth"] != NO_OPEN_ORDERS:
+        blockers.append(f"Open Order Truth blocks post-manual-close reconciliation: {classifications['open_order_truth']}.")
+    if classifications["managed_order_registry"] and classifications["managed_order_registry"] != NO_MANAGED_ORDERS:
+        blockers.append(
+            "Managed Order Registry blocks post-manual-close reconciliation: "
+            f"{classifications['managed_order_registry']}."
+        )
+    if classifications["runtime_supervisor_authority"] in {
+        "SUPERVISOR_MANUAL_REVIEW_REQUIRED",
+        "SUPERVISOR_RESTART_BLOCKED_OPERATOR_ACK",
+        "SUPERVISOR_RESTART_BLOCKED_CRASH_LOOP",
+        "SUPERVISOR_SHARED_TRUTH_STALE",
+        "SUPERVISOR_UNKNOWN_REVIEW_REQUIRED",
+    }:
+        blockers.append(
+            "Runtime Supervisor Authority blocks post-manual-close reconciliation: "
+            f"{classifications['runtime_supervisor_authority']}."
+        )
+    if classifications["reconciliation"] in {
+        "BROKER_TRUTH_SETTLEMENT_CONTRADICTORY_STATE",
+        "TRACK_B_PAPER_BROKER_RECONCILIATION_BLOCKED_UNKNOWN_OPEN_ORDERS",
+    }:
+        blockers.append(
+            f"Reconciliation is unsafe for post-manual-close reconciliation: {classifications['reconciliation']}."
+        )
+    if classifications["broker_lease"] in {
+        "INVALIDATED_CONTRADICTION",
+        "INVALIDATED_UNKNOWN_OPEN_ORDERS",
+        "INVALIDATED_MANUAL_BROKER_ACTION",
+        "OPERATOR_REQUIRED",
+    }:
+        blockers.append(
+            f"Broker Truth Lease is unsafe for post-manual-close reconciliation: {classifications['broker_lease']}."
+        )
+
+    target_agreement = {}
+    for name, rows in {
+        "position_truth": _shared_rows(payloads["position_truth"]),
+        "managed_position_registry": _shared_rows(payloads["managed_position_registry"]),
+    }.items():
+        active_rows = [row for row in rows if _shared_position_row_is_active(row)]
+        conflicting_active = [
+            row for row in active_rows if not _shared_position_row_matches_target(config=config, row=row)
+        ]
+        matching_active = [row for row in active_rows if _shared_position_row_matches_target(config=config, row=row)]
+        target_agreement[name] = {
+            "row_count": len(rows),
+            "active_row_count": len(active_rows),
+            "matching_active_row_count": len(matching_active),
+            "conflicting_active_row_count": len(conflicting_active),
+        }
+        if conflicting_active:
+            blockers.append(f"{name} active rows conflict with post-manual-close target.")
+
+    return {
+        "source_authority": "execution_core_authority",
+        "dashboard_projection_consumed": False,
+        "required": config.require_shared_truth_evidence,
+        "max_age_seconds": config.shared_truth_max_age_seconds,
+        "artifact_paths": {name: str(_resolve(config.repo_root, path)) for name, path in paths.items()},
+        "classifications": classifications,
+        "freshness": freshness,
+        "target_agreement": target_agreement,
+        "blockers": blockers,
+    }
+
+
+def _read_json(path: Path) -> dict[str, Any]:
+    try:
+        payload = json.loads(Path(path).read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+    return payload if isinstance(payload, dict) else {}
+
+
+def _resolve(repo_root: Path, path: Path) -> Path:
+    return path if path.is_absolute() else Path(repo_root) / path
+
+
+def _shared_classification(*, name: str, payload: dict[str, Any]) -> str:
+    if name == "position_truth":
+        summary = payload.get("summary") if isinstance(payload.get("summary"), dict) else {}
+        return str(payload.get("classification") or summary.get("overall_classification") or "")
+    if name == "runtime_supervisor_authority":
+        return str(payload.get("classification") or payload.get("supervisor_classification") or "")
+    if name == "broker_lease":
+        return str(payload.get("classification") or payload.get("lease_state") or "")
+    return str(payload.get("classification") or "")
+
+
+def _shared_freshness(*, payload: dict[str, Any], now: datetime, max_age_seconds: float) -> dict[str, Any]:
+    generated_at = payload.get("generated_at") or payload.get("latest_refresh_time") or payload.get("last_success_at")
+    age_seconds = _age_seconds(generated_at, now)
+    return {
+        "generated_at": generated_at,
+        "age_seconds": age_seconds,
+        "stale_or_missing": age_seconds is None or age_seconds > max_age_seconds,
+    }
+
+
+def _age_seconds(value: Any, now: datetime) -> float | None:
+    if not value:
+        return None
+    try:
+        raw = str(value)
+        if raw.endswith("Z"):
+            raw = raw[:-1] + "+00:00"
+        parsed = datetime.fromisoformat(raw)
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=timezone.utc)
+        return max(0.0, (now - parsed.astimezone(timezone.utc)).total_seconds())
+    except (TypeError, ValueError):
+        return None
+
+
+def _shared_rows(payload: dict[str, Any]) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    for key in ("position_states", "managed_positions", "positions", "broker_positions", "track_b_broker_positions"):
+        value = payload.get(key)
+        if isinstance(value, list):
+            rows.extend(dict(row) for row in value if isinstance(row, dict))
+    summary = payload.get("summary")
+    if isinstance(summary, dict):
+        for key in ("position_states", "managed_positions"):
+            value = summary.get(key)
+            if isinstance(value, list):
+                rows.extend(dict(row) for row in value if isinstance(row, dict))
+    return rows
+
+
+def _shared_position_row_is_active(row: dict[str, Any]) -> bool:
+    classification = str(row.get("classification") or row.get("position_classification") or "")
+    if classification in {"FLAT_CLEAN", "NO_MANAGED_POSITIONS", "CLOSED_FLAT"}:
+        return False
+    status = str(row.get("final_position_status") or row.get("lifecycle_status") or row.get("status") or "").upper()
+    if status in {"CLOSED_FLAT", "FLAT", "CLOSED"}:
+        return False
+    quantity = _coerce_float(
+        row.get("quantity")
+        or row.get("broker_quantity")
+        or row.get("qty")
+        or row.get("position")
+        or dict(row.get("broker_position") or {}).get("quantity")
+    )
+    if quantity is not None:
+        return quantity != 0.0
+    return classification not in {"", "CLEAN_FLAT_READY", "NO_OPEN_ORDERS", "NO_MANAGED_ORDERS"}
+
+
+def _shared_position_row_matches_target(*, config: IbkrPostManualCloseReconciliationConfig, row: dict[str, Any]) -> bool:
+    symbol = str(row.get("symbol") or row.get("instrument_family") or row.get("instrument") or "").strip().upper()
+    local_symbol = str(row.get("local_symbol") or row.get("localSymbol") or row.get("contract") or "").strip().upper()
+    con_id = _coerce_int(row.get("con_id") or row.get("conId"))
+    if symbol and symbol != config.symbol.upper():
+        return False
+    if local_symbol and local_symbol != config.local_symbol.upper():
+        return False
+    if con_id is not None and con_id != config.con_id:
+        return False
+    return True
 
 
 def _load_json(path: Path) -> dict[str, Any]:
@@ -402,6 +628,15 @@ def _coerce_float(value: Any) -> float | None:
         return None
     try:
         return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _coerce_int(value: Any) -> int | None:
+    if value is None or value == "":
+        return None
+    try:
+        return int(value)
     except (TypeError, ValueError):
         return None
 
