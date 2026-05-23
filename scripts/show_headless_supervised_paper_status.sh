@@ -26,6 +26,7 @@ DEFAULT_SELF_RECOVER_RULES_FILE="${REPO_ROOT}/outputs/track_b_execution_core/sel
 DEFAULT_CRASH_LOOP_PROTECTION_FILE="${REPO_ROOT}/outputs/track_b_execution_core/crash_loop_protection/latest_crash_loop_protection.json"
 DEFAULT_RUNTIME_RESUME_SEMANTICS_FILE="${REPO_ROOT}/outputs/track_b_execution_core/runtime_resume/latest_runtime_resume_semantics.json"
 DEFAULT_RUNTIME_SUPERVISOR_AUTHORITY_FILE="${REPO_ROOT}/outputs/track_b_execution_core/runtime_supervisor/latest_runtime_supervisor_authority.json"
+DEFAULT_PAPER_RECOVERY_POLICY_FILE="${REPO_ROOT}/outputs/track_b_execution_core/paper_recovery_policy/latest_paper_recovery_policy.json"
 DEFAULT_STARTUP_FILE="${REPO_ROOT}/outputs/operator_dashboard/startup_control_plane_snapshot.json"
 DEFAULT_OPERABILITY_FILE="${REPO_ROOT}/outputs/operator_dashboard/supervised_paper_operability_snapshot.json"
 DEFAULT_INFO_FILE="${DEFAULT_RUNTIME_DIR}/operator_dashboard.json"
@@ -615,7 +616,7 @@ PY
 }
 
 merge_control_plane_services_status() {
-  "${PYTHON_BIN}" - <<'PY' "${STATUS_FILE}" "${DEFAULT_AGENT_REGISTRY_FILE}" "${DEFAULT_AGENT_HEALTH_FILE}" "${DEFAULT_SELF_RECOVER_RULES_FILE}" "${DEFAULT_CRASH_LOOP_PROTECTION_FILE}" "${DEFAULT_RUNTIME_RESUME_SEMANTICS_FILE}" "${DEFAULT_RUNTIME_SUPERVISOR_AUTHORITY_FILE}"
+  "${PYTHON_BIN}" - <<'PY' "${STATUS_FILE}" "${DEFAULT_AGENT_REGISTRY_FILE}" "${DEFAULT_AGENT_HEALTH_FILE}" "${DEFAULT_SELF_RECOVER_RULES_FILE}" "${DEFAULT_CRASH_LOOP_PROTECTION_FILE}" "${DEFAULT_RUNTIME_RESUME_SEMANTICS_FILE}" "${DEFAULT_RUNTIME_SUPERVISOR_AUTHORITY_FILE}" "${DEFAULT_PAPER_RECOVERY_POLICY_FILE}"
 import json
 import sys
 from pathlib import Path
@@ -627,6 +628,7 @@ self_recover_path = Path(sys.argv[4])
 crash_loop_path = Path(sys.argv[5])
 runtime_resume_path = Path(sys.argv[6])
 runtime_supervisor_path = Path(sys.argv[7])
+paper_recovery_policy_path = Path(sys.argv[8])
 
 def read_json(path: Path) -> dict:
     try:
@@ -646,13 +648,30 @@ self_recover = read_json(self_recover_path)
 crash_loop = read_json(crash_loop_path)
 runtime_resume = read_json(runtime_resume_path)
 runtime_supervisor = read_json(runtime_supervisor_path)
+paper_recovery_policy = read_json(paper_recovery_policy_path)
 operator_ack = runtime_supervisor.get("operator_ack") or {}
+paper_action_policy = paper_recovery_policy.get("paper_action_policy")
+paper_reason = str(paper_recovery_policy.get("reason") or "")
+if paper_action_policy in {"OBSERVE", "REFRESH_EVIDENCE"} and "MARKET_CLOSED_NO_FRESH_BARS" in paper_reason:
+    paper_recovery_diagnostic = "WAIT_MARKET_CLOSED"
+elif paper_action_policy == "AUTONOMOUS_RETRY_ELIGIBLE":
+    paper_recovery_diagnostic = "BOUNDED_AUTONOMOUS_RETRY"
+elif paper_action_policy == "SCOPED_RECOVERY_ELIGIBLE":
+    paper_recovery_diagnostic = "SCOPED_RECOVERY_ELIGIBLE"
+elif paper_action_policy == "QUARANTINE_OBSERVE_ONLY":
+    paper_recovery_diagnostic = "QUARANTINE_OBSERVE_ONLY"
+elif paper_action_policy == "HARD_UNSAFE_HOLD":
+    paper_recovery_diagnostic = "HARD_UNSAFE_HOLD"
+else:
+    paper_recovery_diagnostic = paper_action_policy
+requires_operator_ack_for_paper = paper_recovery_policy.get("requires_operator_ack_for_paper") is True
 market_closed = (
     self_recover.get("recommendation") == "WAIT_MARKET_CLOSED"
     or runtime_resume.get("classification") == "RESUME_BLOCKED_MARKET_CLOSED"
     or runtime_resume.get("reason") == "MARKET_CLOSED_NO_FRESH_BARS"
     or runtime_supervisor.get("supervisor_mode") == "MARKET_CLOSED_WAIT"
     or runtime_supervisor.get("proof_window_status") == "market_closed"
+    or paper_recovery_diagnostic == "WAIT_MARKET_CLOSED"
 )
 status["track_b_control_plane"] = {
     "source": "execution_core_control_plane_authority_projection",
@@ -665,6 +684,15 @@ status["track_b_control_plane"] = {
     "self_recover_recommendation": self_recover.get("recommendation") or self_recover.get("classification"),
     "crash_loop_classification": crash_loop.get("classification"),
     "crash_loop_restart_blocked": crash_loop.get("restart_blocked") is True,
+    "paper_recovery_policy": paper_action_policy,
+    "paper_recovery_severity": paper_recovery_policy.get("severity"),
+    "paper_recovery_diagnostic": paper_recovery_diagnostic,
+    "paper_action_policy": paper_action_policy,
+    "autonomous_recovery_allowed": paper_recovery_policy.get("autonomous_recovery_allowed") is True,
+    "requires_operator_ack_for_paper": requires_operator_ack_for_paper,
+    "operator_ack_advisory_only_for_paper": operator_ack.get("required") is True and not requires_operator_ack_for_paper and bool(paper_action_policy),
+    "bounded_recovery_budget": paper_recovery_policy.get("bounded_recovery_budget") or {},
+    "live_action_policy": paper_recovery_policy.get("live_action_policy"),
     "runtime_resume_classification": runtime_resume.get("classification"),
     "runtime_resume_allowed": runtime_resume.get("allowed") is True,
     "runtime_resume_safe_to_start_runtime": runtime_resume.get("safe_to_start_runtime") is True,
@@ -678,6 +706,7 @@ status["track_b_control_plane"] = {
     "runtime_supervisor_proof_window_status": runtime_supervisor.get("proof_window_status"),
     "runtime_supervisor_recommended_next_command": runtime_supervisor.get("recommended_next_command"),
     "runtime_supervisor_operator_ack_required": operator_ack.get("required") is True,
+    "runtime_supervisor_operator_ack_required_for_paper": requires_operator_ack_for_paper,
     "runtime_supervisor_operator_ack": operator_ack,
     "runtime_supervisor_top_blockers": (runtime_supervisor.get("blockers") or [])[:3],
     "runtime_supervisor_top_warnings": (runtime_supervisor.get("warnings") or [])[:3],
@@ -691,6 +720,7 @@ status["track_b_control_plane"] = {
         "crash_loop_protection": str(crash_loop_path),
         "runtime_resume": str(runtime_resume_path),
         "runtime_supervisor": str(runtime_supervisor_path),
+        "paper_recovery_policy": str(paper_recovery_policy_path),
     },
 }
 status["paper_only"] = True

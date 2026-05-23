@@ -1464,6 +1464,15 @@ class OperatorDashboardService:
                             truth["self_healing_auto_restart_allowed"] = self_healing_health.get("auto_restart_allowed")
                             truth["self_healing_restart_candidates"] = self_healing_health.get("restart_candidates") or []
                             truth["self_healing_operator_required_agents"] = self_healing_health.get("operator_required_agents") or []
+                            truth["self_healing_paper_recovery_policy"] = self_healing_health.get("paper_recovery_policy")
+                            truth["self_healing_paper_recovery_diagnostic"] = self_healing_health.get("paper_recovery_diagnostic")
+                            truth["self_healing_autonomous_recovery_allowed"] = self_healing_health.get("autonomous_recovery_allowed")
+                            truth["self_healing_requires_operator_ack_for_paper"] = self_healing_health.get(
+                                "requires_operator_ack_for_paper"
+                            )
+                            truth["self_healing_operator_ack_advisory_only_for_paper"] = self_healing_health.get(
+                                "operator_ack_advisory_only_for_paper"
+                            )
                             truth["self_healing_blockers"] = self_healing_health.get("blockers") or []
                             truth["self_healing_warnings"] = self_healing_health.get("warnings") or []
                 dashboard_payload: dict[str, Any] = {
@@ -17796,6 +17805,14 @@ def _compact_track_b_self_healing_health(payload: dict[str, Any], path: Path) ->
             "blockers": ["self_healing_health_missing"],
             "warnings": [],
             "agents": [],
+            "paper_recovery_policy": None,
+            "paper_recovery_diagnostic": None,
+            "paper_action_policy": None,
+            "autonomous_recovery_allowed": False,
+            "requires_operator_ack_for_paper": False,
+            "operator_ack_advisory_only_for_paper": False,
+            "bounded_recovery_budget": {},
+            "live_action_policy": None,
             "submit_authority": False,
             "paper_proof_invoked": False,
             "live_money_eligible": False,
@@ -17819,6 +17836,18 @@ def _compact_track_b_self_healing_health(payload: dict[str, Any], path: Path) ->
         "auto_restart_allowed": bool(payload.get("auto_restart_allowed") is True) and fresh,
         "restart_candidates": list(payload.get("restart_candidates") or []),
         "operator_required_agents": list(payload.get("operator_required_agents") or []),
+        "paper_recovery_policy": payload.get("paper_recovery_policy_classification") or payload.get("paper_action_policy"),
+        "paper_recovery_severity": payload.get("paper_recovery_policy_severity"),
+        "paper_recovery_diagnostic": payload.get("paper_recovery_diagnostic"),
+        "paper_action_policy": payload.get("paper_action_policy")
+        or payload.get("paper_recovery_policy_classification"),
+        "autonomous_recovery_allowed": payload.get("autonomous_recovery_allowed") is True,
+        "requires_operator_ack_for_paper": payload.get("requires_operator_ack_for_paper") is True,
+        "operator_ack_advisory_only_for_paper": payload.get("operator_ack_advisory_only_for_paper") is True,
+        "bounded_recovery_budget": dict(payload.get("bounded_recovery_budget") or {})
+        if isinstance(payload.get("bounded_recovery_budget"), dict)
+        else {},
+        "live_action_policy": payload.get("live_action_policy"),
         "blockers": list(payload.get("blockers") or []),
         "warnings": list(payload.get("warnings") or []),
         "agents": agents,
@@ -18110,6 +18139,11 @@ def _track_b_control_plane_services_summary(repo_root: Path) -> dict[str, Any]:
         / "track_b_execution_core"
         / "runtime_supervisor"
         / "latest_runtime_supervisor_authority.json",
+        "paper_recovery_policy": repo_root
+        / "outputs"
+        / "track_b_execution_core"
+        / "paper_recovery_policy"
+        / "latest_paper_recovery_policy.json",
     }
     payloads: dict[str, dict[str, Any]] = {}
     for name, path in authority_paths.items():
@@ -18119,7 +18153,11 @@ def _track_b_control_plane_services_summary(repo_root: Path) -> dict[str, Any]:
     crash_loop = payloads["crash_loop_protection"]
     runtime_resume = payloads["runtime_resume"]
     runtime_supervisor = payloads["runtime_supervisor"]
+    paper_recovery_policy = payloads["paper_recovery_policy"]
     operator_ack = dict(runtime_supervisor.get("operator_ack") or {})
+    paper_action_policy = paper_recovery_policy.get("paper_action_policy")
+    paper_recovery_diagnostic = _paper_recovery_status_diagnostic(paper_recovery_policy)
+    requires_paper_ack = paper_recovery_policy.get("requires_operator_ack_for_paper") is True
     supervisor_blockers = list(runtime_supervisor.get("blockers") or [])
     supervisor_warnings = list(runtime_supervisor.get("warnings") or [])
     market_closed = (
@@ -18128,12 +18166,14 @@ def _track_b_control_plane_services_summary(repo_root: Path) -> dict[str, Any]:
         or runtime_resume.get("reason") == "MARKET_CLOSED_NO_FRESH_BARS"
         or runtime_supervisor.get("supervisor_mode") == "MARKET_CLOSED_WAIT"
         or runtime_supervisor.get("proof_window_status") == "market_closed"
+        or paper_recovery_diagnostic == "WAIT_MARKET_CLOSED"
     )
     attention_required = bool(
-        runtime_resume.get("classification") not in {None, "", "RESUME_ALLOWED_CLEAN", "RESUME_BLOCKED_MARKET_CLOSED"}
+        runtime_resume.get("classification")
+        not in {None, "", "RESUME_ALLOWED_CLEAN", "RESUME_ALLOWED_PAPER_BOUNDED_RETRY", "RESUME_BLOCKED_MARKET_CLOSED"}
         or crash_loop.get("restart_blocked") is True
-        or runtime_resume.get("required_operator_ack") is True
-        or operator_ack.get("required") is True
+        or requires_paper_ack
+        or (operator_ack.get("required") is True and paper_recovery_policy.get("requires_operator_ack_for_paper") is True)
         or runtime_supervisor.get("supervisor_mode") in {
             "CLEANUP_REQUIRED",
             "MANUAL_REVIEW_REQUIRED",
@@ -18153,6 +18193,19 @@ def _track_b_control_plane_services_summary(repo_root: Path) -> dict[str, Any]:
         "self_recover_recommendation": self_recover.get("recommendation") or self_recover.get("classification"),
         "crash_loop_classification": crash_loop.get("classification"),
         "crash_loop_restart_blocked": crash_loop.get("restart_blocked") is True,
+        "paper_recovery_policy": paper_action_policy,
+        "paper_recovery_severity": paper_recovery_policy.get("severity"),
+        "paper_recovery_diagnostic": paper_recovery_diagnostic,
+        "paper_action_policy": paper_action_policy,
+        "autonomous_recovery_allowed": paper_recovery_policy.get("autonomous_recovery_allowed") is True,
+        "requires_operator_ack_for_paper": requires_paper_ack,
+        "operator_ack_advisory_only_for_paper": bool(
+            operator_ack.get("required") is True and requires_paper_ack is False and paper_action_policy
+        ),
+        "bounded_recovery_budget": dict(paper_recovery_policy.get("bounded_recovery_budget") or {})
+        if isinstance(paper_recovery_policy.get("bounded_recovery_budget"), dict)
+        else {},
+        "live_action_policy": paper_recovery_policy.get("live_action_policy"),
         "runtime_resume_classification": runtime_resume.get("classification"),
         "runtime_resume_allowed": runtime_resume.get("allowed") is True,
         "runtime_resume_safe_to_start_runtime": runtime_resume.get("safe_to_start_runtime") is True,
@@ -18166,6 +18219,7 @@ def _track_b_control_plane_services_summary(repo_root: Path) -> dict[str, Any]:
         "runtime_supervisor_proof_window_status": runtime_supervisor.get("proof_window_status"),
         "runtime_supervisor_recommended_next_command": runtime_supervisor.get("recommended_next_command"),
         "runtime_supervisor_operator_ack_required": operator_ack.get("required") is True,
+        "runtime_supervisor_operator_ack_required_for_paper": requires_paper_ack,
         "runtime_supervisor_operator_ack": operator_ack,
         "runtime_supervisor_top_blockers": supervisor_blockers[:3],
         "runtime_supervisor_top_warnings": supervisor_warnings[:3],
@@ -18179,6 +18233,24 @@ def _track_b_control_plane_services_summary(repo_root: Path) -> dict[str, Any]:
         "attention_required": attention_required,
         "artifact_paths": {name: str(path) for name, path in authority_paths.items()},
     }
+
+
+def _paper_recovery_status_diagnostic(payload: dict[str, Any]) -> str | None:
+    if not isinstance(payload, dict) or not payload:
+        return None
+    action = str(payload.get("paper_action_policy") or "").strip()
+    reason = str(payload.get("reason") or "")
+    if action in {"OBSERVE", "REFRESH_EVIDENCE"} and "MARKET_CLOSED_NO_FRESH_BARS" in reason:
+        return "WAIT_MARKET_CLOSED"
+    if action == "AUTONOMOUS_RETRY_ELIGIBLE":
+        return "BOUNDED_AUTONOMOUS_RETRY"
+    if action == "SCOPED_RECOVERY_ELIGIBLE":
+        return "SCOPED_RECOVERY_ELIGIBLE"
+    if action == "QUARANTINE_OBSERVE_ONLY":
+        return "QUARANTINE_OBSERVE_ONLY"
+    if action == "HARD_UNSAFE_HOLD":
+        return "HARD_UNSAFE_HOLD"
+    return action or None
 
 
 def _track_b_broker_reconciliation_overlay_ready(payload: dict[str, Any]) -> bool:

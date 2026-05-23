@@ -270,6 +270,8 @@ def test_track_b_control_plane_status_projection_displays_closed_market_services
         crash_loop_classification="NO_CRASH_LOOP",
         runtime_resume_classification="RESUME_BLOCKED_MARKET_CLOSED",
         runtime_resume_reason="MARKET_CLOSED_NO_FRESH_BARS",
+        paper_action_policy="OBSERVE",
+        paper_recovery_reason="MARKET_CLOSED_NO_FRESH_BARS",
     )
 
     summary = operator_dashboard_module._track_b_control_plane_services_summary(tmp_path)  # noqa: SLF001
@@ -291,12 +293,16 @@ def test_track_b_control_plane_status_projection_displays_closed_market_services
         "wait for market reopen; rerun proof readiness before any runtime start"
     )
     assert summary["runtime_supervisor_operator_ack_required"] is False
+    assert summary["paper_recovery_policy"] == "OBSERVE"
+    assert summary["paper_recovery_diagnostic"] == "WAIT_MARKET_CLOSED"
+    assert summary["requires_operator_ack_for_paper"] is False
     assert summary["market_closed_no_fresh_bars_expected"] is True
     assert summary["operator_message"] == (
         "MARKET_CLOSED_WAIT: market closed/no fresh bars expected; wait and rerun proof readiness after reopen"
     )
     assert "outputs/operator_dashboard/runtime/latest_track_b_runtime_resume_semantics.json" not in json.dumps(summary)
     assert "outputs/operator_dashboard/runtime/latest_track_b_runtime_supervisor_authority.json" not in json.dumps(summary)
+    assert "outputs/operator_dashboard/runtime/latest_track_b_paper_recovery_policy.json" not in json.dumps(summary)
 
 
 def test_track_b_control_plane_status_projection_displays_crash_loop_and_operator_ack(tmp_path: Path) -> None:
@@ -309,6 +315,9 @@ def test_track_b_control_plane_status_projection_displays_crash_loop_and_operato
         runtime_resume_reason="Prior unsafe stop requires operator acknowledgement.",
         runtime_resume_required_operator_ack=True,
         runtime_resume_blockers=[{"code": "operator_ack_required", "detail": "paper_reconciliation_mismatch"}],
+        paper_action_policy="QUARANTINE_OBSERVE_ONLY",
+        paper_recovery_severity="ATTENTION",
+        paper_budget={"budget_exhausted": True},
     )
 
     summary = operator_dashboard_module._track_b_control_plane_services_summary(tmp_path)  # noqa: SLF001
@@ -319,11 +328,87 @@ def test_track_b_control_plane_status_projection_displays_crash_loop_and_operato
     assert summary["runtime_resume_required_operator_ack"] is True
     assert summary["runtime_supervisor_mode"] == "CRASH_LOOP_HOLD"
     assert summary["runtime_supervisor_operator_ack_required"] is True
+    assert summary["runtime_supervisor_operator_ack_required_for_paper"] is False
+    assert summary["operator_ack_advisory_only_for_paper"] is True
     assert summary["runtime_supervisor_operator_ack"]["ack_type"] == "crash_loop_hold"
+    assert summary["paper_recovery_policy"] == "QUARANTINE_OBSERVE_ONLY"
+    assert summary["paper_recovery_diagnostic"] == "QUARANTINE_OBSERVE_ONLY"
+    assert summary["bounded_recovery_budget"]["budget_exhausted"] is True
     assert summary["attention_required"] is True
     assert summary["runtime_resume_blockers"] == [
         {"code": "operator_ack_required", "detail": "paper_reconciliation_mismatch"}
     ]
+
+
+def test_track_b_control_plane_status_projection_displays_bounded_autonomous_retry(tmp_path: Path) -> None:
+    _write_track_b_control_plane_artifacts(
+        tmp_path,
+        self_recover_recommendation="RESTART_RUNTIME_ALLOWED",
+        runtime_resume_classification="RESUME_ALLOWED_PAPER_BOUNDED_RETRY",
+        runtime_resume_reason="PAPER Recovery Policy permits bounded retry.",
+        runtime_resume_allowed=True,
+        runtime_resume_safe_to_start_runtime=True,
+        runtime_supervisor_classification="SUPERVISOR_RUNTIME_START_ALLOWED",
+        runtime_supervisor_mode="READY_FOR_OPERATOR_START",
+        runtime_supervisor_proof_window_status="ready",
+        paper_action_policy="AUTONOMOUS_RETRY_ELIGIBLE",
+        paper_autonomous_recovery_allowed=True,
+    )
+
+    summary = operator_dashboard_module._track_b_control_plane_services_summary(tmp_path)  # noqa: SLF001
+
+    assert summary["paper_recovery_policy"] == "AUTONOMOUS_RETRY_ELIGIBLE"
+    assert summary["paper_recovery_diagnostic"] == "BOUNDED_AUTONOMOUS_RETRY"
+    assert summary["autonomous_recovery_allowed"] is True
+    assert summary["requires_operator_ack_for_paper"] is False
+    assert summary["runtime_resume_allowed"] is True
+    assert summary["attention_required"] is False
+
+
+def test_track_b_control_plane_status_projection_displays_hard_unsafe_paper_policy(tmp_path: Path) -> None:
+    _write_track_b_control_plane_artifacts(
+        tmp_path,
+        self_recover_recommendation="DO_NOT_RECOVER_UNSAFE_STATE",
+        runtime_resume_classification="RESUME_BLOCKED_HARD_UNSAFE",
+        runtime_resume_reason="live_money_eligible=true",
+        runtime_resume_blockers=[{"code": "live_money_eligible_true", "detail": "hard unsafe"}],
+        runtime_supervisor_classification="SUPERVISOR_HARD_UNSAFE_HOLD",
+        runtime_supervisor_mode="HARD_UNSAFE_HOLD",
+        paper_action_policy="HARD_UNSAFE_HOLD",
+        paper_recovery_severity="UNSAFE",
+        paper_recovery_live_action_policy="HOLD_DOWN",
+    )
+
+    summary = operator_dashboard_module._track_b_control_plane_services_summary(tmp_path)  # noqa: SLF001
+
+    assert summary["paper_recovery_policy"] == "HARD_UNSAFE_HOLD"
+    assert summary["paper_recovery_diagnostic"] == "HARD_UNSAFE_HOLD"
+    assert summary["paper_recovery_severity"] == "UNSAFE"
+    assert summary["live_action_policy"] == "HOLD_DOWN"
+    assert summary["attention_required"] is True
+
+
+def test_track_b_control_plane_status_projection_displays_duplicate_writer_hard_unsafe(tmp_path: Path) -> None:
+    _write_track_b_control_plane_artifacts(
+        tmp_path,
+        self_recover_recommendation="DO_NOT_RECOVER_UNSAFE_STATE",
+        runtime_resume_classification="RESUME_BLOCKED_HARD_UNSAFE",
+        runtime_resume_reason="Duplicate runtime writer evidence is present.",
+        runtime_resume_blockers=[{"code": "duplicate_runtime_writer", "detail": "hard unsafe"}],
+        runtime_supervisor_classification="SUPERVISOR_HARD_UNSAFE_HOLD",
+        runtime_supervisor_mode="HARD_UNSAFE_HOLD",
+        paper_action_policy="HARD_UNSAFE_HOLD",
+        paper_recovery_severity="UNSAFE",
+        paper_recovery_reason="duplicate_runtime_writer",
+        paper_recovery_live_action_policy="HOLD_DOWN",
+    )
+
+    summary = operator_dashboard_module._track_b_control_plane_services_summary(tmp_path)  # noqa: SLF001
+
+    assert summary["paper_recovery_policy"] == "HARD_UNSAFE_HOLD"
+    assert summary["paper_recovery_diagnostic"] == "HARD_UNSAFE_HOLD"
+    assert summary["runtime_resume_blockers"] == [{"code": "duplicate_runtime_writer", "detail": "hard unsafe"}]
+    assert summary["attention_required"] is True
 
 
 def test_latest_track_b_operator_status_payload_includes_control_plane_projection(tmp_path: Path) -> None:
@@ -374,6 +459,12 @@ def _write_track_b_control_plane_artifacts(
     runtime_supervisor_proof_window_status: str | None = None,
     runtime_supervisor_recommended_next_command: str | None = None,
     runtime_supervisor_operator_ack: dict[str, object] | None = None,
+    paper_action_policy: str = "AUTONOMOUS_RETRY_ELIGIBLE",
+    paper_recovery_severity: str = "INFO",
+    paper_recovery_reason: str = "",
+    paper_autonomous_recovery_allowed: bool = False,
+    paper_budget: dict[str, object] | None = None,
+    paper_recovery_live_action_policy: str = "REQUIRE_ACK",
 ) -> None:
     _write_json_file(
         root / "outputs/track_b_execution_core/agent_registry/latest_agent_registry.json",
@@ -424,6 +515,27 @@ def _write_track_b_control_plane_artifacts(
         "ack_type": "crash_loop_hold" if supervisor_mode == "CRASH_LOOP_HOLD" else None,
         "ack_id_expected": "track_b_paper_crash_loop_hold_test" if supervisor_mode == "CRASH_LOOP_HOLD" else None,
     }
+    _write_json_file(
+        root / "outputs/track_b_execution_core/paper_recovery_policy/latest_paper_recovery_policy.json",
+        {
+            "severity": paper_recovery_severity,
+            "paper_action_policy": paper_action_policy,
+            "live_action_policy": paper_recovery_live_action_policy,
+            "autonomous_recovery_allowed": paper_autonomous_recovery_allowed,
+            "requires_operator_ack_for_paper": False,
+            "reason": paper_recovery_reason,
+            "bounded_recovery_budget": paper_budget
+            or {
+                "max_attempts_per_target": 1,
+                "max_attempts_per_window": 2,
+                "cooldown_seconds": 300,
+                "budget_exhausted": False,
+            },
+            "artifact_paths": {
+                "authority": "outputs/track_b_execution_core/paper_recovery_policy/latest_paper_recovery_policy.json",
+            },
+        },
+    )
     _write_json_file(
         root / "outputs/track_b_execution_core/runtime_supervisor/latest_runtime_supervisor_authority.json",
         {
@@ -3504,6 +3616,20 @@ def test_self_healing_health_compact_is_advisory_only() -> None:
             "blockers": [],
             "warnings": ["broker_truth_refresher_not_running"],
             "live_money_eligible": False,
+            "paper_recovery_policy_classification": "AUTONOMOUS_RETRY_ELIGIBLE",
+            "paper_recovery_policy_severity": "INFO",
+            "paper_recovery_diagnostic": "BOUNDED_AUTONOMOUS_RETRY",
+            "paper_action_policy": "AUTONOMOUS_RETRY_ELIGIBLE",
+            "autonomous_recovery_allowed": True,
+            "requires_operator_ack_for_paper": False,
+            "operator_ack_advisory_only_for_paper": True,
+            "bounded_recovery_budget": {
+                "max_attempts_per_target": 1,
+                "max_attempts_per_window": 2,
+                "cooldown_seconds": 300,
+                "budget_exhausted": False,
+            },
+            "live_action_policy": "REQUIRE_ACK",
             "agents": {
                 "broker_truth_refresher": {
                     "display_name": "Broker truth refresher",
@@ -3526,6 +3652,12 @@ def test_self_healing_health_compact_is_advisory_only() -> None:
     assert compact["live_money_eligible"] is False
     assert compact["restart_candidates"] == ["broker_truth_refresher"]
     assert compact["agents"][0]["restart_candidate"] is True
+    assert compact["paper_recovery_policy"] == "AUTONOMOUS_RETRY_ELIGIBLE"
+    assert compact["paper_recovery_diagnostic"] == "BOUNDED_AUTONOMOUS_RETRY"
+    assert compact["autonomous_recovery_allowed"] is True
+    assert compact["requires_operator_ack_for_paper"] is False
+    assert compact["operator_ack_advisory_only_for_paper"] is True
+    assert compact["bounded_recovery_budget"]["budget_exhausted"] is False
 
 
 def test_operator_readiness_refresh_status_marks_stale_ready_as_stale() -> None:

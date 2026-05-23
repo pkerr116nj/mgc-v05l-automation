@@ -139,6 +139,7 @@ def test_status_script_surfaces_control_plane_services_as_projection_only() -> N
     assert "DEFAULT_SELF_RECOVER_RULES_FILE" in script
     assert "DEFAULT_CRASH_LOOP_PROTECTION_FILE" in script
     assert "DEFAULT_RUNTIME_RESUME_SEMANTICS_FILE" in script
+    assert "DEFAULT_PAPER_RECOVERY_POLICY_FILE" in script
     assert "merge_control_plane_services_status" in script
     assert "status[\"track_b_control_plane\"]" in script
     assert "\"source_authority\": \"execution_core_authority\"" in script
@@ -148,6 +149,10 @@ def test_status_script_surfaces_control_plane_services_as_projection_only() -> N
     assert "RESUME_BLOCKED_MARKET_CLOSED" in script
     assert "MARKET_CLOSED_NO_FRESH_BARS" in script
     assert "runtime_resume_safe_to_start_runtime" in script
+    assert "paper_recovery_policy" in script
+    assert "paper_recovery_diagnostic" in script
+    assert "requires_operator_ack_for_paper" in script
+    assert "operator_ack_advisory_only_for_paper" in script
     assert script.index("merge_paper_runtime_generation_status") < script.index("merge_control_plane_services_status")
     assert "latest_track_b_runtime_resume_semantics.json" not in script
     assert "latest_track_b_crash_loop_protection.json" not in script
