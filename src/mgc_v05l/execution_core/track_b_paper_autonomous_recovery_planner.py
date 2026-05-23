@@ -19,6 +19,7 @@ from typing import Any, Mapping, Sequence
 
 from mgc_v05l.execution_core.track_b_agent_health import DEFAULT_AGENT_HEALTH_ARTIFACT
 from mgc_v05l.execution_core.track_b_broker_truth_lease import DEFAULT_LEASE_ARTIFACT
+from mgc_v05l.execution_core.track_b_control_plane_snapshot import DEFAULT_CONTROL_PLANE_SNAPSHOT_ARTIFACT
 from mgc_v05l.execution_core.track_b_crash_loop_protection import DEFAULT_CRASH_LOOP_PROTECTION_ARTIFACT
 from mgc_v05l.execution_core.track_b_managed_order_registry import DEFAULT_MANAGED_ORDER_REGISTRY_ARTIFACT
 from mgc_v05l.execution_core.track_b_managed_position_registry import DEFAULT_MANAGED_POSITION_REGISTRY_ARTIFACT
@@ -78,6 +79,8 @@ class TrackBPaperAutonomousRecoveryPlannerConfig:
     repo_root: Path = REPO_ROOT
     output_path: Path = DEFAULT_PAPER_AUTONOMOUS_RECOVERY_PLAN_ARTIFACT
     paper_recovery_policy_path: Path = DEFAULT_PAPER_RECOVERY_POLICY_ARTIFACT
+    control_plane_snapshot_path: Path = DEFAULT_CONTROL_PLANE_SNAPSHOT_ARTIFACT
+    control_plane_snapshot_max_age_seconds: int = 300
     runtime_supervisor_authority_path: Path = DEFAULT_RUNTIME_SUPERVISOR_AUTHORITY_ARTIFACT
     runtime_resume_semantics_path: Path = DEFAULT_RUNTIME_RESUME_SEMANTICS_ARTIFACT
     self_recover_rules_path: Path = DEFAULT_SELF_RECOVER_RULES_ARTIFACT
@@ -106,6 +109,7 @@ def build_track_b_paper_autonomous_recovery_plan(
     actual_now = _ensure_utc(now or datetime.now(UTC))
     inputs = {
         "paper_recovery_policy": _read_json(config.resolve(config.paper_recovery_policy_path)),
+        "control_plane_snapshot": _read_json(config.resolve(config.control_plane_snapshot_path)),
         "runtime_supervisor_authority": _read_json(config.resolve(config.runtime_supervisor_authority_path)),
         "runtime_resume_semantics": _read_json(config.resolve(config.runtime_resume_semantics_path)),
         "self_recover_rules": _read_json(config.resolve(config.self_recover_rules_path)),
@@ -121,7 +125,7 @@ def build_track_b_paper_autonomous_recovery_plan(
         "broker_lease": _read_json(config.resolve(config.broker_lease_path)),
         "runtime_environment_truth": _read_json(config.resolve(config.runtime_environment_truth_path)),
     }
-    evidence = _evidence(inputs=inputs)
+    evidence = _evidence(inputs=inputs, now=actual_now, config=config)
     decision = _classify_plan(inputs=inputs, evidence=evidence)
     return {
         "schema_version": "track_b_paper_autonomous_recovery_plan_v1",
@@ -140,6 +144,11 @@ def build_track_b_paper_autonomous_recovery_plan(
         "modify_authority": False,
         "paper_proof_invoked": False,
         "live_money_eligible": False,
+        "control_plane_snapshot_id": evidence["control_plane_snapshot_id"],
+        "shared_truth_refresh_generation_id": evidence["shared_truth_refresh_generation_id"],
+        "snapshot_coherence_status": evidence["snapshot_coherence_status"],
+        "supervisor_decision_id": evidence["supervisor_decision_id"],
+        "supervisor_classification": evidence["supervisor_classification"],
         "classification": decision["classification"],
         "reason": decision["reason"],
         "proposed_actions": decision["proposed_actions"],
@@ -163,7 +172,8 @@ def build_track_b_paper_autonomous_recovery_plan(
         "todo_executor_v2": [
             "Keep this planner dry-run-only until a separate executor boundary is explicitly approved.",
             "Attach persisted per-target recovery budgets before enabling any autonomous action.",
-            "Require fresh shared-truth and identity revalidation immediately before every future mutation.",
+            "Require a coherent Control Plane Snapshot captured immediately before every future executor action.",
+            "Require exact identity revalidation immediately before every future mutation.",
         ],
     }
 
@@ -416,6 +426,7 @@ def _action(
         "reason": reason,
         "required_preconditions": [
             "fresh_execution_core_authority_evidence",
+            "coherent_control_plane_snapshot_captured_immediately_before_action",
             "paper_mode_only",
             "live_money_eligible_false",
             "single_runtime_writer_invariant",
@@ -437,8 +448,14 @@ def _action(
     }
 
 
-def _evidence(*, inputs: Mapping[str, Mapping[str, Any]]) -> dict[str, Any]:
+def _evidence(
+    *,
+    inputs: Mapping[str, Mapping[str, Any]],
+    now: datetime,
+    config: TrackBPaperAutonomousRecoveryPlannerConfig,
+) -> dict[str, Any]:
     policy = inputs["paper_recovery_policy"]
+    snapshot = inputs["control_plane_snapshot"]
     supervisor = inputs["runtime_supervisor_authority"]
     resume = inputs["runtime_resume_semantics"]
     self_recover = inputs["self_recover_rules"]
@@ -453,7 +470,13 @@ def _evidence(*, inputs: Mapping[str, Mapping[str, Any]]) -> dict[str, Any]:
     broker_lease = inputs["broker_lease"]
     runtime_truth = inputs["runtime_environment_truth"]
     budget = _mapping(policy.get("bounded_recovery_budget"))
+    snapshot_evidence = _control_plane_snapshot_evidence(
+        snapshot=snapshot,
+        now=now,
+        max_age_seconds=config.control_plane_snapshot_max_age_seconds,
+    )
     return {
+        **snapshot_evidence,
         "paper_recovery_policy_classification": _classification(policy) or str(policy.get("paper_action_policy") or ""),
         "paper_action_policy": str(policy.get("paper_action_policy") or ""),
         "paper_policy_severity": str(policy.get("severity") or ""),
@@ -485,6 +508,7 @@ def _evidence(*, inputs: Mapping[str, Mapping[str, Any]]) -> dict[str, Any]:
         "duplicate_writer_count": int(runtime_truth.get("duplicate_writer_count") or 0),
         "live_money_eligible": _any_true(
             policy,
+            snapshot,
             supervisor,
             resume,
             self_recover,
@@ -498,7 +522,7 @@ def _evidence(*, inputs: Mapping[str, Mapping[str, Any]]) -> dict[str, Any]:
             runtime_truth,
             key="live_money_eligible",
         ),
-        "stale_or_missing_evidence": _stale_or_missing_evidence(inputs),
+        "stale_or_missing_evidence": _stale_or_missing_evidence(inputs, snapshot_evidence=snapshot_evidence),
         "lifecycle_state_matrix": {
             "authority": "mgc_v05l.execution_core.track_b_lifecycle_state_transition",
             "doc": str(DEFAULT_LIFECYCLE_STATE_MATRIX_DOC),
@@ -645,7 +669,53 @@ def _phase1_target(agent_health: Mapping[str, Any]) -> dict[str, Any]:
     return {"agent_id": "phase1_databento_live_candles"}
 
 
-def _stale_or_missing_evidence(inputs: Mapping[str, Mapping[str, Any]]) -> list[str]:
+def _control_plane_snapshot_evidence(
+    *,
+    snapshot: Mapping[str, Any],
+    now: datetime,
+    max_age_seconds: int,
+) -> dict[str, Any]:
+    generated_at = _parse_datetime(snapshot.get("generated_at"))
+    age_seconds = None
+    if generated_at is not None:
+        age_seconds = max(0.0, (now - generated_at).total_seconds())
+
+    stale_or_missing: list[str] = []
+    if not snapshot:
+        stale_or_missing.append("control_plane_snapshot_missing")
+    if snapshot and not snapshot.get("control_plane_snapshot_id"):
+        stale_or_missing.append("control_plane_snapshot_id_missing")
+    if snapshot and snapshot.get("shared_truth_coherence_status") != "COHERENT":
+        stale_or_missing.append("control_plane_snapshot_not_coherent")
+    if snapshot and not snapshot.get("shared_truth_refresh_generation_id"):
+        stale_or_missing.append("control_plane_snapshot_generation_missing")
+    if snapshot and not snapshot.get("runtime_supervisor_decision_id"):
+        stale_or_missing.append("control_plane_snapshot_supervisor_decision_missing")
+    if snapshot and generated_at is None:
+        stale_or_missing.append("control_plane_snapshot_generated_at_missing")
+    if age_seconds is not None and age_seconds > max_age_seconds:
+        stale_or_missing.append("control_plane_snapshot_stale")
+
+    return {
+        "control_plane_snapshot_id": str(snapshot.get("control_plane_snapshot_id") or ""),
+        "control_plane_snapshot_generated_at": str(snapshot.get("generated_at") or ""),
+        "control_plane_snapshot_age_seconds": age_seconds,
+        "control_plane_snapshot_max_age_seconds": max_age_seconds,
+        "shared_truth_refresh_generation_id": str(snapshot.get("shared_truth_refresh_generation_id") or ""),
+        "snapshot_coherence_status": str(snapshot.get("shared_truth_coherence_status") or ""),
+        "supervisor_decision_id": str(snapshot.get("runtime_supervisor_decision_id") or ""),
+        "supervisor_classification": str(snapshot.get("runtime_supervisor_classification") or ""),
+        "control_plane_snapshot_stale_or_missing": stale_or_missing,
+        "executor_pre_action_evidence_packet_required": True,
+        "executor_pre_action_evidence_packet_source": "control_plane_snapshot",
+    }
+
+
+def _stale_or_missing_evidence(
+    inputs: Mapping[str, Mapping[str, Any]],
+    *,
+    snapshot_evidence: Mapping[str, Any],
+) -> list[str]:
     required = {
         "paper_recovery_policy": "paper_action_policy",
         "runtime_supervisor_authority": "classification",
@@ -663,7 +733,7 @@ def _stale_or_missing_evidence(inputs: Mapping[str, Mapping[str, Any]]) -> list[
         "broker_lease": "classification",
         "runtime_environment_truth": "classification",
     }
-    missing: list[str] = []
+    missing: list[str] = [str(item) for item in _list(snapshot_evidence.get("control_plane_snapshot_stale_or_missing"))]
     for name, field in required.items():
         payload = inputs[name]
         if not payload:
@@ -681,6 +751,7 @@ def _stale_or_missing_evidence(inputs: Mapping[str, Mapping[str, Any]]) -> list[
 def _input_artifacts(config: TrackBPaperAutonomousRecoveryPlannerConfig) -> dict[str, str]:
     return {
         "paper_recovery_policy": str(config.resolve(config.paper_recovery_policy_path)),
+        "control_plane_snapshot": str(config.resolve(config.control_plane_snapshot_path)),
         "runtime_supervisor_authority": str(config.resolve(config.runtime_supervisor_authority_path)),
         "runtime_resume_semantics": str(config.resolve(config.runtime_resume_semantics_path)),
         "self_recover_rules": str(config.resolve(config.self_recover_rules_path)),
@@ -740,6 +811,16 @@ def _list(value: Any) -> list[Any]:
 
 def _ensure_utc(value: datetime) -> datetime:
     return value.replace(tzinfo=UTC) if value.tzinfo is None else value.astimezone(UTC)
+
+
+def _parse_datetime(value: Any) -> datetime | None:
+    if not value:
+        return None
+    try:
+        parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return _ensure_utc(parsed)
 
 
 if __name__ == "__main__":

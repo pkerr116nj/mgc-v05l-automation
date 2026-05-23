@@ -10,8 +10,23 @@ Version 1 is a dry-run planner only. It does not start or stop runtimes, restart
 
 The planner consumes execution_core authority artifacts only. Dashboard/operator projections are display-only and must never be used as routing, restart, readiness, order, broker, or lifecycle authority.
 
+Every future autonomous recovery executor must use the execution_core Control Plane Snapshot as the single coherent pre-action evidence packet. The snapshot must be captured immediately before the action boundary and must prove that Shared Truth, Runtime Supervisor Authority, PAPER Recovery Policy, and the dry-run Autonomous Recovery Plan were built from one coherent generation.
+
+Required pre-action packet:
+
+- `outputs/track_b_execution_core/control_plane/latest_control_plane_snapshot.json`
+
+Executor boundary rule:
+
+- future executors may only execute from a coherent Control Plane Snapshot;
+- the snapshot must be captured immediately before action;
+- no executor may reassemble scattered local evidence from individual artifacts;
+- if the snapshot is missing, stale, or not coherent, the dry-run planner must classify `PLAN_BLOCKED_STALE_EVIDENCE`;
+- dashboard projections of the snapshot are display-only and must never be consumed as authority.
+
 Primary inputs:
 
+- Control Plane Snapshot
 - PAPER Recovery Policy
 - Runtime Supervisor Authority
 - Runtime Resume Semantics
@@ -73,7 +88,7 @@ The `would_*` fields describe future executor behavior. They are not permissions
 1. Live-money eligibility, duplicate runtime writers, and broad ambiguity are hard unsafe holds.
 2. Market closed/no fresh bars expected maps to `WAIT_MARKET_CLOSED`.
 3. Budget exhaustion maps to `PLAN_BLOCKED_BUDGET_EXHAUSTED`.
-4. Stale or missing authority evidence maps to `PLAN_BLOCKED_STALE_EVIDENCE`.
+4. Stale, missing, or incoherent Control Plane Snapshot evidence maps to `PLAN_BLOCKED_STALE_EVIDENCE`.
 5. Phase-1 producer down while the proof window is open and shared truth is clean maps to `PLAN_MARKET_DATA_RESTART`.
 6. Suspicious, duplicate, or identity-ambiguous order state maps to quarantine or identity ambiguity, not mutation.
 7. Managed-order modify is planned only when Order Adjustment Planner says `MODIFY_IN_PLACE_ELIGIBLE`.
@@ -107,3 +122,13 @@ A future executor can use this plan as one input, but must still revalidate shar
 - targeted cancel/replace executor
 
 Each adapter should keep its own explicit authorization and audit artifact and must reuse the shared authority evidence gates.
+
+Before any adapter executes, it must capture a fresh Control Plane Snapshot and carry these fields into its audit artifact:
+
+- `control_plane_snapshot_id`
+- `shared_truth_refresh_generation_id`
+- `snapshot_coherence_status`
+- `supervisor_decision_id`
+- `supervisor_classification`
+
+The adapter must stop before action if `snapshot_coherence_status` is not `COHERENT`, if the snapshot is stale, or if the snapshot identity does not match the dry-run plan being executed.

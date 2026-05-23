@@ -70,10 +70,60 @@ def test_clean_proof_ready_plans_runtime_retry_dry_run(tmp_path: Path) -> None:
     )
 
     assert payload["classification"] == PLAN_RUNTIME_RETRY
+    assert payload["control_plane_snapshot_id"] == "snapshot-test"
+    assert payload["shared_truth_refresh_generation_id"] == "shared-truth-generation-test"
+    assert payload["snapshot_coherence_status"] == "COHERENT"
+    assert payload["supervisor_decision_id"] == "supervisor-decision-test"
+    assert payload["supervisor_classification"] == SUPERVISOR_RUNTIME_START_ALLOWED
     assert payload["runtime_restart_allowed"] is False
     assert payload["proposed_actions"][0]["action_type"] == "RUNTIME_RETRY"
+    assert "coherent_control_plane_snapshot_captured_immediately_before_action" in payload["proposed_actions"][0][
+        "required_preconditions"
+    ]
     assert payload["proposed_actions"][0]["would_restart_runtime"] is True
     assert payload["proposed_actions"][0]["execution_enabled"] is False
+
+
+def test_missing_control_plane_snapshot_blocks_as_stale_evidence(tmp_path: Path) -> None:
+    _seed_base(tmp_path, include_control_plane_snapshot=False)
+
+    payload = build_track_b_paper_autonomous_recovery_plan(
+        config=TrackBPaperAutonomousRecoveryPlannerConfig(repo_root=tmp_path),
+        now=NOW,
+    )
+
+    assert payload["classification"] == PLAN_BLOCKED_STALE_EVIDENCE
+    assert payload["control_plane_snapshot_id"] == ""
+    assert "control_plane_snapshot_missing" in payload["evidence_summary"]["stale_or_missing_evidence"]
+
+
+def test_incoherent_control_plane_snapshot_blocks_as_stale_evidence(tmp_path: Path) -> None:
+    _seed_base(tmp_path, snapshot_coherence_status="STALE_OR_MIXED")
+
+    payload = build_track_b_paper_autonomous_recovery_plan(
+        config=TrackBPaperAutonomousRecoveryPlannerConfig(repo_root=tmp_path),
+        now=NOW,
+    )
+
+    assert payload["classification"] == PLAN_BLOCKED_STALE_EVIDENCE
+    assert payload["snapshot_coherence_status"] == "STALE_OR_MIXED"
+    assert "control_plane_snapshot_not_coherent" in payload["evidence_summary"]["stale_or_missing_evidence"]
+
+
+def test_stale_control_plane_snapshot_blocks_as_stale_evidence(tmp_path: Path) -> None:
+    _seed_base(tmp_path, snapshot_generated_at=datetime(2026, 5, 23, 11, 0, tzinfo=UTC))
+
+    payload = build_track_b_paper_autonomous_recovery_plan(
+        config=TrackBPaperAutonomousRecoveryPlannerConfig(
+            repo_root=tmp_path,
+            control_plane_snapshot_max_age_seconds=60,
+        ),
+        now=NOW,
+    )
+
+    assert payload["classification"] == PLAN_BLOCKED_STALE_EVIDENCE
+    assert payload["evidence_summary"]["control_plane_snapshot_age_seconds"] == 3600.0
+    assert "control_plane_snapshot_stale" in payload["evidence_summary"]["stale_or_missing_evidence"]
 
 
 def test_stale_evidence_plans_evidence_refresh(tmp_path: Path) -> None:
@@ -279,7 +329,26 @@ def _seed_base(
     live_money_eligible: bool = False,
     exact_position: bool = False,
     include_order_plan: bool = False,
+    include_control_plane_snapshot: bool = True,
+    snapshot_coherence_status: str = "COHERENT",
+    snapshot_generated_at: datetime = NOW,
 ) -> None:
+    if include_control_plane_snapshot:
+        _write_json(
+            root / "outputs" / "track_b_execution_core" / "control_plane" / "latest_control_plane_snapshot.json",
+            {
+                "generated_at": snapshot_generated_at.isoformat(),
+                "classification": "CONTROL_PLANE_SNAPSHOT_READY",
+                "control_plane_snapshot_id": "snapshot-test",
+                "shared_truth_refresh_generation_id": "shared-truth-generation-test",
+                "shared_truth_coherence_status": snapshot_coherence_status,
+                "runtime_supervisor_decision_id": "supervisor-decision-test",
+                "runtime_supervisor_classification": supervisor_classification,
+                "supervisor_mode": supervisor_mode,
+                "safe_to_start_runtime": supervisor_classification == SUPERVISOR_RUNTIME_START_ALLOWED,
+                "live_money_eligible": live_money_eligible,
+            },
+        )
     _write_json(
         root / "outputs" / "track_b_execution_core" / "paper_recovery_policy" / "latest_paper_recovery_policy.json",
         {
