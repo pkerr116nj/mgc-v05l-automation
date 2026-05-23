@@ -20,6 +20,11 @@ Reusable validator:
 
 - `mgc_v05l.execution_core.track_b_pre_action_snapshot_validator`
 
+Dry-run executor envelope:
+
+- `mgc_v05l.execution_core.track_b_paper_autonomous_recovery_executor`
+- audit directory: `outputs/track_b_execution_core/paper_autonomous_recovery/executor_attempts/`
+
 Executor boundary rule:
 
 - future executors may only execute from a coherent Control Plane Snapshot;
@@ -87,6 +92,34 @@ Each proposed action includes:
 - `execution_enabled=false`
 
 The `would_*` fields describe future executor behavior. They are not permissions in v1.
+
+## Executor Attempt Envelope
+
+The v1 executor framework is dry-run only. It calls `validate_track_b_pre_action_snapshot(...)`, checks a file-backed recovery budget ledger, and writes audit artifacts. It never starts a runtime and never mutates broker, order, or lifecycle state.
+
+Each attempt includes:
+
+- `recovery_attempt_id`
+- `control_plane_snapshot_id`
+- `shared_truth_generation_id`
+- `action_type`
+- `target_identity`
+- `budget_key`
+- `pre_action_validation`
+- `pre_action_evidence`
+- `post_action_evidence` placeholder
+- `execution_enabled=false`
+- `would_mutate_runtime`
+- `would_mutate_broker`
+- `would_mutate_lifecycle`
+- `prohibited_actions`
+- `result_classification`
+
+Executor audit artifacts:
+
+- per-attempt JSON under `outputs/track_b_execution_core/paper_autonomous_recovery/executor_attempts/`
+- latest dry-run report at `outputs/track_b_execution_core/paper_autonomous_recovery/executor_attempts/latest_paper_autonomous_recovery_executor_attempt.json`
+- append-only event log at `outputs/track_b_execution_core/paper_autonomous_recovery/executor_attempts/paper_autonomous_recovery_executor_events.jsonl`
 
 ## Decision Rules
 
