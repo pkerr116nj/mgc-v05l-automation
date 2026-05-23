@@ -153,7 +153,7 @@ def main(argv: list[str] | None = None) -> int:
                     repo_root=REPO_ROOT,
                     output_dir=lane_output_dir.relative_to(REPO_ROOT),
                     porting_output_dir=PORTING_OUTPUT_DIR.relative_to(REPO_ROOT),
-                    submit=True,
+                    submit=False,
                     strategy_id=strategy_id,
                 )
             )
@@ -162,7 +162,7 @@ def main(argv: list[str] | None = None) -> int:
                     repo_root=REPO_ROOT,
                     output_dir=lane_output_dir.relative_to(REPO_ROOT),
                     porting_output_dir=PORTING_OUTPUT_DIR.relative_to(REPO_ROOT),
-                    submit=True,
+                    submit=False,
                     strategy_id=strategy_id,
                 ),
                 artifacts=lane_artifacts,

@@ -36,6 +36,10 @@ from mgc_v05l.execution.ibkr_manual_paper_submit import (
     run_ibkr_manual_paper_submit_test,
     write_ibkr_manual_paper_submit_artifacts,
 )
+from mgc_v05l.execution_core.track_b_pre_action_snapshot_validator import PRE_ACTION_SNAPSHOT_VALID
+
+_PLAN_MANUAL_PAPER_SUBMIT = "PLAN_MANUAL_PAPER_SUBMIT"
+_ACTION_MANUAL_PAPER_SUBMIT = "MANUAL_PAPER_SUBMIT"
 
 
 def test_preview_only_default_does_not_submit(monkeypatch) -> None:
@@ -73,6 +77,48 @@ def test_submit_cannot_occur_without_exact_digest(monkeypatch, tmp_path: Path) -
 
     assert artifacts.classification == "IBKR_MANUAL_PAPER_SUBMIT_CANCEL_BLOCKED"
     assert artifacts.report["submit_cancel_lifecycle"]["status"] == "approval_blocked"
+
+
+def test_manual_submit_blocked_without_snapshot(monkeypatch, tmp_path: Path) -> None:
+    _, frozen_path = _preview_bundle(monkeypatch, tmp_path, write_snapshot=False)
+
+    artifacts = run_ibkr_manual_paper_submit_test(
+        config=_config(
+            submit=True,
+            approval_digest="whatever",
+            approval_phrase="whatever",
+            output_dir=tmp_path,
+            frozen_preview_path=frozen_path,
+        ),
+        stack_provider=_manual_stack,
+    )
+
+    assert artifacts.classification == "IBKR_MANUAL_PAPER_SUBMIT_CANCEL_BLOCKED"
+    assert artifacts.report["pre_action_snapshot_validation"]["classification"] == "PRE_ACTION_BLOCKED_SNAPSHOT_MISSING"
+    assert artifacts.open_order_after_submit["status"] == "not_run"
+
+
+def test_manual_submit_valid_snapshot_reaches_existing_next_gate(monkeypatch, tmp_path: Path) -> None:
+    preview_artifacts, frozen_path = _preview_bundle(monkeypatch, tmp_path)
+    monkeypatch.setattr(
+        "mgc_v05l.execution.ibkr_manual_paper_submit._build_runtime",
+        lambda **_kwargs: (_ for _ in ()).throw(RuntimeError("next gate reached")),
+    )
+
+    artifacts = run_ibkr_manual_paper_submit_test(
+        config=_config(
+            submit=True,
+            approval_digest=str(preview_artifacts.report["preview"]["preview_digest"]),
+            approval_phrase=str(preview_artifacts.report["preview"]["expected_approval_phrase"]),
+            output_dir=tmp_path,
+            frozen_preview_path=frozen_path,
+        ),
+        stack_provider=_manual_stack,
+    )
+
+    assert artifacts.classification == "IBKR_MANUAL_PAPER_SUBMIT_CANCEL_BLOCKED"
+    assert artifacts.report["pre_action_snapshot_validation"]["classification"] == PRE_ACTION_SNAPSHOT_VALID
+    assert "next gate reached" in artifacts.report["submit_cancel_lifecycle"]["detail"]
 
 
 def test_submit_cannot_occur_without_typed_phrase(monkeypatch, tmp_path: Path) -> None:
@@ -1178,6 +1224,13 @@ def test_stale_approval_fails_if_preview_payload_changes(monkeypatch, tmp_path: 
         test_mode=_FILL_TEST_MODE,
     )
     frozen_path.write_text(json.dumps(frozen_bundle, indent=2, sort_keys=True), encoding="utf-8")
+    _write_pre_action_snapshot_for_manual_submit(
+        tmp_path,
+        target_identity=_manual_submit_pre_action_target_from_requested_order(
+            frozen_bundle["requested_order"],
+            test_mode=_FILL_TEST_MODE,
+        ),
+    )
 
     artifacts = run_ibkr_manual_paper_submit_test(
         config=_config(
@@ -1392,7 +1445,7 @@ def _config(
     execution_pricing_context: dict[str, object] | None = None,
 ) -> IbkrManualPaperSubmitConfig:
     return IbkrManualPaperSubmitConfig(
-        repo_root=Path("."),
+        repo_root=output_dir or Path("."),
         mode="PAPER",
         host="127.0.0.1",
         port=port,
@@ -1423,6 +1476,7 @@ def _preview_bundle(
     *,
     test_mode: str = "PAPER_RESTING_TEST",
     limit_price: float | None = 4639.7,
+    write_snapshot: bool = True,
 ) -> tuple[IbkrManualPaperSubmitArtifacts, Path]:
     _patch_harness_context(monkeypatch)
     artifacts = run_ibkr_manual_paper_submit_test(
@@ -1437,7 +1491,112 @@ def _preview_bundle(
     write_ibkr_manual_paper_submit_artifacts(output_dir=tmp_path, artifacts=artifacts)
     frozen_path = tmp_path / f"{artifact_stem_for_test_mode(test_mode)}_frozen_preview.json"
     assert frozen_path.exists()
+    if write_snapshot:
+        frozen_bundle = json.loads(frozen_path.read_text(encoding="utf-8"))
+        _write_pre_action_snapshot_for_manual_submit(
+            tmp_path,
+            target_identity=_manual_submit_pre_action_target_from_requested_order(
+                frozen_bundle["requested_order"],
+                test_mode=test_mode,
+            ),
+        )
     return artifacts, frozen_path
+
+
+def _write_pre_action_snapshot_for_manual_submit(
+    root: Path,
+    *,
+    test_mode: str = "PAPER_RESTING_TEST",
+    limit_price: float | None = 4639.7,
+    target_identity: dict[str, object] | None = None,
+) -> None:
+    generated_at = datetime.now(timezone.utc).isoformat()
+    snapshot_id = "snapshot-manual-paper-submit"
+    generation_id = "generation-manual-paper-submit"
+    supervisor_decision_id = "supervisor-manual-paper-submit"
+    target = _manual_submit_pre_action_target(test_mode=test_mode, limit_price=limit_price) if target_identity is None else target_identity
+    _write_json(
+        root / "outputs/track_b_execution_core/control_plane/latest_control_plane_snapshot.json",
+        {
+            "generated_at": generated_at,
+            "classification": "CONTROL_PLANE_SNAPSHOT_READY",
+            "control_plane_snapshot_id": snapshot_id,
+            "shared_truth_refresh_generation_id": generation_id,
+            "shared_truth_coherence_status": "COHERENT",
+            "runtime_supervisor_decision_id": supervisor_decision_id,
+            "runtime_supervisor_classification": "SUPERVISOR_RUNTIME_START_ALLOWED",
+            "safe_to_start_runtime": True,
+            "live_money_eligible": False,
+        },
+    )
+    _write_json(
+        root / "outputs/track_b_execution_core/runtime_supervisor/latest_runtime_supervisor_authority.json",
+        {
+            "generated_at": generated_at,
+            "supervisor_decision_id": supervisor_decision_id,
+            "classification": "SUPERVISOR_RUNTIME_START_ALLOWED",
+            "live_money_eligible": False,
+        },
+    )
+    _write_json(
+        root / "outputs/track_b_execution_core/paper_autonomous_recovery/latest_paper_autonomous_recovery_plan.json",
+        {
+            "generated_at": generated_at,
+            "classification": _PLAN_MANUAL_PAPER_SUBMIT,
+            "control_plane_snapshot_id": snapshot_id,
+            "shared_truth_refresh_generation_id": generation_id,
+            "execution_enabled": False,
+            "proposed_actions": [
+                {
+                    "action_id": "manual_paper_submit",
+                    "action_type": _ACTION_MANUAL_PAPER_SUBMIT,
+                    "target_identity": target,
+                    "execution_enabled": False,
+                }
+            ],
+        },
+    )
+
+
+def _manual_submit_pre_action_target(
+    *,
+    test_mode: str = "PAPER_RESTING_TEST",
+    limit_price: float | None = 4639.7,
+) -> dict[str, object]:
+    return {
+        "account_id": "DUM882026",
+        "symbol": "MGC",
+        "contract": "MGCM6",
+        "con_id": "712565978",
+        "action": "BUY",
+        "quantity": "1.0",
+        "order_type": "LMT",
+        "limit_price": limit_price,
+        "test_mode": test_mode,
+    }
+
+
+def _manual_submit_pre_action_target_from_requested_order(
+    requested_order: dict[str, object],
+    *,
+    test_mode: str,
+) -> dict[str, object]:
+    return {
+        "account_id": "DUM882026",
+        "symbol": str(requested_order.get("symbol") or "MGC").upper(),
+        "contract": "MGCM6",
+        "con_id": "712565978",
+        "action": str(requested_order.get("action") or "BUY").upper(),
+        "quantity": str(requested_order.get("quantity") or "1.0"),
+        "order_type": str(requested_order.get("order_type") or "LMT").upper(),
+        "limit_price": requested_order.get("limit_price"),
+        "test_mode": test_mode,
+    }
+
+
+def _write_json(path: Path, payload: dict[str, object]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
 
 
 def _manual_stack() -> list[SimpleNamespace]:

@@ -23,6 +23,11 @@ from ..brokers.ibkr import (
     IbkrSession,
     build_default_ibkr_order_id_policy,
 )
+from ..execution_core.track_b_pre_action_snapshot_validator import (
+    PRE_ACTION_SNAPSHOT_VALID,
+    TrackBPreActionSnapshotValidatorConfig,
+    validate_track_b_pre_action_snapshot,
+)
 from .ibkr_phase1_futures_scope import phase1_execution_target_for_symbol
 from .ibkr_execution_provider import IbkrExecutionProvider
 from .ibkr_paper_order_preview import (
@@ -86,6 +91,8 @@ _NON_MARKETABLE_LIMIT_LABEL = "NEAR_MARKET_NON_MARKETABLE_LIMIT"
 _FILLED_ORDER_STATUS = {"Filled"}
 _PARTIAL_FILL_STATUS = {"PartiallyFilled"}
 _ORDER_REJECTION_ERROR_CODES = {478, 10268, 201, 202}
+_PLAN_MANUAL_PAPER_SUBMIT = "PLAN_MANUAL_PAPER_SUBMIT"
+_ACTION_MANUAL_PAPER_SUBMIT = "MANUAL_PAPER_SUBMIT"
 
 
 class IbkrManualPaperSubmitError(RuntimeError):
@@ -135,6 +142,7 @@ class IbkrManualPaperSubmitConfig:
     diagnostic_dry_run: bool = False
     post_approval_observation_seconds: float = 75.0
     execution_pricing_context: dict[str, Any] | None = None
+    pre_action_snapshot_max_age_seconds: int = 300
 
 
 @dataclass(frozen=True)
@@ -623,6 +631,30 @@ def run_ibkr_manual_paper_submit_test(
             detail=detail,
         )
 
+    pre_action_validation: dict[str, Any] = {}
+    if config.submit:
+        pre_action_validation = _pre_action_snapshot_validation(
+            config=config,
+            requested_order=requested_order,
+            now=started_at,
+        )
+        if pre_action_validation.get("classification") != PRE_ACTION_SNAPSHOT_VALID:
+            detail = (
+                "Pre-action Control Plane Snapshot validation blocked manual PAPER submit harness: "
+                f"{pre_action_validation.get('classification')} - {pre_action_validation.get('reason')}"
+            )
+            return _blocked_artifacts(
+                config=config,
+                started_at=started_at,
+                requested_order=requested_order,
+                caller_check=caller_check,
+                environment_lock=environment_lock,
+                guardrail_checks=guardrail_checks,
+                audit_events=audit_events,
+                detail=detail,
+                pre_action_snapshot_validation=pre_action_validation,
+            )
+
     runtime: _SubmitRuntime | None = None
     try:
         runtime = _build_runtime(
@@ -719,6 +751,7 @@ def run_ibkr_manual_paper_submit_test(
                         "detail": detail,
                     },
                     frozen_preview_bundle=None,
+                    pre_action_snapshot_validation=pre_action_validation,
                 )
                 return IbkrManualPaperSubmitArtifacts(
                     classification=_blocked_classification_for_mode(config.test_mode),
@@ -799,6 +832,7 @@ def run_ibkr_manual_paper_submit_test(
                     "detail": "Preview-only default prevented submit because no explicit submit flags were provided.",
                 },
                 frozen_preview_bundle=frozen_preview_bundle,
+                pre_action_snapshot_validation=pre_action_validation,
             )
             return IbkrManualPaperSubmitArtifacts(
                 classification=classification,
@@ -849,6 +883,7 @@ def run_ibkr_manual_paper_submit_test(
                     "detail": approval["detail"],
                 },
                 frozen_preview_bundle=frozen_preview_bundle,
+                pre_action_snapshot_validation=pre_action_validation,
             )
             return IbkrManualPaperSubmitArtifacts(
                 classification=_blocked_classification_for_mode(config.test_mode),
@@ -893,6 +928,7 @@ def run_ibkr_manual_paper_submit_test(
             audit_events=audit_events,
             lifecycle_result=lifecycle_result,
             frozen_preview_bundle=frozen_preview_bundle,
+            pre_action_snapshot_validation=pre_action_validation,
         )
         return IbkrManualPaperSubmitArtifacts(
             classification=classification,
@@ -918,6 +954,7 @@ def run_ibkr_manual_paper_submit_test(
             guardrail_checks=guardrail_checks,
             audit_events=audit_events,
             detail=str(exc),
+            pre_action_snapshot_validation=pre_action_validation,
         )
     finally:
         if runtime is not None:
@@ -3479,6 +3516,7 @@ def _build_report(
     audit_events: list[dict[str, Any]],
     lifecycle_result: dict[str, Any],
     frozen_preview_bundle: dict[str, Any] | None,
+    pre_action_snapshot_validation: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     quote_context = dict(context.get("quote_context") or {})
     pricing_context = dict(context.get("pricing_context") or {})
@@ -3495,6 +3533,10 @@ def _build_report(
         "generated_at": datetime.now(timezone.utc).isoformat(),
         "started_at": started_at.isoformat(),
         "account_id": context["selected_account_id"],
+        "lower_level_manual_submit_harness": True,
+        "preferred_path": "runtime_supervised_strategy_bridge_or_managed_order_service",
+        "manual_harness_emergency_only": bool(config.submit),
+        "pre_action_snapshot_validation": pre_action_snapshot_validation or {},
         "connection_check": context["connection_check"],
         "manual_caller_check": caller_check,
         "environment_lock_check": environment_lock,
@@ -3538,6 +3580,41 @@ def _build_report(
     }
 
 
+def _pre_action_snapshot_validation(
+    *,
+    config: IbkrManualPaperSubmitConfig,
+    requested_order: dict[str, Any],
+    now: datetime,
+) -> dict[str, Any]:
+    return validate_track_b_pre_action_snapshot(
+        config=TrackBPreActionSnapshotValidatorConfig(repo_root=config.repo_root),
+        expected_plan_classification=_PLAN_MANUAL_PAPER_SUBMIT,
+        expected_action_type=_ACTION_MANUAL_PAPER_SUBMIT,
+        expected_target_identity=_pre_action_target_identity(config=config, requested_order=requested_order),
+        max_snapshot_age_seconds=int(config.pre_action_snapshot_max_age_seconds),
+        now=now,
+    )
+
+
+def _pre_action_target_identity(
+    *,
+    config: IbkrManualPaperSubmitConfig,
+    requested_order: dict[str, Any],
+) -> dict[str, Any]:
+    target = _phase1_target_for_requested_order(requested_order)
+    return {
+        "account_id": config.account_id or "DUM882026",
+        "symbol": str(requested_order.get("symbol") or config.symbol).strip().upper(),
+        "contract": str(target.get("local_symbol") or ""),
+        "con_id": target.get("con_id"),
+        "action": str(requested_order.get("action") or config.action).strip().upper(),
+        "quantity": str(requested_order.get("quantity") or config.quantity),
+        "order_type": str(requested_order.get("order_type") or config.order_type).strip().upper(),
+        "limit_price": requested_order.get("limit_price"),
+        "test_mode": str(config.test_mode or "").strip().upper(),
+    }
+
+
 def _blocked_artifacts(
     *,
     config: IbkrManualPaperSubmitConfig,
@@ -3548,6 +3625,7 @@ def _blocked_artifacts(
     guardrail_checks: list[dict[str, Any]],
     audit_events: list[dict[str, Any]],
     detail: str,
+    pre_action_snapshot_validation: dict[str, Any] | None = None,
 ) -> IbkrManualPaperSubmitArtifacts:
     classification = _blocked_classification_for_mode(config.test_mode)
     _record_audit(
@@ -3562,6 +3640,10 @@ def _blocked_artifacts(
         "generated_at": datetime.now(timezone.utc).isoformat(),
         "started_at": started_at.isoformat(),
         "account_id": config.account_id,
+        "lower_level_manual_submit_harness": True,
+        "preferred_path": "runtime_supervised_strategy_bridge_or_managed_order_service",
+        "manual_harness_emergency_only": bool(config.submit),
+        "pre_action_snapshot_validation": pre_action_snapshot_validation or {},
         "connection_check": {
             "connected": False,
             "host": config.host,

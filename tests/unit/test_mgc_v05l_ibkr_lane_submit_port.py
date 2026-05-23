@@ -3,12 +3,17 @@ from __future__ import annotations
 import json
 from datetime import datetime, timezone
 from pathlib import Path
+from types import SimpleNamespace
 
+import mgc_v05l.execution.ibkr_lane_submit_port as lane_submit_module
 from mgc_v05l.execution.ibkr_lane_submit_port import (
     IbkrLaneSubmitPortConfig,
     run_ibkr_lane_submit_port,
     write_ibkr_lane_submit_port_artifacts,
 )
+
+_PLAN_LANE_SUBMIT_PORT = "PLAN_LANE_SUBMIT_PORT"
+_ACTION_LANE_SUBMIT_PORT = "LANE_SUBMIT_PORT"
 
 
 def _config(tmp_path: Path) -> IbkrLaneSubmitPortConfig:
@@ -374,3 +379,201 @@ def test_lane_submit_port_writes_artifacts(tmp_path: Path) -> None:
     assert (output_dir / "ibkr_lane_submit_port_report.json").exists()
     assert (output_dir / "ibkr_lane_submit_port_report.md").exists()
     assert (output_dir / "ibkr_lane_submit_port_audit.jsonl").exists()
+
+
+def test_lane_submit_default_is_non_mutating_fail_closed(monkeypatch, tmp_path: Path) -> None:
+    _patch_actionable_lane(monkeypatch)
+
+    artifacts = run_ibkr_lane_submit_port(config=_config(tmp_path))
+
+    assert artifacts.classification == "PAPER_LANE_PREFLIGHT_BLOCKED"
+    assert "submit was disabled" in artifacts.report["detail"]
+    assert artifacts.report["default_submit_enabled"] is False
+    assert artifacts.report["pre_action_snapshot_validation"] == {}
+
+
+def test_lane_submit_cannot_bypass_snapshot_gate(monkeypatch, tmp_path: Path) -> None:
+    _patch_actionable_lane(monkeypatch)
+    monkeypatch.setattr(
+        lane_submit_module,
+        "run_ibkr_paper_strategy_bridge",
+        lambda **_kwargs: (_ for _ in ()).throw(AssertionError("bridge should not run")),
+    )
+
+    artifacts = run_ibkr_lane_submit_port(
+        config=IbkrLaneSubmitPortConfig(
+            repo_root=tmp_path,
+            submit=True,
+            control_plane_authorized_submit=True,
+            strategy_id="mgc_1x_asia_london_participation__asia_london_long_v5",
+        )
+    )
+
+    assert artifacts.classification == "PAPER_LANE_PREFLIGHT_BLOCKED"
+    assert artifacts.report["pre_action_snapshot_validation"]["classification"] == "PRE_ACTION_BLOCKED_SNAPSHOT_MISSING"
+
+
+def test_lane_submit_requires_control_plane_authorized_submit(monkeypatch, tmp_path: Path) -> None:
+    _patch_actionable_lane(monkeypatch)
+    _write_pre_action_snapshot_for_lane_submit(tmp_path)
+
+    artifacts = run_ibkr_lane_submit_port(
+        config=IbkrLaneSubmitPortConfig(
+            repo_root=tmp_path,
+            submit=True,
+            control_plane_authorized_submit=False,
+            strategy_id="mgc_1x_asia_london_participation__asia_london_long_v5",
+        )
+    )
+
+    assert artifacts.classification == "PAPER_LANE_PREFLIGHT_BLOCKED"
+    assert "control-plane-authorized" in artifacts.report["detail"]
+    assert artifacts.report["pre_action_snapshot_validation"] == {}
+
+
+def test_lane_submit_valid_snapshot_reaches_existing_bridge_gate(monkeypatch, tmp_path: Path) -> None:
+    _patch_actionable_lane(monkeypatch)
+    _write_pre_action_snapshot_for_lane_submit(tmp_path)
+    bridge_calls: list[object] = []
+
+    def _fake_bridge(*, config):
+        bridge_calls.append(config)
+        return SimpleNamespace(
+            classification="PAPER_STRATEGY_ORDER_WORKING",
+            report={"detail": "fake bridge reached"},
+        )
+
+    monkeypatch.setattr(lane_submit_module, "run_ibkr_paper_strategy_bridge", _fake_bridge)
+
+    artifacts = run_ibkr_lane_submit_port(
+        config=IbkrLaneSubmitPortConfig(
+            repo_root=tmp_path,
+            submit=True,
+            control_plane_authorized_submit=True,
+            strategy_id="mgc_1x_asia_london_participation__asia_london_long_v5",
+        )
+    )
+
+    assert artifacts.classification == "PAPER_LANE_ORDER_WORKING"
+    assert artifacts.report["pre_action_snapshot_validation"]["classification"] == "PRE_ACTION_SNAPSHOT_VALID"
+    assert artifacts.report["delegated_result"]["detail"] == "fake bridge reached"
+    assert len(bridge_calls) == 1
+
+
+def test_lane_submit_dashboard_projection_not_consumed_as_authority() -> None:
+    source = Path(lane_submit_module.__file__).read_text(encoding="utf-8")
+    assert "outputs/operator_dashboard/runtime/latest_track_b_control_plane_snapshot.json" not in source
+
+
+def _patch_actionable_lane(monkeypatch) -> None:
+    strategy_id = "mgc_1x_asia_london_participation__asia_london_long_v5"
+    monkeypatch.setattr(
+        lane_submit_module,
+        "run_ibkr_paper_strategy_porting",
+        lambda *, config: SimpleNamespace(
+            report={
+                "inventory_rows": [
+                    {
+                        "strategy_id": strategy_id,
+                        "instrument": "MGC",
+                        "current_position_state": "FLAT",
+                        "current_order_destination": "ibkr_paper_bridge_submit_capable",
+                    }
+                ],
+                "intent_rows": [
+                    {
+                        "strategy_id": strategy_id,
+                        "action": "BUY",
+                        "quantity": 1.0,
+                        "route_blockers": [],
+                        "reason": "unit test actionable lane",
+                    }
+                ],
+            }
+        ),
+    )
+    monkeypatch.setattr(lane_submit_module, "write_ibkr_paper_strategy_porting_artifacts", lambda **_kwargs: None)
+    monkeypatch.setattr(
+        lane_submit_module,
+        "load_paper_strategy_monitor_status",
+        lambda *, repo_root: {
+            "monitor_running": True,
+            "health_classification": "HEALTHY",
+            "stale": False,
+            "open_order_count": 0,
+        },
+    )
+    monkeypatch.setattr(
+        lane_submit_module,
+        "load_paper_strategy_governance_status",
+        lambda *, repo_root, strategy_id: {
+            "selected_strategy": {"strategy_status": "WATCHLIST"},
+            "submit_allowed": True,
+        },
+    )
+    monkeypatch.setattr(
+        lane_submit_module,
+        "_load_governance_rows",
+        lambda repo_root: [{"strategy_id": strategy_id, "strategy_status": "WATCHLIST"}],
+    )
+
+
+def _write_pre_action_snapshot_for_lane_submit(root: Path) -> None:
+    generated_at = datetime.now(timezone.utc).isoformat()
+    snapshot_id = "snapshot-lane-submit-port"
+    generation_id = "generation-lane-submit-port"
+    supervisor_decision_id = "supervisor-lane-submit-port"
+    target = {
+        "account_id": "DUM882026",
+        "strategy_id": "mgc_1x_asia_london_participation__asia_london_long_v5",
+        "symbol": "MGC",
+        "contract_month": "202606",
+        "action": "BUY",
+        "quantity": "1.0",
+    }
+    _write_json(
+        root / "outputs/track_b_execution_core/control_plane/latest_control_plane_snapshot.json",
+        {
+            "generated_at": generated_at,
+            "classification": "CONTROL_PLANE_SNAPSHOT_READY",
+            "control_plane_snapshot_id": snapshot_id,
+            "shared_truth_refresh_generation_id": generation_id,
+            "shared_truth_coherence_status": "COHERENT",
+            "runtime_supervisor_decision_id": supervisor_decision_id,
+            "runtime_supervisor_classification": "SUPERVISOR_RUNTIME_START_ALLOWED",
+            "safe_to_start_runtime": True,
+            "live_money_eligible": False,
+        },
+    )
+    _write_json(
+        root / "outputs/track_b_execution_core/runtime_supervisor/latest_runtime_supervisor_authority.json",
+        {
+            "generated_at": generated_at,
+            "supervisor_decision_id": supervisor_decision_id,
+            "classification": "SUPERVISOR_RUNTIME_START_ALLOWED",
+            "live_money_eligible": False,
+        },
+    )
+    _write_json(
+        root / "outputs/track_b_execution_core/paper_autonomous_recovery/latest_paper_autonomous_recovery_plan.json",
+        {
+            "generated_at": generated_at,
+            "classification": _PLAN_LANE_SUBMIT_PORT,
+            "control_plane_snapshot_id": snapshot_id,
+            "shared_truth_refresh_generation_id": generation_id,
+            "execution_enabled": False,
+            "proposed_actions": [
+                {
+                    "action_id": "lane_submit_port",
+                    "action_type": _ACTION_LANE_SUBMIT_PORT,
+                    "target_identity": target,
+                    "execution_enabled": False,
+                }
+            ],
+        },
+    )
+
+
+def _write_json(path: Path, payload: dict[str, object]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")

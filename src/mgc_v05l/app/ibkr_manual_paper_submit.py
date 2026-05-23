@@ -50,6 +50,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--submit", action="store_true", help="Explicitly attempt one paper submit/cancel lifecycle after preview and approval validation.")
     parser.add_argument("--approval-digest", default=None, help="Exact preview digest required for submit.")
     parser.add_argument("--approval-phrase", default=None, help="Exact typed confirmation phrase required for submit.")
+    parser.add_argument(
+        "--pre-action-snapshot-max-age-seconds",
+        type=int,
+        default=300,
+        help="Maximum age for the Control Plane Snapshot required before any apply-mode submit.",
+    )
     parser.add_argument("--diagnostic-dry-run", action="store_true", help="Do not submit anything. Instead exercise the callback and order-observation stack and write a diagnostic report.")
     parser.add_argument("--output-dir", type=Path, default=DEFAULT_OUTPUT_DIR, help="Artifact output directory.")
     parser.add_argument("--frozen-preview-path", type=Path, default=None, help="Optional explicit frozen preview bundle path. Submit requires a previously generated bundle.")
@@ -85,6 +91,7 @@ def main(argv: list[str] | None = None) -> int:
         submit=bool(args.submit),
         approval_digest=str(args.approval_digest or "").strip() or None,
         approval_phrase=str(args.approval_phrase or "").strip() or None,
+        pre_action_snapshot_max_age_seconds=int(args.pre_action_snapshot_max_age_seconds),
         output_dir=output_dir,
         frozen_preview_path=Path(args.frozen_preview_path) if args.frozen_preview_path is not None else None,
         diagnostic_dry_run=bool(args.diagnostic_dry_run),

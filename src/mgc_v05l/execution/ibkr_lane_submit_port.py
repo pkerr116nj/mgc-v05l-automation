@@ -8,6 +8,11 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from ..execution_core.track_b_pre_action_snapshot_validator import (
+    PRE_ACTION_SNAPSHOT_VALID,
+    TrackBPreActionSnapshotValidatorConfig,
+    validate_track_b_pre_action_snapshot,
+)
 from .ibkr_paper_strategy_bridge import IbkrPaperStrategyBridgeConfig, run_ibkr_paper_strategy_bridge
 from .ibkr_paper_strategy_governance import load_paper_strategy_governance_status
 from .ibkr_paper_strategy_monitor import load_paper_strategy_monitor_status
@@ -50,6 +55,8 @@ _EXPECTED_MODE = "PAPER"
 _EXPECTED_HOST = "127.0.0.1"
 _EXPECTED_PORT = 7497
 _EXPECTED_ACCOUNT = "DUM882026"
+_PLAN_LANE_SUBMIT_PORT = "PLAN_LANE_SUBMIT_PORT"
+_ACTION_LANE_SUBMIT_PORT = "LANE_SUBMIT_PORT"
 
 
 @dataclass(frozen=True)
@@ -57,7 +64,9 @@ class IbkrLaneSubmitPortConfig:
     repo_root: Path
     output_dir: Path = _DEFAULT_OUTPUT_DIR
     porting_output_dir: Path = _DEFAULT_PORTING_OUTPUT_DIR
-    submit: bool = True
+    submit: bool = False
+    control_plane_authorized_submit: bool = False
+    pre_action_snapshot_max_age_seconds: int = 300
     client_id: int = 9241
     timeout_seconds: float = 15.0
     strategy_id: str | None = None
@@ -104,24 +113,57 @@ def run_ibkr_lane_submit_port(*, config: IbkrLaneSubmitPortConfig) -> IbkrLaneSu
     action = str(intent_row.get("action") or "NO_ACTION").upper()
     classification = "PAPER_LANE_PREFLIGHT_BLOCKED"
     delegated_result: dict[str, Any] | None = None
+    pre_action_snapshot_validation: dict[str, Any] = {}
     detail = "Selected lane did not pass submit-capable preflight."
     if not any(check["blocking"] and not check["passed"] for check in checks):
         if action in {"NO_ACTION", "HOLD"}:
             classification = "PAPER_LANE_SUBMIT_READY_NO_ACTION"
             detail = "Selected lane is now submit-capable through the shared IBKR paper bridge path, but the live intent remains NO_ACTION so no order was submitted."
         elif action in {"BUY", "SELL", "EXIT"} and config.submit:
-            bridge_config = _bridge_config_for_lane(
-                config=config,
-                strategy_id=strategy_id,
-                inventory_row=inventory_row,
-                intent_row=intent_row,
-                adapter=adapter or {},
-            )
-            bridge_artifacts = run_ibkr_paper_strategy_bridge(config=bridge_config)
-            delegated_result = bridge_artifacts.report
-            classification = _map_bridge_classification(str(bridge_artifacts.classification or ""))
-            detail = str(bridge_artifacts.report.get("detail") or f"Shared bridge returned {bridge_artifacts.classification}.")
-            _record(audit_events, "bridge_executed", "Executed one shared-bridge pass for the selected lane.", {"bridge_classification": bridge_artifacts.classification})
+            if not config.control_plane_authorized_submit:
+                classification = "PAPER_LANE_PREFLIGHT_BLOCKED"
+                detail = "Lane submit port requires explicit control-plane-authorized submit mode before any broker bridge delegation."
+                _record(
+                    audit_events,
+                    "lane_submit_blocked_without_control_plane_authorization",
+                    detail,
+                    {"strategy_id": strategy_id},
+                )
+            else:
+                pre_action_snapshot_validation = _pre_action_snapshot_validation_for_lane(
+                    config=config,
+                    strategy_id=strategy_id,
+                    inventory_row=inventory_row,
+                    intent_row=intent_row,
+                    adapter=adapter or {},
+                    now=datetime.now(timezone.utc),
+                )
+                if pre_action_snapshot_validation.get("classification") != PRE_ACTION_SNAPSHOT_VALID:
+                    classification = "PAPER_LANE_PREFLIGHT_BLOCKED"
+                    detail = (
+                        "Pre-action Control Plane Snapshot validation blocked lane submit port delegation: "
+                        f"{pre_action_snapshot_validation.get('classification')} - "
+                        f"{pre_action_snapshot_validation.get('reason')}"
+                    )
+                    _record(
+                        audit_events,
+                        "lane_submit_pre_action_snapshot_blocked",
+                        detail,
+                        {"pre_action_snapshot_validation": pre_action_snapshot_validation},
+                    )
+                else:
+                    bridge_config = _bridge_config_for_lane(
+                        config=config,
+                        strategy_id=strategy_id,
+                        inventory_row=inventory_row,
+                        intent_row=intent_row,
+                        adapter=adapter or {},
+                    )
+                    bridge_artifacts = run_ibkr_paper_strategy_bridge(config=bridge_config)
+                    delegated_result = bridge_artifacts.report
+                    classification = _map_bridge_classification(str(bridge_artifacts.classification or ""))
+                    detail = str(bridge_artifacts.report.get("detail") or f"Shared bridge returned {bridge_artifacts.classification}.")
+                    _record(audit_events, "bridge_executed", "Executed one shared-bridge pass for the selected lane.", {"bridge_classification": bridge_artifacts.classification})
         else:
             classification = "PAPER_LANE_PREFLIGHT_BLOCKED"
             detail = "Selected lane emitted an actionable intent but submit was disabled for this lane-port run."
@@ -136,6 +178,12 @@ def run_ibkr_lane_submit_port(*, config: IbkrLaneSubmitPortConfig) -> IbkrLaneSu
         "paper_strategy_monitor_status": monitor_status,
         "bridge_adapter": adapter,
         "preflight_checks": checks,
+        "lane_submit_port_path": True,
+        "default_submit_enabled": False,
+        "control_plane_authorized_submit": bool(config.control_plane_authorized_submit),
+        "pre_action_snapshot_required_for_submit": True,
+        "pre_action_snapshot_validation": pre_action_snapshot_validation,
+        "preferred_path": "runtime_supervised_strategy_bridge",
         "delegated_result": delegated_result,
         "detail": detail,
     }
@@ -297,6 +345,59 @@ def _bridge_config_for_lane(
         caller_path="manual_strategy_bridge_cli",
         output_dir=config.output_dir / "delegated_bridge",
     )
+
+
+def _pre_action_snapshot_validation_for_lane(
+    *,
+    config: IbkrLaneSubmitPortConfig,
+    strategy_id: str,
+    inventory_row: dict[str, Any],
+    intent_row: dict[str, Any],
+    adapter: dict[str, Any],
+    now: datetime,
+) -> dict[str, Any]:
+    return validate_track_b_pre_action_snapshot(
+        config=TrackBPreActionSnapshotValidatorConfig(repo_root=config.repo_root),
+        expected_plan_classification=_PLAN_LANE_SUBMIT_PORT,
+        expected_action_type=_ACTION_LANE_SUBMIT_PORT,
+        expected_target_identity=_pre_action_target_identity_for_lane(
+            strategy_id=strategy_id,
+            inventory_row=inventory_row,
+            intent_row=intent_row,
+            adapter=adapter,
+        ),
+        max_snapshot_age_seconds=int(config.pre_action_snapshot_max_age_seconds),
+        now=now,
+    )
+
+
+def _pre_action_target_identity_for_lane(
+    *,
+    strategy_id: str,
+    inventory_row: dict[str, Any],
+    intent_row: dict[str, Any],
+    adapter: dict[str, Any],
+) -> dict[str, Any]:
+    bridge_target = dict(adapter.get("bridge_execution_target") or {})
+    action = str(intent_row.get("action") or "").upper()
+    if action == "EXIT":
+        bridge_action = "SELL"
+        quantity = inventory_row.get("current_quantity")
+    else:
+        bridge_action = action
+        quantity = intent_row.get("quantity")
+    return {
+        "account_id": _EXPECTED_ACCOUNT,
+        "strategy_id": strategy_id,
+        "symbol": str(bridge_target.get("symbol") or _selected_symbol_from_rows(inventory_row, intent_row)).upper(),
+        "contract_month": str(bridge_target.get("contract_month") or ""),
+        "action": bridge_action,
+        "quantity": str(quantity if quantity is not None else ""),
+    }
+
+
+def _selected_symbol_from_rows(inventory_row: dict[str, Any], intent_row: dict[str, Any]) -> str:
+    return str(intent_row.get("symbol") or inventory_row.get("instrument") or "")
 
 
 def _map_bridge_classification(classification: str) -> str:

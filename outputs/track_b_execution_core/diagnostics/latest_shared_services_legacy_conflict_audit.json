@@ -41,6 +41,7 @@
       ],
       "recommended_v2_migration": "Split the harness into read-only preview and mutation adapter. Keep preview diagnostic. Any mutation adapter should require Control Plane Snapshot validation, PAPER Recovery Policy action budget, exact target identity, and explicit PAPER-only route lock. Direct CLI apply should default disabled.",
       "severity": "CRITICAL",
+      "snapshot_gate_status": "APPLY_MODE_SNAPSHOT_GATED",
       "tests_needed": [
         "manual submit apply blocks without pre-action snapshot.",
         "manual submit preview remains read-only.",
@@ -59,6 +60,7 @@
       ],
       "recommended_v2_migration": "Make lane-port mutation dry-run by default, require Control Plane Snapshot validation before delegate submit, and eventually route through the autonomous executor boundary for PLAN_RUNTIME_RETRY or explicit scoped test-order actions.",
       "severity": "CRITICAL",
+      "snapshot_gate_status": "DEFAULT_NON_MUTATING_AND_APPLY_MODE_SNAPSHOT_GATED",
       "tests_needed": [
         "lane submit port default is non-mutating or blocks without snapshot.",
         "lane submit port rejects stale/mixed snapshot.",
@@ -240,13 +242,13 @@
   ],
   "generated_at": "2026-05-23T20:05:48.626900+00:00",
   "recommended_next_implementation_slice": {
-    "rationale": "Lower-level REST cancel, cancel/replace, and modify-in-place are now snapshot-gated. The next shortest path is preventing manual submit and lane submit paths from bypassing coherent Control Plane Snapshot validation.",
+    "rationale": "Lower-level REST cancel, manual submit, lane submit, cancel/replace, and modify-in-place are now snapshot-gated. The next top risk is strategy bridge direct invocation and generation-scoped runtime evidence.",
     "scope": [
-      "SS-LCA-002",
-      "SS-LCA-003",
-      "SS-LCA-004"
+      "SS-LCA-004",
+      "SS-LCA-007",
+      "SS-LCA-008"
     ],
-    "title": "Snapshot-gate manual submit and lane submit mutation entrypoints"
+    "title": "Snapshot-gate strategy bridge direct invocation and process recovery"
   },
   "repo_root": "/Users/patrick/Dev/MGC-v05l-automation",
   "severity_counts": {
@@ -256,11 +258,11 @@
     "MEDIUM": 3
   },
   "top_5_risks": [
-    "SS-LCA-002",
-    "SS-LCA-003",
     "SS-LCA-004",
     "SS-LCA-007",
-    "SS-LCA-008"
+    "SS-LCA-008",
+    "SS-LCA-009",
+    "SS-LCA-010"
   ],
   "v2_resiliency_backlog": [
     {
