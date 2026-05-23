@@ -35,6 +35,14 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--delayed-quote-max-age-seconds", type=float, default=30.0, help="Maximum age of the delayed quote snapshot.")
     parser.add_argument("--visible-in-tws", choices=("true", "false", "unknown"), default="unknown", help="Optional operator confirmation that the resting order was visible in TWS while working.")
     parser.add_argument("--canceled-in-tws", choices=("true", "false", "unknown"), default="unknown", help="Optional operator confirmation that the order disappeared or showed canceled in TWS after cancel.")
+    parser.add_argument(
+        "--emergency-legacy-rest-cancel",
+        action="store_true",
+        help="Deprecated emergency-only gate. Prefer track_b_managed_exit_cancel_replace for managed order cancel/replace.",
+    )
+    parser.add_argument("--pre-action-snapshot-max-age-seconds", type=int, default=300)
+    parser.add_argument("--expected-broker-order-id", help="Optional exact broker order id expected in the Control Plane Snapshot plan target.")
+    parser.add_argument("--expected-perm-id", help="Optional exact perm id expected in the Control Plane Snapshot plan target.")
     parser.add_argument("--output-dir", type=Path, default=DEFAULT_OUTPUT_DIR, help="Artifact output directory.")
     parser.add_argument("--overwrite", action="store_true", help="Allow writing into a non-empty output directory.")
     return parser
@@ -59,6 +67,10 @@ def main(argv: list[str] | None = None) -> int:
         delayed_quote_max_age_seconds=float(args.delayed_quote_max_age_seconds),
         visible_in_tws=_parse_optional_bool(args.visible_in_tws),
         canceled_in_tws=_parse_optional_bool(args.canceled_in_tws),
+        emergency_legacy_rest_cancel=bool(args.emergency_legacy_rest_cancel),
+        pre_action_snapshot_max_age_seconds=int(args.pre_action_snapshot_max_age_seconds),
+        expected_broker_order_id=None if args.expected_broker_order_id is None else str(args.expected_broker_order_id),
+        expected_perm_id=None if args.expected_perm_id is None else str(args.expected_perm_id),
     )
     artifacts = run_ibkr_unattended_paper_rest_cancel(config=config)
     write_ibkr_unattended_paper_rest_cancel_artifacts(output_dir=output_dir, artifacts=artifacts)

@@ -22,7 +22,7 @@ The remaining risk is concentrated in older broker/order mutation harnesses and 
 
 ## Top 5 Risks
 
-1. `SS-LCA-001` CRITICAL - broker mutation / lower-level REST cancel: The unattended rest/cancel harness builds a local IBKR session, reads account/open-order/position snapshots, submits a resting PAPER order, and cancels/verifies it through inherited manual-submit helpers. Its guards are local environment/caller/open-order checks, not a Control Plane Snapshot or pre-action snapshot validator.
+1. `SS-LCA-001` CRITICAL - broker mutation / lower-level REST cancel: The unattended rest/cancel harness was a lower-level submit/cancel test harness. Status update: deprecated as emergency-only and snapshot-gated before any transport construction or broker mutation lifecycle.
 1. `SS-LCA-002` CRITICAL - broker mutation / manual submit harness: The manual paper submit harness can submit and cancel PAPER orders after a frozen-preview/approval-digest flow. It relies on local runtime guardrails, broker snapshots, quote probes, and callback evidence.
 1. `SS-LCA-003` CRITICAL - broker mutation / lane submit port: Lane submit port defaults `submit=True` and delegates actionable BUY/SELL/EXIT intents to the IBKR paper strategy bridge after local monitor/governance/intent checks.
 1. `SS-LCA-004` HIGH - broker mutation / shared bridge submit: The strategy bridge performs many local gates, phase-1 broker reconciliation submit gate checks, ownership persistence, and delegates to the manual paper submit harness.
@@ -31,10 +31,11 @@ The remaining risk is concentrated in older broker/order mutation harnesses and 
 ## Status Update - Snapshot-Gated Order Apply Paths
 
 - updated_at: `2026-05-23T00:00:00+00:00`
+- `SS-LCA-001` lower-level REST cancel is now deprecated/emergency-only, reports `lower_level_cancel_path=true` / `emergency_only=true`, prefers `track_b_managed_exit_cancel_replace`, and validates a coherent Control Plane Snapshot plus matching `PLAN_TARGETED_CANCEL_REPLACE` / `TARGETED_CANCEL_REPLACE` target before any transport construction or submit/cancel lifecycle.
 - `SS-LCA-005` cancel/replace apply path is now gated by `validate_track_b_pre_action_snapshot(...)` before adapter construction, cancel, or replacement submit. It requires a coherent Control Plane Snapshot and `PLAN_TARGETED_CANCEL_REPLACE` / `TARGETED_CANCEL_REPLACE` planner evidence matching the exact order target.
 - `SS-LCA-006` modify-in-place apply path is now gated by `validate_track_b_pre_action_snapshot(...)` before broker refresh, modify, or post-modify verification hooks. It requires a coherent Control Plane Snapshot and `PLAN_MANAGED_ORDER_MODIFY` / `MANAGED_ORDER_MODIFY` planner evidence matching the exact order and price target.
 - dry-run mode remains non-mutating and records whether the same snapshot gate would block apply.
-- next top risk remains `SS-LCA-001` lower-level REST cancel, followed by `SS-LCA-002` manual submit harness and `SS-LCA-003` lane submit port.
+- next top risk is `SS-LCA-002` manual submit harness, followed by `SS-LCA-003` lane submit port and `SS-LCA-004` shared bridge submit.
 
 ## Findings
 
@@ -44,6 +45,7 @@ The remaining risk is concentrated in older broker/order mutation harnesses and 
 - legacy/local behavior: The unattended rest/cancel harness builds a local IBKR session, reads account/open-order/position snapshots, submits a resting PAPER order, and cancels/verifies it through inherited manual-submit helpers. Its guards are local environment/caller/open-order checks, not a Control Plane Snapshot or pre-action snapshot validator.
 - conflict with doctrine: A broker-mutating path can submit/cancel from scattered broker reads instead of a coherent execution_core Control Plane Snapshot. This violates the pre-action packet rule for future autonomous/bounded recovery.
 - recommended v2 migration: Retire or quarantine this harness behind `validate_track_b_pre_action_snapshot(...)` with action type TARGETED_CANCEL_REPLACE or a dedicated BROKER_TEST_ORDER action. Require a coherent snapshot id/generation, Managed Order Registry identity, Open Order Truth, Order Adjustment Planner, and PAPER Recovery Policy budget before any apply mode.
+- current status: deprecated/emergency-only and snapshot-gated before broker transport construction; normal managed cancel/replace should use `track_b_managed_exit_cancel_replace`.
 - code change needed now: `false`
 - tests needed:
   - REST cancel apply blocks without coherent Control Plane Snapshot.

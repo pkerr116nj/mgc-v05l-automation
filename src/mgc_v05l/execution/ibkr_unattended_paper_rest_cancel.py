@@ -12,6 +12,12 @@ from pathlib import Path
 from typing import Any, Callable
 
 from ..brokers.ibkr import IbkrClient, IbkrSession, build_default_ibkr_order_id_policy
+from ..execution_core.track_b_paper_autonomous_recovery_planner import PLAN_TARGETED_CANCEL_REPLACE
+from ..execution_core.track_b_pre_action_snapshot_validator import (
+    PRE_ACTION_SNAPSHOT_VALID,
+    TrackBPreActionSnapshotValidatorConfig,
+    validate_track_b_pre_action_snapshot,
+)
 from .ibkr_manual_paper_submit import (
     _SEVERE_CONNECTION_ERROR_CODES,
     IbkrManualPaperSubmitCollector,
@@ -116,6 +122,10 @@ class IbkrUnattendedPaperRestCancelConfig:
     visible_in_tws: bool | None = None
     canceled_in_tws: bool | None = None
     caller_path: str = "unattended_paper_cli"
+    emergency_legacy_rest_cancel: bool = False
+    pre_action_snapshot_max_age_seconds: int = 300
+    expected_broker_order_id: str | None = None
+    expected_perm_id: str | None = None
 
 
 @dataclass(frozen=True)
@@ -170,6 +180,7 @@ def run_ibkr_unattended_paper_rest_cancel(
         environment_lock=environment_lock,
         unattended_paper=config.unattended_paper,
         input_guardrails=input_guardrails,
+        emergency_legacy_rest_cancel=config.emergency_legacy_rest_cancel,
     )
     if any(check.get("blocking") and not check.get("passed") for check in guardrail_checks):
         detail = _first_failed_guardrail_detail(guardrail_checks)
@@ -189,6 +200,40 @@ def run_ibkr_unattended_paper_rest_cancel(
             guardrail_checks=guardrail_checks,
             audit_events=audit_events,
             detail=detail,
+        )
+        return IbkrUnattendedPaperRestCancelArtifacts(
+            classification="IBKR_UNATTENDED_REST_CANCEL_UNKNOWN",
+            report=report,
+            audit_events=audit_events,
+            open_order_before=_not_run_snapshot("Open-order baseline was not captured."),
+            open_order_after_submit=_not_run_snapshot("Submit did not run."),
+            open_order_after_cancel=_not_run_snapshot("Cancel did not run."),
+            callback_timeline=[],
+        )
+    pre_action_validation = _pre_action_snapshot_validation(config=config, now=started_at)
+    if pre_action_validation.get("classification") != PRE_ACTION_SNAPSHOT_VALID:
+        detail = (
+            "Pre-action Control Plane Snapshot validation blocked emergency legacy REST cancel path: "
+            f"{pre_action_validation.get('classification')} - {pre_action_validation.get('reason')}"
+        )
+        _record_audit(
+            audit_events,
+            event_type="failed_closed",
+            config=_audit_config(config),
+            classification="IBKR_UNATTENDED_REST_CANCEL_UNKNOWN",
+            detail=detail,
+            extra={"pre_action_snapshot_validation": pre_action_validation},
+        )
+        report = _blocked_report(
+            config=config,
+            started_at=started_at,
+            caller_check=caller_check,
+            environment_lock=environment_lock,
+            requested_order=requested_order,
+            guardrail_checks=guardrail_checks,
+            audit_events=audit_events,
+            detail=detail,
+            pre_action_snapshot_validation=pre_action_validation,
         )
         return IbkrUnattendedPaperRestCancelArtifacts(
             classification="IBKR_UNATTENDED_REST_CANCEL_UNKNOWN",
@@ -363,6 +408,7 @@ def run_ibkr_unattended_paper_rest_cancel(
             audit_events=audit_events,
             errors=list(runtime.collector.errors),
             callback_timeline_event_count=len(_build_callback_timeline(runtime)),
+            pre_action_snapshot_validation=pre_action_validation,
         )
         return IbkrUnattendedPaperRestCancelArtifacts(
             classification=classification,
@@ -392,6 +438,7 @@ def run_ibkr_unattended_paper_rest_cancel(
             guardrail_checks=guardrail_checks,
             audit_events=audit_events,
             detail=str(exc),
+            pre_action_snapshot_validation=pre_action_validation,
         )
         if runtime is not None:
             report["errors"] = list(runtime.collector.errors)
@@ -611,6 +658,7 @@ def _preflight_guardrail_checks(
     environment_lock: dict[str, Any],
     unattended_paper: bool,
     input_guardrails: dict[str, dict[str, Any]],
+    emergency_legacy_rest_cancel: bool,
 ) -> list[dict[str, Any]]:
     checks = [
         _guardrail_check("dedicated_unattended_cli_only", passed=caller_check["passed"], blocking=True, detail=caller_check["detail"]),
@@ -620,6 +668,15 @@ def _preflight_guardrail_checks(
             passed=bool(unattended_paper),
             blocking=True,
             detail="The unattended paper rest/cancel harness requires the explicit --unattended-paper flag.",
+        ),
+        _guardrail_check(
+            "explicit_emergency_legacy_rest_cancel_required",
+            passed=bool(emergency_legacy_rest_cancel),
+            blocking=True,
+            detail=(
+                "The lower-level REST cancel harness is deprecated/emergency-only. "
+                "Use track_b_managed_exit_cancel_replace for managed order cancel/replace."
+            ),
         ),
     ]
     for name, payload in input_guardrails.items():
@@ -928,6 +985,7 @@ def _build_report(
     audit_events: list[dict[str, Any]],
     errors: list[dict[str, Any]],
     callback_timeline_event_count: int,
+    pre_action_snapshot_validation: dict[str, Any],
 ) -> dict[str, Any]:
     exact_contract = dict(exact_contract_report.get("exact_contract") or {})
     return {
@@ -941,8 +999,14 @@ def _build_report(
         "mode": config.mode,
         "host": config.host,
         "port": config.port,
+        "lower_level_cancel_path": True,
+        "preferred_path": "track_b_managed_exit_cancel_replace",
+        "emergency_only": True,
+        "emergency_legacy_rest_cancel": bool(config.emergency_legacy_rest_cancel),
+        "deprecated": True,
         "account_id": account_truth.get("selected_account_id") or config.account_id,
         "client_id": config.client_id,
+        "pre_action_snapshot_validation": pre_action_snapshot_validation,
         "caller_gate_check": caller_check,
         "environment_lock_check": environment_lock,
         "account_truth": account_truth,
@@ -1058,6 +1122,33 @@ def _manual_like_config(config: IbkrUnattendedPaperRestCancelConfig) -> Any:
     )()
 
 
+def _pre_action_snapshot_validation(*, config: IbkrUnattendedPaperRestCancelConfig, now: datetime) -> dict[str, Any]:
+    return validate_track_b_pre_action_snapshot(
+        config=TrackBPreActionSnapshotValidatorConfig(repo_root=config.repo_root),
+        expected_plan_classification=PLAN_TARGETED_CANCEL_REPLACE,
+        expected_action_type="TARGETED_CANCEL_REPLACE",
+        expected_target_identity=_pre_action_target_identity(config),
+        max_snapshot_age_seconds=int(config.pre_action_snapshot_max_age_seconds),
+        now=now,
+    )
+
+
+def _pre_action_target_identity(config: IbkrUnattendedPaperRestCancelConfig) -> dict[str, Any]:
+    identity = {
+        "account_id": config.account_id,
+        "symbol": config.symbol,
+        "contract": config.local_symbol,
+        "con_id": config.con_id,
+        "action": config.action,
+        "quantity": config.quantity,
+    }
+    if config.expected_broker_order_id:
+        identity["broker_order_id"] = config.expected_broker_order_id
+    if config.expected_perm_id:
+        identity["perm_id"] = config.expected_perm_id
+    return identity
+
+
 def _audit_config(config: IbkrUnattendedPaperRestCancelConfig) -> Any:
     return type(
         "AuditConfig",
@@ -1081,6 +1172,7 @@ def _blocked_report(
     guardrail_checks: list[dict[str, Any]],
     audit_events: list[dict[str, Any]],
     detail: str,
+    pre_action_snapshot_validation: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     return {
         "classification": "IBKR_UNATTENDED_REST_CANCEL_UNKNOWN",
@@ -1089,8 +1181,14 @@ def _blocked_report(
         "mode": config.mode,
         "host": config.host,
         "port": config.port,
+        "lower_level_cancel_path": True,
+        "preferred_path": "track_b_managed_exit_cancel_replace",
+        "emergency_only": True,
+        "emergency_legacy_rest_cancel": bool(config.emergency_legacy_rest_cancel),
+        "deprecated": True,
         "account_id": config.account_id,
         "client_id": config.client_id,
+        "pre_action_snapshot_validation": pre_action_snapshot_validation or {},
         "caller_gate_check": caller_check,
         "environment_lock_check": environment_lock,
         "quote_context": {},
