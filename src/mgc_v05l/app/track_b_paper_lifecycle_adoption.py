@@ -17,6 +17,13 @@ from pathlib import Path
 from typing import Any, Mapping, Sequence
 
 from mgc_v05l.execution.ibkr_paper_strategy_porting import lane_submit_bridge_adapter
+from mgc_v05l.execution_core.track_b_broker_truth_lease import DEFAULT_LEASE_ARTIFACT
+from mgc_v05l.execution_core.track_b_managed_order_registry import (
+    DEFAULT_MANAGED_ORDER_REGISTRY_ARTIFACT,
+    NO_MANAGED_ORDERS,
+)
+from mgc_v05l.execution_core.track_b_managed_position_registry import DEFAULT_MANAGED_POSITION_REGISTRY_ARTIFACT
+from mgc_v05l.execution_core.track_b_open_order_truth import DEFAULT_OPEN_ORDER_TRUTH_ARTIFACT, NO_OPEN_ORDERS
 from mgc_v05l.execution_core.track_b_paper_trade_ledger import (
     update_track_b_paper_trade_ledger_from_filled_bridge_result,
 )
@@ -24,6 +31,11 @@ from mgc_v05l.execution_core.track_b_position_management_manifest import (
     DEFAULT_TRACK_B_POSITION_MANAGEMENT_MANIFEST_ROOT,
     resolve_management_metadata,
 )
+from mgc_v05l.execution_core.track_b_position_truth_monitor import DEFAULT_POSITION_TRUTH_ARTIFACT
+from mgc_v05l.execution_core.track_b_runtime_supervisor_authority import (
+    DEFAULT_RUNTIME_SUPERVISOR_AUTHORITY_ARTIFACT,
+)
+from mgc_v05l.execution_core.track_b_shared_truth_refresh_cli import DEFAULT_RECONCILIATION_ARTIFACT
 from mgc_v05l.execution_core.track_b_submit_intent_ownership import (
     DEFAULT_TRACK_B_SUBMIT_INTENT_OWNERSHIP_JSONL,
     append_submit_intent_ownership_record,
@@ -69,6 +81,15 @@ class LifecycleAdoptionConfig:
     broker_truth_path: Path = DEFAULT_BROKER_TRUTH_PATH
     ledger_root: Path = DEFAULT_LEDGER_ROOT
     submit_intent_ownership_path: Path = DEFAULT_SUBMIT_INTENT_OWNERSHIP_PATH
+    require_shared_truth_evidence: bool = True
+    shared_truth_max_age_seconds: float = 600.0
+    open_order_truth_path: Path = DEFAULT_OPEN_ORDER_TRUTH_ARTIFACT
+    managed_order_registry_path: Path = DEFAULT_MANAGED_ORDER_REGISTRY_ARTIFACT
+    position_truth_path: Path = DEFAULT_POSITION_TRUTH_ARTIFACT
+    managed_position_registry_path: Path = DEFAULT_MANAGED_POSITION_REGISTRY_ARTIFACT
+    runtime_supervisor_authority_path: Path = DEFAULT_RUNTIME_SUPERVISOR_AUTHORITY_ARTIFACT
+    reconciliation_path: Path = DEFAULT_RECONCILIATION_ARTIFACT
+    broker_lease_path: Path = DEFAULT_LEASE_ARTIFACT
 
 
 @dataclass(frozen=True)
@@ -215,6 +236,14 @@ def run_track_b_paper_lifecycle_adoption(
         failures.append("live_money_eligible must be false.")
     if not order_intent_id:
         failures.append("Missing order_intent_id after intent selection.")
+    shared_truth_evidence = _shared_truth_adoption_evidence(
+        config=config,
+        broker_position=broker_position,
+        submit_intent_ownership=submit_intent_ownership,
+        order_intent_id=order_intent_id,
+        now=actual_now,
+    )
+    failures.extend(shared_truth_evidence["blockers"])
 
     valid = not failures
     classification = (
@@ -281,6 +310,7 @@ def run_track_b_paper_lifecycle_adoption(
             "selected": submit_intent_ownership,
             "unresolved_record_count": len(submit_intent_ownership_records),
         },
+        "shared_truth_evidence": shared_truth_evidence,
         "intent_evidence": {
             "path": str(order_intents_path),
             "selected": intent,
@@ -509,6 +539,8 @@ def _intent_from_submit_intent_ownership(
         "broker_order_id": submit_intent_ownership.get("broker_order_id"),
         "broker_order_status": "FILLED",
         "reason_code": _nested(submit_intent_ownership, "extra", "reason") or "LEAK_TEST_ENTRY",
+        "managed_exit_policy_id": submit_intent_ownership.get("managed_exit_policy_id")
+        or _nested(submit_intent_ownership, "extra", "managed_exit_policy_id"),
         "decision_bar_timestamp": submit_intent_ownership.get("created_at"),
         "signal_timestamp": submit_intent_ownership.get("created_at"),
         "ownership_intent_id": ownership_intent_id,
@@ -572,6 +604,8 @@ def _synthetic_leak_test_intent_from_bridge(
         or _nested(bridge_report, "delegated_result", "report", "submit_cancel_lifecycle", "latest_order_status", "order_id"),
         "broker_order_status": "FILLED",
         "reason_code": intent_payload.get("reason") or "LEAK_TEST_ENTRY",
+        "managed_exit_policy_id": intent_payload.get("managed_exit_policy_id")
+        or caller_metadata.get("managed_exit_policy_id"),
         "decision_bar_timestamp": intent_payload.get("timestamp"),
         "signal_timestamp": intent_payload.get("timestamp"),
         "synthetic_leak_test_intent": True,
@@ -1374,6 +1408,154 @@ def _jsonl_has_identity(rows: Sequence[Mapping[str, Any]], *, order_intent_id: s
     return False
 
 
+def _shared_truth_adoption_evidence(
+    *,
+    config: LifecycleAdoptionConfig,
+    broker_position: Mapping[str, Any] | None,
+    submit_intent_ownership: Mapping[str, Any] | None,
+    order_intent_id: str,
+    now: datetime,
+) -> dict[str, Any]:
+    paths = {
+        "open_order_truth": config.open_order_truth_path,
+        "managed_order_registry": config.managed_order_registry_path,
+        "position_truth": config.position_truth_path,
+        "managed_position_registry": config.managed_position_registry_path,
+        "runtime_supervisor_authority": config.runtime_supervisor_authority_path,
+        "reconciliation": config.reconciliation_path,
+        "broker_lease": config.broker_lease_path,
+    }
+    payloads = {name: _read_json(_resolve(repo_root=config.repo_root, path=path)) for name, path in paths.items()}
+    classifications = {name: _shared_classification(name=name, payload=payload) for name, payload in payloads.items()}
+    freshness = {
+        name: _shared_freshness(payload=payload, now=now, max_age_seconds=config.shared_truth_max_age_seconds)
+        for name, payload in payloads.items()
+    }
+    blockers: list[str] = []
+    if config.require_shared_truth_evidence:
+        for name, payload in payloads.items():
+            if not payload:
+                blockers.append(f"Shared truth authority artifact missing: {name}.")
+        for name, state in freshness.items():
+            if state["stale_or_missing"]:
+                blockers.append(f"Shared truth authority artifact stale/missing: {name}.")
+
+    if classifications["open_order_truth"] and classifications["open_order_truth"] != NO_OPEN_ORDERS:
+        blockers.append(f"Open Order Truth is not safe for adoption: {classifications['open_order_truth']}.")
+    if classifications["managed_order_registry"] and classifications["managed_order_registry"] != NO_MANAGED_ORDERS:
+        blockers.append(
+            f"Managed Order Registry is not safe for adoption: {classifications['managed_order_registry']}."
+        )
+    if classifications["runtime_supervisor_authority"] in {
+        "SUPERVISOR_MANUAL_REVIEW_REQUIRED",
+        "SUPERVISOR_RESTART_BLOCKED_OPERATOR_ACK",
+        "SUPERVISOR_RESTART_BLOCKED_CRASH_LOOP",
+        "SUPERVISOR_SHARED_TRUTH_STALE",
+        "SUPERVISOR_UNKNOWN_REVIEW_REQUIRED",
+    }:
+        blockers.append(
+            f"Runtime Supervisor Authority blocks lifecycle adoption: {classifications['runtime_supervisor_authority']}."
+        )
+    if classifications["reconciliation"] in {
+        "BROKER_TRUTH_SETTLEMENT_CONTRADICTORY_STATE",
+        "TRACK_B_PAPER_BROKER_RECONCILIATION_BLOCKED_UNKNOWN_OPEN_ORDERS",
+    }:
+        blockers.append(f"Reconciliation is unsafe for lifecycle adoption: {classifications['reconciliation']}.")
+    if classifications["broker_lease"] in {
+        "INVALIDATED_CONTRADICTION",
+        "INVALIDATED_UNKNOWN_OPEN_ORDERS",
+        "INVALIDATED_MANUAL_BROKER_ACTION",
+        "OPERATOR_REQUIRED",
+    }:
+        blockers.append(f"Broker Truth Lease is unsafe for lifecycle adoption: {classifications['broker_lease']}.")
+
+    target_agreement = {}
+    for name, rows in {
+        "position_truth": _list(payloads["position_truth"].get("position_states")),
+        "managed_position_registry": _list(payloads["managed_position_registry"].get("managed_positions")),
+    }.items():
+        conflicting = [
+            row
+            for row in rows
+            if _shared_adoption_row_is_active(row)
+            and not _shared_adoption_row_matches_target(
+                config=config,
+                row=row,
+                broker_position=broker_position,
+                submit_intent_ownership=submit_intent_ownership,
+                order_intent_id=order_intent_id,
+            )
+        ]
+        matching = [
+            row
+            for row in rows
+            if _shared_adoption_row_matches_target(
+                config=config,
+                row=row,
+                broker_position=broker_position,
+                submit_intent_ownership=submit_intent_ownership,
+                order_intent_id=order_intent_id,
+            )
+        ]
+        target_agreement[name] = {
+            "row_count": len(rows),
+            "matching_row_count": len(matching),
+            "conflicting_active_row_count": len(conflicting),
+        }
+        if conflicting:
+            blockers.append(f"{name} active rows conflict with requested adoption target.")
+
+    return {
+        "source_authority": "execution_core_authority",
+        "dashboard_projection_consumed": False,
+        "required": config.require_shared_truth_evidence,
+        "max_age_seconds": config.shared_truth_max_age_seconds,
+        "artifact_paths": {name: str(_resolve(repo_root=config.repo_root, path=path)) for name, path in paths.items()},
+        "classifications": classifications,
+        "freshness": freshness,
+        "target_agreement": target_agreement,
+        "blockers": blockers,
+    }
+
+
+def _shared_adoption_row_matches_target(
+    *,
+    config: LifecycleAdoptionConfig,
+    row: Mapping[str, Any],
+    broker_position: Mapping[str, Any] | None,
+    submit_intent_ownership: Mapping[str, Any] | None,
+    order_intent_id: str,
+) -> bool:
+    lifecycle_id = str(row.get("lifecycle_id") or row.get("entry_lifecycle_id") or "")
+    reserved_lifecycle_id = str((submit_intent_ownership or {}).get("lifecycle_id") or "")
+    if lifecycle_id and reserved_lifecycle_id and lifecycle_id == reserved_lifecycle_id:
+        return True
+    row_intent_id = str(row.get("order_intent_id") or row.get("entry_intent_id") or "")
+    ownership_intent_id = str((submit_intent_ownership or {}).get("ownership_intent_id") or "")
+    if row_intent_id and row_intent_id in {order_intent_id, ownership_intent_id}:
+        return True
+    symbol = str(row.get("symbol") or row.get("instrument_family") or row.get("instrument") or "").upper()
+    local_symbol = str(row.get("local_symbol") or row.get("localSymbol") or "").upper()
+    con_id = _decimal(row.get("con_id") or row.get("conId"))
+    broker_con_id = _decimal((broker_position or {}).get("con_id") or (submit_intent_ownership or {}).get("con_id"))
+    quantity = _decimal(row.get("quantity") or row.get("broker_quantity") or row.get("qty"))
+    if symbol and symbol != config.symbol.upper():
+        return False
+    if local_symbol and local_symbol != config.local_symbol.upper():
+        return False
+    if con_id is not None and broker_con_id is not None and con_id != broker_con_id:
+        return False
+    return quantity in {None, config.quantity, abs(config.quantity)}
+
+
+def _shared_adoption_row_is_active(row: Mapping[str, Any]) -> bool:
+    classification = str(row.get("classification") or "")
+    if classification in {"FLAT_CLEAN", "NO_MANAGED_POSITIONS"}:
+        return False
+    status = str(row.get("final_position_status") or row.get("lifecycle_status") or "").upper()
+    return status != "CLOSED_FLAT"
+
+
 def _append_jsonl_if_missing(path: Path, row: Mapping[str, Any], *, order_intent_id: str, execution_id: str) -> bool:
     existing = _read_jsonl(path)
     if _jsonl_has_identity(existing, order_intent_id=order_intent_id, execution_id=execution_id):
@@ -1408,6 +1590,50 @@ def _read_jsonl(path: Path) -> list[dict[str, Any]]:
         if isinstance(payload, dict):
             rows.append(payload)
     return rows
+
+
+def _list(value: Any) -> list[Any]:
+    return list(value) if isinstance(value, list) else []
+
+
+def _shared_classification(*, name: str, payload: Mapping[str, Any]) -> str:
+    if name == "position_truth":
+        summary = payload.get("summary") if isinstance(payload.get("summary"), Mapping) else {}
+        return str(payload.get("classification") or summary.get("overall_classification") or "")
+    if name == "runtime_supervisor_authority":
+        return str(payload.get("classification") or payload.get("supervisor_classification") or "")
+    if name == "broker_lease":
+        return str(payload.get("classification") or payload.get("lease_state") or "")
+    return str(payload.get("classification") or "")
+
+
+def _shared_freshness(*, payload: Mapping[str, Any], now: datetime, max_age_seconds: float) -> dict[str, Any]:
+    generated_at = payload.get("generated_at") or payload.get("latest_refresh_time") or payload.get("last_success_at")
+    age_seconds = _age_seconds(generated_at, now)
+    return {
+        "generated_at": generated_at,
+        "age_seconds": age_seconds,
+        "stale_or_missing": age_seconds is None or age_seconds > max_age_seconds,
+    }
+
+
+def _resolve(*, repo_root: Path, path: Path) -> Path:
+    return path if path.is_absolute() else repo_root / path
+
+
+def _age_seconds(value: object, now: datetime) -> float | None:
+    if not value:
+        return None
+    try:
+        raw = str(value)
+        if raw.endswith("Z"):
+            raw = raw[:-1] + "+00:00"
+        parsed = datetime.fromisoformat(raw)
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=UTC)
+        return max(0.0, (now - parsed.astimezone(UTC)).total_seconds())
+    except (TypeError, ValueError):
+        return None
 
 
 def _write_audit(

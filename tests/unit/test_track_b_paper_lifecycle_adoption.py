@@ -54,6 +54,8 @@ def test_pl_lifecycle_adoption_reconstructs_fill_trade_and_ledger(tmp_path: Path
     assert position["local_symbol"] == "PLN6"
     assert position["con_id"] == 644855286
     assert position["entry_perm_id"] == 1984099439
+    assert result.report["shared_truth_evidence"]["source_authority"] == "execution_core_authority"
+    assert result.report["shared_truth_evidence"]["dashboard_projection_consumed"] is False
 
 
 def test_lifecycle_adoption_refuses_identity_mismatch(tmp_path: Path) -> None:
@@ -474,6 +476,83 @@ def test_lifecycle_adoption_refuses_unsafe_submit_intent_ownership_record(tmp_pa
     assert "unsafe live_money_eligible/paper_proof flags" in " ".join(result.report["failures"])
 
 
+def test_lifecycle_adoption_blocks_suspicious_open_order_truth(tmp_path: Path) -> None:
+    repo = _write_pl_evidence(tmp_path)
+    _write_json(
+        repo / "outputs" / "track_b_execution_core" / "open_order_truth" / "latest_open_order_truth.json",
+        {"generated_at": _now().isoformat(), "classification": "SUSPICIOUS_ORDER_STATE", "order_states": []},
+    )
+
+    result = run_track_b_paper_lifecycle_adoption(
+        config=LifecycleAdoptionConfig(
+            repo_root=repo,
+            order_intent_id="PL|1m|2026-05-13T00:41:00Z|BUY_TO_OPEN",
+            apply=True,
+        ),
+        now=_now(),
+    )
+
+    assert result.classification == "TRACK_B_PAPER_LIFECYCLE_ADOPTION_REFUSED"
+    assert any("Open Order Truth is not safe for adoption" in failure for failure in result.report["failures"])
+
+
+def test_lifecycle_adoption_blocks_managed_order_registry_warning(tmp_path: Path) -> None:
+    repo = _write_pl_evidence(tmp_path)
+    _write_json(
+        repo / "outputs" / "track_b_execution_core" / "managed_orders" / "latest_managed_orders.json",
+        {"generated_at": _now().isoformat(), "classification": "CLOSE_ORDER_SUSPICIOUS", "managed_orders": []},
+    )
+
+    result = run_track_b_paper_lifecycle_adoption(
+        config=LifecycleAdoptionConfig(
+            repo_root=repo,
+            order_intent_id="PL|1m|2026-05-13T00:41:00Z|BUY_TO_OPEN",
+            apply=True,
+        ),
+        now=_now(),
+    )
+
+    assert result.classification == "TRACK_B_PAPER_LIFECYCLE_ADOPTION_REFUSED"
+    assert any("Managed Order Registry is not safe for adoption" in failure for failure in result.report["failures"])
+
+
+def test_lifecycle_adoption_blocks_runtime_supervisor_manual_review(tmp_path: Path) -> None:
+    repo = _write_pl_evidence(tmp_path)
+    _write_json(
+        repo
+        / "outputs"
+        / "track_b_execution_core"
+        / "runtime_supervisor"
+        / "latest_runtime_supervisor_authority.json",
+        {"generated_at": _now().isoformat(), "classification": "SUPERVISOR_MANUAL_REVIEW_REQUIRED"},
+    )
+
+    result = run_track_b_paper_lifecycle_adoption(
+        config=LifecycleAdoptionConfig(
+            repo_root=repo,
+            order_intent_id="PL|1m|2026-05-13T00:41:00Z|BUY_TO_OPEN",
+            apply=True,
+        ),
+        now=_now(),
+    )
+
+    assert result.classification == "TRACK_B_PAPER_LIFECYCLE_ADOPTION_REFUSED"
+    assert any("Runtime Supervisor Authority blocks" in failure for failure in result.report["failures"])
+
+
+def test_lifecycle_adoption_does_not_consume_dashboard_projections_as_authority() -> None:
+    source = Path("src/mgc_v05l/app/track_b_paper_lifecycle_adoption.py").read_text(encoding="utf-8")
+    forbidden_projection_paths = [
+        "latest_track_b_open_order_truth.json",
+        "latest_track_b_managed_orders.json",
+        "latest_track_b_position_truth.json",
+        "latest_track_b_managed_positions.json",
+        "latest_track_b_runtime_supervisor_authority.json",
+    ]
+
+    assert [path for path in forbidden_projection_paths if path in source] == []
+
+
 def test_lifecycle_adoption_module_has_no_broker_mutation_symbols() -> None:
     source = Path("src/mgc_v05l/app/track_b_paper_lifecycle_adoption.py").read_text(encoding="utf-8")
     assert "placeOrder" not in source
@@ -541,6 +620,7 @@ def _write_pl_evidence(tmp_path: Path, *, broker_local_symbol: str = "PLN6") -> 
                 "quantity": 1,
                 "broker_order_id": "1",
                 "broker_order_status": "FILLED",
+                "managed_exit_policy_id": "PAPER_DIAGNOSTIC_TIME_BOXED_3X5M_EXIT_V1",
                 "reason_code": "trend_participation.atp_v1_long_pullback_continuation.long.base",
             }
         ],
@@ -581,6 +661,7 @@ def _write_pl_evidence(tmp_path: Path, *, broker_local_symbol: str = "PLN6") -> 
                 "symbol": "PL",
                 "quantity": 1.0,
                 "paper_only": True,
+                "managed_exit_policy_id": "PAPER_DIAGNOSTIC_TIME_BOXED_3X5M_EXIT_V1",
             },
             "exact_contract_report": {
                 "exact_contract": {
@@ -656,6 +737,14 @@ def _write_pl_evidence(tmp_path: Path, *, broker_local_symbol: str = "PLN6") -> 
             },
         },
     )
+    _write_shared_truth_for_adoption(
+        repo,
+        symbol="PL",
+        local_symbol="PLN6",
+        con_id=644855286,
+        quantity="1",
+        order_intent_id="PL|1m|2026-05-13T00:41:00Z|BUY_TO_OPEN",
+    )
     return repo
 
 
@@ -705,6 +794,7 @@ def _write_gc_leak_test_evidence(tmp_path: Path) -> Path:
                 "strategy_id": "atp_companion_v1__production_track_gc_asia_us_selective_v1",
                 "lane_id": lane_id,
                 "authorization_digest": "b6e18cf95416671adfcc8659b56170074ff5e025d77ac148c45ea09c5ed5ef34",
+                "managed_exit_policy_id": "PAPER_DIAGNOSTIC_TIME_BOXED_3X5M_EXIT_V1",
             },
             "strategy_identity": {"strategy_id": lane_id},
             "intent": {
@@ -714,6 +804,7 @@ def _write_gc_leak_test_evidence(tmp_path: Path) -> Path:
                 "symbol": "GC",
                 "quantity": 1.0,
                 "paper_only": True,
+                "managed_exit_policy_id": "PAPER_DIAGNOSTIC_TIME_BOXED_3X5M_EXIT_V1",
                 "reason": "LEAK_TEST_ENTRY",
                 "risk_tags": ["TRACK_B_LEAK_TEST", "BUY_TO_OPEN"],
                 "timestamp": "2026-05-15T06:29:12.256499+00:00",
@@ -773,6 +864,14 @@ def _write_gc_leak_test_evidence(tmp_path: Path) -> Path:
             },
         },
     )
+    _write_shared_truth_for_adoption(
+        repo,
+        symbol="GC",
+        local_symbol="GCM6",
+        con_id=430360630,
+        quantity="1",
+        order_intent_id="3c23e0f6-b19f-42e5-9582-28dee7b600b7",
+    )
     return repo
 
 
@@ -822,6 +921,7 @@ def _write_mgc_leak_test_unknown_after_submit_evidence(tmp_path: Path) -> Path:
                 "strategy_id": "atp_companion_v1__benchmark_mgc_asia_us",
                 "lane_id": lane_id,
                 "authorization_digest": "80c2b3d4c8193aa7b7d055520e542b9a74454cd19a7d90491e942f77daa466ce",
+                "managed_exit_policy_id": "PAPER_DIAGNOSTIC_TIME_BOXED_3X5M_EXIT_V1",
             },
             "strategy_identity": {"strategy_id": lane_id},
             "intent": {
@@ -831,6 +931,7 @@ def _write_mgc_leak_test_unknown_after_submit_evidence(tmp_path: Path) -> Path:
                 "symbol": "MGC",
                 "quantity": 1.0,
                 "paper_only": True,
+                "managed_exit_policy_id": "PAPER_DIAGNOSTIC_TIME_BOXED_3X5M_EXIT_V1",
                 "reason": "LEAK_TEST_ENTRY",
                 "risk_tags": ["TRACK_B_LEAK_TEST", "BUY_TO_OPEN"],
                 "timestamp": "2026-05-15T20:49:47.393217+00:00",
@@ -885,7 +986,85 @@ def _write_mgc_leak_test_unknown_after_submit_evidence(tmp_path: Path) -> Path:
             },
         },
     )
+    _write_shared_truth_for_adoption(
+        repo,
+        symbol="MGC",
+        local_symbol="MGCM6",
+        con_id=712565978,
+        quantity="1",
+        order_intent_id="39c8aa13-3875-42a8-a027-e31ffb085bc4",
+    )
     return repo
+
+
+def _write_shared_truth_for_adoption(
+    repo: Path,
+    *,
+    symbol: str,
+    local_symbol: str,
+    con_id: int,
+    quantity: str,
+    order_intent_id: str,
+) -> None:
+    generated_at = _now().isoformat()
+    position_row = {
+        "classification": "BROKER_POSITION_REQUIRES_ADOPTION",
+        "symbol": symbol,
+        "local_symbol": local_symbol,
+        "con_id": con_id,
+        "quantity": quantity,
+        "order_intent_id": order_intent_id,
+    }
+    managed_position = {
+        "classification": "BROKER_BACKED_ADOPTION_REQUIRED",
+        "symbol": symbol,
+        "local_symbol": local_symbol,
+        "con_id": con_id,
+        "quantity": quantity,
+        "order_intent_id": order_intent_id,
+        "attention_required": True,
+    }
+    _write_json(
+        repo / "outputs" / "track_b_execution_core" / "open_order_truth" / "latest_open_order_truth.json",
+        {"generated_at": generated_at, "classification": "NO_OPEN_ORDERS", "order_states": []},
+    )
+    _write_json(
+        repo / "outputs" / "track_b_execution_core" / "managed_orders" / "latest_managed_orders.json",
+        {"generated_at": generated_at, "classification": "NO_MANAGED_ORDERS", "managed_orders": []},
+    )
+    _write_json(
+        repo / "outputs" / "track_b_execution_core" / "position_truth" / "latest_position_truth.json",
+        {
+            "generated_at": generated_at,
+            "classification": "ATTENTION_REQUIRED",
+            "summary": {"overall_classification": "ATTENTION_REQUIRED"},
+            "position_states": [position_row],
+        },
+    )
+    _write_json(
+        repo / "outputs" / "track_b_execution_core" / "managed_positions" / "latest_managed_positions.json",
+        {
+            "generated_at": generated_at,
+            "classification": "BROKER_BACKED_ADOPTION_REQUIRED",
+            "managed_positions": [managed_position],
+        },
+    )
+    _write_json(
+        repo / "outputs" / "track_b_execution_core" / "runtime_supervisor" / "latest_runtime_supervisor_authority.json",
+        {"generated_at": generated_at, "classification": "SUPERVISOR_CLEANUP_REQUIRED_BEFORE_RUNTIME"},
+    )
+    _write_json(
+        repo
+        / "outputs"
+        / "reports"
+        / "track_b_paper_broker_reconciliation"
+        / "latest_track_b_paper_broker_reconciliation.json",
+        {"generated_at": generated_at, "classification": "BROKER_TRUTH_SETTLEMENT_TIMEOUT"},
+    )
+    _write_json(
+        repo / "outputs" / "operator_dashboard" / "runtime" / "latest_broker_truth_lease.json",
+        {"generated_at": generated_at, "classification": "ACTIVE"},
+    )
 
 
 def _write_mgc_submit_intent_ownership(
