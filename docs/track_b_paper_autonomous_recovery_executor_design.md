@@ -16,12 +16,17 @@ Required pre-action packet:
 
 - `outputs/track_b_execution_core/control_plane/latest_control_plane_snapshot.json`
 
+Reusable validator:
+
+- `mgc_v05l.execution_core.track_b_pre_action_snapshot_validator`
+
 Executor boundary rule:
 
 - future executors may only execute from a coherent Control Plane Snapshot;
 - the snapshot must be captured immediately before action;
 - no executor may reassemble scattered local evidence from individual artifacts;
 - if the snapshot is missing, stale, or not coherent, the dry-run planner must classify `PLAN_BLOCKED_STALE_EVIDENCE`;
+- future executor apply paths must call `validate_track_b_pre_action_snapshot(...)` before any runtime restart or broker/lifecycle mutation;
 - dashboard projections of the snapshot are display-only and must never be consumed as authority.
 
 Primary inputs:
@@ -132,3 +137,5 @@ Before any adapter executes, it must capture a fresh Control Plane Snapshot and 
 - `supervisor_classification`
 
 The adapter must stop before action if `snapshot_coherence_status` is not `COHERENT`, if the snapshot is stale, or if the snapshot identity does not match the dry-run plan being executed.
+
+The adapter must also stop if `validate_track_b_pre_action_snapshot(...)` returns any result other than `PRE_ACTION_SNAPSHOT_VALID`. Validator blocks include stale/missing/incoherent snapshot, plan mismatch, supervisor mismatch, hard invariant violation, and target identity mismatch.
