@@ -182,6 +182,14 @@ def refresh_track_b_shared_truth(
 
     reconciliation = _read_json(config.resolve(DEFAULT_RECONCILIATION_ARTIFACT))
     broker_lease = _refresh_broker_lease(config=config, reconciliation=reconciliation, now=actual_now)
+    paper_recovery_policy, paper_recovery_policy_path = _refresh_paper_recovery_policy(
+        repo_root=config.repo_root,
+        now=actual_now,
+    )
+    autonomous_recovery_plan, autonomous_recovery_plan_path = _refresh_autonomous_recovery_plan(
+        repo_root=config.repo_root,
+        now=actual_now,
+    )
     services = [
         _service_row("Open Order Truth", open_order_truth, open_order_path),
         _service_row("Managed Order Registry", managed_order_registry, managed_order_path),
@@ -190,6 +198,8 @@ def refresh_track_b_shared_truth(
         _service_row("Managed Position Registry", managed_position_registry, managed_position_path),
         _reconciliation_row(config=config, reconciliation=reconciliation),
         _broker_lease_row(config=config, broker_lease=broker_lease),
+        _paper_recovery_policy_row(payload=paper_recovery_policy, artifact_path=paper_recovery_policy_path),
+        _autonomous_recovery_plan_row(payload=autonomous_recovery_plan, artifact_path=autonomous_recovery_plan_path),
     ]
     warnings = _warnings(services=services, payloads={
         "open_order_truth": open_order_truth,
@@ -199,6 +209,8 @@ def refresh_track_b_shared_truth(
         "managed_position_registry": managed_position_registry,
         "reconciliation": reconciliation,
         "broker_lease": broker_lease,
+        "paper_recovery_policy": paper_recovery_policy,
+        "autonomous_recovery_plan": autonomous_recovery_plan,
     })
     blockers = _unsafe_blockers(
         open_order_truth=open_order_truth,
@@ -221,6 +233,10 @@ def refresh_track_b_shared_truth(
         "services": services,
         "classifications": {str(row["service"]): row.get("classification") for row in services},
         "artifact_paths": {str(row["service"]): row.get("artifact_path") for row in services if row.get("artifact_path")},
+        "paper_recovery_policy": paper_recovery_policy.get("paper_action_policy"),
+        "autonomous_recovery_plan_classification": autonomous_recovery_plan.get("classification"),
+        "autonomous_recovery_next_action": _autonomous_recovery_next_action(autonomous_recovery_plan),
+        "autonomous_recovery_execution_enabled": autonomous_recovery_plan.get("execution_enabled") is True,
         "warnings": warnings,
         "unsafe_blockers": blockers,
         "exit_code": exit_code,
@@ -417,6 +433,32 @@ def _refresh_broker_lease(
     return lease
 
 
+def _refresh_paper_recovery_policy(*, repo_root: Path, now: datetime) -> tuple[dict[str, Any], Path]:
+    from .track_b_paper_recovery_policy import (
+        TrackBPaperRecoveryPolicyConfig,
+        build_track_b_paper_recovery_policy,
+        write_track_b_paper_recovery_policy,
+    )
+
+    policy_config = TrackBPaperRecoveryPolicyConfig(repo_root=repo_root, dashboard_projection_path=None)
+    payload = build_track_b_paper_recovery_policy(config=policy_config, now=now)
+    path = write_track_b_paper_recovery_policy(config=policy_config, payload=payload)
+    return payload, path
+
+
+def _refresh_autonomous_recovery_plan(*, repo_root: Path, now: datetime) -> tuple[dict[str, Any], Path]:
+    from .track_b_paper_autonomous_recovery_planner import (
+        TrackBPaperAutonomousRecoveryPlannerConfig,
+        build_track_b_paper_autonomous_recovery_plan,
+        write_track_b_paper_autonomous_recovery_plan,
+    )
+
+    plan_config = TrackBPaperAutonomousRecoveryPlannerConfig(repo_root=repo_root)
+    payload = build_track_b_paper_autonomous_recovery_plan(config=plan_config, now=now)
+    path = write_track_b_paper_autonomous_recovery_plan(config=plan_config, payload=payload)
+    return payload, path
+
+
 def _service_row(
     service: str,
     payload: Mapping[str, Any],
@@ -431,6 +473,24 @@ def _service_row(
     return {
         "service": service,
         "classification": classification,
+        "generated_at": payload.get("generated_at"),
+        "artifact_path": str(artifact_path),
+    }
+
+
+def _paper_recovery_policy_row(*, payload: Mapping[str, Any], artifact_path: Path) -> dict[str, Any]:
+    return {
+        "service": "PAPER Recovery Policy",
+        "classification": payload.get("paper_action_policy") or payload.get("classification") or "MISSING",
+        "generated_at": payload.get("generated_at"),
+        "artifact_path": str(artifact_path),
+    }
+
+
+def _autonomous_recovery_plan_row(*, payload: Mapping[str, Any], artifact_path: Path) -> dict[str, Any]:
+    return {
+        "service": "PAPER Autonomous Recovery Planner",
+        "classification": payload.get("classification") or "MISSING",
         "generated_at": payload.get("generated_at"),
         "artifact_path": str(artifact_path),
     }
@@ -462,6 +522,19 @@ def _warnings(*, services: Sequence[Mapping[str, Any]], payloads: Mapping[str, M
                 {
                     "code": f"{str(row.get('service') or 'service').lower().replace(' ', '_')}_attention",
                     "detail": f"{row.get('service')} classification is {row.get('classification')}.",
+                }
+            )
+        if row.get("service") == "PAPER Autonomous Recovery Planner" and row.get("classification") in {
+            "PLAN_BLOCKED_STALE_EVIDENCE",
+            "MISSING",
+        }:
+            warnings.append(
+                {
+                    "code": "paper_autonomous_recovery_plan_advisory_stale",
+                    "detail": (
+                        "PAPER Autonomous Recovery Planner is unavailable or requesting evidence refresh; "
+                        "this is advisory evidence and not a broker-unsafe classification."
+                    ),
                 }
             )
     for name, payload in payloads.items():
@@ -552,6 +625,20 @@ def _order_state_summary(payload: Mapping[str, Any], reconciliation: Mapping[str
         or reconciliation.get("unresolved_submit_intent_ownership_count")
         or 0,
     }
+
+
+def _autonomous_recovery_next_action(payload: Mapping[str, Any]) -> str | None:
+    for action in _list(payload.get("proposed_actions")):
+        action_map = _mapping(action)
+        value = str(action_map.get("action_type") or action_map.get("action_id") or "")
+        if value:
+            return value
+    for action in _list(payload.get("blocked_actions")):
+        action_map = _mapping(action)
+        value = str(action_map.get("action_type") or action_map.get("action_id") or "")
+        if value:
+            return value
+    return None
 
 
 def _artifact_timestamp(path: Path, payload: Mapping[str, Any]) -> str | None:

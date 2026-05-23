@@ -29,6 +29,12 @@ def test_refresh_clean_flat_stack(tmp_path: Path) -> None:
     assert result["classifications"]["Runtime Environment Truth"] == "RUNTIME_DOWN_CLEAN"
     assert result["classifications"]["Managed Position Registry"] == "NO_MANAGED_POSITIONS"
     assert result["classifications"]["Reconciliation"] == "TRACK_B_PAPER_BROKER_RECONCILED"
+    assert result["classifications"]["PAPER Recovery Policy"] == "REFRESH_EVIDENCE"
+    assert result["classifications"]["PAPER Autonomous Recovery Planner"] == "PLAN_BLOCKED_STALE_EVIDENCE"
+    assert result["paper_recovery_policy"] == "REFRESH_EVIDENCE"
+    assert result["autonomous_recovery_plan_classification"] == "PLAN_BLOCKED_STALE_EVIDENCE"
+    assert result["autonomous_recovery_next_action"] == "REFRESH_EVIDENCE"
+    assert result["autonomous_recovery_execution_enabled"] is False
     assert result["unsafe_blockers"] == []
     assert _read(tmp_path / "outputs/track_b_execution_core/open_order_truth/latest_open_order_truth.json")[
         "classification"
@@ -36,6 +42,19 @@ def test_refresh_clean_flat_stack(tmp_path: Path) -> None:
     preflight = build_runtime_start_preflight_summary(result)
     assert preflight["classification"] == "SHARED_TRUTH_PREFLIGHT_CLEAN"
     assert preflight["blockers"] == []
+
+
+def test_refresh_writes_autonomous_recovery_planner_artifact(tmp_path: Path) -> None:
+    _seed_clean_stack(tmp_path)
+
+    result = _refresh(tmp_path)
+    planner_path = tmp_path / "outputs/track_b_execution_core/paper_autonomous_recovery/latest_paper_autonomous_recovery_plan.json"
+
+    planner = _read(planner_path)
+    assert result["artifact_paths"]["PAPER Autonomous Recovery Planner"] == str(planner_path)
+    assert planner["schema_version"] == "track_b_paper_autonomous_recovery_plan_v1"
+    assert planner["execution_enabled"] is False
+    assert planner["classification"] == result["autonomous_recovery_plan_classification"]
 
 
 def test_refresh_replaces_stale_upstream_authority_artifact(tmp_path: Path) -> None:
@@ -49,6 +68,49 @@ def test_refresh_replaces_stale_upstream_authority_artifact(tmp_path: Path) -> N
     assert result["exit_code"] == 0
     assert refreshed["classification"] == "NO_OPEN_ORDERS"
     assert refreshed["generated_at"] == NOW.isoformat()
+
+
+def test_refresh_replaces_stale_autonomous_recovery_plan(tmp_path: Path) -> None:
+    _seed_clean_stack(tmp_path)
+    stale_path = tmp_path / "outputs/track_b_execution_core/paper_autonomous_recovery/latest_paper_autonomous_recovery_plan.json"
+    _write(stale_path, {"generated_at": OLD, "classification": "PLAN_RUNTIME_RETRY", "execution_enabled": False})
+
+    result = _refresh(tmp_path)
+
+    refreshed = _read(stale_path)
+    assert refreshed["generated_at"] == NOW.isoformat()
+    assert refreshed["classification"] == result["autonomous_recovery_plan_classification"]
+    assert refreshed["execution_enabled"] is False
+
+
+def test_refresh_market_closed_autonomous_plan_waits(tmp_path: Path) -> None:
+    _seed_clean_stack(tmp_path)
+    _seed_recovery_control_plane(
+        tmp_path,
+        proof_classification="MARKET_CLOSED_NO_FRESH_BARS",
+        supervisor_classification="SUPERVISOR_WAIT_MARKET_CLOSED",
+        supervisor_mode="MARKET_CLOSED_WAIT",
+        resume_classification="RESUME_BLOCKED_MARKET_CLOSED",
+        self_recover_recommendation="WAIT_MARKET_CLOSED",
+    )
+
+    result = _refresh(tmp_path)
+
+    assert result["paper_recovery_policy"] == "OBSERVE"
+    assert result["autonomous_recovery_plan_classification"] == "WAIT_MARKET_CLOSED"
+    assert result["autonomous_recovery_next_action"] == "WAIT_MARKET_CLOSED"
+    assert result["autonomous_recovery_execution_enabled"] is False
+
+
+def test_refresh_surfaces_planner_staleness_as_advisory_warning(tmp_path: Path) -> None:
+    _seed_clean_stack(tmp_path)
+
+    result = _refresh(tmp_path)
+
+    assert result["exit_code"] == 0
+    assert result["autonomous_recovery_plan_classification"] == "PLAN_BLOCKED_STALE_EVIDENCE"
+    assert any(warning["code"] == "paper_autonomous_recovery_plan_advisory_stale" for warning in result["warnings"])
+    assert not any(blocker["code"] == "broker_lease_invalidated" for blocker in result["unsafe_blockers"])
 
 
 def test_refresh_broker_exposure_produces_attention_required(tmp_path: Path) -> None:
@@ -134,6 +196,8 @@ def test_dashboard_projections_are_not_consumed_or_written(tmp_path: Path) -> No
         tmp_path / "outputs/operator_dashboard/runtime/latest_track_b_position_truth.json",
         tmp_path / "outputs/operator_dashboard/runtime/latest_track_b_runtime_environment_truth.json",
         tmp_path / "outputs/operator_dashboard/runtime/latest_track_b_managed_positions.json",
+        tmp_path / "outputs/operator_dashboard/runtime/latest_track_b_paper_recovery_policy.json",
+        tmp_path / "outputs/operator_dashboard/runtime/latest_track_b_paper_autonomous_recovery_plan.json",
     ]
     assert all(not path.exists() for path in projection_paths)
     for path in result["artifact_paths"].values():
@@ -206,6 +270,88 @@ def _seed_clean_stack(root: Path, *, now: datetime = NOW) -> None:
             "classification": "NO_MANAGED_POSITIONS",
             "managed_positions": [],
             "summary": {"managed_position_count": 0},
+        },
+    )
+
+
+def _seed_recovery_control_plane(
+    root: Path,
+    *,
+    now: datetime = NOW,
+    proof_classification: str = "READY_FOR_PROOF",
+    supervisor_classification: str = "SUPERVISOR_RUNTIME_START_ALLOWED",
+    supervisor_mode: str = "READY_FOR_OPERATOR_START",
+    resume_classification: str = "RESUME_ALLOWED_CLEAN",
+    self_recover_recommendation: str = "RESTART_RUNTIME_ALLOWED",
+) -> None:
+    _write(
+        root / "outputs/track_b_execution_core/proof_readiness/latest_track_b_paper_proof_readiness.json",
+        {
+            "generated_at": now.isoformat(),
+            "classification": proof_classification,
+            "phase1_session_reason": proof_classification,
+            "live_money_eligible": False,
+        },
+    )
+    _write(
+        root / "outputs/track_b_execution_core/runtime_supervisor/latest_runtime_supervisor_authority.json",
+        {
+            "generated_at": now.isoformat(),
+            "classification": supervisor_classification,
+            "supervisor_mode": supervisor_mode,
+            "recommended_next_command": "wait for market reopen",
+            "safe_to_start_runtime": supervisor_classification == "SUPERVISOR_RUNTIME_START_ALLOWED",
+            "live_money_eligible": False,
+        },
+    )
+    _write(
+        root / "outputs/track_b_execution_core/runtime_resume/latest_runtime_resume_semantics.json",
+        {
+            "generated_at": now.isoformat(),
+            "classification": resume_classification,
+            "previous_broker_safe_at_stop": True,
+            "live_money_eligible": False,
+        },
+    )
+    _write(
+        root / "outputs/track_b_execution_core/self_recover/latest_self_recover_rules.json",
+        {
+            "generated_at": now.isoformat(),
+            "classification": self_recover_recommendation,
+            "recommendation": self_recover_recommendation,
+            "live_money_eligible": False,
+        },
+    )
+    _write(
+        root / "outputs/track_b_execution_core/crash_loop_protection/latest_crash_loop_protection.json",
+        {
+            "generated_at": now.isoformat(),
+            "classification": "NO_CRASH_LOOP",
+            "restart_blocked": False,
+            "live_money_eligible": False,
+        },
+    )
+    _write(
+        root / "outputs/track_b_execution_core/agent_health/latest_agent_health.json",
+        {
+            "generated_at": now.isoformat(),
+            "classification": "AGENT_HEALTH_READY",
+            "agents": [
+                {
+                    "agent_id": "phase1_databento_live_candles",
+                    "status": "HEALTHY",
+                    "reason": proof_classification,
+                }
+            ],
+            "live_money_eligible": False,
+        },
+    )
+    _write(
+        root / "outputs/track_b_execution_core/runtime_truth/latest_runtime_environment_truth.json",
+        {
+            "generated_at": now.isoformat(),
+            "classification": "RUNTIME_DOWN_CLEAN",
+            "live_money_eligible": False,
         },
     )
 
