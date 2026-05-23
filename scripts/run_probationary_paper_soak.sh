@@ -37,6 +37,7 @@ DEFAULT_LOG_FILE="${DEFAULT_RUNTIME_DIR}/probationary_paper.log"
 DEFAULT_CONFIG_PATHS_FILE="${DEFAULT_RUNTIME_DIR}/paper_runtime_config_paths.txt"
 DEFAULT_LAUNCH_STATUS_FILE="${DEFAULT_RUNTIME_DIR}/probationary_paper_launch_status.json"
 DEFAULT_RUNTIME_TRUTH_FILE="${DEFAULT_RUNTIME_DIR}/paper_runtime_truth.json"
+DEFAULT_SHARED_TRUTH_PREFLIGHT_FILE="${DEFAULT_RUNTIME_DIR}/shared_truth_runtime_start_preflight.json"
 CANARY_ENABLE_SENTINEL="${DEFAULT_RUNTIME_DIR}/enable_paper_route_canary.flag"
 CONFIG_OVERRIDE_RAW="${MGC_PROBATIONARY_PAPER_CONFIG_PATHS:-}"
 LAUNCH_PYTHON_BIN="${MGC_PROBATIONARY_PAPER_LAUNCH_PYTHON_BIN:-${PYTHON_BIN}}"
@@ -44,6 +45,8 @@ BACKGROUND_VERIFY_ATTEMPTS="${MGC_PROBATIONARY_PAPER_BACKGROUND_VERIFY_ATTEMPTS:
 BACKGROUND_VERIFY_POLL_SECONDS="${MGC_PROBATIONARY_PAPER_BACKGROUND_VERIFY_POLL_SECONDS:-1}"
 BACKGROUND_OBSERVATION_WINDOW_SECONDS="${MGC_PROBATIONARY_PAPER_BACKGROUND_OBSERVATION_WINDOW_SECONDS:-5}"
 RUNTIME_TRUTH_FILE="${MGC_PROBATIONARY_PAPER_RUNTIME_TRUTH_FILE:-${DEFAULT_RUNTIME_TRUTH_FILE}}"
+SHARED_TRUTH_PREFLIGHT_FILE="${MGC_TRACK_B_SHARED_TRUTH_PREFLIGHT_FILE:-${DEFAULT_SHARED_TRUTH_PREFLIGHT_FILE}}"
+SHARED_TRUTH_PREFLIGHT_REPO_ROOT="${MGC_TRACK_B_SHARED_TRUTH_PREFLIGHT_REPO_ROOT:-${REPO_ROOT}}"
 LAUNCH_FIRST_TRUTH_GENERATED_AT=""
 LAUNCH_SECOND_TRUTH_GENERATED_AT=""
 LAUNCH_SUSTAINED_CONVERGENCE_CONFIRMED="false"
@@ -310,6 +313,68 @@ with open(os.environ["LAUNCH_STATUS_FILE"], "w", encoding="utf-8") as fh:
 '
 }
 
+run_shared_truth_runtime_start_preflight() {
+  local tmp_file="${SHARED_TRUTH_PREFLIGHT_FILE}.tmp"
+  local stderr_file="${SHARED_TRUTH_PREFLIGHT_FILE}.stderr.log"
+  local status=0
+  local summary=""
+  ensure_dir "$(dirname "${SHARED_TRUTH_PREFLIGHT_FILE}")"
+  set +e
+  "${PYTHON_BIN}" -m mgc_v05l.execution_core.track_b_shared_truth_refresh_cli \
+    --repo-root "${SHARED_TRUTH_PREFLIGHT_REPO_ROOT}" \
+    --json \
+    --runtime-start-preflight \
+    > "${tmp_file}" \
+    2> "${stderr_file}"
+  status=$?
+  set -e
+  if [[ -s "${tmp_file}" ]]; then
+    mv "${tmp_file}" "${SHARED_TRUTH_PREFLIGHT_FILE}"
+  else
+    rm -f "${tmp_file}"
+  fi
+  summary="$("${PYTHON_BIN}" - <<'PY' "${SHARED_TRUTH_PREFLIGHT_FILE}" "${stderr_file}" || true
+import json
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+stderr_path = Path(sys.argv[2])
+try:
+    payload = json.loads(path.read_text(encoding="utf-8"))
+except (OSError, json.JSONDecodeError):
+    stderr = ""
+    try:
+        stderr = stderr_path.read_text(encoding="utf-8").strip()
+    except OSError:
+        pass
+    print(f"Shared Truth runtime-start preflight did not produce valid JSON. stderr={stderr[:500]}")
+    raise SystemExit(0)
+
+preflight = payload.get("runtime_start_preflight") or {}
+classification = preflight.get("classification") or "SHARED_TRUTH_PREFLIGHT_MISSING"
+classifications = payload.get("classifications") or {}
+parts = [f"{key}={value}" for key, value in classifications.items()]
+blockers = preflight.get("blockers") or []
+if blockers:
+    blocker_text = "; ".join(str(item.get("detail") or item.get("code")) for item in blockers if isinstance(item, dict))
+    print(f"{classification}: {', '.join(parts)}. blockers={blocker_text}")
+else:
+    print(f"{classification}: {', '.join(parts)}")
+PY
+)"
+  echo "Track B shared-truth runtime-start preflight: ${summary}"
+  if [[ ${status} -ne 0 ]]; then
+    if [[ -s "${stderr_file}" ]]; then
+      cat "${stderr_file}" >&2
+    fi
+    write_launch_status "SHARED_TRUTH_PREFLIGHT_BLOCKED" "" "${summary}" "${status}"
+    return "${status}"
+  fi
+  rm -f "${stderr_file}"
+  return 0
+}
+
 background_child_stayed_alive() {
   local pid="$1"
   local launched_at_epoch="$2"
@@ -514,6 +579,7 @@ if schwab_runtime_dependency_required && [[ -f "${DEFAULT_SCHWAB_CONFIG}" ]]; th
   runtime_network_resolution_preflight "${DEFAULT_SCHWAB_CONFIG}" "probationary-paper-soak-launch"
 fi
 persist_runtime_config_paths
+run_shared_truth_runtime_start_preflight
 
 LAUNCH_CONFIG_PATHS=()
 index=0

@@ -7,6 +7,7 @@ from pathlib import Path
 from mgc_v05l.execution_core.track_b_shared_truth_refresh_cli import (
     DEFAULT_RECONCILIATION_ARTIFACT,
     TrackBSharedTruthRefreshConfig,
+    build_runtime_start_preflight_summary,
     main,
     refresh_track_b_shared_truth,
 )
@@ -32,6 +33,9 @@ def test_refresh_clean_flat_stack(tmp_path: Path) -> None:
     assert _read(tmp_path / "outputs/track_b_execution_core/open_order_truth/latest_open_order_truth.json")[
         "classification"
     ] == "NO_OPEN_ORDERS"
+    preflight = build_runtime_start_preflight_summary(result)
+    assert preflight["classification"] == "SHARED_TRUTH_PREFLIGHT_CLEAN"
+    assert preflight["blockers"] == []
 
 
 def test_refresh_replaces_stale_upstream_authority_artifact(tmp_path: Path) -> None:
@@ -67,6 +71,55 @@ def test_refresh_broker_exposure_produces_attention_required(tmp_path: Path) -> 
     assert result["classifications"]["Position Truth"] == "ATTENTION_REQUIRED"
     assert result["classifications"]["Runtime Environment Truth"] == "RUNTIME_DOWN_WITH_BROKER_EXPOSURE"
     assert any(blocker["code"] == "position_truth_attention_required" for blocker in result["unsafe_blockers"])
+    preflight = build_runtime_start_preflight_summary(result)
+    assert preflight["classification"] == "SHARED_TRUTH_PREFLIGHT_BLOCKED"
+    assert any(blocker["code"] == "position_truth_not_clean_for_runtime_start" for blocker in preflight["blockers"])
+
+
+def test_runtime_start_preflight_blocks_open_order(tmp_path: Path) -> None:
+    _seed_clean_stack(tmp_path)
+    _write_reconciliation(
+        tmp_path,
+        classification="BROKER_TRUTH_SETTLEMENT_CONTRADICTORY_STATE",
+        broker_reconciled=False,
+        open_orders=[{"symbol": "MNQ", "local_symbol": "MNQM6", "action": "SELL", "order_id": 27}],
+    )
+    _write_broker_status(
+        tmp_path,
+        open_orders=[{"symbol": "MNQ", "local_symbol": "MNQM6", "action": "SELL", "order_id": 27}],
+    )
+
+    result = _refresh(tmp_path)
+
+    preflight = build_runtime_start_preflight_summary(result)
+    assert preflight["classification"] == "SHARED_TRUTH_PREFLIGHT_BLOCKED"
+    assert any(blocker["code"] == "open_order_truth_not_clean_for_runtime_start" for blocker in preflight["blockers"])
+
+
+def test_runtime_start_preflight_blocks_managed_position(tmp_path: Path) -> None:
+    result = {
+        "generated_at": NOW.isoformat(),
+        "live_money_eligible": False,
+        "unsafe_blockers": [],
+        "artifact_paths": {},
+        "warnings": [],
+        "classifications": {
+            "Open Order Truth": "NO_OPEN_ORDERS",
+            "Managed Order Registry": "NO_MANAGED_ORDERS",
+            "Position Truth": "CLEAN_FLAT_READY",
+            "Runtime Environment Truth": "RUNTIME_DOWN_CLEAN",
+            "Managed Position Registry": "OPEN_MANAGED_MATCHED",
+            "Reconciliation": "TRACK_B_PAPER_BROKER_RECONCILED",
+            "Broker Truth Lease": "ACTIVE",
+        },
+    }
+
+    preflight = build_runtime_start_preflight_summary(result)
+    assert preflight["classification"] == "SHARED_TRUTH_PREFLIGHT_BLOCKED"
+    assert any(
+        blocker["code"] == "managed_position_registry_not_clean_for_runtime_start"
+        for blocker in preflight["blockers"]
+    )
 
 
 def test_dashboard_projections_are_not_consumed_or_written(tmp_path: Path) -> None:
@@ -96,6 +149,27 @@ def test_main_runtime_down_clean_exits_zero(tmp_path: Path, capsys) -> None:
     assert exit_code == 0
     assert "Runtime Environment Truth" in output
     assert "RUNTIME_DOWN_CLEAN" in output
+
+
+def test_main_runtime_start_preflight_blocks_attention_required(tmp_path: Path, capsys) -> None:
+    _seed_clean_stack(tmp_path)
+    _write_reconciliation(
+        tmp_path,
+        classification="BROKER_TRUTH_SETTLEMENT_TIMEOUT",
+        broker_reconciled=False,
+        broker_positions=[{"symbol": "MGC", "local_symbol": "MGCM6", "quantity": "1.0", "account": "DUM882026"}],
+    )
+    _write_broker_status(
+        tmp_path,
+        positions=[{"symbol": "MGC", "local_symbol": "MGCM6", "quantity": "1.0", "account": "DUM882026"}],
+    )
+
+    exit_code = main(["--repo-root", str(tmp_path), "--no-broker-lease-history", "--runtime-start-preflight"])
+
+    output = capsys.readouterr().out
+    assert exit_code == 2
+    assert "Runtime start preflight: SHARED_TRUTH_PREFLIGHT_BLOCKED" in output
+    assert "Position Truth is ATTENTION_REQUIRED" in output
 
 
 def _refresh(root: Path) -> dict:
@@ -143,8 +217,10 @@ def _write_reconciliation(
     classification: str = "TRACK_B_PAPER_BROKER_RECONCILED",
     broker_reconciled: bool = True,
     broker_positions: list[dict] | None = None,
+    open_orders: list[dict] | None = None,
 ) -> None:
     positions = broker_positions or []
+    orders = open_orders or []
     _write(
         root / DEFAULT_RECONCILIATION_ARTIFACT,
         {
@@ -153,25 +229,31 @@ def _write_reconciliation(
             "broker_reconciled": broker_reconciled,
             "live_money_eligible": False,
             "track_b_broker_positions": positions,
-            "track_b_broker_open_orders": [],
+            "track_b_broker_open_orders": orders,
             "track_b_lifecycle_positions": [],
-            "unknown_broker_open_orders": [],
+            "unknown_broker_open_orders": orders if orders else [],
             "known_managed_exit_orders": [],
             "unresolved_submit_intent_ownership_records": [],
             "track_b_broker_position_count": len(positions),
-            "track_b_broker_open_order_count": 0,
-            "unknown_broker_open_order_count": 0,
+            "track_b_broker_open_order_count": len(orders),
+            "unknown_broker_open_order_count": len(orders),
             "review_required_count": 0,
             "unresolved_submit_intent_ownership_count": 0,
             "lifecycle_open_position_count": 0,
-            "lifecycle_open_order_count": 0,
+            "lifecycle_open_order_count": len(orders),
             "position_match_report": {"state": "BROKER_AND_LIFECYCLE_FLAT", "matched": broker_reconciled},
             "blockers": [] if broker_reconciled else [{"code": "broker_position_without_lifecycle"}],
         },
     )
 
 
-def _write_broker_status(root: Path, *, now: datetime = NOW, positions: list[dict] | None = None) -> None:
+def _write_broker_status(
+    root: Path,
+    *,
+    now: datetime = NOW,
+    positions: list[dict] | None = None,
+    open_orders: list[dict] | None = None,
+) -> None:
     payload = {
         "classification": "BROKER_TRUTH_REFRESH_READY",
         "account": "DUM882026",
@@ -179,7 +261,7 @@ def _write_broker_status(root: Path, *, now: datetime = NOW, positions: list[dic
         "positions_complete": True,
         "open_orders_complete": True,
         "positions": positions or [],
-        "open_orders": [],
+        "open_orders": open_orders or [],
         "live_money_eligible": False,
     }
     _write(
@@ -193,14 +275,15 @@ def _write_broker_status(root: Path, *, now: datetime = NOW, positions: list[dic
     _write(root / "outputs/reports/ibkr_read_only_verification/ibkr_broker_truth_latest_attempt_status.json", payload)
 
 
-def _write_live_position_status(root: Path, *, now: datetime = NOW) -> None:
+def _write_live_position_status(root: Path, *, now: datetime = NOW, open_positions: list[dict] | None = None) -> None:
+    positions = open_positions or []
     _write(
         root / "outputs/track_b_execution_core/paper_trade_ledger/latest_track_b_live_position_status.json",
         {
             "generated_at": now.isoformat(),
-            "open_position_count": 0,
+            "open_position_count": len(positions),
             "open_order_count": 0,
-            "open_positions": [],
+            "open_positions": positions,
             "review_required_positions": [],
             "live_money_eligible": False,
         },

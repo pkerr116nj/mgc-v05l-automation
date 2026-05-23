@@ -71,6 +71,15 @@ DEFAULT_RECONCILIATION_ARTIFACT = (
     / "track_b_paper_broker_reconciliation"
     / "latest_track_b_paper_broker_reconciliation.json"
 )
+RUNTIME_START_REQUIRED_CLASSIFICATIONS = {
+    "Open Order Truth": {NO_OPEN_ORDERS},
+    "Managed Order Registry": {NO_MANAGED_ORDERS},
+    "Position Truth": {"CLEAN_FLAT_READY"},
+    "Runtime Environment Truth": {RUNTIME_DOWN_CLEAN},
+    "Managed Position Registry": {NO_MANAGED_POSITIONS},
+    "Reconciliation": {"TRACK_B_PAPER_BROKER_RECONCILED"},
+    "Broker Truth Lease": {"ACTIVE"},
+}
 
 
 @dataclass(frozen=True)
@@ -218,6 +227,71 @@ def refresh_track_b_shared_truth(
     }
 
 
+def build_runtime_start_preflight_summary(result: Mapping[str, Any]) -> dict[str, Any]:
+    """Validate shared-truth authority classifications for a PAPER runtime start."""
+
+    classifications = _mapping(result.get("classifications"))
+    blockers: list[dict[str, str]] = []
+    for service, allowed_values in RUNTIME_START_REQUIRED_CLASSIFICATIONS.items():
+        observed = str(classifications.get(service) or "MISSING")
+        if observed not in allowed_values:
+            blockers.append(
+                {
+                    "code": f"{service.lower().replace(' ', '_')}_not_clean_for_runtime_start",
+                    "detail": (
+                        f"{service} is {observed}; expected one of "
+                        f"{', '.join(sorted(allowed_values))} before Track B PAPER runtime start."
+                    ),
+                    "service": service,
+                    "observed": observed,
+                    "expected": ", ".join(sorted(allowed_values)),
+                }
+            )
+    if result.get("live_money_eligible") is not False:
+        blockers.append(
+            {
+                "code": "live_money_eligible_not_false",
+                "detail": "Shared Truth preflight did not report live_money_eligible=false.",
+                "service": "Shared Truth",
+                "observed": str(result.get("live_money_eligible")),
+                "expected": "False",
+            }
+        )
+    for blocker in _list(result.get("unsafe_blockers")):
+        code = str(_mapping(blocker).get("code") or "")
+        if not code:
+            continue
+        blockers.append(
+            {
+                "code": f"shared_truth_{code}",
+                "detail": str(_mapping(blocker).get("detail") or "Shared Truth reported an unsafe blocker."),
+                "service": "Shared Truth",
+                "observed": code,
+                "expected": "no unsafe blockers",
+            }
+        )
+    blockers = _dedupe_codes(blockers)
+    return {
+        "schema_version": "track_b_runtime_start_shared_truth_preflight_v1",
+        "generated_at": result.get("generated_at"),
+        "mode": "PAPER",
+        "read_only": True,
+        "submit_authority": False,
+        "paper_proof_invoked": False,
+        "live_money_eligible": False,
+        "source": "track_b_shared_truth_refresh_cli",
+        "clean_for_runtime_start": not blockers,
+        "classification": "SHARED_TRUTH_PREFLIGHT_CLEAN" if not blockers else "SHARED_TRUTH_PREFLIGHT_BLOCKED",
+        "required_classifications": {
+            service: sorted(values) for service, values in RUNTIME_START_REQUIRED_CLASSIFICATIONS.items()
+        },
+        "observed_classifications": dict(classifications),
+        "artifact_paths": _mapping(result.get("artifact_paths")),
+        "warnings": _list(result.get("warnings")),
+        "blockers": blockers,
+    }
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Refresh read-only Track B PAPER shared-truth authority artifacts.")
     parser.add_argument("--repo-root", default=str(Path(__file__).resolve().parents[3]))
@@ -225,6 +299,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--symbols", default=",".join(PHASE1_RUNTIME_TICKER_ORDER))
     parser.add_argument("--json", action="store_true", help="Print JSON instead of a compact table.")
     parser.add_argument("--no-broker-lease-history", action="store_true", help="Skip broker lease history append.")
+    parser.add_argument(
+        "--runtime-start-preflight",
+        action="store_true",
+        help="Require clean shared-truth classifications for a Track B PAPER runtime start.",
+    )
     return parser
 
 
@@ -239,10 +318,23 @@ def main(argv: Sequence[str] | None = None) -> int:
         broker_lease_history_path=None if bool(args.no_broker_lease_history) else DEFAULT_LEASE_HISTORY,
     )
     result = refresh_track_b_shared_truth(config=config)
+    if bool(args.runtime_start_preflight):
+        result = {
+            **result,
+            "runtime_start_preflight": build_runtime_start_preflight_summary(result),
+        }
+        if result["runtime_start_preflight"]["blockers"]:
+            result["exit_code"] = 2
     if bool(args.json):
         print(json.dumps(result, indent=2, sort_keys=True))
     else:
         print_classification_table(result)
+        preflight = _mapping(result.get("runtime_start_preflight"))
+        if preflight:
+            print("")
+            print(f"Runtime start preflight: {preflight.get('classification')}")
+            for blocker in _list(preflight.get("blockers")):
+                print(f"- {blocker.get('code')}: {blocker.get('detail')}")
     return int(result.get("exit_code") or 0)
 
 
