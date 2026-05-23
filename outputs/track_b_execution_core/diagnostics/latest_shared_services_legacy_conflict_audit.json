@@ -80,6 +80,7 @@
       ],
       "recommended_v2_migration": "Introduce a bridge pre-action evidence contract: runtime-internal calls must include runtime_instance_id/restart_generation/source_commit from the launch snapshot; direct CLI/app calls must require a fresh Control Plane Snapshot validator result.",
       "severity": "HIGH",
+      "snapshot_gate_status": "DIRECT_SUBMIT_SNAPSHOT_GATED_RUNTIME_SUBMIT_REQUIRES_LAUNCH_GENERATION_EVIDENCE",
       "tests_needed": [
         "direct bridge submit blocks without snapshot or runtime generation authority.",
         "runtime-internal bridge submit accepts matching generation-scoped launch evidence.",
@@ -242,13 +243,13 @@
   ],
   "generated_at": "2026-05-23T20:05:48.626900+00:00",
   "recommended_next_implementation_slice": {
-    "rationale": "Lower-level REST cancel, manual submit, lane submit, cancel/replace, and modify-in-place are now snapshot-gated. The next top risk is strategy bridge direct invocation and generation-scoped runtime evidence.",
+    "rationale": "Lower-level REST cancel, manual submit, lane submit, strategy bridge direct submit, cancel/replace, and modify-in-place are now snapshot-gated. The next top risk is process recovery and repair executor subprocess apply paths.",
     "scope": [
-      "SS-LCA-004",
       "SS-LCA-007",
-      "SS-LCA-008"
+      "SS-LCA-008",
+      "SS-LCA-009"
     ],
-    "title": "Snapshot-gate strategy bridge direct invocation and process recovery"
+    "title": "Snapshot-gate repair executor and process recovery adapters"
   },
   "repo_root": "/Users/patrick/Dev/MGC-v05l-automation",
   "severity_counts": {
@@ -258,11 +259,11 @@
     "MEDIUM": 3
   },
   "top_5_risks": [
-    "SS-LCA-004",
     "SS-LCA-007",
     "SS-LCA-008",
     "SS-LCA-009",
-    "SS-LCA-010"
+    "SS-LCA-010",
+    "SS-LCA-011"
   ],
   "v2_resiliency_backlog": [
     {

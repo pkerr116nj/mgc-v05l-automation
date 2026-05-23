@@ -22,11 +22,11 @@ The remaining risk is concentrated in older broker/order mutation harnesses and 
 
 ## Top 5 Risks
 
-1. `SS-LCA-004` HIGH - broker mutation / shared bridge submit: The strategy bridge performs many local gates, phase-1 broker reconciliation submit gate checks, ownership persistence, and delegates to the manual paper submit harness.
 1. `SS-LCA-007` HIGH - repair executor / process recovery: Maintenance repair executor consumes several shared truth artifacts but still executes repair subprocess commands from local maintenance supervisor decisions and canonical readiness artifacts.
 1. `SS-LCA-008` HIGH - control policy / operator ack semantics: Crash Loop Protection still emits OPERATOR_ACK_REQUIRED for repeated unsafe stops; Resume and Supervisor translate some of it through PAPER Recovery Policy, but the lower-level service remains human-gate flavored.
 1. `SS-LCA-009` MEDIUM - readiness / operator dashboard path ownership: Some canonical readiness and broker lease artifacts still live under `outputs/operator_dashboard/runtime`, even when consumed by execution_core services.
 1. `SS-LCA-010` MEDIUM - launch/status / fallback flows: Launch now uses Control Plane Snapshot, but the script still contains legacy shared-truth and supervisor preflight fallback functions and status still assembles some component artifacts directly.
+1. `SS-LCA-011` MEDIUM - lifecycle/local artifact repair: Current manual fallback tools are shared-truth aligned but not yet executor/snapshot adapters.
 
 ## Status Update - Snapshot-Gated Order Apply Paths
 
@@ -34,10 +34,11 @@ The remaining risk is concentrated in older broker/order mutation harnesses and 
 - `SS-LCA-001` lower-level REST cancel is now deprecated/emergency-only, reports `lower_level_cancel_path=true` / `emergency_only=true`, prefers `track_b_managed_exit_cancel_replace`, and validates a coherent Control Plane Snapshot plus matching `PLAN_TARGETED_CANCEL_REPLACE` / `TARGETED_CANCEL_REPLACE` target before any transport construction or submit/cancel lifecycle.
 - `SS-LCA-002` manual PAPER submit harness now validates a coherent Control Plane Snapshot plus matching `PLAN_MANUAL_PAPER_SUBMIT` / `MANUAL_PAPER_SUBMIT` target before any apply-mode transport construction. Preview remains read-only by default.
 - `SS-LCA-003` lane submit port now defaults non-mutating (`submit=False`), requires explicit `--submit --control-plane-authorized-submit`, and validates a coherent Control Plane Snapshot plus matching `PLAN_LANE_SUBMIT_PORT` / `LANE_SUBMIT_PORT` target before delegating to the strategy bridge.
+- `SS-LCA-004` strategy bridge direct submit now validates a coherent Control Plane Snapshot plus matching `PLAN_STRATEGY_BRIDGE_SUBMIT` / `STRATEGY_BRIDGE_SUBMIT` target before broker runtime construction. Runtime-supervised callers must carry matching control-plane snapshot/generation/supervisor ids from the launch generation.
 - `SS-LCA-005` cancel/replace apply path is now gated by `validate_track_b_pre_action_snapshot(...)` before adapter construction, cancel, or replacement submit. It requires a coherent Control Plane Snapshot and `PLAN_TARGETED_CANCEL_REPLACE` / `TARGETED_CANCEL_REPLACE` planner evidence matching the exact order target.
 - `SS-LCA-006` modify-in-place apply path is now gated by `validate_track_b_pre_action_snapshot(...)` before broker refresh, modify, or post-modify verification hooks. It requires a coherent Control Plane Snapshot and `PLAN_MANAGED_ORDER_MODIFY` / `MANAGED_ORDER_MODIFY` planner evidence matching the exact order and price target.
 - dry-run mode remains non-mutating and records whether the same snapshot gate would block apply.
-- next top risk is `SS-LCA-004` strategy bridge direct invocation.
+- next top risk is `SS-LCA-007` repair executor / process recovery.
 
 ## Findings
 
@@ -86,6 +87,7 @@ The remaining risk is concentrated in older broker/order mutation harnesses and 
 - legacy/local behavior: The strategy bridge performs many local gates, phase-1 broker reconciliation submit gate checks, ownership persistence, and delegates to the manual paper submit harness.
 - conflict with doctrine: The bridge is now a central mutation path but still assembles readiness from local bridge/governance/monitor/reconciliation checks. Runtime launch is snapshot-gated, but direct bridge invocation is not itself snapshot-scoped.
 - recommended v2 migration: Introduce a bridge pre-action evidence contract: runtime-internal calls must include runtime_instance_id/restart_generation/source_commit from the launch snapshot; direct CLI/app calls must require a fresh Control Plane Snapshot validator result.
+- current status: direct submit is snapshot-gated with `PLAN_STRATEGY_BRIDGE_SUBMIT` / `STRATEGY_BRIDGE_SUBMIT`; runtime-supervised submit requires matching launch control-plane ids in caller metadata before broker runtime construction.
 - code change needed now: `false`
 - tests needed:
   - direct bridge submit blocks without snapshot or runtime generation authority.
@@ -205,10 +207,10 @@ The remaining risk is concentrated in older broker/order mutation harnesses and 
 
 Continue snapshot/generation convergence on the remaining direct mutation and process-recovery surfaces:
 
-1. Add a bridge pre-action evidence contract to `ibkr_paper_strategy_bridge.py`, with runtime-internal calls carrying generation-scoped launch evidence and direct calls requiring Control Plane Snapshot validation.
-2. Convert repair executor subprocess apply paths into Control Plane Snapshot-driven autonomous recovery adapters.
-3. Move remaining dashboard-path authority files to execution_core authority paths with projection-only compatibility outputs.
-4. Make crash-loop classifications policy-mode native so PAPER quarantine/budget states no longer need translation from LIVE-style operator-ack language.
+1. Convert repair executor subprocess apply paths into Control Plane Snapshot-driven autonomous recovery adapters.
+2. Move remaining dashboard-path authority files to execution_core authority paths with projection-only compatibility outputs.
+3. Make crash-loop classifications policy-mode native so PAPER quarantine/budget states no longer need translation from LIVE-style operator-ack language.
+4. Add executor adapters for scoped lifecycle cleanup using the lifecycle state matrix and exact target snapshot identity.
 
 This keeps PAPER autonomous and failure-discovery oriented while ensuring every mutation boundary is coherent, budgetable, auditable, and impossible to confuse with dashboard projection state.
 

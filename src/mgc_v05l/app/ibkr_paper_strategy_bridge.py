@@ -48,6 +48,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--manual-frozen-preview-path", type=Path, default=None, help="Required manual-harness frozen preview bundle when --submit is used.")
     parser.add_argument("--approval-digest", default=None, help="Required exact manual-harness digest when --submit is used.")
     parser.add_argument("--approval-phrase", default=None, help="Required exact manual-harness approval phrase when --submit is used.")
+    parser.add_argument(
+        "--pre-action-snapshot-max-age-seconds",
+        type=int,
+        default=300,
+        help="Maximum age for Control Plane Snapshot evidence required before submit-capable bridge delegation.",
+    )
     parser.add_argument("--timeout-seconds", type=float, default=15.0, help="Per-request callback timeout.")
     parser.add_argument("--kill-switch-path", type=Path, default=REPO_ROOT / "var" / "ibkr_paper_strategy_bridge.disabled", help="Kill-switch file path checked during preflight.")
     parser.add_argument("--daily-order-cap", type=int, default=1, help="Daily strategy bridge order cap.")
@@ -88,6 +94,7 @@ def main(argv: list[str] | None = None) -> int:
         approval_digest=str(args.approval_digest or "").strip() or None,
         approval_phrase=str(args.approval_phrase or "").strip() or None,
         manual_frozen_preview_path=Path(args.manual_frozen_preview_path) if args.manual_frozen_preview_path is not None else None,
+        pre_action_snapshot_max_age_seconds=int(args.pre_action_snapshot_max_age_seconds),
     )
     artifacts = run_ibkr_paper_strategy_bridge(config=config)
     write_ibkr_paper_strategy_bridge_artifacts(output_dir=output_dir, artifacts=artifacts)

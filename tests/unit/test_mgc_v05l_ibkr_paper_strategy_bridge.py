@@ -38,19 +38,25 @@ from mgc_v05l.execution.ibkr_paper_strategy_monitor import load_paper_strategy_m
 from mgc_v05l.execution.ibkr_paper_order_preview import evaluate_paper_preview_environment_lock
 from mgc_v05l.execution.ibkr_paper_strategy_porting import lane_submit_bridge_adapter
 
+_PLAN_STRATEGY_BRIDGE_SUBMIT = "PLAN_STRATEGY_BRIDGE_SUBMIT"
+_ACTION_STRATEGY_BRIDGE_SUBMIT = "STRATEGY_BRIDGE_SUBMIT"
+
 
 def _healthy_governance() -> dict[str, object]:
+    selected = {
+        "strategy_id": "ATP_COMPANION_V1_ASIA_US",
+        "bridge_strategy_id": "ATP_COMPANION_V1_ASIA_US",
+        "strategy_status": "PROBATION_ACTIVE",
+        "submit_allowed": True,
+        "submit_block_reasons": [],
+    }
     return {
+        "generated_at": "2999-01-01T00:00:00+00:00",
         "classification": "PAPER_STRATEGY_GOVERNANCE_READY",
         "submit_allowed": True,
         "block_reasons": [],
-        "selected_strategy": {
-            "strategy_id": "atp_companion_v1_asia_us",
-            "bridge_strategy_id": "ATP_COMPANION_V1_ASIA_US",
-            "strategy_status": "PROBATION_ACTIVE",
-            "submit_allowed": True,
-            "submit_block_reasons": [],
-        },
+        "selected_strategy": selected,
+        "strategies": [selected],
     }
 
 
@@ -101,17 +107,20 @@ def test_cancelled_close_delegate_maps_to_terminal_non_fill_classification() -> 
 
 
 def _healthy_lane_governance() -> dict[str, object]:
+    selected = {
+        "strategy_id": "gc_1x_asia_london_participation__asia_london_long_v5",
+        "bridge_strategy_id": "asia_london_participation_core_v1__GC",
+        "strategy_status": "PROBATION_ACTIVE",
+        "submit_allowed": True,
+        "submit_block_reasons": [],
+    }
     return {
+        "generated_at": "2999-01-01T00:00:00+00:00",
         "classification": "PAPER_STRATEGY_GOVERNANCE_READY",
         "submit_allowed": True,
         "block_reasons": [],
-        "selected_strategy": {
-            "strategy_id": "gc_1x_asia_london_participation__asia_london_long_v5",
-            "bridge_strategy_id": "asia_london_participation_core_v1__GC",
-            "strategy_status": "PROBATION_ACTIVE",
-            "submit_allowed": True,
-            "submit_block_reasons": [],
-        },
+        "selected_strategy": selected,
+        "strategies": [selected],
     }
 
 
@@ -211,6 +220,105 @@ def _write_phase1_reconciliation(
         ),
         encoding="utf-8",
     )
+
+
+def _write_strategy_bridge_snapshot(
+    tmp_path: Path,
+    *,
+    target_identity: dict[str, object] | None = None,
+    supervisor_classification: str = "SUPERVISOR_RUNTIME_START_ALLOWED",
+    safe_to_start_runtime: bool = True,
+) -> dict[str, str]:
+    generated_at = datetime.now(timezone.utc).isoformat()
+    snapshot_id = "snapshot-strategy-bridge-submit"
+    generation_id = "generation-strategy-bridge-submit"
+    supervisor_decision_id = "supervisor-strategy-bridge-submit"
+    _write_json(
+        tmp_path / "outputs/track_b_execution_core/control_plane/latest_control_plane_snapshot.json",
+        {
+            "generated_at": generated_at,
+            "classification": "CONTROL_PLANE_SNAPSHOT_READY",
+            "control_plane_snapshot_id": snapshot_id,
+            "shared_truth_refresh_generation_id": generation_id,
+            "shared_truth_coherence_status": "COHERENT",
+            "runtime_supervisor_decision_id": supervisor_decision_id,
+            "runtime_supervisor_classification": supervisor_classification,
+            "safe_to_start_runtime": safe_to_start_runtime,
+            "live_money_eligible": False,
+        },
+    )
+    _write_json(
+        tmp_path / "outputs/track_b_execution_core/runtime_supervisor/latest_runtime_supervisor_authority.json",
+        {
+            "generated_at": generated_at,
+            "supervisor_decision_id": supervisor_decision_id,
+            "classification": supervisor_classification,
+            "live_money_eligible": False,
+        },
+    )
+    _write_json(
+        tmp_path / "outputs/track_b_execution_core/paper_autonomous_recovery/latest_paper_autonomous_recovery_plan.json",
+        {
+            "generated_at": generated_at,
+            "classification": _PLAN_STRATEGY_BRIDGE_SUBMIT,
+            "control_plane_snapshot_id": snapshot_id,
+            "shared_truth_refresh_generation_id": generation_id,
+            "execution_enabled": False,
+            "proposed_actions": [
+                {
+                    "action_id": "strategy_bridge_submit",
+                    "action_type": _ACTION_STRATEGY_BRIDGE_SUBMIT,
+                    "target_identity": target_identity or _strategy_bridge_target_identity(),
+                    "execution_enabled": False,
+                }
+            ],
+        },
+    )
+    return {
+        "control_plane_snapshot_id": snapshot_id,
+        "shared_truth_refresh_generation_id": generation_id,
+        "runtime_supervisor_decision_id": supervisor_decision_id,
+    }
+
+
+def _strategy_bridge_target_identity() -> dict[str, object]:
+    return {
+        "strategy_id": "ATP_COMPANION_V1_ASIA_US",
+        "symbol": "MGC",
+        "contract_month": "202606",
+        "contract": "MGCM6",
+        "con_id": "712565978",
+        "action": "BUY",
+        "quantity": "1.0",
+        "caller_path": "manual_strategy_bridge_cli",
+    }
+
+
+def _runtime_bridge_metadata(*, snapshot: dict[str, str]) -> dict[str, object]:
+    return {
+        "caller_type": "supervised_paper_runtime",
+        "strategy_id": "gc_1x_asia_london_participation__asia_london_long_v5",
+        "lane_id": "gc_1x_asia_london_participation__asia_london_long_v5",
+        "source_instrument": "GC",
+        "executable_proxy": "GC",
+        "paper_only": True,
+        "mode": "PAPER",
+        "host": "127.0.0.1",
+        "port": 7497,
+        "account_id": "DUM882026",
+        "runtime_pid": 12345,
+        "runtime_cwd": str(Path.cwd()),
+        "route_destination": "ibkr_paper_bridge_submit_capable",
+        "bridge_proxy_mode": "GC_SIGNAL_DIRECT_PHASE1",
+        "intent_action": "BUY",
+        "intent_type": "BUY_TO_OPEN",
+        **snapshot,
+    }
+
+
+def _write_json(path: Path, payload: dict[str, object]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
 
 
 def _write_fresh_broker_truth(tmp_path: Path) -> None:
@@ -1594,6 +1702,120 @@ def test_submit_requires_manual_harness_bundle(tmp_path: Path) -> None:
     ).exists()
 
 
+def test_direct_bridge_submit_blocked_without_snapshot(tmp_path: Path) -> None:
+    _write_runtime_files(tmp_path, governance_status=_healthy_governance())
+    manual_bundle = tmp_path / "frozen_preview.json"
+
+    artifacts = run_ibkr_paper_strategy_bridge(
+        config=_config(
+            tmp_path,
+            submit=True,
+            manual_frozen_preview_path=manual_bundle,
+            approval_digest="digest",
+            approval_phrase="phrase",
+        )
+    )
+
+    assert artifacts.classification == "PAPER_STRATEGY_INTENT_BLOCKED"
+    assert artifacts.report["bridge_direct_invocation"] is True
+    assert artifacts.report["pre_action_snapshot_validation"]["classification"] == "PRE_ACTION_BLOCKED_SNAPSHOT_MISSING"
+
+
+def test_direct_bridge_submit_blocked_on_snapshot_target_mismatch(tmp_path: Path) -> None:
+    _write_runtime_files(tmp_path, governance_status=_healthy_governance())
+    _write_strategy_bridge_snapshot(
+        tmp_path,
+        target_identity={**_strategy_bridge_target_identity(), "symbol": "MNQ"},
+    )
+
+    artifacts = run_ibkr_paper_strategy_bridge(
+        config=_config(
+            tmp_path,
+            submit=True,
+            manual_frozen_preview_path=tmp_path / "frozen_preview.json",
+            approval_digest="digest",
+            approval_phrase="phrase",
+        )
+    )
+
+    assert artifacts.classification == "PAPER_STRATEGY_INTENT_BLOCKED"
+    assert artifacts.report["pre_action_snapshot_validation"]["classification"] == "PRE_ACTION_BLOCKED_TARGET_IDENTITY_MISMATCH"
+
+
+def test_direct_bridge_submit_blocked_when_supervisor_not_trade_capable(tmp_path: Path) -> None:
+    _write_runtime_files(tmp_path, governance_status=_healthy_governance())
+    _write_strategy_bridge_snapshot(
+        tmp_path,
+        supervisor_classification="SUPERVISOR_WAIT_MARKET_CLOSED",
+        safe_to_start_runtime=False,
+    )
+
+    artifacts = run_ibkr_paper_strategy_bridge(
+        config=_config(
+            tmp_path,
+            submit=True,
+            manual_frozen_preview_path=tmp_path / "frozen_preview.json",
+            approval_digest="digest",
+            approval_phrase="phrase",
+        )
+    )
+
+    assert artifacts.classification == "PAPER_STRATEGY_INTENT_BLOCKED"
+    trade_gate = artifacts.report["pre_action_snapshot_validation"]["snapshot_trade_capable"]
+    assert trade_gate["passed"] is False
+    assert "safe_to_start_runtime" in trade_gate["detail"]
+
+
+def test_runtime_supervised_bridge_reaches_existing_next_gate_with_snapshot(monkeypatch, tmp_path: Path) -> None:
+    _write_runtime_files(tmp_path, governance_status=_healthy_lane_governance())
+    snapshot = _write_strategy_bridge_snapshot(tmp_path)
+    metadata = _runtime_bridge_metadata(snapshot=snapshot)
+    monkeypatch.setattr(
+        bridge_module,
+        "_build_runtime",
+        lambda **_kwargs: (_ for _ in ()).throw(RuntimeError("runtime next gate reached")),
+    )
+    monkeypatch.setattr(
+        bridge_module,
+        "evaluate_paper_strategy_exposure_gate",
+        lambda **_kwargs: _healthy_exposure(),
+    )
+
+    artifacts = run_ibkr_paper_strategy_bridge(
+        config=_config(
+            tmp_path,
+            strategy_id="gc_1x_asia_london_participation__asia_london_long_v5",
+            symbol="GC",
+            contract_month="202606",
+            submit=True,
+            caller_path="probationary_paper_runtime_lane",
+            caller_metadata=metadata,
+        ),
+        stack_provider=lambda: [
+            SimpleNamespace(frame=SimpleNamespace(f_globals={"__name__": "mgc_v05l.app.probationary_runtime"}))
+        ],
+    )
+
+    assert artifacts.classification == "PAPER_STRATEGY_INTENT_BLOCKED"
+    assert artifacts.report["runtime_supervised"] is True
+    assert artifacts.report["runtime_control_plane_authorization"]["classification"] == "RUNTIME_CONTROL_PLANE_AUTHORIZATION_VALID"
+    assert "runtime next gate reached" in artifacts.report["detail"]
+
+
+def test_bridge_test_harness_path_non_mutating_by_default(tmp_path: Path) -> None:
+    _write_runtime_files(tmp_path)
+
+    artifacts = run_ibkr_paper_strategy_bridge(config=_config(tmp_path, submit=False))
+
+    assert artifacts.report.get("pre_action_snapshot_validation", {}) == {}
+    assert artifacts.report.get("delegated_result") is None
+
+
+def test_bridge_does_not_consume_dashboard_projection_as_authority() -> None:
+    source = Path(bridge_module.__file__).read_text(encoding="utf-8")
+    assert "outputs/operator_dashboard/runtime/latest_track_b_control_plane_snapshot.json" not in source
+
+
 def test_leak_test_caller_requires_valid_authorization(tmp_path: Path) -> None:
     _write_runtime_files(tmp_path, governance_status=_healthy_lane_governance())
     artifacts = run_ibkr_paper_strategy_bridge(
@@ -2234,6 +2456,19 @@ def test_leak_test_submit_handshake_failure_reports_paper_connection_config(tmp_
     governance_status["strategies"] = [governance_status["selected_strategy"]]
     _write_runtime_files(tmp_path, governance_status=governance_status)
     _write_fresh_broker_truth(tmp_path)
+    _write_strategy_bridge_snapshot(
+        tmp_path,
+        target_identity={
+            "strategy_id": "gc_1x_asia_london_participation__asia_london_long_v5",
+            "lane_id": "gc_1x_asia_london_participation__asia_london_long_v5",
+            "symbol": "GC",
+            "contract_month": "202606",
+            "action": "BUY",
+            "quantity": "1.0",
+            "intent_type": "BUY_TO_OPEN",
+            "caller_path": "track_b_paper_leak_test_apply",
+        },
+    )
 
     artifacts = run_ibkr_paper_strategy_bridge(
         config=_config(

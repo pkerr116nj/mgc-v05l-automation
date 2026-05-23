@@ -63,6 +63,11 @@ from ..execution_core.track_b_paper_broker_reconciliation import (
     ReconciliationConfig,
     reconcile_track_b_paper_broker_truth,
 )
+from ..execution_core.track_b_pre_action_snapshot_validator import (
+    PRE_ACTION_SNAPSHOT_VALID,
+    TrackBPreActionSnapshotValidatorConfig,
+    validate_track_b_pre_action_snapshot,
+)
 from ..execution_core.track_b_submit_intent_ownership import (
     DEFAULT_TRACK_B_SUBMIT_INTENT_OWNERSHIP_JSONL,
     DEFAULT_TRACK_B_SUBMIT_INTENT_OWNERSHIP_LATEST_JSON,
@@ -196,6 +201,12 @@ _BRIDGE_ADDITIONAL_FORBIDDEN_CALLER_PREFIXES = (
     "mgc_v05l.live",
     "mgc_v05l.execution.live_strategy_broker",
 )
+_PLAN_STRATEGY_BRIDGE_SUBMIT = "PLAN_STRATEGY_BRIDGE_SUBMIT"
+_ACTION_STRATEGY_BRIDGE_SUBMIT = "STRATEGY_BRIDGE_SUBMIT"
+_RUNTIME_CONTROL_PLANE_AUTHORIZATION_VALID = "RUNTIME_CONTROL_PLANE_AUTHORIZATION_VALID"
+_RUNTIME_CONTROL_PLANE_AUTHORIZATION_BLOCKED = "RUNTIME_CONTROL_PLANE_AUTHORIZATION_BLOCKED"
+
+
 class IbkrPaperStrategyBridgeError(RuntimeError):
     """Raised when the IBKR paper strategy bridge fails closed."""
 
@@ -274,6 +285,7 @@ class IbkrPaperStrategyBridgeConfig:
     caller_metadata: dict[str, Any] | None = None
     leak_test_authorization_path: Path | None = None
     leak_test_authorization_digest: str | None = None
+    pre_action_snapshot_max_age_seconds: int = 300
 
 
 @dataclass(frozen=True)
@@ -555,6 +567,8 @@ def run_ibkr_paper_strategy_bridge(
     submit_intent_ownership_pre_submit: dict[str, Any] | None = None
     submit_intent_ownership_update: dict[str, Any] | None = None
     broker_effect_classification: str | None = None
+    pre_action_snapshot_validation: dict[str, Any] = {}
+    runtime_control_plane_authorization: dict[str, Any] = {}
     _record_bridge_audit(
         audit_events,
         event_type="intent_received",
@@ -605,11 +619,103 @@ def run_ibkr_paper_strategy_bridge(
                 "paper_strategy_governance_status": governance_status,
                 "paper_strategy_exposure_status": exposure_status,
                 "preflight_checks": static_checks,
+                "bridge_direct_invocation": _bridge_direct_invocation(config),
+                "runtime_supervised": _bridge_runtime_supervised_invocation(config),
+                "dashboard_projection_consumed": False,
+                "pre_action_snapshot_validation": pre_action_snapshot_validation,
+                "runtime_control_plane_authorization": runtime_control_plane_authorization,
                 "detail": detail,
                 "errors": [],
             },
             audit_events=audit_events,
         )
+    if config.submit:
+        if _bridge_runtime_supervised_invocation(config):
+            runtime_control_plane_authorization = _runtime_control_plane_authorization_check(
+                config=config,
+                intent=intent,
+                now=started_at,
+            )
+            if runtime_control_plane_authorization.get("classification") != _RUNTIME_CONTROL_PLANE_AUTHORIZATION_VALID:
+                detail = (
+                    "Runtime-supervised strategy bridge submit lacks fresh Control Plane Snapshot authorization: "
+                    f"{runtime_control_plane_authorization.get('classification')} - "
+                    f"{runtime_control_plane_authorization.get('reason')}"
+                )
+                _record_bridge_audit(
+                    audit_events,
+                    event_type="runtime_control_plane_authorization_blocked",
+                    detail=detail,
+                    config=config,
+                    extra={"runtime_control_plane_authorization": runtime_control_plane_authorization},
+                )
+                return IbkrPaperStrategyBridgeArtifacts(
+                    classification="PAPER_STRATEGY_INTENT_BLOCKED",
+                    report=_pre_runtime_blocked_report(
+                        config=config,
+                        started_at=started_at,
+                        intent=intent,
+                        caller_gate=caller_gate,
+                        environment_lock=environment_lock,
+                        monitor_status=monitor_status,
+                        governance_status=governance_status,
+                        exposure_status=exposure_status,
+                        preflight_checks=static_checks,
+                        detail=detail,
+                        pre_action_snapshot_validation=pre_action_snapshot_validation,
+                        runtime_control_plane_authorization=runtime_control_plane_authorization,
+                    ),
+                    audit_events=audit_events,
+                )
+        else:
+            pre_action_snapshot_validation = _pre_action_snapshot_validation_for_bridge(
+                config=config,
+                intent=intent,
+                now=started_at,
+            )
+            snapshot_trade_capable = _strategy_bridge_snapshot_trade_capable(pre_action_snapshot_validation)
+            if pre_action_snapshot_validation.get("classification") != PRE_ACTION_SNAPSHOT_VALID or not snapshot_trade_capable.get("passed"):
+                detail = (
+                    "Pre-action Control Plane Snapshot validation blocked direct strategy bridge submit: "
+                    f"{pre_action_snapshot_validation.get('classification')} - "
+                    f"{pre_action_snapshot_validation.get('reason') if snapshot_trade_capable.get('passed') else snapshot_trade_capable.get('detail')}"
+                )
+                _record_bridge_audit(
+                    audit_events,
+                    event_type="strategy_bridge_pre_action_snapshot_blocked",
+                    detail=detail,
+                    config=config,
+                    extra={
+                        "pre_action_snapshot_validation": pre_action_snapshot_validation,
+                        "snapshot_trade_capable": snapshot_trade_capable,
+                    },
+                )
+                pre_action_snapshot_validation = {
+                    **pre_action_snapshot_validation,
+                    "snapshot_trade_capable": snapshot_trade_capable,
+                }
+                return IbkrPaperStrategyBridgeArtifacts(
+                    classification="PAPER_STRATEGY_INTENT_BLOCKED",
+                    report=_pre_runtime_blocked_report(
+                        config=config,
+                        started_at=started_at,
+                        intent=intent,
+                        caller_gate=caller_gate,
+                        environment_lock=environment_lock,
+                        monitor_status=monitor_status,
+                        governance_status=governance_status,
+                        exposure_status=exposure_status,
+                        preflight_checks=static_checks,
+                        detail=detail,
+                        pre_action_snapshot_validation=pre_action_snapshot_validation,
+                        runtime_control_plane_authorization=runtime_control_plane_authorization,
+                    ),
+                    audit_events=audit_events,
+                )
+            pre_action_snapshot_validation = {
+                **pre_action_snapshot_validation,
+                "snapshot_trade_capable": snapshot_trade_capable,
+            }
     try:
         runtime = _build_runtime(config=config, transport_factory=transport_factory, module_loader=module_loader)
         runtime.transport.connect()
@@ -757,6 +863,8 @@ def run_ibkr_paper_strategy_bridge(
                 callback_timeline_event_count=len(_build_callback_timeline(runtime)),
                 errors=list(runtime.collector.errors),
                 connection_diagnostics=_bridge_connection_diagnostics(config=config, runtime=runtime),
+                pre_action_snapshot_validation=pre_action_snapshot_validation,
+                runtime_control_plane_authorization=runtime_control_plane_authorization,
             )
             return IbkrPaperStrategyBridgeArtifacts(classification=classification, report=report, audit_events=audit_events)
 
@@ -778,6 +886,8 @@ def run_ibkr_paper_strategy_bridge(
                 intent=intent,
                 exit_attempt_policy=exit_attempt_policy,
                 entry_execution_pricing=entry_execution_pricing,
+                pre_action_snapshot_validation=pre_action_snapshot_validation,
+                runtime_control_plane_authorization=runtime_control_plane_authorization,
             )
             _record_bridge_audit(
                 audit_events,
@@ -815,6 +925,8 @@ def run_ibkr_paper_strategy_bridge(
                     intent=intent,
                     exit_attempt_policy=exit_attempt_policy,
                     entry_execution_pricing=entry_execution_pricing,
+                    pre_action_snapshot_validation=pre_action_snapshot_validation
+                    or _pre_action_context_from_runtime_authorization(runtime_control_plane_authorization),
                 )
             except Exception as delegate_exc:
                 submit_intent_ownership_update = _persist_submit_intent_ownership_delegate_exception(
@@ -932,6 +1044,8 @@ def run_ibkr_paper_strategy_bridge(
             callback_timeline_event_count=len(_build_callback_timeline(runtime)),
             errors=list(runtime.collector.errors),
             connection_diagnostics=_bridge_connection_diagnostics(config=config, runtime=runtime),
+            pre_action_snapshot_validation=pre_action_snapshot_validation,
+            runtime_control_plane_authorization=runtime_control_plane_authorization,
         )
         if known_managed_exit_order_persistence:
             report["known_managed_exit_order_persistence"] = known_managed_exit_order_persistence
@@ -976,6 +1090,11 @@ def run_ibkr_paper_strategy_bridge(
             "submit_intent_ownership_pre_submit": submit_intent_ownership_pre_submit,
             "submit_intent_ownership_update": submit_intent_ownership_update,
             "broker_effect_classification": _broker_effect_classification_for_delegate_exception(exc),
+            "bridge_direct_invocation": _bridge_direct_invocation(config),
+            "runtime_supervised": _bridge_runtime_supervised_invocation(config),
+            "dashboard_projection_consumed": False,
+            "pre_action_snapshot_validation": pre_action_snapshot_validation,
+            "runtime_control_plane_authorization": runtime_control_plane_authorization,
             "detail": str(exc),
             "errors": [] if runtime is None else list(runtime.collector.errors),
         }
@@ -1130,6 +1249,229 @@ def evaluate_strategy_bridge_caller(
                 else f"Paper strategy bridge detected forbidden caller frames: {', '.join(forbidden)}"
             )
         ),
+    }
+
+
+def _bridge_direct_invocation(config: IbkrPaperStrategyBridgeConfig) -> bool:
+    return str(config.caller_path or "").strip() not in _APPROVED_RUNTIME_CALLER_PATHS
+
+
+def _bridge_runtime_supervised_invocation(config: IbkrPaperStrategyBridgeConfig) -> bool:
+    return str(config.caller_path or "").strip() in _APPROVED_RUNTIME_CALLER_PATHS
+
+
+def _pre_action_snapshot_validation_for_bridge(
+    *,
+    config: IbkrPaperStrategyBridgeConfig,
+    intent: IbkrPaperStrategyOrderIntent,
+    now: datetime,
+) -> dict[str, Any]:
+    return validate_track_b_pre_action_snapshot(
+        config=TrackBPreActionSnapshotValidatorConfig(repo_root=config.repo_root),
+        expected_plan_classification=_PLAN_STRATEGY_BRIDGE_SUBMIT,
+        expected_action_type=_ACTION_STRATEGY_BRIDGE_SUBMIT,
+        expected_target_identity=_pre_action_target_identity_for_bridge(config=config, intent=intent),
+        max_snapshot_age_seconds=int(config.pre_action_snapshot_max_age_seconds),
+        now=now,
+    )
+
+
+def _pre_action_target_identity_for_bridge(
+    *,
+    config: IbkrPaperStrategyBridgeConfig,
+    intent: IbkrPaperStrategyOrderIntent,
+) -> dict[str, Any]:
+    metadata = dict(config.caller_metadata or {})
+    target = _bridge_phase1_target(config=config, intent=intent)
+    return {
+        "strategy_id": config.strategy_id,
+        "lane_id": metadata.get("lane_id"),
+        "symbol": str(config.symbol or intent.symbol or "").strip().upper(),
+        "contract_month": str(config.contract_month or intent.contract_month or "").strip(),
+        "contract": target.get("local_symbol"),
+        "con_id": target.get("con_id") or metadata.get("con_id"),
+        "action": str(config.action or intent.action or "").strip().upper(),
+        "quantity": str(config.quantity),
+        "intent_type": metadata.get("intent_type"),
+        "ownership_id": metadata.get("ownership_id") or metadata.get("submit_ownership_id"),
+        "manifest_id": metadata.get("manifest_id") or metadata.get("position_management_manifest_id"),
+        "lifecycle_id": metadata.get("lifecycle_id") or metadata.get("position_lifecycle_id"),
+        "caller_path": config.caller_path,
+    }
+
+
+def _runtime_control_plane_authorization_check(
+    *,
+    config: IbkrPaperStrategyBridgeConfig,
+    intent: IbkrPaperStrategyOrderIntent,
+    now: datetime,
+) -> dict[str, Any]:
+    metadata = dict(config.caller_metadata or {})
+    validator_config = TrackBPreActionSnapshotValidatorConfig(repo_root=config.repo_root)
+    snapshot_path = validator_config.resolve(validator_config.control_plane_snapshot_path)
+    snapshot = _read_json_object(snapshot_path)
+    base = {
+        "classification": _RUNTIME_CONTROL_PLANE_AUTHORIZATION_BLOCKED,
+        "valid": False,
+        "checked_at": now.isoformat(),
+        "source_artifact_path": str(snapshot_path),
+        "dashboard_projection_consumed": False,
+        "not_routing_authority": True,
+        "expected_target_identity": _pre_action_target_identity_for_bridge(config=config, intent=intent),
+        "control_plane_snapshot_id": str(metadata.get("control_plane_snapshot_id") or ""),
+        "shared_truth_generation_id": str(metadata.get("shared_truth_refresh_generation_id") or ""),
+        "runtime_supervisor_decision_id": str(metadata.get("runtime_supervisor_decision_id") or ""),
+    }
+    metadata_check = _runtime_caller_metadata_check(config=config, intent=intent)
+    base["runtime_caller_metadata_check"] = metadata_check
+    if not metadata_check.get("passed"):
+        return {**base, "reason": str(metadata_check.get("detail") or "Runtime caller metadata failed.")}
+    if not snapshot:
+        return {**base, "reason": "Control Plane Snapshot authority artifact is missing."}
+    generated_at = _parse_iso_datetime(snapshot.get("generated_at"))
+    if generated_at is None:
+        return {**base, "reason": "Control Plane Snapshot generated_at is missing or invalid."}
+    generated_at = generated_at.replace(tzinfo=timezone.utc) if generated_at.tzinfo is None else generated_at.astimezone(timezone.utc)
+    age_seconds = max(0.0, (now - generated_at).total_seconds())
+    base["snapshot_age_seconds"] = age_seconds
+    base["max_snapshot_age_seconds"] = int(config.pre_action_snapshot_max_age_seconds)
+    if age_seconds > int(config.pre_action_snapshot_max_age_seconds):
+        return {**base, "reason": "Control Plane Snapshot authorization is stale."}
+    if str(snapshot.get("shared_truth_coherence_status") or "") != "COHERENT":
+        return {**base, "reason": "Control Plane Snapshot is not coherent."}
+    if snapshot.get("live_money_eligible") is True:
+        return {**base, "reason": "live_money_eligible=true is a hard invariant block."}
+    snapshot_id = str(snapshot.get("control_plane_snapshot_id") or "")
+    generation_id = str(snapshot.get("shared_truth_refresh_generation_id") or "")
+    supervisor_id = str(snapshot.get("runtime_supervisor_decision_id") or "")
+    if base["control_plane_snapshot_id"] != snapshot_id:
+        return {**base, "reason": "Runtime metadata snapshot id does not match authority snapshot."}
+    if base["shared_truth_generation_id"] != generation_id:
+        return {**base, "reason": "Runtime metadata shared-truth generation id does not match authority snapshot."}
+    if base["runtime_supervisor_decision_id"] != supervisor_id:
+        return {**base, "reason": "Runtime metadata supervisor decision id does not match authority snapshot."}
+    return {
+        **base,
+        "classification": _RUNTIME_CONTROL_PLANE_AUTHORIZATION_VALID,
+        "valid": True,
+        "reason": "Runtime-supervised bridge submit inherits a fresh coherent Control Plane Snapshot authorization.",
+        "control_plane_snapshot_id": snapshot_id,
+        "shared_truth_generation_id": generation_id,
+        "runtime_supervisor_decision_id": supervisor_id,
+    }
+
+
+def _pre_action_context_from_runtime_authorization(authorization: dict[str, Any]) -> dict[str, Any]:
+    if not authorization:
+        return {}
+    return {
+        "classification": PRE_ACTION_SNAPSHOT_VALID,
+        "valid": True,
+        "reason": "Runtime Control Plane Snapshot authorization was validated before strategy bridge delegation.",
+        "control_plane_snapshot_id": authorization.get("control_plane_snapshot_id"),
+        "shared_truth_refresh_generation_id": authorization.get("shared_truth_generation_id"),
+        "runtime_supervisor_decision_id": authorization.get("runtime_supervisor_decision_id"),
+        "runtime_control_plane_authorization": authorization,
+    }
+
+
+def _strategy_bridge_snapshot_trade_capable(validation: dict[str, Any]) -> dict[str, Any]:
+    supervisor_classification = str(validation.get("supervisor_classification") or "")
+    if validation.get("snapshot_safe_to_start_runtime") is not True:
+        return {
+            "passed": False,
+            "detail": "Control Plane Snapshot does not mark safe_to_start_runtime=true.",
+            "supervisor_classification": supervisor_classification,
+        }
+    if supervisor_classification != "SUPERVISOR_RUNTIME_START_ALLOWED":
+        return {
+            "passed": False,
+            "detail": f"Runtime Supervisor classification {supervisor_classification or 'UNKNOWN'} does not allow start/trade.",
+            "supervisor_classification": supervisor_classification,
+        }
+    return {
+        "passed": True,
+        "detail": "Control Plane Snapshot and Runtime Supervisor are start/trade capable for direct bridge submit.",
+        "supervisor_classification": supervisor_classification,
+    }
+
+
+def _control_plane_snapshot_id_from_evidence(*payloads: dict[str, Any] | None) -> str:
+    for payload in payloads:
+        value = (payload or {}).get("control_plane_snapshot_id")
+        if value:
+            return str(value)
+    return ""
+
+
+def _shared_truth_generation_id_from_evidence(*payloads: dict[str, Any] | None) -> str:
+    for payload in payloads:
+        value = (payload or {}).get("shared_truth_refresh_generation_id") or (payload or {}).get("shared_truth_generation_id")
+        if value:
+            return str(value)
+    return ""
+
+
+def _read_json_object(path: Path) -> dict[str, Any]:
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+    return payload if isinstance(payload, dict) else {}
+
+
+def _pre_runtime_blocked_report(
+    *,
+    config: IbkrPaperStrategyBridgeConfig,
+    started_at: datetime,
+    intent: IbkrPaperStrategyOrderIntent,
+    caller_gate: dict[str, Any],
+    environment_lock: dict[str, Any],
+    monitor_status: dict[str, Any],
+    governance_status: dict[str, Any],
+    exposure_status: dict[str, Any],
+    preflight_checks: list[dict[str, Any]],
+    detail: str,
+    pre_action_snapshot_validation: dict[str, Any],
+    runtime_control_plane_authorization: dict[str, Any],
+) -> dict[str, Any]:
+    return {
+        "classification": "PAPER_STRATEGY_INTENT_BLOCKED",
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "started_at": started_at.isoformat(),
+        "environment": {
+            "mode": config.mode,
+            "host": config.host,
+            "port": config.port,
+            "client_id": config.client_id,
+            "account_id": config.account_id,
+            "read_only_preflight": True,
+            "timeout_seconds": config.timeout_seconds,
+        },
+        "connection_diagnostics": _bridge_connection_diagnostics(config=config),
+        "intent": intent.to_dict(),
+        "caller_gate": caller_gate,
+        "caller_metadata": dict(config.caller_metadata or {}),
+        "environment_lock_check": environment_lock,
+        "paper_strategy_monitor_status": monitor_status,
+        "paper_strategy_governance_status": governance_status,
+        "paper_strategy_exposure_status": exposure_status,
+        "preflight_checks": preflight_checks,
+        "bridge_direct_invocation": _bridge_direct_invocation(config),
+        "runtime_supervised": _bridge_runtime_supervised_invocation(config),
+        "dashboard_projection_consumed": False,
+        "control_plane_snapshot_id": _control_plane_snapshot_id_from_evidence(
+            pre_action_snapshot_validation,
+            runtime_control_plane_authorization,
+        ),
+        "shared_truth_generation_id": _shared_truth_generation_id_from_evidence(
+            pre_action_snapshot_validation,
+            runtime_control_plane_authorization,
+        ),
+        "pre_action_snapshot_validation": pre_action_snapshot_validation,
+        "runtime_control_plane_authorization": runtime_control_plane_authorization,
+        "detail": detail,
+        "errors": [],
     }
 
 
@@ -2115,6 +2457,7 @@ def _delegate_to_manual_harness(
     intent: IbkrPaperStrategyOrderIntent,
     exit_attempt_policy: ExitAttemptPolicy,
     entry_execution_pricing: dict[str, Any] | None = None,
+    pre_action_snapshot_validation: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     manual_frozen_preview_path = config.manual_frozen_preview_path
     approval_digest = config.approval_digest
@@ -2189,6 +2532,11 @@ def _delegate_to_manual_harness(
         frozen_preview_path=Path(manual_frozen_preview_path),
         diagnostic_dry_run=False,
         execution_pricing_context=entry_execution_pricing if limit_override is not None else None,
+        pre_action_snapshot_already_validated=True,
+        pre_action_snapshot_validation_context={
+            **dict(pre_action_snapshot_validation or {}),
+            "upstream_bridge_validation": True,
+        },
     )
     manual_confirmation_fn = _supervised_runtime_manual_confirmation if supervised_runtime_route else None
     delegated = run_ibkr_manual_paper_submit_test(
@@ -2297,6 +2645,8 @@ def _build_report(
     callback_timeline_event_count: int,
     errors: list[dict[str, Any]],
     connection_diagnostics: dict[str, Any] | None = None,
+    pre_action_snapshot_validation: dict[str, Any] | None = None,
+    runtime_control_plane_authorization: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     strategy_identity = _resolve_strategy_identity(intent.strategy_id)
     return {
@@ -2318,6 +2668,19 @@ def _build_report(
         "selected_account_id": selected_account_id,
         "caller_gate": caller_gate,
         "caller_metadata": dict(config.caller_metadata or {}),
+        "bridge_direct_invocation": _bridge_direct_invocation(config),
+        "runtime_supervised": _bridge_runtime_supervised_invocation(config),
+        "dashboard_projection_consumed": False,
+        "control_plane_snapshot_id": _control_plane_snapshot_id_from_evidence(
+            pre_action_snapshot_validation,
+            runtime_control_plane_authorization,
+        ),
+        "shared_truth_generation_id": _shared_truth_generation_id_from_evidence(
+            pre_action_snapshot_validation,
+            runtime_control_plane_authorization,
+        ),
+        "pre_action_snapshot_validation": pre_action_snapshot_validation or {},
+        "runtime_control_plane_authorization": runtime_control_plane_authorization or {},
         "environment_lock_check": environment_lock,
         "paper_strategy_monitor_status": paper_strategy_monitor_status,
         "paper_strategy_governance_status": paper_strategy_governance_status,

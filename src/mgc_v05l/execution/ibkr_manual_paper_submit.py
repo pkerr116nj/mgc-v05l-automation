@@ -143,6 +143,8 @@ class IbkrManualPaperSubmitConfig:
     post_approval_observation_seconds: float = 75.0
     execution_pricing_context: dict[str, Any] | None = None
     pre_action_snapshot_max_age_seconds: int = 300
+    pre_action_snapshot_already_validated: bool = False
+    pre_action_snapshot_validation_context: dict[str, Any] | None = None
 
 
 @dataclass(frozen=True)
@@ -633,11 +635,20 @@ def run_ibkr_manual_paper_submit_test(
 
     pre_action_validation: dict[str, Any] = {}
     if config.submit:
-        pre_action_validation = _pre_action_snapshot_validation(
-            config=config,
-            requested_order=requested_order,
-            now=started_at,
-        )
+        if config.pre_action_snapshot_already_validated:
+            pre_action_validation = dict(config.pre_action_snapshot_validation_context or {})
+            pre_action_validation.setdefault("classification", PRE_ACTION_SNAPSHOT_VALID)
+            pre_action_validation.setdefault("valid", True)
+            pre_action_validation.setdefault(
+                "reason",
+                "Upstream strategy bridge validated Control Plane Snapshot evidence before delegation.",
+            )
+        else:
+            pre_action_validation = _pre_action_snapshot_validation(
+                config=config,
+                requested_order=requested_order,
+                now=started_at,
+            )
         if pre_action_validation.get("classification") != PRE_ACTION_SNAPSHOT_VALID:
             detail = (
                 "Pre-action Control Plane Snapshot validation blocked manual PAPER submit harness: "

@@ -13269,6 +13269,7 @@ def _runtime_bridge_config_for_lane(
 ) -> IbkrPaperStrategyBridgeConfig:
     bridge_target = dict(bridge_adapter.get("bridge_execution_target") or {})
     action, limit_price_model = _runtime_bridge_action_and_limit_model(order_intent.intent_type)
+    control_plane_evidence = _latest_control_plane_snapshot_evidence(repo_root=repo_root)
     return IbkrPaperStrategyBridgeConfig(
         repo_root=repo_root,
         mode="PAPER",
@@ -13307,10 +13308,36 @@ def _runtime_bridge_config_for_lane(
             "intent_action": action,
             "intent_type": order_intent.intent_type.value,
             "managed_exit_policy_id": bridge_adapter.get("managed_exit_policy_id"),
+            **control_plane_evidence,
             **_runtime_bridge_entry_execution_metadata(bridge_adapter),
         },
         output_dir=repo_root / "outputs" / "reports" / "ibkr_runtime_route_dispatch" / str(lane_id),
     )
+
+
+def _latest_control_plane_snapshot_evidence(*, repo_root: Path) -> dict[str, Any]:
+    path = (
+        Path(repo_root)
+        / "outputs"
+        / "track_b_execution_core"
+        / "control_plane"
+        / "latest_control_plane_snapshot.json"
+    )
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {
+            "control_plane_snapshot_id": "",
+            "shared_truth_refresh_generation_id": "",
+            "runtime_supervisor_decision_id": "",
+            "control_plane_snapshot_authority_path": str(path),
+        }
+    return {
+        "control_plane_snapshot_id": str(payload.get("control_plane_snapshot_id") or ""),
+        "shared_truth_refresh_generation_id": str(payload.get("shared_truth_refresh_generation_id") or ""),
+        "runtime_supervisor_decision_id": str(payload.get("runtime_supervisor_decision_id") or ""),
+        "control_plane_snapshot_authority_path": str(path),
+    }
 
 
 def _create_runtime_bridge_position_manifest(
