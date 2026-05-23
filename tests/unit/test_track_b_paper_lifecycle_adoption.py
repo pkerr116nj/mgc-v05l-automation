@@ -1065,6 +1065,22 @@ def _write_shared_truth_for_adoption(
         repo / "outputs" / "operator_dashboard" / "runtime" / "latest_broker_truth_lease.json",
         {"generated_at": generated_at, "classification": "ACTIVE"},
     )
+    _write_control_plane_snapshot(repo, generated_at=generated_at)
+
+
+def _write_control_plane_snapshot(repo: Path, *, generated_at: str | None = None) -> None:
+    _write_json(
+        repo / "outputs" / "track_b_execution_core" / "control_plane" / "latest_control_plane_snapshot.json",
+        {
+            "classification": "CONTROL_PLANE_SNAPSHOT_READY",
+            "control_plane_snapshot_id": "test-control-plane-snapshot",
+            "shared_truth_refresh_generation_id": "test-shared-truth-generation",
+            "shared_truth_coherence_status": "COHERENT",
+            "generated_at": generated_at or _now().isoformat(),
+            "live_money_eligible": False,
+            "duplicate_writer_count": 0,
+        },
+    )
 
 
 def _write_mgc_submit_intent_ownership(

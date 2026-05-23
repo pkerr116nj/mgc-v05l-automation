@@ -218,20 +218,26 @@
     {
       "area": "lifecycle/local artifact repair",
       "code_change_needed_now": false,
-      "doctrine_conflict": "This is acceptable for the current local-artifact remediation role, but v2 autonomous cleanup should use Control Plane Snapshot and lifecycle state matrix evidence as the pre-action packet.",
+      "current_status": "Resolved/narrowed: apply-capable local repair paths validate the Lifecycle State Matrix, reject unknown states/invalid transitions/incomplete evidence, and require a fresh coherent Control Plane Snapshot before active-state-affecting local writes.",
+      "doctrine_conflict": "Lifecycle/local artifact repair must not create, clean, or reinterpret lifecycle/manifest/ledger state outside the Lifecycle State Matrix or without a coherent Control Plane Snapshot when apply can affect active runtime/reconciliation state.",
       "id": "SS-LCA-011",
       "legacy_local_behavior": "Lifecycle cleanup/adoption paths have been migrated to require shared-truth evidence, but they still read broker truth and lifecycle artifacts directly to derive or write local cleanup/adoption records.",
       "paths": [
-        "src/mgc_v05l/app/track_b_paper_lifecycle_close_cleanup.py:155",
-        "src/mgc_v05l/app/track_b_paper_lifecycle_close_cleanup.py:292",
-        "src/mgc_v05l/app/track_b_paper_lifecycle_adoption.py:112"
+        "src/mgc_v05l/execution_core/track_b_lifecycle_local_repair_guard.py",
+        "src/mgc_v05l/app/track_b_paper_lifecycle_close_cleanup.py",
+        "src/mgc_v05l/app/track_b_paper_lifecycle_adoption.py",
+        "src/mgc_v05l/app/track_b_paper_malformed_ledger_cleanup.py"
       ],
-      "recommended_v2_migration": "Leave current tools as operator/debug fallback. Build executor adapters for SCOPED_POSITION_CLEANUP using snapshot validation and exact target identity; feed lifecycle matrix validators before any local write.",
+      "recommended_v2_migration": "Build executor adapters for SCOPED_POSITION_CLEANUP on top of validate_lifecycle_local_artifact_repair(...). Keep exact target identity, matrix evidence, and Control Plane Snapshot id/generation in every apply audit.",
       "severity": "MEDIUM",
+      "snapshot_gate_status": "MATRIX_ALIGNED_AND_ACTIVE_APPLY_SNAPSHOT_GATED",
       "tests_needed": [
-        "scoped cleanup adapter blocks without snapshot.",
-        "lifecycle cleanup report includes snapshot id when invoked by executor.",
-        "manual fallback remains visibly diagnostic/recovery-only."
+        "unknown lifecycle state rejected. done",
+        "invalid transition rejected. done",
+        "CLOSED_FLAT without fill/broker-flat proof rejected. done",
+        "active local artifact repair blocks without Control Plane Snapshot. done",
+        "matrix-aligned historical repair remains dry-run/classification-only safe. done",
+        "dashboard projections are not consumed. done"
       ]
     },
     {
@@ -254,12 +260,11 @@
   ],
   "generated_at": "2026-05-23T23:04:24.886113+00:00",
   "recommended_next_implementation_slice": {
-    "rationale": "Dashboard projection ownership is now explicit and test-covered. The next risk is local lifecycle repair adapter boundaries, followed by research/offline diagnostic labeling.",
+    "rationale": "Lifecycle/local artifact repair apply boundaries are now matrix-aligned and snapshot-gated. The next remaining risk is research/offline diagnostic labeling.",
     "scope": [
-      "SS-LCA-011",
       "SS-LCA-012"
     ],
-    "title": "Resolve local lifecycle repair adapters and diagnostic labeling"
+    "title": "Resolve research/offline diagnostic labeling"
   },
   "repo_root": "/Users/patrick/Dev/MGC-v05l-automation",
   "severity_counts": {
@@ -269,7 +274,6 @@
     "MEDIUM": 3
   },
   "top_5_risks": [
-    "SS-LCA-011",
     "SS-LCA-012"
   ],
   "v2_resiliency_backlog": [

@@ -27,6 +27,12 @@ from mgc_v05l.execution_core.track_b_managed_position_registry import (
 )
 from mgc_v05l.execution_core.track_b_open_order_truth import DEFAULT_OPEN_ORDER_TRUTH_ARTIFACT, NO_OPEN_ORDERS
 from mgc_v05l.execution_core.track_b_position_truth_monitor import DEFAULT_POSITION_TRUTH_ARTIFACT
+from mgc_v05l.execution_core.track_b_control_plane_snapshot import DEFAULT_CONTROL_PLANE_SNAPSHOT_ARTIFACT
+from mgc_v05l.execution_core.track_b_lifecycle_local_repair_guard import (
+    LIFECYCLE_LOCAL_REPAIR_VALID,
+    TrackBLifecycleLocalRepairGuardConfig,
+    validate_lifecycle_local_artifact_repair,
+)
 from mgc_v05l.execution_core.track_b_runtime_supervisor_authority import (
     DEFAULT_RUNTIME_SUPERVISOR_AUTHORITY_ARTIFACT,
 )
@@ -129,6 +135,9 @@ class LifecycleCloseCleanupConfig:
     runtime_supervisor_authority_path: Path = DEFAULT_RUNTIME_SUPERVISOR_AUTHORITY_ARTIFACT
     reconciliation_path: Path = DEFAULT_RECONCILIATION_ARTIFACT
     broker_lease_path: Path = DEFAULT_LEASE_ARTIFACT
+    control_plane_snapshot_path: Path = DEFAULT_CONTROL_PLANE_SNAPSHOT_ARTIFACT
+    require_control_plane_snapshot_for_apply: bool = True
+    local_repair_snapshot_max_age_seconds: int = 300
 
 
 @dataclass(frozen=True)
@@ -217,6 +226,14 @@ def run_track_b_paper_lifecycle_close_cleanup(
     )
     if close_record is not None and not reconciliation_prediction["would_clear"]:
         failures.append("Post-cleanup reconciliation prediction would not clear.")
+    lifecycle_local_repair_guard = _lifecycle_local_repair_guard(
+        config=config,
+        close_record=close_record,
+        broker_flat_evidence=broker_flat_evidence,
+        now=actual_now,
+    )
+    if lifecycle_local_repair_guard["classification"] != LIFECYCLE_LOCAL_REPAIR_VALID:
+        failures.append(f"Lifecycle State Matrix / Control Plane Snapshot guard blocked cleanup: {lifecycle_local_repair_guard['classification']}.")
     valid = not failures
     if valid and already_applied:
         classification = "TRACK_B_PAPER_LIFECYCLE_CLOSE_CLEANUP_ALREADY_APPLIED"
@@ -255,6 +272,9 @@ def run_track_b_paper_lifecycle_close_cleanup(
         },
         "broker_flat_evidence": broker_flat_evidence,
         "shared_truth_evidence": shared_truth_evidence,
+        "lifecycle_local_repair_guard": lifecycle_local_repair_guard,
+        "control_plane_snapshot_id": lifecycle_local_repair_guard.get("control_plane_snapshot_id"),
+        "shared_truth_refresh_generation_id": lifecycle_local_repair_guard.get("shared_truth_refresh_generation_id"),
         "write_plan": {
             "would_append_close_record": valid and not already_applied,
             "would_append_offsetting_entry_reconciliation": valid
@@ -1060,6 +1080,44 @@ def _offsetting_entry_already_reconciled(config: LifecycleCloseCleanupConfig, ro
         if str(row.get("new_artifact_classification") or "") == OPPOSITE_ENTRY_OFFSET_EXISTING_POSITION_RECLASSIFIED:
             return True
     return False
+
+
+def _lifecycle_local_repair_guard(
+    *,
+    config: LifecycleCloseCleanupConfig,
+    close_record: Mapping[str, Any] | None,
+    broker_flat_evidence: Mapping[str, Any],
+    now: datetime,
+) -> dict[str, Any]:
+    evidence: dict[str, Any] = dict(close_record or {})
+    evidence.update(
+        {
+            "requested_lifecycle_status": "CLOSED_FLAT",
+            "broker_flat_proof": bool(
+                broker_flat_evidence.get("broker_symbol_qty_flat") and broker_flat_evidence.get("open_orders_zero")
+            ),
+            "broker_flat_confirmed": bool(
+                broker_flat_evidence.get("broker_symbol_qty_flat") and broker_flat_evidence.get("open_orders_zero")
+            ),
+            "broker_position_flat": bool(broker_flat_evidence.get("broker_symbol_qty_flat")),
+            "open_order_count": broker_flat_evidence.get("open_order_count"),
+        }
+    )
+    return validate_lifecycle_local_artifact_repair(
+        config=TrackBLifecycleLocalRepairGuardConfig(
+            repo_root=config.repo_root,
+            control_plane_snapshot_path=config.control_plane_snapshot_path,
+            max_snapshot_age_seconds=config.local_repair_snapshot_max_age_seconds,
+            require_snapshot_for_apply=config.require_control_plane_snapshot_for_apply,
+        ),
+        current_state="OPEN_MANAGED",
+        target_state="CLOSED_FLAT",
+        evidence=evidence,
+        apply=config.apply,
+        active_state_affecting=True,
+        target_identity=_expected_identity(config),
+        now=now,
+    )
 
 
 def _already_has_matching_close(config: LifecycleCloseCleanupConfig, rows: Sequence[Mapping[str, Any]]) -> bool:

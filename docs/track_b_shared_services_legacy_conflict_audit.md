@@ -9,7 +9,7 @@
 
 The current launch/control-plane path is much healthier than the older tooling: `run_probationary_paper_soak.sh` now calls the Control Plane Snapshot preflight before runtime spawn, Runtime Supervisor records shared-truth generation/coherence, and the autonomous recovery executor framework already validates snapshots in dry-run mode.
 
-The remaining risk is concentrated in older broker/order mutation harnesses and apply-style repair paths. Several already consume shared-truth artifacts, but they still do not validate one coherent Control Plane Snapshot immediately before action. That is the v2 resiliency line to draw before enabling autonomous execution.
+The remaining high-risk broker/order mutation harnesses and apply-style repair paths now validate one coherent Control Plane Snapshot before apply-capable action. The remaining risk is mostly diagnostic ownership: research/offline readers still need clearer labeling so dashboard paths cannot be mistaken for execution authority.
 
 ## Severity Model
 
@@ -22,7 +22,6 @@ The remaining risk is concentrated in older broker/order mutation harnesses and 
 
 ## Top Remaining Risks
 
-1. `SS-LCA-011` MEDIUM - lifecycle/local artifact repair: Current manual fallback tools are shared-truth aligned but not yet executor/snapshot adapters.
 1. `SS-LCA-012` LOW - research/offline diagnostics: Some research readers still inspect dashboard snapshots for historical evidence; these remain diagnostic-only but need labeling discipline.
 
 ## Status Update - Snapshot-Gated Order Apply Paths
@@ -39,7 +38,8 @@ The remaining risk is concentrated in older broker/order mutation harnesses and 
 - `SS-LCA-008` crash-loop/operator-ack semantics is now PAPER-policy aligned: repeated unsafe stops classify as quarantine/observe, not routine operator acknowledgement. Future LIVE/PRE-LIVE acknowledgement remains explicit policy metadata.
 - `SS-LCA-009` dashboard/operator projection ownership is now explicit: Track B control-plane dashboard projections carry standardized `projection_only`, `not_routing_authority`, `source_authority=execution_core_authority`, source authority path metadata, and degraded/diagnostic-only markers when source authority paths are missing. Remaining physical-path migration for canonical readiness and broker lease is narrowed to future path cleanup, not an active projection-as-authority risk.
 - `SS-LCA-010` launch/status fallback flows now use a shared Control Plane Snapshot status classifier. Launch fails closed when the snapshot is missing, stale, or incoherent; status fallbacks are marked `diagnostic_only=true` / `not_routing_authority=true` and cannot surface `safe_to_start_runtime=true`.
-- next top risk is `SS-LCA-011` lifecycle/local artifact repair.
+- `SS-LCA-011` lifecycle/local artifact repair is now matrix-aligned and snapshot-gated at apply-capable local repair boundaries. Lifecycle close cleanup, lifecycle adoption, and malformed ledger cleanup call `validate_lifecycle_local_artifact_repair(...)`, validate target transitions against the Lifecycle State Matrix, require complete target evidence, and require a fresh coherent Control Plane Snapshot before active-state-affecting apply writes.
+- next top risk is `SS-LCA-012` research/offline diagnostics labeling.
 
 ## Findings
 
@@ -176,15 +176,20 @@ The remaining risk is concentrated in older broker/order mutation harnesses and 
 
 ### SS-LCA-011 - MEDIUM - lifecycle/local artifact repair
 
-- paths: `src/mgc_v05l/app/track_b_paper_lifecycle_close_cleanup.py:155`, `src/mgc_v05l/app/track_b_paper_lifecycle_close_cleanup.py:292`, `src/mgc_v05l/app/track_b_paper_lifecycle_adoption.py:112`
+- paths: `src/mgc_v05l/execution_core/track_b_lifecycle_local_repair_guard.py`, `src/mgc_v05l/app/track_b_paper_lifecycle_close_cleanup.py`, `src/mgc_v05l/app/track_b_paper_lifecycle_adoption.py`, `src/mgc_v05l/app/track_b_paper_malformed_ledger_cleanup.py`
 - legacy/local behavior: Lifecycle cleanup/adoption paths have been migrated to require shared-truth evidence, but they still read broker truth and lifecycle artifacts directly to derive or write local cleanup/adoption records.
 - conflict with doctrine: This is acceptable for the current local-artifact remediation role, but v2 autonomous cleanup should use Control Plane Snapshot and lifecycle state matrix evidence as the pre-action packet.
-- recommended v2 migration: Leave current tools as operator/debug fallback. Build executor adapters for SCOPED_POSITION_CLEANUP using snapshot validation and exact target identity; feed lifecycle matrix validators before any local write.
+- recommended v2 migration: Build executor adapters for SCOPED_POSITION_CLEANUP on top of the new lifecycle local repair guard. Keep exact target identity, matrix evidence, and Control Plane Snapshot id/generation in every apply audit.
+- current status: resolved/narrowed. Apply-capable local repair paths validate the Lifecycle State Matrix, reject unknown states/invalid transitions/incomplete evidence, and require a fresh coherent Control Plane Snapshot before active-state-affecting local writes.
+- lifecycle guard: `validate_lifecycle_local_artifact_repair(...)`
 - code change needed now: `false`
 - tests needed:
-  - scoped cleanup adapter blocks without snapshot.
-  - lifecycle cleanup report includes snapshot id when invoked by executor.
-  - manual fallback remains visibly diagnostic/recovery-only.
+  - unknown lifecycle state rejected. `done`
+  - invalid transition rejected. `done`
+  - CLOSED_FLAT without fill/broker-flat proof rejected. `done`
+  - active local artifact repair blocks without Control Plane Snapshot. `done`
+  - matrix-aligned historical repair remains dry-run/classification-only safe. `done`
+  - dashboard projections are not consumed. `done`
 
 ### SS-LCA-012 - LOW - research/offline diagnostics
 
@@ -212,11 +217,10 @@ The remaining risk is concentrated in older broker/order mutation harnesses and 
 
 ## Recommended Next Implementation Slice
 
-Continue snapshot/generation convergence on the remaining display and local-artifact surfaces:
+Continue labeling convergence on the remaining offline diagnostic surfaces:
 
-1. Add executor adapters for scoped lifecycle cleanup using the lifecycle state matrix and exact target snapshot identity.
-2. Label remaining research/offline diagnostics so dashboard snapshots cannot be mistaken for execution authority.
-3. Move remaining dashboard-path compatibility files for canonical readiness and broker lease to execution_core authority paths when the compatibility window is scheduled.
+1. Label remaining research/offline diagnostics so dashboard snapshots cannot be mistaken for execution authority.
+2. Move remaining dashboard-path compatibility files for canonical readiness and broker lease to execution_core authority paths when the compatibility window is scheduled.
 
 This keeps PAPER autonomous and failure-discovery oriented while ensuring every mutation boundary is coherent, budgetable, auditable, and impossible to confuse with dashboard projection state.
 

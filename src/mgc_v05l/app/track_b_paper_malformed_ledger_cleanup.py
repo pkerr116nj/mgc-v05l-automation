@@ -33,6 +33,12 @@ from mgc_v05l.execution_core.track_b_paper_trade_ledger import (
     build_track_b_paper_trade_summaries,
 )
 from mgc_v05l.execution_core.track_b_position_truth_monitor import DEFAULT_POSITION_TRUTH_ARTIFACT
+from mgc_v05l.execution_core.track_b_control_plane_snapshot import DEFAULT_CONTROL_PLANE_SNAPSHOT_ARTIFACT
+from mgc_v05l.execution_core.track_b_lifecycle_local_repair_guard import (
+    LIFECYCLE_LOCAL_REPAIR_VALID,
+    TrackBLifecycleLocalRepairGuardConfig,
+    validate_lifecycle_local_artifact_repair,
+)
 from mgc_v05l.execution_core.track_b_runtime_supervisor_authority import (
     DEFAULT_RUNTIME_SUPERVISOR_AUTHORITY_ARTIFACT,
 )
@@ -89,6 +95,9 @@ class MalformedLedgerCleanupConfig:
     runtime_supervisor_authority_path: Path = DEFAULT_RUNTIME_SUPERVISOR_AUTHORITY_ARTIFACT
     reconciliation_path: Path = DEFAULT_RECONCILIATION_ARTIFACT
     broker_lease_path: Path = DEFAULT_LEASE_ARTIFACT
+    control_plane_snapshot_path: Path = DEFAULT_CONTROL_PLANE_SNAPSHOT_ARTIFACT
+    require_control_plane_snapshot_for_apply: bool = True
+    local_repair_snapshot_max_age_seconds: int = 300
 
 
 @dataclass(frozen=True)
@@ -189,6 +198,16 @@ def run_track_b_paper_malformed_ledger_cleanup(
         positions_snapshot=broker_positions,
         orders_snapshot=broker_orders,
     )
+    lifecycle_local_repair_guard = _lifecycle_local_repair_guard(
+        config=config,
+        target=target,
+        reconciliation_record=reconciliation_record,
+        broker_flat_evidence=broker_flat_evidence,
+        manual_reconciliation_evidence=manual_reconciliation_evidence,
+        now=actual_now,
+    )
+    if lifecycle_local_repair_guard["classification"] != LIFECYCLE_LOCAL_REPAIR_VALID:
+        failures.append(f"Lifecycle State Matrix / Control Plane Snapshot guard blocked malformed-ledger cleanup: {lifecycle_local_repair_guard['classification']}.")
 
     valid = not failures
     if valid and already_applied:
@@ -229,6 +248,9 @@ def run_track_b_paper_malformed_ledger_cleanup(
             "manual_reconciliation_close": manual_reconciliation_evidence,
             "shared_truth_authority": shared_truth_evidence,
         },
+        "lifecycle_local_repair_guard": lifecycle_local_repair_guard,
+        "control_plane_snapshot_id": lifecycle_local_repair_guard.get("control_plane_snapshot_id"),
+        "shared_truth_refresh_generation_id": lifecycle_local_repair_guard.get("shared_truth_refresh_generation_id"),
         "write_plan": {
             "would_append_reconciliation_record": valid and not already_applied,
             "would_update_compact_summaries": valid,
@@ -611,6 +633,51 @@ def _malformed_reconciliation_record(
         "live_money_eligible": False,
         "created_at": now.isoformat(),
     }
+
+
+def _lifecycle_local_repair_guard(
+    *,
+    config: MalformedLedgerCleanupConfig,
+    target: Mapping[str, Any] | None,
+    reconciliation_record: Mapping[str, Any] | None,
+    broker_flat_evidence: Mapping[str, Any],
+    manual_reconciliation_evidence: Mapping[str, Any],
+    now: datetime,
+) -> dict[str, Any]:
+    evidence: dict[str, Any] = {
+        **dict(target or {}),
+        **dict(reconciliation_record or {}),
+        "requested_lifecycle_status": "MANUAL_OR_MALFORMED_CLEANUP",
+        "operator_review_or_malformed_artifact_evidence": bool(
+            manual_reconciliation_evidence.get("confirmed")
+            or manual_reconciliation_evidence.get("reviewed")
+            or (reconciliation_record or {}).get("manual_reconciliation_required")
+        ),
+        "manual_reconciliation_reviewed": bool(
+            manual_reconciliation_evidence.get("confirmed") or manual_reconciliation_evidence.get("reviewed")
+        ),
+        "malformed_artifact_evidence": True if target is not None else None,
+        "broker_flat_proof": bool(
+            broker_flat_evidence.get("broker_symbol_qty_flat") and broker_flat_evidence.get("open_orders_zero")
+        ),
+        "broker_position_flat": bool(broker_flat_evidence.get("broker_symbol_qty_flat")),
+        "open_order_count": broker_flat_evidence.get("open_order_count"),
+    }
+    return validate_lifecycle_local_artifact_repair(
+        config=TrackBLifecycleLocalRepairGuardConfig(
+            repo_root=config.repo_root,
+            control_plane_snapshot_path=config.control_plane_snapshot_path,
+            max_snapshot_age_seconds=config.local_repair_snapshot_max_age_seconds,
+            require_snapshot_for_apply=config.require_control_plane_snapshot_for_apply,
+        ),
+        current_state="OPEN_MANAGED",
+        target_state="MANUAL_OR_MALFORMED_CLEANUP",
+        evidence=evidence,
+        apply=config.apply,
+        active_state_affecting=True,
+        target_identity=_expected_identity(config),
+        now=now,
+    )
 
 
 def _already_voided(config: MalformedLedgerCleanupConfig, rows: Sequence[Mapping[str, Any]]) -> bool:

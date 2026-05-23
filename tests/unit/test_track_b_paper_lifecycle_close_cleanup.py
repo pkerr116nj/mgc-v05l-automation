@@ -112,6 +112,28 @@ def test_cleanup_audit_requires_shared_truth_snapshot(tmp_path: Path) -> None:
     assert shared["classifications"]["open_order_truth"] == "NO_OPEN_ORDERS"
     assert shared["classifications"]["managed_order_registry"] == "NO_MANAGED_ORDERS"
     assert shared["blockers"] == []
+    assert result.report["lifecycle_local_repair_guard"]["classification"] == "LIFECYCLE_LOCAL_REPAIR_VALID"
+    assert result.report["control_plane_snapshot_id"] == "test-control-plane-snapshot"
+
+
+def test_apply_blocks_without_control_plane_snapshot(tmp_path: Path) -> None:
+    _write_cleanup_fixture(tmp_path)
+    (
+        tmp_path
+        / "outputs"
+        / "track_b_execution_core"
+        / "control_plane"
+        / "latest_control_plane_snapshot.json"
+    ).unlink()
+
+    result = run_track_b_paper_lifecycle_close_cleanup(
+        config=LifecycleCloseCleanupConfig(repo_root=tmp_path, apply=True),
+        now=NOW,
+    )
+
+    assert result.classification == "TRACK_B_PAPER_LIFECYCLE_CLOSE_CLEANUP_REFUSED"
+    assert result.report["lifecycle_local_repair_guard"]["classification"] == "LIFECYCLE_LOCAL_REPAIR_BLOCKED_SNAPSHOT_MISSING"
+    assert any("Control Plane Snapshot guard blocked cleanup" in failure for failure in result.report["failures"])
 
 
 def test_cleanup_blocks_when_shared_truth_reports_suspicious_open_order(tmp_path: Path) -> None:
@@ -1145,6 +1167,22 @@ def _write_shared_truth_for_cleanup(
     _write_json(
         tmp_path / "outputs" / "operator_dashboard" / "runtime" / "latest_broker_truth_lease.json",
         {"generated_at": generated_at, "classification": "ACTIVE" if clean else "OPERATOR_REQUIRED"},
+    )
+    _write_control_plane_snapshot(tmp_path, generated_at=generated_at)
+
+
+def _write_control_plane_snapshot(tmp_path: Path, *, generated_at: str = NOW.isoformat()) -> None:
+    _write_json(
+        tmp_path / "outputs" / "track_b_execution_core" / "control_plane" / "latest_control_plane_snapshot.json",
+        {
+            "classification": "CONTROL_PLANE_SNAPSHOT_READY",
+            "control_plane_snapshot_id": "test-control-plane-snapshot",
+            "shared_truth_refresh_generation_id": "test-shared-truth-generation",
+            "shared_truth_coherence_status": "COHERENT",
+            "generated_at": generated_at,
+            "live_money_eligible": False,
+            "duplicate_writer_count": 0,
+        },
     )
 
 

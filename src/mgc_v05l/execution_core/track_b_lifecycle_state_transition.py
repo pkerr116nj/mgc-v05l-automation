@@ -119,8 +119,20 @@ def classify_managed_position_transition(evidence: Mapping[str, Any]) -> TrackBL
         return _transition(requested, blockers=tuple(evidence.get("review_blockers") or ()))
     if requested == CLOSE_UNKNOWN:
         return _transition(REVIEW_REQUIRED, blockers=("close_state_unknown",))
-    if requested in _MANUAL_OR_MALFORMED_STATES:
-        return _transition(MANUAL_OR_MALFORMED_CLEANUP, blockers=(requested,))
+    if requested == MANUAL_OR_MALFORMED_CLEANUP or requested in _MANUAL_OR_MALFORMED_STATES:
+        manual_evidence = _text(
+            evidence.get("operator_review_or_malformed_artifact_evidence"),
+            evidence.get("manual_reconciliation_reviewed"),
+            evidence.get("manual_reconciliation_evidence"),
+            evidence.get("malformed_artifact_evidence"),
+            evidence.get("broker_backed_malformed_artifact_reviewed"),
+        )
+        if not manual_evidence:
+            return _transition(
+                MANUAL_OR_MALFORMED_CLEANUP,
+                blockers=("operator_review_or_malformed_artifact_evidence",),
+            )
+        return _transition(MANUAL_OR_MALFORMED_CLEANUP)
     if requested in {INTENT_CREATED, SUBMIT_ATTEMPTED, SUBMITTED_PENDING_FILL}:
         return _transition(requested)
 

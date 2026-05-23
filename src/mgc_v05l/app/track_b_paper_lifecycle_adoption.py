@@ -32,6 +32,12 @@ from mgc_v05l.execution_core.track_b_position_management_manifest import (
     resolve_management_metadata,
 )
 from mgc_v05l.execution_core.track_b_position_truth_monitor import DEFAULT_POSITION_TRUTH_ARTIFACT
+from mgc_v05l.execution_core.track_b_control_plane_snapshot import DEFAULT_CONTROL_PLANE_SNAPSHOT_ARTIFACT
+from mgc_v05l.execution_core.track_b_lifecycle_local_repair_guard import (
+    LIFECYCLE_LOCAL_REPAIR_VALID,
+    TrackBLifecycleLocalRepairGuardConfig,
+    validate_lifecycle_local_artifact_repair,
+)
 from mgc_v05l.execution_core.track_b_runtime_supervisor_authority import (
     DEFAULT_RUNTIME_SUPERVISOR_AUTHORITY_ARTIFACT,
 )
@@ -90,6 +96,9 @@ class LifecycleAdoptionConfig:
     runtime_supervisor_authority_path: Path = DEFAULT_RUNTIME_SUPERVISOR_AUTHORITY_ARTIFACT
     reconciliation_path: Path = DEFAULT_RECONCILIATION_ARTIFACT
     broker_lease_path: Path = DEFAULT_LEASE_ARTIFACT
+    control_plane_snapshot_path: Path = DEFAULT_CONTROL_PLANE_SNAPSHOT_ARTIFACT
+    require_control_plane_snapshot_for_apply: bool = True
+    local_repair_snapshot_max_age_seconds: int = 300
 
 
 @dataclass(frozen=True)
@@ -244,6 +253,14 @@ def run_track_b_paper_lifecycle_adoption(
         now=actual_now,
     )
     failures.extend(shared_truth_evidence["blockers"])
+    lifecycle_local_repair_guard = _lifecycle_local_repair_guard(
+        config=config,
+        trade_payload=trade_payload,
+        fill_payload=fill_payload,
+        now=actual_now,
+    )
+    if lifecycle_local_repair_guard["classification"] != LIFECYCLE_LOCAL_REPAIR_VALID:
+        failures.append(f"Lifecycle State Matrix / Control Plane Snapshot guard blocked adoption: {lifecycle_local_repair_guard['classification']}.")
 
     valid = not failures
     classification = (
@@ -311,6 +328,9 @@ def run_track_b_paper_lifecycle_adoption(
             "unresolved_record_count": len(submit_intent_ownership_records),
         },
         "shared_truth_evidence": shared_truth_evidence,
+        "lifecycle_local_repair_guard": lifecycle_local_repair_guard,
+        "control_plane_snapshot_id": lifecycle_local_repair_guard.get("control_plane_snapshot_id"),
+        "shared_truth_refresh_generation_id": lifecycle_local_repair_guard.get("shared_truth_refresh_generation_id"),
         "intent_evidence": {
             "path": str(order_intents_path),
             "selected": intent,
@@ -1323,6 +1343,51 @@ def _build_trade_payload(fill_payload: Mapping[str, Any]) -> dict[str, Any]:
         "broker_mutated_by_adoption": False,
         "source_artifact_paths": fill_payload.get("source_artifact_paths") or [],
     }
+
+
+def _lifecycle_local_repair_guard(
+    *,
+    config: LifecycleAdoptionConfig,
+    trade_payload: Mapping[str, Any],
+    fill_payload: Mapping[str, Any],
+    now: datetime,
+) -> dict[str, Any]:
+    evidence = {
+        **dict(fill_payload),
+        **dict(trade_payload),
+        "requested_lifecycle_status": "OPEN_MANAGED",
+        "fill_price": fill_payload.get("fill_price") or trade_payload.get("entry_fill_price"),
+        "fill_timestamp": fill_payload.get("fill_timestamp") or trade_payload.get("entry_timestamp"),
+        "broker_order_id": fill_payload.get("broker_order_id") or trade_payload.get("broker_order_id"),
+        "perm_id": fill_payload.get("perm_id") or trade_payload.get("entry_perm_id"),
+        "lifecycle_id": trade_payload.get("lifecycle_id") or fill_payload.get("lifecycle_id"),
+    }
+    target_identity = {
+        "account_id": config.account_id,
+        "symbol": config.symbol,
+        "local_symbol": config.local_symbol,
+        "expiry": config.expiry,
+        "quantity": _decimal_text(config.quantity),
+        "order_intent_id": trade_payload.get("order_intent_id") or fill_payload.get("order_intent_id"),
+        "broker_order_id": fill_payload.get("broker_order_id") or trade_payload.get("broker_order_id"),
+        "perm_id": fill_payload.get("perm_id") or trade_payload.get("entry_perm_id"),
+        "lifecycle_id": trade_payload.get("lifecycle_id") or fill_payload.get("lifecycle_id"),
+    }
+    return validate_lifecycle_local_artifact_repair(
+        config=TrackBLifecycleLocalRepairGuardConfig(
+            repo_root=config.repo_root,
+            control_plane_snapshot_path=config.control_plane_snapshot_path,
+            max_snapshot_age_seconds=config.local_repair_snapshot_max_age_seconds,
+            require_snapshot_for_apply=config.require_control_plane_snapshot_for_apply,
+        ),
+        current_state="SUBMITTED_PENDING_FILL",
+        target_state="OPEN_MANAGED",
+        evidence=evidence,
+        apply=config.apply,
+        active_state_affecting=True,
+        target_identity=target_identity,
+        now=now,
+    )
 
 
 def _build_filled_bridge_result(fill_payload: Mapping[str, Any]) -> dict[str, Any]:

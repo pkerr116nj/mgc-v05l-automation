@@ -596,6 +596,22 @@ def _write_shared_truth_for_malformed_cleanup(
             "generated_at": generated_at,
         },
     )
+    _write_control_plane_snapshot(tmp_path, generated_at=generated_at)
+
+
+def _write_control_plane_snapshot(tmp_path: Path, *, generated_at: str = NOW.isoformat()) -> None:
+    _write_json(
+        tmp_path / "outputs" / "track_b_execution_core" / "control_plane" / "latest_control_plane_snapshot.json",
+        {
+            "classification": "CONTROL_PLANE_SNAPSHOT_READY",
+            "control_plane_snapshot_id": "test-control-plane-snapshot",
+            "shared_truth_refresh_generation_id": "test-shared-truth-generation",
+            "shared_truth_coherence_status": "COHERENT",
+            "generated_at": generated_at,
+            "live_money_eligible": False,
+            "duplicate_writer_count": 0,
+        },
+    )
 
 
 def _write_broker_truth(tmp_path: Path, *, broker_mnq_qty: str, open_order_count: int) -> None:
