@@ -291,6 +291,8 @@ status["operator_readiness_refresh_exit_code"] = int(sys.argv[5])
 shared_truth = readiness.get("execution_core_shared_truth") or {}
 proof_readiness = shared_truth.get("proof_readiness") or {}
 shared_truth_classifications = shared_truth.get("classifications") or {}
+shared_truth_artifact_paths = shared_truth.get("artifact_paths") or {}
+shared_truth_source_paths = [str(path) for path in shared_truth_artifact_paths.values() if path]
 market_closed = proof_readiness.get("classification") == "MARKET_CLOSED_NO_FRESH_BARS"
 status["shared_truth"] = {
     "source": "canonical_readiness_execution_core_shared_truth",
@@ -298,6 +300,16 @@ status["shared_truth"] = {
     "projection_only": True,
     "dashboard_projection_authority": False,
     "not_routing_authority": True,
+    "source_authority_path": None,
+    "source_authority_paths": shared_truth_source_paths,
+    "authority_owner": "execution_core",
+    "operator_dashboard_display_only": True,
+    "generated_from_control_plane_snapshot_id": None,
+    "control_plane_snapshot_required": False,
+    "projection_metadata_complete": bool(shared_truth_source_paths),
+    "projection_degraded": not bool(shared_truth_source_paths),
+    "diagnostic_only": not bool(shared_truth_source_paths),
+    "degraded_reason": None if shared_truth_source_paths else "missing_source_authority_path",
     "proof_readiness": proof_readiness.get("classification"),
     "open_order_truth": shared_truth_classifications.get("Open Order Truth"),
     "managed_order_registry": shared_truth_classifications.get("Managed Order Registry"),
@@ -310,7 +322,7 @@ status["shared_truth"] = {
     "phase1_session_reason": proof_readiness.get("phase1_session_reason"),
     "market_closed_no_fresh_bars_expected": market_closed,
     "operator_message": "Market closed/no fresh bars expected" if market_closed else None,
-    "artifact_paths": shared_truth.get("artifact_paths") or {},
+    "artifact_paths": shared_truth_artifact_paths,
 }
 status["eligible_lane_count"] = int((readiness.get("runtime") or {}).get("eligible_lane_count") or 0)
 status["quarantine_count"] = int((readiness.get("lane_quarantine") or {}).get("quarantine_count") or 0)
@@ -699,12 +711,35 @@ market_closed = (
     or runtime_supervisor.get("proof_window_status") == "market_closed"
     or paper_recovery_diagnostic == "WAIT_MARKET_CLOSED"
 )
+authority_paths = {
+    "agent_registry": str(agent_registry_path),
+    "agent_health": str(agent_health_path),
+    "self_recover": str(self_recover_path),
+    "crash_loop_protection": str(crash_loop_path),
+    "runtime_resume": str(runtime_resume_path),
+    "runtime_supervisor": str(runtime_supervisor_path),
+    "control_plane_snapshot": str(control_plane_snapshot_path),
+    "paper_recovery_policy": str(paper_recovery_policy_path),
+    "paper_autonomous_recovery_plan": str(paper_autonomous_recovery_plan_path),
+}
+source_authority_paths = [path for path in authority_paths.values() if path]
+control_plane_snapshot_id = control_plane_snapshot.get("control_plane_snapshot_id")
 status["track_b_control_plane"] = {
     "source": "execution_core_control_plane_authority_projection",
     "source_authority": "execution_core_authority",
     "projection_only": True,
     "dashboard_projection_authority": False,
     "not_routing_authority": True,
+    "source_authority_path": None,
+    "source_authority_paths": source_authority_paths,
+    "authority_owner": "execution_core",
+    "operator_dashboard_display_only": True,
+    "generated_from_control_plane_snapshot_id": control_plane_snapshot_id,
+    "control_plane_snapshot_required": True,
+    "projection_metadata_complete": bool(source_authority_paths),
+    "projection_degraded": not bool(source_authority_paths),
+    "diagnostic_only": control_plane_status["diagnostic_only"] or not bool(source_authority_paths),
+    "degraded_reason": None if source_authority_paths else "missing_source_authority_path",
     "agent_registry": agent_registry.get("classification"),
     "agent_health": agent_health.get("classification"),
     "self_recover_recommendation": self_recover.get("recommendation") or self_recover.get("classification"),
@@ -768,17 +803,7 @@ status["track_b_control_plane"] = {
     "autonomous_recovery_budget_summary": runtime_supervisor.get("autonomous_recovery_budget_summary") or autonomous_budget_summary(paper_autonomous_recovery_plan),
     "market_closed_no_fresh_bars_expected": market_closed,
     "operator_message": "MARKET_CLOSED_WAIT: market closed/no fresh bars expected; wait and rerun proof readiness after reopen" if market_closed else None,
-    "artifact_paths": {
-        "agent_registry": str(agent_registry_path),
-        "agent_health": str(agent_health_path),
-        "self_recover": str(self_recover_path),
-        "crash_loop_protection": str(crash_loop_path),
-        "runtime_resume": str(runtime_resume_path),
-        "runtime_supervisor": str(runtime_supervisor_path),
-        "control_plane_snapshot": str(control_plane_snapshot_path),
-        "paper_recovery_policy": str(paper_recovery_policy_path),
-        "paper_autonomous_recovery_plan": str(paper_autonomous_recovery_plan_path),
-    },
+    "artifact_paths": authority_paths,
 }
 status["paper_only"] = True
 status["live_money_eligible"] = False

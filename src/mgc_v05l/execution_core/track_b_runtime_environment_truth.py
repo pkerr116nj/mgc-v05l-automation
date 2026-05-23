@@ -14,6 +14,8 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Callable, Mapping
 
+from mgc_v05l.execution_core.track_b_projection_metadata import build_projection_metadata
+
 
 RUNTIME_ACTIVE_TRADE_CAPABLE = "RUNTIME_ACTIVE_TRADE_CAPABLE"
 RUNTIME_ACTIVE_OBSERVATION_ONLY = "RUNTIME_ACTIVE_OBSERVATION_ONLY"
@@ -242,11 +244,7 @@ def build_dashboard_runtime_environment_projection(*, authority_payload: Mapping
     return {
         **dict(authority_payload),
         "schema_version": "track_b_runtime_environment_truth_dashboard_projection_v1",
-        "projection_only": True,
-        "not_routing_authority": True,
-        "source_authority_path": str(authority_path),
-        "authority_owner": "execution_core",
-        "operator_dashboard_display_only": True,
+        **build_projection_metadata(source_authority_path=authority_path),
     }
 
 

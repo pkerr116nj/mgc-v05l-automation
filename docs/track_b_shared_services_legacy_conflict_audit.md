@@ -22,7 +22,6 @@ The remaining risk is concentrated in older broker/order mutation harnesses and 
 
 ## Top Remaining Risks
 
-1. `SS-LCA-009` MEDIUM - readiness / operator dashboard path ownership: Some canonical readiness and broker lease artifacts still live under `outputs/operator_dashboard/runtime`, even when consumed by execution_core services.
 1. `SS-LCA-011` MEDIUM - lifecycle/local artifact repair: Current manual fallback tools are shared-truth aligned but not yet executor/snapshot adapters.
 1. `SS-LCA-012` LOW - research/offline diagnostics: Some research readers still inspect dashboard snapshots for historical evidence; these remain diagnostic-only but need labeling discipline.
 
@@ -38,8 +37,9 @@ The remaining risk is concentrated in older broker/order mutation harnesses and 
 - `SS-LCA-007` repair executor / process recovery is now snapshot-gated at the apply-capable dispatch boundary. Maintenance repair commands require coherent `PLAN_EVIDENCE_REFRESH` / `REFRESH_EVIDENCE` evidence, self-healing runtime retry requires `PLAN_RUNTIME_RETRY` / `RUNTIME_RETRY`, and market-data producer recovery requires `PLAN_MARKET_DATA_RESTART` / `MARKET_DATA_RESTART`.
 - dry-run mode remains non-mutating and records whether the same snapshot gate would block apply.
 - `SS-LCA-008` crash-loop/operator-ack semantics is now PAPER-policy aligned: repeated unsafe stops classify as quarantine/observe, not routine operator acknowledgement. Future LIVE/PRE-LIVE acknowledgement remains explicit policy metadata.
+- `SS-LCA-009` dashboard/operator projection ownership is now explicit: Track B control-plane dashboard projections carry standardized `projection_only`, `not_routing_authority`, `source_authority=execution_core_authority`, source authority path metadata, and degraded/diagnostic-only markers when source authority paths are missing. Remaining physical-path migration for canonical readiness and broker lease is narrowed to future path cleanup, not an active projection-as-authority risk.
 - `SS-LCA-010` launch/status fallback flows now use a shared Control Plane Snapshot status classifier. Launch fails closed when the snapshot is missing, stale, or incoherent; status fallbacks are marked `diagnostic_only=true` / `not_routing_authority=true` and cannot surface `safe_to_start_runtime=true`.
-- next top risk is `SS-LCA-009` dashboard path ownership.
+- next top risk is `SS-LCA-011` lifecycle/local artifact repair.
 
 ## Findings
 
@@ -153,11 +153,13 @@ The remaining risk is concentrated in older broker/order mutation harnesses and 
 - legacy/local behavior: Some canonical readiness and broker lease artifacts still live under `outputs/operator_dashboard/runtime`, even when consumed by execution_core services.
 - conflict with doctrine: Dashboard/operator paths should be projections only. Current files may be semantically authoritative while physically living under dashboard output roots, which is confusing and increases risk of projection-as-authority regression.
 - recommended v2 migration: Move canonical readiness and broker lease authority outputs to `outputs/track_b_execution_core/...` with dashboard projections only. Provide compatibility readers for one release and tests that dashboard paths are not authoritative.
+- current status: Track B control-plane dashboard projections now have centralized projection ownership metadata: `projection_only=true`, `not_routing_authority=true`, `dashboard_projection_authority=false`, `source_authority=execution_core_authority`, `source_authority_path(s)`, `generated_from_control_plane_snapshot_id` where applicable, `control_plane_snapshot_required` where applicable, and degraded/diagnostic-only flags when source authority paths are missing. Status/dashboard summaries read execution_core authority paths and mark operator outputs display-only.
 - code change needed now: `false`
 - tests needed:
-  - execution_core canonical readiness path is authoritative.
-  - dashboard canonical readiness path is projection-only.
-  - broker lease authority path migration preserves consumers.
+  - Track B control-plane dashboard projections include required metadata. `done`
+  - Dashboard paths are not consumed by launch/status/pre-action validators as authority. `done`
+  - Missing source authority path marks projection degraded/diagnostic-only. `done`
+  - Future physical migration: execution_core canonical readiness and broker lease paths preserve compatibility projections.
 
 ### SS-LCA-010 - MEDIUM - launch/status / fallback flows
 
@@ -212,9 +214,9 @@ The remaining risk is concentrated in older broker/order mutation harnesses and 
 
 Continue snapshot/generation convergence on the remaining display and local-artifact surfaces:
 
-1. Move remaining dashboard-path authority files to execution_core authority paths with projection-only compatibility outputs.
-2. Add executor adapters for scoped lifecycle cleanup using the lifecycle state matrix and exact target snapshot identity.
-3. Label remaining research/offline diagnostics so dashboard snapshots cannot be mistaken for execution authority.
+1. Add executor adapters for scoped lifecycle cleanup using the lifecycle state matrix and exact target snapshot identity.
+2. Label remaining research/offline diagnostics so dashboard snapshots cannot be mistaken for execution authority.
+3. Move remaining dashboard-path compatibility files for canonical readiness and broker lease to execution_core authority paths when the compatibility window is scheduled.
 
 This keeps PAPER autonomous and failure-discovery oriented while ensuring every mutation boundary is coherent, budgetable, auditable, and impossible to confuse with dashboard projection state.
 

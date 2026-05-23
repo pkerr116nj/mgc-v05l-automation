@@ -47,6 +47,7 @@ from ..execution_core.track_b_strategy_registry import (
 )
 from ..execution_core.track_b_readiness_state import DEFAULT_CANONICAL_READINESS_ARTIFACT
 from ..execution_core.track_b_control_plane_snapshot_status import classify_control_plane_snapshot_status
+from ..execution_core.track_b_projection_metadata import build_projection_metadata
 from ..execution.ibkr_paper_strategy_monitor import load_paper_strategy_monitor_status
 from ..execution.track_b_phase1_submit_authority import evaluate_phase1_broker_reconciliation_submit_gate
 from ..market_data import (
@@ -18086,10 +18087,7 @@ def _canonical_readiness_shared_truth_summary(payload: dict[str, Any]) -> dict[s
     return {
         "available": bool(payload.get("available") is True or classifications or proof_readiness),
         "source": "canonical_readiness_execution_core_shared_truth",
-        "source_authority": "execution_core_authority",
-        "projection_only": True,
-        "dashboard_projection_authority": False,
-        "not_routing_authority": True,
+        **build_projection_metadata(source_authority_paths=artifact_paths.values()),
         "proof_readiness": proof_readiness.get("classification"),
         "open_order_truth": classifications.get("Open Order Truth"),
         "managed_order_registry": classifications.get("Managed Order Registry"),
@@ -18195,13 +18193,20 @@ def _track_b_control_plane_services_summary(repo_root: Path) -> dict[str, Any]:
             "STALE_EVIDENCE_HOLD",
         }
     )
+    projection_metadata = build_projection_metadata(
+        source_authority_paths=authority_paths.values(),
+        generated_from_control_plane_snapshot_id=(
+            str(control_plane_snapshot.get("control_plane_snapshot_id"))
+            if control_plane_snapshot.get("control_plane_snapshot_id")
+            else None
+        ),
+        control_plane_snapshot_required=True,
+        diagnostic_only=control_plane_status["diagnostic_only"],
+    )
     return {
         "available": any(bool(payload) for payload in payloads.values()),
         "source": "execution_core_control_plane_authority_projection",
-        "source_authority": "execution_core_authority",
-        "projection_only": True,
-        "dashboard_projection_authority": False,
-        "not_routing_authority": True,
+        **projection_metadata,
         "agent_registry": payloads["agent_registry"].get("classification"),
         "agent_health": payloads["agent_health"].get("classification"),
         "self_recover_recommendation": self_recover.get("recommendation") or self_recover.get("classification"),

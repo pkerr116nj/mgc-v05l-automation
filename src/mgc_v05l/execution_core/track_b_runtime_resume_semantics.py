@@ -34,6 +34,7 @@ from mgc_v05l.execution_core.track_b_open_order_truth import DEFAULT_OPEN_ORDER_
 from mgc_v05l.execution_core.track_b_paper_proof_readiness import DEFAULT_OUTPUT_PATH as DEFAULT_PROOF_READINESS_ARTIFACT
 from mgc_v05l.execution_core.track_b_paper_proof_readiness import READY_FOR_PROOF
 from mgc_v05l.execution_core.track_b_position_truth_monitor import DEFAULT_POSITION_TRUTH_ARTIFACT
+from mgc_v05l.execution_core.track_b_projection_metadata import build_projection_metadata
 from mgc_v05l.execution_core.track_b_runtime_environment_truth import (
     DEFAULT_RUNTIME_ENVIRONMENT_TRUTH_ARTIFACT,
     RUNTIME_ACTIVE_OBSERVATION_ONLY,
@@ -217,11 +218,15 @@ def build_dashboard_runtime_resume_projection(
     return {
         **dict(authority_payload),
         "schema_version": "track_b_runtime_resume_semantics_dashboard_projection_v1",
-        "projection_only": True,
-        "not_routing_authority": True,
-        "source_authority_path": str(authority_path),
-        "authority_owner": "execution_core",
-        "operator_dashboard_display_only": True,
+        **build_projection_metadata(
+            source_authority_path=authority_path,
+            generated_from_control_plane_snapshot_id=(
+                str(authority_payload.get("control_plane_snapshot_id"))
+                if authority_payload.get("control_plane_snapshot_id")
+                else None
+            ),
+            control_plane_snapshot_required=True,
+        ),
     }
 
 

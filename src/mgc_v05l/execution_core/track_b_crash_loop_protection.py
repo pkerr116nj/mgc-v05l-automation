@@ -17,6 +17,7 @@ from typing import Any, Mapping, Sequence
 
 from mgc_v05l.execution_core.track_b_agent_health import DEFAULT_AGENT_HEALTH_ARTIFACT
 from mgc_v05l.execution_core.track_b_agent_registry import DEFAULT_AGENT_REGISTRY_ARTIFACT
+from mgc_v05l.execution_core.track_b_projection_metadata import build_projection_metadata
 from mgc_v05l.execution_core.track_b_runtime_environment_truth import DEFAULT_RUNTIME_ENVIRONMENT_EVENTS
 from mgc_v05l.execution_core.track_b_self_recover_rules import (
     DEFAULT_SELF_RECOVER_RULES_ARTIFACT,
@@ -215,11 +216,7 @@ def build_dashboard_crash_loop_projection(*, authority_payload: Mapping[str, Any
     return {
         **dict(authority_payload),
         "schema_version": "track_b_crash_loop_protection_dashboard_projection_v1",
-        "projection_only": True,
-        "not_routing_authority": True,
-        "source_authority_path": str(authority_path),
-        "authority_owner": "execution_core",
-        "operator_dashboard_display_only": True,
+        **build_projection_metadata(source_authority_path=authority_path),
     }
 
 

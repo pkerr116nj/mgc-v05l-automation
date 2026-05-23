@@ -279,6 +279,12 @@ def test_track_b_control_plane_status_projection_displays_closed_market_services
     assert summary["projection_only"] is True
     assert summary["not_routing_authority"] is True
     assert summary["source_authority"] == "execution_core_authority"
+    assert summary["source_authority_path"] is None
+    assert summary["source_authority_paths"]
+    assert summary["control_plane_snapshot_required"] is True
+    assert summary["generated_from_control_plane_snapshot_id"] == "test-control-plane-snapshot"
+    assert summary["projection_metadata_complete"] is True
+    assert summary["projection_degraded"] is False
     assert summary["agent_registry"] == "AGENT_REGISTRY_READY"
     assert summary["agent_health"] == "AGENT_HEALTH_READY"
     assert summary["self_recover_recommendation"] == "WAIT_MARKET_CLOSED"
@@ -518,6 +524,11 @@ def test_latest_track_b_operator_status_payload_includes_control_plane_projectio
     control_plane = payload["track_b_control_plane"]
     assert control_plane["projection_only"] is True
     assert control_plane["not_routing_authority"] is True
+    assert control_plane["source_authority"] == "execution_core_authority"
+    assert control_plane["source_authority_paths"]
+    assert control_plane["control_plane_snapshot_required"] is True
+    assert control_plane["generated_from_control_plane_snapshot_id"] == "test-control-plane-snapshot"
+    assert control_plane["projection_metadata_complete"] is True
     assert control_plane["runtime_resume_classification"] == "RESUME_BLOCKED_MARKET_CLOSED"
     assert control_plane["runtime_supervisor_mode"] == "MARKET_CLOSED_WAIT"
     assert control_plane["runtime_supervisor_proof_window_status"] == "market_closed"

@@ -27,6 +27,7 @@ from mgc_v05l.execution_core.track_b_managed_order_registry import NO_MANAGED_OR
 from mgc_v05l.execution_core.track_b_managed_position_registry import NO_MANAGED_POSITIONS
 from mgc_v05l.execution_core.track_b_open_order_truth import NO_OPEN_ORDERS
 from mgc_v05l.execution_core.track_b_paper_proof_readiness import READY_FOR_PROOF
+from mgc_v05l.execution_core.track_b_projection_metadata import build_projection_metadata
 from mgc_v05l.execution_core.track_b_runtime_environment_truth import (
     RUNTIME_DOWN_CLEAN,
     RUNTIME_DOWN_WITH_BROKER_EXPOSURE,
@@ -195,11 +196,7 @@ def build_dashboard_self_recover_projection(*, authority_payload: Mapping[str, A
     return {
         **dict(authority_payload),
         "schema_version": "track_b_self_recover_rules_dashboard_projection_v1",
-        "projection_only": True,
-        "not_routing_authority": True,
-        "source_authority_path": str(authority_path),
-        "authority_owner": "execution_core",
-        "operator_dashboard_display_only": True,
+        **build_projection_metadata(source_authority_path=authority_path),
     }
 
 

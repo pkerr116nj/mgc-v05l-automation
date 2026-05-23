@@ -182,10 +182,13 @@
       ],
       "recommended_v2_migration": "Move canonical readiness and broker lease authority outputs to `outputs/track_b_execution_core/...` with dashboard projections only. Provide compatibility readers for one release and tests that dashboard paths are not authoritative.",
       "severity": "MEDIUM",
+      "current_status": "Resolved/narrowed: Track B control-plane dashboard projections carry standardized projection ownership metadata, source authority path(s), Control Plane Snapshot linkage where applicable, and degraded/diagnostic-only markers when source authority paths are missing. Status/dashboard summaries read execution_core authority paths and mark operator outputs display-only.",
+      "snapshot_gate_status": "PROJECTION_OWNERSHIP_EXPLICIT",
       "tests_needed": [
-        "execution_core canonical readiness path is authoritative.",
-        "dashboard canonical readiness path is projection-only.",
-        "broker lease authority path migration preserves consumers."
+        "Track B control-plane dashboard projections include required metadata. done",
+        "Dashboard paths are not consumed by launch/status/pre-action validators as authority. done",
+        "Missing source authority path marks projection degraded/diagnostic-only. done",
+        "Future physical migration: execution_core canonical readiness and broker lease paths preserve compatibility projections."
       ]
     },
     {
@@ -251,13 +254,12 @@
   ],
   "generated_at": "2026-05-23T23:04:24.886113+00:00",
   "recommended_next_implementation_slice": {
-    "rationale": "Launch/status fallback flows now classify Control Plane Snapshot missing/stale/incoherent states explicitly, fail closed for launch, and mark status fallback as diagnostic-only. The next risk is authority-path ownership and local lifecycle repair adapter boundaries.",
+    "rationale": "Dashboard projection ownership is now explicit and test-covered. The next risk is local lifecycle repair adapter boundaries, followed by research/offline diagnostic labeling.",
     "scope": [
-      "SS-LCA-009",
       "SS-LCA-011",
       "SS-LCA-012"
     ],
-    "title": "Resolve dashboard path ownership and local artifact repair adapters"
+    "title": "Resolve local lifecycle repair adapters and diagnostic labeling"
   },
   "repo_root": "/Users/patrick/Dev/MGC-v05l-automation",
   "severity_counts": {
@@ -267,7 +269,6 @@
     "MEDIUM": 3
   },
   "top_5_risks": [
-    "SS-LCA-009",
     "SS-LCA-011",
     "SS-LCA-012"
   ],

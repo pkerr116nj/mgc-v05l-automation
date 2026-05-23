@@ -22,6 +22,7 @@ from mgc_v05l.execution_core.track_b_agent_registry import (
     build_track_b_agent_registry,
     write_track_b_agent_registry,
 )
+from mgc_v05l.execution_core.track_b_projection_metadata import build_projection_metadata
 from mgc_v05l.execution_core.track_b_runtime_environment_truth import (
     RUNTIME_ACTIVE_OBSERVATION_ONLY,
     RUNTIME_ACTIVE_TRADE_CAPABLE,
@@ -170,11 +171,7 @@ def build_dashboard_agent_health_projection(*, authority_payload: Mapping[str, A
     return {
         **dict(authority_payload),
         "schema_version": "track_b_agent_health_dashboard_projection_v1",
-        "projection_only": True,
-        "not_routing_authority": True,
-        "source_authority_path": str(authority_path),
-        "authority_owner": "execution_core",
-        "operator_dashboard_display_only": True,
+        **build_projection_metadata(source_authority_path=authority_path),
     }
 
 

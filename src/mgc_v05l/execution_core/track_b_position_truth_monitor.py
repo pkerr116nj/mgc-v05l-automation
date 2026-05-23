@@ -13,6 +13,8 @@ from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Any, Mapping
 
+from mgc_v05l.execution_core.track_b_projection_metadata import build_projection_metadata
+
 from .track_b_open_order_truth import (
     BROKER_FLAT_WITH_OPEN_CLOSE_ORDER,
     BROKER_POSITION_WITHOUT_CLOSE_ORDER,
@@ -250,11 +252,7 @@ def build_dashboard_position_truth_projection(*, authority_payload: Mapping[str,
     return {
         **dict(authority_payload),
         "schema_version": "track_b_position_truth_dashboard_projection_v1",
-        "projection_only": True,
-        "not_routing_authority": True,
-        "source_authority_path": str(authority_path),
-        "authority_owner": "execution_core",
-        "operator_dashboard_display_only": True,
+        **build_projection_metadata(source_authority_path=authority_path),
     }
 
 
