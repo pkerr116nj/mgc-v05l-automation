@@ -17,6 +17,13 @@ from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
+from mgc_v05l.execution_core.track_b_broker_truth_lease import DEFAULT_LEASE_ARTIFACT
+from mgc_v05l.execution_core.track_b_managed_order_registry import (
+    DEFAULT_MANAGED_ORDER_REGISTRY_ARTIFACT,
+    NO_MANAGED_ORDERS,
+)
+from mgc_v05l.execution_core.track_b_managed_position_registry import DEFAULT_MANAGED_POSITION_REGISTRY_ARTIFACT
+from mgc_v05l.execution_core.track_b_open_order_truth import DEFAULT_OPEN_ORDER_TRUTH_ARTIFACT, NO_OPEN_ORDERS
 from mgc_v05l.execution_core.track_b_paper_trade_ledger import (
     DEFAULT_TRACK_B_PAPER_TRADE_LEDGER_OUTPUT_ROOT,
     LEDGER_SCHEMA_VERSION,
@@ -25,6 +32,11 @@ from mgc_v05l.execution_core.track_b_paper_trade_ledger import (
     VOID_MALFORMED_STALE_ARTIFACT,
     build_track_b_paper_trade_summaries,
 )
+from mgc_v05l.execution_core.track_b_position_truth_monitor import DEFAULT_POSITION_TRUTH_ARTIFACT
+from mgc_v05l.execution_core.track_b_runtime_supervisor_authority import (
+    DEFAULT_RUNTIME_SUPERVISOR_AUTHORITY_ARTIFACT,
+)
+from mgc_v05l.execution_core.track_b_shared_truth_refresh_cli import DEFAULT_RECONCILIATION_ARTIFACT
 
 
 PAPER_ACCOUNT_ID = "DUM882026"
@@ -68,6 +80,15 @@ class MalformedLedgerCleanupConfig:
     session_close_root: Path = DEFAULT_SESSION_CLOSE_ROOT
     manual_reconciliation_root: Path = DEFAULT_MANUAL_RECONCILIATION_ROOT
     ledger_root: Path = DEFAULT_TRACK_B_PAPER_TRADE_LEDGER_OUTPUT_ROOT
+    require_shared_truth_evidence: bool = True
+    shared_truth_max_age_seconds: float = 600.0
+    position_truth_path: Path = DEFAULT_POSITION_TRUTH_ARTIFACT
+    managed_position_registry_path: Path = DEFAULT_MANAGED_POSITION_REGISTRY_ARTIFACT
+    open_order_truth_path: Path = DEFAULT_OPEN_ORDER_TRUTH_ARTIFACT
+    managed_order_registry_path: Path = DEFAULT_MANAGED_ORDER_REGISTRY_ARTIFACT
+    runtime_supervisor_authority_path: Path = DEFAULT_RUNTIME_SUPERVISOR_AUTHORITY_ARTIFACT
+    reconciliation_path: Path = DEFAULT_RECONCILIATION_ARTIFACT
+    broker_lease_path: Path = DEFAULT_LEASE_ARTIFACT
 
 
 @dataclass(frozen=True)
@@ -141,6 +162,12 @@ def run_track_b_paper_malformed_ledger_cleanup(
         path=manual_reconciliation_review_path,
         failures=failures,
     )
+    shared_truth_evidence = _shared_truth_malformed_cleanup_evidence(
+        config=config,
+        target=target,
+        now=actual_now,
+    )
+    failures.extend(shared_truth_evidence["blockers"])
     already_applied = _already_voided(config=config, rows=ledger_records)
     reconciliation_record = (
         _malformed_reconciliation_record(config=config, target=target, now=actual_now)
@@ -200,6 +227,7 @@ def run_track_b_paper_malformed_ledger_cleanup(
             "session_close_no_fill": session_close_evidence,
             "broker_flat": broker_flat_evidence,
             "manual_reconciliation_close": manual_reconciliation_evidence,
+            "shared_truth_authority": shared_truth_evidence,
         },
         "write_plan": {
             "would_append_reconciliation_record": valid and not already_applied,
@@ -738,6 +766,220 @@ def _position_compact(status: Mapping[str, Any]) -> dict[str, Any]:
         "positions_by_instrument": status.get("positions_by_instrument"),
         "positions_by_strategy_keys": sorted((status.get("positions_by_strategy") or {}).keys()),
     }
+
+
+def _shared_truth_malformed_cleanup_evidence(
+    *,
+    config: MalformedLedgerCleanupConfig,
+    target: Mapping[str, Any] | None,
+    now: datetime,
+) -> dict[str, Any]:
+    paths = {
+        "position_truth": config.position_truth_path,
+        "managed_position_registry": config.managed_position_registry_path,
+        "open_order_truth": config.open_order_truth_path,
+        "managed_order_registry": config.managed_order_registry_path,
+        "runtime_supervisor_authority": config.runtime_supervisor_authority_path,
+        "reconciliation": config.reconciliation_path,
+        "broker_lease": config.broker_lease_path,
+    }
+    payloads = {name: _read_json(_resolve(repo_root=config.repo_root, path=path)) for name, path in paths.items()}
+    classifications = {name: _shared_classification(name=name, payload=payload) for name, payload in payloads.items()}
+    freshness = {
+        name: _shared_freshness(payload=payload, now=now, max_age_seconds=config.shared_truth_max_age_seconds)
+        for name, payload in payloads.items()
+    }
+    blockers: list[str] = []
+    if config.require_shared_truth_evidence:
+        for name, payload in payloads.items():
+            if not payload:
+                blockers.append(f"Shared truth authority artifact missing: {name}.")
+        for name, state in freshness.items():
+            if state["stale_or_missing"]:
+                blockers.append(f"Shared truth authority artifact stale/missing: {name}.")
+
+    if classifications["open_order_truth"] and classifications["open_order_truth"] != NO_OPEN_ORDERS:
+        blockers.append(f"Open Order Truth blocks malformed ledger cleanup: {classifications['open_order_truth']}.")
+    if classifications["managed_order_registry"] and classifications["managed_order_registry"] != NO_MANAGED_ORDERS:
+        blockers.append(
+            f"Managed Order Registry blocks malformed ledger cleanup: {classifications['managed_order_registry']}."
+        )
+    if classifications["runtime_supervisor_authority"] in {
+        "SUPERVISOR_MANUAL_REVIEW_REQUIRED",
+        "SUPERVISOR_RESTART_BLOCKED_OPERATOR_ACK",
+        "SUPERVISOR_RESTART_BLOCKED_CRASH_LOOP",
+        "SUPERVISOR_SHARED_TRUTH_STALE",
+        "SUPERVISOR_UNKNOWN_REVIEW_REQUIRED",
+    }:
+        blockers.append(
+            "Runtime Supervisor Authority blocks malformed ledger cleanup: "
+            f"{classifications['runtime_supervisor_authority']}."
+        )
+    if classifications["reconciliation"] in {
+        "BROKER_TRUTH_SETTLEMENT_CONTRADICTORY_STATE",
+        "TRACK_B_PAPER_BROKER_RECONCILIATION_BLOCKED_UNKNOWN_OPEN_ORDERS",
+    }:
+        blockers.append(f"Reconciliation is unsafe for malformed ledger cleanup: {classifications['reconciliation']}.")
+    if classifications["broker_lease"] in {
+        "INVALIDATED_CONTRADICTION",
+        "INVALIDATED_UNKNOWN_OPEN_ORDERS",
+        "INVALIDATED_MANUAL_BROKER_ACTION",
+        "OPERATOR_REQUIRED",
+    }:
+        blockers.append(f"Broker Truth Lease is unsafe for malformed ledger cleanup: {classifications['broker_lease']}.")
+
+    target_agreement = {}
+    for name, rows in {
+        "position_truth": _shared_rows(payloads["position_truth"]),
+        "managed_position_registry": _shared_rows(payloads["managed_position_registry"]),
+    }.items():
+        active_rows = [row for row in rows if _shared_malformed_row_is_active(row)]
+        matching_active = [
+            row for row in active_rows if _shared_malformed_row_matches_target(config=config, target=target, row=row)
+        ]
+        conflicting_active = [
+            row for row in active_rows if not _shared_malformed_row_matches_target(config=config, target=target, row=row)
+        ]
+        target_agreement[name] = {
+            "row_count": len(rows),
+            "active_row_count": len(active_rows),
+            "matching_active_row_count": len(matching_active),
+            "conflicting_active_row_count": len(conflicting_active),
+        }
+        if matching_active:
+            blockers.append(f"{name} still shows active broker/managed exposure for the malformed cleanup target.")
+        if conflicting_active:
+            blockers.append(f"{name} active rows conflict with malformed ledger cleanup.")
+
+    if classifications["position_truth"] and classifications["position_truth"] != "CLEAN_FLAT_READY":
+        blockers.append(f"Position Truth is not clean flat for malformed ledger cleanup: {classifications['position_truth']}.")
+    if classifications["managed_position_registry"] and classifications["managed_position_registry"] != "NO_MANAGED_POSITIONS":
+        blockers.append(
+            "Managed Position Registry is not clean for malformed ledger cleanup: "
+            f"{classifications['managed_position_registry']}."
+        )
+
+    return {
+        "source_authority": "execution_core_authority",
+        "dashboard_projection_consumed": False,
+        "required": config.require_shared_truth_evidence,
+        "max_age_seconds": config.shared_truth_max_age_seconds,
+        "artifact_paths": {name: str(_resolve(repo_root=config.repo_root, path=path)) for name, path in paths.items()},
+        "classifications": classifications,
+        "freshness": freshness,
+        "target_agreement": target_agreement,
+        "blockers": blockers,
+    }
+
+
+def _shared_rows(payload: Mapping[str, Any]) -> list[Mapping[str, Any]]:
+    candidates = (
+        payload.get("position_states"),
+        payload.get("managed_positions"),
+        payload.get("positions"),
+        payload.get("broker_positions"),
+        payload.get("track_b_broker_positions"),
+    )
+    rows: list[Mapping[str, Any]] = []
+    for candidate in candidates:
+        if isinstance(candidate, list):
+            rows.extend(row for row in candidate if isinstance(row, Mapping))
+    summary = payload.get("summary")
+    if isinstance(summary, Mapping):
+        nested = summary.get("position_states") or summary.get("managed_positions")
+        if isinstance(nested, list):
+            rows.extend(row for row in nested if isinstance(row, Mapping))
+    return rows
+
+
+def _shared_malformed_row_is_active(row: Mapping[str, Any]) -> bool:
+    classification = str(row.get("classification") or row.get("position_classification") or "")
+    if classification in {"FLAT_CLEAN", "NO_MANAGED_POSITIONS", "CLOSED_FLAT"}:
+        return False
+    status = str(row.get("final_position_status") or row.get("lifecycle_status") or row.get("status") or "").upper()
+    if status in {"CLOSED_FLAT", "FLAT", "CLOSED"}:
+        return False
+    quantity = _decimal(
+        row.get("quantity")
+        or row.get("broker_quantity")
+        or row.get("qty")
+        or row.get("position")
+        or _nested(row, "broker_position", "quantity")
+        or _nested(row, "position", "quantity")
+    )
+    if quantity is not None:
+        return quantity != Decimal("0")
+    return classification not in {"", "CLEAN_FLAT_READY", "NO_OPEN_ORDERS", "NO_MANAGED_ORDERS"}
+
+
+def _shared_malformed_row_matches_target(
+    *,
+    config: MalformedLedgerCleanupConfig,
+    target: Mapping[str, Any] | None,
+    row: Mapping[str, Any],
+) -> bool:
+    target_lifecycle_id = str((target or {}).get("lifecycle_id") or config.lifecycle_id)
+    lifecycle_id = str(row.get("lifecycle_id") or row.get("entry_lifecycle_id") or "")
+    if lifecycle_id and lifecycle_id == target_lifecycle_id:
+        return True
+    symbol = str(row.get("symbol") or row.get("instrument_family") or row.get("instrument") or "").upper()
+    local_symbol = str(
+        row.get("local_symbol")
+        or row.get("localSymbol")
+        or row.get("contract")
+        or _nested(row, "broker_position", "local_symbol")
+        or _nested(row, "position", "local_symbol")
+        or ""
+    ).upper()
+    con_id = _int(row.get("con_id") or row.get("conId") or _nested(row, "broker_position", "con_id"))
+    quantity = _decimal(row.get("quantity") or row.get("broker_quantity") or row.get("qty") or row.get("position"))
+    if symbol and symbol != config.symbol.upper():
+        return False
+    if local_symbol and local_symbol != config.local_symbol.upper():
+        return False
+    if con_id is not None and con_id != config.con_id:
+        return False
+    return quantity in {None, config.quantity, -config.quantity, abs(config.quantity)}
+
+
+def _shared_classification(*, name: str, payload: Mapping[str, Any]) -> str:
+    if name == "position_truth":
+        summary = payload.get("summary") if isinstance(payload.get("summary"), Mapping) else {}
+        return str(payload.get("classification") or summary.get("overall_classification") or "")
+    if name == "runtime_supervisor_authority":
+        return str(payload.get("classification") or payload.get("supervisor_classification") or "")
+    if name == "broker_lease":
+        return str(payload.get("classification") or payload.get("lease_state") or "")
+    return str(payload.get("classification") or "")
+
+
+def _shared_freshness(*, payload: Mapping[str, Any], now: datetime, max_age_seconds: float) -> dict[str, Any]:
+    generated_at = payload.get("generated_at") or payload.get("latest_refresh_time") or payload.get("last_success_at")
+    age_seconds = _age_seconds(generated_at, now)
+    return {
+        "generated_at": generated_at,
+        "age_seconds": age_seconds,
+        "stale_or_missing": age_seconds is None or age_seconds > max_age_seconds,
+    }
+
+
+def _resolve(*, repo_root: Path, path: Path) -> Path:
+    return path if path.is_absolute() else repo_root / path
+
+
+def _age_seconds(value: object, now: datetime) -> float | None:
+    if not value:
+        return None
+    try:
+        raw = str(value)
+        if raw.endswith("Z"):
+            raw = raw[:-1] + "+00:00"
+        parsed = datetime.fromisoformat(raw)
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=UTC)
+        return max(0.0, (now - parsed.astimezone(UTC)).total_seconds())
+    except (TypeError, ValueError):
+        return None
 
 
 def _read_json(path: Path) -> dict[str, Any]:

@@ -36,6 +36,8 @@ def test_dry_run_identifies_exact_malformed_row_without_writing(tmp_path: Path) 
     assert result.report["write_plan"]["would_append_reconciliation_record"] is True
     assert result.report["evidence"]["malformed_identity"]["confirmed"] is True
     assert result.report["evidence"]["durable_fill_absence"]["confirmed_absent"] is True
+    assert result.report["evidence"]["shared_truth_authority"]["classifications"]["position_truth"] == "CLEAN_FLAT_READY"
+    assert result.report["evidence"]["shared_truth_authority"]["dashboard_projection_consumed"] is False
     assert result.report["after_prediction"]["reconciliation_would_clear"] is True
     assert result.audit_path.exists()
     assert len(_read_jsonl(_ledger_path(tmp_path))) == 1
@@ -231,6 +233,73 @@ def test_legacy_void_classification_still_preserves_historical_broker_exposure(t
     assert recent["excluded_from_strategy_managed_pnl"] is True
 
 
+def test_broker_backed_malformed_row_not_voided_as_stale_test(tmp_path: Path) -> None:
+    _write_cleanup_fixture(tmp_path)
+
+    result = run_track_b_paper_malformed_ledger_cleanup(
+        config=MalformedLedgerCleanupConfig(repo_root=tmp_path, apply=True),
+        now=NOW,
+    )
+
+    rows = _read_jsonl(_ledger_path(tmp_path))
+    assert result.classification == "TRACK_B_MALFORMED_LEDGER_CLEANUP_APPLIED"
+    assert rows[-1]["new_artifact_classification"] == MALFORMED_BROKER_BACKED_MANUALLY_RECONCILED_ARTIFACT
+    assert rows[-1]["new_artifact_classification"] != VOID_MALFORMED_STALE_ARTIFACT
+    assert rows[-1]["historical_broker_backed_exposure_confirmed"] is True
+
+
+def test_historical_artifact_only_malformed_row_can_be_cleaned_with_shared_truth(tmp_path: Path) -> None:
+    _write_cleanup_fixture(tmp_path)
+
+    result = run_track_b_paper_malformed_ledger_cleanup(
+        config=MalformedLedgerCleanupConfig(repo_root=tmp_path),
+        now=NOW,
+    )
+
+    shared_truth = result.report["evidence"]["shared_truth_authority"]
+    assert result.classification == "TRACK_B_MALFORMED_LEDGER_CLEANUP_DRY_RUN_READY"
+    assert shared_truth["blockers"] == []
+    assert shared_truth["classifications"]["open_order_truth"] == "NO_OPEN_ORDERS"
+    assert shared_truth["classifications"]["managed_position_registry"] == "NO_MANAGED_POSITIONS"
+
+
+def test_cleanup_blocked_by_active_broker_exposure_in_shared_truth(tmp_path: Path) -> None:
+    _write_cleanup_fixture(tmp_path, position_truth_classification="ATTENTION_REQUIRED", position_truth_active_target=True)
+
+    result = run_track_b_paper_malformed_ledger_cleanup(
+        config=MalformedLedgerCleanupConfig(repo_root=tmp_path, apply=True),
+        now=NOW,
+    )
+
+    assert result.classification == "TRACK_B_MALFORMED_LEDGER_CLEANUP_REFUSED"
+    assert any("Position Truth is not clean flat" in failure for failure in result.report["failures"])
+    assert any("active broker/managed exposure" in failure for failure in result.report["failures"])
+    assert len(_read_jsonl(_ledger_path(tmp_path))) == 1
+
+
+def test_cleanup_blocked_by_runtime_supervisor_manual_review(tmp_path: Path) -> None:
+    _write_cleanup_fixture(tmp_path, runtime_supervisor_classification="SUPERVISOR_MANUAL_REVIEW_REQUIRED")
+
+    result = run_track_b_paper_malformed_ledger_cleanup(
+        config=MalformedLedgerCleanupConfig(repo_root=tmp_path, apply=True),
+        now=NOW,
+    )
+
+    assert result.classification == "TRACK_B_MALFORMED_LEDGER_CLEANUP_REFUSED"
+    assert any("Runtime Supervisor Authority blocks malformed ledger cleanup" in failure for failure in result.report["failures"])
+    assert len(_read_jsonl(_ledger_path(tmp_path))) == 1
+
+
+def test_malformed_cleanup_does_not_consume_dashboard_projections() -> None:
+    source = Path("src/mgc_v05l/app/track_b_paper_malformed_ledger_cleanup.py").read_text(encoding="utf-8")
+
+    assert "latest_track_b_position_truth.json" not in source
+    assert "latest_track_b_open_order_truth.json" not in source
+    assert "latest_track_b_managed_orders.json" not in source
+    assert "latest_track_b_managed_positions.json" not in source
+    assert "latest_track_b_runtime_supervisor_authority.json" not in source
+
+
 def _write_cleanup_fixture(
     tmp_path: Path,
     *,
@@ -242,6 +311,10 @@ def _write_cleanup_fixture(
     include_may8_filled_bridge_result: bool = False,
     include_other_open: bool = False,
     include_closed_cleaned_mnq: bool = False,
+    position_truth_classification: str = "CLEAN_FLAT_READY",
+    position_truth_active_target: bool = False,
+    managed_position_registry_classification: str = "NO_MANAGED_POSITIONS",
+    runtime_supervisor_classification: str = "SUPERVISOR_NO_ACTION_NEEDED",
 ) -> None:
     rows = [_malformed_row(lifecycle_id=lifecycle_id, con_id=con_id)]
     if include_other_open:
@@ -261,6 +334,14 @@ def _write_cleanup_fixture(
     _write_session_close_review(tmp_path)
     _write_manual_reconciliation_review(tmp_path)
     _write_broker_truth(tmp_path, broker_mnq_qty=broker_mnq_qty, open_order_count=open_order_count)
+    _write_shared_truth_for_malformed_cleanup(
+        tmp_path,
+        position_truth_classification=position_truth_classification,
+        position_truth_active_target=position_truth_active_target,
+        managed_position_registry_classification=managed_position_registry_classification,
+        runtime_supervisor_classification=runtime_supervisor_classification,
+        open_order_count=open_order_count,
+    )
 
 
 def _malformed_row(*, lifecycle_id: str = DEFAULT_LIFECYCLE_ID, con_id: int = 770561201) -> dict[str, object]:
@@ -422,6 +503,97 @@ def _write_manual_reconciliation_review(tmp_path: Path) -> None:
                 "side": "SLD",
                 "symbol": "MNQ",
             },
+        },
+    )
+
+
+def _write_shared_truth_for_malformed_cleanup(
+    tmp_path: Path,
+    *,
+    position_truth_classification: str,
+    position_truth_active_target: bool,
+    managed_position_registry_classification: str,
+    runtime_supervisor_classification: str,
+    open_order_count: int,
+) -> None:
+    generated_at = NOW.isoformat()
+    target_position = {
+        "classification": "OPEN_MANAGED_MATCHED",
+        "symbol": "MNQ",
+        "local_symbol": "MNQM6",
+        "con_id": 770561201,
+        "quantity": "1",
+        "lifecycle_id": DEFAULT_LIFECYCLE_ID,
+        "final_position_status": "OPEN_MANAGED",
+    }
+    _write_json(
+        tmp_path / "outputs" / "track_b_execution_core" / "open_order_truth" / "latest_open_order_truth.json",
+        {
+            "classification": "NO_OPEN_ORDERS" if open_order_count == 0 else "OPEN_CLOSE_ORDER_WORKING",
+            "generated_at": generated_at,
+            "order_states": [],
+            "source_authority": "execution_core_authority",
+        },
+    )
+    _write_json(
+        tmp_path / "outputs" / "track_b_execution_core" / "managed_orders" / "latest_managed_orders.json",
+        {
+            "classification": "NO_MANAGED_ORDERS",
+            "generated_at": generated_at,
+            "managed_orders": [],
+            "source_authority": "execution_core_authority",
+        },
+    )
+    _write_json(
+        tmp_path / "outputs" / "track_b_execution_core" / "position_truth" / "latest_position_truth.json",
+        {
+            "classification": position_truth_classification,
+            "generated_at": generated_at,
+            "position_states": [target_position] if position_truth_active_target else [],
+            "summary": {"overall_classification": position_truth_classification},
+            "source_authority": "execution_core_authority",
+        },
+    )
+    _write_json(
+        tmp_path / "outputs" / "track_b_execution_core" / "managed_positions" / "latest_managed_positions.json",
+        {
+            "classification": managed_position_registry_classification,
+            "generated_at": generated_at,
+            "managed_positions": [],
+            "source_authority": "execution_core_authority",
+        },
+    )
+    _write_json(
+        tmp_path
+        / "outputs"
+        / "track_b_execution_core"
+        / "runtime_supervisor"
+        / "latest_runtime_supervisor_authority.json",
+        {
+            "classification": runtime_supervisor_classification,
+            "generated_at": generated_at,
+            "source_authority": "execution_core_authority",
+        },
+    )
+    _write_json(
+        tmp_path
+        / "outputs"
+        / "reports"
+        / "track_b_paper_broker_reconciliation"
+        / "latest_track_b_paper_broker_reconciliation.json",
+        {
+            "classification": "TRACK_B_PAPER_BROKER_RECONCILED",
+            "generated_at": generated_at,
+            "track_b_broker_positions": [],
+            "track_b_broker_open_orders": [],
+        },
+    )
+    _write_json(
+        tmp_path / "outputs" / "operator_dashboard" / "runtime" / "latest_broker_truth_lease.json",
+        {
+            "classification": "ACTIVE",
+            "lease_state": "ACTIVE",
+            "generated_at": generated_at,
         },
     )
 
