@@ -140,6 +140,7 @@ def test_status_script_surfaces_control_plane_services_as_projection_only() -> N
     assert "DEFAULT_CRASH_LOOP_PROTECTION_FILE" in script
     assert "DEFAULT_RUNTIME_RESUME_SEMANTICS_FILE" in script
     assert "DEFAULT_PAPER_RECOVERY_POLICY_FILE" in script
+    assert "DEFAULT_PAPER_AUTONOMOUS_RECOVERY_PLAN_FILE" in script
     assert "merge_control_plane_services_status" in script
     assert "status[\"track_b_control_plane\"]" in script
     assert "\"source_authority\": \"execution_core_authority\"" in script
@@ -151,6 +152,9 @@ def test_status_script_surfaces_control_plane_services_as_projection_only() -> N
     assert "runtime_resume_safe_to_start_runtime" in script
     assert "paper_recovery_policy" in script
     assert "paper_recovery_diagnostic" in script
+    assert "autonomous_recovery_plan_classification" in script
+    assert "autonomous_recovery_next_action" in script
+    assert "autonomous_recovery_execution_enabled" in script
     assert "requires_operator_ack_for_paper" in script
     assert "operator_ack_advisory_only_for_paper" in script
     assert script.index("merge_paper_runtime_generation_status") < script.index("merge_control_plane_services_status")
@@ -232,6 +236,9 @@ def test_runtime_start_consults_supervisor_authority_v2_before_spawn() -> None:
     assert "requires_operator_ack_for_paper" in script
     assert "operator_ack_advisory_only_for_paper" in script
     assert "live_action_policy" in script
+    assert "autonomous_recovery_plan_classification" in script
+    assert "autonomous_recovery_next_action" in script
+    assert "autonomous_recovery_execution_enabled" in script
     assert "runtime_supervisor_authority" in script
     assert "latest_track_b_runtime_supervisor_authority.json" not in script
     assert "latest_track_b_paper_recovery_policy.json" not in script
@@ -256,6 +263,9 @@ def test_headless_launch_uses_supervisor_authority_v2_as_final_pre_spawn_gate() 
     assert "requires_operator_ack_for_paper" in script
     assert "operator_ack_advisory_only_for_paper" in script
     assert "live_action_policy" in script
+    assert "autonomous_recovery_plan_classification" in script
+    assert "autonomous_recovery_next_action" in script
+    assert "autonomous_recovery_execution_enabled" in script
     assert "runtime_supervisor_authority_path" in script
     assert "latest_track_b_runtime_supervisor_authority.json" not in script
     assert "latest_track_b_paper_recovery_policy.json" not in script

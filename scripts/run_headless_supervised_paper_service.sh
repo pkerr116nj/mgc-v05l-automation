@@ -1545,6 +1545,9 @@ classification = payload.get("classification")
 mode = payload.get("supervisor_mode")
 proof_window_status = payload.get("proof_window_status")
 recommended = payload.get("recommended_next_command")
+autonomous_plan_classification = payload.get("autonomous_recovery_plan_classification")
+autonomous_next_action = payload.get("autonomous_recovery_next_action")
+autonomous_execution_enabled = payload.get("autonomous_recovery_execution_enabled") is True
 ack_required = payload.get("operator_ack_required") is True or operator_ack.get("required") is True
 paper_action_policy = evidence.get("paper_action_policy")
 autonomous_recovery_allowed = evidence.get("paper_autonomous_recovery_allowed") is True
@@ -1565,6 +1568,9 @@ if not allowed:
         f"autonomous_recovery_allowed={autonomous_recovery_allowed} "
         f"requires_operator_ack_for_paper={requires_operator_ack_for_paper} "
         f"operator_ack_advisory_only_for_paper={operator_ack_advisory_only_for_paper} "
+        f"autonomous_recovery_plan_classification={autonomous_plan_classification} "
+        f"autonomous_recovery_next_action={autonomous_next_action} "
+        f"autonomous_recovery_execution_enabled={autonomous_execution_enabled} "
         f"live_action_policy={live_action_policy} recommended_next_command={recommended}",
         file=sys.stderr,
     )
@@ -1586,6 +1592,9 @@ except (OSError, json.JSONDecodeError):
 operator_ack = payload.get("operator_ack") if isinstance(payload.get("operator_ack"), dict) else {}
 evidence = payload.get("evidence_summary") if isinstance(payload.get("evidence_summary"), dict) else {}
 ack_required = payload.get("operator_ack_required") is True or operator_ack.get("required") is True
+autonomous_plan_classification = payload.get("autonomous_recovery_plan_classification")
+autonomous_next_action = payload.get("autonomous_recovery_next_action")
+autonomous_execution_enabled = payload.get("autonomous_recovery_execution_enabled") is True
 paper_action_policy = evidence.get("paper_action_policy")
 autonomous_recovery_allowed = evidence.get("paper_autonomous_recovery_allowed") is True
 requires_operator_ack_for_paper = evidence.get("paper_requires_operator_ack") is True
@@ -1601,6 +1610,9 @@ print(
     f"autonomous_recovery_allowed={autonomous_recovery_allowed} "
     f"requires_operator_ack_for_paper={requires_operator_ack_for_paper} "
     f"operator_ack_advisory_only_for_paper={operator_ack_advisory_only_for_paper} "
+    f"autonomous_recovery_plan_classification={autonomous_plan_classification} "
+    f"autonomous_recovery_next_action={autonomous_next_action} "
+    f"autonomous_recovery_execution_enabled={autonomous_execution_enabled} "
     f"live_action_policy={live_action_policy}. "
     f"recommended_next_command={payload.get('recommended_next_command')}"
 )

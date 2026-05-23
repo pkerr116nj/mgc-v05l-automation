@@ -108,6 +108,12 @@ DEFAULT_PHASE1_READINESS_ARTIFACT = Path("outputs") / "reports" / "phase1_runtim
 DEFAULT_PAPER_RECOVERY_POLICY_ARTIFACT = (
     Path("outputs") / "track_b_execution_core" / "paper_recovery_policy" / "latest_paper_recovery_policy.json"
 )
+DEFAULT_PAPER_AUTONOMOUS_RECOVERY_PLAN_ARTIFACT = (
+    Path("outputs")
+    / "track_b_execution_core"
+    / "paper_autonomous_recovery"
+    / "latest_paper_autonomous_recovery_plan.json"
+)
 
 
 @dataclass(frozen=True)
@@ -134,6 +140,7 @@ class TrackBRuntimeSupervisorAuthorityConfig:
     phase1_readiness_path: Path = DEFAULT_PHASE1_READINESS_ARTIFACT
     stop_provenance_path: Path = DEFAULT_RUNTIME_STOP_PROVENANCE_ARTIFACT
     paper_recovery_policy_path: Path = DEFAULT_PAPER_RECOVERY_POLICY_ARTIFACT
+    paper_autonomous_recovery_plan_path: Path = DEFAULT_PAPER_AUTONOMOUS_RECOVERY_PLAN_ARTIFACT
 
     def resolve(self, path: Path) -> Path:
         return path if path.is_absolute() else self.repo_root / path
@@ -165,9 +172,11 @@ def build_track_b_runtime_supervisor_authority(
         "phase1_readiness": _read_json(config.resolve(config.phase1_readiness_path)),
         "stop_provenance": _read_json(config.resolve(config.stop_provenance_path)),
         "paper_recovery_policy": _read_json(config.resolve(config.paper_recovery_policy_path)),
+        "paper_autonomous_recovery_plan": _read_json(config.resolve(config.paper_autonomous_recovery_plan_path)),
     }
     decision = _classify_supervisor(inputs=inputs)
     v2 = _v2_advisory(decision=decision, inputs=inputs)
+    autonomous_recovery_plan = _autonomous_recovery_plan_fields(inputs["paper_autonomous_recovery_plan"])
     return {
         "schema_version": "track_b_runtime_supervisor_authority_v2",
         "generated_at": actual_now.isoformat(),
@@ -191,6 +200,11 @@ def build_track_b_runtime_supervisor_authority(
         "operator_ack": v2["operator_ack"],
         "proof_window_status": v2["proof_window_status"],
         "decision_precedence": v2["decision_precedence"],
+        "autonomous_recovery_plan_classification": autonomous_recovery_plan["classification"],
+        "autonomous_recovery_next_action": autonomous_recovery_plan["next_action"],
+        "autonomous_recovery_execution_enabled": False,
+        "autonomous_recovery_blockers": autonomous_recovery_plan["blockers"],
+        "autonomous_recovery_budget_summary": autonomous_recovery_plan["budget_summary"],
         "safe_to_start_runtime": decision["safe_to_start_runtime"],
         "safe_to_leave_runtime_running": decision["safe_to_leave_runtime_running"],
         "safe_to_stop_runtime": decision["safe_to_stop_runtime"],
@@ -208,6 +222,7 @@ def build_track_b_runtime_supervisor_authority(
         "todo_v2": [
             "Wire self-healing executor to consult this advisory artifact before any runtime action.",
             "Consume PAPER Recovery Policy as the normal PAPER interpretation layer for bounded recovery posture.",
+            "Consume PAPER Autonomous Recovery Planner as advisory evidence only until an executor boundary is approved.",
             "Converge manual remediation scripts on supervisor authority plus shared truth blockers.",
         ],
     }
@@ -279,6 +294,11 @@ def main(argv: Sequence[str] | None = None) -> int:
                     "action_allowed": payload.get("action_allowed"),
                     "operator_ack": payload.get("operator_ack"),
                     "proof_window_status": payload.get("proof_window_status"),
+                    "autonomous_recovery_plan_classification": payload.get(
+                        "autonomous_recovery_plan_classification"
+                    ),
+                    "autonomous_recovery_next_action": payload.get("autonomous_recovery_next_action"),
+                    "autonomous_recovery_execution_enabled": payload.get("autonomous_recovery_execution_enabled"),
                     "reason": payload.get("reason"),
                     "authority_path": str(authority_path),
                     "read_only": True,
@@ -700,12 +720,22 @@ def _decision_precedence(
         },
         {
             "rank": 5,
+            "service": "PAPER Autonomous Recovery Planner",
+            "classification": {
+                "classification": evidence["autonomous_recovery_plan_classification"],
+                "next_action": evidence["autonomous_recovery_next_action"],
+                "execution_enabled": evidence["autonomous_recovery_execution_enabled"],
+            },
+            "decisive": False,
+        },
+        {
+            "rank": 6,
             "service": "Crash Loop Protection",
             "classification": evidence["crash_loop_classification"],
             "decisive": decisive_service == "Crash Loop Protection",
         },
         {
-            "rank": 6,
+            "rank": 7,
             "service": "Shared Truth",
             "classification": {
                 "position_truth": evidence["position_truth_classification"],
@@ -750,6 +780,14 @@ def _evidence(inputs: Mapping[str, Mapping[str, Any]]) -> dict[str, Any]:
         "phase1_session_reason": _phase1_session_reason(inputs["phase1_readiness"], inputs["proof_readiness"]),
         "stop_provenance": dict(_stop_provenance(inputs["stop_provenance"])),
         "paper_recovery_policy": _paper_policy_evidence(inputs["paper_recovery_policy"]),
+        "paper_autonomous_recovery_plan": _autonomous_recovery_plan_fields(inputs["paper_autonomous_recovery_plan"]),
+        "autonomous_recovery_plan_classification": _classification(inputs["paper_autonomous_recovery_plan"]),
+        "autonomous_recovery_next_action": _autonomous_recovery_next_action(inputs["paper_autonomous_recovery_plan"]),
+        "autonomous_recovery_execution_enabled": inputs["paper_autonomous_recovery_plan"].get("execution_enabled") is True,
+        "autonomous_recovery_blockers": list(inputs["paper_autonomous_recovery_plan"].get("blockers") or []),
+        "autonomous_recovery_budget_summary": _autonomous_recovery_budget_summary(
+            inputs["paper_autonomous_recovery_plan"]
+        ),
         "paper_policy_severity": str(inputs["paper_recovery_policy"].get("severity") or ""),
         "paper_action_policy": str(inputs["paper_recovery_policy"].get("paper_action_policy") or ""),
         "paper_live_action_policy": str(inputs["paper_recovery_policy"].get("live_action_policy") or ""),
@@ -769,6 +807,7 @@ def _evidence(inputs: Mapping[str, Mapping[str, Any]]) -> dict[str, Any]:
             inputs["managed_position_registry"],
             inputs["reconciliation"],
             inputs["paper_recovery_policy"],
+            inputs["paper_autonomous_recovery_plan"],
             key="live_money_eligible",
         ),
         "runtime_writer_authority": str(inputs["runtime_environment_truth"].get("writer_authority") or ""),
@@ -843,6 +882,7 @@ def _input_artifacts(config: TrackBRuntimeSupervisorAuthorityConfig) -> dict[str
         "phase1_readiness": str(config.resolve(config.phase1_readiness_path)),
         "stop_provenance": str(config.resolve(config.stop_provenance_path)),
         "paper_recovery_policy": str(config.resolve(config.paper_recovery_policy_path)),
+        "paper_autonomous_recovery_plan": str(config.resolve(config.paper_autonomous_recovery_plan_path)),
     }
 
 
@@ -887,6 +927,37 @@ def _paper_policy_evidence(payload: Mapping[str, Any]) -> dict[str, Any]:
         "autonomous_recovery_allowed": payload.get("autonomous_recovery_allowed"),
         "requires_operator_ack_for_paper": payload.get("requires_operator_ack_for_paper"),
         "bounded_recovery_budget": _mapping(payload.get("bounded_recovery_budget")),
+    }
+
+
+def _autonomous_recovery_plan_fields(payload: Mapping[str, Any]) -> dict[str, Any]:
+    return {
+        "classification": _classification(payload),
+        "next_action": _autonomous_recovery_next_action(payload),
+        "execution_enabled": payload.get("execution_enabled") is True,
+        "blockers": list(payload.get("blockers") or []),
+        "budget_summary": _autonomous_recovery_budget_summary(payload),
+    }
+
+
+def _autonomous_recovery_next_action(payload: Mapping[str, Any]) -> str | None:
+    for action in list(payload.get("proposed_actions") or []):
+        if isinstance(action, Mapping):
+            return str(action.get("action_type") or action.get("action_id") or "") or None
+    for action in list(payload.get("blocked_actions") or []):
+        if isinstance(action, Mapping):
+            return str(action.get("action_type") or action.get("action_id") or "") or None
+    return None
+
+
+def _autonomous_recovery_budget_summary(payload: Mapping[str, Any]) -> dict[str, Any]:
+    evidence = _mapping(payload.get("evidence_summary"))
+    budget = _mapping(evidence.get("bounded_recovery_budget"))
+    return {
+        "budget_exhausted": budget.get("budget_exhausted"),
+        "max_attempts_per_target": budget.get("max_attempts_per_target"),
+        "max_attempts_per_window": budget.get("max_attempts_per_window"),
+        "cooldown_seconds": budget.get("cooldown_seconds"),
     }
 
 

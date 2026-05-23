@@ -56,6 +56,8 @@ def test_market_closed_waits_without_alarm(tmp_path: Path) -> None:
         resume_classification=RESUME_BLOCKED_MARKET_CLOSED,
         resume_reason=MARKET_CLOSED_NO_FRESH_BARS,
         self_recover_recommendation="WAIT_MARKET_CLOSED",
+        autonomous_plan_classification="WAIT_MARKET_CLOSED",
+        autonomous_plan_next_action="WAIT_MARKET_CLOSED",
     )
 
     payload = build_track_b_runtime_supervisor_authority(config=TrackBRuntimeSupervisorAuthorityConfig(repo_root=tmp_path), now=NOW)
@@ -68,6 +70,9 @@ def test_market_closed_waits_without_alarm(tmp_path: Path) -> None:
     assert payload["action_allowed"] is True
     assert payload["safe_to_start_runtime"] is False
     assert payload["decision_precedence"][0]["service"] == "Proof Readiness / Phase-1 Readiness"
+    assert payload["autonomous_recovery_plan_classification"] == "WAIT_MARKET_CLOSED"
+    assert payload["autonomous_recovery_next_action"] == "WAIT_MARKET_CLOSED"
+    assert payload["autonomous_recovery_execution_enabled"] is False
 
 
 def test_clean_proof_ready_allows_runtime_start(tmp_path: Path) -> None:
@@ -86,6 +91,9 @@ def test_clean_proof_ready_allows_runtime_start(tmp_path: Path) -> None:
     assert payload["safe_to_start_runtime"] is True
     assert payload["runtime_restart_authority"] is False
     assert payload["broker_mutation"] is False
+    assert payload["autonomous_recovery_plan_classification"] == "PLAN_RUNTIME_RETRY"
+    assert payload["autonomous_recovery_next_action"] == "RUNTIME_RETRY"
+    assert payload["autonomous_recovery_execution_enabled"] is False
 
 
 def test_active_healthy_runtime_is_left_running(tmp_path: Path) -> None:
@@ -183,7 +191,12 @@ def test_duplicate_writer_hard_unsafe_blocks_supervisor(tmp_path: Path) -> None:
 
 
 def test_stale_evidence_blocks_supervisor_action(tmp_path: Path) -> None:
-    _seed_base(tmp_path, include_agent_health=False)
+    _seed_base(
+        tmp_path,
+        include_agent_health=False,
+        autonomous_plan_classification="PLAN_BLOCKED_STALE_EVIDENCE",
+        autonomous_plan_next_action="REFRESH_EVIDENCE",
+    )
 
     payload = build_track_b_runtime_supervisor_authority(config=TrackBRuntimeSupervisorAuthorityConfig(repo_root=tmp_path), now=NOW)
 
@@ -192,6 +205,25 @@ def test_stale_evidence_blocks_supervisor_action(tmp_path: Path) -> None:
     assert payload["recommended_action"] == "REFRESH_SHARED_TRUTH"
     assert payload["recommended_next_command"] == "run shared truth refresh and proof readiness"
     assert any("agent_health" in blocker["detail"] for blocker in payload["blockers"])
+    assert payload["autonomous_recovery_plan_classification"] == "PLAN_BLOCKED_STALE_EVIDENCE"
+    assert payload["autonomous_recovery_next_action"] == "REFRESH_EVIDENCE"
+
+
+def test_hard_unsafe_supervisor_dominates_autonomous_plan(tmp_path: Path) -> None:
+    _seed_base(
+        tmp_path,
+        live_money_eligible=True,
+        paper_action_policy="HARD_UNSAFE_HOLD",
+        autonomous_plan_classification="PLAN_RUNTIME_RETRY",
+        autonomous_plan_next_action="RUNTIME_RETRY",
+    )
+
+    payload = build_track_b_runtime_supervisor_authority(config=TrackBRuntimeSupervisorAuthorityConfig(repo_root=tmp_path), now=NOW)
+
+    assert payload["classification"] == SUPERVISOR_HARD_UNSAFE_HOLD
+    assert payload["supervisor_mode"] == HARD_UNSAFE_HOLD
+    assert payload["autonomous_recovery_plan_classification"] == "PLAN_RUNTIME_RETRY"
+    assert payload["safe_to_start_runtime"] is False
 
 
 def test_dashboard_projection_is_not_authority(tmp_path: Path) -> None:
@@ -209,6 +241,7 @@ def test_dashboard_projection_is_not_authority(tmp_path: Path) -> None:
     assert projection["source_authority_path"] == str(authority_path)
     direct_projection = build_dashboard_runtime_supervisor_projection(authority_payload=payload, authority_path=authority_path)
     assert direct_projection["operator_dashboard_display_only"] is True
+    assert "latest_track_b_paper_autonomous_recovery" not in json.dumps(projection)
 
 
 def _seed_base(
@@ -231,6 +264,9 @@ def _seed_base(
     self_recover_recommendation: str = "RESTART_RUNTIME_ALLOWED",
     paper_action_policy: str = "AUTONOMOUS_RETRY_ELIGIBLE",
     paper_autonomous_recovery_allowed: bool = True,
+    autonomous_plan_classification: str = "PLAN_RUNTIME_RETRY",
+    autonomous_plan_next_action: str = "RUNTIME_RETRY",
+    autonomous_plan_budget_exhausted: bool = False,
     duplicate_writer_count: int = 0,
     live_money_eligible: bool = False,
     include_agent_health: bool = True,
@@ -409,6 +445,40 @@ def _seed_base(
                 "max_attempts_per_window": 2,
                 "cooldown_seconds": 300,
                 "budget_exhausted": paper_action_policy == "QUARANTINE_OBSERVE_ONLY",
+            },
+            "live_money_eligible": live_money_eligible,
+        },
+    )
+    _write_json(
+        root
+        / "outputs"
+        / "track_b_execution_core"
+        / "paper_autonomous_recovery"
+        / "latest_paper_autonomous_recovery_plan.json",
+        {
+            "generated_at": NOW.isoformat(),
+            "classification": autonomous_plan_classification,
+            "execution_enabled": False,
+            "proposed_actions": [
+                {
+                    "action_id": autonomous_plan_next_action.lower(),
+                    "action_type": autonomous_plan_next_action,
+                    "execution_enabled": False,
+                    "would_mutate_broker": False,
+                    "would_mutate_lifecycle": False,
+                    "would_restart_runtime": autonomous_plan_next_action == "RUNTIME_RETRY",
+                }
+            ]
+            if autonomous_plan_next_action
+            else [],
+            "blockers": [],
+            "evidence_summary": {
+                "bounded_recovery_budget": {
+                    "budget_exhausted": autonomous_plan_budget_exhausted,
+                    "max_attempts_per_target": 1,
+                    "max_attempts_per_window": 2,
+                    "cooldown_seconds": 300,
+                }
             },
             "live_money_eligible": live_money_eligible,
         },

@@ -18144,6 +18144,11 @@ def _track_b_control_plane_services_summary(repo_root: Path) -> dict[str, Any]:
         / "track_b_execution_core"
         / "paper_recovery_policy"
         / "latest_paper_recovery_policy.json",
+        "paper_autonomous_recovery_plan": repo_root
+        / "outputs"
+        / "track_b_execution_core"
+        / "paper_autonomous_recovery"
+        / "latest_paper_autonomous_recovery_plan.json",
     }
     payloads: dict[str, dict[str, Any]] = {}
     for name, path in authority_paths.items():
@@ -18154,6 +18159,7 @@ def _track_b_control_plane_services_summary(repo_root: Path) -> dict[str, Any]:
     runtime_resume = payloads["runtime_resume"]
     runtime_supervisor = payloads["runtime_supervisor"]
     paper_recovery_policy = payloads["paper_recovery_policy"]
+    autonomous_recovery_plan = payloads["paper_autonomous_recovery_plan"]
     operator_ack = dict(runtime_supervisor.get("operator_ack") or {})
     paper_action_policy = paper_recovery_policy.get("paper_action_policy")
     paper_recovery_diagnostic = _paper_recovery_status_diagnostic(paper_recovery_policy)
@@ -18224,6 +18230,20 @@ def _track_b_control_plane_services_summary(repo_root: Path) -> dict[str, Any]:
         "runtime_supervisor_top_blockers": supervisor_blockers[:3],
         "runtime_supervisor_top_warnings": supervisor_warnings[:3],
         "runtime_supervisor_decision_precedence": list(runtime_supervisor.get("decision_precedence") or [])[:3],
+        "autonomous_recovery_plan_classification": runtime_supervisor.get("autonomous_recovery_plan_classification")
+        or autonomous_recovery_plan.get("classification"),
+        "autonomous_recovery_next_action": runtime_supervisor.get("autonomous_recovery_next_action")
+        or _autonomous_recovery_plan_next_action(autonomous_recovery_plan),
+        "autonomous_recovery_execution_enabled": False,
+        "autonomous_recovery_blockers": list(
+            runtime_supervisor.get("autonomous_recovery_blockers")
+            or autonomous_recovery_plan.get("blockers")
+            or []
+        )[:3],
+        "autonomous_recovery_budget_summary": dict(
+            runtime_supervisor.get("autonomous_recovery_budget_summary")
+            or _autonomous_recovery_budget_summary(autonomous_recovery_plan)
+        ),
         "market_closed_no_fresh_bars_expected": market_closed,
         "operator_message": (
             "MARKET_CLOSED_WAIT: market closed/no fresh bars expected; wait and rerun proof readiness after reopen"
@@ -18251,6 +18271,31 @@ def _paper_recovery_status_diagnostic(payload: dict[str, Any]) -> str | None:
     if action == "HARD_UNSAFE_HOLD":
         return "HARD_UNSAFE_HOLD"
     return action or None
+
+
+def _autonomous_recovery_plan_next_action(payload: dict[str, Any]) -> str | None:
+    for action in list(payload.get("proposed_actions") or []):
+        if isinstance(action, dict):
+            value = str(action.get("action_type") or action.get("action_id") or "")
+            if value:
+                return value
+    for action in list(payload.get("blocked_actions") or []):
+        if isinstance(action, dict):
+            value = str(action.get("action_type") or action.get("action_id") or "")
+            if value:
+                return value
+    return None
+
+
+def _autonomous_recovery_budget_summary(payload: dict[str, Any]) -> dict[str, Any]:
+    evidence = payload.get("evidence_summary") if isinstance(payload.get("evidence_summary"), dict) else {}
+    budget = evidence.get("bounded_recovery_budget") if isinstance(evidence.get("bounded_recovery_budget"), dict) else {}
+    return {
+        "budget_exhausted": budget.get("budget_exhausted"),
+        "max_attempts_per_target": budget.get("max_attempts_per_target"),
+        "max_attempts_per_window": budget.get("max_attempts_per_window"),
+        "cooldown_seconds": budget.get("cooldown_seconds"),
+    }
 
 
 def _track_b_broker_reconciliation_overlay_ready(payload: dict[str, Any]) -> bool:

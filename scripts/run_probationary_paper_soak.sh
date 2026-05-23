@@ -66,6 +66,14 @@ LAUNCH_SUPERVISOR_MODE=""
 LAUNCH_SUPERVISOR_PROOF_WINDOW_STATUS=""
 LAUNCH_SUPERVISOR_RECOMMENDED_NEXT_COMMAND=""
 LAUNCH_SUPERVISOR_OPERATOR_ACK_REQUIRED="false"
+LAUNCH_SUPERVISOR_PAPER_ACTION_POLICY=""
+LAUNCH_SUPERVISOR_AUTONOMOUS_RECOVERY_ALLOWED="false"
+LAUNCH_SUPERVISOR_REQUIRES_OPERATOR_ACK_FOR_PAPER="false"
+LAUNCH_SUPERVISOR_OPERATOR_ACK_ADVISORY_ONLY_FOR_PAPER="false"
+LAUNCH_SUPERVISOR_LIVE_ACTION_POLICY=""
+LAUNCH_SUPERVISOR_AUTONOMOUS_RECOVERY_PLAN_CLASSIFICATION=""
+LAUNCH_SUPERVISOR_AUTONOMOUS_RECOVERY_NEXT_ACTION=""
+LAUNCH_SUPERVISOR_AUTONOMOUS_RECOVERY_EXECUTION_ENABLED="false"
 
 ARGS=()
 CONFIG_SET=0
@@ -258,6 +266,14 @@ write_launch_status() {
   LAUNCH_SUPERVISOR_PROOF_WINDOW_STATUS="${LAUNCH_SUPERVISOR_PROOF_WINDOW_STATUS}" \
   LAUNCH_SUPERVISOR_RECOMMENDED_NEXT_COMMAND="${LAUNCH_SUPERVISOR_RECOMMENDED_NEXT_COMMAND}" \
   LAUNCH_SUPERVISOR_OPERATOR_ACK_REQUIRED="${LAUNCH_SUPERVISOR_OPERATOR_ACK_REQUIRED}" \
+  LAUNCH_SUPERVISOR_PAPER_ACTION_POLICY="${LAUNCH_SUPERVISOR_PAPER_ACTION_POLICY}" \
+  LAUNCH_SUPERVISOR_AUTONOMOUS_RECOVERY_ALLOWED="${LAUNCH_SUPERVISOR_AUTONOMOUS_RECOVERY_ALLOWED}" \
+  LAUNCH_SUPERVISOR_REQUIRES_OPERATOR_ACK_FOR_PAPER="${LAUNCH_SUPERVISOR_REQUIRES_OPERATOR_ACK_FOR_PAPER}" \
+  LAUNCH_SUPERVISOR_OPERATOR_ACK_ADVISORY_ONLY_FOR_PAPER="${LAUNCH_SUPERVISOR_OPERATOR_ACK_ADVISORY_ONLY_FOR_PAPER}" \
+  LAUNCH_SUPERVISOR_LIVE_ACTION_POLICY="${LAUNCH_SUPERVISOR_LIVE_ACTION_POLICY}" \
+  LAUNCH_SUPERVISOR_AUTONOMOUS_RECOVERY_PLAN_CLASSIFICATION="${LAUNCH_SUPERVISOR_AUTONOMOUS_RECOVERY_PLAN_CLASSIFICATION}" \
+  LAUNCH_SUPERVISOR_AUTONOMOUS_RECOVERY_NEXT_ACTION="${LAUNCH_SUPERVISOR_AUTONOMOUS_RECOVERY_NEXT_ACTION}" \
+  LAUNCH_SUPERVISOR_AUTONOMOUS_RECOVERY_EXECUTION_ENABLED="${LAUNCH_SUPERVISOR_AUTONOMOUS_RECOVERY_EXECUTION_ENABLED}" \
   "${PYTHON_BIN}" -c '
 import json
 import os
@@ -318,6 +334,9 @@ payload = {
         "requires_operator_ack_for_paper": os.environ.get("LAUNCH_SUPERVISOR_REQUIRES_OPERATOR_ACK_FOR_PAPER", "").lower() == "true",
         "operator_ack_advisory_only_for_paper": os.environ.get("LAUNCH_SUPERVISOR_OPERATOR_ACK_ADVISORY_ONLY_FOR_PAPER", "").lower() == "true",
         "live_action_policy": os.environ.get("LAUNCH_SUPERVISOR_LIVE_ACTION_POLICY") or None,
+        "autonomous_recovery_plan_classification": os.environ.get("LAUNCH_SUPERVISOR_AUTONOMOUS_RECOVERY_PLAN_CLASSIFICATION") or None,
+        "autonomous_recovery_next_action": os.environ.get("LAUNCH_SUPERVISOR_AUTONOMOUS_RECOVERY_NEXT_ACTION") or None,
+        "autonomous_recovery_execution_enabled": os.environ.get("LAUNCH_SUPERVISOR_AUTONOMOUS_RECOVERY_EXECUTION_ENABLED", "").lower() == "true",
     },
 }
 if os.environ.get("LAUNCH_STOP_SOURCE") or stop_reason:
@@ -446,6 +465,9 @@ paper_action_policy = evidence.get("paper_action_policy")
 autonomous_recovery_allowed = evidence.get("paper_autonomous_recovery_allowed") is True
 requires_operator_ack_for_paper = evidence.get("paper_requires_operator_ack") is True
 live_action_policy = evidence.get("paper_live_action_policy")
+autonomous_plan_classification = payload.get("autonomous_recovery_plan_classification")
+autonomous_next_action = payload.get("autonomous_recovery_next_action")
+autonomous_execution_enabled = payload.get("autonomous_recovery_execution_enabled") is True
 operator_ack_required = payload.get("operator_ack_required") is True or operator_ack.get("required") is True
 operator_ack_advisory_only_for_paper = bool(operator_ack_required and not requires_operator_ack_for_paper and paper_action_policy)
 print(
@@ -453,6 +475,9 @@ print(
     "safe_to_start_runtime={safe} operator_ack_required={ack} "
     "paper_action_policy={paper_action_policy} autonomous_recovery_allowed={autonomous} "
     "requires_operator_ack_for_paper={paper_ack} operator_ack_advisory_only_for_paper={advisory} "
+    "autonomous_recovery_plan_classification={plan_classification} "
+    "autonomous_recovery_next_action={plan_action} "
+    "autonomous_recovery_execution_enabled={plan_execution_enabled} "
     "live_action_policy={live_action_policy} recommended_next_command={command}".format(
         classification=payload.get("classification"),
         mode=payload.get("supervisor_mode"),
@@ -463,6 +488,9 @@ print(
         autonomous=autonomous_recovery_allowed,
         paper_ack=requires_operator_ack_for_paper,
         advisory=operator_ack_advisory_only_for_paper,
+        plan_classification=autonomous_plan_classification,
+        plan_action=autonomous_next_action,
+        plan_execution_enabled=autonomous_execution_enabled,
         live_action_policy=live_action_policy,
         command=payload.get("recommended_next_command"),
     )
@@ -498,6 +526,9 @@ paper_action_policy = evidence.get("paper_action_policy")
 autonomous_recovery_allowed = evidence.get("paper_autonomous_recovery_allowed") is True
 requires_operator_ack_for_paper = evidence.get("paper_requires_operator_ack") is True
 live_action_policy = evidence.get("paper_live_action_policy")
+autonomous_plan_classification = payload.get("autonomous_recovery_plan_classification")
+autonomous_next_action = payload.get("autonomous_recovery_next_action")
+autonomous_execution_enabled = payload.get("autonomous_recovery_execution_enabled") is True
 operator_ack_advisory_only_for_paper = bool(ack_required and not requires_operator_ack_for_paper and paper_action_policy)
 os.environ["MGC_RUNTIME_SUPERVISOR_CLASSIFICATION"] = str(classification or "")
 allowed = (
@@ -514,6 +545,9 @@ if not allowed:
         f"autonomous_recovery_allowed={autonomous_recovery_allowed} "
         f"requires_operator_ack_for_paper={requires_operator_ack_for_paper} "
         f"operator_ack_advisory_only_for_paper={operator_ack_advisory_only_for_paper} "
+        f"autonomous_recovery_plan_classification={autonomous_plan_classification} "
+        f"autonomous_recovery_next_action={autonomous_next_action} "
+        f"autonomous_recovery_execution_enabled={autonomous_execution_enabled} "
         f"live_action_policy={live_action_policy} recommended_next_command={recommended}",
         file=sys.stderr,
     )
@@ -630,6 +664,36 @@ except (OSError, json.JSONDecodeError):
     payload = {}
 evidence = payload.get("evidence_summary") if isinstance(payload.get("evidence_summary"), dict) else {}
 print(evidence.get(sys.argv[2]) or "")
+PY
+)"
+  LAUNCH_SUPERVISOR_AUTONOMOUS_RECOVERY_PLAN_CLASSIFICATION="$("${PYTHON_BIN}" - <<'PY' "${RUNTIME_SUPERVISOR_AUTHORITY_FILE}" autonomous_recovery_plan_classification || true
+import json, sys
+from pathlib import Path
+try:
+    payload = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
+except (OSError, json.JSONDecodeError):
+    payload = {}
+print(payload.get(sys.argv[2]) or "")
+PY
+)"
+  LAUNCH_SUPERVISOR_AUTONOMOUS_RECOVERY_NEXT_ACTION="$("${PYTHON_BIN}" - <<'PY' "${RUNTIME_SUPERVISOR_AUTHORITY_FILE}" autonomous_recovery_next_action || true
+import json, sys
+from pathlib import Path
+try:
+    payload = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
+except (OSError, json.JSONDecodeError):
+    payload = {}
+print(payload.get(sys.argv[2]) or "")
+PY
+)"
+  LAUNCH_SUPERVISOR_AUTONOMOUS_RECOVERY_EXECUTION_ENABLED="$("${PYTHON_BIN}" - <<'PY' "${RUNTIME_SUPERVISOR_AUTHORITY_FILE}" || true
+import json, sys
+from pathlib import Path
+try:
+    payload = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
+except (OSError, json.JSONDecodeError):
+    payload = {}
+print("true" if payload.get("autonomous_recovery_execution_enabled") is True else "false")
 PY
 )"
   if [[ ${gate_rc} -ne 0 ]]; then

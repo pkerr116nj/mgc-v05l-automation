@@ -293,6 +293,9 @@ def test_track_b_control_plane_status_projection_displays_closed_market_services
         "wait for market reopen; rerun proof readiness before any runtime start"
     )
     assert summary["runtime_supervisor_operator_ack_required"] is False
+    assert summary["autonomous_recovery_plan_classification"] == "WAIT_MARKET_CLOSED"
+    assert summary["autonomous_recovery_next_action"] == "WAIT_MARKET_CLOSED"
+    assert summary["autonomous_recovery_execution_enabled"] is False
     assert summary["paper_recovery_policy"] == "OBSERVE"
     assert summary["paper_recovery_diagnostic"] == "WAIT_MARKET_CLOSED"
     assert summary["requires_operator_ack_for_paper"] is False
@@ -360,6 +363,9 @@ def test_track_b_control_plane_status_projection_displays_bounded_autonomous_ret
     assert summary["paper_recovery_policy"] == "AUTONOMOUS_RETRY_ELIGIBLE"
     assert summary["paper_recovery_diagnostic"] == "BOUNDED_AUTONOMOUS_RETRY"
     assert summary["autonomous_recovery_allowed"] is True
+    assert summary["autonomous_recovery_plan_classification"] == "PLAN_RUNTIME_RETRY"
+    assert summary["autonomous_recovery_next_action"] == "RUNTIME_RETRY"
+    assert summary["autonomous_recovery_execution_enabled"] is False
     assert summary["requires_operator_ack_for_paper"] is False
     assert summary["runtime_resume_allowed"] is True
     assert summary["attention_required"] is False
@@ -384,6 +390,7 @@ def test_track_b_control_plane_status_projection_displays_hard_unsafe_paper_poli
     assert summary["paper_recovery_policy"] == "HARD_UNSAFE_HOLD"
     assert summary["paper_recovery_diagnostic"] == "HARD_UNSAFE_HOLD"
     assert summary["paper_recovery_severity"] == "UNSAFE"
+    assert summary["autonomous_recovery_execution_enabled"] is False
     assert summary["live_action_policy"] == "HOLD_DOWN"
     assert summary["attention_required"] is True
 
@@ -465,6 +472,8 @@ def _write_track_b_control_plane_artifacts(
     paper_autonomous_recovery_allowed: bool = False,
     paper_budget: dict[str, object] | None = None,
     paper_recovery_live_action_policy: str = "REQUIRE_ACK",
+    autonomous_recovery_plan_classification: str | None = None,
+    autonomous_recovery_next_action: str | None = None,
 ) -> None:
     _write_json_file(
         root / "outputs/track_b_execution_core/agent_registry/latest_agent_registry.json",
@@ -552,6 +561,25 @@ def _write_track_b_control_plane_artifacts(
                 else "operator may start Track B PAPER runtime using the repaired direct supervisor launcher"
             ),
             "operator_ack": operator_ack,
+            "autonomous_recovery_plan_classification": autonomous_recovery_plan_classification
+            or (
+                "WAIT_MARKET_CLOSED"
+                if supervisor_mode == "MARKET_CLOSED_WAIT"
+                else "PLAN_RUNTIME_RETRY"
+                if supervisor_mode == "READY_FOR_OPERATOR_START"
+                else "PLAN_QUARANTINE_OBSERVE_ONLY"
+            ),
+            "autonomous_recovery_next_action": autonomous_recovery_next_action
+            or (
+                "WAIT_MARKET_CLOSED"
+                if supervisor_mode == "MARKET_CLOSED_WAIT"
+                else "RUNTIME_RETRY"
+                if supervisor_mode == "READY_FOR_OPERATOR_START"
+                else "QUARANTINE_OBSERVE_ONLY"
+            ),
+            "autonomous_recovery_execution_enabled": False,
+            "autonomous_recovery_blockers": [],
+            "autonomous_recovery_budget_summary": paper_budget or {"budget_exhausted": False},
             "blockers": [{"code": "test_blocker", "detail": "test"}] if operator_ack.get("required") else [],
             "warnings": [],
             "decision_precedence": [
@@ -562,6 +590,35 @@ def _write_track_b_control_plane_artifacts(
                     "decisive": True,
                 }
             ],
+        },
+    )
+    _write_json_file(
+        root / "outputs/track_b_execution_core/paper_autonomous_recovery/latest_paper_autonomous_recovery_plan.json",
+        {
+            "classification": autonomous_recovery_plan_classification
+            or (
+                "WAIT_MARKET_CLOSED"
+                if supervisor_mode == "MARKET_CLOSED_WAIT"
+                else "PLAN_RUNTIME_RETRY"
+                if supervisor_mode == "READY_FOR_OPERATOR_START"
+                else "PLAN_QUARANTINE_OBSERVE_ONLY"
+            ),
+            "execution_enabled": False,
+            "proposed_actions": [
+                {
+                    "action_type": autonomous_recovery_next_action
+                    or (
+                        "WAIT_MARKET_CLOSED"
+                        if supervisor_mode == "MARKET_CLOSED_WAIT"
+                        else "RUNTIME_RETRY"
+                        if supervisor_mode == "READY_FOR_OPERATOR_START"
+                        else "QUARANTINE_OBSERVE_ONLY"
+                    ),
+                    "execution_enabled": False,
+                }
+            ],
+            "blockers": [],
+            "evidence_summary": {"bounded_recovery_budget": paper_budget or {"budget_exhausted": False}},
         },
     )
 
