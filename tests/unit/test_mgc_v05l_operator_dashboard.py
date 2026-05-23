@@ -14643,6 +14643,14 @@ def test_track_b_phase1_gc_preflight_compact_payload_exposes_panel_checks(tmp_pa
     )
 
     assert compact["classification"] == "GC_PHASE1_PREFLIGHT_BLOCKED"
+    assert compact["panel_label"] == "Legacy GC Phase-1 diagnostic"
+    assert compact["authority_scope"] == "DIAGNOSTIC_ONLY"
+    assert compact["runtime_authority"] == "canonical_readiness_and_phase1_runtime_artifacts"
+    assert compact["diagnostic_only"] is True
+    assert compact["not_routing_authority"] is True
+    assert compact["superseded_by"] == (
+        "outputs/track_b_execution_core/proof_readiness/latest_track_b_paper_proof_readiness.json"
+    )
     assert compact["legacy_lifecycle_diagnostic_authoritative"] is False
     assert compact["paper_trade_allowed"] is False
     assert compact["market_data_not_stale"] is True
