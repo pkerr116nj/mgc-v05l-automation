@@ -1,0 +1,310 @@
+{
+  "branch": "track-b-paper-execution-core",
+  "classification": "SHARED_SERVICES_LEGACY_CONFLICT_AUDIT_COMPLETE",
+  "doctrine": [
+    "PAPER is bounded autonomous failure discovery.",
+    "Shared execution_core truth is authority.",
+    "Control Plane Snapshot is the coherent pre-action packet.",
+    "Dashboard projections are never authority.",
+    "No hidden recovery, live-money route, broad cancel, or broad flatten."
+  ],
+  "finding_count": 12,
+  "findings": [
+    {
+      "area": "broker mutation / lower-level REST cancel",
+      "code_change_needed_now": false,
+      "doctrine_conflict": "A broker-mutating path can submit/cancel from scattered broker reads instead of a coherent execution_core Control Plane Snapshot. This violates the pre-action packet rule for future autonomous/bounded recovery.",
+      "id": "SS-LCA-001",
+      "legacy_local_behavior": "The unattended rest/cancel harness builds a local IBKR session, reads account/open-order/position snapshots, submits a resting PAPER order, and cancels/verifies it through inherited manual-submit helpers. Its guards are local environment/caller/open-order checks, not a Control Plane Snapshot or pre-action snapshot validator.",
+      "paths": [
+        "src/mgc_v05l/execution/ibkr_unattended_paper_rest_cancel.py:145",
+        "src/mgc_v05l/app/ibkr_unattended_paper_rest_cancel.py:23"
+      ],
+      "recommended_v2_migration": "Retire or quarantine this harness behind `validate_track_b_pre_action_snapshot(...)` with action type TARGETED_CANCEL_REPLACE or a dedicated BROKER_TEST_ORDER action. Require a coherent snapshot id/generation, Managed Order Registry identity, Open Order Truth, Order Adjustment Planner, and PAPER Recovery Policy budget before any apply mode.",
+      "severity": "CRITICAL",
+      "tests_needed": [
+        "REST cancel apply blocks without coherent Control Plane Snapshot.",
+        "REST cancel apply blocks when planner/snapshot action mismatches.",
+        "REST cancel dry-run still records evidence without broker mutation."
+      ]
+    },
+    {
+      "area": "broker mutation / manual submit harness",
+      "code_change_needed_now": false,
+      "doctrine_conflict": "Direct submit/cancel remains available outside the shared-services control plane and outside the Control Plane Snapshot pre-action validator. It is safe-ish for old manual testing, but it is not an execution_core authority consumer.",
+      "id": "SS-LCA-002",
+      "legacy_local_behavior": "The manual paper submit harness can submit and cancel PAPER orders after a frozen-preview/approval-digest flow. It relies on local runtime guardrails, broker snapshots, quote probes, and callback evidence.",
+      "paths": [
+        "src/mgc_v05l/execution/ibkr_manual_paper_submit.py:107",
+        "src/mgc_v05l/execution/ibkr_manual_paper_submit.py:3270"
+      ],
+      "recommended_v2_migration": "Split the harness into read-only preview and mutation adapter. Keep preview diagnostic. Any mutation adapter should require Control Plane Snapshot validation, PAPER Recovery Policy action budget, exact target identity, and explicit PAPER-only route lock. Direct CLI apply should default disabled.",
+      "severity": "CRITICAL",
+      "tests_needed": [
+        "manual submit apply blocks without pre-action snapshot.",
+        "manual submit preview remains read-only.",
+        "manual submit cannot use dashboard projections as authority."
+      ]
+    },
+    {
+      "area": "broker mutation / lane submit port",
+      "code_change_needed_now": false,
+      "doctrine_conflict": "This is a mutation-capable lane-port/testing command that can authorize an order without Shared Truth Refresh generation, Runtime Supervisor Authority, or Control Plane Snapshot as the coherent pre-action packet.",
+      "id": "SS-LCA-003",
+      "legacy_local_behavior": "Lane submit port defaults `submit=True` and delegates actionable BUY/SELL/EXIT intents to the IBKR paper strategy bridge after local monitor/governance/intent checks.",
+      "paths": [
+        "src/mgc_v05l/execution/ibkr_lane_submit_port.py:55",
+        "src/mgc_v05l/execution/ibkr_lane_submit_port.py:112"
+      ],
+      "recommended_v2_migration": "Make lane-port mutation dry-run by default, require Control Plane Snapshot validation before delegate submit, and eventually route through the autonomous executor boundary for PLAN_RUNTIME_RETRY or explicit scoped test-order actions.",
+      "severity": "CRITICAL",
+      "tests_needed": [
+        "lane submit port default is non-mutating or blocks without snapshot.",
+        "lane submit port rejects stale/mixed snapshot.",
+        "lane submit port preserves existing bridge safety gates after snapshot validation."
+      ]
+    },
+    {
+      "area": "broker mutation / shared bridge submit",
+      "code_change_needed_now": false,
+      "doctrine_conflict": "The bridge is now a central mutation path but still assembles readiness from local bridge/governance/monitor/reconciliation checks. Runtime launch is snapshot-gated, but direct bridge invocation is not itself snapshot-scoped.",
+      "id": "SS-LCA-004",
+      "legacy_local_behavior": "The strategy bridge performs many local gates, phase-1 broker reconciliation submit gate checks, ownership persistence, and delegates to the manual paper submit harness.",
+      "paths": [
+        "src/mgc_v05l/execution/ibkr_paper_strategy_bridge.py:1449",
+        "src/mgc_v05l/execution/ibkr_paper_strategy_bridge.py:1822",
+        "src/mgc_v05l/execution/ibkr_paper_strategy_bridge.py:2194"
+      ],
+      "recommended_v2_migration": "Introduce a bridge pre-action evidence contract: runtime-internal calls must include runtime_instance_id/restart_generation/source_commit from the launch snapshot; direct CLI/app calls must require a fresh Control Plane Snapshot validator result.",
+      "severity": "HIGH",
+      "tests_needed": [
+        "direct bridge submit blocks without snapshot or runtime generation authority.",
+        "runtime-internal bridge submit accepts matching generation-scoped launch evidence.",
+        "bridge reports snapshot/generation in submit ownership records."
+      ]
+    },
+    {
+      "area": "order management / cancel-replace",
+      "code_change_needed_now": false,
+      "doctrine_conflict": "This is exactly the kind of future autonomous recovery boundary that must act from one coherent Control Plane Snapshot, not freshly reassembled local/shared artifacts.",
+      "id": "SS-LCA-005",
+      "legacy_local_behavior": "The guarded cancel/replace path consumes shared truth and reconciliation but can execute adapter cancel and replacement submit from its own readiness report. It does not yet call the reusable pre-action snapshot validator.",
+      "paths": [
+        "src/mgc_v05l/execution_core/track_b_managed_exit_cancel_replace.py:119",
+        "src/mgc_v05l/execution_core/track_b_managed_exit_cancel_replace.py:183",
+        "src/mgc_v05l/execution_core/track_b_managed_exit_cancel_replace.py:225"
+      ],
+      "recommended_v2_migration": "Add `validate_track_b_pre_action_snapshot(...)` as the first apply-mode gate with expected action TARGETED_CANCEL_REPLACE and exact order/position target identity. Keep dry-run planning without mutation.",
+      "severity": "HIGH",
+      "tests_needed": [
+        "cancel/replace apply blocks without valid snapshot.",
+        "cancel/replace apply blocks on target identity mismatch.",
+        "dry-run remains available with shared truth evidence."
+      ]
+    },
+    {
+      "area": "order management / modify-in-place",
+      "code_change_needed_now": false,
+      "doctrine_conflict": "It is shared-truth aligned but not yet Control Plane Snapshot aligned. Future v2 modification should be an executor action with the snapshot validator and budget ledger.",
+      "id": "SS-LCA-006",
+      "legacy_local_behavior": "Modify-in-place consumes shared authority artifacts and requires operator authorization, but apply mode can call an injected broker modify adapter after local shared-truth gating.",
+      "paths": [
+        "src/mgc_v05l/execution_core/track_b_managed_order_modify_in_place.py:107",
+        "src/mgc_v05l/execution_core/track_b_managed_order_modify_in_place.py:130",
+        "src/mgc_v05l/execution_core/track_b_managed_order_modify_in_place.py:174"
+      ],
+      "recommended_v2_migration": "Move apply mode behind pre-action snapshot validation with expected action MANAGED_ORDER_MODIFY. Keep exact same order id/perm/action/qty checks and add snapshot id to audit artifacts.",
+      "severity": "HIGH",
+      "tests_needed": [
+        "modify apply blocks without coherent snapshot.",
+        "modify apply requires planner action PLAN_MANAGED_ORDER_MODIFY.",
+        "modify audit includes snapshot id and shared truth generation id."
+      ]
+    },
+    {
+      "area": "repair executor / process recovery",
+      "code_change_needed_now": false,
+      "doctrine_conflict": "It can restart/repair sidecars or refresh reconciliation without a Control Plane Snapshot pre-action packet. It also retains older OPERATOR_REQUIRED semantics that are now policy-mode dependent.",
+      "id": "SS-LCA-007",
+      "legacy_local_behavior": "Maintenance repair executor consumes several shared truth artifacts but still executes repair subprocess commands from local maintenance supervisor decisions and canonical readiness artifacts.",
+      "paths": [
+        "src/mgc_v05l/app/track_b_maintenance_repair_executor.py:87",
+        "src/mgc_v05l/app/track_b_maintenance_repair_executor.py:174",
+        "src/mgc_v05l/app/track_b_maintenance_repair_executor.py:193"
+      ],
+      "recommended_v2_migration": "Convert to a Control Plane Snapshot consumer and then into the autonomous recovery executor framework as MARKET_DATA_RESTART or REFRESH_EVIDENCE adapters. Keep apply disabled until budgets and snapshot validation are wired.",
+      "severity": "HIGH",
+      "tests_needed": [
+        "repair executor apply blocks without Control Plane Snapshot.",
+        "repair executor dry-run reports snapshot/supervisor/paper policy evidence.",
+        "operator-required legacy decision becomes PAPER policy posture where safe."
+      ]
+    },
+    {
+      "area": "control policy / operator ack semantics",
+      "code_change_needed_now": false,
+      "doctrine_conflict": "PAPER policy should treat catastrophic candidates as evidence-rich bounded recovery/quarantine signals, not core human-gate dependencies. The current translation layer helps but leaves old semantics in a foundational service.",
+      "id": "SS-LCA-008",
+      "legacy_local_behavior": "Crash Loop Protection still emits OPERATOR_ACK_REQUIRED for repeated unsafe stops; Resume and Supervisor translate some of it through PAPER Recovery Policy, but the lower-level service remains human-gate flavored.",
+      "paths": [
+        "src/mgc_v05l/execution_core/track_b_crash_loop_protection.py:303",
+        "src/mgc_v05l/execution_core/track_b_runtime_resume_semantics.py:350",
+        "src/mgc_v05l/execution_core/track_b_runtime_supervisor_authority.py:434"
+      ],
+      "recommended_v2_migration": "Add policy_mode to Crash Loop v2 and emit PAPER-native classifications such as BUDGET_EXHAUSTED_QUARANTINE and UNSAFE_STOP_ENHANCED_OBSERVATION while preserving LIVE operator-ack semantics for future mode.",
+      "severity": "HIGH",
+      "tests_needed": [
+        "PAPER repeated unsafe stops classify quarantine/budget state without mandatory ack.",
+        "LIVE/PRE-LIVE mode can still require ack.",
+        "Supervisor no longer needs translation glue for PAPER crash-loop states."
+      ]
+    },
+    {
+      "area": "readiness / operator dashboard path ownership",
+      "code_change_needed_now": false,
+      "doctrine_conflict": "Dashboard/operator paths should be projections only. Current files may be semantically authoritative while physically living under dashboard output roots, which is confusing and increases risk of projection-as-authority regression.",
+      "id": "SS-LCA-009",
+      "legacy_local_behavior": "Some canonical readiness and broker lease artifacts still live under `outputs/operator_dashboard/runtime`, even when consumed by execution_core services.",
+      "paths": [
+        "src/mgc_v05l/execution_core/track_b_runtime_environment_truth.py:50",
+        "src/mgc_v05l/execution_core/track_b_readiness_state.py:31",
+        "src/mgc_v05l/app/track_b_broker_truth_lease.py:36",
+        "docs/track_b_architecture_map.md:673"
+      ],
+      "recommended_v2_migration": "Move canonical readiness and broker lease authority outputs to `outputs/track_b_execution_core/...` with dashboard projections only. Provide compatibility readers for one release and tests that dashboard paths are not authoritative.",
+      "severity": "MEDIUM",
+      "tests_needed": [
+        "execution_core canonical readiness path is authoritative.",
+        "dashboard canonical readiness path is projection-only.",
+        "broker lease authority path migration preserves consumers."
+      ]
+    },
+    {
+      "area": "launch/status / fallback flows",
+      "code_change_needed_now": false,
+      "doctrine_conflict": "Fallbacks are useful during migration, but if accidentally invoked they can reintroduce mixed-generation decisions and local display summaries that drift from the snapshot.",
+      "id": "SS-LCA-010",
+      "legacy_local_behavior": "Launch now uses Control Plane Snapshot, but the script still contains legacy shared-truth and supervisor preflight fallback functions and status still assembles some component artifacts directly.",
+      "paths": [
+        "scripts/run_probationary_paper_soak.sh:388",
+        "scripts/run_probationary_paper_soak.sh:452",
+        "scripts/run_probationary_paper_soak.sh:766",
+        "scripts/show_headless_supervised_paper_status.sh:620"
+      ],
+      "recommended_v2_migration": "Make Control Plane Snapshot the only launch preflight path; move old functions behind explicit `--legacy-diagnostic-only` flags. Status should render snapshot first and component artifacts only as diagnostics from the same generation.",
+      "severity": "MEDIUM",
+      "tests_needed": [
+        "launch fails if snapshot command unavailable rather than falling back silently.",
+        "status marks component reads diagnostic-only unless snapshot generation matches."
+      ]
+    },
+    {
+      "area": "lifecycle/local artifact repair",
+      "code_change_needed_now": false,
+      "doctrine_conflict": "This is acceptable for the current local-artifact remediation role, but v2 autonomous cleanup should use Control Plane Snapshot and lifecycle state matrix evidence as the pre-action packet.",
+      "id": "SS-LCA-011",
+      "legacy_local_behavior": "Lifecycle cleanup/adoption paths have been migrated to require shared-truth evidence, but they still read broker truth and lifecycle artifacts directly to derive or write local cleanup/adoption records.",
+      "paths": [
+        "src/mgc_v05l/app/track_b_paper_lifecycle_close_cleanup.py:155",
+        "src/mgc_v05l/app/track_b_paper_lifecycle_close_cleanup.py:292",
+        "src/mgc_v05l/app/track_b_paper_lifecycle_adoption.py:112"
+      ],
+      "recommended_v2_migration": "Leave current tools as operator/debug fallback. Build executor adapters for SCOPED_POSITION_CLEANUP using snapshot validation and exact target identity; feed lifecycle matrix validators before any local write.",
+      "severity": "MEDIUM",
+      "tests_needed": [
+        "scoped cleanup adapter blocks without snapshot.",
+        "lifecycle cleanup report includes snapshot id when invoked by executor.",
+        "manual fallback remains visibly diagnostic/recovery-only."
+      ]
+    },
+    {
+      "area": "research/offline diagnostics",
+      "code_change_needed_now": false,
+      "doctrine_conflict": "These are offline diagnostics, not runtime authority, but the path names can confuse future agents into treating dashboard snapshots as execution truth.",
+      "id": "SS-LCA-012",
+      "legacy_local_behavior": "Research and Track 1 forensic tools read operator dashboard snapshots for fill/intent/blotter history.",
+      "paths": [
+        "src/mgc_v05l/research/asia_drift/data_continuity_audit.py:384",
+        "src/mgc_v05l/research/asia_drift/cross_asset_trade_mapping.py:196",
+        "src/mgc_v05l/execution_core/track1_signal_handoff_breakpoint_audit.py:59"
+      ],
+      "recommended_v2_migration": "Label these modules as research/offline in docs and prefer execution_core/cold archive inputs for future forensic replay.",
+      "severity": "LOW",
+      "tests_needed": [
+        "No runtime/readiness/recovery import depends on these research readers."
+      ]
+    }
+  ],
+  "generated_at": "2026-05-23T20:05:48.626900+00:00",
+  "recommended_next_implementation_slice": {
+    "rationale": "These are the shortest path to preventing future autonomous executor or manual tool apply modes from bypassing coherent Control Plane Snapshot validation.",
+    "scope": [
+      "SS-LCA-005",
+      "SS-LCA-006",
+      "SS-LCA-003",
+      "SS-LCA-002"
+    ],
+    "title": "Snapshot-gate mutation-capable broker/order apply paths"
+  },
+  "repo_root": "/Users/patrick/Dev/MGC-v05l-automation",
+  "severity_counts": {
+    "CRITICAL": 3,
+    "HIGH": 5,
+    "LOW": 1,
+    "MEDIUM": 3
+  },
+  "top_5_risks": [
+    "SS-LCA-001",
+    "SS-LCA-002",
+    "SS-LCA-003",
+    "SS-LCA-004",
+    "SS-LCA-005"
+  ],
+  "v2_resiliency_backlog": [
+    {
+      "focus": "Add process/root/source_commit probes that are generation-aware and surfaced through Control Plane Snapshot.",
+      "item": "Agent Health v2",
+      "priority": "MEDIUM"
+    },
+    {
+      "focus": "Replace legacy OPERATOR_REQUIRED language with PAPER policy-mode posture and executor-ready action proposals.",
+      "item": "Self-Recover v2",
+      "priority": "HIGH"
+    },
+    {
+      "focus": "Make crash-loop classifications policy-mode aware; PAPER budget/quarantine vs future LIVE ack.",
+      "item": "Crash Loop v2",
+      "priority": "HIGH"
+    },
+    {
+      "focus": "Consume snapshot/policy directly and reduce translation glue around legacy operator-ack states.",
+      "item": "Runtime Resume v2",
+      "priority": "HIGH"
+    },
+    {
+      "focus": "Make Control Plane Snapshot the only decision packet and move component reads to generation-tied diagnostics.",
+      "item": "Runtime Supervisor v2+",
+      "priority": "HIGH"
+    },
+    {
+      "focus": "Enable one bounded RUNTIME_RETRY adapter only after snapshot validator, budget ledger, and dry-run audit are stable.",
+      "item": "Autonomous Recovery Executor v2",
+      "priority": "CRITICAL"
+    },
+    {
+      "focus": "Move apply path behind snapshot validator/action adapter; keep exact order identity and no replacement creation.",
+      "item": "Modify-in-place v2",
+      "priority": "HIGH"
+    },
+    {
+      "focus": "Implement dry-run archiver that never touches active authority/latest/lifecycle/open-order evidence.",
+      "item": "Artifact retention v2",
+      "priority": "MEDIUM"
+    },
+    {
+      "focus": "Require central matrix validators in bridge, manifest, lifecycle, ledger, and reconciliation write boundaries.",
+      "item": "Lifecycle matrix deeper writer migration",
+      "priority": "HIGH"
+    }
+  ]
+}
