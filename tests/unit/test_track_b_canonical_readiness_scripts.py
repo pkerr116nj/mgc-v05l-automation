@@ -6,6 +6,7 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parents[2]
 RUN_SCRIPT = REPO_ROOT / "scripts" / "run_headless_supervised_paper_service.sh"
 STATUS_SCRIPT = REPO_ROOT / "scripts" / "show_headless_supervised_paper_status.sh"
+PROBATIONARY_PAPER_SOAK_SCRIPT = REPO_ROOT / "scripts" / "run_probationary_paper_soak.sh"
 STOP_PAPER_SCRIPT = REPO_ROOT / "scripts" / "stop_probationary_paper_soak.sh"
 OPERATOR_READINESS_STATUS_SCRIPT = REPO_ROOT / "scripts" / "status-track-b-operator-readiness-refresh"
 OPERATOR_READINESS_START_SCRIPT = REPO_ROOT / "scripts" / "start-track-b-operator-readiness-refresh"
@@ -207,6 +208,45 @@ def test_launch_script_passes_canonical_readiness_paths_to_status_script() -> No
     assert "shared_truth_open_order_truth" in script
     assert "shared_truth_order_adjustment_planner" in script
     assert "Headless supervised paper host is READY_SUBMIT_CAPABLE." in script
+
+
+def test_runtime_start_consults_supervisor_authority_v2_before_spawn() -> None:
+    script = PROBATIONARY_PAPER_SOAK_SCRIPT.read_text(encoding="utf-8")
+
+    assert "DEFAULT_RUNTIME_SUPERVISOR_AUTHORITY_FILE" in script
+    assert "run_runtime_supervisor_start_preflight" in script
+    assert "mgc_v05l.execution_core.track_b_runtime_supervisor_authority" in script
+    assert "--no-dashboard-projection" in script
+    assert "SUPERVISOR_RUNTIME_START_ALLOWED" in script
+    assert "READY_FOR_OPERATOR_START" in script
+    assert "safe_to_start_runtime" in script
+    assert "RUNTIME_SUPERVISOR_START_BLOCKED" in script
+    assert "operator_ack_required" in script
+    assert "runtime_supervisor_authority" in script
+    assert "latest_track_b_runtime_supervisor_authority.json" not in script
+    assert script.index("run_shared_truth_runtime_start_preflight") < script.index("run_runtime_supervisor_start_preflight")
+    assert script.index("run_runtime_supervisor_start_preflight") < script.index("nohup \"${LAUNCH_PYTHON_BIN}\"")
+
+
+def test_headless_launch_uses_supervisor_authority_v2_as_final_pre_spawn_gate() -> None:
+    script = RUN_SCRIPT.read_text(encoding="utf-8")
+
+    assert "DEFAULT_RUNTIME_SUPERVISOR_AUTHORITY_FILE" in script
+    assert "refresh_runtime_supervisor_for_launch" in script
+    assert "runtime_supervisor_start_gate" in script
+    assert "runtime_supervisor_blocked_reason" in script
+    assert "RUNTIME_SUPERVISOR_START_BLOCKED" in script
+    assert "SUPERVISOR_RUNTIME_START_ALLOWED" in script
+    assert "READY_FOR_OPERATOR_START" in script
+    assert "safe_to_start_runtime" in script
+    assert "operator_ack_required" in script
+    assert "runtime_supervisor_authority_path" in script
+    assert "latest_track_b_runtime_supervisor_authority.json" not in script
+    start_flow = script[script.index("persist_requested_config_paths\nif ! assert_required_config_paths_present") :]
+    assert start_flow.index("refresh_canonical_readiness_for_launch \"pre-launch\"") < start_flow.index(
+        "refresh_runtime_supervisor_for_launch"
+    )
+    assert start_flow.index("runtime_supervisor_start_gate") < start_flow.index("if ! start_paper_runtime")
 
 
 def test_launch_script_uses_profile_aware_broker_truth_sidecar_policy() -> None:

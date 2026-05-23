@@ -38,6 +38,7 @@ DEFAULT_CONFIG_PATHS_FILE="${DEFAULT_RUNTIME_DIR}/paper_runtime_config_paths.txt
 DEFAULT_LAUNCH_STATUS_FILE="${DEFAULT_RUNTIME_DIR}/probationary_paper_launch_status.json"
 DEFAULT_RUNTIME_TRUTH_FILE="${DEFAULT_RUNTIME_DIR}/paper_runtime_truth.json"
 DEFAULT_SHARED_TRUTH_PREFLIGHT_FILE="${DEFAULT_RUNTIME_DIR}/shared_truth_runtime_start_preflight.json"
+DEFAULT_RUNTIME_SUPERVISOR_AUTHORITY_FILE="${REPO_ROOT}/outputs/track_b_execution_core/runtime_supervisor/latest_runtime_supervisor_authority.json"
 CANARY_ENABLE_SENTINEL="${DEFAULT_RUNTIME_DIR}/enable_paper_route_canary.flag"
 CONFIG_OVERRIDE_RAW="${MGC_PROBATIONARY_PAPER_CONFIG_PATHS:-}"
 LAUNCH_PYTHON_BIN="${MGC_PROBATIONARY_PAPER_LAUNCH_PYTHON_BIN:-${PYTHON_BIN}}"
@@ -47,6 +48,7 @@ BACKGROUND_OBSERVATION_WINDOW_SECONDS="${MGC_PROBATIONARY_PAPER_BACKGROUND_OBSER
 RUNTIME_TRUTH_FILE="${MGC_PROBATIONARY_PAPER_RUNTIME_TRUTH_FILE:-${DEFAULT_RUNTIME_TRUTH_FILE}}"
 SHARED_TRUTH_PREFLIGHT_FILE="${MGC_TRACK_B_SHARED_TRUTH_PREFLIGHT_FILE:-${DEFAULT_SHARED_TRUTH_PREFLIGHT_FILE}}"
 SHARED_TRUTH_PREFLIGHT_REPO_ROOT="${MGC_TRACK_B_SHARED_TRUTH_PREFLIGHT_REPO_ROOT:-${REPO_ROOT}}"
+RUNTIME_SUPERVISOR_AUTHORITY_FILE="${MGC_TRACK_B_RUNTIME_SUPERVISOR_AUTHORITY_FILE:-${DEFAULT_RUNTIME_SUPERVISOR_AUTHORITY_FILE}}"
 LAUNCH_FIRST_TRUTH_GENERATED_AT=""
 LAUNCH_SECOND_TRUTH_GENERATED_AT=""
 LAUNCH_SUSTAINED_CONVERGENCE_CONFIRMED="false"
@@ -59,6 +61,11 @@ LAUNCH_STOP_REQUESTED_AT=""
 LAUNCH_STOP_OBSERVED_AT=""
 LAUNCH_STOP_EXPECTED_CLEANUP="false"
 LAUNCH_STOP_BROKER_SAFE="false"
+LAUNCH_SUPERVISOR_CLASSIFICATION=""
+LAUNCH_SUPERVISOR_MODE=""
+LAUNCH_SUPERVISOR_PROOF_WINDOW_STATUS=""
+LAUNCH_SUPERVISOR_RECOMMENDED_NEXT_COMMAND=""
+LAUNCH_SUPERVISOR_OPERATOR_ACK_REQUIRED="false"
 
 ARGS=()
 CONFIG_SET=0
@@ -245,6 +252,12 @@ write_launch_status() {
   LAUNCH_STOP_OBSERVED_AT="${LAUNCH_STOP_OBSERVED_AT}" \
   LAUNCH_STOP_EXPECTED_CLEANUP="${LAUNCH_STOP_EXPECTED_CLEANUP}" \
   LAUNCH_STOP_BROKER_SAFE="${LAUNCH_STOP_BROKER_SAFE}" \
+  LAUNCH_RUNTIME_SUPERVISOR_AUTHORITY_FILE="${RUNTIME_SUPERVISOR_AUTHORITY_FILE}" \
+  LAUNCH_SUPERVISOR_CLASSIFICATION="${LAUNCH_SUPERVISOR_CLASSIFICATION}" \
+  LAUNCH_SUPERVISOR_MODE="${LAUNCH_SUPERVISOR_MODE}" \
+  LAUNCH_SUPERVISOR_PROOF_WINDOW_STATUS="${LAUNCH_SUPERVISOR_PROOF_WINDOW_STATUS}" \
+  LAUNCH_SUPERVISOR_RECOMMENDED_NEXT_COMMAND="${LAUNCH_SUPERVISOR_RECOMMENDED_NEXT_COMMAND}" \
+  LAUNCH_SUPERVISOR_OPERATOR_ACK_REQUIRED="${LAUNCH_SUPERVISOR_OPERATOR_ACK_REQUIRED}" \
   "${PYTHON_BIN}" -c '
 import json
 import os
@@ -293,6 +306,14 @@ payload = {
     "live_money_eligible": False,
     "paper_proof_invoked": False,
     "submit_authority": False,
+    "runtime_supervisor_authority": {
+        "artifact_path": os.environ["LAUNCH_RUNTIME_SUPERVISOR_AUTHORITY_FILE"],
+        "classification": os.environ.get("LAUNCH_SUPERVISOR_CLASSIFICATION") or None,
+        "supervisor_mode": os.environ.get("LAUNCH_SUPERVISOR_MODE") or None,
+        "proof_window_status": os.environ.get("LAUNCH_SUPERVISOR_PROOF_WINDOW_STATUS") or None,
+        "recommended_next_command": os.environ.get("LAUNCH_SUPERVISOR_RECOMMENDED_NEXT_COMMAND") or None,
+        "operator_ack_required": os.environ.get("LAUNCH_SUPERVISOR_OPERATOR_ACK_REQUIRED", "").lower() == "true",
+    },
 }
 if os.environ.get("LAUNCH_STOP_SOURCE") or stop_reason:
     payload["stop_provenance"] = {
@@ -372,6 +393,160 @@ PY
     return "${status}"
   fi
   rm -f "${stderr_file}"
+  return 0
+}
+
+run_runtime_supervisor_start_preflight() {
+  local tmp_file="${RUNTIME_SUPERVISOR_AUTHORITY_FILE}.runtime_start.tmp"
+  local stderr_file="${RUNTIME_SUPERVISOR_AUTHORITY_FILE}.runtime_start.stderr.log"
+  local status=0
+  local summary=""
+  ensure_dir "$(dirname "${RUNTIME_SUPERVISOR_AUTHORITY_FILE}")"
+  set +e
+  "${PYTHON_BIN}" -m mgc_v05l.execution_core.track_b_runtime_supervisor_authority \
+    --repo-root "${REPO_ROOT}" \
+    --output-path "${RUNTIME_SUPERVISOR_AUTHORITY_FILE}" \
+    --no-dashboard-projection \
+    --json \
+    > "${tmp_file}" \
+    2> "${stderr_file}"
+  status=$?
+  set -e
+  if [[ -s "${tmp_file}" ]]; then
+    mv "${tmp_file}" "${RUNTIME_SUPERVISOR_AUTHORITY_FILE}"
+  else
+    rm -f "${tmp_file}"
+  fi
+  summary="$("${PYTHON_BIN}" - <<'PY' "${RUNTIME_SUPERVISOR_AUTHORITY_FILE}" "${stderr_file}" || true
+import json
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+stderr_path = Path(sys.argv[2])
+try:
+    payload = json.loads(path.read_text(encoding="utf-8"))
+except (OSError, json.JSONDecodeError):
+    stderr = ""
+    try:
+        stderr = stderr_path.read_text(encoding="utf-8").strip()
+    except OSError:
+        pass
+    print(f"Runtime Supervisor Authority v2 did not produce valid JSON. stderr={stderr[:500]}")
+    raise SystemExit(0)
+
+operator_ack = payload.get("operator_ack") if isinstance(payload.get("operator_ack"), dict) else {}
+print(
+    "classification={classification} supervisor_mode={mode} proof_window_status={window} "
+    "safe_to_start_runtime={safe} operator_ack_required={ack} recommended_next_command={command}".format(
+        classification=payload.get("classification"),
+        mode=payload.get("supervisor_mode"),
+        window=payload.get("proof_window_status"),
+        safe=payload.get("safe_to_start_runtime"),
+        ack=payload.get("operator_ack_required") is True or operator_ack.get("required") is True,
+        command=payload.get("recommended_next_command"),
+    )
+)
+PY
+)"
+  echo "Track B Runtime Supervisor Authority v2 start preflight: ${summary}"
+  if [[ ${status} -ne 0 ]] && [[ -s "${stderr_file}" ]]; then
+    cat "${stderr_file}" >&2
+  fi
+  rm -f "${stderr_file}"
+  set +e
+  "${PYTHON_BIN}" - <<'PY' "${RUNTIME_SUPERVISOR_AUTHORITY_FILE}"
+import json
+import os
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+try:
+    payload = json.loads(path.read_text(encoding="utf-8"))
+except (OSError, json.JSONDecodeError):
+    print("RUNTIME_SUPERVISOR_START_BLOCKED: missing_or_invalid_supervisor_authority", file=sys.stderr)
+    raise SystemExit(2)
+operator_ack = payload.get("operator_ack") if isinstance(payload.get("operator_ack"), dict) else {}
+classification = payload.get("classification")
+mode = payload.get("supervisor_mode")
+proof_window_status = payload.get("proof_window_status")
+recommended = payload.get("recommended_next_command")
+ack_required = payload.get("operator_ack_required") is True or operator_ack.get("required") is True
+os.environ["MGC_RUNTIME_SUPERVISOR_CLASSIFICATION"] = str(classification or "")
+allowed = (
+    classification == "SUPERVISOR_RUNTIME_START_ALLOWED"
+    and mode == "READY_FOR_OPERATOR_START"
+    and payload.get("safe_to_start_runtime") is True
+    and not ack_required
+)
+if not allowed:
+    print(
+        "RUNTIME_SUPERVISOR_START_BLOCKED: "
+        f"classification={classification} supervisor_mode={mode} proof_window_status={proof_window_status} "
+        f"operator_ack_required={ack_required} recommended_next_command={recommended}",
+        file=sys.stderr,
+    )
+    raise SystemExit(2)
+raise SystemExit(0)
+PY
+  local gate_rc=$?
+  set -e
+  LAUNCH_SUPERVISOR_CLASSIFICATION="$("${PYTHON_BIN}" - <<'PY' "${RUNTIME_SUPERVISOR_AUTHORITY_FILE}" classification || true
+import json, sys
+from pathlib import Path
+try:
+    payload = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
+except (OSError, json.JSONDecodeError):
+    payload = {}
+print(payload.get(sys.argv[2]) or "")
+PY
+)"
+  LAUNCH_SUPERVISOR_MODE="$("${PYTHON_BIN}" - <<'PY' "${RUNTIME_SUPERVISOR_AUTHORITY_FILE}" supervisor_mode || true
+import json, sys
+from pathlib import Path
+try:
+    payload = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
+except (OSError, json.JSONDecodeError):
+    payload = {}
+print(payload.get(sys.argv[2]) or "")
+PY
+)"
+  LAUNCH_SUPERVISOR_PROOF_WINDOW_STATUS="$("${PYTHON_BIN}" - <<'PY' "${RUNTIME_SUPERVISOR_AUTHORITY_FILE}" proof_window_status || true
+import json, sys
+from pathlib import Path
+try:
+    payload = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
+except (OSError, json.JSONDecodeError):
+    payload = {}
+print(payload.get(sys.argv[2]) or "")
+PY
+)"
+  LAUNCH_SUPERVISOR_RECOMMENDED_NEXT_COMMAND="$("${PYTHON_BIN}" - <<'PY' "${RUNTIME_SUPERVISOR_AUTHORITY_FILE}" recommended_next_command || true
+import json, sys
+from pathlib import Path
+try:
+    payload = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
+except (OSError, json.JSONDecodeError):
+    payload = {}
+print(payload.get(sys.argv[2]) or "")
+PY
+)"
+  LAUNCH_SUPERVISOR_OPERATOR_ACK_REQUIRED="$("${PYTHON_BIN}" - <<'PY' "${RUNTIME_SUPERVISOR_AUTHORITY_FILE}" || true
+import json, sys
+from pathlib import Path
+try:
+    payload = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
+except (OSError, json.JSONDecodeError):
+    payload = {}
+operator_ack = payload.get("operator_ack") if isinstance(payload.get("operator_ack"), dict) else {}
+print("true" if payload.get("operator_ack_required") is True or operator_ack.get("required") is True else "false")
+PY
+)"
+  if [[ ${gate_rc} -ne 0 ]]; then
+    write_launch_status "RUNTIME_SUPERVISOR_START_BLOCKED" "" "${summary}" "${gate_rc}"
+    return "${gate_rc}"
+  fi
   return 0
 }
 
@@ -580,6 +755,7 @@ if schwab_runtime_dependency_required && [[ -f "${DEFAULT_SCHWAB_CONFIG}" ]]; th
 fi
 persist_runtime_config_paths
 run_shared_truth_runtime_start_preflight
+run_runtime_supervisor_start_preflight
 
 LAUNCH_CONFIG_PATHS=()
 index=0

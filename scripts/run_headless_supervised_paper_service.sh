@@ -28,6 +28,7 @@ DEFAULT_PAPER_WRAPPER_STATUS_FILE="${DEFAULT_PAPER_PID_FILE}.wrapper_status.json
 DEFAULT_PAPER_LOG_FILE="${REPO_ROOT}/outputs/probationary_pattern_engine/paper_session/runtime/probationary_paper.log"
 DEFAULT_PAPER_CONFIG_PATHS_FILE="${REPO_ROOT}/outputs/probationary_pattern_engine/paper_session/runtime/paper_runtime_config_paths.txt"
 DEFAULT_PAPER_RUNTIME_LAUNCH_STATUS_FILE="${REPO_ROOT}/outputs/probationary_pattern_engine/paper_session/runtime/probationary_paper_launch_status.json"
+DEFAULT_RUNTIME_SUPERVISOR_AUTHORITY_FILE="${REPO_ROOT}/outputs/track_b_execution_core/runtime_supervisor/latest_runtime_supervisor_authority.json"
 DEFAULT_PAPER_LAUNCHCTL_STDOUT_FILE="${DEFAULT_PAPER_PID_FILE}.launchctl_submit.stdout"
 DEFAULT_PAPER_LAUNCHCTL_STDERR_FILE="${DEFAULT_PAPER_PID_FILE}.launchctl_submit.stderr"
 DEFAULT_DASHBOARD_URL="${MGC_OPERATOR_DASHBOARD_URL:-http://127.0.0.1:8790/}"
@@ -64,6 +65,7 @@ PAPER_WRAPPER_STATUS_FILE="${DEFAULT_PAPER_WRAPPER_STATUS_FILE}"
 PAPER_LOG_FILE="${DEFAULT_PAPER_LOG_FILE}"
 PAPER_CONFIG_PATHS_FILE="${DEFAULT_PAPER_CONFIG_PATHS_FILE}"
 PAPER_RUNTIME_LAUNCH_STATUS_FILE="${DEFAULT_PAPER_RUNTIME_LAUNCH_STATUS_FILE}"
+RUNTIME_SUPERVISOR_AUTHORITY_FILE="${DEFAULT_RUNTIME_SUPERVISOR_AUTHORITY_FILE}"
 PAPER_LAUNCHCTL_STDOUT_FILE="${DEFAULT_PAPER_LAUNCHCTL_STDOUT_FILE}"
 PAPER_LAUNCHCTL_STDERR_FILE="${DEFAULT_PAPER_LAUNCHCTL_STDERR_FILE}"
 DASHBOARD_URL="${DEFAULT_DASHBOARD_URL}"
@@ -844,7 +846,8 @@ write_launchctl_runtime_status() {
     "${PAPER_RUNTIME_RESTART_GENERATION:-}" \
     "${PAPER_RUNTIME_LAUNCH_STARTED_AT:-}" \
     "${PAPER_RUNTIME_EXPECTED_SOURCE_COMMIT:-}" \
-    "${PAPER_RUNTIME_CONFIG_FINGERPRINT:-}"
+    "${PAPER_RUNTIME_CONFIG_FINGERPRINT:-}" \
+    "${RUNTIME_SUPERVISOR_AUTHORITY_FILE}"
 import json
 import sys
 from datetime import datetime, timezone
@@ -871,6 +874,7 @@ from mgc_v05l.execution_core.track_b_runtime_truth_contract import classify_laun
     launch_started_at,
     expected_source_commit,
     config_fingerprint,
+    runtime_supervisor_authority_path,
 ) = sys.argv[1:]
 
 def read_text(path_raw: str) -> str:
@@ -943,6 +947,8 @@ payload = {
     "repo_root": repo_root,
     "expected_source_commit": expected_source_commit or None,
     "config_fingerprint": config_fingerprint or None,
+    "runtime_supervisor_authority": read_json(runtime_supervisor_authority_path),
+    "runtime_supervisor_authority_path": runtime_supervisor_authority_path,
     "paper_only": True,
     "live_money_eligible": False,
     "paper_proof_invoked": False,
@@ -1500,6 +1506,85 @@ fail_fast_if_hard_canonical_blocker() {
   esac
 }
 
+refresh_runtime_supervisor_for_launch() {
+  local tmp_summary
+  tmp_summary="${RUNTIME_SUPERVISOR_AUTHORITY_FILE}.tmp"
+  rm -f "${tmp_summary}"
+  set +e
+  "${PYTHON_BIN}" -m mgc_v05l.execution_core.track_b_runtime_supervisor_authority \
+    --repo-root "${REPO_ROOT}" \
+    --output-path "${RUNTIME_SUPERVISOR_AUTHORITY_FILE}" \
+    --no-dashboard-projection \
+    --json > "${tmp_summary}"
+  local exit_code=$?
+  set -e
+  if [[ -s "${tmp_summary}" ]]; then
+    mv "${tmp_summary}" "${RUNTIME_SUPERVISOR_AUTHORITY_FILE}"
+    return 0
+  else
+    rm -f "${tmp_summary}"
+  fi
+  return "${exit_code}"
+}
+
+runtime_supervisor_start_gate() {
+  "${PYTHON_BIN}" - <<'PY' "${RUNTIME_SUPERVISOR_AUTHORITY_FILE}"
+import json
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+try:
+    payload = json.loads(path.read_text(encoding="utf-8"))
+except (OSError, json.JSONDecodeError):
+    print("RUNTIME_SUPERVISOR_START_BLOCKED: missing_or_invalid_supervisor_authority", file=sys.stderr)
+    raise SystemExit(2)
+operator_ack = payload.get("operator_ack") if isinstance(payload.get("operator_ack"), dict) else {}
+classification = payload.get("classification")
+mode = payload.get("supervisor_mode")
+proof_window_status = payload.get("proof_window_status")
+recommended = payload.get("recommended_next_command")
+ack_required = payload.get("operator_ack_required") is True or operator_ack.get("required") is True
+allowed = (
+    classification == "SUPERVISOR_RUNTIME_START_ALLOWED"
+    and mode == "READY_FOR_OPERATOR_START"
+    and payload.get("safe_to_start_runtime") is True
+    and not ack_required
+)
+if not allowed:
+    print(
+        "RUNTIME_SUPERVISOR_START_BLOCKED: "
+        f"classification={classification} supervisor_mode={mode} proof_window_status={proof_window_status} "
+        f"operator_ack_required={ack_required} recommended_next_command={recommended}",
+        file=sys.stderr,
+    )
+    raise SystemExit(2)
+raise SystemExit(0)
+PY
+}
+
+runtime_supervisor_blocked_reason() {
+  "${PYTHON_BIN}" - <<'PY' "${RUNTIME_SUPERVISOR_AUTHORITY_FILE}"
+import json
+import sys
+from pathlib import Path
+
+try:
+    payload = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
+except (OSError, json.JSONDecodeError):
+    payload = {}
+operator_ack = payload.get("operator_ack") if isinstance(payload.get("operator_ack"), dict) else {}
+print(
+    "Runtime Supervisor Authority blocked start: "
+    f"classification={payload.get('classification')} "
+    f"supervisor_mode={payload.get('supervisor_mode')} "
+    f"proof_window_status={payload.get('proof_window_status')} "
+    f"operator_ack_required={payload.get('operator_ack_required') is True or operator_ack.get('required') is True}. "
+    f"recommended_next_command={payload.get('recommended_next_command')}"
+)
+PY
+}
+
 persist_requested_config_paths
 if ! assert_required_config_paths_present "${REQUIRED_PAPER_CONFIG_PATHS}"; then
   write_startup_summary "BLOCKED" "Requested paper runtime config stack is missing required config paths." "false"
@@ -1515,6 +1600,19 @@ set +e
 refresh_canonical_readiness_for_launch "pre-launch"
 set -e
 fail_fast_if_hard_canonical_blocker "pre-launch"
+if ! refresh_runtime_supervisor_for_launch; then
+  write_launchctl_runtime_status "RUNTIME_SUPERVISOR_START_BLOCKED" "0" "false" "Runtime Supervisor Authority v2 refresh failed before launch."
+  write_startup_summary "BLOCKED" "Runtime Supervisor Authority v2 refresh failed before launch." "false"
+  cat "${STARTUP_FILE}"
+  exit 2
+fi
+if ! runtime_supervisor_start_gate; then
+  supervisor_reason="$(runtime_supervisor_blocked_reason)"
+  write_launchctl_runtime_status "RUNTIME_SUPERVISOR_START_BLOCKED" "0" "false" "${supervisor_reason}"
+  write_startup_summary "BLOCKED" "${supervisor_reason}" "false"
+  cat "${STARTUP_FILE}"
+  exit 2
+fi
 
 if ! start_paper_runtime; then
   write_startup_summary "BLOCKED" "Failed to start the supervised paper runtime." "false"
