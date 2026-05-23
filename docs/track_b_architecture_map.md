@@ -609,10 +609,14 @@ Authority hierarchy:
    health, self-recover, crash-loop policy, broker/order/position truth, and
    stop provenance into the advisory answer for whether a PAPER runtime may be
    started, resumed, held down, or requires operator acknowledgement.
-14. Self-Healing Restart Evidence consumes shared truth for restart eligibility
+14. Runtime Supervisor Authority combines the control-plane services into the
+   single advisory answer for what should happen next with the PAPER runtime:
+   wait, start allowed, leave healthy runtime running, hold down, cleanup
+   required, or manual review required.
+15. Self-Healing Restart Evidence consumes shared truth for restart eligibility
    diagnostics and keeps broker lease degradation distinct from reconciliation
    danger.
-15. Operator dashboard/status surfaces display projections of this stack. They
+16. Operator dashboard/status surfaces display projections of this stack. They
     are never routing, readiness, restart, broker, lifecycle, or order
     authority.
 
@@ -637,6 +641,7 @@ Authority and status artifact map:
 | Crash Loop Protection | `outputs/track_b_execution_core/crash_loop_protection/latest_crash_loop_protection.json` | `execution_core` advisory authority |
 | Crash Loop events | `outputs/track_b_execution_core/crash_loop_protection/crash_loop_events.jsonl` | `execution_core` audit |
 | Runtime Resume Semantics | `outputs/track_b_execution_core/runtime_resume/latest_runtime_resume_semantics.json` | `execution_core` advisory authority |
+| Runtime Supervisor Authority | `outputs/track_b_execution_core/runtime_supervisor/latest_runtime_supervisor_authority.json` | `execution_core` advisory authority |
 | Shared Truth Refresh CLI | `mgc_v05l.execution_core.track_b_shared_truth_refresh_cli` | `execution_core` refresh orchestrator |
 | Proof Readiness | `outputs/track_b_execution_core/proof_readiness/latest_track_b_paper_proof_readiness.json` | `execution_core` proof preflight authority |
 | Broker reconciliation | `outputs/track_b_execution_core/broker_reconciliation/latest_track_b_paper_broker_reconciliation.json` | `execution_core` reconciliation authority |
@@ -656,7 +661,8 @@ Dashboard projections may exist for operator visibility, for example
 `outputs/operator_dashboard/runtime/latest_track_b_agent_health.json`,
 `outputs/operator_dashboard/runtime/latest_track_b_self_recover_rules.json`, and
 `outputs/operator_dashboard/runtime/latest_track_b_crash_loop_protection.json`, and
-`outputs/operator_dashboard/runtime/latest_track_b_runtime_resume_semantics.json`.
+`outputs/operator_dashboard/runtime/latest_track_b_runtime_resume_semantics.json`,
+and `outputs/operator_dashboard/runtime/latest_track_b_runtime_supervisor_authority.json`.
 Each
 projection must carry `projection_only=true`, `not_routing_authority=true`, and
 `source_authority_path=<execution_core authority path>`. Runtime, readiness,
@@ -698,6 +704,9 @@ Current consumer migration status:
   start clean, must hold down for market closure/shared-truth/crash-loop
   evidence, or requires manual cleanup/operator acknowledgement. It is advisory
   only and never executes a restart.
+- Runtime Supervisor Authority v1 recommends the next PAPER runtime action from
+  shared authority evidence, but never executes start, stop, restart, broker, or
+  lifecycle mutations.
 
 Remaining migration backlog:
 
@@ -722,6 +731,9 @@ Remaining migration backlog:
 - Runtime resume semantics v2 should add an explicit operator acknowledgement
   artifact with actor identity/expiry and correlate each launch attempt back to
   the resume verdict id.
+- Manual remediation scripts should converge on Runtime Supervisor Authority
+  and shared-truth blockers before recommending or requesting scoped operator
+  cleanup.
 
 ## Desktop Package / Deploy
 
