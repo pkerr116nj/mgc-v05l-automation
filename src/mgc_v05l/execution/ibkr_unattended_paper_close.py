@@ -55,6 +55,20 @@ from .ibkr_read_only_verifier import (
     _wait_for_connection_ready,
     IbkrReadOnlyApiTransportConfig,
 )
+from ..execution_core.track_b_broker_truth_lease import DEFAULT_LEASE_ARTIFACT
+from ..execution_core.track_b_managed_order_registry import (
+    DEFAULT_MANAGED_ORDER_REGISTRY_ARTIFACT,
+    NO_MANAGED_ORDERS,
+)
+from ..execution_core.track_b_managed_position_registry import DEFAULT_MANAGED_POSITION_REGISTRY_ARTIFACT
+from ..execution_core.track_b_open_order_truth import DEFAULT_OPEN_ORDER_TRUTH_ARTIFACT, NO_OPEN_ORDERS
+from ..execution_core.track_b_order_adjustment_planner import (
+    DEFAULT_ORDER_ADJUSTMENT_PLAN_ARTIFACT,
+    NO_ACTION_NEEDED,
+)
+from ..execution_core.track_b_position_truth_monitor import DEFAULT_POSITION_TRUTH_ARTIFACT
+from ..execution_core.track_b_runtime_supervisor_authority import DEFAULT_RUNTIME_SUPERVISOR_AUTHORITY_ARTIFACT
+from ..execution_core.track_b_shared_truth_refresh_cli import DEFAULT_RECONCILIATION_ARTIFACT
 
 _EXPECTED_MODE = "PAPER"
 _EXPECTED_HOST = "127.0.0.1"
@@ -110,6 +124,16 @@ class IbkrUnattendedPaperCloseConfig:
     limit_offset_ticks: float = _DEFAULT_LIMIT_OFFSET_TICKS
     delayed_quote_max_age_seconds: float = _DEFAULT_DELAYED_QUOTE_MAX_AGE_SECONDS
     caller_path: str = "unattended_paper_cli"
+    require_shared_truth_evidence: bool = True
+    shared_truth_max_age_seconds: float = 600.0
+    open_order_truth_path: Path = DEFAULT_OPEN_ORDER_TRUTH_ARTIFACT
+    managed_order_registry_path: Path = DEFAULT_MANAGED_ORDER_REGISTRY_ARTIFACT
+    position_truth_path: Path = DEFAULT_POSITION_TRUTH_ARTIFACT
+    managed_position_registry_path: Path = DEFAULT_MANAGED_POSITION_REGISTRY_ARTIFACT
+    runtime_supervisor_authority_path: Path = DEFAULT_RUNTIME_SUPERVISOR_AUTHORITY_ARTIFACT
+    order_adjustment_plan_path: Path = DEFAULT_ORDER_ADJUSTMENT_PLAN_ARTIFACT
+    reconciliation_path: Path = DEFAULT_RECONCILIATION_ARTIFACT
+    broker_lease_path: Path = DEFAULT_LEASE_ARTIFACT
 
 
 @dataclass(frozen=True)
@@ -164,6 +188,19 @@ def run_ibkr_unattended_paper_close(
         unattended_paper=config.unattended_paper,
         input_guardrails=input_guardrails,
     )
+    shared_truth_evidence = _shared_truth_close_evidence(config=config, now=started_at)
+    guardrail_checks.append(
+        _guardrail_check(
+            "execution_core_shared_truth_authority",
+            passed=not shared_truth_evidence["blockers"],
+            blocking=True,
+            detail=(
+                "Execution-core shared truth agrees with the exact guarded close target."
+                if not shared_truth_evidence["blockers"]
+                else "; ".join(str(item) for item in shared_truth_evidence["blockers"])
+            ),
+        )
+    )
     runtime: _Runtime | None = None
     if any(check.get("blocking") and not check.get("passed") for check in guardrail_checks):
         detail = _first_failed_guardrail_detail(guardrail_checks)
@@ -183,6 +220,7 @@ def run_ibkr_unattended_paper_close(
             guardrail_checks=guardrail_checks,
             audit_events=audit_events,
             detail=detail,
+            shared_truth_evidence=shared_truth_evidence,
         )
         return IbkrUnattendedPaperCloseArtifacts(
             classification="IBKR_UNATTENDED_CLOSE_UNKNOWN",
@@ -355,6 +393,7 @@ def run_ibkr_unattended_paper_close(
             audit_events=audit_events,
             errors=list(runtime.collector.errors),
             callback_timeline_event_count=len(_build_callback_timeline(runtime)),
+            shared_truth_evidence=shared_truth_evidence,
         )
         return IbkrUnattendedPaperCloseArtifacts(
             classification=classification,
@@ -384,6 +423,7 @@ def run_ibkr_unattended_paper_close(
             guardrail_checks=guardrail_checks,
             audit_events=audit_events,
             detail=str(exc),
+            shared_truth_evidence=shared_truth_evidence,
         )
         callback_timeline = _build_callback_timeline(runtime) if runtime is not None else []
         if runtime is not None:
@@ -1017,6 +1057,7 @@ def _build_report(
     audit_events: list[dict[str, Any]],
     errors: list[dict[str, Any]],
     callback_timeline_event_count: int,
+    shared_truth_evidence: dict[str, Any],
 ) -> dict[str, Any]:
     exact_contract = dict(exact_contract_report.get("exact_contract") or {})
     return {
@@ -1040,6 +1081,7 @@ def _build_report(
         "preview_digest": preview_digest,
         "lifecycle": lifecycle_result,
         "guardrail_checks": guardrail_checks,
+        "shared_truth_evidence": shared_truth_evidence,
         "audit_event_count": len(audit_events),
         "callback_timeline_event_count": callback_timeline_event_count,
         "errors": errors,
@@ -1130,6 +1172,7 @@ def _blocked_report(
     guardrail_checks: list[dict[str, Any]],
     audit_events: list[dict[str, Any]],
     detail: str,
+    shared_truth_evidence: dict[str, Any],
 ) -> dict[str, Any]:
     return {
         "classification": "IBKR_UNATTENDED_CLOSE_UNKNOWN",
@@ -1148,6 +1191,7 @@ def _blocked_report(
         "limit_price": requested_order.get("limit_price"),
         "lifecycle": {"status": "blocked", "detail": detail},
         "guardrail_checks": guardrail_checks,
+        "shared_truth_evidence": shared_truth_evidence,
         "audit_event_count": len(audit_events),
         "callback_timeline_event_count": 0,
         "errors": [],
@@ -1169,3 +1213,207 @@ def _first_failed_guardrail_detail(guardrail_checks: list[dict[str, Any]]) -> st
         if check.get("blocking") and not check.get("passed"):
             return str(check.get("detail") or f"Blocking guardrail failed: {check.get('name')}")
     return "The unattended paper close harness was blocked by a required guardrail."
+
+
+def _shared_truth_close_evidence(
+    *,
+    config: IbkrUnattendedPaperCloseConfig,
+    now: datetime,
+) -> dict[str, Any]:
+    paths = {
+        "open_order_truth": config.open_order_truth_path,
+        "managed_order_registry": config.managed_order_registry_path,
+        "position_truth": config.position_truth_path,
+        "managed_position_registry": config.managed_position_registry_path,
+        "runtime_supervisor_authority": config.runtime_supervisor_authority_path,
+        "order_adjustment_plan": config.order_adjustment_plan_path,
+        "reconciliation": config.reconciliation_path,
+        "broker_lease": config.broker_lease_path,
+    }
+    payloads = {name: _read_json(_resolve(repo_root=config.repo_root, path=path)) for name, path in paths.items()}
+    classifications = {name: _shared_classification(payload) for name, payload in payloads.items()}
+    freshness = {
+        name: _shared_freshness(payload=payload, now=now, max_age_seconds=config.shared_truth_max_age_seconds)
+        for name, payload in payloads.items()
+    }
+    blockers: list[str] = []
+    if config.require_shared_truth_evidence:
+        for name, payload in payloads.items():
+            if not payload:
+                blockers.append(f"Shared truth authority artifact missing: {name}.")
+        for name, state in freshness.items():
+            if state["stale_or_missing"]:
+                blockers.append(f"Shared truth authority artifact stale/missing: {name}.")
+
+    if classifications["open_order_truth"] and classifications["open_order_truth"] != NO_OPEN_ORDERS:
+        blockers.append(f"Open Order Truth is not safe for guarded close: {classifications['open_order_truth']}.")
+    if classifications["managed_order_registry"] and classifications["managed_order_registry"] != NO_MANAGED_ORDERS:
+        blockers.append(
+            f"Managed Order Registry is not safe for guarded close: {classifications['managed_order_registry']}."
+        )
+    if classifications["order_adjustment_plan"] and classifications["order_adjustment_plan"] != NO_ACTION_NEEDED:
+        blockers.append(
+            f"Order Adjustment Planner blocks guarded close: {classifications['order_adjustment_plan']}."
+        )
+    if classifications["runtime_supervisor_authority"] in {
+        "SUPERVISOR_MANUAL_REVIEW_REQUIRED",
+        "SUPERVISOR_RESTART_BLOCKED_OPERATOR_ACK",
+        "SUPERVISOR_RESTART_BLOCKED_CRASH_LOOP",
+        "SUPERVISOR_SHARED_TRUTH_STALE",
+        "SUPERVISOR_UNKNOWN_REVIEW_REQUIRED",
+    }:
+        blockers.append(
+            f"Runtime Supervisor Authority blocks guarded close: {classifications['runtime_supervisor_authority']}."
+        )
+    if classifications["reconciliation"] in {
+        "BROKER_TRUTH_SETTLEMENT_CONTRADICTORY_STATE",
+        "TRACK_B_PAPER_BROKER_RECONCILIATION_BLOCKED_UNKNOWN_OPEN_ORDERS",
+    }:
+        blockers.append(f"Reconciliation is unsafe for guarded close: {classifications['reconciliation']}.")
+    if classifications["broker_lease"] in {
+        "INVALIDATED_CONTRADICTION",
+        "INVALIDATED_UNKNOWN_OPEN_ORDERS",
+        "INVALIDATED_MANUAL_BROKER_ACTION",
+        "OPERATOR_REQUIRED",
+    }:
+        blockers.append(f"Broker Truth Lease is unsafe for guarded close: {classifications['broker_lease']}.")
+
+    position_rows = _list(payloads["position_truth"].get("position_states"))
+    managed_position_rows = _list(payloads["managed_position_registry"].get("managed_positions"))
+    position_agreement = _shared_close_target_agreement(config=config, rows=position_rows, require_open_managed=False)
+    managed_position_agreement = _shared_close_target_agreement(config=config, rows=managed_position_rows, require_open_managed=True)
+    if position_agreement["conflicting_active_row_count"]:
+        blockers.append("Position Truth active rows conflict with requested guarded close target.")
+    if managed_position_agreement["conflicting_active_row_count"]:
+        blockers.append("Managed Position Registry active rows conflict with requested guarded close target.")
+    if not position_agreement["matching_row_count"]:
+        blockers.append("Position Truth does not show the exact broker position required for guarded close.")
+    if not managed_position_agreement["matching_open_managed_row_count"]:
+        blockers.append("Managed Position Registry does not show a matching OPEN_MANAGED lifecycle target.")
+
+    return {
+        "source_authority": "execution_core_authority",
+        "dashboard_projection_consumed": False,
+        "required": config.require_shared_truth_evidence,
+        "max_age_seconds": config.shared_truth_max_age_seconds,
+        "artifact_paths": {name: str(_resolve(repo_root=config.repo_root, path=path)) for name, path in paths.items()},
+        "classifications": classifications,
+        "freshness": freshness,
+        "target_agreement": {
+            "position_truth": position_agreement,
+            "managed_position_registry": managed_position_agreement,
+        },
+        "blockers": blockers,
+    }
+
+
+def _shared_close_target_agreement(
+    *,
+    config: IbkrUnattendedPaperCloseConfig,
+    rows: list[Any],
+    require_open_managed: bool,
+) -> dict[str, int]:
+    active_rows = [row for row in rows if isinstance(row, dict) and _shared_close_row_is_active(row)]
+    matching_rows = [row for row in active_rows if _shared_close_row_matches_target(config=config, row=row)]
+    matching_open_managed_rows = [
+        row for row in matching_rows if not require_open_managed or _shared_close_row_is_open_managed(row)
+    ]
+    return {
+        "row_count": len(rows),
+        "active_row_count": len(active_rows),
+        "matching_row_count": len(matching_rows),
+        "matching_open_managed_row_count": len(matching_open_managed_rows),
+        "conflicting_active_row_count": len(active_rows) - len(matching_rows),
+    }
+
+
+def _shared_close_row_matches_target(*, config: IbkrUnattendedPaperCloseConfig, row: dict[str, Any]) -> bool:
+    symbol = str(row.get("symbol") or row.get("instrument_family") or row.get("instrument") or "").upper()
+    local_symbol = str(row.get("local_symbol") or row.get("localSymbol") or "").upper()
+    if symbol and symbol != config.symbol.upper():
+        return False
+    if local_symbol and local_symbol != config.local_symbol.upper():
+        return False
+    con_id = _coerce_float(row.get("con_id") or row.get("conId"))
+    if con_id is not None and int(con_id) != int(config.con_id):
+        return False
+    quantity = _shared_close_row_quantity(row)
+    expected_quantity = _expected_position_quantity_for_close(config)
+    if quantity is not None and float(quantity) != float(expected_quantity):
+        return False
+    side = str(row.get("side") or row.get("position_side") or "").strip().upper()
+    if side:
+        expected_side = "LONG" if expected_quantity > 0 else "SHORT"
+        if side != expected_side:
+            return False
+    account = str(row.get("account_id") or row.get("account") or "").strip()
+    return not account or account == str(config.account_id or "").strip()
+
+
+def _shared_close_row_quantity(row: dict[str, Any]) -> float | None:
+    for key in ("signed_quantity", "broker_quantity", "quantity", "qty"):
+        value = _coerce_float(row.get(key))
+        if value is not None:
+            return float(value)
+    side = str(row.get("side") or row.get("position_side") or "").strip().upper()
+    quantity = _coerce_float(row.get("abs_quantity") or row.get("absolute_quantity"))
+    if quantity is None:
+        return None
+    return -float(quantity) if side == "SHORT" else float(quantity)
+
+
+def _expected_position_quantity_for_close(config: IbkrUnattendedPaperCloseConfig) -> float:
+    return float(config.quantity) if str(config.action or "").strip().upper() == "SELL" else -float(config.quantity)
+
+
+def _shared_close_row_is_active(row: dict[str, Any]) -> bool:
+    classification = str(row.get("classification") or "").upper()
+    if classification in {"FLAT_CLEAN", "NO_MANAGED_POSITIONS", "CLOSED_FLAT"}:
+        return False
+    status = str(row.get("final_position_status") or row.get("lifecycle_status") or row.get("status") or "").upper()
+    return status != "CLOSED_FLAT"
+
+
+def _shared_close_row_is_open_managed(row: dict[str, Any]) -> bool:
+    classification = str(row.get("classification") or "").upper()
+    status = str(row.get("final_position_status") or row.get("lifecycle_status") or row.get("status") or "").upper()
+    return classification in {"OPEN_MANAGED_MATCHED", "OPEN_MANAGED_EXIT_DUE"} or status == "OPEN_MANAGED"
+
+
+def _shared_classification(payload: dict[str, Any]) -> str:
+    summary = payload.get("summary") if isinstance(payload.get("summary"), dict) else {}
+    return str(
+        payload.get("classification")
+        or summary.get("classification")
+        or summary.get("overall_classification")
+        or ""
+    )
+
+
+def _shared_freshness(*, payload: dict[str, Any], now: datetime, max_age_seconds: float) -> dict[str, Any]:
+    generated_at = _parse_iso_timestamp(payload.get("generated_at"))
+    if generated_at is None:
+        return {"generated_at": None, "age_seconds": None, "stale_or_missing": True}
+    age_seconds = max(0.0, (now.astimezone(timezone.utc) - generated_at.astimezone(timezone.utc)).total_seconds())
+    return {
+        "generated_at": generated_at.isoformat(),
+        "age_seconds": age_seconds,
+        "stale_or_missing": age_seconds > float(max_age_seconds),
+    }
+
+
+def _read_json(path: Path) -> dict[str, Any]:
+    try:
+        with path.open("r", encoding="utf-8") as handle:
+            payload = json.load(handle)
+        return payload if isinstance(payload, dict) else {}
+    except (FileNotFoundError, json.JSONDecodeError, OSError):
+        return {}
+
+
+def _resolve(*, repo_root: Path, path: Path) -> Path:
+    return path if path.is_absolute() else repo_root / path
+
+
+def _list(value: Any) -> list[Any]:
+    return value if isinstance(value, list) else []

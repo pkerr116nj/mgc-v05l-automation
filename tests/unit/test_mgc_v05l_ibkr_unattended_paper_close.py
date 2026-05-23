@@ -12,6 +12,7 @@ from mgc_v05l.execution.ibkr_unattended_paper_close import (
     _derive_marketable_sell_limit,
     _matching_rows_for_order,
     _order_still_working,
+    _shared_truth_close_evidence,
     evaluate_unattended_paper_close_caller,
     render_ibkr_unattended_paper_close_markdown,
     run_ibkr_unattended_paper_close,
@@ -72,6 +73,79 @@ def test_run_blocks_without_unattended_flag(tmp_path: Path) -> None:
 
     assert artifacts.classification == "IBKR_UNATTENDED_CLOSE_UNKNOWN"
     assert artifacts.report["lifecycle"]["status"] == "blocked"
+    assert artifacts.report["shared_truth_evidence"]["source_authority"] == "execution_core_authority"
+    assert artifacts.report["shared_truth_evidence"]["dashboard_projection_consumed"] is False
+
+
+def test_shared_truth_close_allows_exact_clean_open_managed_target(tmp_path: Path) -> None:
+    _write_shared_truth_for_close(tmp_path)
+
+    evidence = _shared_truth_close_evidence(config=_config(tmp_path), now=_now())
+
+    assert evidence["blockers"] == []
+    assert evidence["classifications"]["open_order_truth"] == "NO_OPEN_ORDERS"
+    assert evidence["target_agreement"]["position_truth"]["matching_row_count"] == 1
+    assert evidence["target_agreement"]["managed_position_registry"]["matching_open_managed_row_count"] == 1
+
+
+def test_shared_truth_close_blocks_suspicious_open_order_truth(tmp_path: Path) -> None:
+    _write_shared_truth_for_close(tmp_path, open_order_truth_classification="SUSPICIOUS_ORDER_STATE")
+
+    evidence = _shared_truth_close_evidence(config=_config(tmp_path), now=_now())
+
+    assert any("Open Order Truth is not safe" in blocker for blocker in evidence["blockers"])
+
+
+def test_shared_truth_close_blocks_existing_managed_close_order(tmp_path: Path) -> None:
+    _write_shared_truth_for_close(tmp_path, managed_order_classification="WORKING_CLOSE_ORDER")
+
+    evidence = _shared_truth_close_evidence(config=_config(tmp_path), now=_now())
+
+    assert any("Managed Order Registry is not safe" in blocker for blocker in evidence["blockers"])
+
+
+def test_shared_truth_close_blocks_order_adjustment_planner_review(tmp_path: Path) -> None:
+    _write_shared_truth_for_close(tmp_path, order_adjustment_classification="REVIEW_REQUIRED_SUSPICIOUS_STATE")
+
+    evidence = _shared_truth_close_evidence(config=_config(tmp_path), now=_now())
+
+    assert any("Order Adjustment Planner blocks" in blocker for blocker in evidence["blockers"])
+
+
+def test_shared_truth_close_blocks_runtime_supervisor_manual_review(tmp_path: Path) -> None:
+    _write_shared_truth_for_close(tmp_path, runtime_supervisor_classification="SUPERVISOR_MANUAL_REVIEW_REQUIRED")
+
+    evidence = _shared_truth_close_evidence(config=_config(tmp_path), now=_now())
+
+    assert any("Runtime Supervisor Authority blocks" in blocker for blocker in evidence["blockers"])
+
+
+def test_shared_truth_close_blocks_broker_position_mismatch(tmp_path: Path) -> None:
+    _write_shared_truth_for_close(tmp_path, quantity="-1", side="SHORT")
+
+    evidence = _shared_truth_close_evidence(config=_config(tmp_path), now=_now())
+
+    assert any("Position Truth does not show the exact broker position" in blocker for blocker in evidence["blockers"])
+    assert any("Managed Position Registry does not show a matching OPEN_MANAGED" in blocker for blocker in evidence["blockers"])
+
+
+def test_unattended_close_does_not_consume_dashboard_projection_as_authority() -> None:
+    source = (
+        Path(__file__).resolve().parents[2]
+        / "src"
+        / "mgc_v05l"
+        / "execution"
+        / "ibkr_unattended_paper_close.py"
+    ).read_text(encoding="utf-8")
+
+    forbidden = [
+        "latest_track_b_open_order_truth.json",
+        "latest_track_b_managed_orders.json",
+        "latest_track_b_position_truth.json",
+        "latest_track_b_managed_positions.json",
+        "latest_track_b_runtime_supervisor_authority.json",
+    ]
+    assert all(path not in source for path in forbidden)
 
 
 def test_classify_lifecycle_variants() -> None:
@@ -201,3 +275,103 @@ def test_write_artifacts_and_markdown(tmp_path: Path) -> None:
     payload = json.loads((tmp_path / "ibkr_unattended_paper_close_test_report.json").read_text(encoding="utf-8"))
     markdown = render_ibkr_unattended_paper_close_markdown(payload)
     assert "IBKR_UNATTENDED_CLOSE_FILLED_FLAT" in markdown
+
+
+def _now() -> datetime:
+    return datetime(2026, 5, 23, 12, 0, tzinfo=timezone.utc)
+
+
+def _write_shared_truth_for_close(
+    repo: Path,
+    *,
+    open_order_truth_classification: str = "NO_OPEN_ORDERS",
+    managed_order_classification: str = "NO_MANAGED_ORDERS",
+    order_adjustment_classification: str = "NO_ACTION_NEEDED",
+    runtime_supervisor_classification: str = "SUPERVISOR_CLEANUP_REQUIRED_BEFORE_RUNTIME",
+    quantity: str = "1",
+    side: str = "LONG",
+) -> None:
+    generated_at = _now().isoformat()
+    position_row = {
+        "classification": "OPEN_MANAGED_MATCHED",
+        "account_id": "DUM882026",
+        "symbol": "MGC",
+        "local_symbol": "MGCM6",
+        "con_id": 712565978,
+        "quantity": quantity,
+        "side": side,
+        "lifecycle_status": "OPEN_MANAGED",
+    }
+    managed_position = {
+        "classification": "OPEN_MANAGED_MATCHED",
+        "account_id": "DUM882026",
+        "symbol": "MGC",
+        "local_symbol": "MGCM6",
+        "con_id": 712565978,
+        "quantity": quantity,
+        "side": side,
+        "lifecycle_status": "OPEN_MANAGED",
+        "managed_exit_policy_id": "PAPER_DIAGNOSTIC_TIME_BOXED_3X5M_EXIT_V1",
+    }
+    _write_json(
+        repo / "outputs" / "track_b_execution_core" / "open_order_truth" / "latest_open_order_truth.json",
+        {
+            "generated_at": generated_at,
+            "classification": open_order_truth_classification,
+            "order_states": [],
+        },
+    )
+    _write_json(
+        repo / "outputs" / "track_b_execution_core" / "managed_orders" / "latest_managed_orders.json",
+        {
+            "generated_at": generated_at,
+            "classification": managed_order_classification,
+            "managed_orders": [],
+        },
+    )
+    _write_json(
+        repo / "outputs" / "track_b_execution_core" / "managed_orders" / "latest_order_adjustment_plan.json",
+        {
+            "generated_at": generated_at,
+            "classification": order_adjustment_classification,
+            "plans": [],
+        },
+    )
+    _write_json(
+        repo / "outputs" / "track_b_execution_core" / "position_truth" / "latest_position_truth.json",
+        {
+            "generated_at": generated_at,
+            "classification": "ATTENTION_REQUIRED",
+            "summary": {"overall_classification": "ATTENTION_REQUIRED"},
+            "position_states": [position_row],
+        },
+    )
+    _write_json(
+        repo / "outputs" / "track_b_execution_core" / "managed_positions" / "latest_managed_positions.json",
+        {
+            "generated_at": generated_at,
+            "classification": "OPEN_MANAGED_MATCHED",
+            "managed_positions": [managed_position],
+        },
+    )
+    _write_json(
+        repo / "outputs" / "track_b_execution_core" / "runtime_supervisor" / "latest_runtime_supervisor_authority.json",
+        {"generated_at": generated_at, "classification": runtime_supervisor_classification},
+    )
+    _write_json(
+        repo
+        / "outputs"
+        / "reports"
+        / "track_b_paper_broker_reconciliation"
+        / "latest_track_b_paper_broker_reconciliation.json",
+        {"generated_at": generated_at, "classification": "TRACK_B_PAPER_BROKER_RECONCILED"},
+    )
+    _write_json(
+        repo / "outputs" / "operator_dashboard" / "runtime" / "latest_broker_truth_lease.json",
+        {"generated_at": generated_at, "classification": "ACTIVE"},
+    )
+
+
+def _write_json(path: Path, payload: dict[str, object]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
