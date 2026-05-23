@@ -30,7 +30,13 @@ from mgc_v05l.execution_core.track_b_order_adjustment_planner import (
     DEFAULT_ORDER_ADJUSTMENT_PLAN_ARTIFACT,
     MODIFY_IN_PLACE_ELIGIBLE,
 )
+from mgc_v05l.execution_core.track_b_paper_autonomous_recovery_planner import PLAN_MANAGED_ORDER_MODIFY
 from mgc_v05l.execution_core.track_b_position_truth_monitor import DEFAULT_POSITION_TRUTH_ARTIFACT
+from mgc_v05l.execution_core.track_b_pre_action_snapshot_validator import (
+    PRE_ACTION_SNAPSHOT_VALID,
+    TrackBPreActionSnapshotValidatorConfig,
+    validate_track_b_pre_action_snapshot,
+)
 from mgc_v05l.execution_core.track_b_runtime_resume_semantics import (
     DEFAULT_RUNTIME_RESUME_SEMANTICS_ARTIFACT,
 )
@@ -95,6 +101,7 @@ class ManagedOrderModifyInPlaceConfig:
     crash_loop_protection_path: Path = DEFAULT_CRASH_LOOP_PROTECTION_ARTIFACT
     reconciliation_path: Path = DEFAULT_RECONCILIATION_ARTIFACT
     broker_lease_path: Path = DEFAULT_LEASE_ARTIFACT
+    pre_action_snapshot_max_age_seconds: int = 300
 
     def resolve(self, path: Path) -> Path:
         return path if path.is_absolute() else self.repo_root / path
@@ -124,12 +131,31 @@ def run_track_b_managed_order_modify_in_place(
         _write_report(config=config, report=report)
         return report
     if not config.apply:
+        pre_action_validation = _pre_action_snapshot_validation(config=config, now=actual_now)
+        report["pre_action_snapshot_validation"] = _jsonable(pre_action_validation)
+        report["pre_action_snapshot_required_for_apply"] = True
+        report["pre_action_snapshot_would_block_apply"] = (
+            pre_action_validation.get("classification") != PRE_ACTION_SNAPSHOT_VALID
+        )
         report["detail"] = "Modify-in-place dry-run is ready; apply=false so no broker mutation was attempted."
         _write_report(config=config, report=report)
         return report
     if not config.operator_authorized_modify:
         report["classification"] = MODIFY_IN_PLACE_BLOCKED_OPERATOR_AUTH_REQUIRED
         report["detail"] = "Actual modify requires --operator-authorized-modify plus exact order identifiers."
+        report["broker_mutation_attempted"] = False
+        _write_report(config=config, report=report)
+        return report
+
+    pre_action_validation = _pre_action_snapshot_validation(config=config, now=actual_now)
+    report["pre_action_snapshot_validation"] = _jsonable(pre_action_validation)
+    report["pre_action_snapshot_required_for_apply"] = True
+    if pre_action_validation.get("classification") != PRE_ACTION_SNAPSHOT_VALID:
+        report["classification"] = MODIFY_IN_PLACE_BLOCKED_SHARED_TRUTH
+        report["detail"] = (
+            "Pre-action Control Plane Snapshot validation blocked modify-in-place: "
+            f"{pre_action_validation.get('classification')} - {pre_action_validation.get('reason')}"
+        )
         report["broker_mutation_attempted"] = False
         _write_report(config=config, report=report)
         return report
@@ -499,6 +525,36 @@ def _base_report(
 
 def _blocked(classification: str, detail: str) -> dict[str, str]:
     return {"classification": classification, "detail": detail}
+
+
+def _pre_action_snapshot_validation(
+    *,
+    config: ManagedOrderModifyInPlaceConfig,
+    now: datetime,
+) -> dict[str, Any]:
+    return validate_track_b_pre_action_snapshot(
+        config=TrackBPreActionSnapshotValidatorConfig(repo_root=config.repo_root),
+        expected_plan_classification=PLAN_MANAGED_ORDER_MODIFY,
+        expected_action_type="MANAGED_ORDER_MODIFY",
+        expected_target_identity=_pre_action_target_identity(config),
+        max_snapshot_age_seconds=int(config.pre_action_snapshot_max_age_seconds),
+        now=now,
+    )
+
+
+def _pre_action_target_identity(config: ManagedOrderModifyInPlaceConfig) -> dict[str, Any]:
+    return {
+        "account_id": config.account_id,
+        "symbol": config.symbol,
+        "contract": config.contract,
+        "con_id": config.con_id,
+        "broker_order_id": config.broker_order_id,
+        "perm_id": config.perm_id,
+        "action": config.action,
+        "quantity": config.quantity,
+        "current_known_limit": config.current_known_limit,
+        "new_limit": config.new_limit,
+    }
 
 
 def _find_order(*, config: ManagedOrderModifyInPlaceConfig, rows: Sequence[Mapping[str, Any]]) -> dict[str, Any] | None:

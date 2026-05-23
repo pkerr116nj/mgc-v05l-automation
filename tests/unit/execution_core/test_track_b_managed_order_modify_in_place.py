@@ -18,6 +18,11 @@ from mgc_v05l.execution_core.track_b_managed_order_modify_in_place import (
     main,
     run_track_b_managed_order_modify_in_place,
 )
+from mgc_v05l.execution_core.track_b_paper_autonomous_recovery_planner import (
+    PLAN_MANAGED_ORDER_MODIFY,
+    PLAN_TARGETED_CANCEL_REPLACE,
+)
+from mgc_v05l.execution_core.track_b_pre_action_snapshot_validator import PRE_ACTION_SNAPSHOT_VALID
 
 
 NOW = datetime(2026, 5, 23, 15, 5, tzinfo=UTC)
@@ -31,6 +36,7 @@ def test_dry_run_ready_for_clean_working_managed_close_order(tmp_path: Path) -> 
     assert report["classification"] == MODIFY_IN_PLACE_DRY_RUN_READY
     assert report["broker_mutation_attempted"] is False
     assert report["new_order_created"] is False
+    assert report["pre_action_snapshot_would_block_apply"] is True
     assert report["shared_truth_evidence"]["dashboard_projection_consumed"] is False
 
 
@@ -109,6 +115,7 @@ def test_broker_flat_blocks_modify(tmp_path: Path) -> None:
 
 def test_applied_path_uses_same_order_identity_and_no_replacement(tmp_path: Path) -> None:
     _seed_authorities(tmp_path)
+    _write_pre_action_snapshot_for_modify(tmp_path)
     calls: list[str] = []
 
     def pre_refresh(config: ManagedOrderModifyInPlaceConfig) -> dict:
@@ -138,6 +145,7 @@ def test_applied_path_uses_same_order_identity_and_no_replacement(tmp_path: Path
 
     assert calls == ["pre", "modify", "post"]
     assert report["classification"] == MODIFY_IN_PLACE_APPLIED
+    assert report["pre_action_snapshot_validation"]["classification"] == PRE_ACTION_SNAPSHOT_VALID
     assert report["broker_mutation_performed"] is True
     assert report["new_order_created"] is False
     assert report["verified_order"]["broker_order_id"] == "27"
@@ -146,6 +154,7 @@ def test_applied_path_uses_same_order_identity_and_no_replacement(tmp_path: Path
 
 def test_post_modify_verification_failure_is_loud(tmp_path: Path) -> None:
     _seed_authorities(tmp_path)
+    _write_pre_action_snapshot_for_modify(tmp_path)
 
     report = run_track_b_managed_order_modify_in_place(
         config=_config(tmp_path, apply=True, operator_authorized_modify=True),
@@ -159,8 +168,65 @@ def test_post_modify_verification_failure_is_loud(tmp_path: Path) -> None:
     assert report["broker_mutation_attempted"] is True
 
 
-def test_cli_writes_dry_run_audit(tmp_path: Path, capsys) -> None:
+def test_modify_apply_blocked_without_snapshot(tmp_path: Path) -> None:
     _seed_authorities(tmp_path)
+
+    def _raise_if_called(_config: ManagedOrderModifyInPlaceConfig) -> dict:
+        raise AssertionError("snapshot gate should block before broker hooks")
+
+    report = run_track_b_managed_order_modify_in_place(
+        config=_config(tmp_path, apply=True, operator_authorized_modify=True),
+        now=NOW,
+        pre_modify_open_order_refresh=_raise_if_called,
+        modify_order_limit=_raise_if_called,
+        post_modify_open_order_refresh=_raise_if_called,
+    )
+
+    assert report["classification"] == MODIFY_IN_PLACE_BLOCKED_SHARED_TRUTH
+    assert report["pre_action_snapshot_validation"]["classification"] == "PRE_ACTION_BLOCKED_SNAPSHOT_MISSING"
+    assert report["broker_mutation_attempted"] is False
+
+
+def test_modify_apply_blocked_on_pre_action_plan_mismatch(tmp_path: Path) -> None:
+    _seed_authorities(tmp_path)
+    _write_pre_action_snapshot_for_modify(
+        tmp_path,
+        plan_classification=PLAN_TARGETED_CANCEL_REPLACE,
+        action_type="TARGETED_CANCEL_REPLACE",
+    )
+
+    report = _run(tmp_path, apply=True, operator_authorized_modify=True)
+
+    assert report["classification"] == MODIFY_IN_PLACE_BLOCKED_SHARED_TRUTH
+    assert report["pre_action_snapshot_validation"]["classification"] == "PRE_ACTION_BLOCKED_PLAN_MISMATCH"
+
+
+def test_modify_apply_blocked_on_pre_action_target_mismatch(tmp_path: Path) -> None:
+    _seed_authorities(tmp_path)
+    target = _modify_pre_action_target()
+    target["contract"] = "MGCM6"
+    _write_pre_action_snapshot_for_modify(tmp_path, target_identity=target)
+
+    report = _run(tmp_path, apply=True, operator_authorized_modify=True)
+
+    assert report["classification"] == MODIFY_IN_PLACE_BLOCKED_SHARED_TRUTH
+    assert report["pre_action_snapshot_validation"]["classification"] == "PRE_ACTION_BLOCKED_TARGET_IDENTITY_MISMATCH"
+
+
+def test_modify_apply_valid_snapshot_reaches_existing_next_gate(tmp_path: Path) -> None:
+    _seed_authorities(tmp_path)
+    _write_pre_action_snapshot_for_modify(tmp_path)
+
+    report = _run(tmp_path, apply=True, operator_authorized_modify=True)
+
+    assert report["classification"] == MODIFY_IN_PLACE_VERIFICATION_FAILED
+    assert report["pre_action_snapshot_validation"]["classification"] == PRE_ACTION_SNAPSHOT_VALID
+    assert "adapter hooks" in report["detail"]
+    assert report["broker_mutation_attempted"] is False
+
+
+def test_cli_writes_dry_run_audit(tmp_path: Path, capsys) -> None:
+    _seed_authorities(tmp_path, generated_at=datetime.now(UTC).isoformat())
 
     exit_code = main(
         [
@@ -199,7 +265,7 @@ def test_cli_writes_dry_run_audit(tmp_path: Path, capsys) -> None:
 
 def test_dashboard_projection_is_not_consumed() -> None:
     repo_root = Path(__file__).resolve().parents[3]
-    forbidden = "outputs/operator_dashboard/runtime/latest_track_b_managed_orders.json"
+    forbidden = "outputs/operator_dashboard/runtime/latest_track_b_control_plane_snapshot.json"
     module = repo_root / "src/mgc_v05l/execution_core/track_b_managed_order_modify_in_place.py"
 
     assert forbidden not in module.read_text(encoding="utf-8")
@@ -249,6 +315,7 @@ def _config(
 def _seed_authorities(
     root: Path,
     *,
+    generated_at: str = NOW.isoformat(),
     open_order_classification: str = "OPEN_CLOSE_ORDER_WORKING",
     managed_order_classification: str = "WORKING_CLOSE_ORDER",
     planner_classification: str = "MODIFY_IN_PLACE_ELIGIBLE",
@@ -263,7 +330,7 @@ def _seed_authorities(
     _write_json(
         root / "outputs/track_b_execution_core/open_order_truth/latest_open_order_truth.json",
         {
-            "generated_at": NOW.isoformat(),
+            "generated_at": generated_at,
             "classification": open_order_classification,
             "order_states": [_broker_order(filled_quantity=filled_quantity, remaining_quantity=remaining_quantity)],
         },
@@ -271,7 +338,7 @@ def _seed_authorities(
     _write_json(
         root / "outputs/track_b_execution_core/managed_orders/latest_managed_orders.json",
         {
-            "generated_at": NOW.isoformat(),
+            "generated_at": generated_at,
             "classification": managed_order_classification,
             "managed_orders": [
                 {
@@ -288,7 +355,7 @@ def _seed_authorities(
     _write_json(
         root / "outputs/track_b_execution_core/managed_orders/latest_order_adjustment_plan.json",
         {
-            "generated_at": NOW.isoformat(),
+            "generated_at": generated_at,
             "classification": planner_classification,
             "plans": [{**_managed_order(classification=planner_classification), "classification": planner_classification}],
         },
@@ -296,7 +363,7 @@ def _seed_authorities(
     _write_json(
         root / "outputs/track_b_execution_core/position_truth/latest_position_truth.json",
         {
-            "generated_at": NOW.isoformat(),
+            "generated_at": generated_at,
             "summary": {"overall_classification": "ATTENTION_REQUIRED" if broker_positions else "CLEAN_FLAT_READY"},
             "broker_positions": broker_positions,
         },
@@ -304,7 +371,7 @@ def _seed_authorities(
     _write_json(
         root / "outputs/track_b_execution_core/managed_positions/latest_managed_positions.json",
         {
-            "generated_at": NOW.isoformat(),
+            "generated_at": generated_at,
             "classification": "OPEN_MANAGED_MATCHED" if managed_positions else "NO_MANAGED_POSITIONS",
             "managed_positions": managed_positions,
         },
@@ -325,17 +392,87 @@ def _seed_authorities(
         "outputs/operator_dashboard/runtime/latest_broker_truth_lease.json": {"classification": "ACTIVE"},
     }
     for relative, payload in simple_authorities.items():
-        _write_json(root / relative, {"generated_at": NOW.isoformat(), **payload})
+        _write_json(root / relative, {"generated_at": generated_at, **payload})
     _write_json(
         root / "outputs/reports/track_b_paper_broker_reconciliation/latest_track_b_paper_broker_reconciliation.json",
         {
-            "generated_at": NOW.isoformat(),
+            "generated_at": generated_at,
             "classification": "TRACK_B_PAPER_BROKER_RECONCILED",
             "broker_reconciled": True,
             "live_money_eligible": False,
             "paper_proof_invoked": False,
         },
     )
+
+
+def _write_pre_action_snapshot_for_modify(
+    root: Path,
+    *,
+    plan_classification: str = PLAN_MANAGED_ORDER_MODIFY,
+    action_type: str = "MANAGED_ORDER_MODIFY",
+    target_identity: dict | None = None,
+) -> None:
+    generated_at = NOW.isoformat()
+    snapshot_id = "snapshot-managed-order-modify"
+    generation_id = "generation-managed-order-modify"
+    supervisor_decision_id = "supervisor-managed-order-modify"
+    target = _modify_pre_action_target() if target_identity is None else target_identity
+    _write_json(
+        root / "outputs/track_b_execution_core/control_plane/latest_control_plane_snapshot.json",
+        {
+            "generated_at": generated_at,
+            "classification": "CONTROL_PLANE_SNAPSHOT_READY",
+            "control_plane_snapshot_id": snapshot_id,
+            "shared_truth_refresh_generation_id": generation_id,
+            "shared_truth_coherence_status": "COHERENT",
+            "runtime_supervisor_decision_id": supervisor_decision_id,
+            "runtime_supervisor_classification": "SUPERVISOR_CLEANUP_REQUIRED_BEFORE_RUNTIME",
+            "safe_to_start_runtime": False,
+            "live_money_eligible": False,
+        },
+    )
+    _write_json(
+        root / "outputs/track_b_execution_core/runtime_supervisor/latest_runtime_supervisor_authority.json",
+        {
+            "generated_at": generated_at,
+            "supervisor_decision_id": supervisor_decision_id,
+            "classification": "SUPERVISOR_CLEANUP_REQUIRED_BEFORE_RUNTIME",
+            "live_money_eligible": False,
+        },
+    )
+    _write_json(
+        root / "outputs/track_b_execution_core/paper_autonomous_recovery/latest_paper_autonomous_recovery_plan.json",
+        {
+            "generated_at": generated_at,
+            "classification": plan_classification,
+            "control_plane_snapshot_id": snapshot_id,
+            "shared_truth_refresh_generation_id": generation_id,
+            "execution_enabled": False,
+            "proposed_actions": [
+                {
+                    "action_id": "modify_mnq_27",
+                    "action_type": action_type,
+                    "target_identity": target,
+                    "execution_enabled": False,
+                }
+            ],
+        },
+    )
+
+
+def _modify_pre_action_target() -> dict:
+    return {
+        "account_id": "DUM882026",
+        "symbol": "MNQ",
+        "contract": "MNQM6",
+        "con_id": "770561201",
+        "broker_order_id": "27",
+        "perm_id": "347068546",
+        "action": "SELL",
+        "quantity": "1",
+        "current_known_limit": "29555.50",
+        "new_limit": "29554.50",
+    }
 
 
 def _managed_order(*, classification: str = "WORKING_CLOSE_ORDER") -> dict:

@@ -26,7 +26,15 @@ The remaining risk is concentrated in older broker/order mutation harnesses and 
 1. `SS-LCA-002` CRITICAL - broker mutation / manual submit harness: The manual paper submit harness can submit and cancel PAPER orders after a frozen-preview/approval-digest flow. It relies on local runtime guardrails, broker snapshots, quote probes, and callback evidence.
 1. `SS-LCA-003` CRITICAL - broker mutation / lane submit port: Lane submit port defaults `submit=True` and delegates actionable BUY/SELL/EXIT intents to the IBKR paper strategy bridge after local monitor/governance/intent checks.
 1. `SS-LCA-004` HIGH - broker mutation / shared bridge submit: The strategy bridge performs many local gates, phase-1 broker reconciliation submit gate checks, ownership persistence, and delegates to the manual paper submit harness.
-1. `SS-LCA-005` HIGH - order management / cancel-replace: The guarded cancel/replace path consumes shared truth and reconciliation but can execute adapter cancel and replacement submit from its own readiness report. It does not yet call the reusable pre-action snapshot validator.
+1. `SS-LCA-005` HIGH - order management / cancel-replace: The guarded cancel/replace path consumed shared truth and reconciliation but could execute adapter cancel and replacement submit from its own readiness report. Status update: snapshot-gated in the follow-up convergence slice.
+
+## Status Update - Snapshot-Gated Order Apply Paths
+
+- updated_at: `2026-05-23T00:00:00+00:00`
+- `SS-LCA-005` cancel/replace apply path is now gated by `validate_track_b_pre_action_snapshot(...)` before adapter construction, cancel, or replacement submit. It requires a coherent Control Plane Snapshot and `PLAN_TARGETED_CANCEL_REPLACE` / `TARGETED_CANCEL_REPLACE` planner evidence matching the exact order target.
+- `SS-LCA-006` modify-in-place apply path is now gated by `validate_track_b_pre_action_snapshot(...)` before broker refresh, modify, or post-modify verification hooks. It requires a coherent Control Plane Snapshot and `PLAN_MANAGED_ORDER_MODIFY` / `MANAGED_ORDER_MODIFY` planner evidence matching the exact order and price target.
+- dry-run mode remains non-mutating and records whether the same snapshot gate would block apply.
+- next top risk remains `SS-LCA-001` lower-level REST cancel, followed by `SS-LCA-002` manual submit harness and `SS-LCA-003` lane submit port.
 
 ## Findings
 
@@ -84,6 +92,7 @@ The remaining risk is concentrated in older broker/order mutation harnesses and 
 - legacy/local behavior: The guarded cancel/replace path consumes shared truth and reconciliation but can execute adapter cancel and replacement submit from its own readiness report. It does not yet call the reusable pre-action snapshot validator.
 - conflict with doctrine: This is exactly the kind of future autonomous recovery boundary that must act from one coherent Control Plane Snapshot, not freshly reassembled local/shared artifacts.
 - recommended v2 migration: Add `validate_track_b_pre_action_snapshot(...)` as the first apply-mode gate with expected action TARGETED_CANCEL_REPLACE and exact order/position target identity. Keep dry-run planning without mutation.
+- current status: snapshot-gated in apply mode; dry-run reports whether apply would block.
 - code change needed now: `false`
 - tests needed:
   - cancel/replace apply blocks without valid snapshot.
@@ -96,6 +105,7 @@ The remaining risk is concentrated in older broker/order mutation harnesses and 
 - legacy/local behavior: Modify-in-place consumes shared authority artifacts and requires operator authorization, but apply mode can call an injected broker modify adapter after local shared-truth gating.
 - conflict with doctrine: It is shared-truth aligned but not yet Control Plane Snapshot aligned. Future v2 modification should be an executor action with the snapshot validator and budget ledger.
 - recommended v2 migration: Move apply mode behind pre-action snapshot validation with expected action MANAGED_ORDER_MODIFY. Keep exact same order id/perm/action/qty checks and add snapshot id to audit artifacts.
+- current status: snapshot-gated in apply mode; dry-run reports whether apply would block.
 - code change needed now: `false`
 - tests needed:
   - modify apply blocks without coherent snapshot.

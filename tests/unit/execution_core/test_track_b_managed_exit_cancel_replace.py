@@ -18,6 +18,11 @@ from mgc_v05l.execution_core.track_b_managed_exit_cancel_replace import (
     ManagedExitCancelReplaceConfig,
     run_guarded_managed_exit_cancel_replace,
 )
+from mgc_v05l.execution_core.track_b_paper_autonomous_recovery_planner import (
+    PLAN_MANAGED_ORDER_MODIFY,
+    PLAN_TARGETED_CANCEL_REPLACE,
+)
+from mgc_v05l.execution_core.track_b_pre_action_snapshot_validator import PRE_ACTION_SNAPSHOT_VALID
 
 
 NOW = datetime(2026, 5, 15, 11, 0, tzinfo=timezone.utc)
@@ -51,6 +56,7 @@ def test_dry_run_does_not_construct_adapter(tmp_path: Path) -> None:
     assert report["classification"] == GUARDED_CANCEL_REPLACE_READY
     assert report["broker_mutation_attempted"] is False
     assert report["broker_mutation_performed"] is False
+    assert report["pre_action_snapshot_would_block_apply"] is True
 
 
 def test_unknown_open_order_proposal_is_refused(tmp_path: Path) -> None:
@@ -190,15 +196,18 @@ def test_live_money_or_paper_proof_state_is_refused(tmp_path: Path) -> None:
 
 
 def test_apply_cancels_exact_order_and_persists_working_replacement(tmp_path: Path) -> None:
+    _write_shared_truth_for_cancel_replace(tmp_path)
+    _write_pre_action_snapshot_for_cancel_replace(tmp_path)
     fake = _FakeAdapter(fill=None)
     report = run_guarded_managed_exit_cancel_replace(
-        config=_config(tmp_path, apply=True),
+        config=_config(tmp_path, apply=True, skip_shared_truth_write=True),
         now=NOW,
         reconciliation_runner=lambda _config: _reconciliation_report(),
         adapter_factory=lambda **_kwargs: fake,
     )
 
     assert report["classification"] == GUARDED_CANCEL_REPLACE_REPLACEMENT_WORKING
+    assert report["pre_action_snapshot_validation"]["classification"] == PRE_ACTION_SNAPSHOT_VALID
     assert report["broker_mutation_performed"] is True
     assert fake.cancelled_order_ids == ["1"]
     assert fake.broad_cancel_called is False
@@ -209,6 +218,8 @@ def test_apply_cancels_exact_order_and_persists_working_replacement(tmp_path: Pa
 
 
 def test_replacement_fill_persists_lifecycle_close(tmp_path: Path) -> None:
+    _write_shared_truth_for_cancel_replace(tmp_path)
+    _write_pre_action_snapshot_for_cancel_replace(tmp_path)
     fake = _FakeAdapter(fill=_fill())
     ledger_calls: list[dict[str, Any]] = []
 
@@ -222,7 +233,7 @@ def test_replacement_fill_persists_lifecycle_close(tmp_path: Path) -> None:
         return _LedgerResult()
 
     report = run_guarded_managed_exit_cancel_replace(
-        config=_config(tmp_path, apply=True),
+        config=_config(tmp_path, apply=True, skip_shared_truth_write=True),
         now=NOW,
         reconciliation_runner=lambda _config: _reconciliation_report(),
         adapter_factory=lambda **_kwargs: fake,
@@ -236,9 +247,11 @@ def test_replacement_fill_persists_lifecycle_close(tmp_path: Path) -> None:
 
 
 def test_cancel_succeeded_replacement_failed_is_explicit_review_classification(tmp_path: Path) -> None:
+    _write_shared_truth_for_cancel_replace(tmp_path)
+    _write_pre_action_snapshot_for_cancel_replace(tmp_path)
     fake = _FakeAdapter(replacement_error=RuntimeError("submit rejected"))
     report = run_guarded_managed_exit_cancel_replace(
-        config=_config(tmp_path, apply=True),
+        config=_config(tmp_path, apply=True, skip_shared_truth_write=True),
         now=NOW,
         reconciliation_runner=lambda _config: _reconciliation_report(),
         adapter_factory=lambda **_kwargs: fake,
@@ -247,6 +260,74 @@ def test_cancel_succeeded_replacement_failed_is_explicit_review_classification(t
     assert report["classification"] == GUARDED_CANCEL_REPLACE_REPLACEMENT_FAILED
     assert "submit rejected" in report["detail"]
     assert fake.cancelled_order_ids == ["1"]
+
+
+def test_cancel_replace_apply_blocked_without_snapshot(tmp_path: Path) -> None:
+    def _raise_if_called(**_kwargs: Any) -> _FakeAdapter:
+        raise AssertionError("snapshot gate should block before adapter construction")
+
+    report = run_guarded_managed_exit_cancel_replace(
+        config=_config(tmp_path, apply=True),
+        now=NOW,
+        reconciliation_runner=lambda _config: _reconciliation_report(),
+        adapter_factory=_raise_if_called,
+    )
+
+    assert report["classification"] == GUARDED_CANCEL_REPLACE_REVIEW_REQUIRED
+    assert report["pre_action_snapshot_validation"]["classification"] == "PRE_ACTION_BLOCKED_SNAPSHOT_MISSING"
+    assert report["broker_mutation_attempted"] is False
+
+
+def test_cancel_replace_apply_blocked_on_pre_action_plan_mismatch(tmp_path: Path) -> None:
+    _write_shared_truth_for_cancel_replace(tmp_path)
+    _write_pre_action_snapshot_for_cancel_replace(
+        tmp_path,
+        plan_classification=PLAN_MANAGED_ORDER_MODIFY,
+        action_type="MANAGED_ORDER_MODIFY",
+    )
+
+    report = run_guarded_managed_exit_cancel_replace(
+        config=_config(tmp_path, apply=True, skip_shared_truth_write=True),
+        now=NOW,
+        reconciliation_runner=lambda _config: _reconciliation_report(),
+        adapter_factory=lambda **_kwargs: _FakeAdapter(fill=None),
+    )
+
+    assert report["classification"] == GUARDED_CANCEL_REPLACE_REVIEW_REQUIRED
+    assert report["pre_action_snapshot_validation"]["classification"] == "PRE_ACTION_BLOCKED_PLAN_MISMATCH"
+
+
+def test_cancel_replace_apply_blocked_on_pre_action_target_mismatch(tmp_path: Path) -> None:
+    _write_shared_truth_for_cancel_replace(tmp_path)
+    target = _cancel_replace_pre_action_target()
+    target["contract"] = "MNQM6"
+    _write_pre_action_snapshot_for_cancel_replace(tmp_path, target_identity=target)
+
+    report = run_guarded_managed_exit_cancel_replace(
+        config=_config(tmp_path, apply=True, skip_shared_truth_write=True),
+        now=NOW,
+        reconciliation_runner=lambda _config: _reconciliation_report(),
+        adapter_factory=lambda **_kwargs: _FakeAdapter(fill=None),
+    )
+
+    assert report["classification"] == GUARDED_CANCEL_REPLACE_REVIEW_REQUIRED
+    assert report["pre_action_snapshot_validation"]["classification"] == "PRE_ACTION_BLOCKED_TARGET_IDENTITY_MISMATCH"
+
+
+def test_cancel_replace_valid_snapshot_reaches_existing_next_gate(tmp_path: Path) -> None:
+    _write_shared_truth_for_cancel_replace(tmp_path)
+    _write_pre_action_snapshot_for_cancel_replace(tmp_path)
+
+    report = run_guarded_managed_exit_cancel_replace(
+        config=_config(tmp_path, apply=True, skip_shared_truth_write=True),
+        now=NOW,
+        reconciliation_runner=lambda _config: _reconciliation_report(),
+        adapter_factory=lambda **_kwargs: _FailingConnectAdapter(),
+    )
+
+    assert report["classification"] == GUARDED_CANCEL_REPLACE_REPLACEMENT_FAILED
+    assert report["pre_action_snapshot_validation"]["classification"] == PRE_ACTION_SNAPSHOT_VALID
+    assert "next gate reached" in report["detail"]
 
 
 def test_original_order_already_gone_does_not_blind_replace(tmp_path: Path) -> None:
@@ -474,6 +555,78 @@ def _write_shared_truth_for_cancel_replace(
     )
 
 
+def _write_pre_action_snapshot_for_cancel_replace(
+    repo: Path,
+    *,
+    plan_classification: str = PLAN_TARGETED_CANCEL_REPLACE,
+    action_type: str = "TARGETED_CANCEL_REPLACE",
+    target_identity: dict[str, Any] | None = None,
+) -> None:
+    generated_at = NOW.isoformat()
+    snapshot_id = "snapshot-targeted-cancel-replace"
+    generation_id = "generation-targeted-cancel-replace"
+    supervisor_decision_id = "supervisor-targeted-cancel-replace"
+    target = _cancel_replace_pre_action_target() if target_identity is None else target_identity
+    _write_json(
+        repo / "outputs" / "track_b_execution_core" / "control_plane" / "latest_control_plane_snapshot.json",
+        {
+            "generated_at": generated_at,
+            "classification": "CONTROL_PLANE_SNAPSHOT_READY",
+            "control_plane_snapshot_id": snapshot_id,
+            "shared_truth_refresh_generation_id": generation_id,
+            "shared_truth_coherence_status": "COHERENT",
+            "runtime_supervisor_decision_id": supervisor_decision_id,
+            "runtime_supervisor_classification": "SUPERVISOR_CLEANUP_REQUIRED_BEFORE_RUNTIME",
+            "safe_to_start_runtime": False,
+            "live_money_eligible": False,
+        },
+    )
+    _write_json(
+        repo / "outputs" / "track_b_execution_core" / "runtime_supervisor" / "latest_runtime_supervisor_authority.json",
+        {
+            "generated_at": generated_at,
+            "supervisor_decision_id": supervisor_decision_id,
+            "classification": "SUPERVISOR_CLEANUP_REQUIRED_BEFORE_RUNTIME",
+            "live_money_eligible": False,
+        },
+    )
+    _write_json(
+        repo
+        / "outputs"
+        / "track_b_execution_core"
+        / "paper_autonomous_recovery"
+        / "latest_paper_autonomous_recovery_plan.json",
+        {
+            "generated_at": generated_at,
+            "classification": plan_classification,
+            "control_plane_snapshot_id": snapshot_id,
+            "shared_truth_refresh_generation_id": generation_id,
+            "execution_enabled": False,
+            "proposed_actions": [
+                {
+                    "action_id": "targeted_cancel_replace_gc_1",
+                    "action_type": action_type,
+                    "target_identity": target,
+                    "execution_enabled": False,
+                }
+            ],
+        },
+    )
+
+
+def _cancel_replace_pre_action_target() -> dict[str, str]:
+    return {
+        "account_id": "DUM882026",
+        "symbol": "GC",
+        "contract": "GCM6",
+        "con_id": "430360630",
+        "broker_order_id": "1",
+        "perm_id": "614029377",
+        "action": "SELL",
+        "quantity": "1.0",
+    }
+
+
 def _write_json(path: Path, payload: dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
@@ -528,6 +681,14 @@ class _FakeAdapter:
         return self.fill
     def submit_diagnostics(self, submit_attempt_id: str | None = None) -> dict[str, Any]:
         return {}
+
+
+class _FailingConnectAdapter(_FakeAdapter):
+    def __init__(self) -> None:
+        super().__init__(fill=None)
+
+    def connect(self) -> None:
+        raise RuntimeError("next gate reached")
 
 
 def _fill() -> FillEvent:

@@ -96,6 +96,7 @@
       ],
       "recommended_v2_migration": "Add `validate_track_b_pre_action_snapshot(...)` as the first apply-mode gate with expected action TARGETED_CANCEL_REPLACE and exact order/position target identity. Keep dry-run planning without mutation.",
       "severity": "HIGH",
+      "snapshot_gate_status": "SNAPSHOT_GATED_IN_FOLLOW_UP_SLICE",
       "tests_needed": [
         "cancel/replace apply blocks without valid snapshot.",
         "cancel/replace apply blocks on target identity mismatch.",
@@ -115,6 +116,7 @@
       ],
       "recommended_v2_migration": "Move apply mode behind pre-action snapshot validation with expected action MANAGED_ORDER_MODIFY. Keep exact same order id/perm/action/qty checks and add snapshot id to audit artifacts.",
       "severity": "HIGH",
+      "snapshot_gate_status": "SNAPSHOT_GATED_IN_FOLLOW_UP_SLICE",
       "tests_needed": [
         "modify apply blocks without coherent snapshot.",
         "modify apply requires planner action PLAN_MANAGED_ORDER_MODIFY.",
@@ -237,14 +239,14 @@
   ],
   "generated_at": "2026-05-23T20:05:48.626900+00:00",
   "recommended_next_implementation_slice": {
-    "rationale": "These are the shortest path to preventing future autonomous executor or manual tool apply modes from bypassing coherent Control Plane Snapshot validation.",
+    "rationale": "Cancel/replace and modify-in-place are now snapshot-gated. The next shortest path is preventing lower-level broker mutation harnesses from bypassing coherent Control Plane Snapshot validation.",
     "scope": [
-      "SS-LCA-005",
-      "SS-LCA-006",
+      "SS-LCA-001",
+      "SS-LCA-002",
       "SS-LCA-003",
-      "SS-LCA-002"
+      "SS-LCA-004"
     ],
-    "title": "Snapshot-gate mutation-capable broker/order apply paths"
+    "title": "Snapshot-gate lower-level broker mutation entrypoints"
   },
   "repo_root": "/Users/patrick/Dev/MGC-v05l-automation",
   "severity_counts": {
@@ -258,7 +260,7 @@
     "SS-LCA-002",
     "SS-LCA-003",
     "SS-LCA-004",
-    "SS-LCA-005"
+    "SS-LCA-007"
   ],
   "v2_resiliency_backlog": [
     {

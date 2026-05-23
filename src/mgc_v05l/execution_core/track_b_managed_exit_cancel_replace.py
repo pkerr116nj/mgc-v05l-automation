@@ -23,6 +23,7 @@ from .track_b_order_adjustment_planner import (
     DEFAULT_ORDER_ADJUSTMENT_PLAN_ARTIFACT,
     TARGETED_CANCEL_REPLACE_REQUIRED,
 )
+from .track_b_paper_autonomous_recovery_planner import PLAN_TARGETED_CANCEL_REPLACE
 from .track_b_paper_broker_reconciliation import (
     PAPER_ACCOUNT,
     ReconciliationConfig,
@@ -30,6 +31,11 @@ from .track_b_paper_broker_reconciliation import (
 )
 from .track_b_paper_trade_ledger import update_track_b_paper_trade_ledger_from_filled_bridge_result
 from .track_b_position_truth_monitor import DEFAULT_POSITION_TRUTH_ARTIFACT
+from .track_b_pre_action_snapshot_validator import (
+    PRE_ACTION_SNAPSHOT_VALID,
+    TrackBPreActionSnapshotValidatorConfig,
+    validate_track_b_pre_action_snapshot,
+)
 from .track_b_runtime_supervisor_authority import DEFAULT_RUNTIME_SUPERVISOR_AUTHORITY_ARTIFACT
 
 
@@ -105,6 +111,7 @@ class ManagedExitCancelReplaceConfig:
     managed_position_registry_path: Path = DEFAULT_MANAGED_POSITION_REGISTRY_ARTIFACT
     runtime_supervisor_authority_path: Path = DEFAULT_RUNTIME_SUPERVISOR_AUTHORITY_ARTIFACT
     broker_lease_path: Path = DEFAULT_LEASE_ARTIFACT
+    pre_action_snapshot_max_age_seconds: int = 300
 
     @property
     def resolved_output_dir(self) -> Path:
@@ -161,7 +168,27 @@ def run_guarded_managed_exit_cancel_replace(
         shared_truth_evidence=shared_truth_evidence,
     )
     if not config.apply:
+        pre_action_validation = _pre_action_snapshot_validation(config=config, ready=ready, now=actual_now)
+        report["pre_action_snapshot_validation"] = _jsonable(pre_action_validation)
+        report["pre_action_snapshot_required_for_apply"] = True
+        report["pre_action_snapshot_would_block_apply"] = (
+            pre_action_validation.get("classification") != PRE_ACTION_SNAPSHOT_VALID
+        )
         report["detail"] = "Guarded cancel/replace is ready; apply=false so no broker mutation was attempted."
+        _write_report(config, report)
+        return report
+
+    pre_action_validation = _pre_action_snapshot_validation(config=config, ready=ready, now=actual_now)
+    report["pre_action_snapshot_validation"] = _jsonable(pre_action_validation)
+    report["pre_action_snapshot_required_for_apply"] = True
+    if pre_action_validation.get("classification") != PRE_ACTION_SNAPSHOT_VALID:
+        report["classification"] = GUARDED_CANCEL_REPLACE_REVIEW_REQUIRED
+        report["detail"] = (
+            "Pre-action Control Plane Snapshot validation blocked targeted cancel/replace: "
+            f"{pre_action_validation.get('classification')} - {pre_action_validation.get('reason')}"
+        )
+        report["broker_mutation_attempted"] = False
+        report["broker_mutation_performed"] = False
         _write_report(config, report)
         return report
 
@@ -603,6 +630,41 @@ def _shared_truth_cancel_replace_evidence(
             "managed_position_registry": managed_position_agreement,
         },
         "blockers": blockers,
+    }
+
+
+def _pre_action_snapshot_validation(
+    *,
+    config: ManagedExitCancelReplaceConfig,
+    ready: Mapping[str, Any],
+    now: datetime,
+) -> dict[str, Any]:
+    return validate_track_b_pre_action_snapshot(
+        config=TrackBPreActionSnapshotValidatorConfig(repo_root=config.repo_root),
+        expected_plan_classification=PLAN_TARGETED_CANCEL_REPLACE,
+        expected_action_type="TARGETED_CANCEL_REPLACE",
+        expected_target_identity=_pre_action_target_identity(config=config, ready=ready),
+        max_snapshot_age_seconds=int(config.pre_action_snapshot_max_age_seconds),
+        now=now,
+    )
+
+
+def _pre_action_target_identity(*, config: ManagedExitCancelReplaceConfig, ready: Mapping[str, Any]) -> dict[str, Any]:
+    known_order = ready.get("known_order") if isinstance(ready.get("known_order"), Mapping) else {}
+    proposal = ready.get("proposal") if isinstance(ready.get("proposal"), Mapping) else {}
+    cancel_identity = proposal.get("cancel_identity") if isinstance(proposal.get("cancel_identity"), Mapping) else {}
+    return {
+        "account_id": config.account_id or cancel_identity.get("account_id") or known_order.get("account_id"),
+        "symbol": cancel_identity.get("symbol") or known_order.get("symbol"),
+        "contract": cancel_identity.get("contract")
+        or cancel_identity.get("local_symbol")
+        or known_order.get("contract")
+        or known_order.get("local_symbol"),
+        "con_id": cancel_identity.get("con_id") or known_order.get("con_id") or known_order.get("conId"),
+        "broker_order_id": config.broker_order_id,
+        "perm_id": config.perm_id or cancel_identity.get("perm_id") or known_order.get("perm_id"),
+        "action": cancel_identity.get("action") or known_order.get("action"),
+        "quantity": cancel_identity.get("quantity") or known_order.get("quantity"),
     }
 
 
