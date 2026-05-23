@@ -179,6 +179,23 @@ def test_canonical_readiness_dashboard_summary_consumes_artifact() -> None:
         "broker_truth": {"fresh": True, "open_order_count": 0},
         "broker_truth_lease": {"lease_state": "EXPIRED_BLOCK_NEW_ENTRIES", "age_seconds": 23400.0},
         "phase1_reconciliation": {"classification": "TRACK_B_PAPER_BROKER_RECONCILED"},
+        "execution_core_shared_truth": {
+            "available": True,
+            "proof_readiness": {
+                "classification": "MARKET_CLOSED_NO_FRESH_BARS",
+                "phase1_session_reason": "GLOBEX_WEEKEND_HALT",
+            },
+            "classifications": {
+                "Open Order Truth": "NO_OPEN_ORDERS",
+                "Managed Order Registry": "NO_MANAGED_ORDERS",
+                "Order Adjustment Planner": "NO_ACTION_NEEDED",
+                "Position Truth": "CLEAN_FLAT_READY",
+                "Runtime Environment Truth": "RUNTIME_DOWN_CLEAN",
+                "Managed Position Registry": "NO_MANAGED_POSITIONS",
+                "Reconciliation": "TRACK_B_PAPER_BROKER_RECONCILED",
+                "Broker Truth Lease": "ACTIVE",
+            },
+        },
         "live_money_eligible": False,
     }
 
@@ -194,6 +211,56 @@ def test_canonical_readiness_dashboard_summary_consumes_artifact() -> None:
     assert summary["broker_truth"]["fresh"] is True
     assert summary["broker_truth_lease"]["lease_state"] == "EXPIRED_BLOCK_NEW_ENTRIES"
     assert summary["phase1_reconciliation"]["classification"] == "TRACK_B_PAPER_BROKER_RECONCILED"
+    assert summary["shared_truth"]["projection_only"] is True
+    assert summary["shared_truth"]["not_routing_authority"] is True
+    assert summary["shared_truth"]["proof_readiness"] == "MARKET_CLOSED_NO_FRESH_BARS"
+    assert summary["shared_truth"]["operator_message"] == "Market closed/no fresh bars expected"
+    assert summary["shared_truth"]["open_order_truth"] == "NO_OPEN_ORDERS"
+    assert summary["shared_truth"]["order_adjustment_planner"] == "NO_ACTION_NEEDED"
+
+
+def test_canonical_readiness_dashboard_summary_surfaces_attention_and_suspicious_order_truth() -> None:
+    payload = {
+        "schema_version": "track_b_canonical_readiness_v1",
+        "generated_at": "2026-05-18T12:00:00+00:00",
+        "paper_only": True,
+        "canonical_readiness": "NOT_READY_DEPENDENCY",
+        "readiness_reasons": ["blocked"],
+        "readiness_blockers": [{"code": "position_truth_not_clean"}],
+        "readiness_warnings": [],
+        "operator_action_required": True,
+        "root_guard_summary": {"root_match": True},
+        "broker_truth": {"fresh": True},
+        "broker_truth_lease": {"lease_state": "ACTIVE"},
+        "phase1_reconciliation": {"classification": "TRACK_B_PAPER_BROKER_RECONCILED"},
+        "execution_core_shared_truth": {
+            "available": True,
+            "proof_readiness": {"classification": "SHARED_TRUTH_BLOCKED"},
+            "classifications": {
+                "Open Order Truth": "SUSPICIOUS_ORDER_STATE",
+                "Managed Order Registry": "CLOSE_ORDER_SUSPICIOUS",
+                "Order Adjustment Planner": "REVIEW_REQUIRED_SUSPICIOUS_STATE",
+                "Position Truth": "ATTENTION_REQUIRED",
+                "Runtime Environment Truth": "RUNTIME_DOWN_WITH_BROKER_EXPOSURE",
+                "Managed Position Registry": "REVIEW_REQUIRED",
+                "Reconciliation": "BROKER_TRUTH_SETTLEMENT_CONTRADICTORY_STATE",
+                "Broker Truth Lease": "INVALIDATED_CONTRADICTION",
+            },
+        },
+        "live_money_eligible": False,
+    }
+
+    summary = _canonical_readiness_dashboard_summary(
+        payload,
+        Path("outputs/operator_dashboard/runtime/latest_canonical_readiness.json"),
+    )
+
+    assert summary["shared_truth"]["position_truth"] == "ATTENTION_REQUIRED"
+    assert summary["shared_truth"]["open_order_truth"] == "SUSPICIOUS_ORDER_STATE"
+    assert summary["shared_truth"]["managed_order_registry"] == "CLOSE_ORDER_SUSPICIOUS"
+    assert summary["shared_truth"]["order_adjustment_planner"] == "REVIEW_REQUIRED_SUSPICIOUS_STATE"
+    assert summary["shared_truth"]["runtime_environment_truth"] == "RUNTIME_DOWN_WITH_BROKER_EXPOSURE"
+    assert summary["shared_truth"]["not_routing_authority"] is True
 
 
 def _write_lane_bar_authority_db(

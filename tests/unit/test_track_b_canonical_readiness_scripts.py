@@ -64,6 +64,15 @@ def test_status_script_produces_canonical_readiness_without_dashboard_ownership(
     assert "merge_canonical_readiness_status" in script
     assert "canonical_readiness_exit_for_classification" in script
     assert "status[\"canonical_readiness\"]" in script
+    assert "status[\"shared_truth\"]" in script
+    assert "Market closed/no fresh bars expected" in script
+    assert "\"source_authority\": \"execution_core_authority\"" in script
+    assert "\"projection_only\": True" in script
+    assert "shared_truth_open_order_truth" in script
+    assert "shared_truth_order_adjustment_planner" in script
+    assert "latest_track_b_position_truth.json" not in script
+    assert "latest_track_b_open_order_truth.json" not in script
+    assert "latest_track_b_managed_orders.json" not in script
     assert "status[\"lane_quarantine\"]" in script
     assert script.index("refresh_canonical_readiness") < script.index("fetch_health_snapshot")
 
@@ -173,6 +182,8 @@ def test_launch_script_passes_canonical_readiness_paths_to_status_script() -> No
     assert "refresh_broker_truth_lease_for_launch" in script
     assert script.index("refresh_operator_readiness_for_launch || true") < script.index("refresh_broker_truth_lease_for_launch || true")
     assert "broker_truth_lease_state" in script
+    assert "shared_truth_open_order_truth" in script
+    assert "shared_truth_order_adjustment_planner" in script
     assert "Headless supervised paper host is READY_SUBMIT_CAPABLE." in script
 
 

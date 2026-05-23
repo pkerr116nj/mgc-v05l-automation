@@ -1408,12 +1408,20 @@ class OperatorDashboardService:
                         runtime_values["diagnostic_only_warning_count"] = readiness_warning_presentation["diagnostic_only_count"]
                     operator_surface_runtime["broker_truth_lease"] = canonical_readiness_summary.get("broker_truth_lease") or {}
                     operator_surface_runtime["broker_truth"] = canonical_readiness_summary.get("broker_truth") or {}
+                    operator_surface_runtime["shared_truth"] = canonical_readiness_summary.get("shared_truth") or {}
                     operator_surface_runtime["operator_readiness_refresh_status"] = operator_readiness_refresh_status
                     operator_surface_runtime["self_healing_health"] = self_healing_health
                     truth = operator_surface_runtime.get("authoritative_runtime_truth")
                     if isinstance(truth, dict):
                         broker_truth_lease = canonical_readiness_summary.get("broker_truth_lease") or {}
+                        shared_truth = canonical_readiness_summary.get("shared_truth") or {}
                         truth["canonical_readiness"] = canonical_readiness_summary["canonical_readiness"]
+                        truth["shared_truth"] = shared_truth
+                        truth["proof_readiness_classification"] = shared_truth.get("proof_readiness")
+                        truth["phase1_session_reason"] = shared_truth.get("phase1_session_reason")
+                        truth["market_closed_no_fresh_bars_expected"] = shared_truth.get(
+                            "market_closed_no_fresh_bars_expected"
+                        )
                         truth["warning_count"] = (
                             readiness_warning_presentation["non_blocking_count"]
                             + readiness_warning_presentation["optional_service_degraded_count"]
@@ -18001,6 +18009,7 @@ def _canonical_readiness_dashboard_summary(payload: dict[str, Any], path: Path) 
             "broker_truth": {},
             "broker_truth_lease": {},
             "phase1_reconciliation": {},
+            "shared_truth": _canonical_readiness_shared_truth_summary({}),
         }
     state = str(payload.get("canonical_readiness") or payload.get("state") or "NOT_READY_CONFIG")
     return {
@@ -18017,9 +18026,40 @@ def _canonical_readiness_dashboard_summary(payload: dict[str, Any], path: Path) 
         "broker_truth": dict(payload.get("broker_truth") or {}),
         "broker_truth_lease": dict(payload.get("broker_truth_lease") or {}),
         "phase1_reconciliation": dict(payload.get("phase1_reconciliation") or {}),
+        "shared_truth": _canonical_readiness_shared_truth_summary(
+            dict(payload.get("execution_core_shared_truth") or {})
+        ),
         "ready_submit_capable": payload.get("ready_submit_capable") is True,
         "paper_only": payload.get("paper_only") is True,
         "live_money_eligible": payload.get("live_money_eligible") is True,
+    }
+
+
+def _canonical_readiness_shared_truth_summary(payload: dict[str, Any]) -> dict[str, Any]:
+    proof_readiness = dict(payload.get("proof_readiness") or {})
+    classifications = dict(payload.get("classifications") or {})
+    artifact_paths = dict(payload.get("artifact_paths") or {})
+    market_closed = proof_readiness.get("classification") == "MARKET_CLOSED_NO_FRESH_BARS"
+    return {
+        "available": bool(payload.get("available") is True or classifications or proof_readiness),
+        "source": "canonical_readiness_execution_core_shared_truth",
+        "source_authority": "execution_core_authority",
+        "projection_only": True,
+        "dashboard_projection_authority": False,
+        "not_routing_authority": True,
+        "proof_readiness": proof_readiness.get("classification"),
+        "open_order_truth": classifications.get("Open Order Truth"),
+        "managed_order_registry": classifications.get("Managed Order Registry"),
+        "order_adjustment_planner": classifications.get("Order Adjustment Planner"),
+        "position_truth": classifications.get("Position Truth"),
+        "runtime_environment_truth": classifications.get("Runtime Environment Truth"),
+        "managed_position_registry": classifications.get("Managed Position Registry"),
+        "reconciliation": classifications.get("Reconciliation"),
+        "broker_truth_lease": classifications.get("Broker Truth Lease"),
+        "phase1_session_reason": proof_readiness.get("phase1_session_reason"),
+        "market_closed_no_fresh_bars_expected": market_closed,
+        "operator_message": "Market closed/no fresh bars expected" if market_closed else None,
+        "artifact_paths": artifact_paths,
     }
 
 

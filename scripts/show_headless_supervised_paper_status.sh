@@ -223,6 +223,14 @@ for key in (
     "broker_truth_lease_state",
     "broker_truth_lease_age_seconds",
     "broker_truth_lease_entry_seconds_remaining",
+    "proof_readiness_classification",
+    "shared_truth_open_order_truth",
+    "shared_truth_managed_order_registry",
+    "shared_truth_order_adjustment_planner",
+    "shared_truth_position_truth",
+    "shared_truth_runtime_environment_truth",
+    "shared_truth_managed_position_registry",
+    "shared_truth_broker_lease",
     "reconciliation_state",
     "eligible_lane_count",
     "quarantine_count",
@@ -271,6 +279,30 @@ status["broker_truth_lease_age_seconds"] = broker_truth_lease.get("age_seconds")
 status["broker_truth_lease_entry_seconds_remaining"] = broker_truth_lease.get("entry_seconds_remaining")
 status["broker_truth_lease_exit_code"] = int(sys.argv[4])
 status["operator_readiness_refresh_exit_code"] = int(sys.argv[5])
+shared_truth = readiness.get("execution_core_shared_truth") or {}
+proof_readiness = shared_truth.get("proof_readiness") or {}
+shared_truth_classifications = shared_truth.get("classifications") or {}
+market_closed = proof_readiness.get("classification") == "MARKET_CLOSED_NO_FRESH_BARS"
+status["shared_truth"] = {
+    "source": "canonical_readiness_execution_core_shared_truth",
+    "source_authority": "execution_core_authority",
+    "projection_only": True,
+    "dashboard_projection_authority": False,
+    "not_routing_authority": True,
+    "proof_readiness": proof_readiness.get("classification"),
+    "open_order_truth": shared_truth_classifications.get("Open Order Truth"),
+    "managed_order_registry": shared_truth_classifications.get("Managed Order Registry"),
+    "order_adjustment_planner": shared_truth_classifications.get("Order Adjustment Planner"),
+    "position_truth": shared_truth_classifications.get("Position Truth"),
+    "runtime_environment_truth": shared_truth_classifications.get("Runtime Environment Truth"),
+    "managed_position_registry": shared_truth_classifications.get("Managed Position Registry"),
+    "reconciliation": shared_truth_classifications.get("Reconciliation"),
+    "broker_truth_lease": shared_truth_classifications.get("Broker Truth Lease"),
+    "phase1_session_reason": proof_readiness.get("phase1_session_reason"),
+    "market_closed_no_fresh_bars_expected": market_closed,
+    "operator_message": "Market closed/no fresh bars expected" if market_closed else None,
+    "artifact_paths": shared_truth.get("artifact_paths") or {},
+}
 status["eligible_lane_count"] = int((readiness.get("runtime") or {}).get("eligible_lane_count") or 0)
 status["quarantine_count"] = int((readiness.get("lane_quarantine") or {}).get("quarantine_count") or 0)
 status["lane_quarantine"] = readiness.get("lane_quarantine") or {}
