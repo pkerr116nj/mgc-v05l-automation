@@ -74,6 +74,59 @@ def _clean_inputs() -> dict:
     }
 
 
+def _shared_truth_evidence(
+    *,
+    proof_classification: str = "READY_FOR_PROOF",
+    open_order_truth: str = "NO_OPEN_ORDERS",
+    managed_order_registry: str = "NO_MANAGED_ORDERS",
+    order_adjustment_planner: str = "NO_ACTION_NEEDED",
+    position_truth: str = "CLEAN_FLAT_READY",
+    runtime_environment_truth: str = "RUNTIME_ACTIVE_TRADE_CAPABLE",
+    managed_position_registry: str = "NO_MANAGED_POSITIONS",
+    reconciliation: str = "TRACK_B_PAPER_BROKER_RECONCILED",
+    broker_truth_lease: str = "ACTIVE",
+    phase1_reason: str | None = None,
+) -> dict:
+    return {
+        "available": True,
+        "evidence_only": True,
+        "readiness_authority": True,
+        "source": "execution_core_authority",
+        "proof_readiness": {
+            "available": True,
+            "classification": proof_classification,
+            "ready_for_proof": proof_classification == "READY_FOR_PROOF",
+            "primary_blocker": {
+                "code": "phase1_mgc_1m_not_ready",
+                "detail": "Phase-1 MGC 1m runtime candles are not proof-ready.",
+            }
+            if proof_classification in {"MARKET_CLOSED_NO_FRESH_BARS", "PHASE1_DATA_UNHEALTHY"}
+            else {},
+            "secondary_warnings": [],
+            "broker_lease_warning": {
+                "lease_state": broker_truth_lease,
+                "code": "broker_truth_lease_not_clean_for_runtime_start",
+                "detail": f"Broker Truth Lease is {broker_truth_lease}.",
+            }
+            if broker_truth_lease != "ACTIVE"
+            else {},
+            "phase1_session_reason": phase1_reason,
+            "blockers": [],
+        },
+        "classifications": {
+            "Open Order Truth": open_order_truth,
+            "Managed Order Registry": managed_order_registry,
+            "Order Adjustment Planner": order_adjustment_planner,
+            "Position Truth": position_truth,
+            "Runtime Environment Truth": runtime_environment_truth,
+            "Managed Position Registry": managed_position_registry,
+            "Reconciliation": reconciliation,
+            "Broker Truth Lease": broker_truth_lease,
+        },
+        "live_money_eligible": False,
+    }
+
+
 def _phase1_listener_status(*, rows: list[dict], generated_at: str = "2026-05-18T11:59:50+00:00", **overrides: object) -> dict:
     payload = {
         "schema_version": "phase1_databento_live_listener_status_v1",
@@ -138,6 +191,106 @@ def test_clean_submit_capable_state_returns_ready_submit_capable() -> None:
     assert result["ready_submit_capable"] is True
     assert result["readiness_blockers"] == []
     assert result["runtime_truth_heartbeat"] == {}
+
+
+def test_clean_shared_truth_and_fresh_phase1_preserve_submit_capable_readiness() -> None:
+    inputs = _clean_inputs()
+    inputs["execution_core_shared_truth"] = _shared_truth_evidence()
+
+    result = classify_canonical_readiness(inputs)
+
+    assert result["canonical_readiness"] == "READY_SUBMIT_CAPABLE"
+    assert result["ready_submit_capable"] is True
+    assert result["execution_core_shared_truth"]["classifications"]["Position Truth"] == "CLEAN_FLAT_READY"
+    assert result["readiness_blockers"] == []
+
+
+def test_closed_market_proof_readiness_blocks_with_clear_market_evidence() -> None:
+    inputs = _clean_inputs()
+    inputs["execution_core_shared_truth"] = _shared_truth_evidence(
+        proof_classification="MARKET_CLOSED_NO_FRESH_BARS",
+        phase1_reason="GLOBEX_WEEKEND_HALT",
+    )
+
+    result = classify_canonical_readiness(inputs)
+
+    assert result["canonical_readiness"] == "NOT_READY_DEPENDENCY"
+    assert result["readiness_blockers"][0]["code"] == "MARKET_CLOSED_NO_FRESH_BARS"
+    assert result["readiness_blockers"][0]["source"] == "execution_core_proof_readiness"
+
+
+def test_degraded_shared_broker_lease_blocks_distinct_from_reconciliation() -> None:
+    inputs = _clean_inputs()
+    inputs["execution_core_shared_truth"] = _shared_truth_evidence(
+        broker_truth_lease="ACTIVE_DEGRADED_REFRESH_FAILING",
+    )
+
+    result = classify_canonical_readiness(inputs)
+
+    assert result["canonical_readiness"] == "NOT_READY_DEPENDENCY"
+    assert result["readiness_blockers"][0]["code"] == "broker_truth_lease_degraded_refresh_failing"
+    assert result["readiness_blockers"][0]["source"] == "execution_core_broker_truth_lease"
+    assert result["phase1_reconciliation"]["classification"] == "TRACK_B_PAPER_BROKER_RECONCILED"
+
+
+def test_broker_exposure_blocks_via_position_truth() -> None:
+    inputs = _clean_inputs()
+    inputs["execution_core_shared_truth"] = _shared_truth_evidence(position_truth="ATTENTION_REQUIRED")
+
+    result = classify_canonical_readiness(inputs)
+
+    assert result["canonical_readiness"] == "NOT_READY_DEPENDENCY"
+    assert result["readiness_blockers"][0]["code"] == "position_truth_not_clean"
+    assert "ATTENTION_REQUIRED" in result["readiness_blockers"][0]["detail"]
+
+
+def test_open_order_blocks_via_open_order_truth_before_legacy_reconstruction() -> None:
+    inputs = _clean_inputs()
+    inputs["execution_core_shared_truth"] = _shared_truth_evidence(
+        open_order_truth="UNKNOWN_OPEN_ORDER",
+        managed_order_registry="WORKING_CLOSE_ORDER",
+    )
+
+    result = classify_canonical_readiness(inputs)
+
+    assert result["canonical_readiness"] == "NOT_READY_DEPENDENCY"
+    assert result["readiness_blockers"][0]["code"] == "open_order_truth_not_clean"
+    assert result["readiness_blockers"][0]["source"] == "execution_core_shared_truth"
+
+
+def test_order_adjustment_planner_review_required_blocks_submit_capable_readiness() -> None:
+    inputs = _clean_inputs()
+    inputs["execution_core_shared_truth"] = _shared_truth_evidence(
+        order_adjustment_planner="REVIEW_REQUIRED_SUSPICIOUS_STATE",
+    )
+
+    result = classify_canonical_readiness(inputs)
+
+    assert result["canonical_readiness"] == "NOT_READY_DEPENDENCY"
+    assert result["readiness_blockers"][0]["code"] == "order_adjustment_planner_not_clean"
+    assert "REVIEW_REQUIRED_SUSPICIOUS_STATE" in result["readiness_blockers"][0]["detail"]
+
+
+def test_bad_runtime_environment_truth_blocks_submit_capable_readiness() -> None:
+    inputs = _clean_inputs()
+    inputs["execution_core_shared_truth"] = _shared_truth_evidence(
+        runtime_environment_truth="DUPLICATE_RUNTIME_WRITERS",
+    )
+
+    result = classify_canonical_readiness(inputs)
+
+    assert result["canonical_readiness"] == "NOT_READY_DEPENDENCY"
+    assert result["readiness_blockers"][0]["code"] == "runtime_environment_truth_not_clean"
+
+
+def test_dashboard_position_truth_projection_is_not_canonical_authority() -> None:
+    source_path = Path("src/mgc_v05l/execution_core/track_b_readiness_state.py")
+    source = source_path.read_text(encoding="utf-8")
+
+    assert "latest_track_b_position_truth.json" not in source
+    assert "latest_track_b_open_order_truth.json" not in source
+    assert "latest_track_b_managed_orders.json" not in source
+    assert "latest_track_b_order_adjustment_plan.json" not in source
 
 
 def test_runtime_truth_heartbeat_is_evidence_without_readiness_authority() -> None:

@@ -87,6 +87,9 @@ def compact_readiness_summary(payload: Mapping[str, Any]) -> dict[str, Any]:
     broker_truth = _mapping(payload.get("broker_truth"))
     broker_truth_lease = _mapping(payload.get("broker_truth_lease"))
     phase1_reconciliation = _mapping(payload.get("phase1_reconciliation"))
+    execution_core_shared_truth = _mapping(payload.get("execution_core_shared_truth"))
+    shared_truth_classifications = _mapping(execution_core_shared_truth.get("classifications"))
+    proof_readiness = _mapping(execution_core_shared_truth.get("proof_readiness"))
     runtime = _mapping(payload.get("runtime"))
     lane_quarantine = _mapping(payload.get("lane_quarantine"))
     root_guard = _mapping(payload.get("root_guard_summary"))
@@ -100,6 +103,14 @@ def compact_readiness_summary(payload: Mapping[str, Any]) -> dict[str, Any]:
         "broker_truth_lease_state": broker_truth_lease.get("lease_state") or "BROKER_TRUTH_LEASE_MISSING",
         "broker_truth_lease_age_seconds": broker_truth_lease.get("age_seconds"),
         "broker_truth_lease_entry_seconds_remaining": broker_truth_lease.get("entry_seconds_remaining"),
+        "proof_readiness_classification": proof_readiness.get("classification"),
+        "shared_truth_open_order_truth": shared_truth_classifications.get("Open Order Truth"),
+        "shared_truth_managed_order_registry": shared_truth_classifications.get("Managed Order Registry"),
+        "shared_truth_order_adjustment_planner": shared_truth_classifications.get("Order Adjustment Planner"),
+        "shared_truth_position_truth": shared_truth_classifications.get("Position Truth"),
+        "shared_truth_runtime_environment_truth": shared_truth_classifications.get("Runtime Environment Truth"),
+        "shared_truth_managed_position_registry": shared_truth_classifications.get("Managed Position Registry"),
+        "shared_truth_broker_lease": shared_truth_classifications.get("Broker Truth Lease"),
         "reconciliation_state": phase1_reconciliation.get("classification")
         or "TRACK_B_PAPER_BROKER_RECONCILIATION_UNKNOWN",
         "eligible_lane_count": int(runtime.get("eligible_lane_count") or 0),
@@ -120,6 +131,14 @@ def print_summary(summary: Mapping[str, Any], *, as_json: bool) -> None:
         "broker_truth_lease_state",
         "broker_truth_lease_age_seconds",
         "broker_truth_lease_entry_seconds_remaining",
+        "proof_readiness_classification",
+        "shared_truth_open_order_truth",
+        "shared_truth_managed_order_registry",
+        "shared_truth_order_adjustment_planner",
+        "shared_truth_position_truth",
+        "shared_truth_runtime_environment_truth",
+        "shared_truth_managed_position_registry",
+        "shared_truth_broker_lease",
         "reconciliation_state",
         "eligible_lane_count",
         "quarantine_count",

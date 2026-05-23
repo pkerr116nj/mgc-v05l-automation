@@ -52,6 +52,30 @@ DEFAULT_LIFECYCLE_STATUS_ARTIFACT = (
 DEFAULT_ORDER_STATE_ARTIFACT = (
     Path("outputs") / "track_b_execution_core" / "paper_trade_ledger" / "latest_track_b_paper_trade_summary.json"
 )
+DEFAULT_PROOF_READINESS_ARTIFACT = (
+    Path("outputs")
+    / "track_b_execution_core"
+    / "proof_readiness"
+    / "latest_track_b_paper_proof_readiness.json"
+)
+DEFAULT_OPEN_ORDER_TRUTH_ARTIFACT = (
+    Path("outputs") / "track_b_execution_core" / "open_order_truth" / "latest_open_order_truth.json"
+)
+DEFAULT_MANAGED_ORDER_REGISTRY_ARTIFACT = (
+    Path("outputs") / "track_b_execution_core" / "managed_orders" / "latest_managed_orders.json"
+)
+DEFAULT_ORDER_ADJUSTMENT_PLAN_ARTIFACT = (
+    Path("outputs") / "track_b_execution_core" / "managed_orders" / "latest_order_adjustment_plan.json"
+)
+DEFAULT_POSITION_TRUTH_ARTIFACT = (
+    Path("outputs") / "track_b_execution_core" / "position_truth" / "latest_position_truth.json"
+)
+DEFAULT_RUNTIME_ENVIRONMENT_TRUTH_ARTIFACT = (
+    Path("outputs") / "track_b_execution_core" / "runtime_truth" / "latest_runtime_environment_truth.json"
+)
+DEFAULT_MANAGED_POSITION_REGISTRY_ARTIFACT = (
+    Path("outputs") / "track_b_execution_core" / "managed_positions" / "latest_managed_positions.json"
+)
 CANONICAL_READINESS_STATES = {
     "READY_SUBMIT_CAPABLE",
     "READY_OBSERVATION_ONLY",
@@ -67,6 +91,7 @@ MARKET_DATA_FRESHNESS_DEFAULT_SECONDS = 180.0
 MARKET_DATA_REQUIRED_SOURCE = "DATABENTO_REALTIME_PHASE1"
 BROKER_TRUTH_LEASE_READY_STATES = {"ACTIVE", "ACTIVE_DEGRADED_REFRESH_FAILING"}
 BROKER_TRUTH_LEASE_EXPIRED_STATES = {"EXPIRED_BLOCK_NEW_ENTRIES", "EXPIRED_EXITS_ONLY"}
+MARKET_CLOSED_NO_FRESH_BARS = "MARKET_CLOSED_NO_FRESH_BARS"
 
 
 def build_canonical_readiness(
@@ -110,6 +135,7 @@ def classify_canonical_readiness(inputs: Mapping[str, Any]) -> dict[str, Any]:
     root_guard = _mapping(inputs.get("root_guard_summary"))
     broker_truth = _mapping(inputs.get("broker_truth"))
     broker_truth_lease = _mapping(inputs.get("broker_truth_lease"))
+    execution_core_shared_truth = _mapping(inputs.get("execution_core_shared_truth"))
     latest_attempt = _mapping(broker_truth.get("latest_attempt_status"))
     reconciliation = _mapping(inputs.get("phase1_reconciliation"))
     runtime = _mapping(inputs.get("runtime"))
@@ -156,6 +182,7 @@ def classify_canonical_readiness(inputs: Mapping[str, Any]) -> dict[str, Any]:
         or _bool(broker_truth.get("live_money_eligible"))
         or _bool(broker_truth_lease.get("live_money_eligible"))
         or _bool(reconciliation.get("live_money_eligible"))
+        or _bool(execution_core_shared_truth.get("live_money_eligible"))
     ):
         block(
             "live_money_eligible_true",
@@ -165,6 +192,29 @@ def classify_canonical_readiness(inputs: Mapping[str, Any]) -> dict[str, Any]:
         return _readiness_result(
             generated_at=generated_at,
             state="NOT_READY_CONFIG",
+            reasons=reasons,
+            blockers=blockers,
+            warnings=warnings,
+            inputs=inputs,
+        )
+
+    shared_truth_decision = _execution_core_shared_truth_decision(execution_core_shared_truth)
+    for warning in shared_truth_decision["warnings"]:
+        warn(
+            str(warning.get("code") or "execution_core_shared_truth_warning"),
+            str(warning.get("detail") or "Execution-core shared truth warning."),
+            source=str(warning.get("source") or "execution_core_shared_truth"),
+        )
+    if shared_truth_decision["blockers"]:
+        primary = shared_truth_decision["blockers"][0]
+        block(
+            str(primary.get("code") or "execution_core_shared_truth_blocked"),
+            str(primary.get("detail") or "Execution-core shared truth blocked submit-capable readiness."),
+            source=str(primary.get("source") or "execution_core_shared_truth"),
+        )
+        return _readiness_result(
+            generated_at=generated_at,
+            state=str(primary.get("state") or "NOT_READY_DEPENDENCY"),
             reasons=reasons,
             blockers=blockers,
             warnings=warnings,
@@ -467,6 +517,7 @@ def build_readiness_inputs(
         repo_root=repo_root,
         now=now,
     )
+    execution_core_shared_truth = _execution_core_shared_truth_input(artifacts, now=now)
     submit_bridge = _submit_bridge_input(repo_root, operator_status, _mapping(artifacts.get("live_timing_summary")))
     backend = _backend_input(_mapping(artifacts.get("dashboard_health")), root_guard)
     live_money_eligible = any(
@@ -479,6 +530,7 @@ def build_readiness_inputs(
             submit_bridge,
             runtime,
             runtime_truth_heartbeat,
+            execution_core_shared_truth,
         )
         if isinstance(source, Mapping)
     )
@@ -495,6 +547,7 @@ def build_readiness_inputs(
         "broker_truth": broker_truth,
         "broker_truth_lease": broker_truth_lease,
         "phase1_reconciliation": reconciliation,
+        "execution_core_shared_truth": execution_core_shared_truth,
         "market_data": market_data,
         "lane_quarantine": lane_quarantine,
         "submit_bridge": submit_bridge,
@@ -607,6 +660,13 @@ def _load_readiness_artifacts(repo_root: Path) -> dict[str, Any]:
         "paper_runtime_truth": _read_json(repo_root / DEFAULT_PAPER_RUNTIME_TRUTH_ARTIFACT),
         "lifecycle_status": _read_json(repo_root / DEFAULT_LIFECYCLE_STATUS_ARTIFACT),
         "order_state": _read_json(repo_root / DEFAULT_ORDER_STATE_ARTIFACT),
+        "proof_readiness": _read_json(repo_root / DEFAULT_PROOF_READINESS_ARTIFACT),
+        "open_order_truth": _read_json(repo_root / DEFAULT_OPEN_ORDER_TRUTH_ARTIFACT),
+        "managed_order_registry": _read_json(repo_root / DEFAULT_MANAGED_ORDER_REGISTRY_ARTIFACT),
+        "order_adjustment_plan": _read_json(repo_root / DEFAULT_ORDER_ADJUSTMENT_PLAN_ARTIFACT),
+        "position_truth": _read_json(repo_root / DEFAULT_POSITION_TRUTH_ARTIFACT),
+        "runtime_environment_truth": _read_json(repo_root / DEFAULT_RUNTIME_ENVIRONMENT_TRUTH_ARTIFACT),
+        "managed_position_registry": _read_json(repo_root / DEFAULT_MANAGED_POSITION_REGISTRY_ARTIFACT),
     }
 
 
@@ -686,6 +746,206 @@ def _write_refreshed_broker_truth_lease_if_present(*, repo_root: Path, payload: 
     lease_path = repo_root / DEFAULT_BROKER_TRUTH_LEASE_ARTIFACT
     lease_path.parent.mkdir(parents=True, exist_ok=True)
     _atomic_write_json(lease_path, lease)
+
+
+def _execution_core_shared_truth_input(artifacts: Mapping[str, Any], *, now: datetime) -> dict[str, Any]:
+    proof_readiness = _mapping(artifacts.get("proof_readiness"))
+    open_order_truth = _mapping(artifacts.get("open_order_truth"))
+    managed_order_registry = _mapping(artifacts.get("managed_order_registry"))
+    order_adjustment_plan = _mapping(artifacts.get("order_adjustment_plan"))
+    position_truth = _mapping(artifacts.get("position_truth"))
+    runtime_environment_truth = _mapping(artifacts.get("runtime_environment_truth"))
+    managed_position_registry = _mapping(artifacts.get("managed_position_registry"))
+    proof_classifications = _mapping(proof_readiness.get("shared_truth_classifications"))
+    classifications = {
+        "Open Order Truth": proof_classifications.get("Open Order Truth")
+        or _classification(open_order_truth),
+        "Managed Order Registry": proof_classifications.get("Managed Order Registry")
+        or _classification(managed_order_registry),
+        "Order Adjustment Planner": _classification(order_adjustment_plan),
+        "Position Truth": proof_classifications.get("Position Truth")
+        or _classification(position_truth, "overall_classification", "classification"),
+        "Runtime Environment Truth": proof_classifications.get("Runtime Environment Truth")
+        or _classification(runtime_environment_truth),
+        "Managed Position Registry": proof_classifications.get("Managed Position Registry")
+        or _classification(managed_position_registry),
+        "Reconciliation": proof_classifications.get("Reconciliation"),
+        "Broker Truth Lease": proof_classifications.get("Broker Truth Lease"),
+    }
+    available = any(
+        bool(payload)
+        for payload in (
+            proof_readiness,
+            open_order_truth,
+            managed_order_registry,
+            order_adjustment_plan,
+            position_truth,
+            runtime_environment_truth,
+            managed_position_registry,
+        )
+    )
+    return {
+        "available": available,
+        "evidence_only": True,
+        "readiness_authority": True,
+        "source": "execution_core_authority",
+        "generated_at": proof_readiness.get("generated_at"),
+        "proof_readiness": {
+            "available": bool(proof_readiness),
+            "classification": proof_readiness.get("classification"),
+            "ready_for_proof": proof_readiness.get("ready_for_proof") is True,
+            "primary_blocker": _mapping(proof_readiness.get("primary_blocker")),
+            "secondary_warnings": list(proof_readiness.get("secondary_warnings") or []),
+            "broker_lease_warning": _mapping(proof_readiness.get("broker_lease_warning")),
+            "phase1_session_reason": proof_readiness.get("phase1_session_reason"),
+            "blockers": list(proof_readiness.get("blockers") or []),
+            "age_seconds": _age_seconds(proof_readiness.get("generated_at"), now),
+        },
+        "classifications": {key: value for key, value in classifications.items() if value},
+        "artifact_paths": {
+            "proof_readiness": str(DEFAULT_PROOF_READINESS_ARTIFACT),
+            "open_order_truth": str(DEFAULT_OPEN_ORDER_TRUTH_ARTIFACT),
+            "managed_order_registry": str(DEFAULT_MANAGED_ORDER_REGISTRY_ARTIFACT),
+            "order_adjustment_plan": str(DEFAULT_ORDER_ADJUSTMENT_PLAN_ARTIFACT),
+            "position_truth": str(DEFAULT_POSITION_TRUTH_ARTIFACT),
+            "runtime_environment_truth": str(DEFAULT_RUNTIME_ENVIRONMENT_TRUTH_ARTIFACT),
+            "managed_position_registry": str(DEFAULT_MANAGED_POSITION_REGISTRY_ARTIFACT),
+        },
+        "live_money_eligible": proof_readiness.get("live_money_eligible") is True,
+    }
+
+
+def _execution_core_shared_truth_decision(evidence: Mapping[str, Any]) -> dict[str, list[dict[str, Any]]]:
+    if not evidence or evidence.get("available") is not True:
+        return {"blockers": [], "warnings": []}
+
+    proof = _mapping(evidence.get("proof_readiness"))
+    proof_classification = str(proof.get("classification") or "")
+    classifications = _mapping(evidence.get("classifications"))
+    blockers: list[dict[str, Any]] = []
+    warnings: list[dict[str, Any]] = []
+
+    broker_lease_warning = _mapping(proof.get("broker_lease_warning"))
+    for warning in list(proof.get("secondary_warnings") or []):
+        if isinstance(warning, Mapping):
+            warnings.append(
+                {
+                    "code": warning.get("code") or "proof_readiness_warning",
+                    "detail": warning.get("detail") or "Proof-readiness warning.",
+                    "source": "execution_core_proof_readiness",
+                }
+            )
+    if broker_lease_warning:
+        warnings.append(
+            {
+                "code": broker_lease_warning.get("code") or "broker_truth_lease_warning",
+                "detail": broker_lease_warning.get("detail") or "Broker Truth Lease warning.",
+                "source": "execution_core_broker_truth_lease",
+            }
+        )
+
+    if proof_classification == MARKET_CLOSED_NO_FRESH_BARS:
+        blockers.append(
+            {
+                "code": MARKET_CLOSED_NO_FRESH_BARS,
+                "detail": "Phase-1 runtime candles are stale because the market/session is closed; submit-capable PAPER readiness remains blocked.",
+                "source": "execution_core_proof_readiness",
+                "state": "NOT_READY_DEPENDENCY",
+            }
+        )
+        return {"blockers": blockers, "warnings": warnings}
+
+    lease_state = str(classifications.get("Broker Truth Lease") or broker_lease_warning.get("lease_state") or "")
+    if lease_state == "ACTIVE_DEGRADED_REFRESH_FAILING":
+        blockers.append(
+            {
+                "code": "broker_truth_lease_degraded_refresh_failing",
+                "detail": "Broker Truth Lease is ACTIVE_DEGRADED_REFRESH_FAILING; current broker truth cannot be trusted for submit-capable readiness.",
+                "source": "execution_core_broker_truth_lease",
+                "state": "NOT_READY_DEPENDENCY",
+            }
+        )
+        return {"blockers": blockers, "warnings": warnings}
+
+    reconciliation_classification = str(classifications.get("Reconciliation") or "")
+    if reconciliation_classification and reconciliation_classification != "TRACK_B_PAPER_BROKER_RECONCILED":
+        blockers.append(
+            {
+                "code": "execution_core_reconciliation_not_clean",
+                "detail": f"Execution-core reconciliation is {reconciliation_classification}; submit-capable readiness is blocked.",
+                "source": "execution_core_reconciliation",
+                "state": "NOT_READY_RECONCILIATION",
+            }
+        )
+        return {"blockers": blockers, "warnings": warnings}
+
+    expected_clean = {
+        "Open Order Truth": "NO_OPEN_ORDERS",
+        "Managed Order Registry": "NO_MANAGED_ORDERS",
+        "Order Adjustment Planner": "NO_ACTION_NEEDED",
+        "Position Truth": "CLEAN_FLAT_READY",
+        "Managed Position Registry": "NO_MANAGED_POSITIONS",
+    }
+    for service, expected in expected_clean.items():
+        observed = str(classifications.get(service) or "")
+        if observed and observed != expected:
+            blockers.append(
+                {
+                    "code": f"{service.lower().replace(' ', '_')}_not_clean",
+                    "detail": f"{service} is {observed}; expected {expected} for submit-capable readiness.",
+                    "source": "execution_core_shared_truth",
+                    "state": "NOT_READY_DEPENDENCY",
+                }
+            )
+            return {"blockers": blockers, "warnings": warnings}
+
+    runtime_classification = str(classifications.get("Runtime Environment Truth") or "")
+    runtime_allowed = {
+        "",
+        "RUNTIME_DOWN_CLEAN",
+        "RUNTIME_ACTIVE_TRADE_CAPABLE",
+        "RUNTIME_ACTIVE_OBSERVATION_ONLY",
+    }
+    if runtime_classification not in runtime_allowed:
+        blockers.append(
+            {
+                "code": "runtime_environment_truth_not_clean",
+                "detail": f"Runtime Environment Truth is {runtime_classification}; submit-capable readiness is blocked.",
+                "source": "execution_core_runtime_environment_truth",
+                "state": "NOT_READY_DEPENDENCY",
+            }
+        )
+        return {"blockers": blockers, "warnings": warnings}
+
+    if proof_classification == "PHASE1_DATA_UNHEALTHY":
+        blockers.append(
+            {
+                "code": "phase1_data_unhealthy",
+                "detail": "Proof-readiness Phase-1 checks report unhealthy runtime candle data.",
+                "source": "execution_core_proof_readiness",
+                "state": "NOT_READY_DEPENDENCY",
+            }
+        )
+    elif proof_classification in {"BROKER_STATE_UNSAFE", "SHARED_TRUTH_BLOCKED"}:
+        primary = _mapping(proof.get("primary_blocker"))
+        blockers.append(
+            {
+                "code": primary.get("code") or "execution_core_shared_truth_blocked",
+                "detail": primary.get("detail") or f"Proof readiness is {proof_classification}.",
+                "source": "execution_core_proof_readiness",
+                "state": "NOT_READY_DEPENDENCY",
+            }
+        )
+
+    return {"blockers": blockers, "warnings": warnings}
+
+
+def _classification(payload: Mapping[str, Any], *keys: str) -> str | None:
+    for key in (*keys, "classification"):
+        value = payload.get(key)
+        if value is not None and str(value).strip():
+            return str(value)
+    return None
 
 
 def _lifecycle_summary(payload: Mapping[str, Any]) -> dict[str, Any]:
@@ -1509,6 +1769,7 @@ def _readiness_result(
         "broker_truth": _mapping(inputs.get("broker_truth")),
         "broker_truth_lease": _mapping(inputs.get("broker_truth_lease")),
         "phase1_reconciliation": _mapping(inputs.get("phase1_reconciliation")),
+        "execution_core_shared_truth": _mapping(inputs.get("execution_core_shared_truth")),
         "market_data": _mapping(inputs.get("market_data")),
         "lane_quarantine": _mapping(inputs.get("lane_quarantine")),
         "submit_bridge": _mapping(inputs.get("submit_bridge")),
