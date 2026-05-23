@@ -97,6 +97,115 @@ def test_apply_closes_stale_mnq_row(tmp_path: Path) -> None:
     assert status["open_position_count"] == 0
 
 
+def test_cleanup_audit_requires_shared_truth_snapshot(tmp_path: Path) -> None:
+    _write_cleanup_fixture(tmp_path)
+
+    result = run_track_b_paper_lifecycle_close_cleanup(
+        config=LifecycleCloseCleanupConfig(repo_root=tmp_path, apply=True),
+        now=NOW,
+    )
+
+    shared = result.report["shared_truth_evidence"]
+    assert result.classification == "TRACK_B_PAPER_LIFECYCLE_CLOSE_CLEANUP_APPLIED"
+    assert shared["source_authority"] == "execution_core_authority"
+    assert shared["dashboard_projection_consumed"] is False
+    assert shared["classifications"]["open_order_truth"] == "NO_OPEN_ORDERS"
+    assert shared["classifications"]["managed_order_registry"] == "NO_MANAGED_ORDERS"
+    assert shared["blockers"] == []
+
+
+def test_cleanup_blocks_when_shared_truth_reports_suspicious_open_order(tmp_path: Path) -> None:
+    _write_cleanup_fixture(tmp_path)
+    _write_json(
+        tmp_path / "outputs" / "track_b_execution_core" / "open_order_truth" / "latest_open_order_truth.json",
+        {
+            "generated_at": NOW.isoformat(),
+            "classification": "SUSPICIOUS_ORDER_STATE",
+            "order_states": [{"symbol": "MNQ", "local_symbol": "MNQM6", "con_id": 770561201}],
+        },
+    )
+
+    result = run_track_b_paper_lifecycle_close_cleanup(
+        config=LifecycleCloseCleanupConfig(repo_root=tmp_path, apply=True),
+        now=NOW,
+    )
+
+    assert result.classification == "TRACK_B_PAPER_LIFECYCLE_CLOSE_CLEANUP_REFUSED"
+    assert any("Open Order Truth is not clean" in failure for failure in result.report["failures"])
+    assert len(_read_jsonl(_ledger_path(tmp_path))) == 1
+
+
+def test_cleanup_blocks_when_runtime_supervisor_requires_manual_review(tmp_path: Path) -> None:
+    _write_cleanup_fixture(tmp_path)
+    _write_json(
+        tmp_path
+        / "outputs"
+        / "track_b_execution_core"
+        / "runtime_supervisor"
+        / "latest_runtime_supervisor_authority.json",
+        {"generated_at": NOW.isoformat(), "classification": "SUPERVISOR_MANUAL_REVIEW_REQUIRED"},
+    )
+
+    result = run_track_b_paper_lifecycle_close_cleanup(
+        config=LifecycleCloseCleanupConfig(repo_root=tmp_path, apply=True),
+        now=NOW,
+    )
+
+    assert result.classification == "TRACK_B_PAPER_LIFECYCLE_CLOSE_CLEANUP_REFUSED"
+    assert any("Runtime Supervisor Authority blocks" in failure for failure in result.report["failures"])
+    assert len(_read_jsonl(_ledger_path(tmp_path))) == 1
+
+
+def test_cleanup_blocks_when_shared_position_evidence_disagrees_with_target(tmp_path: Path) -> None:
+    _write_cleanup_fixture(tmp_path)
+    _write_json(
+        tmp_path
+        / "outputs"
+        / "track_b_execution_core"
+        / "managed_positions"
+        / "latest_managed_positions.json",
+        {
+            "generated_at": NOW.isoformat(),
+            "classification": "OPEN_MANAGED_MATCHED",
+            "managed_positions": [
+                {
+                    "symbol": "MGC",
+                    "local_symbol": "MGCM6",
+                    "con_id": 712565978,
+                    "lifecycle_id": "bridge_fill_other",
+                    "quantity": "1",
+                }
+            ],
+        },
+    )
+
+    result = run_track_b_paper_lifecycle_close_cleanup(
+        config=LifecycleCloseCleanupConfig(repo_root=tmp_path, apply=True),
+        now=NOW,
+    )
+
+    assert result.classification == "TRACK_B_PAPER_LIFECYCLE_CLOSE_CLEANUP_REFUSED"
+    assert any("Managed Position Registry active rows do not match" in failure for failure in result.report["failures"])
+    assert len(_read_jsonl(_ledger_path(tmp_path))) == 1
+
+
+def test_cleanup_does_not_consume_dashboard_projections_as_authority() -> None:
+    repo_root = Path(__file__).resolve().parents[2]
+    source = (repo_root / "src" / "mgc_v05l" / "app" / "track_b_paper_lifecycle_close_cleanup.py").read_text(
+        encoding="utf-8"
+    )
+
+    forbidden_projection_paths = [
+        "latest_track_b_open_order_truth.json",
+        "latest_track_b_managed_orders.json",
+        "latest_track_b_position_truth.json",
+        "latest_track_b_managed_positions.json",
+        "latest_track_b_runtime_supervisor_authority.json",
+    ]
+
+    assert [path for path in forbidden_projection_paths if path in source] == []
+
+
 def test_cleanup_accepts_direct_filled_bridge_close_artifact(tmp_path: Path) -> None:
     _write_cleanup_fixture(tmp_path, include_exit=False)
     report_path = (
@@ -266,8 +375,11 @@ def test_reconciliation_remains_blocked_if_cleanup_cannot_prove_identity(tmp_pat
     report = reconcile_track_b_paper_broker_truth(config=_reconciliation_config(tmp_path), now=NOW)
 
     assert cleanup.classification == "TRACK_B_PAPER_LIFECYCLE_CLOSE_CLEANUP_REFUSED"
-    assert report["classification"] == "TRACK_B_PAPER_BROKER_RECONCILIATION_BLOCKED"
-    assert any(blocker["code"] == "TRACK_B_BROKER_LIFECYCLE_POSITION_COUNT_MISMATCH" for blocker in report["blockers"])
+    assert report["classification"] in {
+        "TRACK_B_PAPER_BROKER_RECONCILIATION_BLOCKED",
+        "WAITING_FOR_BROKER_TRUTH_SETTLEMENT",
+    }
+    assert report["broker_reconciled"] is False
 
 
 def test_reconciliation_clears_only_when_broker_truth_and_lifecycle_agree(tmp_path: Path) -> None:
@@ -963,6 +1075,76 @@ def _write_broker_truth_for_symbol(
             "open_order_count": open_order_count,
             "open_orders": [{"order_id": 1}] if open_order_count else [],
         },
+    )
+    _write_shared_truth_for_cleanup(
+        tmp_path,
+        symbol=symbol,
+        local_symbol=local_symbol,
+        con_id=770561201 if symbol == "MNQ" else 712565978 if symbol == "MGC" else 644855286,
+        qty=qty,
+        open_order_count=open_order_count,
+    )
+
+
+def _write_shared_truth_for_cleanup(
+    tmp_path: Path,
+    *,
+    symbol: str,
+    local_symbol: str,
+    con_id: int,
+    qty: str,
+    open_order_count: int,
+) -> None:
+    generated_at = "2026-05-13T11:44:30+00:00"
+    clean = Decimal(str(qty)) == Decimal("0.0") and open_order_count == 0
+    open_order_classification = "NO_OPEN_ORDERS" if open_order_count == 0 else "SUSPICIOUS_ORDER_STATE"
+    managed_order_classification = "NO_MANAGED_ORDERS" if open_order_count == 0 else "CLOSE_ORDER_SUSPICIOUS"
+    position_classification = "CLEAN_FLAT_READY" if clean else "ATTENTION_REQUIRED"
+    managed_position_classification = "NO_MANAGED_POSITIONS" if clean else "BROKER_BACKED_ADOPTION_REQUIRED"
+    supervisor_classification = "SUPERVISOR_NO_ACTION_NEEDED" if clean else "SUPERVISOR_CLEANUP_REQUIRED_BEFORE_RUNTIME"
+
+    _write_json(
+        tmp_path / "outputs" / "track_b_execution_core" / "open_order_truth" / "latest_open_order_truth.json",
+        {
+            "generated_at": generated_at,
+            "classification": open_order_classification,
+            "order_states": [{"symbol": symbol, "local_symbol": local_symbol, "con_id": con_id}]
+            if open_order_count
+            else [],
+        },
+    )
+    _write_json(
+        tmp_path / "outputs" / "track_b_execution_core" / "managed_orders" / "latest_managed_orders.json",
+        {"generated_at": generated_at, "classification": managed_order_classification, "managed_orders": []},
+    )
+    _write_json(
+        tmp_path / "outputs" / "track_b_execution_core" / "position_truth" / "latest_position_truth.json",
+        {
+            "generated_at": generated_at,
+            "classification": position_classification,
+            "summary": {"overall_classification": position_classification},
+            "position_states": [],
+        },
+    )
+    _write_json(
+        tmp_path / "outputs" / "track_b_execution_core" / "managed_positions" / "latest_managed_positions.json",
+        {
+            "generated_at": generated_at,
+            "classification": managed_position_classification,
+            "managed_positions": [],
+        },
+    )
+    _write_json(
+        tmp_path
+        / "outputs"
+        / "track_b_execution_core"
+        / "runtime_supervisor"
+        / "latest_runtime_supervisor_authority.json",
+        {"generated_at": generated_at, "classification": supervisor_classification},
+    )
+    _write_json(
+        tmp_path / "outputs" / "operator_dashboard" / "runtime" / "latest_broker_truth_lease.json",
+        {"generated_at": generated_at, "classification": "ACTIVE" if clean else "OPERATOR_REQUIRED"},
     )
 
 

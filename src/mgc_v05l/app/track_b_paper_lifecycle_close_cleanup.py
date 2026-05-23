@@ -16,6 +16,21 @@ from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
+from mgc_v05l.execution_core.track_b_broker_truth_lease import DEFAULT_LEASE_ARTIFACT
+from mgc_v05l.execution_core.track_b_managed_order_registry import (
+    DEFAULT_MANAGED_ORDER_REGISTRY_ARTIFACT,
+    NO_MANAGED_ORDERS,
+)
+from mgc_v05l.execution_core.track_b_managed_position_registry import (
+    DEFAULT_MANAGED_POSITION_REGISTRY_ARTIFACT,
+    NO_MANAGED_POSITIONS,
+)
+from mgc_v05l.execution_core.track_b_open_order_truth import DEFAULT_OPEN_ORDER_TRUTH_ARTIFACT, NO_OPEN_ORDERS
+from mgc_v05l.execution_core.track_b_position_truth_monitor import DEFAULT_POSITION_TRUTH_ARTIFACT
+from mgc_v05l.execution_core.track_b_runtime_supervisor_authority import (
+    DEFAULT_RUNTIME_SUPERVISOR_AUTHORITY_ARTIFACT,
+)
+from mgc_v05l.execution_core.track_b_shared_truth_refresh_cli import DEFAULT_RECONCILIATION_ARTIFACT
 from mgc_v05l.execution_core.track_b_paper_trade_ledger import (
     DEFAULT_TRACK_B_PAPER_TRADE_LEDGER_OUTPUT_ROOT,
     LEDGER_SCHEMA_VERSION,
@@ -105,6 +120,15 @@ class LifecycleCloseCleanupConfig:
     allow_ledger_entry_evidence: bool = False
     allow_offsetting_open_intent_as_close: bool = False
     offsetting_open_lifecycle_id: str | None = None
+    require_shared_truth_evidence: bool = True
+    shared_truth_max_age_seconds: float = 600.0
+    open_order_truth_path: Path = DEFAULT_OPEN_ORDER_TRUTH_ARTIFACT
+    managed_order_registry_path: Path = DEFAULT_MANAGED_ORDER_REGISTRY_ARTIFACT
+    position_truth_path: Path = DEFAULT_POSITION_TRUTH_ARTIFACT
+    managed_position_registry_path: Path = DEFAULT_MANAGED_POSITION_REGISTRY_ARTIFACT
+    runtime_supervisor_authority_path: Path = DEFAULT_RUNTIME_SUPERVISOR_AUTHORITY_ARTIFACT
+    reconciliation_path: Path = DEFAULT_RECONCILIATION_ARTIFACT
+    broker_lease_path: Path = DEFAULT_LEASE_ARTIFACT
 
 
 @dataclass(frozen=True)
@@ -155,6 +179,12 @@ def run_track_b_paper_lifecycle_close_cleanup(
         orders_snapshot=broker_orders,
         failures=failures,
     )
+    shared_truth_evidence = _shared_truth_remediation_evidence(
+        config=config,
+        target=target,
+        now=actual_now,
+    )
+    failures.extend(shared_truth_evidence["blockers"])
     ambiguous_rows = _ambiguous_open_mnq_rows(config=config, rows=ledger_records, target=target)
     if ambiguous_rows and config.refuse_on_ambiguous_mnq_rows:
         failures.append("Additional open MNQ lifecycle row has incomplete/non-matching identity evidence.")
@@ -224,6 +254,7 @@ def run_track_b_paper_lifecycle_close_cleanup(
             "exit": exit_evidence,
         },
         "broker_flat_evidence": broker_flat_evidence,
+        "shared_truth_evidence": shared_truth_evidence,
         "write_plan": {
             "would_append_close_record": valid and not already_applied,
             "would_append_offsetting_entry_reconciliation": valid
@@ -1200,6 +1231,166 @@ def _position_compact(status: Mapping[str, Any]) -> dict[str, Any]:
     }
 
 
+def _shared_truth_remediation_evidence(
+    *,
+    config: LifecycleCloseCleanupConfig,
+    target: Mapping[str, Any] | None,
+    now: datetime,
+) -> dict[str, Any]:
+    paths = {
+        "open_order_truth": config.open_order_truth_path,
+        "managed_order_registry": config.managed_order_registry_path,
+        "position_truth": config.position_truth_path,
+        "managed_position_registry": config.managed_position_registry_path,
+        "runtime_supervisor_authority": config.runtime_supervisor_authority_path,
+        "reconciliation": config.reconciliation_path,
+        "broker_lease": config.broker_lease_path,
+    }
+    payloads = {name: _read_json(_resolve(repo_root=config.repo_root, path=path)) for name, path in paths.items()}
+    classifications = {
+        name: _shared_classification(name=name, payload=payload)
+        for name, payload in payloads.items()
+    }
+    freshness = {
+        name: _shared_freshness(payload=payload, now=now, max_age_seconds=config.shared_truth_max_age_seconds)
+        for name, payload in payloads.items()
+    }
+    blockers: list[str] = []
+    required_shared_truth = {
+        "open_order_truth",
+        "managed_order_registry",
+        "position_truth",
+        "managed_position_registry",
+        "runtime_supervisor_authority",
+    }
+    if config.require_shared_truth_evidence:
+        for name, payload in payloads.items():
+            if name in required_shared_truth and not payload:
+                blockers.append(f"Shared truth authority artifact missing: {name}.")
+        for name, state in freshness.items():
+            if name in required_shared_truth and state["stale_or_missing"]:
+                blockers.append(f"Shared truth authority artifact stale/missing: {name}.")
+
+    open_order_classification = classifications["open_order_truth"]
+    if open_order_classification and open_order_classification != NO_OPEN_ORDERS:
+        blockers.append(f"Open Order Truth is not clean: {open_order_classification}.")
+    managed_order_classification = classifications["managed_order_registry"]
+    if managed_order_classification and managed_order_classification != NO_MANAGED_ORDERS:
+        blockers.append(f"Managed Order Registry is not clean: {managed_order_classification}.")
+
+    supervisor_classification = classifications["runtime_supervisor_authority"]
+    if supervisor_classification in {
+        "SUPERVISOR_MANUAL_REVIEW_REQUIRED",
+        "SUPERVISOR_RESTART_BLOCKED_OPERATOR_ACK",
+        "SUPERVISOR_RESTART_BLOCKED_CRASH_LOOP",
+        "SUPERVISOR_SHARED_TRUTH_STALE",
+        "SUPERVISOR_UNKNOWN_REVIEW_REQUIRED",
+    }:
+        blockers.append(f"Runtime Supervisor Authority blocks local cleanup: {supervisor_classification}.")
+
+    managed_positions = _list(payloads["managed_position_registry"].get("managed_positions"))
+    if managed_positions and not _any_shared_position_matches_target(config=config, rows=managed_positions, target=target):
+        blockers.append("Managed Position Registry active rows do not match requested cleanup target.")
+
+    position_states = _list(payloads["position_truth"].get("position_states"))
+    if position_states and not _any_shared_position_matches_target(config=config, rows=position_states, target=target):
+        blockers.append("Position Truth active rows do not match requested cleanup target.")
+
+    return {
+        "source_authority": "execution_core_authority",
+        "dashboard_projection_consumed": False,
+        "required": config.require_shared_truth_evidence,
+        "max_age_seconds": config.shared_truth_max_age_seconds,
+        "artifact_paths": {name: str(_resolve(repo_root=config.repo_root, path=path)) for name, path in paths.items()},
+        "classifications": classifications,
+        "freshness": freshness,
+        "target_agreement": {
+            "managed_position_registry_rows": len(managed_positions),
+            "managed_position_registry_matches_target": (
+                None
+                if not managed_positions
+                else _any_shared_position_matches_target(config=config, rows=managed_positions, target=target)
+            ),
+            "position_truth_rows": len(position_states),
+            "position_truth_matches_target": (
+                None
+                if not position_states
+                else _any_shared_position_matches_target(config=config, rows=position_states, target=target)
+            ),
+        },
+        "blockers": blockers,
+    }
+
+
+def _shared_classification(*, name: str, payload: Mapping[str, Any]) -> str:
+    if name == "position_truth":
+        summary = payload.get("summary") if isinstance(payload.get("summary"), Mapping) else {}
+        return str(payload.get("classification") or summary.get("overall_classification") or "")
+    if name == "runtime_supervisor_authority":
+        return str(payload.get("classification") or payload.get("supervisor_classification") or "")
+    if name == "broker_lease":
+        return str(payload.get("classification") or payload.get("lease_state") or "")
+    return str(payload.get("classification") or "")
+
+
+def _shared_freshness(*, payload: Mapping[str, Any], now: datetime, max_age_seconds: float) -> dict[str, Any]:
+    generated_at = payload.get("generated_at") or payload.get("latest_refresh_time") or payload.get("last_success_at")
+    age_seconds = _age_seconds(generated_at, now)
+    return {
+        "generated_at": generated_at,
+        "age_seconds": age_seconds,
+        "stale_or_missing": age_seconds is None or age_seconds > max_age_seconds,
+    }
+
+
+def _any_shared_position_matches_target(
+    *,
+    config: LifecycleCloseCleanupConfig,
+    rows: Sequence[Mapping[str, Any]],
+    target: Mapping[str, Any] | None,
+) -> bool:
+    return any(_shared_position_matches_target(config=config, row=row, target=target) for row in rows)
+
+
+def _shared_position_matches_target(
+    *,
+    config: LifecycleCloseCleanupConfig,
+    row: Mapping[str, Any],
+    target: Mapping[str, Any] | None,
+) -> bool:
+    lifecycle_id = str(
+        row.get("lifecycle_id")
+        or row.get("entry_lifecycle_id")
+        or _nested(row, "lifecycle", "lifecycle_id")
+        or ""
+    )
+    if lifecycle_id and lifecycle_id == config.entry_lifecycle_id:
+        return True
+    symbol = str(row.get("symbol") or row.get("instrument_family") or row.get("instrument") or "").upper()
+    local_symbol = str(row.get("local_symbol") or row.get("localSymbol") or "").upper()
+    con_id = _int(row.get("con_id") or row.get("conId"))
+    quantity = _decimal(row.get("quantity") or row.get("broker_quantity") or row.get("qty"))
+    if symbol == config.symbol and local_symbol == config.local_symbol and con_id == config.con_id:
+        if quantity in {None, config.quantity, Decimal("0")}:
+            return True
+    if target is None:
+        return False
+    return str(row.get("trade_id") or "") == str(target.get("trade_id") or "")
+
+
+def _resolve(*, repo_root: Path, path: Path) -> Path:
+    return path if path.is_absolute() else repo_root / path
+
+
+def _age_seconds(value: object, now: datetime) -> float | None:
+    if not value:
+        return None
+    try:
+        return max(0.0, (now - datetime.fromisoformat(_canonical_time(value))).total_seconds())
+    except (TypeError, ValueError):
+        return None
+
+
 def _read_json(path: Path) -> dict[str, Any]:
     if not path.exists():
         return {}
@@ -1224,6 +1415,10 @@ def _read_jsonl(path: Path) -> list[dict[str, Any]]:
         if isinstance(payload, dict):
             rows.append(payload)
     return rows
+
+
+def _list(value: Any) -> list[Any]:
+    return list(value) if isinstance(value, list) else []
 
 
 def _write_audit(
