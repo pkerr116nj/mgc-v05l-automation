@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -32,6 +33,8 @@ def test_exact_known_managed_order_proposal_is_accepted(tmp_path: Path) -> None:
     assert report["classification"] == GUARDED_CANCEL_REPLACE_READY
     assert report["broker_mutation_performed"] is False
     assert report["ready"]["proposal"]["allowed_route"] == "GUARDED_TRACK_B_PAPER_CANCEL_REPLACE_ONLY"
+    assert report["shared_truth_evidence"]["source_authority"] == "execution_core_authority"
+    assert report["shared_truth_evidence"]["dashboard_projection_consumed"] is False
 
 
 def test_dry_run_does_not_construct_adapter(tmp_path: Path) -> None:
@@ -60,6 +63,83 @@ def test_unknown_open_order_proposal_is_refused(tmp_path: Path) -> None:
 
     assert report["classification"] == GUARDED_CANCEL_REPLACE_IDENTITY_MISMATCH
     assert "not a known managed exit order" in report["detail"]
+
+
+def test_cancel_replace_blocks_without_exact_managed_order_identity(tmp_path: Path) -> None:
+    _write_shared_truth_for_cancel_replace(tmp_path, broker_order_id="99")
+
+    report = run_guarded_managed_exit_cancel_replace(
+        config=_config(tmp_path, skip_shared_truth_write=True),
+        now=NOW,
+        reconciliation_runner=lambda _config: _reconciliation_report(),
+    )
+
+    assert report["classification"] == GUARDED_CANCEL_REPLACE_REVIEW_REQUIRED
+    assert "Managed Order Registry does not contain the exact target order identity." in report["detail"]
+
+
+def test_cancel_replace_blocks_when_planner_requires_suspicious_review(tmp_path: Path) -> None:
+    _write_shared_truth_for_cancel_replace(
+        tmp_path,
+        order_adjustment_classification="REVIEW_REQUIRED_SUSPICIOUS_STATE",
+    )
+
+    report = run_guarded_managed_exit_cancel_replace(
+        config=_config(tmp_path, skip_shared_truth_write=True),
+        now=NOW,
+        reconciliation_runner=lambda _config: _reconciliation_report(),
+    )
+
+    assert report["classification"] == GUARDED_CANCEL_REPLACE_REVIEW_REQUIRED
+    assert "MANUAL_TWS_REVIEW_REQUIRED" in report["detail"]
+
+
+def test_cancel_replace_blocks_when_old_order_still_open_without_terminal_plan(tmp_path: Path) -> None:
+    _write_shared_truth_for_cancel_replace(
+        tmp_path,
+        order_adjustment_classification="WAIT_FOR_WORKING_ORDER",
+        existing_close_order_live=True,
+    )
+
+    report = run_guarded_managed_exit_cancel_replace(
+        config=_config(tmp_path, skip_shared_truth_write=True),
+        now=NOW,
+        reconciliation_runner=lambda _config: _reconciliation_report(),
+    )
+
+    assert report["classification"] == GUARDED_CANCEL_REPLACE_REVIEW_REQUIRED
+    assert "Existing close order is still live" in report["detail"]
+
+
+def test_cancel_replace_allowed_only_after_terminal_cancel_and_position_still_open(tmp_path: Path) -> None:
+    report = run_guarded_managed_exit_cancel_replace(
+        config=_config(tmp_path),
+        now=NOW,
+        reconciliation_runner=lambda _config: _reconciliation_report(),
+    )
+
+    assert report["classification"] == GUARDED_CANCEL_REPLACE_READY
+    assert report["shared_truth_evidence"]["order_adjustment_plan_match"]["terminal_state_confirmed"] is True
+    assert report["shared_truth_evidence"]["order_adjustment_plan_match"]["position_open"] is True
+
+
+def test_cancel_replace_does_not_consume_dashboard_projection_as_authority() -> None:
+    source = (
+        Path(__file__).resolve().parents[3]
+        / "src"
+        / "mgc_v05l"
+        / "execution_core"
+        / "track_b_managed_exit_cancel_replace.py"
+    ).read_text(encoding="utf-8")
+
+    forbidden = [
+        "latest_track_b_open_order_truth.json",
+        "latest_track_b_managed_orders.json",
+        "latest_track_b_position_truth.json",
+        "latest_track_b_managed_positions.json",
+        "latest_track_b_runtime_supervisor_authority.json",
+    ]
+    assert all(path not in source for path in forbidden)
 
 
 def test_mismatched_broker_order_id_is_refused(tmp_path: Path) -> None:
@@ -181,6 +261,7 @@ def test_original_order_already_gone_does_not_blind_replace(tmp_path: Path) -> N
 
 
 def _config(tmp_path: Path, **overrides: Any) -> ManagedExitCancelReplaceConfig:
+    skip_shared_truth_write = bool(overrides.pop("skip_shared_truth_write", False))
     payload = {
         "repo_root": tmp_path,
         "broker_order_id": "1",
@@ -188,6 +269,13 @@ def _config(tmp_path: Path, **overrides: Any) -> ManagedExitCancelReplaceConfig:
         "perm_id": 614029377,
     }
     payload.update(overrides)
+    if not skip_shared_truth_write:
+        _write_shared_truth_for_cancel_replace(
+            tmp_path,
+            broker_order_id=str(payload["broker_order_id"]),
+            client_id=payload.get("client_id"),
+            perm_id=payload.get("perm_id"),
+        )
     return ManagedExitCancelReplaceConfig(**payload)
 
 
@@ -276,6 +364,119 @@ def _reconciliation_report(
         "known_managed_exit_order_count": len([known_order] if known_orders is None else known_orders),
         "known_managed_exit_orders": [known_order] if known_orders is None else known_orders,
     }
+
+
+def _write_shared_truth_for_cancel_replace(
+    repo: Path,
+    *,
+    broker_order_id: str = "1",
+    client_id: int | None = 10815,
+    perm_id: int | None = 614029377,
+    managed_order_classification: str = "ORDER_TERMINAL_CANCELLED",
+    order_adjustment_classification: str = "TARGETED_CANCEL_REPLACE_REQUIRED",
+    open_order_truth_classification: str = "OPEN_CLOSE_ORDER_WORKING",
+    runtime_supervisor_classification: str = "SUPERVISOR_CLEANUP_REQUIRED_BEFORE_RUNTIME",
+    existing_close_order_live: bool = False,
+) -> None:
+    generated_at = NOW.isoformat()
+    source_order = {
+        "account_id": "DUM882026",
+        "broker_order_id": broker_order_id,
+        "client_id": client_id,
+        "perm_id": perm_id,
+        "symbol": "GC",
+        "local_symbol": "GCM6",
+        "con_id": 430360630,
+        "action": "SELL",
+        "quantity": "1.0",
+        "status": "Cancelled" if order_adjustment_classification == "TARGETED_CANCEL_REPLACE_REQUIRED" else "Submitted",
+    }
+    managed_order = {
+        "classification": managed_order_classification,
+        "recommended_next_action": "TARGETED_CANCEL_REPLACE_CANDIDATE",
+        "account_id": "DUM882026",
+        "symbol": "GC",
+        "contract": "GCM6",
+        "local_symbol": "GCM6",
+        "con_id": 430360630,
+        "action": "SELL",
+        "quantity": "1.0",
+        "broker_order_id": broker_order_id,
+        "client_id": client_id,
+        "perm_id": perm_id,
+        "broker_status": source_order["status"],
+        "source_order": source_order,
+    }
+    plan = {
+        "classification": order_adjustment_classification,
+        "recommended_operator_action": "TARGETED_CANCEL_REPLACE_CANDIDATE",
+        "account_id": "DUM882026",
+        "symbol": "GC",
+        "contract": "GCM6",
+        "con_id": 430360630,
+        "action": "SELL",
+        "quantity": "1.0",
+        "broker_order_id": broker_order_id,
+        "client_id": client_id,
+        "perm_id": perm_id,
+        "broker_status": source_order["status"],
+        "position_open": True,
+        "existing_close_order_live": existing_close_order_live,
+        "terminal_state_confirmed": order_adjustment_classification == "TARGETED_CANCEL_REPLACE_REQUIRED",
+        "source_order": source_order,
+        "identity": {
+            "account_id": "DUM882026",
+            "contract": "GCM6",
+            "con_id": 430360630,
+            "broker_order_id": broker_order_id,
+            "client_id": client_id,
+            "perm_id": perm_id,
+            "action": "SELL",
+            "quantity": "1.0",
+        },
+    }
+    position_row = {
+        "classification": "OPEN_MANAGED_MATCHED",
+        "account_id": "DUM882026",
+        "symbol": "GC",
+        "local_symbol": "GCM6",
+        "con_id": 430360630,
+        "quantity": "1.0",
+        "lifecycle_status": "OPEN_MANAGED",
+    }
+    _write_json(
+        repo / "outputs" / "track_b_execution_core" / "open_order_truth" / "latest_open_order_truth.json",
+        {"generated_at": generated_at, "classification": open_order_truth_classification, "order_states": []},
+    )
+    _write_json(
+        repo / "outputs" / "track_b_execution_core" / "managed_orders" / "latest_managed_orders.json",
+        {"generated_at": generated_at, "classification": managed_order_classification, "managed_orders": [managed_order]},
+    )
+    _write_json(
+        repo / "outputs" / "track_b_execution_core" / "managed_orders" / "latest_order_adjustment_plan.json",
+        {"generated_at": generated_at, "classification": order_adjustment_classification, "plans": [plan]},
+    )
+    _write_json(
+        repo / "outputs" / "track_b_execution_core" / "position_truth" / "latest_position_truth.json",
+        {"generated_at": generated_at, "classification": "ATTENTION_REQUIRED", "broker_positions": [position_row]},
+    )
+    _write_json(
+        repo / "outputs" / "track_b_execution_core" / "managed_positions" / "latest_managed_positions.json",
+        {"generated_at": generated_at, "classification": "OPEN_MANAGED_MATCHED", "managed_positions": [position_row]},
+    )
+    _write_json(
+        repo / "outputs" / "track_b_execution_core" / "runtime_supervisor" / "latest_runtime_supervisor_authority.json",
+        {"generated_at": generated_at, "classification": runtime_supervisor_classification},
+    )
+    _write_json(
+        repo / "outputs" / "operator_dashboard" / "runtime" / "latest_broker_truth_lease.json",
+        {"generated_at": generated_at, "classification": "ACTIVE"},
+    )
+
+
+def _write_json(path: Path, payload: dict[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
 
 
 class _FakeAdapter:

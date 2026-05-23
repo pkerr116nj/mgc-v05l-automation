@@ -15,12 +15,22 @@ from typing import Any, Callable, Mapping, Protocol
 
 from .ibkr_paper_adapter import IbkrPaperAdapter
 from .models import IntentKind, OrderIntent, SubmitAttempt, SubmitAttemptState, to_jsonable
+from .track_b_broker_truth_lease import DEFAULT_LEASE_ARTIFACT
+from .track_b_managed_order_registry import DEFAULT_MANAGED_ORDER_REGISTRY_ARTIFACT
+from .track_b_managed_position_registry import DEFAULT_MANAGED_POSITION_REGISTRY_ARTIFACT
+from .track_b_open_order_truth import DEFAULT_OPEN_ORDER_TRUTH_ARTIFACT
+from .track_b_order_adjustment_planner import (
+    DEFAULT_ORDER_ADJUSTMENT_PLAN_ARTIFACT,
+    TARGETED_CANCEL_REPLACE_REQUIRED,
+)
 from .track_b_paper_broker_reconciliation import (
     PAPER_ACCOUNT,
     ReconciliationConfig,
     reconcile_track_b_paper_broker_truth,
 )
 from .track_b_paper_trade_ledger import update_track_b_paper_trade_ledger_from_filled_bridge_result
+from .track_b_position_truth_monitor import DEFAULT_POSITION_TRUTH_ARTIFACT
+from .track_b_runtime_supervisor_authority import DEFAULT_RUNTIME_SUPERVISOR_AUTHORITY_ARTIFACT
 
 
 GUARDED_CANCEL_REPLACE_READY = "GUARDED_CANCEL_REPLACE_READY"
@@ -86,6 +96,15 @@ class ManagedExitCancelReplaceConfig:
     cancel_timeout_seconds: float = 20.0
     replacement_ack_timeout_seconds: float = 20.0
     replacement_fill_wait_seconds: float = 5.0
+    require_shared_truth_evidence: bool = True
+    shared_truth_max_age_seconds: float = 600.0
+    open_order_truth_path: Path = DEFAULT_OPEN_ORDER_TRUTH_ARTIFACT
+    managed_order_registry_path: Path = DEFAULT_MANAGED_ORDER_REGISTRY_ARTIFACT
+    order_adjustment_plan_path: Path = DEFAULT_ORDER_ADJUSTMENT_PLAN_ARTIFACT
+    position_truth_path: Path = DEFAULT_POSITION_TRUTH_ARTIFACT
+    managed_position_registry_path: Path = DEFAULT_MANAGED_POSITION_REGISTRY_ARTIFACT
+    runtime_supervisor_authority_path: Path = DEFAULT_RUNTIME_SUPERVISOR_AUTHORITY_ARTIFACT
+    broker_lease_path: Path = DEFAULT_LEASE_ARTIFACT
 
     @property
     def resolved_output_dir(self) -> Path:
@@ -113,11 +132,34 @@ def run_guarded_managed_exit_cancel_replace(
         broker_truth_refresh()
     reconciliation = _run_reconciliation(config=config, reconciliation_runner=reconciliation_runner)
     ready = _validate_ready(config=config, reconciliation=reconciliation, now=actual_now)
+    shared_truth_evidence = _shared_truth_cancel_replace_evidence(
+        config=config,
+        reconciliation=reconciliation,
+        ready=ready,
+        now=actual_now,
+    )
+    if ready["classification"] == GUARDED_CANCEL_REPLACE_READY and shared_truth_evidence["blockers"]:
+        ready = _blocked(
+            GUARDED_CANCEL_REPLACE_REVIEW_REQUIRED,
+            "; ".join(str(item) for item in shared_truth_evidence["blockers"]),
+        )
     if ready["classification"] != GUARDED_CANCEL_REPLACE_READY:
-        report = _base_report(config=config, now=actual_now, reconciliation=reconciliation, ready=ready)
+        report = _base_report(
+            config=config,
+            now=actual_now,
+            reconciliation=reconciliation,
+            ready=ready,
+            shared_truth_evidence=shared_truth_evidence,
+        )
         _write_report(config, report)
         return report
-    report = _base_report(config=config, now=actual_now, reconciliation=reconciliation, ready=ready)
+    report = _base_report(
+        config=config,
+        now=actual_now,
+        reconciliation=reconciliation,
+        ready=ready,
+        shared_truth_evidence=shared_truth_evidence,
+    )
     if not config.apply:
         report["detail"] = "Guarded cancel/replace is ready; apply=false so no broker mutation was attempted."
         _write_report(config, report)
@@ -166,6 +208,10 @@ def run_guarded_managed_exit_cancel_replace(
             "client_id": config.client_id,
             "perm_id": config.perm_id,
             "cancelled_at": datetime.now(UTC).isoformat(),
+        }
+        report["replacement_precondition"] = {
+            "old_order_terminal_cancel_confirmed": True,
+            "replacement_allowed_after_terminal_cancel": True,
         }
 
         replacement_intent = _replacement_order_intent(config=config, ready=ready)
@@ -402,6 +448,7 @@ def _base_report(
     now: datetime,
     reconciliation: Mapping[str, Any],
     ready: Mapping[str, Any],
+    shared_truth_evidence: Mapping[str, Any],
 ) -> dict[str, Any]:
     return {
         "schema_version": "track_b_managed_exit_cancel_replace_v1",
@@ -420,6 +467,7 @@ def _base_report(
             "perm_id": config.perm_id,
         },
         "ready": _jsonable(ready),
+        "shared_truth_evidence": _jsonable(shared_truth_evidence),
         "reconciliation_summary": {
             "classification": reconciliation.get("classification"),
             "broker_reconciled": reconciliation.get("broker_reconciled"),
@@ -435,6 +483,225 @@ def _base_report(
         "live_money_eligible": False,
         "paper_proof_invoked": False,
     }
+
+
+def _shared_truth_cancel_replace_evidence(
+    *,
+    config: ManagedExitCancelReplaceConfig,
+    reconciliation: Mapping[str, Any],
+    ready: Mapping[str, Any],
+    now: datetime,
+) -> dict[str, Any]:
+    paths = {
+        "open_order_truth": config.open_order_truth_path,
+        "managed_order_registry": config.managed_order_registry_path,
+        "order_adjustment_plan": config.order_adjustment_plan_path,
+        "position_truth": config.position_truth_path,
+        "managed_position_registry": config.managed_position_registry_path,
+        "runtime_supervisor_authority": config.runtime_supervisor_authority_path,
+        "broker_lease": config.broker_lease_path,
+    }
+    payloads = {name: _read_json(_resolve(repo_root=config.repo_root, path=path)) for name, path in paths.items()}
+    classifications = {name: _classification(payload) for name, payload in payloads.items()}
+    classifications["reconciliation"] = str(reconciliation.get("classification") or "")
+    freshness = {
+        name: _freshness(payload=payload, now=now, max_age_seconds=config.shared_truth_max_age_seconds)
+        for name, payload in payloads.items()
+    }
+    blockers: list[str] = []
+    if config.require_shared_truth_evidence:
+        for name, payload in payloads.items():
+            if not payload:
+                blockers.append(f"Shared truth authority artifact missing: {name}.")
+        for name, state in freshness.items():
+            if state["stale_or_missing"]:
+                blockers.append(f"Shared truth authority artifact stale/missing: {name}.")
+
+    if classifications["runtime_supervisor_authority"] in {
+        "SUPERVISOR_MANUAL_REVIEW_REQUIRED",
+        "SUPERVISOR_RESTART_BLOCKED_OPERATOR_ACK",
+        "SUPERVISOR_RESTART_BLOCKED_CRASH_LOOP",
+        "SUPERVISOR_SHARED_TRUTH_STALE",
+        "SUPERVISOR_UNKNOWN_REVIEW_REQUIRED",
+    }:
+        blockers.append(
+            f"Runtime Supervisor Authority blocks targeted cancel/replace: {classifications['runtime_supervisor_authority']}."
+        )
+    if classifications["reconciliation"] in {
+        "BROKER_TRUTH_SETTLEMENT_CONTRADICTORY_STATE",
+        "TRACK_B_PAPER_BROKER_RECONCILIATION_BLOCKED_UNKNOWN_OPEN_ORDERS",
+    }:
+        blockers.append(f"Reconciliation is unsafe for targeted cancel/replace: {classifications['reconciliation']}.")
+    if classifications["broker_lease"] in {
+        "INVALIDATED_CONTRADICTION",
+        "INVALIDATED_UNKNOWN_OPEN_ORDERS",
+        "INVALIDATED_MANUAL_BROKER_ACTION",
+        "OPERATOR_REQUIRED",
+    }:
+        blockers.append(f"Broker Truth Lease is unsafe for targeted cancel/replace: {classifications['broker_lease']}.")
+    if classifications["open_order_truth"] in {
+        "DUPLICATE_CLOSE_ORDER",
+        "UNKNOWN_OPEN_ORDER",
+        "SUSPICIOUS_ORDER_STATE",
+        "BROKER_FLAT_WITH_OPEN_CLOSE_ORDER",
+    }:
+        blockers.append(f"Open Order Truth blocks targeted cancel/replace: {classifications['open_order_truth']}.")
+
+    managed_order_match = _matching_managed_order(config=config, payload=payloads["managed_order_registry"])
+    plan_match = _matching_adjustment_plan(config=config, payload=payloads["order_adjustment_plan"])
+    if managed_order_match is None:
+        blockers.append("Managed Order Registry does not contain the exact target order identity.")
+    else:
+        managed_order_class = str(managed_order_match.get("classification") or "")
+        if managed_order_class in {
+            "CLOSE_ORDER_SUSPICIOUS",
+            "DUPLICATE_CLOSE_ORDER_BLOCKED",
+            "ORDER_STATE_UNKNOWN_REVIEW_REQUIRED",
+            "BROKER_FLAT_WITH_WORKING_CLOSE",
+        }:
+            blockers.append(f"Managed Order Registry blocks targeted cancel/replace: {managed_order_class}.")
+    if plan_match is None:
+        blockers.append("Order Adjustment Planner does not contain the exact target order identity.")
+    else:
+        plan_class = str(plan_match.get("classification") or "")
+        if plan_class == "REVIEW_REQUIRED_SUSPICIOUS_STATE":
+            blockers.append("MANUAL_TWS_REVIEW_REQUIRED: Order Adjustment Planner reports suspicious state.")
+        elif plan_class in {"DO_NOT_REPLACE_DUPLICATE_RISK", "BROKER_FLAT_NO_REPLACE"}:
+            blockers.append(f"Order Adjustment Planner forbids targeted cancel/replace: {plan_class}.")
+        elif plan_class != TARGETED_CANCEL_REPLACE_REQUIRED:
+            blockers.append(f"Order Adjustment Planner is not targeted-cancel/replace ready: {plan_class}.")
+        if plan_match.get("existing_close_order_live") is True and plan_class != TARGETED_CANCEL_REPLACE_REQUIRED:
+            blockers.append("Existing close order is still live; replacement is forbidden until terminal cancel/inactive/fill.")
+
+    position_agreement = _target_position_agreement(config=config, payload=payloads["position_truth"], ready=ready)
+    managed_position_agreement = _target_position_agreement(
+        config=config,
+        payload=payloads["managed_position_registry"],
+        ready=ready,
+    )
+    if position_agreement["conflicting_active_row_count"]:
+        blockers.append("Position Truth active rows conflict with requested targeted cancel/replace.")
+    if managed_position_agreement["conflicting_active_row_count"]:
+        blockers.append("Managed Position Registry active rows conflict with requested targeted cancel/replace.")
+    if not position_agreement["matching_row_count"]:
+        blockers.append("Position Truth does not show the exact open position for replacement planning.")
+    if not managed_position_agreement["matching_row_count"]:
+        blockers.append("Managed Position Registry does not show the exact managed position for replacement planning.")
+
+    return {
+        "source_authority": "execution_core_authority",
+        "dashboard_projection_consumed": False,
+        "required": config.require_shared_truth_evidence,
+        "max_age_seconds": config.shared_truth_max_age_seconds,
+        "artifact_paths": {name: str(_resolve(repo_root=config.repo_root, path=path)) for name, path in paths.items()},
+        "classifications": classifications,
+        "freshness": freshness,
+        "managed_order_match": _jsonable(managed_order_match),
+        "order_adjustment_plan_match": _jsonable(plan_match),
+        "target_agreement": {
+            "position_truth": position_agreement,
+            "managed_position_registry": managed_position_agreement,
+        },
+        "blockers": blockers,
+    }
+
+
+def _matching_managed_order(*, config: ManagedExitCancelReplaceConfig, payload: Mapping[str, Any]) -> dict[str, Any] | None:
+    for row in payload.get("managed_orders") or []:
+        if isinstance(row, Mapping) and _order_identity_matches_config(config=config, row=row):
+            return dict(row)
+    return None
+
+
+def _matching_adjustment_plan(*, config: ManagedExitCancelReplaceConfig, payload: Mapping[str, Any]) -> dict[str, Any] | None:
+    for row in payload.get("plans") or []:
+        if isinstance(row, Mapping) and _order_identity_matches_config(config=config, row=row):
+            return dict(row)
+    return None
+
+
+def _order_identity_matches_config(*, config: ManagedExitCancelReplaceConfig, row: Mapping[str, Any]) -> bool:
+    identity = row.get("identity") if isinstance(row.get("identity"), Mapping) else {}
+    source_order = row.get("source_order") if isinstance(row.get("source_order"), Mapping) else {}
+    broker_order_id = row.get("broker_order_id") or identity.get("broker_order_id") or source_order.get("broker_order_id") or source_order.get("order_id")
+    if str(broker_order_id or "") != str(config.broker_order_id):
+        return False
+    if config.client_id is not None:
+        client_id = row.get("client_id") or identity.get("client_id") or source_order.get("client_id")
+        if client_id is not None and str(client_id) != str(config.client_id):
+            return False
+    if config.perm_id is not None:
+        perm_id = row.get("perm_id") or identity.get("perm_id") or source_order.get("perm_id")
+        if perm_id is not None and str(perm_id) != str(config.perm_id):
+            return False
+    return True
+
+
+def _target_position_agreement(
+    *,
+    config: ManagedExitCancelReplaceConfig,
+    payload: Mapping[str, Any],
+    ready: Mapping[str, Any],
+) -> dict[str, int]:
+    proposal = ready.get("proposal") if isinstance(ready.get("proposal"), Mapping) else {}
+    replacement = proposal.get("replacement_order") if isinstance(proposal.get("replacement_order"), Mapping) else {}
+    rows = _position_rows(payload)
+    active = [row for row in rows if _position_row_active(row)]
+    matching = [
+        row for row in active if _position_row_matches_replacement(config=config, row=row, replacement=replacement)
+    ]
+    return {
+        "row_count": len(rows),
+        "active_row_count": len(active),
+        "matching_row_count": len(matching),
+        "conflicting_active_row_count": len(active) - len(matching),
+    }
+
+
+def _position_rows(payload: Mapping[str, Any]) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    for key in ("position_states", "broker_positions", "managed_positions"):
+        for row in payload.get(key) or []:
+            if isinstance(row, Mapping):
+                rows.append(dict(row))
+    return rows
+
+
+def _position_row_active(row: Mapping[str, Any]) -> bool:
+    classification = str(row.get("classification") or "").upper()
+    if classification in {"FLAT_CLEAN", "NO_MANAGED_POSITIONS", "CLOSED_FLAT"}:
+        return False
+    status = str(row.get("final_position_status") or row.get("lifecycle_status") or row.get("status") or "").upper()
+    return status != "CLOSED_FLAT"
+
+
+def _position_row_matches_replacement(
+    *,
+    config: ManagedExitCancelReplaceConfig,
+    row: Mapping[str, Any],
+    replacement: Mapping[str, Any],
+) -> bool:
+    symbol = str(replacement.get("symbol") or row.get("symbol") or "").upper()
+    row_symbol = str(row.get("symbol") or row.get("instrument_family") or row.get("instrument") or "").upper()
+    if symbol and row_symbol and row_symbol != symbol:
+        return False
+    local_symbol = str(replacement.get("local_symbol") or "").upper()
+    row_local_symbol = str(row.get("local_symbol") or row.get("localSymbol") or row.get("contract") or "").upper()
+    if local_symbol and row_local_symbol and row_local_symbol != local_symbol:
+        return False
+    con_id = _decimal(replacement.get("con_id"))
+    row_con_id = _decimal(row.get("con_id") or row.get("conId"))
+    if con_id is not None and row_con_id is not None and con_id != row_con_id:
+        return False
+    quantity = _decimal(row.get("signed_quantity") or row.get("broker_quantity") or row.get("quantity") or row.get("qty"))
+    replacement_quantity = _decimal(replacement.get("quantity"))
+    action = str(replacement.get("action") or "").upper()
+    if quantity is not None and replacement_quantity is not None:
+        expected_position_quantity = replacement_quantity if action == "SELL" else -replacement_quantity
+        if quantity != expected_position_quantity:
+            return False
+    account = str(row.get("account_id") or row.get("account") or "").strip()
+    return not account or account == config.account_id
 
 
 def _default_adapter_factory(**kwargs: Any) -> ManagedExitAdapter:
@@ -712,6 +979,52 @@ def _jsonable(value: Any) -> Any:
     if hasattr(value, "to_json_dict"):
         return value.to_json_dict()
     return to_jsonable(value)
+
+
+def _classification(payload: Mapping[str, Any]) -> str:
+    summary = payload.get("summary") if isinstance(payload.get("summary"), Mapping) else {}
+    return str(
+        payload.get("classification")
+        or summary.get("classification")
+        or summary.get("overall_classification")
+        or ""
+    )
+
+
+def _freshness(*, payload: Mapping[str, Any], now: datetime, max_age_seconds: float) -> dict[str, Any]:
+    generated_at = _parse_iso(payload.get("generated_at"))
+    if generated_at is None:
+        return {"generated_at": None, "age_seconds": None, "stale_or_missing": True}
+    age_seconds = max(0.0, (now - generated_at).total_seconds())
+    return {
+        "generated_at": generated_at.isoformat(),
+        "age_seconds": age_seconds,
+        "stale_or_missing": age_seconds > float(max_age_seconds),
+    }
+
+
+def _parse_iso(value: Any) -> datetime | None:
+    text = str(value or "").strip()
+    if not text:
+        return None
+    try:
+        parsed = datetime.fromisoformat(text)
+    except ValueError:
+        return None
+    return parsed.astimezone(UTC) if parsed.tzinfo is not None else parsed.replace(tzinfo=UTC)
+
+
+def _read_json(path: Path) -> dict[str, Any]:
+    try:
+        with path.open("r", encoding="utf-8") as handle:
+            payload = json.load(handle)
+        return payload if isinstance(payload, dict) else {}
+    except (FileNotFoundError, json.JSONDecodeError, OSError):
+        return {}
+
+
+def _resolve(*, repo_root: Path, path: Path) -> Path:
+    return path if path.is_absolute() else repo_root / path
 
 
 def _report_path(config: ManagedExitCancelReplaceConfig) -> Path:
