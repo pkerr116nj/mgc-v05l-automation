@@ -610,20 +610,28 @@ Authority hierarchy:
    wait for market reopen, refresh shared truth, restart-runtime-allowed, and
    cleanup-required-before-restart.
 13. Crash Loop Protection applies read-only restart budget, cooldown, repeated
-   failure, broker-unsafe stop, and operator-ack policy on top of agent health,
-   self-recover, runtime stop provenance, and launch/runtime history.
+   failure, broker-unsafe stop, and legacy/future-live operator-ack evidence on
+   top of agent health, self-recover, runtime stop provenance, and
+   launch/runtime history.
 14. Runtime Resume Semantics combines proof readiness, shared truth, agent
    health, self-recover, crash-loop policy, broker/order/position truth, and
    stop provenance into the advisory answer for whether a PAPER runtime may be
-   started, resumed, held down, or requires operator acknowledgement.
-15. Runtime Supervisor Authority combines the control-plane services into the
+   started, resumed, held down, or has an operator-ack advisory from legacy or
+   future-live policy.
+15. PAPER Recovery Policy interprets the shared evidence stack through a
+   PAPER-specific resilience lens. PAPER is autonomous, bounded, observable,
+   evidence-rich, and failure-tolerant: abnormal behavior should be exposed,
+   classified, and preserved as artifacts rather than hidden behind routine
+   human gates. This policy is advisory only in v1 and does not grant runtime
+   restart, broker mutation, or lifecycle mutation authority.
+16. Runtime Supervisor Authority combines the control-plane services into the
    single advisory answer for what should happen next with the PAPER runtime:
    wait, start allowed, leave healthy runtime running, hold down, cleanup
    required, or manual review required.
-16. Self-Healing Restart Evidence consumes shared truth for restart eligibility
+17. Self-Healing Restart Evidence consumes shared truth for restart eligibility
    diagnostics and keeps broker lease degradation distinct from reconciliation
    danger.
-17. Operator dashboard/status surfaces display projections of this stack. They
+18. Operator dashboard/status surfaces display projections of this stack. They
     are never routing, readiness, restart, broker, lifecycle, or order
     authority.
 
@@ -649,6 +657,7 @@ Authority and status artifact map:
 | Crash Loop Protection | `outputs/track_b_execution_core/crash_loop_protection/latest_crash_loop_protection.json` | `execution_core` advisory authority |
 | Crash Loop events | `outputs/track_b_execution_core/crash_loop_protection/crash_loop_events.jsonl` | `execution_core` audit |
 | Runtime Resume Semantics | `outputs/track_b_execution_core/runtime_resume/latest_runtime_resume_semantics.json` | `execution_core` advisory authority |
+| PAPER Recovery Policy | `outputs/track_b_execution_core/paper_recovery_policy/latest_paper_recovery_policy.json` | `execution_core` PAPER-specific advisory policy |
 | Runtime Supervisor Authority | `outputs/track_b_execution_core/runtime_supervisor/latest_runtime_supervisor_authority.json` | `execution_core` advisory authority |
 | Shared Truth Refresh CLI | `mgc_v05l.execution_core.track_b_shared_truth_refresh_cli` | `execution_core` refresh orchestrator |
 | Proof Readiness | `outputs/track_b_execution_core/proof_readiness/latest_track_b_paper_proof_readiness.json` | `execution_core` proof preflight authority |
@@ -670,6 +679,7 @@ Dashboard projections may exist for operator visibility, for example
 `outputs/operator_dashboard/runtime/latest_track_b_self_recover_rules.json`, and
 `outputs/operator_dashboard/runtime/latest_track_b_crash_loop_protection.json`, and
 `outputs/operator_dashboard/runtime/latest_track_b_runtime_resume_semantics.json`,
+`outputs/operator_dashboard/runtime/latest_track_b_paper_recovery_policy.json`,
 and `outputs/operator_dashboard/runtime/latest_track_b_runtime_supervisor_authority.json`.
 Each
 projection must carry `projection_only=true`, `not_routing_authority=true`, and
@@ -705,13 +715,20 @@ Current consumer migration status:
   agents without granting restart, broker, lifecycle, or routing authority.
 - Self-Recover Rules v1 recommends allowed or blocked recovery actions from
   shared authority evidence, but never executes recovery.
-- Crash Loop Protection v1 recommends restart cooldown and operator
-  acknowledgement requirements from stop provenance and launch/runtime history,
-  but never executes recovery.
+- Crash Loop Protection v1 recommends restart cooldown and may surface
+  operator-ack evidence from stop provenance and launch/runtime history, but it
+  never executes recovery and does not define the core PAPER recovery posture.
 - Runtime Resume Semantics v1 determines whether the runtime is allowed to
   start clean, must hold down for market closure/shared-truth/crash-loop
-  evidence, or requires manual cleanup/operator acknowledgement. It is advisory
-  only and never executes a restart.
+  evidence, or has manual-cleanup/operator-ack advisory evidence. It is
+  advisory only and never executes a restart.
+- PAPER Recovery Policy v1 separates PAPER recovery posture from future
+  LIVE/PRE-LIVE recovery posture. In PAPER, routine operator acknowledgement is
+  not a core dependency: catastrophic-behavior candidates should become loud
+  classifications, preserved evidence, bounded retry budgets, quarantine
+  observation, or scoped recovery eligibility when exact identity is proven.
+  Manual gates may exist only as isolated temporary policy adapters, not the
+  normal PAPER recovery path.
 - Runtime Supervisor Authority v1 recommends the next PAPER runtime action from
   shared authority evidence, but never executes start, stop, restart, broker, or
   lifecycle mutations.
@@ -737,8 +754,8 @@ Remaining migration backlog:
 - Agent health contract v2 should add richer per-agent probes and self-recover
   recommendations without granting restart or broker authority.
 - Runtime resume semantics v2 should add an explicit operator acknowledgement
-  artifact with actor identity/expiry and correlate each launch attempt back to
-  the resume verdict id.
+  adapter only for future LIVE/PRE-LIVE or exceptional PAPER override cases; it
+  should not become a core PAPER recovery dependency.
 - Manual remediation scripts should converge on Runtime Supervisor Authority
   and shared-truth blockers before recommending or requesting scoped operator
   cleanup.
