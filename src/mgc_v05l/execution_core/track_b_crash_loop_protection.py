@@ -30,6 +30,7 @@ RESTART_COOLDOWN_ACTIVE = "RESTART_COOLDOWN_ACTIVE"
 REPEATED_RUNTIME_FAILURE = "REPEATED_RUNTIME_FAILURE"
 REPEATED_MARKET_DATA_FAILURE = "REPEATED_MARKET_DATA_FAILURE"
 REPEATED_BROKER_LEASE_FAILURE = "REPEATED_BROKER_LEASE_FAILURE"
+REPEATED_UNSAFE_STOP_QUARANTINE = "REPEATED_UNSAFE_STOP_QUARANTINE"
 OPERATOR_ACK_REQUIRED = "OPERATOR_ACK_REQUIRED"
 INSUFFICIENT_HISTORY = "INSUFFICIENT_HISTORY"
 
@@ -148,6 +149,11 @@ def build_track_b_crash_loop_protection(
         "repeated_same_stop_source_count": decision["same_source_count"],
         "cooldown_until": decision["cooldown_until"],
         "operator_ack_required": decision["operator_ack_required"],
+        "requires_operator_ack_for_paper": decision["requires_operator_ack_for_paper"],
+        "operator_ack_advisory_only_for_paper": decision["operator_ack_advisory_only_for_paper"],
+        "paper_action_policy": decision["paper_action_policy"],
+        "live_action_policy": decision["live_action_policy"],
+        "future_live_operator_ack_required": decision["future_live_operator_ack_required"],
         "history": {
             "event_count": len(events),
             "window_event_count": len(window_events),
@@ -176,7 +182,7 @@ def build_track_b_crash_loop_protection(
         "todo_v2": [
             "Persist per-agent restart attempts with explicit runtime resume ids.",
             "Define resume semantics for expected-clean shutdown versus failed convergence.",
-            "Attach operator acknowledgement ids before clearing OPERATOR_ACK_REQUIRED.",
+            "Keep OPERATOR_ACK_REQUIRED as a future LIVE/PRE-LIVE policy adapter, not a core PAPER dependency.",
         ],
     }
 
@@ -303,13 +309,18 @@ def _classify_crash_loop(
     unsafe = [event for event in events if event.get("broker_safe_at_stop") is False]
     if len(unsafe) >= 2:
         return _decision(
-            OPERATOR_ACK_REQUIRED,
+            REPEATED_UNSAFE_STOP_QUARANTINE,
             True,
-            "Repeated unsafe runtime stops with broker_safe_at_stop=false.",
+            (
+                "Repeated unsafe runtime stops with broker_safe_at_stop=false; PAPER quarantines/observes "
+                "and preserves evidence instead of requiring routine operator acknowledgement."
+            ),
             events=events,
             now=now,
             config=config,
-            operator_ack_required=True,
+            paper_action_policy="QUARANTINE_OBSERVE_ONLY",
+            live_action_policy="REQUIRE_ACK",
+            future_live_operator_ack_required=True,
         )
     if _market_closed(inputs):
         return _decision(NO_CRASH_LOOP, False, "Market is closed; no fresh bars expected.", events=events, now=now, config=config)
@@ -358,6 +369,9 @@ def _decision(
     now: datetime,
     config: TrackBCrashLoopProtectionConfig,
     operator_ack_required: bool = False,
+    paper_action_policy: str = "OBSERVE",
+    live_action_policy: str = "OBSERVE",
+    future_live_operator_ack_required: bool = False,
 ) -> dict[str, Any]:
     latest = _latest_event(events)
     same_reason_count = _same_value_count(events, "stop_reason", latest.get("stop_reason"))
@@ -374,6 +388,15 @@ def _decision(
         "same_source_count": same_source_count,
         "cooldown_until": cooldown_until,
         "operator_ack_required": operator_ack_required or classification == OPERATOR_ACK_REQUIRED,
+        "requires_operator_ack_for_paper": False,
+        "operator_ack_advisory_only_for_paper": bool(
+            (operator_ack_required or classification == OPERATOR_ACK_REQUIRED or future_live_operator_ack_required)
+            and paper_action_policy
+        ),
+        "paper_action_policy": paper_action_policy,
+        "live_action_policy": live_action_policy,
+        "future_live_operator_ack_required": future_live_operator_ack_required
+        or classification == OPERATOR_ACK_REQUIRED,
     }
 
 
@@ -471,6 +494,8 @@ def _event_state(*, decision: Mapping[str, Any], events: list[dict[str, Any]]) -
         str(len(events)),
         str(decision.get("cooldown_until") or ""),
         str(decision.get("operator_ack_required") or False),
+        str(decision.get("paper_action_policy") or ""),
+        str(decision.get("live_action_policy") or ""),
     ]
     return {
         "classification": decision.get("classification"),

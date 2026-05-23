@@ -143,6 +143,22 @@ def test_crash_loop_with_paper_quarantine_blocks_without_operator_ack(tmp_path: 
     assert payload["resume_mode"] == "paper_quarantine_observe_only"
 
 
+def test_legacy_operator_ack_classification_is_not_paper_ack_dependency(tmp_path: Path) -> None:
+    _seed_base(
+        tmp_path,
+        crash_loop_classification="OPERATOR_ACK_REQUIRED",
+        crash_loop_restart_blocked=True,
+        paper_action_policy="OBSERVE",
+        paper_autonomous_recovery_allowed=False,
+    )
+
+    payload = build_track_b_runtime_resume_semantics(config=TrackBRuntimeResumeSemanticsConfig(repo_root=tmp_path), now=NOW)
+
+    assert payload["classification"] == RESUME_BLOCKED_PAPER_QUARANTINE_OBSERVE_ONLY
+    assert payload["required_operator_ack"] is False
+    assert payload["resume_mode"] == "paper_quarantine_observe_only"
+
+
 def test_live_money_policy_hard_unsafe_blocks_resume(tmp_path: Path) -> None:
     _seed_base(tmp_path, live_money_eligible=True, paper_action_policy="HARD_UNSAFE_HOLD")
 

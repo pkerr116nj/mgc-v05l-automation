@@ -20,9 +20,8 @@ The remaining risk is concentrated in older broker/order mutation harnesses and 
 | MEDIUM | Duplicate display/status/readiness source that can confuse operators or future agents. |
 | LOW | Research/offline/local diagnostic with low runtime authority risk. |
 
-## Top 5 Risks
+## Top Remaining Risks
 
-1. `SS-LCA-008` HIGH - control policy / operator ack semantics: Crash Loop Protection still emits OPERATOR_ACK_REQUIRED for repeated unsafe stops; Resume and Supervisor translate some of it through PAPER Recovery Policy, but the lower-level service remains human-gate flavored.
 1. `SS-LCA-009` MEDIUM - readiness / operator dashboard path ownership: Some canonical readiness and broker lease artifacts still live under `outputs/operator_dashboard/runtime`, even when consumed by execution_core services.
 1. `SS-LCA-010` MEDIUM - launch/status / fallback flows: Launch now uses Control Plane Snapshot, but the script still contains legacy shared-truth and supervisor preflight fallback functions and status still assembles some component artifacts directly.
 1. `SS-LCA-011` MEDIUM - lifecycle/local artifact repair: Current manual fallback tools are shared-truth aligned but not yet executor/snapshot adapters.
@@ -39,7 +38,8 @@ The remaining risk is concentrated in older broker/order mutation harnesses and 
 - `SS-LCA-006` modify-in-place apply path is now gated by `validate_track_b_pre_action_snapshot(...)` before broker refresh, modify, or post-modify verification hooks. It requires a coherent Control Plane Snapshot and `PLAN_MANAGED_ORDER_MODIFY` / `MANAGED_ORDER_MODIFY` planner evidence matching the exact order and price target.
 - `SS-LCA-007` repair executor / process recovery is now snapshot-gated at the apply-capable dispatch boundary. Maintenance repair commands require coherent `PLAN_EVIDENCE_REFRESH` / `REFRESH_EVIDENCE` evidence, self-healing runtime retry requires `PLAN_RUNTIME_RETRY` / `RUNTIME_RETRY`, and market-data producer recovery requires `PLAN_MARKET_DATA_RESTART` / `MARKET_DATA_RESTART`.
 - dry-run mode remains non-mutating and records whether the same snapshot gate would block apply.
-- next top risk is `SS-LCA-008` policy-mode crash-loop/operator-ack semantics.
+- `SS-LCA-008` crash-loop/operator-ack semantics is now PAPER-policy aligned: repeated unsafe stops classify as quarantine/observe, not routine operator acknowledgement. Future LIVE/PRE-LIVE acknowledgement remains explicit policy metadata.
+- next top risk is `SS-LCA-009` dashboard path ownership.
 
 ## Findings
 
@@ -137,14 +137,15 @@ The remaining risk is concentrated in older broker/order mutation harnesses and 
 ### SS-LCA-008 - HIGH - control policy / operator ack semantics
 
 - paths: `src/mgc_v05l/execution_core/track_b_crash_loop_protection.py:303`, `src/mgc_v05l/execution_core/track_b_runtime_resume_semantics.py:350`, `src/mgc_v05l/execution_core/track_b_runtime_supervisor_authority.py:434`
-- legacy/local behavior: Crash Loop Protection still emits OPERATOR_ACK_REQUIRED for repeated unsafe stops; Resume and Supervisor translate some of it through PAPER Recovery Policy, but the lower-level service remains human-gate flavored.
-- conflict with doctrine: PAPER policy should treat catastrophic candidates as evidence-rich bounded recovery/quarantine signals, not core human-gate dependencies. The current translation layer helps but leaves old semantics in a foundational service.
-- recommended v2 migration: Add policy_mode to Crash Loop v2 and emit PAPER-native classifications such as BUDGET_EXHAUSTED_QUARANTINE and UNSAFE_STOP_ENHANCED_OBSERVATION while preserving LIVE operator-ack semantics for future mode.
+- legacy/local behavior: Crash Loop Protection emitted OPERATOR_ACK_REQUIRED for repeated unsafe stops; Resume and Supervisor had to translate it through PAPER Recovery Policy.
+- conflict with doctrine: PAPER policy should treat catastrophic candidates as evidence-rich bounded recovery/quarantine signals, not core human-gate dependencies.
+- recommended v2 migration: Continue using PAPER-native crash-loop classifications such as REPEATED_UNSAFE_STOP_QUARANTINE and keep OPERATOR_ACK_REQUIRED only as a future LIVE/PRE-LIVE policy adapter.
+- current status: repeated unsafe PAPER stops now classify as `REPEATED_UNSAFE_STOP_QUARANTINE`, set `requires_operator_ack_for_paper=false`, expose `paper_action_policy=QUARANTINE_OBSERVE_ONLY`, and preserve `live_action_policy=REQUIRE_ACK` / `future_live_operator_ack_required=true`.
 - code change needed now: `false`
 - tests needed:
-  - PAPER repeated unsafe stops classify quarantine/budget state without mandatory ack.
-  - LIVE/PRE-LIVE mode can still require ack.
-  - Supervisor no longer needs translation glue for PAPER crash-loop states.
+  - PAPER repeated unsafe stops classify quarantine/budget state without mandatory ack. `done`
+  - LIVE/PRE-LIVE policy metadata can still show REQUIRE_ACK. `done`
+  - Manual-review display remains advisory in PAPER unless a hard invariant or ambiguous mutation identity is present. `done`
 
 ### SS-LCA-009 - MEDIUM - readiness / operator dashboard path ownership
 
@@ -197,7 +198,7 @@ The remaining risk is concentrated in older broker/order mutation harnesses and 
 | --- | --- | --- |
 | Agent Health v2 | MEDIUM | Add process/root/source_commit probes that are generation-aware and surfaced through Control Plane Snapshot. |
 | Self-Recover v2 | HIGH | Replace legacy OPERATOR_REQUIRED language with PAPER policy-mode posture and executor-ready action proposals. |
-| Crash Loop v2 | HIGH | Make crash-loop classifications policy-mode aware; PAPER budget/quarantine vs future LIVE ack. |
+| Crash Loop v2 | MEDIUM | Expand PAPER-native crash-loop budget ledger and reset semantics; LIVE ack remains a policy adapter. |
 | Runtime Resume v2 | HIGH | Consume snapshot/policy directly and reduce translation glue around legacy operator-ack states. |
 | Runtime Supervisor v2+ | HIGH | Make Control Plane Snapshot the only decision packet and move component reads to generation-tied diagnostics. |
 | Autonomous Recovery Executor v2 | CRITICAL | Enable one bounded RUNTIME_RETRY adapter only after snapshot validator, budget ledger, and dry-run audit are stable. |
@@ -207,12 +208,11 @@ The remaining risk is concentrated in older broker/order mutation harnesses and 
 
 ## Recommended Next Implementation Slice
 
-Continue snapshot/generation convergence on the remaining direct mutation and process-recovery surfaces:
+Continue snapshot/generation convergence on the remaining display, fallback, and local-artifact surfaces:
 
-1. Convert repair executor subprocess apply paths into Control Plane Snapshot-driven autonomous recovery adapters.
-2. Move remaining dashboard-path authority files to execution_core authority paths with projection-only compatibility outputs.
-3. Make crash-loop classifications policy-mode native so PAPER quarantine/budget states no longer need translation from LIVE-style operator-ack language.
-4. Add executor adapters for scoped lifecycle cleanup using the lifecycle state matrix and exact target snapshot identity.
+1. Move remaining dashboard-path authority files to execution_core authority paths with projection-only compatibility outputs.
+2. Make launch/status fallback flows diagnostic-only so they cannot bypass Control Plane Snapshot.
+3. Add executor adapters for scoped lifecycle cleanup using the lifecycle state matrix and exact target snapshot identity.
 
 This keeps PAPER autonomous and failure-discovery oriented while ensuring every mutation boundary is coherent, budgetable, auditable, and impossible to confuse with dashboard projection state.
 

@@ -150,20 +150,22 @@
     {
       "area": "control policy / operator ack semantics",
       "code_change_needed_now": false,
-      "doctrine_conflict": "PAPER policy should treat catastrophic candidates as evidence-rich bounded recovery/quarantine signals, not core human-gate dependencies. The current translation layer helps but leaves old semantics in a foundational service.",
+      "current_status": "Resolved for PAPER: repeated unsafe stops classify as REPEATED_UNSAFE_STOP_QUARANTINE, requires_operator_ack_for_paper=false, paper_action_policy=QUARANTINE_OBSERVE_ONLY, and live_action_policy=REQUIRE_ACK.",
+      "doctrine_conflict": "PAPER policy should treat catastrophic candidates as evidence-rich bounded recovery/quarantine signals, not core human-gate dependencies.",
       "id": "SS-LCA-008",
-      "legacy_local_behavior": "Crash Loop Protection still emits OPERATOR_ACK_REQUIRED for repeated unsafe stops; Resume and Supervisor translate some of it through PAPER Recovery Policy, but the lower-level service remains human-gate flavored.",
+      "legacy_local_behavior": "Crash Loop Protection previously emitted OPERATOR_ACK_REQUIRED for repeated unsafe stops; Resume and Supervisor translated that through PAPER Recovery Policy.",
       "paths": [
         "src/mgc_v05l/execution_core/track_b_crash_loop_protection.py:303",
         "src/mgc_v05l/execution_core/track_b_runtime_resume_semantics.py:350",
         "src/mgc_v05l/execution_core/track_b_runtime_supervisor_authority.py:434"
       ],
-      "recommended_v2_migration": "Add policy_mode to Crash Loop v2 and emit PAPER-native classifications such as BUDGET_EXHAUSTED_QUARANTINE and UNSAFE_STOP_ENHANCED_OBSERVATION while preserving LIVE operator-ack semantics for future mode.",
+      "policy_status": "PAPER_OPERATOR_ACK_NOT_CORE_DEPENDENCY",
+      "recommended_v2_migration": "Continue using PAPER-native crash-loop classifications such as REPEATED_UNSAFE_STOP_QUARANTINE and keep OPERATOR_ACK_REQUIRED only as a future LIVE/PRE-LIVE policy adapter.",
       "severity": "HIGH",
       "tests_needed": [
-        "PAPER repeated unsafe stops classify quarantine/budget state without mandatory ack.",
-        "LIVE/PRE-LIVE mode can still require ack.",
-        "Supervisor no longer needs translation glue for PAPER crash-loop states."
+        "PAPER repeated unsafe stops classify quarantine/budget state without mandatory ack. done",
+        "LIVE/PRE-LIVE policy metadata can still show REQUIRE_ACK. done",
+        "Manual-review display remains advisory in PAPER unless a hard invariant or ambiguous mutation identity is present. done"
       ]
     },
     {
@@ -242,15 +244,15 @@
       ]
     }
   ],
-  "generated_at": "2026-05-23T20:05:48.626900+00:00",
+  "generated_at": "2026-05-23T22:28:34.333751+00:00",
   "recommended_next_implementation_slice": {
-    "rationale": "Lower-level REST cancel, manual submit, lane submit, strategy bridge direct submit, cancel/replace, and modify-in-place are now snapshot-gated. The next top risk is process recovery and repair executor subprocess apply paths.",
+    "rationale": "Mutation and process-recovery apply boundaries are snapshot-gated, and PAPER crash-loop/operator-ack semantics are policy-mode aligned. The next risk is authority-path ownership and fallback display/launch flows that can confuse projections with execution_core authority.",
     "scope": [
-      "SS-LCA-007",
-      "SS-LCA-008",
-      "SS-LCA-009"
+      "SS-LCA-009",
+      "SS-LCA-010",
+      "SS-LCA-011"
     ],
-    "title": "Snapshot-gate repair executor and process recovery adapters"
+    "title": "Resolve dashboard path ownership and launch/status fallback flows"
   },
   "repo_root": "/Users/patrick/Dev/MGC-v05l-automation",
   "severity_counts": {
@@ -260,7 +262,6 @@
     "MEDIUM": 3
   },
   "top_5_risks": [
-    "SS-LCA-008",
     "SS-LCA-009",
     "SS-LCA-010",
     "SS-LCA-011",
@@ -278,9 +279,9 @@
       "priority": "HIGH"
     },
     {
-      "focus": "Make crash-loop classifications policy-mode aware; PAPER budget/quarantine vs future LIVE ack.",
+      "focus": "Expand PAPER-native crash-loop budget ledger and reset semantics; LIVE ack remains a policy adapter.",
       "item": "Crash Loop v2",
-      "priority": "HIGH"
+      "priority": "MEDIUM"
     },
     {
       "focus": "Consume snapshot/policy directly and reduce translation glue around legacy operator-ack states.",

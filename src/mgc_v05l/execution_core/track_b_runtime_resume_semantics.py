@@ -373,11 +373,14 @@ def _classify_resume(*, inputs: Mapping[str, Mapping[str, Any]]) -> dict[str, An
             )
         return _decision(
             RESUME_BLOCKED_OPERATOR_ACK_REQUIRED,
-            "Prior stop or crash-loop policy requires operator acknowledgement before resume.",
+            (
+                "Legacy operator-ack evidence is present; PAPER treats this as a blocked/quarantine posture "
+                "until PAPER Recovery Policy or fresh shared truth provides a bounded action."
+            ),
             blockers=[_blocker("operator_ack_required", str(evidence["crash_loop_classification"] or stop.get("stop_reason") or ""))],
             warnings=warnings,
             resume_mode="hold_down_operator_ack_required",
-            required_operator_ack=True,
+            required_operator_ack=False,
         )
 
     if evidence["crash_loop_restart_blocked"] is True:

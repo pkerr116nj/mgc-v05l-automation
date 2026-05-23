@@ -661,6 +661,7 @@ def _crash_loop_budget_exhausted(evidence: Mapping[str, Any]) -> bool:
         "REPEATED_RUNTIME_FAILURE",
         "REPEATED_MARKET_DATA_FAILURE",
         "REPEATED_BROKER_LEASE_FAILURE",
+        "REPEATED_UNSAFE_STOP_QUARANTINE",
         "OPERATOR_ACK_REQUIRED",
     }
 

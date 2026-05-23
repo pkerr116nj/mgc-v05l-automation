@@ -5,7 +5,11 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from mgc_v05l.execution_core.track_b_agent_health import HEALTHY, STOPPED_EXPECTED
-from mgc_v05l.execution_core.track_b_crash_loop_protection import NO_CRASH_LOOP, RESTART_COOLDOWN_ACTIVE
+from mgc_v05l.execution_core.track_b_crash_loop_protection import (
+    NO_CRASH_LOOP,
+    REPEATED_UNSAFE_STOP_QUARANTINE,
+    RESTART_COOLDOWN_ACTIVE,
+)
 from mgc_v05l.execution_core.track_b_managed_order_registry import NO_MANAGED_ORDERS
 from mgc_v05l.execution_core.track_b_managed_position_registry import NO_MANAGED_POSITIONS
 from mgc_v05l.execution_core.track_b_open_order_truth import NO_OPEN_ORDERS
@@ -92,6 +96,21 @@ def test_crash_loop_budget_exhausted_quarantines_without_paper_ack(tmp_path: Pat
     assert payload["bounded_recovery_budget"]["budget_exhausted"] is True
     assert payload["requires_operator_ack_for_paper"] is False
     assert payload["live_action_policy"] == "REQUIRE_ACK"
+
+
+def test_repeated_unsafe_stop_quarantine_keeps_future_live_ack_only(tmp_path: Path) -> None:
+    _seed_base(
+        tmp_path,
+        crash_loop_classification=REPEATED_UNSAFE_STOP_QUARANTINE,
+        crash_loop_restart_blocked=True,
+    )
+
+    payload = build_track_b_paper_recovery_policy(config=TrackBPaperRecoveryPolicyConfig(repo_root=tmp_path), now=NOW)
+
+    assert payload["paper_action_policy"] == QUARANTINE_OBSERVE_ONLY
+    assert payload["requires_operator_ack_for_paper"] is False
+    assert payload["live_action_policy"] == "REQUIRE_ACK"
+    assert payload["bounded_recovery_budget"]["budget_exhausted"] is True
 
 
 def test_prior_unsafe_stop_current_clean_truth_uses_enhanced_observation_not_ack(tmp_path: Path) -> None:

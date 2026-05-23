@@ -8,8 +8,8 @@ from mgc_v05l.execution_core.track_b_agent_health import HEALTHY, STOPPED_EXPECT
 from mgc_v05l.execution_core.track_b_crash_loop_protection import (
     INSUFFICIENT_HISTORY,
     NO_CRASH_LOOP,
-    OPERATOR_ACK_REQUIRED,
     REPEATED_BROKER_LEASE_FAILURE,
+    REPEATED_UNSAFE_STOP_QUARANTINE,
     RESTART_COOLDOWN_ACTIVE,
     TrackBCrashLoopProtectionConfig,
     build_dashboard_crash_loop_projection,
@@ -77,7 +77,7 @@ def test_repeated_runtime_preflight_exits_trigger_cooldown(tmp_path: Path) -> No
     assert payload["repeated_same_stop_reason_count"] == 2
 
 
-def test_repeated_unsafe_stops_require_operator_ack(tmp_path: Path) -> None:
+def test_repeated_unsafe_stops_quarantine_without_paper_operator_ack(tmp_path: Path) -> None:
     _seed_base(tmp_path)
     _write_launch_history(
         tmp_path,
@@ -101,9 +101,13 @@ def test_repeated_unsafe_stops_require_operator_ack(tmp_path: Path) -> None:
 
     payload = build_track_b_crash_loop_protection(config=TrackBCrashLoopProtectionConfig(repo_root=tmp_path), now=NOW)
 
-    assert payload["classification"] == OPERATOR_ACK_REQUIRED
+    assert payload["classification"] == REPEATED_UNSAFE_STOP_QUARANTINE
     assert payload["restart_blocked"] is True
-    assert payload["operator_ack_required"] is True
+    assert payload["operator_ack_required"] is False
+    assert payload["requires_operator_ack_for_paper"] is False
+    assert payload["paper_action_policy"] == "QUARANTINE_OBSERVE_ONLY"
+    assert payload["live_action_policy"] == "REQUIRE_ACK"
+    assert payload["future_live_operator_ack_required"] is True
 
 
 def test_repeated_broker_lease_failure_blocks_restart(tmp_path: Path) -> None:

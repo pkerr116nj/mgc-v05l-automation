@@ -456,8 +456,11 @@ def _classify_supervisor(*, inputs: Mapping[str, Mapping[str, Any]]) -> dict[str
         return _decision(
             SUPERVISOR_RESTART_BLOCKED_OPERATOR_ACK,
             "HOLD_DOWN_OPERATOR_ACK_REQUIRED",
-            "Runtime Resume Semantics or Crash Loop Protection requires operator acknowledgement.",
-            operator_ack_required=True,
+            (
+                "Legacy operator-ack evidence is present; PAPER treats this as advisory hold/quarantine "
+                "unless PAPER Recovery Policy explicitly requires acknowledgement."
+            ),
+            operator_ack_required=bool(evidence.get("paper_requires_operator_ack")),
             blockers=[
                 _blocker("runtime_resume", evidence["runtime_resume_classification"]),
                 _blocker("crash_loop_protection", evidence["crash_loop_classification"]),
@@ -476,8 +479,10 @@ def _classify_supervisor(*, inputs: Mapping[str, Mapping[str, Any]]) -> dict[str
         return _decision(
             SUPERVISOR_RESTART_BLOCKED_CRASH_LOOP,
             "HOLD_DOWN_CRASH_LOOP",
-            f"Crash Loop Protection is {evidence['crash_loop_classification']}.",
-            operator_ack_required=True,
+            (
+                f"Crash Loop Protection is {evidence['crash_loop_classification']}; "
+                "PAPER holds/quarantines without making operator acknowledgement a routine dependency."
+            ),
             blockers=[_blocker("crash_loop_protection", evidence["crash_loop_classification"])],
         )
 
@@ -636,7 +641,7 @@ def _recommended_next_command(*, supervisor_mode: str, classification: str, proo
         return "refresh PAPER recovery policy; operator ack is not a routine PAPER recovery dependency"
     if proof_window_status == PROOF_WINDOW_DATA_STALE:
         return "restore Phase-1 market-data freshness before proof"
-    return "manual review required before any runtime action"
+    return "PAPER advisory manual review: quarantine/observe, refresh evidence, and preserve artifacts before any mutation"
 
 
 def _operator_ack_fields(
@@ -654,10 +659,10 @@ def _operator_ack_fields(
         ack_type = "crash_loop_hold"
     elif classification == SUPERVISOR_RESTART_BLOCKED_OPERATOR_ACK:
         required = bool(evidence.get("paper_requires_operator_ack"))
-        reason = "Runtime Resume Semantics or Crash Loop Protection requires operator acknowledgement."
+        reason = "Legacy operator-ack evidence is present; PAPER treats acknowledgement as advisory unless policy says otherwise."
         ack_type = "unsafe_stop_or_operator_ack"
     elif classification == SUPERVISOR_MANUAL_REVIEW_REQUIRED:
-        reason = "Manual review is required before runtime action."
+        reason = "Manual review is advisory in PAPER unless a hard invariant or ambiguous mutation identity is present."
         ack_type = "manual_review"
     return {
         "required": required,

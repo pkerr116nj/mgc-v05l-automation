@@ -127,7 +127,7 @@ def test_broker_exposure_requires_cleanup(tmp_path: Path) -> None:
     assert payload["safe_to_start_runtime"] is False
 
 
-def test_suspicious_order_requires_manual_review(tmp_path: Path) -> None:
+def test_suspicious_order_manual_review_is_paper_advisory_not_ack_gate(tmp_path: Path) -> None:
     _seed_base(tmp_path, open_order_classification="SUSPICIOUS_ORDER_STATE", managed_order_classification="CLOSE_ORDER_SUSPICIOUS")
 
     payload = build_track_b_runtime_supervisor_authority(config=TrackBRuntimeSupervisorAuthorityConfig(repo_root=tmp_path), now=NOW)
@@ -135,7 +135,13 @@ def test_suspicious_order_requires_manual_review(tmp_path: Path) -> None:
     assert payload["classification"] == SUPERVISOR_MANUAL_REVIEW_REQUIRED
     assert payload["supervisor_mode"] == MANUAL_REVIEW_REQUIRED
     assert payload["recommended_action"] == "MANUAL_REVIEW_REQUIRED"
-    assert payload["recommended_next_command"] == "manual review required before any runtime action"
+    assert payload["recommended_next_command"] == (
+        "PAPER advisory manual review: quarantine/observe, refresh evidence, and preserve artifacts before any mutation"
+    )
+    assert payload["operator_ack"]["required"] is False
+    assert payload["operator_ack"]["reason"] == (
+        "Manual review is advisory in PAPER unless a hard invariant or ambiguous mutation identity is present."
+    )
     assert payload["safe_to_start_runtime"] is False
 
 
@@ -174,6 +180,25 @@ def test_prior_unsafe_stop_with_paper_bounded_retry_allows_start_without_ack(tmp
     assert payload["operator_ack"]["required"] is False
     assert payload["safe_to_start_runtime"] is True
     assert payload["evidence_summary"]["paper_action_policy"] == "AUTONOMOUS_RETRY_ELIGIBLE"
+
+
+def test_legacy_operator_ack_supervisor_hold_is_not_paper_ack_dependency(tmp_path: Path) -> None:
+    _seed_base(
+        tmp_path,
+        crash_loop_classification="OPERATOR_ACK_REQUIRED",
+        crash_loop_restart_blocked=True,
+        resume_classification=RESUME_BLOCKED_OPERATOR_ACK_REQUIRED,
+        resume_required_operator_ack=True,
+        paper_action_policy="OBSERVE",
+        paper_autonomous_recovery_allowed=False,
+    )
+
+    payload = build_track_b_runtime_supervisor_authority(config=TrackBRuntimeSupervisorAuthorityConfig(repo_root=tmp_path), now=NOW)
+
+    assert payload["classification"] == SUPERVISOR_PAPER_QUARANTINE_OBSERVE_ONLY
+    assert payload["operator_ack_required"] is False
+    assert payload["operator_ack"]["required"] is False
+    assert "quarantine-observe" in payload["reason"]
 
 
 def test_live_money_policy_hard_unsafe_blocks_supervisor(tmp_path: Path) -> None:
