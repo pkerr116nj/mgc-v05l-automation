@@ -154,8 +154,31 @@ Prefer modify-in-place over cancel/replace when the order is clean and eligible:
 - Same quantity.
 - No duplicate close order.
 - No suspicious sentinel state.
+- Order Adjustment Planner says `MODIFY_IN_PLACE_ELIGIBLE`.
+- Operator explicitly authorizes the modify boundary with exact current and new limit prices.
 
 Never submit a replacement while an existing close order is still live. Suspicious sentinel orders default to review-required or manual/TWS path, not automatic replacement.
+
+Modify-in-place v1 is an explicit operator-authorized boundary, not an automatic runtime action. Use the dry-run first:
+
+```bash
+python -m mgc_v05l.execution_core.track_b_managed_order_modify_in_place \
+  --broker-order-id 27 \
+  --perm-id 347068546 \
+  --symbol MNQ \
+  --contract MNQM6 \
+  --con-id 770561201 \
+  --action SELL \
+  --quantity 1 \
+  --current-known-limit 29555.50 \
+  --new-limit 29554.50
+```
+
+Apply mode requires the same exact identifiers plus `--apply --operator-authorized-modify` and a broker adapter caller that performs immediate pre-modify open-order refresh, same-order limit modification, and post-modify verification. The audit artifact is:
+
+```text
+outputs/reports/track_b_managed_order_modify_in_place/latest_managed_order_modify_in_place.json
+```
 
 Manual TWS intervention rules:
 
