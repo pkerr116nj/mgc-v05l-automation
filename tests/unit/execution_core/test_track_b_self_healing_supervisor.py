@@ -13,6 +13,7 @@ from mgc_v05l.execution_core.track_b_self_healing_supervisor import (
     RESTART_BLOCKED_MANAGED_POSITION_TRUTH,
     RESTART_BLOCKED_OPEN_ORDER_TRUTH,
     RESTART_BLOCKED_POSITION_TRUTH,
+    RESTART_BLOCKED_BROKER_LEASE_DEGRADED,
     RESTART_BLOCKED_DUPLICATE_WRITER,
     RESTART_BLOCKED_RECONCILIATION,
     RESTART_BLOCKED_RUNTIME_TRUTH,
@@ -204,6 +205,18 @@ def test_shared_truth_reconciliation_blocks_restart() -> None:
     result = classify_shared_truth_restart_evidence(evidence)
 
     assert result["classification"] == RESTART_BLOCKED_RECONCILIATION
+    assert result["reconciliation_classification"] == "BROKER_TRUTH_SETTLEMENT_TIMEOUT"
+
+
+def test_shared_truth_degraded_broker_lease_blocks_with_specific_classification() -> None:
+    evidence = _shared_truth_evidence(**{"Broker Truth Lease": "ACTIVE_DEGRADED_REFRESH_FAILING"})
+
+    result = classify_shared_truth_restart_evidence(evidence)
+
+    assert result["classification"] == RESTART_BLOCKED_BROKER_LEASE_DEGRADED
+    assert result["restart_allowed"] is False
+    assert result["broker_lease_classification"] == "ACTIVE_DEGRADED_REFRESH_FAILING"
+    assert "ACTIVE_DEGRADED_REFRESH_FAILING" in result["broker_lease_reason"]
 
 
 def test_shared_truth_missing_fails_closed_when_provided() -> None:

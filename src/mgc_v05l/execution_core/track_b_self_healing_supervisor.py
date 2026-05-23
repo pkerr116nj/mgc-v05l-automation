@@ -56,6 +56,7 @@ RESTART_BLOCKED_OPEN_ORDER_TRUTH = "RESTART_BLOCKED_OPEN_ORDER_TRUTH"
 RESTART_BLOCKED_MANAGED_ORDER_TRUTH = "RESTART_BLOCKED_MANAGED_ORDER_TRUTH"
 RESTART_BLOCKED_MANAGED_POSITION_TRUTH = "RESTART_BLOCKED_MANAGED_POSITION_TRUTH"
 RESTART_BLOCKED_RUNTIME_TRUTH = "RESTART_BLOCKED_RUNTIME_TRUTH"
+RESTART_BLOCKED_BROKER_LEASE_DEGRADED = "RESTART_BLOCKED_BROKER_LEASE_DEGRADED"
 
 DEFAULT_RESTART_WINDOW_SECONDS = 900
 DEFAULT_MAX_RESTART_ATTEMPTS = 3
@@ -850,13 +851,36 @@ def _first_shared_truth_service_blocker(classifications: Mapping[str, Any]) -> s
         ("Runtime Environment Truth", {"RUNTIME_DOWN_CLEAN"}, RESTART_BLOCKED_RUNTIME_TRUTH),
         ("Managed Position Registry", {"NO_MANAGED_POSITIONS"}, RESTART_BLOCKED_MANAGED_POSITION_TRUTH),
         ("Reconciliation", {RECONCILED_CLASSIFICATION}, RESTART_BLOCKED_RECONCILIATION),
-        ("Broker Truth Lease", {"ACTIVE"}, RESTART_BLOCKED_RECONCILIATION),
+        ("Broker Truth Lease", {"ACTIVE"}, _broker_lease_restart_classification(classifications)),
     )
     for service, allowed, restart_classification in checks:
         observed = str(classifications.get(service) or "MISSING")
         if observed not in allowed:
             return restart_classification
     return None
+
+
+def _broker_lease_restart_classification(classifications: Mapping[str, Any]) -> str:
+    lease = str(classifications.get("Broker Truth Lease") or "")
+    if lease == "ACTIVE_DEGRADED_REFRESH_FAILING":
+        return RESTART_BLOCKED_BROKER_LEASE_DEGRADED
+    return RESTART_BLOCKED_RECONCILIATION
+
+
+def _broker_lease_reason(
+    *,
+    classifications: Mapping[str, Any],
+    preflight_blockers: Sequence[Mapping[str, Any]],
+) -> str | None:
+    lease = str(classifications.get("Broker Truth Lease") or "")
+    if not lease or lease == "ACTIVE":
+        return None
+    for blocker in preflight_blockers:
+        if str(blocker.get("code") or "") == "broker_truth_lease_not_clean_for_runtime_start":
+            detail = str(blocker.get("detail") or "")
+            if detail:
+                return detail
+    return f"Broker Truth Lease is {lease}."
 
 
 def _shared_truth_restart_row(
@@ -873,6 +897,12 @@ def _shared_truth_restart_row(
         "restart_allowed": restart_allowed,
         "blockers": tuple(_dedupe([str(blocker) for blocker in blockers])),
         "classifications": dict(classifications),
+        "broker_lease_classification": classifications.get("Broker Truth Lease"),
+        "broker_lease_reason": _broker_lease_reason(
+            classifications=classifications,
+            preflight_blockers=preflight_blockers,
+        ),
+        "reconciliation_classification": classifications.get("Reconciliation"),
         "preflight_blockers": tuple(dict(blocker) for blocker in preflight_blockers),
         "artifact_paths": _mapping(evidence.get("artifact_paths")),
     }
