@@ -20,6 +20,7 @@ from .bar_models import build_bar_id
 from ..persistence.repositories import RepositorySet
 from .databento_provider import DatabentoHttpError, DatabentoMarketDataProvider
 from .canonical_maintenance import CanonicalMarketDataMaintenanceService
+from .phase1_market_session import MARKET_CLOSED_NO_FRESH_BARS, classify_phase1_futures_market_session
 from .provider_models import HistoricalBarsRequest
 from .schwab_adapter import SchwabMarketDataAdapter
 from .schwab_models import (
@@ -325,6 +326,10 @@ class Phase1RuntimeArtifactMissingError(Phase1RuntimeArtifactRecoverableError):
 
 class Phase1RuntimeArtifactStaleError(Phase1RuntimeArtifactRecoverableError):
     """Phase-1 runtime candle artifact exists but is too stale to route from."""
+
+
+class Phase1RuntimeArtifactMarketClosedError(Phase1RuntimeArtifactStaleError):
+    """Phase-1 artifact is stale because the futures market is closed."""
 
 
 class _DatabentoRawLiveSession:
@@ -686,6 +691,14 @@ class Phase1RuntimeArtifactPollingClient:
         )
         latest_age_seconds = max((now - latest_bar_end).total_seconds(), 0.0)
         if latest_age_seconds > threshold_seconds:
+            session = classify_phase1_futures_market_session(now)
+            if session["classification"] == MARKET_CLOSED_NO_FRESH_BARS:
+                raise Phase1RuntimeArtifactMarketClosedError(
+                    "Phase-1 runtime candle artifact has no fresh bars because the market is closed: "
+                    f"classification={MARKET_CLOSED_NO_FRESH_BARS} "
+                    f"session_reason={session.get('reason')} latest_bar={latest_bar_end.isoformat()} "
+                    f"age_seconds={latest_age_seconds:.3f} threshold_seconds={threshold_seconds:.3f} path={path}"
+                )
             raise Phase1RuntimeArtifactStaleError(
                 "Phase-1 runtime candle artifact is stale: "
                 f"latest_bar={latest_bar_end.isoformat()} age_seconds={latest_age_seconds:.3f} "
@@ -695,6 +708,14 @@ class Phase1RuntimeArtifactPollingClient:
         if generated_at is not None:
             generated_age_seconds = max((now - generated_at.astimezone(UTC)).total_seconds(), 0.0)
             if generated_age_seconds > threshold_seconds:
+                session = classify_phase1_futures_market_session(now)
+                if session["classification"] == MARKET_CLOSED_NO_FRESH_BARS:
+                    raise Phase1RuntimeArtifactMarketClosedError(
+                        "Phase-1 runtime candle artifact metadata has no fresh bars because the market is closed: "
+                        f"classification={MARKET_CLOSED_NO_FRESH_BARS} "
+                        f"session_reason={session.get('reason')} generated_at={generated_at.isoformat()} "
+                        f"age_seconds={generated_age_seconds:.3f} threshold_seconds={threshold_seconds:.3f} path={path}"
+                    )
                 raise Phase1RuntimeArtifactStaleError(
                     "Phase-1 runtime candle artifact metadata is stale: "
                     f"generated_at={generated_at.isoformat()} age_seconds={generated_age_seconds:.3f} "

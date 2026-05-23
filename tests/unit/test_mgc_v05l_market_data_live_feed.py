@@ -15,6 +15,7 @@ from mgc_v05l.market_data.live_feed import (
     databento_live_auth_response,
     HistoricalPollingLiveClient,
     LivePollingService,
+    Phase1RuntimeArtifactMarketClosedError,
     Phase1RuntimeArtifactPollingClient,
     databento_live_effective_end,
     databento_live_format_timestamp,
@@ -300,6 +301,33 @@ def test_phase1_runtime_artifact_polling_client_rejects_stale_or_empty_artifact(
 
     _write_phase1_runtime_artifact(root, bars=[])
     with pytest.raises(RuntimeError, match="no completed bars"):
+        client.poll_live_bars(None, "1m", SchwabLivePollRequest(internal_symbol="MNQ"))
+
+
+def test_phase1_runtime_artifact_polling_client_classifies_weekend_halt_stale_bars(tmp_path: Path) -> None:
+    root = tmp_path / "phase1_runtime_market_data"
+    _write_phase1_runtime_artifact(
+        root,
+        generated_at="2026-05-22T21:00:00+00:00",
+        bars=[
+            {
+                "bar_start": "2026-05-22T20:58:00+00:00",
+                "bar_end": "2026-05-22T20:59:00+00:00",
+                "open": 100,
+                "high": 101,
+                "low": 99,
+                "close": 100,
+                "volume": 10,
+                "completed": True,
+            }
+        ],
+    )
+    client = Phase1RuntimeArtifactPollingClient(
+        artifact_root=root,
+        now_fn=lambda: datetime.fromisoformat("2026-05-23T07:15:00+00:00"),
+    )
+
+    with pytest.raises(Phase1RuntimeArtifactMarketClosedError, match="MARKET_CLOSED_NO_FRESH_BARS"):
         client.poll_live_bars(None, "1m", SchwabLivePollRequest(internal_symbol="MNQ"))
 
 

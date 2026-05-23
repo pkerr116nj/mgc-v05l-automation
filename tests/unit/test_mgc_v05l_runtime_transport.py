@@ -16,6 +16,7 @@ from mgc_v05l.app.probationary_runtime import (
     _run_probationary_runtime_market_data_transport_probe,
 )
 from mgc_v05l.config_models import MarketDataProvider, ProbationaryPaperMarketDataSource, RuntimeMode
+from mgc_v05l.market_data.live_feed import Phase1RuntimeArtifactMarketClosedError
 
 
 def test_runtime_transport_probe_writes_dns_failure_artifact(monkeypatch, tmp_path: Path) -> None:
@@ -311,3 +312,93 @@ def test_phase1_artifact_paper_transport_probe_fails_closed_on_stale_artifact(
     assert payload["phase1_artifact_probe_attempted"] is True
     assert payload["phase1_artifact_probe_succeeds"] is False
     assert "stale" in payload["exception_text"]
+
+
+def test_phase1_artifact_paper_transport_probe_classifies_weekend_market_closed(
+    monkeypatch, tmp_path: Path
+) -> None:
+    settings = SimpleNamespace(
+        probationary_artifacts_path=tmp_path / "outputs" / "probationary_pattern_engine" / "paper_session",
+        symbol="MNQ",
+        timeframe="1m",
+        timezone_info=timezone.utc,
+        live_poll_lookback_minutes=180,
+        resolved_execution_timeframe="1m",
+        resolved_context_timeframes=(),
+        market_data_provider=MarketDataProvider.DATABENTO,
+        mode=RuntimeMode.PAPER,
+        probationary_paper_market_data_source=ProbationaryPaperMarketDataSource.PHASE1_RUNTIME_ARTIFACT,
+    )
+
+    class _FakePhase1ArtifactClient:
+        def __init__(self, *, artifact_root=None, required_source=None, now_fn=None):
+            self.artifact_root = artifact_root
+
+        def artifact_path(self, *, internal_symbol: str, internal_timeframe: str) -> Path:
+            return tmp_path / "phase1_runtime_market_data" / internal_symbol / internal_timeframe / "latest_runtime_candles.json"
+
+        def poll_live_bars(self, *_args, **_kwargs):
+            raise Phase1RuntimeArtifactMarketClosedError("MARKET_CLOSED_NO_FRESH_BARS weekend Globex halt")
+
+    monkeypatch.setattr(
+        "mgc_v05l.app.probationary_runtime.Phase1RuntimeArtifactPollingClient",
+        _FakePhase1ArtifactClient,
+    )
+
+    with pytest.raises(ProbationaryRuntimeTransportFailure) as excinfo:
+        _run_probationary_runtime_market_data_transport_probe(
+            settings=settings,
+            schwab_config_path=tmp_path / "schwab.local.json",
+        )
+
+    payload = excinfo.value.payload
+    assert payload["failure_kind"] == "MARKET_CLOSED_NO_FRESH_BARS"
+    assert payload["runtime_ready"] is False
+    assert payload["runtime_trading_blocked"] is True
+    assert "Globex" in payload["next_fix"]
+
+
+def test_phase1_artifact_paper_transport_probe_classifies_producer_down(
+    monkeypatch, tmp_path: Path
+) -> None:
+    settings = SimpleNamespace(
+        probationary_artifacts_path=tmp_path / "outputs" / "probationary_pattern_engine" / "paper_session",
+        symbol="MNQ",
+        timeframe="1m",
+        timezone_info=timezone.utc,
+        live_poll_lookback_minutes=180,
+        resolved_execution_timeframe="1m",
+        resolved_context_timeframes=(),
+        market_data_provider=MarketDataProvider.DATABENTO,
+        mode=RuntimeMode.PAPER,
+        probationary_paper_market_data_source=ProbationaryPaperMarketDataSource.PHASE1_RUNTIME_ARTIFACT,
+    )
+
+    class _FakePhase1ArtifactClient:
+        def __init__(self, *, artifact_root=None, required_source=None, now_fn=None):
+            self.artifact_root = artifact_root
+
+        def artifact_path(self, *, internal_symbol: str, internal_timeframe: str) -> Path:
+            return tmp_path / "phase1_runtime_market_data" / internal_symbol / internal_timeframe / "latest_runtime_candles.json"
+
+        def poll_live_bars(self, *_args, **_kwargs):
+            raise RuntimeError("Phase-1 runtime candle artifact is stale")
+
+    monkeypatch.setattr(
+        "mgc_v05l.app.probationary_runtime.Phase1RuntimeArtifactPollingClient",
+        _FakePhase1ArtifactClient,
+    )
+    monkeypatch.setattr(
+        "mgc_v05l.app.probationary_runtime._read_phase1_databento_live_listener_status",
+        lambda: {"listener_alive": False, "provider_status": "STOPPED"},
+    )
+
+    with pytest.raises(ProbationaryRuntimeTransportFailure) as excinfo:
+        _run_probationary_runtime_market_data_transport_probe(
+            settings=settings,
+            schwab_config_path=tmp_path / "schwab.local.json",
+        )
+
+    payload = excinfo.value.payload
+    assert payload["failure_kind"] == "PHASE1_MARKET_DATA_PRODUCER_DOWN"
+    assert payload["producer_status"]["listener_alive"] is False

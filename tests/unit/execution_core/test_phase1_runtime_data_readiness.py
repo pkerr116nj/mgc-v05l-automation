@@ -68,18 +68,38 @@ def test_valid_fixture_candles_and_features_are_ready(tmp_path: Path) -> None:
 
 
 def test_stale_fixture_candles_fail_closed(tmp_path: Path) -> None:
+    open_session_now = datetime(2026, 5, 11, 14, 0, tzinfo=timezone.utc)
     _write_artifact(
         tmp_path,
         symbol="GC",
         timeframe="1m",
-        generated_at=NOW - timedelta(minutes=10),
+        generated_at=open_session_now - timedelta(minutes=10),
     )
 
-    artifacts = build_phase1_runtime_data_readiness(config=_config(tmp_path))
+    artifacts = build_phase1_runtime_data_readiness(config=_config(tmp_path, now=open_session_now))
     gc = next(row for row in artifacts.rows if row["symbol"] == "GC")
 
     assert gc["runtime_candles_ready"] is False
     assert gc["candle_checks"]["1m"]["reason"] == "RUNTIME_CANDLES_STALE"
+
+
+def test_weekend_halt_stale_candles_are_classified_market_closed(tmp_path: Path) -> None:
+    friday_close = datetime(2026, 5, 22, 21, 0, tzinfo=timezone.utc)
+    saturday = datetime(2026, 5, 23, 7, 15, tzinfo=timezone.utc)
+    _write_artifact(
+        tmp_path,
+        symbol="GC",
+        timeframe="1m",
+        generated_at=friday_close,
+    )
+
+    artifacts = build_phase1_runtime_data_readiness(config=_config(tmp_path, now=saturday))
+    gc = next(row for row in artifacts.rows if row["symbol"] == "GC")
+
+    assert gc["runtime_candles_ready"] is False
+    assert gc["candle_checks"]["1m"]["reason"] == "MARKET_CLOSED_NO_FRESH_BARS"
+    assert gc["candle_checks"]["1m"]["market_session"]["market_closed"] is True
+    assert artifacts.report["market_session"]["classification"] == "MARKET_CLOSED_NO_FRESH_BARS"
 
 
 def test_historical_seed_is_visible_but_does_not_confirm_realtime_readiness(tmp_path: Path) -> None:

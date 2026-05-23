@@ -14,6 +14,10 @@ from mgc_v05l.execution_core.phase1_runtime_ticker_registry import (
     PHASE1_RUNTIME_TICKER_ORDER,
     PHASE1_RUNTIME_TIMEFRAMES,
 )
+from mgc_v05l.market_data.phase1_market_session import (
+    MARKET_CLOSED_NO_FRESH_BARS,
+    classify_phase1_futures_market_session,
+)
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 DEFAULT_OUTPUT_DIR = REPO_ROOT / "outputs" / "reports" / "phase1_runtime_data_readiness"
@@ -54,6 +58,7 @@ def build_phase1_runtime_data_readiness(
         "schema_version": "phase1_runtime_data_readiness_v1",
         "generated_at": now.isoformat(),
         "repo_root": str(Path(config.repo_root)),
+        "market_session": classify_phase1_futures_market_session(now),
         "archive_artifact_used": False,
         "research_artifact_used": False,
         "completed_candles_only": True,
@@ -177,6 +182,20 @@ def _artifact_check(
     freshness_seconds = FRESHNESS_SECONDS_BY_TIMEFRAME[timeframe]
     if age_seconds > freshness_seconds:
         stale_reason = "RUNTIME_CANDLES_STALE" if kind == "candles" else "FEATURES_STALE"
+        if kind == "candles":
+            session = classify_phase1_futures_market_session(now)
+            if session["classification"] == MARKET_CLOSED_NO_FRESH_BARS:
+                return _not_ready(
+                    path=path,
+                    reason=MARKET_CLOSED_NO_FRESH_BARS,
+                    kind=kind,
+                    detail=str(session.get("reason") or ""),
+                    age_seconds=age_seconds,
+                    bar_count=bar_count,
+                    historical_seed_ready=historical_seed_ready,
+                    realtime_feed_confirmed=realtime_feed_confirmed,
+                    market_session=session,
+                )
         return _not_ready(path=path, reason=stale_reason, kind=kind, age_seconds=age_seconds, bar_count=bar_count)
     return {
         "ready": True,
@@ -203,6 +222,7 @@ def _not_ready(
     bar_count: int = 0,
     historical_seed_ready: bool = False,
     realtime_feed_confirmed: bool = False,
+    market_session: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     if kind == "features" and reason == "FEATURES_MISSING":
         reason = "FEATURES_NOT_IMPLEMENTED"
@@ -215,6 +235,7 @@ def _not_ready(
         "bar_count": bar_count,
         "historical_seed_ready": historical_seed_ready,
         "realtime_feed_confirmed": realtime_feed_confirmed,
+        "market_session": market_session or {},
     }
 
 

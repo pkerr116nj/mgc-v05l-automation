@@ -83,6 +83,7 @@ from ..market_data import (
 from ..market_data.live_feed import (
     DatabentoRawLivePollingClient,
     Phase1RuntimeArtifactError,
+    Phase1RuntimeArtifactMarketClosedError,
     Phase1RuntimeArtifactMissingError,
     Phase1RuntimeArtifactPollingClient,
     Phase1RuntimeArtifactRecoverableError,
@@ -9599,7 +9600,11 @@ def _phase_coarse_session_group(current_phase: str) -> str:
 
 
 def _probationary_phase1_artifact_failure_payload(*, lane: Any, exc: Phase1RuntimeArtifactRecoverableError) -> dict[str, Any]:
-    if isinstance(exc, Phase1RuntimeArtifactStaleError):
+    if isinstance(exc, Phase1RuntimeArtifactMarketClosedError):
+        failure_kind = "MARKET_CLOSED_NO_FRESH_BARS"
+        data_state = "MARKET_CLOSED_NO_FRESH_BARS"
+        lane_state = "LANE_NOT_READY_MARKET_CLOSED"
+    elif isinstance(exc, Phase1RuntimeArtifactStaleError):
         failure_kind = "phase1_runtime_artifact_stale"
         data_state = "DATA_STALE_INSTRUMENT"
         lane_state = "LANE_NOT_READY_DATA_STALE"
@@ -17008,6 +17013,48 @@ def _phase1_runtime_artifact_probe_timeframes(settings: StrategySettings) -> lis
     return normalized or ["1m"]
 
 
+def _read_phase1_databento_live_listener_status() -> dict[str, Any]:
+    path = (
+        Path(__file__).resolve().parents[3]
+        / "outputs"
+        / "reports"
+        / "phase1_databento_live_runtime_candles"
+        / "latest_phase1_databento_live_listener_status.json"
+    )
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (FileNotFoundError, json.JSONDecodeError, OSError):
+        return {"classification": "PHASE1_MARKET_DATA_PRODUCER_STATUS_MISSING", "path": str(path)}
+    if not isinstance(payload, dict):
+        return {"classification": "PHASE1_MARKET_DATA_PRODUCER_STATUS_INVALID", "path": str(path)}
+    return {
+        "path": str(path),
+        "final_classification": payload.get("final_classification"),
+        "provider_status": payload.get("provider_status"),
+        "listener_alive": payload.get("listener_alive"),
+        "generated_at": payload.get("generated_at"),
+        "latest_record_at": payload.get("latest_record_at"),
+        "ohlcv_records_received": payload.get("ohlcv_records_received"),
+        "provider_errors": payload.get("provider_errors") or [],
+    }
+
+
+def _phase1_listener_is_down(listener_status: Mapping[str, Any]) -> bool:
+    if not listener_status:
+        return True
+    if str(listener_status.get("classification") or "") in {
+        "PHASE1_MARKET_DATA_PRODUCER_STATUS_MISSING",
+        "PHASE1_MARKET_DATA_PRODUCER_STATUS_INVALID",
+    }:
+        return True
+    if listener_status.get("listener_alive") is False:
+        return True
+    provider_status = str(listener_status.get("provider_status") or "").upper()
+    if provider_status and provider_status not in {"RUNNING", "STARTED"}:
+        return True
+    return False
+
+
 def _phase1_runtime_artifact_transport_probe(settings: StrategySettings) -> dict[str, Any]:
     artifact_root = (
         Path(__file__).resolve().parents[3]
@@ -17061,14 +17108,34 @@ def _phase1_runtime_artifact_transport_probe(settings: StrategySettings) -> dict
                     }
                 )
     except Exception as exc:
+        listener_status = _read_phase1_databento_live_listener_status()
+        market_closed = isinstance(exc, Phase1RuntimeArtifactMarketClosedError)
+        producer_down = _phase1_listener_is_down(listener_status)
+        failure_kind = "phase1_runtime_artifact_unhealthy"
+        message = "Phase-1 runtime artifact health check failed for artifact-backed PAPER runtime startup."
+        next_fix = failure_base["next_fix"]
+        if market_closed:
+            failure_kind = "MARKET_CLOSED_NO_FRESH_BARS"
+            message = "Phase-1 runtime artifacts are stale because the futures market is closed; no fresh bars are expected."
+            next_fix = (
+                "Wait for Globex to reopen and for Phase-1 Databento runtime candle artifacts to refresh. "
+                "Runtime trading remains blocked while candles are stale."
+            )
+        elif producer_down:
+            failure_kind = "PHASE1_MARKET_DATA_PRODUCER_DOWN"
+            message = "Phase-1 Databento runtime candle producer is not running or not reporting live listener status."
+            next_fix = "Restart only the Phase-1 Databento runtime candle producer, then rerun the artifact-backed preflight."
         failure_payload = {
             **failure_base,
-            "failure_kind": "phase1_runtime_artifact_unhealthy",
+            "failure_kind": failure_kind,
             "phase1_artifact_probe_attempted": True,
             "phase1_artifact_probe_succeeds": False,
             "checked_artifacts": checked_artifacts,
             "exception_text": str(exc),
-            "message": "Phase-1 runtime artifact health check failed for artifact-backed PAPER runtime startup.",
+            "message": message,
+            "next_fix": next_fix,
+            "producer_status": listener_status,
+            "runtime_trading_blocked": True,
         }
         failure_path = _write_probationary_runtime_transport_failure(settings, failure_payload)
         failure_payload["artifact_path"] = str(failure_path)
