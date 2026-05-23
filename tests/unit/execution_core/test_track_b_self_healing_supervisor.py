@@ -7,13 +7,20 @@ from pathlib import Path
 from mgc_v05l.execution_core.track_b_self_healing_supervisor import (
     DEFAULT_SELF_HEALING_HEALTH_ARTIFACT,
     RESTART_ALLOWED,
+    RESTART_ALLOWED_CLEAN,
     RESTART_BUDGET_EXHAUSTED,
+    RESTART_BLOCKED_MANAGED_ORDER_TRUTH,
+    RESTART_BLOCKED_MANAGED_POSITION_TRUTH,
+    RESTART_BLOCKED_OPEN_ORDER_TRUTH,
+    RESTART_BLOCKED_POSITION_TRUTH,
     RESTART_BLOCKED_DUPLICATE_WRITER,
     RESTART_BLOCKED_RECONCILIATION,
+    RESTART_BLOCKED_RUNTIME_TRUTH,
     RESTART_COOLDOWN_ACTIVE,
     RESTART_NOT_NEEDED_HEALTHY,
     build_track_b_self_healing_agent_registry,
     build_track_b_self_healing_health,
+    classify_shared_truth_restart_evidence,
     classify_restart_budget_state,
     classify_track_b_self_healing_health,
     write_track_b_self_healing_health,
@@ -136,6 +143,79 @@ def test_runtime_degraded_becomes_restart_candidate_for_clean_broker_state() -> 
     assert result["auto_restart_allowed"] is True
     assert result["restart_candidates"] == ("paper_runtime",)
     assert "paper_runtime_not_running" in result["agents"]["paper_runtime"]["blockers"]
+
+
+def test_shared_truth_clean_allows_runtime_restart_candidate() -> None:
+    inputs = _inputs()
+    inputs["agents"]["paper_runtime"]["process_running"] = False
+    inputs["shared_truth_restart_evidence"] = _shared_truth_evidence()
+
+    result = classify_track_b_self_healing_health(inputs)
+
+    assert result["classification"] == "AUTO_RESTART_ELIGIBLE"
+    assert result["auto_restart_allowed"] is True
+    assert result["shared_truth_restart_evidence"]["restart_eligibility"]["classification"] == RESTART_ALLOWED_CLEAN
+
+
+def test_shared_truth_open_order_blocks_restart() -> None:
+    evidence = _shared_truth_evidence(**{"Open Order Truth": "UNKNOWN_OPEN_ORDER"})
+
+    result = classify_shared_truth_restart_evidence(evidence)
+
+    assert result["classification"] == RESTART_BLOCKED_OPEN_ORDER_TRUTH
+    assert result["restart_allowed"] is False
+
+
+def test_shared_truth_position_truth_blocks_restart() -> None:
+    evidence = _shared_truth_evidence(**{"Position Truth": "ATTENTION_REQUIRED"})
+
+    result = classify_shared_truth_restart_evidence(evidence)
+
+    assert result["classification"] == RESTART_BLOCKED_POSITION_TRUTH
+
+
+def test_shared_truth_managed_order_blocks_restart() -> None:
+    evidence = _shared_truth_evidence(**{"Managed Order Registry": "CLOSE_ORDER_SUSPICIOUS"})
+
+    result = classify_shared_truth_restart_evidence(evidence)
+
+    assert result["classification"] == RESTART_BLOCKED_MANAGED_ORDER_TRUTH
+
+
+def test_shared_truth_managed_position_blocks_restart() -> None:
+    evidence = _shared_truth_evidence(**{"Managed Position Registry": "OPEN_MANAGED_MATCHED"})
+
+    result = classify_shared_truth_restart_evidence(evidence)
+
+    assert result["classification"] == RESTART_BLOCKED_MANAGED_POSITION_TRUTH
+
+
+def test_shared_truth_runtime_truth_blocks_restart() -> None:
+    evidence = _shared_truth_evidence(**{"Runtime Environment Truth": "DUPLICATE_RUNTIME_WRITERS"})
+
+    result = classify_shared_truth_restart_evidence(evidence)
+
+    assert result["classification"] == RESTART_BLOCKED_RUNTIME_TRUTH
+
+
+def test_shared_truth_reconciliation_blocks_restart() -> None:
+    evidence = _shared_truth_evidence(**{"Reconciliation": "BROKER_TRUTH_SETTLEMENT_TIMEOUT"})
+
+    result = classify_shared_truth_restart_evidence(evidence)
+
+    assert result["classification"] == RESTART_BLOCKED_RECONCILIATION
+
+
+def test_shared_truth_missing_fails_closed_when_provided() -> None:
+    inputs = _inputs()
+    inputs["agents"]["paper_runtime"]["process_running"] = False
+    inputs["shared_truth_restart_evidence"] = {"restart_eligibility": {"classification": "RESTART_BLOCKED_SHARED_TRUTH_MISSING"}}
+
+    result = classify_track_b_self_healing_health(inputs)
+
+    assert result["classification"] == "AUTO_RESTART_BLOCKED"
+    assert result["auto_restart_allowed"] is False
+    assert "shared_truth_restart_blocked_shared_truth_missing" in result["blockers"]
 
 
 def test_paper_runtime_truth_is_optional_evidence_not_restart_authority(tmp_path: Path) -> None:
@@ -361,6 +441,42 @@ def _inputs() -> dict:
             "broker_truth_lease_state": "ACTIVE",
             "live_money_eligible": False,
             "duplicate_conflicting_runtime_count": 0,
+        },
+    }
+
+
+def _shared_truth_evidence(**overrides: str) -> dict:
+    classifications = {
+        "Open Order Truth": "NO_OPEN_ORDERS",
+        "Managed Order Registry": "NO_MANAGED_ORDERS",
+        "Position Truth": "CLEAN_FLAT_READY",
+        "Runtime Environment Truth": "RUNTIME_DOWN_CLEAN",
+        "Managed Position Registry": "NO_MANAGED_POSITIONS",
+        "Reconciliation": RECONCILED,
+        "Broker Truth Lease": "ACTIVE",
+    }
+    classifications.update(overrides)
+    return {
+        "classifications": classifications,
+        "runtime_start_preflight": {
+            "classification": "SHARED_TRUTH_PREFLIGHT_CLEAN" if not overrides else "SHARED_TRUTH_PREFLIGHT_BLOCKED",
+            "clean_for_runtime_start": not overrides,
+            "blockers": [
+                {
+                    "code": f"{service.lower().replace(' ', '_')}_not_clean_for_runtime_start",
+                    "service": service,
+                    "observed": observed,
+                }
+                for service, observed in overrides.items()
+            ],
+        },
+        "unsafe_blockers": [],
+        "artifact_paths": {
+            "Open Order Truth": "outputs/track_b_execution_core/open_order_truth/latest_open_order_truth.json",
+            "Managed Order Registry": "outputs/track_b_execution_core/managed_orders/latest_managed_orders.json",
+            "Position Truth": "outputs/track_b_execution_core/position_truth/latest_position_truth.json",
+            "Runtime Environment Truth": "outputs/track_b_execution_core/runtime_truth/latest_runtime_environment_truth.json",
+            "Managed Position Registry": "outputs/track_b_execution_core/managed_positions/latest_managed_positions.json",
         },
     }
 

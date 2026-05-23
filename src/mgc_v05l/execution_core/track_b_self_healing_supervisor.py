@@ -25,6 +25,11 @@ from mgc_v05l.execution_core.track_b_readiness_state import (
     DEFAULT_CANONICAL_READINESS_ARTIFACT,
     DEFAULT_TRACK_B_EXPECTED_ACTIVE_ROOT,
 )
+from mgc_v05l.execution_core.track_b_shared_truth_refresh_cli import (
+    TrackBSharedTruthRefreshConfig,
+    build_runtime_start_preflight_summary,
+    refresh_track_b_shared_truth,
+)
 
 DEFAULT_SELF_HEALING_HEALTH_ARTIFACT = (
     Path("outputs") / "operator_dashboard" / "runtime" / "latest_track_b_self_healing_health.json"
@@ -45,6 +50,12 @@ RESTART_BUDGET_EXHAUSTED = "RESTART_BUDGET_EXHAUSTED"
 RESTART_BLOCKED_DUPLICATE_WRITER = "RESTART_BLOCKED_DUPLICATE_WRITER"
 RESTART_BLOCKED_RECONCILIATION = "RESTART_BLOCKED_RECONCILIATION"
 RESTART_NOT_NEEDED_HEALTHY = "RESTART_NOT_NEEDED_HEALTHY"
+RESTART_ALLOWED_CLEAN = "RESTART_ALLOWED_CLEAN"
+RESTART_BLOCKED_POSITION_TRUTH = "RESTART_BLOCKED_POSITION_TRUTH"
+RESTART_BLOCKED_OPEN_ORDER_TRUTH = "RESTART_BLOCKED_OPEN_ORDER_TRUTH"
+RESTART_BLOCKED_MANAGED_ORDER_TRUTH = "RESTART_BLOCKED_MANAGED_ORDER_TRUTH"
+RESTART_BLOCKED_MANAGED_POSITION_TRUTH = "RESTART_BLOCKED_MANAGED_POSITION_TRUTH"
+RESTART_BLOCKED_RUNTIME_TRUTH = "RESTART_BLOCKED_RUNTIME_TRUTH"
 
 DEFAULT_RESTART_WINDOW_SECONDS = 900
 DEFAULT_MAX_RESTART_ATTEMPTS = 3
@@ -128,12 +139,18 @@ def build_track_b_self_healing_health(
             process_probe=process_probe,
         )
     safety = _read_safety_state(repo_root)
+    shared_truth = _read_shared_truth_restart_evidence(
+        repo_root=repo_root,
+        now=current,
+        process_probe=process_probe,
+    )
     return classify_track_b_self_healing_health(
         {
             "generated_at": current.isoformat(),
             "expected_root": str(expected_root),
             "agents": agent_inputs,
             "broker_safety": safety,
+            "shared_truth_restart_evidence": shared_truth,
         }
     )
 
@@ -147,6 +164,12 @@ def classify_track_b_self_healing_health(inputs: Mapping[str, Any]) -> dict[str,
     agents = _mapping(inputs.get("agents"))
     broker_safety = _mapping(inputs.get("broker_safety"))
     restart_policy = _mapping(inputs.get("restart_policy"))
+    shared_truth_restart_evidence = _mapping(inputs.get("shared_truth_restart_evidence"))
+    if shared_truth_restart_evidence and not _mapping(shared_truth_restart_evidence.get("restart_eligibility")):
+        shared_truth_restart_evidence = {
+            **shared_truth_restart_evidence,
+            "restart_eligibility": classify_shared_truth_restart_evidence(shared_truth_restart_evidence),
+        }
 
     blockers: list[str] = []
     warnings: list[str] = []
@@ -169,6 +192,13 @@ def classify_track_b_self_healing_health(inputs: Mapping[str, Any]) -> dict[str,
         if result["restart_candidate"]:
             restart_candidates.append(agent_id)
 
+    shared_truth_blockers = (
+        _shared_truth_restart_blockers(shared_truth_restart_evidence)
+        if "paper_runtime" in restart_candidates
+        else []
+    )
+    blockers.extend(shared_truth_blockers)
+
     duplicate_submitters = _int(broker_safety.get("duplicate_conflicting_runtime_count"))
     if duplicate_submitters:
         blockers.append("duplicate_conflicting_runtimes")
@@ -184,7 +214,12 @@ def classify_track_b_self_healing_health(inputs: Mapping[str, Any]) -> dict[str,
 
     wrong_root = any("wrong_root" in result["blockers"] for result in agent_results.values())
     restart_blocked = bool(
-        unsafe_broker_blockers or live_money_eligible or wrong_root or duplicate_submitters or stale_launchctl_jobs
+        unsafe_broker_blockers
+        or shared_truth_blockers
+        or live_money_eligible
+        or wrong_root
+        or duplicate_submitters
+        or stale_launchctl_jobs
     )
     required_unhealthy = any(
         result["required"] and result["health_state"] != "HEALTHY" for result in agent_results.values()
@@ -249,8 +284,64 @@ def classify_track_b_self_healing_health(inputs: Mapping[str, Any]) -> dict[str,
         "registry": tuple(contract.as_dict() for contract in registry_by_id.values()),
         "agents": agent_results,
         "broker_safety": dict(broker_safety),
+        "shared_truth_restart_evidence": dict(shared_truth_restart_evidence),
         "stale_launchctl_runtime_job_count": stale_launchctl_jobs,
     }
+
+
+def classify_shared_truth_restart_evidence(evidence: Mapping[str, Any]) -> dict[str, Any]:
+    """Classify execution_core shared-truth evidence for restart supervision."""
+
+    if not evidence:
+        return {
+            "classification": "RESTART_BLOCKED_SHARED_TRUTH_MISSING",
+            "restart_allowed": False,
+            "blockers": ("shared_truth_missing",),
+            "classifications": {},
+            "artifact_paths": {},
+        }
+    classifications = _mapping(evidence.get("classifications"))
+    preflight = _mapping(evidence.get("runtime_start_preflight"))
+    unsafe_blockers = tuple(str(_mapping(row).get("code") or "") for row in _list(evidence.get("unsafe_blockers")))
+    preflight_blockers = tuple(_mapping(row) for row in _list(preflight.get("blockers")))
+    if unsafe_blockers:
+        return _shared_truth_restart_row(
+            "RESTART_BLOCKED_SHARED_TRUTH_UNSAFE",
+            classifications=classifications,
+            evidence=evidence,
+            blockers=unsafe_blockers,
+            preflight_blockers=preflight_blockers,
+        )
+
+    service_blocker = _first_shared_truth_service_blocker(classifications)
+    if service_blocker:
+        return _shared_truth_restart_row(
+            service_blocker,
+            classifications=classifications,
+            evidence=evidence,
+            blockers=tuple(blocker.get("code") or service_blocker.lower() for blocker in preflight_blockers)
+            or (service_blocker.lower(),),
+            preflight_blockers=preflight_blockers,
+        )
+
+    if preflight.get("clean_for_runtime_start") is False:
+        return _shared_truth_restart_row(
+            "RESTART_BLOCKED_SHARED_TRUTH_PREFLIGHT",
+            classifications=classifications,
+            evidence=evidence,
+            blockers=tuple(blocker.get("code") or "shared_truth_preflight_blocked" for blocker in preflight_blockers)
+            or ("shared_truth_preflight_blocked",),
+            preflight_blockers=preflight_blockers,
+        )
+
+    return _shared_truth_restart_row(
+        RESTART_ALLOWED_CLEAN,
+        classifications=classifications,
+        evidence=evidence,
+        blockers=(),
+        preflight_blockers=preflight_blockers,
+        restart_allowed=True,
+    )
 
 
 def classify_restart_budget_state(
@@ -612,6 +703,57 @@ def _read_safety_state(repo_root: Path) -> dict[str, Any]:
     }
 
 
+def _read_shared_truth_restart_evidence(
+    *,
+    repo_root: Path,
+    now: datetime,
+    process_probe: Callable[[int], Mapping[str, Any]] | None,
+) -> dict[str, Any]:
+    def pid_running(pid: int) -> bool:
+        if process_probe is None:
+            return False
+        return _bool(_mapping(process_probe(pid)).get("running"))
+
+    def process_root(pid: int) -> Path | None:
+        if process_probe is None:
+            return None
+        cwd = str(_mapping(process_probe(pid)).get("cwd") or "")
+        if not cwd:
+            return None
+        try:
+            return Path(cwd).expanduser().resolve()
+        except OSError:
+            return None
+
+    shared_truth = refresh_track_b_shared_truth(
+        config=TrackBSharedTruthRefreshConfig(
+            repo_root=repo_root,
+            broker_lease_history_path=None,
+        ),
+        now=now,
+        pid_running=pid_running if process_probe is not None else None,
+        process_root_resolver=process_root if process_probe is not None else None,
+    )
+    preflight = build_runtime_start_preflight_summary(shared_truth)
+    classification = classify_shared_truth_restart_evidence(
+        {
+            **shared_truth,
+            "runtime_start_preflight": preflight,
+        }
+    )
+    return {
+        "source": "execution_core_shared_truth_refresh",
+        "read_only": True,
+        "projection_consumed": False,
+        "classifications": _mapping(shared_truth.get("classifications")),
+        "runtime_start_preflight": preflight,
+        "unsafe_blockers": tuple(_mapping(row) for row in _list(shared_truth.get("unsafe_blockers"))),
+        "warnings": tuple(_mapping(row) for row in _list(shared_truth.get("warnings"))),
+        "artifact_paths": _mapping(shared_truth.get("artifact_paths")),
+        "restart_eligibility": classification,
+    }
+
+
 def _classify_agent(*, contract: AgentContract, supplied: Mapping[str, Any], expected_root: str) -> dict[str, Any]:
     blockers: list[str] = []
     warnings: list[str] = []
@@ -688,6 +830,52 @@ def _broker_safety_blockers(safety: Mapping[str, Any]) -> list[str]:
     if _int(safety.get("track_b_broker_open_order_count")) and classification != RECONCILED_CLASSIFICATION:
         blockers.append("unknown_open_orders")
     return _dedupe(blockers)
+
+
+def _shared_truth_restart_blockers(evidence: Mapping[str, Any]) -> list[str]:
+    if not evidence:
+        return []
+    eligibility = _mapping(evidence.get("restart_eligibility")) or classify_shared_truth_restart_evidence(evidence)
+    classification = str(eligibility.get("classification") or "")
+    if classification == RESTART_ALLOWED_CLEAN:
+        return []
+    return [f"shared_truth_{classification.lower()}"] or ["shared_truth_restart_blocked"]
+
+
+def _first_shared_truth_service_blocker(classifications: Mapping[str, Any]) -> str | None:
+    checks = (
+        ("Open Order Truth", {"NO_OPEN_ORDERS"}, RESTART_BLOCKED_OPEN_ORDER_TRUTH),
+        ("Managed Order Registry", {"NO_MANAGED_ORDERS"}, RESTART_BLOCKED_MANAGED_ORDER_TRUTH),
+        ("Position Truth", {"CLEAN_FLAT_READY"}, RESTART_BLOCKED_POSITION_TRUTH),
+        ("Runtime Environment Truth", {"RUNTIME_DOWN_CLEAN"}, RESTART_BLOCKED_RUNTIME_TRUTH),
+        ("Managed Position Registry", {"NO_MANAGED_POSITIONS"}, RESTART_BLOCKED_MANAGED_POSITION_TRUTH),
+        ("Reconciliation", {RECONCILED_CLASSIFICATION}, RESTART_BLOCKED_RECONCILIATION),
+        ("Broker Truth Lease", {"ACTIVE"}, RESTART_BLOCKED_RECONCILIATION),
+    )
+    for service, allowed, restart_classification in checks:
+        observed = str(classifications.get(service) or "MISSING")
+        if observed not in allowed:
+            return restart_classification
+    return None
+
+
+def _shared_truth_restart_row(
+    classification: str,
+    *,
+    classifications: Mapping[str, Any],
+    evidence: Mapping[str, Any],
+    blockers: Sequence[str],
+    preflight_blockers: Sequence[Mapping[str, Any]],
+    restart_allowed: bool = False,
+) -> dict[str, Any]:
+    return {
+        "classification": classification,
+        "restart_allowed": restart_allowed,
+        "blockers": tuple(_dedupe([str(blocker) for blocker in blockers])),
+        "classifications": dict(classifications),
+        "preflight_blockers": tuple(dict(blocker) for blocker in preflight_blockers),
+        "artifact_paths": _mapping(evidence.get("artifact_paths")),
+    }
 
 
 def _artifact_state(contract: ArtifactContract, *, now: datetime) -> dict[str, Any]:
@@ -806,6 +994,10 @@ def _ensure_utc(value: datetime) -> datetime:
 
 def _mapping(value: Any) -> dict[str, Any]:
     return dict(value) if isinstance(value, Mapping) else {}
+
+
+def _list(value: Any) -> list[Any]:
+    return list(value) if isinstance(value, list) else []
 
 
 def _bool(value: object) -> bool:
