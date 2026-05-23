@@ -284,9 +284,19 @@ def test_track_b_control_plane_status_projection_displays_closed_market_services
     assert summary["runtime_resume_classification"] == "RESUME_BLOCKED_MARKET_CLOSED"
     assert summary["runtime_resume_allowed"] is False
     assert summary["runtime_resume_safe_to_start_runtime"] is False
+    assert summary["runtime_supervisor_classification"] == "SUPERVISOR_WAIT_MARKET_CLOSED"
+    assert summary["runtime_supervisor_mode"] == "MARKET_CLOSED_WAIT"
+    assert summary["runtime_supervisor_proof_window_status"] == "market_closed"
+    assert summary["runtime_supervisor_recommended_next_command"] == (
+        "wait for market reopen; rerun proof readiness before any runtime start"
+    )
+    assert summary["runtime_supervisor_operator_ack_required"] is False
     assert summary["market_closed_no_fresh_bars_expected"] is True
-    assert summary["operator_message"] == "Market closed/no fresh bars expected"
+    assert summary["operator_message"] == (
+        "MARKET_CLOSED_WAIT: market closed/no fresh bars expected; wait and rerun proof readiness after reopen"
+    )
     assert "outputs/operator_dashboard/runtime/latest_track_b_runtime_resume_semantics.json" not in json.dumps(summary)
+    assert "outputs/operator_dashboard/runtime/latest_track_b_runtime_supervisor_authority.json" not in json.dumps(summary)
 
 
 def test_track_b_control_plane_status_projection_displays_crash_loop_and_operator_ack(tmp_path: Path) -> None:
@@ -307,6 +317,9 @@ def test_track_b_control_plane_status_projection_displays_crash_loop_and_operato
     assert summary["crash_loop_restart_blocked"] is True
     assert summary["runtime_resume_classification"] == "RESUME_BLOCKED_OPERATOR_ACK_REQUIRED"
     assert summary["runtime_resume_required_operator_ack"] is True
+    assert summary["runtime_supervisor_mode"] == "CRASH_LOOP_HOLD"
+    assert summary["runtime_supervisor_operator_ack_required"] is True
+    assert summary["runtime_supervisor_operator_ack"]["ack_type"] == "crash_loop_hold"
     assert summary["attention_required"] is True
     assert summary["runtime_resume_blockers"] == [
         {"code": "operator_ack_required", "detail": "paper_reconciliation_mismatch"}
@@ -337,7 +350,11 @@ def test_latest_track_b_operator_status_payload_includes_control_plane_projectio
     assert control_plane["projection_only"] is True
     assert control_plane["not_routing_authority"] is True
     assert control_plane["runtime_resume_classification"] == "RESUME_BLOCKED_MARKET_CLOSED"
-    assert control_plane["operator_message"] == "Market closed/no fresh bars expected"
+    assert control_plane["runtime_supervisor_mode"] == "MARKET_CLOSED_WAIT"
+    assert control_plane["runtime_supervisor_proof_window_status"] == "market_closed"
+    assert control_plane["operator_message"] == (
+        "MARKET_CLOSED_WAIT: market closed/no fresh bars expected; wait and rerun proof readiness after reopen"
+    )
 
 
 def _write_track_b_control_plane_artifacts(
@@ -352,6 +369,11 @@ def _write_track_b_control_plane_artifacts(
     runtime_resume_safe_to_start_runtime: bool = False,
     runtime_resume_required_operator_ack: bool = False,
     runtime_resume_blockers: list[dict[str, str]] | None = None,
+    runtime_supervisor_classification: str | None = None,
+    runtime_supervisor_mode: str | None = None,
+    runtime_supervisor_proof_window_status: str | None = None,
+    runtime_supervisor_recommended_next_command: str | None = None,
+    runtime_supervisor_operator_ack: dict[str, object] | None = None,
 ) -> None:
     _write_json_file(
         root / "outputs/track_b_execution_core/agent_registry/latest_agent_registry.json",
@@ -380,6 +402,54 @@ def _write_track_b_control_plane_artifacts(
             "reason": runtime_resume_reason,
             "blockers": runtime_resume_blockers or [],
             "warnings": [],
+        },
+    )
+    supervisor_classification = runtime_supervisor_classification or (
+        "SUPERVISOR_WAIT_MARKET_CLOSED"
+        if runtime_resume_classification == "RESUME_BLOCKED_MARKET_CLOSED"
+        else "SUPERVISOR_RESTART_BLOCKED_CRASH_LOOP"
+        if runtime_resume_required_operator_ack or crash_loop_restart_blocked
+        else "SUPERVISOR_RUNTIME_START_ALLOWED"
+    )
+    supervisor_mode = runtime_supervisor_mode or (
+        "MARKET_CLOSED_WAIT"
+        if supervisor_classification == "SUPERVISOR_WAIT_MARKET_CLOSED"
+        else "CRASH_LOOP_HOLD"
+        if supervisor_classification == "SUPERVISOR_RESTART_BLOCKED_CRASH_LOOP"
+        else "READY_FOR_OPERATOR_START"
+    )
+    operator_ack = runtime_supervisor_operator_ack or {
+        "required": supervisor_mode == "CRASH_LOOP_HOLD",
+        "reason": "Crash Loop Protection is OPERATOR_ACK_REQUIRED." if supervisor_mode == "CRASH_LOOP_HOLD" else "",
+        "ack_type": "crash_loop_hold" if supervisor_mode == "CRASH_LOOP_HOLD" else None,
+        "ack_id_expected": "track_b_paper_crash_loop_hold_test" if supervisor_mode == "CRASH_LOOP_HOLD" else None,
+    }
+    _write_json_file(
+        root / "outputs/track_b_execution_core/runtime_supervisor/latest_runtime_supervisor_authority.json",
+        {
+            "classification": supervisor_classification,
+            "supervisor_mode": supervisor_mode,
+            "proof_window_status": runtime_supervisor_proof_window_status
+            or ("market_closed" if supervisor_mode == "MARKET_CLOSED_WAIT" else "blocked"),
+            "recommended_next_command": runtime_supervisor_recommended_next_command
+            or (
+                "wait for market reopen; rerun proof readiness before any runtime start"
+                if supervisor_mode == "MARKET_CLOSED_WAIT"
+                else "acknowledge crash-loop hold before any restart planning"
+                if supervisor_mode == "CRASH_LOOP_HOLD"
+                else "operator may start Track B PAPER runtime using the repaired direct supervisor launcher"
+            ),
+            "operator_ack": operator_ack,
+            "blockers": [{"code": "test_blocker", "detail": "test"}] if operator_ack.get("required") else [],
+            "warnings": [],
+            "decision_precedence": [
+                {
+                    "rank": 1,
+                    "service": "Proof Readiness / Phase-1 Readiness",
+                    "classification": supervisor_classification,
+                    "decisive": True,
+                }
+            ],
         },
     )
 

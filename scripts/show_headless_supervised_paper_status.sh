@@ -25,6 +25,7 @@ DEFAULT_AGENT_HEALTH_FILE="${REPO_ROOT}/outputs/track_b_execution_core/agent_hea
 DEFAULT_SELF_RECOVER_RULES_FILE="${REPO_ROOT}/outputs/track_b_execution_core/self_recover/latest_self_recover_rules.json"
 DEFAULT_CRASH_LOOP_PROTECTION_FILE="${REPO_ROOT}/outputs/track_b_execution_core/crash_loop_protection/latest_crash_loop_protection.json"
 DEFAULT_RUNTIME_RESUME_SEMANTICS_FILE="${REPO_ROOT}/outputs/track_b_execution_core/runtime_resume/latest_runtime_resume_semantics.json"
+DEFAULT_RUNTIME_SUPERVISOR_AUTHORITY_FILE="${REPO_ROOT}/outputs/track_b_execution_core/runtime_supervisor/latest_runtime_supervisor_authority.json"
 DEFAULT_STARTUP_FILE="${REPO_ROOT}/outputs/operator_dashboard/startup_control_plane_snapshot.json"
 DEFAULT_OPERABILITY_FILE="${REPO_ROOT}/outputs/operator_dashboard/supervised_paper_operability_snapshot.json"
 DEFAULT_INFO_FILE="${DEFAULT_RUNTIME_DIR}/operator_dashboard.json"
@@ -614,7 +615,7 @@ PY
 }
 
 merge_control_plane_services_status() {
-  "${PYTHON_BIN}" - <<'PY' "${STATUS_FILE}" "${DEFAULT_AGENT_REGISTRY_FILE}" "${DEFAULT_AGENT_HEALTH_FILE}" "${DEFAULT_SELF_RECOVER_RULES_FILE}" "${DEFAULT_CRASH_LOOP_PROTECTION_FILE}" "${DEFAULT_RUNTIME_RESUME_SEMANTICS_FILE}"
+  "${PYTHON_BIN}" - <<'PY' "${STATUS_FILE}" "${DEFAULT_AGENT_REGISTRY_FILE}" "${DEFAULT_AGENT_HEALTH_FILE}" "${DEFAULT_SELF_RECOVER_RULES_FILE}" "${DEFAULT_CRASH_LOOP_PROTECTION_FILE}" "${DEFAULT_RUNTIME_RESUME_SEMANTICS_FILE}" "${DEFAULT_RUNTIME_SUPERVISOR_AUTHORITY_FILE}"
 import json
 import sys
 from pathlib import Path
@@ -625,6 +626,7 @@ agent_health_path = Path(sys.argv[3])
 self_recover_path = Path(sys.argv[4])
 crash_loop_path = Path(sys.argv[5])
 runtime_resume_path = Path(sys.argv[6])
+runtime_supervisor_path = Path(sys.argv[7])
 
 def read_json(path: Path) -> dict:
     try:
@@ -643,10 +645,14 @@ agent_health = read_json(agent_health_path)
 self_recover = read_json(self_recover_path)
 crash_loop = read_json(crash_loop_path)
 runtime_resume = read_json(runtime_resume_path)
+runtime_supervisor = read_json(runtime_supervisor_path)
+operator_ack = runtime_supervisor.get("operator_ack") or {}
 market_closed = (
     self_recover.get("recommendation") == "WAIT_MARKET_CLOSED"
     or runtime_resume.get("classification") == "RESUME_BLOCKED_MARKET_CLOSED"
     or runtime_resume.get("reason") == "MARKET_CLOSED_NO_FRESH_BARS"
+    or runtime_supervisor.get("supervisor_mode") == "MARKET_CLOSED_WAIT"
+    or runtime_supervisor.get("proof_window_status") == "market_closed"
 )
 status["track_b_control_plane"] = {
     "source": "execution_core_control_plane_authority_projection",
@@ -667,14 +673,24 @@ status["track_b_control_plane"] = {
     "runtime_resume_reason": runtime_resume.get("reason"),
     "runtime_resume_blockers": runtime_resume.get("blockers") or [],
     "runtime_resume_warnings": runtime_resume.get("warnings") or [],
+    "runtime_supervisor_classification": runtime_supervisor.get("classification"),
+    "runtime_supervisor_mode": runtime_supervisor.get("supervisor_mode"),
+    "runtime_supervisor_proof_window_status": runtime_supervisor.get("proof_window_status"),
+    "runtime_supervisor_recommended_next_command": runtime_supervisor.get("recommended_next_command"),
+    "runtime_supervisor_operator_ack_required": operator_ack.get("required") is True,
+    "runtime_supervisor_operator_ack": operator_ack,
+    "runtime_supervisor_top_blockers": (runtime_supervisor.get("blockers") or [])[:3],
+    "runtime_supervisor_top_warnings": (runtime_supervisor.get("warnings") or [])[:3],
+    "runtime_supervisor_decision_precedence": (runtime_supervisor.get("decision_precedence") or [])[:3],
     "market_closed_no_fresh_bars_expected": market_closed,
-    "operator_message": "Market closed/no fresh bars expected" if market_closed else None,
+    "operator_message": "MARKET_CLOSED_WAIT: market closed/no fresh bars expected; wait and rerun proof readiness after reopen" if market_closed else None,
     "artifact_paths": {
         "agent_registry": str(agent_registry_path),
         "agent_health": str(agent_health_path),
         "self_recover": str(self_recover_path),
         "crash_loop_protection": str(crash_loop_path),
         "runtime_resume": str(runtime_resume_path),
+        "runtime_supervisor": str(runtime_supervisor_path),
     },
 }
 status["paper_only"] = True

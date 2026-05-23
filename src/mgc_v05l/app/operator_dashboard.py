@@ -18105,6 +18105,11 @@ def _track_b_control_plane_services_summary(repo_root: Path) -> dict[str, Any]:
         / "track_b_execution_core"
         / "runtime_resume"
         / "latest_runtime_resume_semantics.json",
+        "runtime_supervisor": repo_root
+        / "outputs"
+        / "track_b_execution_core"
+        / "runtime_supervisor"
+        / "latest_runtime_supervisor_authority.json",
     }
     payloads: dict[str, dict[str, Any]] = {}
     for name, path in authority_paths.items():
@@ -18113,15 +18118,28 @@ def _track_b_control_plane_services_summary(repo_root: Path) -> dict[str, Any]:
     self_recover = payloads["self_recover"]
     crash_loop = payloads["crash_loop_protection"]
     runtime_resume = payloads["runtime_resume"]
+    runtime_supervisor = payloads["runtime_supervisor"]
+    operator_ack = dict(runtime_supervisor.get("operator_ack") or {})
+    supervisor_blockers = list(runtime_supervisor.get("blockers") or [])
+    supervisor_warnings = list(runtime_supervisor.get("warnings") or [])
     market_closed = (
         self_recover.get("recommendation") == "WAIT_MARKET_CLOSED"
         or runtime_resume.get("classification") == "RESUME_BLOCKED_MARKET_CLOSED"
         or runtime_resume.get("reason") == "MARKET_CLOSED_NO_FRESH_BARS"
+        or runtime_supervisor.get("supervisor_mode") == "MARKET_CLOSED_WAIT"
+        or runtime_supervisor.get("proof_window_status") == "market_closed"
     )
     attention_required = bool(
         runtime_resume.get("classification") not in {None, "", "RESUME_ALLOWED_CLEAN", "RESUME_BLOCKED_MARKET_CLOSED"}
         or crash_loop.get("restart_blocked") is True
         or runtime_resume.get("required_operator_ack") is True
+        or operator_ack.get("required") is True
+        or runtime_supervisor.get("supervisor_mode") in {
+            "CLEANUP_REQUIRED",
+            "MANUAL_REVIEW_REQUIRED",
+            "CRASH_LOOP_HOLD",
+            "STALE_EVIDENCE_HOLD",
+        }
     )
     return {
         "available": any(bool(payload) for payload in payloads.values()),
@@ -18143,8 +18161,21 @@ def _track_b_control_plane_services_summary(repo_root: Path) -> dict[str, Any]:
         "runtime_resume_reason": runtime_resume.get("reason"),
         "runtime_resume_blockers": list(runtime_resume.get("blockers") or []),
         "runtime_resume_warnings": list(runtime_resume.get("warnings") or []),
+        "runtime_supervisor_classification": runtime_supervisor.get("classification"),
+        "runtime_supervisor_mode": runtime_supervisor.get("supervisor_mode"),
+        "runtime_supervisor_proof_window_status": runtime_supervisor.get("proof_window_status"),
+        "runtime_supervisor_recommended_next_command": runtime_supervisor.get("recommended_next_command"),
+        "runtime_supervisor_operator_ack_required": operator_ack.get("required") is True,
+        "runtime_supervisor_operator_ack": operator_ack,
+        "runtime_supervisor_top_blockers": supervisor_blockers[:3],
+        "runtime_supervisor_top_warnings": supervisor_warnings[:3],
+        "runtime_supervisor_decision_precedence": list(runtime_supervisor.get("decision_precedence") or [])[:3],
         "market_closed_no_fresh_bars_expected": market_closed,
-        "operator_message": "Market closed/no fresh bars expected" if market_closed else None,
+        "operator_message": (
+            "MARKET_CLOSED_WAIT: market closed/no fresh bars expected; wait and rerun proof readiness after reopen"
+            if market_closed
+            else None
+        ),
         "attention_required": attention_required,
         "artifact_paths": {name: str(path) for name, path in authority_paths.items()},
     }
