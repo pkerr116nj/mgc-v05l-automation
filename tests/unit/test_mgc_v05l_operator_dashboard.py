@@ -289,6 +289,8 @@ def test_track_b_control_plane_status_projection_displays_closed_market_services
     assert summary["runtime_supervisor_classification"] == "SUPERVISOR_WAIT_MARKET_CLOSED"
     assert summary["runtime_supervisor_mode"] == "MARKET_CLOSED_WAIT"
     assert summary["runtime_supervisor_proof_window_status"] == "market_closed"
+    assert summary["runtime_supervisor_shared_truth_refresh_generation_id"] == "test-shared-truth-generation"
+    assert summary["runtime_supervisor_shared_truth_coherence_status"] == "COHERENT"
     assert summary["runtime_supervisor_recommended_next_command"] == (
         "wait for market reopen; rerun proof readiness before any runtime start"
     )
@@ -578,6 +580,9 @@ def _write_track_b_control_plane_artifacts(
                 else "QUARANTINE_OBSERVE_ONLY"
             ),
             "autonomous_recovery_execution_enabled": False,
+            "shared_truth_refresh_generation_id": "test-shared-truth-generation",
+            "shared_truth_coherence_status": "COHERENT",
+            "stale_or_mixed_sources": [],
             "autonomous_recovery_blockers": [],
             "autonomous_recovery_budget_summary": paper_budget or {"budget_exhausted": False},
             "blockers": [{"code": "test_blocker", "detail": "test"}] if operator_ack.get("required") else [],

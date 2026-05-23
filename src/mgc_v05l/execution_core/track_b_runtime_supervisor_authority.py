@@ -68,6 +68,10 @@ SUPERVISOR_UNKNOWN_REVIEW_REQUIRED = "SUPERVISOR_UNKNOWN_REVIEW_REQUIRED"
 SUPERVISOR_PAPER_QUARANTINE_OBSERVE_ONLY = "SUPERVISOR_PAPER_QUARANTINE_OBSERVE_ONLY"
 SUPERVISOR_HARD_UNSAFE_HOLD = "SUPERVISOR_HARD_UNSAFE_HOLD"
 
+SHARED_TRUTH_COHERENT = "COHERENT"
+SHARED_TRUTH_STALE_OR_MIXED = "STALE_OR_MIXED"
+SHARED_TRUTH_MISSING = "MISSING"
+
 MARKET_CLOSED_WAIT = "MARKET_CLOSED_WAIT"
 READY_FOR_OPERATOR_START = "READY_FOR_OPERATOR_START"
 RUNTIME_ACTIVE_MONITOR = "RUNTIME_ACTIVE_MONITOR"
@@ -174,9 +178,11 @@ def build_track_b_runtime_supervisor_authority(
         "paper_recovery_policy": _read_json(config.resolve(config.paper_recovery_policy_path)),
         "paper_autonomous_recovery_plan": _read_json(config.resolve(config.paper_autonomous_recovery_plan_path)),
     }
+    inputs["shared_truth_coherence"] = _shared_truth_coherence(inputs)
     decision = _classify_supervisor(inputs=inputs)
     v2 = _v2_advisory(decision=decision, inputs=inputs)
     autonomous_recovery_plan = _autonomous_recovery_plan_fields(inputs["paper_autonomous_recovery_plan"])
+    shared_truth_coherence = _mapping(inputs["shared_truth_coherence"])
     return {
         "schema_version": "track_b_runtime_supervisor_authority_v2",
         "generated_at": actual_now.isoformat(),
@@ -200,6 +206,11 @@ def build_track_b_runtime_supervisor_authority(
         "operator_ack": v2["operator_ack"],
         "proof_window_status": v2["proof_window_status"],
         "decision_precedence": v2["decision_precedence"],
+        "shared_truth_refresh_generation_id": shared_truth_coherence.get("refresh_generation_id"),
+        "shared_truth_refresh_generated_at": shared_truth_coherence.get("generated_at"),
+        "shared_truth_coherence_status": shared_truth_coherence.get("status"),
+        "shared_truth_generation_sources": list(shared_truth_coherence.get("source_services") or []),
+        "stale_or_mixed_sources": list(shared_truth_coherence.get("stale_or_mixed_sources") or []),
         "autonomous_recovery_plan_classification": autonomous_recovery_plan["classification"],
         "autonomous_recovery_next_action": autonomous_recovery_plan["next_action"],
         "autonomous_recovery_execution_enabled": False,
@@ -299,6 +310,8 @@ def main(argv: Sequence[str] | None = None) -> int:
                     ),
                     "autonomous_recovery_next_action": payload.get("autonomous_recovery_next_action"),
                     "autonomous_recovery_execution_enabled": payload.get("autonomous_recovery_execution_enabled"),
+                    "shared_truth_refresh_generation_id": payload.get("shared_truth_refresh_generation_id"),
+                    "shared_truth_coherence_status": payload.get("shared_truth_coherence_status"),
                     "reason": payload.get("reason"),
                     "authority_path": str(authority_path),
                     "read_only": True,
@@ -329,6 +342,22 @@ def _classify_supervisor(*, inputs: Mapping[str, Mapping[str, Any]]) -> dict[str
             "HARD_UNSAFE_HOLD",
             "Duplicate runtime writer evidence is present.",
             blockers=[_blocker("runtime_environment_truth", evidence["runtime_environment_truth_classification"])],
+        )
+
+    if evidence["shared_truth_coherence_status"] != SHARED_TRUTH_COHERENT:
+        stale_sources = [
+            str(_mapping(source).get("service") or _mapping(source).get("reason") or source)
+            for source in evidence["shared_truth_stale_or_mixed_sources"]
+        ]
+        detail = ", ".join(stale_sources) if stale_sources else evidence["shared_truth_coherence_status"]
+        return _decision(
+            SUPERVISOR_SHARED_TRUTH_STALE,
+            "REFRESH_SHARED_TRUTH",
+            f"Shared Truth Refresh generation is {evidence['shared_truth_coherence_status']}: {detail}.",
+            blockers=[
+                _blocker("shared_truth_coherence", evidence["shared_truth_coherence_status"]),
+                *[_blocker("stale_or_mixed_source", item) for item in stale_sources],
+            ],
         )
 
     if evidence["runtime_environment_truth_classification"] == RUNTIME_ACTIVE_TRADE_CAPABLE:
@@ -767,6 +796,14 @@ def _evidence(inputs: Mapping[str, Mapping[str, Any]]) -> dict[str, Any]:
         "proof_readiness_classification": _classification(inputs["proof_readiness"]),
         "shared_truth_classification": _classification(inputs["shared_truth"]),
         "shared_truth_classifications": _mapping(inputs["shared_truth"].get("classifications")),
+        "shared_truth_refresh_generation_id": str(
+            _mapping(inputs["shared_truth_coherence"]).get("refresh_generation_id") or ""
+        ),
+        "shared_truth_refresh_generated_at": str(_mapping(inputs["shared_truth_coherence"]).get("generated_at") or ""),
+        "shared_truth_coherence_status": str(_mapping(inputs["shared_truth_coherence"]).get("status") or SHARED_TRUTH_MISSING),
+        "shared_truth_stale_or_mixed_sources": list(
+            _mapping(inputs["shared_truth_coherence"]).get("stale_or_mixed_sources") or []
+        ),
         "canonical_readiness": str(inputs["canonical_readiness"].get("canonical_readiness") or _classification(inputs["canonical_readiness"])),
         "position_truth_classification": _position_truth_classification(inputs["position_truth"]),
         "open_order_truth_classification": _classification(inputs["open_order_truth"]),
@@ -841,6 +878,140 @@ def _missing_or_stale_evidence(evidence: Mapping[str, Any]) -> list[str]:
         if text in {"ORDER_TRUTH_STALE", "STALE_MANAGED_POSITION_EVIDENCE", "AGENT_HEALTH_UNKNOWN"}:
             missing.append(f"{name}:{text}")
     return missing
+
+
+def _shared_truth_coherence(inputs: Mapping[str, Mapping[str, Any]]) -> dict[str, Any]:
+    shared_truth = inputs["shared_truth"]
+    refresh_generation_id = str(shared_truth.get("refresh_generation_id") or "")
+    generated_at = str(shared_truth.get("generated_at") or "")
+    services = _list(shared_truth.get("services"))
+    if not shared_truth or not refresh_generation_id or not generated_at or not services:
+        return {
+            "status": SHARED_TRUTH_MISSING,
+            "refresh_generation_id": refresh_generation_id or None,
+            "generated_at": generated_at or None,
+            "stale_or_mixed_sources": [
+                {
+                    "service": "Shared Truth Refresh",
+                    "reason": "missing_refresh_generation_contract",
+                    "expected": "refresh_generation_id/generated_at/services",
+                    "observed": "missing",
+                }
+            ],
+            "source_services": [],
+        }
+
+    rows = {str(_mapping(row).get("service") or ""): _mapping(row) for row in services}
+    stale_or_mixed: list[dict[str, Any]] = []
+    for service, input_key, observed_classification, observed_generated_at in _coherence_sources(inputs):
+        row = rows.get(service)
+        if not row:
+            stale_or_mixed.append(
+                {
+                    "service": service,
+                    "reason": "missing_from_refresh_generation",
+                    "expected": "service row in Shared Truth Refresh",
+                    "observed": "missing",
+                }
+            )
+            continue
+        expected_classification = str(row.get("classification") or "")
+        if expected_classification != str(observed_classification or ""):
+            stale_or_mixed.append(
+                {
+                    "service": service,
+                    "source": input_key,
+                    "reason": "classification_mismatch",
+                    "expected": expected_classification,
+                    "observed": observed_classification,
+                }
+            )
+        expected_generated_at = str(row.get("generated_at") or "")
+        if expected_generated_at and observed_generated_at and expected_generated_at != str(observed_generated_at):
+            stale_or_mixed.append(
+                {
+                    "service": service,
+                    "source": input_key,
+                    "reason": "generated_at_mismatch",
+                    "expected": expected_generated_at,
+                    "observed": observed_generated_at,
+                }
+            )
+    return {
+        "status": SHARED_TRUTH_STALE_OR_MIXED if stale_or_mixed else SHARED_TRUTH_COHERENT,
+        "refresh_generation_id": refresh_generation_id,
+        "generated_at": generated_at,
+        "stale_or_mixed_sources": stale_or_mixed,
+        "source_classifications": _mapping(shared_truth.get("classifications")),
+        "source_services": [
+            {
+                "service": str(row.get("service") or ""),
+                "classification": row.get("classification"),
+                "generated_at": row.get("generated_at"),
+                "artifact_path": row.get("artifact_path"),
+            }
+            for row in rows.values()
+        ],
+    }
+
+
+def _coherence_sources(inputs: Mapping[str, Mapping[str, Any]]) -> list[tuple[str, str, str, str]]:
+    return [
+        (
+            "Open Order Truth",
+            "open_order_truth",
+            _classification(inputs["open_order_truth"]),
+            str(inputs["open_order_truth"].get("generated_at") or ""),
+        ),
+        (
+            "Managed Order Registry",
+            "managed_order_registry",
+            _classification(inputs["managed_order_registry"]),
+            str(inputs["managed_order_registry"].get("generated_at") or ""),
+        ),
+        (
+            "Position Truth",
+            "position_truth",
+            _position_truth_classification(inputs["position_truth"]),
+            str(inputs["position_truth"].get("generated_at") or ""),
+        ),
+        (
+            "Runtime Environment Truth",
+            "runtime_environment_truth",
+            _classification(inputs["runtime_environment_truth"]),
+            str(inputs["runtime_environment_truth"].get("generated_at") or ""),
+        ),
+        (
+            "Managed Position Registry",
+            "managed_position_registry",
+            _classification(inputs["managed_position_registry"]),
+            str(inputs["managed_position_registry"].get("generated_at") or ""),
+        ),
+        (
+            "Reconciliation",
+            "reconciliation",
+            _classification(inputs["reconciliation"]),
+            str(inputs["reconciliation"].get("generated_at") or ""),
+        ),
+        (
+            "Broker Truth Lease",
+            "broker_lease",
+            _classification(inputs["broker_lease"]) or str(inputs["broker_lease"].get("lease_state") or ""),
+            str(inputs["broker_lease"].get("generated_at") or ""),
+        ),
+        (
+            "PAPER Recovery Policy",
+            "paper_recovery_policy",
+            str(inputs["paper_recovery_policy"].get("paper_action_policy") or _classification(inputs["paper_recovery_policy"])),
+            str(inputs["paper_recovery_policy"].get("generated_at") or ""),
+        ),
+        (
+            "PAPER Autonomous Recovery Planner",
+            "paper_autonomous_recovery_plan",
+            _classification(inputs["paper_autonomous_recovery_plan"]),
+            str(inputs["paper_autonomous_recovery_plan"].get("generated_at") or ""),
+        ),
+    ]
 
 
 def _market_closed(inputs: Mapping[str, Mapping[str, Any]]) -> bool:

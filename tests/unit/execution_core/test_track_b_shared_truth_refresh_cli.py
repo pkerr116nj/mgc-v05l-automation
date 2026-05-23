@@ -23,6 +23,8 @@ def test_refresh_clean_flat_stack(tmp_path: Path) -> None:
     result = _refresh(tmp_path)
 
     assert result["exit_code"] == 0
+    assert result["refresh_phase"] == "pre_supervisor_refresh"
+    assert result["refresh_generation_id"] == "track-b-shared-truth-20260522T180000000000Z"
     assert result["classifications"]["Open Order Truth"] == "NO_OPEN_ORDERS"
     assert result["classifications"]["Managed Order Registry"] == "NO_MANAGED_ORDERS"
     assert result["classifications"]["Position Truth"] == "CLEAN_FLAT_READY"
@@ -39,9 +41,15 @@ def test_refresh_clean_flat_stack(tmp_path: Path) -> None:
     assert _read(tmp_path / "outputs/track_b_execution_core/open_order_truth/latest_open_order_truth.json")[
         "classification"
     ] == "NO_OPEN_ORDERS"
+    shared_truth_path = tmp_path / "outputs/track_b_execution_core/shared_truth/latest_track_b_shared_truth_refresh.json"
+    shared_truth = _read(shared_truth_path)
+    assert shared_truth["refresh_generation_id"] == result["refresh_generation_id"]
+    assert shared_truth["refresh_phase"] == "pre_supervisor_refresh"
+    assert result["source_refresh_artifact_path"] == str(shared_truth_path)
     preflight = build_runtime_start_preflight_summary(result)
     assert preflight["classification"] == "SHARED_TRUTH_PREFLIGHT_CLEAN"
     assert preflight["blockers"] == []
+    assert preflight["refresh_generation_id"] == result["refresh_generation_id"]
 
 
 def test_refresh_writes_autonomous_recovery_planner_artifact(tmp_path: Path) -> None:
@@ -55,6 +63,8 @@ def test_refresh_writes_autonomous_recovery_planner_artifact(tmp_path: Path) -> 
     assert planner["schema_version"] == "track_b_paper_autonomous_recovery_plan_v1"
     assert planner["execution_enabled"] is False
     assert planner["classification"] == result["autonomous_recovery_plan_classification"]
+    shared_truth = _read(tmp_path / "outputs/track_b_execution_core/shared_truth/latest_track_b_shared_truth_refresh.json")
+    assert "Runtime Supervisor Authority" not in {row["service"] for row in shared_truth["services"]}
 
 
 def test_refresh_replaces_stale_upstream_authority_artifact(tmp_path: Path) -> None:

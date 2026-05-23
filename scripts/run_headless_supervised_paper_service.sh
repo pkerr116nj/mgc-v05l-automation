@@ -1548,6 +1548,8 @@ recommended = payload.get("recommended_next_command")
 autonomous_plan_classification = payload.get("autonomous_recovery_plan_classification")
 autonomous_next_action = payload.get("autonomous_recovery_next_action")
 autonomous_execution_enabled = payload.get("autonomous_recovery_execution_enabled") is True
+shared_truth_generation_id = payload.get("shared_truth_refresh_generation_id")
+shared_truth_coherence_status = payload.get("shared_truth_coherence_status")
 ack_required = payload.get("operator_ack_required") is True or operator_ack.get("required") is True
 paper_action_policy = evidence.get("paper_action_policy")
 autonomous_recovery_allowed = evidence.get("paper_autonomous_recovery_allowed") is True
@@ -1571,6 +1573,8 @@ if not allowed:
         f"autonomous_recovery_plan_classification={autonomous_plan_classification} "
         f"autonomous_recovery_next_action={autonomous_next_action} "
         f"autonomous_recovery_execution_enabled={autonomous_execution_enabled} "
+        f"shared_truth_refresh_generation_id={shared_truth_generation_id} "
+        f"shared_truth_coherence_status={shared_truth_coherence_status} "
         f"live_action_policy={live_action_policy} recommended_next_command={recommended}",
         file=sys.stderr,
     )
@@ -1595,6 +1599,8 @@ ack_required = payload.get("operator_ack_required") is True or operator_ack.get(
 autonomous_plan_classification = payload.get("autonomous_recovery_plan_classification")
 autonomous_next_action = payload.get("autonomous_recovery_next_action")
 autonomous_execution_enabled = payload.get("autonomous_recovery_execution_enabled") is True
+shared_truth_generation_id = payload.get("shared_truth_refresh_generation_id")
+shared_truth_coherence_status = payload.get("shared_truth_coherence_status")
 paper_action_policy = evidence.get("paper_action_policy")
 autonomous_recovery_allowed = evidence.get("paper_autonomous_recovery_allowed") is True
 requires_operator_ack_for_paper = evidence.get("paper_requires_operator_ack") is True
@@ -1613,6 +1619,8 @@ print(
     f"autonomous_recovery_plan_classification={autonomous_plan_classification} "
     f"autonomous_recovery_next_action={autonomous_next_action} "
     f"autonomous_recovery_execution_enabled={autonomous_execution_enabled} "
+    f"shared_truth_refresh_generation_id={shared_truth_generation_id} "
+    f"shared_truth_coherence_status={shared_truth_coherence_status} "
     f"live_action_policy={live_action_policy}. "
     f"recommended_next_command={payload.get('recommended_next_command')}"
 )

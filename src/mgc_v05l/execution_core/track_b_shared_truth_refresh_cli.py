@@ -71,6 +71,9 @@ DEFAULT_RECONCILIATION_ARTIFACT = (
     / "track_b_paper_broker_reconciliation"
     / "latest_track_b_paper_broker_reconciliation.json"
 )
+DEFAULT_SHARED_TRUTH_REFRESH_ARTIFACT = (
+    Path("outputs") / "track_b_execution_core" / "shared_truth" / "latest_track_b_shared_truth_refresh.json"
+)
 RUNTIME_START_REQUIRED_CLASSIFICATIONS = {
     "Open Order Truth": {NO_OPEN_ORDERS},
     "Managed Order Registry": {NO_MANAGED_ORDERS},
@@ -93,6 +96,7 @@ class TrackBSharedTruthRefreshConfig:
     trade_summary_path: Path = DEFAULT_TRADE_SUMMARY
     broker_lease_path: Path = DEFAULT_LEASE_ARTIFACT
     broker_lease_history_path: Path | None = DEFAULT_LEASE_HISTORY
+    shared_truth_refresh_path: Path = DEFAULT_SHARED_TRUTH_REFRESH_ARTIFACT
     broker_lease_max_entry_age_seconds: float = 300.0
     broker_lease_max_exit_age_seconds: float = 900.0
     broker_lease_degraded_refresh_grace_seconds: float = 120.0
@@ -110,6 +114,7 @@ def refresh_track_b_shared_truth(
     source_commit_resolver: Callable[[Path], str | None] | None = None,
 ) -> dict[str, Any]:
     actual_now = _ensure_utc(now or datetime.now(UTC))
+    refresh_generation_id = _refresh_generation_id(actual_now)
 
     open_order_config = TrackBOpenOrderTruthConfig(repo_root=config.repo_root, dashboard_projection_path=None)
     open_order_truth = build_track_b_open_order_truth(config=open_order_config, now=actual_now)
@@ -222,9 +227,11 @@ def refresh_track_b_shared_truth(
         broker_lease=broker_lease,
     )
     exit_code = 2 if blockers else 0
-    return {
+    result = {
         "schema_version": "track_b_shared_truth_refresh_v1",
         "generated_at": actual_now.isoformat(),
+        "refresh_generation_id": refresh_generation_id,
+        "refresh_phase": "pre_supervisor_refresh",
         "mode": "PAPER",
         "read_only": True,
         "submit_authority": False,
@@ -233,6 +240,7 @@ def refresh_track_b_shared_truth(
         "services": services,
         "classifications": {str(row["service"]): row.get("classification") for row in services},
         "artifact_paths": {str(row["service"]): row.get("artifact_path") for row in services if row.get("artifact_path")},
+        "source_refresh_artifact_path": str(config.resolve(config.shared_truth_refresh_path)),
         "paper_recovery_policy": paper_recovery_policy.get("paper_action_policy"),
         "autonomous_recovery_plan_classification": autonomous_recovery_plan.get("classification"),
         "autonomous_recovery_next_action": _autonomous_recovery_next_action(autonomous_recovery_plan),
@@ -241,6 +249,8 @@ def refresh_track_b_shared_truth(
         "unsafe_blockers": blockers,
         "exit_code": exit_code,
     }
+    _write_json_atomic(config.resolve(config.shared_truth_refresh_path), result)
+    return result
 
 
 def build_runtime_start_preflight_summary(result: Mapping[str, Any]) -> dict[str, Any]:
@@ -290,6 +300,8 @@ def build_runtime_start_preflight_summary(result: Mapping[str, Any]) -> dict[str
     return {
         "schema_version": "track_b_runtime_start_shared_truth_preflight_v1",
         "generated_at": result.get("generated_at"),
+        "refresh_generation_id": result.get("refresh_generation_id"),
+        "refresh_phase": result.get("refresh_phase"),
         "mode": "PAPER",
         "read_only": True,
         "submit_authority": False,
@@ -303,6 +315,10 @@ def build_runtime_start_preflight_summary(result: Mapping[str, Any]) -> dict[str
         },
         "observed_classifications": dict(classifications),
         "artifact_paths": _mapping(result.get("artifact_paths")),
+        "source_refresh_artifact_path": str(
+            result.get("source_refresh_artifact_path") or ""
+        )
+        or None,
         "warnings": _list(result.get("warnings")),
         "blockers": blockers,
     }
@@ -357,6 +373,7 @@ def main(argv: Sequence[str] | None = None) -> int:
 def print_classification_table(result: Mapping[str, Any]) -> None:
     print("Track B Shared Truth Refresh")
     print(f"generated_at: {result.get('generated_at')}")
+    print(f"refresh_generation_id: {result.get('refresh_generation_id')}")
     print("")
     print(f"{'Service':<30} {'Classification':<40} Artifact")
     print(f"{'-' * 30} {'-' * 40} {'-' * 8}")
@@ -639,6 +656,17 @@ def _autonomous_recovery_next_action(payload: Mapping[str, Any]) -> str | None:
         if value:
             return value
     return None
+
+
+def _refresh_generation_id(value: datetime) -> str:
+    return f"track-b-shared-truth-{value.strftime('%Y%m%dT%H%M%S%fZ')}"
+
+
+def _write_json_atomic(path: Path, payload: Mapping[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(f".{path.name}.tmp")
+    tmp.write_text(json.dumps(dict(payload), indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    tmp.replace(path)
 
 
 def _artifact_timestamp(path: Path, payload: Mapping[str, Any]) -> str | None:

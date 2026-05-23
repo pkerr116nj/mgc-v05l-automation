@@ -239,6 +239,8 @@ def test_runtime_start_consults_supervisor_authority_v2_before_spawn() -> None:
     assert "autonomous_recovery_plan_classification" in script
     assert "autonomous_recovery_next_action" in script
     assert "autonomous_recovery_execution_enabled" in script
+    assert "shared_truth_refresh_generation_id" in script
+    assert "shared_truth_coherence_status" in script
     assert "runtime_supervisor_authority" in script
     assert "latest_track_b_runtime_supervisor_authority.json" not in script
     assert "latest_track_b_paper_recovery_policy.json" not in script
@@ -266,6 +268,8 @@ def test_headless_launch_uses_supervisor_authority_v2_as_final_pre_spawn_gate() 
     assert "autonomous_recovery_plan_classification" in script
     assert "autonomous_recovery_next_action" in script
     assert "autonomous_recovery_execution_enabled" in script
+    assert "shared_truth_refresh_generation_id" in script
+    assert "shared_truth_coherence_status" in script
     assert "runtime_supervisor_authority_path" in script
     assert "latest_track_b_runtime_supervisor_authority.json" not in script
     assert "latest_track_b_paper_recovery_policy.json" not in script

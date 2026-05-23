@@ -73,6 +73,8 @@ def test_market_closed_waits_without_alarm(tmp_path: Path) -> None:
     assert payload["autonomous_recovery_plan_classification"] == "WAIT_MARKET_CLOSED"
     assert payload["autonomous_recovery_next_action"] == "WAIT_MARKET_CLOSED"
     assert payload["autonomous_recovery_execution_enabled"] is False
+    assert payload["shared_truth_refresh_generation_id"] == "test-shared-truth-generation"
+    assert payload["shared_truth_coherence_status"] == "COHERENT"
 
 
 def test_clean_proof_ready_allows_runtime_start(tmp_path: Path) -> None:
@@ -94,6 +96,10 @@ def test_clean_proof_ready_allows_runtime_start(tmp_path: Path) -> None:
     assert payload["autonomous_recovery_plan_classification"] == "PLAN_RUNTIME_RETRY"
     assert payload["autonomous_recovery_next_action"] == "RUNTIME_RETRY"
     assert payload["autonomous_recovery_execution_enabled"] is False
+    assert payload["shared_truth_refresh_generation_id"] == "test-shared-truth-generation"
+    assert payload["shared_truth_refresh_generated_at"] == NOW.isoformat()
+    assert payload["shared_truth_coherence_status"] == "COHERENT"
+    assert payload["stale_or_mixed_sources"] == []
 
 
 def test_active_healthy_runtime_is_left_running(tmp_path: Path) -> None:
@@ -209,6 +215,50 @@ def test_stale_evidence_blocks_supervisor_action(tmp_path: Path) -> None:
     assert payload["autonomous_recovery_next_action"] == "REFRESH_EVIDENCE"
 
 
+def test_mixed_shared_truth_generation_blocks_supervisor(tmp_path: Path) -> None:
+    _seed_base(tmp_path)
+    _write_json(
+        tmp_path / "outputs" / "track_b_execution_core" / "open_order_truth" / "latest_open_order_truth.json",
+        {"generated_at": NOW.isoformat(), "classification": "UNKNOWN_OPEN_ORDER", "live_money_eligible": False},
+    )
+
+    payload = build_track_b_runtime_supervisor_authority(config=TrackBRuntimeSupervisorAuthorityConfig(repo_root=tmp_path), now=NOW)
+
+    assert payload["classification"] == SUPERVISOR_SHARED_TRUTH_STALE
+    assert payload["supervisor_mode"] == STALE_EVIDENCE_HOLD
+    assert payload["shared_truth_coherence_status"] == "STALE_OR_MIXED"
+    assert any(source["service"] == "Open Order Truth" for source in payload["stale_or_mixed_sources"])
+
+
+def test_missing_shared_truth_generation_blocks_supervisor(tmp_path: Path) -> None:
+    _seed_base(tmp_path, include_shared_truth=False)
+
+    payload = build_track_b_runtime_supervisor_authority(config=TrackBRuntimeSupervisorAuthorityConfig(repo_root=tmp_path), now=NOW)
+
+    assert payload["classification"] == SUPERVISOR_SHARED_TRUTH_STALE
+    assert payload["supervisor_mode"] == STALE_EVIDENCE_HOLD
+    assert payload["shared_truth_coherence_status"] == "MISSING"
+    assert payload["shared_truth_refresh_generation_id"] is None
+
+
+def test_shared_truth_generation_has_no_supervisor_recursion(tmp_path: Path) -> None:
+    _seed_base(tmp_path)
+    shared_truth = json.loads(
+        (
+            tmp_path
+            / "outputs"
+            / "track_b_execution_core"
+            / "shared_truth"
+            / "latest_track_b_shared_truth_refresh.json"
+        ).read_text(encoding="utf-8")
+    )
+
+    services = {row["service"] for row in shared_truth["services"]}
+    assert "PAPER Recovery Policy" in services
+    assert "PAPER Autonomous Recovery Planner" in services
+    assert "Runtime Supervisor Authority" not in services
+
+
 def test_hard_unsafe_supervisor_dominates_autonomous_plan(tmp_path: Path) -> None:
     _seed_base(
         tmp_path,
@@ -270,6 +320,7 @@ def _seed_base(
     duplicate_writer_count: int = 0,
     live_money_eligible: bool = False,
     include_agent_health: bool = True,
+    include_shared_truth: bool = True,
 ) -> None:
     _write_json(
         root / "outputs" / "track_b_execution_core" / "runtime_truth" / "latest_runtime_environment_truth.json",
@@ -352,21 +403,22 @@ def _seed_base(
             "live_money_eligible": live_money_eligible,
         },
     )
-    _write_json(
-        root / "outputs" / "track_b_execution_core" / "shared_truth" / "latest_track_b_shared_truth_refresh.json",
-        {
-            "generated_at": NOW.isoformat(),
-            "classifications": {
-                "Open Order Truth": open_order_classification,
-                "Managed Order Registry": managed_order_classification,
-                "Position Truth": position_classification,
-                "Runtime Environment Truth": runtime_classification,
-                "Managed Position Registry": managed_position_classification,
-                "Reconciliation": reconciliation_classification,
-                "Broker Truth Lease": broker_lease_classification,
-            },
-        },
-    )
+    if include_shared_truth:
+        _write_json(
+            root / "outputs" / "track_b_execution_core" / "shared_truth" / "latest_track_b_shared_truth_refresh.json",
+            _shared_truth_payload(
+                root,
+                runtime_classification=runtime_classification,
+                position_classification=position_classification,
+                open_order_classification=open_order_classification,
+                managed_order_classification=managed_order_classification,
+                managed_position_classification=managed_position_classification,
+                reconciliation_classification=reconciliation_classification,
+                broker_lease_classification=broker_lease_classification,
+                paper_action_policy=paper_action_policy,
+                autonomous_plan_classification=autonomous_plan_classification,
+            ),
+        )
     _write_json(
         root / "outputs" / "operator_dashboard" / "runtime" / "latest_canonical_readiness.json",
         {"generated_at": NOW.isoformat(), "canonical_readiness": "READY_SUBMIT_CAPABLE"},
@@ -488,3 +540,92 @@ def _seed_base(
 def _write_json(path: Path, payload: dict) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+
+
+def _shared_truth_payload(
+    root: Path,
+    *,
+    runtime_classification: str,
+    position_classification: str,
+    open_order_classification: str,
+    managed_order_classification: str,
+    managed_position_classification: str,
+    reconciliation_classification: str,
+    broker_lease_classification: str,
+    paper_action_policy: str,
+    autonomous_plan_classification: str,
+) -> dict:
+    rows = [
+        (
+            "Open Order Truth",
+            open_order_classification,
+            root / "outputs" / "track_b_execution_core" / "open_order_truth" / "latest_open_order_truth.json",
+        ),
+        (
+            "Managed Order Registry",
+            managed_order_classification,
+            root / "outputs" / "track_b_execution_core" / "managed_orders" / "latest_managed_orders.json",
+        ),
+        (
+            "Position Truth",
+            position_classification,
+            root / "outputs" / "track_b_execution_core" / "position_truth" / "latest_position_truth.json",
+        ),
+        (
+            "Runtime Environment Truth",
+            runtime_classification,
+            root / "outputs" / "track_b_execution_core" / "runtime_truth" / "latest_runtime_environment_truth.json",
+        ),
+        (
+            "Managed Position Registry",
+            managed_position_classification,
+            root / "outputs" / "track_b_execution_core" / "managed_positions" / "latest_managed_positions.json",
+        ),
+        (
+            "Reconciliation",
+            reconciliation_classification,
+            root
+            / "outputs"
+            / "reports"
+            / "track_b_paper_broker_reconciliation"
+            / "latest_track_b_paper_broker_reconciliation.json",
+        ),
+        (
+            "Broker Truth Lease",
+            broker_lease_classification,
+            root / "outputs" / "operator_dashboard" / "runtime" / "latest_broker_truth_lease.json",
+        ),
+        (
+            "PAPER Recovery Policy",
+            paper_action_policy,
+            root / "outputs" / "track_b_execution_core" / "paper_recovery_policy" / "latest_paper_recovery_policy.json",
+        ),
+        (
+            "PAPER Autonomous Recovery Planner",
+            autonomous_plan_classification,
+            root
+            / "outputs"
+            / "track_b_execution_core"
+            / "paper_autonomous_recovery"
+            / "latest_paper_autonomous_recovery_plan.json",
+        ),
+    ]
+    return {
+        "schema_version": "track_b_shared_truth_refresh_v1",
+        "generated_at": NOW.isoformat(),
+        "refresh_generation_id": "test-shared-truth-generation",
+        "refresh_phase": "pre_supervisor_refresh",
+        "mode": "PAPER",
+        "read_only": True,
+        "services": [
+            {
+                "service": service,
+                "classification": classification,
+                "generated_at": NOW.isoformat(),
+                "artifact_path": str(path),
+            }
+            for service, classification, path in rows
+        ],
+        "classifications": {service: classification for service, classification, _path in rows},
+        "artifact_paths": {service: str(path) for service, _classification, path in rows},
+    }

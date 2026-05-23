@@ -74,6 +74,8 @@ LAUNCH_SUPERVISOR_LIVE_ACTION_POLICY=""
 LAUNCH_SUPERVISOR_AUTONOMOUS_RECOVERY_PLAN_CLASSIFICATION=""
 LAUNCH_SUPERVISOR_AUTONOMOUS_RECOVERY_NEXT_ACTION=""
 LAUNCH_SUPERVISOR_AUTONOMOUS_RECOVERY_EXECUTION_ENABLED="false"
+LAUNCH_SUPERVISOR_SHARED_TRUTH_REFRESH_GENERATION_ID=""
+LAUNCH_SUPERVISOR_SHARED_TRUTH_COHERENCE_STATUS=""
 
 ARGS=()
 CONFIG_SET=0
@@ -337,6 +339,8 @@ payload = {
         "autonomous_recovery_plan_classification": os.environ.get("LAUNCH_SUPERVISOR_AUTONOMOUS_RECOVERY_PLAN_CLASSIFICATION") or None,
         "autonomous_recovery_next_action": os.environ.get("LAUNCH_SUPERVISOR_AUTONOMOUS_RECOVERY_NEXT_ACTION") or None,
         "autonomous_recovery_execution_enabled": os.environ.get("LAUNCH_SUPERVISOR_AUTONOMOUS_RECOVERY_EXECUTION_ENABLED", "").lower() == "true",
+        "shared_truth_refresh_generation_id": os.environ.get("LAUNCH_SUPERVISOR_SHARED_TRUTH_REFRESH_GENERATION_ID") or None,
+        "shared_truth_coherence_status": os.environ.get("LAUNCH_SUPERVISOR_SHARED_TRUTH_COHERENCE_STATUS") or None,
     },
 }
 if os.environ.get("LAUNCH_STOP_SOURCE") or stop_reason:
@@ -468,6 +472,8 @@ live_action_policy = evidence.get("paper_live_action_policy")
 autonomous_plan_classification = payload.get("autonomous_recovery_plan_classification")
 autonomous_next_action = payload.get("autonomous_recovery_next_action")
 autonomous_execution_enabled = payload.get("autonomous_recovery_execution_enabled") is True
+shared_truth_generation_id = payload.get("shared_truth_refresh_generation_id")
+shared_truth_coherence_status = payload.get("shared_truth_coherence_status")
 operator_ack_required = payload.get("operator_ack_required") is True or operator_ack.get("required") is True
 operator_ack_advisory_only_for_paper = bool(operator_ack_required and not requires_operator_ack_for_paper and paper_action_policy)
 print(
@@ -478,6 +484,8 @@ print(
     "autonomous_recovery_plan_classification={plan_classification} "
     "autonomous_recovery_next_action={plan_action} "
     "autonomous_recovery_execution_enabled={plan_execution_enabled} "
+    "shared_truth_refresh_generation_id={shared_truth_generation_id} "
+    "shared_truth_coherence_status={shared_truth_coherence_status} "
     "live_action_policy={live_action_policy} recommended_next_command={command}".format(
         classification=payload.get("classification"),
         mode=payload.get("supervisor_mode"),
@@ -491,6 +499,8 @@ print(
         plan_classification=autonomous_plan_classification,
         plan_action=autonomous_next_action,
         plan_execution_enabled=autonomous_execution_enabled,
+        shared_truth_generation_id=shared_truth_generation_id,
+        shared_truth_coherence_status=shared_truth_coherence_status,
         live_action_policy=live_action_policy,
         command=payload.get("recommended_next_command"),
     )
@@ -529,6 +539,8 @@ live_action_policy = evidence.get("paper_live_action_policy")
 autonomous_plan_classification = payload.get("autonomous_recovery_plan_classification")
 autonomous_next_action = payload.get("autonomous_recovery_next_action")
 autonomous_execution_enabled = payload.get("autonomous_recovery_execution_enabled") is True
+shared_truth_generation_id = payload.get("shared_truth_refresh_generation_id")
+shared_truth_coherence_status = payload.get("shared_truth_coherence_status")
 operator_ack_advisory_only_for_paper = bool(ack_required and not requires_operator_ack_for_paper and paper_action_policy)
 os.environ["MGC_RUNTIME_SUPERVISOR_CLASSIFICATION"] = str(classification or "")
 allowed = (
@@ -548,6 +560,8 @@ if not allowed:
         f"autonomous_recovery_plan_classification={autonomous_plan_classification} "
         f"autonomous_recovery_next_action={autonomous_next_action} "
         f"autonomous_recovery_execution_enabled={autonomous_execution_enabled} "
+        f"shared_truth_refresh_generation_id={shared_truth_generation_id} "
+        f"shared_truth_coherence_status={shared_truth_coherence_status} "
         f"live_action_policy={live_action_policy} recommended_next_command={recommended}",
         file=sys.stderr,
     )
@@ -694,6 +708,26 @@ try:
 except (OSError, json.JSONDecodeError):
     payload = {}
 print("true" if payload.get("autonomous_recovery_execution_enabled") is True else "false")
+PY
+)"
+  LAUNCH_SUPERVISOR_SHARED_TRUTH_REFRESH_GENERATION_ID="$("${PYTHON_BIN}" - <<'PY' "${RUNTIME_SUPERVISOR_AUTHORITY_FILE}" shared_truth_refresh_generation_id || true
+import json, sys
+from pathlib import Path
+try:
+    payload = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
+except (OSError, json.JSONDecodeError):
+    payload = {}
+print(payload.get(sys.argv[2]) or "")
+PY
+)"
+  LAUNCH_SUPERVISOR_SHARED_TRUTH_COHERENCE_STATUS="$("${PYTHON_BIN}" - <<'PY' "${RUNTIME_SUPERVISOR_AUTHORITY_FILE}" shared_truth_coherence_status || true
+import json, sys
+from pathlib import Path
+try:
+    payload = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
+except (OSError, json.JSONDecodeError):
+    payload = {}
+print(payload.get(sys.argv[2]) or "")
 PY
 )"
   if [[ ${gate_rc} -ne 0 ]]; then
