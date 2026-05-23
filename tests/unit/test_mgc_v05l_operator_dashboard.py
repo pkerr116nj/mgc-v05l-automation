@@ -263,6 +263,132 @@ def test_canonical_readiness_dashboard_summary_surfaces_attention_and_suspicious
     assert summary["shared_truth"]["not_routing_authority"] is True
 
 
+def test_track_b_control_plane_status_projection_displays_closed_market_services(tmp_path: Path) -> None:
+    _write_track_b_control_plane_artifacts(
+        tmp_path,
+        self_recover_recommendation="WAIT_MARKET_CLOSED",
+        crash_loop_classification="NO_CRASH_LOOP",
+        runtime_resume_classification="RESUME_BLOCKED_MARKET_CLOSED",
+        runtime_resume_reason="MARKET_CLOSED_NO_FRESH_BARS",
+    )
+
+    summary = operator_dashboard_module._track_b_control_plane_services_summary(tmp_path)  # noqa: SLF001
+
+    assert summary["projection_only"] is True
+    assert summary["not_routing_authority"] is True
+    assert summary["source_authority"] == "execution_core_authority"
+    assert summary["agent_registry"] == "AGENT_REGISTRY_READY"
+    assert summary["agent_health"] == "AGENT_HEALTH_READY"
+    assert summary["self_recover_recommendation"] == "WAIT_MARKET_CLOSED"
+    assert summary["crash_loop_classification"] == "NO_CRASH_LOOP"
+    assert summary["runtime_resume_classification"] == "RESUME_BLOCKED_MARKET_CLOSED"
+    assert summary["runtime_resume_allowed"] is False
+    assert summary["runtime_resume_safe_to_start_runtime"] is False
+    assert summary["market_closed_no_fresh_bars_expected"] is True
+    assert summary["operator_message"] == "Market closed/no fresh bars expected"
+    assert "outputs/operator_dashboard/runtime/latest_track_b_runtime_resume_semantics.json" not in json.dumps(summary)
+
+
+def test_track_b_control_plane_status_projection_displays_crash_loop_and_operator_ack(tmp_path: Path) -> None:
+    _write_track_b_control_plane_artifacts(
+        tmp_path,
+        self_recover_recommendation="RESTART_RUNTIME_BLOCKED",
+        crash_loop_classification="OPERATOR_ACK_REQUIRED",
+        crash_loop_restart_blocked=True,
+        runtime_resume_classification="RESUME_BLOCKED_OPERATOR_ACK_REQUIRED",
+        runtime_resume_reason="Prior unsafe stop requires operator acknowledgement.",
+        runtime_resume_required_operator_ack=True,
+        runtime_resume_blockers=[{"code": "operator_ack_required", "detail": "paper_reconciliation_mismatch"}],
+    )
+
+    summary = operator_dashboard_module._track_b_control_plane_services_summary(tmp_path)  # noqa: SLF001
+
+    assert summary["crash_loop_classification"] == "OPERATOR_ACK_REQUIRED"
+    assert summary["crash_loop_restart_blocked"] is True
+    assert summary["runtime_resume_classification"] == "RESUME_BLOCKED_OPERATOR_ACK_REQUIRED"
+    assert summary["runtime_resume_required_operator_ack"] is True
+    assert summary["attention_required"] is True
+    assert summary["runtime_resume_blockers"] == [
+        {"code": "operator_ack_required", "detail": "paper_reconciliation_mismatch"}
+    ]
+
+
+def test_latest_track_b_operator_status_payload_includes_control_plane_projection(tmp_path: Path) -> None:
+    status_path = (
+        tmp_path
+        / "outputs"
+        / "track_b_execution_core"
+        / "operator_status"
+        / "latest_operator_status_summary.json"
+    )
+    status_path.parent.mkdir(parents=True, exist_ok=True)
+    status_path.write_text(json.dumps({"generated_at": "2026-05-23T12:00:00+00:00"}) + "\n", encoding="utf-8")
+    _write_track_b_control_plane_artifacts(
+        tmp_path,
+        self_recover_recommendation="WAIT_MARKET_CLOSED",
+        runtime_resume_classification="RESUME_BLOCKED_MARKET_CLOSED",
+        runtime_resume_reason="MARKET_CLOSED_NO_FRESH_BARS",
+    )
+
+    payload = OperatorDashboardService(tmp_path)._latest_track_b_operator_status_payload()  # noqa: SLF001
+
+    assert payload is not None
+    control_plane = payload["track_b_control_plane"]
+    assert control_plane["projection_only"] is True
+    assert control_plane["not_routing_authority"] is True
+    assert control_plane["runtime_resume_classification"] == "RESUME_BLOCKED_MARKET_CLOSED"
+    assert control_plane["operator_message"] == "Market closed/no fresh bars expected"
+
+
+def _write_track_b_control_plane_artifacts(
+    root: Path,
+    *,
+    self_recover_recommendation: str,
+    crash_loop_classification: str = "NO_CRASH_LOOP",
+    crash_loop_restart_blocked: bool = False,
+    runtime_resume_classification: str,
+    runtime_resume_reason: str,
+    runtime_resume_allowed: bool = False,
+    runtime_resume_safe_to_start_runtime: bool = False,
+    runtime_resume_required_operator_ack: bool = False,
+    runtime_resume_blockers: list[dict[str, str]] | None = None,
+) -> None:
+    _write_json_file(
+        root / "outputs/track_b_execution_core/agent_registry/latest_agent_registry.json",
+        {"classification": "AGENT_REGISTRY_READY"},
+    )
+    _write_json_file(
+        root / "outputs/track_b_execution_core/agent_health/latest_agent_health.json",
+        {"classification": "AGENT_HEALTH_READY"},
+    )
+    _write_json_file(
+        root / "outputs/track_b_execution_core/self_recover/latest_self_recover_rules.json",
+        {"classification": self_recover_recommendation, "recommendation": self_recover_recommendation},
+    )
+    _write_json_file(
+        root / "outputs/track_b_execution_core/crash_loop_protection/latest_crash_loop_protection.json",
+        {"classification": crash_loop_classification, "restart_blocked": crash_loop_restart_blocked},
+    )
+    _write_json_file(
+        root / "outputs/track_b_execution_core/runtime_resume/latest_runtime_resume_semantics.json",
+        {
+            "classification": runtime_resume_classification,
+            "allowed": runtime_resume_allowed,
+            "safe_to_start_runtime": runtime_resume_safe_to_start_runtime,
+            "required_operator_ack": runtime_resume_required_operator_ack,
+            "resume_mode": "hold_down_market_closed",
+            "reason": runtime_resume_reason,
+            "blockers": runtime_resume_blockers or [],
+            "warnings": [],
+        },
+    )
+
+
+def _write_json_file(path: Path, payload: dict) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+
+
 def _write_lane_bar_authority_db(
     path: Path,
     *,

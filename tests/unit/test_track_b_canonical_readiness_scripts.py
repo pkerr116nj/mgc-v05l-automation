@@ -128,6 +128,28 @@ def test_status_script_surfaces_runtime_generation_evidence_only() -> None:
     assert "paper_runtime_generation_config_in_force_freshness" in script
     assert "paper_runtime_generation_operator_status_freshness" in script
     assert "paper_runtime_generation_runtime_truth_freshness" in script
+
+
+def test_status_script_surfaces_control_plane_services_as_projection_only() -> None:
+    script = STATUS_SCRIPT.read_text(encoding="utf-8")
+
+    assert "DEFAULT_AGENT_REGISTRY_FILE" in script
+    assert "DEFAULT_AGENT_HEALTH_FILE" in script
+    assert "DEFAULT_SELF_RECOVER_RULES_FILE" in script
+    assert "DEFAULT_CRASH_LOOP_PROTECTION_FILE" in script
+    assert "DEFAULT_RUNTIME_RESUME_SEMANTICS_FILE" in script
+    assert "merge_control_plane_services_status" in script
+    assert "status[\"track_b_control_plane\"]" in script
+    assert "\"source_authority\": \"execution_core_authority\"" in script
+    assert "\"projection_only\": True" in script
+    assert "\"not_routing_authority\": True" in script
+    assert "WAIT_MARKET_CLOSED" in script
+    assert "RESUME_BLOCKED_MARKET_CLOSED" in script
+    assert "MARKET_CLOSED_NO_FRESH_BARS" in script
+    assert "runtime_resume_safe_to_start_runtime" in script
+    assert script.index("merge_paper_runtime_generation_status") < script.index("merge_control_plane_services_status")
+    assert "latest_track_b_runtime_resume_semantics.json" not in script
+    assert "latest_track_b_crash_loop_protection.json" not in script
     assert script.index("merge_paper_runtime_truth_status") < script.index("merge_paper_runtime_generation_status")
     assert "ready_submit_capable\" = pid_metadata" not in script
     assert "paper_trade_allowed\" = pid_metadata" not in script

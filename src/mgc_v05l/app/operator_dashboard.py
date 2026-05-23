@@ -1900,6 +1900,7 @@ class OperatorDashboardService:
                 startup_readiness_diagnostic_path,
             ),
         )
+        put_latest_allow_empty("track_b_control_plane", _track_b_control_plane_services_summary(self._repo_root))
         put_missing("shadow_monitor_submit_allowed", monitor.get("submit_allowed"))
         put_missing("shadow_monitor_submit_attempted", monitor.get("submit_attempted"))
         put_missing("shadow_monitor_paper_proof_invoked", monitor.get("paper_proof_invoked"))
@@ -18072,6 +18073,80 @@ def _canonical_readiness_shared_truth_summary(payload: dict[str, Any]) -> dict[s
         "market_closed_no_fresh_bars_expected": market_closed,
         "operator_message": "Market closed/no fresh bars expected" if market_closed else None,
         "artifact_paths": artifact_paths,
+    }
+
+
+def _track_b_control_plane_services_summary(repo_root: Path) -> dict[str, Any]:
+    """Display-only projection of execution_core Track B control-plane authority."""
+
+    authority_paths = {
+        "agent_registry": repo_root
+        / "outputs"
+        / "track_b_execution_core"
+        / "agent_registry"
+        / "latest_agent_registry.json",
+        "agent_health": repo_root
+        / "outputs"
+        / "track_b_execution_core"
+        / "agent_health"
+        / "latest_agent_health.json",
+        "self_recover": repo_root
+        / "outputs"
+        / "track_b_execution_core"
+        / "self_recover"
+        / "latest_self_recover_rules.json",
+        "crash_loop_protection": repo_root
+        / "outputs"
+        / "track_b_execution_core"
+        / "crash_loop_protection"
+        / "latest_crash_loop_protection.json",
+        "runtime_resume": repo_root
+        / "outputs"
+        / "track_b_execution_core"
+        / "runtime_resume"
+        / "latest_runtime_resume_semantics.json",
+    }
+    payloads: dict[str, dict[str, Any]] = {}
+    for name, path in authority_paths.items():
+        payload = _load_json_file(path)
+        payloads[name] = payload if isinstance(payload, dict) else {}
+    self_recover = payloads["self_recover"]
+    crash_loop = payloads["crash_loop_protection"]
+    runtime_resume = payloads["runtime_resume"]
+    market_closed = (
+        self_recover.get("recommendation") == "WAIT_MARKET_CLOSED"
+        or runtime_resume.get("classification") == "RESUME_BLOCKED_MARKET_CLOSED"
+        or runtime_resume.get("reason") == "MARKET_CLOSED_NO_FRESH_BARS"
+    )
+    attention_required = bool(
+        runtime_resume.get("classification") not in {None, "", "RESUME_ALLOWED_CLEAN", "RESUME_BLOCKED_MARKET_CLOSED"}
+        or crash_loop.get("restart_blocked") is True
+        or runtime_resume.get("required_operator_ack") is True
+    )
+    return {
+        "available": any(bool(payload) for payload in payloads.values()),
+        "source": "execution_core_control_plane_authority_projection",
+        "source_authority": "execution_core_authority",
+        "projection_only": True,
+        "dashboard_projection_authority": False,
+        "not_routing_authority": True,
+        "agent_registry": payloads["agent_registry"].get("classification"),
+        "agent_health": payloads["agent_health"].get("classification"),
+        "self_recover_recommendation": self_recover.get("recommendation") or self_recover.get("classification"),
+        "crash_loop_classification": crash_loop.get("classification"),
+        "crash_loop_restart_blocked": crash_loop.get("restart_blocked") is True,
+        "runtime_resume_classification": runtime_resume.get("classification"),
+        "runtime_resume_allowed": runtime_resume.get("allowed") is True,
+        "runtime_resume_safe_to_start_runtime": runtime_resume.get("safe_to_start_runtime") is True,
+        "runtime_resume_required_operator_ack": runtime_resume.get("required_operator_ack") is True,
+        "runtime_resume_resume_mode": runtime_resume.get("resume_mode"),
+        "runtime_resume_reason": runtime_resume.get("reason"),
+        "runtime_resume_blockers": list(runtime_resume.get("blockers") or []),
+        "runtime_resume_warnings": list(runtime_resume.get("warnings") or []),
+        "market_closed_no_fresh_bars_expected": market_closed,
+        "operator_message": "Market closed/no fresh bars expected" if market_closed else None,
+        "attention_required": attention_required,
+        "artifact_paths": {name: str(path) for name, path in authority_paths.items()},
     }
 
 

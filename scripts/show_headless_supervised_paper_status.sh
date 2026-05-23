@@ -20,6 +20,11 @@ DEFAULT_PAPER_CONFIG_IN_FORCE_FILE="${REPO_ROOT}/outputs/probationary_pattern_en
 DEFAULT_PAPER_OPERATOR_STATUS_FILE="${REPO_ROOT}/outputs/probationary_pattern_engine/paper_session/operator_status.json"
 DEFAULT_PAPER_RECONCILIATION_FILE="${REPO_ROOT}/outputs/reports/track_b_paper_broker_reconciliation/latest_track_b_paper_broker_reconciliation.json"
 DEFAULT_PAPER_RUNTIME_LAUNCH_STATUS_FILE="${REPO_ROOT}/outputs/probationary_pattern_engine/paper_session/runtime/probationary_paper_launch_status.json"
+DEFAULT_AGENT_REGISTRY_FILE="${REPO_ROOT}/outputs/track_b_execution_core/agent_registry/latest_agent_registry.json"
+DEFAULT_AGENT_HEALTH_FILE="${REPO_ROOT}/outputs/track_b_execution_core/agent_health/latest_agent_health.json"
+DEFAULT_SELF_RECOVER_RULES_FILE="${REPO_ROOT}/outputs/track_b_execution_core/self_recover/latest_self_recover_rules.json"
+DEFAULT_CRASH_LOOP_PROTECTION_FILE="${REPO_ROOT}/outputs/track_b_execution_core/crash_loop_protection/latest_crash_loop_protection.json"
+DEFAULT_RUNTIME_RESUME_SEMANTICS_FILE="${REPO_ROOT}/outputs/track_b_execution_core/runtime_resume/latest_runtime_resume_semantics.json"
 DEFAULT_STARTUP_FILE="${REPO_ROOT}/outputs/operator_dashboard/startup_control_plane_snapshot.json"
 DEFAULT_OPERABILITY_FILE="${REPO_ROOT}/outputs/operator_dashboard/supervised_paper_operability_snapshot.json"
 DEFAULT_INFO_FILE="${DEFAULT_RUNTIME_DIR}/operator_dashboard.json"
@@ -608,6 +613,77 @@ status_path.write_text(json.dumps(status, indent=2, sort_keys=True) + "\n", enco
 PY
 }
 
+merge_control_plane_services_status() {
+  "${PYTHON_BIN}" - <<'PY' "${STATUS_FILE}" "${DEFAULT_AGENT_REGISTRY_FILE}" "${DEFAULT_AGENT_HEALTH_FILE}" "${DEFAULT_SELF_RECOVER_RULES_FILE}" "${DEFAULT_CRASH_LOOP_PROTECTION_FILE}" "${DEFAULT_RUNTIME_RESUME_SEMANTICS_FILE}"
+import json
+import sys
+from pathlib import Path
+
+status_path = Path(sys.argv[1])
+agent_registry_path = Path(sys.argv[2])
+agent_health_path = Path(sys.argv[3])
+self_recover_path = Path(sys.argv[4])
+crash_loop_path = Path(sys.argv[5])
+runtime_resume_path = Path(sys.argv[6])
+
+def read_json(path: Path) -> dict:
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+    return payload if isinstance(payload, dict) else {}
+
+try:
+    status = json.loads(status_path.read_text(encoding="utf-8"))
+except (OSError, json.JSONDecodeError):
+    status = {}
+
+agent_registry = read_json(agent_registry_path)
+agent_health = read_json(agent_health_path)
+self_recover = read_json(self_recover_path)
+crash_loop = read_json(crash_loop_path)
+runtime_resume = read_json(runtime_resume_path)
+market_closed = (
+    self_recover.get("recommendation") == "WAIT_MARKET_CLOSED"
+    or runtime_resume.get("classification") == "RESUME_BLOCKED_MARKET_CLOSED"
+    or runtime_resume.get("reason") == "MARKET_CLOSED_NO_FRESH_BARS"
+)
+status["track_b_control_plane"] = {
+    "source": "execution_core_control_plane_authority_projection",
+    "source_authority": "execution_core_authority",
+    "projection_only": True,
+    "dashboard_projection_authority": False,
+    "not_routing_authority": True,
+    "agent_registry": agent_registry.get("classification"),
+    "agent_health": agent_health.get("classification"),
+    "self_recover_recommendation": self_recover.get("recommendation") or self_recover.get("classification"),
+    "crash_loop_classification": crash_loop.get("classification"),
+    "crash_loop_restart_blocked": crash_loop.get("restart_blocked") is True,
+    "runtime_resume_classification": runtime_resume.get("classification"),
+    "runtime_resume_allowed": runtime_resume.get("allowed") is True,
+    "runtime_resume_safe_to_start_runtime": runtime_resume.get("safe_to_start_runtime") is True,
+    "runtime_resume_required_operator_ack": runtime_resume.get("required_operator_ack") is True,
+    "runtime_resume_resume_mode": runtime_resume.get("resume_mode"),
+    "runtime_resume_reason": runtime_resume.get("reason"),
+    "runtime_resume_blockers": runtime_resume.get("blockers") or [],
+    "runtime_resume_warnings": runtime_resume.get("warnings") or [],
+    "market_closed_no_fresh_bars_expected": market_closed,
+    "operator_message": "Market closed/no fresh bars expected" if market_closed else None,
+    "artifact_paths": {
+        "agent_registry": str(agent_registry_path),
+        "agent_health": str(agent_health_path),
+        "self_recover": str(self_recover_path),
+        "crash_loop_protection": str(crash_loop_path),
+        "runtime_resume": str(runtime_resume_path),
+    },
+}
+status["paper_only"] = True
+status["live_money_eligible"] = False
+
+status_path.write_text(json.dumps(status, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+PY
+}
+
 canonical_readiness_exit_for_classification() {
   case "$1" in
     READY_SUBMIT_CAPABLE|READY_OBSERVATION_ONLY)
@@ -704,6 +780,7 @@ merge_canonical_readiness_status
 merge_maintenance_supervisor_status
 merge_paper_runtime_truth_status
 merge_paper_runtime_generation_status
+merge_control_plane_services_status
 cat "${STATUS_FILE}"
 canonical_state="$(canonical_readiness_classification)"
 canonical_readiness_exit_for_classification "${canonical_state}"
