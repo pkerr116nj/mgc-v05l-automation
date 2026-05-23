@@ -83,6 +83,7 @@ def validate_track_b_pre_action_snapshot(
         "control_plane_snapshot_id": str(snapshot.get("control_plane_snapshot_id") or ""),
         "shared_truth_refresh_generation_id": str(snapshot.get("shared_truth_refresh_generation_id") or ""),
         "snapshot_coherence_status": str(snapshot.get("shared_truth_coherence_status") or ""),
+        "snapshot_safe_to_start_runtime": snapshot.get("safe_to_start_runtime") is True,
         "supervisor_decision_id": str(snapshot.get("runtime_supervisor_decision_id") or ""),
         "supervisor_classification": str(snapshot.get("runtime_supervisor_classification") or ""),
         "planner_classification": str(plan.get("classification") or ""),

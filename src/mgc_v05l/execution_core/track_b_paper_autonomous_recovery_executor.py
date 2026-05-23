@@ -52,6 +52,8 @@ class TrackBPaperAutonomousRecoveryExecutorConfig:
     max_attempts_per_target: int = 1
     max_attempts_per_window: int = 3
     budget_window_seconds: int = 3600
+    enable_runtime_retry_adapter: bool = False
+    runtime_retry_launcher_path: Path = Path("scripts") / "run_headless_supervised_paper_service.sh"
     pre_action_validator_config: TrackBPreActionSnapshotValidatorConfig | None = None
 
     def resolve(self, path: Path) -> Path:
@@ -112,6 +114,13 @@ def build_track_b_paper_autonomous_recovery_executor_attempt(
         classification = EXECUTOR_BLOCKED_BUDGET_EXHAUSTED
         reason = "Dry-run recovery budget is exhausted for this action/target window."
         blockers.append({"code": "budget_exhausted", "detail": budget_key})
+    adapter_result = _adapter_result(
+        config=config,
+        action_type=action_type,
+        validation=validation,
+        classification=classification,
+        normalized_target=normalized_target,
+    )
 
     return {
         "schema_version": "track_b_paper_autonomous_recovery_executor_attempt_v1",
@@ -129,6 +138,7 @@ def build_track_b_paper_autonomous_recovery_executor_attempt(
         "budget_key": budget_key,
         "budget": budget,
         "pre_action_validation": validation,
+        "action_adapter": adapter_result,
         "pre_action_evidence": {
             "control_plane_snapshot_id": validation.get("control_plane_snapshot_id") or "",
             "shared_truth_refresh_generation_id": validation.get("shared_truth_refresh_generation_id") or "",
@@ -140,6 +150,7 @@ def build_track_b_paper_autonomous_recovery_executor_attempt(
         },
         "post_action_evidence": {
             "placeholder": True,
+            "adapter_apply_result": adapter_result.get("apply_result"),
             "reason": "v1 is dry-run/framework only; no post-action mutation or verification is performed.",
         },
         "would_mutate_runtime": would_mutate_runtime,
@@ -254,6 +265,67 @@ def _budget_summary(
         "remaining_attempts_for_window": window_remaining,
         "budget_exhausted": target_remaining <= 0 or window_remaining <= 0,
     }
+
+
+def _adapter_result(
+    *,
+    config: TrackBPaperAutonomousRecoveryExecutorConfig,
+    action_type: str,
+    validation: Mapping[str, Any],
+    classification: str,
+    normalized_target: Mapping[str, str],
+) -> dict[str, Any]:
+    if action_type != "RUNTIME_RETRY":
+        return {
+            "action_type": action_type,
+            "adapter_name": "NO_ADAPTER_BOUNDARY_V1",
+            "adapter_enabled": False,
+            "execution_enabled": False,
+            "blocked_reason": "ADAPTER_NOT_IMPLEMENTED_FOR_ACTION_TYPE",
+            "dry_run_result": {"classification": classification},
+            "apply_result": {"placeholder": True, "executed": False},
+        }
+    command = _runtime_retry_command(config)
+    launcher_exists = len(command) >= 2 and Path(command[1]).exists()
+    blocked_reason = "ADAPTER_DISABLED"
+    if validation.get("classification") != PRE_ACTION_SNAPSHOT_VALID:
+        blocked_reason = "PRE_ACTION_VALIDATION_BLOCKED"
+    elif validation.get("planner_action_type") != "RUNTIME_RETRY":
+        blocked_reason = "PLAN_ACTION_TYPE_MISMATCH"
+    elif validation.get("snapshot_safe_to_start_runtime") is not True:
+        blocked_reason = "SNAPSHOT_START_NOT_ALLOWED"
+    elif not launcher_exists:
+        blocked_reason = "LAUNCH_COMMAND_NOT_FOUND"
+    elif config.enable_runtime_retry_adapter:
+        blocked_reason = "ADAPTER_DISABLED_PENDING_SECOND_ENABLE_FLAG"
+    return {
+        "action_type": "RUNTIME_RETRY",
+        "adapter_name": "RUNTIME_RETRY_DISABLED_V1",
+        "adapter_enabled": False,
+        "execution_enabled": False,
+        "enable_runtime_retry_adapter_requested": config.enable_runtime_retry_adapter,
+        "blocked_reason": blocked_reason,
+        "would_execute_command": command,
+        "launch_command_exists": launcher_exists,
+        "control_plane_snapshot_id": validation.get("control_plane_snapshot_id") or "",
+        "shared_truth_generation_id": validation.get("shared_truth_refresh_generation_id") or "",
+        "budget_key": _budget_key(action_type=action_type, target_identity=normalized_target),
+        "dry_run_result": {
+            "classification": classification,
+            "validated_runtime_start_allowed": validation.get("snapshot_safe_to_start_runtime") is True,
+            "validated_plan_action_type": validation.get("planner_action_type") == "RUNTIME_RETRY",
+        },
+        "apply_result": {
+            "placeholder": True,
+            "executed": False,
+            "reason": "RUNTIME_RETRY adapter is wired but disabled by policy in v1.",
+        },
+    }
+
+
+def _runtime_retry_command(config: TrackBPaperAutonomousRecoveryExecutorConfig) -> list[str]:
+    launcher = config.resolve(config.runtime_retry_launcher_path)
+    return ["bash", str(launcher)]
 
 
 def _event_rows(path: Path) -> list[dict[str, Any]]:

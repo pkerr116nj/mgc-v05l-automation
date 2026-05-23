@@ -41,6 +41,63 @@ def test_valid_coherent_snapshot_and_matching_plan_creates_dry_run_attempt(tmp_p
     assert payload["pre_action_validation"]["classification"] == PRE_ACTION_SNAPSHOT_VALID
     assert payload["would_mutate_runtime"] is True
     assert payload["would_mutate_broker"] is False
+    assert payload["action_adapter"]["adapter_name"] == "RUNTIME_RETRY_DISABLED_V1"
+    assert payload["action_adapter"]["adapter_enabled"] is False
+    assert payload["action_adapter"]["execution_enabled"] is False
+    assert payload["action_adapter"]["blocked_reason"] == "ADAPTER_DISABLED"
+    assert payload["action_adapter"]["would_execute_command"][0] == "bash"
+    assert payload["action_adapter"]["launch_command_exists"] is True
+
+
+def test_runtime_retry_adapter_stays_disabled_when_placeholder_flag_is_set(tmp_path: Path) -> None:
+    _seed_valid(tmp_path, action_type="RUNTIME_RETRY", plan_classification="PLAN_RUNTIME_RETRY")
+
+    payload = build_track_b_paper_autonomous_recovery_executor_attempt(
+        config=TrackBPaperAutonomousRecoveryExecutorConfig(repo_root=tmp_path, enable_runtime_retry_adapter=True),
+        expected_plan_classification="PLAN_RUNTIME_RETRY",
+        action_type="RUNTIME_RETRY",
+        now=NOW,
+    )
+
+    assert payload["classification"] == EXECUTOR_DRY_RUN_READY
+    assert payload["action_adapter"]["enable_runtime_retry_adapter_requested"] is True
+    assert payload["action_adapter"]["adapter_enabled"] is False
+    assert payload["action_adapter"]["execution_enabled"] is False
+    assert payload["action_adapter"]["blocked_reason"] == "ADAPTER_DISABLED_PENDING_SECOND_ENABLE_FLAG"
+
+
+def test_runtime_retry_adapter_blocks_when_snapshot_start_not_allowed(tmp_path: Path) -> None:
+    _seed_valid(
+        tmp_path,
+        action_type="RUNTIME_RETRY",
+        plan_classification="PLAN_RUNTIME_RETRY",
+        snapshot_safe_to_start_runtime=False,
+    )
+
+    payload = build_track_b_paper_autonomous_recovery_executor_attempt(
+        config=TrackBPaperAutonomousRecoveryExecutorConfig(repo_root=tmp_path),
+        expected_plan_classification="PLAN_RUNTIME_RETRY",
+        action_type="RUNTIME_RETRY",
+        now=NOW,
+    )
+
+    assert payload["classification"] == EXECUTOR_DRY_RUN_READY
+    assert payload["action_adapter"]["blocked_reason"] == "SNAPSHOT_START_NOT_ALLOWED"
+    assert payload["action_adapter"]["execution_enabled"] is False
+
+
+def test_plan_action_mismatch_blocks_before_adapter_enablement(tmp_path: Path) -> None:
+    _seed_valid(tmp_path, action_type="QUARANTINE_OBSERVE_ONLY", plan_classification="PLAN_QUARANTINE_OBSERVE_ONLY")
+
+    payload = build_track_b_paper_autonomous_recovery_executor_attempt(
+        config=TrackBPaperAutonomousRecoveryExecutorConfig(repo_root=tmp_path),
+        expected_plan_classification="PLAN_RUNTIME_RETRY",
+        action_type="RUNTIME_RETRY",
+        now=NOW,
+    )
+
+    assert payload["classification"] == EXECUTOR_BLOCKED_PRE_ACTION_VALIDATION
+    assert payload["action_adapter"]["blocked_reason"] == "PRE_ACTION_VALIDATION_BLOCKED"
 
 
 def test_validator_blocked_state_blocks_executor_attempt(tmp_path: Path) -> None:
@@ -55,6 +112,7 @@ def test_validator_blocked_state_blocks_executor_attempt(tmp_path: Path) -> None
 
     assert payload["classification"] == EXECUTOR_BLOCKED_PRE_ACTION_VALIDATION
     assert payload["pre_action_validation"]["valid"] is False
+    assert payload["action_adapter"]["blocked_reason"] == "PRE_ACTION_VALIDATION_BLOCKED"
 
 
 def test_stale_snapshot_blocks_executor_attempt(tmp_path: Path) -> None:
@@ -126,6 +184,7 @@ def test_live_money_hard_block_flows_from_validator(tmp_path: Path) -> None:
 
     assert payload["classification"] == EXECUTOR_BLOCKED_PRE_ACTION_VALIDATION
     assert payload["pre_action_validation"]["classification"] == PRE_ACTION_BLOCKED_HARD_INVARIANT
+    assert payload["action_adapter"]["blocked_reason"] == "PRE_ACTION_VALIDATION_BLOCKED"
 
 
 def test_duplicate_writer_hard_block_flows_from_validator(tmp_path: Path) -> None:
@@ -140,6 +199,7 @@ def test_duplicate_writer_hard_block_flows_from_validator(tmp_path: Path) -> Non
 
     assert payload["classification"] == EXECUTOR_BLOCKED_PRE_ACTION_VALIDATION
     assert payload["pre_action_validation"]["classification"] == PRE_ACTION_BLOCKED_HARD_INVARIANT
+    assert payload["action_adapter"]["blocked_reason"] == "PRE_ACTION_VALIDATION_BLOCKED"
 
 
 def test_audit_artifacts_are_written(tmp_path: Path) -> None:
@@ -159,6 +219,7 @@ def test_audit_artifacts_are_written(tmp_path: Path) -> None:
     assert latest_path.exists()
     assert event_log_path.exists()
     assert json.loads(latest_path.read_text(encoding="utf-8"))["recovery_attempt_id"] == result["recovery_attempt_id"]
+    assert json.loads(latest_path.read_text(encoding="utf-8"))["action_adapter"]["would_execute_command"][0] == "bash"
     rows = [json.loads(line) for line in event_log_path.read_text(encoding="utf-8").splitlines()]
     assert rows[-1]["recovery_attempt_id"] == result["recovery_attempt_id"]
     assert rows[-1]["execution_enabled"] is False
@@ -182,6 +243,16 @@ def test_dashboard_projection_is_not_consumed(tmp_path: Path) -> None:
     assert "operator_dashboard" not in json.dumps(payload["pre_action_validation"]["source_artifact_paths"])
 
 
+def test_runtime_retry_adapter_has_no_process_execution_path() -> None:
+    source = Path("src/mgc_v05l/execution_core/track_b_paper_autonomous_recovery_executor.py").read_text(
+        encoding="utf-8"
+    )
+
+    assert "subprocess" not in source
+    assert "Popen" not in source
+    assert "os.system" not in source
+
+
 def _seed_valid(
     root: Path,
     *,
@@ -192,7 +263,11 @@ def _seed_valid(
     target_identity: dict | None = None,
     live_money_eligible: bool = False,
     duplicate_writer_count: int = 0,
+    snapshot_safe_to_start_runtime: bool = True,
 ) -> None:
+    launcher_path = root / "scripts" / "run_headless_supervised_paper_service.sh"
+    launcher_path.parent.mkdir(parents=True, exist_ok=True)
+    launcher_path.write_text("#!/usr/bin/env bash\nexit 0\n", encoding="utf-8")
     if include_snapshot:
         _write_json(
             root / "outputs/track_b_execution_core/control_plane/latest_control_plane_snapshot.json",
@@ -203,6 +278,7 @@ def _seed_valid(
                 "shared_truth_coherence_status": "COHERENT",
                 "runtime_supervisor_decision_id": "supervisor-1",
                 "runtime_supervisor_classification": "SUPERVISOR_RUNTIME_START_ALLOWED",
+                "safe_to_start_runtime": snapshot_safe_to_start_runtime,
                 "duplicate_writer_count": duplicate_writer_count,
                 "live_money_eligible": live_money_eligible,
             },

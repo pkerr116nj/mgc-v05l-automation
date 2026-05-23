@@ -39,6 +39,7 @@ def test_coherent_fresh_snapshot_and_matching_plan_are_valid(tmp_path: Path) -> 
     assert result["control_plane_snapshot_id"] == "snapshot-1"
     assert result["shared_truth_refresh_generation_id"] == "generation-1"
     assert result["snapshot_coherence_status"] == "COHERENT"
+    assert result["snapshot_safe_to_start_runtime"] is True
     assert result["planner_action_type"] == "RUNTIME_RETRY"
     assert "operator_dashboard" not in json.dumps(result["source_artifact_paths"])
 
@@ -180,6 +181,7 @@ def _seed_valid(
                 "shared_truth_coherence_status": coherence,
                 "runtime_supervisor_decision_id": "supervisor-1",
                 "runtime_supervisor_classification": "SUPERVISOR_RUNTIME_START_ALLOWED",
+                "safe_to_start_runtime": True,
                 "live_money_eligible": live_money_eligible,
             },
         )

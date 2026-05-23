@@ -121,6 +121,27 @@ Executor audit artifacts:
 - latest dry-run report at `outputs/track_b_execution_core/paper_autonomous_recovery/executor_attempts/latest_paper_autonomous_recovery_executor_attempt.json`
 - append-only event log at `outputs/track_b_execution_core/paper_autonomous_recovery/executor_attempts/paper_autonomous_recovery_executor_events.jsonl`
 
+## Disabled RUNTIME_RETRY Adapter
+
+`RUNTIME_RETRY` is the first candidate action adapter for future enablement because it does not directly mutate broker/order/lifecycle state. In v1 it is wired only as a disabled boundary:
+
+- `adapter_name=RUNTIME_RETRY_DISABLED_V1`
+- `adapter_enabled=false`
+- `execution_enabled=false`
+- `blocked_reason=ADAPTER_DISABLED`
+- `would_execute_command` records the intended launcher command
+- `apply_result.executed=false`
+
+The placeholder config flag `enable_runtime_retry_adapter` may be recorded for audit, but it does not enable execution. A second, explicitly reviewed enablement boundary is required before this adapter may start a runtime.
+
+Broker/order mutation adapters remain later and stricter:
+
+- scoped position cleanup
+- managed order modify-in-place
+- targeted cancel/replace
+
+Those adapters must add exact broker/order/lifecycle identity revalidation, scoped mutation authorization, and stronger post-action verification before they can move beyond dry-run.
+
 ## Decision Rules
 
 1. Live-money eligibility, duplicate runtime writers, and broad ambiguity are hard unsafe holds.
