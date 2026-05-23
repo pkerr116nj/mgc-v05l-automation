@@ -605,10 +605,14 @@ Authority hierarchy:
 12. Crash Loop Protection applies read-only restart budget, cooldown, repeated
    failure, broker-unsafe stop, and operator-ack policy on top of agent health,
    self-recover, runtime stop provenance, and launch/runtime history.
-13. Self-Healing Restart Evidence consumes shared truth for restart eligibility
+13. Runtime Resume Semantics combines proof readiness, shared truth, agent
+   health, self-recover, crash-loop policy, broker/order/position truth, and
+   stop provenance into the advisory answer for whether a PAPER runtime may be
+   started, resumed, held down, or requires operator acknowledgement.
+14. Self-Healing Restart Evidence consumes shared truth for restart eligibility
    diagnostics and keeps broker lease degradation distinct from reconciliation
    danger.
-14. Operator dashboard/status surfaces display projections of this stack. They
+15. Operator dashboard/status surfaces display projections of this stack. They
     are never routing, readiness, restart, broker, lifecycle, or order
     authority.
 
@@ -632,6 +636,7 @@ Authority and status artifact map:
 | Self-Recover Rules | `outputs/track_b_execution_core/self_recover/latest_self_recover_rules.json` | `execution_core` advisory authority |
 | Crash Loop Protection | `outputs/track_b_execution_core/crash_loop_protection/latest_crash_loop_protection.json` | `execution_core` advisory authority |
 | Crash Loop events | `outputs/track_b_execution_core/crash_loop_protection/crash_loop_events.jsonl` | `execution_core` audit |
+| Runtime Resume Semantics | `outputs/track_b_execution_core/runtime_resume/latest_runtime_resume_semantics.json` | `execution_core` advisory authority |
 | Shared Truth Refresh CLI | `mgc_v05l.execution_core.track_b_shared_truth_refresh_cli` | `execution_core` refresh orchestrator |
 | Proof Readiness | `outputs/track_b_execution_core/proof_readiness/latest_track_b_paper_proof_readiness.json` | `execution_core` proof preflight authority |
 | Broker reconciliation | `outputs/track_b_execution_core/broker_reconciliation/latest_track_b_paper_broker_reconciliation.json` | `execution_core` reconciliation authority |
@@ -650,7 +655,8 @@ Dashboard projections may exist for operator visibility, for example
 `outputs/operator_dashboard/runtime/latest_track_b_agent_registry.json`, and
 `outputs/operator_dashboard/runtime/latest_track_b_agent_health.json`,
 `outputs/operator_dashboard/runtime/latest_track_b_self_recover_rules.json`, and
-`outputs/operator_dashboard/runtime/latest_track_b_crash_loop_protection.json`.
+`outputs/operator_dashboard/runtime/latest_track_b_crash_loop_protection.json`, and
+`outputs/operator_dashboard/runtime/latest_track_b_runtime_resume_semantics.json`.
 Each
 projection must carry `projection_only=true`, `not_routing_authority=true`, and
 `source_authority_path=<execution_core authority path>`. Runtime, readiness,
@@ -688,6 +694,10 @@ Current consumer migration status:
 - Crash Loop Protection v1 recommends restart cooldown and operator
   acknowledgement requirements from stop provenance and launch/runtime history,
   but never executes recovery.
+- Runtime Resume Semantics v1 determines whether the runtime is allowed to
+  start clean, must hold down for market closure/shared-truth/crash-loop
+  evidence, or requires manual cleanup/operator acknowledgement. It is advisory
+  only and never executes a restart.
 
 Remaining migration backlog:
 
@@ -709,9 +719,9 @@ Remaining migration backlog:
   marked projections.
 - Agent health contract v2 should add richer per-agent probes and self-recover
   recommendations without granting restart or broker authority.
-- Runtime resume semantics should attach explicit resume attempt ids to Crash
-  Loop Protection so cooldowns and operator acknowledgements can distinguish
-  expected clean stops from failed convergence and unsafe broker stops.
+- Runtime resume semantics v2 should add an explicit operator acknowledgement
+  artifact with actor identity/expiry and correlate each launch attempt back to
+  the resume verdict id.
 
 ## Desktop Package / Deploy
 
