@@ -229,6 +229,7 @@ def _snapshot_payload(
         "supervisor_mode": runtime_supervisor.get("supervisor_mode"),
         "proof_window_status": runtime_supervisor.get("proof_window_status"),
         "recommended_next_command": runtime_supervisor.get("recommended_next_command"),
+        "safe_to_start_runtime": runtime_supervisor.get("safe_to_start_runtime") is True,
         "paper_recovery_policy": evidence.get("paper_action_policy") or shared_truth.get("paper_recovery_policy"),
         "autonomous_recovery_plan_classification": runtime_supervisor.get(
             "autonomous_recovery_plan_classification"

@@ -291,6 +291,11 @@ def test_track_b_control_plane_status_projection_displays_closed_market_services
     assert summary["runtime_supervisor_proof_window_status"] == "market_closed"
     assert summary["runtime_supervisor_shared_truth_refresh_generation_id"] == "test-shared-truth-generation"
     assert summary["runtime_supervisor_shared_truth_coherence_status"] == "COHERENT"
+    assert summary["control_plane_snapshot_id"] == "test-control-plane-snapshot"
+    assert summary["control_plane_snapshot_classification"] == "CONTROL_PLANE_SNAPSHOT_READY"
+    assert summary["control_plane_snapshot_shared_truth_generation_id"] == "test-shared-truth-generation"
+    assert summary["control_plane_snapshot_shared_truth_coherence_status"] == "COHERENT"
+    assert summary["control_plane_snapshot_supervisor_mode"] == "MARKET_CLOSED_WAIT"
     assert summary["runtime_supervisor_recommended_next_command"] == (
         "wait for market reopen; rerun proof readiness before any runtime start"
     )
@@ -595,6 +600,45 @@ def _write_track_b_control_plane_artifacts(
                     "decisive": True,
                 }
             ],
+        },
+    )
+    _write_json_file(
+        root / "outputs/track_b_execution_core/control_plane/latest_control_plane_snapshot.json",
+        {
+            "control_plane_snapshot_id": "test-control-plane-snapshot",
+            "classification": "CONTROL_PLANE_SNAPSHOT_READY",
+            "shared_truth_refresh_generation_id": "test-shared-truth-generation",
+            "shared_truth_coherence_status": "COHERENT",
+            "runtime_supervisor_classification": supervisor_classification,
+            "supervisor_mode": supervisor_mode,
+            "proof_window_status": runtime_supervisor_proof_window_status
+            or ("market_closed" if supervisor_mode == "MARKET_CLOSED_WAIT" else "blocked"),
+            "recommended_next_command": runtime_supervisor_recommended_next_command
+            or (
+                "wait for market reopen; rerun proof readiness before any runtime start"
+                if supervisor_mode == "MARKET_CLOSED_WAIT"
+                else "acknowledge crash-loop hold before any restart planning"
+                if supervisor_mode == "CRASH_LOOP_HOLD"
+                else "operator may start Track B PAPER runtime using the repaired direct supervisor launcher"
+            ),
+            "paper_recovery_policy": paper_action_policy,
+            "autonomous_recovery_plan_classification": autonomous_recovery_plan_classification
+            or (
+                "WAIT_MARKET_CLOSED"
+                if supervisor_mode == "MARKET_CLOSED_WAIT"
+                else "PLAN_RUNTIME_RETRY"
+                if supervisor_mode == "READY_FOR_OPERATOR_START"
+                else "PLAN_QUARANTINE_OBSERVE_ONLY"
+            ),
+            "autonomous_recovery_next_action": autonomous_recovery_next_action
+            or (
+                "WAIT_MARKET_CLOSED"
+                if supervisor_mode == "MARKET_CLOSED_WAIT"
+                else "RUNTIME_RETRY"
+                if supervisor_mode == "READY_FOR_OPERATOR_START"
+                else "QUARANTINE_OBSERVE_ONLY"
+            ),
+            "autonomous_recovery_execution_enabled": False,
         },
     )
     _write_json_file(

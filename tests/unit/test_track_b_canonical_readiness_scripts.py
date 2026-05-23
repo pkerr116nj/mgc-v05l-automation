@@ -219,65 +219,61 @@ def test_launch_script_passes_canonical_readiness_paths_to_status_script() -> No
     assert "Headless supervised paper host is READY_SUBMIT_CAPABLE." in script
 
 
-def test_runtime_start_consults_supervisor_authority_v2_before_spawn() -> None:
+def test_runtime_start_consults_control_plane_snapshot_before_spawn() -> None:
     script = PROBATIONARY_PAPER_SOAK_SCRIPT.read_text(encoding="utf-8")
 
-    assert "DEFAULT_RUNTIME_SUPERVISOR_AUTHORITY_FILE" in script
-    assert "run_runtime_supervisor_start_preflight" in script
-    assert "mgc_v05l.execution_core.track_b_runtime_supervisor_authority" in script
+    assert "DEFAULT_CONTROL_PLANE_SNAPSHOT_FILE" in script
+    assert "run_control_plane_snapshot_start_preflight" in script
+    assert "mgc_v05l.execution_core.track_b_control_plane_snapshot" in script
     assert "--no-dashboard-projection" in script
+    assert "CONTROL_PLANE_SNAPSHOT_READY" in script
+    assert "CONTROL_PLANE_SNAPSHOT_START_BLOCKED" in script
+    assert "COHERENT" in script
     assert "SUPERVISOR_RUNTIME_START_ALLOWED" in script
     assert "READY_FOR_OPERATOR_START" in script
     assert "safe_to_start_runtime" in script
-    assert "RUNTIME_SUPERVISOR_START_BLOCKED" in script
-    assert "operator_ack_required" in script
     assert "paper_action_policy" in script
-    assert "autonomous_recovery_allowed" in script
-    assert "requires_operator_ack_for_paper" in script
-    assert "operator_ack_advisory_only_for_paper" in script
-    assert "live_action_policy" in script
+    assert "control_plane_snapshot_id" in script
     assert "autonomous_recovery_plan_classification" in script
     assert "autonomous_recovery_next_action" in script
     assert "autonomous_recovery_execution_enabled" in script
     assert "shared_truth_refresh_generation_id" in script
     assert "shared_truth_coherence_status" in script
-    assert "runtime_supervisor_authority" in script
+    assert "control_plane_snapshot" in script
     assert "latest_track_b_runtime_supervisor_authority.json" not in script
     assert "latest_track_b_paper_recovery_policy.json" not in script
-    assert script.index("run_shared_truth_runtime_start_preflight") < script.index("run_runtime_supervisor_start_preflight")
-    assert script.index("run_runtime_supervisor_start_preflight") < script.index("nohup \"${LAUNCH_PYTHON_BIN}\"")
+    start_flow = script[script.index("run_control_plane_snapshot_start_preflight") :]
+    assert start_flow.index("run_control_plane_snapshot_start_preflight") < start_flow.index("nohup \"${LAUNCH_PYTHON_BIN}\"")
 
 
-def test_headless_launch_uses_supervisor_authority_v2_as_final_pre_spawn_gate() -> None:
+def test_headless_launch_uses_control_plane_snapshot_as_final_pre_spawn_gate() -> None:
     script = RUN_SCRIPT.read_text(encoding="utf-8")
 
-    assert "DEFAULT_RUNTIME_SUPERVISOR_AUTHORITY_FILE" in script
-    assert "refresh_runtime_supervisor_for_launch" in script
-    assert "runtime_supervisor_start_gate" in script
-    assert "runtime_supervisor_blocked_reason" in script
-    assert "RUNTIME_SUPERVISOR_START_BLOCKED" in script
+    assert "DEFAULT_CONTROL_PLANE_SNAPSHOT_FILE" in script
+    assert "refresh_control_plane_snapshot_for_launch" in script
+    assert "control_plane_snapshot_start_gate" in script
+    assert "control_plane_snapshot_blocked_reason" in script
+    assert "CONTROL_PLANE_SNAPSHOT_START_BLOCKED" in script
+    assert "CONTROL_PLANE_SNAPSHOT_READY" in script
+    assert "COHERENT" in script
     assert "SUPERVISOR_RUNTIME_START_ALLOWED" in script
     assert "READY_FOR_OPERATOR_START" in script
     assert "safe_to_start_runtime" in script
-    assert "operator_ack_required" in script
     assert "paper_action_policy" in script
-    assert "autonomous_recovery_allowed" in script
-    assert "requires_operator_ack_for_paper" in script
-    assert "operator_ack_advisory_only_for_paper" in script
-    assert "live_action_policy" in script
+    assert "control_plane_snapshot_id" in script
     assert "autonomous_recovery_plan_classification" in script
     assert "autonomous_recovery_next_action" in script
     assert "autonomous_recovery_execution_enabled" in script
     assert "shared_truth_refresh_generation_id" in script
     assert "shared_truth_coherence_status" in script
-    assert "runtime_supervisor_authority_path" in script
+    assert "control_plane_snapshot_path" in script
     assert "latest_track_b_runtime_supervisor_authority.json" not in script
     assert "latest_track_b_paper_recovery_policy.json" not in script
     start_flow = script[script.index("persist_requested_config_paths\nif ! assert_required_config_paths_present") :]
     assert start_flow.index("refresh_canonical_readiness_for_launch \"pre-launch\"") < start_flow.index(
-        "refresh_runtime_supervisor_for_launch"
+        "refresh_control_plane_snapshot_for_launch"
     )
-    assert start_flow.index("runtime_supervisor_start_gate") < start_flow.index("if ! start_paper_runtime")
+    assert start_flow.index("control_plane_snapshot_start_gate") < start_flow.index("if ! start_paper_runtime")
 
 
 def test_launch_script_uses_profile_aware_broker_truth_sidecar_policy() -> None:

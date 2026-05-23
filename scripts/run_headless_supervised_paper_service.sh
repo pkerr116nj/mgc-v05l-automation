@@ -29,6 +29,7 @@ DEFAULT_PAPER_LOG_FILE="${REPO_ROOT}/outputs/probationary_pattern_engine/paper_s
 DEFAULT_PAPER_CONFIG_PATHS_FILE="${REPO_ROOT}/outputs/probationary_pattern_engine/paper_session/runtime/paper_runtime_config_paths.txt"
 DEFAULT_PAPER_RUNTIME_LAUNCH_STATUS_FILE="${REPO_ROOT}/outputs/probationary_pattern_engine/paper_session/runtime/probationary_paper_launch_status.json"
 DEFAULT_RUNTIME_SUPERVISOR_AUTHORITY_FILE="${REPO_ROOT}/outputs/track_b_execution_core/runtime_supervisor/latest_runtime_supervisor_authority.json"
+DEFAULT_CONTROL_PLANE_SNAPSHOT_FILE="${REPO_ROOT}/outputs/track_b_execution_core/control_plane/latest_control_plane_snapshot.json"
 DEFAULT_PAPER_LAUNCHCTL_STDOUT_FILE="${DEFAULT_PAPER_PID_FILE}.launchctl_submit.stdout"
 DEFAULT_PAPER_LAUNCHCTL_STDERR_FILE="${DEFAULT_PAPER_PID_FILE}.launchctl_submit.stderr"
 DEFAULT_DASHBOARD_URL="${MGC_OPERATOR_DASHBOARD_URL:-http://127.0.0.1:8790/}"
@@ -66,6 +67,7 @@ PAPER_LOG_FILE="${DEFAULT_PAPER_LOG_FILE}"
 PAPER_CONFIG_PATHS_FILE="${DEFAULT_PAPER_CONFIG_PATHS_FILE}"
 PAPER_RUNTIME_LAUNCH_STATUS_FILE="${DEFAULT_PAPER_RUNTIME_LAUNCH_STATUS_FILE}"
 RUNTIME_SUPERVISOR_AUTHORITY_FILE="${DEFAULT_RUNTIME_SUPERVISOR_AUTHORITY_FILE}"
+CONTROL_PLANE_SNAPSHOT_FILE="${DEFAULT_CONTROL_PLANE_SNAPSHOT_FILE}"
 PAPER_LAUNCHCTL_STDOUT_FILE="${DEFAULT_PAPER_LAUNCHCTL_STDOUT_FILE}"
 PAPER_LAUNCHCTL_STDERR_FILE="${DEFAULT_PAPER_LAUNCHCTL_STDERR_FILE}"
 DASHBOARD_URL="${DEFAULT_DASHBOARD_URL}"
@@ -847,7 +849,8 @@ write_launchctl_runtime_status() {
     "${PAPER_RUNTIME_LAUNCH_STARTED_AT:-}" \
     "${PAPER_RUNTIME_EXPECTED_SOURCE_COMMIT:-}" \
     "${PAPER_RUNTIME_CONFIG_FINGERPRINT:-}" \
-    "${RUNTIME_SUPERVISOR_AUTHORITY_FILE}"
+    "${RUNTIME_SUPERVISOR_AUTHORITY_FILE}" \
+    "${CONTROL_PLANE_SNAPSHOT_FILE}"
 import json
 import sys
 from datetime import datetime, timezone
@@ -875,6 +878,7 @@ from mgc_v05l.execution_core.track_b_runtime_truth_contract import classify_laun
     expected_source_commit,
     config_fingerprint,
     runtime_supervisor_authority_path,
+    control_plane_snapshot_path,
 ) = sys.argv[1:]
 
 def read_text(path_raw: str) -> str:
@@ -949,6 +953,8 @@ payload = {
     "config_fingerprint": config_fingerprint or None,
     "runtime_supervisor_authority": read_json(runtime_supervisor_authority_path),
     "runtime_supervisor_authority_path": runtime_supervisor_authority_path,
+    "control_plane_snapshot": read_json(control_plane_snapshot_path),
+    "control_plane_snapshot_path": control_plane_snapshot_path,
     "paper_only": True,
     "live_money_eligible": False,
     "paper_proof_invoked": False,
@@ -1507,6 +1513,7 @@ fail_fast_if_hard_canonical_blocker() {
 }
 
 refresh_runtime_supervisor_for_launch() {
+  # Legacy fallback only. The launch hot path uses refresh_control_plane_snapshot_for_launch.
   local tmp_summary
   tmp_summary="${RUNTIME_SUPERVISOR_AUTHORITY_FILE}.tmp"
   rm -f "${tmp_summary}"
@@ -1525,6 +1532,101 @@ refresh_runtime_supervisor_for_launch() {
     rm -f "${tmp_summary}"
   fi
   return "${exit_code}"
+}
+
+refresh_control_plane_snapshot_for_launch() {
+  local tmp_summary
+  tmp_summary="${CONTROL_PLANE_SNAPSHOT_FILE}.tmp"
+  rm -f "${tmp_summary}"
+  set +e
+  "${PYTHON_BIN}" -m mgc_v05l.execution_core.track_b_control_plane_snapshot \
+    --repo-root "${REPO_ROOT}" \
+    --output-path "${CONTROL_PLANE_SNAPSHOT_FILE}" \
+    --no-dashboard-projection \
+    --no-broker-lease-history \
+    --json > "${tmp_summary}"
+  local exit_code=$?
+  set -e
+  if [[ -s "${tmp_summary}" ]]; then
+    mv "${tmp_summary}" "${CONTROL_PLANE_SNAPSHOT_FILE}"
+    return 0
+  else
+    rm -f "${tmp_summary}"
+  fi
+  return "${exit_code}"
+}
+
+control_plane_snapshot_start_gate() {
+  "${PYTHON_BIN}" - <<'PY' "${CONTROL_PLANE_SNAPSHOT_FILE}"
+import json
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+try:
+    payload = json.loads(path.read_text(encoding="utf-8"))
+except (OSError, json.JSONDecodeError):
+    print("CONTROL_PLANE_SNAPSHOT_START_BLOCKED: missing_or_invalid_snapshot", file=sys.stderr)
+    raise SystemExit(2)
+
+allowed = (
+    payload.get("classification") == "CONTROL_PLANE_SNAPSHOT_READY"
+    and payload.get("shared_truth_coherence_status") == "COHERENT"
+    and payload.get("runtime_supervisor_classification") == "SUPERVISOR_RUNTIME_START_ALLOWED"
+    and payload.get("supervisor_mode") == "READY_FOR_OPERATOR_START"
+    and payload.get("safe_to_start_runtime") is True
+    and not payload.get("blockers")
+)
+if not allowed:
+    print(
+        "CONTROL_PLANE_SNAPSHOT_START_BLOCKED: "
+        f"snapshot_id={payload.get('control_plane_snapshot_id')} "
+        f"classification={payload.get('classification')} "
+        f"shared_truth_refresh_generation_id={payload.get('shared_truth_refresh_generation_id')} "
+        f"shared_truth_coherence_status={payload.get('shared_truth_coherence_status')} "
+        f"runtime_supervisor_classification={payload.get('runtime_supervisor_classification')} "
+        f"supervisor_mode={payload.get('supervisor_mode')} "
+        f"proof_window_status={payload.get('proof_window_status')} "
+        f"safe_to_start_runtime={payload.get('safe_to_start_runtime')} "
+        f"paper_recovery_policy={payload.get('paper_recovery_policy')} "
+        f"autonomous_recovery_plan_classification={payload.get('autonomous_recovery_plan_classification')} "
+        f"autonomous_recovery_next_action={payload.get('autonomous_recovery_next_action')} "
+        f"autonomous_recovery_execution_enabled={payload.get('autonomous_recovery_execution_enabled')} "
+        f"recommended_next_command={payload.get('recommended_next_command')}",
+        file=sys.stderr,
+    )
+    raise SystemExit(2)
+raise SystemExit(0)
+PY
+}
+
+control_plane_snapshot_blocked_reason() {
+  "${PYTHON_BIN}" - <<'PY' "${CONTROL_PLANE_SNAPSHOT_FILE}"
+import json
+import sys
+from pathlib import Path
+
+try:
+    payload = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
+except (OSError, json.JSONDecodeError):
+    payload = {}
+print(
+    "Control Plane Snapshot blocked start: "
+    f"snapshot_id={payload.get('control_plane_snapshot_id')} "
+    f"classification={payload.get('classification')} "
+    f"shared_truth_refresh_generation_id={payload.get('shared_truth_refresh_generation_id')} "
+    f"shared_truth_coherence_status={payload.get('shared_truth_coherence_status')} "
+    f"runtime_supervisor_classification={payload.get('runtime_supervisor_classification')} "
+    f"supervisor_mode={payload.get('supervisor_mode')} "
+    f"proof_window_status={payload.get('proof_window_status')} "
+    f"safe_to_start_runtime={payload.get('safe_to_start_runtime')} "
+    f"paper_recovery_policy={payload.get('paper_recovery_policy')} "
+    f"autonomous_recovery_plan_classification={payload.get('autonomous_recovery_plan_classification')} "
+    f"autonomous_recovery_next_action={payload.get('autonomous_recovery_next_action')} "
+    f"autonomous_recovery_execution_enabled={payload.get('autonomous_recovery_execution_enabled')} "
+    f"recommended_next_command={payload.get('recommended_next_command')}"
+)
+PY
 }
 
 runtime_supervisor_start_gate() {
@@ -1642,15 +1744,15 @@ set +e
 refresh_canonical_readiness_for_launch "pre-launch"
 set -e
 fail_fast_if_hard_canonical_blocker "pre-launch"
-if ! refresh_runtime_supervisor_for_launch; then
-  write_launchctl_runtime_status "RUNTIME_SUPERVISOR_START_BLOCKED" "0" "false" "Runtime Supervisor Authority v2 refresh failed before launch."
-  write_startup_summary "BLOCKED" "Runtime Supervisor Authority v2 refresh failed before launch." "false"
+if ! refresh_control_plane_snapshot_for_launch; then
+  write_launchctl_runtime_status "CONTROL_PLANE_SNAPSHOT_START_BLOCKED" "0" "false" "Control Plane Snapshot refresh failed before launch."
+  write_startup_summary "BLOCKED" "Control Plane Snapshot refresh failed before launch." "false"
   cat "${STARTUP_FILE}"
   exit 2
 fi
-if ! runtime_supervisor_start_gate; then
-  supervisor_reason="$(runtime_supervisor_blocked_reason)"
-  write_launchctl_runtime_status "RUNTIME_SUPERVISOR_START_BLOCKED" "0" "false" "${supervisor_reason}"
+if ! control_plane_snapshot_start_gate; then
+  supervisor_reason="$(control_plane_snapshot_blocked_reason)"
+  write_launchctl_runtime_status "CONTROL_PLANE_SNAPSHOT_START_BLOCKED" "0" "false" "${supervisor_reason}"
   write_startup_summary "BLOCKED" "${supervisor_reason}" "false"
   cat "${STARTUP_FILE}"
   exit 2

@@ -26,6 +26,7 @@ DEFAULT_SELF_RECOVER_RULES_FILE="${REPO_ROOT}/outputs/track_b_execution_core/sel
 DEFAULT_CRASH_LOOP_PROTECTION_FILE="${REPO_ROOT}/outputs/track_b_execution_core/crash_loop_protection/latest_crash_loop_protection.json"
 DEFAULT_RUNTIME_RESUME_SEMANTICS_FILE="${REPO_ROOT}/outputs/track_b_execution_core/runtime_resume/latest_runtime_resume_semantics.json"
 DEFAULT_RUNTIME_SUPERVISOR_AUTHORITY_FILE="${REPO_ROOT}/outputs/track_b_execution_core/runtime_supervisor/latest_runtime_supervisor_authority.json"
+DEFAULT_CONTROL_PLANE_SNAPSHOT_FILE="${REPO_ROOT}/outputs/track_b_execution_core/control_plane/latest_control_plane_snapshot.json"
 DEFAULT_PAPER_RECOVERY_POLICY_FILE="${REPO_ROOT}/outputs/track_b_execution_core/paper_recovery_policy/latest_paper_recovery_policy.json"
 DEFAULT_PAPER_AUTONOMOUS_RECOVERY_PLAN_FILE="${REPO_ROOT}/outputs/track_b_execution_core/paper_autonomous_recovery/latest_paper_autonomous_recovery_plan.json"
 DEFAULT_STARTUP_FILE="${REPO_ROOT}/outputs/operator_dashboard/startup_control_plane_snapshot.json"
@@ -617,7 +618,7 @@ PY
 }
 
 merge_control_plane_services_status() {
-  "${PYTHON_BIN}" - <<'PY' "${STATUS_FILE}" "${DEFAULT_AGENT_REGISTRY_FILE}" "${DEFAULT_AGENT_HEALTH_FILE}" "${DEFAULT_SELF_RECOVER_RULES_FILE}" "${DEFAULT_CRASH_LOOP_PROTECTION_FILE}" "${DEFAULT_RUNTIME_RESUME_SEMANTICS_FILE}" "${DEFAULT_RUNTIME_SUPERVISOR_AUTHORITY_FILE}" "${DEFAULT_PAPER_RECOVERY_POLICY_FILE}" "${DEFAULT_PAPER_AUTONOMOUS_RECOVERY_PLAN_FILE}"
+  "${PYTHON_BIN}" - <<'PY' "${STATUS_FILE}" "${DEFAULT_AGENT_REGISTRY_FILE}" "${DEFAULT_AGENT_HEALTH_FILE}" "${DEFAULT_SELF_RECOVER_RULES_FILE}" "${DEFAULT_CRASH_LOOP_PROTECTION_FILE}" "${DEFAULT_RUNTIME_RESUME_SEMANTICS_FILE}" "${DEFAULT_RUNTIME_SUPERVISOR_AUTHORITY_FILE}" "${DEFAULT_PAPER_RECOVERY_POLICY_FILE}" "${DEFAULT_PAPER_AUTONOMOUS_RECOVERY_PLAN_FILE}" "${DEFAULT_CONTROL_PLANE_SNAPSHOT_FILE}"
 import json
 import sys
 from pathlib import Path
@@ -631,6 +632,7 @@ runtime_resume_path = Path(sys.argv[6])
 runtime_supervisor_path = Path(sys.argv[7])
 paper_recovery_policy_path = Path(sys.argv[8])
 paper_autonomous_recovery_plan_path = Path(sys.argv[9])
+control_plane_snapshot_path = Path(sys.argv[10])
 
 def read_json(path: Path) -> dict:
     try:
@@ -652,6 +654,7 @@ runtime_resume = read_json(runtime_resume_path)
 runtime_supervisor = read_json(runtime_supervisor_path)
 paper_recovery_policy = read_json(paper_recovery_policy_path)
 paper_autonomous_recovery_plan = read_json(paper_autonomous_recovery_plan_path)
+control_plane_snapshot = read_json(control_plane_snapshot_path)
 operator_ack = runtime_supervisor.get("operator_ack") or {}
 paper_action_policy = paper_recovery_policy.get("paper_action_policy")
 paper_reason = str(paper_recovery_policy.get("reason") or "")
@@ -706,6 +709,13 @@ status["track_b_control_plane"] = {
     "self_recover_recommendation": self_recover.get("recommendation") or self_recover.get("classification"),
     "crash_loop_classification": crash_loop.get("classification"),
     "crash_loop_restart_blocked": crash_loop.get("restart_blocked") is True,
+    "control_plane_snapshot_id": control_plane_snapshot.get("control_plane_snapshot_id"),
+    "control_plane_snapshot_classification": control_plane_snapshot.get("classification"),
+    "control_plane_snapshot_shared_truth_generation_id": control_plane_snapshot.get("shared_truth_refresh_generation_id"),
+    "control_plane_snapshot_shared_truth_coherence_status": control_plane_snapshot.get("shared_truth_coherence_status"),
+    "control_plane_snapshot_supervisor_classification": control_plane_snapshot.get("runtime_supervisor_classification"),
+    "control_plane_snapshot_supervisor_mode": control_plane_snapshot.get("supervisor_mode"),
+    "control_plane_snapshot_proof_window_status": control_plane_snapshot.get("proof_window_status"),
     "paper_recovery_policy": paper_action_policy,
     "paper_recovery_severity": paper_recovery_policy.get("severity"),
     "paper_recovery_diagnostic": paper_recovery_diagnostic,
@@ -750,6 +760,7 @@ status["track_b_control_plane"] = {
         "crash_loop_protection": str(crash_loop_path),
         "runtime_resume": str(runtime_resume_path),
         "runtime_supervisor": str(runtime_supervisor_path),
+        "control_plane_snapshot": str(control_plane_snapshot_path),
         "paper_recovery_policy": str(paper_recovery_policy_path),
         "paper_autonomous_recovery_plan": str(paper_autonomous_recovery_plan_path),
     },

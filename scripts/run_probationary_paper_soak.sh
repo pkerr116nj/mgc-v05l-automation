@@ -39,6 +39,7 @@ DEFAULT_LAUNCH_STATUS_FILE="${DEFAULT_RUNTIME_DIR}/probationary_paper_launch_sta
 DEFAULT_RUNTIME_TRUTH_FILE="${DEFAULT_RUNTIME_DIR}/paper_runtime_truth.json"
 DEFAULT_SHARED_TRUTH_PREFLIGHT_FILE="${DEFAULT_RUNTIME_DIR}/shared_truth_runtime_start_preflight.json"
 DEFAULT_RUNTIME_SUPERVISOR_AUTHORITY_FILE="${REPO_ROOT}/outputs/track_b_execution_core/runtime_supervisor/latest_runtime_supervisor_authority.json"
+DEFAULT_CONTROL_PLANE_SNAPSHOT_FILE="${REPO_ROOT}/outputs/track_b_execution_core/control_plane/latest_control_plane_snapshot.json"
 CANARY_ENABLE_SENTINEL="${DEFAULT_RUNTIME_DIR}/enable_paper_route_canary.flag"
 CONFIG_OVERRIDE_RAW="${MGC_PROBATIONARY_PAPER_CONFIG_PATHS:-}"
 LAUNCH_PYTHON_BIN="${MGC_PROBATIONARY_PAPER_LAUNCH_PYTHON_BIN:-${PYTHON_BIN}}"
@@ -49,6 +50,7 @@ RUNTIME_TRUTH_FILE="${MGC_PROBATIONARY_PAPER_RUNTIME_TRUTH_FILE:-${DEFAULT_RUNTI
 SHARED_TRUTH_PREFLIGHT_FILE="${MGC_TRACK_B_SHARED_TRUTH_PREFLIGHT_FILE:-${DEFAULT_SHARED_TRUTH_PREFLIGHT_FILE}}"
 SHARED_TRUTH_PREFLIGHT_REPO_ROOT="${MGC_TRACK_B_SHARED_TRUTH_PREFLIGHT_REPO_ROOT:-${REPO_ROOT}}"
 RUNTIME_SUPERVISOR_AUTHORITY_FILE="${MGC_TRACK_B_RUNTIME_SUPERVISOR_AUTHORITY_FILE:-${DEFAULT_RUNTIME_SUPERVISOR_AUTHORITY_FILE}}"
+CONTROL_PLANE_SNAPSHOT_FILE="${MGC_TRACK_B_CONTROL_PLANE_SNAPSHOT_FILE:-${DEFAULT_CONTROL_PLANE_SNAPSHOT_FILE}}"
 LAUNCH_FIRST_TRUTH_GENERATED_AT=""
 LAUNCH_SECOND_TRUTH_GENERATED_AT=""
 LAUNCH_SUSTAINED_CONVERGENCE_CONFIRMED="false"
@@ -76,6 +78,9 @@ LAUNCH_SUPERVISOR_AUTONOMOUS_RECOVERY_NEXT_ACTION=""
 LAUNCH_SUPERVISOR_AUTONOMOUS_RECOVERY_EXECUTION_ENABLED="false"
 LAUNCH_SUPERVISOR_SHARED_TRUTH_REFRESH_GENERATION_ID=""
 LAUNCH_SUPERVISOR_SHARED_TRUTH_COHERENCE_STATUS=""
+LAUNCH_CONTROL_PLANE_SNAPSHOT_ID=""
+LAUNCH_CONTROL_PLANE_SNAPSHOT_CLASSIFICATION=""
+LAUNCH_CONTROL_PLANE_SNAPSHOT_FILE="${CONTROL_PLANE_SNAPSHOT_FILE}"
 
 ARGS=()
 CONFIG_SET=0
@@ -263,6 +268,9 @@ write_launch_status() {
   LAUNCH_STOP_EXPECTED_CLEANUP="${LAUNCH_STOP_EXPECTED_CLEANUP}" \
   LAUNCH_STOP_BROKER_SAFE="${LAUNCH_STOP_BROKER_SAFE}" \
   LAUNCH_RUNTIME_SUPERVISOR_AUTHORITY_FILE="${RUNTIME_SUPERVISOR_AUTHORITY_FILE}" \
+  LAUNCH_CONTROL_PLANE_SNAPSHOT_FILE="${CONTROL_PLANE_SNAPSHOT_FILE}" \
+  LAUNCH_CONTROL_PLANE_SNAPSHOT_ID="${LAUNCH_CONTROL_PLANE_SNAPSHOT_ID}" \
+  LAUNCH_CONTROL_PLANE_SNAPSHOT_CLASSIFICATION="${LAUNCH_CONTROL_PLANE_SNAPSHOT_CLASSIFICATION}" \
   LAUNCH_SUPERVISOR_CLASSIFICATION="${LAUNCH_SUPERVISOR_CLASSIFICATION}" \
   LAUNCH_SUPERVISOR_MODE="${LAUNCH_SUPERVISOR_MODE}" \
   LAUNCH_SUPERVISOR_PROOF_WINDOW_STATUS="${LAUNCH_SUPERVISOR_PROOF_WINDOW_STATUS}" \
@@ -342,6 +350,21 @@ payload = {
         "shared_truth_refresh_generation_id": os.environ.get("LAUNCH_SUPERVISOR_SHARED_TRUTH_REFRESH_GENERATION_ID") or None,
         "shared_truth_coherence_status": os.environ.get("LAUNCH_SUPERVISOR_SHARED_TRUTH_COHERENCE_STATUS") or None,
     },
+    "control_plane_snapshot": {
+        "artifact_path": os.environ["LAUNCH_CONTROL_PLANE_SNAPSHOT_FILE"],
+        "control_plane_snapshot_id": os.environ.get("LAUNCH_CONTROL_PLANE_SNAPSHOT_ID") or None,
+        "classification": os.environ.get("LAUNCH_CONTROL_PLANE_SNAPSHOT_CLASSIFICATION") or None,
+        "shared_truth_refresh_generation_id": os.environ.get("LAUNCH_SUPERVISOR_SHARED_TRUTH_REFRESH_GENERATION_ID") or None,
+        "shared_truth_coherence_status": os.environ.get("LAUNCH_SUPERVISOR_SHARED_TRUTH_COHERENCE_STATUS") or None,
+        "runtime_supervisor_classification": os.environ.get("LAUNCH_SUPERVISOR_CLASSIFICATION") or None,
+        "supervisor_mode": os.environ.get("LAUNCH_SUPERVISOR_MODE") or None,
+        "proof_window_status": os.environ.get("LAUNCH_SUPERVISOR_PROOF_WINDOW_STATUS") or None,
+        "paper_recovery_policy": os.environ.get("LAUNCH_SUPERVISOR_PAPER_ACTION_POLICY") or None,
+        "autonomous_recovery_plan_classification": os.environ.get("LAUNCH_SUPERVISOR_AUTONOMOUS_RECOVERY_PLAN_CLASSIFICATION") or None,
+        "autonomous_recovery_next_action": os.environ.get("LAUNCH_SUPERVISOR_AUTONOMOUS_RECOVERY_NEXT_ACTION") or None,
+        "autonomous_recovery_execution_enabled": os.environ.get("LAUNCH_SUPERVISOR_AUTONOMOUS_RECOVERY_EXECUTION_ENABLED", "").lower() == "true",
+        "recommended_next_command": os.environ.get("LAUNCH_SUPERVISOR_RECOMMENDED_NEXT_COMMAND") or None,
+    },
 }
 if os.environ.get("LAUNCH_STOP_SOURCE") or stop_reason:
     payload["stop_provenance"] = {
@@ -363,6 +386,8 @@ with open(os.environ["LAUNCH_STATUS_FILE"], "w", encoding="utf-8") as fh:
 }
 
 run_shared_truth_runtime_start_preflight() {
+  # Legacy fallback only. The launch hot path uses run_control_plane_snapshot_start_preflight
+  # so Shared Truth Refresh and Runtime Supervisor Authority share one coherent generation.
   local tmp_file="${SHARED_TRUTH_PREFLIGHT_FILE}.tmp"
   local stderr_file="${SHARED_TRUTH_PREFLIGHT_FILE}.stderr.log"
   local status=0
@@ -425,6 +450,7 @@ PY
 }
 
 run_runtime_supervisor_start_preflight() {
+  # Legacy fallback only. The launch hot path gates on Control Plane Snapshot.
   local tmp_file="${RUNTIME_SUPERVISOR_AUTHORITY_FILE}.runtime_start.tmp"
   local stderr_file="${RUNTIME_SUPERVISOR_AUTHORITY_FILE}.runtime_start.stderr.log"
   local status=0
@@ -737,6 +763,167 @@ PY
   return 0
 }
 
+run_control_plane_snapshot_start_preflight() {
+  local tmp_file="${CONTROL_PLANE_SNAPSHOT_FILE}.runtime_start.tmp"
+  local stderr_file="${CONTROL_PLANE_SNAPSHOT_FILE}.runtime_start.stderr.log"
+  local status=0
+  local summary=""
+  ensure_dir "$(dirname "${CONTROL_PLANE_SNAPSHOT_FILE}")"
+  set +e
+  "${PYTHON_BIN}" -m mgc_v05l.execution_core.track_b_control_plane_snapshot \
+    --repo-root "${REPO_ROOT}" \
+    --output-path "${CONTROL_PLANE_SNAPSHOT_FILE}" \
+    --no-dashboard-projection \
+    --no-broker-lease-history \
+    --json \
+    > "${tmp_file}" \
+    2> "${stderr_file}"
+  status=$?
+  set -e
+  if [[ -s "${tmp_file}" ]]; then
+    mv "${tmp_file}" "${CONTROL_PLANE_SNAPSHOT_FILE}"
+  else
+    rm -f "${tmp_file}"
+  fi
+  summary="$("${PYTHON_BIN}" - <<'PY' "${CONTROL_PLANE_SNAPSHOT_FILE}" "${stderr_file}" || true
+import json
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+stderr_path = Path(sys.argv[2])
+try:
+    payload = json.loads(path.read_text(encoding="utf-8"))
+except (OSError, json.JSONDecodeError):
+    stderr = ""
+    try:
+        stderr = stderr_path.read_text(encoding="utf-8").strip()
+    except OSError:
+        pass
+    print(f"Control Plane Snapshot did not produce valid JSON. stderr={stderr[:500]}")
+    raise SystemExit(0)
+
+print(
+    "snapshot_id={snapshot_id} classification={classification} "
+    "shared_truth_refresh_generation_id={generation_id} shared_truth_coherence_status={coherence} "
+    "runtime_supervisor_classification={supervisor_classification} supervisor_mode={mode} "
+    "proof_window_status={window} safe_to_start_runtime={safe} "
+    "paper_recovery_policy={paper_policy} autonomous_recovery_plan_classification={plan_classification} "
+    "autonomous_recovery_next_action={plan_action} autonomous_recovery_execution_enabled={plan_enabled} "
+    "recommended_next_command={command}".format(
+        snapshot_id=payload.get("control_plane_snapshot_id"),
+        classification=payload.get("classification"),
+        generation_id=payload.get("shared_truth_refresh_generation_id"),
+        coherence=payload.get("shared_truth_coherence_status"),
+        supervisor_classification=payload.get("runtime_supervisor_classification"),
+        mode=payload.get("supervisor_mode"),
+        window=payload.get("proof_window_status"),
+        safe=payload.get("safe_to_start_runtime"),
+        paper_policy=payload.get("paper_recovery_policy"),
+        plan_classification=payload.get("autonomous_recovery_plan_classification"),
+        plan_action=payload.get("autonomous_recovery_next_action"),
+        plan_enabled=payload.get("autonomous_recovery_execution_enabled"),
+        command=payload.get("recommended_next_command"),
+    )
+)
+PY
+)"
+  echo "Track B Control Plane Snapshot start preflight: ${summary}"
+  if [[ ${status} -ne 0 ]] && [[ -s "${stderr_file}" ]]; then
+    cat "${stderr_file}" >&2
+  fi
+  rm -f "${stderr_file}"
+  set +e
+  "${PYTHON_BIN}" - <<'PY' "${CONTROL_PLANE_SNAPSHOT_FILE}"
+import json
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+try:
+    payload = json.loads(path.read_text(encoding="utf-8"))
+except (OSError, json.JSONDecodeError):
+    print("CONTROL_PLANE_SNAPSHOT_START_BLOCKED: missing_or_invalid_snapshot", file=sys.stderr)
+    raise SystemExit(2)
+
+allowed = (
+    payload.get("classification") == "CONTROL_PLANE_SNAPSHOT_READY"
+    and payload.get("shared_truth_coherence_status") == "COHERENT"
+    and payload.get("runtime_supervisor_classification") == "SUPERVISOR_RUNTIME_START_ALLOWED"
+    and payload.get("supervisor_mode") == "READY_FOR_OPERATOR_START"
+    and payload.get("safe_to_start_runtime") is True
+    and not payload.get("blockers")
+)
+if not allowed:
+    print(
+        "CONTROL_PLANE_SNAPSHOT_START_BLOCKED: "
+        f"snapshot_id={payload.get('control_plane_snapshot_id')} "
+        f"classification={payload.get('classification')} "
+        f"shared_truth_refresh_generation_id={payload.get('shared_truth_refresh_generation_id')} "
+        f"shared_truth_coherence_status={payload.get('shared_truth_coherence_status')} "
+        f"runtime_supervisor_classification={payload.get('runtime_supervisor_classification')} "
+        f"supervisor_mode={payload.get('supervisor_mode')} "
+        f"proof_window_status={payload.get('proof_window_status')} "
+        f"safe_to_start_runtime={payload.get('safe_to_start_runtime')} "
+        f"paper_recovery_policy={payload.get('paper_recovery_policy')} "
+        f"autonomous_recovery_plan_classification={payload.get('autonomous_recovery_plan_classification')} "
+        f"autonomous_recovery_next_action={payload.get('autonomous_recovery_next_action')} "
+        f"autonomous_recovery_execution_enabled={payload.get('autonomous_recovery_execution_enabled')} "
+        f"recommended_next_command={payload.get('recommended_next_command')}",
+        file=sys.stderr,
+    )
+    raise SystemExit(2)
+raise SystemExit(0)
+PY
+  local gate_rc=$?
+  set -e
+  read_control_plane_snapshot_launch_fields
+  if [[ ${gate_rc} -ne 0 ]]; then
+    write_launch_status "CONTROL_PLANE_SNAPSHOT_START_BLOCKED" "" "${summary}" "${gate_rc}"
+    return "${gate_rc}"
+  fi
+  return 0
+}
+
+read_control_plane_snapshot_launch_fields() {
+  local values
+  values="$("${PYTHON_BIN}" - <<'PY' "${CONTROL_PLANE_SNAPSHOT_FILE}" || true
+import json
+import shlex
+import sys
+from pathlib import Path
+
+try:
+    payload = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
+except (OSError, json.JSONDecodeError):
+    payload = {}
+
+fields = {
+    "LAUNCH_CONTROL_PLANE_SNAPSHOT_ID": payload.get("control_plane_snapshot_id"),
+    "LAUNCH_CONTROL_PLANE_SNAPSHOT_CLASSIFICATION": payload.get("classification"),
+    "LAUNCH_SUPERVISOR_CLASSIFICATION": payload.get("runtime_supervisor_classification"),
+    "LAUNCH_SUPERVISOR_MODE": payload.get("supervisor_mode"),
+    "LAUNCH_SUPERVISOR_PROOF_WINDOW_STATUS": payload.get("proof_window_status"),
+    "LAUNCH_SUPERVISOR_RECOMMENDED_NEXT_COMMAND": payload.get("recommended_next_command"),
+    "LAUNCH_SUPERVISOR_PAPER_ACTION_POLICY": payload.get("paper_recovery_policy"),
+    "LAUNCH_SUPERVISOR_AUTONOMOUS_RECOVERY_PLAN_CLASSIFICATION": payload.get("autonomous_recovery_plan_classification"),
+    "LAUNCH_SUPERVISOR_AUTONOMOUS_RECOVERY_NEXT_ACTION": payload.get("autonomous_recovery_next_action"),
+    "LAUNCH_SUPERVISOR_SHARED_TRUTH_REFRESH_GENERATION_ID": payload.get("shared_truth_refresh_generation_id"),
+    "LAUNCH_SUPERVISOR_SHARED_TRUTH_COHERENCE_STATUS": payload.get("shared_truth_coherence_status"),
+}
+for key, value in fields.items():
+    print(f"{key}={shlex.quote(str(value or ''))}")
+print("LAUNCH_SUPERVISOR_OPERATOR_ACK_REQUIRED=false")
+print("LAUNCH_SUPERVISOR_AUTONOMOUS_RECOVERY_ALLOWED=false")
+print("LAUNCH_SUPERVISOR_REQUIRES_OPERATOR_ACK_FOR_PAPER=false")
+print("LAUNCH_SUPERVISOR_OPERATOR_ACK_ADVISORY_ONLY_FOR_PAPER=false")
+print("LAUNCH_SUPERVISOR_LIVE_ACTION_POLICY=")
+print(f"LAUNCH_SUPERVISOR_AUTONOMOUS_RECOVERY_EXECUTION_ENABLED={'true' if payload.get('autonomous_recovery_execution_enabled') is True else 'false'}")
+PY
+)"
+  eval "${values}"
+}
+
 background_child_stayed_alive() {
   local pid="$1"
   local launched_at_epoch="$2"
@@ -941,8 +1128,7 @@ if schwab_runtime_dependency_required && [[ -f "${DEFAULT_SCHWAB_CONFIG}" ]]; th
   runtime_network_resolution_preflight "${DEFAULT_SCHWAB_CONFIG}" "probationary-paper-soak-launch"
 fi
 persist_runtime_config_paths
-run_shared_truth_runtime_start_preflight
-run_runtime_supervisor_start_preflight
+run_control_plane_snapshot_start_preflight
 
 LAUNCH_CONFIG_PATHS=()
 index=0

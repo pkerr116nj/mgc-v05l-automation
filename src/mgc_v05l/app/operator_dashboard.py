@@ -18139,6 +18139,11 @@ def _track_b_control_plane_services_summary(repo_root: Path) -> dict[str, Any]:
         / "track_b_execution_core"
         / "runtime_supervisor"
         / "latest_runtime_supervisor_authority.json",
+        "control_plane_snapshot": repo_root
+        / "outputs"
+        / "track_b_execution_core"
+        / "control_plane"
+        / "latest_control_plane_snapshot.json",
         "paper_recovery_policy": repo_root
         / "outputs"
         / "track_b_execution_core"
@@ -18158,6 +18163,7 @@ def _track_b_control_plane_services_summary(repo_root: Path) -> dict[str, Any]:
     crash_loop = payloads["crash_loop_protection"]
     runtime_resume = payloads["runtime_resume"]
     runtime_supervisor = payloads["runtime_supervisor"]
+    control_plane_snapshot = payloads["control_plane_snapshot"]
     paper_recovery_policy = payloads["paper_recovery_policy"]
     autonomous_recovery_plan = payloads["paper_autonomous_recovery_plan"]
     operator_ack = dict(runtime_supervisor.get("operator_ack") or {})
@@ -18199,6 +18205,19 @@ def _track_b_control_plane_services_summary(repo_root: Path) -> dict[str, Any]:
         "self_recover_recommendation": self_recover.get("recommendation") or self_recover.get("classification"),
         "crash_loop_classification": crash_loop.get("classification"),
         "crash_loop_restart_blocked": crash_loop.get("restart_blocked") is True,
+        "control_plane_snapshot_id": control_plane_snapshot.get("control_plane_snapshot_id"),
+        "control_plane_snapshot_classification": control_plane_snapshot.get("classification"),
+        "control_plane_snapshot_shared_truth_generation_id": control_plane_snapshot.get(
+            "shared_truth_refresh_generation_id"
+        ),
+        "control_plane_snapshot_shared_truth_coherence_status": control_plane_snapshot.get(
+            "shared_truth_coherence_status"
+        ),
+        "control_plane_snapshot_supervisor_classification": control_plane_snapshot.get(
+            "runtime_supervisor_classification"
+        ),
+        "control_plane_snapshot_supervisor_mode": control_plane_snapshot.get("supervisor_mode"),
+        "control_plane_snapshot_proof_window_status": control_plane_snapshot.get("proof_window_status"),
         "paper_recovery_policy": paper_action_policy,
         "paper_recovery_severity": paper_recovery_policy.get("severity"),
         "paper_recovery_diagnostic": paper_recovery_diagnostic,

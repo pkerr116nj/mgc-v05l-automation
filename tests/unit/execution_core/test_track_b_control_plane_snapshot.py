@@ -30,6 +30,7 @@ def test_snapshot_ties_supervisor_to_shared_truth_generation(tmp_path: Path) -> 
     assert payload["shared_truth_generation_matches_supervisor"] is True
     assert payload["runtime_supervisor_classification"] == "SUPERVISOR_RUNTIME_START_ALLOWED"
     assert payload["supervisor_mode"] == "READY_FOR_OPERATOR_START"
+    assert payload["safe_to_start_runtime"] is True
     assert payload["broker_order_position_summary"]["open_order_truth"] == "NO_OPEN_ORDERS"
     assert payload["source_artifact_paths"]["shared_truth_refresh"].endswith(
         "outputs/track_b_execution_core/shared_truth/latest_track_b_shared_truth_refresh.json"
