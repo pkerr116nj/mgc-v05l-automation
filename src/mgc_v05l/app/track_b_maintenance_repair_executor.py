@@ -18,7 +18,25 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable, Mapping, Sequence
 
+from mgc_v05l.execution_core.track_b_broker_truth_lease import DEFAULT_LEASE_ARTIFACT
+from mgc_v05l.execution_core.track_b_crash_loop_protection import DEFAULT_CRASH_LOOP_PROTECTION_ARTIFACT
+from mgc_v05l.execution_core.track_b_managed_order_registry import (
+    DEFAULT_MANAGED_ORDER_REGISTRY_ARTIFACT,
+    NO_MANAGED_ORDERS,
+)
+from mgc_v05l.execution_core.track_b_managed_position_registry import (
+    DEFAULT_MANAGED_POSITION_REGISTRY_ARTIFACT,
+    NO_MANAGED_POSITIONS,
+)
+from mgc_v05l.execution_core.track_b_open_order_truth import DEFAULT_OPEN_ORDER_TRUTH_ARTIFACT, NO_OPEN_ORDERS
+from mgc_v05l.execution_core.track_b_position_truth_monitor import DEFAULT_POSITION_TRUTH_ARTIFACT
 from mgc_v05l.execution_core.track_b_readiness_state import REPO_ROOT
+from mgc_v05l.execution_core.track_b_runtime_resume_semantics import DEFAULT_RUNTIME_RESUME_SEMANTICS_ARTIFACT
+from mgc_v05l.execution_core.track_b_runtime_supervisor_authority import (
+    DEFAULT_RUNTIME_SUPERVISOR_AUTHORITY_ARTIFACT,
+)
+from mgc_v05l.execution_core.track_b_self_recover_rules import DEFAULT_SELF_RECOVER_RULES_ARTIFACT
+from mgc_v05l.execution_core.track_b_shared_truth_refresh_cli import DEFAULT_RECONCILIATION_ARTIFACT
 
 BROKER_TRUTH_SIDECAR_ACTION = "broker-truth-sidecar"
 PHASE1_RECONCILIATION_ACTION = "phase1-reconciliation"
@@ -52,6 +70,18 @@ class RepairExecutorConfig:
     history_path: Path | None = None
     pid_file: Path | None = None
     python_bin: str | None = None
+    require_shared_truth_evidence: bool = True
+    shared_truth_max_age_seconds: float = 600.0
+    runtime_supervisor_authority_path: Path | None = None
+    self_recover_rules_path: Path | None = None
+    crash_loop_protection_path: Path | None = None
+    runtime_resume_semantics_path: Path | None = None
+    open_order_truth_path: Path | None = None
+    managed_order_registry_path: Path | None = None
+    position_truth_path: Path | None = None
+    managed_position_registry_path: Path | None = None
+    reconciliation_path: Path | None = None
+    broker_lease_path: Path | None = None
 
 
 def run_repair_executor(
@@ -69,6 +99,7 @@ def run_repair_executor(
     broker_truth_status = _read_json(paths["broker_truth_status"])
     canonical_readiness = _read_json(paths["canonical_readiness"])
     previous_result = _read_json(paths["result"])
+    shared_truth_evidence = _shared_truth_repair_evidence(config=config, paths=paths, now=now)
     pid = _read_pid(paths["pid_file"])
     pid_checker = pid_checker or _pid_alive
     sidecar_alive = bool(pid is not None and pid_checker(int(pid)))
@@ -81,6 +112,7 @@ def run_repair_executor(
         decision=decision,
         broker_truth_status=broker_truth_status,
         canonical_readiness=canonical_readiness,
+        shared_truth_evidence=shared_truth_evidence,
         pid=pid,
         sidecar_alive=sidecar_alive,
     )
@@ -100,6 +132,28 @@ def run_repair_executor(
         max_retries=int(config.max_retries),
     )
     result = {**base, **selected}
+    shared_blockers = list(shared_truth_evidence.get("blockers") or [])
+    if shared_blockers:
+        result.update(
+            {
+                "classification": "TRACK_B_MAINTENANCE_REPAIR_APPLY_BLOCKED"
+                if config.apply
+                else "TRACK_B_MAINTENANCE_REPAIR_DRY_RUN_BLOCKED",
+                "repair_plan_classification": "REPAIR_PLAN_BLOCKED_SHARED_TRUTH",
+                "blocked_reason": "; ".join(str(item) for item in shared_blockers),
+                "proposed_actions": [],
+                "blocked_actions": [
+                    {
+                        "repair_action": selected.get("repair_action"),
+                        "reason": "; ".join(str(item) for item in shared_blockers),
+                    }
+                ],
+                "would_execute": False,
+                "executed": False,
+            }
+        )
+        _write_result_and_history(paths=paths, result=result)
+        return result
     if blocked_reason:
         result.update(
             {
@@ -107,6 +161,9 @@ def run_repair_executor(
                 if config.apply
                 else "TRACK_B_MAINTENANCE_REPAIR_DRY_RUN_BLOCKED",
                 "blocked_reason": blocked_reason,
+                "repair_plan_classification": "REPAIR_PLAN_BLOCKED",
+                "proposed_actions": [],
+                "blocked_actions": [{"repair_action": selected.get("repair_action"), "reason": blocked_reason}],
                 "would_execute": False,
                 "executed": False,
             }
@@ -117,6 +174,10 @@ def run_repair_executor(
     commands = _commands_for_repair(selected["repair_action"], repo_root=repo_root, python_bin=_python_bin(config))
     result["commands"] = [_command_display(command) for command in commands]
     result["would_execute"] = bool(commands)
+    result["repair_plan_classification"] = "REPAIR_PLAN_READY" if commands else "REPAIR_PLAN_NO_ACTION"
+    result["proposed_actions"] = [{"repair_action": selected["repair_action"], "commands": result["commands"]}] if commands else []
+    result["blocked_actions"] = []
+    result["requires_operator_authorization"] = bool(commands and config.apply)
     if not config.apply:
         result.update(
             {
@@ -229,6 +290,7 @@ def _base_result(
     decision: Mapping[str, Any],
     broker_truth_status: Mapping[str, Any],
     canonical_readiness: Mapping[str, Any],
+    shared_truth_evidence: Mapping[str, Any],
     pid: int | None,
     sidecar_alive: bool,
 ) -> dict[str, Any]:
@@ -248,6 +310,11 @@ def _base_result(
         "supervisor_recommended_actions": list(decision.get("recommended_actions") or []),
         "canonical_readiness": canonical_readiness.get("canonical_readiness") or canonical_readiness.get("state"),
         "broker_truth_classification": broker_truth_status.get("classification"),
+        "shared_truth_evidence": shared_truth_evidence,
+        "repair_plan_classification": "REPAIR_PLAN_PENDING",
+        "proposed_actions": [],
+        "blocked_actions": [],
+        "requires_operator_authorization": False,
         "submit_authority": False,
         "live_money_eligible": False,
         "authority": {
@@ -442,6 +509,111 @@ def _write_json(path: Path, payload: Mapping[str, Any]) -> None:
     tmp.replace(path)
 
 
+def _shared_truth_repair_evidence(
+    *,
+    config: RepairExecutorConfig,
+    paths: Mapping[str, Path],
+    now: datetime,
+) -> dict[str, Any]:
+    shared_paths = {
+        "runtime_supervisor_authority": paths["runtime_supervisor_authority"],
+        "self_recover_rules": paths["self_recover_rules"],
+        "crash_loop_protection": paths["crash_loop_protection"],
+        "runtime_resume_semantics": paths["runtime_resume_semantics"],
+        "open_order_truth": paths["open_order_truth"],
+        "managed_order_registry": paths["managed_order_registry"],
+        "position_truth": paths["position_truth"],
+        "managed_position_registry": paths["managed_position_registry"],
+        "reconciliation": paths["reconciliation"],
+        "broker_lease": paths["broker_lease"],
+    }
+    payloads = {name: _read_json(path) for name, path in shared_paths.items()}
+    classifications = {name: _shared_classification(name=name, payload=payload) for name, payload in payloads.items()}
+    freshness = {
+        name: _shared_freshness(payload=payload, now=now, max_age_seconds=config.shared_truth_max_age_seconds)
+        for name, payload in payloads.items()
+    }
+    blockers: list[str] = []
+    if config.require_shared_truth_evidence:
+        for name, payload in payloads.items():
+            if not payload:
+                blockers.append(f"Shared truth authority artifact missing: {name}.")
+        for name, state in freshness.items():
+            if state["stale_or_missing"]:
+                blockers.append(f"Shared truth authority artifact stale/missing: {name}.")
+
+    if classifications["runtime_supervisor_authority"] in {
+        "SUPERVISOR_MANUAL_REVIEW_REQUIRED",
+        "SUPERVISOR_RESTART_BLOCKED_OPERATOR_ACK",
+        "SUPERVISOR_RESTART_BLOCKED_CRASH_LOOP",
+        "SUPERVISOR_SHARED_TRUTH_STALE",
+        "SUPERVISOR_UNKNOWN_REVIEW_REQUIRED",
+    }:
+        blockers.append(
+            f"Runtime Supervisor Authority blocks repair executor: {classifications['runtime_supervisor_authority']}."
+        )
+    if classifications["self_recover_rules"] in {
+        "REFRESH_SHARED_TRUTH",
+        "OPERATOR_REVIEW_REQUIRED",
+        "MANUAL_TWS_REVIEW_REQUIRED",
+        "CLEANUP_REQUIRED_BEFORE_RESTART",
+        "DO_NOT_RECOVER_UNSAFE_STATE",
+    }:
+        blockers.append(f"Self-Recover Rules block repair executor: {classifications['self_recover_rules']}.")
+    if classifications["crash_loop_protection"] in {
+        "RESTART_COOLDOWN_ACTIVE",
+        "REPEATED_RUNTIME_FAILURE",
+        "REPEATED_MARKET_DATA_FAILURE",
+        "REPEATED_BROKER_LEASE_FAILURE",
+        "OPERATOR_ACK_REQUIRED",
+    }:
+        blockers.append(f"Crash Loop Protection blocks repair executor: {classifications['crash_loop_protection']}.")
+    if classifications["runtime_resume_semantics"] in {
+        "RESUME_BLOCKED_SHARED_TRUTH",
+        "RESUME_BLOCKED_CRASH_LOOP",
+        "RESUME_BLOCKED_OPERATOR_ACK_REQUIRED",
+        "RESUME_BLOCKED_BROKER_EXPOSURE",
+        "RESUME_BLOCKED_OPEN_ORDER",
+        "RESUME_BLOCKED_MANAGED_POSITION",
+        "RESUME_BLOCKED_STALE_OR_MISSING_EVIDENCE",
+        "RESUME_REQUIRES_MANUAL_CLEANUP",
+        "RESUME_UNKNOWN_REVIEW_REQUIRED",
+    }:
+        blockers.append(f"Runtime Resume Semantics blocks repair executor: {classifications['runtime_resume_semantics']}.")
+    if classifications["open_order_truth"] and classifications["open_order_truth"] != NO_OPEN_ORDERS:
+        blockers.append(f"Open Order Truth blocks repair executor: {classifications['open_order_truth']}.")
+    if classifications["managed_order_registry"] and classifications["managed_order_registry"] != NO_MANAGED_ORDERS:
+        blockers.append(f"Managed Order Registry blocks repair executor: {classifications['managed_order_registry']}.")
+    if classifications["position_truth"] and classifications["position_truth"] != "CLEAN_FLAT_READY":
+        blockers.append(f"Position Truth blocks repair executor: {classifications['position_truth']}.")
+    if classifications["managed_position_registry"] and classifications["managed_position_registry"] != NO_MANAGED_POSITIONS:
+        blockers.append(f"Managed Position Registry blocks repair executor: {classifications['managed_position_registry']}.")
+    if classifications["reconciliation"] in {
+        "BROKER_TRUTH_SETTLEMENT_CONTRADICTORY_STATE",
+        "BROKER_TRUTH_SETTLEMENT_TIMEOUT",
+        "TRACK_B_PAPER_BROKER_RECONCILIATION_BLOCKED_UNKNOWN_OPEN_ORDERS",
+    }:
+        blockers.append(f"Reconciliation blocks repair executor: {classifications['reconciliation']}.")
+    if classifications["broker_lease"] in {
+        "INVALIDATED_CONTRADICTION",
+        "INVALIDATED_UNKNOWN_OPEN_ORDERS",
+        "INVALIDATED_MANUAL_BROKER_ACTION",
+        "OPERATOR_REQUIRED",
+    }:
+        blockers.append(f"Broker Truth Lease blocks repair executor: {classifications['broker_lease']}.")
+
+    return {
+        "source_authority": "execution_core_authority",
+        "dashboard_projection_consumed": False,
+        "required": config.require_shared_truth_evidence,
+        "max_age_seconds": config.shared_truth_max_age_seconds,
+        "artifact_paths": {name: str(path) for name, path in shared_paths.items()},
+        "classifications": classifications,
+        "freshness": freshness,
+        "blockers": blockers,
+    }
+
+
 def _resolve_paths(config: RepairExecutorConfig, repo_root: Path) -> dict[str, Path]:
     return {
         "decision": _resolve(repo_root, config.decision_path, DEFAULT_DECISION_ARTIFACT),
@@ -450,6 +622,36 @@ def _resolve_paths(config: RepairExecutorConfig, repo_root: Path) -> dict[str, P
         "result": _resolve(repo_root, config.result_path, DEFAULT_RESULT_ARTIFACT),
         "history": _resolve(repo_root, config.history_path, DEFAULT_HISTORY_ARTIFACT),
         "pid_file": _resolve(repo_root, config.pid_file, DEFAULT_PID_FILE),
+        "runtime_supervisor_authority": _resolve(
+            repo_root,
+            config.runtime_supervisor_authority_path,
+            DEFAULT_RUNTIME_SUPERVISOR_AUTHORITY_ARTIFACT,
+        ),
+        "self_recover_rules": _resolve(repo_root, config.self_recover_rules_path, DEFAULT_SELF_RECOVER_RULES_ARTIFACT),
+        "crash_loop_protection": _resolve(
+            repo_root,
+            config.crash_loop_protection_path,
+            DEFAULT_CRASH_LOOP_PROTECTION_ARTIFACT,
+        ),
+        "runtime_resume_semantics": _resolve(
+            repo_root,
+            config.runtime_resume_semantics_path,
+            DEFAULT_RUNTIME_RESUME_SEMANTICS_ARTIFACT,
+        ),
+        "open_order_truth": _resolve(repo_root, config.open_order_truth_path, DEFAULT_OPEN_ORDER_TRUTH_ARTIFACT),
+        "managed_order_registry": _resolve(
+            repo_root,
+            config.managed_order_registry_path,
+            DEFAULT_MANAGED_ORDER_REGISTRY_ARTIFACT,
+        ),
+        "position_truth": _resolve(repo_root, config.position_truth_path, DEFAULT_POSITION_TRUTH_ARTIFACT),
+        "managed_position_registry": _resolve(
+            repo_root,
+            config.managed_position_registry_path,
+            DEFAULT_MANAGED_POSITION_REGISTRY_ARTIFACT,
+        ),
+        "reconciliation": _resolve(repo_root, config.reconciliation_path, DEFAULT_RECONCILIATION_ARTIFACT),
+        "broker_lease": _resolve(repo_root, config.broker_lease_path, DEFAULT_LEASE_ARTIFACT),
     }
 
 
@@ -467,6 +669,46 @@ def _read_json(path: Path) -> dict[str, Any]:
     except (OSError, json.JSONDecodeError):
         return {}
     return payload if isinstance(payload, dict) else {}
+
+
+def _shared_classification(*, name: str, payload: Mapping[str, Any]) -> str:
+    if name == "runtime_supervisor_authority":
+        return str(payload.get("classification") or payload.get("supervisor_classification") or "")
+    if name == "self_recover_rules":
+        return str(payload.get("recommendation") or payload.get("classification") or "")
+    if name == "runtime_resume_semantics":
+        return str(payload.get("classification") or "")
+    if name == "position_truth":
+        summary = payload.get("summary") if isinstance(payload.get("summary"), Mapping) else {}
+        return str(payload.get("classification") or summary.get("overall_classification") or "")
+    if name == "broker_lease":
+        return str(payload.get("classification") or payload.get("lease_state") or "")
+    return str(payload.get("classification") or "")
+
+
+def _shared_freshness(*, payload: Mapping[str, Any], now: datetime, max_age_seconds: float) -> dict[str, Any]:
+    generated_at = payload.get("generated_at") or payload.get("latest_refresh_time") or payload.get("last_success_at")
+    age_seconds = _age_seconds(generated_at, now)
+    return {
+        "generated_at": generated_at,
+        "age_seconds": age_seconds,
+        "stale_or_missing": age_seconds is None or age_seconds > max_age_seconds,
+    }
+
+
+def _age_seconds(value: Any, now: datetime) -> float | None:
+    if not value:
+        return None
+    try:
+        raw = str(value)
+        if raw.endswith("Z"):
+            raw = raw[:-1] + "+00:00"
+        parsed = datetime.fromisoformat(raw)
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=timezone.utc)
+        return max(0.0, (now - parsed.astimezone(timezone.utc)).total_seconds())
+    except (TypeError, ValueError):
+        return None
 
 
 def _read_pid(path: Path) -> int | None:

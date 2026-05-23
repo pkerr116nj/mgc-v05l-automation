@@ -20,7 +20,18 @@ def write_json(path: Path, payload: dict) -> None:
     path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 
 
-def seed_artifacts(repo_root: Path, *, actions: list[str] | None = None, state: str = "DEGRADED") -> None:
+def seed_artifacts(
+    repo_root: Path,
+    *,
+    actions: list[str] | None = None,
+    state: str = "DEGRADED",
+    shared_truth_generated_at: str = "2026-05-18T13:59:00+00:00",
+    open_order_truth_classification: str = "NO_OPEN_ORDERS",
+    managed_order_registry_classification: str = "NO_MANAGED_ORDERS",
+    position_truth_classification: str = "CLEAN_FLAT_READY",
+    managed_position_registry_classification: str = "NO_MANAGED_POSITIONS",
+    runtime_supervisor_classification: str = "SUPERVISOR_NO_ACTION_NEEDED",
+) -> None:
     write_json(
         repo_root / "outputs" / "operator_dashboard" / "runtime" / "latest_maintenance_supervisor_decision.json",
         {
@@ -54,6 +65,79 @@ def seed_artifacts(repo_root: Path, *, actions: list[str] | None = None, state: 
                 "blockers": [],
             },
         },
+    )
+    seed_shared_truth(
+        repo_root,
+        generated_at=shared_truth_generated_at,
+        open_order_truth_classification=open_order_truth_classification,
+        managed_order_registry_classification=managed_order_registry_classification,
+        position_truth_classification=position_truth_classification,
+        managed_position_registry_classification=managed_position_registry_classification,
+        runtime_supervisor_classification=runtime_supervisor_classification,
+    )
+
+
+def seed_shared_truth(
+    repo_root: Path,
+    *,
+    generated_at: str = "2026-05-18T13:59:00+00:00",
+    open_order_truth_classification: str = "NO_OPEN_ORDERS",
+    managed_order_registry_classification: str = "NO_MANAGED_ORDERS",
+    position_truth_classification: str = "CLEAN_FLAT_READY",
+    managed_position_registry_classification: str = "NO_MANAGED_POSITIONS",
+    runtime_supervisor_classification: str = "SUPERVISOR_NO_ACTION_NEEDED",
+    self_recover_recommendation: str = "NO_ACTION_NEEDED",
+    crash_loop_classification: str = "NO_CRASH_LOOP",
+    runtime_resume_classification: str = "RESUME_ALLOWED_CLEAN",
+) -> None:
+    write_json(
+        repo_root / "outputs" / "track_b_execution_core" / "runtime_supervisor" / "latest_runtime_supervisor_authority.json",
+        {"classification": runtime_supervisor_classification, "generated_at": generated_at},
+    )
+    write_json(
+        repo_root / "outputs" / "track_b_execution_core" / "self_recover" / "latest_self_recover_rules.json",
+        {"classification": self_recover_recommendation, "recommendation": self_recover_recommendation, "generated_at": generated_at},
+    )
+    write_json(
+        repo_root / "outputs" / "track_b_execution_core" / "crash_loop_protection" / "latest_crash_loop_protection.json",
+        {"classification": crash_loop_classification, "generated_at": generated_at},
+    )
+    write_json(
+        repo_root / "outputs" / "track_b_execution_core" / "runtime_resume" / "latest_runtime_resume_semantics.json",
+        {"classification": runtime_resume_classification, "generated_at": generated_at},
+    )
+    write_json(
+        repo_root / "outputs" / "track_b_execution_core" / "open_order_truth" / "latest_open_order_truth.json",
+        {"classification": open_order_truth_classification, "generated_at": generated_at, "order_states": []},
+    )
+    write_json(
+        repo_root / "outputs" / "track_b_execution_core" / "managed_orders" / "latest_managed_orders.json",
+        {"classification": managed_order_registry_classification, "generated_at": generated_at, "managed_orders": []},
+    )
+    write_json(
+        repo_root / "outputs" / "track_b_execution_core" / "position_truth" / "latest_position_truth.json",
+        {
+            "classification": position_truth_classification,
+            "generated_at": generated_at,
+            "position_states": [],
+            "summary": {"overall_classification": position_truth_classification},
+        },
+    )
+    write_json(
+        repo_root / "outputs" / "track_b_execution_core" / "managed_positions" / "latest_managed_positions.json",
+        {"classification": managed_position_registry_classification, "generated_at": generated_at, "managed_positions": []},
+    )
+    write_json(
+        repo_root
+        / "outputs"
+        / "reports"
+        / "track_b_paper_broker_reconciliation"
+        / "latest_track_b_paper_broker_reconciliation.json",
+        {"classification": "TRACK_B_PAPER_BROKER_RECONCILED", "generated_at": generated_at},
+    )
+    write_json(
+        repo_root / "outputs" / "operator_dashboard" / "runtime" / "latest_broker_truth_lease.json",
+        {"classification": "ACTIVE", "lease_state": "ACTIVE", "generated_at": generated_at},
     )
 
 
@@ -245,12 +329,78 @@ def test_phase1_reconciliation_dry_run_recommends_refresh(tmp_path: Path) -> Non
     result = run_repair_executor(config=phase1_config(tmp_path), pid_checker=lambda pid: True, now_fn=now)
 
     assert result["classification"] == "TRACK_B_MAINTENANCE_REPAIR_DRY_RUN_READY"
+    assert result["repair_plan_classification"] == "REPAIR_PLAN_READY"
     assert result["action"] == "phase1-reconciliation"
     assert result["repair_action"] == "REFRESH_PHASE1_RECONCILIATION"
     assert result["would_execute"] is True
+    assert result["proposed_actions"][0]["repair_action"] == "REFRESH_PHASE1_RECONCILIATION"
     assert result["commands"][0][:3] == ["python-test", "-m", "mgc_v05l.execution_core.track_b_paper_broker_reconciliation"]
     assert "--repo-root" in result["commands"][0]
     assert result["authority"]["runtime_restart_allowed"] is False
+
+
+def test_executor_blocks_when_shared_truth_stale(tmp_path: Path) -> None:
+    seed_artifacts(tmp_path, actions=["REFRESH_RECONCILIATION"], shared_truth_generated_at="2026-05-18T13:00:00+00:00")
+
+    result = run_repair_executor(config=phase1_config(tmp_path), pid_checker=lambda pid: True, now_fn=now)
+
+    assert result["classification"] == "TRACK_B_MAINTENANCE_REPAIR_DRY_RUN_BLOCKED"
+    assert result["repair_plan_classification"] == "REPAIR_PLAN_BLOCKED_SHARED_TRUTH"
+    assert "stale/missing" in result["blocked_reason"]
+    assert result["would_execute"] is False
+
+
+def test_executor_blocks_suspicious_order_state(tmp_path: Path) -> None:
+    seed_artifacts(tmp_path, actions=["REFRESH_RECONCILIATION"], open_order_truth_classification="SUSPICIOUS_ORDER_STATE")
+
+    result = run_repair_executor(config=phase1_config(tmp_path), pid_checker=lambda pid: True, now_fn=now)
+
+    assert result["classification"] == "TRACK_B_MAINTENANCE_REPAIR_DRY_RUN_BLOCKED"
+    assert "SUSPICIOUS_ORDER_STATE" in result["blocked_reason"]
+    assert result["blocked_actions"][0]["repair_action"] == "REFRESH_PHASE1_RECONCILIATION"
+
+
+def test_executor_blocks_runtime_supervisor_manual_review(tmp_path: Path) -> None:
+    seed_artifacts(
+        tmp_path,
+        actions=["REFRESH_RECONCILIATION"],
+        runtime_supervisor_classification="SUPERVISOR_MANUAL_REVIEW_REQUIRED",
+    )
+
+    result = run_repair_executor(config=phase1_config(tmp_path), pid_checker=lambda pid: True, now_fn=now)
+
+    assert result["classification"] == "TRACK_B_MAINTENANCE_REPAIR_DRY_RUN_BLOCKED"
+    assert "SUPERVISOR_MANUAL_REVIEW_REQUIRED" in result["blocked_reason"]
+
+
+def test_executor_requires_explicit_operator_authorization_for_apply(tmp_path: Path) -> None:
+    seed_artifacts(tmp_path, actions=["REFRESH_RECONCILIATION"])
+    commands: list[list[str]] = []
+
+    def runner(command, **kwargs):  # type: ignore[no-untyped-def]
+        commands.append(list(command))
+        return SimpleNamespace(returncode=0, stdout="ok", stderr="")
+
+    result = run_repair_executor(
+        config=phase1_config(tmp_path, apply=True),
+        command_runner=runner,
+        pid_checker=lambda pid: True,
+        now_fn=now,
+    )
+
+    assert result["classification"] == "TRACK_B_MAINTENANCE_REPAIR_APPLIED"
+    assert result["requires_operator_authorization"] is True
+    assert commands
+
+
+def test_executor_does_not_consume_dashboard_projections_as_authority() -> None:
+    source = inspect.getsource(executor)
+
+    assert "latest_track_b_open_order_truth.json" not in source
+    assert "latest_track_b_managed_orders.json" not in source
+    assert "latest_track_b_position_truth.json" not in source
+    assert "latest_track_b_managed_positions.json" not in source
+    assert "latest_track_b_runtime_supervisor_authority.json" not in source
 
 
 def test_phase1_reconciliation_apply_uses_safe_python_and_reruns_readiness(tmp_path: Path) -> None:
@@ -335,7 +485,7 @@ def test_phase1_reconciliation_invalid_lease_blocks_apply(tmp_path: Path) -> Non
 
 
 def test_cli_defaults_to_dry_run(tmp_path: Path, capsys) -> None:
-    seed_artifacts(tmp_path, actions=["RESTART_SIDECAR"])
+    seed_artifacts(tmp_path, actions=["RESTART_SIDECAR"], shared_truth_generated_at=datetime.now(timezone.utc).isoformat())
 
     exit_code = executor.main(["--repo-root", str(tmp_path), "--json"])
 
