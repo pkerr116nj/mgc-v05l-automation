@@ -1561,25 +1561,39 @@ control_plane_snapshot_start_gate() {
 import json
 import sys
 from pathlib import Path
+from mgc_v05l.execution_core.track_b_control_plane_snapshot_status import classify_control_plane_snapshot_status
 
 path = Path(sys.argv[1])
 try:
     payload = json.loads(path.read_text(encoding="utf-8"))
 except (OSError, json.JSONDecodeError):
-    print("CONTROL_PLANE_SNAPSHOT_START_BLOCKED: missing_or_invalid_snapshot", file=sys.stderr)
+    status = classify_control_plane_snapshot_status({}, required_for_launch=True)
+    print(
+        "CONTROL_PLANE_SNAPSHOT_START_BLOCKED: "
+        f"control_plane_status_classification={status['classification']} "
+        "diagnostic_only=true not_routing_authority=true "
+        f"reason={status['reason']}",
+        file=sys.stderr,
+    )
     raise SystemExit(2)
 
+status = classify_control_plane_snapshot_status(payload, required_for_launch=True)
 allowed = (
-    payload.get("classification") == "CONTROL_PLANE_SNAPSHOT_READY"
-    and payload.get("shared_truth_coherence_status") == "COHERENT"
+    status.get("classification") == "CONTROL_PLANE_READY"
     and payload.get("runtime_supervisor_classification") == "SUPERVISOR_RUNTIME_START_ALLOWED"
     and payload.get("supervisor_mode") == "READY_FOR_OPERATOR_START"
-    and payload.get("safe_to_start_runtime") is True
+    and status.get("safe_to_start_runtime") is True
     and not payload.get("blockers")
 )
 if not allowed:
     print(
         "CONTROL_PLANE_SNAPSHOT_START_BLOCKED: "
+        f"control_plane_status_classification={status.get('classification')} "
+        f"diagnostic_only={status.get('diagnostic_only')} "
+        f"not_routing_authority={status.get('not_routing_authority')} "
+        f"control_plane_snapshot_missing={status.get('control_plane_snapshot_missing')} "
+        f"control_plane_snapshot_stale={status.get('control_plane_snapshot_stale')} "
+        f"control_plane_snapshot_incoherent={status.get('control_plane_snapshot_incoherent')} "
         f"snapshot_id={payload.get('control_plane_snapshot_id')} "
         f"classification={payload.get('classification')} "
         f"shared_truth_refresh_generation_id={payload.get('shared_truth_refresh_generation_id')} "
@@ -1587,7 +1601,7 @@ if not allowed:
         f"runtime_supervisor_classification={payload.get('runtime_supervisor_classification')} "
         f"supervisor_mode={payload.get('supervisor_mode')} "
         f"proof_window_status={payload.get('proof_window_status')} "
-        f"safe_to_start_runtime={payload.get('safe_to_start_runtime')} "
+        f"safe_to_start_runtime={status.get('safe_to_start_runtime')} "
         f"paper_recovery_policy={payload.get('paper_recovery_policy')} "
         f"autonomous_recovery_plan_classification={payload.get('autonomous_recovery_plan_classification')} "
         f"autonomous_recovery_next_action={payload.get('autonomous_recovery_next_action')} "
@@ -1605,13 +1619,21 @@ control_plane_snapshot_blocked_reason() {
 import json
 import sys
 from pathlib import Path
+from mgc_v05l.execution_core.track_b_control_plane_snapshot_status import classify_control_plane_snapshot_status
 
 try:
     payload = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
 except (OSError, json.JSONDecodeError):
     payload = {}
+status = classify_control_plane_snapshot_status(payload, required_for_launch=True)
 print(
     "Control Plane Snapshot blocked start: "
+    f"control_plane_status_classification={status.get('classification')} "
+    f"diagnostic_only={status.get('diagnostic_only')} "
+    f"not_routing_authority={status.get('not_routing_authority')} "
+    f"control_plane_snapshot_missing={status.get('control_plane_snapshot_missing')} "
+    f"control_plane_snapshot_stale={status.get('control_plane_snapshot_stale')} "
+    f"control_plane_snapshot_incoherent={status.get('control_plane_snapshot_incoherent')} "
     f"snapshot_id={payload.get('control_plane_snapshot_id')} "
     f"classification={payload.get('classification')} "
     f"shared_truth_refresh_generation_id={payload.get('shared_truth_refresh_generation_id')} "
@@ -1619,7 +1641,7 @@ print(
     f"runtime_supervisor_classification={payload.get('runtime_supervisor_classification')} "
     f"supervisor_mode={payload.get('supervisor_mode')} "
     f"proof_window_status={payload.get('proof_window_status')} "
-    f"safe_to_start_runtime={payload.get('safe_to_start_runtime')} "
+    f"safe_to_start_runtime={status.get('safe_to_start_runtime')} "
     f"paper_recovery_policy={payload.get('paper_recovery_policy')} "
     f"autonomous_recovery_plan_classification={payload.get('autonomous_recovery_plan_classification')} "
     f"autonomous_recovery_next_action={payload.get('autonomous_recovery_next_action')} "

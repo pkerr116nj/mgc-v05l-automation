@@ -46,6 +46,7 @@ from ..execution_core.track_b_strategy_registry import (
     get_track_b_strategy_registry,
 )
 from ..execution_core.track_b_readiness_state import DEFAULT_CANONICAL_READINESS_ARTIFACT
+from ..execution_core.track_b_control_plane_snapshot_status import classify_control_plane_snapshot_status
 from ..execution.ibkr_paper_strategy_monitor import load_paper_strategy_monitor_status
 from ..execution.track_b_phase1_submit_authority import evaluate_phase1_broker_reconciliation_submit_gate
 from ..market_data import (
@@ -18164,6 +18165,7 @@ def _track_b_control_plane_services_summary(repo_root: Path) -> dict[str, Any]:
     runtime_resume = payloads["runtime_resume"]
     runtime_supervisor = payloads["runtime_supervisor"]
     control_plane_snapshot = payloads["control_plane_snapshot"]
+    control_plane_status = classify_control_plane_snapshot_status(control_plane_snapshot)
     paper_recovery_policy = payloads["paper_recovery_policy"]
     autonomous_recovery_plan = payloads["paper_autonomous_recovery_plan"]
     operator_ack = dict(runtime_supervisor.get("operator_ack") or {})
@@ -18205,6 +18207,16 @@ def _track_b_control_plane_services_summary(repo_root: Path) -> dict[str, Any]:
         "self_recover_recommendation": self_recover.get("recommendation") or self_recover.get("classification"),
         "crash_loop_classification": crash_loop.get("classification"),
         "crash_loop_restart_blocked": crash_loop.get("restart_blocked") is True,
+        "control_plane_status_classification": control_plane_status["classification"],
+        "control_plane_status_reason": control_plane_status["reason"],
+        "control_plane_diagnostic_only": control_plane_status["diagnostic_only"],
+        "control_plane_not_routing_authority": control_plane_status["not_routing_authority"],
+        "control_plane_snapshot_missing": control_plane_status["control_plane_snapshot_missing"],
+        "control_plane_snapshot_stale": control_plane_status["control_plane_snapshot_stale"],
+        "control_plane_snapshot_incoherent": control_plane_status["control_plane_snapshot_incoherent"],
+        "control_plane_snapshot_missing_or_stale": control_plane_status["control_plane_snapshot_missing_or_stale"],
+        "control_plane_snapshot_age_seconds": control_plane_status["control_plane_snapshot_age_seconds"],
+        "control_plane_snapshot_safe_to_start_runtime": control_plane_status["safe_to_start_runtime"],
         "control_plane_snapshot_id": control_plane_snapshot.get("control_plane_snapshot_id"),
         "control_plane_snapshot_classification": control_plane_snapshot.get("classification"),
         "control_plane_snapshot_shared_truth_generation_id": control_plane_snapshot.get(
@@ -18233,7 +18245,11 @@ def _track_b_control_plane_services_summary(repo_root: Path) -> dict[str, Any]:
         "live_action_policy": paper_recovery_policy.get("live_action_policy"),
         "runtime_resume_classification": runtime_resume.get("classification"),
         "runtime_resume_allowed": runtime_resume.get("allowed") is True,
-        "runtime_resume_safe_to_start_runtime": runtime_resume.get("safe_to_start_runtime") is True,
+        "runtime_resume_safe_to_start_runtime": (
+            runtime_resume.get("safe_to_start_runtime") is True and control_plane_status["safe_to_start_runtime"] is True
+        ),
+        "runtime_resume_raw_safe_to_start_runtime": runtime_resume.get("safe_to_start_runtime") is True,
+        "runtime_resume_diagnostic_only": control_plane_status["classification"] != "CONTROL_PLANE_READY",
         "runtime_resume_required_operator_ack": runtime_resume.get("required_operator_ack") is True,
         "runtime_resume_resume_mode": runtime_resume.get("resume_mode"),
         "runtime_resume_reason": runtime_resume.get("reason"),

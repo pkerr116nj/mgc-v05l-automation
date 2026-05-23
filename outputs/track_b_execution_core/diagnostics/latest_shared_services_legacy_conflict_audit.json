@@ -191,20 +191,25 @@
     {
       "area": "launch/status / fallback flows",
       "code_change_needed_now": false,
-      "doctrine_conflict": "Fallbacks are useful during migration, but if accidentally invoked they can reintroduce mixed-generation decisions and local display summaries that drift from the snapshot.",
+      "current_status": "Resolved: launch gates use the shared Control Plane Snapshot status classifier and block missing/stale/incoherent snapshots; status fallback is diagnostic_only/not_routing_authority and cannot surface safe_to_start_runtime=true without a fresh coherent snapshot.",
+      "doctrine_conflict": "Launch/status must not treat scattered fallback artifacts as authority when the Control Plane Snapshot is missing, stale, or incoherent.",
+      "fallback_status": "CONTROL_PLANE_FALLBACK_DIAGNOSTIC_ONLY",
       "id": "SS-LCA-010",
-      "legacy_local_behavior": "Launch now uses Control Plane Snapshot, but the script still contains legacy shared-truth and supervisor preflight fallback functions and status still assembles some component artifacts directly.",
+      "legacy_local_behavior": "Launch/status previously retained fallback functions that could assemble component artifacts outside the Control Plane Snapshot display path.",
       "paths": [
         "scripts/run_probationary_paper_soak.sh:388",
         "scripts/run_probationary_paper_soak.sh:452",
         "scripts/run_probationary_paper_soak.sh:766",
         "scripts/show_headless_supervised_paper_status.sh:620"
       ],
-      "recommended_v2_migration": "Make Control Plane Snapshot the only launch preflight path; move old functions behind explicit `--legacy-diagnostic-only` flags. Status should render snapshot first and component artifacts only as diagnostics from the same generation.",
+      "recommended_v2_migration": "Keep Control Plane Snapshot as the only launch preflight path; component artifacts may be displayed only as diagnostics unless the snapshot is fresh and coherent.",
       "severity": "MEDIUM",
       "tests_needed": [
-        "launch fails if snapshot command unavailable rather than falling back silently.",
-        "status marks component reads diagnostic-only unless snapshot generation matches."
+        "missing snapshot blocks launch. done",
+        "stale snapshot blocks launch. done",
+        "status fallback is diagnostic-only. done",
+        "fallback cannot set safe_to_start_runtime=true. done",
+        "dashboard projection not consumed. done"
       ]
     },
     {
@@ -244,15 +249,15 @@
       ]
     }
   ],
-  "generated_at": "2026-05-23T22:28:34.333751+00:00",
+  "generated_at": "2026-05-23T23:04:24.886113+00:00",
   "recommended_next_implementation_slice": {
-    "rationale": "Mutation and process-recovery apply boundaries are snapshot-gated, and PAPER crash-loop/operator-ack semantics are policy-mode aligned. The next risk is authority-path ownership and fallback display/launch flows that can confuse projections with execution_core authority.",
+    "rationale": "Launch/status fallback flows now classify Control Plane Snapshot missing/stale/incoherent states explicitly, fail closed for launch, and mark status fallback as diagnostic-only. The next risk is authority-path ownership and local lifecycle repair adapter boundaries.",
     "scope": [
       "SS-LCA-009",
-      "SS-LCA-010",
-      "SS-LCA-011"
+      "SS-LCA-011",
+      "SS-LCA-012"
     ],
-    "title": "Resolve dashboard path ownership and launch/status fallback flows"
+    "title": "Resolve dashboard path ownership and local artifact repair adapters"
   },
   "repo_root": "/Users/patrick/Dev/MGC-v05l-automation",
   "severity_counts": {
@@ -263,7 +268,6 @@
   },
   "top_5_risks": [
     "SS-LCA-009",
-    "SS-LCA-010",
     "SS-LCA-011",
     "SS-LCA-012"
   ],

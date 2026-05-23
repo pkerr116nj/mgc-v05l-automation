@@ -226,9 +226,8 @@ def test_runtime_start_consults_control_plane_snapshot_before_spawn() -> None:
     assert "run_control_plane_snapshot_start_preflight" in script
     assert "mgc_v05l.execution_core.track_b_control_plane_snapshot" in script
     assert "--no-dashboard-projection" in script
-    assert "CONTROL_PLANE_SNAPSHOT_READY" in script
+    assert "CONTROL_PLANE_READY" in script
     assert "CONTROL_PLANE_SNAPSHOT_START_BLOCKED" in script
-    assert "COHERENT" in script
     assert "SUPERVISOR_RUNTIME_START_ALLOWED" in script
     assert "READY_FOR_OPERATOR_START" in script
     assert "safe_to_start_runtime" in script
@@ -240,10 +239,16 @@ def test_runtime_start_consults_control_plane_snapshot_before_spawn() -> None:
     assert "shared_truth_refresh_generation_id" in script
     assert "shared_truth_coherence_status" in script
     assert "control_plane_snapshot" in script
+    assert "classify_control_plane_snapshot_status" in script
+    assert "required_for_launch=True" in script
+    assert "control_plane_status_classification" in script
+    assert "diagnostic_only" in script
+    assert "not_routing_authority" in script
     assert "latest_track_b_runtime_supervisor_authority.json" not in script
     assert "latest_track_b_paper_recovery_policy.json" not in script
     start_flow = script[script.index("run_control_plane_snapshot_start_preflight") :]
     assert start_flow.index("run_control_plane_snapshot_start_preflight") < start_flow.index("nohup \"${LAUNCH_PYTHON_BIN}\"")
+    assert "runtime_supervisor_start_gate" not in start_flow[: start_flow.index("nohup \"${LAUNCH_PYTHON_BIN}\"")]
 
 
 def test_headless_launch_uses_control_plane_snapshot_as_final_pre_spawn_gate() -> None:
@@ -254,8 +259,7 @@ def test_headless_launch_uses_control_plane_snapshot_as_final_pre_spawn_gate() -
     assert "control_plane_snapshot_start_gate" in script
     assert "control_plane_snapshot_blocked_reason" in script
     assert "CONTROL_PLANE_SNAPSHOT_START_BLOCKED" in script
-    assert "CONTROL_PLANE_SNAPSHOT_READY" in script
-    assert "COHERENT" in script
+    assert "CONTROL_PLANE_READY" in script
     assert "SUPERVISOR_RUNTIME_START_ALLOWED" in script
     assert "READY_FOR_OPERATOR_START" in script
     assert "safe_to_start_runtime" in script
@@ -267,6 +271,11 @@ def test_headless_launch_uses_control_plane_snapshot_as_final_pre_spawn_gate() -
     assert "shared_truth_refresh_generation_id" in script
     assert "shared_truth_coherence_status" in script
     assert "control_plane_snapshot_path" in script
+    assert "classify_control_plane_snapshot_status" in script
+    assert "required_for_launch=True" in script
+    assert "control_plane_status_classification" in script
+    assert "diagnostic_only" in script
+    assert "not_routing_authority" in script
     assert "latest_track_b_runtime_supervisor_authority.json" not in script
     assert "latest_track_b_paper_recovery_policy.json" not in script
     start_flow = script[script.index("persist_requested_config_paths\nif ! assert_required_config_paths_present") :]
@@ -274,6 +283,24 @@ def test_headless_launch_uses_control_plane_snapshot_as_final_pre_spawn_gate() -
         "refresh_control_plane_snapshot_for_launch"
     )
     assert start_flow.index("control_plane_snapshot_start_gate") < start_flow.index("if ! start_paper_runtime")
+    assert "runtime_supervisor_start_gate" not in start_flow[: start_flow.index("if ! start_paper_runtime")]
+
+
+def test_status_script_marks_control_plane_fallback_as_diagnostic_only() -> None:
+    script = STATUS_SCRIPT.read_text(encoding="utf-8")
+
+    assert "classify_control_plane_snapshot_status" in script
+    assert "CONTROL_PLANE_MISSING_DIAGNOSTIC_ONLY" not in script
+    assert "control_plane_status_classification" in script
+    assert "control_plane_diagnostic_only" in script
+    assert "control_plane_not_routing_authority" in script
+    assert "control_plane_snapshot_missing" in script
+    assert "runtime_resume_raw_safe_to_start_runtime" in script
+    assert "runtime_resume_safe_to_start_runtime" in script
+    assert (
+        "runtime_resume.get(\"safe_to_start_runtime\") is True and control_plane_status[\"safe_to_start_runtime\"] is True"
+        in script
+    )
 
 
 def test_launch_script_uses_profile_aware_broker_truth_sidecar_policy() -> None:

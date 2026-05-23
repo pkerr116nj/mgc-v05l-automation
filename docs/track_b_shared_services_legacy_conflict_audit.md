@@ -23,7 +23,6 @@ The remaining risk is concentrated in older broker/order mutation harnesses and 
 ## Top Remaining Risks
 
 1. `SS-LCA-009` MEDIUM - readiness / operator dashboard path ownership: Some canonical readiness and broker lease artifacts still live under `outputs/operator_dashboard/runtime`, even when consumed by execution_core services.
-1. `SS-LCA-010` MEDIUM - launch/status / fallback flows: Launch now uses Control Plane Snapshot, but the script still contains legacy shared-truth and supervisor preflight fallback functions and status still assembles some component artifacts directly.
 1. `SS-LCA-011` MEDIUM - lifecycle/local artifact repair: Current manual fallback tools are shared-truth aligned but not yet executor/snapshot adapters.
 1. `SS-LCA-012` LOW - research/offline diagnostics: Some research readers still inspect dashboard snapshots for historical evidence; these remain diagnostic-only but need labeling discipline.
 
@@ -39,6 +38,7 @@ The remaining risk is concentrated in older broker/order mutation harnesses and 
 - `SS-LCA-007` repair executor / process recovery is now snapshot-gated at the apply-capable dispatch boundary. Maintenance repair commands require coherent `PLAN_EVIDENCE_REFRESH` / `REFRESH_EVIDENCE` evidence, self-healing runtime retry requires `PLAN_RUNTIME_RETRY` / `RUNTIME_RETRY`, and market-data producer recovery requires `PLAN_MARKET_DATA_RESTART` / `MARKET_DATA_RESTART`.
 - dry-run mode remains non-mutating and records whether the same snapshot gate would block apply.
 - `SS-LCA-008` crash-loop/operator-ack semantics is now PAPER-policy aligned: repeated unsafe stops classify as quarantine/observe, not routine operator acknowledgement. Future LIVE/PRE-LIVE acknowledgement remains explicit policy metadata.
+- `SS-LCA-010` launch/status fallback flows now use a shared Control Plane Snapshot status classifier. Launch fails closed when the snapshot is missing, stale, or incoherent; status fallbacks are marked `diagnostic_only=true` / `not_routing_authority=true` and cannot surface `safe_to_start_runtime=true`.
 - next top risk is `SS-LCA-009` dashboard path ownership.
 
 ## Findings
@@ -164,11 +164,13 @@ The remaining risk is concentrated in older broker/order mutation harnesses and 
 - paths: `scripts/run_probationary_paper_soak.sh:388`, `scripts/run_probationary_paper_soak.sh:452`, `scripts/run_probationary_paper_soak.sh:766`, `scripts/show_headless_supervised_paper_status.sh:620`
 - legacy/local behavior: Launch now uses Control Plane Snapshot, but the script still contains legacy shared-truth and supervisor preflight fallback functions and status still assembles some component artifacts directly.
 - conflict with doctrine: Fallbacks are useful during migration, but if accidentally invoked they can reintroduce mixed-generation decisions and local display summaries that drift from the snapshot.
-- recommended v2 migration: Make Control Plane Snapshot the only launch preflight path; move old functions behind explicit `--legacy-diagnostic-only` flags. Status should render snapshot first and component artifacts only as diagnostics from the same generation.
+- recommended v2 migration: Keep Control Plane Snapshot as the only launch preflight path; component artifacts may be displayed only as diagnostics unless the snapshot is fresh and coherent.
+- current status: launch gates call the shared Control Plane Snapshot status classifier and block missing/stale/incoherent snapshots. Status displays classify missing/stale fallback as diagnostic-only and gate any displayed `safe_to_start_runtime` behind the fresh coherent snapshot result.
 - code change needed now: `false`
 - tests needed:
-  - launch fails if snapshot command unavailable rather than falling back silently.
-  - status marks component reads diagnostic-only unless snapshot generation matches.
+  - launch fails if snapshot command unavailable rather than falling back silently. `done`
+  - stale/incoherent snapshots block launch. `done`
+  - status marks component reads diagnostic-only unless snapshot is fresh and coherent. `done`
 
 ### SS-LCA-011 - MEDIUM - lifecycle/local artifact repair
 
@@ -208,11 +210,11 @@ The remaining risk is concentrated in older broker/order mutation harnesses and 
 
 ## Recommended Next Implementation Slice
 
-Continue snapshot/generation convergence on the remaining display, fallback, and local-artifact surfaces:
+Continue snapshot/generation convergence on the remaining display and local-artifact surfaces:
 
 1. Move remaining dashboard-path authority files to execution_core authority paths with projection-only compatibility outputs.
-2. Make launch/status fallback flows diagnostic-only so they cannot bypass Control Plane Snapshot.
-3. Add executor adapters for scoped lifecycle cleanup using the lifecycle state matrix and exact target snapshot identity.
+2. Add executor adapters for scoped lifecycle cleanup using the lifecycle state matrix and exact target snapshot identity.
+3. Label remaining research/offline diagnostics so dashboard snapshots cannot be mistaken for execution authority.
 
 This keeps PAPER autonomous and failure-discovery oriented while ensuring every mutation boundary is coherent, budgetable, auditable, and impossible to confuse with dashboard projection state.
 

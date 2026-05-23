@@ -655,6 +655,7 @@ runtime_supervisor = read_json(runtime_supervisor_path)
 paper_recovery_policy = read_json(paper_recovery_policy_path)
 paper_autonomous_recovery_plan = read_json(paper_autonomous_recovery_plan_path)
 control_plane_snapshot = read_json(control_plane_snapshot_path)
+control_plane_status = classify_control_plane_snapshot_status(control_plane_snapshot)
 operator_ack = runtime_supervisor.get("operator_ack") or {}
 paper_action_policy = paper_recovery_policy.get("paper_action_policy")
 paper_reason = str(paper_recovery_policy.get("reason") or "")
@@ -709,6 +710,16 @@ status["track_b_control_plane"] = {
     "self_recover_recommendation": self_recover.get("recommendation") or self_recover.get("classification"),
     "crash_loop_classification": crash_loop.get("classification"),
     "crash_loop_restart_blocked": crash_loop.get("restart_blocked") is True,
+    "control_plane_status_classification": control_plane_status["classification"],
+    "control_plane_status_reason": control_plane_status["reason"],
+    "control_plane_diagnostic_only": control_plane_status["diagnostic_only"],
+    "control_plane_not_routing_authority": control_plane_status["not_routing_authority"],
+    "control_plane_snapshot_missing": control_plane_status["control_plane_snapshot_missing"],
+    "control_plane_snapshot_stale": control_plane_status["control_plane_snapshot_stale"],
+    "control_plane_snapshot_incoherent": control_plane_status["control_plane_snapshot_incoherent"],
+    "control_plane_snapshot_missing_or_stale": control_plane_status["control_plane_snapshot_missing_or_stale"],
+    "control_plane_snapshot_age_seconds": control_plane_status["control_plane_snapshot_age_seconds"],
+    "control_plane_snapshot_safe_to_start_runtime": control_plane_status["safe_to_start_runtime"],
     "control_plane_snapshot_id": control_plane_snapshot.get("control_plane_snapshot_id"),
     "control_plane_snapshot_classification": control_plane_snapshot.get("classification"),
     "control_plane_snapshot_shared_truth_generation_id": control_plane_snapshot.get("shared_truth_refresh_generation_id"),
@@ -727,7 +738,11 @@ status["track_b_control_plane"] = {
     "live_action_policy": paper_recovery_policy.get("live_action_policy"),
     "runtime_resume_classification": runtime_resume.get("classification"),
     "runtime_resume_allowed": runtime_resume.get("allowed") is True,
-    "runtime_resume_safe_to_start_runtime": runtime_resume.get("safe_to_start_runtime") is True,
+    "runtime_resume_safe_to_start_runtime": (
+        runtime_resume.get("safe_to_start_runtime") is True and control_plane_status["safe_to_start_runtime"] is True
+    ),
+    "runtime_resume_raw_safe_to_start_runtime": runtime_resume.get("safe_to_start_runtime") is True,
+    "runtime_resume_diagnostic_only": control_plane_status["classification"] != "CONTROL_PLANE_READY",
     "runtime_resume_required_operator_ack": runtime_resume.get("required_operator_ack") is True,
     "runtime_resume_resume_mode": runtime_resume.get("resume_mode"),
     "runtime_resume_reason": runtime_resume.get("reason"),

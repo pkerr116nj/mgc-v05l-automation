@@ -292,6 +292,9 @@ def test_track_b_control_plane_status_projection_displays_closed_market_services
     assert summary["runtime_supervisor_shared_truth_refresh_generation_id"] == "test-shared-truth-generation"
     assert summary["runtime_supervisor_shared_truth_coherence_status"] == "COHERENT"
     assert summary["control_plane_snapshot_id"] == "test-control-plane-snapshot"
+    assert summary["control_plane_status_classification"] == "CONTROL_PLANE_READY"
+    assert summary["control_plane_diagnostic_only"] is False
+    assert summary["control_plane_snapshot_safe_to_start_runtime"] is False
     assert summary["control_plane_snapshot_classification"] == "CONTROL_PLANE_SNAPSHOT_READY"
     assert summary["control_plane_snapshot_shared_truth_generation_id"] == "test-shared-truth-generation"
     assert summary["control_plane_snapshot_shared_truth_coherence_status"] == "COHERENT"
@@ -313,6 +316,73 @@ def test_track_b_control_plane_status_projection_displays_closed_market_services
     assert "outputs/operator_dashboard/runtime/latest_track_b_runtime_resume_semantics.json" not in json.dumps(summary)
     assert "outputs/operator_dashboard/runtime/latest_track_b_runtime_supervisor_authority.json" not in json.dumps(summary)
     assert "outputs/operator_dashboard/runtime/latest_track_b_paper_recovery_policy.json" not in json.dumps(summary)
+
+
+def test_track_b_control_plane_status_missing_snapshot_is_diagnostic_only(tmp_path: Path) -> None:
+    _write_track_b_control_plane_artifacts(
+        tmp_path,
+        self_recover_recommendation="RESTART_RUNTIME_ALLOWED",
+        runtime_resume_classification="RESUME_ALLOWED_PAPER_BOUNDED_RETRY",
+        runtime_resume_reason="PAPER Recovery Policy permits bounded retry.",
+        runtime_resume_allowed=True,
+        runtime_resume_safe_to_start_runtime=True,
+        runtime_supervisor_classification="SUPERVISOR_RUNTIME_START_ALLOWED",
+        runtime_supervisor_mode="READY_FOR_OPERATOR_START",
+        runtime_supervisor_proof_window_status="ready",
+        paper_action_policy="AUTONOMOUS_RETRY_ELIGIBLE",
+        paper_autonomous_recovery_allowed=True,
+    )
+    (
+        tmp_path / "outputs/track_b_execution_core/control_plane/latest_control_plane_snapshot.json"
+    ).unlink()
+    _write_json_file(
+        tmp_path / "outputs/operator_dashboard/runtime/latest_track_b_control_plane_snapshot.json",
+        {
+            "projection_only": True,
+            "not_routing_authority": True,
+            "control_plane_snapshot_id": "dashboard-projection-only",
+            "classification": "CONTROL_PLANE_SNAPSHOT_READY",
+            "safe_to_start_runtime": True,
+        },
+    )
+
+    summary = operator_dashboard_module._track_b_control_plane_services_summary(tmp_path)  # noqa: SLF001
+
+    assert summary["control_plane_status_classification"] == "CONTROL_PLANE_MISSING_DIAGNOSTIC_ONLY"
+    assert summary["control_plane_diagnostic_only"] is True
+    assert summary["control_plane_snapshot_missing"] is True
+    assert summary["control_plane_snapshot_safe_to_start_runtime"] is False
+    assert summary["runtime_resume_raw_safe_to_start_runtime"] is True
+    assert summary["runtime_resume_safe_to_start_runtime"] is False
+    assert summary["control_plane_snapshot_id"] is None
+    assert "dashboard-projection-only" not in json.dumps(summary)
+
+
+def test_track_b_control_plane_status_stale_snapshot_is_diagnostic_only(tmp_path: Path) -> None:
+    _write_track_b_control_plane_artifacts(
+        tmp_path,
+        self_recover_recommendation="RESTART_RUNTIME_ALLOWED",
+        runtime_resume_classification="RESUME_ALLOWED_PAPER_BOUNDED_RETRY",
+        runtime_resume_reason="PAPER Recovery Policy permits bounded retry.",
+        runtime_resume_allowed=True,
+        runtime_resume_safe_to_start_runtime=True,
+        runtime_supervisor_classification="SUPERVISOR_RUNTIME_START_ALLOWED",
+        runtime_supervisor_mode="READY_FOR_OPERATOR_START",
+        runtime_supervisor_proof_window_status="ready",
+        paper_action_policy="AUTONOMOUS_RETRY_ELIGIBLE",
+        paper_autonomous_recovery_allowed=True,
+    )
+    path = tmp_path / "outputs/track_b_execution_core/control_plane/latest_control_plane_snapshot.json"
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    payload["generated_at"] = "2026-05-23T10:00:00+00:00"
+    _write_json_file(path, payload)
+
+    summary = operator_dashboard_module._track_b_control_plane_services_summary(tmp_path)  # noqa: SLF001
+
+    assert summary["control_plane_status_classification"] == "CONTROL_PLANE_STALE_DIAGNOSTIC_ONLY"
+    assert summary["control_plane_snapshot_stale"] is True
+    assert summary["control_plane_snapshot_safe_to_start_runtime"] is False
+    assert summary["runtime_resume_safe_to_start_runtime"] is False
 
 
 def test_track_b_control_plane_status_projection_displays_crash_loop_and_operator_ack(tmp_path: Path) -> None:
@@ -605,6 +675,7 @@ def _write_track_b_control_plane_artifacts(
     _write_json_file(
         root / "outputs/track_b_execution_core/control_plane/latest_control_plane_snapshot.json",
         {
+            "generated_at": datetime.now(timezone.utc).isoformat(),
             "control_plane_snapshot_id": "test-control-plane-snapshot",
             "classification": "CONTROL_PLANE_SNAPSHOT_READY",
             "shared_truth_refresh_generation_id": "test-shared-truth-generation",
@@ -639,6 +710,8 @@ def _write_track_b_control_plane_artifacts(
                 else "QUARANTINE_OBSERVE_ONLY"
             ),
             "autonomous_recovery_execution_enabled": False,
+            "safe_to_start_runtime": supervisor_mode == "READY_FOR_OPERATOR_START",
+            "blockers": [{"code": "test_blocker", "detail": "test"}] if supervisor_mode != "READY_FOR_OPERATOR_START" else [],
         },
     )
     _write_json_file(
