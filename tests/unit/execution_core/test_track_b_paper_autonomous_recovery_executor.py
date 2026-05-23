@@ -86,6 +86,28 @@ def test_runtime_retry_adapter_blocks_when_snapshot_start_not_allowed(tmp_path: 
     assert payload["action_adapter"]["execution_enabled"] is False
 
 
+def test_market_data_restart_dry_run_can_plan_but_not_execute(tmp_path: Path) -> None:
+    _seed_valid(
+        tmp_path,
+        action_type="MARKET_DATA_RESTART",
+        plan_classification="PLAN_MARKET_DATA_RESTART",
+        target_identity={"agent_id": "phase1_databento_live_candles"},
+    )
+
+    payload = build_track_b_paper_autonomous_recovery_executor_attempt(
+        config=TrackBPaperAutonomousRecoveryExecutorConfig(repo_root=tmp_path),
+        expected_plan_classification="PLAN_MARKET_DATA_RESTART",
+        action_type="MARKET_DATA_RESTART",
+        now=NOW,
+    )
+
+    assert payload["classification"] == EXECUTOR_DRY_RUN_READY
+    assert payload["would_mutate_runtime"] is True
+    assert payload["execution_enabled"] is False
+    assert payload["action_adapter"]["adapter_name"] == "NO_ADAPTER_BOUNDARY_V1"
+    assert payload["action_adapter"]["execution_enabled"] is False
+
+
 def test_plan_action_mismatch_blocks_before_adapter_enablement(tmp_path: Path) -> None:
     _seed_valid(tmp_path, action_type="QUARANTINE_OBSERVE_ONLY", plan_classification="PLAN_QUARANTINE_OBSERVE_ONLY")
 

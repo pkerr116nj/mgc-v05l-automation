@@ -22,11 +22,11 @@ The remaining risk is concentrated in older broker/order mutation harnesses and 
 
 ## Top 5 Risks
 
-1. `SS-LCA-007` HIGH - repair executor / process recovery: Maintenance repair executor consumes several shared truth artifacts but still executes repair subprocess commands from local maintenance supervisor decisions and canonical readiness artifacts.
 1. `SS-LCA-008` HIGH - control policy / operator ack semantics: Crash Loop Protection still emits OPERATOR_ACK_REQUIRED for repeated unsafe stops; Resume and Supervisor translate some of it through PAPER Recovery Policy, but the lower-level service remains human-gate flavored.
 1. `SS-LCA-009` MEDIUM - readiness / operator dashboard path ownership: Some canonical readiness and broker lease artifacts still live under `outputs/operator_dashboard/runtime`, even when consumed by execution_core services.
 1. `SS-LCA-010` MEDIUM - launch/status / fallback flows: Launch now uses Control Plane Snapshot, but the script still contains legacy shared-truth and supervisor preflight fallback functions and status still assembles some component artifacts directly.
 1. `SS-LCA-011` MEDIUM - lifecycle/local artifact repair: Current manual fallback tools are shared-truth aligned but not yet executor/snapshot adapters.
+1. `SS-LCA-012` LOW - research/offline diagnostics: Some research readers still inspect dashboard snapshots for historical evidence; these remain diagnostic-only but need labeling discipline.
 
 ## Status Update - Snapshot-Gated Order Apply Paths
 
@@ -37,8 +37,9 @@ The remaining risk is concentrated in older broker/order mutation harnesses and 
 - `SS-LCA-004` strategy bridge direct submit now validates a coherent Control Plane Snapshot plus matching `PLAN_STRATEGY_BRIDGE_SUBMIT` / `STRATEGY_BRIDGE_SUBMIT` target before broker runtime construction. Runtime-supervised callers must carry matching control-plane snapshot/generation/supervisor ids from the launch generation.
 - `SS-LCA-005` cancel/replace apply path is now gated by `validate_track_b_pre_action_snapshot(...)` before adapter construction, cancel, or replacement submit. It requires a coherent Control Plane Snapshot and `PLAN_TARGETED_CANCEL_REPLACE` / `TARGETED_CANCEL_REPLACE` planner evidence matching the exact order target.
 - `SS-LCA-006` modify-in-place apply path is now gated by `validate_track_b_pre_action_snapshot(...)` before broker refresh, modify, or post-modify verification hooks. It requires a coherent Control Plane Snapshot and `PLAN_MANAGED_ORDER_MODIFY` / `MANAGED_ORDER_MODIFY` planner evidence matching the exact order and price target.
+- `SS-LCA-007` repair executor / process recovery is now snapshot-gated at the apply-capable dispatch boundary. Maintenance repair commands require coherent `PLAN_EVIDENCE_REFRESH` / `REFRESH_EVIDENCE` evidence, self-healing runtime retry requires `PLAN_RUNTIME_RETRY` / `RUNTIME_RETRY`, and market-data producer recovery requires `PLAN_MARKET_DATA_RESTART` / `MARKET_DATA_RESTART`.
 - dry-run mode remains non-mutating and records whether the same snapshot gate would block apply.
-- next top risk is `SS-LCA-007` repair executor / process recovery.
+- next top risk is `SS-LCA-008` policy-mode crash-loop/operator-ack semantics.
 
 ## Findings
 
@@ -126,11 +127,12 @@ The remaining risk is concentrated in older broker/order mutation harnesses and 
 - legacy/local behavior: Maintenance repair executor consumes several shared truth artifacts but still executes repair subprocess commands from local maintenance supervisor decisions and canonical readiness artifacts.
 - conflict with doctrine: It can restart/repair sidecars or refresh reconciliation without a Control Plane Snapshot pre-action packet. It also retains older OPERATOR_REQUIRED semantics that are now policy-mode dependent.
 - recommended v2 migration: Convert to a Control Plane Snapshot consumer and then into the autonomous recovery executor framework as MARKET_DATA_RESTART or REFRESH_EVIDENCE adapters. Keep apply disabled until budgets and snapshot validation are wired.
+- current status: maintenance repair executor and self-healing process recovery apply boundaries now call `validate_track_b_pre_action_snapshot(...)` before subprocess execution; dry-run/report paths surface the same pre-action snapshot evidence without starting/restarting anything.
 - code change needed now: `false`
 - tests needed:
-  - repair executor apply blocks without Control Plane Snapshot.
-  - repair executor dry-run reports snapshot/supervisor/paper policy evidence.
-  - operator-required legacy decision becomes PAPER policy posture where safe.
+  - repair executor apply/dry-run blocks without Control Plane Snapshot.
+  - self-healing process recovery blocks stale/incoherent snapshots and planner mismatches.
+  - RUNTIME_RETRY and MARKET_DATA_RESTART remain dry-run/disabled until explicit executor enablement.
 
 ### SS-LCA-008 - HIGH - control policy / operator ack semantics
 

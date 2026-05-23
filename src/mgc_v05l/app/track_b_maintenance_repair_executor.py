@@ -29,6 +29,12 @@ from mgc_v05l.execution_core.track_b_managed_position_registry import (
     NO_MANAGED_POSITIONS,
 )
 from mgc_v05l.execution_core.track_b_open_order_truth import DEFAULT_OPEN_ORDER_TRUTH_ARTIFACT, NO_OPEN_ORDERS
+from mgc_v05l.execution_core.track_b_paper_autonomous_recovery_planner import PLAN_EVIDENCE_REFRESH
+from mgc_v05l.execution_core.track_b_pre_action_snapshot_validator import (
+    PRE_ACTION_SNAPSHOT_VALID,
+    TrackBPreActionSnapshotValidatorConfig,
+    validate_track_b_pre_action_snapshot,
+)
 from mgc_v05l.execution_core.track_b_position_truth_monitor import DEFAULT_POSITION_TRUTH_ARTIFACT
 from mgc_v05l.execution_core.track_b_readiness_state import REPO_ROOT
 from mgc_v05l.execution_core.track_b_runtime_resume_semantics import DEFAULT_RUNTIME_RESUME_SEMANTICS_ARTIFACT
@@ -82,6 +88,9 @@ class RepairExecutorConfig:
     managed_position_registry_path: Path | None = None
     reconciliation_path: Path | None = None
     broker_lease_path: Path | None = None
+    control_plane_snapshot_path: Path | None = None
+    autonomous_recovery_plan_path: Path | None = None
+    pre_action_snapshot_max_age_seconds: int = 300
 
 
 def run_repair_executor(
@@ -172,6 +181,32 @@ def run_repair_executor(
         return result
 
     commands = _commands_for_repair(selected["repair_action"], repo_root=repo_root, python_bin=_python_bin(config))
+    pre_action_validation = _pre_action_snapshot_validation_for_repair(
+        config=config,
+        paths=paths,
+        repair_action=str(selected.get("repair_action") or ""),
+        now=now,
+    )
+    result["pre_action_snapshot_validation"] = pre_action_validation
+    result["control_plane_snapshot_id"] = pre_action_validation.get("control_plane_snapshot_id") or ""
+    result["shared_truth_generation_id"] = pre_action_validation.get("shared_truth_refresh_generation_id") or ""
+    if commands and pre_action_validation.get("classification") != PRE_ACTION_SNAPSHOT_VALID:
+        reason = f"Pre-action Control Plane Snapshot validation blocked repair: {pre_action_validation.get('classification') or 'UNKNOWN'}."
+        result.update(
+            {
+                "classification": "TRACK_B_MAINTENANCE_REPAIR_APPLY_BLOCKED"
+                if config.apply
+                else "TRACK_B_MAINTENANCE_REPAIR_DRY_RUN_BLOCKED",
+                "repair_plan_classification": "REPAIR_PLAN_BLOCKED_PRE_ACTION_SNAPSHOT",
+                "blocked_reason": reason,
+                "proposed_actions": [],
+                "blocked_actions": [{"repair_action": selected.get("repair_action"), "reason": reason}],
+                "would_execute": False,
+                "executed": False,
+            }
+        )
+        _write_result_and_history(paths=paths, result=result)
+        return result
     result["commands"] = [_command_display(command) for command in commands]
     result["would_execute"] = bool(commands)
     result["repair_plan_classification"] = "REPAIR_PLAN_READY" if commands else "REPAIR_PLAN_NO_ACTION"
@@ -328,6 +363,10 @@ def _base_result(
             "submit_authority": False,
             "live_money_eligible": False,
         },
+        "control_plane_snapshot_required": True,
+        "pre_action_snapshot_validation": {},
+        "control_plane_snapshot_id": "",
+        "shared_truth_generation_id": "",
     }
 
 
@@ -652,7 +691,45 @@ def _resolve_paths(config: RepairExecutorConfig, repo_root: Path) -> dict[str, P
         ),
         "reconciliation": _resolve(repo_root, config.reconciliation_path, DEFAULT_RECONCILIATION_ARTIFACT),
         "broker_lease": _resolve(repo_root, config.broker_lease_path, DEFAULT_LEASE_ARTIFACT),
+        "control_plane_snapshot": _resolve(
+            repo_root,
+            config.control_plane_snapshot_path,
+            TrackBPreActionSnapshotValidatorConfig.control_plane_snapshot_path,
+        ),
+        "autonomous_recovery_plan": _resolve(
+            repo_root,
+            config.autonomous_recovery_plan_path,
+            TrackBPreActionSnapshotValidatorConfig.autonomous_recovery_plan_path,
+        ),
     }
+
+
+def _pre_action_snapshot_validation_for_repair(
+    *,
+    config: RepairExecutorConfig,
+    paths: Mapping[str, Path],
+    repair_action: str,
+    now: datetime,
+) -> dict[str, Any]:
+    if repair_action in {"", "NO_ACTION"}:
+        return {
+            "classification": "PRE_ACTION_SNAPSHOT_NOT_REQUIRED_NO_ACTION",
+            "valid": True,
+            "reason": "No repair command is proposed.",
+        }
+    return validate_track_b_pre_action_snapshot(
+        config=TrackBPreActionSnapshotValidatorConfig(
+            repo_root=Path(config.repo_root).expanduser().resolve(),
+            control_plane_snapshot_path=paths["control_plane_snapshot"],
+            autonomous_recovery_plan_path=paths["autonomous_recovery_plan"],
+            runtime_supervisor_authority_path=paths["runtime_supervisor_authority"],
+        ),
+        expected_plan_classification=PLAN_EVIDENCE_REFRESH,
+        expected_action_type="REFRESH_EVIDENCE",
+        expected_target_identity={},
+        max_snapshot_age_seconds=int(config.pre_action_snapshot_max_age_seconds),
+        now=now,
+    )
 
 
 def _resolve(repo_root: Path, explicit: Path | None, default_relative: Path) -> Path:

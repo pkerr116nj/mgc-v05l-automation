@@ -31,6 +31,8 @@ def seed_artifacts(
     position_truth_classification: str = "CLEAN_FLAT_READY",
     managed_position_registry_classification: str = "NO_MANAGED_POSITIONS",
     runtime_supervisor_classification: str = "SUPERVISOR_NO_ACTION_NEEDED",
+    include_control_plane_snapshot: bool = True,
+    control_plane_snapshot_coherence: str = "COHERENT",
 ) -> None:
     write_json(
         repo_root / "outputs" / "operator_dashboard" / "runtime" / "latest_maintenance_supervisor_decision.json",
@@ -74,6 +76,8 @@ def seed_artifacts(
         position_truth_classification=position_truth_classification,
         managed_position_registry_classification=managed_position_registry_classification,
         runtime_supervisor_classification=runtime_supervisor_classification,
+        include_control_plane_snapshot=include_control_plane_snapshot,
+        control_plane_snapshot_coherence=control_plane_snapshot_coherence,
     )
 
 
@@ -89,10 +93,63 @@ def seed_shared_truth(
     self_recover_recommendation: str = "NO_ACTION_NEEDED",
     crash_loop_classification: str = "NO_CRASH_LOOP",
     runtime_resume_classification: str = "RESUME_ALLOWED_CLEAN",
+    include_control_plane_snapshot: bool = True,
+    control_plane_snapshot_coherence: str = "COHERENT",
 ) -> None:
+    snapshot_id = "snapshot-repair-1"
+    generation_id = "generation-repair-1"
+    supervisor_id = "supervisor-repair-1"
+    if include_control_plane_snapshot:
+        write_json(
+            repo_root
+            / "outputs"
+            / "track_b_execution_core"
+            / "control_plane"
+            / "latest_control_plane_snapshot.json",
+            {
+                "classification": "CONTROL_PLANE_SNAPSHOT_READY",
+                "generated_at": generated_at,
+                "control_plane_snapshot_id": snapshot_id,
+                "shared_truth_refresh_generation_id": generation_id,
+                "shared_truth_coherence_status": control_plane_snapshot_coherence,
+                "runtime_supervisor_decision_id": supervisor_id,
+                "runtime_supervisor_classification": runtime_supervisor_classification,
+                "safe_to_start_runtime": False,
+                "live_money_eligible": False,
+                "duplicate_writer_count": 0,
+            },
+        )
+    write_json(
+        repo_root
+        / "outputs"
+        / "track_b_execution_core"
+        / "paper_autonomous_recovery"
+        / "latest_paper_autonomous_recovery_plan.json",
+        {
+            "classification": "PLAN_EVIDENCE_REFRESH",
+            "generated_at": generated_at,
+            "control_plane_snapshot_id": snapshot_id,
+            "shared_truth_refresh_generation_id": generation_id,
+            "execution_enabled": False,
+            "live_money_eligible": False,
+            "proposed_actions": [
+                {
+                    "action_id": "refresh_evidence",
+                    "action_type": "REFRESH_EVIDENCE",
+                    "target_identity": {},
+                    "execution_enabled": False,
+                }
+            ],
+        },
+    )
     write_json(
         repo_root / "outputs" / "track_b_execution_core" / "runtime_supervisor" / "latest_runtime_supervisor_authority.json",
-        {"classification": runtime_supervisor_classification, "generated_at": generated_at},
+        {
+            "classification": runtime_supervisor_classification,
+            "generated_at": generated_at,
+            "supervisor_decision_id": supervisor_id,
+            "live_money_eligible": False,
+        },
     )
     write_json(
         repo_root / "outputs" / "track_b_execution_core" / "self_recover" / "latest_self_recover_rules.json",
@@ -348,6 +405,29 @@ def test_executor_blocks_when_shared_truth_stale(tmp_path: Path) -> None:
     assert result["repair_plan_classification"] == "REPAIR_PLAN_BLOCKED_SHARED_TRUTH"
     assert "stale/missing" in result["blocked_reason"]
     assert result["would_execute"] is False
+
+
+def test_repair_executor_blocks_without_control_plane_snapshot(tmp_path: Path) -> None:
+    seed_artifacts(tmp_path, actions=["REFRESH_RECONCILIATION"], include_control_plane_snapshot=False)
+
+    result = run_repair_executor(config=phase1_config(tmp_path), pid_checker=lambda pid: True, now_fn=now)
+
+    assert result["classification"] == "TRACK_B_MAINTENANCE_REPAIR_DRY_RUN_BLOCKED"
+    assert result["repair_plan_classification"] == "REPAIR_PLAN_BLOCKED_PRE_ACTION_SNAPSHOT"
+    assert result["pre_action_snapshot_validation"]["classification"] == "PRE_ACTION_BLOCKED_SNAPSHOT_MISSING"
+
+
+def test_repair_executor_blocks_incoherent_control_plane_snapshot(tmp_path: Path) -> None:
+    seed_artifacts(
+        tmp_path,
+        actions=["REFRESH_RECONCILIATION"],
+        control_plane_snapshot_coherence="STALE_OR_MIXED",
+    )
+
+    result = run_repair_executor(config=phase1_config(tmp_path), pid_checker=lambda pid: True, now_fn=now)
+
+    assert result["classification"] == "TRACK_B_MAINTENANCE_REPAIR_DRY_RUN_BLOCKED"
+    assert result["pre_action_snapshot_validation"]["classification"] == "PRE_ACTION_BLOCKED_SNAPSHOT_INCOHERENT"
 
 
 def test_executor_blocks_suspicious_order_state(tmp_path: Path) -> None:

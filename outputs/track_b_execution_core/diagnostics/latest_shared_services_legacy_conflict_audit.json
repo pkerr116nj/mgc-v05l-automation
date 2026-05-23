@@ -140,10 +140,11 @@
       ],
       "recommended_v2_migration": "Convert to a Control Plane Snapshot consumer and then into the autonomous recovery executor framework as MARKET_DATA_RESTART or REFRESH_EVIDENCE adapters. Keep apply disabled until budgets and snapshot validation are wired.",
       "severity": "HIGH",
+      "snapshot_gate_status": "PROCESS_RECOVERY_APPLY_BOUNDARY_SNAPSHOT_GATED",
       "tests_needed": [
-        "repair executor apply blocks without Control Plane Snapshot.",
-        "repair executor dry-run reports snapshot/supervisor/paper policy evidence.",
-        "operator-required legacy decision becomes PAPER policy posture where safe."
+        "repair executor apply/dry-run blocks without Control Plane Snapshot.",
+        "self-healing process recovery blocks stale/incoherent snapshots and planner mismatches.",
+        "RUNTIME_RETRY and MARKET_DATA_RESTART remain dry-run/disabled until explicit executor enablement."
       ]
     },
     {
@@ -259,11 +260,11 @@
     "MEDIUM": 3
   },
   "top_5_risks": [
-    "SS-LCA-007",
     "SS-LCA-008",
     "SS-LCA-009",
     "SS-LCA-010",
-    "SS-LCA-011"
+    "SS-LCA-011",
+    "SS-LCA-012"
   ],
   "v2_resiliency_backlog": [
     {

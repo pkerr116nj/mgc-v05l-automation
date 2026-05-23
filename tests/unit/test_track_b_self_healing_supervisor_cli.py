@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import subprocess
+import json
 from pathlib import Path
 
 import mgc_v05l.app.track_b_self_healing_supervisor as supervisor
@@ -57,6 +58,7 @@ def test_dry_run_reports_restart_without_mutation(tmp_path: Path) -> None:
 
 def test_apply_restarts_eligible_sidecar_and_writes_audit(tmp_path: Path) -> None:
     health = _eligible_health("broker_truth_refresher")
+    _seed_pre_action_snapshot(tmp_path, plan_classification="PLAN_EVIDENCE_REFRESH", action_type="REFRESH_EVIDENCE")
     audit = tmp_path / "audit.jsonl"
     calls: list[tuple[str, ...]] = []
 
@@ -75,6 +77,25 @@ def test_apply_restarts_eligible_sidecar_and_writes_audit(tmp_path: Path) -> Non
         ("bash", "scripts/start-track-b-broker-truth-refresh"),
     ]
     assert '"classification": "RESTART_APPLIED"' in audit.read_text(encoding="utf-8")
+
+
+def test_process_recovery_apply_blocks_without_snapshot(tmp_path: Path) -> None:
+    health = _eligible_health("broker_truth_refresher")
+    audit = tmp_path / "audit.jsonl"
+    calls: list[tuple[str, ...]] = []
+
+    action = evaluate_track_b_self_healing_restart_action(
+        health=health,
+        repo_root=tmp_path,
+        mode="apply",
+        audit_path=audit,
+        now=NOW,
+        command_runner=lambda command, root: calls.append(tuple(command)) or {"command": list(command), "returncode": 0},
+    )
+
+    assert action["attempt"]["classification"] == "RESTART_BLOCKED_PRE_ACTION_SNAPSHOT"
+    assert calls == []
+    assert action["attempt"]["results"][0]["pre_action_snapshot_validation"]["classification"] == "PRE_ACTION_BLOCKED_SNAPSHOT_MISSING"
 
 
 def test_open_orders_block_restart(tmp_path: Path) -> None:
@@ -156,6 +177,7 @@ def test_candidate_health_blocker_does_not_block_its_own_restart() -> None:
 
 def test_apply_restarts_paper_runtime_through_supervised_launcher(tmp_path: Path) -> None:
     health = _eligible_health("paper_runtime")
+    _seed_pre_action_snapshot(tmp_path, plan_classification="PLAN_RUNTIME_RETRY", action_type="RUNTIME_RETRY")
     audit = tmp_path / "audit.jsonl"
     calls: list[tuple[str, ...]] = []
 
@@ -180,6 +202,7 @@ def test_apply_restarts_paper_runtime_through_supervised_launcher(tmp_path: Path
 
 def test_apply_continues_when_paper_stop_finds_no_pid_file(tmp_path: Path) -> None:
     health = _eligible_health("paper_runtime")
+    _seed_pre_action_snapshot(tmp_path, plan_classification="PLAN_RUNTIME_RETRY", action_type="RUNTIME_RETRY")
     audit = tmp_path / "audit.jsonl"
     calls: list[tuple[str, ...]] = []
 
@@ -207,6 +230,76 @@ def test_apply_continues_when_paper_stop_finds_no_pid_file(tmp_path: Path) -> No
     assert calls[0] == ("bash", "scripts/stop_probationary_paper_soak.sh")
     assert calls[1][0] == "env"
     assert calls[1][3:6] == ("bash", "scripts/run_headless_supervised_paper_service.sh", "--no-start-dashboard")
+
+
+def test_process_recovery_blocks_stale_snapshot_before_commands(tmp_path: Path) -> None:
+    health = _eligible_health("paper_runtime")
+    _seed_pre_action_snapshot(
+        tmp_path,
+        plan_classification="PLAN_RUNTIME_RETRY",
+        action_type="RUNTIME_RETRY",
+        generated_at="2026-05-18T13:00:00+00:00",
+    )
+    audit = tmp_path / "audit.jsonl"
+    calls: list[tuple[str, ...]] = []
+
+    action = evaluate_track_b_self_healing_restart_action(
+        health=health,
+        repo_root=tmp_path,
+        mode="apply",
+        audit_path=audit,
+        now=NOW,
+        command_runner=lambda command, root: calls.append(tuple(command)) or {"command": list(command), "returncode": 0},
+    )
+
+    assert action["attempt"]["classification"] == "RESTART_BLOCKED_PRE_ACTION_SNAPSHOT"
+    assert calls == []
+    assert action["attempt"]["results"][0]["failure_class"] == "PRE_ACTION_BLOCKED_SNAPSHOT_STALE"
+
+
+def test_process_recovery_blocks_incoherent_snapshot_before_commands(tmp_path: Path) -> None:
+    health = _eligible_health("paper_runtime")
+    _seed_pre_action_snapshot(
+        tmp_path,
+        plan_classification="PLAN_RUNTIME_RETRY",
+        action_type="RUNTIME_RETRY",
+        coherence="STALE_OR_MIXED",
+    )
+    audit = tmp_path / "audit.jsonl"
+    calls: list[tuple[str, ...]] = []
+
+    action = evaluate_track_b_self_healing_restart_action(
+        health=health,
+        repo_root=tmp_path,
+        mode="apply",
+        audit_path=audit,
+        now=NOW,
+        command_runner=lambda command, root: calls.append(tuple(command)) or {"command": list(command), "returncode": 0},
+    )
+
+    assert action["attempt"]["classification"] == "RESTART_BLOCKED_PRE_ACTION_SNAPSHOT"
+    assert calls == []
+    assert action["attempt"]["results"][0]["failure_class"] == "PRE_ACTION_BLOCKED_SNAPSHOT_INCOHERENT"
+
+
+def test_process_recovery_blocks_plan_mismatch_before_commands(tmp_path: Path) -> None:
+    health = _eligible_health("paper_runtime")
+    _seed_pre_action_snapshot(tmp_path, plan_classification="PLAN_MARKET_DATA_RESTART", action_type="MARKET_DATA_RESTART")
+    audit = tmp_path / "audit.jsonl"
+    calls: list[tuple[str, ...]] = []
+
+    action = evaluate_track_b_self_healing_restart_action(
+        health=health,
+        repo_root=tmp_path,
+        mode="apply",
+        audit_path=audit,
+        now=NOW,
+        command_runner=lambda command, root: calls.append(tuple(command)) or {"command": list(command), "returncode": 0},
+    )
+
+    assert action["attempt"]["classification"] == "RESTART_BLOCKED_PRE_ACTION_SNAPSHOT"
+    assert calls == []
+    assert action["attempt"]["results"][0]["failure_class"] == "PRE_ACTION_BLOCKED_PLAN_MISMATCH"
 
 
 def test_stop_only_no_pid_audit_row_does_not_poison_runtime_retry_policy() -> None:
@@ -574,3 +667,72 @@ def _paper_recovery_policy(
             "authority": "outputs/track_b_execution_core/paper_recovery_policy/latest_paper_recovery_policy.json",
         },
     }
+
+
+def _seed_pre_action_snapshot(
+    root: Path,
+    *,
+    plan_classification: str,
+    action_type: str,
+    generated_at: str | None = None,
+    coherence: str = "COHERENT",
+) -> None:
+    generated_at = generated_at or NOW.isoformat()
+    snapshot_id = "snapshot-self-healing-1"
+    generation_id = "generation-self-healing-1"
+    supervisor_id = "supervisor-self-healing-1"
+    _write_json(
+        root / "outputs" / "track_b_execution_core" / "control_plane" / "latest_control_plane_snapshot.json",
+        {
+            "generated_at": generated_at,
+            "control_plane_snapshot_id": snapshot_id,
+            "shared_truth_refresh_generation_id": generation_id,
+            "shared_truth_coherence_status": coherence,
+            "runtime_supervisor_decision_id": supervisor_id,
+            "runtime_supervisor_classification": "SUPERVISOR_RUNTIME_START_ALLOWED",
+            "safe_to_start_runtime": True,
+            "live_money_eligible": False,
+            "duplicate_writer_count": 0,
+        },
+    )
+    _write_json(
+        root
+        / "outputs"
+        / "track_b_execution_core"
+        / "runtime_supervisor"
+        / "latest_runtime_supervisor_authority.json",
+        {
+            "generated_at": generated_at,
+            "supervisor_decision_id": supervisor_id,
+            "classification": "SUPERVISOR_RUNTIME_START_ALLOWED",
+            "live_money_eligible": False,
+        },
+    )
+    _write_json(
+        root
+        / "outputs"
+        / "track_b_execution_core"
+        / "paper_autonomous_recovery"
+        / "latest_paper_autonomous_recovery_plan.json",
+        {
+            "generated_at": generated_at,
+            "classification": plan_classification,
+            "control_plane_snapshot_id": snapshot_id,
+            "shared_truth_refresh_generation_id": generation_id,
+            "execution_enabled": False,
+            "live_money_eligible": False,
+            "proposed_actions": [
+                {
+                    "action_id": action_type.lower(),
+                    "action_type": action_type,
+                    "target_identity": {},
+                    "execution_enabled": False,
+                }
+            ],
+        },
+    )
+
+
+def _write_json(path: Path, payload: dict) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")

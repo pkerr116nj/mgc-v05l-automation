@@ -19,6 +19,16 @@ from mgc_v05l.execution_core.track_b_readiness_state import (
     DEFAULT_TRACK_B_EXPECTED_ACTIVE_ROOT,
     REPO_ROOT,
 )
+from mgc_v05l.execution_core.track_b_paper_autonomous_recovery_planner import (
+    PLAN_EVIDENCE_REFRESH,
+    PLAN_MARKET_DATA_RESTART,
+    PLAN_RUNTIME_RETRY,
+)
+from mgc_v05l.execution_core.track_b_pre_action_snapshot_validator import (
+    PRE_ACTION_SNAPSHOT_VALID,
+    TrackBPreActionSnapshotValidatorConfig,
+    validate_track_b_pre_action_snapshot,
+)
 from mgc_v05l.execution_core.track_b_self_healing_supervisor import (
     DEFAULT_SELF_HEALING_HEALTH_ARTIFACT,
     build_track_b_self_healing_health,
@@ -32,6 +42,7 @@ DEFAULT_RESTART_COOLDOWN_SECONDS = 300.0
 DEFAULT_RESTART_MAX_ATTEMPTS = 3
 DEFAULT_RESTART_WINDOW_SECONDS = 900.0
 DEFAULT_RESTART_COMMAND_TIMEOUT_SECONDS = 180.0
+DEFAULT_PRE_ACTION_SNAPSHOT_MAX_AGE_SECONDS = 300
 AUTO_RESTART_ELIGIBLE = "AUTO_RESTART_ELIGIBLE"
 PAPER_RUNTIME_AGENT_ID = "paper_runtime"
 ACTIVE_BROKER_LEASE_STATES = {"ACTIVE", "ACTIVE_DEGRADED_REFRESH_FAILING"}
@@ -342,8 +353,26 @@ def _apply_restart_plan(
         _append_audit(audit_path, attempt)
         return attempt
     results: list[dict[str, Any]] = []
+    blocked_by_snapshot = False
     for action in plan.get("actions") or []:
         agent_id = str(action.get("agent_id") or "")
+        pre_action_validation = _pre_action_snapshot_validation_for_restart(
+            agent_id=agent_id,
+            repo_root=repo_root,
+            now=now,
+        )
+        if pre_action_validation.get("classification") != PRE_ACTION_SNAPSHOT_VALID:
+            blocked_by_snapshot = True
+            results.append(
+                {
+                    "agent_id": agent_id,
+                    "classification": "RESTART_BLOCKED_PRE_ACTION_SNAPSHOT",
+                    "failure_class": pre_action_validation.get("classification"),
+                    "commands": [],
+                    "pre_action_snapshot_validation": pre_action_validation,
+                }
+            )
+            continue
         command_results = []
         agent_ok = True
         for command in action.get("commands") or []:
@@ -358,18 +387,59 @@ def _apply_restart_plan(
                 "classification": "RESTART_SUCCEEDED" if agent_ok else "RESTART_FAILED",
                 "failure_class": _command_failure_class(command_results),
                 "commands": command_results,
+                "pre_action_snapshot_validation": pre_action_validation,
             }
         )
-    attempt_classification = "RESTART_APPLIED" if all(row["classification"] == "RESTART_SUCCEEDED" for row in results) else "RESTART_PARTIAL_FAILURE"
+    if results and all(row["classification"] == "RESTART_SUCCEEDED" for row in results):
+        attempt_classification = "RESTART_APPLIED"
+    elif blocked_by_snapshot and all(row["classification"] == "RESTART_BLOCKED_PRE_ACTION_SNAPSHOT" for row in results):
+        attempt_classification = "RESTART_BLOCKED_PRE_ACTION_SNAPSHOT"
+    else:
+        attempt_classification = "RESTART_PARTIAL_FAILURE"
     attempt = {
         "schema_version": "track_b_self_healing_restart_attempt_v1",
         "generated_at": now.isoformat(),
         "classification": attempt_classification,
         "plan_classification": plan.get("classification"),
+        "control_plane_snapshot_required": True,
         "results": results,
     }
     _append_audit(audit_path, attempt)
     return attempt
+
+
+def _pre_action_snapshot_validation_for_restart(
+    *,
+    agent_id: str,
+    repo_root: Path,
+    now: datetime,
+) -> dict[str, Any]:
+    expectation = _restart_pre_action_expectation(agent_id)
+    if not expectation:
+        return {
+            "classification": "PRE_ACTION_SNAPSHOT_UNSUPPORTED_RESTART_AGENT",
+            "valid": False,
+            "reason": f"No Control Plane Snapshot action mapping exists for restart agent {agent_id}.",
+        }
+    plan_classification, action_type = expectation
+    return validate_track_b_pre_action_snapshot(
+        config=TrackBPreActionSnapshotValidatorConfig(repo_root=repo_root),
+        expected_plan_classification=plan_classification,
+        expected_action_type=action_type,
+        expected_target_identity={},
+        max_snapshot_age_seconds=DEFAULT_PRE_ACTION_SNAPSHOT_MAX_AGE_SECONDS,
+        now=now,
+    )
+
+
+def _restart_pre_action_expectation(agent_id: str) -> tuple[str, str] | None:
+    if agent_id == PAPER_RUNTIME_AGENT_ID:
+        return PLAN_RUNTIME_RETRY, "RUNTIME_RETRY"
+    if agent_id == "phase1_candle_supervisor":
+        return PLAN_MARKET_DATA_RESTART, "MARKET_DATA_RESTART"
+    if agent_id in {"broker_truth_refresher", "operator_readiness_refresher"}:
+        return PLAN_EVIDENCE_REFRESH, "REFRESH_EVIDENCE"
+    return None
 
 
 def _global_restart_blockers(health: Mapping[str, Any]) -> list[str]:
