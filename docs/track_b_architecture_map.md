@@ -541,7 +541,10 @@ Dashboard implication:
   `OPEN_MANAGED`, managed exit trigger, guarded close submit, broker-confirmed
   close, and `CLOSED_FLAT` / reconciled P&L. `paper_proof_cli` is retained for
   explicit proof/debug/canary work only and must not be used as a fallback for
-  real strategy signals.
+  real strategy signals. Lifecycle state transitions are governed by the shared
+  matrix in `docs/track_b_lifecycle_state_matrix.md`; `OPEN_MANAGED` requires
+  broker-backed fill/adoption evidence plus managed-exit metadata, and
+  `CLOSED_FLAT` requires close-fill evidence or broker-flat proof.
 - Databento is market data authority only. Databento symbols and continuous
   selectors are not executable broker contracts.
 - IBKR allowlist and the local execution contract key remain execution
@@ -577,46 +580,50 @@ Authority hierarchy:
 
 1. IBKR broker truth and Track B broker reconciliation remain the account,
    position, order, fill, and broker/lifecycle consistency authority.
-2. Open Order Truth normalizes broker open-order evidence, suspicious order
+2. Lifecycle Transition Authority defines shared lifecycle/manifest/ledger
+   transition semantics, including terminal no-broker-effect states,
+   OPEN_MANAGED evidence requirements, CLOSED_FLAT evidence requirements, and
+   malformed/manual cleanup exclusion from clean trade statistics.
+3. Open Order Truth normalizes broker open-order evidence, suspicious order
    states, duplicate close risk, marketability, and broker-flat/open-close
    contradictions.
-3. Managed Order Registry projects Track B-managed order identity and
+4. Managed Order Registry projects Track B-managed order identity and
    read-only adjustment planning context on top of Open Order Truth.
-4. Position Truth summarizes broker positions, lifecycle state, ownership,
+5. Position Truth summarizes broker positions, lifecycle state, ownership,
    reconciliation, runtime status, and managed-order evidence per symbol.
-5. Runtime Environment Truth answers whether exactly one PAPER runtime is
+6. Runtime Environment Truth answers whether exactly one PAPER runtime is
    running correctly from the Dev root on the expected source/config identity.
-6. Managed Position Registry identifies positions Track B is responsible for
+7. Managed Position Registry identifies positions Track B is responsible for
    managing and whether they are matched, exit-due, close-working, adoption
    required, metadata-incomplete, or review-required.
-7. Agent Registry declares the expected, optional, and diagnostic Track B
+8. Agent Registry declares the expected, optional, and diagnostic Track B
    agents/processes/services and their proof/runtime-submit relevance.
-8. Agent Health attaches read-only health contract semantics to registered
+9. Agent Health attaches read-only health contract semantics to registered
    agents, including expected stopped/runtime states, artifact freshness, and
    proof/runtime-submit blocking evidence.
-9. Proof Readiness combines shared truth, broker lease/reconciliation, and
+10. Proof Readiness combines shared truth, broker lease/reconciliation, and
    Phase-1 runtime market-data session/freshness into the supervised proof
    preflight verdict.
-10. Canonical Readiness consumes shared truth/proof-readiness evidence and
+11. Canonical Readiness consumes shared truth/proof-readiness evidence and
    remains the submit-readiness decision surface.
-11. Self-Recover Rules centralize read-only recovery recommendations such as
+12. Self-Recover Rules centralize read-only recovery recommendations such as
    wait for market reopen, refresh shared truth, restart-runtime-allowed, and
    cleanup-required-before-restart.
-12. Crash Loop Protection applies read-only restart budget, cooldown, repeated
+13. Crash Loop Protection applies read-only restart budget, cooldown, repeated
    failure, broker-unsafe stop, and operator-ack policy on top of agent health,
    self-recover, runtime stop provenance, and launch/runtime history.
-13. Runtime Resume Semantics combines proof readiness, shared truth, agent
+14. Runtime Resume Semantics combines proof readiness, shared truth, agent
    health, self-recover, crash-loop policy, broker/order/position truth, and
    stop provenance into the advisory answer for whether a PAPER runtime may be
    started, resumed, held down, or requires operator acknowledgement.
-14. Runtime Supervisor Authority combines the control-plane services into the
+15. Runtime Supervisor Authority combines the control-plane services into the
    single advisory answer for what should happen next with the PAPER runtime:
    wait, start allowed, leave healthy runtime running, hold down, cleanup
    required, or manual review required.
-15. Self-Healing Restart Evidence consumes shared truth for restart eligibility
+16. Self-Healing Restart Evidence consumes shared truth for restart eligibility
    diagnostics and keeps broker lease degradation distinct from reconciliation
    danger.
-16. Operator dashboard/status surfaces display projections of this stack. They
+17. Operator dashboard/status surfaces display projections of this stack. They
     are never routing, readiness, restart, broker, lifecycle, or order
     authority.
 
@@ -624,6 +631,7 @@ Authority and status artifact map:
 
 | Service | Artifact | Role |
 | --- | --- |
+| Lifecycle Transition Authority | `src/mgc_v05l/execution_core/track_b_lifecycle_state_transition.py` / `docs/track_b_lifecycle_state_matrix.md` | pure transition authority |
 | Open Order Truth | `outputs/track_b_execution_core/open_order_truth/latest_open_order_truth.json` | `execution_core` authority |
 | Open Order Truth events | `outputs/track_b_execution_core/open_order_truth/open_order_truth_events.jsonl` | `execution_core` audit |
 | Managed Order Registry | `outputs/track_b_execution_core/managed_orders/latest_managed_orders.json` | `execution_core` authority |

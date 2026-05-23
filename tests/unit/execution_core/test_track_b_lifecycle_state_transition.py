@@ -7,10 +7,12 @@ from mgc_v05l.execution_core.track_b_lifecycle_state_transition import (
     CLOSED_FLAT,
     OPEN_MANAGED,
     OPEN_MANAGED_METADATA_INCOMPLETE,
+    REVIEW_REQUIRED,
     TRACK_B_STRATEGY_PAPER_OPEN_MANAGED,
     broker_backed_fill_evidence_complete,
     classify_managed_position_transition,
     ledger_projection_from_transition,
+    lifecycle_state_matrix,
     normalize_no_broker_effect_result,
     validate_open_managed_evidence,
 )
@@ -83,8 +85,9 @@ def test_no_broker_effect_becomes_terminal_non_lifecycle_state() -> None:
 
     assert result.classification == BLOCKED_NO_BROKER_EFFECT
     projection = ledger_projection_from_transition(transition=result)
-    assert projection["final_position_status"] == "REVIEW_REQUIRED"
-    assert projection["review_required"] is True
+    assert projection["final_position_status"] == BLOCKED_NO_BROKER_EFFECT
+    assert projection["review_required"] is False
+    assert projection["managed_position_registry_allowed"] is False
 
 
 def test_classification_prefers_no_broker_effect_over_open_managed_request() -> None:
@@ -112,10 +115,75 @@ def test_broker_fill_identity_helper_preserves_existing_classifications() -> Non
     assert missing.blockers == ("fill_price", "fill_timestamp")
 
 
-def test_closed_flat_projection_remains_terminal_flat() -> None:
-    result = classify_managed_position_transition({"requested_lifecycle_status": CLOSED_FLAT})
+def test_closed_flat_with_fill_projection_remains_terminal_flat() -> None:
+    result = classify_managed_position_transition(
+        {
+            "requested_lifecycle_status": CLOSED_FLAT,
+            "intent_type": "SELL_TO_CLOSE",
+            "broker_order_id": "20",
+            "perm_id": "1948384228",
+            "fill_price": "4543",
+            "fill_timestamp": "2026-05-21T20:21:35.305374+00:00",
+        }
+    )
     projection = ledger_projection_from_transition(transition=result)
 
     assert result.classification == CLOSED_FLAT
     assert projection["final_position_status"] == CLOSED_FLAT
     assert projection["review_required"] is False
+
+
+def test_closed_flat_with_broker_flat_proof_is_accepted() -> None:
+    result = classify_managed_position_transition(
+        {
+            "requested_lifecycle_status": CLOSED_FLAT,
+            "broker_flat_proof": True,
+            "close_order_id": "32",
+            "contract": "MGCM6",
+        }
+    )
+
+    assert result.classification == CLOSED_FLAT
+    assert result.reconciliation_clean_eligible is True
+
+
+def test_closed_flat_without_evidence_is_rejected() -> None:
+    result = classify_managed_position_transition({"requested_lifecycle_status": CLOSED_FLAT})
+
+    assert result.classification == REVIEW_REQUIRED
+    assert result.blockers == ("close_fill_or_broker_flat_proof",)
+
+
+def test_review_required_blocks_clean_managed_position_state() -> None:
+    result = classify_managed_position_transition(
+        {"requested_lifecycle_status": REVIEW_REQUIRED, "review_blockers": ("missing_exec_details",)}
+    )
+    projection = ledger_projection_from_transition(transition=result)
+
+    assert result.classification == REVIEW_REQUIRED
+    assert result.managed_position_registry_allowed is True
+    assert result.reconciliation_clean_eligible is False
+    assert projection["review_required"] is True
+
+
+def test_lifecycle_state_matrix_exposes_control_plane_semantics() -> None:
+    matrix = lifecycle_state_matrix()
+
+    assert matrix[OPEN_MANAGED]["managed_position_registry_allowed"] is True
+    assert matrix[OPEN_MANAGED]["broker_backed"] is True
+    assert "managed_exit_policy_id" in matrix[OPEN_MANAGED]["required_evidence"]
+    assert matrix[BLOCKED_NO_BROKER_EFFECT]["terminal"] is True
+    assert matrix[BLOCKED_NO_BROKER_EFFECT]["managed_position_registry_allowed"] is False
+    assert matrix[CLOSED_FLAT]["required_evidence"] == ["close_fill_or_broker_flat_proof"]
+
+
+def test_malformed_manual_cleanup_is_terminal_but_excluded_from_clean_trade_stats() -> None:
+    result = classify_managed_position_transition(
+        {"requested_lifecycle_status": "MALFORMED_BROKER_BACKED_MANUALLY_RECONCILED_ARTIFACT"}
+    )
+    projection = ledger_projection_from_transition(transition=result)
+
+    assert result.terminal is True
+    assert result.reconciliation_clean_eligible is True
+    assert result.clean_trade_stats_allowed is False
+    assert projection["clean_trade_stats_allowed"] is False
