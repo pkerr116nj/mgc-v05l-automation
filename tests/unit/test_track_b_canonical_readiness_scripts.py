@@ -227,8 +227,14 @@ def test_runtime_start_consults_supervisor_authority_v2_before_spawn() -> None:
     assert "safe_to_start_runtime" in script
     assert "RUNTIME_SUPERVISOR_START_BLOCKED" in script
     assert "operator_ack_required" in script
+    assert "paper_action_policy" in script
+    assert "autonomous_recovery_allowed" in script
+    assert "requires_operator_ack_for_paper" in script
+    assert "operator_ack_advisory_only_for_paper" in script
+    assert "live_action_policy" in script
     assert "runtime_supervisor_authority" in script
     assert "latest_track_b_runtime_supervisor_authority.json" not in script
+    assert "latest_track_b_paper_recovery_policy.json" not in script
     assert script.index("run_shared_truth_runtime_start_preflight") < script.index("run_runtime_supervisor_start_preflight")
     assert script.index("run_runtime_supervisor_start_preflight") < script.index("nohup \"${LAUNCH_PYTHON_BIN}\"")
 
@@ -245,8 +251,14 @@ def test_headless_launch_uses_supervisor_authority_v2_as_final_pre_spawn_gate() 
     assert "READY_FOR_OPERATOR_START" in script
     assert "safe_to_start_runtime" in script
     assert "operator_ack_required" in script
+    assert "paper_action_policy" in script
+    assert "autonomous_recovery_allowed" in script
+    assert "requires_operator_ack_for_paper" in script
+    assert "operator_ack_advisory_only_for_paper" in script
+    assert "live_action_policy" in script
     assert "runtime_supervisor_authority_path" in script
     assert "latest_track_b_runtime_supervisor_authority.json" not in script
+    assert "latest_track_b_paper_recovery_policy.json" not in script
     start_flow = script[script.index("persist_requested_config_paths\nif ! assert_required_config_paths_present") :]
     assert start_flow.index("refresh_canonical_readiness_for_launch \"pre-launch\"") < start_flow.index(
         "refresh_runtime_supervisor_for_launch"

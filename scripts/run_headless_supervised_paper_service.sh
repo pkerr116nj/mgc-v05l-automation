@@ -1540,11 +1540,17 @@ except (OSError, json.JSONDecodeError):
     print("RUNTIME_SUPERVISOR_START_BLOCKED: missing_or_invalid_supervisor_authority", file=sys.stderr)
     raise SystemExit(2)
 operator_ack = payload.get("operator_ack") if isinstance(payload.get("operator_ack"), dict) else {}
+evidence = payload.get("evidence_summary") if isinstance(payload.get("evidence_summary"), dict) else {}
 classification = payload.get("classification")
 mode = payload.get("supervisor_mode")
 proof_window_status = payload.get("proof_window_status")
 recommended = payload.get("recommended_next_command")
 ack_required = payload.get("operator_ack_required") is True or operator_ack.get("required") is True
+paper_action_policy = evidence.get("paper_action_policy")
+autonomous_recovery_allowed = evidence.get("paper_autonomous_recovery_allowed") is True
+requires_operator_ack_for_paper = evidence.get("paper_requires_operator_ack") is True
+live_action_policy = evidence.get("paper_live_action_policy")
+operator_ack_advisory_only_for_paper = bool(ack_required and not requires_operator_ack_for_paper and paper_action_policy)
 allowed = (
     classification == "SUPERVISOR_RUNTIME_START_ALLOWED"
     and mode == "READY_FOR_OPERATOR_START"
@@ -1555,7 +1561,11 @@ if not allowed:
     print(
         "RUNTIME_SUPERVISOR_START_BLOCKED: "
         f"classification={classification} supervisor_mode={mode} proof_window_status={proof_window_status} "
-        f"operator_ack_required={ack_required} recommended_next_command={recommended}",
+        f"operator_ack_required={ack_required} paper_action_policy={paper_action_policy} "
+        f"autonomous_recovery_allowed={autonomous_recovery_allowed} "
+        f"requires_operator_ack_for_paper={requires_operator_ack_for_paper} "
+        f"operator_ack_advisory_only_for_paper={operator_ack_advisory_only_for_paper} "
+        f"live_action_policy={live_action_policy} recommended_next_command={recommended}",
         file=sys.stderr,
     )
     raise SystemExit(2)
@@ -1574,12 +1584,24 @@ try:
 except (OSError, json.JSONDecodeError):
     payload = {}
 operator_ack = payload.get("operator_ack") if isinstance(payload.get("operator_ack"), dict) else {}
+evidence = payload.get("evidence_summary") if isinstance(payload.get("evidence_summary"), dict) else {}
+ack_required = payload.get("operator_ack_required") is True or operator_ack.get("required") is True
+paper_action_policy = evidence.get("paper_action_policy")
+autonomous_recovery_allowed = evidence.get("paper_autonomous_recovery_allowed") is True
+requires_operator_ack_for_paper = evidence.get("paper_requires_operator_ack") is True
+live_action_policy = evidence.get("paper_live_action_policy")
+operator_ack_advisory_only_for_paper = bool(ack_required and not requires_operator_ack_for_paper and paper_action_policy)
 print(
     "Runtime Supervisor Authority blocked start: "
     f"classification={payload.get('classification')} "
     f"supervisor_mode={payload.get('supervisor_mode')} "
     f"proof_window_status={payload.get('proof_window_status')} "
-    f"operator_ack_required={payload.get('operator_ack_required') is True or operator_ack.get('required') is True}. "
+    f"operator_ack_required={ack_required}. "
+    f"paper_action_policy={paper_action_policy} "
+    f"autonomous_recovery_allowed={autonomous_recovery_allowed} "
+    f"requires_operator_ack_for_paper={requires_operator_ack_for_paper} "
+    f"operator_ack_advisory_only_for_paper={operator_ack_advisory_only_for_paper} "
+    f"live_action_policy={live_action_policy}. "
     f"recommended_next_command={payload.get('recommended_next_command')}"
 )
 PY

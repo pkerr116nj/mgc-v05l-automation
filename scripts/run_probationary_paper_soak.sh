@@ -313,6 +313,11 @@ payload = {
         "proof_window_status": os.environ.get("LAUNCH_SUPERVISOR_PROOF_WINDOW_STATUS") or None,
         "recommended_next_command": os.environ.get("LAUNCH_SUPERVISOR_RECOMMENDED_NEXT_COMMAND") or None,
         "operator_ack_required": os.environ.get("LAUNCH_SUPERVISOR_OPERATOR_ACK_REQUIRED", "").lower() == "true",
+        "paper_action_policy": os.environ.get("LAUNCH_SUPERVISOR_PAPER_ACTION_POLICY") or None,
+        "autonomous_recovery_allowed": os.environ.get("LAUNCH_SUPERVISOR_AUTONOMOUS_RECOVERY_ALLOWED", "").lower() == "true",
+        "requires_operator_ack_for_paper": os.environ.get("LAUNCH_SUPERVISOR_REQUIRES_OPERATOR_ACK_FOR_PAPER", "").lower() == "true",
+        "operator_ack_advisory_only_for_paper": os.environ.get("LAUNCH_SUPERVISOR_OPERATOR_ACK_ADVISORY_ONLY_FOR_PAPER", "").lower() == "true",
+        "live_action_policy": os.environ.get("LAUNCH_SUPERVISOR_LIVE_ACTION_POLICY") or None,
     },
 }
 if os.environ.get("LAUNCH_STOP_SOURCE") or stop_reason:
@@ -436,14 +441,29 @@ except (OSError, json.JSONDecodeError):
     raise SystemExit(0)
 
 operator_ack = payload.get("operator_ack") if isinstance(payload.get("operator_ack"), dict) else {}
+evidence = payload.get("evidence_summary") if isinstance(payload.get("evidence_summary"), dict) else {}
+paper_action_policy = evidence.get("paper_action_policy")
+autonomous_recovery_allowed = evidence.get("paper_autonomous_recovery_allowed") is True
+requires_operator_ack_for_paper = evidence.get("paper_requires_operator_ack") is True
+live_action_policy = evidence.get("paper_live_action_policy")
+operator_ack_required = payload.get("operator_ack_required") is True or operator_ack.get("required") is True
+operator_ack_advisory_only_for_paper = bool(operator_ack_required and not requires_operator_ack_for_paper and paper_action_policy)
 print(
     "classification={classification} supervisor_mode={mode} proof_window_status={window} "
-    "safe_to_start_runtime={safe} operator_ack_required={ack} recommended_next_command={command}".format(
+    "safe_to_start_runtime={safe} operator_ack_required={ack} "
+    "paper_action_policy={paper_action_policy} autonomous_recovery_allowed={autonomous} "
+    "requires_operator_ack_for_paper={paper_ack} operator_ack_advisory_only_for_paper={advisory} "
+    "live_action_policy={live_action_policy} recommended_next_command={command}".format(
         classification=payload.get("classification"),
         mode=payload.get("supervisor_mode"),
         window=payload.get("proof_window_status"),
         safe=payload.get("safe_to_start_runtime"),
-        ack=payload.get("operator_ack_required") is True or operator_ack.get("required") is True,
+        ack=operator_ack_required,
+        paper_action_policy=paper_action_policy,
+        autonomous=autonomous_recovery_allowed,
+        paper_ack=requires_operator_ack_for_paper,
+        advisory=operator_ack_advisory_only_for_paper,
+        live_action_policy=live_action_policy,
         command=payload.get("recommended_next_command"),
     )
 )
@@ -468,11 +488,17 @@ except (OSError, json.JSONDecodeError):
     print("RUNTIME_SUPERVISOR_START_BLOCKED: missing_or_invalid_supervisor_authority", file=sys.stderr)
     raise SystemExit(2)
 operator_ack = payload.get("operator_ack") if isinstance(payload.get("operator_ack"), dict) else {}
+evidence = payload.get("evidence_summary") if isinstance(payload.get("evidence_summary"), dict) else {}
 classification = payload.get("classification")
 mode = payload.get("supervisor_mode")
 proof_window_status = payload.get("proof_window_status")
 recommended = payload.get("recommended_next_command")
 ack_required = payload.get("operator_ack_required") is True or operator_ack.get("required") is True
+paper_action_policy = evidence.get("paper_action_policy")
+autonomous_recovery_allowed = evidence.get("paper_autonomous_recovery_allowed") is True
+requires_operator_ack_for_paper = evidence.get("paper_requires_operator_ack") is True
+live_action_policy = evidence.get("paper_live_action_policy")
+operator_ack_advisory_only_for_paper = bool(ack_required and not requires_operator_ack_for_paper and paper_action_policy)
 os.environ["MGC_RUNTIME_SUPERVISOR_CLASSIFICATION"] = str(classification or "")
 allowed = (
     classification == "SUPERVISOR_RUNTIME_START_ALLOWED"
@@ -484,7 +510,11 @@ if not allowed:
     print(
         "RUNTIME_SUPERVISOR_START_BLOCKED: "
         f"classification={classification} supervisor_mode={mode} proof_window_status={proof_window_status} "
-        f"operator_ack_required={ack_required} recommended_next_command={recommended}",
+        f"operator_ack_required={ack_required} paper_action_policy={paper_action_policy} "
+        f"autonomous_recovery_allowed={autonomous_recovery_allowed} "
+        f"requires_operator_ack_for_paper={requires_operator_ack_for_paper} "
+        f"operator_ack_advisory_only_for_paper={operator_ack_advisory_only_for_paper} "
+        f"live_action_policy={live_action_policy} recommended_next_command={recommended}",
         file=sys.stderr,
     )
     raise SystemExit(2)
@@ -541,6 +571,65 @@ except (OSError, json.JSONDecodeError):
     payload = {}
 operator_ack = payload.get("operator_ack") if isinstance(payload.get("operator_ack"), dict) else {}
 print("true" if payload.get("operator_ack_required") is True or operator_ack.get("required") is True else "false")
+PY
+)"
+  LAUNCH_SUPERVISOR_PAPER_ACTION_POLICY="$("${PYTHON_BIN}" - <<'PY' "${RUNTIME_SUPERVISOR_AUTHORITY_FILE}" paper_action_policy || true
+import json, sys
+from pathlib import Path
+try:
+    payload = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
+except (OSError, json.JSONDecodeError):
+    payload = {}
+evidence = payload.get("evidence_summary") if isinstance(payload.get("evidence_summary"), dict) else {}
+print(evidence.get(sys.argv[2]) or "")
+PY
+)"
+  LAUNCH_SUPERVISOR_AUTONOMOUS_RECOVERY_ALLOWED="$("${PYTHON_BIN}" - <<'PY' "${RUNTIME_SUPERVISOR_AUTHORITY_FILE}" || true
+import json, sys
+from pathlib import Path
+try:
+    payload = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
+except (OSError, json.JSONDecodeError):
+    payload = {}
+evidence = payload.get("evidence_summary") if isinstance(payload.get("evidence_summary"), dict) else {}
+print("true" if evidence.get("paper_autonomous_recovery_allowed") is True else "false")
+PY
+)"
+  LAUNCH_SUPERVISOR_REQUIRES_OPERATOR_ACK_FOR_PAPER="$("${PYTHON_BIN}" - <<'PY' "${RUNTIME_SUPERVISOR_AUTHORITY_FILE}" || true
+import json, sys
+from pathlib import Path
+try:
+    payload = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
+except (OSError, json.JSONDecodeError):
+    payload = {}
+evidence = payload.get("evidence_summary") if isinstance(payload.get("evidence_summary"), dict) else {}
+print("true" if evidence.get("paper_requires_operator_ack") is True else "false")
+PY
+)"
+  LAUNCH_SUPERVISOR_OPERATOR_ACK_ADVISORY_ONLY_FOR_PAPER="$("${PYTHON_BIN}" - <<'PY' "${RUNTIME_SUPERVISOR_AUTHORITY_FILE}" || true
+import json, sys
+from pathlib import Path
+try:
+    payload = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
+except (OSError, json.JSONDecodeError):
+    payload = {}
+operator_ack = payload.get("operator_ack") if isinstance(payload.get("operator_ack"), dict) else {}
+evidence = payload.get("evidence_summary") if isinstance(payload.get("evidence_summary"), dict) else {}
+ack_required = payload.get("operator_ack_required") is True or operator_ack.get("required") is True
+paper_action_policy = evidence.get("paper_action_policy")
+requires_operator_ack_for_paper = evidence.get("paper_requires_operator_ack") is True
+print("true" if ack_required and not requires_operator_ack_for_paper and paper_action_policy else "false")
+PY
+)"
+  LAUNCH_SUPERVISOR_LIVE_ACTION_POLICY="$("${PYTHON_BIN}" - <<'PY' "${RUNTIME_SUPERVISOR_AUTHORITY_FILE}" paper_live_action_policy || true
+import json, sys
+from pathlib import Path
+try:
+    payload = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
+except (OSError, json.JSONDecodeError):
+    payload = {}
+evidence = payload.get("evidence_summary") if isinstance(payload.get("evidence_summary"), dict) else {}
+print(evidence.get(sys.argv[2]) or "")
 PY
 )"
   if [[ ${gate_rc} -ne 0 ]]; then
