@@ -29,6 +29,7 @@ from mgc_v05l.execution_core.track_b_paper_proof_readiness import DEFAULT_OUTPUT
 from mgc_v05l.execution_core.track_b_paper_proof_readiness import READY_FOR_PROOF
 from mgc_v05l.execution_core.track_b_paper_recovery_policy import DEFAULT_PAPER_RECOVERY_POLICY_ARTIFACT
 from mgc_v05l.execution_core.track_b_position_truth_monitor import DEFAULT_POSITION_TRUTH_ARTIFACT
+from mgc_v05l.execution_core.track_b_recovery_budget_ledger import DEFAULT_RECOVERY_BUDGET_LEDGER_ARTIFACT
 from mgc_v05l.execution_core.track_b_runtime_resume_semantics import DEFAULT_RUNTIME_RESUME_SEMANTICS_ARTIFACT
 from mgc_v05l.execution_core.track_b_runtime_supervisor_authority import (
     DEFAULT_RUNTIME_SUPERVISOR_AUTHORITY_ARTIFACT,
@@ -96,6 +97,7 @@ class TrackBPaperAutonomousRecoveryPlannerConfig:
     broker_lease_path: Path = DEFAULT_LEASE_ARTIFACT
     runtime_environment_truth_path: Path = DEFAULT_RUNTIME_ENVIRONMENT_TRUTH_ARTIFACT
     lifecycle_state_matrix_path: Path = DEFAULT_LIFECYCLE_STATE_MATRIX_DOC
+    recovery_budget_ledger_path: Path = DEFAULT_RECOVERY_BUDGET_LEDGER_ARTIFACT
 
     def resolve(self, path: Path) -> Path:
         return path if path.is_absolute() else self.repo_root / path
@@ -124,9 +126,10 @@ def build_track_b_paper_autonomous_recovery_plan(
         "reconciliation": _read_json(config.resolve(config.reconciliation_path)),
         "broker_lease": _read_json(config.resolve(config.broker_lease_path)),
         "runtime_environment_truth": _read_json(config.resolve(config.runtime_environment_truth_path)),
+        "recovery_budget_ledger": _read_json(config.resolve(config.recovery_budget_ledger_path)),
     }
     evidence = _evidence(inputs=inputs, now=actual_now, config=config)
-    decision = _classify_plan(inputs=inputs, evidence=evidence)
+    decision = _attach_budget_to_actions(_classify_plan(inputs=inputs, evidence=evidence), evidence=evidence)
     return {
         "schema_version": "track_b_paper_autonomous_recovery_plan_v1",
         "generated_at": actual_now.isoformat(),
@@ -149,6 +152,8 @@ def build_track_b_paper_autonomous_recovery_plan(
         "snapshot_coherence_status": evidence["snapshot_coherence_status"],
         "supervisor_decision_id": evidence["supervisor_decision_id"],
         "supervisor_classification": evidence["supervisor_classification"],
+        "recovery_budget_ledger_classification": evidence["recovery_budget_classification"],
+        "recovery_budget_summary": evidence["recovery_budget_summary"],
         "classification": decision["classification"],
         "reason": decision["reason"],
         "proposed_actions": decision["proposed_actions"],
@@ -171,7 +176,7 @@ def build_track_b_paper_autonomous_recovery_plan(
         ],
         "todo_executor_v2": [
             "Keep this planner dry-run-only until a separate executor boundary is explicitly approved.",
-            "Attach persisted per-target recovery budgets before enabling any autonomous action.",
+            "Consume this persisted per-target recovery budget before enabling any autonomous action.",
             "Require a coherent Control Plane Snapshot captured immediately before every future executor action.",
             "Require exact identity revalidation immediately before every future mutation.",
         ],
@@ -448,6 +453,22 @@ def _action(
     }
 
 
+def _attach_budget_to_actions(decision: Mapping[str, Any], *, evidence: Mapping[str, Any]) -> dict[str, Any]:
+    result = dict(decision)
+    budget = _mapping(evidence.get("recovery_budget_summary"))
+    for key in ("proposed_actions", "blocked_actions"):
+        rows: list[dict[str, Any]] = []
+        for action in _list(result.get(key)):
+            row = dict(_mapping(action))
+            row["budget_key"] = str(budget.get("budget_key") or row.get("budget_key") or "")
+            row["remaining_budget"] = budget.get("attempts_remaining")
+            row["budget_exhausted"] = budget.get("budget_exhausted") is True
+            row["recovery_budget_ledger_classification"] = evidence.get("recovery_budget_classification")
+            rows.append(row)
+        result[key] = rows
+    return result
+
+
 def _evidence(
     *,
     inputs: Mapping[str, Mapping[str, Any]],
@@ -469,7 +490,9 @@ def _evidence(
     reconciliation = inputs["reconciliation"]
     broker_lease = inputs["broker_lease"]
     runtime_truth = inputs["runtime_environment_truth"]
+    recovery_budget = inputs["recovery_budget_ledger"]
     budget = _mapping(policy.get("bounded_recovery_budget"))
+    ledger_budget = _recovery_budget_summary(recovery_budget)
     snapshot_evidence = _control_plane_snapshot_evidence(
         snapshot=snapshot,
         now=now,
@@ -485,6 +508,10 @@ def _evidence(
         "live_action_policy": str(policy.get("live_action_policy") or ""),
         "budget_exhausted": budget.get("budget_exhausted") is True,
         "bounded_recovery_budget": dict(budget),
+        "recovery_budget_classification": _classification(recovery_budget),
+        "recovery_budget_summary": ledger_budget,
+        "recovery_budget_exhausted": ledger_budget.get("budget_exhausted") is True,
+        "recovery_budget_authority_path": _mapping(recovery_budget.get("artifact_paths")).get("authority"),
         "runtime_supervisor_classification": _classification(supervisor),
         "runtime_supervisor_mode": str(supervisor.get("supervisor_mode") or ""),
         "runtime_supervisor_safe_to_start": supervisor.get("safe_to_start_runtime") is True,
@@ -542,10 +569,24 @@ def _market_closed(evidence: Mapping[str, Any]) -> bool:
 
 
 def _budget_exhausted(evidence: Mapping[str, Any]) -> bool:
-    return evidence["budget_exhausted"] is True or evidence["crash_loop_classification"] in {
+    return evidence["recovery_budget_exhausted"] is True or evidence["budget_exhausted"] is True or evidence["crash_loop_classification"] in {
         "RESTART_COOLDOWN_ACTIVE",
         "REPEATED_RUNTIME_FAILURE",
         "REPEATED_BROKER_LEASE_FAILURE",
+    }
+
+
+def _recovery_budget_summary(payload: Mapping[str, Any]) -> dict[str, Any]:
+    for entry in _list(payload.get("entries")):
+        row = _mapping(entry)
+        if row.get("action_type") == "RUNTIME_RETRY":
+            return dict(row)
+    summary = _mapping(payload.get("summary"))
+    return {
+        "budget_key": "RUNTIME_RETRY",
+        "attempts_remaining": summary.get("minimum_attempts_remaining"),
+        "budget_exhausted": summary.get("budget_exhausted") is True or payload.get("budget_exhausted") is True,
+        "quarantine_required": summary.get("quarantine_required") is True or payload.get("quarantine_required") is True,
     }
 
 
@@ -732,6 +773,7 @@ def _stale_or_missing_evidence(
         "reconciliation": "classification",
         "broker_lease": "classification",
         "runtime_environment_truth": "classification",
+        "recovery_budget_ledger": "classification",
     }
     missing: list[str] = [str(item) for item in _list(snapshot_evidence.get("control_plane_snapshot_stale_or_missing"))]
     for name, field in required.items():
@@ -767,6 +809,7 @@ def _input_artifacts(config: TrackBPaperAutonomousRecoveryPlannerConfig) -> dict
         "broker_lease": str(config.resolve(config.broker_lease_path)),
         "runtime_environment_truth": str(config.resolve(config.runtime_environment_truth_path)),
         "lifecycle_state_matrix": str(config.resolve(config.lifecycle_state_matrix_path)),
+        "recovery_budget_ledger": str(config.resolve(config.recovery_budget_ledger_path)),
     }
 
 

@@ -187,6 +187,10 @@ def refresh_track_b_shared_truth(
 
     reconciliation = _read_json(config.resolve(DEFAULT_RECONCILIATION_ARTIFACT))
     broker_lease = _refresh_broker_lease(config=config, reconciliation=reconciliation, now=actual_now)
+    recovery_budget_ledger, recovery_budget_ledger_path = _refresh_recovery_budget_ledger(
+        repo_root=config.repo_root,
+        now=actual_now,
+    )
     paper_recovery_policy, paper_recovery_policy_path = _refresh_paper_recovery_policy(
         repo_root=config.repo_root,
         now=actual_now,
@@ -203,6 +207,7 @@ def refresh_track_b_shared_truth(
         _service_row("Managed Position Registry", managed_position_registry, managed_position_path),
         _reconciliation_row(config=config, reconciliation=reconciliation),
         _broker_lease_row(config=config, broker_lease=broker_lease),
+        _recovery_budget_ledger_row(payload=recovery_budget_ledger, artifact_path=recovery_budget_ledger_path),
         _paper_recovery_policy_row(payload=paper_recovery_policy, artifact_path=paper_recovery_policy_path),
         _autonomous_recovery_plan_row(payload=autonomous_recovery_plan, artifact_path=autonomous_recovery_plan_path),
     ]
@@ -214,6 +219,7 @@ def refresh_track_b_shared_truth(
         "managed_position_registry": managed_position_registry,
         "reconciliation": reconciliation,
         "broker_lease": broker_lease,
+        "recovery_budget_ledger": recovery_budget_ledger,
         "paper_recovery_policy": paper_recovery_policy,
         "autonomous_recovery_plan": autonomous_recovery_plan,
     })
@@ -241,6 +247,8 @@ def refresh_track_b_shared_truth(
         "classifications": {str(row["service"]): row.get("classification") for row in services},
         "artifact_paths": {str(row["service"]): row.get("artifact_path") for row in services if row.get("artifact_path")},
         "source_refresh_artifact_path": str(config.resolve(config.shared_truth_refresh_path)),
+        "recovery_budget_ledger": recovery_budget_ledger.get("classification"),
+        "recovery_budget_exhausted": recovery_budget_ledger.get("budget_exhausted") is True,
         "paper_recovery_policy": paper_recovery_policy.get("paper_action_policy"),
         "autonomous_recovery_plan_classification": autonomous_recovery_plan.get("classification"),
         "autonomous_recovery_next_action": _autonomous_recovery_next_action(autonomous_recovery_plan),
@@ -463,6 +471,19 @@ def _refresh_paper_recovery_policy(*, repo_root: Path, now: datetime) -> tuple[d
     return payload, path
 
 
+def _refresh_recovery_budget_ledger(*, repo_root: Path, now: datetime) -> tuple[dict[str, Any], Path]:
+    from .track_b_recovery_budget_ledger import (
+        TrackBRecoveryBudgetLedgerConfig,
+        build_track_b_recovery_budget_ledger,
+        write_track_b_recovery_budget_ledger,
+    )
+
+    budget_config = TrackBRecoveryBudgetLedgerConfig(repo_root=repo_root)
+    payload = build_track_b_recovery_budget_ledger(config=budget_config, now=now)
+    path = write_track_b_recovery_budget_ledger(config=budget_config, payload=payload)
+    return payload, path
+
+
 def _refresh_autonomous_recovery_plan(*, repo_root: Path, now: datetime) -> tuple[dict[str, Any], Path]:
     from .track_b_paper_autonomous_recovery_planner import (
         TrackBPaperAutonomousRecoveryPlannerConfig,
@@ -501,6 +522,16 @@ def _paper_recovery_policy_row(*, payload: Mapping[str, Any], artifact_path: Pat
         "classification": payload.get("paper_action_policy") or payload.get("classification") or "MISSING",
         "generated_at": payload.get("generated_at"),
         "artifact_path": str(artifact_path),
+    }
+
+
+def _recovery_budget_ledger_row(*, payload: Mapping[str, Any], artifact_path: Path) -> dict[str, Any]:
+    return {
+        "service": "Recovery Budget Ledger",
+        "classification": payload.get("classification") or "MISSING",
+        "generated_at": payload.get("generated_at"),
+        "artifact_path": str(artifact_path),
+        "budget_exhausted": payload.get("budget_exhausted") is True,
     }
 
 

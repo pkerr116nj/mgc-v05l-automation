@@ -616,29 +616,33 @@ Authority hierarchy:
 12. Self-Recover Rules centralize read-only recovery recommendations such as
    wait for market reopen, refresh shared truth, restart-runtime-allowed, and
    cleanup-required-before-restart.
-13. Crash Loop Protection applies read-only restart budget, cooldown, repeated
-   failure, broker-unsafe stop, and legacy/future-live operator-ack evidence on
-   top of agent health, self-recover, runtime stop provenance, and
-   launch/runtime history.
-14. Runtime Resume Semantics combines proof readiness, shared truth, agent
+13. Recovery Budget Ledger is the persistent per-agent/per-action PAPER
+   accounting service for bounded recovery attempts. It records attempts by
+   agent, action, target identity, generation, stop/failure classification, and
+   time window, then reports remaining budget, cooldown, and quarantine state.
+14. Crash Loop Protection consumes the Recovery Budget Ledger and applies
+   read-only cooldown, repeated failure, broker-unsafe stop, and
+   legacy/future-live operator-ack evidence on top of agent health,
+   self-recover, runtime stop provenance, and launch/runtime history.
+15. Runtime Resume Semantics combines proof readiness, shared truth, agent
    health, self-recover, crash-loop policy, broker/order/position truth, and
    stop provenance into the advisory answer for whether a PAPER runtime may be
    started, resumed, held down, or has an operator-ack advisory from legacy or
    future-live policy.
-15. PAPER Recovery Policy interprets the shared evidence stack through a
+16. PAPER Recovery Policy interprets the shared evidence stack through a
    PAPER-specific resilience lens. PAPER is autonomous, bounded, observable,
    evidence-rich, and failure-tolerant: abnormal behavior should be exposed,
    classified, and preserved as artifacts rather than hidden behind routine
    human gates. This policy is advisory only in v1 and does not grant runtime
    restart, broker mutation, or lifecycle mutation authority.
-16. Runtime Supervisor Authority combines the control-plane services into the
+17. Runtime Supervisor Authority combines the control-plane services into the
    single advisory answer for what should happen next with the PAPER runtime:
    wait, start allowed, leave healthy runtime running, hold down, cleanup
    required, or manual review required.
-17. Self-Healing Restart Evidence consumes shared truth for restart eligibility
+18. Self-Healing Restart Evidence consumes shared truth for restart eligibility
    diagnostics and keeps broker lease degradation distinct from reconciliation
    danger.
-18. Operator dashboard/status surfaces display projections of this stack. They
+19. Operator dashboard/status surfaces display projections of this stack. They
     are never routing, readiness, restart, broker, lifecycle, or order
     authority.
 
@@ -661,6 +665,8 @@ Authority and status artifact map:
 | Agent Registry | `outputs/track_b_execution_core/agent_registry/latest_agent_registry.json` | `execution_core` authority |
 | Agent Health | `outputs/track_b_execution_core/agent_health/latest_agent_health.json` | `execution_core` authority |
 | Self-Recover Rules | `outputs/track_b_execution_core/self_recover/latest_self_recover_rules.json` | `execution_core` advisory authority |
+| Recovery Budget Ledger | `outputs/track_b_execution_core/recovery_budget/latest_recovery_budget_ledger.json` | `execution_core` budget authority |
+| Recovery Budget events | `outputs/track_b_execution_core/recovery_budget/recovery_budget_events.jsonl` | `execution_core` audit/accounting |
 | Crash Loop Protection | `outputs/track_b_execution_core/crash_loop_protection/latest_crash_loop_protection.json` | `execution_core` advisory authority |
 | Crash Loop events | `outputs/track_b_execution_core/crash_loop_protection/crash_loop_events.jsonl` | `execution_core` audit |
 | Runtime Resume Semantics | `outputs/track_b_execution_core/runtime_resume/latest_runtime_resume_semantics.json` | `execution_core` advisory authority |
@@ -722,9 +728,15 @@ Current consumer migration status:
   agents without granting restart, broker, lifecycle, or routing authority.
 - Self-Recover Rules v1 recommends allowed or blocked recovery actions from
   shared authority evidence, but never executes recovery.
-- Crash Loop Protection v1 recommends restart cooldown and may surface
-  operator-ack evidence from stop provenance and launch/runtime history, but it
-  never executes recovery and does not define the core PAPER recovery posture.
+- Recovery Budget Ledger v1 provides persistent PAPER budget accounting for
+  future autonomous recovery executors. Crash-loop, recovery policy, planner,
+  and dry-run executor surfaces consume its remaining-budget/quarantine
+  posture instead of reconstructing retry counts locally.
+- Crash Loop Protection v2 recommends restart cooldown/quarantine from the
+  Recovery Budget Ledger and may surface operator-ack evidence from stop
+  provenance and launch/runtime history as future LIVE policy, but it never
+  executes recovery and does not turn PAPER budget exhaustion into a routine
+  human gate.
 - Runtime Resume Semantics v1 determines whether the runtime is allowed to
   start clean, must hold down for market closure/shared-truth/crash-loop
   evidence, or has manual-cleanup/operator-ack advisory evidence. It is

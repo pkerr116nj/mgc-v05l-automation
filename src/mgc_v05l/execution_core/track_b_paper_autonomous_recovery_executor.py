@@ -18,6 +18,7 @@ from mgc_v05l.execution_core.track_b_pre_action_snapshot_validator import (
     TrackBPreActionSnapshotValidatorConfig,
     validate_track_b_pre_action_snapshot,
 )
+from mgc_v05l.execution_core.track_b_recovery_budget_ledger import DEFAULT_RECOVERY_BUDGET_LEDGER_ARTIFACT
 
 
 EXECUTOR_DRY_RUN_READY = "EXECUTOR_DRY_RUN_READY"
@@ -52,6 +53,7 @@ class TrackBPaperAutonomousRecoveryExecutorConfig:
     max_attempts_per_target: int = 1
     max_attempts_per_window: int = 3
     budget_window_seconds: int = 3600
+    recovery_budget_ledger_path: Path = DEFAULT_RECOVERY_BUDGET_LEDGER_ARTIFACT
     enable_runtime_retry_adapter: bool = False
     runtime_retry_launcher_path: Path = Path("scripts") / "run_headless_supervised_paper_service.sh"
     pre_action_validator_config: TrackBPreActionSnapshotValidatorConfig | None = None
@@ -137,6 +139,12 @@ def build_track_b_paper_autonomous_recovery_executor_attempt(
         "target_identity": normalized_target,
         "budget_key": budget_key,
         "budget": budget,
+        "recovery_budget_ledger": {
+            "classification": budget.get("ledger_classification"),
+            "source_authority_path": budget.get("ledger_authority_path"),
+            "attempts_remaining": budget.get("ledger_attempts_remaining"),
+            "budget_exhausted": budget.get("ledger_budget_exhausted"),
+        },
         "pre_action_validation": validation,
         "action_adapter": adapter_result,
         "pre_action_evidence": {
@@ -242,6 +250,8 @@ def _budget_summary(
 ) -> dict[str, Any]:
     window_start = now - timedelta(seconds=config.budget_window_seconds)
     rows = _event_rows(config.resolve(config.event_log_path))
+    ledger = _read_json(config.resolve(config.recovery_budget_ledger_path))
+    ledger_budget = _ledger_budget_for_action(ledger, action_type=action_type)
     target_attempts = 0
     window_attempts = 0
     for row in rows:
@@ -256,6 +266,11 @@ def _budget_summary(
     window_remaining = max(0, config.max_attempts_per_window - window_attempts)
     return {
         "ledger_path": str(config.resolve(config.event_log_path)),
+        "recovery_budget_ledger_path": str(config.resolve(config.recovery_budget_ledger_path)),
+        "ledger_classification": ledger.get("classification") or "MISSING",
+        "ledger_budget_exhausted": ledger_budget.get("budget_exhausted") is True,
+        "ledger_attempts_remaining": ledger_budget.get("attempts_remaining"),
+        "ledger_authority_path": _mapping(ledger.get("artifact_paths")).get("authority"),
         "max_attempts_per_target": config.max_attempts_per_target,
         "max_attempts_per_window": config.max_attempts_per_window,
         "budget_window_seconds": config.budget_window_seconds,
@@ -263,7 +278,7 @@ def _budget_summary(
         "attempts_for_action_in_window": window_attempts,
         "remaining_attempts_for_target": target_remaining,
         "remaining_attempts_for_window": window_remaining,
-        "budget_exhausted": target_remaining <= 0 or window_remaining <= 0,
+        "budget_exhausted": target_remaining <= 0 or window_remaining <= 0 or ledger_budget.get("budget_exhausted") is True,
     }
 
 
@@ -342,6 +357,26 @@ def _event_rows(path: Path) -> list[dict[str, Any]]:
     return rows
 
 
+def _read_json(path: Path) -> dict[str, Any]:
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (FileNotFoundError, json.JSONDecodeError, OSError):
+        return {}
+    return dict(payload) if isinstance(payload, Mapping) else {}
+
+
+def _ledger_budget_for_action(payload: Mapping[str, Any], *, action_type: str) -> dict[str, Any]:
+    for entry in _list(payload.get("entries")):
+        row = _mapping(entry)
+        if row.get("action_type") == action_type:
+            return dict(row)
+    summary = _mapping(payload.get("summary"))
+    return {
+        "budget_exhausted": payload.get("budget_exhausted") is True or summary.get("budget_exhausted") is True,
+        "attempts_remaining": summary.get("minimum_attempts_remaining"),
+    }
+
+
 def _event_row(payload: Mapping[str, Any]) -> dict[str, Any]:
     return {
         "generated_at": payload.get("generated_at"),
@@ -382,6 +417,14 @@ def _normalize_identity(identity: Mapping[str, Any]) -> dict[str, str]:
             continue
         normalized[str(key)] = str(value)
     return normalized
+
+
+def _mapping(value: Any) -> Mapping[str, Any]:
+    return value if isinstance(value, Mapping) else {}
+
+
+def _list(value: Any) -> list[Any]:
+    return list(value) if isinstance(value, list) else []
 
 
 def _safe_slug(value: str) -> str:

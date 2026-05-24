@@ -367,6 +367,34 @@ def _seed_base(
         },
     )
     _write_json(
+        root / "outputs" / "track_b_execution_core" / "recovery_budget" / "latest_recovery_budget_ledger.json",
+        {
+            "generated_at": NOW.isoformat(),
+            "classification": "RECOVERY_BUDGET_EXHAUSTED" if budget_exhausted else "RECOVERY_BUDGET_AVAILABLE",
+            "budget_exhausted": budget_exhausted,
+            "quarantine_required": budget_exhausted,
+            "entries": [
+                {
+                    "budget_key": "track_b_paper_runtime|RUNTIME_RETRY|empty|*|runtime_retry",
+                    "agent_id": "track_b_paper_runtime",
+                    "action_type": "RUNTIME_RETRY",
+                    "attempts_remaining": 0 if budget_exhausted else 1,
+                    "budget_exhausted": budget_exhausted,
+                }
+            ],
+            "summary": {
+                "budget_exhausted": budget_exhausted,
+                "quarantine_required": budget_exhausted,
+                "minimum_attempts_remaining": 0 if budget_exhausted else 1,
+            },
+            "artifact_paths": {
+                "authority": str(
+                    root / "outputs" / "track_b_execution_core" / "recovery_budget" / "latest_recovery_budget_ledger.json"
+                )
+            },
+        },
+    )
+    _write_json(
         root / "outputs" / "track_b_execution_core" / "runtime_supervisor" / "latest_runtime_supervisor_authority.json",
         {
             "generated_at": NOW.isoformat(),

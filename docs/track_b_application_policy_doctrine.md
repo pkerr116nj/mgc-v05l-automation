@@ -146,6 +146,11 @@ Preferred PAPER outcomes:
 - `QUARANTINE_OBSERVE_ONLY`
 - `HARD_UNSAFE_HOLD`
 
+Bounded recovery budgets are shared authority, not per-script folklore. PAPER
+retry, quarantine, and cooldown posture should flow through the execution_core
+Recovery Budget Ledger so crash-loop protection, recovery policy, planner, and
+future executors all agree on the same attempt counts and cooldown windows.
+
 `HARD_UNSAFE_HOLD` remains valid for top-tier invariants such as live-money
 eligibility, duplicate runtime writers, broad-action risk, or uncontrolled
 cascade risk. It should not be the default response to every abnormal PAPER

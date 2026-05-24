@@ -261,6 +261,35 @@ def _seed_base(
         },
     )
     _write_json(
+        root / "outputs" / "track_b_execution_core" / "recovery_budget" / "latest_recovery_budget_ledger.json",
+        {
+            "generated_at": NOW.isoformat(),
+            "classification": "RECOVERY_BUDGET_EXHAUSTED" if crash_loop_restart_blocked else "RECOVERY_BUDGET_AVAILABLE",
+            "budget_exhausted": crash_loop_restart_blocked,
+            "quarantine_required": crash_loop_restart_blocked,
+            "entries": [
+                {
+                    "budget_key": "track_b_paper_runtime|RUNTIME_RETRY|empty|*|runtime_retry",
+                    "agent_id": "track_b_paper_runtime",
+                    "action_type": "RUNTIME_RETRY",
+                    "attempts_remaining": 0 if crash_loop_restart_blocked else 1,
+                    "budget_exhausted": crash_loop_restart_blocked,
+                }
+            ],
+            "summary": {
+                "budget_exhausted": crash_loop_restart_blocked,
+                "quarantine_required": crash_loop_restart_blocked,
+                "minimum_attempts_remaining": 0 if crash_loop_restart_blocked else 1,
+            },
+            "artifact_paths": {
+                "authority": str(
+                    root / "outputs" / "track_b_execution_core" / "recovery_budget" / "latest_recovery_budget_ledger.json"
+                )
+            },
+            "live_money_eligible": live_money_eligible,
+        },
+    )
+    _write_json(
         root / "outputs" / "track_b_execution_core" / "runtime_resume" / "latest_runtime_resume_semantics.json",
         {
             "generated_at": NOW.isoformat(),

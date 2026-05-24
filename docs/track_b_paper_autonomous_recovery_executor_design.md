@@ -38,6 +38,7 @@ Primary inputs:
 
 - Control Plane Snapshot
 - PAPER Recovery Policy
+- Recovery Budget Ledger
 - Runtime Supervisor Authority
 - Runtime Resume Semantics
 - Self-Recover Rules
@@ -97,6 +98,18 @@ The `would_*` fields describe future executor behavior. They are not permissions
 
 The v1 executor framework is dry-run only. It calls `validate_track_b_pre_action_snapshot(...)`, checks a file-backed recovery budget ledger, and writes audit artifacts. It never starts a runtime and never mutates broker, order, or lifecycle state.
 
+Budget authority:
+
+- `outputs/track_b_execution_core/recovery_budget/latest_recovery_budget_ledger.json`
+- `outputs/track_b_execution_core/recovery_budget/recovery_budget_events.jsonl`
+
+The ledger is the persistent accounting source for per-agent/per-action
+recovery budgets. It keys attempts by agent id, action type, target identity
+hash, runtime generation when known, and stop/failure classification. Crash Loop
+Protection, PAPER Recovery Policy, the planner, and dry-run executor may display
+budget state from this ledger; future apply-enabled executors must validate the
+same ledger immediately after capturing a fresh Control Plane Snapshot.
+
 Each attempt includes:
 
 - `recovery_attempt_id`
@@ -105,6 +118,7 @@ Each attempt includes:
 - `action_type`
 - `target_identity`
 - `budget_key`
+- Recovery Budget Ledger source path and remaining budget
 - `pre_action_validation`
 - `pre_action_evidence`
 - `post_action_evidence` placeholder
@@ -146,7 +160,8 @@ Those adapters must add exact broker/order/lifecycle identity revalidation, scop
 
 1. Live-money eligibility, duplicate runtime writers, and broad ambiguity are hard unsafe holds.
 2. Market closed/no fresh bars expected maps to `WAIT_MARKET_CLOSED`.
-3. Budget exhaustion maps to `PLAN_BLOCKED_BUDGET_EXHAUSTED`.
+3. Budget exhaustion from Recovery Budget Ledger maps to
+   `PLAN_BLOCKED_BUDGET_EXHAUSTED` or quarantine-observe posture.
 4. Stale, missing, or incoherent Control Plane Snapshot evidence maps to `PLAN_BLOCKED_STALE_EVIDENCE`.
 5. Phase-1 producer down while the proof window is open and shared truth is clean maps to `PLAN_MARKET_DATA_RESTART`.
 6. Suspicious, duplicate, or identity-ambiguous order state maps to quarantine or identity ambiguity, not mutation.
@@ -168,7 +183,7 @@ The planner must never weaken these boundaries:
 - no paper_proof bypass
 - no pretending suspicious state is clean
 - no broker mutation without exact identity
-- no runtime retry without bounded budget
+- no runtime retry without Recovery Budget Ledger evidence
 
 ## v2 Executor Boundary
 

@@ -18,6 +18,12 @@ from typing import Any, Mapping, Sequence
 from mgc_v05l.execution_core.track_b_agent_health import DEFAULT_AGENT_HEALTH_ARTIFACT
 from mgc_v05l.execution_core.track_b_agent_registry import DEFAULT_AGENT_REGISTRY_ARTIFACT
 from mgc_v05l.execution_core.track_b_projection_metadata import build_projection_metadata
+from mgc_v05l.execution_core.track_b_recovery_budget_ledger import (
+    DEFAULT_RECOVERY_BUDGET_LEDGER_ARTIFACT,
+    TrackBRecoveryBudgetLedgerConfig,
+    build_recovery_budget_event,
+    build_track_b_recovery_budget_ledger,
+)
 from mgc_v05l.execution_core.track_b_runtime_environment_truth import DEFAULT_RUNTIME_ENVIRONMENT_EVENTS
 from mgc_v05l.execution_core.track_b_self_recover_rules import (
     DEFAULT_SELF_RECOVER_RULES_ARTIFACT,
@@ -100,6 +106,7 @@ class TrackBCrashLoopProtectionConfig:
     launch_status_history_path: Path = DEFAULT_LAUNCH_STATUS_HISTORY
     runtime_truth_history_path: Path = DEFAULT_RUNTIME_ENVIRONMENT_EVENTS
     broker_lease_path: Path = DEFAULT_BROKER_LEASE_ARTIFACT
+    recovery_budget_ledger_path: Path = DEFAULT_RECOVERY_BUDGET_LEDGER_ARTIFACT
     restart_window_seconds: float = 900.0
     cooldown_seconds: float = 300.0
     max_restarts_per_window: int = 2
@@ -125,7 +132,14 @@ def build_track_b_crash_loop_protection(
     }
     events = _collect_history_events(config=config, now=actual_now)
     window_events = _window_events(events=events, now=actual_now, window_seconds=config.restart_window_seconds)
-    decision = _classify_crash_loop(config=config, inputs=inputs, events=window_events, now=actual_now)
+    recovery_budget = _build_recovery_budget_from_history(config=config, events=window_events, now=actual_now)
+    decision = _classify_crash_loop(
+        config=config,
+        inputs=inputs,
+        events=window_events,
+        recovery_budget=recovery_budget,
+        now=actual_now,
+    )
     event_state = _event_state(decision=decision, events=window_events)
     return {
         "schema_version": "track_b_crash_loop_protection_v1",
@@ -155,6 +169,9 @@ def build_track_b_crash_loop_protection(
         "paper_action_policy": decision["paper_action_policy"],
         "live_action_policy": decision["live_action_policy"],
         "future_live_operator_ack_required": decision["future_live_operator_ack_required"],
+        "recovery_budget_ledger": _recovery_budget_summary(recovery_budget),
+        "budget_exhausted": _mapping(recovery_budget.get("summary")).get("budget_exhausted") is True,
+        "quarantine_required": _mapping(recovery_budget.get("summary")).get("quarantine_required") is True,
         "history": {
             "event_count": len(events),
             "window_event_count": len(window_events),
@@ -172,6 +189,7 @@ def build_track_b_crash_loop_protection(
             "launch_status_history": str(config.resolve(config.launch_status_history_path)),
             "runtime_truth_history": str(config.resolve(config.runtime_truth_history_path)),
             "broker_lease": str(config.resolve(config.broker_lease_path)),
+            "recovery_budget_ledger": str(config.resolve(config.recovery_budget_ledger_path)),
         },
         "artifact_paths": {
             "authority": str(config.resolve(config.output_path)),
@@ -181,7 +199,7 @@ def build_track_b_crash_loop_protection(
             else str(config.resolve(config.dashboard_projection_path)),
         },
         "todo_v2": [
-            "Persist per-agent restart attempts with explicit runtime resume ids.",
+            "Wire recovery budget consumption into future apply-enabled PAPER recovery executors.",
             "Define resume semantics for expected-clean shutdown versus failed convergence.",
             "Keep OPERATOR_ACK_REQUIRED as a future LIVE/PRE-LIVE policy adapter, not a core PAPER dependency.",
         ],
@@ -301,6 +319,7 @@ def _classify_crash_loop(
     config: TrackBCrashLoopProtectionConfig,
     inputs: Mapping[str, Mapping[str, Any]],
     events: list[dict[str, Any]],
+    recovery_budget: Mapping[str, Any],
     now: datetime,
 ) -> dict[str, Any]:
     unsafe = [event for event in events if event.get("broker_safe_at_stop") is False]
@@ -335,7 +354,10 @@ def _classify_crash_loop(
             config=config,
         )
     runtime_failures = [event for event in events if _runtime_pre_convergence_failure(event)]
-    if len(runtime_failures) >= config.max_restarts_per_window:
+    if len(runtime_failures) >= config.max_restarts_per_window or _budget_exhausted_for_action(
+        recovery_budget,
+        "RUNTIME_RETRY",
+    ):
         return _decision(
             RESTART_COOLDOWN_ACTIVE,
             True,
@@ -412,6 +434,60 @@ def _collect_history_events(*, config: TrackBCrashLoopProtectionConfig, now: dat
             if event:
                 events.append(event)
     return sorted(_dedupe_events(events), key=lambda item: str(item.get("generated_at") or item.get("observed_at") or ""))
+
+
+def _build_recovery_budget_from_history(
+    *,
+    config: TrackBCrashLoopProtectionConfig,
+    events: list[dict[str, Any]],
+    now: datetime,
+) -> dict[str, Any]:
+    budget_events = [
+        build_recovery_budget_event(
+            agent_id="track_b_paper_runtime",
+            action_type="RUNTIME_RETRY",
+            runtime_generation_id=str(event.get("restart_generation") or "") or None,
+            stop_reason=str(event.get("stop_reason") or event.get("classification") or "") or None,
+            failure_classification=str(event.get("stop_reason") or event.get("classification") or "") or None,
+            attempt_counted=_runtime_pre_convergence_failure(event) or event.get("broker_safe_at_stop") is False,
+            occurred_at=_parse_time(event.get("generated_at")) or now,
+        )
+        for event in events
+        if _runtime_pre_convergence_failure(event) or event.get("broker_safe_at_stop") is False
+    ]
+    budget_config = TrackBRecoveryBudgetLedgerConfig(
+        repo_root=config.repo_root,
+        output_path=config.recovery_budget_ledger_path,
+        budget_window_seconds=int(config.restart_window_seconds),
+        max_attempts_per_target=int(config.max_restarts_per_window),
+        cooldown_seconds=int(config.cooldown_seconds),
+    )
+    if budget_events:
+        return build_track_b_recovery_budget_ledger(config=budget_config, events=budget_events, now=now)
+    persisted = _read_json(config.resolve(config.recovery_budget_ledger_path))
+    if persisted:
+        return dict(persisted)
+    return build_track_b_recovery_budget_ledger(config=budget_config, events=[], now=now)
+
+
+def _budget_exhausted_for_action(payload: Mapping[str, Any], action_type: str) -> bool:
+    for entry in _list(payload.get("entries")):
+        row = _mapping(entry)
+        if row.get("action_type") == action_type and row.get("budget_exhausted") is True:
+            return True
+    return False
+
+
+def _recovery_budget_summary(payload: Mapping[str, Any]) -> dict[str, Any]:
+    summary = _mapping(payload.get("summary"))
+    return {
+        "classification": payload.get("classification"),
+        "budget_exhausted": summary.get("budget_exhausted") is True or payload.get("budget_exhausted") is True,
+        "quarantine_required": summary.get("quarantine_required") is True or payload.get("quarantine_required") is True,
+        "minimum_attempts_remaining": summary.get("minimum_attempts_remaining"),
+        "source_authority_path": _mapping(payload.get("artifact_paths")).get("authority"),
+        "entries": _list(payload.get("entries")),
+    }
 
 
 def _event_from_payload(payload: Mapping[str, Any]) -> dict[str, Any] | None:

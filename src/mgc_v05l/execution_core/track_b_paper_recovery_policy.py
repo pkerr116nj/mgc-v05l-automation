@@ -41,6 +41,7 @@ from mgc_v05l.execution_core.track_b_paper_proof_readiness import DEFAULT_OUTPUT
 from mgc_v05l.execution_core.track_b_paper_proof_readiness import READY_FOR_PROOF
 from mgc_v05l.execution_core.track_b_position_truth_monitor import DEFAULT_POSITION_TRUTH_ARTIFACT
 from mgc_v05l.execution_core.track_b_projection_metadata import build_projection_metadata
+from mgc_v05l.execution_core.track_b_recovery_budget_ledger import DEFAULT_RECOVERY_BUDGET_LEDGER_ARTIFACT
 from mgc_v05l.execution_core.track_b_runtime_resume_semantics import DEFAULT_RUNTIME_RESUME_SEMANTICS_ARTIFACT
 from mgc_v05l.execution_core.track_b_runtime_supervisor_authority import (
     DEFAULT_RUNTIME_STOP_PROVENANCE_ARTIFACT,
@@ -107,6 +108,7 @@ class TrackBPaperRecoveryPolicyConfig:
     stop_provenance_path: Path = DEFAULT_RUNTIME_STOP_PROVENANCE_ARTIFACT
     runtime_environment_truth_path: Path = DEFAULT_RUNTIME_ENVIRONMENT_TRUTH_ARTIFACT
     lifecycle_state_matrix_path: Path = DEFAULT_LIFECYCLE_STATE_MATRIX_DOC
+    recovery_budget_ledger_path: Path = DEFAULT_RECOVERY_BUDGET_LEDGER_ARTIFACT
     max_attempts_per_target: int = DEFAULT_MAX_ATTEMPTS_PER_TARGET
     max_attempts_per_window: int = DEFAULT_MAX_ATTEMPTS_PER_WINDOW
     cooldown_seconds: int = DEFAULT_COOLDOWN_SECONDS
@@ -137,6 +139,7 @@ def build_track_b_paper_recovery_policy(
         "broker_lease": _read_json(config.resolve(config.broker_lease_path)),
         "stop_provenance": _read_json(config.resolve(config.stop_provenance_path)),
         "runtime_environment_truth": _read_json(config.resolve(config.runtime_environment_truth_path)),
+        "recovery_budget_ledger": _read_json(config.resolve(config.recovery_budget_ledger_path)),
     }
     evidence = _evidence(inputs)
     decision = _classify_policy(config=config, evidence=evidence, inputs=inputs)
@@ -167,6 +170,11 @@ def build_track_b_paper_recovery_policy(
             "max_attempts_per_window": config.max_attempts_per_window,
             "cooldown_seconds": config.cooldown_seconds,
             "budget_exhausted": decision["budget_exhausted"],
+            "ledger_classification": evidence["recovery_budget_classification"],
+            "ledger_budget_exhausted": evidence["recovery_budget_exhausted"],
+            "quarantine_required": evidence["recovery_budget_quarantine_required"],
+            "attempts_remaining": evidence["recovery_budget_attempts_remaining"],
+            "source_authority_path": evidence["recovery_budget_authority_path"],
         },
         "prohibited_actions": [
             "live_money_route",
@@ -362,7 +370,7 @@ def _classify_policy(
             blockers=[_blocker("position_truth", evidence["position_truth_classification"])],
             allowed_next_steps=["refresh position/ownership/manifest evidence", "preserve artifacts", "observe only"],
         )
-    if _crash_loop_budget_exhausted(evidence):
+    if _recovery_budget_exhausted(evidence) or _crash_loop_budget_exhausted(evidence):
         return _decision(
             severity=ATTENTION,
             paper_action_policy=QUARANTINE_OBSERVE_ONLY,
@@ -457,6 +465,9 @@ def _evidence(inputs: Mapping[str, Mapping[str, Any]]) -> dict[str, Any]:
     broker_lease = inputs["broker_lease"]
     runtime_environment_truth = inputs["runtime_environment_truth"]
     stop_provenance = inputs["stop_provenance"]
+    recovery_budget = inputs["recovery_budget_ledger"]
+    recovery_budget_summary = _mapping(recovery_budget.get("summary"))
+    recovery_budget_entry = _first_budget_entry(recovery_budget)
     return {
         "runtime_supervisor_classification": _classification(runtime_supervisor),
         "runtime_supervisor_mode": str(runtime_supervisor.get("supervisor_mode") or ""),
@@ -465,6 +476,13 @@ def _evidence(inputs: Mapping[str, Mapping[str, Any]]) -> dict[str, Any]:
         "crash_loop_classification": _classification(crash_loop),
         "crash_loop_restart_blocked": crash_loop.get("restart_blocked") is True,
         "crash_loop_operator_ack_required": crash_loop.get("operator_ack_required") is True,
+        "recovery_budget_classification": _classification(recovery_budget),
+        "recovery_budget_exhausted": recovery_budget.get("budget_exhausted") is True
+        or recovery_budget_summary.get("budget_exhausted") is True,
+        "recovery_budget_quarantine_required": recovery_budget.get("quarantine_required") is True
+        or recovery_budget_summary.get("quarantine_required") is True,
+        "recovery_budget_attempts_remaining": recovery_budget_entry.get("attempts_remaining"),
+        "recovery_budget_authority_path": _mapping(recovery_budget.get("artifact_paths")).get("authority"),
         "runtime_resume_classification": _classification(runtime_resume),
         "runtime_resume_required_operator_ack": runtime_resume.get("required_operator_ack") is True
         or runtime_resume.get("operator_ack_required") is True,
@@ -576,6 +594,7 @@ def _stale_or_missing_evidence(inputs: Mapping[str, Mapping[str, Any]]) -> list[
         "reconciliation": "classification",
         "broker_lease": "classification",
         "runtime_environment_truth": "classification",
+        "recovery_budget_ledger": "classification",
     }
     missing: list[str] = []
     for name, field in required.items():
@@ -671,6 +690,10 @@ def _crash_loop_budget_exhausted(evidence: Mapping[str, Any]) -> bool:
     }
 
 
+def _recovery_budget_exhausted(evidence: Mapping[str, Any]) -> bool:
+    return evidence["recovery_budget_exhausted"] is True or evidence["recovery_budget_quarantine_required"] is True
+
+
 def _prior_unsafe_stop(evidence: Mapping[str, Any]) -> bool:
     return evidence["previous_broker_safe_at_stop"] is False
 
@@ -715,6 +738,7 @@ def _input_artifacts(config: TrackBPaperRecoveryPolicyConfig) -> dict[str, str]:
         "stop_provenance": str(config.resolve(config.stop_provenance_path)),
         "runtime_environment_truth": str(config.resolve(config.runtime_environment_truth_path)),
         "lifecycle_state_matrix": str(config.resolve(config.lifecycle_state_matrix_path)),
+        "recovery_budget_ledger": str(config.resolve(config.recovery_budget_ledger_path)),
     }
 
 
@@ -758,6 +782,12 @@ def _ensure_utc(value: datetime) -> datetime:
 
 def _mapping(value: Any) -> Mapping[str, Any]:
     return value if isinstance(value, Mapping) else {}
+
+
+def _first_budget_entry(payload: Mapping[str, Any]) -> Mapping[str, Any]:
+    for entry in _list(payload.get("entries")):
+        return _mapping(entry)
+    return {}
 
 
 def _list(value: Any) -> list[Any]:
