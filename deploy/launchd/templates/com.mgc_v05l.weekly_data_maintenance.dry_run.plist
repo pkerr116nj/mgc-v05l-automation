@@ -1,0 +1,45 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Template only. Not installed by this repository.
+  Track B weekly artifact-hygiene diagnostic dry run.
+  This template writes reports/logs only and does not run apply mode.
+-->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.mgc_v05l.weekly_data_maintenance.dry_run</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/Users/patrick/Dev/MGC-v05l-automation/.venv/bin/python</string>
+    <string>-m</string>
+    <string>mgc_v05l.app.weekly_data_maintenance</string>
+    <string>--mode</string>
+    <string>dry-run</string>
+    <string>--repo-root</string>
+    <string>/Users/patrick/Dev/MGC-v05l-automation</string>
+    <string>--output-root</string>
+    <string>outputs/reports/weekly_data_maintenance</string>
+  </array>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>TRACK_B_PROJECT_ROOT</key>
+    <string>/Users/patrick/Dev/MGC-v05l-automation</string>
+  </dict>
+  <key>StartCalendarInterval</key>
+  <dict>
+    <key>Weekday</key>
+    <integer>0</integer>
+    <key>Hour</key>
+    <integer>9</integer>
+    <key>Minute</key>
+    <integer>0</integer>
+  </dict>
+  <key>WorkingDirectory</key>
+  <string>/Users/patrick/Dev/MGC-v05l-automation</string>
+  <key>StandardOutPath</key>
+  <string>/Users/patrick/Dev/MGC-v05l-automation/outputs/reports/weekly_data_maintenance/weekly_data_maintenance.stdout.log</string>
+  <key>StandardErrorPath</key>
+  <string>/Users/patrick/Dev/MGC-v05l-automation/outputs/reports/weekly_data_maintenance/weekly_data_maintenance.stderr.log</string>
+</dict>
+</plist>
