@@ -15,13 +15,19 @@ from datetime import UTC, datetime
 from decimal import Decimal, InvalidOperation
 from enum import Enum
 from pathlib import Path
-from typing import Callable, Mapping
+from typing import Any, Callable, Mapping
 
 from .candle_signal_producer import DEFAULT_CANDLE_SIGNAL_PRODUCER_OUTPUT_ROOT
 from .harness import HarnessResult
 from .models import TerminalClassification, require_aware_datetime, to_jsonable
 from .operator_status import DEFAULT_OPERATOR_STATUS_OUTPUT_ROOT, OperatorStatusInputs, create_operator_status_summary
 from .paper_proof import DEFAULT_PAPER_PROOF_OUTPUT_ROOT, PaperProofResult, ProofRunner
+from .track_b_continuation_aware_exit_decision import (
+    ASIAN_DRIFT_CONTINUATION_LONG_LEASH_V1,
+    ASIA_EARLY_PAUSE_RESUME_SHORT_MEDIUM_LEASH_V1,
+    BREAKOUT_RETEST_CONTINUATION_HOLD_V1,
+    SNAP_TURN_FAST_DECAY_V1,
+)
 from .track_b_strategy_managed_paper_lifecycle import (
     DEFAULT_TRACK_B_STRATEGY_MANAGED_PAPER_LIFECYCLE_OUTPUT_ROOT,
     DEFAULT_CONTROL_PLANE_SNAPSHOT_ARTIFACT,
@@ -957,6 +963,203 @@ def _run_readiness(
     return run_track_b_readiness_check(config=readiness_config, stages=readiness_stages)
 
 
+def _continuation_exit_evidence_from_strategy_report(
+    *,
+    config: TrackBStrategyPaperRunnerConfig,
+    strategy_report: Mapping[str, object],
+) -> dict[str, object]:
+    rule_inputs = _mapping_or_empty(strategy_report.get("rule_inputs"))
+    rule_conditions = _mapping_or_empty(strategy_report.get("rule_conditions"))
+    return {
+        "continuation_exit_profile_id": _continuation_exit_profile_id(config.strategy_id, strategy_report),
+        "continuation_completed_5m_candles": _completed_5m_candles_from_report(strategy_report),
+        "continuation_microtrend_state": _continuation_microtrend_state(config.strategy_id, strategy_report, rule_inputs),
+        "continuation_participation_state": _continuation_participation_state(
+            config.strategy_id,
+            strategy_report,
+            rule_conditions,
+        ),
+        "continuation_position_age_minutes": _first_present(
+            strategy_report,
+            (
+                "continuation_position_age_minutes",
+                "position_age_minutes",
+                "open_position_age_minutes",
+                "managed_position_age_minutes",
+            ),
+        ),
+        "continuation_mfe": _first_present(
+            strategy_report,
+            ("continuation_mfe", "mfe", "max_favorable_excursion", "open_position_mfe"),
+        ),
+        "continuation_mae": _first_present(
+            strategy_report,
+            ("continuation_mae", "mae", "max_adverse_excursion", "open_position_mae"),
+        ),
+        "continuation_unrealized_pnl": _first_present(
+            strategy_report,
+            ("continuation_unrealized_pnl", "unrealized_pnl", "open_position_unrealized_pnl"),
+        ),
+        "continuation_safe_state_classification": _string_or_none(
+            _first_present(
+                strategy_report,
+                ("continuation_safe_state_classification", "safe_state_classification", "safe_state"),
+            )
+        )
+        or "SAFE_STATE_NORMAL",
+        "continuation_lifecycle_reconciliation_classification": _string_or_none(
+            _first_present(
+                strategy_report,
+                (
+                    "continuation_lifecycle_reconciliation_classification",
+                    "lifecycle_reconciliation_classification",
+                    "reconciliation_classification",
+                    "broker_reconciliation_classification",
+                ),
+            )
+        )
+        or "CLEAN",
+        "continuation_source_strategy_report_path": _strategy_report_path(strategy_report),
+    }
+
+
+def _continuation_exit_profile_id(strategy_id: str, strategy_report: Mapping[str, object]) -> str | None:
+    explicit = _string_or_none(strategy_report.get("continuation_exit_profile_id") or strategy_report.get("exit_profile_id"))
+    if explicit:
+        return explicit
+    return {
+        "asian_drift_v1": ASIAN_DRIFT_CONTINUATION_LONG_LEASH_V1,
+        "ASIA_EARLY_PAUSE_RESUME_SHORT_V1": ASIA_EARLY_PAUSE_RESUME_SHORT_MEDIUM_LEASH_V1,
+        "ASIA_EARLY_NORMAL_BREAKOUT_RETEST_HOLD_LONG_V1": BREAKOUT_RETEST_CONTINUATION_HOLD_V1,
+        "MNQ_FIRST_BEAR_SNAP_TURN_V1": SNAP_TURN_FAST_DECAY_V1,
+        "MNQ_FIRST_BULL_SNAP_TURN_V1": SNAP_TURN_FAST_DECAY_V1,
+    }.get(strategy_id)
+
+
+def _completed_5m_candles_from_report(strategy_report: Mapping[str, object]) -> tuple[Mapping[str, Any], ...]:
+    raw = _first_present(
+        strategy_report,
+        (
+            "completed_5m_candles",
+            "continuation_completed_5m_candles",
+            "input_candle_window",
+            "recent_completed_5m_candles",
+        ),
+    )
+    if isinstance(raw, Mapping):
+        nested = raw.get("completed_5m_candles") or raw.get("candles") or raw.get("items")
+        raw = nested if nested is not None else raw
+    if isinstance(raw, Mapping):
+        return (dict(raw),)
+    if isinstance(raw, (str, bytes)) or raw is None:
+        return ()
+    try:
+        return tuple(dict(item) for item in raw if isinstance(item, Mapping))  # type: ignore[union-attr]
+    except TypeError:
+        return ()
+
+
+def _continuation_microtrend_state(
+    strategy_id: str,
+    strategy_report: Mapping[str, object],
+    rule_inputs: Mapping[str, object],
+) -> Mapping[str, object] | str | None:
+    explicit = strategy_report.get("continuation_microtrend_state") or strategy_report.get("microtrend_state")
+    if explicit:
+        return explicit  # type: ignore[return-value]
+    if strategy_id == "asian_drift_v1":
+        return {
+            "source": "strategy_report.rule_inputs",
+            "strategy_family": "asia_drift",
+            "asia_drift_state": rule_inputs.get("asia_drift_state"),
+            "asia_drift_regime": rule_inputs.get("asia_drift_regime"),
+            "direction": rule_inputs.get("direction"),
+            "microtrend": _asian_drift_microtrend_label(rule_inputs),
+        }
+    if strategy_id == "ASIA_EARLY_PAUSE_RESUME_SHORT_V1":
+        return {
+            "source": "strategy_report.rule_inputs",
+            "strategy_family": "pause_resume",
+            "direction": "SHORT",
+            "derivative_phase": rule_inputs.get("derivative_phase"),
+            "microtrend": rule_inputs.get("microtrend_state") or rule_inputs.get("trend_state"),
+        }
+    if strategy_id in {
+        "ASIA_EARLY_NORMAL_BREAKOUT_RETEST_HOLD_LONG_V1",
+        "MNQ_FIRST_BEAR_SNAP_TURN_V1",
+        "MNQ_FIRST_BULL_SNAP_TURN_V1",
+    }:
+        return {
+            "source": "strategy_report.placeholder_profile_mapping",
+            "strategy_family": "breakout_retest" if "BREAKOUT_RETEST" in strategy_id else "snap_turn",
+            "runtime_behavior_changed": False,
+        }
+    return None
+
+
+def _continuation_participation_state(
+    strategy_id: str,
+    strategy_report: Mapping[str, object],
+    rule_conditions: Mapping[str, object],
+) -> Mapping[str, object] | str | None:
+    explicit = strategy_report.get("continuation_participation_state") or strategy_report.get("participation_state")
+    if explicit:
+        return explicit  # type: ignore[return-value]
+    if strategy_id == "asian_drift_v1":
+        return {
+            "source": "strategy_report.rule_conditions",
+            "strategy_family": "asia_drift",
+            "participation": _participation_label(rule_conditions),
+            "conditions": dict(rule_conditions),
+        }
+    if strategy_id == "ASIA_EARLY_PAUSE_RESUME_SHORT_V1":
+        return {
+            "source": "strategy_report.rule_conditions",
+            "strategy_family": "pause_resume",
+            "participation": _participation_label(rule_conditions),
+            "failed_continuation_sensitive": True,
+            "conditions": dict(rule_conditions),
+        }
+    return None
+
+
+def _asian_drift_microtrend_label(rule_inputs: Mapping[str, object]) -> str:
+    joined = " ".join(str(value).upper() for value in rule_inputs.values())
+    if "LONG" in joined or "SHORT" in joined:
+        return "ALIGNED_LOW_VOL_DRIFT"
+    return "UNKNOWN"
+
+
+def _participation_label(rule_conditions: Mapping[str, object]) -> str:
+    if rule_conditions and all(value is True for value in rule_conditions.values() if isinstance(value, bool)):
+        return "STRONG_PARTICIPATING"
+    if any(value is False for value in rule_conditions.values() if isinstance(value, bool)):
+        return "FAILED_OR_MIXED_PARTICIPATION"
+    return "UNKNOWN_PARTICIPATION"
+
+
+def _strategy_report_path(strategy_report: Mapping[str, object]) -> str | None:
+    return _string_or_none(
+        strategy_report.get("report_json_path")
+        or strategy_report.get("strategy_rule_report_json")
+        or strategy_report.get("source_strategy_report_path")
+    )
+
+
+def _first_present(payload: Mapping[str, object], keys: tuple[str, ...]) -> object | None:
+    for key in keys:
+        value = payload.get(key)
+        if value is not None and value != "":
+            return value
+    return None
+
+
+def _mapping_or_empty(value: object) -> Mapping[str, object]:
+    if isinstance(value, Mapping):
+        return value
+    return {}
+
+
 def _run_managed_lifecycle(
     config: TrackBStrategyPaperRunnerConfig,
     strategy_report: Mapping[str, object],
@@ -973,6 +1176,7 @@ def _run_managed_lifecycle(
         or strategy_report.get("runtime_data_source")
         or "DATABENTO_LIVE_ARTIFACT"
     )
+    continuation_evidence = _continuation_exit_evidence_from_strategy_report(config=config, strategy_report=strategy_report)
     managed_config = TrackBStrategyManagedPaperLifecycleConfig(
         mode=config.mode,
         account_id=config.account_id,
@@ -1017,6 +1221,21 @@ def _run_managed_lifecycle(
         runtime_safe_state_envelope_path=config.runtime_safe_state_envelope_path,
         expected_control_plane_snapshot_id=config.expected_control_plane_snapshot_id,
         expected_shared_truth_generation_id=config.expected_shared_truth_generation_id,
+        continuation_exit_profile_id=_string_or_none(continuation_evidence.get("continuation_exit_profile_id")),
+        continuation_completed_5m_candles=tuple(continuation_evidence.get("continuation_completed_5m_candles") or ()),
+        continuation_microtrend_state=continuation_evidence.get("continuation_microtrend_state"),
+        continuation_participation_state=continuation_evidence.get("continuation_participation_state"),
+        continuation_position_age_minutes=continuation_evidence.get("continuation_position_age_minutes"),
+        continuation_mfe=continuation_evidence.get("continuation_mfe"),
+        continuation_mae=continuation_evidence.get("continuation_mae"),
+        continuation_unrealized_pnl=continuation_evidence.get("continuation_unrealized_pnl"),
+        continuation_safe_state_classification=_string_or_none(
+            continuation_evidence.get("continuation_safe_state_classification")
+        ),
+        continuation_lifecycle_reconciliation_classification=_string_or_none(
+            continuation_evidence.get("continuation_lifecycle_reconciliation_classification")
+        ),
+        continuation_source_strategy_report_path=continuation_evidence.get("continuation_source_strategy_report_path"),
     )
     return run_track_b_strategy_managed_paper_lifecycle(config=managed_config)
 

@@ -42,11 +42,16 @@ INSUFFICIENT_DATA_HOLD_OR_FALLBACK = "INSUFFICIENT_DATA_HOLD_OR_FALLBACK"
 SUPPORTED_STRATEGY_IDS = {
     "asian_drift_v1",
     "ASIA_EARLY_PAUSE_RESUME_SHORT_V1",
+    "ASIA_EARLY_NORMAL_BREAKOUT_RETEST_HOLD_LONG_V1",
+    "MNQ_FIRST_BEAR_SNAP_TURN_V1",
+    "MNQ_FIRST_BULL_SNAP_TURN_V1",
 }
 
 ASIAN_DRIFT_CONTINUATION_LONG_LEASH_V1 = "ASIAN_DRIFT_CONTINUATION_LONG_LEASH_V1"
 ASIAN_DRIFT_TRUE_DRIFT_HOLD_V1 = "ASIAN_DRIFT_TRUE_DRIFT_HOLD_V1"
 ASIA_EARLY_PAUSE_RESUME_SHORT_MEDIUM_LEASH_V1 = "ASIA_EARLY_PAUSE_RESUME_SHORT_MEDIUM_LEASH_V1"
+BREAKOUT_RETEST_CONTINUATION_HOLD_V1 = "BREAKOUT_RETEST_CONTINUATION_HOLD_V1"
+SNAP_TURN_FAST_DECAY_V1 = "SNAP_TURN_FAST_DECAY_V1"
 
 
 _PROFILE_DEFAULTS: dict[str, dict[str, Any]] = {
@@ -107,6 +112,43 @@ _PROFILE_DEFAULTS: dict[str, dict[str, Any]] = {
             "so PAPER does not overhold a failed continuation."
         ),
     },
+    BREAKOUT_RETEST_CONTINUATION_HOLD_V1: {
+        "exit_profile_id": BREAKOUT_RETEST_CONTINUATION_HOLD_V1,
+        "family_profile_id": BREAKOUT_RETEST_CONTINUATION_HOLD_V1,
+        "strategy_family": "breakout_retest",
+        "minimum_hold_minutes": 15,
+        "continuation_extension_minutes": 45,
+        "hard_max_hold_minutes": 90,
+        "decay_threshold": Decimal("0.62"),
+        "reversal_threshold": Decimal("0.64"),
+        "stagnation_threshold": Decimal("0.70"),
+        "decay_sensitivity": "MODERATE",
+        "reversal_sensitivity": "FIRM",
+        "stagnation_sensitivity": "MODERATE",
+        "paper_experimental_profile": False,
+        "profile_explanation": (
+            "Placeholder P0 breakout/retest continuation profile: keeps preview-only evidence flowing "
+            "until this family is explicitly enabled for runtime exit behavior."
+        ),
+    },
+    SNAP_TURN_FAST_DECAY_V1: {
+        "exit_profile_id": SNAP_TURN_FAST_DECAY_V1,
+        "family_profile_id": SNAP_TURN_FAST_DECAY_V1,
+        "strategy_family": "snap_turn",
+        "minimum_hold_minutes": 5,
+        "continuation_extension_minutes": 10,
+        "hard_max_hold_minutes": 25,
+        "decay_threshold": Decimal("0.48"),
+        "reversal_threshold": Decimal("0.58"),
+        "stagnation_threshold": Decimal("0.52"),
+        "decay_sensitivity": "FAST",
+        "reversal_sensitivity": "FAST",
+        "stagnation_sensitivity": "FAST",
+        "paper_experimental_profile": False,
+        "profile_explanation": (
+            "Placeholder P0 snap-turn profile: fast decay/reversal sensitivity for dry-run preview only."
+        ),
+    },
 }
 
 _PROFILE_ALIASES = {
@@ -117,6 +159,9 @@ _PROFILE_ALIASES = {
 _STRATEGY_PROFILE = {
     "asian_drift_v1": ASIAN_DRIFT_CONTINUATION_LONG_LEASH_V1,
     "ASIA_EARLY_PAUSE_RESUME_SHORT_V1": ASIA_EARLY_PAUSE_RESUME_SHORT_MEDIUM_LEASH_V1,
+    "ASIA_EARLY_NORMAL_BREAKOUT_RETEST_HOLD_LONG_V1": BREAKOUT_RETEST_CONTINUATION_HOLD_V1,
+    "MNQ_FIRST_BEAR_SNAP_TURN_V1": SNAP_TURN_FAST_DECAY_V1,
+    "MNQ_FIRST_BULL_SNAP_TURN_V1": SNAP_TURN_FAST_DECAY_V1,
 }
 
 

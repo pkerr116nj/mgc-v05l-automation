@@ -6,6 +6,7 @@ from pathlib import Path
 
 from mgc_v05l.execution_core.models import TerminalClassification
 from mgc_v05l.execution_core.paper_proof import PaperProofConfig, PaperProofResult
+import mgc_v05l.execution_core.track_b_strategy_paper_runner as paper_runner_module
 from mgc_v05l.execution_core.track_b_readiness_check_runner import (
     TrackBReadinessCheckRunnerResult,
     TrackBReadinessCheckRunnerVerdict,
@@ -27,6 +28,7 @@ from mgc_v05l.execution_core.track_b_strategy_paper_runner import (
     TrackBStrategyPaperRunnerConfig,
     TrackBStrategyPaperRunnerStages,
     TrackBStrategyPaperRunnerVerdict,
+    _continuation_exit_evidence_from_strategy_report,
     run_track_b_strategy_paper,
 )
 from mgc_v05l.execution_core.track_b_strategy_managed_paper_lifecycle import (
@@ -113,6 +115,140 @@ def assert_legacy_paper_proof_disabled(result, calls: Calls) -> None:
     assert result.report["submit_attempted"] is False
     assert result.report["broker_state_mutated"] is False
     assert result.report["live_money_readiness"] is False
+
+
+def test_asian_drift_envelope_auto_populates_continuation_exit_evidence(tmp_path: Path) -> None:
+    evidence = _continuation_exit_evidence_from_strategy_report(
+        config=base_config(tmp_path, strategy_id="asian_drift_v1"),
+        strategy_report={
+            "report_json_path": str(tmp_path / "rule" / "asian_drift.json"),
+            "completed_5m_candles": [
+                {"open": "100.0", "high": "100.4", "low": "99.9", "close": "100.3"},
+                {"open": "100.3", "high": "100.8", "low": "100.2", "close": "100.7"},
+            ],
+            "position_age_minutes": 65,
+            "mfe": "1.4",
+            "mae": "-0.2",
+            "unrealized_pnl": "1.0",
+            "rule_inputs": {
+                "asia_drift_state": "ENTRY_ARMED",
+                "asia_drift_regime": "ASIA_DRIFT_LONG",
+                "direction": "LONG",
+            },
+            "rule_conditions": {"entry_window_open": True, "in_scope": True},
+            "safe_state_classification": "SAFE_STATE_NORMAL",
+            "reconciliation_classification": "TRACK_B_PAPER_BROKER_RECONCILED",
+        },
+    )
+
+    assert evidence["continuation_exit_profile_id"] == "ASIAN_DRIFT_CONTINUATION_LONG_LEASH_V1"
+    assert len(evidence["continuation_completed_5m_candles"]) == 2
+    assert evidence["continuation_position_age_minutes"] == 65
+    assert evidence["continuation_mfe"] == "1.4"
+    assert evidence["continuation_mae"] == "-0.2"
+    assert evidence["continuation_unrealized_pnl"] == "1.0"
+    assert evidence["continuation_microtrend_state"]["microtrend"] == "ALIGNED_LOW_VOL_DRIFT"
+    assert evidence["continuation_participation_state"]["participation"] == "STRONG_PARTICIPATING"
+    assert evidence["continuation_lifecycle_reconciliation_classification"] == "TRACK_B_PAPER_BROKER_RECONCILED"
+    assert evidence["continuation_source_strategy_report_path"].endswith("asian_drift.json")
+
+
+def test_pause_resume_short_envelope_auto_populates_continuation_exit_evidence(tmp_path: Path) -> None:
+    evidence = _continuation_exit_evidence_from_strategy_report(
+        config=base_config(tmp_path, strategy_id="ASIA_EARLY_PAUSE_RESUME_SHORT_V1"),
+        strategy_report={
+            "strategy_rule_report_json": str(tmp_path / "rule" / "pause_resume_short.json"),
+            "input_candle_window": [
+                {"open": "100.0", "high": "100.1", "low": "99.4", "close": "99.5"},
+                {"open": "99.5", "high": "99.6", "low": "98.9", "close": "99.0"},
+            ],
+            "open_position_age_minutes": 18,
+            "open_position_mfe": "1.0",
+            "open_position_mae": "-0.3",
+            "open_position_unrealized_pnl": "0.4",
+            "rule_inputs": {"derivative_phase": "RESUME_SHORT"},
+            "rule_conditions": {"breakdown_confirmed": True, "failed_resume": False},
+        },
+    )
+
+    assert evidence["continuation_exit_profile_id"] == "ASIA_EARLY_PAUSE_RESUME_SHORT_MEDIUM_LEASH_V1"
+    assert len(evidence["continuation_completed_5m_candles"]) == 2
+    assert evidence["continuation_position_age_minutes"] == 18
+    assert evidence["continuation_mfe"] == "1.0"
+    assert evidence["continuation_mae"] == "-0.3"
+    assert evidence["continuation_unrealized_pnl"] == "0.4"
+    assert evidence["continuation_microtrend_state"]["strategy_family"] == "pause_resume"
+    assert evidence["continuation_participation_state"]["failed_continuation_sensitive"] is True
+    assert evidence["continuation_safe_state_classification"] == "SAFE_STATE_NORMAL"
+
+
+def test_remaining_p0_envelopes_have_profile_mapping_without_exit_behavior_change(tmp_path: Path) -> None:
+    cases = {
+        "ASIA_EARLY_NORMAL_BREAKOUT_RETEST_HOLD_LONG_V1": "BREAKOUT_RETEST_CONTINUATION_HOLD_V1",
+        "MNQ_FIRST_BEAR_SNAP_TURN_V1": "SNAP_TURN_FAST_DECAY_V1",
+        "MNQ_FIRST_BULL_SNAP_TURN_V1": "SNAP_TURN_FAST_DECAY_V1",
+    }
+
+    for strategy_id, expected_profile in cases.items():
+        evidence = _continuation_exit_evidence_from_strategy_report(
+            config=base_config(tmp_path, strategy_id=strategy_id),
+            strategy_report={},
+        )
+
+        assert evidence["continuation_exit_profile_id"] == expected_profile
+        assert evidence["continuation_completed_5m_candles"] == ()
+        assert evidence["continuation_microtrend_state"]["runtime_behavior_changed"] is False
+
+
+def test_managed_lifecycle_receives_auto_populated_continuation_evidence(tmp_path: Path, monkeypatch) -> None:
+    captured = {}
+
+    def fake_managed_lifecycle(*, config):
+        captured["config"] = config
+        return TrackBStrategyManagedPaperLifecycleResult(
+            lifecycle_id="captured",
+            classification=TrackBManagedPaperLifecycleClassification.OPEN_MANAGED,
+            report_json=tmp_path / "captured.json",
+            report={"continuation_aware_exit_preview": None},
+        )
+
+    monkeypatch.setattr(paper_runner_module, "run_track_b_strategy_managed_paper_lifecycle", fake_managed_lifecycle)
+
+    paper_runner_module._run_managed_lifecycle(
+        base_config(
+            tmp_path,
+            strategy_id="asian_drift_v1",
+            managed_exit_policy_id="PAPER_DIAGNOSTIC_TIME_BOXED_3X5M_EXIT_V1",
+        ),
+        {
+            "strategy_registry_instrument_family": "MGC",
+            "latest_decision_bar_source": "DATABENTO_LIVE_ARTIFACT",
+            "completed_5m_candles": [
+                {"open": "100.0", "high": "100.5", "low": "99.9", "close": "100.4"},
+                {"open": "100.4", "high": "100.9", "low": "100.3", "close": "100.8"},
+            ],
+            "position_age_minutes": 70,
+            "mfe": "1.6",
+            "mae": "-0.2",
+            "unrealized_pnl": "1.1",
+            "rule_inputs": {
+                "asia_drift_state": "ENTRY_ARMED",
+                "asia_drift_regime": "ASIA_DRIFT_LONG",
+                "direction": "LONG",
+            },
+            "rule_conditions": {"entry_window_open": True, "in_scope": True},
+        },
+    )
+
+    managed_config = captured["config"]
+    assert managed_config.continuation_exit_profile_id == "ASIAN_DRIFT_CONTINUATION_LONG_LEASH_V1"
+    assert len(managed_config.continuation_completed_5m_candles) == 2
+    assert managed_config.continuation_position_age_minutes == 70
+    assert managed_config.continuation_mfe == "1.6"
+    assert managed_config.continuation_mae == "-0.2"
+    assert managed_config.continuation_unrealized_pnl == "1.1"
+    assert managed_config.continuation_microtrend_state["microtrend"] == "ALIGNED_LOW_VOL_DRIFT"
+    assert managed_config.continuation_participation_state["participation"] == "STRONG_PARTICIPATING"
 
 
 def candle_history_producer_result(tmp_path: Path, *, ready: bool = True) -> TrackBMgcCandleHistoryProducerResult:

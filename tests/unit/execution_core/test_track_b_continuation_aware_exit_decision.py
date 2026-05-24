@@ -7,6 +7,7 @@ from mgc_v05l.execution_core.track_b_continuation_aware_exit_decision import (
     ASIAN_DRIFT_CONTINUATION_LONG_LEASH_V1,
     ASIAN_DRIFT_TRUE_DRIFT_HOLD_V1,
     ASIA_EARLY_PAUSE_RESUME_SHORT_MEDIUM_LEASH_V1,
+    BREAKOUT_RETEST_CONTINUATION_HOLD_V1,
     EXIT_DECAY_DETECTED,
     EXIT_HARD_MAX_DURATION,
     EXIT_LIFECYCLE_UNSAFE,
@@ -15,6 +16,7 @@ from mgc_v05l.execution_core.track_b_continuation_aware_exit_decision import (
     HOLD_CONTINUATION_CONFIRMED,
     HOLD_MINIMUM_WINDOW,
     INSUFFICIENT_DATA_HOLD_OR_FALLBACK,
+    SNAP_TURN_FAST_DECAY_V1,
     TIME_PLUS_CONTINUATION_EXIT_V1,
     build_time_plus_continuation_exit_decision,
     write_continuation_aware_exit_preview_artifacts,
@@ -121,6 +123,30 @@ def test_asian_drift_true_drift_profile_allows_360_minute_hard_max_in_dry_run() 
     assert decision["hard_max_hold_minutes"] == 360
     assert decision["hard_max_remaining_minutes"] == "120"
     assert decision["exit_state"] == HOLD_CONTINUATION_CONFIRMED
+
+
+def test_remaining_p0_strategies_have_preview_profile_mapping_without_runtime_exit_enablement() -> None:
+    cases = {
+        "ASIA_EARLY_NORMAL_BREAKOUT_RETEST_HOLD_LONG_V1": BREAKOUT_RETEST_CONTINUATION_HOLD_V1,
+        "MNQ_FIRST_BEAR_SNAP_TURN_V1": SNAP_TURN_FAST_DECAY_V1,
+        "MNQ_FIRST_BULL_SNAP_TURN_V1": SNAP_TURN_FAST_DECAY_V1,
+    }
+
+    for strategy_id, expected_profile in cases.items():
+        decision = build_time_plus_continuation_exit_decision(
+            strategy_id=strategy_id,
+            symbol="MNQ" if strategy_id.startswith("MNQ") else "MGC",
+            side="SHORT" if "BEAR" in strategy_id else "LONG",
+            current_time=_now(),
+            completed_5m_candles=(),
+            position_age_minutes=12,
+        )
+
+        assert decision["exit_profile_id"] == expected_profile
+        assert decision["exit_state"] == INSUFFICIENT_DATA_HOLD_OR_FALLBACK
+        assert decision["dry_run_only"] is True
+        assert decision["should_request_close"] is False
+        assert decision["close_intent_preview"]["would_submit"] is False
 
 
 def test_asian_drift_true_drift_exits_on_firm_reversal_despite_long_leash() -> None:

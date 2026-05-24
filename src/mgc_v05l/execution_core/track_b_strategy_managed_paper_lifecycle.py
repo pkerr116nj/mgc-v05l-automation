@@ -23,8 +23,11 @@ from .models import require_aware_datetime, to_jsonable
 from .models import IntentKind, OrderIntent, PositionState, SubmitAttempt, SubmitAttemptState
 from .preflight import ReadOnlyPreflightConfig
 from .track_b_continuation_aware_exit_decision import (
+    DEFAULT_CONTINUATION_AWARE_EXIT_PREVIEW_EVENT_LOG,
+    DEFAULT_CONTINUATION_AWARE_EXIT_PREVIEW_PATH,
     SUPPORTED_STRATEGY_IDS as CONTINUATION_AWARE_EXIT_SUPPORTED_STRATEGY_IDS,
     build_time_plus_continuation_exit_decision,
+    write_continuation_aware_exit_preview_artifacts,
 )
 from .track_b_paper_autonomous_recovery_planner import DEFAULT_PAPER_AUTONOMOUS_RECOVERY_PLAN_ARTIFACT
 from .track_b_pre_action_snapshot_validator import (
@@ -294,6 +297,7 @@ def run_track_b_strategy_managed_paper_lifecycle(
         report_json=report_json,
     )
     _write_report(report_json, report)
+    _write_continuation_preview_diagnostics(config=config, report=report)
     return TrackBStrategyManagedPaperLifecycleResult(
         lifecycle_id=actual_lifecycle_id,
         classification=classification,
@@ -407,6 +411,7 @@ def maintain_open_track_b_strategy_managed_paper_lifecycle(
     report["maintenance_invoked"] = True
     report["maintenance_generated_at"] = actual_now.isoformat()
     _write_report(report_json, report)
+    _write_continuation_preview_diagnostics(config=config, report=report)
     return TrackBStrategyManagedPaperLifecycleResult(
         lifecycle_id=lifecycle_id,
         classification=classification,
@@ -568,6 +573,7 @@ def write_open_managed_lifecycle_report_from_filled_bridge_result(
     if manifest_path:
         report["position_management_manifest_path"] = str(manifest_path)
     _write_report(report_json, report)
+    _write_continuation_preview_diagnostics(config=config, report=report)
     return report_json
 
 
@@ -1749,6 +1755,21 @@ def _write_report(report_json: Path, report: Mapping[str, Any]) -> None:
     latest = Path(str(report["latest_report_json_path"]))
     latest.parent.mkdir(parents=True, exist_ok=True)
     latest.write_text(payload, encoding="utf-8")
+
+
+def _write_continuation_preview_diagnostics(
+    *,
+    config: TrackBStrategyManagedPaperLifecycleConfig,
+    report: Mapping[str, Any],
+) -> None:
+    preview = _mapping(report.get("continuation_aware_exit_preview"))
+    if not preview:
+        return
+    write_continuation_aware_exit_preview_artifacts(
+        preview=preview,
+        output_path=Path(config.repo_root) / DEFAULT_CONTINUATION_AWARE_EXIT_PREVIEW_PATH,
+        event_log_path=Path(config.repo_root) / DEFAULT_CONTINUATION_AWARE_EXIT_PREVIEW_EVENT_LOG,
+    )
 
 
 def _normalized_exit_policy(value: str | None) -> str:

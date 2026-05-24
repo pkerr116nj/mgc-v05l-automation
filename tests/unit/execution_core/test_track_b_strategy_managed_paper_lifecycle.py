@@ -715,6 +715,28 @@ def test_continuation_aware_preview_is_diagnostic_only_for_first_p0_strategy(tmp
     assert preview["not_lifecycle_authority"] is True
     assert preview["should_request_close"] is False
 
+    latest_preview = (
+        tmp_path
+        / "outputs"
+        / "track_b_execution_core"
+        / "continuation_aware_exit"
+        / "latest_continuation_aware_exit_preview.json"
+    )
+    preview_events = (
+        tmp_path
+        / "outputs"
+        / "track_b_execution_core"
+        / "continuation_aware_exit"
+        / "continuation_aware_exit_previews.jsonl"
+    )
+    diagnostic_preview = json.loads(latest_preview.read_text(encoding="utf-8"))
+    assert diagnostic_preview["strategy_id"] == "asian_drift_v1"
+    assert diagnostic_preview["dry_run_only"] is True
+    assert diagnostic_preview["not_order_authority"] is True
+    assert diagnostic_preview["not_lifecycle_authority"] is True
+    assert diagnostic_preview["close_intent_preview"]["would_submit"] is False
+    assert len(preview_events.read_text(encoding="utf-8").strip().splitlines()) == 1
+
 
 def test_continuation_aware_preview_missing_evidence_does_not_block_time_boxed_exit(tmp_path: Path) -> None:
     result = run_track_b_strategy_managed_paper_lifecycle(
