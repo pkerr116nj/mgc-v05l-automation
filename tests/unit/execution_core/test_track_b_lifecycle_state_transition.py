@@ -11,9 +11,15 @@ from mgc_v05l.execution_core.track_b_lifecycle_state_transition import (
     TRACK_B_STRATEGY_PAPER_OPEN_MANAGED,
     broker_backed_fill_evidence_complete,
     classify_managed_position_transition,
+    classify_transition,
+    is_clean_trade_stat_eligible,
+    is_registry_eligible,
+    is_terminal_state,
     ledger_projection_from_transition,
     lifecycle_state_matrix,
     normalize_no_broker_effect_result,
+    requires_close_fill_or_broker_flat_proof,
+    requires_operator_action,
     validate_open_managed_evidence,
 )
 
@@ -175,6 +181,33 @@ def test_lifecycle_state_matrix_exposes_control_plane_semantics() -> None:
     assert matrix[BLOCKED_NO_BROKER_EFFECT]["terminal"] is True
     assert matrix[BLOCKED_NO_BROKER_EFFECT]["managed_position_registry_allowed"] is False
     assert matrix[CLOSED_FLAT]["required_evidence"] == ["close_fill_or_broker_flat_proof"]
+
+
+def test_lifecycle_state_helpers_expose_matrix_semantics() -> None:
+    assert is_registry_eligible(OPEN_MANAGED) is True
+    assert is_registry_eligible(BLOCKED_NO_BROKER_EFFECT) is False
+    assert is_terminal_state(BLOCKED_NO_BROKER_EFFECT) is True
+    assert requires_operator_action(REVIEW_REQUIRED) is True
+    assert is_clean_trade_stat_eligible("MALFORMED_BROKER_BACKED_MANUALLY_RECONCILED_ARTIFACT") is False
+    assert requires_close_fill_or_broker_flat_proof(CLOSED_FLAT) is True
+
+
+def test_classify_transition_rejects_unknown_or_invalid_writer_states() -> None:
+    unknown = classify_transition(
+        current_state=OPEN_MANAGED,
+        target_state="SOME_NEW_LOCAL_STATE",
+        evidence={},
+    )
+    invalid = classify_transition(
+        current_state=BLOCKED_NO_BROKER_EFFECT,
+        target_state=OPEN_MANAGED,
+        evidence=complete_open_managed_evidence(),
+    )
+
+    assert unknown.allowed is False
+    assert "unknown_target_state" in unknown.blockers
+    assert invalid.allowed is False
+    assert "transition_not_allowed" in invalid.blockers
 
 
 def test_malformed_manual_cleanup_is_terminal_but_excluded_from_clean_trade_stats() -> None:

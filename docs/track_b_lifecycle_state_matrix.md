@@ -45,10 +45,28 @@ src/mgc_v05l/execution_core/track_b_lifecycle_state_transition.py
 Primary functions:
 
 - `classify_managed_position_transition(evidence)`
+- `classify_transition(current_state, target_state, evidence)`
 - `validate_open_managed_evidence(evidence)`
 - `closed_flat_evidence_blockers(evidence)`
 - `ledger_projection_from_transition(transition)`
 - `lifecycle_state_matrix()`
+- `normalize_lifecycle_state(state)`
+- `is_terminal_state(state)`
+- `is_registry_eligible(state)`
+- `requires_operator_action(state)`
+- `is_clean_trade_stat_eligible(state)`
+- `requires_close_fill_or_broker_flat_proof(state)`
 
 New Track B code should call these functions before writing lifecycle,
 manifest, ledger, managed-position, or reconciliation state.
+
+## Writer Migration Rule
+
+Lifecycle/manifest/ledger/reconciliation writers must not directly treat string
+values such as `OPEN_MANAGED`, `CLOSED_FLAT`, `REVIEW_REQUIRED`, or
+`BLOCKED_NO_BROKER_EFFECT` as authority. They should normalize the state and ask
+the matrix for terminal, registry, reconciliation, operator-action, and clean
+trade-stat eligibility. Unknown lifecycle states are review-required, not new
+implicit states. Manual/malformed cleanup rows may remain auditable historical
+records, but they are excluded from clean trade counts and realized P&L
+statistics.

@@ -15,6 +15,11 @@ from pathlib import Path
 from typing import Any, Mapping
 
 from mgc_v05l.execution_core.track_b_atomic_io import write_json_atomic
+from mgc_v05l.execution_core.track_b_lifecycle_state_transition import (
+    is_registry_eligible,
+    normalize_lifecycle_state,
+    requires_operator_action,
+)
 from mgc_v05l.execution_core.track_b_projection_metadata import build_projection_metadata
 
 
@@ -98,7 +103,9 @@ def build_track_b_managed_position_registry(
     manifests = _load_manifests(config.resolve(config.manifest_root))
 
     broker_positions = _list(reconciliation.get("track_b_broker_positions"))
-    lifecycle_positions = _list(reconciliation.get("track_b_lifecycle_positions"))
+    lifecycle_positions = [
+        item for item in _list(reconciliation.get("track_b_lifecycle_positions")) if _lifecycle_position_registry_eligible(item)
+    ]
     unresolved_ownership = _list(reconciliation.get("unresolved_submit_intent_ownership_records"))
     review_positions = _review_required_positions(
         reconciliation=reconciliation,
@@ -361,7 +368,7 @@ def _position_classification(
 ) -> str:
     if source_stale.get("stale") is True:
         return STALE_MANAGED_POSITION_EVIDENCE
-    if review or _truthy(lifecycle_report.get("review_required")):
+    if review or _truthy(lifecycle_report.get("review_required")) or _lifecycle_requires_operator_action(lifecycle, lifecycle_report):
         return REVIEW_REQUIRED
     if broker and not lifecycle:
         return BROKER_BACKED_ADOPTION_REQUIRED
@@ -573,6 +580,31 @@ def _reconciliation_status(
     if lifecycle and not broker:
         return LIFECYCLE_WITHOUT_BROKER
     return NO_MANAGED_POSITIONS
+
+
+def _lifecycle_position_registry_eligible(position: Mapping[str, Any]) -> bool:
+    state = _lifecycle_state_from_mapping(position)
+    if not state:
+        return True
+    return is_registry_eligible(state)
+
+
+def _lifecycle_requires_operator_action(
+    lifecycle: Mapping[str, Any] | None,
+    lifecycle_report: Mapping[str, Any],
+) -> bool:
+    state = _lifecycle_state_from_mapping(lifecycle or lifecycle_report)
+    return bool(state and requires_operator_action(state))
+
+
+def _lifecycle_state_from_mapping(payload: Mapping[str, Any]) -> str:
+    return normalize_lifecycle_state(
+        payload.get("final_position_status")
+        or payload.get("lifecycle_status")
+        or payload.get("paper_lifecycle_classification")
+        or payload.get("strategy_managed_lifecycle_classification")
+        or payload.get("classification")
+    )
 
 
 def _load_lifecycle_reports(root: Path) -> list[dict[str, Any]]:

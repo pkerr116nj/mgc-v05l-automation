@@ -15,10 +15,9 @@ from typing import Any, Mapping
 
 from mgc_v05l.execution_core.track_b_control_plane_snapshot import DEFAULT_CONTROL_PLANE_SNAPSHOT_ARTIFACT
 from mgc_v05l.execution_core.track_b_lifecycle_state_transition import (
-    MANUAL_OR_MALFORMED_CLEANUP,
-    REVIEW_REQUIRED,
-    classify_managed_position_transition,
+    classify_transition,
     lifecycle_state_matrix,
+    normalize_lifecycle_state,
 )
 
 
@@ -98,8 +97,12 @@ def validate_lifecycle_local_artifact_repair(
     if normalized_target not in matrix:
         return _result(base, LIFECYCLE_LOCAL_REPAIR_BLOCKED_UNKNOWN_STATE, "Target lifecycle state is not in the Lifecycle State Matrix.", [normalized_target])
 
-    allowed_from = tuple(matrix[normalized_target].get("allowed_from") or ())
-    if "*" not in allowed_from and normalized_current not in allowed_from:
+    transition_check = classify_transition(
+        current_state=normalized_current,
+        target_state=normalized_target,
+        evidence=evidence,
+    )
+    if "transition_not_allowed" in transition_check.blockers:
         return _result(
             base,
             LIFECYCLE_LOCAL_REPAIR_BLOCKED_INVALID_TRANSITION,
@@ -107,19 +110,17 @@ def validate_lifecycle_local_artifact_repair(
             [f"{normalized_current}->{normalized_target}"],
         )
 
-    evidence_with_target = dict(evidence)
-    evidence_with_target["requested_lifecycle_status"] = normalized_target
-    transition = classify_managed_position_transition(evidence_with_target)
+    transition = transition_check.transition
     base["transition"] = _transition_payload(transition)
     base["clean_trade_stats_allowed"] = transition.clean_trade_stats_allowed
     base["managed_position_registry_allowed"] = transition.managed_position_registry_allowed
     base["reconciliation_clean_eligible"] = transition.reconciliation_clean_eligible
-    if transition.classification != normalized_target or transition.blockers:
+    if not transition_check.allowed:
         return _result(
             base,
             LIFECYCLE_LOCAL_REPAIR_BLOCKED_EVIDENCE_INCOMPLETE,
             "Required lifecycle evidence is incomplete for the requested target state.",
-            list(transition.blockers or (transition.classification,)),
+            list(transition_check.blockers or transition.blockers or (transition.classification,)),
         )
 
     if base["control_plane_snapshot_required"]:
@@ -207,22 +208,7 @@ def _result(base: Mapping[str, Any], classification: str, reason: str, blockers:
 
 
 def _normalize_state(value: str) -> str:
-    state = str(value or "").strip().upper()
-    if state in {"TRACK_B_STRATEGY_PAPER_OPEN_MANAGED"}:
-        return "OPEN_MANAGED"
-    if state in {"TRACK_B_STRATEGY_PAPER_CLOSED_FLAT"}:
-        return "CLOSED_FLAT"
-    if state in {
-        "MANUALLY_FLATTENED_REVIEWED",
-        "APP_ONLY_UNFILLED_REVIEWED",
-        "IBKR_CONTRACT_REJECTED_REVIEWED",
-        "LEAK_TEST_ADOPTED_ENTRY_SETTLED_FLAT_REVIEWED",
-        "VOID_MALFORMED_STALE_ARTIFACT",
-        "MALFORMED_BROKER_BACKED_MANUALLY_RECONCILED_ARTIFACT",
-        "OPPOSITE_ENTRY_OFFSET_EXISTING_POSITION_RECLASSIFIED",
-    }:
-        return MANUAL_OR_MALFORMED_CLEANUP
-    return state
+    return normalize_lifecycle_state(value)
 
 
 def _transition_payload(transition: Any) -> dict[str, Any]:

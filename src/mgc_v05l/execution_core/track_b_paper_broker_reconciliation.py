@@ -16,12 +16,16 @@ from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
-from mgc_v05l.execution_core.track_b_atomic_io import write_json_atomic
 from mgc_v05l.execution_core.phase1_runtime_ticker_registry import PHASE1_RUNTIME_TICKER_ORDER
+from mgc_v05l.execution_core.track_b_atomic_io import write_json_atomic
 from mgc_v05l.execution_core.track_b_exit_safety import (
     DEFAULT_BRIDGE_TERMINAL_EVENT_GRACE_SECONDS,
     bridge_terminal_event_grace_state,
     classify_managed_exit_working_order,
+)
+from mgc_v05l.execution_core.track_b_lifecycle_state_transition import (
+    is_registry_eligible,
+    normalize_lifecycle_state,
 )
 from mgc_v05l.execution_core.track_b_open_order_truth import (
     DUPLICATE_CLOSE_ORDER,
@@ -2047,6 +2051,14 @@ def _track_b_lifecycle_positions(live_position_status: Mapping[str, Any], symbol
             continue
         qty = _decimal_value(item.get("quantity"))
         if qty is None or qty == 0:
+            continue
+        lifecycle_state = normalize_lifecycle_state(
+            item.get("final_position_status")
+            or item.get("lifecycle_status")
+            or item.get("paper_lifecycle_classification")
+            or item.get("strategy_managed_lifecycle_classification")
+        )
+        if lifecycle_state and not is_registry_eligible(lifecycle_state):
             continue
         item["track_b_root"] = root
         matches.append(item)

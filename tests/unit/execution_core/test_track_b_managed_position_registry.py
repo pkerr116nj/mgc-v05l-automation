@@ -77,6 +77,24 @@ def test_active_review_required_lifecycle_still_surfaces(tmp_path: Path) -> None
     assert payload["managed_positions"][0]["classification"] == REVIEW_REQUIRED
 
 
+def test_no_broker_effect_terminal_lifecycle_is_not_registry_eligible(tmp_path: Path) -> None:
+    lifecycle = {
+        **_lifecycle_position(),
+        "final_position_status": "BLOCKED_NO_BROKER_EFFECT",
+        "lifecycle_status": "BLOCKED_NO_BROKER_EFFECT",
+        "paper_lifecycle_classification": "BLOCKED_NO_BROKER_EFFECT",
+    }
+    _seed_base(tmp_path, lifecycle_positions=[lifecycle])
+
+    payload = build_track_b_managed_position_registry(
+        config=TrackBManagedPositionRegistryConfig(repo_root=tmp_path),
+        now=NOW,
+    )
+
+    assert payload["classification"] == NO_MANAGED_POSITIONS
+    assert payload["managed_positions"] == []
+
+
 def test_valid_lifecycle_and_broker_match_reports_open_managed_matched(tmp_path: Path) -> None:
     lifecycle = _lifecycle_position(bars_since_fill=1)
     _seed_base(

@@ -6,6 +6,8 @@ from pathlib import Path
 
 from mgc_v05l.execution_core.operator_status import OperatorStatusInputs, create_operator_status_summary
 from mgc_v05l.execution_core.track_b_paper_trade_ledger import (
+    MALFORMED_BROKER_BACKED_MANUALLY_RECONCILED_ARTIFACT,
+    build_track_b_paper_trade_summaries,
     reconcile_app_only_unfilled_managed_lifecycles,
     reconcile_ibkr_contract_rejected_managed_lifecycles,
     reconcile_leak_test_adopted_entry_settled_flat_lifecycles,
@@ -181,6 +183,29 @@ def test_direct_bridge_fill_missing_policy_is_review_required_incomplete(tmp_pat
     assert result.trade_record["managed_exit_policy_id"] is None
     assert result.trade_record["paper_lifecycle_classification"] == OPEN_MANAGED_METADATA_INCOMPLETE
     assert result.trade_record["review_required"] is True
+
+
+def test_manifest_writer_rejects_unknown_lifecycle_state(tmp_path: Path) -> None:
+    result = create_or_update_position_management_manifest(
+        entry_intent_id="MGC|unknown",
+        lane_id="track_b_paper_execution_test_mule_v1__mgc",
+        strategy_id="track_b_paper_execution_test_mule_v1__mgc",
+        instrument_family="MGC",
+        contract_key="MGC-202606",
+        local_symbol="MGCM6",
+        con_id=712565978,
+        side="LONG",
+        quantity=1,
+        managed_exit_policy_id="PAPER_DIAGNOSTIC_TIME_BOXED_3X5M_EXIT_V1",
+        lifecycle_status="SOME_NEW_LOCAL_STATE",
+        broker_ownership_identity={"broker_order_id": "1", "fill_price": "4528.8", "fill_timestamp": "2026-05-22T08:12:07+00:00"},
+        lifecycle_id="bridge_fill_unknown",
+        output_root=tmp_path / "manifests",
+        now=aware_now(),
+    )
+
+    assert result.manifest["lifecycle_status"] == "REVIEW_REQUIRED"
+    assert result.manifest["lifecycle_status_blockers"] == []
 
 
 def test_direct_bridge_entry_without_broker_fill_identity_does_not_open_managed(tmp_path: Path) -> None:
@@ -669,6 +694,44 @@ def test_no_paper_lifecycle_writes_zero_summaries_only(tmp_path: Path) -> None:
     assert summary["trade_count"] == 0
     assert summary["open_position_count"] == 0
     assert summary["paper_trades_attempted_count"] == 0
+
+
+def test_malformed_manual_cleanup_is_excluded_from_clean_trade_stats(tmp_path: Path) -> None:
+    summaries = build_track_b_paper_trade_summaries(
+        ledger_records=[
+            {
+                "ledger_schema_version": "track_b_paper_trade_ledger_v1",
+                "trade_id": "malformed:1",
+                "lifecycle_id": "malformed-1",
+                "strategy_id": "track_b_paper_execution_test_mule_v1__mgc",
+                "instrument_family": "MGC",
+                "contract_key": "MGC-202606",
+                "paper_lifecycle_type": "STRATEGY_MANAGED",
+                "paper_lifecycle_classification": MALFORMED_BROKER_BACKED_MANUALLY_RECONCILED_ARTIFACT,
+                "final_position_status": MALFORMED_BROKER_BACKED_MANUALLY_RECONCILED_ARTIFACT,
+                "entry_fill_confirmed": True,
+                "entry_fill_price": "4500.0",
+                "entry_timestamp": "2026-05-22T08:12:07+00:00",
+                "exit_fill_confirmed": True,
+                "exit_fill_price": "4501.0",
+                "exit_timestamp": "2026-05-22T08:17:07+00:00",
+                "quantity": "1",
+                "side": "LONG",
+                "malformed_broker_backed_manually_reconciled": True,
+                "realized_pnl": "10",
+                "created_at": "2026-05-22T08:17:08+00:00",
+            }
+        ],
+        ledger_jsonl=tmp_path / "ledger.jsonl",
+        trade_summary_json=tmp_path / "summary.json",
+        live_position_status_json=tmp_path / "positions.json",
+        pnl_summary_json=tmp_path / "pnl.json",
+        now=aware_now(),
+    )
+
+    assert summaries["trade_summary"]["completed_trade_count"] == 0
+    assert summaries["trade_summary"]["archived_manual_flat_count"] == 1
+    assert summaries["pnl_summary"]["total_realized_pnl_today"] == "0"
 
 
 def test_strategy_managed_lifecycle_trade_is_separated_from_proof(tmp_path: Path) -> None:
@@ -1278,21 +1341,28 @@ def test_strategy_managed_lifecycle_is_not_archived_as_proof_canary(tmp_path: Pa
     ledger_jsonl.parent.mkdir(parents=True, exist_ok=True)
     ledger_jsonl.write_text(
         json.dumps(
-            {
-                "ledger_schema_version": "track_b_paper_trade_ledger_v1",
-                "paper_lifecycle_type": "STRATEGY_MANAGED",
-                "lifecycle_id": "managed-open-001",
-                "strategy_id": "ASIA_EARLY_NORMAL_BREAKOUT_RETEST_HOLD_LONG_V1",
-                "contract_key": "MGC-202606",
-                "local_symbol": "MGCM6",
-                "con_id": 712565978,
-                "account_id": "DUM882026",
-                "quantity": "1",
-                "paper_lifecycle_classification": "TRACK_B_STRATEGY_PAPER_OPEN_MANAGED",
-                "entry_fill_price": "4704.6",
-                "review_required": True,
-                "created_at": "2026-05-06T23:11:12+00:00",
-            },
+                {
+                    "ledger_schema_version": "track_b_paper_trade_ledger_v1",
+                        "paper_lifecycle_type": "STRATEGY_MANAGED",
+                        "lifecycle_id": "managed-open-001",
+                        "signal_id": "managed-open-001",
+                    "strategy_id": "ASIA_EARLY_NORMAL_BREAKOUT_RETEST_HOLD_LONG_V1",
+                    "lane_id": "asia_early_long",
+                    "contract_key": "MGC-202606",
+                    "local_symbol": "MGCM6",
+                    "con_id": 712565978,
+                    "account_id": "DUM882026",
+                    "quantity": "1",
+                    "side": "LONG",
+                    "managed_exit_policy_id": "PAPER_DIAGNOSTIC_TIME_BOXED_3X5M_EXIT_V1",
+                    "paper_lifecycle_classification": "TRACK_B_STRATEGY_PAPER_OPEN_MANAGED",
+                    "entry_order_id": "301",
+                    "entry_perm_id": "1948384301",
+                    "entry_fill_price": "4704.6",
+                    "entry_timestamp": "2026-05-06T23:11:12+00:00",
+                    "review_required": True,
+                    "created_at": "2026-05-06T23:11:12+00:00",
+                },
             sort_keys=True,
         )
         + "\n",

@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import Any, Mapping
 
 from mgc_v05l.execution_core.track_b_atomic_io import write_json_atomic
+from mgc_v05l.execution_core.track_b_lifecycle_state_transition import normalize_lifecycle_state, requires_operator_action
 from mgc_v05l.execution_core.track_b_projection_metadata import build_projection_metadata
 
 from .track_b_open_order_truth import (
@@ -440,7 +441,13 @@ def _review_required_positions(
         return []
     reports = []
     for report in lifecycle_reports:
-        if report.get("review_required") is True or str(report.get("final_position_status") or "").upper() == "REVIEW_REQUIRED":
+        state = normalize_lifecycle_state(
+            report.get("final_position_status")
+            or report.get("lifecycle_status")
+            or report.get("paper_lifecycle_classification")
+            or report.get("strategy_managed_lifecycle_classification")
+        )
+        if report.get("review_required") is True or requires_operator_action(state):
             reports.append(report)
     return reports
 

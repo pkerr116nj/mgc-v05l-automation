@@ -15,6 +15,13 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
+from mgc_v05l.execution_core.track_b_lifecycle_state_transition import (
+    is_registry_eligible,
+    is_terminal_state,
+    normalize_lifecycle_state,
+    requires_operator_action,
+)
+
 
 ARTIFACT_RETENTION_INVENTORY_READY = "ARTIFACT_RETENTION_INVENTORY_READY"
 ARTIFACT_RETENTION_INVENTORY_PARTIAL = "ARTIFACT_RETENTION_INVENTORY_PARTIAL"
@@ -58,16 +65,6 @@ WARM_DIAGNOSTIC_ROOTS: tuple[Path, ...] = (
     Path("outputs/operator_dashboard/runtime"),
     Path("outputs/track_b_execution_core"),
 )
-
-ACTIVE_LIFECYCLE_STATES = {
-    "OPEN_MANAGED",
-    "OPEN_MANAGED_METADATA_INCOMPLETE",
-    "REVIEW_REQUIRED",
-    "CLOSE_UNKNOWN",
-    "CLOSE_ORDER_WORKING",
-    "BROKER_BACKED_FILL_EVIDENCE_INCOMPLETE",
-}
-
 
 @dataclass(frozen=True)
 class TrackBArtifactRetentionInventoryConfig:
@@ -325,8 +322,8 @@ def _lifecycle_protection_reason(*, path: Path, lifecycle_root: Path) -> str | N
         return "lifecycle report is unreadable or malformed; protect for operator review"
     if payload.get("review_required") is True:
         return "lifecycle report has review_required=true"
-    values = {
-        str(payload.get(key, "")).upper()
+    values = [
+        normalize_lifecycle_state(payload.get(key))
         for key in (
             "status",
             "classification",
@@ -337,10 +334,22 @@ def _lifecycle_protection_reason(*, path: Path, lifecycle_root: Path) -> str | N
             "position_status",
             "close_status",
         )
-    }
-    if any(value in ACTIVE_LIFECYCLE_STATES or "REVIEW" in value for value in values):
+    ]
+    if any(_active_or_review_lifecycle_state(value) for value in values):
         return "active or review-required lifecycle state"
     return None
+
+
+def _active_or_review_lifecycle_state(state: str) -> bool:
+    if not state:
+        return False
+    if "REVIEW" in state:
+        return True
+    if requires_operator_action(state):
+        return True
+    if is_registry_eligible(state):
+        return True
+    return bool(not is_terminal_state(state) and state not in {"INTENT_CREATED", "SUBMIT_ATTEMPTED"})
 
 
 def _read_json(path: Path) -> dict[str, Any]:

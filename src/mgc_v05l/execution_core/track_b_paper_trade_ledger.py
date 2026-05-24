@@ -16,7 +16,16 @@ from pathlib import Path
 from typing import Any, Iterable, Mapping
 
 from .models import require_aware_datetime, to_jsonable
-from .track_b_lifecycle_state_transition import TrackBLifecycleTransition, ledger_projection_from_transition
+from .track_b_lifecycle_state_transition import (
+    CLOSED_FLAT,
+    MANUAL_OR_MALFORMED_CLEANUP,
+    OPEN_MANAGED,
+    TRACK_B_STRATEGY_PAPER_CLOSED_FLAT,
+    TrackBLifecycleTransition,
+    classify_managed_position_transition,
+    ledger_projection_from_transition,
+    normalize_lifecycle_state,
+)
 from .track_b_position_management_manifest import (
     DEFAULT_TRACK_B_POSITION_MANAGEMENT_MANIFEST_ROOT,
     OPEN_MANAGED_METADATA_INCOMPLETE,
@@ -1199,11 +1208,18 @@ def _trade_record_from_filled_bridge_result(
     if manifest_lifecycle_status:
         transition_classification = manifest_lifecycle_status
     elif metadata.complete:
-        transition_classification = "OPEN_MANAGED"
+        transition_classification = OPEN_MANAGED
     else:
         transition_classification = OPEN_MANAGED_METADATA_INCOMPLETE
     ledger_projection = ledger_projection_from_transition(
-        transition=TrackBLifecycleTransition(transition_classification),
+        transition=classify_managed_position_transition(
+            _open_managed_transition_evidence(
+                filled_bridge_result=filled_bridge_result,
+                metadata_complete=metadata.complete,
+                lifecycle_id=lifecycle_id,
+                requested_lifecycle_status=transition_classification,
+            )
+        ),
         broker_bridge_review_required=bool(filled_bridge_result.get("review_required")),
     )
     lifecycle_classification = str(ledger_projection["paper_lifecycle_classification"])
@@ -1212,7 +1228,7 @@ def _trade_record_from_filled_bridge_result(
         filled_bridge_result.get("paper_lifecycle_report_path")
         or filled_bridge_result.get("managed_lifecycle_report_path")
     )
-    if final_position_status == "OPEN_MANAGED" and not lifecycle_report_path:
+    if final_position_status == OPEN_MANAGED and not lifecycle_report_path:
         from .track_b_strategy_managed_paper_lifecycle import (
             write_open_managed_lifecycle_report_from_filled_bridge_result,
         )
@@ -1363,9 +1379,9 @@ def _closed_trade_record_from_filled_bridge_result(
             "realized_pnl": _decimal_text(realized),
             "ticks_pnl": _decimal_text(ticks),
             "points_pnl": _decimal_text(points),
-            "paper_lifecycle_classification": "TRACK_B_STRATEGY_PAPER_CLOSED_FLAT",
-            "final_broker_state_classification": "TRACK_B_STRATEGY_PAPER_CLOSED_FLAT",
-            "final_position_status": "CLOSED_FLAT",
+            "paper_lifecycle_classification": TRACK_B_STRATEGY_PAPER_CLOSED_FLAT,
+            "final_broker_state_classification": TRACK_B_STRATEGY_PAPER_CLOSED_FLAT,
+            "final_position_status": CLOSED_FLAT,
             "review_required": bool(filled_bridge_result.get("review_required")) or False,
             "filled_bridge_close_result_path": str(filled_bridge_result_json) if filled_bridge_result_json else None,
             "close_bridge_classification": filled_bridge_result.get("bridge_classification"),
@@ -1402,6 +1418,27 @@ def _matching_open_bridge_record(
     if not candidates:
         return None
     return max(candidates, key=lambda item: str(item.get("entry_timestamp") or item.get("created_at") or ""))
+
+
+def _open_managed_transition_evidence(
+    *,
+    filled_bridge_result: Mapping[str, Any],
+    metadata_complete: bool,
+    lifecycle_id: str,
+    requested_lifecycle_status: str,
+) -> dict[str, Any]:
+    contract = filled_bridge_result.get("contract") if isinstance(filled_bridge_result.get("contract"), Mapping) else {}
+    return {
+        **dict(filled_bridge_result),
+        "requested_lifecycle_status": requested_lifecycle_status,
+        "entry_intent_id": filled_bridge_result.get("order_intent_id"),
+        "broker_order_id": filled_bridge_result.get("broker_order_id"),
+        "fill_price": filled_bridge_result.get("fill_price"),
+        "fill_timestamp": filled_bridge_result.get("fill_timestamp"),
+        "lifecycle_id": lifecycle_id,
+        "management_metadata_complete": metadata_complete,
+        "contract_key": _contract_key_from_bridge_result(filled_bridge_result, contract),
+    }
 
 
 def _contract_key_from_bridge_result(
@@ -1716,7 +1753,7 @@ def _leak_test_adopted_entry_settled_flat_targets(
             continue
         if item.get("paper_lifecycle_type") != "STRATEGY_MANAGED":
             continue
-        if str(item.get("final_position_status") or "") != "OPEN_MANAGED":
+        if _ledger_lifecycle_transition(item).classification != OPEN_MANAGED:
             continue
         if item.get("broker_backed_position_confirmed") is not True:
             continue
@@ -2258,9 +2295,10 @@ def _is_flat_closed_trade(item: Mapping[str, Any]) -> bool:
     if _is_manual_flat_reviewed(item):
         return False
     if item.get("paper_lifecycle_type") == "STRATEGY_MANAGED":
+        transition = _ledger_lifecycle_transition(item)
         return (
-            item.get("paper_lifecycle_classification") == "TRACK_B_STRATEGY_PAPER_CLOSED_FLAT"
-            and item.get("final_position_status") == "CLOSED_FLAT"
+            transition.classification == CLOSED_FLAT
+            and transition.clean_trade_stats_allowed
             and _has_entry_fill(item)
             and _has_exit_fill(item)
         )
@@ -2275,11 +2313,10 @@ def _is_open_position_record(item: Mapping[str, Any]) -> bool:
     if _is_reconciliation_record(item) or _is_flat_closed_trade(item) or _is_manual_flat_reviewed(item):
         return False
     if item.get("paper_lifecycle_type") == "STRATEGY_MANAGED":
-        final_status = item.get("final_position_status")
-        if final_status not in {None, ""}:
-            return final_status == "OPEN_MANAGED" and _has_entry_fill(item) and not _has_exit_fill(item)
+        transition = _ledger_lifecycle_transition(item)
         return (
-            item.get("paper_lifecycle_classification") == "TRACK_B_STRATEGY_PAPER_OPEN_MANAGED"
+            transition.classification == OPEN_MANAGED
+            and transition.managed_position_registry_allowed
             and _has_entry_fill(item)
             and not _has_exit_fill(item)
         )
@@ -2301,7 +2338,11 @@ def _is_broker_backed_trade_record(item: Mapping[str, Any]) -> bool:
 
 
 def _is_pnl_trade_record(item: Mapping[str, Any]) -> bool:
-    return _is_broker_backed_trade_record(item)
+    if not _is_broker_backed_trade_record(item):
+        return False
+    if item.get("paper_lifecycle_type") != "STRATEGY_MANAGED":
+        return True
+    return _ledger_lifecycle_transition(item).clean_trade_stats_allowed
 
 
 def _is_unfilled_lifecycle_attempt(item: Mapping[str, Any]) -> bool:
@@ -2327,6 +2368,57 @@ def _has_entry_fill(item: Mapping[str, Any]) -> bool:
 
 def _has_exit_fill(item: Mapping[str, Any]) -> bool:
     return item.get("exit_fill_confirmed") is True or item.get("exit_fill_price") not in {None, ""}
+
+
+def _ledger_lifecycle_transition(item: Mapping[str, Any]) -> TrackBLifecycleTransition:
+    requested = _ledger_lifecycle_state(item)
+    if requested == MANUAL_OR_MALFORMED_CLEANUP:
+        return classify_managed_position_transition(
+            {
+                "requested_lifecycle_status": requested,
+                "operator_review_or_malformed_artifact_evidence": True,
+            }
+        )
+    evidence = {
+        "requested_lifecycle_status": requested,
+        "entry_intent_id": item.get("signal_id") or item.get("order_intent_id") or item.get("ownership_id"),
+        "lane_id": item.get("lane_id") or item.get("strategy_id"),
+        "strategy_id": item.get("strategy_id"),
+        "contract_key": item.get("contract_key"),
+        "local_symbol": item.get("local_symbol"),
+        "con_id": item.get("con_id"),
+        "side": item.get("side") or item.get("order_action"),
+        "quantity": item.get("quantity"),
+        "managed_exit_policy_id": item.get("managed_exit_policy_id"),
+        "lifecycle_id": item.get("lifecycle_id"),
+        "broker_order_id": item.get("entry_order_id"),
+        "perm_id": item.get("entry_perm_id"),
+        "fill_price": item.get("entry_fill_price"),
+        "fill_timestamp": item.get("entry_timestamp"),
+        "close_broker_order_id": item.get("exit_order_id"),
+        "close_perm_id": item.get("exit_perm_id"),
+        "close_fill_price": item.get("exit_fill_price"),
+        "close_fill_timestamp": item.get("exit_timestamp"),
+        "broker_flat_proof": item.get("broker_flat_proof"),
+        "broker_flat_confirmed": item.get("broker_flat_confirmed"),
+        "broker_position_flat": item.get("broker_position_flat"),
+        "open_order_count": item.get("open_order_count"),
+    }
+    return classify_managed_position_transition(evidence)
+
+
+def _ledger_lifecycle_state(item: Mapping[str, Any]) -> str:
+    state = normalize_lifecycle_state(
+        item.get("final_position_status")
+        or item.get("paper_lifecycle_classification")
+        or item.get("final_broker_state_classification")
+    )
+    if state:
+        return state
+    lifecycle_classification = normalize_lifecycle_state(item.get("paper_lifecycle_classification"))
+    if lifecycle_classification:
+        return lifecycle_classification
+    return OPEN_MANAGED if _has_entry_fill(item) and not _has_exit_fill(item) else CLOSED_FLAT
 
 
 def _managed_transmission_classification(

@@ -93,6 +93,15 @@ class TrackBLifecycleStateRule:
     clean_trade_stats_allowed: bool
 
 
+@dataclass(frozen=True)
+class TrackBLifecycleTransitionCheck:
+    current_state: str
+    target_state: str
+    transition: TrackBLifecycleTransition
+    allowed: bool
+    blockers: tuple[str, ...] = ()
+
+
 def classify_managed_position_transition(evidence: Mapping[str, Any]) -> TrackBLifecycleTransition:
     """Classify the lifecycle/manifest state allowed by the supplied evidence."""
 
@@ -323,6 +332,84 @@ def lifecycle_state_matrix() -> dict[str, dict[str, Any]]:
         }
         for state, rule in _STATE_MATRIX.items()
     }
+
+
+def normalize_lifecycle_state(value: Any) -> str:
+    state = str(value or "").strip().upper()
+    if state == TRACK_B_STRATEGY_PAPER_OPEN_MANAGED:
+        return OPEN_MANAGED
+    if state == TRACK_B_STRATEGY_PAPER_CLOSED_FLAT:
+        return CLOSED_FLAT
+    if state in _MANUAL_OR_MALFORMED_STATES:
+        return MANUAL_OR_MALFORMED_CLEANUP
+    return state
+
+
+def lifecycle_state_rule(state: Any) -> TrackBLifecycleStateRule | None:
+    return _STATE_MATRIX.get(normalize_lifecycle_state(state))
+
+
+def is_terminal_state(state: Any) -> bool:
+    rule = lifecycle_state_rule(state)
+    return bool(rule and rule.terminal)
+
+
+def is_registry_eligible(state: Any) -> bool:
+    rule = lifecycle_state_rule(state)
+    return bool(rule and rule.managed_position_registry_allowed)
+
+
+def requires_operator_action(state: Any) -> bool:
+    rule = lifecycle_state_rule(state)
+    return bool(rule and rule.operator_action_required)
+
+
+def is_clean_trade_stat_eligible(state: Any) -> bool:
+    rule = lifecycle_state_rule(state)
+    return bool(rule and rule.clean_trade_stats_allowed)
+
+
+def requires_close_fill_or_broker_flat_proof(state: Any) -> bool:
+    rule = lifecycle_state_rule(state)
+    return bool(rule and "close_fill_or_broker_flat_proof" in rule.required_evidence)
+
+
+def classify_transition(
+    *,
+    current_state: Any,
+    target_state: Any,
+    evidence: Mapping[str, Any],
+) -> TrackBLifecycleTransitionCheck:
+    current = normalize_lifecycle_state(current_state)
+    target = normalize_lifecycle_state(target_state)
+    target_rule = lifecycle_state_rule(target)
+    if target_rule is None:
+        transition = _transition(REVIEW_REQUIRED, blockers=("unknown_target_state",))
+        return TrackBLifecycleTransitionCheck(
+            current_state=current,
+            target_state=target,
+            transition=transition,
+            allowed=False,
+            blockers=("unknown_target_state",),
+        )
+
+    allowed_from = tuple(target_rule.allowed_from)
+    transition_allowed = "*" in allowed_from or current in allowed_from
+    evidence_with_target = dict(evidence)
+    evidence_with_target["requested_lifecycle_status"] = target
+    transition = classify_managed_position_transition(evidence_with_target)
+    blockers = tuple(transition.blockers)
+    if not transition_allowed:
+        blockers = ("transition_not_allowed",) + blockers
+    if transition.classification != target:
+        blockers = (f"classified_as_{transition.classification}",) + blockers
+    return TrackBLifecycleTransitionCheck(
+        current_state=current,
+        target_state=target,
+        transition=transition,
+        allowed=transition_allowed and transition.classification == target and not transition.blockers,
+        blockers=blockers,
+    )
 
 
 def clean_trade_stats_allowed(evidence: Mapping[str, Any]) -> bool:
