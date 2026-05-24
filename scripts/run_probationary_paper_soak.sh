@@ -388,7 +388,7 @@ with open(os.environ["LAUNCH_STATUS_FILE"], "w", encoding="utf-8") as fh:
 run_shared_truth_runtime_start_preflight() {
   # Legacy fallback only. The launch hot path uses run_control_plane_snapshot_start_preflight
   # so Shared Truth Refresh and Runtime Supervisor Authority share one coherent generation.
-  local tmp_file="${SHARED_TRUTH_PREFLIGHT_FILE}.tmp"
+  local tmp_file="${SHARED_TRUTH_PREFLIGHT_FILE}.$$.${RANDOM}.tmp"
   local stderr_file="${SHARED_TRUTH_PREFLIGHT_FILE}.stderr.log"
   local status=0
   local summary=""
@@ -451,7 +451,7 @@ PY
 
 run_runtime_supervisor_start_preflight() {
   # Legacy fallback only. The launch hot path gates on Control Plane Snapshot.
-  local tmp_file="${RUNTIME_SUPERVISOR_AUTHORITY_FILE}.runtime_start.tmp"
+  local tmp_file="${RUNTIME_SUPERVISOR_AUTHORITY_FILE}.runtime_start.$$.${RANDOM}.tmp"
   local stderr_file="${RUNTIME_SUPERVISOR_AUTHORITY_FILE}.runtime_start.stderr.log"
   local status=0
   local summary=""
@@ -764,7 +764,7 @@ PY
 }
 
 run_control_plane_snapshot_start_preflight() {
-  local tmp_file="${CONTROL_PLANE_SNAPSHOT_FILE}.runtime_start.tmp"
+  local tmp_file="${CONTROL_PLANE_SNAPSHOT_FILE}.runtime_start.$$.${RANDOM}.tmp"
   local stderr_file="${CONTROL_PLANE_SNAPSHOT_FILE}.runtime_start.stderr.log"
   local status=0
   local summary=""

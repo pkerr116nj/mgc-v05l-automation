@@ -13,6 +13,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, Mapping
 
+from mgc_v05l.execution_core.track_b_atomic_io import write_json_atomic
 from mgc_v05l.execution_core.track_b_pre_action_snapshot_validator import (
     PRE_ACTION_SNAPSHOT_VALID,
     TrackBPreActionSnapshotValidatorConfig,
@@ -611,10 +612,7 @@ def _append_jsonl(path: Path, payload: Mapping[str, Any]) -> None:
 
 
 def _write_json_atomic(path: Path, payload: Mapping[str, Any]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_name(f".{path.name}.tmp")
-    tmp.write_text(json.dumps(dict(payload), indent=2, sort_keys=True) + "\n", encoding="utf-8")
-    tmp.replace(path)
+    write_json_atomic(path, payload)
 
 
 def _parse_datetime(value: Any) -> datetime | None:

@@ -1477,7 +1477,7 @@ refresh_canonical_readiness_for_launch() {
   refresh_operator_readiness_for_launch || true
   refresh_broker_truth_lease_for_launch || true
   local tmp_summary
-  tmp_summary="${CANONICAL_READINESS_SUMMARY_FILE}.tmp"
+  tmp_summary="${CANONICAL_READINESS_SUMMARY_FILE}.$$.${RANDOM}.tmp"
   rm -f "${tmp_summary}"
   set +e
   "${PYTHON_BIN}" -m mgc_v05l.app.track_b_canonical_readiness \
@@ -1515,7 +1515,7 @@ fail_fast_if_hard_canonical_blocker() {
 refresh_runtime_supervisor_for_launch() {
   # Legacy fallback only. The launch hot path uses refresh_control_plane_snapshot_for_launch.
   local tmp_summary
-  tmp_summary="${RUNTIME_SUPERVISOR_AUTHORITY_FILE}.tmp"
+  tmp_summary="${RUNTIME_SUPERVISOR_AUTHORITY_FILE}.$$.${RANDOM}.tmp"
   rm -f "${tmp_summary}"
   set +e
   "${PYTHON_BIN}" -m mgc_v05l.execution_core.track_b_runtime_supervisor_authority \
@@ -1536,7 +1536,7 @@ refresh_runtime_supervisor_for_launch() {
 
 refresh_control_plane_snapshot_for_launch() {
   local tmp_summary
-  tmp_summary="${CONTROL_PLANE_SNAPSHOT_FILE}.tmp"
+  tmp_summary="${CONTROL_PLANE_SNAPSHOT_FILE}.$$.${RANDOM}.tmp"
   rm -f "${tmp_summary}"
   set +e
   "${PYTHON_BIN}" -m mgc_v05l.execution_core.track_b_control_plane_snapshot \

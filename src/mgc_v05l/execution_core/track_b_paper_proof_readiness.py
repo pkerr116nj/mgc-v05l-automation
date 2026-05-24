@@ -14,6 +14,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Callable, Mapping, Sequence
 
+from mgc_v05l.execution_core.track_b_atomic_io import write_json_atomic
 from mgc_v05l.execution_core.phase1_runtime_data_readiness import (
     Phase1RuntimeDataReadinessConfig,
     build_phase1_runtime_data_readiness,
@@ -135,8 +136,7 @@ def write_track_b_paper_proof_readiness(
     payload: Mapping[str, Any],
 ) -> Path:
     output_path = config.resolve(config.output_path)
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-    output_path.write_text(json.dumps(dict(payload), indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    write_json_atomic(output_path, payload)
     return output_path
 
 

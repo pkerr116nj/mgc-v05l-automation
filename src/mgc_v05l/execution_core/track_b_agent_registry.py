@@ -15,6 +15,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
+from mgc_v05l.execution_core.track_b_atomic_io import write_json_atomic
 from mgc_v05l.execution_core.track_b_projection_metadata import build_projection_metadata
 
 
@@ -482,10 +483,7 @@ def _resolve_display_path(repo_root: Path, path: Path) -> Path:
 
 
 def _write_json_atomic(path: Path, payload: Mapping[str, Any]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_name(f".{path.name}.tmp")
-    tmp.write_text(json.dumps(dict(payload), indent=2, sort_keys=True) + "\n", encoding="utf-8")
-    tmp.replace(path)
+    write_json_atomic(path, payload)
 
 
 def _ensure_utc(value: datetime) -> datetime:

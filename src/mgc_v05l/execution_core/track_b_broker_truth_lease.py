@@ -13,6 +13,8 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
+from mgc_v05l.execution_core.track_b_atomic_io import write_json_atomic
+
 LEASE_STATES = {
     "ACTIVE",
     "ACTIVE_DEGRADED_REFRESH_FAILING",
@@ -288,10 +290,7 @@ def write_broker_truth_lease(
     """Write the lease artifact and optional JSONL history; no actions are executed."""
 
     path = Path(output_path)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_name(f".{path.name}.tmp")
-    tmp.write_text(json.dumps(dict(lease), indent=2, sort_keys=True) + "\n", encoding="utf-8")
-    tmp.replace(path)
+    write_json_atomic(path, lease)
 
     if history_path is not None:
         history = Path(history_path)

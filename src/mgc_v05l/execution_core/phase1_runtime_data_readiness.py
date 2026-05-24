@@ -9,6 +9,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from mgc_v05l.execution_core.track_b_atomic_io import write_json_atomic
 from mgc_v05l.execution_core.phase1_runtime_ticker_registry import (
     PHASE1_RUNTIME_DERIVED_FEATURES,
     PHASE1_RUNTIME_TICKER_ORDER,
@@ -78,11 +79,7 @@ def write_phase1_runtime_data_readiness_artifacts(
     output_dir = Path(config.output_dir)
     if not output_dir.is_absolute():
         output_dir = Path(config.repo_root) / output_dir
-    output_dir.mkdir(parents=True, exist_ok=True)
-    (output_dir / "latest_phase1_runtime_data_readiness.json").write_text(
-        json.dumps(artifacts.report, indent=2, sort_keys=True) + "\n",
-        encoding="utf-8",
-    )
+    write_json_atomic(output_dir / "latest_phase1_runtime_data_readiness.json", artifacts.report)
 
 
 def _ticker_readiness(*, symbol: str, config: Phase1RuntimeDataReadinessConfig, now: datetime) -> dict[str, Any]:
