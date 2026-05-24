@@ -22,6 +22,18 @@ from .ibkr_paper_adapter import IbkrPaperAdapter
 from .models import require_aware_datetime, to_jsonable
 from .models import IntentKind, OrderIntent, PositionState, SubmitAttempt, SubmitAttemptState
 from .preflight import ReadOnlyPreflightConfig
+from .track_b_paper_autonomous_recovery_planner import DEFAULT_PAPER_AUTONOMOUS_RECOVERY_PLAN_ARTIFACT
+from .track_b_pre_action_snapshot_validator import (
+    DEFAULT_CONTROL_PLANE_SNAPSHOT_ARTIFACT,
+    PRE_ACTION_BLOCKED_HARD_INVARIANT,
+    PRE_ACTION_BLOCKED_PLAN_MISMATCH,
+    PRE_ACTION_BLOCKED_SNAPSHOT_MISSING,
+    PRE_ACTION_BLOCKED_SUPERVISOR_MISMATCH,
+    PRE_ACTION_BLOCKED_TARGET_IDENTITY_MISMATCH,
+    PRE_ACTION_SNAPSHOT_VALID,
+    TrackBPreActionSnapshotValidatorConfig,
+    validate_track_b_pre_action_snapshot,
+)
 from .track_b_lifecycle_state_transition import validate_open_managed_evidence
 from .track_b_open_order_truth import (
     BROKER_FLAT_WITH_OPEN_CLOSE_ORDER,
@@ -34,12 +46,31 @@ from .track_b_open_order_truth import (
     build_track_b_open_order_truth_from_reconciliation,
 )
 from .track_b_paper_trade_ledger import DEFAULT_TRACK_B_PAPER_TRADE_LEDGER_OUTPUT_ROOT
+from .track_b_runtime_safe_state_envelope import DEFAULT_RUNTIME_SAFE_STATE_ENVELOPE_ARTIFACT
+from .track_b_runtime_supervisor_authority import DEFAULT_RUNTIME_SUPERVISOR_AUTHORITY_ARTIFACT
 
 
 DEFAULT_TRACK_B_STRATEGY_MANAGED_PAPER_LIFECYCLE_OUTPUT_ROOT = Path(
     "outputs/track_b_execution_core/track_b_strategy_managed_paper_lifecycle"
 )
+REPO_ROOT = Path(__file__).resolve().parents[3]
 CLOSE_ORDER_ALREADY_WORKING = "CLOSE_ORDER_ALREADY_WORKING"
+
+STRATEGY_SUBMIT_AUTHORIZED = "STRATEGY_SUBMIT_AUTHORIZED"
+STRATEGY_SUBMIT_BLOCKED_NO_SNAPSHOT = "STRATEGY_SUBMIT_BLOCKED_NO_SNAPSHOT"
+STRATEGY_SUBMIT_BLOCKED_SAFE_STATE = "STRATEGY_SUBMIT_BLOCKED_SAFE_STATE"
+STRATEGY_SUBMIT_BLOCKED_SUPERVISOR = "STRATEGY_SUBMIT_BLOCKED_SUPERVISOR"
+STRATEGY_SUBMIT_BLOCKED_RUNTIME_GENERATION = "STRATEGY_SUBMIT_BLOCKED_RUNTIME_GENERATION"
+STRATEGY_SUBMIT_BLOCKED_ORDER_TRUTH = "STRATEGY_SUBMIT_BLOCKED_ORDER_TRUTH"
+STRATEGY_SUBMIT_BLOCKED_POSITION_TRUTH = "STRATEGY_SUBMIT_BLOCKED_POSITION_TRUTH"
+STRATEGY_SUBMIT_BLOCKED_LIVE_MONEY = "STRATEGY_SUBMIT_BLOCKED_LIVE_MONEY"
+STRATEGY_SUBMIT_BLOCKED_PAPER_PROOF = "STRATEGY_SUBMIT_BLOCKED_PAPER_PROOF"
+STRATEGY_SUBMIT_BLOCKED_TARGET_MISMATCH = "STRATEGY_SUBMIT_BLOCKED_TARGET_MISMATCH"
+
+PLAN_STRATEGY_MANAGED_ENTRY_SUBMIT = "PLAN_STRATEGY_MANAGED_ENTRY_SUBMIT"
+PLAN_STRATEGY_MANAGED_CLOSE_SUBMIT = "PLAN_STRATEGY_MANAGED_CLOSE_SUBMIT"
+ACTION_STRATEGY_MANAGED_ENTRY_SUBMIT = "STRATEGY_MANAGED_ENTRY_SUBMIT"
+ACTION_STRATEGY_MANAGED_CLOSE_SUBMIT = "STRATEGY_MANAGED_CLOSE_SUBMIT"
 
 
 class TrackBManagedPaperLifecycleClassification(str, Enum):
@@ -105,6 +136,16 @@ class TrackBStrategyManagedPaperLifecycleConfig:
     live_position_status_json: Path | None = None
     live_money_readiness: bool = False
     broker_reconciled: bool = False
+    repo_root: Path = REPO_ROOT
+    lane_id: str | None = None
+    runtime_generation_id: str | None = None
+    control_plane_snapshot_path: Path = DEFAULT_CONTROL_PLANE_SNAPSHOT_ARTIFACT
+    autonomous_recovery_plan_path: Path = DEFAULT_PAPER_AUTONOMOUS_RECOVERY_PLAN_ARTIFACT
+    runtime_supervisor_authority_path: Path = DEFAULT_RUNTIME_SUPERVISOR_AUTHORITY_ARTIFACT
+    runtime_safe_state_envelope_path: Path = DEFAULT_RUNTIME_SAFE_STATE_ENVELOPE_ARTIFACT
+    pre_action_snapshot_max_age_seconds: int = 300
+    expected_control_plane_snapshot_id: str | None = None
+    expected_shared_truth_generation_id: str | None = None
 
 
 @dataclass(frozen=True)
@@ -904,6 +945,23 @@ def _submit_managed_limit_order(
             "broker_state_mutated": False,
             "primary_blocker": f"Managed PAPER {intent_kind.value.lower()} requires a derived limit price.",
         }
+    authorization = build_strategy_managed_submit_authorization(
+        config=config,
+        intent_payload=intent_payload,
+        intent_kind=intent_kind,
+        limit_price=limit_price,
+    )
+    if authorization.get("authorization_classification") != STRATEGY_SUBMIT_AUTHORIZED:
+        return {
+            "submitted": False,
+            "submit_attempted": False,
+            "broker_state_mutated": False,
+            "review_required": True,
+            "classification": authorization.get("authorization_classification"),
+            "managed_submit_blocked_reason": authorization.get("authorization_classification"),
+            "primary_blocker": authorization.get("reason") or "Strategy managed submit authorization blocked.",
+            "strategy_submit_authorization": authorization,
+        }
     adapter = IbkrPaperAdapter(
         mode=config.mode,
         host=config.host,
@@ -1021,6 +1079,7 @@ def _submit_managed_limit_order(
                 "execution_id": fill.execution_id,
             },
             "submit_diagnostics": adapter.submit_diagnostics(submit_attempt.submit_attempt_id),
+            "strategy_submit_authorization": authorization,
         }
     except Exception as exc:  # noqa: BLE001 - adapter stage failures must become artifacts.
         diagnostics = adapter.submit_diagnostics(submit_attempt.submit_attempt_id)
@@ -1042,9 +1101,260 @@ def _submit_managed_limit_order(
             "adapter_exception": repr(exc),
             **error_summary,
             "submit_diagnostics": diagnostics,
+            "strategy_submit_authorization": authorization,
         }
     finally:
         adapter.disconnect()
+
+
+def build_strategy_managed_submit_authorization(
+    *,
+    config: TrackBStrategyManagedPaperLifecycleConfig,
+    intent_payload: Mapping[str, Any],
+    intent_kind: IntentKind,
+    limit_price: object,
+    now: datetime | None = None,
+) -> dict[str, Any]:
+    actual_now = now or datetime.now(UTC)
+    require_aware_datetime(actual_now, "now")
+    target_identity = _strategy_submit_target_identity(
+        config=config,
+        intent_payload=intent_payload,
+        intent_kind=intent_kind,
+        limit_price=limit_price,
+    )
+    plan_classification = (
+        PLAN_STRATEGY_MANAGED_CLOSE_SUBMIT if intent_kind is IntentKind.CLOSE else PLAN_STRATEGY_MANAGED_ENTRY_SUBMIT
+    )
+    action_type = ACTION_STRATEGY_MANAGED_CLOSE_SUBMIT if intent_kind is IntentKind.CLOSE else ACTION_STRATEGY_MANAGED_ENTRY_SUBMIT
+    validator_config = TrackBPreActionSnapshotValidatorConfig(
+        repo_root=Path(config.repo_root),
+        control_plane_snapshot_path=Path(config.control_plane_snapshot_path),
+        autonomous_recovery_plan_path=Path(config.autonomous_recovery_plan_path),
+        runtime_supervisor_authority_path=Path(config.runtime_supervisor_authority_path),
+    )
+    pre_action = validate_track_b_pre_action_snapshot(
+        config=validator_config,
+        expected_plan_classification=plan_classification,
+        expected_action_type=action_type,
+        expected_target_identity=target_identity,
+        max_snapshot_age_seconds=int(config.pre_action_snapshot_max_age_seconds),
+        expected_snapshot_id=config.expected_control_plane_snapshot_id,
+        expected_shared_truth_generation_id=config.expected_shared_truth_generation_id,
+        now=actual_now,
+    )
+    snapshot_path = validator_config.resolve(Path(config.control_plane_snapshot_path))
+    safe_state_path = _resolve_path(config.repo_root, Path(config.runtime_safe_state_envelope_path))
+    snapshot = _read_json_object(snapshot_path)
+    safe_state = _read_json_object(safe_state_path)
+    base = {
+        "schema_version": "track_b_strategy_managed_submit_authorization_v1",
+        "authorized_at": actual_now.isoformat(),
+        "mode": "PAPER",
+        "read_only_validation": True,
+        "paper_only": True,
+        "execution_enabled": False,
+        "dashboard_projection_consumed": False,
+        "not_routing_authority": True,
+        "control_plane_snapshot_id": pre_action.get("control_plane_snapshot_id") or snapshot.get("control_plane_snapshot_id"),
+        "shared_truth_generation_id": pre_action.get("shared_truth_refresh_generation_id")
+        or snapshot.get("shared_truth_refresh_generation_id"),
+        "runtime_generation_id": config.runtime_generation_id,
+        "strategy_id": config.strategy_id,
+        "lane_id": config.lane_id,
+        "symbol": config.instrument_family,
+        "contract": config.local_symbol,
+        "contract_key": config.contract_key,
+        "con_id": config.con_id,
+        "action": target_identity.get("action"),
+        "quantity": target_identity.get("quantity"),
+        "order_type": config.order_type,
+        "limit_price": target_identity.get("limit_price"),
+        "target_identity": target_identity,
+        "pre_action_validation": pre_action,
+        "safe_state_classification": safe_state.get("safe_state_classification") or safe_state.get("classification"),
+        "supervisor_classification": pre_action.get("supervisor_classification")
+        or snapshot.get("runtime_supervisor_classification"),
+        "runtime_resume_action_policy": pre_action.get("runtime_resume_action_policy")
+        or snapshot.get("runtime_resume_action_policy"),
+        "runtime_resume_proposed_next_runtime_generation_id": pre_action.get(
+            "runtime_resume_proposed_next_runtime_generation_id"
+        )
+        or snapshot.get("runtime_resume_proposed_next_runtime_generation_id"),
+        "submit_allowed": False,
+        "broker_mutation_allowed": False,
+        "source_artifact_paths": {
+            "control_plane_snapshot": str(snapshot_path),
+            "runtime_safe_state_envelope": str(safe_state_path),
+            "autonomous_recovery_plan": str(validator_config.resolve(Path(config.autonomous_recovery_plan_path))),
+            "runtime_supervisor_authority": str(validator_config.resolve(Path(config.runtime_supervisor_authority_path))),
+        },
+    }
+    classification, reason = _strategy_submit_authorization_blocker(
+        config=config,
+        pre_action=pre_action,
+        snapshot=snapshot,
+        safe_state=safe_state,
+        target_identity=target_identity,
+    )
+    authorized = classification == STRATEGY_SUBMIT_AUTHORIZED
+    return {
+        **base,
+        "authorization_classification": classification,
+        "classification": classification,
+        "authorized": authorized,
+        "submit_allowed": authorized,
+        "broker_mutation_allowed": authorized,
+        "reason": reason,
+    }
+
+
+def _strategy_submit_authorization_blocker(
+    *,
+    config: TrackBStrategyManagedPaperLifecycleConfig,
+    pre_action: Mapping[str, Any],
+    snapshot: Mapping[str, Any],
+    safe_state: Mapping[str, Any],
+    target_identity: Mapping[str, Any],
+) -> tuple[str, str]:
+    if pre_action.get("classification") == PRE_ACTION_BLOCKED_SNAPSHOT_MISSING:
+        return STRATEGY_SUBMIT_BLOCKED_NO_SNAPSHOT, "Control Plane Snapshot authority artifact is missing."
+    if pre_action.get("classification") == PRE_ACTION_BLOCKED_TARGET_IDENTITY_MISMATCH:
+        return STRATEGY_SUBMIT_BLOCKED_TARGET_MISMATCH, str(pre_action.get("reason") or "Target identity mismatch.")
+    if pre_action.get("classification") == PRE_ACTION_BLOCKED_HARD_INVARIANT and "live_money" in str(
+        pre_action.get("reason") or ""
+    ):
+        return STRATEGY_SUBMIT_BLOCKED_LIVE_MONEY, str(pre_action.get("reason"))
+    if pre_action.get("classification") in {PRE_ACTION_BLOCKED_SUPERVISOR_MISMATCH, PRE_ACTION_BLOCKED_PLAN_MISMATCH}:
+        return STRATEGY_SUBMIT_BLOCKED_SUPERVISOR, str(pre_action.get("reason") or "Supervisor or planner mismatch.")
+    if pre_action.get("classification") != PRE_ACTION_SNAPSHOT_VALID:
+        return STRATEGY_SUBMIT_BLOCKED_NO_SNAPSHOT, str(pre_action.get("reason") or "Pre-action snapshot validation failed.")
+    if _any_true(snapshot, safe_state, key="live_money_eligible"):
+        return STRATEGY_SUBMIT_BLOCKED_LIVE_MONEY, "live_money_eligible=true blocks PAPER strategy submit."
+    if _any_true(snapshot, safe_state, key="paper_proof_invoked"):
+        return STRATEGY_SUBMIT_BLOCKED_PAPER_PROOF, "paper_proof_invoked=true blocks strategy-managed submit."
+    safe_classification = str(safe_state.get("safe_state_classification") or safe_state.get("classification") or "")
+    if not safe_state:
+        return STRATEGY_SUBMIT_BLOCKED_SAFE_STATE, "Runtime Safe-State Envelope authority artifact is missing."
+    if safe_state.get("submit_allowed") is not True:
+        return STRATEGY_SUBMIT_BLOCKED_SAFE_STATE, "Runtime Safe-State Envelope does not permit submit."
+    if safe_state.get("broker_mutation_allowed") is not True:
+        return STRATEGY_SUBMIT_BLOCKED_SAFE_STATE, "Runtime Safe-State Envelope does not permit broker mutation."
+    if safe_state.get("observe_only") is True or "HARD_HOLD" in safe_classification:
+        return STRATEGY_SUBMIT_BLOCKED_SAFE_STATE, f"Runtime Safe-State Envelope blocks submit: {safe_classification}."
+    if list(safe_state.get("tripped_limits") or []):
+        return STRATEGY_SUBMIT_BLOCKED_SAFE_STATE, "Runtime Safe-State Envelope has tripped limits."
+    supervisor_classification = str(pre_action.get("supervisor_classification") or "")
+    supervisor_submit_allowed = supervisor_classification in {
+        "SUPERVISOR_RUNTIME_START_ALLOWED",
+        "SUPERVISOR_RUNTIME_ALREADY_HEALTHY",
+    } and (
+        pre_action.get("snapshot_safe_to_start_runtime") is True
+        or snapshot.get("safe_to_leave_runtime_running") is True
+        or safe_state.get("submit_allowed") is True
+    )
+    if not supervisor_submit_allowed:
+        return (
+            STRATEGY_SUBMIT_BLOCKED_SUPERVISOR,
+            f"Runtime Supervisor does not permit submit/start posture: {supervisor_classification or 'UNKNOWN'}.",
+        )
+    runtime_generation_id = str(config.runtime_generation_id or "")
+    if not runtime_generation_id:
+        return STRATEGY_SUBMIT_BLOCKED_RUNTIME_GENERATION, "runtime_generation_id is required for strategy submit."
+    proposed_generation = str(pre_action.get("runtime_resume_proposed_next_runtime_generation_id") or "")
+    safe_generation = str(safe_state.get("runtime_generation_id") or "")
+    if proposed_generation and proposed_generation != runtime_generation_id:
+        return STRATEGY_SUBMIT_BLOCKED_RUNTIME_GENERATION, "Runtime Resume v2 proposed generation does not match submit authorization."
+    if safe_generation and safe_generation != runtime_generation_id:
+        return STRATEGY_SUBMIT_BLOCKED_RUNTIME_GENERATION, "Safe-State runtime generation does not match submit authorization."
+    order_truth_blocker = _order_truth_blocker(snapshot=snapshot, safe_state=safe_state)
+    if order_truth_blocker:
+        return STRATEGY_SUBMIT_BLOCKED_ORDER_TRUTH, order_truth_blocker
+    position_truth_blocker = _position_truth_blocker(snapshot=snapshot, safe_state=safe_state)
+    if position_truth_blocker:
+        return STRATEGY_SUBMIT_BLOCKED_POSITION_TRUTH, position_truth_blocker
+    if not target_identity:
+        return STRATEGY_SUBMIT_BLOCKED_TARGET_MISMATCH, "Strategy submit target identity is empty."
+    return STRATEGY_SUBMIT_AUTHORIZED, "Strategy-managed PAPER submit authorization is valid."
+
+
+def _strategy_submit_target_identity(
+    *,
+    config: TrackBStrategyManagedPaperLifecycleConfig,
+    intent_payload: Mapping[str, Any],
+    intent_kind: IntentKind,
+    limit_price: object,
+) -> dict[str, str]:
+    lifecycle_id = str(intent_payload.get("lifecycle_id") or "")
+    return _compact_identity(
+        {
+            "account_id": config.account_id,
+            "strategy_id": config.strategy_id,
+            "lane_id": config.lane_id,
+            "runtime_generation_id": config.runtime_generation_id,
+            "lifecycle_id": lifecycle_id,
+            "intent_kind": intent_kind.value,
+            "symbol": config.instrument_family,
+            "contract": config.local_symbol,
+            "contract_key": config.contract_key,
+            "con_id": config.con_id,
+            "action": str(intent_payload.get("order_action") or ""),
+            "quantity": config.quantity,
+            "order_type": config.order_type,
+            "limit_price": _decimal_text(limit_price),
+            "managed_exit_policy_id": _normalized_exit_policy(config.managed_exit_policy_id),
+        }
+    )
+
+
+def _compact_identity(values: Mapping[str, Any]) -> dict[str, str]:
+    return {str(key): str(value) for key, value in values.items() if value not in {None, ""}}
+
+
+def _order_truth_blocker(*, snapshot: Mapping[str, Any], safe_state: Mapping[str, Any]) -> str | None:
+    text = " ".join(
+        str(value or "")
+        for value in (
+            snapshot.get("open_order_truth_classification"),
+            snapshot.get("managed_order_registry_classification"),
+            safe_state.get("open_order_truth_classification"),
+            safe_state.get("managed_order_registry_classification"),
+        )
+    ).upper()
+    if any(token in text for token in ("SUSPICIOUS", "DUPLICATE", "UNKNOWN", "REVIEW_REQUIRED")):
+        return f"Order truth blocks strategy submit: {text.strip()}."
+    return None
+
+
+def _position_truth_blocker(*, snapshot: Mapping[str, Any], safe_state: Mapping[str, Any]) -> str | None:
+    text = " ".join(
+        str(value or "")
+        for value in (
+            snapshot.get("position_truth_classification"),
+            snapshot.get("managed_position_registry_classification"),
+            safe_state.get("position_truth_classification"),
+            safe_state.get("managed_position_registry_classification"),
+        )
+    ).upper()
+    if any(token in text for token in ("SUSPICIOUS", "UNKNOWN", "CONFLICT", "REVIEW_REQUIRED")):
+        return f"Position truth blocks strategy submit: {text.strip()}."
+    return None
+
+
+def _any_true(*payloads: Mapping[str, Any], key: str) -> bool:
+    return any(payload.get(key) is True for payload in payloads)
+
+
+def _read_json_object(path: Path) -> dict[str, Any]:
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (FileNotFoundError, json.JSONDecodeError, OSError):
+        return {}
+    return dict(payload) if isinstance(payload, Mapping) else {}
+
+
+def _resolve_path(repo_root: Path, path: Path) -> Path:
+    return path if path.is_absolute() else Path(repo_root) / path
 
 
 def _managed_close_position_guard(

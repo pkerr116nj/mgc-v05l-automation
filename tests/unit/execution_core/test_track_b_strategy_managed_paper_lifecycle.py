@@ -5,7 +5,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Mapping
 
-from mgc_v05l.execution_core.models import BrokerOrder, PositionSource, PositionState
+from mgc_v05l.execution_core.models import BrokerOrder, IntentKind, PositionSource, PositionState
 from mgc_v05l.execution_core.track_b_open_order_truth import (
     BROKER_FLAT_WITH_OPEN_CLOSE_ORDER,
     DUPLICATE_CLOSE_ORDER,
@@ -50,9 +50,115 @@ def base_config(tmp_path: Path, **overrides: object) -> TrackBStrategyManagedPap
         "close_limit_price": "4705.1",
         "output_root": tmp_path / "managed",
         "paper_trade_ledger_output_root": tmp_path / "ledger",
+        "repo_root": tmp_path,
+        "runtime_generation_id": "runtime-generation-1",
+        "lane_id": "unit-test-lane",
+        "pre_action_snapshot_max_age_seconds": 10_000_000,
     }
     payload.update(overrides)
     return TrackBStrategyManagedPaperLifecycleConfig(**payload)
+
+
+def seed_strategy_submit_authority(
+    tmp_path: Path,
+    *,
+    config: TrackBStrategyManagedPaperLifecycleConfig,
+    intent_payload: Mapping[str, Any],
+    intent_kind: IntentKind,
+    limit_price: object,
+    safe_state_overrides: Mapping[str, Any] | None = None,
+    snapshot_overrides: Mapping[str, Any] | None = None,
+    planner_target_overrides: Mapping[str, Any] | None = None,
+) -> None:
+    target = lifecycle_module._strategy_submit_target_identity(
+        config=config,
+        intent_payload=intent_payload,
+        intent_kind=intent_kind,
+        limit_price=limit_price,
+    )
+    target.update({str(key): str(value) for key, value in (planner_target_overrides or {}).items()})
+    plan_classification = (
+        lifecycle_module.PLAN_STRATEGY_MANAGED_CLOSE_SUBMIT
+        if intent_kind is IntentKind.CLOSE
+        else lifecycle_module.PLAN_STRATEGY_MANAGED_ENTRY_SUBMIT
+    )
+    action_type = (
+        lifecycle_module.ACTION_STRATEGY_MANAGED_CLOSE_SUBMIT
+        if intent_kind is IntentKind.CLOSE
+        else lifecycle_module.ACTION_STRATEGY_MANAGED_ENTRY_SUBMIT
+    )
+    snapshot = {
+        "generated_at": aware_now().isoformat(),
+        "control_plane_snapshot_id": "snapshot-1",
+        "shared_truth_refresh_generation_id": "generation-1",
+        "shared_truth_coherence_status": "COHERENT",
+        "runtime_supervisor_decision_id": "supervisor-1",
+        "runtime_supervisor_classification": "SUPERVISOR_RUNTIME_START_ALLOWED",
+        "safe_to_start_runtime": True,
+        "safe_to_leave_runtime_running": False,
+        "runtime_resume_action_policy": "NEW_RUNTIME_GENERATION_ALLOWED",
+        "runtime_resume_proposed_next_runtime_generation_id": config.runtime_generation_id,
+        "runtime_resume_generation_reuse_allowed": False,
+        "runtime_resume_must_start_new_generation": True,
+        "live_money_eligible": False,
+        "paper_proof_invoked": False,
+        "open_order_truth_classification": "NO_OPEN_ORDERS",
+        "managed_order_registry_classification": "MANAGED_ORDER_REGISTRY_READY",
+        "position_truth_classification": "CLEAN_FLAT_READY",
+        "managed_position_registry_classification": "NO_MANAGED_POSITIONS",
+        "agent_health_top_blockers": [],
+        "agent_health_has_duplicate_writer": False,
+    }
+    snapshot.update(dict(snapshot_overrides or {}))
+    _write_json(tmp_path / "outputs/track_b_execution_core/control_plane/latest_control_plane_snapshot.json", snapshot)
+    _write_json(
+        tmp_path / "outputs/track_b_execution_core/runtime_supervisor/latest_runtime_supervisor_authority.json",
+        {
+            "generated_at": aware_now().isoformat(),
+            "supervisor_decision_id": "supervisor-1",
+            "classification": snapshot.get("runtime_supervisor_classification"),
+            "live_money_eligible": snapshot.get("live_money_eligible"),
+        },
+    )
+    _write_json(
+        tmp_path / "outputs/track_b_execution_core/paper_autonomous_recovery/latest_paper_autonomous_recovery_plan.json",
+        {
+            "generated_at": aware_now().isoformat(),
+            "classification": plan_classification,
+            "control_plane_snapshot_id": snapshot.get("control_plane_snapshot_id"),
+            "shared_truth_refresh_generation_id": snapshot.get("shared_truth_refresh_generation_id"),
+            "execution_enabled": False,
+            "live_money_eligible": snapshot.get("live_money_eligible"),
+            "proposed_actions": [
+                {
+                    "action_id": action_type.lower(),
+                    "action_type": action_type,
+                    "target_identity": target,
+                    "execution_enabled": False,
+                }
+            ],
+        },
+    )
+    safe_state = {
+        "generated_at": aware_now().isoformat(),
+        "safe_state_classification": "SAFE_STATE_NORMAL",
+        "control_plane_snapshot_id": snapshot.get("control_plane_snapshot_id"),
+        "shared_truth_generation_id": snapshot.get("shared_truth_refresh_generation_id"),
+        "runtime_generation_id": config.runtime_generation_id,
+        "submit_allowed": True,
+        "broker_mutation_allowed": True,
+        "observe_only": False,
+        "tripped_limits": [],
+        "live_money_eligible": False,
+        "paper_proof_invoked": False,
+    }
+    safe_state.update(dict(safe_state_overrides or {}))
+    _write_json(tmp_path / "outputs/track_b_execution_core/safe_state/latest_runtime_safe_state_envelope.json", safe_state)
+
+
+def _write_json(path: Path, payload: Mapping[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(dict(payload), indent=2, sort_keys=True) + "\n", encoding="utf-8")
 
 
 def fake_stages(*, close: bool = False) -> TrackBStrategyManagedPaperLifecycleStages:
@@ -228,6 +334,153 @@ def test_submit_disabled_reports_managed_submit_blocked_without_position(tmp_pat
     assert result.report["entry_fill"] is None
     assert result.report["submit_attempted"] is False
     assert result.report["broker_state_mutated"] is False
+
+
+def test_submit_enabled_blocks_without_control_plane_snapshot(tmp_path: Path, monkeypatch) -> None:
+    class MustNotInstantiateAdapter:
+        def __init__(self, **_kwargs: Any) -> None:
+            raise AssertionError("snapshot gate must block before adapter construction")
+
+    monkeypatch.setattr(lifecycle_module, "IbkrPaperAdapter", MustNotInstantiateAdapter)
+
+    result = run_track_b_strategy_managed_paper_lifecycle(
+        config=base_config(
+            tmp_path,
+            managed_exit_policy_id=TrackBManagedExitPolicy.MANAGED_HOLD_REQUIRES_EXTERNAL_EXIT_SIGNAL.value,
+            submit_enabled=True,
+        ),
+        lifecycle_id="missing-snapshot",
+        now=aware_now(),
+    )
+
+    assert result.classification == TrackBManagedPaperLifecycleClassification.REVIEW_REQUIRED
+    attempt = result.report["entry_submit_attempt"]
+    assert attempt["classification"] == lifecycle_module.STRATEGY_SUBMIT_BLOCKED_NO_SNAPSHOT
+    assert attempt["submit_attempted"] is False
+    assert attempt["broker_state_mutated"] is False
+    assert attempt["strategy_submit_authorization"]["dashboard_projection_consumed"] is False
+
+
+def test_submit_enabled_blocks_by_safe_state_observe_only(tmp_path: Path, monkeypatch) -> None:
+    class MustNotInstantiateAdapter:
+        def __init__(self, **_kwargs: Any) -> None:
+            raise AssertionError("safe-state gate must block before adapter construction")
+
+    config = base_config(
+        tmp_path,
+        managed_exit_policy_id=TrackBManagedExitPolicy.MANAGED_HOLD_REQUIRES_EXTERNAL_EXIT_SIGNAL.value,
+        submit_enabled=True,
+    )
+    intent = lifecycle_module._entry_intent(config=config, lifecycle_id="observe-only", now=aware_now())
+    seed_strategy_submit_authority(
+        tmp_path,
+        config=config,
+        intent_payload=intent,
+        intent_kind=IntentKind.OPEN,
+        limit_price="4704.6",
+        safe_state_overrides={
+            "safe_state_classification": "SAFE_STATE_OBSERVE_ONLY",
+            "submit_allowed": False,
+            "broker_mutation_allowed": False,
+            "observe_only": True,
+        },
+    )
+    monkeypatch.setattr(lifecycle_module, "IbkrPaperAdapter", MustNotInstantiateAdapter)
+
+    result = run_track_b_strategy_managed_paper_lifecycle(
+        config=config,
+        lifecycle_id="observe-only",
+        now=aware_now(),
+    )
+
+    attempt = result.report["entry_submit_attempt"]
+    assert attempt["classification"] == lifecycle_module.STRATEGY_SUBMIT_BLOCKED_SAFE_STATE
+    assert attempt["strategy_submit_authorization"]["safe_state_classification"] == "SAFE_STATE_OBSERVE_ONLY"
+    assert attempt["broker_state_mutated"] is False
+
+
+def test_submit_enabled_blocks_live_money_and_paper_proof_flags(tmp_path: Path, monkeypatch) -> None:
+    class MustNotInstantiateAdapter:
+        def __init__(self, **_kwargs: Any) -> None:
+            raise AssertionError("hard invariant gate must block before adapter construction")
+
+    monkeypatch.setattr(lifecycle_module, "IbkrPaperAdapter", MustNotInstantiateAdapter)
+
+    config_live = base_config(
+        tmp_path / "live",
+        managed_exit_policy_id=TrackBManagedExitPolicy.MANAGED_HOLD_REQUIRES_EXTERNAL_EXIT_SIGNAL.value,
+        submit_enabled=True,
+    )
+    intent_live = lifecycle_module._entry_intent(config=config_live, lifecycle_id="live-money", now=aware_now())
+    seed_strategy_submit_authority(
+        tmp_path / "live",
+        config=config_live,
+        intent_payload=intent_live,
+        intent_kind=IntentKind.OPEN,
+        limit_price="4704.6",
+        snapshot_overrides={"live_money_eligible": True},
+        safe_state_overrides={"live_money_eligible": True},
+    )
+    live_result = run_track_b_strategy_managed_paper_lifecycle(
+        config=config_live,
+        lifecycle_id="live-money",
+        now=aware_now(),
+    )
+    assert live_result.report["entry_submit_attempt"]["classification"] == lifecycle_module.STRATEGY_SUBMIT_BLOCKED_LIVE_MONEY
+
+    config_proof = base_config(
+        tmp_path / "proof",
+        managed_exit_policy_id=TrackBManagedExitPolicy.MANAGED_HOLD_REQUIRES_EXTERNAL_EXIT_SIGNAL.value,
+        submit_enabled=True,
+    )
+    intent_proof = lifecycle_module._entry_intent(config=config_proof, lifecycle_id="paper-proof", now=aware_now())
+    seed_strategy_submit_authority(
+        tmp_path / "proof",
+        config=config_proof,
+        intent_payload=intent_proof,
+        intent_kind=IntentKind.OPEN,
+        limit_price="4704.6",
+        snapshot_overrides={"paper_proof_invoked": True},
+    )
+    proof_result = run_track_b_strategy_managed_paper_lifecycle(
+        config=config_proof,
+        lifecycle_id="paper-proof",
+        now=aware_now(),
+    )
+    assert proof_result.report["entry_submit_attempt"]["classification"] == lifecycle_module.STRATEGY_SUBMIT_BLOCKED_PAPER_PROOF
+
+
+def test_submit_enabled_blocks_target_identity_mismatch(tmp_path: Path, monkeypatch) -> None:
+    class MustNotInstantiateAdapter:
+        def __init__(self, **_kwargs: Any) -> None:
+            raise AssertionError("target mismatch must block before adapter construction")
+
+    config = base_config(
+        tmp_path,
+        managed_exit_policy_id=TrackBManagedExitPolicy.MANAGED_HOLD_REQUIRES_EXTERNAL_EXIT_SIGNAL.value,
+        submit_enabled=True,
+    )
+    intent = lifecycle_module._entry_intent(config=config, lifecycle_id="target-mismatch", now=aware_now())
+    seed_strategy_submit_authority(
+        tmp_path,
+        config=config,
+        intent_payload=intent,
+        intent_kind=IntentKind.OPEN,
+        limit_price="4704.6",
+        planner_target_overrides={"contract": "WRONG"},
+    )
+    monkeypatch.setattr(lifecycle_module, "IbkrPaperAdapter", MustNotInstantiateAdapter)
+
+    result = run_track_b_strategy_managed_paper_lifecycle(
+        config=config,
+        lifecycle_id="target-mismatch",
+        now=aware_now(),
+    )
+
+    attempt = result.report["entry_submit_attempt"]
+    assert attempt["classification"] == lifecycle_module.STRATEGY_SUBMIT_BLOCKED_TARGET_MISMATCH
+    assert attempt["submit_attempted"] is False
+    assert attempt["broker_state_mutated"] is False
 
 
 def test_adapter_stage_failure_preserves_submit_attempt_diagnostics(tmp_path: Path) -> None:
@@ -589,21 +842,34 @@ def test_maintenance_blocks_duplicate_working_close_order_before_submit(tmp_path
             raise AssertionError("duplicate close must not submit")
 
     monkeypatch.setattr(lifecycle_module, "IbkrPaperAdapter", ExistingCloseAdapter)
+    config = base_config(
+        tmp_path,
+        strategy_id="track_b_paper_execution_test_mule_v1__mnq",
+        instrument_family="MNQ",
+        contract_key="MNQ-202606",
+        local_symbol="MNQM6",
+        con_id=770561201,
+        side="LONG",
+        entry_limit_price="28729",
+        close_limit_price="28728.5",
+        managed_exit_policy_id=TrackBManagedExitPolicy.PAPER_DIAGNOSTIC_TIME_BOXED_3X5M_EXIT_V1.value,
+        completed_5m_bars_since_entry=3,
+        submit_enabled=True,
+    )
+    seed_strategy_submit_authority(
+        tmp_path,
+        config=config,
+        intent_payload={
+            "lifecycle_id": "open-managed-existing",
+            "order_action": "SELL",
+            "quantity": 1,
+            "close_limit_price": "28728.5",
+        },
+        intent_kind=IntentKind.CLOSE,
+        limit_price="28728.5",
+    )
     result = maintain_open_track_b_strategy_managed_paper_lifecycle(
-        config=base_config(
-            tmp_path,
-            strategy_id="track_b_paper_execution_test_mule_v1__mnq",
-            instrument_family="MNQ",
-            contract_key="MNQ-202606",
-            local_symbol="MNQM6",
-            con_id=770561201,
-            side="LONG",
-            entry_limit_price="28729",
-            close_limit_price="28728.5",
-            managed_exit_policy_id=TrackBManagedExitPolicy.PAPER_DIAGNOSTIC_TIME_BOXED_3X5M_EXIT_V1.value,
-            completed_5m_bars_since_entry=3,
-            submit_enabled=True,
-        ),
+        config=config,
         existing_lifecycle_report=open_managed_report(),
         now=aware_now(),
     )
@@ -651,20 +917,33 @@ def test_maintenance_blocks_duplicate_close_using_open_order_truth(tmp_path: Pat
 
     monkeypatch.setattr(lifecycle_module, "IbkrPaperAdapter", DuplicateCloseAdapter)
 
+    config = base_config(
+        tmp_path,
+        strategy_id="track_b_paper_execution_test_mule_v1__mnq",
+        instrument_family="MNQ",
+        contract_key="MNQ-202606",
+        local_symbol="MNQM6",
+        con_id=770561201,
+        side="LONG",
+        close_limit_price="28728.5",
+        managed_exit_policy_id=TrackBManagedExitPolicy.PAPER_DIAGNOSTIC_TIME_BOXED_3X5M_EXIT_V1.value,
+        completed_5m_bars_since_entry=3,
+        submit_enabled=True,
+    )
+    seed_strategy_submit_authority(
+        tmp_path,
+        config=config,
+        intent_payload={
+            "lifecycle_id": "open-managed-existing",
+            "order_action": "SELL",
+            "quantity": 1,
+            "close_limit_price": "28728.5",
+        },
+        intent_kind=IntentKind.CLOSE,
+        limit_price="28728.5",
+    )
     result = maintain_open_track_b_strategy_managed_paper_lifecycle(
-        config=base_config(
-            tmp_path,
-            strategy_id="track_b_paper_execution_test_mule_v1__mnq",
-            instrument_family="MNQ",
-            contract_key="MNQ-202606",
-            local_symbol="MNQM6",
-            con_id=770561201,
-            side="LONG",
-            close_limit_price="28728.5",
-            managed_exit_policy_id=TrackBManagedExitPolicy.PAPER_DIAGNOSTIC_TIME_BOXED_3X5M_EXIT_V1.value,
-            completed_5m_bars_since_entry=3,
-            submit_enabled=True,
-        ),
+        config=config,
         existing_lifecycle_report=open_managed_report(),
         now=aware_now(),
     )
@@ -722,20 +1001,33 @@ def test_maintenance_surfaces_suspicious_sentinel_close_order_via_open_order_tru
 
     monkeypatch.setattr(lifecycle_module, "IbkrPaperAdapter", SuspiciousCloseAdapter)
 
+    config = base_config(
+        tmp_path,
+        strategy_id="track_b_paper_execution_test_mule_v1__mnq",
+        instrument_family="MNQ",
+        contract_key="MNQ-202606",
+        local_symbol="MNQM6",
+        con_id=770561201,
+        side="LONG",
+        close_limit_price="28728.5",
+        managed_exit_policy_id=TrackBManagedExitPolicy.PAPER_DIAGNOSTIC_TIME_BOXED_3X5M_EXIT_V1.value,
+        completed_5m_bars_since_entry=3,
+        submit_enabled=True,
+    )
+    seed_strategy_submit_authority(
+        tmp_path,
+        config=config,
+        intent_payload={
+            "lifecycle_id": "open-managed-existing",
+            "order_action": "SELL",
+            "quantity": 1,
+            "close_limit_price": "28728.5",
+        },
+        intent_kind=IntentKind.CLOSE,
+        limit_price="28728.5",
+    )
     result = maintain_open_track_b_strategy_managed_paper_lifecycle(
-        config=base_config(
-            tmp_path,
-            strategy_id="track_b_paper_execution_test_mule_v1__mnq",
-            instrument_family="MNQ",
-            contract_key="MNQ-202606",
-            local_symbol="MNQM6",
-            con_id=770561201,
-            side="LONG",
-            close_limit_price="28728.5",
-            managed_exit_policy_id=TrackBManagedExitPolicy.PAPER_DIAGNOSTIC_TIME_BOXED_3X5M_EXIT_V1.value,
-            completed_5m_bars_since_entry=3,
-            submit_enabled=True,
-        ),
+        config=config,
         existing_lifecycle_report=open_managed_report(),
         now=aware_now(),
     )
@@ -846,20 +1138,33 @@ def test_maintenance_with_no_open_orders_continues_to_close_submit(tmp_path: Pat
 
     monkeypatch.setattr(lifecycle_module, "IbkrPaperAdapter", NoOpenOrdersAdapter)
 
+    config = base_config(
+        tmp_path,
+        strategy_id="track_b_paper_execution_test_mule_v1__mnq",
+        instrument_family="MNQ",
+        contract_key="MNQ-202606",
+        local_symbol="MNQM6",
+        con_id=770561201,
+        side="LONG",
+        close_limit_price="28728.5",
+        managed_exit_policy_id=TrackBManagedExitPolicy.PAPER_DIAGNOSTIC_TIME_BOXED_3X5M_EXIT_V1.value,
+        completed_5m_bars_since_entry=3,
+        submit_enabled=True,
+    )
+    seed_strategy_submit_authority(
+        tmp_path,
+        config=config,
+        intent_payload={
+            "lifecycle_id": "open-managed-existing",
+            "order_action": "SELL",
+            "quantity": 1,
+            "close_limit_price": "28728.5",
+        },
+        intent_kind=IntentKind.CLOSE,
+        limit_price="28728.5",
+    )
     result = maintain_open_track_b_strategy_managed_paper_lifecycle(
-        config=base_config(
-            tmp_path,
-            strategy_id="track_b_paper_execution_test_mule_v1__mnq",
-            instrument_family="MNQ",
-            contract_key="MNQ-202606",
-            local_symbol="MNQM6",
-            con_id=770561201,
-            side="LONG",
-            close_limit_price="28728.5",
-            managed_exit_policy_id=TrackBManagedExitPolicy.PAPER_DIAGNOSTIC_TIME_BOXED_3X5M_EXIT_V1.value,
-            completed_5m_bars_since_entry=3,
-            submit_enabled=True,
-        ),
+        config=config,
         existing_lifecycle_report=open_managed_report(),
         now=aware_now(),
     )
@@ -867,6 +1172,10 @@ def test_maintenance_with_no_open_orders_continues_to_close_submit(tmp_path: Pat
     assert result.classification == TrackBManagedPaperLifecycleClassification.CLOSED_FLAT
     assert result.report["close_submit_attempt"]["submitted"] is True
     assert result.report["close_submit_attempt"]["broker_order_id"] == "1002"
+    assert (
+        result.report["close_submit_attempt"]["strategy_submit_authorization"]["authorization_classification"]
+        == lifecycle_module.STRATEGY_SUBMIT_AUTHORIZED
+    )
 
 
 def test_maintenance_blocks_close_when_broker_position_missing_before_submit(
@@ -899,20 +1208,33 @@ def test_maintenance_blocks_close_when_broker_position_missing_before_submit(
 
     monkeypatch.setattr(lifecycle_module, "IbkrPaperAdapter", MissingPositionAdapter)
 
+    config = base_config(
+        tmp_path,
+        strategy_id="track_b_paper_execution_test_mule_v1__mnq",
+        instrument_family="MNQ",
+        contract_key="MNQ-202606",
+        local_symbol="MNQM6",
+        con_id=770561201,
+        side="LONG",
+        close_limit_price="28728.5",
+        managed_exit_policy_id=TrackBManagedExitPolicy.PAPER_DIAGNOSTIC_TIME_BOXED_3X5M_EXIT_V1.value,
+        completed_5m_bars_since_entry=3,
+        submit_enabled=True,
+    )
+    seed_strategy_submit_authority(
+        tmp_path,
+        config=config,
+        intent_payload={
+            "lifecycle_id": "open-managed-existing",
+            "order_action": "SELL",
+            "quantity": 1,
+            "close_limit_price": "28728.5",
+        },
+        intent_kind=IntentKind.CLOSE,
+        limit_price="28728.5",
+    )
     result = maintain_open_track_b_strategy_managed_paper_lifecycle(
-        config=base_config(
-            tmp_path,
-            strategy_id="track_b_paper_execution_test_mule_v1__mnq",
-            instrument_family="MNQ",
-            contract_key="MNQ-202606",
-            local_symbol="MNQM6",
-            con_id=770561201,
-            side="LONG",
-            close_limit_price="28728.5",
-            managed_exit_policy_id=TrackBManagedExitPolicy.PAPER_DIAGNOSTIC_TIME_BOXED_3X5M_EXIT_V1.value,
-            completed_5m_bars_since_entry=3,
-            submit_enabled=True,
-        ),
+        config=config,
         existing_lifecycle_report=open_managed_report(),
         now=aware_now(),
     )
@@ -964,20 +1286,33 @@ def test_maintenance_blocks_close_when_broker_position_direction_mismatches(
 
     monkeypatch.setattr(lifecycle_module, "IbkrPaperAdapter", WrongSidePositionAdapter)
 
+    config = base_config(
+        tmp_path,
+        strategy_id="track_b_paper_execution_test_mule_v1__mnq",
+        instrument_family="MNQ",
+        contract_key="MNQ-202606",
+        local_symbol="MNQM6",
+        con_id=770561201,
+        side="LONG",
+        close_limit_price="28728.5",
+        managed_exit_policy_id=TrackBManagedExitPolicy.PAPER_DIAGNOSTIC_TIME_BOXED_3X5M_EXIT_V1.value,
+        completed_5m_bars_since_entry=3,
+        submit_enabled=True,
+    )
+    seed_strategy_submit_authority(
+        tmp_path,
+        config=config,
+        intent_payload={
+            "lifecycle_id": "open-managed-existing",
+            "order_action": "SELL",
+            "quantity": 1,
+            "close_limit_price": "28728.5",
+        },
+        intent_kind=IntentKind.CLOSE,
+        limit_price="28728.5",
+    )
     result = maintain_open_track_b_strategy_managed_paper_lifecycle(
-        config=base_config(
-            tmp_path,
-            strategy_id="track_b_paper_execution_test_mule_v1__mnq",
-            instrument_family="MNQ",
-            contract_key="MNQ-202606",
-            local_symbol="MNQM6",
-            con_id=770561201,
-            side="LONG",
-            close_limit_price="28728.5",
-            managed_exit_policy_id=TrackBManagedExitPolicy.PAPER_DIAGNOSTIC_TIME_BOXED_3X5M_EXIT_V1.value,
-            completed_5m_bars_since_entry=3,
-            submit_enabled=True,
-        ),
+        config=config,
         existing_lifecycle_report=open_managed_report(),
         now=aware_now(),
     )
