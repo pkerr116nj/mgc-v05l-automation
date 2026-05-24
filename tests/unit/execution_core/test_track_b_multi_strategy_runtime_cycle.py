@@ -669,6 +669,60 @@ def test_clean_cycle_authority_passes_generation_bound_packet_downstream(tmp_pat
     assert "outputs/operator_dashboard" not in observed["control_plane_snapshot_path"]
 
 
+def test_clean_concurrent_strategy_scoped_positions_do_not_block_submit_delegation(tmp_path: Path) -> None:
+    calls = Calls()
+    reports = default_reports()
+    reports["FIRST_BEAR_SNAP_TURN_V1"] = rule_report(
+        "FIRST_BEAR_SNAP_TURN_V1",
+        rule_mode="FIRST_BEAR_SNAP_TURN_V1",
+        decision="SHORT",
+        emitted=True,
+        direction="SHORT",
+    )
+    seed_cycle_authority(
+        tmp_path,
+        snapshot_overrides={
+            "position_truth_classification": "STRATEGY_SCOPED_POSITIONS_CLEAN",
+            "managed_position_registry_classification": "STRATEGY_SCOPED_OPEN_POSITIONS_CLEAN",
+        },
+        safe_state_overrides={
+            "position_truth_classification": "STRATEGY_SCOPED_POSITIONS_CLEAN",
+            "managed_position_registry_classification": "STRATEGY_SCOPED_OPEN_POSITIONS_CLEAN",
+            "limit_counters": {
+                "managed_open_positions_per_strategy_lane": {
+                    "MGC:mgc_first_bear_snap_turn": 1,
+                    "MNQ:mnq_us_derivative_bear_turn": 1,
+                },
+                "max_managed_open_positions_per_strategy_lane_observed": 1,
+            },
+            "tripped_limits": [],
+        },
+    )
+
+    result = run_track_b_multi_strategy_runtime_cycle(
+        config=cycle_config(
+            tmp_path,
+            side="SELL",
+            submit_paper=True,
+            confirm_paper_submit=True,
+            quantity=1,
+            manual_open_limit_price="4575.0",
+            manual_close_limit_price="4575.3",
+        ),
+        stages=stages_for(tmp_path, calls, reports, paper=paper_result(tmp_path)),
+        cycle_id="cycle-concurrent-scoped-positions",
+        now=aware_now(),
+    )
+
+    assert calls.paper == 1
+    assert (
+        result.report["multi_strategy_cycle_authorization_classification"]
+        == cycle_module.MULTI_STRATEGY_CYCLE_AUTHORIZED
+    )
+    assert result.report["cycle_submit_allowed"] is True
+    assert result.report["cycle_broker_mutation_allowed"] is True
+
+
 def test_auto_paper_side_matches_chosen_short_signal(tmp_path: Path) -> None:
     calls = Calls()
     reports = default_reports()
