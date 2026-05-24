@@ -1562,6 +1562,7 @@ import json
 import sys
 from pathlib import Path
 from mgc_v05l.execution_core.track_b_control_plane_snapshot_status import classify_control_plane_snapshot_status
+from mgc_v05l.execution_core.track_b_control_plane_top_line import build_track_b_control_plane_top_line
 
 path = Path(sys.argv[1])
 try:
@@ -1578,6 +1579,7 @@ except (OSError, json.JSONDecodeError):
     raise SystemExit(2)
 
 status = classify_control_plane_snapshot_status(payload, required_for_launch=True)
+top_line = build_track_b_control_plane_top_line(payload)
 
 def agent_health_blocker_summary(payload):
     blockers = payload.get("agent_health_top_blockers") or []
@@ -1622,6 +1624,8 @@ if not allowed:
         f"supervisor_mode={payload.get('supervisor_mode')} "
         f"proof_window_status={payload.get('proof_window_status')} "
         f"safe_to_start_runtime={status.get('safe_to_start_runtime')} "
+        f"top_line_classification={top_line.get('top_line_classification')} "
+        f"top_line_status={json.dumps(top_line.get('top_line_status') or '')} "
         f"paper_recovery_policy={payload.get('paper_recovery_policy')} "
         f"autonomous_recovery_plan_classification={payload.get('autonomous_recovery_plan_classification')} "
         f"autonomous_recovery_next_action={payload.get('autonomous_recovery_next_action')} "
@@ -1655,12 +1659,14 @@ import json
 import sys
 from pathlib import Path
 from mgc_v05l.execution_core.track_b_control_plane_snapshot_status import classify_control_plane_snapshot_status
+from mgc_v05l.execution_core.track_b_control_plane_top_line import build_track_b_control_plane_top_line
 
 try:
     payload = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
 except (OSError, json.JSONDecodeError):
     payload = {}
 status = classify_control_plane_snapshot_status(payload, required_for_launch=True)
+top_line = build_track_b_control_plane_top_line(payload)
 
 def agent_health_blocker_summary(payload):
     blockers = payload.get("agent_health_top_blockers") or []
@@ -1697,6 +1703,8 @@ print(
     f"supervisor_mode={payload.get('supervisor_mode')} "
     f"proof_window_status={payload.get('proof_window_status')} "
     f"safe_to_start_runtime={status.get('safe_to_start_runtime')} "
+    f"top_line_classification={top_line.get('top_line_classification')} "
+    f"top_line_status={json.dumps(top_line.get('top_line_status') or '')} "
     f"paper_recovery_policy={payload.get('paper_recovery_policy')} "
     f"autonomous_recovery_plan_classification={payload.get('autonomous_recovery_plan_classification')} "
     f"autonomous_recovery_next_action={payload.get('autonomous_recovery_next_action')} "

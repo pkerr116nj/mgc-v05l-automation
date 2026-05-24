@@ -364,6 +364,8 @@ payload = {
         "autonomous_recovery_next_action": os.environ.get("LAUNCH_SUPERVISOR_AUTONOMOUS_RECOVERY_NEXT_ACTION") or None,
         "autonomous_recovery_execution_enabled": os.environ.get("LAUNCH_SUPERVISOR_AUTONOMOUS_RECOVERY_EXECUTION_ENABLED", "").lower() == "true",
         "recommended_next_command": os.environ.get("LAUNCH_SUPERVISOR_RECOMMENDED_NEXT_COMMAND") or None,
+        "top_line_classification": os.environ.get("LAUNCH_CONTROL_PLANE_TOP_LINE_CLASSIFICATION") or None,
+        "top_line_status": os.environ.get("LAUNCH_CONTROL_PLANE_TOP_LINE_STATUS") or None,
     },
 }
 if os.environ.get("LAUNCH_STOP_SOURCE") or stop_reason:
@@ -790,6 +792,7 @@ import json
 import sys
 from pathlib import Path
 from mgc_v05l.execution_core.track_b_control_plane_snapshot_status import classify_control_plane_snapshot_status
+from mgc_v05l.execution_core.track_b_control_plane_top_line import build_track_b_control_plane_top_line
 
 path = Path(sys.argv[1])
 stderr_path = Path(sys.argv[2])
@@ -805,6 +808,7 @@ except (OSError, json.JSONDecodeError):
     raise SystemExit(0)
 
 status = classify_control_plane_snapshot_status(payload, required_for_launch=True)
+top_line = build_track_b_control_plane_top_line(payload)
 
 def agent_health_blocker_summary(payload):
     blockers = payload.get("agent_health_top_blockers") or []
@@ -831,6 +835,7 @@ print(
     "shared_truth_refresh_generation_id={generation_id} shared_truth_coherence_status={coherence} "
     "runtime_supervisor_classification={supervisor_classification} supervisor_mode={mode} "
     "proof_window_status={window} safe_to_start_runtime={safe} "
+    "top_line_classification={top_line_classification} top_line_status={top_line_status} "
     "paper_recovery_policy={paper_policy} autonomous_recovery_plan_classification={plan_classification} "
     "autonomous_recovery_next_action={plan_action} autonomous_recovery_execution_enabled={plan_enabled} "
     "agent_health_classification={agent_health_classification} "
@@ -853,6 +858,8 @@ print(
         mode=payload.get("supervisor_mode"),
         window=payload.get("proof_window_status"),
         safe=payload.get("safe_to_start_runtime"),
+        top_line_classification=top_line.get("top_line_classification"),
+        top_line_status=json.dumps(top_line.get("top_line_status") or ""),
         paper_policy=payload.get("paper_recovery_policy"),
         plan_classification=payload.get("autonomous_recovery_plan_classification"),
         plan_action=payload.get("autonomous_recovery_next_action"),
@@ -888,6 +895,7 @@ import json
 import sys
 from pathlib import Path
 from mgc_v05l.execution_core.track_b_control_plane_snapshot_status import classify_control_plane_snapshot_status
+from mgc_v05l.execution_core.track_b_control_plane_top_line import build_track_b_control_plane_top_line
 
 path = Path(sys.argv[1])
 try:
@@ -904,6 +912,7 @@ except (OSError, json.JSONDecodeError):
     raise SystemExit(2)
 
 status = classify_control_plane_snapshot_status(payload, required_for_launch=True)
+top_line = build_track_b_control_plane_top_line(payload)
 
 def agent_health_blocker_summary(payload):
     blockers = payload.get("agent_health_top_blockers") or []
@@ -948,6 +957,8 @@ if not allowed:
         f"supervisor_mode={payload.get('supervisor_mode')} "
         f"proof_window_status={payload.get('proof_window_status')} "
         f"safe_to_start_runtime={status.get('safe_to_start_runtime')} "
+        f"top_line_classification={top_line.get('top_line_classification')} "
+        f"top_line_status={json.dumps(top_line.get('top_line_status') or '')} "
         f"paper_recovery_policy={payload.get('paper_recovery_policy')} "
         f"autonomous_recovery_plan_classification={payload.get('autonomous_recovery_plan_classification')} "
         f"autonomous_recovery_next_action={payload.get('autonomous_recovery_next_action')} "
@@ -1008,6 +1019,8 @@ fields = {
     "LAUNCH_SUPERVISOR_AUTONOMOUS_RECOVERY_NEXT_ACTION": payload.get("autonomous_recovery_next_action"),
     "LAUNCH_SUPERVISOR_SHARED_TRUTH_REFRESH_GENERATION_ID": payload.get("shared_truth_refresh_generation_id"),
     "LAUNCH_SUPERVISOR_SHARED_TRUTH_COHERENCE_STATUS": payload.get("shared_truth_coherence_status"),
+    "LAUNCH_CONTROL_PLANE_TOP_LINE_CLASSIFICATION": payload.get("top_line_classification"),
+    "LAUNCH_CONTROL_PLANE_TOP_LINE_STATUS": payload.get("top_line_status"),
 }
 for key, value in fields.items():
     print(f"{key}={shlex.quote(str(value or ''))}")

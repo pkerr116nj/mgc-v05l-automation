@@ -33,6 +33,7 @@ from mgc_v05l.app.operator_dashboard import (
     _treasury_curve_rows,
 )
 from mgc_v05l.app.tracked_paper_strategies import build_tracked_paper_strategies_payload
+from mgc_v05l.execution_core.track_b_control_plane_top_line import build_track_b_control_plane_top_line
 from mgc_v05l.persistence import build_engine
 from mgc_v05l.persistence.db import create_schema
 from mgc_v05l.persistence.tables import research_capture_status_table
@@ -275,6 +276,12 @@ def test_track_b_control_plane_status_projection_displays_closed_market_services
     )
 
     summary = operator_dashboard_module._track_b_control_plane_services_summary(tmp_path)  # noqa: SLF001
+    snapshot = json.loads(
+        (
+            tmp_path / "outputs/track_b_execution_core/control_plane/latest_control_plane_snapshot.json"
+        ).read_text(encoding="utf-8")
+    )
+    top_line = build_track_b_control_plane_top_line(snapshot)
 
     assert summary["projection_only"] is True
     assert summary["not_routing_authority"] is True
@@ -313,6 +320,10 @@ def test_track_b_control_plane_status_projection_displays_closed_market_services
     assert summary["control_plane_snapshot_shared_truth_generation_id"] == "test-shared-truth-generation"
     assert summary["control_plane_snapshot_shared_truth_coherence_status"] == "COHERENT"
     assert summary["control_plane_snapshot_supervisor_mode"] == "MARKET_CLOSED_WAIT"
+    assert summary["top_line_classification"] == top_line["top_line_classification"]
+    assert summary["top_line_status"] == top_line["top_line_status"]
+    assert summary["top_line_classification"] == "MARKET_CLOSED_WAIT"
+    assert "Market closed/no fresh bars expected" in summary["top_line_status"]
     assert summary["runtime_supervisor_recommended_next_command"] == (
         "wait for market reopen; rerun proof readiness before any runtime start"
     )
@@ -480,6 +491,12 @@ def test_track_b_control_plane_status_projection_displays_hard_unsafe_paper_poli
     )
 
     summary = operator_dashboard_module._track_b_control_plane_services_summary(tmp_path)  # noqa: SLF001
+    snapshot = json.loads(
+        (
+            tmp_path / "outputs/track_b_execution_core/control_plane/latest_control_plane_snapshot.json"
+        ).read_text(encoding="utf-8")
+    )
+    top_line = build_track_b_control_plane_top_line(snapshot)
 
     assert summary["paper_recovery_policy"] == "HARD_UNSAFE_HOLD"
     assert summary["paper_recovery_diagnostic"] == "HARD_UNSAFE_HOLD"
@@ -505,11 +522,20 @@ def test_track_b_control_plane_status_projection_displays_duplicate_writer_hard_
     )
 
     summary = operator_dashboard_module._track_b_control_plane_services_summary(tmp_path)  # noqa: SLF001
+    snapshot = json.loads(
+        (
+            tmp_path / "outputs/track_b_execution_core/control_plane/latest_control_plane_snapshot.json"
+        ).read_text(encoding="utf-8")
+    )
+    top_line = build_track_b_control_plane_top_line(snapshot)
 
     assert summary["paper_recovery_policy"] == "HARD_UNSAFE_HOLD"
     assert summary["paper_recovery_diagnostic"] == "HARD_UNSAFE_HOLD"
     assert summary["runtime_resume_blockers"] == [{"code": "duplicate_runtime_writer", "detail": "hard unsafe"}]
     assert summary["primary_blocking_agent_id"] == "track_b_paper_runtime"
+    assert summary["top_line_classification"] == top_line["top_line_classification"]
+    assert summary["top_line_status"] == top_line["top_line_status"]
+    assert summary["top_line_classification"] == "HARD_UNSAFE_DUPLICATE_WRITER"
     assert summary["prioritized_blockers"][0]["status"] == "DUPLICATE_PROCESS"
     assert "Hard PAPER invariant" in summary["operator_explanation"]
     assert summary["attention_required"] is True

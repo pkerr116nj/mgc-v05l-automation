@@ -47,6 +47,7 @@ from ..execution_core.track_b_strategy_registry import (
 )
 from ..execution_core.track_b_readiness_state import DEFAULT_CANONICAL_READINESS_ARTIFACT
 from ..execution_core.track_b_control_plane_snapshot_status import classify_control_plane_snapshot_status
+from ..execution_core.track_b_control_plane_top_line import build_track_b_control_plane_top_line
 from ..execution_core.track_b_projection_metadata import build_projection_metadata
 from ..execution.ibkr_paper_strategy_monitor import load_paper_strategy_monitor_status
 from ..execution.track_b_phase1_submit_authority import evaluate_phase1_broker_reconciliation_submit_gate
@@ -18164,6 +18165,7 @@ def _track_b_control_plane_services_summary(repo_root: Path) -> dict[str, Any]:
     runtime_supervisor = payloads["runtime_supervisor"]
     control_plane_snapshot = payloads["control_plane_snapshot"]
     control_plane_status = classify_control_plane_snapshot_status(control_plane_snapshot)
+    control_plane_top_line = build_track_b_control_plane_top_line(control_plane_snapshot)
     paper_recovery_policy = payloads["paper_recovery_policy"]
     autonomous_recovery_plan = payloads["paper_autonomous_recovery_plan"]
     operator_ack = dict(runtime_supervisor.get("operator_ack") or {})
@@ -18264,14 +18266,8 @@ def _track_b_control_plane_services_summary(repo_root: Path) -> dict[str, Any]:
         ),
         "control_plane_snapshot_supervisor_mode": control_plane_snapshot.get("supervisor_mode"),
         "control_plane_snapshot_proof_window_status": control_plane_snapshot.get("proof_window_status"),
-        "primary_blocking_agent_id": control_plane_snapshot.get("primary_blocking_agent_id")
-        or autonomous_recovery_plan.get("primary_blocking_agent_id"),
-        "primary_blocking_reason": control_plane_snapshot.get("primary_blocking_reason")
-        or autonomous_recovery_plan.get("primary_blocking_reason"),
-        "operator_explanation": control_plane_snapshot.get("operator_explanation")
-        or autonomous_recovery_plan.get("operator_explanation"),
-        "recommended_observation_step": control_plane_snapshot.get("recommended_observation_step")
-        or autonomous_recovery_plan.get("recommended_observation_step"),
+        **control_plane_top_line,
+        "primary_blocking_reason": control_plane_snapshot.get("primary_blocking_reason"),
         "prioritized_blockers": list(
             control_plane_snapshot.get("prioritized_blockers")
             or autonomous_recovery_plan.get("prioritized_blockers")

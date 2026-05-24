@@ -31,6 +31,8 @@ def test_snapshot_ties_supervisor_to_shared_truth_generation(tmp_path: Path) -> 
     assert payload["runtime_supervisor_classification"] == "SUPERVISOR_RUNTIME_START_ALLOWED"
     assert payload["supervisor_mode"] == "READY_FOR_OPERATOR_START"
     assert payload["safe_to_start_runtime"] is True
+    assert payload["top_line_classification"] == "READY_FOR_OPERATOR_START"
+    assert "Ready for supervised Track B PAPER runtime start" in payload["top_line_status"]
     assert payload["broker_order_position_summary"]["open_order_truth"] == "NO_OPEN_ORDERS"
     assert payload["source_artifact_paths"]["shared_truth_refresh"].endswith(
         "outputs/track_b_execution_core/shared_truth/latest_track_b_shared_truth_refresh.json"
@@ -54,6 +56,8 @@ def test_market_closed_snapshot_waits_without_alarm(tmp_path: Path) -> None:
     assert payload["runtime_supervisor_classification"] == "SUPERVISOR_WAIT_MARKET_CLOSED"
     assert payload["supervisor_mode"] == "MARKET_CLOSED_WAIT"
     assert payload["proof_window_status"] == "market_closed"
+    assert payload["top_line_classification"] == "MARKET_CLOSED_WAIT"
+    assert "Market closed/no fresh bars expected" in payload["top_line_status"]
     assert payload["recommended_next_command"] == "wait for market reopen; rerun proof readiness before any runtime start"
 
 
@@ -127,6 +131,8 @@ def test_snapshot_surfaces_planner_operator_explanation_for_missing_open_order_t
     assert payload["primary_blocking_agent_id"] == "open_order_truth"
     assert payload["primary_blocking_reason"] == "authority artifact missing"
     assert "Open Order Truth" in payload["operator_explanation"]
+    assert payload["top_line_classification"] == "MISSING_AUTHORITY_ARTIFACT"
+    assert "Open Order Truth" in payload["top_line_status"]
     assert payload["prioritized_blockers"][0]["status"] == "MISSING_ARTIFACT"
 
 
@@ -168,6 +174,8 @@ def test_duplicate_writer_blocks_snapshot_start_posture(tmp_path: Path) -> None:
     assert payload["duplicate_process_count"] == 1
     assert payload["agent_health_blocks_proof"] is True
     assert payload["classification"] == "CONTROL_PLANE_SNAPSHOT_BLOCKED"
+    assert payload["top_line_classification"] == "HARD_UNSAFE_DUPLICATE_WRITER"
+    assert "duplicate" in payload["top_line_status"].lower()
     assert any(blocker["code"] == "agent_health_duplicate_writer" for blocker in payload["blockers"])
     assert payload["safe_to_start_runtime"] is False
 

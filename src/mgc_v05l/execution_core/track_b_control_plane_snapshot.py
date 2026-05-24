@@ -23,6 +23,9 @@ from mgc_v05l.execution_core.track_b_agent_health import (
     build_track_b_agent_health,
     write_track_b_agent_health,
 )
+from mgc_v05l.execution_core.track_b_control_plane_top_line import (
+    build_track_b_control_plane_top_line,
+)
 from mgc_v05l.execution_core.track_b_projection_metadata import build_projection_metadata
 from mgc_v05l.execution_core.track_b_runtime_supervisor_authority import (
     SHARED_TRUTH_COHERENT,
@@ -208,6 +211,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         "runtime_supervisor_classification": payload.get("runtime_supervisor_classification"),
         "supervisor_mode": payload.get("supervisor_mode"),
         "proof_window_status": payload.get("proof_window_status"),
+        "top_line_classification": payload.get("top_line_classification"),
+        "top_line_status": payload.get("top_line_status"),
         "primary_blocking_agent_id": payload.get("primary_blocking_agent_id"),
         "operator_explanation": payload.get("operator_explanation"),
         "recommended_observation_step": payload.get("recommended_observation_step"),
@@ -254,7 +259,7 @@ def _snapshot_payload(
     warnings = list(shared_truth.get("warnings") or []) + list(runtime_supervisor.get("warnings") or [])
     warnings.extend(_agent_health_warnings(agent_health_evidence))
     planner_explanation = _planner_explanation_fields(autonomous_recovery_plan)
-    return {
+    payload = {
         "schema_version": "track_b_control_plane_snapshot_v1",
         "control_plane_snapshot_id": _snapshot_id(now),
         "generated_at": now.isoformat(),
@@ -303,6 +308,8 @@ def _snapshot_payload(
             **_mapping(shared_truth.get("artifact_paths")),
         },
     }
+    payload.update(build_track_b_control_plane_top_line(payload))
+    return payload
 
 
 def _snapshot_classification(

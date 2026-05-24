@@ -257,6 +257,9 @@ import json
 import sys
 from pathlib import Path
 
+from mgc_v05l.execution_core.track_b_control_plane_snapshot_status import classify_control_plane_snapshot_status
+from mgc_v05l.execution_core.track_b_control_plane_top_line import build_track_b_control_plane_top_line
+
 status_path = Path(sys.argv[1])
 readiness_path = Path(sys.argv[2])
 summary_path = Path(sys.argv[3])
@@ -635,6 +638,9 @@ import json
 import sys
 from pathlib import Path
 
+from mgc_v05l.execution_core.track_b_control_plane_snapshot_status import classify_control_plane_snapshot_status
+from mgc_v05l.execution_core.track_b_control_plane_top_line import build_track_b_control_plane_top_line
+
 status_path = Path(sys.argv[1])
 agent_registry_path = Path(sys.argv[2])
 agent_health_path = Path(sys.argv[3])
@@ -668,6 +674,7 @@ paper_recovery_policy = read_json(paper_recovery_policy_path)
 paper_autonomous_recovery_plan = read_json(paper_autonomous_recovery_plan_path)
 control_plane_snapshot = read_json(control_plane_snapshot_path)
 control_plane_status = classify_control_plane_snapshot_status(control_plane_snapshot)
+control_plane_top_line = build_track_b_control_plane_top_line(control_plane_snapshot)
 operator_ack = runtime_supervisor.get("operator_ack") or {}
 paper_action_policy = paper_recovery_policy.get("paper_action_policy")
 paper_reason = str(paper_recovery_policy.get("reason") or "")
@@ -782,10 +789,13 @@ status["track_b_control_plane"] = {
     "control_plane_snapshot_supervisor_classification": control_plane_snapshot.get("runtime_supervisor_classification"),
     "control_plane_snapshot_supervisor_mode": control_plane_snapshot.get("supervisor_mode"),
     "control_plane_snapshot_proof_window_status": control_plane_snapshot.get("proof_window_status"),
-    "primary_blocking_agent_id": control_plane_snapshot.get("primary_blocking_agent_id") or paper_autonomous_recovery_plan.get("primary_blocking_agent_id"),
-    "primary_blocking_reason": control_plane_snapshot.get("primary_blocking_reason") or paper_autonomous_recovery_plan.get("primary_blocking_reason"),
-    "operator_explanation": control_plane_snapshot.get("operator_explanation") or paper_autonomous_recovery_plan.get("operator_explanation"),
-    "recommended_observation_step": control_plane_snapshot.get("recommended_observation_step") or paper_autonomous_recovery_plan.get("recommended_observation_step"),
+    **control_plane_top_line,
+    "top_line_classification": control_plane_top_line.get("top_line_classification"),
+    "top_line_status": control_plane_top_line.get("top_line_status"),
+    "primary_blocking_agent_id": control_plane_top_line.get("primary_blocking_agent_id"),
+    "primary_blocking_reason": control_plane_snapshot.get("primary_blocking_reason"),
+    "operator_explanation": control_plane_top_line.get("operator_explanation"),
+    "recommended_observation_step": control_plane_top_line.get("recommended_observation_step"),
     "prioritized_blockers": (control_plane_snapshot.get("prioritized_blockers") or paper_autonomous_recovery_plan.get("prioritized_blockers") or [])[:5],
     "paper_recovery_policy": paper_action_policy,
     "paper_recovery_severity": paper_recovery_policy.get("severity"),
