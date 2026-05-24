@@ -20,6 +20,7 @@ from mgc_v05l.execution_core.track_b_agent_health import (
     DEFAULT_AGENT_HEALTH_ARTIFACT,
     HEALTHY,
     MISSING,
+    MISSING_ARTIFACT,
     STALE,
     STOPPED_UNEXPECTED,
 )
@@ -307,7 +308,7 @@ def _market_closed(proof_readiness: Mapping[str, Any], phase1_agent: Mapping[str
 
 
 def _phase1_restart_allowed(phase1_agent: Mapping[str, Any], proof_class: str) -> bool:
-    if phase1_agent.get("status") not in {MISSING, STALE, STOPPED_UNEXPECTED}:
+    if phase1_agent.get("status") not in {MISSING, MISSING_ARTIFACT, STALE, STOPPED_UNEXPECTED}:
         return False
     return proof_class != MARKET_CLOSED_NO_FRESH_BARS
 
@@ -319,7 +320,7 @@ def _stale_truth_agents(agent_health: Mapping[str, Any]) -> list[str]:
             continue
         if agent.get("agent_id") in {"shared_truth_refresh"}:
             continue
-        if agent.get("status") in {MISSING, STALE}:
+        if agent.get("status") in {MISSING, MISSING_ARTIFACT, STALE}:
             stale.append(str(agent.get("agent_id") or "unknown"))
     return stale
 

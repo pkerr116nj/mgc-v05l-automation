@@ -6,10 +6,15 @@ from pathlib import Path
 
 from mgc_v05l.execution_core.track_b_agent_health import (
     AGENT_HEALTH_BLOCKING,
+    AGENT_HEALTH_DEGRADED,
     AGENT_HEALTH_READY,
     DEFAULT_DASHBOARD_AGENT_HEALTH_PROJECTION,
+    DUPLICATE_PROCESS,
+    DEGRADED,
     HEALTHY,
-    MISSING,
+    MISSING_ARTIFACT,
+    ROOT_MISMATCH,
+    SOURCE_COMMIT_MISMATCH,
     STALE,
     STOPPED_EXPECTED,
     TrackBAgentHealthConfig,
@@ -31,7 +36,7 @@ NOW = datetime(2026, 5, 23, 12, 0, tzinfo=UTC)
 def test_clean_flat_runtime_down_is_expected_and_not_blocking(tmp_path: Path) -> None:
     _seed_healthy_artifacts(tmp_path)
 
-    payload = build_track_b_agent_health(config=TrackBAgentHealthConfig(repo_root=tmp_path), now=NOW)
+    payload = build_track_b_agent_health(config=TrackBAgentHealthConfig(repo_root=tmp_path), now=NOW, process_rows=[])
 
     runtime = _agent(payload, "track_b_paper_runtime")
     assert payload["classification"] == AGENT_HEALTH_READY
@@ -44,8 +49,12 @@ def test_clean_flat_runtime_down_is_expected_and_not_blocking(tmp_path: Path) ->
     assert runtime["process_alive"] is None
     assert runtime["root_matches"] is None
     assert runtime["source_commit_matches"] is None
+    assert runtime["runtime_generation_id"] is None
+    assert runtime["shared_truth_generation_id"] is None
+    assert runtime["control_plane_snapshot_id"] is None
     assert runtime["blocking_for_proof"] is False
     assert runtime["blocking_for_runtime_submit"] is False
+    assert runtime["blocking_for_recovery"] is False
 
 
 def test_missing_required_artifact_blocks(tmp_path: Path) -> None:
@@ -53,11 +62,11 @@ def test_missing_required_artifact_blocks(tmp_path: Path) -> None:
     open_order_agent = _agent(registry, "open_order_truth")
     Path(open_order_agent["heartbeat_artifact_path"]).unlink()
 
-    payload = build_track_b_agent_health(config=TrackBAgentHealthConfig(repo_root=tmp_path), now=NOW)
+    payload = build_track_b_agent_health(config=TrackBAgentHealthConfig(repo_root=tmp_path), now=NOW, process_rows=[])
 
     open_order = _agent(payload, "open_order_truth")
     assert payload["classification"] == AGENT_HEALTH_BLOCKING
-    assert open_order["status"] == MISSING
+    assert open_order["status"] == MISSING_ARTIFACT
     assert open_order["blocking_for_proof"] is True
     assert open_order["blocking_for_runtime_submit"] is True
 
@@ -67,7 +76,7 @@ def test_stale_truth_artifact_is_stale_and_blocking(tmp_path: Path) -> None:
     open_order_agent = _agent(registry, "open_order_truth")
     _write_json(Path(open_order_agent["heartbeat_artifact_path"]), {"generated_at": (NOW - timedelta(minutes=20)).isoformat()})
 
-    payload = build_track_b_agent_health(config=TrackBAgentHealthConfig(repo_root=tmp_path), now=NOW)
+    payload = build_track_b_agent_health(config=TrackBAgentHealthConfig(repo_root=tmp_path), now=NOW, process_rows=[])
 
     open_order = _agent(payload, "open_order_truth")
     assert payload["classification"] == AGENT_HEALTH_BLOCKING
@@ -78,18 +87,110 @@ def test_stale_truth_artifact_is_stale_and_blocking(tmp_path: Path) -> None:
 def test_phase1_market_closed_is_healthy_not_producer_down(tmp_path: Path) -> None:
     _seed_healthy_artifacts(tmp_path, phase1_market_closed=True)
 
-    payload = build_track_b_agent_health(config=TrackBAgentHealthConfig(repo_root=tmp_path), now=NOW)
+    payload = build_track_b_agent_health(
+        config=TrackBAgentHealthConfig(repo_root=tmp_path),
+        now=NOW,
+        process_rows=[
+            {
+                "pid": 101,
+                "command": "python -m mgc_v05l.execution_core.phase1_databento_live_runtime_candles --mode service",
+            }
+        ],
+    )
 
     phase1 = _agent(payload, "phase1_databento_live_candles")
     assert phase1["status"] == HEALTHY
     assert phase1["reason"] == MARKET_CLOSED_NO_FRESH_BARS
+    assert phase1["expected_support_process_running"] is True
     assert phase1["blocking_for_proof"] is False
+
+
+def test_stale_runtime_pid_is_degraded_not_proof_blocking_when_runtime_down_clean(tmp_path: Path) -> None:
+    _seed_healthy_artifacts(tmp_path)
+    pid_file = tmp_path / "outputs/probationary_pattern_engine/paper_session/runtime/probationary_paper.pid"
+    pid_file.parent.mkdir(parents=True, exist_ok=True)
+    pid_file.write_text("123456\n", encoding="utf-8")
+
+    payload = build_track_b_agent_health(
+        config=TrackBAgentHealthConfig(repo_root=tmp_path),
+        now=NOW,
+        process_rows=[],
+        pid_running=lambda _pid: False,
+    )
+
+    runtime = _agent(payload, "track_b_paper_runtime")
+    assert payload["classification"] == AGENT_HEALTH_DEGRADED
+    assert runtime["status"] == DEGRADED
+    assert runtime["stale_pid_detected"] is True
+    assert runtime["blocking_for_proof"] is False
+    assert runtime["blocking_for_runtime_submit"] is False
+
+
+def test_duplicate_runtime_writer_blocks(tmp_path: Path) -> None:
+    _seed_healthy_artifacts(tmp_path)
+
+    payload = build_track_b_agent_health(
+        config=TrackBAgentHealthConfig(repo_root=tmp_path),
+        now=NOW,
+        process_rows=[
+            {"pid": 10, "command": "bash scripts/run_probationary_paper_soak.sh"},
+            {"pid": 11, "command": "python -m mgc_v05l.app.main probationary-paper-soak"},
+        ],
+    )
+
+    runtime = _agent(payload, "track_b_paper_runtime")
+    assert payload["classification"] == AGENT_HEALTH_BLOCKING
+    assert runtime["status"] == DUPLICATE_PROCESS
+    assert runtime["duplicate_process_detected"] is True
+    assert runtime["blocking_for_proof"] is True
+    assert runtime["blocking_for_runtime_submit"] is True
+
+
+def test_source_commit_mismatch_blocks_required_authority_agent(tmp_path: Path) -> None:
+    registry = _seed_healthy_artifacts(tmp_path)
+    open_order_agent = _agent(registry, "open_order_truth")
+    _write_json(
+        Path(open_order_agent["heartbeat_artifact_path"]),
+        {"generated_at": NOW.isoformat(), "source_commit": "old-head"},
+    )
+
+    payload = build_track_b_agent_health(
+        config=TrackBAgentHealthConfig(repo_root=tmp_path),
+        now=NOW,
+        process_rows=[],
+        source_commit_resolver=lambda _root: "new-head",
+    )
+
+    open_order = _agent(payload, "open_order_truth")
+    assert payload["classification"] == AGENT_HEALTH_BLOCKING
+    assert open_order["status"] == SOURCE_COMMIT_MISMATCH
+    assert open_order["source_commit_matches"] is False
+
+
+def test_root_mismatch_blocks_required_authority_agent(tmp_path: Path) -> None:
+    registry = _seed_healthy_artifacts(tmp_path)
+    open_order_agent = _agent(registry, "open_order_truth")
+    _write_json(
+        Path(open_order_agent["heartbeat_artifact_path"]),
+        {"generated_at": NOW.isoformat(), "repo_root": str(tmp_path / "wrong-root")},
+    )
+
+    payload = build_track_b_agent_health(
+        config=TrackBAgentHealthConfig(repo_root=tmp_path),
+        now=NOW,
+        process_rows=[],
+    )
+
+    open_order = _agent(payload, "open_order_truth")
+    assert payload["classification"] == AGENT_HEALTH_BLOCKING
+    assert open_order["status"] == ROOT_MISMATCH
+    assert open_order["root_matches"] is False
 
 
 def test_dashboard_projection_is_not_authority(tmp_path: Path) -> None:
     _seed_healthy_artifacts(tmp_path)
     config = TrackBAgentHealthConfig(repo_root=tmp_path)
-    payload = build_track_b_agent_health(config=config, now=NOW)
+    payload = build_track_b_agent_health(config=config, now=NOW, process_rows=[])
 
     authority_path = write_track_b_agent_health(config=config, payload=payload)
     projection_path = config.resolve(config.dashboard_projection_path)  # type: ignore[arg-type]

@@ -605,7 +605,7 @@ def _market_data_restart_candidate(*, inputs: Mapping[str, Mapping[str, Any]], e
             continue
         status = str(agent.get("status") or "")
         reason = str(agent.get("reason") or "")
-        return status in {"MISSING", "STALE", "STOPPED_UNEXPECTED", "DEGRADED"} and reason != MARKET_CLOSED_NO_FRESH_BARS
+        return status in {"MISSING", "MISSING_ARTIFACT", "STALE", "STOPPED_UNEXPECTED", "DEGRADED"} and reason != MARKET_CLOSED_NO_FRESH_BARS
     return False
 
 

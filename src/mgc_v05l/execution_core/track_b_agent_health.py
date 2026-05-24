@@ -11,10 +11,11 @@ from __future__ import annotations
 
 import argparse
 import json
+import subprocess
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, Mapping, Sequence
+from typing import Any, Callable, Mapping, Sequence
 
 from mgc_v05l.execution_core.track_b_atomic_io import write_json_atomic
 from mgc_v05l.execution_core.track_b_agent_registry import (
@@ -24,6 +25,11 @@ from mgc_v05l.execution_core.track_b_agent_registry import (
     write_track_b_agent_registry,
 )
 from mgc_v05l.execution_core.track_b_projection_metadata import build_projection_metadata
+from mgc_v05l.execution_core.track_b_process_surface_hygiene import (
+    DEFAULT_PROCESS_HYGIENE_ARTIFACT,
+    TrackBProcessSurfaceHygieneConfig,
+    build_track_b_process_surface_hygiene,
+)
 from mgc_v05l.execution_core.track_b_runtime_environment_truth import (
     RUNTIME_ACTIVE_OBSERVATION_ONLY,
     RUNTIME_ACTIVE_TRADE_CAPABLE,
@@ -42,9 +48,13 @@ HEALTHY = "HEALTHY"
 DEGRADED = "DEGRADED"
 STALE = "STALE"
 MISSING = "MISSING"
+MISSING_ARTIFACT = "MISSING_ARTIFACT"
 STOPPED_EXPECTED = "STOPPED_EXPECTED"
 STOPPED_UNEXPECTED = "STOPPED_UNEXPECTED"
 NOT_APPLICABLE = "NOT_APPLICABLE"
+DUPLICATE_PROCESS = "DUPLICATE_PROCESS"
+ROOT_MISMATCH = "ROOT_MISMATCH"
+SOURCE_COMMIT_MISMATCH = "SOURCE_COMMIT_MISMATCH"
 
 REQUIRED_RUNNING = "required_running"
 REQUIRED_FRESH_ARTIFACT = "required_fresh_artifact"
@@ -64,6 +74,12 @@ DEFAULT_RUNTIME_ENVIRONMENT_TRUTH_ARTIFACT = (
 DEFAULT_PHASE1_READINESS_ARTIFACT = (
     Path("outputs") / "reports" / "phase1_runtime_data_readiness" / "latest_phase1_runtime_data_readiness.json"
 )
+DEFAULT_CONTROL_PLANE_SNAPSHOT_ARTIFACT = (
+    Path("outputs") / "track_b_execution_core" / "control_plane" / "latest_control_plane_snapshot.json"
+)
+DEFAULT_SHARED_TRUTH_REFRESH_ARTIFACT = (
+    Path("outputs") / "track_b_execution_core" / "shared_truth" / "latest_track_b_shared_truth_refresh.json"
+)
 DEFAULT_ARTIFACT_MAX_AGE_SECONDS = 300.0
 
 
@@ -75,6 +91,9 @@ class TrackBAgentHealthConfig:
     agent_registry_path: Path = DEFAULT_AGENT_REGISTRY_ARTIFACT
     runtime_environment_truth_path: Path = DEFAULT_RUNTIME_ENVIRONMENT_TRUTH_ARTIFACT
     phase1_readiness_path: Path = DEFAULT_PHASE1_READINESS_ARTIFACT
+    process_hygiene_path: Path = DEFAULT_PROCESS_HYGIENE_ARTIFACT
+    control_plane_snapshot_path: Path = DEFAULT_CONTROL_PLANE_SNAPSHOT_ARTIFACT
+    shared_truth_refresh_path: Path = DEFAULT_SHARED_TRUTH_REFRESH_ARTIFACT
     artifact_max_age_seconds: float = DEFAULT_ARTIFACT_MAX_AGE_SECONDS
 
     def resolve(self, path: Path) -> Path:
@@ -85,8 +104,12 @@ def build_track_b_agent_health(
     *,
     config: TrackBAgentHealthConfig,
     now: datetime | None = None,
+    process_rows: Sequence[Mapping[str, Any]] | None = None,
+    pid_running: Callable[[int], bool] | None = None,
+    source_commit_resolver: Callable[[Path], str | None] | None = None,
 ) -> dict[str, Any]:
     actual_now = _ensure_utc(now or datetime.now(UTC))
+    current_head = (source_commit_resolver or _git_head)(config.repo_root)
     registry_path = config.resolve(config.agent_registry_path)
     registry = _read_json(registry_path)
     if not registry:
@@ -96,6 +119,14 @@ def build_track_b_agent_health(
 
     runtime_environment_truth = _read_json(config.resolve(config.runtime_environment_truth_path))
     phase1_readiness = _read_json(config.resolve(config.phase1_readiness_path))
+    process_hygiene = _load_or_build_process_hygiene(
+        config=config,
+        now=actual_now,
+        process_rows=process_rows,
+        pid_running=pid_running,
+    )
+    control_plane_snapshot = _read_json(config.resolve(config.control_plane_snapshot_path))
+    shared_truth_refresh = _read_json(config.resolve(config.shared_truth_refresh_path))
     agents = _list(registry.get("agents"))
     health_rows = [
         _agent_health_row(
@@ -104,12 +135,16 @@ def build_track_b_agent_health(
             now=actual_now,
             runtime_environment_truth=runtime_environment_truth,
             phase1_readiness=phase1_readiness,
+            process_hygiene=process_hygiene,
+            control_plane_snapshot=control_plane_snapshot,
+            shared_truth_refresh=shared_truth_refresh,
+            current_head=current_head,
         )
         for agent in agents
     ]
     classification = _overall_classification(health_rows)
     return {
-        "schema_version": "track_b_agent_health_v1",
+        "schema_version": "track_b_agent_health_v2",
         "generated_at": actual_now.isoformat(),
         "mode": "PAPER",
         "read_only": True,
@@ -133,9 +168,17 @@ def build_track_b_agent_health(
             "healthy_count": sum(1 for row in health_rows if row.get("status") == HEALTHY),
             "degraded_count": sum(1 for row in health_rows if row.get("status") == DEGRADED),
             "stale_count": sum(1 for row in health_rows if row.get("status") == STALE),
-            "missing_count": sum(1 for row in health_rows if row.get("status") == MISSING),
+            "missing_count": sum(1 for row in health_rows if row.get("status") in {MISSING, MISSING_ARTIFACT}),
+            "missing_artifact_count": sum(1 for row in health_rows if row.get("status") == MISSING_ARTIFACT),
             "stopped_expected_count": sum(1 for row in health_rows if row.get("status") == STOPPED_EXPECTED),
             "stopped_unexpected_count": sum(1 for row in health_rows if row.get("status") == STOPPED_UNEXPECTED),
+            "duplicate_process_count": sum(1 for row in health_rows if row.get("status") == DUPLICATE_PROCESS),
+            "root_mismatch_count": sum(1 for row in health_rows if row.get("status") == ROOT_MISMATCH),
+            "source_commit_mismatch_count": sum(
+                1 for row in health_rows if row.get("status") == SOURCE_COMMIT_MISMATCH
+            ),
+            "blocking_for_recovery_count": sum(1 for row in health_rows if row.get("blocking_for_recovery") is True),
+            "diagnostic_only_count": sum(1 for row in health_rows if row.get("diagnostic_only") is True),
             "blocking_for_proof_count": sum(1 for row in health_rows if row.get("blocking_for_proof") is True),
             "blocking_for_runtime_submit_count": sum(
                 1 for row in health_rows if row.get("blocking_for_runtime_submit") is True
@@ -149,6 +192,9 @@ def build_track_b_agent_health(
             "agent_registry": str(registry_path),
             "runtime_environment_truth": str(config.resolve(config.runtime_environment_truth_path)),
             "phase1_readiness": str(config.resolve(config.phase1_readiness_path)),
+            "process_hygiene": str(config.resolve(config.process_hygiene_path)),
+            "control_plane_snapshot": str(config.resolve(config.control_plane_snapshot_path)),
+            "shared_truth_refresh": str(config.resolve(config.shared_truth_refresh_path)),
         },
     }
 
@@ -224,17 +270,33 @@ def _agent_health_row(
     now: datetime,
     runtime_environment_truth: Mapping[str, Any],
     phase1_readiness: Mapping[str, Any],
+    process_hygiene: Mapping[str, Any],
+    control_plane_snapshot: Mapping[str, Any],
+    shared_truth_refresh: Mapping[str, Any],
+    current_head: str | None,
 ) -> dict[str, Any]:
     agent_id = str(agent.get("agent_id") or "")
     expected_state = _expected_state(agent)
     if agent_id == "track_b_paper_runtime":
         status, reason = _runtime_status(runtime_environment_truth)
         primary_path = str(config.resolve(config.runtime_environment_truth_path))
-        artifact_status = _artifact_status(config.resolve(config.runtime_environment_truth_path), now=now, max_age_seconds=config.artifact_max_age_seconds)
+        artifact_status = _artifact_status(
+            config.resolve(config.runtime_environment_truth_path),
+            now=now,
+            max_age_seconds=config.artifact_max_age_seconds,
+            repo_root=config.repo_root,
+            current_head=current_head,
+        )
     elif agent_id == "phase1_databento_live_candles":
         status, reason = _phase1_status(phase1_readiness)
         primary_path = str(config.resolve(config.phase1_readiness_path))
-        artifact_status = _artifact_status(config.resolve(config.phase1_readiness_path), now=now, max_age_seconds=config.artifact_max_age_seconds)
+        artifact_status = _artifact_status(
+            config.resolve(config.phase1_readiness_path),
+            now=now,
+            max_age_seconds=config.artifact_max_age_seconds,
+            repo_root=config.repo_root,
+            current_head=current_head,
+        )
         if status == HEALTHY and artifact_status["status"] == STALE and _phase1_market_closed(phase1_readiness):
             artifact_status = {**artifact_status, "status": HEALTHY}
     elif expected_state == ON_DEMAND:
@@ -243,22 +305,66 @@ def _agent_health_row(
         artifact_status = {"status": NOT_APPLICABLE, "last_seen_at": None, "freshness_age_seconds": None}
     elif expected_state == DIAGNOSTIC_OPTIONAL:
         primary_path = _primary_path(agent)
-        artifact_status = _optional_artifact_status(primary_path, now=now, max_age_seconds=config.artifact_max_age_seconds)
+        artifact_status = _optional_artifact_status(
+            primary_path,
+            now=now,
+            max_age_seconds=config.artifact_max_age_seconds,
+            repo_root=config.repo_root,
+            current_head=current_head,
+        )
         status = artifact_status["status"]
         reason = "diagnostic_optional"
     else:
         primary_path = _primary_path(agent)
-        artifact_status = _required_artifact_status(primary_path, now=now, max_age_seconds=config.artifact_max_age_seconds)
+        artifact_status = _required_artifact_status(
+            primary_path,
+            now=now,
+            max_age_seconds=config.artifact_max_age_seconds,
+            repo_root=config.repo_root,
+            current_head=current_head,
+        )
         status = artifact_status["status"]
         reason = artifact_status["reason"]
 
+    process_probe = _process_probe(agent_id=agent_id, process_hygiene=process_hygiene)
+    generation_evidence = _generation_evidence(
+        agent_id=agent_id,
+        runtime_environment_truth=runtime_environment_truth,
+        control_plane_snapshot=control_plane_snapshot,
+        shared_truth_refresh=shared_truth_refresh,
+        artifact_status=artifact_status,
+    )
+    status, reason = _apply_probe_overrides(
+        agent_id=agent_id,
+        status=status,
+        reason=reason,
+        runtime_environment_truth=runtime_environment_truth,
+        process_probe=process_probe,
+        artifact_status=artifact_status,
+    )
     required_for_proof = agent.get("required_for_proof") is True
     required_for_runtime_submit = agent.get("required_for_runtime_submit") is True
-    blocking_for_proof = required_for_proof and status in {MISSING, STALE, STOPPED_UNEXPECTED}
-    blocking_for_runtime_submit = required_for_runtime_submit and status in {MISSING, STALE, STOPPED_UNEXPECTED}
+    diagnostic_only = agent.get("diagnostic_only") is True or expected_state == DIAGNOSTIC_OPTIONAL
+    hard_blocking_statuses = {
+        MISSING,
+        MISSING_ARTIFACT,
+        STALE,
+        STOPPED_UNEXPECTED,
+        DUPLICATE_PROCESS,
+        ROOT_MISMATCH,
+        SOURCE_COMMIT_MISMATCH,
+    }
+    blocking_for_proof = required_for_proof and status in hard_blocking_statuses
+    blocking_for_runtime_submit = required_for_runtime_submit and status in hard_blocking_statuses
+    blocking_for_recovery = status in {DUPLICATE_PROCESS, ROOT_MISMATCH, SOURCE_COMMIT_MISMATCH, MISSING_ARTIFACT}
+    if status == DEGRADED and agent_id == "track_b_paper_runtime" and _runtime_down_clean(runtime_environment_truth):
+        blocking_for_proof = False
+        blocking_for_runtime_submit = False
+        blocking_for_recovery = False
     if expected_state == DIAGNOSTIC_OPTIONAL:
         blocking_for_proof = False
         blocking_for_runtime_submit = False
+        blocking_for_recovery = False
     runtime_probe = _runtime_probe(runtime_environment_truth) if agent_id == "track_b_paper_runtime" else {}
     heartbeat_fresh = artifact_status.get("status") == HEALTHY
     artifact_fresh = artifact_status.get("status") == HEALTHY
@@ -278,13 +384,28 @@ def _agent_health_row(
         "freshness_age_seconds": artifact_status.get("freshness_age_seconds"),
         "heartbeat_fresh": heartbeat_fresh,
         "artifact_fresh": artifact_fresh,
-        "process_alive": runtime_probe.get("process_alive"),
-        "root_matches": runtime_probe.get("root_matches"),
-        "source_commit_matches": runtime_probe.get("source_commit_matches"),
+        "process_alive": runtime_probe.get("process_alive")
+        if agent_id == "track_b_paper_runtime"
+        else process_probe.get("process_alive"),
+        "root_matches": runtime_probe.get("root_matches")
+        if agent_id == "track_b_paper_runtime"
+        else artifact_status.get("root_matches"),
+        "source_commit_matches": runtime_probe.get("source_commit_matches")
+        if agent_id == "track_b_paper_runtime"
+        else artifact_status.get("source_commit_matches"),
+        "stale_pid_detected": process_probe.get("stale_pid_detected"),
+        "duplicate_process_detected": process_probe.get("duplicate_process_detected"),
+        "expected_support_process_running": process_probe.get("expected_support_process_running"),
+        "runtime_generation_id": generation_evidence.get("runtime_generation_id"),
+        "shared_truth_generation_id": generation_evidence.get("shared_truth_generation_id"),
+        "control_plane_snapshot_id": generation_evidence.get("control_plane_snapshot_id"),
+        "generation_evidence": generation_evidence,
         "required_for_proof": required_for_proof,
         "required_for_runtime_submit": required_for_runtime_submit,
         "blocking_for_proof": blocking_for_proof,
         "blocking_for_runtime_submit": blocking_for_runtime_submit,
+        "blocking_for_recovery": blocking_for_recovery,
+        "diagnostic_only": diagnostic_only,
         "evidence_paths": _evidence_paths(agent=agent, primary_path=primary_path),
         "reason": reason,
     }
@@ -322,6 +443,10 @@ def _runtime_probe(runtime_environment_truth: Mapping[str, Any]) -> dict[str, An
         "root_matches": runtime.get("root_match"),
         "source_commit_matches": runtime.get("commit_matches_head"),
     }
+
+
+def _runtime_down_clean(runtime_environment_truth: Mapping[str, Any]) -> bool:
+    return runtime_environment_truth.get("classification") == RUNTIME_DOWN_CLEAN
 
 
 def _phase1_status(phase1_readiness: Mapping[str, Any]) -> tuple[str, str]:
@@ -364,32 +489,293 @@ def _primary_path(agent: Mapping[str, Any]) -> str | None:
     return str(paths[0]) if paths else None
 
 
-def _required_artifact_status(path_text: str | None, *, now: datetime, max_age_seconds: float) -> dict[str, Any]:
+def _required_artifact_status(
+    path_text: str | None,
+    *,
+    now: datetime,
+    max_age_seconds: float,
+    repo_root: Path,
+    current_head: str | None,
+) -> dict[str, Any]:
     if not path_text:
-        return {"status": MISSING, "reason": "primary_artifact_path_missing", "last_seen_at": None, "freshness_age_seconds": None}
-    return _artifact_status(Path(path_text), now=now, max_age_seconds=max_age_seconds)
+        return {
+            "status": MISSING_ARTIFACT,
+            "reason": "primary_artifact_path_missing",
+            "last_seen_at": None,
+            "freshness_age_seconds": None,
+        }
+    return _artifact_status(
+        Path(path_text),
+        now=now,
+        max_age_seconds=max_age_seconds,
+        repo_root=repo_root,
+        current_head=current_head,
+    )
 
 
-def _optional_artifact_status(path_text: str | None, *, now: datetime, max_age_seconds: float) -> dict[str, Any]:
+def _optional_artifact_status(
+    path_text: str | None,
+    *,
+    now: datetime,
+    max_age_seconds: float,
+    repo_root: Path,
+    current_head: str | None,
+) -> dict[str, Any]:
     if not path_text:
         return {"status": NOT_APPLICABLE, "reason": "diagnostic_optional_no_primary_artifact", "last_seen_at": None, "freshness_age_seconds": None}
-    status = _artifact_status(Path(path_text), now=now, max_age_seconds=max_age_seconds)
-    if status["status"] == MISSING:
+    status = _artifact_status(
+        Path(path_text),
+        now=now,
+        max_age_seconds=max_age_seconds,
+        repo_root=repo_root,
+        current_head=current_head,
+    )
+    if status["status"] in {MISSING, MISSING_ARTIFACT}:
         return {**status, "status": NOT_APPLICABLE, "reason": "diagnostic_optional_artifact_missing"}
     return status
 
 
-def _artifact_status(path: Path, *, now: datetime, max_age_seconds: float) -> dict[str, Any]:
+def _artifact_status(
+    path: Path,
+    *,
+    now: datetime,
+    max_age_seconds: float,
+    repo_root: Path,
+    current_head: str | None,
+) -> dict[str, Any]:
     payload = _read_json(path)
     if not payload:
-        return {"status": MISSING, "reason": "artifact_missing_or_invalid", "last_seen_at": None, "freshness_age_seconds": None}
+        if path.exists():
+            return _file_artifact_status(path, now=now, max_age_seconds=max_age_seconds)
+        return {
+            "status": MISSING_ARTIFACT,
+            "reason": "artifact_missing_or_invalid",
+            "last_seen_at": None,
+            "freshness_age_seconds": None,
+            "root_matches": None,
+            "source_commit_matches": None,
+        }
+    identity = _artifact_identity_probe(payload=payload, repo_root=repo_root, current_head=current_head)
+    if identity.get("root_matches") is False:
+        return {
+            "status": ROOT_MISMATCH,
+            "reason": "artifact_root_mismatch",
+            "last_seen_at": _time_text(payload),
+            "freshness_age_seconds": None,
+            **identity,
+        }
+    if identity.get("source_commit_matches") is False:
+        return {
+            "status": SOURCE_COMMIT_MISMATCH,
+            "reason": "artifact_source_commit_mismatch",
+            "last_seen_at": _time_text(payload),
+            "freshness_age_seconds": None,
+            **identity,
+        }
     last_seen = _parse_time(payload.get("generated_at") or payload.get("updated_at"))
     if last_seen is None:
-        return {"status": DEGRADED, "reason": "artifact_timestamp_missing", "last_seen_at": None, "freshness_age_seconds": None}
+        return {
+            "status": DEGRADED,
+            "reason": "artifact_timestamp_missing",
+            "last_seen_at": None,
+            "freshness_age_seconds": None,
+            **identity,
+        }
     age = max(0.0, (now - last_seen).total_seconds())
     if age > max_age_seconds:
-        return {"status": STALE, "reason": "artifact_stale", "last_seen_at": last_seen.isoformat(), "freshness_age_seconds": age}
-    return {"status": HEALTHY, "reason": "artifact_fresh", "last_seen_at": last_seen.isoformat(), "freshness_age_seconds": age}
+        return {
+            "status": STALE,
+            "reason": "artifact_stale",
+            "last_seen_at": last_seen.isoformat(),
+            "freshness_age_seconds": age,
+            **identity,
+        }
+    return {
+        "status": HEALTHY,
+        "reason": "artifact_fresh",
+        "last_seen_at": last_seen.isoformat(),
+        "freshness_age_seconds": age,
+        **identity,
+    }
+
+
+def _file_artifact_status(path: Path, *, now: datetime, max_age_seconds: float) -> dict[str, Any]:
+    try:
+        last_seen = datetime.fromtimestamp(path.stat().st_mtime, UTC)
+    except OSError:
+        return {
+            "status": MISSING_ARTIFACT,
+            "reason": "artifact_missing_or_invalid",
+            "last_seen_at": None,
+            "freshness_age_seconds": None,
+            "root_matches": None,
+            "source_commit_matches": None,
+        }
+    age = max(0.0, (now - last_seen).total_seconds())
+    status = HEALTHY if age <= max_age_seconds else STALE
+    return {
+        "status": status,
+        "reason": "file_artifact_fresh" if status == HEALTHY else "file_artifact_stale",
+        "last_seen_at": last_seen.isoformat(),
+        "freshness_age_seconds": age,
+        "root_matches": None,
+        "source_commit_matches": None,
+    }
+
+
+def _load_or_build_process_hygiene(
+    *,
+    config: TrackBAgentHealthConfig,
+    now: datetime,
+    process_rows: Sequence[Mapping[str, Any]] | None,
+    pid_running: Callable[[int], bool] | None,
+) -> Mapping[str, Any]:
+    if process_rows is not None or pid_running is not None:
+        return build_track_b_process_surface_hygiene(
+            config=TrackBProcessSurfaceHygieneConfig(
+                repo_root=config.repo_root,
+                output_path=config.process_hygiene_path,
+            ),
+            now=now,
+            process_rows=process_rows,
+            pid_running=pid_running,
+        )
+    payload = _read_json(config.resolve(config.process_hygiene_path))
+    if payload:
+        return payload
+    return build_track_b_process_surface_hygiene(
+        config=TrackBProcessSurfaceHygieneConfig(
+            repo_root=config.repo_root,
+            output_path=config.process_hygiene_path,
+        ),
+        now=now,
+    )
+
+
+def _process_probe(*, agent_id: str, process_hygiene: Mapping[str, Any]) -> dict[str, Any]:
+    summary = _mapping(process_hygiene.get("summary"))
+    stale_labels = {
+        str(item.get("label") or "")
+        for item in _list(process_hygiene.get("stale_pid_files"))
+        if isinstance(item, Mapping)
+    }
+    if agent_id == "track_b_paper_runtime":
+        count = int(summary.get("active_runtime_writer_count") or 0)
+        return {
+            "process_alive": count > 0,
+            "stale_pid_detected": "track_b_paper_runtime" in stale_labels
+            or "track_b_paper_runtime_wrapper" in stale_labels,
+            "duplicate_process_detected": count > 1,
+            "expected_support_process_running": None,
+            "process_count": count,
+        }
+    if agent_id == "phase1_databento_live_candles":
+        count = int(summary.get("phase1_databento_process_count") or 0)
+        return _support_probe(count=count, stale=bool({"phase1_databento_service", "phase1_databento_child"} & stale_labels))
+    if agent_id == "broker_truth_lease_refresher":
+        count = int(summary.get("broker_truth_refresher_count") or 0)
+        return _support_probe(count=count, stale="broker_truth_refresher" in stale_labels)
+    if agent_id in {"canonical_readiness_refresher"}:
+        count = int(summary.get("operator_dashboard_readiness_process_count") or 0)
+        return _support_probe(
+            count=count,
+            stale=bool({"operator_readiness_refresher_service", "operator_readiness_refresher_child"} & stale_labels),
+        )
+    return {
+        "process_alive": None,
+        "stale_pid_detected": False,
+        "duplicate_process_detected": False,
+        "expected_support_process_running": None,
+        "process_count": None,
+    }
+
+
+def _support_probe(*, count: int, stale: bool) -> dict[str, Any]:
+    return {
+        "process_alive": count > 0,
+        "stale_pid_detected": stale,
+        "duplicate_process_detected": False,
+        "expected_support_process_running": count > 0,
+        "process_count": count,
+    }
+
+
+def _generation_evidence(
+    *,
+    agent_id: str,
+    runtime_environment_truth: Mapping[str, Any],
+    control_plane_snapshot: Mapping[str, Any],
+    shared_truth_refresh: Mapping[str, Any],
+    artifact_status: Mapping[str, Any],
+) -> dict[str, Any]:
+    runtime = _mapping(runtime_environment_truth.get("runtime"))
+    runtime_generation_id = runtime.get("runtime_generation_id") or runtime.get("restart_generation")
+    return {
+        "agent_id": agent_id,
+        "runtime_generation_id": runtime_generation_id,
+        "runtime_instance_id": runtime.get("runtime_instance_id"),
+        "shared_truth_generation_id": control_plane_snapshot.get("shared_truth_refresh_generation_id")
+        or shared_truth_refresh.get("refresh_generation_id"),
+        "shared_truth_generated_at": control_plane_snapshot.get("shared_truth_refresh_generated_at")
+        or shared_truth_refresh.get("generated_at"),
+        "control_plane_snapshot_id": control_plane_snapshot.get("control_plane_snapshot_id"),
+        "control_plane_snapshot_generated_at": control_plane_snapshot.get("generated_at"),
+        "artifact_source_commit": artifact_status.get("artifact_source_commit"),
+        "expected_source_commit": artifact_status.get("expected_source_commit"),
+        "artifact_root": artifact_status.get("artifact_root"),
+        "expected_root": artifact_status.get("expected_root"),
+    }
+
+
+def _apply_probe_overrides(
+    *,
+    agent_id: str,
+    status: str,
+    reason: str,
+    runtime_environment_truth: Mapping[str, Any],
+    process_probe: Mapping[str, Any],
+    artifact_status: Mapping[str, Any],
+) -> tuple[str, str]:
+    if process_probe.get("duplicate_process_detected") is True:
+        return DUPLICATE_PROCESS, "duplicate_process_detected"
+    if agent_id == "track_b_paper_runtime" and process_probe.get("stale_pid_detected") is True and _runtime_down_clean(runtime_environment_truth):
+        return DEGRADED, "stale_runtime_pid_detected_runtime_down_clean"
+    if artifact_status.get("status") in {ROOT_MISMATCH, SOURCE_COMMIT_MISMATCH}:
+        return str(artifact_status.get("status")), str(artifact_status.get("reason") or reason)
+    return status, reason
+
+
+def _artifact_identity_probe(
+    *,
+    payload: Mapping[str, Any],
+    repo_root: Path,
+    current_head: str | None,
+) -> dict[str, Any]:
+    artifact_root = _first_text(
+        payload.get("repo_root"),
+        payload.get("root"),
+        payload.get("producer_root"),
+        payload.get("expected_project_root"),
+    )
+    source_commit = _first_text(payload.get("source_commit"), payload.get("current_head"))
+    expected_root = str(repo_root.resolve())
+    root_matches = None if not artifact_root else str(Path(artifact_root).expanduser().resolve()) == expected_root
+    source_commit_matches = None
+    if source_commit and current_head:
+        source_commit_matches = source_commit == current_head
+    return {
+        "artifact_root": artifact_root,
+        "expected_root": expected_root,
+        "root_matches": root_matches,
+        "artifact_source_commit": source_commit,
+        "expected_source_commit": current_head,
+        "source_commit_matches": source_commit_matches,
+    }
+
+
+def _time_text(payload: Mapping[str, Any]) -> str | None:
+    value = payload.get("generated_at") or payload.get("updated_at")
+    return str(value) if value else None
 
 
 def _evidence_paths(*, agent: Mapping[str, Any], primary_path: str | None) -> list[str]:
@@ -409,9 +795,28 @@ def _overall_classification(rows: Sequence[Mapping[str, Any]]) -> str:
     if any(row.get("blocking_for_proof") is True or row.get("blocking_for_runtime_submit") is True for row in rows):
         return AGENT_HEALTH_BLOCKING
     statuses = {str(row.get("status") or "") for row in rows}
-    if statuses & {DEGRADED, STALE, MISSING, STOPPED_UNEXPECTED}:
+    if statuses & {
+        DEGRADED,
+        STALE,
+        MISSING,
+        MISSING_ARTIFACT,
+        STOPPED_UNEXPECTED,
+        ROOT_MISMATCH,
+        SOURCE_COMMIT_MISMATCH,
+    }:
         return AGENT_HEALTH_DEGRADED
     return AGENT_HEALTH_READY
+
+
+def _git_head(repo_root: Path) -> str | None:
+    try:
+        return subprocess.check_output(
+            ["git", "-C", str(repo_root), "rev-parse", "HEAD"],
+            text=True,
+            stderr=subprocess.DEVNULL,
+        ).strip()
+    except (OSError, subprocess.SubprocessError):
+        return None
 
 
 def _read_json(path: Path) -> dict[str, Any]:
@@ -451,6 +856,14 @@ def _list(value: Any) -> list[Any]:
 
 def _mapping(value: Any) -> Mapping[str, Any]:
     return value if isinstance(value, Mapping) else {}
+
+
+def _first_text(*values: Any) -> str | None:
+    for value in values:
+        text = str(value or "").strip()
+        if text:
+            return text
+    return None
 
 
 if __name__ == "__main__":
