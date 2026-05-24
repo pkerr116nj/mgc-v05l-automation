@@ -18,6 +18,10 @@ from typing import Any, Mapping, Sequence
 
 from mgc_v05l.execution_core.track_b_atomic_io import write_json_atomic
 from mgc_v05l.execution_core.track_b_agent_health import DEFAULT_AGENT_HEALTH_ARTIFACT
+from mgc_v05l.execution_core.track_b_control_plane_snapshot_status import (
+    CONTROL_PLANE_READY,
+    classify_control_plane_snapshot_status,
+)
 from mgc_v05l.execution_core.track_b_crash_loop_protection import (
     DEFAULT_CRASH_LOOP_PROTECTION_ARTIFACT,
     OPERATOR_ACK_REQUIRED,
@@ -36,6 +40,10 @@ from mgc_v05l.execution_core.track_b_paper_proof_readiness import DEFAULT_OUTPUT
 from mgc_v05l.execution_core.track_b_paper_proof_readiness import READY_FOR_PROOF
 from mgc_v05l.execution_core.track_b_position_truth_monitor import DEFAULT_POSITION_TRUTH_ARTIFACT
 from mgc_v05l.execution_core.track_b_projection_metadata import build_projection_metadata
+from mgc_v05l.execution_core.track_b_recovery_budget_ledger import (
+    DEFAULT_RECOVERY_BUDGET_LEDGER_ARTIFACT,
+    budget_summary_for_action,
+)
 from mgc_v05l.execution_core.track_b_runtime_environment_truth import (
     DEFAULT_RUNTIME_ENVIRONMENT_TRUTH_ARTIFACT,
     RUNTIME_ACTIVE_OBSERVATION_ONLY,
@@ -71,6 +79,15 @@ PAPER_POLICY_QUARANTINE_OBSERVE_ONLY = "QUARANTINE_OBSERVE_ONLY"
 PAPER_POLICY_HARD_UNSAFE_HOLD = "HARD_UNSAFE_HOLD"
 PAPER_POLICY_OBSERVE = "OBSERVE"
 
+RESUME_POLICY_NEW_RUNTIME_GENERATION_ALLOWED = "NEW_RUNTIME_GENERATION_ALLOWED"
+RESUME_POLICY_RESUME_EXISTING_RUNTIME = "RESUME_EXISTING_RUNTIME"
+RESUME_POLICY_HOLD_MARKET_CLOSED = "HOLD_MARKET_CLOSED"
+RESUME_POLICY_HOLD_STALE_EVIDENCE = "HOLD_STALE_EVIDENCE"
+RESUME_POLICY_HOLD_DUPLICATE_WRITER = "HOLD_DUPLICATE_WRITER"
+RESUME_POLICY_HOLD_LIVE_MONEY = "HOLD_LIVE_MONEY"
+RESUME_POLICY_HOLD_BUDGET_EXHAUSTED = "HOLD_BUDGET_EXHAUSTED"
+RESUME_POLICY_QUARANTINE_OBSERVE_ONLY = "QUARANTINE_OBSERVE_ONLY"
+
 REPO_ROOT = Path(__file__).resolve().parents[3]
 DEFAULT_RUNTIME_RESUME_SEMANTICS_ARTIFACT = (
     Path("outputs") / "track_b_execution_core" / "runtime_resume" / "latest_runtime_resume_semantics.json"
@@ -86,6 +103,9 @@ DEFAULT_RUNTIME_STOP_PROVENANCE_ARTIFACT = (
 )
 DEFAULT_PAPER_RECOVERY_POLICY_ARTIFACT = (
     Path("outputs") / "track_b_execution_core" / "paper_recovery_policy" / "latest_paper_recovery_policy.json"
+)
+DEFAULT_CONTROL_PLANE_SNAPSHOT_ARTIFACT = (
+    Path("outputs") / "track_b_execution_core" / "control_plane" / "latest_control_plane_snapshot.json"
 )
 
 
@@ -108,6 +128,8 @@ class TrackBRuntimeResumeSemanticsConfig:
     broker_lease_path: Path = DEFAULT_LEASE_ARTIFACT
     stop_provenance_path: Path = DEFAULT_RUNTIME_STOP_PROVENANCE_ARTIFACT
     paper_recovery_policy_path: Path = DEFAULT_PAPER_RECOVERY_POLICY_ARTIFACT
+    control_plane_snapshot_path: Path = DEFAULT_CONTROL_PLANE_SNAPSHOT_ARTIFACT
+    recovery_budget_ledger_path: Path = DEFAULT_RECOVERY_BUDGET_LEDGER_ARTIFACT
 
     def resolve(self, path: Path) -> Path:
         return path if path.is_absolute() else self.repo_root / path
@@ -134,11 +156,15 @@ def build_track_b_runtime_resume_semantics(
         "broker_lease": _read_json(config.resolve(config.broker_lease_path)),
         "stop_provenance": _read_json(config.resolve(config.stop_provenance_path)),
         "paper_recovery_policy": _read_json(config.resolve(config.paper_recovery_policy_path)),
+        "control_plane_snapshot": _read_json(config.resolve(config.control_plane_snapshot_path)),
+        "recovery_budget_ledger": _read_json(config.resolve(config.recovery_budget_ledger_path)),
     }
-    decision = _classify_resume(inputs=inputs)
+    decision = _classify_resume(inputs=inputs, now=actual_now)
     stop = _stop_provenance(inputs["stop_provenance"])
+    generation = _generation_evidence(inputs=inputs, now=actual_now)
     payload = {
-        "schema_version": "track_b_runtime_resume_semantics_v1",
+        "schema_version": "track_b_runtime_resume_semantics_v2",
+        "resume_semantics_version": "v2",
         "generated_at": actual_now.isoformat(),
         "mode": "PAPER",
         "read_only": True,
@@ -157,6 +183,14 @@ def build_track_b_runtime_resume_semantics(
         "safe_to_start_runtime": decision["safe_to_start_runtime"],
         "safe_to_reuse_previous_runtime_state": decision["safe_to_reuse_previous_runtime_state"],
         "must_start_new_runtime_generation": decision["must_start_new_runtime_generation"],
+        "resume_action_policy": decision["resume_action_policy"],
+        "generation_reuse_allowed": decision["generation_reuse_allowed"],
+        "must_start_new_generation": decision["must_start_new_generation"],
+        "bounded_retry_budget_key": decision["bounded_retry_budget_key"],
+        "attempts_remaining": decision["attempts_remaining"],
+        "cooldown_until": decision["cooldown_until"],
+        "enhanced_observation_required": decision["enhanced_observation_required"],
+        **generation,
         "previous_runtime_instance_id": stop.get("runtime_instance_id"),
         "previous_stop_source": stop.get("stop_source"),
         "previous_stop_reason": stop.get("stop_reason"),
@@ -180,6 +214,8 @@ def build_track_b_runtime_resume_semantics(
             "broker_lease": str(config.resolve(config.broker_lease_path)),
             "stop_provenance": str(config.resolve(config.stop_provenance_path)),
             "paper_recovery_policy": str(config.resolve(config.paper_recovery_policy_path)),
+            "control_plane_snapshot": str(config.resolve(config.control_plane_snapshot_path)),
+            "recovery_budget_ledger": str(config.resolve(config.recovery_budget_ledger_path)),
         },
         "artifact_paths": {
             "authority": str(config.resolve(config.output_path)),
@@ -259,7 +295,11 @@ def main(argv: Sequence[str] | None = None) -> int:
                     "classification": payload.get("classification"),
                     "allowed": payload.get("allowed"),
                     "reason": payload.get("reason"),
+                    "resume_semantics_version": payload.get("resume_semantics_version"),
+                    "resume_action_policy": payload.get("resume_action_policy"),
                     "safe_to_start_runtime": payload.get("safe_to_start_runtime"),
+                    "proposed_next_runtime_generation_id": payload.get("proposed_next_runtime_generation_id"),
+                    "attempts_remaining": payload.get("attempts_remaining"),
                     "authority_path": str(authority_path),
                     "read_only": True,
                     "paper_proof_invoked": False,
@@ -272,19 +312,23 @@ def main(argv: Sequence[str] | None = None) -> int:
     return 0 if payload.get("allowed") is True else 2
 
 
-def _classify_resume(*, inputs: Mapping[str, Mapping[str, Any]]) -> dict[str, Any]:
+def _classify_resume(*, inputs: Mapping[str, Mapping[str, Any]], now: datetime) -> dict[str, Any]:
     evidence = _evidence(inputs)
     stop = _stop_provenance(inputs["stop_provenance"])
+    control_plane_status = classify_control_plane_snapshot_status(inputs["control_plane_snapshot"], now=now)
+    budget = _runtime_retry_budget(inputs["recovery_budget_ledger"])
     blockers: list[dict[str, str]] = []
     warnings: list[dict[str, str]] = []
 
-    if evidence["live_money_eligible"] is True or evidence["paper_action_policy"] == PAPER_POLICY_HARD_UNSAFE_HOLD:
+    if evidence["live_money_eligible"] is True:
         return _decision(
             RESUME_BLOCKED_HARD_UNSAFE,
-            f"PAPER Recovery Policy is {evidence['paper_action_policy']} ({evidence['paper_policy_severity']}).",
-            blockers=[_blocker("paper_recovery_policy", evidence["paper_action_policy"])],
+            "live_money_eligible=true is a hard unsafe PAPER hold.",
+            blockers=[_blocker("live_money_eligible", "true")],
             warnings=warnings,
             resume_mode="hard_unsafe_hold",
+            resume_action_policy=RESUME_POLICY_HOLD_LIVE_MONEY,
+            budget=budget,
         )
 
     if _duplicate_writer(evidence):
@@ -294,6 +338,41 @@ def _classify_resume(*, inputs: Mapping[str, Mapping[str, Any]]) -> dict[str, An
             blockers=[_blocker("runtime_environment_truth", evidence["runtime_environment_truth_classification"])],
             warnings=warnings,
             resume_mode="hard_unsafe_hold",
+            resume_action_policy=RESUME_POLICY_HOLD_DUPLICATE_WRITER,
+            budget=budget,
+        )
+
+    if control_plane_status.get("classification") != CONTROL_PLANE_READY:
+        return _decision(
+            RESUME_BLOCKED_STALE_OR_MISSING_EVIDENCE,
+            str(control_plane_status.get("reason") or "Control Plane Snapshot is unavailable or not launch-ready."),
+            blockers=[_blocker("control_plane_snapshot", str(control_plane_status.get("classification") or ""))],
+            warnings=warnings,
+            resume_mode="hold_down_refresh_required",
+            resume_action_policy=RESUME_POLICY_HOLD_STALE_EVIDENCE,
+            budget=budget,
+        )
+
+    if budget.get("missing") is True or budget.get("attempts_remaining") is None:
+        return _decision(
+            RESUME_BLOCKED_STALE_OR_MISSING_EVIDENCE,
+            "Recovery Budget Ledger is missing or does not contain RUNTIME_RETRY budget evidence.",
+            blockers=[_blocker("recovery_budget_ledger", "missing_runtime_retry_budget")],
+            warnings=warnings,
+            resume_mode="hold_down_refresh_required",
+            resume_action_policy=RESUME_POLICY_HOLD_STALE_EVIDENCE,
+            budget=budget,
+        )
+
+    if evidence["paper_action_policy"] == PAPER_POLICY_HARD_UNSAFE_HOLD:
+        return _decision(
+            RESUME_BLOCKED_HARD_UNSAFE,
+            f"PAPER Recovery Policy is {evidence['paper_action_policy']} ({evidence['paper_policy_severity']}).",
+            blockers=[_blocker("paper_recovery_policy", evidence["paper_action_policy"])],
+            warnings=warnings,
+            resume_mode="hard_unsafe_hold",
+            resume_action_policy=RESUME_POLICY_QUARANTINE_OBSERVE_ONLY,
+            budget=budget,
         )
 
     runtime_class = evidence["runtime_environment_truth_classification"]
@@ -306,6 +385,10 @@ def _classify_resume(*, inputs: Mapping[str, Mapping[str, Any]]) -> dict[str, An
             resume_mode="existing_runtime_present",
             safe_to_reuse_previous_runtime_state=True,
             must_start_new_runtime_generation=False,
+            resume_action_policy=RESUME_POLICY_RESUME_EXISTING_RUNTIME,
+            generation_reuse_allowed=True,
+            must_start_new_generation=False,
+            budget=budget,
         )
 
     if runtime_class == RUNTIME_DOWN_WITH_BROKER_EXPOSURE or evidence["position_truth_classification"] != "CLEAN_FLAT_READY":
@@ -315,6 +398,8 @@ def _classify_resume(*, inputs: Mapping[str, Mapping[str, Any]]) -> dict[str, An
             blockers=[_blocker("broker_exposure", evidence["position_truth_classification"])],
             warnings=warnings,
             resume_mode="manual_cleanup_required",
+            resume_action_policy=RESUME_POLICY_QUARANTINE_OBSERVE_ONLY,
+            budget=budget,
         )
 
     if evidence["open_order_truth_classification"] != NO_OPEN_ORDERS:
@@ -324,6 +409,8 @@ def _classify_resume(*, inputs: Mapping[str, Mapping[str, Any]]) -> dict[str, An
             blockers=[_blocker("open_order_truth", evidence["open_order_truth_classification"])],
             warnings=warnings,
             resume_mode="manual_cleanup_required",
+            resume_action_policy=RESUME_POLICY_QUARANTINE_OBSERVE_ONLY,
+            budget=budget,
         )
 
     if evidence["managed_order_registry_classification"] != NO_MANAGED_ORDERS:
@@ -333,6 +420,8 @@ def _classify_resume(*, inputs: Mapping[str, Mapping[str, Any]]) -> dict[str, An
             blockers=[_blocker("managed_order_registry", evidence["managed_order_registry_classification"])],
             warnings=warnings,
             resume_mode="manual_cleanup_required",
+            resume_action_policy=RESUME_POLICY_QUARANTINE_OBSERVE_ONLY,
+            budget=budget,
         )
 
     if evidence["managed_position_registry_classification"] != NO_MANAGED_POSITIONS:
@@ -342,6 +431,8 @@ def _classify_resume(*, inputs: Mapping[str, Mapping[str, Any]]) -> dict[str, An
             blockers=[_blocker("managed_position_registry", evidence["managed_position_registry_classification"])],
             warnings=warnings,
             resume_mode="manual_cleanup_required",
+            resume_action_policy=RESUME_POLICY_QUARANTINE_OBSERVE_ONLY,
+            budget=budget,
         )
 
     if evidence["reconciliation_classification"] not in {"TRACK_B_PAPER_BROKER_RECONCILED", ""}:
@@ -351,6 +442,30 @@ def _classify_resume(*, inputs: Mapping[str, Mapping[str, Any]]) -> dict[str, An
             blockers=[_blocker("reconciliation", evidence["reconciliation_classification"])],
             warnings=warnings,
             resume_mode="manual_cleanup_required",
+            resume_action_policy=RESUME_POLICY_QUARANTINE_OBSERVE_ONLY,
+            budget=budget,
+        )
+
+    if _market_closed(inputs):
+        return _decision(
+            RESUME_BLOCKED_MARKET_CLOSED,
+            MARKET_CLOSED_NO_FRESH_BARS,
+            blockers=[_blocker("market_session", MARKET_CLOSED_NO_FRESH_BARS)],
+            warnings=warnings,
+            resume_mode="hold_down_market_closed",
+            resume_action_policy=RESUME_POLICY_HOLD_MARKET_CLOSED,
+            budget=budget,
+        )
+
+    if budget.get("budget_exhausted") is True or budget.get("quarantine_required") is True:
+        return _decision(
+            RESUME_BLOCKED_PAPER_QUARANTINE_OBSERVE_ONLY,
+            "Recovery Budget Ledger is exhausted; PAPER should quarantine-observe rather than require routine operator ack.",
+            blockers=[_blocker("recovery_budget_ledger", str(budget.get("budget_key") or ""))],
+            warnings=warnings,
+            resume_mode="paper_quarantine_observe_only",
+            resume_action_policy=RESUME_POLICY_QUARANTINE_OBSERVE_ONLY,
+            budget=budget,
         )
 
     if evidence["crash_loop_operator_ack_required"] is True or stop.get("broker_safe_at_stop") is False:
@@ -368,6 +483,10 @@ def _classify_resume(*, inputs: Mapping[str, Mapping[str, Any]]) -> dict[str, An
                 resume_mode="paper_bounded_retry_enhanced_observation",
                 allowed=True,
                 safe_to_start_runtime=True,
+                resume_action_policy=RESUME_POLICY_NEW_RUNTIME_GENERATION_ALLOWED,
+                budget=budget,
+                enhanced_observation_required=stop.get("broker_safe_at_stop") is False
+                or evidence["crash_loop_operator_ack_required"] is True,
             )
         if _paper_policy_quarantine(evidence):
             return _decision(
@@ -376,6 +495,8 @@ def _classify_resume(*, inputs: Mapping[str, Mapping[str, Any]]) -> dict[str, An
                 blockers=[_blocker("paper_recovery_policy", evidence["paper_action_policy"])],
                 warnings=warnings,
                 resume_mode="paper_quarantine_observe_only",
+                resume_action_policy=RESUME_POLICY_QUARANTINE_OBSERVE_ONLY,
+                budget=budget,
             )
         return _decision(
             RESUME_BLOCKED_OPERATOR_ACK_REQUIRED,
@@ -387,6 +508,8 @@ def _classify_resume(*, inputs: Mapping[str, Mapping[str, Any]]) -> dict[str, An
             warnings=warnings,
             resume_mode="hold_down_operator_ack_required",
             required_operator_ack=False,
+            resume_action_policy=RESUME_POLICY_QUARANTINE_OBSERVE_ONLY,
+            budget=budget,
         )
 
     if evidence["crash_loop_restart_blocked"] is True:
@@ -397,6 +520,8 @@ def _classify_resume(*, inputs: Mapping[str, Mapping[str, Any]]) -> dict[str, An
                 blockers=[_blocker("paper_recovery_policy", evidence["paper_action_policy"])],
                 warnings=[_blocker("crash_loop_protection", evidence["crash_loop_classification"])],
                 resume_mode="paper_quarantine_observe_only",
+                resume_action_policy=RESUME_POLICY_QUARANTINE_OBSERVE_ONLY,
+                budget=budget,
             )
         return _decision(
             RESUME_BLOCKED_CRASH_LOOP,
@@ -404,15 +529,10 @@ def _classify_resume(*, inputs: Mapping[str, Mapping[str, Any]]) -> dict[str, An
             blockers=[_blocker("crash_loop_protection", evidence["crash_loop_classification"])],
             warnings=warnings,
             resume_mode="hold_down_crash_loop",
-        )
-
-    if _market_closed(inputs):
-        return _decision(
-            RESUME_BLOCKED_MARKET_CLOSED,
-            MARKET_CLOSED_NO_FRESH_BARS,
-            blockers=[_blocker("market_session", MARKET_CLOSED_NO_FRESH_BARS)],
-            warnings=warnings,
-            resume_mode="hold_down_market_closed",
+            resume_action_policy=RESUME_POLICY_HOLD_BUDGET_EXHAUSTED
+            if budget.get("budget_exhausted") is True
+            else RESUME_POLICY_QUARANTINE_OBSERVE_ONLY,
+            budget=budget,
         )
 
     missing = _missing_or_stale_evidence(evidence)
@@ -424,6 +544,8 @@ def _classify_resume(*, inputs: Mapping[str, Mapping[str, Any]]) -> dict[str, An
             blockers=blockers,
             warnings=warnings,
             resume_mode="hold_down_refresh_required",
+            resume_action_policy=RESUME_POLICY_HOLD_STALE_EVIDENCE,
+            budget=budget,
         )
 
     proof_class = evidence["proof_readiness_classification"]
@@ -436,6 +558,8 @@ def _classify_resume(*, inputs: Mapping[str, Mapping[str, Any]]) -> dict[str, An
             resume_mode="clean_new_start",
             allowed=True,
             safe_to_start_runtime=True,
+            resume_action_policy=RESUME_POLICY_NEW_RUNTIME_GENERATION_ALLOWED,
+            budget=budget,
         )
 
     return _decision(
@@ -444,6 +568,8 @@ def _classify_resume(*, inputs: Mapping[str, Mapping[str, Any]]) -> dict[str, An
         blockers=[_blocker("proof_readiness", proof_class)],
         warnings=warnings,
         resume_mode="hold_down_shared_truth",
+        resume_action_policy=RESUME_POLICY_QUARANTINE_OBSERVE_ONLY,
+        budget=budget,
     )
 
 
@@ -454,11 +580,16 @@ def _decision(
     blockers: list[dict[str, str]],
     warnings: list[dict[str, str]],
     resume_mode: str,
+    resume_action_policy: str,
+    budget: Mapping[str, Any],
     allowed: bool = False,
     safe_to_start_runtime: bool = False,
     safe_to_reuse_previous_runtime_state: bool = False,
     must_start_new_runtime_generation: bool = True,
+    generation_reuse_allowed: bool = False,
+    must_start_new_generation: bool = True,
     required_operator_ack: bool = False,
+    enhanced_observation_required: bool = False,
 ) -> dict[str, Any]:
     return {
         "classification": classification,
@@ -468,6 +599,13 @@ def _decision(
         "safe_to_start_runtime": safe_to_start_runtime,
         "safe_to_reuse_previous_runtime_state": safe_to_reuse_previous_runtime_state,
         "must_start_new_runtime_generation": must_start_new_runtime_generation,
+        "resume_action_policy": resume_action_policy,
+        "generation_reuse_allowed": generation_reuse_allowed,
+        "must_start_new_generation": must_start_new_generation,
+        "bounded_retry_budget_key": budget.get("budget_key"),
+        "attempts_remaining": budget.get("attempts_remaining"),
+        "cooldown_until": budget.get("cooldown_until"),
+        "enhanced_observation_required": enhanced_observation_required,
         "resume_mode": resume_mode,
         "blockers": blockers,
         "warnings": warnings,
@@ -475,7 +613,14 @@ def _decision(
 
 
 def _evidence(inputs: Mapping[str, Mapping[str, Any]]) -> dict[str, Any]:
+    control_plane_status = classify_control_plane_snapshot_status(inputs["control_plane_snapshot"])
+    budget = _runtime_retry_budget(inputs["recovery_budget_ledger"])
     return {
+        "control_plane_snapshot_id": inputs["control_plane_snapshot"].get("control_plane_snapshot_id"),
+        "control_plane_snapshot_classification": _classification(inputs["control_plane_snapshot"]),
+        "control_plane_snapshot_status": control_plane_status.get("classification"),
+        "control_plane_snapshot_safe_to_start_runtime": control_plane_status.get("safe_to_start_runtime") is True,
+        "control_plane_shared_truth_generation_id": inputs["control_plane_snapshot"].get("shared_truth_refresh_generation_id"),
         "proof_readiness_classification": _classification(inputs["proof_readiness"]),
         "shared_truth_classification": _classification(inputs["shared_truth"]),
         "shared_truth_classifications": _mapping(inputs["shared_truth"].get("classifications")),
@@ -500,6 +645,8 @@ def _evidence(inputs: Mapping[str, Mapping[str, Any]]) -> dict[str, Any]:
         "paper_autonomous_recovery_allowed": inputs["paper_recovery_policy"].get("autonomous_recovery_allowed") is True,
         "paper_requires_operator_ack": inputs["paper_recovery_policy"].get("requires_operator_ack_for_paper") is True,
         "paper_bounded_recovery_budget": _mapping(inputs["paper_recovery_policy"].get("bounded_recovery_budget")),
+        "recovery_budget_classification": _classification(inputs["recovery_budget_ledger"]),
+        "runtime_retry_budget": budget,
         "live_money_eligible": _any_true(
             inputs["proof_readiness"],
             inputs["runtime_environment_truth"],
@@ -516,6 +663,54 @@ def _evidence(inputs: Mapping[str, Mapping[str, Any]]) -> dict[str, Any]:
         "runtime_writer_authority": str(inputs["runtime_environment_truth"].get("writer_authority") or ""),
         "duplicate_writer_count": int(inputs["runtime_environment_truth"].get("duplicate_writer_count") or 0),
     }
+
+
+def _runtime_retry_budget(ledger: Mapping[str, Any]) -> dict[str, Any]:
+    if not ledger:
+        return {
+            "budget_key": "",
+            "attempts_used": None,
+            "attempts_remaining": None,
+            "budget_exhausted": False,
+            "cooldown_until": None,
+            "quarantine_required": False,
+            "missing": True,
+        }
+    budget = budget_summary_for_action(
+        ledger,
+        agent_id="track_b_paper_runtime",
+        action_type="RUNTIME_RETRY",
+        target_identity={},
+        failure_classification="runtime_retry",
+    )
+    budget["missing"] = False
+    return budget
+
+
+def _generation_evidence(*, inputs: Mapping[str, Mapping[str, Any]], now: datetime) -> dict[str, Any]:
+    stop = _stop_provenance(inputs["stop_provenance"])
+    runtime = inputs["runtime_environment_truth"]
+    control_plane = inputs["control_plane_snapshot"]
+    previous_runtime_generation_id = (
+        stop.get("runtime_generation_id")
+        or stop.get("restart_generation")
+        or runtime.get("runtime_generation_id")
+        or runtime.get("restart_generation")
+    )
+    return {
+        "previous_runtime_generation_id": previous_runtime_generation_id,
+        "proposed_next_runtime_generation_id": _proposed_runtime_generation_id(now),
+        "previous_source_commit": stop.get("source_commit") or runtime.get("source_commit"),
+        "previous_control_plane_snapshot_id": stop.get("control_plane_snapshot_id")
+        or control_plane.get("control_plane_snapshot_id"),
+        "control_plane_snapshot_id": control_plane.get("control_plane_snapshot_id"),
+        "shared_truth_refresh_generation_id": control_plane.get("shared_truth_refresh_generation_id")
+        or inputs["shared_truth"].get("refresh_generation_id"),
+    }
+
+
+def _proposed_runtime_generation_id(value: datetime) -> str:
+    return f"track-b-paper-runtime-generation-{value.strftime('%Y%m%dT%H%M%SZ')}"
 
 
 def _missing_or_stale_evidence(evidence: Mapping[str, Any]) -> list[str]:

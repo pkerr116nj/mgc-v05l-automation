@@ -16,6 +16,12 @@ from mgc_v05l.execution_core.track_b_runtime_environment_truth import (
     RUNTIME_DOWN_WITH_BROKER_EXPOSURE,
 )
 from mgc_v05l.execution_core.track_b_runtime_resume_semantics import (
+    RESUME_POLICY_HOLD_DUPLICATE_WRITER,
+    RESUME_POLICY_HOLD_LIVE_MONEY,
+    RESUME_POLICY_HOLD_MARKET_CLOSED,
+    RESUME_POLICY_HOLD_STALE_EVIDENCE,
+    RESUME_POLICY_NEW_RUNTIME_GENERATION_ALLOWED,
+    RESUME_POLICY_QUARANTINE_OBSERVE_ONLY,
     RESUME_ALLOWED_CLEAN,
     RESUME_ALLOWED_PAPER_BOUNDED_RETRY,
     RESUME_BLOCKED_BROKER_EXPOSURE,
@@ -48,6 +54,17 @@ def test_clean_proof_ready_allows_clean_resume(tmp_path: Path) -> None:
     assert payload["safe_to_start_runtime"] is True
     assert payload["safe_to_reuse_previous_runtime_state"] is False
     assert payload["must_start_new_runtime_generation"] is True
+    assert payload["resume_semantics_version"] == "v2"
+    assert payload["resume_action_policy"] == RESUME_POLICY_NEW_RUNTIME_GENERATION_ALLOWED
+    assert payload["generation_reuse_allowed"] is False
+    assert payload["must_start_new_generation"] is True
+    assert payload["previous_runtime_generation_id"] == "runtime-generation-previous"
+    assert payload["proposed_next_runtime_generation_id"] == "track-b-paper-runtime-generation-20260523T120000Z"
+    assert payload["previous_runtime_instance_id"] == "track-b-paper-runtime-test"
+    assert payload["previous_source_commit"] == "test-previous-source-commit"
+    assert payload["previous_control_plane_snapshot_id"] == "test-control-plane-snapshot"
+    assert payload["bounded_retry_budget_key"]
+    assert payload["attempts_remaining"] == 2
     assert payload["read_only"] is True
     assert payload["runtime_restart_authority"] is False
     assert payload["broker_mutation"] is False
@@ -61,6 +78,8 @@ def test_market_closed_blocks_resume(tmp_path: Path) -> None:
     assert payload["classification"] == RESUME_BLOCKED_MARKET_CLOSED
     assert payload["allowed"] is False
     assert payload["reason"] == MARKET_CLOSED_NO_FRESH_BARS
+    assert payload["resume_action_policy"] == RESUME_POLICY_HOLD_MARKET_CLOSED
+    assert payload["required_operator_ack"] is False
 
 
 def test_active_runtime_blocks_new_resume_but_marks_reuse_safe(tmp_path: Path) -> None:
@@ -73,6 +92,8 @@ def test_active_runtime_blocks_new_resume_but_marks_reuse_safe(tmp_path: Path) -
     assert payload["safe_to_start_runtime"] is False
     assert payload["safe_to_reuse_previous_runtime_state"] is True
     assert payload["must_start_new_runtime_generation"] is False
+    assert payload["resume_action_policy"] == "RESUME_EXISTING_RUNTIME"
+    assert payload["generation_reuse_allowed"] is True
 
 
 def test_broker_exposure_blocks_resume(tmp_path: Path) -> None:
@@ -124,6 +145,9 @@ def test_prior_unsafe_stop_clean_truth_uses_paper_bounded_retry_not_operator_ack
     assert payload["safe_to_start_runtime"] is True
     assert payload["previous_broker_safe_at_stop"] is False
     assert payload["evidence"]["paper_action_policy"] == "AUTONOMOUS_RETRY_ELIGIBLE"
+    assert payload["resume_action_policy"] == RESUME_POLICY_NEW_RUNTIME_GENERATION_ALLOWED
+    assert payload["enhanced_observation_required"] is True
+    assert payload["must_start_new_generation"] is True
 
 
 def test_crash_loop_with_paper_quarantine_blocks_without_operator_ack(tmp_path: Path) -> None:
@@ -141,6 +165,7 @@ def test_crash_loop_with_paper_quarantine_blocks_without_operator_ack(tmp_path: 
     assert payload["required_operator_ack"] is False
     assert payload["allowed"] is False
     assert payload["resume_mode"] == "paper_quarantine_observe_only"
+    assert payload["resume_action_policy"] == RESUME_POLICY_QUARANTINE_OBSERVE_ONLY
 
 
 def test_legacy_operator_ack_classification_is_not_paper_ack_dependency(tmp_path: Path) -> None:
@@ -167,6 +192,7 @@ def test_live_money_policy_hard_unsafe_blocks_resume(tmp_path: Path) -> None:
     assert payload["classification"] == RESUME_BLOCKED_HARD_UNSAFE
     assert payload["required_operator_ack"] is False
     assert payload["safe_to_start_runtime"] is False
+    assert payload["resume_action_policy"] == RESUME_POLICY_HOLD_LIVE_MONEY
 
 
 def test_duplicate_writer_hard_unsafe_blocks_resume(tmp_path: Path) -> None:
@@ -176,6 +202,29 @@ def test_duplicate_writer_hard_unsafe_blocks_resume(tmp_path: Path) -> None:
 
     assert payload["classification"] == RESUME_BLOCKED_HARD_UNSAFE
     assert payload["blockers"][0]["code"] == "runtime_environment_truth"
+    assert payload["resume_action_policy"] == RESUME_POLICY_HOLD_DUPLICATE_WRITER
+
+
+def test_budget_exhausted_quarantines_observe_only(tmp_path: Path) -> None:
+    _seed_base(tmp_path, budget_exhausted=True)
+
+    payload = build_track_b_runtime_resume_semantics(config=TrackBRuntimeResumeSemanticsConfig(repo_root=tmp_path), now=NOW)
+
+    assert payload["classification"] == RESUME_BLOCKED_PAPER_QUARANTINE_OBSERVE_ONLY
+    assert payload["resume_action_policy"] == RESUME_POLICY_QUARANTINE_OBSERVE_ONLY
+    assert payload["attempts_remaining"] == 0
+    assert payload["cooldown_until"]
+    assert payload["required_operator_ack"] is False
+
+
+def test_stale_control_plane_snapshot_holds_stale_evidence(tmp_path: Path) -> None:
+    _seed_base(tmp_path, control_plane_generated_at="2026-05-23T11:50:00+00:00")
+
+    payload = build_track_b_runtime_resume_semantics(config=TrackBRuntimeResumeSemanticsConfig(repo_root=tmp_path), now=NOW)
+
+    assert payload["classification"] == RESUME_BLOCKED_STALE_OR_MISSING_EVIDENCE
+    assert payload["resume_action_policy"] == RESUME_POLICY_HOLD_STALE_EVIDENCE
+    assert payload["blockers"][0]["code"] == "control_plane_snapshot"
 
 
 def test_missing_evidence_blocks_resume(tmp_path: Path) -> None:
@@ -205,6 +254,26 @@ def test_dashboard_projection_is_not_authority(tmp_path: Path) -> None:
     assert direct_projection["operator_dashboard_display_only"] is True
 
 
+def test_control_plane_dashboard_projection_is_not_consumed_as_authority(tmp_path: Path) -> None:
+    _seed_base(tmp_path)
+    (tmp_path / "outputs/track_b_execution_core/control_plane/latest_control_plane_snapshot.json").unlink()
+    _write_json(
+        tmp_path / "outputs/operator_dashboard/runtime/latest_track_b_control_plane_snapshot.json",
+        {
+            "projection_only": True,
+            "not_routing_authority": True,
+            "classification": "CONTROL_PLANE_SNAPSHOT_READY",
+            "safe_to_start_runtime": True,
+        },
+    )
+
+    payload = build_track_b_runtime_resume_semantics(config=TrackBRuntimeResumeSemanticsConfig(repo_root=tmp_path), now=NOW)
+
+    assert payload["classification"] == RESUME_BLOCKED_STALE_OR_MISSING_EVIDENCE
+    assert payload["resume_action_policy"] == RESUME_POLICY_HOLD_STALE_EVIDENCE
+    assert payload["safe_to_start_runtime"] is False
+
+
 def _seed_base(
     root: Path,
     *,
@@ -225,6 +294,8 @@ def _seed_base(
     duplicate_writer_count: int = 0,
     live_money_eligible: bool = False,
     include_agent_health: bool = True,
+    budget_exhausted: bool = False,
+    control_plane_generated_at: str | None = None,
 ) -> None:
     _write_json(
         root / "outputs" / "track_b_execution_core" / "proof_readiness" / "latest_track_b_paper_proof_readiness.json",
@@ -253,6 +324,8 @@ def _seed_base(
             "writer_authority": "DUPLICATE_WRITER" if duplicate_writer_count else "NO_ACTIVE_WRITER",
             "duplicate_writer_count": duplicate_writer_count,
             "live_money_eligible": live_money_eligible,
+            "runtime_generation_id": "runtime-generation-previous",
+            "source_commit": "test-previous-source-commit",
         },
     )
     if include_agent_health:
@@ -340,6 +413,9 @@ def _seed_base(
             "stop_source": "launcher",
             "stop_reason": "expected_clean_down",
             "runtime_instance_id": "track-b-paper-runtime-test",
+            "runtime_generation_id": "runtime-generation-previous",
+            "source_commit": "test-previous-source-commit",
+            "control_plane_snapshot_id": "test-control-plane-snapshot",
             "broker_safe_at_stop": previous_broker_safe_at_stop,
             "live_money_eligible": live_money_eligible,
         },
@@ -357,8 +433,63 @@ def _seed_base(
                 "max_attempts_per_target": 1,
                 "max_attempts_per_window": 2,
                 "cooldown_seconds": 300,
-                "budget_exhausted": paper_action_policy == "QUARANTINE_OBSERVE_ONLY",
+                "budget_exhausted": budget_exhausted or paper_action_policy == "QUARANTINE_OBSERVE_ONLY",
             },
+            "live_money_eligible": live_money_eligible,
+        },
+    )
+    _write_json(
+        root / "outputs" / "track_b_execution_core" / "recovery_budget" / "latest_recovery_budget_ledger.json",
+        {
+            "generated_at": NOW.isoformat(),
+            "classification": "RECOVERY_BUDGET_EXHAUSTED" if budget_exhausted else "RECOVERY_BUDGET_AVAILABLE",
+            "max_attempts_per_target": 2,
+            "budget_exhausted": budget_exhausted,
+            "quarantine_required": budget_exhausted,
+            "entries": [
+                {
+                    "budget_key": "track_b_paper_runtime|RUNTIME_RETRY|44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a|*|runtime_retry",
+                    "agent_id": "track_b_paper_runtime",
+                    "action_type": "RUNTIME_RETRY",
+                    "target_identity": {},
+                    "target_identity_hash": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+                    "failure_classification": "runtime_retry",
+                    "attempts_used": 2 if budget_exhausted else 0,
+                    "attempts_remaining": 0 if budget_exhausted else 2,
+                    "budget_exhausted": budget_exhausted,
+                    "quarantine_required": budget_exhausted,
+                    "cooldown_until": "2026-05-23T12:15:00+00:00" if budget_exhausted else None,
+                }
+            ],
+            "summary": {
+                "budget_exhausted": budget_exhausted,
+                "quarantine_required": budget_exhausted,
+                "minimum_attempts_remaining": 0 if budget_exhausted else 2,
+            },
+            "live_money_eligible": live_money_eligible,
+        },
+    )
+    _write_json(
+        root / "outputs" / "track_b_execution_core" / "control_plane" / "latest_control_plane_snapshot.json",
+        {
+            "generated_at": control_plane_generated_at or NOW.isoformat(),
+            "control_plane_snapshot_id": "test-control-plane-snapshot",
+            "classification": "CONTROL_PLANE_SNAPSHOT_READY",
+            "shared_truth_coherence_status": "COHERENT",
+            "shared_truth_refresh_generation_id": "test-shared-truth-generation",
+            "runtime_supervisor_classification": "SUPERVISOR_RUNTIME_START_ALLOWED"
+            if proof_classification == READY_FOR_PROOF and not duplicate_writer_count and not live_money_eligible
+            else "SUPERVISOR_WAIT_MARKET_CLOSED"
+            if proof_classification == MARKET_CLOSED_NO_FRESH_BARS
+            else "SUPERVISOR_RUNTIME_START_BLOCKED",
+            "supervisor_mode": "READY_FOR_OPERATOR_START"
+            if proof_classification == READY_FOR_PROOF and not duplicate_writer_count and not live_money_eligible
+            else "MARKET_CLOSED_WAIT"
+            if proof_classification == MARKET_CLOSED_NO_FRESH_BARS
+            else "MANUAL_REVIEW_REQUIRED",
+            "proof_window_status": "ready" if proof_classification == READY_FOR_PROOF else "market_closed",
+            "safe_to_start_runtime": proof_classification == READY_FOR_PROOF and not duplicate_writer_count and not live_money_eligible,
+            "blockers": [],
             "live_money_eligible": live_money_eligible,
         },
     )
