@@ -112,7 +112,7 @@ def build_track_b_agent_health(
     current_head = (source_commit_resolver or _git_head)(config.repo_root)
     registry_path = config.resolve(config.agent_registry_path)
     registry = _read_json(registry_path)
-    if not registry:
+    if not registry or not _list(registry.get("agents")):
         registry_config = TrackBAgentRegistryConfig(repo_root=config.repo_root, dashboard_projection_path=None)
         registry = build_track_b_agent_registry(config=registry_config, now=actual_now)
         write_track_b_agent_registry(config=registry_config, payload=registry)

@@ -287,6 +287,14 @@ def test_track_b_control_plane_status_projection_displays_closed_market_services
     assert summary["projection_degraded"] is False
     assert summary["agent_registry"] == "AGENT_REGISTRY_READY"
     assert summary["agent_health"] == "AGENT_HEALTH_READY"
+    assert summary["agent_health_schema_version"] == "track_b_agent_health_v2"
+    assert summary["agent_health_classification"] == "AGENT_HEALTH_READY"
+    assert summary["agent_health_summary"]["agent_count"] == 14
+    assert summary["agent_health_blocks_proof"] is False
+    assert summary["agent_health_blocks_runtime_submit"] is False
+    assert summary["agent_health_blocks_recovery"] is False
+    assert summary["agent_health_has_duplicate_writer"] is False
+    assert summary["agent_health_top_blockers"] == []
     assert summary["self_recover_recommendation"] == "WAIT_MARKET_CLOSED"
     assert summary["crash_loop_classification"] == "NO_CRASH_LOOP"
     assert summary["runtime_resume_classification"] == "RESUME_BLOCKED_MARKET_CLOSED"
@@ -569,7 +577,22 @@ def _write_track_b_control_plane_artifacts(
     )
     _write_json_file(
         root / "outputs/track_b_execution_core/agent_health/latest_agent_health.json",
-        {"classification": "AGENT_HEALTH_READY"},
+        {
+            "schema_version": "track_b_agent_health_v2",
+            "classification": "AGENT_HEALTH_READY",
+            "summary": {
+                "agent_count": 14,
+                "blocking_for_proof_count": 0,
+                "blocking_for_runtime_submit_count": 0,
+                "blocking_for_recovery_count": 0,
+                "duplicate_process_count": 0,
+                "missing_artifact_count": 0,
+                "stale_pid_count": 0,
+                "source_commit_mismatch_count": 0,
+                "root_mismatch_count": 0,
+            },
+            "agents": [],
+        },
     )
     _write_json_file(
         root / "outputs/track_b_execution_core/self_recover/latest_self_recover_rules.json",
@@ -704,6 +727,29 @@ def _write_track_b_control_plane_artifacts(
                 else "operator may start Track B PAPER runtime using the repaired direct supervisor launcher"
             ),
             "paper_recovery_policy": paper_action_policy,
+            "agent_health_schema_version": "track_b_agent_health_v2",
+            "agent_health_classification": "AGENT_HEALTH_READY",
+            "agent_health_summary": {
+                "agent_count": 14,
+                "blocking_for_proof_count": 0,
+                "blocking_for_runtime_submit_count": 0,
+                "blocking_for_recovery_count": 0,
+                "duplicate_process_count": 0,
+                "missing_artifact_count": 0,
+                "stale_pid_count": 0,
+                "source_commit_mismatch_count": 0,
+                "root_mismatch_count": 0,
+            },
+            "agent_health_top_blockers": [],
+            "agent_health_blocks_proof": False,
+            "agent_health_blocks_runtime_submit": False,
+            "agent_health_blocks_recovery": False,
+            "agent_health_has_duplicate_writer": False,
+            "duplicate_process_count": 0,
+            "missing_artifact_count": 0,
+            "stale_pid_count": 0,
+            "source_commit_mismatch_count": 0,
+            "root_mismatch_count": 0,
             "autonomous_recovery_plan_classification": autonomous_recovery_plan_classification
             or (
                 "WAIT_MARKET_CLOSED"

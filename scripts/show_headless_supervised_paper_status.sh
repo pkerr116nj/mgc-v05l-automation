@@ -742,6 +742,26 @@ status["track_b_control_plane"] = {
     "degraded_reason": None if source_authority_paths else "missing_source_authority_path",
     "agent_registry": agent_registry.get("classification"),
     "agent_health": agent_health.get("classification"),
+    "agent_health_schema_version": control_plane_snapshot.get("agent_health_schema_version") or agent_health.get("schema_version"),
+    "agent_health_classification": control_plane_snapshot.get("agent_health_classification") or agent_health.get("classification"),
+    "agent_health_summary": control_plane_snapshot.get("agent_health_summary") or agent_health.get("summary") or {},
+    "agent_health_top_blockers": (control_plane_snapshot.get("agent_health_top_blockers") or [
+        agent for agent in (agent_health.get("agents") or [])
+        if isinstance(agent, dict) and (
+            agent.get("blocking_for_proof") is True
+            or agent.get("blocking_for_runtime_submit") is True
+            or agent.get("blocking_for_recovery") is True
+        )
+    ])[:5],
+    "agent_health_blocks_proof": control_plane_snapshot.get("agent_health_blocks_proof") is True,
+    "agent_health_blocks_runtime_submit": control_plane_snapshot.get("agent_health_blocks_runtime_submit") is True,
+    "agent_health_blocks_recovery": control_plane_snapshot.get("agent_health_blocks_recovery") is True,
+    "agent_health_has_duplicate_writer": control_plane_snapshot.get("agent_health_has_duplicate_writer") is True,
+    "agent_health_duplicate_process_count": control_plane_snapshot.get("duplicate_process_count"),
+    "agent_health_missing_artifact_count": control_plane_snapshot.get("missing_artifact_count"),
+    "agent_health_stale_pid_count": control_plane_snapshot.get("stale_pid_count"),
+    "agent_health_source_commit_mismatch_count": control_plane_snapshot.get("source_commit_mismatch_count"),
+    "agent_health_root_mismatch_count": control_plane_snapshot.get("root_mismatch_count"),
     "self_recover_recommendation": self_recover.get("recommendation") or self_recover.get("classification"),
     "crash_loop_classification": crash_loop.get("classification"),
     "crash_loop_restart_blocked": crash_loop.get("restart_blocked") is True,

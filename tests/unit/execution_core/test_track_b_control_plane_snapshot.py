@@ -91,6 +91,102 @@ def test_snapshot_includes_recovery_and_planner_fields(tmp_path: Path) -> None:
     assert payload["autonomous_recovery_execution_enabled"] is False
 
 
+def test_snapshot_includes_agent_health_v2_fields(tmp_path: Path) -> None:
+    _seed_clean_stack(tmp_path)
+    _seed_control_plane(tmp_path)
+
+    payload = _snapshot(tmp_path)
+
+    assert payload["agent_health_schema_version"] == "track_b_agent_health_v2"
+    assert payload["agent_health_classification"] == "AGENT_HEALTH_READY"
+    assert payload["agent_health_summary"]["agent_count"] == 14
+    assert payload["blocking_for_proof_count"] == 0
+    assert payload["blocking_for_runtime_submit_count"] == 0
+    assert payload["blocking_for_recovery_count"] == 0
+    assert payload["duplicate_process_count"] == 0
+    assert payload["missing_artifact_count"] == 0
+    assert payload["source_commit_mismatch_count"] == 0
+    assert payload["root_mismatch_count"] == 0
+    assert payload["agent_health_blocks_proof"] is False
+    assert payload["agent_health_blocks_runtime_submit"] is False
+    assert payload["agent_health_blocks_recovery"] is False
+    assert payload["agent_health_has_duplicate_writer"] is False
+
+
+def test_duplicate_writer_blocks_snapshot_start_posture(tmp_path: Path) -> None:
+    _seed_clean_stack(tmp_path)
+    _seed_control_plane(tmp_path)
+
+    payload = _snapshot(
+        tmp_path,
+        process_rows=[
+            {"pid": 10, "command": "bash scripts/run_probationary_paper_soak.sh"},
+            {"pid": 11, "command": "python -m mgc_v05l.app.main probationary-paper-soak"},
+        ],
+    )
+
+    assert payload["agent_health_has_duplicate_writer"] is True
+    assert payload["duplicate_process_count"] == 1
+    assert payload["agent_health_blocks_proof"] is True
+    assert payload["classification"] == "CONTROL_PLANE_SNAPSHOT_BLOCKED"
+    assert any(blocker["code"] == "agent_health_duplicate_writer" for blocker in payload["blockers"])
+    assert payload["safe_to_start_runtime"] is False
+
+
+def test_stale_noncritical_agent_health_artifact_is_warning(tmp_path: Path) -> None:
+    _seed_clean_stack(tmp_path)
+    _seed_control_plane(tmp_path)
+
+    def stale_runtime_pid(_shared_truth: dict) -> None:
+        _write(
+            tmp_path / "outputs/track_b_execution_core/process_hygiene/latest_track_b_process_surface_hygiene.json",
+            {
+                "generated_at": NOW.isoformat(),
+                "classification": "PROCESS_SURFACE_CLEAR",
+                "proof_blocking_processes": [],
+                "diagnostic_processes": [],
+                "expected_support_processes": [],
+                "stale_pid_files": [
+                    {
+                        "label": "track_b_paper_runtime",
+                        "path": str(tmp_path / "outputs/probationary_pattern_engine/paper_session/runtime/probationary_paper.pid"),
+                        "pid": 123,
+                        "reason": "pid_not_running",
+                    }
+                ],
+                "summary": {
+                    "active_runtime_writer_count": 0,
+                    "phase1_databento_process_count": 1,
+                    "broker_truth_refresher_count": 1,
+                    "operator_dashboard_readiness_process_count": 1,
+                },
+            },
+        )
+
+    payload = _snapshot(tmp_path, post_hook=stale_runtime_pid)
+
+    assert payload["stale_pid_count"] == 1
+    assert payload["agent_health_blocks_proof"] is False
+    assert payload["agent_health_blocks_recovery"] is False
+    assert any(warning["code"] == "agent_health_stale_pid_detected" for warning in payload["warnings"])
+
+
+def test_missing_required_agent_health_artifact_blocks(tmp_path: Path) -> None:
+    _seed_clean_stack(tmp_path)
+    _seed_control_plane(tmp_path)
+
+    def remove_open_order_truth(_shared_truth: dict) -> None:
+        (tmp_path / "outputs/track_b_execution_core/open_order_truth/latest_open_order_truth.json").unlink()
+
+    payload = _snapshot(tmp_path, post_hook=remove_open_order_truth)
+
+    assert payload["missing_artifact_count"] == 1
+    assert payload["agent_health_blocks_proof"] is True
+    assert payload["agent_health_blocks_runtime_submit"] is True
+    assert payload["runtime_supervisor_classification"] == "SUPERVISOR_SHARED_TRUTH_STALE"
+    assert any(blocker["agent_id"] == "open_order_truth" for blocker in payload["agent_health_top_blockers"])
+
+
 def test_dashboard_projection_is_not_authority(tmp_path: Path) -> None:
     _seed_clean_stack(tmp_path)
     _seed_control_plane(tmp_path)
@@ -141,11 +237,13 @@ def _snapshot(
     root: Path,
     *,
     post_hook=None,
+    process_rows=None,
 ) -> dict:
     return build_track_b_control_plane_snapshot(
         config=TrackBControlPlaneSnapshotConfig(repo_root=root),
         now=NOW,
         pid_running=lambda _pid: False,
+        process_rows=process_rows,
         process_root_resolver=lambda _pid: None,
         source_commit_resolver=lambda _root: "test-head",
         post_shared_truth_refresh_hook=post_hook,
@@ -234,12 +332,19 @@ def _seed_control_plane(
         {"generated_at": NOW.isoformat(), "canonical_readiness": "READY_SUBMIT_CAPABLE"},
     )
     _write(
+        root / "var/track_b_operator_readiness_refresh_heartbeat.json",
+        {"generated_at": NOW.isoformat(), "repo_root": str(root)},
+    )
+    broker_pid_path = root / "var/track_b_broker_truth_refresh_service.pid"
+    broker_pid_path.parent.mkdir(parents=True, exist_ok=True)
+    broker_pid_path.write_text("123\n", encoding="utf-8")
+    _write(
         root / "outputs/reports/phase1_runtime_data_readiness/latest_phase1_runtime_data_readiness.json",
         {
             "generated_at": NOW.isoformat(),
             "classification": proof_classification,
             "market_session": {"classification": proof_classification},
-            "rows": [],
+            "rows": [{"symbol": "MGC", "runtime_candles_ready": True, "derived_features_ready": True}],
         },
     )
     _write(

@@ -295,6 +295,10 @@ def test_status_script_marks_control_plane_fallback_as_diagnostic_only() -> None
     assert "control_plane_diagnostic_only" in script
     assert "control_plane_not_routing_authority" in script
     assert "control_plane_snapshot_missing" in script
+    assert "agent_health_schema_version" in script
+    assert "agent_health_top_blockers" in script
+    assert "agent_health_has_duplicate_writer" in script
+    assert "agent_health_blocks_runtime_submit" in script
     assert "runtime_resume_raw_safe_to_start_runtime" in script
     assert "runtime_resume_safe_to_start_runtime" in script
     assert (

@@ -17,6 +17,12 @@ from pathlib import Path
 from typing import Any, Callable, Mapping, Sequence
 
 from mgc_v05l.execution_core.track_b_atomic_io import write_json_atomic
+from mgc_v05l.execution_core.track_b_agent_health import (
+    DEFAULT_AGENT_HEALTH_ARTIFACT,
+    TrackBAgentHealthConfig,
+    build_track_b_agent_health,
+    write_track_b_agent_health,
+)
 from mgc_v05l.execution_core.track_b_projection_metadata import build_projection_metadata
 from mgc_v05l.execution_core.track_b_runtime_supervisor_authority import (
     SHARED_TRUTH_COHERENT,
@@ -53,6 +59,7 @@ class TrackBControlPlaneSnapshotConfig:
     output_path: Path = DEFAULT_CONTROL_PLANE_SNAPSHOT_ARTIFACT
     dashboard_projection_path: Path | None = DEFAULT_DASHBOARD_CONTROL_PLANE_SNAPSHOT_PROJECTION
     shared_truth_refresh_path: Path = DEFAULT_SHARED_TRUTH_REFRESH_ARTIFACT
+    agent_health_path: Path = DEFAULT_AGENT_HEALTH_ARTIFACT
     broker_lease_history_path: Path | None = None
 
     def resolve(self, path: Path) -> Path:
@@ -64,6 +71,7 @@ def build_track_b_control_plane_snapshot(
     config: TrackBControlPlaneSnapshotConfig,
     now: datetime | None = None,
     pid_running: Callable[[int], bool] | None = None,
+    process_rows: Sequence[Mapping[str, Any]] | None = None,
     process_root_resolver: Callable[[int], Path | None] | None = None,
     source_commit_resolver: Callable[[Path], str | None] | None = None,
     post_shared_truth_refresh_hook: Callable[[Mapping[str, Any]], None] | None = None,
@@ -83,6 +91,20 @@ def build_track_b_control_plane_snapshot(
     if post_shared_truth_refresh_hook is not None:
         post_shared_truth_refresh_hook(shared_truth)
 
+    agent_health_config = TrackBAgentHealthConfig(
+        repo_root=config.repo_root,
+        output_path=config.agent_health_path,
+        dashboard_projection_path=None,
+    )
+    agent_health = build_track_b_agent_health(
+        config=agent_health_config,
+        now=actual_now,
+        process_rows=process_rows,
+        pid_running=pid_running,
+        source_commit_resolver=source_commit_resolver,
+    )
+    agent_health_path = write_track_b_agent_health(config=agent_health_config, payload=agent_health)
+
     supervisor_config = TrackBRuntimeSupervisorAuthorityConfig(
         repo_root=config.repo_root,
         dashboard_projection_path=None,
@@ -100,6 +122,8 @@ def build_track_b_control_plane_snapshot(
         config=config,
         now=actual_now,
         shared_truth=shared_truth,
+        agent_health=agent_health,
+        agent_health_path=agent_health_path,
         runtime_supervisor=runtime_supervisor,
         runtime_supervisor_path=runtime_supervisor_path,
     )
@@ -190,6 +214,8 @@ def _snapshot_payload(
     config: TrackBControlPlaneSnapshotConfig,
     now: datetime,
     shared_truth: Mapping[str, Any],
+    agent_health: Mapping[str, Any],
+    agent_health_path: Path,
     runtime_supervisor: Mapping[str, Any],
     runtime_supervisor_path: Path,
 ) -> dict[str, Any]:
@@ -197,19 +223,23 @@ def _snapshot_payload(
     generation_matches = (
         shared_truth.get("refresh_generation_id") == runtime_supervisor.get("shared_truth_refresh_generation_id")
     )
+    evidence = _mapping(runtime_supervisor.get("evidence_summary"))
+    agent_health_evidence = _agent_health_evidence(agent_health)
     classification = _snapshot_classification(
         coherence_status=coherence_status,
         generation_matches=generation_matches,
         supervisor_classification=str(runtime_supervisor.get("classification") or ""),
+        agent_health_evidence=agent_health_evidence,
     )
     blockers = _snapshot_blockers(
         shared_truth=shared_truth,
         runtime_supervisor=runtime_supervisor,
+        agent_health_evidence=agent_health_evidence,
         coherence_status=coherence_status,
         generation_matches=generation_matches,
     )
     warnings = list(shared_truth.get("warnings") or []) + list(runtime_supervisor.get("warnings") or [])
-    evidence = _mapping(runtime_supervisor.get("evidence_summary"))
+    warnings.extend(_agent_health_warnings(agent_health_evidence))
     return {
         "schema_version": "track_b_control_plane_snapshot_v1",
         "control_plane_snapshot_id": _snapshot_id(now),
@@ -235,8 +265,12 @@ def _snapshot_payload(
         "supervisor_mode": runtime_supervisor.get("supervisor_mode"),
         "proof_window_status": runtime_supervisor.get("proof_window_status"),
         "recommended_next_command": runtime_supervisor.get("recommended_next_command"),
-        "safe_to_start_runtime": runtime_supervisor.get("safe_to_start_runtime") is True,
+        "safe_to_start_runtime": runtime_supervisor.get("safe_to_start_runtime") is True
+        and classification == CONTROL_PLANE_SNAPSHOT_READY
+        and agent_health_evidence.get("agent_health_has_duplicate_writer") is not True
+        and agent_health_evidence.get("agent_health_blocks_runtime_submit") is not True,
         "paper_recovery_policy": evidence.get("paper_action_policy") or shared_truth.get("paper_recovery_policy"),
+        **agent_health_evidence,
         "autonomous_recovery_plan_classification": runtime_supervisor.get(
             "autonomous_recovery_plan_classification"
         ),
@@ -247,6 +281,7 @@ def _snapshot_payload(
         "warnings": warnings,
         "source_artifact_paths": {
             "shared_truth_refresh": str(config.resolve(config.shared_truth_refresh_path)),
+            "agent_health": str(agent_health_path),
             "runtime_supervisor_authority": str(runtime_supervisor_path),
             "control_plane_snapshot": str(config.resolve(config.output_path)),
             **_mapping(shared_truth.get("artifact_paths")),
@@ -259,9 +294,16 @@ def _snapshot_classification(
     coherence_status: str,
     generation_matches: bool,
     supervisor_classification: str,
+    agent_health_evidence: Mapping[str, Any],
 ) -> str:
     if coherence_status != SHARED_TRUTH_COHERENT or not generation_matches:
         return CONTROL_PLANE_SNAPSHOT_STALE_OR_MIXED
+    if (
+        agent_health_evidence.get("agent_health_has_duplicate_writer") is True
+        or agent_health_evidence.get("agent_health_blocks_runtime_submit") is True
+        or agent_health_evidence.get("agent_health_blocks_recovery") is True
+    ):
+        return CONTROL_PLANE_SNAPSHOT_BLOCKED
     if supervisor_classification in {"SUPERVISOR_RUNTIME_START_ALLOWED", "SUPERVISOR_WAIT_MARKET_CLOSED"}:
         return CONTROL_PLANE_SNAPSHOT_READY
     return CONTROL_PLANE_SNAPSHOT_BLOCKED
@@ -271,6 +313,7 @@ def _snapshot_blockers(
     *,
     shared_truth: Mapping[str, Any],
     runtime_supervisor: Mapping[str, Any],
+    agent_health_evidence: Mapping[str, Any],
     coherence_status: str,
     generation_matches: bool,
 ) -> list[dict[str, str]]:
@@ -295,6 +338,27 @@ def _snapshot_blockers(
         )
     blockers.extend(_stringify_blockers(shared_truth.get("unsafe_blockers")))
     blockers.extend(_stringify_blockers(runtime_supervisor.get("blockers")))
+    if agent_health_evidence.get("agent_health_has_duplicate_writer") is True:
+        blockers.append(
+            {
+                "code": "agent_health_duplicate_writer",
+                "detail": "Agent Health v2 reports duplicate Track B PAPER runtime writer evidence.",
+            }
+        )
+    if agent_health_evidence.get("agent_health_blocks_runtime_submit") is True:
+        blockers.append(
+            {
+                "code": "agent_health_blocks_runtime_submit",
+                "detail": "Agent Health v2 reports required runtime-submit evidence is blocking.",
+            }
+        )
+    if agent_health_evidence.get("agent_health_blocks_recovery") is True:
+        blockers.append(
+            {
+                "code": "agent_health_blocks_recovery",
+                "detail": "Agent Health v2 reports recovery-blocking process or artifact evidence.",
+            }
+        )
     return blockers
 
 
@@ -316,6 +380,73 @@ def _broker_order_position_summary(
         "reconciliation": classifications.get("Reconciliation") or evidence.get("reconciliation_classification"),
         "broker_truth_lease": classifications.get("Broker Truth Lease") or evidence.get("broker_lease_classification"),
     }
+
+
+def _agent_health_evidence(agent_health: Mapping[str, Any]) -> dict[str, Any]:
+    summary = _mapping(agent_health.get("summary"))
+    stale_pid_count = sum(
+        1 for agent in _list(agent_health.get("agents")) if _mapping(agent).get("stale_pid_detected") is True
+    )
+    duplicate_process_count = _as_int(summary.get("duplicate_process_count"))
+    blocking_for_proof_count = _as_int(summary.get("blocking_for_proof_count"))
+    blocking_for_runtime_submit_count = _as_int(summary.get("blocking_for_runtime_submit_count"))
+    blocking_for_recovery_count = _as_int(summary.get("blocking_for_recovery_count"))
+    top_blockers = [
+        {
+            "agent_id": str(agent.get("agent_id") or ""),
+            "status": str(agent.get("status") or ""),
+            "reason": str(agent.get("reason") or ""),
+            "blocking_for_proof": agent.get("blocking_for_proof") is True,
+            "blocking_for_runtime_submit": agent.get("blocking_for_runtime_submit") is True,
+            "blocking_for_recovery": agent.get("blocking_for_recovery") is True,
+        }
+        for agent in _list(agent_health.get("agents"))
+        if isinstance(agent, Mapping)
+        and (
+            agent.get("blocking_for_proof") is True
+            or agent.get("blocking_for_runtime_submit") is True
+            or agent.get("blocking_for_recovery") is True
+        )
+    ][:5]
+    return {
+        "agent_health_schema_version": agent_health.get("schema_version"),
+        "agent_health_classification": agent_health.get("classification"),
+        "agent_health_summary": dict(summary),
+        "agent_health_top_blockers": top_blockers,
+        "blocking_for_proof_count": blocking_for_proof_count,
+        "blocking_for_runtime_submit_count": blocking_for_runtime_submit_count,
+        "blocking_for_recovery_count": blocking_for_recovery_count,
+        "duplicate_process_count": duplicate_process_count,
+        "missing_artifact_count": _as_int(summary.get("missing_artifact_count")),
+        "stale_pid_count": stale_pid_count,
+        "source_commit_mismatch_count": _as_int(summary.get("source_commit_mismatch_count")),
+        "root_mismatch_count": _as_int(summary.get("root_mismatch_count")),
+        "agent_health_blocks_proof": blocking_for_proof_count > 0,
+        "agent_health_blocks_runtime_submit": blocking_for_runtime_submit_count > 0,
+        "agent_health_blocks_recovery": blocking_for_recovery_count > 0,
+        "agent_health_has_duplicate_writer": duplicate_process_count > 0,
+    }
+
+
+def _agent_health_warnings(evidence: Mapping[str, Any]) -> list[dict[str, str]]:
+    warnings: list[dict[str, str]] = []
+    if _as_int(evidence.get("stale_pid_count")):
+        warnings.append(
+            {
+                "code": "agent_health_stale_pid_detected",
+                "detail": f"Agent Health reports stale_pid_count={evidence.get('stale_pid_count')}.",
+            }
+        )
+    for key in ("missing_artifact_count", "source_commit_mismatch_count", "root_mismatch_count"):
+        count = _as_int(evidence.get(key))
+        if count:
+            warnings.append(
+                {
+                    "code": f"agent_health_{key}",
+                    "detail": f"Agent Health reports {key}={count}.",
+                }
+            )
+    return warnings
 
 
 def _stringify_blockers(value: Any) -> list[dict[str, str]]:
@@ -344,6 +475,17 @@ def _write_json_atomic(path: Path, payload: Mapping[str, Any]) -> None:
 
 def _mapping(value: Any) -> Mapping[str, Any]:
     return value if isinstance(value, Mapping) else {}
+
+
+def _list(value: Any) -> list[Any]:
+    return list(value) if isinstance(value, list) else []
+
+
+def _as_int(value: Any) -> int:
+    try:
+        return int(value or 0)
+    except (TypeError, ValueError):
+        return 0
 
 
 def _ensure_utc(value: datetime) -> datetime:
