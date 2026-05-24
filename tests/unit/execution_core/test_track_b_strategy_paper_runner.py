@@ -103,6 +103,71 @@ def base_config(tmp_path: Path, **overrides: object) -> TrackBStrategyPaperRunne
     return TrackBStrategyPaperRunnerConfig(**payload)
 
 
+def _write_strategy_input_event_with_runtime_candles(
+    tmp_path: Path,
+    *,
+    strategy_id: str,
+    symbol: str,
+) -> Path:
+    runtime_payload_path = tmp_path / "runtime" / f"{strategy_id}_runtime_5m.json"
+    runtime_payload_path.parent.mkdir(parents=True, exist_ok=True)
+    runtime_payload_path.write_text(
+        json.dumps(
+            {
+                "instrument_family": symbol,
+                "timeframe": "5m",
+                "candles": [
+                    {
+                        "timestamp": "2026-05-04T14:15:00+00:00",
+                        "timeframe": "5m",
+                        "open": "100.0",
+                        "high": "101.0",
+                        "low": "99.8",
+                        "close": "100.7",
+                        "completed": True,
+                    },
+                    {
+                        "timestamp": "2026-05-04T14:20:00+00:00",
+                        "timeframe": "5m",
+                        "open": "100.7",
+                        "high": "101.6",
+                        "low": "100.5",
+                        "close": "101.4",
+                        "completed": True,
+                    },
+                    {
+                        "timestamp": "2026-05-04T14:25:00+00:00",
+                        "timeframe": "5m",
+                        "open": "101.4",
+                        "high": "102.2",
+                        "low": "101.1",
+                        "close": "102.0",
+                        "completed": True,
+                    },
+                ],
+            },
+            sort_keys=True,
+        ),
+        encoding="utf-8",
+    )
+    input_event_path = tmp_path / "events" / f"{strategy_id}.json"
+    input_event_path.parent.mkdir(parents=True, exist_ok=True)
+    input_event_path.write_text(
+        json.dumps(
+            {
+                "strategy_id": strategy_id,
+                "instrument_family": symbol,
+                "metadata": {
+                    "source_payload_path": str(runtime_payload_path),
+                },
+            },
+            sort_keys=True,
+        ),
+        encoding="utf-8",
+    )
+    return input_event_path
+
+
 def assert_legacy_paper_proof_disabled(result, calls: Calls) -> None:
     assert result.verdict == TrackBStrategyPaperRunnerVerdict.BLOCKED_INVALID_SUBMIT_REQUEST
     assert calls.proof == 0
@@ -184,18 +249,151 @@ def test_pause_resume_short_envelope_auto_populates_continuation_exit_evidence(t
 
 def test_remaining_p0_envelopes_have_profile_mapping_without_exit_behavior_change(tmp_path: Path) -> None:
     cases = {
-        "ASIA_EARLY_NORMAL_BREAKOUT_RETEST_HOLD_LONG_V1": "BREAKOUT_RETEST_CONTINUATION_HOLD_V1",
-        "MNQ_FIRST_BEAR_SNAP_TURN_V1": "SNAP_TURN_FAST_DECAY_V1",
-        "MNQ_FIRST_BULL_SNAP_TURN_V1": "SNAP_TURN_FAST_DECAY_V1",
+        "ASIA_EARLY_NORMAL_BREAKOUT_RETEST_HOLD_LONG_V1": (
+            "BREAKOUT_RETEST_CONTINUATION_HOLD_V1",
+            "breakout_retest",
+        ),
+        "MNQ_FIRST_BEAR_SNAP_TURN_V1": ("SNAP_TURN_FAST_DECAY_V1", "snap_turn"),
+        "MNQ_FIRST_BULL_SNAP_TURN_V1": ("SNAP_TURN_FAST_DECAY_V1", "snap_turn"),
     }
 
-    for strategy_id, expected_profile in cases.items():
+    for strategy_id, (expected_profile, expected_family) in cases.items():
         evidence = _continuation_exit_evidence_from_strategy_report(
             config=base_config(tmp_path, strategy_id=strategy_id),
             strategy_report={},
         )
 
         assert evidence["continuation_exit_profile_id"] == expected_profile
+        assert evidence["continuation_completed_5m_candles"] == ()
+        assert evidence["continuation_microtrend_state"]["strategy_family"] == expected_family
+        assert evidence["continuation_microtrend_state"]["runtime_behavior_changed"] is False
+
+
+def test_breakout_retest_long_envelope_auto_populates_continuation_exit_evidence(tmp_path: Path) -> None:
+    input_event_path = _write_strategy_input_event_with_runtime_candles(
+        tmp_path,
+        strategy_id="ASIA_EARLY_NORMAL_BREAKOUT_RETEST_HOLD_LONG_V1",
+        symbol="MGC",
+    )
+
+    evidence = _continuation_exit_evidence_from_strategy_report(
+        config=base_config(tmp_path, strategy_id="ASIA_EARLY_NORMAL_BREAKOUT_RETEST_HOLD_LONG_V1"),
+        strategy_report={
+            "report_json_path": str(tmp_path / "rule" / "breakout_retest_long.json"),
+            "input_event_path": str(input_event_path),
+            "position_age_minutes": 45,
+            "mfe": "1.8",
+            "mae": "-0.4",
+            "unrealized_pnl": "1.1",
+            "rule_inputs": {
+                "derivative_phase": "ASIA_EARLY_NORMAL_BREAKOUT_RETEST_HOLD",
+                "breakout_normalized_slope": "0.08",
+                "breakout_range_expansion_ratio": "1.05",
+            },
+            "rule_conditions": {
+                "breakout_breaks_prior_1_high": True,
+                "signal_retests_and_holds_breakout_level": True,
+                "breakout_bar_expansion_is_normal": True,
+            },
+        },
+    )
+
+    assert evidence["continuation_exit_profile_id"] == "BREAKOUT_RETEST_CONTINUATION_HOLD_V1"
+    assert len(evidence["continuation_completed_5m_candles"]) == 3
+    assert evidence["continuation_position_age_minutes"] == 45
+    assert evidence["continuation_mfe"] == "1.8"
+    assert evidence["continuation_mae"] == "-0.4"
+    assert evidence["continuation_unrealized_pnl"] == "1.1"
+    assert evidence["continuation_microtrend_state"]["strategy_family"] == "breakout_retest"
+    assert evidence["continuation_microtrend_state"]["microtrend"] == "HEALTHY_BREAKOUT_RETEST_CONTINUATION"
+    assert evidence["continuation_participation_state"]["healthy_pullback_tolerant"] is True
+
+
+def test_mnq_bear_snap_turn_envelope_auto_populates_continuation_exit_evidence(tmp_path: Path) -> None:
+    input_event_path = _write_strategy_input_event_with_runtime_candles(
+        tmp_path,
+        strategy_id="MNQ_FIRST_BEAR_SNAP_TURN_V1",
+        symbol="MNQ",
+    )
+
+    evidence = _continuation_exit_evidence_from_strategy_report(
+        config=base_config(tmp_path, strategy_id="MNQ_FIRST_BEAR_SNAP_TURN_V1"),
+        strategy_report={
+            "strategy_rule_report_json": str(tmp_path / "rule" / "mnq_bear_snap.json"),
+            "input_event_path": str(input_event_path),
+            "open_position_age_minutes": 12,
+            "open_position_mfe": "4.0",
+            "open_position_mae": "-0.8",
+            "open_position_unrealized_pnl": "2.1",
+            "rule_inputs": {"derivative_phase": "FIRST_BEAR_SNAP_TURN", "session_allowed": True},
+            "rule_conditions": {
+                "session_allowed": True,
+                "bear_snap_close_weak": True,
+                "bear_snap_reversal_bar": True,
+                "first_bear_snap_turn": True,
+            },
+        },
+    )
+
+    assert evidence["continuation_exit_profile_id"] == "SNAP_TURN_FAST_DECAY_V1"
+    assert len(evidence["continuation_completed_5m_candles"]) == 3
+    assert evidence["continuation_position_age_minutes"] == 12
+    assert evidence["continuation_mfe"] == "4.0"
+    assert evidence["continuation_mae"] == "-0.8"
+    assert evidence["continuation_unrealized_pnl"] == "2.1"
+    assert evidence["continuation_microtrend_state"]["direction"] == "SHORT"
+    assert evidence["continuation_microtrend_state"]["microtrend"] == "FAST_SNAP_TURN_CONTINUATION"
+    assert evidence["continuation_participation_state"]["fast_decay_sensitive"] is True
+
+
+def test_mnq_bull_snap_turn_envelope_auto_populates_continuation_exit_evidence(tmp_path: Path) -> None:
+    input_event_path = _write_strategy_input_event_with_runtime_candles(
+        tmp_path,
+        strategy_id="MNQ_FIRST_BULL_SNAP_TURN_V1",
+        symbol="MNQ",
+    )
+
+    evidence = _continuation_exit_evidence_from_strategy_report(
+        config=base_config(tmp_path, strategy_id="MNQ_FIRST_BULL_SNAP_TURN_V1"),
+        strategy_report={
+            "source_strategy_report_path": str(tmp_path / "rule" / "mnq_bull_snap.json"),
+            "input_event_path": str(input_event_path),
+            "managed_position_age_minutes": 14,
+            "max_favorable_excursion": "3.2",
+            "max_adverse_excursion": "-0.5",
+            "unrealized_pnl": "1.7",
+            "rule_inputs": {"derivative_phase": "FIRST_BULL_SNAP_TURN", "session_allowed": True},
+            "rule_conditions": {
+                "session_allowed": True,
+                "bull_snap_close_strong": True,
+                "bull_snap_reversal_bar": True,
+                "first_bull_snap_turn": True,
+            },
+        },
+    )
+
+    assert evidence["continuation_exit_profile_id"] == "SNAP_TURN_FAST_DECAY_V1"
+    assert len(evidence["continuation_completed_5m_candles"]) == 3
+    assert evidence["continuation_position_age_minutes"] == 14
+    assert evidence["continuation_mfe"] == "3.2"
+    assert evidence["continuation_mae"] == "-0.5"
+    assert evidence["continuation_unrealized_pnl"] == "1.7"
+    assert evidence["continuation_microtrend_state"]["direction"] == "LONG"
+    assert evidence["continuation_microtrend_state"]["microtrend"] == "FAST_SNAP_TURN_CONTINUATION"
+    assert evidence["continuation_participation_state"]["fast_decay_sensitive"] is True
+
+
+def test_remaining_p0_missing_evidence_falls_back_without_behavior_change(tmp_path: Path) -> None:
+    for strategy_id in (
+        "ASIA_EARLY_NORMAL_BREAKOUT_RETEST_HOLD_LONG_V1",
+        "MNQ_FIRST_BEAR_SNAP_TURN_V1",
+        "MNQ_FIRST_BULL_SNAP_TURN_V1",
+    ):
+        evidence = _continuation_exit_evidence_from_strategy_report(
+            config=base_config(tmp_path, strategy_id=strategy_id),
+            strategy_report={"rule_conditions": {}},
+        )
+
         assert evidence["continuation_completed_5m_candles"] == ()
         assert evidence["continuation_microtrend_state"]["runtime_behavior_changed"] is False
 

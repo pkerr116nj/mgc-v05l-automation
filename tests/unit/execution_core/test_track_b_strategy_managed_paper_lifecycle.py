@@ -760,6 +760,109 @@ def test_continuation_aware_preview_missing_evidence_does_not_block_time_boxed_e
     assert preview["should_request_close"] is False
 
 
+def test_remaining_p0_continuation_previews_are_evidence_fed_diagnostic_only(tmp_path: Path) -> None:
+    cases = (
+        (
+            "ASIA_EARLY_NORMAL_BREAKOUT_RETEST_HOLD_LONG_V1",
+            "MGC",
+            "BUY",
+            "BREAKOUT_RETEST_CONTINUATION_HOLD_V1",
+            (
+                {"open": "100.0", "high": "100.7", "low": "99.8", "close": "100.5"},
+                {"open": "100.5", "high": "101.0", "low": "100.2", "close": "100.8"},
+            ),
+            {"microtrend": "HEALTHY_BREAKOUT_RETEST_CONTINUATION"},
+            {"participation": "STRONG_PARTICIPATING"},
+        ),
+        (
+            "MNQ_FIRST_BEAR_SNAP_TURN_V1",
+            "MNQ",
+            "SELL",
+            "SNAP_TURN_FAST_DECAY_V1",
+            (
+                {"open": "19000.0", "high": "19005.0", "low": "18960.0", "close": "18970.0"},
+                {"open": "18970.0", "high": "18980.0", "low": "18920.0", "close": "18935.0"},
+            ),
+            {"microtrend": "FAST_SNAP_TURN_CONTINUATION"},
+            {"participation": "STRONG_PARTICIPATING"},
+        ),
+        (
+            "MNQ_FIRST_BULL_SNAP_TURN_V1",
+            "MNQ",
+            "BUY",
+            "SNAP_TURN_FAST_DECAY_V1",
+            (
+                {"open": "19000.0", "high": "19045.0", "low": "18990.0", "close": "19035.0"},
+                {"open": "19035.0", "high": "19095.0", "low": "19020.0", "close": "19080.0"},
+            ),
+            {"microtrend": "FAST_SNAP_TURN_CONTINUATION"},
+            {"participation": "STRONG_PARTICIPATING"},
+        ),
+    )
+
+    for strategy_id, symbol, side, expected_profile, candles, microtrend, participation in cases:
+        result = run_track_b_strategy_managed_paper_lifecycle(
+            config=base_config(
+                tmp_path,
+                strategy_id=strategy_id,
+                instrument_family=symbol,
+                side=side,
+                managed_exit_policy_id=TrackBManagedExitPolicy.PAPER_DIAGNOSTIC_TIME_BOXED_3X5M_EXIT_V1.value,
+                completed_5m_bars_since_entry=3,
+                continuation_completed_5m_candles=candles,
+                continuation_microtrend_state=microtrend,
+                continuation_participation_state=participation,
+                continuation_position_age_minutes=20,
+                continuation_mfe="2.0",
+                continuation_mae="-0.3",
+                continuation_unrealized_pnl="1.1",
+            ),
+            stages=fake_stages(),
+            lifecycle_id=f"continuation-preview-{strategy_id}",
+            now=aware_now(),
+        )
+
+        preview = result.report["continuation_aware_exit_preview"]
+        assert result.classification == TrackBManagedPaperLifecycleClassification.CLOSED_FLAT
+        assert result.report["close_intent"]["close_reason"] == "TIME_BOXED_EXIT"
+        assert preview["exit_profile_id"] == expected_profile
+        assert preview["evidence_summary"]["completed_5m_candle_count"] == 2
+        assert preview["evidence_summary"]["microtrend_state"] == microtrend
+        assert preview["evidence_summary"]["participation_state"] == participation
+        assert preview["dry_run_only"] is True
+        assert preview["not_order_authority"] is True
+        assert preview["not_lifecycle_authority"] is True
+        assert preview["should_request_close"] is False
+
+
+def test_remaining_p0_missing_evidence_fallbacks_do_not_block_time_boxed_exit(tmp_path: Path) -> None:
+    for strategy_id, symbol, side in (
+        ("ASIA_EARLY_NORMAL_BREAKOUT_RETEST_HOLD_LONG_V1", "MGC", "BUY"),
+        ("MNQ_FIRST_BEAR_SNAP_TURN_V1", "MNQ", "SELL"),
+        ("MNQ_FIRST_BULL_SNAP_TURN_V1", "MNQ", "BUY"),
+    ):
+        result = run_track_b_strategy_managed_paper_lifecycle(
+            config=base_config(
+                tmp_path,
+                strategy_id=strategy_id,
+                instrument_family=symbol,
+                side=side,
+                managed_exit_policy_id=TrackBManagedExitPolicy.PAPER_DIAGNOSTIC_TIME_BOXED_3X5M_EXIT_V1.value,
+                completed_5m_bars_since_entry=3,
+            ),
+            stages=fake_stages(),
+            lifecycle_id=f"continuation-preview-missing-{strategy_id}",
+            now=aware_now(),
+        )
+
+        preview = result.report["continuation_aware_exit_preview"]
+        assert result.classification == TrackBManagedPaperLifecycleClassification.CLOSED_FLAT
+        assert result.report["close_intent"]["close_reason"] == "TIME_BOXED_EXIT"
+        assert preview["exit_state"] == "INSUFFICIENT_DATA_HOLD_OR_FALLBACK"
+        assert "completed_5m_candles" in preview["missing_inputs"]
+        assert preview["should_request_close"] is False
+
+
 def test_time_boxed_exit_policy_creates_close_intent_after_required_completed_bars(tmp_path: Path) -> None:
     result = run_track_b_strategy_managed_paper_lifecycle(
         config=base_config(

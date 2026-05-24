@@ -1046,6 +1046,29 @@ def _completed_5m_candles_from_report(strategy_report: Mapping[str, object]) -> 
             "recent_completed_5m_candles",
         ),
     )
+    if raw is None:
+        input_event = _input_event_from_strategy_report(strategy_report)
+        raw = _first_present(
+            input_event,
+            (
+                "completed_5m_candles",
+                "continuation_completed_5m_candles",
+                "input_candle_window",
+                "recent_completed_5m_candles",
+            ),
+        )
+        if raw is None:
+            source_payload = _source_payload_from_event(input_event)
+            raw = _first_present(
+                source_payload,
+                (
+                    "completed_5m_candles",
+                    "candles",
+                    "candle_history",
+                    "input_candle_window",
+                    "recent_completed_5m_candles",
+                ),
+            )
     if isinstance(raw, Mapping):
         nested = raw.get("completed_5m_candles") or raw.get("candles") or raw.get("items")
         raw = nested if nested is not None else raw
@@ -1084,14 +1107,27 @@ def _continuation_microtrend_state(
             "derivative_phase": rule_inputs.get("derivative_phase"),
             "microtrend": rule_inputs.get("microtrend_state") or rule_inputs.get("trend_state"),
         }
-    if strategy_id in {
-        "ASIA_EARLY_NORMAL_BREAKOUT_RETEST_HOLD_LONG_V1",
-        "MNQ_FIRST_BEAR_SNAP_TURN_V1",
-        "MNQ_FIRST_BULL_SNAP_TURN_V1",
-    }:
+    if strategy_id == "ASIA_EARLY_NORMAL_BREAKOUT_RETEST_HOLD_LONG_V1":
         return {
-            "source": "strategy_report.placeholder_profile_mapping",
-            "strategy_family": "breakout_retest" if "BREAKOUT_RETEST" in strategy_id else "snap_turn",
+            "source": "strategy_report.rule_inputs",
+            "strategy_family": "breakout_retest",
+            "direction": "LONG",
+            "derivative_phase": rule_inputs.get("derivative_phase"),
+            "breakout_normalized_slope": rule_inputs.get("breakout_normalized_slope"),
+            "breakout_range_expansion_ratio": rule_inputs.get("breakout_range_expansion_ratio"),
+            "microtrend": _breakout_retest_microtrend_label(rule_inputs, _mapping_or_empty(strategy_report.get("rule_conditions"))),
+            "healthy_pullback_tolerant": True,
+            "runtime_behavior_changed": False,
+        }
+    if strategy_id in {"MNQ_FIRST_BEAR_SNAP_TURN_V1", "MNQ_FIRST_BULL_SNAP_TURN_V1"}:
+        return {
+            "source": "strategy_report.rule_inputs",
+            "strategy_family": "snap_turn",
+            "direction": "SHORT" if strategy_id == "MNQ_FIRST_BEAR_SNAP_TURN_V1" else "LONG",
+            "derivative_phase": rule_inputs.get("derivative_phase"),
+            "session_allowed": rule_inputs.get("session_allowed"),
+            "microtrend": _snap_turn_microtrend_label(strategy_id, _mapping_or_empty(strategy_report.get("rule_conditions"))),
+            "fast_decay_sensitive": True,
             "runtime_behavior_changed": False,
         }
     return None
@@ -1120,6 +1156,22 @@ def _continuation_participation_state(
             "failed_continuation_sensitive": True,
             "conditions": dict(rule_conditions),
         }
+    if strategy_id == "ASIA_EARLY_NORMAL_BREAKOUT_RETEST_HOLD_LONG_V1":
+        return {
+            "source": "strategy_report.rule_conditions",
+            "strategy_family": "breakout_retest",
+            "participation": _participation_label(rule_conditions),
+            "healthy_pullback_tolerant": True,
+            "conditions": dict(rule_conditions),
+        }
+    if strategy_id in {"MNQ_FIRST_BEAR_SNAP_TURN_V1", "MNQ_FIRST_BULL_SNAP_TURN_V1"}:
+        return {
+            "source": "strategy_report.rule_conditions",
+            "strategy_family": "snap_turn",
+            "participation": _participation_label(rule_conditions),
+            "fast_decay_sensitive": True,
+            "conditions": dict(rule_conditions),
+        }
     return None
 
 
@@ -1138,6 +1190,28 @@ def _participation_label(rule_conditions: Mapping[str, object]) -> str:
     return "UNKNOWN_PARTICIPATION"
 
 
+def _breakout_retest_microtrend_label(
+    rule_inputs: Mapping[str, object],
+    rule_conditions: Mapping[str, object],
+) -> str:
+    if rule_conditions and all(value is True for value in rule_conditions.values() if isinstance(value, bool)):
+        return "HEALTHY_BREAKOUT_RETEST_CONTINUATION"
+    if any(value is False for value in rule_conditions.values() if isinstance(value, bool)):
+        return "FAILED_BREAKOUT_RETEST_CONTINUATION"
+    joined = " ".join(str(value).upper() for value in rule_inputs.values())
+    if "BREAKOUT" in joined or "RETEST" in joined:
+        return "BREAKOUT_RETEST_CONTEXT_AVAILABLE"
+    return "UNKNOWN_BREAKOUT_RETEST_CONTEXT"
+
+
+def _snap_turn_microtrend_label(strategy_id: str, rule_conditions: Mapping[str, object]) -> str:
+    if rule_conditions and all(value is True for value in rule_conditions.values() if isinstance(value, bool)):
+        return "FAST_SNAP_TURN_CONTINUATION"
+    if any(value is False for value in rule_conditions.values() if isinstance(value, bool)):
+        return "FAILED_SNAP_TURN_CONTINUATION"
+    return "SNAP_TURN_CONTEXT_AVAILABLE" if strategy_id.startswith("MNQ_FIRST_") else "UNKNOWN_SNAP_TURN_CONTEXT"
+
+
 def _strategy_report_path(strategy_report: Mapping[str, object]) -> str | None:
     return _string_or_none(
         strategy_report.get("report_json_path")
@@ -1152,6 +1226,37 @@ def _first_present(payload: Mapping[str, object], keys: tuple[str, ...]) -> obje
         if value is not None and value != "":
             return value
     return None
+
+
+def _input_event_from_strategy_report(strategy_report: Mapping[str, object]) -> Mapping[str, object]:
+    embedded = strategy_report.get("input_event") or strategy_report.get("source_event")
+    if isinstance(embedded, Mapping):
+        return embedded
+    input_path = _string_or_none(strategy_report.get("input_event_path") or strategy_report.get("input_event_json"))
+    if not input_path:
+        return {}
+    return _read_json_mapping(Path(input_path))
+
+
+def _source_payload_from_event(input_event: Mapping[str, object]) -> Mapping[str, object]:
+    metadata = input_event.get("metadata")
+    metadata_mapping = metadata if isinstance(metadata, Mapping) else {}
+    source_payload_path = _string_or_none(
+        metadata_mapping.get("source_payload_path")
+        or input_event.get("source_payload_path")
+        or input_event.get("input_runtime_5m_candles_json")
+    )
+    if not source_payload_path:
+        return {}
+    return _read_json_mapping(Path(source_payload_path))
+
+
+def _read_json_mapping(path: Path) -> Mapping[str, object]:
+    try:
+        parsed = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+    return parsed if isinstance(parsed, Mapping) else {}
 
 
 def _mapping_or_empty(value: object) -> Mapping[str, object]:
