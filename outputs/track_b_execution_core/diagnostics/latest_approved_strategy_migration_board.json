@@ -1,0 +1,545 @@
+{
+  "schema_version": "track_b_approved_strategy_migration_board_v1",
+  "generated_at": "2026-05-24T00:00:00-04:00",
+  "policy_mode": "PAPER",
+  "dry_run_only": true,
+  "broker_mutation_allowed": false,
+  "runtime_restart_allowed": false,
+  "paper_proof_allowed": false,
+  "live_money_route_allowed": false,
+  "dashboard_projection_consumed": false,
+  "authority_sources": [
+    "src/mgc_v05l/execution_core/track_b_strategy_registry.py",
+    "src/mgc_v05l/execution_core/track_b_multi_strategy_runtime_cycle.py",
+    "src/mgc_v05l/execution_core/track_b_strategy_paper_runner.py",
+    "src/mgc_v05l/execution_core/track_b_strategy_managed_paper_lifecycle.py",
+    "src/mgc_v05l/execution_core/track_b_runtime_safe_state_envelope.py",
+    "src/mgc_v05l/execution_core/track1_trackb_same_day_parity_audit.py",
+    "docs/track_b_paper_round_trip_leak_test_completion_2026-05-20.md"
+  ],
+  "summary": {
+    "total_strategies_inventoried": 15,
+    "p0_count": 5,
+    "p1_count": 7,
+    "p2_count": 1,
+    "p3_count": 2,
+    "ready_count": 5,
+    "migration_required_count": 8,
+    "runtime_not_eligible_count": 2,
+    "recommended_first_batch": [
+      "asian_drift_v1",
+      "ASIA_EARLY_PAUSE_RESUME_SHORT_V1",
+      "ASIA_EARLY_NORMAL_BREAKOUT_RETEST_HOLD_LONG_V1",
+      "MNQ_FIRST_BEAR_SNAP_TURN_V1",
+      "MNQ_FIRST_BULL_SNAP_TURN_V1"
+    ],
+    "first_batch_ordering_reason": "Start with the already hardened MGC Asia migration surface, then add MNQ snap-turn coverage to validate cross-symbol concurrency without requiring a universal flat precondition."
+  },
+  "strategies": [
+    {
+      "strategy_id": "asian_drift_v1",
+      "symbol": "MGC",
+      "lane_session": "mgc_example_long_lmt_day / Asia drift",
+      "family": "Asia early / drift",
+      "current_classification": "APPROVED_TRACK_B_READY",
+      "priority": "P0",
+      "missing_requirements": [
+        "Fresh Phase-1 realtime envelope at runtime",
+        "Clean coherent Control Plane Snapshot"
+      ],
+      "proof_risk": "LOW",
+      "recommended_next_action": "Use as first-batch PAPER observation candidate through strategy-managed lifecycle only.",
+      "reason": "Registered, paper eligible, live-money ineligible, and backed by the current strategy-managed submit authorization path.",
+      "shared_services_compliance": {
+        "control_plane_snapshot": "REQUIRED",
+        "safe_state": "REQUIRED",
+        "runtime_generation": "REQUIRED",
+        "lifecycle_matrix": "REQUIRED",
+        "managed_order_registry_order_planner": "REQUIRED_FOR_EXITS",
+        "strategy_submit_authorization": "REQUIRED"
+      },
+      "data_dependencies": [
+        "Phase-1 realtime completed 5m state",
+        "track_b_asian_drift_state"
+      ],
+      "exit_maturity": "MANAGED_TIME_BOXED_EXIT",
+      "known_prior_leak_test_proof_history": "Covered by Track B lifecycle/managed-exit remediation history; no legacy paper_proof route remains valid.",
+      "concurrent_position_compatibility": "Compatible with concurrent strategy-scoped PAPER positions when shared truth is clean and identity is unambiguous."
+    },
+    {
+      "strategy_id": "ASIA_EARLY_PAUSE_RESUME_SHORT_V1",
+      "symbol": "MGC",
+      "lane_session": "mgc_asia_early_pause_resume_short / Asia early",
+      "family": "pause/resume short",
+      "current_classification": "APPROVED_TRACK_B_READY",
+      "priority": "P0",
+      "missing_requirements": [
+        "Fresh Phase-1 envelope",
+        "Clean Safe-State Envelope"
+      ],
+      "proof_risk": "LOW",
+      "recommended_next_action": "Use as first-batch MGC short candidate.",
+      "reason": "First post-guardrail Asia short migration candidate with explicit state envelope and managed exit policy.",
+      "shared_services_compliance": {
+        "control_plane_snapshot": "REQUIRED",
+        "safe_state": "REQUIRED",
+        "runtime_generation": "REQUIRED",
+        "lifecycle_matrix": "REQUIRED",
+        "managed_order_registry_order_planner": "REQUIRED_FOR_EXITS",
+        "strategy_submit_authorization": "REQUIRED"
+      },
+      "data_dependencies": [
+        "Phase-1 realtime completed 5m state",
+        "Asia early session envelope"
+      ],
+      "exit_maturity": "MANAGED_TIME_BOXED_EXIT",
+      "known_prior_leak_test_proof_history": "Included in Track B post-guardrail migration surface; proof must use control-plane authorized runtime path.",
+      "concurrent_position_compatibility": "Compatible when strategy/lane identity is distinct and shared truth is clean."
+    },
+    {
+      "strategy_id": "ASIA_EARLY_NORMAL_BREAKOUT_RETEST_HOLD_LONG_V1",
+      "symbol": "MGC",
+      "lane_session": "mgc_asia_early_normal_breakout_retest_hold_long / Asia early or London extension",
+      "family": "breakout/retest long",
+      "current_classification": "APPROVED_TRACK_B_READY",
+      "priority": "P0",
+      "missing_requirements": [
+        "Fresh Phase-1 envelope",
+        "Clean Safe-State Envelope"
+      ],
+      "proof_risk": "LOW",
+      "recommended_next_action": "Use as first-batch MGC long candidate.",
+      "reason": "First breakout/retest long candidate with explicit envelope and managed exit policy.",
+      "shared_services_compliance": {
+        "control_plane_snapshot": "REQUIRED",
+        "safe_state": "REQUIRED",
+        "runtime_generation": "REQUIRED",
+        "lifecycle_matrix": "REQUIRED",
+        "managed_order_registry_order_planner": "REQUIRED_FOR_EXITS",
+        "strategy_submit_authorization": "REQUIRED"
+      },
+      "data_dependencies": [
+        "Phase-1 realtime completed 5m state",
+        "Breakout/retest session envelope"
+      ],
+      "exit_maturity": "MANAGED_TIME_BOXED_EXIT",
+      "known_prior_leak_test_proof_history": "Included in Track B post-guardrail migration surface; proof must use control-plane authorized runtime path.",
+      "concurrent_position_compatibility": "Compatible when strategy/lane identity is distinct and shared truth is clean."
+    },
+    {
+      "strategy_id": "MNQ_FIRST_BEAR_SNAP_TURN_V1",
+      "symbol": "MNQ",
+      "lane_session": "mnq_first_bear_snap_turn / session allowed",
+      "family": "snap turn short",
+      "current_classification": "APPROVED_TRACK_B_READY",
+      "priority": "P0",
+      "missing_requirements": [
+        "Fresh MNQ snap-turn envelope",
+        "Clean Control Plane Snapshot"
+      ],
+      "proof_risk": "MEDIUM",
+      "recommended_next_action": "Use as first-batch MNQ short candidate after MGC Asia candidates are clean.",
+      "reason": "Exercises the index-futures path and concurrent-position compatibility while remaining managed and paper-only.",
+      "shared_services_compliance": {
+        "control_plane_snapshot": "REQUIRED",
+        "safe_state": "REQUIRED",
+        "runtime_generation": "REQUIRED",
+        "lifecycle_matrix": "REQUIRED",
+        "managed_order_registry_order_planner": "REQUIRED_FOR_EXITS",
+        "strategy_submit_authorization": "REQUIRED"
+      },
+      "data_dependencies": [
+        "Phase-1 realtime completed 5m state",
+        "MNQ snap-turn feature envelope"
+      ],
+      "exit_maturity": "MANAGED_TIME_BOXED_EXIT",
+      "known_prior_leak_test_proof_history": "MNQ leak-test history exposed lifecycle/exit-suppression lessons; current route must use hardened submit authorization.",
+      "concurrent_position_compatibility": "Compatible with concurrent MGC PAPER positions when identities are scoped and Safe-State permits submit."
+    },
+    {
+      "strategy_id": "MNQ_FIRST_BULL_SNAP_TURN_V1",
+      "symbol": "MNQ",
+      "lane_session": "mnq_first_bull_snap_turn / session allowed",
+      "family": "snap turn long",
+      "current_classification": "APPROVED_TRACK_B_READY",
+      "priority": "P0",
+      "missing_requirements": [
+        "Fresh MNQ snap-turn envelope",
+        "Clean Control Plane Snapshot"
+      ],
+      "proof_risk": "MEDIUM",
+      "recommended_next_action": "Use as first-batch MNQ long candidate paired with the MNQ bear snap-turn path.",
+      "reason": "Confirms MNQ direction symmetry and cross-symbol concurrency under shared-services gates.",
+      "shared_services_compliance": {
+        "control_plane_snapshot": "REQUIRED",
+        "safe_state": "REQUIRED",
+        "runtime_generation": "REQUIRED",
+        "lifecycle_matrix": "REQUIRED",
+        "managed_order_registry_order_planner": "REQUIRED_FOR_EXITS",
+        "strategy_submit_authorization": "REQUIRED"
+      },
+      "data_dependencies": [
+        "Phase-1 realtime completed 5m state",
+        "MNQ snap-turn feature envelope"
+      ],
+      "exit_maturity": "MANAGED_TIME_BOXED_EXIT",
+      "known_prior_leak_test_proof_history": "MNQ leak-test history exists; current route must use hardened submit authorization.",
+      "concurrent_position_compatibility": "Compatible with concurrent MGC PAPER positions when identities are scoped and Safe-State permits submit."
+    },
+    {
+      "strategy_id": "FIRST_BULL_SNAP_TURN_V1",
+      "symbol": "MGC",
+      "lane_session": "mgc_first_bull_snap_turn / session allowed",
+      "family": "snap turn long",
+      "current_classification": "APPROVED_REQUIRES_PORT",
+      "priority": "P1",
+      "missing_requirements": [
+        "Runtime envelope freshness validation",
+        "Priority/arbitration tuning after first batch"
+      ],
+      "proof_risk": "MEDIUM",
+      "recommended_next_action": "Port into the first post-batch MGC snap-turn lane.",
+      "reason": "Registered and managed, but should follow P0 candidates so arbitration and envelope freshness can be observed first.",
+      "shared_services_compliance": {
+        "control_plane_snapshot": "REQUIRED",
+        "safe_state": "REQUIRED",
+        "runtime_generation": "REQUIRED",
+        "lifecycle_matrix": "REQUIRED",
+        "managed_order_registry_order_planner": "REQUIRED_FOR_EXITS",
+        "strategy_submit_authorization": "REQUIRED"
+      },
+      "data_dependencies": [
+        "Phase-1 realtime completed 5m state",
+        "MGC snap-turn feature envelope"
+      ],
+      "exit_maturity": "MANAGED_TIME_BOXED_EXIT",
+      "known_prior_leak_test_proof_history": "Replay/parity evidence supports migration; sustained PAPER proof still required.",
+      "concurrent_position_compatibility": "Compatible when identity is distinct and shared truth is clean."
+    },
+    {
+      "strategy_id": "FIRST_BEAR_SNAP_TURN_V1",
+      "symbol": "MGC",
+      "lane_session": "mgc_first_bear_snap_turn / session allowed",
+      "family": "snap turn short",
+      "current_classification": "APPROVED_REQUIRES_PORT",
+      "priority": "P1",
+      "missing_requirements": [
+        "Runtime envelope freshness validation",
+        "Priority/arbitration tuning after first batch"
+      ],
+      "proof_risk": "MEDIUM",
+      "recommended_next_action": "Port with the MGC bull snap-turn pair.",
+      "reason": "Registered and managed, but should follow P0 candidates so arbitration and envelope freshness can be observed first.",
+      "shared_services_compliance": {
+        "control_plane_snapshot": "REQUIRED",
+        "safe_state": "REQUIRED",
+        "runtime_generation": "REQUIRED",
+        "lifecycle_matrix": "REQUIRED",
+        "managed_order_registry_order_planner": "REQUIRED_FOR_EXITS",
+        "strategy_submit_authorization": "REQUIRED"
+      },
+      "data_dependencies": [
+        "Phase-1 realtime completed 5m state",
+        "MGC snap-turn feature envelope"
+      ],
+      "exit_maturity": "MANAGED_TIME_BOXED_EXIT",
+      "known_prior_leak_test_proof_history": "Replay/parity evidence supports migration; sustained PAPER proof still required.",
+      "concurrent_position_compatibility": "Compatible when identity is distinct and shared truth is clean."
+    },
+    {
+      "strategy_id": "LONDON_LATE_PAUSE_RESUME_SHORT_V1",
+      "symbol": "MGC",
+      "lane_session": "mgc_london_late_pause_resume_short / London late",
+      "family": "London pause/resume short",
+      "current_classification": "APPROVED_REQUIRES_PORT",
+      "priority": "P1",
+      "missing_requirements": [
+        "London-late live envelope",
+        "Session-specific observation window"
+      ],
+      "proof_risk": "MEDIUM",
+      "recommended_next_action": "Add after Asia first batch if London feed/session evidence is clean.",
+      "reason": "Registered and managed, but session timing and feed provenance should be validated after P0.",
+      "shared_services_compliance": {
+        "control_plane_snapshot": "REQUIRED",
+        "safe_state": "REQUIRED",
+        "runtime_generation": "REQUIRED",
+        "lifecycle_matrix": "REQUIRED",
+        "managed_order_registry_order_planner": "REQUIRED_FOR_EXITS",
+        "strategy_submit_authorization": "REQUIRED"
+      },
+      "data_dependencies": [
+        "Phase-1 realtime completed 5m state",
+        "London-late session envelope"
+      ],
+      "exit_maturity": "MANAGED_TIME_BOXED_EXIT",
+      "known_prior_leak_test_proof_history": "Parity/replay diagnostics only; runtime proof still required.",
+      "concurrent_position_compatibility": "Compatible when identity is distinct and shared truth is clean."
+    },
+    {
+      "strategy_id": "ASIA_LATE_FLAT_PULLBACK_PAUSE_RESUME_LONG_V1",
+      "symbol": "MGC",
+      "lane_session": "mgc_asia_late_flat_pullback_pause_resume_long / Asia late",
+      "family": "pause/resume long",
+      "current_classification": "APPROVED_REQUIRES_PORT",
+      "priority": "P1",
+      "missing_requirements": [
+        "Asia-late envelope freshness",
+        "Arbitration priority observation"
+      ],
+      "proof_risk": "MEDIUM",
+      "recommended_next_action": "Add after P0 if Asia-late windows produce enough fresh observations.",
+      "reason": "Registered and managed, but needs late-session operational observation before first sustained submit batch.",
+      "shared_services_compliance": {
+        "control_plane_snapshot": "REQUIRED",
+        "safe_state": "REQUIRED",
+        "runtime_generation": "REQUIRED",
+        "lifecycle_matrix": "REQUIRED",
+        "managed_order_registry_order_planner": "REQUIRED_FOR_EXITS",
+        "strategy_submit_authorization": "REQUIRED"
+      },
+      "data_dependencies": [
+        "Phase-1 realtime completed 5m state",
+        "Asia-late session envelope"
+      ],
+      "exit_maturity": "MANAGED_TIME_BOXED_EXIT",
+      "known_prior_leak_test_proof_history": "Parity/replay diagnostics only; runtime proof still required.",
+      "concurrent_position_compatibility": "Compatible when identity is distinct and shared truth is clean."
+    },
+    {
+      "strategy_id": "US_DERIVATIVE_BEAR_TURN_V1",
+      "symbol": "MGC",
+      "lane_session": "mgc_us_derivative_bear_turn / US derivative-bear window",
+      "family": "US midday / derivative bear short",
+      "current_classification": "APPROVED_REQUIRES_PORT",
+      "priority": "P1",
+      "missing_requirements": [
+        "US-session observation",
+        "Historical/live parity check"
+      ],
+      "proof_risk": "MEDIUM",
+      "recommended_next_action": "Port after US-session feed/provenance is stable.",
+      "reason": "Registered and managed, but US-window behavior should be staged after Asia/MNQ first batch.",
+      "shared_services_compliance": {
+        "control_plane_snapshot": "REQUIRED",
+        "safe_state": "REQUIRED",
+        "runtime_generation": "REQUIRED",
+        "lifecycle_matrix": "REQUIRED",
+        "managed_order_registry_order_planner": "REQUIRED_FOR_EXITS",
+        "strategy_submit_authorization": "REQUIRED"
+      },
+      "data_dependencies": [
+        "Phase-1 realtime completed 5m state",
+        "US derivative-bear session envelope"
+      ],
+      "exit_maturity": "MANAGED_TIME_BOXED_EXIT",
+      "known_prior_leak_test_proof_history": "Parity/replay diagnostics only; runtime proof still required.",
+      "concurrent_position_compatibility": "Compatible when identity is distinct and shared truth is clean."
+    },
+    {
+      "strategy_id": "MNQ_US_DERIVATIVE_BEAR_TURN_V1",
+      "symbol": "MNQ",
+      "lane_session": "mnq_us_derivative_bear_turn / US derivative-bear window",
+      "family": "US derivative bear short",
+      "current_classification": "APPROVED_REQUIRES_PORT",
+      "priority": "P1",
+      "missing_requirements": [
+        "MNQ US-session feed parity",
+        "Safe-State limit tuning"
+      ],
+      "proof_risk": "MEDIUM",
+      "recommended_next_action": "Pair with MGC US derivative-bear after P0 MNQ proves stable.",
+      "reason": "Registered and managed, but cross-symbol US-session behavior should follow the P0 MNQ pair.",
+      "shared_services_compliance": {
+        "control_plane_snapshot": "REQUIRED",
+        "safe_state": "REQUIRED",
+        "runtime_generation": "REQUIRED",
+        "lifecycle_matrix": "REQUIRED",
+        "managed_order_registry_order_planner": "REQUIRED_FOR_EXITS",
+        "strategy_submit_authorization": "REQUIRED"
+      },
+      "data_dependencies": [
+        "Phase-1 realtime completed 5m state",
+        "MNQ US derivative-bear session envelope"
+      ],
+      "exit_maturity": "MANAGED_TIME_BOXED_EXIT",
+      "known_prior_leak_test_proof_history": "Parity/replay diagnostics only; runtime proof still required.",
+      "concurrent_position_compatibility": "Compatible with concurrent MGC PAPER positions when identities are scoped and Safe-State permits submit."
+    },
+    {
+      "strategy_id": "US_LATE_PAUSE_RESUME_LONG_V1",
+      "symbol": "MGC",
+      "lane_session": "mgc_us_late_pause_resume_long / US late",
+      "family": "US late pause/resume long",
+      "current_classification": "APPROVED_REQUIRES_PORT",
+      "priority": "P1",
+      "missing_requirements": [
+        "US-late envelope",
+        "Late-session proof cadence"
+      ],
+      "proof_risk": "MEDIUM",
+      "recommended_next_action": "Add after US derivative-bear surfaces are stable.",
+      "reason": "Registered and managed, but should follow earlier session windows for cleaner staged migration.",
+      "shared_services_compliance": {
+        "control_plane_snapshot": "REQUIRED",
+        "safe_state": "REQUIRED",
+        "runtime_generation": "REQUIRED",
+        "lifecycle_matrix": "REQUIRED",
+        "managed_order_registry_order_planner": "REQUIRED_FOR_EXITS",
+        "strategy_submit_authorization": "REQUIRED"
+      },
+      "data_dependencies": [
+        "Phase-1 realtime completed 5m state",
+        "US-late session envelope"
+      ],
+      "exit_maturity": "MANAGED_TIME_BOXED_EXIT",
+      "known_prior_leak_test_proof_history": "Parity/replay diagnostics only; runtime proof still required.",
+      "concurrent_position_compatibility": "Compatible when identity is distinct and shared truth is clean."
+    },
+    {
+      "strategy_id": "mgc_ema_momentum_reclaim_long_v1",
+      "symbol": "MGC",
+      "lane_session": "mgc_example_long_lmt_day / 1m",
+      "family": "trend continuation long",
+      "current_classification": "APPROVED_REQUIRES_EXIT_HARDENING",
+      "priority": "P2",
+      "missing_requirements": [
+        "Managed exit policy",
+        "Lifecycle Matrix evidence",
+        "Multi-strategy runtime-cycle binding"
+      ],
+      "proof_risk": "HIGH",
+      "recommended_next_action": "Do not use for sustained PAPER submit until exit policy and cycle binding are added.",
+      "reason": "Paper eligible but exit_not_available is true and managed_exit_policy_id is missing.",
+      "shared_services_compliance": {
+        "control_plane_snapshot": "REQUIRED_BEFORE_RUNTIME_USE",
+        "safe_state": "REQUIRED_BEFORE_RUNTIME_USE",
+        "runtime_generation": "REQUIRED_BEFORE_RUNTIME_USE",
+        "lifecycle_matrix": "MISSING_EXIT_EVIDENCE",
+        "managed_order_registry_order_planner": "MISSING_EXIT_POLICY",
+        "strategy_submit_authorization": "REQUIRED_BEFORE_RUNTIME_USE"
+      },
+      "data_dependencies": [
+        "Historical MGC 1m",
+        "Realtime quote/state input"
+      ],
+      "exit_maturity": "UNPROVEN_MANUAL",
+      "known_prior_leak_test_proof_history": "Older candidate only; not part of first sustained PAPER batch.",
+      "concurrent_position_compatibility": "Not eligible until managed exit and lifecycle evidence are hardened."
+    },
+    {
+      "strategy_id": "track_b_demo_wiring_proof",
+      "symbol": "MGC",
+      "lane_session": "demo quote snapshot",
+      "family": "demo wiring",
+      "current_classification": "APPROVED_NOT_RUNTIME_ELIGIBLE",
+      "priority": "P3",
+      "missing_requirements": [
+        "Modern runtime strategy identity",
+        "Managed runtime exit policy"
+      ],
+      "proof_risk": "HIGH",
+      "recommended_next_action": "Keep as diagnostic/test fixture only.",
+      "reason": "Legacy paper_proof branch is disabled and this entry is not a modern sustained runtime candidate.",
+      "shared_services_compliance": {
+        "control_plane_snapshot": "NOT_RUNTIME_CANDIDATE",
+        "safe_state": "NOT_RUNTIME_CANDIDATE",
+        "runtime_generation": "NOT_RUNTIME_CANDIDATE",
+        "lifecycle_matrix": "NOT_RUNTIME_CANDIDATE",
+        "managed_order_registry_order_planner": "NOT_RUNTIME_CANDIDATE",
+        "strategy_submit_authorization": "NOT_RUNTIME_CANDIDATE"
+      },
+      "data_dependencies": [
+        "Demo quote snapshot only"
+      ],
+      "exit_maturity": "NOT_RUNTIME_ELIGIBLE",
+      "known_prior_leak_test_proof_history": "Legacy proof wiring only; paper_proof route is disabled.",
+      "concurrent_position_compatibility": "Not applicable."
+    },
+    {
+      "strategy_id": "human_review_only",
+      "symbol": "MGC",
+      "lane_session": "manual review quote snapshot",
+      "family": "human review",
+      "current_classification": "APPROVED_NOT_RUNTIME_ELIGIBLE",
+      "priority": "P3",
+      "missing_requirements": [
+        "paper_eligible=true",
+        "Automated runtime path"
+      ],
+      "proof_risk": "LOW",
+      "recommended_next_action": "Keep as no-submit review sentinel.",
+      "reason": "Explicitly not paper eligible and not an automated runtime submit candidate.",
+      "shared_services_compliance": {
+        "control_plane_snapshot": "NOT_RUNTIME_CANDIDATE",
+        "safe_state": "NOT_RUNTIME_CANDIDATE",
+        "runtime_generation": "NOT_RUNTIME_CANDIDATE",
+        "lifecycle_matrix": "NOT_RUNTIME_CANDIDATE",
+        "managed_order_registry_order_planner": "NOT_RUNTIME_CANDIDATE",
+        "strategy_submit_authorization": "NOT_RUNTIME_CANDIDATE"
+      },
+      "data_dependencies": [
+        "Manual review quote snapshot only"
+      ],
+      "exit_maturity": "NOT_RUNTIME_ELIGIBLE",
+      "known_prior_leak_test_proof_history": "No automated proof route.",
+      "concurrent_position_compatibility": "Not applicable."
+    }
+  ],
+  "top_risks": [
+    {
+      "priority": "HIGH",
+      "risk": "P1 candidates still need staged operational envelope validation before first sustained PAPER migration."
+    },
+    {
+      "priority": "HIGH",
+      "risk": "mgc_ema_momentum_reclaim_long_v1 lacks managed exit maturity and must remain out of sustained PAPER submit."
+    },
+    {
+      "priority": "MEDIUM",
+      "risk": "MNQ candidates need fresh cross-symbol feed provenance and Safe-State limit observation."
+    },
+    {
+      "priority": "MEDIUM",
+      "risk": "US-session candidates require live session parity and observation before migration."
+    },
+    {
+      "priority": "MEDIUM",
+      "risk": "Research/offline and demo proof artifacts must remain non-runtime authority."
+    }
+  ],
+  "concurrent_position_policy": {
+    "universal_flat_required_before_submit": false,
+    "mgc_and_mnq_concurrent_positions_allowed": true,
+    "allowed_when": [
+      "Shared truth is clean",
+      "Control Plane Snapshot is coherent",
+      "Safe-State permits submit",
+      "Strategy/lane/order identities are exact and unambiguous",
+      "No live-money route",
+      "No paper_proof invocation",
+      "No duplicate runtime writer"
+    ],
+    "blocked_when": [
+      "Stale or incoherent snapshot",
+      "Unsafe Safe-State",
+      "Duplicate writer",
+      "Live-money eligibility",
+      "paper_proof invocation",
+      "Unresolved broker/order/position identity",
+      "Suspicious order before mutation",
+      "Lifecycle or reconciliation ambiguity"
+    ]
+  },
+  "recommended_first_remediation_slice": {
+    "classification": "MIGRATE_P0_FIRST_BATCH",
+    "strategies": [
+      "asian_drift_v1",
+      "ASIA_EARLY_PAUSE_RESUME_SHORT_V1",
+      "ASIA_EARLY_NORMAL_BREAKOUT_RETEST_HOLD_LONG_V1",
+      "MNQ_FIRST_BEAR_SNAP_TURN_V1",
+      "MNQ_FIRST_BULL_SNAP_TURN_V1"
+    ],
+    "reason": "These candidates provide the best blend of managed exits, hardened submit authorization, MGC Asia baseline coverage, and MNQ cross-symbol concurrency validation."
+  }
+}
