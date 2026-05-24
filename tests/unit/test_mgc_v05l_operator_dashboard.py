@@ -307,6 +307,8 @@ def test_track_b_control_plane_status_projection_displays_closed_market_services
     assert summary["runtime_resume_classification"] == "RESUME_BLOCKED_MARKET_CLOSED"
     assert summary["runtime_resume_allowed"] is False
     assert summary["runtime_resume_safe_to_start_runtime"] is False
+    assert summary["runtime_resume_semantics_version"] == "v2"
+    assert summary["runtime_resume_action_policy"] == "HOLD_MARKET_CLOSED"
     assert summary["runtime_supervisor_classification"] == "SUPERVISOR_WAIT_MARKET_CLOSED"
     assert summary["runtime_supervisor_mode"] == "MARKET_CLOSED_WAIT"
     assert summary["runtime_supervisor_proof_window_status"] == "market_closed"
@@ -442,6 +444,9 @@ def test_track_b_control_plane_status_projection_displays_crash_loop_and_operato
     assert summary["paper_recovery_policy"] == "QUARANTINE_OBSERVE_ONLY"
     assert summary["paper_recovery_diagnostic"] == "QUARANTINE_OBSERVE_ONLY"
     assert summary["bounded_recovery_budget"]["budget_exhausted"] is True
+    assert summary["runtime_resume_action_policy"] == "QUARANTINE_OBSERVE_ONLY"
+    assert summary["runtime_resume_attempts_remaining"] == 0
+    assert summary["runtime_resume_cooldown_until"] == "2026-05-23T12:15:00+00:00"
     assert summary["attention_required"] is True
     assert summary["runtime_resume_blockers"] == [
         {"code": "operator_ack_required", "detail": "paper_reconciliation_mismatch"}
@@ -473,6 +478,9 @@ def test_track_b_control_plane_status_projection_displays_bounded_autonomous_ret
     assert summary["autonomous_recovery_execution_enabled"] is False
     assert summary["requires_operator_ack_for_paper"] is False
     assert summary["runtime_resume_allowed"] is True
+    assert summary["runtime_resume_action_policy"] == "NEW_RUNTIME_GENERATION_ALLOWED"
+    assert summary["runtime_resume_proposed_next_runtime_generation_id"] == "runtime-generation-next"
+    assert summary["runtime_resume_attempts_remaining"] == 2
     assert summary["attention_required"] is False
 
 
@@ -532,6 +540,7 @@ def test_track_b_control_plane_status_projection_displays_duplicate_writer_hard_
     assert summary["paper_recovery_policy"] == "HARD_UNSAFE_HOLD"
     assert summary["paper_recovery_diagnostic"] == "HARD_UNSAFE_HOLD"
     assert summary["runtime_resume_blockers"] == [{"code": "duplicate_runtime_writer", "detail": "hard unsafe"}]
+    assert summary["runtime_resume_action_policy"] == "HOLD_DUPLICATE_WRITER"
     assert summary["primary_blocking_agent_id"] == "track_b_paper_runtime"
     assert summary["top_line_classification"] == top_line["top_line_classification"]
     assert summary["top_line_status"] == top_line["top_line_status"]
@@ -603,6 +612,16 @@ def _write_track_b_control_plane_artifacts(
     autonomous_recovery_plan_classification: str | None = None,
     autonomous_recovery_next_action: str | None = None,
 ) -> None:
+    if runtime_resume_classification == "RESUME_BLOCKED_MARKET_CLOSED":
+        resume_action_policy = "HOLD_MARKET_CLOSED"
+    elif "Duplicate runtime writer" in runtime_resume_reason:
+        resume_action_policy = "HOLD_DUPLICATE_WRITER"
+    elif "live_money_eligible" in runtime_resume_reason:
+        resume_action_policy = "HOLD_LIVE_MONEY"
+    elif paper_action_policy == "QUARANTINE_OBSERVE_ONLY":
+        resume_action_policy = "QUARANTINE_OBSERVE_ONLY"
+    else:
+        resume_action_policy = "NEW_RUNTIME_GENERATION_ALLOWED"
     _write_json_file(
         root / "outputs/track_b_execution_core/agent_registry/latest_agent_registry.json",
         {"classification": "AGENT_REGISTRY_READY"},
@@ -638,6 +657,17 @@ def _write_track_b_control_plane_artifacts(
         root / "outputs/track_b_execution_core/runtime_resume/latest_runtime_resume_semantics.json",
         {
             "classification": runtime_resume_classification,
+            "resume_semantics_version": "v2",
+            "resume_action_policy": resume_action_policy,
+            "previous_runtime_generation_id": "runtime-generation-previous",
+            "proposed_next_runtime_generation_id": "runtime-generation-next",
+            "bounded_retry_budget_key": "track_b_paper_runtime|RUNTIME_RETRY|test",
+            "attempts_remaining": 0 if paper_action_policy == "QUARANTINE_OBSERVE_ONLY" else 2,
+            "cooldown_until": "2026-05-23T12:15:00+00:00"
+            if paper_action_policy == "QUARANTINE_OBSERVE_ONLY"
+            else None,
+            "generation_reuse_allowed": False,
+            "must_start_new_generation": True,
             "allowed": runtime_resume_allowed,
             "safe_to_start_runtime": runtime_resume_safe_to_start_runtime,
             "required_operator_ack": runtime_resume_required_operator_ack,
@@ -759,6 +789,19 @@ def _write_track_b_control_plane_artifacts(
                 else "operator may start Track B PAPER runtime using the repaired direct supervisor launcher"
             ),
             "paper_recovery_policy": paper_action_policy,
+            "runtime_resume_semantics_version": "v2",
+            "runtime_resume_action_policy": resume_action_policy,
+            "runtime_resume_previous_runtime_generation_id": "runtime-generation-previous",
+            "runtime_resume_proposed_next_runtime_generation_id": "runtime-generation-next",
+            "runtime_resume_bounded_retry_budget_key": "track_b_paper_runtime|RUNTIME_RETRY|test",
+            "runtime_resume_attempts_remaining": 0
+            if paper_action_policy == "QUARANTINE_OBSERVE_ONLY"
+            else 2,
+            "runtime_resume_cooldown_until": "2026-05-23T12:15:00+00:00"
+            if paper_action_policy == "QUARANTINE_OBSERVE_ONLY"
+            else None,
+            "runtime_resume_generation_reuse_allowed": False,
+            "runtime_resume_must_start_new_generation": True,
             "agent_health_schema_version": "track_b_agent_health_v2",
             "agent_health_classification": "AGENT_HEALTH_READY",
             "agent_health_summary": {

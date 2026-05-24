@@ -16,6 +16,9 @@ from mgc_v05l.execution_core.track_b_runtime_environment_truth import (
     RUNTIME_DOWN_WITH_BROKER_EXPOSURE,
 )
 from mgc_v05l.execution_core.track_b_runtime_resume_semantics import (
+    RESUME_POLICY_HOLD_MARKET_CLOSED,
+    RESUME_POLICY_NEW_RUNTIME_GENERATION_ALLOWED,
+    RESUME_POLICY_QUARANTINE_OBSERVE_ONLY,
     RESUME_ALLOWED_CLEAN,
     RESUME_BLOCKED_MARKET_CLOSED,
     RESUME_BLOCKED_OPERATOR_ACK_REQUIRED,
@@ -54,6 +57,7 @@ def test_market_closed_waits_without_alarm(tmp_path: Path) -> None:
         tmp_path,
         proof_classification=MARKET_CLOSED_NO_FRESH_BARS,
         resume_classification=RESUME_BLOCKED_MARKET_CLOSED,
+        resume_action_policy=RESUME_POLICY_HOLD_MARKET_CLOSED,
         resume_reason=MARKET_CLOSED_NO_FRESH_BARS,
         self_recover_recommendation="WAIT_MARKET_CLOSED",
         autonomous_plan_classification="WAIT_MARKET_CLOSED",
@@ -75,6 +79,7 @@ def test_market_closed_waits_without_alarm(tmp_path: Path) -> None:
     assert payload["autonomous_recovery_execution_enabled"] is False
     assert payload["shared_truth_refresh_generation_id"] == "test-shared-truth-generation"
     assert payload["shared_truth_coherence_status"] == "COHERENT"
+    assert payload["runtime_resume_action_policy"] == RESUME_POLICY_HOLD_MARKET_CLOSED
 
 
 def test_clean_proof_ready_allows_runtime_start(tmp_path: Path) -> None:
@@ -100,6 +105,15 @@ def test_clean_proof_ready_allows_runtime_start(tmp_path: Path) -> None:
     assert payload["shared_truth_refresh_generated_at"] == NOW.isoformat()
     assert payload["shared_truth_coherence_status"] == "COHERENT"
     assert payload["stale_or_mixed_sources"] == []
+    assert payload["runtime_resume_semantics_version"] == "v2"
+    assert payload["runtime_resume_action_policy"] == RESUME_POLICY_NEW_RUNTIME_GENERATION_ALLOWED
+    assert payload["runtime_resume_previous_runtime_generation_id"] == "runtime-generation-previous"
+    assert payload["runtime_resume_proposed_next_runtime_generation_id"] == "runtime-generation-next"
+    assert payload["runtime_resume_bounded_retry_budget_key"] == "track_b_paper_runtime|RUNTIME_RETRY|test"
+    assert payload["runtime_resume_attempts_remaining"] == 2
+    assert payload["runtime_resume_cooldown_until"] is None
+    assert payload["runtime_resume_generation_reuse_allowed"] is False
+    assert payload["runtime_resume_must_start_new_generation"] is True
 
 
 def test_active_healthy_runtime_is_left_running(tmp_path: Path) -> None:
@@ -150,6 +164,9 @@ def test_crash_loop_budget_exhausted_uses_paper_quarantine_not_operator_ack(tmp_
         tmp_path,
         crash_loop_classification=RESTART_COOLDOWN_ACTIVE,
         crash_loop_restart_blocked=True,
+        resume_action_policy=RESUME_POLICY_QUARANTINE_OBSERVE_ONLY,
+        resume_attempts_remaining=0,
+        resume_cooldown_until="2026-05-23T12:15:00+00:00",
         paper_action_policy="QUARANTINE_OBSERVE_ONLY",
         paper_autonomous_recovery_allowed=False,
     )
@@ -162,6 +179,7 @@ def test_crash_loop_budget_exhausted_uses_paper_quarantine_not_operator_ack(tmp_
     assert payload["action_allowed"] is False
     assert payload["operator_ack"]["required"] is False
     assert payload["evidence_summary"]["paper_action_policy"] == "QUARANTINE_OBSERVE_ONLY"
+    assert payload["runtime_resume_action_policy"] == RESUME_POLICY_QUARANTINE_OBSERVE_ONLY
 
 
 def test_prior_unsafe_stop_with_paper_bounded_retry_allows_start_without_ack(tmp_path: Path) -> None:
@@ -326,6 +344,9 @@ def _seed_base(
     runtime_classification: str = RUNTIME_DOWN_CLEAN,
     resume_classification: str = RESUME_ALLOWED_CLEAN,
     resume_reason: str = "Clean flat shared truth and proof readiness is READY_FOR_PROOF.",
+    resume_action_policy: str = RESUME_POLICY_NEW_RUNTIME_GENERATION_ALLOWED,
+    resume_attempts_remaining: int = 2,
+    resume_cooldown_until: str | None = None,
     resume_required_operator_ack: bool = False,
     position_classification: str = "CLEAN_FLAT_READY",
     open_order_classification: str = NO_OPEN_ORDERS,
@@ -362,6 +383,15 @@ def _seed_base(
         {
             "generated_at": NOW.isoformat(),
             "classification": resume_classification,
+            "resume_semantics_version": "v2",
+            "resume_action_policy": resume_action_policy,
+            "previous_runtime_generation_id": "runtime-generation-previous",
+            "proposed_next_runtime_generation_id": "runtime-generation-next",
+            "bounded_retry_budget_key": "track_b_paper_runtime|RUNTIME_RETRY|test",
+            "attempts_remaining": resume_attempts_remaining,
+            "cooldown_until": resume_cooldown_until,
+            "generation_reuse_allowed": False,
+            "must_start_new_generation": True,
             "allowed": resume_classification == RESUME_ALLOWED_CLEAN,
             "safe_to_start_runtime": resume_classification == RESUME_ALLOWED_CLEAN,
             "required_operator_ack": resume_required_operator_ack,

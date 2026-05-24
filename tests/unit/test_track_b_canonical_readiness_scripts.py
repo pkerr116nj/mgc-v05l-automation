@@ -249,6 +249,10 @@ def test_runtime_start_consults_control_plane_snapshot_before_spawn() -> None:
     assert "build_track_b_control_plane_top_line" in script
     assert "top_line_classification" in script
     assert "top_line_status" in script
+    assert "resume_action_policy" in script
+    assert "proposed_next_runtime_generation_id" in script
+    assert "runtime_resume_attempts_remaining" in script
+    assert "runtime_resume_cooldown_until" in script
     assert "control_plane_snapshot" in script
     assert "classify_control_plane_snapshot_status" in script
     assert "required_for_launch=True" in script
@@ -292,6 +296,10 @@ def test_headless_launch_uses_control_plane_snapshot_as_final_pre_spawn_gate() -
     assert "build_track_b_control_plane_top_line" in script
     assert "top_line_classification" in script
     assert "top_line_status" in script
+    assert "resume_action_policy" in script
+    assert "proposed_next_runtime_generation_id" in script
+    assert "runtime_resume_attempts_remaining" in script
+    assert "runtime_resume_cooldown_until" in script
     assert "control_plane_snapshot_path" in script
     assert "classify_control_plane_snapshot_status" in script
     assert "required_for_launch=True" in script
@@ -327,6 +335,10 @@ def test_status_script_marks_control_plane_fallback_as_diagnostic_only() -> None
     assert "build_track_b_control_plane_top_line" in script
     assert "top_line_classification" in script
     assert "top_line_status" in script
+    assert "runtime_resume_action_policy" in script
+    assert "runtime_resume_proposed_next_runtime_generation_id" in script
+    assert "runtime_resume_attempts_remaining" in script
+    assert "runtime_resume_cooldown_until" in script
     assert "runtime_resume_raw_safe_to_start_runtime" in script
     assert "runtime_resume_safe_to_start_runtime" in script
     assert (

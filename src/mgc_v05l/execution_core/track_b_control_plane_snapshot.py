@@ -213,6 +213,12 @@ def main(argv: Sequence[str] | None = None) -> int:
         "proof_window_status": payload.get("proof_window_status"),
         "top_line_classification": payload.get("top_line_classification"),
         "top_line_status": payload.get("top_line_status"),
+        "runtime_resume_action_policy": payload.get("runtime_resume_action_policy"),
+        "runtime_resume_proposed_next_runtime_generation_id": payload.get(
+            "runtime_resume_proposed_next_runtime_generation_id"
+        ),
+        "runtime_resume_attempts_remaining": payload.get("runtime_resume_attempts_remaining"),
+        "runtime_resume_cooldown_until": payload.get("runtime_resume_cooldown_until"),
         "primary_blocking_agent_id": payload.get("primary_blocking_agent_id"),
         "operator_explanation": payload.get("operator_explanation"),
         "recommended_observation_step": payload.get("recommended_observation_step"),
@@ -284,6 +290,7 @@ def _snapshot_payload(
         "supervisor_mode": runtime_supervisor.get("supervisor_mode"),
         "proof_window_status": runtime_supervisor.get("proof_window_status"),
         "recommended_next_command": runtime_supervisor.get("recommended_next_command"),
+        **_runtime_resume_v2_fields(runtime_supervisor),
         "safe_to_start_runtime": runtime_supervisor.get("safe_to_start_runtime") is True
         and classification == CONTROL_PLANE_SNAPSHOT_READY
         and agent_health_evidence.get("agent_health_has_duplicate_writer") is not True
@@ -330,6 +337,22 @@ def _snapshot_classification(
     if supervisor_classification in {"SUPERVISOR_RUNTIME_START_ALLOWED", "SUPERVISOR_WAIT_MARKET_CLOSED"}:
         return CONTROL_PLANE_SNAPSHOT_READY
     return CONTROL_PLANE_SNAPSHOT_BLOCKED
+
+
+def _runtime_resume_v2_fields(payload: Mapping[str, Any]) -> dict[str, Any]:
+    return {
+        "runtime_resume_semantics_version": str(payload.get("runtime_resume_semantics_version") or ""),
+        "runtime_resume_action_policy": str(payload.get("runtime_resume_action_policy") or ""),
+        "runtime_resume_previous_runtime_generation_id": payload.get("runtime_resume_previous_runtime_generation_id"),
+        "runtime_resume_proposed_next_runtime_generation_id": payload.get(
+            "runtime_resume_proposed_next_runtime_generation_id"
+        ),
+        "runtime_resume_bounded_retry_budget_key": payload.get("runtime_resume_bounded_retry_budget_key"),
+        "runtime_resume_attempts_remaining": payload.get("runtime_resume_attempts_remaining"),
+        "runtime_resume_cooldown_until": payload.get("runtime_resume_cooldown_until"),
+        "runtime_resume_generation_reuse_allowed": payload.get("runtime_resume_generation_reuse_allowed") is True,
+        "runtime_resume_must_start_new_generation": payload.get("runtime_resume_must_start_new_generation") is True,
+    }
 
 
 def _snapshot_blockers(

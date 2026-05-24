@@ -807,6 +807,15 @@ status["track_b_control_plane"] = {
     "bounded_recovery_budget": paper_recovery_policy.get("bounded_recovery_budget") or {},
     "live_action_policy": paper_recovery_policy.get("live_action_policy"),
     "runtime_resume_classification": runtime_resume.get("classification"),
+    "runtime_resume_semantics_version": control_plane_snapshot.get("runtime_resume_semantics_version"),
+    "runtime_resume_action_policy": control_plane_snapshot.get("runtime_resume_action_policy"),
+    "runtime_resume_previous_runtime_generation_id": control_plane_snapshot.get("runtime_resume_previous_runtime_generation_id"),
+    "runtime_resume_proposed_next_runtime_generation_id": control_plane_snapshot.get("runtime_resume_proposed_next_runtime_generation_id"),
+    "runtime_resume_bounded_retry_budget_key": control_plane_snapshot.get("runtime_resume_bounded_retry_budget_key"),
+    "runtime_resume_attempts_remaining": control_plane_snapshot.get("runtime_resume_attempts_remaining"),
+    "runtime_resume_cooldown_until": control_plane_snapshot.get("runtime_resume_cooldown_until"),
+    "runtime_resume_generation_reuse_allowed": control_plane_snapshot.get("runtime_resume_generation_reuse_allowed") is True,
+    "runtime_resume_must_start_new_generation": control_plane_snapshot.get("runtime_resume_must_start_new_generation") is True,
     "runtime_resume_allowed": runtime_resume.get("allowed") is True,
     "runtime_resume_safe_to_start_runtime": (
         runtime_resume.get("safe_to_start_runtime") is True and control_plane_status["safe_to_start_runtime"] is True

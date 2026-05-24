@@ -208,6 +208,7 @@ def build_track_b_runtime_supervisor_authority(
         "operator_ack": v2["operator_ack"],
         "proof_window_status": v2["proof_window_status"],
         "decision_precedence": v2["decision_precedence"],
+        **_runtime_resume_v2_fields(inputs["runtime_resume_semantics"]),
         "shared_truth_refresh_generation_id": shared_truth_coherence.get("refresh_generation_id"),
         "shared_truth_refresh_generated_at": shared_truth_coherence.get("generated_at"),
         "shared_truth_coherence_status": shared_truth_coherence.get("status"),
@@ -311,6 +312,12 @@ def main(argv: Sequence[str] | None = None) -> int:
                     "action_allowed": payload.get("action_allowed"),
                     "operator_ack": payload.get("operator_ack"),
                     "proof_window_status": payload.get("proof_window_status"),
+                    "runtime_resume_action_policy": payload.get("runtime_resume_action_policy"),
+                    "runtime_resume_proposed_next_runtime_generation_id": payload.get(
+                        "runtime_resume_proposed_next_runtime_generation_id"
+                    ),
+                    "runtime_resume_attempts_remaining": payload.get("runtime_resume_attempts_remaining"),
+                    "runtime_resume_cooldown_until": payload.get("runtime_resume_cooldown_until"),
                     "autonomous_recovery_plan_classification": payload.get(
                         "autonomous_recovery_plan_classification"
                     ),
@@ -794,6 +801,7 @@ def _evidence(inputs: Mapping[str, Mapping[str, Any]]) -> dict[str, Any]:
     return {
         "runtime_environment_truth_classification": _classification(inputs["runtime_environment_truth"]),
         "runtime_resume_classification": _classification(inputs["runtime_resume_semantics"]),
+        **_runtime_resume_v2_fields(inputs["runtime_resume_semantics"]),
         "runtime_resume_allowed": inputs["runtime_resume_semantics"].get("allowed") is True,
         "runtime_resume_safe_to_start_runtime": inputs["runtime_resume_semantics"].get("safe_to_start_runtime") is True,
         "runtime_resume_required_operator_ack": inputs["runtime_resume_semantics"].get("required_operator_ack") is True,
@@ -860,6 +868,20 @@ def _evidence(inputs: Mapping[str, Mapping[str, Any]]) -> dict[str, Any]:
         ),
         "runtime_writer_authority": str(inputs["runtime_environment_truth"].get("writer_authority") or ""),
         "duplicate_writer_count": int(inputs["runtime_environment_truth"].get("duplicate_writer_count") or 0),
+    }
+
+
+def _runtime_resume_v2_fields(payload: Mapping[str, Any]) -> dict[str, Any]:
+    return {
+        "runtime_resume_semantics_version": str(payload.get("resume_semantics_version") or ""),
+        "runtime_resume_action_policy": str(payload.get("resume_action_policy") or ""),
+        "runtime_resume_previous_runtime_generation_id": payload.get("previous_runtime_generation_id"),
+        "runtime_resume_proposed_next_runtime_generation_id": payload.get("proposed_next_runtime_generation_id"),
+        "runtime_resume_bounded_retry_budget_key": payload.get("bounded_retry_budget_key"),
+        "runtime_resume_attempts_remaining": payload.get("attempts_remaining"),
+        "runtime_resume_cooldown_until": payload.get("cooldown_until"),
+        "runtime_resume_generation_reuse_allowed": payload.get("generation_reuse_allowed") is True,
+        "runtime_resume_must_start_new_generation": payload.get("must_start_new_generation") is True,
     }
 
 

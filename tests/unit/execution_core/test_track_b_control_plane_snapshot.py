@@ -33,6 +33,9 @@ def test_snapshot_ties_supervisor_to_shared_truth_generation(tmp_path: Path) -> 
     assert payload["safe_to_start_runtime"] is True
     assert payload["top_line_classification"] == "READY_FOR_OPERATOR_START"
     assert "Ready for supervised Track B PAPER runtime start" in payload["top_line_status"]
+    assert payload["runtime_resume_action_policy"] == "NEW_RUNTIME_GENERATION_ALLOWED"
+    assert payload["runtime_resume_proposed_next_runtime_generation_id"] == "runtime-generation-next"
+    assert payload["runtime_resume_attempts_remaining"] == 2
     assert payload["broker_order_position_summary"]["open_order_truth"] == "NO_OPEN_ORDERS"
     assert payload["source_artifact_paths"]["shared_truth_refresh"].endswith(
         "outputs/track_b_execution_core/shared_truth/latest_track_b_shared_truth_refresh.json"
@@ -58,6 +61,7 @@ def test_market_closed_snapshot_waits_without_alarm(tmp_path: Path) -> None:
     assert payload["proof_window_status"] == "market_closed"
     assert payload["top_line_classification"] == "MARKET_CLOSED_WAIT"
     assert "Market closed/no fresh bars expected" in payload["top_line_status"]
+    assert payload["runtime_resume_action_policy"] == "HOLD_MARKET_CLOSED"
     assert payload["recommended_next_command"] == "wait for market reopen; rerun proof readiness before any runtime start"
 
 
@@ -345,6 +349,17 @@ def _seed_control_plane(
         {
             "generated_at": NOW.isoformat(),
             "classification": resume_classification,
+            "resume_semantics_version": "v2",
+            "resume_action_policy": "HOLD_MARKET_CLOSED"
+            if resume_classification == "RESUME_BLOCKED_MARKET_CLOSED"
+            else "NEW_RUNTIME_GENERATION_ALLOWED",
+            "previous_runtime_generation_id": "runtime-generation-previous",
+            "proposed_next_runtime_generation_id": "runtime-generation-next",
+            "bounded_retry_budget_key": "track_b_paper_runtime|RUNTIME_RETRY|test",
+            "attempts_remaining": 2,
+            "cooldown_until": None,
+            "generation_reuse_allowed": False,
+            "must_start_new_generation": True,
             "allowed": resume_classification == "RESUME_ALLOWED_CLEAN",
             "safe_to_start_runtime": resume_classification == "RESUME_ALLOWED_CLEAN",
             "previous_broker_safe_at_stop": True,

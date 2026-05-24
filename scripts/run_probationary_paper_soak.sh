@@ -340,6 +340,10 @@ payload = {
         "recommended_next_command": os.environ.get("LAUNCH_SUPERVISOR_RECOMMENDED_NEXT_COMMAND") or None,
         "operator_ack_required": os.environ.get("LAUNCH_SUPERVISOR_OPERATOR_ACK_REQUIRED", "").lower() == "true",
         "paper_action_policy": os.environ.get("LAUNCH_SUPERVISOR_PAPER_ACTION_POLICY") or None,
+        "resume_action_policy": os.environ.get("LAUNCH_RUNTIME_RESUME_ACTION_POLICY") or None,
+        "proposed_next_runtime_generation_id": os.environ.get("LAUNCH_RUNTIME_RESUME_PROPOSED_NEXT_GENERATION_ID") or None,
+        "runtime_resume_attempts_remaining": os.environ.get("LAUNCH_RUNTIME_RESUME_ATTEMPTS_REMAINING") or None,
+        "runtime_resume_cooldown_until": os.environ.get("LAUNCH_RUNTIME_RESUME_COOLDOWN_UNTIL") or None,
         "autonomous_recovery_allowed": os.environ.get("LAUNCH_SUPERVISOR_AUTONOMOUS_RECOVERY_ALLOWED", "").lower() == "true",
         "requires_operator_ack_for_paper": os.environ.get("LAUNCH_SUPERVISOR_REQUIRES_OPERATOR_ACK_FOR_PAPER", "").lower() == "true",
         "operator_ack_advisory_only_for_paper": os.environ.get("LAUNCH_SUPERVISOR_OPERATOR_ACK_ADVISORY_ONLY_FOR_PAPER", "").lower() == "true",
@@ -360,6 +364,10 @@ payload = {
         "supervisor_mode": os.environ.get("LAUNCH_SUPERVISOR_MODE") or None,
         "proof_window_status": os.environ.get("LAUNCH_SUPERVISOR_PROOF_WINDOW_STATUS") or None,
         "paper_recovery_policy": os.environ.get("LAUNCH_SUPERVISOR_PAPER_ACTION_POLICY") or None,
+        "resume_action_policy": os.environ.get("LAUNCH_RUNTIME_RESUME_ACTION_POLICY") or None,
+        "proposed_next_runtime_generation_id": os.environ.get("LAUNCH_RUNTIME_RESUME_PROPOSED_NEXT_GENERATION_ID") or None,
+        "runtime_resume_attempts_remaining": os.environ.get("LAUNCH_RUNTIME_RESUME_ATTEMPTS_REMAINING") or None,
+        "runtime_resume_cooldown_until": os.environ.get("LAUNCH_RUNTIME_RESUME_COOLDOWN_UNTIL") or None,
         "autonomous_recovery_plan_classification": os.environ.get("LAUNCH_SUPERVISOR_AUTONOMOUS_RECOVERY_PLAN_CLASSIFICATION") or None,
         "autonomous_recovery_next_action": os.environ.get("LAUNCH_SUPERVISOR_AUTONOMOUS_RECOVERY_NEXT_ACTION") or None,
         "autonomous_recovery_execution_enabled": os.environ.get("LAUNCH_SUPERVISOR_AUTONOMOUS_RECOVERY_EXECUTION_ENABLED", "").lower() == "true",
@@ -836,6 +844,8 @@ print(
     "runtime_supervisor_classification={supervisor_classification} supervisor_mode={mode} "
     "proof_window_status={window} safe_to_start_runtime={safe} "
     "top_line_classification={top_line_classification} top_line_status={top_line_status} "
+    "resume_action_policy={resume_action_policy} proposed_next_runtime_generation_id={next_generation} "
+    "runtime_resume_attempts_remaining={attempts_remaining} runtime_resume_cooldown_until={cooldown_until} "
     "paper_recovery_policy={paper_policy} autonomous_recovery_plan_classification={plan_classification} "
     "autonomous_recovery_next_action={plan_action} autonomous_recovery_execution_enabled={plan_enabled} "
     "agent_health_classification={agent_health_classification} "
@@ -860,6 +870,10 @@ print(
         safe=payload.get("safe_to_start_runtime"),
         top_line_classification=top_line.get("top_line_classification"),
         top_line_status=json.dumps(top_line.get("top_line_status") or ""),
+        resume_action_policy=payload.get("runtime_resume_action_policy"),
+        next_generation=payload.get("runtime_resume_proposed_next_runtime_generation_id"),
+        attempts_remaining=payload.get("runtime_resume_attempts_remaining"),
+        cooldown_until=payload.get("runtime_resume_cooldown_until"),
         paper_policy=payload.get("paper_recovery_policy"),
         plan_classification=payload.get("autonomous_recovery_plan_classification"),
         plan_action=payload.get("autonomous_recovery_next_action"),
@@ -959,6 +973,10 @@ if not allowed:
         f"safe_to_start_runtime={status.get('safe_to_start_runtime')} "
         f"top_line_classification={top_line.get('top_line_classification')} "
         f"top_line_status={json.dumps(top_line.get('top_line_status') or '')} "
+        f"resume_action_policy={payload.get('runtime_resume_action_policy')} "
+        f"proposed_next_runtime_generation_id={payload.get('runtime_resume_proposed_next_runtime_generation_id')} "
+        f"runtime_resume_attempts_remaining={payload.get('runtime_resume_attempts_remaining')} "
+        f"runtime_resume_cooldown_until={payload.get('runtime_resume_cooldown_until')} "
         f"paper_recovery_policy={payload.get('paper_recovery_policy')} "
         f"autonomous_recovery_plan_classification={payload.get('autonomous_recovery_plan_classification')} "
         f"autonomous_recovery_next_action={payload.get('autonomous_recovery_next_action')} "
@@ -1021,6 +1039,12 @@ fields = {
     "LAUNCH_SUPERVISOR_SHARED_TRUTH_COHERENCE_STATUS": payload.get("shared_truth_coherence_status"),
     "LAUNCH_CONTROL_PLANE_TOP_LINE_CLASSIFICATION": payload.get("top_line_classification"),
     "LAUNCH_CONTROL_PLANE_TOP_LINE_STATUS": payload.get("top_line_status"),
+    "LAUNCH_RUNTIME_RESUME_ACTION_POLICY": payload.get("runtime_resume_action_policy"),
+    "LAUNCH_RUNTIME_RESUME_PROPOSED_NEXT_GENERATION_ID": payload.get(
+        "runtime_resume_proposed_next_runtime_generation_id"
+    ),
+    "LAUNCH_RUNTIME_RESUME_ATTEMPTS_REMAINING": payload.get("runtime_resume_attempts_remaining"),
+    "LAUNCH_RUNTIME_RESUME_COOLDOWN_UNTIL": payload.get("runtime_resume_cooldown_until"),
 }
 for key, value in fields.items():
     print(f"{key}={shlex.quote(str(value or ''))}")
