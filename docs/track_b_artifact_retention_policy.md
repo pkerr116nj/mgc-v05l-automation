@@ -99,6 +99,22 @@ outputs/track_b_execution_core/artifact_retention/latest_artifact_retention_inve
 
 The inventory is dry-run only. It reports hot protected artifacts, protected active lifecycle reports, warm diagnostics, and cold archive candidates from bounded local scans. Scan-limit warnings mean the inventory is conservative and should not be used as an archive manifest until a future archive planner completes a target-specific dry run. It performs no deletion, move, compression, archive, broker mutation, lifecycle mutation, paper_proof, submit, cancel, close, replace, flatten, or runtime restart.
 
+## Archive Planner Command
+
+The v2 dry-run archive planner is:
+
+```bash
+python -m mgc_v05l.execution_core.track_b_artifact_archive_planner
+```
+
+It writes:
+
+```text
+outputs/track_b_execution_core/artifact_retention/latest_artifact_archive_plan.json
+```
+
+The planner consumes the retention inventory plus execution_core authority context such as Control Plane Snapshot, Agent Health, Recovery Attempt History, and Managed Position Registry. It identifies cold-storage candidates and blocked/protected candidates, but it does not delete, move, compress, or write archive bundles. Current/latest authority artifacts, active lifecycle open/review artifacts, unresolved ownership/order/broker evidence, and research artifacts without explicit offline/non-runtime metadata remain protected or blocked.
+
 ## Archive Preconditions
 
 A future archive implementation must be explicit and dry-run first. It may proceed only when:
@@ -120,7 +136,6 @@ A future archive implementation must be explicit and dry-run first. It may proce
 
 ## Future Work
 
-- Add a dry-run archive planner that consumes this inventory and shared truth.
 - Add compressed date-partitioned archive bundles with a manifest/index.
 - Add cold-storage transfer support for the future Linux storage box.
 - Add explicit retention metadata to long-lived report writers where useful.
