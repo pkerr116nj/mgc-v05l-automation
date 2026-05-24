@@ -839,6 +839,8 @@ print(
     "blocking_for_proof_count={proof_count} blocking_for_runtime_submit_count={submit_count} "
     "blocking_for_recovery_count={recovery_count} duplicate_process_count={duplicate_count} "
     "stale_pid_count={stale_pid_count} agent_health_blockers={agent_health_blockers} "
+    "primary_blocking_agent_id={primary_agent} primary_blocking_reason={primary_reason} "
+    "operator_explanation={operator_explanation} recommended_observation_step={observation_step} "
     "recommended_next_command={command}".format(
         status_classification=status.get("classification"),
         diagnostic_only=status.get("diagnostic_only"),
@@ -866,6 +868,10 @@ print(
         duplicate_count=payload.get("duplicate_process_count"),
         stale_pid_count=payload.get("stale_pid_count"),
         agent_health_blockers=agent_health_blocker_summary(payload),
+        primary_agent=payload.get("primary_blocking_agent_id"),
+        primary_reason=json.dumps(payload.get("primary_blocking_reason") or ""),
+        operator_explanation=json.dumps(payload.get("operator_explanation") or ""),
+        observation_step=json.dumps(payload.get("recommended_observation_step") or ""),
         command=payload.get("recommended_next_command"),
     )
 )
@@ -957,6 +963,10 @@ if not allowed:
         f"duplicate_process_count={payload.get('duplicate_process_count')} "
         f"stale_pid_count={payload.get('stale_pid_count')} "
         f"agent_health_blockers={agent_health_blocker_summary(payload)} "
+        f"primary_blocking_agent_id={payload.get('primary_blocking_agent_id')} "
+        f"primary_blocking_reason={json.dumps(payload.get('primary_blocking_reason') or '')} "
+        f"operator_explanation={json.dumps(payload.get('operator_explanation') or '')} "
+        f"recommended_observation_step={json.dumps(payload.get('recommended_observation_step') or '')} "
         f"recommended_next_command={payload.get('recommended_next_command')}",
         file=sys.stderr,
     )

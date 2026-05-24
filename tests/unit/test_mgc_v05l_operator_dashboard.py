@@ -320,6 +320,9 @@ def test_track_b_control_plane_status_projection_displays_closed_market_services
     assert summary["autonomous_recovery_plan_classification"] == "WAIT_MARKET_CLOSED"
     assert summary["autonomous_recovery_next_action"] == "WAIT_MARKET_CLOSED"
     assert summary["autonomous_recovery_execution_enabled"] is False
+    assert summary["primary_blocking_agent_id"] == "market_session"
+    assert "no fresh Phase-1 bars are expected" in summary["operator_explanation"]
+    assert "Wait for Globex/session reopen" in summary["recommended_observation_step"]
     assert summary["paper_recovery_policy"] == "OBSERVE"
     assert summary["paper_recovery_diagnostic"] == "WAIT_MARKET_CLOSED"
     assert summary["requires_operator_ack_for_paper"] is False
@@ -506,6 +509,9 @@ def test_track_b_control_plane_status_projection_displays_duplicate_writer_hard_
     assert summary["paper_recovery_policy"] == "HARD_UNSAFE_HOLD"
     assert summary["paper_recovery_diagnostic"] == "HARD_UNSAFE_HOLD"
     assert summary["runtime_resume_blockers"] == [{"code": "duplicate_runtime_writer", "detail": "hard unsafe"}]
+    assert summary["primary_blocking_agent_id"] == "track_b_paper_runtime"
+    assert summary["prioritized_blockers"][0]["status"] == "DUPLICATE_PROCESS"
+    assert "Hard PAPER invariant" in summary["operator_explanation"]
     assert summary["attention_required"] is True
 
 
@@ -750,6 +756,52 @@ def _write_track_b_control_plane_artifacts(
             "stale_pid_count": 0,
             "source_commit_mismatch_count": 0,
             "root_mismatch_count": 0,
+            "primary_blocking_agent_id": (
+                "market_session"
+                if supervisor_mode == "MARKET_CLOSED_WAIT"
+                else "track_b_paper_runtime"
+                if supervisor_classification == "SUPERVISOR_HARD_UNSAFE_HOLD"
+                else ""
+            ),
+            "primary_blocking_reason": (
+                "MARKET_CLOSED_NO_FRESH_BARS"
+                if supervisor_mode == "MARKET_CLOSED_WAIT"
+                else "duplicate runtime writer detected"
+                if supervisor_classification == "SUPERVISOR_HARD_UNSAFE_HOLD"
+                else ""
+            ),
+            "operator_explanation": (
+                "Market/session is closed; no fresh Phase-1 bars are expected, and PAPER should wait without treating this as a process failure."
+                if supervisor_mode == "MARKET_CLOSED_WAIT"
+                else "Hard PAPER invariant blocked recovery: Track B PAPER runtime reports duplicate runtime writer detected."
+                if supervisor_classification == "SUPERVISOR_HARD_UNSAFE_HOLD"
+                else ""
+            ),
+            "recommended_observation_step": (
+                "Wait for Globex/session reopen, then rebuild the Control Plane Snapshot before any proof attempt."
+                if supervisor_mode == "MARKET_CLOSED_WAIT"
+                else "Preserve evidence and do not run autonomous recovery until the hard invariant clears in execution_core authority."
+                if supervisor_classification == "SUPERVISOR_HARD_UNSAFE_HOLD"
+                else ""
+            ),
+            "prioritized_blockers": (
+                [
+                    {
+                        "agent_id": "track_b_paper_runtime",
+                        "display_name": "Track B PAPER runtime",
+                        "status": "DUPLICATE_PROCESS",
+                        "reason": "duplicate runtime writer detected",
+                        "blocking_for_proof": True,
+                        "blocking_for_runtime_submit": True,
+                        "blocking_for_recovery": True,
+                        "diagnostic_only": False,
+                        "source": "agent_health",
+                        "priority": 0,
+                    }
+                ]
+                if supervisor_classification == "SUPERVISOR_HARD_UNSAFE_HOLD"
+                else []
+            ),
             "autonomous_recovery_plan_classification": autonomous_recovery_plan_classification
             or (
                 "WAIT_MARKET_CLOSED"
@@ -783,6 +835,34 @@ def _write_track_b_control_plane_artifacts(
                 else "PLAN_QUARANTINE_OBSERVE_ONLY"
             ),
             "execution_enabled": False,
+            "primary_blocking_agent_id": (
+                "market_session"
+                if supervisor_mode == "MARKET_CLOSED_WAIT"
+                else "track_b_paper_runtime"
+                if supervisor_classification == "SUPERVISOR_HARD_UNSAFE_HOLD"
+                else ""
+            ),
+            "primary_blocking_reason": (
+                "MARKET_CLOSED_NO_FRESH_BARS"
+                if supervisor_mode == "MARKET_CLOSED_WAIT"
+                else "duplicate runtime writer detected"
+                if supervisor_classification == "SUPERVISOR_HARD_UNSAFE_HOLD"
+                else ""
+            ),
+            "operator_explanation": (
+                "Market/session is closed; no fresh Phase-1 bars are expected, and PAPER should wait without treating this as a process failure."
+                if supervisor_mode == "MARKET_CLOSED_WAIT"
+                else "Hard PAPER invariant blocked recovery: Track B PAPER runtime reports duplicate runtime writer detected."
+                if supervisor_classification == "SUPERVISOR_HARD_UNSAFE_HOLD"
+                else ""
+            ),
+            "recommended_observation_step": (
+                "Wait for Globex/session reopen, then rebuild the Control Plane Snapshot before any proof attempt."
+                if supervisor_mode == "MARKET_CLOSED_WAIT"
+                else "Preserve evidence and do not run autonomous recovery until the hard invariant clears in execution_core authority."
+                if supervisor_classification == "SUPERVISOR_HARD_UNSAFE_HOLD"
+                else ""
+            ),
             "proposed_actions": [
                 {
                     "action_type": autonomous_recovery_next_action

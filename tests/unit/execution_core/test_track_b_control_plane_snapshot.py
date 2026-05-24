@@ -91,6 +91,45 @@ def test_snapshot_includes_recovery_and_planner_fields(tmp_path: Path) -> None:
     assert payload["autonomous_recovery_execution_enabled"] is False
 
 
+def test_snapshot_surfaces_planner_operator_explanation_for_missing_open_order_truth(tmp_path: Path) -> None:
+    _seed_clean_stack(tmp_path)
+    _seed_control_plane(tmp_path)
+
+    def write_blocked_plan(_shared_truth: dict) -> None:
+        _write(
+            tmp_path / "outputs/track_b_execution_core/paper_autonomous_recovery/latest_paper_autonomous_recovery_plan.json",
+            {
+                "generated_at": NOW.isoformat(),
+                "classification": "PLAN_BLOCKED_STALE_EVIDENCE",
+                "primary_blocking_agent_id": "open_order_truth",
+                "primary_blocking_reason": "authority artifact missing",
+                "operator_explanation": "Refresh evidence before recovery planning: Open Order Truth reports authority artifact missing.",
+                "recommended_observation_step": "Run the Control Plane Snapshot refresh path so shared truth, Agent Health, planner, and supervisor are rebuilt from one generation.",
+                "prioritized_blockers": [
+                    {
+                        "agent_id": "open_order_truth",
+                        "display_name": "Open Order Truth",
+                        "status": "MISSING_ARTIFACT",
+                        "reason": "authority artifact missing",
+                        "blocking_for_proof": True,
+                        "blocking_for_runtime_submit": True,
+                        "blocking_for_recovery": True,
+                        "diagnostic_only": False,
+                        "source": "agent_health",
+                        "priority": 2,
+                    }
+                ],
+            },
+        )
+
+    payload = _snapshot(tmp_path, post_hook=write_blocked_plan)
+
+    assert payload["primary_blocking_agent_id"] == "open_order_truth"
+    assert payload["primary_blocking_reason"] == "authority artifact missing"
+    assert "Open Order Truth" in payload["operator_explanation"]
+    assert payload["prioritized_blockers"][0]["status"] == "MISSING_ARTIFACT"
+
+
 def test_snapshot_includes_agent_health_v2_fields(tmp_path: Path) -> None:
     _seed_clean_stack(tmp_path)
     _seed_control_plane(tmp_path)

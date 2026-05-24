@@ -47,6 +47,12 @@ DEFAULT_CONTROL_PLANE_SNAPSHOT_ARTIFACT = (
 DEFAULT_DASHBOARD_CONTROL_PLANE_SNAPSHOT_PROJECTION = (
     Path("outputs") / "operator_dashboard" / "runtime" / "latest_track_b_control_plane_snapshot.json"
 )
+DEFAULT_PAPER_AUTONOMOUS_RECOVERY_PLAN_ARTIFACT = (
+    Path("outputs")
+    / "track_b_execution_core"
+    / "paper_autonomous_recovery"
+    / "latest_paper_autonomous_recovery_plan.json"
+)
 
 CONTROL_PLANE_SNAPSHOT_READY = "CONTROL_PLANE_SNAPSHOT_READY"
 CONTROL_PLANE_SNAPSHOT_BLOCKED = "CONTROL_PLANE_SNAPSHOT_BLOCKED"
@@ -60,6 +66,7 @@ class TrackBControlPlaneSnapshotConfig:
     dashboard_projection_path: Path | None = DEFAULT_DASHBOARD_CONTROL_PLANE_SNAPSHOT_PROJECTION
     shared_truth_refresh_path: Path = DEFAULT_SHARED_TRUTH_REFRESH_ARTIFACT
     agent_health_path: Path = DEFAULT_AGENT_HEALTH_ARTIFACT
+    paper_autonomous_recovery_plan_path: Path = DEFAULT_PAPER_AUTONOMOUS_RECOVERY_PLAN_ARTIFACT
     broker_lease_history_path: Path | None = None
 
     def resolve(self, path: Path) -> Path:
@@ -118,6 +125,7 @@ def build_track_b_control_plane_snapshot(
         config=supervisor_config,
         payload=runtime_supervisor,
     )
+    autonomous_recovery_plan = _read_json(config.resolve(config.paper_autonomous_recovery_plan_path))
     return _snapshot_payload(
         config=config,
         now=actual_now,
@@ -126,6 +134,7 @@ def build_track_b_control_plane_snapshot(
         agent_health_path=agent_health_path,
         runtime_supervisor=runtime_supervisor,
         runtime_supervisor_path=runtime_supervisor_path,
+        autonomous_recovery_plan=autonomous_recovery_plan,
     )
 
 
@@ -199,6 +208,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         "runtime_supervisor_classification": payload.get("runtime_supervisor_classification"),
         "supervisor_mode": payload.get("supervisor_mode"),
         "proof_window_status": payload.get("proof_window_status"),
+        "primary_blocking_agent_id": payload.get("primary_blocking_agent_id"),
+        "operator_explanation": payload.get("operator_explanation"),
+        "recommended_observation_step": payload.get("recommended_observation_step"),
         "recommended_next_command": payload.get("recommended_next_command"),
         "authority_path": str(authority_path),
         "read_only": True,
@@ -218,6 +230,7 @@ def _snapshot_payload(
     agent_health_path: Path,
     runtime_supervisor: Mapping[str, Any],
     runtime_supervisor_path: Path,
+    autonomous_recovery_plan: Mapping[str, Any],
 ) -> dict[str, Any]:
     coherence_status = str(runtime_supervisor.get("shared_truth_coherence_status") or "")
     generation_matches = (
@@ -240,6 +253,7 @@ def _snapshot_payload(
     )
     warnings = list(shared_truth.get("warnings") or []) + list(runtime_supervisor.get("warnings") or [])
     warnings.extend(_agent_health_warnings(agent_health_evidence))
+    planner_explanation = _planner_explanation_fields(autonomous_recovery_plan)
     return {
         "schema_version": "track_b_control_plane_snapshot_v1",
         "control_plane_snapshot_id": _snapshot_id(now),
@@ -270,6 +284,7 @@ def _snapshot_payload(
         and agent_health_evidence.get("agent_health_has_duplicate_writer") is not True
         and agent_health_evidence.get("agent_health_blocks_runtime_submit") is not True,
         "paper_recovery_policy": evidence.get("paper_action_policy") or shared_truth.get("paper_recovery_policy"),
+        **planner_explanation,
         **agent_health_evidence,
         "autonomous_recovery_plan_classification": runtime_supervisor.get(
             "autonomous_recovery_plan_classification"
@@ -282,6 +297,7 @@ def _snapshot_payload(
         "source_artifact_paths": {
             "shared_truth_refresh": str(config.resolve(config.shared_truth_refresh_path)),
             "agent_health": str(agent_health_path),
+            "paper_autonomous_recovery_plan": str(config.resolve(config.paper_autonomous_recovery_plan_path)),
             "runtime_supervisor_authority": str(runtime_supervisor_path),
             "control_plane_snapshot": str(config.resolve(config.output_path)),
             **_mapping(shared_truth.get("artifact_paths")),
@@ -451,6 +467,38 @@ def _agent_health_warnings(evidence: Mapping[str, Any]) -> list[dict[str, str]]:
     return warnings
 
 
+def _planner_explanation_fields(plan: Mapping[str, Any]) -> dict[str, Any]:
+    return {
+        "primary_blocking_agent_id": str(plan.get("primary_blocking_agent_id") or ""),
+        "primary_blocking_reason": str(plan.get("primary_blocking_reason") or ""),
+        "operator_explanation": str(plan.get("operator_explanation") or ""),
+        "recommended_observation_step": str(plan.get("recommended_observation_step") or ""),
+        "prioritized_blockers": _planner_prioritized_blockers(plan.get("prioritized_blockers")),
+    }
+
+
+def _planner_prioritized_blockers(value: Any) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    for item in _list(value):
+        if not isinstance(item, Mapping):
+            continue
+        rows.append(
+            {
+                "agent_id": str(item.get("agent_id") or ""),
+                "display_name": str(item.get("display_name") or item.get("agent_id") or ""),
+                "status": str(item.get("status") or ""),
+                "reason": str(item.get("reason") or ""),
+                "blocking_for_proof": item.get("blocking_for_proof") is True,
+                "blocking_for_runtime_submit": item.get("blocking_for_runtime_submit") is True,
+                "blocking_for_recovery": item.get("blocking_for_recovery") is True,
+                "diagnostic_only": item.get("diagnostic_only") is True,
+                "source": str(item.get("source") or ""),
+                "priority": _as_int(item.get("priority")),
+            }
+        )
+    return rows[:8]
+
+
 def _stringify_blockers(value: Any) -> list[dict[str, str]]:
     rows: list[dict[str, str]] = []
     if not isinstance(value, list):
@@ -473,6 +521,14 @@ def _snapshot_id(value: datetime) -> str:
 
 def _write_json_atomic(path: Path, payload: Mapping[str, Any]) -> None:
     write_json_atomic(path, payload)
+
+
+def _read_json(path: Path) -> dict[str, Any]:
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (FileNotFoundError, json.JSONDecodeError, OSError):
+        return {}
+    return dict(payload) if isinstance(payload, Mapping) else {}
 
 
 def _mapping(value: Any) -> Mapping[str, Any]:

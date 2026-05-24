@@ -18264,6 +18264,19 @@ def _track_b_control_plane_services_summary(repo_root: Path) -> dict[str, Any]:
         ),
         "control_plane_snapshot_supervisor_mode": control_plane_snapshot.get("supervisor_mode"),
         "control_plane_snapshot_proof_window_status": control_plane_snapshot.get("proof_window_status"),
+        "primary_blocking_agent_id": control_plane_snapshot.get("primary_blocking_agent_id")
+        or autonomous_recovery_plan.get("primary_blocking_agent_id"),
+        "primary_blocking_reason": control_plane_snapshot.get("primary_blocking_reason")
+        or autonomous_recovery_plan.get("primary_blocking_reason"),
+        "operator_explanation": control_plane_snapshot.get("operator_explanation")
+        or autonomous_recovery_plan.get("operator_explanation"),
+        "recommended_observation_step": control_plane_snapshot.get("recommended_observation_step")
+        or autonomous_recovery_plan.get("recommended_observation_step"),
+        "prioritized_blockers": list(
+            control_plane_snapshot.get("prioritized_blockers")
+            or autonomous_recovery_plan.get("prioritized_blockers")
+            or []
+        )[:5],
         "paper_recovery_policy": paper_action_policy,
         "paper_recovery_severity": paper_recovery_policy.get("severity"),
         "paper_recovery_diagnostic": paper_recovery_diagnostic,

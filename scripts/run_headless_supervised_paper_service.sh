@@ -1637,6 +1637,10 @@ if not allowed:
         f"duplicate_process_count={payload.get('duplicate_process_count')} "
         f"stale_pid_count={payload.get('stale_pid_count')} "
         f"agent_health_blockers={agent_health_blocker_summary(payload)} "
+        f"primary_blocking_agent_id={payload.get('primary_blocking_agent_id')} "
+        f"primary_blocking_reason={json.dumps(payload.get('primary_blocking_reason') or '')} "
+        f"operator_explanation={json.dumps(payload.get('operator_explanation') or '')} "
+        f"recommended_observation_step={json.dumps(payload.get('recommended_observation_step') or '')} "
         f"recommended_next_command={payload.get('recommended_next_command')}",
         file=sys.stderr,
     )
@@ -1708,6 +1712,10 @@ print(
     f"duplicate_process_count={payload.get('duplicate_process_count')} "
     f"stale_pid_count={payload.get('stale_pid_count')} "
     f"agent_health_blockers={agent_health_blocker_summary(payload)} "
+    f"primary_blocking_agent_id={payload.get('primary_blocking_agent_id')} "
+    f"primary_blocking_reason={json.dumps(payload.get('primary_blocking_reason') or '')} "
+    f"operator_explanation={json.dumps(payload.get('operator_explanation') or '')} "
+    f"recommended_observation_step={json.dumps(payload.get('recommended_observation_step') or '')} "
     f"recommended_next_command={payload.get('recommended_next_command')}"
 )
 PY

@@ -243,6 +243,9 @@ def test_runtime_start_consults_control_plane_snapshot_before_spawn() -> None:
     assert "agent_health_has_duplicate_writer" in script
     assert "blocking_for_runtime_submit_count" in script
     assert "stale_pid_count" in script
+    assert "primary_blocking_agent_id" in script
+    assert "operator_explanation" in script
+    assert "recommended_observation_step" in script
     assert "control_plane_snapshot" in script
     assert "classify_control_plane_snapshot_status" in script
     assert "required_for_launch=True" in script
@@ -280,6 +283,9 @@ def test_headless_launch_uses_control_plane_snapshot_as_final_pre_spawn_gate() -
     assert "agent_health_has_duplicate_writer" in script
     assert "blocking_for_runtime_submit_count" in script
     assert "stale_pid_count" in script
+    assert "primary_blocking_agent_id" in script
+    assert "operator_explanation" in script
+    assert "recommended_observation_step" in script
     assert "control_plane_snapshot_path" in script
     assert "classify_control_plane_snapshot_status" in script
     assert "required_for_launch=True" in script
@@ -309,6 +315,9 @@ def test_status_script_marks_control_plane_fallback_as_diagnostic_only() -> None
     assert "agent_health_top_blockers" in script
     assert "agent_health_has_duplicate_writer" in script
     assert "agent_health_blocks_runtime_submit" in script
+    assert "primary_blocking_agent_id" in script
+    assert "operator_explanation" in script
+    assert "recommended_observation_step" in script
     assert "runtime_resume_raw_safe_to_start_runtime" in script
     assert "runtime_resume_safe_to_start_runtime" in script
     assert (
