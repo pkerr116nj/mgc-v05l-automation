@@ -155,6 +155,7 @@ def build_track_b_paper_autonomous_recovery_plan(
         "supervisor_classification": evidence["supervisor_classification"],
         "recovery_budget_ledger_classification": evidence["recovery_budget_classification"],
         "recovery_budget_summary": evidence["recovery_budget_summary"],
+        "agent_health_top_blockers": evidence["agent_health_top_blockers"],
         "classification": decision["classification"],
         "reason": decision["reason"],
         "proposed_actions": decision["proposed_actions"],
@@ -657,7 +658,7 @@ def _clean_shared_truth(evidence: Mapping[str, Any]) -> bool:
 def _duplicate_writer(evidence: Mapping[str, Any]) -> bool:
     return evidence["runtime_environment_truth_classification"] == "DUPLICATE_RUNTIME_WRITERS" or int(
         evidence["duplicate_writer_count"] or 0
-    ) > 0
+    ) > 0 or evidence["agent_health_has_duplicate_writer"] is True
 
 
 def _first_position_identity(position_truth: Mapping[str, Any], managed_position_registry: Mapping[str, Any]) -> dict[str, Any]:
@@ -737,6 +738,12 @@ def _control_plane_snapshot_evidence(
         stale_or_missing.append("control_plane_snapshot_generated_at_missing")
     if age_seconds is not None and age_seconds > max_age_seconds:
         stale_or_missing.append("control_plane_snapshot_stale")
+    if snapshot.get("agent_health_blocks_proof") is True:
+        stale_or_missing.append("agent_health_blocks_proof")
+    if snapshot.get("agent_health_blocks_runtime_submit") is True:
+        stale_or_missing.append("agent_health_blocks_runtime_submit")
+    if snapshot.get("agent_health_blocks_recovery") is True:
+        stale_or_missing.append("agent_health_blocks_recovery")
 
     return {
         "control_plane_snapshot_id": str(snapshot.get("control_plane_snapshot_id") or ""),
@@ -747,10 +754,36 @@ def _control_plane_snapshot_evidence(
         "snapshot_coherence_status": str(snapshot.get("shared_truth_coherence_status") or ""),
         "supervisor_decision_id": str(snapshot.get("runtime_supervisor_decision_id") or ""),
         "supervisor_classification": str(snapshot.get("runtime_supervisor_classification") or ""),
+        "agent_health_top_blockers": _agent_health_blockers(snapshot),
+        "agent_health_blocks_proof": snapshot.get("agent_health_blocks_proof") is True,
+        "agent_health_blocks_runtime_submit": snapshot.get("agent_health_blocks_runtime_submit") is True,
+        "agent_health_blocks_recovery": snapshot.get("agent_health_blocks_recovery") is True,
+        "agent_health_has_duplicate_writer": snapshot.get("agent_health_has_duplicate_writer") is True,
         "control_plane_snapshot_stale_or_missing": stale_or_missing,
         "executor_pre_action_evidence_packet_required": True,
         "executor_pre_action_evidence_packet_source": "control_plane_snapshot",
     }
+
+
+def _agent_health_blockers(snapshot: Mapping[str, Any]) -> list[dict[str, Any]]:
+    blockers: list[dict[str, Any]] = []
+    for row in _list(snapshot.get("agent_health_top_blockers")):
+        blocker = _mapping(row)
+        if not blocker:
+            continue
+        blockers.append(
+            {
+                "agent_id": str(blocker.get("agent_id") or ""),
+                "display_name": str(blocker.get("display_name") or blocker.get("agent_id") or ""),
+                "status": str(blocker.get("status") or ""),
+                "reason": str(blocker.get("reason") or ""),
+                "blocking_for_proof": blocker.get("blocking_for_proof") is True,
+                "blocking_for_runtime_submit": blocker.get("blocking_for_runtime_submit") is True,
+                "blocking_for_recovery": blocker.get("blocking_for_recovery") is True,
+                "diagnostic_only": blocker.get("diagnostic_only") is True,
+            }
+        )
+    return blockers
 
 
 def _stale_or_missing_evidence(

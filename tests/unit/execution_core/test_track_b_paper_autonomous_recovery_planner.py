@@ -138,6 +138,37 @@ def test_stale_evidence_plans_evidence_refresh(tmp_path: Path) -> None:
     assert payload["proposed_actions"][0]["action_type"] == "REFRESH_EVIDENCE"
 
 
+def test_agent_health_blocked_snapshot_includes_blocker_rows(tmp_path: Path) -> None:
+    _seed_base(
+        tmp_path,
+        snapshot_agent_health_top_blockers=[
+            {
+                "agent_id": "open_order_truth",
+                "display_name": "Open Order Truth",
+                "status": "MISSING_ARTIFACT",
+                "reason": "authority artifact missing",
+                "blocking_for_proof": True,
+                "blocking_for_runtime_submit": True,
+                "blocking_for_recovery": True,
+                "diagnostic_only": False,
+            }
+        ],
+        snapshot_agent_health_blocks_runtime_submit=True,
+        snapshot_agent_health_blocks_recovery=True,
+    )
+
+    payload = build_track_b_paper_autonomous_recovery_plan(
+        config=TrackBPaperAutonomousRecoveryPlannerConfig(repo_root=tmp_path),
+        now=NOW,
+    )
+
+    assert payload["classification"] == PLAN_BLOCKED_STALE_EVIDENCE
+    assert "agent_health_blocks_runtime_submit" in payload["evidence_summary"]["stale_or_missing_evidence"]
+    assert payload["agent_health_top_blockers"][0]["agent_id"] == "open_order_truth"
+    assert payload["evidence_summary"]["agent_health_top_blockers"][0]["display_name"] == "Open Order Truth"
+    assert payload["evidence_summary"]["agent_health_top_blockers"][0]["diagnostic_only"] is False
+
+
 def test_producer_down_open_market_plans_market_data_restart_dry_run(tmp_path: Path) -> None:
     _seed_base(
         tmp_path,
@@ -332,6 +363,11 @@ def _seed_base(
     include_control_plane_snapshot: bool = True,
     snapshot_coherence_status: str = "COHERENT",
     snapshot_generated_at: datetime = NOW,
+    snapshot_agent_health_top_blockers: list[dict] | None = None,
+    snapshot_agent_health_blocks_proof: bool = False,
+    snapshot_agent_health_blocks_runtime_submit: bool = False,
+    snapshot_agent_health_blocks_recovery: bool = False,
+    snapshot_agent_health_has_duplicate_writer: bool = False,
 ) -> None:
     if include_control_plane_snapshot:
         _write_json(
@@ -347,6 +383,11 @@ def _seed_base(
                 "supervisor_mode": supervisor_mode,
                 "safe_to_start_runtime": supervisor_classification == SUPERVISOR_RUNTIME_START_ALLOWED,
                 "live_money_eligible": live_money_eligible,
+                "agent_health_top_blockers": snapshot_agent_health_top_blockers or [],
+                "agent_health_blocks_proof": snapshot_agent_health_blocks_proof,
+                "agent_health_blocks_runtime_submit": snapshot_agent_health_blocks_runtime_submit,
+                "agent_health_blocks_recovery": snapshot_agent_health_blocks_recovery,
+                "agent_health_has_duplicate_writer": snapshot_agent_health_has_duplicate_writer,
             },
         )
     _write_json(

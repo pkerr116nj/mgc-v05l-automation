@@ -119,6 +119,38 @@ def test_live_money_hard_invariant_blocks(tmp_path: Path) -> None:
     assert result["reason"] == "live_money_eligible=true is a hard invariant block."
 
 
+def test_duplicate_writer_block_includes_agent_health_blocker_row(tmp_path: Path) -> None:
+    _seed_valid(
+        tmp_path,
+        agent_health_top_blockers=[
+            {
+                "agent_id": "track_b_paper_runtime",
+                "display_name": "Track B PAPER runtime",
+                "status": "DUPLICATE_PROCESS",
+                "reason": "duplicate runtime writer detected",
+                "blocking_for_proof": True,
+                "blocking_for_runtime_submit": True,
+                "blocking_for_recovery": True,
+                "diagnostic_only": False,
+            }
+        ],
+        agent_health_has_duplicate_writer=True,
+    )
+
+    result = validate_track_b_pre_action_snapshot(
+        config=TrackBPreActionSnapshotValidatorConfig(repo_root=tmp_path),
+        expected_plan_classification="PLAN_RUNTIME_RETRY",
+        expected_action_type="RUNTIME_RETRY",
+        now=NOW,
+    )
+
+    assert result["classification"] == PRE_ACTION_BLOCKED_HARD_INVARIANT
+    assert result["reason"] == "Duplicate runtime writer evidence is a hard invariant block."
+    assert result["agent_health_has_duplicate_writer"] is True
+    assert result["agent_health_top_blockers"][0]["agent_id"] == "track_b_paper_runtime"
+    assert result["agent_health_top_blockers"][0]["status"] == "DUPLICATE_PROCESS"
+
+
 def test_target_identity_mismatch_blocks(tmp_path: Path) -> None:
     _seed_valid(
         tmp_path,
@@ -170,6 +202,8 @@ def _seed_valid(
     action_type: str = "RUNTIME_RETRY",
     target_identity: dict | None = None,
     live_money_eligible: bool = False,
+    agent_health_top_blockers: list[dict] | None = None,
+    agent_health_has_duplicate_writer: bool = False,
 ) -> None:
     if include_snapshot:
         _write_json(
@@ -183,6 +217,17 @@ def _seed_valid(
                 "runtime_supervisor_classification": "SUPERVISOR_RUNTIME_START_ALLOWED",
                 "safe_to_start_runtime": True,
                 "live_money_eligible": live_money_eligible,
+                "agent_health_top_blockers": agent_health_top_blockers or [],
+                "agent_health_has_duplicate_writer": agent_health_has_duplicate_writer,
+                "agent_health_blocks_proof": any(
+                    row.get("blocking_for_proof") is True for row in (agent_health_top_blockers or [])
+                ),
+                "agent_health_blocks_runtime_submit": any(
+                    row.get("blocking_for_runtime_submit") is True for row in (agent_health_top_blockers or [])
+                ),
+                "agent_health_blocks_recovery": any(
+                    row.get("blocking_for_recovery") is True for row in (agent_health_top_blockers or [])
+                ),
             },
         )
     _write_json(

@@ -86,6 +86,11 @@ def validate_track_b_pre_action_snapshot(
         "snapshot_safe_to_start_runtime": snapshot.get("safe_to_start_runtime") is True,
         "supervisor_decision_id": str(snapshot.get("runtime_supervisor_decision_id") or ""),
         "supervisor_classification": str(snapshot.get("runtime_supervisor_classification") or ""),
+        "agent_health_top_blockers": _agent_health_blockers(snapshot),
+        "agent_health_blocks_proof": snapshot.get("agent_health_blocks_proof") is True,
+        "agent_health_blocks_runtime_submit": snapshot.get("agent_health_blocks_runtime_submit") is True,
+        "agent_health_blocks_recovery": snapshot.get("agent_health_blocks_recovery") is True,
+        "agent_health_has_duplicate_writer": snapshot.get("agent_health_has_duplicate_writer") is True,
         "planner_classification": str(plan.get("classification") or ""),
         "planner_action_type": "",
         "source_artifact_paths": {
@@ -184,12 +189,20 @@ def _find_action(plan: Mapping[str, Any], expected_action_type: str) -> dict[str
 
 def _duplicate_writer(*payloads: Mapping[str, Any]) -> bool:
     for payload in payloads:
+        if payload.get("agent_health_has_duplicate_writer") is True:
+            return True
         if _positive_int(payload.get("duplicate_writer_count")):
+            return True
+        if _positive_int(payload.get("duplicate_process_count")):
             return True
         if payload.get("runtime_environment_truth_classification") == "DUPLICATE_RUNTIME_WRITERS":
             return True
         evidence = _mapping(payload.get("evidence_summary"))
+        if evidence.get("agent_health_has_duplicate_writer") is True:
+            return True
         if _positive_int(evidence.get("duplicate_writer_count")):
+            return True
+        if _positive_int(evidence.get("duplicate_process_count")):
             return True
         if evidence.get("runtime_environment_truth_classification") == "DUPLICATE_RUNTIME_WRITERS":
             return True
@@ -207,6 +220,26 @@ def _normalize_identity(identity: Mapping[str, Any]) -> dict[str, str]:
             continue
         normalized[str(key)] = str(value)
     return normalized
+
+
+def _agent_health_blockers(snapshot: Mapping[str, Any]) -> list[dict[str, Any]]:
+    blockers: list[dict[str, Any]] = []
+    for row in list(snapshot.get("agent_health_top_blockers") or []):
+        if not isinstance(row, Mapping):
+            continue
+        blockers.append(
+            {
+                "agent_id": str(row.get("agent_id") or ""),
+                "display_name": str(row.get("display_name") or row.get("agent_id") or ""),
+                "status": str(row.get("status") or ""),
+                "reason": str(row.get("reason") or ""),
+                "blocking_for_proof": row.get("blocking_for_proof") is True,
+                "blocking_for_runtime_submit": row.get("blocking_for_runtime_submit") is True,
+                "blocking_for_recovery": row.get("blocking_for_recovery") is True,
+                "diagnostic_only": row.get("diagnostic_only") is True,
+            }
+        )
+    return blockers
 
 
 def _positive_int(value: Any) -> bool:

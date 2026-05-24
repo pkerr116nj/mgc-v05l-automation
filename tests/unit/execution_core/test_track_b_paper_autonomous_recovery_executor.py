@@ -327,6 +327,9 @@ def test_duplicate_writer_hard_block_flows_from_validator(tmp_path: Path) -> Non
     assert payload["classification"] == EXECUTOR_BLOCKED_PRE_ACTION_VALIDATION
     assert payload["pre_action_validation"]["classification"] == PRE_ACTION_BLOCKED_HARD_INVARIANT
     assert payload["action_adapter"]["blocked_reason"] == "PRE_ACTION_VALIDATION_BLOCKED"
+    assert payload["agent_health_top_blockers"][0]["agent_id"] == "track_b_paper_runtime"
+    assert payload["pre_action_evidence"]["agent_health_top_blockers"][0]["status"] == "DUPLICATE_PROCESS"
+    assert payload["pre_action_evidence"]["agent_health_has_duplicate_writer"] is True
 
 
 def test_audit_artifacts_are_written(tmp_path: Path) -> None:
@@ -403,6 +406,20 @@ def _seed_valid(
     launcher_path.parent.mkdir(parents=True, exist_ok=True)
     launcher_path.write_text("#!/usr/bin/env bash\nexit 0\n", encoding="utf-8")
     if include_snapshot:
+        agent_health_top_blockers = []
+        if duplicate_writer_count:
+            agent_health_top_blockers.append(
+                {
+                    "agent_id": "track_b_paper_runtime",
+                    "display_name": "Track B PAPER runtime",
+                    "status": "DUPLICATE_PROCESS",
+                    "reason": "duplicate runtime writer detected",
+                    "blocking_for_proof": True,
+                    "blocking_for_runtime_submit": True,
+                    "blocking_for_recovery": True,
+                    "diagnostic_only": False,
+                }
+            )
         _write_json(
             root / "outputs/track_b_execution_core/control_plane/latest_control_plane_snapshot.json",
             {
@@ -415,6 +432,11 @@ def _seed_valid(
                 "safe_to_start_runtime": snapshot_safe_to_start_runtime,
                 "duplicate_writer_count": duplicate_writer_count,
                 "live_money_eligible": live_money_eligible,
+                "agent_health_top_blockers": agent_health_top_blockers,
+                "agent_health_has_duplicate_writer": bool(duplicate_writer_count),
+                "agent_health_blocks_proof": bool(duplicate_writer_count),
+                "agent_health_blocks_runtime_submit": bool(duplicate_writer_count),
+                "agent_health_blocks_recovery": bool(duplicate_writer_count),
             },
         )
     _write_json(

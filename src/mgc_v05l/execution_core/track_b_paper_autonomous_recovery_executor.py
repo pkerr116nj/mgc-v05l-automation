@@ -176,6 +176,7 @@ def build_track_b_paper_autonomous_recovery_executor_attempt(
             "budget_gate_classification": budget.get("budget_gate_classification"),
         },
         "pre_action_validation": validation,
+        "agent_health_top_blockers": list(validation.get("agent_health_top_blockers") or []),
         "action_adapter": adapter_result,
         "pre_action_evidence": {
             "control_plane_snapshot_id": validation.get("control_plane_snapshot_id") or "",
@@ -185,6 +186,8 @@ def build_track_b_paper_autonomous_recovery_executor_attempt(
             "supervisor_classification": validation.get("supervisor_classification") or "",
             "planner_classification": validation.get("planner_classification") or "",
             "planner_action_type": validation.get("planner_action_type") or "",
+            "agent_health_top_blockers": list(validation.get("agent_health_top_blockers") or []),
+            "agent_health_has_duplicate_writer": validation.get("agent_health_has_duplicate_writer") is True,
         },
         "post_action_evidence": {
             "placeholder": True,
