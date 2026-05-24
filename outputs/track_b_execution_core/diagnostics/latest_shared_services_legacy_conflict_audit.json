@@ -243,28 +243,32 @@
     {
       "area": "research/offline diagnostics",
       "code_change_needed_now": false,
+      "current_status": "Resolved/narrowed: audited research/offline report builders emit standard non-authority labels, and hot-path execution_core static tests prevent runtime/control-plane modules from consuming research artifact roots as active truth.",
       "doctrine_conflict": "These are offline diagnostics, not runtime authority, but the path names can confuse future agents into treating dashboard snapshots as execution truth.",
       "id": "SS-LCA-012",
       "legacy_local_behavior": "Research and Track 1 forensic tools read operator dashboard snapshots for fill/intent/blotter history.",
       "paths": [
-        "src/mgc_v05l/research/asia_drift/data_continuity_audit.py:384",
-        "src/mgc_v05l/research/asia_drift/cross_asset_trade_mapping.py:196",
-        "src/mgc_v05l/execution_core/track1_signal_handoff_breakpoint_audit.py:59"
+        "src/mgc_v05l/execution_core/track_b_research_offline_metadata.py",
+        "src/mgc_v05l/research/asia_drift/data_continuity_audit.py",
+        "src/mgc_v05l/research/asia_drift/cross_asset_trade_mapping.py",
+        "src/mgc_v05l/execution_core/track1_signal_handoff_breakpoint_audit.py"
       ],
-      "recommended_v2_migration": "Label these modules as research/offline in docs and prefer execution_core/cold archive inputs for future forensic replay.",
+      "recommended_v2_migration": "Continue applying the shared research/offline metadata helper to older research reports as they are touched; prefer cold/archive research roots for forensic replay instead of active dashboard paths.",
       "severity": "LOW",
+      "snapshot_gate_status": "RESEARCH_OFFLINE_NON_AUTHORITY_LABELLED",
       "tests_needed": [
-        "No runtime/readiness/recovery import depends on these research readers."
+        "Research/offline metadata marks artifacts non-authoritative. done",
+        "Track 1 breakpoint diagnostic labels dashboard history as offline forensic evidence. done",
+        "Asia Drift cross-asset trade mapping labels reports as research/offline. done",
+        "Active execution_core hot paths do not consume research artifact roots. done"
       ]
     }
   ],
   "generated_at": "2026-05-23T23:04:24.886113+00:00",
   "recommended_next_implementation_slice": {
-    "rationale": "Lifecycle/local artifact repair apply boundaries are now matrix-aligned and snapshot-gated. The next remaining risk is research/offline diagnostic labeling.",
-    "scope": [
-      "SS-LCA-012"
-    ],
-    "title": "Resolve research/offline diagnostic labeling"
+    "rationale": "All SS-LCA audit findings are resolved or narrowed. Remaining work is lower-priority hygiene outside this audit.",
+    "scope": [],
+    "title": "No active SS-LCA risks remain"
   },
   "repo_root": "/Users/patrick/Dev/MGC-v05l-automation",
   "severity_counts": {
@@ -273,9 +277,7 @@
     "LOW": 1,
     "MEDIUM": 3
   },
-  "top_5_risks": [
-    "SS-LCA-012"
-  ],
+  "top_5_risks": [],
   "v2_resiliency_backlog": [
     {
       "focus": "Add process/root/source_commit probes that are generation-aware and surfaced through Control Plane Snapshot.",

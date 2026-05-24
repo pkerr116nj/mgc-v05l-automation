@@ -760,6 +760,14 @@ Remaining migration backlog:
   authority or be labeled diagnostic-only.
 - Research/offline root/path migration should keep historical artifacts out of
   runtime, readiness, broker, lifecycle, and dashboard authority paths.
+- Research/offline diagnostics must carry explicit non-authority labels such
+  as `research_only=true`, `offline_diagnostic=true`,
+  `not_runtime_authority=true`, `not_broker_truth=true`,
+  `not_market_data_runtime_truth=true`, and `not_routing_authority=true`.
+  Active runtime/control-plane code must not consume `outputs/track_b_research`,
+  `outputs/research_*`, or `outputs/reports/*research*` as shared truth.
+  The policy is documented in
+  `docs/track_b_research_offline_diagnostics_policy.md`.
 - Any new shared service should write its authority artifact under
   `outputs/track_b_execution_core/`, with dashboard/operator outputs limited to
   marked projections.

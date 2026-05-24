@@ -100,6 +100,12 @@ def test_signals_present_but_no_handoff_artifact_classifies_intent_not_created(t
     assert result.report["classification"] == "HANDOFF_INTENT_NOT_CREATED"
     assert result.report["missing_link"] == "signal_to_intent"
     assert result.report["bounded_policy"]["broker_commands_invoked"] is False
+    assert result.report["research_only"] is True
+    assert result.report["offline_diagnostic"] is True
+    assert result.report["not_runtime_authority"] is True
+    assert result.report["not_broker_truth"] is True
+    assert result.report["not_routing_authority"] is True
+    assert result.report["research_offline_metadata"]["source_category"] == "research/offline"
 
 
 def test_handoff_disabled_config_classifies_config(tmp_path: Path) -> None:

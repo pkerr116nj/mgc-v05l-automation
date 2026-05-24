@@ -16,6 +16,7 @@ from pathlib import Path
 from typing import Any, Iterable, Mapping
 
 from .models import require_aware_datetime, to_jsonable
+from .track_b_research_offline_metadata import apply_research_offline_metadata
 
 
 DEFAULT_OUTPUT_ROOT = Path("outputs/track_b_execution_core/diagnostics")
@@ -74,42 +75,56 @@ def build_track1_signal_handoff_breakpoint_audit(
     suspected_commit = _suspected_commit(commit_candidates, window_start)
     report_json = output / DEFAULT_JSON.name
     report_md = output / DEFAULT_MD.name
-    report = {
-        "schema_version": "track1_signal_handoff_breakpoint_audit_v1",
-        "generated_at": actual_now.isoformat(),
-        "bounded_policy": {
-            "broker_commands_invoked": False,
-            "paper_proof_cli_invoked": False,
-            "submit_cancel_place_order_invoked": False,
-            "broker_state_mutated": False,
-            "max_file_bytes": MAX_FILE_BYTES,
-            "max_rows_per_artifact": MAX_ROWS,
+    report = apply_research_offline_metadata(
+        {
+            "schema_version": "track1_signal_handoff_breakpoint_audit_v1",
+            "generated_at": actual_now.isoformat(),
+            "bounded_policy": {
+                "broker_commands_invoked": False,
+                "paper_proof_cli_invoked": False,
+                "submit_cancel_place_order_invoked": False,
+                "broker_state_mutated": False,
+                "max_file_bytes": MAX_FILE_BYTES,
+                "max_rows_per_artifact": MAX_ROWS,
+            },
+            "source_preflight_path": str(preflight_path or DEFAULT_PREFLIGHT),
+            "audit_window": {
+                "start": window_start,
+                "end": window_end,
+                "scope_note": "Narrow window from last direct Track 1-like trade to latest post-trade signal/session-review evidence.",
+            },
+            "classification": classification,
+            "missing_link": missing_link,
+            "classification_explanation": explanation,
+            "last_known_trade": last_trade,
+            "last_known_trade_detail": last_trade_detail,
+            "first_known_signal_without_trade": signal_summary.get("first_signal_without_trade"),
+            "latest_signal_without_trade": signal_summary.get("latest_signal_without_trade"),
+            "post_trade_signal_summary": signal_summary,
+            "handoff_intent_summary": intent_summary,
+            "fill_summary": fill_summary,
+            "blotter_summary": blotter_summary,
+            "config_evidence": config_evidence,
+            "runner_evidence": runner_evidence,
+            "broker_block_evidence": broker_block_evidence,
+            "commit_candidates": commit_candidates,
+            "suspected_commit_or_config_breakpoint": suspected_commit,
+            "current_strategy_managed_lifecycle_v1_assessment": _managed_lifecycle_assessment(classification),
+            "recommended_next_action": _recommended_next_action(classification),
         },
-        "source_preflight_path": str(preflight_path or DEFAULT_PREFLIGHT),
-        "audit_window": {
-            "start": window_start,
-            "end": window_end,
-            "scope_note": "Narrow window from last direct Track 1-like trade to latest post-trade signal/session-review evidence.",
-        },
-        "classification": classification,
-        "missing_link": missing_link,
-        "classification_explanation": explanation,
-        "last_known_trade": last_trade,
-        "last_known_trade_detail": last_trade_detail,
-        "first_known_signal_without_trade": signal_summary.get("first_signal_without_trade"),
-        "latest_signal_without_trade": signal_summary.get("latest_signal_without_trade"),
-        "post_trade_signal_summary": signal_summary,
-        "handoff_intent_summary": intent_summary,
-        "fill_summary": fill_summary,
-        "blotter_summary": blotter_summary,
-        "config_evidence": config_evidence,
-        "runner_evidence": runner_evidence,
-        "broker_block_evidence": broker_block_evidence,
-        "commit_candidates": commit_candidates,
-        "suspected_commit_or_config_breakpoint": suspected_commit,
-        "current_strategy_managed_lifecycle_v1_assessment": _managed_lifecycle_assessment(classification),
-        "recommended_next_action": _recommended_next_action(classification),
-    }
+        producer="track1_signal_handoff_breakpoint_audit",
+        source_paths=[
+            preflight_path or DEFAULT_PREFLIGHT,
+            "outputs/operator_dashboard/paper_latest_intents_snapshot.json",
+            "outputs/operator_dashboard/paper_latest_fills_snapshot.json",
+            "outputs/operator_dashboard/paper_latest_blotter_snapshot.json",
+            "outputs/operator_dashboard/paper_session_close_reviews",
+        ],
+        notes=[
+            "Track 1 breakpoint diagnostics read dashboard history as offline forensic evidence only.",
+            "This report is not Track B shared truth, broker truth, market-data runtime truth, or routing authority.",
+        ],
+    )
     markdown = _markdown(report)
     if write:
         report_json.parent.mkdir(parents=True, exist_ok=True)

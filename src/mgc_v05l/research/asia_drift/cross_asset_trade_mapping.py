@@ -13,6 +13,8 @@ from zoneinfo import ZoneInfo
 
 import pyarrow.parquet as pq
 
+from mgc_v05l.execution_core.track_b_research_offline_metadata import apply_research_offline_metadata
+
 from ..trend_participation.storage import build_layout, write_storage_manifest
 from .cross_asset_confirmation import TIER_A, TIER_B, TIER_C, TIER_DIVERGENT, TIER_NONE, TIER_NO_PARTNER
 from .session_scope import DEFAULT_SESSION_CONFIG, _session_date
@@ -70,24 +72,36 @@ def run_cross_asset_trade_mapping(
         recent_signal=recent_signal,
         insufficient_report=insufficient_report,
     )
-    payload = {
-        "module": "Asia Drift Cross-Asset Trade Mapping",
-        "objective": (
-            "Research-only mapping of historical paper/forced/live-candidate trade artifacts into the CROSS_ASSET_CONFIRMATION "
-            "framework. This pass inventories available trade evidence, attaches no-future-leakage session confirmation tiers "
-            "where possible, compares outcomes by tier, estimates a Tier A/B filter counterfactual, and checks whether the signal "
-            "is still present in the most recent available structural sessions."
-        ),
-        "cross_asset_output_dir": str(cross_asset_output_dir.resolve()),
-        "multi_year_output_dir": str(multi_year_output_dir.resolve()),
-        "trade_artifact_inventory": inventory_rows,
-        "mapped_trade_rows": mapped_rows,
-        "tier_outcome_summary": tier_summary,
-        "counterfactual_filter_summary": counterfactual,
-        "recent_signal_summary": recent_signal,
-        "insufficient_data_report": insufficient_report,
-        "recommendation": recommendation,
-    }
+    payload = apply_research_offline_metadata(
+        {
+            "module": "Asia Drift Cross-Asset Trade Mapping",
+            "objective": (
+                "Research-only mapping of historical paper/forced/live-candidate trade artifacts into the CROSS_ASSET_CONFIRMATION "
+                "framework. This pass inventories available trade evidence, attaches no-future-leakage session confirmation tiers "
+                "where possible, compares outcomes by tier, estimates a Tier A/B filter counterfactual, and checks whether the signal "
+                "is still present in the most recent available structural sessions."
+            ),
+            "cross_asset_output_dir": str(cross_asset_output_dir.resolve()),
+            "multi_year_output_dir": str(multi_year_output_dir.resolve()),
+            "trade_artifact_inventory": inventory_rows,
+            "mapped_trade_rows": mapped_rows,
+            "tier_outcome_summary": tier_summary,
+            "counterfactual_filter_summary": counterfactual,
+            "recent_signal_summary": recent_signal,
+            "insufficient_data_report": insufficient_report,
+            "recommendation": recommendation,
+        },
+        producer="asia_drift_cross_asset_trade_mapping",
+        source_paths=[
+            cross_asset_output_dir,
+            multi_year_output_dir,
+            *(path for path in (warehouse_root, runtime_bridge_dir, operator_dashboard_dir) if path is not None),
+        ],
+        notes=[
+            "Dashboard/operator rows are offline inventory inputs only and cannot authorize runtime routing or broker state.",
+            "Mapped trade rows are research evidence and must not be consumed by active Track B runtime/control-plane services.",
+        ],
+    )
     artifacts = _write_artifacts(output_dir=output_dir, payload=payload)
     return {"payload": payload, "artifacts": artifacts}
 
@@ -121,24 +135,29 @@ def run_cross_asset_trade_mapping_from_rows(
         inventory_rows=list(trade_inventory_rows),
         recent_signal=recent_signal,
     )
-    payload = {
-        "module": "Asia Drift Cross-Asset Trade Mapping",
-        "objective": "Research-only synthetic/unit-test mapping payload.",
-        "cross_asset_output_dir": "synthetic",
-        "multi_year_output_dir": "synthetic",
-        "trade_artifact_inventory": list(trade_inventory_rows),
-        "mapped_trade_rows": mapped_rows,
-        "tier_outcome_summary": tier_summary,
-        "counterfactual_filter_summary": counterfactual,
-        "recent_signal_summary": recent_signal,
-        "insufficient_data_report": insufficient_report,
-        "recommendation": _recommendation(
-            mapped_rows=mapped_rows,
-            counterfactual=counterfactual,
-            recent_signal=recent_signal,
-            insufficient_report=insufficient_report,
-        ),
-    }
+    payload = apply_research_offline_metadata(
+        {
+            "module": "Asia Drift Cross-Asset Trade Mapping",
+            "objective": "Research-only synthetic/unit-test mapping payload.",
+            "cross_asset_output_dir": "synthetic",
+            "multi_year_output_dir": "synthetic",
+            "trade_artifact_inventory": list(trade_inventory_rows),
+            "mapped_trade_rows": mapped_rows,
+            "tier_outcome_summary": tier_summary,
+            "counterfactual_filter_summary": counterfactual,
+            "recent_signal_summary": recent_signal,
+            "insufficient_data_report": insufficient_report,
+            "recommendation": _recommendation(
+                mapped_rows=mapped_rows,
+                counterfactual=counterfactual,
+                recent_signal=recent_signal,
+                insufficient_report=insufficient_report,
+            ),
+        },
+        producer="asia_drift_cross_asset_trade_mapping_from_rows",
+        source_paths=[],
+        notes=["Row-injected test/replay mapping is offline-only and has no runtime, broker, or routing authority."],
+    )
     artifacts = _write_artifacts(output_dir=output_dir, payload=payload)
     return {"payload": payload, "artifacts": artifacts}
 

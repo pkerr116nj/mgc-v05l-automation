@@ -1923,6 +1923,13 @@ def test_cross_asset_trade_mapping_runner_stays_research_only(tmp_path: Path) ->
     )
     payload = result["payload"]
     assert "research-only" in payload["objective"].lower()
+    assert payload["research_only"] is True
+    assert payload["offline_diagnostic"] is True
+    assert payload["not_runtime_authority"] is True
+    assert payload["not_broker_truth"] is True
+    assert payload["not_market_data_runtime_truth"] is True
+    assert payload["not_routing_authority"] is True
+    assert payload["research_offline_metadata"]["source_category"] == "research/offline"
     assert payload["recommendation"]["recommendation"] == "more_paper_collection_only"
 
 

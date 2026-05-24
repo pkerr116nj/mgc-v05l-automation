@@ -14,6 +14,8 @@ from zoneinfo import ZoneInfo
 
 import pyarrow.parquet as pq
 
+from mgc_v05l.execution_core.track_b_research_offline_metadata import apply_research_offline_metadata
+
 from ..trend_participation.storage import build_layout, write_storage_manifest
 
 
@@ -63,24 +65,38 @@ def run_data_continuity_audit(
         trade_audit=trade_audit,
         root_cause=root_cause,
     )
-    payload = {
-        "module": "Asia Drift Data Continuity Audit",
-        "objective": (
-            "Research-only audit of market data, replay coverage, warehouse artifacts, and trade evidence used in Asia Drift "
-            "and cross-asset confirmation research. This pass does not recompute strategy outputs; it verifies whether the "
-            "underlying datasets are continuous and aligned enough to support prior conclusions."
-        ),
-        "replay_db_path": str(replay_db_path.resolve()),
-        "warehouse_root": str(warehouse_root.resolve()),
-        "multi_year_output_dir": str(multi_year_output_dir.resolve()),
-        "cross_asset_output_dir": str(cross_asset_output_dir.resolve()),
-        "replay_coverage": replay_audit,
-        "warehouse_coverage": warehouse_audit,
-        "trade_artifact_coverage": trade_audit,
-        "cross_dataset_alignment": alignment,
-        "root_cause_summary": root_cause,
-        "repair_plan": repair_plan,
-    }
+    payload = apply_research_offline_metadata(
+        {
+            "module": "Asia Drift Data Continuity Audit",
+            "objective": (
+                "Research-only audit of market data, replay coverage, warehouse artifacts, and trade evidence used in Asia Drift "
+                "and cross-asset confirmation research. This pass does not recompute strategy outputs; it verifies whether the "
+                "underlying datasets are continuous and aligned enough to support prior conclusions."
+            ),
+            "replay_db_path": str(replay_db_path.resolve()),
+            "warehouse_root": str(warehouse_root.resolve()),
+            "multi_year_output_dir": str(multi_year_output_dir.resolve()),
+            "cross_asset_output_dir": str(cross_asset_output_dir.resolve()),
+            "replay_coverage": replay_audit,
+            "warehouse_coverage": warehouse_audit,
+            "trade_artifact_coverage": trade_audit,
+            "cross_dataset_alignment": alignment,
+            "root_cause_summary": root_cause,
+            "repair_plan": repair_plan,
+        },
+        producer="asia_drift_data_continuity_audit",
+        source_paths=[
+            replay_db_path,
+            warehouse_root,
+            multi_year_output_dir,
+            cross_asset_output_dir,
+            *(path for path in (runtime_bridge_dir, operator_dashboard_dir) if path is not None),
+        ],
+        notes=[
+            "Dashboard/operator rows are historical research inputs only; they are not broker truth, runtime truth, or routing authority.",
+            "This audit may recommend data repair for research datasets but does not authorize active runtime remediation.",
+        ],
+    )
     artifacts = _write_artifacts(output_dir=output_dir, payload=payload)
     return {"payload": payload, "artifacts": artifacts}
 

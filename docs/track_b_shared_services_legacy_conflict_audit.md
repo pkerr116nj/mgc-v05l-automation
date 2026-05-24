@@ -22,7 +22,7 @@ The remaining high-risk broker/order mutation harnesses and apply-style repair p
 
 ## Top Remaining Risks
 
-1. `SS-LCA-012` LOW - research/offline diagnostics: Some research readers still inspect dashboard snapshots for historical evidence; these remain diagnostic-only but need labeling discipline.
+No active shared-services legacy conflict risks remain from this audit. Future hygiene remains: continue labeling older research/offline artifacts as they are touched, and schedule physical-path cleanup for historical compatibility outputs.
 
 ## Status Update - Snapshot-Gated Order Apply Paths
 
@@ -39,7 +39,8 @@ The remaining high-risk broker/order mutation harnesses and apply-style repair p
 - `SS-LCA-009` dashboard/operator projection ownership is now explicit: Track B control-plane dashboard projections carry standardized `projection_only`, `not_routing_authority`, `source_authority=execution_core_authority`, source authority path metadata, and degraded/diagnostic-only markers when source authority paths are missing. Remaining physical-path migration for canonical readiness and broker lease is narrowed to future path cleanup, not an active projection-as-authority risk.
 - `SS-LCA-010` launch/status fallback flows now use a shared Control Plane Snapshot status classifier. Launch fails closed when the snapshot is missing, stale, or incoherent; status fallbacks are marked `diagnostic_only=true` / `not_routing_authority=true` and cannot surface `safe_to_start_runtime=true`.
 - `SS-LCA-011` lifecycle/local artifact repair is now matrix-aligned and snapshot-gated at apply-capable local repair boundaries. Lifecycle close cleanup, lifecycle adoption, and malformed ledger cleanup call `validate_lifecycle_local_artifact_repair(...)`, validate target transitions against the Lifecycle State Matrix, require complete target evidence, and require a fresh coherent Control Plane Snapshot before active-state-affecting apply writes.
-- next top risk is `SS-LCA-012` research/offline diagnostics labeling.
+- `SS-LCA-012` research/offline diagnostics are now explicitly labeled. Shared metadata marks research reports as `research_only`, `offline_diagnostic`, `not_runtime_authority`, `not_broker_truth`, `not_market_data_runtime_truth`, and `not_routing_authority`; static tests cover hot-path execution_core modules against research artifact consumption.
+- no remaining active risk from this audit.
 
 ## Findings
 
@@ -193,13 +194,18 @@ The remaining high-risk broker/order mutation harnesses and apply-style repair p
 
 ### SS-LCA-012 - LOW - research/offline diagnostics
 
-- paths: `src/mgc_v05l/research/asia_drift/data_continuity_audit.py:384`, `src/mgc_v05l/research/asia_drift/cross_asset_trade_mapping.py:196`, `src/mgc_v05l/execution_core/track1_signal_handoff_breakpoint_audit.py:59`
+- paths: `src/mgc_v05l/execution_core/track_b_research_offline_metadata.py`, `src/mgc_v05l/research/asia_drift/data_continuity_audit.py`, `src/mgc_v05l/research/asia_drift/cross_asset_trade_mapping.py`, `src/mgc_v05l/execution_core/track1_signal_handoff_breakpoint_audit.py`
 - legacy/local behavior: Research and Track 1 forensic tools read operator dashboard snapshots for fill/intent/blotter history.
 - conflict with doctrine: These are offline diagnostics, not runtime authority, but the path names can confuse future agents into treating dashboard snapshots as execution truth.
-- recommended v2 migration: Label these modules as research/offline in docs and prefer execution_core/cold archive inputs for future forensic replay.
+- recommended v2 migration: Continue applying the shared research/offline metadata helper to older research reports as they are touched; prefer cold/archive research roots for forensic replay instead of active dashboard paths.
+- current status: resolved/narrowed. The audited research/offline report builders now emit standard non-authority labels, and hot-path execution_core static tests prevent runtime/control-plane modules from consuming research artifact roots as active truth.
+- metadata helper: `mgc_v05l.execution_core.track_b_research_offline_metadata`
 - code change needed now: `false`
 - tests needed:
-  - No runtime/readiness/recovery import depends on these research readers.
+  - Research/offline metadata marks artifacts non-authoritative. `done`
+  - Track 1 breakpoint diagnostic labels dashboard history as offline forensic evidence. `done`
+  - Asia Drift cross-asset trade mapping labels reports as research/offline. `done`
+  - Active execution_core hot paths do not consume research artifact roots. `done`
 
 ## V2 Resiliency Backlog
 
@@ -217,9 +223,9 @@ The remaining high-risk broker/order mutation harnesses and apply-style repair p
 
 ## Recommended Next Implementation Slice
 
-Continue labeling convergence on the remaining offline diagnostic surfaces:
+Continue lower-priority hygiene outside this audit:
 
-1. Label remaining research/offline diagnostics so dashboard snapshots cannot be mistaken for execution authority.
+1. Add the shared research/offline metadata helper to older research reports opportunistically when those reports are touched.
 2. Move remaining dashboard-path compatibility files for canonical readiness and broker lease to execution_core authority paths when the compatibility window is scheduled.
 
 This keeps PAPER autonomous and failure-discovery oriented while ensuring every mutation boundary is coherent, budgetable, auditable, and impossible to confuse with dashboard projection state.
