@@ -18241,6 +18241,27 @@ def _track_b_control_plane_services_summary(repo_root: Path) -> dict[str, Any]:
         "agent_health_source_commit_mismatch_count": control_plane_snapshot.get("source_commit_mismatch_count"),
         "agent_health_root_mismatch_count": control_plane_snapshot.get("root_mismatch_count"),
         "self_recover_recommendation": self_recover.get("recommendation") or self_recover.get("classification"),
+        "self_recover_schema_version": control_plane_snapshot.get("self_recover_schema_version")
+        or self_recover.get("self_recover_schema_version"),
+        "recommended_recovery_action": control_plane_snapshot.get("recommended_recovery_action")
+        or self_recover.get("recommended_recovery_action"),
+        "self_recover_paper_action_policy": control_plane_snapshot.get("paper_action_policy")
+        or self_recover.get("paper_action_policy"),
+        "self_recover_autonomous_recovery_plan_classification": control_plane_snapshot.get(
+            "self_recover_autonomous_recovery_plan_classification"
+        )
+        or self_recover.get("autonomous_recovery_plan_classification"),
+        "self_recover_recovery_budget_key": control_plane_snapshot.get("recovery_budget_key")
+        or self_recover.get("recovery_budget_key"),
+        "self_recover_attempts_remaining": control_plane_snapshot.get("attempts_remaining")
+        if control_plane_snapshot.get("attempts_remaining") is not None
+        else self_recover.get("attempts_remaining"),
+        "self_recover_cooldown_until": control_plane_snapshot.get("cooldown_until")
+        or self_recover.get("cooldown_until"),
+        "self_recover_quarantine_required": control_plane_snapshot.get("quarantine_required") is True
+        or self_recover.get("quarantine_required") is True,
+        "self_recover_execution_enabled": control_plane_snapshot.get("self_recover_execution_enabled") is True
+        or self_recover.get("execution_enabled") is True,
         "crash_loop_classification": crash_loop.get("classification"),
         "crash_loop_restart_blocked": crash_loop.get("restart_blocked") is True,
         "control_plane_status_classification": control_plane_status["classification"],

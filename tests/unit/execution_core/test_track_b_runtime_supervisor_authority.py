@@ -80,6 +80,7 @@ def test_market_closed_waits_without_alarm(tmp_path: Path) -> None:
     assert payload["shared_truth_refresh_generation_id"] == "test-shared-truth-generation"
     assert payload["shared_truth_coherence_status"] == "COHERENT"
     assert payload["runtime_resume_action_policy"] == RESUME_POLICY_HOLD_MARKET_CLOSED
+    assert payload["self_recover_recommended_recovery_action"] == "WAIT_MARKET_CLOSED"
 
 
 def test_clean_proof_ready_allows_runtime_start(tmp_path: Path) -> None:
@@ -114,6 +115,13 @@ def test_clean_proof_ready_allows_runtime_start(tmp_path: Path) -> None:
     assert payload["runtime_resume_cooldown_until"] is None
     assert payload["runtime_resume_generation_reuse_allowed"] is False
     assert payload["runtime_resume_must_start_new_generation"] is True
+    assert payload["self_recover_schema_version"] == "v2"
+    assert payload["self_recover_recommended_recovery_action"] == "RUNTIME_RETRY_DRY_RUN"
+    assert payload["self_recover_paper_action_policy"] == "AUTONOMOUS_RETRY_ELIGIBLE"
+    assert payload["self_recover_autonomous_recovery_plan_classification"] == "PLAN_RUNTIME_RETRY"
+    assert payload["self_recover_recovery_budget_key"] == "track_b_paper_runtime|RUNTIME_RETRY|test"
+    assert payload["self_recover_attempts_remaining"] == 2
+    assert payload["self_recover_quarantine_required"] is False
 
 
 def test_active_healthy_runtime_is_left_running(tmp_path: Path) -> None:
@@ -402,9 +410,33 @@ def _seed_base(
     _write_json(
         root / "outputs" / "track_b_execution_core" / "self_recover" / "latest_self_recover_rules.json",
         {
+            "self_recover_schema_version": "v2",
             "generated_at": NOW.isoformat(),
             "classification": self_recover_recommendation,
             "recommendation": self_recover_recommendation,
+            "recovery_plan_id": "self-recover-plan-1",
+            "control_plane_snapshot_id": "snapshot-1",
+            "shared_truth_generation_id": "test-shared-truth-generation",
+            "paper_action_policy": paper_action_policy,
+            "autonomous_recovery_plan_classification": autonomous_plan_classification,
+            "recommended_recovery_action": "WAIT_MARKET_CLOSED"
+            if self_recover_recommendation == "WAIT_MARKET_CLOSED"
+            else (
+                "QUARANTINE_OBSERVE_ONLY"
+                if paper_action_policy == "QUARANTINE_OBSERVE_ONLY"
+                else (
+                    "HARD_UNSAFE_HOLD"
+                    if paper_action_policy == "HARD_UNSAFE_HOLD"
+                    else "RUNTIME_RETRY_DRY_RUN"
+                )
+            ),
+            "recovery_budget_key": "track_b_paper_runtime|RUNTIME_RETRY|test",
+            "attempts_remaining": resume_attempts_remaining,
+            "cooldown_until": resume_cooldown_until,
+            "quarantine_required": paper_action_policy == "QUARANTINE_OBSERVE_ONLY",
+            "agent_health_top_blockers": [],
+            "operator_explanation": "self recover structured plan",
+            "execution_enabled": False,
             "live_money_eligible": live_money_eligible,
         },
     )

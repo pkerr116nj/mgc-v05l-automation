@@ -36,6 +36,11 @@ def test_snapshot_ties_supervisor_to_shared_truth_generation(tmp_path: Path) -> 
     assert payload["runtime_resume_action_policy"] == "NEW_RUNTIME_GENERATION_ALLOWED"
     assert payload["runtime_resume_proposed_next_runtime_generation_id"] == "runtime-generation-next"
     assert payload["runtime_resume_attempts_remaining"] == 2
+    assert payload["recommended_recovery_action"] == "RUNTIME_RETRY_DRY_RUN"
+    assert payload["paper_action_policy"] == "AUTONOMOUS_RETRY_ELIGIBLE"
+    assert payload["recovery_budget_key"] == "track_b_paper_runtime|RUNTIME_RETRY|test"
+    assert payload["attempts_remaining"] == 2
+    assert payload["quarantine_required"] is False
     assert payload["broker_order_position_summary"]["open_order_truth"] == "NO_OPEN_ORDERS"
     assert payload["source_artifact_paths"]["shared_truth_refresh"].endswith(
         "outputs/track_b_execution_core/shared_truth/latest_track_b_shared_truth_refresh.json"
@@ -62,6 +67,7 @@ def test_market_closed_snapshot_waits_without_alarm(tmp_path: Path) -> None:
     assert payload["top_line_classification"] == "MARKET_CLOSED_WAIT"
     assert "Market closed/no fresh bars expected" in payload["top_line_status"]
     assert payload["runtime_resume_action_policy"] == "HOLD_MARKET_CLOSED"
+    assert payload["recommended_recovery_action"] == "WAIT_MARKET_CLOSED"
     assert payload["recommended_next_command"] == "wait for market reopen; rerun proof readiness before any runtime start"
 
 
@@ -94,6 +100,7 @@ def test_snapshot_includes_recovery_and_planner_fields(tmp_path: Path) -> None:
     payload = _snapshot(tmp_path)
 
     assert payload["paper_recovery_policy"] == "AUTONOMOUS_RETRY_ELIGIBLE"
+    assert payload["recommended_recovery_action"] == "RUNTIME_RETRY_DRY_RUN"
     assert payload["autonomous_recovery_plan_classification"]
     assert payload["autonomous_recovery_next_action"]
     assert payload["autonomous_recovery_execution_enabled"] is False
@@ -369,9 +376,29 @@ def _seed_control_plane(
     _write(
         root / "outputs/track_b_execution_core/self_recover/latest_self_recover_rules.json",
         {
+            "self_recover_schema_version": "v2",
             "generated_at": NOW.isoformat(),
             "classification": self_recover_recommendation,
             "recommendation": self_recover_recommendation,
+            "recovery_plan_id": "self-recover-plan-1",
+            "control_plane_snapshot_id": "snapshot-1",
+            "shared_truth_generation_id": "track-b-shared-truth-20260523T120000000000Z",
+            "paper_action_policy": "OBSERVE"
+            if self_recover_recommendation == "WAIT_MARKET_CLOSED"
+            else "AUTONOMOUS_RETRY_ELIGIBLE",
+            "autonomous_recovery_plan_classification": "WAIT_MARKET_CLOSED"
+            if self_recover_recommendation == "WAIT_MARKET_CLOSED"
+            else "PLAN_RUNTIME_RETRY",
+            "recommended_recovery_action": "WAIT_MARKET_CLOSED"
+            if self_recover_recommendation == "WAIT_MARKET_CLOSED"
+            else "RUNTIME_RETRY_DRY_RUN",
+            "recovery_budget_key": "track_b_paper_runtime|RUNTIME_RETRY|test",
+            "attempts_remaining": 2,
+            "cooldown_until": None,
+            "quarantine_required": False,
+            "agent_health_top_blockers": [],
+            "operator_explanation": "self recover structured plan",
+            "execution_enabled": False,
             "live_money_eligible": False,
         },
     )

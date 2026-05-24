@@ -184,6 +184,7 @@ def build_track_b_runtime_supervisor_authority(
     decision = _classify_supervisor(inputs=inputs)
     v2 = _v2_advisory(decision=decision, inputs=inputs)
     autonomous_recovery_plan = _autonomous_recovery_plan_fields(inputs["paper_autonomous_recovery_plan"])
+    self_recover_plan = _self_recover_v2_fields(inputs["self_recover_rules"])
     shared_truth_coherence = _mapping(inputs["shared_truth_coherence"])
     return {
         "schema_version": "track_b_runtime_supervisor_authority_v2",
@@ -209,6 +210,7 @@ def build_track_b_runtime_supervisor_authority(
         "proof_window_status": v2["proof_window_status"],
         "decision_precedence": v2["decision_precedence"],
         **_runtime_resume_v2_fields(inputs["runtime_resume_semantics"]),
+        **self_recover_plan,
         "shared_truth_refresh_generation_id": shared_truth_coherence.get("refresh_generation_id"),
         "shared_truth_refresh_generated_at": shared_truth_coherence.get("generated_at"),
         "shared_truth_coherence_status": shared_truth_coherence.get("status"),
@@ -318,6 +320,16 @@ def main(argv: Sequence[str] | None = None) -> int:
                     ),
                     "runtime_resume_attempts_remaining": payload.get("runtime_resume_attempts_remaining"),
                     "runtime_resume_cooldown_until": payload.get("runtime_resume_cooldown_until"),
+                    "self_recover_recommended_recovery_action": payload.get(
+                        "self_recover_recommended_recovery_action"
+                    ),
+                    "self_recover_paper_action_policy": payload.get("self_recover_paper_action_policy"),
+                    "self_recover_autonomous_recovery_plan_classification": payload.get(
+                        "self_recover_autonomous_recovery_plan_classification"
+                    ),
+                    "self_recover_attempts_remaining": payload.get("self_recover_attempts_remaining"),
+                    "self_recover_cooldown_until": payload.get("self_recover_cooldown_until"),
+                    "self_recover_quarantine_required": payload.get("self_recover_quarantine_required"),
                     "autonomous_recovery_plan_classification": payload.get(
                         "autonomous_recovery_plan_classification"
                     ),
@@ -806,6 +818,7 @@ def _evidence(inputs: Mapping[str, Mapping[str, Any]]) -> dict[str, Any]:
         "runtime_resume_safe_to_start_runtime": inputs["runtime_resume_semantics"].get("safe_to_start_runtime") is True,
         "runtime_resume_required_operator_ack": inputs["runtime_resume_semantics"].get("required_operator_ack") is True,
         "self_recover_recommendation": str(inputs["self_recover_rules"].get("recommendation") or _classification(inputs["self_recover_rules"])),
+        **_self_recover_v2_fields(inputs["self_recover_rules"]),
         "crash_loop_classification": _classification(inputs["crash_loop_protection"]),
         "crash_loop_restart_blocked": inputs["crash_loop_protection"].get("restart_blocked") is True,
         "crash_loop_operator_ack_required": inputs["crash_loop_protection"].get("operator_ack_required") is True
@@ -882,6 +895,27 @@ def _runtime_resume_v2_fields(payload: Mapping[str, Any]) -> dict[str, Any]:
         "runtime_resume_cooldown_until": payload.get("cooldown_until"),
         "runtime_resume_generation_reuse_allowed": payload.get("generation_reuse_allowed") is True,
         "runtime_resume_must_start_new_generation": payload.get("must_start_new_generation") is True,
+    }
+
+
+def _self_recover_v2_fields(payload: Mapping[str, Any]) -> dict[str, Any]:
+    return {
+        "self_recover_schema_version": str(payload.get("self_recover_schema_version") or ""),
+        "self_recover_recovery_plan_id": payload.get("recovery_plan_id"),
+        "self_recover_control_plane_snapshot_id": payload.get("control_plane_snapshot_id"),
+        "self_recover_shared_truth_generation_id": payload.get("shared_truth_generation_id"),
+        "self_recover_recommended_recovery_action": payload.get("recommended_recovery_action"),
+        "self_recover_paper_action_policy": payload.get("paper_action_policy"),
+        "self_recover_autonomous_recovery_plan_classification": payload.get(
+            "autonomous_recovery_plan_classification"
+        ),
+        "self_recover_recovery_budget_key": payload.get("recovery_budget_key"),
+        "self_recover_attempts_remaining": payload.get("attempts_remaining"),
+        "self_recover_cooldown_until": payload.get("cooldown_until"),
+        "self_recover_quarantine_required": payload.get("quarantine_required") is True,
+        "self_recover_agent_health_top_blockers": list(payload.get("agent_health_top_blockers") or []),
+        "self_recover_operator_explanation": str(payload.get("operator_explanation") or ""),
+        "self_recover_execution_enabled": payload.get("execution_enabled") is True,
     }
 
 

@@ -219,6 +219,15 @@ def main(argv: Sequence[str] | None = None) -> int:
         ),
         "runtime_resume_attempts_remaining": payload.get("runtime_resume_attempts_remaining"),
         "runtime_resume_cooldown_until": payload.get("runtime_resume_cooldown_until"),
+        "recommended_recovery_action": payload.get("recommended_recovery_action"),
+        "paper_action_policy": payload.get("paper_action_policy"),
+        "self_recover_autonomous_recovery_plan_classification": payload.get(
+            "self_recover_autonomous_recovery_plan_classification"
+        ),
+        "recovery_budget_key": payload.get("recovery_budget_key"),
+        "attempts_remaining": payload.get("attempts_remaining"),
+        "cooldown_until": payload.get("cooldown_until"),
+        "quarantine_required": payload.get("quarantine_required"),
         "primary_blocking_agent_id": payload.get("primary_blocking_agent_id"),
         "operator_explanation": payload.get("operator_explanation"),
         "recommended_observation_step": payload.get("recommended_observation_step"),
@@ -291,6 +300,7 @@ def _snapshot_payload(
         "proof_window_status": runtime_supervisor.get("proof_window_status"),
         "recommended_next_command": runtime_supervisor.get("recommended_next_command"),
         **_runtime_resume_v2_fields(runtime_supervisor),
+        **_self_recover_v2_fields(runtime_supervisor),
         "safe_to_start_runtime": runtime_supervisor.get("safe_to_start_runtime") is True
         and classification == CONTROL_PLANE_SNAPSHOT_READY
         and agent_health_evidence.get("agent_health_has_duplicate_writer") is not True
@@ -352,6 +362,27 @@ def _runtime_resume_v2_fields(payload: Mapping[str, Any]) -> dict[str, Any]:
         "runtime_resume_cooldown_until": payload.get("runtime_resume_cooldown_until"),
         "runtime_resume_generation_reuse_allowed": payload.get("runtime_resume_generation_reuse_allowed") is True,
         "runtime_resume_must_start_new_generation": payload.get("runtime_resume_must_start_new_generation") is True,
+    }
+
+
+def _self_recover_v2_fields(payload: Mapping[str, Any]) -> dict[str, Any]:
+    return {
+        "self_recover_schema_version": str(payload.get("self_recover_schema_version") or ""),
+        "self_recover_recovery_plan_id": payload.get("self_recover_recovery_plan_id"),
+        "self_recover_control_plane_snapshot_id": payload.get("self_recover_control_plane_snapshot_id"),
+        "self_recover_shared_truth_generation_id": payload.get("self_recover_shared_truth_generation_id"),
+        "recommended_recovery_action": payload.get("self_recover_recommended_recovery_action"),
+        "paper_action_policy": payload.get("self_recover_paper_action_policy"),
+        "self_recover_autonomous_recovery_plan_classification": payload.get(
+            "self_recover_autonomous_recovery_plan_classification"
+        ),
+        "recovery_budget_key": payload.get("self_recover_recovery_budget_key"),
+        "attempts_remaining": payload.get("self_recover_attempts_remaining"),
+        "cooldown_until": payload.get("self_recover_cooldown_until"),
+        "quarantine_required": payload.get("self_recover_quarantine_required") is True,
+        "self_recover_agent_health_top_blockers": list(payload.get("self_recover_agent_health_top_blockers") or []),
+        "self_recover_operator_explanation": str(payload.get("self_recover_operator_explanation") or ""),
+        "self_recover_execution_enabled": payload.get("self_recover_execution_enabled") is True,
     }
 
 

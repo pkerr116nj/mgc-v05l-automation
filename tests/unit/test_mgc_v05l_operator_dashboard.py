@@ -303,6 +303,13 @@ def test_track_b_control_plane_status_projection_displays_closed_market_services
     assert summary["agent_health_has_duplicate_writer"] is False
     assert summary["agent_health_top_blockers"] == []
     assert summary["self_recover_recommendation"] == "WAIT_MARKET_CLOSED"
+    assert summary["self_recover_schema_version"] == "v2"
+    assert summary["recommended_recovery_action"] == "WAIT_MARKET_CLOSED"
+    assert summary["self_recover_paper_action_policy"] == "OBSERVE"
+    assert summary["self_recover_autonomous_recovery_plan_classification"] == "WAIT_MARKET_CLOSED"
+    assert summary["self_recover_recovery_budget_key"] == "track_b_paper_runtime|RUNTIME_RETRY|test"
+    assert summary["self_recover_attempts_remaining"] == 2
+    assert summary["self_recover_quarantine_required"] is False
     assert summary["crash_loop_classification"] == "NO_CRASH_LOOP"
     assert summary["runtime_resume_classification"] == "RESUME_BLOCKED_MARKET_CLOSED"
     assert summary["runtime_resume_allowed"] is False
@@ -443,6 +450,11 @@ def test_track_b_control_plane_status_projection_displays_crash_loop_and_operato
     assert summary["runtime_supervisor_operator_ack"]["ack_type"] == "crash_loop_hold"
     assert summary["paper_recovery_policy"] == "QUARANTINE_OBSERVE_ONLY"
     assert summary["paper_recovery_diagnostic"] == "QUARANTINE_OBSERVE_ONLY"
+    assert summary["recommended_recovery_action"] == "QUARANTINE_OBSERVE_ONLY"
+    assert summary["self_recover_paper_action_policy"] == "QUARANTINE_OBSERVE_ONLY"
+    assert summary["self_recover_attempts_remaining"] == 0
+    assert summary["self_recover_cooldown_until"] == "2026-05-23T12:15:00+00:00"
+    assert summary["self_recover_quarantine_required"] is True
     assert summary["bounded_recovery_budget"]["budget_exhausted"] is True
     assert summary["runtime_resume_action_policy"] == "QUARANTINE_OBSERVE_ONLY"
     assert summary["runtime_resume_attempts_remaining"] == 0
@@ -472,6 +484,12 @@ def test_track_b_control_plane_status_projection_displays_bounded_autonomous_ret
 
     assert summary["paper_recovery_policy"] == "AUTONOMOUS_RETRY_ELIGIBLE"
     assert summary["paper_recovery_diagnostic"] == "BOUNDED_AUTONOMOUS_RETRY"
+    assert summary["recommended_recovery_action"] == "RUNTIME_RETRY_DRY_RUN"
+    assert summary["self_recover_paper_action_policy"] == "AUTONOMOUS_RETRY_ELIGIBLE"
+    assert summary["self_recover_autonomous_recovery_plan_classification"] == "PLAN_RUNTIME_RETRY"
+    assert summary["self_recover_recovery_budget_key"] == "track_b_paper_runtime|RUNTIME_RETRY|test"
+    assert summary["self_recover_attempts_remaining"] == 2
+    assert summary["self_recover_quarantine_required"] is False
     assert summary["autonomous_recovery_allowed"] is True
     assert summary["autonomous_recovery_plan_classification"] == "PLAN_RUNTIME_RETRY"
     assert summary["autonomous_recovery_next_action"] == "RUNTIME_RETRY"
@@ -508,6 +526,8 @@ def test_track_b_control_plane_status_projection_displays_hard_unsafe_paper_poli
 
     assert summary["paper_recovery_policy"] == "HARD_UNSAFE_HOLD"
     assert summary["paper_recovery_diagnostic"] == "HARD_UNSAFE_HOLD"
+    assert summary["recommended_recovery_action"] == "HARD_UNSAFE_HOLD"
+    assert summary["self_recover_paper_action_policy"] == "HARD_UNSAFE_HOLD"
     assert summary["paper_recovery_severity"] == "UNSAFE"
     assert summary["autonomous_recovery_execution_enabled"] is False
     assert summary["live_action_policy"] == "HOLD_DOWN"
@@ -539,6 +559,8 @@ def test_track_b_control_plane_status_projection_displays_duplicate_writer_hard_
 
     assert summary["paper_recovery_policy"] == "HARD_UNSAFE_HOLD"
     assert summary["paper_recovery_diagnostic"] == "HARD_UNSAFE_HOLD"
+    assert summary["recommended_recovery_action"] == "HARD_UNSAFE_HOLD"
+    assert summary["self_recover_paper_action_policy"] == "HARD_UNSAFE_HOLD"
     assert summary["runtime_resume_blockers"] == [{"code": "duplicate_runtime_writer", "detail": "hard unsafe"}]
     assert summary["runtime_resume_action_policy"] == "HOLD_DUPLICATE_WRITER"
     assert summary["primary_blocking_agent_id"] == "track_b_paper_runtime"
@@ -622,6 +644,29 @@ def _write_track_b_control_plane_artifacts(
         resume_action_policy = "QUARANTINE_OBSERVE_ONLY"
     else:
         resume_action_policy = "NEW_RUNTIME_GENERATION_ALLOWED"
+    self_recover_plan_classification = autonomous_recovery_plan_classification or (
+        "WAIT_MARKET_CLOSED"
+        if runtime_resume_classification == "RESUME_BLOCKED_MARKET_CLOSED"
+        else "PLAN_RUNTIME_RETRY"
+        if paper_action_policy == "AUTONOMOUS_RETRY_ELIGIBLE"
+        else "PLAN_HARD_UNSAFE_HOLD"
+        if paper_action_policy == "HARD_UNSAFE_HOLD"
+        else "PLAN_QUARANTINE_OBSERVE_ONLY"
+    )
+    self_recover_recommended_action = (
+        "WAIT_MARKET_CLOSED"
+        if runtime_resume_classification == "RESUME_BLOCKED_MARKET_CLOSED"
+        else "RUNTIME_RETRY_DRY_RUN"
+        if paper_action_policy == "AUTONOMOUS_RETRY_ELIGIBLE"
+        else "HARD_UNSAFE_HOLD"
+        if paper_action_policy == "HARD_UNSAFE_HOLD"
+        else "QUARANTINE_OBSERVE_ONLY"
+    )
+    self_recover_attempts_remaining = 0 if paper_action_policy == "QUARANTINE_OBSERVE_ONLY" else 2
+    self_recover_cooldown_until = (
+        "2026-05-23T12:15:00+00:00" if paper_action_policy == "QUARANTINE_OBSERVE_ONLY" else None
+    )
+    self_recover_budget_key = "track_b_paper_runtime|RUNTIME_RETRY|test"
     _write_json_file(
         root / "outputs/track_b_execution_core/agent_registry/latest_agent_registry.json",
         {"classification": "AGENT_REGISTRY_READY"},
@@ -647,7 +692,24 @@ def _write_track_b_control_plane_artifacts(
     )
     _write_json_file(
         root / "outputs/track_b_execution_core/self_recover/latest_self_recover_rules.json",
-        {"classification": self_recover_recommendation, "recommendation": self_recover_recommendation},
+        {
+            "classification": self_recover_recommendation,
+            "recommendation": self_recover_recommendation,
+            "self_recover_schema_version": "v2",
+            "recovery_plan_id": "test-self-recover-plan",
+            "control_plane_snapshot_id": "test-control-plane-snapshot",
+            "shared_truth_generation_id": "test-shared-truth-generation",
+            "paper_action_policy": paper_action_policy,
+            "autonomous_recovery_plan_classification": self_recover_plan_classification,
+            "recommended_recovery_action": self_recover_recommended_action,
+            "recovery_budget_key": self_recover_budget_key,
+            "attempts_remaining": self_recover_attempts_remaining,
+            "cooldown_until": self_recover_cooldown_until,
+            "quarantine_required": paper_action_policy == "QUARANTINE_OBSERVE_ONLY",
+            "agent_health_top_blockers": [],
+            "operator_explanation": paper_recovery_reason,
+            "execution_enabled": False,
+        },
     )
     _write_json_file(
         root / "outputs/track_b_execution_core/crash_loop_protection/latest_crash_loop_protection.json",
@@ -751,6 +813,20 @@ def _write_track_b_control_plane_artifacts(
                 else "QUARANTINE_OBSERVE_ONLY"
             ),
             "autonomous_recovery_execution_enabled": False,
+            "self_recover_schema_version": "v2",
+            "self_recover_recovery_plan_id": "test-self-recover-plan",
+            "self_recover_control_plane_snapshot_id": "test-control-plane-snapshot",
+            "self_recover_shared_truth_generation_id": "test-shared-truth-generation",
+            "self_recover_recommended_recovery_action": self_recover_recommended_action,
+            "self_recover_paper_action_policy": paper_action_policy,
+            "self_recover_autonomous_recovery_plan_classification": self_recover_plan_classification,
+            "self_recover_recovery_budget_key": self_recover_budget_key,
+            "self_recover_attempts_remaining": self_recover_attempts_remaining,
+            "self_recover_cooldown_until": self_recover_cooldown_until,
+            "self_recover_quarantine_required": paper_action_policy == "QUARANTINE_OBSERVE_ONLY",
+            "self_recover_agent_health_top_blockers": [],
+            "self_recover_operator_explanation": paper_recovery_reason,
+            "self_recover_execution_enabled": False,
             "shared_truth_refresh_generation_id": "test-shared-truth-generation",
             "shared_truth_coherence_status": "COHERENT",
             "stale_or_mixed_sources": [],
@@ -789,6 +865,20 @@ def _write_track_b_control_plane_artifacts(
                 else "operator may start Track B PAPER runtime using the repaired direct supervisor launcher"
             ),
             "paper_recovery_policy": paper_action_policy,
+            "self_recover_schema_version": "v2",
+            "self_recover_recovery_plan_id": "test-self-recover-plan",
+            "self_recover_control_plane_snapshot_id": "test-control-plane-snapshot",
+            "self_recover_shared_truth_generation_id": "test-shared-truth-generation",
+            "recommended_recovery_action": self_recover_recommended_action,
+            "paper_action_policy": paper_action_policy,
+            "self_recover_autonomous_recovery_plan_classification": self_recover_plan_classification,
+            "recovery_budget_key": self_recover_budget_key,
+            "attempts_remaining": self_recover_attempts_remaining,
+            "cooldown_until": self_recover_cooldown_until,
+            "quarantine_required": paper_action_policy == "QUARANTINE_OBSERVE_ONLY",
+            "self_recover_agent_health_top_blockers": [],
+            "self_recover_operator_explanation": paper_recovery_reason,
+            "self_recover_execution_enabled": False,
             "runtime_resume_semantics_version": "v2",
             "runtime_resume_action_policy": resume_action_policy,
             "runtime_resume_previous_runtime_generation_id": "runtime-generation-previous",
