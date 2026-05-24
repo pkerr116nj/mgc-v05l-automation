@@ -184,7 +184,15 @@ def test_missing_required_agent_health_artifact_blocks(tmp_path: Path) -> None:
     assert payload["agent_health_blocks_proof"] is True
     assert payload["agent_health_blocks_runtime_submit"] is True
     assert payload["runtime_supervisor_classification"] == "SUPERVISOR_SHARED_TRUTH_STALE"
-    assert any(blocker["agent_id"] == "open_order_truth" for blocker in payload["agent_health_top_blockers"])
+    open_order_blocker = next(
+        blocker for blocker in payload["agent_health_top_blockers"] if blocker["agent_id"] == "open_order_truth"
+    )
+    assert open_order_blocker["display_name"] == "Open Order Truth"
+    assert open_order_blocker["status"] == "MISSING_ARTIFACT"
+    assert open_order_blocker["blocking_for_proof"] is True
+    assert open_order_blocker["blocking_for_runtime_submit"] is True
+    assert open_order_blocker["blocking_for_recovery"] is True
+    assert open_order_blocker["diagnostic_only"] is False
 
 
 def test_dashboard_projection_is_not_authority(tmp_path: Path) -> None:

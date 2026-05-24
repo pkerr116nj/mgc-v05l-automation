@@ -238,6 +238,11 @@ def test_runtime_start_consults_control_plane_snapshot_before_spawn() -> None:
     assert "autonomous_recovery_execution_enabled" in script
     assert "shared_truth_refresh_generation_id" in script
     assert "shared_truth_coherence_status" in script
+    assert "agent_health_blockers" in script
+    assert "agent_health_classification" in script
+    assert "agent_health_has_duplicate_writer" in script
+    assert "blocking_for_runtime_submit_count" in script
+    assert "stale_pid_count" in script
     assert "control_plane_snapshot" in script
     assert "classify_control_plane_snapshot_status" in script
     assert "required_for_launch=True" in script
@@ -270,6 +275,11 @@ def test_headless_launch_uses_control_plane_snapshot_as_final_pre_spawn_gate() -
     assert "autonomous_recovery_execution_enabled" in script
     assert "shared_truth_refresh_generation_id" in script
     assert "shared_truth_coherence_status" in script
+    assert "agent_health_blockers" in script
+    assert "agent_health_classification" in script
+    assert "agent_health_has_duplicate_writer" in script
+    assert "blocking_for_runtime_submit_count" in script
+    assert "stale_pid_count" in script
     assert "control_plane_snapshot_path" in script
     assert "classify_control_plane_snapshot_status" in script
     assert "required_for_launch=True" in script

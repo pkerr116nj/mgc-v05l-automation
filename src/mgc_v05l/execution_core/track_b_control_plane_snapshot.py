@@ -394,11 +394,13 @@ def _agent_health_evidence(agent_health: Mapping[str, Any]) -> dict[str, Any]:
     top_blockers = [
         {
             "agent_id": str(agent.get("agent_id") or ""),
+            "display_name": str(agent.get("display_name") or agent.get("agent_id") or ""),
             "status": str(agent.get("status") or ""),
             "reason": str(agent.get("reason") or ""),
             "blocking_for_proof": agent.get("blocking_for_proof") is True,
             "blocking_for_runtime_submit": agent.get("blocking_for_runtime_submit") is True,
             "blocking_for_recovery": agent.get("blocking_for_recovery") is True,
+            "diagnostic_only": agent.get("diagnostic_only") is True,
         }
         for agent in _list(agent_health.get("agents"))
         if isinstance(agent, Mapping)

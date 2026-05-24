@@ -805,6 +805,26 @@ except (OSError, json.JSONDecodeError):
     raise SystemExit(0)
 
 status = classify_control_plane_snapshot_status(payload, required_for_launch=True)
+
+def agent_health_blocker_summary(payload):
+    blockers = payload.get("agent_health_top_blockers") or []
+    if not blockers:
+        return "[]"
+    rows = []
+    for blocker in blockers[:5]:
+        rows.append(
+            "{agent_id}:{status}:{reason}:proof={proof}:submit={submit}:recovery={recovery}:diagnostic={diagnostic}".format(
+                agent_id=blocker.get("agent_id") or "unknown",
+                status=blocker.get("status") or "unknown",
+                reason=str(blocker.get("reason") or "-").replace(" ", "_")[:160],
+                proof=blocker.get("blocking_for_proof") is True,
+                submit=blocker.get("blocking_for_runtime_submit") is True,
+                recovery=blocker.get("blocking_for_recovery") is True,
+                diagnostic=blocker.get("diagnostic_only") is True,
+            )
+        )
+    return "[" + ";".join(rows) + "]"
+
 print(
     "control_plane_status_classification={status_classification} diagnostic_only={diagnostic_only} "
     "not_routing_authority={not_routing_authority} snapshot_id={snapshot_id} classification={classification} "
@@ -813,6 +833,12 @@ print(
     "proof_window_status={window} safe_to_start_runtime={safe} "
     "paper_recovery_policy={paper_policy} autonomous_recovery_plan_classification={plan_classification} "
     "autonomous_recovery_next_action={plan_action} autonomous_recovery_execution_enabled={plan_enabled} "
+    "agent_health_classification={agent_health_classification} "
+    "agent_health_blocks_proof={blocks_proof} agent_health_blocks_runtime_submit={blocks_submit} "
+    "agent_health_blocks_recovery={blocks_recovery} agent_health_has_duplicate_writer={duplicate_writer} "
+    "blocking_for_proof_count={proof_count} blocking_for_runtime_submit_count={submit_count} "
+    "blocking_for_recovery_count={recovery_count} duplicate_process_count={duplicate_count} "
+    "stale_pid_count={stale_pid_count} agent_health_blockers={agent_health_blockers} "
     "recommended_next_command={command}".format(
         status_classification=status.get("classification"),
         diagnostic_only=status.get("diagnostic_only"),
@@ -829,6 +855,17 @@ print(
         plan_classification=payload.get("autonomous_recovery_plan_classification"),
         plan_action=payload.get("autonomous_recovery_next_action"),
         plan_enabled=payload.get("autonomous_recovery_execution_enabled"),
+        agent_health_classification=payload.get("agent_health_classification"),
+        blocks_proof=payload.get("agent_health_blocks_proof"),
+        blocks_submit=payload.get("agent_health_blocks_runtime_submit"),
+        blocks_recovery=payload.get("agent_health_blocks_recovery"),
+        duplicate_writer=payload.get("agent_health_has_duplicate_writer"),
+        proof_count=payload.get("blocking_for_proof_count"),
+        submit_count=payload.get("blocking_for_runtime_submit_count"),
+        recovery_count=payload.get("blocking_for_recovery_count"),
+        duplicate_count=payload.get("duplicate_process_count"),
+        stale_pid_count=payload.get("stale_pid_count"),
+        agent_health_blockers=agent_health_blocker_summary(payload),
         command=payload.get("recommended_next_command"),
     )
 )
@@ -861,6 +898,26 @@ except (OSError, json.JSONDecodeError):
     raise SystemExit(2)
 
 status = classify_control_plane_snapshot_status(payload, required_for_launch=True)
+
+def agent_health_blocker_summary(payload):
+    blockers = payload.get("agent_health_top_blockers") or []
+    if not blockers:
+        return "[]"
+    rows = []
+    for blocker in blockers[:5]:
+        rows.append(
+            "{agent_id}:{status}:{reason}:proof={proof}:submit={submit}:recovery={recovery}:diagnostic={diagnostic}".format(
+                agent_id=blocker.get("agent_id") or "unknown",
+                status=blocker.get("status") or "unknown",
+                reason=str(blocker.get("reason") or "-").replace(" ", "_")[:160],
+                proof=blocker.get("blocking_for_proof") is True,
+                submit=blocker.get("blocking_for_runtime_submit") is True,
+                recovery=blocker.get("blocking_for_recovery") is True,
+                diagnostic=blocker.get("diagnostic_only") is True,
+            )
+        )
+    return "[" + ";".join(rows) + "]"
+
 allowed = (
     status.get("classification") == "CONTROL_PLANE_READY"
     and payload.get("runtime_supervisor_classification") == "SUPERVISOR_RUNTIME_START_ALLOWED"
@@ -889,6 +946,17 @@ if not allowed:
         f"autonomous_recovery_plan_classification={payload.get('autonomous_recovery_plan_classification')} "
         f"autonomous_recovery_next_action={payload.get('autonomous_recovery_next_action')} "
         f"autonomous_recovery_execution_enabled={payload.get('autonomous_recovery_execution_enabled')} "
+        f"agent_health_classification={payload.get('agent_health_classification')} "
+        f"agent_health_blocks_proof={payload.get('agent_health_blocks_proof')} "
+        f"agent_health_blocks_runtime_submit={payload.get('agent_health_blocks_runtime_submit')} "
+        f"agent_health_blocks_recovery={payload.get('agent_health_blocks_recovery')} "
+        f"agent_health_has_duplicate_writer={payload.get('agent_health_has_duplicate_writer')} "
+        f"blocking_for_proof_count={payload.get('blocking_for_proof_count')} "
+        f"blocking_for_runtime_submit_count={payload.get('blocking_for_runtime_submit_count')} "
+        f"blocking_for_recovery_count={payload.get('blocking_for_recovery_count')} "
+        f"duplicate_process_count={payload.get('duplicate_process_count')} "
+        f"stale_pid_count={payload.get('stale_pid_count')} "
+        f"agent_health_blockers={agent_health_blocker_summary(payload)} "
         f"recommended_next_command={payload.get('recommended_next_command')}",
         file=sys.stderr,
     )
