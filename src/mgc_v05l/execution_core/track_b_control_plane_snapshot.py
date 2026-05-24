@@ -45,6 +45,12 @@ from mgc_v05l.execution_core.track_b_runtime_supervisor_authority import (
     build_track_b_runtime_supervisor_authority,
     write_track_b_runtime_supervisor_authority,
 )
+from mgc_v05l.execution_core.track_b_runtime_safe_state_envelope import (
+    DEFAULT_RUNTIME_SAFE_STATE_ENVELOPE_ARTIFACT,
+    TrackBRuntimeSafeStateEnvelopeConfig,
+    build_track_b_runtime_safe_state_envelope,
+    write_track_b_runtime_safe_state_envelope,
+)
 from mgc_v05l.execution_core.track_b_shared_truth_refresh_cli import (
     DEFAULT_SHARED_TRUTH_REFRESH_ARTIFACT,
     TrackBSharedTruthRefreshConfig,
@@ -84,6 +90,7 @@ class TrackBControlPlaneSnapshotConfig:
     paper_autonomous_recovery_plan_path: Path = DEFAULT_PAPER_AUTONOMOUS_RECOVERY_PLAN_ARTIFACT
     recovery_attempt_history_path: Path = DEFAULT_RECOVERY_ATTEMPT_HISTORY_ARTIFACT
     artifact_archive_plan_path: Path = DEFAULT_ARTIFACT_ARCHIVE_PLAN_PATH
+    runtime_safe_state_envelope_path: Path = DEFAULT_RUNTIME_SAFE_STATE_ENVELOPE_ARTIFACT
     broker_lease_history_path: Path | None = None
 
     def resolve(self, path: Path) -> Path:
@@ -133,6 +140,9 @@ def build_track_b_control_plane_snapshot(
         repo_root=config.repo_root,
         dashboard_projection_path=None,
         shared_truth_path=config.shared_truth_refresh_path,
+        runtime_safe_state_envelope_path=Path(
+            "outputs/track_b_execution_core/safe_state/__control_plane_snapshot_pre_safe_state_not_authority.json"
+        ),
     )
     runtime_supervisor = build_track_b_runtime_supervisor_authority(
         config=supervisor_config,
@@ -171,7 +181,7 @@ def build_track_b_control_plane_snapshot(
         config=artifact_archive_plan_config,
         payload=artifact_archive_plan,
     )
-    return _snapshot_payload(
+    payload = _snapshot_payload(
         config=config,
         now=actual_now,
         shared_truth=shared_truth,
@@ -185,6 +195,24 @@ def build_track_b_control_plane_snapshot(
         artifact_archive_plan=artifact_archive_plan,
         artifact_archive_plan_path=artifact_archive_plan_path,
     )
+    safe_state_config = TrackBRuntimeSafeStateEnvelopeConfig(
+        repo_root=config.repo_root,
+        output_path=config.runtime_safe_state_envelope_path,
+        control_plane_snapshot_path=config.output_path,
+    )
+    safe_state = build_track_b_runtime_safe_state_envelope(
+        config=safe_state_config,
+        now=actual_now,
+        input_overrides={
+            "control_plane_snapshot": payload,
+            "recovery_attempt_history": recovery_attempt_history,
+        },
+    )
+    safe_state_path = write_track_b_runtime_safe_state_envelope(config=safe_state_config, payload=safe_state)
+    _apply_safe_state_to_snapshot(payload=payload, safe_state=safe_state)
+    payload["source_artifact_paths"]["runtime_safe_state_envelope"] = str(safe_state_path)
+    payload.update(build_track_b_control_plane_top_line(payload))
+    return payload
 
 
 def write_track_b_control_plane_snapshot(
@@ -288,6 +316,12 @@ def main(argv: Sequence[str] | None = None) -> int:
         "artifact_archive_estimated_bytes": payload.get("artifact_archive_estimated_bytes"),
         "artifact_archive_dry_run_only": payload.get("artifact_archive_dry_run_only"),
         "artifact_archive_execution_enabled": payload.get("artifact_archive_execution_enabled"),
+        "safe_state_classification": payload.get("safe_state_classification"),
+        "safe_state_observe_only": payload.get("safe_state_observe_only"),
+        "safe_state_recovery_only": payload.get("safe_state_recovery_only"),
+        "safe_state_runtime_start_allowed": payload.get("safe_state_runtime_start_allowed"),
+        "safe_state_submit_allowed": payload.get("safe_state_submit_allowed"),
+        "safe_state_broker_mutation_allowed": payload.get("safe_state_broker_mutation_allowed"),
         "primary_blocking_agent_id": payload.get("primary_blocking_agent_id"),
         "operator_explanation": payload.get("operator_explanation"),
         "recommended_observation_step": payload.get("recommended_observation_step"),
@@ -488,6 +522,43 @@ def _artifact_archive_plan_fields(payload: Mapping[str, Any]) -> dict[str, Any]:
         "artifact_archive_diagnostic_only": True,
         "artifact_archive_not_routing_authority": True,
     }
+
+
+def _safe_state_envelope_fields(payload: Mapping[str, Any]) -> dict[str, Any]:
+    classification = str(payload.get("safe_state_classification") or payload.get("classification") or "")
+    return {
+        "safe_state_classification": classification,
+        "safe_state_broker_mutation_allowed": payload.get("broker_mutation_allowed") is True,
+        "safe_state_runtime_start_allowed": payload.get("runtime_start_allowed") is True,
+        "safe_state_submit_allowed": payload.get("submit_allowed") is True,
+        "safe_state_observe_only": payload.get("observe_only") is True,
+        "safe_state_recovery_only": payload.get("recovery_only") is True,
+        "safe_state_tripped_limits": list(payload.get("tripped_limits") or []),
+        "safe_state_limit_counters": dict(_mapping(payload.get("limit_counters"))),
+        "safe_state_runtime_generation_id": payload.get("runtime_generation_id"),
+        "safe_state_control_plane_snapshot_id": payload.get("control_plane_snapshot_id"),
+        "safe_state_operator_explanation": str(payload.get("operator_explanation") or ""),
+        "safe_state_recommended_next_step": str(payload.get("recommended_next_step") or ""),
+    }
+
+
+def _apply_safe_state_to_snapshot(*, payload: dict[str, Any], safe_state: Mapping[str, Any]) -> None:
+    fields = _safe_state_envelope_fields(safe_state)
+    payload.update(fields)
+    classification = str(fields["safe_state_classification"] or "")
+    if classification and classification != "SAFE_STATE_NORMAL":
+        payload["classification"] = CONTROL_PLANE_SNAPSHOT_BLOCKED
+        payload["safe_to_start_runtime"] = False
+        payload.setdefault("blockers", []).append(
+            {
+                "code": "runtime_safe_state_envelope",
+                "detail": f"Runtime Safe-State Envelope is {classification}.",
+            }
+        )
+        if not payload.get("operator_explanation"):
+            payload["operator_explanation"] = fields["safe_state_operator_explanation"]
+        if not payload.get("recommended_observation_step"):
+            payload["recommended_observation_step"] = fields["safe_state_recommended_next_step"]
 
 
 def _snapshot_blockers(

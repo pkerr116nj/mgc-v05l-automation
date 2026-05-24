@@ -13,6 +13,7 @@ from typing import Any, Mapping
 TOP_LINE_MARKET_CLOSED_WAIT = "MARKET_CLOSED_WAIT"
 TOP_LINE_READY_FOR_OPERATOR_START = "READY_FOR_OPERATOR_START"
 TOP_LINE_HARD_UNSAFE_DUPLICATE_WRITER = "HARD_UNSAFE_DUPLICATE_WRITER"
+TOP_LINE_HARD_UNSAFE_SAFE_STATE = "HARD_UNSAFE_SAFE_STATE"
 TOP_LINE_MISSING_AUTHORITY_ARTIFACT = "MISSING_AUTHORITY_ARTIFACT"
 TOP_LINE_CONTROL_PLANE_BLOCKED = "CONTROL_PLANE_BLOCKED"
 TOP_LINE_CONTROL_PLANE_STATUS = "CONTROL_PLANE_STATUS"
@@ -33,6 +34,15 @@ def build_track_b_control_plane_top_line(snapshot: Mapping[str, Any]) -> dict[st
         classification = TOP_LINE_HARD_UNSAFE_DUPLICATE_WRITER
         status = _join_status(
             "Hard unsafe: duplicate Track B PAPER runtime writer detected.",
+            operator_explanation,
+            recommended_observation_step,
+        )
+    elif _safe_state_hard_hold_detected(snapshot):
+        classification = TOP_LINE_HARD_UNSAFE_SAFE_STATE
+        status = _join_status(
+            "Hard unsafe: Runtime Safe-State Envelope containment limit is tripped.",
+            _text(snapshot.get("safe_state_operator_explanation")),
+            _text(snapshot.get("safe_state_recommended_next_step")),
             operator_explanation,
             recommended_observation_step,
         )
@@ -103,6 +113,13 @@ def _duplicate_writer_detected(snapshot: Mapping[str, Any]) -> bool:
         ]
     ).lower()
     return "duplicate" in combined and ("writer" in combined or "runtime" in combined)
+
+
+def _safe_state_hard_hold_detected(snapshot: Mapping[str, Any]) -> bool:
+    return _text(snapshot.get("safe_state_classification")) in {
+        "SAFE_STATE_HARD_HOLD",
+        "SAFE_STATE_POSITION_LIMIT_HIT",
+    }
 
 
 def _missing_authority_artifact_detected(snapshot: Mapping[str, Any]) -> bool:

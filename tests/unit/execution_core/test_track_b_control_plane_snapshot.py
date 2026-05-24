@@ -49,6 +49,10 @@ def test_snapshot_ties_supervisor_to_shared_truth_generation(tmp_path: Path) -> 
     assert payload["artifact_archive_execution_enabled"] is False
     assert payload["artifact_archive_diagnostic_only"] is True
     assert payload["artifact_archive_not_routing_authority"] is True
+    assert payload["safe_state_classification"] == "SAFE_STATE_NORMAL"
+    assert payload["safe_state_runtime_start_allowed"] is True
+    assert payload["safe_state_submit_allowed"] is True
+    assert payload["safe_state_broker_mutation_allowed"] is True
     assert payload["broker_order_position_summary"]["open_order_truth"] == "NO_OPEN_ORDERS"
     assert payload["source_artifact_paths"]["shared_truth_refresh"].endswith(
         "outputs/track_b_execution_core/shared_truth/latest_track_b_shared_truth_refresh.json"
@@ -240,6 +244,32 @@ def test_duplicate_writer_blocks_snapshot_start_posture(tmp_path: Path) -> None:
     assert "duplicate" in payload["top_line_status"].lower()
     assert any(blocker["code"] == "agent_health_duplicate_writer" for blocker in payload["blockers"])
     assert payload["safe_to_start_runtime"] is False
+
+
+def test_safe_state_broker_mutation_limit_blocks_snapshot_status(tmp_path: Path) -> None:
+    _seed_clean_stack(tmp_path)
+    _seed_control_plane(tmp_path)
+    _write(
+        tmp_path / "outputs/track_b_execution_core/strategy_bridge/latest_strategy_bridge_submit_report.json",
+        {
+            "generated_at": NOW.isoformat(),
+            "submits_per_symbol_window": {"MGC": 4},
+            "broker_mutation_attempts_per_window": 4,
+            "failed_broker_mutations_per_window": 0,
+            "live_money_eligible": False,
+        },
+    )
+
+    payload = _snapshot(tmp_path)
+
+    assert payload["safe_state_classification"] == "SAFE_STATE_BROKER_MUTATION_LIMIT_HIT"
+    assert payload["safe_state_recovery_only"] is True
+    assert payload["classification"] == "CONTROL_PLANE_SNAPSHOT_BLOCKED"
+    assert payload["safe_to_start_runtime"] is False
+    assert any(blocker["code"] == "runtime_safe_state_envelope" for blocker in payload["blockers"])
+    assert payload["source_artifact_paths"]["runtime_safe_state_envelope"].endswith(
+        "outputs/track_b_execution_core/safe_state/latest_runtime_safe_state_envelope.json"
+    )
 
 
 def test_stale_noncritical_agent_health_artifact_is_warning(tmp_path: Path) -> None:

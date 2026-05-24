@@ -51,6 +51,15 @@ from mgc_v05l.execution_core.track_b_runtime_resume_semantics import (
     RESUME_BLOCKED_MARKET_CLOSED,
     RESUME_BLOCKED_OPERATOR_ACK_REQUIRED,
 )
+from mgc_v05l.execution_core.track_b_runtime_safe_state_envelope import (
+    DEFAULT_RUNTIME_SAFE_STATE_ENVELOPE_ARTIFACT,
+    SAFE_STATE_BROKER_MUTATION_LIMIT_HIT,
+    SAFE_STATE_DUPLICATE_INTENT_RISK,
+    SAFE_STATE_HARD_HOLD,
+    SAFE_STATE_LIFECYCLE_DISAGREEMENT_LIMIT_HIT,
+    SAFE_STATE_POSITION_LIMIT_HIT,
+    SAFE_STATE_RECOVERY_ONLY,
+)
 from mgc_v05l.execution_core.track_b_self_recover_rules import DEFAULT_SELF_RECOVER_RULES_ARTIFACT
 from mgc_v05l.execution_core.track_b_shared_truth_refresh_cli import DEFAULT_RECONCILIATION_ARTIFACT
 from mgc_v05l.market_data.phase1_market_session import MARKET_CLOSED_NO_FRESH_BARS
@@ -147,6 +156,7 @@ class TrackBRuntimeSupervisorAuthorityConfig:
     stop_provenance_path: Path = DEFAULT_RUNTIME_STOP_PROVENANCE_ARTIFACT
     paper_recovery_policy_path: Path = DEFAULT_PAPER_RECOVERY_POLICY_ARTIFACT
     paper_autonomous_recovery_plan_path: Path = DEFAULT_PAPER_AUTONOMOUS_RECOVERY_PLAN_ARTIFACT
+    runtime_safe_state_envelope_path: Path = DEFAULT_RUNTIME_SAFE_STATE_ENVELOPE_ARTIFACT
 
     def resolve(self, path: Path) -> Path:
         return path if path.is_absolute() else self.repo_root / path
@@ -179,6 +189,7 @@ def build_track_b_runtime_supervisor_authority(
         "stop_provenance": _read_json(config.resolve(config.stop_provenance_path)),
         "paper_recovery_policy": _read_json(config.resolve(config.paper_recovery_policy_path)),
         "paper_autonomous_recovery_plan": _read_json(config.resolve(config.paper_autonomous_recovery_plan_path)),
+        "runtime_safe_state_envelope": _read_json(config.resolve(config.runtime_safe_state_envelope_path)),
     }
     inputs["shared_truth_coherence"] = _shared_truth_coherence(inputs)
     decision = _classify_supervisor(inputs=inputs)
@@ -221,6 +232,7 @@ def build_track_b_runtime_supervisor_authority(
         "autonomous_recovery_execution_enabled": False,
         "autonomous_recovery_blockers": autonomous_recovery_plan["blockers"],
         "autonomous_recovery_budget_summary": autonomous_recovery_plan["budget_summary"],
+        **_safe_state_fields(inputs["runtime_safe_state_envelope"]),
         "safe_to_start_runtime": decision["safe_to_start_runtime"],
         "safe_to_leave_runtime_running": decision["safe_to_leave_runtime_running"],
         "safe_to_stop_runtime": decision["safe_to_stop_runtime"],
@@ -335,6 +347,11 @@ def main(argv: Sequence[str] | None = None) -> int:
                     ),
                     "autonomous_recovery_next_action": payload.get("autonomous_recovery_next_action"),
                     "autonomous_recovery_execution_enabled": payload.get("autonomous_recovery_execution_enabled"),
+                    "safe_state_classification": payload.get("safe_state_classification"),
+                    "safe_state_observe_only": payload.get("safe_state_observe_only"),
+                    "safe_state_recovery_only": payload.get("safe_state_recovery_only"),
+                    "safe_state_runtime_start_allowed": payload.get("safe_state_runtime_start_allowed"),
+                    "safe_state_submit_allowed": payload.get("safe_state_submit_allowed"),
                     "shared_truth_refresh_generation_id": payload.get("shared_truth_refresh_generation_id"),
                     "shared_truth_coherence_status": payload.get("shared_truth_coherence_status"),
                     "reason": payload.get("reason"),
@@ -352,6 +369,34 @@ def main(argv: Sequence[str] | None = None) -> int:
 
 def _classify_supervisor(*, inputs: Mapping[str, Mapping[str, Any]]) -> dict[str, Any]:
     evidence = _evidence(inputs)
+
+    if evidence["safe_state_classification"] in {SAFE_STATE_HARD_HOLD, SAFE_STATE_POSITION_LIMIT_HIT}:
+        return _decision(
+            SUPERVISOR_HARD_UNSAFE_HOLD,
+            "SAFE_STATE_HARD_HOLD",
+            f"Runtime Safe-State Envelope is {evidence['safe_state_classification']}.",
+            blockers=[_blocker("runtime_safe_state_envelope", evidence["safe_state_classification"])],
+        )
+
+    if evidence["safe_state_classification"] == SAFE_STATE_BROKER_MUTATION_LIMIT_HIT:
+        return _decision(
+            SUPERVISOR_PAPER_QUARANTINE_OBSERVE_ONLY,
+            "SAFE_STATE_RECOVERY_ONLY",
+            "Runtime Safe-State Envelope tripped broker mutation containment; PAPER shifts to recovery-only posture.",
+            blockers=[_blocker("runtime_safe_state_envelope", evidence["safe_state_classification"])],
+        )
+
+    if evidence["safe_state_classification"] in {
+        SAFE_STATE_DUPLICATE_INTENT_RISK,
+        SAFE_STATE_LIFECYCLE_DISAGREEMENT_LIMIT_HIT,
+        SAFE_STATE_RECOVERY_ONLY,
+    }:
+        return _decision(
+            SUPERVISOR_PAPER_QUARANTINE_OBSERVE_ONLY,
+            "SAFE_STATE_OBSERVE_OR_RECOVERY_ONLY",
+            f"Runtime Safe-State Envelope is {evidence['safe_state_classification']}.",
+            blockers=[_blocker("runtime_safe_state_envelope", evidence["safe_state_classification"])],
+        )
 
     if evidence["live_money_eligible"] is True or evidence["paper_action_policy"] == PAPER_POLICY_HARD_UNSAFE_HOLD:
         return _decision(
@@ -850,6 +895,8 @@ def _evidence(inputs: Mapping[str, Mapping[str, Any]]) -> dict[str, Any]:
         "stop_provenance": dict(_stop_provenance(inputs["stop_provenance"])),
         "paper_recovery_policy": _paper_policy_evidence(inputs["paper_recovery_policy"]),
         "paper_autonomous_recovery_plan": _autonomous_recovery_plan_fields(inputs["paper_autonomous_recovery_plan"]),
+        "runtime_safe_state_envelope": _safe_state_fields(inputs["runtime_safe_state_envelope"]),
+        **_safe_state_evidence_fields(inputs["runtime_safe_state_envelope"]),
         "autonomous_recovery_plan_classification": _classification(inputs["paper_autonomous_recovery_plan"]),
         "autonomous_recovery_next_action": _autonomous_recovery_next_action(inputs["paper_autonomous_recovery_plan"]),
         "autonomous_recovery_execution_enabled": inputs["paper_autonomous_recovery_plan"].get("execution_enabled") is True,
@@ -877,6 +924,7 @@ def _evidence(inputs: Mapping[str, Mapping[str, Any]]) -> dict[str, Any]:
             inputs["reconciliation"],
             inputs["paper_recovery_policy"],
             inputs["paper_autonomous_recovery_plan"],
+            inputs["runtime_safe_state_envelope"],
             key="live_money_eligible",
         ),
         "runtime_writer_authority": str(inputs["runtime_environment_truth"].get("writer_authority") or ""),
@@ -917,6 +965,27 @@ def _self_recover_v2_fields(payload: Mapping[str, Any]) -> dict[str, Any]:
         "self_recover_operator_explanation": str(payload.get("operator_explanation") or ""),
         "self_recover_execution_enabled": payload.get("execution_enabled") is True,
     }
+
+
+def _safe_state_fields(payload: Mapping[str, Any]) -> dict[str, Any]:
+    return {
+        "safe_state_classification": str(
+            payload.get("safe_state_classification") or payload.get("classification") or ""
+        ),
+        "safe_state_broker_mutation_allowed": payload.get("broker_mutation_allowed") is True,
+        "safe_state_runtime_start_allowed": payload.get("runtime_start_allowed") is True,
+        "safe_state_submit_allowed": payload.get("submit_allowed") is True,
+        "safe_state_observe_only": payload.get("observe_only") is True,
+        "safe_state_recovery_only": payload.get("recovery_only") is True,
+        "safe_state_tripped_limits": list(payload.get("tripped_limits") or []),
+        "safe_state_limit_counters": dict(_mapping(payload.get("limit_counters"))),
+        "safe_state_operator_explanation": str(payload.get("operator_explanation") or ""),
+        "safe_state_recommended_next_step": str(payload.get("recommended_next_step") or ""),
+    }
+
+
+def _safe_state_evidence_fields(payload: Mapping[str, Any]) -> dict[str, Any]:
+    return _safe_state_fields(payload)
 
 
 def _missing_or_stale_evidence(evidence: Mapping[str, Any]) -> list[str]:
@@ -1121,6 +1190,7 @@ def _input_artifacts(config: TrackBRuntimeSupervisorAuthorityConfig) -> dict[str
         "stop_provenance": str(config.resolve(config.stop_provenance_path)),
         "paper_recovery_policy": str(config.resolve(config.paper_recovery_policy_path)),
         "paper_autonomous_recovery_plan": str(config.resolve(config.paper_autonomous_recovery_plan_path)),
+        "runtime_safe_state_envelope": str(config.resolve(config.runtime_safe_state_envelope_path)),
     }
 
 

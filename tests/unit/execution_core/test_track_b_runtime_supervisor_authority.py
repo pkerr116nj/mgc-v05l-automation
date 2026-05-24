@@ -327,6 +327,33 @@ def test_hard_unsafe_supervisor_dominates_autonomous_plan(tmp_path: Path) -> Non
     assert payload["safe_to_start_runtime"] is False
 
 
+def test_safe_state_hard_hold_blocks_supervisor(tmp_path: Path) -> None:
+    _seed_base(tmp_path)
+    _write_json(
+        tmp_path / "outputs" / "track_b_execution_core" / "safe_state" / "latest_runtime_safe_state_envelope.json",
+        {
+            "generated_at": NOW.isoformat(),
+            "safe_state_classification": "SAFE_STATE_HARD_HOLD",
+            "classification": "SAFE_STATE_HARD_HOLD",
+            "runtime_start_allowed": False,
+            "submit_allowed": False,
+            "broker_mutation_allowed": False,
+            "observe_only": True,
+            "recovery_only": False,
+            "tripped_limits": [{"limit_id": "duplicate_runtime_writer", "classification": "SAFE_STATE_HARD_HOLD"}],
+            "live_money_eligible": False,
+        },
+    )
+
+    payload = build_track_b_runtime_supervisor_authority(config=TrackBRuntimeSupervisorAuthorityConfig(repo_root=tmp_path), now=NOW)
+
+    assert payload["classification"] == SUPERVISOR_HARD_UNSAFE_HOLD
+    assert payload["safe_state_classification"] == "SAFE_STATE_HARD_HOLD"
+    assert payload["safe_state_observe_only"] is True
+    assert payload["safe_to_start_runtime"] is False
+    assert payload["blockers"][0]["code"] == "runtime_safe_state_envelope"
+
+
 def test_dashboard_projection_is_not_authority(tmp_path: Path) -> None:
     _seed_base(tmp_path)
     config = TrackBRuntimeSupervisorAuthorityConfig(repo_root=tmp_path)

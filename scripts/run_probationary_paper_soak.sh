@@ -884,6 +884,9 @@ print(
     "artifact_archive_plan_classification={artifact_archive_plan_classification} artifact_archive_cold_archive_candidate_count={artifact_archive_cold_archive_candidate_count} "
     "artifact_archive_blocked_candidate_count={artifact_archive_blocked_candidate_count} artifact_archive_dry_run_only={artifact_archive_dry_run_only} "
     "artifact_archive_execution_enabled={artifact_archive_execution_enabled} "
+    "safe_state_classification={safe_state_classification} safe_state_observe_only={safe_state_observe_only} "
+    "safe_state_recovery_only={safe_state_recovery_only} safe_state_runtime_start_allowed={safe_state_runtime_start_allowed} "
+    "safe_state_submit_allowed={safe_state_submit_allowed} safe_state_broker_mutation_allowed={safe_state_broker_mutation_allowed} "
     "paper_recovery_policy={paper_policy} autonomous_recovery_plan_classification={plan_classification} "
     "autonomous_recovery_next_action={plan_action} autonomous_recovery_execution_enabled={plan_enabled} "
     "agent_health_classification={agent_health_classification} "
@@ -927,6 +930,12 @@ print(
         artifact_archive_blocked_candidate_count=payload.get("artifact_archive_blocked_candidate_count"),
         artifact_archive_dry_run_only=payload.get("artifact_archive_dry_run_only"),
         artifact_archive_execution_enabled=payload.get("artifact_archive_execution_enabled"),
+        safe_state_classification=payload.get("safe_state_classification"),
+        safe_state_observe_only=payload.get("safe_state_observe_only"),
+        safe_state_recovery_only=payload.get("safe_state_recovery_only"),
+        safe_state_runtime_start_allowed=payload.get("safe_state_runtime_start_allowed"),
+        safe_state_submit_allowed=payload.get("safe_state_submit_allowed"),
+        safe_state_broker_mutation_allowed=payload.get("safe_state_broker_mutation_allowed"),
         paper_policy=payload.get("paper_recovery_policy"),
         plan_classification=payload.get("autonomous_recovery_plan_classification"),
         plan_action=payload.get("autonomous_recovery_next_action"),
@@ -1045,6 +1054,12 @@ if not allowed:
         f"artifact_archive_blocked_candidate_count={payload.get('artifact_archive_blocked_candidate_count')} "
         f"artifact_archive_dry_run_only={payload.get('artifact_archive_dry_run_only')} "
         f"artifact_archive_execution_enabled={payload.get('artifact_archive_execution_enabled')} "
+        f"safe_state_classification={payload.get('safe_state_classification')} "
+        f"safe_state_observe_only={payload.get('safe_state_observe_only')} "
+        f"safe_state_recovery_only={payload.get('safe_state_recovery_only')} "
+        f"safe_state_runtime_start_allowed={payload.get('safe_state_runtime_start_allowed')} "
+        f"safe_state_submit_allowed={payload.get('safe_state_submit_allowed')} "
+        f"safe_state_broker_mutation_allowed={payload.get('safe_state_broker_mutation_allowed')} "
         f"paper_recovery_policy={payload.get('paper_recovery_policy')} "
         f"autonomous_recovery_plan_classification={payload.get('autonomous_recovery_plan_classification')} "
         f"autonomous_recovery_next_action={payload.get('autonomous_recovery_next_action')} "

@@ -77,6 +77,22 @@ def test_duplicate_writer_top_line_is_loud() -> None:
     assert top_line["primary_blocking_agent_id"] == "track_b_paper_runtime"
 
 
+def test_safe_state_hard_hold_top_line_is_loud() -> None:
+    top_line = build_track_b_control_plane_top_line(
+        {
+            "safe_state_classification": "SAFE_STATE_HARD_HOLD",
+            "safe_state_operator_explanation": "Hard safe-state hold: live-money route is prohibited.",
+            "safe_state_recommended_next_step": "hold runtime/start/submit actions",
+            "safe_to_start_runtime": False,
+            "proof_window_status": "blocked",
+        }
+    )
+
+    assert top_line["top_line_classification"] == "HARD_UNSAFE_SAFE_STATE"
+    assert "Runtime Safe-State Envelope" in top_line["top_line_status"]
+    assert "live-money route is prohibited" in top_line["top_line_status"]
+
+
 def test_missing_authority_artifact_top_line_names_artifact() -> None:
     top_line = build_track_b_control_plane_top_line(
         {
