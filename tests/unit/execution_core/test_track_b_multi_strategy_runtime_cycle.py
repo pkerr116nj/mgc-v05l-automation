@@ -4,6 +4,7 @@ import json
 from datetime import datetime, timezone
 from pathlib import Path
 
+from mgc_v05l.execution_core import track_b_multi_strategy_runtime_cycle as cycle_module
 from mgc_v05l.execution_core.track_b_multi_strategy_runtime_cycle import (
     TrackBMultiStrategyInput,
     TrackBMultiStrategyRuntimeCycleConfig,
@@ -62,9 +63,80 @@ def cycle_config(tmp_path: Path, **overrides: object) -> TrackBMultiStrategyRunt
         "output_root": tmp_path / "cycle",
         "strategy_rule_output_root": tmp_path / "rules",
         "strategy_paper_runner_output_root": tmp_path / "paper",
+        "repo_root": tmp_path,
+        "runtime_generation_id": "runtime-generation-1",
+        "control_plane_snapshot_max_age_seconds": 10_000_000,
     }
     payload.update(overrides)
     return TrackBMultiStrategyRuntimeCycleConfig(**payload)
+
+
+def seed_cycle_authority(
+    tmp_path: Path,
+    *,
+    runtime_generation_id: str = "runtime-generation-1",
+    snapshot_overrides: dict[str, object] | None = None,
+    safe_state_overrides: dict[str, object] | None = None,
+) -> None:
+    snapshot = {
+        "generated_at": aware_now().isoformat(),
+        "control_plane_snapshot_id": "snapshot-1",
+        "shared_truth_refresh_generation_id": "generation-1",
+        "shared_truth_coherence_status": "COHERENT",
+        "runtime_supervisor_decision_id": "supervisor-1",
+        "runtime_supervisor_classification": "SUPERVISOR_RUNTIME_ALREADY_HEALTHY",
+        "safe_to_start_runtime": False,
+        "safe_to_leave_runtime_running": True,
+        "runtime_resume_action_policy": "RESUME_EXISTING_RUNTIME",
+        "runtime_resume_proposed_next_runtime_generation_id": runtime_generation_id,
+        "paper_action_policy": "OBSERVE",
+        "live_money_eligible": False,
+        "paper_proof_invoked": False,
+    }
+    snapshot.update(snapshot_overrides or {})
+    safe_state = {
+        "generated_at": aware_now().isoformat(),
+        "safe_state_classification": "SAFE_STATE_NORMAL",
+        "control_plane_snapshot_id": snapshot["control_plane_snapshot_id"],
+        "shared_truth_generation_id": snapshot["shared_truth_refresh_generation_id"],
+        "runtime_generation_id": runtime_generation_id,
+        "submit_allowed": True,
+        "broker_mutation_allowed": True,
+        "observe_only": False,
+        "tripped_limits": [],
+        "live_money_eligible": False,
+        "paper_proof_invoked": False,
+    }
+    safe_state.update(safe_state_overrides or {})
+    supervisor = {
+        "generated_at": aware_now().isoformat(),
+        "supervisor_decision_id": snapshot["runtime_supervisor_decision_id"],
+        "classification": snapshot["runtime_supervisor_classification"],
+        "live_money_eligible": snapshot.get("live_money_eligible"),
+    }
+    plan = {
+        "generated_at": aware_now().isoformat(),
+        "classification": "PLAN_RUNTIME_RETRY",
+        "control_plane_snapshot_id": snapshot["control_plane_snapshot_id"],
+        "shared_truth_refresh_generation_id": snapshot["shared_truth_refresh_generation_id"],
+        "execution_enabled": False,
+        "proposed_actions": [],
+    }
+    _write_json(tmp_path / "outputs/track_b_execution_core/control_plane/latest_control_plane_snapshot.json", snapshot)
+    _write_json(tmp_path / "outputs/track_b_execution_core/safe_state/latest_runtime_safe_state_envelope.json", safe_state)
+    _write_json(
+        tmp_path / "outputs/track_b_execution_core/runtime_supervisor/latest_runtime_supervisor_authority.json",
+        supervisor,
+    )
+    _write_json(
+        tmp_path / "outputs/track_b_execution_core/paper_autonomous_recovery/latest_paper_autonomous_recovery_plan.json",
+        plan,
+    )
+
+
+def _write_json(path: Path, payload: dict[str, object]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
 
 
 def live_pricing_context(*, close: str = "4575.0", fresh: bool = True, age_seconds: int = 10) -> dict[str, object]:
@@ -151,6 +223,7 @@ def strategy_result(tmp_path: Path, report: dict[str, object]) -> TrackBStrategy
 
 def paper_result(tmp_path: Path, *, passed: bool = True, mutated: bool = True, side_blocked: bool = False) -> TrackBStrategyPaperRunnerResult:
     path = tmp_path / "paper_runner_report.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
     verdict = (
         TrackBStrategyPaperRunnerVerdict.PAPER_PROOF_PASSED
         if passed
@@ -348,6 +421,7 @@ def test_one_signal_with_paper_flags_delegates_once(tmp_path: Path) -> None:
         emitted=True,
         direction="SHORT",
     )
+    seed_cycle_authority(tmp_path)
     result = run_track_b_multi_strategy_runtime_cycle(
         config=cycle_config(
             tmp_path,
@@ -372,6 +446,229 @@ def test_one_signal_with_paper_flags_delegates_once(tmp_path: Path) -> None:
     assert result.report["live_money_readiness"] is False
 
 
+def test_submit_flags_block_without_control_plane_snapshot(tmp_path: Path) -> None:
+    calls = Calls()
+    reports = default_reports()
+    reports["FIRST_BEAR_SNAP_TURN_V1"] = rule_report(
+        "FIRST_BEAR_SNAP_TURN_V1",
+        rule_mode="FIRST_BEAR_SNAP_TURN_V1",
+        decision="SHORT",
+        emitted=True,
+        direction="SHORT",
+    )
+
+    result = run_track_b_multi_strategy_runtime_cycle(
+        config=cycle_config(
+            tmp_path,
+            side="SELL",
+            submit_paper=True,
+            confirm_paper_submit=True,
+            quantity=1,
+            manual_open_limit_price="4575.0",
+            manual_close_limit_price="4575.3",
+        ),
+        stages=stages_for(tmp_path, calls, reports, paper=paper_result(tmp_path)),
+        cycle_id="cycle-no-snapshot",
+        now=aware_now(),
+    )
+
+    assert result.verdict == TrackBMultiStrategyRuntimeCycleVerdict.SIGNAL_READY_NO_SUBMIT
+    assert calls.paper == 0
+    assert result.report["submit_attempted"] is False
+    assert result.report["broker_state_mutated"] is False
+    assert (
+        result.report["multi_strategy_cycle_authorization_classification"]
+        == cycle_module.MULTI_STRATEGY_CYCLE_BLOCKED_NO_SNAPSHOT
+    )
+    assert result.report["multi_strategy_cycle_authority"]["dashboard_projection_consumed"] is False
+
+
+def test_submit_flags_block_by_safe_state_observe_only(tmp_path: Path) -> None:
+    calls = Calls()
+    reports = default_reports()
+    reports["FIRST_BEAR_SNAP_TURN_V1"] = rule_report(
+        "FIRST_BEAR_SNAP_TURN_V1",
+        rule_mode="FIRST_BEAR_SNAP_TURN_V1",
+        decision="SHORT",
+        emitted=True,
+        direction="SHORT",
+    )
+    seed_cycle_authority(
+        tmp_path,
+        safe_state_overrides={
+            "safe_state_classification": "SAFE_STATE_OBSERVE_ONLY",
+            "submit_allowed": False,
+            "broker_mutation_allowed": False,
+            "observe_only": True,
+        },
+    )
+
+    result = run_track_b_multi_strategy_runtime_cycle(
+        config=cycle_config(
+            tmp_path,
+            side="SELL",
+            submit_paper=True,
+            confirm_paper_submit=True,
+            quantity=1,
+            manual_open_limit_price="4575.0",
+            manual_close_limit_price="4575.3",
+        ),
+        stages=stages_for(tmp_path, calls, reports, paper=paper_result(tmp_path)),
+        cycle_id="cycle-safe-state-observe",
+        now=aware_now(),
+    )
+
+    assert calls.paper == 0
+    assert result.report["cycle_submit_allowed"] is False
+    assert result.report["cycle_broker_mutation_allowed"] is False
+    assert (
+        result.report["multi_strategy_cycle_authorization_classification"]
+        == cycle_module.MULTI_STRATEGY_CYCLE_BLOCKED_SAFE_STATE
+    )
+
+
+def test_submit_flags_block_live_money_and_paper_proof_flags(tmp_path: Path) -> None:
+    reports = default_reports()
+    reports["FIRST_BEAR_SNAP_TURN_V1"] = rule_report(
+        "FIRST_BEAR_SNAP_TURN_V1",
+        rule_mode="FIRST_BEAR_SNAP_TURN_V1",
+        decision="SHORT",
+        emitted=True,
+        direction="SHORT",
+    )
+    seed_cycle_authority(tmp_path / "live", snapshot_overrides={"live_money_eligible": True})
+    live_calls = Calls()
+    live_result = run_track_b_multi_strategy_runtime_cycle(
+        config=cycle_config(
+            tmp_path / "live",
+            side="SELL",
+            submit_paper=True,
+            confirm_paper_submit=True,
+            quantity=1,
+            manual_open_limit_price="4575.0",
+            manual_close_limit_price="4575.3",
+        ),
+        stages=stages_for(tmp_path / "live", live_calls, reports, paper=paper_result(tmp_path / "live")),
+        cycle_id="cycle-live-money",
+        now=aware_now(),
+    )
+    assert live_calls.paper == 0
+    assert (
+        live_result.report["multi_strategy_cycle_authorization_classification"]
+        == cycle_module.MULTI_STRATEGY_CYCLE_BLOCKED_LIVE_MONEY
+    )
+
+    seed_cycle_authority(tmp_path / "proof", snapshot_overrides={"paper_proof_invoked": True})
+    proof_calls = Calls()
+    proof_result = run_track_b_multi_strategy_runtime_cycle(
+        config=cycle_config(
+            tmp_path / "proof",
+            side="SELL",
+            submit_paper=True,
+            confirm_paper_submit=True,
+            quantity=1,
+            manual_open_limit_price="4575.0",
+            manual_close_limit_price="4575.3",
+        ),
+        stages=stages_for(tmp_path / "proof", proof_calls, reports, paper=paper_result(tmp_path / "proof")),
+        cycle_id="cycle-paper-proof",
+        now=aware_now(),
+    )
+    assert proof_calls.paper == 0
+    assert (
+        proof_result.report["multi_strategy_cycle_authorization_classification"]
+        == cycle_module.MULTI_STRATEGY_CYCLE_BLOCKED_PAPER_PROOF
+    )
+
+    seed_cycle_authority(tmp_path / "proof_path")
+    proof_path_calls = Calls()
+    proof_path_result = run_track_b_multi_strategy_runtime_cycle(
+        config=cycle_config(
+            tmp_path / "proof_path",
+            side="SELL",
+            submit_paper=True,
+            confirm_paper_submit=True,
+            quantity=1,
+            manual_open_limit_price="4575.0",
+            manual_close_limit_price="4575.3",
+            paper_execution_path="PAPER_PROOF_DEBUG",
+        ),
+        stages=stages_for(
+            tmp_path / "proof_path",
+            proof_path_calls,
+            reports,
+            paper=paper_result(tmp_path / "proof_path"),
+        ),
+        cycle_id="cycle-paper-proof-path",
+        now=aware_now(),
+    )
+    assert proof_path_calls.paper == 0
+    assert (
+        proof_path_result.report["multi_strategy_cycle_authorization_classification"]
+        == cycle_module.MULTI_STRATEGY_CYCLE_BLOCKED_PAPER_PROOF
+    )
+
+
+def test_clean_cycle_authority_passes_generation_bound_packet_downstream(tmp_path: Path) -> None:
+    calls = Calls()
+    reports = default_reports()
+    reports["FIRST_BEAR_SNAP_TURN_V1"] = rule_report(
+        "FIRST_BEAR_SNAP_TURN_V1",
+        rule_mode="FIRST_BEAR_SNAP_TURN_V1",
+        decision="SHORT",
+        emitted=True,
+        direction="SHORT",
+    )
+    seed_cycle_authority(tmp_path, runtime_generation_id="runtime-generation-clean")
+    observed: dict[str, object] = {}
+
+    def paper_stage(
+        config: TrackBMultiStrategyRuntimeCycleConfig,
+        _strategy_input: TrackBMultiStrategyInput,
+        _chosen_signal: dict[str, object],
+    ) -> TrackBStrategyPaperRunnerResult:
+        calls.paper += 1
+        observed.update(
+            {
+                "runtime_generation_id": config.runtime_generation_id,
+                "control_plane_snapshot_path": str(config.control_plane_snapshot_path),
+                "runtime_safe_state_envelope_path": str(config.runtime_safe_state_envelope_path),
+                "expected_control_plane_snapshot_id": config.expected_control_plane_snapshot_id,
+                "expected_shared_truth_generation_id": config.expected_shared_truth_generation_id,
+            }
+        )
+        return paper_result(tmp_path)
+
+    result = run_track_b_multi_strategy_runtime_cycle(
+        config=cycle_config(
+            tmp_path,
+            runtime_generation_id="runtime-generation-clean",
+            side="SELL",
+            submit_paper=True,
+            confirm_paper_submit=True,
+            quantity=1,
+            manual_open_limit_price="4575.0",
+            manual_close_limit_price="4575.3",
+        ),
+        stages=TrackBMultiStrategyRuntimeCycleStages(
+            strategy_rule=stages_for(tmp_path, calls, reports).strategy_rule,
+            paper_runner=paper_stage,
+        ),
+        cycle_id="cycle-authorized-downstream",
+        now=aware_now(),
+    )
+
+    assert calls.paper == 1
+    assert (
+        result.report["multi_strategy_cycle_authorization_classification"]
+        == cycle_module.MULTI_STRATEGY_CYCLE_AUTHORIZED
+    )
+    assert observed["runtime_generation_id"] == "runtime-generation-clean"
+    assert observed["expected_control_plane_snapshot_id"] == "snapshot-1"
+    assert observed["expected_shared_truth_generation_id"] == "generation-1"
+    assert "outputs/operator_dashboard" not in observed["control_plane_snapshot_path"]
+
+
 def test_auto_paper_side_matches_chosen_short_signal(tmp_path: Path) -> None:
     calls = Calls()
     reports = default_reports()
@@ -382,6 +679,7 @@ def test_auto_paper_side_matches_chosen_short_signal(tmp_path: Path) -> None:
         emitted=True,
         direction="SHORT",
     )
+    seed_cycle_authority(tmp_path)
     observed_side: list[str] = []
 
     def strategy_stage(
@@ -432,6 +730,7 @@ def test_auto_pricing_derives_buy_limits_from_fresh_live_last(tmp_path: Path) ->
         emitted=True,
         direction="LONG",
     )
+    seed_cycle_authority(tmp_path)
     observed: list[dict[str, object]] = []
 
     def paper_stage(
@@ -486,6 +785,7 @@ def test_auto_pricing_derives_sell_limits_from_fresh_live_last(tmp_path: Path) -
         emitted=True,
         direction="SHORT",
     )
+    seed_cycle_authority(tmp_path)
     observed: list[dict[str, object]] = []
 
     def paper_stage(
@@ -714,6 +1014,7 @@ def test_side_mismatch_blocks_inside_guarded_paper_runner(tmp_path: Path) -> Non
         emitted=True,
         direction="LONG",
     )
+    seed_cycle_authority(tmp_path)
     result = run_track_b_multi_strategy_runtime_cycle(
         config=cycle_config(
             tmp_path,

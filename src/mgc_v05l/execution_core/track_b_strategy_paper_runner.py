@@ -25,6 +25,11 @@ from .operator_status import DEFAULT_OPERATOR_STATUS_OUTPUT_ROOT, OperatorStatus
 from .paper_proof import DEFAULT_PAPER_PROOF_OUTPUT_ROOT, PaperProofConfig, PaperProofResult, ProofRunner, run_paper_proof
 from .track_b_strategy_managed_paper_lifecycle import (
     DEFAULT_TRACK_B_STRATEGY_MANAGED_PAPER_LIFECYCLE_OUTPUT_ROOT,
+    DEFAULT_CONTROL_PLANE_SNAPSHOT_ARTIFACT,
+    DEFAULT_PAPER_AUTONOMOUS_RECOVERY_PLAN_ARTIFACT,
+    DEFAULT_RUNTIME_SAFE_STATE_ENVELOPE_ARTIFACT,
+    DEFAULT_RUNTIME_SUPERVISOR_AUTHORITY_ARTIFACT,
+    REPO_ROOT,
     TrackBManagedPaperLifecycleClassification,
     TrackBStrategyManagedPaperLifecycleConfig,
     TrackBStrategyManagedPaperLifecycleResult,
@@ -212,6 +217,14 @@ class TrackBStrategyPaperRunnerConfig:
     paper_proof_output_root: Path = DEFAULT_PAPER_PROOF_OUTPUT_ROOT
     paper_trade_ledger_output_root: Path | None = None
     operator_status_output_root: Path = DEFAULT_OPERATOR_STATUS_OUTPUT_ROOT
+    repo_root: Path = REPO_ROOT
+    runtime_generation_id: str | None = None
+    control_plane_snapshot_path: Path = DEFAULT_CONTROL_PLANE_SNAPSHOT_ARTIFACT
+    autonomous_recovery_plan_path: Path = DEFAULT_PAPER_AUTONOMOUS_RECOVERY_PLAN_ARTIFACT
+    runtime_supervisor_authority_path: Path = DEFAULT_RUNTIME_SUPERVISOR_AUTHORITY_ARTIFACT
+    runtime_safe_state_envelope_path: Path = DEFAULT_RUNTIME_SAFE_STATE_ENVELOPE_ARTIFACT
+    expected_control_plane_snapshot_id: str | None = None
+    expected_shared_truth_generation_id: str | None = None
 
 
 @dataclass(frozen=True)
@@ -1013,6 +1026,15 @@ def _run_managed_lifecycle(
         paper_trade_ledger_output_root=_paper_trade_ledger_output_root(config),
         live_money_readiness=False,
         broker_reconciled=False,
+        repo_root=config.repo_root,
+        lane_id=config.lane_id,
+        runtime_generation_id=config.runtime_generation_id,
+        control_plane_snapshot_path=config.control_plane_snapshot_path,
+        autonomous_recovery_plan_path=config.autonomous_recovery_plan_path,
+        runtime_supervisor_authority_path=config.runtime_supervisor_authority_path,
+        runtime_safe_state_envelope_path=config.runtime_safe_state_envelope_path,
+        expected_control_plane_snapshot_id=config.expected_control_plane_snapshot_id,
+        expected_shared_truth_generation_id=config.expected_shared_truth_generation_id,
     )
     return run_track_b_strategy_managed_paper_lifecycle(config=managed_config)
 

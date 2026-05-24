@@ -15,11 +15,15 @@ from datetime import UTC, datetime
 from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 from enum import Enum
 from pathlib import Path
-from typing import Callable, Mapping
+from typing import Any, Callable, Mapping
 
 from .models import require_aware_datetime, to_jsonable
 from .operator_status import DEFAULT_OPERATOR_STATUS_OUTPUT_ROOT, OperatorStatusInputs, create_operator_status_summary
 from .track_b_decision_journal import record_track_b_decision_journal_cycle
+from .track_b_paper_autonomous_recovery_planner import DEFAULT_PAPER_AUTONOMOUS_RECOVERY_PLAN_ARTIFACT
+from .track_b_pre_action_snapshot_validator import DEFAULT_CONTROL_PLANE_SNAPSHOT_ARTIFACT
+from .track_b_runtime_safe_state_envelope import DEFAULT_RUNTIME_SAFE_STATE_ENVELOPE_ARTIFACT
+from .track_b_runtime_supervisor_authority import DEFAULT_RUNTIME_SUPERVISOR_AUTHORITY_ARTIFACT
 from .track_b_strategy_paper_runner import (
     DEFAULT_TRACK_B_STRATEGY_PAPER_RUNNER_OUTPUT_ROOT,
     TrackBStrategyPaperRunnerConfig,
@@ -41,6 +45,15 @@ from .track_b_strategy_rule_runner import (
 DEFAULT_TRACK_B_MULTI_STRATEGY_RUNTIME_CYCLE_OUTPUT_ROOT = Path(
     "outputs/track_b_execution_core/track_b_multi_strategy_runtime_cycle"
 )
+REPO_ROOT = Path(__file__).resolve().parents[3]
+
+MULTI_STRATEGY_CYCLE_AUTHORIZED = "MULTI_STRATEGY_CYCLE_AUTHORIZED"
+MULTI_STRATEGY_CYCLE_OBSERVE_ONLY = "MULTI_STRATEGY_CYCLE_OBSERVE_ONLY"
+MULTI_STRATEGY_CYCLE_BLOCKED_NO_SNAPSHOT = "MULTI_STRATEGY_CYCLE_BLOCKED_NO_SNAPSHOT"
+MULTI_STRATEGY_CYCLE_BLOCKED_SAFE_STATE = "MULTI_STRATEGY_CYCLE_BLOCKED_SAFE_STATE"
+MULTI_STRATEGY_CYCLE_BLOCKED_RUNTIME_GENERATION = "MULTI_STRATEGY_CYCLE_BLOCKED_RUNTIME_GENERATION"
+MULTI_STRATEGY_CYCLE_BLOCKED_LIVE_MONEY = "MULTI_STRATEGY_CYCLE_BLOCKED_LIVE_MONEY"
+MULTI_STRATEGY_CYCLE_BLOCKED_PAPER_PROOF = "MULTI_STRATEGY_CYCLE_BLOCKED_PAPER_PROOF"
 
 
 class TrackBMultiStrategyRuntimeCycleVerdict(str, Enum):
@@ -131,6 +144,15 @@ class TrackBMultiStrategyRuntimeCycleConfig:
     update_operator_status: bool = False
     operator_status_output_root: Path = DEFAULT_OPERATOR_STATUS_OUTPUT_ROOT
     backend_health_json: Path | None = Path("outputs/operator_dashboard/runtime/operator_dashboard_readiness.json")
+    repo_root: Path = REPO_ROOT
+    runtime_generation_id: str | None = None
+    control_plane_snapshot_path: Path = DEFAULT_CONTROL_PLANE_SNAPSHOT_ARTIFACT
+    autonomous_recovery_plan_path: Path = DEFAULT_PAPER_AUTONOMOUS_RECOVERY_PLAN_ARTIFACT
+    runtime_supervisor_authority_path: Path = DEFAULT_RUNTIME_SUPERVISOR_AUTHORITY_ARTIFACT
+    runtime_safe_state_envelope_path: Path = DEFAULT_RUNTIME_SAFE_STATE_ENVELOPE_ARTIFACT
+    control_plane_snapshot_max_age_seconds: int = 300
+    expected_control_plane_snapshot_id: str | None = None
+    expected_shared_truth_generation_id: str | None = None
 
 
 @dataclass(frozen=True)
@@ -173,6 +195,11 @@ def run_track_b_multi_strategy_runtime_cycle(
     strategy_results: list[TrackBStrategyRuleRunnerResult] = []
     paper_result: TrackBStrategyPaperRunnerResult | None = None
     paper_order_parameters: dict[str, object] = _empty_paper_order_parameters(config)
+    cycle_authority: dict[str, object] = build_track_b_multi_strategy_cycle_authority(
+        config=config,
+        submit_requested=False,
+        now=actual_now,
+    )
 
     try:
         strategy_reports: list[dict[str, object]] = []
@@ -193,6 +220,11 @@ def run_track_b_multi_strategy_runtime_cycle(
         paper_submit_requested = _paper_submit_requested(config)
         primary_blocker = arbitration.get("primary_blocker")
         required_next_action = str(arbitration.get("required_next_action") or "Continue bounded no-submit watch.")
+        cycle_authority = build_track_b_multi_strategy_cycle_authority(
+            config=config,
+            submit_requested=paper_submit_requested,
+            now=actual_now,
+        )
 
         if not candidate_signals:
             verdict = TrackBMultiStrategyRuntimeCycleVerdict.NO_SIGNAL_NO_MUTATION
@@ -217,11 +249,25 @@ def run_track_b_multi_strategy_runtime_cycle(
                     required_next_action = (
                         "Resolve Track B PAPER order pricing context before any guarded PAPER lifecycle handoff."
                     )
+                elif cycle_authority.get("authorization_classification") != MULTI_STRATEGY_CYCLE_AUTHORIZED:
+                    verdict = TrackBMultiStrategyRuntimeCycleVerdict.SIGNAL_READY_NO_SUBMIT
+                    primary_blocker = cycle_authority.get("reason") or "Multi-strategy cycle submit authority blocked handoff."
+                    required_next_action = (
+                        "Cycle-level Control Plane Snapshot / Safe-State authority blocked PAPER submit delegation; "
+                        "continue observe/evaluate mode and refresh shared control-plane evidence before retry."
+                    )
                 else:
                     paper_config = replace(
                         config,
                         manual_open_limit_price=str(paper_order_parameters["open_limit_price"]),
                         manual_close_limit_price=str(paper_order_parameters["close_limit_price"]),
+                        runtime_generation_id=str(cycle_authority.get("runtime_generation_id") or ""),
+                        control_plane_snapshot_path=Path(str(cycle_authority["source_artifact_paths"]["control_plane_snapshot"])),
+                        autonomous_recovery_plan_path=Path(str(cycle_authority["source_artifact_paths"]["autonomous_recovery_plan"])),
+                        runtime_supervisor_authority_path=Path(str(cycle_authority["source_artifact_paths"]["runtime_supervisor_authority"])),
+                        runtime_safe_state_envelope_path=Path(str(cycle_authority["source_artifact_paths"]["runtime_safe_state_envelope"])),
+                        expected_control_plane_snapshot_id=str(cycle_authority.get("control_plane_snapshot_id") or ""),
+                        expected_shared_truth_generation_id=str(cycle_authority.get("shared_truth_generation_id") or ""),
                     )
                     paper_result = actual_stages.paper_runner(paper_config, chosen_input, chosen_signal or {})
                     paper_order_parameters["paper_runner_config_open_limit_price"] = paper_config.manual_open_limit_price
@@ -241,6 +287,7 @@ def run_track_b_multi_strategy_runtime_cycle(
             arbitration=arbitration,
             paper_result=paper_result,
             paper_order_parameters=paper_order_parameters,
+            cycle_authority=cycle_authority,
             primary_blocker=primary_blocker,
             required_next_action=required_next_action,
         )
@@ -268,6 +315,7 @@ def run_track_b_multi_strategy_runtime_cycle(
             arbitration={},
             paper_result=paper_result,
             paper_order_parameters=paper_order_parameters,
+            cycle_authority=cycle_authority,
             primary_blocker=f"Track B multi-strategy runtime cycle stage error: {exc}",
             required_next_action="Review multi-strategy cycle diagnostics before retrying.",
         )
@@ -369,6 +417,14 @@ def _run_strategy_paper_runner(
             proof_timing_status=config.proof_timing_status,
             proof_timing_source=config.proof_timing_source,
             output_root=config.strategy_paper_runner_output_root,
+            repo_root=config.repo_root,
+            runtime_generation_id=config.runtime_generation_id,
+            control_plane_snapshot_path=config.control_plane_snapshot_path,
+            autonomous_recovery_plan_path=config.autonomous_recovery_plan_path,
+            runtime_supervisor_authority_path=config.runtime_supervisor_authority_path,
+            runtime_safe_state_envelope_path=config.runtime_safe_state_envelope_path,
+            expected_control_plane_snapshot_id=config.expected_control_plane_snapshot_id,
+            expected_shared_truth_generation_id=config.expected_shared_truth_generation_id,
         )
     )
 
@@ -663,6 +719,142 @@ def _paper_submit_requested(config: TrackBMultiStrategyRuntimeCycleConfig) -> bo
     return bool(config.submit_paper and config.confirm_paper_submit)
 
 
+def build_track_b_multi_strategy_cycle_authority(
+    *,
+    config: TrackBMultiStrategyRuntimeCycleConfig,
+    submit_requested: bool,
+    now: datetime | None = None,
+) -> dict[str, object]:
+    actual_now = now or datetime.now(UTC)
+    require_aware_datetime(actual_now, "now")
+    snapshot_path = _resolve_path(config.repo_root, config.control_plane_snapshot_path)
+    safe_state_path = _resolve_path(config.repo_root, config.runtime_safe_state_envelope_path)
+    supervisor_path = _resolve_path(config.repo_root, config.runtime_supervisor_authority_path)
+    plan_path = _resolve_path(config.repo_root, config.autonomous_recovery_plan_path)
+    snapshot = _read_json_object(snapshot_path)
+    safe_state = _read_json_object(safe_state_path)
+    supervisor = _read_json_object(supervisor_path)
+    runtime_generation_id = str(
+        config.runtime_generation_id
+        or safe_state.get("runtime_generation_id")
+        or snapshot.get("runtime_resume_proposed_next_runtime_generation_id")
+        or snapshot.get("runtime_generation_id")
+        or ""
+    )
+    base: dict[str, object] = {
+        "schema_version": "track_b_multi_strategy_cycle_authority_v1",
+        "authorized_at": actual_now.isoformat(),
+        "mode": "PAPER",
+        "submit_requested": submit_requested,
+        "read_only_validation": True,
+        "dashboard_projection_consumed": False,
+        "not_routing_authority": True,
+        "control_plane_snapshot_id": snapshot.get("control_plane_snapshot_id"),
+        "shared_truth_generation_id": snapshot.get("shared_truth_refresh_generation_id"),
+        "runtime_generation_id": runtime_generation_id or None,
+        "safe_state_classification": safe_state.get("safe_state_classification") or safe_state.get("classification"),
+        "submit_allowed": False,
+        "broker_mutation_allowed": False,
+        "runtime_supervisor_classification": snapshot.get("runtime_supervisor_classification")
+        or supervisor.get("classification"),
+        "runtime_resume_action_policy": snapshot.get("runtime_resume_action_policy"),
+        "paper_recovery_policy": snapshot.get("paper_action_policy") or snapshot.get("paper_recovery_policy"),
+        "live_money_eligible": _any_true(snapshot, safe_state, supervisor, key="live_money_eligible"),
+        "paper_proof_invoked": _any_true(snapshot, safe_state, key="paper_proof_invoked"),
+        "source_artifact_paths": {
+            "control_plane_snapshot": str(snapshot_path),
+            "runtime_safe_state_envelope": str(safe_state_path),
+            "runtime_supervisor_authority": str(supervisor_path),
+            "autonomous_recovery_plan": str(plan_path),
+        },
+    }
+    classification, reason = _multi_strategy_cycle_authority_blocker(
+        config=config,
+        snapshot=snapshot,
+        safe_state=safe_state,
+        supervisor=supervisor,
+        runtime_generation_id=runtime_generation_id,
+        submit_requested=submit_requested,
+        now=actual_now,
+    )
+    authorized = classification == MULTI_STRATEGY_CYCLE_AUTHORIZED
+    return {
+        **base,
+        "authorization_classification": classification,
+        "classification": classification,
+        "authorized": authorized,
+        "submit_allowed": authorized,
+        "broker_mutation_allowed": authorized,
+        "reason": reason,
+    }
+
+
+def _multi_strategy_cycle_authority_blocker(
+    *,
+    config: TrackBMultiStrategyRuntimeCycleConfig,
+    snapshot: Mapping[str, Any],
+    safe_state: Mapping[str, Any],
+    supervisor: Mapping[str, Any],
+    runtime_generation_id: str,
+    submit_requested: bool,
+    now: datetime,
+) -> tuple[str, str]:
+    if not submit_requested:
+        return MULTI_STRATEGY_CYCLE_OBSERVE_ONLY, "No submit delegation requested; cycle remains observe/evaluate only."
+    if str(config.paper_execution_path or "").strip().upper() in {"PAPER_PROOF_DEBUG", "PAPER_PROOF_CANARY"}:
+        return MULTI_STRATEGY_CYCLE_BLOCKED_PAPER_PROOF, "paper_proof execution paths are not allowed from runtime cycle."
+    if not snapshot:
+        return MULTI_STRATEGY_CYCLE_BLOCKED_NO_SNAPSHOT, "Control Plane Snapshot authority artifact is missing."
+    generated_at = _parse_datetime(snapshot.get("generated_at"))
+    if generated_at is None:
+        return MULTI_STRATEGY_CYCLE_BLOCKED_NO_SNAPSHOT, "Control Plane Snapshot generated_at is missing or invalid."
+    age_seconds = max(0.0, (now.astimezone(UTC) - generated_at.astimezone(UTC)).total_seconds())
+    if age_seconds > int(config.control_plane_snapshot_max_age_seconds):
+        return MULTI_STRATEGY_CYCLE_BLOCKED_NO_SNAPSHOT, "Control Plane Snapshot is stale for submit delegation."
+    if snapshot.get("shared_truth_coherence_status") != "COHERENT":
+        return MULTI_STRATEGY_CYCLE_BLOCKED_NO_SNAPSHOT, "Control Plane Snapshot is not coherent."
+    if _any_true(snapshot, safe_state, supervisor, key="live_money_eligible"):
+        return MULTI_STRATEGY_CYCLE_BLOCKED_LIVE_MONEY, "live_money_eligible=true blocks multi-strategy PAPER submit."
+    if _any_true(snapshot, safe_state, key="paper_proof_invoked"):
+        return MULTI_STRATEGY_CYCLE_BLOCKED_PAPER_PROOF, "paper_proof_invoked=true blocks strategy submit delegation."
+    if not safe_state:
+        return MULTI_STRATEGY_CYCLE_BLOCKED_SAFE_STATE, "Runtime Safe-State Envelope authority artifact is missing."
+    safe_classification = str(safe_state.get("safe_state_classification") or safe_state.get("classification") or "")
+    if safe_state.get("submit_allowed") is not True:
+        return MULTI_STRATEGY_CYCLE_BLOCKED_SAFE_STATE, "Runtime Safe-State Envelope does not permit submit."
+    if safe_state.get("broker_mutation_allowed") is not True:
+        return MULTI_STRATEGY_CYCLE_BLOCKED_SAFE_STATE, "Runtime Safe-State Envelope does not permit broker mutation."
+    if safe_state.get("observe_only") is True or "HARD_HOLD" in safe_classification:
+        return MULTI_STRATEGY_CYCLE_BLOCKED_SAFE_STATE, f"Runtime Safe-State Envelope blocks submit: {safe_classification}."
+    if list(safe_state.get("tripped_limits") or []):
+        return MULTI_STRATEGY_CYCLE_BLOCKED_SAFE_STATE, "Runtime Safe-State Envelope has tripped limits."
+    if not runtime_generation_id:
+        return MULTI_STRATEGY_CYCLE_BLOCKED_RUNTIME_GENERATION, "runtime_generation_id is required before submit delegation."
+    proposed_generation = str(snapshot.get("runtime_resume_proposed_next_runtime_generation_id") or "")
+    safe_generation = str(safe_state.get("runtime_generation_id") or "")
+    if proposed_generation and proposed_generation != runtime_generation_id:
+        return MULTI_STRATEGY_CYCLE_BLOCKED_RUNTIME_GENERATION, "Runtime Resume v2 proposed generation does not match cycle."
+    if safe_generation and safe_generation != runtime_generation_id:
+        return MULTI_STRATEGY_CYCLE_BLOCKED_RUNTIME_GENERATION, "Safe-State runtime generation does not match cycle."
+    supervisor_classification = str(
+        snapshot.get("runtime_supervisor_classification") or supervisor.get("classification") or ""
+    )
+    supervisor_submit_allowed = supervisor_classification in {
+        "SUPERVISOR_RUNTIME_START_ALLOWED",
+        "SUPERVISOR_RUNTIME_ALREADY_HEALTHY",
+    } and (
+        snapshot.get("safe_to_start_runtime") is True
+        or snapshot.get("safe_to_leave_runtime_running") is True
+        or safe_state.get("submit_allowed") is True
+    )
+    if not supervisor_submit_allowed:
+        return (
+            MULTI_STRATEGY_CYCLE_BLOCKED_SAFE_STATE,
+            f"Runtime Supervisor does not permit submit/start posture: {supervisor_classification or 'UNKNOWN'}.",
+        )
+    return MULTI_STRATEGY_CYCLE_AUTHORIZED, "Multi-strategy cycle authority permits submit-capable handoff."
+
+
 def _paper_side_for_chosen_signal(config_side: str, chosen_signal: Mapping[str, object]) -> str:
     if str(config_side or "").strip().upper() != "AUTO":
         return config_side
@@ -935,6 +1127,7 @@ def _build_report(
     arbitration: Mapping[str, object],
     paper_result: TrackBStrategyPaperRunnerResult | None,
     paper_order_parameters: Mapping[str, object],
+    cycle_authority: Mapping[str, object],
     primary_blocker: object | None,
     required_next_action: str,
 ) -> dict[str, object]:
@@ -955,6 +1148,23 @@ def _build_report(
         "chosen_strategy_id": chosen_signal.get("strategy_id") if isinstance(chosen_signal, Mapping) else None,
         "reason_no_signal_chosen": _reason_no_signal_chosen(verdict, arbitration, primary_blocker),
         "paper_submit_requested": _paper_submit_requested(config),
+        "multi_strategy_cycle_authority": dict(cycle_authority),
+        "multi_strategy_cycle_authorization_classification": cycle_authority.get("authorization_classification"),
+        "control_plane_snapshot_id": cycle_authority.get("control_plane_snapshot_id"),
+        "shared_truth_generation_id": cycle_authority.get("shared_truth_generation_id"),
+        "runtime_generation_id": cycle_authority.get("runtime_generation_id"),
+        "safe_state_classification": cycle_authority.get("safe_state_classification"),
+        "cycle_submit_allowed": cycle_authority.get("submit_allowed") is True,
+        "cycle_broker_mutation_allowed": cycle_authority.get("broker_mutation_allowed") is True,
+        "runtime_supervisor_classification": cycle_authority.get("runtime_supervisor_classification"),
+        "runtime_resume_action_policy": cycle_authority.get("runtime_resume_action_policy"),
+        "paper_recovery_policy": cycle_authority.get("paper_recovery_policy"),
+        "cycle_authority_blocked_reason": (
+            None
+            if cycle_authority.get("authorization_classification")
+            in {MULTI_STRATEGY_CYCLE_AUTHORIZED, MULTI_STRATEGY_CYCLE_OBSERVE_ONLY}
+            else cycle_authority.get("reason")
+        ),
         "paper_order_parameters": dict(paper_order_parameters),
         "paper_order_parameter_blocker": paper_order_parameters.get("paper_order_parameter_blocker"),
         "order_action": paper_order_parameters.get("order_action"),
@@ -1145,10 +1355,38 @@ def _reason_no_signal_chosen(
     if verdict == TrackBMultiStrategyRuntimeCycleVerdict.NO_SIGNAL_NO_MUTATION:
         return "No registered Asia strategy emitted a real signal."
     if verdict == TrackBMultiStrategyRuntimeCycleVerdict.SIGNAL_READY_NO_SUBMIT:
-        return "One signal was chosen, but explicit PAPER submit flags were not supplied."
+        return str(primary_blocker or "One signal was chosen, but explicit PAPER submit flags were not supplied.")
     if verdict == TrackBMultiStrategyRuntimeCycleVerdict.ARBITRATION_BLOCKED:
         return str(primary_blocker or arbitration.get("primary_blocker") or "Strategy arbitration did not choose a signal.")
     return None
+
+
+def _read_json_object(path: Path) -> dict[str, Any]:
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (FileNotFoundError, json.JSONDecodeError, OSError):
+        return {}
+    return dict(payload) if isinstance(payload, Mapping) else {}
+
+
+def _resolve_path(repo_root: Path, path: Path) -> Path:
+    return path if path.is_absolute() else Path(repo_root) / path
+
+
+def _parse_datetime(value: object) -> datetime | None:
+    if not value:
+        return None
+    try:
+        parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=UTC)
+    return parsed.astimezone(UTC)
+
+
+def _any_true(*payloads: Mapping[str, Any], key: str) -> bool:
+    return any(payload.get(key) is True for payload in payloads)
 
 
 def _write_report(report_json: Path, report: dict[str, object]) -> None:
