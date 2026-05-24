@@ -23,6 +23,16 @@ Scope: planning-only runbook for the five approved P0 Track B PAPER strategy can
 | `MNQ_FIRST_BEAR_SNAP_TURN_V1` | `MNQ-202606` / `MNQM6` / conId `770561201` | session allowed / `mnq_first_bear_snap_turn` | Completed 5m first bear snap-turn feature/state envelope | Phase-1 realtime completed 5m MNQ envelope, realtime quote evidence, `MNQ.v.0` / `GLBX.MDP3` provenance | `PAPER_DIAGNOSTIC_TIME_BOXED_3X5M_EXIT_V1` | Same strategy-managed lifecycle path | LIMIT, qty `1`, `SELL` |
 | `MNQ_FIRST_BULL_SNAP_TURN_V1` | `MNQ-202606` / `MNQM6` / conId `770561201` | session allowed / `mnq_first_bull_snap_turn` | Completed 5m first bull snap-turn feature/state envelope | Phase-1 realtime completed 5m MNQ envelope, realtime quote evidence, `MNQ.v.0` / `GLBX.MDP3` provenance | `PAPER_DIAGNOSTIC_TIME_BOXED_3X5M_EXIT_V1` | Same strategy-managed lifecycle path | LIMIT, qty `1`, `BUY` |
 
+P0 observe-only envelope refresh now uses Phase-1 runtime market-data authority artifacts directly. The producers accept the current `bars` schema and normalize it to the historical `candles`/`candle_history` shape while preserving `source_category=PHASE1_RUNTIME_MARKET_DATA`, the source authority path, latest bar timestamp, and freshness status. Legacy `databento_live_runtime_feed` and `track_b_runtime_candle_capture` paths are diagnostic fallback only and require the explicit `--allow-legacy-runtime-candles` flag.
+
+Current P0 authority candle inputs:
+
+```text
+outputs/track_b_execution_core/phase1_runtime_market_data/MGC/1m/latest_runtime_candles.json
+outputs/track_b_execution_core/phase1_runtime_market_data/MGC/5m/latest_runtime_candles.json
+outputs/track_b_execution_core/phase1_runtime_market_data/MNQ/5m/latest_runtime_candles.json
+```
+
 ## Per-Strategy Readiness Details
 
 ### `asian_drift_v1`

@@ -857,19 +857,19 @@ adapters:
 
 ```bash
 ./.venv/bin/python -m mgc_v05l.execution_core.track_b_session_strategy_envelope_producer_cli \
-  --runtime-5m-candles-json outputs/track_b_execution_core/asian_drift_state/latest_asian_drift_5m_candles.json \
+  --runtime-5m-candles-json outputs/track_b_execution_core/phase1_runtime_market_data/MGC/5m/latest_runtime_candles.json \
   --expected-account-id DUM882026 \
   --source-id asia_session_strategy_envelope_watch \
   --max-completed-5m-age-seconds 900 \
   --output-root outputs/track_b_execution_core/session_strategy_state
 ```
 
-Produce the snap-turn envelopes from the same fresh completed realtime MGC 5m
-context:
+Produce the MNQ snap-turn envelopes from fresh completed realtime MNQ 5m
+Phase-1 authority context:
 
 ```bash
 ./.venv/bin/python -m mgc_v05l.execution_core.track_b_snap_turn_envelope_producer_cli \
-  --runtime-5m-candles-json outputs/track_b_execution_core/asian_drift_state/latest_asian_drift_5m_candles.json \
+  --runtime-5m-candles-json outputs/track_b_execution_core/phase1_runtime_market_data/MNQ/5m/latest_runtime_candles.json \
   --expected-account-id DUM882026 \
   --source-id snap_turn_envelope_watch \
   --max-completed-5m-age-seconds 900 \
@@ -878,9 +878,10 @@ context:
 
 Both envelope producers block with a stale-runtime-context verdict if the
 latest completed 5m candle is older than the configured threshold. Do not feed
-`latest_good_mgc_1m_history.json` into these producer commands for live shadow
-watching unless that artifact has first passed the same runtime freshness
-check.
+`latest_good_mgc_1m_history.json`, `databento_live_runtime_feed`, or
+`track_b_runtime_candle_capture` artifacts into these producer commands for P0
+authority. Those legacy paths are diagnostic fallback only and require the
+explicit `--allow-legacy-runtime-candles` flag.
 
 The stable Asia Early envelope paths are:
 
@@ -1298,8 +1299,7 @@ For the full no-submit watch chain from bounded runtime 1m candle context, run:
 
 ```bash
 ./.venv/bin/python -m mgc_v05l.execution_core.track_b_asian_drift_watch_chain_cli \
-  --source-candles-json outputs/track_b_execution_core/track_b_runtime_candle_capture/latest_runtime_mgc_1m_candles.json \
-  --current-quote-report-json <REALTIME_CURRENT_QUOTE_REPORT_JSON> \
+  --source-candles-json outputs/track_b_execution_core/phase1_runtime_market_data/MGC/1m/latest_runtime_candles.json \
   --inbox-dir examples/track_b_shadow_listener/inbox \
   --expected-account-id DUM882026 \
   --account-id DUM882026 \

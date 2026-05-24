@@ -81,6 +81,42 @@ def mnq_runtime_5m_payload(*, bars: int = 9, completed: bool = True) -> dict[str
     return payload
 
 
+def phase1_mnq_runtime_5m_payload(*, bars: int = 9) -> dict[str, object]:
+    start = datetime(2026, 5, 5, 6, 45, tzinfo=timezone.utc)
+    phase1_bars: list[dict[str, object]] = []
+    close = 29250.0
+    for index in range(bars):
+        bar_start = start + timedelta(minutes=5 * index)
+        bar_end = bar_start + timedelta(minutes=5)
+        open_price = close
+        close = close + (2.5 if index % 2 == 0 else -1.25)
+        phase1_bars.append(
+            {
+                "bar_start": bar_start.isoformat(),
+                "bar_end": bar_end.isoformat(),
+                "open": round(open_price, 2),
+                "high": round(max(open_price, close) + 4.0, 2),
+                "low": round(min(open_price, close) - 4.0, 2),
+                "close": round(close, 2),
+                "volume": 500 + index,
+                "completed": True,
+            }
+        )
+    return {
+        "symbol": "MNQ",
+        "timeframe": "5m",
+        "dataset": "GLBX.MDP3",
+        "source_id": "DATABENTO_REALTIME_PHASE1_mnq",
+        "realtime_feed_confirmed": True,
+        "realtime_feed_block_reason": "READY",
+        "last_completed_bar_ts": phase1_bars[-1]["bar_end"],
+        "bars": phase1_bars,
+        "submit_allowed": False,
+        "paper_trade_allowed": False,
+        "live_money_eligible": False,
+    }
+
+
 def test_producer_blocks_when_insufficient_completed_5m_bars(tmp_path: Path) -> None:
     result = produce_track_b_snap_turn_envelopes(
         runtime_5m_payload=runtime_5m_payload(bars=3),
@@ -94,6 +130,45 @@ def test_producer_blocks_when_insufficient_completed_5m_bars(tmp_path: Path) -> 
     assert result.first_bear_snap_turn_event_json is None
     assert result.report["submit_attempted"] is False
     assert result.report["live_money_readiness"] is False
+
+
+def test_phase1_mnq_bars_schema_feeds_snap_turn_envelopes(tmp_path: Path) -> None:
+    source = (
+        tmp_path
+        / "outputs/track_b_execution_core/phase1_runtime_market_data/MNQ/5m/latest_runtime_candles.json"
+    )
+    result = produce_track_b_snap_turn_envelopes(
+        runtime_5m_payload=phase1_mnq_runtime_5m_payload(),
+        runtime_5m_payload_path=source,
+        output_root=tmp_path / "snap",
+        now=aware_now(),
+    )
+
+    assert result.verdict == TrackBSnapTurnEnvelopeProducerVerdict.WROTE_ENVELOPES
+    assert result.report["source_category"] == "PHASE1_RUNTIME_MARKET_DATA"
+    assert result.report["phase1_runtime_market_data_authority"] is True
+    assert result.report["input_bar_count"] == 9
+    assert result.first_bull_snap_turn_event is not None
+    assert result.first_bull_snap_turn_event["strategy_id"] == "MNQ_FIRST_BULL_SNAP_TURN_V1"
+    assert result.first_bull_snap_turn_event["source_authority_path"] == str(source)
+    assert result.first_bull_snap_turn_event["submit_attempted"] is False
+
+
+def test_legacy_runtime_candle_path_rejected_for_p0_authority_without_flag(tmp_path: Path) -> None:
+    legacy = (
+        tmp_path
+        / "outputs/track_b_execution_core/databento_live_runtime_feed/latest_live_mnq_completed_5m_candles.json"
+    )
+    result = produce_track_b_snap_turn_envelopes(
+        runtime_5m_payload=mnq_runtime_5m_payload(),
+        runtime_5m_payload_path=legacy,
+        output_root=tmp_path / "snap",
+        now=aware_now(),
+    )
+
+    assert result.verdict == TrackBSnapTurnEnvelopeProducerVerdict.BLOCKED_INVALID_INPUT
+    assert "legacy runtime candle path is diagnostic-only" in str(result.report["primary_blocker"])
+    assert result.report["submit_attempted"] is False
 
 
 def test_producer_blocks_when_input_contains_incomplete_5m_bars(tmp_path: Path) -> None:

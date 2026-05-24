@@ -82,6 +82,42 @@ def mnq_runtime_5m_payload(*, bars: int = 9, completed: bool = True) -> dict[str
     return payload
 
 
+def phase1_mgc_runtime_5m_payload(*, bars: int = 9) -> dict[str, object]:
+    start = datetime(2026, 5, 5, 9, 45, tzinfo=timezone.utc)
+    phase1_bars: list[dict[str, object]] = []
+    close = 4525.0
+    for index in range(bars):
+        bar_start = start + timedelta(minutes=5 * index)
+        bar_end = bar_start + timedelta(minutes=5)
+        open_price = close
+        close = close + (0.3 if index % 2 == 0 else -0.2)
+        phase1_bars.append(
+            {
+                "bar_start": bar_start.isoformat(),
+                "bar_end": bar_end.isoformat(),
+                "open": round(open_price, 2),
+                "high": round(max(open_price, close) + 0.5, 2),
+                "low": round(min(open_price, close) - 0.5, 2),
+                "close": round(close, 2),
+                "volume": 100 + index,
+                "completed": True,
+            }
+        )
+    return {
+        "symbol": "MGC",
+        "timeframe": "5m",
+        "dataset": "GLBX.MDP3",
+        "source_id": "DATABENTO_REALTIME_PHASE1_mgc",
+        "realtime_feed_confirmed": True,
+        "realtime_feed_block_reason": "READY",
+        "last_completed_bar_ts": phase1_bars[-1]["bar_end"],
+        "bars": phase1_bars,
+        "submit_allowed": False,
+        "paper_trade_allowed": False,
+        "live_money_eligible": False,
+    }
+
+
 def test_producer_blocks_when_insufficient_completed_5m_bars(tmp_path: Path) -> None:
     result = produce_track_b_session_strategy_envelopes(
         runtime_5m_payload=runtime_5m_payload(bars=3),
@@ -97,6 +133,44 @@ def test_producer_blocks_when_insufficient_completed_5m_bars(tmp_path: Path) -> 
     assert result.asia_early_normal_breakout_retest_hold_long_event_json is None
     assert result.report["submit_attempted"] is False
     assert result.report["live_money_readiness"] is False
+
+
+def test_phase1_mgc_bars_schema_feeds_session_envelopes(tmp_path: Path) -> None:
+    source = (
+        tmp_path
+        / "outputs/track_b_execution_core/phase1_runtime_market_data/MGC/5m/latest_runtime_candles.json"
+    )
+    result = produce_track_b_session_strategy_envelopes(
+        runtime_5m_payload=phase1_mgc_runtime_5m_payload(),
+        runtime_5m_payload_path=source,
+        output_root=tmp_path / "session",
+        now=aware_now(),
+    )
+
+    assert result.verdict == TrackBSessionStrategyEnvelopeProducerVerdict.WROTE_ENVELOPES
+    assert result.report["source_category"] == "PHASE1_RUNTIME_MARKET_DATA"
+    assert result.report["phase1_runtime_market_data_authority"] is True
+    assert result.report["input_bar_count"] == 9
+    assert result.asia_early_pause_resume_short_event is not None
+    assert result.asia_early_pause_resume_short_event["source_authority_path"] == str(source)
+    assert result.asia_early_pause_resume_short_event["submit_attempted"] is False
+
+
+def test_legacy_runtime_candle_path_rejected_for_p0_authority_without_flag(tmp_path: Path) -> None:
+    legacy = (
+        tmp_path
+        / "outputs/track_b_execution_core/track_b_runtime_candle_capture/latest_runtime_mgc_1m_candles.json"
+    )
+    result = produce_track_b_session_strategy_envelopes(
+        runtime_5m_payload=runtime_5m_payload(),
+        runtime_5m_payload_path=legacy,
+        output_root=tmp_path / "session",
+        now=aware_now(),
+    )
+
+    assert result.verdict == TrackBSessionStrategyEnvelopeProducerVerdict.BLOCKED_INVALID_INPUT
+    assert "legacy runtime candle path is diagnostic-only" in str(result.report["primary_blocker"])
+    assert result.report["submit_attempted"] is False
 
 
 def test_producer_blocks_when_input_contains_incomplete_5m_bars(tmp_path: Path) -> None:

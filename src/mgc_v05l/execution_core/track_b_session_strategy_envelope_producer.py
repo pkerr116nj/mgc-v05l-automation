@@ -19,6 +19,10 @@ from typing import Any, Mapping, Sequence
 from zoneinfo import ZoneInfo
 
 from .models import require_aware_datetime, to_jsonable
+from .track_b_phase1_runtime_candle_adapter import (
+    legacy_p0_runtime_candle_path_blocker,
+    normalize_phase1_runtime_candle_payload,
+)
 from .track_b_snap_turn_envelope_producer import (
     DEFAULT_CALIBRATION_PROFILE,
     DEFAULT_EXPECTED_ACCOUNT_ID,
@@ -158,6 +162,7 @@ def produce_track_b_session_strategy_envelopes(
     prior_bars_since_bull_snap: int | None = None,
     prior_bars_since_bear_snap: int | None = None,
     max_completed_5m_age_seconds: int | None = None,
+    allow_legacy_runtime_candles: bool = False,
     now: datetime | None = None,
     producer_id: str | None = None,
 ) -> TrackBSessionStrategyEnvelopeProducerResult:
@@ -166,10 +171,15 @@ def produce_track_b_session_strategy_envelopes(
     actual_producer_id = producer_id or f"track_b_session_strategy_envelope_producer_{uuid.uuid4().hex}"
     output_root = Path(output_root)
     report_json = output_root / actual_producer_id / "session_strategy_envelope_producer_report.json"
+    normalized_payload = normalize_phase1_runtime_candle_payload(
+        runtime_5m_payload,
+        source_path=runtime_5m_payload_path,
+    )
+    legacy_blocker = None if allow_legacy_runtime_candles else legacy_p0_runtime_candle_path_blocker(runtime_5m_payload_path)
 
     try:
-        candles = _completed_5m_candles(runtime_5m_payload)
-        blocker = _input_blocker(runtime_5m_payload, candles, min_completed_bars)
+        candles = _completed_5m_candles(normalized_payload)
+        blocker = legacy_blocker or _input_blocker(normalized_payload, candles, min_completed_bars)
         if blocker:
             return _write_blocked_result(
                 verdict=_verdict_for_blocker(blocker),
@@ -178,7 +188,7 @@ def produce_track_b_session_strategy_envelopes(
                 now=actual_now,
                 producer_id=actual_producer_id,
                 source_id=source_id,
-                input_payload=runtime_5m_payload,
+                input_payload=normalized_payload,
                 input_payload_path=runtime_5m_payload_path,
                 candles=candles,
                 primary_blocker=blocker,
@@ -198,7 +208,7 @@ def produce_track_b_session_strategy_envelopes(
                 now=actual_now,
                 producer_id=actual_producer_id,
                 source_id=source_id,
-                input_payload=runtime_5m_payload,
+                input_payload=normalized_payload,
                 input_payload_path=runtime_5m_payload_path,
                 candles=candles,
                 primary_blocker=(
@@ -222,10 +232,10 @@ def produce_track_b_session_strategy_envelopes(
             features=current_features,
             prior_bars_since_snap=prior_bars_since_bear_snap,
         )
-        instrument_family = _payload_instrument_family(runtime_5m_payload)
+        instrument_family = _payload_instrument_family(normalized_payload)
         if instrument_family == MNQ_INSTRUMENT_FAMILY:
             mnq_derivative_bear_event = _mnq_us_derivative_bear_turn_event(
-                runtime_5m_payload=runtime_5m_payload,
+                runtime_5m_payload=normalized_payload,
                 runtime_5m_payload_path=runtime_5m_payload_path,
                 expected_account_id=expected_account_id,
                 source_id=source_id,
@@ -247,7 +257,7 @@ def produce_track_b_session_strategy_envelopes(
                 producer_id=actual_producer_id,
                 report_json=report_json,
                 source_id=source_id,
-                input_payload=runtime_5m_payload,
+                input_payload=normalized_payload,
                 input_payload_path=runtime_5m_payload_path,
                 candles=candles,
                 primary_blocker=None,
@@ -285,7 +295,7 @@ def produce_track_b_session_strategy_envelopes(
             )
 
         london_event = _london_late_pause_resume_short_event(
-            runtime_5m_payload=runtime_5m_payload,
+            runtime_5m_payload=normalized_payload,
             runtime_5m_payload_path=runtime_5m_payload_path,
             expected_account_id=expected_account_id,
             source_id=source_id,
@@ -296,7 +306,7 @@ def produce_track_b_session_strategy_envelopes(
             prior_bars_since_short_setup=prior_bars_since_short_setup,
         )
         asia_event = _asia_late_flat_pullback_pause_resume_long_event(
-            runtime_5m_payload=runtime_5m_payload,
+            runtime_5m_payload=normalized_payload,
             runtime_5m_payload_path=runtime_5m_payload_path,
             expected_account_id=expected_account_id,
             source_id=source_id,
@@ -307,7 +317,7 @@ def produce_track_b_session_strategy_envelopes(
             prior_bars_since_long_setup=prior_bars_since_long_setup,
         )
         asia_early_short_event = _asia_early_pause_resume_short_event(
-            runtime_5m_payload=runtime_5m_payload,
+            runtime_5m_payload=normalized_payload,
             runtime_5m_payload_path=runtime_5m_payload_path,
             expected_account_id=expected_account_id,
             source_id=source_id,
@@ -318,7 +328,7 @@ def produce_track_b_session_strategy_envelopes(
             prior_bars_since_short_setup=prior_bars_since_short_setup,
         )
         asia_early_long_event = _asia_early_normal_breakout_retest_hold_long_event(
-            runtime_5m_payload=runtime_5m_payload,
+            runtime_5m_payload=normalized_payload,
             runtime_5m_payload_path=runtime_5m_payload_path,
             expected_account_id=expected_account_id,
             source_id=source_id,
@@ -329,7 +339,7 @@ def produce_track_b_session_strategy_envelopes(
             prior_bars_since_long_setup=prior_bars_since_long_setup,
         )
         derivative_bear_event = _us_derivative_bear_turn_event(
-            runtime_5m_payload=runtime_5m_payload,
+            runtime_5m_payload=normalized_payload,
             runtime_5m_payload_path=runtime_5m_payload_path,
             expected_account_id=expected_account_id,
             source_id=source_id,
@@ -339,7 +349,7 @@ def produce_track_b_session_strategy_envelopes(
             prior_bars_since_short_setup=prior_bars_since_short_setup,
         )
         us_late_long_event = _us_late_pause_resume_long_event(
-            runtime_5m_payload=runtime_5m_payload,
+            runtime_5m_payload=normalized_payload,
             runtime_5m_payload_path=runtime_5m_payload_path,
             expected_account_id=expected_account_id,
             source_id=source_id,
@@ -385,7 +395,7 @@ def produce_track_b_session_strategy_envelopes(
             producer_id=actual_producer_id,
             report_json=report_json,
             source_id=source_id,
-            input_payload=runtime_5m_payload,
+            input_payload=normalized_payload,
             input_payload_path=runtime_5m_payload_path,
             candles=candles,
             primary_blocker=None,
@@ -444,7 +454,7 @@ def produce_track_b_session_strategy_envelopes(
             now=actual_now,
             producer_id=actual_producer_id,
             source_id=source_id,
-            input_payload=runtime_5m_payload,
+            input_payload=normalized_payload,
             input_payload_path=runtime_5m_payload_path,
             candles=[],
             primary_blocker=f"Track B session-strategy envelope producer invalid input: {exc}",
@@ -1213,6 +1223,14 @@ def _event_envelope(
             "track_b_strategy_adapter_consumes_envelope_only": True,
             "track_b_no_submit_market_state": True,
             "source_payload_path": None if runtime_5m_payload_path is None else str(runtime_5m_payload_path),
+            "source_category": runtime_5m_payload.get("source_category"),
+            "input_source_category": runtime_5m_payload.get("input_source_category"),
+            "source_authority": runtime_5m_payload.get("source_authority"),
+            "source_authority_path": runtime_5m_payload.get("source_authority_path"),
+            "latest_bar_timestamp": runtime_5m_payload.get("latest_bar_timestamp"),
+            "freshness_status": runtime_5m_payload.get("freshness_status"),
+            "phase1_runtime_market_data_authority": runtime_5m_payload.get("phase1_runtime_market_data_authority")
+            is True,
             "source_bar_count": input_bar_count,
             "signal_side_if_ready": signal_side,
             "feature_version": feature_version,
@@ -1231,6 +1249,14 @@ def _event_envelope(
         "instrument_family": _optional_text(runtime_5m_payload.get("instrument_family")) or MGC_INSTRUMENT_FAMILY,
         "local_symbol": _optional_text(runtime_5m_payload.get("local_symbol")) or MGC_LOCAL_SYMBOL,
         "dataset": _optional_text(runtime_5m_payload.get("dataset")) or MGC_DATASET,
+        "source_category": runtime_5m_payload.get("source_category"),
+        "input_source_category": runtime_5m_payload.get("input_source_category"),
+        "source_authority": runtime_5m_payload.get("source_authority"),
+        "source_authority_path": runtime_5m_payload.get("source_authority_path"),
+        "latest_bar_timestamp": runtime_5m_payload.get("latest_bar_timestamp"),
+        "freshness_status": runtime_5m_payload.get("freshness_status"),
+        "phase1_runtime_market_data_authority": runtime_5m_payload.get("phase1_runtime_market_data_authority")
+        is True,
         "strategy_id": strategy_id,
         "signal_family": strategy_id,
         "lane_id": lane_id,
@@ -1287,6 +1313,13 @@ def _base_report(
         "instrument_family": _optional_text(input_payload.get("instrument_family")) or MGC_INSTRUMENT_FAMILY,
         "local_symbol": _optional_text(input_payload.get("local_symbol")) or MGC_LOCAL_SYMBOL,
         "dataset": _optional_text(input_payload.get("dataset")) or MGC_DATASET,
+        "source_category": input_payload.get("source_category"),
+        "input_source_category": input_payload.get("input_source_category"),
+        "source_authority": input_payload.get("source_authority"),
+        "source_authority_path": input_payload.get("source_authority_path"),
+        "latest_bar_timestamp": input_payload.get("latest_bar_timestamp"),
+        "freshness_status": input_payload.get("freshness_status"),
+        "phase1_runtime_market_data_authority": input_payload.get("phase1_runtime_market_data_authority") is True,
         "timeframe": _optional_text(input_payload.get("timeframe")) or "5m",
         "quote_provider_mode": _optional_text(input_payload.get("quote_provider_mode")),
         "realtime_quote_received": input_payload.get("realtime_quote_received") is True,

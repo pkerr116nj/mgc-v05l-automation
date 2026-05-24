@@ -34,6 +34,11 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--prior-bars-since-bull-snap", type=int)
     parser.add_argument("--prior-bars-since-bear-snap", type=int)
+    parser.add_argument(
+        "--allow-legacy-runtime-candles",
+        action="store_true",
+        help="Allow diagnostic legacy candle paths; default P0 authority requires Phase-1 runtime market data.",
+    )
     parser.add_argument("--output-root", type=Path, default=DEFAULT_TRACK_B_SNAP_TURN_ENVELOPE_OUTPUT_ROOT)
     return parser
 
@@ -53,6 +58,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         max_completed_5m_age_seconds=args.max_completed_5m_age_seconds,
         prior_bars_since_bull_snap=args.prior_bars_since_bull_snap,
         prior_bars_since_bear_snap=args.prior_bars_since_bear_snap,
+        allow_legacy_runtime_candles=bool(args.allow_legacy_runtime_candles),
     )
     print(
         json.dumps(

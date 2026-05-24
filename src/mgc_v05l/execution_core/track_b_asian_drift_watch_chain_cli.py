@@ -36,6 +36,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--lane-id", default="mgc_example_long_lmt_day")
     parser.add_argument("--max-source-bars", type=int, default=250)
     parser.add_argument(
+        "--allow-legacy-runtime-candles",
+        action="store_true",
+        help="Allow diagnostic legacy candle paths; default P0 authority requires Phase-1 runtime market data.",
+    )
+    parser.add_argument(
         "--max-completed-5m-age-seconds",
         type=int,
         default=900,
@@ -70,6 +75,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         strategy_id=args.strategy_id,
         lane_id=args.lane_id,
         max_source_bars=args.max_source_bars,
+        allow_legacy_runtime_candles=bool(args.allow_legacy_runtime_candles),
         max_completed_5m_age_seconds=args.max_completed_5m_age_seconds,
         inbox_dir=args.inbox_dir,
         output_root=args.output_root,

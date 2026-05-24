@@ -52,6 +52,42 @@ def one_minute_payload(closes: list[float], *, completed: bool = True) -> dict[s
     }
 
 
+def phase1_one_minute_payload(closes: list[float], *, completed: bool = True) -> dict[str, object]:
+    start = datetime(2026, 5, 4, 18, 1, tzinfo=ZoneInfo("America/New_York"))
+    previous_close = closes[0] if closes else 4575.0
+    bars: list[dict[str, object]] = []
+    for index, close in enumerate(closes):
+        bar_start = start + timedelta(minutes=index)
+        bar_end = bar_start + timedelta(minutes=1)
+        open_price = previous_close if index else close
+        bars.append(
+            {
+                "bar_start": bar_start.isoformat(),
+                "bar_end": bar_end.isoformat(),
+                "open": open_price,
+                "high": max(open_price, close) + 0.2,
+                "low": min(open_price, close) - 0.2,
+                "close": close,
+                "volume": 4,
+                "completed": completed,
+            }
+        )
+        previous_close = close
+    return {
+        "symbol": "MGC",
+        "timeframe": "1m",
+        "dataset": "GLBX.MDP3",
+        "source_id": "DATABENTO_REALTIME_PHASE1_mgc",
+        "realtime_feed_confirmed": True,
+        "realtime_feed_block_reason": "READY",
+        "last_completed_bar_ts": bars[-1]["bar_end"] if bars else None,
+        "bars": bars,
+        "submit_allowed": False,
+        "paper_trade_allowed": False,
+        "live_money_eligible": False,
+    }
+
+
 def flat_1m_closes(count: int) -> list[float]:
     return [4575.0 + (0.03 if index % 2 == 0 else -0.03) for index in range(count)]
 
@@ -89,6 +125,50 @@ def test_watch_chain_aggregates_1m_to_5m_and_reaches_no_signal(tmp_path: Path) -
     assert result.report["submit_attempted"] is False
     assert result.report["broker_state_mutated"] is False
     assert result.report["live_money_readiness"] is False
+
+
+def test_watch_chain_accepts_phase1_runtime_bars_schema_for_asian_drift(tmp_path: Path) -> None:
+    source = (
+        tmp_path
+        / "outputs/track_b_execution_core/phase1_runtime_market_data/MGC/1m/latest_runtime_candles.json"
+    )
+    result = run_track_b_asian_drift_watch_chain(
+        candle_payload=phase1_one_minute_payload(flat_1m_closes(40)),
+        source_payload_path=source,
+        output_root=tmp_path / "asian_drift_state",
+        feature_rows_output_root=tmp_path / "asian_drift_state",
+        strategy_rule_output_root=tmp_path / "rule",
+        inbox_dir=tmp_path / "inbox",
+        chain_id="phase1-chain",
+        now=aware_now(),
+    )
+
+    assert result.verdict == TrackBAsianDriftWatchChainVerdict.NO_SIGNAL_NO_MUTATION
+    assert result.completed_5m_candles_payload is not None
+    assert result.completed_5m_candles_payload["source_category"] == "PHASE1_RUNTIME_MARKET_DATA"
+    assert result.completed_5m_candles_payload["source_authority_path"] == str(source)
+    assert result.completed_5m_candles_payload["phase1_runtime_market_data_authority"] is True
+    assert result.report["submit_attempted"] is False
+
+
+def test_watch_chain_rejects_legacy_runtime_path_without_explicit_flag(tmp_path: Path) -> None:
+    legacy = (
+        tmp_path
+        / "outputs/track_b_execution_core/track_b_runtime_candle_capture/latest_runtime_mgc_1m_candles.json"
+    )
+    result = run_track_b_asian_drift_watch_chain(
+        candle_payload=one_minute_payload(flat_1m_closes(40)),
+        source_payload_path=legacy,
+        output_root=tmp_path / "asian_drift_state",
+        feature_rows_output_root=tmp_path / "asian_drift_state",
+        inbox_dir=tmp_path / "inbox",
+        chain_id="legacy-chain",
+        now=aware_now(),
+    )
+
+    assert result.verdict == TrackBAsianDriftWatchChainVerdict.BLOCKED_SCHEMA_ERROR
+    assert "legacy runtime candle path is diagnostic-only" in str(result.report["primary_blocker"])
+    assert result.report["submit_attempted"] is False
 
 
 def test_watch_chain_blocks_with_fewer_than_eight_completed_5m_bars(tmp_path: Path) -> None:

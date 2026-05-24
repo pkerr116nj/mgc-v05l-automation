@@ -23,6 +23,10 @@ from .track_b_asian_drift_feature_rows import (
     TrackBAsianDriftFeatureRowsResult,
     produce_track_b_asian_drift_feature_rows,
 )
+from .track_b_phase1_runtime_candle_adapter import (
+    legacy_p0_runtime_candle_path_blocker,
+    normalize_phase1_runtime_candle_payload,
+)
 from .track_b_strategy_rule_runner import (
     TrackBStrategyRuleRunnerResult,
     run_track_b_strategy_rule,
@@ -69,6 +73,7 @@ def run_track_b_asian_drift_watch_chain(
     calibration_profile: str = RECOVERY_CONFIRMED,
     max_source_bars: int = 250,
     max_completed_5m_age_seconds: int | None = None,
+    allow_legacy_runtime_candles: bool = False,
     output_root: Path = DEFAULT_TRACK_B_ASIAN_DRIFT_WATCH_CHAIN_OUTPUT_ROOT,
     feature_rows_output_root: Path = DEFAULT_TRACK_B_ASIAN_DRIFT_FEATURE_ROWS_OUTPUT_ROOT,
     strategy_rule_output_root: Path | None = None,
@@ -87,9 +92,14 @@ def run_track_b_asian_drift_watch_chain(
     completed_5m_json = output_root / actual_chain_id / "asian_drift_5m_candles.json"
     latest_report_json = output_root / "latest_asian_drift_watch_chain_report.json"
     latest_completed_5m_json = output_root / "latest_asian_drift_5m_candles.json"
+    normalized_payload = normalize_phase1_runtime_candle_payload(
+        candle_payload,
+        source_path=source_payload_path,
+    )
+    legacy_blocker = None if allow_legacy_runtime_candles else legacy_p0_runtime_candle_path_blocker(source_payload_path)
     try:
         completed_5m_payload = _completed_5m_payload(
-            payload=candle_payload,
+            payload=normalized_payload,
             source_payload_path=source_payload_path,
             current_quote_report_payload=current_quote_report_payload,
             current_quote_report_json=current_quote_report_json,
@@ -107,10 +117,31 @@ def run_track_b_asian_drift_watch_chain(
         _write_json(latest_completed_5m_json, completed_5m_payload)
         freshness = _runtime_candle_freshness(
             completed_5m_payload=completed_5m_payload,
-            source_payload=candle_payload,
+            source_payload=normalized_payload,
             now=actual_now,
             max_completed_5m_age_seconds=max_completed_5m_age_seconds,
         )
+        if legacy_blocker:
+            report = _blocked_schema_report(
+                now=actual_now,
+                chain_id=actual_chain_id,
+                source_id=source_id,
+                source_payload_path=source_payload_path,
+                primary_blocker=legacy_blocker,
+                report_json=report_json,
+                latest_report_json=latest_report_json,
+            )
+            _write_json(report_json, report)
+            _write_json(latest_report_json, report)
+            return TrackBAsianDriftWatchChainResult(
+                verdict=TrackBAsianDriftWatchChainVerdict.BLOCKED_SCHEMA_ERROR,
+                report_json=report_json,
+                report=report,
+                completed_5m_candles_json=completed_5m_json,
+                completed_5m_candles_payload=completed_5m_payload,
+                feature_rows_result=None,
+                rule_result=None,
+            )
         if freshness["runtime_candle_context_stale"] is True:
             report = _stale_runtime_context_report(
                 now=actual_now,
@@ -262,6 +293,13 @@ def _completed_5m_payload(
         "generated_at": generated_at.isoformat(),
         "source_id": source_id,
         "source_payload_path": None if source_payload_path is None else str(source_payload_path),
+        "source_category": payload.get("source_category"),
+        "input_source_category": payload.get("input_source_category"),
+        "source_authority": payload.get("source_authority"),
+        "source_authority_path": payload.get("source_authority_path"),
+        "latest_bar_timestamp": payload.get("latest_bar_timestamp"),
+        "freshness_status": payload.get("freshness_status"),
+        "phase1_runtime_market_data_authority": payload.get("phase1_runtime_market_data_authority") is True,
         "account_id": account_id,
         "expected_account_id": expected_account_id,
         "contract_key": contract_key,
