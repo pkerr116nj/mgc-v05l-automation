@@ -99,6 +99,16 @@ def validate_track_b_pre_action_snapshot(
         "runtime_resume_cooldown_until": snapshot.get("runtime_resume_cooldown_until"),
         "runtime_resume_generation_reuse_allowed": snapshot.get("runtime_resume_generation_reuse_allowed") is True,
         "runtime_resume_must_start_new_generation": snapshot.get("runtime_resume_must_start_new_generation") is True,
+        "self_recover_schema_version": str(snapshot.get("self_recover_schema_version") or ""),
+        "recommended_recovery_action": str(snapshot.get("recommended_recovery_action") or ""),
+        "self_recover_paper_action_policy": str(snapshot.get("paper_action_policy") or ""),
+        "self_recover_autonomous_recovery_plan_classification": str(
+            snapshot.get("self_recover_autonomous_recovery_plan_classification") or ""
+        ),
+        "self_recover_recovery_budget_key": str(snapshot.get("recovery_budget_key") or ""),
+        "self_recover_attempts_remaining": snapshot.get("attempts_remaining"),
+        "self_recover_cooldown_until": snapshot.get("cooldown_until"),
+        "self_recover_quarantine_required": snapshot.get("quarantine_required") is True,
         "agent_health_top_blockers": _agent_health_blockers(snapshot),
         "agent_health_blocks_proof": snapshot.get("agent_health_blocks_proof") is True,
         "agent_health_blocks_runtime_submit": snapshot.get("agent_health_blocks_runtime_submit") is True,

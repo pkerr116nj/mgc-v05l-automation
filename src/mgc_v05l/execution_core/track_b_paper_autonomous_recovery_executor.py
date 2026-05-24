@@ -157,6 +157,7 @@ def build_track_b_paper_autonomous_recovery_executor_attempt(
         classification = EXECUTOR_BLOCKED_BUDGET_EXHAUSTED
         reason = "Dry-run executor audit budget is exhausted for this action/target window."
         blockers.append({"code": "executor_audit_budget_exhausted", "detail": budget_key})
+    self_recover_plan = _self_recover_v2_fields(validation)
     adapter_result = _adapter_result(
         config=config,
         action_type=action_type,
@@ -178,6 +179,7 @@ def build_track_b_paper_autonomous_recovery_executor_attempt(
         "execution_enabled": False,
         "control_plane_snapshot_id": validation.get("control_plane_snapshot_id") or "",
         "shared_truth_generation_id": validation.get("shared_truth_refresh_generation_id") or "",
+        **self_recover_plan,
         "action_type": action_type,
         "expected_plan_classification": expected_plan_classification,
         "target_identity": normalized_target,
@@ -204,6 +206,7 @@ def build_track_b_paper_autonomous_recovery_executor_attempt(
         "pre_action_evidence": {
             "control_plane_snapshot_id": validation.get("control_plane_snapshot_id") or "",
             "shared_truth_refresh_generation_id": validation.get("shared_truth_refresh_generation_id") or "",
+            **self_recover_plan,
             "snapshot_coherence_status": validation.get("snapshot_coherence_status") or "",
             "supervisor_decision_id": validation.get("supervisor_decision_id") or "",
             "supervisor_classification": validation.get("supervisor_classification") or "",
@@ -409,6 +412,7 @@ def _adapter_result(
         "launch_command_exists": launcher_exists,
         "control_plane_snapshot_id": validation.get("control_plane_snapshot_id") or "",
         "shared_truth_generation_id": validation.get("shared_truth_refresh_generation_id") or "",
+        **_self_recover_v2_fields(validation),
         "budget_key": _budget_key(action_type=action_type, target_identity=normalized_target),
         "runtime_retry_generation_gate_classification": generation_gate["classification"],
         "runtime_retry_generation_gate_reason": generation_gate["reason"],
@@ -909,7 +913,30 @@ def _event_row(payload: Mapping[str, Any]) -> dict[str, Any]:
         "budget_key": payload.get("budget_key"),
         "control_plane_snapshot_id": payload.get("control_plane_snapshot_id"),
         "shared_truth_generation_id": payload.get("shared_truth_generation_id"),
+        "self_recover_schema_version": payload.get("self_recover_schema_version"),
+        "recommended_recovery_action": payload.get("recommended_recovery_action"),
+        "self_recover_paper_action_policy": payload.get("self_recover_paper_action_policy"),
+        "autonomous_recovery_plan_classification": payload.get("autonomous_recovery_plan_classification"),
+        "recovery_budget_key": payload.get("recovery_budget_key"),
+        "self_recover_attempts_remaining": payload.get("self_recover_attempts_remaining"),
+        "self_recover_cooldown_until": payload.get("self_recover_cooldown_until"),
+        "quarantine_required": payload.get("quarantine_required") is True,
         "execution_enabled": False,
+    }
+
+
+def _self_recover_v2_fields(payload: Mapping[str, Any]) -> dict[str, Any]:
+    return {
+        "self_recover_schema_version": str(payload.get("self_recover_schema_version") or ""),
+        "recommended_recovery_action": str(payload.get("recommended_recovery_action") or ""),
+        "self_recover_paper_action_policy": str(payload.get("self_recover_paper_action_policy") or ""),
+        "autonomous_recovery_plan_classification": str(
+            payload.get("self_recover_autonomous_recovery_plan_classification") or ""
+        ),
+        "recovery_budget_key": str(payload.get("self_recover_recovery_budget_key") or ""),
+        "self_recover_attempts_remaining": payload.get("self_recover_attempts_remaining"),
+        "self_recover_cooldown_until": payload.get("self_recover_cooldown_until"),
+        "quarantine_required": payload.get("self_recover_quarantine_required") is True,
     }
 
 

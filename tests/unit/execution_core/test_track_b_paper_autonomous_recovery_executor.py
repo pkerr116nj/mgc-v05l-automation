@@ -55,7 +55,16 @@ def test_valid_coherent_snapshot_and_matching_plan_creates_dry_run_attempt(tmp_p
     assert payload["execution_enabled"] is False
     assert payload["control_plane_snapshot_id"] == "snapshot-1"
     assert payload["shared_truth_generation_id"] == "generation-1"
+    assert payload["self_recover_schema_version"] == "v2"
+    assert payload["recommended_recovery_action"] == "RUNTIME_RETRY_DRY_RUN"
+    assert payload["self_recover_paper_action_policy"] == "AUTONOMOUS_RETRY_ELIGIBLE"
+    assert payload["autonomous_recovery_plan_classification"] == "PLAN_RUNTIME_RETRY"
+    assert payload["recovery_budget_key"] == "track_b_paper_runtime|RUNTIME_RETRY|test"
+    assert payload["self_recover_attempts_remaining"] == 1
+    assert payload["self_recover_cooldown_until"] is None
+    assert payload["quarantine_required"] is False
     assert payload["pre_action_validation"]["classification"] == PRE_ACTION_SNAPSHOT_VALID
+    assert payload["pre_action_evidence"]["recommended_recovery_action"] == "RUNTIME_RETRY_DRY_RUN"
     assert payload["would_mutate_runtime"] is True
     assert payload["would_mutate_broker"] is False
     assert payload["action_adapter"]["adapter_name"] == "RUNTIME_RETRY_DISABLED_V1"
@@ -63,6 +72,8 @@ def test_valid_coherent_snapshot_and_matching_plan_creates_dry_run_attempt(tmp_p
     assert payload["action_adapter"]["execution_enabled"] is False
     assert payload["action_adapter"]["blocked_reason"] == "ADAPTER_DISABLED"
     assert payload["action_adapter"]["runtime_retry_generation_gate_classification"] == RUNTIME_RETRY_GATE_PASS
+    assert payload["action_adapter"]["recommended_recovery_action"] == "RUNTIME_RETRY_DRY_RUN"
+    assert payload["action_adapter"]["self_recover_paper_action_policy"] == "AUTONOMOUS_RETRY_ELIGIBLE"
     assert payload["action_adapter"]["runtime_resume_action_policy"] == "NEW_RUNTIME_GENERATION_ALLOWED"
     assert payload["action_adapter"]["previous_runtime_generation_id"] == "runtime-generation-previous"
     assert payload["action_adapter"]["proposed_next_runtime_generation_id"] == "runtime-generation-next"
@@ -190,6 +201,9 @@ def test_runtime_retry_budget_quarantine_blocks_before_adapter_disabled(tmp_path
     )
 
     assert payload["classification"] == EXECUTOR_BLOCKED_BUDGET_EXHAUSTED
+    assert payload["recommended_recovery_action"] == "QUARANTINE_OBSERVE_ONLY"
+    assert payload["self_recover_paper_action_policy"] == "QUARANTINE_OBSERVE_ONLY"
+    assert payload["quarantine_required"] is True
     assert payload["action_adapter"]["budget_gate_classification"] == BUDGET_GATE_BLOCKED_QUARANTINE
     assert payload["action_adapter"]["blocked_reason"] == RUNTIME_RETRY_BLOCKED_QUARANTINE
 
@@ -506,9 +520,16 @@ def test_audit_artifacts_are_written(tmp_path: Path) -> None:
     assert latest_path.exists()
     assert event_log_path.exists()
     assert json.loads(latest_path.read_text(encoding="utf-8"))["recovery_attempt_id"] == result["recovery_attempt_id"]
-    assert json.loads(latest_path.read_text(encoding="utf-8"))["action_adapter"]["would_execute_command"][0] == "bash"
+    latest = json.loads(latest_path.read_text(encoding="utf-8"))
+    assert latest["action_adapter"]["would_execute_command"][0] == "bash"
+    assert latest["recommended_recovery_action"] == "RUNTIME_RETRY_DRY_RUN"
+    assert latest["pre_action_evidence"]["self_recover_paper_action_policy"] == "AUTONOMOUS_RETRY_ELIGIBLE"
     rows = [json.loads(line) for line in event_log_path.read_text(encoding="utf-8").splitlines()]
     assert rows[-1]["recovery_attempt_id"] == result["recovery_attempt_id"]
+    assert rows[-1]["recommended_recovery_action"] == "RUNTIME_RETRY_DRY_RUN"
+    assert rows[-1]["self_recover_paper_action_policy"] == "AUTONOMOUS_RETRY_ELIGIBLE"
+    assert rows[-1]["recovery_budget_key"] == "track_b_paper_runtime|RUNTIME_RETRY|test"
+    assert rows[-1]["quarantine_required"] is False
     assert rows[-1]["execution_enabled"] is False
     assert not (tmp_path / "outputs/track_b_execution_core/recovery_budget/recovery_budget_events.jsonl").exists()
 
@@ -587,6 +608,20 @@ def _seed_valid(
                     "diagnostic_only": False,
                 }
             )
+        if budget_quarantine_required:
+            self_recover_recommended_action = "QUARANTINE_OBSERVE_ONLY"
+            self_recover_paper_action_policy = "QUARANTINE_OBSERVE_ONLY"
+            self_recover_plan_classification = "PLAN_QUARANTINE_OBSERVE_ONLY"
+            self_recover_attempts_remaining = 0
+            self_recover_cooldown_until = None
+            self_recover_quarantine_required = True
+        else:
+            self_recover_recommended_action = "RUNTIME_RETRY_DRY_RUN"
+            self_recover_paper_action_policy = "AUTONOMOUS_RETRY_ELIGIBLE"
+            self_recover_plan_classification = "PLAN_RUNTIME_RETRY"
+            self_recover_attempts_remaining = runtime_resume_attempts_remaining
+            self_recover_cooldown_until = None if runtime_resume_cooldown_until is None else runtime_resume_cooldown_until.isoformat()
+            self_recover_quarantine_required = False
         _write_json(
             root / "outputs/track_b_execution_core/control_plane/latest_control_plane_snapshot.json",
             {
@@ -608,6 +643,14 @@ def _seed_valid(
                 else runtime_resume_cooldown_until.isoformat(),
                 "runtime_resume_generation_reuse_allowed": generation_reuse_allowed,
                 "runtime_resume_must_start_new_generation": must_start_new_generation,
+                "self_recover_schema_version": "v2",
+                "recommended_recovery_action": self_recover_recommended_action,
+                "paper_action_policy": self_recover_paper_action_policy,
+                "self_recover_autonomous_recovery_plan_classification": self_recover_plan_classification,
+                "recovery_budget_key": "track_b_paper_runtime|RUNTIME_RETRY|test",
+                "attempts_remaining": self_recover_attempts_remaining,
+                "cooldown_until": self_recover_cooldown_until,
+                "quarantine_required": self_recover_quarantine_required,
                 "duplicate_writer_count": duplicate_writer_count,
                 "live_money_eligible": live_money_eligible,
                 "agent_health_top_blockers": agent_health_top_blockers,
