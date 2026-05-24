@@ -10,7 +10,9 @@ adapter hook plus operator authorization. It never creates replacement orders.
 from __future__ import annotations
 
 import argparse
+import importlib
 import json
+import threading
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from decimal import Decimal, InvalidOperation
@@ -102,6 +104,10 @@ class ManagedOrderModifyInPlaceConfig:
     reconciliation_path: Path = DEFAULT_RECONCILIATION_ARTIFACT
     broker_lease_path: Path = DEFAULT_LEASE_ARTIFACT
     pre_action_snapshot_max_age_seconds: int = 300
+    tws_host: str = "127.0.0.1"
+    tws_port: int = 7497
+    tws_client_id: int = 1967
+    broker_timeout_seconds: float = 10.0
 
     def resolve(self, path: Path) -> Path:
         return path if path.is_absolute() else self.repo_root / path
@@ -109,6 +115,10 @@ class ManagedOrderModifyInPlaceConfig:
 
 BrokerOrderRefresh = Callable[[ManagedOrderModifyInPlaceConfig], Mapping[str, Any] | Sequence[Mapping[str, Any]]]
 BrokerOrderModify = Callable[[ManagedOrderModifyInPlaceConfig], Mapping[str, Any]]
+
+
+class ManagedOrderModifyInPlaceBrokerError(RuntimeError):
+    """Raised when the PAPER broker modify adapter cannot complete its boundary."""
 
 
 def run_track_b_managed_order_modify_in_place(
@@ -133,6 +143,7 @@ def run_track_b_managed_order_modify_in_place(
     if not config.apply:
         pre_action_validation = _pre_action_snapshot_validation(config=config, now=actual_now)
         report["pre_action_snapshot_validation"] = _jsonable(pre_action_validation)
+        _attach_pre_action_summary(report, pre_action_validation)
         report["pre_action_snapshot_required_for_apply"] = True
         report["pre_action_snapshot_would_block_apply"] = (
             pre_action_validation.get("classification") != PRE_ACTION_SNAPSHOT_VALID
@@ -149,6 +160,7 @@ def run_track_b_managed_order_modify_in_place(
 
     pre_action_validation = _pre_action_snapshot_validation(config=config, now=actual_now)
     report["pre_action_snapshot_validation"] = _jsonable(pre_action_validation)
+    _attach_pre_action_summary(report, pre_action_validation)
     report["pre_action_snapshot_required_for_apply"] = True
     if pre_action_validation.get("classification") != PRE_ACTION_SNAPSHOT_VALID:
         report["classification"] = MODIFY_IN_PLACE_BLOCKED_SHARED_TRUTH
@@ -170,7 +182,14 @@ def run_track_b_managed_order_modify_in_place(
         _write_report(config=config, report=report)
         return report
 
-    pre_refresh = _normalize_refresh(pre_modify_open_order_refresh(config))
+    try:
+        pre_refresh = _normalize_refresh(pre_modify_open_order_refresh(config))
+    except Exception as exc:  # noqa: BLE001 - adapter errors must become audit evidence.
+        report["classification"] = MODIFY_IN_PLACE_VERIFICATION_FAILED
+        report["detail"] = f"Pre-modify broker open-order refresh failed: {exc}"
+        report["broker_mutation_attempted"] = False
+        _write_report(config=config, report=report)
+        return report
     pre_order = _matching_order(config=config, rows=pre_refresh)
     if pre_order is None:
         report["classification"] = MODIFY_IN_PLACE_BLOCKED_NOT_WORKING_ORDER
@@ -206,7 +225,17 @@ def run_track_b_managed_order_modify_in_place(
         _write_report(config=config, report=report)
         return report
 
-    post_refresh = _normalize_refresh(post_modify_open_order_refresh(config))
+    try:
+        post_refresh = _normalize_refresh(post_modify_open_order_refresh(config))
+    except Exception as exc:  # noqa: BLE001 - adapter errors must become audit evidence.
+        report["classification"] = MODIFY_IN_PLACE_VERIFICATION_FAILED
+        report["detail"] = f"Post-modify broker open-order verification refresh failed: {exc}"
+        report["broker_mutation_attempted"] = True
+        report["broker_mutation_performed"] = bool(modify_result.get("accepted", True))
+        report["pre_modify_refresh"] = pre_refresh
+        report["modify_result"] = _jsonable(modify_result)
+        _write_report(config=config, report=report)
+        return report
     post_order = _matching_order(config=config, rows=post_refresh, expected_limit=config.new_limit)
     if post_order is None:
         report["classification"] = MODIFY_IN_PLACE_VERIFICATION_FAILED
@@ -216,6 +245,14 @@ def run_track_b_managed_order_modify_in_place(
         report["pre_modify_refresh"] = pre_refresh
         report["modify_result"] = _jsonable(modify_result)
         report["post_modify_refresh"] = post_refresh
+        report["post_modify_verification"] = {
+            "verified": False,
+            "same_order_id_required": config.broker_order_id,
+            "same_perm_id_required": config.perm_id,
+            "same_action_required": config.action,
+            "same_quantity_required": config.quantity,
+            "updated_limit_required": config.new_limit,
+        }
         _write_report(config=config, report=report)
         return report
 
@@ -227,6 +264,14 @@ def run_track_b_managed_order_modify_in_place(
     report["modify_result"] = _jsonable(modify_result)
     report["post_modify_refresh"] = post_refresh
     report["verified_order"] = _jsonable(post_order)
+    report["post_modify_verification"] = {
+        "verified": True,
+        "same_order_id": str(_value(post_order, "broker_order_id", "order_id")) == str(config.broker_order_id),
+        "same_perm_id": str(_value(post_order, "perm_id")) == str(config.perm_id),
+        "same_action": str(_value(post_order, "action") or "").upper() == str(config.action).upper(),
+        "same_quantity": _decimal(_value(post_order, "quantity", "qty")) == _decimal(config.quantity),
+        "updated_limit_observed": _decimal(_value(post_order, "limit_price", "order_limit_price", "lmt_price")) == _decimal(config.new_limit),
+    }
     _write_report(config=config, report=report)
     return report
 
@@ -246,6 +291,10 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--account-id", default=PAPER_ACCOUNT)
     parser.add_argument("--apply", action="store_true", help="Attempt broker modify if an adapter hook is supplied by the caller.")
     parser.add_argument("--operator-authorized-modify", action="store_true")
+    parser.add_argument("--tws-host", default="127.0.0.1")
+    parser.add_argument("--tws-port", type=int, default=7497)
+    parser.add_argument("--tws-client-id", type=int, default=1967)
+    parser.add_argument("--broker-timeout-seconds", type=float, default=10.0)
     parser.add_argument("--output-path", type=Path, default=DEFAULT_AUDIT_PATH)
     parser.add_argument("--json", action="store_true")
     return parser
@@ -268,8 +317,25 @@ def main(argv: Sequence[str] | None = None) -> int:
         apply=bool(args.apply),
         operator_authorized_modify=bool(args.operator_authorized_modify),
         output_path=Path(args.output_path),
+        tws_host=str(args.tws_host),
+        tws_port=int(args.tws_port),
+        tws_client_id=int(args.tws_client_id),
+        broker_timeout_seconds=float(args.broker_timeout_seconds),
     )
-    report = run_track_b_managed_order_modify_in_place(config=config)
+    adapter: IbkrPaperManagedOrderModifyAdapter | None = None
+    hooks: dict[str, Any] = {}
+    if config.apply and config.operator_authorized_modify:
+        adapter = IbkrPaperManagedOrderModifyAdapter(config=config)
+        hooks = {
+            "pre_modify_open_order_refresh": adapter.refresh_open_orders,
+            "modify_order_limit": adapter.modify_order_limit,
+            "post_modify_open_order_refresh": adapter.refresh_open_orders,
+        }
+    try:
+        report = run_track_b_managed_order_modify_in_place(config=config, **hooks)
+    finally:
+        if adapter is not None:
+            adapter.disconnect()
     if bool(args.json):
         print(json.dumps(report, indent=2, sort_keys=True))
     else:
@@ -441,6 +507,10 @@ def _shared_truth_evidence(*, config: ManagedOrderModifyInPlaceConfig, now: date
         "TRACK_B_PAPER_BROKER_RECONCILIATION_BLOCKED_UNKNOWN_OPEN_ORDERS",
     }:
         blockers.append(f"Reconciliation is unsafe for modify-in-place: {classifications['reconciliation']}.")
+    if reconciliation.get("live_money_eligible") is True or any(payload.get("live_money_eligible") is True for payload in payloads.values()):
+        blockers.append("live_money_eligible=true blocks PAPER modify-in-place.")
+    if reconciliation.get("paper_proof_invoked") is True or any(payload.get("paper_proof_invoked") is True for payload in payloads.values()):
+        blockers.append("paper_proof_invoked=true blocks managed modify-in-place.")
 
     return {
         "source_authority": "execution_core_authority",
@@ -488,7 +558,7 @@ def _base_report(
     readiness: Mapping[str, Any],
 ) -> dict[str, Any]:
     return {
-        "schema_version": "track_b_managed_order_modify_in_place_v1",
+        "schema_version": "track_b_managed_order_modify_in_place_v2",
         "generated_at": now.isoformat(),
         "classification": readiness.get("classification"),
         "detail": readiness.get("detail"),
@@ -555,6 +625,15 @@ def _pre_action_target_identity(config: ManagedOrderModifyInPlaceConfig) -> dict
         "current_known_limit": config.current_known_limit,
         "new_limit": config.new_limit,
     }
+
+
+def _attach_pre_action_summary(report: dict[str, Any], validation: Mapping[str, Any]) -> None:
+    report["control_plane_snapshot_id"] = validation.get("control_plane_snapshot_id")
+    report["shared_truth_refresh_generation_id"] = validation.get("shared_truth_refresh_generation_id")
+    report["snapshot_coherence_status"] = validation.get("snapshot_coherence_status")
+    report["supervisor_decision_id"] = validation.get("supervisor_decision_id")
+    report["autonomous_recovery_plan_classification"] = validation.get("planner_classification")
+    report["autonomous_recovery_action_type"] = validation.get("planner_action_type")
 
 
 def _find_order(*, config: ManagedOrderModifyInPlaceConfig, rows: Sequence[Mapping[str, Any]]) -> dict[str, Any] | None:
@@ -771,6 +850,183 @@ def _write_report(*, config: ManagedOrderModifyInPlaceConfig, report: Mapping[st
     path = config.resolve(config.output_path)
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(report, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+
+
+class IbkrPaperManagedOrderModifyAdapter:
+    """Minimal PAPER-only IBKR adapter for modifying one existing order in place.
+
+    The adapter is instantiated only by the CLI when both --apply and
+    --operator-authorized-modify are present. It refreshes open orders, mutates
+    the exact same order object's limit price, and submits it back to TWS with
+    the same order id. It does not cancel, flatten, or create replacement
+    orders.
+    """
+
+    def __init__(
+        self,
+        *,
+        config: ManagedOrderModifyInPlaceConfig,
+        module_loader: Callable[[str], Any] | None = None,
+    ) -> None:
+        self._config = config
+        self._module_loader = module_loader or importlib.import_module
+        self._bridge: Any | None = None
+        self._thread: threading.Thread | None = None
+        self._connected = False
+        self._next_valid_id_seen = threading.Event()
+        self._open_order_end_seen = threading.Event()
+        self._open_order_rows: list[dict[str, Any]] = []
+        self._raw_open_orders: list[dict[str, Any]] = []
+
+    def connect(self) -> None:
+        if self._connected:
+            return
+        bridge = self._ensure_bridge()
+        bridge.connect(self._config.tws_host, int(self._config.tws_port), int(self._config.tws_client_id))
+        self._thread = threading.Thread(target=bridge.run, name="track-b-modify-in-place-ibkr", daemon=True)
+        self._thread.start()
+        if not self._next_valid_id_seen.wait(timeout=float(self._config.broker_timeout_seconds)):
+            raise ManagedOrderModifyInPlaceBrokerError("Timed out waiting for IBKR nextValidId after connect.")
+        self._connected = True
+
+    def disconnect(self) -> None:
+        if self._bridge is None:
+            return
+        try:
+            self._bridge.disconnect()
+        except Exception:
+            return
+        self._connected = False
+
+    def refresh_open_orders(self, config: ManagedOrderModifyInPlaceConfig) -> dict[str, Any]:
+        self._assert_same_config(config)
+        self.connect()
+        bridge = self._ensure_bridge()
+        self._open_order_rows = []
+        self._raw_open_orders = []
+        self._open_order_end_seen.clear()
+        bridge.reqOpenOrders()
+        if not self._open_order_end_seen.wait(timeout=float(config.broker_timeout_seconds)):
+            raise ManagedOrderModifyInPlaceBrokerError("Timed out waiting for IBKR openOrderEnd.")
+        return {
+            "source": "IBKR_TWS_REQ_OPEN_ORDERS",
+            "open_orders": [dict(row) for row in self._open_order_rows],
+            "requested_at": datetime.now(UTC).isoformat(),
+            "paper_only": True,
+            "live_money_eligible": False,
+        }
+
+    def modify_order_limit(self, config: ManagedOrderModifyInPlaceConfig) -> dict[str, Any]:
+        self._assert_same_config(config)
+        raw = self._matching_raw_order(config)
+        if raw is None:
+            raise ManagedOrderModifyInPlaceBrokerError("No exact raw openOrder callback is available for modify.")
+        order = raw["order"]
+        contract = raw["contract"]
+        before = _order_row_from_ibkr(
+            order_id=int(raw["order_id"]),
+            contract=contract,
+            order=order,
+            order_state=raw.get("order_state"),
+        )
+        mismatch = _identity_mismatch(config=config, row=before, require_limit=True)
+        if mismatch:
+            raise ManagedOrderModifyInPlaceBrokerError(f"Raw order identity mismatch before modify: {mismatch}")
+
+        setattr(order, "lmtPrice", float(_decimal(config.new_limit) or Decimal(config.new_limit)))
+        self._ensure_bridge().placeOrder(int(config.broker_order_id), contract, order)
+        return {
+            "adapter_name": "IBKR_TWS_MANAGED_ORDER_MODIFY_IN_PLACE",
+            "place_order_called": True,
+            "same_order_id": str(config.broker_order_id),
+            "same_perm_id": str(config.perm_id),
+            "same_action": str(config.action),
+            "same_quantity": str(config.quantity),
+            "old_limit": str(config.current_known_limit),
+            "new_limit": str(config.new_limit),
+            "new_order_created": False,
+            "paper_only": True,
+            "live_money_eligible": False,
+        }
+
+    def _matching_raw_order(self, config: ManagedOrderModifyInPlaceConfig) -> dict[str, Any] | None:
+        for raw in self._raw_open_orders:
+            row = _order_row_from_ibkr(
+                order_id=int(raw["order_id"]),
+                contract=raw["contract"],
+                order=raw["order"],
+                order_state=raw.get("order_state"),
+            )
+            if _order_identity_matches(config=config, row=row):
+                return raw
+        return None
+
+    def _assert_same_config(self, config: ManagedOrderModifyInPlaceConfig) -> None:
+        if config is not self._config and _pre_action_target_identity(config) != _pre_action_target_identity(self._config):
+            raise ManagedOrderModifyInPlaceBrokerError("Adapter config target identity changed between gates.")
+
+    def _ensure_bridge(self) -> Any:
+        if self._bridge is not None:
+            return self._bridge
+        wrapper_cls = getattr(self._module_loader("ibapi.wrapper"), "EWrapper", None)
+        client_cls = getattr(self._module_loader("ibapi.client"), "EClient", None)
+        if wrapper_cls is None or client_cls is None:
+            raise ManagedOrderModifyInPlaceBrokerError("Installed ibapi package is missing EWrapper/EClient.")
+        owner = self
+
+        class _Bridge(wrapper_cls, client_cls):  # type: ignore[misc, valid-type]
+            def __init__(self) -> None:
+                wrapper_cls.__init__(self)
+                client_cls.__init__(self, wrapper=self)
+
+            def nextValidId(self, orderId: int) -> None:  # noqa: N802, ARG002
+                owner._next_valid_id_seen.set()
+
+            def openOrder(self, orderId: int, contract: Any, order: Any, orderState: Any) -> None:  # noqa: N802
+                row = _order_row_from_ibkr(order_id=int(orderId), contract=contract, order=order, order_state=orderState)
+                owner._open_order_rows.append(row)
+                owner._raw_open_orders.append(
+                    {
+                        "order_id": int(orderId),
+                        "contract": contract,
+                        "order": order,
+                        "order_state": orderState,
+                    }
+                )
+
+            def openOrderEnd(self) -> None:  # noqa: N802
+                owner._open_order_end_seen.set()
+
+            def error(self, *args: Any) -> None:
+                # Errors are captured by timeout/identity checks; do not raise
+                # from the network callback thread.
+                return None
+
+        self._bridge = _Bridge()
+        return self._bridge
+
+
+def _order_row_from_ibkr(*, order_id: int, contract: Any, order: Any, order_state: Any) -> dict[str, Any]:
+    status = "" if order_state is None else str(getattr(order_state, "status", "") or "")
+    local_symbol = str(getattr(contract, "localSymbol", "") or "")
+    symbol = str(getattr(contract, "symbol", "") or "")
+    return {
+        "account_id": str(getattr(order, "account", "") or ""),
+        "symbol": symbol,
+        "contract": local_symbol or symbol,
+        "local_symbol": local_symbol,
+        "con_id": getattr(contract, "conId", None),
+        "broker_order_id": str(order_id),
+        "order_id": str(order_id),
+        "perm_id": str(getattr(order, "permId", "") or ""),
+        "action": str(getattr(order, "action", "") or ""),
+        "quantity": str(getattr(order, "totalQuantity", "") or ""),
+        "status": status,
+        "broker_status": status,
+        "limit_price": str(getattr(order, "lmtPrice", "") or ""),
+        "filled_quantity": getattr(order, "filledQuantity", None),
+        "remaining_quantity": getattr(order, "remainingQuantity", None),
+    }
 
 
 def _jsonable(value: Any) -> Any:

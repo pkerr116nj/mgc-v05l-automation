@@ -3,8 +3,10 @@ from __future__ import annotations
 import json
 from datetime import UTC, datetime
 from pathlib import Path
+from types import SimpleNamespace
 
 from mgc_v05l.execution_core.track_b_managed_order_modify_in_place import (
+    IbkrPaperManagedOrderModifyAdapter,
     MODIFY_IN_PLACE_APPLIED,
     MODIFY_IN_PLACE_BLOCKED_DUPLICATE_RISK,
     MODIFY_IN_PLACE_BLOCKED_NOT_WORKING_ORDER,
@@ -150,6 +152,10 @@ def test_applied_path_uses_same_order_identity_and_no_replacement(tmp_path: Path
     assert report["new_order_created"] is False
     assert report["verified_order"]["broker_order_id"] == "27"
     assert report["verified_order"]["perm_id"] == "347068546"
+    assert report["control_plane_snapshot_id"] == "snapshot-managed-order-modify"
+    assert report["shared_truth_refresh_generation_id"] == "generation-managed-order-modify"
+    assert report["post_modify_verification"]["verified"] is True
+    assert report["post_modify_verification"]["updated_limit_observed"] is True
 
 
 def test_post_modify_verification_failure_is_loud(tmp_path: Path) -> None:
@@ -166,6 +172,44 @@ def test_post_modify_verification_failure_is_loud(tmp_path: Path) -> None:
 
     assert report["classification"] == MODIFY_IN_PLACE_VERIFICATION_FAILED
     assert report["broker_mutation_attempted"] is True
+    assert report["post_modify_verification"]["verified"] is False
+
+
+def test_ibkr_adapter_modifies_same_order_id_without_replacement(tmp_path: Path) -> None:
+    config = _config(tmp_path, apply=True, operator_authorized_modify=True)
+    fake_client_cls = _fake_ibkr_client_class()
+    fake_wrapper_cls = type("_FakeWrapper", (), {})
+    adapter = IbkrPaperManagedOrderModifyAdapter(
+        config=config,
+        module_loader=lambda name: SimpleNamespace(
+            EWrapper=fake_wrapper_cls,
+            EClient=fake_client_cls,
+        ),
+    )
+
+    adapter.connect()
+    pre_refresh = adapter.refresh_open_orders(config)
+    modify_result = adapter.modify_order_limit(config)
+    post_refresh = adapter.refresh_open_orders(config)
+    bridge = adapter._bridge  # noqa: SLF001 - test-only inspection of fake transport.
+
+    assert pre_refresh["open_orders"][0]["limit_price"] == "29555.5"
+    assert modify_result["place_order_called"] is True
+    assert modify_result["new_order_created"] is False
+    assert len(bridge.place_order_calls) == 1
+    assert bridge.place_order_calls[0]["order_id"] == 27
+    assert bridge.place_order_calls[0]["order"].lmtPrice == 29554.5
+    assert post_refresh["open_orders"][0]["limit_price"] == "29554.5"
+    adapter.disconnect()
+
+
+def test_live_money_evidence_blocks_modify(tmp_path: Path) -> None:
+    _seed_authorities(tmp_path, live_money_eligible=True)
+
+    report = _run(tmp_path)
+
+    assert report["classification"] == MODIFY_IN_PLACE_BLOCKED_SHARED_TRUTH
+    assert "live_money_eligible" in report["detail"]
 
 
 def test_modify_apply_blocked_without_snapshot(tmp_path: Path) -> None:
@@ -324,6 +368,7 @@ def _seed_authorities(
     remaining_quantity: str | None = "1",
     broker_positions: list[dict] | None = None,
     managed_positions: list[dict] | None = None,
+    live_money_eligible: bool = False,
 ) -> None:
     broker_positions = [_position()] if broker_positions is None else broker_positions
     managed_positions = [_managed_position()] if managed_positions is None else managed_positions
@@ -399,7 +444,7 @@ def _seed_authorities(
             "generated_at": generated_at,
             "classification": "TRACK_B_PAPER_BROKER_RECONCILED",
             "broker_reconciled": True,
-            "live_money_eligible": False,
+            "live_money_eligible": live_money_eligible,
             "paper_proof_invoked": False,
         },
     )
@@ -518,6 +563,52 @@ def _broker_order(
         "filled_quantity": filled_quantity,
         "remaining_quantity": remaining_quantity,
     }
+
+
+def _fake_ibkr_client_class():
+    class _FakeContract:
+        symbol = "MNQ"
+        localSymbol = "MNQM6"
+        conId = "770561201"
+
+    class _FakeOrder:
+        account = "DUM882026"
+        permId = "347068546"
+        action = "SELL"
+        totalQuantity = "1"
+        lmtPrice = 29555.5
+        filledQuantity = "0"
+        remainingQuantity = "1"
+
+    class _FakeOrderState:
+        status = "Submitted"
+
+    class _FakeClient:
+        def __init__(self, wrapper) -> None:
+            self.wrapper = wrapper
+            self.order = _FakeOrder()
+            self.contract = _FakeContract()
+            self.place_order_calls: list[dict] = []
+            self.disconnected = False
+
+        def connect(self, host, port, client_id) -> None:
+            self.connected = (host, port, client_id)
+            self.wrapper.nextValidId(9001)
+
+        def run(self) -> None:
+            return None
+
+        def disconnect(self) -> None:
+            self.disconnected = True
+
+        def reqOpenOrders(self) -> None:
+            self.wrapper.openOrder(27, self.contract, self.order, _FakeOrderState())
+            self.wrapper.openOrderEnd()
+
+        def placeOrder(self, order_id, contract, order) -> None:
+            self.place_order_calls.append({"order_id": order_id, "contract": contract, "order": order})
+
+    return _FakeClient
 
 
 def _position() -> dict:
