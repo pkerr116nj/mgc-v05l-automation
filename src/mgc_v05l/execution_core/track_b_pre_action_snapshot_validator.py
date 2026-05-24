@@ -91,6 +91,11 @@ def validate_track_b_pre_action_snapshot(
         "agent_health_blocks_runtime_submit": snapshot.get("agent_health_blocks_runtime_submit") is True,
         "agent_health_blocks_recovery": snapshot.get("agent_health_blocks_recovery") is True,
         "agent_health_has_duplicate_writer": snapshot.get("agent_health_has_duplicate_writer") is True,
+        "planner_prioritized_blockers": list(plan.get("prioritized_blockers") or []),
+        "planner_primary_blocking_agent_id": str(plan.get("primary_blocking_agent_id") or ""),
+        "planner_primary_blocking_reason": str(plan.get("primary_blocking_reason") or ""),
+        "planner_operator_explanation": str(plan.get("operator_explanation") or ""),
+        "planner_recommended_observation_step": str(plan.get("recommended_observation_step") or ""),
         "planner_classification": str(plan.get("classification") or ""),
         "planner_action_type": "",
         "source_artifact_paths": {

@@ -59,6 +59,9 @@ def test_market_closed_plans_wait_without_execution(tmp_path: Path) -> None:
     assert payload["execution_enabled"] is False
     assert payload["proposed_actions"][0]["execution_enabled"] is False
     assert payload["proposed_actions"][0]["would_restart_runtime"] is False
+    assert payload["primary_blocking_agent_id"] == "market_session"
+    assert "no fresh Phase-1 bars are expected" in payload["operator_explanation"]
+    assert "Wait for Globex/session reopen" in payload["recommended_observation_step"]
 
 
 def test_clean_proof_ready_plans_runtime_retry_dry_run(tmp_path: Path) -> None:
@@ -165,6 +168,11 @@ def test_agent_health_blocked_snapshot_includes_blocker_rows(tmp_path: Path) -> 
     assert payload["classification"] == PLAN_BLOCKED_STALE_EVIDENCE
     assert "agent_health_blocks_runtime_submit" in payload["evidence_summary"]["stale_or_missing_evidence"]
     assert payload["agent_health_top_blockers"][0]["agent_id"] == "open_order_truth"
+    assert payload["prioritized_blockers"][0]["agent_id"] == "open_order_truth"
+    assert payload["primary_blocking_agent_id"] == "open_order_truth"
+    assert payload["primary_blocking_reason"] == "authority artifact missing"
+    assert "Open Order Truth" in payload["operator_explanation"]
+    assert "Refresh evidence before recovery planning" in payload["operator_explanation"]
     assert payload["evidence_summary"]["agent_health_top_blockers"][0]["display_name"] == "Open Order Truth"
     assert payload["evidence_summary"]["agent_health_top_blockers"][0]["diagnostic_only"] is False
 
@@ -265,6 +273,8 @@ def test_suspicious_order_quarantines_or_blocks_identity_ambiguity(tmp_path: Pat
 
     assert payload["classification"] == PLAN_QUARANTINE_OBSERVE_ONLY
     assert payload["proposed_actions"][0]["action_type"] == "QUARANTINE_OBSERVE_ONLY"
+    assert "quarantine and observe" in payload["operator_explanation"]
+    assert "operator ack" not in payload["operator_explanation"].lower()
 
 
 def test_budget_exhausted_blocks_autonomous_retry(tmp_path: Path) -> None:
@@ -294,6 +304,9 @@ def test_live_money_and_duplicate_writer_are_hard_unsafe(tmp_path: Path) -> None
         now=NOW,
     )
     assert duplicate["classification"] == PLAN_HARD_UNSAFE_HOLD
+    assert duplicate["primary_blocking_agent_id"] == "track_b_paper_runtime"
+    assert duplicate["prioritized_blockers"][0]["status"] == "DUPLICATE_PROCESS"
+    assert "Hard PAPER invariant" in duplicate["operator_explanation"]
 
 
 def test_identity_ambiguous_duplicate_order_blocks(tmp_path: Path) -> None:

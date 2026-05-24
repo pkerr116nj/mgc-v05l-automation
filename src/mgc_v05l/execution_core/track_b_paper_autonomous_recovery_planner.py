@@ -131,6 +131,7 @@ def build_track_b_paper_autonomous_recovery_plan(
     }
     evidence = _evidence(inputs=inputs, now=actual_now, config=config)
     decision = _attach_budget_to_actions(_classify_plan(inputs=inputs, evidence=evidence), evidence=evidence)
+    explanation = _planner_explanation(decision=decision, evidence=evidence)
     return {
         "schema_version": "track_b_paper_autonomous_recovery_plan_v1",
         "generated_at": actual_now.isoformat(),
@@ -156,6 +157,11 @@ def build_track_b_paper_autonomous_recovery_plan(
         "recovery_budget_ledger_classification": evidence["recovery_budget_classification"],
         "recovery_budget_summary": evidence["recovery_budget_summary"],
         "agent_health_top_blockers": evidence["agent_health_top_blockers"],
+        "prioritized_blockers": explanation["prioritized_blockers"],
+        "primary_blocking_agent_id": explanation["primary_blocking_agent_id"],
+        "primary_blocking_reason": explanation["primary_blocking_reason"],
+        "operator_explanation": explanation["operator_explanation"],
+        "recommended_observation_step": explanation["recommended_observation_step"],
         "classification": decision["classification"],
         "reason": decision["reason"],
         "proposed_actions": decision["proposed_actions"],
@@ -414,6 +420,182 @@ def _decision(
         "blockers": blockers or [],
         "warnings": warnings or [],
     }
+
+
+def _planner_explanation(*, decision: Mapping[str, Any], evidence: Mapping[str, Any]) -> dict[str, Any]:
+    classification = str(decision.get("classification") or "")
+    prioritized = _prioritized_blockers(decision=decision, evidence=evidence)
+    primary = prioritized[0] if prioritized else {}
+    primary_id = str(primary.get("agent_id") or "")
+    primary_name = str(primary.get("display_name") or primary_id or "shared truth")
+    primary_reason = str(primary.get("reason") or primary.get("status") or decision.get("reason") or "")
+
+    if classification == WAIT_MARKET_CLOSED:
+        operator_explanation = "Market/session is closed; no fresh Phase-1 bars are expected, and PAPER should wait without treating this as a process failure."
+        recommended_step = "Wait for Globex/session reopen, then rebuild the Control Plane Snapshot before any proof attempt."
+    elif classification == PLAN_HARD_UNSAFE_HOLD:
+        operator_explanation = f"Hard PAPER invariant blocked recovery: {primary_name} reports {primary_reason or 'unsafe evidence'}."
+        recommended_step = "Preserve evidence and do not run autonomous recovery until the hard invariant clears in execution_core authority."
+    elif classification in {PLAN_BLOCKED_STALE_EVIDENCE, PLAN_EVIDENCE_REFRESH}:
+        operator_explanation = f"Refresh evidence before recovery planning: {primary_name} reports {primary_reason or 'stale or missing authority evidence'}."
+        recommended_step = "Run the Control Plane Snapshot refresh path so shared truth, Agent Health, planner, and supervisor are rebuilt from one generation."
+    elif classification in {PLAN_QUARANTINE_OBSERVE_ONLY, PLAN_BLOCKED_IDENTITY_AMBIGUITY}:
+        operator_explanation = f"PAPER should quarantine and observe because {primary_name} reports {primary_reason or 'ambiguous recovery evidence'}; preserve artifacts and avoid broker mutation."
+        recommended_step = "Continue read-only observation, refresh shared evidence, and let bounded PAPER policy keep the state visible."
+    elif classification == PLAN_BLOCKED_BUDGET_EXHAUSTED:
+        operator_explanation = "PAPER recovery budget is exhausted; preserve artifacts and quarantine/observe instead of retrying again."
+        recommended_step = "Wait for budget cooldown or a new clean evidence generation before planning another retry."
+    else:
+        operator_explanation = str(decision.get("reason") or "No recovery explanation available.")
+        recommended_step = "Continue using execution_core authority artifacts for the next planning decision."
+
+    return {
+        "prioritized_blockers": prioritized,
+        "primary_blocking_agent_id": primary_id,
+        "primary_blocking_reason": primary_reason,
+        "operator_explanation": operator_explanation,
+        "recommended_observation_step": recommended_step,
+    }
+
+
+def _prioritized_blockers(*, decision: Mapping[str, Any], evidence: Mapping[str, Any]) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    for blocker in _list(evidence.get("agent_health_top_blockers")):
+        row = _mapping(blocker)
+        if row:
+            rows.append(_explanation_blocker(row, source="agent_health"))
+
+    if _duplicate_writer(evidence) and not any(row["agent_id"] == "track_b_paper_runtime" for row in rows):
+        rows.append(
+            _explanation_blocker(
+                {
+                    "agent_id": "track_b_paper_runtime",
+                    "display_name": "Track B PAPER runtime",
+                    "status": "DUPLICATE_PROCESS",
+                    "reason": "duplicate runtime writer evidence is present",
+                    "blocking_for_proof": True,
+                    "blocking_for_runtime_submit": True,
+                    "blocking_for_recovery": True,
+                    "diagnostic_only": False,
+                },
+                source="runtime_environment_truth",
+            )
+        )
+    if evidence.get("live_money_eligible") is True:
+        rows.append(
+            _explanation_blocker(
+                {
+                    "agent_id": "live_money_policy",
+                    "display_name": "Live-money policy",
+                    "status": "LIVE_MONEY_ELIGIBLE",
+                    "reason": "live_money_eligible=true",
+                    "blocking_for_proof": True,
+                    "blocking_for_runtime_submit": True,
+                    "blocking_for_recovery": True,
+                    "diagnostic_only": False,
+                },
+                source="paper_recovery_policy",
+            )
+        )
+
+    for item in _list(evidence.get("stale_or_missing_evidence")):
+        item_text = str(item)
+        if item_text.startswith("agent_health_") and rows:
+            continue
+        rows.append(
+            _explanation_blocker(
+                {
+                    "agent_id": _stale_item_agent_id(item_text),
+                    "display_name": _stale_item_display_name(item_text),
+                    "status": "STALE_OR_MISSING",
+                    "reason": item_text,
+                    "blocking_for_proof": item_text not in {"control_plane_snapshot_stale"},
+                    "blocking_for_runtime_submit": True,
+                    "blocking_for_recovery": True,
+                    "diagnostic_only": False,
+                },
+                source="stale_or_missing_evidence",
+            )
+        )
+
+    if not rows:
+        for blocker in _list(decision.get("blockers")) + _list(decision.get("warnings")):
+            row = _mapping(blocker)
+            if row:
+                rows.append(
+                    _explanation_blocker(
+                        {
+                            "agent_id": str(row.get("code") or "shared_truth"),
+                            "display_name": str(row.get("code") or "Shared truth"),
+                            "status": "BLOCKED",
+                            "reason": str(row.get("detail") or ""),
+                            "blocking_for_proof": True,
+                            "blocking_for_runtime_submit": True,
+                            "blocking_for_recovery": True,
+                            "diagnostic_only": False,
+                        },
+                        source="planner_blocker",
+                    )
+                )
+
+    deduped: dict[str, dict[str, Any]] = {}
+    for row in rows:
+        key = f"{row['agent_id']}|{row['status']}|{row['reason']}"
+        existing = deduped.get(key)
+        if existing is None or row["priority"] < existing["priority"]:
+            deduped[key] = row
+    return sorted(deduped.values(), key=lambda row: (int(row["priority"]), row["agent_id"]))[:8]
+
+
+def _explanation_blocker(blocker: Mapping[str, Any], *, source: str) -> dict[str, Any]:
+    row = {
+        "agent_id": str(blocker.get("agent_id") or ""),
+        "display_name": str(blocker.get("display_name") or blocker.get("agent_id") or ""),
+        "status": str(blocker.get("status") or ""),
+        "reason": str(blocker.get("reason") or ""),
+        "blocking_for_proof": blocker.get("blocking_for_proof") is True,
+        "blocking_for_runtime_submit": blocker.get("blocking_for_runtime_submit") is True,
+        "blocking_for_recovery": blocker.get("blocking_for_recovery") is True,
+        "diagnostic_only": blocker.get("diagnostic_only") is True,
+        "source": source,
+    }
+    row["priority"] = _blocker_priority(row)
+    return row
+
+
+def _blocker_priority(blocker: Mapping[str, Any]) -> int:
+    text = " ".join(
+        str(blocker.get(key) or "").lower() for key in ("agent_id", "display_name", "status", "reason")
+    )
+    if "duplicate" in text and ("runtime" in text or "writer" in text):
+        return 0
+    if "live_money" in text or "live-money" in text:
+        return 1
+    if "missing_artifact" in text or "missing" in text:
+        return 2
+    if "control_plane_snapshot" in text and ("stale" in text or "incoherent" in text or "missing" in text):
+        return 3
+    if blocker.get("blocking_for_runtime_submit") is True:
+        return 4
+    if blocker.get("blocking_for_proof") is True:
+        return 5
+    if blocker.get("blocking_for_recovery") is True:
+        return 6
+    if blocker.get("diagnostic_only") is True:
+        return 9
+    return 7
+
+
+def _stale_item_agent_id(item: str) -> str:
+    if item.startswith("control_plane_snapshot"):
+        return "control_plane_snapshot"
+    return item
+
+
+def _stale_item_display_name(item: str) -> str:
+    if item.startswith("control_plane_snapshot"):
+        return "Control Plane Snapshot"
+    return item.replace("_", " ").title()
 
 
 def _action(

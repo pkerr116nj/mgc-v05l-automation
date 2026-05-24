@@ -177,6 +177,11 @@ def build_track_b_paper_autonomous_recovery_executor_attempt(
         },
         "pre_action_validation": validation,
         "agent_health_top_blockers": list(validation.get("agent_health_top_blockers") or []),
+        "prioritized_blockers": list(validation.get("planner_prioritized_blockers") or []),
+        "primary_blocking_agent_id": validation.get("planner_primary_blocking_agent_id") or "",
+        "primary_blocking_reason": validation.get("planner_primary_blocking_reason") or "",
+        "operator_explanation": validation.get("planner_operator_explanation") or "",
+        "recommended_observation_step": validation.get("planner_recommended_observation_step") or "",
         "action_adapter": adapter_result,
         "pre_action_evidence": {
             "control_plane_snapshot_id": validation.get("control_plane_snapshot_id") or "",
@@ -188,6 +193,9 @@ def build_track_b_paper_autonomous_recovery_executor_attempt(
             "planner_action_type": validation.get("planner_action_type") or "",
             "agent_health_top_blockers": list(validation.get("agent_health_top_blockers") or []),
             "agent_health_has_duplicate_writer": validation.get("agent_health_has_duplicate_writer") is True,
+            "prioritized_blockers": list(validation.get("planner_prioritized_blockers") or []),
+            "operator_explanation": validation.get("planner_operator_explanation") or "",
+            "recommended_observation_step": validation.get("planner_recommended_observation_step") or "",
         },
         "post_action_evidence": {
             "placeholder": True,

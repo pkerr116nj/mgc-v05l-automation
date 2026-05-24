@@ -213,7 +213,26 @@ def test_market_data_restart_dry_run_can_plan_but_not_execute(tmp_path: Path) ->
 
 
 def test_plan_action_mismatch_blocks_before_adapter_enablement(tmp_path: Path) -> None:
-    _seed_valid(tmp_path, action_type="QUARANTINE_OBSERVE_ONLY", plan_classification="PLAN_QUARANTINE_OBSERVE_ONLY")
+    _seed_valid(
+        tmp_path,
+        action_type="QUARANTINE_OBSERVE_ONLY",
+        plan_classification="PLAN_QUARANTINE_OBSERVE_ONLY",
+        plan_prioritized_blockers=[
+            {
+                "agent_id": "open_order_truth",
+                "display_name": "Open Order Truth",
+                "status": "SUSPICIOUS_ORDER_STATE",
+                "reason": "sentinel filled quantity",
+                "blocking_for_proof": True,
+                "blocking_for_runtime_submit": True,
+                "blocking_for_recovery": True,
+                "diagnostic_only": False,
+                "priority": 4,
+            }
+        ],
+        plan_operator_explanation="PAPER should quarantine and observe because Open Order Truth reports sentinel filled quantity.",
+        plan_recommended_observation_step="Continue read-only observation and refresh shared evidence.",
+    )
 
     payload = build_track_b_paper_autonomous_recovery_executor_attempt(
         config=TrackBPaperAutonomousRecoveryExecutorConfig(repo_root=tmp_path),
@@ -224,6 +243,12 @@ def test_plan_action_mismatch_blocks_before_adapter_enablement(tmp_path: Path) -
 
     assert payload["classification"] == EXECUTOR_BLOCKED_PRE_ACTION_VALIDATION
     assert payload["action_adapter"]["blocked_reason"] == "PRE_ACTION_VALIDATION_BLOCKED"
+    assert payload["primary_blocking_agent_id"] == "open_order_truth"
+    assert payload["prioritized_blockers"][0]["display_name"] == "Open Order Truth"
+    assert "quarantine and observe" in payload["operator_explanation"]
+    assert payload["pre_action_evidence"]["recommended_observation_step"] == (
+        "Continue read-only observation and refresh shared evidence."
+    )
 
 
 def test_validator_blocked_state_blocks_executor_attempt(tmp_path: Path) -> None:
@@ -401,6 +426,9 @@ def _seed_valid(
     budget_exhausted: bool = False,
     budget_quarantine_required: bool = False,
     budget_cooldown_until: datetime | None = None,
+    plan_prioritized_blockers: list[dict] | None = None,
+    plan_operator_explanation: str = "",
+    plan_recommended_observation_step: str = "",
 ) -> None:
     launcher_path = root / "scripts" / "run_headless_supervised_paper_service.sh"
     launcher_path.parent.mkdir(parents=True, exist_ok=True)
@@ -458,6 +486,11 @@ def _seed_valid(
             "shared_truth_refresh_generation_id": "generation-1",
             "execution_enabled": False,
             "live_money_eligible": live_money_eligible,
+            "prioritized_blockers": plan_prioritized_blockers or [],
+            "primary_blocking_agent_id": (plan_prioritized_blockers or [{}])[0].get("agent_id", ""),
+            "primary_blocking_reason": (plan_prioritized_blockers or [{}])[0].get("reason", ""),
+            "operator_explanation": plan_operator_explanation,
+            "recommended_observation_step": plan_recommended_observation_step,
             "proposed_actions": [
                 {
                     "action_id": action_type.lower(),
