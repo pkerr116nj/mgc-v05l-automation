@@ -61,6 +61,11 @@ def test_valid_coherent_snapshot_and_matching_plan_creates_dry_run_attempt(tmp_p
         payload["action_adapter"]["would_record_budget_event"]["event"]["recovery_attempt_id"]
         == payload["recovery_attempt_id"]
     )
+    transaction_preview = payload["action_adapter"]["recovery_budget_transaction_preview"]
+    assert transaction_preview["consume_success"]["transaction_classification"] == "TRANSACTION_SIMULATED_CONSUMED_SUCCESS"
+    assert transaction_preview["consume_failure"]["transaction_classification"] == "TRANSACTION_SIMULATED_CONSUMED_FAILURE"
+    assert transaction_preview["consume_success"]["would_append"] is False
+    assert transaction_preview["append_enabled"] is False
     assert payload["action_adapter"]["would_execute_command"][0] == "bash"
     assert payload["action_adapter"]["launch_command_exists"] is True
 

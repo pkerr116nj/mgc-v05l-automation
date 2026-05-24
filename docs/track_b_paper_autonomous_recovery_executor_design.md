@@ -190,6 +190,28 @@ preview only. It does not append to
 and budget consumption remains reserved for a future explicitly apply-enabled
 executor.
 
+The disabled adapter also includes a Recovery Budget transaction simulation
+preview. The simulator validates reserve/follow-up ordering end to end without
+appending events:
+
+- `TRANSACTION_DRY_RUN_READY`
+- `TRANSACTION_BLOCKED_NO_RESERVATION`
+- `TRANSACTION_BLOCKED_DUPLICATE_ACTIVE_RESERVATION`
+- `TRANSACTION_BLOCKED_INVALID_ORDERING`
+- `TRANSACTION_BLOCKED_BUDGET_EXHAUSTED`
+- `TRANSACTION_SIMULATED_RELEASED`
+- `TRANSACTION_SIMULATED_CONSUMED_SUCCESS`
+- `TRANSACTION_SIMULATED_CONSUMED_FAILURE`
+- `TRANSACTION_SIMULATED_EXPIRED`
+
+Future apply-enabled runtime retry must pass this transaction ordering model:
+reserve before consume/release/expire, no duplicate active reservation for the
+same `recovery_attempt_id`, no second consume after release/consume/expire, and
+no consumed success/failure event without a known reservation. The preview
+fields use `would_append=false` and `append_enabled=false`; dry-run adapters may
+show both a reserve+success and reserve+failure path, but they must not write
+either path to the budget event log.
+
 The placeholder config flag `enable_runtime_retry_adapter` may be recorded for audit, but it does not enable execution. A second, explicitly reviewed enablement boundary is required before this adapter may start a runtime.
 
 Broker/order mutation adapters remain later and stricter:

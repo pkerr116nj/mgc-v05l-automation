@@ -19,12 +19,15 @@ from mgc_v05l.execution_core.track_b_pre_action_snapshot_validator import (
     validate_track_b_pre_action_snapshot,
 )
 from mgc_v05l.execution_core.track_b_recovery_budget_ledger import (
+    BUDGET_ATTEMPT_CONSUMED_FAILURE,
+    BUDGET_ATTEMPT_CONSUMED_SUCCESS,
     DEFAULT_AGENT_ID,
     DEFAULT_RECOVERY_BUDGET_LEDGER_ARTIFACT,
     build_budget_reservation_event,
     target_identity_hash,
     validate_budget_event,
 )
+from mgc_v05l.execution_core.track_b_recovery_budget_transaction import simulate_recovery_budget_transaction
 
 
 EXECUTOR_DRY_RUN_READY = "EXECUTOR_DRY_RUN_READY"
@@ -143,6 +146,7 @@ def build_track_b_paper_autonomous_recovery_executor_attempt(
         classification=classification,
         normalized_target=normalized_target,
         recovery_attempt_id=recovery_attempt_id,
+        now=actual_now,
     )
 
     return {
@@ -323,6 +327,7 @@ def _adapter_result(
     classification: str,
     normalized_target: Mapping[str, str],
     recovery_attempt_id: str,
+    now: datetime,
 ) -> dict[str, Any]:
     if action_type != "RUNTIME_RETRY":
         return {
@@ -366,6 +371,14 @@ def _adapter_result(
             validation=validation,
             budget_key=_budget_key(action_type=action_type, target_identity=normalized_target),
             normalized_target=normalized_target,
+        ),
+        "recovery_budget_transaction_preview": _budget_transaction_preview(
+            config=config,
+            recovery_attempt_id=recovery_attempt_id,
+            validation=validation,
+            budget_key=_budget_key(action_type=action_type, target_identity=normalized_target),
+            normalized_target=normalized_target,
+            now=now,
         ),
         "recovery_budget_classification": budget.get("ledger_classification"),
         "attempts_remaining": budget.get("ledger_attempts_remaining"),
@@ -414,6 +427,43 @@ def _budget_event_preview(
         "would_append": False,
         "append_enabled": False,
         "reason": "Dry-run disabled adapter previews reservation semantics but does not append budget events.",
+    }
+
+
+def _budget_transaction_preview(
+    *,
+    config: TrackBPaperAutonomousRecoveryExecutorConfig,
+    recovery_attempt_id: str,
+    validation: Mapping[str, Any],
+    budget_key: str,
+    normalized_target: Mapping[str, str],
+    now: datetime,
+) -> dict[str, Any]:
+    ledger = _read_json(config.resolve(config.recovery_budget_ledger_path))
+    common = {
+        "ledger": ledger,
+        "recovery_attempt_id": recovery_attempt_id or "runtime-retry-preview",
+        "control_plane_snapshot_id": str(validation.get("control_plane_snapshot_id") or ""),
+        "shared_truth_generation_id": str(validation.get("shared_truth_refresh_generation_id") or ""),
+        "action_type": "RUNTIME_RETRY",
+        "budget_key": budget_key,
+        "agent_id": DEFAULT_AGENT_ID,
+        "target_identity": normalized_target,
+        "existing_events": [],
+        "now": now,
+    }
+    return {
+        "consume_success": simulate_recovery_budget_transaction(
+            **common,
+            followup_event_type=BUDGET_ATTEMPT_CONSUMED_SUCCESS,
+        ),
+        "consume_failure": simulate_recovery_budget_transaction(
+            **common,
+            followup_event_type=BUDGET_ATTEMPT_CONSUMED_FAILURE,
+        ),
+        "would_append": False,
+        "append_enabled": False,
+        "reason": "Disabled adapter simulates reserve+consume ordering only; no Recovery Budget events are appended.",
     }
 
 
