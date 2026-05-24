@@ -157,6 +157,9 @@ def test_status_script_surfaces_control_plane_services_as_projection_only() -> N
     assert "self_recover_attempts_remaining" in script
     assert "self_recover_quarantine_required" in script
     assert "self_recover_recovery_budget_key" in script
+    assert "latest_recovery_attempt_id" in script
+    assert "latest_recovery_attempt_classification" in script
+    assert "recovery_attempt_history_no_history" in script
     assert "autonomous_recovery_plan_classification" in script
     assert "autonomous_recovery_next_action" in script
     assert "autonomous_recovery_execution_enabled" in script
@@ -246,6 +249,9 @@ def test_runtime_start_consults_control_plane_snapshot_before_spawn() -> None:
     assert "self_recover_attempts_remaining" in script
     assert "quarantine_required" in script
     assert "recovery_budget_key" in script
+    assert "latest_recovery_attempt_id" in script
+    assert "latest_recovery_attempt_classification" in script
+    assert "recovery_attempt_history_no_history" in script
     assert "shared_truth_refresh_generation_id" in script
     assert "shared_truth_coherence_status" in script
     assert "agent_health_blockers" in script
@@ -298,6 +304,9 @@ def test_headless_launch_uses_control_plane_snapshot_as_final_pre_spawn_gate() -
     assert "self_recover_attempts_remaining" in script
     assert "quarantine_required" in script
     assert "recovery_budget_key" in script
+    assert "latest_recovery_attempt_id" in script
+    assert "latest_recovery_attempt_classification" in script
+    assert "recovery_attempt_history_no_history" in script
     assert "shared_truth_refresh_generation_id" in script
     assert "shared_truth_coherence_status" in script
     assert "agent_health_blockers" in script
@@ -359,6 +368,9 @@ def test_status_script_marks_control_plane_fallback_as_diagnostic_only() -> None
     assert "self_recover_attempts_remaining" in script
     assert "self_recover_quarantine_required" in script
     assert "self_recover_recovery_budget_key" in script
+    assert "latest_recovery_attempt_id" in script
+    assert "latest_recovery_attempt_classification" in script
+    assert "recovery_attempt_history_no_history" in script
     assert "runtime_resume_raw_safe_to_start_runtime" in script
     assert "runtime_resume_safe_to_start_runtime" in script
     assert (

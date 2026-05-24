@@ -10,7 +10,6 @@ from pathlib import Path
 from typing import Any, Mapping, Sequence
 
 from mgc_v05l.execution_core.track_b_atomic_io import write_json_atomic
-from mgc_v05l.execution_core.track_b_control_plane_snapshot import DEFAULT_CONTROL_PLANE_SNAPSHOT_ARTIFACT
 from mgc_v05l.execution_core.track_b_paper_autonomous_recovery_executor import (
     DEFAULT_EXECUTOR_EVENT_LOG,
     DEFAULT_LATEST_EXECUTOR_REPORT,
@@ -32,6 +31,12 @@ DEFAULT_RECOVERY_ATTEMPT_HISTORY_ARTIFACT = (
     / "track_b_execution_core"
     / "paper_autonomous_recovery"
     / "latest_recovery_attempt_history.json"
+)
+DEFAULT_CONTROL_PLANE_SNAPSHOT_ARTIFACT = (
+    Path("outputs")
+    / "track_b_execution_core"
+    / "control_plane"
+    / "latest_control_plane_snapshot.json"
 )
 
 

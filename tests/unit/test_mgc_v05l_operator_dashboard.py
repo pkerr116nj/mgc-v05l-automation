@@ -310,6 +310,8 @@ def test_track_b_control_plane_status_projection_displays_closed_market_services
     assert summary["self_recover_recovery_budget_key"] == "track_b_paper_runtime|RUNTIME_RETRY|test"
     assert summary["self_recover_attempts_remaining"] == 2
     assert summary["self_recover_quarantine_required"] is False
+    assert summary["recovery_attempt_history_no_history"] is True
+    assert summary["latest_recovery_attempt_id"] == ""
     assert summary["crash_loop_classification"] == "NO_CRASH_LOOP"
     assert summary["runtime_resume_classification"] == "RESUME_BLOCKED_MARKET_CLOSED"
     assert summary["runtime_resume_allowed"] is False
@@ -435,6 +437,8 @@ def test_track_b_control_plane_status_projection_displays_crash_loop_and_operato
         paper_action_policy="QUARANTINE_OBSERVE_ONLY",
         paper_recovery_severity="ATTENTION",
         paper_budget={"budget_exhausted": True},
+        latest_recovery_attempt_id="attempt-quarantine",
+        latest_recovery_attempt_classification="EXECUTOR_BLOCKED_BUDGET_EXHAUSTED",
     )
 
     summary = operator_dashboard_module._track_b_control_plane_services_summary(tmp_path)  # noqa: SLF001
@@ -455,6 +459,9 @@ def test_track_b_control_plane_status_projection_displays_crash_loop_and_operato
     assert summary["self_recover_attempts_remaining"] == 0
     assert summary["self_recover_cooldown_until"] == "2026-05-23T12:15:00+00:00"
     assert summary["self_recover_quarantine_required"] is True
+    assert summary["latest_recovery_attempt_id"] == "attempt-quarantine"
+    assert summary["latest_recovery_attempt_classification"] == "EXECUTOR_BLOCKED_BUDGET_EXHAUSTED"
+    assert summary["recovery_attempt_quarantine_required"] is True
     assert summary["bounded_recovery_budget"]["budget_exhausted"] is True
     assert summary["runtime_resume_action_policy"] == "QUARANTINE_OBSERVE_ONLY"
     assert summary["runtime_resume_attempts_remaining"] == 0
@@ -478,6 +485,8 @@ def test_track_b_control_plane_status_projection_displays_bounded_autonomous_ret
         runtime_supervisor_proof_window_status="ready",
         paper_action_policy="AUTONOMOUS_RETRY_ELIGIBLE",
         paper_autonomous_recovery_allowed=True,
+        latest_recovery_attempt_id="attempt-1",
+        latest_recovery_attempt_classification="EXECUTOR_DRY_RUN_READY",
     )
 
     summary = operator_dashboard_module._track_b_control_plane_services_summary(tmp_path)  # noqa: SLF001
@@ -490,6 +499,13 @@ def test_track_b_control_plane_status_projection_displays_bounded_autonomous_ret
     assert summary["self_recover_recovery_budget_key"] == "track_b_paper_runtime|RUNTIME_RETRY|test"
     assert summary["self_recover_attempts_remaining"] == 2
     assert summary["self_recover_quarantine_required"] is False
+    assert summary["latest_recovery_attempt_id"] == "attempt-1"
+    assert summary["latest_recovery_attempt_action_type"] == "RUNTIME_RETRY"
+    assert summary["latest_recovery_attempt_classification"] == "EXECUTOR_DRY_RUN_READY"
+    assert summary["recovery_attempt_recommended_recovery_action"] == "RUNTIME_RETRY_DRY_RUN"
+    assert summary["recovery_attempt_recovery_budget_key"] == "track_b_paper_runtime|RUNTIME_RETRY|test"
+    assert summary["recovery_attempt_attempts_remaining"] == 2
+    assert summary["recovery_attempt_history_no_history"] is False
     assert summary["autonomous_recovery_allowed"] is True
     assert summary["autonomous_recovery_plan_classification"] == "PLAN_RUNTIME_RETRY"
     assert summary["autonomous_recovery_next_action"] == "RUNTIME_RETRY"
@@ -633,6 +649,8 @@ def _write_track_b_control_plane_artifacts(
     paper_recovery_live_action_policy: str = "REQUIRE_ACK",
     autonomous_recovery_plan_classification: str | None = None,
     autonomous_recovery_next_action: str | None = None,
+    latest_recovery_attempt_id: str = "",
+    latest_recovery_attempt_classification: str = "",
 ) -> None:
     if runtime_resume_classification == "RESUME_BLOCKED_MARKET_CLOSED":
         resume_action_policy = "HOLD_MARKET_CLOSED"
@@ -879,6 +897,37 @@ def _write_track_b_control_plane_artifacts(
             "self_recover_agent_health_top_blockers": [],
             "self_recover_operator_explanation": paper_recovery_reason,
             "self_recover_execution_enabled": False,
+            "latest_recovery_attempt_id": latest_recovery_attempt_id,
+            "latest_recovery_attempt_action_type": "RUNTIME_RETRY" if latest_recovery_attempt_id else "",
+            "latest_recovery_attempt_classification": latest_recovery_attempt_classification,
+            "recovery_attempt_recommended_recovery_action": self_recover_recommended_action
+            if latest_recovery_attempt_id
+            else "",
+            "recovery_attempt_recovery_budget_key": self_recover_budget_key if latest_recovery_attempt_id else "",
+            "recovery_attempt_attempts_remaining": self_recover_attempts_remaining
+            if latest_recovery_attempt_id
+            else None,
+            "recovery_attempt_quarantine_required": (
+                paper_action_policy == "QUARANTINE_OBSERVE_ONLY" and bool(latest_recovery_attempt_id)
+            ),
+            "recovery_attempt_last_success_at": None,
+            "recovery_attempt_last_failure_at": None,
+            "recovery_attempt_history_no_history": not bool(latest_recovery_attempt_id),
+            "recovery_attempt_recent_attempts": (
+                [
+                    {
+                        "recovery_attempt_id": latest_recovery_attempt_id,
+                        "action_type": "RUNTIME_RETRY",
+                        "classification": latest_recovery_attempt_classification,
+                        "recommended_recovery_action": self_recover_recommended_action,
+                        "recovery_budget_key": self_recover_budget_key,
+                        "quarantine_required": paper_action_policy == "QUARANTINE_OBSERVE_ONLY",
+                        "execution_enabled": False,
+                    }
+                ]
+                if latest_recovery_attempt_id
+                else []
+            ),
             "runtime_resume_semantics_version": "v2",
             "runtime_resume_action_policy": resume_action_policy,
             "runtime_resume_previous_runtime_generation_id": "runtime-generation-previous",

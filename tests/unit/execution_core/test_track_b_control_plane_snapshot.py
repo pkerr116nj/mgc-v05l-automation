@@ -41,6 +41,8 @@ def test_snapshot_ties_supervisor_to_shared_truth_generation(tmp_path: Path) -> 
     assert payload["recovery_budget_key"] == "track_b_paper_runtime|RUNTIME_RETRY|test"
     assert payload["attempts_remaining"] == 2
     assert payload["quarantine_required"] is False
+    assert payload["recovery_attempt_history_no_history"] is True
+    assert payload["latest_recovery_attempt_id"] == ""
     assert payload["broker_order_position_summary"]["open_order_truth"] == "NO_OPEN_ORDERS"
     assert payload["source_artifact_paths"]["shared_truth_refresh"].endswith(
         "outputs/track_b_execution_core/shared_truth/latest_track_b_shared_truth_refresh.json"
@@ -104,6 +106,27 @@ def test_snapshot_includes_recovery_and_planner_fields(tmp_path: Path) -> None:
     assert payload["autonomous_recovery_plan_classification"]
     assert payload["autonomous_recovery_next_action"]
     assert payload["autonomous_recovery_execution_enabled"] is False
+
+
+def test_snapshot_surfaces_recovery_attempt_history(tmp_path: Path) -> None:
+    _seed_clean_stack(tmp_path)
+    _seed_control_plane(tmp_path)
+    _seed_recovery_attempt(tmp_path)
+
+    payload = _snapshot(tmp_path)
+
+    assert payload["latest_recovery_attempt_id"] == "attempt-1"
+    assert payload["latest_recovery_attempt_action_type"] == "RUNTIME_RETRY"
+    assert payload["latest_recovery_attempt_classification"] == "EXECUTOR_DRY_RUN_READY"
+    assert payload["recovery_attempt_recommended_recovery_action"] == "RUNTIME_RETRY_DRY_RUN"
+    assert payload["recovery_attempt_recovery_budget_key"] == "track_b_paper_runtime|RUNTIME_RETRY|test"
+    assert payload["recovery_attempt_attempts_remaining"] == 1
+    assert payload["recovery_attempt_quarantine_required"] is False
+    assert payload["recovery_attempt_last_success_at"] == "2026-05-23T12:01:00+00:00"
+    assert payload["recovery_attempt_history_no_history"] is False
+    assert payload["source_artifact_paths"]["recovery_attempt_history"].endswith(
+        "outputs/track_b_execution_core/paper_autonomous_recovery/latest_recovery_attempt_history.json"
+    )
 
 
 def test_snapshot_surfaces_planner_operator_explanation_for_missing_open_order_truth(tmp_path: Path) -> None:
@@ -308,7 +331,7 @@ def _snapshot(
     return build_track_b_control_plane_snapshot(
         config=TrackBControlPlaneSnapshotConfig(repo_root=root),
         now=NOW,
-        pid_running=lambda _pid: False,
+        pid_running=(lambda _pid: False) if process_rows is not None else None,
         process_rows=process_rows,
         process_root_resolver=lambda _pid: None,
         source_commit_resolver=lambda _root: "test-head",
@@ -452,6 +475,51 @@ def _seed_control_plane(
             "stop_reason": "expected_clean_down",
             "live_money_eligible": False,
         },
+    )
+
+
+def _seed_recovery_attempt(root: Path) -> None:
+    attempt = {
+        "generated_at": NOW.isoformat(),
+        "recovery_attempt_id": "attempt-1",
+        "action_type": "RUNTIME_RETRY",
+        "classification": "EXECUTOR_DRY_RUN_READY",
+        "control_plane_snapshot_id": "snapshot-1",
+        "shared_truth_generation_id": "track-b-shared-truth-20260523T120000000000Z",
+        "recommended_recovery_action": "RUNTIME_RETRY_DRY_RUN",
+        "self_recover_paper_action_policy": "AUTONOMOUS_RETRY_ELIGIBLE",
+        "autonomous_recovery_plan_classification": "PLAN_RUNTIME_RETRY",
+        "recovery_budget_key": "track_b_paper_runtime|RUNTIME_RETRY|test",
+        "self_recover_attempts_remaining": 1,
+        "quarantine_required": False,
+        "operator_explanation": "Runtime retry dry-run remains disabled and auditable.",
+        "execution_enabled": False,
+    }
+    _write(
+        root
+        / "outputs/track_b_execution_core/paper_autonomous_recovery/executor_attempts/latest_paper_autonomous_recovery_executor_attempt.json",
+        attempt,
+    )
+    path = (
+        root
+        / "outputs/track_b_execution_core/paper_autonomous_recovery/executor_attempts/paper_autonomous_recovery_executor_events.jsonl"
+    )
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(attempt, sort_keys=True) + "\n", encoding="utf-8")
+    budget_event_path = root / "outputs/track_b_execution_core/recovery_budget/recovery_budget_events.jsonl"
+    budget_event_path.parent.mkdir(parents=True, exist_ok=True)
+    budget_event_path.write_text(
+        json.dumps(
+            {
+                "event_type": "BUDGET_ATTEMPT_CONSUMED_SUCCESS",
+                "reservation_id": "reservation-1",
+                "recovery_attempt_id": "attempt-1",
+                "consumed_at": "2026-05-23T12:01:00+00:00",
+            },
+            sort_keys=True,
+        )
+        + "\n",
+        encoding="utf-8",
     )
 
 

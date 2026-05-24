@@ -14,7 +14,6 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Mapping
 
-from mgc_v05l.execution_core.track_b_control_plane_snapshot import DEFAULT_CONTROL_PLANE_SNAPSHOT_ARTIFACT
 from mgc_v05l.execution_core.track_b_paper_autonomous_recovery_planner import (
     DEFAULT_PAPER_AUTONOMOUS_RECOVERY_PLAN_ARTIFACT,
 )
@@ -33,6 +32,12 @@ PRE_ACTION_BLOCKED_HARD_INVARIANT = "PRE_ACTION_BLOCKED_HARD_INVARIANT"
 PRE_ACTION_BLOCKED_TARGET_IDENTITY_MISMATCH = "PRE_ACTION_BLOCKED_TARGET_IDENTITY_MISMATCH"
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
+DEFAULT_CONTROL_PLANE_SNAPSHOT_ARTIFACT = (
+    Path("outputs")
+    / "track_b_execution_core"
+    / "control_plane"
+    / "latest_control_plane_snapshot.json"
+)
 
 
 @dataclass(frozen=True)

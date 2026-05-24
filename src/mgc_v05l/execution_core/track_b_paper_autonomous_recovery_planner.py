@@ -20,7 +20,6 @@ from typing import Any, Mapping, Sequence
 from mgc_v05l.execution_core.track_b_atomic_io import write_json_atomic
 from mgc_v05l.execution_core.track_b_agent_health import DEFAULT_AGENT_HEALTH_ARTIFACT
 from mgc_v05l.execution_core.track_b_broker_truth_lease import DEFAULT_LEASE_ARTIFACT
-from mgc_v05l.execution_core.track_b_control_plane_snapshot import DEFAULT_CONTROL_PLANE_SNAPSHOT_ARTIFACT
 from mgc_v05l.execution_core.track_b_crash_loop_protection import DEFAULT_CRASH_LOOP_PROTECTION_ARTIFACT
 from mgc_v05l.execution_core.track_b_managed_order_registry import DEFAULT_MANAGED_ORDER_REGISTRY_ARTIFACT
 from mgc_v05l.execution_core.track_b_managed_position_registry import DEFAULT_MANAGED_POSITION_REGISTRY_ARTIFACT
@@ -72,6 +71,9 @@ DEFAULT_PAPER_AUTONOMOUS_RECOVERY_PLAN_ARTIFACT = (
 )
 DEFAULT_RUNTIME_ENVIRONMENT_TRUTH_ARTIFACT = (
     Path("outputs") / "track_b_execution_core" / "runtime_truth" / "latest_runtime_environment_truth.json"
+)
+DEFAULT_CONTROL_PLANE_SNAPSHOT_ARTIFACT = (
+    Path("outputs") / "track_b_execution_core" / "control_plane" / "latest_control_plane_snapshot.json"
 )
 DEFAULT_LIFECYCLE_STATE_MATRIX_DOC = Path("docs") / "track_b_lifecycle_state_matrix.md"
 

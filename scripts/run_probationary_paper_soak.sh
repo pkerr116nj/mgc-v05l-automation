@@ -350,6 +350,10 @@ payload = {
         "self_recover_attempts_remaining": os.environ.get("LAUNCH_SELF_RECOVER_ATTEMPTS_REMAINING") or None,
         "self_recover_cooldown_until": os.environ.get("LAUNCH_SELF_RECOVER_COOLDOWN_UNTIL") or None,
         "self_recover_quarantine_required": os.environ.get("LAUNCH_SELF_RECOVER_QUARANTINE_REQUIRED", "").lower() == "true",
+        "latest_recovery_attempt_id": os.environ.get("LAUNCH_LATEST_RECOVERY_ATTEMPT_ID") or None,
+        "latest_recovery_attempt_action_type": os.environ.get("LAUNCH_LATEST_RECOVERY_ATTEMPT_ACTION_TYPE") or None,
+        "latest_recovery_attempt_classification": os.environ.get("LAUNCH_LATEST_RECOVERY_ATTEMPT_CLASSIFICATION") or None,
+        "recovery_attempt_history_no_history": os.environ.get("LAUNCH_RECOVERY_ATTEMPT_HISTORY_NO_HISTORY", "").lower() == "true",
         "autonomous_recovery_allowed": os.environ.get("LAUNCH_SUPERVISOR_AUTONOMOUS_RECOVERY_ALLOWED", "").lower() == "true",
         "requires_operator_ack_for_paper": os.environ.get("LAUNCH_SUPERVISOR_REQUIRES_OPERATOR_ACK_FOR_PAPER", "").lower() == "true",
         "operator_ack_advisory_only_for_paper": os.environ.get("LAUNCH_SUPERVISOR_OPERATOR_ACK_ADVISORY_ONLY_FOR_PAPER", "").lower() == "true",
@@ -380,6 +384,10 @@ payload = {
         "attempts_remaining": os.environ.get("LAUNCH_SELF_RECOVER_ATTEMPTS_REMAINING") or None,
         "cooldown_until": os.environ.get("LAUNCH_SELF_RECOVER_COOLDOWN_UNTIL") or None,
         "quarantine_required": os.environ.get("LAUNCH_SELF_RECOVER_QUARANTINE_REQUIRED", "").lower() == "true",
+        "latest_recovery_attempt_id": os.environ.get("LAUNCH_LATEST_RECOVERY_ATTEMPT_ID") or None,
+        "latest_recovery_attempt_action_type": os.environ.get("LAUNCH_LATEST_RECOVERY_ATTEMPT_ACTION_TYPE") or None,
+        "latest_recovery_attempt_classification": os.environ.get("LAUNCH_LATEST_RECOVERY_ATTEMPT_CLASSIFICATION") or None,
+        "recovery_attempt_history_no_history": os.environ.get("LAUNCH_RECOVERY_ATTEMPT_HISTORY_NO_HISTORY", "").lower() == "true",
         "autonomous_recovery_plan_classification": os.environ.get("LAUNCH_SUPERVISOR_AUTONOMOUS_RECOVERY_PLAN_CLASSIFICATION") or None,
         "autonomous_recovery_next_action": os.environ.get("LAUNCH_SUPERVISOR_AUTONOMOUS_RECOVERY_NEXT_ACTION") or None,
         "autonomous_recovery_execution_enabled": os.environ.get("LAUNCH_SUPERVISOR_AUTONOMOUS_RECOVERY_EXECUTION_ENABLED", "").lower() == "true",
@@ -861,6 +869,8 @@ print(
     "recommended_recovery_action={recommended_recovery_action} self_recover_paper_action_policy={self_recover_policy} "
     "recovery_budget_key={recovery_budget_key} self_recover_attempts_remaining={self_recover_attempts} "
     "self_recover_cooldown_until={self_recover_cooldown} quarantine_required={quarantine_required} "
+    "latest_recovery_attempt_id={latest_recovery_attempt_id} latest_recovery_attempt_action_type={latest_recovery_attempt_action_type} "
+    "latest_recovery_attempt_classification={latest_recovery_attempt_classification} recovery_attempt_history_no_history={recovery_attempt_history_no_history} "
     "paper_recovery_policy={paper_policy} autonomous_recovery_plan_classification={plan_classification} "
     "autonomous_recovery_next_action={plan_action} autonomous_recovery_execution_enabled={plan_enabled} "
     "agent_health_classification={agent_health_classification} "
@@ -895,6 +905,10 @@ print(
         self_recover_attempts=payload.get("attempts_remaining"),
         self_recover_cooldown=payload.get("cooldown_until"),
         quarantine_required=payload.get("quarantine_required"),
+        latest_recovery_attempt_id=payload.get("latest_recovery_attempt_id"),
+        latest_recovery_attempt_action_type=payload.get("latest_recovery_attempt_action_type"),
+        latest_recovery_attempt_classification=payload.get("latest_recovery_attempt_classification"),
+        recovery_attempt_history_no_history=payload.get("recovery_attempt_history_no_history"),
         paper_policy=payload.get("paper_recovery_policy"),
         plan_classification=payload.get("autonomous_recovery_plan_classification"),
         plan_action=payload.get("autonomous_recovery_next_action"),
@@ -1004,6 +1018,10 @@ if not allowed:
         f"self_recover_attempts_remaining={payload.get('attempts_remaining')} "
         f"self_recover_cooldown_until={payload.get('cooldown_until')} "
         f"quarantine_required={payload.get('quarantine_required')} "
+        f"latest_recovery_attempt_id={payload.get('latest_recovery_attempt_id')} "
+        f"latest_recovery_attempt_action_type={payload.get('latest_recovery_attempt_action_type')} "
+        f"latest_recovery_attempt_classification={payload.get('latest_recovery_attempt_classification')} "
+        f"recovery_attempt_history_no_history={payload.get('recovery_attempt_history_no_history')} "
         f"paper_recovery_policy={payload.get('paper_recovery_policy')} "
         f"autonomous_recovery_plan_classification={payload.get('autonomous_recovery_plan_classification')} "
         f"autonomous_recovery_next_action={payload.get('autonomous_recovery_next_action')} "
@@ -1078,6 +1096,10 @@ fields = {
     "LAUNCH_SELF_RECOVER_ATTEMPTS_REMAINING": payload.get("attempts_remaining"),
     "LAUNCH_SELF_RECOVER_COOLDOWN_UNTIL": payload.get("cooldown_until"),
     "LAUNCH_SELF_RECOVER_QUARANTINE_REQUIRED": "true" if payload.get("quarantine_required") is True else "false",
+    "LAUNCH_LATEST_RECOVERY_ATTEMPT_ID": payload.get("latest_recovery_attempt_id"),
+    "LAUNCH_LATEST_RECOVERY_ATTEMPT_ACTION_TYPE": payload.get("latest_recovery_attempt_action_type"),
+    "LAUNCH_LATEST_RECOVERY_ATTEMPT_CLASSIFICATION": payload.get("latest_recovery_attempt_classification"),
+    "LAUNCH_RECOVERY_ATTEMPT_HISTORY_NO_HISTORY": "true" if payload.get("recovery_attempt_history_no_history") is True else "false",
 }
 for key, value in fields.items():
     print(f"{key}={shlex.quote(str(value or ''))}")

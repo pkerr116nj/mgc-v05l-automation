@@ -27,6 +27,12 @@ from mgc_v05l.execution_core.track_b_control_plane_top_line import (
     build_track_b_control_plane_top_line,
 )
 from mgc_v05l.execution_core.track_b_projection_metadata import build_projection_metadata
+from mgc_v05l.execution_core.track_b_recovery_attempt_history import (
+    DEFAULT_RECOVERY_ATTEMPT_HISTORY_ARTIFACT,
+    TrackBRecoveryAttemptHistoryConfig,
+    build_track_b_recovery_attempt_history,
+    write_track_b_recovery_attempt_history,
+)
 from mgc_v05l.execution_core.track_b_runtime_supervisor_authority import (
     SHARED_TRUTH_COHERENT,
     TrackBRuntimeSupervisorAuthorityConfig,
@@ -70,6 +76,7 @@ class TrackBControlPlaneSnapshotConfig:
     shared_truth_refresh_path: Path = DEFAULT_SHARED_TRUTH_REFRESH_ARTIFACT
     agent_health_path: Path = DEFAULT_AGENT_HEALTH_ARTIFACT
     paper_autonomous_recovery_plan_path: Path = DEFAULT_PAPER_AUTONOMOUS_RECOVERY_PLAN_ARTIFACT
+    recovery_attempt_history_path: Path = DEFAULT_RECOVERY_ATTEMPT_HISTORY_ARTIFACT
     broker_lease_history_path: Path | None = None
 
     def resolve(self, path: Path) -> Path:
@@ -129,6 +136,19 @@ def build_track_b_control_plane_snapshot(
         payload=runtime_supervisor,
     )
     autonomous_recovery_plan = _read_json(config.resolve(config.paper_autonomous_recovery_plan_path))
+    recovery_attempt_history_config = TrackBRecoveryAttemptHistoryConfig(
+        repo_root=config.repo_root,
+        output_path=config.recovery_attempt_history_path,
+        control_plane_snapshot_path=config.output_path,
+    )
+    recovery_attempt_history = build_track_b_recovery_attempt_history(
+        config=recovery_attempt_history_config,
+        now=actual_now,
+    )
+    recovery_attempt_history_path = write_track_b_recovery_attempt_history(
+        config=recovery_attempt_history_config,
+        payload=recovery_attempt_history,
+    )
     return _snapshot_payload(
         config=config,
         now=actual_now,
@@ -138,6 +158,8 @@ def build_track_b_control_plane_snapshot(
         runtime_supervisor=runtime_supervisor,
         runtime_supervisor_path=runtime_supervisor_path,
         autonomous_recovery_plan=autonomous_recovery_plan,
+        recovery_attempt_history=recovery_attempt_history,
+        recovery_attempt_history_path=recovery_attempt_history_path,
     )
 
 
@@ -228,6 +250,12 @@ def main(argv: Sequence[str] | None = None) -> int:
         "attempts_remaining": payload.get("attempts_remaining"),
         "cooldown_until": payload.get("cooldown_until"),
         "quarantine_required": payload.get("quarantine_required"),
+        "latest_recovery_attempt_id": payload.get("latest_recovery_attempt_id"),
+        "latest_recovery_attempt_action_type": payload.get("latest_recovery_attempt_action_type"),
+        "latest_recovery_attempt_classification": payload.get("latest_recovery_attempt_classification"),
+        "recovery_attempt_history_no_history": payload.get("recovery_attempt_history_no_history"),
+        "recovery_attempt_last_success_at": payload.get("recovery_attempt_last_success_at"),
+        "recovery_attempt_last_failure_at": payload.get("recovery_attempt_last_failure_at"),
         "primary_blocking_agent_id": payload.get("primary_blocking_agent_id"),
         "operator_explanation": payload.get("operator_explanation"),
         "recommended_observation_step": payload.get("recommended_observation_step"),
@@ -251,6 +279,8 @@ def _snapshot_payload(
     runtime_supervisor: Mapping[str, Any],
     runtime_supervisor_path: Path,
     autonomous_recovery_plan: Mapping[str, Any],
+    recovery_attempt_history: Mapping[str, Any],
+    recovery_attempt_history_path: Path,
 ) -> dict[str, Any]:
     coherence_status = str(runtime_supervisor.get("shared_truth_coherence_status") or "")
     generation_matches = (
@@ -301,6 +331,7 @@ def _snapshot_payload(
         "recommended_next_command": runtime_supervisor.get("recommended_next_command"),
         **_runtime_resume_v2_fields(runtime_supervisor),
         **_self_recover_v2_fields(runtime_supervisor),
+        **_recovery_attempt_history_fields(recovery_attempt_history),
         "safe_to_start_runtime": runtime_supervisor.get("safe_to_start_runtime") is True
         and classification == CONTROL_PLANE_SNAPSHOT_READY
         and agent_health_evidence.get("agent_health_has_duplicate_writer") is not True
@@ -320,6 +351,7 @@ def _snapshot_payload(
             "shared_truth_refresh": str(config.resolve(config.shared_truth_refresh_path)),
             "agent_health": str(agent_health_path),
             "paper_autonomous_recovery_plan": str(config.resolve(config.paper_autonomous_recovery_plan_path)),
+            "recovery_attempt_history": str(recovery_attempt_history_path),
             "runtime_supervisor_authority": str(runtime_supervisor_path),
             "control_plane_snapshot": str(config.resolve(config.output_path)),
             **_mapping(shared_truth.get("artifact_paths")),
@@ -383,6 +415,26 @@ def _self_recover_v2_fields(payload: Mapping[str, Any]) -> dict[str, Any]:
         "self_recover_agent_health_top_blockers": list(payload.get("self_recover_agent_health_top_blockers") or []),
         "self_recover_operator_explanation": str(payload.get("self_recover_operator_explanation") or ""),
         "self_recover_execution_enabled": payload.get("self_recover_execution_enabled") is True,
+    }
+
+
+def _recovery_attempt_history_fields(payload: Mapping[str, Any]) -> dict[str, Any]:
+    latest_attempt_id = str(payload.get("latest_recovery_attempt_id") or "")
+    return {
+        "latest_recovery_attempt_id": latest_attempt_id,
+        "latest_recovery_attempt_action_type": payload.get("latest_action_type") or "",
+        "latest_recovery_attempt_classification": payload.get("latest_classification") or "",
+        "recovery_attempt_recommended_recovery_action": payload.get("recommended_recovery_action") or "",
+        "recovery_attempt_recovery_budget_key": payload.get("recovery_budget_key") or "",
+        "recovery_attempt_attempts_remaining": payload.get("attempts_remaining"),
+        "recovery_attempt_quarantine_required": payload.get("quarantine_required") is True,
+        "recovery_attempt_last_success_at": payload.get("last_success_at"),
+        "recovery_attempt_last_failure_at": payload.get("last_failure_at"),
+        "recovery_attempt_recent_attempts": list(payload.get("recent_attempts") or [])[:5],
+        "recovery_attempt_active_budget_reservations": list(payload.get("active_budget_reservations") or [])[:5],
+        "recovery_attempt_stale_or_incomplete_attempts": list(payload.get("stale_or_incomplete_attempts") or [])[:5],
+        "recovery_attempt_operator_explanation": payload.get("operator_explanation") or "",
+        "recovery_attempt_history_no_history": not bool(latest_attempt_id),
     }
 
 
