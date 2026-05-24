@@ -13,6 +13,12 @@ from mgc_v05l.execution_core.track_b_paper_autonomous_recovery_executor import (
     EXECUTOR_BLOCKED_BUDGET_EXHAUSTED,
     EXECUTOR_BLOCKED_PRE_ACTION_VALIDATION,
     EXECUTOR_DRY_RUN_READY,
+    RUNTIME_RETRY_BLOCKED_BUDGET,
+    RUNTIME_RETRY_BLOCKED_COOLDOWN,
+    RUNTIME_RETRY_BLOCKED_MISSING_GENERATION,
+    RUNTIME_RETRY_BLOCKED_QUARANTINE,
+    RUNTIME_RETRY_BLOCKED_RESUME_POLICY,
+    RUNTIME_RETRY_GATE_PASS,
     TrackBPaperAutonomousRecoveryExecutorConfig,
     build_track_b_paper_autonomous_recovery_executor_attempt,
     run_track_b_paper_autonomous_recovery_executor_dry_run,
@@ -51,6 +57,13 @@ def test_valid_coherent_snapshot_and_matching_plan_creates_dry_run_attempt(tmp_p
     assert payload["action_adapter"]["adapter_enabled"] is False
     assert payload["action_adapter"]["execution_enabled"] is False
     assert payload["action_adapter"]["blocked_reason"] == "ADAPTER_DISABLED"
+    assert payload["action_adapter"]["runtime_retry_generation_gate_classification"] == RUNTIME_RETRY_GATE_PASS
+    assert payload["action_adapter"]["runtime_resume_action_policy"] == "NEW_RUNTIME_GENERATION_ALLOWED"
+    assert payload["action_adapter"]["previous_runtime_generation_id"] == "runtime-generation-previous"
+    assert payload["action_adapter"]["proposed_next_runtime_generation_id"] == "runtime-generation-next"
+    assert payload["action_adapter"]["generation_reuse_allowed"] is False
+    assert payload["action_adapter"]["must_start_new_generation"] is True
+    assert payload["action_adapter"]["runtime_resume_attempts_remaining"] == 1
     assert payload["action_adapter"]["budget_gate_classification"] == BUDGET_GATE_PASS
     assert payload["action_adapter"]["attempts_remaining"] == 1
     assert payload["action_adapter"]["budget_exhausted"] is False
@@ -105,7 +118,8 @@ def test_runtime_retry_budget_exhausted_blocks_before_adapter_disabled(tmp_path:
 
     assert payload["classification"] == EXECUTOR_BLOCKED_BUDGET_EXHAUSTED
     assert payload["action_adapter"]["budget_gate_classification"] == BUDGET_GATE_BLOCKED_EXHAUSTED
-    assert payload["action_adapter"]["blocked_reason"] == BUDGET_GATE_BLOCKED_EXHAUSTED
+    assert payload["action_adapter"]["blocked_reason"] == RUNTIME_RETRY_BLOCKED_BUDGET
+    assert payload["action_adapter"]["runtime_retry_generation_gate_classification"] == RUNTIME_RETRY_BLOCKED_BUDGET
     assert payload["action_adapter"]["adapter_enabled"] is False
     assert payload["action_adapter"]["execution_enabled"] is False
 
@@ -127,7 +141,7 @@ def test_runtime_retry_budget_cooldown_blocks_before_adapter_disabled(tmp_path: 
 
     assert payload["classification"] == EXECUTOR_BLOCKED_BUDGET_EXHAUSTED
     assert payload["action_adapter"]["budget_gate_classification"] == BUDGET_GATE_BLOCKED_COOLDOWN
-    assert payload["action_adapter"]["blocked_reason"] == BUDGET_GATE_BLOCKED_COOLDOWN
+    assert payload["action_adapter"]["blocked_reason"] == RUNTIME_RETRY_BLOCKED_COOLDOWN
 
 
 def test_runtime_retry_budget_quarantine_blocks_before_adapter_disabled(tmp_path: Path) -> None:
@@ -147,7 +161,7 @@ def test_runtime_retry_budget_quarantine_blocks_before_adapter_disabled(tmp_path
 
     assert payload["classification"] == EXECUTOR_BLOCKED_BUDGET_EXHAUSTED
     assert payload["action_adapter"]["budget_gate_classification"] == BUDGET_GATE_BLOCKED_QUARANTINE
-    assert payload["action_adapter"]["blocked_reason"] == BUDGET_GATE_BLOCKED_QUARANTINE
+    assert payload["action_adapter"]["blocked_reason"] == RUNTIME_RETRY_BLOCKED_QUARANTINE
 
 
 def test_runtime_retry_missing_budget_ledger_blocks_before_adapter_disabled(tmp_path: Path) -> None:
@@ -167,7 +181,7 @@ def test_runtime_retry_missing_budget_ledger_blocks_before_adapter_disabled(tmp_
 
     assert payload["classification"] == EXECUTOR_BLOCKED_BUDGET_EXHAUSTED
     assert payload["action_adapter"]["budget_gate_classification"] == BUDGET_GATE_BLOCKED_MISSING
-    assert payload["action_adapter"]["blocked_reason"] == BUDGET_GATE_BLOCKED_MISSING
+    assert payload["action_adapter"]["blocked_reason"] == RUNTIME_RETRY_BLOCKED_BUDGET
 
 
 def test_runtime_retry_adapter_blocks_when_snapshot_start_not_allowed(tmp_path: Path) -> None:
@@ -188,6 +202,90 @@ def test_runtime_retry_adapter_blocks_when_snapshot_start_not_allowed(tmp_path: 
     assert payload["classification"] == EXECUTOR_DRY_RUN_READY
     assert payload["action_adapter"]["blocked_reason"] == "SNAPSHOT_START_NOT_ALLOWED"
     assert payload["action_adapter"]["execution_enabled"] is False
+
+
+def test_runtime_retry_blocks_when_next_generation_is_missing(tmp_path: Path) -> None:
+    _seed_valid(
+        tmp_path,
+        action_type="RUNTIME_RETRY",
+        plan_classification="PLAN_RUNTIME_RETRY",
+        proposed_next_runtime_generation_id="",
+    )
+
+    payload = build_track_b_paper_autonomous_recovery_executor_attempt(
+        config=TrackBPaperAutonomousRecoveryExecutorConfig(repo_root=tmp_path),
+        expected_plan_classification="PLAN_RUNTIME_RETRY",
+        action_type="RUNTIME_RETRY",
+        now=NOW,
+    )
+
+    assert payload["classification"] == EXECUTOR_DRY_RUN_READY
+    assert payload["action_adapter"]["blocked_reason"] == RUNTIME_RETRY_BLOCKED_MISSING_GENERATION
+    assert payload["action_adapter"]["runtime_retry_generation_gate_classification"] == (
+        RUNTIME_RETRY_BLOCKED_MISSING_GENERATION
+    )
+
+
+def test_runtime_retry_blocks_when_generation_reuse_is_allowed(tmp_path: Path) -> None:
+    _seed_valid(
+        tmp_path,
+        action_type="RUNTIME_RETRY",
+        plan_classification="PLAN_RUNTIME_RETRY",
+        generation_reuse_allowed=True,
+        must_start_new_generation=False,
+    )
+
+    payload = build_track_b_paper_autonomous_recovery_executor_attempt(
+        config=TrackBPaperAutonomousRecoveryExecutorConfig(repo_root=tmp_path),
+        expected_plan_classification="PLAN_RUNTIME_RETRY",
+        action_type="RUNTIME_RETRY",
+        now=NOW,
+    )
+
+    assert payload["classification"] == EXECUTOR_DRY_RUN_READY
+    assert payload["action_adapter"]["blocked_reason"] == RUNTIME_RETRY_BLOCKED_RESUME_POLICY
+    assert payload["action_adapter"]["generation_reuse_allowed"] is True
+    assert payload["action_adapter"]["must_start_new_generation"] is False
+
+
+def test_runtime_retry_blocks_when_resume_policy_is_not_allowed(tmp_path: Path) -> None:
+    _seed_valid(
+        tmp_path,
+        action_type="RUNTIME_RETRY",
+        plan_classification="PLAN_RUNTIME_RETRY",
+        runtime_resume_action_policy="HOLD_MARKET_CLOSED",
+    )
+
+    payload = build_track_b_paper_autonomous_recovery_executor_attempt(
+        config=TrackBPaperAutonomousRecoveryExecutorConfig(repo_root=tmp_path),
+        expected_plan_classification="PLAN_RUNTIME_RETRY",
+        action_type="RUNTIME_RETRY",
+        now=NOW,
+    )
+
+    assert payload["classification"] == EXECUTOR_DRY_RUN_READY
+    assert payload["action_adapter"]["blocked_reason"] == RUNTIME_RETRY_BLOCKED_RESUME_POLICY
+    assert payload["action_adapter"]["runtime_resume_action_policy"] == "HOLD_MARKET_CLOSED"
+
+
+def test_runtime_retry_blocks_when_runtime_resume_reports_cooldown(tmp_path: Path) -> None:
+    _seed_valid(
+        tmp_path,
+        action_type="RUNTIME_RETRY",
+        plan_classification="PLAN_RUNTIME_RETRY",
+        runtime_resume_cooldown_until=datetime(2026, 5, 23, 12, 10, tzinfo=UTC),
+    )
+
+    payload = build_track_b_paper_autonomous_recovery_executor_attempt(
+        config=TrackBPaperAutonomousRecoveryExecutorConfig(repo_root=tmp_path),
+        expected_plan_classification="PLAN_RUNTIME_RETRY",
+        action_type="RUNTIME_RETRY",
+        now=NOW,
+    )
+
+    assert payload["classification"] == EXECUTOR_DRY_RUN_READY
+    assert payload["action_adapter"]["blocked_reason"] == RUNTIME_RETRY_BLOCKED_COOLDOWN
+    assert payload["action_adapter"]["runtime_resume_cooldown_until"] == "2026-05-23T12:10:00+00:00"
 
 
 def test_market_data_restart_dry_run_can_plan_but_not_execute(tmp_path: Path) -> None:
@@ -426,6 +524,13 @@ def _seed_valid(
     budget_exhausted: bool = False,
     budget_quarantine_required: bool = False,
     budget_cooldown_until: datetime | None = None,
+    runtime_resume_action_policy: str = "NEW_RUNTIME_GENERATION_ALLOWED",
+    previous_runtime_generation_id: str = "runtime-generation-previous",
+    proposed_next_runtime_generation_id: str = "runtime-generation-next",
+    generation_reuse_allowed: bool = False,
+    must_start_new_generation: bool = True,
+    runtime_resume_attempts_remaining: int = 1,
+    runtime_resume_cooldown_until: datetime | None = None,
     plan_prioritized_blockers: list[dict] | None = None,
     plan_operator_explanation: str = "",
     plan_recommended_observation_step: str = "",
@@ -458,6 +563,17 @@ def _seed_valid(
                 "runtime_supervisor_decision_id": "supervisor-1",
                 "runtime_supervisor_classification": "SUPERVISOR_RUNTIME_START_ALLOWED",
                 "safe_to_start_runtime": snapshot_safe_to_start_runtime,
+                "runtime_resume_semantics_version": "v2",
+                "runtime_resume_action_policy": runtime_resume_action_policy,
+                "runtime_resume_previous_runtime_generation_id": previous_runtime_generation_id,
+                "runtime_resume_proposed_next_runtime_generation_id": proposed_next_runtime_generation_id,
+                "runtime_resume_bounded_retry_budget_key": "track_b_paper_runtime|RUNTIME_RETRY|test",
+                "runtime_resume_attempts_remaining": runtime_resume_attempts_remaining,
+                "runtime_resume_cooldown_until": None
+                if runtime_resume_cooldown_until is None
+                else runtime_resume_cooldown_until.isoformat(),
+                "runtime_resume_generation_reuse_allowed": generation_reuse_allowed,
+                "runtime_resume_must_start_new_generation": must_start_new_generation,
                 "duplicate_writer_count": duplicate_writer_count,
                 "live_money_eligible": live_money_eligible,
                 "agent_health_top_blockers": agent_health_top_blockers,

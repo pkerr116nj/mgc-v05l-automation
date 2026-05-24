@@ -44,6 +44,13 @@ BUDGET_GATE_BLOCKED_MISSING = "BUDGET_GATE_BLOCKED_MISSING"
 BUDGET_GATE_NOT_APPLICABLE = "BUDGET_GATE_NOT_APPLICABLE"
 BUDGET_GATE_NOT_EVALUATED = "BUDGET_GATE_NOT_EVALUATED"
 
+RUNTIME_RETRY_GATE_PASS = "RUNTIME_RETRY_GATE_PASS"
+RUNTIME_RETRY_BLOCKED_RESUME_POLICY = "RUNTIME_RETRY_BLOCKED_RESUME_POLICY"
+RUNTIME_RETRY_BLOCKED_MISSING_GENERATION = "RUNTIME_RETRY_BLOCKED_MISSING_GENERATION"
+RUNTIME_RETRY_BLOCKED_BUDGET = "RUNTIME_RETRY_BLOCKED_BUDGET"
+RUNTIME_RETRY_BLOCKED_COOLDOWN = "RUNTIME_RETRY_BLOCKED_COOLDOWN"
+RUNTIME_RETRY_BLOCKED_QUARANTINE = "RUNTIME_RETRY_BLOCKED_QUARANTINE"
+
 SUPPORTED_ACTION_TYPES = {
     "REFRESH_EVIDENCE",
     "RUNTIME_RETRY",
@@ -353,15 +360,18 @@ def _adapter_result(
         }
     command = _runtime_retry_command(config)
     launcher_exists = len(command) >= 2 and Path(command[1]).exists()
+    generation_gate = _runtime_retry_generation_gate(validation=validation, budget=budget, now=now)
     blocked_reason = "ADAPTER_DISABLED"
     if validation.get("classification") != PRE_ACTION_SNAPSHOT_VALID:
         blocked_reason = "PRE_ACTION_VALIDATION_BLOCKED"
     elif budget.get("budget_gate_classification") != BUDGET_GATE_PASS:
-        blocked_reason = str(budget.get("budget_gate_classification") or BUDGET_GATE_BLOCKED_MISSING)
+        blocked_reason = _runtime_retry_budget_block_classification(budget)
     elif validation.get("planner_action_type") != "RUNTIME_RETRY":
         blocked_reason = "PLAN_ACTION_TYPE_MISMATCH"
     elif validation.get("snapshot_safe_to_start_runtime") is not True:
         blocked_reason = "SNAPSHOT_START_NOT_ALLOWED"
+    elif generation_gate["classification"] != RUNTIME_RETRY_GATE_PASS:
+        blocked_reason = generation_gate["classification"]
     elif not launcher_exists:
         blocked_reason = "LAUNCH_COMMAND_NOT_FOUND"
     elif config.enable_runtime_retry_adapter:
@@ -378,6 +388,19 @@ def _adapter_result(
         "control_plane_snapshot_id": validation.get("control_plane_snapshot_id") or "",
         "shared_truth_generation_id": validation.get("shared_truth_refresh_generation_id") or "",
         "budget_key": _budget_key(action_type=action_type, target_identity=normalized_target),
+        "runtime_retry_generation_gate_classification": generation_gate["classification"],
+        "runtime_retry_generation_gate_reason": generation_gate["reason"],
+        "runtime_resume_action_policy": validation.get("runtime_resume_action_policy") or "",
+        "previous_runtime_generation_id": validation.get("runtime_resume_previous_runtime_generation_id") or "",
+        "proposed_next_runtime_generation_id": validation.get(
+            "runtime_resume_proposed_next_runtime_generation_id"
+        )
+        or "",
+        "generation_reuse_allowed": validation.get("runtime_resume_generation_reuse_allowed") is True,
+        "must_start_new_generation": validation.get("runtime_resume_must_start_new_generation") is True,
+        "runtime_resume_attempts_remaining": validation.get("runtime_resume_attempts_remaining"),
+        "runtime_resume_cooldown_until": validation.get("runtime_resume_cooldown_until"),
+        "runtime_resume_bounded_retry_budget_key": validation.get("runtime_resume_bounded_retry_budget_key") or "",
         "would_record_budget_event": _budget_event_preview(
             recovery_attempt_id=recovery_attempt_id,
             validation=validation,
@@ -404,6 +427,7 @@ def _adapter_result(
             "validated_runtime_start_allowed": validation.get("snapshot_safe_to_start_runtime") is True,
             "validated_plan_action_type": validation.get("planner_action_type") == "RUNTIME_RETRY",
             "validated_recovery_budget_gate": budget.get("budget_gate_classification") == BUDGET_GATE_PASS,
+            "validated_runtime_resume_generation_gate": generation_gate["classification"] == RUNTIME_RETRY_GATE_PASS,
         },
         "apply_result": {
             "placeholder": True,
@@ -412,6 +436,83 @@ def _adapter_result(
             "reason": "RUNTIME_RETRY adapter is wired but disabled by policy in v1.",
         },
     }
+
+
+def _runtime_retry_generation_gate(
+    *,
+    validation: Mapping[str, Any],
+    budget: Mapping[str, Any],
+    now: datetime,
+) -> dict[str, str]:
+    budget_block = _runtime_retry_budget_block_classification(budget)
+    if budget_block in {RUNTIME_RETRY_BLOCKED_COOLDOWN, RUNTIME_RETRY_BLOCKED_QUARANTINE}:
+        return {"classification": budget_block, "reason": "Recovery Budget Ledger reports cooldown or quarantine."}
+    if budget_block == RUNTIME_RETRY_BLOCKED_BUDGET:
+        return {"classification": budget_block, "reason": "Recovery Budget Ledger does not permit RUNTIME_RETRY."}
+
+    if validation.get("runtime_resume_action_policy") != "NEW_RUNTIME_GENERATION_ALLOWED":
+        return {
+            "classification": RUNTIME_RETRY_BLOCKED_RESUME_POLICY,
+            "reason": "Runtime Resume v2 does not allow a new runtime generation.",
+        }
+    proposed_generation = str(validation.get("runtime_resume_proposed_next_runtime_generation_id") or "")
+    if not proposed_generation:
+        return {
+            "classification": RUNTIME_RETRY_BLOCKED_MISSING_GENERATION,
+            "reason": "Runtime Resume v2 did not provide proposed_next_runtime_generation_id.",
+        }
+    if validation.get("runtime_resume_generation_reuse_allowed") is True:
+        return {
+            "classification": RUNTIME_RETRY_BLOCKED_RESUME_POLICY,
+            "reason": "Runtime Resume v2 permits generation reuse; RUNTIME_RETRY requires a new generation.",
+        }
+    if validation.get("runtime_resume_must_start_new_generation") is not True:
+        return {
+            "classification": RUNTIME_RETRY_BLOCKED_RESUME_POLICY,
+            "reason": "Runtime Resume v2 did not require a new runtime generation.",
+        }
+    resume_attempts_remaining = _int_or_none(validation.get("runtime_resume_attempts_remaining"))
+    if resume_attempts_remaining is None or resume_attempts_remaining <= 0:
+        return {
+            "classification": RUNTIME_RETRY_BLOCKED_BUDGET,
+            "reason": "Runtime Resume v2 attempts_remaining is missing or exhausted.",
+        }
+    cooldown_until = validation.get("runtime_resume_cooldown_until")
+    parsed_cooldown = _parse_datetime(cooldown_until)
+    if cooldown_until and (parsed_cooldown is None or parsed_cooldown > now):
+        return {
+            "classification": RUNTIME_RETRY_BLOCKED_COOLDOWN,
+            "reason": "Runtime Resume v2 reports an active or invalid cooldown.",
+        }
+    planner_target = _mapping(validation.get("planner_target_identity"))
+    for key in ("proposed_next_runtime_generation_id", "next_runtime_generation_id", "runtime_generation_id"):
+        planner_generation = str(planner_target.get(key) or "")
+        if planner_generation and planner_generation != proposed_generation:
+            return {
+                "classification": RUNTIME_RETRY_BLOCKED_RESUME_POLICY,
+                "reason": "Autonomous Recovery Plan target generation does not match Runtime Resume v2.",
+            }
+    return {
+        "classification": RUNTIME_RETRY_GATE_PASS,
+        "reason": "Runtime Resume v2, Control Plane Snapshot, planner, and budget posture agree on a new generation.",
+    }
+
+
+def _runtime_retry_budget_block_classification(budget: Mapping[str, Any]) -> str:
+    gate = str(budget.get("budget_gate_classification") or "")
+    if gate == BUDGET_GATE_PASS:
+        return RUNTIME_RETRY_GATE_PASS
+    if gate == BUDGET_GATE_BLOCKED_COOLDOWN:
+        return RUNTIME_RETRY_BLOCKED_COOLDOWN
+    if gate == BUDGET_GATE_BLOCKED_QUARANTINE:
+        return RUNTIME_RETRY_BLOCKED_QUARANTINE
+    if gate in {BUDGET_GATE_BLOCKED_EXHAUSTED, BUDGET_GATE_BLOCKED_MISSING}:
+        return RUNTIME_RETRY_BLOCKED_BUDGET
+    if budget.get("ledger_quarantine_required") is True:
+        return RUNTIME_RETRY_BLOCKED_QUARANTINE
+    if budget.get("ledger_budget_exhausted") is True:
+        return RUNTIME_RETRY_BLOCKED_BUDGET
+    return RUNTIME_RETRY_BLOCKED_BUDGET
 
 
 def _budget_event_preview(
@@ -610,6 +711,13 @@ def _mapping(value: Any) -> Mapping[str, Any]:
 
 def _list(value: Any) -> list[Any]:
     return list(value) if isinstance(value, list) else []
+
+
+def _int_or_none(value: Any) -> int | None:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
 
 
 def _safe_slug(value: str) -> str:

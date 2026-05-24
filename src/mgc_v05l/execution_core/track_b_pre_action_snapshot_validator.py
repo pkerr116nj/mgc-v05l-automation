@@ -86,6 +86,19 @@ def validate_track_b_pre_action_snapshot(
         "snapshot_safe_to_start_runtime": snapshot.get("safe_to_start_runtime") is True,
         "supervisor_decision_id": str(snapshot.get("runtime_supervisor_decision_id") or ""),
         "supervisor_classification": str(snapshot.get("runtime_supervisor_classification") or ""),
+        "runtime_resume_semantics_version": str(snapshot.get("runtime_resume_semantics_version") or ""),
+        "runtime_resume_action_policy": str(snapshot.get("runtime_resume_action_policy") or ""),
+        "runtime_resume_previous_runtime_generation_id": str(
+            snapshot.get("runtime_resume_previous_runtime_generation_id") or ""
+        ),
+        "runtime_resume_proposed_next_runtime_generation_id": str(
+            snapshot.get("runtime_resume_proposed_next_runtime_generation_id") or ""
+        ),
+        "runtime_resume_bounded_retry_budget_key": str(snapshot.get("runtime_resume_bounded_retry_budget_key") or ""),
+        "runtime_resume_attempts_remaining": snapshot.get("runtime_resume_attempts_remaining"),
+        "runtime_resume_cooldown_until": snapshot.get("runtime_resume_cooldown_until"),
+        "runtime_resume_generation_reuse_allowed": snapshot.get("runtime_resume_generation_reuse_allowed") is True,
+        "runtime_resume_must_start_new_generation": snapshot.get("runtime_resume_must_start_new_generation") is True,
         "agent_health_top_blockers": _agent_health_blockers(snapshot),
         "agent_health_blocks_proof": snapshot.get("agent_health_blocks_proof") is True,
         "agent_health_blocks_runtime_submit": snapshot.get("agent_health_blocks_runtime_submit") is True,
