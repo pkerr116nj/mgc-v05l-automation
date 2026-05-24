@@ -318,6 +318,11 @@ def test_track_b_control_plane_status_projection_displays_closed_market_services
     assert summary["artifact_archive_execution_enabled"] is False
     assert summary["artifact_archive_diagnostic_only"] is True
     assert summary["artifact_archive_not_routing_authority"] is True
+    assert summary["continuation_aware_exit_state"] == "NO_CONTINUATION_AWARE_EXIT_PREVIEW"
+    assert summary["continuation_aware_exit_no_preview"] is True
+    assert summary["continuation_aware_exit_diagnostic_only"] is True
+    assert summary["continuation_aware_exit_not_order_authority"] is True
+    assert summary["continuation_aware_exit_not_lifecycle_authority"] is True
     assert summary["crash_loop_classification"] == "NO_CRASH_LOOP"
     assert summary["runtime_resume_classification"] == "RESUME_BLOCKED_MARKET_CLOSED"
     assert summary["runtime_resume_allowed"] is False
@@ -361,6 +366,45 @@ def test_track_b_control_plane_status_projection_displays_closed_market_services
     assert "outputs/operator_dashboard/runtime/latest_track_b_runtime_resume_semantics.json" not in json.dumps(summary)
     assert "outputs/operator_dashboard/runtime/latest_track_b_runtime_supervisor_authority.json" not in json.dumps(summary)
     assert "outputs/operator_dashboard/runtime/latest_track_b_paper_recovery_policy.json" not in json.dumps(summary)
+
+
+def test_track_b_control_plane_status_projection_displays_continuation_preview(tmp_path: Path) -> None:
+    _write_track_b_control_plane_artifacts(
+        tmp_path,
+        self_recover_recommendation="RESTART_RUNTIME_ALLOWED",
+        runtime_resume_classification="RESUME_ALLOWED_CLEAN",
+        runtime_resume_reason="",
+        continuation_aware_exit_preview={
+            "strategy_id": "asian_drift_v1",
+            "symbol": "MGC",
+            "exit_policy_id": "TIME_PLUS_CONTINUATION_EXIT_V1",
+            "exit_profile_id": "ASIAN_DRIFT_CONTINUATION_LONG_LEASH_V1",
+            "exit_state": "HOLD_CONTINUATION_CONFIRMED",
+            "continuation_quality_state": "STRONG_ALIGNED_CONTINUATION",
+            "should_request_close": False,
+            "dry_run_only": True,
+            "not_order_authority": True,
+            "not_lifecycle_authority": True,
+            "missing_inputs": [],
+            "source_strategy_report_path": "outputs/strategy/asian_drift_rule_report.json",
+        },
+    )
+
+    summary = operator_dashboard_module._track_b_control_plane_services_summary(tmp_path)  # noqa: SLF001
+
+    assert summary["continuation_aware_exit_strategy_id"] == "asian_drift_v1"
+    assert summary["continuation_aware_exit_symbol"] == "MGC"
+    assert summary["continuation_aware_exit_policy_id"] == "TIME_PLUS_CONTINUATION_EXIT_V1"
+    assert summary["continuation_aware_exit_profile_id"] == "ASIAN_DRIFT_CONTINUATION_LONG_LEASH_V1"
+    assert summary["continuation_aware_exit_state"] == "HOLD_CONTINUATION_CONFIRMED"
+    assert summary["continuation_aware_exit_quality_state"] == "STRONG_ALIGNED_CONTINUATION"
+    assert summary["continuation_aware_exit_should_request_close"] is False
+    assert summary["continuation_aware_exit_dry_run_only"] is True
+    assert summary["continuation_aware_exit_not_order_authority"] is True
+    assert summary["continuation_aware_exit_not_lifecycle_authority"] is True
+    assert summary["continuation_aware_exit_missing_inputs"] == []
+    assert summary["continuation_aware_exit_source_report_path"].endswith("asian_drift_rule_report.json")
+    assert summary["continuation_aware_exit_diagnostic_only"] is True
 
 
 def test_track_b_control_plane_status_missing_snapshot_is_diagnostic_only(tmp_path: Path) -> None:
@@ -690,6 +734,7 @@ def _write_track_b_control_plane_artifacts(
     artifact_archive_cold_archive_candidate_count: int = 0,
     artifact_archive_blocked_candidate_count: int = 0,
     artifact_archive_estimated_bytes: int = 0,
+    continuation_aware_exit_preview: dict[str, object] | None = None,
 ) -> None:
     if runtime_resume_classification == "RESUME_BLOCKED_MARKET_CLOSED":
         resume_action_policy = "HOLD_MARKET_CLOSED"
@@ -978,6 +1023,7 @@ def _write_track_b_control_plane_artifacts(
             "artifact_archive_execution_enabled": False,
             "artifact_archive_diagnostic_only": True,
             "artifact_archive_not_routing_authority": True,
+            **_continuation_aware_exit_snapshot_fields(continuation_aware_exit_preview),
             "runtime_resume_semantics_version": "v2",
             "runtime_resume_action_policy": resume_action_policy,
             "runtime_resume_previous_runtime_generation_id": "runtime-generation-previous",
@@ -1154,6 +1200,46 @@ def _write_track_b_control_plane_artifacts(
             "not_routing_authority": True,
         },
     )
+
+
+def _continuation_aware_exit_snapshot_fields(preview: dict[str, object] | None) -> dict[str, object]:
+    if not preview:
+        return {
+            "continuation_aware_exit_strategy_id": "",
+            "continuation_aware_exit_symbol": "",
+            "continuation_aware_exit_policy_id": "",
+            "continuation_aware_exit_profile_id": "",
+            "continuation_aware_exit_state": "NO_CONTINUATION_AWARE_EXIT_PREVIEW",
+            "continuation_aware_exit_quality_state": "",
+            "continuation_aware_exit_should_request_close": False,
+            "continuation_aware_exit_dry_run_only": False,
+            "continuation_aware_exit_not_order_authority": True,
+            "continuation_aware_exit_not_lifecycle_authority": True,
+            "continuation_aware_exit_missing_inputs": [],
+            "continuation_aware_exit_source_report_path": "",
+            "continuation_aware_exit_no_preview": True,
+            "continuation_aware_exit_diagnostic_only": True,
+            "continuation_aware_exit_not_routing_authority": True,
+        }
+    return {
+        "continuation_aware_exit_strategy_id": preview.get("strategy_id") or "",
+        "continuation_aware_exit_symbol": preview.get("symbol") or "",
+        "continuation_aware_exit_policy_id": preview.get("exit_policy_id") or "",
+        "continuation_aware_exit_profile_id": preview.get("exit_profile_id") or "",
+        "continuation_aware_exit_state": preview.get("exit_state") or "",
+        "continuation_aware_exit_quality_state": preview.get("continuation_quality_state") or "",
+        "continuation_aware_exit_should_request_close": preview.get("should_request_close") is True,
+        "continuation_aware_exit_dry_run_only": preview.get("dry_run_only") is True,
+        "continuation_aware_exit_not_order_authority": preview.get("not_order_authority") is not False,
+        "continuation_aware_exit_not_lifecycle_authority": preview.get("not_lifecycle_authority") is not False,
+        "continuation_aware_exit_missing_inputs": list(preview.get("missing_inputs") or []),
+        "continuation_aware_exit_source_report_path": str(
+            preview.get("source_strategy_report_path") or preview.get("source_lifecycle_report_path") or ""
+        ),
+        "continuation_aware_exit_no_preview": False,
+        "continuation_aware_exit_diagnostic_only": True,
+        "continuation_aware_exit_not_routing_authority": True,
+    }
 
 
 def _write_json_file(path: Path, payload: dict) -> None:

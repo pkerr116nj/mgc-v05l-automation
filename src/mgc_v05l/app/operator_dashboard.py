@@ -18321,6 +18321,43 @@ def _track_b_control_plane_services_summary(repo_root: Path) -> dict[str, Any]:
         or artifact_archive_plan.get("execution_enabled") is True,
         "artifact_archive_diagnostic_only": True,
         "artifact_archive_not_routing_authority": True,
+        "continuation_aware_exit_strategy_id": control_plane_snapshot.get("continuation_aware_exit_strategy_id") or "",
+        "continuation_aware_exit_symbol": control_plane_snapshot.get("continuation_aware_exit_symbol") or "",
+        "continuation_aware_exit_policy_id": control_plane_snapshot.get("continuation_aware_exit_policy_id") or "",
+        "continuation_aware_exit_profile_id": control_plane_snapshot.get("continuation_aware_exit_profile_id") or "",
+        "continuation_aware_exit_state": control_plane_snapshot.get("continuation_aware_exit_state")
+        or "NO_CONTINUATION_AWARE_EXIT_PREVIEW",
+        "continuation_aware_exit_quality_state": control_plane_snapshot.get(
+            "continuation_aware_exit_quality_state"
+        )
+        or "",
+        "continuation_aware_exit_should_request_close": control_plane_snapshot.get(
+            "continuation_aware_exit_should_request_close"
+        )
+        is True,
+        "continuation_aware_exit_dry_run_only": control_plane_snapshot.get(
+            "continuation_aware_exit_dry_run_only"
+        )
+        is True,
+        "continuation_aware_exit_not_order_authority": control_plane_snapshot.get(
+            "continuation_aware_exit_not_order_authority"
+        )
+        is not False,
+        "continuation_aware_exit_not_lifecycle_authority": control_plane_snapshot.get(
+            "continuation_aware_exit_not_lifecycle_authority"
+        )
+        is not False,
+        "continuation_aware_exit_missing_inputs": list(
+            control_plane_snapshot.get("continuation_aware_exit_missing_inputs") or []
+        ),
+        "continuation_aware_exit_source_report_path": control_plane_snapshot.get(
+            "continuation_aware_exit_source_report_path"
+        )
+        or "",
+        "continuation_aware_exit_no_preview": control_plane_snapshot.get("continuation_aware_exit_no_preview")
+        is True,
+        "continuation_aware_exit_diagnostic_only": True,
+        "continuation_aware_exit_not_routing_authority": True,
         "safe_state_classification": control_plane_snapshot.get("safe_state_classification") or "",
         "safe_state_broker_mutation_allowed": control_plane_snapshot.get("safe_state_broker_mutation_allowed") is True,
         "safe_state_runtime_start_allowed": control_plane_snapshot.get("safe_state_runtime_start_allowed") is True,

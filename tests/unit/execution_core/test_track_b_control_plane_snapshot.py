@@ -161,6 +161,65 @@ def test_snapshot_surfaces_blocked_artifact_archive_plan(tmp_path: Path) -> None
     )
 
 
+def test_snapshot_surfaces_continuation_aware_exit_preview_as_diagnostic_only(tmp_path: Path) -> None:
+    _seed_clean_stack(tmp_path)
+    _seed_control_plane(tmp_path)
+    _seed_continuation_aware_exit_preview(tmp_path)
+
+    payload = _snapshot(tmp_path)
+
+    assert payload["continuation_aware_exit_strategy_id"] == "asian_drift_v1"
+    assert payload["continuation_aware_exit_symbol"] == "MGC"
+    assert payload["continuation_aware_exit_policy_id"] == "TIME_PLUS_CONTINUATION_EXIT_V1"
+    assert payload["continuation_aware_exit_profile_id"] == "ASIAN_DRIFT_CONTINUATION_LONG_LEASH_V1"
+    assert payload["continuation_aware_exit_state"] == "HOLD_CONTINUATION_CONFIRMED"
+    assert payload["continuation_aware_exit_quality_state"] == "STRONG_ALIGNED_CONTINUATION"
+    assert payload["continuation_aware_exit_should_request_close"] is False
+    assert payload["continuation_aware_exit_dry_run_only"] is True
+    assert payload["continuation_aware_exit_not_order_authority"] is True
+    assert payload["continuation_aware_exit_not_lifecycle_authority"] is True
+    assert payload["continuation_aware_exit_missing_inputs"] == []
+    assert payload["continuation_aware_exit_source_report_path"].endswith("asian_drift_rule_report.json")
+    assert payload["continuation_aware_exit_no_preview"] is False
+    assert payload["continuation_aware_exit_diagnostic_only"] is True
+    assert payload["continuation_aware_exit_not_routing_authority"] is True
+    assert payload["source_artifact_paths"]["continuation_aware_exit_preview"].endswith(
+        "outputs/track_b_execution_core/continuation_aware_exit/latest_continuation_aware_exit_preview.json"
+    )
+
+
+def test_snapshot_no_continuation_aware_exit_preview_is_calm(tmp_path: Path) -> None:
+    _seed_clean_stack(tmp_path)
+    _seed_control_plane(tmp_path)
+
+    payload = _snapshot(tmp_path)
+
+    assert payload["continuation_aware_exit_state"] == "NO_CONTINUATION_AWARE_EXIT_PREVIEW"
+    assert payload["continuation_aware_exit_no_preview"] is True
+    assert payload["continuation_aware_exit_diagnostic_only"] is True
+    assert payload["continuation_aware_exit_should_request_close"] is False
+
+
+def test_malformed_continuation_preview_cannot_influence_authority_fields(tmp_path: Path) -> None:
+    _seed_clean_stack(tmp_path)
+    _seed_control_plane(tmp_path)
+    _seed_continuation_aware_exit_preview(
+        tmp_path,
+        should_request_close=True,
+        exit_state="EXIT_REVERSAL_DETECTED",
+    )
+
+    payload = _snapshot(tmp_path)
+
+    assert payload["continuation_aware_exit_should_request_close"] is True
+    assert payload["continuation_aware_exit_not_order_authority"] is True
+    assert payload["continuation_aware_exit_not_lifecycle_authority"] is True
+    assert payload["safe_to_start_runtime"] is True
+    assert payload["safe_state_classification"] == "SAFE_STATE_NORMAL"
+    assert payload["runtime_supervisor_classification"] == "SUPERVISOR_RUNTIME_START_ALLOWED"
+    assert not any(blocker["code"].startswith("continuation_aware_exit") for blocker in payload["blockers"])
+
+
 def test_snapshot_surfaces_planner_operator_explanation_for_missing_open_order_truth(tmp_path: Path) -> None:
     _seed_clean_stack(tmp_path)
     _seed_control_plane(tmp_path)
@@ -578,6 +637,34 @@ def _seed_recovery_attempt(root: Path) -> None:
         )
         + "\n",
         encoding="utf-8",
+    )
+
+
+def _seed_continuation_aware_exit_preview(
+    root: Path,
+    *,
+    should_request_close: bool = False,
+    exit_state: str = "HOLD_CONTINUATION_CONFIRMED",
+) -> None:
+    _write(
+        root
+        / "outputs/track_b_execution_core/continuation_aware_exit/latest_continuation_aware_exit_preview.json",
+        {
+            "generated_at": NOW.isoformat(),
+            "strategy_id": "asian_drift_v1",
+            "symbol": "MGC",
+            "exit_policy_id": "TIME_PLUS_CONTINUATION_EXIT_V1",
+            "exit_profile_id": "ASIAN_DRIFT_CONTINUATION_LONG_LEASH_V1",
+            "exit_state": exit_state,
+            "continuation_quality_state": "STRONG_ALIGNED_CONTINUATION",
+            "should_request_close": should_request_close,
+            "dry_run_only": True,
+            "not_order_authority": True,
+            "not_lifecycle_authority": True,
+            "missing_inputs": [],
+            "source_strategy_report_path": str(root / "outputs/strategy/asian_drift_rule_report.json"),
+            "close_intent_preview": {"would_submit": False},
+        },
     )
 
 

@@ -32,6 +32,9 @@ from mgc_v05l.execution_core.track_b_artifact_archive_planner import (
 from mgc_v05l.execution_core.track_b_control_plane_top_line import (
     build_track_b_control_plane_top_line,
 )
+from mgc_v05l.execution_core.track_b_continuation_aware_exit_decision import (
+    DEFAULT_CONTINUATION_AWARE_EXIT_PREVIEW_PATH,
+)
 from mgc_v05l.execution_core.track_b_projection_metadata import build_projection_metadata
 from mgc_v05l.execution_core.track_b_recovery_attempt_history import (
     DEFAULT_RECOVERY_ATTEMPT_HISTORY_ARTIFACT,
@@ -90,6 +93,7 @@ class TrackBControlPlaneSnapshotConfig:
     paper_autonomous_recovery_plan_path: Path = DEFAULT_PAPER_AUTONOMOUS_RECOVERY_PLAN_ARTIFACT
     recovery_attempt_history_path: Path = DEFAULT_RECOVERY_ATTEMPT_HISTORY_ARTIFACT
     artifact_archive_plan_path: Path = DEFAULT_ARTIFACT_ARCHIVE_PLAN_PATH
+    continuation_aware_exit_preview_path: Path = DEFAULT_CONTINUATION_AWARE_EXIT_PREVIEW_PATH
     runtime_safe_state_envelope_path: Path = DEFAULT_RUNTIME_SAFE_STATE_ENVELOPE_ARTIFACT
     broker_lease_history_path: Path | None = None
 
@@ -153,6 +157,7 @@ def build_track_b_control_plane_snapshot(
         payload=runtime_supervisor,
     )
     autonomous_recovery_plan = _read_json(config.resolve(config.paper_autonomous_recovery_plan_path))
+    continuation_aware_exit_preview = _read_json(config.resolve(config.continuation_aware_exit_preview_path))
     recovery_attempt_history_config = TrackBRecoveryAttemptHistoryConfig(
         repo_root=config.repo_root,
         output_path=config.recovery_attempt_history_path,
@@ -190,6 +195,7 @@ def build_track_b_control_plane_snapshot(
         runtime_supervisor=runtime_supervisor,
         runtime_supervisor_path=runtime_supervisor_path,
         autonomous_recovery_plan=autonomous_recovery_plan,
+        continuation_aware_exit_preview=continuation_aware_exit_preview,
         recovery_attempt_history=recovery_attempt_history,
         recovery_attempt_history_path=recovery_attempt_history_path,
         artifact_archive_plan=artifact_archive_plan,
@@ -316,6 +322,23 @@ def main(argv: Sequence[str] | None = None) -> int:
         "artifact_archive_estimated_bytes": payload.get("artifact_archive_estimated_bytes"),
         "artifact_archive_dry_run_only": payload.get("artifact_archive_dry_run_only"),
         "artifact_archive_execution_enabled": payload.get("artifact_archive_execution_enabled"),
+        "continuation_aware_exit_strategy_id": payload.get("continuation_aware_exit_strategy_id"),
+        "continuation_aware_exit_symbol": payload.get("continuation_aware_exit_symbol"),
+        "continuation_aware_exit_policy_id": payload.get("continuation_aware_exit_policy_id"),
+        "continuation_aware_exit_profile_id": payload.get("continuation_aware_exit_profile_id"),
+        "continuation_aware_exit_state": payload.get("continuation_aware_exit_state"),
+        "continuation_aware_exit_quality_state": payload.get("continuation_aware_exit_quality_state"),
+        "continuation_aware_exit_should_request_close": payload.get("continuation_aware_exit_should_request_close"),
+        "continuation_aware_exit_dry_run_only": payload.get("continuation_aware_exit_dry_run_only"),
+        "continuation_aware_exit_not_order_authority": payload.get(
+            "continuation_aware_exit_not_order_authority"
+        ),
+        "continuation_aware_exit_not_lifecycle_authority": payload.get(
+            "continuation_aware_exit_not_lifecycle_authority"
+        ),
+        "continuation_aware_exit_missing_inputs": payload.get("continuation_aware_exit_missing_inputs"),
+        "continuation_aware_exit_source_report_path": payload.get("continuation_aware_exit_source_report_path"),
+        "continuation_aware_exit_no_preview": payload.get("continuation_aware_exit_no_preview"),
         "safe_state_classification": payload.get("safe_state_classification"),
         "safe_state_observe_only": payload.get("safe_state_observe_only"),
         "safe_state_recovery_only": payload.get("safe_state_recovery_only"),
@@ -345,6 +368,7 @@ def _snapshot_payload(
     runtime_supervisor: Mapping[str, Any],
     runtime_supervisor_path: Path,
     autonomous_recovery_plan: Mapping[str, Any],
+    continuation_aware_exit_preview: Mapping[str, Any],
     recovery_attempt_history: Mapping[str, Any],
     recovery_attempt_history_path: Path,
     artifact_archive_plan: Mapping[str, Any],
@@ -401,6 +425,7 @@ def _snapshot_payload(
         **_self_recover_v2_fields(runtime_supervisor),
         **_recovery_attempt_history_fields(recovery_attempt_history),
         **_artifact_archive_plan_fields(artifact_archive_plan),
+        **_continuation_aware_exit_preview_fields(continuation_aware_exit_preview),
         "safe_to_start_runtime": runtime_supervisor.get("safe_to_start_runtime") is True
         and classification == CONTROL_PLANE_SNAPSHOT_READY
         and agent_health_evidence.get("agent_health_has_duplicate_writer") is not True
@@ -420,6 +445,7 @@ def _snapshot_payload(
             "shared_truth_refresh": str(config.resolve(config.shared_truth_refresh_path)),
             "agent_health": str(agent_health_path),
             "paper_autonomous_recovery_plan": str(config.resolve(config.paper_autonomous_recovery_plan_path)),
+            "continuation_aware_exit_preview": str(config.resolve(config.continuation_aware_exit_preview_path)),
             "recovery_attempt_history": str(recovery_attempt_history_path),
             "artifact_archive_plan": str(artifact_archive_plan_path),
             "runtime_supervisor_authority": str(runtime_supervisor_path),
@@ -521,6 +547,35 @@ def _artifact_archive_plan_fields(payload: Mapping[str, Any]) -> dict[str, Any]:
         "artifact_archive_execution_enabled": payload.get("execution_enabled") is True,
         "artifact_archive_diagnostic_only": True,
         "artifact_archive_not_routing_authority": True,
+    }
+
+
+def _continuation_aware_exit_preview_fields(payload: Mapping[str, Any]) -> dict[str, Any]:
+    has_preview = bool(payload)
+    source_report_path = (
+        payload.get("source_strategy_report_path")
+        or payload.get("source_lifecycle_report_path")
+        or payload.get("source_report_path")
+    )
+    return {
+        "continuation_aware_exit_strategy_id": payload.get("strategy_id") if has_preview else "",
+        "continuation_aware_exit_symbol": payload.get("symbol") if has_preview else "",
+        "continuation_aware_exit_policy_id": payload.get("exit_policy_id") if has_preview else "",
+        "continuation_aware_exit_profile_id": payload.get("exit_profile_id") if has_preview else "",
+        "continuation_aware_exit_state": payload.get("exit_state") if has_preview else "NO_CONTINUATION_AWARE_EXIT_PREVIEW",
+        "continuation_aware_exit_quality_state": payload.get("continuation_quality_state") if has_preview else "",
+        "continuation_aware_exit_should_request_close": payload.get("should_request_close") is True,
+        "continuation_aware_exit_dry_run_only": payload.get("dry_run_only") is True,
+        "continuation_aware_exit_not_order_authority": True,
+        "continuation_aware_exit_not_lifecycle_authority": True,
+        "continuation_aware_exit_missing_inputs": list(payload.get("missing_inputs") or []) if has_preview else [],
+        "continuation_aware_exit_source_report_path": str(source_report_path or ""),
+        "continuation_aware_exit_no_preview": not has_preview,
+        "continuation_aware_exit_diagnostic_only": True,
+        "continuation_aware_exit_not_routing_authority": True,
+        "continuation_aware_exit_safe_state_authority": False,
+        "continuation_aware_exit_order_authority": False,
+        "continuation_aware_exit_lifecycle_authority": False,
     }
 
 

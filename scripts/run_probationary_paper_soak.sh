@@ -359,6 +359,14 @@ payload = {
         "artifact_archive_blocked_candidate_count": os.environ.get("LAUNCH_ARTIFACT_ARCHIVE_BLOCKED_CANDIDATE_COUNT") or None,
         "artifact_archive_dry_run_only": os.environ.get("LAUNCH_ARTIFACT_ARCHIVE_DRY_RUN_ONLY", "").lower() == "true",
         "artifact_archive_execution_enabled": os.environ.get("LAUNCH_ARTIFACT_ARCHIVE_EXECUTION_ENABLED", "").lower() == "true",
+        "continuation_aware_exit_strategy_id": os.environ.get("LAUNCH_CONTINUATION_AWARE_EXIT_STRATEGY_ID") or None,
+        "continuation_aware_exit_profile_id": os.environ.get("LAUNCH_CONTINUATION_AWARE_EXIT_PROFILE_ID") or None,
+        "continuation_aware_exit_state": os.environ.get("LAUNCH_CONTINUATION_AWARE_EXIT_STATE") or None,
+        "continuation_aware_exit_quality_state": os.environ.get("LAUNCH_CONTINUATION_AWARE_EXIT_QUALITY_STATE") or None,
+        "continuation_aware_exit_should_request_close": os.environ.get("LAUNCH_CONTINUATION_AWARE_EXIT_SHOULD_REQUEST_CLOSE", "").lower() == "true",
+        "continuation_aware_exit_dry_run_only": os.environ.get("LAUNCH_CONTINUATION_AWARE_EXIT_DRY_RUN_ONLY", "").lower() == "true",
+        "continuation_aware_exit_not_order_authority": os.environ.get("LAUNCH_CONTINUATION_AWARE_EXIT_NOT_ORDER_AUTHORITY", "").lower() == "true",
+        "continuation_aware_exit_not_lifecycle_authority": os.environ.get("LAUNCH_CONTINUATION_AWARE_EXIT_NOT_LIFECYCLE_AUTHORITY", "").lower() == "true",
         "autonomous_recovery_allowed": os.environ.get("LAUNCH_SUPERVISOR_AUTONOMOUS_RECOVERY_ALLOWED", "").lower() == "true",
         "requires_operator_ack_for_paper": os.environ.get("LAUNCH_SUPERVISOR_REQUIRES_OPERATOR_ACK_FOR_PAPER", "").lower() == "true",
         "operator_ack_advisory_only_for_paper": os.environ.get("LAUNCH_SUPERVISOR_OPERATOR_ACK_ADVISORY_ONLY_FOR_PAPER", "").lower() == "true",
@@ -398,6 +406,14 @@ payload = {
         "artifact_archive_blocked_candidate_count": os.environ.get("LAUNCH_ARTIFACT_ARCHIVE_BLOCKED_CANDIDATE_COUNT") or None,
         "artifact_archive_dry_run_only": os.environ.get("LAUNCH_ARTIFACT_ARCHIVE_DRY_RUN_ONLY", "").lower() == "true",
         "artifact_archive_execution_enabled": os.environ.get("LAUNCH_ARTIFACT_ARCHIVE_EXECUTION_ENABLED", "").lower() == "true",
+        "continuation_aware_exit_strategy_id": os.environ.get("LAUNCH_CONTINUATION_AWARE_EXIT_STRATEGY_ID") or None,
+        "continuation_aware_exit_profile_id": os.environ.get("LAUNCH_CONTINUATION_AWARE_EXIT_PROFILE_ID") or None,
+        "continuation_aware_exit_state": os.environ.get("LAUNCH_CONTINUATION_AWARE_EXIT_STATE") or None,
+        "continuation_aware_exit_quality_state": os.environ.get("LAUNCH_CONTINUATION_AWARE_EXIT_QUALITY_STATE") or None,
+        "continuation_aware_exit_should_request_close": os.environ.get("LAUNCH_CONTINUATION_AWARE_EXIT_SHOULD_REQUEST_CLOSE", "").lower() == "true",
+        "continuation_aware_exit_dry_run_only": os.environ.get("LAUNCH_CONTINUATION_AWARE_EXIT_DRY_RUN_ONLY", "").lower() == "true",
+        "continuation_aware_exit_not_order_authority": os.environ.get("LAUNCH_CONTINUATION_AWARE_EXIT_NOT_ORDER_AUTHORITY", "").lower() == "true",
+        "continuation_aware_exit_not_lifecycle_authority": os.environ.get("LAUNCH_CONTINUATION_AWARE_EXIT_NOT_LIFECYCLE_AUTHORITY", "").lower() == "true",
         "autonomous_recovery_plan_classification": os.environ.get("LAUNCH_SUPERVISOR_AUTONOMOUS_RECOVERY_PLAN_CLASSIFICATION") or None,
         "autonomous_recovery_next_action": os.environ.get("LAUNCH_SUPERVISOR_AUTONOMOUS_RECOVERY_NEXT_ACTION") or None,
         "autonomous_recovery_execution_enabled": os.environ.get("LAUNCH_SUPERVISOR_AUTONOMOUS_RECOVERY_EXECUTION_ENABLED", "").lower() == "true",
@@ -884,6 +900,10 @@ print(
     "artifact_archive_plan_classification={artifact_archive_plan_classification} artifact_archive_cold_archive_candidate_count={artifact_archive_cold_archive_candidate_count} "
     "artifact_archive_blocked_candidate_count={artifact_archive_blocked_candidate_count} artifact_archive_dry_run_only={artifact_archive_dry_run_only} "
     "artifact_archive_execution_enabled={artifact_archive_execution_enabled} "
+    "continuation_aware_exit_strategy_id={continuation_strategy_id} continuation_aware_exit_profile_id={continuation_profile_id} "
+    "continuation_aware_exit_state={continuation_state} continuation_aware_exit_quality_state={continuation_quality_state} "
+    "continuation_aware_exit_should_request_close={continuation_should_request_close} continuation_aware_exit_dry_run_only={continuation_dry_run_only} "
+    "continuation_aware_exit_not_order_authority={continuation_not_order_authority} continuation_aware_exit_not_lifecycle_authority={continuation_not_lifecycle_authority} "
     "safe_state_classification={safe_state_classification} safe_state_observe_only={safe_state_observe_only} "
     "safe_state_recovery_only={safe_state_recovery_only} safe_state_runtime_start_allowed={safe_state_runtime_start_allowed} "
     "safe_state_submit_allowed={safe_state_submit_allowed} safe_state_broker_mutation_allowed={safe_state_broker_mutation_allowed} "
@@ -930,6 +950,14 @@ print(
         artifact_archive_blocked_candidate_count=payload.get("artifact_archive_blocked_candidate_count"),
         artifact_archive_dry_run_only=payload.get("artifact_archive_dry_run_only"),
         artifact_archive_execution_enabled=payload.get("artifact_archive_execution_enabled"),
+        continuation_strategy_id=payload.get("continuation_aware_exit_strategy_id"),
+        continuation_profile_id=payload.get("continuation_aware_exit_profile_id"),
+        continuation_state=payload.get("continuation_aware_exit_state"),
+        continuation_quality_state=payload.get("continuation_aware_exit_quality_state"),
+        continuation_should_request_close=payload.get("continuation_aware_exit_should_request_close"),
+        continuation_dry_run_only=payload.get("continuation_aware_exit_dry_run_only"),
+        continuation_not_order_authority=payload.get("continuation_aware_exit_not_order_authority"),
+        continuation_not_lifecycle_authority=payload.get("continuation_aware_exit_not_lifecycle_authority"),
         safe_state_classification=payload.get("safe_state_classification"),
         safe_state_observe_only=payload.get("safe_state_observe_only"),
         safe_state_recovery_only=payload.get("safe_state_recovery_only"),
@@ -1054,6 +1082,14 @@ if not allowed:
         f"artifact_archive_blocked_candidate_count={payload.get('artifact_archive_blocked_candidate_count')} "
         f"artifact_archive_dry_run_only={payload.get('artifact_archive_dry_run_only')} "
         f"artifact_archive_execution_enabled={payload.get('artifact_archive_execution_enabled')} "
+        f"continuation_aware_exit_strategy_id={payload.get('continuation_aware_exit_strategy_id')} "
+        f"continuation_aware_exit_profile_id={payload.get('continuation_aware_exit_profile_id')} "
+        f"continuation_aware_exit_state={payload.get('continuation_aware_exit_state')} "
+        f"continuation_aware_exit_quality_state={payload.get('continuation_aware_exit_quality_state')} "
+        f"continuation_aware_exit_should_request_close={payload.get('continuation_aware_exit_should_request_close')} "
+        f"continuation_aware_exit_dry_run_only={payload.get('continuation_aware_exit_dry_run_only')} "
+        f"continuation_aware_exit_not_order_authority={payload.get('continuation_aware_exit_not_order_authority')} "
+        f"continuation_aware_exit_not_lifecycle_authority={payload.get('continuation_aware_exit_not_lifecycle_authority')} "
         f"safe_state_classification={payload.get('safe_state_classification')} "
         f"safe_state_observe_only={payload.get('safe_state_observe_only')} "
         f"safe_state_recovery_only={payload.get('safe_state_recovery_only')} "
@@ -1143,6 +1179,14 @@ fields = {
     "LAUNCH_ARTIFACT_ARCHIVE_BLOCKED_CANDIDATE_COUNT": payload.get("artifact_archive_blocked_candidate_count"),
     "LAUNCH_ARTIFACT_ARCHIVE_DRY_RUN_ONLY": "true" if payload.get("artifact_archive_dry_run_only") is True else "false",
     "LAUNCH_ARTIFACT_ARCHIVE_EXECUTION_ENABLED": "true" if payload.get("artifact_archive_execution_enabled") is True else "false",
+    "LAUNCH_CONTINUATION_AWARE_EXIT_STRATEGY_ID": payload.get("continuation_aware_exit_strategy_id"),
+    "LAUNCH_CONTINUATION_AWARE_EXIT_PROFILE_ID": payload.get("continuation_aware_exit_profile_id"),
+    "LAUNCH_CONTINUATION_AWARE_EXIT_STATE": payload.get("continuation_aware_exit_state"),
+    "LAUNCH_CONTINUATION_AWARE_EXIT_QUALITY_STATE": payload.get("continuation_aware_exit_quality_state"),
+    "LAUNCH_CONTINUATION_AWARE_EXIT_SHOULD_REQUEST_CLOSE": "true" if payload.get("continuation_aware_exit_should_request_close") is True else "false",
+    "LAUNCH_CONTINUATION_AWARE_EXIT_DRY_RUN_ONLY": "true" if payload.get("continuation_aware_exit_dry_run_only") is True else "false",
+    "LAUNCH_CONTINUATION_AWARE_EXIT_NOT_ORDER_AUTHORITY": "true" if payload.get("continuation_aware_exit_not_order_authority") is not False else "false",
+    "LAUNCH_CONTINUATION_AWARE_EXIT_NOT_LIFECYCLE_AUTHORITY": "true" if payload.get("continuation_aware_exit_not_lifecycle_authority") is not False else "false",
 }
 for key, value in fields.items():
     print(f"{key}={shlex.quote(str(value or ''))}")
