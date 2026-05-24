@@ -23,6 +23,12 @@ from mgc_v05l.execution_core.track_b_agent_health import (
     build_track_b_agent_health,
     write_track_b_agent_health,
 )
+from mgc_v05l.execution_core.track_b_artifact_archive_planner import (
+    DEFAULT_ARTIFACT_ARCHIVE_PLAN_PATH,
+    TrackBArtifactArchivePlannerConfig,
+    build_track_b_artifact_archive_plan,
+    write_track_b_artifact_archive_plan,
+)
 from mgc_v05l.execution_core.track_b_control_plane_top_line import (
     build_track_b_control_plane_top_line,
 )
@@ -77,6 +83,7 @@ class TrackBControlPlaneSnapshotConfig:
     agent_health_path: Path = DEFAULT_AGENT_HEALTH_ARTIFACT
     paper_autonomous_recovery_plan_path: Path = DEFAULT_PAPER_AUTONOMOUS_RECOVERY_PLAN_ARTIFACT
     recovery_attempt_history_path: Path = DEFAULT_RECOVERY_ATTEMPT_HISTORY_ARTIFACT
+    artifact_archive_plan_path: Path = DEFAULT_ARTIFACT_ARCHIVE_PLAN_PATH
     broker_lease_history_path: Path | None = None
 
     def resolve(self, path: Path) -> Path:
@@ -149,6 +156,21 @@ def build_track_b_control_plane_snapshot(
         config=recovery_attempt_history_config,
         payload=recovery_attempt_history,
     )
+    artifact_archive_plan_config = TrackBArtifactArchivePlannerConfig(
+        repo_root=config.repo_root,
+        output_path=config.artifact_archive_plan_path,
+        control_plane_snapshot_path=config.output_path,
+        agent_health_path=config.agent_health_path,
+        recovery_attempt_history_path=config.recovery_attempt_history_path,
+    )
+    artifact_archive_plan = build_track_b_artifact_archive_plan(
+        config=artifact_archive_plan_config,
+        now=actual_now,
+    )
+    artifact_archive_plan_path = write_track_b_artifact_archive_plan(
+        config=artifact_archive_plan_config,
+        payload=artifact_archive_plan,
+    )
     return _snapshot_payload(
         config=config,
         now=actual_now,
@@ -160,6 +182,8 @@ def build_track_b_control_plane_snapshot(
         autonomous_recovery_plan=autonomous_recovery_plan,
         recovery_attempt_history=recovery_attempt_history,
         recovery_attempt_history_path=recovery_attempt_history_path,
+        artifact_archive_plan=artifact_archive_plan,
+        artifact_archive_plan_path=artifact_archive_plan_path,
     )
 
 
@@ -256,6 +280,14 @@ def main(argv: Sequence[str] | None = None) -> int:
         "recovery_attempt_history_no_history": payload.get("recovery_attempt_history_no_history"),
         "recovery_attempt_last_success_at": payload.get("recovery_attempt_last_success_at"),
         "recovery_attempt_last_failure_at": payload.get("recovery_attempt_last_failure_at"),
+        "artifact_archive_plan_classification": payload.get("artifact_archive_plan_classification"),
+        "artifact_archive_cold_archive_candidate_count": payload.get(
+            "artifact_archive_cold_archive_candidate_count"
+        ),
+        "artifact_archive_blocked_candidate_count": payload.get("artifact_archive_blocked_candidate_count"),
+        "artifact_archive_estimated_bytes": payload.get("artifact_archive_estimated_bytes"),
+        "artifact_archive_dry_run_only": payload.get("artifact_archive_dry_run_only"),
+        "artifact_archive_execution_enabled": payload.get("artifact_archive_execution_enabled"),
         "primary_blocking_agent_id": payload.get("primary_blocking_agent_id"),
         "operator_explanation": payload.get("operator_explanation"),
         "recommended_observation_step": payload.get("recommended_observation_step"),
@@ -281,6 +313,8 @@ def _snapshot_payload(
     autonomous_recovery_plan: Mapping[str, Any],
     recovery_attempt_history: Mapping[str, Any],
     recovery_attempt_history_path: Path,
+    artifact_archive_plan: Mapping[str, Any],
+    artifact_archive_plan_path: Path,
 ) -> dict[str, Any]:
     coherence_status = str(runtime_supervisor.get("shared_truth_coherence_status") or "")
     generation_matches = (
@@ -332,6 +366,7 @@ def _snapshot_payload(
         **_runtime_resume_v2_fields(runtime_supervisor),
         **_self_recover_v2_fields(runtime_supervisor),
         **_recovery_attempt_history_fields(recovery_attempt_history),
+        **_artifact_archive_plan_fields(artifact_archive_plan),
         "safe_to_start_runtime": runtime_supervisor.get("safe_to_start_runtime") is True
         and classification == CONTROL_PLANE_SNAPSHOT_READY
         and agent_health_evidence.get("agent_health_has_duplicate_writer") is not True
@@ -352,6 +387,7 @@ def _snapshot_payload(
             "agent_health": str(agent_health_path),
             "paper_autonomous_recovery_plan": str(config.resolve(config.paper_autonomous_recovery_plan_path)),
             "recovery_attempt_history": str(recovery_attempt_history_path),
+            "artifact_archive_plan": str(artifact_archive_plan_path),
             "runtime_supervisor_authority": str(runtime_supervisor_path),
             "control_plane_snapshot": str(config.resolve(config.output_path)),
             **_mapping(shared_truth.get("artifact_paths")),
@@ -435,6 +471,22 @@ def _recovery_attempt_history_fields(payload: Mapping[str, Any]) -> dict[str, An
         "recovery_attempt_stale_or_incomplete_attempts": list(payload.get("stale_or_incomplete_attempts") or [])[:5],
         "recovery_attempt_operator_explanation": payload.get("operator_explanation") or "",
         "recovery_attempt_history_no_history": not bool(latest_attempt_id),
+    }
+
+
+def _artifact_archive_plan_fields(payload: Mapping[str, Any]) -> dict[str, Any]:
+    return {
+        "artifact_archive_plan_classification": payload.get("classification") or "",
+        "artifact_archive_hot_authority_protected_count": payload.get("hot_authority_protected_count"),
+        "artifact_archive_active_lifecycle_protected_count": payload.get("active_lifecycle_protected_count"),
+        "artifact_archive_warm_diagnostic_count": payload.get("warm_diagnostic_count"),
+        "artifact_archive_cold_archive_candidate_count": payload.get("cold_archive_candidate_count"),
+        "artifact_archive_blocked_candidate_count": payload.get("blocked_candidate_count"),
+        "artifact_archive_estimated_bytes": payload.get("estimated_bytes"),
+        "artifact_archive_dry_run_only": payload.get("dry_run_only") is True,
+        "artifact_archive_execution_enabled": payload.get("execution_enabled") is True,
+        "artifact_archive_diagnostic_only": True,
+        "artifact_archive_not_routing_authority": True,
     }
 
 

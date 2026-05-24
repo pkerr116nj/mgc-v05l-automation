@@ -354,6 +354,11 @@ payload = {
         "latest_recovery_attempt_action_type": os.environ.get("LAUNCH_LATEST_RECOVERY_ATTEMPT_ACTION_TYPE") or None,
         "latest_recovery_attempt_classification": os.environ.get("LAUNCH_LATEST_RECOVERY_ATTEMPT_CLASSIFICATION") or None,
         "recovery_attempt_history_no_history": os.environ.get("LAUNCH_RECOVERY_ATTEMPT_HISTORY_NO_HISTORY", "").lower() == "true",
+        "artifact_archive_plan_classification": os.environ.get("LAUNCH_ARTIFACT_ARCHIVE_PLAN_CLASSIFICATION") or None,
+        "artifact_archive_cold_archive_candidate_count": os.environ.get("LAUNCH_ARTIFACT_ARCHIVE_COLD_ARCHIVE_CANDIDATE_COUNT") or None,
+        "artifact_archive_blocked_candidate_count": os.environ.get("LAUNCH_ARTIFACT_ARCHIVE_BLOCKED_CANDIDATE_COUNT") or None,
+        "artifact_archive_dry_run_only": os.environ.get("LAUNCH_ARTIFACT_ARCHIVE_DRY_RUN_ONLY", "").lower() == "true",
+        "artifact_archive_execution_enabled": os.environ.get("LAUNCH_ARTIFACT_ARCHIVE_EXECUTION_ENABLED", "").lower() == "true",
         "autonomous_recovery_allowed": os.environ.get("LAUNCH_SUPERVISOR_AUTONOMOUS_RECOVERY_ALLOWED", "").lower() == "true",
         "requires_operator_ack_for_paper": os.environ.get("LAUNCH_SUPERVISOR_REQUIRES_OPERATOR_ACK_FOR_PAPER", "").lower() == "true",
         "operator_ack_advisory_only_for_paper": os.environ.get("LAUNCH_SUPERVISOR_OPERATOR_ACK_ADVISORY_ONLY_FOR_PAPER", "").lower() == "true",
@@ -388,6 +393,11 @@ payload = {
         "latest_recovery_attempt_action_type": os.environ.get("LAUNCH_LATEST_RECOVERY_ATTEMPT_ACTION_TYPE") or None,
         "latest_recovery_attempt_classification": os.environ.get("LAUNCH_LATEST_RECOVERY_ATTEMPT_CLASSIFICATION") or None,
         "recovery_attempt_history_no_history": os.environ.get("LAUNCH_RECOVERY_ATTEMPT_HISTORY_NO_HISTORY", "").lower() == "true",
+        "artifact_archive_plan_classification": os.environ.get("LAUNCH_ARTIFACT_ARCHIVE_PLAN_CLASSIFICATION") or None,
+        "artifact_archive_cold_archive_candidate_count": os.environ.get("LAUNCH_ARTIFACT_ARCHIVE_COLD_ARCHIVE_CANDIDATE_COUNT") or None,
+        "artifact_archive_blocked_candidate_count": os.environ.get("LAUNCH_ARTIFACT_ARCHIVE_BLOCKED_CANDIDATE_COUNT") or None,
+        "artifact_archive_dry_run_only": os.environ.get("LAUNCH_ARTIFACT_ARCHIVE_DRY_RUN_ONLY", "").lower() == "true",
+        "artifact_archive_execution_enabled": os.environ.get("LAUNCH_ARTIFACT_ARCHIVE_EXECUTION_ENABLED", "").lower() == "true",
         "autonomous_recovery_plan_classification": os.environ.get("LAUNCH_SUPERVISOR_AUTONOMOUS_RECOVERY_PLAN_CLASSIFICATION") or None,
         "autonomous_recovery_next_action": os.environ.get("LAUNCH_SUPERVISOR_AUTONOMOUS_RECOVERY_NEXT_ACTION") or None,
         "autonomous_recovery_execution_enabled": os.environ.get("LAUNCH_SUPERVISOR_AUTONOMOUS_RECOVERY_EXECUTION_ENABLED", "").lower() == "true",
@@ -871,6 +881,9 @@ print(
     "self_recover_cooldown_until={self_recover_cooldown} quarantine_required={quarantine_required} "
     "latest_recovery_attempt_id={latest_recovery_attempt_id} latest_recovery_attempt_action_type={latest_recovery_attempt_action_type} "
     "latest_recovery_attempt_classification={latest_recovery_attempt_classification} recovery_attempt_history_no_history={recovery_attempt_history_no_history} "
+    "artifact_archive_plan_classification={artifact_archive_plan_classification} artifact_archive_cold_archive_candidate_count={artifact_archive_cold_archive_candidate_count} "
+    "artifact_archive_blocked_candidate_count={artifact_archive_blocked_candidate_count} artifact_archive_dry_run_only={artifact_archive_dry_run_only} "
+    "artifact_archive_execution_enabled={artifact_archive_execution_enabled} "
     "paper_recovery_policy={paper_policy} autonomous_recovery_plan_classification={plan_classification} "
     "autonomous_recovery_next_action={plan_action} autonomous_recovery_execution_enabled={plan_enabled} "
     "agent_health_classification={agent_health_classification} "
@@ -909,6 +922,11 @@ print(
         latest_recovery_attempt_action_type=payload.get("latest_recovery_attempt_action_type"),
         latest_recovery_attempt_classification=payload.get("latest_recovery_attempt_classification"),
         recovery_attempt_history_no_history=payload.get("recovery_attempt_history_no_history"),
+        artifact_archive_plan_classification=payload.get("artifact_archive_plan_classification"),
+        artifact_archive_cold_archive_candidate_count=payload.get("artifact_archive_cold_archive_candidate_count"),
+        artifact_archive_blocked_candidate_count=payload.get("artifact_archive_blocked_candidate_count"),
+        artifact_archive_dry_run_only=payload.get("artifact_archive_dry_run_only"),
+        artifact_archive_execution_enabled=payload.get("artifact_archive_execution_enabled"),
         paper_policy=payload.get("paper_recovery_policy"),
         plan_classification=payload.get("autonomous_recovery_plan_classification"),
         plan_action=payload.get("autonomous_recovery_next_action"),
@@ -1022,6 +1040,11 @@ if not allowed:
         f"latest_recovery_attempt_action_type={payload.get('latest_recovery_attempt_action_type')} "
         f"latest_recovery_attempt_classification={payload.get('latest_recovery_attempt_classification')} "
         f"recovery_attempt_history_no_history={payload.get('recovery_attempt_history_no_history')} "
+        f"artifact_archive_plan_classification={payload.get('artifact_archive_plan_classification')} "
+        f"artifact_archive_cold_archive_candidate_count={payload.get('artifact_archive_cold_archive_candidate_count')} "
+        f"artifact_archive_blocked_candidate_count={payload.get('artifact_archive_blocked_candidate_count')} "
+        f"artifact_archive_dry_run_only={payload.get('artifact_archive_dry_run_only')} "
+        f"artifact_archive_execution_enabled={payload.get('artifact_archive_execution_enabled')} "
         f"paper_recovery_policy={payload.get('paper_recovery_policy')} "
         f"autonomous_recovery_plan_classification={payload.get('autonomous_recovery_plan_classification')} "
         f"autonomous_recovery_next_action={payload.get('autonomous_recovery_next_action')} "
@@ -1100,6 +1123,11 @@ fields = {
     "LAUNCH_LATEST_RECOVERY_ATTEMPT_ACTION_TYPE": payload.get("latest_recovery_attempt_action_type"),
     "LAUNCH_LATEST_RECOVERY_ATTEMPT_CLASSIFICATION": payload.get("latest_recovery_attempt_classification"),
     "LAUNCH_RECOVERY_ATTEMPT_HISTORY_NO_HISTORY": "true" if payload.get("recovery_attempt_history_no_history") is True else "false",
+    "LAUNCH_ARTIFACT_ARCHIVE_PLAN_CLASSIFICATION": payload.get("artifact_archive_plan_classification"),
+    "LAUNCH_ARTIFACT_ARCHIVE_COLD_ARCHIVE_CANDIDATE_COUNT": payload.get("artifact_archive_cold_archive_candidate_count"),
+    "LAUNCH_ARTIFACT_ARCHIVE_BLOCKED_CANDIDATE_COUNT": payload.get("artifact_archive_blocked_candidate_count"),
+    "LAUNCH_ARTIFACT_ARCHIVE_DRY_RUN_ONLY": "true" if payload.get("artifact_archive_dry_run_only") is True else "false",
+    "LAUNCH_ARTIFACT_ARCHIVE_EXECUTION_ENABLED": "true" if payload.get("artifact_archive_execution_enabled") is True else "false",
 }
 for key, value in fields.items():
     print(f"{key}={shlex.quote(str(value or ''))}")

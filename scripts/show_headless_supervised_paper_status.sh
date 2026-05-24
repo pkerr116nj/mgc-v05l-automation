@@ -29,6 +29,7 @@ DEFAULT_RUNTIME_SUPERVISOR_AUTHORITY_FILE="${REPO_ROOT}/outputs/track_b_executio
 DEFAULT_CONTROL_PLANE_SNAPSHOT_FILE="${REPO_ROOT}/outputs/track_b_execution_core/control_plane/latest_control_plane_snapshot.json"
 DEFAULT_PAPER_RECOVERY_POLICY_FILE="${REPO_ROOT}/outputs/track_b_execution_core/paper_recovery_policy/latest_paper_recovery_policy.json"
 DEFAULT_PAPER_AUTONOMOUS_RECOVERY_PLAN_FILE="${REPO_ROOT}/outputs/track_b_execution_core/paper_autonomous_recovery/latest_paper_autonomous_recovery_plan.json"
+DEFAULT_ARTIFACT_ARCHIVE_PLAN_FILE="${REPO_ROOT}/outputs/track_b_execution_core/artifact_retention/latest_artifact_archive_plan.json"
 DEFAULT_STARTUP_FILE="${REPO_ROOT}/outputs/operator_dashboard/startup_control_plane_snapshot.json"
 DEFAULT_OPERABILITY_FILE="${REPO_ROOT}/outputs/operator_dashboard/supervised_paper_operability_snapshot.json"
 DEFAULT_INFO_FILE="${DEFAULT_RUNTIME_DIR}/operator_dashboard.json"
@@ -633,7 +634,7 @@ PY
 }
 
 merge_control_plane_services_status() {
-  "${PYTHON_BIN}" - <<'PY' "${STATUS_FILE}" "${DEFAULT_AGENT_REGISTRY_FILE}" "${DEFAULT_AGENT_HEALTH_FILE}" "${DEFAULT_SELF_RECOVER_RULES_FILE}" "${DEFAULT_CRASH_LOOP_PROTECTION_FILE}" "${DEFAULT_RUNTIME_RESUME_SEMANTICS_FILE}" "${DEFAULT_RUNTIME_SUPERVISOR_AUTHORITY_FILE}" "${DEFAULT_PAPER_RECOVERY_POLICY_FILE}" "${DEFAULT_PAPER_AUTONOMOUS_RECOVERY_PLAN_FILE}" "${DEFAULT_CONTROL_PLANE_SNAPSHOT_FILE}"
+  "${PYTHON_BIN}" - <<'PY' "${STATUS_FILE}" "${DEFAULT_AGENT_REGISTRY_FILE}" "${DEFAULT_AGENT_HEALTH_FILE}" "${DEFAULT_SELF_RECOVER_RULES_FILE}" "${DEFAULT_CRASH_LOOP_PROTECTION_FILE}" "${DEFAULT_RUNTIME_RESUME_SEMANTICS_FILE}" "${DEFAULT_RUNTIME_SUPERVISOR_AUTHORITY_FILE}" "${DEFAULT_PAPER_RECOVERY_POLICY_FILE}" "${DEFAULT_PAPER_AUTONOMOUS_RECOVERY_PLAN_FILE}" "${DEFAULT_CONTROL_PLANE_SNAPSHOT_FILE}" "${DEFAULT_ARTIFACT_ARCHIVE_PLAN_FILE}"
 import json
 import sys
 from pathlib import Path
@@ -651,6 +652,7 @@ runtime_supervisor_path = Path(sys.argv[7])
 paper_recovery_policy_path = Path(sys.argv[8])
 paper_autonomous_recovery_plan_path = Path(sys.argv[9])
 control_plane_snapshot_path = Path(sys.argv[10])
+artifact_archive_plan_path = Path(sys.argv[11])
 
 def read_json(path: Path) -> dict:
     try:
@@ -673,6 +675,7 @@ runtime_supervisor = read_json(runtime_supervisor_path)
 paper_recovery_policy = read_json(paper_recovery_policy_path)
 paper_autonomous_recovery_plan = read_json(paper_autonomous_recovery_plan_path)
 control_plane_snapshot = read_json(control_plane_snapshot_path)
+artifact_archive_plan = read_json(artifact_archive_plan_path)
 control_plane_status = classify_control_plane_snapshot_status(control_plane_snapshot)
 control_plane_top_line = build_track_b_control_plane_top_line(control_plane_snapshot)
 operator_ack = runtime_supervisor.get("operator_ack") or {}
@@ -728,6 +731,7 @@ authority_paths = {
     "control_plane_snapshot": str(control_plane_snapshot_path),
     "paper_recovery_policy": str(paper_recovery_policy_path),
     "paper_autonomous_recovery_plan": str(paper_autonomous_recovery_plan_path),
+    "artifact_archive_plan": str(artifact_archive_plan_path),
 }
 source_authority_paths = [path for path in authority_paths.values() if path]
 control_plane_snapshot_id = control_plane_snapshot.get("control_plane_snapshot_id")
@@ -790,6 +794,17 @@ status["track_b_control_plane"] = {
     "recovery_attempt_last_failure_at": control_plane_snapshot.get("recovery_attempt_last_failure_at"),
     "recovery_attempt_history_no_history": control_plane_snapshot.get("recovery_attempt_history_no_history") is True,
     "recent_recovery_attempts": (control_plane_snapshot.get("recovery_attempt_recent_attempts") or [])[:5],
+    "artifact_archive_plan_classification": control_plane_snapshot.get("artifact_archive_plan_classification") or artifact_archive_plan.get("classification") or "",
+    "artifact_archive_hot_authority_protected_count": control_plane_snapshot.get("artifact_archive_hot_authority_protected_count") if control_plane_snapshot.get("artifact_archive_hot_authority_protected_count") is not None else artifact_archive_plan.get("hot_authority_protected_count"),
+    "artifact_archive_active_lifecycle_protected_count": control_plane_snapshot.get("artifact_archive_active_lifecycle_protected_count") if control_plane_snapshot.get("artifact_archive_active_lifecycle_protected_count") is not None else artifact_archive_plan.get("active_lifecycle_protected_count"),
+    "artifact_archive_warm_diagnostic_count": control_plane_snapshot.get("artifact_archive_warm_diagnostic_count") if control_plane_snapshot.get("artifact_archive_warm_diagnostic_count") is not None else artifact_archive_plan.get("warm_diagnostic_count"),
+    "artifact_archive_cold_archive_candidate_count": control_plane_snapshot.get("artifact_archive_cold_archive_candidate_count") if control_plane_snapshot.get("artifact_archive_cold_archive_candidate_count") is not None else artifact_archive_plan.get("cold_archive_candidate_count"),
+    "artifact_archive_blocked_candidate_count": control_plane_snapshot.get("artifact_archive_blocked_candidate_count") if control_plane_snapshot.get("artifact_archive_blocked_candidate_count") is not None else artifact_archive_plan.get("blocked_candidate_count"),
+    "artifact_archive_estimated_bytes": control_plane_snapshot.get("artifact_archive_estimated_bytes") if control_plane_snapshot.get("artifact_archive_estimated_bytes") is not None else artifact_archive_plan.get("estimated_bytes"),
+    "artifact_archive_dry_run_only": control_plane_snapshot.get("artifact_archive_dry_run_only") is True or artifact_archive_plan.get("dry_run_only") is True,
+    "artifact_archive_execution_enabled": control_plane_snapshot.get("artifact_archive_execution_enabled") is True or artifact_archive_plan.get("execution_enabled") is True,
+    "artifact_archive_diagnostic_only": True,
+    "artifact_archive_not_routing_authority": True,
     "crash_loop_classification": crash_loop.get("classification"),
     "crash_loop_restart_blocked": crash_loop.get("restart_blocked") is True,
     "control_plane_status_classification": control_plane_status["classification"],

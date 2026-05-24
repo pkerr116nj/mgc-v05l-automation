@@ -312,6 +312,12 @@ def test_track_b_control_plane_status_projection_displays_closed_market_services
     assert summary["self_recover_quarantine_required"] is False
     assert summary["recovery_attempt_history_no_history"] is True
     assert summary["latest_recovery_attempt_id"] == ""
+    assert summary["artifact_archive_plan_classification"] == "ARCHIVE_PLAN_EMPTY"
+    assert summary["artifact_archive_cold_archive_candidate_count"] == 0
+    assert summary["artifact_archive_dry_run_only"] is True
+    assert summary["artifact_archive_execution_enabled"] is False
+    assert summary["artifact_archive_diagnostic_only"] is True
+    assert summary["artifact_archive_not_routing_authority"] is True
     assert summary["crash_loop_classification"] == "NO_CRASH_LOOP"
     assert summary["runtime_resume_classification"] == "RESUME_BLOCKED_MARKET_CLOSED"
     assert summary["runtime_resume_allowed"] is False
@@ -518,6 +524,32 @@ def test_track_b_control_plane_status_projection_displays_bounded_autonomous_ret
     assert summary["attention_required"] is False
 
 
+def test_track_b_control_plane_status_projection_displays_blocked_artifact_archive_plan(tmp_path: Path) -> None:
+    _write_track_b_control_plane_artifacts(
+        tmp_path,
+        self_recover_recommendation="RESTART_RUNTIME_ALLOWED",
+        runtime_resume_classification="RESUME_ALLOWED_CLEAN",
+        runtime_resume_reason="ready",
+        runtime_resume_allowed=True,
+        runtime_resume_safe_to_start_runtime=True,
+        runtime_supervisor_classification="SUPERVISOR_RUNTIME_START_ALLOWED",
+        runtime_supervisor_mode="READY_FOR_OPERATOR_START",
+        artifact_archive_plan_classification="ARCHIVE_PLAN_BLOCKED_UNRESOLVED_LIFECYCLE",
+        artifact_archive_active_lifecycle_protected_count=1,
+        artifact_archive_blocked_candidate_count=0,
+    )
+
+    summary = operator_dashboard_module._track_b_control_plane_services_summary(tmp_path)  # noqa: SLF001
+
+    assert summary["artifact_archive_plan_classification"] == "ARCHIVE_PLAN_BLOCKED_UNRESOLVED_LIFECYCLE"
+    assert summary["artifact_archive_active_lifecycle_protected_count"] == 1
+    assert summary["artifact_archive_blocked_candidate_count"] == 0
+    assert summary["artifact_archive_dry_run_only"] is True
+    assert summary["artifact_archive_execution_enabled"] is False
+    assert summary["artifact_archive_diagnostic_only"] is True
+    assert summary["artifact_archive_not_routing_authority"] is True
+
+
 def test_track_b_control_plane_status_projection_displays_hard_unsafe_paper_policy(tmp_path: Path) -> None:
     _write_track_b_control_plane_artifacts(
         tmp_path,
@@ -651,6 +683,13 @@ def _write_track_b_control_plane_artifacts(
     autonomous_recovery_next_action: str | None = None,
     latest_recovery_attempt_id: str = "",
     latest_recovery_attempt_classification: str = "",
+    artifact_archive_plan_classification: str = "ARCHIVE_PLAN_EMPTY",
+    artifact_archive_hot_authority_protected_count: int = 24,
+    artifact_archive_active_lifecycle_protected_count: int = 0,
+    artifact_archive_warm_diagnostic_count: int = 0,
+    artifact_archive_cold_archive_candidate_count: int = 0,
+    artifact_archive_blocked_candidate_count: int = 0,
+    artifact_archive_estimated_bytes: int = 0,
 ) -> None:
     if runtime_resume_classification == "RESUME_BLOCKED_MARKET_CLOSED":
         resume_action_policy = "HOLD_MARKET_CLOSED"
@@ -928,6 +967,17 @@ def _write_track_b_control_plane_artifacts(
                 if latest_recovery_attempt_id
                 else []
             ),
+            "artifact_archive_plan_classification": artifact_archive_plan_classification,
+            "artifact_archive_hot_authority_protected_count": artifact_archive_hot_authority_protected_count,
+            "artifact_archive_active_lifecycle_protected_count": artifact_archive_active_lifecycle_protected_count,
+            "artifact_archive_warm_diagnostic_count": artifact_archive_warm_diagnostic_count,
+            "artifact_archive_cold_archive_candidate_count": artifact_archive_cold_archive_candidate_count,
+            "artifact_archive_blocked_candidate_count": artifact_archive_blocked_candidate_count,
+            "artifact_archive_estimated_bytes": artifact_archive_estimated_bytes,
+            "artifact_archive_dry_run_only": True,
+            "artifact_archive_execution_enabled": False,
+            "artifact_archive_diagnostic_only": True,
+            "artifact_archive_not_routing_authority": True,
             "runtime_resume_semantics_version": "v2",
             "runtime_resume_action_policy": resume_action_policy,
             "runtime_resume_previous_runtime_generation_id": "runtime-generation-previous",
@@ -1086,6 +1136,22 @@ def _write_track_b_control_plane_artifacts(
             ],
             "blockers": [],
             "evidence_summary": {"bounded_recovery_budget": paper_budget or {"budget_exhausted": False}},
+        },
+    )
+    _write_json_file(
+        root / "outputs/track_b_execution_core/artifact_retention/latest_artifact_archive_plan.json",
+        {
+            "classification": artifact_archive_plan_classification,
+            "hot_authority_protected_count": artifact_archive_hot_authority_protected_count,
+            "active_lifecycle_protected_count": artifact_archive_active_lifecycle_protected_count,
+            "warm_diagnostic_count": artifact_archive_warm_diagnostic_count,
+            "cold_archive_candidate_count": artifact_archive_cold_archive_candidate_count,
+            "blocked_candidate_count": artifact_archive_blocked_candidate_count,
+            "estimated_bytes": artifact_archive_estimated_bytes,
+            "dry_run_only": True,
+            "execution_enabled": False,
+            "projection_only": False,
+            "not_routing_authority": True,
         },
     )
 

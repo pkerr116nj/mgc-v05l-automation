@@ -18154,6 +18154,11 @@ def _track_b_control_plane_services_summary(repo_root: Path) -> dict[str, Any]:
         / "track_b_execution_core"
         / "paper_autonomous_recovery"
         / "latest_paper_autonomous_recovery_plan.json",
+        "artifact_archive_plan": repo_root
+        / "outputs"
+        / "track_b_execution_core"
+        / "artifact_retention"
+        / "latest_artifact_archive_plan.json",
     }
     payloads: dict[str, dict[str, Any]] = {}
     for name, path in authority_paths.items():
@@ -18164,6 +18169,7 @@ def _track_b_control_plane_services_summary(repo_root: Path) -> dict[str, Any]:
     runtime_resume = payloads["runtime_resume"]
     runtime_supervisor = payloads["runtime_supervisor"]
     control_plane_snapshot = payloads["control_plane_snapshot"]
+    artifact_archive_plan = payloads["artifact_archive_plan"]
     control_plane_status = classify_control_plane_snapshot_status(control_plane_snapshot)
     control_plane_top_line = build_track_b_control_plane_top_line(control_plane_snapshot)
     paper_recovery_policy = payloads["paper_recovery_policy"]
@@ -18282,6 +18288,39 @@ def _track_b_control_plane_services_summary(repo_root: Path) -> dict[str, Any]:
         "recovery_attempt_history_no_history": control_plane_snapshot.get("recovery_attempt_history_no_history")
         is True,
         "recent_recovery_attempts": list(control_plane_snapshot.get("recovery_attempt_recent_attempts") or [])[:5],
+        "artifact_archive_plan_classification": control_plane_snapshot.get("artifact_archive_plan_classification")
+        or artifact_archive_plan.get("classification")
+        or "",
+        "artifact_archive_hot_authority_protected_count": control_plane_snapshot.get(
+            "artifact_archive_hot_authority_protected_count"
+        )
+        if control_plane_snapshot.get("artifact_archive_hot_authority_protected_count") is not None
+        else artifact_archive_plan.get("hot_authority_protected_count"),
+        "artifact_archive_active_lifecycle_protected_count": control_plane_snapshot.get(
+            "artifact_archive_active_lifecycle_protected_count"
+        )
+        if control_plane_snapshot.get("artifact_archive_active_lifecycle_protected_count") is not None
+        else artifact_archive_plan.get("active_lifecycle_protected_count"),
+        "artifact_archive_warm_diagnostic_count": control_plane_snapshot.get("artifact_archive_warm_diagnostic_count")
+        if control_plane_snapshot.get("artifact_archive_warm_diagnostic_count") is not None
+        else artifact_archive_plan.get("warm_diagnostic_count"),
+        "artifact_archive_cold_archive_candidate_count": control_plane_snapshot.get(
+            "artifact_archive_cold_archive_candidate_count"
+        )
+        if control_plane_snapshot.get("artifact_archive_cold_archive_candidate_count") is not None
+        else artifact_archive_plan.get("cold_archive_candidate_count"),
+        "artifact_archive_blocked_candidate_count": control_plane_snapshot.get("artifact_archive_blocked_candidate_count")
+        if control_plane_snapshot.get("artifact_archive_blocked_candidate_count") is not None
+        else artifact_archive_plan.get("blocked_candidate_count"),
+        "artifact_archive_estimated_bytes": control_plane_snapshot.get("artifact_archive_estimated_bytes")
+        if control_plane_snapshot.get("artifact_archive_estimated_bytes") is not None
+        else artifact_archive_plan.get("estimated_bytes"),
+        "artifact_archive_dry_run_only": control_plane_snapshot.get("artifact_archive_dry_run_only") is True
+        or artifact_archive_plan.get("dry_run_only") is True,
+        "artifact_archive_execution_enabled": control_plane_snapshot.get("artifact_archive_execution_enabled") is True
+        or artifact_archive_plan.get("execution_enabled") is True,
+        "artifact_archive_diagnostic_only": True,
+        "artifact_archive_not_routing_authority": True,
         "crash_loop_classification": crash_loop.get("classification"),
         "crash_loop_restart_blocked": crash_loop.get("restart_blocked") is True,
         "control_plane_status_classification": control_plane_status["classification"],

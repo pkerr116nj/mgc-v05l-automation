@@ -43,6 +43,12 @@ def test_snapshot_ties_supervisor_to_shared_truth_generation(tmp_path: Path) -> 
     assert payload["quarantine_required"] is False
     assert payload["recovery_attempt_history_no_history"] is True
     assert payload["latest_recovery_attempt_id"] == ""
+    assert payload["artifact_archive_plan_classification"] == "ARCHIVE_PLAN_EMPTY"
+    assert payload["artifact_archive_cold_archive_candidate_count"] == 0
+    assert payload["artifact_archive_dry_run_only"] is True
+    assert payload["artifact_archive_execution_enabled"] is False
+    assert payload["artifact_archive_diagnostic_only"] is True
+    assert payload["artifact_archive_not_routing_authority"] is True
     assert payload["broker_order_position_summary"]["open_order_truth"] == "NO_OPEN_ORDERS"
     assert payload["source_artifact_paths"]["shared_truth_refresh"].endswith(
         "outputs/track_b_execution_core/shared_truth/latest_track_b_shared_truth_refresh.json"
@@ -126,6 +132,28 @@ def test_snapshot_surfaces_recovery_attempt_history(tmp_path: Path) -> None:
     assert payload["recovery_attempt_history_no_history"] is False
     assert payload["source_artifact_paths"]["recovery_attempt_history"].endswith(
         "outputs/track_b_execution_core/paper_autonomous_recovery/latest_recovery_attempt_history.json"
+    )
+
+
+def test_snapshot_surfaces_blocked_artifact_archive_plan(tmp_path: Path) -> None:
+    _seed_clean_stack(tmp_path)
+    _seed_control_plane(tmp_path)
+
+    lifecycle = (
+        tmp_path
+        / "outputs/track_b_execution_core/track_b_strategy_managed_paper_lifecycle/lifecycle-1/"
+        / "track_b_strategy_managed_paper_lifecycle_report.json"
+    )
+    _write(lifecycle, {"final_position_status": "OPEN_MANAGED"})
+
+    payload = _snapshot(tmp_path)
+
+    assert payload["artifact_archive_plan_classification"] == "ARCHIVE_PLAN_BLOCKED_UNRESOLVED_LIFECYCLE"
+    assert payload["artifact_archive_active_lifecycle_protected_count"] == 1
+    assert payload["artifact_archive_dry_run_only"] is True
+    assert payload["artifact_archive_execution_enabled"] is False
+    assert payload["source_artifact_paths"]["artifact_archive_plan"].endswith(
+        "outputs/track_b_execution_core/artifact_retention/latest_artifact_archive_plan.json"
     )
 
 
