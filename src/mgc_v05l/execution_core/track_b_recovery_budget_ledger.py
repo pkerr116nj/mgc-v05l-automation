@@ -21,6 +21,19 @@ RECOVERY_BUDGET_AVAILABLE = "RECOVERY_BUDGET_AVAILABLE"
 RECOVERY_BUDGET_EXHAUSTED = "RECOVERY_BUDGET_EXHAUSTED"
 RECOVERY_BUDGET_UNKNOWN = "RECOVERY_BUDGET_UNKNOWN"
 
+BUDGET_ATTEMPT_RESERVED = "BUDGET_ATTEMPT_RESERVED"
+BUDGET_ATTEMPT_RELEASED = "BUDGET_ATTEMPT_RELEASED"
+BUDGET_ATTEMPT_CONSUMED_SUCCESS = "BUDGET_ATTEMPT_CONSUMED_SUCCESS"
+BUDGET_ATTEMPT_CONSUMED_FAILURE = "BUDGET_ATTEMPT_CONSUMED_FAILURE"
+BUDGET_ATTEMPT_EXPIRED = "BUDGET_ATTEMPT_EXPIRED"
+RECOVERY_ATTEMPT_RECORDED = "RECOVERY_ATTEMPT_RECORDED"
+
+BUDGET_EVENT_VALID = "BUDGET_EVENT_VALID"
+BUDGET_EVENT_INVALID_MISSING_SNAPSHOT = "BUDGET_EVENT_INVALID_MISSING_SNAPSHOT"
+BUDGET_EVENT_INVALID_DUPLICATE_ACTIVE_RESERVATION = "BUDGET_EVENT_INVALID_DUPLICATE_ACTIVE_RESERVATION"
+BUDGET_EVENT_INVALID_MISSING_RESERVATION = "BUDGET_EVENT_INVALID_MISSING_RESERVATION"
+BUDGET_EVENT_INVALID_SCHEMA = "BUDGET_EVENT_INVALID_SCHEMA"
+
 DEFAULT_AGENT_ID = "track_b_paper_runtime"
 DEFAULT_ACTION_TYPE = "RUNTIME_RETRY"
 DEFAULT_FAILURE_CLASSIFICATION = "runtime_retry"
@@ -157,7 +170,7 @@ def build_recovery_budget_event(
     normalized_identity = _normalize_identity(target_identity or {})
     return {
         "schema_version": "track_b_recovery_budget_event_v1",
-        "event_type": "RECOVERY_ATTEMPT_RECORDED",
+        "event_type": RECOVERY_ATTEMPT_RECORDED,
         "generated_at": actual_time.isoformat(),
         "occurred_at": actual_time.isoformat(),
         "mode": "PAPER",
@@ -176,6 +189,175 @@ def build_recovery_budget_event(
         "live_money_eligible": False,
         "paper_proof_invoked": False,
     }
+
+
+def build_budget_reservation_event(
+    *,
+    recovery_attempt_id: str,
+    control_plane_snapshot_id: str,
+    shared_truth_generation_id: str,
+    action_type: str = DEFAULT_ACTION_TYPE,
+    budget_key: str | None = None,
+    agent_id: str = DEFAULT_AGENT_ID,
+    target_identity: Mapping[str, Any] | None = None,
+    runtime_generation_id: str | None = None,
+    created_at: datetime | None = None,
+) -> dict[str, Any]:
+    actual_time = _ensure_utc(created_at or datetime.now(UTC))
+    normalized_identity = _normalize_identity(target_identity or {})
+    resolved_budget_key = budget_key or _public_budget_key(
+        agent_id=agent_id,
+        action_type=action_type,
+        target_identity=normalized_identity,
+        runtime_generation_id=runtime_generation_id,
+    )
+    return {
+        "schema_version": "track_b_recovery_budget_event_v2",
+        "event_type": BUDGET_ATTEMPT_RESERVED,
+        "reservation_id": f"budget-reservation-{_safe_slug(recovery_attempt_id)}",
+        "recovery_attempt_id": recovery_attempt_id,
+        "control_plane_snapshot_id": control_plane_snapshot_id,
+        "shared_truth_generation_id": shared_truth_generation_id,
+        "agent_id": str(agent_id or DEFAULT_AGENT_ID),
+        "action_type": str(action_type or DEFAULT_ACTION_TYPE),
+        "budget_key": resolved_budget_key,
+        "target_identity": normalized_identity,
+        "target_identity_hash": target_identity_hash(normalized_identity),
+        "runtime_generation_id": runtime_generation_id,
+        "created_at": actual_time.isoformat(),
+        "generated_at": actual_time.isoformat(),
+        "occurred_at": actual_time.isoformat(),
+        "attempt_counted": True,
+        "dry_run": False,
+        "apply_enabled_required": True,
+        "read_only_accounting": True,
+        "broker_mutation": False,
+        "runtime_restart_executed": False,
+        "live_money_eligible": False,
+        "paper_proof_invoked": False,
+    }
+
+
+def build_budget_release_event(
+    *,
+    reservation_id: str,
+    recovery_attempt_id: str,
+    released_at: datetime | None = None,
+    reason: str = "reservation_released_before_apply",
+) -> dict[str, Any]:
+    actual_time = _ensure_utc(released_at or datetime.now(UTC))
+    return {
+        "schema_version": "track_b_recovery_budget_event_v2",
+        "event_type": BUDGET_ATTEMPT_RELEASED,
+        "reservation_id": reservation_id,
+        "recovery_attempt_id": recovery_attempt_id,
+        "reason": reason,
+        "generated_at": actual_time.isoformat(),
+        "occurred_at": actual_time.isoformat(),
+        "attempt_counted": False,
+        "read_only_accounting": True,
+        "broker_mutation": False,
+        "runtime_restart_executed": False,
+        "live_money_eligible": False,
+        "paper_proof_invoked": False,
+    }
+
+
+def build_budget_consumed_event(
+    *,
+    reservation_id: str,
+    recovery_attempt_id: str,
+    success: bool,
+    consumed_at: datetime | None = None,
+    failure_classification: str | None = None,
+    stop_reason: str | None = None,
+) -> dict[str, Any]:
+    actual_time = _ensure_utc(consumed_at or datetime.now(UTC))
+    return {
+        "schema_version": "track_b_recovery_budget_event_v2",
+        "event_type": BUDGET_ATTEMPT_CONSUMED_SUCCESS if success else BUDGET_ATTEMPT_CONSUMED_FAILURE,
+        "reservation_id": reservation_id,
+        "recovery_attempt_id": recovery_attempt_id,
+        "success": bool(success),
+        "failure_classification": None if success else failure_classification,
+        "stop_reason": None if success else stop_reason,
+        "generated_at": actual_time.isoformat(),
+        "occurred_at": actual_time.isoformat(),
+        "attempt_counted": True,
+        "read_only_accounting": True,
+        "broker_mutation": False,
+        "runtime_restart_executed": False,
+        "live_money_eligible": False,
+        "paper_proof_invoked": False,
+    }
+
+
+def build_budget_expired_event(
+    *,
+    reservation_id: str,
+    recovery_attempt_id: str,
+    expired_at: datetime | None = None,
+    reason: str = "reservation_expired_before_apply",
+) -> dict[str, Any]:
+    event = build_budget_release_event(
+        reservation_id=reservation_id,
+        recovery_attempt_id=recovery_attempt_id,
+        released_at=expired_at,
+        reason=reason,
+    )
+    event["event_type"] = BUDGET_ATTEMPT_EXPIRED
+    return event
+
+
+def validate_budget_event(
+    event: Mapping[str, Any],
+    *,
+    existing_events: Sequence[Mapping[str, Any]] | None = None,
+) -> dict[str, Any]:
+    event_type = str(event.get("event_type") or "")
+    existing = list(existing_events or [])
+    if event_type not in {
+        RECOVERY_ATTEMPT_RECORDED,
+        BUDGET_ATTEMPT_RESERVED,
+        BUDGET_ATTEMPT_RELEASED,
+        BUDGET_ATTEMPT_CONSUMED_SUCCESS,
+        BUDGET_ATTEMPT_CONSUMED_FAILURE,
+        BUDGET_ATTEMPT_EXPIRED,
+    }:
+        return _validation(BUDGET_EVENT_INVALID_SCHEMA, "Unknown recovery budget event type.")
+    if event_type == BUDGET_ATTEMPT_RESERVED:
+        missing = [
+            field
+            for field in (
+                "recovery_attempt_id",
+                "control_plane_snapshot_id",
+                "shared_truth_generation_id",
+                "action_type",
+                "budget_key",
+                "agent_id",
+                "created_at",
+            )
+            if not event.get(field)
+        ]
+        if missing:
+            return _validation(BUDGET_EVENT_INVALID_MISSING_SNAPSHOT, f"Reservation missing fields: {', '.join(missing)}.")
+        if _active_reservation(event.get("recovery_attempt_id"), existing) is not None:
+            return _validation(
+                BUDGET_EVENT_INVALID_DUPLICATE_ACTIVE_RESERVATION,
+                "Duplicate active reservation for recovery_attempt_id.",
+            )
+        return _validation(BUDGET_EVENT_VALID, "Budget reservation event is valid.")
+    if event_type in {
+        BUDGET_ATTEMPT_CONSUMED_SUCCESS,
+        BUDGET_ATTEMPT_CONSUMED_FAILURE,
+        BUDGET_ATTEMPT_RELEASED,
+        BUDGET_ATTEMPT_EXPIRED,
+    }:
+        if not event.get("reservation_id") or not event.get("recovery_attempt_id"):
+            return _validation(BUDGET_EVENT_INVALID_SCHEMA, "Reservation-linked event is missing reservation identity.")
+        if _reservation_by_id(event.get("reservation_id"), existing) is None:
+            return _validation(BUDGET_EVENT_INVALID_MISSING_RESERVATION, "Reservation-linked event has no prior reservation.")
+    return _validation(BUDGET_EVENT_VALID, "Recovery budget event is valid.")
 
 
 def target_identity_hash(identity: Mapping[str, Any] | None) -> str:
@@ -270,7 +452,7 @@ def _default_budget_request() -> dict[str, Any]:
 
 def _group_events(*, events: Sequence[Mapping[str, Any]], window_start: datetime) -> dict[str, list[dict[str, Any]]]:
     grouped: dict[str, list[dict[str, Any]]] = {}
-    for event in events:
+    for event in _budget_consuming_events(events):
         if event.get("attempt_counted") is False:
             continue
         event_time = _parse_datetime(event.get("occurred_at") or event.get("generated_at"))
@@ -279,6 +461,39 @@ def _group_events(*, events: Sequence[Mapping[str, Any]], window_start: datetime
         key = _budget_key_from_event(event)
         grouped.setdefault(key, []).append(dict(event))
     return grouped
+
+
+def _budget_consuming_events(events: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
+    active: dict[str, dict[str, Any]] = {}
+    consumed: list[dict[str, Any]] = []
+    for event in events:
+        event_type = str(event.get("event_type") or RECOVERY_ATTEMPT_RECORDED)
+        reservation_id = str(event.get("reservation_id") or "")
+        if event_type == BUDGET_ATTEMPT_RESERVED:
+            if reservation_id:
+                active[reservation_id] = dict(event)
+            continue
+        if event_type in {BUDGET_ATTEMPT_RELEASED, BUDGET_ATTEMPT_EXPIRED}:
+            active.pop(reservation_id, None)
+            continue
+        if event_type in {BUDGET_ATTEMPT_CONSUMED_SUCCESS, BUDGET_ATTEMPT_CONSUMED_FAILURE}:
+            reservation = active.pop(reservation_id, None)
+            consumed.append(_merge_consumed_event(reservation=reservation, event=event))
+            continue
+        consumed.append(dict(event))
+    return consumed + list(active.values())
+
+
+def _merge_consumed_event(*, reservation: Mapping[str, Any] | None, event: Mapping[str, Any]) -> dict[str, Any]:
+    merged = dict(reservation or {})
+    merged.update(dict(event))
+    if reservation:
+        for key in ("agent_id", "action_type", "target_identity", "target_identity_hash", "runtime_generation_id", "budget_key"):
+            if key not in merged or merged.get(key) in (None, ""):
+                merged[key] = reservation.get(key)
+        if not merged.get("failure_classification"):
+            merged["failure_classification"] = reservation.get("failure_classification") or DEFAULT_FAILURE_CLASSIFICATION
+    return merged
 
 
 def _entry_for_key(
@@ -340,6 +555,25 @@ def _budget_key_from_request(request: Mapping[str, Any]) -> str:
     )
 
 
+def _public_budget_key(
+    *,
+    agent_id: str,
+    action_type: str,
+    target_identity: Mapping[str, Any],
+    runtime_generation_id: str | None = None,
+    failure_classification: str | None = None,
+) -> str:
+    return _budget_key_from_request(
+        {
+            "agent_id": agent_id,
+            "action_type": action_type,
+            "target_identity": target_identity,
+            "runtime_generation_id": runtime_generation_id,
+            "failure_classification": failure_classification or DEFAULT_FAILURE_CLASSIFICATION,
+        }
+    )
+
+
 def _budget_key_from_event(event: Mapping[str, Any]) -> str:
     return _budget_key_from_request(event)
 
@@ -352,6 +586,47 @@ def _latest_event_time(events: Sequence[Mapping[str, Any]]) -> datetime | None:
 
 def _normalize_identity(identity: Mapping[str, Any]) -> dict[str, str]:
     return {str(key): str(value) for key, value in sorted(identity.items()) if value not in (None, "")}
+
+
+def _reservation_by_id(reservation_id: Any, events: Sequence[Mapping[str, Any]]) -> Mapping[str, Any] | None:
+    for event in events:
+        if event.get("reservation_id") == reservation_id and event.get("event_type") == BUDGET_ATTEMPT_RESERVED:
+            return event
+    return None
+
+
+def _active_reservation(recovery_attempt_id: Any, events: Sequence[Mapping[str, Any]]) -> Mapping[str, Any] | None:
+    active: dict[str, Mapping[str, Any]] = {}
+    for event in events:
+        event_type = str(event.get("event_type") or "")
+        reservation_id = str(event.get("reservation_id") or "")
+        if event_type == BUDGET_ATTEMPT_RESERVED and event.get("recovery_attempt_id") == recovery_attempt_id:
+            active[reservation_id] = event
+        elif event_type in {
+            BUDGET_ATTEMPT_RELEASED,
+            BUDGET_ATTEMPT_CONSUMED_SUCCESS,
+            BUDGET_ATTEMPT_CONSUMED_FAILURE,
+            BUDGET_ATTEMPT_EXPIRED,
+        }:
+            active.pop(reservation_id, None)
+    for reservation in active.values():
+        return reservation
+    return None
+
+
+def _validation(classification: str, reason: str) -> dict[str, Any]:
+    return {
+        "classification": classification,
+        "valid": classification == BUDGET_EVENT_VALID,
+        "reason": reason,
+        "read_only": True,
+        "broker_mutation": False,
+        "runtime_restart_authority": False,
+    }
+
+
+def _safe_slug(value: str) -> str:
+    return "".join(ch if ch.isalnum() or ch in {"-", "_"} else "_" for ch in str(value)).strip("_") or "unknown"
 
 
 def _read_jsonl(path: Path) -> list[dict[str, Any]]:

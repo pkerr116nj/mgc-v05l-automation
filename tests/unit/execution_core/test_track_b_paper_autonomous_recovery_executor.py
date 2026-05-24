@@ -54,6 +54,13 @@ def test_valid_coherent_snapshot_and_matching_plan_creates_dry_run_attempt(tmp_p
     assert payload["action_adapter"]["budget_gate_classification"] == BUDGET_GATE_PASS
     assert payload["action_adapter"]["attempts_remaining"] == 1
     assert payload["action_adapter"]["budget_exhausted"] is False
+    assert payload["action_adapter"]["would_record_budget_event"]["event_type"] == "BUDGET_ATTEMPT_RESERVED"
+    assert payload["action_adapter"]["would_record_budget_event"]["would_append"] is False
+    assert payload["action_adapter"]["would_record_budget_event"]["append_enabled"] is False
+    assert (
+        payload["action_adapter"]["would_record_budget_event"]["event"]["recovery_attempt_id"]
+        == payload["recovery_attempt_id"]
+    )
     assert payload["action_adapter"]["would_execute_command"][0] == "bash"
     assert payload["action_adapter"]["launch_command_exists"] is True
 
@@ -338,6 +345,7 @@ def test_audit_artifacts_are_written(tmp_path: Path) -> None:
     rows = [json.loads(line) for line in event_log_path.read_text(encoding="utf-8").splitlines()]
     assert rows[-1]["recovery_attempt_id"] == result["recovery_attempt_id"]
     assert rows[-1]["execution_enabled"] is False
+    assert not (tmp_path / "outputs/track_b_execution_core/recovery_budget/recovery_budget_events.jsonl").exists()
 
 
 def test_dashboard_projection_is_not_consumed(tmp_path: Path) -> None:

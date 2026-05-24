@@ -164,6 +164,32 @@ Budget gate classifications:
 - `BUDGET_GATE_BLOCKED_QUARANTINE`
 - `BUDGET_GATE_BLOCKED_MISSING`
 
+Future apply-enabled runtime retry must use a two-phase Recovery Budget Ledger
+event lifecycle:
+
+- `BUDGET_ATTEMPT_RESERVED`: reserve budget immediately before apply after
+  snapshot and budget gates pass.
+- `BUDGET_ATTEMPT_RELEASED`: release the reservation if apply is abandoned
+  before execution.
+- `BUDGET_ATTEMPT_CONSUMED_SUCCESS`: consume the reservation after a successful
+  apply attempt.
+- `BUDGET_ATTEMPT_CONSUMED_FAILURE`: consume the reservation after a failed
+  apply attempt.
+- `BUDGET_ATTEMPT_EXPIRED`: release an abandoned stale reservation.
+
+Reservation events must include `recovery_attempt_id`,
+`control_plane_snapshot_id`, `shared_truth_generation_id`, `action_type`,
+`budget_key`, `agent_id`, and `created_at`. Consumed, released, and expired
+events must link back to `reservation_id`. Duplicate active reservations for the
+same recovery attempt are invalid. A consumed event without a prior reservation
+is invalid.
+
+The disabled v1 adapter includes `would_record_budget_event` as an audit
+preview only. It does not append to
+`outputs/track_b_execution_core/recovery_budget/recovery_budget_events.jsonl`,
+and budget consumption remains reserved for a future explicitly apply-enabled
+executor.
+
 The placeholder config flag `enable_runtime_retry_adapter` may be recorded for audit, but it does not enable execution. A second, explicitly reviewed enablement boundary is required before this adapter may start a runtime.
 
 Broker/order mutation adapters remain later and stricter:

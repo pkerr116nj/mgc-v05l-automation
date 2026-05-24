@@ -21,7 +21,9 @@ from mgc_v05l.execution_core.track_b_pre_action_snapshot_validator import (
 from mgc_v05l.execution_core.track_b_recovery_budget_ledger import (
     DEFAULT_AGENT_ID,
     DEFAULT_RECOVERY_BUDGET_LEDGER_ARTIFACT,
+    build_budget_reservation_event,
     target_identity_hash,
+    validate_budget_event,
 )
 
 
@@ -140,6 +142,7 @@ def build_track_b_paper_autonomous_recovery_executor_attempt(
         budget=budget,
         classification=classification,
         normalized_target=normalized_target,
+        recovery_attempt_id=recovery_attempt_id,
     )
 
     return {
@@ -319,6 +322,7 @@ def _adapter_result(
     budget: Mapping[str, Any],
     classification: str,
     normalized_target: Mapping[str, str],
+    recovery_attempt_id: str,
 ) -> dict[str, Any]:
     if action_type != "RUNTIME_RETRY":
         return {
@@ -357,6 +361,12 @@ def _adapter_result(
         "control_plane_snapshot_id": validation.get("control_plane_snapshot_id") or "",
         "shared_truth_generation_id": validation.get("shared_truth_refresh_generation_id") or "",
         "budget_key": _budget_key(action_type=action_type, target_identity=normalized_target),
+        "would_record_budget_event": _budget_event_preview(
+            recovery_attempt_id=recovery_attempt_id,
+            validation=validation,
+            budget_key=_budget_key(action_type=action_type, target_identity=normalized_target),
+            normalized_target=normalized_target,
+        ),
         "recovery_budget_classification": budget.get("ledger_classification"),
         "attempts_remaining": budget.get("ledger_attempts_remaining"),
         "attempts_used": budget.get("ledger_attempts_used"),
@@ -373,8 +383,37 @@ def _adapter_result(
         "apply_result": {
             "placeholder": True,
             "executed": False,
+            "budget_event_appended": False,
             "reason": "RUNTIME_RETRY adapter is wired but disabled by policy in v1.",
         },
+    }
+
+
+def _budget_event_preview(
+    *,
+    recovery_attempt_id: str,
+    validation: Mapping[str, Any],
+    budget_key: str,
+    normalized_target: Mapping[str, str],
+) -> dict[str, Any]:
+    attempt_id = recovery_attempt_id or "runtime-retry-preview"
+    event = build_budget_reservation_event(
+        recovery_attempt_id=attempt_id,
+        control_plane_snapshot_id=str(validation.get("control_plane_snapshot_id") or ""),
+        shared_truth_generation_id=str(validation.get("shared_truth_refresh_generation_id") or ""),
+        action_type="RUNTIME_RETRY",
+        budget_key=budget_key,
+        agent_id=DEFAULT_AGENT_ID,
+        target_identity=normalized_target,
+    )
+    validation_result = validate_budget_event(event)
+    return {
+        "event_type": event["event_type"],
+        "event": event,
+        "validation": validation_result,
+        "would_append": False,
+        "append_enabled": False,
+        "reason": "Dry-run disabled adapter previews reservation semantics but does not append budget events.",
     }
 
 
