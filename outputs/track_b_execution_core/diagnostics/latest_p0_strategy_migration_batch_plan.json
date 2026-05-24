@@ -1,0 +1,386 @@
+{
+  "schema_version": "track_b_p0_strategy_migration_batch_plan_v1",
+  "generated_at": "2026-05-24T00:00:00-04:00",
+  "policy_mode": "PAPER",
+  "planning_only": true,
+  "runtime_restart_allowed": false,
+  "broker_mutation_allowed": false,
+  "lifecycle_mutation_allowed": false,
+  "submit_enabled": false,
+  "paper_proof_allowed": false,
+  "live_money_route_allowed": false,
+  "dashboard_projection_consumed": false,
+  "strategy_count": 5,
+  "strategies": [
+    {
+      "strategy_id": "asian_drift_v1",
+      "symbol": "MGC",
+      "instrument": {
+        "contract_key": "MGC-202606",
+        "local_symbol": "MGCM6",
+        "con_id": 712565978,
+        "exchange": "COMEX",
+        "databento_continuous_symbol": "MGC.v.0",
+        "dataset": "GLBX.MDP3"
+      },
+      "session_lane": "Asia drift / mgc_example_long_lmt_day",
+      "entry_signal_source": "Explicit Asian Drift 5m state snapshot; direction from asia_drift_regime.",
+      "required_runtime_market_data": [
+        "Bounded runtime MGC 1m candles rolled to completed 5m state",
+        "Realtime quote evidence",
+        "Fresh completed 5m context"
+      ],
+      "exit_policy": "PAPER_DIAGNOSTIC_TIME_BOXED_3X5M_EXIT_V1",
+      "managed_lifecycle_path": "track_b_multi_strategy_runtime_cycle -> track_b_strategy_paper_runner -> track_b_strategy_managed_paper_lifecycle",
+      "expected_order": {
+        "order_type": "LIMIT",
+        "quantity": 1,
+        "allowed_actions": [
+          "BUY",
+          "SELL"
+        ],
+        "side_rule": "LONG -> BUY; SHORT -> SELL"
+      },
+      "safe_state_limits": {
+        "max_orders_per_runtime_generation_id": 4,
+        "max_submits_per_symbol_per_window": 3,
+        "max_broker_mutation_attempts_per_window": 5,
+        "max_failed_broker_mutations_per_window": 2,
+        "max_duplicate_intent_attempts": 1,
+        "max_managed_open_positions_per_strategy_lane": 1,
+        "max_consecutive_lifecycle_reconciliation_disagreements": 2,
+        "max_recovery_attempts_per_runtime_generation": 3
+      },
+      "concurrent_position_compatibility": "Compatible with strategy-scoped MGC/MNQ positions when shared truth is clean and identities are unambiguous.",
+      "known_proof_leak_test_history": "Hardened watch-chain/state-snapshot path exists; legacy paper_proof is not an acceptable submit route.",
+      "required_artifacts": [
+        "Control Plane Snapshot",
+        "Safe-State Envelope",
+        "Runtime Supervisor Authority",
+        "Runtime Resume v2",
+        "Agent Health v2",
+        "Open Order Truth",
+        "Managed Order Registry",
+        "Position Truth",
+        "Managed Position Registry",
+        "Reconciliation / Broker Lease",
+        "Asian Drift state snapshot",
+        "Strategy rule report",
+        "Strategy submit authorization packet"
+      ],
+      "missing_implementation_gaps": [
+        "Prove fresh bounded runtime candle context and quote evidence without maintained historical data authority."
+      ],
+      "tests_required_before_enablement": [
+        "Observe-only no-signal",
+        "Observe-only signal-ready-no-submit",
+        "Stale runtime candle context blocks",
+        "Side matches explicit direction",
+        "Submit authorization blocks without snapshot",
+        "Lifecycle path receives exact strategy/lane identity"
+      ],
+      "first_paper_proving_mode": "OBSERVE_ONLY"
+    },
+    {
+      "strategy_id": "ASIA_EARLY_PAUSE_RESUME_SHORT_V1",
+      "symbol": "MGC",
+      "instrument": {
+        "contract_key": "MGC-202606",
+        "local_symbol": "MGCM6",
+        "con_id": 712565978,
+        "exchange": "COMEX",
+        "databento_continuous_symbol": "MGC.v.0",
+        "dataset": "GLBX.MDP3"
+      },
+      "session_lane": "Asia early / mgc_asia_early_pause_resume_short",
+      "entry_signal_source": "Completed 5m Asia early pause/resume short feature/state envelope.",
+      "required_runtime_market_data": [
+        "Phase-1 realtime completed 5m MGC envelope",
+        "Realtime quote evidence"
+      ],
+      "exit_policy": "PAPER_DIAGNOSTIC_TIME_BOXED_3X5M_EXIT_V1",
+      "managed_lifecycle_path": "track_b_multi_strategy_runtime_cycle -> track_b_strategy_paper_runner -> track_b_strategy_managed_paper_lifecycle",
+      "expected_order": {
+        "order_type": "LIMIT",
+        "quantity": 1,
+        "allowed_actions": [
+          "SELL"
+        ],
+        "side_rule": "SHORT -> SELL"
+      },
+      "safe_state_limits": {
+        "max_orders_per_runtime_generation_id": 4,
+        "max_submits_per_symbol_per_window": 3,
+        "max_broker_mutation_attempts_per_window": 5,
+        "max_failed_broker_mutations_per_window": 2,
+        "max_duplicate_intent_attempts": 1,
+        "max_managed_open_positions_per_strategy_lane": 1,
+        "max_consecutive_lifecycle_reconciliation_disagreements": 2,
+        "max_recovery_attempts_per_runtime_generation": 3
+      },
+      "concurrent_position_compatibility": "Compatible when open-order/position truth remains exact and non-ambiguous.",
+      "known_proof_leak_test_history": "First post-guardrail Asia short candidate; adapter remains signal-only.",
+      "required_artifacts": [
+        "Control Plane Snapshot",
+        "Safe-State Envelope",
+        "Runtime Supervisor Authority",
+        "Runtime Resume v2",
+        "Agent Health v2",
+        "Open Order Truth",
+        "Managed Order Registry",
+        "Position Truth",
+        "Managed Position Registry",
+        "Reconciliation / Broker Lease",
+        "Session strategy envelope",
+        "Strategy rule report",
+        "Strategy submit authorization packet"
+      ],
+      "missing_implementation_gaps": [
+        "Verify current live envelope production and no-submit reporting for exact Asia early short state fields."
+      ],
+      "tests_required_before_enablement": [
+        "Missing feature fields produce NOT_READY",
+        "No-signal state produces NO_SIGNAL_NO_MUTATION",
+        "Signal state without submit flags stays SIGNAL_READY_NO_SUBMIT",
+        "Side is forced/matched to SELL",
+        "Authorization blocks with unsafe Safe-State"
+      ],
+      "first_paper_proving_mode": "OBSERVE_ONLY"
+    },
+    {
+      "strategy_id": "ASIA_EARLY_NORMAL_BREAKOUT_RETEST_HOLD_LONG_V1",
+      "symbol": "MGC",
+      "instrument": {
+        "contract_key": "MGC-202606",
+        "local_symbol": "MGCM6",
+        "con_id": 712565978,
+        "exchange": "COMEX",
+        "databento_continuous_symbol": "MGC.v.0",
+        "dataset": "GLBX.MDP3"
+      },
+      "session_lane": "Asia early or GC/MGC London-open extension / mgc_asia_early_normal_breakout_retest_hold_long",
+      "entry_signal_source": "Completed 5m breakout/retest/hold feature/state envelope.",
+      "required_runtime_market_data": [
+        "Phase-1 realtime completed 5m MGC envelope",
+        "Realtime quote evidence"
+      ],
+      "exit_policy": "PAPER_DIAGNOSTIC_TIME_BOXED_3X5M_EXIT_V1",
+      "managed_lifecycle_path": "track_b_multi_strategy_runtime_cycle -> track_b_strategy_paper_runner -> track_b_strategy_managed_paper_lifecycle",
+      "expected_order": {
+        "order_type": "LIMIT",
+        "quantity": 1,
+        "allowed_actions": [
+          "BUY"
+        ],
+        "side_rule": "LONG -> BUY"
+      },
+      "safe_state_limits": {
+        "max_orders_per_runtime_generation_id": 4,
+        "max_submits_per_symbol_per_window": 3,
+        "max_broker_mutation_attempts_per_window": 5,
+        "max_failed_broker_mutations_per_window": 2,
+        "max_duplicate_intent_attempts": 1,
+        "max_managed_open_positions_per_strategy_lane": 1,
+        "max_consecutive_lifecycle_reconciliation_disagreements": 2,
+        "max_recovery_attempts_per_runtime_generation": 3
+      },
+      "concurrent_position_compatibility": "Compatible when lifecycle and managed position registry stay clean.",
+      "known_proof_leak_test_history": "Paired first-batch MGC long candidate; submit must use shared-services authorization.",
+      "required_artifacts": [
+        "Control Plane Snapshot",
+        "Safe-State Envelope",
+        "Runtime Supervisor Authority",
+        "Runtime Resume v2",
+        "Agent Health v2",
+        "Open Order Truth",
+        "Managed Order Registry",
+        "Position Truth",
+        "Managed Position Registry",
+        "Reconciliation / Broker Lease",
+        "Breakout/retest/hold session envelope",
+        "Strategy rule report",
+        "Strategy submit authorization packet"
+      ],
+      "missing_implementation_gaps": [
+        "Verify London-open extension data freshness and arbitration interaction with the Asia short candidate."
+      ],
+      "tests_required_before_enablement": [
+        "Missing feature fields produce NOT_READY",
+        "No-signal produces NO_SIGNAL_NO_MUTATION",
+        "Signal without submit flags stays SIGNAL_READY_NO_SUBMIT",
+        "Side is BUY",
+        "Arbitration blocks multiple PAPER candidates"
+      ],
+      "first_paper_proving_mode": "OBSERVE_ONLY"
+    },
+    {
+      "strategy_id": "MNQ_FIRST_BEAR_SNAP_TURN_V1",
+      "symbol": "MNQ",
+      "instrument": {
+        "contract_key": "MNQ-202606",
+        "local_symbol": "MNQM6",
+        "con_id": 770561201,
+        "exchange": "CME",
+        "databento_continuous_symbol": "MNQ.v.0",
+        "dataset": "GLBX.MDP3"
+      },
+      "session_lane": "session allowed / mnq_first_bear_snap_turn",
+      "entry_signal_source": "Completed 5m first bear snap-turn feature/state envelope.",
+      "required_runtime_market_data": [
+        "Phase-1 realtime completed 5m MNQ envelope",
+        "Realtime quote evidence",
+        "Fresh index-futures feed provenance"
+      ],
+      "exit_policy": "PAPER_DIAGNOSTIC_TIME_BOXED_3X5M_EXIT_V1",
+      "managed_lifecycle_path": "track_b_multi_strategy_runtime_cycle -> track_b_strategy_paper_runner -> track_b_strategy_managed_paper_lifecycle",
+      "expected_order": {
+        "order_type": "LIMIT",
+        "quantity": 1,
+        "allowed_actions": [
+          "SELL"
+        ],
+        "side_rule": "SHORT -> SELL"
+      },
+      "safe_state_limits": {
+        "max_orders_per_runtime_generation_id": 4,
+        "max_submits_per_symbol_per_window": 3,
+        "max_broker_mutation_attempts_per_window": 5,
+        "max_failed_broker_mutations_per_window": 2,
+        "max_duplicate_intent_attempts": 1,
+        "max_managed_open_positions_per_strategy_lane": 1,
+        "max_consecutive_lifecycle_reconciliation_disagreements": 2,
+        "max_recovery_attempts_per_runtime_generation": 3
+      },
+      "concurrent_position_compatibility": "Compatible with concurrent MGC positions when MNQ order/position identity is scoped and Safe-State permits submit.",
+      "known_proof_leak_test_history": "Prior MNQ leak-test exposed managed-exit and lifecycle edges; current path must preserve exact identity and managed lifecycle evidence.",
+      "required_artifacts": [
+        "Control Plane Snapshot",
+        "Safe-State Envelope",
+        "Runtime Supervisor Authority",
+        "Runtime Resume v2",
+        "Agent Health v2",
+        "Open Order Truth",
+        "Managed Order Registry",
+        "Position Truth",
+        "Managed Position Registry",
+        "Reconciliation / Broker Lease",
+        "MNQ snap-turn envelope",
+        "Strategy rule report",
+        "Strategy submit authorization packet"
+      ],
+      "missing_implementation_gaps": [
+        "Prove fresh MNQ Phase-1 realtime envelope and quote provenance in sustained runtime stack."
+      ],
+      "tests_required_before_enablement": [
+        "MNQ contract allowlist identity",
+        "No-signal/no-mutation",
+        "Signal-ready-no-submit",
+        "SELL side match",
+        "Concurrent MGC+MNQ scoped-position fixture",
+        "Submit authorization blocks if MNQ truth is stale or ambiguous"
+      ],
+      "first_paper_proving_mode": "SUBMIT_DISABLED_DRY_RUN"
+    },
+    {
+      "strategy_id": "MNQ_FIRST_BULL_SNAP_TURN_V1",
+      "symbol": "MNQ",
+      "instrument": {
+        "contract_key": "MNQ-202606",
+        "local_symbol": "MNQM6",
+        "con_id": 770561201,
+        "exchange": "CME",
+        "databento_continuous_symbol": "MNQ.v.0",
+        "dataset": "GLBX.MDP3"
+      },
+      "session_lane": "session allowed / mnq_first_bull_snap_turn",
+      "entry_signal_source": "Completed 5m first bull snap-turn feature/state envelope.",
+      "required_runtime_market_data": [
+        "Phase-1 realtime completed 5m MNQ envelope",
+        "Realtime quote evidence",
+        "Fresh index-futures feed provenance"
+      ],
+      "exit_policy": "PAPER_DIAGNOSTIC_TIME_BOXED_3X5M_EXIT_V1",
+      "managed_lifecycle_path": "track_b_multi_strategy_runtime_cycle -> track_b_strategy_paper_runner -> track_b_strategy_managed_paper_lifecycle",
+      "expected_order": {
+        "order_type": "LIMIT",
+        "quantity": 1,
+        "allowed_actions": [
+          "BUY"
+        ],
+        "side_rule": "LONG -> BUY"
+      },
+      "safe_state_limits": {
+        "max_orders_per_runtime_generation_id": 4,
+        "max_submits_per_symbol_per_window": 3,
+        "max_broker_mutation_attempts_per_window": 5,
+        "max_failed_broker_mutations_per_window": 2,
+        "max_duplicate_intent_attempts": 1,
+        "max_managed_open_positions_per_strategy_lane": 1,
+        "max_consecutive_lifecycle_reconciliation_disagreements": 2,
+        "max_recovery_attempts_per_runtime_generation": 3
+      },
+      "concurrent_position_compatibility": "Compatible with concurrent MGC positions when MNQ order/position identity is scoped and Safe-State permits submit.",
+      "known_proof_leak_test_history": "Pairs with the MNQ bear candidate to prove direction symmetry under the hardened lifecycle path.",
+      "required_artifacts": [
+        "Control Plane Snapshot",
+        "Safe-State Envelope",
+        "Runtime Supervisor Authority",
+        "Runtime Resume v2",
+        "Agent Health v2",
+        "Open Order Truth",
+        "Managed Order Registry",
+        "Position Truth",
+        "Managed Position Registry",
+        "Reconciliation / Broker Lease",
+        "MNQ snap-turn envelope",
+        "Strategy rule report",
+        "Strategy submit authorization packet"
+      ],
+      "missing_implementation_gaps": [
+        "Prove fresh MNQ Phase-1 realtime envelope and quote provenance in sustained runtime stack."
+      ],
+      "tests_required_before_enablement": [
+        "MNQ contract allowlist identity",
+        "No-signal/no-mutation",
+        "Signal-ready-no-submit",
+        "BUY side match",
+        "Concurrent MGC+MNQ scoped-position fixture",
+        "Submit authorization blocks if MNQ truth is stale or ambiguous"
+      ],
+      "first_paper_proving_mode": "SUBMIT_DISABLED_DRY_RUN"
+    }
+  ],
+  "recommended_migration_order": [
+    "asian_drift_v1",
+    "ASIA_EARLY_PAUSE_RESUME_SHORT_V1",
+    "ASIA_EARLY_NORMAL_BREAKOUT_RETEST_HOLD_LONG_V1",
+    "MNQ_FIRST_BEAR_SNAP_TURN_V1",
+    "MNQ_FIRST_BULL_SNAP_TURN_V1"
+  ],
+  "exact_enablement_gates": [
+    "Fresh coherent Control Plane Snapshot",
+    "Safe-State NORMAL with submit_allowed=true and broker_mutation_allowed=true",
+    "Runtime Supervisor submit-capable posture",
+    "Runtime Resume v2 generation matches active runtime generation",
+    "Agent Health v2 has no duplicate writer or runtime-submit blocker",
+    "Open/managed order, position, managed position, reconciliation, and broker lease truth are clean for the exact target",
+    "Strategy submit authorization packet is STRATEGY_SUBMIT_AUTHORIZED",
+    "Quantity exactly 1, order type LIMIT, explicit manual limit prices, side matches signal",
+    "live_money_eligible=false",
+    "paper_proof_invoked=false"
+  ],
+  "before_first_guarded_paper_submit": [
+    "At least one clean observe-only cycle per MGC P0 strategy",
+    "At least one clean submit-disabled dry-run with real signal-ready-no-submit for candidate being enabled",
+    "Passing authorization, Safe-State, stale snapshot, target mismatch, and concurrent MGC/MNQ tests",
+    "Fresh snapshot and Safe-State captured immediately before submit",
+    "Explicit operator command through guarded strategy-managed lifecycle path"
+  ],
+  "rollback_observe_only_behavior": [
+    "Missing, stale, incoherent, or ambiguous evidence keeps strategy observe-only",
+    "Multiple real candidates in one cycle block submit and preserve evidence",
+    "Safe-State tripped limits shift to observe-only or recovery-only",
+    "Stale MNQ feed keeps MNQ candidates disabled while clean MGC observe-only may continue",
+    "Rollback never performs broad cancel, broad flatten, runtime restart, paper_proof, or live-money routing"
+  ]
+}
