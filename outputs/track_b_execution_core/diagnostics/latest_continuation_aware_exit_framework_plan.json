@@ -1,0 +1,192 @@
+{
+  "schema_version": "track_b_continuation_aware_exit_framework_plan_v1",
+  "generated_at": "2026-05-24T00:00:00-04:00",
+  "policy_mode": "PAPER",
+  "design_only": true,
+  "runtime_behavior_implemented": false,
+  "runtime_restart_allowed": false,
+  "broker_mutation_allowed": false,
+  "lifecycle_mutation_allowed": false,
+  "submit_cancel_close_replace_modify_flatten_allowed": false,
+  "paper_proof_allowed": false,
+  "live_money_route_allowed": false,
+  "dashboard_projection_consumed": false,
+  "new_exit_policy_family": "TIME_PLUS_CONTINUATION_EXIT_V1",
+  "components": [
+    "minimum_hold_duration",
+    "continuation_extension_window",
+    "hard_max_hold_duration",
+    "continuation_quality_state",
+    "decay_exit_trigger",
+    "reversal_exit_trigger",
+    "stagnation_exit_trigger",
+    "safe_state_override",
+    "lifecycle_reconciliation_override"
+  ],
+  "required_input_signals": [
+    "completed_5m_candles",
+    "directional_participation_microtrend_state",
+    "position_age",
+    "unrealized_mfe_mae",
+    "current_managed_order_state",
+    "order_adjustment_planner_state",
+    "safe_state_envelope",
+    "lifecycle_reconciliation_state",
+    "strategy_family",
+    "exact_managed_position_identity"
+  ],
+  "exit_states": [
+    "HOLD_MINIMUM_WINDOW",
+    "HOLD_CONTINUATION_CONFIRMED",
+    "EXIT_DECAY_DETECTED",
+    "EXIT_REVERSAL_DETECTED",
+    "EXIT_STAGNATION",
+    "EXIT_HARD_MAX_DURATION",
+    "EXIT_SAFE_STATE_OVERRIDE",
+    "EXIT_LIFECYCLE_UNSAFE"
+  ],
+  "family_defaults": {
+    "breakout_retest": {
+      "minimum_hold_completed_5m_bars": 2,
+      "continuation_extension_completed_5m_bars": 4,
+      "hard_max_completed_5m_bars": 8,
+      "decay_sensitivity": "MEDIUM",
+      "reversal_sensitivity": "MEDIUM",
+      "stagnation_rule": "Exit if retest hold fails to expand after extension window."
+    },
+    "snap_turn_reversal": {
+      "minimum_hold_completed_5m_bars": 1,
+      "continuation_extension_completed_5m_bars": 2,
+      "hard_max_completed_5m_bars": 5,
+      "decay_sensitivity": "FAST",
+      "reversal_sensitivity": "FAST",
+      "stagnation_rule": "Exit if reversal impulse fails quickly."
+    },
+    "asia_drift": {
+      "minimum_hold_completed_5m_bars": 2,
+      "continuation_extension_completed_5m_bars": 3,
+      "hard_max_completed_5m_bars": 7,
+      "decay_sensitivity": "MEDIUM",
+      "reversal_sensitivity": "MEDIUM",
+      "stagnation_rule": "Session and volatility aware exit if drift does not continue."
+    },
+    "pause_resume": {
+      "minimum_hold_completed_5m_bars": 2,
+      "continuation_extension_completed_5m_bars": 3,
+      "hard_max_completed_5m_bars": 6,
+      "decay_sensitivity": "MEDIUM_FAST",
+      "reversal_sensitivity": "MEDIUM_FAST",
+      "stagnation_rule": "Exit when continuation after resume fails."
+    },
+    "trend_continuation": {
+      "minimum_hold_completed_5m_bars": 3,
+      "continuation_extension_completed_5m_bars": 5,
+      "hard_max_completed_5m_bars": 10,
+      "decay_sensitivity": "SLOW",
+      "reversal_sensitivity": "MEDIUM",
+      "stagnation_rule": "Hold extension allowed while trend participation remains strong."
+    }
+  },
+  "p0_mapping": [
+    {
+      "strategy_id": "asian_drift_v1",
+      "strategy_family": "asia_drift",
+      "current_exit_policy": "PAPER_DIAGNOSTIC_TIME_BOXED_3X5M_EXIT_V1",
+      "current_exit_type": "TIME_ONLY",
+      "proposed_exit_policy": "TIME_PLUS_CONTINUATION_EXIT_V1",
+      "proposed_profile": "asia_drift",
+      "minimum_hold_completed_5m_bars": 2,
+      "continuation_extension_completed_5m_bars": 3,
+      "hard_max_completed_5m_bars": 7,
+      "safe_to_adopt_first": true,
+      "adoption_reason": "MGC P0 with explicit state snapshot and variable direction; good first dry-run builder target."
+    },
+    {
+      "strategy_id": "ASIA_EARLY_PAUSE_RESUME_SHORT_V1",
+      "strategy_family": "pause_resume",
+      "current_exit_policy": "PAPER_DIAGNOSTIC_TIME_BOXED_3X5M_EXIT_V1",
+      "current_exit_type": "TIME_ONLY",
+      "proposed_exit_policy": "TIME_PLUS_CONTINUATION_EXIT_V1",
+      "proposed_profile": "pause_resume",
+      "minimum_hold_completed_5m_bars": 2,
+      "continuation_extension_completed_5m_bars": 3,
+      "hard_max_completed_5m_bars": 6,
+      "safe_to_adopt_first": true,
+      "adoption_reason": "MGC P0 short candidate with explicit completed-5m envelope; pairs well with Asian Drift for first dry-run slice."
+    },
+    {
+      "strategy_id": "ASIA_EARLY_NORMAL_BREAKOUT_RETEST_HOLD_LONG_V1",
+      "strategy_family": "breakout_retest",
+      "current_exit_policy": "PAPER_DIAGNOSTIC_TIME_BOXED_3X5M_EXIT_V1",
+      "current_exit_type": "TIME_ONLY",
+      "proposed_exit_policy": "TIME_PLUS_CONTINUATION_EXIT_V1",
+      "proposed_profile": "breakout_retest",
+      "minimum_hold_completed_5m_bars": 2,
+      "continuation_extension_completed_5m_bars": 4,
+      "hard_max_completed_5m_bars": 8,
+      "safe_to_adopt_first": false,
+      "adoption_reason": "Longer continuation leash should follow initial MGC dry-run builder validation."
+    },
+    {
+      "strategy_id": "MNQ_FIRST_BEAR_SNAP_TURN_V1",
+      "strategy_family": "snap_turn_reversal",
+      "current_exit_policy": "PAPER_DIAGNOSTIC_TIME_BOXED_3X5M_EXIT_V1",
+      "current_exit_type": "TIME_ONLY",
+      "proposed_exit_policy": "TIME_PLUS_CONTINUATION_EXIT_V1",
+      "proposed_profile": "snap_turn_reversal",
+      "minimum_hold_completed_5m_bars": 1,
+      "continuation_extension_completed_5m_bars": 2,
+      "hard_max_completed_5m_bars": 5,
+      "safe_to_adopt_first": false,
+      "adoption_reason": "Should follow MGC validation because MNQ adds cross-symbol identity and quote/MFE plumbing."
+    },
+    {
+      "strategy_id": "MNQ_FIRST_BULL_SNAP_TURN_V1",
+      "strategy_family": "snap_turn_reversal",
+      "current_exit_policy": "PAPER_DIAGNOSTIC_TIME_BOXED_3X5M_EXIT_V1",
+      "current_exit_type": "TIME_ONLY",
+      "proposed_exit_policy": "TIME_PLUS_CONTINUATION_EXIT_V1",
+      "proposed_profile": "snap_turn_reversal",
+      "minimum_hold_completed_5m_bars": 1,
+      "continuation_extension_completed_5m_bars": 2,
+      "hard_max_completed_5m_bars": 5,
+      "safe_to_adopt_first": false,
+      "adoption_reason": "Should adopt with MNQ bear pair after direction-symmetry tests."
+    }
+  ],
+  "safety_overrides": [
+    "SAFE_STATE_HARD_HOLD blocks exit mutation and marks EXIT_SAFE_STATE_OVERRIDE",
+    "duplicate_writer blocks exit mutation and marks EXIT_SAFE_STATE_OVERRIDE",
+    "live_money_eligible=true blocks exit mutation and marks EXIT_SAFE_STATE_OVERRIDE",
+    "suspicious open order or duplicate close risk marks EXIT_LIFECYCLE_UNSAFE",
+    "stale or incoherent Control Plane Snapshot blocks close-intent planning",
+    "broker exposure identity ambiguity blocks close-intent planning",
+    "unknown Lifecycle State Matrix state blocks clean exit stats"
+  ],
+  "tests_required_before_runtime_behavior": [
+    "minimum hold produces HOLD_MINIMUM_WINDOW",
+    "favorable continuation produces HOLD_CONTINUATION_CONFIRMED",
+    "decay produces EXIT_DECAY_DETECTED",
+    "reversal produces EXIT_REVERSAL_DETECTED",
+    "low MFE/time progression produces EXIT_STAGNATION",
+    "hard max produces EXIT_HARD_MAX_DURATION",
+    "unsafe Safe-State produces EXIT_SAFE_STATE_OVERRIDE",
+    "ambiguous lifecycle/reconciliation produces EXIT_LIFECYCLE_UNSAFE",
+    "dashboard projection is not consumed",
+    "builder performs no broker/order/lifecycle mutation"
+  ],
+  "recommended_first_implementation_slice": {
+    "classification": "PURE_EXIT_DECISION_BUILDER_DRY_RUN",
+    "strategies": [
+      "asian_drift_v1",
+      "ASIA_EARLY_PAUSE_RESUME_SHORT_V1"
+    ],
+    "reason": "Both are MGC P0 candidates with explicit completed-5m envelopes; together they exercise variable direction and short continuation failure without MNQ cross-symbol complexity.",
+    "must_not_change": [
+      "Existing time-boxed close submit behavior",
+      "Managed lifecycle broker mutation gates",
+      "Safe-State and Control Plane Snapshot requirements",
+      "Dashboard projection non-authority"
+    ]
+  }
+}
