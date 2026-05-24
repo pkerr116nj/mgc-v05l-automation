@@ -688,6 +688,15 @@ def test_continuation_aware_preview_is_diagnostic_only_for_first_p0_strategy(tmp
             side="BUY",
             managed_exit_policy_id=TrackBManagedExitPolicy.PAPER_DIAGNOSTIC_TIME_BOXED_3X5M_EXIT_V1.value,
             completed_5m_bars_since_entry=3,
+            continuation_completed_5m_candles=(
+                {"open": "100.0", "high": "101.4", "low": "99.8", "close": "101.1"},
+                {"open": "101.1", "high": "102.2", "low": "100.9", "close": "102.0"},
+            ),
+            continuation_microtrend_state={"trend": "ALIGNED_CONTINUATION"},
+            continuation_participation_state={"participation": "STRONG_PARTICIPATING"},
+            continuation_mfe="2.0",
+            continuation_mae="-0.2",
+            continuation_unrealized_pnl="1.2",
         ),
         stages=fake_stages(),
         lifecycle_id="continuation-preview-diagnostic",
@@ -698,9 +707,34 @@ def test_continuation_aware_preview_is_diagnostic_only_for_first_p0_strategy(tmp
     assert result.classification == TrackBManagedPaperLifecycleClassification.CLOSED_FLAT
     assert result.report["close_intent"]["close_reason"] == "TIME_BOXED_EXIT"
     assert preview["exit_policy_id"] == "TIME_PLUS_CONTINUATION_EXIT_V1"
+    assert preview["exit_profile_id"] == "ASIAN_DRIFT_CONTINUATION_LONG_LEASH_V1"
+    assert preview["exit_state"] == "HOLD_CONTINUATION_CONFIRMED"
+    assert preview["evidence_summary"]["completed_5m_candle_count"] == 2
     assert preview["dry_run_only"] is True
     assert preview["not_order_authority"] is True
     assert preview["not_lifecycle_authority"] is True
+    assert preview["should_request_close"] is False
+
+
+def test_continuation_aware_preview_missing_evidence_does_not_block_time_boxed_exit(tmp_path: Path) -> None:
+    result = run_track_b_strategy_managed_paper_lifecycle(
+        config=base_config(
+            tmp_path,
+            strategy_id="ASIA_EARLY_PAUSE_RESUME_SHORT_V1",
+            side="SELL",
+            managed_exit_policy_id=TrackBManagedExitPolicy.PAPER_DIAGNOSTIC_TIME_BOXED_3X5M_EXIT_V1.value,
+            completed_5m_bars_since_entry=3,
+        ),
+        stages=fake_stages(),
+        lifecycle_id="continuation-preview-missing-evidence",
+        now=aware_now(),
+    )
+
+    preview = result.report["continuation_aware_exit_preview"]
+    assert result.classification == TrackBManagedPaperLifecycleClassification.CLOSED_FLAT
+    assert result.report["close_intent"]["close_reason"] == "TIME_BOXED_EXIT"
+    assert preview["exit_state"] == "INSUFFICIENT_DATA_HOLD_OR_FALLBACK"
+    assert "completed_5m_candles" in preview["missing_inputs"]
     assert preview["should_request_close"] is False
 
 

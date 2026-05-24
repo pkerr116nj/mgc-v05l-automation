@@ -150,6 +150,17 @@ class TrackBStrategyManagedPaperLifecycleConfig:
     pre_action_snapshot_max_age_seconds: int = 300
     expected_control_plane_snapshot_id: str | None = None
     expected_shared_truth_generation_id: str | None = None
+    continuation_exit_profile_id: str | None = None
+    continuation_completed_5m_candles: tuple[Mapping[str, Any], ...] = ()
+    continuation_microtrend_state: Mapping[str, Any] | str | None = None
+    continuation_participation_state: Mapping[str, Any] | str | None = None
+    continuation_position_age_minutes: int | float | Decimal | None = None
+    continuation_mfe: int | float | Decimal | str | None = None
+    continuation_mae: int | float | Decimal | str | None = None
+    continuation_unrealized_pnl: int | float | Decimal | str | None = None
+    continuation_safe_state_classification: str | None = "SAFE_STATE_NORMAL"
+    continuation_lifecycle_reconciliation_classification: str | None = "CLEAN"
+    continuation_source_strategy_report_path: str | Path | None = None
 
 
 @dataclass(frozen=True)
@@ -739,9 +750,9 @@ def _continuation_aware_exit_preview(
     entry_time = None
     if open_state:
         entry_time = open_state.get("entry_timestamp") or config.signal_timestamp
-    position_age_minutes = None
+    position_age_minutes = config.continuation_position_age_minutes
     bars_since_fill = None if open_state is None else open_state.get("bars_since_fill")
-    if bars_since_fill is not None:
+    if position_age_minutes is None and bars_since_fill is not None:
         try:
             position_age_minutes = int(bars_since_fill) * 5
         except (TypeError, ValueError):
@@ -752,15 +763,18 @@ def _continuation_aware_exit_preview(
         side=side,
         entry_time=entry_time,
         current_time=now,
-        completed_5m_candles=(),
+        completed_5m_candles=config.continuation_completed_5m_candles,
         position_age_minutes=position_age_minutes,
-        mfe=None,
-        mae=None,
-        unrealized_pnl=None,
-        microtrend_state=None,
-        participation_state=None,
-        safe_state_classification="SAFE_STATE_NORMAL",
-        lifecycle_reconciliation_classification="CLEAN",
+        mfe=config.continuation_mfe,
+        mae=config.continuation_mae,
+        unrealized_pnl=config.continuation_unrealized_pnl,
+        microtrend_state=config.continuation_microtrend_state,
+        participation_state=config.continuation_participation_state,
+        safe_state_classification=config.continuation_safe_state_classification,
+        lifecycle_reconciliation_classification=config.continuation_lifecycle_reconciliation_classification,
+        family_profile_id=config.continuation_exit_profile_id,
+        source_lifecycle_report_path=str(Path(config.output_root) / "latest_track_b_strategy_managed_paper_lifecycle_report.json"),
+        source_strategy_report_path=config.continuation_source_strategy_report_path,
     )
 
 

@@ -6,12 +6,28 @@ close, flatten, mutate lifecycle state, or call broker/order planner APIs.
 
 from __future__ import annotations
 
+import json
 from datetime import UTC, datetime
 from decimal import Decimal, InvalidOperation
+from pathlib import Path
 from typing import Any, Mapping, Sequence
+
+from mgc_v05l.execution_core.track_b_atomic_io import write_json_atomic
 
 
 TIME_PLUS_CONTINUATION_EXIT_V1 = "TIME_PLUS_CONTINUATION_EXIT_V1"
+DEFAULT_CONTINUATION_AWARE_EXIT_PREVIEW_PATH = (
+    Path("outputs")
+    / "track_b_execution_core"
+    / "continuation_aware_exit"
+    / "latest_continuation_aware_exit_preview.json"
+)
+DEFAULT_CONTINUATION_AWARE_EXIT_PREVIEW_EVENT_LOG = (
+    Path("outputs")
+    / "track_b_execution_core"
+    / "continuation_aware_exit"
+    / "continuation_aware_exit_previews.jsonl"
+)
 
 HOLD_MINIMUM_WINDOW = "HOLD_MINIMUM_WINDOW"
 HOLD_CONTINUATION_CONFIRMED = "HOLD_CONTINUATION_CONFIRMED"
@@ -28,33 +44,79 @@ SUPPORTED_STRATEGY_IDS = {
     "ASIA_EARLY_PAUSE_RESUME_SHORT_V1",
 }
 
+ASIAN_DRIFT_CONTINUATION_LONG_LEASH_V1 = "ASIAN_DRIFT_CONTINUATION_LONG_LEASH_V1"
+ASIAN_DRIFT_TRUE_DRIFT_HOLD_V1 = "ASIAN_DRIFT_TRUE_DRIFT_HOLD_V1"
+ASIA_EARLY_PAUSE_RESUME_SHORT_MEDIUM_LEASH_V1 = "ASIA_EARLY_PAUSE_RESUME_SHORT_MEDIUM_LEASH_V1"
+
 
 _PROFILE_DEFAULTS: dict[str, dict[str, Any]] = {
-    "ASIA_DRIFT_MEDIUM_LEASH": {
-        "family_profile_id": "ASIA_DRIFT_MEDIUM_LEASH",
+    ASIAN_DRIFT_CONTINUATION_LONG_LEASH_V1: {
+        "exit_profile_id": ASIAN_DRIFT_CONTINUATION_LONG_LEASH_V1,
+        "family_profile_id": ASIAN_DRIFT_CONTINUATION_LONG_LEASH_V1,
         "strategy_family": "asia_drift",
-        "minimum_hold_minutes": 10,
-        "continuation_extension_minutes": 15,
-        "hard_max_hold_minutes": 35,
-        "decay_threshold": Decimal("0.58"),
+        "minimum_hold_minutes": 15,
+        "continuation_extension_minutes": 45,
+        "hard_max_hold_minutes": 120,
+        "decay_threshold": Decimal("0.72"),
         "reversal_threshold": Decimal("0.65"),
-        "stagnation_threshold": Decimal("0.62"),
+        "stagnation_threshold": Decimal("0.75"),
+        "decay_sensitivity": "LOW_MODERATE",
+        "reversal_sensitivity": "FIRM",
+        "stagnation_sensitivity": "MODERATE",
+        "paper_experimental_profile": False,
+        "profile_explanation": (
+            "Preferred initial PAPER observation profile for Asian Drift: generous continuation hold "
+            "that avoids cutting off quiet aligned drift too early."
+        ),
     },
-    "PAUSE_RESUME_MEDIUM_SHORT_LEASH": {
-        "family_profile_id": "PAUSE_RESUME_MEDIUM_SHORT_LEASH",
+    ASIAN_DRIFT_TRUE_DRIFT_HOLD_V1: {
+        "exit_profile_id": ASIAN_DRIFT_TRUE_DRIFT_HOLD_V1,
+        "family_profile_id": ASIAN_DRIFT_TRUE_DRIFT_HOLD_V1,
+        "strategy_family": "asia_drift",
+        "minimum_hold_minutes": 20,
+        "continuation_extension_minutes": 180,
+        "hard_max_hold_minutes": 360,
+        "decay_threshold": Decimal("0.86"),
+        "reversal_threshold": Decimal("0.62"),
+        "stagnation_threshold": Decimal("0.90"),
+        "decay_sensitivity": "LOW_DURING_ALIGNED_LOW_VOL_DRIFT",
+        "reversal_sensitivity": "FIRM",
+        "stagnation_sensitivity": "LOW",
+        "paper_experimental_profile": True,
+        "profile_explanation": (
+            "Experimental PAPER-only true-drift hold profile: lets quiet aligned overnight drift run "
+            "while preserving firm reversal, Safe-State, lifecycle, reconciliation, and data-quality overrides."
+        ),
+    },
+    ASIA_EARLY_PAUSE_RESUME_SHORT_MEDIUM_LEASH_V1: {
+        "exit_profile_id": ASIA_EARLY_PAUSE_RESUME_SHORT_MEDIUM_LEASH_V1,
+        "family_profile_id": ASIA_EARLY_PAUSE_RESUME_SHORT_MEDIUM_LEASH_V1,
         "strategy_family": "pause_resume",
         "minimum_hold_minutes": 10,
         "continuation_extension_minutes": 15,
         "hard_max_hold_minutes": 30,
-        "decay_threshold": Decimal("0.52"),
+        "decay_threshold": Decimal("0.50"),
         "reversal_threshold": Decimal("0.60"),
-        "stagnation_threshold": Decimal("0.58"),
+        "stagnation_threshold": Decimal("0.56"),
+        "decay_sensitivity": "MEDIUM_FAST",
+        "reversal_sensitivity": "MEDIUM_FAST",
+        "stagnation_sensitivity": "MEDIUM_FAST",
+        "paper_experimental_profile": False,
+        "profile_explanation": (
+            "Medium/short leash pause-resume profile: flags failed short continuation and reversal "
+            "so PAPER does not overhold a failed continuation."
+        ),
     },
 }
 
+_PROFILE_ALIASES = {
+    "ASIA_DRIFT_MEDIUM_LEASH": ASIAN_DRIFT_CONTINUATION_LONG_LEASH_V1,
+    "PAUSE_RESUME_MEDIUM_SHORT_LEASH": ASIA_EARLY_PAUSE_RESUME_SHORT_MEDIUM_LEASH_V1,
+}
+
 _STRATEGY_PROFILE = {
-    "asian_drift_v1": "ASIA_DRIFT_MEDIUM_LEASH",
-    "ASIA_EARLY_PAUSE_RESUME_SHORT_V1": "PAUSE_RESUME_MEDIUM_SHORT_LEASH",
+    "asian_drift_v1": ASIAN_DRIFT_CONTINUATION_LONG_LEASH_V1,
+    "ASIA_EARLY_PAUSE_RESUME_SHORT_V1": ASIA_EARLY_PAUSE_RESUME_SHORT_MEDIUM_LEASH_V1,
 }
 
 
@@ -75,6 +137,8 @@ def build_time_plus_continuation_exit_decision(
     safe_state_classification: str | None = "SAFE_STATE_NORMAL",
     lifecycle_reconciliation_classification: str | None = "CLEAN",
     family_profile_id: str | None = None,
+    source_lifecycle_report_path: str | Path | None = None,
+    source_strategy_report_path: str | Path | None = None,
 ) -> dict[str, Any]:
     """Build a dry-run exit decision for the first P0 continuation-aware slice."""
 
@@ -104,13 +168,15 @@ def build_time_plus_continuation_exit_decision(
         age_minutes=age_minutes,
         profile=profile,
     )
+    missing_inputs = _missing_inputs(candles=candles)
     evidence = {
         "strategy_id": actual_strategy_id,
         "symbol": str(symbol or "").upper(),
         "side": side_normalized,
-        "family_profile_id": profile["family_profile_id"],
+        "exit_profile_id": profile["exit_profile_id"],
         "strategy_family": profile["strategy_family"],
         "completed_5m_candle_count": len(candles),
+        "missing_inputs": missing_inputs,
         "position_age_minutes": _json_decimal(age_minutes),
         "mfe": _json_decimal(mfe_decimal),
         "mae": _json_decimal(mae_decimal),
@@ -134,11 +200,21 @@ def build_time_plus_continuation_exit_decision(
     return {
         "exit_policy_id": TIME_PLUS_CONTINUATION_EXIT_V1,
         "schema_version": "track_b_continuation_aware_exit_decision_v1",
+        "generated_at": actual_current_time.isoformat(),
         "strategy_id": actual_strategy_id,
         "symbol": str(symbol or "").upper(),
         "side": side_normalized,
+        "exit_profile_id": profile["exit_profile_id"],
         "family_profile_id": profile["family_profile_id"],
         "strategy_family": profile["strategy_family"],
+        "min_hold_minutes": int(profile["minimum_hold_minutes"]),
+        "hard_max_hold_minutes": int(profile["hard_max_hold_minutes"]),
+        "continuation_extension_minutes": int(profile["continuation_extension_minutes"]),
+        "decay_sensitivity": profile["decay_sensitivity"],
+        "reversal_sensitivity": profile["reversal_sensitivity"],
+        "stagnation_sensitivity": profile["stagnation_sensitivity"],
+        "profile_explanation": profile["profile_explanation"],
+        "paper_experimental_profile": bool(profile["paper_experimental_profile"]),
         "dry_run_only": True,
         "not_order_authority": True,
         "not_lifecycle_authority": True,
@@ -149,6 +225,10 @@ def build_time_plus_continuation_exit_decision(
         "exit_state": exit_state,
         "reason": reason,
         "evidence_summary": evidence,
+        "missing_inputs": missing_inputs,
+        "input_candle_window": [dict(candle) for candle in candles[-12:]],
+        "participation_state": participation_state,
+        "microtrend_state": microtrend_state,
         "min_hold_remaining_minutes": _json_decimal(min_remaining),
         "hard_max_remaining_minutes": _json_decimal(hard_max_remaining),
         "continuation_quality_state": scores["continuation_quality_state"],
@@ -163,15 +243,18 @@ def build_time_plus_continuation_exit_decision(
             exit_state=exit_state,
             reason=reason,
         ),
+        "source_lifecycle_report_path": str(source_lifecycle_report_path) if source_lifecycle_report_path else None,
+        "source_strategy_report_path": str(source_strategy_report_path) if source_strategy_report_path else None,
     }
 
 
 def _profile_for(*, strategy_id: str, family_profile_id: str | None) -> dict[str, Any]:
     requested = str(family_profile_id or "").strip().upper()
     profile_id = requested or _STRATEGY_PROFILE.get(strategy_id) or "ASIA_DRIFT_MEDIUM_LEASH"
+    profile_id = _PROFILE_ALIASES.get(profile_id, profile_id)
     profile = _PROFILE_DEFAULTS.get(profile_id)
     if profile is None:
-        profile = _PROFILE_DEFAULTS["ASIA_DRIFT_MEDIUM_LEASH"]
+        profile = _PROFILE_DEFAULTS[ASIAN_DRIFT_CONTINUATION_LONG_LEASH_V1]
     return dict(profile)
 
 
@@ -205,7 +288,7 @@ def _classify(
     if len(candles) < 2:
         return (
             INSUFFICIENT_DATA_HOLD_OR_FALLBACK,
-            "At least two completed 5m candles are required for continuation-aware exit preview.",
+            "Missing required completed_5m_candles: at least two completed 5m candles are required for continuation-aware exit preview.",
         )
 
     minimum = Decimal(int(profile["minimum_hold_minutes"]))
@@ -237,6 +320,8 @@ def _scores(
 ) -> dict[str, Decimal | str]:
     candle_alignment = _candle_alignment(side=side, candles=candles[-3:])
     state_bias = _state_bias(microtrend_state) + _state_bias(participation_state)
+    if bool(profile.get("paper_experimental_profile")) and _aligned_low_vol_drift(microtrend_state, participation_state):
+        state_bias += Decimal("0.16")
     reversal_state_pressure = _reversal_state_pressure(microtrend_state) + _reversal_state_pressure(participation_state)
     pnl_bias = Decimal("0")
     if unrealized_pnl is not None:
@@ -253,6 +338,8 @@ def _scores(
         Decimal("0.50") - candle_alignment + reversal_state_pressure + _negative_pnl_pressure(unrealized_pnl)
     )
     decay = _clamp(Decimal("0.55") - continuation + _mfe_decay_pressure(mfe=mfe, unrealized_pnl=unrealized_pnl))
+    if bool(profile.get("paper_experimental_profile")) and _aligned_low_vol_drift(microtrend_state, participation_state):
+        decay = _clamp(decay - Decimal("0.18"))
     stagnation = Decimal("0")
     if age_minutes is not None:
         extension_start = Decimal(int(profile["minimum_hold_minutes"])) + Decimal(int(profile["continuation_extension_minutes"]))
@@ -318,7 +405,7 @@ def _state_bias(state: Mapping[str, Any] | str | None) -> Decimal:
         return Decimal("-0.28")
     if any(token in joined for token in ("DECAY", "WEAK", "FAILED", "FADING")):
         return Decimal("-0.12")
-    if any(token in joined for token in ("STRONG", "ALIGNED", "CONTINUATION", "PARTICIPATING")):
+    if any(token in joined for token in ("STRONG", "ALIGNED", "CONTINUATION", "PARTICIPATING", "LOW_VOL_DRIFT")):
         return Decimal("0.18")
     return Decimal("0")
 
@@ -335,6 +422,19 @@ def _reversal_state_pressure(state: Mapping[str, Any] | str | None) -> Decimal:
     if any(token in joined for token in ("REVERSAL", "ADVERSE", "OPPOSITE")):
         return Decimal("0.22")
     return Decimal("0")
+
+
+def _aligned_low_vol_drift(*states: Mapping[str, Any] | str | None) -> bool:
+    joined = " ".join(_state_words(state) for state in states)
+    return "ALIGNED" in joined and ("LOW_VOL" in joined or "QUIET" in joined or "DRIFT" in joined)
+
+
+def _state_words(state: Mapping[str, Any] | str | None) -> str:
+    if state is None:
+        return ""
+    if isinstance(state, Mapping):
+        return " ".join(str(value).upper() for value in state.values())
+    return str(state).upper()
 
 
 def _negative_pnl_pressure(unrealized_pnl: Decimal | None) -> Decimal:
@@ -433,3 +533,43 @@ def _json_decimal(value: Decimal | None) -> str | None:
     if value is None:
         return None
     return format(value.normalize(), "f")
+
+
+def _missing_inputs(*, candles: Sequence[Mapping[str, Any]]) -> list[str]:
+    missing: list[str] = []
+    if len(candles) < 2:
+        missing.append("completed_5m_candles")
+    return missing
+
+
+def write_continuation_aware_exit_preview_artifacts(
+    *,
+    preview: Mapping[str, Any],
+    output_path: Path = DEFAULT_CONTINUATION_AWARE_EXIT_PREVIEW_PATH,
+    event_log_path: Path = DEFAULT_CONTINUATION_AWARE_EXIT_PREVIEW_EVENT_LOG,
+) -> dict[str, Any]:
+    """Write latest preview JSON plus append-only JSONL diagnostics."""
+
+    payload = dict(preview)
+    if not payload.get("generated_at"):
+        payload["generated_at"] = datetime.now(UTC).isoformat()
+    payload["dry_run_only"] = True
+    payload["not_order_authority"] = True
+    payload["not_lifecycle_authority"] = True
+    payload["should_request_close"] = False
+    close_preview = dict(payload.get("close_intent_preview") or {})
+    close_preview["would_submit"] = False
+    payload["close_intent_preview"] = close_preview
+
+    write_json_atomic(output_path, payload)
+    event_log_path.parent.mkdir(parents=True, exist_ok=True)
+    with event_log_path.open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps(payload, sort_keys=True) + "\n")
+    return {
+        "latest_preview_path": str(output_path),
+        "event_log_path": str(event_log_path),
+        "event_appended": True,
+        "dry_run_only": True,
+        "not_order_authority": True,
+        "not_lifecycle_authority": True,
+    }
