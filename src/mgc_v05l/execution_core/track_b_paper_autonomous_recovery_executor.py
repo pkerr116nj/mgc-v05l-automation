@@ -18,13 +18,25 @@ from mgc_v05l.execution_core.track_b_pre_action_snapshot_validator import (
     TrackBPreActionSnapshotValidatorConfig,
     validate_track_b_pre_action_snapshot,
 )
-from mgc_v05l.execution_core.track_b_recovery_budget_ledger import DEFAULT_RECOVERY_BUDGET_LEDGER_ARTIFACT
+from mgc_v05l.execution_core.track_b_recovery_budget_ledger import (
+    DEFAULT_AGENT_ID,
+    DEFAULT_RECOVERY_BUDGET_LEDGER_ARTIFACT,
+    target_identity_hash,
+)
 
 
 EXECUTOR_DRY_RUN_READY = "EXECUTOR_DRY_RUN_READY"
 EXECUTOR_BLOCKED_PRE_ACTION_VALIDATION = "EXECUTOR_BLOCKED_PRE_ACTION_VALIDATION"
 EXECUTOR_BLOCKED_BUDGET_EXHAUSTED = "EXECUTOR_BLOCKED_BUDGET_EXHAUSTED"
 EXECUTOR_BLOCKED_UNSUPPORTED_ACTION = "EXECUTOR_BLOCKED_UNSUPPORTED_ACTION"
+
+BUDGET_GATE_PASS = "BUDGET_GATE_PASS"
+BUDGET_GATE_BLOCKED_EXHAUSTED = "BUDGET_GATE_BLOCKED_EXHAUSTED"
+BUDGET_GATE_BLOCKED_COOLDOWN = "BUDGET_GATE_BLOCKED_COOLDOWN"
+BUDGET_GATE_BLOCKED_QUARANTINE = "BUDGET_GATE_BLOCKED_QUARANTINE"
+BUDGET_GATE_BLOCKED_MISSING = "BUDGET_GATE_BLOCKED_MISSING"
+BUDGET_GATE_NOT_APPLICABLE = "BUDGET_GATE_NOT_APPLICABLE"
+BUDGET_GATE_NOT_EVALUATED = "BUDGET_GATE_NOT_EVALUATED"
 
 SUPPORTED_ACTION_TYPES = {
     "REFRESH_EVIDENCE",
@@ -95,6 +107,7 @@ def build_track_b_paper_autonomous_recovery_executor_attempt(
         config=config,
         action_type=action_type,
         budget_key=budget_key,
+        target_identity=normalized_target,
         now=actual_now,
     )
     would_mutate_runtime = action_type in {"RUNTIME_RETRY", "MARKET_DATA_RESTART"}
@@ -112,14 +125,19 @@ def build_track_b_paper_autonomous_recovery_executor_attempt(
         classification = EXECUTOR_BLOCKED_PRE_ACTION_VALIDATION
         reason = "Pre-action Control Plane Snapshot validation blocked the attempt."
         blockers.append({"code": "pre_action_validation", "detail": str(validation.get("classification") or "")})
+    elif action_type == "RUNTIME_RETRY" and budget["budget_gate_classification"] != BUDGET_GATE_PASS:
+        classification = EXECUTOR_BLOCKED_BUDGET_EXHAUSTED
+        reason = "Recovery Budget Ledger blocked RUNTIME_RETRY before the disabled adapter boundary."
+        blockers.append({"code": "recovery_budget_gate", "detail": str(budget["budget_gate_classification"])})
     elif budget["budget_exhausted"] is True:
         classification = EXECUTOR_BLOCKED_BUDGET_EXHAUSTED
-        reason = "Dry-run recovery budget is exhausted for this action/target window."
-        blockers.append({"code": "budget_exhausted", "detail": budget_key})
+        reason = "Dry-run executor audit budget is exhausted for this action/target window."
+        blockers.append({"code": "executor_audit_budget_exhausted", "detail": budget_key})
     adapter_result = _adapter_result(
         config=config,
         action_type=action_type,
         validation=validation,
+        budget=budget,
         classification=classification,
         normalized_target=normalized_target,
     )
@@ -143,7 +161,11 @@ def build_track_b_paper_autonomous_recovery_executor_attempt(
             "classification": budget.get("ledger_classification"),
             "source_authority_path": budget.get("ledger_authority_path"),
             "attempts_remaining": budget.get("ledger_attempts_remaining"),
+            "attempts_used": budget.get("ledger_attempts_used"),
             "budget_exhausted": budget.get("ledger_budget_exhausted"),
+            "cooldown_until": budget.get("ledger_cooldown_until"),
+            "quarantine_required": budget.get("ledger_quarantine_required"),
+            "budget_gate_classification": budget.get("budget_gate_classification"),
         },
         "pre_action_validation": validation,
         "action_adapter": adapter_result,
@@ -246,12 +268,14 @@ def _budget_summary(
     config: TrackBPaperAutonomousRecoveryExecutorConfig,
     action_type: str,
     budget_key: str,
+    target_identity: Mapping[str, str],
     now: datetime,
 ) -> dict[str, Any]:
     window_start = now - timedelta(seconds=config.budget_window_seconds)
     rows = _event_rows(config.resolve(config.event_log_path))
     ledger = _read_json(config.resolve(config.recovery_budget_ledger_path))
-    ledger_budget = _ledger_budget_for_action(ledger, action_type=action_type)
+    ledger_budget = _ledger_budget_for_action(ledger, action_type=action_type, target_identity=target_identity)
+    budget_gate = _budget_gate(ledger=ledger, ledger_budget=ledger_budget, action_type=action_type, now=now)
     target_attempts = 0
     window_attempts = 0
     for row in rows:
@@ -270,7 +294,12 @@ def _budget_summary(
         "ledger_classification": ledger.get("classification") or "MISSING",
         "ledger_budget_exhausted": ledger_budget.get("budget_exhausted") is True,
         "ledger_attempts_remaining": ledger_budget.get("attempts_remaining"),
+        "ledger_attempts_used": ledger_budget.get("attempts_used"),
+        "ledger_cooldown_until": ledger_budget.get("cooldown_until"),
+        "ledger_quarantine_required": ledger_budget.get("quarantine_required") is True,
         "ledger_authority_path": _mapping(ledger.get("artifact_paths")).get("authority"),
+        "budget_gate_classification": budget_gate["classification"],
+        "budget_gate_reason": budget_gate["reason"],
         "max_attempts_per_target": config.max_attempts_per_target,
         "max_attempts_per_window": config.max_attempts_per_window,
         "budget_window_seconds": config.budget_window_seconds,
@@ -287,6 +316,7 @@ def _adapter_result(
     config: TrackBPaperAutonomousRecoveryExecutorConfig,
     action_type: str,
     validation: Mapping[str, Any],
+    budget: Mapping[str, Any],
     classification: str,
     normalized_target: Mapping[str, str],
 ) -> dict[str, Any]:
@@ -305,6 +335,8 @@ def _adapter_result(
     blocked_reason = "ADAPTER_DISABLED"
     if validation.get("classification") != PRE_ACTION_SNAPSHOT_VALID:
         blocked_reason = "PRE_ACTION_VALIDATION_BLOCKED"
+    elif budget.get("budget_gate_classification") != BUDGET_GATE_PASS:
+        blocked_reason = str(budget.get("budget_gate_classification") or BUDGET_GATE_BLOCKED_MISSING)
     elif validation.get("planner_action_type") != "RUNTIME_RETRY":
         blocked_reason = "PLAN_ACTION_TYPE_MISMATCH"
     elif validation.get("snapshot_safe_to_start_runtime") is not True:
@@ -325,10 +357,18 @@ def _adapter_result(
         "control_plane_snapshot_id": validation.get("control_plane_snapshot_id") or "",
         "shared_truth_generation_id": validation.get("shared_truth_refresh_generation_id") or "",
         "budget_key": _budget_key(action_type=action_type, target_identity=normalized_target),
+        "recovery_budget_classification": budget.get("ledger_classification"),
+        "attempts_remaining": budget.get("ledger_attempts_remaining"),
+        "attempts_used": budget.get("ledger_attempts_used"),
+        "budget_exhausted": budget.get("ledger_budget_exhausted") is True,
+        "cooldown_until": budget.get("ledger_cooldown_until"),
+        "quarantine_required": budget.get("ledger_quarantine_required") is True,
+        "budget_gate_classification": budget.get("budget_gate_classification"),
         "dry_run_result": {
             "classification": classification,
             "validated_runtime_start_allowed": validation.get("snapshot_safe_to_start_runtime") is True,
             "validated_plan_action_type": validation.get("planner_action_type") == "RUNTIME_RETRY",
+            "validated_recovery_budget_gate": budget.get("budget_gate_classification") == BUDGET_GATE_PASS,
         },
         "apply_result": {
             "placeholder": True,
@@ -365,16 +405,60 @@ def _read_json(path: Path) -> dict[str, Any]:
     return dict(payload) if isinstance(payload, Mapping) else {}
 
 
-def _ledger_budget_for_action(payload: Mapping[str, Any], *, action_type: str) -> dict[str, Any]:
+def _ledger_budget_for_action(
+    payload: Mapping[str, Any],
+    *,
+    action_type: str,
+    target_identity: Mapping[str, str],
+) -> dict[str, Any]:
+    wanted_hash = target_identity_hash(target_identity)
     for entry in _list(payload.get("entries")):
         row = _mapping(entry)
-        if row.get("action_type") == action_type:
+        if (
+            row.get("agent_id") == DEFAULT_AGENT_ID
+            and row.get("action_type") == action_type
+            and row.get("target_identity_hash") == wanted_hash
+        ):
             return dict(row)
     summary = _mapping(payload.get("summary"))
     return {
+        "budget_entry_missing": bool(payload),
         "budget_exhausted": payload.get("budget_exhausted") is True or summary.get("budget_exhausted") is True,
         "attempts_remaining": summary.get("minimum_attempts_remaining"),
+        "quarantine_required": payload.get("quarantine_required") is True or summary.get("quarantine_required") is True,
     }
+
+
+def _budget_gate(
+    *,
+    ledger: Mapping[str, Any],
+    ledger_budget: Mapping[str, Any],
+    action_type: str,
+    now: datetime,
+) -> dict[str, str]:
+    if action_type != "RUNTIME_RETRY":
+        return {"classification": BUDGET_GATE_NOT_APPLICABLE, "reason": "Budget gate applies only to RUNTIME_RETRY in v1."}
+    if not ledger or not ledger.get("classification"):
+        return {"classification": BUDGET_GATE_BLOCKED_MISSING, "reason": "Recovery Budget Ledger authority artifact is missing."}
+    if ledger_budget.get("budget_entry_missing") is True:
+        return {"classification": BUDGET_GATE_BLOCKED_MISSING, "reason": "Recovery Budget Ledger has no matching RUNTIME_RETRY budget entry."}
+    if ledger_budget.get("quarantine_required") is True:
+        return {"classification": BUDGET_GATE_BLOCKED_QUARANTINE, "reason": "Recovery Budget Ledger requires quarantine."}
+    cooldown_until = _parse_datetime(ledger_budget.get("cooldown_until"))
+    if cooldown_until is not None and cooldown_until > now:
+        return {"classification": BUDGET_GATE_BLOCKED_COOLDOWN, "reason": "Recovery Budget Ledger cooldown is active."}
+    if ledger_budget.get("budget_exhausted") is True:
+        return {"classification": BUDGET_GATE_BLOCKED_EXHAUSTED, "reason": "Recovery Budget Ledger budget is exhausted."}
+    attempts_remaining = ledger_budget.get("attempts_remaining")
+    if attempts_remaining is None:
+        return {"classification": BUDGET_GATE_BLOCKED_MISSING, "reason": "Recovery Budget Ledger attempts_remaining is missing."}
+    try:
+        remaining = int(attempts_remaining)
+    except (TypeError, ValueError):
+        return {"classification": BUDGET_GATE_BLOCKED_MISSING, "reason": "Recovery Budget Ledger attempts_remaining is invalid."}
+    if remaining <= 0:
+        return {"classification": BUDGET_GATE_BLOCKED_EXHAUSTED, "reason": "Recovery Budget Ledger has no attempts remaining."}
+    return {"classification": BUDGET_GATE_PASS, "reason": "Recovery Budget Ledger permits one bounded RUNTIME_RETRY attempt."}
 
 
 def _event_row(payload: Mapping[str, Any]) -> dict[str, Any]:

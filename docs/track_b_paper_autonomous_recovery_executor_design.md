@@ -146,6 +146,24 @@ Executor audit artifacts:
 - `would_execute_command` records the intended launcher command
 - `apply_result.executed=false`
 
+Before the disabled adapter can report `ADAPTER_DISABLED`, it must pass two hard
+pre-apply gates:
+
+- `validate_track_b_pre_action_snapshot(...)` must return
+  `PRE_ACTION_SNAPSHOT_VALID`.
+- Recovery Budget Ledger must provide a matching `RUNTIME_RETRY` budget entry
+  for `agent_id=track_b_paper_runtime` and the target identity hash, with
+  `attempts_remaining > 0`, no exhausted budget, no active cooldown, and no
+  quarantine requirement.
+
+Budget gate classifications:
+
+- `BUDGET_GATE_PASS`
+- `BUDGET_GATE_BLOCKED_EXHAUSTED`
+- `BUDGET_GATE_BLOCKED_COOLDOWN`
+- `BUDGET_GATE_BLOCKED_QUARANTINE`
+- `BUDGET_GATE_BLOCKED_MISSING`
+
 The placeholder config flag `enable_runtime_retry_adapter` may be recorded for audit, but it does not enable execution. A second, explicitly reviewed enablement boundary is required before this adapter may start a runtime.
 
 Broker/order mutation adapters remain later and stricter:
