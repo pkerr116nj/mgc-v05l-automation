@@ -433,6 +433,10 @@ class _DecisionBuilder:
             "submit_block_required": submit_block_required,
             "submit_block_reason": "; ".join(row["detail"] for row in self.blockers) if submit_block_required else None,
             "canonical_readiness": _canonical_state(self.canonical),
+            "broker_lease_degraded_diagnostic": any(
+                row.get("code") == "broker_truth_lease_degraded_refresh_failing" for row in self.warnings
+            )
+            and not submit_block_required,
             "live_money_eligible": False,
             "authority": {
                 "paper_only": True,

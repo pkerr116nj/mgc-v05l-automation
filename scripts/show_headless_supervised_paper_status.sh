@@ -232,6 +232,7 @@ for key in (
     "root_match",
     "broker_truth_fresh",
     "broker_truth_lease_state",
+    "broker_lease_degraded_diagnostic",
     "broker_truth_lease_age_seconds",
     "broker_truth_lease_entry_seconds_remaining",
     "proof_readiness_classification",

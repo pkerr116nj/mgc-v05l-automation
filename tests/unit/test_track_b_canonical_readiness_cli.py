@@ -186,6 +186,7 @@ def test_json_summary_contains_compact_fields(capsys) -> None:
     summary = json.loads(capsys.readouterr().out)
     assert sorted(summary) == [
         "blockers",
+        "broker_lease_degraded_diagnostic",
         "broker_truth_fresh",
         "broker_truth_lease_age_seconds",
         "broker_truth_lease_entry_seconds_remaining",
@@ -193,9 +194,17 @@ def test_json_summary_contains_compact_fields(capsys) -> None:
         "classification",
         "eligible_lane_count",
         "generated_at",
+        "proof_readiness_classification",
         "quarantine_count",
         "reconciliation_state",
         "root_match",
+        "shared_truth_broker_lease",
+        "shared_truth_managed_order_registry",
+        "shared_truth_managed_position_registry",
+        "shared_truth_open_order_truth",
+        "shared_truth_order_adjustment_planner",
+        "shared_truth_position_truth",
+        "shared_truth_runtime_environment_truth",
         "warnings",
     ]
     assert summary["generated_at"] == "2026-05-18T12:00:00+00:00"

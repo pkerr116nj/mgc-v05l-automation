@@ -144,6 +144,8 @@ def test_active_degraded_lease_recommends_repair_without_operator_required() -> 
     assert result["supervisor_state"] == "DEGRADED"
     assert {"REFRESH_BROKER_TRUTH", "RETRY", "ROTATE_CLIENT_ID"}.issubset(result["recommended_actions"])
     assert result["operator_action_required"] is False
+    assert result["submit_block_required"] is False
+    assert result["broker_lease_degraded_diagnostic"] is True
     assert _warning_codes(result) >= {"broker_truth_lease_degraded_refresh_failing"}
 
 

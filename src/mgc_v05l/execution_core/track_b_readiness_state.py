@@ -857,15 +857,13 @@ def _execution_core_shared_truth_decision(evidence: Mapping[str, Any]) -> dict[s
 
     lease_state = str(classifications.get("Broker Truth Lease") or broker_lease_warning.get("lease_state") or "")
     if lease_state == "ACTIVE_DEGRADED_REFRESH_FAILING":
-        blockers.append(
+        warnings.append(
             {
                 "code": "broker_truth_lease_degraded_refresh_failing",
-                "detail": "Broker Truth Lease is ACTIVE_DEGRADED_REFRESH_FAILING; current broker truth cannot be trusted for submit-capable readiness.",
+                "detail": "Broker Truth Lease is ACTIVE_DEGRADED_REFRESH_FAILING; broker truth remains usable while fresh and reconciled, but refresh degradation is diagnostic.",
                 "source": "execution_core_broker_truth_lease",
-                "state": "NOT_READY_DEPENDENCY",
             }
         )
-        return {"blockers": blockers, "warnings": warnings}
 
     reconciliation_classification = str(classifications.get("Reconciliation") or "")
     if reconciliation_classification and reconciliation_classification != "TRACK_B_PAPER_BROKER_RECONCILED":
@@ -1751,6 +1749,14 @@ def _readiness_result(
     if state not in CANONICAL_READINESS_STATES:
         state = "NOT_READY_CONFIG"
     root_guard = _mapping(inputs.get("root_guard_summary"))
+    broker_truth_lease = _mapping(inputs.get("broker_truth_lease"))
+    execution_core_shared_truth = _mapping(inputs.get("execution_core_shared_truth"))
+    shared_truth_classifications = _mapping(execution_core_shared_truth.get("classifications"))
+    broker_lease_degraded_diagnostic = (
+        str(broker_truth_lease.get("lease_state") or "").upper() == "ACTIVE_DEGRADED_REFRESH_FAILING"
+        or str(shared_truth_classifications.get("Broker Truth Lease") or "").upper()
+        == "ACTIVE_DEGRADED_REFRESH_FAILING"
+    )
     return {
         "schema_version": "track_b_canonical_readiness_v1",
         "generated_at": generated_at,
@@ -1767,9 +1773,10 @@ def _readiness_result(
         "runtime": _mapping(inputs.get("runtime")),
         "runtime_truth_heartbeat": _mapping(inputs.get("runtime_truth_heartbeat")),
         "broker_truth": _mapping(inputs.get("broker_truth")),
-        "broker_truth_lease": _mapping(inputs.get("broker_truth_lease")),
+        "broker_truth_lease": broker_truth_lease,
+        "broker_lease_degraded_diagnostic": broker_lease_degraded_diagnostic,
         "phase1_reconciliation": _mapping(inputs.get("phase1_reconciliation")),
-        "execution_core_shared_truth": _mapping(inputs.get("execution_core_shared_truth")),
+        "execution_core_shared_truth": execution_core_shared_truth,
         "market_data": _mapping(inputs.get("market_data")),
         "lane_quarantine": _mapping(inputs.get("lane_quarantine")),
         "submit_bridge": _mapping(inputs.get("submit_bridge")),

@@ -18070,6 +18070,7 @@ def _canonical_readiness_dashboard_summary(payload: dict[str, Any], path: Path) 
         "root_guard_summary": dict(payload.get("root_guard_summary") or {}),
         "broker_truth": dict(payload.get("broker_truth") or {}),
         "broker_truth_lease": dict(payload.get("broker_truth_lease") or {}),
+        "broker_lease_degraded_diagnostic": payload.get("broker_lease_degraded_diagnostic") is True,
         "phase1_reconciliation": dict(payload.get("phase1_reconciliation") or {}),
         "shared_truth": _canonical_readiness_shared_truth_summary(
             dict(payload.get("execution_core_shared_truth") or {})

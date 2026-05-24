@@ -219,7 +219,7 @@ def test_closed_market_proof_readiness_blocks_with_clear_market_evidence() -> No
     assert result["readiness_blockers"][0]["source"] == "execution_core_proof_readiness"
 
 
-def test_degraded_shared_broker_lease_blocks_distinct_from_reconciliation() -> None:
+def test_degraded_shared_broker_lease_is_diagnostic_when_truth_clean() -> None:
     inputs = _clean_inputs()
     inputs["execution_core_shared_truth"] = _shared_truth_evidence(
         broker_truth_lease="ACTIVE_DEGRADED_REFRESH_FAILING",
@@ -227,9 +227,12 @@ def test_degraded_shared_broker_lease_blocks_distinct_from_reconciliation() -> N
 
     result = classify_canonical_readiness(inputs)
 
-    assert result["canonical_readiness"] == "NOT_READY_DEPENDENCY"
-    assert result["readiness_blockers"][0]["code"] == "broker_truth_lease_degraded_refresh_failing"
-    assert result["readiness_blockers"][0]["source"] == "execution_core_broker_truth_lease"
+    assert result["canonical_readiness"] == "READY_SUBMIT_CAPABLE"
+    assert result["broker_lease_degraded_diagnostic"] is True
+    assert {row["code"] for row in result["readiness_blockers"]} == set()
+    assert {
+        row["code"] for row in result["readiness_warnings"]
+    } >= {"broker_truth_lease_degraded_refresh_failing"}
     assert result["phase1_reconciliation"]["classification"] == "TRACK_B_PAPER_BROKER_RECONCILED"
 
 
@@ -648,6 +651,7 @@ def test_degraded_broker_truth_lease_warns_without_dependency_blocker() -> None:
     result = classify_canonical_readiness(inputs)
 
     assert result["canonical_readiness"] == "READY_SUBMIT_CAPABLE"
+    assert result["broker_lease_degraded_diagnostic"] is True
     warning_codes = {row["code"] for row in result["readiness_warnings"]}
     assert "latest_broker_attempt_failed" in warning_codes
     assert "broker_truth_lease_degraded_refresh_failing" in warning_codes

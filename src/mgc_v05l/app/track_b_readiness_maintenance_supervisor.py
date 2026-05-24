@@ -115,6 +115,7 @@ def compact_supervisor_summary(payload: Mapping[str, Any]) -> dict[str, Any]:
         "operator_action_required": payload.get("operator_action_required") is True,
         "submit_block_required": payload.get("submit_block_required") is True,
         "canonical_readiness": payload.get("canonical_readiness"),
+        "broker_lease_degraded_diagnostic": payload.get("broker_lease_degraded_diagnostic") is True,
         "live_money_eligible": False,
     }
 
@@ -134,6 +135,7 @@ def print_summary(summary: Mapping[str, Any], *, as_json: bool) -> None:
         "operator_action_required",
         "submit_block_required",
         "canonical_readiness",
+        "broker_lease_degraded_diagnostic",
         "live_money_eligible",
     ):
         print(f"{key}={_format_summary_value(summary.get(key))}")
