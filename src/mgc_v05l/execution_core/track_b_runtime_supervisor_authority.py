@@ -1152,6 +1152,8 @@ def _coherence_sources(inputs: Mapping[str, Mapping[str, Any]]) -> list[tuple[st
 
 def _market_closed(inputs: Mapping[str, Mapping[str, Any]]) -> bool:
     proof = inputs["proof_readiness"]
+    if _proof_readiness_reports_open_session(proof):
+        return False
     resume = inputs["runtime_resume_semantics"]
     self_recover = inputs["self_recover_rules"]
     if proof.get("classification") == MARKET_CLOSED_NO_FRESH_BARS:
@@ -1166,6 +1168,14 @@ def _market_closed(inputs: Mapping[str, Mapping[str, Any]]) -> bool:
     if self_recover.get("recommendation") == "WAIT_MARKET_CLOSED":
         return True
     return False
+
+
+def _proof_readiness_reports_open_session(proof: Mapping[str, Any]) -> bool:
+    session = _mapping(proof.get("phase1_market_session"))
+    if session.get("market_closed") is False:
+        return True
+    reason = str(session.get("reason") or proof.get("phase1_session_reason") or "")
+    return reason in {"GLOBEX_SESSION_OPEN", "MARKET_OPEN_EXPECT_FRESH_BARS"}
 
 
 def _input_artifacts(config: TrackBRuntimeSupervisorAuthorityConfig) -> dict[str, str]:

@@ -61,6 +61,16 @@ from mgc_v05l.execution_core.track_b_runtime_safe_state_envelope import (
     build_track_b_runtime_safe_state_envelope,
     write_track_b_runtime_safe_state_envelope,
 )
+from mgc_v05l.execution_core.track_b_runtime_resume_semantics import (
+    TrackBRuntimeResumeSemanticsConfig,
+    build_track_b_runtime_resume_semantics,
+    write_track_b_runtime_resume_semantics,
+)
+from mgc_v05l.execution_core.track_b_self_recover_rules import (
+    TrackBSelfRecoverRulesConfig,
+    build_track_b_self_recover_rules,
+    write_track_b_self_recover_rules,
+)
 from mgc_v05l.execution_core.track_b_shared_truth_refresh_cli import (
     DEFAULT_SHARED_TRUTH_REFRESH_ARTIFACT,
     TrackBSharedTruthRefreshConfig,
@@ -147,6 +157,19 @@ def build_track_b_control_plane_snapshot(
         source_commit_resolver=source_commit_resolver,
     )
     agent_health_path = write_track_b_agent_health(config=agent_health_config, payload=agent_health)
+    runtime_resume_config = TrackBRuntimeResumeSemanticsConfig(
+        repo_root=config.repo_root,
+        dashboard_projection_path=None,
+        allow_control_plane_build_context=True,
+    )
+    runtime_resume = build_track_b_runtime_resume_semantics(config=runtime_resume_config, now=actual_now)
+    write_track_b_runtime_resume_semantics(config=runtime_resume_config, payload=runtime_resume)
+    self_recover_config = TrackBSelfRecoverRulesConfig(
+        repo_root=config.repo_root,
+        dashboard_projection_path=None,
+    )
+    self_recover = build_track_b_self_recover_rules(config=self_recover_config, now=actual_now)
+    write_track_b_self_recover_rules(config=self_recover_config, payload=self_recover)
 
     supervisor_config = TrackBRuntimeSupervisorAuthorityConfig(
         repo_root=config.repo_root,

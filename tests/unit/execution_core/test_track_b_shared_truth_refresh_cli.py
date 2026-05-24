@@ -194,6 +194,30 @@ def test_runtime_start_preflight_blocks_managed_position(tmp_path: Path) -> None
     )
 
 
+def test_runtime_start_preflight_allows_active_degraded_broker_lease_within_valid_window(tmp_path: Path) -> None:
+    result = {
+        "generated_at": NOW.isoformat(),
+        "live_money_eligible": False,
+        "unsafe_blockers": [],
+        "artifact_paths": {},
+        "warnings": [],
+        "classifications": {
+            "Open Order Truth": "NO_OPEN_ORDERS",
+            "Managed Order Registry": "NO_MANAGED_ORDERS",
+            "Position Truth": "CLEAN_FLAT_READY",
+            "Runtime Environment Truth": "RUNTIME_DOWN_CLEAN",
+            "Managed Position Registry": "NO_MANAGED_POSITIONS",
+            "Reconciliation": "TRACK_B_PAPER_BROKER_RECONCILED",
+            "Broker Truth Lease": "ACTIVE_DEGRADED_REFRESH_FAILING",
+        },
+    }
+
+    preflight = build_runtime_start_preflight_summary(result)
+
+    assert preflight["classification"] == "SHARED_TRUTH_PREFLIGHT_CLEAN"
+    assert preflight["blockers"] == []
+
+
 def test_dashboard_projections_are_not_consumed_or_written(tmp_path: Path) -> None:
     _seed_clean_stack(tmp_path)
 

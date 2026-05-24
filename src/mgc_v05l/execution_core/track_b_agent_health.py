@@ -80,6 +80,12 @@ DEFAULT_CONTROL_PLANE_SNAPSHOT_ARTIFACT = (
 DEFAULT_SHARED_TRUTH_REFRESH_ARTIFACT = (
     Path("outputs") / "track_b_execution_core" / "shared_truth" / "latest_track_b_shared_truth_refresh.json"
 )
+DEFAULT_BROKER_TRUTH_STATUS_ARTIFACT = (
+    Path("outputs") / "reports" / "ibkr_read_only_verification" / "ibkr_broker_truth_refresh_status.json"
+)
+DEFAULT_BROKER_TRUTH_LEASE_ARTIFACT = (
+    Path("outputs") / "operator_dashboard" / "runtime" / "latest_broker_truth_lease.json"
+)
 DEFAULT_ARTIFACT_MAX_AGE_SECONDS = 300.0
 
 
@@ -94,6 +100,8 @@ class TrackBAgentHealthConfig:
     process_hygiene_path: Path = DEFAULT_PROCESS_HYGIENE_ARTIFACT
     control_plane_snapshot_path: Path = DEFAULT_CONTROL_PLANE_SNAPSHOT_ARTIFACT
     shared_truth_refresh_path: Path = DEFAULT_SHARED_TRUTH_REFRESH_ARTIFACT
+    broker_truth_status_path: Path = DEFAULT_BROKER_TRUTH_STATUS_ARTIFACT
+    broker_lease_path: Path = DEFAULT_BROKER_TRUTH_LEASE_ARTIFACT
     artifact_max_age_seconds: float = DEFAULT_ARTIFACT_MAX_AGE_SECONDS
 
     def resolve(self, path: Path) -> Path:
@@ -299,6 +307,15 @@ def _agent_health_row(
         )
         if status == HEALTHY and artifact_status["status"] == STALE and _phase1_market_closed(phase1_readiness):
             artifact_status = {**artifact_status, "status": HEALTHY}
+    elif agent_id == "broker_truth_lease_refresher":
+        primary_path = str(config.resolve(config.broker_truth_status_path))
+        artifact_status = _broker_truth_artifact_status(
+            config=config,
+            now=now,
+            current_head=current_head,
+        )
+        status = str(artifact_status.get("status") or MISSING_ARTIFACT)
+        reason = str(artifact_status.get("reason") or "broker_truth_artifact_status")
     elif expected_state == ON_DEMAND:
         status, reason = HEALTHY, "on_demand_agent_invoked_by_callers"
         primary_path = None
@@ -511,6 +528,69 @@ def _required_artifact_status(
         repo_root=repo_root,
         current_head=current_head,
     )
+
+
+def _broker_truth_artifact_status(
+    *,
+    config: TrackBAgentHealthConfig,
+    now: datetime,
+    current_head: str | None,
+) -> dict[str, Any]:
+    status_path = config.resolve(config.broker_truth_status_path)
+    lease_path = config.resolve(config.broker_lease_path)
+    status_payload = _read_json(status_path)
+    lease_payload = _read_json(lease_path)
+    status_artifact = _artifact_status(
+        status_path,
+        now=now,
+        max_age_seconds=config.artifact_max_age_seconds,
+        repo_root=config.repo_root,
+        current_head=current_head,
+    )
+    lease_artifact = _artifact_status(
+        lease_path,
+        now=now,
+        max_age_seconds=config.artifact_max_age_seconds,
+        repo_root=config.repo_root,
+        current_head=current_head,
+    )
+    if status_artifact.get("status") in {MISSING_ARTIFACT, ROOT_MISMATCH, SOURCE_COMMIT_MISMATCH}:
+        return status_artifact
+    if lease_artifact.get("status") in {MISSING_ARTIFACT, ROOT_MISMATCH, SOURCE_COMMIT_MISMATCH}:
+        return lease_artifact
+    lease_state = str(lease_payload.get("lease_state") or "")
+    operator_required = lease_payload.get("operator_action_required") is True
+    if not lease_state and str(status_payload.get("classification") or "") == "READY":
+        return status_artifact
+    if status_artifact.get("status") == STALE or lease_artifact.get("status") == STALE:
+        return {
+            **status_artifact,
+            "status": STALE,
+            "reason": "broker_truth_or_lease_stale",
+            "lease_state": lease_state,
+        }
+    status_fresh = str(status_payload.get("classification") or "") == "BROKER_TRUTH_REFRESH_READY"
+    lease_valid = lease_state in {"ACTIVE", "ACTIVE_DEGRADED_REFRESH_FAILING"} and operator_required is False
+    if status_fresh and lease_valid:
+        return {
+            **status_artifact,
+            "status": HEALTHY,
+            "reason": "broker_truth_and_lease_fresh",
+            "lease_state": lease_state,
+        }
+    if lease_valid:
+        return {
+            **status_artifact,
+            "status": DEGRADED,
+            "reason": "broker_lease_active_degraded_refresh_failing",
+            "lease_state": lease_state,
+        }
+    return {
+        **status_artifact,
+        "status": STALE,
+        "reason": "broker_truth_lease_not_active",
+        "lease_state": lease_state,
+    }
 
 
 def _optional_artifact_status(

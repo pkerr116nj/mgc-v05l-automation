@@ -126,6 +126,61 @@ def test_stale_runtime_pid_is_degraded_not_proof_blocking_when_runtime_down_clea
     assert runtime["blocking_for_runtime_submit"] is False
 
 
+def test_fresh_broker_truth_with_stale_refresher_pid_is_not_proof_blocking(tmp_path: Path) -> None:
+    _seed_healthy_artifacts(tmp_path)
+    _write_json(
+        tmp_path / "outputs/reports/ibkr_read_only_verification/ibkr_broker_truth_refresh_status.json",
+        {"generated_at": NOW.isoformat(), "classification": "BROKER_TRUTH_REFRESH_READY"},
+    )
+    _write_json(
+        tmp_path / "outputs/operator_dashboard/runtime/latest_broker_truth_lease.json",
+        {
+            "generated_at": NOW.isoformat(),
+            "lease_state": "ACTIVE",
+            "operator_action_required": False,
+            "live_money_eligible": False,
+        },
+    )
+    (tmp_path / "var/track_b_broker_truth_refresh_service.pid").write_text("123456\n", encoding="utf-8")
+
+    payload = build_track_b_agent_health(
+        config=TrackBAgentHealthConfig(repo_root=tmp_path),
+        now=NOW,
+        process_rows=[],
+        pid_running=lambda _pid: False,
+    )
+
+    broker = _agent(payload, "broker_truth_lease_refresher")
+    assert broker["status"] == HEALTHY
+    assert broker["reason"] == "broker_truth_and_lease_fresh"
+    assert broker["stale_pid_detected"] is True
+    assert broker["blocking_for_proof"] is False
+    assert broker["blocking_for_runtime_submit"] is False
+
+
+def test_stale_broker_truth_remains_proof_blocking(tmp_path: Path) -> None:
+    _seed_healthy_artifacts(tmp_path)
+    _write_json(
+        tmp_path / "outputs/reports/ibkr_read_only_verification/ibkr_broker_truth_refresh_status.json",
+        {"generated_at": (NOW - timedelta(minutes=20)).isoformat(), "classification": "BROKER_TRUTH_REFRESH_READY"},
+    )
+    _write_json(
+        tmp_path / "outputs/operator_dashboard/runtime/latest_broker_truth_lease.json",
+        {
+            "generated_at": (NOW - timedelta(minutes=20)).isoformat(),
+            "lease_state": "ACTIVE",
+            "operator_action_required": False,
+            "live_money_eligible": False,
+        },
+    )
+
+    payload = build_track_b_agent_health(config=TrackBAgentHealthConfig(repo_root=tmp_path), now=NOW, process_rows=[])
+
+    broker = _agent(payload, "broker_truth_lease_refresher")
+    assert broker["status"] == STALE
+    assert broker["blocking_for_proof"] is True
+
+
 def test_duplicate_runtime_writer_blocks(tmp_path: Path) -> None:
     _seed_healthy_artifacts(tmp_path)
 

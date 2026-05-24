@@ -83,6 +83,25 @@ def test_market_closed_waits_without_alarm(tmp_path: Path) -> None:
     assert payload["self_recover_recommended_recovery_action"] == "WAIT_MARKET_CLOSED"
 
 
+def test_open_proof_window_ignores_stale_market_closed_resume_and_self_recover(tmp_path: Path) -> None:
+    _seed_base(
+        tmp_path,
+        proof_classification=READY_FOR_PROOF,
+        resume_classification=RESUME_BLOCKED_MARKET_CLOSED,
+        resume_action_policy=RESUME_POLICY_HOLD_MARKET_CLOSED,
+        resume_reason=MARKET_CLOSED_NO_FRESH_BARS,
+        self_recover_recommendation="WAIT_MARKET_CLOSED",
+        autonomous_plan_classification="WAIT_MARKET_CLOSED",
+        autonomous_plan_next_action="WAIT_MARKET_CLOSED",
+    )
+
+    payload = build_track_b_runtime_supervisor_authority(config=TrackBRuntimeSupervisorAuthorityConfig(repo_root=tmp_path), now=NOW)
+
+    assert payload["classification"] != SUPERVISOR_WAIT_MARKET_CLOSED
+    assert payload["supervisor_mode"] != MARKET_CLOSED_WAIT
+    assert payload["proof_window_status"] == "ready"
+
+
 def test_clean_proof_ready_allows_runtime_start(tmp_path: Path) -> None:
     _seed_base(tmp_path)
 
@@ -514,6 +533,15 @@ def _seed_base(
             "generated_at": NOW.isoformat(),
             "classification": proof_classification,
             "phase1_session_reason": proof_classification,
+            "phase1_market_session": {
+                "classification": "MARKET_CLOSED_NO_FRESH_BARS"
+                if proof_classification == MARKET_CLOSED_NO_FRESH_BARS
+                else "MARKET_OPEN_EXPECT_FRESH_BARS",
+                "market_closed": proof_classification == MARKET_CLOSED_NO_FRESH_BARS,
+                "reason": "MARKET_CLOSED_NO_FRESH_BARS"
+                if proof_classification == MARKET_CLOSED_NO_FRESH_BARS
+                else "GLOBEX_SESSION_OPEN",
+            },
             "live_money_eligible": live_money_eligible,
         },
     )

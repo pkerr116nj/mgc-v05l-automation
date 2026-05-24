@@ -82,7 +82,7 @@ RUNTIME_START_REQUIRED_CLASSIFICATIONS = {
     "Runtime Environment Truth": {RUNTIME_DOWN_CLEAN},
     "Managed Position Registry": {NO_MANAGED_POSITIONS},
     "Reconciliation": {"TRACK_B_PAPER_BROKER_RECONCILED"},
-    "Broker Truth Lease": {"ACTIVE"},
+    "Broker Truth Lease": {"ACTIVE", "ACTIVE_DEGRADED_REFRESH_FAILING"},
 }
 
 

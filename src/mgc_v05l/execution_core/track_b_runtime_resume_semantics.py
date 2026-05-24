@@ -129,6 +129,7 @@ class TrackBRuntimeResumeSemanticsConfig:
     stop_provenance_path: Path = DEFAULT_RUNTIME_STOP_PROVENANCE_ARTIFACT
     paper_recovery_policy_path: Path = DEFAULT_PAPER_RECOVERY_POLICY_ARTIFACT
     control_plane_snapshot_path: Path = DEFAULT_CONTROL_PLANE_SNAPSHOT_ARTIFACT
+    allow_control_plane_build_context: bool = False
     recovery_budget_ledger_path: Path = DEFAULT_RECOVERY_BUDGET_LEDGER_ARTIFACT
 
     def resolve(self, path: Path) -> Path:
@@ -159,7 +160,11 @@ def build_track_b_runtime_resume_semantics(
         "control_plane_snapshot": _read_json(config.resolve(config.control_plane_snapshot_path)),
         "recovery_budget_ledger": _read_json(config.resolve(config.recovery_budget_ledger_path)),
     }
-    decision = _classify_resume(inputs=inputs, now=actual_now)
+    decision = _classify_resume(
+        inputs=inputs,
+        now=actual_now,
+        allow_control_plane_build_context=config.allow_control_plane_build_context,
+    )
     stop = _stop_provenance(inputs["stop_provenance"])
     generation = _generation_evidence(inputs=inputs, now=actual_now)
     payload = {
@@ -312,7 +317,12 @@ def main(argv: Sequence[str] | None = None) -> int:
     return 0 if payload.get("allowed") is True else 2
 
 
-def _classify_resume(*, inputs: Mapping[str, Mapping[str, Any]], now: datetime) -> dict[str, Any]:
+def _classify_resume(
+    *,
+    inputs: Mapping[str, Mapping[str, Any]],
+    now: datetime,
+    allow_control_plane_build_context: bool = False,
+) -> dict[str, Any]:
     evidence = _evidence(inputs)
     stop = _stop_provenance(inputs["stop_provenance"])
     control_plane_status = classify_control_plane_snapshot_status(inputs["control_plane_snapshot"], now=now)
@@ -342,7 +352,20 @@ def _classify_resume(*, inputs: Mapping[str, Mapping[str, Any]], now: datetime) 
             budget=budget,
         )
 
-    if control_plane_status.get("classification") != CONTROL_PLANE_READY:
+    if _market_closed(inputs):
+        return _decision(
+            RESUME_BLOCKED_MARKET_CLOSED,
+            MARKET_CLOSED_NO_FRESH_BARS,
+            blockers=[_blocker("market_session", MARKET_CLOSED_NO_FRESH_BARS)],
+            warnings=warnings,
+            resume_mode="hold_down_market_closed",
+            resume_action_policy=RESUME_POLICY_HOLD_MARKET_CLOSED,
+            budget=budget,
+        )
+
+    if control_plane_status.get("classification") != CONTROL_PLANE_READY and not (
+        allow_control_plane_build_context and _shared_truth_supports_new_generation(evidence)
+    ):
         return _decision(
             RESUME_BLOCKED_STALE_OR_MISSING_EVIDENCE,
             str(control_plane_status.get("reason") or "Control Plane Snapshot is unavailable or not launch-ready."),
@@ -351,6 +374,13 @@ def _classify_resume(*, inputs: Mapping[str, Mapping[str, Any]], now: datetime) 
             resume_mode="hold_down_refresh_required",
             resume_action_policy=RESUME_POLICY_HOLD_STALE_EVIDENCE,
             budget=budget,
+        )
+    if control_plane_status.get("classification") != CONTROL_PLANE_READY:
+        warnings.append(
+            _blocker(
+                "control_plane_snapshot",
+                str(control_plane_status.get("classification") or "CONTROL_PLANE_SNAPSHOT_REFRESH_IN_PROGRESS"),
+            )
         )
 
     if budget.get("missing") is True or budget.get("attempts_remaining") is None:
@@ -443,17 +473,6 @@ def _classify_resume(*, inputs: Mapping[str, Mapping[str, Any]], now: datetime) 
             warnings=warnings,
             resume_mode="manual_cleanup_required",
             resume_action_policy=RESUME_POLICY_QUARANTINE_OBSERVE_ONLY,
-            budget=budget,
-        )
-
-    if _market_closed(inputs):
-        return _decision(
-            RESUME_BLOCKED_MARKET_CLOSED,
-            MARKET_CLOSED_NO_FRESH_BARS,
-            blockers=[_blocker("market_session", MARKET_CLOSED_NO_FRESH_BARS)],
-            warnings=warnings,
-            resume_mode="hold_down_market_closed",
-            resume_action_policy=RESUME_POLICY_HOLD_MARKET_CLOSED,
             budget=budget,
         )
 
@@ -685,6 +704,27 @@ def _runtime_retry_budget(ledger: Mapping[str, Any]) -> dict[str, Any]:
     )
     budget["missing"] = False
     return budget
+
+
+def _shared_truth_supports_new_generation(evidence: Mapping[str, Any]) -> bool:
+    classifications = _mapping(evidence.get("shared_truth_classifications"))
+    return (
+        evidence["proof_readiness_classification"] == READY_FOR_PROOF
+        and evidence["runtime_environment_truth_classification"] == RUNTIME_DOWN_CLEAN
+        and evidence["position_truth_classification"] == "CLEAN_FLAT_READY"
+        and evidence["open_order_truth_classification"] == NO_OPEN_ORDERS
+        and evidence["managed_order_registry_classification"] == NO_MANAGED_ORDERS
+        and evidence["managed_position_registry_classification"] == NO_MANAGED_POSITIONS
+        and evidence["reconciliation_classification"] == "TRACK_B_PAPER_BROKER_RECONCILED"
+        and evidence["broker_lease_classification"] in {"ACTIVE", "ACTIVE_DEGRADED_REFRESH_FAILING"}
+        and classifications.get("Open Order Truth") == NO_OPEN_ORDERS
+        and classifications.get("Managed Order Registry") == NO_MANAGED_ORDERS
+        and classifications.get("Position Truth") == "CLEAN_FLAT_READY"
+        and classifications.get("Runtime Environment Truth") == RUNTIME_DOWN_CLEAN
+        and classifications.get("Managed Position Registry") == NO_MANAGED_POSITIONS
+        and classifications.get("Reconciliation") == "TRACK_B_PAPER_BROKER_RECONCILED"
+        and classifications.get("Broker Truth Lease") in {"ACTIVE", "ACTIVE_DEGRADED_REFRESH_FAILING"}
+    )
 
 
 def _generation_evidence(*, inputs: Mapping[str, Mapping[str, Any]], now: datetime) -> dict[str, Any]:

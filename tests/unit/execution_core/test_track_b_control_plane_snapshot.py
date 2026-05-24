@@ -34,11 +34,11 @@ def test_snapshot_ties_supervisor_to_shared_truth_generation(tmp_path: Path) -> 
     assert payload["top_line_classification"] == "READY_FOR_OPERATOR_START"
     assert "Ready for supervised Track B PAPER runtime start" in payload["top_line_status"]
     assert payload["runtime_resume_action_policy"] == "NEW_RUNTIME_GENERATION_ALLOWED"
-    assert payload["runtime_resume_proposed_next_runtime_generation_id"] == "runtime-generation-next"
+    assert payload["runtime_resume_proposed_next_runtime_generation_id"] == "track-b-paper-runtime-generation-20260523T120000Z"
     assert payload["runtime_resume_attempts_remaining"] == 2
     assert payload["recommended_recovery_action"] == "RUNTIME_RETRY_DRY_RUN"
     assert payload["paper_action_policy"] == "AUTONOMOUS_RETRY_ELIGIBLE"
-    assert payload["recovery_budget_key"] == "track_b_paper_runtime|RUNTIME_RETRY|test"
+    assert payload["recovery_budget_key"].startswith("track_b_paper_runtime|RUNTIME_RETRY|")
     assert payload["attempts_remaining"] == 2
     assert payload["quarantine_required"] is False
     assert payload["recovery_attempt_history_no_history"] is True
