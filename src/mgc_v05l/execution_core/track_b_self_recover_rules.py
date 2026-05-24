@@ -88,6 +88,28 @@ DEFAULT_BROKER_LEASE_ARTIFACT = Path("outputs") / "operator_dashboard" / "runtim
 DEFAULT_STOP_PROVENANCE_ARTIFACT = (
     Path("outputs") / "probationary_pattern_engine" / "paper_session" / "runtime" / "latest_runtime_stop_provenance.json"
 )
+DEFAULT_CONTROL_PLANE_SNAPSHOT_ARTIFACT = (
+    Path("outputs") / "track_b_execution_core" / "control_plane" / "latest_control_plane_snapshot.json"
+)
+DEFAULT_PAPER_RECOVERY_POLICY_ARTIFACT = (
+    Path("outputs") / "track_b_execution_core" / "paper_recovery_policy" / "latest_paper_recovery_policy.json"
+)
+DEFAULT_AUTONOMOUS_RECOVERY_PLAN_ARTIFACT = (
+    Path("outputs")
+    / "track_b_execution_core"
+    / "paper_autonomous_recovery"
+    / "latest_paper_autonomous_recovery_plan.json"
+)
+DEFAULT_RECOVERY_BUDGET_LEDGER_ARTIFACT = (
+    Path("outputs") / "track_b_execution_core" / "recovery_budget" / "latest_recovery_budget_ledger.json"
+)
+
+STRUCTURED_WAIT_MARKET_CLOSED = "WAIT_MARKET_CLOSED"
+STRUCTURED_REFRESH_EVIDENCE = "REFRESH_EVIDENCE"
+STRUCTURED_RUNTIME_RETRY_DRY_RUN = "RUNTIME_RETRY_DRY_RUN"
+STRUCTURED_MARKET_DATA_RESTART_DRY_RUN = "MARKET_DATA_RESTART_DRY_RUN"
+STRUCTURED_QUARANTINE_OBSERVE_ONLY = "QUARANTINE_OBSERVE_ONLY"
+STRUCTURED_HARD_UNSAFE_HOLD = "HARD_UNSAFE_HOLD"
 
 
 @dataclass(frozen=True)
@@ -107,6 +129,10 @@ class TrackBSelfRecoverRulesConfig:
     reconciliation_path: Path = DEFAULT_RECONCILIATION_ARTIFACT
     broker_lease_path: Path = DEFAULT_BROKER_LEASE_ARTIFACT
     stop_provenance_path: Path = DEFAULT_STOP_PROVENANCE_ARTIFACT
+    control_plane_snapshot_path: Path = DEFAULT_CONTROL_PLANE_SNAPSHOT_ARTIFACT
+    paper_recovery_policy_path: Path = DEFAULT_PAPER_RECOVERY_POLICY_ARTIFACT
+    autonomous_recovery_plan_path: Path = DEFAULT_AUTONOMOUS_RECOVERY_PLAN_ARTIFACT
+    recovery_budget_ledger_path: Path = DEFAULT_RECOVERY_BUDGET_LEDGER_ARTIFACT
 
     def resolve(self, path: Path) -> Path:
         return path if path.is_absolute() else self.repo_root / path
@@ -131,10 +157,16 @@ def build_track_b_self_recover_rules(
         "reconciliation": _read_json(config.resolve(config.reconciliation_path)),
         "broker_lease": _read_json(config.resolve(config.broker_lease_path)),
         "stop_provenance": _read_json(config.resolve(config.stop_provenance_path)),
+        "control_plane_snapshot": _read_json(config.resolve(config.control_plane_snapshot_path)),
+        "paper_recovery_policy": _read_json(config.resolve(config.paper_recovery_policy_path)),
+        "autonomous_recovery_plan": _read_json(config.resolve(config.autonomous_recovery_plan_path)),
+        "recovery_budget_ledger": _read_json(config.resolve(config.recovery_budget_ledger_path)),
     }
     decision = _recommendation(inputs)
+    structured_plan = _structured_recovery_plan(inputs=inputs, decision=decision, now=actual_now)
     return {
-        "schema_version": "track_b_self_recover_rules_v1",
+        "schema_version": "track_b_self_recover_rules_v2",
+        "self_recover_schema_version": "v2",
         "generated_at": actual_now.isoformat(),
         "mode": "PAPER",
         "read_only": True,
@@ -150,6 +182,7 @@ def build_track_b_self_recover_rules(
         "allowed": decision["allowed"],
         "blocked": not decision["allowed"],
         "reason": decision["reason"],
+        **structured_plan,
         "evidence": _evidence(inputs),
         "input_artifacts": {
             "agent_registry": str(config.resolve(config.agent_registry_path)),
@@ -164,6 +197,10 @@ def build_track_b_self_recover_rules(
             "reconciliation": str(config.resolve(config.reconciliation_path)),
             "broker_lease": str(config.resolve(config.broker_lease_path)),
             "stop_provenance": str(config.resolve(config.stop_provenance_path)),
+            "control_plane_snapshot": str(config.resolve(config.control_plane_snapshot_path)),
+            "paper_recovery_policy": str(config.resolve(config.paper_recovery_policy_path)),
+            "autonomous_recovery_plan": str(config.resolve(config.autonomous_recovery_plan_path)),
+            "recovery_budget_ledger": str(config.resolve(config.recovery_budget_ledger_path)),
         },
         "artifact_paths": {
             "authority": str(config.resolve(config.output_path)),
@@ -228,6 +265,13 @@ def main(argv: Sequence[str] | None = None) -> int:
             json.dumps(
                 {
                     "recommendation": payload.get("recommendation"),
+                    "recommended_recovery_action": payload.get("recommended_recovery_action"),
+                    "control_plane_snapshot_id": payload.get("control_plane_snapshot_id"),
+                    "shared_truth_generation_id": payload.get("shared_truth_generation_id"),
+                    "paper_action_policy": payload.get("paper_action_policy"),
+                    "autonomous_recovery_plan_classification": payload.get(
+                        "autonomous_recovery_plan_classification"
+                    ),
                     "allowed": payload.get("allowed"),
                     "reason": payload.get("reason"),
                     "authority_path": str(authority_path),
@@ -290,6 +334,99 @@ def _decision(recommendation: str, allowed: bool, reason: str) -> dict[str, Any]
     return {"recommendation": recommendation, "allowed": allowed, "reason": reason}
 
 
+def _structured_recovery_plan(
+    *,
+    inputs: Mapping[str, Mapping[str, Any]],
+    decision: Mapping[str, Any],
+    now: datetime,
+) -> dict[str, Any]:
+    snapshot = inputs["control_plane_snapshot"]
+    paper_policy = inputs["paper_recovery_policy"]
+    autonomous_plan = inputs["autonomous_recovery_plan"]
+    budget = _runtime_retry_budget(inputs["recovery_budget_ledger"])
+    if _live_money(inputs) or _duplicate_writer(inputs):
+        paper_action_policy = "HARD_UNSAFE_HOLD"
+    elif decision.get("recommendation") == WAIT_MARKET_CLOSED:
+        paper_action_policy = "OBSERVE"
+    else:
+        paper_action_policy = str(
+            paper_policy.get("paper_action_policy")
+            or snapshot.get("paper_action_policy")
+            or _derived_paper_action_policy(decision, inputs)
+        )
+    recommended_action = _structured_action(
+        inputs=inputs,
+        decision=decision,
+        paper_action_policy=paper_action_policy,
+        budget=budget,
+    )
+    recovery_plan_id = f"track-b-self-recover-plan-{now.strftime('%Y%m%dT%H%M%SZ')}"
+    return {
+        "recovery_plan_id": recovery_plan_id,
+        "control_plane_snapshot_id": str(snapshot.get("control_plane_snapshot_id") or ""),
+        "shared_truth_generation_id": str(snapshot.get("shared_truth_refresh_generation_id") or ""),
+        "paper_action_policy": paper_action_policy,
+        "autonomous_recovery_plan_classification": str(autonomous_plan.get("classification") or ""),
+        "recommended_recovery_action": recommended_action,
+        "recovery_budget_key": str(budget.get("budget_key") or ""),
+        "attempts_remaining": budget.get("attempts_remaining"),
+        "cooldown_until": budget.get("cooldown_until"),
+        "quarantine_required": budget.get("quarantine_required") is True,
+        "agent_health_top_blockers": _agent_health_top_blockers(inputs["agent_health"], snapshot),
+        "operator_explanation": _operator_explanation(
+            recommended_action=recommended_action,
+            decision=decision,
+            autonomous_plan=autonomous_plan,
+            paper_action_policy=paper_action_policy,
+        ),
+        "execution_enabled": False,
+    }
+
+
+def _structured_action(
+    *,
+    inputs: Mapping[str, Mapping[str, Any]],
+    decision: Mapping[str, Any],
+    paper_action_policy: str,
+    budget: Mapping[str, Any],
+) -> str:
+    if _live_money(inputs) or _duplicate_writer(inputs):
+        return STRUCTURED_HARD_UNSAFE_HOLD
+    if decision.get("recommendation") == WAIT_MARKET_CLOSED:
+        return STRUCTURED_WAIT_MARKET_CLOSED
+    if decision.get("recommendation") == REFRESH_SHARED_TRUTH or paper_action_policy == "REFRESH_EVIDENCE":
+        return STRUCTURED_REFRESH_EVIDENCE
+    if budget.get("budget_exhausted") is True or budget.get("quarantine_required") is True:
+        return STRUCTURED_QUARANTINE_OBSERVE_ONLY
+    if decision.get("recommendation") == RESTART_MARKET_DATA_PRODUCER_ALLOWED:
+        return STRUCTURED_MARKET_DATA_RESTART_DRY_RUN
+    if (
+        decision.get("recommendation") == RESTART_RUNTIME_ALLOWED
+        and paper_action_policy == "AUTONOMOUS_RETRY_ELIGIBLE"
+        and _positive_int(budget.get("attempts_remaining"))
+        and not budget.get("cooldown_until")
+    ):
+        return STRUCTURED_RUNTIME_RETRY_DRY_RUN
+    if decision.get("recommendation") in {DO_NOT_RECOVER_UNSAFE_STATE, MANUAL_TWS_REVIEW_REQUIRED}:
+        return STRUCTURED_HARD_UNSAFE_HOLD
+    return STRUCTURED_QUARANTINE_OBSERVE_ONLY
+
+
+def _derived_paper_action_policy(decision: Mapping[str, Any], inputs: Mapping[str, Mapping[str, Any]]) -> str:
+    if _live_money(inputs) or _duplicate_writer(inputs):
+        return "HARD_UNSAFE_HOLD"
+    recommendation = decision.get("recommendation")
+    if recommendation == WAIT_MARKET_CLOSED:
+        return "OBSERVE"
+    if recommendation == REFRESH_SHARED_TRUTH:
+        return "REFRESH_EVIDENCE"
+    if recommendation == RESTART_RUNTIME_ALLOWED:
+        return "AUTONOMOUS_RETRY_ELIGIBLE"
+    if recommendation in {DO_NOT_RECOVER_UNSAFE_STATE, MANUAL_TWS_REVIEW_REQUIRED}:
+        return "HARD_UNSAFE_HOLD"
+    return "QUARANTINE_OBSERVE_ONLY"
+
+
 def _classification(payload: Mapping[str, Any]) -> str:
     return str(payload.get("classification") or "")
 
@@ -350,6 +487,107 @@ def _evidence(inputs: Mapping[str, Mapping[str, Any]]) -> dict[str, Any]:
         "stale_truth_agents": _stale_truth_agents(agent_health),
         "phase1_agent": dict(_agent(agent_health, "phase1_databento_live_candles")),
     }
+
+
+def _runtime_retry_budget(payload: Mapping[str, Any]) -> dict[str, Any]:
+    for entry in _list(payload.get("entries")):
+        row = _mapping(entry)
+        if row.get("agent_id") == "track_b_paper_runtime" and row.get("action_type") == "RUNTIME_RETRY":
+            return {
+                "budget_key": str(row.get("budget_key") or ""),
+                "attempts_remaining": row.get("attempts_remaining"),
+                "cooldown_until": row.get("cooldown_until"),
+                "quarantine_required": row.get("quarantine_required") is True,
+                "budget_exhausted": row.get("budget_exhausted") is True,
+            }
+    summary = _mapping(payload.get("summary"))
+    return {
+        "budget_key": "RUNTIME_RETRY",
+        "attempts_remaining": summary.get("minimum_attempts_remaining"),
+        "cooldown_until": summary.get("cooldown_until"),
+        "quarantine_required": payload.get("quarantine_required") is True or summary.get("quarantine_required") is True,
+        "budget_exhausted": payload.get("budget_exhausted") is True or summary.get("budget_exhausted") is True,
+    }
+
+
+def _agent_health_top_blockers(agent_health: Mapping[str, Any], snapshot: Mapping[str, Any]) -> list[dict[str, Any]]:
+    rows = _list(snapshot.get("agent_health_top_blockers"))
+    if not rows:
+        rows = [
+            row
+            for row in _list(agent_health.get("agents"))
+            if row.get("blocking_for_proof") is True
+            or row.get("blocking_for_runtime_submit") is True
+            or row.get("blocking_for_recovery") is True
+        ]
+    blockers: list[dict[str, Any]] = []
+    for row in rows:
+        item = _mapping(row)
+        blockers.append(
+            {
+                "agent_id": str(item.get("agent_id") or ""),
+                "display_name": str(item.get("display_name") or item.get("agent_id") or ""),
+                "status": str(item.get("status") or ""),
+                "reason": str(item.get("reason") or ""),
+                "blocking_for_proof": item.get("blocking_for_proof") is True,
+                "blocking_for_runtime_submit": item.get("blocking_for_runtime_submit") is True,
+                "blocking_for_recovery": item.get("blocking_for_recovery") is True,
+                "diagnostic_only": item.get("diagnostic_only") is True,
+            }
+        )
+    return blockers
+
+
+def _operator_explanation(
+    *,
+    recommended_action: str,
+    decision: Mapping[str, Any],
+    autonomous_plan: Mapping[str, Any],
+    paper_action_policy: str,
+) -> str:
+    planner_explanation = str(autonomous_plan.get("operator_explanation") or "")
+    if planner_explanation:
+        return planner_explanation
+    if recommended_action == STRUCTURED_WAIT_MARKET_CLOSED:
+        return "Market is closed or fresh bars are not expected; PAPER should wait and observe."
+    if recommended_action == STRUCTURED_REFRESH_EVIDENCE:
+        return "Shared-truth evidence is stale or missing; refresh evidence before recovery."
+    if recommended_action == STRUCTURED_RUNTIME_RETRY_DRY_RUN:
+        return "PAPER policy and budget allow a bounded runtime retry dry-run plan; execution remains disabled."
+    if recommended_action == STRUCTURED_MARKET_DATA_RESTART_DRY_RUN:
+        return "Phase-1 market-data support is unhealthy in an open proof window; restart remains dry-run only."
+    if recommended_action == STRUCTURED_QUARANTINE_OBSERVE_ONLY:
+        return "PAPER should quarantine and observe without requiring routine operator acknowledgement."
+    if recommended_action == STRUCTURED_HARD_UNSAFE_HOLD:
+        return f"Hard safety invariant blocks recovery; paper_action_policy={paper_action_policy}."
+    return str(decision.get("reason") or "")
+
+
+def _live_money(inputs: Mapping[str, Mapping[str, Any]]) -> bool:
+    for key in ("proof_readiness", "control_plane_snapshot", "paper_recovery_policy", "autonomous_recovery_plan"):
+        if inputs[key].get("live_money_eligible") is True:
+            return True
+    return False
+
+
+def _duplicate_writer(inputs: Mapping[str, Mapping[str, Any]]) -> bool:
+    snapshot = inputs["control_plane_snapshot"]
+    if snapshot.get("agent_health_has_duplicate_writer") is True:
+        return True
+    if _positive_int(snapshot.get("duplicate_writer_count")) or _positive_int(snapshot.get("duplicate_process_count")):
+        return True
+    for agent in _list(inputs["agent_health"].get("agents")):
+        row = _mapping(agent)
+        if row.get("agent_id") == "track_b_paper_runtime" and row.get("status") == "DUPLICATE_PROCESS":
+            return True
+    return False
+
+
+def _positive_int(value: Any) -> bool:
+    try:
+        return int(value or 0) > 0
+    except (TypeError, ValueError):
+        return False
 
 
 def _read_json(path: Path) -> dict[str, Any]:
