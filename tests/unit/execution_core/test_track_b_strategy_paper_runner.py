@@ -23,6 +23,7 @@ from mgc_v05l.execution_core.track_b_mgc_candle_history_producer import (
     TrackBMgcCandleHistoryProducerVerdict,
 )
 from mgc_v05l.execution_core.track_b_strategy_paper_runner import (
+    LEGACY_PAPER_PROOF_DISABLED_REASON,
     TrackBStrategyPaperRunnerConfig,
     TrackBStrategyPaperRunnerStages,
     TrackBStrategyPaperRunnerVerdict,
@@ -98,6 +99,20 @@ def base_config(tmp_path: Path, **overrides: object) -> TrackBStrategyPaperRunne
     }
     payload.update(overrides)
     return TrackBStrategyPaperRunnerConfig(**payload)
+
+
+def assert_legacy_paper_proof_disabled(result, calls: Calls) -> None:
+    assert result.verdict == TrackBStrategyPaperRunnerVerdict.BLOCKED_INVALID_SUBMIT_REQUEST
+    assert calls.proof == 0
+    assert result.report["primary_blocker"] == LEGACY_PAPER_PROOF_DISABLED_REASON
+    assert result.report["required_next_action"] == "Use the strategy-managed lifecycle path; paper_proof is not a runtime submit boundary."
+    assert result.report["paper_submit_requested"] is True
+    assert result.report["paper_proof_invoked"] is False
+    assert result.report["paper_proof_classification"] is None
+    assert result.report["submit_allowed"] is False
+    assert result.report["submit_attempted"] is False
+    assert result.report["broker_state_mutated"] is False
+    assert result.report["live_money_readiness"] is False
 
 
 def candle_history_producer_result(tmp_path: Path, *, ready: bool = True) -> TrackBMgcCandleHistoryProducerResult:
@@ -1234,7 +1249,7 @@ def test_remaining_ported_strategy_signals_route_to_managed_lifecycle(tmp_path: 
         assert result.report["live_money_readiness"] is False
 
 
-def test_signal_readiness_green_and_explicit_submit_invokes_paper_proof(tmp_path: Path) -> None:
+def test_signal_readiness_green_and_explicit_submit_blocks_legacy_paper_proof(tmp_path: Path) -> None:
     calls = Calls()
     result = run_track_b_strategy_paper(
         config=base_config(
@@ -1257,31 +1272,13 @@ def test_signal_readiness_green_and_explicit_submit_invokes_paper_proof(tmp_path
         now=aware_now(),
     )
 
-    assert result.verdict == TrackBStrategyPaperRunnerVerdict.PAPER_PROOF_PASSED
+    assert_legacy_paper_proof_disabled(result, calls)
     assert calls.feature == 0
-    assert calls.proof == 1
-    assert result.report["paper_submit_requested"] is True
-    assert result.report["paper_proof_invoked"] is True
-    assert result.report["paper_proof_classification"] == "TRACK_B_PAPER_PROOF_PASSED"
     assert result.report["signal_source"] == "REAL_STRATEGY_RULE"
     assert result.report["real_strategy_signal"] is True
-    assert result.report["paper_proof_lifecycle_status"] == "PROOF_COMPLETE_FLAT"
-    assert result.report["open_intent"] is not None
-    assert result.report["open_submit_attempt"] is not None
-    assert result.report["open_fill"] is not None
-    assert result.report["close_intent"] is not None
-    assert result.report["close_submit_attempt"] is not None
-    assert result.report["close_fill"] is not None
-    assert result.report["final_position_snapshot"] == {"account_id": "DUM882026", "contract_key": "MGC-202606", "signed_quantity": 0}
-    assert result.report["final_open_orders_snapshot"] == []
-    assert result.report["final_flat"] is True
-    assert result.report["final_position_status"] == "CLEAN"
-    assert result.report["submit_allowed"] is True
-    assert result.report["submit_attempted"] is True
-    assert result.report["live_money_readiness"] is False
 
 
-def test_feature_builder_signal_readiness_green_and_explicit_submit_invokes_paper_proof(tmp_path: Path) -> None:
+def test_feature_builder_signal_readiness_green_and_explicit_submit_blocks_legacy_paper_proof(tmp_path: Path) -> None:
     calls = Calls()
     result = run_track_b_strategy_paper(
         config=base_config(
@@ -1306,25 +1303,19 @@ def test_feature_builder_signal_readiness_green_and_explicit_submit_invokes_pape
         now=aware_now(),
     )
 
-    assert result.verdict == TrackBStrategyPaperRunnerVerdict.PAPER_PROOF_PASSED
+    assert_legacy_paper_proof_disabled(result, calls)
     assert calls.feature == 1
     assert calls.strategy == 1
     assert calls.readiness == 1
-    assert calls.proof == 1
     assert result.report["feature_builder_invoked"] is True
     assert result.report["feature_builder_verdict"] == "TRACK_B_FEATURE_BUILDER_WROTE_FEATURE_EVENT"
     assert result.report["feature_event_path"]
     assert result.report["strategy_rule_verdict"] == "TRACK_B_STRATEGY_RULE_RUNNER_EMITTED_SIGNAL"
     assert result.report["readiness_invoked"] is True
     assert result.report["readiness_verdict"] == "READY_FOR_PAPER_PROOF"
-    assert result.report["paper_submit_requested"] is True
-    assert result.report["paper_proof_invoked"] is True
-    assert result.report["submit_attempted"] is True
-    assert result.report["final_flat"] is True
-    assert result.report["live_money_readiness"] is False
 
 
-def test_full_history_feature_rule_readiness_green_and_explicit_submit_invokes_paper_proof(tmp_path: Path) -> None:
+def test_full_history_feature_rule_readiness_green_and_explicit_submit_blocks_legacy_paper_proof(tmp_path: Path) -> None:
     calls = Calls()
     result = run_track_b_strategy_paper(
         config=base_config(
@@ -1353,13 +1344,12 @@ def test_full_history_feature_rule_readiness_green_and_explicit_submit_invokes_p
         now=aware_now(),
     )
 
-    assert result.verdict == TrackBStrategyPaperRunnerVerdict.PAPER_PROOF_PASSED
+    assert_legacy_paper_proof_disabled(result, calls)
     assert calls.candle_history == 1
     assert calls.market_history == 1
     assert calls.feature == 1
     assert calls.strategy == 1
     assert calls.readiness == 1
-    assert calls.proof == 1
     assert result.report["candle_history_producer_invoked"] is True
     assert result.report["candle_history_producer_verdict"] == "TRACK_B_MGC_CANDLE_HISTORY_PRODUCER_WROTE_HISTORY_INPUT"
     assert result.report["market_history_collector_invoked"] is True
@@ -1367,12 +1357,6 @@ def test_full_history_feature_rule_readiness_green_and_explicit_submit_invokes_p
     assert result.report["feature_builder_verdict"] == "TRACK_B_FEATURE_BUILDER_WROTE_FEATURE_EVENT"
     assert result.report["strategy_rule_verdict"] == "TRACK_B_STRATEGY_RULE_RUNNER_EMITTED_SIGNAL"
     assert result.report["readiness_verdict"] == "READY_FOR_PAPER_PROOF"
-    assert result.report["paper_submit_requested"] is True
-    assert result.report["paper_proof_invoked"] is True
-    assert result.report["paper_proof_classification"] == "TRACK_B_PAPER_PROOF_PASSED"
-    assert result.report["final_flat"] is True
-    assert result.report["submit_attempted"] is True
-    assert result.report["live_money_readiness"] is False
 
 
 def test_maintained_history_feature_rule_submit_uses_maintenance_without_history_fetch(tmp_path: Path) -> None:
@@ -1406,19 +1390,15 @@ def test_maintained_history_feature_rule_submit_uses_maintenance_without_history
         now=aware_now(),
     )
 
-    assert result.verdict == TrackBStrategyPaperRunnerVerdict.PAPER_PROOF_PASSED
+    assert_legacy_paper_proof_disabled(result, calls)
     assert calls.candle_history == 0
     assert calls.market_history == 1
     assert calls.feature == 1
     assert calls.strategy == 1
     assert calls.readiness == 1
-    assert calls.proof == 1
     assert result.report["data_maintenance_history_requested"] is True
     assert result.report["maintained_history_path"] == str(maintained_history_json)
     assert result.report["candle_history_producer_invoked"] is False
-    assert result.report["paper_proof_invoked"] is True
-    assert result.report["submit_attempted"] is True
-    assert result.report["live_money_readiness"] is False
 
 
 def test_stale_maintained_history_blocks_only_when_intraday_freshness_required(tmp_path: Path) -> None:
@@ -1502,15 +1482,13 @@ def test_maintained_history_age_961s_passes_as_historical_context_by_default(tmp
         now=aware_now(),
     )
 
-    assert result.verdict == TrackBStrategyPaperRunnerVerdict.PAPER_PROOF_PASSED
+    assert_legacy_paper_proof_disabled(result, calls)
     assert result.report["maintained_history_age_seconds"] == 961
     assert result.report["max_maintained_history_age_seconds"] == 900
     assert result.report["runtime_intraday_freshness_policy"] == "NOT_REQUESTED"
     assert result.report["historical_context_ready"] is True
     assert result.report["maintained_history_ready"] is True
     assert calls.market_history == 1
-    assert calls.proof == 1
-    assert result.report["submit_attempted"] is True
 
 
 def test_maintained_history_age_961s_blocks_when_intraday_policy_explicit(tmp_path: Path) -> None:
@@ -1877,7 +1855,7 @@ def test_runtime_candle_context_no_signal_does_not_invoke_readiness_or_proof(tmp
     assert result.report["live_money_readiness"] is False
 
 
-def test_demo_wiring_signal_is_explicitly_labeled_and_can_invoke_paper_proof(tmp_path: Path) -> None:
+def test_demo_wiring_signal_is_explicitly_labeled_and_blocks_legacy_paper_proof(tmp_path: Path) -> None:
     calls = Calls()
     result = run_track_b_strategy_paper(
         config=base_config(
@@ -1901,15 +1879,10 @@ def test_demo_wiring_signal_is_explicitly_labeled_and_can_invoke_paper_proof(tmp
         now=aware_now(),
     )
 
-    assert result.verdict == TrackBStrategyPaperRunnerVerdict.PAPER_PROOF_PASSED
+    assert_legacy_paper_proof_disabled(result, calls)
     assert result.report["rule_mode"] == "DEMO_LONG_ONLY"
     assert result.report["signal_source"] == "DEMO_WIRING_PROOF"
     assert result.report["real_strategy_signal"] is False
-    assert result.report["paper_proof_invoked"] is True
-    assert result.report["submit_attempted"] is True
-    assert result.report["broker_state_mutated"] is True
-    assert result.report["final_flat"] is True
-    assert result.report["live_money_readiness"] is False
 
 
 def test_demo_wiring_signal_stays_no_submit_without_explicit_flags(tmp_path: Path) -> None:
@@ -2152,7 +2125,7 @@ def test_asian_drift_entry_capable_short_fixture_maps_to_short_signal(tmp_path: 
     assert result.report["broker_state_mutated"] is False
 
 
-def test_asian_drift_signal_with_paper_flags_delegates_once_to_guarded_proof(tmp_path: Path) -> None:
+def test_asian_drift_signal_with_paper_flags_blocks_legacy_paper_proof(tmp_path: Path) -> None:
     calls = Calls()
     result = run_track_b_strategy_paper(
         config=base_config(
@@ -2184,21 +2157,12 @@ def test_asian_drift_signal_with_paper_flags_delegates_once_to_guarded_proof(tmp
         now=aware_now(),
     )
 
-    assert result.verdict == TrackBStrategyPaperRunnerVerdict.PAPER_PROOF_PASSED
+    assert_legacy_paper_proof_disabled(result, calls)
     assert result.report["asian_drift_watch_verdict"] == "ASIAN_DRIFT_SIGNAL_READY_NO_SUBMIT"
     assert result.report["signal_source"] == "ASIAN_DRIFT_V1"
     assert result.report["real_strategy_signal"] is True
     assert calls.readiness == 1
-    assert calls.proof == 1
     assert result.report["readiness_invoked"] is True
-    assert result.report["paper_proof_invoked"] is True
-    assert result.report["submit_attempted"] is True
-    assert result.report["broker_state_mutated"] is True
-    assert result.report["paper_proof_classification"] == "TRACK_B_PAPER_PROOF_PASSED"
-    assert result.report["paper_proof_lifecycle_status"] == "PROOF_COMPLETE_FLAT"
-    assert result.report["final_flat"] is True
-    assert result.report["final_position_status"] == "CLEAN"
-    assert result.report["live_money_readiness"] is False
 
 
 def test_demo_wiring_signal_cannot_drive_asian_drift_paper_path(tmp_path: Path) -> None:
@@ -2282,7 +2246,7 @@ def test_first_bull_snap_turn_signal_without_paper_flags_reports_signal_ready_no
     assert result.report["live_money_readiness"] is False
 
 
-def test_first_bear_snap_turn_signal_with_paper_flags_delegates_once_to_guarded_proof(tmp_path: Path) -> None:
+def test_first_bear_snap_turn_signal_with_paper_flags_blocks_legacy_paper_proof(tmp_path: Path) -> None:
     calls = Calls()
     result = run_track_b_strategy_paper(
         config=base_config(
@@ -2315,22 +2279,14 @@ def test_first_bear_snap_turn_signal_with_paper_flags_delegates_once_to_guarded_
         now=aware_now(),
     )
 
-    assert result.verdict == TrackBStrategyPaperRunnerVerdict.PAPER_PROOF_PASSED
+    assert_legacy_paper_proof_disabled(result, calls)
     assert result.report["first_bear_snap_turn_watch_verdict"] == "FIRST_BEAR_SNAP_TURN_SIGNAL_READY_NO_SUBMIT"
     assert result.report["signal_source"] == "FIRST_BEAR_SNAP_TURN_V1"
     assert result.report["real_strategy_signal"] is True
     assert result.report["strategy_registry_paper_eligible"] is True
     assert result.report["strategy_registry_live_money_eligible"] is False
     assert calls.readiness == 1
-    assert calls.proof == 1
     assert result.report["readiness_invoked"] is True
-    assert result.report["paper_proof_invoked"] is True
-    assert result.report["submit_attempted"] is True
-    assert result.report["broker_state_mutated"] is True
-    assert result.report["paper_proof_classification"] == "TRACK_B_PAPER_PROOF_PASSED"
-    assert result.report["paper_proof_lifecycle_status"] == "PROOF_COMPLETE_FLAT"
-    assert result.report["final_flat"] is True
-    assert result.report["live_money_readiness"] is False
 
 
 def test_demo_wiring_signal_cannot_drive_first_bull_snap_turn_paper_path(tmp_path: Path) -> None:
@@ -2545,7 +2501,7 @@ def test_pause_resume_short_signal_without_paper_flags_reports_signal_ready_no_s
     assert result.report["live_money_readiness"] is False
 
 
-def test_pause_resume_short_signal_with_paper_flags_delegates_once_to_guarded_proof(tmp_path: Path) -> None:
+def test_pause_resume_short_signal_with_paper_flags_blocks_legacy_paper_proof(tmp_path: Path) -> None:
     calls = Calls()
     result = run_track_b_strategy_paper(
         config=base_config(
@@ -2572,21 +2528,13 @@ def test_pause_resume_short_signal_with_paper_flags_delegates_once_to_guarded_pr
         now=aware_now(),
     )
 
-    assert result.verdict == TrackBStrategyPaperRunnerVerdict.PAPER_PROOF_PASSED
+    assert_legacy_paper_proof_disabled(result, calls)
     assert result.report["signal_source"] == "ASIA_EARLY_PAUSE_RESUME_SHORT_V1"
     assert result.report["real_strategy_signal"] is True
     assert result.report["strategy_registry_paper_eligible"] is True
     assert result.report["strategy_registry_live_money_eligible"] is False
     assert calls.readiness == 1
-    assert calls.proof == 1
     assert result.report["readiness_invoked"] is True
-    assert result.report["paper_proof_invoked"] is True
-    assert result.report["submit_attempted"] is True
-    assert result.report["broker_state_mutated"] is True
-    assert result.report["paper_proof_classification"] == "TRACK_B_PAPER_PROOF_PASSED"
-    assert result.report["paper_proof_lifecycle_status"] == "PROOF_COMPLETE_FLAT"
-    assert result.report["final_flat"] is True
-    assert result.report["live_money_readiness"] is False
 
 
 def test_demo_wiring_signal_cannot_drive_pause_resume_short_paper_path(tmp_path: Path) -> None:
@@ -2794,7 +2742,7 @@ def test_breakout_retest_hold_long_signal_without_paper_flags_reports_signal_rea
     assert result.report["live_money_readiness"] is False
 
 
-def test_breakout_retest_hold_long_signal_with_paper_flags_delegates_once_to_guarded_proof(tmp_path: Path) -> None:
+def test_breakout_retest_hold_long_signal_with_paper_flags_blocks_legacy_paper_proof(tmp_path: Path) -> None:
     calls = Calls()
     result = run_track_b_strategy_paper(
         config=base_config(
@@ -2821,20 +2769,12 @@ def test_breakout_retest_hold_long_signal_with_paper_flags_delegates_once_to_gua
         now=aware_now(),
     )
 
-    assert result.verdict == TrackBStrategyPaperRunnerVerdict.PAPER_PROOF_PASSED
+    assert_legacy_paper_proof_disabled(result, calls)
     assert result.report["signal_source"] == "ASIA_EARLY_NORMAL_BREAKOUT_RETEST_HOLD_LONG_V1"
     assert result.report["real_strategy_signal"] is True
     assert result.report["strategy_registry_paper_eligible"] is True
     assert result.report["strategy_registry_live_money_eligible"] is False
     assert calls.readiness == 1
-    assert calls.proof == 1
-    assert result.report["paper_proof_invoked"] is True
-    assert result.report["submit_attempted"] is True
-    assert result.report["broker_state_mutated"] is True
-    assert result.report["paper_proof_classification"] == "TRACK_B_PAPER_PROOF_PASSED"
-    assert result.report["paper_proof_lifecycle_status"] == "PROOF_COMPLETE_FLAT"
-    assert result.report["final_flat"] is True
-    assert result.report["live_money_readiness"] is False
 
 
 def test_demo_wiring_signal_cannot_drive_breakout_retest_hold_long_paper_path(tmp_path: Path) -> None:
@@ -3172,7 +3112,7 @@ def test_missing_feature_event_path_blocks_cleanly_before_strategy_readiness_or_
     assert result.report["live_money_readiness"] is False
 
 
-def test_ambiguous_paper_proof_requires_manual_review(tmp_path: Path) -> None:
+def test_ambiguous_paper_proof_path_is_disabled_before_proof(tmp_path: Path) -> None:
     calls = Calls()
     result = run_track_b_strategy_paper(
         config=base_config(
@@ -3195,14 +3135,10 @@ def test_ambiguous_paper_proof_requires_manual_review(tmp_path: Path) -> None:
         now=aware_now(),
     )
 
-    assert result.verdict == TrackBStrategyPaperRunnerVerdict.PAPER_PROOF_AMBIGUOUS_MANUAL_REVIEW_REQUIRED
-    assert result.report["paper_proof_classification"] == "TRACK_B_PAPER_PROOF_AMBIGUOUS_MANUAL_REVIEW_REQUIRED"
-    assert result.report["final_flat"] is False
-    assert result.report["primary_blocker"] == "callback gap"
-    assert result.report["submit_attempted"] is True
+    assert_legacy_paper_proof_disabled(result, calls)
 
 
-def test_flat_but_close_provenance_incomplete_is_not_paper_proof_passed(tmp_path: Path) -> None:
+def test_flat_but_close_provenance_incomplete_paper_proof_path_is_disabled_before_proof(tmp_path: Path) -> None:
     calls = Calls()
     result = run_track_b_strategy_paper(
         config=base_config(
@@ -3225,12 +3161,7 @@ def test_flat_but_close_provenance_incomplete_is_not_paper_proof_passed(tmp_path
         now=aware_now(),
     )
 
-    assert result.verdict == TrackBStrategyPaperRunnerVerdict.PAPER_PROOF_FLAT_BUT_CLOSE_PROVENANCE_INCOMPLETE
-    assert result.report["paper_proof_classification"] == "TRACK_B_PAPER_PROOF_FLAT_BUT_CLOSE_PROVENANCE_INCOMPLETE"
-    assert result.report["final_flat"] is True
-    assert result.report["primary_blocker"] == "flat but close provenance incomplete"
-    assert result.report["submit_attempted"] is True
-    assert result.report["live_money_readiness"] is False
+    assert_legacy_paper_proof_disabled(result, calls)
 
 
 def test_non_paper_mode_refuses_before_strategy(tmp_path: Path) -> None:

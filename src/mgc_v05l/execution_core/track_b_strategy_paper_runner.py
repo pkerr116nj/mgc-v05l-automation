@@ -2,8 +2,8 @@
 
 This Phase 2 boundary is the explicit handoff from a strategy signal to
 readiness and Track B PAPER lifecycle management. It defaults to dry-run/no
-submit. Real strategy signals route to the strategy-managed lifecycle; the
-paper-proof lifecycle is retained only for explicit proof/debug/canary use.
+submit. Real strategy signals route to the strategy-managed lifecycle; legacy
+paper-proof debug/canary routes are accepted only to fail closed.
 """
 
 from __future__ import annotations
@@ -19,10 +19,9 @@ from typing import Callable, Mapping
 
 from .candle_signal_producer import DEFAULT_CANDLE_SIGNAL_PRODUCER_OUTPUT_ROOT
 from .harness import HarnessResult
-from .ibkr_readonly_transport import IbkrReadOnlyTransportConfig, IbkrReadOnlyTwsTransport
 from .models import TerminalClassification, require_aware_datetime, to_jsonable
 from .operator_status import DEFAULT_OPERATOR_STATUS_OUTPUT_ROOT, OperatorStatusInputs, create_operator_status_summary
-from .paper_proof import DEFAULT_PAPER_PROOF_OUTPUT_ROOT, PaperProofConfig, PaperProofResult, ProofRunner, run_paper_proof
+from .paper_proof import DEFAULT_PAPER_PROOF_OUTPUT_ROOT, PaperProofResult, ProofRunner
 from .track_b_strategy_managed_paper_lifecycle import (
     DEFAULT_TRACK_B_STRATEGY_MANAGED_PAPER_LIFECYCLE_OUTPUT_ROOT,
     DEFAULT_CONTROL_PLANE_SNAPSHOT_ARTIFACT,
@@ -46,7 +45,7 @@ from .track_b_paper_trade_ledger import (
     DEFAULT_TRACK_B_PAPER_TRADE_LEDGER_OUTPUT_ROOT,
     update_track_b_paper_trade_ledger_from_runner_report,
 )
-from .preflight import ReadOnlyPreflightConfig, run_read_only_preflight
+from .preflight import ReadOnlyPreflightConfig
 from .signal_batch_writer import DEFAULT_SIGNAL_BATCH_WRITER_OUTPUT_ROOT
 from .strategy_signal_adapter import DEFAULT_STRATEGY_SIGNAL_ADAPTER_OUTPUT_ROOT
 from .track_b_feature_builder import (
@@ -84,6 +83,10 @@ from .track_b_strategy_rule_runner import (
 
 
 DEFAULT_TRACK_B_STRATEGY_PAPER_RUNNER_OUTPUT_ROOT = Path("outputs/track_b_execution_core/track_b_strategy_paper_runner")
+LEGACY_PAPER_PROOF_DISABLED_REASON = (
+    "Legacy paper_proof execution paths are disabled for Track B strategy runtime. "
+    "Use STRATEGY_MANAGED with Control Plane Snapshot / Safe-State / generation-scoped authorization."
+)
 
 
 class TrackBStrategyPaperRunnerVerdict(str, Enum):
@@ -270,7 +273,7 @@ def default_stages(
         readiness=lambda config: _run_readiness(config, readiness_stages=readiness_stages),
         strategy_trade_intent=_run_strategy_trade_intent,
         managed_lifecycle=_run_managed_lifecycle,
-        paper_proof=lambda config: _run_paper_proof(config, proof_runner=proof_runner),
+        paper_proof=_disabled_legacy_paper_proof,
         operator_status=_run_operator_status,
     )
 
@@ -697,44 +700,23 @@ def run_track_b_strategy_paper(
                 operator_status_stage=actual_stages.operator_status,
             )
 
-        if _paper_execution_path(config) in {"PAPER_PROOF_DEBUG", "PAPER_PROOF_CANARY"}:
-            proof = actual_stages.paper_proof(config)
-            proof_classification = proof.classification.value
-            if proof.classification == TerminalClassification.PASSED:
-                verdict = TrackBStrategyPaperRunnerVerdict.PAPER_PROOF_PASSED
-                primary_blocker = None
-                required_next_action = "PAPER strategy proof lifecycle passed and final broker state is flat."
-            elif proof.classification == TerminalClassification.BLOCKED:
-                verdict = TrackBStrategyPaperRunnerVerdict.PAPER_PROOF_BLOCKED
-                primary_blocker = _proof_blocker(proof.report)
-                required_next_action = _proof_required_action(proof.report, "Resolve paper proof blocker before retrying.")
-            elif proof.classification == TerminalClassification.FLAT_BUT_CLOSE_PROVENANCE_INCOMPLETE:
-                verdict = TrackBStrategyPaperRunnerVerdict.PAPER_PROOF_FLAT_BUT_CLOSE_PROVENANCE_INCOMPLETE
-                primary_blocker = _proof_blocker(proof.report)
-                required_next_action = _proof_required_action(
-                    proof.report,
-                    "Verify broker activity and rerun read-only recovery before any further PAPER submit.",
-                )
-            else:
-                verdict = TrackBStrategyPaperRunnerVerdict.PAPER_PROOF_AMBIGUOUS_MANUAL_REVIEW_REQUIRED
-                primary_blocker = _proof_blocker(proof.report)
-                required_next_action = _proof_required_action(proof.report, "Manual review required; do not run another open proof until broker state is reconciled.")
+        legacy_paper_proof_error = _legacy_paper_proof_path_error(config)
+        if legacy_paper_proof_error:
             return _finalize(
                 config=config,
                 report_json=report_json,
                 now=actual_now,
                 runner_id=actual_runner_id,
-                verdict=verdict,
+                verdict=TrackBStrategyPaperRunnerVerdict.BLOCKED_INVALID_SUBMIT_REQUEST,
                 candle_history_producer=candle_history_producer,
                 market_history=market_history,
                 feature_builder=feature_builder,
                 strategy_rule=strategy_rule,
                 readiness=readiness,
                 proof=proof,
-                primary_blocker=primary_blocker,
-                required_next_action=required_next_action,
+                primary_blocker=legacy_paper_proof_error,
+                required_next_action="Use the strategy-managed lifecycle path; paper_proof is not a runtime submit boundary.",
                 operator_status_stage=actual_stages.operator_status,
-                proof_classification=proof_classification,
             )
 
         managed_exit_policy_id = _managed_exit_policy_id(config, strategy_rule.report if strategy_rule else {})
@@ -1081,41 +1063,8 @@ def _run_strategy_trade_intent(
     return create_track_b_strategy_trade_intent(config=intent_config, strategy_report=strategy_report)
 
 
-def _run_paper_proof(config: TrackBStrategyPaperRunnerConfig, *, proof_runner: ProofRunner | None) -> PaperProofResult:
-    paper_config = PaperProofConfig(
-        mode=config.mode,
-        host=config.host,
-        port=config.port,
-        client_id=config.client_id,
-        account_id=config.account_id,
-        contract_key=config.contract_key,
-        side=config.side,
-        quantity=int(config.quantity or 0),
-        order_type=config.order_type,
-        time_in_force=config.time_in_force,
-        output_root=config.paper_proof_output_root,
-        submit_enabled=True,
-        confirm_paper_submit=True,
-        allow_delayed_data_for_paper_proof=True,
-        manual_open_limit_price=config.manual_open_limit_price,
-        manual_close_limit_price=config.manual_close_limit_price,
-        proof_timing_status=config.proof_timing_status,
-        proof_timing_source=config.proof_timing_source,
-        proof_timing_detail=config.proof_timing_detail,
-    )
-    transport_config = IbkrReadOnlyTransportConfig(
-        request_timeout_seconds=config.request_timeout_seconds,
-        quote_timeout_seconds=config.quote_timeout_seconds,
-    )
-
-    def preflight_runner(preflight_config: ReadOnlyPreflightConfig, run_id: str):
-        return run_read_only_preflight(
-            config=preflight_config,
-            transport=IbkrReadOnlyTwsTransport(config=transport_config),
-            run_id=run_id,
-        )
-
-    return run_paper_proof(config=paper_config, preflight_runner=preflight_runner, proof_runner=proof_runner)
+def _disabled_legacy_paper_proof(_config: TrackBStrategyPaperRunnerConfig) -> PaperProofResult:
+    raise RuntimeError(LEGACY_PAPER_PROOF_DISABLED_REASON)
 
 
 def _run_operator_status(config: TrackBStrategyPaperRunnerConfig, runner_report_json: Path) -> None:
@@ -1137,6 +1086,12 @@ def _paper_trade_ledger_output_root(config: TrackBStrategyPaperRunnerConfig) -> 
 
 def _paper_execution_path(config: TrackBStrategyPaperRunnerConfig) -> str:
     return str(config.paper_execution_path or "STRATEGY_MANAGED").strip().upper()
+
+
+def _legacy_paper_proof_path_error(config: TrackBStrategyPaperRunnerConfig) -> str | None:
+    if _paper_execution_path(config) in {"PAPER_PROOF_DEBUG", "PAPER_PROOF_CANARY"}:
+        return LEGACY_PAPER_PROOF_DISABLED_REASON
+    return None
 
 
 def _managed_exit_policy_id(

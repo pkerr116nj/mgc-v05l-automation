@@ -59,7 +59,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--paper-execution-path",
         default="STRATEGY_MANAGED",
         choices=["STRATEGY_MANAGED", "PAPER_PROOF_DEBUG", "PAPER_PROOF_CANARY"],
-        help="Real strategy signals use STRATEGY_MANAGED by default; proof paths are explicit debug/canary only.",
+        help="Real strategy signals use STRATEGY_MANAGED. Legacy PAPER_PROOF_* choices are accepted only to fail closed.",
     )
     parser.add_argument("--managed-exit-policy-id")
     parser.add_argument("--broker-order-id")
