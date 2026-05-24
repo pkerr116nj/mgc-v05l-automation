@@ -100,21 +100,65 @@ Required authorities include:
 Weekly artifact hygiene is diagnostic-only. Historical MGC data maintenance is
 historical context only. Neither lane may promote itself to proof authority.
 
-## Proposed Diagnostic Schedule
+## Weekly Maintenance Orchestrator
 
-The weekly artifact-hygiene dry run may be scheduled after the Saturday/Sunday
-maintenance window and before Sunday preflight.
+Weekly maintenance should run as one orchestrated process, not as separate
+proof-authority jobs. The orchestrator owns schedule classification, lane
+composition, retry/no-op behavior, and alert artifacts.
 
-Proposed local schedule:
+State artifact:
 
-- label: `com.mgc_v05l.weekly_data_maintenance.dry_run`
-- cadence: Sunday 09:00 America/New_York
-- command: `mgc_v05l.app.weekly_data_maintenance --mode dry-run`
-- working directory: `/Users/patrick/Dev/MGC-v05l-automation`
-- stdout/stderr: `outputs/reports/weekly_data_maintenance/`
-- install status: template only, not installed
+- `outputs/track_b_execution_core/weekly_maintenance/latest_weekly_maintenance_orchestrator.json`
 
-The launchd template is:
+Required state fields:
+
+- `week_id`
+- `maintenance_window_id`
+- `window_start`
+- `alert_start`
+- `window_end`
+- `completion_status`
+- `last_attempt_at`
+- `next_retry_at`
+- `attempts`
+- `lanes_complete`
+- `lanes_failed`
+- `proof_blocking_findings`
+- `alert_required`
+
+Schedule doctrine:
+
+- native macOS LaunchAgent;
+- first attempt: Saturday 00:00 America/New_York;
+- retry cadence: hourly on the hour;
+- retry window ends: Sunday 16:00 America/New_York;
+- if the current week is already complete, later invocations no-op with
+  `WEEKLY_MAINTENANCE_ALREADY_COMPLETE`;
+- alerts begin Sunday 01:00 America/New_York if maintenance is still incomplete;
+- alerts continue hourly until success or Sunday 16:00 America/New_York;
+- Sunday 16:00 incomplete becomes proof-blocking/window-expired posture.
+
+Retry classifications:
+
+- `WEEKLY_MAINTENANCE_READY`
+- `WEEKLY_MAINTENANCE_ALREADY_COMPLETE`
+- `WEEKLY_MAINTENANCE_RETRY_SCHEDULED`
+- `WEEKLY_MAINTENANCE_ALERT_REQUIRED`
+- `WEEKLY_MAINTENANCE_PROOF_BLOCKED`
+- `WEEKLY_MAINTENANCE_WINDOW_EXPIRED`
+
+Notification stance:
+
+- current implementation writes alert fields and artifacts only;
+- no external messaging is active;
+- a future macOS notification hook may consume `alert_required=true`, but that
+  hook must remain separate from broker, order, lifecycle, and proof authority.
+
+The orchestrator launchd template is:
+
+- `deploy/launchd/templates/com.mgc_v05l.track_b_weekly_maintenance_orchestrator.plist`
+
+The earlier weekly artifact-hygiene template remains diagnostic-only:
 
 - `deploy/launchd/templates/com.mgc_v05l.weekly_data_maintenance.dry_run.plist`
 

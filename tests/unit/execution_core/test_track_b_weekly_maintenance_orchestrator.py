@@ -7,14 +7,17 @@ from pathlib import Path
 
 from mgc_v05l.execution_core import track_b_weekly_maintenance_orchestrator as orchestrator
 from mgc_v05l.execution_core.track_b_weekly_maintenance_orchestrator import (
+    COMPLETION_COMPLETE,
+    COMPLETION_COMPLETE_WITH_DIAGNOSTICS,
     LANE_DIAGNOSTIC_WARNING,
     LANE_FAILED,
+    LANE_INCOMPLETE,
     LANE_PROOF_BLOCKED,
-    LANE_READY,
-    WEEKLY_MAINTENANCE_FAILED,
-    WEEKLY_MAINTENANCE_PROOF_BLOCKED,
+    WEEKLY_MAINTENANCE_ALERT_REQUIRED,
+    WEEKLY_MAINTENANCE_ALREADY_COMPLETE,
     WEEKLY_MAINTENANCE_READY,
-    WEEKLY_MAINTENANCE_READY_WITH_DIAGNOSTICS,
+    WEEKLY_MAINTENANCE_RETRY_SCHEDULED,
+    WEEKLY_MAINTENANCE_WINDOW_EXPIRED,
     TrackBWeeklyMaintenanceOrchestratorConfig,
     build_track_b_weekly_maintenance_orchestrator,
     write_track_b_weekly_maintenance_orchestrator,
@@ -22,6 +25,11 @@ from mgc_v05l.execution_core.track_b_weekly_maintenance_orchestrator import (
 
 
 NOW = datetime(2026, 5, 24, 12, 0, tzinfo=UTC)
+SATURDAY_0000_ET = datetime(2026, 5, 23, 4, 0, tzinfo=UTC)
+SATURDAY_0100_ET = datetime(2026, 5, 23, 5, 0, tzinfo=UTC)
+SUNDAY_0000_ET = datetime(2026, 5, 24, 4, 0, tzinfo=UTC)
+SUNDAY_0100_ET = datetime(2026, 5, 24, 5, 0, tzinfo=UTC)
+SUNDAY_1600_ET = datetime(2026, 5, 24, 20, 0, tzinfo=UTC)
 
 
 def test_all_lanes_run_successfully_is_ready(tmp_path: Path) -> None:
@@ -36,20 +44,23 @@ def test_all_lanes_run_successfully_is_ready(tmp_path: Path) -> None:
         payload=payload,
     )
 
-    assert payload["overall_classification"] in {
-        WEEKLY_MAINTENANCE_READY,
-        WEEKLY_MAINTENANCE_READY_WITH_DIAGNOSTICS,
-    }
+    assert payload["overall_classification"] == WEEKLY_MAINTENANCE_READY
+    assert payload["completion_status"] in {COMPLETION_COMPLETE, COMPLETION_COMPLETE_WITH_DIAGNOSTICS}
+    assert payload["maintenance_window_id"] == "track_b_weekly_maintenance_2026-05-23_saturday_et"
+    assert payload["window_start"] == "2026-05-23T04:00:00+00:00"
+    assert payload["alert_start"] == "2026-05-24T05:00:00+00:00"
+    assert payload["window_end"] == "2026-05-24T20:00:00+00:00"
+    assert payload["attempts"] == 1
+    assert payload["next_retry_at"] is None
+    assert payload["alert_required"] is False
     assert set(payload["lanes_run"]) == set(orchestrator.LANE_IDS)
+    assert set(payload["lanes_complete"]) == set(orchestrator.LANE_IDS)
     assert payload["proof_blocking_findings"] == []
     assert payload["dry_run_only"] is True
     assert payload["broker_mutation_allowed"] is False
     assert payload["archive_delete_enabled"] is False
     assert payload["archive_compression_enabled"] is False
-    assert json.loads(written["json"].read_text(encoding="utf-8"))["overall_classification"] in {
-        WEEKLY_MAINTENANCE_READY,
-        WEEKLY_MAINTENANCE_READY_WITH_DIAGNOSTICS,
-    }
+    assert json.loads(written["json"].read_text(encoding="utf-8"))["overall_classification"] == WEEKLY_MAINTENANCE_READY
     assert written["markdown"].read_text(encoding="utf-8").startswith("# Track B Weekly Maintenance")
 
 
@@ -71,9 +82,10 @@ def test_historical_critical_lane_stale_blocks_only_when_configured_proof_critic
         now=NOW,
     )
 
-    assert diagnostic["overall_classification"] == WEEKLY_MAINTENANCE_READY_WITH_DIAGNOSTICS
+    assert diagnostic["overall_classification"] == WEEKLY_MAINTENANCE_READY
+    assert diagnostic["completion_status"] == COMPLETION_COMPLETE_WITH_DIAGNOSTICS
     assert diagnostic["proof_blocking_findings"] == []
-    assert proof_critical["overall_classification"] == WEEKLY_MAINTENANCE_PROOF_BLOCKED
+    assert proof_critical["overall_classification"] == WEEKLY_MAINTENANCE_ALERT_REQUIRED
     assert proof_critical["proof_blocking_findings"][0]["lane_id"] == "historical_data_maintenance"
 
 
@@ -94,7 +106,8 @@ def test_artifact_hygiene_warning_is_diagnostic_not_proof_blocking(tmp_path: Pat
         },
     )
 
-    assert payload["overall_classification"] == WEEKLY_MAINTENANCE_READY_WITH_DIAGNOSTICS
+    assert payload["overall_classification"] == WEEKLY_MAINTENANCE_READY
+    assert payload["completion_status"] == COMPLETION_COMPLETE_WITH_DIAGNOSTICS
     assert payload["proof_blocking_findings"] == []
     assert payload["diagnostic_findings"][0]["lane_id"] == "artifact_hygiene"
 
@@ -129,8 +142,8 @@ def test_archive_planner_scan_block_is_diagnostic_but_active_authority_risk_bloc
         },
     )
 
-    assert diagnostic["overall_classification"] == WEEKLY_MAINTENANCE_READY_WITH_DIAGNOSTICS
-    assert active_authority["overall_classification"] == WEEKLY_MAINTENANCE_PROOF_BLOCKED
+    assert diagnostic["overall_classification"] == WEEKLY_MAINTENANCE_READY
+    assert active_authority["overall_classification"] == WEEKLY_MAINTENANCE_ALERT_REQUIRED
     assert active_authority["proof_blocking_findings"][0]["lane_id"] == "artifact_archive_planner"
 
 
@@ -151,7 +164,8 @@ def test_lane_failure_is_failed(tmp_path: Path) -> None:
         },
     )
 
-    assert payload["overall_classification"] == WEEKLY_MAINTENANCE_FAILED
+    assert payload["overall_classification"] == WEEKLY_MAINTENANCE_ALERT_REQUIRED
+    assert payload["base_lane_classification"] == orchestrator.WEEKLY_MAINTENANCE_FAILED
     assert payload["lanes_failed"] == ["research_offline_labeling_check"]
 
 
@@ -169,7 +183,7 @@ def test_old_root_contamination_blocks_proof(tmp_path: Path) -> None:
         now=NOW,
     )
 
-    assert payload["overall_classification"] == WEEKLY_MAINTENANCE_PROOF_BLOCKED
+    assert payload["overall_classification"] == WEEKLY_MAINTENANCE_ALERT_REQUIRED
     assert payload["old_root_hits"] == ["scripts/bad.sh:1"]
     assert any(item["lane_id"] == "old_root_contamination_check" for item in payload["proof_blocking_findings"])
 
@@ -183,8 +197,97 @@ def test_research_offline_unlabeled_is_diagnostic(tmp_path: Path) -> None:
         now=NOW,
     )
 
-    assert payload["overall_classification"] == WEEKLY_MAINTENANCE_READY_WITH_DIAGNOSTICS
+    assert payload["overall_classification"] == WEEKLY_MAINTENANCE_READY
+    assert payload["completion_status"] == COMPLETION_COMPLETE_WITH_DIAGNOSTICS
     assert any(item["lane_id"] == "research_offline_labeling_check" for item in payload["diagnostic_findings"])
+
+
+def test_saturday_0000_first_attempt_is_allowed(tmp_path: Path) -> None:
+    _write_good_data_maintenance_report(tmp_path)
+
+    payload = build_track_b_weekly_maintenance_orchestrator(
+        config=TrackBWeeklyMaintenanceOrchestratorConfig(repo_root=tmp_path),
+        now=SATURDAY_0000_ET,
+    )
+
+    assert payload["overall_classification"] == WEEKLY_MAINTENANCE_READY
+    assert payload["last_attempt_at"] == "2026-05-23T04:00:00+00:00"
+    assert payload["attempts"] == 1
+    assert payload["alert_required"] is False
+
+
+def test_saturday_hourly_retry_when_incomplete(tmp_path: Path) -> None:
+    _write_good_data_maintenance_report(tmp_path)
+
+    payload = build_track_b_weekly_maintenance_orchestrator(
+        config=TrackBWeeklyMaintenanceOrchestratorConfig(repo_root=tmp_path),
+        now=SATURDAY_0100_ET,
+        lane_overrides=_incomplete_lane_override(),
+    )
+
+    assert payload["overall_classification"] == WEEKLY_MAINTENANCE_RETRY_SCHEDULED
+    assert payload["completion_status"] == "INCOMPLETE"
+    assert payload["next_retry_at"] == "2026-05-23T06:00:00+00:00"
+    assert payload["alert_required"] is False
+
+
+def test_sunday_0000_incomplete_has_no_alert_yet(tmp_path: Path) -> None:
+    _write_good_data_maintenance_report(tmp_path)
+
+    payload = build_track_b_weekly_maintenance_orchestrator(
+        config=TrackBWeeklyMaintenanceOrchestratorConfig(repo_root=tmp_path),
+        now=SUNDAY_0000_ET,
+        lane_overrides=_incomplete_lane_override(),
+    )
+
+    assert payload["overall_classification"] == WEEKLY_MAINTENANCE_RETRY_SCHEDULED
+    assert payload["next_retry_at"] == "2026-05-24T05:00:00+00:00"
+    assert payload["alert_required"] is False
+
+
+def test_sunday_0100_incomplete_requires_alert(tmp_path: Path) -> None:
+    _write_good_data_maintenance_report(tmp_path)
+
+    payload = build_track_b_weekly_maintenance_orchestrator(
+        config=TrackBWeeklyMaintenanceOrchestratorConfig(repo_root=tmp_path),
+        now=SUNDAY_0100_ET,
+        lane_overrides=_incomplete_lane_override(),
+    )
+
+    assert payload["overall_classification"] == WEEKLY_MAINTENANCE_ALERT_REQUIRED
+    assert payload["alert_required"] is True
+    assert payload["next_retry_at"] == "2026-05-24T06:00:00+00:00"
+
+
+def test_sunday_1600_incomplete_expires_and_blocks_proof(tmp_path: Path) -> None:
+    _write_good_data_maintenance_report(tmp_path)
+
+    payload = build_track_b_weekly_maintenance_orchestrator(
+        config=TrackBWeeklyMaintenanceOrchestratorConfig(repo_root=tmp_path),
+        now=SUNDAY_1600_ET,
+        lane_overrides=_incomplete_lane_override(),
+    )
+
+    assert payload["overall_classification"] == WEEKLY_MAINTENANCE_WINDOW_EXPIRED
+    assert payload["completion_status"] == "WINDOW_EXPIRED"
+    assert payload["next_retry_at"] is None
+    assert payload["alert_required"] is True
+    assert any(item["lane_id"] == "weekly_maintenance_window" for item in payload["proof_blocking_findings"])
+
+
+def test_completed_week_is_already_complete_noop(tmp_path: Path) -> None:
+    _write_good_data_maintenance_report(tmp_path)
+    config = TrackBWeeklyMaintenanceOrchestratorConfig(repo_root=tmp_path)
+    first = build_track_b_weekly_maintenance_orchestrator(config=config, now=SATURDAY_0000_ET)
+    write_track_b_weekly_maintenance_orchestrator(config=config, payload=first)
+
+    second = build_track_b_weekly_maintenance_orchestrator(config=config, now=SATURDAY_0100_ET)
+
+    assert second["overall_classification"] == WEEKLY_MAINTENANCE_ALREADY_COMPLETE
+    assert second["lanes_run"] == []
+    assert second["attempts"] == 1
+    assert second["next_retry_at"] is None
+    assert second["alert_required"] is False
 
 
 def test_no_broker_order_lifecycle_mutation_or_archive_execution_terms() -> None:
@@ -246,3 +349,15 @@ def _write_data_maintenance_report(root: Path, payload: dict) -> None:
 def _write_json(path: Path, payload: dict) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+
+
+def _incomplete_lane_override() -> dict[str, dict[str, object]]:
+    return {
+        "artifact_hygiene": {
+            "classification": LANE_INCOMPLETE,
+            "status": "incomplete",
+            "reason": "External platform maintenance still in progress.",
+            "proof_blocking": False,
+            "diagnostic_only": False,
+        }
+    }

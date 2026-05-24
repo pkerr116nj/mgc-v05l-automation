@@ -1,0 +1,51 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Template only. Not installed by this repository.
+  Track B weekly maintenance orchestrator for the Saturday retry window.
+  Writes state, reports, and alert fields only. No external notification hook is active.
+-->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.mgc_v05l.track_b_weekly_maintenance_orchestrator</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/Users/patrick/Dev/MGC-v05l-automation/.venv/bin/python</string>
+    <string>-m</string>
+    <string>mgc_v05l.execution_core.track_b_weekly_maintenance_orchestrator</string>
+    <string>--repo-root</string>
+    <string>/Users/patrick/Dev/MGC-v05l-automation</string>
+    <string>--output-path</string>
+    <string>outputs/track_b_execution_core/weekly_maintenance/latest_weekly_maintenance_orchestrator.json</string>
+    <string>--markdown-report-root</string>
+    <string>outputs/reports/weekly_maintenance</string>
+  </array>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>TRACK_B_PROJECT_ROOT</key>
+    <string>/Users/patrick/Dev/MGC-v05l-automation</string>
+  </dict>
+  <key>StartCalendarInterval</key>
+  <array>
+    <dict>
+      <key>Weekday</key>
+      <integer>6</integer>
+      <key>Minute</key>
+      <integer>0</integer>
+    </dict>
+    <dict>
+      <key>Weekday</key>
+      <integer>0</integer>
+      <key>Minute</key>
+      <integer>0</integer>
+    </dict>
+  </array>
+  <key>WorkingDirectory</key>
+  <string>/Users/patrick/Dev/MGC-v05l-automation</string>
+  <key>StandardOutPath</key>
+  <string>/Users/patrick/Dev/MGC-v05l-automation/outputs/reports/weekly_maintenance/weekly_maintenance_orchestrator.stdout.log</string>
+  <key>StandardErrorPath</key>
+  <string>/Users/patrick/Dev/MGC-v05l-automation/outputs/reports/weekly_maintenance/weekly_maintenance_orchestrator.stderr.log</string>
+</dict>
+</plist>

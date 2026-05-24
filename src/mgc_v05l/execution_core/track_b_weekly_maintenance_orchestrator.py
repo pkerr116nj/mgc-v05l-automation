@@ -1,9 +1,9 @@
 """Track B weekly maintenance orchestrator v1.
 
-The orchestrator composes maintenance lanes into one PAPER-mode report. It
-does not create broker/order/lifecycle authority and never deletes, moves,
-compresses, archives, submits, cancels, replaces, closes, flattens, or invokes
-paper proof.
+The orchestrator composes maintenance lanes into one PAPER-mode report and
+classifies the Saturday/Sunday retry window. It does not create
+broker/order/lifecycle authority and never deletes, moves, compresses,
+archives, submits, cancels, replaces, closes, flattens, or invokes paper proof.
 """
 
 from __future__ import annotations
@@ -48,10 +48,20 @@ from mgc_v05l.paths import ARCHIVED_ROOT_FRAGMENTS, PROJECT_ROOT
 
 
 WEEKLY_MAINTENANCE_READY = "WEEKLY_MAINTENANCE_READY"
+WEEKLY_MAINTENANCE_ALREADY_COMPLETE = "WEEKLY_MAINTENANCE_ALREADY_COMPLETE"
+WEEKLY_MAINTENANCE_RETRY_SCHEDULED = "WEEKLY_MAINTENANCE_RETRY_SCHEDULED"
+WEEKLY_MAINTENANCE_ALERT_REQUIRED = "WEEKLY_MAINTENANCE_ALERT_REQUIRED"
+WEEKLY_MAINTENANCE_WINDOW_EXPIRED = "WEEKLY_MAINTENANCE_WINDOW_EXPIRED"
 WEEKLY_MAINTENANCE_READY_WITH_DIAGNOSTICS = "WEEKLY_MAINTENANCE_READY_WITH_DIAGNOSTICS"
 WEEKLY_MAINTENANCE_PROOF_BLOCKED = "WEEKLY_MAINTENANCE_PROOF_BLOCKED"
 WEEKLY_MAINTENANCE_INCOMPLETE = "WEEKLY_MAINTENANCE_INCOMPLETE"
 WEEKLY_MAINTENANCE_FAILED = "WEEKLY_MAINTENANCE_FAILED"
+
+COMPLETION_COMPLETE = "COMPLETE"
+COMPLETION_COMPLETE_WITH_DIAGNOSTICS = "COMPLETE_WITH_DIAGNOSTICS"
+COMPLETION_INCOMPLETE = "INCOMPLETE"
+COMPLETION_PROOF_BLOCKED = "PROOF_BLOCKED"
+COMPLETION_WINDOW_EXPIRED = "WINDOW_EXPIRED"
 
 LANE_READY = "LANE_READY"
 LANE_DIAGNOSTIC_WARNING = "LANE_DIAGNOSTIC_WARNING"
@@ -96,6 +106,7 @@ class TrackBWeeklyMaintenanceOrchestratorConfig:
     max_research_files: int = 1000
     max_old_root_scan_files: int = 5000
     write_lane_artifacts: bool = True
+    force: bool = False
 
     def resolve(self, path: Path) -> Path:
         return path if path.is_absolute() else self.repo_root / path
@@ -108,6 +119,11 @@ def build_track_b_weekly_maintenance_orchestrator(
     lane_overrides: Mapping[str, Mapping[str, Any]] | None = None,
 ) -> dict[str, Any]:
     actual_now = _ensure_utc(now or datetime.now(UTC))
+    window = _maintenance_window(actual_now)
+    previous_state = _read_json(config.resolve(config.output_path))
+    if not config.force and _same_completed_window(previous_state, window):
+        return _already_complete_payload(now=actual_now, window=window, previous_state=previous_state)
+
     overrides = lane_overrides or {}
     lanes: list[dict[str, Any]] = []
     for lane_id in LANE_IDS:
@@ -133,13 +149,30 @@ def build_track_b_weekly_maintenance_orchestrator(
     diagnostics = _diagnostic_findings(lanes)
     failures = [lane for lane in lanes if lane.get("classification") == LANE_FAILED]
     incomplete = [lane for lane in lanes if lane.get("classification") == LANE_INCOMPLETE]
-    overall = _overall_classification(
+    base_overall = _overall_classification(
         missing_lanes=missing_lanes,
         failures=failures,
         incomplete=incomplete,
         proof_blockers=proof_blockers,
         diagnostics=diagnostics,
     )
+    completion_status = _completion_status(
+        base_overall=base_overall,
+        diagnostics=diagnostics,
+        actual_now=actual_now,
+        window=window,
+    )
+    overall = _scheduled_classification(
+        completion_status=completion_status,
+        base_overall=base_overall,
+        actual_now=actual_now,
+        window=window,
+    )
+    alert_required = _alert_required(actual_now=actual_now, window=window, completion_status=completion_status)
+    next_retry_at = _next_retry_at(actual_now=actual_now, window=window, completion_status=completion_status)
+    attempts = _attempt_count(previous_state) + 1
+    scheduled_blockers = _scheduled_proof_blockers(overall=overall, window=window)
+    all_proof_blockers = [*proof_blockers, *scheduled_blockers]
     artifact_archive_lane = _lane_by_id(lanes, "artifact_archive_planner")
     historical_lane = _lane_by_id(lanes, "historical_data_maintenance")
     old_root_lane = _lane_by_id(lanes, "old_root_contamination_check")
@@ -147,13 +180,30 @@ def build_track_b_weekly_maintenance_orchestrator(
         "schema_version": "track_b_weekly_maintenance_orchestrator_v1",
         "generated_at": actual_now.isoformat(),
         "weekly_maintenance_orchestrator_id": f"track_b_weekly_maintenance_{uuid.uuid4().hex}",
+        "week_id": window["week_id"],
+        "maintenance_window_id": window["maintenance_window_id"],
+        "window_start": window["window_start"].isoformat(),
+        "alert_start": window["alert_start"].isoformat(),
+        "window_end": window["window_end"].isoformat(),
+        "completion_status": completion_status,
+        "last_attempt_at": actual_now.isoformat(),
+        "next_retry_at": next_retry_at.isoformat() if next_retry_at is not None else None,
+        "attempts": attempts,
+        "alert_required": alert_required,
         "mode": "PAPER",
         "overall_classification": overall,
+        "base_lane_classification": base_overall,
         "lanes_run": [lane.get("lane_id") for lane in lanes],
+        "lanes_complete": [
+            lane.get("lane_id")
+            for lane in lanes
+            if lane.get("classification") not in {LANE_FAILED, LANE_INCOMPLETE, LANE_PROOF_BLOCKED}
+        ],
         "lanes_failed": [lane.get("lane_id") for lane in failures],
+        "lanes_failed_or_incomplete": [lane.get("lane_id") for lane in [*failures, *incomplete]],
         "lanes_incomplete": [lane.get("lane_id") for lane in incomplete],
         "missing_lanes": missing_lanes,
-        "proof_blocking_findings": proof_blockers,
+        "proof_blocking_findings": all_proof_blockers,
         "diagnostic_findings": diagnostics,
         "archive_posture": artifact_archive_lane.get("summary", {}),
         "historical_data_posture": historical_lane.get("summary", {}),
@@ -206,6 +256,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--output-path", type=Path, default=DEFAULT_OUTPUT_PATH)
     parser.add_argument("--markdown-report-root", type=Path, default=DEFAULT_MARKDOWN_REPORT_ROOT)
     parser.add_argument("--historical-data-proof-critical", action="store_true")
+    parser.add_argument("--force", action="store_true")
     parser.add_argument("--no-write", action="store_true")
     parser.add_argument("--json", action="store_true")
     return parser
@@ -218,6 +269,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         output_path=Path(args.output_path),
         markdown_report_root=Path(args.markdown_report_root),
         historical_data_proof_critical=bool(args.historical_data_proof_critical),
+        force=bool(args.force),
     )
     payload = build_track_b_weekly_maintenance_orchestrator(config=config)
     written: dict[str, Path] = {}
@@ -234,9 +286,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         "output_path": str(written.get("json") or config.resolve(config.output_path)),
     }
     print(json.dumps(payload if bool(args.json) else summary, indent=2, sort_keys=True))
-    if payload.get("overall_classification") in {
-        WEEKLY_MAINTENANCE_READY,
-        WEEKLY_MAINTENANCE_READY_WITH_DIAGNOSTICS,
+    if payload.get("overall_classification") not in {
+        WEEKLY_MAINTENANCE_PROOF_BLOCKED,
+        WEEKLY_MAINTENANCE_WINDOW_EXPIRED,
+        WEEKLY_MAINTENANCE_FAILED,
     }:
         return 0
     return 2
@@ -599,6 +652,192 @@ def _overall_classification(
     return WEEKLY_MAINTENANCE_READY
 
 
+def _completion_status(
+    *,
+    base_overall: str,
+    diagnostics: Sequence[Mapping[str, Any]],
+    actual_now: datetime,
+    window: Mapping[str, datetime | str],
+) -> str:
+    if base_overall in {WEEKLY_MAINTENANCE_READY, WEEKLY_MAINTENANCE_READY_WITH_DIAGNOSTICS}:
+        return COMPLETION_COMPLETE_WITH_DIAGNOSTICS if diagnostics else COMPLETION_COMPLETE
+    if actual_now >= _window_datetime(window, "window_end"):
+        return COMPLETION_WINDOW_EXPIRED
+    if base_overall == WEEKLY_MAINTENANCE_PROOF_BLOCKED:
+        return COMPLETION_PROOF_BLOCKED
+    return COMPLETION_INCOMPLETE
+
+
+def _scheduled_classification(
+    *,
+    completion_status: str,
+    base_overall: str,
+    actual_now: datetime,
+    window: Mapping[str, datetime | str],
+) -> str:
+    if completion_status in {COMPLETION_COMPLETE, COMPLETION_COMPLETE_WITH_DIAGNOSTICS}:
+        return WEEKLY_MAINTENANCE_READY
+    if completion_status == COMPLETION_WINDOW_EXPIRED:
+        return WEEKLY_MAINTENANCE_WINDOW_EXPIRED
+    if _alert_required(actual_now=actual_now, window=window, completion_status=completion_status):
+        return WEEKLY_MAINTENANCE_ALERT_REQUIRED
+    if base_overall == WEEKLY_MAINTENANCE_PROOF_BLOCKED:
+        return WEEKLY_MAINTENANCE_PROOF_BLOCKED
+    return WEEKLY_MAINTENANCE_RETRY_SCHEDULED
+
+
+def _alert_required(
+    *,
+    actual_now: datetime,
+    window: Mapping[str, datetime | str],
+    completion_status: str,
+) -> bool:
+    if completion_status in {COMPLETION_COMPLETE, COMPLETION_COMPLETE_WITH_DIAGNOSTICS}:
+        return False
+    return _window_datetime(window, "alert_start") <= actual_now <= _window_datetime(window, "window_end")
+
+
+def _next_retry_at(
+    *,
+    actual_now: datetime,
+    window: Mapping[str, datetime | str],
+    completion_status: str,
+) -> datetime | None:
+    if completion_status in {
+        COMPLETION_COMPLETE,
+        COMPLETION_COMPLETE_WITH_DIAGNOSTICS,
+        COMPLETION_WINDOW_EXPIRED,
+    }:
+        return None
+    window_start = _window_datetime(window, "window_start")
+    window_end = _window_datetime(window, "window_end")
+    if actual_now < window_start:
+        return window_start
+    if actual_now >= window_end:
+        return None
+    next_hour = actual_now.replace(minute=0, second=0, microsecond=0) + timedelta(hours=1)
+    return next_hour if next_hour <= window_end else window_end
+
+
+def _scheduled_proof_blockers(*, overall: str, window: Mapping[str, datetime | str]) -> list[dict[str, Any]]:
+    if overall != WEEKLY_MAINTENANCE_WINDOW_EXPIRED:
+        return []
+    return [
+        {
+            "lane_id": "weekly_maintenance_window",
+            "classification": WEEKLY_MAINTENANCE_WINDOW_EXPIRED,
+            "reason": (
+                "Weekly maintenance remained incomplete through "
+                f"{_window_datetime(window, 'window_end').isoformat()}."
+            ),
+        }
+    ]
+
+
+def _maintenance_window(now: datetime) -> dict[str, datetime | str]:
+    eastern = ZoneInfo("America/New_York")
+    local_now = _ensure_utc(now).astimezone(eastern)
+    days_until_saturday = (5 - local_now.weekday()) % 7
+    if local_now.weekday() == 6:
+        days_until_saturday = -1
+    saturday = local_now.date() + timedelta(days=days_until_saturday)
+    window_start = datetime.combine(saturday, time(0, 0), tzinfo=eastern)
+    alert_start = window_start + timedelta(days=1, hours=1)
+    window_end = window_start + timedelta(days=1, hours=16)
+    week_id = f"{saturday.isoformat()}_saturday_et"
+    return {
+        "week_id": week_id,
+        "maintenance_window_id": f"track_b_weekly_maintenance_{week_id}",
+        "window_start": window_start.astimezone(UTC),
+        "alert_start": alert_start.astimezone(UTC),
+        "window_end": window_end.astimezone(UTC),
+    }
+
+
+def _same_completed_window(
+    previous_state: Mapping[str, Any],
+    window: Mapping[str, datetime | str],
+) -> bool:
+    if not previous_state:
+        return False
+    return (
+        previous_state.get("maintenance_window_id") == window.get("maintenance_window_id")
+        and previous_state.get("completion_status") in {COMPLETION_COMPLETE, COMPLETION_COMPLETE_WITH_DIAGNOSTICS}
+        and previous_state.get("overall_classification")
+        in {WEEKLY_MAINTENANCE_READY, WEEKLY_MAINTENANCE_ALREADY_COMPLETE}
+    )
+
+
+def _already_complete_payload(
+    *,
+    now: datetime,
+    window: Mapping[str, datetime | str],
+    previous_state: Mapping[str, Any],
+) -> dict[str, Any]:
+    return {
+        "schema_version": "track_b_weekly_maintenance_orchestrator_v1",
+        "generated_at": now.isoformat(),
+        "weekly_maintenance_orchestrator_id": f"track_b_weekly_maintenance_{uuid.uuid4().hex}",
+        "week_id": window["week_id"],
+        "maintenance_window_id": window["maintenance_window_id"],
+        "window_start": _window_datetime(window, "window_start").isoformat(),
+        "alert_start": _window_datetime(window, "alert_start").isoformat(),
+        "window_end": _window_datetime(window, "window_end").isoformat(),
+        "completion_status": previous_state.get("completion_status") or COMPLETION_COMPLETE,
+        "last_attempt_at": previous_state.get("last_attempt_at"),
+        "next_retry_at": None,
+        "attempts": _attempt_count(previous_state),
+        "alert_required": False,
+        "mode": "PAPER",
+        "overall_classification": WEEKLY_MAINTENANCE_ALREADY_COMPLETE,
+        "base_lane_classification": previous_state.get("base_lane_classification") or WEEKLY_MAINTENANCE_READY,
+        "lanes_run": [],
+        "lanes_complete": list(_list(previous_state.get("lanes_complete"))),
+        "lanes_failed": [],
+        "lanes_failed_or_incomplete": [],
+        "lanes_incomplete": [],
+        "missing_lanes": [],
+        "proof_blocking_findings": [],
+        "diagnostic_findings": list(_list(previous_state.get("diagnostic_findings"))),
+        "archive_posture": _mapping(previous_state.get("archive_posture")),
+        "historical_data_posture": _mapping(previous_state.get("historical_data_posture")),
+        "old_root_hits": list(_list(previous_state.get("old_root_hits"))),
+        "recommended_actions": ["Weekly maintenance already completed for this maintenance window."],
+        "dry_run_only": True,
+        "broker_mutation_allowed": False,
+        "order_mutation_allowed": False,
+        "lifecycle_mutation_allowed": False,
+        "submit_allowed": False,
+        "cancel_allowed": False,
+        "replace_allowed": False,
+        "close_allowed": False,
+        "flatten_allowed": False,
+        "paper_proof_invoked": False,
+        "live_money_eligible": False,
+        "archive_apply_enabled": False,
+        "archive_delete_enabled": False,
+        "archive_compression_enabled": False,
+        "maintenance_creates_authority": False,
+        "dashboard_projection_consumed": False,
+        "lanes": [],
+        "source_artifact_paths": dict(_mapping(previous_state.get("source_artifact_paths"))),
+    }
+
+
+def _window_datetime(window: Mapping[str, datetime | str], key: str) -> datetime:
+    value = window[key]
+    if isinstance(value, datetime):
+        return _ensure_utc(value)
+    return _ensure_utc(datetime.fromisoformat(str(value).replace("Z", "+00:00")))
+
+
+def _attempt_count(previous_state: Mapping[str, Any]) -> int:
+    try:
+        return max(0, int(previous_state.get("attempts") or 0))
+    except (TypeError, ValueError):
+        return 0
+
+
 def _proof_blocking_findings(lanes: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
     return [
         {
@@ -626,6 +865,14 @@ def _diagnostic_findings(lanes: Sequence[Mapping[str, Any]]) -> list[dict[str, A
 def _recommended_actions(overall: str, lanes: Sequence[Mapping[str, Any]]) -> list[str]:
     if overall == WEEKLY_MAINTENANCE_READY:
         return ["No weekly maintenance action required before proof."]
+    if overall == WEEKLY_MAINTENANCE_ALREADY_COMPLETE:
+        return ["Weekly maintenance already completed for this maintenance window."]
+    if overall == WEEKLY_MAINTENANCE_RETRY_SCHEDULED:
+        return ["Weekly maintenance incomplete; next hourly retry is scheduled."]
+    if overall == WEEKLY_MAINTENANCE_ALERT_REQUIRED:
+        return ["Weekly maintenance incomplete in the Sunday alert window; alert artifact review is required."]
+    if overall == WEEKLY_MAINTENANCE_WINDOW_EXPIRED:
+        return ["Weekly maintenance window expired incomplete; treat as proof-blocking until resolved."]
     actions: list[str] = []
     for finding in [*_proof_blocking_findings(lanes), *_diagnostic_findings(lanes)]:
         actions.append(f"{finding['lane_id']}: {finding['reason']}")
@@ -638,6 +885,14 @@ def _render_markdown(payload: Mapping[str, Any]) -> str:
         "",
         f"- generated_at: {payload.get('generated_at')}",
         f"- overall_classification: {payload.get('overall_classification')}",
+        f"- completion_status: {payload.get('completion_status')}",
+        f"- maintenance_window_id: {payload.get('maintenance_window_id')}",
+        f"- window_start: {payload.get('window_start')}",
+        f"- alert_start: {payload.get('alert_start')}",
+        f"- window_end: {payload.get('window_end')}",
+        f"- attempts: {payload.get('attempts')}",
+        f"- next_retry_at: {payload.get('next_retry_at')}",
+        f"- alert_required: {payload.get('alert_required')}",
         f"- dry_run_only: {payload.get('dry_run_only')}",
         f"- broker_mutation_allowed: {payload.get('broker_mutation_allowed')}",
         f"- proof_blocking_findings: {len(payload.get('proof_blocking_findings') or [])}",
