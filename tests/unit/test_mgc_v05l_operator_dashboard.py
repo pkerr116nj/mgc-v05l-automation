@@ -405,6 +405,17 @@ def test_track_b_control_plane_status_projection_displays_continuation_preview(t
     assert summary["continuation_aware_exit_missing_inputs"] == []
     assert summary["continuation_aware_exit_source_report_path"].endswith("asian_drift_rule_report.json")
     assert summary["continuation_aware_exit_diagnostic_only"] is True
+    assert summary["continuation_aware_exit_history_classification"] == "CONTINUATION_EXIT_HISTORY_READY"
+    assert summary["continuation_aware_exit_history_total_events"] == 1
+    assert summary["continuation_aware_exit_history_strategy_count"] == 1
+    assert summary["continuation_aware_exit_history_latest_strategy_id"] == "asian_drift_v1"
+    assert summary["continuation_aware_exit_history_latest_exit_profile_id"] == (
+        "ASIAN_DRIFT_CONTINUATION_LONG_LEASH_V1"
+    )
+    assert summary["continuation_aware_exit_history_latest_exit_state"] == "HOLD_CONTINUATION_CONFIRMED"
+    assert summary["continuation_aware_exit_history_not_order_authority"] is True
+    assert summary["continuation_aware_exit_history_not_lifecycle_authority"] is True
+    assert summary["continuation_aware_exit_history_not_routing_authority"] is True
 
 
 def test_track_b_control_plane_status_missing_snapshot_is_diagnostic_only(tmp_path: Path) -> None:
@@ -1220,7 +1231,35 @@ def _continuation_aware_exit_snapshot_fields(preview: dict[str, object] | None) 
             "continuation_aware_exit_no_preview": True,
             "continuation_aware_exit_diagnostic_only": True,
             "continuation_aware_exit_not_routing_authority": True,
+            "continuation_aware_exit_history_classification": "CONTINUATION_EXIT_HISTORY_EMPTY",
+            "continuation_aware_exit_history_total_events": 0,
+            "continuation_aware_exit_history_strategy_count": 0,
+            "continuation_aware_exit_history_latest_strategy_id": "",
+            "continuation_aware_exit_history_latest_exit_profile_id": "",
+            "continuation_aware_exit_history_latest_exit_state": "",
+            "continuation_aware_exit_history_top_strategies": [],
+            "continuation_aware_exit_history_diagnostic_only": True,
+            "continuation_aware_exit_history_not_order_authority": True,
+            "continuation_aware_exit_history_not_lifecycle_authority": True,
+            "continuation_aware_exit_history_not_routing_authority": True,
         }
+    history_row = {
+        "strategy_id": preview.get("strategy_id") or "",
+        "symbol": preview.get("symbol") or "",
+        "latest_exit_profile_id": preview.get("exit_profile_id") or "",
+        "latest_exit_state": preview.get("exit_state") or "",
+        "latest_continuation_quality_state": preview.get("continuation_quality_state") or "",
+        "latest_generated_at": preview.get("generated_at"),
+        "hold_count": 1 if str(preview.get("exit_state") or "").startswith("HOLD_") else 0,
+        "exit_preview_count": 1
+        if str(preview.get("exit_state") or "").startswith("EXIT_") or preview.get("should_request_close") is True
+        else 0,
+        "insufficient_data_count": 1 if preview.get("exit_state") == "INSUFFICIENT_DATA_HOLD_OR_FALLBACK" else 0,
+        "hard_override_count": 1
+        if preview.get("exit_state") in {"EXIT_HARD_MAX_DURATION", "EXIT_SAFE_STATE_OVERRIDE", "EXIT_LIFECYCLE_UNSAFE"}
+        else 0,
+        "latest_operator_summary": "test continuation history summary",
+    }
     return {
         "continuation_aware_exit_strategy_id": preview.get("strategy_id") or "",
         "continuation_aware_exit_symbol": preview.get("symbol") or "",
@@ -1239,6 +1278,17 @@ def _continuation_aware_exit_snapshot_fields(preview: dict[str, object] | None) 
         "continuation_aware_exit_no_preview": False,
         "continuation_aware_exit_diagnostic_only": True,
         "continuation_aware_exit_not_routing_authority": True,
+        "continuation_aware_exit_history_classification": "CONTINUATION_EXIT_HISTORY_READY",
+        "continuation_aware_exit_history_total_events": 1,
+        "continuation_aware_exit_history_strategy_count": 1,
+        "continuation_aware_exit_history_latest_strategy_id": preview.get("strategy_id") or "",
+        "continuation_aware_exit_history_latest_exit_profile_id": preview.get("exit_profile_id") or "",
+        "continuation_aware_exit_history_latest_exit_state": preview.get("exit_state") or "",
+        "continuation_aware_exit_history_top_strategies": [history_row],
+        "continuation_aware_exit_history_diagnostic_only": True,
+        "continuation_aware_exit_history_not_order_authority": True,
+        "continuation_aware_exit_history_not_lifecycle_authority": True,
+        "continuation_aware_exit_history_not_routing_authority": True,
     }
 
 

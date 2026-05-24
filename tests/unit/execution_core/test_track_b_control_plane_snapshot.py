@@ -183,8 +183,23 @@ def test_snapshot_surfaces_continuation_aware_exit_preview_as_diagnostic_only(tm
     assert payload["continuation_aware_exit_no_preview"] is False
     assert payload["continuation_aware_exit_diagnostic_only"] is True
     assert payload["continuation_aware_exit_not_routing_authority"] is True
+    assert payload["continuation_aware_exit_history_classification"] == "CONTINUATION_EXIT_HISTORY_READY"
+    assert payload["continuation_aware_exit_history_total_events"] == 1
+    assert payload["continuation_aware_exit_history_strategy_count"] == 1
+    assert payload["continuation_aware_exit_history_latest_strategy_id"] == "asian_drift_v1"
+    assert payload["continuation_aware_exit_history_latest_exit_profile_id"] == (
+        "ASIAN_DRIFT_CONTINUATION_LONG_LEASH_V1"
+    )
+    assert payload["continuation_aware_exit_history_latest_exit_state"] == "HOLD_CONTINUATION_CONFIRMED"
+    assert payload["continuation_aware_exit_history_not_order_authority"] is True
+    assert payload["continuation_aware_exit_history_not_lifecycle_authority"] is True
+    assert payload["continuation_aware_exit_history_not_routing_authority"] is True
+    assert payload["continuation_aware_exit_history_top_strategies"][0]["strategy_id"] == "asian_drift_v1"
     assert payload["source_artifact_paths"]["continuation_aware_exit_preview"].endswith(
         "outputs/track_b_execution_core/continuation_aware_exit/latest_continuation_aware_exit_preview.json"
+    )
+    assert payload["source_artifact_paths"]["continuation_aware_exit_history"].endswith(
+        "outputs/track_b_execution_core/continuation_aware_exit/latest_continuation_aware_exit_history.json"
     )
 
 
@@ -198,6 +213,9 @@ def test_snapshot_no_continuation_aware_exit_preview_is_calm(tmp_path: Path) -> 
     assert payload["continuation_aware_exit_no_preview"] is True
     assert payload["continuation_aware_exit_diagnostic_only"] is True
     assert payload["continuation_aware_exit_should_request_close"] is False
+    assert payload["continuation_aware_exit_history_classification"] == "CONTINUATION_EXIT_HISTORY_EMPTY"
+    assert payload["continuation_aware_exit_history_total_events"] == 0
+    assert payload["continuation_aware_exit_history_top_strategies"] == []
 
 
 def test_malformed_continuation_preview_cannot_influence_authority_fields(tmp_path: Path) -> None:
@@ -218,6 +236,9 @@ def test_malformed_continuation_preview_cannot_influence_authority_fields(tmp_pa
     assert payload["safe_state_classification"] == "SAFE_STATE_NORMAL"
     assert payload["runtime_supervisor_classification"] == "SUPERVISOR_RUNTIME_START_ALLOWED"
     assert not any(blocker["code"].startswith("continuation_aware_exit") for blocker in payload["blockers"])
+    assert payload["continuation_aware_exit_history_total_events"] == 1
+    assert payload["continuation_aware_exit_history_not_order_authority"] is True
+    assert payload["continuation_aware_exit_history_not_lifecycle_authority"] is True
 
 
 def test_snapshot_surfaces_planner_operator_explanation_for_missing_open_order_truth(tmp_path: Path) -> None:

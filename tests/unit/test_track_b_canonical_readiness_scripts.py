@@ -169,6 +169,9 @@ def test_status_script_surfaces_control_plane_services_as_projection_only() -> N
     assert "continuation_aware_exit_diagnostic_only" in script
     assert "continuation_aware_exit_not_order_authority" in script
     assert "continuation_aware_exit_not_lifecycle_authority" in script
+    assert "continuation_aware_exit_history_classification" in script
+    assert "continuation_aware_exit_history_not_order_authority" in script
+    assert "continuation_aware_exit_history_not_lifecycle_authority" in script
     assert "autonomous_recovery_plan_classification" in script
     assert "autonomous_recovery_next_action" in script
     assert "autonomous_recovery_execution_enabled" in script
@@ -267,6 +270,8 @@ def test_runtime_start_consults_control_plane_snapshot_before_spawn() -> None:
     assert "continuation_aware_exit_dry_run_only" in script
     assert "continuation_aware_exit_not_order_authority" in script
     assert "continuation_aware_exit_not_lifecycle_authority" in script
+    assert "continuation_aware_exit_history_classification" in script
+    assert "continuation_aware_exit_history_latest_exit_state" in script
     assert "shared_truth_refresh_generation_id" in script
     assert "shared_truth_coherence_status" in script
     assert "agent_health_blockers" in script

@@ -18358,6 +18358,37 @@ def _track_b_control_plane_services_summary(repo_root: Path) -> dict[str, Any]:
         is True,
         "continuation_aware_exit_diagnostic_only": True,
         "continuation_aware_exit_not_routing_authority": True,
+        "continuation_aware_exit_history_classification": control_plane_snapshot.get(
+            "continuation_aware_exit_history_classification"
+        )
+        or "CONTINUATION_EXIT_HISTORY_EMPTY",
+        "continuation_aware_exit_history_total_events": control_plane_snapshot.get(
+            "continuation_aware_exit_history_total_events"
+        )
+        or 0,
+        "continuation_aware_exit_history_strategy_count": control_plane_snapshot.get(
+            "continuation_aware_exit_history_strategy_count"
+        )
+        or 0,
+        "continuation_aware_exit_history_latest_strategy_id": control_plane_snapshot.get(
+            "continuation_aware_exit_history_latest_strategy_id"
+        )
+        or "",
+        "continuation_aware_exit_history_latest_exit_profile_id": control_plane_snapshot.get(
+            "continuation_aware_exit_history_latest_exit_profile_id"
+        )
+        or "",
+        "continuation_aware_exit_history_latest_exit_state": control_plane_snapshot.get(
+            "continuation_aware_exit_history_latest_exit_state"
+        )
+        or "",
+        "continuation_aware_exit_history_top_strategies": list(
+            control_plane_snapshot.get("continuation_aware_exit_history_top_strategies") or []
+        )[:3],
+        "continuation_aware_exit_history_diagnostic_only": True,
+        "continuation_aware_exit_history_not_order_authority": True,
+        "continuation_aware_exit_history_not_lifecycle_authority": True,
+        "continuation_aware_exit_history_not_routing_authority": True,
         "safe_state_classification": control_plane_snapshot.get("safe_state_classification") or "",
         "safe_state_broker_mutation_allowed": control_plane_snapshot.get("safe_state_broker_mutation_allowed") is True,
         "safe_state_runtime_start_allowed": control_plane_snapshot.get("safe_state_runtime_start_allowed") is True,
