@@ -22,6 +22,8 @@ from mgc_v05l.execution_core.track_b_pre_action_snapshot_validator import (
 from mgc_v05l.execution_core.track_b_recovery_budget_ledger import (
     BUDGET_ATTEMPT_CONSUMED_FAILURE,
     BUDGET_ATTEMPT_CONSUMED_SUCCESS,
+    BUDGET_ATTEMPT_EXPIRED,
+    BUDGET_ATTEMPT_RELEASED,
     DEFAULT_AGENT_ID,
     DEFAULT_RECOVERY_BUDGET_LEDGER_ARTIFACT,
     build_budget_reservation_event,
@@ -50,6 +52,15 @@ RUNTIME_RETRY_BLOCKED_MISSING_GENERATION = "RUNTIME_RETRY_BLOCKED_MISSING_GENERA
 RUNTIME_RETRY_BLOCKED_BUDGET = "RUNTIME_RETRY_BLOCKED_BUDGET"
 RUNTIME_RETRY_BLOCKED_COOLDOWN = "RUNTIME_RETRY_BLOCKED_COOLDOWN"
 RUNTIME_RETRY_BLOCKED_QUARANTINE = "RUNTIME_RETRY_BLOCKED_QUARANTINE"
+
+RUNTIME_RETRY_TRANSACTION_DRY_RUN_READY = "RUNTIME_RETRY_TRANSACTION_DRY_RUN_READY"
+RUNTIME_RETRY_TRANSACTION_RESERVED = "RUNTIME_RETRY_TRANSACTION_RESERVED"
+RUNTIME_RETRY_TRANSACTION_APPLY_DISABLED = "RUNTIME_RETRY_TRANSACTION_APPLY_DISABLED"
+RUNTIME_RETRY_TRANSACTION_RELEASED = "RUNTIME_RETRY_TRANSACTION_RELEASED"
+RUNTIME_RETRY_TRANSACTION_CONSUMED_SUCCESS = "RUNTIME_RETRY_TRANSACTION_CONSUMED_SUCCESS"
+RUNTIME_RETRY_TRANSACTION_CONSUMED_FAILURE = "RUNTIME_RETRY_TRANSACTION_CONSUMED_FAILURE"
+RUNTIME_RETRY_TRANSACTION_ABORTED_PRE_ACTION = "RUNTIME_RETRY_TRANSACTION_ABORTED_PRE_ACTION"
+RUNTIME_RETRY_TRANSACTION_ABORTED_POST_ACTION = "RUNTIME_RETRY_TRANSACTION_ABORTED_POST_ACTION"
 
 SUPPORTED_ACTION_TYPES = {
     "REFRESH_EVIDENCE",
@@ -361,6 +372,17 @@ def _adapter_result(
     command = _runtime_retry_command(config)
     launcher_exists = len(command) >= 2 and Path(command[1]).exists()
     generation_gate = _runtime_retry_generation_gate(validation=validation, budget=budget, now=now)
+    transaction_lifecycle = _runtime_retry_transaction_lifecycle(
+        config=config,
+        recovery_attempt_id=recovery_attempt_id,
+        validation=validation,
+        budget=budget,
+        generation_gate=generation_gate,
+        budget_key=_budget_key(action_type=action_type, target_identity=normalized_target),
+        normalized_target=normalized_target,
+        command=command,
+        now=now,
+    )
     blocked_reason = "ADAPTER_DISABLED"
     if validation.get("classification") != PRE_ACTION_SNAPSHOT_VALID:
         blocked_reason = "PRE_ACTION_VALIDATION_BLOCKED"
@@ -406,6 +428,7 @@ def _adapter_result(
             validation=validation,
             budget_key=_budget_key(action_type=action_type, target_identity=normalized_target),
             normalized_target=normalized_target,
+            runtime_generation_id=str(validation.get("runtime_resume_proposed_next_runtime_generation_id") or ""),
         ),
         "recovery_budget_transaction_preview": _budget_transaction_preview(
             config=config,
@@ -413,8 +436,10 @@ def _adapter_result(
             validation=validation,
             budget_key=_budget_key(action_type=action_type, target_identity=normalized_target),
             normalized_target=normalized_target,
+            runtime_generation_id=str(validation.get("runtime_resume_proposed_next_runtime_generation_id") or ""),
             now=now,
         ),
+        "runtime_retry_transaction": transaction_lifecycle,
         "recovery_budget_classification": budget.get("ledger_classification"),
         "attempts_remaining": budget.get("ledger_attempts_remaining"),
         "attempts_used": budget.get("ledger_attempts_used"),
@@ -498,6 +523,202 @@ def _runtime_retry_generation_gate(
     }
 
 
+def _runtime_retry_transaction_lifecycle(
+    *,
+    config: TrackBPaperAutonomousRecoveryExecutorConfig,
+    recovery_attempt_id: str,
+    validation: Mapping[str, Any],
+    budget: Mapping[str, Any],
+    generation_gate: Mapping[str, str],
+    budget_key: str,
+    normalized_target: Mapping[str, str],
+    command: list[str],
+    now: datetime,
+) -> dict[str, Any]:
+    proposed_generation = str(validation.get("runtime_resume_proposed_next_runtime_generation_id") or "")
+    base = {
+        "schema_version": "track_b_runtime_retry_transaction_lifecycle_v1",
+        "recovery_attempt_id": recovery_attempt_id,
+        "reservation_id": "",
+        "control_plane_snapshot_id": validation.get("control_plane_snapshot_id") or "",
+        "shared_truth_generation_id": validation.get("shared_truth_refresh_generation_id") or "",
+        "previous_runtime_generation_id": validation.get("runtime_resume_previous_runtime_generation_id") or "",
+        "proposed_next_runtime_generation_id": proposed_generation,
+        "budget_key": budget_key,
+        "budget_event_sequence_preview": [],
+        "launch_command_preview": command,
+        "post_action_verification_plan": _runtime_retry_post_action_verification_plan(proposed_generation),
+        "append_enabled": False,
+        "execution_enabled": False,
+        "would_start_runtime": False,
+        "would_append_budget_events": False,
+    }
+    pre_action_blocks = []
+    if validation.get("classification") != PRE_ACTION_SNAPSHOT_VALID:
+        pre_action_blocks.append(str(validation.get("classification") or "PRE_ACTION_VALIDATION_BLOCKED"))
+    if budget.get("budget_gate_classification") != BUDGET_GATE_PASS:
+        pre_action_blocks.append(str(budget.get("budget_gate_classification") or BUDGET_GATE_BLOCKED_MISSING))
+    if generation_gate.get("classification") != RUNTIME_RETRY_GATE_PASS:
+        pre_action_blocks.append(str(generation_gate.get("classification") or RUNTIME_RETRY_BLOCKED_RESUME_POLICY))
+    if pre_action_blocks:
+        payload = dict(base)
+        payload.update(
+            {
+                "classification": RUNTIME_RETRY_TRANSACTION_ABORTED_PRE_ACTION,
+                "reason": "Runtime retry transaction aborted before reservation preview.",
+                "blocked_by": pre_action_blocks,
+                "validated_snapshot": validation.get("classification") == PRE_ACTION_SNAPSHOT_VALID,
+                "validated_resume_generation": generation_gate.get("classification") == RUNTIME_RETRY_GATE_PASS,
+                "validated_budget": budget.get("budget_gate_classification") == BUDGET_GATE_PASS,
+            }
+        )
+        return payload
+
+    reservation = build_budget_reservation_event(
+        recovery_attempt_id=recovery_attempt_id,
+        control_plane_snapshot_id=str(validation.get("control_plane_snapshot_id") or ""),
+        shared_truth_generation_id=str(validation.get("shared_truth_refresh_generation_id") or ""),
+        action_type="RUNTIME_RETRY",
+        budget_key=budget_key,
+        agent_id=DEFAULT_AGENT_ID,
+        target_identity=normalized_target,
+        runtime_generation_id=proposed_generation,
+        created_at=now,
+    )
+    reservation_validation = validate_budget_event(reservation)
+    if reservation_validation.get("classification") != "BUDGET_EVENT_VALID":
+        payload = dict(base)
+        payload.update(
+            {
+                "classification": RUNTIME_RETRY_TRANSACTION_ABORTED_PRE_ACTION,
+                "reason": "Runtime retry transaction reservation preview is invalid.",
+                "reservation_id": reservation.get("reservation_id") or "",
+                "budget_event_sequence_preview": [
+                    _sequence_step(
+                        step="reserve_budget",
+                        state=RUNTIME_RETRY_TRANSACTION_ABORTED_PRE_ACTION,
+                        event=reservation,
+                        validation=reservation_validation,
+                    )
+                ],
+                "validated_snapshot": True,
+                "validated_resume_generation": True,
+                "validated_budget": True,
+            }
+        )
+        return payload
+
+    preview = _budget_transaction_preview(
+        config=config,
+        recovery_attempt_id=recovery_attempt_id,
+        validation=validation,
+        budget_key=budget_key,
+        normalized_target=normalized_target,
+        runtime_generation_id=proposed_generation,
+        now=now,
+    )
+    reservation_id = str(reservation.get("reservation_id") or "")
+    sequence = [
+        _sequence_step(step="validate_snapshot", state=RUNTIME_RETRY_TRANSACTION_DRY_RUN_READY),
+        _sequence_step(step="validate_resume_generation", state=RUNTIME_RETRY_TRANSACTION_DRY_RUN_READY),
+        _sequence_step(step="validate_budget", state=RUNTIME_RETRY_TRANSACTION_DRY_RUN_READY),
+        _sequence_step(
+            step="reserve_budget",
+            state=RUNTIME_RETRY_TRANSACTION_RESERVED,
+            event=reservation,
+            validation=reservation_validation,
+        ),
+        _sequence_step(
+            step="execute_runtime_retry",
+            state=RUNTIME_RETRY_TRANSACTION_APPLY_DISABLED,
+            reason="Execution remains disabled; no runtime process is started.",
+        ),
+        _sequence_step(
+            step="verify_runtime_convergence",
+            state=RUNTIME_RETRY_TRANSACTION_ABORTED_POST_ACTION,
+            reason="Post-action verification is planned only because apply is disabled.",
+        ),
+        _sequence_step(
+            step="consume_success",
+            state=RUNTIME_RETRY_TRANSACTION_CONSUMED_SUCCESS,
+            event=_preview_event(preview, "consume_success", "followup_event_preview"),
+            validation=_preview_validation(preview, "consume_success", "followup_event_preview"),
+        ),
+        _sequence_step(
+            step="consume_failure",
+            state=RUNTIME_RETRY_TRANSACTION_CONSUMED_FAILURE,
+            event=_preview_event(preview, "consume_failure", "followup_event_preview"),
+            validation=_preview_validation(preview, "consume_failure", "followup_event_preview"),
+        ),
+        _sequence_step(
+            step="release_reservation",
+            state=RUNTIME_RETRY_TRANSACTION_RELEASED,
+            event=_preview_event(preview, "release", "followup_event_preview"),
+            validation=_preview_validation(preview, "release", "followup_event_preview"),
+        ),
+    ]
+    payload = dict(base)
+    payload.update(
+        {
+            "classification": RUNTIME_RETRY_TRANSACTION_APPLY_DISABLED,
+            "reason": "Runtime retry transaction is fully previewed; apply remains disabled.",
+            "reservation_id": reservation_id,
+            "budget_event_sequence_preview": sequence,
+            "transaction_preview": preview,
+            "validated_snapshot": True,
+            "validated_resume_generation": True,
+            "validated_budget": True,
+        }
+    )
+    return payload
+
+
+def _runtime_retry_post_action_verification_plan(proposed_generation: str) -> dict[str, Any]:
+    return {
+        "verification_enabled": False,
+        "planned_checks": [
+            "runtime_process_alive",
+            "runtime_environment_truth_generation_matches",
+            "control_plane_snapshot_after_start",
+            "agent_health_runtime_generation_matches",
+            "source_commit_matches",
+            "single_writer_invariant",
+        ],
+        "expected_runtime_generation_id": proposed_generation,
+        "success_consumes_budget": True,
+        "failure_consumes_budget": True,
+        "pre_execution_abort_releases_budget": True,
+    }
+
+
+def _sequence_step(
+    *,
+    step: str,
+    state: str,
+    event: Mapping[str, Any] | None = None,
+    validation: Mapping[str, Any] | None = None,
+    reason: str = "",
+) -> dict[str, Any]:
+    return {
+        "step": step,
+        "state": state,
+        "event": None if event is None else dict(event),
+        "validation": None if validation is None else dict(validation),
+        "reason": reason,
+        "would_append": False,
+        "append_enabled": False,
+        "execution_enabled": False,
+    }
+
+
+def _preview_event(preview: Mapping[str, Any], key: str, nested: str) -> Mapping[str, Any] | None:
+    return _mapping(_mapping(preview.get(key)).get(nested)).get("event")
+
+
+def _preview_validation(preview: Mapping[str, Any], key: str, nested: str) -> Mapping[str, Any] | None:
+    return _mapping(_mapping(preview.get(key)).get(nested)).get("validation")
+
+
 def _runtime_retry_budget_block_classification(budget: Mapping[str, Any]) -> str:
     gate = str(budget.get("budget_gate_classification") or "")
     if gate == BUDGET_GATE_PASS:
@@ -521,6 +742,7 @@ def _budget_event_preview(
     validation: Mapping[str, Any],
     budget_key: str,
     normalized_target: Mapping[str, str],
+    runtime_generation_id: str = "",
 ) -> dict[str, Any]:
     attempt_id = recovery_attempt_id or "runtime-retry-preview"
     event = build_budget_reservation_event(
@@ -531,6 +753,7 @@ def _budget_event_preview(
         budget_key=budget_key,
         agent_id=DEFAULT_AGENT_ID,
         target_identity=normalized_target,
+        runtime_generation_id=runtime_generation_id or None,
     )
     validation_result = validate_budget_event(event)
     return {
@@ -550,6 +773,7 @@ def _budget_transaction_preview(
     validation: Mapping[str, Any],
     budget_key: str,
     normalized_target: Mapping[str, str],
+    runtime_generation_id: str = "",
     now: datetime,
 ) -> dict[str, Any]:
     ledger = _read_json(config.resolve(config.recovery_budget_ledger_path))
@@ -562,10 +786,15 @@ def _budget_transaction_preview(
         "budget_key": budget_key,
         "agent_id": DEFAULT_AGENT_ID,
         "target_identity": normalized_target,
+        "runtime_generation_id": runtime_generation_id or None,
         "existing_events": [],
         "now": now,
     }
     return {
+        "reservation": simulate_recovery_budget_transaction(
+            **common,
+            followup_event_type=None,
+        ),
         "consume_success": simulate_recovery_budget_transaction(
             **common,
             followup_event_type=BUDGET_ATTEMPT_CONSUMED_SUCCESS,
@@ -573,6 +802,14 @@ def _budget_transaction_preview(
         "consume_failure": simulate_recovery_budget_transaction(
             **common,
             followup_event_type=BUDGET_ATTEMPT_CONSUMED_FAILURE,
+        ),
+        "release": simulate_recovery_budget_transaction(
+            **common,
+            followup_event_type=BUDGET_ATTEMPT_RELEASED,
+        ),
+        "expire": simulate_recovery_budget_transaction(
+            **common,
+            followup_event_type=BUDGET_ATTEMPT_EXPIRED,
         ),
         "would_append": False,
         "append_enabled": False,

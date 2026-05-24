@@ -212,6 +212,60 @@ fields use `would_append=false` and `append_enabled=false`; dry-run adapters may
 show both a reserve+success and reserve+failure path, but they must not write
 either path to the budget event log.
 
+### RUNTIME_RETRY Apply Transaction Lifecycle
+
+The disabled adapter now defines the future apply transaction lifecycle without
+enabling execution. The lifecycle is emitted under
+`action_adapter.runtime_retry_transaction` and is still read-only:
+
+- `RUNTIME_RETRY_TRANSACTION_DRY_RUN_READY`: pre-action validations are ready to
+  preview a transaction.
+- `RUNTIME_RETRY_TRANSACTION_RESERVED`: budget reservation event preview is
+  valid.
+- `RUNTIME_RETRY_TRANSACTION_APPLY_DISABLED`: the sequence reached the apply
+  boundary, but execution remains disabled.
+- `RUNTIME_RETRY_TRANSACTION_RELEASED`: release event preview for an abandoned
+  reservation.
+- `RUNTIME_RETRY_TRANSACTION_CONSUMED_SUCCESS`: success consumption event
+  preview.
+- `RUNTIME_RETRY_TRANSACTION_CONSUMED_FAILURE`: failure consumption event
+  preview.
+- `RUNTIME_RETRY_TRANSACTION_ABORTED_PRE_ACTION`: snapshot, generation, budget,
+  or reservation validation blocked before apply.
+- `RUNTIME_RETRY_TRANSACTION_ABORTED_POST_ACTION`: post-action verification
+  failure classification reserved for future apply-enabled mode.
+
+Required lifecycle fields:
+
+- `recovery_attempt_id`
+- `reservation_id`
+- `control_plane_snapshot_id`
+- `shared_truth_generation_id`
+- `previous_runtime_generation_id`
+- `proposed_next_runtime_generation_id`
+- `budget_key`
+- `budget_event_sequence_preview`
+- `launch_command_preview`
+- `post_action_verification_plan`
+- `append_enabled=false`
+- `execution_enabled=false`
+
+The sequence is:
+
+1. Validate the Control Plane Snapshot with
+   `validate_track_b_pre_action_snapshot(...)`.
+2. Validate Runtime Resume v2 generation posture:
+   `resume_action_policy=NEW_RUNTIME_GENERATION_ALLOWED`, a non-empty
+   `proposed_next_runtime_generation_id`, `generation_reuse_allowed=false`, and
+   `must_start_new_generation=true`.
+3. Validate Recovery Budget Ledger attempts, cooldown, and quarantine state.
+4. Preview `BUDGET_ATTEMPT_RESERVED` with the proposed runtime generation id.
+5. Stop at `RUNTIME_RETRY_TRANSACTION_APPLY_DISABLED`; no process is started.
+6. Preview post-action verification checks for future convergence proof.
+7. Preview success/failure consumption and release events linked to the same
+   `reservation_id`.
+8. Write immutable executor audit artifacts only.
+
 The placeholder config flag `enable_runtime_retry_adapter` may be recorded for audit, but it does not enable execution. A second, explicitly reviewed enablement boundary is required before this adapter may start a runtime.
 
 Broker/order mutation adapters remain later and stricter:

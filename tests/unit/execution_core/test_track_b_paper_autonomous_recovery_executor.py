@@ -19,6 +19,11 @@ from mgc_v05l.execution_core.track_b_paper_autonomous_recovery_executor import (
     RUNTIME_RETRY_BLOCKED_QUARANTINE,
     RUNTIME_RETRY_BLOCKED_RESUME_POLICY,
     RUNTIME_RETRY_GATE_PASS,
+    RUNTIME_RETRY_TRANSACTION_ABORTED_PRE_ACTION,
+    RUNTIME_RETRY_TRANSACTION_APPLY_DISABLED,
+    RUNTIME_RETRY_TRANSACTION_CONSUMED_FAILURE,
+    RUNTIME_RETRY_TRANSACTION_CONSUMED_SUCCESS,
+    RUNTIME_RETRY_TRANSACTION_RESERVED,
     TrackBPaperAutonomousRecoveryExecutorConfig,
     build_track_b_paper_autonomous_recovery_executor_attempt,
     run_track_b_paper_autonomous_recovery_executor_dry_run,
@@ -74,7 +79,28 @@ def test_valid_coherent_snapshot_and_matching_plan_creates_dry_run_attempt(tmp_p
         payload["action_adapter"]["would_record_budget_event"]["event"]["recovery_attempt_id"]
         == payload["recovery_attempt_id"]
     )
+    lifecycle = payload["action_adapter"]["runtime_retry_transaction"]
+    assert lifecycle["classification"] == RUNTIME_RETRY_TRANSACTION_APPLY_DISABLED
+    assert lifecycle["execution_enabled"] is False
+    assert lifecycle["append_enabled"] is False
+    assert lifecycle["control_plane_snapshot_id"] == "snapshot-1"
+    assert lifecycle["shared_truth_generation_id"] == "generation-1"
+    assert lifecycle["previous_runtime_generation_id"] == "runtime-generation-previous"
+    assert lifecycle["proposed_next_runtime_generation_id"] == "runtime-generation-next"
+    assert lifecycle["launch_command_preview"][0] == "bash"
+    assert lifecycle["post_action_verification_plan"]["expected_runtime_generation_id"] == "runtime-generation-next"
+    states = {row["step"]: row["state"] for row in lifecycle["budget_event_sequence_preview"]}
+    assert states["reserve_budget"] == RUNTIME_RETRY_TRANSACTION_RESERVED
+    assert states["execute_runtime_retry"] == RUNTIME_RETRY_TRANSACTION_APPLY_DISABLED
+    assert states["consume_success"] == RUNTIME_RETRY_TRANSACTION_CONSUMED_SUCCESS
+    assert states["consume_failure"] == RUNTIME_RETRY_TRANSACTION_CONSUMED_FAILURE
+    assert lifecycle["reservation_id"]
+    for step in lifecycle["budget_event_sequence_preview"]:
+        event = step.get("event")
+        if step["step"] in {"consume_success", "consume_failure", "release_reservation"}:
+            assert event["reservation_id"] == lifecycle["reservation_id"]
     transaction_preview = payload["action_adapter"]["recovery_budget_transaction_preview"]
+    assert transaction_preview["reservation"]["transaction_classification"] == "TRANSACTION_DRY_RUN_READY"
     assert transaction_preview["consume_success"]["transaction_classification"] == "TRANSACTION_SIMULATED_CONSUMED_SUCCESS"
     assert transaction_preview["consume_failure"]["transaction_classification"] == "TRANSACTION_SIMULATED_CONSUMED_FAILURE"
     assert transaction_preview["consume_success"]["would_append"] is False
@@ -120,6 +146,10 @@ def test_runtime_retry_budget_exhausted_blocks_before_adapter_disabled(tmp_path:
     assert payload["action_adapter"]["budget_gate_classification"] == BUDGET_GATE_BLOCKED_EXHAUSTED
     assert payload["action_adapter"]["blocked_reason"] == RUNTIME_RETRY_BLOCKED_BUDGET
     assert payload["action_adapter"]["runtime_retry_generation_gate_classification"] == RUNTIME_RETRY_BLOCKED_BUDGET
+    assert payload["action_adapter"]["runtime_retry_transaction"]["classification"] == (
+        RUNTIME_RETRY_TRANSACTION_ABORTED_PRE_ACTION
+    )
+    assert payload["action_adapter"]["runtime_retry_transaction"]["reservation_id"] == ""
     assert payload["action_adapter"]["adapter_enabled"] is False
     assert payload["action_adapter"]["execution_enabled"] is False
 
@@ -224,6 +254,10 @@ def test_runtime_retry_blocks_when_next_generation_is_missing(tmp_path: Path) ->
     assert payload["action_adapter"]["runtime_retry_generation_gate_classification"] == (
         RUNTIME_RETRY_BLOCKED_MISSING_GENERATION
     )
+    assert payload["action_adapter"]["runtime_retry_transaction"]["classification"] == (
+        RUNTIME_RETRY_TRANSACTION_ABORTED_PRE_ACTION
+    )
+    assert payload["action_adapter"]["runtime_retry_transaction"]["reservation_id"] == ""
 
 
 def test_runtime_retry_blocks_when_generation_reuse_is_allowed(tmp_path: Path) -> None:
