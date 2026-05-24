@@ -22,6 +22,10 @@ from .ibkr_paper_adapter import IbkrPaperAdapter
 from .models import require_aware_datetime, to_jsonable
 from .models import IntentKind, OrderIntent, PositionState, SubmitAttempt, SubmitAttemptState
 from .preflight import ReadOnlyPreflightConfig
+from .track_b_continuation_aware_exit_decision import (
+    SUPPORTED_STRATEGY_IDS as CONTINUATION_AWARE_EXIT_SUPPORTED_STRATEGY_IDS,
+    build_time_plus_continuation_exit_decision,
+)
 from .track_b_paper_autonomous_recovery_planner import DEFAULT_PAPER_AUTONOMOUS_RECOVERY_PLAN_ARTIFACT
 from .track_b_pre_action_snapshot_validator import (
     DEFAULT_CONTROL_PLANE_SNAPSHOT_ARTIFACT,
@@ -652,6 +656,7 @@ def _build_report(
         TrackBManagedPaperLifecycleClassification.BROKER_MISMATCH,
         TrackBManagedPaperLifecycleClassification.BLOCKED_EXISTING_REVIEW_REQUIRED,
     }
+    continuation_preview = _continuation_aware_exit_preview(config=config, now=now, open_state=open_state)
     return {
         "schema_version": "track_b_strategy_managed_paper_lifecycle_v1",
         "generated_at": now.isoformat(),
@@ -679,6 +684,7 @@ def _build_report(
         "broker_truth_state": str(config.broker_truth_state or "FRESH"),
         "suppressed_due_to_stale_data": bool(config.suppress_discretionary_exits_due_to_stale_data and close_intent is None),
         "expected_exit_condition": _expected_exit_condition(config),
+        "continuation_aware_exit_preview": continuation_preview,
         "close_intent_status": _close_intent_status(classification, close_intent),
         "strategy_managed_lifecycle_classification": classification.value,
         "paper_lifecycle_classification": classification.value,
@@ -719,6 +725,43 @@ def _build_report(
         "report_json_path": str(report_json),
         "latest_report_json_path": str(report_json.parent.parent / "latest_track_b_strategy_managed_paper_lifecycle_report.json"),
     }
+
+
+def _continuation_aware_exit_preview(
+    *,
+    config: TrackBStrategyManagedPaperLifecycleConfig,
+    now: datetime,
+    open_state: Mapping[str, Any] | None,
+) -> dict[str, Any] | None:
+    if config.strategy_id not in CONTINUATION_AWARE_EXIT_SUPPORTED_STRATEGY_IDS:
+        return None
+    side = str((open_state or {}).get("side") or config.side or "")
+    entry_time = None
+    if open_state:
+        entry_time = open_state.get("entry_timestamp") or config.signal_timestamp
+    position_age_minutes = None
+    bars_since_fill = None if open_state is None else open_state.get("bars_since_fill")
+    if bars_since_fill is not None:
+        try:
+            position_age_minutes = int(bars_since_fill) * 5
+        except (TypeError, ValueError):
+            position_age_minutes = None
+    return build_time_plus_continuation_exit_decision(
+        strategy_id=config.strategy_id,
+        symbol=config.instrument_family,
+        side=side,
+        entry_time=entry_time,
+        current_time=now,
+        completed_5m_candles=(),
+        position_age_minutes=position_age_minutes,
+        mfe=None,
+        mae=None,
+        unrealized_pnl=None,
+        microtrend_state=None,
+        participation_state=None,
+        safe_state_classification="SAFE_STATE_NORMAL",
+        lifecycle_reconciliation_classification="CLEAN",
+    )
 
 
 def _guard_blocker(config: TrackBStrategyManagedPaperLifecycleConfig) -> str | None:

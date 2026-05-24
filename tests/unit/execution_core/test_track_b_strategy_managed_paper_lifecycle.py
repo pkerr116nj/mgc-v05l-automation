@@ -680,6 +680,30 @@ def test_time_boxed_exit_policy_waits_until_required_completed_bars(tmp_path: Pa
     assert result.report["close_intent"] is None
 
 
+def test_continuation_aware_preview_is_diagnostic_only_for_first_p0_strategy(tmp_path: Path) -> None:
+    result = run_track_b_strategy_managed_paper_lifecycle(
+        config=base_config(
+            tmp_path,
+            strategy_id="asian_drift_v1",
+            side="BUY",
+            managed_exit_policy_id=TrackBManagedExitPolicy.PAPER_DIAGNOSTIC_TIME_BOXED_3X5M_EXIT_V1.value,
+            completed_5m_bars_since_entry=3,
+        ),
+        stages=fake_stages(),
+        lifecycle_id="continuation-preview-diagnostic",
+        now=aware_now(),
+    )
+
+    preview = result.report["continuation_aware_exit_preview"]
+    assert result.classification == TrackBManagedPaperLifecycleClassification.CLOSED_FLAT
+    assert result.report["close_intent"]["close_reason"] == "TIME_BOXED_EXIT"
+    assert preview["exit_policy_id"] == "TIME_PLUS_CONTINUATION_EXIT_V1"
+    assert preview["dry_run_only"] is True
+    assert preview["not_order_authority"] is True
+    assert preview["not_lifecycle_authority"] is True
+    assert preview["should_request_close"] is False
+
+
 def test_time_boxed_exit_policy_creates_close_intent_after_required_completed_bars(tmp_path: Path) -> None:
     result = run_track_b_strategy_managed_paper_lifecycle(
         config=base_config(
