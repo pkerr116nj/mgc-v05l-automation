@@ -6,7 +6,10 @@ from pathlib import Path
 
 from mgc_v05l.execution_core.track_b_agent_health import HEALTHY, STOPPED_EXPECTED
 from mgc_v05l.execution_core.track_b_crash_loop_protection import NO_CRASH_LOOP, RESTART_COOLDOWN_ACTIVE
-from mgc_v05l.execution_core.track_b_managed_order_registry import NO_MANAGED_ORDERS
+from mgc_v05l.execution_core.track_b_managed_order_registry import (
+    ACTIVE_HOLD_MANAGED_TIMED_EXIT_PENDING,
+    NO_MANAGED_ORDERS,
+)
 from mgc_v05l.execution_core.track_b_managed_position_registry import NO_MANAGED_POSITIONS
 from mgc_v05l.execution_core.track_b_open_order_truth import NO_OPEN_ORDERS
 from mgc_v05l.execution_core.track_b_paper_proof_readiness import READY_FOR_PROOF
@@ -166,6 +169,24 @@ def test_broker_exposure_requires_cleanup(tmp_path: Path) -> None:
     assert payload["recommended_action"] == "CLEANUP_REQUIRED_BEFORE_RUNTIME"
     assert payload["recommended_next_command"] == "perform exact scoped cleanup only after operator authorization"
     assert payload["safe_to_start_runtime"] is False
+
+
+def test_reconciled_managed_timed_hold_allows_nonconflicting_runtime_posture(tmp_path: Path) -> None:
+    _seed_base(
+        tmp_path,
+        runtime_classification=RUNTIME_DOWN_WITH_BROKER_EXPOSURE,
+        position_classification=ACTIVE_HOLD_MANAGED_TIMED_EXIT_PENDING,
+        open_order_classification="BROKER_POSITION_WITHOUT_CLOSE_ORDER",
+        managed_order_classification=ACTIVE_HOLD_MANAGED_TIMED_EXIT_PENDING,
+        managed_position_classification="OPEN_MANAGED_MATCHED",
+    )
+
+    payload = build_track_b_runtime_supervisor_authority(config=TrackBRuntimeSupervisorAuthorityConfig(repo_root=tmp_path), now=NOW)
+
+    assert payload["classification"] == SUPERVISOR_RUNTIME_START_ALLOWED
+    assert payload["supervisor_mode"] == READY_FOR_OPERATOR_START
+    assert payload["recommended_action"] == "MANAGED_ACTIVE_HOLD"
+    assert payload["safe_to_start_runtime"] is True
 
 
 def test_suspicious_order_manual_review_is_paper_advisory_not_ack_gate(tmp_path: Path) -> None:

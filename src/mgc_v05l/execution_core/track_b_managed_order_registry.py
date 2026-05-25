@@ -31,6 +31,7 @@ ORDER_TERMINAL_CANCELLED = "ORDER_TERMINAL_CANCELLED"
 ORDER_STATE_UNKNOWN_REVIEW_REQUIRED = "ORDER_STATE_UNKNOWN_REVIEW_REQUIRED"
 BROKER_FLAT_WITH_WORKING_CLOSE = "BROKER_FLAT_WITH_WORKING_CLOSE"
 POSITION_WITHOUT_CLOSE_ORDER = "POSITION_WITHOUT_CLOSE_ORDER"
+ACTIVE_HOLD_MANAGED_TIMED_EXIT_PENDING = "ACTIVE_HOLD_MANAGED_TIMED_EXIT_PENDING"
 
 WAIT = "WAIT"
 MODIFY_IN_PLACE_CANDIDATE = "MODIFY_IN_PLACE_CANDIDATE"
@@ -184,6 +185,11 @@ def build_track_b_managed_order_registry(
             ),
             "position_without_close_order_count": sum(
                 1 for item in managed_orders if item.get("classification") == POSITION_WITHOUT_CLOSE_ORDER
+            ),
+            "active_hold_managed_timed_exit_pending_count": sum(
+                1
+                for item in managed_orders
+                if item.get("classification") == ACTIVE_HOLD_MANAGED_TIMED_EXIT_PENDING
             ),
         },
         "event_state": _event_state(classification=classification, managed_orders=managed_orders),
@@ -372,13 +378,18 @@ def _position_without_close_rows(
     rows: list[dict[str, Any]] = []
     registry_positions = _list(managed_positions.get("managed_positions"))
     for position in _list(open_order_truth.get("broker_positions_without_close_order")):
-        lifecycle_report = _lifecycle_report_for_position(position=position, lifecycle_reports=lifecycle_reports)
         registry_position = _registry_position_for_broker_position(position=position, registry_positions=registry_positions)
+        lifecycle_report = _lifecycle_report_for_registry_position(
+            registry_position=registry_position,
+            lifecycle_reports=lifecycle_reports,
+        ) or _lifecycle_report_for_position(position=position, lifecycle_reports=lifecycle_reports)
         manifest = _manifest_for_position(position=position, lifecycle_report=lifecycle_report, manifests=manifests)
+        active_hold_pending = _active_hold_managed_timed_exit_pending(registry_position=registry_position)
+        classification = ACTIVE_HOLD_MANAGED_TIMED_EXIT_PENDING if active_hold_pending else POSITION_WITHOUT_CLOSE_ORDER
         rows.append(
             {
-                "classification": POSITION_WITHOUT_CLOSE_ORDER,
-                "recommended_next_action": REVIEW_REQUIRED,
+                "classification": classification,
+                "recommended_next_action": WAIT if active_hold_pending else REVIEW_REQUIRED,
                 "symbol": _row_symbol(position),
                 "contract": position.get("local_symbol") or position.get("contract_key"),
                 "local_symbol": position.get("local_symbol"),
@@ -411,6 +422,10 @@ def _position_without_close_rows(
                 "source_open_order_truth_classification": "BROKER_POSITION_WITHOUT_CLOSE_ORDER",
                 "source_order": None,
                 "broker_position": dict(position),
+                "managed_exit_profile_present": active_hold_pending,
+                "exit_not_yet_eligible": active_hold_pending,
+                "close_order_required_now": not active_hold_pending,
+                "managed_active_hold": active_hold_pending,
             }
         )
     return rows
@@ -431,6 +446,7 @@ def _overall_classification(*, source_stale: Mapping[str, Any], managed_orders: 
         POSITION_WITHOUT_CLOSE_ORDER,
         WORKING_CLOSE_ORDER,
         WORKING_ENTRY_ORDER,
+        ACTIVE_HOLD_MANAGED_TIMED_EXIT_PENDING,
         ORDER_TERMINAL_FILLED,
         ORDER_TERMINAL_CANCELLED,
     ]
@@ -561,8 +577,22 @@ def _lifecycle_report_for_order(*, order: Mapping[str, Any], lifecycle_reports: 
 
 
 def _lifecycle_report_for_position(*, position: Mapping[str, Any], lifecycle_reports: list[dict[str, Any]]) -> dict[str, Any]:
-    for report in lifecycle_reports:
+    for report in reversed(lifecycle_reports):
         if _same_contract(position, report) and str(report.get("final_position_status") or "").upper() == "OPEN_MANAGED":
+            return report
+    return {}
+
+
+def _lifecycle_report_for_registry_position(
+    *,
+    registry_position: Mapping[str, Any],
+    lifecycle_reports: list[dict[str, Any]],
+) -> dict[str, Any]:
+    lifecycle_id = str(registry_position.get("lifecycle_id") or "").strip()
+    if not lifecycle_id:
+        return {}
+    for report in reversed(lifecycle_reports):
+        if _lifecycle_id(report) == lifecycle_id:
             return report
     return {}
 
@@ -579,6 +609,20 @@ def _registry_position_for_broker_position(
         if _same_contract(position, item):
             return item
     return {}
+
+
+def _active_hold_managed_timed_exit_pending(*, registry_position: Mapping[str, Any]) -> bool:
+    if str(registry_position.get("classification") or "") != "OPEN_MANAGED_MATCHED":
+        return False
+    if not str(registry_position.get("managed_exit_policy_id") or "").strip():
+        return False
+    if registry_position.get("exit_due") is True:
+        return False
+    if registry_position.get("attention_required") is True:
+        return False
+    if _mapping(registry_position.get("close_order_state")):
+        return False
+    return bool(registry_position.get("lifecycle_id"))
 
 
 def _manifest_for_order(
@@ -786,6 +830,7 @@ def _mapping(value: Any) -> dict[str, Any]:
 
 
 __all__ = [
+    "ACTIVE_HOLD_MANAGED_TIMED_EXIT_PENDING",
     "BROKER_FLAT_WITH_WORKING_CLOSE",
     "CLOSE_ORDER_CANCEL_REPLACE_REQUIRED",
     "CLOSE_ORDER_MODIFIABLE",

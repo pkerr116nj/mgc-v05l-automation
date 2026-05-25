@@ -400,7 +400,11 @@ def _string_set(value: Any) -> set[str]:
 
 
 def _symbol(row: Mapping[str, Any]) -> str:
-    return str(row.get("symbol") or row.get("internal_symbol") or row.get("broker_symbol") or "").strip().upper()
+    explicit = row.get("symbol") or row.get("internal_symbol") or row.get("broker_symbol") or row.get("track_b_root") or row.get("instrument_family")
+    if explicit:
+        return str(explicit).strip().upper()
+    local_symbol = str(row.get("local_symbol") or "").strip().upper()
+    return "".join(ch for ch in local_symbol if ch.isalpha())[:3]
 
 
 def _quantity(row: Mapping[str, Any]) -> float:

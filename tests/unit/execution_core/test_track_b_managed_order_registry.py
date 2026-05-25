@@ -5,6 +5,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from mgc_v05l.execution_core.track_b_managed_order_registry import (
+    ACTIVE_HOLD_MANAGED_TIMED_EXIT_PENDING,
     BROKER_FLAT_WITH_WORKING_CLOSE,
     CLOSE_ORDER_MODIFIABLE,
     CLOSE_ORDER_SUSPICIOUS,
@@ -121,6 +122,41 @@ def test_position_without_close_order_is_tracked(tmp_path: Path) -> None:
     assert payload["managed_orders"][0]["action"] == "SELL"
 
 
+def test_managed_timed_hold_pending_is_not_review_required(tmp_path: Path) -> None:
+    managed_position = {
+        "classification": "OPEN_MANAGED_MATCHED",
+        "symbol": "MNQ",
+        "local_symbol": "MNQM6",
+        "con_id": 770561201,
+        "side": "LONG",
+        "quantity": "1",
+        "lifecycle_id": "current_managed_mnq",
+        "lane_id": "mnq_1x_asia_london_participation__asia_london_long_v6",
+        "strategy_id": "asia_london_long_v6",
+        "managed_exit_policy_id": "PAPER_DIAGNOSTIC_TIME_BOXED_3X5M_EXIT_V1",
+        "exit_due": False,
+        "attention_required": False,
+    }
+    _seed_base(
+        tmp_path,
+        positions_without_close=[_broker_position()],
+        managed_positions=[managed_position],
+    )
+
+    payload = build_track_b_managed_order_registry(
+        config=TrackBManagedOrderRegistryConfig(repo_root=tmp_path),
+        now=NOW,
+    )
+
+    assert payload["classification"] == ACTIVE_HOLD_MANAGED_TIMED_EXIT_PENDING
+    row = payload["managed_orders"][0]
+    assert row["classification"] == ACTIVE_HOLD_MANAGED_TIMED_EXIT_PENDING
+    assert row["recommended_next_action"] == "WAIT"
+    assert row["managed_exit_profile_present"] is True
+    assert row["exit_not_yet_eligible"] is True
+    assert row["close_order_required_now"] is False
+
+
 def test_marketable_close_order_is_modify_in_place_candidate(tmp_path: Path) -> None:
     _seed_base(
         tmp_path,
@@ -207,9 +243,11 @@ def _seed_base(
     duplicate_groups: list[dict] | None = None,
     flat_with_close: list[dict] | None = None,
     positions_without_close: list[dict] | None = None,
+    managed_positions: list[dict] | None = None,
 ) -> None:
     order_states = order_states or []
     positions_without_close = positions_without_close or []
+    managed_positions = managed_positions or []
     _write_json(
         root / "outputs" / "track_b_execution_core" / "open_order_truth" / "latest_open_order_truth.json",
         {
@@ -235,8 +273,8 @@ def _seed_base(
         {
             "schema_version": "track_b_managed_position_registry_v1",
             "generated_at": NOW.isoformat(),
-            "classification": "NO_MANAGED_POSITIONS",
-            "managed_positions": [],
+            "classification": "NO_MANAGED_POSITIONS" if not managed_positions else managed_positions[0]["classification"],
+            "managed_positions": managed_positions,
         },
     )
     _write_json(

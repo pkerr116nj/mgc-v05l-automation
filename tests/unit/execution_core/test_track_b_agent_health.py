@@ -26,7 +26,7 @@ from mgc_v05l.execution_core.track_b_agent_registry import (
     build_track_b_agent_registry,
     write_track_b_agent_registry,
 )
-from mgc_v05l.execution_core.track_b_runtime_environment_truth import RUNTIME_DOWN_CLEAN
+from mgc_v05l.execution_core.track_b_runtime_environment_truth import RUNTIME_DOWN_CLEAN, RUNTIME_DOWN_WITH_BROKER_EXPOSURE
 from mgc_v05l.market_data.phase1_market_session import MARKET_CLOSED_NO_FRESH_BARS
 
 
@@ -122,6 +122,37 @@ def test_stale_runtime_pid_is_degraded_not_proof_blocking_when_runtime_down_clea
     assert payload["classification"] == AGENT_HEALTH_DEGRADED
     assert runtime["status"] == DEGRADED
     assert runtime["stale_pid_detected"] is True
+    assert runtime["blocking_for_proof"] is False
+    assert runtime["blocking_for_runtime_submit"] is False
+
+
+def test_managed_active_hold_runtime_down_is_degraded_not_blocking(tmp_path: Path) -> None:
+    _seed_healthy_artifacts(tmp_path)
+    _write_json(
+        tmp_path / "outputs" / "track_b_execution_core" / "runtime_truth" / "latest_runtime_environment_truth.json",
+        {"generated_at": NOW.isoformat(), "classification": RUNTIME_DOWN_WITH_BROKER_EXPOSURE},
+    )
+    _write_json(
+        tmp_path / "outputs" / "track_b_execution_core" / "shared_truth" / "latest_track_b_shared_truth_refresh.json",
+        {
+            "generated_at": NOW.isoformat(),
+            "refresh_generation_id": "track-b-shared-truth-test",
+            "classifications": {
+                "Open Order Truth": "BROKER_POSITION_WITHOUT_CLOSE_ORDER",
+                "Managed Order Registry": "ACTIVE_HOLD_MANAGED_TIMED_EXIT_PENDING",
+                "Position Truth": "ACTIVE_HOLD_MANAGED_TIMED_EXIT_PENDING",
+                "Managed Position Registry": "OPEN_MANAGED_MATCHED",
+                "Reconciliation": "TRACK_B_PAPER_BROKER_RECONCILED",
+            },
+        },
+    )
+
+    payload = build_track_b_agent_health(config=TrackBAgentHealthConfig(repo_root=tmp_path), now=NOW, process_rows=[])
+
+    runtime = _agent(payload, "track_b_paper_runtime")
+    assert payload["classification"] == AGENT_HEALTH_DEGRADED
+    assert runtime["status"] == DEGRADED
+    assert runtime["reason"] == "ACTIVE_HOLD_MANAGED_TIMED_EXIT_PENDING"
     assert runtime["blocking_for_proof"] is False
     assert runtime["blocking_for_runtime_submit"] is False
 

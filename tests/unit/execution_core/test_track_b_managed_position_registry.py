@@ -115,6 +115,27 @@ def test_valid_lifecycle_and_broker_match_reports_open_managed_matched(tmp_path:
     assert payload["managed_positions"][0]["attention_required"] is False
 
 
+def test_historical_review_required_same_contract_does_not_pollute_active_matched_position(tmp_path: Path) -> None:
+    lifecycle = _lifecycle_position(lifecycle_id="current_managed_mnq", bars_since_fill=1)
+    _seed_base(tmp_path, broker_positions=[_broker_position()], lifecycle_positions=[lifecycle])
+    _write_lifecycle_report(tmp_path, lifecycle_id=lifecycle["lifecycle_id"], bars_since_fill=1)
+    _write_lifecycle_report(
+        tmp_path,
+        lifecycle_id="old_review_required_mnq",
+        review_required=True,
+        paper_lifecycle_classification="TRACK_B_STRATEGY_PAPER_REVIEW_REQUIRED",
+    )
+
+    payload = build_track_b_managed_position_registry(
+        config=TrackBManagedPositionRegistryConfig(repo_root=tmp_path),
+        now=NOW,
+    )
+
+    assert payload["classification"] == OPEN_MANAGED_MATCHED
+    assert payload["review_required_positions"] == []
+    assert payload["managed_positions"][0]["lifecycle_id"] == "current_managed_mnq"
+
+
 def test_exit_due_from_policy_and_completed_bars(tmp_path: Path) -> None:
     lifecycle = _lifecycle_position(bars_since_fill=3)
     _seed_base(tmp_path, broker_positions=[_broker_position()], lifecycle_positions=[lifecycle])
@@ -128,6 +149,30 @@ def test_exit_due_from_policy_and_completed_bars(tmp_path: Path) -> None:
     assert payload["classification"] == OPEN_MANAGED_EXIT_DUE
     assert payload["managed_positions"][0]["exit_due"] is True
     assert payload["managed_positions"][0]["recommended_operator_action"].startswith("Observe runtime-managed exit")
+
+
+def test_exit_due_uses_current_phase1_completed_5m_bars_over_stale_lifecycle_counter(tmp_path: Path) -> None:
+    lifecycle = _lifecycle_position(bars_since_fill=1)
+    _seed_base(tmp_path, broker_positions=[_broker_position()], lifecycle_positions=[lifecycle])
+    _write_lifecycle_report(tmp_path, lifecycle_id=lifecycle["lifecycle_id"], bars_since_fill=1)
+    _write_phase1_5m_bars(
+        tmp_path,
+        symbol="MNQ",
+        bar_ends=[
+            "2026-05-22T16:25:00+00:00",
+            "2026-05-22T16:30:00+00:00",
+            "2026-05-22T16:35:00+00:00",
+        ],
+    )
+
+    payload = build_track_b_managed_position_registry(
+        config=TrackBManagedPositionRegistryConfig(repo_root=tmp_path),
+        now=NOW,
+    )
+
+    assert payload["classification"] == OPEN_MANAGED_EXIT_DUE
+    assert payload["managed_positions"][0]["bars_since_entry"] == 3
+    assert payload["managed_positions"][0]["exit_due"] is True
 
 
 def test_close_working_comes_from_open_order_truth(tmp_path: Path) -> None:
@@ -364,7 +409,12 @@ def _broker_position() -> dict:
     }
 
 
-def _lifecycle_position(*, policy: str = "PAPER_DIAGNOSTIC_TIME_BOXED_3X5M_EXIT_V1", bars_since_fill: int = 1) -> dict:
+def _lifecycle_position(
+    *,
+    policy: str = "PAPER_DIAGNOSTIC_TIME_BOXED_3X5M_EXIT_V1",
+    bars_since_fill: int = 1,
+    lifecycle_id: str = "bridge_fill_mnq_short",
+) -> dict:
     return {
         "account_id": "DUM882026",
         "instrument_family": "MNQ",
@@ -375,7 +425,7 @@ def _lifecycle_position(*, policy: str = "PAPER_DIAGNOSTIC_TIME_BOXED_3X5M_EXIT_
         "quantity": "1",
         "side": "SHORT",
         "strategy_id": "track_b_paper_execution_test_mule_v1__mnq",
-        "lifecycle_id": "bridge_fill_mnq_short",
+        "lifecycle_id": lifecycle_id,
         "avg_entry_price": "29688.69",
         "entry_timestamp": "2026-05-22T16:20:00+00:00",
         "managed_exit_policy_id": policy,
@@ -431,6 +481,24 @@ def _write_lifecycle_report(
             "lifecycle_id": lifecycle_id,
             "managed_exit_policy_id": policy,
             "lifecycle_status": "OPEN_MANAGED",
+        },
+    )
+
+
+def _write_phase1_5m_bars(root: Path, *, symbol: str, bar_ends: list[str]) -> None:
+    _write_json(
+        root
+        / "outputs"
+        / "track_b_execution_core"
+        / "phase1_runtime_market_data"
+        / symbol
+        / "5m"
+        / "latest_runtime_candles.json",
+        {
+            "schema_version": "phase1_runtime_candles_v1",
+            "symbol": symbol,
+            "timeframe": "5m",
+            "bars": [{"bar_end": value, "close": "100.0"} for value in bar_ends],
         },
     )
 

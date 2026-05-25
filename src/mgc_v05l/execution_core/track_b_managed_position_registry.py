@@ -67,6 +67,9 @@ DEFAULT_LIFECYCLE_ROOT = (
     Path("outputs") / "track_b_execution_core" / "track_b_strategy_managed_paper_lifecycle"
 )
 DEFAULT_MANIFEST_ROOT = Path("outputs") / "track_b_execution_core" / "position_management_manifests"
+DEFAULT_PHASE1_RUNTIME_MARKET_DATA_ROOT = (
+    Path("outputs") / "track_b_execution_core" / "phase1_runtime_market_data"
+)
 
 
 @dataclass(frozen=True)
@@ -82,6 +85,7 @@ class TrackBManagedPositionRegistryConfig:
     live_position_status_path: Path = DEFAULT_LIVE_POSITION_STATUS_ARTIFACT
     lifecycle_root: Path = DEFAULT_LIFECYCLE_ROOT
     manifest_root: Path = DEFAULT_MANIFEST_ROOT
+    market_data_root: Path = DEFAULT_PHASE1_RUNTIME_MARKET_DATA_ROOT
     artifact_max_age_seconds: float = 180.0
 
     def resolve(self, path: Path) -> Path:
@@ -131,6 +135,7 @@ def build_track_b_managed_position_registry(
         managed_order_states=managed_order_states,
         lifecycle_reports=lifecycle_reports,
         manifests=manifests,
+        market_data_root=config.resolve(config.market_data_root),
         source_stale=source_stale,
     )
     classification = _overall_classification(
@@ -206,6 +211,7 @@ def build_track_b_managed_position_registry(
             "live_position_status": str(config.resolve(config.live_position_status_path)),
             "lifecycle_root": str(config.resolve(config.lifecycle_root)),
             "manifest_root": str(config.resolve(config.manifest_root)),
+            "market_data_root": str(config.resolve(config.market_data_root)),
         },
     }
     return payload
@@ -279,6 +285,7 @@ def _managed_positions(
     managed_order_states: list[dict[str, Any]],
     lifecycle_reports: list[dict[str, Any]],
     manifests: list[dict[str, Any]],
+    market_data_root: Path,
     source_stale: Mapping[str, Any],
 ) -> list[dict[str, Any]]:
     positions: list[dict[str, Any]] = []
@@ -312,7 +319,17 @@ def _managed_positions(
             close_order_state=effective_close_order_state,
             source_stale=source_stale,
         )
-        exit_due = _exit_due(lifecycle=lifecycle, lifecycle_report=lifecycle_report, classification=classification)
+        bars_since_entry = _bars_since_entry(
+            lifecycle=lifecycle,
+            lifecycle_report=lifecycle_report,
+            market_data_root=market_data_root,
+        )
+        exit_due = _exit_due(
+            lifecycle=lifecycle,
+            lifecycle_report=lifecycle_report,
+            classification=classification,
+            bars_since_entry=bars_since_entry,
+        )
         position = {
             "classification": OPEN_MANAGED_EXIT_DUE if exit_due and classification == OPEN_MANAGED_MATCHED else classification,
             "symbol": _symbol(broker or lifecycle or review),
@@ -331,7 +348,7 @@ def _managed_positions(
             "entry_price": (lifecycle or review or {}).get("avg_entry_price")
             or _mapping(lifecycle_report.get("entry_fill")).get("price"),
             "managed_exit_policy_id": _managed_exit_policy_id(lifecycle, review, lifecycle_report, manifest),
-            "bars_since_entry": _bars_since_entry(lifecycle, lifecycle_report),
+            "bars_since_entry": bars_since_entry,
             "exit_due": bool(exit_due),
             "exit_due_state": _exit_due_state(exit_due),
             "close_order_state": effective_close_order_state,
@@ -418,11 +435,38 @@ def _review_required_positions(
     lifecycle_reports: list[dict[str, Any]],
     position_truth: Mapping[str, Any],
 ) -> list[dict[str, Any]]:
+    active_lifecycle_ids = {
+        str(item.get("lifecycle_id") or "").strip()
+        for item in [
+            *_list(reconciliation.get("track_b_lifecycle_positions")),
+            *_list(reconciliation.get("review_required_positions")),
+        ]
+        if str(item.get("lifecycle_id") or "").strip()
+    }
+    active_position_keys = {
+        _position_key(item)
+        for item in [
+            *_list(reconciliation.get("track_b_broker_positions")),
+            *_list(reconciliation.get("track_b_lifecycle_positions")),
+            *_list(reconciliation.get("review_required_positions")),
+            *_list(live_position_status.get("positions")),
+            *_list(live_position_status.get("open_positions")),
+        ]
+        if _position_key(item)
+    }
     values = _list(reconciliation.get("review_required_positions")) or _list(
         live_position_status.get("review_required_positions")
     )
     if values:
-        return values
+        return [
+            value
+            for value in values
+            if _review_position_matches_active_context(
+                value,
+                active_lifecycle_ids=active_lifecycle_ids,
+                active_position_keys=active_position_keys,
+            )
+        ] or ([] if (active_lifecycle_ids or active_position_keys) else values)
     if not _active_lifecycle_report_evidence(
         reconciliation=reconciliation,
         live_position_status=live_position_status,
@@ -432,8 +476,28 @@ def _review_required_positions(
     return [
         report
         for report in lifecycle_reports
-        if report.get("review_required") is True or "REVIEW" in str(report.get("paper_lifecycle_classification") or "")
+        if (report.get("review_required") is True or "REVIEW" in str(report.get("paper_lifecycle_classification") or ""))
+        and _review_position_matches_active_context(
+            report,
+            active_lifecycle_ids=active_lifecycle_ids,
+            active_position_keys=active_position_keys,
+        )
     ]
+
+
+def _review_position_matches_active_context(
+    position: Mapping[str, Any],
+    *,
+    active_lifecycle_ids: set[str],
+    active_position_keys: set[str],
+) -> bool:
+    lifecycle_id = str(position.get("lifecycle_id") or "").strip()
+    if active_lifecycle_ids:
+        return bool(lifecycle_id and lifecycle_id in active_lifecycle_ids)
+    key = _position_key(position)
+    if active_position_keys:
+        return bool(key and key in active_position_keys)
+    return True
 
 
 def _active_lifecycle_report_evidence(
@@ -463,17 +527,25 @@ def _active_lifecycle_report_evidence(
     return position_summary.get("broker_exposure_present") is True
 
 
-def _exit_due(*, lifecycle: Mapping[str, Any] | None, lifecycle_report: Mapping[str, Any], classification: str) -> bool:
+def _exit_due(
+    *,
+    lifecycle: Mapping[str, Any] | None,
+    lifecycle_report: Mapping[str, Any],
+    classification: str,
+    bars_since_entry: int | None,
+) -> bool:
     if classification != OPEN_MANAGED_MATCHED:
         return False
     policy = str(_managed_exit_policy_id(lifecycle, None, lifecycle_report, None) or "")
-    if policy != "PAPER_DIAGNOSTIC_TIME_BOXED_3X5M_EXIT_V1":
+    if policy not in {
+        "PAPER_DIAGNOSTIC_TIME_BOXED_3X5M_EXIT_V1",
+        "FORCED_SESSION_SEGMENT_LOCAL_EXIT_V1",
+    }:
         return False
-    bars = _bars_since_entry(lifecycle, lifecycle_report)
     required = _int_or_none((lifecycle or {}).get("required_completed_5m_bars")) or _int_or_none(
         lifecycle_report.get("managed_exit_policy_max_completed_5m_bars")
     ) or 3
-    return bars is not None and bars >= required
+    return bars_since_entry is not None and bars_since_entry >= required
 
 
 def _close_order_state(*, key: str, open_order_states: list[dict[str, Any]]) -> dict[str, Any] | None:
@@ -681,7 +753,19 @@ def _managed_exit_policy_id(
     )
 
 
-def _bars_since_entry(lifecycle: Mapping[str, Any] | None, lifecycle_report: Mapping[str, Any]) -> int | None:
+def _bars_since_entry(
+    *,
+    lifecycle: Mapping[str, Any] | None,
+    lifecycle_report: Mapping[str, Any],
+    market_data_root: Path,
+) -> int | None:
+    from_phase1 = _phase1_completed_5m_bars_since_entry(
+        lifecycle=lifecycle,
+        lifecycle_report=lifecycle_report,
+        market_data_root=market_data_root,
+    )
+    if from_phase1 is not None:
+        return from_phase1
     for value in (
         (lifecycle or {}).get("bars_since_fill"),
         (lifecycle or {}).get("completed_bars_since_entry"),
@@ -692,6 +776,52 @@ def _bars_since_entry(lifecycle: Mapping[str, Any] | None, lifecycle_report: Map
         if parsed is not None:
             return parsed
     return None
+
+
+def _phase1_completed_5m_bars_since_entry(
+    *,
+    lifecycle: Mapping[str, Any] | None,
+    lifecycle_report: Mapping[str, Any],
+    market_data_root: Path,
+) -> int | None:
+    symbol = _symbol(lifecycle or lifecycle_report)
+    entry_time = _entry_time(lifecycle=lifecycle, lifecycle_report=lifecycle_report)
+    if not symbol or entry_time is None:
+        return None
+    payload = _read_json(market_data_root / symbol / "5m" / "latest_runtime_candles.json")
+    bars = _runtime_bars(payload)
+    if not bars:
+        return None
+    completed = 0
+    for bar in bars:
+        bar_time = _bar_end_time(bar)
+        if bar_time is not None and bar_time > entry_time:
+            completed += 1
+    return completed
+
+
+def _runtime_bars(payload: Mapping[str, Any]) -> list[dict[str, Any]]:
+    for key in ("bars", "candles", "candle_history"):
+        rows = _list(payload.get(key))
+        if rows:
+            return rows
+    return []
+
+
+def _bar_end_time(bar: Mapping[str, Any]) -> datetime | None:
+    for key in ("bar_end", "end", "timestamp", "ts", "datetime", "time"):
+        parsed = _parse_time(bar.get(key))
+        if parsed is not None:
+            return parsed
+    return None
+
+
+def _entry_time(*, lifecycle: Mapping[str, Any] | None, lifecycle_report: Mapping[str, Any]) -> datetime | None:
+    return _parse_time(
+        (lifecycle or {}).get("entry_timestamp")
+        or lifecycle_report.get("entry_timestamp")
+        or _mapping(lifecycle_report.get("entry_fill")).get("filled_at")
+    )
 
 
 def _exit_due_state(exit_due: bool) -> str:

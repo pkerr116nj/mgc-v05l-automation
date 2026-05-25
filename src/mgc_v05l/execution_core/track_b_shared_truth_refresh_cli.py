@@ -22,6 +22,7 @@ from .track_b_broker_truth_lease import (
     write_broker_truth_lease,
 )
 from .track_b_managed_order_registry import (
+    ACTIVE_HOLD_MANAGED_TIMED_EXIT_PENDING,
     NO_MANAGED_ORDERS,
     TrackBManagedOrderRegistryConfig,
     build_track_b_managed_order_registry,
@@ -34,6 +35,7 @@ from .track_b_managed_position_registry import (
     write_track_b_managed_position_registry,
 )
 from .track_b_open_order_truth import (
+    BROKER_POSITION_WITHOUT_CLOSE_ORDER,
     NO_OPEN_ORDERS,
     TrackBOpenOrderTruthConfig,
     build_track_b_open_order_truth,
@@ -266,10 +268,25 @@ def build_runtime_start_preflight_summary(result: Mapping[str, Any]) -> dict[str
     """Validate shared-truth authority classifications for a PAPER runtime start."""
 
     classifications = _mapping(result.get("classifications"))
+    active_hold = _managed_active_hold_pending(
+        open_order_class=str(classifications.get("Open Order Truth") or ""),
+        managed_order_class=str(classifications.get("Managed Order Registry") or ""),
+        position_class=str(classifications.get("Position Truth") or ""),
+        managed_position_class=str(classifications.get("Managed Position Registry") or ""),
+        reconciliation_class=str(classifications.get("Reconciliation") or ""),
+    )
     blockers: list[dict[str, str]] = []
     for service, allowed_values in RUNTIME_START_REQUIRED_CLASSIFICATIONS.items():
         observed = str(classifications.get(service) or "MISSING")
         if observed not in allowed_values:
+            if active_hold and service in {
+                "Open Order Truth",
+                "Managed Order Registry",
+                "Position Truth",
+                "Runtime Environment Truth",
+                "Managed Position Registry",
+            }:
+                continue
             blockers.append(
                 {
                     "code": f"{service.lower().replace(' ', '_')}_not_clean_for_runtime_start",
@@ -318,6 +335,7 @@ def build_runtime_start_preflight_summary(result: Mapping[str, Any]) -> dict[str
         "live_money_eligible": False,
         "source": "track_b_shared_truth_refresh_cli",
         "clean_for_runtime_start": not blockers,
+        "active_hold_managed_timed_exit_pending": active_hold,
         "classification": "SHARED_TRUTH_PREFLIGHT_CLEAN" if not blockers else "SHARED_TRUTH_PREFLIGHT_BLOCKED",
         "required_classifications": {
             service: sorted(values) for service, values in RUNTIME_START_REQUIRED_CLASSIFICATIONS.items()
@@ -616,14 +634,26 @@ def _unsafe_blockers(
     open_order_class = str(open_order_truth.get("classification") or "")
     reconciliation_class = str(reconciliation.get("classification") or "")
     lease_state = str(broker_lease.get("lease_state") or "")
+    active_hold = _managed_active_hold_pending(
+        open_order_class=open_order_class,
+        managed_order_class=managed_order_class,
+        position_class=position_class,
+        managed_position_class=managed_position_class,
+        reconciliation_class=reconciliation_class,
+    )
 
-    if open_order_class not in {NO_OPEN_ORDERS, "OPEN_CLOSE_ORDER_WORKING", "OPEN_ENTRY_ORDER_WORKING"}:
+    if open_order_class not in {NO_OPEN_ORDERS, "OPEN_CLOSE_ORDER_WORKING", "OPEN_ENTRY_ORDER_WORKING"} and not active_hold:
         blockers.append({"code": "open_order_truth_blocked", "detail": f"Open Order Truth is {open_order_class}."})
-    if managed_order_class not in {NO_MANAGED_ORDERS, "WORKING_CLOSE_ORDER", "WORKING_ENTRY_ORDER", "CLOSE_ORDER_MODIFIABLE"}:
+    if managed_order_class not in {
+        NO_MANAGED_ORDERS,
+        "WORKING_CLOSE_ORDER",
+        "WORKING_ENTRY_ORDER",
+        "CLOSE_ORDER_MODIFIABLE",
+    } and not active_hold:
         blockers.append({"code": "managed_order_registry_blocked", "detail": f"Managed Order Registry is {managed_order_class}."})
-    if position_class and position_class != "CLEAN_FLAT_READY":
+    if position_class and position_class != "CLEAN_FLAT_READY" and not active_hold:
         blockers.append({"code": "position_truth_attention_required", "detail": f"Position Truth is {position_class}."})
-    if runtime_class not in {RUNTIME_DOWN_CLEAN, RUNTIME_ACTIVE_TRADE_CAPABLE, RUNTIME_ACTIVE_OBSERVATION_ONLY}:
+    if runtime_class not in {RUNTIME_DOWN_CLEAN, RUNTIME_ACTIVE_TRADE_CAPABLE, RUNTIME_ACTIVE_OBSERVATION_ONLY} and not active_hold:
         blockers.append({"code": "runtime_environment_blocked", "detail": f"Runtime Environment Truth is {runtime_class}."})
     if managed_position_class not in {NO_MANAGED_POSITIONS, "OPEN_MANAGED_MATCHED", "OPEN_MANAGED_EXIT_DUE", "OPEN_MANAGED_CLOSE_WORKING"}:
         if not (managed_position_class == "STALE_MANAGED_POSITION_EVIDENCE" and position_class == "CLEAN_FLAT_READY"):
@@ -637,6 +667,23 @@ def _unsafe_blockers(
     if lease_state == "OPERATOR_REQUIRED" and position_class != "CLEAN_FLAT_READY":
         blockers.append({"code": "broker_lease_operator_required", "detail": "Broker Truth Lease requires operator attention."})
     return blockers
+
+
+def _managed_active_hold_pending(
+    *,
+    open_order_class: str,
+    managed_order_class: str,
+    position_class: str,
+    managed_position_class: str,
+    reconciliation_class: str,
+) -> bool:
+    return (
+        open_order_class == BROKER_POSITION_WITHOUT_CLOSE_ORDER
+        and managed_order_class == ACTIVE_HOLD_MANAGED_TIMED_EXIT_PENDING
+        and position_class == ACTIVE_HOLD_MANAGED_TIMED_EXIT_PENDING
+        and managed_position_class == "OPEN_MANAGED_MATCHED"
+        and reconciliation_class == "TRACK_B_PAPER_BROKER_RECONCILED"
+    )
 
 
 def _stale_sources(payload: Mapping[str, Any]) -> list[str]:

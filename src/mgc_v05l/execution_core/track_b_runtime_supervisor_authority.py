@@ -25,6 +25,7 @@ from mgc_v05l.execution_core.track_b_crash_loop_protection import (
     OPERATOR_ACK_REQUIRED,
 )
 from mgc_v05l.execution_core.track_b_managed_order_registry import (
+    ACTIVE_HOLD_MANAGED_TIMED_EXIT_PENDING,
     DEFAULT_MANAGED_ORDER_REGISTRY_ARTIFACT,
     NO_MANAGED_ORDERS,
 )
@@ -33,7 +34,11 @@ from mgc_v05l.execution_core.track_b_managed_position_registry import (
     NO_MANAGED_POSITIONS,
 )
 from mgc_v05l.execution_core.track_b_order_adjustment_planner import DEFAULT_ORDER_ADJUSTMENT_PLAN_ARTIFACT
-from mgc_v05l.execution_core.track_b_open_order_truth import DEFAULT_OPEN_ORDER_TRUTH_ARTIFACT, NO_OPEN_ORDERS
+from mgc_v05l.execution_core.track_b_open_order_truth import (
+    BROKER_POSITION_WITHOUT_CLOSE_ORDER,
+    DEFAULT_OPEN_ORDER_TRUTH_ARTIFACT,
+    NO_OPEN_ORDERS,
+)
 from mgc_v05l.execution_core.track_b_paper_proof_readiness import DEFAULT_OUTPUT_PATH as DEFAULT_PROOF_READINESS_ARTIFACT
 from mgc_v05l.execution_core.track_b_paper_proof_readiness import READY_FOR_PROOF
 from mgc_v05l.execution_core.track_b_position_truth_monitor import DEFAULT_POSITION_TRUTH_ARTIFACT
@@ -464,6 +469,18 @@ def _classify_supervisor(*, inputs: Mapping[str, Mapping[str, Any]]) -> dict[str
                 _blocker("managed_order_registry", evidence["managed_order_registry_classification"]),
                 _blocker("order_adjustment_plan", evidence["order_adjustment_plan_classification"]),
             ],
+        )
+
+    if _managed_active_hold_pending(evidence):
+        return _decision(
+            SUPERVISOR_RUNTIME_START_ALLOWED,
+            "MANAGED_ACTIVE_HOLD",
+            (
+                "Managed PAPER exposure is reconciled, lifecycle-owned, and waiting inside its timed-exit "
+                "profile; non-conflicting guarded lanes may proceed."
+            ),
+            action_allowed=True,
+            safe_to_start_runtime=True,
         )
 
     if (
@@ -927,6 +944,23 @@ def _evidence(inputs: Mapping[str, Mapping[str, Any]]) -> dict[str, Any]:
             inputs["runtime_safe_state_envelope"],
             key="live_money_eligible",
         ),
+        "paper_proof_invoked": _any_true(
+            inputs["runtime_environment_truth"],
+            inputs["runtime_resume_semantics"],
+            inputs["self_recover_rules"],
+            inputs["crash_loop_protection"],
+            inputs["agent_health"],
+            inputs["proof_readiness"],
+            inputs["position_truth"],
+            inputs["open_order_truth"],
+            inputs["managed_order_registry"],
+            inputs["managed_position_registry"],
+            inputs["reconciliation"],
+            inputs["paper_recovery_policy"],
+            inputs["paper_autonomous_recovery_plan"],
+            inputs["runtime_safe_state_envelope"],
+            key="paper_proof_invoked",
+        ),
         "runtime_writer_authority": str(inputs["runtime_environment_truth"].get("writer_authority") or ""),
         "duplicate_writer_count": int(inputs["runtime_environment_truth"].get("duplicate_writer_count") or 0),
     }
@@ -1226,6 +1260,18 @@ def _clean_start_facts(evidence: Mapping[str, Any]) -> bool:
         and evidence["managed_order_registry_classification"] == NO_MANAGED_ORDERS
         and evidence["managed_position_registry_classification"] == NO_MANAGED_POSITIONS
         and evidence["reconciliation_classification"] in {"TRACK_B_PAPER_BROKER_RECONCILED", ""}
+    )
+
+
+def _managed_active_hold_pending(evidence: Mapping[str, Any]) -> bool:
+    return (
+        evidence["open_order_truth_classification"] == BROKER_POSITION_WITHOUT_CLOSE_ORDER
+        and evidence["managed_order_registry_classification"] == ACTIVE_HOLD_MANAGED_TIMED_EXIT_PENDING
+        and evidence["position_truth_classification"] == ACTIVE_HOLD_MANAGED_TIMED_EXIT_PENDING
+        and evidence["managed_position_registry_classification"] == "OPEN_MANAGED_MATCHED"
+        and evidence["reconciliation_classification"] in {"TRACK_B_PAPER_BROKER_RECONCILED", ""}
+        and evidence["live_money_eligible"] is False
+        and evidence["paper_proof_invoked"] is False
     )
 
 

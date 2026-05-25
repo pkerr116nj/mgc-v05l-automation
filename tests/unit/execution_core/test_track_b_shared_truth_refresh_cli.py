@@ -148,6 +148,43 @@ def test_refresh_broker_exposure_produces_attention_required(tmp_path: Path) -> 
     assert any(blocker["code"] == "position_truth_not_clean_for_runtime_start" for blocker in preflight["blockers"])
 
 
+def test_refresh_allows_reconciled_managed_timed_hold_pending(tmp_path: Path) -> None:
+    _seed_clean_stack(tmp_path)
+    broker_position = {"symbol": "MNQ", "local_symbol": "MNQM6", "con_id": 770561201, "quantity": "1", "account": "DUM882026"}
+    lifecycle_position = {
+        "instrument_family": "MNQ",
+        "local_symbol": "MNQM6",
+        "con_id": 770561201,
+        "quantity": "1",
+        "side": "LONG",
+        "lifecycle_id": "current_managed_mnq",
+        "managed_exit_policy_id": "PAPER_DIAGNOSTIC_TIME_BOXED_3X5M_EXIT_V1",
+        "bars_since_fill": 1,
+    }
+    _write_reconciliation(
+        tmp_path,
+        classification="TRACK_B_PAPER_BROKER_RECONCILED",
+        broker_reconciled=True,
+        broker_positions=[broker_position],
+        lifecycle_positions=[lifecycle_position],
+    )
+    _write_broker_status(tmp_path, positions=[broker_position])
+    _write_live_position_status(tmp_path, open_positions=[lifecycle_position])
+    _write_lifecycle_report(tmp_path, lifecycle_position)
+
+    result = _refresh(tmp_path)
+
+    assert result["exit_code"] == 0
+    assert result["classifications"]["Open Order Truth"] == "BROKER_POSITION_WITHOUT_CLOSE_ORDER"
+    assert result["classifications"]["Managed Order Registry"] == "ACTIVE_HOLD_MANAGED_TIMED_EXIT_PENDING"
+    assert result["classifications"]["Position Truth"] == "ACTIVE_HOLD_MANAGED_TIMED_EXIT_PENDING"
+    assert result["classifications"]["Managed Position Registry"] == "OPEN_MANAGED_MATCHED"
+    assert result["unsafe_blockers"] == []
+    preflight = build_runtime_start_preflight_summary(result)
+    assert preflight["classification"] == "SHARED_TRUTH_PREFLIGHT_CLEAN"
+    assert preflight["active_hold_managed_timed_exit_pending"] is True
+
+
 def test_runtime_start_preflight_blocks_open_order(tmp_path: Path) -> None:
     _seed_clean_stack(tmp_path)
     _write_reconciliation(
@@ -398,9 +435,11 @@ def _write_reconciliation(
     broker_reconciled: bool = True,
     broker_positions: list[dict] | None = None,
     open_orders: list[dict] | None = None,
+    lifecycle_positions: list[dict] | None = None,
 ) -> None:
     positions = broker_positions or []
     orders = open_orders or []
+    lifecycle_rows = lifecycle_positions or []
     _write(
         root / DEFAULT_RECONCILIATION_ARTIFACT,
         {
@@ -410,7 +449,7 @@ def _write_reconciliation(
             "live_money_eligible": False,
             "track_b_broker_positions": positions,
             "track_b_broker_open_orders": orders,
-            "track_b_lifecycle_positions": [],
+            "track_b_lifecycle_positions": lifecycle_rows,
             "unknown_broker_open_orders": orders if orders else [],
             "known_managed_exit_orders": [],
             "unresolved_submit_intent_ownership_records": [],
@@ -419,10 +458,34 @@ def _write_reconciliation(
             "unknown_broker_open_order_count": len(orders),
             "review_required_count": 0,
             "unresolved_submit_intent_ownership_count": 0,
-            "lifecycle_open_position_count": 0,
+            "lifecycle_open_position_count": len(lifecycle_rows),
             "lifecycle_open_order_count": len(orders),
             "position_match_report": {"state": "BROKER_AND_LIFECYCLE_FLAT", "matched": broker_reconciled},
             "blockers": [] if broker_reconciled else [{"code": "broker_position_without_lifecycle"}],
+        },
+    )
+
+
+def _write_lifecycle_report(root: Path, lifecycle_position: dict) -> None:
+    lifecycle_id = str(lifecycle_position["lifecycle_id"])
+    _write(
+        root
+        / "outputs/track_b_execution_core/track_b_strategy_managed_paper_lifecycle"
+        / lifecycle_id
+        / "track_b_strategy_managed_paper_lifecycle_report.json",
+        {
+            "generated_at": NOW.isoformat(),
+            "lifecycle_id": lifecycle_id,
+            "instrument_family": lifecycle_position.get("instrument_family"),
+            "local_symbol": lifecycle_position.get("local_symbol"),
+            "con_id": lifecycle_position.get("con_id"),
+            "final_position_status": "OPEN_MANAGED",
+            "paper_lifecycle_classification": "TRACK_B_STRATEGY_PAPER_OPEN_MANAGED",
+            "managed_exit_policy_id": lifecycle_position.get("managed_exit_policy_id"),
+            "managed_exit_policy_max_completed_5m_bars": 3,
+            "bars_since_fill": lifecycle_position.get("bars_since_fill"),
+            "entry_intent": {"side": lifecycle_position.get("side"), "quantity": lifecycle_position.get("quantity")},
+            "entry_fill": {"price": "29976.81", "filled_at": "2026-05-25T11:13:29+00:00"},
         },
     )
 

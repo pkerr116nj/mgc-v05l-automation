@@ -359,6 +359,11 @@ def _agent_health_row(
         process_probe=process_probe,
         artifact_status=artifact_status,
     )
+    if agent_id == "track_b_paper_runtime" and status == STOPPED_UNEXPECTED and _shared_truth_active_hold_pending(
+        shared_truth_refresh
+    ):
+        status = DEGRADED
+        reason = "ACTIVE_HOLD_MANAGED_TIMED_EXIT_PENDING"
     required_for_proof = agent.get("required_for_proof") is True
     required_for_runtime_submit = agent.get("required_for_runtime_submit") is True
     diagnostic_only = agent.get("diagnostic_only") is True or expected_state == DIAGNOSTIC_OPTIONAL
@@ -451,6 +456,17 @@ def _runtime_status(runtime_environment_truth: Mapping[str, Any]) -> tuple[str, 
     if not runtime_environment_truth:
         return MISSING, "runtime_environment_truth_missing"
     return DEGRADED, classification or "runtime_environment_truth_not_clean"
+
+
+def _shared_truth_active_hold_pending(shared_truth_refresh: Mapping[str, Any]) -> bool:
+    classifications = _mapping(shared_truth_refresh.get("classifications"))
+    return (
+        classifications.get("Open Order Truth") == "BROKER_POSITION_WITHOUT_CLOSE_ORDER"
+        and classifications.get("Managed Order Registry") == "ACTIVE_HOLD_MANAGED_TIMED_EXIT_PENDING"
+        and classifications.get("Position Truth") == "ACTIVE_HOLD_MANAGED_TIMED_EXIT_PENDING"
+        and classifications.get("Managed Position Registry") == "OPEN_MANAGED_MATCHED"
+        and classifications.get("Reconciliation") == "TRACK_B_PAPER_BROKER_RECONCILED"
+    )
 
 
 def _runtime_probe(runtime_environment_truth: Mapping[str, Any]) -> dict[str, Any]:

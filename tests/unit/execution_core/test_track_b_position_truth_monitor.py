@@ -13,6 +13,7 @@ from mgc_v05l.execution_core.track_b_position_truth_monitor import (
     build_track_b_position_truth,
     write_track_b_position_truth,
 )
+from mgc_v05l.execution_core.track_b_managed_order_registry import ACTIVE_HOLD_MANAGED_TIMED_EXIT_PENDING
 
 
 NOW = datetime(2026, 5, 22, 9, 40, tzinfo=UTC)
@@ -215,6 +216,31 @@ def test_open_managed_matched_classification(tmp_path: Path) -> None:
     assert mgc["open_managed_valid"] is True
     assert mgc["broker_quantity"] == "1"
     assert mgc["lifecycle_quantity"] == "1"
+
+
+def test_active_timed_hold_is_not_attention_required_summary(tmp_path: Path) -> None:
+    _seed_open_managed(tmp_path)
+    _write_json(
+        tmp_path / "outputs" / "track_b_execution_core" / "managed_orders" / "latest_managed_orders.json",
+        {
+            "schema_version": "track_b_managed_order_registry_v1",
+            "generated_at": NOW.isoformat(),
+            "classification": ACTIVE_HOLD_MANAGED_TIMED_EXIT_PENDING,
+            "summary": {
+                "managed_order_count": 1,
+                "active_hold_managed_timed_exit_pending_count": 1,
+                "suspicious_order_count": 0,
+                "duplicate_close_order_count": 0,
+                "working_close_order_count": 0,
+                "modifiable_close_order_count": 0,
+            },
+        },
+    )
+
+    payload = build_track_b_position_truth(config=TrackBPositionTruthMonitorConfig(repo_root=tmp_path), now=NOW)
+
+    assert payload["summary"]["overall_classification"] == ACTIVE_HOLD_MANAGED_TIMED_EXIT_PENDING
+    assert payload["summary"]["active_hold_managed_timed_exit_pending"] is True
 
 
 def _seed_clean(root: Path) -> None:

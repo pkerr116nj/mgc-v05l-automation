@@ -29,7 +29,7 @@ from .track_b_open_order_truth import (
     TrackBOpenOrderTruthConfig,
     build_track_b_open_order_truth,
 )
-from .track_b_managed_order_registry import DEFAULT_MANAGED_ORDER_REGISTRY_ARTIFACT
+from .track_b_managed_order_registry import ACTIVE_HOLD_MANAGED_TIMED_EXIT_PENDING, DEFAULT_MANAGED_ORDER_REGISTRY_ARTIFACT
 
 DEFAULT_POSITION_TRUTH_ARTIFACT = (
     Path("outputs") / "track_b_execution_core" / "position_truth" / "latest_position_truth.json"
@@ -541,8 +541,22 @@ def _summary(
         counts[classification] = counts.get(classification, 0) + 1
     open_order_summary = _mapping(open_order_truth.get("summary"))
     managed_order_summary = _mapping(managed_order_registry.get("summary"))
+    all_flat = reconciliation.get("broker_reconciled") is True and all(
+        s.get("classification") == FLAT_CLEAN for s in position_states
+    )
+    active_hold = (
+        reconciliation.get("broker_reconciled") is True
+        and str(managed_order_registry.get("classification") or "") == ACTIVE_HOLD_MANAGED_TIMED_EXIT_PENDING
+        and bool(position_states)
+        and all(s.get("classification") in {FLAT_CLEAN, OPEN_MANAGED_MATCHED} for s in position_states)
+    )
     return {
-        "overall_classification": "CLEAN_FLAT_READY" if reconciliation.get("broker_reconciled") is True and all(s.get("classification") == FLAT_CLEAN for s in position_states) else "ATTENTION_REQUIRED",
+        "overall_classification": "CLEAN_FLAT_READY"
+        if all_flat
+        else ACTIVE_HOLD_MANAGED_TIMED_EXIT_PENDING
+        if active_hold
+        else "ATTENTION_REQUIRED",
+        "active_hold_managed_timed_exit_pending": active_hold,
         "classification_counts": counts,
         "broker_reconciled": reconciliation.get("broker_reconciled"),
         "runtime_running": runtime_status.get("runtime_running"),
