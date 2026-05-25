@@ -11,7 +11,7 @@ import argparse
 import json
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from decimal import Decimal, ROUND_HALF_UP
+from decimal import Decimal
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
@@ -21,6 +21,13 @@ from mgc_v05l.execution_core.track_b_control_plane_snapshot import (
     TrackBControlPlaneSnapshotConfig,
     build_track_b_control_plane_snapshot,
     write_track_b_control_plane_snapshot,
+)
+from mgc_v05l.execution_core.track_b_exit_strategy_roster import (
+    MNQ_SNAP_TURN_TIMEBOX_3X5M_V1,
+    TIMEBOXED_3X5M_MANAGED_LIMIT_CLOSE_V1,
+    close_action_for_position_side,
+    close_limit_from_profile,
+    resolve_track_b_exit_profile,
 )
 from mgc_v05l.execution_core.track_b_managed_order_registry import (
     DEFAULT_MANAGED_ORDER_REGISTRY_ARTIFACT,
@@ -34,6 +41,7 @@ from mgc_v05l.execution_core.track_b_paper_trade_ledger import (
     DEFAULT_TRACK_B_LIVE_POSITION_STATUS_JSON,
     DEFAULT_TRACK_B_PAPER_TRADE_LEDGER_OUTPUT_ROOT,
     DEFAULT_TRACK_B_PAPER_TRADE_SUMMARY_JSON,
+    update_track_b_paper_trade_ledger_from_runner_report,
 )
 from mgc_v05l.execution_core.track_b_position_truth_monitor import DEFAULT_POSITION_TRUTH_ARTIFACT
 from mgc_v05l.execution_core.track_b_runtime_safe_state_envelope import DEFAULT_RUNTIME_SAFE_STATE_ENVELOPE_ARTIFACT
@@ -83,8 +91,8 @@ class TrackBManagedExitAttachConfig:
     side: str = "LONG"
     quantity: int = 1
     managed_exit_policy_id: str = TrackBManagedExitPolicy.PAPER_DIAGNOSTIC_TIME_BOXED_3X5M_EXIT_V1.value
-    exit_strategy_id: str = "timeboxed_3x5m_managed_limit_close_v1"
-    exit_profile_id: str = "MNQ_SNAP_TURN_TIMEBOX_3X5M_V1"
+    exit_strategy_id: str = TIMEBOXED_3X5M_MANAGED_LIMIT_CLOSE_V1
+    exit_profile_id: str = MNQ_SNAP_TURN_TIMEBOX_3X5M_V1
     required_completed_5m_bars: int = 3
     close_limit_price: str | None = None
     exit_price_offset_ticks: int = 2
@@ -120,6 +128,9 @@ def build_track_b_managed_exit_attach_plan(
 ) -> dict[str, Any]:
     actual_now = now or datetime.now(UTC)
     require_aware_datetime(actual_now, "now")
+    exit_profile = resolve_track_b_exit_profile(config.exit_profile_id)
+    managed_exit_policy_id = exit_profile.managed_exit_policy_id
+    required_completed_5m_bars = int(exit_profile.required_completed_5m_bars)
     if config.refresh_control_plane:
         snapshot_config = TrackBControlPlaneSnapshotConfig(repo_root=config.repo_root, output_path=config.control_plane_snapshot_path)
         snapshot_payload = build_track_b_control_plane_snapshot(config=snapshot_config, now=actual_now)
@@ -140,25 +151,32 @@ def build_track_b_managed_exit_attach_plan(
     completed_bars = _completed_bar_timestamps_after_entry(payload=bars_payload, entry_timestamp=entry_timestamp)
     completed_bar_count = len(completed_bars)
     latest_price = _latest_price(one_minute_payload) or _latest_price(bars_payload)
-    close_limit_price = config.close_limit_price or _derive_close_limit_price(
+    close_limit_price = config.close_limit_price or close_limit_from_profile(
         latest_price=latest_price,
         side=config.side,
-        tick_size=Decimal(str(config.tick_size)),
-        offset_ticks=config.exit_price_offset_ticks,
+        profile=exit_profile,
     )
-    close_action = "SELL" if config.side.upper() == "LONG" else "BUY"
+    close_action = close_action_for_position_side(config.side)
     close_intent = _close_intent_preview(
         config=config,
         close_action=close_action,
         close_limit_price=close_limit_price,
         completed_bar_count=completed_bar_count,
+        managed_exit_policy_id=managed_exit_policy_id,
+        required_completed_5m_bars=required_completed_5m_bars,
+        exit_strategy_id=exit_profile.exit_strategy_id,
+        exit_profile_id=exit_profile.exit_profile_id,
     )
 
     blockers: list[str] = []
     control_plane_ok, control_plane_reason = _control_plane_allows_managed_exit(snapshot)
     safe_state_ok, safe_state_reason = _safe_state_allows_managed_exit(safe_state)
     position_ok, position_reason = _position_identity_matches(config=config, position_truth=position_truth, live_position_status=live_position_status)
-    lifecycle_ok, lifecycle_reason = _lifecycle_matches(config=config, lifecycle_report=lifecycle_report)
+    lifecycle_ok, lifecycle_reason = _lifecycle_matches(
+        config=config,
+        lifecycle_report=lifecycle_report,
+        managed_exit_policy_id=managed_exit_policy_id,
+    )
     duplicate_close = _duplicate_close_order(config=config, managed_orders=managed_orders, open_order_truth=open_order_truth, close_action=close_action)
 
     if not control_plane_ok:
@@ -173,7 +191,7 @@ def build_track_b_managed_exit_attach_plan(
     elif duplicate_close:
         blockers.append(duplicate_close)
         classification = MANAGED_EXIT_BLOCKED_DUPLICATE_CLOSE_ORDER
-    elif completed_bar_count < int(config.required_completed_5m_bars):
+    elif completed_bar_count < required_completed_5m_bars:
         classification = MANAGED_EXIT_NOT_YET_ELIGIBLE
     elif config.apply is not True and config.operator_authorized_managed_exit is not True:
         classification = MANAGED_EXIT_TIMEBOX_CLOSE_ELIGIBLE
@@ -188,7 +206,7 @@ def build_track_b_managed_exit_attach_plan(
         "classification": classification,
         "plan_classification": (
             MANAGED_EXIT_TIMEBOX_CLOSE_ELIGIBLE
-            if completed_bar_count >= int(config.required_completed_5m_bars) and not blockers
+            if completed_bar_count >= required_completed_5m_bars and not blockers
             else MANAGED_EXIT_ATTACH_PLAN_READY
             if not blockers
             else classification
@@ -220,19 +238,29 @@ def build_track_b_managed_exit_attach_plan(
         "open_order_truth_classification": open_order_truth.get("classification"),
         "managed_order_registry_classification": managed_orders.get("classification"),
         "position_truth_classification": position_truth.get("classification"),
-        "target_identity": _target_identity(config=config, action=close_action, close_limit_price=close_limit_price),
+        "target_identity": _target_identity(
+            config=config,
+            action=close_action,
+            close_limit_price=close_limit_price,
+            managed_exit_policy_id=managed_exit_policy_id,
+            exit_strategy_id=exit_profile.exit_strategy_id,
+            exit_profile_id=exit_profile.exit_profile_id,
+        ),
         "position_identity_verified": position_ok,
         "lifecycle_identity_verified": lifecycle_ok,
         "duplicate_close_order_detected": bool(duplicate_close),
-        "managed_exit_policy_id": config.managed_exit_policy_id,
-        "exit_strategy_id": config.exit_strategy_id,
-        "exit_profile_id": config.exit_profile_id,
+        "managed_exit_policy_id": managed_exit_policy_id,
+        "exit_profile": exit_profile.to_json_dict(),
+        "exit_strategy_id": exit_profile.exit_strategy_id,
+        "exit_profile_id": exit_profile.exit_profile_id,
+        "requested_exit_strategy_id": config.exit_strategy_id,
+        "requested_exit_profile_id": config.exit_profile_id,
         "exit_roster_compatible": True,
         "exit_roster_role": "strategy_managed_position_close",
-        "required_completed_5m_bars": int(config.required_completed_5m_bars),
+        "required_completed_5m_bars": required_completed_5m_bars,
         "completed_5m_bars_since_entry": completed_bar_count,
         "completed_5m_bar_timestamps_since_entry": completed_bars,
-        "timebox_exit_eligible": completed_bar_count >= int(config.required_completed_5m_bars),
+        "timebox_exit_eligible": completed_bar_count >= required_completed_5m_bars,
         "entry_timestamp": entry_timestamp,
         "latest_price_evidence": latest_price,
         "close_intent_preview": close_intent,
@@ -268,7 +296,15 @@ def build_track_b_managed_exit_attach_plan(
         )
         return payload
 
-    apply_result = _apply_managed_exit(config=config, lifecycle_report=lifecycle_report, completed_bar_count=completed_bar_count, close_limit_price=close_limit_price, now=actual_now)
+    apply_result = _apply_managed_exit(
+        config=config,
+        lifecycle_report=lifecycle_report,
+        completed_bar_count=completed_bar_count,
+        close_limit_price=close_limit_price,
+        managed_exit_policy_id=managed_exit_policy_id,
+        required_completed_5m_bars=required_completed_5m_bars,
+        now=actual_now,
+    )
     payload["apply_result"] = apply_result
     payload["classification"] = str(apply_result.get("classification") or MANAGED_EXIT_APPLIED_OR_PENDING)
     payload["broker_state_mutated"] = bool(apply_result.get("broker_state_mutated"))
@@ -297,8 +333,11 @@ def _apply_managed_exit(
     lifecycle_report: Mapping[str, Any],
     completed_bar_count: int,
     close_limit_price: str | None,
+    managed_exit_policy_id: str,
+    required_completed_5m_bars: int,
     now: datetime,
 ) -> dict[str, Any]:
+    entry_intent = lifecycle_report.get("entry_intent") if isinstance(lifecycle_report.get("entry_intent"), Mapping) else {}
     lifecycle_config = TrackBStrategyManagedPaperLifecycleConfig(
         mode=config.mode,
         account_id=config.account_id,
@@ -311,10 +350,14 @@ def _apply_managed_exit(
         side=config.side,
         quantity=config.quantity,
         close_limit_price=close_limit_price,
-        managed_exit_policy_id=config.managed_exit_policy_id,
-        managed_exit_policy_max_completed_5m_bars=config.required_completed_5m_bars,
+        managed_exit_policy_id=managed_exit_policy_id,
+        managed_exit_policy_max_completed_5m_bars=required_completed_5m_bars,
         completed_5m_bars_since_entry=completed_bar_count,
         fill_timestamp_source="BROKER_ENTRY_FILL",
+        signal_timestamp=entry_intent.get("signal_timestamp"),
+        signal_reason=entry_intent.get("signal_reason"),
+        decision_bar_timestamp=entry_intent.get("decision_bar_timestamp"),
+        latest_decision_bar_source=str(entry_intent.get("latest_decision_bar_source") or "DATABENTO_LIVE_ARTIFACT"),
         data_freshness_state="FRESH",
         broker_truth_state="FRESH",
         submit_enabled=True,
@@ -345,6 +388,31 @@ def _apply_managed_exit(
         existing_lifecycle_report=lifecycle_report,
         now=now,
     )
+    ledger_update: dict[str, Any] = {}
+    if result.report.get("close_submit_attempt") or result.report.get("close_fill"):
+        ledger_result = update_track_b_paper_trade_ledger_from_runner_report(
+            runner_report={
+                "managed_lifecycle_invoked": True,
+                "managed_lifecycle_report_path": str(result.report_json),
+                "strategy_id": config.strategy_id,
+                "contract_key": config.contract_key,
+                "local_symbol": config.local_symbol,
+                "con_id": config.con_id,
+                "account_id": config.account_id,
+            },
+            runner_report_json=result.report_json,
+            output_root=config.paper_trade_ledger_output_root,
+            now=now,
+        )
+        ledger_update = {
+            "trade_record_written": ledger_result.trade_record_written,
+            "ledger_jsonl": str(ledger_result.ledger_jsonl),
+            "trade_summary_json": str(ledger_result.trade_summary_json),
+            "live_position_status_json": str(ledger_result.live_position_status_json),
+            "pnl_summary_json": str(ledger_result.pnl_summary_json),
+            "open_position_count": ledger_result.trade_summary.get("open_position_count"),
+            "realized_pnl": None if ledger_result.trade_record is None else ledger_result.trade_record.get("realized_pnl"),
+        }
     return {
         "classification": result.report.get("paper_lifecycle_classification") or result.classification.value,
         "lifecycle_report_path": str(result.report_json),
@@ -353,6 +421,7 @@ def _apply_managed_exit(
         "close_intent": result.report.get("close_intent"),
         "close_submit_attempt": result.report.get("close_submit_attempt"),
         "close_fill": result.report.get("close_fill"),
+        "paper_trade_ledger_update": ledger_update,
         "primary_blocker": result.report.get("primary_blocker"),
     }
 
@@ -422,7 +491,12 @@ def _position_identity_matches(
     return False, "No exact active broker/lifecycle position matches account, contract, conId, and quantity."
 
 
-def _lifecycle_matches(*, config: TrackBManagedExitAttachConfig, lifecycle_report: Mapping[str, Any]) -> tuple[bool, str]:
+def _lifecycle_matches(
+    *,
+    config: TrackBManagedExitAttachConfig,
+    lifecycle_report: Mapping[str, Any],
+    managed_exit_policy_id: str,
+) -> tuple[bool, str]:
     checks = {
         "lifecycle_id": config.lifecycle_id,
         "strategy_id": config.strategy_id,
@@ -435,11 +509,57 @@ def _lifecycle_matches(*, config: TrackBManagedExitAttachConfig, lifecycle_repor
             return False, f"Lifecycle {key} mismatch."
     if _int_or_none(lifecycle_report.get("con_id")) != config.con_id:
         return False, "Lifecycle con_id mismatch."
-    if lifecycle_report.get("paper_lifecycle_classification") != "TRACK_B_STRATEGY_PAPER_OPEN_MANAGED":
-        return False, "Lifecycle is not OPEN_MANAGED."
-    if str(lifecycle_report.get("managed_exit_policy_id") or "") != config.managed_exit_policy_id:
+    lifecycle_classification = str(lifecycle_report.get("paper_lifecycle_classification") or "")
+    if lifecycle_classification != "TRACK_B_STRATEGY_PAPER_OPEN_MANAGED":
+        previous_attach_guard = (
+            lifecycle_classification == "TRACK_B_STRATEGY_PAPER_REVIEW_REQUIRED"
+            and lifecycle_report.get("broker_state_mutated") is False
+            and not lifecycle_report.get("close_intent")
+            and not lifecycle_report.get("close_submit_attempt")
+            and "latest decision bar source DATABENTO_LIVE_ARTIFACT"
+            in str(lifecycle_report.get("primary_blocker") or "")
+        )
+        retryable_unmutated_close_review = _retryable_unmutated_close_review(
+            config=config,
+            lifecycle_report=lifecycle_report,
+            managed_exit_policy_id=managed_exit_policy_id,
+        )
+        if not previous_attach_guard and not retryable_unmutated_close_review:
+            return False, "Lifecycle is not OPEN_MANAGED."
+    if str(lifecycle_report.get("managed_exit_policy_id") or "") != managed_exit_policy_id:
         return False, "Lifecycle managed exit policy mismatch."
     return True, "Lifecycle identity matches."
+
+
+def _retryable_unmutated_close_review(
+    *,
+    config: TrackBManagedExitAttachConfig,
+    lifecycle_report: Mapping[str, Any],
+    managed_exit_policy_id: str,
+) -> bool:
+    if lifecycle_report.get("paper_lifecycle_classification") != "TRACK_B_STRATEGY_PAPER_REVIEW_REQUIRED":
+        return False
+    if lifecycle_report.get("broker_state_mutated") is True:
+        return False
+    if lifecycle_report.get("close_fill"):
+        return False
+    close_intent = lifecycle_report.get("close_intent") if isinstance(lifecycle_report.get("close_intent"), Mapping) else {}
+    close_submit = (
+        lifecycle_report.get("close_submit_attempt")
+        if isinstance(lifecycle_report.get("close_submit_attempt"), Mapping)
+        else {}
+    )
+    if close_submit.get("submitted") is True or close_submit.get("broker_state_mutated") is True:
+        return False
+    return (
+        str(close_intent.get("lifecycle_id") or "") == config.lifecycle_id
+        and str(close_intent.get("strategy_id") or "") == config.strategy_id
+        and str(close_intent.get("local_symbol") or "") == config.local_symbol
+        and _int_or_none(close_intent.get("con_id")) == config.con_id
+        and str(close_intent.get("order_action") or "") == close_action_for_position_side(config.side)
+        and _decimal(close_intent.get("quantity")) == Decimal(str(config.quantity))
+        and str(close_intent.get("managed_exit_policy_id") or "") == managed_exit_policy_id
+    )
 
 
 def _duplicate_close_order(
@@ -490,6 +610,10 @@ def _close_intent_preview(
     close_action: str,
     close_limit_price: str | None,
     completed_bar_count: int,
+    managed_exit_policy_id: str,
+    required_completed_5m_bars: int,
+    exit_strategy_id: str,
+    exit_profile_id: str,
 ) -> dict[str, Any]:
     return {
         "intent_schema_version": "track_b_strategy_managed_paper_close_intent_v1",
@@ -506,17 +630,25 @@ def _close_intent_preview(
         "close_limit_price": close_limit_price,
         "exit_family": "DIAGNOSTIC_TIME",
         "close_reason": "TIME_BOXED_EXIT",
-        "managed_exit_policy_id": config.managed_exit_policy_id,
-        "exit_strategy_id": config.exit_strategy_id,
-        "exit_profile_id": config.exit_profile_id,
+        "managed_exit_policy_id": managed_exit_policy_id,
+        "exit_strategy_id": exit_strategy_id,
+        "exit_profile_id": exit_profile_id,
         "elapsed_completed_5m_bars": completed_bar_count,
-        "required_completed_5m_bars": int(config.required_completed_5m_bars),
+        "required_completed_5m_bars": required_completed_5m_bars,
         "would_submit": False,
         "submit_allowed": False,
     }
 
 
-def _target_identity(*, config: TrackBManagedExitAttachConfig, action: str, close_limit_price: str | None) -> dict[str, str]:
+def _target_identity(
+    *,
+    config: TrackBManagedExitAttachConfig,
+    action: str,
+    close_limit_price: str | None,
+    managed_exit_policy_id: str,
+    exit_strategy_id: str,
+    exit_profile_id: str,
+) -> dict[str, str]:
     return {
         "account_id": config.account_id,
         "strategy_id": config.strategy_id,
@@ -532,9 +664,9 @@ def _target_identity(*, config: TrackBManagedExitAttachConfig, action: str, clos
         "quantity": str(config.quantity),
         "order_type": "LMT",
         "limit_price": str(close_limit_price or ""),
-        "managed_exit_policy_id": config.managed_exit_policy_id,
-        "exit_strategy_id": config.exit_strategy_id,
-        "exit_profile_id": config.exit_profile_id,
+        "managed_exit_policy_id": managed_exit_policy_id,
+        "exit_strategy_id": exit_strategy_id,
+        "exit_profile_id": exit_profile_id,
     }
 
 
@@ -583,16 +715,6 @@ def _latest_price(payload: Mapping[str, Any]) -> str | None:
         return None
     value = bars[-1].get("close") or bars[-1].get("last_price")
     return None if value in {None, ""} else str(value)
-
-
-def _derive_close_limit_price(*, latest_price: str | None, side: str, tick_size: Decimal, offset_ticks: int) -> str | None:
-    latest = _decimal(latest_price)
-    if latest is None:
-        return None
-    offset = tick_size * Decimal(max(int(offset_ticks), 0))
-    raw = latest - offset if side.upper() == "LONG" else latest + offset
-    rounded = (raw / tick_size).to_integral_value(rounding=ROUND_HALF_UP) * tick_size
-    return format(rounded.normalize(), "f")
 
 
 def _payload_bars(payload: Mapping[str, Any]) -> list[Mapping[str, Any]]:

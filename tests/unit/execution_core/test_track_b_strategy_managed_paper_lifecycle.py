@@ -1361,6 +1361,77 @@ def test_maintenance_with_no_open_orders_continues_to_close_submit(tmp_path: Pat
     )
 
 
+def test_managed_cleanup_close_allows_prior_runtime_generation_owner(tmp_path: Path) -> None:
+    config = base_config(
+        tmp_path,
+        strategy_id="MNQ_FIRST_BULL_SNAP_TURN_V1",
+        instrument_family="MNQ",
+        contract_key="MNQ-202606",
+        local_symbol="MNQM6",
+        con_id=770561201,
+        side="LONG",
+        close_limit_price="28728.5",
+        managed_exit_policy_id=TrackBManagedExitPolicy.PAPER_DIAGNOSTIC_TIME_BOXED_3X5M_EXIT_V1.value,
+        runtime_generation_id="runtime-generation-that-opened-position",
+    )
+    close_intent = {
+        "lifecycle_id": "open-managed-existing",
+        "order_action": "SELL",
+        "quantity": 1,
+        "close_limit_price": "28728.5",
+    }
+    seed_strategy_submit_authority(
+        tmp_path,
+        config=config,
+        intent_payload=close_intent,
+        intent_kind=IntentKind.CLOSE,
+        limit_price="28728.5",
+        snapshot_overrides={
+            "runtime_supervisor_classification": "SUPERVISOR_CLEANUP_REQUIRED_BEFORE_RUNTIME",
+            "safe_to_start_runtime": False,
+            "runtime_resume_action_policy": "QUARANTINE_OBSERVE_ONLY",
+            "runtime_resume_proposed_next_runtime_generation_id": "runtime-generation-after-cleanup",
+            "open_order_truth_classification": "BROKER_POSITION_WITHOUT_CLOSE_ORDER",
+            "managed_order_registry_classification": "POSITION_WITHOUT_CLOSE_ORDER",
+            "position_truth_classification": "REVIEW_REQUIRED",
+        },
+        safe_state_overrides={
+            "runtime_generation_id": "runtime-generation-after-cleanup",
+            "submit_allowed": False,
+            "broker_mutation_allowed": True,
+        },
+    )
+    _write_json(
+        tmp_path / "outputs/track_b_execution_core/paper_autonomous_recovery/latest_paper_autonomous_recovery_plan.json",
+        {
+            "generated_at": aware_now().isoformat(),
+            "classification": "PLAN_BLOCKED_STALE_EVIDENCE",
+            "control_plane_snapshot_id": "snapshot-1",
+            "shared_truth_refresh_generation_id": "generation-1",
+            "execution_enabled": False,
+            "live_money_eligible": False,
+            "proposed_actions": [],
+        },
+    )
+
+    authorization = lifecycle_module.build_strategy_managed_submit_authorization(
+        config=config,
+        intent_payload=close_intent,
+        intent_kind=IntentKind.CLOSE,
+        limit_price="28728.5",
+        now=aware_now(),
+    )
+
+    assert authorization["classification"] == lifecycle_module.STRATEGY_SUBMIT_AUTHORIZED
+    assert authorization["runtime_generation_id"] == "runtime-generation-that-opened-position"
+    assert (
+        authorization["runtime_resume_proposed_next_runtime_generation_id"]
+        == "runtime-generation-after-cleanup"
+    )
+    assert authorization["pre_action_validation"]["strategy_managed_close_exact_cleanup"] is True
+    assert authorization["submit_allowed"] is True
+
+
 def test_maintenance_blocks_close_when_broker_position_missing_before_submit(
     tmp_path: Path,
     monkeypatch,

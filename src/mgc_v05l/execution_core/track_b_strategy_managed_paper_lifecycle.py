@@ -1234,6 +1234,15 @@ def build_strategy_managed_submit_authorization(
     safe_state_path = _resolve_path(config.repo_root, Path(config.runtime_safe_state_envelope_path))
     snapshot = _read_json_object(snapshot_path)
     safe_state = _read_json_object(safe_state_path)
+    if intent_kind is IntentKind.CLOSE and pre_action.get("classification") != PRE_ACTION_SNAPSHOT_VALID:
+        managed_cleanup_pre_action = _managed_close_cleanup_pre_action(
+            pre_action=pre_action,
+            snapshot=snapshot,
+            safe_state=safe_state,
+            target_identity=target_identity,
+        )
+        if managed_cleanup_pre_action.get("classification") == PRE_ACTION_SNAPSHOT_VALID:
+            pre_action = managed_cleanup_pre_action
     base = {
         "schema_version": "track_b_strategy_managed_submit_authorization_v1",
         "authorized_at": actual_now.isoformat(),
@@ -1306,8 +1315,10 @@ def _strategy_submit_authorization_blocker(
 ) -> tuple[str, str]:
     cleanup_close = (
         target_identity.get("intent_kind") == IntentKind.CLOSE.value
-        and pre_action.get("expected_plan_classification") == PLAN_SCOPED_POSITION_CLEANUP
-        and pre_action.get("expected_action_type") == "SCOPED_POSITION_CLEANUP"
+        and (
+            pre_action.get("expected_plan_classification") == PLAN_SCOPED_POSITION_CLEANUP
+            or pre_action.get("strategy_managed_close_exact_cleanup") is True
+        )
         and pre_action.get("classification") == PRE_ACTION_SNAPSHOT_VALID
     )
     if pre_action.get("classification") == PRE_ACTION_BLOCKED_SNAPSHOT_MISSING:
@@ -1360,7 +1371,7 @@ def _strategy_submit_authorization_blocker(
     safe_generation = str(safe_state.get("runtime_generation_id") or "")
     if proposed_generation and proposed_generation != runtime_generation_id and not cleanup_close:
         return STRATEGY_SUBMIT_BLOCKED_RUNTIME_GENERATION, "Runtime Resume v2 proposed generation does not match submit authorization."
-    if safe_generation and safe_generation != runtime_generation_id:
+    if safe_generation and safe_generation != runtime_generation_id and not cleanup_close:
         return STRATEGY_SUBMIT_BLOCKED_RUNTIME_GENERATION, "Safe-State runtime generation does not match submit authorization."
     order_truth_blocker = _order_truth_blocker(snapshot=snapshot, safe_state=safe_state)
     if order_truth_blocker:
@@ -1375,6 +1386,64 @@ def _strategy_submit_authorization_blocker(
     if not target_identity:
         return STRATEGY_SUBMIT_BLOCKED_TARGET_MISMATCH, "Strategy submit target identity is empty."
     return STRATEGY_SUBMIT_AUTHORIZED, "Strategy-managed PAPER submit authorization is valid."
+
+
+def _managed_close_cleanup_pre_action(
+    *,
+    pre_action: Mapping[str, Any],
+    snapshot: Mapping[str, Any],
+    safe_state: Mapping[str, Any],
+    target_identity: Mapping[str, Any],
+) -> dict[str, Any]:
+    if target_identity.get("intent_kind") != IntentKind.CLOSE.value:
+        return dict(pre_action)
+    if snapshot.get("shared_truth_coherence_status") != "COHERENT":
+        return dict(pre_action)
+    if snapshot.get("live_money_eligible") is True or safe_state.get("live_money_eligible") is True:
+        return dict(pre_action)
+    if snapshot.get("paper_proof_invoked") is True or safe_state.get("paper_proof_invoked") is True:
+        return dict(pre_action)
+    if snapshot.get("agent_health_has_duplicate_writer") is True:
+        return dict(pre_action)
+    if safe_state.get("broker_mutation_allowed") is not True:
+        return dict(pre_action)
+    supervisor = str(snapshot.get("runtime_supervisor_classification") or "")
+    if supervisor != "SUPERVISOR_CLEANUP_REQUIRED_BEFORE_RUNTIME":
+        return dict(pre_action)
+    open_order_state = " ".join(
+        str(snapshot.get(key) or "")
+        for key in ("open_order_truth_classification", "managed_order_registry_classification")
+    ).upper()
+    if open_order_state.strip() and "POSITION_WITHOUT_CLOSE_ORDER" not in open_order_state:
+        return dict(pre_action)
+    payload = dict(pre_action)
+    payload.update(
+        {
+            "classification": PRE_ACTION_SNAPSHOT_VALID,
+            "valid": True,
+            "reason": "Strategy-managed close is exact-target cleanup for broker position without close order.",
+            "expected_plan_classification": PLAN_SCOPED_POSITION_CLEANUP,
+            "expected_action_type": "SCOPED_POSITION_CLEANUP",
+            "strategy_managed_close_exact_cleanup": True,
+            "planner_action_type": "SCOPED_POSITION_CLEANUP",
+            "planner_target_identity": _strategy_close_scoped_cleanup_target_identity_from_submit_target(target_identity),
+            "strategy_managed_close_submit_target_identity": dict(target_identity),
+        }
+    )
+    return payload
+
+
+def _strategy_close_scoped_cleanup_target_identity_from_submit_target(target_identity: Mapping[str, Any]) -> dict[str, str]:
+    return _compact_identity(
+        {
+            "symbol": target_identity.get("symbol"),
+            "contract": target_identity.get("contract"),
+            "con_id": target_identity.get("con_id"),
+            "side": "LONG" if target_identity.get("action") == "SELL" else "SHORT",
+            "quantity": target_identity.get("quantity"),
+            "lifecycle_id": target_identity.get("lifecycle_id"),
+        }
+    )
 
 
 def _strategy_submit_target_identity(

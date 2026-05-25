@@ -5,6 +5,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Mapping
 
+import mgc_v05l.execution_core.track_b_managed_exit_attach as attach_module
 from mgc_v05l.execution_core.track_b_managed_exit_attach import (
     MANAGED_EXIT_APPLY_DISABLED,
     MANAGED_EXIT_BLOCKED_DUPLICATE_CLOSE_ORDER,
@@ -78,6 +79,72 @@ def test_blocked_on_duplicate_close_order(tmp_path: Path) -> None:
     assert payload["duplicate_close_order_detected"] is True
 
 
+def test_previous_attach_guard_review_state_can_retry_when_broker_identity_matches(tmp_path: Path) -> None:
+    config = _seed(tmp_path, completed_bars=3)
+    lifecycle_path = (
+        tmp_path
+        / "outputs/track_b_execution_core/track_b_strategy_managed_paper_lifecycle"
+        / config.lifecycle_id
+        / "track_b_strategy_managed_paper_lifecycle_report.json"
+    )
+    lifecycle = json.loads(lifecycle_path.read_text(encoding="utf-8"))
+    lifecycle.update(
+        {
+            "paper_lifecycle_classification": "TRACK_B_STRATEGY_PAPER_REVIEW_REQUIRED",
+            "final_position_status": "REVIEW_REQUIRED",
+            "broker_state_mutated": False,
+            "close_intent": None,
+            "close_submit_attempt": None,
+            "primary_blocker": "Strategy-managed PAPER lifecycle requires latest decision bar source DATABENTO_LIVE_ARTIFACT.",
+        }
+    )
+    _write_json(lifecycle_path, lifecycle)
+
+    payload = build_track_b_managed_exit_attach_plan(config=config, now=NOW)
+
+    assert payload["classification"] == MANAGED_EXIT_TIMEBOX_CLOSE_ELIGIBLE
+    assert payload["lifecycle_identity_verified"] is True
+
+
+def test_unmutated_close_authorization_review_can_retry_when_close_intent_matches(tmp_path: Path) -> None:
+    config = _seed(tmp_path, completed_bars=3)
+    lifecycle_path = (
+        tmp_path
+        / "outputs/track_b_execution_core/track_b_strategy_managed_paper_lifecycle"
+        / config.lifecycle_id
+        / "track_b_strategy_managed_paper_lifecycle_report.json"
+    )
+    lifecycle = json.loads(lifecycle_path.read_text(encoding="utf-8"))
+    lifecycle.update(
+        {
+            "paper_lifecycle_classification": "TRACK_B_STRATEGY_PAPER_REVIEW_REQUIRED",
+            "final_position_status": "REVIEW_REQUIRED",
+            "broker_state_mutated": False,
+            "primary_blocker": "Planner does not reference the active snapshot id.",
+            "close_intent": {
+                "lifecycle_id": config.lifecycle_id,
+                "strategy_id": config.strategy_id,
+                "local_symbol": config.local_symbol,
+                "con_id": config.con_id,
+                "order_action": "SELL",
+                "quantity": 1,
+                "managed_exit_policy_id": config.managed_exit_policy_id,
+            },
+            "close_submit_attempt": {
+                "submitted": False,
+                "broker_state_mutated": False,
+                "classification": "STRATEGY_SUBMIT_BLOCKED_SUPERVISOR",
+            },
+        }
+    )
+    _write_json(lifecycle_path, lifecycle)
+
+    payload = build_track_b_managed_exit_attach_plan(config=config, now=NOW)
+
+    assert payload["classification"] == MANAGED_EXIT_TIMEBOX_CLOSE_ELIGIBLE
+    assert payload["lifecycle_identity_verified"] is True
+
+
 def test_apply_disabled_without_both_flags(tmp_path: Path) -> None:
     config = TrackBManagedExitAttachConfig(**{**_seed(tmp_path, completed_bars=3).__dict__, "apply": True})
 
@@ -87,6 +154,89 @@ def test_apply_disabled_without_both_flags(tmp_path: Path) -> None:
     assert payload["apply_enabled"] is False
     assert payload["submit_attempted"] is False
     assert payload["broker_state_mutated"] is False
+
+
+def test_apply_updates_paper_trade_ledger_projection(tmp_path: Path, monkeypatch) -> None:
+    config = TrackBManagedExitAttachConfig(
+        **{
+            **_seed(tmp_path, completed_bars=3).__dict__,
+            "apply": True,
+            "operator_authorized_managed_exit": True,
+        }
+    )
+    lifecycle_report_path = (
+        tmp_path
+        / "outputs/track_b_execution_core/track_b_strategy_managed_paper_lifecycle"
+        / config.lifecycle_id
+        / "track_b_strategy_managed_paper_lifecycle_report.json"
+    )
+    lifecycle = json.loads(lifecycle_report_path.read_text(encoding="utf-8"))
+    closed_lifecycle = {
+        **lifecycle,
+        **{
+            "paper_lifecycle_classification": "TRACK_B_STRATEGY_PAPER_CLOSED_FLAT",
+            "final_position_status": "CLOSED_FLAT",
+            "broker_state_mutated": True,
+            "submit_attempted": True,
+            "close_intent": {
+                "lifecycle_id": config.lifecycle_id,
+                "strategy_id": config.strategy_id,
+                "local_symbol": config.local_symbol,
+                "con_id": config.con_id,
+                "order_action": "SELL",
+                "quantity": 1,
+                "close_limit_price": "29965",
+                "managed_exit_policy_id": config.managed_exit_policy_id,
+            },
+            "close_submit_attempt": {
+                "submitted": True,
+                "broker_state_mutated": True,
+                "broker_order_id": "34",
+            },
+            "close_fill": {
+                "broker_order_id": "34",
+                "perm_id": "917751476",
+                "execution_id": "exec-34",
+                "price": "29965",
+                "quantity": "1",
+                "filled_at": "2026-05-25T07:48:00+00:00",
+            },
+        },
+    }
+    calls: dict[str, Any] = {}
+
+    class Result:
+        report_json = lifecycle_report_path
+        report = closed_lifecycle
+
+    class LedgerResult:
+        trade_record_written = True
+        ledger_jsonl = tmp_path / "ledger.jsonl"
+        trade_summary_json = tmp_path / "summary.json"
+        live_position_status_json = tmp_path / "live.json"
+        pnl_summary_json = tmp_path / "pnl.json"
+        trade_summary = {"open_position_count": 0}
+        trade_record = {"realized_pnl": "82.5"}
+
+    def fake_maintain(**kwargs: Any) -> Result:
+        calls["maintain"] = kwargs
+        return Result()
+
+    def fake_ledger_update(**kwargs: Any) -> LedgerResult:
+        calls["ledger_update"] = kwargs
+        return LedgerResult()
+
+    monkeypatch.setattr(attach_module, "maintain_open_track_b_strategy_managed_paper_lifecycle", fake_maintain)
+    monkeypatch.setattr(attach_module, "update_track_b_paper_trade_ledger_from_runner_report", fake_ledger_update)
+
+    payload = build_track_b_managed_exit_attach_plan(config=config, now=NOW)
+
+    assert payload["classification"] == "TRACK_B_STRATEGY_PAPER_CLOSED_FLAT"
+    assert calls["ledger_update"]["runner_report"]["managed_lifecycle_invoked"] is True
+    assert calls["ledger_update"]["runner_report"]["managed_lifecycle_report_path"] == str(lifecycle_report_path)
+    assert payload["apply_result"]["paper_trade_ledger_update"]["trade_record_written"] is True
+    assert payload["apply_result"]["paper_trade_ledger_update"]["open_position_count"] == 0
+    assert payload["apply_result"]["paper_trade_ledger_update"]["realized_pnl"] == "82.5"
 
 
 def test_no_live_money_or_paper_proof_route(tmp_path: Path) -> None:
