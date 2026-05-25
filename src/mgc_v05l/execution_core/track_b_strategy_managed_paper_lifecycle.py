@@ -29,7 +29,10 @@ from .track_b_continuation_aware_exit_decision import (
     build_time_plus_continuation_exit_decision,
     write_continuation_aware_exit_preview_artifacts,
 )
-from .track_b_paper_autonomous_recovery_planner import DEFAULT_PAPER_AUTONOMOUS_RECOVERY_PLAN_ARTIFACT
+from .track_b_paper_autonomous_recovery_planner import (
+    DEFAULT_PAPER_AUTONOMOUS_RECOVERY_PLAN_ARTIFACT,
+    PLAN_SCOPED_POSITION_CLEANUP,
+)
 from .track_b_pre_action_snapshot_validator import (
     DEFAULT_CONTROL_PLANE_SNAPSHOT_ARTIFACT,
     PRE_ACTION_BLOCKED_HARD_INVARIANT,
@@ -1206,6 +1209,27 @@ def build_strategy_managed_submit_authorization(
         expected_shared_truth_generation_id=config.expected_shared_truth_generation_id,
         now=actual_now,
     )
+    if intent_kind is IntentKind.CLOSE and pre_action.get("classification") != PRE_ACTION_SNAPSHOT_VALID:
+        scoped_cleanup_target = _strategy_close_scoped_cleanup_target_identity(
+            config=config,
+            intent_payload=intent_payload,
+        )
+        scoped_cleanup_pre_action = validate_track_b_pre_action_snapshot(
+            config=validator_config,
+            expected_plan_classification=PLAN_SCOPED_POSITION_CLEANUP,
+            expected_action_type="SCOPED_POSITION_CLEANUP",
+            expected_target_identity=scoped_cleanup_target,
+            max_snapshot_age_seconds=int(config.pre_action_snapshot_max_age_seconds),
+            expected_snapshot_id=config.expected_control_plane_snapshot_id,
+            expected_shared_truth_generation_id=config.expected_shared_truth_generation_id,
+            now=actual_now,
+        )
+        if scoped_cleanup_pre_action.get("classification") == PRE_ACTION_SNAPSHOT_VALID:
+            pre_action = {
+                **scoped_cleanup_pre_action,
+                "strategy_managed_close_submit_refines_scoped_cleanup": True,
+                "strategy_managed_close_submit_target_identity": target_identity,
+            }
     snapshot_path = validator_config.resolve(Path(config.control_plane_snapshot_path))
     safe_state_path = _resolve_path(config.repo_root, Path(config.runtime_safe_state_envelope_path))
     snapshot = _read_json_object(snapshot_path)
@@ -1280,6 +1304,12 @@ def _strategy_submit_authorization_blocker(
     safe_state: Mapping[str, Any],
     target_identity: Mapping[str, Any],
 ) -> tuple[str, str]:
+    cleanup_close = (
+        target_identity.get("intent_kind") == IntentKind.CLOSE.value
+        and pre_action.get("expected_plan_classification") == PLAN_SCOPED_POSITION_CLEANUP
+        and pre_action.get("expected_action_type") == "SCOPED_POSITION_CLEANUP"
+        and pre_action.get("classification") == PRE_ACTION_SNAPSHOT_VALID
+    )
     if pre_action.get("classification") == PRE_ACTION_BLOCKED_SNAPSHOT_MISSING:
         return STRATEGY_SUBMIT_BLOCKED_NO_SNAPSHOT, "Control Plane Snapshot authority artifact is missing."
     if pre_action.get("classification") == PRE_ACTION_BLOCKED_TARGET_IDENTITY_MISMATCH:
@@ -1299,7 +1329,7 @@ def _strategy_submit_authorization_blocker(
     safe_classification = str(safe_state.get("safe_state_classification") or safe_state.get("classification") or "")
     if not safe_state:
         return STRATEGY_SUBMIT_BLOCKED_SAFE_STATE, "Runtime Safe-State Envelope authority artifact is missing."
-    if safe_state.get("submit_allowed") is not True:
+    if safe_state.get("submit_allowed") is not True and not cleanup_close:
         return STRATEGY_SUBMIT_BLOCKED_SAFE_STATE, "Runtime Safe-State Envelope does not permit submit."
     if safe_state.get("broker_mutation_allowed") is not True:
         return STRATEGY_SUBMIT_BLOCKED_SAFE_STATE, "Runtime Safe-State Envelope does not permit broker mutation."
@@ -1311,10 +1341,12 @@ def _strategy_submit_authorization_blocker(
     supervisor_submit_allowed = supervisor_classification in {
         "SUPERVISOR_RUNTIME_START_ALLOWED",
         "SUPERVISOR_RUNTIME_ALREADY_HEALTHY",
+        "SUPERVISOR_CLEANUP_REQUIRED_BEFORE_RUNTIME",
     } and (
         pre_action.get("snapshot_safe_to_start_runtime") is True
         or snapshot.get("safe_to_leave_runtime_running") is True
         or safe_state.get("submit_allowed") is True
+        or cleanup_close
     )
     if not supervisor_submit_allowed:
         return (
@@ -1326,14 +1358,18 @@ def _strategy_submit_authorization_blocker(
         return STRATEGY_SUBMIT_BLOCKED_RUNTIME_GENERATION, "runtime_generation_id is required for strategy submit."
     proposed_generation = str(pre_action.get("runtime_resume_proposed_next_runtime_generation_id") or "")
     safe_generation = str(safe_state.get("runtime_generation_id") or "")
-    if proposed_generation and proposed_generation != runtime_generation_id:
+    if proposed_generation and proposed_generation != runtime_generation_id and not cleanup_close:
         return STRATEGY_SUBMIT_BLOCKED_RUNTIME_GENERATION, "Runtime Resume v2 proposed generation does not match submit authorization."
     if safe_generation and safe_generation != runtime_generation_id:
         return STRATEGY_SUBMIT_BLOCKED_RUNTIME_GENERATION, "Safe-State runtime generation does not match submit authorization."
     order_truth_blocker = _order_truth_blocker(snapshot=snapshot, safe_state=safe_state)
     if order_truth_blocker:
         return STRATEGY_SUBMIT_BLOCKED_ORDER_TRUTH, order_truth_blocker
-    position_truth_blocker = _position_truth_blocker(snapshot=snapshot, safe_state=safe_state)
+    position_truth_blocker = _position_truth_blocker(
+        snapshot=snapshot,
+        safe_state=safe_state,
+        allow_review_required_cleanup=cleanup_close,
+    )
     if position_truth_blocker:
         return STRATEGY_SUBMIT_BLOCKED_POSITION_TRUTH, position_truth_blocker
     if not target_identity:
@@ -1370,6 +1406,28 @@ def _strategy_submit_target_identity(
     )
 
 
+def _strategy_close_scoped_cleanup_target_identity(
+    *,
+    config: TrackBStrategyManagedPaperLifecycleConfig,
+    intent_payload: Mapping[str, Any],
+) -> dict[str, str]:
+    side = str(intent_payload.get("side") or config.side or "").upper()
+    if side in {"BUY", "BUY_TO_OPEN"}:
+        side = "LONG"
+    if side in {"SELL", "SELL_TO_OPEN"}:
+        side = "SHORT"
+    return _compact_identity(
+        {
+            "symbol": config.instrument_family,
+            "contract": config.local_symbol,
+            "con_id": config.con_id,
+            "side": side,
+            "quantity": config.quantity,
+            "lifecycle_id": intent_payload.get("lifecycle_id"),
+        }
+    )
+
+
 def _compact_identity(values: Mapping[str, Any]) -> dict[str, str]:
     return {str(key): str(value) for key, value in values.items() if value not in {None, ""}}
 
@@ -1389,7 +1447,12 @@ def _order_truth_blocker(*, snapshot: Mapping[str, Any], safe_state: Mapping[str
     return None
 
 
-def _position_truth_blocker(*, snapshot: Mapping[str, Any], safe_state: Mapping[str, Any]) -> str | None:
+def _position_truth_blocker(
+    *,
+    snapshot: Mapping[str, Any],
+    safe_state: Mapping[str, Any],
+    allow_review_required_cleanup: bool = False,
+) -> str | None:
     text = " ".join(
         str(value or "")
         for value in (
@@ -1399,7 +1462,13 @@ def _position_truth_blocker(*, snapshot: Mapping[str, Any], safe_state: Mapping[
             safe_state.get("managed_position_registry_classification"),
         )
     ).upper()
-    if any(token in text for token in ("SUSPICIOUS", "UNKNOWN", "CONFLICT", "REVIEW_REQUIRED")):
+    tokens = ("SUSPICIOUS", "UNKNOWN", "CONFLICT") if allow_review_required_cleanup else (
+        "SUSPICIOUS",
+        "UNKNOWN",
+        "CONFLICT",
+        "REVIEW_REQUIRED",
+    )
+    if any(token in text for token in tokens):
         return f"Position truth blocks strategy submit: {text.strip()}."
     return None
 
