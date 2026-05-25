@@ -12,10 +12,11 @@ from __future__ import annotations
 import json
 import uuid
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime, time, timedelta
 from enum import Enum
 from pathlib import Path
 from typing import Any, Mapping, Sequence
+from zoneinfo import ZoneInfo
 
 from .models import require_aware_datetime, to_jsonable
 from .track_b_asian_drift_state import (
@@ -27,10 +28,13 @@ from .track_b_asian_drift_state import (
 
 
 DEFAULT_TRACK_B_ASIAN_DRIFT_LIVE_STATE_OUTPUT_ROOT = DEFAULT_TRACK_B_ASIAN_DRIFT_STATE_OUTPUT_ROOT
+NEW_YORK = ZoneInfo("America/New_York")
 
 NO_TRADE = "NO_TRADE"
 ASIA_DRIFT_LONG = "ASIA_DRIFT_LONG"
 ASIA_DRIFT_SHORT = "ASIA_DRIFT_SHORT"
+ASIAN_DRIFT_BLOCKED_MISSING_SESSION_ANCHOR_CONTEXT = "ASIAN_DRIFT_BLOCKED_MISSING_SESSION_ANCHOR_CONTEXT"
+ASIAN_DRIFT_LATE_JOIN_STRONG_DRIFT_OBSERVED = "ASIAN_DRIFT_LATE_JOIN_STRONG_DRIFT_OBSERVED"
 NORMAL_PULLBACK = "NORMAL_PULLBACK"
 STRETCHED_BUT_VALID = "STRETCHED_BUT_VALID"
 TOO_EXTENDED = "TOO_EXTENDED"
@@ -184,9 +188,11 @@ def produce_track_b_asian_drift_live_state(
         latest_state = state_rows[-1]
         latest_row = latest_state["row"]
         quote_evidence = _quote_evidence(runtime_payload, current_quote_report_payload, current_quote_report_json)
+        late_join_diagnostic = _late_join_missing_anchor_diagnostic(rows=sorted_rows, latest_row=latest_row)
         state_payload = {
             **latest_row,
             **quote_evidence,
+            **late_join_diagnostic,
             "account_id": account_id,
             "expected_account_id": expected_account_id,
             "contract_key": contract_key,
@@ -199,7 +205,9 @@ def produce_track_b_asian_drift_live_state(
             "observed_at": actual_now.isoformat(),
             "asia_drift_state": latest_state["state"],
             "asia_drift_regime": _text(latest_row.get("regime")),
-            "hypothetical_entry_ready": _bool(latest_row.get("hypothetical_entry_ready")),
+            "hypothetical_entry_ready": False
+            if late_join_diagnostic.get("late_join_diagnostic") is True
+            else _bool(latest_row.get("hypothetical_entry_ready")),
             "entry_window_open": _bool(latest_row.get("entry_window_open")),
             "in_scope": _bool(latest_row.get("in_scope")),
             "session_timeout": _bool(latest_row.get("session_timeout")) or False,
@@ -214,6 +222,9 @@ def produce_track_b_asian_drift_live_state(
                 "previous_state": latest_state["previous_state"],
                 "pullback_state": latest_row.get("pullback_state"),
                 "dominant_direction": latest_row.get("dominant_direction"),
+                "asian_drift_diagnostic_classification": late_join_diagnostic.get("asian_drift_diagnostic_classification"),
+                "late_join_policy": late_join_diagnostic.get("late_join_policy"),
+                "operator_explanation": late_join_diagnostic.get("operator_explanation"),
                 "track_b_does_not_infer_asian_drift_from_raw_candles": True,
             },
             "submit_allowed": False,
@@ -358,6 +369,77 @@ def _evaluate_states(rows: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
         context_by_session[session_id] = next_context
         states.append(state_row)
     return states
+
+
+def _late_join_missing_anchor_diagnostic(
+    *,
+    rows: Sequence[Mapping[str, Any]],
+    latest_row: Mapping[str, Any],
+) -> dict[str, Any]:
+    first_ts = _timestamp(rows[0]) if rows else _timestamp(latest_row)
+    latest_ts = _timestamp(latest_row)
+    anchor_start, anchor_end = _anchor_window(latest_ts, latest_row)
+    direction, score = _strong_drift_direction(latest_row)
+    missing_anchor = _bool(latest_row.get("anchor_observed")) is not True
+    drift_observed_after_anchor = direction is not None and latest_ts.astimezone(NEW_YORK) > anchor_end
+    diagnostic = (
+        missing_anchor
+        and _bool(latest_row.get("in_scope")) is True
+        and _bool(latest_row.get("entry_window_open")) is True
+        and drift_observed_after_anchor
+    )
+    if not diagnostic:
+        return {}
+    first_local = first_ts.astimezone(NEW_YORK)
+    missing_anchor_reason = (
+        "runtime_context_started_after_anchor_window"
+        if first_local > anchor_end
+        else "anchor_window_not_present_in_runtime_context"
+    )
+    return {
+        "asian_drift_diagnostic_classification": ASIAN_DRIFT_BLOCKED_MISSING_SESSION_ANCHOR_CONTEXT,
+        "late_join_classification": ASIAN_DRIFT_LATE_JOIN_STRONG_DRIFT_OBSERVED,
+        "late_join_diagnostic": True,
+        "anchor_required": True,
+        "anchor_observed": False,
+        "anchor_window_start": anchor_start.isoformat(),
+        "anchor_window_end": anchor_end.isoformat(),
+        "runtime_context_start": first_ts.isoformat(),
+        "missing_anchor_reason": missing_anchor_reason,
+        "drift_observed_after_anchor": True,
+        "late_join_policy": "DIAGNOSTIC_ONLY",
+        "hypothetical_late_join_score": score,
+        "operator_explanation": (
+            "Strong drift observed, but 18:00 ET session anchor context is missing; no signal by design."
+        ),
+        "no_mutation": True,
+        "submit_allowed": False,
+        "submit_attempted": False,
+        "live_money_readiness": False,
+    }
+
+
+def _anchor_window(latest_ts: datetime, row: Mapping[str, Any]) -> tuple[datetime, datetime]:
+    session_date_text = _text(row.get("local_session_date"))
+    if session_date_text:
+        session_date = date.fromisoformat(session_date_text)
+    else:
+        local_ts = latest_ts.astimezone(NEW_YORK)
+        session_date = local_ts.date() if local_ts.timetz().replace(tzinfo=None) >= time(18, 0) else (local_ts - timedelta(days=1)).date()
+    anchor_start = datetime.combine(session_date, time(18, 0), tzinfo=NEW_YORK)
+    return anchor_start, anchor_start + timedelta(minutes=5)
+
+
+def _strong_drift_direction(row: Mapping[str, Any]) -> tuple[str | None, float | None]:
+    long_score = _float(row.get("long_drift_score"))
+    short_score = _float(row.get("short_drift_score"))
+    long_strength = _text(row.get("long_drift_strength"))
+    short_strength = _text(row.get("short_drift_strength"))
+    if (long_strength == "STRONG" or long_score >= 3.1) and long_score - short_score >= 0.75:
+        return "LONG", long_score
+    if (short_strength == "STRONG" or short_score >= 3.1) and short_score - long_score >= 0.75:
+        return "SHORT", short_score
+    return None, max(long_score, short_score) if long_score or short_score else None
 
 
 def _derive_state(
@@ -508,6 +590,7 @@ def _write_live_report(
     required_next_action: str,
 ) -> TrackBAsianDriftLiveStateResult:
     row = latest_state.get("row") if latest_state else {}
+    snapshot = snapshot_writer.snapshot if snapshot_writer is not None and snapshot_writer.snapshot is not None else {}
     report = {
         "schema_version": "track_b_asian_drift_live_state_report_v1",
         "generated_at": now.isoformat(),
@@ -527,6 +610,20 @@ def _write_live_report(
         "entry_window_open": row.get("entry_window_open") if isinstance(row, Mapping) else None,
         "in_scope": row.get("in_scope") if isinstance(row, Mapping) else None,
         "transition_reason": None if latest_state is None else latest_state.get("transition_reason"),
+        "asian_drift_diagnostic_classification": snapshot.get("asian_drift_diagnostic_classification"),
+        "late_join_classification": snapshot.get("late_join_classification"),
+        "late_join_diagnostic": snapshot.get("late_join_diagnostic", False),
+        "anchor_required": snapshot.get("anchor_required"),
+        "anchor_observed": snapshot.get("anchor_observed"),
+        "anchor_window_start": snapshot.get("anchor_window_start"),
+        "anchor_window_end": snapshot.get("anchor_window_end"),
+        "runtime_context_start": snapshot.get("runtime_context_start"),
+        "missing_anchor_reason": snapshot.get("missing_anchor_reason"),
+        "drift_observed_after_anchor": snapshot.get("drift_observed_after_anchor"),
+        "late_join_policy": snapshot.get("late_join_policy"),
+        "hypothetical_late_join_score": snapshot.get("hypothetical_late_join_score"),
+        "operator_explanation": snapshot.get("operator_explanation"),
+        "no_mutation": snapshot.get("no_mutation", True),
         "asian_drift_state_ready": verdict == TrackBAsianDriftLiveStateVerdict.WROTE_SNAPSHOT,
         "asian_drift_state_snapshot_path": None if snapshot_writer is None else snapshot_writer.report.get("asian_drift_state_snapshot_path"),
         "latest_asian_drift_state_snapshot_path": None if snapshot_writer is None else snapshot_writer.report.get("latest_asian_drift_state_snapshot_path"),

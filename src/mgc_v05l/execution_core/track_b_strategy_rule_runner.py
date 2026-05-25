@@ -715,6 +715,7 @@ def _evaluate_asian_drift_v1(
     metadata = event.get("metadata") if isinstance(event.get("metadata") or {}, Mapping) else {}
     state = _first_text(event, metadata, "asia_drift_state", "state")
     regime = _first_text(event, metadata, "asia_drift_regime", "regime")
+    diagnostic_classification = _first_text(event, metadata, "asian_drift_diagnostic_classification")
     direction = _asian_drift_direction(event, metadata, regime)
     entry_ready = _first_bool(event, metadata, "hypothetical_entry_ready")
     entry_window_open = _first_bool(event, metadata, "entry_window_open")
@@ -746,9 +747,14 @@ def _evaluate_asian_drift_v1(
         "calibration_profile_present": "Asian Drift calibration profile is missing.",
     }
     blockers = [blocker_labels.get(name, name) for name in failed]
+    operator_explanation = _first_text(event, metadata, "operator_explanation")
+    if diagnostic_classification == "ASIAN_DRIFT_BLOCKED_MISSING_SESSION_ANCHOR_CONTEXT" and operator_explanation:
+        blockers.append(operator_explanation)
     if direction_required and direction not in {"LONG", "SHORT"} and blocker_labels["direction_is_explicit"] not in blockers:
         blockers.append("Asian Drift direction is not explicit LONG/SHORT.")
-    if failed:
+    if diagnostic_classification == "ASIAN_DRIFT_BLOCKED_MISSING_SESSION_ANCHOR_CONTEXT" and operator_explanation:
+        decision_reason = operator_explanation
+    elif failed:
         decision_reason = "Asian Drift v1 conditions did not pass: " + ", ".join(failed)
     else:
         decision_reason = f"Asian Drift v1 explicit state snapshot is entry-ready for {direction}."
@@ -769,6 +775,20 @@ def _evaluate_asian_drift_v1(
             "calibration_profile": calibration_profile,
             "quote_provider_mode": quote_evidence.get("input_quote_provider_mode"),
         },
+        "asian_drift_diagnostic_classification": diagnostic_classification,
+        "late_join_classification": _first_text(event, metadata, "late_join_classification"),
+        "late_join_diagnostic": _first_bool(event, metadata, "late_join_diagnostic") is True,
+        "anchor_required": _first_bool(event, metadata, "anchor_required"),
+        "anchor_observed": _first_bool(event, metadata, "anchor_observed"),
+        "anchor_window_start": _first_text(event, metadata, "anchor_window_start"),
+        "anchor_window_end": _first_text(event, metadata, "anchor_window_end"),
+        "runtime_context_start": _first_text(event, metadata, "runtime_context_start"),
+        "missing_anchor_reason": _first_text(event, metadata, "missing_anchor_reason"),
+        "drift_observed_after_anchor": _first_bool(event, metadata, "drift_observed_after_anchor"),
+        "late_join_policy": _first_text(event, metadata, "late_join_policy"),
+        "hypothetical_late_join_score": event.get("hypothetical_late_join_score"),
+        "operator_explanation": operator_explanation,
+        "no_mutation": True,
         "rule_conditions": conditions,
         "rule_blockers": blockers,
         "research_lineage": (
@@ -1550,7 +1570,13 @@ def _write_report(
         "rule_mode": rule_mode.value,
         "signal_source": _signal_source(rule_mode),
         "real_strategy_signal": _real_strategy_signal(rule_mode),
-        "asian_drift_watch_verdict": _asian_drift_watch_verdict(rule_mode, verdict, signal_emitted, primary_blocker),
+        "asian_drift_watch_verdict": _asian_drift_watch_verdict(
+            rule_mode,
+            verdict,
+            signal_emitted,
+            primary_blocker,
+            rule_evaluation,
+        ),
         "asia_early_pause_resume_short_watch_verdict": _asia_early_pause_resume_short_watch_verdict(
             rule_mode,
             verdict,
@@ -1640,6 +1666,20 @@ def _write_report(
         "rule_inputs": rule_evaluation.get("rule_inputs") or {},
         "rule_conditions": rule_evaluation.get("rule_conditions") or {},
         "rule_blockers": rule_blockers,
+        "asian_drift_diagnostic_classification": rule_evaluation.get("asian_drift_diagnostic_classification"),
+        "late_join_classification": rule_evaluation.get("late_join_classification"),
+        "late_join_diagnostic": rule_evaluation.get("late_join_diagnostic", False),
+        "anchor_required": rule_evaluation.get("anchor_required"),
+        "anchor_observed": rule_evaluation.get("anchor_observed"),
+        "anchor_window_start": rule_evaluation.get("anchor_window_start"),
+        "anchor_window_end": rule_evaluation.get("anchor_window_end"),
+        "runtime_context_start": rule_evaluation.get("runtime_context_start"),
+        "missing_anchor_reason": rule_evaluation.get("missing_anchor_reason"),
+        "drift_observed_after_anchor": rule_evaluation.get("drift_observed_after_anchor"),
+        "late_join_policy": rule_evaluation.get("late_join_policy"),
+        "hypothetical_late_join_score": rule_evaluation.get("hypothetical_late_join_score"),
+        "operator_explanation": rule_evaluation.get("operator_explanation"),
+        "no_mutation": True,
         "research_lineage": rule_evaluation.get("research_lineage") or "NOT_PROVIDED",
         "source_id": source_id,
         "input_event_path": None if input_event_path is None else str(input_event_path),
@@ -1805,9 +1845,12 @@ def _asian_drift_watch_verdict(
     verdict: TrackBStrategyRuleRunnerVerdict,
     signal_emitted: bool,
     primary_blocker: str | None,
+    rule_evaluation: Mapping[str, Any] | None = None,
 ) -> str | None:
     if rule_mode != TrackBStrategyRuleMode.ASIAN_DRIFT_V1:
         return None
+    if (rule_evaluation or {}).get("asian_drift_diagnostic_classification") == "ASIAN_DRIFT_BLOCKED_MISSING_SESSION_ANCHOR_CONTEXT":
+        return "ASIAN_DRIFT_BLOCKED_MISSING_SESSION_ANCHOR_CONTEXT"
     if primary_blocker or verdict in {
         TrackBStrategyRuleRunnerVerdict.BLOCKED_INVALID_INPUT,
         TrackBStrategyRuleRunnerVerdict.BLOCKED_NON_REALTIME_INPUT,

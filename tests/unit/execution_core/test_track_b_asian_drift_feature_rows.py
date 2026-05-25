@@ -23,8 +23,13 @@ def aware_now() -> datetime:
     return datetime(2026, 5, 5, 1, 15, tzinfo=timezone.utc)
 
 
-def candle_payload(closes: list[float], *, completed: bool = True) -> dict[str, object]:
-    start = datetime(2026, 5, 4, 18, 5, tzinfo=ZoneInfo("America/New_York"))
+def candle_payload(
+    closes: list[float],
+    *,
+    completed: bool = True,
+    start: datetime | None = None,
+) -> dict[str, object]:
+    start = start or datetime(2026, 5, 4, 18, 5, tzinfo=ZoneInfo("America/New_York"))
     candles: list[dict[str, object]] = []
     previous_close = closes[0] if closes else 4575.0
     for index, close in enumerate(closes):
@@ -67,6 +72,10 @@ def flat_closes(count: int) -> list[float]:
 
 def long_signal_closes() -> list[float]:
     return [4575.0, 4576.2, 4577.5, 4578.8, 4580.0, 4581.3, 4582.4, 4583.0, 4583.5, 4582.9]
+
+
+def late_join_strong_drift_closes() -> list[float]:
+    return [4562.9, 4565.0, 4564.6, 4569.9, 4571.2, 4575.3, 4577.4, 4578.7, 4576.2, 4580.3]
 
 
 def test_feature_rows_block_with_zero_completed_rows(tmp_path: Path) -> None:
@@ -241,3 +250,90 @@ def test_valid_signal_fixture_reaches_asian_drift_signal_ready_no_submit(tmp_pat
     assert rule_result.report["submit_attempted"] is False
     assert rule_result.report["broker_state_mutated"] is False
     assert rule_result.report["live_money_readiness"] is False
+
+
+def test_strong_late_join_drift_missing_anchor_is_diagnostic_only(tmp_path: Path) -> None:
+    feature_result = produce_track_b_asian_drift_feature_rows(
+        runtime_5m_payload=candle_payload(
+            late_join_strong_drift_closes(),
+            start=datetime(2026, 5, 4, 18, 45, tzinfo=ZoneInfo("America/New_York")),
+        ),
+        output_root=tmp_path / "asian_drift_state",
+        producer_id="late-join-missing-anchor",
+        now=aware_now(),
+    )
+
+    assert feature_result.live_state_result is not None
+    assert feature_result.live_state_result.snapshot is not None
+    snapshot = feature_result.live_state_result.snapshot
+    assert feature_result.report["asian_drift_watch_verdict"] == "ASIAN_DRIFT_BLOCKED_MISSING_SESSION_ANCHOR_CONTEXT"
+    assert feature_result.report["late_join_diagnostic"] is True
+    assert snapshot["asian_drift_diagnostic_classification"] == "ASIAN_DRIFT_BLOCKED_MISSING_SESSION_ANCHOR_CONTEXT"
+    assert snapshot["late_join_classification"] == "ASIAN_DRIFT_LATE_JOIN_STRONG_DRIFT_OBSERVED"
+    assert snapshot["anchor_required"] is True
+    assert snapshot["anchor_observed"] is False
+    assert snapshot["late_join_policy"] == "DIAGNOSTIC_ONLY"
+    assert snapshot["hypothetical_entry_ready"] is False
+    assert snapshot["submit_allowed"] is False
+    assert snapshot["submit_attempted"] is False
+    assert snapshot["no_mutation"] is True
+    assert "18:00 ET session anchor context is missing" in snapshot["operator_explanation"]
+
+
+def test_weak_late_join_missing_anchor_remains_plain_no_signal(tmp_path: Path) -> None:
+    feature_result = produce_track_b_asian_drift_feature_rows(
+        runtime_5m_payload=candle_payload(
+            flat_closes(10),
+            start=datetime(2026, 5, 4, 18, 45, tzinfo=ZoneInfo("America/New_York")),
+        ),
+        output_root=tmp_path / "asian_drift_state",
+        producer_id="late-join-weak-missing-anchor",
+        now=aware_now(),
+    )
+
+    assert feature_result.live_state_result is not None
+    assert feature_result.live_state_result.snapshot is not None
+    assert feature_result.report["asian_drift_watch_verdict"] == "ASIAN_DRIFT_NO_SIGNAL_NO_MUTATION"
+    assert feature_result.report["late_join_diagnostic"] is False
+    assert feature_result.live_state_result.snapshot.get("asian_drift_diagnostic_classification") is None
+
+
+def test_late_join_diagnostic_rule_runner_preserves_no_submit_authority(tmp_path: Path) -> None:
+    feature_result = produce_track_b_asian_drift_feature_rows(
+        runtime_5m_payload=candle_payload(
+            late_join_strong_drift_closes(),
+            start=datetime(2026, 5, 4, 18, 45, tzinfo=ZoneInfo("America/New_York")),
+        ),
+        output_root=tmp_path / "asian_drift_state",
+        producer_id="late-join-rule",
+        now=aware_now(),
+    )
+    assert feature_result.live_state_result is not None
+    assert feature_result.live_state_result.snapshot is not None
+    assert feature_result.live_state_result.snapshot_json is not None
+
+    rule_result = run_track_b_strategy_rule(
+        input_event_payload=feature_result.live_state_result.snapshot,
+        input_event_path=feature_result.live_state_result.snapshot_json,
+        inbox_dir=tmp_path / "inbox",
+        expected_account_id="DUM882026",
+        source_id="asian_drift_late_join_rule",
+        rule_id="asian_drift_v1",
+        rule_mode="ASIAN_DRIFT_V1",
+        emit_signal=True,
+        output_root=tmp_path / "rule_reports",
+        strategy_adapter_output_root=tmp_path / "adapter_reports",
+        candle_producer_output_root=tmp_path / "candle_reports",
+        writer_output_root=tmp_path / "writer_reports",
+        runner_id="asian-drift-late-join-rule",
+        now=aware_now(),
+    )
+
+    assert rule_result.verdict == TrackBStrategyRuleRunnerVerdict.NO_SIGNAL
+    assert rule_result.report["asian_drift_watch_verdict"] == "ASIAN_DRIFT_BLOCKED_MISSING_SESSION_ANCHOR_CONTEXT"
+    assert rule_result.report["late_join_diagnostic"] is True
+    assert rule_result.report["signal_emitted"] is False
+    assert rule_result.report["submit_allowed"] is False
+    assert rule_result.report["submit_attempted"] is False
+    assert rule_result.report["broker_state_mutated"] is False
+    assert "18:00 ET session anchor context is missing" in rule_result.report["decision_reason"]

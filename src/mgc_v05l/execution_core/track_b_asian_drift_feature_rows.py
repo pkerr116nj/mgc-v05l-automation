@@ -1439,6 +1439,24 @@ def _write_result(
         "latest_asian_drift_state_snapshot_path": None
         if live_state_result is None
         else live_state_result.report.get("latest_asian_drift_state_snapshot_path"),
+        "asian_drift_diagnostic_classification": None
+        if live_state_result is None
+        else live_state_result.report.get("asian_drift_diagnostic_classification"),
+        "late_join_classification": None if live_state_result is None else live_state_result.report.get("late_join_classification"),
+        "late_join_diagnostic": False if live_state_result is None else live_state_result.report.get("late_join_diagnostic", False),
+        "anchor_required": None if live_state_result is None else live_state_result.report.get("anchor_required"),
+        "anchor_observed": None if live_state_result is None else live_state_result.report.get("anchor_observed"),
+        "anchor_window_start": None if live_state_result is None else live_state_result.report.get("anchor_window_start"),
+        "anchor_window_end": None if live_state_result is None else live_state_result.report.get("anchor_window_end"),
+        "runtime_context_start": None if live_state_result is None else live_state_result.report.get("runtime_context_start"),
+        "missing_anchor_reason": None if live_state_result is None else live_state_result.report.get("missing_anchor_reason"),
+        "drift_observed_after_anchor": None if live_state_result is None else live_state_result.report.get("drift_observed_after_anchor"),
+        "late_join_policy": None if live_state_result is None else live_state_result.report.get("late_join_policy"),
+        "hypothetical_late_join_score": None
+        if live_state_result is None
+        else live_state_result.report.get("hypothetical_late_join_score"),
+        "operator_explanation": None if live_state_result is None else live_state_result.report.get("operator_explanation"),
+        "no_mutation": True,
         "primary_blocker": primary_blocker,
         "required_next_action": required_next_action,
         "readiness_invoked": False,

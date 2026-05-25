@@ -181,6 +181,44 @@ def test_live_state_emits_valid_signal_snapshot_and_rule_consumes_it(tmp_path: P
     assert rule_result.report["broker_state_mutated"] is False
 
 
+def test_live_state_labels_strong_missing_anchor_as_late_join_diagnostic(tmp_path: Path) -> None:
+    rows = [feature_row(index, anchor_observed=False) for index in range(7)]
+    rows.append(
+        feature_row(
+            7,
+            anchor_observed=False,
+            dominant_direction="LONG",
+            long_drift_score=4.2,
+            short_drift_score=0.8,
+            long_drift_strength="STRONG",
+            pullback_state="NORMAL_PULLBACK",
+            hypothetical_entry_ready=False,
+            local_session_date="2026-05-04",
+        )
+    )
+    result = produce_track_b_asian_drift_live_state(
+        runtime_payload=runtime_payload(rows),
+        output_root=tmp_path / "asian_drift_state",
+        producer_id="asian-drift-missing-anchor",
+        now=aware_now(),
+    )
+
+    assert result.verdict == TrackBAsianDriftLiveStateVerdict.WROTE_SNAPSHOT
+    assert result.snapshot is not None
+    assert result.snapshot["asia_drift_state"] == "NO_TRADE"
+    assert result.snapshot["asian_drift_diagnostic_classification"] == "ASIAN_DRIFT_BLOCKED_MISSING_SESSION_ANCHOR_CONTEXT"
+    assert result.snapshot["late_join_classification"] == "ASIAN_DRIFT_LATE_JOIN_STRONG_DRIFT_OBSERVED"
+    assert result.snapshot["late_join_diagnostic"] is True
+    assert result.snapshot["anchor_required"] is True
+    assert result.snapshot["anchor_observed"] is False
+    assert result.snapshot["late_join_policy"] == "DIAGNOSTIC_ONLY"
+    assert result.snapshot["hypothetical_entry_ready"] is False
+    assert result.snapshot["submit_allowed"] is False
+    assert result.snapshot["submit_attempted"] is False
+    assert result.report["asian_drift_watch_verdict"] == "ASIAN_DRIFT_BLOCKED_MISSING_SESSION_ANCHOR_CONTEXT"
+    assert "18:00 ET session anchor context is missing" in result.report["operator_explanation"]
+
+
 def test_live_state_blocks_raw_candles_without_asian_drift_features(tmp_path: Path) -> None:
     candles = [
         {

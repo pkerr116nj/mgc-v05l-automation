@@ -426,7 +426,11 @@ def _report(
         "generated_at": now.isoformat(),
         "asian_drift_watch_chain_id": chain_id,
         "asian_drift_watch_chain_verdict": verdict.value,
-        "asian_drift_watch_verdict": verdict.value,
+        "asian_drift_watch_verdict": (
+            rule_report.get("asian_drift_watch_verdict")
+            or live_report.get("asian_drift_watch_verdict")
+            or verdict.value
+        ),
         "source_id": source_id,
         "source_payload_path": None if source_payload_path is None else str(source_payload_path),
         "current_quote_report_json": None if current_quote_report_json is None else str(current_quote_report_json),
@@ -440,6 +444,27 @@ def _report(
         "asian_drift_state_ready": live_report.get("asian_drift_state_ready", False),
         "asian_drift_state_snapshot_path": live_report.get("latest_asian_drift_state_snapshot_path"),
         "live_state_verdict": live_report.get("asian_drift_live_state_verdict"),
+        "asian_drift_diagnostic_classification": (
+            rule_report.get("asian_drift_diagnostic_classification")
+            or live_report.get("asian_drift_diagnostic_classification")
+        ),
+        "late_join_classification": rule_report.get("late_join_classification") or live_report.get("late_join_classification"),
+        "late_join_diagnostic": rule_report.get("late_join_diagnostic", live_report.get("late_join_diagnostic", False)),
+        "anchor_required": rule_report.get("anchor_required", live_report.get("anchor_required")),
+        "anchor_observed": rule_report.get("anchor_observed", live_report.get("anchor_observed")),
+        "anchor_window_start": rule_report.get("anchor_window_start") or live_report.get("anchor_window_start"),
+        "anchor_window_end": rule_report.get("anchor_window_end") or live_report.get("anchor_window_end"),
+        "runtime_context_start": rule_report.get("runtime_context_start") or live_report.get("runtime_context_start"),
+        "missing_anchor_reason": rule_report.get("missing_anchor_reason") or live_report.get("missing_anchor_reason"),
+        "drift_observed_after_anchor": rule_report.get(
+            "drift_observed_after_anchor",
+            live_report.get("drift_observed_after_anchor"),
+        ),
+        "late_join_policy": rule_report.get("late_join_policy") or live_report.get("late_join_policy"),
+        "hypothetical_late_join_score": rule_report.get("hypothetical_late_join_score")
+        or live_report.get("hypothetical_late_join_score"),
+        "operator_explanation": rule_report.get("operator_explanation") or live_report.get("operator_explanation"),
+        "no_mutation": True,
         "rule_evaluated": rule_result is not None,
         "rule_decision": rule_report.get("rule_decision") or rule_report.get("decision"),
         "signal_emitted": rule_report.get("signal_emitted", False),

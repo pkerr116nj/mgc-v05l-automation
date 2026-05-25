@@ -220,12 +220,15 @@ def _write_report(
     latest_report_json = output_root / "latest_asian_drift_state_builder_report.json"
     latest_snapshot_json = output_root / "latest_asian_drift_5m_state_snapshot.json"
     wrote_snapshot = snapshot is not None and verdict == TrackBAsianDriftStateVerdict.WROTE_SNAPSHOT
+    watch_verdict = "ASIAN_DRIFT_NOT_READY_FOR_TONIGHT"
+    if wrote_snapshot:
+        watch_verdict = str(snapshot.get("asian_drift_diagnostic_classification") or "ASIAN_DRIFT_NO_SIGNAL_NO_MUTATION")
     report = {
         "schema_version": "track_b_asian_drift_state_builder_report_v1",
         "generated_at": now.isoformat(),
         "asian_drift_state_builder_id": builder_id,
         "asian_drift_state_builder_verdict": verdict.value,
-        "asian_drift_watch_verdict": "ASIAN_DRIFT_NO_SIGNAL_NO_MUTATION" if wrote_snapshot else "ASIAN_DRIFT_NOT_READY_FOR_TONIGHT",
+        "asian_drift_watch_verdict": watch_verdict,
         "source_id": source_id,
         "source_payload_path": None if source_payload_path is None else str(source_payload_path),
         "strategy_id": None if snapshot is None else snapshot.get("strategy_id"),
@@ -238,6 +241,20 @@ def _write_report(
         "hypothetical_entry_ready": None if snapshot is None else snapshot.get("hypothetical_entry_ready"),
         "entry_window_open": None if snapshot is None else snapshot.get("entry_window_open"),
         "in_scope": None if snapshot is None else snapshot.get("in_scope"),
+        "asian_drift_diagnostic_classification": None if snapshot is None else snapshot.get("asian_drift_diagnostic_classification"),
+        "late_join_classification": None if snapshot is None else snapshot.get("late_join_classification"),
+        "late_join_diagnostic": False if snapshot is None else snapshot.get("late_join_diagnostic", False),
+        "anchor_required": None if snapshot is None else snapshot.get("anchor_required"),
+        "anchor_observed": None if snapshot is None else snapshot.get("anchor_observed"),
+        "anchor_window_start": None if snapshot is None else snapshot.get("anchor_window_start"),
+        "anchor_window_end": None if snapshot is None else snapshot.get("anchor_window_end"),
+        "runtime_context_start": None if snapshot is None else snapshot.get("runtime_context_start"),
+        "missing_anchor_reason": None if snapshot is None else snapshot.get("missing_anchor_reason"),
+        "drift_observed_after_anchor": None if snapshot is None else snapshot.get("drift_observed_after_anchor"),
+        "late_join_policy": None if snapshot is None else snapshot.get("late_join_policy"),
+        "hypothetical_late_join_score": None if snapshot is None else snapshot.get("hypothetical_late_join_score"),
+        "operator_explanation": None if snapshot is None else snapshot.get("operator_explanation"),
+        "no_mutation": True,
         "primary_blocker": primary_blocker,
         "required_next_action": required_next_action,
         "readiness_invoked": False,

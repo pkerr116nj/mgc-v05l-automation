@@ -621,6 +621,14 @@ def _strategy_summary(report: Mapping[str, object]) -> dict[str, object]:
         "rule_conditions": report.get("rule_conditions") or {},
         "rule_blockers": report.get("rule_blockers") or [],
         "rule_inputs": report.get("rule_inputs") or {},
+        "asian_drift_diagnostic_classification": report.get("asian_drift_diagnostic_classification"),
+        "late_join_classification": report.get("late_join_classification"),
+        "late_join_diagnostic": report.get("late_join_diagnostic", False),
+        "anchor_required": report.get("anchor_required"),
+        "anchor_observed": report.get("anchor_observed"),
+        "missing_anchor_reason": report.get("missing_anchor_reason"),
+        "late_join_policy": report.get("late_join_policy"),
+        "operator_explanation": report.get("operator_explanation"),
     }
 
 
