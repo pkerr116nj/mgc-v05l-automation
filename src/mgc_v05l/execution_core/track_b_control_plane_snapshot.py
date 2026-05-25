@@ -502,6 +502,13 @@ def _snapshot_payload(
         "autonomous_recovery_next_action": runtime_supervisor.get("autonomous_recovery_next_action"),
         "autonomous_recovery_execution_enabled": False,
         "broker_order_position_summary": _broker_order_position_summary(shared_truth, runtime_supervisor),
+        "broker_position_guardian_classification": _mapping(shared_truth.get("classifications")).get(
+            "Broker Position Guardian"
+        ),
+        "broker_position_guardian_blocks_submit": _mapping(shared_truth.get("classifications")).get(
+            "Broker Position Guardian"
+        )
+        == "BROKER_POSITION_GUARDIAN_HARD_HOLD",
         "blockers": blockers,
         "warnings": warnings,
         "source_artifact_paths": {
@@ -802,6 +809,7 @@ def _broker_order_position_summary(
         or evidence.get("managed_position_registry_classification"),
         "reconciliation": classifications.get("Reconciliation") or evidence.get("reconciliation_classification"),
         "broker_truth_lease": classifications.get("Broker Truth Lease") or evidence.get("broker_lease_classification"),
+        "broker_position_guardian": classifications.get("Broker Position Guardian"),
     }
 
 

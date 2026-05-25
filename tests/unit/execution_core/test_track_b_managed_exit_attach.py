@@ -79,6 +79,37 @@ def test_blocked_on_duplicate_close_order(tmp_path: Path) -> None:
     assert payload["duplicate_close_order_detected"] is True
 
 
+def test_blocked_when_lifecycle_already_has_prior_close_submit(tmp_path: Path) -> None:
+    config = _seed(
+        tmp_path,
+        completed_bars=3,
+        config_overrides={"apply": True, "operator_authorized_managed_exit": True},
+    )
+    lifecycle_path = (
+        tmp_path
+        / "outputs/track_b_execution_core/track_b_strategy_managed_paper_lifecycle"
+        / config.lifecycle_id
+        / "track_b_strategy_managed_paper_lifecycle_report.json"
+    )
+    lifecycle = json.loads(lifecycle_path.read_text(encoding="utf-8"))
+    lifecycle["close_submit_attempt"] = {
+        "broker_order_id": "36",
+        "broker_state_mutated": True,
+        "submit_attempted": True,
+        "submitted": False,
+    }
+    _write_json(lifecycle_path, lifecycle)
+
+    payload = build_track_b_managed_exit_attach_plan(config=config, now=NOW)
+
+    assert payload["classification"] == MANAGED_EXIT_BLOCKED_DUPLICATE_CLOSE_ORDER
+    assert payload["apply_enabled"] is False
+    assert payload["submit_attempted"] is False
+    assert payload["broker_state_mutated"] is False
+    assert payload["duplicate_close_order_detected"] is True
+    assert "broker order 36" in payload["prior_lifecycle_close_submit_blocker"]
+
+
 def test_previous_attach_guard_review_state_can_retry_when_broker_identity_matches(tmp_path: Path) -> None:
     config = _seed(tmp_path, completed_bars=3)
     lifecycle_path = (

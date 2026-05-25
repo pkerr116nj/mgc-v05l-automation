@@ -21,6 +21,13 @@ from .track_b_broker_truth_lease import (
     classify_broker_truth_lease,
     write_broker_truth_lease,
 )
+from .track_b_broker_position_guardian import (
+    BROKER_POSITION_GUARDIAN_READY,
+    DEFAULT_BROKER_POSITION_GUARDIAN_ARTIFACT,
+    TrackBBrokerPositionGuardianConfig,
+    build_track_b_broker_position_guardian,
+    write_track_b_broker_position_guardian,
+)
 from .track_b_managed_order_registry import (
     ACTIVE_HOLD_MANAGED_TIMED_EXIT_PENDING,
     NO_MANAGED_ORDERS,
@@ -85,6 +92,7 @@ RUNTIME_START_REQUIRED_CLASSIFICATIONS = {
     "Managed Position Registry": {NO_MANAGED_POSITIONS},
     "Reconciliation": {"TRACK_B_PAPER_BROKER_RECONCILED"},
     "Broker Truth Lease": {"ACTIVE", "ACTIVE_DEGRADED_REFRESH_FAILING"},
+    "Broker Position Guardian": {BROKER_POSITION_GUARDIAN_READY},
 }
 
 
@@ -99,6 +107,7 @@ class TrackBSharedTruthRefreshConfig:
     trade_summary_path: Path = DEFAULT_TRADE_SUMMARY
     broker_lease_path: Path = DEFAULT_LEASE_ARTIFACT
     broker_lease_history_path: Path | None = DEFAULT_LEASE_HISTORY
+    broker_position_guardian_path: Path = DEFAULT_BROKER_POSITION_GUARDIAN_ARTIFACT
     shared_truth_refresh_path: Path = DEFAULT_SHARED_TRUTH_REFRESH_ARTIFACT
     broker_lease_max_entry_age_seconds: float = 300.0
     broker_lease_max_exit_age_seconds: float = 900.0
@@ -189,6 +198,25 @@ def refresh_track_b_shared_truth(
     )
 
     reconciliation = _read_json(config.resolve(DEFAULT_RECONCILIATION_ARTIFACT))
+    broker_position_guardian_config = TrackBBrokerPositionGuardianConfig(
+        repo_root=config.repo_root,
+        output_path=config.broker_position_guardian_path,
+    )
+    broker_position_guardian = build_track_b_broker_position_guardian(
+        config=broker_position_guardian_config,
+        now=actual_now,
+        input_overrides={
+            "open_order_truth": open_order_truth,
+            "managed_order_registry": managed_order_registry,
+            "position_truth": position_truth,
+            "managed_position_registry": managed_position_registry,
+            "reconciliation": reconciliation,
+        },
+    )
+    broker_position_guardian_path = write_track_b_broker_position_guardian(
+        config=broker_position_guardian_config,
+        payload=broker_position_guardian,
+    )
     broker_lease = _refresh_broker_lease(config=config, reconciliation=reconciliation, now=actual_now)
     recovery_budget_ledger, recovery_budget_ledger_path = _refresh_recovery_budget_ledger(
         repo_root=config.repo_root,
@@ -210,6 +238,7 @@ def refresh_track_b_shared_truth(
         _service_row("Managed Position Registry", managed_position_registry, managed_position_path),
         _reconciliation_row(config=config, reconciliation=reconciliation),
         _broker_lease_row(config=config, broker_lease=broker_lease),
+        _service_row("Broker Position Guardian", broker_position_guardian, broker_position_guardian_path),
         _recovery_budget_ledger_row(payload=recovery_budget_ledger, artifact_path=recovery_budget_ledger_path),
         _paper_recovery_policy_row(payload=paper_recovery_policy, artifact_path=paper_recovery_policy_path),
         _autonomous_recovery_plan_row(payload=autonomous_recovery_plan, artifact_path=autonomous_recovery_plan_path),
@@ -222,6 +251,7 @@ def refresh_track_b_shared_truth(
         "managed_position_registry": managed_position_registry,
         "reconciliation": reconciliation,
         "broker_lease": broker_lease,
+        "broker_position_guardian": broker_position_guardian,
         "recovery_budget_ledger": recovery_budget_ledger,
         "paper_recovery_policy": paper_recovery_policy,
         "autonomous_recovery_plan": autonomous_recovery_plan,
@@ -234,6 +264,7 @@ def refresh_track_b_shared_truth(
         managed_position_registry=managed_position_registry,
         reconciliation=reconciliation,
         broker_lease=broker_lease,
+        broker_position_guardian=broker_position_guardian,
     )
     exit_code = 2 if blockers else 0
     result = {
@@ -625,6 +656,7 @@ def _unsafe_blockers(
     managed_position_registry: Mapping[str, Any],
     reconciliation: Mapping[str, Any],
     broker_lease: Mapping[str, Any],
+    broker_position_guardian: Mapping[str, Any],
 ) -> list[dict[str, str]]:
     blockers: list[dict[str, str]] = []
     position_class = str(_mapping(position_truth.get("summary")).get("overall_classification") or "")
@@ -634,6 +666,7 @@ def _unsafe_blockers(
     open_order_class = str(open_order_truth.get("classification") or "")
     reconciliation_class = str(reconciliation.get("classification") or "")
     lease_state = str(broker_lease.get("lease_state") or "")
+    guardian_class = str(broker_position_guardian.get("classification") or "")
     active_hold = _managed_active_hold_pending(
         open_order_class=open_order_class,
         managed_order_class=managed_order_class,
@@ -666,6 +699,14 @@ def _unsafe_blockers(
         blockers.append({"code": "broker_lease_invalidated", "detail": f"Broker Truth Lease is {lease_state}."})
     if lease_state == "OPERATOR_REQUIRED" and position_class != "CLEAN_FLAT_READY":
         blockers.append({"code": "broker_lease_operator_required", "detail": "Broker Truth Lease requires operator attention."})
+    if guardian_class and guardian_class != BROKER_POSITION_GUARDIAN_READY:
+        hard = ", ".join(str(item) for item in broker_position_guardian.get("hard_classifications") or [])
+        blockers.append(
+            {
+                "code": "broker_position_guardian_hard_hold",
+                "detail": f"Broker Position Guardian is {guardian_class}: {hard or 'hard hold'}.",
+            }
+        )
     return blockers
 
 

@@ -182,7 +182,11 @@ def fake_stages(*, close: bool = False) -> TrackBStrategyManagedPaperLifecycleSt
         open_state: Mapping[str, Any],
     ) -> Mapping[str, Any] | None:
         time_boxed_ready = (
-            config.managed_exit_policy_id == TrackBManagedExitPolicy.PAPER_DIAGNOSTIC_TIME_BOXED_3X5M_EXIT_V1.value
+            config.managed_exit_policy_id
+            in {
+                TrackBManagedExitPolicy.PAPER_DIAGNOSTIC_TIME_BOXED_3X5M_EXIT_V1.value,
+                TrackBManagedExitPolicy.FORCED_SESSION_SEGMENT_LOCAL_EXIT_V1.value,
+            }
             and int(config.completed_5m_bars_since_entry or 0) >= int(config.managed_exit_policy_max_completed_5m_bars)
         )
         if not close and not time_boxed_ready:
@@ -193,6 +197,7 @@ def fake_stages(*, close: bool = False) -> TrackBStrategyManagedPaperLifecycleSt
             "close_limit_price": "4705.1",
             "exit_family": "DIAGNOSTIC_TIME",
             "close_reason": "TIME_BOXED_EXIT" if time_boxed_ready else "DIAGNOSTIC_TIME_EXIT_IMMEDIATE",
+            "managed_exit_policy_id": config.managed_exit_policy_id,
             "hard_exit": False,
             "discretionary_exit": True,
             "elapsed_completed_5m_bars": config.completed_5m_bars_since_entry,
@@ -396,6 +401,42 @@ def test_submit_enabled_blocks_by_safe_state_observe_only(tmp_path: Path, monkey
     attempt = result.report["entry_submit_attempt"]
     assert attempt["classification"] == lifecycle_module.STRATEGY_SUBMIT_BLOCKED_SAFE_STATE
     assert attempt["strategy_submit_authorization"]["safe_state_classification"] == "SAFE_STATE_OBSERVE_ONLY"
+    assert attempt["broker_state_mutated"] is False
+
+
+def test_submit_enabled_blocks_by_broker_position_guardian_hard_hold(tmp_path: Path, monkeypatch) -> None:
+    class MustNotInstantiateAdapter:
+        def __init__(self, **_kwargs: Any) -> None:
+            raise AssertionError("guardian hard hold must block before adapter construction")
+
+    config = base_config(
+        tmp_path,
+        managed_exit_policy_id=TrackBManagedExitPolicy.MANAGED_HOLD_REQUIRES_EXTERNAL_EXIT_SIGNAL.value,
+        submit_enabled=True,
+    )
+    intent = lifecycle_module._entry_intent(config=config, lifecycle_id="guardian-hard-hold", now=aware_now())
+    seed_strategy_submit_authority(
+        tmp_path,
+        config=config,
+        intent_payload=intent,
+        intent_kind=IntentKind.OPEN,
+        limit_price="4704.6",
+        snapshot_overrides={
+            "broker_position_guardian_classification": "BROKER_POSITION_GUARDIAN_HARD_HOLD",
+            "broker_position_guardian_blocks_submit": True,
+        },
+    )
+    monkeypatch.setattr(lifecycle_module, "IbkrPaperAdapter", MustNotInstantiateAdapter)
+
+    result = run_track_b_strategy_managed_paper_lifecycle(
+        config=config,
+        lifecycle_id="guardian-hard-hold",
+        now=aware_now(),
+    )
+
+    attempt = result.report["entry_submit_attempt"]
+    assert attempt["classification"] == lifecycle_module.STRATEGY_SUBMIT_BLOCKED_POSITION_TRUTH
+    assert "Broker Position Guardian hard hold" in attempt["primary_blocker"]
     assert attempt["broker_state_mutated"] is False
 
 
@@ -639,6 +680,40 @@ def test_direct_bridge_writer_refuses_open_managed_without_broker_fill_identity(
 
     assert report_path is None
     assert not list((tmp_path / "managed").glob("**/track_b_strategy_managed_paper_lifecycle_report.json"))
+
+
+def test_direct_bridge_writer_preserves_lane_and_runtime_generation(tmp_path: Path) -> None:
+    report_path = write_open_managed_lifecycle_report_from_filled_bridge_result(
+        filled_bridge_result={
+            "order_intent_id": "MGC|1m|2026-05-22T01:39:00Z|BUY_TO_OPEN",
+            "intent_type": "BUY_TO_OPEN",
+            "lane_id": "mgc_1x_all_lanes__asia_early_long",
+            "strategy_id": "gc_mgc_forced_session_baseline_v2__mgc_1x_all_lanes__asia_early_long",
+            "runtime_generation_id": "track-b-paper-runtime-generation-20260525T101253Z",
+            "instrument": "MGC",
+            "symbol": "MGC",
+            "contract_key": "MGC-202606",
+            "local_symbol": "MGCM6",
+            "con_id": 712565978,
+            "quantity": 1,
+            "managed_exit_policy_id": TrackBManagedExitPolicy.PAPER_DIAGNOSTIC_TIME_BOXED_3X5M_EXIT_V1.value,
+            "broker_order_id": "31",
+            "perm_id": "123",
+            "fill_price": "4572.897",
+            "fill_timestamp": aware_now().isoformat(),
+            "paper_proof_invoked": False,
+            "live_money_readiness": False,
+        },
+        output_root=tmp_path / "managed",
+        now=aware_now(),
+    )
+
+    assert report_path is not None
+    report = json.loads(report_path.read_text(encoding="utf-8"))
+    assert report["lane_id"] == "mgc_1x_all_lanes__asia_early_long"
+    assert report["runtime_generation_id"] == "track-b-paper-runtime-generation-20260525T101253Z"
+    assert report["entry_intent"]["lane_id"] == "mgc_1x_all_lanes__asia_early_long"
+    assert report["open_state"]["runtime_generation_id"] == "track-b-paper-runtime-generation-20260525T101253Z"
 
 
 def test_exit_policy_generates_close_and_closed_flat(tmp_path: Path) -> None:
@@ -889,6 +964,26 @@ def test_time_boxed_exit_policy_creates_close_intent_after_required_completed_ba
     assert result.report["close_intent"]["discretionary_exit"] is True
 
 
+def test_forced_session_segment_exit_policy_uses_time_boxed_close(tmp_path: Path) -> None:
+    result = run_track_b_strategy_managed_paper_lifecycle(
+        config=base_config(
+            tmp_path,
+            managed_exit_policy_id=TrackBManagedExitPolicy.FORCED_SESSION_SEGMENT_LOCAL_EXIT_V1.value,
+            completed_5m_bars_since_entry=3,
+        ),
+        stages=fake_stages(),
+        lifecycle_id="forced-session-time-boxed-close",
+        now=aware_now(),
+    )
+
+    assert result.classification == TrackBManagedPaperLifecycleClassification.CLOSED_FLAT
+    assert result.report["managed_exit_policy_id"] == "FORCED_SESSION_SEGMENT_LOCAL_EXIT_V1"
+    assert result.report["expected_exit_condition"] == "TIME_BOXED_EXIT_AFTER_3_COMPLETED_5M_BARS"
+    assert result.report["close_intent"]["close_reason"] == "TIME_BOXED_EXIT"
+    assert result.report["close_intent"]["managed_exit_policy_id"] == "FORCED_SESSION_SEGMENT_LOCAL_EXIT_V1"
+    assert result.report["broker_state_mutated"] is True
+
+
 def test_degraded_stale_data_blocks_new_entries_before_exit_panic(tmp_path: Path) -> None:
     result = run_track_b_strategy_managed_paper_lifecycle(
         config=base_config(
@@ -1072,6 +1167,102 @@ def test_maintenance_blocks_duplicate_working_close_order_before_submit(tmp_path
     assert result.report["primary_blocker"] == (
         "Existing working close order for exact contract/action/quantity blocks duplicate managed PAPER close submit."
     )
+
+
+def test_maintenance_blocks_prior_lifecycle_close_submit_before_second_submit(tmp_path: Path) -> None:
+    def close_submitter(
+        _config: TrackBStrategyManagedPaperLifecycleConfig,
+        _close_intent: Mapping[str, Any],
+    ) -> Mapping[str, Any]:
+        raise AssertionError("prior lifecycle close submit must block duplicate broker submit")
+
+    stages = TrackBStrategyManagedPaperLifecycleStages(
+        entry_submitter=fake_stages().entry_submitter,
+        exit_policy=fake_stages(close=True).exit_policy,
+        close_submitter=close_submitter,
+    )
+    report = open_managed_report()
+    report["close_submit_attempt"] = {
+        "broker_order_id": "36",
+        "broker_state_mutated": True,
+        "submit_attempted": True,
+        "submitted": False,
+        "primary_blocker": "missing execDetails callback",
+    }
+
+    result = maintain_open_track_b_strategy_managed_paper_lifecycle(
+        config=base_config(
+            tmp_path,
+            strategy_id="MNQ_FIRST_BULL_SNAP_TURN_V1",
+            instrument_family="MNQ",
+            contract_key="MNQ-202606",
+            local_symbol="MNQM6",
+            con_id=770561201,
+            side="LONG",
+            close_limit_price="28728.5",
+            managed_exit_policy_id=TrackBManagedExitPolicy.PAPER_DIAGNOSTIC_TIME_BOXED_3X5M_EXIT_V1.value,
+            completed_5m_bars_since_entry=3,
+            submit_enabled=True,
+        ),
+        existing_lifecycle_report=report,
+        stages=stages,
+        now=aware_now(),
+    )
+
+    close_attempt = result.report["close_submit_attempt"]
+    assert result.classification == TrackBManagedPaperLifecycleClassification.OPEN_MANAGED
+    assert close_attempt["classification"] == CLOSE_ORDER_ALREADY_WORKING
+    assert close_attempt["broker_order_id"] == "36"
+    assert close_attempt["submitted"] is False
+    assert close_attempt["broker_state_mutated"] is False
+    assert "Existing managed close submit" in close_attempt["primary_blocker"]
+
+
+def test_maintenance_blocks_prior_lifecycle_close_fill_before_second_submit(tmp_path: Path) -> None:
+    def close_submitter(
+        _config: TrackBStrategyManagedPaperLifecycleConfig,
+        _close_intent: Mapping[str, Any],
+    ) -> Mapping[str, Any]:
+        raise AssertionError("prior lifecycle close fill must block duplicate broker submit")
+
+    stages = TrackBStrategyManagedPaperLifecycleStages(
+        entry_submitter=fake_stages().entry_submitter,
+        exit_policy=fake_stages(close=True).exit_policy,
+        close_submitter=close_submitter,
+    )
+    report = open_managed_report()
+    report["close_fill"] = {
+        "broker_order_id": "36",
+        "execution_id": "exec-close-36",
+        "price": "29978",
+        "quantity": "1",
+        "filled_at": "2026-05-25T11:53:55+00:00",
+    }
+
+    result = maintain_open_track_b_strategy_managed_paper_lifecycle(
+        config=base_config(
+            tmp_path,
+            strategy_id="MNQ_FIRST_BULL_SNAP_TURN_V1",
+            instrument_family="MNQ",
+            contract_key="MNQ-202606",
+            local_symbol="MNQM6",
+            con_id=770561201,
+            side="LONG",
+            close_limit_price="28728.5",
+            managed_exit_policy_id=TrackBManagedExitPolicy.PAPER_DIAGNOSTIC_TIME_BOXED_3X5M_EXIT_V1.value,
+            completed_5m_bars_since_entry=3,
+            submit_enabled=True,
+        ),
+        existing_lifecycle_report=report,
+        stages=stages,
+        now=aware_now(),
+    )
+
+    close_attempt = result.report["close_submit_attempt"]
+    assert result.classification == TrackBManagedPaperLifecycleClassification.CLOSED_FLAT
+    assert close_attempt["classification"] == CLOSE_ORDER_ALREADY_WORKING
+    assert close_attempt["existing_close_fill"]["broker_order_id"] == "36"
+    assert close_attempt["broker_state_mutated"] is False
 
 
 def test_maintenance_blocks_duplicate_close_using_open_order_truth(tmp_path: Path, monkeypatch) -> None:

@@ -189,6 +189,7 @@ def build_track_b_managed_exit_attach_plan(
         managed_exit_policy_id=managed_exit_policy_id,
     )
     duplicate_close = _duplicate_close_order(config=config, managed_orders=managed_orders, open_order_truth=open_order_truth, close_action=close_action)
+    prior_lifecycle_close = _prior_lifecycle_close_submit_blocker(lifecycle_report)
 
     if not control_plane_ok:
         blockers.append(control_plane_reason)
@@ -199,8 +200,8 @@ def build_track_b_managed_exit_attach_plan(
     elif not position_ok or not lifecycle_ok:
         blockers.extend(reason for reason in (position_reason, lifecycle_reason) if reason)
         classification = MANAGED_EXIT_BLOCKED_POSITION_MISMATCH
-    elif duplicate_close:
-        blockers.append(duplicate_close)
+    elif duplicate_close or prior_lifecycle_close:
+        blockers.append(duplicate_close or prior_lifecycle_close or "Existing managed close state blocks duplicate attach.")
         classification = MANAGED_EXIT_BLOCKED_DUPLICATE_CLOSE_ORDER
     elif completed_bar_count < required_completed_5m_bars:
         classification = MANAGED_EXIT_NOT_YET_ELIGIBLE
@@ -268,7 +269,8 @@ def build_track_b_managed_exit_attach_plan(
         ),
         "position_identity_verified": position_ok,
         "lifecycle_identity_verified": lifecycle_ok,
-        "duplicate_close_order_detected": bool(duplicate_close),
+        "duplicate_close_order_detected": bool(duplicate_close or prior_lifecycle_close),
+        "prior_lifecycle_close_submit_blocker": prior_lifecycle_close,
         "managed_exit_policy_id": managed_exit_policy_id,
         "exit_profile": exit_profile.to_json_dict(),
         "exit_strategy_id": exit_profile.exit_strategy_id,
@@ -701,6 +703,24 @@ def _retryable_unmutated_close_review(
         and _decimal(close_intent.get("quantity")) == Decimal(str(config.quantity))
         and str(close_intent.get("managed_exit_policy_id") or "") == managed_exit_policy_id
     )
+
+
+def _prior_lifecycle_close_submit_blocker(lifecycle_report: Mapping[str, Any]) -> str | None:
+    close_fill = lifecycle_report.get("close_fill") if isinstance(lifecycle_report.get("close_fill"), Mapping) else {}
+    if close_fill:
+        return "Lifecycle already records a managed close fill; duplicate managed-exit attach is blocked."
+    close_submit = (
+        lifecycle_report.get("close_submit_attempt")
+        if isinstance(lifecycle_report.get("close_submit_attempt"), Mapping)
+        else {}
+    )
+    broker_order_id = str(close_submit.get("broker_order_id") or "").strip()
+    if broker_order_id and close_submit.get("broker_state_mutated") is True:
+        return (
+            "Lifecycle already records managed close broker order "
+            f"{broker_order_id}; duplicate managed-exit attach is blocked until broker/order truth converges."
+        )
+    return None
 
 
 def _duplicate_close_order(

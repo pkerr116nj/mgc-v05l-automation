@@ -374,11 +374,35 @@ def maintain_open_track_b_strategy_managed_paper_lifecycle(
             if close_intent is None:
                 classification = TrackBManagedPaperLifecycleClassification.OPEN_MANAGED
             else:
-                close_submit = dict(actual_stages.close_submitter(config, close_intent))
-                submit_attempted = submit_attempted or bool(close_submit.get("submitted") or close_submit.get("submit_attempted"))
-                broker_state_mutated = bool(close_submit.get("broker_state_mutated"))
+                existing_close_submit = _prior_close_submit_attempt_guard(
+                    existing_lifecycle_report=existing_lifecycle_report,
+                    close_intent=close_intent,
+                )
+                if existing_close_submit:
+                    close_submit = existing_close_submit
+                    submit_attempted = submit_attempted or bool(close_submit.get("submit_attempted"))
+                    broker_state_mutated = False
+                else:
+                    close_submit = dict(actual_stages.close_submitter(config, close_intent))
+                    submit_attempted = submit_attempted or bool(close_submit.get("submitted") or close_submit.get("submit_attempted"))
+                    broker_state_mutated = bool(close_submit.get("broker_state_mutated"))
                 close_fill = _mapping(close_submit.get("close_fill") or close_submit.get("fill"))
-                if close_submit.get("review_required") is True and _close_submit_has_working_broker_order(close_submit):
+                if (
+                    close_submit.get("idempotency_guard_source") == "prior_lifecycle_close_submit"
+                    and close_submit.get("classification") == CLOSE_ORDER_ALREADY_WORKING
+                    and close_submit.get("existing_close_fill")
+                ):
+                    classification = TrackBManagedPaperLifecycleClassification.CLOSED_FLAT
+                    primary_blocker = None
+                    required_next_action = "Existing managed close fill is already recorded; do not submit another close."
+                elif (
+                    close_submit.get("idempotency_guard_source") == "prior_lifecycle_close_submit"
+                    and close_submit.get("classification") == CLOSE_ORDER_ALREADY_WORKING
+                ):
+                    classification = TrackBManagedPaperLifecycleClassification.OPEN_MANAGED
+                    primary_blocker = str(close_submit.get("primary_blocker") or "")
+                    required_next_action = "Existing managed close submit is fill-pending/working; do not submit another close."
+                elif close_submit.get("review_required") is True and _close_submit_has_working_broker_order(close_submit):
                     classification = TrackBManagedPaperLifecycleClassification.OPEN_MANAGED
                     primary_blocker = None
                     required_next_action = "Managed close order is working; wait for fill or broker/order truth convergence."
@@ -1369,6 +1393,12 @@ def _strategy_submit_authorization_blocker(
         return STRATEGY_SUBMIT_BLOCKED_LIVE_MONEY, "live_money_eligible=true blocks PAPER strategy submit."
     if _any_true(snapshot, safe_state, key="paper_proof_invoked"):
         return STRATEGY_SUBMIT_BLOCKED_PAPER_PROOF, "paper_proof_invoked=true blocks strategy-managed submit."
+    if (
+        snapshot.get("broker_position_guardian_blocks_submit") is True
+        or str(snapshot.get("broker_position_guardian_classification") or "") == "BROKER_POSITION_GUARDIAN_HARD_HOLD"
+        or str(safe_state.get("safe_state_classification") or safe_state.get("classification") or "") == "SAFE_STATE_HARD_HOLD"
+    ):
+        return STRATEGY_SUBMIT_BLOCKED_POSITION_TRUTH, "Broker Position Guardian hard hold blocks strategy-managed submit."
     safe_classification = str(safe_state.get("safe_state_classification") or safe_state.get("classification") or "")
     if not safe_state:
         return STRATEGY_SUBMIT_BLOCKED_SAFE_STATE, "Runtime Safe-State Envelope authority artifact is missing."
@@ -1993,6 +2023,48 @@ def _close_submit_has_working_broker_order(close_submit: Mapping[str, Any] | Non
             or str(close_submit.get("broker_status") or "").strip().lower() in {"submitted", "presubmitted"}
         )
     )
+
+
+def _prior_close_submit_attempt_guard(
+    *,
+    existing_lifecycle_report: Mapping[str, Any],
+    close_intent: Mapping[str, Any],
+) -> dict[str, Any]:
+    prior_close_submit = _mapping(existing_lifecycle_report.get("close_submit_attempt"))
+    prior_close_fill = _mapping(existing_lifecycle_report.get("close_fill"))
+    if prior_close_fill:
+        return {
+            "classification": CLOSE_ORDER_ALREADY_WORKING,
+            "idempotency_guard_source": "prior_lifecycle_close_submit",
+            "submitted": False,
+            "submit_attempted": False,
+            "broker_state_mutated": False,
+            "existing_close_fill": dict(prior_close_fill),
+            "close_intent": dict(close_intent),
+            "primary_blocker": "Existing managed close fill for this lifecycle blocks duplicate managed PAPER close submit.",
+        }
+    if not prior_close_submit:
+        return {}
+    broker_order_id = str(prior_close_submit.get("broker_order_id") or "").strip()
+    if not broker_order_id:
+        return {}
+    if prior_close_submit.get("broker_state_mutated") is not True:
+        return {}
+    return {
+        "classification": CLOSE_ORDER_ALREADY_WORKING,
+        "idempotency_guard_source": "prior_lifecycle_close_submit",
+        "submitted": False,
+        "submit_attempted": True,
+        "broker_state_mutated": False,
+        "existing_close_submit_attempt": dict(prior_close_submit),
+        "broker_order_id": broker_order_id,
+        "perm_id": prior_close_submit.get("perm_id"),
+        "close_intent": dict(close_intent),
+        "primary_blocker": (
+            "Existing managed close submit with broker order id "
+            f"{broker_order_id} blocks duplicate managed PAPER close submit for this lifecycle."
+        ),
+    }
 
 
 def _known_managed_exit_orders(

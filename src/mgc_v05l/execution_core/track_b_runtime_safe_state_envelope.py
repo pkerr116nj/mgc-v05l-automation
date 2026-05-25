@@ -15,6 +15,10 @@ from pathlib import Path
 from typing import Any, Mapping, Sequence
 
 from mgc_v05l.execution_core.track_b_atomic_io import write_json_atomic
+from mgc_v05l.execution_core.track_b_broker_position_guardian import (
+    BROKER_POSITION_GUARDIAN_HARD_HOLD,
+    DEFAULT_BROKER_POSITION_GUARDIAN_ARTIFACT,
+)
 
 
 SAFE_STATE_NORMAL = "SAFE_STATE_NORMAL"
@@ -72,6 +76,7 @@ DEFAULT_LEDGER_SUMMARY_ARTIFACT = (
 DEFAULT_STRATEGY_BRIDGE_SUBMIT_REPORT_ARTIFACT = (
     Path("outputs") / "track_b_execution_core" / "strategy_bridge" / "latest_strategy_bridge_submit_report.json"
 )
+DEFAULT_BROKER_POSITION_GUARDIAN_PATH = DEFAULT_BROKER_POSITION_GUARDIAN_ARTIFACT
 
 
 @dataclass(frozen=True)
@@ -90,6 +95,7 @@ class TrackBRuntimeSafeStateEnvelopeConfig:
     lifecycle_summary_path: Path = DEFAULT_LIFECYCLE_SUMMARY_ARTIFACT
     ledger_summary_path: Path = DEFAULT_LEDGER_SUMMARY_ARTIFACT
     strategy_bridge_submit_report_path: Path = DEFAULT_STRATEGY_BRIDGE_SUBMIT_REPORT_ARTIFACT
+    broker_position_guardian_path: Path = DEFAULT_BROKER_POSITION_GUARDIAN_PATH
     max_orders_per_runtime_generation_id: int = 4
     max_submits_per_symbol_per_window: int = 3
     max_broker_mutation_attempts_per_window: int = 5
@@ -228,6 +234,7 @@ def _inputs(
         "lifecycle_summary": config.lifecycle_summary_path,
         "ledger_summary": config.ledger_summary_path,
         "strategy_bridge_submit_report": config.strategy_bridge_submit_report_path,
+        "broker_position_guardian": config.broker_position_guardian_path,
     }
     return {name: overrides.get(name) or _read_json(config.resolve(path)) for name, path in paths.items()}
 
@@ -298,6 +305,17 @@ def _tripped_limits(
     rows: list[dict[str, Any]] = []
     if _live_money_eligible(inputs):
         rows.append(_limit("live_money_eligible", SAFE_STATE_HARD_HOLD, True, False, "Live-money route is prohibited."))
+    guardian = inputs["broker_position_guardian"]
+    if guardian.get("classification") == BROKER_POSITION_GUARDIAN_HARD_HOLD:
+        rows.append(
+            _limit(
+                "broker_position_guardian_hard_hold",
+                SAFE_STATE_HARD_HOLD,
+                ", ".join(str(item) for item in guardian.get("hard_classifications") or []) or "hard_hold",
+                BROKER_POSITION_GUARDIAN_HARD_HOLD,
+                str(guardian.get("operator_explanation") or "Broker Position Guardian reports hard hold."),
+            )
+        )
     if not inputs["control_plane_snapshot"].get("control_plane_snapshot_id"):
         rows.append(
             _limit(
@@ -585,6 +603,7 @@ def _source_artifact_paths(config: TrackBRuntimeSafeStateEnvelopeConfig) -> dict
         "lifecycle_summary": str(config.resolve(config.lifecycle_summary_path)),
         "ledger_summary": str(config.resolve(config.ledger_summary_path)),
         "strategy_bridge_submit_report": str(config.resolve(config.strategy_bridge_submit_report_path)),
+        "broker_position_guardian": str(config.resolve(config.broker_position_guardian_path)),
     }
 
 

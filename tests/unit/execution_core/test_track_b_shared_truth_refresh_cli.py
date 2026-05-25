@@ -31,6 +31,7 @@ def test_refresh_clean_flat_stack(tmp_path: Path) -> None:
     assert result["classifications"]["Runtime Environment Truth"] == "RUNTIME_DOWN_CLEAN"
     assert result["classifications"]["Managed Position Registry"] == "NO_MANAGED_POSITIONS"
     assert result["classifications"]["Reconciliation"] == "TRACK_B_PAPER_BROKER_RECONCILED"
+    assert result["classifications"]["Broker Position Guardian"] == "BROKER_POSITION_GUARDIAN_READY"
     assert result["classifications"]["PAPER Recovery Policy"] == "REFRESH_EVIDENCE"
     assert result["classifications"]["PAPER Autonomous Recovery Planner"] == "PLAN_BLOCKED_STALE_EVIDENCE"
     assert result["paper_recovery_policy"] == "REFRESH_EVIDENCE"
@@ -243,11 +244,12 @@ def test_runtime_start_preflight_allows_active_degraded_broker_lease_within_vali
             "Managed Order Registry": "NO_MANAGED_ORDERS",
             "Position Truth": "CLEAN_FLAT_READY",
             "Runtime Environment Truth": "RUNTIME_DOWN_CLEAN",
-            "Managed Position Registry": "NO_MANAGED_POSITIONS",
-            "Reconciliation": "TRACK_B_PAPER_BROKER_RECONCILED",
-            "Broker Truth Lease": "ACTIVE_DEGRADED_REFRESH_FAILING",
-        },
-    }
+                "Managed Position Registry": "NO_MANAGED_POSITIONS",
+                "Reconciliation": "TRACK_B_PAPER_BROKER_RECONCILED",
+                "Broker Truth Lease": "ACTIVE_DEGRADED_REFRESH_FAILING",
+                "Broker Position Guardian": "BROKER_POSITION_GUARDIAN_READY",
+            },
+        }
 
     preflight = build_runtime_start_preflight_summary(result)
 

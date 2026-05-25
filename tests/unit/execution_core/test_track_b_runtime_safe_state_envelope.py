@@ -55,6 +55,28 @@ def test_duplicate_writer_hard_holds(tmp_path: Path) -> None:
     assert any(row["limit_id"] == "duplicate_runtime_writer" for row in payload["tripped_limits"])
 
 
+def test_broker_position_guardian_hard_hold_blocks_submit(tmp_path: Path) -> None:
+    _seed_base(tmp_path)
+    _write(
+        tmp_path / "outputs/track_b_execution_core/broker_position_guardian/latest_broker_position_guardian.json",
+        {
+            "generated_at": NOW.isoformat(),
+            "classification": "BROKER_POSITION_GUARDIAN_HARD_HOLD",
+            "hard_classifications": ["UNAUTHORIZED_REVERSE_EXPOSURE"],
+            "operator_explanation": "Unauthorized reverse exposure detected.",
+            "live_money_eligible": False,
+            "paper_proof_invoked": False,
+        },
+    )
+
+    payload = _build(tmp_path)
+
+    assert payload["safe_state_classification"] == SAFE_STATE_HARD_HOLD
+    assert payload["submit_allowed"] is False
+    assert payload["broker_mutation_allowed"] is False
+    assert any(row["limit_id"] == "broker_position_guardian_hard_hold" for row in payload["tripped_limits"])
+
+
 def test_too_many_submits_hits_broker_mutation_limit(tmp_path: Path) -> None:
     _seed_base(tmp_path)
     _write(
