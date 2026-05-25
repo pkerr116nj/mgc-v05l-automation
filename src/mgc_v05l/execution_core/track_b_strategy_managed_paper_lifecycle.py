@@ -99,6 +99,7 @@ class TrackBManagedExitPolicy(str, Enum):
     MANAGED_HOLD_REQUIRES_EXTERNAL_EXIT_SIGNAL = "MANAGED_HOLD_REQUIRES_EXTERNAL_EXIT_SIGNAL"
     DIAGNOSTIC_TIME_EXIT_IMMEDIATE = "DIAGNOSTIC_TIME_EXIT_IMMEDIATE"
     PAPER_DIAGNOSTIC_TIME_BOXED_3X5M_EXIT_V1 = "PAPER_DIAGNOSTIC_TIME_BOXED_3X5M_EXIT_V1"
+    FORCED_SESSION_SEGMENT_LOCAL_EXIT_V1 = "FORCED_SESSION_SEGMENT_LOCAL_EXIT_V1"
 
 
 @dataclass(frozen=True)
@@ -377,13 +378,20 @@ def maintain_open_track_b_strategy_managed_paper_lifecycle(
                 submit_attempted = submit_attempted or bool(close_submit.get("submitted") or close_submit.get("submit_attempted"))
                 broker_state_mutated = bool(close_submit.get("broker_state_mutated"))
                 close_fill = _mapping(close_submit.get("close_fill") or close_submit.get("fill"))
-                if close_submit.get("review_required") is True:
+                if close_submit.get("review_required") is True and _close_submit_has_working_broker_order(close_submit):
+                    classification = TrackBManagedPaperLifecycleClassification.OPEN_MANAGED
+                    primary_blocker = None
+                    required_next_action = "Managed close order is working; wait for fill or broker/order truth convergence."
+                elif close_submit.get("review_required") is True:
                     classification = TrackBManagedPaperLifecycleClassification.REVIEW_REQUIRED
                     primary_blocker = str(close_submit.get("primary_blocker") or "Managed close submit requires review.")
                     required_next_action = "Review managed close diagnostics before retrying."
                 elif close_fill:
                     classification = TrackBManagedPaperLifecycleClassification.CLOSED_FLAT
                     required_next_action = "Managed PAPER lifecycle closed flat."
+                elif _close_submit_has_working_broker_order(close_submit):
+                    classification = TrackBManagedPaperLifecycleClassification.OPEN_MANAGED
+                    required_next_action = "Managed close order is working; wait for fill or broker/order truth convergence."
                 else:
                     classification = TrackBManagedPaperLifecycleClassification.REVIEW_REQUIRED
                     primary_blocker = str(close_submit.get("primary_blocker") or "Managed close submit/fill was not confirmed.")
@@ -502,6 +510,8 @@ def write_open_managed_lifecycle_report_from_filled_bridge_result(
         account_id=account_id,
         expected_account_id=str(filled_bridge_result.get("expected_account_id") or account_id),
         strategy_id=str(filled_bridge_result.get("strategy_id") or filled_bridge_result.get("lane_id") or ""),
+        lane_id=str(filled_bridge_result.get("lane_id") or "") or None,
+        runtime_generation_id=str(filled_bridge_result.get("runtime_generation_id") or "") or None,
         instrument_family=instrument,
         contract_key=contract_key,
         local_symbol=local_symbol,
@@ -593,6 +603,8 @@ def _entry_intent(
         "lifecycle_id": lifecycle_id,
         "trade_id": f"{config.strategy_id}:{lifecycle_id}",
         "strategy_id": config.strategy_id,
+        "lane_id": config.lane_id,
+        "runtime_generation_id": config.runtime_generation_id,
         "instrument_family": config.instrument_family,
         "contract_key": config.contract_key,
         "local_symbol": config.local_symbol,
@@ -627,6 +639,8 @@ def _open_state(
         "lifecycle_id": lifecycle_id,
         "trade_id": entry_intent.get("trade_id"),
         "strategy_id": config.strategy_id,
+        "lane_id": config.lane_id,
+        "runtime_generation_id": config.runtime_generation_id,
         "instrument_family": config.instrument_family,
         "contract_key": config.contract_key,
         "local_symbol": config.local_symbol,
@@ -683,6 +697,8 @@ def _build_report(
         "lifecycle_id": lifecycle_id,
         "trade_id": entry_intent.get("trade_id"),
         "strategy_id": config.strategy_id,
+        "lane_id": config.lane_id,
+        "runtime_generation_id": config.runtime_generation_id,
         "instrument_family": config.instrument_family,
         "contract_key": config.contract_key,
         "local_symbol": config.local_symbol,
@@ -722,9 +738,24 @@ def _build_report(
         "entry_intent": dict(entry_intent),
         "entry_submit_attempt": dict(entry_submit) if entry_submit else None,
         "entry_fill": dict(entry_fill) if entry_fill else None,
+        "open_state": dict(open_state) if open_state else None,
         "close_intent": dict(close_intent) if close_intent else None,
         "close_submit_attempt": dict(close_submit) if close_submit else None,
         "close_fill": dict(close_fill) if close_fill else None,
+        "known_managed_exit_orders": _known_managed_exit_orders(
+            config=config,
+            lifecycle_id=lifecycle_id,
+            close_intent=close_intent,
+            close_submit=close_submit,
+            close_fill=close_fill,
+        ),
+        "working_managed_exit_orders": _known_managed_exit_orders(
+            config=config,
+            lifecycle_id=lifecycle_id,
+            close_intent=close_intent,
+            close_submit=close_submit,
+            close_fill=close_fill,
+        ),
         "realized_pnl": _decimal_text(realized),
         "pnl_currency": "USD",
         "final_position_status": _final_position_status(classification),
@@ -929,7 +960,7 @@ def _default_exit_policy(
             "broker_truth_state": str(config.broker_truth_state or "FRESH"),
             "suppressed_due_to_stale_data": False,
         }
-    if policy_id == TrackBManagedExitPolicy.PAPER_DIAGNOSTIC_TIME_BOXED_3X5M_EXIT_V1.value:
+    if _is_timeboxed_managed_close_policy(policy_id):
         elapsed = int(config.completed_5m_bars_since_entry or 0)
         required = int(config.managed_exit_policy_max_completed_5m_bars)
         if elapsed < required:
@@ -972,6 +1003,7 @@ def _discretionary_exits_suppressed(config: TrackBStrategyManagedPaperLifecycleC
     return policy_id in {
         TrackBManagedExitPolicy.DIAGNOSTIC_TIME_EXIT_IMMEDIATE.value,
         TrackBManagedExitPolicy.PAPER_DIAGNOSTIC_TIME_BOXED_3X5M_EXIT_V1.value,
+        TrackBManagedExitPolicy.FORCED_SESSION_SEGMENT_LOCAL_EXIT_V1.value,
     }
 
 
@@ -1914,9 +1946,16 @@ def _normalized_exit_policy(value: str | None) -> str:
     return str(value or TrackBManagedExitPolicy.EXIT_NOT_AVAILABLE.value).strip().upper()
 
 
+def _is_timeboxed_managed_close_policy(policy_id: str) -> bool:
+    return policy_id in {
+        TrackBManagedExitPolicy.PAPER_DIAGNOSTIC_TIME_BOXED_3X5M_EXIT_V1.value,
+        TrackBManagedExitPolicy.FORCED_SESSION_SEGMENT_LOCAL_EXIT_V1.value,
+    }
+
+
 def _expected_exit_condition(config: TrackBStrategyManagedPaperLifecycleConfig) -> str:
     policy_id = _normalized_exit_policy(config.managed_exit_policy_id)
-    if policy_id == TrackBManagedExitPolicy.PAPER_DIAGNOSTIC_TIME_BOXED_3X5M_EXIT_V1.value:
+    if _is_timeboxed_managed_close_policy(policy_id):
         return f"TIME_BOXED_EXIT_AFTER_{int(config.managed_exit_policy_max_completed_5m_bars)}_COMPLETED_5M_BARS"
     if policy_id == TrackBManagedExitPolicy.DIAGNOSTIC_TIME_EXIT_IMMEDIATE.value:
         return "DIAGNOSTIC_IMMEDIATE_CLOSE"
@@ -1936,6 +1975,60 @@ def _close_intent_status(
     if classification == TrackBManagedPaperLifecycleClassification.EXIT_POLICY_MISSING:
         return "EXIT_POLICY_MISSING"
     return "NOT_APPLICABLE"
+
+
+def _close_submit_has_working_broker_order(close_submit: Mapping[str, Any] | None) -> bool:
+    if not close_submit:
+        return False
+    if close_submit.get("close_fill") or close_submit.get("fill"):
+        return False
+    broker_order_id = str(close_submit.get("broker_order_id") or "").strip()
+    diagnostics = _mapping(close_submit.get("submit_diagnostics")) or {}
+    return bool(
+        broker_order_id
+        and close_submit.get("broker_state_mutated") is True
+        and (
+            diagnostics.get("openOrder_seen") is True
+            or diagnostics.get("orderStatus_seen") is True
+            or str(close_submit.get("broker_status") or "").strip().lower() in {"submitted", "presubmitted"}
+        )
+    )
+
+
+def _known_managed_exit_orders(
+    *,
+    config: TrackBStrategyManagedPaperLifecycleConfig,
+    lifecycle_id: str,
+    close_intent: Mapping[str, Any] | None,
+    close_submit: Mapping[str, Any] | None,
+    close_fill: Mapping[str, Any] | None,
+) -> list[dict[str, Any]]:
+    if not _close_submit_has_working_broker_order(close_submit):
+        return []
+    diagnostics = _mapping(close_submit.get("submit_diagnostics")) or {}
+    return [
+        {
+            "account_id": config.account_id,
+            "strategy_id": config.strategy_id,
+            "lane_id": config.lane_id,
+            "runtime_generation_id": config.runtime_generation_id,
+            "lifecycle_id": lifecycle_id,
+            "managed_exit_policy_id": _normalized_exit_policy(config.managed_exit_policy_id),
+            "broker_order_id": str(close_submit.get("broker_order_id") or ""),
+            "perm_id": close_submit.get("perm_id") or diagnostics.get("perm_id"),
+            "client_id": diagnostics.get("client_id") or config.client_id,
+            "local_symbol": config.local_symbol,
+            "con_id": config.con_id,
+            "contract_key": config.contract_key,
+            "symbol": config.instrument_family,
+            "action": (close_intent or {}).get("order_action"),
+            "quantity": str((close_intent or {}).get("quantity") or config.quantity or ""),
+            "status": "Submitted",
+            "managed_order_status": "WORKING",
+            "submitted_at": close_submit.get("submitted_at"),
+            "close_fill_observed": bool(close_fill),
+        }
+    ]
 
 
 def _normalized_side(value: str | None) -> str:

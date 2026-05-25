@@ -14,7 +14,9 @@ from typing import Mapping
 
 
 PAPER_DIAGNOSTIC_TIME_BOXED_3X5M_EXIT_V1 = "PAPER_DIAGNOSTIC_TIME_BOXED_3X5M_EXIT_V1"
+FORCED_SESSION_SEGMENT_LOCAL_EXIT_V1 = "FORCED_SESSION_SEGMENT_LOCAL_EXIT_V1"
 MNQ_SNAP_TURN_TIMEBOX_3X5M_V1 = "MNQ_SNAP_TURN_TIMEBOX_3X5M_V1"
+MGC_FORCED_SESSION_SEGMENT_TIMEBOX_3X5M_V1 = "MGC_FORCED_SESSION_SEGMENT_TIMEBOX_3X5M_V1"
 TIMEBOXED_3X5M_MANAGED_LIMIT_CLOSE_V1 = "timeboxed_3x5m_managed_limit_close_v1"
 
 
@@ -71,7 +73,22 @@ EXIT_PROFILE_ROSTER: Mapping[str, TrackBExitProfile] = {
             "PAPER diagnostic snap-turn close profile: after three completed 5m bars, "
             "submit the managed lifecycle close as an exact SELL/BUY limit order for the owned position."
         ),
-    )
+    ),
+    MGC_FORCED_SESSION_SEGMENT_TIMEBOX_3X5M_V1: TrackBExitProfile(
+        exit_strategy_id=TIMEBOXED_3X5M_MANAGED_LIMIT_CLOSE_V1,
+        exit_profile_id=MGC_FORCED_SESSION_SEGMENT_TIMEBOX_3X5M_V1,
+        managed_exit_policy_id=FORCED_SESSION_SEGMENT_LOCAL_EXIT_V1,
+        instrument_family="MGC",
+        strategy_family="gold_forced_session_baseline_v2",
+        order_type="LMT",
+        required_completed_5m_bars=3,
+        price_offset_ticks=2,
+        tick_size="0.1",
+        profile_explanation=(
+            "PAPER forced-session MGC close profile: after three completed 5m bars, "
+            "submit the managed lifecycle close as an exact opposite-side limit order for the owned MGC position."
+        ),
+    ),
 }
 
 
@@ -80,6 +97,27 @@ def resolve_track_b_exit_profile(exit_profile_id: str) -> TrackBExitProfile:
         return EXIT_PROFILE_ROSTER[exit_profile_id]
     except KeyError as exc:
         raise ValueError(f"Unknown Track B exit profile: {exit_profile_id}") from exc
+
+
+def resolve_track_b_exit_profile_for_position(*, instrument_family: str, managed_exit_policy_id: str) -> TrackBExitProfile:
+    normalized_instrument = str(instrument_family or "").strip().upper()
+    normalized_policy = str(managed_exit_policy_id or "").strip()
+    matches = [
+        profile
+        for profile in EXIT_PROFILE_ROSTER.values()
+        if profile.instrument_family == normalized_instrument and profile.managed_exit_policy_id == normalized_policy
+    ]
+    if len(matches) == 1:
+        return matches[0]
+    if not matches:
+        raise ValueError(
+            f"No Track B exit profile for instrument={normalized_instrument or 'UNKNOWN'} "
+            f"policy={normalized_policy or 'UNKNOWN'}"
+        )
+    raise ValueError(
+        f"Ambiguous Track B exit profile for instrument={normalized_instrument} policy={normalized_policy}: "
+        + ", ".join(sorted(profile.exit_profile_id for profile in matches))
+    )
 
 
 def close_action_for_position_side(side: str) -> str:

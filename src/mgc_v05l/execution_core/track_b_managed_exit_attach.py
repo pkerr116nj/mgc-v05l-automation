@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import argparse
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from decimal import Decimal
 from pathlib import Path
@@ -28,11 +28,13 @@ from mgc_v05l.execution_core.track_b_exit_strategy_roster import (
     close_action_for_position_side,
     close_limit_from_profile,
     resolve_track_b_exit_profile,
+    resolve_track_b_exit_profile_for_position,
 )
 from mgc_v05l.execution_core.track_b_managed_order_registry import (
     DEFAULT_MANAGED_ORDER_REGISTRY_ARTIFACT,
     POSITION_WITHOUT_CLOSE_ORDER,
 )
+from mgc_v05l.execution_core.track_b_managed_position_registry import DEFAULT_MANAGED_POSITION_REGISTRY_ARTIFACT
 from mgc_v05l.execution_core.track_b_open_order_truth import (
     BROKER_POSITION_WITHOUT_CLOSE_ORDER,
     DEFAULT_OPEN_ORDER_TRUTH_ARTIFACT,
@@ -68,6 +70,7 @@ MANAGED_EXIT_BLOCKED_CONTROL_PLANE = "MANAGED_EXIT_BLOCKED_CONTROL_PLANE"
 MANAGED_EXIT_BLOCKED_SAFE_STATE = "MANAGED_EXIT_BLOCKED_SAFE_STATE"
 MANAGED_EXIT_APPLY_DISABLED = "MANAGED_EXIT_APPLY_DISABLED"
 MANAGED_EXIT_APPLIED_OR_PENDING = "MANAGED_EXIT_APPLIED_OR_PENDING"
+MANAGED_EXIT_DUE_READY_FOR_APPLY = "MANAGED_EXIT_DUE_READY_FOR_APPLY"
 
 
 @dataclass(frozen=True)
@@ -110,12 +113,14 @@ class TrackBManagedExitAttachConfig:
     open_order_truth_path: Path = DEFAULT_OPEN_ORDER_TRUTH_ARTIFACT
     position_truth_path: Path = DEFAULT_POSITION_TRUTH_ARTIFACT
     managed_order_registry_path: Path = DEFAULT_MANAGED_ORDER_REGISTRY_ARTIFACT
+    managed_position_registry_path: Path = DEFAULT_MANAGED_POSITION_REGISTRY_ARTIFACT
     live_position_status_path: Path = DEFAULT_TRACK_B_LIVE_POSITION_STATUS_JSON
     paper_trade_summary_path: Path = DEFAULT_TRACK_B_PAPER_TRADE_SUMMARY_JSON
     phase1_market_data_root: Path = DEFAULT_PHASE1_RUNTIME_MARKET_DATA_ROOT
     lifecycle_output_root: Path = DEFAULT_TRACK_B_STRATEGY_MANAGED_PAPER_LIFECYCLE_OUTPUT_ROOT
     paper_trade_ledger_output_root: Path = DEFAULT_TRACK_B_PAPER_TRADE_LEDGER_OUTPUT_ROOT
     output_path: Path = DEFAULT_MANAGED_EXIT_ATTACH_PLAN
+    auto_select_active_managed_position: bool = True
 
     def resolve(self, path: Path) -> Path:
         return path if path.is_absolute() else self.repo_root / path
@@ -136,6 +141,12 @@ def build_track_b_managed_exit_attach_plan(
         snapshot_payload = build_track_b_control_plane_snapshot(config=snapshot_config, now=actual_now)
         write_track_b_control_plane_snapshot(config=snapshot_config, payload=snapshot_payload)
 
+    managed_position_registry = _read_json(config.resolve(config.managed_position_registry_path))
+    selected_managed_position = _select_active_managed_exit_due_position(
+        config=config,
+        managed_position_registry=managed_position_registry,
+    )
+    config = _config_for_selected_managed_position(config=config, selected_position=selected_managed_position)
     snapshot = _read_json(config.resolve(config.control_plane_snapshot_path))
     safe_state = _read_json(config.resolve(config.safe_state_path))
     open_order_truth = _read_json(config.resolve(config.open_order_truth_path))
@@ -237,6 +248,15 @@ def build_track_b_managed_exit_attach_plan(
         "safe_state_broker_mutation_allowed": safe_state.get("broker_mutation_allowed") is True,
         "open_order_truth_classification": open_order_truth.get("classification"),
         "managed_order_registry_classification": managed_orders.get("classification"),
+        "managed_position_registry_classification": managed_position_registry.get("classification"),
+        "selected_managed_position": selected_managed_position,
+        "managed_exit_due_automation": {
+            "scan_enabled": config.auto_select_active_managed_position,
+            "classification": MANAGED_EXIT_DUE_READY_FOR_APPLY
+            if selected_managed_position and completed_bar_count >= required_completed_5m_bars and not blockers
+            else None,
+            "active_due_count": _active_due_count(managed_position_registry),
+        },
         "position_truth_classification": position_truth.get("classification"),
         "target_identity": _target_identity(
             config=config,
@@ -389,7 +409,7 @@ def _apply_managed_exit(
         now=now,
     )
     ledger_update: dict[str, Any] = {}
-    if result.report.get("close_submit_attempt") or result.report.get("close_fill"):
+    if result.report.get("close_fill"):
         ledger_result = update_track_b_paper_trade_ledger_from_runner_report(
             runner_report={
                 "managed_lifecycle_invoked": True,
@@ -424,6 +444,127 @@ def _apply_managed_exit(
         "paper_trade_ledger_update": ledger_update,
         "primary_blocker": result.report.get("primary_blocker"),
     }
+
+
+def _select_active_managed_exit_due_position(
+    *,
+    config: TrackBManagedExitAttachConfig,
+    managed_position_registry: Mapping[str, Any],
+) -> dict[str, Any]:
+    if config.auto_select_active_managed_position is not True:
+        return {}
+    candidates = [
+        dict(item)
+        for item in managed_position_registry.get("managed_positions") or []
+        if isinstance(item, Mapping)
+        and str(item.get("classification") or "") == "OPEN_MANAGED_EXIT_DUE"
+        and item.get("exit_due") is True
+        and item.get("attention_required") is not True
+    ]
+    if not candidates:
+        return {}
+    exact_lifecycle = [item for item in candidates if str(item.get("lifecycle_id") or "") == config.lifecycle_id]
+    if len(exact_lifecycle) == 1:
+        return exact_lifecycle[0]
+    exact_contract = [
+        item
+        for item in candidates
+        if str(item.get("local_symbol") or "") == config.local_symbol
+        and _int_or_none(item.get("con_id")) == config.con_id
+        and str(item.get("contract_key") or "") == config.contract_key
+    ]
+    if len(exact_contract) == 1:
+        return exact_contract[0]
+    if len(candidates) == 1:
+        return candidates[0]
+    return {}
+
+
+def _config_for_selected_managed_position(
+    *,
+    config: TrackBManagedExitAttachConfig,
+    selected_position: Mapping[str, Any],
+) -> TrackBManagedExitAttachConfig:
+    if not selected_position:
+        return config
+    lifecycle_position = _mapping(selected_position.get("lifecycle_position"))
+    broker_position = _mapping(selected_position.get("broker_position"))
+    instrument_family = str(
+        selected_position.get("symbol")
+        or lifecycle_position.get("instrument_family")
+        or lifecycle_position.get("track_b_root")
+        or broker_position.get("track_b_root")
+        or broker_position.get("symbol")
+        or config.instrument_family
+    ).upper()
+    managed_exit_policy_id = str(selected_position.get("managed_exit_policy_id") or config.managed_exit_policy_id)
+    exit_profile = resolve_track_b_exit_profile_for_position(
+        instrument_family=instrument_family,
+        managed_exit_policy_id=managed_exit_policy_id,
+    )
+    quantity = _int_or_none(selected_position.get("quantity") or lifecycle_position.get("quantity"))
+    if quantity is None:
+        decimal_quantity = _decimal(selected_position.get("quantity") or lifecycle_position.get("quantity"))
+        quantity = int(abs(decimal_quantity)) if decimal_quantity is not None else config.quantity
+    strategy_id = str(
+        selected_position.get("strategy_id")
+        or lifecycle_position.get("strategy_id")
+        or config.strategy_id
+    )
+    lane_id = str(selected_position.get("lane_id") or lifecycle_position.get("lane_id") or _lane_from_strategy_id(strategy_id) or config.lane_id)
+    return replace(
+        config,
+        account_id=str(
+            lifecycle_position.get("account_id")
+            or selected_position.get("account_id")
+            or broker_position.get("account_id")
+            or broker_position.get("account")
+            or config.account_id
+        ),
+        expected_account_id=str(
+            lifecycle_position.get("account_id")
+            or selected_position.get("account_id")
+            or broker_position.get("account_id")
+            or broker_position.get("account")
+            or config.expected_account_id
+        ),
+        strategy_id=strategy_id,
+        lane_id=lane_id,
+        runtime_generation_id=str(
+            lifecycle_position.get("runtime_generation_id")
+            or selected_position.get("runtime_generation_id")
+            or config.runtime_generation_id
+            or ""
+        ),
+        lifecycle_id=str(selected_position.get("lifecycle_id") or lifecycle_position.get("lifecycle_id") or config.lifecycle_id),
+        instrument_family=instrument_family,
+        contract_key=str(selected_position.get("contract_key") or lifecycle_position.get("contract_key") or config.contract_key),
+        local_symbol=str(selected_position.get("local_symbol") or lifecycle_position.get("local_symbol") or config.local_symbol),
+        con_id=_int_or_none(selected_position.get("con_id") or lifecycle_position.get("con_id")) or config.con_id,
+        expiry=str(broker_position.get("expiry") or lifecycle_position.get("expiry") or config.expiry),
+        side=str(selected_position.get("side") or lifecycle_position.get("side") or config.side),
+        quantity=quantity,
+        managed_exit_policy_id=managed_exit_policy_id,
+        exit_strategy_id=exit_profile.exit_strategy_id,
+        exit_profile_id=exit_profile.exit_profile_id,
+        required_completed_5m_bars=int(exit_profile.required_completed_5m_bars),
+        tick_size=str(exit_profile.tick_size),
+    )
+
+
+def _active_due_count(managed_position_registry: Mapping[str, Any]) -> int:
+    return sum(
+        1
+        for item in managed_position_registry.get("managed_positions") or []
+        if isinstance(item, Mapping)
+        and str(item.get("classification") or "") == "OPEN_MANAGED_EXIT_DUE"
+        and item.get("exit_due") is True
+    )
+
+
+def _lane_from_strategy_id(strategy_id: str) -> str:
+    parts = [part for part in str(strategy_id or "").split("__") if part]
+    return "__".join(parts[1:]) if len(parts) > 1 else ""
 
 
 def _control_plane_allows_managed_exit(snapshot: Mapping[str, Any]) -> tuple[bool, str]:
@@ -730,6 +871,10 @@ def _read_json(path: Path) -> dict[str, Any]:
     return dict(payload) if isinstance(payload, Mapping) else {}
 
 
+def _mapping(value: object) -> dict[str, Any]:
+    return dict(value) if isinstance(value, Mapping) else {}
+
+
 def _parse_time(value: object) -> datetime | None:
     if value in {None, ""}:
         return None
@@ -774,6 +919,7 @@ def _parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
             "mnq_first_bull_snap_turn_v1"
         ),
     )
+    parser.add_argument("--instrument-family", default="MNQ")
     parser.add_argument("--contract-key", default="MNQ-202606")
     parser.add_argument("--local-symbol", default="MNQM6")
     parser.add_argument("--con-id", type=int, default=770561201)
@@ -800,6 +946,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         lane_id=args.lane_id,
         runtime_generation_id=args.runtime_generation_id,
         lifecycle_id=args.lifecycle_id,
+        instrument_family=args.instrument_family,
         contract_key=args.contract_key,
         local_symbol=args.local_symbol,
         con_id=args.con_id,

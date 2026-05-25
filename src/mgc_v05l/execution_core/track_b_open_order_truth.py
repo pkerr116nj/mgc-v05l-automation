@@ -384,6 +384,8 @@ def _overall_classification(
 
 def _suspicious_reasons(*, order: Mapping[str, Any], lifecycle_report: Mapping[str, Any]) -> list[str]:
     reasons: list[str] = []
+    if _known_working_managed_exit_order(order=order, lifecycle_report=lifecycle_report):
+        return reasons
     filled = _decimal_or_none(order.get("filled_quantity") or order.get("filled"))
     if filled is not None and abs(filled) >= _SENTINEL_FILLED_QUANTITY:
         reasons.append("sentinel_filled_quantity")
@@ -394,6 +396,24 @@ def _suspicious_reasons(*, order: Mapping[str, Any], lifecycle_report: Mapping[s
     if close_attempt and diagnostics.get("execDetails_seen") is False:
         reasons.append("open_close_order_without_execDetails")
     return reasons
+
+
+def _known_working_managed_exit_order(*, order: Mapping[str, Any], lifecycle_report: Mapping[str, Any]) -> bool:
+    close_attempt = _mapping(lifecycle_report.get("close_submit_attempt"))
+    if not close_attempt:
+        return False
+    order_id = str(order.get("broker_order_id") or order.get("order_id") or "")
+    if not order_id or str(close_attempt.get("broker_order_id") or "") != order_id:
+        return False
+    if lifecycle_report.get("close_fill"):
+        return False
+    status = str(order.get("status") or "").strip().upper()
+    diagnostics = _mapping(close_attempt.get("submit_diagnostics"))
+    return bool(
+        close_attempt.get("broker_state_mutated") is True
+        and status in {"SUBMITTED", "PRESUBMITTED", "PENDING_SUBMIT"}
+        and (diagnostics.get("openOrder_seen") is True or diagnostics.get("orderStatus_seen") is True)
+    )
 
 
 def _duplicate_close_groups(order_states: list[dict[str, Any]]) -> list[dict[str, Any]]:

@@ -251,6 +251,100 @@ def test_no_live_money_or_paper_proof_route(tmp_path: Path) -> None:
     assert payload["global_flatten_allowed"] is False
 
 
+def test_mgc_forced_session_exit_profile_builds_managed_close_preview(tmp_path: Path) -> None:
+    config = _seed(
+        tmp_path,
+        completed_bars=3,
+        config_overrides={
+            "strategy_id": "gc_mgc_forced_session_baseline_v2__mgc_1x_all_lanes__asia_early_long",
+            "lane_id": "mgc_1x_all_lanes__asia_early_long",
+            "lifecycle_id": "reserved_submit_mgc_1x_all_lanes_asia_early_long_test",
+            "instrument_family": "MGC",
+            "contract_key": "MGC-202606",
+            "local_symbol": "MGCM6",
+            "con_id": 712565978,
+            "expiry": "20260626",
+            "managed_exit_policy_id": "FORCED_SESSION_SEGMENT_LOCAL_EXIT_V1",
+            "exit_profile_id": "MGC_FORCED_SESSION_SEGMENT_TIMEBOX_3X5M_V1",
+            "tick_size": "0.1",
+        },
+    )
+
+    payload = build_track_b_managed_exit_attach_plan(config=config, now=NOW)
+
+    assert payload["classification"] == MANAGED_EXIT_TIMEBOX_CLOSE_ELIGIBLE
+    assert payload["managed_exit_policy_id"] == "FORCED_SESSION_SEGMENT_LOCAL_EXIT_V1"
+    assert payload["exit_profile_id"] == "MGC_FORCED_SESSION_SEGMENT_TIMEBOX_3X5M_V1"
+    assert payload["close_intent_preview"]["order_action"] == "SELL"
+    assert payload["close_intent_preview"]["would_submit"] is False
+    assert payload["broker_state_mutated"] is False
+
+
+def test_auto_selects_current_exit_due_managed_position_instead_of_stale_default_target(tmp_path: Path) -> None:
+    current_lifecycle_id = "reserved_submit_mnq_1x_asia_london_participation_asia_london_long_v6"
+    strategy_id = "asia_london_participation_core_v1__mnq_1x_asia_london_participation__asia_london_long_v6"
+    config = _seed(
+        tmp_path,
+        completed_bars=3,
+        config_overrides={
+            "strategy_id": strategy_id,
+            "lane_id": "mnq_1x_asia_london_participation__asia_london_long_v6",
+            "lifecycle_id": current_lifecycle_id,
+        },
+    )
+    stale_config = TrackBManagedExitAttachConfig(repo_root=tmp_path, refresh_control_plane=False)
+    lifecycle_path = (
+        tmp_path
+        / "outputs/track_b_execution_core/track_b_strategy_managed_paper_lifecycle"
+        / current_lifecycle_id
+        / "track_b_strategy_managed_paper_lifecycle_report.json"
+    )
+    _write_json(
+        tmp_path / "outputs/track_b_execution_core/managed_positions/latest_managed_positions.json",
+        {
+            "classification": "OPEN_MANAGED_EXIT_DUE",
+            "managed_positions": [
+                {
+                    "classification": "OPEN_MANAGED_EXIT_DUE",
+                    "exit_due": True,
+                    "attention_required": False,
+                    "symbol": "MNQ",
+                    "contract_key": "MNQ-202606",
+                    "local_symbol": "MNQM6",
+                    "con_id": 770561201,
+                    "quantity": "1",
+                    "side": "LONG",
+                    "strategy_id": strategy_id,
+                    "lifecycle_id": current_lifecycle_id,
+                    "managed_exit_policy_id": "PAPER_DIAGNOSTIC_TIME_BOXED_3X5M_EXIT_V1",
+                    "lifecycle_position": {
+                        "account_id": "DUM882026",
+                        "instrument_family": "MNQ",
+                        "contract_key": "MNQ-202606",
+                        "local_symbol": "MNQM6",
+                        "con_id": 770561201,
+                        "quantity": "1",
+                        "side": "LONG",
+                        "strategy_id": strategy_id,
+                        "lifecycle_id": current_lifecycle_id,
+                        "paper_lifecycle_report_path": str(lifecycle_path),
+                    },
+                }
+            ],
+        },
+    )
+
+    payload = build_track_b_managed_exit_attach_plan(config=stale_config, now=NOW)
+
+    assert config.lifecycle_id == current_lifecycle_id
+    assert payload["classification"] == MANAGED_EXIT_TIMEBOX_CLOSE_ELIGIBLE
+    assert payload["target_identity"]["lifecycle_id"] == current_lifecycle_id
+    assert payload["target_identity"]["strategy_id"] == strategy_id
+    assert payload["target_identity"]["lane_id"] == "mnq_1x_asia_london_participation__asia_london_long_v6"
+    assert payload["close_intent_preview"]["lifecycle_id"] == current_lifecycle_id
+    assert payload["managed_exit_due_automation"]["classification"] == "MANAGED_EXIT_DUE_READY_FOR_APPLY"
+
+
 def _seed(
     tmp_path: Path,
     *,
@@ -258,8 +352,13 @@ def _seed(
     position_overrides: Mapping[str, Any] | None = None,
     managed_order_overrides: Mapping[str, Any] | None = None,
     snapshot_overrides: Mapping[str, Any] | None = None,
+    config_overrides: Mapping[str, Any] | None = None,
 ) -> TrackBManagedExitAttachConfig:
-    config = TrackBManagedExitAttachConfig(repo_root=tmp_path, refresh_control_plane=False)
+    config = TrackBManagedExitAttachConfig(
+        repo_root=tmp_path,
+        refresh_control_plane=False,
+        **dict(config_overrides or {}),
+    )
     lifecycle_path = (
         tmp_path
         / "outputs/track_b_execution_core/track_b_strategy_managed_paper_lifecycle"
@@ -356,7 +455,7 @@ def _seed(
         "local_symbol": config.local_symbol,
         "con_id": config.con_id,
         "quantity": "1",
-        "symbol": "MNQ",
+        "symbol": config.instrument_family,
     }
     position_truth_position.update(dict(position_overrides or {}))
     _write_json(
@@ -382,11 +481,11 @@ def _seed(
         for idx in range(completed_bars)
     ]
     _write_json(
-        tmp_path / "outputs/track_b_execution_core/phase1_runtime_market_data/MNQ/5m/latest_runtime_candles.json",
+        tmp_path / "outputs/track_b_execution_core/phase1_runtime_market_data" / config.instrument_family / "5m/latest_runtime_candles.json",
         {"bars": bars},
     )
     _write_json(
-        tmp_path / "outputs/track_b_execution_core/phase1_runtime_market_data/MNQ/1m/latest_runtime_candles.json",
+        tmp_path / "outputs/track_b_execution_core/phase1_runtime_market_data" / config.instrument_family / "1m/latest_runtime_candles.json",
         {"bars": [{"bar_end": "2026-05-25T07:47:00+00:00", "close": "29965.5"}]},
     )
     return config
