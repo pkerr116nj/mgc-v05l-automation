@@ -9,6 +9,8 @@ from mgc_v05l.execution_core import track_b_weekly_maintenance_orchestrator as o
 from mgc_v05l.execution_core.track_b_weekly_maintenance_orchestrator import (
     COMPLETION_COMPLETE,
     COMPLETION_COMPLETE_WITH_DIAGNOSTICS,
+    ACTIVE_PROOF_PATH_BLOCKER,
+    GENERATED_CACHE_DIAGNOSTIC,
     LANE_DIAGNOSTIC_WARNING,
     LANE_FAILED,
     LANE_INCOMPLETE,
@@ -64,29 +66,31 @@ def test_all_lanes_run_successfully_is_ready(tmp_path: Path) -> None:
     assert written["markdown"].read_text(encoding="utf-8").startswith("# Track B Weekly Maintenance")
 
 
-def test_historical_critical_lane_stale_blocks_only_when_configured_proof_critical(tmp_path: Path) -> None:
+def test_stale_mgc_historical_data_is_optional_runner_blocking_not_canonical(tmp_path: Path) -> None:
     _write_stale_data_maintenance_report(tmp_path)
 
     diagnostic = build_track_b_weekly_maintenance_orchestrator(
         config=TrackBWeeklyMaintenanceOrchestratorConfig(
             repo_root=tmp_path,
-            historical_data_proof_critical=False,
+            maintained_history_runner_enabled=False,
         ),
         now=NOW,
     )
-    proof_critical = build_track_b_weekly_maintenance_orchestrator(
+    optional_runner = build_track_b_weekly_maintenance_orchestrator(
         config=TrackBWeeklyMaintenanceOrchestratorConfig(
             repo_root=tmp_path,
-            historical_data_proof_critical=True,
+            maintained_history_runner_enabled=True,
         ),
         now=NOW,
     )
 
     assert diagnostic["overall_classification"] == WEEKLY_MAINTENANCE_READY
     assert diagnostic["completion_status"] == COMPLETION_COMPLETE_WITH_DIAGNOSTICS
-    assert diagnostic["proof_blocking_findings"] == []
-    assert proof_critical["overall_classification"] == WEEKLY_MAINTENANCE_ALERT_REQUIRED
-    assert proof_critical["proof_blocking_findings"][0]["lane_id"] == "historical_data_maintenance"
+    assert diagnostic["canonical_proof_blocking_findings"] == []
+    assert diagnostic["optional_strategy_blocking_findings"] == []
+    assert optional_runner["overall_classification"] == WEEKLY_MAINTENANCE_READY
+    assert optional_runner["canonical_proof_blocking_findings"] == []
+    assert optional_runner["optional_strategy_blocking_findings"][0]["lane_id"] == "historical_data_maintenance"
 
 
 def test_artifact_hygiene_warning_is_diagnostic_not_proof_blocking(tmp_path: Path) -> None:
@@ -112,7 +116,7 @@ def test_artifact_hygiene_warning_is_diagnostic_not_proof_blocking(tmp_path: Pat
     assert payload["diagnostic_findings"][0]["lane_id"] == "artifact_hygiene"
 
 
-def test_archive_planner_scan_block_is_diagnostic_but_active_authority_risk_blocks(tmp_path: Path) -> None:
+def test_archive_planner_scan_block_is_maintenance_incomplete_not_canonical(tmp_path: Path) -> None:
     _write_good_data_maintenance_report(tmp_path)
 
     diagnostic = build_track_b_weekly_maintenance_orchestrator(
@@ -125,9 +129,19 @@ def test_archive_planner_scan_block_is_diagnostic_but_active_authority_risk_bloc
                 "reason": "Archive planner scan limit reached.",
                 "proof_blocking": False,
                 "diagnostic_only": True,
+                "maintenance_incomplete": True,
             }
         },
     )
+
+    assert diagnostic["overall_classification"] == WEEKLY_MAINTENANCE_ALERT_REQUIRED
+    assert diagnostic["canonical_proof_blocking_findings"] == []
+    assert diagnostic["maintenance_incomplete_findings"][0]["lane_id"] == "artifact_archive_planner"
+
+
+def test_active_authority_archive_risk_remains_canonical_proof_blocker(tmp_path: Path) -> None:
+    _write_good_data_maintenance_report(tmp_path)
+
     active_authority = build_track_b_weekly_maintenance_orchestrator(
         config=TrackBWeeklyMaintenanceOrchestratorConfig(repo_root=tmp_path),
         now=NOW,
@@ -136,15 +150,14 @@ def test_archive_planner_scan_block_is_diagnostic_but_active_authority_risk_bloc
                 "classification": LANE_PROOF_BLOCKED,
                 "status": "blocked",
                 "reason": "Archive planner saw current/latest authority in candidates.",
-                "proof_blocking": True,
+                "canonical_proof_blocking": True,
                 "diagnostic_only": False,
             }
         },
     )
 
-    assert diagnostic["overall_classification"] == WEEKLY_MAINTENANCE_READY
-    assert active_authority["overall_classification"] == WEEKLY_MAINTENANCE_ALERT_REQUIRED
-    assert active_authority["proof_blocking_findings"][0]["lane_id"] == "artifact_archive_planner"
+    assert active_authority["overall_classification"] == orchestrator.WEEKLY_MAINTENANCE_PROOF_BLOCKED
+    assert active_authority["canonical_proof_blocking_findings"][0]["lane_id"] == "artifact_archive_planner"
 
 
 def test_lane_failure_is_failed(tmp_path: Path) -> None:
@@ -169,11 +182,31 @@ def test_lane_failure_is_failed(tmp_path: Path) -> None:
     assert payload["lanes_failed"] == ["research_offline_labeling_check"]
 
 
-def test_old_root_contamination_blocks_proof(tmp_path: Path) -> None:
+def test_pycache_old_root_hits_are_diagnostic_only(tmp_path: Path) -> None:
     _write_good_data_maintenance_report(tmp_path)
-    bad_script = tmp_path / "scripts" / "bad.sh"
-    bad_script.parent.mkdir(parents=True, exist_ok=True)
-    bad_script.write_text(
+    cache = tmp_path / "src" / "validation_layer" / "__pycache__" / "models.cpython-311.pyc"
+    cache.parent.mkdir(parents=True, exist_ok=True)
+    cache.write_text(
+        "/Users/patrick/Documents/MGC-v05l-automation/src/validation_layer/models.py\n",
+        encoding="utf-8",
+    )
+
+    payload = build_track_b_weekly_maintenance_orchestrator(
+        config=TrackBWeeklyMaintenanceOrchestratorConfig(repo_root=tmp_path),
+        now=NOW,
+    )
+
+    assert payload["overall_classification"] == WEEKLY_MAINTENANCE_READY
+    assert payload["canonical_proof_blocking_findings"] == []
+    details = payload["lanes"][6]["summary"]["old_root_hit_details"]
+    assert details[0]["severity"] == GENERATED_CACHE_DIAGNOSTIC
+
+
+def test_active_launch_preflight_old_root_hit_is_canonical_proof_blocker(tmp_path: Path) -> None:
+    _write_good_data_maintenance_report(tmp_path)
+    preflight = tmp_path / "scripts" / "track_b_paper_preflight.sh"
+    preflight.parent.mkdir(parents=True, exist_ok=True)
+    preflight.write_text(
         "/Users/patrick/Documents/MGC-v05l-automation/scripts/run_probationary_paper_soak.sh\n",
         encoding="utf-8",
     )
@@ -183,9 +216,10 @@ def test_old_root_contamination_blocks_proof(tmp_path: Path) -> None:
         now=NOW,
     )
 
-    assert payload["overall_classification"] == WEEKLY_MAINTENANCE_ALERT_REQUIRED
-    assert payload["old_root_hits"] == ["scripts/bad.sh:1"]
-    assert any(item["lane_id"] == "old_root_contamination_check" for item in payload["proof_blocking_findings"])
+    assert payload["overall_classification"] == orchestrator.WEEKLY_MAINTENANCE_PROOF_BLOCKED
+    assert payload["old_root_hits"] == ["scripts/track_b_paper_preflight.sh:1"]
+    assert payload["old_root_active_path_blockers"][0]["severity"] == ACTIVE_PROOF_PATH_BLOCKER
+    assert payload["canonical_proof_blocking_findings"][0]["lane_id"] == "old_root_contamination_check"
 
 
 def test_research_offline_unlabeled_is_diagnostic(tmp_path: Path) -> None:
@@ -272,7 +306,39 @@ def test_sunday_1600_incomplete_expires_and_blocks_proof(tmp_path: Path) -> None
     assert payload["completion_status"] == "WINDOW_EXPIRED"
     assert payload["next_retry_at"] is None
     assert payload["alert_required"] is True
-    assert any(item["lane_id"] == "weekly_maintenance_window" for item in payload["proof_blocking_findings"])
+    assert payload["canonical_proof_blocking_findings"] == []
+    assert payload["maintenance_incomplete_findings"][0]["lane_id"] == "artifact_hygiene"
+
+
+def test_final_readiness_context_separates_canonical_from_diagnostics(tmp_path: Path) -> None:
+    _write_good_data_maintenance_report(tmp_path)
+
+    payload = build_track_b_weekly_maintenance_orchestrator(
+        config=TrackBWeeklyMaintenanceOrchestratorConfig(repo_root=tmp_path),
+        now=NOW,
+        lane_overrides={
+            "artifact_hygiene": {
+                "classification": LANE_DIAGNOSTIC_WARNING,
+                "status": "diagnostic",
+                "reason": "Diagnostic warning.",
+                "diagnostic_only": True,
+                "proof_blocking": False,
+            },
+            "artifact_archive_planner": {
+                "classification": LANE_DIAGNOSTIC_WARNING,
+                "status": "attention",
+                "reason": "Archive planner scan limit reached.",
+                "diagnostic_only": True,
+                "maintenance_incomplete": True,
+            },
+        },
+    )
+
+    final_lane = [lane for lane in payload["lanes"] if lane["lane_id"] == "final_control_plane_readiness_context"][0]
+    assert payload["canonical_proof_blocking_findings"] == []
+    assert payload["maintenance_incomplete_findings"][0]["lane_id"] == "artifact_archive_planner"
+    assert final_lane["summary"]["canonical_proof_blocking_count"] == 0
+    assert final_lane["summary"]["maintenance_incomplete_count"] == 1
 
 
 def test_completed_week_is_already_complete_noop(tmp_path: Path) -> None:

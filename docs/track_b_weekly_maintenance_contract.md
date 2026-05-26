@@ -83,6 +83,27 @@ Proof stance:
 - It is not a substitute for Phase-1 runtime market-data artifacts or runtime
   ingestion proof.
 - It does not provide proof authority by itself.
+- Missing or stale maintained history is an optional strategy-runner blocker
+  only when that runner explicitly enables maintained-history dependency
+  checks. It must not block unrelated PAPER proof/runtime readiness when current
+  Phase-1, broker, Guardian, Control Plane, and Safe-State authority are clean.
+
+Databento key handling:
+
+- Maintenance jobs may read `DATABENTO_API_KEY` from the approved local
+  environment, but reports and logs must never print the secret.
+- For shell-launched maintenance, export `.env.local` values before invoking
+  Python:
+
+```bash
+set -a
+source .env.local
+set +a
+./.venv/bin/python -m mgc_v05l.execution_core.track_b_data_maintenance_cli
+```
+
+- Operators should verify only presence/absence of `DATABENTO_API_KEY`, never
+  the value itself.
 
 ## Sunday PAPER Proof Readiness
 
@@ -123,7 +144,10 @@ Required state fields:
 - `attempts`
 - `lanes_complete`
 - `lanes_failed`
-- `proof_blocking_findings`
+- `canonical_proof_blocking_findings`
+- `optional_strategy_blocking_findings`
+- `maintenance_incomplete_findings`
+- `proof_blocking_findings` as a compatibility alias for canonical blockers
 - `alert_required`
 
 Schedule doctrine:
@@ -136,7 +160,9 @@ Schedule doctrine:
   `WEEKLY_MAINTENANCE_ALREADY_COMPLETE`;
 - alerts begin Sunday 01:00 America/New_York if maintenance is still incomplete;
 - alerts continue hourly until success or Sunday 16:00 America/New_York;
-- Sunday 16:00 incomplete becomes proof-blocking/window-expired posture.
+- Sunday 16:00 incomplete becomes window-expired maintenance posture. It is
+  canonical proof-blocking only when the incomplete lane reports a current
+  active proof/runtime path blocker.
 
 Retry classifications:
 
@@ -146,6 +172,15 @@ Retry classifications:
 - `WEEKLY_MAINTENANCE_ALERT_REQUIRED`
 - `WEEKLY_MAINTENANCE_PROOF_BLOCKED`
 - `WEEKLY_MAINTENANCE_WINDOW_EXPIRED`
+
+Old-root contamination policy:
+
+- Active proof/runtime path hits remain canonical blockers.
+- Research/offline docs, generated caches, and archived diagnostics are
+  reported as diagnostics unless they are consumed by an active proof/runtime
+  path.
+- Guard code that names old-root fragments solely to reject them is not itself
+  a contamination hit.
 
 Notification stance:
 

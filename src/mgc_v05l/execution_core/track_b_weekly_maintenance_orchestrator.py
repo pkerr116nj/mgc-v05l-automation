@@ -31,6 +31,8 @@ from mgc_v05l.execution_core.track_b_artifact_archive_executor import (
 )
 from mgc_v05l.execution_core.track_b_artifact_archive_planner import (
     ARCHIVE_PLAN_BLOCKED_ACTIVE_AUTHORITY,
+    ARCHIVE_PLAN_BLOCKED_SCAN_LIMIT,
+    ARCHIVE_PLAN_BLOCKED_UNRESOLVED_LIFECYCLE,
     ARCHIVE_PLAN_EMPTY,
     ARCHIVE_PLAN_READY,
     TrackBArtifactArchivePlannerConfig,
@@ -68,6 +70,13 @@ LANE_DIAGNOSTIC_WARNING = "LANE_DIAGNOSTIC_WARNING"
 LANE_PROOF_BLOCKED = "LANE_PROOF_BLOCKED"
 LANE_INCOMPLETE = "LANE_INCOMPLETE"
 LANE_FAILED = "LANE_FAILED"
+
+ACTIVE_PROOF_PATH_BLOCKER = "ACTIVE_PROOF_PATH_BLOCKER"
+ACTIVE_RUNTIME_PATH_BLOCKER = "ACTIVE_RUNTIME_PATH_BLOCKER"
+RESEARCH_OR_OFFLINE_DIAGNOSTIC = "RESEARCH_OR_OFFLINE_DIAGNOSTIC"
+GENERATED_CACHE_DIAGNOSTIC = "GENERATED_CACHE_DIAGNOSTIC"
+DOC_DIAGNOSTIC = "DOC_DIAGNOSTIC"
+OTHER_DIAGNOSTIC = "OTHER_DIAGNOSTIC"
 
 LANE_IDS = (
     "historical_data_maintenance",
@@ -107,6 +116,7 @@ class TrackBWeeklyMaintenanceOrchestratorConfig:
     max_old_root_scan_files: int = 5000
     write_lane_artifacts: bool = True
     force: bool = False
+    maintained_history_runner_enabled: bool = False
 
     def resolve(self, path: Path) -> Path:
         return path if path.is_absolute() else self.repo_root / path
@@ -145,19 +155,24 @@ def build_track_b_weekly_maintenance_orchestrator(
             )
 
     missing_lanes = sorted(set(LANE_IDS) - {str(lane.get("lane_id") or "") for lane in lanes})
-    proof_blockers = _proof_blocking_findings(lanes)
+    canonical_proof_blockers = _canonical_proof_blocking_findings(lanes)
+    optional_strategy_blockers = _optional_strategy_blocking_findings(lanes)
     diagnostics = _diagnostic_findings(lanes)
+    maintenance_incomplete = _maintenance_incomplete_findings(lanes)
     failures = [lane for lane in lanes if lane.get("classification") == LANE_FAILED]
     incomplete = [lane for lane in lanes if lane.get("classification") == LANE_INCOMPLETE]
     base_overall = _overall_classification(
         missing_lanes=missing_lanes,
         failures=failures,
         incomplete=incomplete,
-        proof_blockers=proof_blockers,
+        canonical_proof_blockers=canonical_proof_blockers,
+        maintenance_incomplete=maintenance_incomplete,
         diagnostics=diagnostics,
     )
     completion_status = _completion_status(
         base_overall=base_overall,
+        canonical_proof_blockers=canonical_proof_blockers,
+        maintenance_incomplete=maintenance_incomplete,
         diagnostics=diagnostics,
         actual_now=actual_now,
         window=window,
@@ -171,8 +186,6 @@ def build_track_b_weekly_maintenance_orchestrator(
     alert_required = _alert_required(actual_now=actual_now, window=window, completion_status=completion_status)
     next_retry_at = _next_retry_at(actual_now=actual_now, window=window, completion_status=completion_status)
     attempts = _attempt_count(previous_state) + 1
-    scheduled_blockers = _scheduled_proof_blockers(overall=overall, window=window)
-    all_proof_blockers = [*proof_blockers, *scheduled_blockers]
     artifact_archive_lane = _lane_by_id(lanes, "artifact_archive_planner")
     historical_lane = _lane_by_id(lanes, "historical_data_maintenance")
     old_root_lane = _lane_by_id(lanes, "old_root_contamination_check")
@@ -203,11 +216,16 @@ def build_track_b_weekly_maintenance_orchestrator(
         "lanes_failed_or_incomplete": [lane.get("lane_id") for lane in [*failures, *incomplete]],
         "lanes_incomplete": [lane.get("lane_id") for lane in incomplete],
         "missing_lanes": missing_lanes,
-        "proof_blocking_findings": all_proof_blockers,
+        "canonical_proof_blocking_findings": canonical_proof_blockers,
+        "optional_strategy_blocking_findings": optional_strategy_blockers,
+        "proof_blocking_findings": canonical_proof_blockers,
         "diagnostic_findings": diagnostics,
+        "maintenance_incomplete_findings": maintenance_incomplete,
         "archive_posture": artifact_archive_lane.get("summary", {}),
         "historical_data_posture": historical_lane.get("summary", {}),
         "old_root_hits": old_root_lane.get("summary", {}).get("old_root_hits", []),
+        "old_root_active_path_blockers": old_root_lane.get("summary", {}).get("active_path_blockers", []),
+        "sunday_proof_blocked": bool(canonical_proof_blockers),
         "recommended_actions": _recommended_actions(overall, lanes),
         "dry_run_only": True,
         "broker_mutation_allowed": False,
@@ -256,6 +274,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--output-path", type=Path, default=DEFAULT_OUTPUT_PATH)
     parser.add_argument("--markdown-report-root", type=Path, default=DEFAULT_MARKDOWN_REPORT_ROOT)
     parser.add_argument("--historical-data-proof-critical", action="store_true")
+    parser.add_argument("--maintained-history-runner-enabled", action="store_true")
     parser.add_argument("--force", action="store_true")
     parser.add_argument("--no-write", action="store_true")
     parser.add_argument("--json", action="store_true")
@@ -269,6 +288,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         output_path=Path(args.output_path),
         markdown_report_root=Path(args.markdown_report_root),
         historical_data_proof_critical=bool(args.historical_data_proof_critical),
+        maintained_history_runner_enabled=bool(args.maintained_history_runner_enabled),
         force=bool(args.force),
     )
     payload = build_track_b_weekly_maintenance_orchestrator(config=config)
@@ -280,7 +300,11 @@ def main(argv: Sequence[str] | None = None) -> int:
         "lanes_run": len(payload.get("lanes_run") or []),
         "lanes_failed": payload.get("lanes_failed"),
         "proof_blocking_findings": payload.get("proof_blocking_findings"),
+        "canonical_proof_blocking_findings": payload.get("canonical_proof_blocking_findings"),
+        "optional_strategy_blocking_findings": payload.get("optional_strategy_blocking_findings"),
+        "maintenance_incomplete_findings": payload.get("maintenance_incomplete_findings"),
         "diagnostic_findings_count": len(payload.get("diagnostic_findings") or []),
+        "sunday_proof_blocked": payload.get("sunday_proof_blocked"),
         "dry_run_only": True,
         "broker_mutation_allowed": False,
         "output_path": str(written.get("json") or config.resolve(config.output_path)),
@@ -337,17 +361,19 @@ def _historical_data_maintenance_lane(
     report = _read_json(path)
     cutoff = _prior_friday_close_utc(now)
     if not report:
-        classification = LANE_PROOF_BLOCKED if config.historical_data_proof_critical else LANE_DIAGNOSTIC_WARNING
+        classification = LANE_DIAGNOSTIC_WARNING
         return _lane_result(
             lane_id="historical_data_maintenance",
             classification=classification,
             status="missing",
             reason="Latest Track B data maintenance report is missing.",
-            proof_blocking=config.historical_data_proof_critical,
-            diagnostic_only=not config.historical_data_proof_critical,
+            proof_blocking=False,
+            diagnostic_only=True,
+            optional_strategy_blocking=config.maintained_history_runner_enabled,
             summary={
                 "expected_command": "python -m mgc_v05l.execution_core.track_b_data_maintenance_cli",
                 "expected_complete_through_prior_friday_close": cutoff.isoformat(),
+                "optional_mgc_runner_blocking": config.maintained_history_runner_enabled,
                 "report_path": str(path),
             },
         )
@@ -358,7 +384,7 @@ def _historical_data_maintenance_lane(
     ok = ready and complete and cutoff_ready
     classification = LANE_READY
     if not ok:
-        classification = LANE_PROOF_BLOCKED if config.historical_data_proof_critical else LANE_DIAGNOSTIC_WARNING
+        classification = LANE_DIAGNOSTIC_WARNING
     reason = (
         "MGC 1m historical maintenance is complete through prior Friday close."
         if ok
@@ -369,8 +395,9 @@ def _historical_data_maintenance_lane(
         classification=classification,
         status="ready" if ok else "attention",
         reason=reason,
-        proof_blocking=not ok and config.historical_data_proof_critical,
-        diagnostic_only=not config.historical_data_proof_critical,
+        proof_blocking=False,
+        diagnostic_only=True,
+        optional_strategy_blocking=not ok and config.maintained_history_runner_enabled,
         summary={
             "expected_command": "python -m mgc_v05l.execution_core.track_b_data_maintenance_cli",
             "data_maintenance_verdict": report.get("data_maintenance_verdict"),
@@ -378,6 +405,7 @@ def _historical_data_maintenance_lane(
             "complete_through_cutoff": complete,
             "expected_complete_through_prior_friday_close": cutoff.isoformat(),
             "proof_critical": config.historical_data_proof_critical,
+            "optional_mgc_runner_blocking": not ok and config.maintained_history_runner_enabled,
             "report_path": str(path),
         },
     )
@@ -453,6 +481,8 @@ def _artifact_archive_planner_lane(
         output_path = write_track_b_artifact_archive_plan(config=planner_config, payload=payload)
     classification = str(payload.get("classification") or "")
     active_authority_risk = classification == ARCHIVE_PLAN_BLOCKED_ACTIVE_AUTHORITY
+    maintenance_incomplete = classification == ARCHIVE_PLAN_BLOCKED_SCAN_LIMIT
+    lifecycle_diagnostic = classification == ARCHIVE_PLAN_BLOCKED_UNRESOLVED_LIFECYCLE
     ok = classification in {ARCHIVE_PLAN_READY, ARCHIVE_PLAN_EMPTY}
     return _lane_result(
         lane_id="artifact_archive_planner",
@@ -461,6 +491,7 @@ def _artifact_archive_planner_lane(
         reason="Archive planner completed; execution remains disabled.",
         proof_blocking=active_authority_risk,
         diagnostic_only=not active_authority_risk,
+        maintenance_incomplete=maintenance_incomplete,
         summary={
             "classification": classification,
             "hot_authority_protected_count": payload.get("hot_authority_protected_count"),
@@ -472,6 +503,8 @@ def _artifact_archive_planner_lane(
             "output_path": str(output_path or planner_config.resolve(planner_config.output_path)),
             "dry_run_only": True,
             "execution_enabled": False,
+            "maintenance_incomplete": maintenance_incomplete,
+            "active_lifecycle_diagnostic": lifecycle_diagnostic,
         },
     )
 
@@ -548,29 +581,41 @@ def _old_root_contamination_lane(
     *,
     config: TrackBWeeklyMaintenanceOrchestratorConfig,
 ) -> dict[str, Any]:
-    hits = _old_root_hits(repo_root=config.repo_root, max_files=config.max_old_root_scan_files)
+    hit_details = _old_root_hit_details(repo_root=config.repo_root, max_files=config.max_old_root_scan_files)
+    hits = [str(item.get("hit") or "") for item in hit_details]
+    active_path_blockers = [
+        item
+        for item in hit_details
+        if item.get("severity") in {ACTIVE_PROOF_PATH_BLOCKER, ACTIVE_RUNTIME_PATH_BLOCKER}
+    ]
     return _lane_result(
         lane_id="old_root_contamination_check",
-        classification=LANE_READY if not hits else LANE_PROOF_BLOCKED,
-        status="ready" if not hits else "blocked",
+        classification=LANE_READY if not active_path_blockers else LANE_PROOF_BLOCKED,
+        status="ready" if not active_path_blockers else "blocked",
         reason=(
             "No archived/Documents/iCloud root fragments found."
             if not hits
-            else "Archived-root fragments found in active project files."
+            else "Archived-root fragments found; active proof/runtime path hits are separated from diagnostics."
         ),
-        proof_blocking=bool(hits),
-        diagnostic_only=False,
+        proof_blocking=bool(active_path_blockers),
+        diagnostic_only=bool(hits) and not active_path_blockers,
         summary={
             "old_root_hits": hits[:20],
             "old_root_hit_count": len(hits),
+            "old_root_hit_details": hit_details[:20],
+            "active_path_blockers": active_path_blockers[:20],
+            "active_path_blocker_count": len(active_path_blockers),
+            "diagnostic_hit_count": max(0, len(hit_details) - len(active_path_blockers)),
             "fragments": list(ARCHIVED_ROOT_FRAGMENTS),
         },
     )
 
 
 def _final_context_lane(*, lanes: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
-    proof_blockers = _proof_blocking_findings(lanes)
+    proof_blockers = _canonical_proof_blocking_findings(lanes)
+    optional_blockers = _optional_strategy_blocking_findings(lanes)
     diagnostics = _diagnostic_findings(lanes)
+    maintenance_incomplete = _maintenance_incomplete_findings(lanes)
     return _lane_result(
         lane_id="final_control_plane_readiness_context",
         classification=LANE_READY if not proof_blockers else LANE_PROOF_BLOCKED,
@@ -581,13 +626,16 @@ def _final_context_lane(*, lanes: Sequence[Mapping[str, Any]]) -> dict[str, Any]
             else "Weekly maintenance found proof-blocking issues."
         ),
         proof_blocking=bool(proof_blockers),
-        diagnostic_only=False,
+        diagnostic_only=not proof_blockers and bool(diagnostics),
+        maintenance_incomplete=bool(maintenance_incomplete),
         summary={
             "sunday_proof_posture": (
                 "PROCEED_AFTER_FRESH_BARS_RETURN" if not proof_blockers else "BLOCKED_BY_MAINTENANCE"
             ),
-            "proof_blocking_count": len(proof_blockers),
+            "canonical_proof_blocking_count": len(proof_blockers),
+            "optional_strategy_blocking_count": len(optional_blockers),
             "diagnostic_count": len(diagnostics),
+            "maintenance_incomplete_count": len(maintenance_incomplete),
             "maintenance_creates_broker_order_lifecycle_authority": False,
         },
     )
@@ -601,6 +649,8 @@ def _lane_result(
     reason: str,
     proof_blocking: bool,
     diagnostic_only: bool,
+    optional_strategy_blocking: bool = False,
+    maintenance_incomplete: bool = False,
     summary: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     return {
@@ -609,7 +659,10 @@ def _lane_result(
         "status": status,
         "reason": reason,
         "proof_blocking": proof_blocking,
+        "canonical_proof_blocking": proof_blocking,
+        "optional_strategy_blocking": optional_strategy_blocking,
         "diagnostic_only": diagnostic_only,
+        "maintenance_incomplete": maintenance_incomplete,
         "dry_run_only": True,
         "broker_mutation_allowed": False,
         "order_mutation_allowed": False,
@@ -624,8 +677,10 @@ def _normalize_lane_result(*, lane_id: str, payload: Mapping[str, Any]) -> dict[
         classification=str(payload.get("classification") or LANE_READY),
         status=str(payload.get("status") or "ready"),
         reason=str(payload.get("reason") or "Injected lane result."),
-        proof_blocking=payload.get("proof_blocking") is True,
+        proof_blocking=payload.get("canonical_proof_blocking") is True or payload.get("proof_blocking") is True,
         diagnostic_only=payload.get("diagnostic_only") is not False,
+        optional_strategy_blocking=payload.get("optional_strategy_blocking") is True,
+        maintenance_incomplete=payload.get("maintenance_incomplete") is True,
         summary=_mapping(payload.get("summary")),
     )
     result.update({key: value for key, value in payload.items() if key not in result})
@@ -638,15 +693,18 @@ def _overall_classification(
     missing_lanes: Sequence[str],
     failures: Sequence[Mapping[str, Any]],
     incomplete: Sequence[Mapping[str, Any]],
-    proof_blockers: Sequence[Mapping[str, Any]],
+    canonical_proof_blockers: Sequence[Mapping[str, Any]],
+    maintenance_incomplete: Sequence[Mapping[str, Any]],
     diagnostics: Sequence[Mapping[str, Any]],
 ) -> str:
     if failures:
         return WEEKLY_MAINTENANCE_FAILED
     if missing_lanes or incomplete:
         return WEEKLY_MAINTENANCE_INCOMPLETE
-    if proof_blockers:
+    if canonical_proof_blockers:
         return WEEKLY_MAINTENANCE_PROOF_BLOCKED
+    if maintenance_incomplete:
+        return WEEKLY_MAINTENANCE_INCOMPLETE
     if diagnostics:
         return WEEKLY_MAINTENANCE_READY_WITH_DIAGNOSTICS
     return WEEKLY_MAINTENANCE_READY
@@ -655,16 +713,20 @@ def _overall_classification(
 def _completion_status(
     *,
     base_overall: str,
+    canonical_proof_blockers: Sequence[Mapping[str, Any]],
+    maintenance_incomplete: Sequence[Mapping[str, Any]],
     diagnostics: Sequence[Mapping[str, Any]],
     actual_now: datetime,
     window: Mapping[str, datetime | str],
 ) -> str:
+    if canonical_proof_blockers:
+        return COMPLETION_PROOF_BLOCKED
     if base_overall in {WEEKLY_MAINTENANCE_READY, WEEKLY_MAINTENANCE_READY_WITH_DIAGNOSTICS}:
         return COMPLETION_COMPLETE_WITH_DIAGNOSTICS if diagnostics else COMPLETION_COMPLETE
     if actual_now >= _window_datetime(window, "window_end"):
         return COMPLETION_WINDOW_EXPIRED
-    if base_overall == WEEKLY_MAINTENANCE_PROOF_BLOCKED:
-        return COMPLETION_PROOF_BLOCKED
+    if maintenance_incomplete:
+        return COMPLETION_INCOMPLETE
     return COMPLETION_INCOMPLETE
 
 
@@ -679,10 +741,10 @@ def _scheduled_classification(
         return WEEKLY_MAINTENANCE_READY
     if completion_status == COMPLETION_WINDOW_EXPIRED:
         return WEEKLY_MAINTENANCE_WINDOW_EXPIRED
-    if _alert_required(actual_now=actual_now, window=window, completion_status=completion_status):
-        return WEEKLY_MAINTENANCE_ALERT_REQUIRED
     if base_overall == WEEKLY_MAINTENANCE_PROOF_BLOCKED:
         return WEEKLY_MAINTENANCE_PROOF_BLOCKED
+    if _alert_required(actual_now=actual_now, window=window, completion_status=completion_status):
+        return WEEKLY_MAINTENANCE_ALERT_REQUIRED
     return WEEKLY_MAINTENANCE_RETRY_SCHEDULED
 
 
@@ -717,21 +779,6 @@ def _next_retry_at(
         return None
     next_hour = actual_now.replace(minute=0, second=0, microsecond=0) + timedelta(hours=1)
     return next_hour if next_hour <= window_end else window_end
-
-
-def _scheduled_proof_blockers(*, overall: str, window: Mapping[str, datetime | str]) -> list[dict[str, Any]]:
-    if overall != WEEKLY_MAINTENANCE_WINDOW_EXPIRED:
-        return []
-    return [
-        {
-            "lane_id": "weekly_maintenance_window",
-            "classification": WEEKLY_MAINTENANCE_WINDOW_EXPIRED,
-            "reason": (
-                "Weekly maintenance remained incomplete through "
-                f"{_window_datetime(window, 'window_end').isoformat()}."
-            ),
-        }
-    ]
 
 
 def _maintenance_window(now: datetime) -> dict[str, datetime | str]:
@@ -797,11 +844,16 @@ def _already_complete_payload(
         "lanes_failed_or_incomplete": [],
         "lanes_incomplete": [],
         "missing_lanes": [],
+        "canonical_proof_blocking_findings": [],
+        "optional_strategy_blocking_findings": list(_list(previous_state.get("optional_strategy_blocking_findings"))),
         "proof_blocking_findings": [],
         "diagnostic_findings": list(_list(previous_state.get("diagnostic_findings"))),
+        "maintenance_incomplete_findings": list(_list(previous_state.get("maintenance_incomplete_findings"))),
         "archive_posture": _mapping(previous_state.get("archive_posture")),
         "historical_data_posture": _mapping(previous_state.get("historical_data_posture")),
         "old_root_hits": list(_list(previous_state.get("old_root_hits"))),
+        "old_root_active_path_blockers": list(_list(previous_state.get("old_root_active_path_blockers"))),
+        "sunday_proof_blocked": False,
         "recommended_actions": ["Weekly maintenance already completed for this maintenance window."],
         "dry_run_only": True,
         "broker_mutation_allowed": False,
@@ -838,15 +890,42 @@ def _attempt_count(previous_state: Mapping[str, Any]) -> int:
         return 0
 
 
-def _proof_blocking_findings(lanes: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
+def _canonical_proof_blocking_findings(lanes: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
     return [
         {
             "lane_id": str(lane.get("lane_id") or ""),
             "classification": lane.get("classification"),
             "reason": lane.get("reason"),
+            "summary": _mapping(lane.get("summary")),
         }
         for lane in lanes
-        if lane.get("proof_blocking") is True
+        if lane.get("canonical_proof_blocking") is True or lane.get("proof_blocking") is True
+    ]
+
+
+def _optional_strategy_blocking_findings(lanes: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
+    return [
+        {
+            "lane_id": str(lane.get("lane_id") or ""),
+            "classification": lane.get("classification"),
+            "reason": lane.get("reason"),
+            "summary": _mapping(lane.get("summary")),
+        }
+        for lane in lanes
+        if lane.get("optional_strategy_blocking") is True
+    ]
+
+
+def _maintenance_incomplete_findings(lanes: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
+    return [
+        {
+            "lane_id": str(lane.get("lane_id") or ""),
+            "classification": lane.get("classification"),
+            "reason": lane.get("reason"),
+            "summary": _mapping(lane.get("summary")),
+        }
+        for lane in lanes
+        if lane.get("maintenance_incomplete") is True or lane.get("classification") == LANE_INCOMPLETE
     ]
 
 
@@ -872,9 +951,14 @@ def _recommended_actions(overall: str, lanes: Sequence[Mapping[str, Any]]) -> li
     if overall == WEEKLY_MAINTENANCE_ALERT_REQUIRED:
         return ["Weekly maintenance incomplete in the Sunday alert window; alert artifact review is required."]
     if overall == WEEKLY_MAINTENANCE_WINDOW_EXPIRED:
-        return ["Weekly maintenance window expired incomplete; treat as proof-blocking until resolved."]
+        return ["Weekly maintenance window expired incomplete; review maintenance posture before proof."]
     actions: list[str] = []
-    for finding in [*_proof_blocking_findings(lanes), *_diagnostic_findings(lanes)]:
+    for finding in [
+        *_canonical_proof_blocking_findings(lanes),
+        *_optional_strategy_blocking_findings(lanes),
+        *_maintenance_incomplete_findings(lanes),
+        *_diagnostic_findings(lanes),
+    ]:
         actions.append(f"{finding['lane_id']}: {finding['reason']}")
     return actions or ["Review incomplete weekly maintenance lanes."]
 
@@ -893,9 +977,12 @@ def _render_markdown(payload: Mapping[str, Any]) -> str:
         f"- attempts: {payload.get('attempts')}",
         f"- next_retry_at: {payload.get('next_retry_at')}",
         f"- alert_required: {payload.get('alert_required')}",
+        f"- sunday_proof_blocked: {payload.get('sunday_proof_blocked')}",
         f"- dry_run_only: {payload.get('dry_run_only')}",
         f"- broker_mutation_allowed: {payload.get('broker_mutation_allowed')}",
-        f"- proof_blocking_findings: {len(payload.get('proof_blocking_findings') or [])}",
+        f"- canonical_proof_blocking_findings: {len(payload.get('canonical_proof_blocking_findings') or [])}",
+        f"- optional_strategy_blocking_findings: {len(payload.get('optional_strategy_blocking_findings') or [])}",
+        f"- maintenance_incomplete_findings: {len(payload.get('maintenance_incomplete_findings') or [])}",
         f"- diagnostic_findings: {len(payload.get('diagnostic_findings') or [])}",
         "",
         "## Lanes",
@@ -921,8 +1008,8 @@ def _lane_by_id(lanes: Sequence[Mapping[str, Any]], lane_id: str) -> Mapping[str
     return {}
 
 
-def _old_root_hits(*, repo_root: Path, max_files: int) -> list[str]:
-    hits: list[str] = []
+def _old_root_hit_details(*, repo_root: Path, max_files: int) -> list[dict[str, str]]:
+    hits: list[dict[str, str]] = []
     scanned = 0
     for root in (repo_root / "config", repo_root / "scripts", repo_root / "src"):
         if not root.exists():
@@ -937,11 +1024,77 @@ def _old_root_hits(*, repo_root: Path, max_files: int) -> list[str]:
                 text = path.read_text(encoding="utf-8", errors="ignore")
             except OSError:
                 continue
-            for line_number, line in enumerate(text.splitlines(), start=1):
+            lines = text.splitlines()
+            for line_number, line in enumerate(lines, start=1):
                 if any(fragment in line for fragment in ARCHIVED_ROOT_FRAGMENTS):
-                    hits.append(f"{_relative_text(path, repo_root)}:{line_number}")
+                    if _old_root_line_is_guard_only(lines=lines, line_number=line_number, line=line):
+                        continue
+                    relative = _relative_text(path, repo_root)
+                    hits.append(
+                        {
+                            "hit": f"{relative}:{line_number}",
+                            "path": relative,
+                            "line": str(line_number),
+                            "severity": _old_root_hit_severity(relative),
+                        }
+                    )
                     break
     return hits
+
+
+def _old_root_hit_severity(relative_path: str) -> str:
+    path = Path(relative_path)
+    parts = tuple(path.parts)
+    lowered = relative_path.lower()
+    if "__pycache__" in parts or lowered.endswith((".pyc", ".pyo")):
+        return GENERATED_CACHE_DIAGNOSTIC
+    if parts and parts[0] == "docs":
+        return DOC_DIAGNOSTIC
+    if "research" in parts or any(marker in lowered for marker in ("atp_", "us_open", "shadow", "replay")):
+        return RESEARCH_OR_OFFLINE_DIAGNOSTIC
+    if parts and parts[0] == "scripts":
+        name = path.name
+        if name in {
+            "track_b_paper_preflight.sh",
+            "run_probationary_paper_soak.sh",
+            "run_headless_supervised_paper_service.sh",
+            "show_headless_supervised_paper_status.sh",
+            "install_track_b_sunday_preflight_launchd.sh",
+        }:
+            return ACTIVE_PROOF_PATH_BLOCKER
+        if any(token in name for token in ("paper", "headless", "probationary", "operator", "broker_truth")):
+            return ACTIVE_RUNTIME_PATH_BLOCKER
+        return RESEARCH_OR_OFFLINE_DIAGNOSTIC
+    if parts[:3] == ("src", "mgc_v05l", "execution_core"):
+        return ACTIVE_PROOF_PATH_BLOCKER
+    if parts[:3] == ("src", "mgc_v05l", "app") and any(
+        token in lowered for token in ("operator_dashboard", "paper", "broker", "lifecycle", "runtime")
+    ):
+        return ACTIVE_RUNTIME_PATH_BLOCKER
+    return OTHER_DIAGNOSTIC
+
+
+def _old_root_line_is_guard_only(*, lines: Sequence[str], line_number: int, line: str) -> bool:
+    stripped = line.strip()
+    context_start = max(0, line_number - 4)
+    context = "\n".join(lines[context_start:line_number])
+    if "OLD_ROOT_PATTERNS" in context or "ARCHIVED_ROOT_FRAGMENTS" in context:
+        return True
+    guard_markers = (
+        "OLD_ROOT_UNSAFE",
+        "deprecated Documents/iCloud root",
+        "archived/Documents/iCloud root fragments",
+        "Refusing archived Documents/iCloud project root",
+        "is_archived_project_root",
+        "ALLOW_ARCHIVED_ROOT_FOR_TESTS",
+    )
+    if any(marker in line for marker in guard_markers):
+        return True
+    if (" in text" in stripped or " in line" in stripped or " in normalized" in stripped) and (
+        "Documents" in stripped or "Mobile Documents" in stripped or "iCloud" in stripped
+    ):
+        return True
+    return stripped.startswith("*\"/Users/patrick/Documents\"*") or stripped.startswith("*\"Mobile Documents\"*")
 
 
 def _prior_friday_close_utc(now: datetime) -> datetime:
