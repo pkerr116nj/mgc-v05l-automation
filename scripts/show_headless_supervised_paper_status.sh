@@ -490,6 +490,10 @@ from mgc_v05l.execution_core.track_b_runtime_truth_contract import (
     classify_runtime_launch_guard,
     runtime_generation_mismatches,
 )
+from mgc_v05l.execution_core.track_b_runtime_authority_resolver import (
+    RuntimeAuthorityResolverConfig,
+    resolve_track_b_runtime_authority,
+)
 
 status_path = Path(sys.argv[1])
 metadata_path = Path(sys.argv[2])
@@ -499,6 +503,7 @@ operator_path = Path(sys.argv[5])
 reconciliation_path = Path(sys.argv[6])
 launch_status_path = Path(sys.argv[7])
 expected_root = str(Path(sys.argv[8]).resolve())
+repo_root = Path(expected_root)
 
 def read_json(path: Path) -> dict:
     try:
@@ -551,6 +556,10 @@ config_in_force = read_json(config_path)
 operator_status = read_json(operator_path)
 reconciliation = read_json(reconciliation_path)
 launch_status = read_json(launch_status_path)
+runtime_authority = resolve_track_b_runtime_authority(
+    RuntimeAuthorityResolverConfig(repo_root=repo_root),
+    legacy_operator_status=operator_status,
+)
 probe = process_probe(pid_metadata.get("pid"))
 metadata_state = classify_pid_metadata(
     pid_metadata,
@@ -612,6 +621,15 @@ status["paper_runtime_generation_operator_status_freshness"] = artifact_freshnes
 status["paper_runtime_generation_duplicate_writer_state"] = (
     "DUPLICATE_WRITER_DETECTED" if duplicate_writer_detected else "NO_DUPLICATE_WRITER_EVIDENCE"
 )
+status["runtime_authority_resolver"] = runtime_authority
+status["runtime_authority_classification"] = runtime_authority.get("classification")
+status["runtime_authority_valid"] = runtime_authority.get("valid") is True
+status["runtime_authority_source"] = runtime_authority.get("source")
+status["runtime_authority_runtime_pid"] = runtime_authority.get("runtime_pid")
+status["runtime_authority_runtime_generation_id"] = runtime_authority.get("runtime_generation_id")
+status["runtime_authority_blockers"] = list(runtime_authority.get("blockers") or [])
+status["runtime_authority_diagnostics"] = list(runtime_authority.get("diagnostics") or [])
+status["runtime_authority_legacy_stale_policy"] = runtime_authority.get("legacy_stale_policy")
 status["paper_runtime_launch_guard"] = launch_guard
 status["paper_runtime_launch_guard_classification"] = launch_guard.get("classification")
 status["paper_runtime_launch_guard_cleanup_allowed"] = launch_guard.get("cleanup_allowed")
