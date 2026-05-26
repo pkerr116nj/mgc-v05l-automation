@@ -2,14 +2,29 @@
 
 Status: research/shadow only. No broker, order, lifecycle, live-money, or paper_proof authority is granted.
 
-## Current Findings
-- Closed broker-effect trades reviewed: 25
-- Attribution classification counts: `{"ENTRY_GOOD_ORDER_MANAGEMENT_BAD": 20, "INCONCLUSIVE": 5}`
-- Shadow recommendation counts: `{"COLLECT_MORE_FORWARD_EVIDENCE": 25}`
+## A. All Closed Trades / Evidence Completeness
+- Closed broker-effect trades reviewed: 65
+- Attribution classification counts: `{"INCOMPLETE_FILL_EVIDENCE": 15, "INCONCLUSIVE": 50}`
+- Shadow recommendation counts: `{"EXCLUDED_BUG_FIX_EXIT": 63, "EXCLUDED_UNKNOWN_EXIT_INTENT": 2}`
 
-## Top Root Causes
-- ENTRY_GOOD_ORDER_MANAGEMENT_BAD: Missing or incomplete close fill/price evidence prevents reliable P&L and exit-quality attribution. (20)
-- INCONCLUSIVE: Timestamp-coherent candle or fill evidence is incomplete. (5)
+## B. Exit Intent Classification
+- Intent counts: `{"BUG_FIX_EXIT": 63, "UNKNOWN_EXIT_INTENT": 2}`
+- Contamination flags: `{"aggregate_close_repair": 8, "broker_flat_reconciliation_cleanup": 37, "duplicate_exit_resolution": 1, "leak_test_trade": 44, "manual_intervention_required": 65, "missing_fill_price": 15, "remediation_trade": 51}`
+
+## C. Bug-Fix / Remediation Exit Inventory
+- BUG_FIX_EXIT count: `63`
+- These trades are excluded from alpha-exit quality metrics by default.
+
+## D. True Strategy Exit-Quality Analysis
+- ALPHA_EXIT eligible count: `0`
+- ALPHA_EXIT classification counts: `{}`
+
+## E. Risk Exits
+- RISK_EXIT count: `0`
+- RISK_EXIT classification counts: `{}`
+
+## F. Recommendations
+- No clean alpha-exit underperformance recommendation yet; collect more eligible strategy exits.
 
 ## Shadow Policies
 - CURRENT_ACTUAL_MANAGED_EXIT
@@ -27,7 +42,7 @@ Status: research/shadow only. No broker, order, lifecycle, live-money, or paper_
 - explainable_rules_only: Rules use participation, MFE/giveback, thesis failure, and session/regime evidence; no black-box promotion.
 
 ## Recommended Next Slice
-Collect fill-price-complete closed trades and compare fixed time-box against profit-harvest on timestamp-coherent windows.
+Collect more clean ALPHA_EXIT samples with timestamp-coherent candles before changing live exits.
 
 ## Safety
 - `submit_allowed=false`
