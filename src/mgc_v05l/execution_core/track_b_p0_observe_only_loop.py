@@ -41,6 +41,13 @@ from mgc_v05l.execution_core.track_b_paper_proof_readiness import (
     build_track_b_paper_proof_readiness,
     write_track_b_paper_proof_readiness,
 )
+from mgc_v05l.execution_core.track_b_research_shadow_drift import (
+    TrackBResearchShadowDriftConfig,
+    build_gap_drift_continuation_shadow,
+    build_late_join_asian_drift_shadow,
+    build_p0_near_miss_shadow,
+    write_research_shadow_payloads,
+)
 from mgc_v05l.execution_core.track_b_session_strategy_envelope_producer import (
     produce_track_b_session_strategy_envelopes,
 )
@@ -266,14 +273,22 @@ def _run_iteration(
                 "required_next_action": "Keep P0 observe-only loop stopped while Safe-State is not normal.",
             }
 
-        envelope_context = _refresh_p0_envelopes(config=config, stages=stages, now=now)
+        envelope_context = _refresh_p0_envelopes(config=config, stages=stages, now=now, snapshot=snapshot)
         cycle = stages.multi_strategy_cycle(config, now, envelope_context)
         cycle_report = dict(getattr(cycle, "report", {}) or {})
         cycle_verdict = str(cycle_report.get("multi_strategy_runtime_cycle_verdict") or "")
+        p0_near_miss_shadow = _p0_near_miss_shadow_diagnostics(
+            config=config,
+            now=now,
+            cycle_report=cycle_report,
+            cycle_report_path=getattr(cycle, "report_json", None),
+            prior_shadow_diagnostics=envelope_context.get("research_shadow_diagnostics"),
+        )
         if not cycle_verdict:
             return {
                 **base,
                 **envelope_context["iteration_fields"],
+                "p0_near_miss_shadow": _p0_near_miss_shadow_summary(p0_near_miss_shadow),
                 "classification": P0_OBSERVE_LOOP_CYCLE_FAILED,
                 "primary_blocker": "Multi-strategy cycle did not return a verdict.",
                 "required_next_action": "Review P0 multi-strategy cycle stage diagnostics before continuing.",
@@ -289,6 +304,7 @@ def _run_iteration(
             "cycle_broker_mutation_allowed": cycle_report.get("cycle_broker_mutation_allowed") is True,
             "candidate_signal_count": len(cycle_report.get("candidate_signals") or []),
             "suppressed_signal_count": len(cycle_report.get("suppressed_signals") or []),
+            "p0_near_miss_shadow": _p0_near_miss_shadow_summary(p0_near_miss_shadow),
             "per_strategy": _per_strategy_summary(cycle_report),
             "continuation_aware_exit": _continuation_summary(snapshot),
             "primary_blocker": cycle_report.get("primary_blocker"),
@@ -308,6 +324,7 @@ def _refresh_p0_envelopes(
     config: TrackBP0ObserveOnlyLoopConfig,
     stages: TrackBP0ObserveOnlyLoopStages,
     now: datetime,
+    snapshot: Mapping[str, Any],
 ) -> dict[str, Any]:
     asian = stages.asian_drift(config, now)
     session = stages.session_envelopes(config, now)
@@ -330,6 +347,13 @@ def _refresh_p0_envelopes(
         "mnq_first_bear_snap_turn": _path_str(getattr(snap, "first_bear_snap_turn_event_json", None)),
         "mnq_first_bull_snap_turn": _path_str(getattr(snap, "first_bull_snap_turn_event_json", None)),
     }
+    shadow_diagnostics = _research_shadow_diagnostics(
+        config=config,
+        now=now,
+        asian_report=asian_report,
+        asian_report_path=getattr(asian, "report_json", None),
+        safe_state=snapshot,
+    )
     iteration_fields = {
         "envelope_refresh": {
             "asian_drift_watch_verdict": asian_report.get("asian_drift_watch_verdict"),
@@ -343,6 +367,7 @@ def _refresh_p0_envelopes(
             "envelope_paths": envelope_paths,
         },
         "late_join_asian_drift_diagnostic": _asian_late_join_summary(asian_report),
+        "research_shadow_diagnostics": _research_shadow_summary(shadow_diagnostics),
     }
     return {
         "iteration_fields": iteration_fields,
@@ -355,6 +380,7 @@ def _refresh_p0_envelopes(
         ),
         "mnq_first_bear_snap_turn_event_json": getattr(snap, "first_bear_snap_turn_event_json", None),
         "mnq_first_bull_snap_turn_event_json": getattr(snap, "first_bull_snap_turn_event_json", None),
+        "research_shadow_diagnostics": shadow_diagnostics,
     }
 
 
@@ -606,6 +632,113 @@ def _asian_late_join_summary(report: Mapping[str, Any]) -> dict[str, Any]:
         "operator_explanation": report.get("operator_explanation"),
         "submit_allowed": report.get("submit_allowed") is True,
         "no_mutation": report.get("no_mutation") is True,
+    }
+
+
+def _research_shadow_diagnostics(
+    *,
+    config: TrackBP0ObserveOnlyLoopConfig,
+    now: datetime,
+    asian_report: Mapping[str, Any],
+    asian_report_path: Any,
+    safe_state: Mapping[str, Any],
+) -> dict[str, Any]:
+    shadow_config = TrackBResearchShadowDriftConfig(repo_root=config.repo_root)
+    late_join = build_late_join_asian_drift_shadow(
+        config=shadow_config,
+        asian_report=asian_report,
+        asian_report_path=Path(str(asian_report_path)) if asian_report_path else None,
+        now=now,
+    )
+    gap_drift = build_gap_drift_continuation_shadow(
+        config=shadow_config,
+        runtime_candles_payload=_read_json(config.resolve(config.mgc_5m_candles_path)),
+        runtime_candles_path=config.resolve(config.mgc_5m_candles_path),
+        safe_state=safe_state,
+        now=now,
+    )
+    paths = write_research_shadow_payloads(
+        config=shadow_config,
+        late_join_shadow=late_join,
+        gap_drift_shadow=gap_drift,
+    )
+    return {
+        "late_join_asian_drift_shadow": late_join,
+        "gap_drift_continuation_shadow": gap_drift,
+        **paths,
+    }
+
+
+def _p0_near_miss_shadow_diagnostics(
+    *,
+    config: TrackBP0ObserveOnlyLoopConfig,
+    now: datetime,
+    cycle_report: Mapping[str, Any],
+    cycle_report_path: Any,
+    prior_shadow_diagnostics: Any,
+) -> dict[str, Any]:
+    shadow_config = TrackBResearchShadowDriftConfig(repo_root=config.repo_root)
+    near_miss = build_p0_near_miss_shadow(
+        config=shadow_config,
+        cycle_report=cycle_report,
+        cycle_report_path=Path(str(cycle_report_path)) if cycle_report_path else None,
+        now=now,
+    )
+    prior = prior_shadow_diagnostics if isinstance(prior_shadow_diagnostics, Mapping) else {}
+    paths = write_research_shadow_payloads(
+        config=shadow_config,
+        late_join_shadow=prior.get("late_join_asian_drift_shadow") or {},
+        gap_drift_shadow=prior.get("gap_drift_continuation_shadow") or {},
+        p0_near_miss_shadow=near_miss,
+    )
+    return {
+        "p0_near_miss_shadow": near_miss,
+        **paths,
+    }
+
+
+def _research_shadow_summary(payload: Mapping[str, Any]) -> dict[str, Any]:
+    late_join = payload.get("late_join_asian_drift_shadow")
+    gap_drift = payload.get("gap_drift_continuation_shadow")
+    late_join_payload = late_join if isinstance(late_join, Mapping) else {}
+    gap_drift_payload = gap_drift if isinstance(gap_drift, Mapping) else {}
+    return {
+        "late_join_asian_drift_shadow_classification": late_join_payload.get("shadow_classification"),
+        "late_join_hypothetical_direction": late_join_payload.get("hypothetical_direction"),
+        "late_join_hypothetical_score": late_join_payload.get("hypothetical_score"),
+        "gap_drift_continuation_shadow_classification": gap_drift_payload.get("shadow_classification"),
+        "gap_drift_symbol": gap_drift_payload.get("symbol"),
+        "gap_drift_hypothetical_direction": gap_drift_payload.get("hypothetical_direction"),
+        "gap_drift_hypothetical_score": gap_drift_payload.get("hypothetical_score"),
+        "dry_run_only": True,
+        "research_only": True,
+        "submit_allowed": False,
+        "broker_mutation_allowed": False,
+        "not_order_authority": True,
+        "not_lifecycle_authority": True,
+        "latest_late_join_asian_drift_shadow_path": payload.get("latest_late_join_asian_drift_shadow_path"),
+        "latest_gap_drift_continuation_shadow_path": payload.get("latest_gap_drift_continuation_shadow_path"),
+    }
+
+
+def _p0_near_miss_shadow_summary(payload: Mapping[str, Any]) -> dict[str, Any]:
+    near_miss = payload.get("p0_near_miss_shadow")
+    near_miss_payload = near_miss if isinstance(near_miss, Mapping) else {}
+    return {
+        "shadow_classification": near_miss_payload.get("shadow_classification"),
+        "b_grade_candidate_count": near_miss_payload.get("b_grade_candidate_count"),
+        "primary_shadow_strategy_id": near_miss_payload.get("primary_shadow_strategy_id"),
+        "primary_entry_grade": near_miss_payload.get("primary_entry_grade"),
+        "hypothetical_direction": near_miss_payload.get("hypothetical_direction"),
+        "hypothetical_score": near_miss_payload.get("hypothetical_score"),
+        "entry_grade_summary": near_miss_payload.get("entry_grade_summary"),
+        "dry_run_only": True,
+        "research_only": True,
+        "submit_allowed": False,
+        "broker_mutation_allowed": False,
+        "not_order_authority": True,
+        "not_lifecycle_authority": True,
+        "latest_p0_near_miss_shadow_path": payload.get("latest_p0_near_miss_shadow_path"),
     }
 
 

@@ -229,6 +229,8 @@ def test_one_iteration_success_writes_latest_and_event_log(tmp_path: Path) -> No
     assert payload["completed_iterations"] == 1
     assert payload["iterations"][0]["classification"] == P0_OBSERVE_LOOP_ITERATION_OK
     assert payload["iterations"][0]["cycle_verdict"] == "TRACK_B_MULTI_STRATEGY_RUNTIME_NO_SIGNAL_NO_MUTATION"
+    assert payload["iterations"][0]["p0_near_miss_shadow"]["submit_allowed"] is False
+    assert payload["iterations"][0]["p0_near_miss_shadow"]["research_only"] is True
     assert payload["iterations"][0]["submit_attempted"] is False
     assert payload["iterations"][0]["broker_state_mutated"] is False
     assert calls.phase1 == calls.proof == calls.control == calls.asian == calls.session == calls.snap == calls.cycle == 1
@@ -338,10 +340,15 @@ def test_missing_anchor_diagnostic_surfaces_in_iteration_report(tmp_path: Path) 
     )
 
     diagnostic = payload["iterations"][0]["late_join_asian_drift_diagnostic"]
+    shadow = payload["iterations"][0]["research_shadow_diagnostics"]
     assert diagnostic["late_join_diagnostic"] is True
     assert diagnostic["late_join_policy"] == "DIAGNOSTIC_ONLY"
     assert diagnostic["submit_allowed"] is False
     assert "Strong drift observed" in diagnostic["operator_explanation"]
+    assert shadow["late_join_asian_drift_shadow_classification"] == "LATE_JOIN_ASIAN_DRIFT_SHADOW_CANDIDATE"
+    assert shadow["late_join_hypothetical_score"] == 5.72
+    assert shadow["submit_allowed"] is False
+    assert shadow["not_order_authority"] is True
 
 
 def test_dashboard_projection_is_not_consumed(tmp_path: Path) -> None:
