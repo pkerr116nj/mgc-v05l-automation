@@ -6,6 +6,7 @@ import os
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
+import mgc_v05l.app.track_b_paper_leak_test as leak_test_module
 from mgc_v05l.app.track_b_paper_leak_test import (
     LeakTestExposurePolicy,
     RESULT_CLASSIFICATIONS,
@@ -22,6 +23,7 @@ from mgc_v05l.app.track_b_paper_leak_test import (
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 LANE_ID = "mnq_1x_ny_early_core__us_midday_long"
+MGC_LANE_ID = "mgc_1x_all_lanes__asia_early_long"
 
 
 def _runtime_command() -> str:
@@ -35,6 +37,34 @@ def _operator_status() -> dict[str, object]:
         "source_runtime_repo_root": str(REPO_ROOT),
         "source_runtime_command": _runtime_command(),
     }
+
+
+def _stale_operator_status() -> dict[str, object]:
+    return {
+        "source_runtime_pid": 99999999,
+        "source_runtime_cwd": str(REPO_ROOT),
+        "source_runtime_repo_root": str(REPO_ROOT),
+        "source_runtime_command": _runtime_command(),
+    }
+
+
+def _guarded_authority(**overrides: object) -> dict[str, object]:
+    payload: dict[str, object] = {
+        "valid": True,
+        "source": "guarded_paper_loop_control_plane",
+        "pid": os.getpid(),
+        "command": (
+            f"python -m mgc_v05l.execution_core.track_b_p0_observe_only_loop "
+            f"--repo-root {REPO_ROOT} --mode guarded-paper"
+        ),
+        "runtime_cwd": str(REPO_ROOT),
+        "runtime_generation_id": "track-b-paper-runtime-generation-test",
+        "duplicate_count": 1,
+        "blockers": (),
+        "process_count": 1,
+    }
+    payload.update(overrides)
+    return payload
 
 
 def _clean_flat_reconciliation(**overrides: object) -> dict[str, object]:
@@ -346,6 +376,41 @@ def _readiness_repo(
     return root
 
 
+def _write_phase1_runtime_candles(root: Path, *, symbol: str = "MNQ", timeframe: str = "1m", stale: bool = False) -> None:
+    generated_at = datetime.now(timezone.utc) - (timedelta(minutes=10) if stale else timedelta(seconds=15))
+    _write_json(
+        root
+        / "outputs"
+        / "track_b_execution_core"
+        / "phase1_runtime_market_data"
+        / symbol
+        / timeframe
+        / "latest_runtime_candles.json",
+        {
+            "generated_at": generated_at.isoformat(),
+            "symbol": symbol,
+            "timeframe": timeframe,
+            "source_id": f"DATABENTO_REALTIME_PHASE1_{symbol.lower()}",
+            "completed_candles_only": True,
+            "historical_seed_ready": False,
+            "realtime_feed_confirmed": True,
+            "archive_artifact_used": False,
+            "research_artifact_used": False,
+            "bars": [
+                {
+                    "bar_start": "2026-05-25T09:00:00+00:00",
+                    "bar_end": "2026-05-25T09:01:00+00:00",
+                    "open": 1,
+                    "high": 2,
+                    "low": 1,
+                    "close": 2,
+                    "completed": True,
+                }
+            ],
+        },
+    )
+
+
 def _selected_lane_row(**overrides: object) -> dict[str, object]:
     row: dict[str, object] = {
         "lane_id": LANE_ID,
@@ -584,6 +649,112 @@ def test_precheck_selected_lane_micro_stale_blocks_retryable(tmp_path: Path) -> 
     assert readiness["classification"] == "LEAK_TEST_MARKET_DATA_MICRO_STALE_RETRYABLE"
     assert readiness["ready"] is False
     assert "selected_lane_market_data_micro_stale_retryable" in readiness["blockers"]
+
+
+def test_precheck_uses_shared_services_authority_over_stale_legacy_readiness(monkeypatch, tmp_path: Path) -> None:
+    report = build_single_lane_dry_run_report(
+        repo_root=REPO_ROOT,
+        lane_id=LANE_ID,
+        reconciliation=_clean_flat_reconciliation(),
+        operator_status=_operator_status(),
+        runtime_command=_runtime_command(),
+    )
+    lane = _lane(report)
+    repo = _readiness_repo(
+        tmp_path,
+        selected_row=_selected_lane_row(
+            data_fresh=False,
+            bar_state="MARKET_DATA_STALE",
+            tradability_status="MARKET_DATA_STALE",
+            artifact_timeframe="3m",
+            expected_completed_bar_end_ts="2026-05-25T09:20:00+00:00",
+            observed_completed_bar_end_ts="2026-05-22T19:34:00+00:00",
+            market_data_lag_seconds=222300.0,
+            observed_bar_arrival_age_seconds=222300.0,
+        ),
+    )
+    _write_phase1_runtime_candles(repo, symbol="MNQ", timeframe="1m")
+    monkeypatch.setattr(leak_test_module, "_current_guarded_runtime_authority", lambda _repo_root: _guarded_authority())
+    monkeypatch.setattr(
+        leak_test_module,
+        "build_track_b_readiness_authority",
+        lambda **_kwargs: {
+            "ready": False,
+            "blockers": ("canonical_readiness_not_submit_capable", "runtime_not_running", "runtime_ingestion_not_fresh"),
+            "runtime_running": False,
+            "paper_runtime_ready": False,
+            "paper_trade_allowed": False,
+        },
+    )
+
+    readiness = _pre_apply_readiness_check(repo_root=repo, lane=lane, safety=report.safety)
+
+    assert readiness["classification"] == "LEAK_TEST_PRECHECK_READY"
+    assert readiness["ready"] is True
+    assert readiness["shared_services_authority_ready"] is True
+    assert readiness["selected_lane_market_data_fresh"] is True
+    assert readiness["selected_lane_authority_timeframe"] == "1m"
+    assert readiness["selected_lane_market_data"]["source_authority"] == "PHASE1_RUNTIME_MARKET_DATA"
+    assert "shared_services_authority_overrode_legacy_readiness" in readiness["warnings"]
+    assert "phase1_runtime_market_data_overrode_legacy_lane_readiness" in readiness["warnings"]
+    assert not readiness["blockers"]
+
+
+def test_precheck_blocks_when_shared_services_control_plane_is_blocked(monkeypatch, tmp_path: Path) -> None:
+    report = build_single_lane_dry_run_report(
+        repo_root=REPO_ROOT,
+        lane_id=LANE_ID,
+        reconciliation=_clean_flat_reconciliation(),
+        operator_status=_operator_status(),
+        runtime_command=_runtime_command(),
+    )
+    lane = _lane(report)
+    repo = _readiness_repo(tmp_path, selected_row=_selected_lane_row())
+    _write_phase1_runtime_candles(repo, symbol="MNQ", timeframe="1m")
+    monkeypatch.setattr(
+        leak_test_module,
+        "_current_guarded_runtime_authority",
+        lambda _repo_root: _guarded_authority(valid=False, blockers=("control_plane_not_ready",)),
+    )
+    monkeypatch.setattr(
+        leak_test_module,
+        "build_track_b_readiness_authority",
+        lambda **_kwargs: {
+            "ready": False,
+            "blockers": ("canonical_readiness_not_submit_capable",),
+            "runtime_running": False,
+            "paper_runtime_ready": False,
+            "paper_trade_allowed": False,
+        },
+    )
+
+    readiness = _pre_apply_readiness_check(repo_root=repo, lane=lane, safety=report.safety)
+
+    assert readiness["classification"] == "LEAK_TEST_PRECHECK_GOVERNANCE_NOT_READY"
+    assert "control_plane_not_ready" in readiness["blockers"]
+
+
+def test_precheck_legacy_lane_stale_blocks_when_phase1_authority_is_stale(monkeypatch, tmp_path: Path) -> None:
+    report = build_single_lane_dry_run_report(
+        repo_root=REPO_ROOT,
+        lane_id=LANE_ID,
+        reconciliation=_clean_flat_reconciliation(),
+        operator_status=_operator_status(),
+        runtime_command=_runtime_command(),
+    )
+    lane = _lane(report)
+    repo = _readiness_repo(
+        tmp_path,
+        selected_row=_selected_lane_row(data_fresh=False, bar_state="MARKET_DATA_STALE", tradability_status="MARKET_DATA_STALE"),
+    )
+    _write_phase1_runtime_candles(repo, symbol="MNQ", timeframe="1m", stale=True)
+    monkeypatch.setattr(leak_test_module, "_current_guarded_runtime_authority", lambda _repo_root: _guarded_authority())
+
+    readiness = _pre_apply_readiness_check(repo_root=repo, lane=lane, safety=report.safety)
+
+    assert readiness["classification"] == "LEAK_TEST_PRECHECK_SELECTED_LANE_MARKET_DATA_STALE"
+    assert "selected_lane_market_data_stale" in readiness["blockers"]
+    assert readiness["phase1_runtime_market_data"]["ready"] is False
 
 
 def test_apply_refuses_when_broker_lifecycle_not_reconciled() -> None:
@@ -844,7 +1015,12 @@ def test_operator_status_with_active_pid_and_dev_cwd_passes_runtime_verification
     assert "runtime_pid_not_active" not in report.lanes[0].blockers
 
 
-def test_operator_status_missing_cwd_blocks_runtime_verification() -> None:
+def test_operator_status_missing_cwd_blocks_runtime_verification(monkeypatch) -> None:
+    monkeypatch.setattr(
+        leak_test_module,
+        "_current_guarded_runtime_authority",
+        lambda _repo_root: _guarded_authority(valid=False, blockers=("guarded_paper_loop_process_missing",), process_count=0),
+    )
     operator_status = {
         "source_runtime_pid": os.getpid(),
         "source_runtime_command": _runtime_command(),
@@ -861,7 +1037,12 @@ def test_operator_status_missing_cwd_blocks_runtime_verification() -> None:
     assert "runtime_not_verified_from_dev_root" in report.lanes[0].blockers
 
 
-def test_operator_status_dead_pid_blocks_runtime_verification() -> None:
+def test_operator_status_dead_pid_blocks_runtime_verification(monkeypatch) -> None:
+    monkeypatch.setattr(
+        leak_test_module,
+        "_current_guarded_runtime_authority",
+        lambda _repo_root: _guarded_authority(valid=False, blockers=("guarded_paper_loop_process_missing",), process_count=0),
+    )
     report = build_single_lane_apply_report(
         repo_root=REPO_ROOT,
         lane_id=LANE_ID,
@@ -873,7 +1054,225 @@ def test_operator_status_dead_pid_blocks_runtime_verification() -> None:
     assert "runtime_pid_not_active" in report.lanes[0].blockers
 
 
-def test_operator_status_documents_cwd_blocks_runtime_verification() -> None:
+def test_stale_legacy_pid_ignored_when_current_guarded_authority_is_valid(monkeypatch) -> None:
+    monkeypatch.setattr(leak_test_module, "_current_guarded_runtime_authority", lambda _repo_root: _guarded_authority())
+
+    report = build_concurrent_plan_report(
+        repo_root=REPO_ROOT,
+        reconciliation=_clean_flat_reconciliation(),
+        operator_status=_stale_operator_status(),
+    )
+
+    lane = _lane(report)
+    assert report.safety.runtime_authority_source == "guarded_paper_loop_control_plane"
+    assert report.safety.runtime_pid == os.getpid()
+    assert report.safety.runtime_pid_active is True
+    assert report.safety.runtime_from_dev_root is True
+    assert "runtime_pid_not_active" not in lane.concurrent_blockers
+    assert "runtime_not_verified_from_dev_root" not in lane.concurrent_blockers
+    assert lane.safe_for_concurrent_test is True
+
+
+def test_stale_legacy_pid_blocks_when_current_guarded_authority_is_missing(monkeypatch) -> None:
+    monkeypatch.setattr(
+        leak_test_module,
+        "_current_guarded_runtime_authority",
+        lambda _repo_root: _guarded_authority(
+            valid=False,
+            pid=None,
+            command=None,
+            runtime_cwd=None,
+            duplicate_count=0,
+            blockers=("guarded_paper_loop_process_missing",),
+            process_count=0,
+        ),
+    )
+
+    report = build_concurrent_plan_report(
+        repo_root=REPO_ROOT,
+        reconciliation=_clean_flat_reconciliation(),
+        operator_status=_stale_operator_status(),
+    )
+
+    lane = _lane(report)
+    assert "runtime_pid_not_active" in lane.concurrent_blockers
+    assert "runtime_not_verified_from_dev_root" in lane.concurrent_blockers
+
+
+def test_explicit_metals_lane_flow_does_not_require_guarded_loop_when_authority_is_clean(monkeypatch) -> None:
+    monkeypatch.setattr(
+        leak_test_module,
+        "_current_guarded_runtime_authority",
+        lambda _repo_root: _guarded_authority(
+            valid=False,
+            pid=None,
+            command=None,
+            runtime_cwd=None,
+            blockers=("guarded_paper_loop_process_missing",),
+            process_count=0,
+        ),
+    )
+    monkeypatch.setattr(
+        leak_test_module,
+        "_explicit_lane_flow_authority",
+        lambda *, repo_root, metals_only: {
+            "ready": True,
+            "source": "explicit_metals_lane_control_plane",
+            "blockers": (),
+            "warnings": (),
+            "metals_only": metals_only,
+        },
+    )
+
+    report = build_concurrent_plan_report(
+        repo_root=REPO_ROOT,
+        reconciliation=_clean_flat_reconciliation(),
+        operator_status=_stale_operator_status(),
+        explicit_lane_flow=True,
+        metals_only=True,
+    )
+    lane = _lane(report, MGC_LANE_ID)
+
+    assert report.safety.runtime_authority_source == "explicit_lane_flow_control_plane"
+    assert "runtime_pid_not_active" not in lane.concurrent_blockers
+    assert "runtime_not_verified_from_dev_root" not in lane.concurrent_blockers
+    assert "guarded_paper_loop_process_missing" not in lane.concurrent_blockers
+    assert lane.safe_for_concurrent_test is True
+
+
+def test_explicit_metals_lane_flow_filters_equity_index_lanes(monkeypatch) -> None:
+    monkeypatch.setattr(
+        leak_test_module,
+        "_explicit_lane_flow_authority",
+        lambda *, repo_root, metals_only: {"ready": True, "blockers": (), "warnings": (), "metals_only": metals_only},
+    )
+
+    report = build_concurrent_plan_report(
+        repo_root=REPO_ROOT,
+        reconciliation=_clean_flat_reconciliation(),
+        operator_status=_stale_operator_status(),
+        explicit_lane_flow=True,
+        metals_only=True,
+        now=datetime(2026, 5, 25, 17, 45, tzinfo=timezone.utc),
+    )
+
+    symbols = {lane.symbol for lane in report.lanes}
+    assert symbols
+    assert symbols <= {"MGC", "GC", "PL"}
+    assert "MNQ" not in symbols
+    assert "PL" in symbols
+
+
+def test_explicit_metals_lane_flow_excludes_pl_after_230pm_et(monkeypatch) -> None:
+    monkeypatch.setattr(
+        leak_test_module,
+        "_explicit_lane_flow_authority",
+        lambda *, repo_root, metals_only: {"ready": True, "blockers": (), "warnings": (), "metals_only": metals_only},
+    )
+
+    report = build_concurrent_plan_report(
+        repo_root=REPO_ROOT,
+        reconciliation=_clean_flat_reconciliation(),
+        operator_status=_stale_operator_status(),
+        explicit_lane_flow=True,
+        metals_only=True,
+        now=datetime(2026, 5, 25, 18, 31, tzinfo=timezone.utc),
+    )
+
+    symbols = {lane.symbol for lane in report.lanes}
+    assert symbols
+    assert symbols <= {"MGC", "GC"}
+    assert "PL" not in symbols
+
+
+def test_explicit_metals_lane_flow_blocks_conflicting_mgc_exposure(monkeypatch) -> None:
+    monkeypatch.setattr(
+        leak_test_module,
+        "_explicit_lane_flow_authority",
+        lambda *, repo_root, metals_only: {"ready": True, "blockers": (), "warnings": (), "metals_only": metals_only},
+    )
+
+    report = build_concurrent_plan_report(
+        repo_root=REPO_ROOT,
+        reconciliation=_clean_managed_position_reconciliation(symbol="MGC", lane_id="existing_mgc_long"),
+        operator_status=_stale_operator_status(),
+        explicit_lane_flow=True,
+        metals_only=True,
+    )
+    lane = _lane(report, MGC_LANE_ID)
+
+    assert "max_positions_per_symbol_reached" in lane.concurrent_blockers
+    assert "same_symbol_conflict" in lane.concurrent_blockers
+
+
+def test_current_guarded_authority_wrong_root_blocks(monkeypatch) -> None:
+    monkeypatch.setattr(
+        leak_test_module,
+        "_current_guarded_runtime_authority",
+        lambda _repo_root: _guarded_authority(
+            valid=False,
+            runtime_cwd="/Users/patrick/Documents/MGC-v05l-automation",
+            blockers=("runtime_not_verified_from_dev_root", "runtime_from_documents_or_icloud"),
+        ),
+    )
+
+    report = build_concurrent_plan_report(
+        repo_root=REPO_ROOT,
+        reconciliation=_clean_flat_reconciliation(),
+        operator_status=_stale_operator_status(),
+    )
+
+    lane = _lane(report)
+    assert "runtime_not_verified_from_dev_root" in lane.concurrent_blockers
+    assert "runtime_from_documents_or_icloud" in lane.concurrent_blockers
+
+
+def test_current_guarded_authority_duplicate_writer_blocks(monkeypatch) -> None:
+    monkeypatch.setattr(
+        leak_test_module,
+        "_current_guarded_runtime_authority",
+        lambda _repo_root: _guarded_authority(
+            valid=False,
+            duplicate_count=2,
+            blockers=("duplicate_runtime_submitters",),
+        ),
+    )
+
+    report = build_concurrent_plan_report(
+        repo_root=REPO_ROOT,
+        reconciliation=_clean_flat_reconciliation(),
+        operator_status=_stale_operator_status(),
+    )
+
+    assert report.safety.duplicate_runtime_submitter_count == 2
+    assert "duplicate_runtime_submitters" in _lane(report).concurrent_blockers
+
+
+def test_current_guarded_authority_control_plane_blocked_blocks(monkeypatch) -> None:
+    monkeypatch.setattr(
+        leak_test_module,
+        "_current_guarded_runtime_authority",
+        lambda _repo_root: _guarded_authority(
+            valid=False,
+            blockers=("control_plane_not_ready",),
+        ),
+    )
+
+    report = build_concurrent_plan_report(
+        repo_root=REPO_ROOT,
+        reconciliation=_clean_flat_reconciliation(),
+        operator_status=_stale_operator_status(),
+    )
+
+    assert "control_plane_not_ready" in _lane(report).concurrent_blockers
+
+
+def test_operator_status_documents_cwd_blocks_runtime_verification(monkeypatch) -> None:
+    monkeypatch.setattr(
+        leak_test_module,
+        "_current_guarded_runtime_authority",
+        lambda _repo_root: _guarded_authority(valid=False, blockers=("guarded_paper_loop_process_missing",), process_count=0),
+    )
     documents_root = "/Users/patrick/Documents/MGC-v05l-automation"
     report = build_single_lane_apply_report(
         repo_root=REPO_ROOT,
@@ -1464,6 +1863,58 @@ def test_unknown_managed_exit_with_broker_flat_resolves_lifecycle_close(tmp_path
     assert report.apply_result.exit.order_id == "27"
     assert report.apply_result.exit.client_id == 11940
     assert report.apply_result.lifecycle_close_result == "LIFECYCLE_CLOSED_FLAT"
+
+
+def test_unknown_managed_exit_with_working_order_stays_loud(tmp_path: Path) -> None:
+    calls = []
+    lifecycle_id = "bridge_fill_MNQ|1m|2026-05-14T17:52:00Z|BUY_TO_OPEN"
+
+    def _runner(config):
+        calls.append(config)
+        return _bridge_result("PAPER_STRATEGY_ORDER_FILLED") if len(calls) == 1 else _unknown_close_bridge_result(lifecycle_id=lifecycle_id)
+
+    report = build_single_lane_apply_report(
+        repo_root=REPO_ROOT,
+        lane_id=LANE_ID,
+        reconciliation=_clean_flat_reconciliation(),
+        operator_status=_operator_status(),
+        runtime_command=_runtime_command(),
+        authorization_path=_authorization_path(tmp_path),
+        guarded_route_runner=_runner,
+        readiness_checker=_ready_precheck,
+        post_submit_broker_state_refresher=lambda _repo_root, _stage: _clean_flat_reconciliation(
+            broker_reconciled=False,
+            classification="TRACK_B_PAPER_BROKER_RECONCILIATION_BLOCKED",
+            track_b_broker_open_order_count=1,
+            unknown_broker_open_order_count=1,
+            lifecycle_open_position_count=1,
+            track_b_broker_position_count=1,
+            track_b_broker_open_orders=[
+                {
+                    "symbol": "MNQ",
+                    "local_symbol": "MNQM6",
+                    "action": "SELL",
+                    "quantity": "1",
+                    "order_id": "27",
+                    "order_status": "Submitted",
+                }
+            ],
+            blockers=[{"code": "UNKNOWN_BROKER_OPEN_ORDER"}],
+        ),
+        lifecycle_adoption_runner=_adoption_applied,
+        reconciliation_reader=_reader_for(
+            {
+                "after_entry": _clean_managed_position_reconciliation(symbol="MNQ", lane_id=LANE_ID),
+            }
+        ),
+        max_wait_seconds=0,
+    )
+
+    assert report.result_classification == "LEAK_TEST_OPEN_ORDER_AMBIGUITY"
+    assert report.apply_result is not None
+    assert report.apply_result.exit is not None
+    assert report.apply_result.exit.order_id == "27"
+    assert report.apply_result.lifecycle_close_result is None
 
 
 def test_apply_entry_fill_lifecycle_gap_reports_failure(tmp_path: Path) -> None:

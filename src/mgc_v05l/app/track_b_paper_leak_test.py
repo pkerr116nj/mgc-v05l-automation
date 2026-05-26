@@ -10,13 +10,14 @@ import os
 import subprocess
 import time
 from dataclasses import asdict, dataclass
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, time as datetime_time, timedelta, timezone
 from decimal import Decimal
 from pathlib import Path
 from typing import Any, Callable, Mapping, Sequence
 
 from ..config_models import load_settings_from_files
 from ..paths import PROJECT_ROOT, is_archived_project_root
+from ..session_phase_labels import NEW_YORK
 from ..execution.ibkr_paper_strategy_bridge import (
     IbkrPaperStrategyBridgeConfig,
     run_ibkr_paper_strategy_bridge,
@@ -28,6 +29,10 @@ from ..execution_core.track_b_paper_broker_reconciliation import (
     reconcile_track_b_paper_broker_truth,
 )
 from ..execution_core.track_b_readiness_authority import build_track_b_readiness_authority
+from ..execution_core.track_b_runtime_authority_resolver import (
+    RuntimeAuthorityResolverConfig,
+    resolve_track_b_runtime_authority,
+)
 from ..execution_core.track_b_managed_exit_order_resolution import (
     ManagedExitOrderResolutionConfig,
     resolve_known_managed_exit_order_disappearance,
@@ -49,6 +54,11 @@ DEFAULT_CONFIGS = (
 RECONCILIATION_PATH = Path("outputs/reports/track_b_paper_broker_reconciliation/latest_track_b_paper_broker_reconciliation.json")
 OPERATOR_STATUS_PATH = Path("outputs/probationary_pattern_engine/paper_session/operator_status.json")
 ACTIVE_LEAK_TEST_PATH = Path("outputs/reports/track_b_paper_leak_test/active_lane.json")
+CONTROL_PLANE_SNAPSHOT_PATH = Path("outputs/track_b_execution_core/control_plane/latest_control_plane_snapshot.json")
+RUNTIME_SAFE_STATE_PATH = Path("outputs/track_b_execution_core/safe_state/latest_runtime_safe_state_envelope.json")
+GUARDED_PAPER_LOOP_PATH = Path("outputs/track_b_execution_core/p0_observe_only/latest_p0_observe_only_loop.json")
+BROKER_POSITION_GUARDIAN_PATH = Path("outputs/track_b_execution_core/broker_position_guardian/latest_broker_position_guardian.json")
+PHASE1_RUNTIME_MARKET_DATA_ROOT = Path("outputs/track_b_execution_core/phase1_runtime_market_data")
 PAPER_READINESS_SNAPSHOT_PATH = Path("outputs/operator_dashboard/paper_readiness_snapshot.json")
 STARTUP_CONTROL_PLANE_SNAPSHOT_PATH = Path("outputs/operator_dashboard/startup_control_plane_snapshot.json")
 SUPERVISED_PAPER_OPERABILITY_SNAPSHOT_PATH = Path("outputs/operator_dashboard/supervised_paper_operability_snapshot.json")
@@ -76,6 +86,14 @@ AUTHORIZATION_DIGEST_FIELDS = (
     "safety_snapshot",
 )
 READINESS_FRESHNESS_WINDOW_SECONDS = 120.0
+PHASE1_RUNTIME_MARKET_DATA_FRESHNESS_SECONDS = {
+    "1m": 180.0,
+    "3m": 360.0,
+    "5m": 600.0,
+}
+METALS_LEAK_TEST_SYMBOLS = {"MGC", "GC"}
+PL_LEAK_TEST_SYMBOLS = {"PL"}
+PL_LEAK_TEST_CUTOFF_ET = datetime_time(14, 30)
 LEAK_TEST_MARKETABLE_LIMIT_OFFSET_TICKS = 16.0
 RESULT_CLASSIFICATIONS = (
     "LEAK_TEST_PASS_FULL_ROUND_TRIP",
@@ -160,6 +178,8 @@ class LeakTestSafetySnapshot:
     runtime_from_dev_root: bool
     runtime_from_documents_or_icloud: bool
     duplicate_runtime_submitter_count: int
+    runtime_authority_source: str | None
+    runtime_authority_blockers: tuple[str, ...]
     active_leak_test_lane_id: str | None
     existing_positions: tuple[dict[str, Any], ...]
     existing_open_orders: tuple[dict[str, Any], ...]
@@ -301,6 +321,16 @@ def _parse_datetime(value: object) -> datetime | None:
 
 def _utc_now() -> datetime:
     return datetime.now(timezone.utc)
+
+
+def _metals_only_symbol_allowed(symbol: str, *, now: datetime) -> bool:
+    normalized = str(symbol or "").upper()
+    if normalized in METALS_LEAK_TEST_SYMBOLS:
+        return True
+    if normalized in PL_LEAK_TEST_SYMBOLS:
+        local_now = now.astimezone(NEW_YORK)
+        return local_now.timetz().replace(tzinfo=None) < PL_LEAK_TEST_CUTOFF_ET
+    return False
 
 
 def _git_head(repo_root: Path) -> str | None:
@@ -463,6 +493,53 @@ def _duplicate_runtime_submitter_count(*, repo_root: Path, operator_status: Mapp
     return count
 
 
+def _guarded_loop_processes(repo_root: Path) -> tuple[dict[str, Any], ...]:
+    try:
+        completed = subprocess.run(
+            ["ps", "-efww"],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=2,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return ()
+    repo_text = str(repo_root.resolve())
+    rows: list[dict[str, Any]] = []
+    for line in completed.stdout.splitlines():
+        if "track_b_p0_observe_only_loop" not in line or "--mode guarded-paper" not in line:
+            continue
+        if (
+            " egrep " in line
+            or " grep " in line
+            or "/bin/zsh -c" in line
+            or "SCREEN -dmS" in line
+            or " login -pflq " in line
+        ):
+            continue
+        parts = line.split(None, 7)
+        pid = _int_value(parts[1]) if len(parts) > 1 else 0
+        if pid <= 0:
+            continue
+        command = parts[7] if len(parts) > 7 else line
+        rows.append(
+            {
+                "pid": pid,
+                "command": command,
+                "root_matches": repo_text in line,
+                "wrong_root": "Documents/MGC-v05l" in line or "Mobile Documents" in line,
+            }
+        )
+    return tuple(rows)
+
+
+def _current_guarded_runtime_authority(repo_root: Path) -> dict[str, Any]:
+    return resolve_track_b_runtime_authority(
+        RuntimeAuthorityResolverConfig(repo_root=repo_root),
+        process_rows_provider=lambda root: _guarded_loop_processes(root),
+    )
+
+
 def _contract_local_symbol(symbol: str, contract_month: str | None) -> str | None:
     month_codes = {
         "01": "F",
@@ -559,6 +636,7 @@ def build_safety_snapshot(
     operator_status: Mapping[str, Any] | None = None,
     active_leak_test: Mapping[str, Any] | None = None,
     runtime_command: str | None = None,
+    runtime_loop_required: bool = True,
 ) -> LeakTestSafetySnapshot:
     reconciliation_payload = dict(reconciliation or _read_json(repo_root / RECONCILIATION_PATH))
     operator_payload = dict(operator_status or _read_json(repo_root / OPERATOR_STATUS_PATH))
@@ -587,6 +665,45 @@ def build_safety_snapshot(
         or _documents_or_icloud_runtime_submitter_exists()
     )
     pid_active = _runtime_pid_is_active(runtime_pid)
+    legacy_runtime_valid = pid_active and cwd_or_repo_matches and command_matches and not nested_runtime
+    runtime_authority_source: str | None = "legacy_operator_status"
+    runtime_authority_blockers: tuple[str, ...] = ()
+    duplicate_count = _duplicate_runtime_submitter_count(
+        repo_root=repo_root,
+        operator_status=operator_payload,
+    )
+    if not runtime_loop_required:
+        runtime_pid = None
+        command = None
+        runtime_cwd_text = str(repo_root.resolve())
+        pid_active = False
+        cwd_or_repo_matches = True
+        command_matches = True
+        nested_runtime = False
+        runtime_authority_source = "explicit_lane_flow_control_plane"
+        runtime_authority_blockers = ()
+    elif not legacy_runtime_valid:
+        guarded_authority = _current_guarded_runtime_authority(repo_root)
+        guarded_blockers = tuple(str(row) for row in guarded_authority.get("blockers") or ())
+        if guarded_authority.get("valid") is True:
+            runtime_pid = _int_value(guarded_authority.get("pid")) or runtime_pid
+            command = str(guarded_authority.get("command") or command or "") or None
+            runtime_cwd_text = str(guarded_authority.get("runtime_cwd") or repo_root.resolve())
+            pid_active = True
+            cwd_or_repo_matches = True
+            command_text = str(command or "")
+            command_matches = repo_root_text in command_text
+            nested_runtime = False
+            runtime_authority_source = str(guarded_authority.get("source") or "guarded_paper_loop_control_plane")
+        elif guarded_authority.get("process_count") or guarded_blockers:
+            runtime_authority_source = str(guarded_authority.get("source") or "guarded_paper_loop_control_plane")
+            runtime_authority_blockers = guarded_blockers
+            if guarded_authority.get("pid") and "guarded_paper_loop_process_missing" not in guarded_blockers:
+                runtime_pid = _int_value(guarded_authority.get("pid")) or runtime_pid
+                command = str(guarded_authority.get("command") or command or "") or None
+                runtime_cwd_text = str(guarded_authority.get("runtime_cwd") or runtime_cwd_text or "")
+                pid_active = bool(runtime_pid)
+        duplicate_count = max(duplicate_count, _int_value(guarded_authority.get("duplicate_count")))
     return LeakTestSafetySnapshot(
         account_id=_account_from_reconciliation(reconciliation_payload),
         classification=str(reconciliation_payload.get("classification") or "") or None,
@@ -604,10 +721,9 @@ def build_safety_snapshot(
         runtime_command=command,
         runtime_from_dev_root=pid_active and cwd_or_repo_matches and command_matches,
         runtime_from_documents_or_icloud=nested_runtime,
-        duplicate_runtime_submitter_count=_duplicate_runtime_submitter_count(
-            repo_root=repo_root,
-            operator_status=operator_payload,
-        ),
+        duplicate_runtime_submitter_count=duplicate_count,
+        runtime_authority_source=runtime_authority_source,
+        runtime_authority_blockers=runtime_authority_blockers,
         active_leak_test_lane_id=str(active_payload.get("lane_id") or "").strip() or None,
         existing_positions=_existing_positions_from_reconciliation(reconciliation_payload),
         existing_open_orders=_existing_open_orders_from_reconciliation(reconciliation_payload),
@@ -640,7 +756,96 @@ def _unresolved_state_blockers(*, repo_root: Path, safety: LeakTestSafetySnapsho
         blockers.append("runtime_from_documents_or_icloud")
     if safety.duplicate_runtime_submitter_count > 1:
         blockers.append("duplicate_runtime_submitters")
+    blockers.extend(safety.runtime_authority_blockers)
     return blockers
+
+
+def _explicit_lane_flow_authority(
+    *,
+    repo_root: Path,
+    metals_only: bool,
+) -> dict[str, Any]:
+    control_plane = _read_json(repo_root / CONTROL_PLANE_SNAPSHOT_PATH)
+    safe_state = _read_json(repo_root / RUNTIME_SAFE_STATE_PATH)
+    guardian = _read_json(repo_root / BROKER_POSITION_GUARDIAN_PATH)
+    blockers: list[str] = []
+    warnings: list[str] = []
+    cp_ready = str(control_plane.get("classification") or "") == "CONTROL_PLANE_SNAPSHOT_READY"
+    coherent = str(control_plane.get("shared_truth_coherence_status") or "") == "COHERENT"
+    safe_normal = str(
+        safe_state.get("safe_state_classification")
+        or control_plane.get("safe_state_classification")
+        or ""
+    ) == "SAFE_STATE_NORMAL"
+    guardian_ready = str(
+        guardian.get("guardian_classification")
+        or guardian.get("broker_position_guardian_classification")
+        or control_plane.get("broker_position_guardian_classification")
+        or ""
+    ) == "BROKER_POSITION_GUARDIAN_READY"
+    live_money = bool(control_plane.get("live_money_eligible") is True or safe_state.get("live_money_eligible") is True)
+    paper_proof = bool(control_plane.get("paper_proof_invoked") is True or safe_state.get("paper_proof_invoked") is True)
+    if not metals_only:
+        blockers.append("explicit_lane_flow_requires_metals_only")
+    if not cp_ready:
+        blockers.append("control_plane_not_ready")
+    if not coherent:
+        blockers.append("shared_truth_not_coherent")
+    if not safe_normal:
+        blockers.append("safe_state_not_normal")
+    if not guardian_ready:
+        blockers.append("broker_position_guardian_not_ready")
+    if live_money:
+        blockers.append("live_money_eligible_true")
+    if paper_proof:
+        blockers.append("paper_proof_invoked_true")
+    if not (repo_root / CONTROL_PLANE_SNAPSHOT_PATH).exists():
+        blockers.append("control_plane_snapshot_missing")
+    if not (repo_root / RUNTIME_SAFE_STATE_PATH).exists():
+        blockers.append("safe_state_envelope_missing")
+    if not (repo_root / BROKER_POSITION_GUARDIAN_PATH).exists():
+        blockers.append("broker_position_guardian_missing")
+    return {
+        "ready": not blockers,
+        "source": "explicit_metals_lane_control_plane",
+        "blockers": tuple(dict.fromkeys(blockers)),
+        "warnings": tuple(dict.fromkeys(warnings)),
+        "control_plane_classification": control_plane.get("classification"),
+        "shared_truth_coherence_status": control_plane.get("shared_truth_coherence_status"),
+        "safe_state_classification": safe_state.get("safe_state_classification")
+        or control_plane.get("safe_state_classification"),
+        "guardian_classification": guardian.get("guardian_classification")
+        or guardian.get("broker_position_guardian_classification")
+        or control_plane.get("broker_position_guardian_classification"),
+        "live_money_eligible": live_money,
+        "paper_proof_invoked": paper_proof,
+        "runtime_loop_required": False,
+        "metals_only": metals_only,
+    }
+
+
+def _unresolved_state_blockers_for_mode(
+    *,
+    repo_root: Path,
+    safety: LeakTestSafetySnapshot,
+    runtime_loop_required: bool,
+    explicit_lane_flow_authority: Mapping[str, Any] | None = None,
+) -> list[str]:
+    blockers = _unresolved_state_blockers(repo_root=repo_root, safety=safety)
+    if not runtime_loop_required:
+        blockers = [
+            blocker
+            for blocker in blockers
+            if blocker
+            not in {
+                "runtime_pid_missing",
+                "runtime_pid_not_active",
+                "runtime_not_verified_from_dev_root",
+                "guarded_paper_loop_process_missing",
+            }
+        ]
+        blockers.extend(str(blocker) for blocker in (explicit_lane_flow_authority or {}).get("blockers") or ())
+    return list(dict.fromkeys(blockers))
 
 
 def _underlying_family(symbol: str) -> str:
@@ -949,8 +1154,12 @@ def build_plan_only_report(
     active_leak_test: Mapping[str, Any] | None = None,
     runtime_command: str | None = None,
     exposure_policy: LeakTestExposurePolicy | None = None,
+    explicit_lane_flow: bool = False,
+    metals_only: bool = False,
+    now: datetime | None = None,
 ) -> LeakTestReport:
     policy = exposure_policy or LeakTestExposurePolicy()
+    current = now or _utc_now()
     settings = load_settings_from_files([repo_root / path for path in DEFAULT_CONFIGS])
     safety = build_safety_snapshot(
         repo_root=repo_root,
@@ -958,15 +1167,26 @@ def build_plan_only_report(
         operator_status=operator_status,
         active_leak_test=active_leak_test,
         runtime_command=runtime_command,
+        runtime_loop_required=not explicit_lane_flow,
     )
-    unresolved_blockers = _unresolved_state_blockers(repo_root=repo_root, safety=safety)
+    explicit_authority = (
+        _explicit_lane_flow_authority(repo_root=repo_root, metals_only=metals_only)
+        if explicit_lane_flow
+        else None
+    )
+    unresolved_blockers = _unresolved_state_blockers_for_mode(
+        repo_root=repo_root,
+        safety=safety,
+        runtime_loop_required=not explicit_lane_flow,
+        explicit_lane_flow_authority=explicit_authority,
+    )
     lanes = tuple(
         lane
         for spec in _active_probationary_paper_lane_specs(settings)
         for lane in [
             _lane_plan(spec=spec, safety=safety, unresolved_blockers=unresolved_blockers, exposure_policy=policy)
         ]
-        if lane is not None
+        if lane is not None and (not metals_only or _metals_only_symbol_allowed(lane.symbol, now=current))
     )
     scenarios = _build_concurrent_scenarios(lanes=lanes, safety=safety, exposure_policy=policy)
     recommended_isolated = tuple(lane.lane_id for lane in lanes if lane.safe_for_isolated_test)[:3]
@@ -990,6 +1210,9 @@ def build_plan_only_report(
             "Plan-only mode performs no broker mutation.",
             "Single-lane apply exists but is broker-mutating unless --dry-run is used.",
             "Existing clean managed positions may coexist when exposure policy allows; unresolved broker/lifecycle state still blocks.",
+            "Explicit metals-only lane flow does not require the full guarded roster loop."
+            if explicit_lane_flow and metals_only
+            else "Full roster/general leak-test modes still require guarded runtime authority.",
         ),
     )
 
@@ -1002,6 +1225,9 @@ def build_concurrent_plan_report(
     active_leak_test: Mapping[str, Any] | None = None,
     runtime_command: str | None = None,
     exposure_policy: LeakTestExposurePolicy | None = None,
+    explicit_lane_flow: bool = False,
+    metals_only: bool = False,
+    now: datetime | None = None,
 ) -> LeakTestReport:
     plan = build_plan_only_report(
         repo_root=repo_root,
@@ -1010,6 +1236,9 @@ def build_concurrent_plan_report(
         active_leak_test=active_leak_test,
         runtime_command=runtime_command,
         exposure_policy=exposure_policy,
+        explicit_lane_flow=explicit_lane_flow,
+        metals_only=metals_only,
+        now=now,
     )
     return LeakTestReport(
         mode="concurrent-plan",
@@ -1029,6 +1258,9 @@ def build_concurrent_plan_report(
         notes=(
             "Concurrent-plan mode proposes multi-position scenarios only.",
             "No broker mutation is implemented or executed by this mode.",
+            "Explicit metals-only lane flow is scoped to MGC/GC lanes."
+            if explicit_lane_flow and metals_only
+            else "General concurrent-plan mode keeps normal runtime-loop requirements.",
         ),
     )
 
@@ -1046,6 +1278,9 @@ def build_single_lane_dry_run_report(
     authorization_ttl_seconds: float = 600.0,
     authorization_output_path: Path | None = None,
     concurrent_tolerant: bool = False,
+    explicit_lane_flow: bool = False,
+    metals_only: bool = False,
+    now: datetime | None = None,
 ) -> LeakTestReport:
     plan = build_plan_only_report(
         repo_root=repo_root,
@@ -1054,6 +1289,9 @@ def build_single_lane_dry_run_report(
         active_leak_test=active_leak_test,
         runtime_command=runtime_command,
         exposure_policy=exposure_policy,
+        explicit_lane_flow=explicit_lane_flow,
+        metals_only=metals_only,
+        now=now,
     )
     lanes = tuple(lane for lane in plan.lanes if lane.lane_id == lane_id)
     classification = "LEAK_TEST_PASS_BLOCKED_SAFELY"
@@ -1098,6 +1336,9 @@ def build_single_lane_dry_run_report(
                 else "Isolated mode requires no existing positions."
             ),
             "Authorization artifact written for one explicit lane/action." if authorization_artifact else "No authorization artifact written.",
+            "Explicit metals-only lane flow is scoped to MGC/GC lanes and uses Control Plane/Safe-State authority."
+            if explicit_lane_flow and metals_only
+            else "Normal lane dry-run mode keeps runtime-loop requirements.",
         ),
     )
 
@@ -1422,6 +1663,103 @@ def _lane_required_timeframe(row: Mapping[str, Any], lane: LeakTestLanePlan) -> 
     return None
 
 
+def _phase1_runtime_candle_status(
+    *,
+    repo_root: Path,
+    lane: LeakTestLanePlan,
+    timeframe: str,
+    now: datetime,
+) -> dict[str, Any]:
+    symbol = str(lane.symbol or "").strip().upper()
+    path = repo_root / PHASE1_RUNTIME_MARKET_DATA_ROOT / symbol / timeframe / "latest_runtime_candles.json"
+    payload = _read_json(path)
+    if not payload:
+        return {"ready": False, "reason": "PHASE1_RUNTIME_CANDLES_MISSING", "path": str(path), "timeframe": timeframe}
+    generated_at = _parse_datetime(payload.get("generated_at"))
+    if generated_at is None:
+        return {"ready": False, "reason": "PHASE1_RUNTIME_GENERATED_AT_MISSING", "path": str(path), "timeframe": timeframe}
+    if str(payload.get("symbol") or "").strip().upper() != symbol:
+        return {"ready": False, "reason": "PHASE1_RUNTIME_SYMBOL_MISMATCH", "path": str(path), "timeframe": timeframe}
+    if str(payload.get("timeframe") or "").strip() != timeframe:
+        return {"ready": False, "reason": "PHASE1_RUNTIME_TIMEFRAME_MISMATCH", "path": str(path), "timeframe": timeframe}
+    if payload.get("completed_candles_only") is not True:
+        return {"ready": False, "reason": "PHASE1_RUNTIME_COMPLETED_CANDLES_REQUIRED", "path": str(path), "timeframe": timeframe}
+    if payload.get("research_artifact_used") is True or payload.get("archive_artifact_used") is True:
+        return {"ready": False, "reason": "PHASE1_RUNTIME_NON_AUTHORITY_ARTIFACT", "path": str(path), "timeframe": timeframe}
+    if payload.get("realtime_feed_confirmed", True) is not True:
+        return {"ready": False, "reason": "PHASE1_RUNTIME_REALTIME_FEED_NOT_CONFIRMED", "path": str(path), "timeframe": timeframe}
+    bars = payload.get("bars") or payload.get("candles") or []
+    if not isinstance(bars, list) or not bars:
+        return {"ready": False, "reason": "PHASE1_RUNTIME_BARS_MISSING", "path": str(path), "timeframe": timeframe}
+    age_seconds = max(0.0, (now - generated_at).total_seconds())
+    freshness_seconds = PHASE1_RUNTIME_MARKET_DATA_FRESHNESS_SECONDS.get(timeframe, 180.0)
+    latest_bar = bars[-1] if isinstance(bars[-1], Mapping) else {}
+    latest_bar_timestamp = (
+        latest_bar.get("bar_end")
+        or latest_bar.get("timestamp")
+        or latest_bar.get("ts")
+        or payload.get("latest_bar_timestamp")
+    )
+    if age_seconds > freshness_seconds:
+        return {
+            "ready": False,
+            "reason": "PHASE1_RUNTIME_CANDLES_STALE",
+            "path": str(path),
+            "timeframe": timeframe,
+            "age_seconds": age_seconds,
+            "freshness_seconds": freshness_seconds,
+            "latest_bar_timestamp": latest_bar_timestamp,
+        }
+    return {
+        "ready": True,
+        "reason": "READY",
+        "source_authority": "PHASE1_RUNTIME_MARKET_DATA",
+        "source_path": str(path),
+        "path": str(path),
+        "symbol": symbol,
+        "timeframe": timeframe,
+        "generated_at": generated_at.isoformat(),
+        "age_seconds": age_seconds,
+        "freshness_seconds": freshness_seconds,
+        "latest_bar_timestamp": latest_bar_timestamp,
+        "bar_count": len(bars),
+        "realtime_feed_confirmed": True,
+        "completed_candles_only": True,
+        "not_dashboard_projection_authority": True,
+    }
+
+
+def _phase1_market_data_status_for_lane(
+    *,
+    repo_root: Path,
+    lane: LeakTestLanePlan,
+    legacy_lane_row: Mapping[str, Any],
+    now: datetime,
+) -> dict[str, Any]:
+    requested = _lane_required_timeframe(legacy_lane_row, lane)
+    candidate_timeframes: list[str] = []
+    # Leak-test entry pricing is broker-bound but uses hot Phase-1 execution evidence,
+    # so prefer the 1m authority artifact even when old dashboard rows mention legacy 3m lanes.
+    for timeframe in ("1m", requested, "5m"):
+        if timeframe and timeframe not in candidate_timeframes:
+            candidate_timeframes.append(timeframe)
+    checked = [
+        _phase1_runtime_candle_status(repo_root=repo_root, lane=lane, timeframe=timeframe, now=now)
+        for timeframe in candidate_timeframes
+    ]
+    ready = next((row for row in checked if row.get("ready") is True), None)
+    if ready:
+        return {**ready, "checked_timeframes": candidate_timeframes, "requested_timeframe": requested}
+    first = checked[0] if checked else {"ready": False, "reason": "PHASE1_RUNTIME_CANDLES_MISSING"}
+    return {
+        **first,
+        "ready": False,
+        "checked_timeframes": candidate_timeframes,
+        "requested_timeframe": requested,
+        "checked": checked,
+    }
+
+
 def _market_data_stale_summary(row: Mapping[str, Any]) -> dict[str, Any]:
     return {
         "lane_id": row.get("lane_id") or row.get("strategy_id"),
@@ -1442,6 +1780,8 @@ def _pre_apply_readiness_check(
     lane: LeakTestLanePlan,
     safety: LeakTestSafetySnapshot,
     now: datetime | None = None,
+    explicit_lane_flow: bool = False,
+    metals_only: bool = False,
 ) -> dict[str, Any]:
     current = now or _utc_now()
     readiness_authority = build_track_b_readiness_authority(
@@ -1519,7 +1859,28 @@ def _pre_apply_readiness_check(
         if _lane_market_data_stale(row)
         and str(row.get("lane_id") or row.get("strategy_id") or "") not in {lane.lane_id, lane.strategy_id}
     ]
-    selected_lane_data_fresh = bool(lane_row) and not selected_lane_stale and bool(lane_row.get("data_fresh", True))
+    shared_runtime_authority = _current_guarded_runtime_authority(repo_root)
+    explicit_authority = (
+        _explicit_lane_flow_authority(repo_root=repo_root, metals_only=metals_only)
+        if explicit_lane_flow
+        else {"ready": False, "blockers": (), "warnings": ()}
+    )
+    phase1_lane_market_data = _phase1_market_data_status_for_lane(
+        repo_root=repo_root,
+        lane=lane,
+        legacy_lane_row=lane_row,
+        now=current,
+    )
+    shared_services_authority_ready = (
+        (
+            shared_runtime_authority.get("valid") is True
+            or (explicit_lane_flow and explicit_authority.get("ready") is True)
+        )
+        and phase1_lane_market_data.get("ready") is True
+    )
+    selected_lane_data_fresh = (
+        bool(lane_row) and not selected_lane_stale and bool(lane_row.get("data_fresh", True))
+    ) or bool(shared_services_authority_ready)
     listener_running = bool(listener) and listener.get("live_money_eligible") is False
     supervisor_running = str(supervisor.get("classification") or "").upper().endswith("_RUNNING")
     blockers: list[str] = []
@@ -1540,16 +1901,29 @@ def _pre_apply_readiness_check(
         warnings.append("presentation_readiness_snapshot_stale_diagnostic_only")
     if legacy_presentation_fallback:
         warnings.append("legacy_presentation_readiness_fallback_used")
-    if not bool(readiness_authority.get("ready")) and not legacy_presentation_fallback:
+    if shared_services_authority_ready:
+        if not bool(readiness_authority.get("ready")):
+            warnings.append("shared_services_authority_overrode_legacy_readiness")
+        if selected_lane_stale or not lane_row:
+            warnings.append("phase1_runtime_market_data_overrode_legacy_lane_readiness")
+        if explicit_lane_flow:
+            warnings.append("explicit_metals_lane_flow_runtime_loop_not_required")
+    if not bool(readiness_authority.get("ready")) and not legacy_presentation_fallback and not shared_services_authority_ready:
         blockers.extend(authority_blockers)
+        if explicit_lane_flow:
+            blockers.extend(str(blocker) for blocker in explicit_authority.get("blockers") or ())
+        else:
+            blockers.extend(str(blocker) for blocker in shared_runtime_authority.get("blockers") or ())
+        if phase1_lane_market_data.get("ready") is not True:
+            blockers.append(str(phase1_lane_market_data.get("reason") or "phase1_runtime_market_data_not_ready"))
         classification = "LEAK_TEST_PRECHECK_GOVERNANCE_NOT_READY"
-    elif paper_readiness_fresh and not lane_row:
+    elif paper_readiness_fresh and not lane_row and not shared_services_authority_ready:
         blockers.append("selected_lane_market_data_unavailable")
         classification = "LEAK_TEST_PRECHECK_SELECTED_LANE_MARKET_DATA_STALE"
-    elif selected_lane_micro_stale and listener_running and supervisor_running:
+    elif selected_lane_micro_stale and listener_running and supervisor_running and not shared_services_authority_ready:
         blockers.append("selected_lane_market_data_micro_stale_retryable")
         classification = "LEAK_TEST_MARKET_DATA_MICRO_STALE_RETRYABLE"
-    elif selected_lane_stale:
+    elif selected_lane_stale and not shared_services_authority_ready:
         blockers.append("selected_lane_market_data_stale")
         classification = "LEAK_TEST_PRECHECK_SELECTED_LANE_MARKET_DATA_STALE"
     elif market_data_stale_count > 0 and unrelated_stale_rows:
@@ -1576,11 +1950,20 @@ def _pre_apply_readiness_check(
         "warnings": tuple(dict.fromkeys(warnings)),
         "artifacts": artifacts,
         "readiness_authority": readiness_authority,
+        "shared_services_runtime_authority": shared_runtime_authority,
+        "explicit_lane_flow_authority": explicit_authority,
+        "phase1_runtime_market_data": phase1_lane_market_data,
+        "shared_services_authority_ready": bool(shared_services_authority_ready),
         "market_data_scope": "SELECTED_LANE",
         "market_data_stale_count": market_data_stale_count,
         "selected_lane_market_data_fresh": selected_lane_data_fresh,
-        "selected_lane_market_data_age_seconds": _lane_market_data_age_seconds(lane_row),
+        "selected_lane_market_data_age_seconds": (
+            phase1_lane_market_data.get("age_seconds")
+            if shared_services_authority_ready
+            else _lane_market_data_age_seconds(lane_row)
+        ),
         "selected_lane_required_timeframe": _lane_required_timeframe(lane_row, lane),
+        "selected_lane_authority_timeframe": phase1_lane_market_data.get("timeframe") if shared_services_authority_ready else None,
         "unrelated_market_data_stale_count": len(unrelated_stale_rows),
         "unrelated_market_data_stale_lanes": tuple(_market_data_stale_summary(row) for row in unrelated_stale_rows),
         "bar_authority_unavailable_count": (
@@ -1588,26 +1971,38 @@ def _pre_apply_readiness_check(
         ),
         "blocking_fault_count": _int_value(paper_readiness.get("blocking_fault_count")) if paper_readiness_fresh else 0,
         "runtime_running": bool(
-            paper_readiness.get("runtime_running")
-            if legacy_presentation_fallback
-            else readiness_authority.get("runtime_running")
+            True
+            if shared_services_authority_ready
+            else (
+                paper_readiness.get("runtime_running")
+                if legacy_presentation_fallback
+                else readiness_authority.get("runtime_running")
+            )
         ),
         "paper_runtime_ready": bool(
-            paper_readiness.get("paper_runtime_ready")
-            if legacy_presentation_fallback
-            else readiness_authority.get("paper_runtime_ready")
+            True
+            if shared_services_authority_ready
+            else (
+                paper_readiness.get("paper_runtime_ready")
+                if legacy_presentation_fallback
+                else readiness_authority.get("paper_runtime_ready")
+            )
         ),
         "paper_trade_allowed": bool(
-            paper_readiness.get("paper_trade_allowed")
-            if legacy_presentation_fallback
-            else readiness_authority.get("paper_trade_allowed")
+            True
+            if shared_services_authority_ready
+            else (
+                paper_readiness.get("paper_trade_allowed")
+                if legacy_presentation_fallback
+                else readiness_authority.get("paper_trade_allowed")
+            )
         ),
         "startup_overall_state": startup.get("overall_state"),
         "supervised_paper_usable": bool(supervised.get("app_usable_for_supervised_paper")),
         "temp_paper_blocked": bool(temp_integrity.get("temp_paper_blocked")),
         "databento_listener_running": listener_running,
         "databento_supervisor_running": supervisor_running,
-        "selected_lane_market_data": lane_row,
+        "selected_lane_market_data": phase1_lane_market_data if shared_services_authority_ready else lane_row,
     }
 
 
@@ -1671,6 +2066,9 @@ def _bridge_config_for_apply(
             "runtime_pid": safety.runtime_pid,
             "runtime_cwd": safety.runtime_cwd,
             "leak_test": True,
+            "explicit_lane_flow": True,
+            "metals_only": True,
+            "runtime_loop_required": False,
             "live_money_eligible": False,
             "paper_only": True,
             "authorization_digest": auth_digest or None,
@@ -1978,6 +2376,9 @@ def build_single_lane_apply_report(
     managed_exit_resolution_runner: Callable[..., dict[str, Any]] = _default_managed_exit_resolution_runner,
     readiness_checker: Callable[[Path, LeakTestLanePlan, LeakTestSafetySnapshot], dict[str, Any]] | None = None,
     concurrent_tolerant: bool = False,
+    explicit_lane_flow: bool = False,
+    metals_only: bool = False,
+    now: datetime | None = None,
 ) -> LeakTestReport:
     dry_run_report = build_single_lane_dry_run_report(
         repo_root=repo_root,
@@ -1988,6 +2389,9 @@ def build_single_lane_apply_report(
         runtime_command=runtime_command,
         exposure_policy=exposure_policy,
         concurrent_tolerant=concurrent_tolerant,
+        explicit_lane_flow=explicit_lane_flow,
+        metals_only=metals_only,
+        now=now,
     )
     if not dry_run_report.lanes:
         classification = "LEAK_TEST_LANE_NOT_FOUND"
@@ -2089,6 +2493,8 @@ def build_single_lane_apply_report(
                     repo_root=root,
                     lane=readiness_lane,
                     safety=readiness_safety,
+                    explicit_lane_flow=explicit_lane_flow,
+                    metals_only=metals_only,
                 )
             )
             pre_apply_readiness = checker(repo_root, lane, dry_run_report.safety)
@@ -2499,6 +2905,16 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Use concurrent exposure policy for single-lane dry-run/apply eligibility instead of isolated flat-only gates.",
     )
+    parser.add_argument(
+        "--explicit-lane-flow",
+        action="store_true",
+        help="Use explicit lane-scoped leak-test authority instead of requiring a running full guarded roster loop.",
+    )
+    parser.add_argument(
+        "--metals-only",
+        action="store_true",
+        help="Restrict explicit lane flow/planning to MGC/GC lanes.",
+    )
     return parser
 
 
@@ -2506,9 +2922,17 @@ def main(argv: Sequence[str] | None = None) -> int:
     args = _build_arg_parser().parse_args(argv)
     repo_root = Path(args.repo_root).resolve()
     if args.mode == "plan-only":
-        report = build_plan_only_report(repo_root=repo_root)
+        report = build_plan_only_report(
+            repo_root=repo_root,
+            explicit_lane_flow=bool(args.explicit_lane_flow),
+            metals_only=bool(args.metals_only),
+        )
     elif args.mode == "concurrent-plan":
-        report = build_concurrent_plan_report(repo_root=repo_root)
+        report = build_concurrent_plan_report(
+            repo_root=repo_root,
+            explicit_lane_flow=bool(args.explicit_lane_flow),
+            metals_only=bool(args.metals_only),
+        )
     elif args.mode == "single-lane-dry-run":
         report = build_single_lane_dry_run_report(
             repo_root=repo_root,
@@ -2517,6 +2941,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             authorization_ttl_seconds=float(args.authorization_ttl_seconds),
             authorization_output_path=args.authorization_path,
             concurrent_tolerant=bool(args.concurrent_tolerant),
+            explicit_lane_flow=bool(args.explicit_lane_flow),
+            metals_only=bool(args.metals_only),
         )
     else:
         report = build_single_lane_apply_report(
@@ -2528,6 +2954,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             force_exit_after_entry=bool(args.force_exit_after_entry),
             authorization_path=args.authorization_path,
             concurrent_tolerant=bool(args.concurrent_tolerant),
+            explicit_lane_flow=bool(args.explicit_lane_flow),
+            metals_only=bool(args.metals_only),
         )
     print(json.dumps(report_to_dict(report), indent=2, sort_keys=True))
     return 0
