@@ -1888,6 +1888,124 @@ def test_leak_test_caller_with_valid_authorization_satisfies_manual_bundle_gate(
     assert checks["manual_harness_bundle_present_for_submit"]["passed"] is True
 
 
+def test_explicit_metals_leak_test_flow_bypasses_only_legacy_runtime_loop_governance_block(tmp_path: Path) -> None:
+    auth_path, digest = _write_leak_authorization(tmp_path)
+    config = _config(
+        tmp_path,
+        submit=True,
+        strategy_id="gc_1x_asia_london_participation__asia_london_long_v5",
+        symbol="GC",
+        contract_month="202606",
+        caller_path="track_b_paper_leak_test_apply",
+        leak_test_authorization_path=auth_path,
+        leak_test_authorization_digest=digest,
+        caller_metadata={
+            "caller_type": "track_b_paper_leak_test",
+            "lane_id": "gc_1x_asia_london_participation__asia_london_long_v5",
+            "strategy_id": "asia_london_participation_core_v1__GC",
+            "source_instrument": "GC",
+            "executable_proxy": "GC",
+            "paper_only": True,
+            "mode": "PAPER",
+            "account_id": "DUM882026",
+            "route_destination": "ibkr_paper_bridge_submit_capable",
+            "intent_action": "BUY",
+            "intent_type": "BUY_TO_OPEN",
+            "local_symbol": "GCM6",
+            "explicit_lane_flow": True,
+            "metals_only": True,
+            "runtime_loop_required": False,
+        },
+    )
+    governance = {
+        "classification": "PAPER_STRATEGY_GOVERNANCE_PARTIAL",
+        "submit_allowed": False,
+        "block_reasons": ["backend_or_source_not_live_ready"],
+        "selected_strategy": {
+            "strategy_id": "gc_1x_asia_london_participation__asia_london_long_v5",
+            "bridge_strategy_id": "asia_london_participation_core_v1__GC",
+            "strategy_status": "PROBATION_ACTIVE",
+            "submit_allowed": False,
+            "submit_block_reasons": ["backend_or_source_not_live_ready"],
+        },
+    }
+
+    checks = _build_static_preflight_checks(
+        config=config,
+        intent=_intent_from_config(config),
+        environment_lock=evaluate_paper_preview_environment_lock(mode=config.mode, host=config.host, port=config.port),
+        caller_gate={"passed": True, "detail": "approved leak-test caller"},
+        monitor_status={
+            "monitor_running": True,
+            "submit_allowed": True,
+            "health_classification": "HEALTHY",
+            "account_id": "DUM882026",
+            "exact_contract": {"symbol": "GC", "expiry": "202606", "con_id": None, "local_symbol": "GCM6"},
+            "block_reasons": [],
+        },
+        governance_status=governance,
+        exposure_status=_healthy_exposure(),
+    )
+
+    by_name = {row["name"]: row for row in checks}
+    assert by_name["leak_test_authorization"]["passed"] is True
+    assert by_name["paper_strategy_governance_submit_gate"]["passed"] is True
+    assert "explicit metals-only Leak Test v2 lane flow" in by_name["paper_strategy_governance_submit_gate"]["detail"]
+
+
+def test_leak_test_caller_writes_matching_bridge_pre_action_plan(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    auth_path, digest = _write_leak_authorization(tmp_path)
+    _write_runtime_files(tmp_path, governance_status=_healthy_lane_governance())
+    _write_strategy_bridge_snapshot(tmp_path)
+    plan_path = tmp_path / "outputs/track_b_execution_core/paper_autonomous_recovery/latest_paper_autonomous_recovery_plan.json"
+    plan_path.unlink()
+    monkeypatch.setattr(
+        bridge_module,
+        "_build_runtime",
+        lambda **_kwargs: (_ for _ in ()).throw(RuntimeError("runtime next gate reached")),
+    )
+    monkeypatch.setattr(
+        bridge_module,
+        "evaluate_paper_strategy_exposure_gate",
+        lambda **_kwargs: _healthy_exposure(),
+    )
+
+    artifacts = run_ibkr_paper_strategy_bridge(
+        config=_config(
+            tmp_path,
+            strategy_id="gc_1x_asia_london_participation__asia_london_long_v5",
+            symbol="GC",
+            contract_month="202606",
+            submit=True,
+            caller_path="track_b_paper_leak_test_apply",
+            leak_test_authorization_path=auth_path,
+            leak_test_authorization_digest=digest,
+            caller_metadata={
+                "caller_type": "track_b_paper_leak_test",
+                "lane_id": "gc_1x_asia_london_participation__asia_london_long_v5",
+                "strategy_id": "asia_london_participation_core_v1__GC",
+                "route_destination": "ibkr_paper_bridge_submit_capable",
+                "intent_type": "BUY_TO_OPEN",
+                "intent_action": "BUY",
+                "account_id": "DUM882026",
+                "mode": "PAPER",
+                "host": "127.0.0.1",
+                "port": 7497,
+                "local_symbol": "GCM6",
+                "paper_only": True,
+                "live_money_eligible": False,
+            },
+        )
+    )
+
+    plan = json.loads(plan_path.read_text(encoding="utf-8"))
+    validation = artifacts.report["pre_action_snapshot_validation"]
+    assert plan["classification"] == _PLAN_STRATEGY_BRIDGE_SUBMIT
+    assert plan["proposed_actions"][0]["action_type"] == _ACTION_STRATEGY_BRIDGE_SUBMIT
+    assert validation["classification"] == "PRE_ACTION_SNAPSHOT_VALID"
+    assert "runtime next gate reached" in artifacts.report["detail"]
+
+
 def test_leak_test_close_authorization_checks_exit_action_not_entry_action(tmp_path: Path) -> None:
     auth_path, digest = _write_leak_authorization(tmp_path, action="BUY")
     config = _config(

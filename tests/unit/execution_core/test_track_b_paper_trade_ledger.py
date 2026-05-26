@@ -6,8 +6,11 @@ from pathlib import Path
 
 from mgc_v05l.execution_core.operator_status import OperatorStatusInputs, create_operator_status_summary
 from mgc_v05l.execution_core.track_b_paper_trade_ledger import (
+    DUPLICATE_EXIT_OVERFILL_SCOPED_REMEDIATION_REVIEWED,
     MALFORMED_BROKER_BACKED_MANUALLY_RECONCILED_ARTIFACT,
+    _positions_by,
     build_track_b_paper_trade_summaries,
+    reconcile_duplicate_exit_overfill_scoped_remediation,
     reconcile_app_only_unfilled_managed_lifecycles,
     reconcile_ibkr_contract_rejected_managed_lifecycles,
     reconcile_leak_test_adopted_entry_settled_flat_lifecycles,
@@ -24,6 +27,65 @@ from mgc_v05l.execution_core.track_b_position_management_manifest import (
 
 def aware_now() -> datetime:
     return datetime(2026, 5, 5, 22, 30, tzinfo=timezone.utc)
+
+
+def test_positions_by_preserves_same_lane_units_and_aggregates_quantity() -> None:
+    records = [
+        _open_unit("lifecycle-46", "46", "1306861269", "29898.5", "2026-05-26T10:36:07+00:00"),
+        _open_unit("lifecycle-47", "47", "1306861276", "29901.5", "2026-05-26T10:37:09+00:00"),
+        _open_unit("lifecycle-48", "48", "1306861287", "29904", "2026-05-26T10:38:09+00:00"),
+    ]
+
+    positions = _positions_by(records, "contract_key", aware_now())
+    position = positions["MNQ-202606"]
+
+    assert position["quantity"] == "3"
+    assert position["aggregate_qty"] == "-3"
+    assert position["side"] == "SHORT"
+    assert position["lifecycle_unit_count"] == 3
+    assert position["lifecycle_ids"] == ["lifecycle-46", "lifecycle-47", "lifecycle-48"]
+    assert position["entry_order_ids"] == ["46", "47", "48"]
+    assert position["duplicate_same_lane_exposure"] is True
+    assert position["pyramiding_allowed"] is False
+    assert position["pyramiding_policy"] == "PYRAMIDING_NOT_ALLOWED_REVIEW_REQUIRED"
+    assert [unit["signed_qty"] for unit in position["lifecycle_units"]] == ["-1", "-1", "-1"]
+
+
+def _open_unit(
+    lifecycle_id: str,
+    order_id: str,
+    perm_id: str,
+    price: str,
+    timestamp: str,
+    *,
+    strategy_id: str = "MNQ_FIRST_BEAR_SNAP_TURN_V1",
+    lane_id: str = "mnq_first_bear_snap_turn",
+    contract_key: str = "MNQ-202606",
+    local_symbol: str = "MNQM6",
+    con_id: int = 770561201,
+) -> dict:
+    return {
+        "final_position_status": "OPEN_MANAGED",
+        "paper_lifecycle_type": "STRATEGY_MANAGED",
+        "strategy_id": strategy_id,
+        "lane_id": lane_id,
+        "lifecycle_id": lifecycle_id,
+        "signal_id": f"intent-{order_id}",
+        "instrument_family": contract_key.split("-")[0],
+        "contract_key": contract_key,
+        "local_symbol": local_symbol,
+        "con_id": con_id,
+        "expiry": "20260618",
+        "account_id": "DUM882026",
+        "side": "SHORT",
+        "quantity": "1",
+        "entry_order_id": order_id,
+        "entry_perm_id": perm_id,
+        "entry_fill_price": price,
+        "entry_timestamp": timestamp,
+        "managed_exit_policy_id": "PAPER_DIAGNOSTIC_TIME_BOXED_3X5M_EXIT_V1",
+        "paper_lifecycle_report_path": f"outputs/lifecycle/{lifecycle_id}.json",
+    }
 
 
 def test_updates_open_position_from_direct_bridge_fill_artifact(tmp_path: Path) -> None:
@@ -78,6 +140,134 @@ def test_updates_open_position_from_direct_bridge_fill_artifact(tmp_path: Path) 
     assert position["entry_perm_id"] == 1984099439
     assert position["entry_client_id"] == 10905
     assert position["entry_broker_identity"]["broker_order_id"] == "1"
+
+
+def test_direct_bridge_fill_prefers_reserved_lifecycle_id(tmp_path: Path) -> None:
+    artifact_path = tmp_path / "filled_bridge_result_latest.json"
+    reserved_lifecycle_id = "reserved_submit_mgc_1x_all_lanes_asia_early_long_20260525T101343188485Z_bf0fbb7201f7"
+    payload = {
+        "classification": "PAPER_STRATEGY_ORDER_FILLED_PERSISTED",
+        "strategy_id": "gc_mgc_forced_session_baseline_v2__mgc_1x_all_lanes__asia_early_long",
+        "lane_id": "mgc_1x_all_lanes__asia_early_long",
+        "instrument": "MGC",
+        "symbol": "MGC",
+        "action": "BUY",
+        "quantity": 1,
+        "order_intent_id": "submit_owner_d03f3ef67fe7421d4f17101d",
+        "reserved_lifecycle_id": reserved_lifecycle_id,
+        "intent_type": "BUY_TO_OPEN",
+        "decision_bar_timestamp": "2026-05-25T10:13:43.188485+00:00",
+        "broker_order_id": "31",
+        "account_id": "DUM882026",
+        "perm_id": None,
+        "client_id": 11940,
+        "exec_id": None,
+        "local_symbol": "MGCM6",
+        "con_id": 712565978,
+        "contract": {"symbol": "MGC", "local_symbol": "MGCM6", "expiry": "20260626", "multiplier": "10"},
+        "fill_price": "4572.897",
+        "fill_timestamp": "2026-05-25T10:32:09.473292+00:00",
+        "bridge_classification": "PAPER_STRATEGY_ORDER_FILLED",
+        "entry_source": "LEAK_TEST_ENTRY",
+        "source": "TRACK_B_PAPER_LIFECYCLE_ADOPTION",
+        "route_destination": "ibkr_paper_bridge_submit_capable",
+        "managed_exit_policy_id": "FORCED_SESSION_SEGMENT_LOCAL_EXIT_V1",
+        "paper_proof_invoked": False,
+        "live_money_readiness": False,
+        "review_required": False,
+    }
+    write_json(artifact_path, payload)
+
+    result = update_track_b_paper_trade_ledger_from_filled_bridge_result(
+        filled_bridge_result=payload,
+        filled_bridge_result_json=artifact_path,
+        output_root=tmp_path / "ledger",
+        now=aware_now(),
+    )
+
+    assert result.trade_record_written is True
+    assert result.trade_record is not None
+    assert result.trade_record["lifecycle_id"] == reserved_lifecycle_id
+    assert result.trade_record["trade_id"].endswith(f":{reserved_lifecycle_id}")
+    assert result.live_position_status["open_position_count"] == 1
+    position = next(iter(result.live_position_status["positions_by_instrument"].values()))
+    assert position["lifecycle_id"] == reserved_lifecycle_id
+
+
+def test_duplicate_exit_overfill_scoped_remediation_clears_review_without_broker_mutation(tmp_path: Path) -> None:
+    lifecycle_id = "reserved_submit_mnq_1x_asia_london_participation_asia_london_long_v6_20260525T111329090382Z_42f9e3f5707e"
+    ledger = tmp_path / "ledger" / "track_b_paper_trade_ledger.jsonl"
+    ledger.parent.mkdir(parents=True)
+    review_row = {
+        "ledger_schema_version": "track_b_paper_trade_ledger_v1",
+        "trade_id": f"strategy:{lifecycle_id}",
+        "lifecycle_id": lifecycle_id,
+        "strategy_id": "asia_london_participation_core_v1__mnq_1x_asia_london_participation__asia_london_long_v6",
+        "paper_lifecycle_type": "STRATEGY_MANAGED",
+        "broker_backed_position_confirmed": True,
+        "entry_fill_confirmed": True,
+        "entry_order_id": "32",
+        "entry_fill_price": "29976.81",
+        "entry_timestamp": "2026-05-25T11:13:41.191614+00:00",
+        "exit_order_id": "36",
+        "exit_timestamp": "2026-05-25T11:53:55.018266+00:00",
+        "paper_lifecycle_classification": "TRACK_B_STRATEGY_PAPER_REVIEW_REQUIRED",
+        "final_position_status": "REVIEW_REQUIRED",
+        "final_broker_state_classification": "TRACK_B_STRATEGY_PAPER_REVIEW_REQUIRED",
+        "review_required": True,
+        "instrument_family": "MNQ",
+        "contract_key": "MNQ-202606",
+        "local_symbol": "MNQM6",
+        "con_id": 770561201,
+        "account_id": "DUM882026",
+        "side": "LONG",
+        "quantity": "1",
+    }
+    ledger.write_text(json.dumps(review_row, sort_keys=True) + "\n", encoding="utf-8")
+    remediation = {
+        "classification": "SCOPED_GUARDIAN_REMEDIATION_FILLED",
+        "guardian_hard_classifications": ["UNAUTHORIZED_REVERSE_EXPOSURE", "BROKER_LIFECYCLE_POSITION_MISMATCH"],
+        "target_identity": {"account_id": "DUM882026", "local_symbol": "MNQM6", "con_id": 770561201},
+        "apply_result": {
+            "broker_order_id": "5",
+            "fill": {
+                "account_id": "DUM882026",
+                "action": "BUY",
+                "contract_key": "MNQ-202606",
+                "quantity": "1.0",
+                "price": "29952.0",
+                "perm_id": "917755089",
+                "execution_id": "0000e1a7.6a1d9c47.01.01",
+                "filled_at": "2026-05-25T12:41:47.257831+00:00",
+            },
+        },
+    }
+    remediation_path = write_json(tmp_path / "remediation.json", remediation)
+    positions_path = write_json(
+        tmp_path / "positions.json",
+        {"positions": [{"account_id": "DUM882026", "symbol": "MNQ", "local_symbol": "MNQM6", "con_id": 770561201, "quantity": "0.0"}]},
+    )
+    orders_path = write_json(tmp_path / "orders.json", {"open_orders": []})
+
+    result = reconcile_duplicate_exit_overfill_scoped_remediation(
+        lifecycle_id=lifecycle_id,
+        guardian_remediation_json=remediation_path,
+        broker_positions_snapshot_json=positions_path,
+        broker_open_orders_snapshot_json=orders_path,
+        ledger_jsonl=ledger,
+        output_root=tmp_path / "ledger",
+        diagnostics_root=tmp_path / "diagnostics",
+        now=aware_now(),
+    )
+
+    assert result.reconciliation_record_written is True
+    assert result.reconciliation_report["reconciliation_action"] == DUPLICATE_EXIT_OVERFILL_SCOPED_REMEDIATION_REVIEWED
+    assert result.trade_summary["review_required_count"] == 0
+    assert result.trade_summary["open_position_count"] == 0
+    latest = result.trade_summary["recent_trades"][0]
+    assert latest["review_required"] is False
+    assert latest["artifact_reconciliation_classification"] == DUPLICATE_EXIT_OVERFILL_SCOPED_REMEDIATION_REVIEWED
+    assert result.reconciliation_report["broker_mutation_attempted"] is False
 
 
 def test_direct_bridge_fill_inherits_exit_policy_from_manifest(tmp_path: Path) -> None:
@@ -374,6 +564,81 @@ def test_flat_confirmed_direct_close_counts_as_closed_when_price_unknown(tmp_pat
     assert result.trade_record["exit_fill_price"] is None
     assert result.live_position_status["open_position_count"] == 0
     assert result.pnl_summary["completed_trades"] == 1
+
+
+def test_known_close_matches_strategy_managed_lifecycle_source_by_lifecycle_id(tmp_path: Path) -> None:
+    output_root = tmp_path / "ledger"
+    output_root.mkdir(parents=True)
+    lifecycle_id = "strategy_managed_track_b_multi_strategy_runtime_cycle_04098e91aa94408e834cb36e3e404445_asia_late_flat_pullback_pause_resume_long_v1"
+    open_row = {
+        "ledger_schema_version": "track_b_paper_trade_ledger_v1",
+        "trade_id": f"ASIA_LATE_FLAT_PULLBACK_PAUSE_RESUME_LONG_V1:{lifecycle_id}",
+        "lifecycle_id": lifecycle_id,
+        "source": "TRACK_B_STRATEGY_MANAGED_LIFECYCLE",
+        "strategy_id": "ASIA_LATE_FLAT_PULLBACK_PAUSE_RESUME_LONG_V1",
+        "lane_id": "mgc_asia_late_flat_pullback_pause_resume_long",
+        "entry_intent_id": lifecycle_id,
+        "paper_lifecycle_type": "STRATEGY_MANAGED",
+        "broker_backed_position_confirmed": True,
+        "instrument_family": "MGC",
+        "contract_key": "MGC-202606",
+        "contract": {"symbol": "MGC", "local_symbol": "MGCM6", "expiry": "20260626"},
+        "local_symbol": "MGCM6",
+        "con_id": 712565978,
+        "account_id": "DUM882026",
+        "side": "LONG",
+        "quantity": "1",
+        "entry_order_id": "44",
+        "entry_fill_price": "4534.9",
+        "entry_timestamp": "2026-05-26T02:56:52.969540+00:00",
+        "entry_fill_confirmed": True,
+        "final_position_status": "OPEN_MANAGED",
+        "paper_lifecycle_classification": "TRACK_B_STRATEGY_PAPER_OPEN_MANAGED",
+        "managed_exit_policy_id": "PAPER_DIAGNOSTIC_TIME_BOXED_3X5M_EXIT_V1",
+    }
+    ledger_jsonl = output_root / "track_b_paper_trade_ledger.jsonl"
+    ledger_jsonl.write_text(json.dumps(open_row, sort_keys=True) + "\n", encoding="utf-8")
+    close_payload = {
+        "classification": "PAPER_STRATEGY_ORDER_FILLED_PERSISTED",
+        "bridge_classification": "KNOWN_MANAGED_EXIT_ORDER_FILLED_CLOSE_PERSISTENCE_GAP",
+        "intent_type": "SELL_TO_CLOSE",
+        "action": "SELL",
+        "instrument": "MGC",
+        "symbol": "MGC",
+        "strategy_id": "ASIA_LATE_FLAT_PULLBACK_PAUSE_RESUME_LONG_V1",
+        "lane_id": "mgc_asia_late_flat_pullback_pause_resume_long",
+        "lifecycle_id": lifecycle_id,
+        "account_id": "DUM882026",
+        "broker_order_id": "45",
+        "client_id": 17086,
+        "perm_id": 1306860537,
+        "quantity": "1",
+        "fill_price": None,
+        "fill_price_source": "UNKNOWN_BROKER_POSITION_FLAT",
+        "realized_pnl_unknown": True,
+        "fill_timestamp": "2026-05-26T07:29:05.882775+00:00",
+        "local_symbol": "MGCM6",
+        "con_id": 712565978,
+        "contract": {"symbol": "MGC", "local_symbol": "MGCM6", "expiry": "20260626"},
+        "paper_proof_invoked": False,
+        "live_money_readiness": False,
+        "review_required": False,
+    }
+
+    result = update_track_b_paper_trade_ledger_from_filled_bridge_result(
+        filled_bridge_result=close_payload,
+        filled_bridge_result_json=write_json(tmp_path / "close.json", close_payload),
+        output_root=output_root,
+        now=aware_now(),
+    )
+
+    assert result.trade_record_written is True
+    assert result.trade_record is not None
+    assert result.trade_record["lifecycle_id"] == lifecycle_id
+    assert result.trade_record["final_position_status"] == "CLOSED_FLAT"
+    assert result.trade_record["source"] == "TRACK_B_STRATEGY_MANAGED_LIFECYCLE"
+    assert result.trade_record["exit_order_id"] == "45"
+    assert result.live_position_status["open_position_count"] == 0
 
 
 def write_json(path: Path, payload: dict[str, object]) -> Path:

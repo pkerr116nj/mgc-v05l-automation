@@ -20,6 +20,7 @@ from mgc_v05l.execution_core.track_b_atomic_io import write_json_atomic
 
 from .track_b_managed_order_registry import (
     BROKER_FLAT_WITH_WORKING_CLOSE,
+    CLOSE_ORDER_CANCEL_REPLACE_REQUIRED,
     CLOSE_ORDER_MODIFIABLE,
     CLOSE_ORDER_SUSPICIOUS,
     DUPLICATE_CLOSE_ORDER_BLOCKED,
@@ -188,6 +189,15 @@ def _plan_for_managed_order(
     position_open = _position_open(order=order, position_truth=position_truth)
     identity = _identity(order=order, source_order=source_order)
     suspicious_reasons = _suspicious_reasons(order=order, source_order=source_order)
+    tolerated_status_gaps = _tolerated_ibkr_status_gaps(
+        source_classification=source_classification,
+        suspicious_reasons=suspicious_reasons,
+        identity=identity,
+        position_open=position_open,
+    )
+    blocking_suspicious_reasons = [
+        reason for reason in suspicious_reasons if reason not in set(tolerated_status_gaps)
+    ]
     reference = marketability.get("market_reference") or _phase1_market_reference(
         config=config,
         symbol=str(order.get("symbol") or ""),
@@ -204,7 +214,7 @@ def _plan_for_managed_order(
         classification = BROKER_FLAT_NO_REPLACE
         recommended_action = "REVIEW_BROKER_FLAT_WITH_OPEN_CLOSE"
         rationale = "Broker is flat while a close order appears working; replacement is forbidden."
-    elif suspicious_reasons or source_classification == CLOSE_ORDER_SUSPICIOUS:
+    elif blocking_suspicious_reasons or source_classification == CLOSE_ORDER_SUSPICIOUS:
         classification = REVIEW_REQUIRED_SUSPICIOUS_STATE
         recommended_action = "OPERATOR_REVIEW_OR_MANUAL_TWS_PATH"
         rationale = "Suspicious order evidence requires review; automatic replacement is not planned."
@@ -225,13 +235,13 @@ def _plan_for_managed_order(
         classification = ORDER_NOT_FOUND if position_open else NO_ACTION_NEEDED
         recommended_action = "REVIEW_REQUIRED" if position_open else "WAIT"
         rationale = "Broker position exists without a current managed close order."
-    elif source_classification == CLOSE_ORDER_MODIFIABLE or (
+    elif source_classification in {CLOSE_ORDER_MODIFIABLE, CLOSE_ORDER_CANCEL_REPLACE_REQUIRED} or (
         source_classification == WORKING_CLOSE_ORDER and marketability.get("marketable") is not True
     ):
         if _identity_complete(identity):
             classification = MODIFY_IN_PLACE_ELIGIBLE
             recommended_action = "MODIFY_IN_PLACE_CANDIDATE"
-            rationale = "Working close order identity is complete and the order is away from market."
+            rationale = "Working close order identity is complete; modify-in-place is preferred before any cancel/replace path."
         else:
             classification = REVIEW_REQUIRED_SUSPICIOUS_STATE
             recommended_action = "REVIEW_REQUIRED"
@@ -271,6 +281,8 @@ def _plan_for_managed_order(
         or status in _TERMINAL_CANCELLED_STATUSES
         or status in _TERMINAL_FILLED_STATUSES,
         "suspicious_reasons": suspicious_reasons,
+        "blocking_suspicious_reasons": blocking_suspicious_reasons,
+        "tolerated_ibkr_status_gaps": tolerated_status_gaps,
         "source_managed_order_classification": source_classification,
         "source_recommended_next_action": order.get("recommended_next_action"),
         "lifecycle_id": order.get("lifecycle_id"),
@@ -345,6 +357,26 @@ def _suspicious_reasons(*, order: Mapping[str, Any], source_order: Mapping[str, 
     if order.get("working") is True and remaining in {None, ""}:
         reasons.append("missing_remaining_quantity")
     return sorted(set(reasons))
+
+
+def _tolerated_ibkr_status_gaps(
+    *,
+    source_classification: str,
+    suspicious_reasons: Sequence[str],
+    identity: Mapping[str, Any],
+    position_open: bool,
+) -> list[str]:
+    tolerable = {"sentinel_filled_quantity", "missing_remaining_quantity"}
+    reasons = {str(reason) for reason in suspicious_reasons}
+    if (
+        source_classification in {WORKING_CLOSE_ORDER, CLOSE_ORDER_CANCEL_REPLACE_REQUIRED}
+        and position_open
+        and _identity_complete(identity)
+        and reasons
+        and reasons <= tolerable
+    ):
+        return sorted(reasons)
+    return []
 
 
 def _phase1_market_reference(*, config: TrackBOrderAdjustmentPlannerConfig, symbol: str) -> dict[str, Any]:

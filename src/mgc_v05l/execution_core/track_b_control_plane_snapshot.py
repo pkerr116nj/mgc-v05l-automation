@@ -43,6 +43,12 @@ from mgc_v05l.execution_core.track_b_continuation_aware_exit_history import (
     write_continuation_aware_exit_history,
 )
 from mgc_v05l.execution_core.track_b_projection_metadata import build_projection_metadata
+from mgc_v05l.execution_core.track_b_paper_proof_readiness import (
+    DEFAULT_OUTPUT_PATH as DEFAULT_PROOF_READINESS_ARTIFACT,
+    TrackBPaperProofReadinessConfig,
+    build_track_b_paper_proof_readiness,
+    write_track_b_paper_proof_readiness,
+)
 from mgc_v05l.execution_core.track_b_recovery_attempt_history import (
     DEFAULT_RECOVERY_ATTEMPT_HISTORY_ARTIFACT,
     TrackBRecoveryAttemptHistoryConfig,
@@ -107,6 +113,7 @@ class TrackBControlPlaneSnapshotConfig:
     dashboard_projection_path: Path | None = DEFAULT_DASHBOARD_CONTROL_PLANE_SNAPSHOT_PROJECTION
     shared_truth_refresh_path: Path = DEFAULT_SHARED_TRUTH_REFRESH_ARTIFACT
     agent_health_path: Path = DEFAULT_AGENT_HEALTH_ARTIFACT
+    proof_readiness_path: Path = DEFAULT_PROOF_READINESS_ARTIFACT
     paper_autonomous_recovery_plan_path: Path = DEFAULT_PAPER_AUTONOMOUS_RECOVERY_PLAN_ARTIFACT
     recovery_attempt_history_path: Path = DEFAULT_RECOVERY_ATTEMPT_HISTORY_ARTIFACT
     artifact_archive_plan_path: Path = DEFAULT_ARTIFACT_ARCHIVE_PLAN_PATH
@@ -114,6 +121,7 @@ class TrackBControlPlaneSnapshotConfig:
     continuation_aware_exit_history_path: Path = DEFAULT_CONTINUATION_AWARE_EXIT_HISTORY_PATH
     runtime_safe_state_envelope_path: Path = DEFAULT_RUNTIME_SAFE_STATE_ENVELOPE_ARTIFACT
     broker_lease_history_path: Path | None = None
+    refresh_proof_readiness_before_snapshot: bool = True
 
     def resolve(self, path: Path) -> Path:
         return path if path.is_absolute() else self.repo_root / path
@@ -130,6 +138,8 @@ def build_track_b_control_plane_snapshot(
     post_shared_truth_refresh_hook: Callable[[Mapping[str, Any]], None] | None = None,
 ) -> dict[str, Any]:
     actual_now = _ensure_utc(now or datetime.now(UTC))
+    if config.refresh_proof_readiness_before_snapshot:
+        _refresh_proof_readiness_for_snapshot(config=config, now=actual_now)
     shared_truth = refresh_track_b_shared_truth(
         config=TrackBSharedTruthRefreshConfig(
             repo_root=config.repo_root,
@@ -265,6 +275,22 @@ def build_track_b_control_plane_snapshot(
     _apply_safe_state_to_snapshot(payload=payload, safe_state=safe_state)
     payload["source_artifact_paths"]["runtime_safe_state_envelope"] = str(safe_state_path)
     payload.update(build_track_b_control_plane_top_line(payload))
+    return payload
+
+
+def _refresh_proof_readiness_for_snapshot(
+    *,
+    config: TrackBControlPlaneSnapshotConfig,
+    now: datetime,
+) -> Mapping[str, Any]:
+    proof_config = TrackBPaperProofReadinessConfig(
+        repo_root=config.repo_root,
+        output_path=config.proof_readiness_path,
+        now=now,
+        broker_lease_history_path=config.broker_lease_history_path,
+    )
+    payload = build_track_b_paper_proof_readiness(config=proof_config, now=now)
+    write_track_b_paper_proof_readiness(config=proof_config, payload=payload)
     return payload
 
 

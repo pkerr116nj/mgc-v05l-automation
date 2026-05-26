@@ -119,6 +119,76 @@ def test_lifecycle_owner_without_broker_position_blocks() -> None:
     assert BROKER_LIFECYCLE_POSITION_MISMATCH in payload["hard_classifications"]
 
 
+def test_aggregate_same_lane_units_match_broker_quantity_without_guardian_hold() -> None:
+    lifecycle_position = {
+        "account_id": "DUM882026",
+        "symbol": "MNQ",
+        "local_symbol": "MNQM6",
+        "con_id": 770561201,
+        "quantity": "3",
+        "aggregate_qty": "-3",
+        "side": "SHORT",
+        "lifecycle_id": "lifecycle-48",
+        "lifecycle_unit_count": 3,
+        "lifecycle_units": [
+            {"lifecycle_id": "lifecycle-46", "signed_qty": "-1"},
+            {"lifecycle_id": "lifecycle-47", "signed_qty": "-1"},
+            {"lifecycle_id": "lifecycle-48", "signed_qty": "-1"},
+        ],
+        "duplicate_same_lane_exposure": True,
+        "pyramiding_allowed": False,
+    }
+    payload = build_track_b_broker_position_guardian(
+        config=TrackBBrokerPositionGuardianConfig(),
+        now=NOW,
+        input_overrides=_inputs(
+            position_truth={"broker_positions": [_mnq_position("-3")]},
+            managed_position_registry={
+                "classification": "OPEN_MANAGED_EXIT_DUE",
+                "managed_positions": [lifecycle_position],
+                "lifecycle_open_positions": [lifecycle_position],
+            },
+            reconciliation={
+                "classification": "TRACK_B_PAPER_BROKER_RECONCILED",
+                "track_b_lifecycle_positions": [lifecycle_position],
+                "blockers": [],
+            },
+        ),
+    )
+
+    assert payload["classification"] == BROKER_POSITION_GUARDIAN_READY
+    assert BROKER_LIFECYCLE_POSITION_MISMATCH not in payload["hard_classifications"]
+
+
+def test_collapsed_registry_quantity_against_broker_hard_holds() -> None:
+    collapsed = {
+        "account_id": "DUM882026",
+        "symbol": "MNQ",
+        "local_symbol": "MNQM6",
+        "con_id": 770561201,
+        "quantity": "1",
+        "side": "SHORT",
+        "lifecycle_id": "lifecycle-48",
+        "lifecycle_unit_count": 3,
+    }
+    payload = build_track_b_broker_position_guardian(
+        config=TrackBBrokerPositionGuardianConfig(),
+        now=NOW,
+        input_overrides=_inputs(
+            position_truth={"broker_positions": [_mnq_position("-3")]},
+            managed_position_registry={
+                "classification": "OPEN_MANAGED_EXIT_DUE",
+                "managed_positions": [collapsed],
+                "lifecycle_open_positions": [collapsed],
+            },
+            reconciliation={"classification": "TRACK_B_PAPER_BROKER_RECONCILED", "blockers": []},
+        ),
+    )
+
+    assert payload["classification"] == BROKER_POSITION_GUARDIAN_HARD_HOLD
+    assert BROKER_LIFECYCLE_POSITION_MISMATCH in payload["hard_classifications"]
+
+
 def _inputs(**overrides: dict) -> dict:
     payload = {
         "position_truth": {"classification": "CLEAN_FLAT_READY", "broker_positions": []},

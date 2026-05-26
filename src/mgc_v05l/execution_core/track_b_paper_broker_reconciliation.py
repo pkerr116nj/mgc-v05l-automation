@@ -1318,6 +1318,7 @@ def _known_managed_exit_orders(
     persisted_known_orders: Sequence[Mapping[str, Any]] = (),
 ) -> list[dict[str, Any]]:
     declared_orders = _declared_known_managed_exit_orders(lifecycle_status)
+    declared_orders.extend(_lifecycle_report_known_managed_exit_orders(lifecycle_status=lifecycle_status, repo_root=config.repo_root))
     declared_orders.extend(dict(row) for row in runtime_restore_orders if isinstance(row, Mapping))
     declared_orders.extend(dict(row) for row in persisted_known_orders if isinstance(row, Mapping))
     if not declared_orders:
@@ -1386,6 +1387,34 @@ def _runtime_restore_known_managed_exit_orders(repo_root: Path, symbols: Sequenc
         payload = _load_json(restore_path)
         row = _managed_exit_order_from_restore_payload(payload, source_path=restore_path, symbols=symbols)
         if row is not None:
+            rows.append(row)
+    return rows
+
+
+def _lifecycle_report_known_managed_exit_orders(*, lifecycle_status: Mapping[str, Any], repo_root: Path) -> list[dict[str, Any]]:
+    report_paths: list[Path] = []
+    for positions_key in ("positions_by_instrument", "positions_by_strategy"):
+        positions = lifecycle_status.get(positions_key)
+        if not isinstance(positions, Mapping):
+            continue
+        for position in positions.values():
+            if not isinstance(position, Mapping):
+                continue
+            path_value = position.get("paper_lifecycle_report_path")
+            if not path_value:
+                continue
+            path = Path(str(path_value))
+            report_paths.append(path if path.is_absolute() else repo_root / path)
+    rows: list[dict[str, Any]] = []
+    seen_paths: set[Path] = set()
+    for report_path in report_paths:
+        if report_path in seen_paths:
+            continue
+        seen_paths.add(report_path)
+        report = _load_json(report_path)
+        for row in _declared_known_managed_exit_orders(report):
+            row.setdefault("source", "TRACK_B_LIFECYCLE_REPORT_KNOWN_MANAGED_EXIT_ORDER")
+            row.setdefault("source_artifact_path", str(report_path))
             rows.append(row)
     return rows
 
@@ -2097,6 +2126,12 @@ def _broker_lifecycle_position_match(
                     "broker_local_symbol": broker_position.get("local_symbol") or broker_position.get("localSymbol"),
                     "lifecycle_local_symbol": lifecycle_position.get("local_symbol") or lifecycle_position.get("localSymbol"),
                     "quantity": str(broker_qty),
+                    "lifecycle_aggregate_qty": lifecycle_position.get("aggregate_qty"),
+                    "lifecycle_unit_count": lifecycle_position.get("lifecycle_unit_count")
+                    or len(lifecycle_position.get("lifecycle_units") or []),
+                    "lifecycle_ids": lifecycle_position.get("lifecycle_ids") or [],
+                    "duplicate_same_lane_exposure": lifecycle_position.get("duplicate_same_lane_exposure") is True,
+                    "pyramiding_allowed": lifecycle_position.get("pyramiding_allowed") is True,
                     "broker_position": dict(broker_position),
                     "lifecycle_position": dict(lifecycle_position),
                 }

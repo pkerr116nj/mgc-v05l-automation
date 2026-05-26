@@ -4,6 +4,7 @@ import json
 from datetime import UTC, datetime
 from pathlib import Path
 
+from mgc_v05l.execution_core import track_b_control_plane_snapshot as cp_module
 from mgc_v05l.execution_core.track_b_control_plane_snapshot import (
     CONTROL_PLANE_SNAPSHOT_READY,
     CONTROL_PLANE_SNAPSHOT_STALE_OR_MIXED,
@@ -57,6 +58,79 @@ def test_snapshot_ties_supervisor_to_shared_truth_generation(tmp_path: Path) -> 
     assert payload["source_artifact_paths"]["shared_truth_refresh"].endswith(
         "outputs/track_b_execution_core/shared_truth/latest_track_b_shared_truth_refresh.json"
     )
+
+
+def test_snapshot_refreshes_stale_proof_readiness_before_supervisor(monkeypatch, tmp_path: Path) -> None:
+    _seed_clean_stack(tmp_path)
+    _seed_control_plane(tmp_path, proof_classification="PHASE1_DATA_UNHEALTHY")
+
+    proof_calls = []
+
+    def fake_build_proof(**kwargs):
+        proof_calls.append(kwargs["config"])
+        return {
+            "generated_at": NOW.isoformat(),
+            "classification": "READY_FOR_PROOF",
+            "phase1_session_reason": "GLOBEX_SESSION_OPEN",
+            "phase1_market_session": {"market_closed": False, "reason": "GLOBEX_SESSION_OPEN"},
+            "live_money_eligible": False,
+            "paper_proof_invoked": False,
+        }
+
+    def fake_write_proof(*, config, payload):
+        path = config.resolve(config.output_path)
+        _write(path, payload)
+        return path
+
+    monkeypatch.setattr(cp_module, "build_track_b_paper_proof_readiness", fake_build_proof)
+    monkeypatch.setattr(cp_module, "write_track_b_paper_proof_readiness", fake_write_proof)
+
+    payload = build_track_b_control_plane_snapshot(
+        config=TrackBControlPlaneSnapshotConfig(repo_root=tmp_path),
+        now=NOW,
+        process_root_resolver=lambda _pid: None,
+        source_commit_resolver=lambda _root: "test-head",
+    )
+
+    assert proof_calls
+    assert payload["classification"] == CONTROL_PLANE_SNAPSHOT_READY
+    assert payload["runtime_supervisor_classification"] == "SUPERVISOR_RUNTIME_START_ALLOWED"
+    assert payload["proof_window_status"] == "ready"
+
+
+def test_snapshot_preserves_real_stale_phase1_proof_blocker(monkeypatch, tmp_path: Path) -> None:
+    _seed_clean_stack(tmp_path)
+    _seed_control_plane(tmp_path, proof_classification="READY_FOR_PROOF")
+
+    def fake_build_proof(**_kwargs):
+        return {
+            "generated_at": NOW.isoformat(),
+            "classification": "PHASE1_DATA_UNHEALTHY",
+            "primary_blocker": {"code": "phase1_mgc_5m_not_ready"},
+            "phase1_session_reason": "RUNTIME_CANDLES_STALE",
+            "phase1_market_session": {"market_closed": False, "reason": "GLOBEX_SESSION_OPEN"},
+            "live_money_eligible": False,
+            "paper_proof_invoked": False,
+        }
+
+    def fake_write_proof(*, config, payload):
+        path = config.resolve(config.output_path)
+        _write(path, payload)
+        return path
+
+    monkeypatch.setattr(cp_module, "build_track_b_paper_proof_readiness", fake_build_proof)
+    monkeypatch.setattr(cp_module, "write_track_b_paper_proof_readiness", fake_write_proof)
+
+    payload = build_track_b_control_plane_snapshot(
+        config=TrackBControlPlaneSnapshotConfig(repo_root=tmp_path),
+        now=NOW,
+        process_root_resolver=lambda _pid: None,
+        source_commit_resolver=lambda _root: "test-head",
+    )
+
+    assert payload["classification"] != CONTROL_PLANE_SNAPSHOT_READY
+    assert payload["runtime_supervisor_classification"] == "SUPERVISOR_SHARED_TRUTH_STALE"
+    assert payload["proof_window_status"] == "data_stale"
 
 
 def test_market_closed_snapshot_waits_without_alarm(tmp_path: Path) -> None:
@@ -467,7 +541,7 @@ def _snapshot(
     process_rows=None,
 ) -> dict:
     return build_track_b_control_plane_snapshot(
-        config=TrackBControlPlaneSnapshotConfig(repo_root=root),
+        config=TrackBControlPlaneSnapshotConfig(repo_root=root, refresh_proof_readiness_before_snapshot=False),
         now=NOW,
         pid_running=(lambda _pid: False) if process_rows is not None else None,
         process_rows=process_rows,

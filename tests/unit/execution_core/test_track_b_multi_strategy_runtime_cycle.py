@@ -166,6 +166,36 @@ def live_pricing_context(*, close: str = "4575.0", fresh: bool = True, age_secon
     }
 
 
+def phase1_pricing_context(
+    *,
+    symbol: str,
+    close: str,
+    age_seconds: int = 10,
+) -> dict[str, object]:
+    return {
+        "source": "DATABENTO_REALTIME_PHASE1",
+        "instrument": symbol,
+        "symbol": symbol,
+        "dataset": "GLBX.MDP3",
+        "realtime_feed_confirmed": True,
+        "realtime_feed_block_reason": "READY",
+        "completed_candles_only": True,
+        "latest_bar_age_seconds": age_seconds,
+        "last_completed_bar_ts": aware_now().isoformat(),
+        "bars": [
+            {
+                "bar_end": aware_now().isoformat(),
+                "open": close,
+                "high": close,
+                "low": close,
+                "close": close,
+                "volume": "1",
+                "completed": True,
+            }
+        ],
+    }
+
+
 def rule_report(
     strategy_id: str,
     *,
@@ -177,6 +207,7 @@ def rule_report(
     paper_eligible: bool = True,
     live_money_eligible: bool = False,
     verdict: str | None = None,
+    instrument_family: str = "MGC",
 ) -> dict[str, object]:
     strategy_verdict = verdict or (
         TrackBStrategyRuleRunnerVerdict.EMITTED_SIGNAL.value if emitted else TrackBStrategyRuleRunnerVerdict.NO_SIGNAL.value
@@ -186,7 +217,7 @@ def rule_report(
         "strategy_registry_id": strategy_id,
         "strategy_registry_rule_id": strategy_id,
         "strategy_registry_rule_mode": rule_mode,
-        "strategy_registry_instrument_family": "MGC",
+        "strategy_registry_instrument_family": instrument_family,
         "strategy_registry_timeframe": "5m",
         "strategy_registry_feature_version": "test_feature_v1",
         "strategy_registry_calibration_profile": "test_calibration",
@@ -881,6 +912,73 @@ def test_auto_pricing_derives_sell_limits_from_fresh_live_last(tmp_path: Path) -
     assert result.report["open_limit_price"] == "4574.8"
     assert result.report["close_limit_price"] == "4575.2"
     assert calls.paper == 1
+
+
+def test_guarded_handoff_uses_chosen_mnq_contract_and_strategy_submit_plan(tmp_path: Path) -> None:
+    calls = Calls()
+    reports = default_reports()
+    reports["MNQ_FIRST_BULL_SNAP_TURN_V1"] = rule_report(
+        "MNQ_FIRST_BULL_SNAP_TURN_V1",
+        rule_mode="MNQ_FIRST_BULL_SNAP_TURN_V1",
+        decision="LONG",
+        emitted=True,
+        direction="LONG",
+        instrument_family="MNQ",
+    )
+    seed_cycle_authority(tmp_path)
+    observed: list[dict[str, object]] = []
+
+    def paper_stage(
+        config: TrackBMultiStrategyRuntimeCycleConfig,
+        _strategy_input: TrackBMultiStrategyInput,
+        _chosen_signal: dict[str, object],
+    ) -> TrackBStrategyPaperRunnerResult:
+        calls.paper += 1
+        plan = json.loads(Path(config.autonomous_recovery_plan_path).read_text(encoding="utf-8"))
+        observed.append(
+            {
+                "contract_key": config.contract_key,
+                "local_symbol": config.allowlisted_local_symbol,
+                "con_id": config.con_id,
+                "tick_size": config.tick_size,
+                "plan_classification": plan.get("classification"),
+                "target": plan["proposed_actions"][0]["target_identity"],
+                "managed_lifecycle_id": config.managed_lifecycle_id,
+            }
+        )
+        return paper_result(tmp_path)
+
+    result = run_track_b_multi_strategy_runtime_cycle(
+        config=cycle_config(
+            tmp_path,
+            enabled_strategy_ids=("MNQ_FIRST_BULL_SNAP_TURN_V1",),
+            mnq_first_bull_snap_turn_event_payload=base_event("MNQ_FIRST_BULL_SNAP_TURN_V1"),
+            submit_paper=True,
+            confirm_paper_submit=True,
+            quantity=1,
+            side="AUTO",
+            paper_order_pricing_policy="LIMIT_AT_LAST",
+            mnq_pricing_context_json=None,
+            pricing_context_payload=phase1_pricing_context(symbol="MNQ", close="28725.25"),
+        ),
+        stages=TrackBMultiStrategyRuntimeCycleStages(
+            strategy_rule=stages_for(tmp_path, calls, reports).strategy_rule,
+            paper_runner=paper_stage,
+        ),
+        cycle_id="cycle-mnq-guarded",
+        now=aware_now(),
+    )
+
+    assert result.verdict == TrackBMultiStrategyRuntimeCycleVerdict.PAPER_PROOF_PASSED
+    assert observed[0]["contract_key"] == "MNQ-202606"
+    assert observed[0]["local_symbol"] == "MNQM6"
+    assert observed[0]["con_id"] == 770561201
+    assert observed[0]["tick_size"] == "0.25"
+    assert observed[0]["plan_classification"] == "PLAN_STRATEGY_MANAGED_ENTRY_SUBMIT"
+    assert observed[0]["target"]["contract_key"] == "MNQ-202606"
+    assert observed[0]["target"]["symbol"] == "MNQ"
+    assert observed[0]["target"]["limit_price"] == "28725.25"
+    assert observed[0]["target"]["lifecycle_id"] == observed[0]["managed_lifecycle_id"]
 
 
 def test_auto_pricing_blocks_when_live_context_missing(tmp_path: Path) -> None:

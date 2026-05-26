@@ -267,6 +267,21 @@ def _classify_plan(
             blockers=[_blocker("bounded_recovery_budget", "budget_exhausted")],
             blocked_actions=[_action("budget_exhausted", "RUNTIME_RETRY", reason="bounded recovery budget exhausted")],
         )
+    if _managed_order_modify_candidate_with_only_agent_health_submit_blocks(evidence):
+        return _decision(
+            classification=PLAN_MANAGED_ORDER_MODIFY,
+            reason="A working managed close order is eligible for exact modify-in-place cleanup; runtime/proof Agent Health blocks are not order-modify identity blockers.",
+            proposed_actions=[
+                _action(
+                    "managed_order_modify",
+                    "MANAGED_ORDER_MODIFY",
+                    target_identity=_first_order_identity(inputs["order_adjustment_plan"], inputs["managed_order_registry"]),
+                    reason="Future executor would require exact order identity and explicit operator authorization.",
+                    would_mutate_broker=True,
+                )
+            ],
+            warnings=[_blocker("agent_health", item) for item in evidence["stale_or_missing_evidence"]],
+        )
     if _stale_or_missing(evidence):
         return _decision(
             classification=PLAN_BLOCKED_STALE_EVIDENCE,
@@ -780,6 +795,16 @@ def _stale_or_missing(evidence: Mapping[str, Any]) -> bool:
     return bool(evidence["stale_or_missing_evidence"]) or evidence["paper_action_policy"] == PAPER_POLICY_REFRESH_EVIDENCE
 
 
+def _managed_order_modify_candidate_with_only_agent_health_submit_blocks(evidence: Mapping[str, Any]) -> bool:
+    tolerated = {"agent_health_blocks_proof", "agent_health_blocks_runtime_submit"}
+    stale = {str(item) for item in _list(evidence.get("stale_or_missing_evidence"))}
+    return (
+        evidence.get("order_adjustment_plan_classification") == "MODIFY_IN_PLACE_ELIGIBLE"
+        and stale <= tolerated
+        and evidence.get("snapshot_coherence_status") == "COHERENT"
+    )
+
+
 def _market_data_restart_candidate(*, inputs: Mapping[str, Mapping[str, Any]], evidence: Mapping[str, Any]) -> bool:
     if not _clean_shared_truth(evidence):
         return False
@@ -877,6 +902,17 @@ def _first_order_identity(order_adjustment_plan: Mapping[str, Any], managed_orde
                 "perm_id": row.get("perm_id"),
                 "action": row.get("action"),
                 "quantity": row.get("quantity"),
+            }
+        else:
+            identity = {
+                "account_id": identity.get("account_id") or row.get("account_id"),
+                "symbol": identity.get("symbol") or row.get("symbol"),
+                "contract": identity.get("contract") or row.get("contract") or row.get("local_symbol"),
+                "con_id": identity.get("con_id") or row.get("con_id"),
+                "broker_order_id": identity.get("broker_order_id") or row.get("broker_order_id"),
+                "perm_id": identity.get("perm_id") or row.get("perm_id"),
+                "action": identity.get("action") or row.get("action"),
+                "quantity": identity.get("quantity") or row.get("quantity"),
             }
         if identity.get("contract") or identity.get("broker_order_id") or identity.get("perm_id"):
             return dict(identity)

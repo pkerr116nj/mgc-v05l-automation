@@ -549,8 +549,12 @@ def _lifecycle_positions_match(*, positions: Sequence[Mapping[str, Any]], lifecy
 
 
 def _reconciliation_clean(reconciliation: Mapping[str, Any]) -> bool:
+    clean_classifications = {
+        "TRACK_B_PAPER_BROKER_RECONCILED",
+        "TRACK_B_PAPER_BROKER_RECONCILED_WITH_KNOWN_MANAGED_EXIT_ORDER",
+    }
     return (
-        str(reconciliation.get("classification") or "") == "TRACK_B_PAPER_BROKER_RECONCILED"
+        str(reconciliation.get("classification") or "") in clean_classifications
         and _bool(reconciliation.get("broker_reconciled"))
         and int(reconciliation.get("review_required_count") or 0) == 0
     )

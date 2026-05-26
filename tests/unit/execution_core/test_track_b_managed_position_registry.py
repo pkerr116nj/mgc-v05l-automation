@@ -77,6 +77,38 @@ def test_active_review_required_lifecycle_still_surfaces(tmp_path: Path) -> None
     assert payload["managed_positions"][0]["classification"] == REVIEW_REQUIRED
 
 
+def test_retryable_unmutated_aggregate_close_review_does_not_mask_exit_due(tmp_path: Path) -> None:
+    lifecycle = _lifecycle_position(bars_since_fill=3)
+    _seed_base(tmp_path, broker_positions=[_broker_position()], lifecycle_positions=[lifecycle])
+    _write_lifecycle_report(
+        tmp_path,
+        lifecycle_id=lifecycle["lifecycle_id"],
+        bars_since_fill=3,
+        review_required=True,
+        paper_lifecycle_classification="TRACK_B_STRATEGY_PAPER_REVIEW_REQUIRED",
+        broker_state_mutated=False,
+        primary_blocker="Managed PAPER lifecycle close maintenance error: quantity must be exactly 1 for milestone one.",
+        close_intent={
+            "lifecycle_id": lifecycle["lifecycle_id"],
+            "strategy_id": "track_b_paper_execution_test_mule_v1__mnq",
+            "local_symbol": "MNQM6",
+            "con_id": 770561201,
+            "order_action": "BUY",
+            "quantity": 3,
+            "managed_exit_policy_id": "PAPER_DIAGNOSTIC_TIME_BOXED_3X5M_EXIT_V1",
+        },
+    )
+
+    payload = build_track_b_managed_position_registry(
+        config=TrackBManagedPositionRegistryConfig(repo_root=tmp_path),
+        now=NOW,
+    )
+
+    assert payload["classification"] == OPEN_MANAGED_EXIT_DUE
+    assert payload["review_required_positions"] == []
+    assert payload["managed_positions"][0]["attention_required"] is False
+
+
 def test_no_broker_effect_terminal_lifecycle_is_not_registry_eligible(tmp_path: Path) -> None:
     lifecycle = {
         **_lifecycle_position(),
@@ -443,6 +475,9 @@ def _write_lifecycle_report(
     bars_since_fill: int = 1,
     review_required: bool = False,
     paper_lifecycle_classification: str = "TRACK_B_STRATEGY_PAPER_OPEN_MANAGED",
+    broker_state_mutated: bool = True,
+    primary_blocker: str | None = None,
+    close_intent: dict | None = None,
 ) -> None:
     _write_json(
         root
@@ -467,6 +502,9 @@ def _write_lifecycle_report(
             "paper_lifecycle_classification": paper_lifecycle_classification,
             "final_position_status": "OPEN_MANAGED",
             "review_required": review_required,
+            "broker_state_mutated": broker_state_mutated,
+            "primary_blocker": primary_blocker,
+            "close_intent": close_intent,
             "entry_intent": {"side": "SHORT", "order_action": "SELL", "quantity": 1},
             "entry_fill": {"price": "29688.69", "filled_at": "2026-05-22T16:20:00+00:00"},
         },

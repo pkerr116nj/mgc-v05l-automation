@@ -5,6 +5,7 @@ from pathlib import Path
 
 import pytest
 
+import mgc_v05l.execution.ibkr_paper_strategy_governance as governance_module
 from mgc_v05l.execution.ibkr_paper_strategy_governance import (
     IbkrPaperStrategyGovernanceConfig,
     load_paper_strategy_governance_status,
@@ -253,6 +254,121 @@ def _write_canonical_readiness(
         ),
         encoding="utf-8",
     )
+
+
+def _write_shared_services_authority(
+    tmp_path: Path,
+    *,
+    symbol: str = "NQ",
+    generated_at: str = "2999-01-01T00:00:00+00:00",
+    control_plane_classification: str = "CONTROL_PLANE_SNAPSHOT_READY",
+    coherence: str = "COHERENT",
+    safe_state_classification: str = "SAFE_STATE_NORMAL",
+    submit_allowed: bool = True,
+    broker_mutation_allowed: bool = True,
+    live_money_eligible: bool = False,
+    paper_proof_invoked: bool = False,
+    duplicate_writer: bool = False,
+    loop_mode: str = "guarded-paper",
+    candle_stale: bool = False,
+) -> None:
+    control_plane_path = tmp_path / "outputs" / "track_b_execution_core" / "control_plane" / "latest_control_plane_snapshot.json"
+    safe_state_path = tmp_path / "outputs" / "track_b_execution_core" / "safe_state" / "latest_runtime_safe_state_envelope.json"
+    loop_path = tmp_path / "outputs" / "track_b_execution_core" / "p0_observe_only" / "latest_p0_observe_only_loop.json"
+    candle_path = tmp_path / "outputs" / "track_b_execution_core" / "phase1_runtime_market_data" / symbol / "1m" / "latest_runtime_candles.json"
+    control_plane_path.parent.mkdir(parents=True, exist_ok=True)
+    safe_state_path.parent.mkdir(parents=True, exist_ok=True)
+    loop_path.parent.mkdir(parents=True, exist_ok=True)
+    candle_path.parent.mkdir(parents=True, exist_ok=True)
+    control_plane_path.write_text(
+        json.dumps(
+            {
+                "classification": control_plane_classification,
+                "shared_truth_coherence_status": coherence,
+                "control_plane_snapshot_id": "cp-test",
+                "shared_truth_generation_id": "truth-test",
+                "safe_state_runtime_generation_id": "gen-test",
+                "safe_state_classification": safe_state_classification,
+                "agent_health_has_duplicate_writer": duplicate_writer,
+                "live_money_eligible": live_money_eligible,
+                "paper_proof_invoked": paper_proof_invoked,
+            }
+        ),
+        encoding="utf-8",
+    )
+    safe_state_path.write_text(
+        json.dumps(
+            {
+                "classification": safe_state_classification,
+                "safe_state_classification": safe_state_classification,
+                "submit_allowed": submit_allowed,
+                "broker_mutation_allowed": broker_mutation_allowed,
+                "runtime_generation_id": "gen-test",
+                "shared_truth_generation_id": "truth-test",
+                "live_money_eligible": live_money_eligible,
+                "paper_proof_invoked": paper_proof_invoked,
+            }
+        ),
+        encoding="utf-8",
+    )
+    loop_path.write_text(
+        json.dumps(
+            {
+                "loop_mode": loop_mode,
+                "runtime_generation_id": "gen-test",
+                "live_money_eligible": live_money_eligible,
+                "paper_proof_invoked": paper_proof_invoked,
+                "latest_iteration": {
+                    "control_plane_snapshot": {
+                        "safe_state_runtime_generation_id": "gen-test",
+                    }
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    candle_path.write_text(
+        json.dumps(
+            {
+                "generated_at": "2026-04-29T12:28:50.338596+00:00" if candle_stale else generated_at,
+                "symbol": symbol,
+                "timeframe": "1m",
+                "completed_candles_only": True,
+                "realtime_feed_confirmed": True,
+                "bars": [
+                    {
+                        "bar_start": "2999-01-01T00:00:00+00:00",
+                        "bar_end": "2999-01-01T00:01:00+00:00",
+                        "open": 1,
+                        "high": 2,
+                        "low": 1,
+                        "close": 2,
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+
+def _patch_guarded_loop_process(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, *, count: int = 1, root_matches: bool = True) -> None:
+    def _fake_processes(repo_root: Path) -> tuple[dict[str, object], ...]:
+        if count <= 0:
+            return ()
+        rows = []
+        for idx in range(count):
+            rows.append(
+                {
+                    "pid": 80000 + idx,
+                    "command": f"python -m mgc_v05l.execution_core.track_b_p0_observe_only_loop --repo-root {tmp_path} --mode guarded-paper",
+                    "root_matches": root_matches,
+                    "wrong_root": not root_matches,
+                }
+            )
+        return tuple(rows)
+
+    monkeypatch.setattr(governance_module, "_guarded_loop_processes", _fake_processes)
+
 
 def _write_signal_audit(tmp_path: Path) -> None:
     path = tmp_path / "outputs" / "operator_dashboard" / "paper_signal_intent_fill_audit_snapshot.json"
@@ -732,6 +848,152 @@ def test_governance_blocks_when_canonical_runtime_down_even_if_dashboard_snapsho
     assert "paper_runtime_not_running" in nq["backend_source_readiness"]["block_reasons"]
     assert nq["submit_block_reasons"] == ["backend_or_source_not_live_ready"]
     assert nq["submit_allowed"] is False
+
+
+def test_governance_uses_shared_services_authority_over_stale_canonical_runtime_down(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _write_monitor(
+        tmp_path,
+        broker_position_quantity=0.0,
+        ledger_position_quantity=0.0,
+    )
+    _write_ledger(tmp_path)
+    _write_dashboard(tmp_path)
+    _write_backend_source_readiness(
+        tmp_path,
+        generated_at="2026-04-29T12:28:50.338596+00:00",
+        runtime_running=False,
+        paper_runtime_ready=False,
+        paper_trade_allowed=False,
+        market_data_stale_count=2,
+    )
+    _write_canonical_readiness(
+        tmp_path,
+        state="READY_OBSERVATION_ONLY",
+        runtime_running=False,
+        runtime_healthy=False,
+        runtime_ingestion_fresh=False,
+    )
+    _write_shared_services_authority(tmp_path, symbol="NQ")
+    _patch_guarded_loop_process(monkeypatch, tmp_path)
+    _write_signal_audit(tmp_path)
+    _write_strategy_performance(tmp_path)
+
+    artifacts = run_ibkr_paper_strategy_governance(config=_config(tmp_path))
+
+    nq = next(row for row in artifacts.performance_rows if row["strategy_id"] == "nq_1x_ny_early_core__us_late_long")
+    readiness = nq["backend_source_readiness"]
+    assert readiness["source"] == "execution_core_control_plane_safe_state_guarded_loop_phase1"
+    assert readiness["shared_services_authority_ready"] is True
+    assert readiness["dashboard_projection_consumed"] is False
+    assert readiness["live_ready"] is True
+    assert readiness["paper_trade_allowed"] is True
+    assert "backend_or_source_not_live_ready" not in nq["submit_block_reasons"]
+    assert nq["submit_allowed"] is True
+
+
+def test_governance_shared_services_blocks_when_control_plane_blocked(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _write_monitor(
+        tmp_path,
+        broker_position_quantity=0.0,
+        ledger_position_quantity=0.0,
+    )
+    _write_ledger(tmp_path)
+    _write_dashboard(tmp_path)
+    _write_backend_source_readiness(tmp_path)
+    _write_shared_services_authority(tmp_path, symbol="NQ", control_plane_classification="CONTROL_PLANE_SNAPSHOT_BLOCKED")
+    _patch_guarded_loop_process(monkeypatch, tmp_path)
+    _write_signal_audit(tmp_path)
+    _write_strategy_performance(tmp_path)
+
+    artifacts = run_ibkr_paper_strategy_governance(config=_config(tmp_path))
+
+    nq = next(row for row in artifacts.performance_rows if row["strategy_id"] == "nq_1x_ny_early_core__us_late_long")
+    assert nq["backend_source_readiness"]["live_ready"] is False
+    assert "control_plane_not_ready" in nq["backend_source_readiness"]["block_reasons"]
+    assert nq["submit_block_reasons"] == ["backend_or_source_not_live_ready"]
+
+
+def test_governance_shared_services_blocks_when_safe_state_unsafe(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _write_monitor(
+        tmp_path,
+        broker_position_quantity=0.0,
+        ledger_position_quantity=0.0,
+    )
+    _write_ledger(tmp_path)
+    _write_dashboard(tmp_path)
+    _write_backend_source_readiness(tmp_path)
+    _write_shared_services_authority(tmp_path, symbol="NQ", safe_state_classification="SAFE_STATE_HARD_HOLD")
+    _patch_guarded_loop_process(monkeypatch, tmp_path)
+    _write_signal_audit(tmp_path)
+    _write_strategy_performance(tmp_path)
+
+    artifacts = run_ibkr_paper_strategy_governance(config=_config(tmp_path))
+
+    nq = next(row for row in artifacts.performance_rows if row["strategy_id"] == "nq_1x_ny_early_core__us_late_long")
+    assert nq["backend_source_readiness"]["live_ready"] is False
+    assert "safe_state_not_normal" in nq["backend_source_readiness"]["block_reasons"]
+    assert nq["submit_allowed"] is False
+
+
+def test_governance_shared_services_blocks_live_money_and_paper_proof(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _write_monitor(
+        tmp_path,
+        broker_position_quantity=0.0,
+        ledger_position_quantity=0.0,
+    )
+    _write_ledger(tmp_path)
+    _write_dashboard(tmp_path)
+    _write_backend_source_readiness(tmp_path)
+    _write_shared_services_authority(tmp_path, symbol="NQ", live_money_eligible=True, paper_proof_invoked=True)
+    _patch_guarded_loop_process(monkeypatch, tmp_path)
+    _write_signal_audit(tmp_path)
+    _write_strategy_performance(tmp_path)
+
+    artifacts = run_ibkr_paper_strategy_governance(config=_config(tmp_path))
+
+    nq = next(row for row in artifacts.performance_rows if row["strategy_id"] == "nq_1x_ny_early_core__us_late_long")
+    reasons = nq["backend_source_readiness"]["block_reasons"]
+    assert "live_money_eligible_true" in reasons
+    assert "paper_proof_invoked_true" in reasons
+    assert nq["submit_allowed"] is False
+
+
+def test_governance_shared_services_blocks_stale_phase1_market_data(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _write_monitor(
+        tmp_path,
+        broker_position_quantity=0.0,
+        ledger_position_quantity=0.0,
+    )
+    _write_ledger(tmp_path)
+    _write_dashboard(tmp_path)
+    _write_backend_source_readiness(tmp_path)
+    _write_shared_services_authority(tmp_path, symbol="NQ", candle_stale=True)
+    _patch_guarded_loop_process(monkeypatch, tmp_path)
+    _write_signal_audit(tmp_path)
+    _write_strategy_performance(tmp_path)
+
+    artifacts = run_ibkr_paper_strategy_governance(config=_config(tmp_path))
+
+    nq = next(row for row in artifacts.performance_rows if row["strategy_id"] == "nq_1x_ny_early_core__us_late_long")
+    readiness = nq["backend_source_readiness"]
+    assert readiness["live_ready"] is False
+    assert "phase1_runtime_market_data_not_ready" in readiness["block_reasons"]
+    assert readiness["shared_services_authority"]["phase1_runtime_market_data"]["ready"] is False
 
 
 def test_governance_blocks_when_canonical_readiness_is_stale(tmp_path: Path) -> None:

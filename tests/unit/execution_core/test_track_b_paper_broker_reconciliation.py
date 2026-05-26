@@ -6,6 +6,7 @@ from pathlib import Path
 
 from mgc_v05l.execution_core.track_b_paper_broker_reconciliation import (
     ReconciliationConfig,
+    _broker_lifecycle_position_match,
     reconcile_track_b_paper_broker_truth,
 )
 from mgc_v05l.execution_core.track_b_submit_intent_ownership import (
@@ -16,6 +17,76 @@ from mgc_v05l.execution_core.track_b_submit_intent_ownership import (
 
 
 NOW = datetime(2026, 5, 11, 12, 0, tzinfo=timezone.utc)
+
+
+def test_broker_lifecycle_match_accepts_aggregate_same_lane_units() -> None:
+    report = _broker_lifecycle_position_match(
+        broker_positions=[
+            {
+                "account_id": "DUM882026",
+                "symbol": "MNQ",
+                "local_symbol": "MNQM6",
+                "con_id": 770561201,
+                "expiry": "20260618",
+                "quantity": "-3",
+            }
+        ],
+        lifecycle_positions=[
+            {
+                "account_id": "DUM882026",
+                "instrument_family": "MNQ",
+                "contract_key": "MNQ-202606",
+                "local_symbol": "MNQM6",
+                "con_id": 770561201,
+                "expiry": "20260618",
+                "side": "SHORT",
+                "quantity": "3",
+                "aggregate_qty": "-3",
+                "lifecycle_unit_count": 3,
+                "lifecycle_ids": ["lifecycle-46", "lifecycle-47", "lifecycle-48"],
+                "duplicate_same_lane_exposure": True,
+                "pyramiding_allowed": False,
+            }
+        ],
+        symbols=["MNQ"],
+    )
+
+    assert report["matched"] is True
+    assert report["state"] == "BROKER_AND_LIFECYCLE_OPEN_MATCHED"
+    assert report["matches"][0]["lifecycle_unit_count"] == 3
+    assert report["matches"][0]["duplicate_same_lane_exposure"] is True
+
+
+def test_broker_lifecycle_match_blocks_collapsed_same_lane_quantity() -> None:
+    report = _broker_lifecycle_position_match(
+        broker_positions=[
+            {
+                "account_id": "DUM882026",
+                "symbol": "MNQ",
+                "local_symbol": "MNQM6",
+                "con_id": 770561201,
+                "expiry": "20260618",
+                "quantity": "-3",
+            }
+        ],
+        lifecycle_positions=[
+            {
+                "account_id": "DUM882026",
+                "instrument_family": "MNQ",
+                "contract_key": "MNQ-202606",
+                "local_symbol": "MNQM6",
+                "con_id": 770561201,
+                "expiry": "20260618",
+                "side": "SHORT",
+                "quantity": "1",
+                "lifecycle_id": "lifecycle-48",
+            }
+        ],
+        symbols=["MNQ"],
+    )
+
+    assert report["matched"] is False
+    assert report["state"] == "BROKER_LIFECYCLE_POSITION_DETAIL_MISMATCH"
 
 
 def test_reconciles_flat_lifecycle_with_fresh_broker_truth_and_unrelated_positions(tmp_path: Path) -> None:
@@ -592,6 +663,91 @@ def test_known_managed_exit_order_is_not_unknown_open_order_blocker(tmp_path: Pa
     assert report["blockers"] == []
     reconciled_position = json.loads(config.reconciled_live_position_status_path.read_text(encoding="utf-8"))
     assert reconciled_position["known_managed_exit_orders"][0]["broker_order_id"] == "1"
+
+
+def test_lifecycle_report_known_managed_exit_order_is_not_unknown_open_order_blocker(tmp_path: Path) -> None:
+    lifecycle_path = (
+        tmp_path
+        / "outputs"
+        / "track_b_execution_core"
+        / "track_b_strategy_managed_paper_lifecycle"
+        / "reserved_submit_mgc"
+        / "track_b_strategy_managed_paper_lifecycle_report.json"
+    )
+    open_position = {
+        "strategy_id": "gc_mgc_forced_session_baseline_v2__mgc_1x_all_lanes__asia_early_short",
+        "lifecycle_id": "reserved_submit_mgc",
+        "instrument_family": "MGC",
+        "contract_key": "MGC-202606",
+        "local_symbol": "MGCM6",
+        "con_id": 712565978,
+        "side": "SHORT",
+        "quantity": "-1",
+        "avg_entry_price": "4564.3",
+        "paper_lifecycle_report_path": str(lifecycle_path),
+    }
+    config = _write_base_artifacts(tmp_path, open_position=open_position)
+    _write_json(
+        lifecycle_path,
+        {
+            "known_managed_exit_orders": [
+                {
+                    "managed_order_status": "WORKING",
+                    "lifecycle_id": "reserved_submit_mgc",
+                    "strategy_id": "gc_mgc_forced_session_baseline_v2__mgc_1x_all_lanes__asia_early_short",
+                    "lane_id": "mgc_1x_all_lanes__asia_early_short",
+                    "broker_order_id": "38",
+                    "client_id": 17086,
+                    "symbol": "MGC",
+                    "local_symbol": "MGCM6",
+                    "con_id": 712565978,
+                    "action": "BUY",
+                    "quantity": "1",
+                }
+            ]
+        },
+    )
+    _write_broker_truth(
+        config,
+        positions=[
+            {
+                "account_id": "DUM882026",
+                "symbol": "MGC",
+                "local_symbol": "MGCM6",
+                "security_type": "FUT",
+                "quantity": "-1",
+                "average_cost": "45643.0",
+                "multiplier": "10",
+                "con_id": 712565978,
+            }
+        ],
+        open_orders=[
+            {
+                "broker_order_id": "38",
+                "client_id": 17086,
+                "symbol": "MGC",
+                "local_symbol": "MGCM6",
+                "security_type": "FUT",
+                "expiry": "20260626",
+                "con_id": 712565978,
+                "action": "BUY",
+                "order_type": "LMT",
+                "limit_price": "4568.6",
+                "quantity": "1",
+                "remaining_quantity": "1",
+                "status": "Submitted",
+            }
+        ],
+    )
+
+    report = reconcile_track_b_paper_broker_truth(config=config, now=NOW)
+
+    assert report["classification"] == "TRACK_B_PAPER_BROKER_RECONCILED_WITH_KNOWN_MANAGED_EXIT_ORDER"
+    assert report["broker_reconciled"] is True
+    assert report["known_managed_exit_order_count"] == 1
+    assert report["unknown_broker_open_order_count"] == 0
+    assert report["open_order_truth_classification"] == "OPEN_CLOSE_ORDER_WORKING"
+    assert report["known_managed_exit_orders"][0]["source"] == "TRACK_B_LIFECYCLE_REPORT_KNOWN_MANAGED_EXIT_ORDER"
 
 
 def test_known_leak_test_entry_order_is_not_unknown_open_order_blocker(tmp_path: Path) -> None:
@@ -1174,6 +1330,40 @@ def test_unknown_open_order_blocks_even_with_matching_submit_intent(tmp_path: Pa
     assert report["classification"] == "TRACK_B_PAPER_BROKER_RECONCILIATION_BLOCKED"
     assert any(blocker["code"] == "UNKNOWN_BROKER_OPEN_ORDER" for blocker in report["blockers"])
     assert report["submit_intent_ownership_reconciliation"]["classification"] == "SUBMIT_INTENT_OPEN_ORDER_AMBIGUITY"
+
+
+def test_cancelled_known_close_order_absent_from_open_orders_reconciles_flat(tmp_path: Path) -> None:
+    config = _write_base_artifacts(tmp_path)
+    _write_json(
+        config.repo_root / "outputs/track_b_execution_core/managed_exit_orders/latest_known_managed_exit_orders.json",
+        {
+            "schema_version": "track_b_known_managed_exit_orders_v1",
+            "known_managed_exit_orders": [
+                {
+                    "source": "GUARDED_TRACK_B_PAPER_CANCEL_REPLACE_ONLY",
+                    "symbol": "MNQ",
+                    "local_symbol": "MNQM6",
+                    "order_id": "13",
+                    "broker_order_id": "13",
+                    "perm_id": "1784491840",
+                    "action": "SELL",
+                    "quantity": "1",
+                    "managed_order_status": "Cancelled",
+                    "lifecycle_id": "bridge_fill_MNQ|1m|2026-05-20T12:25:00Z|BUY_TO_OPEN",
+                }
+            ],
+            "resolved_known_managed_exit_orders": [],
+        },
+    )
+    _write_broker_truth(config, positions=[], open_orders=[])
+
+    report = reconcile_track_b_paper_broker_truth(config=config, now=NOW)
+
+    assert report["classification"] == "TRACK_B_PAPER_BROKER_RECONCILED"
+    assert report["broker_reconciled"] is True
+    assert report["track_b_broker_open_order_count"] == 0
+    assert report["known_managed_exit_order_count"] == 0
+    assert not any(blocker.get("code") == "UNKNOWN_BROKER_OPEN_ORDER" for blocker in report["blockers"])
 
 
 def test_reconciliation_module_has_no_broker_mutation_symbols() -> None:

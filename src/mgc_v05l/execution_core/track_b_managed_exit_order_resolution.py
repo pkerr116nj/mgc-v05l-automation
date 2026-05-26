@@ -126,28 +126,51 @@ def resolve_known_managed_exit_order_disappearance(
     if broker_qty == Decimal("0"):
         report["classification"] = KNOWN_MANAGED_EXIT_ORDER_FILLED_CLOSE_PERSISTENCE_GAP
         report["detail"] = "Broker truth is flat for the exact lifecycle contract; lifecycle close persistence is required."
-        close_payload = _filled_close_payload(
+        close_payloads = _filled_close_payloads(
+            config=config,
+            target=target,
+            known_order=known_order,
+            now=actual_now,
+        )
+        close_payload = close_payloads[-1] if close_payloads else _filled_close_payload(
             config=config,
             target=target,
             known_order=known_order,
             now=actual_now,
         )
         report["filled_bridge_result"] = close_payload
+        if len(close_payloads) > 1:
+            report["aggregate_lifecycle_close_persistence"] = {
+                "enabled": True,
+                "lifecycle_count": len(close_payloads),
+                "lifecycle_ids": [payload.get("lifecycle_id") for payload in close_payloads],
+            }
         if config.apply:
-            filled_path = config.resolved_report_dir / "known_managed_exit_order_close_fill_result.json"
-            _write_json(filled_path, close_payload)
-            ledger_result = ledger_update_runner(
-                filled_bridge_result=close_payload,
-                filled_bridge_result_json=filled_path,
-                output_root=config.repo_root / "outputs" / "track_b_execution_core" / "paper_trade_ledger",
-                now=actual_now,
-            )
+            ledger_results = []
+            for index, payload in enumerate(close_payloads or [close_payload], start=1):
+                lifecycle_id = _safe_filename(str(payload.get("lifecycle_id") or config.lifecycle_id or index))
+                suffix = "" if len(close_payloads) <= 1 else f"_{index}_{lifecycle_id}"
+                filled_path = config.resolved_report_dir / f"known_managed_exit_order_close_fill_result{suffix}.json"
+                _write_json(filled_path, payload)
+                ledger_results.append(
+                    ledger_update_runner(
+                        filled_bridge_result=payload,
+                        filled_bridge_result_json=filled_path,
+                        output_root=config.repo_root / "outputs" / "track_b_execution_core" / "paper_trade_ledger",
+                        now=actual_now,
+                    )
+                )
             _clear_pending_order_state(config=config, known_order=known_order, classification=report["classification"], now=actual_now)
+            primary_ledger_result = ledger_results[-1] if ledger_results else None
             report["lifecycle_close"] = {
-                "persisted": bool(getattr(ledger_result, "trade_record_written", False)),
-                "ledger_jsonl": str(getattr(ledger_result, "ledger_jsonl", "")),
-                "live_position_status_json": str(getattr(ledger_result, "live_position_status_json", "")),
-                "trade_record": getattr(ledger_result, "trade_record", None),
+                "persisted": any(bool(getattr(item, "trade_record_written", False)) for item in ledger_results),
+                "persisted_count": sum(1 for item in ledger_results if getattr(item, "trade_record_written", False)),
+                "ledger_jsonl": str(getattr(primary_ledger_result, "ledger_jsonl", "")) if primary_ledger_result else "",
+                "live_position_status_json": str(getattr(primary_ledger_result, "live_position_status_json", ""))
+                if primary_ledger_result
+                else "",
+                "trade_record": getattr(primary_ledger_result, "trade_record", None) if primary_ledger_result else None,
+                "trade_records": [getattr(item, "trade_record", None) for item in ledger_results],
             }
         _write_report(config, report)
         return report
@@ -208,6 +231,9 @@ def _known_exit_order(
     for row in persisted.get("known_managed_exit_orders") or []:
         if isinstance(row, Mapping) and str(row.get("broker_order_id") or "") == str(config.broker_order_id):
             return dict(row)
+    attach_order = _managed_exit_attach_known_order(config=config, target=target)
+    if attach_order:
+        return attach_order
     restore = _restore_known_order(config=config, target=target)
     if restore:
         return restore
@@ -226,6 +252,100 @@ def _known_exit_order(
         "strategy_id": (target or {}).get("strategy_id"),
         "lane_id": (target or {}).get("lane_id"),
     }
+
+
+def _managed_exit_attach_known_order(
+    *,
+    config: ManagedExitOrderResolutionConfig,
+    target: Mapping[str, Any] | None,
+) -> dict[str, Any] | None:
+    path = (
+        config.repo_root
+        / "outputs"
+        / "track_b_execution_core"
+        / "managed_exit_attach"
+        / "latest_managed_exit_attach_plan.json"
+    )
+    payload = _load_json(path)
+    if not payload:
+        return None
+    apply_result = payload.get("apply_result")
+    close_intent = apply_result.get("close_intent") if isinstance(apply_result, Mapping) else {}
+    if not isinstance(close_intent, Mapping):
+        close_intent = {}
+    preview = payload.get("close_intent_preview")
+    if not isinstance(preview, Mapping):
+        preview = {}
+    payload_lifecycle_id = str(
+        payload.get("lifecycle_id") or close_intent.get("lifecycle_id") or preview.get("lifecycle_id") or ""
+    )
+    aggregate_group = payload.get("aggregate_exit_group") if isinstance(payload.get("aggregate_exit_group"), Mapping) else {}
+    aggregate_lifecycle_ids = {str(item) for item in aggregate_group.get("lifecycle_ids") or []}
+    if payload_lifecycle_id != config.lifecycle_id and config.lifecycle_id not in aggregate_lifecycle_ids:
+        return None
+    close_submit = apply_result
+    if isinstance(apply_result, Mapping):
+        close_submit = apply_result.get("close_submit_attempt")
+    if not isinstance(close_submit, Mapping):
+        return None
+    if str(close_submit.get("broker_order_id") or "") != str(config.broker_order_id):
+        return None
+    if not _managed_exit_attach_payload_matches_target(
+        config=config,
+        target=target,
+        payload=payload,
+        preview={**dict(close_intent), **dict(preview)},
+    ):
+        return None
+    return {
+        "source": "TRACK_B_MANAGED_EXIT_ATTACH_APPLY_ARTIFACT",
+        "source_artifact_path": str(path),
+        "lifecycle_id": config.lifecycle_id,
+        "strategy_id": payload.get("strategy_id") or close_intent.get("strategy_id") or preview.get("strategy_id") or (target or {}).get("strategy_id"),
+        "lane_id": payload.get("lane_id") or close_intent.get("lane_id") or preview.get("lane_id") or (target or {}).get("lane_id"),
+        "order_intent_id": close_submit.get("submit_attempt_id")
+        or close_intent.get("order_intent_id")
+        or preview.get("order_intent_id")
+        or f"{preview.get('symbol') or (target or {}).get('track_b_root') or config.symbol}|managed_exit_attach|{config.broker_order_id}",
+        "broker_order_id": str(close_submit.get("broker_order_id") or config.broker_order_id),
+        "client_id": config.client_id or close_submit.get("client_id"),
+        "perm_id": config.perm_id or close_submit.get("perm_id"),
+        "symbol": config.symbol or payload.get("symbol") or close_intent.get("symbol") or (target or {}).get("track_b_root"),
+        "local_symbol": config.local_symbol or payload.get("local_symbol") or close_intent.get("local_symbol") or preview.get("local_symbol") or (target or {}).get("local_symbol"),
+        "con_id": config.con_id if config.con_id is not None else payload.get("con_id") or close_intent.get("con_id") or preview.get("con_id") or (target or {}).get("con_id"),
+        "action": close_intent.get("order_action") or preview.get("order_action") or ("SELL" if str((target or {}).get("side") or "").upper() == "LONG" else "BUY"),
+        "quantity": close_intent.get("quantity") or preview.get("quantity") or (target or {}).get("quantity") or "1",
+        "order_type": close_intent.get("order_type") or preview.get("order_type"),
+        "limit_price": close_intent.get("close_limit_price") or preview.get("close_limit_price"),
+        "exit_reason": close_intent.get("close_reason") or preview.get("close_reason"),
+        "exit_profile_id": preview.get("exit_profile_id"),
+        "fill_price": close_submit.get("fill_price"),
+        "fill_timestamp": close_submit.get("fill_timestamp"),
+        "review_required": close_submit.get("review_required"),
+        "primary_blocker": close_submit.get("primary_blocker"),
+    }
+
+
+def _managed_exit_attach_payload_matches_target(
+    *,
+    config: ManagedExitOrderResolutionConfig,
+    target: Mapping[str, Any] | None,
+    payload: Mapping[str, Any],
+    preview: Mapping[str, Any],
+) -> bool:
+    target_local = str(config.local_symbol or (target or {}).get("local_symbol") or "").upper()
+    payload_local = str(payload.get("local_symbol") or preview.get("local_symbol") or "").upper()
+    if target_local and payload_local and target_local != payload_local:
+        return False
+    target_con_id = _int_or_none(config.con_id if config.con_id is not None else (target or {}).get("con_id"))
+    payload_con_id = _int_or_none(payload.get("con_id") or preview.get("con_id"))
+    if target_con_id is not None and payload_con_id is not None and target_con_id != payload_con_id:
+        return False
+    target_symbol = str(config.symbol or (target or {}).get("track_b_root") or (target or {}).get("instrument_family") or "").upper()
+    payload_symbol = str(payload.get("symbol") or preview.get("symbol") or "").upper()
+    if target_symbol and payload_symbol and target_symbol != payload_symbol:
+        return False
+    return True
 
 
 def _restore_known_order(
@@ -408,6 +528,7 @@ def _filled_close_payload(
     lane_id = target.get("lane_id") or known_order.get("lane_id")
     fill_price = known_order.get("fill_price")
     fill_timestamp = known_order.get("fill_timestamp") or now.isoformat()
+    lifecycle_id = str(target.get("lifecycle_id") or config.lifecycle_id)
     return {
         "classification": "PAPER_STRATEGY_ORDER_FILLED_PERSISTED",
         "bridge_classification": KNOWN_MANAGED_EXIT_ORDER_FILLED_CLOSE_PERSISTENCE_GAP,
@@ -417,10 +538,11 @@ def _filled_close_payload(
         "symbol": symbol,
         "strategy_id": target.get("strategy_id"),
         "lane_id": lane_id,
+        "lifecycle_id": lifecycle_id,
         "order_intent_id": known_order.get("order_intent_id") or f"{symbol}|managed_exit_disappeared|{config.broker_order_id}",
         "account_id": target.get("account_id"),
         "broker_account_id": config.account_id,
-        "quantity": target.get("quantity") or known_order.get("quantity") or "1",
+        "quantity": _positive_quantity(target.get("quantity") or known_order.get("quantity") or "1"),
         "fill_price": fill_price,
         "fill_price_source": "UNKNOWN_BROKER_POSITION_FLAT" if fill_price in {None, ""} else "BROKER_FILL_EVIDENCE",
         "realized_pnl_unknown": fill_price in {None, ""},
@@ -453,6 +575,48 @@ def _filled_close_payload(
         "review_required": False,
         "created_at": now.isoformat(),
     }
+
+
+def _filled_close_payloads(
+    *,
+    config: ManagedExitOrderResolutionConfig,
+    target: Mapping[str, Any],
+    known_order: Mapping[str, Any],
+    now: datetime,
+) -> list[dict[str, Any]]:
+    units = [dict(item) for item in target.get("lifecycle_units") or [] if isinstance(item, Mapping)]
+    if not units:
+        return [_filled_close_payload(config=config, target=target, known_order=known_order, now=now)]
+    aggregate_lifecycle_ids = {
+        str(item.get("lifecycle_id") or "")
+        for item in units
+        if str(item.get("lifecycle_id") or "").strip()
+    }
+    payloads: list[dict[str, Any]] = []
+    for unit in units:
+        unit_target = {
+            **dict(target),
+            **unit,
+            "lifecycle_id": unit.get("lifecycle_id") or unit.get("entry_intent_id") or target.get("lifecycle_id"),
+            "quantity": unit.get("quantity") or "1",
+            "side": unit.get("side") or target.get("side"),
+            "strategy_id": unit.get("strategy_id") or target.get("strategy_id"),
+            "lane_id": unit.get("lane_id") or target.get("lane_id"),
+            "account_id": unit.get("account_id") or target.get("account_id"),
+            "local_symbol": unit.get("local_symbol") or target.get("local_symbol"),
+            "con_id": unit.get("con_id") or target.get("con_id"),
+            "contract_key": unit.get("contract_key") or target.get("contract_key"),
+        }
+        payload = _filled_close_payload(config=config, target=unit_target, known_order=known_order, now=now)
+        payload["aggregate_lifecycle_close"] = {
+            "enabled": True,
+            "source_lifecycle_id": config.lifecycle_id,
+            "aggregate_lifecycle_ids": sorted(aggregate_lifecycle_ids),
+            "aggregate_order_quantity": str(known_order.get("quantity") or target.get("quantity") or len(units)),
+            "unit_count": len(units),
+        }
+        payloads.append(payload)
+    return payloads
 
 
 def _clear_pending_order_state(
@@ -542,6 +706,13 @@ def _abs_decimal(value: Any) -> Decimal | None:
         return None
 
 
+def _positive_quantity(value: Any) -> str:
+    parsed = _abs_decimal(value)
+    if parsed is None:
+        return str(value or "1")
+    return str(parsed.normalize())
+
+
 def _int_or_none(value: Any) -> int | None:
     try:
         return int(str(value))
@@ -573,3 +744,7 @@ def _write_json(path: Path, payload: Mapping[str, Any]) -> None:
     tmp = path.with_suffix(path.suffix + ".tmp")
     tmp.write_text(json.dumps(to_jsonable(payload), indent=2, sort_keys=True) + "\n", encoding="utf-8")
     tmp.replace(path)
+
+
+def _safe_filename(value: str) -> str:
+    return "".join(ch if ch.isalnum() or ch in {"-", "_"} else "_" for ch in value)[:180] or "lifecycle"

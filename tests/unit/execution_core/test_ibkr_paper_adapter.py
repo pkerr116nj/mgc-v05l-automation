@@ -390,6 +390,27 @@ def test_submit_limit_order_places_lmt_day_only_after_explicit_enablement() -> N
     assert diagnostics["isConnected_after_placeOrder"] is True
 
 
+def test_submit_limit_order_allows_aggregate_managed_close_quantity() -> None:
+    paper = adapter(submit_enabled=True, module_loader=fake_ibapi_loader())
+    paper.connect()
+    submit = submit_attempt(broker_order_id="1001", perm_id=None)
+    intent = order_intent(
+        order_intent_id="intent-close-3",
+        intent_kind=IntentKind.CLOSE,
+        action="BUY",
+        quantity=3,
+        limit_price="29919.25",
+        reason="aggregate managed exit",
+    )
+
+    local_order_id = paper.submit_limit_order(submit_attempt=submit, order_intent=intent)
+
+    placed = paper.bridge_for_test().placed_orders[0]
+    assert local_order_id == 1001
+    assert placed["order"].totalQuantity == 3.0
+    assert placed["order"].action == "BUY"
+
+
 def test_submit_limit_order_canonicalizes_mgc_shorthand_expiry_for_known_conid_local_symbol() -> None:
     mgc_allowlist = allowlist()
     mgc_allowlist["MGC-202606"]["con_id"] = "712565978"
@@ -528,7 +549,7 @@ def test_submit_limit_order_canonicalizes_mnq_shorthand_expiry() -> None:
     [
         ("order_type", "MKT", "order_type must be LMT"),
         ("time_in_force", "GTC", "time_in_force must be DAY"),
-        ("quantity", Decimal("2"), "quantity must be exactly 1"),
+        ("quantity", Decimal("2"), "OPEN quantity must be exactly 1"),
         ("extra_fields", {"parentId": 1}, "forbidden"),
     ],
 )

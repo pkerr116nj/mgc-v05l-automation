@@ -377,6 +377,146 @@ def test_unknown_after_submit_matching_submit_intent_adopts_reserved_lifecycle_i
     assert latest_ownership["latest_record"]["state"] == "LIFECYCLE_OPEN_PERSISTED"
 
 
+def test_submit_intent_adoption_allows_exact_broker_position_without_close_order_cleanup(tmp_path: Path) -> None:
+    repo = _write_mgc_leak_test_unknown_after_submit_evidence(tmp_path)
+    bridge_path = repo / "outputs/reports/track_b_paper_leak_test/atp_companion_v1_asia_us/ibkr_paper_strategy_bridge_report.json"
+    bridge_path.unlink()
+    ownership = _write_mgc_submit_intent_ownership(repo)
+    create_or_update_position_management_manifest(
+        entry_intent_id=str(ownership["ownership_intent_id"]),
+        lane_id="atp_companion_v1_asia_us",
+        strategy_id="atp_companion_v1__benchmark_mgc_asia_us",
+        instrument_family="MGC",
+        contract_key="MGC-202606",
+        local_symbol="MGCM6",
+        con_id=712565978,
+        side="LONG",
+        quantity=1,
+        managed_exit_policy_id="PAPER_DIAGNOSTIC_TIME_BOXED_3X5M_EXIT_V1",
+        lifecycle_status="INTENT_CREATED",
+        output_root=repo / "outputs/track_b_execution_core/position_management_manifests",
+        now=_now(),
+    )
+    generated_at = _now().isoformat()
+    _write_json(
+        repo / "outputs" / "track_b_execution_core" / "open_order_truth" / "latest_open_order_truth.json",
+        {
+            "generated_at": generated_at,
+            "classification": "BROKER_POSITION_WITHOUT_CLOSE_ORDER",
+            "summary": {
+                "open_order_count": 0,
+                "duplicate_close_order_group_count": 0,
+                "suspicious_order_count": 0,
+                "working_entry_order_count": 0,
+            },
+        },
+    )
+    _write_json(
+        repo / "outputs" / "track_b_execution_core" / "managed_orders" / "latest_managed_orders.json",
+        {
+            "generated_at": generated_at,
+            "classification": "POSITION_WITHOUT_CLOSE_ORDER",
+            "summary": {
+                "duplicate_close_order_count": 0,
+                "suspicious_order_count": 0,
+                "working_entry_order_count": 0,
+            },
+            "managed_orders": [
+                {
+                    "classification": "ACTIVE_HOLD_MANAGED_TIMED_EXIT_PENDING",
+                    "symbol": "MNQ",
+                    "local_symbol": "MNQM6",
+                    "con_id": 770561201,
+                    "quantity": "1",
+                },
+                {
+                    "classification": "POSITION_WITHOUT_CLOSE_ORDER",
+                    "symbol": "MGC",
+                    "local_symbol": "MGCM6",
+                    "con_id": 712565978,
+                    "quantity": "1",
+                }
+            ],
+        },
+    )
+    _write_json(
+        repo / "outputs" / "track_b_execution_core" / "position_truth" / "latest_position_truth.json",
+        {
+            "generated_at": generated_at,
+            "classification": "ATTENTION_REQUIRED",
+            "summary": {"overall_classification": "ATTENTION_REQUIRED"},
+            "position_states": [
+                {
+                    "classification": "BROKER_POSITION_REQUIRES_ADOPTION",
+                    "symbol": "MGC",
+                    "local_symbol": "MGCM6",
+                    "con_id": 712565978,
+                    "broker_quantity": "1",
+                    "order_intent_id": ownership["ownership_intent_id"],
+                }
+            ],
+        },
+    )
+    _write_json(
+        repo / "outputs" / "track_b_execution_core" / "managed_positions" / "latest_managed_positions.json",
+        {
+            "generated_at": generated_at,
+            "classification": "REVIEW_REQUIRED",
+            "managed_positions": [
+                {
+                    "classification": "BROKER_BACKED_ADOPTION_REQUIRED",
+                    "symbol": "MGC",
+                    "local_symbol": "MGCM6",
+                    "con_id": 712565978,
+                    "quantity": "1",
+                    "order_intent_id": ownership["ownership_intent_id"],
+                },
+                {
+                    "classification": "REVIEW_REQUIRED",
+                    "symbol": "MNQ",
+                    "local_symbol": "MNQM6",
+                    "con_id": 770561201,
+                    "quantity": "1",
+                },
+            ],
+        },
+    )
+    _write_json(
+        repo / "outputs" / "operator_dashboard" / "runtime" / "latest_broker_truth_lease.json",
+        {
+            "generated_at": generated_at,
+            "classification": "OPERATOR_REQUIRED",
+            "blockers": [{"code": "reconciliation_not_clean", "detail": "Lifecycle adoption pending."}],
+        },
+    )
+
+    result = run_track_b_paper_lifecycle_adoption(
+        config=LifecycleAdoptionConfig(
+            repo_root=repo,
+            lane_id="atp_companion_v1_asia_us",
+            symbol="MGC",
+            local_symbol="MGCM6",
+            expiry="20260626",
+            bridge_root=Path("outputs/reports/track_b_paper_leak_test"),
+            expected_broker_order_id="28",
+            expected_client_id=11940,
+            expected_perm_id=614044377,
+            apply=True,
+        ),
+        now=_now(),
+    )
+
+    assert result.classification == "TRACK_B_PAPER_LIFECYCLE_ADOPTION_APPLIED"
+    shared_truth = result.report["shared_truth_evidence"]
+    assert shared_truth["broker_backed_adoption_context"] is True
+    assert {row["artifact"] for row in shared_truth["circular_adoption_allowances"]} == {
+        "open_order_truth",
+        "managed_order_registry",
+        "broker_lease",
+    }
+    assert shared_truth["target_agreement"]["managed_position_registry"]["non_target_active_row_count"] == 1
+
+
 def test_bridge_report_fallback_still_adopts_without_submit_intent(tmp_path: Path) -> None:
     repo = _write_mgc_leak_test_unknown_after_submit_evidence(tmp_path)
 
@@ -401,6 +541,150 @@ def test_bridge_report_fallback_still_adopts_without_submit_intent(tmp_path: Pat
     assert result.report["submit_intent_ownership_evidence"]["selected"] is None
     fill_rows = _read_jsonl(repo / "outputs/probationary_pattern_engine/paper_session/lanes/atp_companion_v1_asia_us/fills.jsonl")
     assert fill_rows[0].get("ownership_intent_id") is None
+
+
+def test_submit_intent_adoption_allows_invalidated_lease_when_target_adoption_is_the_repair(
+    tmp_path: Path,
+) -> None:
+    repo = _write_mgc_leak_test_unknown_after_submit_evidence(tmp_path)
+    bridge_path = repo / "outputs/reports/track_b_paper_leak_test/atp_companion_v1_asia_us/ibkr_paper_strategy_bridge_report.json"
+    bridge_path.unlink()
+    ownership = _write_mgc_submit_intent_ownership(repo)
+    create_or_update_position_management_manifest(
+        entry_intent_id=str(ownership["ownership_intent_id"]),
+        lane_id="atp_companion_v1_asia_us",
+        strategy_id="atp_companion_v1__benchmark_mgc_asia_us",
+        instrument_family="MGC",
+        contract_key="MGC-202606",
+        local_symbol="MGCM6",
+        con_id=712565978,
+        side="LONG",
+        quantity=1,
+        managed_exit_policy_id="PAPER_DIAGNOSTIC_TIME_BOXED_3X5M_EXIT_V1",
+        lifecycle_status="INTENT_CREATED",
+        output_root=repo / "outputs/track_b_execution_core/position_management_manifests",
+        now=_now(),
+    )
+    generated_at = _now().isoformat()
+    _write_json(
+        repo / "outputs" / "track_b_execution_core" / "open_order_truth" / "latest_open_order_truth.json",
+        {
+            "generated_at": generated_at,
+            "classification": "BROKER_POSITION_WITHOUT_CLOSE_ORDER",
+            "summary": {
+                "open_order_count": 0,
+                "duplicate_close_order_group_count": 0,
+                "suspicious_order_count": 0,
+                "working_entry_order_count": 0,
+            },
+        },
+    )
+    _write_json(
+        repo / "outputs" / "track_b_execution_core" / "managed_orders" / "latest_managed_orders.json",
+        {
+            "generated_at": generated_at,
+            "classification": "POSITION_WITHOUT_CLOSE_ORDER",
+            "summary": {
+                "duplicate_close_order_count": 0,
+                "suspicious_order_count": 0,
+                "working_entry_order_count": 0,
+            },
+            "managed_orders": [
+                {
+                    "classification": "POSITION_WITHOUT_CLOSE_ORDER",
+                    "symbol": "MGC",
+                    "local_symbol": "MGCM6",
+                    "con_id": 712565978,
+                    "quantity": "1",
+                }
+            ],
+        },
+    )
+    _write_json(
+        repo / "outputs" / "track_b_execution_core" / "position_truth" / "latest_position_truth.json",
+        {
+            "generated_at": generated_at,
+            "classification": "ATTENTION_REQUIRED",
+            "summary": {"overall_classification": "ATTENTION_REQUIRED"},
+            "position_states": [
+                {
+                    "classification": "BROKER_POSITION_REQUIRES_ADOPTION",
+                    "symbol": "MGC",
+                    "local_symbol": "MGCM6",
+                    "con_id": 712565978,
+                    "broker_quantity": "1",
+                    "order_intent_id": ownership["ownership_intent_id"],
+                }
+            ],
+        },
+    )
+    _write_json(
+        repo / "outputs" / "track_b_execution_core" / "managed_positions" / "latest_managed_positions.json",
+        {
+            "generated_at": generated_at,
+            "classification": "BROKER_BACKED_ADOPTION_REQUIRED",
+            "managed_positions": [
+                {
+                    "classification": "BROKER_BACKED_ADOPTION_REQUIRED",
+                    "symbol": "MGC",
+                    "local_symbol": "MGCM6",
+                    "con_id": 712565978,
+                    "quantity": "1",
+                    "order_intent_id": ownership["ownership_intent_id"],
+                }
+            ],
+        },
+    )
+    _write_json(
+        repo / "outputs" / "operator_dashboard" / "runtime" / "latest_broker_truth_lease.json",
+        {
+            "generated_at": generated_at,
+            "classification": "INVALIDATED_CONTRADICTION",
+            "track_b_broker_open_order_count": 0,
+            "blockers": [
+                {
+                    "code": "lifecycle_broker_position_mismatch",
+                    "detail": "The target broker-backed entry needs lifecycle adoption.",
+                }
+            ],
+        },
+    )
+    _write_json(
+        repo / "outputs" / "track_b_execution_core" / "control_plane" / "latest_control_plane_snapshot.json",
+        {
+            "classification": "CONTROL_PLANE_SNAPSHOT_BLOCKED",
+            "control_plane_snapshot_id": "test-control-plane-snapshot",
+            "generated_at": generated_at,
+            "live_money_eligible": False,
+            "paper_proof_invoked": False,
+            "shared_truth_coherence_status": "STALE_OR_MIXED",
+            "shared_truth_refresh_generation_id": "test-shared-truth-generation",
+        },
+    )
+
+    result = run_track_b_paper_lifecycle_adoption(
+        config=LifecycleAdoptionConfig(
+            repo_root=repo,
+            lane_id="atp_companion_v1_asia_us",
+            symbol="MGC",
+            local_symbol="MGCM6",
+            expiry="20260626",
+            bridge_root=Path("outputs/reports/track_b_paper_leak_test"),
+            expected_broker_order_id="28",
+            expected_client_id=11940,
+            expected_perm_id=614044377,
+            apply=True,
+        ),
+        now=_now(),
+    )
+
+    assert result.classification == "TRACK_B_PAPER_LIFECYCLE_ADOPTION_APPLIED"
+    assert result.report["lifecycle_local_repair_guard"]["control_plane_circular_adoption_allowance"] is True
+    shared_truth = result.report["shared_truth_evidence"]
+    assert {
+        (row["artifact"], row["classification"])
+        for row in shared_truth["circular_adoption_allowances"]
+    } >= {("broker_lease", "INVALIDATED_CONTRADICTION")}
 
 
 def test_lifecycle_adoption_refuses_competing_submit_intent_ownership_records(tmp_path: Path) -> None:
@@ -538,6 +822,69 @@ def test_lifecycle_adoption_blocks_runtime_supervisor_manual_review(tmp_path: Pa
 
     assert result.classification == "TRACK_B_PAPER_LIFECYCLE_ADOPTION_REFUSED"
     assert any("Runtime Supervisor Authority blocks" in failure for failure in result.report["failures"])
+
+
+def test_lifecycle_adoption_allows_supervisor_stale_only_for_exact_broker_backed_repair(
+    tmp_path: Path,
+) -> None:
+    repo = _write_mgc_leak_test_unknown_after_submit_evidence(tmp_path)
+    bridge_path = repo / "outputs/reports/track_b_paper_leak_test/atp_companion_v1_asia_us/ibkr_paper_strategy_bridge_report.json"
+    bridge_path.unlink()
+    ownership = _write_mgc_submit_intent_ownership(repo)
+    create_or_update_position_management_manifest(
+        entry_intent_id=str(ownership["ownership_intent_id"]),
+        lane_id="atp_companion_v1_asia_us",
+        strategy_id="atp_companion_v1__benchmark_mgc_asia_us",
+        instrument_family="MGC",
+        contract_key="MGC-202606",
+        local_symbol="MGCM6",
+        con_id=712565978,
+        side="LONG",
+        quantity=1,
+        managed_exit_policy_id="PAPER_DIAGNOSTIC_TIME_BOXED_3X5M_EXIT_V1",
+        lifecycle_status="INTENT_CREATED",
+        output_root=repo / "outputs/track_b_execution_core/position_management_manifests",
+        now=_now(),
+    )
+    generated_at = _now().isoformat()
+    _write_shared_truth_for_adoption(
+        repo,
+        symbol="MGC",
+        local_symbol="MGCM6",
+        con_id=712565978,
+        quantity="1",
+        order_intent_id=str(ownership["ownership_intent_id"]),
+    )
+    _write_json(
+        repo
+        / "outputs"
+        / "track_b_execution_core"
+        / "runtime_supervisor"
+        / "latest_runtime_supervisor_authority.json",
+        {"generated_at": generated_at, "classification": "SUPERVISOR_SHARED_TRUTH_STALE"},
+    )
+
+    result = run_track_b_paper_lifecycle_adoption(
+        config=LifecycleAdoptionConfig(
+            repo_root=repo,
+            lane_id="atp_companion_v1_asia_us",
+            symbol="MGC",
+            local_symbol="MGCM6",
+            expiry="20260626",
+            bridge_root=Path("outputs/reports/track_b_paper_leak_test"),
+            expected_broker_order_id="28",
+            expected_client_id=11940,
+            expected_perm_id=614044377,
+            apply=True,
+        ),
+        now=_now(),
+    )
+
+    assert result.classification == "TRACK_B_PAPER_LIFECYCLE_ADOPTION_APPLIED"
+    assert {
+        row["artifact"]
+        for row in result.report["shared_truth_evidence"]["circular_adoption_allowances"]
+    } >= {"runtime_supervisor_authority"}
 
 
 def test_lifecycle_adoption_does_not_consume_dashboard_projections_as_authority() -> None:

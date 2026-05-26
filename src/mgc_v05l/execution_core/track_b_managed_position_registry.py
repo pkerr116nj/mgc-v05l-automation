@@ -330,6 +330,15 @@ def _managed_positions(
             classification=classification,
             bars_since_entry=bars_since_entry,
         )
+        lifecycle_units = _list((lifecycle or {}).get("lifecycle_units"))
+        aggregate_qty = (lifecycle or {}).get("aggregate_qty")
+        signed_lifecycle_qty = _signed_lifecycle_quantity(lifecycle)
+        signed_broker_qty = _decimal((broker or {}).get("quantity"))
+        broker_qty_match = (
+            signed_lifecycle_qty is not None
+            and signed_broker_qty is not None
+            and signed_lifecycle_qty == signed_broker_qty
+        )
         position = {
             "classification": OPEN_MANAGED_EXIT_DUE if exit_due and classification == OPEN_MANAGED_MATCHED else classification,
             "symbol": _symbol(broker or lifecycle or review),
@@ -338,6 +347,30 @@ def _managed_positions(
             "con_id": (lifecycle or review or broker or {}).get("con_id"),
             "side": (lifecycle or review or {}).get("side") or _side_from_broker(broker or {}),
             "quantity": (lifecycle or review or broker or {}).get("quantity"),
+            "aggregate_qty": aggregate_qty,
+            "signed_lifecycle_qty": _decimal_display(signed_lifecycle_qty),
+            "signed_broker_qty": _decimal_display(signed_broker_qty),
+            "broker_qty_match": broker_qty_match if broker and lifecycle else None,
+            "unit_count": (lifecycle or {}).get("unit_count") or (lifecycle or {}).get("lifecycle_unit_count") or len(lifecycle_units) or None,
+            "lifecycle_unit_count": (lifecycle or {}).get("lifecycle_unit_count") or len(lifecycle_units) or None,
+            "lifecycle_units": lifecycle_units,
+            "lifecycle_ids": (lifecycle or {}).get("lifecycle_ids") or [
+                str(item.get("lifecycle_id") or "") for item in lifecycle_units if item.get("lifecycle_id")
+            ],
+            "entry_intent_ids": [
+                str(item.get("entry_intent_id") or "") for item in lifecycle_units if item.get("entry_intent_id")
+            ],
+            "entry_order_ids": (lifecycle or {}).get("entry_order_ids") or [
+                str(item.get("entry_order_id") or "") for item in lifecycle_units if item.get("entry_order_id")
+            ],
+            "entry_perm_ids": (lifecycle or {}).get("entry_perm_ids") or [
+                str(item.get("entry_perm_id") or "") for item in lifecycle_units if item.get("entry_perm_id")
+            ],
+            "duplicate_same_lane_exposure": (lifecycle or {}).get("duplicate_same_lane_exposure") is True,
+            "pyramiding_allowed": (lifecycle or {}).get("pyramiding_allowed") is True,
+            "pyramiding_policy": (lifecycle or {}).get("pyramiding_policy"),
+            "working_close_qty": _working_close_qty(effective_close_order_state),
+            "unmanaged_qty": None if broker_qty_match else _decimal_display(signed_broker_qty),
             "lane_id": (lifecycle or review or manifest or {}).get("lane_id"),
             "strategy_id": (lifecycle or review or lifecycle_report or manifest or {}).get("strategy_id"),
             "lifecycle_id": lifecycle_id or None,
@@ -385,7 +418,11 @@ def _position_classification(
 ) -> str:
     if source_stale.get("stale") is True:
         return STALE_MANAGED_POSITION_EVIDENCE
-    if review or _truthy(lifecycle_report.get("review_required")) or _lifecycle_requires_operator_action(lifecycle, lifecycle_report):
+    lifecycle_review = (
+        _truthy(lifecycle_report.get("review_required"))
+        or _lifecycle_requires_operator_action(lifecycle, lifecycle_report)
+    ) and not _retryable_unmutated_managed_close_review(lifecycle_report)
+    if (review and not _retryable_unmutated_managed_close_review(review)) or lifecycle_review:
         return REVIEW_REQUIRED
     if broker and not lifecycle:
         return BROKER_BACKED_ADOPTION_REQUIRED
@@ -461,6 +498,7 @@ def _review_required_positions(
         return [
             value
             for value in values
+            if not _retryable_unmutated_managed_close_review(value)
             if _review_position_matches_active_context(
                 value,
                 active_lifecycle_ids=active_lifecycle_ids,
@@ -477,6 +515,7 @@ def _review_required_positions(
         report
         for report in lifecycle_reports
         if (report.get("review_required") is True or "REVIEW" in str(report.get("paper_lifecycle_classification") or ""))
+        and not _retryable_unmutated_managed_close_review(report)
         and _review_position_matches_active_context(
             report,
             active_lifecycle_ids=active_lifecycle_ids,
@@ -654,6 +693,36 @@ def _reconciliation_status(
     return NO_MANAGED_POSITIONS
 
 
+def _signed_lifecycle_quantity(position: Mapping[str, Any] | None) -> Decimal | None:
+    if not position:
+        return None
+    aggregate = _decimal(position.get("aggregate_qty"))
+    if aggregate is not None:
+        return aggregate
+    quantity = _decimal(position.get("quantity"))
+    if quantity is None:
+        return None
+    side = str(position.get("side") or "").upper()
+    if side == "SHORT" and quantity > 0:
+        return -quantity
+    return quantity
+
+
+def _working_close_qty(order_state: Mapping[str, Any] | None) -> str | None:
+    if not order_state:
+        return "0"
+    quantity = _decimal(order_state.get("quantity") or _mapping(order_state.get("order")).get("quantity"))
+    return _decimal_display(quantity)
+
+
+def _decimal_display(value: Decimal | None) -> str | None:
+    if value is None:
+        return None
+    if value == value.to_integral_value():
+        return str(value.quantize(Decimal("1")))
+    return str(value.normalize())
+
+
 def _lifecycle_position_registry_eligible(position: Mapping[str, Any]) -> bool:
     state = _lifecycle_state_from_mapping(position)
     if not state:
@@ -667,6 +736,30 @@ def _lifecycle_requires_operator_action(
 ) -> bool:
     state = _lifecycle_state_from_mapping(lifecycle or lifecycle_report)
     return bool(state and requires_operator_action(state))
+
+
+def _retryable_unmutated_managed_close_review(payload: Mapping[str, Any]) -> bool:
+    """Treat stale no-broker-effect close reviews as retryable evidence."""
+
+    if str(payload.get("paper_lifecycle_classification") or "") != "TRACK_B_STRATEGY_PAPER_REVIEW_REQUIRED":
+        return False
+    if payload.get("broker_state_mutated") is True:
+        return False
+    if payload.get("close_fill"):
+        return False
+    close_submit = payload.get("close_submit_attempt")
+    if isinstance(close_submit, Mapping) and (
+        close_submit.get("submitted") is True
+        or close_submit.get("submit_attempted") is True
+        or close_submit.get("broker_state_mutated") is True
+        or str(close_submit.get("broker_order_id") or "").strip()
+    ):
+        return False
+    if not isinstance(payload.get("close_intent"), Mapping):
+        return False
+    if "quantity must be exactly 1 for milestone one" not in str(payload.get("primary_blocker") or ""):
+        return False
+    return bool(payload.get("entry_fill") or payload.get("entry_fill_confirmed") is True)
 
 
 def _lifecycle_state_from_mapping(payload: Mapping[str, Any]) -> str:

@@ -21,6 +21,7 @@ from mgc_v05l.execution_core.track_b_shared_truth_refresh_cli import DEFAULT_REC
 
 OPEN_NOW = datetime(2026, 5, 22, 14, 0, tzinfo=UTC)
 SATURDAY_NOW = datetime(2026, 5, 23, 7, 15, tzinfo=UTC)
+EQUITY_INDEX_HALT_NOW = datetime(2026, 5, 25, 17, 30, tzinfo=UTC)
 
 
 def test_clean_shared_truth_and_fresh_bars_are_ready_for_proof(tmp_path: Path) -> None:
@@ -59,20 +60,21 @@ def test_closed_market_with_degraded_broker_lease_keeps_market_closed_primary(tm
     assert payload["classification"] == MARKET_CLOSED_NO_FRESH_BARS
     assert payload["primary_blocker"]["reason"] == MARKET_CLOSED_NO_FRESH_BARS
     assert payload["broker_lease_warning"]["lease_state"] == "ACTIVE_DEGRADED_REFRESH_FAILING"
-    assert any(
+    assert not any(
         warning.get("code") == "broker_truth_lease_not_clean_for_runtime_start"
+        and warning.get("warning_type") == "shared_truth_evidence"
         for warning in payload["secondary_warnings"]
     )
 
 
-def test_open_market_with_degraded_broker_lease_blocks(tmp_path: Path) -> None:
+def test_open_market_with_degraded_broker_lease_is_diagnostic_when_truth_is_clean(tmp_path: Path) -> None:
     _seed_clean_shared_truth(tmp_path, now=OPEN_NOW, broker_refresh_failing=True)
     _seed_required_phase1_candles(tmp_path, generated_at=OPEN_NOW)
 
     payload = _build(tmp_path, now=OPEN_NOW)
 
-    assert payload["classification"] == SHARED_TRUTH_BLOCKED
-    assert payload["primary_blocker"]["code"] == "broker_truth_lease_not_clean_for_runtime_start"
+    assert payload["classification"] == READY_FOR_PROOF
+    assert payload["primary_blocker"] is None
     assert payload["broker_lease_warning"]["lease_state"] == "ACTIVE_DEGRADED_REFRESH_FAILING"
 
 
@@ -108,6 +110,31 @@ def test_stale_open_session_bars_are_phase1_unhealthy(tmp_path: Path) -> None:
     assert payload["classification"] == PHASE1_DATA_UNHEALTHY
     assert payload["ready_for_proof"] is False
     assert {blocker["reason"] for blocker in payload["blockers"]} == {"RUNTIME_CANDLES_STALE"}
+
+
+def test_planned_equity_index_halt_mnq_stale_does_not_block_metals_readiness(tmp_path: Path) -> None:
+    _seed_clean_shared_truth(tmp_path, now=EQUITY_INDEX_HALT_NOW)
+    for timeframe in ("1m", "5m"):
+        _write_phase1_candle(tmp_path, symbol="MGC", timeframe=timeframe, generated_at=EQUITY_INDEX_HALT_NOW)
+        _write_phase1_candle(
+            tmp_path,
+            symbol="MNQ",
+            timeframe=timeframe,
+            generated_at=EQUITY_INDEX_HALT_NOW - timedelta(minutes=45),
+        )
+
+    payload = _build(tmp_path, now=EQUITY_INDEX_HALT_NOW)
+
+    assert payload["classification"] == READY_FOR_PROOF
+    assert payload["ready_for_proof"] is True
+    assert payload["blockers"] == []
+    stale_mnq = [
+        warning for warning in payload["secondary_warnings"]
+        if warning.get("symbol") == "MNQ"
+    ]
+    assert {warning["reason"] for warning in stale_mnq} == {"PLANNED_EQUITY_INDEX_FUTURES_HALT_NO_FRESH_BARS"}
+    assert all(warning["blocking_for_proof"] is False for warning in stale_mnq)
+    assert all(warning["scope_impact"] == "EQUITY_INDEX_ONLY" for warning in stale_mnq)
 
 
 def test_active_runtime_blocks_as_already_active(tmp_path: Path) -> None:

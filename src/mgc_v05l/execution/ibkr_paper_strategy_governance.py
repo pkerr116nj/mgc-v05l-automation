@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import csv
 import json
+import subprocess
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation
@@ -21,6 +22,10 @@ from .track_b_phase1_submit_authority import evaluate_phase1_broker_reconciliati
 from ..execution_core.phase1_gc_paper_candidate_registry import (
     is_phase1_gc_guarded_paper_eligible_strategy,
 )
+from ..execution_core.track_b_runtime_authority_resolver import (
+    RuntimeAuthorityResolverConfig,
+    resolve_track_b_runtime_authority,
+)
 
 _DEFAULT_OUTPUT_DIR = Path("outputs") / "reports" / "ibkr_strategy_governance"
 _DEFAULT_VAR_STATUS_PATH = Path("var") / "per_strategy_paper_status.json"
@@ -34,6 +39,10 @@ _DEFAULT_CANONICAL_READINESS_PATH = Path("outputs") / "operator_dashboard" / "ru
 _DEFAULT_STARTUP_CONTROL_PLANE_SNAPSHOT_PATH = Path("outputs") / "operator_dashboard" / "startup_control_plane_snapshot.json"
 _DEFAULT_SUPERVISED_PAPER_OPERABILITY_SNAPSHOT_PATH = Path("outputs") / "operator_dashboard" / "supervised_paper_operability_snapshot.json"
 _DEFAULT_TEMP_PAPER_INTEGRITY_SNAPSHOT_PATH = Path("outputs") / "operator_dashboard" / "paper_temporary_paper_runtime_integrity_snapshot.json"
+_DEFAULT_CONTROL_PLANE_SNAPSHOT_PATH = Path("outputs") / "track_b_execution_core" / "control_plane" / "latest_control_plane_snapshot.json"
+_DEFAULT_SAFE_STATE_ENVELOPE_PATH = Path("outputs") / "track_b_execution_core" / "safe_state" / "latest_runtime_safe_state_envelope.json"
+_DEFAULT_GUARDED_PAPER_LOOP_PATH = Path("outputs") / "track_b_execution_core" / "p0_observe_only" / "latest_p0_observe_only_loop.json"
+_DEFAULT_PHASE1_RUNTIME_MARKET_DATA_ROOT = Path("outputs") / "track_b_execution_core" / "phase1_runtime_market_data"
 _DEFAULT_LEDGER_PATH = Path("var") / "paper_strategy_position_ledger.json"
 _DEFAULT_PORTING_OUTPUT_DIR = Path("outputs") / "reports" / "ibkr_strategy_porting"
 _DEFAULT_PAPER_SESSION_LANES_DIR = Path("outputs") / "probationary_pattern_engine" / "paper_session" / "lanes"
@@ -50,6 +59,7 @@ _LOCAL_ONLY_AUDIT_CSV = "local_only_lane_audit.csv"
 _TRADE_SEPARATION_REPORT_MD = "ibkr_vs_internal_paper_trade_separation_report.md"
 
 _SUPPORTED_EXECUTABLE_INSTRUMENTS = {"MGC", "GC", "MNQ", "NQ", "MES", "ES"}
+_PHASE1_CANDLE_FRESHNESS_SECONDS = {"1M": 180.0, "3M": 360.0, "5M": 600.0}
 _BACKEND_SOURCE_MONITOR_BLOCK_REASONS = {
     "backend_down",
     "source_snapshot_fallback",
@@ -820,6 +830,205 @@ def _coerce_instrument_list(value: Any) -> list[str]:
     return normalized
 
 
+def _backend_shared_services_authority(
+    *,
+    config: IbkrPaperStrategyGovernanceConfig,
+    required_instruments: list[str],
+) -> dict[str, Any]:
+    control_plane = _load_json(config.repo_root / _DEFAULT_CONTROL_PLANE_SNAPSHOT_PATH)
+    safe_state = _load_json(config.repo_root / _DEFAULT_SAFE_STATE_ENVELOPE_PATH)
+    guarded_loop = _load_json(config.repo_root / _DEFAULT_GUARDED_PAPER_LOOP_PATH)
+    runtime_authority = resolve_track_b_runtime_authority(
+        RuntimeAuthorityResolverConfig(repo_root=config.repo_root),
+        process_rows_provider=lambda repo_root: _guarded_loop_processes(repo_root),
+    )
+    if not control_plane and not safe_state and not guarded_loop:
+        return {
+            "present": False,
+            "ready": False,
+            "source": "execution_core_control_plane_safe_state_guarded_loop_phase1",
+            "block_reasons": ["shared_services_authority_missing"],
+            "dashboard_projection_consumed": False,
+        }
+
+    block_reasons: list[str] = []
+    cp_classification = str(control_plane.get("classification") or "").strip().upper()
+    coherence = str(control_plane.get("shared_truth_coherence_status") or "").strip().upper()
+    safe_classification = str(safe_state.get("safe_state_classification") or safe_state.get("classification") or "").strip().upper()
+
+    block_reasons.extend(str(reason) for reason in runtime_authority.get("blockers") or [])
+    if safe_state and safe_state.get("submit_allowed") is False:
+        block_reasons.append("safe_state_submit_not_allowed")
+    if safe_state and safe_state.get("broker_mutation_allowed") is False:
+        block_reasons.append("safe_state_broker_mutation_not_allowed")
+
+    phase1_status = _phase1_market_data_readiness(config.repo_root, required_instruments)
+    if required_instruments and not phase1_status.get("ready"):
+        block_reasons.append("phase1_runtime_market_data_not_ready")
+
+    unique_block_reasons = list(dict.fromkeys(block_reasons))
+    return {
+        "present": True,
+        "ready": not unique_block_reasons,
+        "source": "execution_core_control_plane_safe_state_guarded_loop_phase1",
+        "block_reasons": unique_block_reasons,
+        "control_plane_snapshot_id": control_plane.get("control_plane_snapshot_id"),
+        "shared_truth_generation_id": control_plane.get("shared_truth_generation_id")
+        or control_plane.get("shared_truth_refresh_generation_id")
+        or safe_state.get("shared_truth_generation_id"),
+        "safe_state_classification": safe_classification or None,
+        "runtime_pid": runtime_authority.get("runtime_pid"),
+        "runtime_command": runtime_authority.get("runtime_command"),
+        "runtime_generation_id": runtime_authority.get("runtime_generation_id"),
+        "runtime_authority_classification": runtime_authority.get("classification"),
+        "runtime_authority_diagnostics": list(runtime_authority.get("diagnostics") or []),
+        "runtime_authority_legacy_stale_policy": runtime_authority.get("legacy_stale_policy"),
+        "process_count": int(runtime_authority.get("process_count") or 0),
+        "matching_process_count": int(runtime_authority.get("matching_process_count") or 0),
+        "phase1_runtime_market_data": phase1_status,
+        "dashboard_projection_consumed": False,
+    }
+
+
+def _guarded_loop_runtime_generation(payload: dict[str, Any]) -> str | None:
+    latest_iteration = payload.get("latest_iteration")
+    if isinstance(latest_iteration, dict):
+        snapshot = latest_iteration.get("control_plane_snapshot")
+        if isinstance(snapshot, dict):
+            generation = snapshot.get("safe_state_runtime_generation_id") or snapshot.get("runtime_generation_id")
+            if generation:
+                return str(generation)
+    for key in ("runtime_generation_id", "safe_state_runtime_generation_id"):
+        if payload.get(key):
+            return str(payload.get(key))
+    return None
+
+
+def _guarded_loop_processes(repo_root: Path) -> tuple[dict[str, Any], ...]:
+    try:
+        completed = subprocess.run(
+            ["ps", "-efww"],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=2,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return ()
+    repo_text = str(repo_root.resolve())
+    rows: list[dict[str, Any]] = []
+    for line in completed.stdout.splitlines():
+        if "track_b_p0_observe_only_loop" not in line or "--mode guarded-paper" not in line:
+            continue
+        if (
+            " egrep " in line
+            or " grep " in line
+            or "/bin/zsh -c" in line
+            or "SCREEN -dmS" in line
+            or " login -pflq " in line
+        ):
+            continue
+        parts = line.split(None, 7)
+        pid = int(parts[1]) if len(parts) > 1 and str(parts[1]).isdigit() else 0
+        if pid <= 0:
+            continue
+        command = parts[7] if len(parts) > 7 else line
+        rows.append(
+            {
+                "pid": pid,
+                "command": command,
+                "root_matches": repo_text in line,
+                "wrong_root": "Documents/MGC-v05l" in line or "Mobile Documents" in line,
+            }
+        )
+    return tuple(rows)
+
+
+def _phase1_market_data_readiness(repo_root: Path, required_instruments: list[str]) -> dict[str, Any]:
+    rows: list[dict[str, Any]] = []
+    for instrument in required_instruments:
+        candidates: list[dict[str, Any]] = []
+        for symbol in _phase1_symbols_for_instrument(instrument):
+            for timeframe in ("1m", "5m"):
+                candidates.append(_phase1_runtime_candle_status(repo_root, symbol=symbol, timeframe=timeframe))
+        ready_candidates = [row for row in candidates if row.get("ready")]
+        selected = ready_candidates[0] if ready_candidates else (candidates[0] if candidates else {})
+        rows.append(
+            {
+                "instrument": instrument,
+                "ready": bool(ready_candidates),
+                "selected": selected,
+                "candidates": candidates,
+            }
+        )
+    return {
+        "ready": all(row.get("ready") for row in rows) if rows else True,
+        "required_instruments": list(required_instruments),
+        "rows": rows,
+    }
+
+
+def _phase1_symbols_for_instrument(instrument: str) -> list[str]:
+    symbol = str(instrument or "").strip().upper()
+    mapping = {
+        "GC": ["MGC", "GC"],
+        "NQ": ["MNQ", "NQ"],
+        "ES": ["MES", "ES"],
+    }
+    values = mapping.get(symbol, [symbol])
+    return [value for value in values if value]
+
+
+def _phase1_runtime_candle_status(repo_root: Path, *, symbol: str, timeframe: str) -> dict[str, Any]:
+    path = repo_root / _DEFAULT_PHASE1_RUNTIME_MARKET_DATA_ROOT / symbol / timeframe / "latest_runtime_candles.json"
+    payload = _load_json(path)
+    generated_at = _parse_datetime(payload.get("generated_at"))
+    now = datetime.now(timezone.utc)
+    age_seconds = None if generated_at is None else max(0.0, (now - generated_at).total_seconds())
+    normalized_timeframe = timeframe.upper()
+    freshness_window = _PHASE1_CANDLE_FRESHNESS_SECONDS.get(normalized_timeframe, 600.0)
+    bars = list(payload.get("bars") or payload.get("candles") or payload.get("candle_history") or [])
+    source_category = str(payload.get("source_category") or "").strip().upper()
+    block_reasons: list[str] = []
+    if not payload:
+        block_reasons.append("phase1_runtime_candle_artifact_missing")
+    if payload and str(payload.get("symbol") or "").strip().upper() not in {"", symbol.upper()}:
+        block_reasons.append("phase1_runtime_candle_symbol_mismatch")
+    if payload and str(payload.get("timeframe") or "").strip().upper() not in {"", normalized_timeframe}:
+        block_reasons.append("phase1_runtime_candle_timeframe_mismatch")
+    if payload and payload.get("completed_candles_only") is False:
+        block_reasons.append("phase1_runtime_candles_not_completed_only")
+    if payload and payload.get("realtime_feed_confirmed") is False:
+        block_reasons.append("phase1_runtime_feed_not_confirmed")
+    if payload and source_category in {"RESEARCH", "OFFLINE", "REPLAY", "DASHBOARD_PROJECTION"}:
+        block_reasons.append("phase1_runtime_candle_not_runtime_authority")
+    if not bars:
+        block_reasons.append("phase1_runtime_candles_empty")
+    if generated_at is None:
+        block_reasons.append("phase1_runtime_candle_generated_at_missing")
+    elif age_seconds is not None and age_seconds > freshness_window:
+        block_reasons.append("phase1_runtime_candle_artifact_stale")
+    latest_bar_timestamp = payload.get("latest_bar_timestamp")
+    if not latest_bar_timestamp and bars:
+        last_bar = bars[-1]
+        if isinstance(last_bar, dict):
+            latest_bar_timestamp = last_bar.get("bar_end") or last_bar.get("timestamp") or last_bar.get("time")
+    return {
+        "ready": not block_reasons,
+        "symbol": symbol,
+        "timeframe": timeframe,
+        "path": str(path),
+        "generated_at": generated_at.isoformat() if generated_at is not None else None,
+        "age_seconds": _round_age(age_seconds),
+        "freshness_window_seconds": freshness_window,
+        "latest_bar_timestamp": latest_bar_timestamp,
+        "bar_count": len(bars),
+        "block_reasons": block_reasons,
+        "source_category": source_category or "PHASE1_RUNTIME_MARKET_DATA",
+        "dashboard_projection_consumed": False,
+    }
+
+
 def _backend_source_live_readiness(
     *,
     config: IbkrPaperStrategyGovernanceConfig,
@@ -864,6 +1073,10 @@ def _backend_source_live_readiness(
     }
     block_reasons: list[str] = []
     required_instrument_list = sorted(dict.fromkeys(_coerce_instrument_list(required_instruments) or _coerce_instrument_list(instrument)))
+    shared_services_authority = _backend_shared_services_authority(
+        config=config,
+        required_instruments=required_instrument_list,
+    )
     canonical_status = artifacts["canonical_readiness"]
     canonical_present = bool(canonical)
     canonical_fresh = bool(canonical_status["fresh"])
@@ -954,27 +1167,63 @@ def _backend_source_live_readiness(
         block_reasons.append("backend_readiness_artifact_stale")
     if temp_paper_blocked:
         block_reasons.append("temp_paper_blocked")
+    if shared_services_authority.get("present") is True and shared_services_authority.get("ready") is not True:
+        block_reasons.append("shared_services_authority_not_ready")
+        block_reasons.extend(str(reason) for reason in list(shared_services_authority.get("block_reasons") or []))
+
+    if shared_services_authority.get("ready") is True:
+        block_reasons = []
+        runtime_running = True
+        paper_runtime_ready = True
+        paper_trade_allowed = True
+        startup_ready = True
+        supervised_usable = True
+        market_data_stale_count = 0
+        bar_authority_unavailable_count = 0
+        blocking_fault_count = 0
+        source_faults = {
+            "market_data_stale_count": 0,
+            "bar_authority_unavailable_count": 0,
+            "blocking_fault_count": 0,
+            "readiness_scope": "execution_core_shared_services_authority",
+            "required_instruments": required_instrument_list,
+            "relevant_lane_ids": [],
+            "global_market_data_stale_count": int(readiness.get("market_data_stale_count") or 0),
+            "global_bar_authority_unavailable_count": int(readiness.get("bar_authority_unavailable_count") or 0),
+            "global_blocking_fault_count": int(readiness.get("blocking_fault_count") or 0),
+        }
 
     block_reasons = list(dict.fromkeys(block_reasons))
     live_ready = not block_reasons
-    detail = _backend_source_readiness_detail(
-        live_ready=live_ready,
-        block_reasons=block_reasons,
-        artifacts=artifacts,
-        freshness_window_seconds=freshness_window,
-        readiness=readiness,
-        startup=startup,
-        supervised=supervised,
-        temp_integrity=temp_integrity,
-        source_faults=source_faults,
-        canonical=canonical,
-        canonical_authoritative=canonical_authoritative,
-        runtime_running=runtime_running,
-        paper_runtime_ready=paper_runtime_ready,
-        paper_trade_allowed=paper_trade_allowed,
-        startup_ready=startup_ready,
-        supervised_usable=supervised_usable,
-    )
+    if shared_services_authority.get("ready") is True:
+        detail = (
+            "backend/source readiness ready from execution_core_control_plane_safe_state_guarded_loop_phase1; "
+            "legacy canonical/operator readiness treated as diagnostic projection; "
+            f"required_instruments={required_instrument_list}; "
+            f"runtime_pid={shared_services_authority.get('runtime_pid')} "
+            f"runtime_generation_id={shared_services_authority.get('runtime_generation_id')} "
+            f"control_plane_snapshot_id={shared_services_authority.get('control_plane_snapshot_id')} "
+            f"shared_truth_generation_id={shared_services_authority.get('shared_truth_generation_id')}"
+        )
+    else:
+        detail = _backend_source_readiness_detail(
+            live_ready=live_ready,
+            block_reasons=block_reasons,
+            artifacts=artifacts,
+            freshness_window_seconds=freshness_window,
+            readiness=readiness,
+            startup=startup,
+            supervised=supervised,
+            temp_integrity=temp_integrity,
+            source_faults=source_faults,
+            canonical=canonical,
+            canonical_authoritative=canonical_authoritative,
+            runtime_running=runtime_running,
+            paper_runtime_ready=paper_runtime_ready,
+            paper_trade_allowed=paper_trade_allowed,
+            startup_ready=startup_ready,
+            supervised_usable=supervised_usable,
+        )
     return {
         "live_ready": live_ready,
         "block_reasons": block_reasons,
@@ -1000,7 +1249,14 @@ def _backend_source_live_readiness(
         "canonical_readiness_authoritative": canonical_authoritative,
         "canonical_readiness_artifact": artifacts["canonical_readiness"],
         "presentation_readiness_authority": "DIAGNOSTIC_ONLY_WHEN_CANONICAL_PRESENT",
-        "source": "canonical_track_b_runtime_readiness" if canonical_present else "operator_dashboard_readiness_artifacts",
+        "source": (
+            str(shared_services_authority.get("source"))
+            if shared_services_authority.get("ready") is True
+            else "canonical_track_b_runtime_readiness" if canonical_present else "operator_dashboard_readiness_artifacts"
+        ),
+        "shared_services_authority": shared_services_authority,
+        "shared_services_authority_ready": bool(shared_services_authority.get("ready")),
+        "dashboard_projection_consumed": False,
     }
 
 

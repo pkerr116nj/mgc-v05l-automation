@@ -129,6 +129,13 @@ def require_milestone_quantity(value: Decimal | int | float | str, field_name: s
     return normalized
 
 
+def require_positive_integral_quantity(value: Decimal | int | float | str, field_name: str = "quantity") -> Decimal:
+    normalized = normalize_decimal(value, field_name)
+    if normalized <= 0 or normalized != normalized.to_integral_value():
+        raise TrackBModelError(f"{field_name} must be a positive whole-number quantity.")
+    return normalized
+
+
 def normalize_action(value: Action | str) -> Action:
     try:
         return value if isinstance(value, Action) else Action(str(value).strip().upper())
@@ -297,7 +304,11 @@ class OrderIntent(JsonSerializable):
         object.__setattr__(self, "symbol", require_id(self.symbol, "symbol").upper())
         object.__setattr__(self, "contract_key", require_id(self.contract_key, "contract_key"))
         object.__setattr__(self, "action", normalize_action(self.action))
-        object.__setattr__(self, "quantity", require_milestone_quantity(self.quantity))
+        if self.intent_kind == IntentKind.OPEN:
+            quantity = require_milestone_quantity(self.quantity)
+        else:
+            quantity = require_positive_integral_quantity(self.quantity)
+        object.__setattr__(self, "quantity", quantity)
         ensure_lmt_day(self.order_type, self.time_in_force)
         object.__setattr__(self, "order_type", MILESTONE_ONE_ORDER_TYPE)
         object.__setattr__(self, "limit_price", normalize_decimal(self.limit_price, "limit_price"))
@@ -402,7 +413,7 @@ class BrokerOrder(JsonSerializable):
         object.__setattr__(self, "broker_order_id", require_id(self.broker_order_id, "broker_order_id"))
         object.__setattr__(self, "contract_key", require_id(self.contract_key, "contract_key"))
         object.__setattr__(self, "action", normalize_action(self.action))
-        object.__setattr__(self, "quantity", require_milestone_quantity(self.quantity))
+        object.__setattr__(self, "quantity", require_positive_integral_quantity(self.quantity))
         ensure_lmt_day(self.order_type, MILESTONE_ONE_TIME_IN_FORCE)
         object.__setattr__(self, "order_type", MILESTONE_ONE_ORDER_TYPE)
         object.__setattr__(self, "limit_price", normalize_decimal(self.limit_price, "limit_price"))
@@ -449,7 +460,7 @@ class FillEvent(JsonSerializable):
         object.__setattr__(self, "execution_id", require_id(self.execution_id, "execution_id"))
         object.__setattr__(self, "contract_key", require_id(self.contract_key, "contract_key"))
         object.__setattr__(self, "action", normalize_action(self.action))
-        object.__setattr__(self, "quantity", require_milestone_quantity(self.quantity))
+        object.__setattr__(self, "quantity", require_positive_integral_quantity(self.quantity))
         object.__setattr__(self, "price", normalize_decimal(self.price, "price"))
         object.__setattr__(self, "filled_at", require_aware_datetime(self.filled_at, "filled_at"))
 
@@ -474,8 +485,6 @@ class PositionState(JsonSerializable):
         object.__setattr__(self, "source", normalize_position_source(self.source))
         object.__setattr__(self, "account_id", require_id(self.account_id, "account_id"))
         object.__setattr__(self, "contract_key", require_id(self.contract_key, "contract_key"))
-        if abs(int(self.signed_quantity)) > 1:
-            raise TrackBModelError("signed_quantity must be -1, 0, or 1 for milestone one.")
         object.__setattr__(self, "signed_quantity", int(self.signed_quantity))
         if self.average_price is not None:
             object.__setattr__(self, "average_price", normalize_decimal(self.average_price, "average_price"))

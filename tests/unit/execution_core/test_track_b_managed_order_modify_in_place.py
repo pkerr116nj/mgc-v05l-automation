@@ -77,6 +77,38 @@ def test_suspicious_sentinel_order_blocks_modify(tmp_path: Path) -> None:
     assert "SUSPICIOUS" in report["detail"]
 
 
+def test_known_working_close_tolerates_ibkr_sentinel_status_gap(tmp_path: Path) -> None:
+    _seed_authorities(
+        tmp_path,
+        open_order_classification="OPEN_CLOSE_ORDER_WORKING",
+        managed_order_classification="WORKING_CLOSE_ORDER",
+        planner_classification="MODIFY_IN_PLACE_ELIGIBLE",
+        filled_quantity="1.7976931348623157e+308",
+        remaining_quantity=None,
+    )
+
+    report = _run(tmp_path)
+
+    assert report["classification"] == MODIFY_IN_PLACE_DRY_RUN_READY
+    assert report["broker_mutation_attempted"] is False
+
+
+def test_stale_known_close_can_use_modify_in_place_boundary(tmp_path: Path) -> None:
+    _seed_authorities(
+        tmp_path,
+        open_order_classification="CLOSE_ORDER_STALE",
+        managed_order_classification="CLOSE_ORDER_CANCEL_REPLACE_REQUIRED",
+        planner_classification="MODIFY_IN_PLACE_ELIGIBLE",
+        filled_quantity="1.7976931348623157e+308",
+        remaining_quantity=None,
+    )
+
+    report = _run(tmp_path)
+
+    assert report["classification"] == MODIFY_IN_PLACE_DRY_RUN_READY
+    assert report["new_order_created"] is False
+
+
 def test_duplicate_close_risk_blocks_modify(tmp_path: Path) -> None:
     _seed_authorities(
         tmp_path,
@@ -156,6 +188,47 @@ def test_applied_path_uses_same_order_identity_and_no_replacement(tmp_path: Path
     assert report["shared_truth_refresh_generation_id"] == "generation-managed-order-modify"
     assert report["post_modify_verification"]["verified"] is True
     assert report["post_modify_verification"]["updated_limit_observed"] is True
+
+
+def test_apply_tolerates_exact_single_order_with_sentinel_status_gap_and_missing_limit(tmp_path: Path) -> None:
+    _seed_authorities(tmp_path)
+    _write_pre_action_snapshot_for_modify(tmp_path)
+    calls: list[str] = []
+
+    def pre_refresh(config: ManagedOrderModifyInPlaceConfig) -> dict:
+        calls.append("pre")
+        return {
+            "open_orders": [
+                _broker_order(
+                    limit_price=None,  # type: ignore[arg-type]
+                    filled_quantity="1.7976931348623157e+308",
+                    remaining_quantity=None,
+                )
+            ]
+        }
+
+    def modify(config: ManagedOrderModifyInPlaceConfig) -> dict:
+        calls.append("modify")
+        return {"accepted": True, "broker_order_id": config.broker_order_id, "perm_id": config.perm_id}
+
+    def post_refresh(config: ManagedOrderModifyInPlaceConfig) -> dict:
+        calls.append("post")
+        return {"open_orders": [_broker_order(limit_price=None)]}  # type: ignore[arg-type]
+
+    report = run_track_b_managed_order_modify_in_place(
+        config=_config(tmp_path, apply=True, operator_authorized_modify=True),
+        now=NOW,
+        pre_modify_open_order_refresh=pre_refresh,
+        modify_order_limit=modify,
+        post_modify_open_order_refresh=post_refresh,
+    )
+
+    assert calls == ["pre", "modify", "post"]
+    assert report["classification"] == MODIFY_IN_PLACE_APPLIED
+    assert report["new_order_created"] is False
+    assert report["post_modify_verification"]["verified"] is True
+    assert report["post_modify_verification"]["updated_limit_observed"] is False
+    assert report["post_modify_verification"]["broker_limit_omitted_or_not_echoed"] is True
 
 
 def test_post_modify_verification_failure_is_loud(tmp_path: Path) -> None:
@@ -305,6 +378,47 @@ def test_cli_writes_dry_run_audit(tmp_path: Path, capsys) -> None:
         )
     )
     assert audit["classification"] == MODIFY_IN_PLACE_DRY_RUN_READY
+    assert audit["requested_identity"]["tws_client_id"] == 17086
+
+
+def test_cli_explicit_tws_client_id_overrides_order_owner(tmp_path: Path, capsys) -> None:
+    _seed_authorities(tmp_path, generated_at=datetime.now(UTC).isoformat())
+
+    exit_code = main(
+        [
+            "--repo-root",
+            str(tmp_path),
+            "--broker-order-id",
+            "27",
+            "--perm-id",
+            "347068546",
+            "--symbol",
+            "MNQ",
+            "--contract",
+            "MNQM6",
+            "--con-id",
+            "770561201",
+            "--action",
+            "SELL",
+            "--quantity",
+            "1",
+            "--current-known-limit",
+            "29555.50",
+            "--new-limit",
+            "29554.50",
+            "--tws-client-id",
+            "1967",
+        ]
+    )
+
+    assert exit_code == 0
+    assert "classification=MODIFY_IN_PLACE_DRY_RUN_READY" in capsys.readouterr().out
+    audit = json.loads(
+        (tmp_path / "outputs/reports/track_b_managed_order_modify_in_place/latest_managed_order_modify_in_place.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    assert audit["requested_identity"]["tws_client_id"] == 1967
 
 
 def test_dashboard_projection_is_not_consumed() -> None:
@@ -515,8 +629,6 @@ def _modify_pre_action_target() -> dict:
         "perm_id": "347068546",
         "action": "SELL",
         "quantity": "1",
-        "current_known_limit": "29555.50",
-        "new_limit": "29554.50",
     }
 
 
@@ -532,6 +644,7 @@ def _managed_order(*, classification: str = "WORKING_CLOSE_ORDER") -> dict:
         "quantity": "1",
         "broker_order_id": "27",
         "perm_id": "347068546",
+        "client_id": 17086,
         "broker_status": "Submitted",
         "limit_price": "29555.50",
         "lifecycle_id": "lifecycle_mnq",
@@ -555,6 +668,7 @@ def _broker_order(
         "broker_order_id": "27",
         "order_id": "27",
         "perm_id": "347068546",
+        "client_id": 17086,
         "action": "SELL",
         "quantity": "1",
         "status": "Submitted",
@@ -604,6 +718,9 @@ def _fake_ibkr_client_class():
         def reqOpenOrders(self) -> None:
             self.wrapper.openOrder(27, self.contract, self.order, _FakeOrderState())
             self.wrapper.openOrderEnd()
+
+        def reqAllOpenOrders(self) -> None:
+            self.reqOpenOrders()
 
         def placeOrder(self, order_id, contract, order) -> None:
             self.place_order_calls.append({"order_id": order_id, "contract": contract, "order": order})

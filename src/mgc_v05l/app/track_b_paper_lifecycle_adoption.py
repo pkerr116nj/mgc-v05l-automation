@@ -49,6 +49,11 @@ from mgc_v05l.execution_core.track_b_submit_intent_ownership import (
 )
 
 PAPER_ACCOUNT_ID = "DUM882026"
+BROKER_POSITION_WITHOUT_CLOSE_ORDER = "BROKER_POSITION_WITHOUT_CLOSE_ORDER"
+POSITION_WITHOUT_CLOSE_ORDER = "POSITION_WITHOUT_CLOSE_ORDER"
+BROKER_POSITION_REQUIRES_ADOPTION = "BROKER_POSITION_REQUIRES_ADOPTION"
+BROKER_BACKED_ADOPTION_REQUIRED = "BROKER_BACKED_ADOPTION_REQUIRED"
+REVIEW_REQUIRED = "REVIEW_REQUIRED"
 DEFAULT_LANE_ID = "atp_companion_v1_pl_asia_us"
 DEFAULT_SYMBOL = "PL"
 DEFAULT_LOCAL_SYMBOL = "PLN6"
@@ -259,6 +264,18 @@ def run_track_b_paper_lifecycle_adoption(
         fill_payload=fill_payload,
         now=actual_now,
     )
+    if _control_plane_incoherence_allows_broker_backed_adoption(
+        lifecycle_local_repair_guard=lifecycle_local_repair_guard,
+        shared_truth_evidence=shared_truth_evidence,
+    ):
+        lifecycle_local_repair_guard = {
+            **lifecycle_local_repair_guard,
+            "valid": True,
+            "classification": LIFECYCLE_LOCAL_REPAIR_VALID,
+            "reason": "Control Plane Snapshot is incoherent only because this exact broker-backed lifecycle adoption is pending.",
+            "blockers": [],
+            "control_plane_circular_adoption_allowance": True,
+        }
     if lifecycle_local_repair_guard["classification"] != LIFECYCLE_LOCAL_REPAIR_VALID:
         failures.append(f"Lifecycle State Matrix / Control Plane Snapshot guard blocked adoption: {lifecycle_local_repair_guard['classification']}.")
 
@@ -784,6 +801,7 @@ def _extract_submit_intent_ownership_evidence(
         "perm_id": perm_id,
         "client_id": client_id,
         "execution_id": execution_id,
+        "runtime_generation_id": _find_first_by_key(submit_intent_ownership, "runtime_generation_id"),
         "fill_price": _decimal_text(fill_price) or "",
         "fill_price_source": "BROKER_POSITION_AVERAGE_PRICE",
         "fill_timestamp": (broker_position or {}).get("updated_at") or submit_intent_ownership.get("updated_at"),
@@ -1107,6 +1125,7 @@ def _extract_partial_leak_test_broker_position_evidence(
     perm_id = expected_perm_id if expected_perm_id is not None else known_perm_id
     execution_id = expected_exec_id if expected_exec_id is not None else known_exec_id
     fill_price = expected_fill_decimal or execution_price or broker_average_price
+    runtime_generation_id = _find_first_by_key(bridge_report, "runtime_generation_id")
     missing_fields = [
         field
         for field, value in (
@@ -1128,6 +1147,7 @@ def _extract_partial_leak_test_broker_position_evidence(
         "perm_id": perm_id,
         "client_id": client_id,
         "execution_id": execution_id,
+        "runtime_generation_id": runtime_generation_id,
         "fill_price": _decimal_text(fill_price) or "",
         "fill_price_source": "BROKER_POSITION_AVERAGE_PRICE" if execution_price is None and expected_fill_decimal is None else "BRIDGE_OR_OPERATOR_EVIDENCE",
         "fill_timestamp": execution.get("executed_at") or latest_status.get("updated_at") or broker_position.get("updated_at"),
@@ -1183,6 +1203,22 @@ def _first_nonempty(*values: Any) -> Any:
     return None
 
 
+def _find_first_by_key(value: Any, key: str) -> Any:
+    if isinstance(value, Mapping):
+        if value.get(key) not in {None, ""}:
+            return value.get(key)
+        for nested in value.values():
+            found = _find_first_by_key(nested, key)
+            if found not in {None, ""}:
+                return found
+    if isinstance(value, list):
+        for nested in value:
+            found = _find_first_by_key(nested, key)
+            if found not in {None, ""}:
+                return found
+    return None
+
+
 def _build_fill_payload(
     *,
     config: LifecycleAdoptionConfig,
@@ -1230,6 +1266,7 @@ def _build_fill_payload(
         "lane_id": config.lane_id,
         "strategy_id": strategy_id,
         "standalone_strategy_id": strategy_id,
+        "runtime_generation_id": bridge_evidence.get("runtime_generation_id") or intent.get("runtime_generation_id"),
         "order_intent_id": order_intent_id,
         "ownership_intent_id": bridge_evidence.get("ownership_intent_id"),
         "reserved_lifecycle_id": bridge_evidence.get("reserved_lifecycle_id"),
@@ -1311,6 +1348,7 @@ def _build_trade_payload(fill_payload: Mapping[str, Any]) -> dict[str, Any]:
         "account_id": fill_payload.get("account_id"),
         "lane_id": fill_payload.get("lane_id"),
         "strategy_id": strategy_id,
+        "runtime_generation_id": fill_payload.get("runtime_generation_id"),
         "order_intent_id": order_intent_id,
         "symbol": fill_payload.get("symbol"),
         "instrument": fill_payload.get("instrument"),
@@ -1395,6 +1433,7 @@ def _build_filled_bridge_result(fill_payload: Mapping[str, Any]) -> dict[str, An
         "classification": "PAPER_STRATEGY_ORDER_FILLED_PERSISTED",
         "strategy_id": fill_payload.get("strategy_id"),
         "lane_id": fill_payload.get("lane_id"),
+        "runtime_generation_id": fill_payload.get("runtime_generation_id"),
         "instrument": fill_payload.get("instrument"),
         "symbol": fill_payload.get("symbol"),
         "action": fill_payload.get("action"),
@@ -1492,6 +1531,11 @@ def _shared_truth_adoption_evidence(
     }
     payloads = {name: _read_json(_resolve(repo_root=config.repo_root, path=path)) for name, path in paths.items()}
     classifications = {name: _shared_classification(name=name, payload=payload) for name, payload in payloads.items()}
+    broker_backed_adoption_context = _broker_backed_adoption_context(
+        submit_intent_ownership=submit_intent_ownership,
+        broker_position=broker_position,
+    )
+    circular_adoption_allowances: list[dict[str, str]] = []
     freshness = {
         name: _shared_freshness(payload=payload, now=now, max_age_seconds=config.shared_truth_max_age_seconds)
         for name, payload in payloads.items()
@@ -1506,11 +1550,36 @@ def _shared_truth_adoption_evidence(
                 blockers.append(f"Shared truth authority artifact stale/missing: {name}.")
 
     if classifications["open_order_truth"] and classifications["open_order_truth"] != NO_OPEN_ORDERS:
-        blockers.append(f"Open Order Truth is not safe for adoption: {classifications['open_order_truth']}.")
+        if broker_backed_adoption_context and _open_order_truth_allows_broker_backed_adoption(
+            payloads["open_order_truth"]
+        ):
+            circular_adoption_allowances.append(
+                {
+                    "artifact": "open_order_truth",
+                    "classification": classifications["open_order_truth"],
+                    "reason": "Exact broker-backed entry adoption may proceed while the only open-order finding is the target broker position without a close order.",
+                }
+            )
+        else:
+            blockers.append(f"Open Order Truth is not safe for adoption: {classifications['open_order_truth']}.")
     if classifications["managed_order_registry"] and classifications["managed_order_registry"] != NO_MANAGED_ORDERS:
-        blockers.append(
-            f"Managed Order Registry is not safe for adoption: {classifications['managed_order_registry']}."
-        )
+        if broker_backed_adoption_context and _managed_order_registry_allows_broker_backed_adoption(
+            payloads["managed_order_registry"],
+            config=config,
+            broker_position=broker_position,
+            submit_intent_ownership=submit_intent_ownership,
+        ):
+            circular_adoption_allowances.append(
+                {
+                    "artifact": "managed_order_registry",
+                    "classification": classifications["managed_order_registry"],
+                    "reason": "Exact broker-backed entry adoption may proceed while the only managed-order finding is the target position without a close order.",
+                }
+            )
+        else:
+            blockers.append(
+                f"Managed Order Registry is not safe for adoption: {classifications['managed_order_registry']}."
+            )
     if classifications["runtime_supervisor_authority"] in {
         "SUPERVISOR_MANUAL_REVIEW_REQUIRED",
         "SUPERVISOR_RESTART_BLOCKED_OPERATOR_ACK",
@@ -1518,9 +1587,22 @@ def _shared_truth_adoption_evidence(
         "SUPERVISOR_SHARED_TRUTH_STALE",
         "SUPERVISOR_UNKNOWN_REVIEW_REQUIRED",
     }:
-        blockers.append(
-            f"Runtime Supervisor Authority blocks lifecycle adoption: {classifications['runtime_supervisor_authority']}."
-        )
+        if (
+            classifications["runtime_supervisor_authority"] == "SUPERVISOR_SHARED_TRUTH_STALE"
+            and broker_backed_adoption_context
+            and not any(state["stale_or_missing"] for state in freshness.values())
+        ):
+            circular_adoption_allowances.append(
+                {
+                    "artifact": "runtime_supervisor_authority",
+                    "classification": classifications["runtime_supervisor_authority"],
+                    "reason": "Runtime Supervisor shared-truth stale posture is caused by the exact broker-backed lifecycle adoption being repaired.",
+                }
+            )
+        else:
+            blockers.append(
+                f"Runtime Supervisor Authority blocks lifecycle adoption: {classifications['runtime_supervisor_authority']}."
+            )
     if classifications["reconciliation"] in {
         "BROKER_TRUTH_SETTLEMENT_CONTRADICTORY_STATE",
         "TRACK_B_PAPER_BROKER_RECONCILIATION_BLOCKED_UNKNOWN_OPEN_ORDERS",
@@ -1532,7 +1614,20 @@ def _shared_truth_adoption_evidence(
         "INVALIDATED_MANUAL_BROKER_ACTION",
         "OPERATOR_REQUIRED",
     }:
-        blockers.append(f"Broker Truth Lease is unsafe for lifecycle adoption: {classifications['broker_lease']}.")
+        if (
+            classifications["broker_lease"] in {"OPERATOR_REQUIRED", "INVALIDATED_CONTRADICTION"}
+            and broker_backed_adoption_context
+            and _broker_lease_allows_broker_backed_adoption(payloads["broker_lease"])
+        ):
+            circular_adoption_allowances.append(
+                {
+                    "artifact": "broker_lease",
+                    "classification": classifications["broker_lease"],
+                    "reason": "Broker Truth Lease is blocked only because reconciliation is waiting for this exact broker-backed lifecycle adoption.",
+                }
+            )
+        else:
+            blockers.append(f"Broker Truth Lease is unsafe for lifecycle adoption: {classifications['broker_lease']}.")
 
     target_agreement = {}
     for name, rows in {
@@ -1543,6 +1638,12 @@ def _shared_truth_adoption_evidence(
             row
             for row in rows
             if _shared_adoption_row_is_active(row)
+            and _shared_adoption_row_overlaps_target(
+                config=config,
+                row=row,
+                broker_position=broker_position,
+                submit_intent_ownership=submit_intent_ownership,
+            )
             and not _shared_adoption_row_matches_target(
                 config=config,
                 row=row,
@@ -1554,6 +1655,12 @@ def _shared_truth_adoption_evidence(
         matching = [
             row
             for row in rows
+            if _shared_adoption_row_overlaps_target(
+                config=config,
+                row=row,
+                broker_position=broker_position,
+                submit_intent_ownership=submit_intent_ownership,
+            )
             if _shared_adoption_row_matches_target(
                 config=config,
                 row=row,
@@ -1566,6 +1673,19 @@ def _shared_truth_adoption_evidence(
             "row_count": len(rows),
             "matching_row_count": len(matching),
             "conflicting_active_row_count": len(conflicting),
+            "non_target_active_row_count": len(
+                [
+                    row
+                    for row in rows
+                    if _shared_adoption_row_is_active(row)
+                    and not _shared_adoption_row_overlaps_target(
+                        config=config,
+                        row=row,
+                        broker_position=broker_position,
+                        submit_intent_ownership=submit_intent_ownership,
+                    )
+                ]
+            ),
         }
         if conflicting:
             blockers.append(f"{name} active rows conflict with requested adoption target.")
@@ -1574,6 +1694,8 @@ def _shared_truth_adoption_evidence(
         "source_authority": "execution_core_authority",
         "dashboard_projection_consumed": False,
         "required": config.require_shared_truth_evidence,
+        "broker_backed_adoption_context": broker_backed_adoption_context,
+        "circular_adoption_allowances": circular_adoption_allowances,
         "max_age_seconds": config.shared_truth_max_age_seconds,
         "artifact_paths": {name: str(_resolve(repo_root=config.repo_root, path=path)) for name, path in paths.items()},
         "classifications": classifications,
@@ -1581,6 +1703,128 @@ def _shared_truth_adoption_evidence(
         "target_agreement": target_agreement,
         "blockers": blockers,
     }
+
+
+def _broker_backed_adoption_context(
+    *,
+    submit_intent_ownership: Mapping[str, Any] | None,
+    broker_position: Mapping[str, Any] | None,
+) -> bool:
+    if not submit_intent_ownership or not broker_position:
+        return False
+    if submit_intent_ownership.get("live_money_eligible") is not False:
+        return False
+    if submit_intent_ownership.get("paper_proof_invoked") is not False:
+        return False
+    return str(submit_intent_ownership.get("state") or "").upper() in {
+        "BROKER_RESULT_UNKNOWN_REFRESH_REQUIRED",
+        "BROKER_ORDER_WORKING",
+        "BROKER_POSITION_OBSERVED_ADOPTION_REQUIRED",
+    }
+
+
+def _open_order_truth_allows_broker_backed_adoption(payload: Mapping[str, Any]) -> bool:
+    if _shared_classification(name="open_order_truth", payload=payload) != BROKER_POSITION_WITHOUT_CLOSE_ORDER:
+        return False
+    summary = _mapping_or_empty(payload.get("summary"))
+    return (
+        _decimal(summary.get("open_order_count")) == Decimal("0")
+        and _decimal(summary.get("duplicate_close_order_group_count")) == Decimal("0")
+        and _decimal(summary.get("suspicious_order_count")) == Decimal("0")
+        and _decimal(summary.get("working_entry_order_count")) == Decimal("0")
+    )
+
+
+def _managed_order_registry_allows_broker_backed_adoption(
+    payload: Mapping[str, Any],
+    *,
+    config: LifecycleAdoptionConfig,
+    broker_position: Mapping[str, Any] | None,
+    submit_intent_ownership: Mapping[str, Any] | None,
+) -> bool:
+    if _shared_classification(name="managed_order_registry", payload=payload) != POSITION_WITHOUT_CLOSE_ORDER:
+        return False
+    summary = _mapping_or_empty(payload.get("summary"))
+    if (
+        _decimal(summary.get("duplicate_close_order_count")) not in {None, Decimal("0")}
+        or _decimal(summary.get("suspicious_order_count")) not in {None, Decimal("0")}
+        or _decimal(summary.get("working_entry_order_count")) not in {None, Decimal("0")}
+    ):
+        return False
+    for row in _list(payload.get("managed_orders")):
+        classification = str(row.get("classification") or "")
+        overlaps_target = _shared_adoption_row_overlaps_target(
+            config=config,
+            row=row,
+            broker_position=broker_position,
+            submit_intent_ownership=submit_intent_ownership,
+        )
+        if not overlaps_target:
+            if classification == "ACTIVE_HOLD_MANAGED_TIMED_EXIT_PENDING":
+                continue
+            return False
+        if classification != POSITION_WITHOUT_CLOSE_ORDER:
+            return False
+        if row.get("source_order") or row.get("broker_order_id") or row.get("perm_id"):
+            return False
+    return True
+
+
+def _broker_lease_allows_broker_backed_adoption(payload: Mapping[str, Any]) -> bool:
+    blockers = _list(payload.get("blockers"))
+    if not blockers:
+        return False
+    allowed_codes = {
+        "reconciliation_not_clean",
+        "lifecycle_broker_position_mismatch",
+    }
+    open_order_count = _decimal(payload.get("track_b_broker_open_order_count"))
+    if open_order_count not in {None, Decimal("0")}:
+        return False
+    return all(str(blocker.get("code") or "") in allowed_codes for blocker in blockers)
+
+
+def _control_plane_incoherence_allows_broker_backed_adoption(
+    *,
+    lifecycle_local_repair_guard: Mapping[str, Any],
+    shared_truth_evidence: Mapping[str, Any],
+) -> bool:
+    if lifecycle_local_repair_guard.get("classification") != "LIFECYCLE_LOCAL_REPAIR_BLOCKED_SNAPSHOT_INCOHERENT":
+        return False
+    if lifecycle_local_repair_guard.get("blockers") != ["control_plane_snapshot_incoherent"]:
+        return False
+    if shared_truth_evidence.get("blockers"):
+        return False
+    if shared_truth_evidence.get("broker_backed_adoption_context") is not True:
+        return False
+    allowance_artifacts = {
+        str(row.get("artifact") or "")
+        for row in _list(shared_truth_evidence.get("circular_adoption_allowances"))
+    }
+    return "broker_lease" in allowance_artifacts
+
+
+def _shared_adoption_row_overlaps_target(
+    *,
+    config: LifecycleAdoptionConfig,
+    row: Mapping[str, Any],
+    broker_position: Mapping[str, Any] | None,
+    submit_intent_ownership: Mapping[str, Any] | None,
+) -> bool:
+    symbol = str(row.get("symbol") or row.get("instrument_family") or row.get("instrument") or "").upper()
+    if symbol and symbol != config.symbol.upper():
+        return False
+    local_symbol = str(row.get("local_symbol") or row.get("localSymbol") or "").upper()
+    if local_symbol and local_symbol != config.local_symbol.upper():
+        return False
+    con_id = _decimal(row.get("con_id") or row.get("conId"))
+    broker_con_id = _decimal((broker_position or {}).get("con_id") or (submit_intent_ownership or {}).get("con_id"))
+    if con_id is not None and broker_con_id is not None and con_id != broker_con_id:
+        return False
+    quantity = _decimal(row.get("quantity") or row.get("broker_quantity") or row.get("qty"))
+    if quantity is not None and quantity not in {config.quantity, abs(config.quantity)}:
+        return False
+    return bool(symbol or local_symbol or con_id is not None)
 
 
 def _shared_adoption_row_matches_target(
@@ -1659,6 +1903,10 @@ def _read_jsonl(path: Path) -> list[dict[str, Any]]:
 
 def _list(value: Any) -> list[Any]:
     return list(value) if isinstance(value, list) else []
+
+
+def _mapping_or_empty(value: Any) -> Mapping[str, Any]:
+    return value if isinstance(value, Mapping) else {}
 
 
 def _shared_classification(*, name: str, payload: Mapping[str, Any]) -> str:

@@ -80,6 +80,56 @@ def test_suspicious_sentinel_order_requires_review_not_auto_replace(tmp_path: Pa
     assert "sentinel_filled_quantity" in plan["suspicious_reasons"]
 
 
+def test_known_working_close_tolerates_ibkr_sentinel_status_gap(tmp_path: Path) -> None:
+    _seed_base(
+        tmp_path,
+        managed_orders=[
+            _managed_order(
+                classification="WORKING_CLOSE_ORDER",
+                marketable=False,
+                source_order={
+                    **_source_order(),
+                    "filled_quantity": "1.7976931348623157e+308",
+                    "remaining_quantity": None,
+                },
+            )
+        ],
+        broker_positions=[_broker_position()],
+    )
+
+    payload = _build(tmp_path)
+
+    assert payload["classification"] == MODIFY_IN_PLACE_ELIGIBLE
+    plan = payload["plans"][0]
+    assert plan["classification"] == MODIFY_IN_PLACE_ELIGIBLE
+    assert plan["tolerated_ibkr_status_gaps"] == ["missing_remaining_quantity", "sentinel_filled_quantity"]
+    assert plan["blocking_suspicious_reasons"] == []
+
+
+def test_stale_known_close_prefers_modify_in_place_over_cancel_replace(tmp_path: Path) -> None:
+    _seed_base(
+        tmp_path,
+        managed_orders=[
+            _managed_order(
+                classification="CLOSE_ORDER_CANCEL_REPLACE_REQUIRED",
+                source_order={
+                    **_source_order(),
+                    "filled_quantity": "1.7976931348623157e+308",
+                    "remaining_quantity": None,
+                },
+            )
+        ],
+        broker_positions=[_broker_position()],
+    )
+
+    payload = _build(tmp_path)
+
+    assert payload["classification"] == MODIFY_IN_PLACE_ELIGIBLE
+    plan = payload["plans"][0]
+    assert plan["source_managed_order_classification"] == "CLOSE_ORDER_CANCEL_REPLACE_REQUIRED"
+    assert plan["recommended_operator_action"] == "MODIFY_IN_PLACE_CANDIDATE"
+
+
 def test_cancelled_order_with_still_open_position_requires_targeted_cancel_replace(tmp_path: Path) -> None:
     _seed_base(
         tmp_path,
@@ -226,10 +276,11 @@ def _seed_base(
 
 
 def _seed_shared_truth_refresh_inputs(root: Path) -> None:
+    generated_at = datetime.now(UTC).isoformat()
     _write_json(
         root / "outputs/reports/track_b_paper_broker_reconciliation/latest_track_b_paper_broker_reconciliation.json",
         {
-            "generated_at": NOW.isoformat(),
+            "generated_at": generated_at,
             "classification": "TRACK_B_PAPER_BROKER_RECONCILED",
             "broker_reconciled": True,
             "live_money_eligible": False,
@@ -253,7 +304,7 @@ def _seed_shared_truth_refresh_inputs(root: Path) -> None:
     broker_truth = {
         "classification": "BROKER_TRUTH_REFRESH_READY",
         "account": "DUM882026",
-        "generated_at": NOW.isoformat(),
+        "generated_at": generated_at,
         "positions_complete": True,
         "open_orders_complete": True,
         "positions": [],
@@ -271,15 +322,15 @@ def _seed_shared_truth_refresh_inputs(root: Path) -> None:
     _write_json(root / "outputs/reports/ibkr_read_only_verification/ibkr_broker_truth_latest_attempt_status.json", broker_truth)
     _write_json(
         root / "outputs/track_b_execution_core/paper_trade_ledger/latest_track_b_live_position_status.json",
-        {"generated_at": NOW.isoformat(), "open_position_count": 0, "open_positions": [], "review_required_positions": []},
+        {"generated_at": generated_at, "open_position_count": 0, "open_positions": [], "review_required_positions": []},
     )
     _write_json(
         root / "outputs/track_b_execution_core/paper_trade_ledger/latest_track_b_paper_trade_summary.json",
-        {"generated_at": NOW.isoformat(), "review_required_count": 0, "unknown_open_order_count": 0},
+        {"generated_at": generated_at, "review_required_count": 0, "unknown_open_order_count": 0},
     )
     _write_json(
         root / "outputs/track_b_execution_core/managed_positions/latest_managed_positions.json",
-        {"generated_at": NOW.isoformat(), "classification": "NO_MANAGED_POSITIONS", "managed_positions": []},
+        {"generated_at": generated_at, "classification": "NO_MANAGED_POSITIONS", "managed_positions": []},
     )
 
 

@@ -137,6 +137,46 @@ def test_previous_attach_guard_review_state_can_retry_when_broker_identity_match
     assert payload["lifecycle_identity_verified"] is True
 
 
+def test_unmutated_positive_quantity_review_can_retry_after_signed_quantity_fix(tmp_path: Path) -> None:
+    config = _seed(
+        tmp_path,
+        completed_bars=3,
+        config_overrides={
+            "side": "SHORT",
+        },
+        position_overrides={
+            "quantity": "-1",
+            "side": "SHORT",
+        },
+    )
+    lifecycle_path = (
+        tmp_path
+        / "outputs/track_b_execution_core/track_b_strategy_managed_paper_lifecycle"
+        / config.lifecycle_id
+        / "track_b_strategy_managed_paper_lifecycle_report.json"
+    )
+    lifecycle = json.loads(lifecycle_path.read_text(encoding="utf-8"))
+    lifecycle.update(
+        {
+            "paper_lifecycle_classification": "TRACK_B_STRATEGY_PAPER_REVIEW_REQUIRED",
+            "final_position_status": "REVIEW_REQUIRED",
+            "broker_state_mutated": False,
+            "close_intent": None,
+            "close_submit_attempt": None,
+            "primary_blocker": "Strategy-managed PAPER lifecycle requires positive configured quantity.",
+        }
+    )
+    _write_json(lifecycle_path, lifecycle)
+
+    payload = build_track_b_managed_exit_attach_plan(config=config, now=NOW)
+
+    assert payload["classification"] == MANAGED_EXIT_TIMEBOX_CLOSE_ELIGIBLE
+    assert payload["position_identity_verified"] is True
+    assert payload["lifecycle_identity_verified"] is True
+    assert payload["close_intent_preview"]["order_action"] == "BUY"
+    assert payload["close_intent_preview"]["quantity"] == 1
+
+
 def test_unmutated_close_authorization_review_can_retry_when_close_intent_matches(tmp_path: Path) -> None:
     config = _seed(tmp_path, completed_bars=3)
     lifecycle_path = (
@@ -267,7 +307,165 @@ def test_apply_updates_paper_trade_ledger_projection(tmp_path: Path, monkeypatch
     assert calls["ledger_update"]["runner_report"]["managed_lifecycle_report_path"] == str(lifecycle_report_path)
     assert payload["apply_result"]["paper_trade_ledger_update"]["trade_record_written"] is True
     assert payload["apply_result"]["paper_trade_ledger_update"]["open_position_count"] == 0
-    assert payload["apply_result"]["paper_trade_ledger_update"]["realized_pnl"] == "82.5"
+    assert payload["apply_result"]["paper_trade_ledger_update"]["realized_pnl_by_lifecycle"] == ["82.5"]
+
+
+def test_aggregate_close_persists_all_lifecycle_units(tmp_path: Path, monkeypatch) -> None:
+    config = _seed(tmp_path, completed_bars=3)
+    unit_ids = ["lifecycle-46", "lifecycle-47", "lifecycle-48"]
+    units = []
+    for index, lifecycle_id in enumerate(unit_ids, start=1):
+        report_path = (
+            tmp_path
+            / "outputs/track_b_execution_core/track_b_strategy_managed_paper_lifecycle"
+            / lifecycle_id
+            / "track_b_strategy_managed_paper_lifecycle_report.json"
+        )
+        report = _lifecycle_payload(
+            config=config,
+            lifecycle_id=lifecycle_id,
+            order_id=str(45 + index),
+            price=str(29900 + index),
+        )
+        _write_json(report_path, report)
+        units.append(
+            {
+                "lifecycle_id": lifecycle_id,
+                "entry_order_id": str(45 + index),
+                "quantity": "1",
+                "paper_lifecycle_report_path": str(report_path),
+            }
+        )
+    _write_json(
+        tmp_path / "outputs/track_b_execution_core/managed_positions/latest_managed_positions.json",
+        {
+            "classification": "OPEN_MANAGED_EXIT_DUE",
+            "managed_positions": [
+                {
+                    "classification": "OPEN_MANAGED_EXIT_DUE",
+                    "exit_due": True,
+                    "attention_required": False,
+                    "symbol": "MNQ",
+                    "contract_key": config.contract_key,
+                    "local_symbol": config.local_symbol,
+                    "con_id": config.con_id,
+                    "quantity": "3",
+                    "aggregate_qty": "-3",
+                    "side": "SHORT",
+                    "strategy_id": config.strategy_id,
+                    "lifecycle_id": unit_ids[-1],
+                    "managed_exit_policy_id": config.managed_exit_policy_id,
+                    "lifecycle_units": units,
+                    "lifecycle_position": {
+                        "account_id": config.account_id,
+                        "instrument_family": "MNQ",
+                        "contract_key": config.contract_key,
+                        "local_symbol": config.local_symbol,
+                        "con_id": config.con_id,
+                        "quantity": "3",
+                        "aggregate_qty": "-3",
+                        "side": "SHORT",
+                        "strategy_id": config.strategy_id,
+                        "lifecycle_id": unit_ids[-1],
+                        "managed_exit_policy_id": config.managed_exit_policy_id,
+                        "lifecycle_units": units,
+                        "paper_lifecycle_report_path": str(
+                            tmp_path
+                            / "outputs/track_b_execution_core/track_b_strategy_managed_paper_lifecycle"
+                            / unit_ids[-1]
+                            / "track_b_strategy_managed_paper_lifecycle_report.json"
+                        ),
+                    },
+                }
+            ],
+        },
+    )
+    _write_json(
+        tmp_path / "outputs/track_b_execution_core/paper_trade_ledger/latest_track_b_live_position_status.json",
+        {
+            "positions_by_instrument": {
+                config.contract_key: {
+                    "account_id": config.account_id,
+                    "contract_key": config.contract_key,
+                    "local_symbol": config.local_symbol,
+                    "con_id": config.con_id,
+                    "quantity": "3",
+                    "aggregate_qty": "-3",
+                    "side": "SHORT",
+                    "lifecycle_units": units,
+                }
+            }
+        },
+    )
+    _write_json(
+        tmp_path / "outputs/track_b_execution_core/position_truth/latest_position_truth.json",
+        {"broker_positions": [{"account_id": config.account_id, "local_symbol": config.local_symbol, "con_id": config.con_id, "quantity": "-3"}]},
+    )
+    apply_config = TrackBManagedExitAttachConfig(
+        **{
+            **config.__dict__,
+            "apply": True,
+            "operator_authorized_managed_exit": True,
+        }
+    )
+    latest_path = (
+        tmp_path
+        / "outputs/track_b_execution_core/track_b_strategy_managed_paper_lifecycle"
+        / unit_ids[-1]
+        / "track_b_strategy_managed_paper_lifecycle_report.json"
+    )
+    closed_lifecycle = {
+        **json.loads(latest_path.read_text(encoding="utf-8")),
+        "paper_lifecycle_classification": "TRACK_B_STRATEGY_PAPER_CLOSED_FLAT",
+        "final_position_status": "CLOSED_FLAT",
+        "broker_state_mutated": True,
+        "submit_attempted": True,
+        "close_intent": {"quantity": 3, "order_action": "BUY", "managed_exit_policy_id": config.managed_exit_policy_id},
+        "close_submit_attempt": {"submitted": True, "broker_state_mutated": True, "broker_order_id": "55"},
+        "close_fill": {"broker_order_id": "55", "price": "29915", "quantity": "3", "filled_at": NOW.isoformat()},
+    }
+    calls: list[str] = []
+
+    class Result:
+        report_json = latest_path
+        report = closed_lifecycle
+
+    class LedgerResult:
+        trade_record_written = True
+        ledger_jsonl = tmp_path / "ledger.jsonl"
+        trade_summary_json = tmp_path / "summary.json"
+        live_position_status_json = tmp_path / "live.json"
+        pnl_summary_json = tmp_path / "pnl.json"
+        trade_summary = {"open_position_count": 0}
+        trade_record = {"realized_pnl": "1"}
+
+    def fake_maintain(**kwargs: Any) -> Result:
+        return Result()
+
+    def fake_ledger_update(**kwargs: Any) -> LedgerResult:
+        calls.append(str(kwargs["runner_report"]["managed_lifecycle_report_path"]))
+        return LedgerResult()
+
+    monkeypatch.setattr(attach_module, "maintain_open_track_b_strategy_managed_paper_lifecycle", fake_maintain)
+    monkeypatch.setattr(attach_module, "update_track_b_paper_trade_ledger_from_runner_report", fake_ledger_update)
+
+    payload = build_track_b_managed_exit_attach_plan(config=apply_config, now=NOW)
+
+    assert payload["aggregate_exit_group"]["coordinated_lifecycle_close_required"] is True
+    assert payload["apply_result"]["paper_trade_ledger_update"]["aggregate_lifecycle_close_persistence"]["synced_lifecycle_count"] == 3
+    assert len(calls) == 3
+    for lifecycle_id in unit_ids:
+        report_path = (
+            tmp_path
+            / "outputs/track_b_execution_core/track_b_strategy_managed_paper_lifecycle"
+            / lifecycle_id
+            / "track_b_strategy_managed_paper_lifecycle_report.json"
+        )
+        synced = json.loads(report_path.read_text(encoding="utf-8"))
+        assert synced["final_position_status"] == "CLOSED_FLAT"
+        assert synced["close_fill"]["aggregate_order_quantity"] == "3"
+        assert synced["close_fill"]["quantity"] == "1"
+        assert synced["aggregate_managed_exit_close"]["unit_count"] == 3
 
 
 def test_no_live_money_or_paper_proof_route(tmp_path: Path) -> None:
@@ -374,6 +572,160 @@ def test_auto_selects_current_exit_due_managed_position_instead_of_stale_default
     assert payload["target_identity"]["lane_id"] == "mnq_1x_asia_london_participation__asia_london_long_v6"
     assert payload["close_intent_preview"]["lifecycle_id"] == current_lifecycle_id
     assert payload["managed_exit_due_automation"]["classification"] == "MANAGED_EXIT_DUE_READY_FOR_APPLY"
+
+
+def test_auto_selected_mgc_due_position_resolves_mgc_exit_profile_not_default_mnq(tmp_path: Path) -> None:
+    current_lifecycle_id = "reserved_submit_mgc_1x_all_lanes_asia_early_short"
+    strategy_id = "gc_mgc_forced_session_baseline_v2__mgc_1x_all_lanes__asia_early_short"
+    _seed(
+        tmp_path,
+        completed_bars=3,
+        config_overrides={
+            "strategy_id": strategy_id,
+            "lane_id": "mgc_1x_all_lanes__asia_early_short",
+            "lifecycle_id": current_lifecycle_id,
+            "instrument_family": "MGC",
+            "contract_key": "MGC-202606",
+            "local_symbol": "MGCM6",
+            "con_id": 712565978,
+            "expiry": "20260626",
+            "side": "SHORT",
+            "managed_exit_policy_id": "FORCED_SESSION_SEGMENT_LOCAL_EXIT_V1",
+        },
+        position_overrides={
+            "symbol": "MGC",
+            "quantity": "-1",
+            "side": "SHORT",
+        },
+    )
+    stale_default_config = TrackBManagedExitAttachConfig(repo_root=tmp_path, refresh_control_plane=False)
+    lifecycle_path = (
+        tmp_path
+        / "outputs/track_b_execution_core/track_b_strategy_managed_paper_lifecycle"
+        / current_lifecycle_id
+        / "track_b_strategy_managed_paper_lifecycle_report.json"
+    )
+    _write_json(
+        tmp_path / "outputs/track_b_execution_core/managed_positions/latest_managed_positions.json",
+        {
+            "classification": "OPEN_MANAGED_EXIT_DUE",
+            "managed_positions": [
+                {
+                    "classification": "OPEN_MANAGED_EXIT_DUE",
+                    "exit_due": True,
+                    "attention_required": False,
+                    "symbol": "MGC",
+                    "contract_key": "MGC-202606",
+                    "local_symbol": "MGCM6",
+                    "con_id": 712565978,
+                    "quantity": "-1",
+                    "side": "SHORT",
+                    "strategy_id": strategy_id,
+                    "lifecycle_id": current_lifecycle_id,
+                    "managed_exit_policy_id": "FORCED_SESSION_SEGMENT_LOCAL_EXIT_V1",
+                    "lifecycle_position": {
+                        "account_id": "DUM882026",
+                        "instrument_family": "MGC",
+                        "contract_key": "MGC-202606",
+                        "local_symbol": "MGCM6",
+                        "con_id": 712565978,
+                        "quantity": "-1",
+                        "side": "SHORT",
+                        "strategy_id": strategy_id,
+                        "lifecycle_id": current_lifecycle_id,
+                        "managed_exit_policy_id": "FORCED_SESSION_SEGMENT_LOCAL_EXIT_V1",
+                        "paper_lifecycle_report_path": str(lifecycle_path),
+                    },
+                }
+            ],
+        },
+    )
+
+    payload = build_track_b_managed_exit_attach_plan(config=stale_default_config, now=NOW)
+
+    assert payload["classification"] == MANAGED_EXIT_TIMEBOX_CLOSE_ELIGIBLE
+    assert payload["target_identity"]["lifecycle_id"] == current_lifecycle_id
+    assert payload["managed_exit_policy_id"] == "FORCED_SESSION_SEGMENT_LOCAL_EXIT_V1"
+    assert payload["exit_profile_id"] == "MGC_FORCED_SESSION_SEGMENT_TIMEBOX_3X5M_V1"
+    assert payload["close_intent_preview"]["exit_profile_id"] == "MGC_FORCED_SESSION_SEGMENT_TIMEBOX_3X5M_V1"
+    assert payload["close_intent_preview"]["order_action"] == "BUY"
+    assert payload["close_intent_preview"]["quantity"] == 1
+    assert payload["target_identity"]["quantity"] == "1"
+
+
+def test_explicit_mgc_retry_target_does_not_auto_select_due_mnq_position(tmp_path: Path) -> None:
+    mgc_lifecycle_id = "reserved_submit_mgc_1x_all_lanes_asia_early_short"
+    mgc_strategy_id = "gc_mgc_forced_session_baseline_v2__mgc_1x_all_lanes__asia_early_short"
+    config = _seed(
+        tmp_path,
+        completed_bars=3,
+        config_overrides={
+            "strategy_id": mgc_strategy_id,
+            "lane_id": "mgc_1x_all_lanes__asia_early_short",
+            "lifecycle_id": mgc_lifecycle_id,
+            "instrument_family": "MGC",
+            "contract_key": "MGC-202606",
+            "local_symbol": "MGCM6",
+            "con_id": 712565978,
+            "expiry": "20260626",
+            "side": "SHORT",
+            "managed_exit_policy_id": "FORCED_SESSION_SEGMENT_LOCAL_EXIT_V1",
+        },
+        position_overrides={
+            "symbol": "MGC",
+            "quantity": "-1",
+            "side": "SHORT",
+        },
+    )
+    lifecycle_path = (
+        tmp_path
+        / "outputs/track_b_execution_core/track_b_strategy_managed_paper_lifecycle"
+        / mgc_lifecycle_id
+        / "track_b_strategy_managed_paper_lifecycle_report.json"
+    )
+    lifecycle = json.loads(lifecycle_path.read_text(encoding="utf-8"))
+    lifecycle.update(
+        {
+            "paper_lifecycle_classification": "TRACK_B_STRATEGY_PAPER_REVIEW_REQUIRED",
+            "final_position_status": "REVIEW_REQUIRED",
+            "broker_state_mutated": False,
+            "close_intent": None,
+            "close_submit_attempt": None,
+            "primary_blocker": "Strategy-managed PAPER lifecycle requires positive configured quantity.",
+        }
+    )
+    _write_json(lifecycle_path, lifecycle)
+    _write_json(
+        tmp_path / "outputs/track_b_execution_core/managed_positions/latest_managed_positions.json",
+        {
+            "classification": "OPEN_MANAGED_EXIT_DUE",
+            "managed_positions": [
+                {
+                    "classification": "OPEN_MANAGED_EXIT_DUE",
+                    "exit_due": True,
+                    "attention_required": False,
+                    "symbol": "MNQ",
+                    "contract_key": "MNQ-202606",
+                    "local_symbol": "MNQM6",
+                    "con_id": 770561201,
+                    "quantity": "1",
+                    "side": "LONG",
+                    "strategy_id": "asia_london_participation_core_v1__mnq_1x_asia_london_participation__asia_london_long_v6",
+                    "lifecycle_id": "reserved_submit_mnq_1x_asia_london_participation_asia_london_long_v6",
+                    "managed_exit_policy_id": "PAPER_DIAGNOSTIC_TIME_BOXED_3X5M_EXIT_V1",
+                }
+            ],
+        },
+    )
+
+    payload = build_track_b_managed_exit_attach_plan(config=config, now=NOW)
+
+    assert payload["classification"] == MANAGED_EXIT_TIMEBOX_CLOSE_ELIGIBLE
+    assert payload["selected_managed_position"] == {}
+    assert payload["target_identity"]["lifecycle_id"] == mgc_lifecycle_id
+    assert payload["target_identity"]["contract"] == "MGCM6"
+    assert payload["exit_profile_id"] == "MGC_FORCED_SESSION_SEGMENT_TIMEBOX_3X5M_V1"
+    assert payload["close_intent_preview"]["order_action"] == "BUY"
 
 
 def _seed(
@@ -520,6 +872,42 @@ def _seed(
         {"bars": [{"bar_end": "2026-05-25T07:47:00+00:00", "close": "29965.5"}]},
     )
     return config
+
+
+def _lifecycle_payload(
+    *,
+    config: TrackBManagedExitAttachConfig,
+    lifecycle_id: str,
+    order_id: str,
+    price: str,
+) -> dict[str, Any]:
+    return {
+        "schema_version": "track_b_strategy_managed_paper_lifecycle_v1",
+        "lifecycle_id": lifecycle_id,
+        "strategy_id": config.strategy_id,
+        "instrument_family": config.instrument_family,
+        "contract_key": config.contract_key,
+        "local_symbol": config.local_symbol,
+        "con_id": config.con_id,
+        "account_id": config.account_id,
+        "expected_account_id": config.expected_account_id,
+        "mode": "PAPER",
+        "managed_exit_policy_id": config.managed_exit_policy_id,
+        "managed_exit_policy_max_completed_5m_bars": config.required_completed_5m_bars,
+        "paper_lifecycle_classification": "TRACK_B_STRATEGY_PAPER_OPEN_MANAGED",
+        "final_position_status": "OPEN_MANAGED",
+        "entry_intent": {
+            "side": "SHORT",
+            "quantity": 1,
+            "managed_exit_policy_id": config.managed_exit_policy_id,
+        },
+        "entry_fill": {
+            "price": price,
+            "quantity": "1",
+            "filled_at": "2026-05-25T07:26:12+00:00",
+            "broker_order_id": order_id,
+        },
+    }
 
 
 def _write_json(path: Path, payload: Mapping[str, Any]) -> None:

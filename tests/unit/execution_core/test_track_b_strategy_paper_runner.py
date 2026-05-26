@@ -1283,6 +1283,56 @@ def test_signal_with_blocked_readiness_does_not_submit(tmp_path: Path) -> None:
     assert result.report["submit_attempted"] is False
 
 
+def test_strategy_managed_phase1_pricing_evidence_skips_legacy_quote_readiness(tmp_path: Path) -> None:
+    calls = Calls()
+    now = aware_now()
+    phase1_payload = {
+        "schema": "ohlcv-1m",
+        "source": "DATABENTO_REALTIME_PHASE1",
+        "source_category": "PHASE1_RUNTIME_MARKET_DATA",
+        "symbol": "MGC",
+        "timeframe": "1m",
+        "generated_at": now.isoformat(),
+        "last_completed_bar_ts": now.isoformat(),
+        "realtime_feed_confirmed": True,
+        "realtime_feed_block_reason": "READY",
+        "freshness_seconds": 180.0,
+        "bars": [{"bar_end": now.isoformat(), "close": "4575.3", "completed": True}],
+    }
+    result = run_track_b_strategy_paper(
+        config=base_config(
+            tmp_path,
+            submit_paper=True,
+            confirm_paper_submit=True,
+            quantity=1,
+            manual_open_limit_price="4575.3",
+            manual_close_limit_price="4575.6",
+            paper_order_pricing_policy="LIMIT_AT_LAST",
+            current_quote_report_payload=phase1_payload,
+            managed_exit_policy_id="PAPER_DIAGNOSTIC_TIME_BOXED_3X5M_EXIT_V1",
+        ),
+        stages=stages(
+            calls=calls,
+            strategy=strategy_result(tmp_path),
+            readiness=readiness_result(tmp_path, ready=False),
+            managed_lifecycle=managed_lifecycle_result(
+                tmp_path,
+                TrackBManagedPaperLifecycleClassification.OPEN_MANAGED,
+                managed_exit_policy_id="PAPER_DIAGNOSTIC_TIME_BOXED_3X5M_EXIT_V1",
+            ),
+        ),
+        runner_id="paper-phase1-managed-submit",
+        now=now,
+    )
+
+    assert result.verdict == TrackBStrategyPaperRunnerVerdict.STRATEGY_MANAGED_OPEN_MANAGED
+    assert calls.readiness == 0
+    assert calls.managed_lifecycle == 1
+    assert result.report["strategy_managed_phase1_runtime_pricing_ready"] is True
+    assert result.report["readiness_verdict"] == "READY_FOR_PAPER_PROOF"
+    assert result.report["paper_proof_invoked"] is False
+
+
 def test_blocked_strategy_rule_does_not_run_readiness_or_proof(tmp_path: Path) -> None:
     calls = Calls()
     blocked_strategy = strategy_result(

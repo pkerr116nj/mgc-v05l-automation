@@ -101,6 +101,49 @@ def test_order_intent_rejects_invalid_milestone_one_values(field: str, value: ob
         OrderIntent(**kwargs)
 
 
+def test_close_order_intent_allows_aggregate_managed_exit_quantity() -> None:
+    intent = OrderIntent(
+        order_intent_id="intent-close-3",
+        signal_event_id="sig-1",
+        run_id="run-1",
+        intent_kind=IntentKind.CLOSE,
+        account_id="DUM123",
+        symbol="MNQ",
+        contract_key="MNQ-202606",
+        action=Action.BUY,
+        quantity=3,
+        order_type="LMT",
+        limit_price=Decimal("29919.25"),
+        time_in_force="DAY",
+        paper_only=True,
+        created_at=aware_now(),
+        reason="aggregate managed exit",
+    )
+
+    assert intent.quantity == Decimal("3")
+
+
+def test_close_order_intent_rejects_fractional_quantity() -> None:
+    with pytest.raises(TrackBModelError, match="positive whole-number"):
+        OrderIntent(
+            order_intent_id="intent-close-fractional",
+            signal_event_id="sig-1",
+            run_id="run-1",
+            intent_kind=IntentKind.CLOSE,
+            account_id="DUM123",
+            symbol="MNQ",
+            contract_key="MNQ-202606",
+            action=Action.BUY,
+            quantity=Decimal("1.5"),
+            order_type="LMT",
+            limit_price=Decimal("29919.25"),
+            time_in_force="DAY",
+            paper_only=True,
+            created_at=aware_now(),
+            reason="aggregate managed exit",
+        )
+
+
 def test_fill_event_requires_explicit_ids_and_quantity_one() -> None:
     with pytest.raises(TrackBModelError, match="execution_id is required"):
         FillEvent(

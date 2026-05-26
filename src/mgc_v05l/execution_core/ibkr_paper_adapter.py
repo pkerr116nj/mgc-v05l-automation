@@ -26,7 +26,6 @@ from .models import (
     normalize_action,
     normalize_decimal,
     require_aware_datetime,
-    require_milestone_quantity,
 )
 from .pricing import QuoteObservation
 
@@ -447,8 +446,12 @@ class IbkrPaperAdapter:
             raise IbkrPaperConfigError("market orders are forbidden; order_type must be LMT")
         if order_intent.time_in_force != "DAY":
             raise IbkrPaperConfigError("time_in_force must be DAY")
-        if order_intent.quantity != Decimal("1"):
-            raise IbkrPaperConfigError("quantity must be exactly 1")
+        if order_intent.intent_kind.value == "OPEN" and order_intent.quantity != Decimal("1"):
+            raise IbkrPaperConfigError("OPEN quantity must be exactly 1")
+        if order_intent.intent_kind.value == "CLOSE" and (
+            order_intent.quantity <= 0 or order_intent.quantity != order_intent.quantity.to_integral_value()
+        ):
+            raise IbkrPaperConfigError("CLOSE quantity must be a positive whole-number quantity")
         if _has_forbidden_order_fields(order_intent.extra_fields):
             raise IbkrPaperConfigError("bracket/OCO/parent/child/algo fields are forbidden")
         self.require_ready()
@@ -925,7 +928,7 @@ class IbkrPaperAdapter:
             self._mark_ambiguous(submit_attempt_id, "contract mismatch")
         if normalize_action(action) != context.order_intent.action:
             self._mark_ambiguous(submit_attempt_id, "action mismatch")
-        if require_milestone_quantity(quantity) != context.order_intent.quantity:
+        if normalize_decimal(quantity, "quantity") != context.order_intent.quantity:
             self._mark_ambiguous(submit_attempt_id, "quantity mismatch")
         if not str(broker_order_id or "").strip():
             self._mark_ambiguous(submit_attempt_id, "broker_order_id is required")

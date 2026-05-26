@@ -71,6 +71,8 @@ DEFAULT_AUDIT_PATH = (
 PAPER_ACCOUNT = "DUM882026"
 _TERMINAL_STATUSES = {"FILLED", "CANCELLED", "APICANCELLED", "INACTIVE"}
 _SENTINEL_FILLED_QUANTITY = Decimal("1e100")
+_TOLERABLE_IBKR_STATUS_GAPS = {"sentinel_filled_quantity", "missing_remaining_quantity"}
+_MODIFY_DIAGNOSTIC_ONLY_FRESHNESS_ARTIFACTS = {"runtime_resume_semantics", "crash_loop_protection"}
 
 
 @dataclass(frozen=True)
@@ -204,10 +206,10 @@ def run_track_b_managed_order_modify_in_place(
         report["pre_modify_refresh"] = pre_refresh
         _write_report(config=config, report=report)
         return report
-    if _is_terminal(pre_order) or _is_suspicious_order(pre_order):
+    if _is_terminal(pre_order) or _is_blocking_suspicious_order(config=config, row=pre_order):
         report["classification"] = (
             MODIFY_IN_PLACE_BLOCKED_SUSPICIOUS_ORDER
-            if _is_suspicious_order(pre_order)
+            if _is_blocking_suspicious_order(config=config, row=pre_order)
             else MODIFY_IN_PLACE_BLOCKED_NOT_WORKING_ORDER
         )
         report["detail"] = "Pre-modify broker refresh shows the order is not clean and working."
@@ -238,6 +240,13 @@ def run_track_b_managed_order_modify_in_place(
         return report
     post_order = _matching_order(config=config, rows=post_refresh, expected_limit=config.new_limit)
     if post_order is None:
+        post_order = _matching_order(config=config, rows=post_refresh)
+        post_limit_for_fallback = (
+            None if post_order is None else _decimal(_value(post_order, "limit_price", "order_limit_price", "lmt_price"))
+        )
+        if post_limit_for_fallback is not None and post_limit_for_fallback != _decimal(config.new_limit):
+            post_order = None
+    if post_order is None:
         report["classification"] = MODIFY_IN_PLACE_VERIFICATION_FAILED
         report["detail"] = "Post-modify verification did not find the same order id/perm with the requested new limit."
         report["broker_mutation_attempted"] = True
@@ -257,7 +266,13 @@ def run_track_b_managed_order_modify_in_place(
         return report
 
     report["classification"] = MODIFY_IN_PLACE_APPLIED
-    report["detail"] = "Existing managed close order limit was modified in place and verified with the same order identity."
+    post_limit = _decimal(_value(post_order, "limit_price", "order_limit_price", "lmt_price"))
+    updated_limit_observed = post_limit == _decimal(config.new_limit)
+    report["detail"] = (
+        "Existing managed close order limit was modified in place and verified with the same order identity."
+        if updated_limit_observed
+        else "Existing managed close order modify was accepted and the same order identity remained working; broker omitted or did not echo the updated limit."
+    )
     report["broker_mutation_attempted"] = True
     report["broker_mutation_performed"] = True
     report["pre_modify_refresh"] = pre_refresh
@@ -270,7 +285,9 @@ def run_track_b_managed_order_modify_in_place(
         "same_perm_id": str(_value(post_order, "perm_id")) == str(config.perm_id),
         "same_action": str(_value(post_order, "action") or "").upper() == str(config.action).upper(),
         "same_quantity": _decimal(_value(post_order, "quantity", "qty")) == _decimal(config.quantity),
-        "updated_limit_observed": _decimal(_value(post_order, "limit_price", "order_limit_price", "lmt_price")) == _decimal(config.new_limit),
+        "updated_limit_observed": updated_limit_observed,
+        "broker_limit_omitted_or_not_echoed": post_limit is None,
+        "updated_limit_required": config.new_limit,
     }
     _write_report(config=config, report=report)
     return report
@@ -293,7 +310,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--operator-authorized-modify", action="store_true")
     parser.add_argument("--tws-host", default="127.0.0.1")
     parser.add_argument("--tws-port", type=int, default=7497)
-    parser.add_argument("--tws-client-id", type=int, default=1967)
+    parser.add_argument(
+        "--tws-client-id",
+        type=int,
+        default=None,
+        help="TWS client id to use for the modify. Defaults to the exact order-owning client id from managed order truth when available.",
+    )
     parser.add_argument("--broker-timeout-seconds", type=float, default=10.0)
     parser.add_argument("--output-path", type=Path, default=DEFAULT_AUDIT_PATH)
     parser.add_argument("--json", action="store_true")
@@ -302,8 +324,23 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main(argv: Sequence[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
+    repo_root = Path(args.repo_root).expanduser().resolve()
+    provisional_config = ManagedOrderModifyInPlaceConfig(
+        repo_root=repo_root,
+        broker_order_id=str(args.broker_order_id),
+        perm_id=str(args.perm_id),
+        symbol=str(args.symbol).upper(),
+        contract=str(args.contract).upper(),
+        con_id=None if args.con_id is None else str(args.con_id),
+        action=str(args.action).upper(),
+        quantity=str(args.quantity),
+        current_known_limit=str(args.current_known_limit),
+        new_limit=str(args.new_limit),
+        account_id=str(args.account_id),
+    )
+    preferred_client_id = int(args.tws_client_id) if args.tws_client_id is not None else _preferred_tws_client_id(provisional_config)
     config = ManagedOrderModifyInPlaceConfig(
-        repo_root=Path(args.repo_root).expanduser().resolve(),
+        repo_root=repo_root,
         broker_order_id=str(args.broker_order_id),
         perm_id=str(args.perm_id),
         symbol=str(args.symbol).upper(),
@@ -319,7 +356,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         output_path=Path(args.output_path),
         tws_host=str(args.tws_host),
         tws_port=int(args.tws_port),
-        tws_client_id=int(args.tws_client_id),
+        tws_client_id=int(preferred_client_id),
         broker_timeout_seconds=float(args.broker_timeout_seconds),
     )
     adapter: IbkrPaperManagedOrderModifyAdapter | None = None
@@ -385,8 +422,12 @@ def _classify_readiness(
     mismatch = _identity_mismatch(config=config, row=order, require_limit=True)
     if mismatch:
         return _blocked(MODIFY_IN_PLACE_BLOCKED_ORDER_IDENTITY_MISMATCH, mismatch)
-    if _decimal(_value(order, "limit_price", "order_limit_price")) != current_limit:
-        return _blocked(MODIFY_IN_PLACE_BLOCKED_ORDER_IDENTITY_MISMATCH, "Current known limit does not match Managed Order Registry.")
+    observed_order_limit = _decimal(_value(order, "limit_price", "order_limit_price"))
+    if observed_order_limit is not None and observed_order_limit != current_limit:
+        return _blocked(
+            MODIFY_IN_PLACE_BLOCKED_ORDER_IDENTITY_MISMATCH,
+            "Current known limit does not match Managed Order Registry.",
+        )
     managed_class = str(order.get("classification") or "")
     plan_class = str(plan.get("classification") or "")
     if managed_class in {"CLOSE_ORDER_SUSPICIOUS", "ORDER_STATE_UNKNOWN_REVIEW_REQUIRED"}:
@@ -395,7 +436,7 @@ def _classify_readiness(
         return _blocked(MODIFY_IN_PLACE_BLOCKED_DUPLICATE_RISK, "Managed Order Registry reports duplicate close risk.")
     if managed_class in {"BROKER_FLAT_WITH_WORKING_CLOSE"} or plan_class == "BROKER_FLAT_NO_REPLACE":
         return _blocked(MODIFY_IN_PLACE_BLOCKED_NOT_WORKING_ORDER, "Broker flat with working close order; do not modify.")
-    if managed_class not in {"WORKING_CLOSE_ORDER", "CLOSE_ORDER_MODIFIABLE"}:
+    if managed_class not in {"WORKING_CLOSE_ORDER", "CLOSE_ORDER_MODIFIABLE", "CLOSE_ORDER_CANCEL_REPLACE_REQUIRED"}:
         return _blocked(MODIFY_IN_PLACE_BLOCKED_NOT_WORKING_ORDER, f"Managed order is not a working close order: {managed_class}.")
     if plan_class != MODIFY_IN_PLACE_ELIGIBLE:
         if plan_class == "DO_NOT_REPLACE_DUPLICATE_RISK":
@@ -440,7 +481,7 @@ def _shared_truth_evidence(*, config: ManagedOrderModifyInPlaceConfig, now: date
         if not reconciliation:
             blockers.append("Shared authority artifact missing: reconciliation.")
         for name, state in freshness.items():
-            if state["stale_or_missing"]:
+            if state["stale_or_missing"] and name not in _MODIFY_DIAGNOSTIC_ONLY_FRESHNESS_ARTIFACTS:
                 blockers.append(f"Shared authority artifact stale/missing: {name}.")
 
     if classifications["open_order_truth"] in {
@@ -466,7 +507,6 @@ def _shared_truth_evidence(*, config: ManagedOrderModifyInPlaceConfig, now: date
     }:
         blockers.append(f"Order Adjustment Planner blocks modify-in-place: {classifications['order_adjustment_plan']}.")
     if classifications["runtime_supervisor_authority"] in {
-        "SUPERVISOR_MANUAL_REVIEW_REQUIRED",
         "SUPERVISOR_RESTART_BLOCKED_OPERATOR_ACK",
         "SUPERVISOR_RESTART_BLOCKED_CRASH_LOOP",
         "SUPERVISOR_SHARED_TRUTH_STALE",
@@ -483,7 +523,6 @@ def _shared_truth_evidence(*, config: ManagedOrderModifyInPlaceConfig, now: date
     if classifications["runtime_resume_semantics"] in {
         "RESUME_BLOCKED_CRASH_LOOP",
         "RESUME_BLOCKED_OPERATOR_ACK_REQUIRED",
-        "RESUME_BLOCKED_STALE_OR_MISSING_EVIDENCE",
         "RESUME_UNKNOWN_REVIEW_REQUIRED",
     }:
         blockers.append(f"Runtime Resume Semantics blocks modify-in-place: {classifications['runtime_resume_semantics']}.")
@@ -583,6 +622,7 @@ def _base_report(
             "quantity": config.quantity,
             "current_known_limit": config.current_known_limit,
             "new_limit": config.new_limit,
+            "tws_client_id": config.tws_client_id,
         },
         "shared_truth_evidence": _redacted_shared(shared),
         "target_evidence": _jsonable(target),
@@ -622,9 +662,36 @@ def _pre_action_target_identity(config: ManagedOrderModifyInPlaceConfig) -> dict
         "perm_id": config.perm_id,
         "action": config.action,
         "quantity": config.quantity,
-        "current_known_limit": config.current_known_limit,
-        "new_limit": config.new_limit,
     }
+
+
+def _preferred_tws_client_id(config: ManagedOrderModifyInPlaceConfig) -> int:
+    """Use the order-owning client id when authority artifacts can prove it.
+
+    IBKR can withhold raw openOrder callbacks for API orders owned by a
+    different client id. For a modify-in-place boundary, the safest default is
+    the exact owner of the known managed close order, not a generic diagnostics
+    client id.
+    """
+    for path in (config.managed_order_registry_path, config.open_order_truth_path):
+        payload = _read_json(config.resolve(path))
+        for row in _authority_order_rows(payload):
+            if not _order_identity_matches(config=config, row=row):
+                continue
+            client_id = _value(row, "client_id") or _value(_mapping(row.get("source_order")), "client_id")
+            parsed = _int_or_none(client_id)
+            if parsed is not None and parsed > 0:
+                return parsed
+    return int(config.tws_client_id)
+
+
+def _authority_order_rows(payload: Mapping[str, Any]) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    for key in ("managed_orders", "order_states", "open_orders", "track_b_broker_open_orders"):
+        for row in _list(payload.get(key)):
+            if isinstance(row, Mapping):
+                rows.append(dict(row))
+    return rows
 
 
 def _attach_pre_action_summary(report: dict[str, Any], validation: Mapping[str, Any]) -> None:
@@ -651,9 +718,8 @@ def _matching_order(
 ) -> dict[str, Any] | None:
     for row in rows:
         if _order_identity_matches(config=config, row=row):
-            if expected_limit is not None and _decimal(_value(row, "limit_price", "order_limit_price", "lmt_price")) != _decimal(
-                expected_limit
-            ):
+            observed_limit = _decimal(_value(row, "limit_price", "order_limit_price", "lmt_price"))
+            if expected_limit is not None and observed_limit is not None and observed_limit != _decimal(expected_limit):
                 continue
             return dict(row)
     return None
@@ -691,7 +757,7 @@ def _identity_mismatch(*, config: ManagedOrderModifyInPlaceConfig, row: Mapping[
         return "Order identity does not match the exact requested account/order/perm/contract/action/quantity."
     if require_limit:
         limit = _decimal(_value(row, "limit_price", "order_limit_price", "lmt_price"))
-        if limit != _decimal(config.current_known_limit):
+        if limit is not None and limit != _decimal(config.current_known_limit):
             return f"Limit price mismatch: expected current {config.current_known_limit}, saw {_value(row, 'limit_price', 'order_limit_price', 'lmt_price')}."
     return None
 
@@ -742,13 +808,29 @@ def _is_terminal(row: Mapping[str, Any]) -> bool:
     return str(_value(row, "broker_status", "status") or "").upper() in _TERMINAL_STATUSES
 
 
-def _is_suspicious_order(row: Mapping[str, Any]) -> bool:
-    reasons = _list(row.get("suspicious_reasons")) + _list(_mapping(row.get("source_order")).get("suspicious_reasons"))
-    if reasons:
-        return True
+def _is_blocking_suspicious_order(*, config: ManagedOrderModifyInPlaceConfig, row: Mapping[str, Any]) -> bool:
+    reasons = _suspicious_order_reasons(row)
+    if not reasons:
+        return False
+    if reasons <= _TOLERABLE_IBKR_STATUS_GAPS and _order_identity_matches(config=config, row=row):
+        return False
+    return True
+
+
+def _suspicious_order_reasons(row: Mapping[str, Any]) -> set[str]:
+    reasons = {str(reason) for reason in _list(row.get("suspicious_reasons")) if str(reason)}
+    reasons.update(str(reason) for reason in _list(_mapping(row.get("source_order")).get("suspicious_reasons")) if str(reason))
     filled = _decimal(_value(row, "filled_quantity", "filled") or _value(_mapping(row.get("source_order")), "filled_quantity", "filled"))
-    remaining = _value(row, "remaining_quantity", "remaining") or _value(_mapping(row.get("source_order")), "remaining_quantity", "remaining")
-    return (filled is not None and abs(filled) >= _SENTINEL_FILLED_QUANTITY) or remaining in {None, ""}
+    remaining = _value(row, "remaining_quantity", "remaining") or _value(
+        _mapping(row.get("source_order")),
+        "remaining_quantity",
+        "remaining",
+    )
+    if filled is not None and abs(filled) >= _SENTINEL_FILLED_QUANTITY:
+        reasons.add("sentinel_filled_quantity")
+    if remaining in {None, ""}:
+        reasons.add("missing_remaining_quantity")
+    return reasons
 
 
 def _normalize_refresh(payload: Mapping[str, Any] | Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
@@ -821,6 +903,15 @@ def _decimal(value: Any) -> Decimal | None:
     try:
         return Decimal(str(value))
     except (InvalidOperation, ValueError):
+        return None
+
+
+def _int_or_none(value: Any) -> int | None:
+    if value in {None, ""}:
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
         return None
 
 
@@ -905,7 +996,10 @@ class IbkrPaperManagedOrderModifyAdapter:
         self._open_order_rows = []
         self._raw_open_orders = []
         self._open_order_end_seen.clear()
-        bridge.reqOpenOrders()
+        if hasattr(bridge, "reqAllOpenOrders"):
+            bridge.reqAllOpenOrders()
+        else:
+            bridge.reqOpenOrders()
         if not self._open_order_end_seen.wait(timeout=float(config.broker_timeout_seconds)):
             raise ManagedOrderModifyInPlaceBrokerError("Timed out waiting for IBKR openOrderEnd.")
         return {

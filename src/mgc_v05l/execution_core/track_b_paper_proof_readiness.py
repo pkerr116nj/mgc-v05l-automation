@@ -10,7 +10,7 @@ from __future__ import annotations
 import argparse
 import json
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, time
 from pathlib import Path
 from typing import Any, Callable, Mapping, Sequence
 
@@ -31,6 +31,7 @@ from mgc_v05l.execution_core.track_b_shared_truth_refresh_cli import (
     refresh_track_b_shared_truth,
 )
 from mgc_v05l.market_data.phase1_market_session import MARKET_CLOSED_NO_FRESH_BARS
+from mgc_v05l.session_phase_labels import NEW_YORK
 
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
@@ -45,6 +46,9 @@ SHARED_TRUTH_BLOCKED = "SHARED_TRUTH_BLOCKED"
 PHASE1_DATA_UNHEALTHY = "PHASE1_DATA_UNHEALTHY"
 RUNTIME_ALREADY_ACTIVE = "RUNTIME_ALREADY_ACTIVE"
 BROKER_STATE_UNSAFE = "BROKER_STATE_UNSAFE"
+PLANNED_EQUITY_INDEX_FUTURES_HALT_NO_FRESH_BARS = "PLANNED_EQUITY_INDEX_FUTURES_HALT_NO_FRESH_BARS"
+
+_EQUITY_INDEX_PHASE1_SYMBOLS = {"MNQ", "NQ", "MES", "ES", "MYM", "YM"}
 
 
 @dataclass(frozen=True)
@@ -88,6 +92,7 @@ def build_track_b_paper_proof_readiness(
         rows=phase1.rows,
         symbols=config.required_symbols,
         timeframes=config.required_timeframes,
+        now=actual_now,
     )
     decision = _classify_proof_readiness(
         shared_truth=shared_truth,
@@ -145,6 +150,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--repo-root", default=str(REPO_ROOT))
     parser.add_argument("--output-path", default=str(DEFAULT_OUTPUT_PATH))
     parser.add_argument("--now", default=None, help="UTC/ISO timestamp override for deterministic dry-run tests.")
+    parser.add_argument(
+        "--required-symbols",
+        default=",".join(TrackBPaperProofReadinessConfig.required_symbols),
+        help="Comma-separated Phase-1 symbols required for this readiness scope.",
+    )
     parser.add_argument("--json", action="store_true", help="Print JSON instead of a concise readiness summary.")
     parser.add_argument("--no-broker-lease-history", action="store_true", help="Skip broker lease history append.")
     return parser
@@ -157,6 +167,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     config = TrackBPaperProofReadinessConfig(
         repo_root=repo_root,
         output_path=output_path,
+        required_symbols=_csv_tuple(args.required_symbols),
         now=_parse_datetime(args.now),
         broker_lease_history_path=None if bool(args.no_broker_lease_history) else DEFAULT_LEASE_HISTORY,
     )
@@ -182,11 +193,21 @@ def _classify_proof_readiness(
     hard_shared_blockers = [
         blocker for blocker in shared_blockers if not _is_degraded_broker_lease_blocker(blocker)
     ]
-    missing_or_unready = [dict(check) for check in phase1_checks if check.get("ready") is not True]
+    missing_or_unready = [
+        dict(check)
+        for check in phase1_checks
+        if check.get("ready") is not True and check.get("blocking_for_proof") is not False
+    ]
+    nonblocking_phase1_warnings = [
+        dict(check)
+        for check in phase1_checks
+        if check.get("ready") is not True and check.get("blocking_for_proof") is False
+    ]
     phase1_closed_market = bool(missing_or_unready) and all(
         str(check.get("reason") or "") == MARKET_CLOSED_NO_FRESH_BARS for check in missing_or_unready
     )
     phase1_blockers = _phase1_blockers(missing_or_unready)
+    phase1_warnings = _phase1_blockers(nonblocking_phase1_warnings)
     phase1_session_reason = _phase1_session_reason(phase1_checks=phase1_checks)
 
     if runtime_classification in {RUNTIME_ACTIVE_TRADE_CAPABLE, RUNTIME_ACTIVE_OBSERVATION_ONLY}:
@@ -199,7 +220,10 @@ def _classify_proof_readiness(
         return _decision(
             classification=RUNTIME_ALREADY_ACTIVE,
             blockers=blockers,
-            secondary_warnings=_secondary_warnings(shared_blockers=shared_blockers, phase1_blockers=phase1_blockers),
+            secondary_warnings=_secondary_warnings(
+                shared_blockers=shared_blockers,
+                phase1_blockers=[*phase1_blockers, *phase1_warnings],
+            ),
             broker_lease_warning=broker_lease_warning,
             phase1_session_reason=phase1_session_reason,
         )
@@ -213,7 +237,7 @@ def _classify_proof_readiness(
                 shared_blockers=[
                     blocker for blocker in shared_blockers if blocker not in hard_shared_blockers
                 ],
-                phase1_blockers=phase1_blockers,
+                phase1_blockers=[*phase1_blockers, *phase1_warnings],
             ),
             broker_lease_warning=broker_lease_warning,
             phase1_session_reason=phase1_session_reason,
@@ -223,7 +247,7 @@ def _classify_proof_readiness(
         return _decision(
             classification=MARKET_CLOSED_NO_FRESH_BARS,
             blockers=phase1_blockers,
-            secondary_warnings=_secondary_warnings(shared_blockers=shared_blockers, phase1_blockers=[]),
+            secondary_warnings=_secondary_warnings(shared_blockers=shared_blockers, phase1_blockers=phase1_warnings),
             broker_lease_warning=broker_lease_warning,
             phase1_session_reason=phase1_session_reason,
         )
@@ -233,7 +257,7 @@ def _classify_proof_readiness(
         return _decision(
             classification=classification,
             blockers=shared_blockers,
-            secondary_warnings=[],
+            secondary_warnings=_secondary_warnings(shared_blockers=[], phase1_blockers=phase1_warnings),
             broker_lease_warning=broker_lease_warning,
             phase1_session_reason=phase1_session_reason,
         )
@@ -242,7 +266,7 @@ def _classify_proof_readiness(
         return _decision(
             classification=PHASE1_DATA_UNHEALTHY,
             blockers=phase1_blockers,
-            secondary_warnings=[],
+            secondary_warnings=_secondary_warnings(shared_blockers=[], phase1_blockers=phase1_warnings),
             broker_lease_warning=broker_lease_warning,
             phase1_session_reason=phase1_session_reason,
         )
@@ -250,7 +274,7 @@ def _classify_proof_readiness(
     return _decision(
         classification=READY_FOR_PROOF,
         blockers=[],
-        secondary_warnings=[],
+        secondary_warnings=_secondary_warnings(shared_blockers=[], phase1_blockers=phase1_warnings),
         broker_lease_warning=broker_lease_warning,
         phase1_session_reason=phase1_session_reason,
     )
@@ -281,6 +305,7 @@ def _required_phase1_checks(
     rows: Sequence[Mapping[str, Any]],
     symbols: Sequence[str],
     timeframes: Sequence[str],
+    now: datetime,
 ) -> list[dict[str, Any]]:
     rows_by_symbol = {str(row.get("symbol") or "").upper(): row for row in rows}
     checks: list[dict[str, Any]] = []
@@ -295,17 +320,28 @@ def _required_phase1_checks(
                     "reason": "PHASE1_RUNTIME_CANDLE_CHECK_MISSING",
                     "path": None,
                 }
+            symbol_key = symbol.upper()
+            reason = str(check.get("reason") or "UNKNOWN")
+            planned_halt = _planned_equity_index_halt(symbol=symbol_key, now=now)
+            nonblocking_planned_halt = planned_halt and reason in {
+                "RUNTIME_CANDLES_STALE",
+                "RUNTIME_CANDLES_MISSING",
+                "PHASE1_RUNTIME_CANDLE_CHECK_MISSING",
+            }
             checks.append(
                 {
-                    "symbol": symbol.upper(),
+                    "symbol": symbol_key,
                     "timeframe": timeframe,
                     "ready": check.get("ready") is True,
-                    "reason": check.get("reason") or "UNKNOWN",
+                    "reason": PLANNED_EQUITY_INDEX_FUTURES_HALT_NO_FRESH_BARS if nonblocking_planned_halt else reason,
                     "path": check.get("path"),
                     "generated_at": check.get("generated_at"),
                     "age_seconds": check.get("age_seconds"),
                     "freshness_seconds": check.get("freshness_seconds"),
                     "market_session": check.get("market_session") or {},
+                    "planned_halt": bool(planned_halt),
+                    "blocking_for_proof": False if nonblocking_planned_halt else True,
+                    "scope_impact": "EQUITY_INDEX_ONLY" if nonblocking_planned_halt else "TRACK_B_REQUIRED_SCOPE",
                 }
             )
     return checks
@@ -325,9 +361,22 @@ def _phase1_blockers(checks: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]
                 "timeframe": timeframe,
                 "reason": reason,
                 "path": str(check.get("path") or ""),
+                "blocking_for_proof": check.get("blocking_for_proof") is not False,
+                "planned_halt": check.get("planned_halt") is True,
+                "scope_impact": check.get("scope_impact") or "",
             }
         )
     return blockers
+
+
+def _planned_equity_index_halt(*, symbol: str, now: datetime) -> bool:
+    if symbol.upper() not in _EQUITY_INDEX_PHASE1_SYMBOLS:
+        return False
+    local_dt = _ensure_utc(now).astimezone(NEW_YORK)
+    if local_dt.date().isoformat() != "2026-05-25":
+        return False
+    local_time = local_dt.timetz().replace(tzinfo=None)
+    return time(13, 0) <= local_time < time(18, 0)
 
 
 def _secondary_warnings(
@@ -432,6 +481,10 @@ def _parse_datetime(value: Any) -> datetime | None:
     if text.endswith("Z"):
         text = f"{text[:-1]}+00:00"
     return _ensure_utc(datetime.fromisoformat(text))
+
+
+def _csv_tuple(value: Any) -> tuple[str, ...]:
+    return tuple(part.strip().upper() for part in str(value or "").split(",") if part.strip())
 
 
 def _list(value: Any) -> list[Any]:

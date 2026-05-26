@@ -182,6 +182,48 @@ def test_unknown_open_orders_invalidate_immediately() -> None:
     assert result["operator_action_required"] is True
 
 
+def test_known_managed_exit_order_reconciliation_preserves_active_lease() -> None:
+    inputs = base_inputs()
+    inputs["last_successful_broker_truth"] = {
+        **dict(inputs["last_successful_broker_truth"]),
+        "positions": [],
+        "open_orders": [],
+        "open_order_count": 1,
+    }
+    inputs["latest_attempt_status"] = {
+        **dict(inputs["latest_attempt_status"]),
+        "positions": [],
+        "open_orders": [],
+        "open_order_count": 1,
+    }
+    inputs["reconciliation"] = {
+        **dict(inputs["reconciliation"]),
+        "classification": "TRACK_B_PAPER_BROKER_RECONCILED_WITH_KNOWN_MANAGED_EXIT_ORDER",
+        "broker_reconciled": True,
+        "known_managed_exit_order_count": 1,
+        "track_b_broker_position_count": 1,
+        "track_b_broker_open_order_count": 1,
+        "lifecycle_open_position_count": 1,
+    }
+    inputs["lifecycle"] = {
+        **dict(inputs["lifecycle"]),
+        "open_position_count": 1,
+        "open_positions": [{"symbol": "MNQ", "local_symbol": "MNQM6", "quantity": "1", "owned": True}],
+    }
+    inputs["order_state"] = {
+        **dict(inputs["order_state"]),
+        "classification": "OPEN_CLOSE_ORDER_WORKING",
+        "unknown_open_order_count": 0,
+    }
+
+    result = classify_broker_truth_lease(inputs)
+
+    assert result["lease_state"] == "ACTIVE"
+    assert result["submit_exit_allowed"] is True
+    assert result["operator_action_required"] is False
+    assert _contradiction_codes(result) == set()
+
+
 def test_unexpected_broker_position_invalidates_immediately() -> None:
     inputs = base_inputs()
     inputs["last_successful_broker_truth"] = {

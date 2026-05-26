@@ -93,6 +93,11 @@ _PARTIAL_FILL_STATUS = {"PartiallyFilled"}
 _ORDER_REJECTION_ERROR_CODES = {478, 10268, 201, 202}
 _PLAN_MANUAL_PAPER_SUBMIT = "PLAN_MANUAL_PAPER_SUBMIT"
 _ACTION_MANUAL_PAPER_SUBMIT = "MANUAL_PAPER_SUBMIT"
+_RUNTIME_EXECUTION_PRICE_SOURCES = {
+    "RUNTIME_DATABENTO_1M_CLOSE",
+    "RUNTIME_DATABENTO_1M_LAST_OR_CLOSE",
+    "RUNTIME_DATABENTO_CANDLE",
+}
 
 
 class IbkrManualPaperSubmitError(RuntimeError):
@@ -695,7 +700,7 @@ def run_ibkr_manual_paper_submit_test(
             sleep_fn=sleep_fn,
             started_at=started_at,
             requested_order=requested_order,
-            collect_quote=not config.submit,
+            collect_quote=not config.submit and not _has_runtime_execution_pricing_authority(config=config),
         )
         audit_events.extend(context["audit_events"])
         guardrail_checks.extend(
@@ -1581,14 +1586,23 @@ def _submit_input_guardrails(
     require_limit_price: bool,
 ) -> dict[str, dict[str, Any]]:
     normalized_mode = str(test_mode or "").strip().upper()
-    expected_action = "SELL" if normalized_mode == _CLOSE_TEST_MODE else _EXPECTED_ACTION
+    if normalized_mode == _CLOSE_TEST_MODE:
+        supported_actions = {"SELL"}
+    elif normalized_mode == _FILL_TEST_MODE:
+        supported_actions = {"BUY", "SELL"}
+    else:
+        supported_actions = {_EXPECTED_ACTION}
     expected_target = _phase1_target_for_requested_order(requested_order)
     expected_symbol = str(expected_target.get("symbol") or "").strip().upper()
     expected_expiry = str(expected_target.get("contract_month") or "").strip()
     action_detail = (
         "Only SELL is allowed in the manual paper close harness."
         if normalized_mode == _CLOSE_TEST_MODE
-        else "Only BUY is allowed in the first manual paper submit/cancel harness."
+        else (
+            "PAPER_FILL_TEST allows BUY or SELL for guarded entry leak tests."
+            if normalized_mode == _FILL_TEST_MODE
+            else "Only BUY is allowed in the first manual paper submit/cancel harness."
+        )
     )
     return {
         "whitelisted_contract": {
@@ -1602,7 +1616,7 @@ def _submit_input_guardrails(
             ),
         },
         "supported_action": {
-            "passed": requested_order.get("action") == expected_action,
+            "passed": str(requested_order.get("action") or "").strip().upper() in supported_actions,
             "detail": action_detail,
         },
         "quantity_cap": {
@@ -1751,21 +1765,24 @@ def _build_delayed_quote_pricing_context(
     normalized_action = str(requested_order.get("action") or "").strip().upper()
     runtime_reference_price = _coerce_float(execution_pricing_context.get("runtime_last_or_close"))
     execution_price_source = str(execution_pricing_context.get("execution_price_source") or "").strip().upper()
-    runtime_price_source = execution_price_source in {
-        "RUNTIME_DATABENTO_1M_CLOSE",
-        "RUNTIME_DATABENTO_1M_LAST_OR_CLOSE",
-        "RUNTIME_DATABENTO_CANDLE",
-    }
+    runtime_price_source = execution_price_source in _RUNTIME_EXECUTION_PRICE_SOURCES
     if normalized_mode == _FILL_TEST_MODE:
         if runtime_price_source and runtime_reference_price is not None:
             reference_price, reference_source = runtime_reference_price, "runtime_last_or_close"
         else:
-            reference_price, reference_source = _select_fill_reference_price(quote_context)
-        price_relation = "above_reference"
+            if normalized_action == "SELL":
+                reference_price, reference_source = _select_close_reference_price(quote_context)
+            else:
+                reference_price, reference_source = _select_fill_reference_price(quote_context)
+        price_relation = "below_reference" if normalized_action == "SELL" else "above_reference"
         distance_from_reference_price = (
             None
             if limit_price is None or reference_price is None
-            else float(limit_price) - float(reference_price)
+            else (
+                float(reference_price) - float(limit_price)
+                if normalized_action == "SELL"
+                else float(limit_price) - float(reference_price)
+            )
         )
         pricing_label = _MARKETABLE_LIMIT_LABEL
         intended_to_fill = True
@@ -1806,6 +1823,7 @@ def _build_delayed_quote_pricing_context(
     return {
         "execution_price_source": execution_pricing_context.get("execution_price_source"),
         "execution_pricing_context": execution_pricing_context or None,
+        "requested_action": normalized_action,
         "quote_snapshot": {
             "source_label": quote_context.get("quote_source_label"),
             "updated_at": quote_context.get("updated_at"),
@@ -1839,11 +1857,7 @@ def _delayed_quote_pricing_guardrails(pricing_context: dict[str, Any]) -> list[d
     max_distance_ticks = pricing_context.get("max_distance_ticks")
     execution_context = dict(pricing_context.get("execution_pricing_context") or {})
     execution_source = str(pricing_context.get("execution_price_source") or execution_context.get("execution_price_source") or "").strip().upper()
-    runtime_price_source = execution_source in {
-        "RUNTIME_DATABENTO_1M_CLOSE",
-        "RUNTIME_DATABENTO_1M_LAST_OR_CLOSE",
-        "RUNTIME_DATABENTO_CANDLE",
-    }
+    runtime_price_source = execution_source in _RUNTIME_EXECUTION_PRICE_SOURCES
     checks = [
         _guardrail_check(
             "delayed_quote_available",
@@ -1882,6 +1896,12 @@ def _delayed_quote_pricing_guardrails(pricing_context: dict[str, Any]) -> list[d
                 "For PAPER_CLOSE_TEST SELL 1 MGC 202606 LMT DAY, the chosen limit must be slightly below the runtime reference so it is a marketable limit intended to fill in paper while remaining near-market rather than far away."
                 if runtime_price_source
                 else "For PAPER_CLOSE_TEST SELL 1 MGC 202606 LMT DAY, the chosen limit must be slightly below the delayed bid/last so it is a marketable limit intended to fill in paper while remaining near-market rather than far away."
+            )
+        elif str(pricing_context.get("requested_action") or "").strip().upper() == "SELL":
+            detail = (
+                "For PAPER_FILL_TEST SELL 1 MGC 202606 LMT DAY, the chosen limit must be slightly below the runtime reference so it is a marketable limit intended to fill in paper, while remaining near-market rather than far away."
+                if runtime_price_source
+                else "For PAPER_FILL_TEST SELL 1 MGC 202606 LMT DAY, the chosen limit must be slightly below the delayed bid/last so it is a marketable limit intended to fill in paper, while remaining near-market rather than far away."
             )
         else:
             detail = (
@@ -2204,7 +2224,7 @@ def _collect_truth_and_preview_context(
             sleep_fn=sleep_fn,
         )
         if collect_quote
-        else {}
+        else _runtime_execution_quote_context(config=config)
     )
     audit_events.extend(
         [
@@ -2256,6 +2276,47 @@ def _collect_truth_and_preview_context(
         "errors": list(runtime.collector.errors),
         "audit_events": audit_events,
         "open_order_baseline_digest": _snapshot_digest(open_orders_before),
+    }
+
+
+def _has_runtime_execution_pricing_authority(*, config: IbkrManualPaperSubmitConfig) -> bool:
+    context = dict(config.execution_pricing_context or {})
+    execution_price_source = str(context.get("execution_price_source") or "").strip().upper()
+    limit_price = _coerce_float(config.limit_price)
+    runtime_reference = _coerce_float(context.get("runtime_last_or_close"))
+    return (
+        execution_price_source in _RUNTIME_EXECUTION_PRICE_SOURCES
+        and limit_price is not None
+        and limit_price > 0.0
+        and runtime_reference is not None
+        and runtime_reference > 0.0
+    )
+
+
+def _runtime_execution_quote_context(*, config: IbkrManualPaperSubmitConfig) -> dict[str, Any]:
+    context = dict(config.execution_pricing_context or {})
+    runtime_reference = _coerce_float(context.get("runtime_last_or_close"))
+    updated_at = context.get("runtime_candle_timestamp") or context.get("generated_at") or datetime.now(timezone.utc).isoformat()
+    source_path = context.get("source_artifact_path") or context.get("runtime_source_artifact_path")
+    return {
+        "quote_source_label": "PHASE1_RUNTIME_MARKET_DATA",
+        "live_market_data_available": False,
+        "live_market_data_warning": (
+            "IBKR quote data was not used for this PAPER preview; Phase-1 runtime market data authority supplied the execution price."
+            if _has_runtime_execution_pricing_authority(config=config)
+            else None
+        ),
+        "has_quote": False,
+        "bid_price": None,
+        "ask_price": None,
+        "last_price": runtime_reference,
+        "close_price": runtime_reference,
+        "updated_at": str(updated_at),
+        "response_indication": "phase1_runtime_authority",
+        "delayed_data_warning_present": False,
+        "source_category": "PHASE1_RUNTIME_MARKET_DATA",
+        "source_artifact_path": None if source_path is None else str(source_path),
+        "not_dashboard_authority": True,
     }
 
 

@@ -16,6 +16,7 @@ from typing import Mapping
 PAPER_DIAGNOSTIC_TIME_BOXED_3X5M_EXIT_V1 = "PAPER_DIAGNOSTIC_TIME_BOXED_3X5M_EXIT_V1"
 FORCED_SESSION_SEGMENT_LOCAL_EXIT_V1 = "FORCED_SESSION_SEGMENT_LOCAL_EXIT_V1"
 MNQ_SNAP_TURN_TIMEBOX_3X5M_V1 = "MNQ_SNAP_TURN_TIMEBOX_3X5M_V1"
+MGC_DIAGNOSTIC_TIMEBOX_3X5M_V1 = "MGC_DIAGNOSTIC_TIMEBOX_3X5M_V1"
 MGC_FORCED_SESSION_SEGMENT_TIMEBOX_3X5M_V1 = "MGC_FORCED_SESSION_SEGMENT_TIMEBOX_3X5M_V1"
 TIMEBOXED_3X5M_MANAGED_LIMIT_CLOSE_V1 = "timeboxed_3x5m_managed_limit_close_v1"
 
@@ -72,6 +73,21 @@ EXIT_PROFILE_ROSTER: Mapping[str, TrackBExitProfile] = {
         profile_explanation=(
             "PAPER diagnostic snap-turn close profile: after three completed 5m bars, "
             "submit the managed lifecycle close as an exact SELL/BUY limit order for the owned position."
+        ),
+    ),
+    MGC_DIAGNOSTIC_TIMEBOX_3X5M_V1: TrackBExitProfile(
+        exit_strategy_id=TIMEBOXED_3X5M_MANAGED_LIMIT_CLOSE_V1,
+        exit_profile_id=MGC_DIAGNOSTIC_TIMEBOX_3X5M_V1,
+        managed_exit_policy_id=PAPER_DIAGNOSTIC_TIME_BOXED_3X5M_EXIT_V1,
+        instrument_family="MGC",
+        strategy_family="gold_session_strategy_diagnostic",
+        order_type="LMT",
+        required_completed_5m_bars=3,
+        price_offset_ticks=2,
+        tick_size="0.1",
+        profile_explanation=(
+            "PAPER diagnostic MGC close profile: after three completed 5m bars, "
+            "submit the managed lifecycle close as an exact opposite-side limit order for the owned MGC position."
         ),
     ),
     MGC_FORCED_SESSION_SEGMENT_TIMEBOX_3X5M_V1: TrackBExitProfile(

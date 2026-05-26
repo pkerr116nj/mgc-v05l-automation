@@ -15,6 +15,7 @@ from mgc_v05l.execution_core.track_b_open_order_truth import (
 import mgc_v05l.execution_core.track_b_strategy_managed_paper_lifecycle as lifecycle_module
 from mgc_v05l.execution_core.track_b_strategy_managed_paper_lifecycle import (
     CLOSE_ORDER_ALREADY_WORKING,
+    STRATEGY_SUBMIT_BLOCKED_ENTRY_EXPOSURE,
     TrackBManagedExitPolicy,
     TrackBManagedPaperLifecycleClassification,
     TrackBStrategyManagedPaperLifecycleConfig,
@@ -651,6 +652,81 @@ def test_valid_exit_policy_creates_open_managed_state(tmp_path: Path) -> None:
     assert result.report["close_intent"] is None
     assert result.report["final_position_status"] == "OPEN_MANAGED"
     assert result.report["paper_proof_invoked"] is False
+
+
+def test_entry_submit_authorization_blocks_same_lane_reentry_before_adapter(tmp_path: Path) -> None:
+    config = base_config(
+        tmp_path,
+        strategy_id="MNQ_FIRST_BEAR_SNAP_TURN_V1",
+        lane_id="mnq_first_bear_snap_turn",
+        instrument_family="MNQ",
+        contract_key="MNQ-202606",
+        local_symbol="MNQM6",
+        con_id=770561201,
+        side="SELL",
+        entry_limit_price="30000",
+        submit_enabled=True,
+        managed_exit_policy_id=TrackBManagedExitPolicy.PAPER_DIAGNOSTIC_TIME_BOXED_3X5M_EXIT_V1.value,
+    )
+    lifecycle_id = "new-mnq-same-lane"
+    entry_intent = lifecycle_module._entry_intent(config=config, lifecycle_id=lifecycle_id, now=aware_now())
+    seed_strategy_submit_authority(
+        tmp_path,
+        config=config,
+        intent_payload=entry_intent,
+        intent_kind=IntentKind.OPEN,
+        limit_price=config.entry_limit_price,
+    )
+    _write_json(
+        tmp_path / "outputs/track_b_execution_core/managed_positions/latest_managed_positions.json",
+        {
+            "classification": "OPEN_MANAGED_MATCHED",
+            "live_money_eligible": False,
+            "paper_proof_invoked": False,
+            "managed_positions": [
+                {
+                    "classification": "OPEN_MANAGED_MATCHED",
+                    "account_id": "DUM882026",
+                    "instrument_family": "MNQ",
+                    "contract_key": "MNQ-202606",
+                    "local_symbol": "MNQM6",
+                    "con_id": 770561201,
+                    "aggregate_qty": "-1",
+                    "lifecycle_units": [
+                        {
+                            "lifecycle_id": "existing-life",
+                            "entry_intent_id": "existing-life",
+                            "strategy_id": "MNQ_FIRST_BEAR_SNAP_TURN_V1",
+                            "lane_id": "mnq_first_bear_snap_turn",
+                            "account_id": "DUM882026",
+                            "instrument_family": "MNQ",
+                            "contract_key": "MNQ-202606",
+                            "local_symbol": "MNQM6",
+                            "con_id": 770561201,
+                            "side": "SHORT",
+                            "quantity": "1",
+                            "signed_qty": "-1",
+                            "exit_status": "OPEN_MANAGED",
+                        }
+                    ],
+                    "broker_qty_match": True,
+                }
+            ],
+        },
+    )
+
+    result = run_track_b_strategy_managed_paper_lifecycle(
+        config=config,
+        lifecycle_id=lifecycle_id,
+        now=aware_now(),
+    )
+
+    assert result.classification == TrackBManagedPaperLifecycleClassification.REVIEW_REQUIRED
+    assert result.report["entry_submit_attempt"]["classification"] == STRATEGY_SUBMIT_BLOCKED_ENTRY_EXPOSURE
+    assert result.report["entry_submit_attempt"]["strategy_submit_authorization"]["entry_exposure_gate"][
+        "classification"
+    ] == "SAME_LANE_REENTRY_BLOCKED_PYRAMIDING_NOT_ALLOWED"
+    assert result.report["entry_submit_attempt"]["broker_state_mutated"] is False
 
 
 def test_direct_bridge_writer_refuses_open_managed_without_broker_fill_identity(tmp_path: Path) -> None:

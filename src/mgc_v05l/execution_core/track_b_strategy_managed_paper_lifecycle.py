@@ -45,6 +45,12 @@ from .track_b_pre_action_snapshot_validator import (
     validate_track_b_pre_action_snapshot,
 )
 from .track_b_lifecycle_state_transition import validate_open_managed_evidence
+from .track_b_entry_exposure_gate import (
+    ENTRY_EXPOSURE_GATE_ALLOWED,
+    PYRAMIDING_NOT_ALLOWED_REVIEW_REQUIRED,
+    TrackBEntryExposureGateConfig,
+    evaluate_track_b_entry_exposure_gate,
+)
 from .track_b_open_order_truth import (
     BROKER_FLAT_WITH_OPEN_CLOSE_ORDER,
     CLOSE_ORDER_MARKETABLE_NOT_FILLED,
@@ -76,6 +82,7 @@ STRATEGY_SUBMIT_BLOCKED_POSITION_TRUTH = "STRATEGY_SUBMIT_BLOCKED_POSITION_TRUTH
 STRATEGY_SUBMIT_BLOCKED_LIVE_MONEY = "STRATEGY_SUBMIT_BLOCKED_LIVE_MONEY"
 STRATEGY_SUBMIT_BLOCKED_PAPER_PROOF = "STRATEGY_SUBMIT_BLOCKED_PAPER_PROOF"
 STRATEGY_SUBMIT_BLOCKED_TARGET_MISMATCH = "STRATEGY_SUBMIT_BLOCKED_TARGET_MISMATCH"
+STRATEGY_SUBMIT_BLOCKED_ENTRY_EXPOSURE = "STRATEGY_SUBMIT_BLOCKED_ENTRY_EXPOSURE"
 
 PLAN_STRATEGY_MANAGED_ENTRY_SUBMIT = "PLAN_STRATEGY_MANAGED_ENTRY_SUBMIT"
 PLAN_STRATEGY_MANAGED_CLOSE_SUBMIT = "PLAN_STRATEGY_MANAGED_CLOSE_SUBMIT"
@@ -168,6 +175,8 @@ class TrackBStrategyManagedPaperLifecycleConfig:
     continuation_safe_state_classification: str | None = "SAFE_STATE_NORMAL"
     continuation_lifecycle_reconciliation_classification: str | None = "CLEAN"
     continuation_source_strategy_report_path: str | Path | None = None
+    pyramiding_policy: str = PYRAMIDING_NOT_ALLOWED_REVIEW_REQUIRED
+    max_units_per_lane: int = 1
 
 
 @dataclass(frozen=True)
@@ -1290,6 +1299,26 @@ def build_strategy_managed_submit_authorization(
     safe_state_path = _resolve_path(config.repo_root, Path(config.runtime_safe_state_envelope_path))
     snapshot = _read_json_object(snapshot_path)
     safe_state = _read_json_object(safe_state_path)
+    entry_exposure_gate = (
+        evaluate_track_b_entry_exposure_gate(
+            TrackBEntryExposureGateConfig(
+                repo_root=Path(config.repo_root),
+                account_id=config.account_id,
+                strategy_id=config.strategy_id,
+                lane_id=config.lane_id,
+                instrument_family=config.instrument_family,
+                contract_key=config.contract_key,
+                local_symbol=config.local_symbol,
+                con_id=config.con_id,
+                side=config.side,
+                quantity=config.quantity or 0,
+                pyramiding_policy=config.pyramiding_policy,
+                max_units_per_lane=int(config.max_units_per_lane),
+            )
+        )
+        if intent_kind is IntentKind.OPEN
+        else {"classification": ENTRY_EXPOSURE_GATE_ALLOWED, "allowed": True}
+    )
     if intent_kind is IntentKind.CLOSE and pre_action.get("classification") != PRE_ACTION_SNAPSHOT_VALID:
         managed_cleanup_pre_action = _managed_close_cleanup_pre_action(
             pre_action=pre_action,
@@ -1324,6 +1353,7 @@ def build_strategy_managed_submit_authorization(
         "limit_price": target_identity.get("limit_price"),
         "target_identity": target_identity,
         "pre_action_validation": pre_action,
+        "entry_exposure_gate": entry_exposure_gate,
         "safe_state_classification": safe_state.get("safe_state_classification") or safe_state.get("classification"),
         "supervisor_classification": pre_action.get("supervisor_classification")
         or snapshot.get("runtime_supervisor_classification"),
@@ -1348,6 +1378,7 @@ def build_strategy_managed_submit_authorization(
         snapshot=snapshot,
         safe_state=safe_state,
         target_identity=target_identity,
+        entry_exposure_gate=entry_exposure_gate,
     )
     authorized = classification == STRATEGY_SUBMIT_AUTHORIZED
     return {
@@ -1368,6 +1399,7 @@ def _strategy_submit_authorization_blocker(
     snapshot: Mapping[str, Any],
     safe_state: Mapping[str, Any],
     target_identity: Mapping[str, Any],
+    entry_exposure_gate: Mapping[str, Any],
 ) -> tuple[str, str]:
     cleanup_close = (
         target_identity.get("intent_kind") == IntentKind.CLOSE.value
@@ -1393,6 +1425,15 @@ def _strategy_submit_authorization_blocker(
         return STRATEGY_SUBMIT_BLOCKED_LIVE_MONEY, "live_money_eligible=true blocks PAPER strategy submit."
     if _any_true(snapshot, safe_state, key="paper_proof_invoked"):
         return STRATEGY_SUBMIT_BLOCKED_PAPER_PROOF, "paper_proof_invoked=true blocks strategy-managed submit."
+    if target_identity.get("intent_kind") == IntentKind.OPEN.value and entry_exposure_gate.get("allowed") is not True:
+        return (
+            STRATEGY_SUBMIT_BLOCKED_ENTRY_EXPOSURE,
+            str(
+                entry_exposure_gate.get("entry_block_reason")
+                or entry_exposure_gate.get("classification")
+                or "Entry exposure gate blocked strategy-managed submit."
+            ),
+        )
     if (
         snapshot.get("broker_position_guardian_blocks_submit") is True
         or str(snapshot.get("broker_position_guardian_classification") or "") == "BROKER_POSITION_GUARDIAN_HARD_HOLD"
@@ -1639,8 +1680,8 @@ def _managed_close_position_guard(
             "primary_blocker": f"Managed PAPER close blocked because broker position is not confirmed for exact contract: {exc}",
             "close_intent": dict(close_intent),
         }
-    expected_sign = 1 if str(close_intent.get("side") or config.side).upper() == "LONG" else -1
-    if int(position.signed_quantity) != expected_sign:
+    expected_signed_quantity = _signed_position_quantity(config)
+    if int(position.signed_quantity) != expected_signed_quantity:
         return {
             "submitted": False,
             "submit_attempted": False,
@@ -1648,7 +1689,7 @@ def _managed_close_position_guard(
             "classification": "BROKER_POSITION_NOT_OPEN_FOR_MANAGED_CLOSE",
             "primary_blocker": (
                 "Managed PAPER close blocked because broker position direction/quantity does not "
-                f"match lifecycle side: expected_signed_quantity={expected_sign}; "
+                f"match lifecycle side: expected_signed_quantity={expected_signed_quantity}; "
                 f"observed_signed_quantity={position.signed_quantity}."
             ),
             "close_intent": dict(close_intent),

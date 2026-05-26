@@ -258,6 +258,24 @@ def _position_mismatch_findings(
                     "lifecycle_position": _compact_position(match),
                 }
             )
+            continue
+        broker_qty = _decimal(broker_position.get("quantity"))
+        lifecycle_qty = _signed_lifecycle_quantity(match)
+        if lifecycle_qty != Decimal("0") and broker_qty != lifecycle_qty:
+            findings.append(
+                {
+                    "classification": BROKER_LIFECYCLE_POSITION_MISMATCH,
+                    "hard_hold": True,
+                    "detail": "Broker aggregate quantity does not match lifecycle aggregate quantity.",
+                    "broker_position": _compact_position(broker_position),
+                    "lifecycle_position": _compact_position(match),
+                    "broker_quantity": _decimal_display(broker_qty),
+                    "lifecycle_aggregate_quantity": _decimal_display(lifecycle_qty),
+                    "lifecycle_unit_count": match.get("lifecycle_unit_count")
+                    or len(match.get("lifecycle_units") or []),
+                }
+            )
+    findings.extend(_managed_registry_quantity_findings(inputs=inputs, broker_open=broker_open))
     for lifecycle_position in lifecycle_open:
         match = _matching_broker_position(lifecycle_position=lifecycle_position, broker_positions=broker_open)
         if match is None:
@@ -276,6 +294,37 @@ def _position_mismatch_findings(
                 "hard_hold": True,
                 "detail": "Close fill expected broker-flat state but lifecycle still reports open exposure.",
                 "lifecycle_positions": [_compact_position(row) for row in lifecycle_open],
+            }
+        )
+    return findings
+
+
+def _managed_registry_quantity_findings(
+    *,
+    inputs: Mapping[str, Mapping[str, Any]],
+    broker_open: Sequence[Mapping[str, Any]],
+) -> list[dict[str, Any]]:
+    findings: list[dict[str, Any]] = []
+    managed_positions = _list(inputs["managed_position_registry"].get("managed_positions"))
+    for managed_position in managed_positions:
+        broker_position = _matching_broker_position(lifecycle_position=managed_position, broker_positions=broker_open)
+        if broker_position is None:
+            continue
+        broker_qty = _decimal(broker_position.get("quantity"))
+        managed_qty = _signed_lifecycle_quantity(managed_position)
+        if managed_qty == Decimal("0") or broker_qty == managed_qty:
+            continue
+        findings.append(
+            {
+                "classification": BROKER_LIFECYCLE_POSITION_MISMATCH,
+                "hard_hold": True,
+                "detail": "Managed Position Registry visible aggregate quantity does not match broker truth.",
+                "broker_position": _compact_position(broker_position),
+                "managed_position": _compact_position(managed_position),
+                "broker_quantity": _decimal_display(broker_qty),
+                "managed_position_quantity": _decimal_display(managed_qty),
+                "lifecycle_unit_count": managed_position.get("lifecycle_unit_count")
+                or len(managed_position.get("lifecycle_units") or []),
             }
         )
     return findings
@@ -437,6 +486,17 @@ def _side_from_lifecycle(row: Mapping[str, Any]) -> str:
     if side in {"LONG", "SHORT"}:
         return side
     return _side_from_quantity(row.get("quantity"))
+
+
+def _signed_lifecycle_quantity(row: Mapping[str, Any]) -> Decimal:
+    aggregate = _decimal(row.get("aggregate_qty") or row.get("signed_lifecycle_qty"))
+    if aggregate != Decimal("0"):
+        return aggregate
+    quantity = _decimal(row.get("quantity"))
+    side = _side_from_lifecycle(row)
+    if side == "SHORT" and quantity > 0:
+        return -quantity
+    return quantity
 
 
 def _side_from_quantity(value: Any) -> str:

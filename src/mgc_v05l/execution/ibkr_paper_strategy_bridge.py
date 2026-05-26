@@ -54,6 +54,7 @@ from .ibkr_position_reconciliation import (
 )
 from .ibkr_read_only_verifier import _wait_for_connection_ready, IbkrReadOnlyApiTransportConfig
 from .track_b_phase1_submit_authority import evaluate_phase1_broker_reconciliation_submit_gate
+from ..execution_core.track_b_atomic_io import write_json_atomic
 from ..execution_core.track_b_exit_safety import (
     ExitAttemptPolicy,
     classify_exit_attempt_policy,
@@ -1266,6 +1267,8 @@ def _pre_action_snapshot_validation_for_bridge(
     intent: IbkrPaperStrategyOrderIntent,
     now: datetime,
 ) -> dict[str, Any]:
+    if str(config.caller_path or "").strip() == "track_b_paper_leak_test_apply":
+        _write_strategy_bridge_pre_action_plan(config=config, intent=intent, now=now)
     return validate_track_b_pre_action_snapshot(
         config=TrackBPreActionSnapshotValidatorConfig(repo_root=config.repo_root),
         expected_plan_classification=_PLAN_STRATEGY_BRIDGE_SUBMIT,
@@ -1274,6 +1277,60 @@ def _pre_action_snapshot_validation_for_bridge(
         max_snapshot_age_seconds=int(config.pre_action_snapshot_max_age_seconds),
         now=now,
     )
+
+
+def _write_strategy_bridge_pre_action_plan(
+    *,
+    config: IbkrPaperStrategyBridgeConfig,
+    intent: IbkrPaperStrategyOrderIntent,
+    now: datetime,
+) -> Path:
+    validator_config = TrackBPreActionSnapshotValidatorConfig(repo_root=config.repo_root)
+    snapshot_path = validator_config.resolve(validator_config.control_plane_snapshot_path)
+    plan_path = validator_config.resolve(validator_config.autonomous_recovery_plan_path)
+    snapshot = _read_json_object(snapshot_path)
+    target_identity = _pre_action_target_identity_for_bridge(config=config, intent=intent)
+    payload = {
+        "schema_version": "track_b_strategy_bridge_pre_action_plan_v1",
+        "generated_at": now.astimezone(timezone.utc).isoformat(),
+        "mode": "PAPER",
+        "dry_run": True,
+        "planning_only": True,
+        "read_only": True,
+        "execution_enabled": False,
+        "broker_mutation_allowed": False,
+        "lifecycle_mutation_allowed": False,
+        "runtime_restart_allowed": False,
+        "submit_authority": False,
+        "paper_proof_invoked": False,
+        "live_money_eligible": False,
+        "classification": _PLAN_STRATEGY_BRIDGE_SUBMIT,
+        "reason": "Guarded PAPER leak-test bridge submit has an exact pre-action target identity plan.",
+        "control_plane_snapshot_id": str(snapshot.get("control_plane_snapshot_id") or ""),
+        "shared_truth_refresh_generation_id": str(snapshot.get("shared_truth_refresh_generation_id") or ""),
+        "snapshot_coherence_status": str(snapshot.get("shared_truth_coherence_status") or ""),
+        "supervisor_decision_id": str(snapshot.get("runtime_supervisor_decision_id") or ""),
+        "supervisor_classification": str(snapshot.get("runtime_supervisor_classification") or ""),
+        "proposed_actions": [
+            {
+                "action_id": "strategy_bridge_submit",
+                "action_type": _ACTION_STRATEGY_BRIDGE_SUBMIT,
+                "target_identity": target_identity,
+                "execution_enabled": False,
+                "would_mutate_broker": True,
+                "reason": "Future broker submit may proceed only after immediate pre-action snapshot validation.",
+            }
+        ],
+        "blocked_actions": [],
+        "blockers": [],
+        "warnings": [],
+        "source": "ibkr_paper_strategy_bridge_pre_action_planner",
+        "dashboard_projection_authority": False,
+        "dashboard_projection_consumed": False,
+        "source_artifact_paths": {"control_plane_snapshot": str(snapshot_path), "authority": str(plan_path)},
+    }
+    write_json_atomic(plan_path, payload)
+    return plan_path
 
 
 def _pre_action_target_identity_for_bridge(
@@ -1953,12 +2010,33 @@ def _build_static_preflight_checks(
         governance_status=governance_status,
         phase1_reconciliation_gate=phase1_reconciliation_gate,
         exposure_status=exposure_status,
+    ) or _leak_test_explicit_lane_flow_governance_allowed(
+        config=config,
+        intent=intent,
+        governance_status=governance_status,
+        phase1_reconciliation_gate=phase1_reconciliation_gate,
+        exposure_status=exposure_status,
+        leak_test_authorization=leak_test_authorization,
     )
     if governance_submit_allowed and not bool(governance_status.get("submit_allowed")):
-        governance_detail = (
-            "Paper strategy governance entry-readiness blocker is bypassed for a supervised PAPER exit only; "
-            "Phase-1 broker reconciliation and owning-strategy exposure gates remain required."
-        )
+        if _leak_test_explicit_lane_flow_governance_allowed(
+            config=config,
+            intent=intent,
+            governance_status=governance_status,
+            phase1_reconciliation_gate=phase1_reconciliation_gate,
+            exposure_status=exposure_status,
+            leak_test_authorization=leak_test_authorization,
+        ):
+            governance_detail = (
+                "Paper strategy governance legacy runtime-loop readiness blocker is bypassed for explicit metals-only "
+                "Leak Test v2 lane flow; valid leak-test authorization, Phase-1 broker reconciliation, exposure, "
+                "Control Plane/Safe-State precheck, and PAPER invariants remain required."
+            )
+        else:
+            governance_detail = (
+                "Paper strategy governance entry-readiness blocker is bypassed for a supervised PAPER exit only; "
+                "Phase-1 broker reconciliation and owning-strategy exposure gates remain required."
+            )
     caller_path = str(config.caller_path or "").strip()
     leak_test_authorized = caller_path == _LEAK_TEST_CALLER_PATH and bool(leak_test_authorization.get("passed"))
     deprecated_root_detail = _deprecated_submit_root_detail(Path(config.repo_root))
@@ -2152,6 +2230,45 @@ def _governance_exit_override_allowed(
         return False
     selected = dict(governance_status.get("selected_strategy") or {})
     if str(selected.get("strategy_status") or "").strip().upper() in {"PAUSED", "DISABLED", "KILL_CANDIDATE"}:
+        return False
+    return True
+
+
+def _leak_test_explicit_lane_flow_governance_allowed(
+    *,
+    config: IbkrPaperStrategyBridgeConfig,
+    intent: IbkrPaperStrategyOrderIntent,
+    governance_status: dict[str, Any],
+    phase1_reconciliation_gate: dict[str, Any],
+    exposure_status: dict[str, Any],
+    leak_test_authorization: dict[str, Any],
+) -> bool:
+    if not config.submit:
+        return False
+    if str(config.caller_path or "").strip() != _LEAK_TEST_CALLER_PATH:
+        return False
+    metadata = dict(config.caller_metadata or {})
+    if metadata.get("explicit_lane_flow") is not True or metadata.get("metals_only") is not True:
+        return False
+    if str(intent.symbol or config.symbol or "").strip().upper() not in {"MGC", "GC", "PL"}:
+        return False
+    if not bool(leak_test_authorization.get("passed")):
+        return False
+    block_reasons = {str(reason).strip() for reason in governance_status.get("block_reasons") or [] if str(reason).strip()}
+    selected = dict(governance_status.get("selected_strategy") or {})
+    selected_reasons = {
+        str(reason).strip()
+        for reason in list(selected.get("submit_block_reasons") or [])
+        if str(reason).strip()
+    }
+    combined_reasons = block_reasons | selected_reasons
+    if not combined_reasons or not combined_reasons.issubset({"backend_or_source_not_live_ready"}):
+        return False
+    if str(selected.get("strategy_status") or "").strip().upper() in {"PAUSED", "DISABLED", "KILL_CANDIDATE"}:
+        return False
+    if not bool(phase1_reconciliation_gate.get("ready")):
+        return False
+    if not bool(exposure_status.get("submit_allowed")):
         return False
     return True
 

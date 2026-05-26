@@ -121,6 +121,7 @@ class TrackBManagedExitAttachConfig:
     paper_trade_ledger_output_root: Path = DEFAULT_TRACK_B_PAPER_TRADE_LEDGER_OUTPUT_ROOT
     output_path: Path = DEFAULT_MANAGED_EXIT_ATTACH_PLAN
     auto_select_active_managed_position: bool = True
+    aggregate_lifecycle_units: tuple[Mapping[str, Any], ...] = ()
 
     def resolve(self, path: Path) -> Path:
         return path if path.is_absolute() else self.repo_root / path
@@ -133,9 +134,6 @@ def build_track_b_managed_exit_attach_plan(
 ) -> dict[str, Any]:
     actual_now = now or datetime.now(UTC)
     require_aware_datetime(actual_now, "now")
-    exit_profile = resolve_track_b_exit_profile(config.exit_profile_id)
-    managed_exit_policy_id = exit_profile.managed_exit_policy_id
-    required_completed_5m_bars = int(exit_profile.required_completed_5m_bars)
     if config.refresh_control_plane:
         snapshot_config = TrackBControlPlaneSnapshotConfig(repo_root=config.repo_root, output_path=config.control_plane_snapshot_path)
         snapshot_payload = build_track_b_control_plane_snapshot(config=snapshot_config, now=actual_now)
@@ -155,6 +153,10 @@ def build_track_b_managed_exit_attach_plan(
     live_position_status = _read_json(config.resolve(config.live_position_status_path))
     lifecycle_path = _lifecycle_report_path(config=config, live_position_status=live_position_status)
     lifecycle_report = _read_json(lifecycle_path)
+    config = _config_with_lifecycle_policy(config=config, lifecycle_report=lifecycle_report)
+    exit_profile = _resolve_exit_profile_for_config(config)
+    managed_exit_policy_id = exit_profile.managed_exit_policy_id
+    required_completed_5m_bars = int(exit_profile.required_completed_5m_bars)
 
     bars_payload = _read_json(_phase1_path(config=config, timeframe="5m"))
     one_minute_payload = _read_json(_phase1_path(config=config, timeframe="1m"))
@@ -190,6 +192,10 @@ def build_track_b_managed_exit_attach_plan(
     )
     duplicate_close = _duplicate_close_order(config=config, managed_orders=managed_orders, open_order_truth=open_order_truth, close_action=close_action)
     prior_lifecycle_close = _prior_lifecycle_close_submit_blocker(lifecycle_report)
+    aggregate_lifecycle_blocker = _aggregate_lifecycle_unit_blocker(
+        config=config,
+        managed_exit_policy_id=managed_exit_policy_id,
+    )
 
     if not control_plane_ok:
         blockers.append(control_plane_reason)
@@ -200,8 +206,13 @@ def build_track_b_managed_exit_attach_plan(
     elif not position_ok or not lifecycle_ok:
         blockers.extend(reason for reason in (position_reason, lifecycle_reason) if reason)
         classification = MANAGED_EXIT_BLOCKED_POSITION_MISMATCH
-    elif duplicate_close or prior_lifecycle_close:
-        blockers.append(duplicate_close or prior_lifecycle_close or "Existing managed close state blocks duplicate attach.")
+    elif duplicate_close or prior_lifecycle_close or aggregate_lifecycle_blocker:
+        blockers.append(
+            duplicate_close
+            or prior_lifecycle_close
+            or aggregate_lifecycle_blocker
+            or "Existing managed close state blocks duplicate attach."
+        )
         classification = MANAGED_EXIT_BLOCKED_DUPLICATE_CLOSE_ORDER
     elif completed_bar_count < required_completed_5m_bars:
         classification = MANAGED_EXIT_NOT_YET_ELIGIBLE
@@ -251,6 +262,7 @@ def build_track_b_managed_exit_attach_plan(
         "managed_order_registry_classification": managed_orders.get("classification"),
         "managed_position_registry_classification": managed_position_registry.get("classification"),
         "selected_managed_position": selected_managed_position,
+        "aggregate_exit_group": _aggregate_exit_group(config),
         "managed_exit_due_automation": {
             "scan_enabled": config.auto_select_active_managed_position,
             "classification": MANAGED_EXIT_DUE_READY_FOR_APPLY
@@ -412,28 +424,46 @@ def _apply_managed_exit(
     )
     ledger_update: dict[str, Any] = {}
     if result.report.get("close_fill"):
-        ledger_result = update_track_b_paper_trade_ledger_from_runner_report(
-            runner_report={
-                "managed_lifecycle_invoked": True,
-                "managed_lifecycle_report_path": str(result.report_json),
-                "strategy_id": config.strategy_id,
-                "contract_key": config.contract_key,
-                "local_symbol": config.local_symbol,
-                "con_id": config.con_id,
-                "account_id": config.account_id,
-            },
-            runner_report_json=result.report_json,
-            output_root=config.paper_trade_ledger_output_root,
+        synced_reports = _sync_aggregate_lifecycle_close_reports(
+            config=config,
+            close_source_report=result.report,
+            close_source_report_path=result.report_json,
             now=now,
         )
+        ledger_results = []
+        for report_path in synced_reports:
+            report_payload = _read_json(report_path)
+            ledger_result = update_track_b_paper_trade_ledger_from_runner_report(
+                runner_report={
+                    "managed_lifecycle_invoked": True,
+                    "managed_lifecycle_report_path": str(report_path),
+                    "strategy_id": report_payload.get("strategy_id") or config.strategy_id,
+                    "contract_key": report_payload.get("contract_key") or config.contract_key,
+                    "local_symbol": report_payload.get("local_symbol") or config.local_symbol,
+                    "con_id": report_payload.get("con_id") or config.con_id,
+                    "account_id": report_payload.get("account_id") or config.account_id,
+                },
+                runner_report_json=report_path,
+                output_root=config.paper_trade_ledger_output_root,
+                now=now,
+            )
+            ledger_results.append(ledger_result)
         ledger_update = {
-            "trade_record_written": ledger_result.trade_record_written,
-            "ledger_jsonl": str(ledger_result.ledger_jsonl),
-            "trade_summary_json": str(ledger_result.trade_summary_json),
-            "live_position_status_json": str(ledger_result.live_position_status_json),
-            "pnl_summary_json": str(ledger_result.pnl_summary_json),
-            "open_position_count": ledger_result.trade_summary.get("open_position_count"),
-            "realized_pnl": None if ledger_result.trade_record is None else ledger_result.trade_record.get("realized_pnl"),
+            "aggregate_lifecycle_close_persistence": {
+                "enabled": bool(config.aggregate_lifecycle_units),
+                "synced_lifecycle_count": len(synced_reports),
+                "synced_report_paths": [str(path) for path in synced_reports],
+            },
+            "trade_record_written": any(item.trade_record_written for item in ledger_results),
+            "ledger_jsonl": str(ledger_results[-1].ledger_jsonl) if ledger_results else None,
+            "trade_summary_json": str(ledger_results[-1].trade_summary_json) if ledger_results else None,
+            "live_position_status_json": str(ledger_results[-1].live_position_status_json) if ledger_results else None,
+            "pnl_summary_json": str(ledger_results[-1].pnl_summary_json) if ledger_results else None,
+            "open_position_count": ledger_results[-1].trade_summary.get("open_position_count") if ledger_results else None,
+            "realized_pnl_by_lifecycle": [
+                None if item.trade_record is None else item.trade_record.get("realized_pnl")
+                for item in ledger_results
+            ],
         }
     return {
         "classification": result.report.get("paper_lifecycle_classification") or result.classification.value,
@@ -477,9 +507,59 @@ def _select_active_managed_exit_due_position(
     ]
     if len(exact_contract) == 1:
         return exact_contract[0]
+    if _has_explicit_managed_exit_target(config):
+        return {}
     if len(candidates) == 1:
         return candidates[0]
     return {}
+
+
+def _has_explicit_managed_exit_target(config: TrackBManagedExitAttachConfig) -> bool:
+    default = TrackBManagedExitAttachConfig(repo_root=config.repo_root)
+    return any(
+        (
+            config.lifecycle_id != default.lifecycle_id,
+            config.strategy_id != default.strategy_id,
+            config.contract_key != default.contract_key,
+            config.local_symbol != default.local_symbol,
+            config.con_id != default.con_id,
+        )
+    )
+
+
+def _resolve_exit_profile_for_config(config: TrackBManagedExitAttachConfig):
+    requested = resolve_track_b_exit_profile(config.exit_profile_id)
+    if (
+        requested.instrument_family == str(config.instrument_family or "").upper()
+        and requested.managed_exit_policy_id == config.managed_exit_policy_id
+    ):
+        return requested
+    return resolve_track_b_exit_profile_for_position(
+        instrument_family=config.instrument_family,
+        managed_exit_policy_id=config.managed_exit_policy_id,
+    )
+
+
+def _config_with_lifecycle_policy(
+    *,
+    config: TrackBManagedExitAttachConfig,
+    lifecycle_report: Mapping[str, Any],
+) -> TrackBManagedExitAttachConfig:
+    managed_exit_policy_id = str(lifecycle_report.get("managed_exit_policy_id") or "").strip()
+    if not managed_exit_policy_id or managed_exit_policy_id == config.managed_exit_policy_id:
+        return config
+    exit_profile = resolve_track_b_exit_profile_for_position(
+        instrument_family=config.instrument_family,
+        managed_exit_policy_id=managed_exit_policy_id,
+    )
+    return replace(
+        config,
+        managed_exit_policy_id=managed_exit_policy_id,
+        exit_strategy_id=exit_profile.exit_strategy_id,
+        exit_profile_id=exit_profile.exit_profile_id,
+        required_completed_5m_bars=int(exit_profile.required_completed_5m_bars),
+        tick_size=str(exit_profile.tick_size),
+    )
 
 
 def _config_for_selected_managed_position(
@@ -508,6 +588,7 @@ def _config_for_selected_managed_position(
     if quantity is None:
         decimal_quantity = _decimal(selected_position.get("quantity") or lifecycle_position.get("quantity"))
         quantity = int(abs(decimal_quantity)) if decimal_quantity is not None else config.quantity
+    quantity = abs(quantity)
     strategy_id = str(
         selected_position.get("strategy_id")
         or lifecycle_position.get("strategy_id")
@@ -551,6 +632,11 @@ def _config_for_selected_managed_position(
         exit_profile_id=exit_profile.exit_profile_id,
         required_completed_5m_bars=int(exit_profile.required_completed_5m_bars),
         tick_size=str(exit_profile.tick_size),
+        aggregate_lifecycle_units=tuple(
+            dict(item)
+            for item in (selected_position.get("lifecycle_units") or lifecycle_position.get("lifecycle_units") or [])
+            if isinstance(item, Mapping)
+        ),
     )
 
 
@@ -628,7 +714,8 @@ def _position_identity_matches(
             account == config.account_id
             and local_symbol == config.local_symbol
             and con_id == config.con_id
-            and quantity == Decimal(str(config.quantity))
+            and quantity is not None
+            and abs(quantity) == Decimal(str(config.quantity))
         ):
             return True, "Position identity matches."
     return False, "No exact active broker/lifecycle position matches account, contract, conId, and quantity."
@@ -639,6 +726,7 @@ def _lifecycle_matches(
     config: TrackBManagedExitAttachConfig,
     lifecycle_report: Mapping[str, Any],
     managed_exit_policy_id: str,
+    retryable_close_quantity: int | None = None,
 ) -> tuple[bool, str]:
     checks = {
         "lifecycle_id": config.lifecycle_id,
@@ -659,13 +747,18 @@ def _lifecycle_matches(
             and lifecycle_report.get("broker_state_mutated") is False
             and not lifecycle_report.get("close_intent")
             and not lifecycle_report.get("close_submit_attempt")
-            and "latest decision bar source DATABENTO_LIVE_ARTIFACT"
-            in str(lifecycle_report.get("primary_blocker") or "")
+            and (
+                "latest decision bar source DATABENTO_LIVE_ARTIFACT"
+                in str(lifecycle_report.get("primary_blocker") or "")
+                or "requires positive configured quantity"
+                in str(lifecycle_report.get("primary_blocker") or "")
+            )
         )
         retryable_unmutated_close_review = _retryable_unmutated_close_review(
             config=config,
             lifecycle_report=lifecycle_report,
             managed_exit_policy_id=managed_exit_policy_id,
+            retryable_close_quantity=retryable_close_quantity,
         )
         if not previous_attach_guard and not retryable_unmutated_close_review:
             return False, "Lifecycle is not OPEN_MANAGED."
@@ -679,6 +772,7 @@ def _retryable_unmutated_close_review(
     config: TrackBManagedExitAttachConfig,
     lifecycle_report: Mapping[str, Any],
     managed_exit_policy_id: str,
+    retryable_close_quantity: int | None = None,
 ) -> bool:
     if lifecycle_report.get("paper_lifecycle_classification") != "TRACK_B_STRATEGY_PAPER_REVIEW_REQUIRED":
         return False
@@ -700,7 +794,7 @@ def _retryable_unmutated_close_review(
         and str(close_intent.get("local_symbol") or "") == config.local_symbol
         and _int_or_none(close_intent.get("con_id")) == config.con_id
         and str(close_intent.get("order_action") or "") == close_action_for_position_side(config.side)
-        and _decimal(close_intent.get("quantity")) == Decimal(str(config.quantity))
+        and _decimal(close_intent.get("quantity")) == Decimal(str(retryable_close_quantity or config.quantity))
         and str(close_intent.get("managed_exit_policy_id") or "") == managed_exit_policy_id
     )
 
@@ -721,6 +815,135 @@ def _prior_lifecycle_close_submit_blocker(lifecycle_report: Mapping[str, Any]) -
             f"{broker_order_id}; duplicate managed-exit attach is blocked until broker/order truth converges."
         )
     return None
+
+
+def _aggregate_lifecycle_unit_blocker(
+    *,
+    config: TrackBManagedExitAttachConfig,
+    managed_exit_policy_id: str,
+) -> str | None:
+    units = [dict(item) for item in config.aggregate_lifecycle_units if isinstance(item, Mapping)]
+    if len(units) <= 1:
+        return None
+    lifecycle_ids = [str(item.get("lifecycle_id") or "").strip() for item in units]
+    if len([item for item in lifecycle_ids if item]) != len(set(lifecycle_ids)):
+        return "Aggregate lifecycle group has missing or duplicate lifecycle ids."
+    total = sum((_decimal(item.get("quantity")) or Decimal("0") for item in units), Decimal("0"))
+    if total != Decimal(str(config.quantity)):
+        return "Aggregate lifecycle unit quantity does not match planned close quantity."
+    for unit in units:
+        report_path = _unit_lifecycle_report_path(config=config, unit=unit)
+        report = _read_json(report_path)
+        if not report:
+            return f"Aggregate lifecycle unit report is missing: {report_path}."
+        unit_config = replace(
+            config,
+            lifecycle_id=str(unit.get("lifecycle_id") or ""),
+            quantity=int(abs(_decimal(unit.get("quantity")) or Decimal("0"))) or 1,
+        )
+        lifecycle_ok, lifecycle_reason = _lifecycle_matches(
+            config=unit_config,
+            lifecycle_report=report,
+            managed_exit_policy_id=managed_exit_policy_id,
+            retryable_close_quantity=config.quantity,
+        )
+        if not lifecycle_ok:
+            return f"Aggregate lifecycle unit {unit_config.lifecycle_id} mismatch: {lifecycle_reason}"
+        prior = _prior_lifecycle_close_submit_blocker(report)
+        if prior:
+            return f"Aggregate lifecycle unit {unit_config.lifecycle_id} already has close evidence: {prior}"
+    return None
+
+
+def _aggregate_exit_group(config: TrackBManagedExitAttachConfig) -> dict[str, Any]:
+    units = [dict(item) for item in config.aggregate_lifecycle_units if isinstance(item, Mapping)]
+    return {
+        "enabled": bool(units),
+        "unit_count": len(units),
+        "lifecycle_ids": [item.get("lifecycle_id") for item in units],
+        "entry_order_ids": [item.get("entry_order_id") for item in units],
+        "entry_perm_ids": [item.get("entry_perm_id") for item in units if item.get("entry_perm_id")],
+        "aggregate_close_quantity": str(config.quantity),
+        "coordinated_lifecycle_close_required": len(units) > 1,
+    }
+
+
+def _sync_aggregate_lifecycle_close_reports(
+    *,
+    config: TrackBManagedExitAttachConfig,
+    close_source_report: Mapping[str, Any],
+    close_source_report_path: Path,
+    now: datetime,
+) -> list[Path]:
+    units = [dict(item) for item in config.aggregate_lifecycle_units if isinstance(item, Mapping)]
+    if not units:
+        return [close_source_report_path]
+    close_intent = _mapping(close_source_report.get("close_intent"))
+    close_submit = _mapping(close_source_report.get("close_submit_attempt"))
+    close_fill = _mapping(close_source_report.get("close_fill"))
+    aggregate_group = _aggregate_exit_group(config)
+    written: list[Path] = []
+    for unit in units:
+        report_path = _unit_lifecycle_report_path(config=config, unit=unit)
+        report = _read_json(report_path)
+        if not report:
+            continue
+        unit_qty = _decimal(unit.get("quantity")) or Decimal("1")
+        unit_lifecycle_id = str(unit.get("lifecycle_id") or report.get("lifecycle_id") or "")
+        unit_close_intent = {
+            **close_intent,
+            "lifecycle_id": unit_lifecycle_id,
+            "quantity": _decimal_display(abs(unit_qty)),
+            "aggregate_close_group": aggregate_group,
+        }
+        unit_close_submit = {
+            **close_submit,
+            "lifecycle_id": unit_lifecycle_id,
+            "quantity": _decimal_display(abs(unit_qty)),
+            "aggregate_order_quantity": str(config.quantity),
+            "aggregate_close_group": aggregate_group,
+        }
+        unit_close_fill = {
+            **close_fill,
+            "lifecycle_id": unit_lifecycle_id,
+            "quantity": _decimal_display(abs(unit_qty)),
+            "aggregate_order_quantity": str(config.quantity),
+            "aggregate_close_group": aggregate_group,
+        }
+        synced = {
+            **report,
+            "paper_lifecycle_classification": close_source_report.get("paper_lifecycle_classification"),
+            "strategy_managed_lifecycle_classification": close_source_report.get(
+                "strategy_managed_lifecycle_classification"
+            )
+            or close_source_report.get("paper_lifecycle_classification"),
+            "final_position_status": close_source_report.get("final_position_status"),
+            "final_broker_state_classification": close_source_report.get("final_broker_state_classification"),
+            "broker_reconciled": close_source_report.get("broker_reconciled"),
+            "close_intent": unit_close_intent,
+            "close_submit_attempt": unit_close_submit,
+            "close_fill": unit_close_fill,
+            "aggregate_managed_exit_close": {
+                **aggregate_group,
+                "close_source_lifecycle_id": close_source_report.get("lifecycle_id"),
+                "close_source_report_path": str(close_source_report_path),
+                "synced_at": now.isoformat(),
+            },
+            "broker_state_mutated": close_source_report.get("broker_state_mutated"),
+            "submit_attempted": close_source_report.get("submit_attempted"),
+            "updated_at": now.isoformat(),
+        }
+        write_json_atomic(report_path, to_jsonable(synced))
+        written.append(report_path)
+    return written or [close_source_report_path]
+
+
+def _unit_lifecycle_report_path(*, config: TrackBManagedExitAttachConfig, unit: Mapping[str, Any]) -> Path:
+    path = unit.get("paper_lifecycle_report_path")
+    if path:
+        return config.resolve(Path(str(path)))
+    lifecycle_id = str(unit.get("lifecycle_id") or "")
+    return config.resolve(config.lifecycle_output_root) / lifecycle_id / "track_b_strategy_managed_paper_lifecycle_report.json"
 
 
 def _duplicate_close_order(
@@ -914,6 +1137,14 @@ def _decimal(value: object) -> Decimal | None:
         return Decimal(str(value))
     except Exception:  # noqa: BLE001 - malformed artifact values fail closed elsewhere.
         return None
+
+
+def _decimal_display(value: Decimal | None) -> str | None:
+    if value is None:
+        return None
+    if value == value.to_integral_value():
+        return str(value.quantize(Decimal("1")))
+    return str(value.normalize())
 
 
 def _int_or_none(value: object) -> int | None:

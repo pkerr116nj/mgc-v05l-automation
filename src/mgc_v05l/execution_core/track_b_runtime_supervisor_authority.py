@@ -604,6 +604,14 @@ def _classify_supervisor(*, inputs: Mapping[str, Mapping[str, Any]]) -> dict[str
             safe_to_start_runtime=True,
         )
 
+    if evidence["proof_readiness_classification"] and evidence["proof_readiness_classification"] != READY_FOR_PROOF:
+        return _decision(
+            SUPERVISOR_SHARED_TRUTH_STALE,
+            "REFRESH_PROOF_READINESS",
+            f"Proof Readiness is {evidence['proof_readiness_classification']}.",
+            blockers=[_blocker("proof_readiness", evidence["proof_readiness_classification"])],
+        )
+
     if evidence["runtime_resume_classification"] in {
         RESUME_BLOCKED_MARKET_CLOSED,
         RESUME_BLOCKED_CRASH_LOOP,

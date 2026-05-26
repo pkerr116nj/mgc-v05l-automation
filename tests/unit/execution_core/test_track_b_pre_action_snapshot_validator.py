@@ -105,6 +105,39 @@ def test_planner_references_different_snapshot_blocks(tmp_path: Path) -> None:
     assert result["reason"] == "Planner does not reference the active snapshot id."
 
 
+def test_embedded_managed_order_modify_plan_handoff_is_valid(tmp_path: Path) -> None:
+    target = {
+        "account_id": "DUM882026",
+        "symbol": "MNQ",
+        "contract": "MNQM6",
+        "con_id": "770561201",
+        "broker_order_id": "39",
+        "perm_id": "917760620",
+        "action": "SELL",
+        "quantity": "1",
+    }
+    _seed_valid(
+        tmp_path,
+        planner_snapshot_id="snapshot-prior",
+        plan_classification="PLAN_MANAGED_ORDER_MODIFY",
+        action_type="MANAGED_ORDER_MODIFY",
+        target_identity=target,
+        embedded_plan_handoff=True,
+    )
+
+    result = validate_track_b_pre_action_snapshot(
+        config=TrackBPreActionSnapshotValidatorConfig(repo_root=tmp_path),
+        expected_plan_classification="PLAN_MANAGED_ORDER_MODIFY",
+        expected_action_type="MANAGED_ORDER_MODIFY",
+        expected_target_identity=target,
+        now=NOW,
+    )
+
+    assert result["classification"] == PRE_ACTION_SNAPSHOT_VALID
+    assert result["planner_action_type"] == "MANAGED_ORDER_MODIFY"
+    assert result["planner_target_identity"] == target
+
+
 def test_live_money_hard_invariant_blocks(tmp_path: Path) -> None:
     _seed_valid(tmp_path, live_money_eligible=True)
 
@@ -204,6 +237,7 @@ def _seed_valid(
     live_money_eligible: bool = False,
     agent_health_top_blockers: list[dict] | None = None,
     agent_health_has_duplicate_writer: bool = False,
+    embedded_plan_handoff: bool = False,
 ) -> None:
     if include_snapshot:
         _write_json(
@@ -228,6 +262,16 @@ def _seed_valid(
                 "agent_health_blocks_recovery": any(
                     row.get("blocking_for_recovery") is True for row in (agent_health_top_blockers or [])
                 ),
+                **(
+                    {
+                        "self_recover_autonomous_recovery_plan_classification": plan_classification,
+                        "autonomous_recovery_next_action": action_type,
+                        "self_recover_control_plane_snapshot_id": planner_snapshot_id,
+                        "self_recover_shared_truth_generation_id": "generation-prior",
+                    }
+                    if embedded_plan_handoff
+                    else {}
+                ),
             },
         )
     _write_json(
@@ -245,7 +289,7 @@ def _seed_valid(
             "generated_at": NOW.isoformat(),
             "classification": plan_classification,
             "control_plane_snapshot_id": planner_snapshot_id,
-            "shared_truth_refresh_generation_id": "generation-1",
+            "shared_truth_refresh_generation_id": "generation-prior" if embedded_plan_handoff else "generation-1",
             "execution_enabled": False,
             "live_money_eligible": live_money_eligible,
             "proposed_actions": [

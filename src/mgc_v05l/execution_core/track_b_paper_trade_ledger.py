@@ -67,6 +67,9 @@ MANUALLY_FLATTENED_REVIEWED = "MANUALLY_FLATTENED_REVIEWED"
 APP_ONLY_UNFILLED_REVIEWED = "APP_ONLY_UNFILLED_REVIEWED"
 IBKR_CONTRACT_REJECTED_REVIEWED = "IBKR_CONTRACT_REJECTED_REVIEWED"
 LEAK_TEST_ADOPTED_ENTRY_SETTLED_FLAT_REVIEWED = "LEAK_TEST_ADOPTED_ENTRY_SETTLED_FLAT_REVIEWED"
+DUPLICATE_EXIT_OVERFILL_SCOPED_REMEDIATION_REVIEWED = (
+    "DUPLICATE_EXIT_OVERFILL_SCOPED_REMEDIATION_REVIEWED"
+)
 VOID_MALFORMED_STALE_ARTIFACT = "VOID_MALFORMED_STALE_ARTIFACT"
 MALFORMED_BROKER_BACKED_MANUALLY_RECONCILED_ARTIFACT = (
     "MALFORMED_BROKER_BACKED_MANUALLY_RECONCILED_ARTIFACT"
@@ -366,6 +369,145 @@ def reconcile_leak_test_adopted_entry_settled_flat_lifecycles(
         pnl_summary_json=pnl_summary_json,
         reconciliation_report_json=reconciliation_report_json,
         reconciliation_record_written=bool(reconciliation_records),
+        reconciliation_report=report,
+        trade_summary=summaries["trade_summary"],
+        live_position_status=summaries["live_position_status"],
+        pnl_summary=summaries["pnl_summary"],
+    )
+
+
+def reconcile_duplicate_exit_overfill_scoped_remediation(
+    *,
+    lifecycle_id: str,
+    guardian_remediation_json: Path = Path(
+        "outputs/track_b_execution_core/broker_position_guardian/latest_scoped_guardian_remediation.json"
+    ),
+    broker_positions_snapshot_json: Path = Path(
+        "outputs/reports/ibkr_read_only_verification/ibkr_positions_snapshot.json"
+    ),
+    broker_open_orders_snapshot_json: Path = Path(
+        "outputs/reports/ibkr_read_only_verification/ibkr_open_orders_snapshot.json"
+    ),
+    ledger_jsonl: Path = DEFAULT_TRACK_B_PAPER_TRADE_LEDGER_JSONL,
+    output_root: Path = DEFAULT_TRACK_B_PAPER_TRADE_LEDGER_OUTPUT_ROOT,
+    diagnostics_root: Path = Path("outputs/track_b_execution_core/diagnostics"),
+    now: datetime | None = None,
+) -> TrackBArtifactReconciliationResult:
+    """Resolve a review row after exact scoped guardian remediation restored broker flat.
+
+    This is local artifact reconciliation only. It requires a filled scoped
+    guardian remediation artifact, broker-flat/open-order-flat truth, and exact
+    lifecycle/contract identity. The original incident evidence remains in the
+    ledger and remediation artifacts; the hot read models stop treating the
+    resolved review row as active broker ambiguity.
+    """
+
+    actual_now = now or datetime.now(UTC)
+    require_aware_datetime(actual_now, "now")
+    ledger_path = Path(ledger_jsonl)
+    root = Path(output_root)
+    root.mkdir(parents=True, exist_ok=True)
+    diagnostics_root.mkdir(parents=True, exist_ok=True)
+    if not ledger_path.exists():
+        ledger_path.parent.mkdir(parents=True, exist_ok=True)
+        ledger_path.touch()
+    trade_summary_json = root / "latest_track_b_paper_trade_summary.json"
+    live_position_status_json = root / "latest_track_b_live_position_status.json"
+    pnl_summary_json = root / "latest_track_b_pnl_summary.json"
+    reconciliation_report_json = diagnostics_root / "latest_track_b_duplicate_exit_overfill_review_cleanup_report.json"
+
+    records = _read_ledger_records(ledger_path)
+    target = _latest_lifecycle_record(records, lifecycle_id)
+    remediation = _load_json_path(guardian_remediation_json)
+    positions_snapshot = _load_json_path(broker_positions_snapshot_json)
+    orders_snapshot = _load_json_path(broker_open_orders_snapshot_json)
+    evidence = _duplicate_exit_overfill_scoped_remediation_evidence(
+        target=target,
+        remediation=remediation,
+        positions_snapshot=positions_snapshot,
+        orders_snapshot=orders_snapshot,
+    )
+    existing_resolution = next(
+        (
+            item
+            for item in records
+            if _is_reconciliation_record(item)
+            and str(item.get("lifecycle_id") or "") == str(lifecycle_id)
+            and item.get("new_artifact_classification") == DUPLICATE_EXIT_OVERFILL_SCOPED_REMEDIATION_REVIEWED
+        ),
+        None,
+    )
+    can_resolve = target is not None and evidence["scoped_remediation_confirmed"] is True
+    wrote = False
+    if can_resolve and existing_resolution is None:
+        reconciliation_record = _duplicate_exit_overfill_scoped_remediation_record(
+            target=target,
+            evidence=evidence,
+            guardian_remediation_json=guardian_remediation_json,
+            broker_positions_snapshot_json=broker_positions_snapshot_json,
+            broker_open_orders_snapshot_json=broker_open_orders_snapshot_json,
+            now=actual_now,
+        )
+        with ledger_path.open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps(to_jsonable(reconciliation_record), sort_keys=True) + "\n")
+        records.append(reconciliation_record)
+        wrote = True
+
+    summaries = build_track_b_paper_trade_summaries(
+        ledger_records=records,
+        ledger_jsonl=ledger_path,
+        trade_summary_json=trade_summary_json,
+        live_position_status_json=live_position_status_json,
+        pnl_summary_json=pnl_summary_json,
+        now=actual_now,
+    )
+    _write_json(trade_summary_json, summaries["trade_summary"])
+    _write_json(live_position_status_json, summaries["live_position_status"])
+    _write_json(pnl_summary_json, summaries["pnl_summary"])
+    report = {
+        "schema_version": RECONCILIATION_SCHEMA_VERSION,
+        "generated_at": actual_now.isoformat(),
+        "reconciliation_action": DUPLICATE_EXIT_OVERFILL_SCOPED_REMEDIATION_REVIEWED
+        if can_resolve
+        else "NO_ARCHIVE_REVIEW_REQUIRED",
+        "reconciliation_source": "BROKER_POSITION_GUARDIAN_SCOPED_REMEDIATION_FILLED_AND_BROKER_FLAT_TRUTH",
+        "lifecycle_id": lifecycle_id,
+        "strategy_id": None if target is None else target.get("strategy_id"),
+        "contract_key": None if target is None else target.get("contract_key"),
+        "local_symbol": None if target is None else target.get("local_symbol"),
+        "con_id": None if target is None else target.get("con_id"),
+        "prior_artifact_state": _prior_artifact_state(target),
+        "scoped_remediation_evidence": evidence,
+        "existing_resolution_record_found": existing_resolution is not None,
+        "reconciliation_record_written": wrote,
+        "evidence_preserved": {
+            "guardian_remediation_artifact": str(guardian_remediation_json),
+            "broker_positions_snapshot": str(broker_positions_snapshot_json),
+            "broker_open_orders_snapshot": str(broker_open_orders_snapshot_json),
+            "paper_trade_ledger": str(ledger_path),
+            "paper_lifecycle_report_path": None if target is None else target.get("paper_lifecycle_report_path"),
+        },
+        "compact_summaries_updated": True,
+        "post_reconciliation_summary": {
+            "open_position_count": summaries["trade_summary"].get("open_position_count"),
+            "review_required_count": summaries["trade_summary"].get("review_required_count"),
+            "managed_strategy_trade_count": summaries["trade_summary"].get("managed_strategy_trade_count"),
+            "meaningful_strategy_trade_count": summaries["trade_summary"].get("meaningful_strategy_trade_count"),
+            "archived_manual_flat_count": summaries["trade_summary"].get("archived_manual_flat_count"),
+        },
+        "broker_mutation_attempted": False,
+        "submit_attempted": False,
+        "paper_proof_cli_invoked": False,
+        "remaining_blocker": None if can_resolve else evidence["blocker"],
+    }
+    _write_json(reconciliation_report_json, report)
+    return TrackBArtifactReconciliationResult(
+        ledger_jsonl=ledger_path,
+        trade_summary_json=trade_summary_json,
+        live_position_status_json=live_position_status_json,
+        pnl_summary_json=pnl_summary_json,
+        reconciliation_report_json=reconciliation_report_json,
+        reconciliation_record_written=wrote,
         reconciliation_report=report,
         trade_summary=summaries["trade_summary"],
         live_position_status=summaries["live_position_status"],
@@ -1180,7 +1322,13 @@ def _trade_record_from_filled_bridge_result(
     if not symbol:
         return None
     order_intent_id = str(filled_bridge_result.get("order_intent_id") or "").strip()
-    lifecycle_id = f"bridge_fill_{order_intent_id}" if order_intent_id else f"bridge_fill_{filled_bridge_result.get('broker_order_id')}"
+    explicit_lifecycle_id = str(
+        filled_bridge_result.get("lifecycle_id") or filled_bridge_result.get("reserved_lifecycle_id") or ""
+    ).strip()
+    lifecycle_id = (
+        explicit_lifecycle_id
+        or (f"bridge_fill_{order_intent_id}" if order_intent_id else f"bridge_fill_{filled_bridge_result.get('broker_order_id')}")
+    )
     strategy_id = str(filled_bridge_result.get("strategy_id") or filled_bridge_result.get("lane_id") or "UNKNOWN")
     contract = filled_bridge_result.get("contract") if isinstance(filled_bridge_result.get("contract"), Mapping) else {}
     quantity = _decimal(filled_bridge_result.get("quantity"))
@@ -1336,6 +1484,7 @@ def _closed_trade_record_from_filled_bridge_result(
     account_id = str(filled_bridge_result.get("account_id") or "").strip()
     open_record = _matching_open_bridge_record(
         existing_records=existing_records,
+        lifecycle_id=str(filled_bridge_result.get("lifecycle_id") or ""),
         strategy_id=strategy_id,
         contract_key=contract_key,
         account_id=account_id,
@@ -1395,17 +1544,34 @@ def _closed_trade_record_from_filled_bridge_result(
 def _matching_open_bridge_record(
     *,
     existing_records: Iterable[Mapping[str, Any]],
+    lifecycle_id: str,
     strategy_id: str,
     contract_key: str | None,
     account_id: str,
 ) -> dict[str, Any] | None:
+    if lifecycle_id:
+        exact_lifecycle_candidates = [
+            dict(item)
+            for item in existing_records
+            if not _is_reconciliation_record(item)
+            and _is_open_position_record(item)
+            and str(item.get("lifecycle_id") or "") == lifecycle_id
+        ]
+        if exact_lifecycle_candidates:
+            return max(
+                exact_lifecycle_candidates,
+                key=lambda item: str(item.get("entry_timestamp") or item.get("created_at") or ""),
+            )
     candidates = []
     for item in existing_records:
         if _is_reconciliation_record(item):
             continue
         if not _is_open_position_record(item):
             continue
-        if str(item.get("source") or "") != "TRACK_B_DIRECT_BRIDGE_FILL_ARTIFACT":
+        if str(item.get("source") or "") not in {
+            "TRACK_B_DIRECT_BRIDGE_FILL_ARTIFACT",
+            "TRACK_B_STRATEGY_MANAGED_LIFECYCLE",
+        }:
             continue
         if str(item.get("strategy_id") or "") != strategy_id:
             continue
@@ -1863,6 +2029,148 @@ def _leak_test_adopted_entry_settled_flat_reconciliation_record(
     }
 
 
+def _duplicate_exit_overfill_scoped_remediation_evidence(
+    *,
+    target: Mapping[str, Any] | None,
+    remediation: Mapping[str, Any],
+    positions_snapshot: Mapping[str, Any],
+    orders_snapshot: Mapping[str, Any],
+) -> dict[str, Any]:
+    if target is None:
+        return {"scoped_remediation_confirmed": False, "blocker": "LIFECYCLE_TARGET_NOT_FOUND"}
+    account_id = str(target.get("account_id") or PAPER_ACCOUNT_ID)
+    symbol = str(target.get("instrument_family") or target.get("symbol") or "").upper()
+    local_symbol = str(target.get("local_symbol") or "").upper()
+    con_id = _int(target.get("con_id"))
+    position_rows = [row for row in _snapshot_rows(positions_snapshot) if _row_matches_contract(row, account_id, symbol, local_symbol, con_id)]
+    order_rows = [row for row in _snapshot_rows(orders_snapshot) if _row_matches_contract(row, account_id, symbol, local_symbol, con_id)]
+    nonzero_positions = [row for row in position_rows if _decimal(row.get("quantity")) != Decimal("0")]
+    open_orders = [row for row in order_rows if _decimal(row.get("quantity") or row.get("total_quantity") or row.get("remaining_quantity")) != Decimal("0")]
+    target_identity = _mapping(remediation.get("target_identity"))
+    apply_result = _mapping(remediation.get("apply_result"))
+    fill = _mapping(apply_result.get("fill"))
+    hard_classifications = {str(item) for item in remediation.get("guardian_hard_classifications") or []}
+    remediation_filled = str(remediation.get("classification") or "") == "SCOPED_GUARDIAN_REMEDIATION_FILLED"
+    fill_matches = (
+        str(fill.get("action") or "").upper() == "BUY"
+        and _decimal(fill.get("quantity")) == Decimal("1.0")
+        and str(fill.get("contract_key") or "") == "MNQ-202606"
+        and str(fill.get("account_id") or "") == account_id
+    )
+    identity_matches = (
+        str(target_identity.get("local_symbol") or "").upper() == local_symbol
+        and _int(target_identity.get("con_id")) == con_id
+        and str(target_identity.get("account_id") or "") == account_id
+    )
+    broker_flat = not nonzero_positions
+    no_open_orders = not open_orders
+    target_is_review = target.get("review_required") is True
+    duplicate_exit_context = (
+        "UNAUTHORIZED_REVERSE_EXPOSURE" in hard_classifications
+        and "BROKER_LIFECYCLE_POSITION_MISMATCH" in hard_classifications
+    )
+    confirmed = (
+        target_is_review
+        and remediation_filled
+        and fill_matches
+        and identity_matches
+        and broker_flat
+        and no_open_orders
+        and duplicate_exit_context
+    )
+    blocker = None
+    if not target_is_review:
+        blocker = "TARGET_NOT_REVIEW_REQUIRED"
+    elif not remediation_filled:
+        blocker = "SCOPED_REMEDIATION_NOT_FILLED"
+    elif not fill_matches:
+        blocker = "SCOPED_REMEDIATION_FILL_MISMATCH"
+    elif not identity_matches:
+        blocker = "SCOPED_REMEDIATION_IDENTITY_MISMATCH"
+    elif not broker_flat:
+        blocker = "BROKER_POSITION_STILL_OPEN"
+    elif not no_open_orders:
+        blocker = "BROKER_OPEN_ORDER_PRESENT"
+    elif not duplicate_exit_context:
+        blocker = "GUARDIAN_DUPLICATE_EXIT_CONTEXT_MISSING"
+    return {
+        "scoped_remediation_confirmed": confirmed,
+        "blocker": blocker,
+        "account_id": account_id,
+        "symbol": symbol,
+        "local_symbol": local_symbol,
+        "con_id": con_id,
+        "broker_flat": broker_flat,
+        "open_orders_zero": no_open_orders,
+        "position_rows": position_rows,
+        "open_order_rows": open_orders,
+        "remediation_classification": remediation.get("classification"),
+        "remediation_broker_order_id": apply_result.get("broker_order_id"),
+        "remediation_perm_id": fill.get("perm_id"),
+        "remediation_execution_id": fill.get("execution_id"),
+        "remediation_fill_price": fill.get("price"),
+        "remediation_fill_time": fill.get("filled_at"),
+        "prior_exit_order_id": target.get("exit_order_id"),
+        "prior_exit_timestamp": target.get("exit_timestamp"),
+        "guardian_hard_classifications": sorted(hard_classifications),
+        "paper_proof_cli_invoked": False,
+    }
+
+
+def _duplicate_exit_overfill_scoped_remediation_record(
+    *,
+    target: Mapping[str, Any],
+    evidence: Mapping[str, Any],
+    guardian_remediation_json: Path,
+    broker_positions_snapshot_json: Path,
+    broker_open_orders_snapshot_json: Path,
+    now: datetime,
+) -> dict[str, Any]:
+    return {
+        "ledger_schema_version": LEDGER_SCHEMA_VERSION,
+        "record_type": "ARTIFACT_RECONCILIATION",
+        "reconciliation_schema_version": RECONCILIATION_SCHEMA_VERSION,
+        "trade_id": f"{target.get('trade_id')}:duplicate_exit_overfill_scoped_remediation_review",
+        "lifecycle_id": target.get("lifecycle_id"),
+        "strategy_id": target.get("strategy_id"),
+        "instrument_family": target.get("instrument_family"),
+        "contract_key": target.get("contract_key"),
+        "local_symbol": target.get("local_symbol"),
+        "con_id": target.get("con_id"),
+        "account_id": target.get("account_id"),
+        "prior_artifact_classification": target.get("paper_lifecycle_classification"),
+        "prior_review_required": target.get("review_required"),
+        "reconciliation_action": DUPLICATE_EXIT_OVERFILL_SCOPED_REMEDIATION_REVIEWED,
+        "new_artifact_classification": DUPLICATE_EXIT_OVERFILL_SCOPED_REMEDIATION_REVIEWED,
+        "final_position_status": DUPLICATE_EXIT_OVERFILL_SCOPED_REMEDIATION_REVIEWED,
+        "review_required": False,
+        "broker_reconciled": True,
+        "broker_backed_position_confirmed": False,
+        "historical_broker_backed_exposure_confirmed": True,
+        "excluded_from_strategy_managed_pnl": True,
+        "excluded_from_clean_trade_stats": True,
+        "prior_exit_order_id": evidence.get("prior_exit_order_id"),
+        "prior_exit_timestamp": evidence.get("prior_exit_timestamp"),
+        "remediation_broker_order_id": evidence.get("remediation_broker_order_id"),
+        "remediation_perm_id": evidence.get("remediation_perm_id"),
+        "remediation_execution_id": evidence.get("remediation_execution_id"),
+        "remediation_fill_price": evidence.get("remediation_fill_price"),
+        "remediation_fill_time": evidence.get("remediation_fill_time"),
+        "broker_flat": evidence.get("broker_flat"),
+        "open_orders_zero": evidence.get("open_orders_zero"),
+        "guardian_hard_classifications": evidence.get("guardian_hard_classifications"),
+        "guardian_remediation_artifact_path": str(guardian_remediation_json),
+        "broker_positions_snapshot_path": str(broker_positions_snapshot_json),
+        "broker_open_orders_snapshot_path": str(broker_open_orders_snapshot_json),
+        "broker_mutation_attempted": False,
+        "submit_attempted": False,
+        "paper_proof_cli_invoked": False,
+        "source": "BROKER_POSITION_GUARDIAN_SCOPED_REMEDIATION_FILLED_AND_BROKER_FLAT_TRUTH",
+        "paper_lifecycle_report_path": target.get("paper_lifecycle_report_path"),
+        "created_at": now.isoformat(),
+    }
+
+
 def _snapshot_rows(snapshot: Mapping[str, Any]) -> list[Mapping[str, Any]]:
     rows = snapshot.get("positions") or snapshot.get("open_orders") or snapshot.get("orders") or snapshot.get("rows") or []
     return [row for row in rows if isinstance(row, Mapping)]
@@ -2044,6 +2352,12 @@ def _apply_manual_flat_reconciliations(records: list[dict[str, Any]]) -> list[di
         if _is_reconciliation_record(item)
         and item.get("new_artifact_classification") == LEAK_TEST_ADOPTED_ENTRY_SETTLED_FLAT_REVIEWED
     }
+    duplicate_exit_overfill_reviewed_lifecycle_ids = {
+        str(item.get("lifecycle_id"))
+        for item in records
+        if _is_reconciliation_record(item)
+        and item.get("new_artifact_classification") == DUPLICATE_EXIT_OVERFILL_SCOPED_REMEDIATION_REVIEWED
+    }
     offsetting_entry_reclassified_lifecycle_ids = {
         str(item.get("lifecycle_id"))
         for item in records
@@ -2061,6 +2375,7 @@ def _apply_manual_flat_reconciliations(records: list[dict[str, Any]]) -> list[di
         and not app_only_reviewed_lifecycle_ids
         and not ibkr_rejected_reviewed_lifecycle_ids
         and not leak_test_settled_flat_lifecycle_ids
+        and not duplicate_exit_overfill_reviewed_lifecycle_ids
         and not offsetting_entry_reclassified_lifecycle_ids
         and not malformed_reconciliations_by_lifecycle_id
     ):
@@ -2119,6 +2434,22 @@ def _apply_manual_flat_reconciliations(records: list[dict[str, Any]]) -> list[di
             row["paper_lifecycle_classification"] = LEAK_TEST_ADOPTED_ENTRY_SETTLED_FLAT_REVIEWED
             row["final_position_status"] = LEAK_TEST_ADOPTED_ENTRY_SETTLED_FLAT_REVIEWED
             row["final_broker_state_classification"] = LEAK_TEST_ADOPTED_ENTRY_SETTLED_FLAT_REVIEWED
+        if (
+            not _is_reconciliation_record(row)
+            and str(row.get("lifecycle_id") or "") in duplicate_exit_overfill_reviewed_lifecycle_ids
+            and row.get("paper_lifecycle_type") == "STRATEGY_MANAGED"
+        ):
+            row["artifact_reconciliation_classification"] = DUPLICATE_EXIT_OVERFILL_SCOPED_REMEDIATION_REVIEWED
+            row["duplicate_exit_overfill_scoped_remediation_reviewed"] = True
+            row["historical_broker_backed_exposure_confirmed"] = row.get("broker_backed_position_confirmed") is True
+            row["excluded_from_strategy_managed_pnl"] = True
+            row["excluded_from_clean_trade_stats"] = True
+            row["review_required"] = False
+            row["broker_reconciled"] = True
+            row["prior_paper_lifecycle_classification"] = row.get("paper_lifecycle_classification")
+            row["paper_lifecycle_classification"] = DUPLICATE_EXIT_OVERFILL_SCOPED_REMEDIATION_REVIEWED
+            row["final_position_status"] = DUPLICATE_EXIT_OVERFILL_SCOPED_REMEDIATION_REVIEWED
+            row["final_broker_state_classification"] = DUPLICATE_EXIT_OVERFILL_SCOPED_REMEDIATION_REVIEWED
         if (
             not _is_reconciliation_record(row)
             and str(row.get("lifecycle_id") or "") in offsetting_entry_reclassified_lifecycle_ids
@@ -2381,7 +2712,11 @@ def _ledger_lifecycle_transition(item: Mapping[str, Any]) -> TrackBLifecycleTran
         )
     evidence = {
         "requested_lifecycle_status": requested,
-        "entry_intent_id": item.get("signal_id") or item.get("order_intent_id") or item.get("ownership_id"),
+        "entry_intent_id": item.get("signal_id")
+        or item.get("order_intent_id")
+        or item.get("entry_intent_id")
+        or item.get("ownership_id")
+        or item.get("lifecycle_id"),
         "lane_id": item.get("lane_id") or item.get("strategy_id"),
         "strategy_id": item.get("strategy_id"),
         "contract_key": item.get("contract_key"),
@@ -2463,6 +2798,9 @@ def _is_manual_flat_reviewed(item: Mapping[str, Any]) -> bool:
         or item.get("artifact_reconciliation_classification") == LEAK_TEST_ADOPTED_ENTRY_SETTLED_FLAT_REVIEWED
         or item.get("new_artifact_classification") == LEAK_TEST_ADOPTED_ENTRY_SETTLED_FLAT_REVIEWED
         or item.get("leak_test_adopted_entry_settled_flat_reviewed") is True
+        or item.get("artifact_reconciliation_classification") == DUPLICATE_EXIT_OVERFILL_SCOPED_REMEDIATION_REVIEWED
+        or item.get("new_artifact_classification") == DUPLICATE_EXIT_OVERFILL_SCOPED_REMEDIATION_REVIEWED
+        or item.get("duplicate_exit_overfill_scoped_remediation_reviewed") is True
         or item.get("artifact_reconciliation_classification") == OPPOSITE_ENTRY_OFFSET_EXISTING_POSITION_RECLASSIFIED
         or item.get("new_artifact_classification") == OPPOSITE_ENTRY_OFFSET_EXISTING_POSITION_RECLASSIFIED
         or item.get("opposite_entry_offset_existing_position_reclassified") is True
@@ -2599,39 +2937,181 @@ def _compact_trade_row(item: Mapping[str, Any]) -> dict[str, Any]:
 
 def _positions_by(records: Iterable[Mapping[str, Any]], key: str, now: datetime) -> dict[str, dict[str, Any]]:
     positions: dict[str, dict[str, Any]] = {}
+    grouped: dict[str, list[Mapping[str, Any]]] = defaultdict(list)
     for item in records:
         if not _is_open_position_record(item):
             continue
         name = str(item.get(key) or "UNKNOWN")
-        quantity = _decimal(item.get("quantity")) or Decimal("0")
+        grouped[name].append(item)
+
+    for name, units in grouped.items():
+        signed_units = [(_position_unit_signed_quantity(item), item) for item in units]
+        signed_total = sum((qty for qty, _item in signed_units), Decimal("0"))
+        gross_total = sum((abs(qty) for qty, _item in signed_units), Decimal("0"))
+        latest = max(units, key=lambda item: str(item.get("entry_timestamp") or item.get("as_of") or ""))
+        unit_details = [_position_unit_detail(item, signed_qty) for signed_qty, item in signed_units]
+        strategy_lane_keys = [
+            (
+                str(item.get("strategy_id") or ""),
+                str(item.get("lane_id") or item.get("strategy_id") or ""),
+                str(item.get("contract_key") or ""),
+                str(item.get("local_symbol") or ""),
+                _position_side_from_signed(_position_unit_signed_quantity(item)),
+            )
+            for item in units
+        ]
+        duplicate_same_lane_exposure = any(strategy_lane_keys.count(value) > 1 for value in set(strategy_lane_keys))
+        pyramiding_allowed = duplicate_same_lane_exposure and all(_pyramiding_allowed(item) for item in units)
+        average_entry_price = _weighted_average_entry_price(units, signed_units)
+        distinct_values = {
+            field: sorted({str(_position_group_value(item, field) or "") for item in units if _position_group_value(item, field) not in {None, ""}})
+            for field in ("strategy_id", "lane_id", "instrument_family", "contract_key", "local_symbol", "account_id")
+        }
         positions[name] = {
             "as_of": now.isoformat(),
-            "strategy_id": item.get("strategy_id"),
-            "lifecycle_id": item.get("lifecycle_id"),
-            "instrument_family": item.get("instrument_family"),
-            "contract_key": item.get("contract_key"),
-            "local_symbol": item.get("local_symbol"),
-            "con_id": item.get("con_id"),
-            "account_id": item.get("account_id"),
-            "entry_order_id": item.get("entry_order_id"),
-            "entry_perm_id": item.get("entry_perm_id"),
-            "entry_client_id": item.get("entry_client_id"),
-            "entry_exec_id": item.get("entry_exec_id"),
-            "entry_broker_identity": item.get("entry_broker_identity"),
-            "managed_exit_policy_id": item.get("managed_exit_policy_id"),
-            "paper_lifecycle_report_path": item.get("paper_lifecycle_report_path"),
-            "position_management_manifest_path": item.get("position_management_manifest_path"),
-            "side": item.get("side"),
-            "quantity": _decimal_text(quantity),
-            "avg_entry_price": item.get("entry_fill_price"),
+            "strategy_id": latest.get("strategy_id") if len(distinct_values["strategy_id"]) == 1 else "MULTIPLE",
+            "strategy_ids": distinct_values["strategy_id"],
+            "lane_id": _position_group_value(latest, "lane_id") if len(distinct_values["lane_id"]) == 1 else "MULTIPLE",
+            "lane_ids": distinct_values["lane_id"],
+            "lifecycle_id": latest.get("lifecycle_id"),
+            "lifecycle_ids": [str(item.get("lifecycle_id") or "") for item in units if item.get("lifecycle_id")],
+            "instrument_family": latest.get("instrument_family")
+            if len(distinct_values["instrument_family"]) == 1
+            else "MULTIPLE",
+            "contract_key": latest.get("contract_key") if len(distinct_values["contract_key"]) == 1 else "MULTIPLE",
+            "local_symbol": latest.get("local_symbol") if len(distinct_values["local_symbol"]) == 1 else "MULTIPLE",
+            "con_id": latest.get("con_id") if len({str(item.get("con_id") or "") for item in units}) == 1 else None,
+            "expiry": latest.get("expiry") if len({str(item.get("expiry") or "") for item in units}) == 1 else None,
+            "account_id": latest.get("account_id") if len(distinct_values["account_id"]) == 1 else "MULTIPLE",
+            "entry_order_id": latest.get("entry_order_id"),
+            "entry_order_ids": [str(item.get("entry_order_id") or "") for item in units if item.get("entry_order_id")],
+            "entry_perm_id": latest.get("entry_perm_id"),
+            "entry_perm_ids": [str(item.get("entry_perm_id") or "") for item in units if item.get("entry_perm_id")],
+            "entry_client_id": latest.get("entry_client_id"),
+            "entry_exec_id": latest.get("entry_exec_id"),
+            "entry_broker_identity": latest.get("entry_broker_identity"),
+            "managed_exit_policy_id": latest.get("managed_exit_policy_id")
+            if len({str(item.get("managed_exit_policy_id") or "") for item in units}) == 1
+            else "MULTIPLE",
+            "paper_lifecycle_report_path": latest.get("paper_lifecycle_report_path"),
+            "paper_lifecycle_report_paths": [
+                str(item.get("paper_lifecycle_report_path") or "")
+                for item in units
+                if item.get("paper_lifecycle_report_path")
+            ],
+            "position_management_manifest_path": latest.get("position_management_manifest_path"),
+            "side": _position_side_from_signed(signed_total),
+            "quantity": _decimal_text(abs(signed_total)),
+            "aggregate_qty": _decimal_text(signed_total),
+            "gross_unit_qty": _decimal_text(gross_total),
+            "unit_count": len(units),
+            "lifecycle_unit_count": len(unit_details),
+            "lifecycle_units": unit_details,
+            "duplicate_same_lane_exposure": duplicate_same_lane_exposure,
+            "pyramiding_allowed": bool(pyramiding_allowed),
+            "pyramiding_policy": (
+                "PYRAMIDING_ALLOWED"
+                if pyramiding_allowed
+                else "PYRAMIDING_NOT_ALLOWED_REVIEW_REQUIRED"
+                if duplicate_same_lane_exposure
+                else "NOT_APPLICABLE"
+            ),
+            "avg_entry_price": average_entry_price,
             "latest_mark_price": None,
             "unrealized_pnl": None,
             "realized_pnl_today": "0",
             "open_order_count": 0,
-            "review_required": item.get("review_required") is True,
+            "review_required": any(item.get("review_required") is True for item in units),
             "source": "TRACK_B_LIFECYCLE_ARTIFACTS",
         }
     return positions
+
+
+def _position_unit_signed_quantity(item: Mapping[str, Any]) -> Decimal:
+    quantity = abs(_decimal(item.get("quantity")) or Decimal("0"))
+    side = str(item.get("side") or item.get("position_side") or "").upper()
+    if side == "SHORT":
+        return -quantity
+    if side == "LONG":
+        return quantity
+    action = str(item.get("order_action") or "").upper()
+    if action == "SELL":
+        return -quantity
+    return quantity
+
+
+def _position_group_value(item: Mapping[str, Any], field: str) -> Any:
+    if field == "lane_id":
+        return item.get("lane_id") or item.get("strategy_id")
+    return item.get(field)
+
+
+def _position_side_from_signed(quantity: Decimal) -> str:
+    if quantity < 0:
+        return "SHORT"
+    if quantity > 0:
+        return "LONG"
+    return "FLAT"
+
+
+def _position_unit_detail(item: Mapping[str, Any], signed_quantity: Decimal) -> dict[str, Any]:
+    return {
+        "lifecycle_id": item.get("lifecycle_id"),
+        "entry_intent_id": item.get("signal_id")
+        or item.get("order_intent_id")
+        or item.get("entry_intent_id")
+        or item.get("ownership_id")
+        or item.get("lifecycle_id"),
+        "strategy_id": item.get("strategy_id"),
+        "lane_id": item.get("lane_id") or item.get("strategy_id"),
+        "account_id": item.get("account_id"),
+        "instrument_family": item.get("instrument_family"),
+        "contract_key": item.get("contract_key"),
+        "local_symbol": item.get("local_symbol"),
+        "con_id": item.get("con_id"),
+        "expiry": item.get("expiry"),
+        "side": _position_side_from_signed(signed_quantity),
+        "quantity": _decimal_text(abs(signed_quantity)),
+        "signed_qty": _decimal_text(signed_quantity),
+        "entry_order_id": item.get("entry_order_id"),
+        "entry_perm_id": item.get("entry_perm_id"),
+        "entry_client_id": item.get("entry_client_id"),
+        "entry_exec_id": item.get("entry_exec_id"),
+        "entry_price": item.get("entry_fill_price"),
+        "entry_time": item.get("entry_timestamp"),
+        "runtime_generation_id": item.get("runtime_generation_id"),
+        "managed_exit_policy_id": item.get("managed_exit_policy_id"),
+        "exit_status": item.get("final_position_status") or item.get("paper_lifecycle_classification"),
+        "paper_lifecycle_report_path": item.get("paper_lifecycle_report_path"),
+    }
+
+
+def _pyramiding_allowed(item: Mapping[str, Any]) -> bool:
+    text = str(
+        item.get("pyramiding_policy")
+        or item.get("position_accumulation_policy")
+        or item.get("same_lane_position_policy")
+        or ""
+    ).upper()
+    return item.get("pyramiding_allowed") is True or text == "PYRAMIDING_ALLOWED"
+
+
+def _weighted_average_entry_price(
+    units: list[Mapping[str, Any]],
+    signed_units: list[tuple[Decimal, Mapping[str, Any]]],
+) -> str | None:
+    total_qty = Decimal("0")
+    total_value = Decimal("0")
+    for signed_qty, item in signed_units:
+        price = _decimal(item.get("entry_fill_price"))
+        qty = abs(signed_qty)
+        if price is None or qty == 0:
+            continue
+        total_qty += qty
+        total_value += price * qty
+    if total_qty == 0:
+        return units[-1].get("entry_fill_price") if units else None
+    return _decimal_text(total_value / total_qty)
 
 
 def _source_paths(records: Iterable[Mapping[str, Any]]) -> list[str]:

@@ -78,6 +78,7 @@ from .track_b_readiness_check_runner import (
     TrackBReadinessCheckRunnerConfig,
     TrackBReadinessCheckRunnerResult,
     TrackBReadinessCheckRunnerStages,
+    TrackBReadinessCheckRunnerVerdict,
     run_track_b_readiness_check,
 )
 from .track_b_strategy_rule_runner import (
@@ -234,6 +235,7 @@ class TrackBStrategyPaperRunnerConfig:
     runtime_safe_state_envelope_path: Path = DEFAULT_RUNTIME_SAFE_STATE_ENVELOPE_ARTIFACT
     expected_control_plane_snapshot_id: str | None = None
     expected_shared_truth_generation_id: str | None = None
+    managed_lifecycle_id: str | None = None
 
 
 @dataclass(frozen=True)
@@ -669,7 +671,9 @@ def run_track_b_strategy_paper(
                 operator_status_stage=actual_stages.operator_status,
             )
 
-        readiness = actual_stages.readiness(config)
+        readiness = _strategy_managed_phase1_readiness(config=config, runner_id=actual_runner_id, now=actual_now)
+        if readiness is None:
+            readiness = actual_stages.readiness(config)
         if readiness.report.get("runner_verdict") != "TRACK_B_READINESS_CHECK_READY_FOR_PAPER_PROOF_REVIEW" or readiness.report.get("readiness_verdict") != "READY_FOR_PAPER_PROOF":
             return _finalize(
                 config=config,
@@ -961,6 +965,145 @@ def _run_readiness(
         operator_status_output_root=config.operator_status_output_root,
     )
     return run_track_b_readiness_check(config=readiness_config, stages=readiness_stages)
+
+
+def _strategy_managed_phase1_readiness(
+    *,
+    config: TrackBStrategyPaperRunnerConfig,
+    runner_id: str,
+    now: datetime,
+) -> TrackBReadinessCheckRunnerResult | None:
+    if _paper_execution_path(config) != "STRATEGY_MANAGED":
+        return None
+    if str(config.paper_order_pricing_policy or "").strip().upper() not in {
+        "LIMIT_AT_LAST",
+        "MARKETABLE_LIMIT_FROM_LIVE_CONTEXT",
+        "LIMIT_AT_SIGNAL_PRICE",
+    }:
+        return None
+
+    quote_payload = _optional_current_quote_payload(config)
+    if not quote_payload:
+        return None
+    blocker = _phase1_runtime_pricing_blocker(config=config, payload=quote_payload, now=now)
+    if blocker is not None:
+        return None
+
+    report_json = (
+        Path(config.readiness_output_root)
+        / f"track_b_readiness_check_{runner_id}_phase1_runtime_pricing"
+        / "track_b_readiness_check_runner_report.json"
+    )
+    source_path = quote_payload.get("source_authority_path") or quote_payload.get("source_path")
+    if source_path is None and config.current_quote_report_json is not None:
+        source_path = str(config.current_quote_report_json)
+    report = {
+        "runner_id": f"track_b_readiness_check_{runner_id}_phase1_runtime_pricing",
+        "generated_at": now.isoformat(),
+        "report_json_path": str(report_json),
+        "latest_report_json_path": str(report_json.parent.parent / "latest_track_b_readiness_check_runner_report.json"),
+        "runner_verdict": TrackBReadinessCheckRunnerVerdict.READY_FOR_PAPER_PROOF_REVIEW.value,
+        "readiness_verdict": "READY_FOR_PAPER_PROOF",
+        "final_readiness_verdict": "READY_FOR_PAPER_PROOF",
+        "primary_blocker": None,
+        "required_next_action": (
+            "Strategy-managed PAPER submit is using fresh Phase-1 runtime candle pricing evidence; "
+            "the final mutation boundary remains Control Plane Snapshot / Safe-State / pre-action validation."
+        ),
+        "strategy_managed_phase1_runtime_pricing_ready": True,
+        "readiness_source": "PHASE1_RUNTIME_MARKET_DATA_STRATEGY_MANAGED_PRICING",
+        "current_quote_available": True,
+        "realtime_quote_received": True,
+        "quote_provider_mode": quote_payload.get("quote_provider_mode") or "REALTIME",
+        "quote_freshness_verdict": quote_payload.get("quote_freshness_verdict")
+        or quote_payload.get("realtime_feed_block_reason")
+        or "PHASE1_RUNTIME_MARKET_DATA_READY",
+        "phase1_runtime_market_data_authority": True,
+        "source_category": quote_payload.get("source_category") or "PHASE1_RUNTIME_MARKET_DATA",
+        "source_authority_path": source_path,
+        "symbol": quote_payload.get("symbol"),
+        "timeframe": quote_payload.get("timeframe"),
+        "latest_bar_timestamp": _phase1_latest_bar_timestamp(quote_payload),
+        "live_money_readiness": False,
+        "paper_proof_invoked": False,
+    }
+    _write_report(report_json, report)
+    return TrackBReadinessCheckRunnerResult(
+        verdict=TrackBReadinessCheckRunnerVerdict.READY_FOR_PAPER_PROOF_REVIEW,
+        report_json=report_json,
+        report=report,
+    )
+
+
+def _optional_current_quote_payload(config: TrackBStrategyPaperRunnerConfig) -> Mapping[str, object] | None:
+    try:
+        return _current_quote_report_payload(config)
+    except (TypeError, ValueError, OSError, json.JSONDecodeError):
+        return None
+
+
+def _phase1_runtime_pricing_blocker(
+    *,
+    config: TrackBStrategyPaperRunnerConfig,
+    payload: Mapping[str, object],
+    now: datetime,
+) -> str | None:
+    source = str(payload.get("source") or payload.get("source_category") or payload.get("input_source_category") or "")
+    if "PHASE1" not in source and payload.get("phase1_runtime_market_data_authority") is not True:
+        return "Strategy-managed readiness bypass only accepts Phase-1 runtime market-data pricing evidence."
+    if payload.get("realtime_feed_confirmed") is not True and payload.get("current_quote_available") is not True:
+        return "Phase-1 runtime pricing evidence is not realtime/current."
+    if payload.get("realtime_feed_block_reason") not in {None, "READY"}:
+        return f"Phase-1 runtime pricing evidence is not ready: {payload.get('realtime_feed_block_reason')}."
+    if _phase1_latest_bar_timestamp(payload) is None:
+        return "Phase-1 runtime pricing evidence is missing latest completed bar timestamp."
+
+    freshness_seconds = _optional_positive_float(payload.get("freshness_seconds"))
+    generated_at = _parse_optional_datetime(payload.get("generated_at"))
+    if generated_at is not None and freshness_seconds is not None:
+        age_seconds = max((now - generated_at).total_seconds(), 0.0)
+        if age_seconds > freshness_seconds:
+            return f"Phase-1 runtime pricing evidence is stale: age_seconds={age_seconds:.1f}."
+
+    if config.expected_account_id != "DUM882026" or config.account_id != "DUM882026":
+        return "Strategy-managed Phase-1 readiness bypass is PAPER-account-only."
+    return None
+
+
+def _phase1_latest_bar_timestamp(payload: Mapping[str, object]) -> str | None:
+    for key in ("last_completed_bar_ts", "latest_bar_timestamp", "latest_completed_bar_at"):
+        value = payload.get(key)
+        if value:
+            return str(value)
+    bars = payload.get("bars")
+    if isinstance(bars, list) and bars:
+        last = bars[-1]
+        if isinstance(last, Mapping):
+            value = last.get("bar_end") or last.get("timestamp") or last.get("candle_timestamp")
+            return None if value is None else str(value)
+    return None
+
+
+def _optional_positive_float(value: object) -> float | None:
+    try:
+        parsed = float(str(value))
+    except (TypeError, ValueError):
+        return None
+    if parsed <= 0:
+        return None
+    return parsed
+
+
+def _parse_optional_datetime(value: object) -> datetime | None:
+    if value is None:
+        return None
+    try:
+        parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=UTC)
+    return parsed.astimezone(UTC)
 
 
 def _continuation_exit_evidence_from_strategy_report(
@@ -1342,6 +1485,11 @@ def _run_managed_lifecycle(
         ),
         continuation_source_strategy_report_path=continuation_evidence.get("continuation_source_strategy_report_path"),
     )
+    if config.managed_lifecycle_id is not None:
+        return run_track_b_strategy_managed_paper_lifecycle(
+            config=managed_config,
+            lifecycle_id=config.managed_lifecycle_id,
+        )
     return run_track_b_strategy_managed_paper_lifecycle(config=managed_config)
 
 
@@ -1689,6 +1837,11 @@ def _build_report(
         "realtime_quote_received": readiness_report.get("realtime_quote_received"),
         "current_quote_available": readiness_report.get("current_quote_available"),
         "quote_provider_mode": readiness_report.get("quote_provider_mode"),
+        "strategy_managed_phase1_runtime_pricing_ready": readiness_report.get(
+            "strategy_managed_phase1_runtime_pricing_ready"
+        ),
+        "phase1_runtime_pricing_source_authority_path": readiness_report.get("source_authority_path"),
+        "phase1_runtime_pricing_latest_bar_timestamp": readiness_report.get("latest_bar_timestamp"),
         "paper_submit_requested": _paper_submit_requested(config),
         "paper_submit_flags_present": bool(config.submit_paper and config.confirm_paper_submit),
         "strategy_trade_intent_invoked": strategy_trade_intent_invoked,
@@ -2175,6 +2328,8 @@ def _optional_int(value: object) -> int | None:
 
 
 def _candle_history_producer_requested(config: TrackBStrategyPaperRunnerConfig) -> bool:
+    if _current_quote_is_phase1_strategy_managed_pricing(config):
+        return config.candle_history_json is not None or config.candle_history_payload is not None
     return (
         config.candle_history_json is not None
         or config.candle_history_payload is not None
@@ -2185,12 +2340,30 @@ def _candle_history_producer_requested(config: TrackBStrategyPaperRunnerConfig) 
 
 def _candle_history_producer_request_error(config: TrackBStrategyPaperRunnerConfig) -> str | None:
     has_history = config.candle_history_json is not None or config.candle_history_payload is not None
-    has_current_quote = config.current_quote_report_json is not None or config.current_quote_report_payload is not None
+    has_current_quote = (
+        config.current_quote_report_json is not None or config.current_quote_report_payload is not None
+    ) and not _current_quote_is_phase1_strategy_managed_pricing(config)
     if has_history and not has_current_quote:
         return "Candle-history PAPER path requires a current quote report JSON/payload."
     if has_current_quote and not has_history:
         return "Candle-history PAPER path requires bounded candle history JSON/payload."
     return None
+
+
+def _current_quote_is_phase1_strategy_managed_pricing(config: TrackBStrategyPaperRunnerConfig) -> bool:
+    if _paper_execution_path(config) != "STRATEGY_MANAGED":
+        return False
+    if str(config.paper_order_pricing_policy or "").strip().upper() not in {
+        "LIMIT_AT_LAST",
+        "MARKETABLE_LIMIT_FROM_LIVE_CONTEXT",
+        "LIMIT_AT_SIGNAL_PRICE",
+    }:
+        return False
+    payload = _optional_current_quote_payload(config)
+    if not payload:
+        return False
+    source = str(payload.get("source") or payload.get("source_category") or payload.get("input_source_category") or "")
+    return "PHASE1" in source or payload.get("phase1_runtime_market_data_authority") is True
 
 
 def _feature_builder_requested(config: TrackBStrategyPaperRunnerConfig) -> bool:

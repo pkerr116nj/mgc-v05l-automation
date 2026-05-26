@@ -24,6 +24,11 @@ from .track_b_paper_autonomous_recovery_planner import DEFAULT_PAPER_AUTONOMOUS_
 from .track_b_pre_action_snapshot_validator import DEFAULT_CONTROL_PLANE_SNAPSHOT_ARTIFACT
 from .track_b_runtime_safe_state_envelope import DEFAULT_RUNTIME_SAFE_STATE_ENVELOPE_ARTIFACT
 from .track_b_runtime_supervisor_authority import DEFAULT_RUNTIME_SUPERVISOR_AUTHORITY_ARTIFACT
+from .track_b_atomic_io import write_json_atomic
+from .track_b_strategy_managed_paper_lifecycle import (
+    ACTION_STRATEGY_MANAGED_ENTRY_SUBMIT,
+    PLAN_STRATEGY_MANAGED_ENTRY_SUBMIT,
+)
 from .track_b_strategy_paper_runner import (
     DEFAULT_TRACK_B_STRATEGY_PAPER_RUNNER_OUTPUT_ROOT,
     TrackBStrategyPaperRunnerConfig,
@@ -128,6 +133,12 @@ class TrackBMultiStrategyRuntimeCycleConfig:
     paper_exit_price_offset_ticks: int = 2
     pricing_context_json: Path | None = None
     pricing_context_payload: Mapping[str, object] | None = None
+    mgc_pricing_context_json: Path | None = Path(
+        "outputs/track_b_execution_core/phase1_runtime_market_data/MGC/1m/latest_runtime_candles.json"
+    )
+    mnq_pricing_context_json: Path | None = Path(
+        "outputs/track_b_execution_core/phase1_runtime_market_data/MNQ/1m/latest_runtime_candles.json"
+    )
     live_quote_report_json: Path | None = None
     live_quote_report_payload: Mapping[str, object] | None = None
     max_pricing_context_age_seconds: int = 120
@@ -153,6 +164,7 @@ class TrackBMultiStrategyRuntimeCycleConfig:
     control_plane_snapshot_max_age_seconds: int = 300
     expected_control_plane_snapshot_id: str | None = None
     expected_shared_truth_generation_id: str | None = None
+    managed_lifecycle_id: str | None = None
 
 
 @dataclass(frozen=True)
@@ -242,7 +254,12 @@ def run_track_b_multi_strategy_runtime_cycle(
                 primary_blocker = "Chosen strategy candidate did not map back to a cycle input envelope."
                 required_next_action = "Review multi-strategy cycle artifacts before any PAPER retry."
             else:
-                paper_order_parameters = _resolve_paper_order_parameters(config, chosen_signal or {}, actual_now)
+                chosen_paper_config = _paper_config_for_chosen_signal(config, chosen_signal or {})
+                paper_order_parameters = _resolve_paper_order_parameters(
+                    chosen_paper_config,
+                    chosen_signal or {},
+                    actual_now,
+                )
                 if paper_order_parameters.get("paper_order_parameter_blocker"):
                     verdict = TrackBMultiStrategyRuntimeCycleVerdict.ARBITRATION_BLOCKED
                     primary_blocker = paper_order_parameters.get("paper_order_parameter_blocker")
@@ -257,13 +274,32 @@ def run_track_b_multi_strategy_runtime_cycle(
                         "continue observe/evaluate mode and refresh shared control-plane evidence before retry."
                     )
                 else:
+                    authorized_paper_config = replace(
+                        chosen_paper_config,
+                        runtime_generation_id=str(cycle_authority.get("runtime_generation_id") or ""),
+                    )
+                    managed_lifecycle_id = (
+                        authorized_paper_config.managed_lifecycle_id
+                        or f"strategy_managed_{actual_cycle_id}_{str(chosen_input.strategy_id).lower()}"
+                    )
+                    strategy_submit_plan_path = _write_strategy_submit_plan(
+                        config=authorized_paper_config,
+                        now=actual_now,
+                        plan_dir=report_json.parent,
+                        cycle_authority=cycle_authority,
+                        chosen_input=chosen_input,
+                        chosen_signal=chosen_signal or {},
+                        paper_order_parameters=paper_order_parameters,
+                        managed_lifecycle_id=managed_lifecycle_id,
+                    )
                     paper_config = replace(
-                        config,
+                        authorized_paper_config,
                         manual_open_limit_price=str(paper_order_parameters["open_limit_price"]),
                         manual_close_limit_price=str(paper_order_parameters["close_limit_price"]),
+                        managed_lifecycle_id=managed_lifecycle_id,
                         runtime_generation_id=str(cycle_authority.get("runtime_generation_id") or ""),
                         control_plane_snapshot_path=Path(str(cycle_authority["source_artifact_paths"]["control_plane_snapshot"])),
-                        autonomous_recovery_plan_path=Path(str(cycle_authority["source_artifact_paths"]["autonomous_recovery_plan"])),
+                        autonomous_recovery_plan_path=strategy_submit_plan_path,
                         runtime_supervisor_authority_path=Path(str(cycle_authority["source_artifact_paths"]["runtime_supervisor_authority"])),
                         runtime_safe_state_envelope_path=Path(str(cycle_authority["source_artifact_paths"]["runtime_safe_state_envelope"])),
                         expected_control_plane_snapshot_id=str(cycle_authority.get("control_plane_snapshot_id") or ""),
@@ -272,6 +308,8 @@ def run_track_b_multi_strategy_runtime_cycle(
                     paper_result = actual_stages.paper_runner(paper_config, chosen_input, chosen_signal or {})
                     paper_order_parameters["paper_runner_config_open_limit_price"] = paper_config.manual_open_limit_price
                     paper_order_parameters["paper_runner_config_close_limit_price"] = paper_config.manual_close_limit_price
+                    paper_order_parameters["strategy_submit_plan_path"] = str(strategy_submit_plan_path)
+                    paper_order_parameters["managed_lifecycle_id"] = managed_lifecycle_id
                     verdict = _paper_result_cycle_verdict(paper_result)
                     primary_blocker = paper_result.report.get("primary_blocker")
                     required_next_action = str(paper_result.report.get("required_next_action") or "Review strategy PAPER runner report.")
@@ -404,6 +442,8 @@ def _run_strategy_paper_runner(
             confirm_paper_submit=config.confirm_paper_submit,
             manual_open_limit_price=config.manual_open_limit_price,
             manual_close_limit_price=config.manual_close_limit_price,
+            current_quote_report_json=config.pricing_context_json,
+            current_quote_report_payload=_pricing_context(config),
             paper_execution_path=config.paper_execution_path,
             managed_exit_policy_id=config.managed_exit_policy_id,
             runtime_decision_source="DATABENTO_LIVE_ARTIFACT",
@@ -425,8 +465,133 @@ def _run_strategy_paper_runner(
             runtime_safe_state_envelope_path=config.runtime_safe_state_envelope_path,
             expected_control_plane_snapshot_id=config.expected_control_plane_snapshot_id,
             expected_shared_truth_generation_id=config.expected_shared_truth_generation_id,
+            managed_lifecycle_id=config.managed_lifecycle_id,
         )
     )
+
+
+def _paper_config_for_chosen_signal(
+    config: TrackBMultiStrategyRuntimeCycleConfig,
+    chosen_signal: Mapping[str, object],
+) -> TrackBMultiStrategyRuntimeCycleConfig:
+    instrument = str(
+        chosen_signal.get("strategy_registry_instrument_family")
+        or chosen_signal.get("instrument_family")
+        or chosen_signal.get("symbol")
+        or ""
+    ).upper()
+    if instrument == "MNQ":
+        return replace(
+            config,
+            contract_key="MNQ-202606",
+            allowlisted_local_symbol="MNQM6",
+            con_id=770561201,
+            tick_size="0.25",
+            pricing_context_json=config.mnq_pricing_context_json or config.pricing_context_json,
+        )
+    if instrument == "MGC":
+        return replace(
+            config,
+            contract_key="MGC-202606",
+            allowlisted_local_symbol="MGCM6",
+            con_id=712565978,
+            tick_size="0.1",
+            pricing_context_json=config.mgc_pricing_context_json or config.pricing_context_json,
+        )
+    return config
+
+
+def _write_strategy_submit_plan(
+    *,
+    config: TrackBMultiStrategyRuntimeCycleConfig,
+    now: datetime,
+    plan_dir: Path,
+    cycle_authority: Mapping[str, object],
+    chosen_input: TrackBMultiStrategyInput,
+    chosen_signal: Mapping[str, object],
+    paper_order_parameters: Mapping[str, object],
+    managed_lifecycle_id: str,
+) -> Path:
+    target_identity = _strategy_managed_entry_target_identity(
+        config=config,
+        chosen_input=chosen_input,
+        chosen_signal=chosen_signal,
+        paper_order_parameters=paper_order_parameters,
+        managed_lifecycle_id=managed_lifecycle_id,
+    )
+    plan_path = plan_dir / "track_b_strategy_managed_entry_submit_plan.json"
+    payload = {
+        "schema_version": "track_b_strategy_managed_submit_plan_v1",
+        "generated_at": now.isoformat(),
+        "classification": PLAN_STRATEGY_MANAGED_ENTRY_SUBMIT,
+        "control_plane_snapshot_id": cycle_authority.get("control_plane_snapshot_id"),
+        "shared_truth_refresh_generation_id": cycle_authority.get("shared_truth_generation_id"),
+        "runtime_supervisor_decision_id": cycle_authority.get("runtime_supervisor_decision_id"),
+        "supervisor_classification": cycle_authority.get("runtime_supervisor_classification"),
+        "execution_enabled": False,
+        "live_money_eligible": False,
+        "paper_proof_invoked": False,
+        "proposed_actions": [
+            {
+                "action_id": f"strategy_managed_entry_submit_{managed_lifecycle_id}",
+                "action_type": ACTION_STRATEGY_MANAGED_ENTRY_SUBMIT,
+                "target_identity": target_identity,
+                "reason": "Guarded PAPER strategy-managed entry submit selected by Track B multi-strategy arbitration.",
+                "required_preconditions": [
+                    "CONTROL_PLANE_SNAPSHOT_READY",
+                    "SAFE_STATE_NORMAL",
+                    "generation-scoped submit authorization",
+                    "managed lifecycle submitter",
+                ],
+                "prohibited_actions": ["paper_proof", "live_money", "broad_cancel", "flatten"],
+                "would_mutate_broker": True,
+                "would_mutate_lifecycle": True,
+                "would_restart_runtime": False,
+                "execution_enabled": False,
+            }
+        ],
+        "source_artifact_paths": dict(cycle_authority.get("source_artifact_paths") or {}),
+    }
+    write_json_atomic(plan_path, payload)
+    return plan_path
+
+
+def _strategy_managed_entry_target_identity(
+    *,
+    config: TrackBMultiStrategyRuntimeCycleConfig,
+    chosen_input: TrackBMultiStrategyInput,
+    chosen_signal: Mapping[str, object],
+    paper_order_parameters: Mapping[str, object],
+    managed_lifecycle_id: str,
+) -> dict[str, str]:
+    instrument = str(
+        chosen_signal.get("strategy_registry_instrument_family")
+        or chosen_signal.get("instrument_family")
+        or ("MNQ" if str(config.contract_key).startswith("MNQ-") else "MGC")
+    )
+    managed_exit_policy_id = (
+        chosen_signal.get("strategy_registry_managed_exit_policy_id")
+        or config.managed_exit_policy_id
+        or "PAPER_DIAGNOSTIC_TIME_BOXED_3X5M_EXIT_V1"
+    )
+    values = {
+        "account_id": config.account_id,
+        "strategy_id": chosen_input.strategy_id,
+        "lane_id": chosen_input.lane_id,
+        "runtime_generation_id": config.runtime_generation_id,
+        "lifecycle_id": managed_lifecycle_id,
+        "intent_kind": "OPEN",
+        "symbol": instrument,
+        "contract": config.allowlisted_local_symbol,
+        "contract_key": config.contract_key,
+        "con_id": config.con_id,
+        "action": paper_order_parameters.get("order_action"),
+        "quantity": config.quantity,
+        "order_type": "LMT",
+        "limit_price": paper_order_parameters.get("open_limit_price"),
+        "managed_exit_policy_id": managed_exit_policy_id,
+    }
+    return {str(key): str(value) for key, value in values.items() if value not in {None, ""}}
 
 
 def _strategy_inputs(config: TrackBMultiStrategyRuntimeCycleConfig) -> tuple[TrackBMultiStrategyInput, ...]:
@@ -678,6 +843,8 @@ def _candidate_from_report(report: Mapping[str, object]) -> dict[str, object]:
         "decision": report.get("decision"),
         "paper_eligible": report.get("strategy_registry_paper_eligible"),
         "live_money_eligible": report.get("strategy_registry_live_money_eligible"),
+        "strategy_registry_instrument_family": report.get("strategy_registry_instrument_family"),
+        "strategy_registry_managed_exit_policy_id": report.get("strategy_registry_managed_exit_policy_id"),
         "strategy_rule_report_path": report.get("report_json_path"),
     }
 
@@ -1003,8 +1170,11 @@ def _pricing_context(config: TrackBMultiStrategyRuntimeCycleConfig) -> Mapping[s
         return config.pricing_context_payload
     if config.pricing_context_json is None:
         return {}
+    path = Path(config.pricing_context_json)
+    if not path.is_absolute():
+        path = Path(config.repo_root) / path
     try:
-        value = json.loads(Path(config.pricing_context_json).read_text(encoding="utf-8"))
+        value = json.loads(path.read_text(encoding="utf-8"))
     except (FileNotFoundError, json.JSONDecodeError, OSError):
         return {}
     return value if isinstance(value, Mapping) else {}
@@ -1015,8 +1185,11 @@ def _live_quote_context(config: TrackBMultiStrategyRuntimeCycleConfig) -> Mappin
         return config.live_quote_report_payload
     if config.live_quote_report_json is None:
         return {}
+    path = Path(config.live_quote_report_json)
+    if not path.is_absolute():
+        path = Path(config.repo_root) / path
     try:
-        value = json.loads(Path(config.live_quote_report_json).read_text(encoding="utf-8"))
+        value = json.loads(path.read_text(encoding="utf-8"))
     except (FileNotFoundError, json.JSONDecodeError, OSError):
         return {}
     return value if isinstance(value, Mapping) else {}
@@ -1030,7 +1203,16 @@ def _pricing_context_blocker(
 ) -> str | None:
     if not context:
         return "Fresh Live pricing context JSON/payload is required for automatic PAPER order pricing."
-    if context.get("fresh_for_execution") is not True or context.get("runtime_candle_context_ready") is not True:
+    phase1_ready = (
+        context.get("source") == "DATABENTO_REALTIME_PHASE1"
+        and context.get("realtime_feed_confirmed") is True
+        and str(context.get("realtime_feed_block_reason") or "").upper() == "READY"
+        and context.get("completed_candles_only") is True
+    )
+    if (
+        not phase1_ready
+        and (context.get("fresh_for_execution") is not True or context.get("runtime_candle_context_ready") is not True)
+    ):
         return "Live pricing context must be fresh_for_execution=true and runtime_candle_context_ready=true."
     expected = {
         "contract_key": config.contract_key,
@@ -1041,7 +1223,12 @@ def _pricing_context_blocker(
         observed = context.get(key)
         if observed is not None and str(observed) != str(expected_value):
             return f"Live pricing context {key} mismatch: expected {expected_value}, observed {observed}."
-    age = _optional_decimal(context.get("latest_1m_age_seconds") or context.get("latest_1m_candle_age_seconds"))
+    age = _optional_decimal(
+        context.get("latest_1m_age_seconds")
+        or context.get("latest_1m_candle_age_seconds")
+        or context.get("latest_bar_age_seconds")
+        or context.get("freshness_seconds")
+    )
     if age is None:
         latest_timestamp = _latest_context_timestamp(context)
         if latest_timestamp is not None:
@@ -1057,12 +1244,17 @@ def _pricing_context_blocker(
 
 
 def _latest_context_timestamp(context: Mapping[str, object]) -> datetime | None:
-    raw = context.get("candle_timestamp") or context.get("last_candle_timestamp") or context.get("latest_1m_timestamp")
-    candles = context.get("candles") or context.get("candle_history")
+    raw = (
+        context.get("candle_timestamp")
+        or context.get("last_candle_timestamp")
+        or context.get("latest_1m_timestamp")
+        or context.get("last_completed_bar_ts")
+    )
+    candles = context.get("candles") or context.get("candle_history") or context.get("bars")
     if isinstance(candles, list) and candles:
         latest = candles[-1]
         if isinstance(latest, Mapping):
-            raw = latest.get("candle_timestamp") or latest.get("timestamp") or raw
+            raw = latest.get("candle_timestamp") or latest.get("timestamp") or latest.get("bar_end") or raw
     if not raw:
         return None
     try:
@@ -1078,7 +1270,7 @@ def _latest_last_price(context: Mapping[str, object]) -> Decimal | None:
     direct = _decimal_from_first(context, ("last", "last_price", "close"))
     if direct is not None:
         return direct
-    candles = context.get("candles") or context.get("candle_history")
+    candles = context.get("candles") or context.get("candle_history") or context.get("bars")
     if isinstance(candles, list) and candles:
         latest = candles[-1]
         if isinstance(latest, Mapping):

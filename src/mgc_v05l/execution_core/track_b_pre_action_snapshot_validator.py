@@ -174,9 +174,15 @@ def validate_track_b_pre_action_snapshot(
 
     plan_snapshot_id = str(plan.get("control_plane_snapshot_id") or "")
     plan_generation_id = str(plan.get("shared_truth_refresh_generation_id") or "")
-    if not plan or plan_snapshot_id != base["control_plane_snapshot_id"]:
+    embedded_plan_handoff = _snapshot_embeds_scoped_cleanup_plan(
+        snapshot=snapshot,
+        plan=plan,
+        expected_plan_classification=expected_plan_classification,
+        expected_action_type=expected_action_type,
+    )
+    if not plan or (plan_snapshot_id != base["control_plane_snapshot_id"] and not embedded_plan_handoff):
         return _result(base, PRE_ACTION_BLOCKED_PLAN_MISMATCH, "Planner does not reference the active snapshot id.")
-    if plan_generation_id != base["shared_truth_refresh_generation_id"]:
+    if plan_generation_id != base["shared_truth_refresh_generation_id"] and not embedded_plan_handoff:
         return _result(base, PRE_ACTION_BLOCKED_PLAN_MISMATCH, "Planner does not reference the active generation id.")
     if plan.get("classification") != expected_plan_classification:
         return _result(base, PRE_ACTION_BLOCKED_PLAN_MISMATCH, "Planner classification does not match expected action.")
@@ -218,6 +224,38 @@ def _find_action(plan: Mapping[str, Any], expected_action_type: str) -> dict[str
         if isinstance(action, Mapping) and action.get("action_type") == expected_action_type:
             return dict(action)
     return {}
+
+
+def _snapshot_embeds_scoped_cleanup_plan(
+    *,
+    snapshot: Mapping[str, Any],
+    plan: Mapping[str, Any],
+    expected_plan_classification: str,
+    expected_action_type: str,
+) -> bool:
+    """Allow one Control Plane handoff cycle for exact scoped cleanup actions.
+
+    Control Plane Snapshot is the coherent pre-action packet. For scoped cleanup
+    actions such as managed order modify, Control Plane may be rebuilt after the
+    planner, embedding the planner result while assigning a new snapshot id. Do
+    not relax this for runtime retry or other future executor paths.
+    """
+    if expected_action_type != "MANAGED_ORDER_MODIFY":
+        return False
+    if snapshot.get("self_recover_autonomous_recovery_plan_classification") != expected_plan_classification:
+        return False
+    if snapshot.get("autonomous_recovery_next_action") != expected_action_type:
+        return False
+    if plan.get("classification") != expected_plan_classification:
+        return False
+    if not _find_action(plan, expected_action_type):
+        return False
+    return (
+        str(plan.get("control_plane_snapshot_id") or "")
+        == str(snapshot.get("self_recover_control_plane_snapshot_id") or "")
+        and str(plan.get("shared_truth_refresh_generation_id") or "")
+        == str(snapshot.get("self_recover_shared_truth_generation_id") or "")
+    )
 
 
 def _duplicate_writer(*payloads: Mapping[str, Any]) -> bool:

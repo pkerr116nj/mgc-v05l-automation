@@ -547,6 +547,25 @@ def test_close_mode_requires_sell_and_classifies_close_outcomes() -> None:
     assert _classify_submit_lifecycle(_CLOSE_TEST_MODE, "close_position_not_flat") == "PAPER_CLOSE_UNKNOWN_NEEDS_MANUAL_TWS_REVIEW"
 
 
+def test_fill_mode_allows_sell_to_open_for_guarded_leak_test() -> None:
+    guardrails = _submit_input_guardrails(
+        {
+            "symbol": "MGC",
+            "expiry": "202606",
+            "action": "SELL",
+            "quantity": 1.0,
+            "order_type": "LMT",
+            "limit_price": 4639.7,
+            "time_in_force": "DAY",
+        },
+        test_mode=_FILL_TEST_MODE,
+        require_limit_price=True,
+    )
+
+    assert guardrails["supported_action"]["passed"] is True
+    assert "BUY or SELL" in guardrails["supported_action"]["detail"]
+
+
 def test_close_mode_derives_marketable_limit_below_delayed_bid() -> None:
     limit_price = _derive_marketable_limit_price(
         quote_context={"bid_price": 4608.5, "last_price": 4608.6},
@@ -611,6 +630,46 @@ def test_runtime_execution_pricing_context_makes_delayed_quote_diagnostic_only()
     assert delayed_quote_fresh["blocking"] is False
     assert runtime_source["passed"] is True
     assert marketable["passed"] is True
+
+
+def test_runtime_execution_pricing_context_handles_sell_to_open_marketability() -> None:
+    config = _config(
+        test_mode=_FILL_TEST_MODE,
+        limit_price=4562.4,
+        execution_pricing_context={
+            "execution_price_source": "RUNTIME_DATABENTO_1M_CLOSE",
+            "runtime_last_or_close": 4564.0,
+            "runtime_candle_timestamp": "2026-05-25T13:28:00+00:00",
+            "runtime_data_age_seconds": 30.0,
+            "live_money_eligible": False,
+        },
+    )
+    pricing_context = _build_delayed_quote_pricing_context(
+        config=config,
+        requested_order={
+            "symbol": "MGC",
+            "expiry": "202606",
+            "action": "SELL",
+            "quantity": 1.0,
+            "order_type": "LMT",
+            "limit_price": 4562.4,
+            "time_in_force": "DAY",
+        },
+        context={
+            "quote_context": manual_submit_module._runtime_execution_quote_context(config=config),
+            "contract_report": {"api_contract_details": [{"min_tick": 0.1}]},
+        },
+    )
+
+    checks = _delayed_quote_pricing_guardrails(pricing_context)
+    marketable = next(row for row in checks if row["name"] == "marketable_limit_intended_to_fill")
+
+    assert pricing_context["requested_action"] == "SELL"
+    assert pricing_context["reference_price"] == 4564.0
+    assert pricing_context["reference_price_source"] == "runtime_last_or_close"
+    assert round(float(pricing_context["distance_ticks"]), 4) == 16.0
+    assert marketable["passed"] is True
+    assert "SELL 1 MGC" in marketable["detail"]
 
 
 def test_exact_contract_position_quantity_matches_local_symbol_and_expiry() -> None:
@@ -1260,6 +1319,56 @@ def test_paper_fill_test_uses_ask_side_marketable_limit_for_buy(monkeypatch, tmp
     assert preview["pricing_label"] == "MARKETABLE_LIMIT_INTENDED_TO_FILL_IN_PAPER"
     assert preview["intended_to_fill"] is True
     assert artifact_stem_for_test_mode(_FILL_TEST_MODE) in str(frozen_path)
+
+
+def test_runtime_execution_pricing_preview_does_not_require_broker_quote(monkeypatch) -> None:
+    captured: dict[str, object] = {}
+
+    monkeypatch.setattr(
+        "mgc_v05l.execution.ibkr_manual_paper_submit._build_runtime",
+        lambda **_: SimpleNamespace(
+            transport=SimpleNamespace(connect=lambda: None, disconnect=lambda: None),
+            session=SimpleNamespace(state=SimpleNamespace(connected=True)),
+            collector=SimpleNamespace(latest_error=lambda **kwargs: None, errors=[]),
+            client=SimpleNamespace(),
+        ),
+    )
+    monkeypatch.setattr("mgc_v05l.execution.ibkr_manual_paper_submit._start_runtime", lambda runtime: None)
+    monkeypatch.setattr("mgc_v05l.execution.ibkr_manual_paper_submit._wait_for_connection_ready", lambda **_: True)
+
+    def fake_context(**kwargs):
+        config = kwargs["config"]
+        captured["collect_quote"] = kwargs["collect_quote"]
+        context = _context()
+        context["quote_context"] = manual_submit_module._runtime_execution_quote_context(config=config)
+        return context
+
+    monkeypatch.setattr(
+        "mgc_v05l.execution.ibkr_manual_paper_submit._collect_truth_and_preview_context",
+        fake_context,
+    )
+
+    artifacts = run_ibkr_manual_paper_submit_test(
+        config=_config(
+            submit=False,
+            test_mode=_FILL_TEST_MODE,
+            limit_price=4640.1,
+            execution_pricing_context={
+                "execution_price_source": "RUNTIME_DATABENTO_1M_CLOSE",
+                "runtime_last_or_close": 4640.0,
+                "runtime_candle_timestamp": datetime.now(timezone.utc).isoformat(),
+                "source_artifact_path": "outputs/track_b_execution_core/phase1_runtime_market_data/MGC/1m/latest_runtime_candles.json",
+            },
+        ),
+        stack_provider=_manual_stack,
+    )
+
+    assert captured["collect_quote"] is False
+    assert artifacts.classification == "IBKR_MANUAL_PAPER_FILL_TEST_PARTIAL"
+    preview = artifacts.report["preview"]
+    assert preview["quote_source_label"] == "PHASE1_RUNTIME_MARKET_DATA"
+    assert preview["reference_price_source"] == "runtime_last_or_close"
+    assert preview["limit_price"] == 4640.1
 
 
 def test_fill_timeout_invokes_cancel_path(monkeypatch) -> None:
