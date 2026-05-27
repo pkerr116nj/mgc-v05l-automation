@@ -80,6 +80,7 @@ The audit artifact exposes read-only context for:
 - Managed lifecycle reports: `position_intent`, `trade_thesis`, `hold_policy`, `exit_policy`
 - Shadow Exit Policy v2 recommendations: `expected_hold_type`, `invalidation_conditions`, `attribution_tags`
 - Hold-State / Exit-Selection Shadow Engine v1: `thesis_type`, `expected_hold_bars_5m`, `invalidation_conditions`, `intended_exit_family`
+- Strategy Hold/Exit Policy Registry v1: `hold_policy_id`, `exit_policy_family`, `order_policy_id`, `participation_decay_inputs`
 
 These integrations are diagnostic-only until a separate enforcement gate is designed and approved.
 

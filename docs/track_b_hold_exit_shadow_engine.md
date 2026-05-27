@@ -34,6 +34,7 @@ It is diagnostic only. It does not submit, cancel, close, modify, flatten, mutat
 - Session and regime labels when available.
 - ATP, participation, or MicroTrend shadow state when present in the input artifact.
 - Actual current managed exit policy for context.
+- Strategy Hold/Exit Policy Registry v1 context, including `hold_policy_id`, `exit_policy_family`, `profit_harvest_policy`, `thesis_failure_conditions`, and `participation_decay_inputs`.
 
 ## Decision Order
 

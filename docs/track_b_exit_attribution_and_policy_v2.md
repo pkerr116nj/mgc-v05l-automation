@@ -47,6 +47,7 @@ Status: research/shadow only. No broker, order, lifecycle, live-money, or paper_
 ## Hold-State / Exit-Selection Shadow Engine v1
 - Dedicated artifact: `outputs/track_b_execution_core/research_shadow/latest_hold_exit_shadow_recommendations.json`
 - Uses `PositionIntent` / `TradeThesis` metadata as read-only context.
+- Uses Strategy Hold/Exit Policy Registry v1 metadata as read-only context for policy family attribution.
 - Produces `HOLD`, `EXTEND_HOLD`, `HARVEST`, `EXIT_DECAY`, `EXIT_THESIS_FAILURE`, `TIMEBOX_EXIT`, or `NO_RECOMMENDATION`.
 - Excludes `BUG_FIX_EXIT` trades from alpha-exit learning by default.
 - Does not change managed-exit roster behavior or live exit authority.

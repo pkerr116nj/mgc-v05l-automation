@@ -26,6 +26,9 @@ from mgc_v05l.execution_core.track_b_exit_strategy_roster import (
 from mgc_v05l.execution_core.track_b_strategy_managed_paper_lifecycle import (
     PYRAMIDING_NOT_ALLOWED_REVIEW_REQUIRED,
 )
+from mgc_v05l.execution_core.track_b_strategy_hold_exit_policy_registry import (
+    strategy_hold_exit_policy_for,
+)
 
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
@@ -503,6 +506,7 @@ def build_position_intent_contract_audit(
             {
                 **validation,
                 "position_intent": _to_payload(intent),
+                "strategy_hold_exit_policy": strategy_hold_exit_policy_for(strategy_id),
             }
         )
 
@@ -539,6 +543,8 @@ def build_position_intent_contract_audit(
             "hold_exit_shadow_engine": {
                 "mode": "read_only_context",
                 "fields": [
+                    "hold_policy_id",
+                    "exit_policy_family",
                     "thesis_type",
                     "expected_hold_type",
                     "expected_hold_bars_5m",

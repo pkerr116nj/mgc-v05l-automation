@@ -29,6 +29,7 @@ from mgc_v05l.execution_core.track_b_position_intent_contract import (
     build_position_intent_contract_audit,
     position_intent_from_template,
 )
+from mgc_v05l.execution_core.track_b_strategy_hold_exit_policy_registry import strategy_hold_exit_policy_for
 
 
 NOW = datetime(2026, 5, 27, 14, 0, tzinfo=UTC)
@@ -50,6 +51,8 @@ def test_strong_participation_with_favorable_mfe_extends_hold() -> None:
 
     assert result["hold_state"] == HOLD_EXTEND_PARTICIPATION_STRONG
     assert result["recommendation"] == EXTEND_HOLD
+    assert result["hold_policy_id"] == "ASIAN_DRIFT_PARTICIPATION_HOLD_SHADOW_V1"
+    assert result["exit_policy_family"] == "TIME_BOX_PLUS_PARTICIPATION_DECAY_SHADOW"
     assert result["submit_allowed"] is False
     assert result["broker_mutation_allowed"] is False
     assert result["lifecycle_authority"] is False
@@ -185,6 +188,7 @@ def test_bug_fix_exits_are_excluded_from_alpha_learning(tmp_path: Path) -> None:
     assert payload["summary"]["skipped_bug_fix_exit_count"] == 1
     assert payload["summary"]["closed_alpha_recommendation_count"] == 1
     assert payload["closed_alpha_exit_recommendations"][0]["trade_id"] == "alpha"
+    assert payload["closed_alpha_exit_recommendations"][0]["hold_policy_id"] == "ASIAN_DRIFT_PARTICIPATION_HOLD_SHADOW_V1"
     assert payload["submit_allowed"] is False
     assert payload["broker_mutation_allowed"] is False
     assert payload["lifecycle_authority"] is False
@@ -192,7 +196,9 @@ def test_bug_fix_exits_are_excluded_from_alpha_learning(tmp_path: Path) -> None:
 
 def _intent_payload(strategy_id: str) -> dict:
     intent = position_intent_from_template(APPROVED_TRACK_B_POSITION_INTENT_TEMPLATES[strategy_id])
-    return json.loads(json.dumps(intent, default=lambda value: getattr(value, "__dict__", str(value))))
+    payload = json.loads(json.dumps(intent, default=lambda value: getattr(value, "__dict__", str(value))))
+    payload["strategy_hold_exit_policy"] = strategy_hold_exit_policy_for(strategy_id)
+    return payload
 
 
 def _write_json(path: Path, payload: dict) -> None:

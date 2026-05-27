@@ -25,6 +25,9 @@ from mgc_v05l.execution_core.track_b_exit_attribution_policy_v2 import (
 from mgc_v05l.execution_core.track_b_position_intent_contract import (
     DEFAULT_OUTPUT_PATH as DEFAULT_POSITION_INTENT_AUDIT_PATH,
 )
+from mgc_v05l.execution_core.track_b_strategy_hold_exit_policy_registry import (
+    strategy_hold_exit_policy_for,
+)
 
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
@@ -123,6 +126,7 @@ def evaluate_hold_exit_shadow(
     completed_bars = _int(evidence.get("completed_5m_bars_since_entry"))
     max_bars = _int(_nested(position_intent, "hold_policy", "expected_hold_bars_5m")) or _max_bars_from_policy(
         _nested(position_intent, "hold_policy", "max_hold_policy")
+        or _nested(position_intent, "strategy_hold_exit_policy", "max_hold_policy")
     )
     current_net = _decimal(evidence.get("current_net_points"))
     mfe = _decimal(evidence.get("mfe_points"))
@@ -314,6 +318,15 @@ def _recommendation(
         "expected_hold_type": _nested(position_intent, "hold_policy", "expected_hold_type"),
         "actual_exit_policy": evidence.get("actual_exit_policy")
         or _nested(position_intent, "exit_policy", "managed_exit_policy_id"),
+        "hold_policy_id": _nested(position_intent, "strategy_hold_exit_policy", "hold_policy_id"),
+        "exit_policy_family": _nested(position_intent, "strategy_hold_exit_policy", "exit_policy_family"),
+        "profit_harvest_policy": _nested(position_intent, "strategy_hold_exit_policy", "profit_harvest_policy"),
+        "thesis_failure_conditions": _nested(
+            position_intent, "strategy_hold_exit_policy", "thesis_failure_conditions"
+        ),
+        "participation_decay_inputs": _nested(
+            position_intent, "strategy_hold_exit_policy", "participation_decay_inputs"
+        ),
         "hold_state": hold_state,
         "recommendation": recommendation,
         "basis": list(basis),
@@ -354,8 +367,12 @@ def _intents_by_strategy(audit: Mapping[str, Any]) -> dict[tuple[str, str], dict
         intent = row.get("position_intent")
         if not isinstance(intent, Mapping):
             continue
+        strategy_policy = row.get("strategy_hold_exit_policy")
+        intent = dict(intent)
+        if isinstance(strategy_policy, Mapping):
+            intent["strategy_hold_exit_policy"] = dict(strategy_policy)
         key = (str(intent.get("strategy_id") or ""), str(intent.get("lane_id") or ""))
-        result[key] = dict(intent)
+        result[key] = intent
     return result
 
 
@@ -366,13 +383,18 @@ def _intent_for_position(
     strategy_id = str(position.get("strategy_id") or "")
     lane_id = str(position.get("lane_id") or "")
     if (strategy_id, lane_id) in intents_by_strategy:
-        return dict(intents_by_strategy[(strategy_id, lane_id)])
+        intent = dict(intents_by_strategy[(strategy_id, lane_id)])
+        intent.setdefault("strategy_hold_exit_policy", strategy_hold_exit_policy_for(strategy_id))
+        return intent
     for (known_strategy, _known_lane), intent in intents_by_strategy.items():
         if known_strategy == strategy_id:
-            return dict(intent)
+            matched = dict(intent)
+            matched.setdefault("strategy_hold_exit_policy", strategy_hold_exit_policy_for(strategy_id))
+            return matched
     return {
         "strategy_id": strategy_id,
         "lane_id": lane_id,
+        "strategy_hold_exit_policy": strategy_hold_exit_policy_for(strategy_id),
         "instrument_family": position.get("instrument_family") or position.get("instrument") or position.get("symbol"),
         "side": _position_side(position),
         "quantity": position.get("quantity") or position.get("qty") or position.get("position"),

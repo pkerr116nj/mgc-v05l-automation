@@ -86,6 +86,8 @@ def test_current_roster_contract_audit_is_read_only(tmp_path: Path) -> None:
     assert payload["lifecycle_authority"] is False
     assert payload["integration_targets"]["exit_attribution_framework"]["mode"] == "read_only_context"
     assert payload["integration_targets"]["hold_exit_shadow_engine"]["mode"] == "read_only_context"
+    assert payload["strategies"][0]["strategy_hold_exit_policy"]["hold_policy_id"]
+    assert payload["strategies"][0]["strategy_hold_exit_policy"]["submit_allowed"] is False
 
 
 def test_roster_strategy_without_contract_template_reports_gap(tmp_path: Path) -> None:
