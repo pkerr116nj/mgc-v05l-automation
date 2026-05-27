@@ -964,6 +964,15 @@ def _build_track_b_trading_authority_surface(*, paper: dict[str, Any]) -> dict[s
         _track_b_authority_row(row, None, broker_authoritative=False)
         for row in shadow_only_rows
     ]
+    remaining_shadow_only_exceptions = list(promotion_report.get("remaining_shadow_only_exceptions") or [])
+    broker_side_counts = _track_b_authority_side_counts(broker_rows)
+    broker_session_coverage = _track_b_authority_session_coverage(broker_rows)
+    atp_rows = [row for row in broker_rows if str(row.get("strategy_id") or "").startswith("atp_companion_v1__paper_")]
+    london_late_rows = [
+        row
+        for row in broker_rows
+        if "LONDON_LATE" in {str(part).strip().upper() for part in str(row.get("session") or "").split("/")}
+    ]
     return {
         "schema_version": "operator_track_b_trading_authority_v1",
         "classification": (
@@ -975,7 +984,27 @@ def _build_track_b_trading_authority_surface(*, paper: dict[str, Any]) -> dict[s
         "live_money_eligible": False,
         "paper_proof_invoked": False,
         "broker_authoritative_count": len(broker_rows),
+        "broker_authoritative_long_count": broker_side_counts["LONG"],
+        "broker_authoritative_short_count": broker_side_counts["SHORT"],
+        "broker_authoritative_side_counts": broker_side_counts,
+        "broker_authoritative_session_coverage": broker_session_coverage,
         "shadow_only_count": len(shadow_rows),
+        "remaining_shadow_only_exception_count": len(remaining_shadow_only_exceptions),
+        "remaining_shadow_only_exceptions": remaining_shadow_only_exceptions,
+        "atp_remediation_status": {
+            "broker_authoritative_count": len(atp_rows),
+            "broker_authoritative_lane_ids": [str(row.get("lane_id") or "") for row in atp_rows],
+            "remaining_shadow_only_exceptions": [
+                row
+                for row in remaining_shadow_only_exceptions
+                if str(row.get("candidate_group") or "").startswith("ATP_")
+            ],
+        },
+        "london_late_coverage_status": {
+            "broker_authoritative_count": len(london_late_rows),
+            "broker_authoritative_lane_ids": [str(row.get("lane_id") or "") for row in london_late_rows],
+            "classification": "LONDON_LATE_GUARDED_PAPER_ACTIVE" if london_late_rows else "LONDON_LATE_NOT_ACTIVE",
+        },
         "deprecated_legacy_authority_surface_count": len(deprecated_legacy_lanes),
         "deprecated_legacy_authority_scope": "DIAGNOSTIC_ONLY_NOT_TRACK_B_PROMOTION_AUTHORITY",
         "broker_authoritative_rows": broker_rows,
@@ -985,6 +1014,7 @@ def _build_track_b_trading_authority_surface(*, paper: dict[str, Any]) -> dict[s
         "status_line": (
             f"{len(broker_rows)} promoted Track B PAPER lane(s) broker-authoritative; "
             f"{len(shadow_rows)} promotion candidate(s) remain shadow-only; "
+            f"{len(remaining_shadow_only_exceptions)} shadow exception group(s) blocked; "
             f"{len(deprecated_legacy_lanes)} legacy lane(s) diagnostic-only for Track B authority."
         ),
         "field_sources": {
@@ -1006,6 +1036,26 @@ def _build_track_b_trading_authority_surface(*, paper: dict[str, Any]) -> dict[s
             "does_not_create_live_money_route",
         ],
     }
+
+
+def _track_b_authority_side_counts(rows: list[dict[str, Any]]) -> dict[str, int]:
+    counts = {"LONG": 0, "SHORT": 0, "UNKNOWN": 0}
+    for row in rows:
+        side = str(row.get("side") or "").upper()
+        if side in {"LONG", "SHORT"}:
+            counts[side] += 1
+        else:
+            counts["UNKNOWN"] += 1
+    return counts
+
+
+def _track_b_authority_session_coverage(rows: list[dict[str, Any]]) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    for row in rows:
+        parts = [part.strip().upper() for part in str(row.get("session") or "").split("/") if part.strip()]
+        for part in parts or ["UNKNOWN"]:
+            counts[part] = counts.get(part, 0) + 1
+    return dict(sorted(counts.items()))
 
 
 def _track_b_authority_row(

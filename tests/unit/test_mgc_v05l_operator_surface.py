@@ -306,7 +306,13 @@ def test_operator_surface_shows_promoted_track_b_paper_authority() -> None:
     authority = surface["track_b_trading_authority"]
     assert authority["classification"] == "TRACK_B_PROMOTED_PAPER_AUTHORITY_ACTIVE"
     assert authority["broker_authoritative_count"] == 1
-    assert authority["shadow_only_count"] == 0
+    assert authority["broker_authoritative_long_count"] == 1
+    assert authority["broker_authoritative_short_count"] == 0
+    assert authority["broker_authoritative_session_coverage"] == {"ASIA": 1}
+    assert authority["shadow_only_count"] == 6
+    assert authority["remaining_shadow_only_exception_count"] == 3
+    assert authority["atp_remediation_status"]["broker_authoritative_count"] == 0
+    assert authority["london_late_coverage_status"]["classification"] == "LONDON_LATE_NOT_ACTIVE"
     assert authority["deprecated_legacy_authority_surface_count"] == 0
     assert authority["deprecated_legacy_authority_scope"] == "DIAGNOSTIC_ONLY_NOT_TRACK_B_PROMOTION_AUTHORITY"
     assert authority["active_runtime_promoted_lane_ids"] == ["mgc_asian_drift_late_join_missing_anchor_long"]
@@ -318,6 +324,74 @@ def test_operator_surface_shows_promoted_track_b_paper_authority() -> None:
     assert row["paper_proof_invoked"] is False
     assert row["timestamp_coherence_required"] is True
     assert surface["trading_authority"] == authority
+
+
+def test_operator_surface_reports_promoted_track_b_side_and_session_coverage() -> None:
+    surface = build_operator_surface(
+        generated_at="2026-05-27T08:00:00+00:00",
+        global_payload={
+            "paper_label": "RUNNING",
+            "current_session_date": "2026-05-27",
+            "market_data_label": "LIVE",
+        },
+        auth_status={"runtime_ready": True},
+        paper={
+            "running": True,
+            "status": {"entries_enabled": True, "operator_halt": False},
+            "readiness": {"runtime_phase": "RUNNING", "entries_enabled": True, "paper_trade_allowed": True},
+            "exceptions": {"exceptions": []},
+            "performance": {},
+            "session_shape": {},
+            "position": {"side": "FLAT"},
+            "approved_models": {"rows": [], "details_by_branch": {}},
+            "non_approved_lanes": {"rows": []},
+            "config_in_force": {
+                "lanes": [
+                    {
+                        "lane_id": "mgc_asian_drift_late_join_missing_anchor_long",
+                        "symbol": "MGC",
+                        "standalone_strategy_id": "ASIAN_DRIFT_LATE_JOIN_MISSING_ANCHOR_LONG_SHADOW_V1",
+                        "runtime_kind": "track_b_rule_runner_paper_strategy_engine",
+                        "session_restriction": "ASIA",
+                        "runtime_overlay_params": {
+                            "strategy_id": "ASIAN_DRIFT_LATE_JOIN_MISSING_ANCHOR_LONG_SHADOW_V1",
+                        },
+                    },
+                    {
+                        "lane_id": "atp_companion_v1_mgc_asia_promotion_edge_v1",
+                        "symbol": "MGC",
+                        "standalone_strategy_id": "atp_companion_v1__paper_mgc_asia__edge_v1",
+                        "runtime_kind": "atp_companion_benchmark_paper",
+                        "session_restriction": "ASIA",
+                        "runtime_overlay_params": {
+                            "strategy_id": "atp_companion_v1__paper_mgc_asia__edge_v1",
+                        },
+                    },
+                    {
+                        "lane_id": "mgc_london_late_pause_resume_short",
+                        "symbol": "MGC",
+                        "standalone_strategy_id": "LONDON_LATE_PAUSE_RESUME_SHORT_V1",
+                        "runtime_kind": "track_b_rule_runner_paper_strategy_engine",
+                        "session_restriction": "LONDON_LATE",
+                        "runtime_overlay_params": {
+                            "strategy_id": "LONDON_LATE_PAUSE_RESUME_SHORT_V1",
+                        },
+                    },
+                ]
+            },
+        },
+        approved_quant_baselines={"rows": []},
+        market_context={"feed_label": "LIVE", "feed_state": "LIVE", "symbols": []},
+        treasury_curve={"feed_label": "LIVE", "feed_state": "LIVE", "rows": []},
+    )
+
+    authority = surface["track_b_trading_authority"]
+    assert authority["broker_authoritative_count"] == 3
+    assert authority["broker_authoritative_long_count"] == 1
+    assert authority["broker_authoritative_short_count"] == 2
+    assert authority["broker_authoritative_session_coverage"] == {"ASIA": 2, "LONDON_LATE": 1}
+    assert authority["atp_remediation_status"]["broker_authoritative_count"] == 1
+    assert authority["london_late_coverage_status"]["classification"] == "LONDON_LATE_GUARDED_PAPER_ACTIVE"
 
 
 def test_operator_surface_runtime_down_is_loud_and_not_route_capable() -> None:
