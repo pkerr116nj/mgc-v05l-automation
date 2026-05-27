@@ -253,6 +253,73 @@ def test_operator_surface_exposes_exact_contract_and_rollup_integrity() -> None:
     assert secondary_context["items"][4]["label"] == "Treasury Curve Prior"
 
 
+def test_operator_surface_shows_promoted_track_b_paper_authority() -> None:
+    surface = build_operator_surface(
+        generated_at="2026-05-27T08:00:00+00:00",
+        global_payload={
+            "paper_label": "RUNNING",
+            "current_session_date": "2026-05-27",
+            "market_data_label": "LIVE",
+        },
+        auth_status={"runtime_ready": True},
+        paper={
+            "running": True,
+            "status": {"entries_enabled": True, "operator_halt": False},
+            "readiness": {
+                "runtime_phase": "RUNNING",
+                "entries_enabled": True,
+                "paper_trade_allowed": True,
+                "lane_status_summary": {
+                    "runtime_lanes_loaded_count": 6,
+                    "route_ready_lanes_count": 6,
+                    "session_eligible_lanes_count": 1,
+                },
+            },
+            "exceptions": {"exceptions": []},
+            "performance": {},
+            "session_shape": {},
+            "position": {"side": "FLAT"},
+            "approved_models": {"rows": [], "details_by_branch": {}},
+            "non_approved_lanes": {"rows": []},
+            "config_in_force": {
+                "lanes": [
+                    {
+                        "lane_id": "mgc_asian_drift_late_join_missing_anchor_long",
+                        "symbol": "MGC",
+                        "standalone_strategy_id": "ASIAN_DRIFT_LATE_JOIN_MISSING_ANCHOR_LONG_SHADOW_V1",
+                        "runtime_kind": "track_b_rule_runner_paper_strategy_engine",
+                        "session_restriction": "ASIA",
+                        "runtime_overlay_params": {
+                            "strategy_id": "ASIAN_DRIFT_LATE_JOIN_MISSING_ANCHOR_LONG_SHADOW_V1",
+                            "require_timestamp_coherence": True,
+                            "input_event_path": "outputs/track_b_execution_core/asian_drift_state/latest_asian_drift_5m_state_snapshot.json",
+                        },
+                    }
+                ]
+            },
+        },
+        approved_quant_baselines={"rows": []},
+        market_context={"feed_label": "LIVE", "feed_state": "LIVE", "symbols": []},
+        treasury_curve={"feed_label": "LIVE", "feed_state": "LIVE", "rows": []},
+    )
+
+    authority = surface["track_b_trading_authority"]
+    assert authority["classification"] == "TRACK_B_PROMOTED_PAPER_AUTHORITY_ACTIVE"
+    assert authority["broker_authoritative_count"] == 1
+    assert authority["shadow_only_count"] == 0
+    assert authority["deprecated_legacy_authority_surface_count"] == 0
+    assert authority["deprecated_legacy_authority_scope"] == "DIAGNOSTIC_ONLY_NOT_TRACK_B_PROMOTION_AUTHORITY"
+    assert authority["active_runtime_promoted_lane_ids"] == ["mgc_asian_drift_late_join_missing_anchor_long"]
+    row = authority["broker_authoritative_rows"][0]
+    assert row["strategy_id"] == "ASIAN_DRIFT_LATE_JOIN_MISSING_ANCHOR_LONG_SHADOW_V1"
+    assert row["broker_authoritative"] is True
+    assert row["submit_allowed"] is True
+    assert row["live_money_eligible"] is False
+    assert row["paper_proof_invoked"] is False
+    assert row["timestamp_coherence_required"] is True
+    assert surface["trading_authority"] == authority
+
+
 def test_operator_surface_runtime_down_is_loud_and_not_route_capable() -> None:
     surface = build_operator_surface(
         generated_at="2026-05-19T22:00:00+00:00",

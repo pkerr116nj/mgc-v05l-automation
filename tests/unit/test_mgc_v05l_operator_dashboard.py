@@ -5285,6 +5285,7 @@ def test_dashboard_assets_use_operator_first_surface_and_preserve_legacy_surface
     assert "<h2>Instrument Rollup</h2>" in html
     assert "<h2>Current Active Positions</h2>" in html
     assert "<h2>Active Lanes / Instruments</h2>" in html
+    assert "<h2>Track B Trading Authority</h2>" in html
     assert "<h2>Experimental Paper / Diagnostics</h2>" in html
     assert "<h2>Unified Active Lane Table</h2>" not in html
     assert "<h2>Secondary Market Context</h2>" in html
@@ -5314,14 +5315,17 @@ def test_dashboard_assets_use_operator_first_surface_and_preserve_legacy_surface
     assert 'id="operator-universe-cards"' in html
     assert 'id="operator-lane-grid-summary"' in html
     assert 'id="operator-lane-grid-table"' in html
+    assert 'id="operator-trading-authority-table"' in html
     assert 'id="operator-context-items"' in html
-    assert html.count("operator-flow-table-wrap") == 3
+    assert html.count("operator-flow-table-wrap") == 4
     assert 'id="market-value-djia"' not in html
     assert 'id="treasury-summary-10y"' not in html
     assert "renderLaneRegistrySections(dashboard.lane_registry || {});" in js
     assert "renderOperatorSurface(dashboard.operator_surface || {});" in js
     assert "renderRuntimeBuildInfo(dashboard);" in js
     assert "function renderOperatorLaneGrid(rows)" in js
+    assert "function renderTrackBTradingAuthority(payload)" in js
+    assert '"Legacy Non-Auth"' in js
     assert "function renderOperatorInstrumentRollup(payload)" in js
     assert "function renderOperatorActivePositions(payload)" in js
     assert "function renderOperatorContext(payload)" in js

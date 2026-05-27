@@ -535,6 +535,77 @@ def test_asian_drift_v1_emits_signal_on_explicit_entry_armed_snapshot(tmp_path: 
     assert batch["signal_items"][0]["signal"]["signal_direction"] == "LONG"
 
 
+def test_late_join_missing_anchor_paper_profile_emits_only_for_documented_shadow_case(tmp_path: Path) -> None:
+    result = run_track_b_strategy_rule(
+        input_event_payload=asian_drift_event(
+            tmp_path,
+            strategy_id="ASIAN_DRIFT_LATE_JOIN_MISSING_ANCHOR_LONG_SHADOW_V1",
+            signal_family="ASIAN_DRIFT_LATE_JOIN_MISSING_ANCHOR_LONG_SHADOW_V1",
+            lane_id="mgc_asian_drift_late_join_missing_anchor_long",
+            asia_drift_state="NO_TRADE",
+            asia_drift_regime="ASIA_DRIFT_LONG",
+            direction="LONG",
+            hypothetical_entry_ready=False,
+            hypothetical_late_join_score="3.2",
+            asian_drift_diagnostic_classification="ASIAN_DRIFT_BLOCKED_MISSING_SESSION_ANCHOR_CONTEXT",
+            late_join_classification="ASIAN_DRIFT_LATE_JOIN_STRONG_DRIFT_OBSERVED",
+            missing_anchor_reason="missing_18_00_et_session_anchor_context",
+        ),
+        input_event_path=tmp_path / "asian_drift_state_snapshot.json",
+        inbox_dir=tmp_path / "inbox",
+        expected_account_id="DUM882026",
+        source_id="unit_test_late_join_paper_profile",
+        rule_id="ASIAN_DRIFT_LATE_JOIN_MISSING_ANCHOR_LONG_SHADOW_V1",
+        rule_mode="ASIAN_DRIFT_LATE_JOIN_MISSING_ANCHOR_LONG_SHADOW_V1",
+        emit_signal=True,
+        output_root=tmp_path / "rule_reports",
+        strategy_adapter_output_root=tmp_path / "adapter_reports",
+        candle_producer_output_root=tmp_path / "candle_reports",
+        writer_output_root=tmp_path / "writer_reports",
+        runner_id="rule-runner-late-join-promoted",
+        now=aware_now(),
+    )
+
+    assert result.verdict == TrackBStrategyRuleRunnerVerdict.EMITTED_SIGNAL
+    assert result.report["strategy_registry_id"] == "ASIAN_DRIFT_LATE_JOIN_MISSING_ANCHOR_LONG_SHADOW_V1"
+    assert result.report["strategy_registry_paper_eligible"] is True
+    assert result.report["strategy_registry_live_money_eligible"] is False
+    assert result.report["decision"] == "LONG"
+    assert result.report["signal_emitted"] is True
+    assert result.report["submit_allowed"] is False
+    assert result.report["paper_proof_invoked"] is False
+    assert result.report["broker_state_mutated"] is False
+
+
+def test_late_join_missing_anchor_profile_does_not_emit_for_broad_near_miss(tmp_path: Path) -> None:
+    result = run_track_b_strategy_rule(
+        input_event_payload=asian_drift_event(
+            tmp_path,
+            strategy_id="ASIAN_DRIFT_LATE_JOIN_MISSING_ANCHOR_LONG_SHADOW_V1",
+            signal_family="ASIAN_DRIFT_LATE_JOIN_MISSING_ANCHOR_LONG_SHADOW_V1",
+            lane_id="mgc_asian_drift_late_join_missing_anchor_long",
+            asia_drift_regime="ASIA_DRIFT_LONG",
+            direction="LONG",
+            hypothetical_late_join_score="3.2",
+        ),
+        input_event_path=tmp_path / "asian_drift_state_snapshot.json",
+        inbox_dir=tmp_path / "inbox",
+        expected_account_id="DUM882026",
+        source_id="unit_test_late_join_paper_profile",
+        rule_id="ASIAN_DRIFT_LATE_JOIN_MISSING_ANCHOR_LONG_SHADOW_V1",
+        rule_mode="ASIAN_DRIFT_LATE_JOIN_MISSING_ANCHOR_LONG_SHADOW_V1",
+        emit_signal=True,
+        output_root=tmp_path / "rule_reports",
+        runner_id="rule-runner-late-join-no-signal",
+        now=aware_now(),
+    )
+
+    assert result.verdict == TrackBStrategyRuleRunnerVerdict.BLOCKED_INVALID_INPUT
+    assert result.report["signal_emitted"] is False
+    assert "asian_drift_diagnostic_classification" in str(result.report["primary_blocker"])
+    assert "late_join_classification" in str(result.report["primary_blocker"])
+
+
 def test_asian_drift_v1_maps_directional_regime_to_explicit_side(tmp_path: Path) -> None:
     result = run_track_b_strategy_rule(
         input_event_payload=asian_drift_event(

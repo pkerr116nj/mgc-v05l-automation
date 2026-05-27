@@ -147,6 +147,7 @@ h3 {
     "readiness readiness riskstrip riskstrip riskstrip"
     "instrument instrument instrument instrument instrument"
     "universe universe universe universe universe"
+    "authority authority authority authority authority"
     "canarytop canarytop canarytop canarytop canarytop"
     "positions positions positions positions positions"
     "context context context context context"
@@ -165,6 +166,7 @@ h3 {
 .operator-active-positions-panel { grid-area: positions; }
 .operator-context-panel { grid-area: context; }
 .operator-universe-panel { grid-area: universe; }
+.operator-trading-authority-panel { grid-area: authority; }
 .operator-canary-panel { grid-area: canarytop; }
 .diagnostics-shell { grid-area: diagnostics; }
 .canary-table-panel { grid-area: canarydetail; }

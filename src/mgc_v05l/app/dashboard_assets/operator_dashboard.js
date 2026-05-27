@@ -869,6 +869,7 @@ function renderOperatorSurface(payload) {
   renderOperatorActivePositions(payload.current_active_positions || {});
   renderOperatorUniverse(payload.active_instrument_surface || payload.lane_universe || {}, payload.lane_rows || []);
   renderOperatorLaneGrid((payload.active_instrument_surface || {}).rows || payload.lane_rows || []);
+  renderTrackBTradingAuthority(payload.track_b_trading_authority || payload.trading_authority || {});
   renderOperatorContext(payload.secondary_context || payload.context || {});
 }
 
@@ -1106,6 +1107,91 @@ function renderOperatorActivePositions(payload) {
           <td>${escapeHtml(row.open_risk_state || "-")}</td>
           <td>${escapeHtml(row.warning_summary || "No active warnings.")}</td>
         </tr>`).join("")}
+    </tbody>
+  `;
+}
+
+function renderTrackBTradingAuthority(payload) {
+  text("operator-trading-authority-status", payload.status_line || "-");
+  setLink("operator-trading-authority-link", "/api/operator-artifact/operator-surface");
+  const badge = document.getElementById("operator-trading-authority-badge");
+  if (badge) {
+    const active = Number(payload.broker_authoritative_count || 0) > 0;
+    badge.className = `badge ${active ? "badge-accent" : "badge-muted"}`;
+    badge.textContent = active ? "PROMOTED PAPER ACTIVE" : "NO PROMOTED PAPER";
+  }
+  const cards = document.getElementById("operator-trading-authority-cards");
+  if (cards) {
+    cards.innerHTML = renderOperatorMetricCards([
+      { label: "Broker-Auth", value: String(payload.broker_authoritative_count ?? 0), level: Number(payload.broker_authoritative_count || 0) > 0 ? "good" : "muted" },
+      { label: "Shadow-Only", value: String(payload.shadow_only_count ?? 0), level: "muted" },
+      { label: "Legacy Non-Auth", value: String(payload.deprecated_legacy_authority_surface_count ?? 0), level: "muted" },
+      { label: "Runtime Lanes", value: String(payload.active_runtime_lane_count ?? 0) },
+      { label: "Paper", value: payload.paper_only === false ? "NO" : "YES", level: payload.paper_only === false ? "danger" : "good" },
+      { label: "Live Money", value: payload.live_money_eligible ? "YES" : "NO", level: payload.live_money_eligible ? "danger" : "good" },
+      { label: "Paper Proof", value: payload.paper_proof_invoked ? "YES" : "NO", level: payload.paper_proof_invoked ? "danger" : "good" },
+    ]);
+  }
+  const table = document.getElementById("operator-trading-authority-table");
+  if (!table) return;
+  const rows = [
+    ...(Array.isArray(payload.broker_authoritative_rows) ? payload.broker_authoritative_rows : []),
+    ...(Array.isArray(payload.shadow_only_rows) ? payload.shadow_only_rows : []),
+  ];
+  if (!rows.length) {
+    table.innerHTML = "<tr><td>No Track B promotion candidates surfaced.</td></tr>";
+    return;
+  }
+  table.className = "approved-models-table-compact operator-lane-grid-table";
+  table.innerHTML = `
+    <thead>
+      <tr>
+        <th>instrument</th>
+        <th>lane</th>
+        <th>authority</th>
+        <th>side</th>
+        <th>session</th>
+        <th>exit</th>
+        <th>evidence</th>
+        <th>guard</th>
+      </tr>
+    </thead>
+    <tbody>
+      ${rows
+        .map((row) => {
+          const evidence = row.evidence_summary || {};
+          const evidenceText = [
+            evidence.timestamp_locked_valid_outcomes != null ? `n=${evidence.timestamp_locked_valid_outcomes}` : null,
+            evidence.missed_winner_count != null ? `MW=${evidence.missed_winner_count}` : null,
+            evidence.avoided_loser_count != null ? `AL=${evidence.avoided_loser_count}` : null,
+            evidence.near_miss_score != null ? `score=${evidence.near_miss_score}` : null,
+          ].filter(Boolean).join(" • ");
+          const guardText = [
+            row.paper_only ? "paper" : "not-paper",
+            row.live_money_eligible ? "live-money" : "no-live",
+            row.paper_proof_invoked ? "paper-proof" : "no-proof",
+            row.timestamp_coherence_required ? "timestamp-lock" : null,
+          ].filter(Boolean).join(" • ");
+          return `
+            <tr>
+              <td class="approved-lane-instrument mono">${escapeHtml(row.instrument || "-")}</td>
+              <td>
+                <div class="approved-lane-family-wrap">
+                  <span class="approved-lane-family-name mono">${escapeHtml(row.strategy_id || "-")}</span>
+                  <span class="approved-lane-label subnote mono">${escapeHtml(row.lane_id || "-")}</span>
+                  <span class="approved-lane-exit subnote mono">${escapeHtml(row.experimental_reason || "-")}</span>
+                </div>
+              </td>
+              <td><span class="${badgeClass(row.broker_authoritative ? "good" : "muted")}">${escapeHtml(row.broker_authoritative ? "PAPER AUTH" : "SHADOW")}</span></td>
+              <td>${escapeHtml(row.side || "-")}</td>
+              <td>${sessionTagMarkup(row.session || "-")}</td>
+              <td>${escapeHtml(row.exit_profile_id || "-")}</td>
+              <td>${escapeHtml(evidenceText || "-")}</td>
+              <td>${escapeHtml(guardText || "-")}</td>
+            </tr>
+          `;
+        })
+        .join("")}
     </tbody>
   `;
 }

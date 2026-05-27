@@ -39,6 +39,7 @@ MNQ_CONTRACT_KEY = "MNQ-202606"
 MNQ_INSTRUMENT_FAMILY = "MNQ"
 DEFAULT_MGC_EMA_MOMENTUM_RECLAIM_LONG_RULE_ID = "mgc_ema_momentum_reclaim_long_v1"
 DEFAULT_ASIAN_DRIFT_RULE_ID = "asian_drift_v1"
+DEFAULT_ASIAN_DRIFT_LATE_JOIN_MISSING_ANCHOR_LONG_RULE_ID = "ASIAN_DRIFT_LATE_JOIN_MISSING_ANCHOR_LONG_SHADOW_V1"
 DEFAULT_ASIA_EARLY_PAUSE_RESUME_SHORT_RULE_ID = "ASIA_EARLY_PAUSE_RESUME_SHORT_V1"
 DEFAULT_ASIA_EARLY_NORMAL_BREAKOUT_RETEST_HOLD_LONG_RULE_ID = "ASIA_EARLY_NORMAL_BREAKOUT_RETEST_HOLD_LONG_V1"
 DEFAULT_FIRST_BULL_SNAP_TURN_RULE_ID = "FIRST_BULL_SNAP_TURN_V1"
@@ -66,6 +67,7 @@ class TrackBStrategyRuleMode(str, Enum):
     DEMO_LONG_ONLY = "DEMO_LONG_ONLY"
     MGC_EMA_MOMENTUM_RECLAIM_LONG = "MGC_EMA_MOMENTUM_RECLAIM_LONG"
     ASIAN_DRIFT_V1 = "ASIAN_DRIFT_V1"
+    ASIAN_DRIFT_LATE_JOIN_MISSING_ANCHOR_LONG_SHADOW_V1 = "ASIAN_DRIFT_LATE_JOIN_MISSING_ANCHOR_LONG_SHADOW_V1"
     ASIA_EARLY_PAUSE_RESUME_SHORT_V1 = "ASIA_EARLY_PAUSE_RESUME_SHORT_V1"
     ASIA_EARLY_NORMAL_BREAKOUT_RETEST_HOLD_LONG_V1 = "ASIA_EARLY_NORMAL_BREAKOUT_RETEST_HOLD_LONG_V1"
     FIRST_BULL_SNAP_TURN_V1 = "FIRST_BULL_SNAP_TURN_V1"
@@ -423,6 +425,8 @@ def _validate_input(
         return "Input current_quote_available is not true."
     if rule_mode == TrackBStrategyRuleMode.ASIAN_DRIFT_V1:
         return _validate_asian_drift_snapshot(event)
+    if rule_mode == TrackBStrategyRuleMode.ASIAN_DRIFT_LATE_JOIN_MISSING_ANCHOR_LONG_SHADOW_V1:
+        return _validate_asian_drift_late_join_missing_anchor_snapshot(event)
     if rule_mode == TrackBStrategyRuleMode.ASIA_EARLY_PAUSE_RESUME_SHORT_V1:
         return _validate_asia_early_pause_resume_short_snapshot(event)
     if rule_mode == TrackBStrategyRuleMode.ASIA_EARLY_NORMAL_BREAKOUT_RETEST_HOLD_LONG_V1:
@@ -530,6 +534,20 @@ def _validate_asian_drift_snapshot(event: Mapping[str, Any]) -> str | None:
     return None
 
 
+def _validate_asian_drift_late_join_missing_anchor_snapshot(event: Mapping[str, Any]) -> str | None:
+    base_blocker = _validate_asian_drift_snapshot(event)
+    if base_blocker:
+        return base_blocker
+    metadata = event.get("metadata") if isinstance(event.get("metadata") or {}, Mapping) else {}
+    diagnostic = _first_text(event, metadata, "asian_drift_diagnostic_classification")
+    late_join = _first_text(event, metadata, "late_join_classification")
+    if diagnostic != "ASIAN_DRIFT_BLOCKED_MISSING_SESSION_ANCHOR_CONTEXT":
+        return "Late-join missing-anchor PAPER candidate requires explicit missing-session-anchor diagnostic evidence."
+    if late_join != "ASIAN_DRIFT_LATE_JOIN_STRONG_DRIFT_OBSERVED":
+        return "Late-join missing-anchor PAPER candidate requires strong late-join drift evidence."
+    return None
+
+
 def _validate_asia_early_pause_resume_short_snapshot(event: Mapping[str, Any]) -> str | None:
     metadata = event.get("metadata") if isinstance(event.get("metadata") or {}, Mapping) else {}
     state = metadata.get("asia_early_pause_resume_short_state")
@@ -629,6 +647,12 @@ def _evaluate_rule_decision(
         return _evaluate_mgc_ema_momentum_reclaim_long(event=event, quote_evidence=quote_evidence, rule_id=rule_id)
     if rule_mode == TrackBStrategyRuleMode.ASIAN_DRIFT_V1:
         return _evaluate_asian_drift_v1(event=event, quote_evidence=quote_evidence, rule_id=rule_id)
+    if rule_mode == TrackBStrategyRuleMode.ASIAN_DRIFT_LATE_JOIN_MISSING_ANCHOR_LONG_SHADOW_V1:
+        return _evaluate_asian_drift_late_join_missing_anchor_long_v1(
+            event=event,
+            quote_evidence=quote_evidence,
+            rule_id=rule_id,
+        )
     if rule_mode == TrackBStrategyRuleMode.ASIA_EARLY_PAUSE_RESUME_SHORT_V1:
         return _evaluate_asia_early_pause_resume_short_v1(event=event, quote_evidence=quote_evidence, rule_id=rule_id)
     if rule_mode == TrackBStrategyRuleMode.ASIA_EARLY_NORMAL_BREAKOUT_RETEST_HOLD_LONG_V1:
@@ -794,6 +818,79 @@ def _evaluate_asian_drift_v1(
         "research_lineage": (
             "Based on docs/specs/ASIA_DRIFT_V1_RESEARCH_SPEC.md and the research/asia_drift "
             "feature/state snapshot contract. Track B does not infer these fields from raw candles."
+        ),
+        "rule_id": rule_id,
+    }
+
+
+def _evaluate_asian_drift_late_join_missing_anchor_long_v1(
+    *,
+    event: Mapping[str, Any],
+    quote_evidence: Mapping[str, Any],
+    rule_id: str,
+) -> dict[str, Any]:
+    metadata = event.get("metadata") if isinstance(event.get("metadata") or {}, Mapping) else {}
+    diagnostic_classification = _first_text(event, metadata, "asian_drift_diagnostic_classification")
+    late_join_classification = _first_text(event, metadata, "late_join_classification")
+    direction = _asian_drift_direction(event, metadata, _first_text(event, metadata, "asia_drift_regime", "regime"))
+    score = _decimal_field(event, metadata, "hypothetical_late_join_score", "hypothetical_score", "max_late_join_score")
+    min_score = _decimal_field(event, metadata, "min_late_join_score") or Decimal("3.1")
+    entry_window_open = _first_bool(event, metadata, "entry_window_open")
+    in_scope = _first_bool(event, metadata, "in_scope")
+    session_timeout = _first_bool(event, metadata, "session_timeout")
+    feature_version = _first_text(event, metadata, "feature_version")
+    calibration_profile = _first_text(event, metadata, "calibration_profile")
+    conditions: dict[str, bool | None] = {
+        "experimental_missing_anchor_profile": diagnostic_classification
+        == "ASIAN_DRIFT_BLOCKED_MISSING_SESSION_ANCHOR_CONTEXT",
+        "strong_late_join_drift_observed": late_join_classification == "ASIAN_DRIFT_LATE_JOIN_STRONG_DRIFT_OBSERVED",
+        "direction_is_long": direction == "LONG",
+        "late_join_score_at_or_above_threshold": score >= min_score if score is not None else None,
+        "entry_window_open": entry_window_open is True,
+        "in_scope": in_scope is True,
+        "session_not_timeout": session_timeout is not True,
+        "feature_version_present": feature_version is not None,
+        "calibration_profile_present": calibration_profile is not None,
+    }
+    failed = [name for name, passed in conditions.items() if passed is not True]
+    if failed:
+        decision = TrackBStrategyRuleDecision.NO_SIGNAL
+        decision_reason = "Asian Drift late-join missing-anchor PAPER conditions did not pass: " + ", ".join(failed)
+    else:
+        decision = TrackBStrategyRuleDecision.LONG
+        decision_reason = (
+            "Asian Drift late-join missing-anchor experimental PAPER profile emitted LONG from "
+            "strong drift evidence while documenting missing 18:00 ET anchor context."
+        )
+    return {
+        "rule_name": "asian_drift_late_join_missing_anchor_long_shadow_v1",
+        "decision": decision,
+        "decision_reason": decision_reason,
+        "rule_inputs": {
+            "direction": direction,
+            "hypothetical_late_join_score": None if score is None else str(score),
+            "min_late_join_score": str(min_score),
+            "entry_window_open": entry_window_open,
+            "in_scope": in_scope,
+            "session_timeout": session_timeout,
+            "quote_provider_mode": quote_evidence.get("input_quote_provider_mode"),
+        },
+        "rule_conditions": conditions,
+        "rule_blockers": [f"{name}=false_or_missing" for name in failed],
+        "asian_drift_diagnostic_classification": diagnostic_classification,
+        "late_join_classification": late_join_classification,
+        "missing_anchor_reason": _first_text(event, metadata, "missing_anchor_reason"),
+        "experimental_reason": "missing_18_00_et_session_anchor_context",
+        "promotion_source_shadow_family": "ASIAN_DRIFT_LATE_JOIN_MISSING_ANCHOR_LONG_SHADOW_V1",
+        "replay_evidence_summary": {
+            "valid_timestamp_locked_outcomes": 5,
+            "missed_winner_count": 4,
+            "avoided_loser_count": 1,
+        },
+        "no_mutation": True,
+        "research_lineage": (
+            "Promoted from timestamp-locked late-join Asian Drift missing-anchor shadow evidence. "
+            "This remains PAPER-only experimental authority and does not weaken strict asian_drift_v1."
         ),
         "rule_id": rule_id,
     }
@@ -1797,6 +1894,8 @@ def _signal_source(rule_mode: TrackBStrategyRuleMode) -> str:
         return "HUMAN_REVIEW_ONLY"
     if rule_mode == TrackBStrategyRuleMode.ASIAN_DRIFT_V1:
         return "ASIAN_DRIFT_V1"
+    if rule_mode == TrackBStrategyRuleMode.ASIAN_DRIFT_LATE_JOIN_MISSING_ANCHOR_LONG_SHADOW_V1:
+        return "ASIAN_DRIFT_LATE_JOIN_MISSING_ANCHOR_LONG_SHADOW_V1"
     if rule_mode == TrackBStrategyRuleMode.ASIA_EARLY_PAUSE_RESUME_SHORT_V1:
         return "ASIA_EARLY_PAUSE_RESUME_SHORT_V1"
     if rule_mode == TrackBStrategyRuleMode.ASIA_EARLY_NORMAL_BREAKOUT_RETEST_HOLD_LONG_V1:
@@ -1826,6 +1925,7 @@ def _real_strategy_signal(rule_mode: TrackBStrategyRuleMode) -> bool:
     return rule_mode in {
         TrackBStrategyRuleMode.MGC_EMA_MOMENTUM_RECLAIM_LONG,
         TrackBStrategyRuleMode.ASIAN_DRIFT_V1,
+        TrackBStrategyRuleMode.ASIAN_DRIFT_LATE_JOIN_MISSING_ANCHOR_LONG_SHADOW_V1,
         TrackBStrategyRuleMode.ASIA_EARLY_PAUSE_RESUME_SHORT_V1,
         TrackBStrategyRuleMode.ASIA_EARLY_NORMAL_BREAKOUT_RETEST_HOLD_LONG_V1,
         TrackBStrategyRuleMode.FIRST_BULL_SNAP_TURN_V1,

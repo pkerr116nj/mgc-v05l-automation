@@ -7,6 +7,12 @@ from datetime import date, datetime
 from decimal import Decimal, InvalidOperation
 from typing import Any
 
+from mgc_v05l.execution_core.track_b_shadow_promotion_contract import (
+    PROMOTION_CANDIDATE_GUARDED_PAPER_READY,
+    PROMOTION_CANDIDATE_SHADOW_ONLY,
+    build_shadow_promotion_contract_report,
+)
+
 from .strategy_identity import build_standalone_strategy_identity
 
 _OD_FILE = "src/mgc_v05l/app/operator_dashboard.py"
@@ -76,6 +82,7 @@ def build_operator_surface(
         supervised_paper_operability=supervised_paper_operability,
     )
     active_surface = _build_active_instrument_surface_block(active_rows=active_rows)
+    track_b_trading_authority = _build_track_b_trading_authority_surface(paper=paper)
     current_active_positions = _build_current_active_positions(
         paper=paper,
         active_rows=active_rows,
@@ -101,6 +108,7 @@ def build_operator_surface(
         "operator_metrics_by_instrument": instrument_block,
         "current_active_positions": current_active_positions,
         "active_instrument_surface": active_surface,
+        "track_b_trading_authority": track_b_trading_authority,
         "secondary_context": secondary_context,
         "rollup_integrity": rollup_integrity,
         "source_manifest": source_manifest,
@@ -113,6 +121,7 @@ def build_operator_surface(
     surface["daily_risk"] = _legacy_portfolio_alias(portfolio_block)
     surface["lane_universe"] = _legacy_universe_alias(active_surface)
     surface["lane_rows"] = active_rows
+    surface["trading_authority"] = track_b_trading_authority
     surface["context"] = _legacy_context_alias(secondary_context)
     return surface
 
@@ -914,6 +923,122 @@ def _build_active_instrument_surface_block(*, active_rows: list[dict[str, Any]])
             "active_instruments_count": _source(_OS_FILE, "_build_active_instrument_surface_block", "active_instrument_surface.rows[].instrument"),
             "active_lanes_count": _source(_OS_FILE, "_build_active_instrument_surface_block", "active_instrument_surface.rows[].lane_id"),
         },
+    }
+
+
+def _build_track_b_trading_authority_surface(*, paper: dict[str, Any]) -> dict[str, Any]:
+    config_lanes = list((paper.get("config_in_force") or {}).get("lanes") or [])
+    promoted_strategy_ids = {
+        str((lane.get("runtime_overlay_params") or {}).get("strategy_id") or lane.get("standalone_strategy_id") or "")
+        for lane in config_lanes
+    }
+    promotion_report = build_shadow_promotion_contract_report(
+        {"enabled_strategy_ids": sorted(strategy_id for strategy_id in promoted_strategy_ids if strategy_id)}
+    )
+    promoted_rows = [
+        row
+        for row in promotion_report.get("promotion_candidates", [])
+        if row.get("classification") == PROMOTION_CANDIDATE_GUARDED_PAPER_READY
+    ]
+    shadow_only_rows = [
+        row
+        for row in promotion_report.get("promotion_candidates", [])
+        if row.get("classification") == PROMOTION_CANDIDATE_SHADOW_ONLY
+    ]
+    lane_lookup = {
+        str(lane.get("lane_id") or ""): lane
+        for lane in config_lanes
+        if str(lane.get("lane_id") or "")
+    }
+    promoted_lane_ids = {str(row.get("lane_id") or "") for row in promoted_rows}
+    deprecated_legacy_lanes = [
+        lane
+        for lane in config_lanes
+        if str(lane.get("lane_id") or "") and str(lane.get("lane_id") or "") not in promoted_lane_ids
+    ]
+    broker_rows = [
+        _track_b_authority_row(row, lane_lookup.get(str(row.get("lane_id") or "")), broker_authoritative=True)
+        for row in promoted_rows
+    ]
+    shadow_rows = [
+        _track_b_authority_row(row, None, broker_authoritative=False)
+        for row in shadow_only_rows
+    ]
+    return {
+        "schema_version": "operator_track_b_trading_authority_v1",
+        "classification": (
+            "TRACK_B_PROMOTED_PAPER_AUTHORITY_ACTIVE"
+            if broker_rows
+            else "TRACK_B_NO_PROMOTED_PAPER_AUTHORITY_ACTIVE"
+        ),
+        "paper_only": True,
+        "live_money_eligible": False,
+        "paper_proof_invoked": False,
+        "broker_authoritative_count": len(broker_rows),
+        "shadow_only_count": len(shadow_rows),
+        "deprecated_legacy_authority_surface_count": len(deprecated_legacy_lanes),
+        "deprecated_legacy_authority_scope": "DIAGNOSTIC_ONLY_NOT_TRACK_B_PROMOTION_AUTHORITY",
+        "broker_authoritative_rows": broker_rows,
+        "shadow_only_rows": shadow_rows,
+        "active_runtime_lane_count": len(config_lanes),
+        "active_runtime_promoted_lane_ids": [row["lane_id"] for row in broker_rows],
+        "status_line": (
+            f"{len(broker_rows)} promoted Track B PAPER lane(s) broker-authoritative; "
+            f"{len(shadow_rows)} promotion candidate(s) remain shadow-only; "
+            f"{len(deprecated_legacy_lanes)} legacy lane(s) diagnostic-only for Track B authority."
+        ),
+        "field_sources": {
+            "broker_authoritative_rows": _source(
+                _OS_FILE,
+                "_build_track_b_trading_authority_surface",
+                "paper.config_in_force.lanes + track_b_shadow_promotion_contract",
+            ),
+            "shadow_only_rows": _source(
+                _OS_FILE,
+                "_build_track_b_trading_authority_surface",
+                "track_b_shadow_promotion_contract",
+            ),
+        },
+        "non_goals": [
+            "does_not_change_strategy_logic",
+            "does_not_submit_orders",
+            "does_not_change_lifecycle_authority",
+            "does_not_create_live_money_route",
+        ],
+    }
+
+
+def _track_b_authority_row(
+    promotion_row: dict[str, Any],
+    lane: dict[str, Any] | None,
+    *,
+    broker_authoritative: bool,
+) -> dict[str, Any]:
+    lane = dict(lane or {})
+    runtime_overlay = dict(lane.get("runtime_overlay_params") or {})
+    return {
+        "strategy_id": str(promotion_row.get("promoted_strategy_id") or ""),
+        "shadow_candidate_family": str(promotion_row.get("shadow_candidate_family") or ""),
+        "lane_id": str(promotion_row.get("lane_id") or lane.get("lane_id") or ""),
+        "instrument": str(promotion_row.get("instrument_family") or lane.get("symbol") or ""),
+        "side": str(promotion_row.get("side") or ""),
+        "session": "/".join(list(promotion_row.get("session_eligibility") or []))
+        or str(lane.get("session_restriction") or ""),
+        "runtime_kind": str(lane.get("runtime_kind") or ""),
+        "classification": str(promotion_row.get("classification") or ""),
+        "broker_authoritative": broker_authoritative,
+        "submit_allowed": broker_authoritative and bool(promotion_row.get("submit_allowed")),
+        "lifecycle_authority": broker_authoritative and bool(promotion_row.get("lifecycle_authority")),
+        "paper_only": True,
+        "live_money_eligible": False,
+        "paper_proof_invoked": False,
+        "experimental_reason": promotion_row.get("experimental_reason"),
+        "evidence_summary": dict(promotion_row.get("evidence_summary") or {}),
+        "exit_profile_id": promotion_row.get("exit_profile_id"),
+        "pyramiding_policy": promotion_row.get("pyramiding_policy"),
+        "conflict_group": promotion_row.get("conflict_group"),
+        "timestamp_coherence_required": bool(runtime_overlay.get("require_timestamp_coherence")),
+        "input_event_path": runtime_overlay.get("input_event_path"),
     }
 
 

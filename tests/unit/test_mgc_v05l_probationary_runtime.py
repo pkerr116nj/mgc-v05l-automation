@@ -70,6 +70,7 @@ from mgc_v05l.app.probationary_runtime import (
     simulate_atpe_exit_policy_on_bars,
     submit_probationary_operator_control,
 )
+from mgc_v05l.app.track_b_rule_runner_paper_engine import TRACK_B_RULE_RUNNER_PAPER_RUNTIME_KIND
 from mgc_v05l.domain.enums import LongEntryFamily, OrderIntentType, OrderStatus, PositionSide, ShortEntryFamily, StrategyStatus
 from mgc_v05l.config_models import ProbationaryPaperMarketDataSource, RuntimeMode, load_settings_from_files
 from mgc_v05l.config_models.settings import EnvironmentMode, ExecutionTimeframeRole
@@ -177,6 +178,38 @@ def test_paper_runtime_truth_artifact_schema_contains_operational_fields(tmp_pat
     assert metadata["restart_generation"] == payload["restart_generation"]
     assert metadata["pid"] == payload["producer_pid"]
     assert metadata["submit_authority"] is False
+
+
+def test_track_b_rule_runner_promotion_lane_loads_as_probationary_paper_spec(tmp_path: Path) -> None:
+    settings = _build_probationary_settings(tmp_path)
+    row = {
+        "lane_id": "mgc_asian_drift_late_join_missing_anchor_long",
+        "display_name": "MGC / Asian Drift late-join missing-anchor long / PAPER experiment",
+        "symbol": "MGC",
+        "standalone_strategy_id": "ASIAN_DRIFT_LATE_JOIN_MISSING_ANCHOR_LONG_SHADOW_V1",
+        "long_sources": ["ASIAN_DRIFT_LATE_JOIN_MISSING_ANCHOR_LONG_SHADOW_V1"],
+        "short_sources": [],
+        "session_restriction": "ASIA",
+        "allowed_sessions": ["ASIA"],
+        "point_value": "10",
+        "catastrophic_open_loss": "-500",
+        "strategy_family": "ASIAN_DRIFT_LATE_JOIN_MISSING_ANCHOR_LONG_SHADOW_V1",
+        "runtime_kind": TRACK_B_RULE_RUNNER_PAPER_RUNTIME_KIND,
+        "paper_only": True,
+        "live_money_eligible": False,
+        "runtime_overlay_params": {
+            "rule_mode": "ASIAN_DRIFT_LATE_JOIN_MISSING_ANCHOR_LONG_SHADOW_V1",
+            "require_timestamp_coherence": True,
+        },
+    }
+    settings = settings.model_copy(update={"probationary_paper_lanes_json": json.dumps([row])})
+
+    specs = _load_probationary_paper_lane_specs(settings)
+    target = next(spec for spec in specs if spec.lane_id == "mgc_asian_drift_late_join_missing_anchor_long")
+
+    assert target.runtime_kind == TRACK_B_RULE_RUNNER_PAPER_RUNTIME_KIND
+    assert target.long_sources == ("ASIAN_DRIFT_LATE_JOIN_MISSING_ANCHOR_LONG_SHADOW_V1",)
+    assert target.paper_only is True
 
 
 def test_paper_runtime_truth_builder_represents_duplicate_writer_indicator(tmp_path: Path) -> None:

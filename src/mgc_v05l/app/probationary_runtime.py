@@ -166,6 +166,10 @@ from .index_futures_forced_session_runtime import (
     INDEX_FUTURES_FORCED_SESSION_RUNTIME_KIND,
     IndexFuturesForcedSessionStrategyEngine,
 )
+from .track_b_rule_runner_paper_engine import (
+    TRACK_B_RULE_RUNNER_PAPER_RUNTIME_KIND,
+    TrackBRuleRunnerPaperStrategyEngine,
+)
 from .shared_strategy_identities import ATP_COMPANION_V1_ASIA_US, ATP_COMPANION_V1_GC_ASIA_US, get_shared_strategy_identity
 from .session_phase_labels import (
     label_session_phase,
@@ -8904,6 +8908,16 @@ def _build_probationary_strategy_engine(
         )
     if spec.runtime_kind == ASIA_LONDON_PARTICIPATION_RUNTIME_KIND:
         return AsiaLondonParticipationStrategyEngine(
+            lane_spec=spec,
+            settings=settings,
+            repositories=repositories,
+            execution_engine=execution_engine,
+            structured_logger=structured_logger,
+            alert_dispatcher=alert_dispatcher,
+            runtime_identity=runtime_identity,
+        )
+    if spec.runtime_kind == TRACK_B_RULE_RUNNER_PAPER_RUNTIME_KIND:
+        return TrackBRuleRunnerPaperStrategyEngine(
             lane_spec=spec,
             settings=settings,
             repositories=repositories,

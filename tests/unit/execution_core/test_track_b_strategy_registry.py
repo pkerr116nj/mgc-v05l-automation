@@ -117,6 +117,23 @@ def test_asian_drift_registry_metadata_has_managed_exit_policy() -> None:
     assert entry.exit_not_available is False
 
 
+def test_late_join_missing_anchor_promotion_registry_metadata_is_paper_only() -> None:
+    entry = resolve_track_b_strategy_registry_entry(
+        rule_mode="ASIAN_DRIFT_LATE_JOIN_MISSING_ANCHOR_LONG_SHADOW_V1",
+        rule_id="ASIAN_DRIFT_LATE_JOIN_MISSING_ANCHOR_LONG_SHADOW_V1",
+        strategy_id="ASIAN_DRIFT_LATE_JOIN_MISSING_ANCHOR_LONG_SHADOW_V1",
+    )
+
+    assert entry is not None
+    assert entry.instrument_family == "MGC"
+    assert entry.timeframe == "5m"
+    assert entry.paper_eligible is True
+    assert entry.live_money_eligible is False
+    assert entry.managed_exit_policy_id == PAPER_DIAGNOSTIC_TIME_BOXED_3X5M_EXIT_V1
+    assert entry.exit_not_available is False
+    assert "late_join_classification" in entry.required_state_schema
+
+
 def test_first_bull_snap_turn_registry_metadata_is_valid() -> None:
     entry = resolve_track_b_strategy_registry_entry(
         rule_mode="FIRST_BULL_SNAP_TURN_V1",

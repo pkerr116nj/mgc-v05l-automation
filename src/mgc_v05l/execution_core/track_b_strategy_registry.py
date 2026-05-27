@@ -107,6 +107,31 @@ ASIAN_DRIFT_V1 = TrackBStrategyRegistryEntry(
     accepted_rule_ids=("asian_drift_v1",),
 )
 
+ASIAN_DRIFT_LATE_JOIN_MISSING_ANCHOR_LONG_SHADOW_V1 = TrackBStrategyRegistryEntry(
+    strategy_id="ASIAN_DRIFT_LATE_JOIN_MISSING_ANCHOR_LONG_SHADOW_V1",
+    rule_id="ASIAN_DRIFT_LATE_JOIN_MISSING_ANCHOR_LONG_SHADOW_V1",
+    rule_mode="ASIAN_DRIFT_LATE_JOIN_MISSING_ANCHOR_LONG_SHADOW_V1",
+    instrument_family="MGC",
+    timeframe="5m",
+    required_feature_schema=("feature_version", "calibration_profile"),
+    required_state_schema=(
+        "asia_drift_state",
+        "asia_drift_regime",
+        "entry_window_open",
+        "in_scope",
+        "late_join_classification",
+        "asian_drift_diagnostic_classification",
+    ),
+    feature_version="asia_drift_v1_phase1",
+    calibration_profile="recovery_confirmed",
+    paper_eligible=True,
+    live_money_eligible=False,
+    managed_exit_policy_id=PAPER_DIAGNOSTIC_TIME_BOXED_3X5M_EXIT_V1,
+    exit_not_available=False,
+    accepted_strategy_ids=("ASIAN_DRIFT_LATE_JOIN_MISSING_ANCHOR_LONG_SHADOW_V1",),
+    accepted_rule_ids=("ASIAN_DRIFT_LATE_JOIN_MISSING_ANCHOR_LONG_SHADOW_V1",),
+)
+
 ASIA_EARLY_PAUSE_RESUME_SHORT_V1 = TrackBStrategyRegistryEntry(
     strategy_id="ASIA_EARLY_PAUSE_RESUME_SHORT_V1",
     rule_id="ASIA_EARLY_PAUSE_RESUME_SHORT_V1",
@@ -553,6 +578,7 @@ HUMAN_REVIEW_ONLY = TrackBStrategyRegistryEntry(
 TRACK_B_STRATEGY_REGISTRY: tuple[TrackBStrategyRegistryEntry, ...] = (
     MGC_EMA_MOMENTUM_RECLAIM_LONG,
     ASIAN_DRIFT_V1,
+    ASIAN_DRIFT_LATE_JOIN_MISSING_ANCHOR_LONG_SHADOW_V1,
     ASIA_EARLY_PAUSE_RESUME_SHORT_V1,
     ASIA_EARLY_NORMAL_BREAKOUT_RETEST_HOLD_LONG_V1,
     FIRST_BULL_SNAP_TURN_V1,
