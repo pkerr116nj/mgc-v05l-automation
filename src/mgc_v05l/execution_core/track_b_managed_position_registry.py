@@ -70,6 +70,21 @@ DEFAULT_MANIFEST_ROOT = Path("outputs") / "track_b_execution_core" / "position_m
 DEFAULT_PHASE1_RUNTIME_MARKET_DATA_ROOT = (
     Path("outputs") / "track_b_execution_core" / "phase1_runtime_market_data"
 )
+DEFAULT_POSITION_INTENT_CONTRACT_AUDIT = (
+    Path("outputs") / "track_b_execution_core" / "diagnostics" / "latest_position_intent_contract_audit.json"
+)
+DEFAULT_HOLD_EXIT_SHADOW_ARTIFACT = (
+    Path("outputs")
+    / "track_b_execution_core"
+    / "research_shadow"
+    / "latest_managed_position_hold_exit_shadow.json"
+)
+DEFAULT_HOLD_EXIT_SHADOW_EVENTS = (
+    Path("outputs")
+    / "track_b_execution_core"
+    / "research_shadow"
+    / "managed_position_hold_exit_shadow_events.jsonl"
+)
 
 
 @dataclass(frozen=True)
@@ -86,6 +101,9 @@ class TrackBManagedPositionRegistryConfig:
     lifecycle_root: Path = DEFAULT_LIFECYCLE_ROOT
     manifest_root: Path = DEFAULT_MANIFEST_ROOT
     market_data_root: Path = DEFAULT_PHASE1_RUNTIME_MARKET_DATA_ROOT
+    position_intent_audit_path: Path = DEFAULT_POSITION_INTENT_CONTRACT_AUDIT
+    hold_exit_shadow_output_path: Path = DEFAULT_HOLD_EXIT_SHADOW_ARTIFACT
+    hold_exit_shadow_event_log_path: Path = DEFAULT_HOLD_EXIT_SHADOW_EVENTS
     artifact_max_age_seconds: float = 180.0
 
     def resolve(self, path: Path) -> Path:
@@ -144,6 +162,23 @@ def build_track_b_managed_position_registry(
         lifecycle_positions=lifecycle_positions,
         review_positions=review_positions,
         source_stale=source_stale,
+    )
+    from mgc_v05l.execution_core.track_b_managed_position_hold_exit_shadow import (
+        ManagedPositionHoldExitShadowConfig,
+        decorate_managed_positions_with_hold_exit_shadow,
+    )
+
+    hold_exit_shadow_config = ManagedPositionHoldExitShadowConfig(
+        repo_root=config.repo_root,
+        managed_position_registry_path=config.output_path,
+        position_intent_audit_path=config.position_intent_audit_path,
+        latest_output_path=config.hold_exit_shadow_output_path,
+        events_path=config.hold_exit_shadow_event_log_path,
+    )
+    managed_positions = decorate_managed_positions_with_hold_exit_shadow(
+        managed_positions=managed_positions,
+        config=hold_exit_shadow_config,
+        now=actual_now,
     )
     payload = {
         "schema_version": "track_b_managed_position_registry_v1",
@@ -212,6 +247,8 @@ def build_track_b_managed_position_registry(
             "lifecycle_root": str(config.resolve(config.lifecycle_root)),
             "manifest_root": str(config.resolve(config.manifest_root)),
             "market_data_root": str(config.resolve(config.market_data_root)),
+            "position_intent_audit": str(config.resolve(config.position_intent_audit_path)),
+            "hold_exit_shadow": str(config.resolve(config.hold_exit_shadow_output_path)),
         },
     }
     return payload
@@ -228,6 +265,25 @@ def write_track_b_managed_position_registry(
     previous = _read_json(output_path)
     events = build_managed_position_events(previous=previous, current=payload, now=now)
     _write_json_atomic(output_path, dict(payload))
+    from mgc_v05l.execution_core.track_b_managed_position_hold_exit_shadow import (
+        ManagedPositionHoldExitShadowConfig,
+        build_managed_position_hold_exit_shadow,
+        write_managed_position_hold_exit_shadow,
+    )
+
+    hold_exit_shadow_config = ManagedPositionHoldExitShadowConfig(
+        repo_root=config.repo_root,
+        managed_position_registry_path=config.output_path,
+        position_intent_audit_path=config.position_intent_audit_path,
+        latest_output_path=config.hold_exit_shadow_output_path,
+        events_path=config.hold_exit_shadow_event_log_path,
+    )
+    hold_exit_shadow_payload = build_managed_position_hold_exit_shadow(
+        config=hold_exit_shadow_config,
+        managed_position_registry=payload,
+        now=now,
+    )
+    write_managed_position_hold_exit_shadow(config=hold_exit_shadow_config, payload=hold_exit_shadow_payload)
     if config.dashboard_projection_path is not None:
         _write_json_atomic(
             config.resolve(config.dashboard_projection_path),
