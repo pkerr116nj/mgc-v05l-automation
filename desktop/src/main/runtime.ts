@@ -5,7 +5,7 @@ import fs from "node:fs/promises";
 import { request as httpRequest } from "node:http";
 import { request as httpsRequest } from "node:https";
 import path from "node:path";
-import { app, safeStorage, shell, systemPreferences } from "electron";
+import { app, Notification, safeStorage, shell, systemPreferences } from "electron";
 import packageJson from "../../package.json";
 import {
   classifyStartupFailure,
@@ -14,6 +14,17 @@ import {
   type StartupFailureKind,
 } from "./dashboardStartup";
 import { deriveOperationalReadiness } from "./shared/operationalReadiness";
+import {
+  DEFAULT_NOTIFICATION_POLICY,
+  buildNotificationSnapshot,
+  deriveNotificationEvents,
+  makeTestNotificationEvent,
+  normalizeNotificationPolicy,
+  notificationPolicyDecision,
+  type OperatorNotificationEvent,
+  type OperatorNotificationPolicy,
+  type OperatorNotificationSnapshot,
+} from "./shared/operatorNotifications";
 
 type JsonRecord = Record<string, unknown>;
 
@@ -144,6 +155,7 @@ export interface DesktopState {
   localAuth: LocalOperatorAuthState;
   trackB: TrackBReadOnlyStatus;
   trackBPortfolio: TrackBPortfolioReadOnlyStatus;
+  notifications: TrackBOperatorNotificationState;
   refreshedAt: string;
 }
 
@@ -165,6 +177,22 @@ export interface TrackBPortfolioReadOnlyStatus {
   portfolio: JsonRecord | null;
   calendar: JsonRecord | null;
   missingReason: string | null;
+  loadedAt: string;
+}
+
+export interface TrackBOperatorNotificationState {
+  policyPath: string;
+  eventLogPath: string;
+  latestStatePath: string;
+  policy: OperatorNotificationPolicy;
+  recentEvents: OperatorNotificationEvent[];
+  adapter: {
+    platform: string;
+    macosNativeSupported: boolean;
+    advisoryOnly: boolean;
+    lastDeliveryStatus: string | null;
+    lastDeliveryError: string | null;
+  };
   loadedAt: string;
 }
 
@@ -285,6 +313,9 @@ const TRACK_B_PNL_CALENDAR_LATEST_FILE = path.join(REPO_ROOT, "outputs", "report
 const RUNTIME_ROOT = path.join(OUTPUT_ROOT, "runtime");
 const DEFAULT_INFO_FILE = path.join(RUNTIME_ROOT, "operator_dashboard.json");
 const DEFAULT_LOG_FILE = path.join(RUNTIME_ROOT, "operator_dashboard.log");
+const TRACK_B_NOTIFICATION_POLICY_FILE = path.join(RUNTIME_ROOT, "track_b_operator_notification_policy.json");
+const TRACK_B_NOTIFICATION_EVENT_LOG_FILE = path.join(RUNTIME_ROOT, "track_b_operator_notifications.jsonl");
+const TRACK_B_NOTIFICATION_STATE_FILE = path.join(RUNTIME_ROOT, "track_b_operator_notifications_latest.json");
 function desktopAppStateRoot(): string {
   const explicit = String(process.env.MGC_DESKTOP_STATE_CACHE_ROOT || "").trim();
   if (explicit) {
@@ -482,6 +513,9 @@ let testExecScriptHook: ((args: string[]) => Promise<{ ok: boolean; stdout: stri
 let testCurlJsonHook: ((url: string, timeoutMs: number) => Promise<JsonRecord>) | null = null;
 let testBuildLocalOperatorAuthStateHook: (() => Promise<LocalOperatorAuthState>) | null = null;
 let testAutoBootstrapBlockedHook: (() => boolean) | null = null;
+let lastNotificationSnapshot: OperatorNotificationSnapshot | null = null;
+let lastNotificationDeliveryStatus: string | null = null;
+let lastNotificationDeliveryError: string | null = null;
 let testLoadLiveDashboardHook:
   | ((urls: string[], options?: LoadLiveDashboardOptions) => Promise<LoadLiveDashboardResult>)
   | null = null;
@@ -783,6 +817,192 @@ async function readJsonlRecords(filePath: string, limit = 50): Promise<JsonRecor
   } catch {
     return [];
   }
+}
+
+function coerceNotificationEvent(row: JsonRecord): OperatorNotificationEvent | null {
+  const eventType = String(row.event_type ?? "");
+  if (!eventType) {
+    return null;
+  }
+  return {
+    event_id: String(row.event_id ?? `${eventType}:${row.timestamp ?? Date.now()}`),
+    event_type: eventType as OperatorNotificationEvent["event_type"],
+    severity: String(row.severity ?? "info") as OperatorNotificationEvent["severity"],
+    title: String(row.title ?? eventType),
+    body: String(row.body ?? ""),
+    timestamp: String(row.timestamp ?? new Date().toISOString()),
+    source_component: String(row.source_component ?? "operator_notifications"),
+    dedupe_key: String(row.dedupe_key ?? eventType),
+    throttle_seconds: Number(row.throttle_seconds ?? DEFAULT_NOTIFICATION_POLICY.default_throttle_seconds),
+    metadata: asJsonRecord(row.metadata),
+    delivery_status: String(row.delivery_status ?? "pending") as OperatorNotificationEvent["delivery_status"],
+  };
+}
+
+async function readNotificationPolicy(): Promise<OperatorNotificationPolicy> {
+  const persisted = await readJsonFile<JsonRecord>(TRACK_B_NOTIFICATION_POLICY_FILE);
+  return normalizeNotificationPolicy(persisted);
+}
+
+async function writeNotificationPolicy(policy: OperatorNotificationPolicy): Promise<void> {
+  await writeJsonFileAtomic(TRACK_B_NOTIFICATION_POLICY_FILE, normalizeNotificationPolicy(policy));
+}
+
+async function readRecentNotificationEvents(limit = 50): Promise<OperatorNotificationEvent[]> {
+  const rows = await readJsonlRecords(TRACK_B_NOTIFICATION_EVENT_LOG_FILE, limit);
+  return rows.map(coerceNotificationEvent).filter((event): event is OperatorNotificationEvent => Boolean(event));
+}
+
+function notificationAdapterState(policy: OperatorNotificationPolicy, recentEvents: OperatorNotificationEvent[]): TrackBOperatorNotificationState {
+  return {
+    policyPath: TRACK_B_NOTIFICATION_POLICY_FILE,
+    eventLogPath: TRACK_B_NOTIFICATION_EVENT_LOG_FILE,
+    latestStatePath: TRACK_B_NOTIFICATION_STATE_FILE,
+    policy,
+    recentEvents,
+    adapter: {
+      platform: process.platform,
+      macosNativeSupported: macOSNotificationSupported(),
+      advisoryOnly: true,
+      lastDeliveryStatus: lastNotificationDeliveryStatus,
+      lastDeliveryError: lastNotificationDeliveryError,
+    },
+    loadedAt: new Date().toISOString(),
+  };
+}
+
+function macOSNotificationSupported(): boolean {
+  return process.platform === "darwin" && typeof Notification?.isSupported === "function" && Notification.isSupported();
+}
+
+async function buildTrackBOperatorNotificationState(): Promise<TrackBOperatorNotificationState> {
+  const policy = await readNotificationPolicy();
+  const recentEvents = await readRecentNotificationEvents(60);
+  return notificationAdapterState(policy, recentEvents);
+}
+
+async function appendNotificationEvent(event: OperatorNotificationEvent): Promise<void> {
+  await appendJsonlRecord(TRACK_B_NOTIFICATION_EVENT_LOG_FILE, event as unknown as JsonRecord);
+  const policy = await readNotificationPolicy();
+  const recentEvents = await readRecentNotificationEvents(30);
+  await writeJsonFileAtomic(TRACK_B_NOTIFICATION_STATE_FILE, notificationAdapterState(policy, recentEvents));
+}
+
+async function deliverMacOSNotification(event: OperatorNotificationEvent): Promise<OperatorNotificationEvent> {
+  if (process.platform !== "darwin") {
+    return {
+      ...event,
+      delivery_status: "failed",
+      metadata: { ...event.metadata, delivery_error: "Native macOS notifications are only available on darwin." },
+    };
+  }
+  if (!macOSNotificationSupported()) {
+    return {
+      ...event,
+      delivery_status: "failed",
+      metadata: { ...event.metadata, delivery_error: "Electron Notification is not supported in this launch context." },
+    };
+  }
+  try {
+    new Notification({
+      title: event.title,
+      body: event.body,
+      silent: event.severity === "info",
+      urgency: event.severity === "critical" ? "critical" : event.severity === "warning" ? "normal" : "low",
+    }).show();
+    return { ...event, delivery_status: "delivered" };
+  } catch (error) {
+    return {
+      ...event,
+      delivery_status: "failed",
+      metadata: {
+        ...event.metadata,
+        delivery_error: error instanceof Error ? error.message : String(error),
+      },
+    };
+  }
+}
+
+async function handleNotificationCandidates(candidates: OperatorNotificationEvent[], options: { force?: boolean } = {}): Promise<OperatorNotificationEvent[]> {
+  if (!candidates.length) {
+    return [];
+  }
+  const policy = await readNotificationPolicy();
+  const recentEvents = await readRecentNotificationEvents(500);
+  const handled: OperatorNotificationEvent[] = [];
+  for (const candidate of candidates) {
+    const decision = options.force
+      ? { allowed: true, status: "pending" as const, reason: "Forced test notification." }
+      : notificationPolicyDecision(candidate, policy, recentEvents, new Date(candidate.timestamp));
+    let event: OperatorNotificationEvent = {
+      ...candidate,
+      delivery_status: decision.status,
+      metadata: {
+        ...candidate.metadata,
+        policy_decision: decision.reason,
+        advisory_only: true,
+        broker_state_mutation: false,
+      },
+    };
+    if (decision.allowed) {
+      event = await deliverMacOSNotification(event);
+      lastNotificationDeliveryStatus = event.delivery_status;
+      lastNotificationDeliveryError = typeof event.metadata.delivery_error === "string" ? event.metadata.delivery_error : null;
+    }
+    await appendNotificationEvent(event);
+    handled.push(event);
+    recentEvents.unshift(event);
+  }
+  return handled;
+}
+
+function observeTrackBNotificationSnapshot(state: DesktopState): void {
+  const snapshot = buildNotificationSnapshot({
+    dashboard: state.dashboard,
+    trackBStatus: state.trackB.status,
+    backendState: state.backend.state,
+    backendLabel: state.backend.label,
+    sourceMode: state.source.mode,
+    sourceLabel: state.source.label,
+  });
+  const events = deriveNotificationEvents({
+    previous: lastNotificationSnapshot,
+    current: snapshot,
+    timestamp: new Date().toISOString(),
+  });
+  lastNotificationSnapshot = snapshot;
+  void handleNotificationCandidates(events).catch((error) => {
+    lastNotificationDeliveryStatus = "failed";
+    lastNotificationDeliveryError = error instanceof Error ? error.message : String(error);
+    appendDesktopLog(`[electron] Track B notification handling failed: ${lastNotificationDeliveryError}`);
+  });
+}
+
+export async function updateTrackBNotificationPolicy(input: unknown): Promise<DesktopCommandResult> {
+  const policy = normalizeNotificationPolicy(input);
+  await writeNotificationPolicy(policy);
+  const state = await getDesktopState({ includeHeavyPayload: false });
+  return {
+    ok: true,
+    message: "Track B notification preferences updated.",
+    detail: "Notification preferences are advisory-only and never mutate broker or runtime state.",
+    state,
+  };
+}
+
+export async function sendTrackBTestNotification(): Promise<DesktopCommandResult> {
+  const event = makeTestNotificationEvent();
+  const [handled] = await handleNotificationCandidates([event], { force: true });
+  const state = await getDesktopState({ includeHeavyPayload: false });
+  return {
+    ok: handled?.delivery_status === "delivered",
+    message: handled?.delivery_status === "delivered"
+      ? "Track B test notification delivered."
+      : "Track B test notification was recorded, but native delivery did not complete.",
+    detail: handled?.metadata.delivery_error ? String(handled.metadata.delivery_error) : "Test event recorded in the Track B notification event log.",
+    state,
+    payload: handled as unknown as JsonRecord,
+  };
 }
 
 async function ensureLocalSecretWrapper(): Promise<LocalOperatorAuthState["secret_protection"]> {
@@ -2132,6 +2352,7 @@ async function loadDesktopStateFixtureState(): Promise<DesktopState> {
   const localAuth = await buildLocalOperatorAuthState();
   const trackB = await buildTrackBReadOnlyStatus();
   const trackBPortfolio = await buildTrackBPortfolioReadOnlyStatus();
+  const notifications = await buildTrackBOperatorNotificationState();
   const base: DesktopState = {
     connection: "unavailable",
     dashboard: null,
@@ -2199,6 +2420,7 @@ async function loadDesktopStateFixtureState(): Promise<DesktopState> {
     localAuth,
     trackB,
     trackBPortfolio,
+    notifications,
     refreshedAt: nowIso(),
   };
   if (!override) {
@@ -4098,6 +4320,7 @@ async function probeDesktopState(
   const localAuth = await buildLocalOperatorAuthState();
   const trackB = await buildTrackBReadOnlyStatus();
   const trackBPortfolio = await buildTrackBPortfolioReadOnlyStatus();
+  const notifications = await buildTrackBOperatorNotificationState();
   const { urls, infoFiles } = await candidateUrls();
   const errors: string[] = [];
   const packagedBridge = await loadPackagedAttachedSnapshotBridge({ includeHeavyPayload });
@@ -4208,9 +4431,11 @@ async function probeDesktopState(
       localAuth,
       trackB,
       trackBPortfolio,
+      notifications,
       refreshedAt: new Date().toISOString(),
     };
     const syncedState = applyHistoricalPlaybackSyncWarning(state, historicalPlaybackSync);
+    observeTrackBNotificationSnapshot(syncedState);
     await writeDesktopStartupStatus(syncedState);
     return syncedState;
   }
@@ -4255,9 +4480,11 @@ async function probeDesktopState(
       localAuth,
       trackB,
       trackBPortfolio,
+      notifications,
       refreshedAt: new Date().toISOString(),
     };
     const syncedState = applyHistoricalPlaybackSyncWarning(state, historicalPlaybackSync);
+    observeTrackBNotificationSnapshot(syncedState);
     await writeDesktopStartupStatus(syncedState);
     return syncedState;
   }
@@ -4294,8 +4521,10 @@ async function probeDesktopState(
     localAuth,
     trackB,
     trackBPortfolio,
+    notifications,
     refreshedAt: new Date().toISOString(),
   };
+  observeTrackBNotificationSnapshot(state);
   await writeDesktopStartupStatus(state);
   return state;
 }

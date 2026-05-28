@@ -1,5 +1,35 @@
 export type JsonRecord = Record<string, any>;
 
+export type OperatorNotificationSeverity = "info" | "warning" | "critical" | "trade";
+
+export interface OperatorNotificationPolicy {
+  enabled: boolean;
+  enabled_event_types: Record<string, boolean>;
+  severity_threshold: OperatorNotificationSeverity;
+  quiet_hours: {
+    enabled: boolean;
+    start: string;
+    end: string;
+  };
+  trade_alerts_always_on: boolean;
+  default_throttle_seconds: number;
+  dedupe_window_seconds: number;
+}
+
+export interface OperatorNotificationEvent {
+  event_id: string;
+  event_type: string;
+  severity: OperatorNotificationSeverity;
+  title: string;
+  body: string;
+  timestamp: string;
+  source_component: string;
+  dedupe_key: string;
+  throttle_seconds: number;
+  metadata: JsonRecord;
+  delivery_status: string;
+}
+
 export interface DesktopCommandResult {
   ok: boolean;
   message: string;
@@ -154,6 +184,21 @@ export interface DesktopState {
     missingReason: string | null;
     loadedAt: string;
   };
+  notifications: {
+    policyPath: string;
+    eventLogPath: string;
+    latestStatePath: string;
+    policy: OperatorNotificationPolicy;
+    recentEvents: OperatorNotificationEvent[];
+    adapter: {
+      platform: string;
+      macosNativeSupported: boolean;
+      advisoryOnly: boolean;
+      lastDeliveryStatus: string | null;
+      lastDeliveryError: string | null;
+    };
+    loadedAt: string;
+  };
   refreshedAt: string;
 }
 
@@ -192,6 +237,8 @@ export interface OperatorDesktopApi {
   runProductionLinkAction(action: string, payload: JsonRecord): Promise<DesktopCommandResult>;
   authenticateLocalOperator(reason?: string): Promise<DesktopCommandResult>;
   clearLocalOperatorAuthSession(): Promise<DesktopCommandResult>;
+  updateTrackBNotificationPolicy(policy: JsonRecord): Promise<DesktopCommandResult>;
+  sendTrackBTestNotification(): Promise<DesktopCommandResult>;
   openPath(targetPath: string): Promise<DesktopCommandResult>;
   openExternalUrl(url: string): Promise<DesktopCommandResult>;
   copyText(text: string): Promise<DesktopCommandResult>;

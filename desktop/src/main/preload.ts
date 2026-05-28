@@ -20,6 +20,10 @@ const operatorDesktop = {
     ipcRenderer.invoke("desktop:authenticate-local-operator", reason),
   clearLocalOperatorAuthSession: (): Promise<DesktopCommandResult> =>
     ipcRenderer.invoke("desktop:clear-local-operator-auth-session"),
+  updateTrackBNotificationPolicy: (policy: Record<string, unknown>): Promise<DesktopCommandResult> =>
+    ipcRenderer.invoke("desktop:update-track-b-notification-policy", policy),
+  sendTrackBTestNotification: (): Promise<DesktopCommandResult> =>
+    ipcRenderer.invoke("desktop:send-track-b-test-notification"),
   openPath: (targetPath: string): Promise<DesktopCommandResult> => ipcRenderer.invoke("desktop:open-path", targetPath),
   openExternalUrl: (url: string): Promise<DesktopCommandResult> => ipcRenderer.invoke("desktop:open-external-url", url),
   copyText: (text: string): Promise<DesktopCommandResult> => ipcRenderer.invoke("desktop:copy-text", text),

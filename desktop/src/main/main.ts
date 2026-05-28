@@ -17,8 +17,10 @@ import {
   restartDashboard,
   runDashboardAction,
   runProductionLinkAction,
+  sendTrackBTestNotification,
   startDashboard,
   stopDashboard,
+  updateTrackBNotificationPolicy,
   type DesktopStateRequestOptions,
 } from "./runtime";
 
@@ -549,6 +551,10 @@ function installIpcHandlers(): void {
   );
   ipcMain.handle("desktop:authenticate-local-operator", (_event, reason?: string) => authenticateLocalOperator(reason));
   ipcMain.handle("desktop:clear-local-operator-auth-session", () => clearLocalOperatorAuthSession());
+  ipcMain.handle("desktop:update-track-b-notification-policy", (_event, policy: Record<string, unknown>) =>
+    updateTrackBNotificationPolicy(policy),
+  );
+  ipcMain.handle("desktop:send-track-b-test-notification", () => sendTrackBTestNotification());
   ipcMain.handle("desktop:open-path", (_event, targetPath: string) => openPathInShell(targetPath));
   ipcMain.handle("desktop:open-external-url", (_event, url: string) => openExternalUrl(url));
   ipcMain.handle("desktop:copy-text", (_event, text: string) => copyText(text));

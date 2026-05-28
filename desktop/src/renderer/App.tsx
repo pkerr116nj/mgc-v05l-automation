@@ -1,5 +1,12 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode } from "react";
-import type { DesktopCommandResult, DesktopState, DesktopStateRequestOptions, JsonRecord, OperatorDesktopApi } from "./types";
+import type {
+  DesktopCommandResult,
+  DesktopState,
+  DesktopStateRequestOptions,
+  JsonRecord,
+  OperatorDesktopApi,
+  OperatorNotificationPolicy,
+} from "./types";
 import {
   asArray,
   asRecord,
@@ -547,6 +554,40 @@ const DEFAULT_SETTINGS: AppSettings = {
   refreshSeconds: 15,
   defaultPage: "home",
   showDiagnostics: true,
+};
+
+const TRACK_B_NOTIFICATION_EVENT_LABELS: Array<{ id: string; label: string }> = [
+  { id: "market_data_disconnected", label: "Market data disconnected" },
+  { id: "market_data_reconnected", label: "Market data reconnected" },
+  { id: "broker_disconnected", label: "Broker disconnected" },
+  { id: "broker_reconnected", label: "Broker reconnected" },
+  { id: "runtime_down", label: "Runtime down" },
+  { id: "runtime_recovered", label: "Runtime recovered" },
+  { id: "readiness_changed", label: "Readiness changed" },
+  { id: "paper_order_submitted", label: "PAPER order submitted" },
+  { id: "paper_fill_received", label: "PAPER fill received" },
+  { id: "trade_opened", label: "Trade opened" },
+  { id: "trade_closed", label: "Trade closed" },
+  { id: "lifecycle_reconciliation_blocked", label: "Lifecycle/reconciliation blocked" },
+  { id: "duplicate_writer_detected", label: "Duplicate writer detected" },
+  { id: "stale_authority_truth_artifact", label: "Stale authority/truth artifact" },
+  { id: "guardian_control_safe_state_hard_block", label: "Guardian/Control Plane/Safe-State hard block" },
+  { id: "backend_ui_degraded_runtime_active", label: "Backend/UI degraded while runtime active" },
+  { id: "test_notification", label: "Test notification" },
+];
+
+const DEFAULT_NOTIFICATION_POLICY: OperatorNotificationPolicy = {
+  enabled: true,
+  enabled_event_types: Object.fromEntries(TRACK_B_NOTIFICATION_EVENT_LABELS.map((item) => [item.id, true])),
+  severity_threshold: "info",
+  quiet_hours: {
+    enabled: false,
+    start: "22:00",
+    end: "07:00",
+  },
+  trade_alerts_always_on: true,
+  default_throttle_seconds: 60,
+  dedupe_window_seconds: 300,
 };
 
 const POSITIONS_LAYOUT_STORAGE_KEY = "mgc.operatorDesktop.positionsLayouts.v1";
@@ -1154,6 +1195,21 @@ const API_FALLBACK: OperatorDesktopApi = {
         missingReason: "No Track B portfolio artifacts found.",
         loadedAt: new Date().toISOString(),
       },
+      notifications: {
+        policyPath: "",
+        eventLogPath: "",
+        latestStatePath: "",
+        policy: DEFAULT_NOTIFICATION_POLICY,
+        recentEvents: [],
+        adapter: {
+          platform: "unavailable",
+          macosNativeSupported: false,
+          advisoryOnly: true,
+          lastDeliveryStatus: null,
+          lastDeliveryError: null,
+        },
+        loadedAt: new Date().toISOString(),
+      },
       refreshedAt: new Date().toISOString(),
     };
   },
@@ -1177,6 +1233,12 @@ const API_FALLBACK: OperatorDesktopApi = {
     return { ok: false, message: "Electron preload bridge is unavailable." };
   },
   async clearLocalOperatorAuthSession() {
+    return { ok: false, message: "Electron preload bridge is unavailable." };
+  },
+  async updateTrackBNotificationPolicy() {
+    return { ok: false, message: "Electron preload bridge is unavailable." };
+  },
+  async sendTrackBTestNotification() {
     return { ok: false, message: "Electron preload bridge is unavailable." };
   },
   async openPath() {
@@ -1263,6 +1325,42 @@ function readSettings(): AppSettings {
 
 function writeSettings(settings: AppSettings): void {
   window.localStorage.setItem("mgc.operatorDesktop.settings.v1", JSON.stringify(settings));
+}
+
+function notificationPolicyFromState(desktopState: DesktopState | null): OperatorNotificationPolicy {
+  return desktopState?.notifications?.policy ?? DEFAULT_NOTIFICATION_POLICY;
+}
+
+function updateNotificationPolicyValue(
+  policy: OperatorNotificationPolicy,
+  update: Partial<OperatorNotificationPolicy>,
+): OperatorNotificationPolicy {
+  return {
+    ...policy,
+    ...update,
+    quiet_hours: {
+      ...policy.quiet_hours,
+      ...(update.quiet_hours ?? {}),
+    },
+    enabled_event_types: {
+      ...policy.enabled_event_types,
+      ...(update.enabled_event_types ?? {}),
+    },
+  };
+}
+
+function notificationStatusTone(status: unknown): Tone {
+  const text = String(status ?? "").toLowerCase();
+  if (text.includes("delivered")) {
+    return "good";
+  }
+  if (text.includes("failed")) {
+    return "danger";
+  }
+  if (text.includes("suppressed")) {
+    return "warn";
+  }
+  return "muted";
 }
 
 function statusTone(label: unknown): "good" | "warn" | "danger" | "muted" {
@@ -5519,6 +5617,11 @@ export function App() {
     } finally {
       setBusyAction(null);
     }
+  }
+
+  async function updateTrackBNotificationPolicy(update: Partial<OperatorNotificationPolicy>): Promise<void> {
+    const nextPolicy = updateNotificationPolicyValue(notificationPolicyFromState(desktopState), update);
+    await runCommand("update-track-b-notifications", () => api.updateTrackBNotificationPolicy(nextPolicy as unknown as JsonRecord));
   }
 
 function sameUnderlyingActionPayload(): JsonRecord {
@@ -13171,6 +13274,9 @@ function backendUrlStateLabel(backendUrl: string | null | undefined, backendStat
   const showSidebarEmergencyHalt = page !== "track-b";
   const showWorkspaceContextBar = false;
   const showPrimaryCommandResult = page === "home" || page === "market" || page === "positions" || page === "diagnostics";
+  const notificationPolicy = notificationPolicyFromState(desktopState);
+  const notificationState = desktopState?.notifications;
+  const recentNotificationEvents = notificationState?.recentEvents ?? [];
 
   currentSectionPageContext = page;
 
@@ -20303,6 +20409,167 @@ function backendUrlStateLabel(backendUrl: string | null | undefined, backendStat
                     Open Local Auth State
                   </button>
                 </div>
+              </Section>
+
+              <Section title="Track B Notifications" subtitle="Native macOS advisory notifications from broker-backed Track B evidence">
+                <div className="notice-strip">
+                  <div>Notifications are advisory only. Broker truth, runtime authority, and control-plane artifacts remain the source of record.</div>
+                  <div>Notification delivery never submits, cancels, closes, flattens, enables live money, or writes paper_proof artifacts.</div>
+                  <div>Adapter: {notificationState?.adapter.macosNativeSupported ? "macOS native notifications available" : "macOS native notifications unavailable in this context"}.</div>
+                </div>
+                <div className="settings-grid">
+                  <label className="settings-toggle">
+                    <input
+                      type="checkbox"
+                      checked={notificationPolicy.enabled}
+                      onChange={(event) =>
+                        void updateTrackBNotificationPolicy({
+                          enabled: event.target.checked,
+                        })
+                      }
+                    />
+                    <span>Enable Track B notifications</span>
+                  </label>
+
+                  <label className="settings-field">
+                    <span>Severity threshold</span>
+                    <select
+                      value={notificationPolicy.severity_threshold}
+                      onChange={(event) =>
+                        void updateTrackBNotificationPolicy({
+                          severity_threshold: event.target.value as OperatorNotificationPolicy["severity_threshold"],
+                        })
+                      }
+                    >
+                      <option value="info">Info and above</option>
+                      <option value="warning">Warning and above</option>
+                      <option value="critical">Critical only</option>
+                      <option value="trade">Trade only</option>
+                    </select>
+                  </label>
+
+                  <label className="settings-toggle">
+                    <input
+                      type="checkbox"
+                      checked={notificationPolicy.trade_alerts_always_on}
+                      onChange={(event) =>
+                        void updateTrackBNotificationPolicy({
+                          trade_alerts_always_on: event.target.checked,
+                        })
+                      }
+                    />
+                    <span>Trade alerts always on</span>
+                  </label>
+
+                  <label className="settings-toggle">
+                    <input
+                      type="checkbox"
+                      checked={notificationPolicy.quiet_hours.enabled}
+                      onChange={(event) =>
+                        void updateTrackBNotificationPolicy({
+                          quiet_hours: { ...notificationPolicy.quiet_hours, enabled: event.target.checked },
+                        })
+                      }
+                    />
+                    <span>Quiet hours</span>
+                  </label>
+
+                  <label className="settings-field">
+                    <span>Quiet start</span>
+                    <input
+                      type="time"
+                      value={notificationPolicy.quiet_hours.start}
+                      onChange={(event) =>
+                        void updateTrackBNotificationPolicy({
+                          quiet_hours: { ...notificationPolicy.quiet_hours, start: event.target.value },
+                        })
+                      }
+                    />
+                  </label>
+
+                  <label className="settings-field">
+                    <span>Quiet end</span>
+                    <input
+                      type="time"
+                      value={notificationPolicy.quiet_hours.end}
+                      onChange={(event) =>
+                        void updateTrackBNotificationPolicy({
+                          quiet_hours: { ...notificationPolicy.quiet_hours, end: event.target.value },
+                        })
+                      }
+                    />
+                  </label>
+
+                  <label className="settings-field">
+                    <span>Throttle seconds</span>
+                    <input
+                      type="number"
+                      min="0"
+                      value={notificationPolicy.default_throttle_seconds}
+                      onChange={(event) =>
+                        void updateTrackBNotificationPolicy({
+                          default_throttle_seconds: Number(event.target.value),
+                        })
+                      }
+                    />
+                  </label>
+
+                  <label className="settings-field">
+                    <span>Dedupe window seconds</span>
+                    <input
+                      type="number"
+                      min="0"
+                      value={notificationPolicy.dedupe_window_seconds}
+                      onChange={(event) =>
+                        void updateTrackBNotificationPolicy({
+                          dedupe_window_seconds: Number(event.target.value),
+                        })
+                      }
+                    />
+                  </label>
+                </div>
+                <div className="notification-event-toggle-grid">
+                  {TRACK_B_NOTIFICATION_EVENT_LABELS.map((eventType) => (
+                    <label className="settings-toggle compact" key={eventType.id}>
+                      <input
+                        type="checkbox"
+                        checked={notificationPolicy.enabled_event_types[eventType.id] !== false}
+                        onChange={(event) =>
+                          void updateTrackBNotificationPolicy({
+                            enabled_event_types: {
+                              ...notificationPolicy.enabled_event_types,
+                              [eventType.id]: event.target.checked,
+                            },
+                          })
+                        }
+                      />
+                      <span>{eventType.label}</span>
+                    </label>
+                  ))}
+                </div>
+                <div className="action-row inline">
+                  <button className="panel-button" disabled={busyAction !== null} onClick={() => void runCommand("send-track-b-test-notification", () => api.sendTrackBTestNotification())}>
+                    Send Test Notification
+                  </button>
+                  <button className="panel-button subtle" disabled={!notificationState?.eventLogPath} onClick={() => void runCommand("open-notification-log", () => api.openPath(notificationState?.eventLogPath ?? ""))}>
+                    Open Event Log
+                  </button>
+                  <button className="panel-button subtle" disabled={!notificationState?.policyPath} onClick={() => void runCommand("open-notification-policy", () => api.openPath(notificationState?.policyPath ?? ""))}>
+                    Open Policy
+                  </button>
+                </div>
+                <DataTable
+                  columns={[
+                    { key: "timestamp", label: "Time", render: (row) => formatTimestamp(row.timestamp) },
+                    { key: "event_type", label: "Event", render: (row) => formatValue(row.event_type) },
+                    { key: "severity", label: "Severity", render: (row) => <Badge label={formatValue(row.severity)} tone={statusTone(row.severity)} /> },
+                    { key: "title", label: "Title" },
+                    { key: "delivery_status", label: "Delivery", render: (row) => <Badge label={formatValue(row.delivery_status)} tone={notificationStatusTone(row.delivery_status)} /> },
+                  ]}
+                  rows={recentNotificationEvents as JsonRecord[]}
+                  emptyLabel="No Track B notification events have been recorded yet."
+                  rowKey={(row, index) => String(row.event_id ?? index)}
+                />
               </Section>
 
               <Section title="Desktop Preferences" subtitle="Application-level preferences stored locally in the renderer">

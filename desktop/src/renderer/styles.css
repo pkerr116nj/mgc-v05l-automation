@@ -1825,6 +1825,16 @@ input {
   gap: 12px;
 }
 
+.notification-event-toggle-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+  gap: 10px;
+}
+
+.settings-toggle.compact {
+  min-height: 42px;
+}
+
 .market-tile {
   padding: 16px;
   border: 1px solid var(--border);
