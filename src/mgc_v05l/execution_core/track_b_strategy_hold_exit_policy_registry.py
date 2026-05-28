@@ -278,6 +278,20 @@ APPROVED_TRACK_B_STRATEGY_HOLD_EXIT_POLICIES: Mapping[str, StrategyHoldExitPolic
         participation_decay_inputs=("phase1_5m_closes", "microtrend_shadow"),
         conflict_group="equity_index_nasdaq_mnq_nq",
     ),
+    "GLOBEX_REOPEN_MNQ_1M_STRONG_GREEN_SECOND_CANDLE_CONFIRM_SHADOW_V1": _policy(
+        strategy_id="GLOBEX_REOPEN_MNQ_1M_STRONG_GREEN_SECOND_CANDLE_CONFIRM_SHADOW_V1",
+        lane_id="globex_reopen_mnq_1m_strong_green_second_candle_confirm_shadow",
+        lane_family="globex_reopen_first_candle_continuation_shadow",
+        thesis_type="TREND_PARTICIPATION",
+        expected_hold_type="TIMEBOXED",
+        hold_policy_id="GLOBEX_REOPEN_FIRST_CANDLE_60M_TIMEBOX_HOLD_SHADOW_V1",
+        exit_policy_family="GLOBEX_REOPEN_FIRST_CANDLE_TIMEBOX_EXIT_SHADOW",
+        profit_harvest_policy=None,
+        thesis_failure_conditions=("second_candle_rejects_first_candle", "first_candle_not_strong_green"),
+        participation_decay_inputs=("phase1_1m_closes", "globex_reopen_session_open", "second_candle_confirmation"),
+        conflict_group="equity_index_nasdaq_mnq_nq",
+        max_hold_policy="12_COMPLETED_5M_BARS",
+    ),
 }
 
 

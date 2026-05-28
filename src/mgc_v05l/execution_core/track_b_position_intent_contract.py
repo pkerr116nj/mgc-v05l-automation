@@ -21,6 +21,7 @@ from mgc_v05l.execution_core.track_b_exit_strategy_roster import (
     MGC_DIAGNOSTIC_TIMEBOX_3X5M_V1,
     MGC_FORCED_SESSION_SEGMENT_TIMEBOX_3X5M_V1,
     MNQ_SNAP_TURN_TIMEBOX_3X5M_V1,
+    MNQ_GLOBEX_REOPEN_FIRST_CANDLE_TIMEBOX_60M_SHADOW_V1,
     PAPER_DIAGNOSTIC_TIME_BOXED_3X5M_EXIT_V1,
 )
 from mgc_v05l.execution_core.track_b_strategy_managed_paper_lifecycle import (
@@ -360,6 +361,34 @@ APPROVED_TRACK_B_POSITION_INTENT_TEMPLATES: Mapping[str, _StrategyContractTempla
         thesis_summary="First bullish MNQ snap-turn.",
         session_tags=("GLOBAL",),
         regime_tags=("SNAP_TURN_REVERSAL",),
+    ),
+    "GLOBEX_REOPEN_MNQ_1M_STRONG_GREEN_SECOND_CANDLE_CONFIRM_SHADOW_V1": _StrategyContractTemplate(
+        strategy_id="GLOBEX_REOPEN_MNQ_1M_STRONG_GREEN_SECOND_CANDLE_CONFIRM_SHADOW_V1",
+        lane_id="globex_reopen_mnq_1m_strong_green_second_candle_confirm_shadow",
+        instrument_family="MNQ",
+        contract_key="MNQ-202606",
+        local_symbol="MNQM6",
+        con_id=770561201,
+        expiry="20260618",
+        side="LONG",
+        quantity=1,
+        thesis_type=ThesisType.TREND_PARTICIPATION,
+        thesis_summary=(
+            "Shadow-only Globex reopen continuation thesis: after the 18:00 ET futures reopen, "
+            "observe MNQ when the first completed 1m candle is strong green and the second candle "
+            "confirms without immediate rejection, using a 60m continuation benchmark."
+        ),
+        expected_hold_type=ExpectedHoldType.TIMEBOXED,
+        intended_exit_family="GLOBEX_REOPEN_FIRST_CANDLE_TIMEBOX_EXIT_SHADOW",
+        managed_exit_policy_id="GLOBEX_REOPEN_FIRST_CANDLE_60M_TIMEBOX_SHADOW_EXIT_V1",
+        exit_profile_id=MNQ_GLOBEX_REOPEN_FIRST_CANDLE_TIMEBOX_60M_SHADOW_V1,
+        invalidation_conditions=("second_candle_rejects_first_candle", "first_candle_not_strong_green"),
+        max_hold_policy="12_COMPLETED_5M_BARS",
+        expected_hold_bars_5m=12,
+        conflict_group="equity_index_nasdaq_mnq_nq",
+        strategy_family="globex_reopen_first_candle_continuation_shadow",
+        session_tags=("GLOBEX_REOPEN", "ASIA_EARLY"),
+        regime_tags=("FIRST_CANDLE_CONTINUATION", "TREND_PARTICIPATION", "SHADOW_CANDIDATE"),
     ),
 }
 

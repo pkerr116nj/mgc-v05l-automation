@@ -16,9 +16,11 @@ from typing import Mapping
 PAPER_DIAGNOSTIC_TIME_BOXED_3X5M_EXIT_V1 = "PAPER_DIAGNOSTIC_TIME_BOXED_3X5M_EXIT_V1"
 FORCED_SESSION_SEGMENT_LOCAL_EXIT_V1 = "FORCED_SESSION_SEGMENT_LOCAL_EXIT_V1"
 MNQ_SNAP_TURN_TIMEBOX_3X5M_V1 = "MNQ_SNAP_TURN_TIMEBOX_3X5M_V1"
+MNQ_GLOBEX_REOPEN_FIRST_CANDLE_TIMEBOX_60M_SHADOW_V1 = "MNQ_GLOBEX_REOPEN_FIRST_CANDLE_TIMEBOX_60M_SHADOW_V1"
 MGC_DIAGNOSTIC_TIMEBOX_3X5M_V1 = "MGC_DIAGNOSTIC_TIMEBOX_3X5M_V1"
 MGC_FORCED_SESSION_SEGMENT_TIMEBOX_3X5M_V1 = "MGC_FORCED_SESSION_SEGMENT_TIMEBOX_3X5M_V1"
 TIMEBOXED_3X5M_MANAGED_LIMIT_CLOSE_V1 = "timeboxed_3x5m_managed_limit_close_v1"
+TIMEBOXED_MANAGED_LIMIT_CLOSE_V1 = "timeboxed_managed_limit_close_v1"
 
 
 @dataclass(frozen=True)
@@ -73,6 +75,22 @@ EXIT_PROFILE_ROSTER: Mapping[str, TrackBExitProfile] = {
         profile_explanation=(
             "PAPER diagnostic snap-turn close profile: after three completed 5m bars, "
             "submit the managed lifecycle close as an exact SELL/BUY limit order for the owned position."
+        ),
+    ),
+    MNQ_GLOBEX_REOPEN_FIRST_CANDLE_TIMEBOX_60M_SHADOW_V1: TrackBExitProfile(
+        exit_strategy_id=TIMEBOXED_MANAGED_LIMIT_CLOSE_V1,
+        exit_profile_id=MNQ_GLOBEX_REOPEN_FIRST_CANDLE_TIMEBOX_60M_SHADOW_V1,
+        managed_exit_policy_id="GLOBEX_REOPEN_FIRST_CANDLE_60M_TIMEBOX_SHADOW_EXIT_V1",
+        instrument_family="MNQ",
+        strategy_family="globex_reopen_first_candle_continuation_shadow",
+        order_type="LMT",
+        required_completed_5m_bars=12,
+        price_offset_ticks=2,
+        tick_size="0.25",
+        profile_explanation=(
+            "Shadow-only Globex reopen first-candle benchmark profile: observe the hypothetical "
+            "opposite-side MNQ limit close after twelve completed 5m bars, about one hour, without "
+            "broker or lifecycle authority."
         ),
     ),
     MGC_DIAGNOSTIC_TIMEBOX_3X5M_V1: TrackBExitProfile(

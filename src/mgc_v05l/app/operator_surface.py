@@ -12,6 +12,9 @@ from mgc_v05l.execution_core.track_b_shadow_promotion_contract import (
     PROMOTION_CANDIDATE_SHADOW_ONLY,
     build_shadow_promotion_contract_report,
 )
+from mgc_v05l.execution_core.track_b_globex_reopen_shadow_candidates import (
+    build_globex_reopen_shadow_candidate_report,
+)
 
 from .strategy_identity import build_standalone_strategy_identity
 
@@ -935,6 +938,7 @@ def _build_track_b_trading_authority_surface(*, paper: dict[str, Any]) -> dict[s
     promotion_report = build_shadow_promotion_contract_report(
         {"enabled_strategy_ids": sorted(strategy_id for strategy_id in promoted_strategy_ids if strategy_id)}
     )
+    globex_reopen_shadow_report = build_globex_reopen_shadow_candidate_report()
     promoted_rows = [
         row
         for row in promotion_report.get("promotion_candidates", [])
@@ -989,6 +993,9 @@ def _build_track_b_trading_authority_surface(*, paper: dict[str, Any]) -> dict[s
         "broker_authoritative_side_counts": broker_side_counts,
         "broker_authoritative_session_coverage": broker_session_coverage,
         "shadow_only_count": len(shadow_rows),
+        "globex_reopen_shadow_candidate_count": globex_reopen_shadow_report.get("candidate_count", 0),
+        "globex_reopen_shadow_candidates": globex_reopen_shadow_report.get("candidates", []),
+        "globex_reopen_shadow_operator_visibility": globex_reopen_shadow_report.get("operator_visibility", {}),
         "remaining_shadow_only_exception_count": len(remaining_shadow_only_exceptions),
         "remaining_shadow_only_exceptions": remaining_shadow_only_exceptions,
         "atp_remediation_status": {
