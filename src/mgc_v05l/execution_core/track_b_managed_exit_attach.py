@@ -184,7 +184,12 @@ def build_track_b_managed_exit_attach_plan(
     blockers: list[str] = []
     control_plane_ok, control_plane_reason = _control_plane_allows_managed_exit(snapshot)
     safe_state_ok, safe_state_reason = _safe_state_allows_managed_exit(safe_state)
-    position_ok, position_reason = _position_identity_matches(config=config, position_truth=position_truth, live_position_status=live_position_status)
+    position_ok, position_reason = _position_identity_matches(
+        config=config,
+        position_truth=position_truth,
+        live_position_status=live_position_status,
+        selected_position=selected_managed_position,
+    )
     lifecycle_ok, lifecycle_reason = _lifecycle_matches(
         config=config,
         lifecycle_report=lifecycle_report,
@@ -381,6 +386,7 @@ def _apply_managed_exit(
         contract_key=config.contract_key,
         local_symbol=config.local_symbol,
         con_id=config.con_id,
+        contract_expiry=config.expiry,
         side=config.side,
         quantity=config.quantity,
         close_limit_price=close_limit_price,
@@ -595,22 +601,16 @@ def _config_for_selected_managed_position(
         or config.strategy_id
     )
     lane_id = str(selected_position.get("lane_id") or lifecycle_position.get("lane_id") or _lane_from_strategy_id(strategy_id) or config.lane_id)
+    selected_account_id = _selected_position_account_id(
+        selected_position=selected_position,
+        lifecycle_position=lifecycle_position,
+        broker_position=broker_position,
+        fallback_account_id=config.account_id,
+    )
     return replace(
         config,
-        account_id=str(
-            lifecycle_position.get("account_id")
-            or selected_position.get("account_id")
-            or broker_position.get("account_id")
-            or broker_position.get("account")
-            or config.account_id
-        ),
-        expected_account_id=str(
-            lifecycle_position.get("account_id")
-            or selected_position.get("account_id")
-            or broker_position.get("account_id")
-            or broker_position.get("account")
-            or config.expected_account_id
-        ),
+        account_id=selected_account_id,
+        expected_account_id=selected_account_id or config.expected_account_id,
         strategy_id=strategy_id,
         lane_id=lane_id,
         runtime_generation_id=str(
@@ -638,6 +638,42 @@ def _config_for_selected_managed_position(
             if isinstance(item, Mapping)
         ),
     )
+
+
+def _selected_position_account_id(
+    *,
+    selected_position: Mapping[str, Any],
+    lifecycle_position: Mapping[str, Any],
+    broker_position: Mapping[str, Any],
+    fallback_account_id: str,
+) -> str:
+    units = [
+        _mapping(item)
+        for item in (selected_position.get("lifecycle_units") or lifecycle_position.get("lifecycle_units") or [])
+        if isinstance(item, Mapping)
+    ]
+    unit_accounts = {_valid_account_id(item.get("account_id") or item.get("account")) for item in units}
+    unit_accounts.discard("")
+    for raw in (
+        broker_position.get("account_id"),
+        broker_position.get("account"),
+        next(iter(unit_accounts)) if len(unit_accounts) == 1 else "",
+        lifecycle_position.get("account_id"),
+        lifecycle_position.get("account"),
+        selected_position.get("account_id"),
+        selected_position.get("account"),
+    ):
+        account = _valid_account_id(raw)
+        if account:
+            return account
+    return "" if selected_position else str(fallback_account_id or "")
+
+
+def _valid_account_id(value: Any) -> str:
+    text = str(value or "").strip()
+    if text.upper() in {"", "MULTIPLE", "MISSING", "UNKNOWN", "NONE", "NULL"}:
+        return ""
+    return text
 
 
 def _active_due_count(managed_position_registry: Mapping[str, Any]) -> int:
@@ -698,8 +734,43 @@ def _position_identity_matches(
     config: TrackBManagedExitAttachConfig,
     position_truth: Mapping[str, Any],
     live_position_status: Mapping[str, Any],
+    selected_position: Mapping[str, Any] | None = None,
 ) -> tuple[bool, str]:
     candidates = list(position_truth.get("broker_positions") or [])
+    reconciliation = _read_json(
+        config.repo_root
+        / "outputs"
+        / "reports"
+        / "track_b_paper_broker_reconciliation"
+        / "latest_track_b_paper_broker_reconciliation.json"
+    )
+    reconciliation_broker_positions = [
+        dict(position)
+        for position in list(reconciliation.get("track_b_broker_positions") or [])
+        if isinstance(position, Mapping)
+    ]
+    candidates.extend(
+        reconciliation_broker_positions
+    )
+    candidates.extend(
+        _reconciled_lifecycle_position_identity_candidate(
+            lifecycle_position=dict(position),
+            broker_positions=reconciliation_broker_positions,
+        )
+        for position in list(reconciliation.get("track_b_lifecycle_positions") or [])
+        if isinstance(position, Mapping)
+    )
+    selected = _mapping(selected_position)
+    selected_broker = _mapping(selected.get("broker_position"))
+    if selected_broker:
+        candidates.append(
+            {
+                **selected_broker,
+                "con_id": selected_broker.get("con_id") or selected.get("con_id"),
+                "local_symbol": selected_broker.get("local_symbol") or selected.get("local_symbol"),
+                "quantity": selected_broker.get("quantity") or selected.get("quantity"),
+            }
+        )
     for value in (live_position_status.get("positions_by_instrument") or {}).values():
         if isinstance(value, Mapping):
             candidates.append(dict(value))
@@ -708,10 +779,11 @@ def _position_identity_matches(
             continue
         local_symbol = str(position.get("local_symbol") or position.get("localSymbol") or "")
         con_id = _int_or_none(position.get("con_id") or position.get("conId"))
-        account = str(position.get("account_id") or position.get("account") or config.account_id)
+        account = _valid_account_id(position.get("account_id") or position.get("account"))
         quantity = _decimal(position.get("quantity"))
         if (
-            account == config.account_id
+            account
+            and account == config.account_id
             and local_symbol == config.local_symbol
             and con_id == config.con_id
             and quantity is not None
@@ -719,6 +791,49 @@ def _position_identity_matches(
         ):
             return True, "Position identity matches."
     return False, "No exact active broker/lifecycle position matches account, contract, conId, and quantity."
+
+
+def _reconciled_lifecycle_position_identity_candidate(
+    *,
+    lifecycle_position: Mapping[str, Any],
+    broker_positions: Sequence[Mapping[str, Any]],
+) -> dict[str, Any]:
+    local_symbol = str(lifecycle_position.get("local_symbol") or lifecycle_position.get("localSymbol") or "").strip()
+    symbol = str(
+        lifecycle_position.get("track_b_root")
+        or lifecycle_position.get("instrument_family")
+        or lifecycle_position.get("symbol")
+        or ""
+    ).strip().upper()
+    broker = _matching_reconciled_broker_position(
+        local_symbol=local_symbol,
+        symbol=symbol,
+        broker_positions=broker_positions,
+    )
+    return {
+        "account_id": broker.get("account_id") or broker.get("account") or lifecycle_position.get("account_id"),
+        "local_symbol": local_symbol,
+        "con_id": lifecycle_position.get("con_id") or lifecycle_position.get("conId") or broker.get("con_id") or broker.get("conId"),
+        "quantity": lifecycle_position.get("quantity") or broker.get("quantity"),
+    }
+
+
+def _matching_reconciled_broker_position(
+    *,
+    local_symbol: str,
+    symbol: str,
+    broker_positions: Sequence[Mapping[str, Any]],
+) -> dict[str, Any]:
+    requested_local = str(local_symbol or "").strip().upper()
+    requested_symbol = str(symbol or "").strip().upper()
+    for position in broker_positions:
+        broker_local = str(position.get("local_symbol") or position.get("localSymbol") or "").strip().upper()
+        broker_symbol = str(position.get("track_b_root") or position.get("symbol") or "").strip().upper()
+        if requested_local and broker_local and requested_local == broker_local:
+            return dict(position)
+        if requested_symbol and broker_symbol and requested_symbol == broker_symbol and not requested_local:
+            return dict(position)
+    return {}
 
 
 def _lifecycle_matches(
@@ -1005,6 +1120,7 @@ def _close_intent_preview(
         "strategy_id": config.strategy_id,
         "account_id": config.account_id,
         "contract_key": config.contract_key,
+        "expiry": config.expiry,
         "local_symbol": config.local_symbol,
         "con_id": config.con_id,
         "side": config.side,

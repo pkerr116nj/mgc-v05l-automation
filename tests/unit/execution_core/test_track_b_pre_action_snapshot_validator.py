@@ -224,6 +224,66 @@ def test_matching_target_identity_is_valid(tmp_path: Path) -> None:
     assert result["planner_target_identity"] == {key: str(value) for key, value in TARGET.items()}
 
 
+def test_scoped_cleanup_allows_extra_diagnostic_identity_fields(tmp_path: Path) -> None:
+    expected = {
+        "symbol": "MNQ",
+        "contract": "MNQM6",
+        "con_id": 770561201,
+        "side": "LONG",
+        "quantity": 1,
+        "lifecycle_id": "bridge_fill_MNQ|1m|2026-05-29T18:33:00Z|BUY_TO_OPEN",
+    }
+    planner = {
+        **expected,
+        "lane": "mnq_us_active_participation_long",
+        "manifest_id": "MNQ|1m|2026-05-29T18:33:00Z|BUY_TO_OPEN",
+    }
+    _seed_valid(
+        tmp_path,
+        plan_classification="PLAN_SCOPED_POSITION_CLEANUP",
+        action_type="SCOPED_POSITION_CLEANUP",
+        target_identity=planner,
+    )
+
+    result = validate_track_b_pre_action_snapshot(
+        config=TrackBPreActionSnapshotValidatorConfig(repo_root=tmp_path),
+        expected_plan_classification="PLAN_SCOPED_POSITION_CLEANUP",
+        expected_action_type="SCOPED_POSITION_CLEANUP",
+        expected_target_identity=expected,
+        now=NOW,
+    )
+
+    assert result["classification"] == PRE_ACTION_SNAPSHOT_VALID
+    assert result["planner_target_identity"]["lane"] == "mnq_us_active_participation_long"
+
+
+def test_scoped_cleanup_still_blocks_hard_identity_mismatch(tmp_path: Path) -> None:
+    expected = {
+        "symbol": "MNQ",
+        "contract": "MNQM6",
+        "con_id": 770561201,
+        "side": "LONG",
+        "quantity": 1,
+        "lifecycle_id": "bridge_fill_MNQ|1m|2026-05-29T18:33:00Z|BUY_TO_OPEN",
+    }
+    _seed_valid(
+        tmp_path,
+        plan_classification="PLAN_SCOPED_POSITION_CLEANUP",
+        action_type="SCOPED_POSITION_CLEANUP",
+        target_identity={**expected, "con_id": 770561202, "lane": "other_lane"},
+    )
+
+    result = validate_track_b_pre_action_snapshot(
+        config=TrackBPreActionSnapshotValidatorConfig(repo_root=tmp_path),
+        expected_plan_classification="PLAN_SCOPED_POSITION_CLEANUP",
+        expected_action_type="SCOPED_POSITION_CLEANUP",
+        expected_target_identity=expected,
+        now=NOW,
+    )
+
+    assert result["classification"] == PRE_ACTION_BLOCKED_TARGET_IDENTITY_MISMATCH
+
+
 def _seed_valid(
     root: Path,
     *,

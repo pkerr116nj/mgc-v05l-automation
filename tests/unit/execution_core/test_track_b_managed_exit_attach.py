@@ -30,6 +30,7 @@ def test_plan_ready_when_3x5m_elapsed(tmp_path: Path) -> None:
     assert payload["apply_boundary_classification"] == MANAGED_EXIT_APPLY_DISABLED
     assert payload["close_intent_preview"]["order_action"] == "SELL"
     assert payload["close_intent_preview"]["quantity"] == 1
+    assert payload["close_intent_preview"]["expiry"] == config.expiry
     assert payload["close_intent_preview"]["would_submit"] is False
     assert payload["broker_state_mutated"] is False
     assert payload["exit_roster_compatible"] is True
@@ -728,6 +729,89 @@ def test_explicit_mgc_retry_target_does_not_auto_select_due_mnq_position(tmp_pat
     assert payload["close_intent_preview"]["order_action"] == "BUY"
 
 
+def test_auto_selected_aggregate_multiple_account_uses_broker_backed_account(tmp_path: Path) -> None:
+    config = _seed(tmp_path, completed_bars=3)
+    _write_exit_due_managed_position(
+        tmp_path,
+        config=config,
+        lifecycle_account_id="MULTIPLE",
+        lifecycle_unit_account_id=None,
+        broker_account_id=config.account_id,
+        include_broker_position_con_id=False,
+    )
+    _write_json(
+        tmp_path / "outputs/track_b_execution_core/position_truth/latest_position_truth.json",
+        {
+            "broker_positions": [
+                {
+                    "account_id": config.account_id,
+                    "local_symbol": config.local_symbol,
+                    "quantity": "1.0",
+                    "symbol": config.instrument_family,
+                }
+            ],
+            "live_money_eligible": False,
+            "paper_proof_invoked": False,
+        },
+    )
+    stale_default_config = TrackBManagedExitAttachConfig(repo_root=tmp_path, refresh_control_plane=False)
+
+    payload = build_track_b_managed_exit_attach_plan(config=stale_default_config, now=NOW)
+
+    assert payload["classification"] == MANAGED_EXIT_TIMEBOX_CLOSE_ELIGIBLE
+    assert payload["target_identity"]["account_id"] == config.account_id
+    assert payload["expected_post_action_evidence"]["same_account"] == config.account_id
+    assert payload["position_identity_verified"] is True
+    assert payload["lifecycle_identity_verified"] is True
+
+
+def test_auto_selected_true_account_mismatch_still_blocks(tmp_path: Path) -> None:
+    config = _seed(tmp_path, completed_bars=3)
+    lifecycle_path = (
+        tmp_path
+        / "outputs/track_b_execution_core/track_b_strategy_managed_paper_lifecycle"
+        / config.lifecycle_id
+        / "track_b_strategy_managed_paper_lifecycle_report.json"
+    )
+    lifecycle = json.loads(lifecycle_path.read_text(encoding="utf-8"))
+    lifecycle["account_id"] = "OTHER_ACCOUNT"
+    _write_json(lifecycle_path, lifecycle)
+    _write_exit_due_managed_position(
+        tmp_path,
+        config=config,
+        lifecycle_account_id="OTHER_ACCOUNT",
+        lifecycle_unit_account_id="OTHER_ACCOUNT",
+        broker_account_id=config.account_id,
+    )
+    stale_default_config = TrackBManagedExitAttachConfig(repo_root=tmp_path, refresh_control_plane=False)
+
+    payload = build_track_b_managed_exit_attach_plan(config=stale_default_config, now=NOW)
+
+    assert payload["classification"] == MANAGED_EXIT_BLOCKED_POSITION_MISMATCH
+    assert payload["position_identity_verified"] is True
+    assert payload["lifecycle_identity_verified"] is False
+    assert payload["broker_state_mutated"] is False
+
+
+def test_auto_selected_missing_account_fails_closed(tmp_path: Path) -> None:
+    config = _seed(tmp_path, completed_bars=3)
+    _write_exit_due_managed_position(
+        tmp_path,
+        config=config,
+        lifecycle_account_id="MULTIPLE",
+        lifecycle_unit_account_id=None,
+        broker_account_id=None,
+    )
+    stale_default_config = TrackBManagedExitAttachConfig(repo_root=tmp_path, refresh_control_plane=False)
+
+    payload = build_track_b_managed_exit_attach_plan(config=stale_default_config, now=NOW)
+
+    assert payload["classification"] == MANAGED_EXIT_BLOCKED_POSITION_MISMATCH
+    assert payload["target_identity"]["account_id"] == ""
+    assert payload["position_identity_verified"] is False
+    assert payload["broker_state_mutated"] is False
+
+
 def _seed(
     tmp_path: Path,
     *,
@@ -874,6 +958,91 @@ def _seed(
     return config
 
 
+def _write_exit_due_managed_position(
+    tmp_path: Path,
+    *,
+    config: TrackBManagedExitAttachConfig,
+    lifecycle_account_id: str | None,
+    lifecycle_unit_account_id: str | None,
+    broker_account_id: str | None,
+    include_broker_position_con_id: bool = True,
+) -> None:
+    lifecycle_path = (
+        tmp_path
+        / "outputs/track_b_execution_core/track_b_strategy_managed_paper_lifecycle"
+        / config.lifecycle_id
+        / "track_b_strategy_managed_paper_lifecycle_report.json"
+    )
+    lifecycle_unit = {
+        "account_id": lifecycle_unit_account_id,
+        "con_id": config.con_id,
+        "contract_key": config.contract_key,
+        "entry_order_id": "33",
+        "entry_perm_id": 2047276068,
+        "entry_exec_id": "0000e1a7.6a2870c7.01.01",
+        "instrument_family": config.instrument_family,
+        "lane_id": config.lane_id,
+        "lifecycle_id": config.lifecycle_id,
+        "local_symbol": config.local_symbol,
+        "managed_exit_policy_id": config.managed_exit_policy_id,
+        "paper_lifecycle_report_path": str(lifecycle_path),
+        "quantity": "1",
+        "side": config.side,
+        "strategy_id": config.strategy_id,
+    }
+    broker_position = {
+        "average_cost": "149618.75",
+        "expiry": config.expiry,
+        "local_symbol": config.local_symbol,
+        "quantity": "1",
+        "symbol": config.instrument_family,
+    }
+    if include_broker_position_con_id:
+        broker_position["con_id"] = config.con_id
+    if broker_account_id is not None:
+        broker_position["account_id"] = broker_account_id
+    _write_json(
+        tmp_path / "outputs/track_b_execution_core/managed_positions/latest_managed_positions.json",
+        {
+            "classification": "OPEN_MANAGED_EXIT_DUE",
+            "managed_positions": [
+                {
+                    "classification": "OPEN_MANAGED_EXIT_DUE",
+                    "exit_due": True,
+                    "attention_required": False,
+                    "symbol": config.instrument_family,
+                    "contract_key": config.contract_key,
+                    "local_symbol": config.local_symbol,
+                    "con_id": config.con_id,
+                    "quantity": "1",
+                    "side": config.side,
+                    "strategy_id": config.strategy_id,
+                    "lane_id": config.lane_id,
+                    "lifecycle_id": config.lifecycle_id,
+                    "managed_exit_policy_id": config.managed_exit_policy_id,
+                    "broker_position": broker_position,
+                    "lifecycle_units": [lifecycle_unit],
+                    "lifecycle_position": {
+                        "account_id": lifecycle_account_id,
+                        "instrument_family": config.instrument_family,
+                        "contract_key": config.contract_key,
+                        "local_symbol": config.local_symbol,
+                        "con_id": config.con_id,
+                        "quantity": "1",
+                        "side": config.side,
+                        "strategy_id": config.strategy_id,
+                        "lane_id": config.lane_id,
+                        "lifecycle_id": config.lifecycle_id,
+                        "managed_exit_policy_id": config.managed_exit_policy_id,
+                        "lifecycle_units": [lifecycle_unit],
+                        "paper_lifecycle_report_path": str(lifecycle_path),
+                    },
+                }
+            ],
+        },
+    )
+
+
 def _lifecycle_payload(
     *,
     config: TrackBManagedExitAttachConfig,
@@ -908,6 +1077,99 @@ def _lifecycle_payload(
             "broker_order_id": order_id,
         },
     }
+
+
+def test_reconciled_lifecycle_identity_supplies_missing_broker_con_id_for_any_symbol(tmp_path: Path) -> None:
+    _write_reconciliation(
+        tmp_path,
+        broker_position={
+            "account_id": "DUM882026",
+            "symbol": "ZC",
+            "local_symbol": "ZCN6",
+            "quantity": "1",
+        },
+        lifecycle_position={
+            "account_id": "MULTIPLE",
+            "track_b_root": "ZC",
+            "local_symbol": "ZCN6",
+            "con_id": 123456789,
+            "quantity": "1",
+        },
+    )
+    config = TrackBManagedExitAttachConfig(
+        repo_root=tmp_path,
+        account_id="DUM882026",
+        instrument_family="ZC",
+        contract_key="ZC-202607",
+        local_symbol="ZCN6",
+        con_id=123456789,
+        quantity=1,
+    )
+
+    ok, reason = attach_module._position_identity_matches(  # noqa: SLF001
+        config=config,
+        position_truth={"broker_positions": []},
+        live_position_status={},
+    )
+
+    assert ok is True
+    assert reason == "Position identity matches."
+
+
+def test_reconciled_lifecycle_identity_preserves_true_account_mismatch_block(tmp_path: Path) -> None:
+    _write_reconciliation(
+        tmp_path,
+        broker_position={
+            "account_id": "OTHER",
+            "symbol": "BTC",
+            "local_symbol": "BTC-PERP",
+            "quantity": "1",
+        },
+        lifecycle_position={
+            "account_id": "MULTIPLE",
+            "track_b_root": "BTC",
+            "local_symbol": "BTC-PERP",
+            "con_id": 987654321,
+            "quantity": "1",
+        },
+    )
+    config = TrackBManagedExitAttachConfig(
+        repo_root=tmp_path,
+        account_id="DUM882026",
+        instrument_family="BTC",
+        contract_key="BTC-PERP",
+        local_symbol="BTC-PERP",
+        con_id=987654321,
+        quantity=1,
+    )
+
+    ok, reason = attach_module._position_identity_matches(  # noqa: SLF001
+        config=config,
+        position_truth={"broker_positions": []},
+        live_position_status={},
+    )
+
+    assert ok is False
+    assert reason == "No exact active broker/lifecycle position matches account, contract, conId, and quantity."
+
+
+def _write_reconciliation(
+    repo_root: Path,
+    *,
+    broker_position: dict[str, Any],
+    lifecycle_position: dict[str, Any],
+) -> None:
+    _write_json(
+        repo_root
+        / "outputs"
+        / "reports"
+        / "track_b_paper_broker_reconciliation"
+        / "latest_track_b_paper_broker_reconciliation.json",
+        {
+            "track_b_broker_positions": [broker_position],
+            "track_b_lifecycle_positions": [lifecycle_position],
+        },
+    )
 
 
 def _write_json(path: Path, payload: Mapping[str, Any]) -> None:

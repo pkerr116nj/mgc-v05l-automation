@@ -197,7 +197,11 @@ def validate_track_b_pre_action_snapshot(
     base["planner_target_identity"] = _normalize_identity(_mapping(action.get("target_identity")))
 
     expected_identity = _normalize_identity(expected_target_identity or {})
-    if expected_identity and expected_identity != base["planner_target_identity"]:
+    if expected_identity and expected_identity != base["planner_target_identity"] and not _scoped_cleanup_identity_matches(
+        expected_identity=expected_identity,
+        planner_identity=base["planner_target_identity"],
+        expected_action_type=expected_action_type,
+    ):
         return _result(
             base,
             PRE_ACTION_BLOCKED_TARGET_IDENTITY_MISMATCH,
@@ -205,6 +209,23 @@ def validate_track_b_pre_action_snapshot(
         )
 
     return _result(base, PRE_ACTION_SNAPSHOT_VALID, "Pre-action Control Plane Snapshot evidence is valid.")
+
+
+def _scoped_cleanup_identity_matches(
+    *,
+    expected_identity: Mapping[str, str],
+    planner_identity: Mapping[str, str],
+    expected_action_type: str,
+) -> bool:
+    if expected_action_type != "SCOPED_POSITION_CLEANUP":
+        return False
+    required_keys = {"symbol", "contract", "con_id", "side", "quantity", "lifecycle_id"}
+    if not required_keys <= set(expected_identity):
+        return False
+    for key in required_keys:
+        if str(expected_identity.get(key) or "") != str(planner_identity.get(key) or ""):
+            return False
+    return True
 
 
 def _result(base: Mapping[str, Any], classification: str, reason: str) -> dict[str, Any]:
