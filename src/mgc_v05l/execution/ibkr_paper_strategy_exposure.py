@@ -340,6 +340,11 @@ def _build_strategy_exposure_rows_from_phase1_reconciliation(
 ) -> list[dict[str, Any]]:
     if not bool(phase1_reconciliation_gate.get("ready")):
         return []
+    broker_positions = [
+        dict(row)
+        for row in list(phase1_reconciliation_gate.get("track_b_broker_positions") or [])
+        if isinstance(row, dict)
+    ]
     rows: list[dict[str, Any]] = []
     for position in list(phase1_reconciliation_gate.get("track_b_lifecycle_positions") or []):
         quantity = float(position.get("quantity") or 0.0)
@@ -349,11 +354,16 @@ def _build_strategy_exposure_rows_from_phase1_reconciliation(
         state = _normalize_strategy_state(quantity=quantity, side=side, raw_state=side)
         signed_quantity = quantity if state == "LONG" else (-quantity if state == "SHORT" else 0.0)
         strategy_id = str(position.get("strategy_id") or "").strip()
+        broker_position = _matching_broker_position_for_lifecycle(position=position, broker_positions=broker_positions)
         rows.append(
             {
                 "strategy_id": strategy_id,
-                "strategy_aliases": _strategy_aliases_for_phase1_lifecycle_position(strategy_id),
+                "strategy_aliases": _strategy_aliases_for_phase1_lifecycle_position(position),
+                "lane_id": position.get("lane_id"),
+                "lane_ids": list(position.get("lane_ids") or []),
+                "strategy_ids": list(position.get("strategy_ids") or []),
                 "account_id": position.get("account_id"),
+                "broker_account_id": broker_position.get("account_id") or broker_position.get("account"),
                 "symbol": position.get("track_b_root") or position.get("instrument_family"),
                 "contract_month": str(position.get("contract_key") or "").split("-", 1)[-1],
                 "expiry": position.get("expiry"),
@@ -380,11 +390,48 @@ def _build_strategy_exposure_rows_from_phase1_reconciliation(
     return rows
 
 
-def _strategy_aliases_for_phase1_lifecycle_position(strategy_id: str) -> list[str]:
-    normalized = str(strategy_id or "").strip()
+def _matching_broker_position_for_lifecycle(
+    *,
+    position: dict[str, Any],
+    broker_positions: list[dict[str, Any]],
+) -> dict[str, Any]:
+    requested_con_id = str(position.get("con_id") or "").strip()
+    requested_local = str(position.get("local_symbol") or "").strip().upper()
+    requested_symbol = str(position.get("track_b_root") or position.get("instrument_family") or "").strip().upper()
+    for broker_position in broker_positions:
+        broker_con_id = str(broker_position.get("con_id") or broker_position.get("conId") or "").strip()
+        broker_local = str(broker_position.get("local_symbol") or broker_position.get("localSymbol") or "").strip().upper()
+        broker_symbol = str(broker_position.get("track_b_root") or broker_position.get("symbol") or "").strip().upper()
+        if requested_con_id and broker_con_id and requested_con_id == broker_con_id:
+            return dict(broker_position)
+        if requested_local and broker_local and requested_local == broker_local:
+            return dict(broker_position)
+        if requested_symbol and broker_symbol and requested_symbol == broker_symbol and not requested_local and not requested_con_id:
+            return dict(broker_position)
+    return {}
+
+
+def _strategy_aliases_for_phase1_lifecycle_position(position: dict[str, Any]) -> list[str]:
+    normalized = str(position.get("strategy_id") or "").strip()
     aliases: list[str] = []
     if normalized:
         aliases.append(normalized)
+    for key in ("lane_id", "strategy_id"):
+        value = str(position.get(key) or "").strip()
+        if value:
+            aliases.append(value)
+    for key in ("lane_ids", "strategy_ids"):
+        for value in list(position.get(key) or []):
+            text = str(value or "").strip()
+            if text:
+                aliases.append(text)
+    for unit in list(position.get("lifecycle_units") or []):
+        if not isinstance(unit, dict):
+            continue
+        for key in ("lane_id", "strategy_id"):
+            value = str(unit.get(key) or "").strip()
+            if value:
+                aliases.append(value)
     if "__" in normalized:
         root, suffix = normalized.split("__", 1)
         if suffix:
@@ -501,13 +548,39 @@ def _evaluate_strategy_gate(
     quantity = float(config.quantity or 0.0)
     identifiers = {requested_strategy, requested_bridge_strategy}
     identifiers.discard("")
+    requested_lifecycle_id = str(config.lifecycle_id or "").strip()
+    exact_lifecycle_rows = [
+        dict(row)
+        for row in strategy_rows
+        if requested_lifecycle_id
+        and str(row.get("lifecycle_id") or row.get("source_intent_id") or "").strip() == requested_lifecycle_id
+    ]
     owned_rows = []
     for row in strategy_rows:
         row_identifiers = {str(row.get("strategy_id") or "").strip()}
         row_identifiers.update(str(alias or "").strip() for alias in list(row.get("strategy_aliases") or []))
+        row_identifiers.add(str(row.get("lane_id") or "").strip())
+        row_identifiers.update(str(alias or "").strip() for alias in list(row.get("lane_ids") or []))
+        row_identifiers.update(str(alias or "").strip() for alias in list(row.get("strategy_ids") or []))
         row_identifiers.discard("")
         if row_identifiers.intersection(identifiers):
             owned_rows.append(dict(row))
+    if semantics.operation == "CLOSE" and exact_lifecycle_rows:
+        exact_lifecycle_ids = {
+            str(row.get("strategy_id") or "").strip()
+            for row in exact_lifecycle_rows
+            if str(row.get("strategy_id") or "").strip()
+        }
+        exact_lifecycle_aliases = {
+            str(alias or "").strip()
+            for row in exact_lifecycle_rows
+            for alias in list(row.get("strategy_aliases") or [])
+            if str(alias or "").strip()
+        }
+        if identifiers and not identifiers.intersection(exact_lifecycle_ids | exact_lifecycle_aliases):
+            owned_rows = []
+        else:
+            owned_rows = exact_lifecycle_rows
     exit_identity_requested = semantics.operation == "CLOSE" and any(
         item not in (None, "")
         for item in (config.account_id, config.con_id, config.local_symbol, config.lifecycle_id)
@@ -614,6 +687,12 @@ def _evaluate_strategy_gate(
                 else "The strategy may open short exposure from flat."
             )
     elif semantics.operation == "CLOSE":
+        if exit_identity_requested and not requested_lifecycle_id and any(
+            str(row.get("lifecycle_id") or row.get("source_intent_id") or "").strip()
+            and str(row.get("pnl_source") or "").strip() == "phase1_broker_reconciliation"
+            for row in owned_rows
+        ):
+            block_reasons.append("missing_lifecycle_identity")
         if exit_identity_requested and not identity_filtered_owned_rows:
             block_reasons.append("exit_identity_mismatch")
         if semantics.direction == "LONG" and strategy_state != "LONG":
@@ -699,13 +778,13 @@ def _filter_owned_rows_for_requested_exit_identity(
     local_symbol: str | None,
     lifecycle_id: str | None,
 ) -> list[dict[str, Any]]:
-    requested_account = str(account_id or "").strip()
+    requested_account = _valid_owner_identity_value(account_id)
     requested_con_id = str(con_id or "").strip()
     requested_local_symbol = str(local_symbol or "").strip().upper()
     requested_lifecycle_id = str(lifecycle_id or "").strip()
     filtered: list[dict[str, Any]] = []
     for row in owned_rows:
-        row_account = str(row.get("account_id") or "").strip()
+        row_account = _valid_owner_identity_value(row.get("account_id")) or _valid_owner_identity_value(row.get("broker_account_id"))
         if requested_account and row_account and row_account != requested_account:
             continue
         if requested_con_id and str(row.get("con_id") or "").strip() != requested_con_id:
@@ -717,6 +796,13 @@ def _filter_owned_rows_for_requested_exit_identity(
             continue
         filtered.append(dict(row))
     return filtered
+
+
+def _valid_owner_identity_value(value: Any) -> str:
+    text = str(value or "").strip()
+    if text.upper() in {"", "MULTIPLE", "MISSING", "UNKNOWN", "NONE", "NULL"}:
+        return ""
+    return text
 
 
 def _load_unresolved_submit_intents(config: IbkrPaperStrategyExposureConfig) -> list[dict[str, Any]]:

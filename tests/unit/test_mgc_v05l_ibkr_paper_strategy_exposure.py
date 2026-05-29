@@ -76,6 +76,7 @@ def _write_phase1_reconciliation(
     open_order_count: int = 0,
     block_reasons: list[str] | None = None,
     lifecycle_positions: list[dict[str, object]] | None = None,
+    broker_positions: list[dict[str, object]] | None = None,
 ) -> None:
     path = (
         tmp_path
@@ -94,7 +95,7 @@ def _write_phase1_reconciliation(
                 "review_required_count": review_required_count,
                 "track_b_broker_open_order_count": open_order_count,
                 "track_b_broker_position_count": 0,
-                "track_b_broker_positions": [],
+                "track_b_broker_positions": broker_positions or [],
                 "track_b_lifecycle_positions": lifecycle_positions or [],
                 "live_money_eligible": False,
                 "blockers": [],
@@ -192,6 +193,56 @@ def _governance_row(strategy_id: str, bridge_strategy_id: str, *, status: str = 
         "submit_block_reasons": [],
         "open_order_ambiguity_count": 0,
     }
+
+
+def _write_broker_backed_managed_position(
+    tmp_path: Path,
+    *,
+    symbol: str,
+    lane_id: str,
+    thesis_strategy_id: str,
+    lifecycle_id: str,
+    con_id: int,
+    local_symbol: str,
+    account_id: str = "MULTIPLE",
+    broker_account_id: str = "DUM882026",
+    quantity: str = "1",
+) -> None:
+    _write_monitor(tmp_path, broker_quantity=0.0)
+    _write_ledger(tmp_path, [])
+    _write_governance(tmp_path, [_governance_row(lane_id, thesis_strategy_id)])
+    broker_position = {
+        "account_id": broker_account_id,
+        "symbol": symbol,
+        "local_symbol": local_symbol,
+        "con_id": con_id,
+        "quantity": quantity,
+    }
+    _write_phase1_reconciliation(
+        tmp_path,
+        lifecycle_positions=[
+            {
+                "account_id": account_id,
+                "strategy_id": thesis_strategy_id,
+                "lane_id": lane_id,
+                "track_b_root": symbol,
+                "instrument_family": symbol,
+                "contract_key": f"{symbol}-202606",
+                "local_symbol": local_symbol,
+                "con_id": con_id,
+                "quantity": quantity,
+                "side": "LONG",
+                "avg_entry_price": "100",
+                "entry_order_id": "1",
+                "entry_perm_id": "2047276405",
+                "entry_exec_id": "0000e1a7.6a29f525.01.01",
+                "lifecycle_id": lifecycle_id,
+            }
+        ],
+        broker_positions=[broker_position],
+    )
+    _write_broker_positions_snapshot(tmp_path, positions=[broker_position])
+    _write_broker_open_orders_snapshot(tmp_path, open_orders=[])
 
 
 def _write_submit_intent_ownership(
@@ -869,6 +920,179 @@ def test_pl_exit_blocks_when_exact_identity_does_not_match_phase1_owner(tmp_path
     assert gate["submit_allowed"] is False
     assert "exit_identity_mismatch" in gate["block_reasons"]
     assert "non_owning_strategy_exit_forbidden" in gate["block_reasons"]
+
+
+@pytest.mark.parametrize(
+    ("symbol", "lane_id", "thesis_strategy_id", "lifecycle_id", "con_id", "local_symbol"),
+    [
+        (
+            "MNQ",
+            "mnq_us_active_participation_long",
+            "PAPER_ACTIVE_EVIDENCE_MNQ_US_PARTICIPATION_LONG_V1",
+            "bridge_fill_MNQ|1m|2026-05-29T18:33:00Z|BUY_TO_OPEN",
+            770561201,
+            "MNQM6",
+        ),
+        (
+            "MES",
+            "mes_globex_active_participation_long",
+            "PAPER_ACTIVE_EVIDENCE_MES_GLOBEX_PARTICIPATION_LONG_V1",
+            "bridge_fill_MES|1m|2026-05-29T05:54:00Z|BUY_TO_OPEN",
+            770561194,
+            "MESM6",
+        ),
+        (
+            "MGC",
+            "mgc_asia_late_flat_pullback_pause_resume_long",
+            "ASIA_LATE_FLAT_PULLBACK_PAUSE_RESUME_LONG_V1",
+            "bridge_fill_MGC|1m|2026-05-29T01:05:00Z|BUY_TO_OPEN",
+            712565978,
+            "MGCM6",
+        ),
+        (
+            "GC",
+            "gc_1x_asia_london_participation_long",
+            "GC_ASIA_LONDON_PARTICIPATION_LONG_V1",
+            "bridge_fill_GC|1m|2026-05-29T01:05:00Z|BUY_TO_OPEN",
+            430360630,
+            "GCM6",
+        ),
+        (
+            "ZC",
+            "zc_ag_paper_managed_long",
+            "AGRICULTURE_MANAGED_PAPER_ZC_LONG_V1",
+            "bridge_fill_ZC|1m|2026-05-29T14:05:00Z|BUY_TO_OPEN",
+            800100101,
+            "ZCN6",
+        ),
+        (
+            "BTC",
+            "btc_crypto_paper_managed_long",
+            "CRYPTO_MANAGED_PAPER_BTC_LONG_V1",
+            "bridge_fill_BTC|1m|2026-05-29T14:05:00Z|BUY_TO_OPEN",
+            900200202,
+            "BTCUSD",
+        ),
+    ],
+)
+def test_exact_lifecycle_identity_allows_managed_close_when_lane_differs_from_thesis_and_account_is_aggregate(
+    tmp_path: Path,
+    symbol: str,
+    lane_id: str,
+    thesis_strategy_id: str,
+    lifecycle_id: str,
+    con_id: int,
+    local_symbol: str,
+) -> None:
+    _write_broker_backed_managed_position(
+        tmp_path,
+        symbol=symbol,
+        lane_id=lane_id,
+        thesis_strategy_id=thesis_strategy_id,
+        lifecycle_id=lifecycle_id,
+        con_id=con_id,
+        local_symbol=local_symbol,
+    )
+
+    gate = evaluate_paper_strategy_exposure_gate(
+        repo_root=tmp_path,
+        strategy_id=lane_id,
+        bridge_strategy_id=thesis_strategy_id,
+        executable_symbol=symbol,
+        action="SELL",
+        intent_type="SELL_TO_CLOSE",
+        quantity=1.0,
+        account_id="DUM882026",
+        con_id=con_id,
+        local_symbol=local_symbol,
+        lifecycle_id=lifecycle_id,
+    )
+
+    assert gate["classification"] == "PAPER_EXPOSURE_EXIT_ALLOWED"
+    assert gate["submit_allowed"] is True
+    assert gate["owned_strategy_quantity"] == 1.0
+    assert "exit_identity_mismatch" not in gate["block_reasons"]
+
+
+def test_exact_lifecycle_identity_blocks_true_non_owner_managed_close(tmp_path: Path) -> None:
+    lifecycle_id = "bridge_fill_MNQ|1m|2026-05-29T18:33:00Z|BUY_TO_OPEN"
+    _write_broker_backed_managed_position(
+        tmp_path,
+        symbol="MNQ",
+        lane_id="mnq_us_active_participation_long",
+        thesis_strategy_id="PAPER_ACTIVE_EVIDENCE_MNQ_US_PARTICIPATION_LONG_V1",
+        lifecycle_id=lifecycle_id,
+        con_id=770561201,
+        local_symbol="MNQM6",
+    )
+
+    gate = evaluate_paper_strategy_exposure_gate(
+        repo_root=tmp_path,
+        strategy_id="mnq_us_active_participation_short",
+        bridge_strategy_id="PAPER_ACTIVE_EVIDENCE_MNQ_US_PARTICIPATION_SHORT_V1",
+        executable_symbol="MNQ",
+        action="SELL",
+        intent_type="SELL_TO_CLOSE",
+        quantity=1.0,
+        account_id="DUM882026",
+        con_id=770561201,
+        local_symbol="MNQM6",
+        lifecycle_id=lifecycle_id,
+    )
+
+    assert gate["submit_allowed"] is False
+    assert "non_owning_strategy_exit_forbidden" in gate["block_reasons"]
+
+
+@pytest.mark.parametrize(
+    ("override", "expected_blocker"),
+    [
+        ({"quantity": 2.0}, "exit_quantity_exceeds_owned_strategy_position"),
+        ({"account_id": "OTHER123"}, "exit_identity_mismatch"),
+        ({"con_id": 999999999}, "exit_identity_mismatch"),
+        ({"lifecycle_id": None}, "missing_lifecycle_identity"),
+    ],
+)
+def test_managed_close_exact_identity_mismatches_fail_closed(
+    tmp_path: Path,
+    override: dict[str, object],
+    expected_blocker: str,
+) -> None:
+    lifecycle_id = "bridge_fill_MES|1m|2026-05-29T05:54:00Z|BUY_TO_OPEN"
+    _write_broker_backed_managed_position(
+        tmp_path,
+        symbol="MES",
+        lane_id="mes_globex_active_participation_long",
+        thesis_strategy_id="PAPER_ACTIVE_EVIDENCE_MES_GLOBEX_PARTICIPATION_LONG_V1",
+        lifecycle_id=lifecycle_id,
+        con_id=770561194,
+        local_symbol="MESM6",
+    )
+    params = {
+        "quantity": 1.0,
+        "account_id": "DUM882026",
+        "con_id": 770561194,
+        "local_symbol": "MESM6",
+        "lifecycle_id": lifecycle_id,
+    }
+    params.update(override)
+
+    gate = evaluate_paper_strategy_exposure_gate(
+        repo_root=tmp_path,
+        strategy_id="mes_globex_active_participation_long",
+        bridge_strategy_id="PAPER_ACTIVE_EVIDENCE_MES_GLOBEX_PARTICIPATION_LONG_V1",
+        executable_symbol="MES",
+        action="SELL",
+        intent_type="SELL_TO_CLOSE",
+        quantity=float(params["quantity"]),
+        account_id=str(params["account_id"]),
+        con_id=params["con_id"],  # type: ignore[arg-type]
+        local_symbol=str(params["local_symbol"]),
+        lifecycle_id=params["lifecycle_id"],  # type: ignore[arg-type]
+    )
+
+    assert gate["submit_allowed"] is False
+    assert expected_blocker in gate["block_reasons"]
 
 
 def test_flat_sell_to_close_blocks(tmp_path: Path) -> None:

@@ -544,19 +544,21 @@ def run_ibkr_paper_strategy_bridge(
     governance_status = load_paper_strategy_governance_status(repo_root=config.repo_root, strategy_id=config.strategy_id)
     governance_row = dict(governance_status.get("selected_strategy") or {})
     metadata = dict(config.caller_metadata or {})
+    managed_close_owner_identity = _managed_close_owner_identity_for_bridge(config=config, metadata=metadata)
     exposure_status = evaluate_paper_strategy_exposure_gate(
         repo_root=config.repo_root,
-        strategy_id=_exposure_strategy_id_for_bridge(config=config),
+        strategy_id=str(managed_close_owner_identity.get("strategy_id") or _exposure_strategy_id_for_bridge(config=config)),
         bridge_strategy_id=str(governance_row.get("bridge_strategy_id") or "").strip() or None,
         action=config.action,
         intent_type=str(metadata.get("intent_type") or "").strip().upper() or None,
         quantity=config.quantity,
         executable_symbol=config.symbol,
-        account_id=str(metadata.get("account_id") or config.account_id or "").strip() or None,
-        con_id=_int_or_none(metadata.get("con_id")),
-        local_symbol=str(metadata.get("local_symbol") or "").strip() or None,
+        account_id=str(managed_close_owner_identity.get("account_id") or metadata.get("account_id") or config.account_id or "").strip() or None,
+        con_id=_int_or_none(managed_close_owner_identity.get("con_id") or metadata.get("con_id")),
+        local_symbol=str(managed_close_owner_identity.get("local_symbol") or metadata.get("local_symbol") or "").strip() or None,
         lifecycle_id=str(
-            metadata.get("lifecycle_id")
+            managed_close_owner_identity.get("lifecycle_id")
+            or metadata.get("lifecycle_id")
             or metadata.get("position_lifecycle_id")
             or metadata.get("managed_lifecycle_id")
             or ""
@@ -619,6 +621,7 @@ def run_ibkr_paper_strategy_bridge(
                 "paper_strategy_monitor_status": monitor_status,
                 "paper_strategy_governance_status": governance_status,
                 "paper_strategy_exposure_status": exposure_status,
+                "managed_close_owner_identity": managed_close_owner_identity,
                 "preflight_checks": static_checks,
                 "bridge_direct_invocation": _bridge_direct_invocation(config),
                 "runtime_supervised": _bridge_runtime_supervised_invocation(config),
@@ -1732,6 +1735,168 @@ def _exposure_strategy_id_for_bridge(*, config: IbkrPaperStrategyBridgeConfig) -
         if lifecycle_owner_strategy_id:
             return lifecycle_owner_strategy_id
     return str(config.strategy_id or "").strip()
+
+
+def _managed_close_owner_identity_for_bridge(
+    *,
+    config: IbkrPaperStrategyBridgeConfig,
+    metadata: dict[str, Any],
+) -> dict[str, Any]:
+    intent_type = str(metadata.get("intent_type") or "").strip().upper()
+    action = str(config.action or "").strip().upper()
+    if intent_type not in {"SELL_TO_CLOSE", "BUY_TO_CLOSE"} and action != "EXIT":
+        return {}
+
+    gate = evaluate_phase1_broker_reconciliation_submit_gate(
+        repo_root=config.repo_root,
+        max_age_seconds=float(config.pre_action_snapshot_max_age_seconds),
+    )
+    if not bool(gate.get("ready")):
+        return {}
+
+    lifecycle_positions = [
+        dict(row)
+        for row in list(gate.get("track_b_lifecycle_positions") or [])
+        if isinstance(row, dict) and float(row.get("quantity") or 0.0) > 0.0
+    ]
+    broker_positions = [
+        dict(row)
+        for row in list(gate.get("track_b_broker_positions") or [])
+        if isinstance(row, dict)
+    ]
+    requested_lifecycle_id = str(
+        metadata.get("lifecycle_id")
+        or metadata.get("position_lifecycle_id")
+        or metadata.get("managed_lifecycle_id")
+        or ""
+    ).strip()
+    requested_symbol = str(config.symbol or metadata.get("symbol") or "").strip().upper()
+    requested_quantity = float(config.quantity or 0.0)
+    requested_policy = str(metadata.get("managed_exit_policy_id") or "").strip()
+    requested_ids = {
+        str(config.strategy_id or "").strip(),
+        str(metadata.get("strategy_id") or "").strip(),
+        str(metadata.get("lane_id") or "").strip(),
+    }
+    requested_ids.discard("")
+    expected_side = _managed_close_position_side_for_intent(action=action, intent_type=intent_type)
+
+    candidates: list[dict[str, Any]] = []
+    for position in lifecycle_positions:
+        if requested_lifecycle_id and str(position.get("lifecycle_id") or "").strip() != requested_lifecycle_id:
+            continue
+        if requested_symbol and _lifecycle_position_symbol(position) != requested_symbol:
+            continue
+        if requested_policy:
+            position_policy = str(position.get("managed_exit_policy_id") or position.get("exit_policy_id") or "").strip()
+            if position_policy and position_policy != requested_policy:
+                continue
+        if expected_side and str(position.get("side") or "").strip().upper() != expected_side:
+            continue
+        if requested_quantity > 0.0 and abs(float(position.get("quantity") or 0.0) - requested_quantity) > 1e-9:
+            continue
+        position_ids = _lifecycle_owner_identifiers(position)
+        if not requested_lifecycle_id and requested_ids and not requested_ids.intersection(position_ids):
+            continue
+        candidates.append(dict(position))
+
+    if len(candidates) != 1:
+        return {}
+
+    owner = candidates[0]
+    broker_position = _matching_bridge_broker_position_for_lifecycle(
+        position=owner,
+        broker_positions=broker_positions,
+    )
+    account_id = str(
+        broker_position.get("account_id")
+        or broker_position.get("account")
+        or owner.get("account_id")
+        or metadata.get("account_id")
+        or config.account_id
+        or ""
+    ).strip()
+    con_id = _int_or_none(owner.get("con_id") or broker_position.get("con_id") or broker_position.get("conId") or metadata.get("con_id"))
+    local_symbol = str(
+        owner.get("local_symbol")
+        or broker_position.get("local_symbol")
+        or broker_position.get("localSymbol")
+        or metadata.get("local_symbol")
+        or ""
+    ).strip()
+    thesis_strategy_id = str(owner.get("strategy_id") or metadata.get("strategy_id") or config.strategy_id or "").strip()
+    lane_id = str(owner.get("lane_id") or metadata.get("lane_id") or config.strategy_id or "").strip()
+    return {
+        "source": "TRACK_B_PHASE1_BROKER_RECONCILIATION_EXACT_LIFECYCLE_OWNER",
+        "lifecycle_id": str(owner.get("lifecycle_id") or "").strip(),
+        "strategy_id": thesis_strategy_id,
+        "lane_id": lane_id,
+        "account_id": account_id,
+        "con_id": con_id,
+        "local_symbol": local_symbol,
+        "quantity": float(owner.get("quantity") or 0.0),
+        "side": str(owner.get("side") or "").strip().upper(),
+        "action": "SELL" if str(owner.get("side") or "").strip().upper() == "LONG" else "BUY",
+        "entry_exec_id": owner.get("entry_exec_id") or owner.get("exec_id"),
+        "entry_perm_id": owner.get("entry_perm_id") or owner.get("perm_id"),
+        "generated_at": gate.get("generated_at"),
+    }
+
+
+def _managed_close_position_side_for_intent(*, action: str, intent_type: str) -> str:
+    normalized_action = str(action or "").strip().upper()
+    normalized_intent = str(intent_type or "").strip().upper()
+    if normalized_intent == "SELL_TO_CLOSE" or normalized_action == "SELL":
+        return "LONG"
+    if normalized_intent == "BUY_TO_CLOSE" or normalized_action == "BUY":
+        return "SHORT"
+    return ""
+
+
+def _lifecycle_position_symbol(position: dict[str, Any]) -> str:
+    return str(
+        position.get("track_b_root")
+        or position.get("instrument_family")
+        or position.get("symbol")
+        or ""
+    ).strip().upper()
+
+
+def _lifecycle_owner_identifiers(position: dict[str, Any]) -> set[str]:
+    identifiers = {
+        str(position.get("strategy_id") or "").strip(),
+        str(position.get("lane_id") or "").strip(),
+    }
+    for key in ("strategy_ids", "lane_ids"):
+        identifiers.update(str(value or "").strip() for value in list(position.get(key) or []))
+    for unit in list(position.get("lifecycle_units") or []):
+        if not isinstance(unit, dict):
+            continue
+        identifiers.add(str(unit.get("strategy_id") or "").strip())
+        identifiers.add(str(unit.get("lane_id") or "").strip())
+    identifiers.discard("")
+    return identifiers
+
+
+def _matching_bridge_broker_position_for_lifecycle(
+    *,
+    position: dict[str, Any],
+    broker_positions: list[dict[str, Any]],
+) -> dict[str, Any]:
+    requested_con_id = str(position.get("con_id") or "").strip()
+    requested_local = str(position.get("local_symbol") or "").strip().upper()
+    requested_symbol = _lifecycle_position_symbol(position)
+    for broker_position in broker_positions:
+        broker_con_id = str(broker_position.get("con_id") or broker_position.get("conId") or "").strip()
+        broker_local = str(broker_position.get("local_symbol") or broker_position.get("localSymbol") or "").strip().upper()
+        broker_symbol = str(broker_position.get("track_b_root") or broker_position.get("symbol") or "").strip().upper()
+        if requested_con_id and broker_con_id and requested_con_id == broker_con_id:
+            return dict(broker_position)
+        if requested_local and broker_local and requested_local == broker_local:
+            return dict(broker_position)
+        if requested_symbol and broker_symbol and requested_symbol == broker_symbol and not requested_local and not requested_con_id:
+            return dict(broker_position)
+    return {}
 
 
 def _authorized_supervised_runtime_route_check(
