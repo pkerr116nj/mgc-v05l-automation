@@ -114,6 +114,15 @@ def launchctl_has_label(label: str | None) -> bool:
     if not label:
         return False
     try:
+        subprocess.check_output(
+            ["launchctl", "print", f"gui/{os.getuid()}/{label}"],
+            text=True,
+            stderr=subprocess.DEVNULL,
+        )
+        return True
+    except (OSError, subprocess.CalledProcessError):
+        pass
+    try:
         output = subprocess.check_output(["launchctl", "list"], text=True, stderr=subprocess.DEVNULL)
     except (OSError, subprocess.CalledProcessError):
         return False
@@ -148,6 +157,17 @@ hourly_recovery_audit_path = (
     repo_root / "outputs/track_b_execution_core/runtime_recovery/latest_hourly_runtime_recovery_audit.json"
 )
 hourly_recovery_audit = read_json(hourly_recovery_audit_path)
+standalone_recovery_status_path = (
+    repo_root / "outputs/track_b_execution_core/runtime_recovery/latest_launchd_recovery_status.json"
+)
+standalone_recovery_tick_path = (
+    repo_root / "outputs/track_b_execution_core/runtime_recovery/latest_launchd_recovery_tick.json"
+)
+standalone_recovery_disabled_marker_path = (
+    repo_root / "outputs/track_b_execution_core/runtime_recovery/recovery_disabled_by_operator.json"
+)
+standalone_recovery_status = read_json(standalone_recovery_status_path)
+standalone_recovery_tick = read_json(standalone_recovery_tick_path)
 hourly_recovery_generated_at = parse_iso(hourly_recovery_audit.get("generated_at"))
 hourly_recovery_age_seconds = (
     (datetime.now(timezone.utc) - hourly_recovery_generated_at.astimezone(timezone.utc)).total_seconds()
@@ -156,6 +176,15 @@ hourly_recovery_age_seconds = (
 )
 live_scheduler_evidence = collect_scheduler_evidence(repo_root=repo_root)
 live_scheduler_classification = classify_scheduler_evidence(live_scheduler_evidence)
+standalone_recovery_label = "com.mgc.trackb.paper-runtime-recovery"
+standalone_recovery_loaded = launchctl_has_label(standalone_recovery_label)
+standalone_recovery_disabled = standalone_recovery_disabled_marker_path.exists()
+if standalone_recovery_disabled:
+    standalone_recovery_classification = "RECOVERY_DISABLED_BY_OPERATOR"
+elif standalone_recovery_loaded:
+    standalone_recovery_classification = "RECOVERY_ACTIVE"
+else:
+    standalone_recovery_classification = "SUPERVISOR_PAUSED"
 
 pid_candidates = [
     runtime_truth.get("producer_pid"),
@@ -258,6 +287,7 @@ if (
 if (
     ((hourly_recovery_audit.get("hourly_supervisor") or {}).get("classification") or "") == SUPERVISOR_RUNNING
     and live_scheduler_classification == SUPERVISOR_PAUSED
+    and not standalone_recovery_loaded
 ):
     warnings.append(
         {
@@ -332,6 +362,18 @@ payload = {
         or ((runtime_truth.get("duplicate_writer_detection") or {}).get("duplicate_writer_detected") is True),
     },
     "recovery": {
+        "classification": standalone_recovery_classification,
+        "standalone_recovery_classification": standalone_recovery_classification,
+        "standalone_recovery_status_artifact": str(standalone_recovery_status_path),
+        "standalone_recovery_status_generated_at": standalone_recovery_status.get("generated_at"),
+        "standalone_recovery_last_tick_artifact": str(standalone_recovery_tick_path),
+        "standalone_recovery_last_tick": standalone_recovery_tick.get("generated_at"),
+        "standalone_recovery_last_action": standalone_recovery_tick.get("last_action"),
+        "standalone_recovery_last_blocker": standalone_recovery_tick.get("last_blocker"),
+        "standalone_recovery_launchd_label": standalone_recovery_label,
+        "standalone_recovery_launchd_loaded": standalone_recovery_loaded,
+        "standalone_recovery_launchd_enabled": standalone_recovery_loaded and not standalone_recovery_disabled,
+        "standalone_recovery_operator_disabled": standalone_recovery_disabled,
         "hourly_recovery_artifact": str(hourly_recovery_audit_path),
         "hourly_recovery_artifact_generated_at": hourly_recovery_audit.get("generated_at"),
         "hourly_recovery_artifact_age_seconds": hourly_recovery_age_seconds,
@@ -340,11 +382,19 @@ payload = {
             hourly_recovery_audit.get("hourly_supervisor") or {}
         ).get("classification"),
         "live_scheduler_classification": live_scheduler_classification,
-        "hourly_recovery_active": live_scheduler_classification == SUPERVISOR_RUNNING,
-        "hourly_recovery_paused": live_scheduler_classification == SUPERVISOR_PAUSED,
-        "recovery_authoritative": False,
-        "authority_reason": "status_probe_is_read_only_and_does_not_restart_runtime",
-        "latest_run_time": hourly_recovery_audit.get("generated_at"),
+        "hourly_recovery_active": standalone_recovery_loaded and not standalone_recovery_disabled,
+        "hourly_recovery_paused": not standalone_recovery_loaded or standalone_recovery_disabled,
+        "recovery_authoritative": standalone_recovery_loaded and not standalone_recovery_disabled,
+        "authority_reason": (
+            "standalone_launchd_recovery_service_disabled_by_operator"
+            if standalone_recovery_disabled
+            else (
+                "standalone_launchd_recovery_service_loaded"
+                if standalone_recovery_loaded
+                else "standalone_launchd_recovery_service_not_loaded"
+            )
+        ),
+        "latest_run_time": standalone_recovery_tick.get("generated_at") or hourly_recovery_audit.get("generated_at"),
         "scheduler_evidence": live_scheduler_evidence,
     },
     "safety": {
@@ -374,12 +424,15 @@ payload = json.load(open(sys.argv[1], encoding="utf-8"))
 runtime = payload["runtime"]
 readiness = payload["readiness"]
 config = payload["config"]
+recovery = payload["recovery"]
 print(
     "Track B PAPER stack: "
     f"state={readiness['canonical_state']} "
     f"ready_submit_capable={readiness['ready_submit_capable']} "
     f"pid={runtime['pid']} running={runtime['running']} owner={runtime['owner']} "
-    f"lane_count={config['lane_count']} next_action={payload['next_action']}"
+    f"lane_count={config['lane_count']} "
+    f"recovery={recovery['classification']} "
+    f"next_action={payload['next_action']}"
 )
 print(f"status_artifact={payload['status_artifact']}")
 PY

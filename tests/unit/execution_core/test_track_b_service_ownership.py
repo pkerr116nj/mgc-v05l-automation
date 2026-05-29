@@ -38,16 +38,16 @@ def test_paper_runtime_plist_uses_canonical_stack_without_review_overlay(tmp_pat
     assert plist["EnvironmentVariables"]["MGC_HEADLESS_REQUIRED_PAPER_CONFIGS"] == config_stack
 
 
-def test_hourly_recovery_plist_is_launchd_owned_disabled_and_canonical_only(tmp_path: Path) -> None:
+def test_hourly_recovery_plist_is_launchd_owned_enabled_and_canonical_only(tmp_path: Path) -> None:
     recovery = next(spec for spec in service_specs(tmp_path) if spec.service_id == "track_b_hourly_paper_runtime_recovery")
 
     plist = build_launchd_plist(recovery, repo_root=tmp_path)
 
     assert recovery.owner == "launchd_user_agent"
-    assert recovery.disabled_by_default is True
+    assert recovery.disabled_by_default is False
     assert recovery.start_interval_seconds == 3600
-    assert plist["Disabled"] is True
-    assert plist["RunAtLoad"] is False
+    assert "Disabled" not in plist
+    assert plist["RunAtLoad"] is True
     assert plist["StartInterval"] == 3600
     assert plist["ProgramArguments"] == ["/bin/bash", "scripts/track_b_hourly_paper_runtime_recovery.sh", "tick"]
     assert recovery.status_command == ("bash", "scripts/track_b_hourly_paper_runtime_recovery.sh", "status")
