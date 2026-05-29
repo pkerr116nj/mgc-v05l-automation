@@ -47,6 +47,7 @@ DEFAULT_EVENTS_PATH = (
 
 SUPERVISOR_NOT_INSTALLED = "SUPERVISOR_NOT_INSTALLED"
 SUPERVISOR_NOT_RUNNING = "SUPERVISOR_NOT_RUNNING"
+SUPERVISOR_PAUSED = "SUPERVISOR_PAUSED"
 SUPERVISOR_RUNNING = "SUPERVISOR_RUNNING"
 RECOVERY_POLICY_TOO_PASSIVE = "RECOVERY_POLICY_TOO_PASSIVE"
 CONTROL_PLANE_REAL_BLOCK = "CONTROL_PLANE_REAL_BLOCK"
@@ -88,7 +89,8 @@ def build_hourly_runtime_recovery_audit(
     runtime_restart_eligible = self_healing_health.get("runtime_restart_eligible") is True
     runtime_restart_blockers = tuple(str(item) for item in self_healing_health.get("runtime_restart_blockers") or [])
     paper_runtime = _mapping(_mapping(self_healing_health.get("agents")).get("paper_runtime"))
-    scheduler_classification = _scheduler_classification(scheduler_evidence)
+    scheduler_classification = classify_scheduler_evidence(scheduler_evidence)
+    scheduler_details = _scheduler_details(scheduler_evidence, classification=scheduler_classification)
     root_cause = _root_cause(
         scheduler_classification=scheduler_classification,
         self_healing_health=self_healing_health,
@@ -107,6 +109,13 @@ def build_hourly_runtime_recovery_audit(
             "classification": scheduler_classification,
             "installed": scheduler_classification != SUPERVISOR_NOT_INSTALLED,
             "running": scheduler_classification == SUPERVISOR_RUNNING,
+            "active": scheduler_classification == SUPERVISOR_RUNNING,
+            "paused": scheduler_classification == SUPERVISOR_PAUSED,
+            "latest_audit_run_at": actual_now.isoformat(),
+            "latest_run_time": actual_now.isoformat(),
+            "recovery_authoritative": False,
+            "authority_reason": "read_only_audit_no_runtime_restart_authority",
+            **scheduler_details,
             "evidence": dict(scheduler_evidence),
         },
         "self_healing": {
@@ -137,6 +146,7 @@ def build_hourly_runtime_recovery_audit(
         "canonical_operability": {
             "artifact": operability.get("artifact_path"),
             "state": operability.get("canonical_state"),
+            "runtime_healthy": operability.get("canonical_state") == "READY_SUBMIT_CAPABLE",
             "restart_allowed_if_runtime_down": operability.get("restart_allowed_if_runtime_down") is True,
             "blocker_family": operability.get("blocker_family"),
             "blockers": list(operability.get("blockers") or []),
@@ -208,7 +218,7 @@ def write_hourly_runtime_recovery_audit(
     return output_path
 
 
-def _scheduler_classification(evidence: Mapping[str, Any]) -> str:
+def classify_scheduler_evidence(evidence: Mapping[str, Any]) -> str:
     labels = list(evidence.get("launchd_matching_labels") or [])
     cron = list(evidence.get("crontab_matching_entries") or [])
     codex_automations = list(evidence.get("codex_automation_matching_entries") or [])
@@ -217,7 +227,31 @@ def _scheduler_classification(evidence: Mapping[str, Any]) -> str:
     if any(str(item.get("status", "")).upper() == "ACTIVE" for item in codex_automations if isinstance(item, Mapping)):
         return SUPERVISOR_RUNNING
     running = any(_looks_running(line) for line in labels)
-    return SUPERVISOR_RUNNING if running else SUPERVISOR_NOT_RUNNING
+    if running:
+        return SUPERVISOR_RUNNING
+    if codex_automations and all(
+        str(item.get("status", "")).upper() == "PAUSED" for item in codex_automations if isinstance(item, Mapping)
+    ):
+        return SUPERVISOR_PAUSED
+    return SUPERVISOR_NOT_RUNNING
+
+
+def _scheduler_details(evidence: Mapping[str, Any], *, classification: str) -> dict[str, Any]:
+    codex_automations = [
+        item for item in list(evidence.get("codex_automation_matching_entries") or []) if isinstance(item, Mapping)
+    ]
+    statuses = [str(item.get("status") or "").upper() for item in codex_automations]
+    return {
+        "codex_automation_count": len(codex_automations),
+        "codex_automation_statuses": statuses,
+        "codex_automation_active_count": sum(1 for status in statuses if status == "ACTIVE"),
+        "codex_automation_paused_count": sum(1 for status in statuses if status == "PAUSED"),
+        "launchd_match_count": len(list(evidence.get("launchd_matching_labels") or [])),
+        "crontab_match_count": len(list(evidence.get("crontab_matching_entries") or [])),
+        "status_truth_source": "live_scheduler_probe",
+        "stale_artifact_can_claim_active": False,
+        "should_remain_paused": classification == SUPERVISOR_PAUSED,
+    }
 
 
 def _root_cause(
@@ -232,6 +266,8 @@ def _root_cause(
     operability = _mapping(operability_contract)
     if scheduler_classification == SUPERVISOR_NOT_INSTALLED:
         return SUPERVISOR_NOT_INSTALLED
+    if scheduler_classification == SUPERVISOR_PAUSED:
+        return SUPERVISOR_PAUSED
     if scheduler_classification == SUPERVISOR_NOT_RUNNING:
         return SUPERVISOR_NOT_RUNNING
     if operability.get("canonical_state") == "BLOCKED_STALE_TRUTH":
@@ -260,6 +296,13 @@ def _restart_decision(
     operability_contract: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     operability = _mapping(operability_contract)
+    if operability.get("canonical_state") == "READY_SUBMIT_CAPABLE":
+        return {
+            "classification": "RUNTIME_HEALTHY_NO_RESTART_NEEDED",
+            "action": "none",
+            "blockers": [],
+            "authority_source": "canonical_operability",
+        }
     if operability and operability.get("restart_allowed_if_runtime_down") is not True:
         return {
             "classification": "RUNTIME_RESTART_NOT_ALLOWED_BY_CANONICAL_OPERABILITY",
@@ -287,6 +330,7 @@ def _root_cause_reason(root_cause: str) -> str:
         SUPERVISOR_NOT_INSTALLED: (
             "No hourly Track B runtime recovery crontab entry, launchd job, or Codex automation was found."
         ),
+        SUPERVISOR_PAUSED: "The hourly Track B runtime recovery automation is installed but paused.",
         SUPERVISOR_NOT_RUNNING: "A scheduler definition was found, but no running hourly recovery supervisor was evident.",
         RECOVERY_POLICY_TOO_PASSIVE: "Existing self-healing policy can recommend a runtime restart, but no hourly runner applied it.",
         CONTROL_PLANE_REAL_BLOCK: "Current self-healing/control-plane evidence blocks restart.",

@@ -9421,7 +9421,9 @@ def _write_probationary_paper_runtime_truth(
         operator_status=operator_status,
     )
     tmp = path.with_name(f".{path.name}.tmp")
+    tmp.parent.mkdir(parents=True, exist_ok=True)
     tmp.write_text(json.dumps(payload, indent=2, sort_keys=True, default=str) + "\n", encoding="utf-8")
+    path.parent.mkdir(parents=True, exist_ok=True)
     tmp.replace(path)
     _write_probationary_paper_pid_metadata(settings=settings, runtime_truth=payload)
     return path
@@ -9461,9 +9463,15 @@ def _write_probationary_paper_pid_metadata(*, settings: StrategySettings, runtim
         "readiness_authority": False,
         "restart_authority": False,
     }
-    tmp = path.with_name(f".{path.name}.tmp")
-    tmp.write_text(json.dumps(payload, indent=2, sort_keys=True, default=str) + "\n", encoding="utf-8")
-    tmp.replace(path)
+    tmp = path.with_name(f".{path.name}.{os.getpid()}.{time_module.time_ns()}.tmp")
+    try:
+        tmp.write_text(json.dumps(payload, indent=2, sort_keys=True, default=str) + "\n", encoding="utf-8")
+        tmp.replace(path)
+    finally:
+        try:
+            tmp.unlink()
+        except FileNotFoundError:
+            pass
     return path
 
 

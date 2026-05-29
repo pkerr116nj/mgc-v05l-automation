@@ -266,6 +266,7 @@ def test_paper_runtime_generation_env_is_reused_in_truth_and_metadata(tmp_path: 
     assert metadata["runtime_instance_id"] == "runtime-from-launcher"
     assert metadata["restart_generation"] == 42
     assert metadata["launcher_config_fingerprint"] == "sha256:launcher"
+    assert not list(metadata_path.parent.glob(".probationary_paper.pid.json.*.tmp"))
 
 
 def _research_bar_1m(index: int, *, instrument: str = "GC", close: str = "100") -> ResearchBar:

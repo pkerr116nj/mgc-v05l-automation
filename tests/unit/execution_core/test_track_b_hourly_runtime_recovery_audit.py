@@ -7,6 +7,7 @@ from mgc_v05l.execution_core.track_b_hourly_runtime_recovery_audit import (
     RECOVERY_POLICY_TOO_PASSIVE,
     RUNTIME_HEALTHY_NO_ACTION,
     SUPERVISOR_NOT_INSTALLED,
+    SUPERVISOR_PAUSED,
     build_hourly_runtime_recovery_audit,
 )
 
@@ -104,6 +105,37 @@ def test_active_codex_automation_counts_as_hourly_supervisor() -> None:
     assert payload["classification"] == RUNTIME_HEALTHY_NO_ACTION
     assert payload["hourly_supervisor"]["installed"] is True
     assert payload["hourly_supervisor"]["running"] is True
+    assert payload["hourly_supervisor"]["recovery_authoritative"] is False
+
+
+def test_paused_codex_automation_is_reported_explicitly_and_not_running() -> None:
+    payload = build_hourly_runtime_recovery_audit(
+        self_healing_health=_health(runtime_running=True, restart_allowed=False),
+        scheduler_evidence={
+            "launchd_matching_labels": [],
+            "crontab_matching_entries": [],
+            "codex_automation_matching_entries": [
+                {
+                    "id": "track-b-hourly-paper-runtime-recovery",
+                    "name": "Track B hourly PAPER runtime recovery",
+                    "status": "PAUSED",
+                    "rrule": "FREQ=HOURLY;INTERVAL=1;BYMINUTE=0;BYSECOND=0",
+                }
+            ],
+        },
+        operability_contract={"canonical_state": "READY_SUBMIT_CAPABLE", "restart_allowed_if_runtime_down": True},
+        now=NOW,
+    )
+
+    assert payload["classification"] == SUPERVISOR_PAUSED
+    assert payload["hourly_supervisor"]["installed"] is True
+    assert payload["hourly_supervisor"]["running"] is False
+    assert payload["hourly_supervisor"]["active"] is False
+    assert payload["hourly_supervisor"]["paused"] is True
+    assert payload["hourly_supervisor"]["codex_automation_paused_count"] == 1
+    assert payload["hourly_supervisor"]["stale_artifact_can_claim_active"] is False
+    assert payload["canonical_operability"]["runtime_healthy"] is True
+    assert payload["restart_decision"]["classification"] == "RUNTIME_HEALTHY_NO_RESTART_NEEDED"
 
 
 def test_unrelated_launchd_labels_do_not_count_as_hourly_recovery() -> None:
