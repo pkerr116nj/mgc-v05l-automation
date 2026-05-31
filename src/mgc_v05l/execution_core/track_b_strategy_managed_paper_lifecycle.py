@@ -45,6 +45,13 @@ from .track_b_pre_action_snapshot_validator import (
     validate_track_b_pre_action_snapshot,
 )
 from .track_b_lifecycle_state_transition import validate_open_managed_evidence
+from .track_b_central_trade_registry import TradeEventType
+from .track_b_live_trade_registry import (
+    append_live_trade_registry_event,
+    broker_backed_fill_has_required_ids,
+    make_live_trade_registry_event,
+    trade_id_from_live_identity,
+)
 from .track_b_entry_exposure_gate import (
     ENTRY_EXPOSURE_GATE_ALLOWED,
     PYRAMIDING_NOT_ALLOWED_REVIEW_REQUIRED,
@@ -121,6 +128,7 @@ class TrackBStrategyManagedPaperLifecycleConfig:
     con_id: int | None
     side: str
     quantity: int | None
+    contract_expiry: str | None = None
     signal_timestamp: str | None = None
     signal_reason: str | None = None
     decision_bar_timestamp: str | None = None
@@ -310,6 +318,11 @@ def run_track_b_strategy_managed_paper_lifecycle(
         report_json=report_json,
     )
     _write_report(report_json, report)
+    _append_lifecycle_report_registry_events(
+        config=config,
+        report=report,
+        report_json=report_json,
+    )
     _write_continuation_preview_diagnostics(config=config, report=report)
     return TrackBStrategyManagedPaperLifecycleResult(
         lifecycle_id=actual_lifecycle_id,
@@ -455,6 +468,11 @@ def maintain_open_track_b_strategy_managed_paper_lifecycle(
     report["maintenance_invoked"] = True
     report["maintenance_generated_at"] = actual_now.isoformat()
     _write_report(report_json, report)
+    _append_lifecycle_report_registry_events(
+        config=config,
+        report=report,
+        report_json=report_json,
+    )
     _write_continuation_preview_diagnostics(config=config, report=report)
     return TrackBStrategyManagedPaperLifecycleResult(
         lifecycle_id=lifecycle_id,
@@ -537,6 +555,14 @@ def write_open_managed_lifecycle_report_from_filled_bridge_result(
     require_aware_datetime(actual_now, "now")
     side = "LONG" if intent_type == "BUY_TO_OPEN" else "SHORT"
     lifecycle_id = str(filled_bridge_result.get("lifecycle_id") or f"bridge_fill_{order_intent_id}")
+    trade_id = trade_id_from_live_identity(
+        explicit_trade_id=filled_bridge_result.get("trade_id"),
+        lifecycle_id=lifecycle_id,
+        order_intent_id=order_intent_id,
+        account_id=account_id,
+        con_id=con_id,
+        lane_id=filled_bridge_result.get("lane_id") or filled_bridge_result.get("strategy_id"),
+    )
     report_json = Path(output_root) / lifecycle_id / "track_b_strategy_managed_paper_lifecycle_report.json"
     config = TrackBStrategyManagedPaperLifecycleConfig(
         mode="PAPER",
@@ -565,6 +591,7 @@ def write_open_managed_lifecycle_report_from_filled_bridge_result(
         broker_reconciled=False,
     )
     entry_intent = _entry_intent(config=config, lifecycle_id=lifecycle_id, now=actual_now)
+    entry_intent["trade_id"] = trade_id
     entry_submit = {
         "submitted": True,
         "submit_attempted": True,
@@ -619,6 +646,20 @@ def write_open_managed_lifecycle_report_from_filled_bridge_result(
     if manifest_path:
         report["position_management_manifest_path"] = str(manifest_path)
     _write_report(report_json, report)
+    _append_lifecycle_live_trade_registry_event(
+        config=config,
+        event_type=TradeEventType.LIFECYCLE_OPEN_MANAGED,
+        trade_id=trade_id,
+        lifecycle_id=lifecycle_id,
+        intent_payload=entry_intent,
+        source_artifact_path=str(report_json),
+        order_id=entry_fill.get("broker_order_id"),
+        client_id=entry_submit.get("client_id"),
+        perm_id=entry_fill.get("perm_id"),
+        exec_id=entry_fill.get("execution_id"),
+        price=entry_fill.get("price"),
+        reason_codes=("LIFECYCLE_OPEN_MANAGED",),
+    )
     _write_continuation_preview_diagnostics(config=config, report=report)
     return report_json
 
@@ -974,6 +1015,7 @@ def _default_exit_policy(
             "strategy_id": config.strategy_id,
             "account_id": config.account_id,
             "contract_key": config.contract_key,
+            "expiry": config.contract_expiry,
             "local_symbol": config.local_symbol,
             "con_id": config.con_id,
             "side": open_state.get("side"),
@@ -1005,6 +1047,7 @@ def _default_exit_policy(
             "strategy_id": config.strategy_id,
             "account_id": config.account_id,
             "contract_key": config.contract_key,
+            "expiry": config.contract_expiry,
             "local_symbol": config.local_symbol,
             "con_id": config.con_id,
             "side": open_state.get("side"),
@@ -1061,6 +1104,111 @@ def _default_close_submitter(
     )
 
 
+def _append_lifecycle_live_trade_registry_event(
+    *,
+    config: TrackBStrategyManagedPaperLifecycleConfig,
+    event_type: TradeEventType,
+    trade_id: str,
+    lifecycle_id: str,
+    intent_payload: Mapping[str, Any],
+    source_artifact_path: str,
+    order_id: object = None,
+    client_id: object = None,
+    perm_id: object = None,
+    exec_id: object = None,
+    price: object = None,
+    reason_codes: tuple[str, ...] = (),
+) -> dict[str, Any]:
+    event = make_live_trade_registry_event(
+        event_type=event_type,
+        trade_id=trade_id,
+        lifecycle_id=lifecycle_id,
+        lane_id=str(config.lane_id or intent_payload.get("lane_id") or config.strategy_id or "").strip(),
+        thesis_strategy_id=str(intent_payload.get("strategy_id") or config.strategy_id or "").strip(),
+        account_id=str(intent_payload.get("account_id") or config.account_id or "").strip(),
+        symbol=str(config.instrument_family or "").strip().upper(),
+        con_id=config.con_id,
+        local_symbol=str(config.local_symbol or "").strip(),
+        expiry=str(config.contract_expiry or _contract_month(config.contract_key) or "").strip(),
+        side=str(intent_payload.get("side") or config.side or "").strip().upper(),
+        action=str(intent_payload.get("order_action") or "").strip().upper(),
+        qty=intent_payload.get("quantity") or config.quantity,
+        source_artifact_path=source_artifact_path,
+        order_id=order_id,
+        client_id=client_id,
+        perm_id=perm_id,
+        exec_id=exec_id,
+        price=price,
+        reason_codes=reason_codes,
+        metadata={
+            "source": "track_b_strategy_managed_paper_lifecycle",
+            "managed_exit_policy_id": _normalized_exit_policy(config.managed_exit_policy_id),
+            "runtime_generation_id": config.runtime_generation_id,
+            "paper_only": True,
+            "live_money_eligible": False,
+            "paper_proof_invoked": False,
+        },
+    )
+    return append_live_trade_registry_event(repo_root=Path(config.repo_root), event=event)
+
+
+def _append_lifecycle_report_registry_events(
+    *,
+    config: TrackBStrategyManagedPaperLifecycleConfig,
+    report: Mapping[str, Any],
+    report_json: Path,
+) -> None:
+    trade_id = str(report.get("trade_id") or "").strip()
+    lifecycle_id = str(report.get("lifecycle_id") or "").strip()
+    if not trade_id or not lifecycle_id:
+        return
+    entry_intent = _mapping(report.get("entry_intent"))
+    entry_fill = _mapping(report.get("entry_fill"))
+    close_fill = _mapping(report.get("close_fill"))
+    classification = str(report.get("classification") or "")
+    try:
+        if classification == TrackBManagedPaperLifecycleClassification.OPEN_MANAGED.value and entry_intent:
+            _append_lifecycle_live_trade_registry_event(
+                config=config,
+                event_type=TradeEventType.LIFECYCLE_OPEN_MANAGED,
+                trade_id=trade_id,
+                lifecycle_id=lifecycle_id,
+                intent_payload=entry_intent,
+                source_artifact_path=str(report_json),
+                order_id=entry_fill.get("broker_order_id"),
+                perm_id=entry_fill.get("perm_id"),
+                exec_id=entry_fill.get("execution_id") or entry_fill.get("exec_id"),
+                price=entry_fill.get("price"),
+                reason_codes=("LIFECYCLE_OPEN_MANAGED",),
+            )
+        elif classification == TrackBManagedPaperLifecycleClassification.CLOSED_FLAT.value:
+            _append_lifecycle_live_trade_registry_event(
+                config=config,
+                event_type=TradeEventType.RECONCILED_FLAT,
+                trade_id=trade_id,
+                lifecycle_id=lifecycle_id,
+                intent_payload=_mapping(report.get("close_intent")) or entry_intent,
+                source_artifact_path=str(report_json),
+                order_id=close_fill.get("broker_order_id"),
+                perm_id=close_fill.get("perm_id"),
+                exec_id=close_fill.get("execution_id") or close_fill.get("exec_id"),
+                price=close_fill.get("price"),
+                reason_codes=("LIFECYCLE_RECONCILED_FLAT",),
+            )
+        elif classification == TrackBManagedPaperLifecycleClassification.REVIEW_REQUIRED.value:
+            _append_lifecycle_live_trade_registry_event(
+                config=config,
+                event_type=TradeEventType.REVIEW_REQUIRED,
+                trade_id=trade_id,
+                lifecycle_id=lifecycle_id,
+                intent_payload=entry_intent or _mapping(report.get("close_intent")),
+                source_artifact_path=str(report_json),
+                reason_codes=("LIFECYCLE_REVIEW_REQUIRED",),
+            )
+    except Exception:
+        return
+
+
 def _submit_managed_limit_order(
     *,
     config: TrackBStrategyManagedPaperLifecycleConfig,
@@ -1103,6 +1251,16 @@ def _submit_managed_limit_order(
         submit_enabled=True,
     )
     run_id = str(intent_payload.get("lifecycle_id") or f"strategy_managed_{uuid.uuid4().hex}")
+    trade_id = str(intent_payload.get("trade_id") or "").strip()
+    if not trade_id:
+        return {
+            "submitted": False,
+            "submit_attempted": False,
+            "broker_state_mutated": False,
+            "review_required": True,
+            "classification": "MANAGED_LIFECYCLE_TRADE_ID_MISSING",
+            "primary_blocker": "Managed PAPER lifecycle submit requires a central trade_id before broker submission.",
+        }
     order_intent = OrderIntent(
         order_intent_id=f"managed_{intent_kind.value.lower()}_intent_{run_id}_{submit_index}",
         signal_event_id=str(intent_payload.get("signal_id") or intent_payload.get("lifecycle_id") or run_id),
@@ -1141,6 +1299,20 @@ def _submit_managed_limit_order(
         state=SubmitAttemptState.CREATED,
         submitted_at=datetime.now(UTC),
     )
+    registry_events: list[dict[str, Any]] = [
+        _append_lifecycle_live_trade_registry_event(
+            config=config,
+            event_type=TradeEventType.ENTRY_INTENT_CREATED
+            if intent_kind is IntentKind.OPEN
+            else TradeEventType.EXIT_INTENT_CREATED,
+            trade_id=trade_id,
+            lifecycle_id=run_id,
+            intent_payload=intent_payload,
+            source_artifact_path=str(Path(config.output_root) / run_id / "track_b_strategy_managed_paper_lifecycle_report.json"),
+            price=limit_price,
+            reason_codes=("MANAGED_PAPER_INTENT_CREATED",),
+        )
+    ]
     try:
         adapter.connect()
         adapter.managed_accounts()
@@ -1190,8 +1362,66 @@ def _submit_managed_limit_order(
             if position_blocker is not None:
                 return position_blocker
         broker_order_id = adapter.submit_limit_order(submit_attempt=submit_attempt, order_intent=order_intent)
+        registry_events.append(
+            _append_lifecycle_live_trade_registry_event(
+                config=config,
+                event_type=TradeEventType.ENTRY_ORDER_SUBMITTED
+                if intent_kind is IntentKind.OPEN
+                else TradeEventType.EXIT_ORDER_SUBMITTED,
+                trade_id=trade_id,
+                lifecycle_id=run_id,
+                intent_payload=intent_payload,
+                source_artifact_path=str(
+                    Path(config.output_root) / run_id / "track_b_strategy_managed_paper_lifecycle_report.json"
+                ),
+                order_id=broker_order_id,
+                client_id=config.client_id,
+                price=limit_price,
+                reason_codes=("MANAGED_PAPER_ORDER_SUBMITTED",),
+            )
+        )
         broker_order = adapter.wait_for_broker_order(submit_attempt_id=submit_attempt.submit_attempt_id)
         fill = adapter.wait_for_fill(submit_attempt_id=submit_attempt.submit_attempt_id)
+        fill_event_type = (
+            TradeEventType.ENTRY_FILL_BROKER_BACKED
+            if intent_kind is IntentKind.OPEN
+            else TradeEventType.EXIT_FILL_BROKER_BACKED
+        )
+        if broker_backed_fill_has_required_ids(perm_id=fill.perm_id, exec_id=fill.execution_id):
+            registry_events.append(
+                _append_lifecycle_live_trade_registry_event(
+                    config=config,
+                    event_type=fill_event_type,
+                    trade_id=trade_id,
+                    lifecycle_id=run_id,
+                    intent_payload=intent_payload,
+                    source_artifact_path=str(
+                        Path(config.output_root) / run_id / "track_b_strategy_managed_paper_lifecycle_report.json"
+                    ),
+                    order_id=fill.broker_order_id,
+                    client_id=config.client_id,
+                    perm_id=fill.perm_id,
+                    exec_id=fill.execution_id,
+                    price=fill.price,
+                    reason_codes=("BROKER_BACKED_FILL_CONFIRMED",),
+                )
+            )
+        else:
+            registry_events.append(
+                _append_lifecycle_live_trade_registry_event(
+                    config=config,
+                    event_type=TradeEventType.REVIEW_REQUIRED,
+                    trade_id=trade_id,
+                    lifecycle_id=run_id,
+                    intent_payload=intent_payload,
+                    source_artifact_path=str(
+                        Path(config.output_root) / run_id / "track_b_strategy_managed_paper_lifecycle_report.json"
+                    ),
+                    order_id=fill.broker_order_id,
+                    client_id=config.client_id,
+                    reason_codes=("BROKER_BACKED_FILL_MISSING_PERM_OR_EXEC",),
+                )
+            )
         field = "entry_fill" if intent_kind == IntentKind.OPEN else "close_fill"
         return {
             "submitted": True,
@@ -1211,6 +1441,7 @@ def _submit_managed_limit_order(
             },
             "submit_diagnostics": adapter.submit_diagnostics(submit_attempt.submit_attempt_id),
             "strategy_submit_authorization": authorization,
+            "live_trade_registry_events": registry_events,
         }
     except Exception as exc:  # noqa: BLE001 - adapter stage failures must become artifacts.
         diagnostics = adapter.submit_diagnostics(submit_attempt.submit_attempt_id)
@@ -1233,6 +1464,7 @@ def _submit_managed_limit_order(
             **error_summary,
             "submit_diagnostics": diagnostics,
             "strategy_submit_authorization": authorization,
+            "live_trade_registry_events": registry_events,
         }
     finally:
         adapter.disconnect()
@@ -1708,7 +1940,7 @@ def _contract_allowlist_entry(config: TrackBStrategyManagedPaperLifecycleConfig)
         "local_symbol": config.local_symbol,
         "con_id": config.con_id,
         "contract_month": _contract_month(config.contract_key),
-        "expiry": _contract_month(config.contract_key),
+        "expiry": str(config.contract_expiry or "").strip() or _contract_month(config.contract_key),
         "tick_size": config.tick_size,
     }
     if not canonical:

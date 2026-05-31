@@ -37,6 +37,11 @@ from mgc_v05l.execution_core.track_b_submit_intent_ownership import (
     DEFAULT_TRACK_B_SUBMIT_INTENT_OWNERSHIP_JSONL,
     load_unresolved_submit_intent_ownership_records,
 )
+from mgc_v05l.execution_core.track_b_central_trade_registry import TradeEventType
+from mgc_v05l.execution_core.track_b_live_trade_registry import (
+    append_live_trade_registry_event,
+    make_live_trade_registry_event,
+)
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 DEFAULT_LEDGER_ROOT = REPO_ROOT / "outputs" / "track_b_execution_core" / "paper_trade_ledger"
@@ -447,7 +452,72 @@ def reconcile_track_b_paper_broker_truth(
             broker_positions=track_b_positions,
         )
     _write_json_atomic(config.report_path, report)
+    _append_reconciliation_registry_events(config=config, report=report, now=actual_now)
     return report
+
+
+def _append_reconciliation_registry_events(
+    *,
+    config: ReconciliationConfig,
+    report: Mapping[str, Any],
+    now: datetime,
+) -> None:
+    classification = str(report.get("classification") or "")
+    if "RECONCILED" in classification and report.get("broker_reconciled") is True:
+        event_type = TradeEventType.RECONCILED_OPEN if report.get("track_b_broker_position_count") else TradeEventType.RECONCILED_FLAT
+        reason = "BROKER_LIFECYCLE_RECONCILED"
+    else:
+        event_type = TradeEventType.REVIEW_REQUIRED
+        reason = classification or "BROKER_LIFECYCLE_RECONCILIATION_REVIEW_REQUIRED"
+
+    candidates = [
+        row
+        for bucket in (
+            report.get("track_b_lifecycle_positions"),
+            report.get("track_b_broker_positions"),
+            report.get("unresolved_submit_intent_ownership_records"),
+        )
+        for row in list(bucket or [])
+        if isinstance(row, Mapping)
+    ]
+    for row in candidates:
+        extra = row.get("extra") if isinstance(row.get("extra"), Mapping) else {}
+        trade_id = str(row.get("trade_id") or extra.get("trade_id") or "").strip()
+        lifecycle_id = str(row.get("lifecycle_id") or "").strip()
+        if not trade_id and not lifecycle_id:
+            continue
+        if not trade_id:
+            trade_id = f"trade_{lifecycle_id}"
+        try:
+            event = make_live_trade_registry_event(
+                event_type=event_type,
+                generated_at=now,
+                trade_id=trade_id,
+                lifecycle_id=lifecycle_id or None,
+                lane_id=str(row.get("lane_id") or row.get("strategy_id") or "UNKNOWN").strip(),
+                thesis_strategy_id=str(row.get("strategy_id") or row.get("lane_id") or "UNKNOWN").strip(),
+                account_id=str(row.get("account_id") or row.get("account") or config.account).strip(),
+                symbol=str(row.get("symbol") or row.get("instrument_family") or row.get("root_symbol") or "UNKNOWN").strip().upper(),
+                con_id=row.get("con_id") or row.get("conId") or 1,
+                local_symbol=str(row.get("local_symbol") or row.get("localSymbol") or "UNKNOWN").strip(),
+                expiry=str(row.get("expiry") or row.get("contract_month") or "UNKNOWN").strip(),
+                side=str(row.get("side") or row.get("position_side") or row.get("action") or "UNKNOWN").strip().upper(),
+                action=str(row.get("action") or row.get("order_action") or "RECONCILE").strip().upper(),
+                qty=row.get("qty") or row.get("quantity") or row.get("position_qty") or 1,
+                source_artifact_path=str(config.report_path),
+                reason_codes=(reason,),
+                metadata={
+                    "source": "track_b_paper_broker_reconciliation",
+                    "classification": classification,
+                    "broker_reconciled": report.get("broker_reconciled") is True,
+                    "paper_only": True,
+                    "live_money_eligible": False,
+                    "paper_proof_invoked": False,
+                },
+            )
+            append_live_trade_registry_event(repo_root=config.repo_root, event=event)
+        except Exception:
+            continue
 
 
 def _validate_broker_truth(

@@ -29,6 +29,9 @@ from mgc_v05l.execution_core.track_b_managed_order_registry import (
     DEFAULT_MANAGED_ORDER_REGISTRY_ARTIFACT,
     DEFAULT_MANAGED_POSITION_REGISTRY_ARTIFACT,
 )
+from mgc_v05l.execution_core.track_b_live_trade_registry import (
+    DEFAULT_TRACK_B_LIVE_TRADE_REGISTRY_EVENTS_JSONL,
+)
 from mgc_v05l.execution_core.track_b_paper_broker_reconciliation import (
     ReconciliationConfig,
 )
@@ -67,6 +70,7 @@ SUBMIT_INTENT_NO_BROKER_EFFECT_CONFIRMED = "SUBMIT_INTENT_NO_BROKER_EFFECT_CONFI
 @dataclass(frozen=True)
 class TradeRegistryReconstructionConfig:
     repo_root: Path
+    live_trade_registry_events_path: Path = DEFAULT_TRACK_B_LIVE_TRADE_REGISTRY_EVENTS_JSONL
     submit_intent_ownership_path: Path = DEFAULT_TRACK_B_SUBMIT_INTENT_OWNERSHIP_JSONL
     bridge_report_paths: tuple[Path, ...] = field(default_factory=lambda: (DEFAULT_STRATEGY_BRIDGE_REPORT,))
     filled_bridge_result_paths: tuple[Path, ...] = field(default_factory=lambda: (DEFAULT_FILLED_BRIDGE_RESULT,))
@@ -85,6 +89,7 @@ class TradeRegistryReconstructionConfig:
     @property
     def source_paths(self) -> tuple[Path, ...]:
         return (
+            self.live_trade_registry_events_path,
             self.submit_intent_ownership_path,
             *self.bridge_report_paths,
             *self.filled_bridge_result_paths,
@@ -193,6 +198,10 @@ def write_trade_registry_reconstruction_report(
 
 def _load_sources(config: TradeRegistryReconstructionConfig) -> dict[str, tuple[Path, Any]]:
     sources: dict[str, tuple[Path, Any]] = {}
+    sources["live_trade_registry_events"] = (
+        config.resolve(config.live_trade_registry_events_path),
+        _read_jsonl(config.resolve(config.live_trade_registry_events_path)),
+    )
     sources["submit_intent_ownership"] = (
         config.resolve(config.submit_intent_ownership_path),
         _read_jsonl(config.resolve(config.submit_intent_ownership_path)),

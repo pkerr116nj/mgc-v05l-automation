@@ -75,6 +75,14 @@ from ..execution_core.track_b_submit_intent_ownership import (
     SubmitIntentOwnershipRecord,
     SubmitIntentOwnershipState,
     append_submit_intent_ownership_record,
+    generate_ownership_intent_id,
+)
+from ..execution_core.track_b_central_trade_registry import TradeEventType
+from ..execution_core.track_b_live_trade_registry import (
+    append_live_trade_registry_event,
+    broker_backed_fill_has_required_ids,
+    make_live_trade_registry_event,
+    trade_id_from_live_identity,
 )
 
 _EXPECTED_MODE = "PAPER"
@@ -570,6 +578,7 @@ def run_ibkr_paper_strategy_bridge(
     submit_intent_ownership_pre_submit: dict[str, Any] | None = None
     submit_intent_ownership_update: dict[str, Any] | None = None
     broker_effect_classification: str | None = None
+    live_trade_registry_events: list[dict[str, Any]] = []
     pre_action_snapshot_validation: dict[str, Any] = {}
     runtime_control_plane_authorization: dict[str, Any] = {}
     _record_bridge_audit(
@@ -916,6 +925,20 @@ def run_ibkr_paper_strategy_bridge(
                 entry_execution_pricing=entry_execution_pricing,
                 phase1_gate=phase1_gate,
             )
+            live_trade_registry_events.append(
+                _append_bridge_live_trade_registry_event(
+                    config=config,
+                    intent=intent,
+                    event_type=TradeEventType.ENTRY_INTENT_CREATED
+                    if _is_entry_intent(config=config, intent=intent)
+                    else TradeEventType.EXIT_INTENT_CREATED,
+                    ownership_record=submit_intent_ownership_pre_submit,
+                    qualified_contract_report=qualified_contract_report,
+                    source_artifact_path=str(_bridge_report_path(config)),
+                    price=_submit_ownership_limit_price(entry_execution_pricing),
+                    reason_codes=("GUARDED_PAPER_INTENT_CREATED",),
+                )
+            )
             _record_bridge_audit(
                 audit_events,
                 event_type="submit_intent_ownership_pre_submit_persisted",
@@ -966,6 +989,17 @@ def run_ibkr_paper_strategy_bridge(
                 else str(submit_intent_ownership_update.get("broker_effect_classification") or "").strip()
                 or None
             )
+            live_trade_registry_events.extend(
+                _append_bridge_live_trade_registry_events_after_delegate(
+                    config=config,
+                    intent=intent,
+                    ownership_record=submit_intent_ownership_update or submit_intent_ownership_pre_submit,
+                    qualified_contract_report=qualified_contract_report,
+                    delegated_result=delegated_result,
+                    mapped_classification=classification,
+                    source_artifact_path=str(_bridge_report_path(config)),
+                )
+            )
             known_managed_exit_order_persistence = _persist_known_managed_exit_order_after_submit(
                 config=config,
                 intent=intent,
@@ -996,6 +1030,7 @@ def run_ibkr_paper_strategy_bridge(
                     "known_managed_exit_order_persistence": known_managed_exit_order_persistence,
                     "known_leak_test_entry_order_persistence": known_leak_test_entry_order_persistence,
                     "submit_intent_ownership": submit_intent_ownership_update,
+                    "live_trade_registry_events": live_trade_registry_events,
                 },
             )
             _record_bridge_audit(
@@ -1061,6 +1096,8 @@ def run_ibkr_paper_strategy_bridge(
             report["submit_intent_ownership_update"] = submit_intent_ownership_update
         if broker_effect_classification:
             report["broker_effect_classification"] = broker_effect_classification
+        if live_trade_registry_events:
+            report["live_trade_registry_events"] = live_trade_registry_events
         return IbkrPaperStrategyBridgeArtifacts(classification=classification, report=report, audit_events=audit_events)
     except Exception as exc:
         classification = "PAPER_STRATEGY_INTENT_BLOCKED"
@@ -1094,6 +1131,7 @@ def run_ibkr_paper_strategy_bridge(
             "submit_intent_ownership_pre_submit": submit_intent_ownership_pre_submit,
             "submit_intent_ownership_update": submit_intent_ownership_update,
             "broker_effect_classification": _broker_effect_classification_for_delegate_exception(exc),
+            "live_trade_registry_events": live_trade_registry_events,
             "bridge_direct_invocation": _bridge_direct_invocation(config),
             "runtime_supervised": _bridge_runtime_supervised_invocation(config),
             "dashboard_projection_consumed": False,
@@ -3008,15 +3046,42 @@ def _persist_submit_intent_ownership_before_delegate(
     qualified = dict(qualified_contract_report.get("qualified_contract") or {})
     now = datetime.now(timezone.utc)
     is_entry = _is_entry_intent(config=config, intent=intent)
+    lane_id = str(metadata.get("lane_id") or config.strategy_id or "").strip()
+    intent_type = _submit_ownership_intent_type(config=config, intent=intent)
+    action = str(intent.action or config.action or "").strip().upper()
+    symbol = str(qualified.get("symbol") or config.symbol or intent.symbol or "").strip().upper()
+    local_symbol = str(metadata.get("local_symbol") or qualified.get("local_symbol") or "").strip()
+    ownership_intent_id = generate_ownership_intent_id(
+        lane_id=lane_id,
+        intent_type=intent_type,
+        action=action,
+        symbol=symbol,
+        local_symbol=local_symbol,
+        created_at=now,
+    )
+    trade_id = trade_id_from_live_identity(
+        explicit_trade_id=metadata.get("trade_id"),
+        lifecycle_id=None
+        if is_entry
+        else (
+            metadata.get("lifecycle_id")
+            or metadata.get("position_lifecycle_id")
+            or metadata.get("managed_lifecycle_id")
+        ),
+        ownership_intent_id=ownership_intent_id,
+        account_id=metadata.get("account_id") or config.account_id,
+        con_id=metadata.get("con_id") or qualified.get("con_id"),
+        lane_id=lane_id,
+    )
     record = SubmitIntentOwnershipRecord(
         mode=config.mode,
         account_id=str(metadata.get("account_id") or config.account_id or "").strip(),
-        lane_id=str(metadata.get("lane_id") or config.strategy_id or "").strip(),
+        lane_id=lane_id,
         strategy_id=str(metadata.get("strategy_id") or _exposure_strategy_id_for_bridge(config=config) or "").strip(),
-        intent_type=_submit_ownership_intent_type(config=config, intent=intent),
-        action=str(intent.action or config.action or "").strip().upper(),
-        symbol=str(qualified.get("symbol") or config.symbol or intent.symbol or "").strip().upper(),
-        local_symbol=str(metadata.get("local_symbol") or qualified.get("local_symbol") or "").strip(),
+        intent_type=intent_type,
+        action=action,
+        symbol=symbol,
+        local_symbol=local_symbol,
         expiry=str(qualified.get("expiry") or config.contract_month or intent.contract_month or "").strip(),
         con_id=_int_or_none(metadata.get("con_id") or qualified.get("con_id")) or "",
         qty=float(config.quantity or intent.quantity or 0.0),
@@ -3025,6 +3090,7 @@ def _persist_submit_intent_ownership_before_delegate(
         time_in_force=str(config.time_in_force or intent.time_in_force or "").strip().upper(),
         repo_root=str(config.repo_root),
         git_head=str(metadata.get("git_head") or _repo_git_head(config.repo_root) or "").strip(),
+        ownership_intent_id=ownership_intent_id,
         created_at=now,
         lifecycle_id=None
         if is_entry
@@ -3075,6 +3141,7 @@ def _persist_submit_intent_ownership_before_delegate(
             if path
         ),
         extra={
+            "trade_id": trade_id,
             "reason": intent.reason,
             "intent_id": intent.intent_id or intent.default_intent_id,
             "caller_metadata": metadata,
@@ -3401,6 +3468,205 @@ def _resolve_strategy_identity(strategy_id: str) -> dict[str, Any]:
         "allowed_sessions": list(identity.allowed_sessions),
         "known_identity": True,
     }
+
+
+def _append_bridge_live_trade_registry_event(
+    *,
+    config: IbkrPaperStrategyBridgeConfig,
+    intent: IbkrPaperStrategyOrderIntent,
+    event_type: TradeEventType,
+    ownership_record: dict[str, Any] | None,
+    qualified_contract_report: dict[str, Any],
+    source_artifact_path: str,
+    order_id: int | str | None = None,
+    client_id: int | str | None = None,
+    perm_id: int | str | None = None,
+    exec_id: str | None = None,
+    price: object = None,
+    reason_codes: tuple[str, ...] = (),
+) -> dict[str, Any]:
+    record = dict((ownership_record or {}).get("record") or ownership_record or {})
+    extra = dict(record.get("extra") or {})
+    metadata = dict(extra.get("caller_metadata") or config.caller_metadata or {})
+    qualified = dict(qualified_contract_report.get("qualified_contract") or {})
+    trade_id = trade_id_from_live_identity(
+        explicit_trade_id=extra.get("trade_id") or metadata.get("trade_id") or record.get("trade_id"),
+        lifecycle_id=record.get("lifecycle_id") if not bool(record.get("lifecycle_id_reserved_only")) else None,
+        ownership_intent_id=record.get("ownership_intent_id"),
+        account_id=record.get("account_id") or config.account_id,
+        con_id=record.get("con_id") or qualified.get("con_id"),
+        lane_id=record.get("lane_id") or metadata.get("lane_id") or config.strategy_id,
+    )
+    event = make_live_trade_registry_event(
+        event_type=event_type,
+        trade_id=trade_id,
+        lifecycle_id=None
+        if bool(record.get("lifecycle_id_reserved_only")) and event_type == TradeEventType.ENTRY_INTENT_CREATED
+        else record.get("lifecycle_id"),
+        lane_id=str(record.get("lane_id") or metadata.get("lane_id") or config.strategy_id or "").strip(),
+        thesis_strategy_id=str(
+            record.get("strategy_id")
+            or metadata.get("strategy_id")
+            or _exposure_strategy_id_for_bridge(config=config)
+            or ""
+        ).strip(),
+        account_id=str(record.get("account_id") or metadata.get("account_id") or config.account_id or "").strip(),
+        symbol=str(record.get("symbol") or qualified.get("symbol") or config.symbol or intent.symbol or "").strip().upper(),
+        con_id=record.get("con_id") or metadata.get("con_id") or qualified.get("con_id"),
+        local_symbol=str(record.get("local_symbol") or metadata.get("local_symbol") or qualified.get("local_symbol") or "").strip(),
+        expiry=str(record.get("expiry") or qualified.get("expiry") or config.contract_month or intent.contract_month or "").strip(),
+        side=_registry_side_for_bridge(record=record, metadata=metadata, config=config, intent=intent),
+        action=str(record.get("action") or intent.action or config.action or "").strip().upper(),
+        qty=record.get("qty") or config.quantity or intent.quantity,
+        source_artifact_path=source_artifact_path,
+        order_id=order_id if order_id is not None else record.get("broker_order_id"),
+        client_id=client_id if client_id is not None else record.get("client_id") or config.client_id,
+        perm_id=perm_id if perm_id is not None else record.get("perm_id"),
+        exec_id=exec_id if exec_id is not None else record.get("exec_id"),
+        price=price if price not in {None, ""} else record.get("limit_price"),
+        reason_codes=reason_codes,
+        metadata={
+            "source": "ibkr_paper_strategy_bridge",
+            "intent_type": record.get("intent_type") or _submit_ownership_intent_type(config=config, intent=intent),
+            "ownership_intent_id": record.get("ownership_intent_id"),
+            "paper_only": True,
+            "live_money_eligible": False,
+            "paper_proof_invoked": False,
+        },
+    )
+    return append_live_trade_registry_event(repo_root=config.repo_root, event=event)
+
+
+def _append_bridge_live_trade_registry_events_after_delegate(
+    *,
+    config: IbkrPaperStrategyBridgeConfig,
+    intent: IbkrPaperStrategyOrderIntent,
+    ownership_record: dict[str, Any] | None,
+    qualified_contract_report: dict[str, Any],
+    delegated_result: dict[str, Any] | None,
+    mapped_classification: str,
+    source_artifact_path: str,
+) -> list[dict[str, Any]]:
+    delegated = dict(delegated_result or {})
+    delegated_report = dict(delegated.get("report") or {})
+    lifecycle = dict(
+        delegated_report.get("submit_cancel_lifecycle")
+        or delegated_report.get("lifecycle")
+        or delegated.get("submit_cancel_lifecycle")
+        or {}
+    )
+    order_id = _submitted_broker_order_id(delegated=delegated, delegated_report=delegated_report, lifecycle=lifecycle)
+    client_id = _submitted_client_id(config=config, delegated=delegated, delegated_report=delegated_report, lifecycle=lifecycle)
+    perm_id = _submitted_perm_id(delegated=delegated, delegated_report=delegated_report, lifecycle=lifecycle)
+    exec_id = _submitted_exec_id(delegated=delegated, delegated_report=delegated_report, lifecycle=lifecycle)
+    if order_id is None or client_id is None:
+        return []
+
+    is_exit = _is_close_intent(config=config, intent=intent)
+    events = [
+        _append_bridge_live_trade_registry_event(
+            config=config,
+            intent=intent,
+            event_type=TradeEventType.EXIT_ORDER_SUBMITTED if is_exit else TradeEventType.ENTRY_ORDER_SUBMITTED,
+            ownership_record=ownership_record,
+            qualified_contract_report=qualified_contract_report,
+            source_artifact_path=source_artifact_path,
+            order_id=order_id,
+            client_id=client_id,
+            perm_id=perm_id,
+            exec_id=None,
+            price=_submitted_fill_or_limit_price(delegated=delegated, delegated_report=delegated_report, lifecycle=lifecycle),
+            reason_codes=("GUARDED_PAPER_ORDER_SUBMITTED",),
+        )
+    ]
+    if mapped_classification in {"PAPER_STRATEGY_ORDER_NOT_FILLED_CANCELLED", "PAPER_STRATEGY_ENTRY_MISSED_CANCELLED_ACCEPTED"}:
+        events.append(
+            _append_bridge_live_trade_registry_event(
+                config=config,
+                intent=intent,
+                event_type=TradeEventType.EXIT_ORDER_CANCELLED if is_exit else TradeEventType.ENTRY_ORDER_CANCELLED,
+                ownership_record=ownership_record,
+                qualified_contract_report=qualified_contract_report,
+                source_artifact_path=source_artifact_path,
+                order_id=order_id,
+                client_id=client_id,
+                reason_codes=("GUARDED_PAPER_ORDER_CANCELLED",),
+            )
+        )
+    if mapped_classification == "PAPER_STRATEGY_ORDER_FILLED":
+        if broker_backed_fill_has_required_ids(perm_id=perm_id, exec_id=exec_id):
+            events.append(
+                _append_bridge_live_trade_registry_event(
+                    config=config,
+                    intent=intent,
+                    event_type=TradeEventType.EXIT_FILL_BROKER_BACKED if is_exit else TradeEventType.ENTRY_FILL_BROKER_BACKED,
+                    ownership_record=ownership_record,
+                    qualified_contract_report=qualified_contract_report,
+                    source_artifact_path=source_artifact_path,
+                    order_id=order_id,
+                    client_id=client_id,
+                    perm_id=perm_id,
+                    exec_id=exec_id,
+                    price=_submitted_fill_or_limit_price(
+                        delegated=delegated,
+                        delegated_report=delegated_report,
+                        lifecycle=lifecycle,
+                    ),
+                    reason_codes=("BROKER_BACKED_FILL_CONFIRMED",),
+                )
+            )
+        else:
+            events.append(
+                _append_bridge_live_trade_registry_event(
+                    config=config,
+                    intent=intent,
+                    event_type=TradeEventType.REVIEW_REQUIRED,
+                    ownership_record=ownership_record,
+                    qualified_contract_report=qualified_contract_report,
+                    source_artifact_path=source_artifact_path,
+                    order_id=order_id,
+                    client_id=client_id,
+                    reason_codes=("BROKER_BACKED_FILL_MISSING_PERM_OR_EXEC",),
+                )
+            )
+    return events
+
+
+def _registry_side_for_bridge(
+    *,
+    record: dict[str, Any],
+    metadata: dict[str, Any],
+    config: IbkrPaperStrategyBridgeConfig,
+    intent: IbkrPaperStrategyOrderIntent,
+) -> str:
+    explicit = str(metadata.get("side") or record.get("side") or "").strip().upper()
+    if explicit:
+        return explicit
+    intent_type = str(record.get("intent_type") or metadata.get("intent_type") or "").strip().upper()
+    action = str(record.get("action") or intent.action or config.action or "").strip().upper()
+    if intent_type in {"BUY_TO_OPEN", "SELL_TO_CLOSE"} or action == "BUY":
+        return "LONG"
+    if intent_type in {"SELL_TO_OPEN", "BUY_TO_CLOSE"} or action == "SELL":
+        return "SHORT"
+    return action or "UNKNOWN"
+
+
+def _submitted_fill_or_limit_price(
+    *,
+    delegated: dict[str, Any],
+    delegated_report: dict[str, Any],
+    lifecycle: dict[str, Any],
+) -> object:
+    fill = dict(lifecycle.get("fill") or delegated_report.get("fill") or delegated.get("fill") or {})
+    return (
+        fill.get("price")
+        or lifecycle.get("fill_price")
+        or delegated_report.get("fill_price")
+        or delegated.get("fill_price")
+        or lifecycle.get("limit_price")
+        or delegated_report.get("limit_price")
+        or delegated.get("limit_price")
+    )
 
 
 def _submitted_order_count(audit_events: list[dict[str, Any]]) -> int:
