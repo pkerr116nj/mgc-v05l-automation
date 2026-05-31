@@ -40,6 +40,11 @@ from mgc_v05l.execution_core.track_b_central_trade_registry import (
     TradeRegistryRecord,
     reduce_trade_events,
 )
+from mgc_v05l.execution_core.track_b_gate_shadow_parity import (
+    TrackBGateName,
+    TrackBGateShadowContext,
+    evaluate_track_b_gate_shadow_parity,
+)
 from mgc_v05l.execution_core.track_b_trade_registry_shadow_report import TradeRegistryShadowRow
 
 
@@ -52,6 +57,18 @@ STRESS_EXPECTED_REVIEW_REQUIRED = "STRESS_EXPECTED_REVIEW_REQUIRED"
 STRESS_REVIEW_REQUIRED = "STRESS_REVIEW_REQUIRED"
 STRESS_INVARIANT_FAILED = "STRESS_INVARIANT_FAILED"
 STRESS_REDUCER_ERROR = "STRESS_REDUCER_ERROR"
+_GATE_SHADOW_SAFETY_REASONS = {
+    "TRUTH_CONFLICT_REVIEW_REQUIRED",
+    "BROKER_LIFECYCLE_RECONCILIATION_NOT_CLEAN",
+    "BROKER_LIFECYCLE_RECONCILIATION_DIRTY",
+    "SAFE_STATE_SUBMIT_BLOCKED",
+    "CONTROL_PLANE_STALE",
+    "OPEN_WORKING_ORDER_PRESENT",
+    "DUPLICATE_STRATEGY_ENTRY_WHILE_POSITION_OPEN",
+    "REGISTRY_ENTRY_NOT_BROKER_BACKED",
+    "REGISTRY_TRADE_ID_NOT_OPEN_MANAGED",
+    "FILL_NOT_BROKER_BACKED",
+}
 
 
 class LifecycleStressRunMode(str, Enum):
@@ -86,6 +103,8 @@ class LifecycleStressScenario(str, Enum):
     RECOVERY_AMBIGUOUS_TRADE_IDS = "recovery_ambiguous_trade_ids"
     RECOVERY_LIFECYCLE_OWNER_CONFLICT = "recovery_lifecycle_owner_conflict"
     RECOVERY_STALE_HISTORY_NO_ADOPT = "recovery_stale_history_no_adopt"
+    GATE_DUPLICATE_ENTRY_BLOCKED = "gate_duplicate_entry_blocked"
+    GATE_OPEN_WORKING_ORDER_BLOCKED = "gate_open_working_order_blocked"
 
 
 @dataclass(frozen=True)
@@ -135,6 +154,8 @@ EXPECTED_REVIEW_SCENARIOS = {
     LifecycleStressScenario.RECOVERY_AMBIGUOUS_TRADE_IDS,
     LifecycleStressScenario.RECOVERY_LIFECYCLE_OWNER_CONFLICT,
     LifecycleStressScenario.RECOVERY_STALE_HISTORY_NO_ADOPT,
+    LifecycleStressScenario.GATE_DUPLICATE_ENTRY_BLOCKED,
+    LifecycleStressScenario.GATE_OPEN_WORKING_ORDER_BLOCKED,
 }
 IMPOSSIBLE_STATE_INVARIANTS = {
     "CLOSED_FLAT_WITH_OPEN_QTY",
@@ -143,7 +164,7 @@ IMPOSSIBLE_STATE_INVARIANTS = {
 }
 DEFAULT_COUNTS_BY_MODE = {
     LifecycleStressRunMode.SMOKE: 20,
-    LifecycleStressRunMode.KNOWN_SCENARIOS: 240,
+    LifecycleStressRunMode.KNOWN_SCENARIOS: 260,
     LifecycleStressRunMode.LANE_MATRIX: 1000,
     LifecycleStressRunMode.FUZZ: 10000,
 }
@@ -184,6 +205,8 @@ class LifecycleStressResult:
     impossible_states: tuple[str, ...]
     silent_ambiguity_merge: bool
     reducer_error: str | None
+    gate_shadow_summary: Mapping[str, Any]
+    gate_shadow_report: Mapping[str, Any] | None
     shadow_row: Mapping[str, Any] | None
 
     def to_dict(self) -> dict[str, Any]:
@@ -206,6 +229,8 @@ class LifecycleStressResult:
             "impossible_states": list(self.impossible_states),
             "silent_ambiguity_merge": self.silent_ambiguity_merge,
             "reducer_error": self.reducer_error,
+            "gate_shadow_summary": dict(self.gate_shadow_summary),
+            "gate_shadow_report": dict(self.gate_shadow_report or {}),
             "shadow_row": dict(self.shadow_row or {}),
         }
 
@@ -238,6 +263,12 @@ class LifecycleStressReport:
                     "reducer_errors": 0,
                     "silent_ambiguity_merges": 0,
                     "impossible_states": 0,
+                    "gate_shadow_checks": 0,
+                    "gate_shadow_green_path_checks": 0,
+                    "gate_shadow_blocked_checks": 0,
+                    "gate_shadow_mismatches": 0,
+                    "gate_shadow_safety_regressions": 0,
+                    "gate_shadow_missing_trade_id_blocks": 0,
                 },
             )
             row["total"] += 1
@@ -255,6 +286,20 @@ class LifecycleStressReport:
                 row["silent_ambiguity_merges"] += 1
             if result.impossible_states:
                 row["impossible_states"] += 1
+            row["gate_shadow_checks"] += int(result.gate_shadow_summary.get("total_gate_checks") or 0)
+            row["gate_shadow_green_path_checks"] += int(result.gate_shadow_summary.get("green_path_checks") or 0)
+            row["gate_shadow_blocked_checks"] += int(result.gate_shadow_summary.get("blocked_checks") or 0)
+            row["gate_shadow_mismatches"] += int(result.gate_shadow_summary.get("mismatches") or 0)
+            row["gate_shadow_safety_regressions"] += int(result.gate_shadow_summary.get("safety_regressions") or 0)
+            row["gate_shadow_missing_trade_id_blocks"] += int(result.gate_shadow_summary.get("missing_trade_id_blocks") or 0)
+        gate_mismatches_by_gate: dict[str, int] = {}
+        gate_mismatches_by_lane_scenario: dict[str, int] = {}
+        for result in self.results:
+            for gate, count in dict(result.gate_shadow_summary.get("mismatches_by_gate") or {}).items():
+                gate_mismatches_by_gate[str(gate)] = gate_mismatches_by_gate.get(str(gate), 0) + int(count)
+            if int(result.gate_shadow_summary.get("mismatches") or 0):
+                key = f"{result.scenario}|{result.lane_id}"
+                gate_mismatches_by_lane_scenario[key] = gate_mismatches_by_lane_scenario.get(key, 0) + int(result.gate_shadow_summary.get("mismatches") or 0)
         return {
             "total_trades": len(self.results),
             "passed": sum(1 for result in self.results if result.classification == STRESS_PASSED),
@@ -271,6 +316,14 @@ class LifecycleStressReport:
             "bad_lifecycles_without_reason_codes": sum(
                 1 for result in self.results if result.expected_review_required and not result.expected_bad_lifecycle_classified
             ),
+            "gate_shadow_total_checks": sum(int(result.gate_shadow_summary.get("total_gate_checks") or 0) for result in self.results),
+            "gate_shadow_green_path_checks": sum(int(result.gate_shadow_summary.get("green_path_checks") or 0) for result in self.results),
+            "gate_shadow_blocked_checks": sum(int(result.gate_shadow_summary.get("blocked_checks") or 0) for result in self.results),
+            "gate_shadow_mismatches": sum(int(result.gate_shadow_summary.get("mismatches") or 0) for result in self.results),
+            "gate_shadow_safety_regressions": sum(int(result.gate_shadow_summary.get("safety_regressions") or 0) for result in self.results),
+            "gate_shadow_missing_trade_id_blocks": sum(int(result.gate_shadow_summary.get("missing_trade_id_blocks") or 0) for result in self.results),
+            "gate_shadow_mismatches_by_gate": gate_mismatches_by_gate,
+            "gate_shadow_mismatches_by_lane_scenario": gate_mismatches_by_lane_scenario,
             "stage_goal_zero_failures": {
                 "zero_crashes": not any(result.reducer_error for result in self.results),
                 "zero_silent_merges": not any(result.silent_ambiguity_merge for result in self.results),
@@ -280,6 +333,9 @@ class LifecycleStressReport:
                     result.expected_review_required and not result.expected_bad_lifecycle_classified
                     for result in self.results
                 ),
+                "zero_gate_shadow_mismatches": not any(int(result.gate_shadow_summary.get("mismatches") or 0) for result in self.results),
+                "zero_gate_shadow_safety_regressions": not any(int(result.gate_shadow_summary.get("safety_regressions") or 0) for result in self.results),
+                "zero_gate_shadow_missing_trade_id_blocks": not any(int(result.gate_shadow_summary.get("missing_trade_id_blocks") or 0) for result in self.results),
             },
             "scenario_breakdown": scenario_breakdown,
         }
@@ -405,6 +461,15 @@ def _run_one(
         reducer_error = str(exc)
 
     truth = _truth_for_scenario(root=root, scenario=scenario, lane=lane, record=record, generated_at=generated_at)
+    gate_shadow_report = _gate_shadow_for_scenario(
+        root=root,
+        scenario=scenario,
+        lane=lane,
+        trade_id=trade_id,
+        record=record,
+        generated_at=generated_at,
+    )
+    gate_shadow_summary = _gate_shadow_summary(gate_shadow_report)
     invariants = _invariant_failures(record=record, events=events, scenario=scenario)
     unexpected_invariants = _unexpected_invariant_failures(scenario=scenario, invariants=invariants)
     impossible_states = tuple(item for item in invariants if item in IMPOSSIBLE_STATE_INVARIANTS)
@@ -444,6 +509,8 @@ def _run_one(
         impossible_states=impossible_states,
         silent_ambiguity_merge=silent_ambiguity_merge,
         reducer_error=reducer_error,
+        gate_shadow_summary=gate_shadow_summary,
+        gate_shadow_report=gate_shadow_report.to_dict() if gate_shadow_report is not None else None,
         shadow_row=shadow_row.to_dict() if shadow_row else None,
     )
 
@@ -581,6 +648,18 @@ def _events_for_scenario(
                 reason_codes=("RECOVERY_STALE_HISTORICAL_ARTIFACT_CANNOT_ADOPT_CURRENT_POSITION",),
             ),
         )
+    if scenario == LifecycleStressScenario.GATE_DUPLICATE_ENTRY_BLOCKED:
+        return (
+            event(TradeEventType.ENTRY_FILL_BROKER_BACKED, seconds=0, order_id=entry_order_id, perm_id=entry_perm_id, exec_id=entry_exec_id, price="100.00"),
+            event(TradeEventType.LIFECYCLE_OPEN_MANAGED, seconds=1),
+            event(TradeEventType.REVIEW_REQUIRED, seconds=2, reason_codes=("GATE_DUPLICATE_ENTRY_BLOCKED",)),
+        )
+    if scenario == LifecycleStressScenario.GATE_OPEN_WORKING_ORDER_BLOCKED:
+        return (
+            event(TradeEventType.ENTRY_INTENT_CREATED, seconds=0),
+            event(TradeEventType.ENTRY_ORDER_SUBMITTED, seconds=1, order_id=entry_order_id, reason_codes=("OPEN_WORKING_ORDER_PRESENT",)),
+            event(TradeEventType.REVIEW_REQUIRED, seconds=2, reason_codes=("GATE_OPEN_WORKING_ORDER_BLOCKED",)),
+        )
     if scenario == LifecycleStressScenario.MANUAL_OPERATOR_CLOSE:
         return (
             event(TradeEventType.ENTRY_FILL_BROKER_BACKED, seconds=0, order_id=entry_order_id, perm_id=entry_perm_id, exec_id=entry_exec_id, price="100.00"),
@@ -677,6 +756,241 @@ def _truth_for_scenario(
     return build_track_b_truth_snapshot(config=config, now=generated_at)
 
 
+def _gate_shadow_for_scenario(
+    *,
+    root: Path,
+    scenario: LifecycleStressScenario,
+    lane: StressLane,
+    trade_id: str,
+    record: TradeRegistryRecord | None,
+    generated_at: datetime,
+):
+    gate_action = _gate_action_for_scenario(scenario=scenario, lane=lane)
+    gate_record = _gate_record_for_scenario(
+        scenario=scenario,
+        lane=lane,
+        trade_id=trade_id,
+        generated_at=generated_at,
+        fallback_record=record,
+    )
+    gate_records = () if gate_record is None else (gate_record,)
+    gate_truth = _truth_for_scenario(
+        root=root / "gate_shadow",
+        scenario=scenario,
+        lane=lane,
+        record=gate_record,
+        generated_at=generated_at,
+    )
+    owner = gate_record.ownership_identity if gate_record is not None else None
+    context = TrackBGateShadowContext(
+        repo_root=root,
+        lane_id=lane.lane_id,
+        thesis_strategy_id=lane.thesis_strategy_id,
+        action=gate_action,
+        quantity=Decimal("1"),
+        symbol=lane.symbol,
+        trade_id=gate_record.trade_id if _gate_action_is_close(gate_action) and gate_record is not None else None,
+        lifecycle_id=owner.lifecycle_id if _gate_action_is_close(gate_action) and owner is not None else None,
+        existing_gate_results=_legacy_gate_results_for_scenario(
+            scenario=scenario,
+            action=gate_action,
+            gate_truth=gate_truth,
+        ),
+        truth_snapshot=gate_truth,
+        registry_records=gate_records,
+        generated_at=generated_at,
+    )
+    return evaluate_track_b_gate_shadow_parity(context)
+
+
+def _gate_shadow_summary(report) -> dict[str, Any]:
+    if report is None:
+        return {
+            "total_gate_checks": 0,
+            "green_path_checks": 0,
+            "blocked_checks": 0,
+            "mismatches": 0,
+            "safety_regressions": 0,
+            "missing_trade_id_blocks": 0,
+            "mismatches_by_gate": {},
+            "mismatches_by_lane_scenario": {},
+        }
+    mismatches_by_gate: dict[str, int] = {}
+    safety_regressions = 0
+    missing_trade_id_blocks = 0
+    green_path_checks = 0
+    blocked_checks = 0
+    for row in report.rows:
+        existing_allowed = bool(row.existing_gate_result.allowed)
+        shadow_allowed = bool(row.registry_truth_gate_result.allowed)
+        if existing_allowed and shadow_allowed:
+            green_path_checks += 1
+        if not existing_allowed and not shadow_allowed:
+            blocked_checks += 1
+        if not row.parity:
+            mismatches_by_gate[row.gate_name] = mismatches_by_gate.get(row.gate_name, 0) + 1
+        if not existing_allowed and shadow_allowed and _has_safety_reason(row.existing_gate_result.reason_codes):
+            safety_regressions += 1
+        if existing_allowed and not shadow_allowed and "REGISTRY_TRADE_ID_NOT_OPEN_MANAGED" in row.registry_truth_gate_result.reason_codes:
+            missing_trade_id_blocks += 1
+    return {
+        "total_gate_checks": len(report.rows),
+        "green_path_checks": green_path_checks,
+        "blocked_checks": blocked_checks,
+        "mismatches": sum(mismatches_by_gate.values()),
+        "safety_regressions": safety_regressions,
+        "missing_trade_id_blocks": missing_trade_id_blocks,
+        "mismatches_by_gate": mismatches_by_gate,
+        "mismatches_by_lane_scenario": {f"{report.lane_id}|{report.trade_id or 'entry'}": sum(mismatches_by_gate.values())} if mismatches_by_gate else {},
+    }
+
+
+def _has_safety_reason(reason_codes: Sequence[str]) -> bool:
+    return bool({str(code) for code in reason_codes}.intersection(_GATE_SHADOW_SAFETY_REASONS))
+
+
+def _gate_action_for_scenario(*, scenario: LifecycleStressScenario, lane: StressLane) -> str:
+    if scenario in {
+        LifecycleStressScenario.MANAGED_EXIT_DUE_CLOSE,
+        LifecycleStressScenario.MISSING_PERM_OR_EXEC,
+        LifecycleStressScenario.RECOVERY_MISSING_BROKER_EVIDENCE,
+    }:
+        return lane.exit_action
+    return lane.entry_action
+
+
+def _gate_action_is_close(action: str) -> bool:
+    return str(action or "").upper() in {"SELL_TO_CLOSE", "BUY_TO_CLOSE", "EXIT", "CLOSE"}
+
+
+def _gate_record_for_scenario(
+    *,
+    scenario: LifecycleStressScenario,
+    lane: StressLane,
+    trade_id: str,
+    generated_at: datetime,
+    fallback_record: TradeRegistryRecord | None,
+) -> TradeRegistryRecord | None:
+    if scenario in {
+        LifecycleStressScenario.MANAGED_EXIT_DUE_CLOSE,
+        LifecycleStressScenario.GATE_DUPLICATE_ENTRY_BLOCKED,
+    }:
+        return reduce_trade_events(
+            tuple(
+                event
+                for event in _events_for_scenario(
+                    index=0,
+                    scenario=LifecycleStressScenario.CLEAN_FULL_LIFECYCLE,
+                    lane=lane,
+                    trade_id=trade_id,
+                    generated_at=generated_at,
+                )
+                if event.event_type
+                in {
+                    TradeEventType.ENTRY_INTENT_CREATED,
+                    TradeEventType.ENTRY_ORDER_SUBMITTED,
+                    TradeEventType.ENTRY_FILL_BROKER_BACKED,
+                    TradeEventType.LIFECYCLE_OPEN_MANAGED,
+                }
+            )
+        )
+    if scenario in {
+        LifecycleStressScenario.MISSING_PERM_OR_EXEC,
+        LifecycleStressScenario.RECOVERY_MISSING_BROKER_EVIDENCE,
+        LifecycleStressScenario.RECONCILIATION_AMBIGUITY,
+    }:
+        return fallback_record
+    return None if fallback_record is None or fallback_record.current_state != TradeCurrentState.OPEN_MANAGED else fallback_record
+
+
+def _legacy_gate_results_for_scenario(
+    *,
+    scenario: LifecycleStressScenario,
+    action: str,
+    gate_truth: TrackBTruthSnapshot,
+) -> dict[str, dict[str, Any]]:
+    entry_allowed = True
+    managed_exit_allowed = True
+    governance_allowed = True
+    safe_allowed = bool(gate_truth.safe_state.submit_allowed and gate_truth.safe_state.fresh)
+    no_order_allowed = bool(gate_truth.broker_truth.fresh and gate_truth.broker_truth.open_order_count == 0)
+    runtime_allowed = bool(gate_truth.runtime.runtime_alive and gate_truth.runtime.submit_capable and not gate_truth.runtime.duplicate_writer_detected)
+    entry_reasons: list[str] = []
+    managed_reasons: list[str] = []
+    governance_reasons: list[str] = []
+    safe_reasons: list[str] = list(gate_truth.safe_state.reason_codes)
+    no_order_reasons: list[str] = []
+    runtime_reasons: list[str] = list(gate_truth.runtime.reason_codes)
+
+    if _gate_action_is_close(action):
+        entry_reasons.append("ENTRY_EXPOSURE_NOT_APPLICABLE")
+    else:
+        managed_reasons.append("MANAGED_EXIT_NOT_APPLICABLE")
+
+    if gate_truth.conflicts:
+        if not _gate_action_is_close(action):
+            entry_allowed = False
+            entry_reasons.append("TRUTH_CONFLICT_REVIEW_REQUIRED")
+        else:
+            managed_exit_allowed = False
+            managed_reasons.append("TRUTH_CONFLICT_REVIEW_REQUIRED")
+        governance_allowed = False
+        governance_reasons.append("TRUTH_CONFLICT_REVIEW_REQUIRED")
+    if not gate_truth.runtime.submit_capable:
+        governance_allowed = False
+        runtime_allowed = False
+        governance_reasons.append("RUNTIME_NOT_SUBMIT_CAPABLE")
+        runtime_reasons.append("RUNTIME_NOT_SUBMIT_CAPABLE")
+    if not gate_truth.control_plane.fresh:
+        governance_allowed = False
+        governance_reasons.append(CONTROL_PLANE_STALE)
+    if not gate_truth.safe_state.submit_allowed:
+        governance_allowed = False
+        governance_reasons.append(SAFE_STATE_SUBMIT_BLOCKED)
+    if not safe_allowed:
+        safe_reasons.append("SAFE_STATE_STALE" if not gate_truth.safe_state.fresh else SAFE_STATE_SUBMIT_BLOCKED)
+    if not no_order_allowed:
+        no_order_reasons.append("OPEN_WORKING_ORDER_PRESENT")
+        if not _gate_action_is_close(action):
+            entry_allowed = False
+            entry_reasons.append("OPEN_WORKING_ORDER_PRESENT")
+        else:
+            managed_exit_allowed = False
+            managed_reasons.append("OPEN_WORKING_ORDER_PRESENT")
+        governance_allowed = False
+        governance_reasons.append("OPEN_WORKING_ORDER_PRESENT")
+
+    if scenario == LifecycleStressScenario.GATE_DUPLICATE_ENTRY_BLOCKED:
+        entry_allowed = False
+        entry_reasons.append("DUPLICATE_STRATEGY_ENTRY_WHILE_POSITION_OPEN")
+    if scenario in {
+        LifecycleStressScenario.RECOVERY_ADOPTION,
+        LifecycleStressScenario.RECOVERY_REGISTRY_BACKED_RESUME,
+    } and not _gate_action_is_close(action):
+        entry_allowed = False
+        entry_reasons.append("DUPLICATE_STRATEGY_ENTRY_WHILE_POSITION_OPEN")
+    if scenario in {
+        LifecycleStressScenario.MISSING_PERM_OR_EXEC,
+        LifecycleStressScenario.RECOVERY_MISSING_BROKER_EVIDENCE,
+    }:
+        managed_exit_allowed = False
+        managed_reasons.append("REGISTRY_ENTRY_NOT_BROKER_BACKED")
+        governance_allowed = False
+        governance_reasons.append("FILL_NOT_BROKER_BACKED")
+    if scenario == LifecycleStressScenario.CONTRACT_CLOSE_ONLY:
+        governance_allowed = False
+        governance_reasons.append(CONTRACT_ENTRY_CLOSE_ONLY)
+
+    return {
+        TrackBGateName.ENTRY_EXPOSURE.value: {"submit_allowed": entry_allowed, "block_reasons": list(dict.fromkeys(entry_reasons))},
+        TrackBGateName.MANAGED_EXIT_EXPOSURE.value: {"submit_allowed": managed_exit_allowed, "block_reasons": list(dict.fromkeys(managed_reasons))},
+        TrackBGateName.GOVERNANCE_SUBMIT.value: {"submit_allowed": governance_allowed, "block_reasons": list(dict.fromkeys(governance_reasons))},
+        TrackBGateName.SAFE_STATE_SUBMIT.value: {"submit_allowed": safe_allowed, "block_reasons": list(dict.fromkeys(safe_reasons))},
+        TrackBGateName.NO_WORKING_ORDER.value: {"passed": no_order_allowed, "block_reasons": list(dict.fromkeys(no_order_reasons))},
+        TrackBGateName.RUNTIME_AUTHORITY.value: {"ready": runtime_allowed, "block_reasons": list(dict.fromkeys(runtime_reasons))},
+    }
+
+
 def _seed_truth_artifacts(
     *,
     config: TrackBTruthSnapshotConfig,
@@ -713,14 +1027,25 @@ def _seed_truth_artifacts(
     safe_blocked = scenario == LifecycleStressScenario.SAFE_STATE_BLOCKED
     planner_mismatch = scenario == LifecycleStressScenario.PLANNER_SNAPSHOT_MISMATCH
     close_only = scenario == LifecycleStressScenario.CONTRACT_CLOSE_ONLY
-    missing_broker_ids = scenario == LifecycleStressScenario.MISSING_PERM_OR_EXEC
+    missing_broker_ids = scenario in {
+        LifecycleStressScenario.MISSING_PERM_OR_EXEC,
+        LifecycleStressScenario.RECOVERY_MISSING_BROKER_EVIDENCE,
+    }
 
     _write_json(root / config.runtime_truth_path, {"generated_at": generated_at.isoformat(), "classification": "RUNTIME_ACTIVE_TRADE_CAPABLE", "runtime": {"pid": 1234, "pid_alive": True, "runtime_instance_id": "generation-1", "lane_count": 8}, "canonical_readiness": {"classification": "READY_SUBMIT_CAPABLE", "ready_submit_capable": True}})
     _write_json(root / config.recovery_status_path, {"generated_at": generated_at.isoformat(), "classification": "RECOVERY_ACTIVE", "launchd_loaded": True, "launchd_enabled": True, "last_tick": generated_at.isoformat()})
     _write_json(root / config.recovery_audit_path, {"generated_at": generated_at.isoformat(), "classification": "RUNTIME_HEALTHY_NO_ACTION", "hourly_supervisor": {"classification": "SUPERVISOR_RUNNING", "active": True}})
     _write_json(root / config.broker_status_path, {"generated_at": generated_at.isoformat(), "positions_snapshot_path": str(root / config.broker_positions_path), "open_orders_snapshot_path": str(root / config.broker_open_orders_path)})
     _write_json(root / config.broker_positions_path, {"generated_at": generated_at.isoformat(), "positions": broker_positions})
-    _write_json(root / config.broker_open_orders_path, {"generated_at": generated_at.isoformat(), "open_orders": []})
+    open_orders = [
+        {
+            "symbol": lane.symbol,
+            "order_id": "synthetic_working_order",
+            "client_id": "17",
+            "status": "Submitted",
+        }
+    ] if scenario == LifecycleStressScenario.GATE_OPEN_WORKING_ORDER_BLOCKED else []
+    _write_json(root / config.broker_open_orders_path, {"generated_at": generated_at.isoformat(), "open_orders": open_orders})
     _write_json(root / config.lifecycle_live_position_path, {"generated_at": generated_at.isoformat(), "open_positions": managed_positions})
     _write_json(root / config.managed_position_registry_path, {"generated_at": generated_at.isoformat(), "managed_positions": managed_positions})
     _write_json(root / config.managed_order_registry_path, {"generated_at": generated_at.isoformat(), "managed_orders": []})

@@ -42,8 +42,11 @@ def test_staged_run_ladder_counts_and_goal_metrics() -> None:
     assert smoke.summary["stage_goal_zero_failures"]["zero_trade_id_collisions"] is True
     assert smoke.summary["stage_goal_zero_failures"]["zero_impossible_states"] is True
     assert smoke.summary["stage_goal_zero_failures"]["every_bad_lifecycle_has_reason_codes"] is True
-    assert known.requested_count == 240
+    assert known.requested_count == 260
     assert known.summary["expected_review_required"] > 0
+    assert known.summary["gate_shadow_total_checks"] == known.summary["total_trades"] * 6
+    assert known.summary["gate_shadow_mismatches"] == 0
+    assert known.summary["gate_shadow_safety_regressions"] == 0
 
 
 def test_expected_counts_and_classifications_for_small_mix() -> None:
@@ -67,6 +70,8 @@ def test_expected_counts_and_classifications_for_small_mix() -> None:
     assert TradeCurrentState.CANCELLED.value in states
     assert TradeCurrentState.REVIEW_REQUIRED.value in states
     assert report.summary["scenario_breakdown"]
+    assert report.summary["gate_shadow_total_checks"] == 48
+    assert report.summary["gate_shadow_mismatches"] == 0
 
 
 def test_induced_invalid_scenarios_produce_review_or_invariant_failures() -> None:
@@ -158,3 +163,5 @@ def test_stress_report_json_roundtrip(tmp_path: Path) -> None:
     assert payload["summary"]["total_trades"] == 12
     assert payload["summary"]["passed"] == 12
     assert payload["results"][0]["shadow_row"]["current_derived_state"] == TradeCurrentState.CLOSED_FLAT.value
+    assert payload["summary"]["gate_shadow_total_checks"] == 72
+    assert payload["summary"]["gate_shadow_mismatches"] == 0

@@ -82,6 +82,14 @@ class LifecycleStressPreflightStageResult:
     impossible_states: int
     bad_lifecycles_without_reason_codes: int
     broker_backed_evidence_violations: int
+    gate_shadow_total_checks: int
+    gate_shadow_green_path_checks: int
+    gate_shadow_blocked_checks: int
+    gate_shadow_mismatches: int
+    gate_shadow_safety_regressions: int
+    gate_shadow_missing_trade_id_blocks: int
+    gate_shadow_mismatches_by_gate: Mapping[str, int]
+    gate_shadow_mismatches_by_lane_scenario: Mapping[str, int]
     top_10_reason_codes: tuple[tuple[str, int], ...]
     worst_scenario_lane_combinations: tuple[Mapping[str, Any], ...]
     report_summary: Mapping[str, Any]
@@ -101,6 +109,14 @@ class LifecycleStressPreflightStageResult:
             "impossible_states": self.impossible_states,
             "bad_lifecycles_without_reason_codes": self.bad_lifecycles_without_reason_codes,
             "broker_backed_evidence_violations": self.broker_backed_evidence_violations,
+            "gate_shadow_total_checks": self.gate_shadow_total_checks,
+            "gate_shadow_green_path_checks": self.gate_shadow_green_path_checks,
+            "gate_shadow_blocked_checks": self.gate_shadow_blocked_checks,
+            "gate_shadow_mismatches": self.gate_shadow_mismatches,
+            "gate_shadow_safety_regressions": self.gate_shadow_safety_regressions,
+            "gate_shadow_missing_trade_id_blocks": self.gate_shadow_missing_trade_id_blocks,
+            "gate_shadow_mismatches_by_gate": dict(self.gate_shadow_mismatches_by_gate),
+            "gate_shadow_mismatches_by_lane_scenario": dict(self.gate_shadow_mismatches_by_lane_scenario),
             "top_10_reason_codes": [[code, count] for code, count in self.top_10_reason_codes],
             "worst_scenario_lane_combinations": list(self.worst_scenario_lane_combinations),
             "report_summary": dict(self.report_summary),
@@ -146,6 +162,12 @@ class LifecycleStressPreflightReport:
                 "impossible_states": sum(stage.impossible_states for stage in self.stages),
                 "bad_lifecycles_without_reason_codes": sum(stage.bad_lifecycles_without_reason_codes for stage in self.stages),
                 "broker_backed_evidence_violations": sum(stage.broker_backed_evidence_violations for stage in self.stages),
+                "gate_shadow_total_checks": sum(stage.gate_shadow_total_checks for stage in self.stages),
+                "gate_shadow_green_path_checks": sum(stage.gate_shadow_green_path_checks for stage in self.stages),
+                "gate_shadow_blocked_checks": sum(stage.gate_shadow_blocked_checks for stage in self.stages),
+                "gate_shadow_mismatches": sum(stage.gate_shadow_mismatches for stage in self.stages),
+                "gate_shadow_safety_regressions": sum(stage.gate_shadow_safety_regressions for stage in self.stages),
+                "gate_shadow_missing_trade_id_blocks": sum(stage.gate_shadow_missing_trade_id_blocks for stage in self.stages),
             },
         }
 
@@ -253,6 +275,9 @@ def _stage_result(report: LifecycleStressReport) -> LifecycleStressPreflightStag
         "impossible_states": int(summary["impossible_states"]),
         "bad_lifecycles_without_reason_codes": int(summary["bad_lifecycles_without_reason_codes"]),
         "broker_backed_evidence_violations": broker_violations,
+        "gate_shadow_mismatches": int(summary.get("gate_shadow_mismatches") or 0),
+        "gate_shadow_safety_regressions": int(summary.get("gate_shadow_safety_regressions") or 0),
+        "gate_shadow_missing_trade_id_blocks": int(summary.get("gate_shadow_missing_trade_id_blocks") or 0),
     }
     reasons = tuple(key for key, value in hard_fields.items() if value > 0)
     return LifecycleStressPreflightStageResult(
@@ -269,6 +294,14 @@ def _stage_result(report: LifecycleStressReport) -> LifecycleStressPreflightStag
         impossible_states=hard_fields["impossible_states"],
         bad_lifecycles_without_reason_codes=hard_fields["bad_lifecycles_without_reason_codes"],
         broker_backed_evidence_violations=broker_violations,
+        gate_shadow_total_checks=int(summary.get("gate_shadow_total_checks") or 0),
+        gate_shadow_green_path_checks=int(summary.get("gate_shadow_green_path_checks") or 0),
+        gate_shadow_blocked_checks=int(summary.get("gate_shadow_blocked_checks") or 0),
+        gate_shadow_mismatches=hard_fields["gate_shadow_mismatches"],
+        gate_shadow_safety_regressions=hard_fields["gate_shadow_safety_regressions"],
+        gate_shadow_missing_trade_id_blocks=hard_fields["gate_shadow_missing_trade_id_blocks"],
+        gate_shadow_mismatches_by_gate=dict(summary.get("gate_shadow_mismatches_by_gate") or {}),
+        gate_shadow_mismatches_by_lane_scenario=dict(summary.get("gate_shadow_mismatches_by_lane_scenario") or {}),
         top_10_reason_codes=top_reason_codes,
         worst_scenario_lane_combinations=worst,
         report_summary=summary,
@@ -339,12 +372,13 @@ def _markdown_summary(report: LifecycleStressPreflightReport) -> str:
         f"- Passed: `{str(report.passed).lower()}`",
         f"- Generated at: `{report.generated_at.isoformat()}`",
         "",
-        "| Stage | Total | Expected REVIEW/block | Unexpected invariants | Crashes | Collisions | Silent merges | Impossible states | Missing reason codes | Broker evidence violations |",
-        "|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|",
+        "| Stage | Total | Expected REVIEW/block | Gate checks | Gate mismatches | Unexpected invariants | Crashes | Collisions | Silent merges | Impossible states | Missing reason codes | Broker evidence violations |",
+        "|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|",
     ]
     for stage in report.stages:
         lines.append(
             f"| {stage.mode} | {stage.total_lifecycles} | {stage.expected_review_required} | "
+            f"{stage.gate_shadow_total_checks} | {stage.gate_shadow_mismatches} | "
             f"{stage.unexpected_invariant_failures} | {stage.reducer_crashes} | {stage.trade_id_collisions} | "
             f"{stage.silent_ambiguity_merges} | {stage.impossible_states} | "
             f"{stage.bad_lifecycles_without_reason_codes} | {stage.broker_backed_evidence_violations} |"

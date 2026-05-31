@@ -23,9 +23,11 @@ def test_routine_preflight_runs_all_ladder_stages_with_fast_fuzz() -> None:
 
     assert report.passed is True
     assert [stage.mode for stage in report.stages] == ["smoke", "known_scenarios", "lane_matrix", "fuzz"]
-    assert [stage.total_lifecycles for stage in report.stages] == [20, 240, 1000, 25]
+    assert [stage.total_lifecycles for stage in report.stages] == [20, 260, 1000, 25]
     assert all(stage.hard_failure is False for stage in report.stages)
     assert report.to_dict()["summary"]["bad_lifecycles_without_reason_codes"] == 0
+    assert report.to_dict()["summary"]["gate_shadow_mismatches"] == 0
+    assert all(stage.gate_shadow_total_checks == stage.total_lifecycles * 6 for stage in report.stages)
     assert report.broker_mutation_allowed is False
     assert report.runtime_restart_allowed is False
     assert report.production_gate_wiring_allowed is False
@@ -53,6 +55,7 @@ def test_preflight_report_artifacts_include_json_and_markdown(tmp_path: Path) ->
     assert payload["schema_version"] == "track_b_lifecycle_stress_preflight_v1"
     assert payload["passed"] is True
     assert "hard_failure_reasons" in payload["stages"][0]
+    assert payload["summary"]["gate_shadow_mismatches"] == 0
     assert "Track B Lifecycle Stress Preflight" in markdown
     assert "Expected REVIEW/block" in markdown
 
