@@ -11,6 +11,7 @@ import json
 from dataclasses import asdict, dataclass, replace
 from datetime import UTC, datetime, timedelta
 from enum import Enum
+from decimal import Decimal
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
@@ -18,6 +19,14 @@ from mgc_v05l.execution_core.track_b_canonical_truth_snapshot import (
     TrackBTruthSnapshot,
     TrackBTruthSnapshotConfig,
     build_track_b_truth_snapshot,
+)
+from mgc_v05l.execution_core.track_b_central_trade_registry import (
+    TradeCurrentState,
+    TradeEvent,
+    TradeEventType,
+    TradeRegistryRecord,
+    generate_trade_id,
+    reduce_trade_events,
 )
 from mgc_v05l.execution_core.track_b_pre_action_snapshot_validator import (
     PRE_ACTION_BLOCKED_HARD_INVARIANT,
@@ -216,6 +225,8 @@ class LifecycleSimulationResult:
 @dataclass(frozen=True)
 class CanonicalTruthSimulationReportRow:
     scenario_id: str
+    expected_registry_state: str | None
+    actual_registry_state: str | None
     expected_classification: str
     actual_classification: str
     expected_reason_codes: tuple[str, ...]
@@ -226,6 +237,8 @@ class CanonicalTruthSimulationReportRow:
     actual_broker_backed: bool
     expected_submit_allowed: bool
     actual_submit_allowed: bool
+    registry_broker_backed_entry: bool | None
+    registry_broker_backed_exit: bool | None
     passed: bool
 
 
@@ -611,10 +624,253 @@ def build_lifecycle_simulation_truth_snapshot(
     return build_track_b_truth_snapshot(config=config, now=now)
 
 
+def build_lifecycle_simulation_trade_events(
+    scenario: LifecycleSimulationScenario,
+    *,
+    now: datetime = NOW,
+) -> tuple[TradeEvent, ...]:
+    trade_id = _simulation_trade_id(scenario)
+    events: list[TradeEvent] = [
+        _trade_event(
+            scenario=scenario,
+            event_type=TradeEventType.ENTRY_INTENT_CREATED,
+            trade_id=trade_id,
+            generated_at=now,
+            action=scenario.entry_intent.authority.action,
+        )
+    ]
+    if scenario.entry_intent.authority.contract_resolver_status == "CLOSE_ONLY":
+        events.append(
+            _trade_event(
+                scenario=scenario,
+                event_type=TradeEventType.REVIEW_REQUIRED,
+                trade_id=trade_id,
+                generated_at=now + timedelta(seconds=1),
+                action=scenario.entry_intent.authority.action,
+                reason_codes=(REASON_CONTRACT_CLOSE_ONLY_ENTRY_BLOCKED,),
+            )
+        )
+        return tuple(events)
+
+    events.append(
+        _trade_event(
+            scenario=scenario,
+            event_type=TradeEventType.ENTRY_ORDER_SUBMITTED,
+            trade_id=trade_id,
+            generated_at=now + timedelta(seconds=1),
+            action=scenario.entry_intent.authority.action,
+            order_id=scenario.broker_order.order_id,
+            client_id=scenario.broker_order.client_id,
+        )
+    )
+    if scenario.passive_entry_cancelled:
+        events.append(
+            _trade_event(
+                scenario=scenario,
+                event_type=TradeEventType.ENTRY_ORDER_CANCELLED,
+                trade_id=trade_id,
+                generated_at=now + timedelta(seconds=2),
+                action=scenario.entry_intent.authority.action,
+                order_id=scenario.broker_order.order_id,
+                client_id=scenario.broker_order.client_id,
+                reason_codes=(REASON_PASSIVE_ENTRY_CANCELLED,),
+            )
+        )
+        return tuple(events)
+
+    events.append(
+        _trade_event(
+            scenario=scenario,
+            event_type=TradeEventType.ENTRY_FILL_BROKER_BACKED,
+            trade_id=trade_id,
+            generated_at=now + timedelta(seconds=2),
+            action=scenario.fill_evidence.authority.action,
+            order_id=scenario.fill_evidence.order_id,
+            client_id=scenario.fill_evidence.client_id,
+            perm_id=scenario.fill_evidence.perm_id,
+            exec_id=scenario.fill_evidence.exec_id,
+            price=Decimal(scenario.fill_evidence.fill_price),
+        )
+    )
+    if scenario.local_paper_artifact_only:
+        return tuple(events)
+    if not scenario.entry_fill_adopted:
+        events.append(
+            _trade_event(
+                scenario=scenario,
+                event_type=TradeEventType.REVIEW_REQUIRED,
+                trade_id=trade_id,
+                generated_at=now + timedelta(seconds=3),
+                action=scenario.entry_intent.authority.action,
+                reason_codes=(REASON_ENTRY_FILL_NOT_ADOPTED,),
+            )
+        )
+        return tuple(events)
+    if not scenario.managed_position.lifecycle_id:
+        events.append(
+            _trade_event(
+                scenario=scenario,
+                event_type=TradeEventType.REVIEW_REQUIRED,
+                trade_id=trade_id,
+                generated_at=now + timedelta(seconds=3),
+                reason_codes=(REASON_MISSING_LIFECYCLE_ID,),
+            )
+        )
+        return tuple(events)
+
+    events.append(
+        _trade_event(
+            scenario=scenario,
+            event_type=TradeEventType.LIFECYCLE_OPEN_MANAGED,
+            trade_id=trade_id,
+            generated_at=now + timedelta(seconds=3),
+            lifecycle_id=scenario.managed_position.lifecycle_id,
+            action=scenario.managed_position.authority.action,
+            perm_id=scenario.managed_position.entry_perm_id,
+            exec_id=scenario.managed_position.entry_exec_id,
+            reason_codes=(REASON_MANAGED_POSITION_ADOPTED,),
+        )
+    )
+    if scenario.stale_control_plane_snapshot:
+        events.append(
+            _trade_event(
+                scenario=scenario,
+                event_type=TradeEventType.REVIEW_REQUIRED,
+                trade_id=trade_id,
+                generated_at=now + timedelta(seconds=4),
+                lifecycle_id=scenario.managed_position.lifecycle_id,
+                reason_codes=(REASON_CONTROL_PLANE_SNAPSHOT_STALE,),
+            )
+        )
+        return tuple(events)
+    if not scenario.safe_state_submit_allowed:
+        events.append(
+            _trade_event(
+                scenario=scenario,
+                event_type=TradeEventType.REVIEW_REQUIRED,
+                trade_id=trade_id,
+                generated_at=now + timedelta(seconds=4),
+                lifecycle_id=scenario.managed_position.lifecycle_id,
+                reason_codes=(REASON_SAFE_STATE_SUBMIT_BLOCKED,),
+            )
+        )
+        return tuple(events)
+    if scenario.planner_snapshot_mismatch:
+        events.append(
+            _trade_event(
+                scenario=scenario,
+                event_type=TradeEventType.REVIEW_REQUIRED,
+                trade_id=trade_id,
+                generated_at=now + timedelta(seconds=4),
+                lifecycle_id=scenario.managed_position.lifecycle_id,
+                reason_codes=(REASON_PLANNER_SNAPSHOT_MISMATCH,),
+            )
+        )
+        return tuple(events)
+    if scenario.managed_position.hold_policy != "TIME_BOXED_EXIT_AFTER_12_COMPLETED_5M_BARS":
+        events.append(
+            _trade_event(
+                scenario=scenario,
+                event_type=TradeEventType.REVIEW_REQUIRED,
+                trade_id=trade_id,
+                generated_at=now + timedelta(seconds=4),
+                lifecycle_id=scenario.managed_position.lifecycle_id,
+                reason_codes=(REASON_MANAGED_EXIT_BAR_COUNT_MISMATCH,),
+            )
+        )
+        return tuple(events)
+    if scenario.entry_intent.authority.lane_id != scenario.entry_intent.authority.thesis_strategy_id:
+        events.append(
+            _trade_event(
+                scenario=scenario,
+                event_type=TradeEventType.REVIEW_REQUIRED,
+                trade_id=trade_id,
+                generated_at=now + timedelta(seconds=4),
+                lifecycle_id=scenario.managed_position.lifecycle_id,
+                reason_codes=(REASON_LANE_THESIS_STRATEGY_MISMATCH,),
+            )
+        )
+        return tuple(events)
+
+    events.append(
+        _trade_event(
+            scenario=scenario,
+            event_type=TradeEventType.EXIT_INTENT_CREATED,
+            trade_id=trade_id,
+            generated_at=now + timedelta(seconds=4),
+            lifecycle_id=scenario.exit_intent.lifecycle_id,
+            action=scenario.exit_intent.authority.action,
+        )
+    )
+    if (
+        scenario.exit_intent.authority.con_id != scenario.managed_position.authority.con_id
+        or scenario.exit_intent.authority.local_symbol != scenario.managed_position.authority.local_symbol
+    ):
+        events.append(
+            _trade_event(
+                scenario=scenario,
+                event_type=TradeEventType.REVIEW_REQUIRED,
+                trade_id=trade_id,
+                generated_at=now + timedelta(seconds=5),
+                lifecycle_id=scenario.exit_intent.lifecycle_id,
+                action=scenario.exit_intent.authority.action,
+                reason_codes=(REASON_EXACT_LIFECYCLE_IDENTITY_REQUIRED, REASON_EXIT_CONTRACT_MISMATCH),
+            )
+        )
+        return tuple(events)
+    events.append(
+        _trade_event(
+            scenario=scenario,
+            event_type=TradeEventType.EXIT_ORDER_SUBMITTED,
+            trade_id=trade_id,
+            generated_at=now + timedelta(seconds=5),
+            lifecycle_id=scenario.exit_intent.lifecycle_id,
+            action=scenario.exit_intent.authority.action,
+            order_id=scenario.close_fill.order_id,
+            client_id=scenario.close_fill.client_id,
+        )
+    )
+    events.append(
+        _trade_event(
+            scenario=scenario,
+            event_type=TradeEventType.EXIT_FILL_BROKER_BACKED,
+            trade_id=trade_id,
+            generated_at=now + timedelta(seconds=6),
+            lifecycle_id=scenario.close_fill.lifecycle_id,
+            action=scenario.close_fill.authority.action,
+            order_id=scenario.close_fill.order_id,
+            client_id=scenario.close_fill.client_id,
+            perm_id=scenario.close_fill.perm_id,
+            exec_id=scenario.close_fill.exec_id,
+            price=Decimal(scenario.close_fill.fill_price),
+        )
+    )
+    events.append(
+        _trade_event(
+            scenario=scenario,
+            event_type=TradeEventType.RECONCILED_FLAT,
+            trade_id=trade_id,
+            generated_at=now + timedelta(seconds=7),
+            lifecycle_id=scenario.reconciliation.lifecycle_id,
+            action=scenario.close_fill.authority.action,
+        )
+    )
+    return tuple(events)
+
+
+def reduce_lifecycle_simulation_trade_registry(
+    scenario: LifecycleSimulationScenario,
+    *,
+    now: datetime = NOW,
+) -> TradeRegistryRecord:
+    return reduce_trade_events(build_lifecycle_simulation_trade_events(scenario, now=now))
+
+
 def build_canonical_truth_simulation_report_row(
     *,
     repo_root: Path,
     scenario_id: str,
+    expected_registry_state: TradeCurrentState | str | None = None,
     expected_classification: str,
     expected_reason_codes: Sequence[str] = (),
     expected_conflicts: Sequence[str] = (),
@@ -622,11 +878,18 @@ def build_canonical_truth_simulation_report_row(
     expected_submit_allowed: bool = True,
     now: datetime = NOW,
 ) -> CanonicalTruthSimulationReportRow:
+    scenario = build_lifecycle_simulation_scenario(scenario_id)
+    registry_record = reduce_lifecycle_simulation_trade_registry(scenario, now=now)
     snapshot = build_lifecycle_simulation_truth_snapshot(repo_root=repo_root, scenario_id=scenario_id, now=now)
     actual_conflicts = tuple(conflict.classification for conflict in snapshot.conflicts)
     expected_reasons = tuple(expected_reason_codes)
     expected_conflict_tuple = tuple(expected_conflicts)
     passed = (
+        (
+            expected_registry_state is None
+            or registry_record.current_state.value == _state_value(expected_registry_state)
+        )
+        and
         snapshot.classification == expected_classification
         and all(reason in snapshot.reason_codes for reason in expected_reasons)
         and all(conflict in actual_conflicts for conflict in expected_conflict_tuple)
@@ -635,6 +898,8 @@ def build_canonical_truth_simulation_report_row(
     )
     return CanonicalTruthSimulationReportRow(
         scenario_id=scenario_id,
+        expected_registry_state=_state_value(expected_registry_state) if expected_registry_state is not None else None,
+        actual_registry_state=registry_record.current_state.value,
         expected_classification=expected_classification,
         actual_classification=snapshot.classification,
         expected_reason_codes=expected_reasons,
@@ -645,6 +910,8 @@ def build_canonical_truth_simulation_report_row(
         actual_broker_backed=snapshot.broker_backed_evidence.broker_backed,
         expected_submit_allowed=expected_submit_allowed,
         actual_submit_allowed=snapshot.safe_state.submit_allowed,
+        registry_broker_backed_entry=registry_record.broker_backed_entry,
+        registry_broker_backed_exit=registry_record.broker_backed_exit,
         passed=passed,
     )
 
@@ -1077,6 +1344,72 @@ def _truth_local_paper_artifact(scenario: LifecycleSimulationScenario, *, now: d
             ],
         }
     return {"generated_at": now.isoformat(), "local_rows": []}
+
+
+def _simulation_trade_id(scenario: LifecycleSimulationScenario) -> str:
+    auth = scenario.entry_intent.authority
+    return generate_trade_id(
+        account_id="DUM882026" if auth.account_id == "MULTIPLE" else auth.account_id,
+        con_id=auth.con_id,
+        lane_id=auth.lane_id,
+        entry_action=auth.action,
+        entry_perm_id=scenario.fill_evidence.perm_id or None,
+        order_id=scenario.broker_order.order_id,
+        generated_at=NOW,
+    )
+
+
+def _trade_event(
+    *,
+    scenario: LifecycleSimulationScenario,
+    event_type: TradeEventType,
+    trade_id: str,
+    generated_at: datetime,
+    lifecycle_id: str | None = None,
+    action: str | None = None,
+    order_id: str | None = None,
+    client_id: str | None = None,
+    perm_id: str | None = None,
+    exec_id: str | None = None,
+    price: Decimal | None = None,
+    reason_codes: Sequence[str] = (),
+) -> TradeEvent:
+    auth = _event_authority(scenario=scenario, action=action)
+    return TradeEvent(
+        event_id=f"{scenario.scenario_id}_{int((generated_at - NOW).total_seconds())}_{event_type.value}",
+        event_type=event_type,
+        generated_at=generated_at,
+        trade_id=trade_id,
+        lifecycle_id=lifecycle_id,
+        lane_id=auth.lane_id,
+        thesis_strategy_id=auth.thesis_strategy_id,
+        account_id="DUM882026" if auth.account_id == "MULTIPLE" else auth.account_id,
+        symbol=_strategy_symbol(auth.local_symbol),
+        con_id=auth.con_id,
+        local_symbol=auth.local_symbol,
+        expiry=auth.expiry,
+        side=auth.side,
+        action=action or auth.action,
+        qty=Decimal(str(auth.qty)),
+        order_id=order_id or None,
+        client_id=client_id or None,
+        perm_id=perm_id or None,
+        exec_id=exec_id or None,
+        price=price,
+        source_artifact_path=f"synthetic://track_b_lifecycle_simulation/{scenario.scenario_id}/{event_type.value}",
+        reason_codes=tuple(reason_codes),
+        metadata={"scenario_id": scenario.scenario_id, "simulated_only": True},
+    )
+
+
+def _event_authority(*, scenario: LifecycleSimulationScenario, action: str | None) -> HandoffAuthority:
+    if action and "CLOSE" in action:
+        return scenario.exit_intent.authority
+    return scenario.entry_intent.authority
+
+
+def _state_value(value: TradeCurrentState | str) -> str:
+    return value.value if isinstance(value, TradeCurrentState) else str(value)
 
 
 def _base_authority() -> HandoffAuthority:
