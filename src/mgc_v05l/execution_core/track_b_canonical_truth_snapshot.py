@@ -91,6 +91,8 @@ CONTRACT_AMBIGUOUS = "CONTRACT_AMBIGUOUS"
 EXACT_LIFECYCLE_OWNER_RESOLVED = "EXACT_LIFECYCLE_OWNER_RESOLVED"
 AGGREGATE_PLACEHOLDER_DIAGNOSTIC_ONLY = "AGGREGATE_PLACEHOLDER_DIAGNOSTIC_ONLY"
 EXACT_LIFECYCLE_IDENTITY_MISMATCH = "EXACT_LIFECYCLE_IDENTITY_MISMATCH"
+LANE_THESIS_STRATEGY_MISMATCH = "LANE_THESIS_STRATEGY_MISMATCH"
+MANAGED_EXIT_POLICY_CONFLICT = "MANAGED_EXIT_POLICY_CONFLICT"
 DUPLICATE_WRITER_DETECTED = "DUPLICATE_WRITER_DETECTED"
 
 
@@ -730,6 +732,14 @@ def _lifecycle_section(
         reasons.append(LIFECYCLE_TRUTH_STALE)
     if aggregate_accounts and exact_owner_resolved:
         reasons.extend([EXACT_LIFECYCLE_OWNER_RESOLVED, AGGREGATE_PLACEHOLDER_DIAGNOSTIC_ONLY])
+    if any(not row.get("lifecycle_id") for row in open_positions):
+        reasons.append(EXACT_LIFECYCLE_IDENTITY_MISMATCH)
+    if any(_lane_thesis_mismatch(row) for row in open_positions):
+        reasons.append(LANE_THESIS_STRATEGY_MISMATCH)
+    if any(_managed_exit_policy_conflict(row) for row in open_positions):
+        reasons.append(MANAGED_EXIT_POLICY_CONFLICT)
+    if any(_exit_contract_mismatch(row) for row in open_positions):
+        reasons.append(EXACT_LIFECYCLE_IDENTITY_MISMATCH)
     return LifecycleTruthSection(
         fresh=lifecycle_source.fresh or managed_positions_source.fresh,
         open_position_count=len(open_positions),
@@ -887,6 +897,7 @@ def _broker_backed_evidence_section(
     local_paper_payload: Mapping[str, Any],
 ) -> BrokerBackedEvidenceSection:
     row = _first_evidence_row(payload)
+    evidence_row_present = bool(row)
     if not row:
         row = _mapping(payload)
     order_id = _str_or_none(row.get("order_id") or row.get("broker_order_id"))
@@ -898,10 +909,10 @@ def _broker_backed_evidence_section(
     if broker_backed:
         reasons.append("BROKER_BACKED_EVIDENCE_CONFIRMED")
     else:
-        local_row = _first_evidence_row(local_paper_payload) or _mapping(local_paper_payload)
+        local_row = _first_evidence_row(local_paper_payload)
         if local_row:
             reasons.extend([FILL_NOT_BROKER_BACKED, LOCAL_ARTIFACT_NOT_AUTHORITY])
-        elif payload:
+        elif evidence_row_present:
             reasons.append(FILL_NOT_BROKER_BACKED)
     return BrokerBackedEvidenceSection(
         broker_backed=broker_backed,
@@ -952,6 +963,22 @@ def _conflicts(
                 (BROKER_LIFECYCLE_RECONCILIATION_DIRTY,),
             )
         )
+    lifecycle_identity_codes = {
+        EXACT_LIFECYCLE_IDENTITY_MISMATCH,
+        LANE_THESIS_STRATEGY_MISMATCH,
+        MANAGED_EXIT_POLICY_CONFLICT,
+    }
+    for code in lifecycle_identity_codes:
+        if code in lifecycle.reason_codes:
+            conflicts.append(
+                _conflict(
+                    code,
+                    "Does lifecycle identity/policy preserve the exact managed owner contract?",
+                    lifecycle.source,
+                    (lifecycle.source, broker_truth.source, reconciliation.source),
+                    (code,),
+                )
+            )
     if not reconciliation.reconciled and reconciliation.fresh:
         conflicts.append(
             _conflict(
@@ -1131,6 +1158,27 @@ def _lifecycle_open(row: Mapping[str, Any]) -> bool:
 def _open_order_active(row: Mapping[str, Any]) -> bool:
     status = str(row.get("status") or row.get("order_status") or "").upper()
     return status not in {"CANCELLED", "CANCELED", "FILLED", "INACTIVE"}
+
+
+def _lane_thesis_mismatch(row: Mapping[str, Any]) -> bool:
+    lane_id = str(row.get("lane_id") or "").strip()
+    strategy_id = str(row.get("thesis_strategy_id") or row.get("strategy_id") or "").strip()
+    return bool(lane_id and strategy_id and lane_id != strategy_id)
+
+
+def _managed_exit_policy_conflict(row: Mapping[str, Any]) -> bool:
+    policy = str(row.get("hold_policy") or row.get("managed_exit_policy") or "").strip()
+    return bool(policy and policy != "TIME_BOXED_EXIT_AFTER_12_COMPLETED_5M_BARS")
+
+
+def _exit_contract_mismatch(row: Mapping[str, Any]) -> bool:
+    exit_con_id = row.get("exit_con_id")
+    exit_local_symbol = row.get("exit_localSymbol") or row.get("exit_local_symbol")
+    if exit_con_id not in (None, "") and _int_or_none(exit_con_id) != _int_or_none(row.get("con_id") or row.get("conId")):
+        return True
+    if exit_local_symbol and str(exit_local_symbol) != str(row.get("localSymbol") or row.get("local_symbol") or ""):
+        return True
+    return False
 
 
 def _qty(row: Mapping[str, Any]) -> float:

@@ -14,6 +14,11 @@ from enum import Enum
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
+from mgc_v05l.execution_core.track_b_canonical_truth_snapshot import (
+    TrackBTruthSnapshot,
+    TrackBTruthSnapshotConfig,
+    build_track_b_truth_snapshot,
+)
 from mgc_v05l.execution_core.track_b_pre_action_snapshot_validator import (
     PRE_ACTION_BLOCKED_HARD_INVARIANT,
     PRE_ACTION_BLOCKED_PLAN_MISMATCH,
@@ -206,6 +211,22 @@ class LifecycleSimulationResult:
     lifecycle_mutation_allowed: bool = False
     ibkr_mutation_allowed: bool = False
     simulated_only: bool = True
+
+
+@dataclass(frozen=True)
+class CanonicalTruthSimulationReportRow:
+    scenario_id: str
+    expected_classification: str
+    actual_classification: str
+    expected_reason_codes: tuple[str, ...]
+    actual_reason_codes: tuple[str, ...]
+    expected_conflicts: tuple[str, ...]
+    actual_conflicts: tuple[str, ...]
+    expected_broker_backed: bool
+    actual_broker_backed: bool
+    expected_submit_allowed: bool
+    actual_submit_allowed: bool
+    passed: bool
 
 
 SCENARIO_IDS = (
@@ -431,6 +452,218 @@ def write_lifecycle_simulation_authority_artifacts(
                     "execution_enabled": False,
                 }
             ],
+        },
+    )
+
+
+def write_lifecycle_simulation_truth_snapshot_artifacts(
+    repo_root: Path,
+    scenario: LifecycleSimulationScenario,
+    *,
+    now: datetime = NOW,
+) -> TrackBTruthSnapshotConfig:
+    """Write synthetic real-artifact inputs for TrackBTruthSnapshot tests."""
+
+    config = TrackBTruthSnapshotConfig(repo_root=repo_root)
+    auth = scenario.entry_intent.authority
+    exit_auth = scenario.exit_intent.authority
+    generated_at = now - timedelta(minutes=20) if scenario.stale_control_plane_snapshot else now
+    lifecycle_row = _truth_lifecycle_row(scenario)
+    broker_position_rows = _truth_broker_positions(scenario)
+    lifecycle_open_rows = [lifecycle_row] if lifecycle_row else []
+    reconciled = scenario.reconciliation.reconciliation_status in {"RECONCILED_FLAT", "BROKER_LIFECYCLE_RECONCILED"}
+    if scenario.entry_fill_adopted is False:
+        reconciled = False
+    if not scenario.managed_position.lifecycle_id:
+        reconciled = False
+    if auth.lane_id != auth.thesis_strategy_id:
+        reconciled = False
+    if scenario.managed_position.hold_policy != "TIME_BOXED_EXIT_AFTER_12_COMPLETED_5M_BARS":
+        reconciled = False
+    if exit_auth.con_id != scenario.managed_position.authority.con_id or exit_auth.local_symbol != scenario.managed_position.authority.local_symbol:
+        reconciled = False
+
+    _write_json(
+        repo_root / config.runtime_truth_path,
+        {
+            "generated_at": now.isoformat(),
+            "classification": "RUNTIME_ACTIVE_TRADE_CAPABLE",
+            "runtime": {
+                "pid": 99901,
+                "pid_alive": True,
+                "runtime_instance_id": auth.runtime_generation_id,
+                "lane_count": 8,
+            },
+            "canonical_readiness": {
+                "classification": "READY_SUBMIT_CAPABLE",
+                "ready_submit_capable": True,
+            },
+            "paper_proof_invoked": False,
+            "live_money_eligible": False,
+        },
+    )
+    _write_json(
+        repo_root / config.recovery_status_path,
+        {
+            "generated_at": now.isoformat(),
+            "classification": "RECOVERY_ACTIVE",
+            "launchd_loaded": True,
+            "launchd_enabled": True,
+            "last_tick": now.isoformat(),
+        },
+    )
+    _write_json(
+        repo_root / config.recovery_audit_path,
+        {
+            "generated_at": now.isoformat(),
+            "classification": "RUNTIME_HEALTHY_NO_ACTION",
+            "hourly_supervisor": {"classification": "SUPERVISOR_RUNNING", "active": True},
+        },
+    )
+    _write_json(
+        repo_root / config.broker_status_path,
+        {
+            "generated_at": now.isoformat(),
+            "positions_snapshot_path": str(repo_root / config.broker_positions_path),
+            "open_orders_snapshot_path": str(repo_root / config.broker_open_orders_path),
+        },
+    )
+    _write_json(repo_root / config.broker_positions_path, {"generated_at": now.isoformat(), "positions": broker_position_rows})
+    _write_json(repo_root / config.broker_open_orders_path, {"generated_at": now.isoformat(), "open_orders": _truth_open_orders(scenario)})
+    _write_json(
+        repo_root / config.lifecycle_live_position_path,
+        {"generated_at": now.isoformat(), "open_positions": lifecycle_open_rows},
+    )
+    _write_json(
+        repo_root / config.managed_position_registry_path,
+        {"generated_at": now.isoformat(), "managed_positions": lifecycle_open_rows},
+    )
+    _write_json(repo_root / config.managed_order_registry_path, {"generated_at": now.isoformat(), "managed_orders": []})
+    _write_json(
+        repo_root / config.reconciliation_path,
+        {
+            "generated_at": now.isoformat(),
+            "classification": "BROKER_LIFECYCLE_RECONCILED" if reconciled else "DIRTY",
+            "broker_reconciled": reconciled,
+            "review_required_count": 0 if reconciled else 1,
+        },
+    )
+    _write_json(
+        repo_root / config.safe_state_path,
+        {
+            "generated_at": now.isoformat(),
+            "classification": "SAFE_STATE_NORMAL" if scenario.safe_state_submit_allowed else "SAFE_STATE_RECOVERY_ONLY",
+            "submit_allowed": scenario.safe_state_submit_allowed,
+            "runtime_start_allowed": True,
+            "control_plane_snapshot_id": auth.control_plane_snapshot_id,
+        },
+    )
+    _write_json(
+        repo_root / config.control_plane_path,
+        {
+            "generated_at": generated_at.isoformat(),
+            "control_plane_snapshot_id": auth.control_plane_snapshot_id,
+            "shared_truth_refresh_generation_id": auth.runtime_generation_id,
+            "shared_truth_coherence_status": "COHERENT",
+        },
+    )
+    _write_json(
+        repo_root / config.planner_path,
+        {
+            "generated_at": now.isoformat(),
+            "classification": scenario.expected_plan_classification,
+            "control_plane_snapshot_id": "stale-snapshot" if scenario.planner_snapshot_mismatch else auth.control_plane_snapshot_id,
+            "shared_truth_refresh_generation_id": auth.runtime_generation_id,
+            "proposed_actions": [
+                {
+                    "action_id": scenario.expected_action_type.lower(),
+                    "action_type": scenario.expected_action_type,
+                    "target_identity": _target_identity(scenario),
+                    "execution_enabled": False,
+                }
+            ],
+        },
+    )
+    _write_json(
+        repo_root / config.supervisor_path,
+        {
+            "generated_at": now.isoformat(),
+            "classification": "SUPERVISOR_RUNTIME_START_ALLOWED",
+            "supervisor_decision_id": "supervisor-sim-1",
+        },
+    )
+    _write_json(repo_root / config.contract_status_path, _truth_contract_status(scenario, now=now))
+    _write_json(repo_root / config.broker_backed_evidence_path, _truth_fill_evidence(scenario, now=now))
+    _write_json(repo_root / config.local_paper_artifact_path, _truth_local_paper_artifact(scenario, now=now))
+    if config.dashboard_runtime_path is not None:
+        _write_json(repo_root / config.dashboard_runtime_path, {"generated_at": now.isoformat(), "diagnostic": True})
+    return config
+
+
+def build_lifecycle_simulation_truth_snapshot(
+    *,
+    repo_root: Path,
+    scenario_id: str,
+    now: datetime = NOW,
+) -> TrackBTruthSnapshot:
+    scenario = build_lifecycle_simulation_scenario(scenario_id)
+    config = write_lifecycle_simulation_truth_snapshot_artifacts(repo_root, scenario, now=now)
+    return build_track_b_truth_snapshot(config=config, now=now)
+
+
+def build_canonical_truth_simulation_report_row(
+    *,
+    repo_root: Path,
+    scenario_id: str,
+    expected_classification: str,
+    expected_reason_codes: Sequence[str] = (),
+    expected_conflicts: Sequence[str] = (),
+    expected_broker_backed: bool = True,
+    expected_submit_allowed: bool = True,
+    now: datetime = NOW,
+) -> CanonicalTruthSimulationReportRow:
+    snapshot = build_lifecycle_simulation_truth_snapshot(repo_root=repo_root, scenario_id=scenario_id, now=now)
+    actual_conflicts = tuple(conflict.classification for conflict in snapshot.conflicts)
+    expected_reasons = tuple(expected_reason_codes)
+    expected_conflict_tuple = tuple(expected_conflicts)
+    passed = (
+        snapshot.classification == expected_classification
+        and all(reason in snapshot.reason_codes for reason in expected_reasons)
+        and all(conflict in actual_conflicts for conflict in expected_conflict_tuple)
+        and snapshot.broker_backed_evidence.broker_backed is expected_broker_backed
+        and snapshot.safe_state.submit_allowed is expected_submit_allowed
+    )
+    return CanonicalTruthSimulationReportRow(
+        scenario_id=scenario_id,
+        expected_classification=expected_classification,
+        actual_classification=snapshot.classification,
+        expected_reason_codes=expected_reasons,
+        actual_reason_codes=snapshot.reason_codes,
+        expected_conflicts=expected_conflict_tuple,
+        actual_conflicts=actual_conflicts,
+        expected_broker_backed=expected_broker_backed,
+        actual_broker_backed=snapshot.broker_backed_evidence.broker_backed,
+        expected_submit_allowed=expected_submit_allowed,
+        actual_submit_allowed=snapshot.safe_state.submit_allowed,
+        passed=passed,
+    )
+
+
+def write_canonical_truth_simulation_report(
+    path: Path,
+    rows: Sequence[CanonicalTruthSimulationReportRow],
+    *,
+    now: datetime = NOW,
+) -> None:
+    _write_json(
+        path,
+        {
+            "schema_version": "track_b_canonical_truth_simulation_report_v1",
+            "generated_at": now.isoformat(),
+            "simulated_only": True,
+            "broker_mutation_allowed": False,
+            "runtime_restart_allowed": False,
+            "results": [asdict(row) for row in rows],
         },
     )
 
@@ -715,6 +948,135 @@ def simulation_result_to_dict(result: LifecycleSimulationResult) -> dict[str, An
     payload = asdict(result)
     payload["stage_results"] = [asdict(stage) for stage in result.stage_results]
     return payload
+
+
+def _truth_lifecycle_row(scenario: LifecycleSimulationScenario) -> dict[str, Any]:
+    if scenario.passive_entry_cancelled or scenario.entry_fill_adopted is False:
+        return {}
+    managed = scenario.managed_position
+    auth = managed.authority
+    return {
+        "lifecycle_id": managed.lifecycle_id,
+        "lane_id": auth.lane_id,
+        "thesis_strategy_id": auth.thesis_strategy_id,
+        "strategy_id": auth.thesis_strategy_id,
+        "account_id": auth.account_id,
+        "exact_lifecycle_account_id": managed.exact_lifecycle_account_id,
+        "con_id": auth.con_id,
+        "localSymbol": auth.local_symbol,
+        "expiry": auth.expiry,
+        "qty": auth.qty,
+        "side": auth.side,
+        "action": auth.action,
+        "entry_perm_id": managed.entry_perm_id,
+        "entry_exec_id": managed.entry_exec_id,
+        "hold_policy": managed.hold_policy,
+        "state": managed.lifecycle_state,
+        "exit_con_id": scenario.exit_intent.authority.con_id,
+        "exit_localSymbol": scenario.exit_intent.authority.local_symbol,
+    }
+
+
+def _truth_broker_positions(scenario: LifecycleSimulationScenario) -> list[dict[str, Any]]:
+    if scenario.passive_entry_cancelled:
+        return []
+    if scenario.entry_fill_adopted is False:
+        auth = scenario.fill_evidence.authority
+        return [_broker_position_row(auth)]
+    if scenario.reconciliation.broker_position_qty == 0 and scenario.reconciliation.reconciliation_status == "RECONCILED_FLAT":
+        if scenario.scenario_id in {
+            "managed_exit_policy_wrong_bar_count",
+            "managed_exit_due_missing_lifecycle_id",
+            "lane_id_vs_thesis_strategy_id_mismatch",
+            "managed_exit_close_identity_contract_mismatch",
+            "aggregate_account_multiple_exact_row_valid",
+        }:
+            return [_broker_position_row(scenario.managed_position.authority)]
+        return []
+    return [_broker_position_row(scenario.managed_position.authority)]
+
+
+def _broker_position_row(auth: HandoffAuthority) -> dict[str, Any]:
+    return {
+        "symbol": _strategy_symbol(auth.local_symbol),
+        "localSymbol": auth.local_symbol,
+        "conId": auth.con_id,
+        "expiry": auth.expiry,
+        "account": "DUM882026" if auth.account_id == "MULTIPLE" else auth.account_id,
+        "position": auth.qty,
+    }
+
+
+def _truth_open_orders(scenario: LifecycleSimulationScenario) -> list[dict[str, Any]]:
+    if not scenario.passive_entry_cancelled:
+        return []
+    return [
+        {
+            "order_id": scenario.broker_order.order_id,
+            "client_id": scenario.broker_order.client_id,
+            "status": scenario.broker_order.status,
+            "symbol": _strategy_symbol(scenario.broker_order.authority.local_symbol),
+        }
+    ]
+
+
+def _truth_contract_status(scenario: LifecycleSimulationScenario, *, now: datetime) -> dict[str, Any]:
+    auth = scenario.entry_intent.authority
+    if auth.contract_resolver_status == "CLOSE_ONLY":
+        classification = "CONTRACT_EXIT_OR_MANAGEMENT_ALLOWED"
+        entry_status = "CONTRACT_ENTRY_CLOSE_ONLY"
+        exit_status = "EXIT_ORIGINAL_CONTRACT_ALLOWED"
+    else:
+        classification = "CONTRACT_ALLOWED"
+        entry_status = "CONTRACT_ENTRY_ELIGIBLE"
+        exit_status = "EXIT_STATUS_UNKNOWN"
+    return {
+        "generated_at": now.isoformat(),
+        "classification": classification,
+        "symbol": _strategy_symbol(auth.local_symbol),
+        "entry_status": entry_status,
+        "exit_status": exit_status,
+        "submit_allowed": entry_status == "CONTRACT_ENTRY_ELIGIBLE",
+        "selected_contract": {
+            "localSymbol": auth.local_symbol,
+            "conId": auth.con_id,
+            "expiry": auth.expiry,
+            "symbol": _strategy_symbol(auth.local_symbol),
+        },
+    }
+
+
+def _truth_fill_evidence(scenario: LifecycleSimulationScenario, *, now: datetime) -> dict[str, Any]:
+    if scenario.passive_entry_cancelled:
+        return {"generated_at": now.isoformat(), "fills": []}
+    fill = scenario.fill_evidence
+    return {
+        "generated_at": now.isoformat(),
+        "fills": [
+            {
+                "order_id": fill.order_id,
+                "client_id": fill.client_id,
+                "perm_id": fill.perm_id,
+                "exec_id": fill.exec_id,
+                "fill_price": fill.fill_price,
+            }
+        ],
+    }
+
+
+def _truth_local_paper_artifact(scenario: LifecycleSimulationScenario, *, now: datetime) -> dict[str, Any]:
+    if scenario.local_paper_artifact_only:
+        return {
+            "generated_at": now.isoformat(),
+            "fills": [
+                {
+                    "order_id": scenario.fill_evidence.order_id or "paper-local-order",
+                    "client_id": scenario.fill_evidence.client_id or "paper-local-client",
+                    "source": "local_paper_artifact",
+                }
+            ],
+        }
+    return {"generated_at": now.isoformat(), "local_rows": []}
 
 
 def _base_authority() -> HandoffAuthority:
