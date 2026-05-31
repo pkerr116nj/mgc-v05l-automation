@@ -12,6 +12,7 @@ from mgc_v05l.execution_core.track_b_runtime_operability_contract import (
     build_runtime_authority_map,
     build_runtime_operability_contract,
     classify_runtime_operability,
+    READY_DIAGNOSTIC_ONLY,
 )
 
 
@@ -81,6 +82,32 @@ def test_runtime_down_with_clean_authority_allows_recovery_restart(tmp_path: Pat
     assert payload["runtime_summary"]["running"] is False
 
 
+def test_scheduled_market_halt_is_diagnostic_not_infrastructure_block(tmp_path: Path) -> None:
+    config = _write_ready_authority(
+        tmp_path,
+        canonical_readiness="WAITING_FOR_MARKET_REOPEN",
+        canonical_extra={
+            "ready_submit_capable": False,
+            "market_schedule_state": "SCHEDULED_MARKET_HALT",
+            "stale_market_data_expected": True,
+            "next_expected_reopen_time": "2026-05-31T22:00:00+00:00",
+            "market_data_grace_until": "2026-05-31T22:10:00+00:00",
+            "readiness_block_is_scheduled_halt": True,
+            "readiness_blockers": [],
+        },
+    )
+
+    payload = build_runtime_operability_contract(config=config, now=NOW)
+
+    assert payload["canonical_state"] == READY_DIAGNOSTIC_ONLY
+    assert payload["ready_submit_capable"] is False
+    assert payload["restart_allowed_if_runtime_down"] is False
+    assert payload["blockers"] == []
+    assert payload["market_schedule_state"] == "SCHEDULED_MARKET_HALT"
+    assert payload["readiness_block_is_scheduled_halt"] is True
+    assert "canonical_readiness_waiting_for_market_reopen" in {row["code"] for row in payload["warnings"]}
+
+
 def test_fresh_healthy_runtime_truth_with_producer_pid_reports_runtime_up(tmp_path: Path) -> None:
     config = _write_ready_authority(tmp_path)
     _write(
@@ -128,18 +155,21 @@ def _write_ready_authority(
     *,
     live_money_eligible: bool = False,
     runtime_running: bool = True,
+    canonical_readiness: str = "READY_SUBMIT_CAPABLE",
+    canonical_extra: dict | None = None,
 ) -> RuntimeOperabilityConfig:
     config = RuntimeOperabilityConfig(repo_root=tmp_path)
     _write(
         config.resolve(config.canonical_readiness_path),
         {
             "generated_at": NOW.isoformat(),
-            "canonical_readiness": "READY_SUBMIT_CAPABLE",
+            "canonical_readiness": canonical_readiness,
             "live_money_eligible": live_money_eligible,
             "paper_proof_invoked": False,
             "broker_mutation_allowed": False,
             "readiness_blockers": [],
             "runtime": {"eligible_lane_count": 5},
+            **(canonical_extra or {}),
         },
     )
     _write(

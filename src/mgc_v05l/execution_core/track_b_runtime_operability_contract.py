@@ -28,6 +28,7 @@ REPO_ROOT = Path(__file__).resolve().parents[3]
 
 READY_SUBMIT_CAPABLE = "READY_SUBMIT_CAPABLE"
 READY_DIAGNOSTIC_ONLY = "READY_DIAGNOSTIC_ONLY"
+WAITING_FOR_MARKET_REOPEN = "WAITING_FOR_MARKET_REOPEN"
 BLOCKED_SAFETY = "BLOCKED_SAFETY"
 BLOCKED_INFRASTRUCTURE = "BLOCKED_INFRASTRUCTURE"
 BLOCKED_CONFIG = "BLOCKED_CONFIG"
@@ -155,6 +156,11 @@ def build_runtime_operability_contract(
         "canonical_state": classification["state"],
         "ready_submit_capable": classification["state"] == READY_SUBMIT_CAPABLE,
         "restart_allowed_if_runtime_down": classification["restart_allowed_if_runtime_down"],
+        "market_schedule_state": classification.get("market_schedule_state"),
+        "stale_market_data_expected": classification.get("stale_market_data_expected") is True,
+        "next_expected_reopen_time": classification.get("next_expected_reopen_time"),
+        "market_data_grace_until": classification.get("market_data_grace_until"),
+        "readiness_block_is_scheduled_halt": classification.get("readiness_block_is_scheduled_halt") is True,
         "blocker_family": classification["blocker_family"],
         "blockers": classification["blockers"],
         "warnings": classification["warnings"],
@@ -348,6 +354,8 @@ def classify_runtime_operability(
     readiness_blockers = list(canonical.get("readiness_blockers") or canonical.get("blockers") or [])
     if readiness_state in {"NOT_READY_CONFIG", "NOT_READY_WRONG_ROOT"}:
         block("canonical_readiness_config_block", readiness_state, "canonical_readiness", BLOCKED_CONFIG)
+    elif readiness_state == WAITING_FOR_MARKET_REOPEN:
+        warn("canonical_readiness_waiting_for_market_reopen", readiness_state, "canonical_readiness")
     elif readiness_state in {"NOT_READY_DEPENDENCY", "NOT_READY_RECONCILIATION", "DEGRADED_NO_SUBMIT"}:
         block("canonical_readiness_infrastructure_block", readiness_state, "canonical_readiness", BLOCKED_INFRASTRUCTURE)
     elif readiness_state == "READY_OBSERVATION_ONLY":
@@ -389,6 +397,9 @@ def classify_runtime_operability(
     elif readiness_state == READY_SUBMIT_CAPABLE:
         state = READY_SUBMIT_CAPABLE
         family = None
+    elif readiness_state == WAITING_FOR_MARKET_REOPEN:
+        state = READY_DIAGNOSTIC_ONLY
+        family = None
     else:
         state = READY_DIAGNOSTIC_ONLY
         family = None
@@ -398,6 +409,8 @@ def classify_runtime_operability(
     )
     if state in {BLOCKED_SAFETY, BLOCKED_CONFIG, BLOCKED_STALE_TRUTH, BLOCKED_INFRASTRUCTURE}:
         restart_allowed = False
+    elif readiness_state == WAITING_FOR_MARKET_REOPEN:
+        restart_allowed = False
 
     return {
         "state": state,
@@ -405,6 +418,11 @@ def classify_runtime_operability(
         "blockers": blockers,
         "warnings": warnings,
         "restart_allowed_if_runtime_down": restart_allowed,
+        "market_schedule_state": canonical.get("market_schedule_state"),
+        "stale_market_data_expected": canonical.get("stale_market_data_expected") is True,
+        "next_expected_reopen_time": canonical.get("next_expected_reopen_time"),
+        "market_data_grace_until": canonical.get("market_data_grace_until"),
+        "readiness_block_is_scheduled_halt": canonical.get("readiness_block_is_scheduled_halt") is True,
         "runtime_summary": {
             "running": runtime_running,
             "pid": runtime_truth.get("producer_pid") or runtime_truth.get("pid"),

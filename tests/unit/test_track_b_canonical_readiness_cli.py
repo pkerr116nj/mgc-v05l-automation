@@ -194,8 +194,12 @@ def test_json_summary_contains_compact_fields(capsys) -> None:
         "classification",
         "eligible_lane_count",
         "generated_at",
+        "market_data_grace_until",
+        "market_schedule_state",
+        "next_expected_reopen_time",
         "proof_readiness_classification",
         "quarantine_count",
+        "readiness_block_is_scheduled_halt",
         "reconciliation_state",
         "root_match",
         "shared_truth_broker_lease",
@@ -205,6 +209,7 @@ def test_json_summary_contains_compact_fields(capsys) -> None:
         "shared_truth_order_adjustment_planner",
         "shared_truth_position_truth",
         "shared_truth_runtime_environment_truth",
+        "stale_market_data_expected",
         "warnings",
     ]
     assert summary["generated_at"] == "2026-05-18T12:00:00+00:00"

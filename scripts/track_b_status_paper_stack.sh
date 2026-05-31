@@ -159,6 +159,8 @@ phase1_status = read_json(
     repo_root
     / "outputs/reports/phase1_databento_live_runtime_candles/latest_phase1_databento_live_listener_status.json"
 )
+# Canonical readiness is read only for extra status fields; operator_dashboard_readiness remains diagnostic only.
+canonical_readiness = read_json(repo_root / "outputs/operator_dashboard/runtime/latest_canonical_readiness.json")
 hourly_recovery_audit_path = (
     repo_root / "outputs/track_b_execution_core/runtime_recovery/latest_hourly_runtime_recovery_audit.json"
 )
@@ -398,6 +400,11 @@ payload = {
         "canonical_state": canonical_state,
         "ready_submit_capable": ready_submit_capable,
         "restart_allowed_if_runtime_down": operability.get("restart_allowed_if_runtime_down") is True,
+        "market_schedule_state": canonical_readiness.get("market_schedule_state"),
+        "stale_market_data_expected": canonical_readiness.get("stale_market_data_expected") is True,
+        "next_expected_reopen_time": canonical_readiness.get("next_expected_reopen_time"),
+        "market_data_grace_until": canonical_readiness.get("market_data_grace_until"),
+        "readiness_block_is_scheduled_halt": canonical_readiness.get("readiness_block_is_scheduled_halt") is True,
         "blockers": blockers,
         "warnings": warnings,
     },

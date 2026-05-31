@@ -12,7 +12,7 @@ import errno
 import json
 import os
 import subprocess
-from datetime import datetime, timezone
+from datetime import datetime, time, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable, Mapping, Sequence
 
@@ -23,6 +23,8 @@ from mgc_v05l.execution_core.track_b_live_market_data_symbols import (
     TrackBLiveMarketDataSymbol,
     load_track_b_live_market_data_symbols,
 )
+from mgc_v05l.market_data.phase1_market_session import classify_phase1_futures_market_session
+from mgc_v05l.session_phase_labels import NEW_YORK
 
 REPO_ROOT = PROJECT_ROOT
 TRACK_B_EXPECTED_ACTIVE_ROOT_ENV = "MGC_TRACK_B_EXPECTED_ACTIVE_ROOT"
@@ -79,6 +81,7 @@ DEFAULT_MANAGED_POSITION_REGISTRY_ARTIFACT = (
 CANONICAL_READINESS_STATES = {
     "READY_SUBMIT_CAPABLE",
     "READY_OBSERVATION_ONLY",
+    "WAITING_FOR_MARKET_REOPEN",
     "DEGRADED_NO_SUBMIT",
     "NOT_READY_DEPENDENCY",
     "NOT_READY_RECONCILIATION",
@@ -88,10 +91,15 @@ CANONICAL_READINESS_STATES = {
 BROKER_FRESHNESS_DEFAULT_SECONDS = 150.0
 RECONCILIATION_FRESHNESS_DEFAULT_SECONDS = 180.0
 MARKET_DATA_FRESHNESS_DEFAULT_SECONDS = 180.0
+MARKET_DATA_POST_REOPEN_GRACE_SECONDS = 10 * 60.0
+PROOF_CLASSIFICATION_MAX_AGE_SECONDS = 300.0
 MARKET_DATA_REQUIRED_SOURCE = "DATABENTO_REALTIME_PHASE1"
 BROKER_TRUTH_LEASE_READY_STATES = {"ACTIVE", "ACTIVE_DEGRADED_REFRESH_FAILING"}
 BROKER_TRUTH_LEASE_EXPIRED_STATES = {"EXPIRED_BLOCK_NEW_ENTRIES", "EXPIRED_EXITS_ONLY"}
 MARKET_CLOSED_NO_FRESH_BARS = "MARKET_CLOSED_NO_FRESH_BARS"
+MARKET_SCHEDULE_OPEN = "MARKET_OPEN_EXPECT_FRESH_BARS"
+MARKET_SCHEDULED_HALT = "SCHEDULED_MARKET_HALT"
+MARKET_POST_REOPEN_GRACE = "POST_REOPEN_GRACE"
 
 
 def build_canonical_readiness(
@@ -142,6 +150,7 @@ def classify_canonical_readiness(inputs: Mapping[str, Any]) -> dict[str, Any]:
     runtime_truth_heartbeat = _mapping(inputs.get("runtime_truth_heartbeat"))
     backend = _mapping(inputs.get("backend"))
     market_data = _mapping(inputs.get("market_data"))
+    schedule = _mapping(market_data.get("market_schedule"))
     lane_quarantine = _mapping(inputs.get("lane_quarantine"))
     submit_bridge = _mapping(inputs.get("submit_bridge"))
 
@@ -373,6 +382,20 @@ def classify_canonical_readiness(inputs: Mapping[str, Any]) -> dict[str, Any]:
     loaded_lane_count = int(runtime.get("loaded_lane_count") or 0)
     eligible_lane_count = int(runtime.get("eligible_lane_count") or 0)
     live_bars_fresh = _bool(market_data.get("fresh"))
+    if not live_bars_fresh and _proof_readiness_allows_market_data_startup(
+        execution_core_shared_truth=execution_core_shared_truth,
+        market_data=market_data,
+    ):
+        warn(
+            "market_data_freshness_delegated_to_proof_readiness",
+            "Proof readiness is clean; required listener freshness blockers are startup warnings only.",
+            source="execution_core_proof_readiness",
+        )
+        live_bars_fresh = True
+    scheduled_market_data_wait = _scheduled_market_data_wait(market_data)
+    if _proof_readiness_market_closed(execution_core_shared_truth):
+        live_bars_fresh = False
+        scheduled_market_data_wait = True
     submit_route_ready = _bool(submit_bridge.get("submit_route_ready"))
     submit_authority_explicit = _bool(submit_bridge.get("submit_authority_explicit"))
     quarantine_count = int(lane_quarantine.get("quarantine_count") or 0)
@@ -416,6 +439,32 @@ def classify_canonical_readiness(inputs: Mapping[str, Any]) -> dict[str, Any]:
             blockers=blockers,
             warnings=warnings,
             inputs=inputs,
+        )
+
+    if not live_bars_fresh and scheduled_market_data_wait:
+        market_schedule_state = str(schedule.get("market_schedule_state") or MARKET_SCHEDULED_HALT)
+        reasons.append(
+            "Fresh market data is not expected during the scheduled futures market halt/reopen grace window."
+        )
+        warn(
+            "scheduled_market_halt_waiting_for_fresh_bars",
+            "Fresh candles are intentionally not required until the scheduled futures market reopens and the grace period expires.",
+            source="market_data",
+        )
+        return _readiness_result(
+            generated_at=generated_at,
+            state="WAITING_FOR_MARKET_REOPEN",
+            reasons=reasons,
+            blockers=blockers,
+            warnings=warnings,
+            inputs=inputs,
+            market_schedule_override={
+                "market_schedule_state": market_schedule_state,
+                "stale_market_data_expected": True,
+                "next_expected_reopen_time": schedule.get("next_expected_reopen_time"),
+                "market_data_grace_until": schedule.get("market_data_grace_until"),
+                "readiness_block_is_scheduled_halt": True,
+            },
         )
 
     if not live_bars_fresh:
@@ -845,12 +894,11 @@ def _execution_core_shared_truth_decision(evidence: Mapping[str, Any]) -> dict[s
         )
 
     if proof_classification == MARKET_CLOSED_NO_FRESH_BARS:
-        blockers.append(
+        warnings.append(
             {
                 "code": MARKET_CLOSED_NO_FRESH_BARS,
-                "detail": "Phase-1 runtime candles are stale because the market/session is closed; submit-capable PAPER readiness remains blocked.",
+                "detail": "Phase-1 runtime candles are stale because the market/session is closed; scheduled-halt classification decides submit readiness.",
                 "source": "execution_core_proof_readiness",
-                "state": "NOT_READY_DEPENDENCY",
             }
         )
         return {"blockers": blockers, "warnings": warnings}
@@ -936,6 +984,55 @@ def _execution_core_shared_truth_decision(evidence: Mapping[str, Any]) -> dict[s
         )
 
     return {"blockers": blockers, "warnings": warnings}
+
+
+def _proof_readiness_allows_market_data_startup(
+    *,
+    execution_core_shared_truth: Mapping[str, Any],
+    market_data: Mapping[str, Any],
+) -> bool:
+    proof = _mapping(execution_core_shared_truth.get("proof_readiness"))
+    if proof.get("classification") != "READY_FOR_PROOF":
+        return False
+    if market_data.get("listener_global_issue") is True:
+        return False
+    blockers = [row for row in list(market_data.get("blockers") or []) if isinstance(row, Mapping)]
+    if not blockers:
+        return False
+    return all(str(row.get("code") or "") == "market_data_not_fresh" for row in blockers)
+
+
+def _scheduled_market_data_wait(market_data: Mapping[str, Any]) -> bool:
+    schedule = _mapping(market_data.get("market_schedule"))
+    return bool(
+        market_data.get("stale_market_data_expected") is True
+        or schedule.get("stale_market_data_expected") is True
+        or schedule.get("readiness_block_is_scheduled_halt") is True
+    )
+
+
+def _proof_readiness_market_closed(execution_core_shared_truth: Mapping[str, Any]) -> bool:
+    proof = _mapping(execution_core_shared_truth.get("proof_readiness"))
+    return str(proof.get("classification") or "") == MARKET_CLOSED_NO_FRESH_BARS
+
+
+def _market_schedule_fields(market_data: Mapping[str, Any]) -> dict[str, Any]:
+    schedule = _mapping(market_data.get("market_schedule"))
+    return {
+        "market_schedule_state": schedule.get("market_schedule_state") or market_data.get("market_schedule_state"),
+        "stale_market_data_expected": bool(
+            schedule.get("stale_market_data_expected") is True
+            or market_data.get("stale_market_data_expected") is True
+        ),
+        "next_expected_reopen_time": schedule.get("next_expected_reopen_time")
+        or market_data.get("next_expected_reopen_time"),
+        "market_data_grace_until": schedule.get("market_data_grace_until")
+        or market_data.get("market_data_grace_until"),
+        "readiness_block_is_scheduled_halt": bool(
+            schedule.get("readiness_block_is_scheduled_halt") is True
+            or market_data.get("readiness_block_is_scheduled_halt") is True
+        ),
+    }
 
 
 def _classification(payload: Mapping[str, Any], *keys: str) -> str | None:
@@ -1309,6 +1406,7 @@ def _market_data_input(
         fallback["source"] = "operator_runtime_fallback"
         fallback["listener_available"] = False
         fallback["fallback_used"] = True
+        fallback.update(_scheduled_market_data_fields(now))
         return fallback
 
     listener = _phase1_listener_market_data_input(listener_payload, repo_root=repo_root, now=now)
@@ -1356,6 +1454,7 @@ def _fallback_market_data_input(
         "probe_runtime_ready": market_probe.get("runtime_ready"),
         "warnings": [],
         "blockers": [],
+        **_scheduled_market_data_fields(now),
     }
 
 
@@ -1364,13 +1463,34 @@ def _phase1_listener_market_data_input(
     *,
     repo_root: Path,
     now: datetime,
+    active_required_symbols: set[str] | None = None,
 ) -> dict[str, Any]:
+    scheduled_fields = _scheduled_market_data_fields(now)
     source = str(payload.get("source") or payload.get("source_id") or "").strip()
     generated_at = payload.get("generated_at")
     status_age_seconds = _age_seconds(generated_at, now)
     live_rows = _phase1_live_symbol_rows(payload, repo_root=repo_root)
-    required_symbols = _symbols_from_payload_or_rows(payload.get("required_for_readiness_symbols"), live_rows, required=True)
-    optional_symbols = _symbols_from_payload_or_rows(payload.get("optional_symbols"), live_rows, required=False)
+    configured_required_symbols = _symbols_from_payload_or_rows(payload.get("required_for_readiness_symbols"), live_rows, required=True)
+    configured_optional_symbols = _symbols_from_payload_or_rows(payload.get("optional_symbols"), live_rows, required=False)
+    active_symbols = {str(symbol).strip().upper() for symbol in (active_required_symbols or set()) if str(symbol).strip()}
+    if active_symbols:
+        available_symbols = {
+            str(row.get("symbol") or "").strip().upper()
+            for row in live_rows
+            if str(row.get("symbol") or "").strip()
+        }
+        required_symbols = sorted(symbol for symbol in active_symbols if symbol in available_symbols)
+        optional_symbols = sorted(
+            {
+                *configured_required_symbols,
+                *configured_optional_symbols,
+                *(symbol for symbol in active_symbols if symbol not in available_symbols),
+            }
+            - set(required_symbols)
+        )
+    else:
+        required_symbols = configured_required_symbols
+        optional_symbols = configured_optional_symbols
     listener_threshold = _listener_status_freshness_threshold(live_rows)
     provider_status = str(payload.get("provider_status") or "").upper()
     listener_status_fresh = bool(status_age_seconds is not None and status_age_seconds <= listener_threshold)
@@ -1401,13 +1521,15 @@ def _phase1_listener_market_data_input(
             }
         )
     if not listener_status_fresh:
-        blockers.append(
-            {
-                "code": "phase1_listener_status_stale",
-                "detail": "Phase-1 Databento listener status artifact is stale.",
-                "source": "phase1_databento_live_listener",
-            }
-        )
+        issue = {
+            "code": "phase1_listener_status_stale",
+            "detail": "Phase-1 Databento listener status artifact is stale.",
+            "source": "phase1_databento_live_listener",
+        }
+        if scheduled_fields["stale_market_data_expected"]:
+            warnings.append(issue)
+        else:
+            blockers.append(issue)
     if listener_down:
         blockers.append(
             {
@@ -1460,7 +1582,110 @@ def _phase1_listener_market_data_input(
         "research_artifact_used": payload.get("research_artifact_used") is True,
         "archive_artifact_used": payload.get("archive_artifact_used") is True,
         "databento_live_api_replay": payload.get("databento_live_api_replay") is True,
+        **scheduled_fields,
     }
+
+
+def _active_runtime_market_data_symbols(operator_status: Mapping[str, Any]) -> set[str]:
+    active_lane_ids = {
+        str(value).strip()
+        for value in list(operator_status.get("active_lane_ids") or [])
+        if str(value).strip()
+    }
+    symbols: set[str] = set()
+    for lane in list(operator_status.get("lanes") or []):
+        if not isinstance(lane, Mapping):
+            continue
+        lane_id = str(lane.get("lane_id") or "").strip()
+        if active_lane_ids and lane_id and lane_id not in active_lane_ids:
+            continue
+        symbol = str(lane.get("symbol") or lane.get("instrument") or "").strip().upper()
+        if symbol:
+            symbols.add(symbol)
+    if symbols:
+        return symbols
+    for symbol in list(operator_status.get("required_instruments") or operator_status.get("active_symbols") or []):
+        symbol_text = str(symbol).strip().upper()
+        if symbol_text:
+            symbols.add(symbol_text)
+    return symbols
+
+
+def _scheduled_market_data_fields(now: datetime) -> dict[str, Any]:
+    actual_now = _ensure_utc(now)
+    session = classify_phase1_futures_market_session(actual_now)
+    next_reopen = _next_expected_futures_reopen(actual_now)
+    last_reopen = _last_expected_futures_reopen(actual_now)
+    grace_until = last_reopen + timedelta(seconds=MARKET_DATA_POST_REOPEN_GRACE_SECONDS)
+    in_scheduled_halt = bool(session.get("market_closed"))
+    in_post_reopen_grace = bool(not in_scheduled_halt and actual_now <= grace_until)
+    if in_scheduled_halt:
+        market_schedule_state = MARKET_SCHEDULED_HALT
+        stale_expected = True
+        grace_value = next_reopen + timedelta(seconds=MARKET_DATA_POST_REOPEN_GRACE_SECONDS)
+    elif in_post_reopen_grace:
+        market_schedule_state = MARKET_POST_REOPEN_GRACE
+        stale_expected = True
+        grace_value = grace_until
+    else:
+        market_schedule_state = MARKET_SCHEDULE_OPEN
+        stale_expected = False
+        grace_value = None
+    return {
+        "market_schedule_state": market_schedule_state,
+        "stale_market_data_expected": stale_expected,
+        "next_expected_reopen_time": next_reopen.isoformat(),
+        "market_data_grace_until": grace_value.isoformat() if grace_value is not None else None,
+        "readiness_block_is_scheduled_halt": stale_expected,
+        "market_schedule": {
+            "classification": session.get("classification"),
+            "reason": session.get("reason"),
+            "market_closed": in_scheduled_halt,
+            "market_schedule_state": market_schedule_state,
+            "stale_market_data_expected": stale_expected,
+            "next_expected_reopen_time": next_reopen.isoformat(),
+            "market_data_grace_until": grace_value.isoformat() if grace_value is not None else None,
+            "readiness_block_is_scheduled_halt": stale_expected,
+            "post_reopen_grace_seconds": MARKET_DATA_POST_REOPEN_GRACE_SECONDS,
+        },
+    }
+
+
+def _next_expected_futures_reopen(now: datetime) -> datetime:
+    local = _ensure_utc(now).astimezone(NEW_YORK)
+    local_time = local.timetz().replace(tzinfo=None)
+    weekday = local.weekday()
+    if weekday == 5:
+        days_until_sunday = 1
+        reopen_date = local.date() + timedelta(days=days_until_sunday)
+    elif weekday == 6 and local_time < time(18, 0):
+        reopen_date = local.date()
+    elif weekday == 4 and local_time >= time(17, 0):
+        reopen_date = local.date() + timedelta(days=2)
+    elif time(17, 0) <= local_time < time(18, 0):
+        reopen_date = local.date()
+    elif local_time < time(17, 0):
+        reopen_date = local.date()
+    else:
+        reopen_date = local.date() + timedelta(days=1)
+    reopen_local = datetime.combine(reopen_date, time(18, 0), tzinfo=NEW_YORK)
+    return reopen_local.astimezone(timezone.utc)
+
+
+def _last_expected_futures_reopen(now: datetime) -> datetime:
+    local = _ensure_utc(now).astimezone(NEW_YORK)
+    local_time = local.timetz().replace(tzinfo=None)
+    weekday = local.weekday()
+    if time(18, 0) <= local_time:
+        reopen_date = local.date()
+    else:
+        reopen_date = local.date() - timedelta(days=1)
+    if weekday == 6 and local_time < time(18, 0):
+        reopen_date = local.date() - timedelta(days=2)
+    elif weekday == 5:
+        reopen_date = local.date() - timedelta(days=1)
+    reopen_local = datetime.combine(reopen_date, time(18, 0), tzinfo=NEW_YORK)
+    return reopen_local.astimezone(timezone.utc)
 
 
 def _phase1_live_symbol_rows(payload: Mapping[str, Any], *, repo_root: Path) -> list[dict[str, Any]]:
@@ -1745,6 +1970,7 @@ def _readiness_result(
     blockers: Sequence[Mapping[str, Any]],
     warnings: Sequence[Mapping[str, Any]],
     inputs: Mapping[str, Any],
+    market_schedule_override: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     if state not in CANONICAL_READINESS_STATES:
         state = "NOT_READY_CONFIG"
@@ -1757,6 +1983,9 @@ def _readiness_result(
         or str(shared_truth_classifications.get("Broker Truth Lease") or "").upper()
         == "ACTIVE_DEGRADED_REFRESH_FAILING"
     )
+    market_schedule = _market_schedule_fields(_mapping(inputs.get("market_data")))
+    if market_schedule_override:
+        market_schedule.update(dict(market_schedule_override))
     return {
         "schema_version": "track_b_canonical_readiness_v1",
         "generated_at": generated_at,
@@ -1778,6 +2007,7 @@ def _readiness_result(
         "phase1_reconciliation": _mapping(inputs.get("phase1_reconciliation")),
         "execution_core_shared_truth": execution_core_shared_truth,
         "market_data": _mapping(inputs.get("market_data")),
+        **market_schedule,
         "lane_quarantine": _mapping(inputs.get("lane_quarantine")),
         "submit_bridge": _mapping(inputs.get("submit_bridge")),
         "live_money_eligible": _bool(inputs.get("live_money_eligible")),

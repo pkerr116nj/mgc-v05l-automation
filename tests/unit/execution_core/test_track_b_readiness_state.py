@@ -214,9 +214,45 @@ def test_closed_market_proof_readiness_blocks_with_clear_market_evidence() -> No
 
     result = classify_canonical_readiness(inputs)
 
-    assert result["canonical_readiness"] == "NOT_READY_DEPENDENCY"
-    assert result["readiness_blockers"][0]["code"] == "MARKET_CLOSED_NO_FRESH_BARS"
-    assert result["readiness_blockers"][0]["source"] == "execution_core_proof_readiness"
+    assert result["canonical_readiness"] == "WAITING_FOR_MARKET_REOPEN"
+    assert result["ready_submit_capable"] is False
+    assert result["market_schedule_state"] == "SCHEDULED_MARKET_HALT"
+    assert result["stale_market_data_expected"] is True
+    assert result["readiness_block_is_scheduled_halt"] is True
+    assert result["readiness_blockers"] == []
+
+
+def test_sunday_pre_reopen_halt_waits_without_infrastructure_block() -> None:
+    now = datetime(2026, 5, 31, 17, 30, tzinfo=timezone.utc)
+    inputs = _clean_inputs()
+    inputs["generated_at"] = now.isoformat()
+    inputs["execution_core_shared_truth"] = _shared_truth_evidence(
+        proof_classification="MARKET_CLOSED_NO_FRESH_BARS",
+        phase1_reason="WEEKEND_GLOBEX_HALT_BEFORE_SUNDAY_REOPEN",
+    )
+    inputs["market_data"] = _market_data_input(
+        {"active_symbols": ["MNQ", "MES"]},
+        {},
+        _phase1_listener_status(
+            rows=[
+                _listener_row("MNQ", realtime_feed_confirmed=False, bar_count=0, latest_completed_bar_ts=None),
+                _listener_row("MES", realtime_feed_confirmed=False, bar_count=0, latest_completed_bar_ts=None),
+            ],
+            generated_at=now.isoformat(),
+        ),
+        now=now,
+    )
+
+    result = classify_canonical_readiness(inputs)
+
+    assert result["canonical_readiness"] == "WAITING_FOR_MARKET_REOPEN"
+    assert result["ready_submit_capable"] is False
+    assert result["market_schedule_state"] == "SCHEDULED_MARKET_HALT"
+    assert result["stale_market_data_expected"] is True
+    assert result["next_expected_reopen_time"] == "2026-05-31T22:00:00+00:00"
+    assert result["market_data_grace_until"] == "2026-05-31T22:10:00+00:00"
+    assert result["readiness_block_is_scheduled_halt"] is True
+    assert result["readiness_blockers"] == []
 
 
 def test_degraded_shared_broker_lease_is_diagnostic_when_truth_clean() -> None:
@@ -377,6 +413,95 @@ def test_required_symbol_stale_from_phase1_listener_blocks_market_data() -> None
     assert result["canonical_readiness"] == "NOT_READY_DEPENDENCY"
     assert result["readiness_blockers"][0]["code"] == "market_data_not_fresh"
     assert result["market_data"]["required_blocked_symbols"] == ["MGC"]
+
+
+def test_post_reopen_grace_waits_for_market_data_before_blocking() -> None:
+    now = datetime(2026, 5, 31, 22, 5, tzinfo=timezone.utc)
+    inputs = _clean_inputs()
+    inputs["generated_at"] = now.isoformat()
+    inputs["market_data"] = _market_data_input(
+        {"active_symbols": ["MNQ"]},
+        {},
+        _phase1_listener_status(
+            rows=[_listener_row("MNQ", realtime_feed_confirmed=False, bar_count=0, latest_completed_bar_ts=None)],
+            generated_at=now.isoformat(),
+        ),
+        now=now,
+    )
+
+    result = classify_canonical_readiness(inputs)
+
+    assert result["canonical_readiness"] == "WAITING_FOR_MARKET_REOPEN"
+    assert result["market_schedule_state"] == "POST_REOPEN_GRACE"
+    assert result["market_data_grace_until"] == "2026-05-31T22:10:00+00:00"
+    assert result["readiness_blockers"] == []
+
+
+def test_after_reopen_grace_expiry_stale_data_is_infrastructure_dependency() -> None:
+    now = datetime(2026, 5, 31, 22, 12, tzinfo=timezone.utc)
+    inputs = _clean_inputs()
+    inputs["generated_at"] = now.isoformat()
+    inputs["market_data"] = _market_data_input(
+        {"active_symbols": ["MNQ"]},
+        {},
+        _phase1_listener_status(
+            rows=[_listener_row("MNQ", realtime_feed_confirmed=False, bar_count=0, latest_completed_bar_ts=None)],
+            generated_at=now.isoformat(),
+        ),
+        now=now,
+    )
+
+    result = classify_canonical_readiness(inputs)
+
+    assert result["canonical_readiness"] == "NOT_READY_DEPENDENCY"
+    assert result["readiness_blockers"][0]["code"] == "market_data_not_fresh"
+    assert result["market_schedule_state"] == "MARKET_OPEN_EXPECT_FRESH_BARS"
+    assert result["stale_market_data_expected"] is False
+    assert result["readiness_block_is_scheduled_halt"] is False
+
+
+def test_fresh_data_after_reopen_can_pass_when_other_gates_clean() -> None:
+    now = datetime(2026, 5, 31, 22, 12, tzinfo=timezone.utc)
+    inputs = _clean_inputs()
+    inputs["generated_at"] = now.isoformat()
+    inputs["runtime"]["last_processed_bar_end_ts"] = "2026-05-31T22:11:00+00:00"
+    inputs["market_data"] = _market_data_input(
+        {"active_symbols": ["MNQ"]},
+        {},
+        _phase1_listener_status(
+            rows=[_listener_row("MNQ", latest_completed_bar_ts="2026-05-31T22:11:00+00:00")],
+            generated_at=now.isoformat(),
+        ),
+        now=now,
+    )
+
+    result = classify_canonical_readiness(inputs)
+
+    assert result["canonical_readiness"] == "READY_SUBMIT_CAPABLE"
+    assert result["readiness_blockers"] == []
+    assert result["market_schedule_state"] == "MARKET_OPEN_EXPECT_FRESH_BARS"
+
+
+def test_ready_proof_readiness_downgrades_quiet_required_listener_staleness_to_warning() -> None:
+    now = datetime(2026, 5, 18, 12, 0, tzinfo=timezone.utc)
+    inputs = _clean_inputs()
+    inputs["execution_core_shared_truth"] = _shared_truth_evidence(proof_classification="READY_FOR_PROOF")
+    inputs["market_data"] = _market_data_input(
+        {},
+        {},
+        _phase1_listener_status(
+            rows=[_listener_row("MGC", latest_completed_bar_ts="2026-05-18T11:56:00+00:00")]
+        ),
+        now=now,
+    )
+
+    result = classify_canonical_readiness(inputs)
+
+    assert result["canonical_readiness"] == "READY_SUBMIT_CAPABLE"
+    assert result["readiness_blockers"] == []
+    assert "market_data_freshness_delegated_to_proof_readiness" in {
+        warning["code"] for warning in result["readiness_warnings"]
+    }
 
 
 def test_required_symbol_unconfirmed_or_under_min_bars_blocks_market_data() -> None:
