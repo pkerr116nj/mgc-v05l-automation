@@ -7,6 +7,7 @@ from mgc_v05l.execution_core.track_b_central_trade_registry import TradeCurrentS
 from mgc_v05l.execution_core.track_b_live_trade_registry import (
     append_live_trade_registry_event,
     broker_backed_fill_has_required_ids,
+    load_live_trade_registry_records,
     make_live_trade_registry_event,
     validate_registry_managed_exit_identity,
 )
@@ -73,6 +74,38 @@ def test_broker_backed_fill_requires_perm_and_exec_id():
     assert broker_backed_fill_has_required_ids(perm_id="2047", exec_id="exec-1") is True
     assert broker_backed_fill_has_required_ids(perm_id="2047", exec_id=None) is False
     assert broker_backed_fill_has_required_ids(perm_id=None, exec_id="exec-1") is False
+
+
+def test_live_registry_rejects_out_of_repo_temp_source_artifacts(tmp_path):
+    repo_root = tmp_path / "repo"
+    repo_root.mkdir()
+    event = make_live_trade_registry_event(
+        event_type=TradeEventType.LIFECYCLE_OPEN_MANAGED,
+        trade_id="trade_pytest_pollution",
+        lifecycle_id="life_pytest_pollution",
+        lane_id="mnq_us_active_participation_long",
+        thesis_strategy_id="PAPER_ACTIVE_EVIDENCE_MNQ_US_PARTICIPATION_LONG_V1",
+        account_id="DUM882026",
+        symbol="MNQ",
+        con_id=770561201,
+        local_symbol="MNQM6",
+        expiry="202606",
+        side="LONG",
+        action="BUY",
+        qty=Decimal("1"),
+        order_id="101",
+        client_id="17086",
+        perm_id="2047",
+        exec_id="exec-1",
+        source_artifact_path=str(tmp_path / "pytest-of-patrick/test_case/report.json"),
+        generated_at=NOW,
+    )
+
+    result = append_live_trade_registry_event(repo_root=repo_root, event=event)
+
+    assert result["persisted"] is False
+    assert result["classification"] == "LIVE_REGISTRY_EVENT_REJECTED_OUT_OF_REPO_SOURCE"
+    assert load_live_trade_registry_records(repo_root=repo_root) == ()
 
 
 def test_registry_managed_exit_validator_allows_dry_run_and_live_from_same_snapshot(tmp_path):

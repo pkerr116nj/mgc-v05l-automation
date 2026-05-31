@@ -111,6 +111,7 @@ class TrackBRegistryTruthDiagnosticsReport:
     broker_positions_by_scope: Mapping[str, Any]
     lifecycle_open_position_count: int
     registry_trade_state_counts: Mapping[str, int]
+    current_scope_trade_states: tuple[Mapping[str, Any], ...]
     review_required_trade_ids: tuple[str, ...]
     historical_review_required_trade_ids: tuple[str, ...]
     truth_conflicts: tuple[Mapping[str, Any], ...]
@@ -146,6 +147,7 @@ class TrackBRegistryTruthDiagnosticsReport:
             "broker_positions_by_scope": dict(self.broker_positions_by_scope),
             "lifecycle_open_position_count": self.lifecycle_open_position_count,
             "registry_trade_state_counts": dict(self.registry_trade_state_counts),
+            "current_scope_trade_states": list(self.current_scope_trade_states),
             "review_required_trade_ids": list(self.review_required_trade_ids),
             "historical_review_required_trade_ids": list(self.historical_review_required_trade_ids),
             "truth_conflicts": list(self.truth_conflicts),
@@ -216,7 +218,12 @@ def build_track_b_registry_truth_diagnostics(
         unknown_scope_position_count=len(scoped_positions["unknown_scope_positions"]),
         broker_positions_by_scope=scoped_positions,
         lifecycle_open_position_count=truth.lifecycle.open_position_count,
-        registry_trade_state_counts=_registry_state_counts(reconstruction),
+        registry_trade_state_counts=_registry_state_counts_for_mode(
+            mode=config.mode,
+            reconstruction=reconstruction,
+            current_rows=current_rows,
+        ),
+        current_scope_trade_states=tuple(_trade_state_surface(row) for row in current_rows),
         review_required_trade_ids=tuple(
             row.trade_id
             for row in _review_required_rows_for_mode(config.mode, shadow, current_rows)
@@ -380,6 +387,25 @@ def _review_required_rows_for_mode(
     return tuple(row for row in rows if row.current_derived_state == TradeCurrentState.REVIEW_REQUIRED.value)
 
 
+def _trade_state_surface(row: Any) -> Mapping[str, Any]:
+    payload = row.to_dict()
+    return {
+        "trade_id": payload.get("trade_id"),
+        "lifecycle_id": payload.get("lifecycle_id"),
+        "lane_id": payload.get("lane_id"),
+        "strategy_id": payload.get("thesis_strategy_id"),
+        "symbol": payload.get("symbol"),
+        "con_id": payload.get("con_id"),
+        "local_symbol": payload.get("local_symbol"),
+        "current_derived_state": payload.get("current_derived_state"),
+        "broker_backed_entry": payload.get("broker_backed_entry"),
+        "broker_backed_exit": payload.get("broker_backed_exit"),
+        "registry_agrees_with_reconciliation": payload.get("registry_agrees_with_reconciliation"),
+        "ambiguous_reconstruction": payload.get("ambiguous_reconstruction"),
+        "reason_codes": payload.get("agreement_reason_codes") or payload.get("truth_reason_codes") or [],
+    }
+
+
 def _current_scope_conflict(
     *,
     truth: TrackBTruthSnapshot,
@@ -388,11 +414,15 @@ def _current_scope_conflict(
 ) -> bool:
     if scoped_positions["unknown_scope_positions"]:
         return True
-    if truth.classification == TRUTH_CONFLICT_REVIEW_REQUIRED and (
-        truth.broker_truth.broker_position_count
+    has_current_exposure_or_order = bool(
+        scoped_positions["track_b_managed_futures_positions"]
+        or scoped_positions["unknown_scope_positions"]
         or truth.broker_truth.open_order_count
         or truth.lifecycle.open_position_count
         or rows
+    )
+    if truth.classification == TRUTH_CONFLICT_REVIEW_REQUIRED and (
+        has_current_exposure_or_order
     ):
         return True
     return any(
@@ -474,6 +504,22 @@ def _registry_state_counts(reconstruction: TradeRegistryReconstructionReport) ->
     counts: dict[str, int] = {}
     for record in reconstruction.records:
         counts[record.current_state.value] = counts.get(record.current_state.value, 0) + 1
+    return counts
+
+
+def _registry_state_counts_for_mode(
+    *,
+    mode: TrackBDiagnosticsMode,
+    reconstruction: TradeRegistryReconstructionReport,
+    current_rows: tuple[Any, ...],
+) -> Mapping[str, int]:
+    if mode != TrackBDiagnosticsMode.CURRENT_HOT_PATH:
+        return _registry_state_counts(reconstruction)
+    counts: dict[str, int] = {}
+    for row in current_rows:
+        state = str(getattr(row, "current_derived_state", "") or "")
+        if state:
+            counts[state] = counts.get(state, 0) + 1
     return counts
 
 

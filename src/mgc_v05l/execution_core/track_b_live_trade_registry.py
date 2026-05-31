@@ -41,6 +41,16 @@ def append_live_trade_registry_event(
     """Append one validated central trade event to the live PAPER registry."""
 
     event_payload = event.to_dict()
+    if not _event_source_allowed(repo_root=repo_root, event=event):
+        return {
+            "persisted": False,
+            "classification": "LIVE_REGISTRY_EVENT_REJECTED_OUT_OF_REPO_SOURCE",
+            "event_type": event.event_type.value,
+            "event_id": event.event_id,
+            "trade_id": event.trade_id,
+            "lifecycle_id": event.lifecycle_id,
+            "source_artifact_path": event.source_artifact_path,
+        }
     resolved_jsonl = _resolve(repo_root, jsonl_path)
     resolved_latest = _resolve(repo_root, latest_path)
     resolved_jsonl.parent.mkdir(parents=True, exist_ok=True)
@@ -100,6 +110,8 @@ def load_live_trade_registry_record(
             event = TradeEvent.from_dict(json.loads(line))
         except Exception:
             continue
+        if not _event_source_allowed(repo_root=repo_root, event=event):
+            continue
         if event.trade_id == requested_trade_id:
             events.append(event)
     if not events:
@@ -131,6 +143,8 @@ def load_live_trade_registry_records(
         try:
             event = TradeEvent.from_dict(json.loads(line))
         except Exception:
+            continue
+        if not _event_source_allowed(repo_root=repo_root, event=event):
             continue
         events_by_trade_id.setdefault(event.trade_id, []).append(event)
     records: list[TradeRegistryRecord] = []
@@ -421,6 +435,20 @@ def _latest_event_value(record: TradeRegistryRecord, field: str) -> str | None:
 
 def _resolve(repo_root: Path, path: Path) -> Path:
     return path if path.is_absolute() else Path(repo_root) / path
+
+
+def _event_source_allowed(*, repo_root: Path, event: TradeEvent) -> bool:
+    source = str(event.source_artifact_path or "").strip()
+    if not source:
+        return True
+    source_path = Path(source)
+    if not source_path.is_absolute():
+        return True
+    try:
+        source_path.resolve().relative_to(Path(repo_root).resolve())
+        return True
+    except (OSError, ValueError):
+        return False
 
 
 def _now() -> datetime:

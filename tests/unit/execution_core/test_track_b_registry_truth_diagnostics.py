@@ -49,7 +49,7 @@ def test_clean_flat_state_reports_clean(tmp_path: Path) -> None:
     assert report.recovery_active is True
     assert report.broker_lifecycle_reconciled is True
     assert report.broker_position_count == 0
-    assert report.registry_trade_state_counts == {TradeCurrentState.CLOSED_FLAT.value: 1}
+    assert report.registry_trade_state_counts == {}
     assert report.latest_preflight_hard_failure_count == 0
 
 
@@ -135,6 +135,7 @@ def test_flat_current_reconciliation_with_old_review_chains_is_clean_current_sco
     assert report.review_required_trade_ids == ()
     assert report.historical_review_required_trade_ids == ("trade_review",)
     assert "HISTORICAL_REGISTRY_REVIEW_REQUIRED_TRADE" in report.reason_codes
+    assert report.registry_trade_state_counts == {}
 
 
 def test_full_artifact_audit_still_reports_old_review_required_trades(tmp_path: Path) -> None:
@@ -237,6 +238,31 @@ def test_unrelated_broker_positions_do_not_count_as_track_b_exposure(tmp_path: P
     assert report.track_b_managed_futures_position_count == 0
     assert report.unrelated_broker_position_count == 1
     assert report.unknown_scope_position_count == 0
+
+
+def test_unrelated_broker_positions_do_not_promote_truth_conflict_to_current_scope(tmp_path: Path) -> None:
+    config = _seed_config(
+        tmp_path,
+        broker_positions=[{"symbol": "AAPL", "position": 100, "track_b_scope": "UNRELATED"}],
+    )
+    _write_json(
+        tmp_path / config.truth_config.planner_path,  # type: ignore[union-attr]
+        {
+            "generated_at": NOW.isoformat(),
+            "classification": "PLAN_SCOPED_POSITION_CLEANUP",
+            "control_plane_snapshot_id": "old-snapshot",
+            "shared_truth_refresh_generation_id": "generation-1",
+        },
+    )
+
+    report = build_track_b_registry_truth_diagnostics(config=config, now=NOW)
+
+    assert report.classification == TRACK_B_DIAGNOSTICS_CLEAN_CURRENT_SCOPE
+    assert report.broker_position_count == 1
+    assert report.track_b_managed_futures_position_count == 0
+    assert report.unrelated_broker_position_count == 1
+    assert report.unknown_scope_position_count == 0
+    assert report.registry_trade_state_counts == {}
 
 
 def test_current_open_broker_position_without_lifecycle_owner_conflicts_current_scope(tmp_path: Path) -> None:
