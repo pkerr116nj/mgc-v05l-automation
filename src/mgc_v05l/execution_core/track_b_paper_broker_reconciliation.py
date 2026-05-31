@@ -239,9 +239,6 @@ def reconcile_track_b_paper_broker_truth(
         config=config,
         now=actual_now,
     )
-    broker_backed_entry_adoption = _broker_backed_entry_adoption_remediation(
-        submit_intent_ownership_reconciliation
-    )
     broker_truth_settlement = _broker_truth_settlement_state(
         position_match_report=position_match_report,
         broker_positions=track_b_positions,
@@ -261,6 +258,10 @@ def reconcile_track_b_paper_broker_truth(
         lifecycle_positions=lifecycle_positions,
         broker_open_orders=track_b_open_orders,
         position_match_report=position_match_report,
+    )
+    broker_backed_entry_adoption = _broker_backed_entry_adoption_remediation(
+        submit_intent_ownership_reconciliation=submit_intent_ownership_reconciliation,
+        registry_reconciliation=registry_reconciliation,
     )
     if registry_reconciliation.get("blocking") is True:
         blockers.append(
@@ -474,6 +475,7 @@ def reconcile_track_b_paper_broker_truth(
         config=config,
         report=report,
         registry_reconciliation=registry_reconciliation,
+        broker_backed_entry_adoption=broker_backed_entry_adoption,
         now=actual_now,
     )
     return report
@@ -492,6 +494,9 @@ def _registry_reconciliation_state(
         "source": "CENTRAL_TRADE_REGISTRY_READ_ONLY",
         "registry_event_path": str(config.repo_root / "outputs/track_b_execution_core/trade_registry/live_trade_events.jsonl"),
         "record_count": len(records),
+        "broker_position_count": len(broker_positions),
+        "lifecycle_position_count": len(lifecycle_positions),
+        "broker_open_order_count": len(broker_open_orders),
         "blocking": False,
         "paper_only": True,
         "live_money_eligible": False,
@@ -650,6 +655,7 @@ def _append_reconciliation_registry_events(
     config: ReconciliationConfig,
     report: Mapping[str, Any],
     registry_reconciliation: Mapping[str, Any],
+    broker_backed_entry_adoption: Mapping[str, Any] | None,
     now: datetime,
 ) -> None:
     classification = str(report.get("classification") or "")
@@ -672,6 +678,7 @@ def _append_reconciliation_registry_events(
         if isinstance(row, Mapping)
     ]
     candidate_by_trade_id: dict[str, Mapping[str, Any]] = {}
+    recovery_trade_ids = _recovery_adoption_trade_ids(broker_backed_entry_adoption)
     for row in candidates:
         trade_id = _trade_id_from_row(row)
         if trade_id:
@@ -714,6 +721,8 @@ def _append_reconciliation_registry_events(
             )
         if not trade_id:
             continue
+        if event_type == TradeEventType.REVIEW_REQUIRED and trade_id in recovery_trade_ids:
+            continue
         try:
             event = make_live_trade_registry_event(
                 event_type=event_type,
@@ -745,6 +754,11 @@ def _append_reconciliation_registry_events(
             append_live_trade_registry_event(repo_root=config.repo_root, event=event)
         except Exception:
             continue
+    _append_recovery_adoption_registry_events(
+        config=config,
+        broker_backed_entry_adoption=broker_backed_entry_adoption,
+        now=now,
+    )
 
 
 def _registry_records_for_broker_position(
@@ -778,7 +792,12 @@ def _registry_record_event_row(record: TradeRegistryRecord) -> dict[str, Any]:
         "expiry": owner.expiry,
         "side": owner.side,
         "quantity": str(owner.qty),
-        "action": "SELL" if owner.side.upper() == "LONG" else "BUY",
+        "action": _entry_action_for_side(owner.side),
+        "current_state": record.current_state.value,
+        "entry_order_id": _registry_record_latest_event_value(record, "order_id"),
+        "entry_client_id": _registry_record_latest_event_value(record, "client_id"),
+        "entry_perm_id": _registry_record_latest_event_value(record, "perm_id"),
+        "entry_exec_id": _registry_record_latest_event_value(record, "exec_id"),
     }
 
 
@@ -793,8 +812,7 @@ def _registry_records_for_lifecycle_position(
             for record in records
             if record.ownership_identity is not None and record.ownership_identity.lifecycle_id == lifecycle_id
         ]
-        if exact:
-            return exact
+        return exact
     return [
         record
         for record in records
@@ -868,6 +886,105 @@ def _review_trade_ids_from_registry_blockers(blockers: Sequence[Mapping[str, Any
             if isinstance(value, list):
                 trade_ids.extend(str(item) for item in value if str(item or "").strip())
     return sorted(set(trade_ids))
+
+
+def _append_recovery_adoption_registry_events(
+    *,
+    config: ReconciliationConfig,
+    broker_backed_entry_adoption: Mapping[str, Any] | None,
+    now: datetime,
+) -> None:
+    if not isinstance(broker_backed_entry_adoption, Mapping):
+        return
+    classification = str(broker_backed_entry_adoption.get("classification") or "")
+    adoption_rows = [
+        row
+        for row in broker_backed_entry_adoption.get("adoptions") or []
+        if isinstance(row, Mapping)
+    ]
+    if not adoption_rows and broker_backed_entry_adoption.get("trade_id"):
+        adoption_rows = [broker_backed_entry_adoption]
+    for row in adoption_rows:
+        event_type = (
+            TradeEventType.RECOVERY_ADOPTION_RECORDED
+            if row.get("adoption_allowed") is True and row.get("broker_backed_evidence_valid") is True
+            else TradeEventType.REVIEW_REQUIRED
+        )
+        reason = (
+            "RECOVERY_ADOPTION_REGISTRY_BACKED"
+            if event_type == TradeEventType.RECOVERY_ADOPTION_RECORDED
+            else "RECOVERY_ADOPTION_REVIEW_REQUIRED"
+        )
+        contract = row.get("contract") if isinstance(row.get("contract"), Mapping) else {}
+        try:
+            append_live_trade_registry_event(
+                repo_root=config.repo_root,
+                event=make_live_trade_registry_event(
+                    event_type=event_type,
+                    generated_at=now,
+                    trade_id=str(row.get("trade_id") or "").strip(),
+                    lifecycle_id=str(row.get("lifecycle_id") or row.get("ownership_intent_id") or "").strip() or None,
+                    lane_id=str(row.get("lane_id") or row.get("strategy_id") or "UNKNOWN").strip(),
+                    thesis_strategy_id=str(row.get("strategy_id") or row.get("lane_id") or "UNKNOWN").strip(),
+                    account_id=str(row.get("account_id") or config.account).strip(),
+                    symbol=str(contract.get("symbol") or row.get("symbol") or "UNKNOWN").strip().upper(),
+                    con_id=contract.get("con_id") or row.get("con_id") or 1,
+                    local_symbol=str(contract.get("local_symbol") or row.get("local_symbol") or "UNKNOWN").strip(),
+                    expiry=str(contract.get("expiry") or row.get("expiry") or "UNKNOWN").strip(),
+                    side=str(row.get("side") or _side_for_entry_action(row.get("action")) or "LONG").strip().upper(),
+                    action=str(row.get("action") or "BUY").strip().upper().replace("_TO_OPEN", ""),
+                    qty=row.get("qty") or row.get("quantity") or 1,
+                    order_id=row.get("broker_order_id") or row.get("order_id"),
+                    client_id=row.get("client_id"),
+                    perm_id=row.get("perm_id"),
+                    exec_id=row.get("exec_id"),
+                    source_artifact_path=str(config.report_path),
+                    reason_codes=(reason,),
+                    metadata={
+                        "source": "track_b_paper_broker_reconciliation_recovery_adoption",
+                        "classification": classification,
+                        "paper_only": True,
+                        "live_money_eligible": False,
+                        "paper_proof_invoked": False,
+                    },
+                ),
+            )
+        except Exception:
+            continue
+
+
+def _recovery_adoption_trade_ids(broker_backed_entry_adoption: Mapping[str, Any] | None) -> set[str]:
+    if not isinstance(broker_backed_entry_adoption, Mapping):
+        return set()
+    rows = [
+        row
+        for row in broker_backed_entry_adoption.get("adoptions") or []
+        if isinstance(row, Mapping)
+    ]
+    if not rows and broker_backed_entry_adoption.get("trade_id"):
+        rows = [broker_backed_entry_adoption]
+    return {
+        str(row.get("trade_id") or "").strip()
+        for row in rows
+        if row.get("adoption_allowed") is True and str(row.get("trade_id") or "").strip()
+    }
+
+
+def _registry_record_latest_event_value(record: TradeRegistryRecord, field_name: str) -> str | None:
+    for event in reversed(record.event_chain):
+        value = getattr(event, field_name, None)
+        if value not in (None, ""):
+            return str(value)
+    return None
+
+
+def _entry_action_for_side(side: object) -> str:
+    return "SELL" if str(side or "").strip().upper() == "SHORT" else "BUY"
+
+
+def _side_for_entry_action(action: object) -> str:
+    normalized = str(action or "").strip().upper()
+    return "SHORT" if normalized.startswith("SELL") else "LONG"
 
 
 def _validate_broker_truth(
@@ -1323,8 +1440,51 @@ def _submit_intent_ownership_reconciliation_state(
 
 
 def _broker_backed_entry_adoption_remediation(
+    *,
     submit_intent_ownership_reconciliation: Mapping[str, Any],
+    registry_reconciliation: Mapping[str, Any],
 ) -> dict[str, Any] | None:
+    registry_classification = str(registry_reconciliation.get("classification") or "")
+    if registry_classification == "REGISTRY_RECONCILIATION_REVIEW_REQUIRED":
+        blockers = [row for row in registry_reconciliation.get("blockers") or [] if isinstance(row, Mapping)]
+        orphan_broker_position_only = bool(blockers) and all(
+            str(row.get("code") or "") == "REGISTRY_ORPHAN_BROKER_POSITION_REVIEW_REQUIRED"
+            for row in blockers
+        )
+        if not orphan_broker_position_only:
+            return {
+                "classification": "BROKER_BACKED_ENTRY_ADOPTION_REVIEW_REQUIRED",
+                "detail": "Central trade registry cannot safely identify the broker-backed position for recovery/adoption.",
+                "registry_reconciliation": dict(registry_reconciliation),
+                "adoption_allowed": False,
+                "live_money_eligible": False,
+                "paper_proof_invoked": False,
+            }
+    mapped_records = [row for row in registry_reconciliation.get("mapped_records") or [] if isinstance(row, Mapping)]
+    mapped_trade_ids = [str(item).strip() for item in registry_reconciliation.get("mapped_trade_ids") or [] if str(item).strip()]
+    broker_position_count = int(registry_reconciliation.get("broker_position_count") or 0)
+    lifecycle_position_count = int(registry_reconciliation.get("lifecycle_position_count") or 0)
+    open_resume_records = [
+        row
+        for row in mapped_records
+        if str(row.get("current_state") or "") in {"OPEN_MANAGED", "EXIT_DUE", "WORKING_EXIT"}
+    ]
+    if open_resume_records and mapped_trade_ids and broker_position_count > 0 and lifecycle_position_count == 0:
+        return {
+            "classification": "BROKER_BACKED_ENTRY_REGISTRY_RESUME_REQUIRED",
+            "detail": "Broker-backed PAPER position maps to exactly one central registry trade_id and should resume from that trade chain.",
+            "adoption_allowed": True,
+            "resume_existing_trade": True,
+            "trade_id": mapped_trade_ids[0] if len(mapped_trade_ids) == 1 else None,
+            "adoption_count": len(open_resume_records),
+            "adoptions": [
+                _registry_resume_adoption_item(row)
+                for row in open_resume_records
+            ],
+            "live_money_eligible": False,
+            "paper_proof_invoked": False,
+            "required_action": "Resume guarded PAPER lifecycle management from the exact central registry trade_id.",
+        }
     classification = str(submit_intent_ownership_reconciliation.get("classification") or "")
     if classification == "SUBMIT_INTENT_BROKER_POSITIONS_ADOPTION_REQUIRED":
         remediations = []
@@ -1342,6 +1502,7 @@ def _broker_backed_entry_adoption_remediation(
             "detail": "Multiple broker-backed PAPER entries are each attributed to durable submit intents but no lifecycle OPEN_MANAGED records exist.",
             "adoption_count": len(remediations),
             "adoptions": remediations,
+            "adoption_allowed": bool(remediations) and all(item.get("broker_backed_evidence_valid") is True for item in remediations),
             "live_money_eligible": False,
             "paper_proof_invoked": False,
             "required_action": "Run guarded PAPER lifecycle adoption for each exact ownership/order/contract before allowing submit.",
@@ -1360,14 +1521,40 @@ def _broker_backed_entry_adoption_item(
 ) -> dict[str, Any] | None:
     if not isinstance(submit_intent, Mapping) or not isinstance(broker_position, Mapping):
         return None
+    perm_id = submit_intent.get("perm_id")
+    extra = submit_intent.get("extra") if isinstance(submit_intent.get("extra"), Mapping) else {}
+    exec_id = submit_intent.get("exec_id") or submit_intent.get("execution_id") or extra.get("exec_id")
+    broker_backed_evidence_valid = bool(str(perm_id or "").strip() and str(exec_id or "").strip())
+    trade_id = str(extra.get("trade_id") or submit_intent.get("trade_id") or "").strip()
+    if not trade_id:
+        trade_id = trade_id_from_live_identity(
+            lifecycle_id=submit_intent.get("lifecycle_id"),
+            ownership_intent_id=submit_intent.get("ownership_intent_id"),
+            order_intent_id=submit_intent.get("order_intent_id"),
+            account_id=submit_intent.get("account_id"),
+            con_id=submit_intent.get("con_id") or broker_position.get("con_id"),
+            lane_id=submit_intent.get("lane_id") or submit_intent.get("strategy_id"),
+        )
     return {
-        "classification": "BROKER_BACKED_ENTRY_ADOPTION_REQUIRED",
-        "detail": "Broker-backed PAPER entry is attributed to a durable submit intent but no lifecycle OPEN_MANAGED record exists.",
+        "classification": "BROKER_BACKED_ENTRY_ADOPTION_REQUIRED"
+        if broker_backed_evidence_valid
+        else "BROKER_BACKED_ENTRY_ADOPTION_REVIEW_REQUIRED",
+        "detail": "Broker-backed PAPER entry is attributed to a durable submit intent but no lifecycle OPEN_MANAGED record exists."
+        if broker_backed_evidence_valid
+        else "Broker position is attributed to a submit intent, but broker-backed fill evidence is missing perm_id/exec_id.",
+        "adoption_allowed": broker_backed_evidence_valid,
+        "broker_backed_evidence_valid": broker_backed_evidence_valid,
+        "trade_id": trade_id,
+        "lifecycle_id": submit_intent.get("lifecycle_id"),
         "ownership_intent_id": submit_intent.get("ownership_intent_id"),
         "order_intent_id": submit_intent.get("order_intent_id") or submit_intent.get("ownership_intent_id"),
         "broker_order_id": submit_intent.get("broker_order_id"),
         "client_id": submit_intent.get("client_id"),
-        "perm_id": submit_intent.get("perm_id"),
+        "perm_id": perm_id,
+        "exec_id": exec_id,
+        "lane_id": submit_intent.get("lane_id"),
+        "strategy_id": submit_intent.get("strategy_id"),
+        "action": submit_intent.get("action"),
         "contract": {
             "symbol": submit_intent.get("symbol") or broker_position.get("symbol"),
             "local_symbol": submit_intent.get("local_symbol") or broker_position.get("local_symbol"),
@@ -1379,6 +1566,32 @@ def _broker_backed_entry_adoption_item(
         "live_money_eligible": False,
         "paper_proof_invoked": False,
         "required_action": "Run guarded PAPER lifecycle adoption for this exact ownership/order/contract before allowing submit.",
+    }
+
+
+def _registry_resume_adoption_item(row: Mapping[str, Any]) -> dict[str, Any]:
+    return {
+        "classification": "BROKER_BACKED_ENTRY_REGISTRY_RESUME_READY",
+        "adoption_allowed": True,
+        "resume_existing_trade": True,
+        "trade_id": row.get("trade_id"),
+        "lifecycle_id": row.get("lifecycle_id"),
+        "lane_id": row.get("lane_id"),
+        "strategy_id": row.get("strategy_id"),
+        "account_id": row.get("account_id"),
+        "action": _entry_action_for_side(row.get("side")),
+        "contract": {
+            "symbol": row.get("symbol") or row.get("instrument_family"),
+            "local_symbol": row.get("local_symbol"),
+            "expiry": row.get("expiry"),
+            "con_id": row.get("con_id"),
+        },
+        "qty": row.get("quantity"),
+        "broker_order_id": row.get("entry_order_id"),
+        "client_id": row.get("entry_client_id"),
+        "perm_id": row.get("entry_perm_id"),
+        "exec_id": row.get("entry_exec_id"),
+        "broker_backed_evidence_valid": bool(str(row.get("entry_perm_id") or "").strip() and str(row.get("entry_exec_id") or "").strip()),
     }
 
 

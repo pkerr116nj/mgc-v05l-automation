@@ -42,7 +42,7 @@ def test_staged_run_ladder_counts_and_goal_metrics() -> None:
     assert smoke.summary["stage_goal_zero_failures"]["zero_trade_id_collisions"] is True
     assert smoke.summary["stage_goal_zero_failures"]["zero_impossible_states"] is True
     assert smoke.summary["stage_goal_zero_failures"]["every_bad_lifecycle_has_reason_codes"] is True
-    assert known.requested_count == 190
+    assert known.requested_count == 240
     assert known.summary["expected_review_required"] > 0
 
 
@@ -80,6 +80,10 @@ def test_induced_invalid_scenarios_produce_review_or_invariant_failures() -> Non
             LifecycleStressScenario.DUPLICATE_CLOSE,
             LifecycleStressScenario.RECONCILIATION_AMBIGUITY,
             LifecycleStressScenario.STALE_ARTIFACT_RESURRECTION,
+            LifecycleStressScenario.RECOVERY_MISSING_BROKER_EVIDENCE,
+            LifecycleStressScenario.RECOVERY_AMBIGUOUS_TRADE_IDS,
+            LifecycleStressScenario.RECOVERY_LIFECYCLE_OWNER_CONFLICT,
+            LifecycleStressScenario.RECOVERY_STALE_HISTORY_NO_ADOPT,
         )
     ]
     results = [report.results[0] for report in reports]
@@ -96,6 +100,13 @@ def test_induced_invalid_scenarios_produce_review_or_invariant_failures() -> Non
     }
     assert reconciliation_cases[LifecycleStressScenario.RECONCILIATION_AMBIGUITY.value].registry_state == "REVIEW_REQUIRED"
     assert reconciliation_cases[LifecycleStressScenario.STALE_ARTIFACT_RESURRECTION.value].registry_state == "REVIEW_REQUIRED"
+    recovery_cases = {
+        result.scenario: result for result in results if result.scenario.startswith("recovery_")
+    }
+    assert recovery_cases[LifecycleStressScenario.RECOVERY_MISSING_BROKER_EVIDENCE.value].registry_state == "REVIEW_REQUIRED"
+    assert recovery_cases[LifecycleStressScenario.RECOVERY_AMBIGUOUS_TRADE_IDS.value].registry_state == "REVIEW_REQUIRED"
+    assert recovery_cases[LifecycleStressScenario.RECOVERY_LIFECYCLE_OWNER_CONFLICT.value].registry_state == "REVIEW_REQUIRED"
+    assert recovery_cases[LifecycleStressScenario.RECOVERY_STALE_HISTORY_NO_ADOPT.value].registry_state == "REVIEW_REQUIRED"
 
 
 def test_contract_close_only_blocks_entry_and_preserves_exit_management() -> None:
@@ -123,6 +134,7 @@ def test_passed_scenarios_have_shadow_report_style_rows() -> None:
             scenario_mix=(
                 LifecycleStressScenario.CLEAN_FULL_LIFECYCLE,
                 LifecycleStressScenario.RECOVERY_ADOPTION,
+                LifecycleStressScenario.RECOVERY_REGISTRY_BACKED_RESUME,
                 LifecycleStressScenario.MANUAL_OPERATOR_CLOSE,
             ),
         )

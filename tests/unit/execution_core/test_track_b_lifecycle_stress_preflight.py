@@ -23,7 +23,7 @@ def test_routine_preflight_runs_all_ladder_stages_with_fast_fuzz() -> None:
 
     assert report.passed is True
     assert [stage.mode for stage in report.stages] == ["smoke", "known_scenarios", "lane_matrix", "fuzz"]
-    assert [stage.total_lifecycles for stage in report.stages] == [20, 170, 1000, 25]
+    assert [stage.total_lifecycles for stage in report.stages] == [20, 240, 1000, 25]
     assert all(stage.hard_failure is False for stage in report.stages)
     assert report.to_dict()["summary"]["bad_lifecycles_without_reason_codes"] == 0
     assert report.broker_mutation_allowed is False

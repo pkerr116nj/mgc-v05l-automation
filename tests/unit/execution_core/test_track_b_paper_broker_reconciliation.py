@@ -13,6 +13,7 @@ from mgc_v05l.execution_core.track_b_central_trade_registry import TradeEventTyp
 from mgc_v05l.execution_core.track_b_live_trade_registry import (
     append_live_trade_registry_event,
     make_live_trade_registry_event,
+    validate_registry_managed_exit_identity,
 )
 from mgc_v05l.execution_core.track_b_submit_intent_ownership import (
     SubmitIntentOwnershipRecord,
@@ -227,6 +228,7 @@ def test_broker_only_position_with_matching_submit_intent_is_adoption_required(t
     assert remediation["ownership_intent_id"].startswith("submit_owner_")
     assert remediation["broker_order_id"] == "28"
     assert remediation["perm_id"] == 614044377
+    assert remediation["exec_id"] == "exec-1"
     assert remediation["contract"] == {
         "symbol": "MGC",
         "local_symbol": "MGCM6",
@@ -238,6 +240,9 @@ def test_broker_only_position_with_matching_submit_intent_is_adoption_required(t
     blocker = next(blocker for blocker in report["blockers"] if blocker["code"] == "SUBMIT_INTENT_BROKER_POSITION_ADOPTION_REQUIRED")
     assert blocker["broker_backed_entry_adoption"]["classification"] == "BROKER_BACKED_ENTRY_ADOPTION_REQUIRED"
     assert not any(blocker["code"] == "TRACK_B_BROKER_LIFECYCLE_POSITION_COUNT_MISMATCH" for blocker in report["blockers"])
+    events = _read_registry_events(config)
+    assert events[-1]["event_type"] == "RECOVERY_ADOPTION_RECORDED"
+    assert events[-1]["trade_id"] == remediation["trade_id"]
 
 
 def test_multiple_mule_broker_only_positions_get_per_position_adoption_required(tmp_path: Path) -> None:
@@ -309,8 +314,284 @@ def test_multiple_mule_broker_only_positions_get_per_position_adoption_required(
         "submit_owner_test_mgc_1",
         "submit_owner_test_mnq_1",
     }
+    assert all(item["broker_backed_evidence_valid"] is True for item in remediation["adoptions"])
     assert any(blocker["code"] == "SUBMIT_INTENT_BROKER_POSITIONS_ADOPTION_REQUIRED" for blocker in report["blockers"])
     assert not any(blocker["code"] == "TRACK_B_BROKER_LIFECYCLE_POSITION_COUNT_MISMATCH" for blocker in report["blockers"])
+
+
+def test_restart_with_registry_backed_open_position_resumes_same_trade_id(tmp_path: Path) -> None:
+    config = _write_base_artifacts(tmp_path)
+    trade_id = "trade_registry_restart_resume"
+    _write_registry_open_managed_trade(
+        config,
+        trade_id=trade_id,
+        lifecycle_id="life_restart_resume",
+        lane_id="mnq_us_active_participation_long",
+        strategy_id="PAPER_ACTIVE_EVIDENCE_MNQ_US_PARTICIPATION_LONG_V1",
+        symbol="MNQ",
+        local_symbol="MNQM6",
+        con_id=770561201,
+        expiry="20260618",
+    )
+    _write_broker_truth(
+        config,
+        positions=[
+            {
+                "account_id": "DUM882026",
+                "symbol": "MNQ",
+                "local_symbol": "MNQM6",
+                "con_id": 770561201,
+                "expiry": "20260618",
+                "security_type": "FUT",
+                "quantity": "1",
+            }
+        ],
+    )
+
+    report = reconcile_track_b_paper_broker_truth(config=config, now=NOW)
+
+    adoption = report["broker_backed_entry_adoption"]
+    assert adoption["classification"] == "BROKER_BACKED_ENTRY_REGISTRY_RESUME_REQUIRED"
+    assert adoption["adoptions"][0]["trade_id"] == trade_id
+    events = _read_registry_events(config)
+    assert events[-1]["event_type"] == "RECOVERY_ADOPTION_RECORDED"
+    assert events[-1]["trade_id"] == trade_id
+
+
+def test_broker_position_with_fill_evidence_but_no_registry_creates_recovery_adoption(tmp_path: Path) -> None:
+    config = _write_base_artifacts(tmp_path)
+    record = _write_submit_intent_ownership(config, ownership_intent_id="submit_owner_mnq_recovery", symbol="MNQ", local_symbol="MNQM6", expiry="20260618", con_id=770561201)
+    _write_broker_truth(
+        config,
+        positions=[
+            {
+                "account_id": "DUM882026",
+                "symbol": "MNQ",
+                "local_symbol": "MNQM6",
+                "expiry": "20260618",
+                "con_id": 770561201,
+                "security_type": "FUT",
+                "quantity": "1",
+            }
+        ],
+    )
+
+    report = reconcile_track_b_paper_broker_truth(config=config, now=NOW)
+
+    adoption = report["broker_backed_entry_adoption"]
+    assert adoption["classification"] == "BROKER_BACKED_ENTRY_ADOPTION_REQUIRED"
+    assert adoption["broker_backed_evidence_valid"] is True
+    assert adoption["trade_id"] == record["extra"]["trade_id"]
+    events = _read_registry_events(config)
+    assert events[-1]["event_type"] == "RECOVERY_ADOPTION_RECORDED"
+    assert events[-1]["trade_id"] == record["extra"]["trade_id"]
+
+
+def test_broker_position_without_fill_evidence_is_recovery_review_required(tmp_path: Path) -> None:
+    config = _write_base_artifacts(tmp_path)
+    _write_submit_intent_ownership(config, exec_id=None)
+    _write_broker_truth(
+        config,
+        positions=[
+            {
+                "account_id": "DUM882026",
+                "symbol": "MGC",
+                "local_symbol": "MGCM6",
+                "expiry": "20260626",
+                "con_id": 712565978,
+                "security_type": "FUT",
+                "quantity": "1",
+            }
+        ],
+    )
+
+    report = reconcile_track_b_paper_broker_truth(config=config, now=NOW)
+
+    adoption = report["broker_backed_entry_adoption"]
+    assert adoption["classification"] == "BROKER_BACKED_ENTRY_ADOPTION_REVIEW_REQUIRED"
+    assert adoption["broker_backed_evidence_valid"] is False
+    assert any(event["event_type"] == "REVIEW_REQUIRED" for event in _read_registry_events(config))
+
+
+def test_ambiguous_registry_trade_ids_block_recovery_adoption(tmp_path: Path) -> None:
+    config = _write_base_artifacts(tmp_path)
+    for trade_id in ("trade_recovery_ambiguous_a", "trade_recovery_ambiguous_b"):
+        _write_registry_open_managed_trade(
+            config,
+            trade_id=trade_id,
+            lifecycle_id=f"life_{trade_id}",
+            lane_id="mnq_us_active_participation_long",
+            strategy_id="PAPER_ACTIVE_EVIDENCE_MNQ_US_PARTICIPATION_LONG_V1",
+            symbol="MNQ",
+            local_symbol="MNQM6",
+            con_id=770561201,
+            expiry="20260618",
+        )
+    _write_broker_truth(
+        config,
+        positions=[
+            {
+                "account_id": "DUM882026",
+                "symbol": "MNQ",
+                "local_symbol": "MNQM6",
+                "expiry": "20260618",
+                "con_id": 770561201,
+                "security_type": "FUT",
+                "quantity": "1",
+            }
+        ],
+    )
+
+    report = reconcile_track_b_paper_broker_truth(config=config, now=NOW)
+
+    assert report["broker_backed_entry_adoption"]["classification"] == "BROKER_BACKED_ENTRY_ADOPTION_REVIEW_REQUIRED"
+    assert any(
+        blocker["code"] == "REGISTRY_AMBIGUOUS_BROKER_POSITION"
+        for blocker in report["registry_reconciliation"]["blockers"]
+    )
+
+
+def test_lifecycle_owner_conflict_with_registry_blocks_recovery_adoption(tmp_path: Path) -> None:
+    config = _write_base_artifacts(
+        tmp_path,
+        open_position={
+            "strategy_id": "PAPER_ACTIVE_EVIDENCE_MNQ_US_PARTICIPATION_LONG_V1",
+            "lane_id": "mnq_us_active_participation_long",
+            "trade_id": "trade_lifecycle_conflict",
+            "lifecycle_id": "life_actual",
+            "instrument_family": "MNQ",
+            "contract_key": "MNQ-202606",
+            "local_symbol": "MNQM6",
+            "con_id": 770561201,
+            "expiry": "20260618",
+            "side": "LONG",
+            "quantity": "1",
+        },
+    )
+    _write_registry_open_managed_trade(
+        config,
+        trade_id="trade_lifecycle_conflict",
+        lifecycle_id="life_other",
+        lane_id="mnq_us_active_participation_long",
+        strategy_id="PAPER_ACTIVE_EVIDENCE_MNQ_US_PARTICIPATION_LONG_V1",
+        symbol="MNQ",
+        local_symbol="MNQM6",
+        con_id=770561201,
+        expiry="20260618",
+    )
+    _write_broker_truth(
+        config,
+        positions=[
+            {
+                "account_id": "DUM882026",
+                "symbol": "MNQ",
+                "local_symbol": "MNQM6",
+                "expiry": "20260618",
+                "con_id": 770561201,
+                "security_type": "FUT",
+                "quantity": "1",
+            }
+        ],
+    )
+
+    report = reconcile_track_b_paper_broker_truth(config=config, now=NOW)
+
+    assert report["broker_backed_entry_adoption"]["classification"] == "BROKER_BACKED_ENTRY_ADOPTION_REVIEW_REQUIRED"
+    assert any(
+        blocker["code"] == "REGISTRY_LIFECYCLE_OPEN_WITHOUT_TRADE_ID_REVIEW_REQUIRED"
+        for blocker in report["registry_reconciliation"]["blockers"]
+    )
+
+
+def test_closed_historical_registry_record_does_not_adopt_current_broker_position(tmp_path: Path) -> None:
+    config = _write_base_artifacts(tmp_path)
+    _write_registry_open_managed_trade(
+        config,
+        trade_id="trade_closed_history_no_adopt",
+        lifecycle_id="life_closed_history_no_adopt",
+        lane_id="mnq_us_active_participation_long",
+        strategy_id="PAPER_ACTIVE_EVIDENCE_MNQ_US_PARTICIPATION_LONG_V1",
+        symbol="MNQ",
+        local_symbol="MNQM6",
+        con_id=770561201,
+        expiry="20260618",
+        include_close_fill=True,
+    )
+    _write_broker_truth(
+        config,
+        positions=[
+            {
+                "account_id": "DUM882026",
+                "symbol": "MNQ",
+                "local_symbol": "MNQM6",
+                "expiry": "20260618",
+                "con_id": 770561201,
+                "security_type": "FUT",
+                "quantity": "1",
+            }
+        ],
+    )
+
+    report = reconcile_track_b_paper_broker_truth(config=config, now=NOW)
+
+    assert report["broker_backed_entry_adoption"] is None
+    assert any(
+        blocker["code"] == "REGISTRY_ORPHAN_BROKER_POSITION_REVIEW_REQUIRED"
+        for blocker in report["registry_reconciliation"]["blockers"]
+    )
+
+
+def test_managed_exit_after_recovery_uses_trade_id(tmp_path: Path) -> None:
+    config = _write_base_artifacts(tmp_path)
+    record = _write_submit_intent_ownership(config, ownership_intent_id="submit_owner_mnq_exit_after_recovery", symbol="MNQ", local_symbol="MNQM6", expiry="20260618", con_id=770561201)
+    _write_broker_truth(
+        config,
+        positions=[
+            {
+                "account_id": "DUM882026",
+                "symbol": "MNQ",
+                "local_symbol": "MNQM6",
+                "expiry": "20260618",
+                "con_id": 770561201,
+                "security_type": "FUT",
+                "quantity": "1",
+            }
+        ],
+    )
+    reconcile_track_b_paper_broker_truth(config=config, now=NOW)
+    phase1 = {
+        "ready": True,
+        "track_b_lifecycle_positions": [
+            {
+                "lifecycle_id": record["lifecycle_id"],
+                "account_id": "MULTIPLE",
+                "lane_id": record["lane_id"],
+                "strategy_id": record["strategy_id"],
+                "track_b_root": "MNQ",
+                "local_symbol": "MNQM6",
+                "con_id": 770561201,
+                "quantity": "1",
+                "side": "LONG",
+            }
+        ],
+        "track_b_broker_positions": [
+            {"account_id": "DUM882026", "symbol": "MNQ", "local_symbol": "MNQM6", "con_id": 770561201, "quantity": "1"}
+        ],
+    }
+
+    validation = validate_registry_managed_exit_identity(
+        repo_root=config.repo_root,
+        trade_id=record["extra"]["trade_id"],
+        lifecycle_id=record["lifecycle_id"],
+        account_id="DUM882026",
+        con_id=770561201,
+        local_symbol="MNQM6",
+        quantity=1,
+        action="SELL",
+        phase1_reconciliation_gate=phase1,
+    )
+
+    assert validation["allowed"] is True
 
 
 def test_competing_submit_intents_block_review_required(tmp_path: Path) -> None:
@@ -1835,9 +2116,21 @@ def _write_submit_intent_ownership(
     con_id: int = 712565978,
     client_id: int = 11940,
     perm_id: int = 614044377,
+    exec_id: str | None = "exec-1",
+    trade_id: str | None = None,
     ownership_intent_id: str | None = None,
 ) -> dict[str, object]:
     parsed_created_at = datetime.fromisoformat(created_at.replace("Z", "+00:00"))
+    resolved_ownership_intent_id = ownership_intent_id or f"submit_owner_test_{broker_order_id}"
+    resolved_trade_id = trade_id or f"trade_{resolved_ownership_intent_id}"
+    extra = {
+        "reason": "LEAK_TEST_ENTRY",
+        "delegated_classification": "PAPER_ORDER_UNKNOWN_NEEDS_MANUAL_TWS_REVIEW",
+        "bridge_classification": "PAPER_STRATEGY_NEEDS_MANUAL_REVIEW",
+        "trade_id": resolved_trade_id,
+    }
+    if exec_id is not None:
+        extra["exec_id"] = exec_id
     record = SubmitIntentOwnershipRecord(
         mode="PAPER",
         account_id="DUM882026",
@@ -1857,7 +2150,7 @@ def _write_submit_intent_ownership(
         git_head="abc123",
         created_at=parsed_created_at,
         state=SubmitIntentOwnershipState.BROKER_RESULT_UNKNOWN_REFRESH_REQUIRED,
-        ownership_intent_id=ownership_intent_id or f"submit_owner_test_{broker_order_id}",
+        ownership_intent_id=resolved_ownership_intent_id,
         lifecycle_id=f"reserved_submit_{lane_id}_{broker_order_id}",
         lifecycle_id_reserved_only=True,
         lifecycle_position_open=False,
@@ -1876,11 +2169,7 @@ def _write_submit_intent_ownership(
         broker_order_id=broker_order_id,
         client_id=client_id,
         perm_id=perm_id,
-        extra={
-            "reason": "LEAK_TEST_ENTRY",
-            "delegated_classification": "PAPER_ORDER_UNKNOWN_NEEDS_MANUAL_TWS_REVIEW",
-            "bridge_classification": "PAPER_STRATEGY_NEEDS_MANUAL_REVIEW",
-        },
+        extra=extra,
     )
     result = append_submit_intent_ownership_record(
         record,

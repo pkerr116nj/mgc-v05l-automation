@@ -81,6 +81,11 @@ class LifecycleStressScenario(str, Enum):
     AMBIGUOUS_RECONSTRUCTION = "ambiguous_reconstruction"
     RECONCILIATION_AMBIGUITY = "reconciliation_ambiguity"
     STALE_ARTIFACT_RESURRECTION = "stale_artifact_resurrection"
+    RECOVERY_REGISTRY_BACKED_RESUME = "recovery_registry_backed_resume"
+    RECOVERY_MISSING_BROKER_EVIDENCE = "recovery_missing_broker_backed_evidence"
+    RECOVERY_AMBIGUOUS_TRADE_IDS = "recovery_ambiguous_trade_ids"
+    RECOVERY_LIFECYCLE_OWNER_CONFLICT = "recovery_lifecycle_owner_conflict"
+    RECOVERY_STALE_HISTORY_NO_ADOPT = "recovery_stale_history_no_adopt"
 
 
 @dataclass(frozen=True)
@@ -126,6 +131,10 @@ EXPECTED_REVIEW_SCENARIOS = {
     LifecycleStressScenario.AMBIGUOUS_RECONSTRUCTION,
     LifecycleStressScenario.RECONCILIATION_AMBIGUITY,
     LifecycleStressScenario.STALE_ARTIFACT_RESURRECTION,
+    LifecycleStressScenario.RECOVERY_MISSING_BROKER_EVIDENCE,
+    LifecycleStressScenario.RECOVERY_AMBIGUOUS_TRADE_IDS,
+    LifecycleStressScenario.RECOVERY_LIFECYCLE_OWNER_CONFLICT,
+    LifecycleStressScenario.RECOVERY_STALE_HISTORY_NO_ADOPT,
 }
 IMPOSSIBLE_STATE_INVARIANTS = {
     "CLOSED_FLAT_WITH_OPEN_QTY",
@@ -134,7 +143,7 @@ IMPOSSIBLE_STATE_INVARIANTS = {
 }
 DEFAULT_COUNTS_BY_MODE = {
     LifecycleStressRunMode.SMOKE: 20,
-    LifecycleStressRunMode.KNOWN_SCENARIOS: 190,
+    LifecycleStressRunMode.KNOWN_SCENARIOS: 240,
     LifecycleStressRunMode.LANE_MATRIX: 1000,
     LifecycleStressRunMode.FUZZ: 10000,
 }
@@ -506,7 +515,43 @@ def _events_for_scenario(
                 reason_codes=("PASSIVE_LIMIT_TIMEOUT_EXPECTED",),
             ),
         )
-    if scenario == LifecycleStressScenario.RECOVERY_ADOPTION:
+    if scenario in {
+        LifecycleStressScenario.RECOVERY_ADOPTION,
+        LifecycleStressScenario.RECOVERY_REGISTRY_BACKED_RESUME,
+    }:
+        return (
+            event(
+                TradeEventType.RECOVERY_ADOPTION_RECORDED,
+                seconds=0,
+                order_id=entry_order_id,
+                perm_id=entry_perm_id,
+                exec_id=entry_exec_id,
+                price="100.00",
+                reason_codes=(
+                    "RECOVERY_ADOPTION_REGISTRY_BACKED"
+                    if scenario == LifecycleStressScenario.RECOVERY_REGISTRY_BACKED_RESUME
+                    else "RECOVERY_ADOPTION_RECORDED",
+                ),
+            ),
+            event(TradeEventType.RECONCILED_OPEN, seconds=1),
+        )
+    if scenario == LifecycleStressScenario.RECOVERY_MISSING_BROKER_EVIDENCE:
+        return (
+            event(
+                TradeEventType.REVIEW_REQUIRED,
+                seconds=0,
+                reason_codes=("RECOVERY_ADOPTION_MISSING_BROKER_BACKED_EVIDENCE",),
+            ),
+        )
+    if scenario == LifecycleStressScenario.RECOVERY_AMBIGUOUS_TRADE_IDS:
+        return (
+            event(
+                TradeEventType.REVIEW_REQUIRED,
+                seconds=0,
+                reason_codes=("RECOVERY_ADOPTION_AMBIGUOUS_TRADE_IDS",),
+            ),
+        )
+    if scenario == LifecycleStressScenario.RECOVERY_LIFECYCLE_OWNER_CONFLICT:
         return (
             event(
                 TradeEventType.RECOVERY_ADOPTION_RECORDED,
@@ -517,7 +562,24 @@ def _events_for_scenario(
                 price="100.00",
                 reason_codes=("RECOVERY_ADOPTION_RECORDED",),
             ),
-            event(TradeEventType.RECONCILED_OPEN, seconds=1),
+            event(
+                TradeEventType.REVIEW_REQUIRED,
+                seconds=1,
+                lifecycle=f"conflicting_{lifecycle_id}",
+                reason_codes=("RECOVERY_ADOPTION_LIFECYCLE_OWNER_CONFLICT",),
+            ),
+        )
+    if scenario == LifecycleStressScenario.RECOVERY_STALE_HISTORY_NO_ADOPT:
+        return (
+            event(TradeEventType.ENTRY_FILL_BROKER_BACKED, seconds=0, order_id=entry_order_id, perm_id=entry_perm_id, exec_id=entry_exec_id, price="100.00"),
+            event(TradeEventType.LIFECYCLE_OPEN_MANAGED, seconds=1),
+            event(TradeEventType.EXIT_FILL_BROKER_BACKED, seconds=2, action=lane.exit_action, order_id=exit_order_id, perm_id=exit_perm_id, exec_id=exit_exec_id, price="101.00"),
+            event(TradeEventType.RECONCILED_FLAT, seconds=3, action=lane.exit_action),
+            event(
+                TradeEventType.REVIEW_REQUIRED,
+                seconds=4,
+                reason_codes=("RECOVERY_STALE_HISTORICAL_ARTIFACT_CANNOT_ADOPT_CURRENT_POSITION",),
+            ),
         )
     if scenario == LifecycleStressScenario.MANUAL_OPERATOR_CLOSE:
         return (
