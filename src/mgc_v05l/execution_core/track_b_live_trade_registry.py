@@ -14,7 +14,13 @@ from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Any, Mapping
 
-from .track_b_central_trade_registry import TradeEvent, TradeEventType
+from .track_b_central_trade_registry import (
+    TradeCurrentState,
+    TradeEvent,
+    TradeEventType,
+    TradeRegistryRecord,
+    reduce_trade_events,
+)
 
 
 DEFAULT_TRACK_B_LIVE_TRADE_REGISTRY_EVENTS_JSONL = (
@@ -63,6 +69,161 @@ def append_live_trade_registry_event(
         "jsonl_path": str(resolved_jsonl),
         "latest_path": str(resolved_latest),
     }
+
+
+def load_live_trade_registry_record(
+    *,
+    repo_root: Path,
+    trade_id: str,
+    jsonl_path: Path = DEFAULT_TRACK_B_LIVE_TRADE_REGISTRY_EVENTS_JSONL,
+) -> TradeRegistryRecord | None:
+    """Load and reduce one live registry trade chain by ``trade_id``.
+
+    This is read-only reconstruction from the append-only registry event log.
+    Malformed records are ignored here and should be classified by callers as
+    review-required rather than inferred into ownership authority.
+    """
+
+    requested_trade_id = str(trade_id or "").strip()
+    if not requested_trade_id:
+        return None
+    events: list[TradeEvent] = []
+    path = _resolve(repo_root, jsonl_path)
+    try:
+        rows = path.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return None
+    for line in rows:
+        if not line.strip():
+            continue
+        try:
+            event = TradeEvent.from_dict(json.loads(line))
+        except Exception:
+            continue
+        if event.trade_id == requested_trade_id:
+            events.append(event)
+    if not events:
+        return None
+    return reduce_trade_events(events)
+
+
+def validate_registry_managed_exit_identity(
+    *,
+    repo_root: Path,
+    trade_id: str | None,
+    lifecycle_id: str | None,
+    account_id: str | None,
+    con_id: int | str | None,
+    local_symbol: str | None,
+    quantity: int | float | str | Decimal | None,
+    action: str | None,
+    phase1_reconciliation_gate: Mapping[str, Any],
+    jsonl_path: Path = DEFAULT_TRACK_B_LIVE_TRADE_REGISTRY_EVENTS_JSONL,
+) -> dict[str, Any]:
+    """Validate a managed close against the central registry owner identity.
+
+    The registry record is the ownership source of first resort. Phase-1
+    broker/lifecycle reconciliation is then used to prove the registry owner
+    still matches exact live broker-backed lifecycle truth.
+    """
+
+    blockers: list[str] = []
+    requested_trade_id = str(trade_id or "").strip()
+    requested_lifecycle_id = str(lifecycle_id or "").strip()
+    if not requested_trade_id:
+        blockers.append("missing_trade_id")
+    if not requested_lifecycle_id:
+        blockers.append("missing_lifecycle_id")
+    if not bool(phase1_reconciliation_gate.get("ready")):
+        blockers.append("broker_lifecycle_reconciliation_not_clean")
+    if blockers:
+        return _managed_exit_validation_result(blockers=blockers)
+
+    record = load_live_trade_registry_record(repo_root=repo_root, trade_id=requested_trade_id, jsonl_path=jsonl_path)
+    if record is None:
+        return _managed_exit_validation_result(blockers=["trade_registry_record_missing"])
+    if record.current_state not in {TradeCurrentState.OPEN_MANAGED, TradeCurrentState.EXIT_DUE}:
+        return _managed_exit_validation_result(
+            blockers=["trade_registry_state_not_open_managed"],
+            record=record,
+        )
+    if record.broker_backed_entry is not True:
+        return _managed_exit_validation_result(blockers=["trade_registry_entry_not_broker_backed"], record=record)
+    owner = record.ownership_identity
+    if owner is None:
+        return _managed_exit_validation_result(blockers=["trade_registry_owner_identity_missing"], record=record)
+    if not owner.lifecycle_id:
+        return _managed_exit_validation_result(blockers=["trade_registry_owner_lifecycle_id_missing"], record=record)
+    if owner.lifecycle_id != requested_lifecycle_id:
+        blockers.append("lifecycle_id_mismatch")
+
+    lifecycle_row = _exact_lifecycle_row(phase1_reconciliation_gate, requested_lifecycle_id)
+    if not lifecycle_row:
+        blockers.append("lifecycle_identity_row_missing")
+    broker_row = _matching_broker_position(lifecycle_row, phase1_reconciliation_gate) if lifecycle_row else {}
+
+    requested_account = _valid_identity_text(account_id)
+    owner_account = _valid_identity_text(owner.account_id)
+    lifecycle_account = _valid_identity_text(lifecycle_row.get("account_id") if lifecycle_row else None)
+    broker_account = _valid_identity_text(
+        broker_row.get("account_id") or broker_row.get("account") if broker_row else None
+    )
+    exact_account = broker_account or lifecycle_account
+    if requested_account and exact_account and requested_account != exact_account:
+        blockers.append("account_id_mismatch")
+    if owner_account and exact_account and owner_account != exact_account:
+        blockers.append("registry_owner_account_id_mismatch")
+
+    requested_con_id = str(con_id or "").strip()
+    exact_con_id = str((lifecycle_row or {}).get("con_id") or (broker_row or {}).get("con_id") or (broker_row or {}).get("conId") or "").strip()
+    if requested_con_id and exact_con_id and requested_con_id != exact_con_id:
+        blockers.append("con_id_mismatch")
+    if exact_con_id and str(owner.con_id) != exact_con_id:
+        blockers.append("registry_owner_con_id_mismatch")
+
+    requested_local = str(local_symbol or "").strip().upper()
+    exact_local = str((lifecycle_row or {}).get("local_symbol") or (broker_row or {}).get("local_symbol") or (broker_row or {}).get("localSymbol") or "").strip().upper()
+    if requested_local and exact_local and requested_local != exact_local:
+        blockers.append("local_symbol_mismatch")
+    if exact_local and owner.local_symbol.upper() != exact_local:
+        blockers.append("registry_owner_local_symbol_mismatch")
+
+    requested_qty = _decimal_or_none(quantity)
+    exact_qty = _decimal_or_none((lifecycle_row or {}).get("quantity"))
+    if requested_qty is not None and exact_qty is not None and requested_qty != exact_qty:
+        blockers.append("quantity_mismatch")
+    if exact_qty is not None and owner.qty != exact_qty:
+        blockers.append("registry_owner_quantity_mismatch")
+
+    expected_action = "SELL" if str(owner.side or "").upper() == "LONG" else "BUY"
+    requested_action = str(action or "").strip().upper()
+    if requested_action and requested_action != expected_action:
+        blockers.append("close_action_mismatch")
+
+    owner_payload = {
+        "trade_id": record.trade_id,
+        "current_state": record.current_state.value,
+        "broker_backed_entry": record.broker_backed_entry,
+        "lifecycle_id": owner.lifecycle_id,
+        "lane_id": owner.lane_id,
+        "strategy_id": owner.thesis_strategy_id,
+        "account_id": exact_account or owner.account_id,
+        "con_id": owner.con_id,
+        "local_symbol": owner.local_symbol,
+        "symbol": owner.symbol,
+        "expiry": owner.expiry,
+        "side": owner.side,
+        "quantity": str(owner.qty),
+        "entry_perm_id": _latest_event_value(record, "perm_id"),
+        "entry_exec_id": _latest_event_value(record, "exec_id"),
+    }
+    return _managed_exit_validation_result(
+        blockers=blockers,
+        record=record,
+        owner_identity=owner_payload,
+        lifecycle_row=lifecycle_row,
+        broker_position=broker_row,
+    )
 
 
 def make_live_trade_registry_event(
@@ -156,6 +317,71 @@ def trade_id_from_live_identity(
 
 def broker_backed_fill_has_required_ids(*, perm_id: object = None, exec_id: object = None) -> bool:
     return bool(str(perm_id or "").strip() and str(exec_id or "").strip())
+
+
+def _managed_exit_validation_result(
+    *,
+    blockers: list[str],
+    record: TradeRegistryRecord | None = None,
+    owner_identity: Mapping[str, Any] | None = None,
+    lifecycle_row: Mapping[str, Any] | None = None,
+    broker_position: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    return {
+        "classification": "REGISTRY_MANAGED_EXIT_ALLOWED" if not blockers else "REGISTRY_MANAGED_EXIT_BLOCKED",
+        "allowed": not blockers,
+        "block_reasons": list(dict.fromkeys(blockers)),
+        "trade_id": None if record is None else record.trade_id,
+        "registry_current_state": None if record is None else record.current_state.value,
+        "broker_backed_entry": None if record is None else record.broker_backed_entry,
+        "owner_identity": dict(owner_identity or {}),
+        "lifecycle_row": dict(lifecycle_row or {}),
+        "broker_position": dict(broker_position or {}),
+    }
+
+
+def _exact_lifecycle_row(phase1_reconciliation_gate: Mapping[str, Any], lifecycle_id: str) -> dict[str, Any]:
+    for row in list(phase1_reconciliation_gate.get("track_b_lifecycle_positions") or []):
+        if isinstance(row, Mapping) and str(row.get("lifecycle_id") or "").strip() == lifecycle_id:
+            return dict(row)
+    return {}
+
+
+def _matching_broker_position(
+    lifecycle_row: Mapping[str, Any],
+    phase1_reconciliation_gate: Mapping[str, Any],
+) -> dict[str, Any]:
+    requested_con_id = str(lifecycle_row.get("con_id") or "").strip()
+    requested_local = str(lifecycle_row.get("local_symbol") or "").strip().upper()
+    requested_symbol = str(lifecycle_row.get("track_b_root") or lifecycle_row.get("instrument_family") or "").strip().upper()
+    for row in list(phase1_reconciliation_gate.get("track_b_broker_positions") or []):
+        if not isinstance(row, Mapping):
+            continue
+        broker_con_id = str(row.get("con_id") or row.get("conId") or "").strip()
+        broker_local = str(row.get("local_symbol") or row.get("localSymbol") or "").strip().upper()
+        broker_symbol = str(row.get("track_b_root") or row.get("symbol") or "").strip().upper()
+        if requested_con_id and broker_con_id and requested_con_id == broker_con_id:
+            return dict(row)
+        if requested_local and broker_local and requested_local == broker_local:
+            return dict(row)
+        if requested_symbol and broker_symbol and requested_symbol == broker_symbol and not requested_local and not requested_con_id:
+            return dict(row)
+    return {}
+
+
+def _valid_identity_text(value: object) -> str:
+    text = str(value or "").strip()
+    if text.upper() in {"", "MULTIPLE", "MISSING", "UNKNOWN", "NONE", "NULL"}:
+        return ""
+    return text
+
+
+def _latest_event_value(record: TradeRegistryRecord, field: str) -> str | None:
+    for event in reversed(record.event_chain):
+        value = getattr(event, field, None)
+        if value not in (None, ""):
+            return str(value)
+    return None
 
 
 def _resolve(repo_root: Path, path: Path) -> Path:

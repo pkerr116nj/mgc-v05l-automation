@@ -16,6 +16,11 @@ from mgc_v05l.execution_core.track_b_submit_intent_ownership import (
     SubmitIntentOwnershipState,
     append_submit_intent_ownership_record,
 )
+from mgc_v05l.execution_core.track_b_central_trade_registry import TradeEventType
+from mgc_v05l.execution_core.track_b_live_trade_registry import (
+    append_live_trade_registry_event,
+    make_live_trade_registry_event,
+)
 
 
 def _write_monitor(tmp_path: Path, *, broker_quantity: float = 1.0, orphan_positions: list[dict[str, object]] | None = None) -> None:
@@ -243,6 +248,53 @@ def _write_broker_backed_managed_position(
     )
     _write_broker_positions_snapshot(tmp_path, positions=[broker_position])
     _write_broker_open_orders_snapshot(tmp_path, open_orders=[])
+
+
+def _write_registry_open_managed_trade(
+    tmp_path: Path,
+    *,
+    trade_id: str,
+    lifecycle_id: str,
+    lane_id: str,
+    thesis_strategy_id: str,
+    symbol: str,
+    con_id: int,
+    local_symbol: str,
+    account_id: str = "DUM882026",
+    qty: str = "1",
+) -> None:
+    base = {
+        "trade_id": trade_id,
+        "lifecycle_id": lifecycle_id,
+        "lane_id": lane_id,
+        "thesis_strategy_id": thesis_strategy_id,
+        "account_id": account_id,
+        "symbol": symbol,
+        "con_id": con_id,
+        "local_symbol": local_symbol,
+        "expiry": "202606",
+        "side": "LONG",
+        "action": "BUY",
+        "qty": qty,
+        "source_artifact_path": str(tmp_path / "registry_fixture.json"),
+        "generated_at": datetime(2026, 5, 31, 12, 0, tzinfo=UTC),
+    }
+    for event_type, extra in (
+        (TradeEventType.ENTRY_INTENT_CREATED, {}),
+        (TradeEventType.ENTRY_ORDER_SUBMITTED, {"order_id": "101", "client_id": "9801"}),
+        (
+            TradeEventType.ENTRY_FILL_BROKER_BACKED,
+            {"order_id": "101", "client_id": "9801", "perm_id": "2047276405", "exec_id": "0000e1a7.6a29f525.01.01", "price": "100"},
+        ),
+        (
+            TradeEventType.LIFECYCLE_OPEN_MANAGED,
+            {"order_id": "101", "client_id": "9801", "perm_id": "2047276405", "exec_id": "0000e1a7.6a29f525.01.01", "price": "100"},
+        ),
+    ):
+        append_live_trade_registry_event(
+            repo_root=tmp_path,
+            event=make_live_trade_registry_event(event_type=event_type, **base, **extra),
+        )
 
 
 def _write_submit_intent_ownership(
@@ -822,6 +874,7 @@ def test_mgc_plus_one_blocks_session_coverage_review_short_without_reversal_poli
 
 def test_pl_lane_can_exit_turn_owner_from_clean_phase1_reconciliation(tmp_path: Path) -> None:
     lifecycle_id = "bridge_fill_PL|1m|2026-05-14T17:52:00Z|BUY_TO_OPEN"
+    trade_id = "trade_pl_turn_registry"
     _write_monitor(tmp_path, broker_quantity=0.0)
     _write_ledger(tmp_path, [])
     _write_governance(
@@ -852,6 +905,16 @@ def test_pl_lane_can_exit_turn_owner_from_clean_phase1_reconciliation(tmp_path: 
         positions=[{"symbol": "PL", "local_symbol": "PLN6", "con_id": 644855286, "quantity": "1.0"}],
     )
     _write_broker_open_orders_snapshot(tmp_path, open_orders=[])
+    _write_registry_open_managed_trade(
+        tmp_path,
+        trade_id=trade_id,
+        lifecycle_id=lifecycle_id,
+        lane_id="pl_us_late_pause_resume_long",
+        thesis_strategy_id="pl_us_late_pause_resume_long_turn__PL",
+        symbol="PL",
+        con_id=644855286,
+        local_symbol="PLN6",
+    )
 
     gate = evaluate_paper_strategy_exposure_gate(
         repo_root=tmp_path,
@@ -865,6 +928,7 @@ def test_pl_lane_can_exit_turn_owner_from_clean_phase1_reconciliation(tmp_path: 
         con_id=644855286,
         local_symbol="PLN6",
         lifecycle_id=lifecycle_id,
+        trade_id=trade_id,
     )
 
     assert gate["classification"] == "PAPER_EXPOSURE_EXIT_ALLOWED"
@@ -993,6 +1057,17 @@ def test_exact_lifecycle_identity_allows_managed_close_when_lane_differs_from_th
         con_id=con_id,
         local_symbol=local_symbol,
     )
+    trade_id = f"trade_{symbol.lower()}_registry_backed"
+    _write_registry_open_managed_trade(
+        tmp_path,
+        trade_id=trade_id,
+        lifecycle_id=lifecycle_id,
+        lane_id=lane_id,
+        thesis_strategy_id=thesis_strategy_id,
+        symbol=symbol,
+        con_id=con_id,
+        local_symbol=local_symbol,
+    )
 
     gate = evaluate_paper_strategy_exposure_gate(
         repo_root=tmp_path,
@@ -1006,12 +1081,100 @@ def test_exact_lifecycle_identity_allows_managed_close_when_lane_differs_from_th
         con_id=con_id,
         local_symbol=local_symbol,
         lifecycle_id=lifecycle_id,
+        trade_id=trade_id,
     )
 
     assert gate["classification"] == "PAPER_EXPOSURE_EXIT_ALLOWED"
     assert gate["submit_allowed"] is True
     assert gate["owned_strategy_quantity"] == 1.0
     assert "exit_identity_mismatch" not in gate["block_reasons"]
+    assert gate["registry_exit_validation"]["allowed"] is True
+
+
+def test_registry_backed_managed_close_requires_trade_id(tmp_path: Path) -> None:
+    lifecycle_id = "bridge_fill_MNQ|1m|2026-05-29T18:33:00Z|BUY_TO_OPEN"
+    _write_broker_backed_managed_position(
+        tmp_path,
+        symbol="MNQ",
+        lane_id="mnq_us_active_participation_long",
+        thesis_strategy_id="PAPER_ACTIVE_EVIDENCE_MNQ_US_PARTICIPATION_LONG_V1",
+        lifecycle_id=lifecycle_id,
+        con_id=770561201,
+        local_symbol="MNQM6",
+    )
+
+    gate = evaluate_paper_strategy_exposure_gate(
+        repo_root=tmp_path,
+        strategy_id="mnq_us_active_participation_long",
+        bridge_strategy_id="PAPER_ACTIVE_EVIDENCE_MNQ_US_PARTICIPATION_LONG_V1",
+        executable_symbol="MNQ",
+        action="SELL",
+        intent_type="SELL_TO_CLOSE",
+        quantity=1.0,
+        account_id="DUM882026",
+        con_id=770561201,
+        local_symbol="MNQM6",
+        lifecycle_id=lifecycle_id,
+    )
+
+    assert gate["submit_allowed"] is False
+    assert "missing_trade_id" in gate["block_reasons"]
+
+
+@pytest.mark.parametrize(
+    ("override", "expected_blocker"),
+    [
+        ({"con_id": 999999999}, "con_id_mismatch"),
+        ({"local_symbol": "MNQU6"}, "local_symbol_mismatch"),
+        ({"quantity": 2.0}, "quantity_mismatch"),
+    ],
+)
+def test_registry_backed_managed_close_identity_mismatches_fail_closed(
+    tmp_path: Path,
+    override: dict[str, object],
+    expected_blocker: str,
+) -> None:
+    trade_id = "trade_mnq_assisted_registry"
+    lifecycle_id = "bridge_fill_MNQ|1m|2026-05-29T18:33:00Z|BUY_TO_OPEN"
+    _write_broker_backed_managed_position(
+        tmp_path,
+        symbol="MNQ",
+        lane_id="mnq_us_active_participation_long",
+        thesis_strategy_id="PAPER_ACTIVE_EVIDENCE_MNQ_US_PARTICIPATION_LONG_V1",
+        lifecycle_id=lifecycle_id,
+        con_id=770561201,
+        local_symbol="MNQM6",
+    )
+    _write_registry_open_managed_trade(
+        tmp_path,
+        trade_id=trade_id,
+        lifecycle_id=lifecycle_id,
+        lane_id="mnq_us_active_participation_long",
+        thesis_strategy_id="PAPER_ACTIVE_EVIDENCE_MNQ_US_PARTICIPATION_LONG_V1",
+        symbol="MNQ",
+        con_id=770561201,
+        local_symbol="MNQM6",
+    )
+    params = {"con_id": 770561201, "local_symbol": "MNQM6", "quantity": 1.0}
+    params.update(override)
+
+    gate = evaluate_paper_strategy_exposure_gate(
+        repo_root=tmp_path,
+        strategy_id="mnq_us_active_participation_long",
+        bridge_strategy_id="PAPER_ACTIVE_EVIDENCE_MNQ_US_PARTICIPATION_LONG_V1",
+        executable_symbol="MNQ",
+        action="SELL",
+        intent_type="SELL_TO_CLOSE",
+        quantity=float(params["quantity"]),
+        account_id="DUM882026",
+        con_id=params["con_id"],  # type: ignore[arg-type]
+        local_symbol=str(params["local_symbol"]),
+        lifecycle_id=lifecycle_id,
+        trade_id=trade_id,
+    )
+
+    assert gate["submit_allowed"] is False
+    assert expected_blocker in gate["block_reasons"]
 
 
 def test_exact_lifecycle_identity_blocks_true_non_owner_managed_close(tmp_path: Path) -> None:

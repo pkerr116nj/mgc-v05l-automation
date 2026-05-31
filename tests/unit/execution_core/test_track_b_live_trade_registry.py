@@ -8,6 +8,7 @@ from mgc_v05l.execution_core.track_b_live_trade_registry import (
     append_live_trade_registry_event,
     broker_backed_fill_has_required_ids,
     make_live_trade_registry_event,
+    validate_registry_managed_exit_identity,
 )
 from mgc_v05l.execution_core.track_b_trade_registry_reconstruction import (
     TradeRegistryReconstructionConfig,
@@ -72,3 +73,105 @@ def test_broker_backed_fill_requires_perm_and_exec_id():
     assert broker_backed_fill_has_required_ids(perm_id="2047", exec_id="exec-1") is True
     assert broker_backed_fill_has_required_ids(perm_id="2047", exec_id=None) is False
     assert broker_backed_fill_has_required_ids(perm_id=None, exec_id="exec-1") is False
+
+
+def test_registry_managed_exit_validator_allows_dry_run_and_live_from_same_snapshot(tmp_path):
+    repo_root = tmp_path
+    trade_id = "trade_mnq_managed_exit"
+    lifecycle_id = "life_mnq_managed_exit"
+    source_path = str(repo_root / "outputs/track_b_execution_core/strategy_bridge/bridge_report.json")
+    base = {
+        "trade_id": trade_id,
+        "lifecycle_id": lifecycle_id,
+        "lane_id": "mnq_us_active_participation_long",
+        "thesis_strategy_id": "PAPER_ACTIVE_EVIDENCE_MNQ_US_PARTICIPATION_LONG_V1",
+        "account_id": "DUM882026",
+        "symbol": "MNQ",
+        "con_id": 770561201,
+        "local_symbol": "MNQM6",
+        "expiry": "202606",
+        "side": "LONG",
+        "action": "BUY",
+        "qty": Decimal("1"),
+        "source_artifact_path": source_path,
+        "generated_at": NOW,
+    }
+    for event_type, extra in (
+        (TradeEventType.ENTRY_INTENT_CREATED, {}),
+        (TradeEventType.ENTRY_ORDER_SUBMITTED, {"order_id": "101", "client_id": "17086"}),
+        (
+            TradeEventType.ENTRY_FILL_BROKER_BACKED,
+            {"order_id": "101", "client_id": "17086", "perm_id": "2047", "exec_id": "exec-1", "price": "30380.25"},
+        ),
+        (
+            TradeEventType.LIFECYCLE_OPEN_MANAGED,
+            {"order_id": "101", "client_id": "17086", "perm_id": "2047", "exec_id": "exec-1", "price": "30380.25"},
+        ),
+    ):
+        append_live_trade_registry_event(
+            repo_root=repo_root,
+            event=make_live_trade_registry_event(event_type=event_type, **base, **extra),
+        )
+    phase1 = {
+        "ready": True,
+        "track_b_lifecycle_positions": [
+            {
+                "lifecycle_id": lifecycle_id,
+                "account_id": "MULTIPLE",
+                "lane_id": "mnq_us_active_participation_long",
+                "strategy_id": "PAPER_ACTIVE_EVIDENCE_MNQ_US_PARTICIPATION_LONG_V1",
+                "track_b_root": "MNQ",
+                "local_symbol": "MNQM6",
+                "con_id": 770561201,
+                "quantity": "1",
+                "side": "LONG",
+            }
+        ],
+        "track_b_broker_positions": [
+            {"account_id": "DUM882026", "symbol": "MNQ", "local_symbol": "MNQM6", "con_id": 770561201, "quantity": "1"}
+        ],
+    }
+
+    dry_run = validate_registry_managed_exit_identity(
+        repo_root=repo_root,
+        trade_id=trade_id,
+        lifecycle_id=lifecycle_id,
+        account_id="DUM882026",
+        con_id=770561201,
+        local_symbol="MNQM6",
+        quantity=1,
+        action="SELL",
+        phase1_reconciliation_gate=phase1,
+    )
+    live = validate_registry_managed_exit_identity(
+        repo_root=repo_root,
+        trade_id=trade_id,
+        lifecycle_id=lifecycle_id,
+        account_id="DUM882026",
+        con_id=770561201,
+        local_symbol="MNQM6",
+        quantity=1,
+        action="SELL",
+        phase1_reconciliation_gate=phase1,
+    )
+
+    assert dry_run["allowed"] is True
+    assert live["allowed"] is True
+    assert dry_run["owner_identity"] == live["owner_identity"]
+
+
+def test_registry_managed_exit_validator_fails_closed_without_trade_id(tmp_path):
+    result = validate_registry_managed_exit_identity(
+        repo_root=tmp_path,
+        trade_id=None,
+        lifecycle_id="life",
+        account_id="DUM882026",
+        con_id=1,
+        local_symbol="ANY",
+        quantity=1,
+        action="SELL",
+        phase1_reconciliation_gate={"ready": True},
+    )
+
+    assert result["allowed"] is False
+    assert "missing_trade_id" in result["block_reasons"]

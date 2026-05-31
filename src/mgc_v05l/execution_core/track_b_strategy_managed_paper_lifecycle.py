@@ -51,7 +51,9 @@ from .track_b_live_trade_registry import (
     broker_backed_fill_has_required_ids,
     make_live_trade_registry_event,
     trade_id_from_live_identity,
+    validate_registry_managed_exit_identity,
 )
+from mgc_v05l.execution.track_b_phase1_submit_authority import evaluate_phase1_broker_reconciliation_submit_gate
 from .track_b_entry_exposure_gate import (
     ENTRY_EXPOSURE_GATE_ALLOWED,
     PYRAMIDING_NOT_ALLOWED_REVIEW_REQUIRED,
@@ -1551,6 +1553,24 @@ def build_strategy_managed_submit_authorization(
         if intent_kind is IntentKind.OPEN
         else {"classification": ENTRY_EXPOSURE_GATE_ALLOWED, "allowed": True}
     )
+    registry_exit_validation = (
+        validate_registry_managed_exit_identity(
+            repo_root=Path(config.repo_root),
+            trade_id=str(intent_payload.get("trade_id") or "").strip(),
+            lifecycle_id=str(intent_payload.get("lifecycle_id") or "").strip(),
+            account_id=str(intent_payload.get("account_id") or config.account_id or "").strip(),
+            con_id=config.con_id,
+            local_symbol=config.local_symbol,
+            quantity=intent_payload.get("quantity") or config.quantity,
+            action=str(intent_payload.get("order_action") or "").strip(),
+            phase1_reconciliation_gate=evaluate_phase1_broker_reconciliation_submit_gate(
+                repo_root=Path(config.repo_root),
+                max_age_seconds=float(config.pre_action_snapshot_max_age_seconds),
+            ),
+        )
+        if intent_kind is IntentKind.CLOSE
+        else None
+    )
     if intent_kind is IntentKind.CLOSE and pre_action.get("classification") != PRE_ACTION_SNAPSHOT_VALID:
         managed_cleanup_pre_action = _managed_close_cleanup_pre_action(
             pre_action=pre_action,
@@ -1586,6 +1606,7 @@ def build_strategy_managed_submit_authorization(
         "target_identity": target_identity,
         "pre_action_validation": pre_action,
         "entry_exposure_gate": entry_exposure_gate,
+        "registry_exit_validation": registry_exit_validation,
         "safe_state_classification": safe_state.get("safe_state_classification") or safe_state.get("classification"),
         "supervisor_classification": pre_action.get("supervisor_classification")
         or snapshot.get("runtime_supervisor_classification"),
@@ -1611,6 +1632,7 @@ def build_strategy_managed_submit_authorization(
         safe_state=safe_state,
         target_identity=target_identity,
         entry_exposure_gate=entry_exposure_gate,
+        registry_exit_validation=registry_exit_validation,
     )
     authorized = classification == STRATEGY_SUBMIT_AUTHORIZED
     return {
@@ -1632,6 +1654,7 @@ def _strategy_submit_authorization_blocker(
     safe_state: Mapping[str, Any],
     target_identity: Mapping[str, Any],
     entry_exposure_gate: Mapping[str, Any],
+    registry_exit_validation: Mapping[str, Any] | None = None,
 ) -> tuple[str, str]:
     cleanup_close = (
         target_identity.get("intent_kind") == IntentKind.CLOSE.value
@@ -1666,6 +1689,14 @@ def _strategy_submit_authorization_blocker(
                 or "Entry exposure gate blocked strategy-managed submit."
             ),
         )
+    if target_identity.get("intent_kind") == IntentKind.CLOSE.value:
+        registry_validation = dict(registry_exit_validation or {})
+        if registry_validation.get("allowed") is not True:
+            return (
+                STRATEGY_SUBMIT_BLOCKED_ENTRY_EXPOSURE,
+                "Registry-backed managed exit identity validation blocked close: "
+                + ",".join(str(reason) for reason in list(registry_validation.get("block_reasons") or [])),
+            )
     if (
         snapshot.get("broker_position_guardian_blocks_submit") is True
         or str(snapshot.get("broker_position_guardian_classification") or "") == "BROKER_POSITION_GUARDIAN_HARD_HOLD"

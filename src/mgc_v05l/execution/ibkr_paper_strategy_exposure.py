@@ -15,6 +15,10 @@ from ..execution_core.track_b_submit_intent_ownership import (
     DEFAULT_TRACK_B_SUBMIT_INTENT_OWNERSHIP_JSONL,
     load_unresolved_submit_intent_ownership_records,
 )
+from ..execution_core.track_b_live_trade_registry import (
+    DEFAULT_TRACK_B_LIVE_TRADE_REGISTRY_EVENTS_JSONL,
+    validate_registry_managed_exit_identity,
+)
 
 _DEFAULT_OUTPUT_DIR = Path("outputs") / "reports" / "paper_strategy_exposure"
 _DEFAULT_LEDGER_PATH = Path("var") / "paper_strategy_position_ledger.json"
@@ -61,6 +65,8 @@ class IbkrPaperStrategyExposureConfig:
     con_id: int | None = None
     local_symbol: str | None = None
     lifecycle_id: str | None = None
+    trade_id: str | None = None
+    live_trade_registry_events_path: Path = DEFAULT_TRACK_B_LIVE_TRADE_REGISTRY_EVENTS_JSONL
     submit_intent_ownership_path: Path = _DEFAULT_SUBMIT_INTENT_OWNERSHIP_PATH
 
 
@@ -206,6 +212,7 @@ def evaluate_paper_strategy_exposure_gate(
     con_id: int | None = None,
     local_symbol: str | None = None,
     lifecycle_id: str | None = None,
+    trade_id: str | None = None,
 ) -> dict[str, Any]:
     artifacts = run_ibkr_paper_strategy_exposure(
         config=IbkrPaperStrategyExposureConfig(
@@ -230,6 +237,7 @@ def evaluate_paper_strategy_exposure_gate(
             con_id=con_id,
             local_symbol=local_symbol,
             lifecycle_id=lifecycle_id,
+            trade_id=trade_id,
             submit_intent_ownership_path=_DEFAULT_SUBMIT_INTENT_OWNERSHIP_PATH,
         )
     )
@@ -522,6 +530,7 @@ def _build_aggregate_exposure_state(
             "generated_at": phase1_reconciliation_gate.get("generated_at"),
             "age_seconds": phase1_reconciliation_gate.get("age_seconds"),
         },
+        "phase1_broker_reconciliation_gate_full": phase1_reconciliation_gate,
         "allow_stacking": bool(config.allow_stacking),
         "max_total_mgc_contracts": config.max_total_mgc_contracts,
         "max_total_gc_equivalent": float(config.max_total_gc_equivalent),
@@ -549,6 +558,7 @@ def _evaluate_strategy_gate(
     identifiers = {requested_strategy, requested_bridge_strategy}
     identifiers.discard("")
     requested_lifecycle_id = str(config.lifecycle_id or "").strip()
+    requested_trade_id = str(config.trade_id or "").strip()
     exact_lifecycle_rows = [
         dict(row)
         for row in strategy_rows
@@ -581,9 +591,32 @@ def _evaluate_strategy_gate(
             owned_rows = []
         else:
             owned_rows = exact_lifecycle_rows
+    registry_exit_validation: dict[str, Any] | None = None
+    registry_owner_identity: dict[str, Any] = {}
+    if semantics.operation == "CLOSE" and requested_lifecycle_id:
+        registry_exit_validation = validate_registry_managed_exit_identity(
+            repo_root=config.repo_root,
+            trade_id=requested_trade_id,
+            lifecycle_id=requested_lifecycle_id,
+            account_id=config.account_id,
+            con_id=config.con_id,
+            local_symbol=config.local_symbol,
+            quantity=quantity,
+            action=action,
+            phase1_reconciliation_gate=dict(aggregate_state.get("phase1_broker_reconciliation_gate_full") or {}),
+            jsonl_path=config.live_trade_registry_events_path,
+        )
+        registry_owner_identity = dict(registry_exit_validation.get("owner_identity") or {})
+        if registry_exit_validation.get("allowed") is True:
+            owned_rows = [
+                _strategy_row_from_registry_owner_identity(
+                    registry_owner_identity,
+                    lifecycle_id=requested_lifecycle_id,
+                )
+            ]
     exit_identity_requested = semantics.operation == "CLOSE" and any(
         item not in (None, "")
-        for item in (config.account_id, config.con_id, config.local_symbol, config.lifecycle_id)
+        for item in (config.account_id, config.con_id, config.local_symbol, config.lifecycle_id, config.trade_id)
     )
     identity_filtered_owned_rows = _filter_owned_rows_for_requested_exit_identity(
         owned_rows=owned_rows,
@@ -687,6 +720,8 @@ def _evaluate_strategy_gate(
                 else "The strategy may open short exposure from flat."
             )
     elif semantics.operation == "CLOSE":
+        if registry_exit_validation is not None and registry_exit_validation.get("allowed") is not True:
+            block_reasons.extend(str(reason) for reason in list(registry_exit_validation.get("block_reasons") or []))
         if exit_identity_requested and not requested_lifecycle_id and any(
             str(row.get("lifecycle_id") or row.get("source_intent_id") or "").strip()
             and str(row.get("pnl_source") or "").strip() == "phase1_broker_reconciliation"
@@ -737,6 +772,7 @@ def _evaluate_strategy_gate(
         "owned_strategy_quantity": owned_quantity,
         "owned_strategy_position_count": len(owned_rows_for_quantity),
         "exit_identity_requested": exit_identity_requested,
+        "registry_exit_validation": registry_exit_validation,
         "submit_allowed": submit_allowed and not block_reasons,
         "block_reasons": list(dict.fromkeys(block_reasons)),
         "detail": detail,
@@ -796,6 +832,42 @@ def _filter_owned_rows_for_requested_exit_identity(
             continue
         filtered.append(dict(row))
     return filtered
+
+
+def _strategy_row_from_registry_owner_identity(
+    owner: dict[str, Any],
+    *,
+    lifecycle_id: str,
+) -> dict[str, Any]:
+    quantity = float(owner.get("quantity") or 0.0)
+    side = str(owner.get("side") or "").strip().upper()
+    state = _normalize_strategy_state(quantity=quantity, side=side, raw_state=side)
+    signed_quantity = quantity if state == "LONG" else (-quantity if state == "SHORT" else 0.0)
+    strategy_id = str(owner.get("strategy_id") or "").strip()
+    lane_id = str(owner.get("lane_id") or "").strip()
+    return {
+        "strategy_id": strategy_id,
+        "strategy_aliases": [value for value in (strategy_id, lane_id) if value],
+        "lane_id": lane_id,
+        "lane_ids": [lane_id] if lane_id else [],
+        "strategy_ids": [strategy_id] if strategy_id else [],
+        "account_id": owner.get("account_id"),
+        "broker_account_id": owner.get("account_id"),
+        "symbol": owner.get("symbol"),
+        "expiry": owner.get("expiry"),
+        "con_id": owner.get("con_id"),
+        "local_symbol": owner.get("local_symbol"),
+        "direction": state,
+        "quantity": quantity,
+        "signed_quantity": signed_quantity,
+        "perm_id": owner.get("entry_perm_id"),
+        "execution_id": owner.get("entry_exec_id"),
+        "source_intent_id": lifecycle_id,
+        "lifecycle_id": lifecycle_id,
+        "state": state if quantity > 0.0 else "FLAT",
+        "open_orders": [],
+        "pnl_source": "central_trade_registry",
+    }
 
 
 def _valid_owner_identity_value(value: Any) -> str:

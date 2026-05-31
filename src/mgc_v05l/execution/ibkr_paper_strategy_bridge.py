@@ -572,6 +572,7 @@ def run_ibkr_paper_strategy_bridge(
             or ""
         ).strip()
         or None,
+        trade_id=str(managed_close_owner_identity.get("trade_id") or metadata.get("trade_id") or "").strip() or None,
     )
     bridge_audit_history = _load_bridge_audit_history(config.output_dir)
     runtime: _Runtime | None = None
@@ -1867,6 +1868,7 @@ def _managed_close_owner_identity_for_bridge(
     return {
         "source": "TRACK_B_PHASE1_BROKER_RECONCILIATION_EXACT_LIFECYCLE_OWNER",
         "lifecycle_id": str(owner.get("lifecycle_id") or "").strip(),
+        "trade_id": str(metadata.get("trade_id") or owner.get("trade_id") or "").strip(),
         "strategy_id": thesis_strategy_id,
         "lane_id": lane_id,
         "account_id": account_id,

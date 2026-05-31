@@ -6,6 +6,11 @@ from pathlib import Path
 from typing import Any, Mapping
 
 from mgc_v05l.execution_core.models import BrokerOrder, IntentKind, PositionSource, PositionState
+from mgc_v05l.execution_core.track_b_central_trade_registry import TradeEventType
+from mgc_v05l.execution_core.track_b_live_trade_registry import (
+    append_live_trade_registry_event,
+    make_live_trade_registry_event,
+)
 from mgc_v05l.execution_core.track_b_open_order_truth import (
     BROKER_FLAT_WITH_OPEN_CLOSE_ORDER,
     DUPLICATE_CLOSE_ORDER,
@@ -155,11 +160,93 @@ def seed_strategy_submit_authority(
     }
     safe_state.update(dict(safe_state_overrides or {}))
     _write_json(tmp_path / "outputs/track_b_execution_core/safe_state/latest_runtime_safe_state_envelope.json", safe_state)
+    if intent_kind is IntentKind.CLOSE:
+        _seed_registry_backed_close_truth(tmp_path, config=config, intent_payload=intent_payload)
 
 
 def _write_json(path: Path, payload: Mapping[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(dict(payload), indent=2, sort_keys=True) + "\n", encoding="utf-8")
+
+
+def _seed_registry_backed_close_truth(
+    tmp_path: Path,
+    *,
+    config: TrackBStrategyManagedPaperLifecycleConfig,
+    intent_payload: Mapping[str, Any],
+) -> None:
+    lifecycle_id = str(intent_payload.get("lifecycle_id") or "open-managed-existing")
+    trade_id = str(intent_payload.get("trade_id") or "").strip()
+    if not trade_id and lifecycle_id == "open-managed-existing":
+        trade_id = "MNQ_FIRST_BULL_SNAP_TURN_V1:open-managed-existing"
+    if not trade_id:
+        trade_id = f"{config.strategy_id}:{lifecycle_id}"
+    side = "LONG" if str(intent_payload.get("order_action") or "SELL").upper() == "SELL" else "SHORT"
+    base = {
+        "trade_id": trade_id,
+        "lifecycle_id": lifecycle_id,
+        "lane_id": str(config.lane_id or config.strategy_id),
+        "thesis_strategy_id": str(config.strategy_id),
+        "account_id": str(config.account_id),
+        "symbol": str(config.instrument_family),
+        "con_id": int(config.con_id),
+        "local_symbol": str(config.local_symbol),
+        "expiry": str(config.contract_expiry or config.contract_key.split("-", 1)[-1]),
+        "side": side,
+        "action": "BUY" if side == "LONG" else "SELL",
+        "qty": intent_payload.get("quantity") or config.quantity,
+        "source_artifact_path": str(tmp_path / "registry_fixture.json"),
+        "generated_at": aware_now(),
+    }
+    for event_type, extra in (
+        (TradeEventType.ENTRY_INTENT_CREATED, {}),
+        (TradeEventType.ENTRY_ORDER_SUBMITTED, {"order_id": "11", "client_id": "17086"}),
+        (TradeEventType.ENTRY_FILL_BROKER_BACKED, {"order_id": "11", "client_id": "17086", "perm_id": "347068100", "exec_id": "exec-1", "price": "28729"}),
+        (TradeEventType.LIFECYCLE_OPEN_MANAGED, {"order_id": "11", "client_id": "17086", "perm_id": "347068100", "exec_id": "exec-1", "price": "28729"}),
+    ):
+        append_live_trade_registry_event(
+            repo_root=tmp_path,
+            event=make_live_trade_registry_event(event_type=event_type, **base, **extra),
+        )
+    _write_json(
+        tmp_path / "outputs/reports/track_b_paper_broker_reconciliation/latest_track_b_paper_broker_reconciliation.json",
+        {
+            "generated_at": aware_now().isoformat(),
+            "classification": "TRACK_B_PAPER_BROKER_RECONCILED",
+            "broker_reconciled": True,
+            "review_required_count": 0,
+            "track_b_broker_open_order_count": 0,
+            "track_b_broker_positions": [
+                {
+                    "account_id": config.account_id,
+                    "symbol": config.instrument_family,
+                    "local_symbol": config.local_symbol,
+                    "con_id": config.con_id,
+                    "quantity": str(intent_payload.get("quantity") or config.quantity),
+                }
+            ],
+            "track_b_lifecycle_positions": [
+                {
+                    "account_id": "MULTIPLE",
+                    "strategy_id": config.strategy_id,
+                    "lane_id": config.lane_id,
+                    "track_b_root": config.instrument_family,
+                    "instrument_family": config.instrument_family,
+                    "contract_key": config.contract_key,
+                    "local_symbol": config.local_symbol,
+                    "con_id": config.con_id,
+                    "quantity": str(intent_payload.get("quantity") or config.quantity),
+                    "side": side,
+                    "entry_perm_id": "347068100",
+                    "entry_exec_id": "exec-1",
+                    "lifecycle_id": lifecycle_id,
+                }
+            ],
+            "live_money_eligible": False,
+            "blockers": [],
+            "block_reasons": [],
+        },
+    )
 
 
 def fake_stages(*, close: bool = False) -> TrackBStrategyManagedPaperLifecycleStages:
@@ -1643,6 +1730,7 @@ def test_managed_cleanup_close_allows_prior_runtime_generation_owner(tmp_path: P
     )
     close_intent = {
         "lifecycle_id": "open-managed-existing",
+        "trade_id": "MNQ_FIRST_BULL_SNAP_TURN_V1:open-managed-existing",
         "order_action": "SELL",
         "quantity": 1,
         "close_limit_price": "28728.5",
