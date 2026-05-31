@@ -38,6 +38,7 @@ _DEFAULT_MAX_TOTAL_MGC_CONTRACTS = 20.0
 _DEFAULT_MAX_TOTAL_GC_EQUIVALENT = 2.0
 _DEFAULT_MAX_PER_STRATEGY_MGC_CONTRACTS = 1.0
 _DEFAULT_BROKER_TRUTH_MAX_AGE_SECONDS = 300.0
+_MANAGED_EXIT_AUTHORITY_REGISTRY_TRUTH = "REGISTRY_TRUTH"
 
 
 @dataclass(frozen=True)
@@ -657,6 +658,11 @@ def _evaluate_strategy_gate(
         detail = "Current Phase-1 broker reconciliation is required before exposure can authorize submit."
     submit_allowed = not block_reasons
     stacking_observed = False
+    managed_exit_legacy_result: dict[str, Any] | None = None
+    managed_exit_registry_truth_result: dict[str, Any] | None = None
+    managed_exit_parity_status: str | None = None
+    managed_exit_authoritative_source: str | None = None
+    managed_exit_diagnostic_reason_codes: list[str] = []
 
     if semantics.operation == "OPEN":
         submit_intent_blocker = _unresolved_submit_intent_new_entry_blocker(
@@ -720,27 +726,74 @@ def _evaluate_strategy_gate(
                 else "The strategy may open short exposure from flat."
             )
     elif semantics.operation == "CLOSE":
-        if registry_exit_validation is not None and registry_exit_validation.get("allowed") is not True:
-            block_reasons.extend(str(reason) for reason in list(registry_exit_validation.get("block_reasons") or []))
+        legacy_block_reasons = list(block_reasons)
         if exit_identity_requested and not requested_lifecycle_id and any(
             str(row.get("lifecycle_id") or row.get("source_intent_id") or "").strip()
             and str(row.get("pnl_source") or "").strip() == "phase1_broker_reconciliation"
             for row in owned_rows
         ):
-            block_reasons.append("missing_lifecycle_identity")
+            legacy_block_reasons.append("missing_lifecycle_identity")
         if exit_identity_requested and not identity_filtered_owned_rows:
-            block_reasons.append("exit_identity_mismatch")
+            legacy_block_reasons.append("exit_identity_mismatch")
         if semantics.direction == "LONG" and strategy_state != "LONG":
-            block_reasons.append("non_owning_strategy_exit_forbidden")
+            legacy_block_reasons.append("non_owning_strategy_exit_forbidden")
         if semantics.direction == "SHORT" and strategy_state != "SHORT":
-            block_reasons.append("non_owning_strategy_exit_forbidden")
+            legacy_block_reasons.append("non_owning_strategy_exit_forbidden")
         if quantity <= 0.0 or quantity > owned_quantity:
-            block_reasons.append("exit_quantity_exceeds_owned_strategy_position")
+            legacy_block_reasons.append("exit_quantity_exceeds_owned_strategy_position")
         broker_net_position = float(aggregate_state.get("broker_net_position") or 0.0)
         if semantics.direction == "LONG" and broker_net_position < quantity:
-            block_reasons.append("broker_position_does_not_support_requested_exit")
+            legacy_block_reasons.append("broker_position_does_not_support_requested_exit")
         if semantics.direction == "SHORT" and broker_net_position > -quantity:
-            block_reasons.append("broker_position_does_not_support_requested_exit")
+            legacy_block_reasons.append("broker_position_does_not_support_requested_exit")
+
+        managed_exit_legacy_result = {
+            "allowed": not legacy_block_reasons,
+            "reason_codes": list(dict.fromkeys(legacy_block_reasons)),
+            "classification": (
+                "PAPER_EXPOSURE_EXIT_ALLOWED"
+                if not legacy_block_reasons
+                else (
+                    "PAPER_EXPOSURE_BLOCKED_PHASE1_RECONCILIATION"
+                    if "phase1_broker_reconciliation_not_clear" in legacy_block_reasons
+                    else "PAPER_EXPOSURE_BLOCKED_STRATEGY_LIMIT"
+                )
+            ),
+            "authority_source": "LEGACY_EXPOSURE_ATTRIBUTION",
+            "diagnostic_only": registry_exit_validation is not None,
+        }
+
+        if registry_exit_validation is not None:
+            managed_exit_authoritative_source = _MANAGED_EXIT_AUTHORITY_REGISTRY_TRUTH
+            managed_exit_registry_truth_result = _managed_exit_registry_truth_result(
+                registry_exit_validation=registry_exit_validation,
+                aggregate_state=aggregate_state,
+                requested_identifiers=identifiers,
+            )
+            registry_allowed = bool(managed_exit_registry_truth_result.get("allowed"))
+            legacy_allowed = bool(managed_exit_legacy_result.get("allowed"))
+            if registry_allowed and legacy_allowed:
+                managed_exit_parity_status = "MATCH_ALLOWED"
+                block_reasons = []
+                submit_allowed = True
+            elif registry_allowed and not legacy_allowed:
+                managed_exit_parity_status = "REGISTRY_TRUTH_ALLOWED_LEGACY_BLOCKED_DIAGNOSTIC"
+                managed_exit_diagnostic_reason_codes = list(managed_exit_legacy_result.get("reason_codes") or [])
+                block_reasons = []
+                submit_allowed = True
+            elif not registry_allowed and legacy_allowed:
+                managed_exit_parity_status = "LEGACY_ALLOWED_REGISTRY_TRUTH_BLOCKED_FAIL_CLOSED"
+                block_reasons = list(managed_exit_registry_truth_result.get("reason_codes") or [])
+                block_reasons.append("legacy_allowed_registry_truth_blocked_fail_closed")
+                submit_allowed = False
+            else:
+                managed_exit_parity_status = "MATCH_BLOCKED"
+                block_reasons = list(managed_exit_registry_truth_result.get("reason_codes") or [])
+                block_reasons.extend(str(reason) for reason in list(managed_exit_legacy_result.get("reason_codes") or []))
+                submit_allowed = False
+        else:
+            block_reasons = legacy_block_reasons
+
         if block_reasons:
             submit_allowed = False
             if "phase1_broker_reconciliation_not_clear" in block_reasons:
@@ -773,6 +826,11 @@ def _evaluate_strategy_gate(
         "owned_strategy_position_count": len(owned_rows_for_quantity),
         "exit_identity_requested": exit_identity_requested,
         "registry_exit_validation": registry_exit_validation,
+        "legacy_result": managed_exit_legacy_result,
+        "registry_truth_result": managed_exit_registry_truth_result,
+        "parity_status": managed_exit_parity_status,
+        "authoritative_source": managed_exit_authoritative_source,
+        "diagnostic_reason_codes": list(dict.fromkeys(managed_exit_diagnostic_reason_codes)),
         "submit_allowed": submit_allowed and not block_reasons,
         "block_reasons": list(dict.fromkeys(block_reasons)),
         "detail": detail,
@@ -832,6 +890,54 @@ def _filter_owned_rows_for_requested_exit_identity(
             continue
         filtered.append(dict(row))
     return filtered
+
+
+def _managed_exit_registry_truth_result(
+    *,
+    registry_exit_validation: dict[str, Any],
+    aggregate_state: dict[str, Any],
+    requested_identifiers: set[str],
+) -> dict[str, Any]:
+    reason_codes = [
+        str(reason)
+        for reason in list(registry_exit_validation.get("block_reasons") or [])
+        if str(reason or "").strip()
+    ]
+    phase1_gate_full = dict(aggregate_state.get("phase1_broker_reconciliation_gate_full") or {})
+    open_order_count = _int_value(
+        phase1_gate_full.get("track_b_broker_open_order_count")
+        or phase1_gate_full.get("broker_open_order_count")
+        or phase1_gate_full.get("open_order_count")
+    )
+    if open_order_count > 0:
+        reason_codes.append("open_order_conflict")
+    owner_identity = dict(registry_exit_validation.get("owner_identity") or {})
+    owner_identifiers = {
+        str(owner_identity.get("lane_id") or "").strip(),
+        str(owner_identity.get("strategy_id") or "").strip(),
+    }
+    owner_identifiers.discard("")
+    if requested_identifiers and owner_identifiers and not requested_identifiers.intersection(owner_identifiers):
+        reason_codes.append("non_owning_strategy_exit_forbidden")
+    allowed = bool(registry_exit_validation.get("allowed")) and not reason_codes
+    return {
+        "allowed": allowed,
+        "reason_codes": list(dict.fromkeys(reason_codes)),
+        "authority_source": _MANAGED_EXIT_AUTHORITY_REGISTRY_TRUTH,
+        "owner_identity": owner_identity,
+        "broker_position": dict(registry_exit_validation.get("broker_position") or {}),
+        "lifecycle_row": dict(registry_exit_validation.get("lifecycle_row") or {}),
+        "open_order_count": open_order_count,
+        "safe_state_submit_authority": "DEFERRED_TO_EXISTING_SUBMIT_GATE",
+        "control_plane_authority": "DEFERRED_TO_EXISTING_SUBMIT_GATE",
+    }
+
+
+def _int_value(value: Any) -> int:
+    try:
+        return int(value or 0)
+    except (TypeError, ValueError):
+        return 0
 
 
 def _strategy_row_from_registry_owner_identity(

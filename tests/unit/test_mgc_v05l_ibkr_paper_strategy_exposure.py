@@ -1089,6 +1089,10 @@ def test_exact_lifecycle_identity_allows_managed_close_when_lane_differs_from_th
     assert gate["owned_strategy_quantity"] == 1.0
     assert "exit_identity_mismatch" not in gate["block_reasons"]
     assert gate["registry_exit_validation"]["allowed"] is True
+    assert gate["authoritative_source"] == "REGISTRY_TRUTH"
+    assert gate["registry_truth_result"]["allowed"] is True
+    assert gate["legacy_result"]["diagnostic_only"] is True
+    assert gate["parity_status"] == "MATCH_ALLOWED"
 
 
 def test_registry_backed_managed_close_requires_trade_id(tmp_path: Path) -> None:
@@ -1119,6 +1123,56 @@ def test_registry_backed_managed_close_requires_trade_id(tmp_path: Path) -> None
 
     assert gate["submit_allowed"] is False
     assert "missing_trade_id" in gate["block_reasons"]
+
+
+def test_registry_truth_allows_managed_close_when_legacy_snapshot_is_stale_aggregate_mismatch(
+    tmp_path: Path,
+) -> None:
+    trade_id = "trade_mnq_registry_authoritative"
+    lifecycle_id = "bridge_fill_MNQ|1m|2026-05-29T18:33:00Z|BUY_TO_OPEN"
+    _write_broker_backed_managed_position(
+        tmp_path,
+        symbol="MNQ",
+        lane_id="mnq_us_active_participation_long",
+        thesis_strategy_id="PAPER_ACTIVE_EVIDENCE_MNQ_US_PARTICIPATION_LONG_V1",
+        lifecycle_id=lifecycle_id,
+        con_id=770561201,
+        local_symbol="MNQM6",
+    )
+    _write_registry_open_managed_trade(
+        tmp_path,
+        trade_id=trade_id,
+        lifecycle_id=lifecycle_id,
+        lane_id="mnq_us_active_participation_long",
+        thesis_strategy_id="PAPER_ACTIVE_EVIDENCE_MNQ_US_PARTICIPATION_LONG_V1",
+        symbol="MNQ",
+        con_id=770561201,
+        local_symbol="MNQM6",
+    )
+    _write_broker_positions_snapshot(tmp_path, positions=[])
+
+    gate = evaluate_paper_strategy_exposure_gate(
+        repo_root=tmp_path,
+        strategy_id="mnq_us_active_participation_long",
+        bridge_strategy_id="PAPER_ACTIVE_EVIDENCE_MNQ_US_PARTICIPATION_LONG_V1",
+        executable_symbol="MNQ",
+        action="SELL",
+        intent_type="SELL_TO_CLOSE",
+        quantity=1.0,
+        account_id="DUM882026",
+        con_id=770561201,
+        local_symbol="MNQM6",
+        lifecycle_id=lifecycle_id,
+        trade_id=trade_id,
+    )
+
+    assert gate["classification"] == "PAPER_EXPOSURE_EXIT_ALLOWED"
+    assert gate["submit_allowed"] is True
+    assert gate["authoritative_source"] == "REGISTRY_TRUTH"
+    assert gate["registry_truth_result"]["allowed"] is True
+    assert gate["legacy_result"]["allowed"] is False
+    assert gate["parity_status"] == "REGISTRY_TRUTH_ALLOWED_LEGACY_BLOCKED_DIAGNOSTIC"
+    assert "broker_position_does_not_support_requested_exit" in gate["diagnostic_reason_codes"]
 
 
 @pytest.mark.parametrize(
@@ -1205,6 +1259,113 @@ def test_exact_lifecycle_identity_blocks_true_non_owner_managed_close(tmp_path: 
 
     assert gate["submit_allowed"] is False
     assert "non_owning_strategy_exit_forbidden" in gate["block_reasons"]
+
+
+def test_registry_truth_blocks_true_non_owner_even_with_valid_trade_id(tmp_path: Path) -> None:
+    trade_id = "trade_mnq_true_owner"
+    lifecycle_id = "bridge_fill_MNQ|1m|2026-05-29T18:33:00Z|BUY_TO_OPEN"
+    _write_broker_backed_managed_position(
+        tmp_path,
+        symbol="MNQ",
+        lane_id="mnq_us_active_participation_long",
+        thesis_strategy_id="PAPER_ACTIVE_EVIDENCE_MNQ_US_PARTICIPATION_LONG_V1",
+        lifecycle_id=lifecycle_id,
+        con_id=770561201,
+        local_symbol="MNQM6",
+    )
+    _write_registry_open_managed_trade(
+        tmp_path,
+        trade_id=trade_id,
+        lifecycle_id=lifecycle_id,
+        lane_id="mnq_us_active_participation_long",
+        thesis_strategy_id="PAPER_ACTIVE_EVIDENCE_MNQ_US_PARTICIPATION_LONG_V1",
+        symbol="MNQ",
+        con_id=770561201,
+        local_symbol="MNQM6",
+    )
+
+    gate = evaluate_paper_strategy_exposure_gate(
+        repo_root=tmp_path,
+        strategy_id="mnq_us_active_participation_short",
+        bridge_strategy_id="PAPER_ACTIVE_EVIDENCE_MNQ_US_PARTICIPATION_SHORT_V1",
+        executable_symbol="MNQ",
+        action="SELL",
+        intent_type="SELL_TO_CLOSE",
+        quantity=1.0,
+        account_id="DUM882026",
+        con_id=770561201,
+        local_symbol="MNQM6",
+        lifecycle_id=lifecycle_id,
+        trade_id=trade_id,
+    )
+
+    assert gate["submit_allowed"] is False
+    assert gate["authoritative_source"] == "REGISTRY_TRUTH"
+    assert gate["registry_truth_result"]["allowed"] is False
+    assert "non_owning_strategy_exit_forbidden" in gate["block_reasons"]
+
+
+def test_registry_truth_blocks_managed_close_without_broker_backed_entry_evidence(tmp_path: Path) -> None:
+    trade_id = "trade_mnq_local_only"
+    lifecycle_id = "bridge_fill_MNQ|1m|2026-05-29T18:33:00Z|BUY_TO_OPEN"
+    lane_id = "mnq_us_active_participation_long"
+    thesis_strategy_id = "PAPER_ACTIVE_EVIDENCE_MNQ_US_PARTICIPATION_LONG_V1"
+    _write_broker_backed_managed_position(
+        tmp_path,
+        symbol="MNQ",
+        lane_id=lane_id,
+        thesis_strategy_id=thesis_strategy_id,
+        lifecycle_id=lifecycle_id,
+        con_id=770561201,
+        local_symbol="MNQM6",
+    )
+    base = {
+        "trade_id": trade_id,
+        "lifecycle_id": lifecycle_id,
+        "lane_id": lane_id,
+        "thesis_strategy_id": thesis_strategy_id,
+        "account_id": "DUM882026",
+        "symbol": "MNQ",
+        "con_id": 770561201,
+        "local_symbol": "MNQM6",
+        "expiry": "202606",
+        "side": "LONG",
+        "action": "BUY",
+        "qty": "1",
+        "source_artifact_path": str(tmp_path / "local_paper_only.json"),
+        "generated_at": datetime(2026, 5, 31, 12, 0, tzinfo=UTC),
+    }
+    append_live_trade_registry_event(
+        repo_root=tmp_path,
+        event=make_live_trade_registry_event(event_type=TradeEventType.ENTRY_INTENT_CREATED, **base),
+    )
+    append_live_trade_registry_event(
+        repo_root=tmp_path,
+        event=make_live_trade_registry_event(event_type=TradeEventType.LIFECYCLE_OPEN_MANAGED, **base),
+    )
+
+    gate = evaluate_paper_strategy_exposure_gate(
+        repo_root=tmp_path,
+        strategy_id=lane_id,
+        bridge_strategy_id=thesis_strategy_id,
+        executable_symbol="MNQ",
+        action="SELL",
+        intent_type="SELL_TO_CLOSE",
+        quantity=1.0,
+        account_id="DUM882026",
+        con_id=770561201,
+        local_symbol="MNQM6",
+        lifecycle_id=lifecycle_id,
+        trade_id=trade_id,
+    )
+
+    assert gate["submit_allowed"] is False
+    assert gate["authoritative_source"] == "REGISTRY_TRUTH"
+    assert gate["registry_truth_result"]["allowed"] is False
+    assert any(
+        reason in gate["block_reasons"]
+        for reason in {"trade_registry_entry_not_broker_backed", "trade_registry_state_not_open_managed"}
+    )
 
 
 @pytest.mark.parametrize(
