@@ -43,6 +43,7 @@ def test_produces_artifact_without_dashboard(tmp_path: Path, monkeypatch, capsys
     runtime_dir.mkdir(parents=True)
     (report_dir / "ibkr_read_only_verification").mkdir(parents=True)
     (report_dir / "track_b_paper_broker_reconciliation").mkdir(parents=True)
+    (repo_root / "outputs" / "track_b_execution_core" / "control_plane").mkdir(parents=True)
     lanes_dir.mkdir(parents=True)
     now = datetime(2026, 5, 18, 12, 0, tzinfo=timezone.utc)
     (repo_root / "outputs" / "probationary_pattern_engine" / "paper_session" / "operator_status.json").write_text(
@@ -107,6 +108,26 @@ def test_produces_artifact_without_dashboard(tmp_path: Path, monkeypatch, capsys
               "route_destination": "ibkr_paper_bridge_submit_capable"
             }
           }
+        }
+        """,
+        encoding="utf-8",
+    )
+    (
+        repo_root
+        / "outputs"
+        / "track_b_execution_core"
+        / "control_plane"
+        / "latest_control_plane_snapshot.json"
+    ).write_text(
+        """
+        {
+          "classification": "CONTROL_PLANE_SNAPSHOT_READY",
+          "generated_at": "2026-05-18T11:59:30+00:00",
+          "control_plane_snapshot_id": "track-b-control-plane-test",
+          "shared_truth_refresh_generation_id": "track-b-shared-truth-test",
+          "runtime_supervisor_decision_id": "track-b-paper-supervisor-test",
+          "shared_truth_coherence_status": "COHERENT",
+          "live_money_eligible": false
         }
         """,
         encoding="utf-8",

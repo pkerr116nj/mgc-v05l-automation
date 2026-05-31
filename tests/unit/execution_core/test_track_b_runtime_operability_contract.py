@@ -5,6 +5,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 from mgc_v05l.execution_core.track_b_runtime_operability_contract import (
+    AUTHORITY_STALE_SECONDS,
     BLOCKED_SAFETY,
     BLOCKED_STALE_TRUTH,
     READY_SUBMIT_CAPABLE,
@@ -13,6 +14,10 @@ from mgc_v05l.execution_core.track_b_runtime_operability_contract import (
     build_runtime_operability_contract,
     classify_runtime_operability,
     READY_DIAGNOSTIC_ONLY,
+)
+from mgc_v05l.execution.ibkr_paper_strategy_bridge import IbkrPaperStrategyBridgeConfig
+from mgc_v05l.execution_core.track_b_pre_action_snapshot_validator import (
+    DEFAULT_CONTROL_PLANE_SNAPSHOT_ARTIFACT,
 )
 
 
@@ -60,6 +65,60 @@ def test_stale_authority_artifact_blocks_as_stale_truth(tmp_path: Path) -> None:
     assert payload["canonical_state"] == BLOCKED_STALE_TRUTH
     assert payload["restart_allowed_if_runtime_down"] is False
     assert any(row["code"] == "authority_artifact_stale" for row in payload["blockers"])
+
+
+def test_stale_bridge_control_plane_snapshot_blocks_operability_submit_capable(tmp_path: Path) -> None:
+    config = _write_ready_authority(tmp_path)
+    stale_generated_at = NOW - timedelta(seconds=AUTHORITY_STALE_SECONDS + 1)
+    _write(
+        config.resolve(config.control_plane_snapshot_path),
+        {
+            "classification": "CONTROL_PLANE_SNAPSHOT_READY",
+            "generated_at": stale_generated_at.isoformat(),
+            "control_plane_snapshot_id": "track-b-control-plane-stale",
+            "shared_truth_refresh_generation_id": "track-b-shared-truth-stale",
+            "runtime_supervisor_decision_id": "track-b-paper-supervisor-stale",
+            "shared_truth_coherence_status": "COHERENT",
+            "live_money_eligible": False,
+        },
+    )
+
+    payload = build_runtime_operability_contract(config=config, now=NOW)
+
+    assert payload["canonical_state"] == BLOCKED_STALE_TRUTH
+    assert payload["ready_submit_capable"] is False
+    assert any(row["code"] == "control_plane_snapshot_stale" for row in payload["blockers"])
+
+
+def test_runtime_operability_uses_bridge_control_plane_source_and_max_age(tmp_path: Path) -> None:
+    config = _write_ready_authority(tmp_path)
+
+    payload = build_runtime_operability_contract(config=config, now=NOW)
+
+    control_plane_row = payload["authority_map"]["control_plane_snapshot"]
+    assert Path(control_plane_row["path"]).relative_to(tmp_path) == DEFAULT_CONTROL_PLANE_SNAPSHOT_ARTIFACT
+    assert control_plane_row["freshness"]["stale_after_seconds"] == AUTHORITY_STALE_SECONDS
+    assert AUTHORITY_STALE_SECONDS == IbkrPaperStrategyBridgeConfig.__dataclass_fields__[
+        "pre_action_snapshot_max_age_seconds"
+    ].default
+
+
+def test_stale_autonomous_recovery_plan_does_not_block_bridge_authority(tmp_path: Path) -> None:
+    config = _write_ready_authority(tmp_path)
+    stale_time = NOW - timedelta(hours=2)
+    _write(
+        config.resolve(Path("outputs/track_b_execution_core/paper_autonomous_recovery/latest_paper_autonomous_recovery_plan.json")),
+        {
+            "classification": "PLAN_BLOCKED_STALE_EVIDENCE",
+            "generated_at": stale_time.isoformat(),
+            "control_plane_snapshot_id": "old-control-plane-id",
+        },
+    )
+
+    payload = build_runtime_operability_contract(config=config, now=NOW)
+
+    assert payload["canonical_state"] == READY_SUBMIT_CAPABLE
+    assert payload["ready_submit_capable"] is True
 
 
 def test_paper_safety_flags_remain_hard_blocks(tmp_path: Path) -> None:
@@ -227,6 +286,18 @@ def _write_ready_authority(
     _write(
         config.resolve(config.broker_reconciliation_path),
         {"classification": "TRACK_B_PAPER_BROKER_RECONCILED", "live_money_eligible": False},
+    )
+    _write(
+        config.resolve(config.control_plane_snapshot_path),
+        {
+            "classification": "CONTROL_PLANE_SNAPSHOT_READY",
+            "generated_at": NOW.isoformat(),
+            "control_plane_snapshot_id": "track-b-control-plane-test",
+            "shared_truth_refresh_generation_id": "track-b-shared-truth-test",
+            "runtime_supervisor_decision_id": "track-b-paper-supervisor-test",
+            "shared_truth_coherence_status": "COHERENT",
+            "live_money_eligible": False,
+        },
     )
     _write(
         config.resolve(config.runtime_supervisor_authority_path),

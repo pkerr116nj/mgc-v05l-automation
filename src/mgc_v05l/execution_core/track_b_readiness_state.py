@@ -23,6 +23,9 @@ from mgc_v05l.execution_core.track_b_live_market_data_symbols import (
     TrackBLiveMarketDataSymbol,
     load_track_b_live_market_data_symbols,
 )
+from mgc_v05l.execution_core.track_b_pre_action_snapshot_validator import (
+    DEFAULT_CONTROL_PLANE_SNAPSHOT_ARTIFACT,
+)
 from mgc_v05l.market_data.phase1_market_session import classify_phase1_futures_market_session
 from mgc_v05l.session_phase_labels import NEW_YORK
 
@@ -94,6 +97,7 @@ RECONCILIATION_FRESHNESS_DEFAULT_SECONDS = 180.0
 MARKET_DATA_FRESHNESS_DEFAULT_SECONDS = 180.0
 MARKET_DATA_POST_REOPEN_GRACE_SECONDS = 10 * 60.0
 PROOF_CLASSIFICATION_MAX_AGE_SECONDS = 300.0
+CONTROL_PLANE_SNAPSHOT_MAX_AGE_SECONDS = 300.0
 MARKET_DATA_REQUIRED_SOURCE = "DATABENTO_REALTIME_PHASE1"
 BROKER_TRUTH_LEASE_READY_STATES = {"ACTIVE", "ACTIVE_DEGRADED_REFRESH_FAILING"}
 BROKER_TRUTH_LEASE_EXPIRED_STATES = {"EXPIRED_BLOCK_NEW_ENTRIES", "EXPIRED_EXITS_ONLY"}
@@ -154,6 +158,7 @@ def classify_canonical_readiness(inputs: Mapping[str, Any]) -> dict[str, Any]:
     schedule = _mapping(market_data.get("market_schedule"))
     lane_quarantine = _mapping(inputs.get("lane_quarantine"))
     submit_bridge = _mapping(inputs.get("submit_bridge"))
+    control_plane_authorization = _mapping(inputs.get("control_plane_authorization"))
 
     blockers: list[dict[str, Any]] = []
     warnings: list[dict[str, Any]] = []
@@ -359,6 +364,66 @@ def classify_canonical_readiness(inputs: Mapping[str, Any]) -> dict[str, Any]:
         return _readiness_result(
             generated_at=generated_at,
             state="NOT_READY_RECONCILIATION",
+            reasons=reasons,
+            blockers=blockers,
+            warnings=warnings,
+            inputs=inputs,
+        )
+
+    control_plane_available = _bool(control_plane_authorization.get("available"))
+    control_plane_fresh = _bool(control_plane_authorization.get("fresh"))
+    control_plane_coherent = str(control_plane_authorization.get("shared_truth_coherence_status") or "") == "COHERENT"
+    if not control_plane_available:
+        block(
+            "control_plane_snapshot_missing",
+            "Execution-core Control Plane Snapshot authority is missing; bridge pre-action authorization would fail.",
+            source="control_plane_authorization",
+        )
+        return _readiness_result(
+            generated_at=generated_at,
+            state="NOT_READY_DEPENDENCY",
+            reasons=reasons,
+            blockers=blockers,
+            warnings=warnings,
+            inputs=inputs,
+        )
+    if not control_plane_fresh:
+        block(
+            "control_plane_snapshot_stale",
+            "Execution-core Control Plane Snapshot authority is stale for bridge pre-action authorization.",
+            source="control_plane_authorization",
+        )
+        return _readiness_result(
+            generated_at=generated_at,
+            state="NOT_READY_DEPENDENCY",
+            reasons=reasons,
+            blockers=blockers,
+            warnings=warnings,
+            inputs=inputs,
+        )
+    if not control_plane_coherent:
+        block(
+            "control_plane_snapshot_incoherent",
+            "Execution-core Control Plane Snapshot authority is not coherent.",
+            source="control_plane_authorization",
+        )
+        return _readiness_result(
+            generated_at=generated_at,
+            state="NOT_READY_DEPENDENCY",
+            reasons=reasons,
+            blockers=blockers,
+            warnings=warnings,
+            inputs=inputs,
+        )
+    if _bool(control_plane_authorization.get("live_money_eligible")):
+        block(
+            "control_plane_live_money_eligible_true",
+            "Control Plane Snapshot exposed live_money_eligible=true.",
+            source="control_plane_authorization",
+        )
+        return _readiness_result(
+            generated_at=generated_at,
+            state="NOT_READY_CONFIG",
             reasons=reasons,
             blockers=blockers,
             warnings=warnings,
@@ -595,6 +660,10 @@ def build_readiness_inputs(
         now=now,
     )
     execution_core_shared_truth = _execution_core_shared_truth_input(artifacts, now=now)
+    control_plane_authorization = _control_plane_authorization_input(
+        _mapping(artifacts.get("control_plane_snapshot")),
+        now=now,
+    )
     submit_bridge = _submit_bridge_input(repo_root, operator_status, _mapping(artifacts.get("live_timing_summary")))
     backend = _backend_input(_mapping(artifacts.get("dashboard_health")), root_guard)
     live_money_eligible = any(
@@ -625,6 +694,7 @@ def build_readiness_inputs(
         "broker_truth_lease": broker_truth_lease,
         "phase1_reconciliation": reconciliation,
         "execution_core_shared_truth": execution_core_shared_truth,
+        "control_plane_authorization": control_plane_authorization,
         "market_data": market_data,
         "lane_quarantine": lane_quarantine,
         "submit_bridge": submit_bridge,
@@ -744,6 +814,27 @@ def _load_readiness_artifacts(repo_root: Path) -> dict[str, Any]:
         "position_truth": _read_json(repo_root / DEFAULT_POSITION_TRUTH_ARTIFACT),
         "runtime_environment_truth": _read_json(repo_root / DEFAULT_RUNTIME_ENVIRONMENT_TRUTH_ARTIFACT),
         "managed_position_registry": _read_json(repo_root / DEFAULT_MANAGED_POSITION_REGISTRY_ARTIFACT),
+        "control_plane_snapshot": _read_json(repo_root / DEFAULT_CONTROL_PLANE_SNAPSHOT_ARTIFACT),
+    }
+
+
+def _control_plane_authorization_input(payload: Mapping[str, Any], *, now: datetime) -> dict[str, Any]:
+    age_seconds = _age_seconds(payload.get("generated_at"), now)
+    fresh = bool(age_seconds is not None and age_seconds <= CONTROL_PLANE_SNAPSHOT_MAX_AGE_SECONDS)
+    return {
+        "available": bool(payload),
+        "fresh": fresh,
+        "generated_at": payload.get("generated_at"),
+        "age_seconds": age_seconds,
+        "max_age_seconds": CONTROL_PLANE_SNAPSHOT_MAX_AGE_SECONDS,
+        "source_artifact_path": str(DEFAULT_CONTROL_PLANE_SNAPSHOT_ARTIFACT),
+        "control_plane_snapshot_id": payload.get("control_plane_snapshot_id"),
+        "shared_truth_refresh_generation_id": payload.get("shared_truth_refresh_generation_id"),
+        "runtime_supervisor_decision_id": payload.get("runtime_supervisor_decision_id"),
+        "shared_truth_coherence_status": payload.get("shared_truth_coherence_status"),
+        "classification": payload.get("classification"),
+        "live_money_eligible": payload.get("live_money_eligible") is True,
+        "bridge_pre_action_authority": True,
     }
 
 
@@ -2040,6 +2131,7 @@ def _readiness_result(
         "broker_lease_degraded_diagnostic": broker_lease_degraded_diagnostic,
         "phase1_reconciliation": _mapping(inputs.get("phase1_reconciliation")),
         "execution_core_shared_truth": execution_core_shared_truth,
+        "control_plane_authorization": _mapping(inputs.get("control_plane_authorization")),
         "market_data": _mapping(inputs.get("market_data")),
         **market_schedule,
         "lane_quarantine": _mapping(inputs.get("lane_quarantine")),

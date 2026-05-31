@@ -5,6 +5,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from mgc_v05l.execution_core.track_b_readiness_state import (
+    CONTROL_PLANE_SNAPSHOT_MAX_AGE_SECONDS,
+    DEFAULT_CONTROL_PLANE_SNAPSHOT_ARTIFACT,
     _broker_truth_input,
     _market_data_input,
     _runtime_input,
@@ -71,6 +73,21 @@ def _clean_inputs() -> dict:
             "eligible_lane_count": 3,
             "live_money_eligible": False,
         },
+        "control_plane_authorization": {
+            "available": True,
+            "fresh": True,
+            "generated_at": "2026-05-18T11:59:00+00:00",
+            "age_seconds": 60.0,
+            "max_age_seconds": CONTROL_PLANE_SNAPSHOT_MAX_AGE_SECONDS,
+            "source_artifact_path": str(DEFAULT_CONTROL_PLANE_SNAPSHOT_ARTIFACT),
+            "control_plane_snapshot_id": "track-b-control-plane-test",
+            "shared_truth_refresh_generation_id": "track-b-shared-truth-test",
+            "runtime_supervisor_decision_id": "track-b-paper-supervisor-test",
+            "shared_truth_coherence_status": "COHERENT",
+            "classification": "CONTROL_PLANE_SNAPSHOT_READY",
+            "live_money_eligible": False,
+            "bridge_pre_action_authority": True,
+        },
     }
 
 
@@ -125,6 +142,26 @@ def _shared_truth_evidence(
         },
         "live_money_eligible": False,
     }
+
+
+def _write_control_plane_snapshot(repo_root: Path, generated_at: str = "2026-05-18T11:59:30+00:00") -> None:
+    path = repo_root / DEFAULT_CONTROL_PLANE_SNAPSHOT_ARTIFACT
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        json.dumps(
+            {
+                "classification": "CONTROL_PLANE_SNAPSHOT_READY",
+                "generated_at": generated_at,
+                "control_plane_snapshot_id": "track-b-control-plane-test",
+                "shared_truth_refresh_generation_id": "track-b-shared-truth-test",
+                "runtime_supervisor_decision_id": "track-b-paper-supervisor-test",
+                "shared_truth_coherence_status": "COHERENT",
+                "live_money_eligible": False,
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
 
 
 def _phase1_listener_status(*, rows: list[dict], generated_at: str = "2026-05-18T11:59:50+00:00", **overrides: object) -> dict:
@@ -203,6 +240,32 @@ def test_clean_shared_truth_and_fresh_phase1_preserve_submit_capable_readiness()
     assert result["ready_submit_capable"] is True
     assert result["execution_core_shared_truth"]["classifications"]["Position Truth"] == "CLEAN_FLAT_READY"
     assert result["readiness_blockers"] == []
+
+
+def test_stale_bridge_control_plane_snapshot_blocks_submit_capable_readiness() -> None:
+    inputs = _clean_inputs()
+    inputs["control_plane_authorization"] = {
+        **inputs["control_plane_authorization"],
+        "fresh": False,
+        "age_seconds": CONTROL_PLANE_SNAPSHOT_MAX_AGE_SECONDS + 1.0,
+    }
+
+    result = classify_canonical_readiness(inputs)
+
+    assert result["canonical_readiness"] == "NOT_READY_DEPENDENCY"
+    assert result["ready_submit_capable"] is False
+    assert result["submit_allowed"] is False
+    assert result["control_plane_authorization"]["source_artifact_path"] == str(DEFAULT_CONTROL_PLANE_SNAPSHOT_ARTIFACT)
+    assert {row["code"] for row in result["readiness_blockers"]} == {"control_plane_snapshot_stale"}
+
+
+def test_fresh_bridge_control_plane_snapshot_preserves_submit_capable_readiness() -> None:
+    inputs = _clean_inputs()
+
+    result = classify_canonical_readiness(inputs)
+
+    assert result["canonical_readiness"] == "READY_SUBMIT_CAPABLE"
+    assert result["control_plane_authorization"]["fresh"] is True
 
 
 def test_closed_market_proof_readiness_blocks_with_clear_market_evidence() -> None:
@@ -884,6 +947,7 @@ def test_canonical_readiness_refreshes_stale_broker_truth_lease_from_fresh_sourc
         '"route_destination":"ibkr_paper_bridge_submit_capable"}}}',
         encoding="utf-8",
     )
+    _write_control_plane_snapshot(repo_root)
     monkeypatch.setattr("mgc_v05l.execution_core.track_b_readiness_state._pid_running", lambda pid: pid == 100)
 
     result = write_canonical_readiness_artifact(
@@ -956,6 +1020,7 @@ def test_canonical_readiness_keeps_stale_broker_truth_blocked_when_lease_is_refr
         '"route_destination":"ibkr_paper_bridge_submit_capable"}}}',
         encoding="utf-8",
     )
+    _write_control_plane_snapshot(repo_root)
     monkeypatch.setattr("mgc_v05l.execution_core.track_b_readiness_state._pid_running", lambda pid: pid == 100)
 
     result = write_canonical_readiness_artifact(
@@ -1197,6 +1262,7 @@ def test_write_canonical_readiness_artifact_without_dashboard(tmp_path: Path, mo
         """,
         encoding="utf-8",
     )
+    _write_control_plane_snapshot(repo_root)
     monkeypatch.setattr("mgc_v05l.execution_core.track_b_readiness_state._pid_running", lambda pid: pid == 100)
 
     output = repo_root / "outputs" / "operator_dashboard" / "runtime" / "latest_canonical_readiness.json"

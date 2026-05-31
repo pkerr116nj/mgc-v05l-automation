@@ -22,6 +22,9 @@ from typing import Any, Mapping, Sequence
 
 from mgc_v05l.execution_core.models import to_jsonable
 from mgc_v05l.execution_core.track_b_atomic_io import write_json_atomic
+from mgc_v05l.execution_core.track_b_pre_action_snapshot_validator import (
+    DEFAULT_CONTROL_PLANE_SNAPSHOT_ARTIFACT,
+)
 
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
@@ -117,6 +120,7 @@ class RuntimeOperabilityConfig:
     paper_config_in_force_path: Path = DEFAULT_PAPER_CONFIG_IN_FORCE_PATH
     paper_runtime_truth_path: Path = DEFAULT_PAPER_RUNTIME_TRUTH_PATH
     runtime_supervisor_authority_path: Path = DEFAULT_RUNTIME_SUPERVISOR_AUTHORITY_PATH
+    control_plane_snapshot_path: Path = DEFAULT_CONTROL_PLANE_SNAPSHOT_ARTIFACT
     hourly_recovery_audit_path: Path = DEFAULT_HOURLY_RECOVERY_AUDIT_PATH
     broker_reconciliation_path: Path = DEFAULT_BROKER_RECONCILIATION_PATH
     operator_dashboard_readiness_path: Path = DEFAULT_OPERATOR_DASHBOARD_READINESS_PATH
@@ -256,6 +260,14 @@ def build_runtime_authority_map(
             can_block_runtime=True,
         ),
         row(
+            "control_plane_snapshot",
+            config.control_plane_snapshot_path,
+            AUTHORITY_ACTIVE,
+            "Execution-core Control Plane Snapshot used by bridge pre-action authorization.",
+            stale_after_seconds=AUTHORITY_STALE_SECONDS,
+            can_block_runtime=True,
+        ),
+        row(
             "runtime_supervisor_authority",
             config.runtime_supervisor_authority_path,
             DIAGNOSTIC_ONLY,
@@ -307,6 +319,7 @@ def classify_runtime_operability(
     config = _mapping(payloads.get("active_paper_config"))
     reconciliation = _mapping(payloads.get("broker_lifecycle_reconciliation"))
     supervisor = _mapping(payloads.get("runtime_supervisor_authority"))
+    control_plane = _mapping(payloads.get("control_plane_snapshot"))
     recovery = _mapping(payloads.get("hourly_recovery_audit"))
 
     for key, row in surfaces.items():
@@ -350,6 +363,42 @@ def classify_runtime_operability(
             "unguarded_broker_mutation_allowed",
             "Canonical readiness exposed broker_mutation_allowed=true.",
             "paper_safety",
+            BLOCKED_SAFETY,
+        )
+    control_plane_age_seconds = _payload_age_seconds(control_plane, now=now)
+    if not control_plane:
+        block(
+            "control_plane_snapshot_missing",
+            "Execution-core Control Plane Snapshot authority is missing; bridge pre-action authorization would fail.",
+            "control_plane_snapshot",
+            BLOCKED_STALE_TRUTH,
+        )
+    elif control_plane_age_seconds is None:
+        block(
+            "control_plane_snapshot_generated_at_invalid",
+            "Execution-core Control Plane Snapshot generated_at is missing or invalid.",
+            "control_plane_snapshot",
+            BLOCKED_STALE_TRUTH,
+        )
+    elif control_plane_age_seconds > AUTHORITY_STALE_SECONDS:
+        block(
+            "control_plane_snapshot_stale",
+            "Execution-core Control Plane Snapshot authority is stale for bridge pre-action authorization.",
+            "control_plane_snapshot",
+            BLOCKED_STALE_TRUTH,
+        )
+    elif str(control_plane.get("shared_truth_coherence_status") or "") != "COHERENT":
+        block(
+            "control_plane_snapshot_incoherent",
+            "Execution-core Control Plane Snapshot authority is not coherent.",
+            "control_plane_snapshot",
+            BLOCKED_STALE_TRUTH,
+        )
+    if _bool(control_plane.get("live_money_eligible")):
+        block(
+            "control_plane_live_money_eligible_true",
+            "Control Plane Snapshot exposed live_money_eligible=true.",
+            "control_plane_snapshot",
             BLOCKED_SAFETY,
         )
 
@@ -565,6 +614,20 @@ def _int(value: Any, *, default: int | None = 0) -> int | None:
         return int(value)
     except (TypeError, ValueError):
         return default
+
+
+def _payload_age_seconds(payload: Mapping[str, Any], *, now: datetime | None) -> float | None:
+    if now is None:
+        return None
+    raw = payload.get("generated_at")
+    if raw is None:
+        return None
+    try:
+        parsed = datetime.fromisoformat(str(raw).replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    parsed = _ensure_utc(parsed)
+    return max(0.0, (_ensure_utc(now) - parsed).total_seconds())
 
 
 def build_parser() -> argparse.ArgumentParser:
