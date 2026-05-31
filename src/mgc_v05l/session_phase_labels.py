@@ -9,6 +9,7 @@ from zoneinfo import ZoneInfo
 NEW_YORK = ZoneInfo("America/New_York")
 
 _SESSION_WINDOWS: dict[str, tuple[time, time]] = {
+    "GLOBEX": (time(18, 0), time(3, 0)),
     "SESSION_OPEN": (time(18, 0), time(19, 0)),
     "ASIA_EARLY": (time(19, 0), time(22, 0)),
     "ASIA_LATE": (time(22, 0), time(3, 0)),
@@ -86,17 +87,20 @@ def phase_coarse_session_group(phase: str) -> str:
 def session_restriction_matches_phase(current_phase: str, restriction: str | None) -> bool:
     """Return whether a restriction matches a fine-grained phase label."""
     normalized = str(restriction or "").upper().strip()
+    current = str(current_phase or "").upper()
     if not normalized or normalized in {"ALL", "ANY"}:
         return True
     if "/" in normalized:
         allowed = {part.strip() for part in normalized.split("/") if part.strip()}
         coarse = phase_coarse_session_group(current_phase)
-        return coarse in allowed or str(current_phase or "").upper() in allowed
+        return coarse in allowed or current in allowed or ("GLOBEX" in allowed and coarse == "ASIA")
     if normalized == "US_EARLY_OBSERVATION":
-        return str(current_phase or "").upper() in {"US_PREOPEN_OPENING", "US_CASH_OPEN_IMPULSE", "US_OPEN_LATE"}
+        return current in {"US_PREOPEN_OPENING", "US_CASH_OPEN_IMPULSE", "US_OPEN_LATE"}
+    if normalized == "GLOBEX":
+        return phase_coarse_session_group(current_phase) == "ASIA"
     if normalized in {"ASIA", "LONDON", "US", "NY"}:
         return phase_coarse_session_group(current_phase) == ("US" if normalized == "NY" else normalized)
-    return str(current_phase or "").upper() == normalized
+    return current == normalized
 
 
 def session_restriction_matches_timestamp(timestamp: datetime, restriction: str | None) -> bool:

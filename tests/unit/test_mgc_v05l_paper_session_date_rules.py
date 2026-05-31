@@ -59,6 +59,22 @@ def test_session_open_is_standalone_sunday_through_thursday() -> None:
     assert session_restriction_matches_timestamp(friday_open, "SESSION_OPEN") is False
 
 
+def test_globex_restriction_covers_sunday_reopen_through_asia_late() -> None:
+    sunday_reopen = datetime.fromisoformat("2026-05-31T18:05:00-04:00")
+    asia_early = datetime.fromisoformat("2026-05-31T19:05:00-04:00")
+    asia_late = datetime.fromisoformat("2026-05-31T22:05:00-04:00")
+    monday_before_london = datetime.fromisoformat("2026-06-01T02:55:00-04:00")
+    monday_london = datetime.fromisoformat("2026-06-01T03:00:00-04:00")
+
+    assert label_session_phase(sunday_reopen) == "SESSION_OPEN"
+    assert session_restriction_matches_timestamp(sunday_reopen, "GLOBEX") is True
+    assert session_restriction_matches_timestamp(sunday_reopen, "GLOBEX/ASIA_EARLY/ASIA_LATE") is True
+    assert session_restriction_matches_timestamp(asia_early, "GLOBEX") is True
+    assert session_restriction_matches_timestamp(asia_late, "GLOBEX") is True
+    assert session_restriction_matches_timestamp(monday_before_london, "GLOBEX") is True
+    assert session_restriction_matches_timestamp(monday_london, "GLOBEX") is False
+
+
 def test_track_b_asia_early_extends_to_2200_for_live_operator_semantics() -> None:
     asia_early = datetime.fromisoformat("2026-05-18T20:40:00-04:00")
     asia_late_start = datetime.fromisoformat("2026-05-18T22:00:00-04:00")
