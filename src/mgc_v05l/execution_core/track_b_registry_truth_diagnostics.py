@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from enum import Enum
 from pathlib import Path
 from typing import Any, Mapping
 
@@ -43,11 +44,24 @@ TRACK_B_DIAGNOSTICS_CLEAN = "TRACK_B_DIAGNOSTICS_CLEAN"
 TRACK_B_DIAGNOSTICS_REVIEW_REQUIRED = "TRACK_B_DIAGNOSTICS_REVIEW_REQUIRED"
 TRACK_B_DIAGNOSTICS_STALE = "TRACK_B_DIAGNOSTICS_STALE"
 TRACK_B_DIAGNOSTICS_CONFLICT = "TRACK_B_DIAGNOSTICS_CONFLICT"
+TRACK_B_DIAGNOSTICS_CLEAN_CURRENT_SCOPE = "TRACK_B_DIAGNOSTICS_CLEAN_CURRENT_SCOPE"
+TRACK_B_DIAGNOSTICS_STALE_AUTHORITY = "TRACK_B_DIAGNOSTICS_STALE_AUTHORITY"
+TRACK_B_DIAGNOSTICS_HISTORICAL_REVIEW_REQUIRED = "TRACK_B_DIAGNOSTICS_HISTORICAL_REVIEW_REQUIRED"
+TRACK_B_DIAGNOSTICS_CONFLICT_CURRENT_SCOPE = "TRACK_B_DIAGNOSTICS_CONFLICT_CURRENT_SCOPE"
+
+TRACK_B_FUTURES_SYMBOLS = {"MGC", "GC", "MNQ", "MES"}
+
+
+class TrackBDiagnosticsMode(str, Enum):
+    CURRENT_HOT_PATH = "CURRENT_HOT_PATH"
+    HISTORICAL_RECONSTRUCTION = "HISTORICAL_RECONSTRUCTION"
+    FULL_ARTIFACT_AUDIT = "FULL_ARTIFACT_AUDIT"
 
 
 @dataclass(frozen=True)
 class TrackBRegistryTruthDiagnosticsConfig:
     repo_root: Path
+    mode: TrackBDiagnosticsMode = TrackBDiagnosticsMode.CURRENT_HOT_PATH
     output_path: Path = DEFAULT_DIAGNOSTICS_REPORT_PATH
     truth_config: TrackBTruthSnapshotConfig | None = None
     reconstruction_config: TradeRegistryReconstructionConfig | None = None
@@ -78,6 +92,7 @@ class TrackBRegistryTruthDiagnosticsConfig:
 class TrackBRegistryTruthDiagnosticsReport:
     schema_version: str
     generated_at: datetime
+    mode: str
     classification: str
     read_only: bool
     diagnostic_only: bool
@@ -90,9 +105,14 @@ class TrackBRegistryTruthDiagnosticsReport:
     broker_lifecycle_reconciled: bool
     broker_open_order_count: int
     broker_position_count: int
+    track_b_managed_futures_position_count: int
+    unrelated_broker_position_count: int
+    unknown_scope_position_count: int
+    broker_positions_by_scope: Mapping[str, Any]
     lifecycle_open_position_count: int
     registry_trade_state_counts: Mapping[str, int]
     review_required_trade_ids: tuple[str, ...]
+    historical_review_required_trade_ids: tuple[str, ...]
     truth_conflicts: tuple[Mapping[str, Any], ...]
     registry_reconciliation_disagreements: tuple[str, ...]
     latest_preflight_hard_failure_count: int
@@ -107,6 +127,7 @@ class TrackBRegistryTruthDiagnosticsReport:
         return {
             "schema_version": self.schema_version,
             "generated_at": self.generated_at.isoformat(),
+            "mode": self.mode,
             "classification": self.classification,
             "read_only": self.read_only,
             "diagnostic_only": self.diagnostic_only,
@@ -119,9 +140,14 @@ class TrackBRegistryTruthDiagnosticsReport:
             "broker_lifecycle_reconciled": self.broker_lifecycle_reconciled,
             "broker_open_order_count": self.broker_open_order_count,
             "broker_position_count": self.broker_position_count,
+            "track_b_managed_futures_position_count": self.track_b_managed_futures_position_count,
+            "unrelated_broker_position_count": self.unrelated_broker_position_count,
+            "unknown_scope_position_count": self.unknown_scope_position_count,
+            "broker_positions_by_scope": dict(self.broker_positions_by_scope),
             "lifecycle_open_position_count": self.lifecycle_open_position_count,
             "registry_trade_state_counts": dict(self.registry_trade_state_counts),
             "review_required_trade_ids": list(self.review_required_trade_ids),
+            "historical_review_required_trade_ids": list(self.historical_review_required_trade_ids),
             "truth_conflicts": list(self.truth_conflicts),
             "registry_reconciliation_disagreements": list(self.registry_reconciliation_disagreements),
             "latest_preflight_hard_failure_count": self.latest_preflight_hard_failure_count,
@@ -146,16 +172,33 @@ def build_track_b_registry_truth_diagnostics(
     truth = build_track_b_truth_snapshot(config=truth_config, now=generated_at)
     reconstruction = reconstruct_trade_registry_from_artifacts(config=reconstruction_config, now=generated_at)
     shadow = build_trade_registry_shadow_report(config=shadow_config, now=generated_at)
+    scoped_positions = _broker_positions_by_scope(truth)
     preflight = _preflight_state(
         path=config.resolve(config.preflight_summary_path),
         now=generated_at,
         max_age_seconds=config.max_preflight_age_seconds,
     )
-    reason_codes = _reason_codes(truth=truth, shadow=shadow, preflight=preflight)
-    classification = _classification(truth=truth, shadow=shadow, preflight=preflight)
+    current_rows = _current_scope_shadow_rows(truth=truth, shadow=shadow, scoped_positions=scoped_positions)
+    reason_codes = _reason_codes(
+        mode=config.mode,
+        truth=truth,
+        shadow=shadow,
+        current_rows=current_rows,
+        scoped_positions=scoped_positions,
+        preflight=preflight,
+    )
+    classification = _classification(
+        mode=config.mode,
+        truth=truth,
+        shadow=shadow,
+        current_rows=current_rows,
+        scoped_positions=scoped_positions,
+        preflight=preflight,
+    )
     return TrackBRegistryTruthDiagnosticsReport(
         schema_version=SCHEMA_VERSION,
         generated_at=generated_at,
+        mode=config.mode.value,
         classification=classification,
         read_only=True,
         diagnostic_only=True,
@@ -168,12 +211,18 @@ def build_track_b_registry_truth_diagnostics(
         broker_lifecycle_reconciled=truth.reconciliation.reconciled,
         broker_open_order_count=truth.broker_truth.open_order_count,
         broker_position_count=truth.broker_truth.broker_position_count,
+        track_b_managed_futures_position_count=len(scoped_positions["track_b_managed_futures_positions"]),
+        unrelated_broker_position_count=len(scoped_positions["unrelated_broker_positions"]),
+        unknown_scope_position_count=len(scoped_positions["unknown_scope_positions"]),
+        broker_positions_by_scope=scoped_positions,
         lifecycle_open_position_count=truth.lifecycle.open_position_count,
         registry_trade_state_counts=_registry_state_counts(reconstruction),
         review_required_trade_ids=tuple(
-            record.trade_id
-            for record in reconstruction.records
-            if record.current_state == TradeCurrentState.REVIEW_REQUIRED
+            row.trade_id
+            for row in _review_required_rows_for_mode(config.mode, shadow, current_rows)
+        ),
+        historical_review_required_trade_ids=tuple(
+            record.trade_id for record in reconstruction.records if record.current_state == TradeCurrentState.REVIEW_REQUIRED
         ),
         truth_conflicts=tuple(_conflict_summary(conflict) for conflict in truth.conflicts),
         registry_reconciliation_disagreements=tuple(
@@ -202,29 +251,43 @@ def write_track_b_registry_truth_diagnostics(
 
 def _classification(
     *,
+    mode: TrackBDiagnosticsMode,
     truth: TrackBTruthSnapshot,
     shadow: TradeRegistryShadowReport,
+    current_rows: tuple[Any, ...],
+    scoped_positions: Mapping[str, Any],
     preflight: Mapping[str, Any],
 ) -> str:
     if _truth_has_stale_authority(truth) or preflight["stale"]:
-        return TRACK_B_DIAGNOSTICS_STALE
-    if truth.classification == TRUTH_CONFLICT_REVIEW_REQUIRED or any(
-        not row.registry_agrees_with_reconciliation
-        and row.current_derived_state != TradeCurrentState.REVIEW_REQUIRED.value
-        for row in shadow.rows
-    ):
-        return TRACK_B_DIAGNOSTICS_CONFLICT
+        return TRACK_B_DIAGNOSTICS_STALE_AUTHORITY
+    if mode == TrackBDiagnosticsMode.CURRENT_HOT_PATH:
+        if _current_scope_conflict(truth=truth, rows=current_rows, scoped_positions=scoped_positions):
+            return TRACK_B_DIAGNOSTICS_CONFLICT_CURRENT_SCOPE
+        if any(row.current_derived_state == TradeCurrentState.REVIEW_REQUIRED.value for row in current_rows):
+            return TRACK_B_DIAGNOSTICS_HISTORICAL_REVIEW_REQUIRED
+        if int(preflight["hard_failure_count"]) > 0:
+            return TRACK_B_DIAGNOSTICS_HISTORICAL_REVIEW_REQUIRED
+        return TRACK_B_DIAGNOSTICS_CLEAN_CURRENT_SCOPE
+    if mode == TrackBDiagnosticsMode.HISTORICAL_RECONSTRUCTION:
+        if any(row.current_derived_state == TradeCurrentState.REVIEW_REQUIRED.value for row in shadow.rows):
+            return TRACK_B_DIAGNOSTICS_HISTORICAL_REVIEW_REQUIRED
+        return TRACK_B_DIAGNOSTICS_CLEAN_CURRENT_SCOPE
+    if truth.classification == TRUTH_CONFLICT_REVIEW_REQUIRED or _full_artifact_conflict(shadow):
+        return TRACK_B_DIAGNOSTICS_CONFLICT_CURRENT_SCOPE
     if any(row.current_derived_state == TradeCurrentState.REVIEW_REQUIRED.value for row in shadow.rows):
-        return TRACK_B_DIAGNOSTICS_REVIEW_REQUIRED
+        return TRACK_B_DIAGNOSTICS_HISTORICAL_REVIEW_REQUIRED
     if int(preflight["hard_failure_count"]) > 0:
-        return TRACK_B_DIAGNOSTICS_REVIEW_REQUIRED
-    return TRACK_B_DIAGNOSTICS_CLEAN
+        return TRACK_B_DIAGNOSTICS_HISTORICAL_REVIEW_REQUIRED
+    return TRACK_B_DIAGNOSTICS_CLEAN_CURRENT_SCOPE
 
 
 def _reason_codes(
     *,
+    mode: TrackBDiagnosticsMode,
     truth: TrackBTruthSnapshot,
     shadow: TradeRegistryShadowReport,
+    current_rows: tuple[Any, ...],
+    scoped_positions: Mapping[str, Any],
     preflight: Mapping[str, Any],
 ) -> tuple[str, ...]:
     reasons: list[str] = list(truth.reason_codes)
@@ -234,9 +297,16 @@ def _reason_codes(
         reasons.append("LIFECYCLE_STRESS_PREFLIGHT_STALE")
     if int(preflight["hard_failure_count"]) > 0:
         reasons.append("LIFECYCLE_STRESS_PREFLIGHT_HARD_FAILURE")
+    if scoped_positions["unknown_scope_positions"]:
+        reasons.append("UNKNOWN_SCOPE_BROKER_POSITION")
+    if any(row.current_derived_state == TradeCurrentState.REVIEW_REQUIRED.value for row in current_rows):
+        reasons.append("CURRENT_SCOPE_REGISTRY_REVIEW_REQUIRED_TRADE")
     if any(row.current_derived_state == TradeCurrentState.REVIEW_REQUIRED.value for row in shadow.rows):
-        reasons.append("REGISTRY_REVIEW_REQUIRED_TRADE")
-    if any(not row.registry_agrees_with_reconciliation for row in shadow.rows):
+        reasons.append("HISTORICAL_REGISTRY_REVIEW_REQUIRED_TRADE")
+    if mode == TrackBDiagnosticsMode.CURRENT_HOT_PATH:
+        if any(not row.registry_agrees_with_reconciliation for row in current_rows):
+            reasons.append("CURRENT_SCOPE_REGISTRY_RECONCILIATION_DISAGREEMENT")
+    elif any(not row.registry_agrees_with_reconciliation for row in shadow.rows):
         reasons.append("REGISTRY_RECONCILIATION_DISAGREEMENT")
     return tuple(dict.fromkeys(reasons))
 
@@ -251,6 +321,126 @@ def _truth_has_stale_authority(truth: TrackBTruthSnapshot) -> bool:
         truth.control_plane.source,
     )
     return any(not source.fresh for source in sources)
+
+
+def _broker_positions_by_scope(truth: TrackBTruthSnapshot) -> Mapping[str, Any]:
+    lifecycle_keys = {_position_key(row) for row in truth.lifecycle.open_positions}
+    track_b: list[Mapping[str, Any]] = []
+    unrelated: list[Mapping[str, Any]] = []
+    unknown: list[Mapping[str, Any]] = []
+    for position in truth.broker_truth.positions:
+        row = dict(position)
+        scope = str(row.get("track_b_scope") or row.get("scope") or "").strip().upper()
+        key = _position_key(row)
+        symbol = _symbol(row)
+        if scope in {"TRACK_B", "TRACK_B_MANAGED", "MANAGED"} or any(_keys_match(key, lifecycle_key) for lifecycle_key in lifecycle_keys):
+            track_b.append(row)
+        elif scope in {"UNRELATED", "OUT_OF_SCOPE", "NON_TRACK_B"} or symbol not in TRACK_B_FUTURES_SYMBOLS:
+            unrelated.append(row)
+        else:
+            unknown.append(row)
+    return {
+        "track_b_managed_futures_positions": track_b,
+        "unrelated_broker_positions": unrelated,
+        "unknown_scope_positions": unknown,
+    }
+
+
+def _current_scope_shadow_rows(
+    *,
+    truth: TrackBTruthSnapshot,
+    shadow: TradeRegistryShadowReport,
+    scoped_positions: Mapping[str, Any],
+) -> tuple[Any, ...]:
+    current_keys = {
+        _position_key(row)
+        for bucket in (
+            scoped_positions["track_b_managed_futures_positions"],
+            scoped_positions["unknown_scope_positions"],
+            truth.broker_truth.open_orders,
+            truth.lifecycle.open_positions,
+        )
+        for row in bucket
+    }
+    if not current_keys:
+        return ()
+    return tuple(row for row in shadow.rows if any(_keys_match(_row_key(row), current_key) for current_key in current_keys))
+
+
+def _review_required_rows_for_mode(
+    mode: TrackBDiagnosticsMode,
+    shadow: TradeRegistryShadowReport,
+    current_rows: tuple[Any, ...],
+) -> tuple[Any, ...]:
+    rows = current_rows if mode == TrackBDiagnosticsMode.CURRENT_HOT_PATH else shadow.rows
+    return tuple(row for row in rows if row.current_derived_state == TradeCurrentState.REVIEW_REQUIRED.value)
+
+
+def _current_scope_conflict(
+    *,
+    truth: TrackBTruthSnapshot,
+    rows: tuple[Any, ...],
+    scoped_positions: Mapping[str, Any],
+) -> bool:
+    if scoped_positions["unknown_scope_positions"]:
+        return True
+    if truth.classification == TRUTH_CONFLICT_REVIEW_REQUIRED and (
+        truth.broker_truth.broker_position_count
+        or truth.broker_truth.open_order_count
+        or truth.lifecycle.open_position_count
+        or rows
+    ):
+        return True
+    return any(
+        not row.registry_agrees_with_reconciliation
+        and row.current_derived_state != TradeCurrentState.REVIEW_REQUIRED.value
+        for row in rows
+    )
+
+
+def _full_artifact_conflict(shadow: TradeRegistryShadowReport) -> bool:
+    return any(
+        not row.registry_agrees_with_reconciliation
+        and row.current_derived_state != TradeCurrentState.REVIEW_REQUIRED.value
+        for row in shadow.rows
+    )
+
+
+def _position_key(row: Mapping[str, Any]) -> tuple[str | None, str | None, str | None]:
+    return (
+        _text(row.get("con_id") or row.get("conId") or row.get("contract_id")),
+        _text(row.get("local_symbol") or row.get("localSymbol")),
+        _symbol(row),
+    )
+
+
+def _row_key(row: Any) -> tuple[str | None, str | None, str | None]:
+    return (_text(getattr(row, "con_id", None)), _text(getattr(row, "local_symbol", None)), _text(getattr(row, "symbol", None)))
+
+
+def _keys_match(
+    left: tuple[str | None, str | None, str | None],
+    right: tuple[str | None, str | None, str | None],
+) -> bool:
+    left_con, left_local, left_symbol = left
+    right_con, right_local, right_symbol = right
+    if left_con and right_con:
+        return left_con == right_con
+    if left_local and right_local:
+        return left_local == right_local
+    if left_symbol and right_symbol:
+        return left_symbol == right_symbol
+    return False
+
+
+def _symbol(row: Mapping[str, Any]) -> str | None:
+    text = _text(row.get("symbol") or row.get("root_symbol") or row.get("underlying"))
+    return text.upper() if text else None
+
+
+def _text(value: Any) -> str | None:
+    text = str(value or "").strip()
+    return text or None
 
 
 def _preflight_state(*, path: Path, now: datetime, max_age_seconds: float) -> Mapping[str, Any]:

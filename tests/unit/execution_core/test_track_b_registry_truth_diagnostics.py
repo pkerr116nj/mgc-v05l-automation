@@ -7,10 +7,11 @@ from pathlib import Path
 from mgc_v05l.execution_core.track_b_canonical_truth_snapshot import TrackBTruthSnapshotConfig
 from mgc_v05l.execution_core.track_b_central_trade_registry import TradeCurrentState, TradeEventType
 from mgc_v05l.execution_core.track_b_registry_truth_diagnostics import (
-    TRACK_B_DIAGNOSTICS_CLEAN,
-    TRACK_B_DIAGNOSTICS_CONFLICT,
-    TRACK_B_DIAGNOSTICS_REVIEW_REQUIRED,
-    TRACK_B_DIAGNOSTICS_STALE,
+    TRACK_B_DIAGNOSTICS_CLEAN_CURRENT_SCOPE,
+    TRACK_B_DIAGNOSTICS_CONFLICT_CURRENT_SCOPE,
+    TRACK_B_DIAGNOSTICS_HISTORICAL_REVIEW_REQUIRED,
+    TRACK_B_DIAGNOSTICS_STALE_AUTHORITY,
+    TrackBDiagnosticsMode,
     TrackBRegistryTruthDiagnosticsConfig,
     build_track_b_registry_truth_diagnostics,
     write_track_b_registry_truth_diagnostics,
@@ -43,7 +44,7 @@ def test_clean_flat_state_reports_clean(tmp_path: Path) -> None:
 
     report = build_track_b_registry_truth_diagnostics(config=config, now=NOW)
 
-    assert report.classification == TRACK_B_DIAGNOSTICS_CLEAN
+    assert report.classification == TRACK_B_DIAGNOSTICS_CLEAN_CURRENT_SCOPE
     assert report.runtime_ready is True
     assert report.recovery_active is True
     assert report.broker_lifecycle_reconciled is True
@@ -53,7 +54,12 @@ def test_clean_flat_state_reports_clean(tmp_path: Path) -> None:
 
 
 def test_open_managed_trade_surfaces_open_state(tmp_path: Path) -> None:
-    config = _seed_config(tmp_path, broker_positions=[{"symbol": "MNQ", "position": 1}])
+    config = _seed_config(
+        tmp_path,
+        broker_positions=[
+            {"symbol": "MNQ", "position": 1, "con_id": 770561201, "localSymbol": "MNQM6"}
+        ],
+    )
     _write_json(
         tmp_path / config.truth_config.managed_position_registry_path,  # type: ignore[union-attr]
         {
@@ -99,13 +105,14 @@ def test_open_managed_trade_surfaces_open_state(tmp_path: Path) -> None:
 
     report = build_track_b_registry_truth_diagnostics(config=config, now=NOW)
 
-    assert report.classification == TRACK_B_DIAGNOSTICS_CLEAN
+    assert report.classification == TRACK_B_DIAGNOSTICS_CLEAN_CURRENT_SCOPE
     assert report.broker_position_count == 1
+    assert report.track_b_managed_futures_position_count == 1
     assert report.lifecycle_open_position_count == 1
     assert report.registry_trade_state_counts == {TradeCurrentState.OPEN_MANAGED.value: 1}
 
 
-def test_review_required_trade_reports_review_required(tmp_path: Path) -> None:
+def test_flat_current_reconciliation_with_old_review_chains_is_clean_current_scope(tmp_path: Path) -> None:
     config = _seed_config(tmp_path)
     _write_jsonl(
         tmp_path / "fixtures/ledger.jsonl",
@@ -124,9 +131,33 @@ def test_review_required_trade_reports_review_required(tmp_path: Path) -> None:
 
     report = build_track_b_registry_truth_diagnostics(config=config, now=NOW)
 
-    assert report.classification == TRACK_B_DIAGNOSTICS_REVIEW_REQUIRED
+    assert report.classification == TRACK_B_DIAGNOSTICS_CLEAN_CURRENT_SCOPE
+    assert report.review_required_trade_ids == ()
+    assert report.historical_review_required_trade_ids == ("trade_review",)
+    assert "HISTORICAL_REGISTRY_REVIEW_REQUIRED_TRADE" in report.reason_codes
+
+
+def test_full_artifact_audit_still_reports_old_review_required_trades(tmp_path: Path) -> None:
+    config = _seed_config(tmp_path, mode=TrackBDiagnosticsMode.FULL_ARTIFACT_AUDIT)
+    _write_jsonl(
+        tmp_path / "fixtures/ledger.jsonl",
+        [
+            _event(
+                TradeEventType.ENTRY_FILL_BROKER_BACKED,
+                trade_id="trade_review",
+                lifecycle_id="life_review",
+                order_id="1",
+                client_id="17",
+                perm_id=None,
+                exec_id=None,
+            )
+        ],
+    )
+
+    report = build_track_b_registry_truth_diagnostics(config=config, now=NOW)
+
+    assert report.classification == TRACK_B_DIAGNOSTICS_HISTORICAL_REVIEW_REQUIRED
     assert report.review_required_trade_ids == ("trade_review",)
-    assert "REGISTRY_REVIEW_REQUIRED_TRADE" in report.reason_codes
 
 
 def test_stale_truth_snapshot_reports_stale(tmp_path: Path) -> None:
@@ -142,12 +173,48 @@ def test_stale_truth_snapshot_reports_stale(tmp_path: Path) -> None:
 
     report = build_track_b_registry_truth_diagnostics(config=config, now=NOW)
 
-    assert report.classification == TRACK_B_DIAGNOSTICS_STALE
+    assert report.classification == TRACK_B_DIAGNOSTICS_STALE_AUTHORITY
     assert "TRUTH_AUTHORITY_STALE" in report.reason_codes
 
 
-def test_registry_reconciliation_disagreement_reports_conflict(tmp_path: Path) -> None:
-    config = _seed_config(tmp_path, broker_positions=[{"symbol": "MNQ", "position": 1}])
+def test_unrelated_broker_positions_do_not_count_as_track_b_exposure(tmp_path: Path) -> None:
+    config = _seed_config(
+        tmp_path,
+        broker_positions=[{"symbol": "AAPL", "position": 100, "track_b_scope": "UNRELATED"}],
+    )
+
+    report = build_track_b_registry_truth_diagnostics(config=config, now=NOW)
+
+    assert report.classification == TRACK_B_DIAGNOSTICS_CLEAN_CURRENT_SCOPE
+    assert report.broker_position_count == 1
+    assert report.track_b_managed_futures_position_count == 0
+    assert report.unrelated_broker_position_count == 1
+    assert report.unknown_scope_position_count == 0
+
+
+def test_current_open_broker_position_without_lifecycle_owner_conflicts_current_scope(tmp_path: Path) -> None:
+    config = _seed_config(tmp_path, broker_positions=[{"symbol": "MNQ", "position": 1, "con_id": 770561201, "localSymbol": "MNQM6"}])
+
+    report = build_track_b_registry_truth_diagnostics(config=config, now=NOW)
+
+    assert report.classification == TRACK_B_DIAGNOSTICS_CONFLICT_CURRENT_SCOPE
+    assert report.unknown_scope_position_count == 1
+    assert "UNKNOWN_SCOPE_BROKER_POSITION" in report.reason_codes
+
+
+def test_registry_reconciliation_disagreement_reports_current_scope_conflict(tmp_path: Path) -> None:
+    config = _seed_config(
+        tmp_path,
+        broker_positions=[
+            {
+                "symbol": "MNQ",
+                "position": 1,
+                "con_id": 770561201,
+                "localSymbol": "MNQM6",
+                "track_b_scope": "TRACK_B",
+            }
+        ],
+    )
     _write_jsonl(
         tmp_path / "fixtures/ledger.jsonl",
         [
@@ -176,9 +243,9 @@ def test_registry_reconciliation_disagreement_reports_conflict(tmp_path: Path) -
 
     report = build_track_b_registry_truth_diagnostics(config=config, now=NOW)
 
-    assert report.classification == TRACK_B_DIAGNOSTICS_CONFLICT
+    assert report.classification == TRACK_B_DIAGNOSTICS_CONFLICT_CURRENT_SCOPE
     assert report.registry_reconciliation_disagreements == ("trade_conflict",)
-    assert "REGISTRY_RECONCILIATION_DISAGREEMENT" in report.reason_codes
+    assert "CURRENT_SCOPE_REGISTRY_RECONCILIATION_DISAGREEMENT" in report.reason_codes
 
 
 def test_stress_preflight_hard_failure_blocks_clean_status(tmp_path: Path) -> None:
@@ -187,7 +254,7 @@ def test_stress_preflight_hard_failure_blocks_clean_status(tmp_path: Path) -> No
 
     report = build_track_b_registry_truth_diagnostics(config=config, now=NOW)
 
-    assert report.classification == TRACK_B_DIAGNOSTICS_REVIEW_REQUIRED
+    assert report.classification == TRACK_B_DIAGNOSTICS_HISTORICAL_REVIEW_REQUIRED
     assert report.latest_preflight_hard_failure_count == 2
     assert "LIFECYCLE_STRESS_PREFLIGHT_HARD_FAILURE" in report.reason_codes
 
@@ -200,7 +267,7 @@ def test_diagnostics_report_writer_outputs_json(tmp_path: Path) -> None:
     payload = json.loads(path.read_text(encoding="utf-8"))
 
     assert payload["schema_version"] == "track_b_registry_truth_diagnostics_v1"
-    assert payload["classification"] == TRACK_B_DIAGNOSTICS_CLEAN
+    assert payload["classification"] == TRACK_B_DIAGNOSTICS_CLEAN_CURRENT_SCOPE
     assert payload["broker_mutation_allowed"] is False
     assert payload["runtime_restart_allowed"] is False
     assert payload["production_gate_wiring_allowed"] is False
@@ -210,6 +277,7 @@ def _seed_config(
     tmp_path: Path,
     *,
     broker_positions: list[dict] | None = None,
+    mode: TrackBDiagnosticsMode = TrackBDiagnosticsMode.CURRENT_HOT_PATH,
 ) -> TrackBRegistryTruthDiagnosticsConfig:
     truth_config = _seed_truth(tmp_path, broker_positions=broker_positions or [])
     reconstruction_config = TradeRegistryReconstructionConfig(
@@ -232,6 +300,7 @@ def _seed_config(
     )
     config = TrackBRegistryTruthDiagnosticsConfig(
         repo_root=tmp_path,
+        mode=mode,
         truth_config=truth_config,
         reconstruction_config=reconstruction_config,
         shadow_config=shadow_config,
