@@ -1,13 +1,18 @@
 from __future__ import annotations
 
 import json
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from mgc_v05l.execution_core.track_b_paper_broker_reconciliation import (
     ReconciliationConfig,
     _broker_lifecycle_position_match,
     reconcile_track_b_paper_broker_truth,
+)
+from mgc_v05l.execution_core.track_b_central_trade_registry import TradeEventType
+from mgc_v05l.execution_core.track_b_live_trade_registry import (
+    append_live_trade_registry_event,
+    make_live_trade_registry_event,
 )
 from mgc_v05l.execution_core.track_b_submit_intent_ownership import (
     SubmitIntentOwnershipRecord,
@@ -489,6 +494,231 @@ def test_reconciles_matching_track_b_broker_and_lifecycle_open_position(tmp_path
     assert reconciled_position["broker_cost_basis_adjustments"] == report["broker_cost_basis_adjustments"]
     assert reconciled_position["live_money_eligible"] is False
     assert reconciled_position["paper_proof_invoked"] is False
+
+
+def test_registry_aware_reconciliation_appends_reconciled_open_for_matching_trade_id(tmp_path: Path) -> None:
+    trade_id = "trade_registry_open_mnq"
+    lifecycle_id = "bridge_fill_MNQ|1m|2026-05-12T17:34:00Z|BUY_TO_OPEN"
+    config = _write_base_artifacts(
+        tmp_path,
+        open_position={
+            "strategy_id": "PAPER_ACTIVE_EVIDENCE_MNQ_US_PARTICIPATION_LONG_V1",
+            "lane_id": "mnq_us_active_participation_long",
+            "trade_id": trade_id,
+            "lifecycle_id": lifecycle_id,
+            "instrument_family": "MNQ",
+            "contract_key": "MNQ-202606",
+            "local_symbol": "MNQM6",
+            "con_id": 770561201,
+            "expiry": "20260618",
+            "side": "LONG",
+            "quantity": "1",
+            "avg_entry_price": "28981.25",
+        },
+    )
+    _write_registry_open_managed_trade(
+        config,
+        trade_id=trade_id,
+        lifecycle_id=lifecycle_id,
+        lane_id="mnq_us_active_participation_long",
+        strategy_id="PAPER_ACTIVE_EVIDENCE_MNQ_US_PARTICIPATION_LONG_V1",
+        symbol="MNQ",
+        local_symbol="MNQM6",
+        con_id=770561201,
+        expiry="20260618",
+    )
+    _write_broker_truth(
+        config,
+        positions=[
+            {
+                "account_id": "DUM882026",
+                "symbol": "MNQ",
+                "local_symbol": "MNQM6",
+                "con_id": 770561201,
+                "expiry": "20260618",
+                "security_type": "FUT",
+                "quantity": "1",
+            }
+        ],
+    )
+
+    report = reconcile_track_b_paper_broker_truth(config=config, now=NOW)
+
+    assert report["broker_reconciled"] is True
+    assert report["registry_reconciliation"]["classification"] == "REGISTRY_RECONCILIATION_MATCHED"
+    assert report["registry_reconciliation"]["mapped_trade_ids"] == [trade_id]
+    events = _read_registry_events(config)
+    assert events[-1]["event_type"] == "RECONCILED_OPEN"
+    assert events[-1]["trade_id"] == trade_id
+
+
+def test_registry_aware_reconciliation_appends_reconciled_flat_for_manual_close(tmp_path: Path) -> None:
+    trade_id = "trade_registry_manual_flat_mnq"
+    lifecycle_id = "bridge_fill_MNQ|1m|2026-05-12T17:34:00Z|BUY_TO_OPEN"
+    config = _write_base_artifacts(tmp_path)
+    _write_registry_open_managed_trade(
+        config,
+        trade_id=trade_id,
+        lifecycle_id=lifecycle_id,
+        lane_id="mnq_us_active_participation_long",
+        strategy_id="PAPER_ACTIVE_EVIDENCE_MNQ_US_PARTICIPATION_LONG_V1",
+        symbol="MNQ",
+        local_symbol="MNQM6",
+        con_id=770561201,
+        expiry="20260618",
+        include_manual_close=True,
+    )
+    _write_broker_truth(config)
+
+    report = reconcile_track_b_paper_broker_truth(config=config, now=NOW)
+
+    assert report["broker_reconciled"] is True
+    assert report["registry_reconciliation"]["classification"] == "REGISTRY_RECONCILIATION_MATCHED"
+    events = _read_registry_events(config)
+    assert events[-1]["event_type"] == "RECONCILED_FLAT"
+    assert events[-1]["trade_id"] == trade_id
+
+
+def test_registry_aware_reconciliation_blocks_ambiguous_broker_position(tmp_path: Path) -> None:
+    lifecycle_id = "bridge_fill_MNQ|1m|2026-05-12T17:34:00Z|BUY_TO_OPEN"
+    config = _write_base_artifacts(
+        tmp_path,
+        open_position={
+            "strategy_id": "PAPER_ACTIVE_EVIDENCE_MNQ_US_PARTICIPATION_LONG_V1",
+            "lane_id": "mnq_us_active_participation_long",
+            "lifecycle_id": lifecycle_id,
+            "instrument_family": "MNQ",
+            "contract_key": "MNQ-202606",
+            "local_symbol": "MNQM6",
+            "con_id": 770561201,
+            "expiry": "20260618",
+            "side": "LONG",
+            "quantity": "1",
+        },
+    )
+    for trade_id in ("trade_registry_ambiguous_a", "trade_registry_ambiguous_b"):
+        _write_registry_open_managed_trade(
+            config,
+            trade_id=trade_id,
+            lifecycle_id=f"{lifecycle_id}_{trade_id}",
+            lane_id="mnq_us_active_participation_long",
+            strategy_id="PAPER_ACTIVE_EVIDENCE_MNQ_US_PARTICIPATION_LONG_V1",
+            symbol="MNQ",
+            local_symbol="MNQM6",
+            con_id=770561201,
+            expiry="20260618",
+        )
+    _write_broker_truth(
+        config,
+        positions=[
+            {
+                "account_id": "DUM882026",
+                "symbol": "MNQ",
+                "local_symbol": "MNQM6",
+                "con_id": 770561201,
+                "expiry": "20260618",
+                "security_type": "FUT",
+                "quantity": "1",
+            }
+        ],
+    )
+
+    report = reconcile_track_b_paper_broker_truth(config=config, now=NOW)
+
+    assert report["broker_reconciled"] is False
+    registry = report["registry_reconciliation"]
+    assert registry["classification"] == "REGISTRY_RECONCILIATION_REVIEW_REQUIRED"
+    assert any(blocker["code"] == "REGISTRY_AMBIGUOUS_BROKER_POSITION" for blocker in registry["blockers"])
+
+
+def test_registry_aware_reconciliation_blocks_lifecycle_open_when_broker_flat(tmp_path: Path) -> None:
+    trade_id = "trade_registry_lifecycle_only"
+    lifecycle_id = "bridge_fill_MNQ|1m|2026-05-12T17:34:00Z|BUY_TO_OPEN"
+    config = _write_base_artifacts(
+        tmp_path,
+        open_position={
+            "strategy_id": "PAPER_ACTIVE_EVIDENCE_MNQ_US_PARTICIPATION_LONG_V1",
+            "lane_id": "mnq_us_active_participation_long",
+            "trade_id": trade_id,
+            "lifecycle_id": lifecycle_id,
+            "instrument_family": "MNQ",
+            "contract_key": "MNQ-202606",
+            "local_symbol": "MNQM6",
+            "con_id": 770561201,
+            "expiry": "20260618",
+            "side": "LONG",
+            "quantity": "1",
+        },
+    )
+    _write_registry_open_managed_trade(
+        config,
+        trade_id=trade_id,
+        lifecycle_id=lifecycle_id,
+        lane_id="mnq_us_active_participation_long",
+        strategy_id="PAPER_ACTIVE_EVIDENCE_MNQ_US_PARTICIPATION_LONG_V1",
+        symbol="MNQ",
+        local_symbol="MNQM6",
+        con_id=770561201,
+        expiry="20260618",
+    )
+    _write_broker_truth(config)
+
+    report = reconcile_track_b_paper_broker_truth(config=config, now=NOW)
+
+    assert report["broker_reconciled"] is False
+    assert report["registry_reconciliation"]["classification"] == "REGISTRY_RECONCILIATION_REVIEW_REQUIRED"
+    assert any(blocker["code"] == "TRACK_B_BROKER_LIFECYCLE_POSITION_COUNT_MISMATCH" for blocker in report["blockers"])
+    assert any(event["event_type"] == "REVIEW_REQUIRED" for event in _read_registry_events(config))
+
+
+def test_registry_aware_reconciliation_does_not_resurrect_stale_closed_trade(tmp_path: Path) -> None:
+    trade_id = "trade_registry_closed_history"
+    lifecycle_id = "bridge_fill_MNQ|1m|2026-05-12T17:34:00Z|BUY_TO_OPEN"
+    config = _write_base_artifacts(tmp_path)
+    _write_registry_open_managed_trade(
+        config,
+        trade_id=trade_id,
+        lifecycle_id=lifecycle_id,
+        lane_id="mnq_us_active_participation_long",
+        strategy_id="PAPER_ACTIVE_EVIDENCE_MNQ_US_PARTICIPATION_LONG_V1",
+        symbol="MNQ",
+        local_symbol="MNQM6",
+        con_id=770561201,
+        expiry="20260618",
+        include_close_fill=True,
+    )
+    _write_broker_truth(config)
+
+    report = reconcile_track_b_paper_broker_truth(config=config, now=NOW)
+
+    assert report["broker_reconciled"] is True
+    assert report["registry_reconciliation"]["classification"] == "REGISTRY_RECONCILIATION_MATCHED"
+    events = _read_registry_events(config)
+    assert events[-1]["event_type"] == "RECONCILED_FLAT"
+    assert events[-1]["trade_id"] == trade_id
+    assert not any(event["event_type"] == "RECONCILED_OPEN" for event in events if event["trade_id"] == trade_id)
+
+
+def test_registry_review_event_is_not_broker_backed_without_perm_and_exec_id(tmp_path: Path) -> None:
+    config = _write_base_artifacts(tmp_path)
+    _write_registry_open_managed_trade(
+        config,
+        trade_id="trade_registry_orphan",
+        lifecycle_id="bridge_fill_MNQ|1m|2026-05-12T17:34:00Z|BUY_TO_OPEN",
+        lane_id="mnq_us_active_participation_long",
+        strategy_id="PAPER_ACTIVE_EVIDENCE_MNQ_US_PARTICIPATION_LONG_V1",
+        symbol="MNQ",
+        local_symbol="MNQM6",
+        con_id=770561201,
+        expiry="20260618",
+    )
+    _write_broker_truth(config)
+
+    reconcile_track_b_paper_broker_truth(config=config, now=NOW)
+
+    review_events = [event for event in _read_registry_events(config) if event["event_type"] == "REVIEW_REQUIRED"]
+    assert review_events
+    assert all(not event.get("perm_id") and not event.get("exec_id") for event in review_events)
 
 
 def test_blocks_when_track_b_open_order_exists(tmp_path: Path) -> None:
@@ -1658,6 +1888,81 @@ def _write_submit_intent_ownership(
         latest_path=config.repo_root / "outputs/track_b_execution_core/submit_intent_ownership/latest_track_b_submit_intent_ownership.json",
     )
     return result.record
+
+
+def _write_registry_open_managed_trade(
+    config: ReconciliationConfig,
+    *,
+    trade_id: str,
+    lifecycle_id: str,
+    lane_id: str,
+    strategy_id: str,
+    symbol: str,
+    local_symbol: str,
+    con_id: int,
+    expiry: str,
+    include_close_fill: bool = False,
+    include_manual_close: bool = False,
+) -> None:
+    base = {
+        "trade_id": trade_id,
+        "lifecycle_id": lifecycle_id,
+        "lane_id": lane_id,
+        "thesis_strategy_id": strategy_id,
+        "account_id": "DUM882026",
+        "symbol": symbol,
+        "con_id": con_id,
+        "local_symbol": local_symbol,
+        "expiry": expiry,
+        "side": "LONG",
+        "action": "BUY",
+        "qty": "1",
+        "source_artifact_path": str(config.report_path),
+        "generated_at": NOW,
+    }
+    events: list[tuple[TradeEventType, dict[str, object]]] = [
+        (TradeEventType.ENTRY_INTENT_CREATED, {}),
+        (TradeEventType.ENTRY_ORDER_SUBMITTED, {"order_id": "101", "client_id": "17086"}),
+        (
+            TradeEventType.ENTRY_FILL_BROKER_BACKED,
+            {"order_id": "101", "client_id": "17086", "perm_id": "2047276405", "exec_id": "exec-1", "price": "28981.25"},
+        ),
+        (
+            TradeEventType.LIFECYCLE_OPEN_MANAGED,
+            {"order_id": "101", "client_id": "17086", "perm_id": "2047276405", "exec_id": "exec-1", "price": "28981.25"},
+        ),
+    ]
+    if include_close_fill:
+        events.extend(
+            [
+                (TradeEventType.EXIT_INTENT_CREATED, {"action": "SELL"}),
+                (TradeEventType.EXIT_ORDER_SUBMITTED, {"action": "SELL", "order_id": "102", "client_id": "17086"}),
+                (
+                    TradeEventType.EXIT_FILL_BROKER_BACKED,
+                    {
+                        "action": "SELL",
+                        "order_id": "102",
+                        "client_id": "17086",
+                        "perm_id": "2047276406",
+                        "exec_id": "exec-2",
+                        "price": "28985.00",
+                    },
+                ),
+            ]
+        )
+    if include_manual_close:
+        events.append((TradeEventType.MANUAL_OPERATOR_CLOSE_RECORDED, {"action": "SELL", "price": "28985.00"}))
+    for index, (event_type, extra) in enumerate(events):
+        payload = {**base, **extra, "generated_at": NOW + timedelta(seconds=index)}
+        append_live_trade_registry_event(
+            repo_root=config.repo_root,
+            event=make_live_trade_registry_event(event_type=event_type, **payload),
+        )
+
+
+def _read_registry_events(config: ReconciliationConfig) -> list[dict[str, object]]:
+    path = config.repo_root / "outputs/track_b_execution_core/trade_registry/live_trade_events.jsonl"
+    return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
 
 
 def _write_market_price(config: ReconciliationConfig, root: str, *, close: float) -> None:

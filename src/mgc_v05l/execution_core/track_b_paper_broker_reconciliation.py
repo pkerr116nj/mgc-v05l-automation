@@ -37,10 +37,12 @@ from mgc_v05l.execution_core.track_b_submit_intent_ownership import (
     DEFAULT_TRACK_B_SUBMIT_INTENT_OWNERSHIP_JSONL,
     load_unresolved_submit_intent_ownership_records,
 )
-from mgc_v05l.execution_core.track_b_central_trade_registry import TradeEventType
+from mgc_v05l.execution_core.track_b_central_trade_registry import TradeCurrentState, TradeEventType, TradeRegistryRecord
 from mgc_v05l.execution_core.track_b_live_trade_registry import (
     append_live_trade_registry_event,
+    load_live_trade_registry_records,
     make_live_trade_registry_event,
+    trade_id_from_live_identity,
 )
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
@@ -253,6 +255,21 @@ def reconcile_track_b_paper_broker_truth(
         now=actual_now,
     )
     broker_cost_basis_adjustments = _broker_cost_basis_adjustments_from_match_report(position_match_report)
+    registry_reconciliation = _registry_reconciliation_state(
+        config=config,
+        broker_positions=track_b_positions,
+        lifecycle_positions=lifecycle_positions,
+        broker_open_orders=track_b_open_orders,
+        position_match_report=position_match_report,
+    )
+    if registry_reconciliation.get("blocking") is True:
+        blockers.append(
+            {
+                "code": registry_reconciliation.get("classification"),
+                "detail": registry_reconciliation.get("detail"),
+                "registry_reconciliation": registry_reconciliation,
+            }
+        )
     stale_managed_exit_orders = [
         row
         for row in known_managed_exit_orders
@@ -430,6 +447,7 @@ def reconcile_track_b_paper_broker_truth(
         "broker_cost_basis_adjustments": broker_cost_basis_adjustments,
         "bridge_terminal_event_grace": terminal_event_grace,
         "broker_truth_settlement": broker_truth_settlement,
+        "registry_reconciliation": registry_reconciliation,
         "lifecycle_open_position_count": _int_value(live_position_status.get("open_position_count")),
         "lifecycle_open_order_count": _int_value(live_position_status.get("open_order_count")),
         "review_required_count": _max_int(
@@ -452,23 +470,196 @@ def reconcile_track_b_paper_broker_truth(
             broker_positions=track_b_positions,
         )
     _write_json_atomic(config.report_path, report)
-    _append_reconciliation_registry_events(config=config, report=report, now=actual_now)
+    _append_reconciliation_registry_events(
+        config=config,
+        report=report,
+        registry_reconciliation=registry_reconciliation,
+        now=actual_now,
+    )
     return report
+
+
+def _registry_reconciliation_state(
+    *,
+    config: ReconciliationConfig,
+    broker_positions: Sequence[Mapping[str, Any]],
+    lifecycle_positions: Sequence[Mapping[str, Any]],
+    broker_open_orders: Sequence[Mapping[str, Any]],
+    position_match_report: Mapping[str, Any],
+) -> dict[str, Any]:
+    records = load_live_trade_registry_records(repo_root=config.repo_root)
+    base = {
+        "source": "CENTRAL_TRADE_REGISTRY_READ_ONLY",
+        "registry_event_path": str(config.repo_root / "outputs/track_b_execution_core/trade_registry/live_trade_events.jsonl"),
+        "record_count": len(records),
+        "blocking": False,
+        "paper_only": True,
+        "live_money_eligible": False,
+        "paper_proof_invoked": False,
+    }
+    if not records:
+        return {
+            **base,
+            "classification": "REGISTRY_RECONCILIATION_NOT_AVAILABLE",
+            "detail": "No central trade registry records exist yet; legacy broker/lifecycle reconciliation remains diagnostic authority.",
+            "mapped_trade_ids": [],
+            "review_required_trade_ids": [],
+        }
+
+    active_records = [
+        record
+        for record in records
+        if record.current_state
+        in {
+            TradeCurrentState.OPEN_MANAGED,
+            TradeCurrentState.EXIT_DUE,
+            TradeCurrentState.WORKING_EXIT,
+            TradeCurrentState.WORKING_ENTRY,
+        }
+    ]
+    blockers: list[dict[str, Any]] = []
+    mapped_trade_ids: set[str] = set()
+    mapped_records: dict[str, dict[str, Any]] = {}
+
+    for broker_position in broker_positions:
+        matches = _registry_records_for_broker_position(active_records, broker_position)
+        if len(matches) == 1:
+            mapped_trade_ids.add(matches[0].trade_id)
+            mapped_records[matches[0].trade_id] = _registry_record_event_row(matches[0])
+        elif len(matches) > 1:
+            blockers.append(
+                {
+                    "code": "REGISTRY_AMBIGUOUS_BROKER_POSITION",
+                    "broker_position": dict(broker_position),
+                    "matching_trade_ids": [record.trade_id for record in matches],
+                }
+            )
+        else:
+            blockers.append(
+                {
+                    "code": "REGISTRY_ORPHAN_BROKER_POSITION_REVIEW_REQUIRED",
+                    "broker_position": dict(broker_position),
+                }
+            )
+
+    for lifecycle_position in lifecycle_positions:
+        matches = _registry_records_for_lifecycle_position(active_records, lifecycle_position)
+        if len(matches) == 1:
+            mapped_trade_ids.add(matches[0].trade_id)
+            mapped_records[matches[0].trade_id] = _registry_record_event_row(matches[0])
+            if not broker_positions:
+                blockers.append(
+                    {
+                        "code": "REGISTRY_LIFECYCLE_OPEN_WITHOUT_BROKER_POSITION_REVIEW_REQUIRED",
+                        "lifecycle_position": dict(lifecycle_position),
+                        "trade_id": matches[0].trade_id,
+                    }
+                )
+        elif len(matches) > 1:
+            blockers.append(
+                {
+                    "code": "REGISTRY_AMBIGUOUS_LIFECYCLE_POSITION",
+                    "lifecycle_position": dict(lifecycle_position),
+                    "matching_trade_ids": [record.trade_id for record in matches],
+                }
+            )
+        else:
+            blockers.append(
+                {
+                    "code": "REGISTRY_LIFECYCLE_OPEN_WITHOUT_TRADE_ID_REVIEW_REQUIRED",
+                    "lifecycle_position": dict(lifecycle_position),
+                }
+            )
+
+    for match in position_match_report.get("matches") or []:
+        if not isinstance(match, Mapping):
+            continue
+        broker_position = match.get("broker_position") if isinstance(match.get("broker_position"), Mapping) else {}
+        lifecycle_position = match.get("lifecycle_position") if isinstance(match.get("lifecycle_position"), Mapping) else {}
+        broker_trade_ids = {record.trade_id for record in _registry_records_for_broker_position(active_records, broker_position)}
+        lifecycle_trade_ids = {record.trade_id for record in _registry_records_for_lifecycle_position(active_records, lifecycle_position)}
+        if broker_trade_ids and lifecycle_trade_ids and broker_trade_ids != lifecycle_trade_ids:
+            blockers.append(
+                {
+                    "code": "REGISTRY_BROKER_LIFECYCLE_TRADE_ID_CONFLICT",
+                    "broker_trade_ids": sorted(broker_trade_ids),
+                    "lifecycle_trade_ids": sorted(lifecycle_trade_ids),
+                    "match": dict(match),
+                }
+            )
+
+    if not broker_positions and not lifecycle_positions:
+        stale_open_records = [
+            record
+            for record in active_records
+            if record.current_state in {TradeCurrentState.OPEN_MANAGED, TradeCurrentState.EXIT_DUE, TradeCurrentState.WORKING_EXIT}
+        ]
+        if stale_open_records:
+            blockers.append(
+                {
+                    "code": "REGISTRY_OPEN_TRADE_WITH_FLAT_BROKER_LIFECYCLE_REVIEW_REQUIRED",
+                    "trade_ids": [record.trade_id for record in stale_open_records],
+                }
+            )
+        for record in records:
+            if record.current_state == TradeCurrentState.CLOSED_FLAT:
+                mapped_trade_ids.add(record.trade_id)
+                mapped_records[record.trade_id] = _registry_record_event_row(record)
+
+    working_order_trade_ids = [
+        trade_id
+        for order in broker_open_orders
+        for trade_id in [_trade_id_from_row(order)]
+        if trade_id
+    ]
+    if broker_open_orders and working_order_trade_ids:
+        mapped_trade_ids.update(working_order_trade_ids)
+
+    if blockers:
+        review_trade_ids = _review_trade_ids_from_registry_blockers(blockers)
+        review_records = [
+            _registry_record_event_row(record)
+            for record in records
+            if record.trade_id in set(review_trade_ids)
+        ]
+        return {
+            **base,
+            "classification": "REGISTRY_RECONCILIATION_REVIEW_REQUIRED",
+            "detail": "Central trade registry could not map current broker/lifecycle truth to exactly one trade chain.",
+            "blocking": True,
+            "blockers": blockers,
+            "mapped_trade_ids": sorted(mapped_trade_ids),
+            "mapped_records": [mapped_records[key] for key in sorted(mapped_records)],
+            "review_required_trade_ids": review_trade_ids,
+            "review_records": review_records,
+        }
+    return {
+        **base,
+        "classification": "REGISTRY_RECONCILIATION_MATCHED",
+        "detail": "Current broker/lifecycle truth maps cleanly to central trade registry state.",
+        "blockers": [],
+        "mapped_trade_ids": sorted(mapped_trade_ids),
+        "mapped_records": [mapped_records[key] for key in sorted(mapped_records)],
+        "review_required_trade_ids": [],
+        "working_order_trade_ids": sorted(set(working_order_trade_ids)),
+    }
 
 
 def _append_reconciliation_registry_events(
     *,
     config: ReconciliationConfig,
     report: Mapping[str, Any],
+    registry_reconciliation: Mapping[str, Any],
     now: datetime,
 ) -> None:
     classification = str(report.get("classification") or "")
+    registry_classification = str(registry_reconciliation.get("classification") or "")
     if "RECONCILED" in classification and report.get("broker_reconciled") is True:
         event_type = TradeEventType.RECONCILED_OPEN if report.get("track_b_broker_position_count") else TradeEventType.RECONCILED_FLAT
         reason = "BROKER_LIFECYCLE_RECONCILED"
     else:
         event_type = TradeEventType.REVIEW_REQUIRED
-        reason = classification or "BROKER_LIFECYCLE_RECONCILIATION_REVIEW_REQUIRED"
+        reason = registry_classification or classification or "BROKER_LIFECYCLE_RECONCILIATION_REVIEW_REQUIRED"
 
     candidates = [
         row
@@ -480,14 +671,49 @@ def _append_reconciliation_registry_events(
         for row in list(bucket or [])
         if isinstance(row, Mapping)
     ]
+    candidate_by_trade_id: dict[str, Mapping[str, Any]] = {}
     for row in candidates:
-        extra = row.get("extra") if isinstance(row.get("extra"), Mapping) else {}
-        trade_id = str(row.get("trade_id") or extra.get("trade_id") or "").strip()
-        lifecycle_id = str(row.get("lifecycle_id") or "").strip()
-        if not trade_id and not lifecycle_id:
+        trade_id = _trade_id_from_row(row)
+        if trade_id:
+            candidate_by_trade_id.setdefault(trade_id, row)
+    for row in list(registry_reconciliation.get("mapped_records") or []):
+        if isinstance(row, Mapping):
+            trade_id = _trade_id_from_row(row)
+            if trade_id:
+                candidate_by_trade_id.setdefault(trade_id, row)
+    for row in list(registry_reconciliation.get("review_records") or []):
+        if isinstance(row, Mapping):
+            trade_id = _trade_id_from_row(row)
+            if trade_id:
+                candidate_by_trade_id.setdefault(trade_id, row)
+    for blocker in list(registry_reconciliation.get("blockers") or []):
+        if not isinstance(blocker, Mapping):
             continue
+        for row_key in ("broker_position", "lifecycle_position"):
+            row = blocker.get(row_key)
+            if isinstance(row, Mapping):
+                trade_id = _trade_id_from_row(row)
+                if not trade_id:
+                    trade_id = trade_id_from_live_identity(
+                        account_id=row.get("account_id") or row.get("account") or config.account,
+                        con_id=row.get("con_id") or row.get("conId"),
+                        lane_id=row.get("lane_id") or row.get("strategy_id") or row.get("track_b_root") or "review",
+                    )
+                if trade_id:
+                    candidate_by_trade_id.setdefault(trade_id, row)
+    for row in candidate_by_trade_id.values():
+        extra = row.get("extra") if isinstance(row.get("extra"), Mapping) else {}
+        trade_id = _trade_id_from_row(row)
+        lifecycle_id = str(row.get("lifecycle_id") or "").strip()
         if not trade_id:
-            trade_id = f"trade_{lifecycle_id}"
+            trade_id = trade_id_from_live_identity(
+                lifecycle_id=lifecycle_id,
+                account_id=row.get("account_id") or row.get("account") or config.account,
+                con_id=row.get("con_id") or row.get("conId"),
+                lane_id=row.get("lane_id") or row.get("strategy_id") or row.get("track_b_root") or "review",
+            )
+        if not trade_id:
+            continue
         try:
             event = make_live_trade_registry_event(
                 event_type=event_type,
@@ -509,6 +735,7 @@ def _append_reconciliation_registry_events(
                 metadata={
                     "source": "track_b_paper_broker_reconciliation",
                     "classification": classification,
+                    "registry_reconciliation_classification": registry_classification,
                     "broker_reconciled": report.get("broker_reconciled") is True,
                     "paper_only": True,
                     "live_money_eligible": False,
@@ -518,6 +745,129 @@ def _append_reconciliation_registry_events(
             append_live_trade_registry_event(repo_root=config.repo_root, event=event)
         except Exception:
             continue
+
+
+def _registry_records_for_broker_position(
+    records: Sequence[TradeRegistryRecord],
+    broker_position: Mapping[str, Any],
+) -> list[TradeRegistryRecord]:
+    return [
+        record
+        for record in records
+        if record.ownership_identity is not None
+        and _record_contract_matches_row(record, broker_position)
+        and _record_account_matches_row(record, broker_position)
+        and _record_quantity_matches_broker_position(record, broker_position)
+    ]
+
+
+def _registry_record_event_row(record: TradeRegistryRecord) -> dict[str, Any]:
+    owner = record.ownership_identity
+    if owner is None:
+        return {"trade_id": record.trade_id}
+    return {
+        "trade_id": record.trade_id,
+        "lifecycle_id": owner.lifecycle_id,
+        "lane_id": owner.lane_id,
+        "strategy_id": owner.thesis_strategy_id,
+        "account_id": owner.account_id,
+        "symbol": owner.symbol,
+        "instrument_family": owner.symbol,
+        "con_id": owner.con_id,
+        "local_symbol": owner.local_symbol,
+        "expiry": owner.expiry,
+        "side": owner.side,
+        "quantity": str(owner.qty),
+        "action": "SELL" if owner.side.upper() == "LONG" else "BUY",
+    }
+
+
+def _registry_records_for_lifecycle_position(
+    records: Sequence[TradeRegistryRecord],
+    lifecycle_position: Mapping[str, Any],
+) -> list[TradeRegistryRecord]:
+    lifecycle_id = str(lifecycle_position.get("lifecycle_id") or "").strip()
+    if lifecycle_id:
+        exact = [
+            record
+            for record in records
+            if record.ownership_identity is not None and record.ownership_identity.lifecycle_id == lifecycle_id
+        ]
+        if exact:
+            return exact
+    return [
+        record
+        for record in records
+        if record.ownership_identity is not None
+        and _record_contract_matches_row(record, lifecycle_position)
+        and _record_account_matches_row(record, lifecycle_position)
+        and _record_quantity_matches_lifecycle_position(record, lifecycle_position)
+    ]
+
+
+def _record_contract_matches_row(record: TradeRegistryRecord, row: Mapping[str, Any]) -> bool:
+    owner = record.ownership_identity
+    if owner is None:
+        return False
+    row_con_id = _int_or_none(row.get("con_id") or row.get("conId"))
+    if row_con_id is not None and int(owner.con_id) != int(row_con_id):
+        return False
+    row_local = str(row.get("local_symbol") or row.get("localSymbol") or "").strip().upper()
+    if row_local and owner.local_symbol.upper() != row_local:
+        return False
+    row_symbol = str(row.get("track_b_root") or row.get("symbol") or row.get("instrument_family") or "").strip().upper()
+    if row_symbol and owner.symbol.upper() != row_symbol:
+        return False
+    return bool(row_con_id is not None or row_local or row_symbol)
+
+
+def _record_account_matches_row(record: TradeRegistryRecord, row: Mapping[str, Any]) -> bool:
+    owner = record.ownership_identity
+    if owner is None:
+        return False
+    row_account = _valid_registry_identity_text(row.get("account_id") or row.get("account"))
+    return not row_account or row_account == owner.account_id
+
+
+def _record_quantity_matches_broker_position(record: TradeRegistryRecord, broker_position: Mapping[str, Any]) -> bool:
+    owner = record.ownership_identity
+    broker_qty = _decimal_value(broker_position.get("quantity"))
+    if owner is None or broker_qty is None:
+        return False
+    expected_qty = owner.qty if owner.side.upper() == "LONG" else -owner.qty
+    return broker_qty == expected_qty
+
+
+def _record_quantity_matches_lifecycle_position(record: TradeRegistryRecord, lifecycle_position: Mapping[str, Any]) -> bool:
+    owner = record.ownership_identity
+    lifecycle_qty = _decimal_value(lifecycle_position.get("quantity"))
+    if owner is None or lifecycle_qty is None:
+        return False
+    return abs(lifecycle_qty) == abs(owner.qty)
+
+
+def _valid_registry_identity_text(value: object) -> str:
+    text = str(value or "").strip()
+    if text.upper() in {"", "MULTIPLE", "MISSING", "UNKNOWN", "NONE", "NULL"}:
+        return ""
+    return text
+
+
+def _trade_id_from_row(row: Mapping[str, Any]) -> str:
+    extra = row.get("extra") if isinstance(row.get("extra"), Mapping) else {}
+    return str(row.get("trade_id") or extra.get("trade_id") or "").strip()
+
+
+def _review_trade_ids_from_registry_blockers(blockers: Sequence[Mapping[str, Any]]) -> list[str]:
+    trade_ids: list[str] = []
+    for blocker in blockers:
+        if str(blocker.get("trade_id") or "").strip():
+            trade_ids.append(str(blocker.get("trade_id")))
+        for key in ("matching_trade_ids", "trade_ids", "broker_trade_ids", "lifecycle_trade_ids"):
+            value = blocker.get(key)
+            if isinstance(value, list):
+                trade_ids.extend(str(item) for item in value if str(item or "").strip())
+    return sorted(set(trade_ids))
 
 
 def _validate_broker_truth(

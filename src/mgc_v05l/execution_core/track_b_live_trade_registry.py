@@ -107,6 +107,41 @@ def load_live_trade_registry_record(
     return reduce_trade_events(events)
 
 
+def load_live_trade_registry_records(
+    *,
+    repo_root: Path,
+    jsonl_path: Path = DEFAULT_TRACK_B_LIVE_TRADE_REGISTRY_EVENTS_JSONL,
+) -> tuple[TradeRegistryRecord, ...]:
+    """Load and reduce all valid live registry trade chains.
+
+    The append-only registry may contain partial historical debris. Callers use
+    the reduced records as authority only when they can map current broker or
+    lifecycle truth to exactly one trade id.
+    """
+
+    path = _resolve(repo_root, jsonl_path)
+    try:
+        rows = path.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return ()
+    events_by_trade_id: dict[str, list[TradeEvent]] = {}
+    for line in rows:
+        if not line.strip():
+            continue
+        try:
+            event = TradeEvent.from_dict(json.loads(line))
+        except Exception:
+            continue
+        events_by_trade_id.setdefault(event.trade_id, []).append(event)
+    records: list[TradeRegistryRecord] = []
+    for events in events_by_trade_id.values():
+        try:
+            records.append(reduce_trade_events(events))
+        except Exception:
+            continue
+    return tuple(records)
+
+
 def validate_registry_managed_exit_identity(
     *,
     repo_root: Path,

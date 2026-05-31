@@ -79,6 +79,8 @@ class LifecycleStressScenario(str, Enum):
     DUPLICATE_CLOSE = "duplicate_close"
     CONTRACT_CLOSE_ONLY = "contract_close_only_entry_blocked_exit_allowed"
     AMBIGUOUS_RECONSTRUCTION = "ambiguous_reconstruction"
+    RECONCILIATION_AMBIGUITY = "reconciliation_ambiguity"
+    STALE_ARTIFACT_RESURRECTION = "stale_artifact_resurrection"
 
 
 @dataclass(frozen=True)
@@ -122,6 +124,8 @@ EXPECTED_REVIEW_SCENARIOS = {
     LifecycleStressScenario.DUPLICATE_CLOSE,
     LifecycleStressScenario.CONTRACT_CLOSE_ONLY,
     LifecycleStressScenario.AMBIGUOUS_RECONSTRUCTION,
+    LifecycleStressScenario.RECONCILIATION_AMBIGUITY,
+    LifecycleStressScenario.STALE_ARTIFACT_RESURRECTION,
 }
 IMPOSSIBLE_STATE_INVARIANTS = {
     "CLOSED_FLAT_WITH_OPEN_QTY",
@@ -130,7 +134,7 @@ IMPOSSIBLE_STATE_INVARIANTS = {
 }
 DEFAULT_COUNTS_BY_MODE = {
     LifecycleStressRunMode.SMOKE: 20,
-    LifecycleStressRunMode.KNOWN_SCENARIOS: 170,
+    LifecycleStressRunMode.KNOWN_SCENARIOS: 190,
     LifecycleStressRunMode.LANE_MATRIX: 1000,
     LifecycleStressRunMode.FUZZ: 10000,
 }
@@ -562,6 +566,8 @@ def _events_for_scenario(
         LifecycleStressScenario.PLANNER_SNAPSHOT_MISMATCH,
         LifecycleStressScenario.CONTRACT_CLOSE_ONLY,
         LifecycleStressScenario.AMBIGUOUS_RECONSTRUCTION,
+        LifecycleStressScenario.RECONCILIATION_AMBIGUITY,
+        LifecycleStressScenario.STALE_ARTIFACT_RESURRECTION,
     }:
         reason = {
             LifecycleStressScenario.STALE_CONTROL_PLANE: CONTROL_PLANE_STALE,
@@ -569,6 +575,8 @@ def _events_for_scenario(
             LifecycleStressScenario.PLANNER_SNAPSHOT_MISMATCH: PLANNER_SNAPSHOT_MISMATCH,
             LifecycleStressScenario.CONTRACT_CLOSE_ONLY: CONTRACT_ENTRY_CLOSE_ONLY,
             LifecycleStressScenario.AMBIGUOUS_RECONSTRUCTION: "AMBIGUOUS_RECONSTRUCTION",
+            LifecycleStressScenario.RECONCILIATION_AMBIGUITY: "REGISTRY_AMBIGUOUS_BROKER_POSITION",
+            LifecycleStressScenario.STALE_ARTIFACT_RESURRECTION: "STALE_HISTORICAL_ARTIFACT_CANNOT_REOPEN_CLOSED_TRADE",
         }[scenario]
         chain.append(event(TradeEventType.REVIEW_REQUIRED, seconds=4, reason_codes=(reason,)))
         return tuple(chain)
