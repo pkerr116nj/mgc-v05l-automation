@@ -980,6 +980,80 @@ def test_registry_aware_reconciliation_does_not_resurrect_stale_closed_trade(tmp
     assert not any(event["event_type"] == "RECONCILED_OPEN" for event in events if event["trade_id"] == trade_id)
 
 
+def test_registry_stale_open_trade_can_be_resolved_only_with_explicit_historical_flat_cleanup(
+    tmp_path: Path,
+) -> None:
+    trade_id = "trade_registry_historical_flat_cleanup"
+    lifecycle_id = "bridge_fill_MNQ|1m|2026-05-12T17:34:00Z|BUY_TO_OPEN"
+    config = _write_base_artifacts(tmp_path)
+    _write_registry_open_managed_trade(
+        config,
+        trade_id=trade_id,
+        lifecycle_id=lifecycle_id,
+        lane_id="mnq_us_active_participation_long",
+        strategy_id="PAPER_ACTIVE_EVIDENCE_MNQ_US_PARTICIPATION_LONG_V1",
+        symbol="MNQ",
+        local_symbol="MNQM6",
+        con_id=770561201,
+        expiry="20260618",
+    )
+    _write_broker_truth(config)
+
+    blocked = reconcile_track_b_paper_broker_truth(config=config, now=NOW)
+
+    assert blocked["broker_reconciled"] is False
+    assert any(
+        blocker["code"] == "REGISTRY_RECONCILIATION_REVIEW_REQUIRED"
+        for blocker in blocked["blockers"]
+    )
+
+    cleanup_payload = {
+        "trade_id": trade_id,
+        "lifecycle_id": lifecycle_id,
+        "lane_id": "mnq_us_active_participation_long",
+        "thesis_strategy_id": "PAPER_ACTIVE_EVIDENCE_MNQ_US_PARTICIPATION_LONG_V1",
+        "account_id": "DUM882026",
+        "symbol": "MNQ",
+        "con_id": 770561201,
+        "local_symbol": "MNQM6",
+        "expiry": "20260618",
+        "side": "LONG",
+        "action": "HISTORICAL_FLAT_CLEANUP",
+        "qty": "1",
+        "source_artifact_path": str(config.report_path),
+        "generated_at": NOW + timedelta(seconds=30),
+        "reason_codes": (
+            "REGISTRY_OPEN_TRADE_WITH_FLAT_BROKER_LIFECYCLE_REVIEW_REQUIRED",
+            "BROKER_LIFECYCLE_FLAT_CONFIRMED",
+            "NOT_CURRENT_EXPOSURE",
+            "NOT_CURRENT_OPEN_ORDER",
+        ),
+        "metadata": {
+            "not_current_exposure": True,
+            "not_current_open_order": True,
+            "broker_position_count": 0,
+            "broker_open_order_count": 0,
+            "lifecycle_position_count": 0,
+            "cleanup_authority": "READ_ONLY_BROKER_LIFECYCLE_FLAT_EVIDENCE",
+        },
+    }
+    append_live_trade_registry_event(
+        repo_root=config.repo_root,
+        event=make_live_trade_registry_event(
+            event_type=TradeEventType.RECONCILED_FLAT_HISTORICAL_CLEANUP,
+            **cleanup_payload,
+        ),
+    )
+
+    clean = reconcile_track_b_paper_broker_truth(config=config, now=NOW + timedelta(seconds=31))
+
+    assert clean["broker_reconciled"] is True
+    assert clean["registry_reconciliation"]["classification"] == "REGISTRY_RECONCILIATION_MATCHED"
+    events = _read_registry_events(config)
+    assert any(event["event_type"] == "RECONCILED_FLAT_HISTORICAL_CLEANUP" for event in events)
+    assert events[-1]["event_type"] == "RECONCILED_FLAT"
+
+
 def test_registry_review_event_is_not_broker_backed_without_perm_and_exec_id(tmp_path: Path) -> None:
     config = _write_base_artifacts(tmp_path)
     _write_registry_open_managed_trade(

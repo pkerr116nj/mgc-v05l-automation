@@ -33,6 +33,7 @@ class TradeEventType(str, Enum):
     EXIT_FILL_BROKER_BACKED = "EXIT_FILL_BROKER_BACKED"
     RECONCILED_OPEN = "RECONCILED_OPEN"
     RECONCILED_FLAT = "RECONCILED_FLAT"
+    RECONCILED_FLAT_HISTORICAL_CLEANUP = "RECONCILED_FLAT_HISTORICAL_CLEANUP"
     REVIEW_REQUIRED = "REVIEW_REQUIRED"
     MANUAL_OPERATOR_CLOSE_RECORDED = "MANUAL_OPERATOR_CLOSE_RECORDED"
     RECOVERY_ADOPTION_RECORDED = "RECOVERY_ADOPTION_RECORDED"
@@ -317,6 +318,10 @@ def reduce_trade_events(events: Sequence[TradeEvent]) -> TradeRegistryRecord:
         elif event.event_type == TradeEventType.RECONCILED_FLAT:
             open_qty = Decimal("0")
             state = TradeCurrentState.CLOSED_FLAT if state != TradeCurrentState.REVIEW_REQUIRED else state
+        elif event.event_type == TradeEventType.RECONCILED_FLAT_HISTORICAL_CLEANUP:
+            open_qty = Decimal("0")
+            state = TradeCurrentState.CLOSED_FLAT
+            reason_codes.append("RECONCILED_FLAT_HISTORICAL_CLEANUP")
         elif event.event_type == TradeEventType.REVIEW_REQUIRED:
             state = TradeCurrentState.REVIEW_REQUIRED
             reason_codes.append("REVIEW_REQUIRED_EVENT")
