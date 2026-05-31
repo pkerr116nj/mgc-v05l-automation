@@ -40,6 +40,12 @@ from mgc_v05l.execution_core.track_b_hourly_runtime_recovery_audit import (
     classify_scheduler_evidence,
     collect_scheduler_evidence,
 )
+from mgc_v05l.execution_core.track_b_registry_truth_diagnostics import (
+    TrackBDiagnosticsMode,
+    TrackBRegistryTruthDiagnosticsConfig,
+    build_track_b_registry_truth_diagnostics,
+    write_track_b_registry_truth_diagnostics,
+)
 
 repo_root = Path(sys.argv[1]).resolve()
 runtime_dir = Path(sys.argv[2])
@@ -304,6 +310,64 @@ if review_overlay_active:
         }
     )
 
+registry_truth_diagnostics = {
+    "mode": "CURRENT_HOT_PATH",
+    "classification": "TRACK_B_DIAGNOSTICS_UNAVAILABLE",
+    "diagnostic_only": True,
+    "error": None,
+}
+try:
+    registry_truth_config = TrackBRegistryTruthDiagnosticsConfig(
+        repo_root=repo_root,
+        mode=TrackBDiagnosticsMode.CURRENT_HOT_PATH,
+    )
+    registry_truth_report = build_track_b_registry_truth_diagnostics(config=registry_truth_config)
+    registry_truth_path = write_track_b_registry_truth_diagnostics(
+        config=registry_truth_config,
+        report=registry_truth_report,
+    )
+    registry_truth_payload = registry_truth_report.to_dict()
+    registry_truth_diagnostics = {
+        "mode": registry_truth_payload["mode"],
+        "classification": registry_truth_payload["classification"],
+        "diagnostic_only": True,
+        "report_path": str(registry_truth_path),
+        "track_b_managed_futures_position_count": registry_truth_payload["track_b_managed_futures_position_count"],
+        "track_b_managed_futures_positions": registry_truth_payload["broker_positions_by_scope"][
+            "track_b_managed_futures_positions"
+        ],
+        "broker_open_order_count": registry_truth_payload["broker_open_order_count"],
+        "lifecycle_open_position_count": registry_truth_payload["lifecycle_open_position_count"],
+        "current_scope_review_required_count": len(registry_truth_payload["review_required_trade_ids"]),
+        "current_scope_review_required_trade_ids": registry_truth_payload["review_required_trade_ids"],
+        "historical_quarantined_count": max(
+            0,
+            len(registry_truth_payload["historical_review_required_trade_ids"])
+            - len(registry_truth_payload["review_required_trade_ids"]),
+        ),
+        "latest_lifecycle_stress_preflight_hard_failure_count": registry_truth_payload[
+            "latest_preflight_hard_failure_count"
+        ],
+        "stale_authority_reason_codes": [
+            code
+            for code in registry_truth_payload["reason_codes"]
+            if "STALE" in str(code) or code == "TRUTH_AUTHORITY_STALE"
+        ],
+        "full_artifact_audit_mode": "separate_diagnostic_only",
+        "full_artifact_audit_output_path": str(
+            repo_root
+            / "outputs/track_b_execution_core/diagnostics/latest_track_b_registry_truth_diagnostics_full_artifact_audit.json"
+        ),
+        "error": None,
+    }
+except Exception as exc:
+    registry_truth_diagnostics = {
+        "mode": "CURRENT_HOT_PATH",
+        "classification": "TRACK_B_DIAGNOSTICS_UNAVAILABLE",
+        "diagnostic_only": True,
+        "error": f"{type(exc).__name__}: {exc}",
+    }
+
 next_action = "none"
 if blockers:
     next_action = "resolve_blockers_before_start"
@@ -351,6 +415,7 @@ payload = {
         "broker_truth_classification": broker_truth_status.get("classification"),
         "broker_truth_fresh": broker_truth_status.get("fresh"),
     },
+    "registry_truth_diagnostics": registry_truth_diagnostics,
     "data": {
         "phase1_listener_classification": phase1_status.get("final_classification"),
         "phase1_latest_record_at": phase1_status.get("latest_record_at"),

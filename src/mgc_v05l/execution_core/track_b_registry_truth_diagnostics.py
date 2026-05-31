@@ -324,7 +324,11 @@ def _truth_has_stale_authority(truth: TrackBTruthSnapshot) -> bool:
 
 
 def _broker_positions_by_scope(truth: TrackBTruthSnapshot) -> Mapping[str, Any]:
-    lifecycle_keys = {_position_key(row) for row in truth.lifecycle.open_positions}
+    lifecycle_keys = (
+        {_position_key(row) for row in truth.lifecycle.open_positions}
+        if truth.lifecycle.fresh and truth.reconciliation.fresh
+        else set()
+    )
     track_b: list[Mapping[str, Any]] = []
     unrelated: list[Mapping[str, Any]] = []
     unknown: list[Mapping[str, Any]] = []
@@ -358,7 +362,7 @@ def _current_scope_shadow_rows(
             scoped_positions["track_b_managed_futures_positions"],
             scoped_positions["unknown_scope_positions"],
             truth.broker_truth.open_orders,
-            truth.lifecycle.open_positions,
+            truth.lifecycle.open_positions if truth.lifecycle.fresh and truth.reconciliation.fresh else (),
         )
         for row in bucket
     }

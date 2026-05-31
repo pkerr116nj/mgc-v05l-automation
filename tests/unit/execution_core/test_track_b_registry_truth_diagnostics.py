@@ -177,6 +177,53 @@ def test_stale_truth_snapshot_reports_stale(tmp_path: Path) -> None:
     assert "TRUTH_AUTHORITY_STALE" in report.reason_codes
 
 
+def test_stale_lifecycle_authority_does_not_link_historical_review_to_current_scope(tmp_path: Path) -> None:
+    config = _seed_config(tmp_path)
+    _write_json(
+        tmp_path / config.truth_config.managed_position_registry_path,  # type: ignore[union-attr]
+        {
+            "generated_at": (NOW - timedelta(hours=12)).isoformat(),
+            "managed_positions": [
+                {
+                    "lifecycle_id": "old_life",
+                    "account_id": "DUM882026",
+                    "con_id": 770561201,
+                    "localSymbol": "MNQM6",
+                    "qty": 1,
+                    "state": "OPEN_MANAGED",
+                }
+            ],
+        },
+    )
+    _write_json(
+        tmp_path / config.truth_config.lifecycle_live_position_path,  # type: ignore[union-attr]
+        {
+            "generated_at": (NOW - timedelta(hours=12)).isoformat(),
+            "open_positions": [],
+        },
+    )
+    _write_jsonl(
+        tmp_path / "fixtures/ledger.jsonl",
+        [
+            _event(
+                TradeEventType.ENTRY_FILL_BROKER_BACKED,
+                trade_id="trade_old_review",
+                lifecycle_id="old_life",
+                order_id="1",
+                client_id="17",
+                perm_id=None,
+                exec_id=None,
+            )
+        ],
+    )
+
+    report = build_track_b_registry_truth_diagnostics(config=config, now=NOW)
+
+    assert report.classification == TRACK_B_DIAGNOSTICS_STALE_AUTHORITY
+    assert report.review_required_trade_ids == ()
+    assert report.historical_review_required_trade_ids == ("trade_old_review",)
+
+
 def test_unrelated_broker_positions_do_not_count_as_track_b_exposure(tmp_path: Path) -> None:
     config = _seed_config(
         tmp_path,

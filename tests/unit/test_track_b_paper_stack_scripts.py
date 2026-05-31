@@ -118,6 +118,25 @@ def test_status_reports_dashboard_as_non_authority_and_duplicate_writer_state() 
     assert "standalone_recovery_last_blocker" in source
 
 
+def test_status_surfaces_current_hot_path_registry_truth_diagnostics_read_only() -> None:
+    source = STATUS_SCRIPT.read_text(encoding="utf-8")
+
+    assert "TrackBRegistryTruthDiagnosticsConfig" in source
+    assert "TrackBDiagnosticsMode.CURRENT_HOT_PATH" in source
+    assert "registry_truth_diagnostics" in source
+    assert '"diagnostic_only": True' in source
+    assert "track_b_managed_futures_position_count" in source
+    assert "broker_open_order_count" in source
+    assert "lifecycle_open_position_count" in source
+    assert "current_scope_review_required_count" in source
+    assert "historical_quarantined_count" in source
+    assert "latest_lifecycle_stress_preflight_hard_failure_count" in source
+    assert "stale_authority_reason_codes" in source
+    assert "full_artifact_audit_mode" in source
+    assert "separate_diagnostic_only" in source
+    assert "submit_gate" not in source
+
+
 def test_canonical_paper_config_uses_phase1_artifact_market_data() -> None:
     source = PAPER_CONFIG.read_text(encoding="utf-8")
 
