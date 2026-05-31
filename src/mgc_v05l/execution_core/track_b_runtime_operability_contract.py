@@ -28,6 +28,7 @@ REPO_ROOT = Path(__file__).resolve().parents[3]
 
 READY_SUBMIT_CAPABLE = "READY_SUBMIT_CAPABLE"
 READY_DIAGNOSTIC_ONLY = "READY_DIAGNOSTIC_ONLY"
+READY_TO_START_DIAGNOSTIC_ONLY = "READY_TO_START_DIAGNOSTIC_ONLY"
 WAITING_FOR_MARKET_REOPEN = "WAITING_FOR_MARKET_REOPEN"
 BLOCKED_SAFETY = "BLOCKED_SAFETY"
 BLOCKED_INFRASTRUCTURE = "BLOCKED_INFRASTRUCTURE"
@@ -155,6 +156,8 @@ def build_runtime_operability_contract(
         "paper_proof_invoked": False,
         "canonical_state": classification["state"],
         "ready_submit_capable": classification["state"] == READY_SUBMIT_CAPABLE,
+        "submit_allowed": classification.get("submit_allowed") is True,
+        "runtime_start_allowed": classification.get("runtime_start_allowed") is True,
         "restart_allowed_if_runtime_down": classification["restart_allowed_if_runtime_down"],
         "market_schedule_state": classification.get("market_schedule_state"),
         "stale_market_data_expected": classification.get("stale_market_data_expected") is True,
@@ -354,7 +357,7 @@ def classify_runtime_operability(
     readiness_blockers = list(canonical.get("readiness_blockers") or canonical.get("blockers") or [])
     if readiness_state in {"NOT_READY_CONFIG", "NOT_READY_WRONG_ROOT"}:
         block("canonical_readiness_config_block", readiness_state, "canonical_readiness", BLOCKED_CONFIG)
-    elif readiness_state == WAITING_FOR_MARKET_REOPEN:
+    elif readiness_state in {WAITING_FOR_MARKET_REOPEN, READY_TO_START_DIAGNOSTIC_ONLY}:
         warn("canonical_readiness_waiting_for_market_reopen", readiness_state, "canonical_readiness")
     elif readiness_state in {"NOT_READY_DEPENDENCY", "NOT_READY_RECONCILIATION", "DEGRADED_NO_SUBMIT"}:
         block("canonical_readiness_infrastructure_block", readiness_state, "canonical_readiness", BLOCKED_INFRASTRUCTURE)
@@ -376,7 +379,11 @@ def classify_runtime_operability(
 
     if lane_count <= 0:
         block("active_paper_config_empty", "Active paper_config_in_force has no lanes.", "active_paper_config", BLOCKED_CONFIG)
-    if runtime_running is False and readiness_state == READY_SUBMIT_CAPABLE:
+    runtime_down_with_clean_safety = runtime_running is False and readiness_state in {
+        READY_SUBMIT_CAPABLE,
+        READY_TO_START_DIAGNOSTIC_ONLY,
+    }
+    if runtime_down_with_clean_safety:
         warn("runtime_down_but_safety_clean", "Runtime is down while canonical readiness is clean.", "runtime_truth")
     if runtime_lane_count and lane_count and runtime_lane_count != lane_count:
         block(
@@ -394,29 +401,41 @@ def classify_runtime_operability(
     if blockers:
         family = _highest_precedence_family(blockers)
         state = family
+    elif runtime_down_with_clean_safety:
+        state = READY_DIAGNOSTIC_ONLY
+        family = None
     elif readiness_state == READY_SUBMIT_CAPABLE:
         state = READY_SUBMIT_CAPABLE
         family = None
-    elif readiness_state == WAITING_FOR_MARKET_REOPEN:
+    elif readiness_state in {WAITING_FOR_MARKET_REOPEN, READY_TO_START_DIAGNOSTIC_ONLY}:
         state = READY_DIAGNOSTIC_ONLY
         family = None
     else:
         state = READY_DIAGNOSTIC_ONLY
         family = None
 
-    restart_allowed = state == READY_SUBMIT_CAPABLE or (
+    runtime_start_allowed = state == READY_SUBMIT_CAPABLE or (
         state == READY_DIAGNOSTIC_ONLY and str(supervisor.get("safe_to_start_runtime")).lower() == "true"
     )
+    if readiness_state in {READY_TO_START_DIAGNOSTIC_ONLY, WAITING_FOR_MARKET_REOPEN}:
+        runtime_start_allowed = True
+    restart_allowed = runtime_start_allowed
     if state in {BLOCKED_SAFETY, BLOCKED_CONFIG, BLOCKED_STALE_TRUTH, BLOCKED_INFRASTRUCTURE}:
         restart_allowed = False
+        runtime_start_allowed = False
     elif readiness_state == WAITING_FOR_MARKET_REOPEN:
         restart_allowed = False
+    elif runtime_down_with_clean_safety:
+        restart_allowed = True
+        runtime_start_allowed = True
 
     return {
         "state": state,
         "blocker_family": family,
         "blockers": blockers,
         "warnings": warnings,
+        "submit_allowed": state == READY_SUBMIT_CAPABLE,
+        "runtime_start_allowed": runtime_start_allowed,
         "restart_allowed_if_runtime_down": restart_allowed,
         "market_schedule_state": canonical.get("market_schedule_state"),
         "stale_market_data_expected": canonical.get("stale_market_data_expected") is True,

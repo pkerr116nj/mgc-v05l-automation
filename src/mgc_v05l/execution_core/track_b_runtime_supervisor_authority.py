@@ -574,6 +574,15 @@ def _classify_supervisor(*, inputs: Mapping[str, Mapping[str, Any]]) -> dict[str
         )
 
     if _market_closed(inputs):
+        if _clean_diagnostic_runtime_start_facts(evidence):
+            return _decision(
+                SUPERVISOR_RUNTIME_START_ALLOWED,
+                "START_RUNTIME_DIAGNOSTIC_ONLY",
+                MARKET_CLOSED_NO_FRESH_BARS,
+                action_allowed=True,
+                safe_to_start_runtime=True,
+                warnings=[_blocker("market_session", MARKET_CLOSED_NO_FRESH_BARS)],
+            )
         return _decision(
             SUPERVISOR_WAIT_MARKET_CLOSED,
             "WAIT_MARKET_CLOSED",
@@ -1263,7 +1272,13 @@ def _paper_policy_quarantine(evidence: Mapping[str, Any]) -> bool:
 def _clean_start_facts(evidence: Mapping[str, Any]) -> bool:
     return (
         evidence["proof_readiness_classification"] == READY_FOR_PROOF
-        and evidence["position_truth_classification"] == "CLEAN_FLAT_READY"
+        and _clean_diagnostic_runtime_start_facts(evidence)
+    )
+
+
+def _clean_diagnostic_runtime_start_facts(evidence: Mapping[str, Any]) -> bool:
+    return (
+        evidence["position_truth_classification"] == "CLEAN_FLAT_READY"
         and evidence["open_order_truth_classification"] == NO_OPEN_ORDERS
         and evidence["managed_order_registry_classification"] == NO_MANAGED_ORDERS
         and evidence["managed_position_registry_classification"] == NO_MANAGED_POSITIONS

@@ -202,6 +202,7 @@ def test_json_summary_contains_compact_fields(capsys) -> None:
         "readiness_block_is_scheduled_halt",
         "reconciliation_state",
         "root_match",
+        "runtime_start_allowed",
         "shared_truth_broker_lease",
         "shared_truth_managed_order_registry",
         "shared_truth_managed_position_registry",
@@ -210,6 +211,7 @@ def test_json_summary_contains_compact_fields(capsys) -> None:
         "shared_truth_position_truth",
         "shared_truth_runtime_environment_truth",
         "stale_market_data_expected",
+        "submit_allowed",
         "warnings",
     ]
     assert summary["generated_at"] == "2026-05-18T12:00:00+00:00"

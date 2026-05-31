@@ -147,14 +147,15 @@ def test_market_closed_snapshot_waits_without_alarm(tmp_path: Path) -> None:
     payload = _snapshot(tmp_path)
 
     assert payload["classification"] == CONTROL_PLANE_SNAPSHOT_READY
-    assert payload["runtime_supervisor_classification"] == "SUPERVISOR_WAIT_MARKET_CLOSED"
-    assert payload["supervisor_mode"] == "MARKET_CLOSED_WAIT"
+    assert payload["runtime_supervisor_classification"] == "SUPERVISOR_RUNTIME_START_ALLOWED"
+    assert payload["supervisor_mode"] == "READY_FOR_OPERATOR_START"
     assert payload["proof_window_status"] == "market_closed"
     assert payload["top_line_classification"] == "MARKET_CLOSED_WAIT"
     assert "Market closed/no fresh bars expected" in payload["top_line_status"]
     assert payload["runtime_resume_action_policy"] == "HOLD_MARKET_CLOSED"
     assert payload["recommended_recovery_action"] == "WAIT_MARKET_CLOSED"
-    assert payload["recommended_next_command"] == "wait for market reopen; rerun proof readiness before any runtime start"
+    assert payload["recommended_next_command"] == "operator may start Track B PAPER runtime using the repaired direct supervisor launcher"
+    assert payload["safe_to_start_runtime"] is True
 
 
 def test_stale_mixed_generation_blocks_snapshot(tmp_path: Path) -> None:

@@ -69,14 +69,14 @@ def test_market_closed_waits_without_alarm(tmp_path: Path) -> None:
 
     payload = build_track_b_runtime_supervisor_authority(config=TrackBRuntimeSupervisorAuthorityConfig(repo_root=tmp_path), now=NOW)
 
-    assert payload["classification"] == SUPERVISOR_WAIT_MARKET_CLOSED
-    assert payload["supervisor_mode"] == MARKET_CLOSED_WAIT
-    assert payload["recommended_action"] == "WAIT_MARKET_CLOSED"
-    assert payload["recommended_next_command"] == "wait for market reopen; rerun proof readiness before any runtime start"
+    assert payload["classification"] == SUPERVISOR_RUNTIME_START_ALLOWED
+    assert payload["supervisor_mode"] == READY_FOR_OPERATOR_START
+    assert payload["recommended_action"] == "START_RUNTIME_DIAGNOSTIC_ONLY"
+    assert payload["recommended_next_command"] == "operator may start Track B PAPER runtime using the repaired direct supervisor launcher"
     assert payload["proof_window_status"] == "market_closed"
     assert payload["action_allowed"] is True
-    assert payload["safe_to_start_runtime"] is False
-    assert payload["decision_precedence"][0]["service"] == "Proof Readiness / Phase-1 Readiness"
+    assert payload["safe_to_start_runtime"] is True
+    assert payload["decision_precedence"][0]["service"] == "Proof Readiness / Runtime Resume Semantics"
     assert payload["autonomous_recovery_plan_classification"] == "WAIT_MARKET_CLOSED"
     assert payload["autonomous_recovery_next_action"] == "WAIT_MARKET_CLOSED"
     assert payload["autonomous_recovery_execution_enabled"] is False

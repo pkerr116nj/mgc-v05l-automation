@@ -17170,6 +17170,27 @@ def _phase1_runtime_artifact_transport_probe(settings: StrategySettings) -> dict
                 "Wait for Globex to reopen and for Phase-1 Databento runtime candle artifacts to refresh. "
                 "Runtime trading remains blocked while candles are stale."
             )
+            market_closed_payload = {
+                **failure_base,
+                "failure_kind": failure_kind,
+                "phase1_artifact_probe_attempted": True,
+                "phase1_artifact_probe_succeeds": False,
+                "checked_artifacts": checked_artifacts,
+                "exception_text": str(exc),
+                "message": message,
+                "next_fix": next_fix,
+                "producer_status": listener_status,
+                "runtime_ready": True,
+                "runtime_start_allowed": True,
+                "runtime_trading_ready": False,
+                "runtime_trading_blocked": True,
+                "scheduled_market_halt": True,
+                "status": "market_closed_wait",
+            }
+            _clear_probationary_runtime_transport_failure(settings)
+            artifact_path = _write_probationary_runtime_transport_probe(settings, market_closed_payload)
+            market_closed_payload["artifact_path"] = str(artifact_path)
+            return market_closed_payload
         elif producer_down:
             failure_kind = "PHASE1_MARKET_DATA_PRODUCER_DOWN"
             message = "Phase-1 Databento runtime candle producer is not running or not reporting live listener status."

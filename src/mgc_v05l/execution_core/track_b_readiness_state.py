@@ -80,6 +80,7 @@ DEFAULT_MANAGED_POSITION_REGISTRY_ARTIFACT = (
 )
 CANONICAL_READINESS_STATES = {
     "READY_SUBMIT_CAPABLE",
+    "READY_TO_START_DIAGNOSTIC_ONLY",
     "READY_OBSERVATION_ONLY",
     "WAITING_FOR_MARKET_REOPEN",
     "DEGRADED_NO_SUBMIT",
@@ -413,6 +414,33 @@ def classify_canonical_readiness(inputs: Mapping[str, Any]) -> dict[str, Any]:
             "lane_quarantine_active",
             f"{quarantine_count} lane(s) are quarantined; quarantined lanes are excluded from submit eligibility.",
             source="lane_quarantine",
+        )
+
+    if not live_bars_fresh and scheduled_market_data_wait and not runtime_running:
+        market_schedule_state = str(schedule.get("market_schedule_state") or MARKET_SCHEDULED_HALT)
+        reasons.append(
+            "Fresh market data is not expected during the scheduled futures market halt/reopen grace window."
+        )
+        reasons.append("Dependencies are clean enough to start the PAPER runtime in diagnostic-only mode.")
+        warn(
+            "scheduled_market_halt_runtime_start_allowed",
+            "Runtime start is allowed before reopen so listeners and authority refresh can warm up; submit remains disabled.",
+            source="market_data",
+        )
+        return _readiness_result(
+            generated_at=generated_at,
+            state="READY_TO_START_DIAGNOSTIC_ONLY",
+            reasons=reasons,
+            blockers=blockers,
+            warnings=warnings,
+            inputs=inputs,
+            market_schedule_override={
+                "market_schedule_state": market_schedule_state,
+                "stale_market_data_expected": True,
+                "next_expected_reopen_time": schedule.get("next_expected_reopen_time"),
+                "market_data_grace_until": schedule.get("market_data_grace_until"),
+                "readiness_block_is_scheduled_halt": True,
+            },
         )
 
     if not runtime_running:
@@ -1993,6 +2021,12 @@ def _readiness_result(
         "canonical_readiness": state,
         "state": state,
         "ready_submit_capable": state == "READY_SUBMIT_CAPABLE",
+        "submit_allowed": state == "READY_SUBMIT_CAPABLE",
+        "runtime_start_allowed": state in {
+            "READY_SUBMIT_CAPABLE",
+            "READY_OBSERVATION_ONLY",
+            "READY_TO_START_DIAGNOSTIC_ONLY",
+        },
         "readiness_reasons": list(reasons),
         "readiness_blockers": [dict(row) for row in blockers],
         "readiness_warnings": [dict(row) for row in warnings],

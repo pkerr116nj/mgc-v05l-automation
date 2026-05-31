@@ -345,16 +345,18 @@ def test_phase1_artifact_paper_transport_probe_classifies_weekend_market_closed(
         _FakePhase1ArtifactClient,
     )
 
-    with pytest.raises(ProbationaryRuntimeTransportFailure) as excinfo:
-        _run_probationary_runtime_market_data_transport_probe(
-            settings=settings,
-            schwab_config_path=tmp_path / "schwab.local.json",
-        )
+    payload = _run_probationary_runtime_market_data_transport_probe(
+        settings=settings,
+        schwab_config_path=tmp_path / "schwab.local.json",
+    )
 
-    payload = excinfo.value.payload
     assert payload["failure_kind"] == "MARKET_CLOSED_NO_FRESH_BARS"
-    assert payload["runtime_ready"] is False
+    assert payload["runtime_ready"] is True
+    assert payload["runtime_start_allowed"] is True
+    assert payload["runtime_trading_ready"] is False
     assert payload["runtime_trading_blocked"] is True
+    assert payload["scheduled_market_halt"] is True
+    assert payload["status"] == "market_closed_wait"
     assert "Globex" in payload["next_fix"]
 
 

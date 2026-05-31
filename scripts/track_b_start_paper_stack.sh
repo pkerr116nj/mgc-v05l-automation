@@ -276,6 +276,7 @@ if [[ "${already_running}" == "true" ]]; then
 fi
 
 restart_allowed="$("${PYTHON_BIN}" -c 'import json,sys; print(str(json.loads(sys.stdin.read())["readiness"]["restart_allowed_if_runtime_down"]).lower())' <<<"${status_json}")"
+runtime_start_allowed="$("${PYTHON_BIN}" -c 'import json,sys; print(str(json.loads(sys.stdin.read())["readiness"].get("runtime_start_allowed") is True).lower())' <<<"${status_json}")"
 blocker_count="$("${PYTHON_BIN}" -c 'import json,sys; print(len(json.loads(sys.stdin.read())["readiness"]["blockers"]))' <<<"${status_json}")"
 launch_guard_restart_allowed="$("${PYTHON_BIN}" -c '
 import json, sys
@@ -305,7 +306,7 @@ ok = (
 print(str(ok).lower())
 ' <<<"${status_json}")"
 scoped_profile_allowed="$(scoped_profile_start_allowed || true)"
-if [[ ( "${restart_allowed}" != "true" || "${blocker_count}" != "0" ) && "${launch_guard_restart_allowed}" != "true" && "${scoped_profile_allowed}" != "true" ]]; then
+if [[ ( "${runtime_start_allowed}" != "true" || "${blocker_count}" != "0" ) && ( "${restart_allowed}" != "true" || "${blocker_count}" != "0" ) && "${launch_guard_restart_allowed}" != "true" && "${scoped_profile_allowed}" != "true" ]]; then
   write_startup_artifact "BLOCKED_PRECHECK" "Canonical readiness does not allow a clean PAPER runtime start." ""
   exit 2
 fi
@@ -477,6 +478,8 @@ while [[ "${SECONDS}" -lt "${deadline}" ]]; do
   last_status="$("${STATUS_SCRIPT}" --json || true)"
   running="$("${PYTHON_BIN}" -c 'import json,sys; print(str(json.loads(sys.stdin.read())["runtime"]["running"]).lower())' <<<"${last_status}" 2>/dev/null || echo false)"
   ready="$("${PYTHON_BIN}" -c 'import json,sys; print(str(json.loads(sys.stdin.read())["readiness"]["ready_submit_capable"]).lower())' <<<"${last_status}" 2>/dev/null || echo false)"
+  start_allowed="$("${PYTHON_BIN}" -c 'import json,sys; print(str(json.loads(sys.stdin.read())["readiness"].get("runtime_start_allowed") is True).lower())' <<<"${last_status}" 2>/dev/null || echo false)"
+  scheduled_halt="$("${PYTHON_BIN}" -c 'import json,sys; p=json.loads(sys.stdin.read())["readiness"]; print(str(p.get("readiness_block_is_scheduled_halt") is True and p.get("ready_submit_capable") is not True).lower())' <<<"${last_status}" 2>/dev/null || echo false)"
   pid="$("${PYTHON_BIN}" -c 'import json,sys; print(json.loads(sys.stdin.read())["runtime"]["pid"] or "")' <<<"${last_status}" 2>/dev/null || true)"
   if [[ "${running}" == "true" && "${ready}" == "true" ]]; then
     if [[ "${ready_pid}" != "${pid}" ]]; then
@@ -490,6 +493,18 @@ while [[ "${SECONDS}" -lt "${deadline}" ]]; do
     write_startup_artifact "RUNTIME_RUNNING_WAITING_FOR_SUSTAINED_READINESS" "Runtime is READY_SUBMIT_CAPABLE; waiting for ${STABLE_SECONDS}s sustained readiness." "${pid}" >/dev/null
     continue
   fi
+  if [[ "${running}" == "true" && "${start_allowed}" == "true" && "${scheduled_halt}" == "true" ]]; then
+    if [[ "${ready_pid}" != "${pid}" ]]; then
+      ready_pid="${pid}"
+      ready_since="${SECONDS}"
+    fi
+    if (( SECONDS - ready_since >= STABLE_SECONDS )); then
+      write_startup_artifact "READY_TO_START_DIAGNOSTIC_ONLY" "Track B PAPER runtime started before reopen and remained diagnostic-start-ready for ${STABLE_SECONDS}s; submit remains disabled until market data is fresh." "${pid}"
+      exit 0
+    fi
+    write_startup_artifact "RUNTIME_RUNNING_WAITING_FOR_DIAGNOSTIC_START_STABILITY" "Runtime is alive during scheduled halt; waiting for ${STABLE_SECONDS}s sustained diagnostic start readiness." "${pid}" >/dev/null
+    continue
+  fi
   if [[ -n "${ready_pid}" && "${running}" != "true" ]]; then
     write_startup_artifact "BLOCKED_RUNTIME_EXITED_DURING_STARTUP" "Runtime reached initial readiness, then exited before ${STABLE_SECONDS}s sustained readiness." "${ready_pid}"
     exit 1
@@ -499,5 +514,5 @@ while [[ "${SECONDS}" -lt "${deadline}" ]]; do
   fi
 done
 
-write_startup_artifact "BLOCKED_START_TIMEOUT" "Runtime did not remain READY_SUBMIT_CAPABLE for ${STABLE_SECONDS}s before timeout; inspect status artifact and runtime log." ""
+write_startup_artifact "BLOCKED_START_TIMEOUT" "Runtime did not remain READY_SUBMIT_CAPABLE or scheduled-halt diagnostic-start-ready for ${STABLE_SECONDS}s before timeout; inspect status artifact and runtime log." ""
 exit 1

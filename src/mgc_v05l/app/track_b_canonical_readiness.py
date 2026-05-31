@@ -19,7 +19,7 @@ from mgc_v05l.execution_core.track_b_readiness_state import (
     write_canonical_readiness_artifact,
 )
 
-READY_EXIT_STATES = {"READY_SUBMIT_CAPABLE", "READY_OBSERVATION_ONLY"}
+READY_EXIT_STATES = {"READY_SUBMIT_CAPABLE", "READY_OBSERVATION_ONLY", "READY_TO_START_DIAGNOSTIC_ONLY"}
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -96,6 +96,8 @@ def compact_readiness_summary(payload: Mapping[str, Any]) -> dict[str, Any]:
     return {
         "generated_at": payload.get("generated_at"),
         "classification": str(payload.get("canonical_readiness") or payload.get("state") or "NOT_READY_CONFIG"),
+        "runtime_start_allowed": payload.get("runtime_start_allowed") is True,
+        "submit_allowed": payload.get("submit_allowed") is True,
         "blockers": _codes(payload.get("readiness_blockers")),
         "warnings": _codes(payload.get("readiness_warnings")),
         "market_schedule_state": payload.get("market_schedule_state"),
@@ -130,6 +132,8 @@ def print_summary(summary: Mapping[str, Any], *, as_json: bool) -> None:
         return
     for key in (
         "classification",
+        "runtime_start_allowed",
+        "submit_allowed",
         "blockers",
         "warnings",
         "market_schedule_state",

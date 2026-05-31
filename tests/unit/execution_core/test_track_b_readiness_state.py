@@ -255,6 +255,39 @@ def test_sunday_pre_reopen_halt_waits_without_infrastructure_block() -> None:
     assert result["readiness_blockers"] == []
 
 
+def test_sunday_pre_reopen_halt_allows_runtime_start_but_not_submit_when_runtime_down() -> None:
+    now = datetime(2026, 5, 31, 17, 30, tzinfo=timezone.utc)
+    inputs = _clean_inputs()
+    inputs["generated_at"] = now.isoformat()
+    inputs["runtime"]["running"] = False
+    inputs["runtime"]["healthy"] = False
+    inputs["execution_core_shared_truth"] = _shared_truth_evidence(
+        proof_classification="MARKET_CLOSED_NO_FRESH_BARS",
+        phase1_reason="WEEKEND_GLOBEX_HALT_BEFORE_SUNDAY_REOPEN",
+    )
+    inputs["market_data"] = _market_data_input(
+        {"active_symbols": ["MNQ", "MES"]},
+        {},
+        _phase1_listener_status(
+            rows=[
+                _listener_row("MNQ", realtime_feed_confirmed=False, bar_count=0, latest_completed_bar_ts=None),
+                _listener_row("MES", realtime_feed_confirmed=False, bar_count=0, latest_completed_bar_ts=None),
+            ],
+            generated_at=now.isoformat(),
+        ),
+        now=now,
+    )
+
+    result = classify_canonical_readiness(inputs)
+
+    assert result["canonical_readiness"] == "READY_TO_START_DIAGNOSTIC_ONLY"
+    assert result["runtime_start_allowed"] is True
+    assert result["submit_allowed"] is False
+    assert result["ready_submit_capable"] is False
+    assert result["market_schedule_state"] == "SCHEDULED_MARKET_HALT"
+    assert result["readiness_blockers"] == []
+
+
 def test_degraded_shared_broker_lease_is_diagnostic_when_truth_clean() -> None:
     inputs = _clean_inputs()
     inputs["execution_core_shared_truth"] = _shared_truth_evidence(

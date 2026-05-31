@@ -77,7 +77,8 @@ def test_runtime_down_with_clean_authority_allows_recovery_restart(tmp_path: Pat
 
     payload = build_runtime_operability_contract(config=config, now=NOW)
 
-    assert payload["canonical_state"] == READY_SUBMIT_CAPABLE
+    assert payload["canonical_state"] == READY_DIAGNOSTIC_ONLY
+    assert payload["ready_submit_capable"] is False
     assert payload["restart_allowed_if_runtime_down"] is True
     assert payload["runtime_summary"]["running"] is False
 
@@ -101,11 +102,40 @@ def test_scheduled_market_halt_is_diagnostic_not_infrastructure_block(tmp_path: 
 
     assert payload["canonical_state"] == READY_DIAGNOSTIC_ONLY
     assert payload["ready_submit_capable"] is False
+    assert payload["runtime_start_allowed"] is True
     assert payload["restart_allowed_if_runtime_down"] is False
     assert payload["blockers"] == []
     assert payload["market_schedule_state"] == "SCHEDULED_MARKET_HALT"
     assert payload["readiness_block_is_scheduled_halt"] is True
     assert "canonical_readiness_waiting_for_market_reopen" in {row["code"] for row in payload["warnings"]}
+
+
+def test_pre_reopen_diagnostic_start_state_allows_runtime_start_without_submit(tmp_path: Path) -> None:
+    config = _write_ready_authority(
+        tmp_path,
+        runtime_running=False,
+        canonical_readiness="READY_TO_START_DIAGNOSTIC_ONLY",
+        canonical_extra={
+            "runtime_start_allowed": True,
+            "submit_allowed": False,
+            "ready_submit_capable": False,
+            "market_schedule_state": "SCHEDULED_MARKET_HALT",
+            "stale_market_data_expected": True,
+            "next_expected_reopen_time": "2026-05-31T22:00:00+00:00",
+            "market_data_grace_until": "2026-05-31T22:10:00+00:00",
+            "readiness_block_is_scheduled_halt": True,
+            "readiness_blockers": [],
+        },
+    )
+
+    payload = build_runtime_operability_contract(config=config, now=NOW)
+
+    assert payload["canonical_state"] == READY_DIAGNOSTIC_ONLY
+    assert payload["runtime_start_allowed"] is True
+    assert payload["restart_allowed_if_runtime_down"] is True
+    assert payload["submit_allowed"] is False
+    assert payload["ready_submit_capable"] is False
+    assert payload["readiness_block_is_scheduled_halt"] is True
 
 
 def test_fresh_healthy_runtime_truth_with_producer_pid_reports_runtime_up(tmp_path: Path) -> None:

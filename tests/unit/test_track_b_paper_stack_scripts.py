@@ -44,6 +44,8 @@ def test_paper_stack_start_requires_sustained_readiness() -> None:
     assert "RUNTIME_RUNNING_WAITING_FOR_SUSTAINED_READINESS" in source
     assert "BLOCKED_RUNTIME_EXITED_DURING_STARTUP" in source
     assert "remained READY_SUBMIT_CAPABLE" in source
+    assert "READY_TO_START_DIAGNOSTIC_ONLY" in source
+    assert "submit remains disabled" in source
 
 
 def test_paper_stack_start_enables_recovery_service_unless_operator_opts_out() -> None:
@@ -108,6 +110,8 @@ def test_status_reports_dashboard_as_non_authority_and_duplicate_writer_state() 
     assert "live_scheduler_classification" in source
     assert "hourly_recovery_paused" in source
     assert "stale_hourly_recovery_artifact_live_scheduler_paused" in source
+    assert "runtime_start_allowed" in source
+    assert "submit_allowed" in source
     assert "recovery_authoritative" in source
     assert "standalone_recovery_classification" in source
     assert "RECOVERY_ACTIVE" in source

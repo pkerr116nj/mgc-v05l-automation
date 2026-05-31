@@ -260,6 +260,7 @@ config_summary = dict(operability.get("config_summary") or {})
 lane_count = config_summary.get("lane_count") or runtime_truth.get("lane_count")
 canonical_state = str(operability.get("canonical_state") or "UNKNOWN")
 ready_submit_capable = bool(operability.get("ready_submit_capable")) and running
+runtime_start_allowed = bool(operability.get("runtime_start_allowed") or canonical_readiness.get("runtime_start_allowed"))
 blockers = list(operability.get("blockers") or [])
 warnings = list(operability.get("warnings") or [])
 if not running:
@@ -399,6 +400,8 @@ payload = {
     "readiness": {
         "canonical_state": canonical_state,
         "ready_submit_capable": ready_submit_capable,
+        "submit_allowed": ready_submit_capable,
+        "runtime_start_allowed": runtime_start_allowed,
         "restart_allowed_if_runtime_down": operability.get("restart_allowed_if_runtime_down") is True,
         "market_schedule_state": canonical_readiness.get("market_schedule_state"),
         "stale_market_data_expected": canonical_readiness.get("stale_market_data_expected") is True,
