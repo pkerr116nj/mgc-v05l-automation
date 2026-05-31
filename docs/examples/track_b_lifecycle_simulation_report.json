@@ -1,0 +1,131 @@
+{
+  "generated_at": "2026-05-31T12:00:00+00:00",
+  "ibkr_mutation_allowed": false,
+  "schema_version": "track_b_lifecycle_simulation_report_v1",
+  "simulated_only": true,
+  "results": [
+    {
+      "classification": "LIFECYCLE_SIMULATION_PASSED",
+      "reason_codes": [
+        "ENTRY_INTENT_VALID",
+        "BROKER_ORDER_ACCEPTED",
+        "BROKER_BACKED_ENTRY_FILL",
+        "MANAGED_POSITION_ADOPTED",
+        "TIMEBOX_EXIT_DUE",
+        "BROKER_BACKED_CLOSE_FILL",
+        "RECONCILED_FLAT"
+      ],
+      "scenario_id": "clean_full_lifecycle",
+      "terminal_state": "RECONCILED_FLAT"
+    },
+    {
+      "classification": "LIFECYCLE_SIMULATION_CANCELLED",
+      "reason_codes": [
+        "PASSIVE_ENTRY_CANCELLED"
+      ],
+      "scenario_id": "passive_entry_cancel",
+      "terminal_state": "ENTRY_ORDER_CANCELLED_BEFORE_FILL"
+    },
+    {
+      "classification": "LIFECYCLE_SIMULATION_BLOCKED",
+      "reason_codes": [
+        "ENTRY_FILL_NOT_ADOPTED"
+      ],
+      "scenario_id": "entry_fill_not_adopted",
+      "terminal_state": "BROKER_FILL_NOT_ADOPTED_BY_LIFECYCLE"
+    },
+    {
+      "classification": "LIFECYCLE_SIMULATION_BLOCKED",
+      "reason_codes": [
+        "MANAGED_EXIT_BAR_COUNT_MISMATCH"
+      ],
+      "scenario_id": "managed_exit_policy_wrong_bar_count",
+      "terminal_state": "MANAGED_EXIT_POLICY_CONTRACT_FAILED"
+    },
+    {
+      "classification": "LIFECYCLE_SIMULATION_BLOCKED",
+      "reason_codes": [
+        "REQUIRED_FIELD_MISSING",
+        "MISSING_LIFECYCLE_ID"
+      ],
+      "scenario_id": "managed_exit_due_missing_lifecycle_id",
+      "terminal_state": "IDENTITY_CONTRACT_FAILED"
+    },
+    {
+      "classification": "LIFECYCLE_SIMULATION_BLOCKED",
+      "reason_codes": [
+        "LANE_THESIS_STRATEGY_MISMATCH"
+      ],
+      "scenario_id": "lane_id_vs_thesis_strategy_id_mismatch",
+      "terminal_state": "LANE_THESIS_MISMATCH_BLOCKED"
+    },
+    {
+      "classification": "LIFECYCLE_SIMULATION_BLOCKED",
+      "reason_codes": [
+        "EXACT_LIFECYCLE_IDENTITY_REQUIRED",
+        "EXIT_CONTRACT_MISMATCH"
+      ],
+      "scenario_id": "managed_exit_close_identity_contract_mismatch",
+      "terminal_state": "EXACT_LIFECYCLE_EXIT_IDENTITY_FAILED"
+    },
+    {
+      "classification": "LIFECYCLE_SIMULATION_PASSED",
+      "reason_codes": [
+        "AGGREGATE_ACCOUNT_DIAGNOSTIC_ONLY",
+        "RECONCILED_FLAT"
+      ],
+      "scenario_id": "aggregate_account_multiple_exact_row_valid",
+      "terminal_state": "RECONCILED_FLAT"
+    },
+    {
+      "classification": "LIFECYCLE_SIMULATION_BLOCKED",
+      "reason_codes": [
+        "CONTROL_PLANE_SNAPSHOT_STALE"
+      ],
+      "scenario_id": "stale_control_plane_snapshot",
+      "terminal_state": "PRE_ACTION_BLOCKED_SNAPSHOT_STALE"
+    },
+    {
+      "classification": "LIFECYCLE_SIMULATION_BLOCKED",
+      "reason_codes": [
+        "SAFE_STATE_SUBMIT_BLOCKED"
+      ],
+      "scenario_id": "safe_state_submit_blocked",
+      "terminal_state": "SAFE_STATE_SUBMIT_BLOCKED"
+    },
+    {
+      "classification": "LIFECYCLE_SIMULATION_BLOCKED",
+      "reason_codes": [
+        "PLANNER_SNAPSHOT_MISMATCH"
+      ],
+      "scenario_id": "planner_snapshot_mismatch",
+      "terminal_state": "PRE_ACTION_BLOCKED_PLAN_MISMATCH"
+    },
+    {
+      "classification": "LIFECYCLE_SIMULATION_PASSED",
+      "reason_codes": [
+        "SCOPED_CLEANUP_DIAGNOSTIC_FIELDS_IGNORED",
+        "RECONCILED_FLAT"
+      ],
+      "scenario_id": "scoped_cleanup_extra_diagnostic_fields",
+      "terminal_state": "RECONCILED_FLAT"
+    },
+    {
+      "classification": "LIFECYCLE_SIMULATION_BLOCKED",
+      "reason_codes": [
+        "LOCAL_ARTIFACT_NOT_BROKER_BACKED"
+      ],
+      "scenario_id": "local_paper_artifact_without_broker_ids",
+      "terminal_state": "ENTRY_FILL_NOT_BROKER_BACKED"
+    },
+    {
+      "classification": "LIFECYCLE_SIMULATION_BLOCKED",
+      "reason_codes": [
+        "CONTRACT_CLOSE_ONLY_ENTRY_BLOCKED",
+        "EXIT_ALLOWED_ON_ORIGINAL_FILLED_CONTRACT"
+      ],
+      "scenario_id": "contract_close_only_new_entry_blocked_exit_allowed",
+      "terminal_state": "ENTRY_BLOCKED_EXIT_ALLOWED_CLOSE_ONLY_CONTRACT"
+    }
+  ]
+}
