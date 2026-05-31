@@ -351,9 +351,24 @@ def _write_fresh_broker_truth(tmp_path: Path) -> None:
     )
 
 
+def _write_contract_status(tmp_path: Path, *, entry_status: str = "CONTRACT_ENTRY_ELIGIBLE") -> None:
+    _write_json(
+        tmp_path / "outputs/track_b_execution_core/contract_resolver/latest_contract_resolver_status.json",
+        {
+            "generated_at": "2999-01-01T00:00:00+00:00",
+            "classification": "CONTRACT_ALLOWED" if entry_status == "CONTRACT_ENTRY_ELIGIBLE" else "CONTRACT_BLOCKED",
+            "entry_status": entry_status,
+            "exit_status": "EXIT_ORIGINAL_CONTRACT_ALLOWED",
+            "symbol": "MGC",
+            "selected_contract": {"localSymbol": "MGCM6", "conId": 712565978, "expiry": "202606"},
+        },
+    )
+
+
 @pytest.fixture(autouse=True)
 def _default_phase1_reconciliation(tmp_path: Path) -> None:
     _write_phase1_reconciliation(tmp_path)
+    _write_contract_status(tmp_path)
 
 
 def _config(tmp_path: Path, **overrides: object) -> IbkrPaperStrategyBridgeConfig:

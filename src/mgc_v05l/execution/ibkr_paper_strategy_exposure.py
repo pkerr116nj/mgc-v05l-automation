@@ -11,12 +11,29 @@ from typing import Any
 from .ibkr_paper_strategy_governance import load_paper_strategy_governance_status
 from .ibkr_paper_strategy_monitor import load_paper_strategy_monitor_status
 from .track_b_phase1_submit_authority import evaluate_phase1_broker_reconciliation_submit_gate
+from ..execution_core.track_b_canonical_truth_snapshot import (
+    BROKER_LIFECYCLE_RECONCILIATION_DIRTY,
+    BROKER_TRUTH_CONFLICT_REVIEW_REQUIRED,
+    BROKER_TRUTH_STALE,
+    CONTRACT_AMBIGUOUS,
+    CONTRACT_DETAILS_STALE,
+    CONTRACT_ENTRY_BLOCKED,
+    CONTRACT_ENTRY_CLOSE_ONLY,
+    CONTRACT_ENTRY_ELIGIBLE,
+    EXACT_LIFECYCLE_IDENTITY_MISMATCH,
+    LIFECYCLE_TRUTH_STALE,
+    TrackBTruthSnapshot,
+    TrackBTruthSnapshotConfig,
+    build_track_b_truth_snapshot,
+)
+from ..execution_core.track_b_central_trade_registry import TradeCurrentState, TradeRegistryRecord
 from ..execution_core.track_b_submit_intent_ownership import (
     DEFAULT_TRACK_B_SUBMIT_INTENT_OWNERSHIP_JSONL,
     load_unresolved_submit_intent_ownership_records,
 )
 from ..execution_core.track_b_live_trade_registry import (
     DEFAULT_TRACK_B_LIVE_TRADE_REGISTRY_EVENTS_JSONL,
+    load_live_trade_registry_records,
     validate_registry_managed_exit_identity,
 )
 
@@ -38,7 +55,26 @@ _DEFAULT_MAX_TOTAL_MGC_CONTRACTS = 20.0
 _DEFAULT_MAX_TOTAL_GC_EQUIVALENT = 2.0
 _DEFAULT_MAX_PER_STRATEGY_MGC_CONTRACTS = 1.0
 _DEFAULT_BROKER_TRUTH_MAX_AGE_SECONDS = 300.0
+_ENTRY_EXPOSURE_AUTHORITY_REGISTRY_TRUTH = "REGISTRY_TRUTH"
 _MANAGED_EXIT_AUTHORITY_REGISTRY_TRUTH = "REGISTRY_TRUTH"
+_ENTRY_ACTIVE_REGISTRY_STATES = {
+    TradeCurrentState.PENDING_ENTRY,
+    TradeCurrentState.WORKING_ENTRY,
+    TradeCurrentState.OPEN_MANAGED,
+    TradeCurrentState.EXIT_DUE,
+    TradeCurrentState.WORKING_EXIT,
+}
+_ENTRY_CURRENT_HOT_PATH_CONFLICTS = {
+    BROKER_TRUTH_STALE,
+    BROKER_TRUTH_CONFLICT_REVIEW_REQUIRED,
+    LIFECYCLE_TRUTH_STALE,
+    BROKER_LIFECYCLE_RECONCILIATION_DIRTY,
+    EXACT_LIFECYCLE_IDENTITY_MISMATCH,
+    CONTRACT_DETAILS_STALE,
+    CONTRACT_AMBIGUOUS,
+    CONTRACT_ENTRY_BLOCKED,
+    CONTRACT_ENTRY_CLOSE_ONLY,
+}
 
 
 @dataclass(frozen=True)
@@ -658,6 +694,11 @@ def _evaluate_strategy_gate(
         detail = "Current Phase-1 broker reconciliation is required before exposure can authorize submit."
     submit_allowed = not block_reasons
     stacking_observed = False
+    entry_legacy_result: dict[str, Any] | None = None
+    entry_registry_truth_result: dict[str, Any] | None = None
+    entry_parity_status: str | None = None
+    entry_authoritative_source: str | None = None
+    entry_diagnostic_reason_codes: list[str] = []
     managed_exit_legacy_result: dict[str, Any] | None = None
     managed_exit_registry_truth_result: dict[str, Any] | None = None
     managed_exit_parity_status: str | None = None
@@ -725,6 +766,57 @@ def _evaluate_strategy_gate(
                 if semantics.direction == "LONG"
                 else "The strategy may open short exposure from flat."
             )
+        entry_legacy_result = {
+            "allowed": bool(submit_allowed and not block_reasons),
+            "reason_codes": list(dict.fromkeys(block_reasons)),
+            "classification": classification,
+            "authority_source": "LEGACY_EXPOSURE_ATTRIBUTION",
+            "diagnostic_only": True,
+        }
+        entry_authoritative_source = _ENTRY_EXPOSURE_AUTHORITY_REGISTRY_TRUTH
+        entry_registry_truth_result = _entry_registry_truth_result(
+            config=config,
+            aggregate_state=aggregate_state,
+            requested_strategy=requested_strategy,
+            requested_bridge_strategy=requested_bridge_strategy,
+            executable_symbol=config.executable_symbol,
+            quantity=quantity,
+            allow_stacking=bool(config.allow_stacking),
+        )
+        registry_allowed = bool(entry_registry_truth_result.get("allowed"))
+        legacy_allowed = bool(entry_legacy_result.get("allowed"))
+        if registry_allowed and legacy_allowed:
+            entry_parity_status = "MATCH_ALLOWED"
+            block_reasons = []
+            submit_allowed = True
+        elif registry_allowed and not legacy_allowed:
+            entry_parity_status = "REGISTRY_TRUTH_ALLOWED_LEGACY_BLOCKED_DIAGNOSTIC"
+            entry_diagnostic_reason_codes = list(entry_legacy_result.get("reason_codes") or [])
+            block_reasons = []
+            submit_allowed = True
+        elif not registry_allowed and legacy_allowed:
+            entry_parity_status = "LEGACY_ALLOWED_REGISTRY_TRUTH_BLOCKED_FAIL_CLOSED"
+            block_reasons = list(entry_registry_truth_result.get("reason_codes") or [])
+            block_reasons.append("legacy_allowed_registry_truth_blocked_fail_closed")
+            submit_allowed = False
+        else:
+            entry_parity_status = "MATCH_BLOCKED"
+            block_reasons = list(entry_registry_truth_result.get("reason_codes") or [])
+            block_reasons.extend(str(reason) for reason in list(entry_legacy_result.get("reason_codes") or []))
+            submit_allowed = False
+
+        if block_reasons:
+            classification = "PAPER_EXPOSURE_BLOCKED_REGISTRY_TRUTH_ENTRY"
+            detail = "Registry/truth current-hot-path authority blocked this new entry."
+        elif entry_parity_status == "REGISTRY_TRUTH_ALLOWED_LEGACY_BLOCKED_DIAGNOSTIC":
+            classification = "PAPER_EXPOSURE_ENTRY_ALLOWED_REGISTRY_TRUTH_LEGACY_DIAGNOSTIC"
+            detail = "Registry/truth current-hot-path authority allowed this entry; legacy exposure blockers are diagnostic only."
+        elif stacking_observed and bool(config.allow_stacking):
+            classification = "PAPER_EXPOSURE_STACK_ALLOWED"
+            detail = "Another strategy already owns executable-contract exposure, but registry/truth current-hot-path authority allows this entry."
+        else:
+            classification = "PAPER_EXPOSURE_ENTRY_ALLOWED"
+            detail = "Registry/truth current-hot-path authority allows this new entry."
     elif semantics.operation == "CLOSE":
         legacy_block_reasons = list(block_reasons)
         if exit_identity_requested and not requested_lifecycle_id and any(
@@ -826,11 +918,13 @@ def _evaluate_strategy_gate(
         "owned_strategy_position_count": len(owned_rows_for_quantity),
         "exit_identity_requested": exit_identity_requested,
         "registry_exit_validation": registry_exit_validation,
-        "legacy_result": managed_exit_legacy_result,
-        "registry_truth_result": managed_exit_registry_truth_result,
-        "parity_status": managed_exit_parity_status,
-        "authoritative_source": managed_exit_authoritative_source,
-        "diagnostic_reason_codes": list(dict.fromkeys(managed_exit_diagnostic_reason_codes)),
+        "legacy_result": entry_legacy_result if semantics.operation == "OPEN" else managed_exit_legacy_result,
+        "registry_truth_result": entry_registry_truth_result if semantics.operation == "OPEN" else managed_exit_registry_truth_result,
+        "parity_status": entry_parity_status if semantics.operation == "OPEN" else managed_exit_parity_status,
+        "authoritative_source": entry_authoritative_source if semantics.operation == "OPEN" else managed_exit_authoritative_source,
+        "diagnostic_reason_codes": list(
+            dict.fromkeys(entry_diagnostic_reason_codes if semantics.operation == "OPEN" else managed_exit_diagnostic_reason_codes)
+        ),
         "submit_allowed": submit_allowed and not block_reasons,
         "block_reasons": list(dict.fromkeys(block_reasons)),
         "detail": detail,
@@ -862,6 +956,145 @@ def _evaluate_strategy_gate(
             }
         ),
     }
+
+
+def _entry_registry_truth_result(
+    *,
+    config: IbkrPaperStrategyExposureConfig,
+    aggregate_state: dict[str, Any],
+    requested_strategy: str,
+    requested_bridge_strategy: str,
+    executable_symbol: str,
+    quantity: float,
+    allow_stacking: bool,
+) -> dict[str, Any]:
+    reason_codes: list[str] = []
+    trade_id = _entry_birth_trade_id(config=config, requested_strategy=requested_strategy, executable_symbol=executable_symbol)
+    if not trade_id:
+        reason_codes.append("missing_or_invalid_trade_id_birth_path")
+    if quantity <= 0.0:
+        reason_codes.append("entry_quantity_must_be_positive")
+
+    truth = _safe_build_entry_truth_snapshot(config.repo_root)
+    records = load_live_trade_registry_records(
+        repo_root=config.repo_root,
+        jsonl_path=config.live_trade_registry_events_path,
+    )
+    active_records = tuple(record for record in records if record.current_state in _ENTRY_ACTIVE_REGISTRY_STATES)
+    matching_records = _matching_entry_registry_records(
+        records=active_records,
+        requested_strategy=requested_strategy,
+        requested_bridge_strategy=requested_bridge_strategy,
+        executable_symbol=executable_symbol,
+    )
+    if matching_records:
+        reason_codes.append("duplicate_same_lane_entry")
+    elif active_records and not allow_stacking:
+        reason_codes.append("strategy_stacking_disabled")
+    broker_net_position = abs(float(aggregate_state.get("broker_net_position") or 0.0))
+    if broker_net_position > 0.0 and not active_records:
+        reason_codes.append("current_broker_position_without_registry_trade")
+
+    source_paths: dict[str, str] = {}
+    contract_entry_status = None
+    if truth is not None:
+        source_paths = dict(truth.source_paths)
+        contract_entry_status = truth.contract_status.entry_status
+        reason_codes.extend(_entry_truth_contract_block_reasons(truth))
+
+    phase1_gate = dict(aggregate_state.get("phase1_broker_reconciliation_gate_full") or {})
+    broker_open_order_count = _int_value(
+        phase1_gate.get("track_b_broker_open_order_count")
+        or phase1_gate.get("broker_open_order_count")
+        or phase1_gate.get("open_order_count")
+    )
+    broker_lifecycle_reconciled = bool(phase1_gate.get("ready"))
+    if not broker_lifecycle_reconciled:
+        reason_codes.append("broker_lifecycle_reconciliation_not_clean")
+    if broker_open_order_count > 0:
+        reason_codes.append("current_open_order_conflict")
+    aggregate_discrepancy = str(aggregate_state.get("discrepancy_classification") or "CLEAN")
+    if aggregate_discrepancy == "BROKER_TRUTH_STALE_OR_MISSING":
+        reason_codes.append("broker_truth_stale")
+    elif aggregate_discrepancy in {"ORPHAN_BROKER_POSITION", "LEDGER_ONLY_POSITION", "LEDGER_BROKER_MISMATCH"}:
+        reason_codes.append("broker_lifecycle_reconciliation_not_clean")
+
+    allowed = not reason_codes
+    return {
+        "allowed": allowed,
+        "reason_codes": list(dict.fromkeys(reason_codes)),
+        "authority_source": _ENTRY_EXPOSURE_AUTHORITY_REGISTRY_TRUTH,
+        "trade_id": trade_id or None,
+        "active_registry_trade_count": len(active_records),
+        "matching_registry_trade_ids": [record.trade_id for record in matching_records],
+        "contract_entry_status": contract_entry_status,
+        "broker_open_order_count": broker_open_order_count,
+        "broker_lifecycle_reconciled": broker_lifecycle_reconciled,
+        "source_paths": source_paths,
+    }
+
+
+def _safe_build_entry_truth_snapshot(repo_root: Path) -> TrackBTruthSnapshot | None:
+    try:
+        return build_track_b_truth_snapshot(
+            config=TrackBTruthSnapshotConfig(
+                repo_root=repo_root,
+                reconciliation_path=Path(
+                    "outputs/reports/track_b_paper_broker_reconciliation/latest_track_b_paper_broker_reconciliation.json"
+                ),
+            )
+        )
+    except Exception:
+        return None
+
+
+def _entry_birth_trade_id(
+    *,
+    config: IbkrPaperStrategyExposureConfig,
+    requested_strategy: str,
+    executable_symbol: str,
+) -> str:
+    explicit = str(config.trade_id or "").strip()
+    if explicit:
+        return explicit
+    strategy = str(requested_strategy or config.strategy_id or "").strip()
+    symbol = str(executable_symbol or config.executable_symbol or "").strip().upper()
+    if strategy and symbol:
+        return f"trade_birth_path_{strategy}_{symbol}".replace("/", "_")
+    return ""
+
+
+def _entry_truth_contract_block_reasons(truth: TrackBTruthSnapshot) -> list[str]:
+    reasons: list[str] = []
+    if truth.contract_status.entry_status not in {CONTRACT_ENTRY_ELIGIBLE, "ENTRY_ALLOWED", "CONTRACT_ENTRY_ALLOWED"}:
+        reasons.append(str(truth.contract_status.entry_status or CONTRACT_ENTRY_BLOCKED))
+    for conflict in truth.conflicts:
+        if conflict.classification in {CONTRACT_DETAILS_STALE, CONTRACT_AMBIGUOUS, CONTRACT_ENTRY_BLOCKED, CONTRACT_ENTRY_CLOSE_ONLY}:
+            reasons.append(conflict.classification)
+            reasons.extend(str(code) for code in conflict.reason_codes)
+    return list(dict.fromkeys(reasons))
+
+
+def _matching_entry_registry_records(
+    *,
+    records: tuple[TradeRegistryRecord, ...],
+    requested_strategy: str,
+    requested_bridge_strategy: str,
+    executable_symbol: str,
+) -> tuple[TradeRegistryRecord, ...]:
+    identifiers = {str(requested_strategy or "").strip(), str(requested_bridge_strategy or "").strip()}
+    identifiers.discard("")
+    symbol = str(executable_symbol or "").strip().upper()
+    matches: list[TradeRegistryRecord] = []
+    for record in records:
+        owner = record.ownership_identity
+        if owner is None:
+            continue
+        owner_ids = {str(owner.lane_id or "").strip(), str(owner.thesis_strategy_id or "").strip()}
+        owner_ids.discard("")
+        if identifiers and owner_ids.intersection(identifiers) and str(owner.symbol or "").strip().upper() == symbol:
+            matches.append(record)
+    return tuple(matches)
 
 
 def _filter_owned_rows_for_requested_exit_identity(

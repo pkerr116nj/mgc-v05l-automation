@@ -114,6 +114,7 @@ def _write_phase1_reconciliation(
 @pytest.fixture(autouse=True)
 def _default_phase1_reconciliation(tmp_path: Path) -> None:
     _write_phase1_reconciliation(tmp_path)
+    _write_contract_status(tmp_path)
 
 
 def _write_broker_positions_snapshot(
@@ -160,6 +161,24 @@ def _write_broker_open_orders_snapshot(
                 "open_order_count": len(open_orders or []),
                 "has_open_orders": bool(open_orders),
                 "open_orders": open_orders or [],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+
+def _write_contract_status(tmp_path: Path, *, entry_status: str = "CONTRACT_ENTRY_ELIGIBLE") -> None:
+    path = tmp_path / "outputs" / "track_b_execution_core" / "contract_resolver" / "latest_contract_resolver_status.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        json.dumps(
+            {
+                "generated_at": "2999-01-01T00:00:00+00:00",
+                "classification": "CONTRACT_ALLOWED" if entry_status == "CONTRACT_ENTRY_ELIGIBLE" else "CONTRACT_BLOCKED",
+                "entry_status": entry_status,
+                "exit_status": "EXIT_ORIGINAL_CONTRACT_ALLOWED",
+                "symbol": "MGC",
+                "selected_contract": {"localSymbol": "MGCM6", "conId": 712565978, "expiry": "202606"},
             }
         ),
         encoding="utf-8",
@@ -368,8 +387,9 @@ def test_allows_second_strategy_buy_when_another_strategy_is_already_long(tmp_pa
         allow_stacking=True,
     )
 
-    assert gate["classification"] == "PAPER_EXPOSURE_STACK_ALLOWED"
-    assert gate["submit_allowed"] is True
+    assert gate["classification"] == "PAPER_EXPOSURE_BLOCKED_REGISTRY_TRUTH_ENTRY"
+    assert gate["submit_allowed"] is False
+    assert "current_broker_position_without_registry_trade" in gate["block_reasons"]
     assert gate["max_total_mgc_contracts"] == 20.0
 
 
@@ -398,10 +418,14 @@ def test_blocks_new_entry_by_unresolved_same_account_contract_submit_intent(tmp_
         local_symbol="MGCM6",
     )
 
-    assert gate["classification"] == "PAPER_EXPOSURE_BLOCKED_UNRESOLVED_SUBMIT_INTENT"
-    assert gate["submit_allowed"] is False
-    assert gate["blocker_classification"] == "TRACK_B_UNRESOLVED_SUBMIT_INTENT_BLOCKS_NEW_ENTRY"
-    assert "TRACK_B_UNRESOLVED_SUBMIT_INTENT_BLOCKS_NEW_ENTRY" in gate["block_reasons"]
+    assert gate["classification"] == "PAPER_EXPOSURE_ENTRY_ALLOWED_REGISTRY_TRUTH_LEGACY_DIAGNOSTIC"
+    assert gate["submit_allowed"] is True
+    assert gate["authoritative_source"] == "REGISTRY_TRUTH"
+    assert gate["registry_truth_result"]["allowed"] is True
+    assert gate["legacy_result"]["allowed"] is False
+    assert gate["parity_status"] == "REGISTRY_TRUTH_ALLOWED_LEGACY_BLOCKED_DIAGNOSTIC"
+    assert gate["blocker_classification"] is None
+    assert "TRACK_B_UNRESOLVED_SUBMIT_INTENT_BLOCKS_NEW_ENTRY" in gate["diagnostic_reason_codes"]
     blocker = gate["unresolved_submit_intent_ownership_blocker"]
     assert blocker["matching_records"][0]["match_reason"] == "same_account_contract"
 
@@ -429,8 +453,9 @@ def test_blocks_new_entry_by_unresolved_same_lane_submit_intent(tmp_path: Path) 
         executable_symbol="MGC",
     )
 
-    assert gate["classification"] == "PAPER_EXPOSURE_BLOCKED_UNRESOLVED_SUBMIT_INTENT"
-    assert gate["submit_allowed"] is False
+    assert gate["classification"] == "PAPER_EXPOSURE_ENTRY_ALLOWED_REGISTRY_TRUTH_LEGACY_DIAGNOSTIC"
+    assert gate["submit_allowed"] is True
+    assert "TRACK_B_UNRESOLVED_SUBMIT_INTENT_BLOCKS_NEW_ENTRY" in gate["diagnostic_reason_codes"]
     assert gate["unresolved_submit_intent_ownership_blocker"]["matching_records"][0]["match_reason"] == "same_lane_or_strategy"
 
 
@@ -460,7 +485,7 @@ def test_terminal_submit_intent_does_not_block_new_entry(tmp_path: Path) -> None
         local_symbol="MGCM6",
     )
 
-    assert gate["classification"] == "PAPER_EXPOSURE_ATTRIBUTION_READY"
+    assert gate["classification"] == "PAPER_EXPOSURE_ENTRY_ALLOWED"
     assert gate["submit_allowed"] is True
     assert gate["unresolved_submit_intent_ownership_blocker"] is None
 
@@ -489,8 +514,9 @@ def test_review_required_submit_intent_blocks_same_instrument_new_entry(tmp_path
         executable_symbol="MGC",
     )
 
-    assert gate["classification"] == "PAPER_EXPOSURE_BLOCKED_UNRESOLVED_SUBMIT_INTENT"
-    assert gate["submit_allowed"] is False
+    assert gate["classification"] == "PAPER_EXPOSURE_ENTRY_ALLOWED_REGISTRY_TRUTH_LEGACY_DIAGNOSTIC"
+    assert gate["submit_allowed"] is True
+    assert "TRACK_B_UNRESOLVED_SUBMIT_INTENT_BLOCKS_NEW_ENTRY" in gate["diagnostic_reason_codes"]
     assert gate["unresolved_submit_intent_ownership_blocker"]["matching_records"][0]["state"] == "REVIEW_REQUIRED"
 
 
@@ -545,7 +571,7 @@ def test_phase1_reconciliation_blocked_overrides_legacy_monitor_submit_allowed(t
         allow_stacking=True,
     )
 
-    assert gate["classification"] == "PAPER_EXPOSURE_BLOCKED_PHASE1_RECONCILIATION"
+    assert gate["classification"] == "PAPER_EXPOSURE_BLOCKED_REGISTRY_TRUTH_ENTRY"
     assert gate["submit_allowed"] is False
     assert gate["blocker_classification"] == "PHASE1_BROKER_RECONCILIATION_NOT_CLEAR"
     assert gate["review_required"] is True
@@ -565,8 +591,8 @@ def test_blocks_duplicate_buy_from_same_strategy_while_already_long(tmp_path: Pa
         quantity=1.0,
     )
 
-    assert gate["classification"] == "PAPER_EXPOSURE_BLOCKED_STRATEGY_LIMIT"
-    assert "duplicate_strategy_entry_while_position_open" in gate["block_reasons"]
+    assert gate["classification"] == "PAPER_EXPOSURE_BLOCKED_REGISTRY_TRUTH_ENTRY"
+    assert "current_broker_position_without_registry_trade" in gate["block_reasons"]
 
 
 def test_allows_owning_strategy_exit(tmp_path: Path) -> None:
@@ -675,12 +701,93 @@ def test_flat_mnq_sell_to_open_short_entry_is_allowed(tmp_path: Path) -> None:
         quantity=1.0,
     )
 
-    assert gate["classification"] == "PAPER_EXPOSURE_ATTRIBUTION_READY"
+    assert gate["classification"] == "PAPER_EXPOSURE_ENTRY_ALLOWED"
     assert gate["submit_allowed"] is True
     assert gate["intent_operation"] == "OPEN"
     assert gate["intent_direction"] == "SHORT"
     assert gate["broker_action"] == "SELL"
     assert gate["block_reasons"] == []
+
+
+def test_registry_truth_blocks_entry_when_contract_is_not_entry_allowed(tmp_path: Path) -> None:
+    _write_monitor(tmp_path, broker_quantity=0.0)
+    _write_ledger(tmp_path, [])
+    _write_governance(tmp_path, [_governance_row("mnq_us_active_participation_long", "PAPER_ACTIVE_EVIDENCE_MNQ_US_PARTICIPATION_LONG_V1")])
+    _write_broker_positions_snapshot(tmp_path)
+    _write_broker_open_orders_snapshot(tmp_path)
+    _write_contract_status(tmp_path, entry_status="CONTRACT_ENTRY_CLOSE_ONLY")
+
+    gate = evaluate_paper_strategy_exposure_gate(
+        repo_root=tmp_path,
+        strategy_id="mnq_us_active_participation_long",
+        bridge_strategy_id="PAPER_ACTIVE_EVIDENCE_MNQ_US_PARTICIPATION_LONG_V1",
+        executable_symbol="MNQ",
+        action="BUY",
+        intent_type="BUY_TO_OPEN",
+        quantity=1.0,
+        trade_id="trade_entry_contract_close_only",
+    )
+
+    assert gate["classification"] == "PAPER_EXPOSURE_BLOCKED_REGISTRY_TRUTH_ENTRY"
+    assert gate["submit_allowed"] is False
+    assert gate["authoritative_source"] == "REGISTRY_TRUTH"
+    assert "CONTRACT_ENTRY_CLOSE_ONLY" in gate["block_reasons"]
+
+
+def test_registry_truth_blocks_duplicate_same_lane_entry(tmp_path: Path) -> None:
+    _write_monitor(tmp_path, broker_quantity=0.0)
+    _write_ledger(tmp_path, [])
+    _write_governance(tmp_path, [_governance_row("mnq_us_active_participation_long", "PAPER_ACTIVE_EVIDENCE_MNQ_US_PARTICIPATION_LONG_V1")])
+    _write_broker_positions_snapshot(tmp_path)
+    _write_broker_open_orders_snapshot(tmp_path)
+    _write_registry_open_managed_trade(
+        tmp_path,
+        trade_id="trade_existing_mnq_long",
+        lifecycle_id="lifecycle_existing_mnq_long",
+        lane_id="mnq_us_active_participation_long",
+        thesis_strategy_id="PAPER_ACTIVE_EVIDENCE_MNQ_US_PARTICIPATION_LONG_V1",
+        symbol="MNQ",
+        con_id=770561201,
+        local_symbol="MNQM6",
+    )
+
+    gate = evaluate_paper_strategy_exposure_gate(
+        repo_root=tmp_path,
+        strategy_id="mnq_us_active_participation_long",
+        bridge_strategy_id="PAPER_ACTIVE_EVIDENCE_MNQ_US_PARTICIPATION_LONG_V1",
+        executable_symbol="MNQ",
+        action="BUY",
+        intent_type="BUY_TO_OPEN",
+        quantity=1.0,
+        trade_id="trade_new_mnq_long",
+    )
+
+    assert gate["classification"] == "PAPER_EXPOSURE_BLOCKED_REGISTRY_TRUTH_ENTRY"
+    assert gate["submit_allowed"] is False
+    assert "duplicate_same_lane_entry" in gate["block_reasons"]
+    assert gate["registry_truth_result"]["matching_registry_trade_ids"] == ["trade_existing_mnq_long"]
+
+
+def test_registry_truth_blocks_entry_without_birth_identity(tmp_path: Path) -> None:
+    _write_monitor(tmp_path, broker_quantity=0.0)
+    _write_ledger(tmp_path, [])
+    _write_governance(tmp_path, [_governance_row("", "")])
+    _write_broker_positions_snapshot(tmp_path)
+    _write_broker_open_orders_snapshot(tmp_path)
+
+    gate = evaluate_paper_strategy_exposure_gate(
+        repo_root=tmp_path,
+        strategy_id="",
+        bridge_strategy_id="",
+        executable_symbol="",
+        action="BUY",
+        intent_type="BUY_TO_OPEN",
+        quantity=1.0,
+    )
+
+    assert gate["classification"] == "PAPER_EXPOSURE_BLOCKED_REGISTRY_TRUTH_ENTRY"
+    assert gate["submit_allowed"] is False
+    assert "missing_or_invalid_trade_id_birth_path" in gate["block_reasons"]
 
 
 def test_blocks_opposite_direction_open_against_existing_phase1_position(tmp_path: Path) -> None:
@@ -744,8 +851,8 @@ def test_blocks_opposite_direction_open_against_existing_phase1_position(tmp_pat
     )
 
     assert gate["submit_allowed"] is False
-    assert gate["classification"] == "PAPER_EXPOSURE_BLOCKED_STRATEGY_LIMIT"
-    assert "opposite_direction_strategy_exposure" in gate["block_reasons"]
+    assert gate["classification"] == "PAPER_EXPOSURE_BLOCKED_REGISTRY_TRUTH_ENTRY"
+    assert "current_broker_position_without_registry_trade" in gate["block_reasons"]
     assert gate["aggregate_strategy_position_sum"] == 1.0
     assert gate["aggregate_broker_position"] == 1.0
 
@@ -798,8 +905,8 @@ def test_mgc_plus_one_blocks_session_coverage_review_long_without_pyramiding(tmp
     )
 
     assert gate["submit_allowed"] is False
-    assert gate["classification"] == "PAPER_EXPOSURE_BLOCKED_STRATEGY_LIMIT"
-    assert "strategy_stacking_disabled" in gate["block_reasons"]
+    assert gate["classification"] == "PAPER_EXPOSURE_BLOCKED_REGISTRY_TRUTH_ENTRY"
+    assert "current_broker_position_without_registry_trade" in gate["block_reasons"]
     assert gate["aggregate_strategy_position_sum"] == 1.0
     assert gate["aggregate_broker_position"] == 1.0
 
@@ -814,8 +921,8 @@ def test_mgc_plus_one_blocks_session_coverage_review_long_without_pyramiding(tmp
         allow_stacking=True,
     )
 
-    assert explicit_pyramid_gate["submit_allowed"] is True
-    assert "strategy_stacking_disabled" not in explicit_pyramid_gate["block_reasons"]
+    assert explicit_pyramid_gate["submit_allowed"] is False
+    assert "current_broker_position_without_registry_trade" in explicit_pyramid_gate["block_reasons"]
 
 
 def test_mgc_plus_one_blocks_session_coverage_review_short_without_reversal_policy(tmp_path: Path) -> None:
@@ -866,8 +973,8 @@ def test_mgc_plus_one_blocks_session_coverage_review_short_without_reversal_poli
     )
 
     assert gate["submit_allowed"] is False
-    assert gate["classification"] == "PAPER_EXPOSURE_BLOCKED_STRATEGY_LIMIT"
-    assert "opposite_direction_strategy_exposure" in gate["block_reasons"]
+    assert gate["classification"] == "PAPER_EXPOSURE_BLOCKED_REGISTRY_TRUTH_ENTRY"
+    assert "current_broker_position_without_registry_trade" in gate["block_reasons"]
     assert gate["aggregate_strategy_position_sum"] == 1.0
     assert gate["aggregate_broker_position"] == 1.0
 
@@ -1615,11 +1722,11 @@ def test_blocks_mnq_entry_when_non_mgc_broker_truth_is_stale(tmp_path: Path) -> 
     )
 
     assert gate["submit_allowed"] is False
-    assert gate["classification"] == "BROKER_TRUTH_STALE_OR_MISSING"
+    assert gate["classification"] == "PAPER_EXPOSURE_BLOCKED_REGISTRY_TRUTH_ENTRY"
     assert gate["blocker_classification"] == "BROKER_TRUTH_STALE_OR_MISSING"
     assert gate["review_required"] is True
     assert "broker_position_truth_stale_or_missing" in gate["block_reasons"]
-    assert gate["detail"] == "Fresh broker position and open-order truth is required before exposure ownership can be evaluated."
+    assert gate["detail"] == "Registry/truth current-hot-path authority blocked this new entry."
     broker_truth = gate["broker_truth"]
     assert broker_truth["symbol"] == "MNQ"
     assert broker_truth["positions_snapshot"]["path"].endswith("ibkr_positions_snapshot.json")
@@ -1650,7 +1757,7 @@ def test_blocks_non_mgc_entry_when_broker_truth_refresh_is_incomplete(tmp_path: 
     )
 
     assert gate["submit_allowed"] is False
-    assert gate["classification"] == "BROKER_TRUTH_STALE_OR_MISSING"
+    assert gate["classification"] == "PAPER_EXPOSURE_BLOCKED_REGISTRY_TRUTH_ENTRY"
     assert gate["broker_truth"]["positions_snapshot"]["reason"] == "positions_complete_false_or_missing"
 
 
@@ -1674,8 +1781,8 @@ def test_honors_optional_aggregate_cap_when_configured(tmp_path: Path) -> None:
         max_total_mgc_contracts=1.0,
     )
 
-    assert gate["classification"] == "PAPER_EXPOSURE_BLOCKED_AGGREGATE_LIMIT"
-    assert "configured_aggregate_contract_limit_exceeded" in gate["block_reasons"]
+    assert gate["classification"] == "PAPER_EXPOSURE_BLOCKED_REGISTRY_TRUTH_ENTRY"
+    assert "current_broker_position_without_registry_trade" in gate["block_reasons"]
 
 
 def test_does_not_impose_aggregate_cap_of_one_by_default(tmp_path: Path) -> None:
@@ -1698,7 +1805,8 @@ def test_does_not_impose_aggregate_cap_of_one_by_default(tmp_path: Path) -> None
         allow_stacking=True,
     )
 
-    assert gate["submit_allowed"] is True
+    assert gate["submit_allowed"] is False
+    assert "current_broker_position_without_registry_trade" in gate["block_reasons"]
     assert gate["max_total_mgc_contracts"] == 20.0
 
 
@@ -1721,5 +1829,5 @@ def test_blocks_when_default_twenty_mgc_cap_would_be_exceeded(tmp_path: Path) ->
         quantity=1.0,
     )
 
-    assert gate["classification"] == "PAPER_EXPOSURE_BLOCKED_AGGREGATE_LIMIT"
-    assert "configured_aggregate_contract_limit_exceeded" in gate["block_reasons"]
+    assert gate["classification"] == "PAPER_EXPOSURE_BLOCKED_REGISTRY_TRUTH_ENTRY"
+    assert "current_broker_position_without_registry_trade" in gate["block_reasons"]

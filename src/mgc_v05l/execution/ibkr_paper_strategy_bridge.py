@@ -9,7 +9,7 @@ import os
 import threading
 import time
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
@@ -552,6 +552,13 @@ def run_ibkr_paper_strategy_bridge(
     governance_status = load_paper_strategy_governance_status(repo_root=config.repo_root, strategy_id=config.strategy_id)
     governance_row = dict(governance_status.get("selected_strategy") or {})
     metadata = dict(config.caller_metadata or {})
+    if _is_entry_intent(config=config, intent=intent) and not str(metadata.get("trade_id") or "").strip():
+        metadata["trade_id"] = trade_id_from_live_identity(
+            order_intent_id=intent.intent_id or intent.default_intent_id,
+            account_id=config.account_id,
+            lane_id=str(metadata.get("lane_id") or config.strategy_id or "").strip(),
+        )
+        config = replace(config, caller_metadata=metadata)
     managed_close_owner_identity = _managed_close_owner_identity_for_bridge(config=config, metadata=metadata)
     exposure_status = evaluate_paper_strategy_exposure_gate(
         repo_root=config.repo_root,
