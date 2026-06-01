@@ -116,6 +116,12 @@ class TrackBManagedExitPolicy(str, Enum):
     DIAGNOSTIC_TIME_EXIT_IMMEDIATE = "DIAGNOSTIC_TIME_EXIT_IMMEDIATE"
     PAPER_DIAGNOSTIC_TIME_BOXED_3X5M_EXIT_V1 = "PAPER_DIAGNOSTIC_TIME_BOXED_3X5M_EXIT_V1"
     FORCED_SESSION_SEGMENT_LOCAL_EXIT_V1 = "FORCED_SESSION_SEGMENT_LOCAL_EXIT_V1"
+    CHANGEOVER_0300_LONG_TIMEBOX_6H_EXIT_V1 = "CHANGEOVER_0300_LONG_TIMEBOX_6H_EXIT_V1"
+    CHANGEOVER_0700_LONG_TIMEBOX_4H_EXIT_V1 = "CHANGEOVER_0700_LONG_TIMEBOX_4H_EXIT_V1"
+    US_SESSION_CONTINUATION_TIMEBOX_2H_EXIT_V1 = "US_SESSION_CONTINUATION_TIMEBOX_2H_EXIT_V1"
+    US_ACTIVE_EVIDENCE_TIMEBOX_60M_EXIT_V1 = "US_ACTIVE_EVIDENCE_TIMEBOX_60M_EXIT_V1"
+    GLOBEX_ACTIVE_EVIDENCE_TIMEBOX_60M_EXIT_V1 = "GLOBEX_ACTIVE_EVIDENCE_TIMEBOX_60M_EXIT_V1"
+    GLOBEX_REOPEN_FIRST_CANDLE_60M_TIMEBOX_SHADOW_EXIT_V1 = "GLOBEX_REOPEN_FIRST_CANDLE_60M_TIMEBOX_SHADOW_EXIT_V1"
 
 
 @dataclass(frozen=True)
@@ -583,12 +589,13 @@ def write_open_managed_lifecycle_report_from_filled_bridge_result(
         decision_bar_timestamp=str(filled_bridge_result.get("decision_bar_timestamp") or "") or None,
         latest_decision_bar_source="DATABENTO_LIVE_ARTIFACT",
         managed_exit_policy_id=policy_id,
-        managed_exit_policy_max_completed_5m_bars=3,
+        managed_exit_policy_max_completed_5m_bars=_required_completed_5m_bars_for_policy(policy_id),
         completed_5m_bars_since_entry=0,
         completed_5m_bars_since_signal=0,
         fill_timestamp_source="BROKER_ENTRY_FILL",
         submit_enabled=True,
         output_root=Path(output_root),
+        repo_root=Path(str(filled_bridge_result.get("repo_root") or REPO_ROOT)),
         live_money_readiness=False,
         broker_reconciled=False,
     )
@@ -734,7 +741,10 @@ def _open_state(
         "broker_truth_state": str(config.broker_truth_state or "FRESH"),
         "suppressed_due_to_stale_data": False,
         "managed_exit_policy_id": _normalized_exit_policy(config.managed_exit_policy_id),
-        "managed_exit_policy_max_completed_5m_bars": int(config.managed_exit_policy_max_completed_5m_bars),
+        "managed_exit_policy_max_completed_5m_bars": _required_completed_5m_bars_for_policy(
+            _normalized_exit_policy(config.managed_exit_policy_id),
+            configured_bars=int(config.managed_exit_policy_max_completed_5m_bars),
+        ),
         "expected_exit_condition": _expected_exit_condition(config),
         "broker_reconciled": bool(config.broker_reconciled),
         "review_required": False,
@@ -783,7 +793,10 @@ def _build_report(
         "expected_account_id": config.expected_account_id,
         "mode": config.mode,
         "managed_exit_policy_id": _normalized_exit_policy(config.managed_exit_policy_id),
-        "managed_exit_policy_max_completed_5m_bars": int(config.managed_exit_policy_max_completed_5m_bars),
+        "managed_exit_policy_max_completed_5m_bars": _required_completed_5m_bars_for_policy(
+            _normalized_exit_policy(config.managed_exit_policy_id),
+            configured_bars=int(config.managed_exit_policy_max_completed_5m_bars),
+        ),
         "open_position_age_completed_5m_bars": None
         if open_state is None
         else open_state.get("open_position_age_completed_5m_bars"),
@@ -1039,7 +1052,10 @@ def _default_exit_policy(
         }
     if _is_timeboxed_managed_close_policy(policy_id):
         elapsed = int(config.completed_5m_bars_since_entry or 0)
-        required = int(config.managed_exit_policy_max_completed_5m_bars)
+        required = _required_completed_5m_bars_for_policy(
+            policy_id,
+            configured_bars=int(config.managed_exit_policy_max_completed_5m_bars),
+        )
         if elapsed < required:
             return None
         return {
@@ -1082,6 +1098,12 @@ def _discretionary_exits_suppressed(config: TrackBStrategyManagedPaperLifecycleC
         TrackBManagedExitPolicy.DIAGNOSTIC_TIME_EXIT_IMMEDIATE.value,
         TrackBManagedExitPolicy.PAPER_DIAGNOSTIC_TIME_BOXED_3X5M_EXIT_V1.value,
         TrackBManagedExitPolicy.FORCED_SESSION_SEGMENT_LOCAL_EXIT_V1.value,
+        TrackBManagedExitPolicy.CHANGEOVER_0300_LONG_TIMEBOX_6H_EXIT_V1.value,
+        TrackBManagedExitPolicy.CHANGEOVER_0700_LONG_TIMEBOX_4H_EXIT_V1.value,
+        TrackBManagedExitPolicy.US_SESSION_CONTINUATION_TIMEBOX_2H_EXIT_V1.value,
+        TrackBManagedExitPolicy.US_ACTIVE_EVIDENCE_TIMEBOX_60M_EXIT_V1.value,
+        TrackBManagedExitPolicy.GLOBEX_ACTIVE_EVIDENCE_TIMEBOX_60M_EXIT_V1.value,
+        TrackBManagedExitPolicy.GLOBEX_REOPEN_FIRST_CANDLE_60M_TIMEBOX_SHADOW_EXIT_V1.value,
     }
 
 
@@ -2280,17 +2302,44 @@ def _normalized_exit_policy(value: str | None) -> str:
     return str(value or TrackBManagedExitPolicy.EXIT_NOT_AVAILABLE.value).strip().upper()
 
 
+def _required_completed_5m_bars_for_policy(policy_id: str, *, configured_bars: int | None = None) -> int:
+    normalized = _normalized_exit_policy(policy_id)
+    policy_defaults = {
+        TrackBManagedExitPolicy.PAPER_DIAGNOSTIC_TIME_BOXED_3X5M_EXIT_V1.value: 3,
+        TrackBManagedExitPolicy.FORCED_SESSION_SEGMENT_LOCAL_EXIT_V1.value: 3,
+        TrackBManagedExitPolicy.CHANGEOVER_0300_LONG_TIMEBOX_6H_EXIT_V1.value: 72,
+        TrackBManagedExitPolicy.CHANGEOVER_0700_LONG_TIMEBOX_4H_EXIT_V1.value: 48,
+        TrackBManagedExitPolicy.US_SESSION_CONTINUATION_TIMEBOX_2H_EXIT_V1.value: 24,
+        TrackBManagedExitPolicy.US_ACTIVE_EVIDENCE_TIMEBOX_60M_EXIT_V1.value: 12,
+        TrackBManagedExitPolicy.GLOBEX_ACTIVE_EVIDENCE_TIMEBOX_60M_EXIT_V1.value: 12,
+        TrackBManagedExitPolicy.GLOBEX_REOPEN_FIRST_CANDLE_60M_TIMEBOX_SHADOW_EXIT_V1.value: 12,
+    }
+    if normalized in policy_defaults:
+        return policy_defaults[normalized]
+    return int(configured_bars if configured_bars is not None else 3)
+
+
 def _is_timeboxed_managed_close_policy(policy_id: str) -> bool:
     return policy_id in {
         TrackBManagedExitPolicy.PAPER_DIAGNOSTIC_TIME_BOXED_3X5M_EXIT_V1.value,
         TrackBManagedExitPolicy.FORCED_SESSION_SEGMENT_LOCAL_EXIT_V1.value,
+        TrackBManagedExitPolicy.CHANGEOVER_0300_LONG_TIMEBOX_6H_EXIT_V1.value,
+        TrackBManagedExitPolicy.CHANGEOVER_0700_LONG_TIMEBOX_4H_EXIT_V1.value,
+        TrackBManagedExitPolicy.US_SESSION_CONTINUATION_TIMEBOX_2H_EXIT_V1.value,
+        TrackBManagedExitPolicy.US_ACTIVE_EVIDENCE_TIMEBOX_60M_EXIT_V1.value,
+        TrackBManagedExitPolicy.GLOBEX_ACTIVE_EVIDENCE_TIMEBOX_60M_EXIT_V1.value,
+        TrackBManagedExitPolicy.GLOBEX_REOPEN_FIRST_CANDLE_60M_TIMEBOX_SHADOW_EXIT_V1.value,
     }
 
 
 def _expected_exit_condition(config: TrackBStrategyManagedPaperLifecycleConfig) -> str:
     policy_id = _normalized_exit_policy(config.managed_exit_policy_id)
     if _is_timeboxed_managed_close_policy(policy_id):
-        return f"TIME_BOXED_EXIT_AFTER_{int(config.managed_exit_policy_max_completed_5m_bars)}_COMPLETED_5M_BARS"
+        required = _required_completed_5m_bars_for_policy(
+            policy_id,
+            configured_bars=int(config.managed_exit_policy_max_completed_5m_bars),
+        )
+        return f"TIME_BOXED_EXIT_AFTER_{required}_COMPLETED_5M_BARS"
     if policy_id == TrackBManagedExitPolicy.DIAGNOSTIC_TIME_EXIT_IMMEDIATE.value:
         return "DIAGNOSTIC_IMMEDIATE_CLOSE"
     if policy_id == TrackBManagedExitPolicy.MANAGED_HOLD_REQUIRES_EXTERNAL_EXIT_SIGNAL.value:

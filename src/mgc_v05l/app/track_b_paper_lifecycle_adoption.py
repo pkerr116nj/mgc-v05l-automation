@@ -42,10 +42,19 @@ from mgc_v05l.execution_core.track_b_runtime_supervisor_authority import (
     DEFAULT_RUNTIME_SUPERVISOR_AUTHORITY_ARTIFACT,
 )
 from mgc_v05l.execution_core.track_b_shared_truth_refresh_cli import DEFAULT_RECONCILIATION_ARTIFACT
+from mgc_v05l.execution_core.track_b_strategy_managed_paper_lifecycle import (
+    DEFAULT_TRACK_B_STRATEGY_MANAGED_PAPER_LIFECYCLE_OUTPUT_ROOT,
+)
 from mgc_v05l.execution_core.track_b_submit_intent_ownership import (
     DEFAULT_TRACK_B_SUBMIT_INTENT_OWNERSHIP_JSONL,
     append_submit_intent_ownership_record,
-    load_unresolved_submit_intent_ownership_records,
+    load_submit_intent_ownership_records,
+)
+from mgc_v05l.execution_core.track_b_central_trade_registry import TradeEventType
+from mgc_v05l.execution_core.track_b_live_trade_registry import (
+    append_live_trade_registry_event,
+    load_live_trade_registry_record,
+    make_live_trade_registry_event,
 )
 
 PAPER_ACCOUNT_ID = "DUM882026"
@@ -133,7 +142,9 @@ def run_track_b_paper_lifecycle_adoption(
     broker_truth = _read_json(broker_truth_path)
     bridge_report = _read_json(bridge_path)
     intents = _read_jsonl(order_intents_path)
-    submit_intent_ownership_records = load_unresolved_submit_intent_ownership_records(submit_intent_ownership_path)
+    submit_intent_ownership_records = _latest_submit_intent_ownership_records_for_adoption(
+        load_submit_intent_ownership_records(submit_intent_ownership_path)
+    )
     adapter = lane_submit_bridge_adapter(lane_id=config.lane_id)
 
     broker_position = _select_broker_position(
@@ -179,6 +190,7 @@ def run_track_b_paper_lifecycle_adoption(
     bridge_evidence = (
         _extract_submit_intent_ownership_evidence(
             submit_intent_ownership=submit_intent_ownership,
+            bridge_report=bridge_report,
             broker_position=broker_position,
             broker_average_price=broker_average_price,
             account_id=config.account_id,
@@ -369,6 +381,13 @@ def run_track_b_paper_lifecycle_adoption(
     latest_audit_path = _write_latest_audit(repo_root, config.output_root, report)
 
     if valid and config.apply:
+        registry_fill_event = _append_adoption_entry_fill_registry_event(
+            config=config,
+            fill_payload=fill_payload,
+            trade_payload=trade_payload,
+            audit_path=audit_path,
+            now=actual_now,
+        )
         _append_jsonl_if_missing(
             fills_path,
             fill_payload,
@@ -386,6 +405,7 @@ def run_track_b_paper_lifecycle_adoption(
             filled_bridge_result_json=audit_path,
             output_root=repo_root / config.ledger_root,
             position_management_manifest_root=repo_root / DEFAULT_TRACK_B_POSITION_MANAGEMENT_MANIFEST_ROOT,
+            managed_lifecycle_output_root=repo_root / DEFAULT_TRACK_B_STRATEGY_MANAGED_PAPER_LIFECYCLE_OUTPUT_ROOT,
             now=actual_now,
         )
         ownership_resolution = _resolve_submit_intent_ownership_after_adoption(
@@ -401,6 +421,7 @@ def run_track_b_paper_lifecycle_adoption(
         post_report["post_adoption"] = {
             "fill_written": not fill_already_present,
             "trade_written": not trade_already_present,
+            "registry_entry_fill_event": registry_fill_event,
             "compact_ledger_trade_record_written": ledger_result.trade_record_written,
             "compact_ledger_live_position_status": ledger_result.live_position_status,
             "submit_intent_ownership_resolved": ownership_resolution is not None,
@@ -577,9 +598,15 @@ def _intent_from_submit_intent_ownership(
         "broker_order_status": "FILLED",
         "reason_code": _nested(submit_intent_ownership, "extra", "reason") or "LEAK_TEST_ENTRY",
         "managed_exit_policy_id": submit_intent_ownership.get("managed_exit_policy_id")
-        or _nested(submit_intent_ownership, "extra", "managed_exit_policy_id"),
-        "decision_bar_timestamp": submit_intent_ownership.get("created_at"),
-        "signal_timestamp": submit_intent_ownership.get("created_at"),
+        or _nested(submit_intent_ownership, "extra", "managed_exit_policy_id")
+        or _nested(submit_intent_ownership, "extra", "caller_metadata", "managed_exit_policy_id"),
+        "decision_bar_timestamp": _nested(submit_intent_ownership, "extra", "caller_metadata", "decision_bar_timestamp")
+        or _nested(submit_intent_ownership, "extra", "caller_metadata", "runtime_candle_timestamp")
+        or submit_intent_ownership.get("created_at"),
+        "signal_timestamp": _nested(submit_intent_ownership, "extra", "caller_metadata", "signal_timestamp")
+        or submit_intent_ownership.get("created_at"),
+        "created_at": submit_intent_ownership.get("created_at"),
+        "trade_id": _single_trade_id_from_sources(submit_intent_ownership),
         "ownership_intent_id": ownership_intent_id,
         "reserved_lifecycle_id": submit_intent_ownership.get("lifecycle_id"),
         "source": "TRACK_B_SUBMIT_INTENT_OWNERSHIP",
@@ -706,6 +733,7 @@ def _select_submit_intent_ownership(
         "BROKER_RESULT_UNKNOWN_REFRESH_REQUIRED",
         "BROKER_ORDER_WORKING",
         "BROKER_POSITION_OBSERVED_ADOPTION_REQUIRED",
+        "LIFECYCLE_OPEN_PERSISTED",
     }
     matches = [row for row in matches if str(row.get("state") or "").upper() in adoptable_states]
     if len(matches) > 1:
@@ -720,9 +748,25 @@ def _select_submit_intent_ownership(
     return None
 
 
+def _latest_submit_intent_ownership_records_for_adoption(
+    records: Sequence[Mapping[str, Any]],
+) -> list[dict[str, Any]]:
+    latest_by_id: dict[str, dict[str, Any]] = {}
+    anonymous: list[dict[str, Any]] = []
+    for record in records:
+        row = dict(record)
+        ownership_id = str(row.get("ownership_intent_id") or "").strip()
+        if ownership_id:
+            latest_by_id[ownership_id] = row
+        else:
+            anonymous.append(row)
+    return [*latest_by_id.values(), *anonymous]
+
+
 def _extract_submit_intent_ownership_evidence(
     *,
     submit_intent_ownership: Mapping[str, Any],
+    bridge_report: Mapping[str, Any],
     broker_position: Mapping[str, Any] | None,
     broker_average_price: Decimal | None,
     account_id: str,
@@ -766,9 +810,30 @@ def _extract_submit_intent_ownership_evidence(
     if expected_client_id is not None and _decimal(client_id) != Decimal(expected_client_id):
         local_failures.append("Submit-intent ownership client_id does not match expected client_id.")
     perm_id = submit_intent_ownership.get("perm_id")
+    bridge_lifecycle = _nested(bridge_report, "delegated_result", "report", "submit_cancel_lifecycle")
+    bridge_lifecycle = bridge_lifecycle if isinstance(bridge_lifecycle, Mapping) else {}
+    bridge_latest_status = (
+        bridge_lifecycle.get("latest_order_status")
+        if isinstance(bridge_lifecycle.get("latest_order_status"), Mapping)
+        else {}
+    )
+    bridge_execution = _select_exact_bridge_execution_for_submit_ownership(
+        bridge_report=bridge_report,
+        account_id=account_id,
+        symbol=symbol,
+        quantity=quantity,
+        expected_exec_id=expected_exec_id,
+        failures=local_failures,
+    )
     if expected_perm_id is not None and _decimal(perm_id) != Decimal(expected_perm_id):
         local_failures.append("Submit-intent ownership perm_id does not match expected perm_id.")
-    execution_id = submit_intent_ownership.get("exec_id")
+    original_trade_id = _single_trade_id_from_sources(submit_intent_ownership, bridge_report)
+    if original_trade_id == "__AMBIGUOUS__":
+        local_failures.append("Multiple distinct registry trade_id values match the broker-backed fill.")
+        original_trade_id = ""
+    execution_id = submit_intent_ownership.get("exec_id") or (
+        bridge_execution.get("execution_id") if bridge_execution is not None else None
+    )
     if expected_exec_id is not None and str(execution_id or "") != str(expected_exec_id):
         local_failures.append("Submit-intent ownership exec_id does not match expected exec_id.")
     expected_fill_decimal = _decimal(expected_fill_price)
@@ -778,7 +843,16 @@ def _extract_submit_intent_ownership_evidence(
         failures.extend(local_failures)
         return None
 
-    fill_price = expected_fill_decimal or broker_average_price
+    execution_price = _decimal((bridge_execution or {}).get("price"))
+    fill_price = expected_fill_decimal or execution_price or broker_average_price
+    bridge_fill_timestamp = (bridge_execution or {}).get("executed_at")
+    managed_exit_policy_id = (
+        submit_intent_ownership.get("managed_exit_policy_id")
+        or _nested(submit_intent_ownership, "extra", "managed_exit_policy_id")
+        or _nested(submit_intent_ownership, "extra", "caller_metadata", "managed_exit_policy_id")
+        or _nested(bridge_report, "intent", "managed_exit_policy_id")
+        or _nested(bridge_report, "caller_metadata", "managed_exit_policy_id")
+    )
     missing_fields = [
         field
         for field, value in (
@@ -786,6 +860,7 @@ def _extract_submit_intent_ownership_evidence(
             ("client_id", client_id),
             ("perm_id", perm_id),
             ("execution_id", execution_id),
+            ("managed_exit_policy_id", managed_exit_policy_id),
         )
         if value in {None, ""}
     ]
@@ -802,16 +877,27 @@ def _extract_submit_intent_ownership_evidence(
         "client_id": client_id,
         "execution_id": execution_id,
         "runtime_generation_id": _find_first_by_key(submit_intent_ownership, "runtime_generation_id"),
+        "trade_id": original_trade_id,
+        "submit_intent_created_at": submit_intent_ownership.get("created_at"),
+        "strategy_entry_bar_ts": _nested(submit_intent_ownership, "extra", "caller_metadata", "runtime_candle_timestamp")
+        or _nested(submit_intent_ownership, "extra", "caller_metadata", "decision_bar_timestamp")
+        or _nested(bridge_report, "entry_execution_pricing", "runtime_candle_timestamp"),
         "fill_price": _decimal_text(fill_price) or "",
-        "fill_price_source": "BROKER_POSITION_AVERAGE_PRICE",
-        "fill_timestamp": (broker_position or {}).get("updated_at") or submit_intent_ownership.get("updated_at"),
-        "order_status_updated_at": submit_intent_ownership.get("updated_at"),
-        "latest_order_status": {},
-        "selected_execution": {},
-        "entry_execution_intent": _nested(submit_intent_ownership, "extra", "entry_execution_intent"),
-        "entry_price_source": submit_intent_ownership.get("execution_price_source"),
+        "fill_price_source": "BRIDGE_EXECUTION_EVIDENCE" if execution_price is not None else "BROKER_POSITION_AVERAGE_PRICE",
+        "fill_timestamp": bridge_fill_timestamp or (broker_position or {}).get("updated_at") or submit_intent_ownership.get("updated_at"),
+        "order_status_updated_at": bridge_latest_status.get("updated_at") or submit_intent_ownership.get("updated_at"),
+        "latest_order_status": dict(bridge_latest_status),
+        "selected_execution": dict(bridge_execution or {}),
+        "entry_execution_intent": _nested(submit_intent_ownership, "extra", "entry_execution_intent")
+        or _nested(submit_intent_ownership, "extra", "caller_metadata", "entry_execution_intent")
+        or _nested(bridge_report, "entry_execution_pricing", "entry_execution_intent")
+        or _nested(bridge_report, "caller_metadata", "entry_execution_intent"),
+        "entry_price_source": submit_intent_ownership.get("execution_price_source")
+        or _nested(bridge_report, "entry_execution_pricing", "execution_price_source"),
+        "managed_exit_policy_id": managed_exit_policy_id,
         "leak_test": str(submit_intent_ownership.get("caller_path") or "") == "track_b_paper_leak_test_apply",
-        "authorization_digest": submit_intent_ownership.get("authorization_digest"),
+        "authorization_digest": submit_intent_ownership.get("authorization_digest")
+        or _nested(bridge_report, "caller_metadata", "authorization_digest"),
         "ownership_intent_id": submit_intent_ownership.get("ownership_intent_id"),
         "reserved_lifecycle_id": submit_intent_ownership.get("lifecycle_id"),
         "submit_intent_state": submit_intent_ownership.get("state"),
@@ -824,6 +910,40 @@ def _extract_submit_intent_ownership_evidence(
         "bridge_classification": _nested(submit_intent_ownership, "extra", "bridge_classification"),
         "source_artifact_paths": submit_intent_ownership.get("source_artifact_paths") or [],
     }
+
+
+def _select_exact_bridge_execution_for_submit_ownership(
+    *,
+    bridge_report: Mapping[str, Any],
+    account_id: str,
+    symbol: str,
+    quantity: Decimal,
+    expected_exec_id: str | None,
+    failures: list[str],
+) -> dict[str, Any] | None:
+    lifecycle = _nested(bridge_report, "delegated_result", "report", "submit_cancel_lifecycle")
+    if not isinstance(lifecycle, Mapping):
+        return None
+    executions = _bridge_execution_rows(lifecycle)
+    matching: dict[str, dict[str, Any]] = {}
+    for execution in executions:
+        if str(execution.get("account_id") or "") != account_id:
+            continue
+        if str(execution.get("symbol") or "").upper() != symbol.upper():
+            continue
+        if _decimal(execution.get("quantity")) != quantity:
+            continue
+        execution_id = str(execution.get("execution_id") or "")
+        if expected_exec_id is not None and execution_id != str(expected_exec_id):
+            continue
+        matching[execution_id or json.dumps(execution, sort_keys=True)] = dict(execution)
+    if len(matching) == 1:
+        return next(iter(matching.values()))
+    if expected_exec_id is not None or matching:
+        failures.append(
+            f"Expected exactly one unique matching bridge execution for submit-intent ownership, found {len(matching)}."
+        )
+    return None
 
 
 def _validate_route_identity(
@@ -980,6 +1100,10 @@ def _extract_bridge_evidence(
         {},
     )
     con_id = contract.get("con_id") or contract.get("qualified_contract_identifier")
+    original_trade_id = _single_trade_id_from_sources(bridge_report, intent or {})
+    if original_trade_id == "__AMBIGUOUS__":
+        failures.append("Multiple distinct registry trade_id values match the broker-backed bridge fill.")
+        original_trade_id = ""
     return {
         "account_id": account_id,
         "symbol": symbol,
@@ -992,6 +1116,10 @@ def _extract_bridge_evidence(
         "perm_id": latest_status.get("perm_id"),
         "client_id": latest_status.get("client_id") or _nested(bridge_report, "environment", "client_id"),
         "execution_id": execution.get("execution_id"),
+        "trade_id": original_trade_id,
+        "strategy_entry_bar_ts": _nested(bridge_report, "entry_execution_pricing", "runtime_candle_timestamp")
+        or (intent or {}).get("decision_bar_timestamp"),
+        "submit_intent_created_at": (intent or {}).get("created_at") or _nested(bridge_report, "intent", "timestamp"),
         "fill_price": str(execution.get("price") or latest_status.get("avg_fill_price") or ""),
         "fill_timestamp": execution.get("executed_at") or latest_status.get("updated_at"),
         "order_status_updated_at": latest_status.get("updated_at"),
@@ -1236,12 +1364,31 @@ def _build_fill_payload(
     intent_type = str(intent.get("intent_type") or "BUY_TO_OPEN").upper()
     action = "BUY" if intent_type == "BUY_TO_OPEN" else "SELL"
     fill_price = str(bridge_evidence.get("fill_price") or _decimal_text(broker_average_price) or "")
-    fill_timestamp = str(bridge_evidence.get("fill_timestamp") or bridge_evidence.get("order_status_updated_at") or now.isoformat())
+    broker_execution_timestamp = str(
+        bridge_evidence.get("fill_timestamp") or bridge_evidence.get("order_status_updated_at") or now.isoformat()
+    )
     strategy_id = str(intent.get("standalone_strategy_id") or intent.get("strategy_id") or config.lane_id)
+    original_trade_id = str(bridge_evidence.get("trade_id") or intent.get("trade_id") or "").strip()
+    strategy_entry_bar_ts = str(
+        bridge_evidence.get("strategy_entry_bar_ts")
+        or intent.get("decision_bar_timestamp")
+        or intent.get("signal_timestamp")
+        or ""
+    ).strip()
+    submit_intent_created_at = str(
+        bridge_evidence.get("submit_intent_created_at") or intent.get("created_at") or ""
+    ).strip()
+    managed_entry_time = _managed_entry_time(
+        strategy_entry_bar_ts=strategy_entry_bar_ts,
+        submit_intent_created_at=submit_intent_created_at,
+        broker_execution_timestamp=broker_execution_timestamp,
+        fallback=now.isoformat(),
+    )
     management_metadata = resolve_management_metadata(
         source={
             **intent,
             **bridge_evidence,
+            "trade_id": original_trade_id,
             "lane_id": config.lane_id,
             "strategy_id": strategy_id,
             "order_intent_id": order_intent_id,
@@ -1267,6 +1414,8 @@ def _build_fill_payload(
         "strategy_id": strategy_id,
         "standalone_strategy_id": strategy_id,
         "runtime_generation_id": bridge_evidence.get("runtime_generation_id") or intent.get("runtime_generation_id"),
+        "trade_id": original_trade_id,
+        "repo_root": str(config.repo_root),
         "order_intent_id": order_intent_id,
         "ownership_intent_id": bridge_evidence.get("ownership_intent_id"),
         "reserved_lifecycle_id": bridge_evidence.get("reserved_lifecycle_id"),
@@ -1283,7 +1432,13 @@ def _build_fill_payload(
         "multiplier": str(broker_position.get("multiplier") or bridge_evidence.get("multiplier") or ""),
         "quantity": _decimal_text(config.quantity),
         "fill_price": fill_price,
-        "fill_timestamp": fill_timestamp,
+        "fill_timestamp": managed_entry_time,
+        "managed_entry_time": managed_entry_time,
+        "strategy_entry_bar_ts": strategy_entry_bar_ts or None,
+        "submit_intent_created_at": submit_intent_created_at or None,
+        "broker_execution_timestamp": broker_execution_timestamp,
+        "evidence_retrieved_at": now.isoformat(),
+        "lifecycle_adopted_at": now.isoformat(),
         "broker_order_id": str(bridge_evidence.get("broker_order_id") or intent.get("broker_order_id") or ""),
         "perm_id": bridge_evidence.get("perm_id"),
         "client_id": bridge_evidence.get("client_id"),
@@ -1336,7 +1491,7 @@ def _build_trade_payload(fill_payload: Mapping[str, Any]) -> dict[str, Any]:
     return {
         "source": "TRACK_B_PAPER_LIFECYCLE_ADOPTION",
         "classification": "PAPER_TRADE_LIFECYCLE_ADOPTION_RECONSTRUCTED_OPEN",
-        "trade_id": f"{strategy_id}:{lifecycle_id}",
+        "trade_id": str(fill_payload.get("trade_id") or "").strip() or f"{strategy_id}:{lifecycle_id}",
         "lifecycle_id": lifecycle_id,
         "ownership_intent_id": fill_payload.get("ownership_intent_id"),
         "reserved_lifecycle_id": fill_payload.get("reserved_lifecycle_id"),
@@ -1358,7 +1513,11 @@ def _build_trade_payload(fill_payload: Mapping[str, Any]) -> dict[str, Any]:
         "con_id": fill_payload.get("con_id"),
         "side": side,
         "quantity": fill_payload.get("quantity"),
-        "entry_timestamp": fill_payload.get("fill_timestamp"),
+        "entry_timestamp": fill_payload.get("managed_entry_time") or fill_payload.get("fill_timestamp"),
+        "broker_execution_timestamp": fill_payload.get("broker_execution_timestamp"),
+        "evidence_retrieved_at": fill_payload.get("evidence_retrieved_at"),
+        "lifecycle_adopted_at": fill_payload.get("lifecycle_adopted_at"),
+        "strategy_entry_bar_ts": fill_payload.get("strategy_entry_bar_ts"),
         "entry_price": fill_payload.get("fill_price"),
         "entry_fill_price": fill_payload.get("fill_price"),
         "exit_timestamp": None,
@@ -1434,6 +1593,8 @@ def _build_filled_bridge_result(fill_payload: Mapping[str, Any]) -> dict[str, An
         "strategy_id": fill_payload.get("strategy_id"),
         "lane_id": fill_payload.get("lane_id"),
         "runtime_generation_id": fill_payload.get("runtime_generation_id"),
+        "trade_id": fill_payload.get("trade_id"),
+        "repo_root": fill_payload.get("repo_root"),
         "instrument": fill_payload.get("instrument"),
         "symbol": fill_payload.get("symbol"),
         "action": fill_payload.get("action"),
@@ -1462,7 +1623,13 @@ def _build_filled_bridge_result(fill_payload: Mapping[str, Any]) -> dict[str, An
             "qualified_contract_identifier": fill_payload.get("con_id"),
         },
         "fill_price": fill_payload.get("fill_price"),
-        "fill_timestamp": fill_payload.get("fill_timestamp"),
+        "fill_timestamp": fill_payload.get("managed_entry_time") or fill_payload.get("fill_timestamp"),
+        "managed_entry_time": fill_payload.get("managed_entry_time"),
+        "strategy_entry_bar_ts": fill_payload.get("strategy_entry_bar_ts"),
+        "submit_intent_created_at": fill_payload.get("submit_intent_created_at"),
+        "broker_execution_timestamp": fill_payload.get("broker_execution_timestamp"),
+        "evidence_retrieved_at": fill_payload.get("evidence_retrieved_at"),
+        "lifecycle_adopted_at": fill_payload.get("lifecycle_adopted_at"),
         "bridge_classification": fill_payload.get("bridge_classification"),
         "leak_test": bool(fill_payload.get("leak_test")),
         "entry_source": fill_payload.get("entry_source"),
@@ -1480,6 +1647,104 @@ def _build_filled_bridge_result(fill_payload: Mapping[str, Any]) -> dict[str, An
         "review_required": False,
         "broker_cost_basis_adjustment": fill_payload.get("broker_cost_basis_adjustment"),
     }
+
+
+def _append_adoption_entry_fill_registry_event(
+    *,
+    config: LifecycleAdoptionConfig,
+    fill_payload: Mapping[str, Any],
+    trade_payload: Mapping[str, Any],
+    audit_path: Path,
+    now: datetime,
+) -> dict[str, Any] | None:
+    trade_id = str(trade_payload.get("trade_id") or fill_payload.get("trade_id") or "").strip()
+    exec_id = str(fill_payload.get("execution_id") or fill_payload.get("exec_id") or "").strip()
+    perm_id = str(fill_payload.get("perm_id") or "").strip()
+    if not trade_id or not exec_id or not perm_id:
+        return None
+    existing = load_live_trade_registry_record(repo_root=config.repo_root, trade_id=trade_id)
+    if existing is not None:
+        for event in existing.event_chain:
+            if (
+                event.event_type == TradeEventType.ENTRY_FILL_BROKER_BACKED
+                and str(event.exec_id or "") == exec_id
+                and str(event.perm_id or "") == perm_id
+            ):
+                return {
+                    "persisted": False,
+                    "classification": "ENTRY_FILL_BROKER_BACKED_ALREADY_PRESENT",
+                    "trade_id": trade_id,
+                    "exec_id": exec_id,
+                    "perm_id": perm_id,
+                }
+    event = make_live_trade_registry_event(
+        event_type=TradeEventType.ENTRY_FILL_BROKER_BACKED,
+        trade_id=trade_id,
+        lifecycle_id=str(trade_payload.get("lifecycle_id") or fill_payload.get("lifecycle_id") or ""),
+        lane_id=str(fill_payload.get("lane_id") or config.lane_id),
+        thesis_strategy_id=str(fill_payload.get("strategy_id") or fill_payload.get("lane_id") or config.lane_id),
+        account_id=str(fill_payload.get("account_id") or config.account_id),
+        symbol=str(fill_payload.get("symbol") or config.symbol),
+        con_id=fill_payload.get("con_id"),
+        local_symbol=str(fill_payload.get("local_symbol") or config.local_symbol),
+        expiry=str(fill_payload.get("expiry") or config.expiry),
+        side=str(trade_payload.get("side") or ("LONG" if str(fill_payload.get("intent_type") or "").upper() == "BUY_TO_OPEN" else "SHORT")),
+        action=str(fill_payload.get("action") or ""),
+        qty=fill_payload.get("quantity"),
+        source_artifact_path=str(audit_path),
+        generated_at=now,
+        order_id=fill_payload.get("broker_order_id"),
+        client_id=fill_payload.get("client_id"),
+        perm_id=perm_id,
+        exec_id=exec_id,
+        price=fill_payload.get("fill_price"),
+        reason_codes=("BROKER_BACKED_ENTRY_FILL_ADOPTED",),
+        metadata={
+            "broker_execution_timestamp": fill_payload.get("broker_execution_timestamp"),
+            "managed_entry_time": fill_payload.get("managed_entry_time"),
+            "evidence_retrieved_at": fill_payload.get("evidence_retrieved_at"),
+            "lifecycle_adopted_at": fill_payload.get("lifecycle_adopted_at"),
+            "strategy_entry_bar_ts": fill_payload.get("strategy_entry_bar_ts"),
+            "submit_intent_created_at": fill_payload.get("submit_intent_created_at"),
+            "adoption_source": "TRACK_B_PAPER_LIFECYCLE_ADOPTION",
+        },
+    )
+    return append_live_trade_registry_event(repo_root=config.repo_root, event=event)
+
+
+def _single_trade_id_from_sources(*sources: Mapping[str, Any] | None) -> str:
+    candidates: list[str] = []
+    for source in sources:
+        if not isinstance(source, Mapping):
+            continue
+        for value in (
+            source.get("trade_id"),
+            _nested(source, "extra", "trade_id"),
+            _nested(source, "extra", "caller_metadata", "trade_id"),
+            _nested(source, "caller_metadata", "trade_id"),
+            _nested(source, "intent", "trade_id"),
+        ):
+            text = str(value or "").strip()
+            if text:
+                candidates.append(text)
+    unique = tuple(dict.fromkeys(candidates))
+    if len(unique) > 1:
+        return "__AMBIGUOUS__"
+    return unique[0] if unique else ""
+
+
+def _managed_entry_time(
+    *,
+    strategy_entry_bar_ts: str,
+    submit_intent_created_at: str,
+    broker_execution_timestamp: str,
+    fallback: str,
+) -> str:
+    for value in (submit_intent_created_at, strategy_entry_bar_ts, broker_execution_timestamp, fallback):
+        text = str(value or "").strip()
+        if text:
+            return text
+    return fallback
 
 
 def _broker_average_price(position: Mapping[str, Any] | None) -> Decimal | None:
@@ -1720,6 +1985,7 @@ def _broker_backed_adoption_context(
         "BROKER_RESULT_UNKNOWN_REFRESH_REQUIRED",
         "BROKER_ORDER_WORKING",
         "BROKER_POSITION_OBSERVED_ADOPTION_REQUIRED",
+        "LIFECYCLE_OPEN_PERSISTED",
     }
 
 
@@ -1742,7 +2008,8 @@ def _managed_order_registry_allows_broker_backed_adoption(
     broker_position: Mapping[str, Any] | None,
     submit_intent_ownership: Mapping[str, Any] | None,
 ) -> bool:
-    if _shared_classification(name="managed_order_registry", payload=payload) != POSITION_WITHOUT_CLOSE_ORDER:
+    registry_classification = _shared_classification(name="managed_order_registry", payload=payload)
+    if registry_classification not in {POSITION_WITHOUT_CLOSE_ORDER, "ACTIVE_HOLD_MANAGED_TIMED_EXIT_PENDING"}:
         return False
     summary = _mapping_or_empty(payload.get("summary"))
     if (
@@ -1762,7 +2029,13 @@ def _managed_order_registry_allows_broker_backed_adoption(
         if not overlaps_target:
             if classification == "ACTIVE_HOLD_MANAGED_TIMED_EXIT_PENDING":
                 continue
+            if classification == POSITION_WITHOUT_CLOSE_ORDER and not (
+                row.get("source_order") or row.get("broker_order_id") or row.get("perm_id")
+            ):
+                continue
             return False
+        if classification == "ACTIVE_HOLD_MANAGED_TIMED_EXIT_PENDING":
+            continue
         if classification != POSITION_WITHOUT_CLOSE_ORDER:
             return False
         if row.get("source_order") or row.get("broker_order_id") or row.get("perm_id"):
