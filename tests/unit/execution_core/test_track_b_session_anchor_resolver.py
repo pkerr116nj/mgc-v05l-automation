@@ -199,6 +199,70 @@ def test_gap_backfill_can_recover_anchor_when_runtime_window_rolled(tmp_path: Pa
     assert result.reference_price == "7588.50"
 
 
+def test_intraday_backfill_recovers_anchor_after_runtime_window_aged_out(tmp_path: Path) -> None:
+    _write_runtime_bars(tmp_path, "MNQ", [_bar("2026-06-01T16:48:00+00:00", "2026-06-01T16:49:00+00:00", open_="30500")])
+    _write_intraday_backfill_bars(
+        tmp_path,
+        "MNQ",
+        [_bar("2026-06-01T13:30:00+00:00", "2026-06-01T13:31:00+00:00", open_="30420.25")],
+    )
+
+    result = resolve_session_anchor(
+        "MNQ",
+        "US_0930_OPEN",
+        datetime(2026, 6, 1, 14, 0, tzinfo=NY),
+        config=TrackBSessionAnchorConfig(repo_root=tmp_path),
+    )
+
+    assert result.status == SessionAnchorStatus.READY
+    assert result.source == "RECOVERED_PHASE1_1M"
+    assert result.reason_code == SessionAnchorReasonCode.ANCHOR_RECOVERED_FROM_PHASE1_GAP_BACKFILL
+    assert result.reference_price == "30420.25"
+
+
+def test_prior_day_intraday_backfill_rejected_for_current_session(tmp_path: Path) -> None:
+    _write_runtime_bars(tmp_path, "MNQ", [_bar("2026-06-01T16:48:00+00:00", "2026-06-01T16:49:00+00:00", open_="30500")])
+    _write_intraday_backfill_bars(
+        tmp_path,
+        "MNQ",
+        [_bar("2026-05-29T13:30:00+00:00", "2026-05-29T13:31:00+00:00", open_="30300")],
+    )
+
+    result = resolve_session_anchor(
+        "MNQ",
+        "US_0930_OPEN",
+        datetime(2026, 6, 1, 14, 0, tzinfo=NY),
+        config=TrackBSessionAnchorConfig(repo_root=tmp_path),
+    )
+
+    assert result.status == SessionAnchorStatus.NOT_READY
+    assert result.reason_code == SessionAnchorReasonCode.ANCHOR_BAR_NOT_FOUND
+
+
+def test_conflicting_live_and_backfill_anchor_is_ambiguous(tmp_path: Path) -> None:
+    _write_runtime_bars(
+        tmp_path,
+        "MNQ",
+        [_bar("2026-06-01T13:30:00+00:00", "2026-06-01T13:31:00+00:00", open_="30420.25")],
+    )
+    _write_intraday_backfill_bars(
+        tmp_path,
+        "MNQ",
+        [_bar("2026-06-01T13:30:00+00:00", "2026-06-01T13:31:00+00:00", open_="30421.00")],
+    )
+
+    result = resolve_session_anchor(
+        "MNQ",
+        "US_0930_OPEN",
+        datetime(2026, 6, 1, 14, 0, tzinfo=NY),
+        config=TrackBSessionAnchorConfig(repo_root=tmp_path),
+    )
+
+    assert result.status == SessionAnchorStatus.AMBIGUOUS
+    assert result.reason_code == SessionAnchorReasonCode.ANCHOR_AMBIGUOUS
+    assert result.not_ready_reason == "CONFLICTING_ANCHOR_SOURCES"
+
+
 def _bar(start: str, end: str, *, open_: str) -> dict[str, object]:
     return {
         "bar_start": start,
@@ -222,6 +286,13 @@ def _write_runtime_bars(tmp_path: Path, symbol: str, bars: list[dict[str, object
 def _write_gap_bars(tmp_path: Path, symbol: str, subdir: str, bars: list[dict[str, object]]) -> None:
     _write_json(
         tmp_path / f"outputs/track_b_execution_core/phase1_runtime_market_data_gap_backfill/{subdir}/{symbol}/1m/latest_runtime_candles.json",
+        {"source": "DATABENTO_HISTORICAL_SEED", "generated_at": "2026-06-01T14:01:00+00:00", "bars": bars},
+    )
+
+
+def _write_intraday_backfill_bars(tmp_path: Path, symbol: str, bars: list[dict[str, object]]) -> None:
+    _write_json(
+        tmp_path / f"outputs/track_b_execution_core/phase1_runtime_market_data_intraday_backfill/{symbol}/1m/latest_runtime_candles.json",
         {"source": "DATABENTO_HISTORICAL_SEED", "generated_at": "2026-06-01T14:01:00+00:00", "bars": bars},
     )
 

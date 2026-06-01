@@ -25,6 +25,7 @@ NEW_YORK = ZoneInfo("America/New_York")
 SCHEMA_VERSION = "track_b_session_anchor_v1"
 DEFAULT_SESSION_ANCHOR_ROOT = Path("outputs/track_b_execution_core/session_anchors")
 DEFAULT_PHASE1_RUNTIME_MARKET_DATA_ROOT = Path("outputs/track_b_execution_core/phase1_runtime_market_data")
+DEFAULT_PHASE1_INTRADAY_BACKFILL_ROOT = Path("outputs/track_b_execution_core/phase1_runtime_market_data_intraday_backfill")
 DEFAULT_PHASE1_GAP_BACKFILL_ROOT = Path("outputs/track_b_execution_core/phase1_runtime_market_data_gap_backfill")
 DEFAULT_HISTORICAL_BACKFILL_ROOT = Path("outputs/track_b_execution_core/session_anchor_historical_backfill")
 
@@ -63,6 +64,7 @@ class TrackBSessionAnchorConfig:
     repo_root: Path = REPO_ROOT
     anchor_root: Path = DEFAULT_SESSION_ANCHOR_ROOT
     runtime_market_data_root: Path = DEFAULT_PHASE1_RUNTIME_MARKET_DATA_ROOT
+    intraday_backfill_root: Path = DEFAULT_PHASE1_INTRADAY_BACKFILL_ROOT
     gap_backfill_root: Path = DEFAULT_PHASE1_GAP_BACKFILL_ROOT
     historical_backfill_root: Path = DEFAULT_HISTORICAL_BACKFILL_ROOT
     max_canonical_age_seconds: int = 7 * 24 * 60 * 60
@@ -472,6 +474,19 @@ def _select_ready_or_not_ready(
 
 def _source_paths(config: TrackBSessionAnchorConfig, request: SessionAnchorRequest) -> list[tuple[Path, str]]:
     runtime = config.resolve(config.runtime_market_data_root) / request.symbol / request.timeframe / "latest_runtime_candles.json"
+    intraday = (
+        config.resolve(config.intraday_backfill_root)
+        / request.symbol
+        / request.timeframe
+        / "latest_runtime_candles.json"
+    )
+    intraday_anchor = (
+        config.resolve(config.intraday_backfill_root)
+        / _gap_backfill_subdir(request.anchor_type)
+        / request.symbol
+        / request.timeframe
+        / "latest_runtime_candles.json"
+    )
     gap = (
         config.resolve(config.gap_backfill_root)
         / _gap_backfill_subdir(request.anchor_type)
@@ -487,7 +502,9 @@ def _source_paths(config: TrackBSessionAnchorConfig, request: SessionAnchorReque
     )
     return [
         (runtime, "LIVE_PHASE1"),
-        (gap, "PHASE1_GAP_BACKFILL"),
+        (intraday, "RECOVERED_PHASE1_1M"),
+        (intraday_anchor, "RECOVERED_PHASE1_1M"),
+        (gap, "RECOVERED_PHASE1_1M"),
         (historical, "HISTORICAL_BACKFILL"),
     ]
 
@@ -575,7 +592,7 @@ def _invalid_timestamp_result(
 def _ready_reason_for_source(source_kind: str) -> SessionAnchorReasonCode:
     if source_kind == "LIVE_PHASE1":
         return SessionAnchorReasonCode.ANCHOR_READY_FROM_RUNTIME
-    if source_kind == "PHASE1_GAP_BACKFILL":
+    if source_kind == "RECOVERED_PHASE1_1M":
         return SessionAnchorReasonCode.ANCHOR_RECOVERED_FROM_PHASE1_GAP_BACKFILL
     if source_kind == "HISTORICAL_BACKFILL":
         return SessionAnchorReasonCode.ANCHOR_RECOVERED_FROM_HISTORICAL
