@@ -214,6 +214,10 @@ def _lane_bar_funnel(*, lane: Mapping[str, Any], bar: Mapping[str, Any], now: da
         "data_freshness": _data_freshness(lane),
         "execution_context_timestamp": execution_ts.isoformat() if execution_ts else None,
         "predicate_results": predicate_results,
+        "session_anchor_status": rule_report.get("session_anchor_status"),
+        "session_anchor_reason_code": rule_report.get("session_anchor_reason_code"),
+        "session_anchor_source": rule_report.get("session_anchor_source"),
+        "session_anchor_source_artifact_path": rule_report.get("session_anchor_source_artifact_path"),
         "first_fail_reason": _first_fail_reason(
             lane=lane,
             stage_results=stage_results,
@@ -259,6 +263,8 @@ def _lane_reports(*, lanes: Sequence[Mapping[str, Any]], bar_rows: Sequence[Mapp
                 "funnel_counts": counts,
                 "first_fail_counts": first_fail_counts,
                 "latest_first_fail_reason": rows[-1].get("first_fail_reason") if rows else "NO_BARS",
+                "latest_session_anchor_status": rows[-1].get("session_anchor_status") if rows else None,
+                "latest_session_anchor_reason_code": rows[-1].get("session_anchor_reason_code") if rows else None,
                 "noise_silence_classification": _lane_noise_silence(lane=lane, rows=rows, counts=counts),
             }
         )
@@ -420,7 +426,18 @@ def _predicate_results(rule_report: Mapping[str, Any]) -> dict[str, Any]:
     explicit = rule_report.get("predicate_results")
     if isinstance(explicit, Mapping):
         return dict(explicit)
-    keys = ("vwap_price", "session_open_price", "current_close", "primary_blocker", "classification", "condition")
+    keys = (
+        "vwap_price",
+        "session_open_price",
+        "current_close",
+        "primary_blocker",
+        "classification",
+        "condition",
+        "session_anchor_status",
+        "session_anchor_reason_code",
+        "session_anchor_source",
+        "session_anchor_source_artifact_path",
+    )
     return {key: rule_report.get(key) for key in keys if key in rule_report}
 
 

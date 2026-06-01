@@ -57,6 +57,56 @@ def test_predicates_fail_with_first_fail_reason(tmp_path: Path) -> None:
     assert row["first_fail_reason"] == "close_below_vwap"
 
 
+def test_session_anchor_not_ready_is_surfaced_as_predicate_blocker(tmp_path: Path) -> None:
+    bar_ts = "2026-06-01T14:00:00+00:00"
+    lane = _lane(
+        bar_ts=bar_ts,
+        rule_report={
+            "classification": "TRACK_B_PAPER_ACTIVE_EVIDENCE_NO_SIGNAL",
+            "primary_blocker": "SESSION_ANCHOR_NOT_READY",
+            "session_anchor_status": "NOT_READY",
+            "session_anchor_reason_code": "ANCHOR_BAR_NOT_FOUND",
+            "session_anchor_source": None,
+            "session_anchor_source_artifact_path": None,
+        },
+    )
+    _write_fixture(tmp_path, [lane], {"MNQ": [bar_ts]})
+
+    report = _build(tmp_path)
+    row = report["bar_evaluations"][0]
+
+    assert row["stage_results"]["PREDICATES_EVALUATED"] is True
+    assert row["first_fail_reason"] == "SESSION_ANCHOR_NOT_READY"
+    assert row["session_anchor_status"] == "NOT_READY"
+    assert row["session_anchor_reason_code"] == "ANCHOR_BAR_NOT_FOUND"
+    assert row["predicate_results"]["session_anchor_status"] == "NOT_READY"
+    assert report["lane_reports"][0]["latest_session_anchor_status"] == "NOT_READY"
+
+
+def test_session_anchor_ready_does_not_report_legacy_missing_open_blocker(tmp_path: Path) -> None:
+    bar_ts = "2026-06-01T14:00:00+00:00"
+    lane = _lane(
+        bar_ts=bar_ts,
+        rule_report={
+            "classification": "TRACK_B_PAPER_ACTIVE_EVIDENCE_SIGNAL",
+            "primary_blocker": None,
+            "session_open_price": "21000",
+            "session_anchor_status": "READY",
+            "session_anchor_reason_code": "ANCHOR_RECOVERED_FROM_PHASE1_GAP_BACKFILL",
+            "session_anchor_source": "RECOVERED_PHASE1_1M",
+            "session_anchor_source_artifact_path": "/tmp/session-anchor.json",
+        },
+    )
+    _write_fixture(tmp_path, [lane], {"MNQ": [bar_ts]})
+
+    row = _build(tmp_path)["bar_evaluations"][0]
+
+    assert row["candidate_created"] is True
+    assert row["first_fail_reason"] != "us_session_open_bar_missing"
+    assert row["session_anchor_status"] == "READY"
+    assert row["predicate_results"]["session_anchor_reason_code"] == "ANCHOR_RECOVERED_FROM_PHASE1_GAP_BACKFILL"
+
+
 def test_predicates_pass_but_candidate_missing_is_flagged(tmp_path: Path) -> None:
     bar_ts = "2026-06-01T14:00:00+00:00"
     lane = _lane(
