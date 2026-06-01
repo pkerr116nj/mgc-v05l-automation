@@ -1843,11 +1843,12 @@ def _evaluate_managed_exit_close_authority(
     if not safe_state:
         block_reasons.append("SAFE_STATE_MISSING")
     safe_classification = str(safe_state.get("safe_state_classification") or safe_state.get("classification") or "")
-    if safe_state.get("broker_mutation_allowed") is not True:
+    safe_close_allowed = safe_state.get("managed_close_mutation_allowed") is True
+    if safe_state.get("broker_mutation_allowed") is not True and not safe_close_allowed:
         block_reasons.append("SAFE_STATE_BROKER_MUTATION_NOT_ALLOWED")
-    if safe_state.get("observe_only") is True or "HARD_HOLD" in safe_classification:
+    if (safe_state.get("observe_only") is True or "HARD_HOLD" in safe_classification) and not safe_close_allowed:
         block_reasons.append(f"SAFE_STATE_BLOCKS_CLOSE:{safe_classification or 'UNKNOWN'}")
-    if list(safe_state.get("tripped_limits") or []):
+    if list(safe_state.get("tripped_limits") or []) and not safe_close_allowed:
         block_reasons.append("SAFE_STATE_TRIPPED_LIMITS")
     if not snapshot:
         block_reasons.append("CONTROL_PLANE_SNAPSHOT_MISSING")
@@ -1894,13 +1895,16 @@ def _evaluate_managed_exit_close_authority(
         "requires_entry_lane_window": False,
         "requires_flat_position_state": False,
         "requires_entry_exposure_allow": False,
-        "requires_broker_mutation_allowed": True,
+        "requires_broker_mutation_allowed": not safe_close_allowed,
+        "requires_managed_close_mutation_allowed": True,
         "requires_control_plane_close_authority": True,
         "control_plane_snapshot_id": snapshot.get("control_plane_snapshot_id"),
         "control_plane_snapshot_age_seconds": snapshot_age_seconds,
         "control_plane_snapshot_max_age_seconds": int(config.pre_action_snapshot_max_age_seconds),
         "safe_state_classification": safe_classification,
         "safe_state_broker_mutation_allowed": safe_state.get("broker_mutation_allowed"),
+        "safe_state_managed_close_mutation_allowed": safe_state.get("managed_close_mutation_allowed"),
+        "safe_state_close_authority_reason_codes": list(safe_state.get("close_authority_reason_codes") or []),
         "registry_exit_validation": registry_validation,
         "legacy_pre_action_classification": pre_action.get("classification"),
         "legacy_pre_action_reason": pre_action.get("reason"),

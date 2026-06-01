@@ -74,7 +74,77 @@ def test_broker_position_guardian_hard_hold_blocks_submit(tmp_path: Path) -> Non
     assert payload["safe_state_classification"] == SAFE_STATE_HARD_HOLD
     assert payload["submit_allowed"] is False
     assert payload["broker_mutation_allowed"] is False
+    assert payload["entry_mutation_allowed"] is False
+    assert payload["managed_close_mutation_allowed"] is False
     assert any(row["limit_id"] == "broker_position_guardian_hard_hold" for row in payload["tripped_limits"])
+
+
+def test_broker_position_guardian_hard_hold_allows_exact_managed_close_only(tmp_path: Path) -> None:
+    _seed_base(tmp_path)
+    _write(
+        tmp_path / "outputs/track_b_execution_core/broker_position_guardian/latest_broker_position_guardian.json",
+        {
+            "generated_at": NOW.isoformat(),
+            "classification": "BROKER_POSITION_GUARDIAN_HARD_HOLD",
+            "hard_classifications": ["UNAUTHORIZED_REVERSE_EXPOSURE", "BROKER_LIFECYCLE_POSITION_MISMATCH"],
+            "managed_close_mutation_allowed": True,
+            "managed_close_authority": {
+                "classification": "BROKER_POSITION_GUARDIAN_CLOSE_ALLOWED_RISK_REDUCING",
+                "allowed": True,
+                "risk_reducing_only": True,
+                "reason_codes": [],
+                "candidates": [
+                    {
+                        "trade_id": "trade-1",
+                        "lifecycle_id": "lifecycle-1",
+                        "local_symbol": "MNQM6",
+                        "con_id": 770561201,
+                        "action": "SELL",
+                        "quantity": "1",
+                    }
+                ],
+            },
+            "operator_explanation": "Unauthorized reverse exposure detected.",
+            "live_money_eligible": False,
+            "paper_proof_invoked": False,
+        },
+    )
+
+    payload = _build(tmp_path)
+
+    assert payload["safe_state_classification"] == SAFE_STATE_HARD_HOLD
+    assert payload["broker_mutation_allowed"] is False
+    assert payload["entry_mutation_allowed"] is False
+    assert payload["submit_allowed"] is False
+    assert payload["managed_close_mutation_allowed"] is True
+    assert payload["close_authority"]["classification"] == "MANAGED_CLOSE_MUTATION_ALLOWED"
+    assert payload["close_authority"]["broad_flatten_allowed"] is False
+    assert payload["close_authority"]["global_flatten_allowed"] is False
+    assert payload["close_authority_reason_codes"] == []
+
+
+def test_unrelated_hard_hold_still_blocks_managed_close(tmp_path: Path) -> None:
+    _seed_base(tmp_path, duplicate_writer=True)
+    _write(
+        tmp_path / "outputs/track_b_execution_core/broker_position_guardian/latest_broker_position_guardian.json",
+        {
+            "generated_at": NOW.isoformat(),
+            "classification": "BROKER_POSITION_GUARDIAN_HARD_HOLD",
+            "hard_classifications": ["UNAUTHORIZED_REVERSE_EXPOSURE"],
+            "managed_close_authority": {
+                "classification": "BROKER_POSITION_GUARDIAN_CLOSE_ALLOWED_RISK_REDUCING",
+                "allowed": True,
+                "reason_codes": [],
+            },
+            "live_money_eligible": False,
+        },
+    )
+
+    payload = _build(tmp_path)
+
+    assert payload["safe_state_classification"] == SAFE_STATE_HARD_HOLD
+    assert payload["managed_close_mutation_allowed"] is False
+    assert "SAFE_STATE_LIMIT_BLOCKS_CLOSE:duplicate_runtime_writer" in payload["close_authority_reason_codes"]
 
 
 def test_too_many_submits_hits_broker_mutation_limit(tmp_path: Path) -> None:

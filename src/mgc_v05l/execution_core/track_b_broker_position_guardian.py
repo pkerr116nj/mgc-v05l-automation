@@ -20,6 +20,9 @@ from mgc_v05l.execution_core.track_b_atomic_io import write_json_atomic
 
 BROKER_POSITION_GUARDIAN_READY = "BROKER_POSITION_GUARDIAN_READY"
 BROKER_POSITION_GUARDIAN_HARD_HOLD = "BROKER_POSITION_GUARDIAN_HARD_HOLD"
+BROKER_POSITION_GUARDIAN_CLOSE_ALLOWED_RISK_REDUCING = (
+    "BROKER_POSITION_GUARDIAN_CLOSE_ALLOWED_RISK_REDUCING"
+)
 DUPLICATE_CLOSE_ORDER_BLOCKED = "DUPLICATE_CLOSE_ORDER_BLOCKED"
 UNAUTHORIZED_REVERSE_EXPOSURE = "UNAUTHORIZED_REVERSE_EXPOSURE"
 BROKER_LIFECYCLE_POSITION_MISMATCH = "BROKER_LIFECYCLE_POSITION_MISMATCH"
@@ -85,7 +88,14 @@ def build_track_b_broker_position_guardian(
 
     hard_classifications = _dedupe([str(row.get("classification") or "") for row in findings if row.get("hard_hold")])
     classification = BROKER_POSITION_GUARDIAN_HARD_HOLD if hard_classifications else BROKER_POSITION_GUARDIAN_READY
+    close_authority = _registry_verified_managed_close_authority(
+        inputs=inputs,
+        broker_positions=broker_positions,
+        open_orders=open_orders,
+        managed_orders=managed_orders,
+    )
     remediation_plan = _scoped_remediation_plan(findings=findings, broker_positions=broker_positions)
+    close_submit_allowed = classification == BROKER_POSITION_GUARDIAN_READY or close_authority.get("allowed") is True
     return {
         "schema_version": "track_b_broker_position_guardian_v1",
         "generated_at": actual_now.isoformat(),
@@ -103,6 +113,7 @@ def build_track_b_broker_position_guardian(
         "classification": classification,
         "hard_classifications": hard_classifications,
         "findings": findings,
+        "managed_close_authority": close_authority,
         "broker_positions": broker_positions,
         "open_orders": open_orders,
         "managed_order_rows": managed_orders,
@@ -110,7 +121,9 @@ def build_track_b_broker_position_guardian(
         "new_entries_allowed": classification == BROKER_POSITION_GUARDIAN_READY,
         "lane_progression_allowed": classification == BROKER_POSITION_GUARDIAN_READY,
         "guarded_roster_submit_allowed": classification == BROKER_POSITION_GUARDIAN_READY,
-        "close_submit_allowed": classification == BROKER_POSITION_GUARDIAN_READY,
+        "close_submit_allowed": close_submit_allowed,
+        "managed_close_mutation_allowed": close_authority.get("allowed") is True,
+        "managed_close_authority_reason_codes": list(close_authority.get("reason_codes") or []),
         "requires_exact_scoped_remediation_plan": classification == BROKER_POSITION_GUARDIAN_HARD_HOLD,
         "scoped_remediation_plan": remediation_plan,
         "operator_explanation": _operator_explanation(hard_classifications=hard_classifications, remediation_plan=remediation_plan),
@@ -156,6 +169,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         "new_entries_allowed": payload.get("new_entries_allowed"),
         "lane_progression_allowed": payload.get("lane_progression_allowed"),
         "guarded_roster_submit_allowed": payload.get("guarded_roster_submit_allowed"),
+        "close_submit_allowed": payload.get("close_submit_allowed"),
+        "managed_close_mutation_allowed": payload.get("managed_close_mutation_allowed"),
+        "managed_close_authority_reason_codes": payload.get("managed_close_authority_reason_codes"),
         "requires_exact_scoped_remediation_plan": payload.get("requires_exact_scoped_remediation_plan"),
         "scoped_remediation_plan": payload.get("scoped_remediation_plan"),
         "authority_path": str(authority_path),
@@ -214,6 +230,126 @@ def _duplicate_close_findings(
             "orders": [_compact_order(row) for row in duplicate_rows or open_orders],
         }
     ]
+
+
+def _registry_verified_managed_close_authority(
+    *,
+    inputs: Mapping[str, Mapping[str, Any]],
+    broker_positions: Sequence[Mapping[str, Any]],
+    open_orders: Sequence[Mapping[str, Any]],
+    managed_orders: Sequence[Mapping[str, Any]],
+) -> dict[str, Any]:
+    reason_codes: list[str] = []
+    candidates: list[dict[str, Any]] = []
+    reconciliation = inputs["reconciliation"]
+    registry = _mapping(reconciliation.get("registry_reconciliation"))
+    if registry.get("classification") != "REGISTRY_RECONCILIATION_MATCHED" or registry.get("blocking") is True:
+        reason_codes.append("REGISTRY_RECONCILIATION_NOT_MATCHED")
+    open_broker_positions = [row for row in broker_positions if _decimal(row.get("quantity")) != Decimal("0")]
+    if not open_broker_positions:
+        reason_codes.append("BROKER_POSITION_MISSING")
+    if _has_conflicting_close_order(open_orders=open_orders, managed_orders=managed_orders):
+        reason_codes.append("CONFLICTING_CLOSE_ORDER")
+    mapped_records = [_mapping(row) for row in _list(registry.get("mapped_records"))]
+    if not mapped_records:
+        reason_codes.append("REGISTRY_MAPPED_RECORD_MISSING")
+
+    for broker_position in open_broker_positions:
+        matches = [
+            record
+            for record in mapped_records
+            if _same_contract(left=broker_position, right=record)
+            and _text(record.get("account_id")) == _text(broker_position.get("account_id"))
+        ]
+        if len(matches) != 1:
+            reason_codes.append("REGISTRY_MAPPED_RECORD_AMBIGUOUS" if matches else "REGISTRY_MAPPED_RECORD_NOT_FOUND")
+            continue
+        record = matches[0]
+        record_reasons = _risk_reducing_close_record_reasons(broker_position=broker_position, record=record)
+        if record_reasons:
+            reason_codes.extend(record_reasons)
+            continue
+        broker_qty = _decimal(broker_position.get("quantity"))
+        close_action = "SELL" if broker_qty > 0 else "BUY"
+        candidates.append(
+            {
+                "classification": BROKER_POSITION_GUARDIAN_CLOSE_ALLOWED_RISK_REDUCING,
+                "trade_id": record.get("trade_id"),
+                "lifecycle_id": record.get("lifecycle_id"),
+                "account_id": broker_position.get("account_id"),
+                "symbol": broker_position.get("symbol") or record.get("symbol") or record.get("instrument_family"),
+                "local_symbol": broker_position.get("local_symbol") or record.get("local_symbol"),
+                "con_id": broker_position.get("con_id") or broker_position.get("conId") or record.get("con_id"),
+                "quantity": _decimal_display(min(abs(broker_qty), abs(_decimal(record.get("quantity"))))),
+                "action": close_action,
+                "reason": "Exact registry-backed managed close reduces current broker exposure.",
+            }
+        )
+
+    reason_codes = _dedupe(reason_codes)
+    allowed = bool(candidates) and not reason_codes
+    return {
+        "classification": (
+            BROKER_POSITION_GUARDIAN_CLOSE_ALLOWED_RISK_REDUCING
+            if allowed
+            else "BROKER_POSITION_GUARDIAN_CLOSE_BLOCKED"
+        ),
+        "allowed": allowed,
+        "risk_reducing_only": allowed,
+        "authority_source": "CENTRAL_TRADE_REGISTRY_RECONCILIATION",
+        "reason_codes": [] if allowed else reason_codes,
+        "candidates": candidates,
+        "broad_flatten_allowed": False,
+        "global_flatten_allowed": False,
+    }
+
+
+def _risk_reducing_close_record_reasons(
+    *,
+    broker_position: Mapping[str, Any],
+    record: Mapping[str, Any],
+) -> list[str]:
+    reasons: list[str] = []
+    if not _text(record.get("trade_id")):
+        reasons.append("TRADE_ID_MISSING")
+    if not _text(record.get("lifecycle_id")):
+        reasons.append("LIFECYCLE_ID_MISSING")
+    if not (_text(record.get("entry_perm_id")) and _text(record.get("entry_exec_id"))):
+        reasons.append("BROKER_BACKED_ENTRY_EVIDENCE_MISSING")
+    if _text(record.get("account_id")) != _text(broker_position.get("account_id")):
+        reasons.append("ACCOUNT_MISMATCH")
+    if not _same_contract(left=broker_position, right=record):
+        reasons.append("CONTRACT_MISMATCH")
+    broker_qty = abs(_decimal(broker_position.get("quantity")))
+    record_qty = abs(_decimal(record.get("quantity")))
+    if record_qty == Decimal("0"):
+        reasons.append("QUANTITY_MISSING")
+    elif record_qty > broker_qty:
+        reasons.append("CLOSE_QUANTITY_EXCEEDS_BROKER_POSITION")
+    broker_side = _side_from_quantity(broker_position.get("quantity"))
+    record_side = str(record.get("side") or "").upper()
+    if record_side in {"LONG", "SHORT"} and record_side != broker_side:
+        reasons.append("SIDE_MISMATCH")
+    state = str(record.get("current_state") or "").upper()
+    if state and state not in {"OPEN_MANAGED", "EXIT_DUE", "WORKING_EXIT"}:
+        reasons.append("REGISTRY_STATE_NOT_OPEN_MANAGED")
+    return reasons
+
+
+def _has_conflicting_close_order(
+    *,
+    open_orders: Sequence[Mapping[str, Any]],
+    managed_orders: Sequence[Mapping[str, Any]],
+) -> bool:
+    if open_orders:
+        return True
+    for order in managed_orders:
+        action = str(order.get("action") or "").upper()
+        if action not in {"BUY", "SELL"}:
+            continue
+        if order.get("working") is True or order.get("broker_order_id") or order.get("client_id"):
+            return True
+    return False
 
 
 def _position_mismatch_findings(

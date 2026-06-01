@@ -120,7 +120,8 @@ def build_track_b_runtime_safe_state_envelope(
     counters = _limit_counters(inputs=inputs)
     tripped_limits = _tripped_limits(config=config, inputs=inputs, counters=counters)
     classification = _classify(inputs=inputs, tripped_limits=tripped_limits)
-    posture = _posture(classification=classification, inputs=inputs)
+    posture = _posture(classification=classification, inputs=inputs, tripped_limits=tripped_limits)
+    close_authority = _managed_close_authority(inputs=inputs, tripped_limits=tripped_limits)
     control_plane = inputs["control_plane_snapshot"]
     runtime_generation_id = _runtime_generation_id(inputs)
     snapshot_id = str(control_plane.get("control_plane_snapshot_id") or "")
@@ -145,6 +146,10 @@ def build_track_b_runtime_safe_state_envelope(
         "safe_state_classification": classification,
         "classification": classification,
         "broker_mutation_allowed": posture["broker_mutation_allowed"],
+        "entry_mutation_allowed": posture["entry_mutation_allowed"],
+        "managed_close_mutation_allowed": posture["managed_close_mutation_allowed"],
+        "close_authority_reason_codes": close_authority["reason_codes"],
+        "close_authority": close_authority,
         "runtime_start_allowed": posture["runtime_start_allowed"],
         "submit_allowed": posture["submit_allowed"],
         "observe_only": posture["observe_only"],
@@ -200,6 +205,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         "runtime_generation_id": payload.get("runtime_generation_id"),
         "control_plane_snapshot_id": payload.get("control_plane_snapshot_id"),
         "broker_mutation_allowed": payload.get("broker_mutation_allowed"),
+        "entry_mutation_allowed": payload.get("entry_mutation_allowed"),
+        "managed_close_mutation_allowed": payload.get("managed_close_mutation_allowed"),
+        "close_authority_reason_codes": payload.get("close_authority_reason_codes"),
         "runtime_start_allowed": payload.get("runtime_start_allowed"),
         "submit_allowed": payload.get("submit_allowed"),
         "observe_only": payload.get("observe_only"),
@@ -428,10 +436,19 @@ def _classify(*, inputs: Mapping[str, Mapping[str, Any]], tripped_limits: Sequen
     return SAFE_STATE_NORMAL
 
 
-def _posture(*, classification: str, inputs: Mapping[str, Mapping[str, Any]]) -> dict[str, bool]:
+def _posture(
+    *,
+    classification: str,
+    inputs: Mapping[str, Mapping[str, Any]],
+    tripped_limits: Sequence[Mapping[str, Any]],
+) -> dict[str, bool]:
+    close_authority = _managed_close_authority(inputs=inputs, tripped_limits=tripped_limits)
+    managed_close_allowed = close_authority["allowed"]
     if classification in {SAFE_STATE_HARD_HOLD, SAFE_STATE_POSITION_LIMIT_HIT}:
         return {
             "broker_mutation_allowed": False,
+            "entry_mutation_allowed": False,
+            "managed_close_mutation_allowed": managed_close_allowed,
             "runtime_start_allowed": False,
             "submit_allowed": False,
             "observe_only": True,
@@ -440,6 +457,8 @@ def _posture(*, classification: str, inputs: Mapping[str, Mapping[str, Any]]) ->
     if classification == SAFE_STATE_BROKER_MUTATION_LIMIT_HIT:
         return {
             "broker_mutation_allowed": False,
+            "entry_mutation_allowed": False,
+            "managed_close_mutation_allowed": False,
             "runtime_start_allowed": False,
             "submit_allowed": False,
             "observe_only": False,
@@ -448,6 +467,8 @@ def _posture(*, classification: str, inputs: Mapping[str, Mapping[str, Any]]) ->
     if classification in {SAFE_STATE_DUPLICATE_INTENT_RISK, SAFE_STATE_LIFECYCLE_DISAGREEMENT_LIMIT_HIT}:
         return {
             "broker_mutation_allowed": False,
+            "entry_mutation_allowed": False,
+            "managed_close_mutation_allowed": False,
             "runtime_start_allowed": False,
             "submit_allowed": False,
             "observe_only": True,
@@ -456,6 +477,8 @@ def _posture(*, classification: str, inputs: Mapping[str, Mapping[str, Any]]) ->
     if classification == SAFE_STATE_RECOVERY_ONLY:
         return {
             "broker_mutation_allowed": False,
+            "entry_mutation_allowed": False,
+            "managed_close_mutation_allowed": False,
             "runtime_start_allowed": False,
             "submit_allowed": False,
             "observe_only": False,
@@ -464,6 +487,8 @@ def _posture(*, classification: str, inputs: Mapping[str, Mapping[str, Any]]) ->
     if classification == SAFE_STATE_OBSERVE_ONLY:
         return {
             "broker_mutation_allowed": False,
+            "entry_mutation_allowed": False,
+            "managed_close_mutation_allowed": False,
             "runtime_start_allowed": False,
             "submit_allowed": False,
             "observe_only": True,
@@ -471,10 +496,43 @@ def _posture(*, classification: str, inputs: Mapping[str, Mapping[str, Any]]) ->
         }
     return {
         "broker_mutation_allowed": True,
+        "entry_mutation_allowed": True,
+        "managed_close_mutation_allowed": True,
         "runtime_start_allowed": inputs["control_plane_snapshot"].get("safe_to_start_runtime") is True,
         "submit_allowed": inputs["control_plane_snapshot"].get("safe_to_start_runtime") is True,
         "observe_only": False,
         "recovery_only": False,
+    }
+
+
+def _managed_close_authority(
+    *,
+    inputs: Mapping[str, Mapping[str, Any]],
+    tripped_limits: Sequence[Mapping[str, Any]],
+) -> dict[str, Any]:
+    guardian = inputs["broker_position_guardian"]
+    guardian_close = _mapping(guardian.get("managed_close_authority"))
+    reason_codes: list[str] = []
+    if guardian_close.get("allowed") is not True:
+        reason_codes.extend(str(item) for item in guardian_close.get("reason_codes") or [])
+        reason_codes.append("BROKER_POSITION_GUARDIAN_CLOSE_NOT_ALLOWED")
+    for limit in tripped_limits:
+        limit_id = str(limit.get("limit_id") or "")
+        if limit_id == "broker_position_guardian_hard_hold":
+            continue
+        reason_codes.append(f"SAFE_STATE_LIMIT_BLOCKS_CLOSE:{limit_id or 'UNKNOWN'}")
+    reason_codes = _dedupe(reason_codes)
+    allowed = not reason_codes
+    return {
+        "classification": "MANAGED_CLOSE_MUTATION_ALLOWED" if allowed else "MANAGED_CLOSE_MUTATION_BLOCKED",
+        "allowed": allowed,
+        "authority_source": "BROKER_POSITION_GUARDIAN_REGISTRY_TRUTH",
+        "reason_codes": reason_codes,
+        "guardian_classification": guardian.get("classification"),
+        "guardian_close_classification": guardian_close.get("classification"),
+        "guardian_close_candidates": list(guardian_close.get("candidates") or []),
+        "broad_flatten_allowed": False,
+        "global_flatten_allowed": False,
     }
 
 
@@ -653,6 +711,16 @@ def _contains_true(value: Any, key: str) -> bool:
     if isinstance(value, list):
         return any(_contains_true(item, key) for item in value)
     return False
+
+
+def _dedupe(values: Sequence[str]) -> list[str]:
+    seen: set[str] = set()
+    result: list[str] = []
+    for value in values:
+        if value and value not in seen:
+            seen.add(value)
+            result.append(value)
+    return result
 
 
 def _read_json(path: Path) -> dict[str, Any]:

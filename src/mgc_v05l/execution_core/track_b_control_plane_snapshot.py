@@ -733,6 +733,10 @@ def _safe_state_envelope_fields(payload: Mapping[str, Any]) -> dict[str, Any]:
     return {
         "safe_state_classification": classification,
         "safe_state_broker_mutation_allowed": payload.get("broker_mutation_allowed") is True,
+        "safe_state_entry_mutation_allowed": payload.get("entry_mutation_allowed") is True,
+        "safe_state_managed_close_mutation_allowed": payload.get("managed_close_mutation_allowed") is True,
+        "safe_state_close_authority_reason_codes": list(payload.get("close_authority_reason_codes") or []),
+        "safe_state_close_authority": dict(_mapping(payload.get("close_authority"))),
         "safe_state_runtime_start_allowed": payload.get("runtime_start_allowed") is True,
         "safe_state_submit_allowed": payload.get("submit_allowed") is True,
         "safe_state_observe_only": payload.get("observe_only") is True,

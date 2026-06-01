@@ -4,6 +4,7 @@ from datetime import UTC, datetime
 
 from mgc_v05l.execution_core.track_b_broker_position_guardian import (
     BROKER_LIFECYCLE_POSITION_MISMATCH,
+    BROKER_POSITION_GUARDIAN_CLOSE_ALLOWED_RISK_REDUCING,
     BROKER_POSITION_GUARDIAN_HARD_HOLD,
     BROKER_POSITION_GUARDIAN_READY,
     DUPLICATE_CLOSE_ORDER_BLOCKED,
@@ -91,6 +92,102 @@ def test_exit_fill_expected_flat_with_short_broker_position_is_unauthorized_reve
     assert payload["scoped_remediation_plan"]["local_symbol"] == "MNQM6"
     assert payload["scoped_remediation_plan"]["con_id"] == 770561201
     assert payload["scoped_remediation_plan"]["broad_flatten_allowed"] is False
+
+
+def test_hard_hold_allows_exact_registry_backed_risk_reducing_close() -> None:
+    inputs = _inputs(
+        position_truth={"broker_positions": [_mnq_position("1")]},
+        reconciliation=_registry_matched_reconciliation(quantity="1"),
+    )
+
+    payload = build_track_b_broker_position_guardian(
+        config=TrackBBrokerPositionGuardianConfig(),
+        now=NOW,
+        input_overrides=inputs,
+    )
+
+    assert payload["classification"] == BROKER_POSITION_GUARDIAN_HARD_HOLD
+    assert payload["new_entries_allowed"] is False
+    assert payload["global_flatten_allowed"] is False
+    assert payload["close_submit_allowed"] is True
+    assert payload["managed_close_mutation_allowed"] is True
+    assert payload["managed_close_authority"]["classification"] == BROKER_POSITION_GUARDIAN_CLOSE_ALLOWED_RISK_REDUCING
+    assert payload["managed_close_authority"]["candidates"][0]["action"] == "SELL"
+
+
+def test_registry_backed_close_blocks_wrong_quantity() -> None:
+    payload = build_track_b_broker_position_guardian(
+        config=TrackBBrokerPositionGuardianConfig(),
+        now=NOW,
+        input_overrides=_inputs(
+            position_truth={"broker_positions": [_mnq_position("1")]},
+            reconciliation=_registry_matched_reconciliation(quantity="2"),
+        ),
+    )
+
+    assert payload["managed_close_mutation_allowed"] is False
+    assert "CLOSE_QUANTITY_EXCEEDS_BROKER_POSITION" in payload["managed_close_authority"]["reason_codes"]
+
+
+def test_registry_backed_close_blocks_contract_mismatch() -> None:
+    payload = build_track_b_broker_position_guardian(
+        config=TrackBBrokerPositionGuardianConfig(),
+        now=NOW,
+        input_overrides=_inputs(
+            position_truth={"broker_positions": [_mnq_position("1")]},
+            reconciliation=_registry_matched_reconciliation(local_symbol="MESM6", con_id=770561194),
+        ),
+    )
+
+    assert payload["managed_close_mutation_allowed"] is False
+    assert "REGISTRY_MAPPED_RECORD_NOT_FOUND" in payload["managed_close_authority"]["reason_codes"]
+
+
+def test_registry_backed_close_blocks_missing_trade_identity() -> None:
+    payload = build_track_b_broker_position_guardian(
+        config=TrackBBrokerPositionGuardianConfig(),
+        now=NOW,
+        input_overrides=_inputs(
+            position_truth={"broker_positions": [_mnq_position("1")]},
+            reconciliation=_registry_matched_reconciliation(trade_id="", lifecycle_id=""),
+        ),
+    )
+
+    assert payload["managed_close_mutation_allowed"] is False
+    assert "TRADE_ID_MISSING" in payload["managed_close_authority"]["reason_codes"]
+    assert "LIFECYCLE_ID_MISSING" in payload["managed_close_authority"]["reason_codes"]
+
+
+def test_registry_backed_close_blocks_registry_conflict() -> None:
+    reconciliation = _registry_matched_reconciliation(quantity="1")
+    reconciliation["registry_reconciliation"]["blocking"] = True
+
+    payload = build_track_b_broker_position_guardian(
+        config=TrackBBrokerPositionGuardianConfig(),
+        now=NOW,
+        input_overrides=_inputs(position_truth={"broker_positions": [_mnq_position("1")]}, reconciliation=reconciliation),
+    )
+
+    assert payload["managed_close_mutation_allowed"] is False
+    assert "REGISTRY_RECONCILIATION_NOT_MATCHED" in payload["managed_close_authority"]["reason_codes"]
+
+
+def test_registry_backed_close_blocks_conflicting_close_order() -> None:
+    payload = build_track_b_broker_position_guardian(
+        config=TrackBBrokerPositionGuardianConfig(),
+        now=NOW,
+        input_overrides=_inputs(
+            position_truth={"broker_positions": [_mnq_position("1")]},
+            open_order_truth={
+                "classification": "OPEN_CLOSE_ORDER_WORKING",
+                "open_orders": [{"local_symbol": "MNQM6", "action": "SELL", "quantity": "1", "broker_order_id": "59"}],
+            },
+            reconciliation=_registry_matched_reconciliation(quantity="1"),
+        ),
+    )
+
+    assert payload["managed_close_mutation_allowed"] is False
+    assert "CONFLICTING_CLOSE_ORDER" in payload["managed_close_authority"]["reason_codes"]
 
 
 def test_lifecycle_owner_without_broker_position_blocks() -> None:
@@ -213,4 +310,51 @@ def _mnq_position(quantity: str) -> dict:
         "con_id": 770561201,
         "expiry": "20260618",
         "quantity": quantity,
+    }
+
+
+def _registry_matched_reconciliation(
+    *,
+    quantity: str = "1",
+    trade_id: str = "trade-1",
+    lifecycle_id: str = "lifecycle-1",
+    local_symbol: str = "MNQM6",
+    con_id: int = 770561201,
+) -> dict:
+    return {
+        "classification": "BROKER_TRUTH_SETTLEMENT_TIMEOUT",
+        "blockers": [
+            {
+                "broker_truth_settlement": {
+                    "event": {
+                        "event_type": "EXIT_FILL_EXPECTING_BROKER_FLAT",
+                        "broker_order_id": "59",
+                        "local_symbol": "MNQM6",
+                        "con_id": 770561201,
+                    }
+                }
+            }
+        ],
+        "registry_reconciliation": {
+            "classification": "REGISTRY_RECONCILIATION_MATCHED",
+            "blocking": False,
+            "mapped_records": [
+                {
+                    "trade_id": trade_id,
+                    "lifecycle_id": lifecycle_id,
+                    "account_id": "DUM882026",
+                    "symbol": "MNQ",
+                    "instrument_family": "MNQ",
+                    "local_symbol": local_symbol,
+                    "con_id": con_id,
+                    "quantity": quantity,
+                    "side": "LONG",
+                    "current_state": "OPEN_MANAGED",
+                    "entry_perm_id": "1955790757",
+                    "entry_exec_id": "0000e1a7.6a2c281d.01.01",
+                    "lane_id": "mnq_us_active_participation_long",
+                    "strategy_id": "mnq_us_active_participation_long",
+                }
+            ],
+        },
     }

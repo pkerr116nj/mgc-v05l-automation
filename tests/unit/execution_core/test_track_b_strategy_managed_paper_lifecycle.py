@@ -1879,6 +1879,63 @@ def test_managed_exit_close_authority_blocks_unsafe_safe_state(tmp_path: Path) -
     assert "SAFE_STATE_BROKER_MUTATION_NOT_ALLOWED" in authorization["reason"]
 
 
+def test_managed_exit_close_authority_allows_registry_verified_close_under_guardian_hold(tmp_path: Path) -> None:
+    config = base_config(
+        tmp_path,
+        strategy_id="mnq_us_active_participation_long",
+        lane_id="mnq_us_active_participation_long",
+        instrument_family="MNQ",
+        contract_key="MNQ-202606",
+        local_symbol="MNQM6",
+        con_id=770561201,
+        side="LONG",
+        close_limit_price="30444.5",
+        managed_exit_policy_id=TrackBManagedExitPolicy.US_ACTIVE_EVIDENCE_TIMEBOX_60M_EXIT_V1.value,
+    )
+    close_intent = {
+        "lifecycle_id": "reserved-submit-mnq",
+        "trade_id": "trade-d642",
+        "order_action": "SELL",
+        "quantity": 1,
+        "close_limit_price": "30444.5",
+    }
+    seed_strategy_submit_authority(
+        tmp_path,
+        config=config,
+        intent_payload=close_intent,
+        intent_kind=IntentKind.CLOSE,
+        limit_price="30444.5",
+        safe_state_overrides={
+            "safe_state_classification": "SAFE_STATE_HARD_HOLD",
+            "submit_allowed": False,
+            "broker_mutation_allowed": False,
+            "entry_mutation_allowed": False,
+            "managed_close_mutation_allowed": True,
+            "observe_only": True,
+            "tripped_limits": [
+                {
+                    "limit_id": "broker_position_guardian_hard_hold",
+                    "classification": "SAFE_STATE_HARD_HOLD",
+                }
+            ],
+            "close_authority_reason_codes": [],
+        },
+    )
+
+    authorization = lifecycle_module.build_strategy_managed_submit_authorization(
+        config=config,
+        intent_payload=close_intent,
+        intent_kind=IntentKind.CLOSE,
+        limit_price="30444.5",
+        now=aware_now(),
+    )
+
+    assert authorization["classification"] == lifecycle_module.STRATEGY_SUBMIT_AUTHORIZED
+    assert authorization["managed_exit_close_authority"]["allowed"] is True
+    assert authorization["managed_exit_close_authority"]["safe_state_broker_mutation_allowed"] is False
+    assert authorization["managed_exit_close_authority"]["safe_state_managed_close_mutation_allowed"] is True
+
+
 def test_managed_exit_close_authority_blocks_stale_control_plane(tmp_path: Path) -> None:
     config = base_config(tmp_path, pre_action_snapshot_max_age_seconds=60)
     close_intent = {
