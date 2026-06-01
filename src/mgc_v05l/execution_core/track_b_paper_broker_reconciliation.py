@@ -38,6 +38,10 @@ from mgc_v05l.execution_core.track_b_submit_intent_ownership import (
     load_unresolved_submit_intent_ownership_records,
 )
 from mgc_v05l.execution_core.track_b_central_trade_registry import TradeCurrentState, TradeEventType, TradeRegistryRecord
+from mgc_v05l.execution_core.track_b_broker_fill_evidence_resolver import (
+    BrokerFillEvidenceRequest,
+    resolve_broker_backed_fill_evidence,
+)
 from mgc_v05l.execution_core.track_b_live_trade_registry import (
     append_live_trade_registry_event,
     load_live_trade_registry_records,
@@ -260,6 +264,7 @@ def reconcile_track_b_paper_broker_truth(
         position_match_report=position_match_report,
     )
     broker_backed_entry_adoption = _broker_backed_entry_adoption_remediation(
+        config=config,
         submit_intent_ownership_reconciliation=submit_intent_ownership_reconciliation,
         registry_reconciliation=registry_reconciliation,
     )
@@ -917,6 +922,41 @@ def _append_recovery_adoption_registry_events(
         )
         contract = row.get("contract") if isinstance(row.get("contract"), Mapping) else {}
         try:
+            if event_type == TradeEventType.RECOVERY_ADOPTION_RECORDED:
+                resolver_context = row.get("fill_evidence_resolver") if isinstance(row.get("fill_evidence_resolver"), Mapping) else {}
+                append_live_trade_registry_event(
+                    repo_root=config.repo_root,
+                    event=make_live_trade_registry_event(
+                        event_type=TradeEventType.ENTRY_FILL_BROKER_BACKED,
+                        generated_at=now,
+                        trade_id=str(row.get("trade_id") or "").strip(),
+                        lifecycle_id=str(row.get("lifecycle_id") or row.get("ownership_intent_id") or "").strip() or None,
+                        lane_id=str(row.get("lane_id") or row.get("strategy_id") or "UNKNOWN").strip(),
+                        thesis_strategy_id=str(row.get("strategy_id") or row.get("lane_id") or "UNKNOWN").strip(),
+                        account_id=str(row.get("account_id") or config.account).strip(),
+                        symbol=str(contract.get("symbol") or row.get("symbol") or "UNKNOWN").strip().upper(),
+                        con_id=contract.get("con_id") or row.get("con_id") or 1,
+                        local_symbol=str(contract.get("local_symbol") or row.get("local_symbol") or "UNKNOWN").strip(),
+                        expiry=str(contract.get("expiry") or row.get("expiry") or "UNKNOWN").strip(),
+                        side=str(row.get("side") or _side_for_entry_action(row.get("action")) or "LONG").strip().upper(),
+                        action=str(row.get("action") or "BUY").strip().upper().replace("_TO_OPEN", ""),
+                        qty=row.get("qty") or row.get("quantity") or 1,
+                        order_id=row.get("broker_order_id") or row.get("order_id"),
+                        client_id=row.get("client_id"),
+                        perm_id=row.get("perm_id"),
+                        exec_id=row.get("exec_id"),
+                        price=row.get("fill_price"),
+                        source_artifact_path=str(resolver_context.get("selected_source_artifact_path") or config.report_path),
+                        reason_codes=("BROKER_BACKED_FILL_EVIDENCE_RESOLVED_FOR_ADOPTION",),
+                        metadata={
+                            "source": "track_b_paper_broker_reconciliation_fill_evidence_resolver",
+                            "classification": classification,
+                            "paper_only": True,
+                            "live_money_eligible": False,
+                            "paper_proof_invoked": False,
+                        },
+                    ),
+                )
             append_live_trade_registry_event(
                 repo_root=config.repo_root,
                 event=make_live_trade_registry_event(
@@ -1441,6 +1481,7 @@ def _submit_intent_ownership_reconciliation_state(
 
 def _broker_backed_entry_adoption_remediation(
     *,
+    config: ReconciliationConfig,
     submit_intent_ownership_reconciliation: Mapping[str, Any],
     registry_reconciliation: Mapping[str, Any],
 ) -> dict[str, Any] | None:
@@ -1492,6 +1533,7 @@ def _broker_backed_entry_adoption_remediation(
             if not isinstance(item, Mapping):
                 continue
             remediation = _broker_backed_entry_adoption_item(
+                config=config,
                 submit_intent=item.get("matching_submit_intent"),
                 broker_position=item.get("broker_position"),
             )
@@ -1511,11 +1553,12 @@ def _broker_backed_entry_adoption_remediation(
         return None
     submit_intent = submit_intent_ownership_reconciliation.get("matching_submit_intent")
     broker_position = submit_intent_ownership_reconciliation.get("broker_position")
-    return _broker_backed_entry_adoption_item(submit_intent=submit_intent, broker_position=broker_position)
+    return _broker_backed_entry_adoption_item(config=config, submit_intent=submit_intent, broker_position=broker_position)
 
 
 def _broker_backed_entry_adoption_item(
     *,
+    config: ReconciliationConfig,
     submit_intent: object,
     broker_position: object,
 ) -> dict[str, Any] | None:
@@ -1523,7 +1566,32 @@ def _broker_backed_entry_adoption_item(
         return None
     perm_id = submit_intent.get("perm_id")
     extra = submit_intent.get("extra") if isinstance(submit_intent.get("extra"), Mapping) else {}
-    exec_id = submit_intent.get("exec_id") or submit_intent.get("execution_id") or extra.get("exec_id")
+    resolver = resolve_broker_backed_fill_evidence(
+        repo_root=config.repo_root,
+        request=BrokerFillEvidenceRequest(
+            trade_id=extra.get("trade_id") or submit_intent.get("trade_id"),
+            submit_intent_id=submit_intent.get("ownership_intent_id") or submit_intent.get("order_intent_id"),
+            order_id=submit_intent.get("broker_order_id"),
+            client_id=submit_intent.get("client_id"),
+            perm_id=perm_id,
+            con_id=submit_intent.get("con_id") or broker_position.get("con_id") or broker_position.get("conId"),
+            local_symbol=submit_intent.get("local_symbol") or broker_position.get("local_symbol") or broker_position.get("localSymbol"),
+            account_id=submit_intent.get("account_id") or broker_position.get("account_id") or broker_position.get("account"),
+            action=submit_intent.get("action"),
+            qty=submit_intent.get("qty") or broker_position.get("quantity"),
+            symbol=submit_intent.get("symbol") or broker_position.get("symbol"),
+        ),
+    )
+    resolved_evidence = resolver.evidence or {}
+    exec_id = (
+        submit_intent.get("exec_id")
+        or submit_intent.get("execution_id")
+        or extra.get("exec_id")
+        or resolved_evidence.get("exec_id")
+        or resolved_evidence.get("execution_id")
+    )
+    if not perm_id:
+        perm_id = resolved_evidence.get("perm_id")
     broker_backed_evidence_valid = bool(str(perm_id or "").strip() and str(exec_id or "").strip())
     trade_id = str(extra.get("trade_id") or submit_intent.get("trade_id") or "").strip()
     if not trade_id:
@@ -1541,15 +1609,23 @@ def _broker_backed_entry_adoption_item(
         else "BROKER_BACKED_ENTRY_ADOPTION_REVIEW_REQUIRED",
         "detail": "Broker-backed PAPER entry is attributed to a durable submit intent but no lifecycle OPEN_MANAGED record exists."
         if broker_backed_evidence_valid
-        else "Broker position is attributed to a submit intent, but broker-backed fill evidence is missing perm_id/exec_id.",
+        else "Broker position is attributed to a submit intent, but broker-backed fill evidence is missing an exact exec_id.",
         "adoption_allowed": broker_backed_evidence_valid,
         "broker_backed_evidence_valid": broker_backed_evidence_valid,
+        "fill_evidence_resolver": {
+            "classification": resolver.classification,
+            "broker_backed_evidence_valid": resolver.broker_backed_evidence_valid,
+            "searched_paths": list(resolver.searched_paths),
+            "reason_codes": list(resolver.reason_codes),
+            "selected_source_artifact_path": resolved_evidence.get("source_artifact_path"),
+            "matching_execution_count": len(resolver.matches),
+        },
         "trade_id": trade_id,
         "lifecycle_id": submit_intent.get("lifecycle_id"),
         "ownership_intent_id": submit_intent.get("ownership_intent_id"),
         "order_intent_id": submit_intent.get("order_intent_id") or submit_intent.get("ownership_intent_id"),
-        "broker_order_id": submit_intent.get("broker_order_id"),
-        "client_id": submit_intent.get("client_id"),
+        "broker_order_id": submit_intent.get("broker_order_id") or resolved_evidence.get("order_id"),
+        "client_id": submit_intent.get("client_id") or resolved_evidence.get("client_id"),
         "perm_id": perm_id,
         "exec_id": exec_id,
         "lane_id": submit_intent.get("lane_id"),
@@ -1562,6 +1638,8 @@ def _broker_backed_entry_adoption_item(
             "con_id": submit_intent.get("con_id") or broker_position.get("con_id"),
         },
         "qty": submit_intent.get("qty") or broker_position.get("quantity"),
+        "fill_price": resolved_evidence.get("price"),
+        "fill_timestamp": resolved_evidence.get("fill_timestamp"),
         "broker_position_quantity": broker_position.get("quantity"),
         "live_money_eligible": False,
         "paper_proof_invoked": False,

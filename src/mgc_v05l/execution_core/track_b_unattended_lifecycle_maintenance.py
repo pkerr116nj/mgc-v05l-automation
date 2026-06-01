@@ -316,7 +316,7 @@ def _run_pending_adoptions(
                     expected_broker_order_id=_string_or_none(adoption.get("broker_order_id")),
                     expected_client_id=_int_or_none(adoption.get("client_id")),
                     expected_perm_id=_int_or_none(adoption.get("perm_id")),
-                    bridge_root=Path("outputs") / "reports" / "track_b_paper_leak_test",
+                    expected_exec_id=_string_or_none(adoption.get("exec_id")),
                 )
             )
             results.append(

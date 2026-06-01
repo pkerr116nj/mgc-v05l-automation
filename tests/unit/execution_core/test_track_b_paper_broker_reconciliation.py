@@ -413,6 +413,60 @@ def test_broker_position_without_fill_evidence_is_recovery_review_required(tmp_p
     assert any(event["event_type"] == "REVIEW_REQUIRED" for event in _read_registry_events(config))
 
 
+def test_missing_submit_exec_id_resolves_from_bridge_execution_report_for_adoption(tmp_path: Path) -> None:
+    config = _write_base_artifacts(tmp_path)
+    record = _write_submit_intent_ownership(
+        config,
+        ownership_intent_id="submit_owner_mnq_exec_late",
+        symbol="MNQ",
+        local_symbol="MNQM6",
+        expiry="20260618",
+        con_id=770561201,
+        broker_order_id="1",
+        client_id=11127,
+        perm_id=1955790757,
+        exec_id=None,
+    )
+    _write_bridge_execution_report(
+        config,
+        lane_id="atp_companion_v1_asia_us",
+        symbol="MNQ",
+        local_symbol="MNQM6",
+        con_id=770561201,
+        order_id="1",
+        client_id=11127,
+        perm_id=1955790757,
+        exec_id="0000e1a7.current.01.01",
+        account_id="DUM882026",
+    )
+    _write_broker_truth(
+        config,
+        positions=[
+            {
+                "account_id": "DUM882026",
+                "symbol": "MNQ",
+                "local_symbol": "MNQM6",
+                "expiry": "20260618",
+                "con_id": 770561201,
+                "security_type": "FUT",
+                "quantity": "1",
+            }
+        ],
+    )
+
+    report = reconcile_track_b_paper_broker_truth(config=config, now=NOW)
+
+    adoption = report["broker_backed_entry_adoption"]
+    assert adoption["classification"] == "BROKER_BACKED_ENTRY_ADOPTION_REQUIRED"
+    assert adoption["broker_backed_evidence_valid"] is True
+    assert adoption["exec_id"] == "0000e1a7.current.01.01"
+    assert adoption["trade_id"] == record["extra"]["trade_id"]
+    assert adoption["fill_evidence_resolver"]["classification"] == "BROKER_BACKED_FILL_EVIDENCE_RESOLVED"
+    events = _read_registry_events(config)
+    assert [event["event_type"] for event in events[-2:]] == ["ENTRY_FILL_BROKER_BACKED", "RECOVERY_ADOPTION_RECORDED"]
+    assert events[-2]["exec_id"] == "0000e1a7.current.01.01"
+
+
 def test_ambiguous_registry_trade_ids_block_recovery_adoption(tmp_path: Path) -> None:
     config = _write_base_artifacts(tmp_path)
     for trade_id in ("trade_recovery_ambiguous_a", "trade_recovery_ambiguous_b"):
@@ -2321,6 +2375,63 @@ def _write_registry_open_managed_trade(
             repo_root=config.repo_root,
             event=make_live_trade_registry_event(event_type=event_type, **payload),
         )
+
+
+def _write_bridge_execution_report(
+    config: ReconciliationConfig,
+    *,
+    lane_id: str,
+    symbol: str,
+    local_symbol: str,
+    con_id: int,
+    order_id: str,
+    client_id: int,
+    perm_id: int,
+    exec_id: str,
+    account_id: str,
+) -> Path:
+    path = config.repo_root / "outputs/reports/ibkr_runtime_route_dispatch" / lane_id / "ibkr_paper_strategy_bridge_report.json"
+    _write_json(
+        path,
+        {
+            "selected_account_id": account_id,
+            "intent": {"strategy_id": lane_id, "symbol": symbol, "quantity": 1, "action": "BUY"},
+            "qualified_contract_report": {
+                "qualified_contract": {
+                    "symbol": symbol,
+                    "local_symbol": local_symbol,
+                    "con_id": con_id,
+                    "expiry": "20260618",
+                }
+            },
+            "delegated_result": {
+                "classification": "PAPER_ORDER_FILLED",
+                "report": {
+                    "submit_cancel_lifecycle": {
+                        "latest_order_status": {
+                            "status": "Filled",
+                            "order_id": order_id,
+                            "client_id": client_id,
+                            "perm_id": perm_id,
+                            "filled": 1,
+                        },
+                        "executions_after_submit": [
+                            {
+                                "execution_id": exec_id,
+                                "account_id": account_id,
+                                "symbol": symbol,
+                                "quantity": 1,
+                                "side": "BOT",
+                                "price": "30437.00",
+                                "executed_at": "2026-06-01T13:36:09+00:00",
+                            }
+                        ],
+                    }
+                },
+            },
+        },
+    )
+    return path
 
 
 def _read_registry_events(config: ReconciliationConfig) -> list[dict[str, object]]:
