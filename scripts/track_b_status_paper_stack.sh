@@ -14,9 +14,17 @@ fi
 RUNTIME_DIR="${REPO_ROOT}/outputs/probationary_pattern_engine/paper_session/runtime"
 STATUS_DIR="${REPO_ROOT}/outputs/track_b_execution_core/paper_stack"
 STATUS_ARTIFACT="${STATUS_DIR}/latest_paper_stack_status.json"
+AUTHORITY_REFRESH_TMP="${STATUS_DIR}/.authority_refresh.$$.json"
 OPERABILITY_TMP="${STATUS_DIR}/.operability_status.$$.json"
 
 mkdir -p "${STATUS_DIR}"
+
+set +e
+"${PYTHON_BIN}" -m mgc_v05l.execution_core.track_b_authority_refresh_heartbeat \
+  --repo-root "${REPO_ROOT}" \
+  --json > "${AUTHORITY_REFRESH_TMP}"
+AUTHORITY_REFRESH_RC=$?
+set -e
 
 set +e
 "${PYTHON_BIN}" -m mgc_v05l.execution_core.track_b_runtime_operability_contract \
@@ -25,7 +33,7 @@ set +e
 OPERABILITY_RC=$?
 set -e
 
-"${PYTHON_BIN}" - "${REPO_ROOT}" "${RUNTIME_DIR}" "${OPERABILITY_TMP}" "${OPERABILITY_RC}" "${STATUS_ARTIFACT}" <<'PY'
+"${PYTHON_BIN}" - "${REPO_ROOT}" "${RUNTIME_DIR}" "${OPERABILITY_TMP}" "${OPERABILITY_RC}" "${AUTHORITY_REFRESH_TMP}" "${AUTHORITY_REFRESH_RC}" "${STATUS_ARTIFACT}" <<'PY'
 import json
 import os
 import subprocess
@@ -51,7 +59,9 @@ repo_root = Path(sys.argv[1]).resolve()
 runtime_dir = Path(sys.argv[2])
 operability_path = Path(sys.argv[3])
 operability_rc = int(sys.argv[4])
-status_artifact = Path(sys.argv[5])
+authority_refresh_path = Path(sys.argv[5])
+authority_refresh_rc = int(sys.argv[6])
+status_artifact = Path(sys.argv[7])
 
 
 def read_json(path: Path) -> dict:
@@ -147,6 +157,7 @@ def parse_iso(value: object):
 
 
 operability = read_json(operability_path)
+authority_refresh = read_json(authority_refresh_path)
 pid_metadata = read_json(runtime_dir / "probationary_paper.pid.json")
 runtime_truth = read_json(runtime_dir / "paper_runtime_truth.json")
 launch_guard = read_json(runtime_dir / "probationary_paper.pid.json.launch_guard.json")
@@ -161,6 +172,7 @@ phase1_status = read_json(
 )
 # Canonical readiness is read only for extra status fields; operator_dashboard_readiness remains diagnostic only.
 canonical_readiness = read_json(repo_root / "outputs/operator_dashboard/runtime/latest_canonical_readiness.json")
+operator_status = read_json(repo_root / "outputs/probationary_pattern_engine/paper_session/operator_status.json")
 hourly_recovery_audit_path = (
     repo_root / "outputs/track_b_execution_core/runtime_recovery/latest_hourly_runtime_recovery_audit.json"
 )
@@ -263,6 +275,56 @@ ready_submit_capable = bool(operability.get("ready_submit_capable")) and running
 runtime_start_allowed = bool(operability.get("runtime_start_allowed") or canonical_readiness.get("runtime_start_allowed"))
 blockers = list(operability.get("blockers") or [])
 warnings = list(operability.get("warnings") or [])
+raw_operator_lanes = operator_status.get("lanes")
+if isinstance(raw_operator_lanes, list):
+    operator_lanes = [lane for lane in raw_operator_lanes if isinstance(lane, dict)]
+elif isinstance(raw_operator_lanes, dict):
+    operator_lanes = [lane for lane in raw_operator_lanes.values() if isinstance(lane, dict)]
+else:
+    operator_lanes = []
+active_window_lane_count = sum(
+    1
+    for lane in operator_lanes
+    if lane.get("eligible_now") is True
+    or lane.get("allowed_session_match") is True
+    or str(lane.get("current_session_window_classification") or "") == "IN_WINDOW"
+)
+out_of_window_lane_count = sum(
+    1
+    for lane in operator_lanes
+    if str(lane.get("current_session_window_classification") or lane.get("eligibility_reason") or "").upper()
+    in {"OUT_OF_WINDOW", "WRONG_SESSION"}
+)
+stale_truth_blocked = canonical_state == "BLOCKED_STALE_TRUTH" or any(
+    str(row.get("code") or "") in {"BLOCKED_STALE_TRUTH", "CONTROL_PLANE_SNAPSHOT_STALE", "TRUTH_AUTHORITY_STALE"}
+    or "STALE" in str(row.get("code") or "")
+    for row in blockers
+    if isinstance(row, dict)
+)
+authority_refresh_generated_at = parse_iso(
+    authority_refresh.get("latest_successful_refresh_at") or authority_refresh.get("generated_at")
+)
+authority_refresh_age_seconds = (
+    (datetime.now(timezone.utc) - authority_refresh_generated_at.astimezone(timezone.utc)).total_seconds()
+    if authority_refresh_generated_at
+    else None
+)
+authority_refresh_fresh = (
+    authority_refresh_rc == 0
+    and authority_refresh.get("classification")
+    in {"AUTHORITY_REFRESHED", "AUTHORITY_REFRESH_SKIPPED_NOT_DUE"}
+    and authority_refresh_age_seconds is not None
+    and authority_refresh_age_seconds <= float(authority_refresh.get("bridge_max_age_seconds") or 120.0)
+)
+all_lanes_out_of_window = bool(operator_lanes) and active_window_lane_count == 0
+if running and all_lanes_out_of_window and authority_refresh_fresh:
+    activity_classification = "OUT_OF_WINDOW_BUT_AUTHORITY_FRESH"
+elif stale_truth_blocked:
+    activity_classification = "BLOCKED_STALE_TRUTH"
+elif ready_submit_capable:
+    activity_classification = "READY_SUBMIT_CAPABLE"
+else:
+    activity_classification = canonical_state
 if not running:
     warnings.append({"code": "runtime_not_running", "detail": "No live Track B PAPER runtime process is present."})
 elif command is None and ppid is None:
@@ -384,6 +446,7 @@ payload = {
     "generated_at": datetime.now(timezone.utc).isoformat(),
     "repo_root": str(repo_root),
     "operability_rc": operability_rc,
+    "authority_refresh_rc": authority_refresh_rc,
     "startup_artifact": str(repo_root / "outputs/track_b_execution_core/paper_stack/latest_paper_stack_startup.json"),
     "status_artifact": str(status_artifact),
     "runtime": {
@@ -399,6 +462,7 @@ payload = {
     },
     "readiness": {
         "canonical_state": canonical_state,
+        "activity_classification": activity_classification,
         "ready_submit_capable": ready_submit_capable,
         "submit_allowed": ready_submit_capable,
         "runtime_start_allowed": runtime_start_allowed,
@@ -408,6 +472,8 @@ payload = {
         "next_expected_reopen_time": canonical_readiness.get("next_expected_reopen_time"),
         "market_data_grace_until": canonical_readiness.get("market_data_grace_until"),
         "readiness_block_is_scheduled_halt": canonical_readiness.get("readiness_block_is_scheduled_halt") is True,
+        "active_window_lane_count": active_window_lane_count,
+        "out_of_window_lane_count": out_of_window_lane_count,
         "blockers": blockers,
         "warnings": warnings,
     },
@@ -426,6 +492,21 @@ payload = {
         "broker_truth_fresh": broker_truth_status.get("fresh"),
     },
     "registry_truth_diagnostics": registry_truth_diagnostics,
+    "authority_refresh": {
+        "classification": authority_refresh.get("classification"),
+        "reason_codes": authority_refresh.get("reason_codes") or [],
+        "generated_at": authority_refresh.get("generated_at"),
+        "latest_successful_refresh_at": authority_refresh.get("latest_successful_refresh_at"),
+        "last_failure_at": authority_refresh.get("last_failure_at"),
+        "age_seconds": authority_refresh_age_seconds,
+        "fresh": authority_refresh_fresh,
+        "refresh_interval_seconds": authority_refresh.get("refresh_interval_seconds"),
+        "bridge_max_age_seconds": authority_refresh.get("bridge_max_age_seconds"),
+        "control_plane_snapshot_age_seconds": authority_refresh.get("control_plane_snapshot_age_seconds"),
+        "artifact_path": authority_refresh.get("artifact_path") or str(authority_refresh_path),
+        "read_only": authority_refresh.get("read_only") is True,
+        "broker_mutation_allowed": authority_refresh.get("broker_mutation_allowed") is True,
+    },
     "data": {
         "phase1_listener_classification": phase1_status.get("final_classification"),
         "phase1_latest_record_at": phase1_status.get("latest_record_at"),
@@ -489,7 +570,7 @@ tmp.replace(status_artifact)
 print(json.dumps(payload, indent=2, sort_keys=True))
 PY
 
-rm -f "${OPERABILITY_TMP}"
+rm -f "${OPERABILITY_TMP}" "${AUTHORITY_REFRESH_TMP}"
 
 if [[ "${JSON_ONLY}" -eq 0 ]]; then
   "${PYTHON_BIN}" - "${STATUS_ARTIFACT}" <<'PY'
@@ -503,6 +584,7 @@ recovery = payload["recovery"]
 print(
     "Track B PAPER stack: "
     f"state={readiness['canonical_state']} "
+    f"activity={readiness['activity_classification']} "
     f"ready_submit_capable={readiness['ready_submit_capable']} "
     f"pid={runtime['pid']} running={runtime['running']} owner={runtime['owner']} "
     f"lane_count={config['lane_count']} "

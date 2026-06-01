@@ -110,6 +110,10 @@ from ..execution_core.track_b_runtime_truth_contract import (
     classify_writer_authority,
     validate_runtime_truth_contract,
 )
+from ..execution_core.track_b_authority_refresh_heartbeat import (
+    TrackBAuthorityRefreshHeartbeatConfig,
+    refresh_track_b_paper_authority_if_due,
+)
 from ..research.trend_participation.canary import _CANARY_LANES
 from ..research.trend_participation.canary import atpe_runtime_lane_id, atpe_runtime_lane_name
 from ..research.trend_participation.engine import DEFAULT_POINT_VALUES as ATPE_POINT_VALUES
@@ -7356,6 +7360,7 @@ class ProbationaryPaperSupervisor:
                 runtime_instance_id=self._runtime_instance_id,
                 runtime_started_at=self._runtime_started_at,
             )
+            _refresh_track_b_authority_for_active_paper_runtime(self._settings)
             risk_state = _load_probationary_paper_risk_state(self._settings)
 
             for lane in self._lanes:
@@ -7558,6 +7563,7 @@ class ProbationaryPaperSupervisor:
                     runtime_instance_id=self._runtime_instance_id,
                     runtime_started_at=self._runtime_started_at,
                 )
+                _refresh_track_b_authority_for_active_paper_runtime(self._settings)
 
                 if not reconciliation_clean:
                     stop_reason = "paper_reconciliation_mismatch"
@@ -9427,6 +9433,24 @@ def _write_probationary_paper_runtime_truth(
     tmp.replace(path)
     _write_probationary_paper_pid_metadata(settings=settings, runtime_truth=payload)
     return path
+
+
+def _refresh_track_b_authority_for_active_paper_runtime(settings: StrategySettings) -> dict[str, Any]:
+    repo_root = Path(__file__).resolve().parents[3]
+    try:
+        return refresh_track_b_paper_authority_if_due(
+            config=TrackBAuthorityRefreshHeartbeatConfig(repo_root=repo_root),
+            runtime_active=True,
+        )
+    except Exception as exc:
+        return {
+            "classification": "AUTHORITY_REFRESH_FAILED",
+            "reason_codes": ["AUTHORITY_REFRESH_RUNTIME_CALL_FAILED", type(exc).__name__],
+            "exception_message": str(exc),
+            "read_only": True,
+            "broker_mutation_allowed": False,
+            "runtime_artifacts_root": str(getattr(settings, "probationary_artifacts_path", "")),
+        }
 
 
 def _write_probationary_paper_pid_metadata(*, settings: StrategySettings, runtime_truth: dict[str, Any]) -> Path:
