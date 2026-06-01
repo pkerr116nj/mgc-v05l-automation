@@ -730,7 +730,7 @@ def _active_lifecycle_report_evidence(
         return True
     if open_order_states or managed_order_states:
         return True
-    if _int_or_none(reconciliation.get("review_required_count")):
+    if _current_scope_review_required_count(reconciliation):
         return True
     if _int_or_none(reconciliation.get("unresolved_submit_intent_ownership_count")):
         return True
@@ -743,6 +743,12 @@ def _active_lifecycle_report_evidence(
     if position_classification in {"CLEAN_FLAT_READY", "FLAT_CLEAN"}:
         return False
     return position_summary.get("broker_exposure_present") is True
+
+
+def _current_scope_review_required_count(reconciliation: Mapping[str, Any]) -> int:
+    if "current_scope_review_required_count" in reconciliation:
+        return int(reconciliation.get("current_scope_review_required_count") or 0)
+    return int(reconciliation.get("review_required_count") or 0)
 
 
 def _exit_due(

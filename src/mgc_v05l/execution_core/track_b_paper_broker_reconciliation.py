@@ -184,6 +184,11 @@ def reconcile_track_b_paper_broker_truth(
         now=actual_now,
         blockers=blockers,
     )
+    raw_review_required_count = _lifecycle_review_required_count(
+        trade_summary=trade_summary,
+        live_position_status=live_position_status,
+        pnl_summary=pnl_summary,
+    )
     lifecycle_blockers = _validate_lifecycle_read_model(
         trade_summary=trade_summary,
         live_position_status=live_position_status,
@@ -265,6 +270,8 @@ def reconcile_track_b_paper_broker_truth(
         lifecycle_blockers,
         historical_debris_resolution=historical_debris_resolution,
     )
+    current_scope_review_required_count = _current_scope_review_required_count(lifecycle_blockers)
+    historical_review_required_count = max(raw_review_required_count - current_scope_review_required_count, 0)
     blockers.extend(lifecycle_blockers)
     submit_intent_ownership_reconciliation = _submit_intent_ownership_reconciliation_state(
         unresolved_submit_intents=unresolved_submit_intents,
@@ -489,11 +496,10 @@ def reconcile_track_b_paper_broker_truth(
         "registry_reconciliation": registry_reconciliation,
         "lifecycle_open_position_count": _int_value(live_position_status.get("open_position_count")),
         "lifecycle_open_order_count": _int_value(live_position_status.get("open_order_count")),
-        "review_required_count": _max_int(
-            pnl_summary.get("review_required_count"),
-            trade_summary.get("review_required_count"),
-            len(live_position_status.get("review_required_positions") or []),
-        ),
+        "review_required_count": current_scope_review_required_count,
+        "current_scope_review_required_count": current_scope_review_required_count,
+        "historical_review_required_count": historical_review_required_count,
+        "raw_review_required_count": raw_review_required_count,
         "blockers": blockers,
     }
     if reconciled:
@@ -1305,14 +1311,34 @@ def _validate_lifecycle_read_model(
     positions_by_strategy = live_position_status.get("positions_by_strategy")
     if positions_by_strategy not in ({}, None) and not isinstance(positions_by_strategy, Mapping):
         blockers.append({"code": "LIFECYCLE_POSITIONS_BY_STRATEGY_INVALID"})
-    review_required_count = _max_int(
-        trade_summary.get("review_required_count"),
-        pnl_summary.get("review_required_count"),
-        len(live_position_status.get("review_required_positions") or []),
+    review_required_count = _lifecycle_review_required_count(
+        trade_summary=trade_summary,
+        live_position_status=live_position_status,
+        pnl_summary=pnl_summary,
     )
     if review_required_count:
         blockers.append({"code": "LIFECYCLE_REVIEW_REQUIRED_PRESENT", "count": review_required_count})
     return blockers
+
+
+def _lifecycle_review_required_count(
+    *,
+    trade_summary: Mapping[str, Any],
+    live_position_status: Mapping[str, Any],
+    pnl_summary: Mapping[str, Any],
+) -> int:
+    return _max_int(
+        trade_summary.get("review_required_count"),
+        pnl_summary.get("review_required_count"),
+        len(live_position_status.get("review_required_positions") or []),
+    )
+
+
+def _current_scope_review_required_count(blockers: Sequence[Mapping[str, Any]]) -> int:
+    for row in blockers:
+        if row.get("code") == "LIFECYCLE_REVIEW_REQUIRED_PRESENT":
+            return _int_value(row.get("count"))
+    return 0
 
 
 def _bridge_terminal_event_grace_for_flat_lifecycle(

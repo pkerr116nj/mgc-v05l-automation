@@ -251,7 +251,9 @@ def classify_broker_truth_lease(inputs: Mapping[str, Any]) -> dict[str, Any]:
             or order_state.get("lifecycle_open_order_count")
             or 0
         ),
-        "review_required_count": int(reconciliation.get("review_required_count") or 0),
+        "review_required_count": _current_scope_review_required_count(reconciliation),
+        "current_scope_review_required_count": _current_scope_review_required_count(reconciliation),
+        "historical_review_required_count": int(reconciliation.get("historical_review_required_count") or 0),
         "broker_reconciled": _bool(reconciliation.get("broker_reconciled")),
         "lifecycle_match_status": lifecycle.get("match_status") or reconciliation.get("position_match_report", {}).get("state"),
         "order_intent_match_status": order_state.get("match_status")
@@ -556,8 +558,14 @@ def _reconciliation_clean(reconciliation: Mapping[str, Any]) -> bool:
     return (
         str(reconciliation.get("classification") or "") in clean_classifications
         and _bool(reconciliation.get("broker_reconciled"))
-        and int(reconciliation.get("review_required_count") or 0) == 0
+        and _current_scope_review_required_count(reconciliation) == 0
     )
+
+
+def _current_scope_review_required_count(reconciliation: Mapping[str, Any]) -> int:
+    if "current_scope_review_required_count" in reconciliation:
+        return int(reconciliation.get("current_scope_review_required_count") or 0)
+    return int(reconciliation.get("review_required_count") or 0)
 
 
 def _source_timestamps(

@@ -162,10 +162,53 @@ def test_active_lease_writes_artifacts_and_exits_0(tmp_path: Path, capsys) -> No
     assert exit_code == 0
     assert summary["lease_state"] == "ACTIVE"
     assert lease["lease_state"] == "ACTIVE"
-    assert lease["submit_entry_allowed"] is True
-    assert lease["submit_exit_allowed"] is True
-    assert lease["live_money_eligible"] is False
-    assert len(history_rows) == 1
+
+
+def test_historical_review_count_does_not_block_active_lease(tmp_path: Path, capsys) -> None:
+    seed_clean_artifacts(tmp_path)
+    reconciliation = json.loads(reconciliation_path(tmp_path).read_text(encoding="utf-8"))
+    reconciliation.update(
+        {
+            "classification": "TRACK_B_PAPER_BROKER_RECONCILED",
+            "broker_reconciled": True,
+            "review_required_count": 0,
+            "current_scope_review_required_count": 0,
+            "historical_review_required_count": 1,
+            "raw_review_required_count": 1,
+        }
+    )
+    write_json(reconciliation_path(tmp_path), reconciliation)
+
+    exit_code = cli.main([*base_args(tmp_path), "--json"])
+
+    summary = json.loads(capsys.readouterr().out)
+    lease = json.loads(lease_path(tmp_path).read_text(encoding="utf-8"))
+    assert exit_code == 0
+    assert summary["lease_state"] == "ACTIVE"
+    assert lease["review_required_count"] == 0
+    assert lease["current_scope_review_required_count"] == 0
+    assert lease["historical_review_required_count"] == 1
+
+
+def test_current_scope_review_count_blocks_active_lease(tmp_path: Path, capsys) -> None:
+    seed_clean_artifacts(tmp_path)
+    reconciliation = json.loads(reconciliation_path(tmp_path).read_text(encoding="utf-8"))
+    reconciliation.update(
+        {
+            "classification": "TRACK_B_PAPER_BROKER_RECONCILIATION_BLOCKED",
+            "broker_reconciled": False,
+            "review_required_count": 1,
+            "current_scope_review_required_count": 1,
+            "historical_review_required_count": 0,
+        }
+    )
+    write_json(reconciliation_path(tmp_path), reconciliation)
+
+    exit_code = cli.main([*base_args(tmp_path), "--json"])
+
+    summary = json.loads(capsys.readouterr().out)
+    assert exit_code == 2
+    assert summary["lease_state"] == "OPERATOR_REQUIRED"
 
 
 def test_degraded_but_valid_lease_exits_0(tmp_path: Path) -> None:

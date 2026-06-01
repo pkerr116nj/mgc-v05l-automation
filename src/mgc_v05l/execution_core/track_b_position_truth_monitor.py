@@ -437,7 +437,7 @@ def _review_required_positions(
     rows = _list(live_position_status.get("review_required_positions"))
     if rows:
         return rows
-    if int(reconciliation.get("review_required_count") or 0) <= 0:
+    if _current_scope_review_required_count(reconciliation) <= 0:
         return []
     reports = []
     for report in lifecycle_reports:
@@ -579,6 +579,12 @@ def _summary(
         "managed_order_working_close_order_count": int(managed_order_summary.get("working_close_order_count") or 0),
         "managed_order_modifiable_close_order_count": int(managed_order_summary.get("modifiable_close_order_count") or 0),
     }
+
+
+def _current_scope_review_required_count(reconciliation: Mapping[str, Any]) -> int:
+    if "current_scope_review_required_count" in reconciliation:
+        return int(reconciliation.get("current_scope_review_required_count") or 0)
+    return int(reconciliation.get("review_required_count") or 0)
 
 
 def _event_state(*, position_states: list[dict[str, Any]], reconciliation: Mapping[str, Any], runtime_status: Mapping[str, Any]) -> dict[str, Any]:

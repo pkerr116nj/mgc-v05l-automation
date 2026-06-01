@@ -2088,6 +2088,10 @@ def test_historical_lifecycle_review_debris_clears_current_hot_path_reconciliati
 
     assert report["broker_reconciled"] is True
     assert report["classification"] == "TRACK_B_PAPER_BROKER_RECONCILED"
+    assert report["review_required_count"] == 0
+    assert report["current_scope_review_required_count"] == 0
+    assert report["historical_review_required_count"] == 1
+    assert report["raw_review_required_count"] == 1
     assert report["historical_reconciliation_debris_resolution"]["classification"] == "HISTORICAL_RECONCILIATION_DEBRIS_RESOLVED"
     assert not any(blocker["code"] == "LIFECYCLE_REVIEW_REQUIRED_PRESENT" for blocker in report["blockers"])
 
@@ -2208,6 +2212,10 @@ def test_lifecycle_review_summary_debris_resolves_when_broker_lifecycle_flat(tmp
 
     assert report["blockers"] == []
     assert report["broker_reconciled"] is True
+    assert report["classification"] == "TRACK_B_PAPER_BROKER_RECONCILED"
+    assert report["review_required_count"] == 0
+    assert report["current_scope_review_required_count"] == 0
+    assert report["historical_review_required_count"] == 1
     assert report["historical_reconciliation_debris_resolution"]["classification"] == "HISTORICAL_RECONCILIATION_DEBRIS_RESOLVED"
 
 
