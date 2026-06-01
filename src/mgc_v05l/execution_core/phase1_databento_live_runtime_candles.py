@@ -40,10 +40,11 @@ from mgc_v05l.execution_core.track_b_live_market_data_symbols import (
     load_track_b_live_market_data_symbols,
 )
 from mgc_v05l.execution_core.track_b_runtime_candle_capture_cli import _load_databento_api_key
-from mgc_v05l.session_phase_labels import label_session_phase, session_restriction_matches_timestamp
+from mgc_v05l.session_phase_labels import NEW_YORK, label_session_phase, session_restriction_matches_timestamp
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 DEFAULT_RUNTIME_CANDLE_ROOT = Path("outputs") / "track_b_execution_core" / "phase1_runtime_market_data"
+DEFAULT_INTRADAY_BACKFILL_ROOT = Path("outputs") / "track_b_execution_core" / "phase1_runtime_market_data_intraday_backfill"
 DEFAULT_REPORT_DIR = Path("outputs") / "reports" / "phase1_databento_live_runtime_candles"
 DEFAULT_RAW_DBN_ROOT = Path("outputs") / "track_b_execution_core" / "phase1_databento_live_raw_dbn"
 DEFAULT_DATABENTO_DATASET = "GLBX.MDP3"
@@ -59,6 +60,7 @@ FRESHNESS_SECONDS_BY_TIMEFRAME = {
 class Phase1DatabentoLiveRuntimeCandlesConfig:
     repo_root: Path = REPO_ROOT
     runtime_candle_root: Path = DEFAULT_RUNTIME_CANDLE_ROOT
+    intraday_backfill_root: Path = DEFAULT_INTRADAY_BACKFILL_ROOT
     report_dir: Path = DEFAULT_REPORT_DIR
     legacy_live_output_root: Path = DEFAULT_TRACK_B_DATABENTO_LIVE_RUNTIME_FEED_OUTPUT_ROOT
     live_market_data_symbols_path: Path = DEFAULT_TRACK_B_LIVE_MARKET_DATA_SYMBOLS_PATH
@@ -147,6 +149,7 @@ class _Phase1LiveSymbolSelection:
 class Phase1DatabentoLiveListenerConfig:
     repo_root: Path = REPO_ROOT
     runtime_candle_root: Path = DEFAULT_RUNTIME_CANDLE_ROOT
+    intraday_backfill_root: Path = DEFAULT_INTRADAY_BACKFILL_ROOT
     report_dir: Path = DEFAULT_REPORT_DIR
     raw_dbn_root: Path = DEFAULT_RAW_DBN_ROOT
     live_market_data_symbols_path: Path = DEFAULT_TRACK_B_LIVE_MARKET_DATA_SYMBOLS_PATH
@@ -393,6 +396,7 @@ class _LiveListenerState:
         self.instrument_id_to_symbol: dict[str, str] = {}
         self.provider_errors: list[str] = []
         self.system_messages: list[dict[str, Any]] = []
+        self.intraday_bars_by_symbol: dict[str, list[dict[str, Any]]] = {symbol: [] for symbol in self.symbols}
         self.latest_record_at: datetime | None = None
         self.latest_completed_bar_by_symbol: dict[str, str | None] = {symbol: None for symbol in self.symbols}
         self.records_received = 0
@@ -429,11 +433,18 @@ class _LiveListenerState:
             bars = self.bars_by_symbol.setdefault(symbol, [])
             bars.extend(_normalize_live_1m_candles({"candles": [candle]}))
             self.bars_by_symbol[symbol] = _dedupe_phase1_bars(bars)[-int(self.config.max_bars) :]
+            intraday_bars = self.intraday_bars_by_symbol.setdefault(symbol, [])
+            intraday_bars.extend(_normalize_live_1m_candles({"candles": [candle]}))
+            self.intraday_bars_by_symbol[symbol] = _current_session_anchor_bars(
+                bars=_dedupe_phase1_bars(intraday_bars),
+                generated_at=now,
+            )
             written = _write_symbol_runtime_artifacts_from_bars(
                 config=self.config,
                 live_symbol=self.live_symbol_by_symbol[symbol],
                 symbol=symbol,
                 bars=self.bars_by_symbol[symbol],
+                intraday_bars=self.intraday_bars_by_symbol[symbol],
                 generated_at=now,
                 raw_dbn_path=self.raw_dbn_path,
             )
@@ -516,6 +527,10 @@ class _LiveListenerState:
                     "dataset": live_symbol.dataset,
                     "schema": live_symbol.schema,
                     "bar_count": len(self.bars_by_symbol.get(symbol, [])),
+                    "intraday_backfill_bar_count": len(self.intraday_bars_by_symbol.get(symbol, [])),
+                    "intraday_backfill_path": str(
+                        _intraday_backfill_path_for_listener(config=self.config, symbol=symbol, timeframe="1m")
+                    ),
                     "latest_completed_bar_ts": self.latest_completed_bar_by_symbol.get(symbol),
                     "realtime_feed_confirmed": _all_timeframes_confirmed(
                         config=self.config,
@@ -738,12 +753,35 @@ def _dedupe_phase1_bars(bars: Sequence[Mapping[str, Any]]) -> list[dict[str, Any
     return [by_end[key] for key in sorted(by_end, key=lambda value: _parse_datetime(value) or datetime.min.replace(tzinfo=timezone.utc))]
 
 
+def _current_session_anchor_bars(*, bars: Sequence[Mapping[str, Any]], generated_at: datetime) -> list[dict[str, Any]]:
+    """Retain the current futures session for anchor recovery, independent of the hot rolling window."""
+
+    generated_at = _coerce_now(generated_at)
+    generated_et = generated_at.astimezone(NEW_YORK)
+    session_start_date = generated_et.date()
+    if generated_et.hour < 18:
+        session_start_date -= timedelta(days=1)
+    session_start_et = datetime.combine(
+        session_start_date,
+        datetime.min.time().replace(hour=18),
+        tzinfo=NEW_YORK,
+    )
+    session_start_utc = session_start_et.astimezone(timezone.utc)
+    retained = []
+    for bar in bars:
+        end = _parse_datetime(bar.get("bar_end"))
+        if end is not None and session_start_utc <= end <= generated_at + timedelta(minutes=1):
+            retained.append(dict(bar))
+    return _dedupe_phase1_bars(retained)
+
+
 def _write_symbol_runtime_artifacts_from_bars(
     *,
     config: Phase1DatabentoLiveListenerConfig,
     live_symbol: TrackBLiveMarketDataSymbol,
     symbol: str,
     bars: Sequence[Mapping[str, Any]],
+    intraday_bars: Sequence[Mapping[str, Any]],
     generated_at: datetime,
     raw_dbn_path: Path,
 ) -> list[Path]:
@@ -771,6 +809,61 @@ def _write_symbol_runtime_artifacts_from_bars(
                 now=generated_at,
             ):
                 continue
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+        written.append(path)
+    if intraday_bars:
+        backfill_written = _write_intraday_backfill_artifacts_from_bars(
+            config=config,
+            live_symbol=live_symbol,
+            symbol=symbol,
+            bars=intraday_bars,
+            generated_at=generated_at,
+            raw_dbn_path=raw_dbn_path,
+        )
+        written.extend(backfill_written)
+    return written
+
+
+def _write_intraday_backfill_artifacts_from_bars(
+    *,
+    config: Phase1DatabentoLiveListenerConfig,
+    live_symbol: TrackBLiveMarketDataSymbol,
+    symbol: str,
+    bars: Sequence[Mapping[str, Any]],
+    generated_at: datetime,
+    raw_dbn_path: Path,
+) -> list[Path]:
+    one_minute = _current_session_anchor_bars(
+        bars=[dict(bar) for bar in bars],
+        generated_at=generated_at,
+    )
+    timeframe_bars = _timeframe_bars(one_minute)
+    written: list[Path] = []
+    for timeframe in PHASE1_RUNTIME_TIMEFRAMES:
+        payload = _runtime_payload_for_service(
+            config=config,
+            live_symbol=live_symbol,
+            symbol=symbol,
+            timeframe=timeframe,
+            generated_at=generated_at,
+            bars=timeframe_bars.get(timeframe, []),
+            raw_dbn_path=raw_dbn_path,
+        )
+        payload.update(
+            {
+                "source": "RECOVERED_PHASE1_1M",
+                "source_id": f"RECOVERED_PHASE1_1M_{symbol.lower()}",
+                "anchor_recovery_backfill": True,
+                "phase1_current_day_backfill": True,
+                "retention_policy": "CURRENT_FUTURES_SESSION_FROM_1800_ET",
+                "source_live_runtime_root": str(_resolve_path(config.repo_root, config.runtime_candle_root)),
+                "can_submit": False,
+                "paper_trade_allowed": False,
+                "live_money_eligible": False,
+            }
+        )
+        path = _intraday_backfill_path_for_listener(config=config, symbol=symbol, timeframe=timeframe)
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
         written.append(path)
@@ -869,6 +962,12 @@ def _runtime_candle_path_for_listener(
     *, config: Phase1DatabentoLiveListenerConfig, symbol: str, timeframe: str
 ) -> Path:
     return _resolve_path(config.repo_root, config.runtime_candle_root) / symbol / timeframe / "latest_runtime_candles.json"
+
+
+def _intraday_backfill_path_for_listener(
+    *, config: Phase1DatabentoLiveListenerConfig, symbol: str, timeframe: str
+) -> Path:
+    return _resolve_path(config.repo_root, config.intraday_backfill_root) / symbol / timeframe / "latest_runtime_candles.json"
 
 
 def _read_json(path: Path) -> Any:
@@ -1022,6 +1121,22 @@ def _row_and_artifacts_for_live_result(
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
             written.append(path)
+            intraday_payload = {
+                **payload,
+                "source": "RECOVERED_PHASE1_1M",
+                "source_id": f"RECOVERED_PHASE1_1M_{symbol.lower()}",
+                "anchor_recovery_backfill": True,
+                "phase1_current_day_backfill": True,
+                "retention_policy": "CURRENT_FUTURES_SESSION_FROM_1800_ET",
+                "source_live_runtime_root": str(_resolve_path(config.repo_root, config.runtime_candle_root)),
+                "can_submit": False,
+                "paper_trade_allowed": False,
+                "live_money_eligible": False,
+            }
+            intraday_path = _intraday_backfill_path(config=config, symbol=symbol, timeframe=timeframe)
+            intraday_path.parent.mkdir(parents=True, exist_ok=True)
+            intraday_path.write_text(json.dumps(intraday_payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+            written.append(intraday_path)
     return (
         {
             "symbol": symbol,
@@ -1333,6 +1448,10 @@ def _runtime_candle_path(*, config: Phase1DatabentoLiveRuntimeCandlesConfig, sym
     return _resolve_path(config.repo_root, config.runtime_candle_root) / symbol / timeframe / "latest_runtime_candles.json"
 
 
+def _intraday_backfill_path(*, config: Phase1DatabentoLiveRuntimeCandlesConfig, symbol: str, timeframe: str) -> Path:
+    return _resolve_path(config.repo_root, config.intraday_backfill_root) / symbol / timeframe / "latest_runtime_candles.json"
+
+
 def _resolve_path(repo_root: Path, value: Path) -> Path:
     return value if value.is_absolute() else Path(repo_root) / value
 
@@ -1369,6 +1488,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--live-market-data-symbols-path", type=Path, default=DEFAULT_TRACK_B_LIVE_MARKET_DATA_SYMBOLS_PATH)
     parser.add_argument("--repo-root", default=str(REPO_ROOT))
     parser.add_argument("--runtime-candle-root", default=str(DEFAULT_RUNTIME_CANDLE_ROOT))
+    parser.add_argument("--intraday-backfill-root", default=str(DEFAULT_INTRADAY_BACKFILL_ROOT))
     parser.add_argument("--report-dir", default=str(DEFAULT_REPORT_DIR))
     parser.add_argument("--raw-dbn-root", default=str(DEFAULT_RAW_DBN_ROOT))
     parser.add_argument("--legacy-live-output-root", default=str(DEFAULT_TRACK_B_DATABENTO_LIVE_RUNTIME_FEED_OUTPUT_ROOT))
@@ -1399,6 +1519,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             config=Phase1DatabentoLiveListenerConfig(
                 repo_root=Path(args.repo_root),
                 runtime_candle_root=Path(args.runtime_candle_root),
+                intraday_backfill_root=Path(args.intraday_backfill_root),
                 report_dir=Path(args.report_dir),
                 raw_dbn_root=Path(args.raw_dbn_root),
                 live_market_data_symbols_path=Path(args.live_market_data_symbols_path),
@@ -1433,6 +1554,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         config=Phase1DatabentoLiveRuntimeCandlesConfig(
             repo_root=Path(args.repo_root),
             runtime_candle_root=Path(args.runtime_candle_root),
+            intraday_backfill_root=Path(args.intraday_backfill_root),
             report_dir=Path(args.report_dir),
             legacy_live_output_root=Path(args.legacy_live_output_root),
             live_market_data_symbols_path=Path(args.live_market_data_symbols_path),

@@ -10,6 +10,12 @@ from mgc_v05l.execution_core.phase1_databento_historical_seed import (
     build_phase1_databento_historical_seed,
 )
 from mgc_v05l.execution_core.phase1_runtime_ticker_registry import PHASE1_RUNTIME_TICKER_ORDER
+from mgc_v05l.execution_core.track_b_session_anchor_resolver import (
+    SessionAnchorReasonCode,
+    SessionAnchorStatus,
+    TrackBSessionAnchorConfig,
+    resolve_session_anchor,
+)
 
 NOW = datetime(2026, 5, 10, 16, 0, tzinfo=timezone.utc)
 
@@ -60,6 +66,24 @@ def _records(count: int = 30) -> list[dict[str, Any]]:
     return rows
 
 
+def _records_for_window(*, start: datetime, count: int) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    for index in range(count):
+        ts = start + timedelta(minutes=index)
+        px = 100.0 + index
+        rows.append(
+            {
+                "ts_event": ts.isoformat(),
+                "open": px,
+                "high": px + 1.0,
+                "low": px - 1.0,
+                "close": px + 0.5,
+                "volume": 10 + index,
+            }
+        )
+    return rows
+
+
 def _config(root: Path, **overrides: object) -> Phase1HistoricalSeedConfig:
     values = {
         "repo_root": root,
@@ -76,14 +100,14 @@ def test_bounded_30_day_window_and_all_10_symbols_are_requested(tmp_path: Path) 
 
     result = build_phase1_databento_historical_seed(config=_config(tmp_path), client=client)
 
-    assert len(client.requests) == 10
+    assert len(client.requests) == len(PHASE1_RUNTIME_TICKER_ORDER)
     assert {request["request_symbol"] for request in client.requests} == {f"{symbol}.v.0" for symbol in PHASE1_RUNTIME_TICKER_ORDER}
     assert all(request["dataset"] == "GLBX.MDP3" for request in client.requests)
     assert all(request["schema_name"] == "ohlcv-1m" for request in client.requests)
     assert all(request["end"] == NOW.replace(second=0, microsecond=0) for request in client.requests)
     assert all(request["start"] == NOW.replace(second=0, microsecond=0) - timedelta(days=30) for request in client.requests)
-    assert result.report["phase1_symbol_count"] == 10
-    assert result.report["historical_seed_ready_count"] == 10
+    assert result.report["phase1_symbol_count"] == len(PHASE1_RUNTIME_TICKER_ORDER)
+    assert result.report["historical_seed_ready_count"] == len(PHASE1_RUNTIME_TICKER_ORDER)
     assert result.report["final_classification"] == "SUNDAY_HISTORICAL_SEED_READY"
 
 
@@ -118,6 +142,37 @@ def test_seed_artifacts_include_runtime_provenance_and_do_not_enable_submit(tmp_
     assert payload["archive_artifact_used"] is False
     assert payload["can_submit"] is False
     assert payload["live_money_eligible"] is False
+
+
+def test_historical_seed_writes_current_day_intraday_backfill_for_anchor_recovery(tmp_path: Path) -> None:
+    now = datetime(2026, 6, 1, 18, 42, tzinfo=timezone.utc)
+    records = _records_for_window(
+        start=datetime(2026, 6, 1, 13, 30, tzinfo=timezone.utc),
+        count=312,
+    )
+
+    build_phase1_databento_historical_seed(
+        config=_config(tmp_path, symbols=("MNQ",), now=now),
+        client=FakeHistoricalClient(records=records),
+    )
+
+    hot_path = tmp_path / "outputs/track_b_execution_core/phase1_runtime_market_data/MNQ/1m/latest_runtime_candles.json"
+    hot_payload = json.loads(hot_path.read_text(encoding="utf-8"))
+    hot_payload["bars"] = hot_payload["bars"][-90:]
+    hot_payload["bar_count"] = 90
+    hot_path.write_text(json.dumps(hot_payload), encoding="utf-8")
+
+    result = resolve_session_anchor(
+        "MNQ",
+        "US_0930_OPEN",
+        now,
+        config=TrackBSessionAnchorConfig(repo_root=tmp_path),
+    )
+
+    assert result.status == SessionAnchorStatus.READY
+    assert result.source == "RECOVERED_PHASE1_1M"
+    assert result.reason_code == SessionAnchorReasonCode.ANCHOR_RECOVERED_FROM_PHASE1_GAP_BACKFILL
+    assert result.reference_price == "101.0"
 
 
 def test_available_end_retry_keeps_seed_bounded_to_30_days(tmp_path: Path) -> None:

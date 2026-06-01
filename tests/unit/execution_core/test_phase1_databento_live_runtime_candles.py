@@ -17,6 +17,11 @@ from mgc_v05l.execution_core.phase1_runtime_data_readiness import (
     Phase1RuntimeDataReadinessConfig,
     build_phase1_runtime_data_readiness,
 )
+from mgc_v05l.execution_core.track_b_session_anchor_resolver import (
+    SessionAnchorStatus,
+    TrackBSessionAnchorConfig,
+    resolve_session_anchor,
+)
 from mgc_v05l.execution_core.track_b_databento_live_runtime_feed import (
     TrackBDatabentoLiveFeedConfig,
     TrackBDatabentoLiveFeedResult,
@@ -690,6 +695,47 @@ def test_live_listener_symbol_mapping_distinguishes_micros_from_full_size_roots(
         )
         assert payload["symbol"] == symbol
         assert payload["realtime_feed_confirmed"] is True
+
+
+def test_live_listener_retains_current_session_intraday_backfill_for_session_anchors(tmp_path: Path) -> None:
+    now = datetime(2026, 6, 1, 18, 42, tzinfo=timezone.utc)
+    records = _live_records(312, symbol="MNQ", end=now - timedelta(minutes=1))
+    records.extend(_live_records(312, symbol="MES", end=now - timedelta(minutes=1)))
+    client = FakeLiveClient(records)
+
+    run_phase1_databento_live_listener(
+        config=_listener_config(tmp_path, symbols=("MNQ", "MES"), now=now, max_bars=90),
+        live_client_factory=lambda _key: client,
+        now_func=lambda: now,
+    )
+
+    for symbol in ("MNQ", "MES"):
+        hot_payload = json.loads(
+            (
+                tmp_path
+                / f"outputs/track_b_execution_core/phase1_runtime_market_data/{symbol}/1m/latest_runtime_candles.json"
+            ).read_text(encoding="utf-8")
+        )
+        assert hot_payload["bar_count"] == 90
+        assert all(str(bar["bar_end"]) != "2026-06-01T13:30:00+00:00" for bar in hot_payload["bars"])
+
+        backfill_path = (
+            tmp_path
+            / f"outputs/track_b_execution_core/phase1_runtime_market_data_intraday_backfill/{symbol}/1m/latest_runtime_candles.json"
+        )
+        backfill_payload = json.loads(backfill_path.read_text(encoding="utf-8"))
+        assert backfill_payload["source"] == "RECOVERED_PHASE1_1M"
+        assert backfill_payload["anchor_recovery_backfill"] is True
+        assert any(str(bar["bar_end"]) == "2026-06-01T13:30:00+00:00" for bar in backfill_payload["bars"])
+
+        anchor = resolve_session_anchor(
+            symbol,
+            "US_0930_OPEN",
+            now,
+            config=TrackBSessionAnchorConfig(repo_root=tmp_path),
+        )
+        assert anchor.status == SessionAnchorStatus.READY
+        assert anchor.source == "RECOVERED_PHASE1_1M"
 
 
 def test_no_broker_or_paper_proof_terms_in_phase1_live_module() -> None:

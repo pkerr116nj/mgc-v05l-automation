@@ -23,6 +23,7 @@ from mgc_v05l.market_data.databento_provider import DatabentoHistoricalHttpClien
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 DEFAULT_RUNTIME_CANDLE_ROOT = Path("outputs") / "track_b_execution_core" / "phase1_runtime_market_data"
+DEFAULT_INTRADAY_BACKFILL_ROOT = Path("outputs") / "track_b_execution_core" / "phase1_runtime_market_data_intraday_backfill"
 DEFAULT_REPORT_DIR = Path("outputs") / "reports" / "phase1_databento_historical_seed"
 DEFAULT_DATABENTO_BASE_URL = "https://hist.databento.com/v0"
 DEFAULT_DATABENTO_DATASET = "GLBX.MDP3"
@@ -55,6 +56,7 @@ class HistoricalSeedClient(Protocol):
 class Phase1HistoricalSeedConfig:
     repo_root: Path = REPO_ROOT
     runtime_candle_root: Path = DEFAULT_RUNTIME_CANDLE_ROOT
+    intraday_backfill_root: Path = DEFAULT_INTRADAY_BACKFILL_ROOT
     report_dir: Path = DEFAULT_REPORT_DIR
     symbols: tuple[str, ...] = PHASE1_RUNTIME_TICKER_ORDER
     lookback_days: int = DEFAULT_LOOKBACK_DAYS
@@ -150,6 +152,23 @@ def build_phase1_databento_historical_seed(
                 path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
                 artifacts_written.append(path)
                 symbol_artifacts.append(str(path))
+                intraday_payload = {
+                    **payload,
+                    "source": "RECOVERED_PHASE1_1M",
+                    "source_id": f"RECOVERED_PHASE1_1M_{symbol.lower()}",
+                    "anchor_recovery_backfill": True,
+                    "phase1_current_day_backfill": True,
+                    "retention_policy": "HISTORICAL_SEED_REQUEST_WINDOW",
+                    "source_historical_seed_root": str(_resolve_path(config.repo_root, config.runtime_candle_root)),
+                    "can_submit": False,
+                    "paper_trade_allowed": False,
+                    "live_money_eligible": False,
+                }
+                intraday_path = _intraday_backfill_path(config=config, symbol=symbol, timeframe=timeframe)
+                intraday_path.parent.mkdir(parents=True, exist_ok=True)
+                intraday_path.write_text(json.dumps(intraday_payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+                artifacts_written.append(intraday_path)
+                symbol_artifacts.append(str(intraday_path))
         rows.append(
             {
                 "symbol": symbol,
@@ -449,10 +468,15 @@ def _write_report(*, config: Phase1HistoricalSeedConfig, report: dict[str, Any])
 
 
 def _runtime_candle_path(*, config: Phase1HistoricalSeedConfig, symbol: str, timeframe: str) -> Path:
-    root = Path(config.runtime_candle_root)
-    if not root.is_absolute():
-        root = Path(config.repo_root) / root
-    return root / symbol / timeframe / "latest_runtime_candles.json"
+    return _resolve_path(config.repo_root, config.runtime_candle_root) / symbol / timeframe / "latest_runtime_candles.json"
+
+
+def _intraday_backfill_path(*, config: Phase1HistoricalSeedConfig, symbol: str, timeframe: str) -> Path:
+    return _resolve_path(config.repo_root, config.intraday_backfill_root) / symbol / timeframe / "latest_runtime_candles.json"
+
+
+def _resolve_path(repo_root: Path, value: Path) -> Path:
+    return value if value.is_absolute() else Path(repo_root) / value
 
 
 def _continuous_symbol(symbol: str) -> str:
@@ -494,6 +518,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--symbols", default=",".join(PHASE1_RUNTIME_TICKER_ORDER))
     parser.add_argument("--repo-root", default=str(REPO_ROOT))
     parser.add_argument("--runtime-candle-root", default=str(DEFAULT_RUNTIME_CANDLE_ROOT))
+    parser.add_argument("--intraday-backfill-root", default=str(DEFAULT_INTRADAY_BACKFILL_ROOT))
     parser.add_argument("--report-dir", default=str(DEFAULT_REPORT_DIR))
     parser.add_argument("--dataset", default=DEFAULT_DATABENTO_DATASET)
     parser.add_argument("--base-url", default=DEFAULT_DATABENTO_BASE_URL)
@@ -510,6 +535,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         config=Phase1HistoricalSeedConfig(
             repo_root=Path(args.repo_root),
             runtime_candle_root=Path(args.runtime_candle_root),
+            intraday_backfill_root=Path(args.intraday_backfill_root),
             report_dir=Path(args.report_dir),
             symbols=symbols,
             lookback_days=args.lookback_days,

@@ -382,15 +382,19 @@ def _resolve_from_candle_artifact(
     bars = payload.get("bars") or payload.get("candles") or []
     if not isinstance(bars, list):
         bars = []
-    matches = []
+    primary_matches = []
+    legacy_matches = []
     for row in bars:
         if not isinstance(row, Mapping):
             continue
         bar = _bar_from_row(row)
         if bar is None:
             continue
-        if _bar_contains_anchor(bar, expected.anchor_time_utc):
-            matches.append(bar)
+        if _bar_contains_anchor_primary(bar, expected.anchor_time_utc):
+            primary_matches.append(bar)
+        elif _bar_contains_anchor_legacy(bar, expected.anchor_time_utc):
+            legacy_matches.append(bar)
+    matches = primary_matches or legacy_matches
     if len(matches) > 1:
         return _not_ready_result(
             request=request,
@@ -600,10 +604,20 @@ def _ready_reason_for_source(source_kind: str) -> SessionAnchorReasonCode:
 
 
 def _bar_contains_anchor(bar: Any, anchor_time_utc: datetime) -> bool:
+    return _bar_contains_anchor_primary(bar, anchor_time_utc) or _bar_contains_anchor_legacy(bar, anchor_time_utc)
+
+
+def _bar_contains_anchor_primary(bar: Any, anchor_time_utc: datetime) -> bool:
     start = bar.start_ts.astimezone(UTC)
     end = bar.end_ts.astimezone(UTC)
     anchor = anchor_time_utc.astimezone(UTC)
-    return start <= anchor < end or end == anchor
+    return start <= anchor < end
+
+
+def _bar_contains_anchor_legacy(bar: Any, anchor_time_utc: datetime) -> bool:
+    end = bar.end_ts.astimezone(UTC)
+    anchor = anchor_time_utc.astimezone(UTC)
+    return end == anchor
 
 
 def _bar_from_row(row: Mapping[str, Any]) -> Any | None:
