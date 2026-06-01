@@ -74,6 +74,9 @@ DEFAULT_PAPER_RUNTIME_TRUTH_ARTIFACT = (
     / "runtime"
     / "paper_runtime_truth.json"
 )
+DEFAULT_PAPER_OPERATOR_STATUS_ARTIFACT = (
+    Path("outputs") / "probationary_pattern_engine" / "paper_session" / "operator_status.json"
+)
 
 
 @dataclass(frozen=True)
@@ -82,6 +85,7 @@ class TrackBAuthorityRefreshHeartbeatConfig:
     output_path: Path = DEFAULT_AUTHORITY_REFRESH_HEARTBEAT_ARTIFACT
     events_path: Path = DEFAULT_AUTHORITY_REFRESH_EVENTS_ARTIFACT
     runtime_truth_path: Path = DEFAULT_PAPER_RUNTIME_TRUTH_ARTIFACT
+    operator_status_path: Path = DEFAULT_PAPER_OPERATOR_STATUS_ARTIFACT
     control_plane_snapshot_path: Path = DEFAULT_CONTROL_PLANE_SNAPSHOT_ARTIFACT
     runtime_safe_state_envelope_path: Path = DEFAULT_RUNTIME_SAFE_STATE_ENVELOPE_ARTIFACT
     runtime_supervisor_authority_path: Path = DEFAULT_RUNTIME_SUPERVISOR_AUTHORITY_ARTIFACT
@@ -262,6 +266,38 @@ def refresh_track_b_paper_authority_if_due(
     return _write_heartbeat(config=config, payload=payload)
 
 
+def record_track_b_authority_refresh_runtime_failure(
+    *,
+    config: TrackBAuthorityRefreshHeartbeatConfig,
+    exception: BaseException,
+    now: datetime | None = None,
+    reason_codes: Sequence[str] = ("AUTHORITY_REFRESH_RUNTIME_CALL_FAILED",),
+) -> dict[str, Any]:
+    """Persist a visible read-only heartbeat failure from the active runtime loop."""
+
+    actual_now = _ensure_utc(now or datetime.now(UTC))
+    previous = _read_json(config.resolve(config.output_path))
+    runtime_truth = _read_json(config.resolve(config.runtime_truth_path))
+    control_plane = _read_json(config.resolve(config.control_plane_snapshot_path))
+    payload = _base_payload(
+        config=config,
+        now=actual_now,
+        classification=AUTHORITY_REFRESH_FAILED,
+        latest_successful_refresh_at=previous.get("latest_successful_refresh_at"),
+        reason_codes=[*reason_codes, type(exception).__name__],
+        runtime_truth=runtime_truth,
+        control_plane_age_seconds=_artifact_age_seconds(control_plane, actual_now),
+    )
+    payload.update(
+        {
+            "last_failure_at": actual_now.isoformat(),
+            "exception_type": type(exception).__name__,
+            "exception_message": str(exception),
+        }
+    )
+    return _write_heartbeat(config=config, payload=payload)
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Refresh read-only Track B PAPER authority artifacts when due.")
     parser.add_argument("--repo-root", default=str(Path(__file__).resolve().parents[3]))
@@ -293,15 +329,34 @@ def _base_payload(
     runtime_truth: Mapping[str, Any],
     control_plane_age_seconds: float | None = None,
 ) -> dict[str, Any]:
+    latest_successful_refresh_age_seconds = _age_seconds(latest_successful_refresh_at, now)
+    authority_fresh = (
+        classification != AUTHORITY_REFRESH_FAILED
+        and latest_successful_refresh_age_seconds is not None
+        and latest_successful_refresh_age_seconds < float(config.bridge_max_age_seconds)
+    )
+    runtime_active = _runtime_active(runtime_truth)
+    operator_status = _read_json(config.resolve(config.operator_status_path))
+    out_of_window = _all_active_lanes_out_of_window(operator_status)
     return {
         "schema_version": SCHEMA_VERSION,
         "generated_at": now.isoformat(),
         "classification": classification,
+        "activity_classification": _activity_classification(
+            runtime_active=runtime_active,
+            authority_fresh=authority_fresh,
+            out_of_window=out_of_window,
+            classification=classification,
+        ),
         "reason_codes": list(reason_codes),
         "latest_successful_refresh_at": latest_successful_refresh_at,
-        "runtime_active": _runtime_active(runtime_truth),
+        "latest_successful_refresh_age_seconds": latest_successful_refresh_age_seconds,
+        "authority_fresh": authority_fresh,
+        "runtime_active": runtime_active,
         "runtime_pid": runtime_truth.get("producer_pid") or runtime_truth.get("pid"),
         "runtime_instance_id": runtime_truth.get("runtime_instance_id"),
+        "current_detected_session": operator_status.get("current_detected_session"),
+        "all_active_lanes_out_of_window": out_of_window,
         "control_plane_snapshot_age_seconds": control_plane_age_seconds,
         "refresh_interval_seconds": float(config.interval_seconds),
         "bridge_max_age_seconds": float(config.bridge_max_age_seconds),
@@ -316,6 +371,7 @@ def _base_payload(
         "artifact_paths": {
             "authority_refresh": str(config.resolve(config.output_path)),
             "runtime_truth": str(config.resolve(config.runtime_truth_path)),
+            "operator_status": str(config.resolve(config.operator_status_path)),
             "control_plane_snapshot": str(config.resolve(config.control_plane_snapshot_path)),
             "safe_state_envelope": str(config.resolve(config.runtime_safe_state_envelope_path)),
             "runtime_supervisor_authority": str(config.resolve(config.runtime_supervisor_authority_path)),
@@ -324,6 +380,65 @@ def _base_payload(
             "shared_truth_refresh": str(config.resolve(config.shared_truth_refresh_path)),
         },
     }
+
+
+def _activity_classification(
+    *,
+    runtime_active: bool,
+    authority_fresh: bool,
+    out_of_window: bool,
+    classification: str,
+) -> str:
+    if not runtime_active:
+        return "RUNTIME_INACTIVE"
+    if classification == AUTHORITY_REFRESH_FAILED:
+        return "AUTHORITY_REFRESH_FAILED"
+    if authority_fresh and out_of_window:
+        return "OUT_OF_WINDOW_BUT_AUTHORITY_FRESH"
+    if authority_fresh:
+        return "AUTHORITY_FRESH_RUNTIME_ACTIVE"
+    return "BLOCKED_STALE_TRUTH"
+
+
+def _all_active_lanes_out_of_window(operator_status: Mapping[str, Any]) -> bool:
+    current_session = _normalize_session(operator_status.get("current_detected_session"))
+    lanes = operator_status.get("lanes")
+    if not current_session or not isinstance(lanes, Sequence) or isinstance(lanes, (str, bytes)):
+        return False
+    active_lane_ids = {
+        str(lane_id)
+        for lane_id in (operator_status.get("active_lane_ids") or [])
+        if str(lane_id)
+    }
+    considered = []
+    for lane in lanes:
+        if not isinstance(lane, Mapping):
+            continue
+        lane_id = str(lane.get("lane_id") or "")
+        if active_lane_ids and lane_id not in active_lane_ids:
+            continue
+        allowed_sessions = {
+            _normalize_session(session)
+            for session in (lane.get("allowed_sessions") or [])
+            if _normalize_session(session)
+        }
+        if not allowed_sessions:
+            raw_restriction = str(lane.get("session_restriction") or "")
+            allowed_sessions = {
+                _normalize_session(part)
+                for part in raw_restriction.replace(",", "/").split("/")
+                if _normalize_session(part)
+            }
+        if not allowed_sessions or "ALL" in allowed_sessions:
+            return False
+        considered.append(lane_id)
+        if current_session in allowed_sessions:
+            return False
+    return bool(considered)
+
+
+def _normalize_session(value: object) -> str:
+    return str(value or "").strip().upper()
 
 
 def _write_heartbeat(

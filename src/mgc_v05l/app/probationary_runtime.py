@@ -112,6 +112,7 @@ from ..execution_core.track_b_runtime_truth_contract import (
 )
 from ..execution_core.track_b_authority_refresh_heartbeat import (
     TrackBAuthorityRefreshHeartbeatConfig,
+    record_track_b_authority_refresh_runtime_failure,
     refresh_track_b_paper_authority_if_due,
 )
 from ..research.trend_participation.canary import _CANARY_LANES
@@ -9437,20 +9438,19 @@ def _write_probationary_paper_runtime_truth(
 
 def _refresh_track_b_authority_for_active_paper_runtime(settings: StrategySettings) -> dict[str, Any]:
     repo_root = Path(__file__).resolve().parents[3]
+    config = TrackBAuthorityRefreshHeartbeatConfig(repo_root=repo_root)
     try:
         return refresh_track_b_paper_authority_if_due(
-            config=TrackBAuthorityRefreshHeartbeatConfig(repo_root=repo_root),
+            config=config,
             runtime_active=True,
         )
     except Exception as exc:
-        return {
-            "classification": "AUTHORITY_REFRESH_FAILED",
-            "reason_codes": ["AUTHORITY_REFRESH_RUNTIME_CALL_FAILED", type(exc).__name__],
-            "exception_message": str(exc),
-            "read_only": True,
-            "broker_mutation_allowed": False,
-            "runtime_artifacts_root": str(getattr(settings, "probationary_artifacts_path", "")),
-        }
+        payload = record_track_b_authority_refresh_runtime_failure(
+            config=config,
+            exception=exc,
+        )
+        payload["runtime_artifacts_root"] = str(getattr(settings, "probationary_artifacts_path", ""))
+        return payload
 
 
 def _write_probationary_paper_pid_metadata(*, settings: StrategySettings, runtime_truth: dict[str, Any]) -> Path:
