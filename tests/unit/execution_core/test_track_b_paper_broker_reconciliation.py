@@ -1915,17 +1915,28 @@ def test_unresolved_submit_intent_without_broker_effect_waits_inside_window(tmp_
     assert report["blockers"] == []
 
 
-def test_unresolved_submit_intent_without_broker_effect_times_out(tmp_path: Path) -> None:
+def test_unresolved_submit_intent_without_broker_effect_times_out_resolves_as_historical_flat(
+    tmp_path: Path,
+) -> None:
     config = _write_base_artifacts(tmp_path)
     _write_submit_intent_ownership(config, created_at="2026-05-11T11:50:00+00:00")
     _write_broker_truth(config, positions=[])
 
     report = reconcile_track_b_paper_broker_truth(config=config, now=NOW)
 
-    assert report["classification"] == "TRACK_B_PAPER_BROKER_RECONCILIATION_BLOCKED"
-    assert report["broker_reconciled"] is False
-    assert report["submit_intent_ownership_reconciliation"]["classification"] == "SUBMIT_INTENT_NO_BROKER_EFFECT_TIMEOUT"
-    assert any(blocker["code"] == "SUBMIT_INTENT_NO_BROKER_EFFECT_TIMEOUT" for blocker in report["blockers"])
+    assert report["classification"] == "TRACK_B_PAPER_BROKER_RECONCILED"
+    assert report["broker_reconciled"] is True
+    assert report["submit_intent_ownership_reconciliation"]["classification"] == "SUBMIT_INTENT_OWNERSHIP_NOT_APPLICABLE"
+    assert report["historical_reconciliation_debris_resolution"]["classification"] == "HISTORICAL_RECONCILIATION_DEBRIS_RESOLVED"
+    assert report["blockers"] == []
+    events = _read_registry_events(config)
+    assert any(event["event_type"] == "RECONCILED_FLAT_HISTORICAL_CLEANUP" for event in events)
+    latest_ownership = json.loads(
+        (config.repo_root / "outputs/track_b_execution_core/submit_intent_ownership/latest_track_b_submit_intent_ownership.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    assert latest_ownership["unresolved_count"] == 0
 
 
 def test_unsafe_unresolved_submit_intent_blocks_reconciliation(tmp_path: Path) -> None:
@@ -1942,6 +1953,143 @@ def test_unsafe_unresolved_submit_intent_blocks_reconciliation(tmp_path: Path) -
     assert report["classification"] == "TRACK_B_PAPER_BROKER_RECONCILIATION_BLOCKED"
     assert report["submit_intent_ownership_reconciliation"]["classification"] == "SUBMIT_INTENT_IDENTITY_MISMATCH_REVIEW_REQUIRED"
     assert any(blocker["code"] == "SUBMIT_INTENT_IDENTITY_MISMATCH_REVIEW_REQUIRED" for blocker in report["blockers"])
+
+
+def test_historical_debris_resolver_never_cleans_current_exposure(tmp_path: Path) -> None:
+    config = _write_base_artifacts(tmp_path)
+    _write_submit_intent_ownership(config, created_at="2026-05-11T11:50:00+00:00", symbol="MNQ", local_symbol="MNQM6", con_id=770561201)
+    _write_broker_truth(
+        config,
+        positions=[
+            {
+                "account_id": "DUM882026",
+                "symbol": "MNQ",
+                "local_symbol": "MNQM6",
+                "con_id": 770561201,
+                "expiry": "20260618",
+                "quantity": "1",
+            }
+        ],
+    )
+
+    report = reconcile_track_b_paper_broker_truth(config=config, now=NOW)
+
+    assert report["broker_reconciled"] is False
+    assert report["historical_reconciliation_debris_resolution"]["classification"] == "HISTORICAL_RECONCILIATION_DEBRIS_BLOCKED"
+    assert "CURRENT_EXPOSURE_OR_OPEN_ORDER_PRESENT" in report["historical_reconciliation_debris_resolution"]["reason_codes"]
+    latest_ownership = json.loads(
+        (config.repo_root / "outputs/track_b_execution_core/submit_intent_ownership/latest_track_b_submit_intent_ownership.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    assert latest_ownership["unresolved_count"] == 1
+
+
+def test_historical_debris_resolver_never_cleans_open_order(tmp_path: Path) -> None:
+    config = _write_base_artifacts(tmp_path)
+    _write_submit_intent_ownership(config, created_at="2026-05-11T11:50:00+00:00", symbol="MNQ", local_symbol="MNQM6", con_id=770561201)
+    _write_broker_truth(
+        config,
+        positions=[],
+        open_orders=[
+            {
+                "account_id": "DUM882026",
+                "symbol": "MNQ",
+                "local_symbol": "MNQM6",
+                "con_id": 770561201,
+                "order_id": "28",
+                "action": "BUY",
+                "quantity": "1",
+            }
+        ],
+    )
+
+    report = reconcile_track_b_paper_broker_truth(config=config, now=NOW)
+
+    assert report["broker_reconciled"] is False
+    assert report["historical_reconciliation_debris_resolution"]["classification"] == "HISTORICAL_RECONCILIATION_DEBRIS_BLOCKED"
+    assert "CURRENT_EXPOSURE_OR_OPEN_ORDER_PRESENT" in report["historical_reconciliation_debris_resolution"]["reason_codes"]
+
+
+def test_historical_debris_resolver_prefers_exact_execution_evidence(tmp_path: Path) -> None:
+    config = _write_base_artifacts(tmp_path)
+    record = _write_submit_intent_ownership(
+        config,
+        created_at="2026-05-11T11:50:00+00:00",
+        symbol="MNQ",
+        local_symbol="MNQM6",
+        expiry="20260618",
+        con_id=770561201,
+        broker_order_id="101",
+        client_id=17086,
+        perm_id=2047276405,
+        exec_id=None,
+        trade_id="trade_exact_exec_historical",
+        ownership_intent_id="submit_owner_exact_exec_historical",
+    )
+    _write_bridge_execution_report(
+        config,
+        lane_id="atp_companion_v1_asia_us",
+        symbol="MNQ",
+        local_symbol="MNQM6",
+        con_id=770561201,
+        order_id="101",
+        client_id=17086,
+        perm_id=2047276405,
+        exec_id="exec-historical-1",
+        account_id="DUM882026",
+    )
+    _write_broker_truth(config, positions=[])
+
+    report = reconcile_track_b_paper_broker_truth(config=config, now=NOW)
+
+    assert report["broker_reconciled"] is True
+    item = report["historical_reconciliation_debris_resolution"]["resolved_items"][0]
+    assert item["trade_id"] == record["extra"]["trade_id"]
+    assert item["broker_fill_evidence_classification"] == "BROKER_BACKED_FILL_EVIDENCE_RESOLVED"
+    events = _read_registry_events(config)
+    event_types = [event["event_type"] for event in events]
+    assert "ENTRY_FILL_BROKER_BACKED" in event_types
+    assert "RECONCILED_FLAT_HISTORICAL_CLEANUP" in event_types
+
+
+def test_historical_lifecycle_review_debris_clears_current_hot_path_reconciliation(tmp_path: Path) -> None:
+    config = _write_base_artifacts(tmp_path, review_required_count=1)
+    managed_path = config.repo_root / "outputs/track_b_execution_core/managed_positions/latest_managed_positions.json"
+    _write_json(
+        managed_path,
+        {
+            "generated_at": NOW.isoformat(),
+            "classification": "REVIEW_REQUIRED",
+            "managed_positions": [
+                {
+                    "classification": "REVIEW_REQUIRED",
+                    "review_required_position": {
+                        "trade_id": "trade_old_review",
+                        "lifecycle_id": "old_lifecycle",
+                        "account_id": "DUM882026",
+                        "instrument_family": "MGC",
+                        "symbol": "MGC",
+                        "local_symbol": "MGCM6",
+                        "con_id": 712565978,
+                        "quantity": 1,
+                        "side": "LONG",
+                        "strategy_id": "old_strategy",
+                        "generated_at": "2026-05-01T12:00:00+00:00",
+                        "final_position_status": "REVIEW_REQUIRED",
+                    },
+                }
+            ],
+        },
+    )
+    _write_broker_truth(config, positions=[])
+
+    report = reconcile_track_b_paper_broker_truth(config=config, now=NOW)
+
+    assert report["broker_reconciled"] is True
+    assert report["classification"] == "TRACK_B_PAPER_BROKER_RECONCILED"
+    assert report["historical_reconciliation_debris_resolution"]["classification"] == "HISTORICAL_RECONCILIATION_DEBRIS_RESOLVED"
+    assert not any(blocker["code"] == "LIFECYCLE_REVIEW_REQUIRED_PRESENT" for blocker in report["blockers"])
 
 
 def test_unknown_open_order_blocks_even_with_matching_submit_intent(tmp_path: Path) -> None:
@@ -2052,14 +2200,15 @@ def test_unknown_open_order_does_not_enter_settlement_wait(tmp_path: Path) -> No
     assert any(blocker["code"] == "UNKNOWN_BROKER_OPEN_ORDER" for blocker in report["blockers"])
 
 
-def test_blocks_when_lifecycle_reports_review_required(tmp_path: Path) -> None:
+def test_lifecycle_review_summary_debris_resolves_when_broker_lifecycle_flat(tmp_path: Path) -> None:
     config = _write_base_artifacts(tmp_path, review_required_count=1)
     _write_broker_truth(config)
 
     report = reconcile_track_b_paper_broker_truth(config=config, now=NOW)
 
-    assert any(blocker["code"] == "LIFECYCLE_REVIEW_REQUIRED_PRESENT" for blocker in report["blockers"])
-    assert report["broker_reconciled"] is False
+    assert report["blockers"] == []
+    assert report["broker_reconciled"] is True
+    assert report["historical_reconciliation_debris_resolution"]["classification"] == "HISTORICAL_RECONCILIATION_DEBRIS_RESOLVED"
 
 
 def test_blocks_when_bridge_fill_persistence_is_review_required(tmp_path: Path) -> None:

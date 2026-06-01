@@ -34,6 +34,7 @@ from mgc_v05l.execution_core.track_b_open_order_truth import (
     build_track_b_open_order_truth_from_reconciliation,
 )
 from mgc_v05l.execution_core.track_b_submit_intent_ownership import (
+    DEFAULT_TRACK_B_SUBMIT_INTENT_OWNERSHIP_LATEST_JSON,
     DEFAULT_TRACK_B_SUBMIT_INTENT_OWNERSHIP_JSONL,
     load_unresolved_submit_intent_ownership_records,
 )
@@ -41,6 +42,11 @@ from mgc_v05l.execution_core.track_b_central_trade_registry import TradeCurrentS
 from mgc_v05l.execution_core.track_b_broker_fill_evidence_resolver import (
     BrokerFillEvidenceRequest,
     resolve_broker_backed_fill_evidence,
+)
+from mgc_v05l.execution_core.track_b_historical_reconciliation_debris_resolver import (
+    RESOLVER_CLEAN,
+    HistoricalReconciliationDebrisResolverConfig,
+    resolve_historical_reconciliation_debris,
 )
 from mgc_v05l.execution_core.track_b_live_trade_registry import (
     append_live_trade_registry_event,
@@ -183,7 +189,6 @@ def reconcile_track_b_paper_broker_truth(
         live_position_status=live_position_status,
         pnl_summary=pnl_summary,
     )
-    blockers.extend(lifecycle_blockers)
     track_b_positions = _track_b_broker_positions(positions_snapshot, config.symbols)
     track_b_open_orders = _track_b_broker_open_orders(open_orders_snapshot, config.symbols)
     lifecycle_positions = _track_b_lifecycle_positions(live_position_status, config.symbols)
@@ -234,6 +239,33 @@ def reconcile_track_b_paper_broker_truth(
     )
     managed_order_registry_evidence = _managed_order_registry_evidence(config=config, now=actual_now)
     unresolved_submit_intents = _unresolved_submit_intent_ownership_records(config)
+    historical_debris_resolution = resolve_historical_reconciliation_debris(
+        config=HistoricalReconciliationDebrisResolverConfig(
+            repo_root=config.repo_root,
+            submit_intent_ownership_path=config.submit_intent_ownership_path,
+            latest_submit_intent_ownership_path=DEFAULT_TRACK_B_SUBMIT_INTENT_OWNERSHIP_LATEST_JSON,
+            stale_after_seconds=config.broker_truth_settlement_seconds,
+            apply=True,
+        ),
+        now=actual_now,
+        broker_positions=track_b_positions,
+        broker_open_orders=track_b_open_orders,
+        lifecycle_positions=lifecycle_positions,
+        unresolved_submit_intents=unresolved_submit_intents,
+        lifecycle_review_required=any(row.get("code") == "LIFECYCLE_REVIEW_REQUIRED_PRESENT" for row in lifecycle_blockers),
+        broker_flat_proof_path=positions_path,
+        open_orders_proof_path=open_orders_path,
+        source_artifact_path=config.report_path,
+    )
+    unresolved_submit_intents = _filter_historical_resolved_submit_intents(
+        unresolved_submit_intents,
+        historical_debris_resolution=historical_debris_resolution,
+    )
+    lifecycle_blockers = _filter_historical_resolved_lifecycle_blockers(
+        lifecycle_blockers,
+        historical_debris_resolution=historical_debris_resolution,
+    )
+    blockers.extend(lifecycle_blockers)
     submit_intent_ownership_reconciliation = _submit_intent_ownership_reconciliation_state(
         unresolved_submit_intents=unresolved_submit_intents,
         broker_positions=track_b_positions,
@@ -444,6 +476,7 @@ def reconcile_track_b_paper_broker_truth(
         "known_leak_test_entry_orders": known_leak_test_entry_orders,
         "unresolved_submit_intent_ownership_records": unresolved_submit_intents,
         "submit_intent_ownership_reconciliation": submit_intent_ownership_reconciliation,
+        "historical_reconciliation_debris_resolution": historical_debris_resolution,
         "broker_backed_entry_adoption": broker_backed_entry_adoption,
         "stale_managed_exit_orders": stale_managed_exit_orders,
         "hard_exit_order_not_marketable_orders": hard_exit_order_not_marketable,
@@ -1403,6 +1436,56 @@ def _unresolved_submit_intent_ownership_records(config: ReconciliationConfig) ->
         dict(row)
         for row in rows
         if str(row.get("symbol") or "").strip().upper() in allowed_symbols
+    ]
+
+
+def _filter_historical_resolved_submit_intents(
+    rows: Sequence[Mapping[str, Any]],
+    *,
+    historical_debris_resolution: Mapping[str, Any],
+) -> list[dict[str, Any]]:
+    if historical_debris_resolution.get("classification") != RESOLVER_CLEAN:
+        return [dict(row) for row in rows]
+    resolved_ids = {
+        str(item.get("ownership_intent_id") or "").strip()
+        for item in historical_debris_resolution.get("resolved_items") or []
+        if isinstance(item, Mapping) and item.get("kind") == "submit_intent"
+    }
+    resolved_trade_ids = {
+        str(item.get("trade_id") or "").strip()
+        for item in historical_debris_resolution.get("resolved_items") or []
+        if isinstance(item, Mapping) and item.get("kind") == "submit_intent"
+    }
+    filtered: list[dict[str, Any]] = []
+    for row in rows:
+        extra = row.get("extra") if isinstance(row.get("extra"), Mapping) else {}
+        ownership_id = str(row.get("ownership_intent_id") or "").strip()
+        trade_id = str(extra.get("trade_id") or row.get("trade_id") or "").strip()
+        if (ownership_id and ownership_id in resolved_ids) or (trade_id and trade_id in resolved_trade_ids):
+            continue
+        filtered.append(dict(row))
+    return filtered
+
+
+def _filter_historical_resolved_lifecycle_blockers(
+    blockers: Sequence[Mapping[str, Any]],
+    *,
+    historical_debris_resolution: Mapping[str, Any],
+) -> list[dict[str, Any]]:
+    if historical_debris_resolution.get("classification") != RESOLVER_CLEAN:
+        return [dict(row) for row in blockers]
+    lifecycle_resolved = any(
+        isinstance(item, Mapping)
+        and item.get("kind") in {"lifecycle_review", "lifecycle_review_summary"}
+        and item.get("resolved") is True
+        for item in historical_debris_resolution.get("resolved_items") or []
+    )
+    if not lifecycle_resolved:
+        return [dict(row) for row in blockers]
+    return [
+        dict(row)
+        for row in blockers
+        if row.get("code") != "LIFECYCLE_REVIEW_REQUIRED_PRESENT"
     ]
 
 
