@@ -52,6 +52,55 @@ def test_clean_working_close_away_from_market_is_modify_in_place_eligible(tmp_pa
     assert plan["classification"] == MODIFY_IN_PLACE_ELIGIBLE
     assert plan["identity_complete_for_modify"] is True
     assert plan["mutation_planned"] is False
+    assert plan["managed_close_reprice_policy"]["classification"] == "MANAGED_CLOSE_PRICED"
+    assert plan["managed_close_reprice_policy"]["limit_price"] == "29547.75"
+    assert plan["managed_close_reprice_policy"]["marketable_limit_offset_ticks"] == 8.0
+
+
+def test_unfilled_working_close_reprice_escalates_but_caps_slippage(tmp_path: Path) -> None:
+    _seed_base(
+        tmp_path,
+        managed_orders=[
+            {
+                **_managed_order(classification="WORKING_CLOSE_ORDER", marketable=False),
+                "reprice_attempt_count": 20,
+                "marketability": {
+                    "marketable": False,
+                    "market_reference": {"reference_price": "29549.75", "reference_age_seconds": 30.0},
+                },
+            }
+        ],
+        broker_positions=[_broker_position()],
+    )
+
+    payload = _build(tmp_path)
+
+    policy = payload["plans"][0]["managed_close_reprice_policy"]
+    assert policy["classification"] == "MANAGED_CLOSE_PRICED"
+    assert policy["limit_price"] == "29545.75"
+    assert policy["marketable_limit_offset_ticks"] == 16.0
+
+
+def test_stale_working_close_reference_blocks_reprice_policy(tmp_path: Path) -> None:
+    _seed_base(
+        tmp_path,
+        managed_orders=[
+            {
+                **_managed_order(classification="WORKING_CLOSE_ORDER", marketable=False),
+                "marketability": {
+                    "marketable": False,
+                    "market_reference": {"reference_price": "29549.75", "reference_age_seconds": 121.0},
+                },
+            }
+        ],
+        broker_positions=[_broker_position()],
+    )
+
+    payload = _build(tmp_path)
+
+    policy = payload["plans"][0]["managed_close_reprice_policy"]
+    assert policy["classification"] == "MANAGED_CLOSE_PRICING_BLOCKED"
+    assert policy["stale_reference_blocker"] == "MANAGED_CLOSE_REFERENCE_STALE"
 
 
 def test_suspicious_sentinel_order_requires_review_not_auto_replace(tmp_path: Path) -> None:

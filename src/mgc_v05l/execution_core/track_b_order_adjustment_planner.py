@@ -18,6 +18,14 @@ from typing import Any, Mapping, Sequence
 
 from mgc_v05l.execution_core.track_b_atomic_io import write_json_atomic
 
+from .track_b_exit_strategy_roster import (
+    ACTIVE_EVIDENCE_MANAGED_CLOSE_MAX_SLIPPAGE_TICKS,
+    ACTIVE_EVIDENCE_MANAGED_CLOSE_OFFSET_TICKS,
+    ACTIVE_EVIDENCE_MANAGED_CLOSE_REPRICE_ESCALATION_TICKS,
+    ACTIVE_EVIDENCE_MANAGED_CLOSE_STALE_AFTER_SECONDS,
+    ACTIVE_EVIDENCE_MANAGED_CLOSE_WIDEN_AFTER_SECONDS,
+    managed_close_limit_from_reference,
+)
 from .track_b_managed_order_registry import (
     BROKER_FLAT_WITH_WORKING_CLOSE,
     CLOSE_ORDER_CANCEL_REPLACE_REQUIRED,
@@ -202,6 +210,7 @@ def _plan_for_managed_order(
         config=config,
         symbol=str(order.get("symbol") or ""),
     )
+    close_reprice_policy = _managed_close_reprice_policy(order=order, reference=reference)
     classification: str
     recommended_action: str
     rationale: str
@@ -273,6 +282,7 @@ def _plan_for_managed_order(
         "broker_status": order.get("broker_status"),
         "limit_price": order.get("limit_price"),
         "market_reference": reference,
+        "managed_close_reprice_policy": close_reprice_policy,
         "identity": identity,
         "identity_complete_for_modify": _identity_complete(identity),
         "position_open": position_open,
@@ -395,6 +405,42 @@ def _phase1_market_reference(*, config: TrackBOrderAdjustmentPlannerConfig, symb
     }
 
 
+def _managed_close_reprice_policy(*, order: Mapping[str, Any], reference: Mapping[str, Any]) -> dict[str, Any]:
+    symbol = str(order.get("symbol") or "").upper()
+    tick_size = "0.25" if symbol in {"MNQ", "MES", "NQ", "ES"} else "0.1"
+    return managed_close_limit_from_reference(
+        reference_price=reference.get("reference_price"),
+        close_action=str(order.get("action") or ""),
+        tick_size=tick_size,
+        base_offset_ticks=_int_or_default(
+            order.get("managed_close_offset_ticks"),
+            ACTIVE_EVIDENCE_MANAGED_CLOSE_OFFSET_TICKS,
+        ),
+        max_slippage_ticks=_int_or_default(
+            order.get("managed_close_max_slippage_ticks"),
+            ACTIVE_EVIDENCE_MANAGED_CLOSE_MAX_SLIPPAGE_TICKS,
+        ),
+        reprice_attempts=_int_or_default(order.get("reprice_attempt_count") or order.get("modify_attempt_count"), 0),
+        reprice_escalation_ticks=_int_or_default(
+            order.get("managed_close_reprice_escalation_ticks"),
+            ACTIVE_EVIDENCE_MANAGED_CLOSE_REPRICE_ESCALATION_TICKS,
+        ),
+        reference_age_seconds=_float_or_none(
+            reference.get("reference_age_seconds")
+            or reference.get("pricing_reference_age_seconds")
+            or reference.get("age_seconds")
+        ),
+        stale_reference_seconds=_int_or_default(
+            order.get("managed_close_stale_reference_seconds"),
+            ACTIVE_EVIDENCE_MANAGED_CLOSE_STALE_AFTER_SECONDS,
+        ),
+        widen_reference_seconds=_int_or_default(
+            order.get("managed_close_widen_reference_seconds"),
+            ACTIVE_EVIDENCE_MANAGED_CLOSE_WIDEN_AFTER_SECONDS,
+        ),
+    )
+
+
 def _authority_summary(payload: Mapping[str, Any], path: Path) -> dict[str, Any]:
     return {
         "artifact_path": str(path),
@@ -438,6 +484,22 @@ def _decimal_or_none(value: Any) -> Decimal | None:
     try:
         return Decimal(str(value))
     except (InvalidOperation, ValueError):
+        return None
+
+
+def _int_or_default(value: Any, default: int) -> int:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _float_or_none(value: Any) -> float | None:
+    if value in {None, ""}:
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
         return None
 
 

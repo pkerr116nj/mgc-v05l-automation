@@ -33,6 +33,14 @@ from .track_b_control_plane_snapshot import (
     build_track_b_control_plane_snapshot,
     write_track_b_control_plane_snapshot,
 )
+from .track_b_exit_strategy_roster import (
+    ACTIVE_EVIDENCE_MANAGED_CLOSE_MAX_SLIPPAGE_TICKS,
+    ACTIVE_EVIDENCE_MANAGED_CLOSE_OFFSET_TICKS,
+    ACTIVE_EVIDENCE_MANAGED_CLOSE_REPRICE_ESCALATION_TICKS,
+    ACTIVE_EVIDENCE_MANAGED_CLOSE_STALE_AFTER_SECONDS,
+    ACTIVE_EVIDENCE_MANAGED_CLOSE_WIDEN_AFTER_SECONDS,
+    managed_close_limit_from_reference,
+)
 from .track_b_managed_exit_attach import TrackBManagedExitAttachConfig, run_track_b_managed_exit_attach
 from .track_b_managed_order_modify_in_place import (
     IbkrPaperManagedOrderModifyAdapter,
@@ -817,6 +825,10 @@ def _current_known_limit_for_working_close(
 
 
 def _marketable_limit_for_working_close(*, order: Mapping[str, Any], plan: Mapping[str, Any]) -> Decimal | None:
+    policy = plan.get("managed_close_reprice_policy") if isinstance(plan.get("managed_close_reprice_policy"), Mapping) else {}
+    policy_limit = _decimal(policy.get("limit_price"))
+    if policy_limit is not None and str(policy.get("classification") or "") == "MANAGED_CLOSE_PRICED":
+        return policy_limit
     reference = plan.get("market_reference") if isinstance(plan.get("market_reference"), Mapping) else {}
     reference_price = _decimal(reference.get("reference_price"))
     if reference_price is None:
@@ -830,9 +842,29 @@ def _marketable_limit_for_working_close(*, order: Mapping[str, Any], plan: Mappi
     action = str(order.get("action") or plan.get("action") or "").upper()
     symbol = str(order.get("symbol") or plan.get("symbol") or "").upper()
     tick = _tick_size(symbol)
-    offset = tick * Decimal("2")
-    candidate = reference_price - offset if action == "SELL" else reference_price + offset
-    return _round_to_tick(candidate, tick)
+    priced = managed_close_limit_from_reference(
+        reference_price=reference_price,
+        close_action=action,
+        tick_size=str(tick),
+        base_offset_ticks=ACTIVE_EVIDENCE_MANAGED_CLOSE_OFFSET_TICKS,
+        max_slippage_ticks=ACTIVE_EVIDENCE_MANAGED_CLOSE_MAX_SLIPPAGE_TICKS,
+        reprice_attempts=_int_or_default(
+            order.get("reprice_attempt_count")
+            or plan.get("reprice_attempt_count")
+            or order.get("modify_attempt_count")
+            or plan.get("modify_attempt_count"),
+            0,
+        ),
+        reprice_escalation_ticks=ACTIVE_EVIDENCE_MANAGED_CLOSE_REPRICE_ESCALATION_TICKS,
+        reference_age_seconds=_float_or_none(
+            reference.get("reference_age_seconds")
+            or reference.get("pricing_reference_age_seconds")
+            or reference.get("age_seconds")
+        ),
+        stale_reference_seconds=ACTIVE_EVIDENCE_MANAGED_CLOSE_STALE_AFTER_SECONDS,
+        widen_reference_seconds=ACTIVE_EVIDENCE_MANAGED_CLOSE_WIDEN_AFTER_SECONDS,
+    )
+    return _decimal(priced.get("limit_price"))
 
 
 def _tick_size(symbol: str) -> Decimal:
@@ -845,6 +877,22 @@ def _round_to_tick(value: Decimal, tick: Decimal) -> Decimal:
     rounding = ROUND_FLOOR if value >= 0 else ROUND_CEILING
     steps = (value / tick).to_integral_value(rounding=rounding)
     return steps * tick
+
+
+def _int_or_default(value: Any, default: int) -> int:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _float_or_none(value: Any) -> float | None:
+    if value in {None, ""}:
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
 
 
 def _adoption_records(reconciliation: Mapping[str, Any]) -> list[dict[str, Any]]:

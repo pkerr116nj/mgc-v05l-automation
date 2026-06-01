@@ -270,11 +270,99 @@ def test_unattended_maintenance_rebuilds_current_order_plan_and_routes_modify(mo
     assert modify_calls[0].broker_order_id == "45"
     assert modify_calls[0].contract == "MGCM6"
     assert modify_calls[0].current_known_limit == "4528.7"
-    assert modify_calls[0].new_limit == "4525.0"
+    assert modify_calls[0].new_limit == "4524.4"
     assert modify_calls[0].apply is False
     assert report["classification"] == module.UNATTENDED_LIFECYCLE_MAINTENANCE_CLOSE_ORDER_MANAGED
     assert report["root_cause_controls"]["fresh_order_adjustment_plan_rebuilt_each_pass"] is True
     assert report["root_cause_controls"]["working_close_orders_managed_by_modify_in_place"] is True
+
+
+def test_unattended_maintenance_uses_reprice_policy_from_fresh_order_plan(monkeypatch, tmp_path: Path) -> None:
+    modify_calls = []
+    managed_order = {
+        "account_id": "DUM882026",
+        "symbol": "MNQ",
+        "contract": "MNQM6",
+        "local_symbol": "MNQM6",
+        "con_id": 770561201,
+        "action": "SELL",
+        "quantity": "1",
+        "broker_order_id": 59,
+        "perm_id": 1955790754,
+        "classification": "WORKING_CLOSE_ORDER",
+        "lifecycle_id": "life-mnq",
+        "source_order": {"account_id": "DUM882026", "symbol": "MNQ", "local_symbol": "MNQM6"},
+    }
+    current_plan = {
+        "classification": module.MODIFY_IN_PLACE_ELIGIBLE,
+        "broker_order_id": 59,
+        "perm_id": 1955790754,
+        "symbol": "MNQ",
+        "contract": "MNQM6",
+        "con_id": 770561201,
+        "action": "SELL",
+        "quantity": "1",
+        "limit_price": "30582.25",
+        "lifecycle_id": "life-mnq",
+        "identity": {
+            "account_id": "DUM882026",
+            "broker_order_id": 59,
+            "perm_id": 1955790754,
+            "contract": "MNQM6",
+            "con_id": 770561201,
+            "action": "SELL",
+            "quantity": "1",
+        },
+        "managed_close_reprice_policy": {
+            "classification": "MANAGED_CLOSE_PRICED",
+            "limit_price": "30523",
+            "marketable_limit_offset_ticks": 8.0,
+            "max_slippage_ticks": 16.0,
+        },
+        "market_reference": {"reference_price": "30525", "reference_age_seconds": 5.0},
+    }
+
+    monkeypatch.setattr(module, "reconcile_track_b_paper_broker_truth", lambda **_kwargs: {"classification": "TRACK_B_PAPER_BROKER_RECONCILED"})
+    _patch_truth(
+        monkeypatch,
+        managed_position={"lifecycle_id": "life-mnq", "exit_due": False, "managed_exit_policy_id": "GLOBEX_ACTIVE_EVIDENCE_TIMEBOX_60M_EXIT_V1"},
+    )
+    monkeypatch.setattr(
+        module,
+        "build_track_b_managed_order_registry",
+        lambda **_kwargs: {"classification": "WORKING_CLOSE_ORDER", "managed_orders": [managed_order]},
+    )
+    monkeypatch.setattr(
+        module,
+        "build_track_b_order_adjustment_plan",
+        lambda **_kwargs: {
+            "classification": module.MODIFY_IN_PLACE_ELIGIBLE,
+            "summary": {"plan_count": 1, "modify_in_place_eligible_count": 1},
+            "plans": [current_plan],
+        },
+    )
+    monkeypatch.setattr(module, "write_track_b_order_adjustment_plan", lambda **_kwargs: Path("order_adjustment.json"))
+    monkeypatch.setattr(
+        module,
+        "run_track_b_managed_order_modify_in_place",
+        lambda **kwargs: modify_calls.append(kwargs["config"])
+        or {
+            "classification": "MODIFY_IN_PLACE_DRY_RUN_READY",
+            "broker_mutation_attempted": False,
+            "broker_mutation_performed": False,
+            "new_order_created": False,
+            "artifact_path": "modify.json",
+        },
+    )
+
+    report = module.run_unattended_lifecycle_maintenance(config=_config(tmp_path), now=_now())
+
+    assert modify_calls
+    assert modify_calls[0].broker_order_id == "59"
+    assert modify_calls[0].current_known_limit == "30582.25"
+    assert modify_calls[0].new_limit == "30523"
+    assert modify_calls[0].apply is False
+    assert report["classification"] == module.UNATTENDED_LIFECYCLE_MAINTENANCE_CLOSE_ORDER_MANAGED
 
 
 def test_unattended_maintenance_persists_known_close_when_broker_flat(monkeypatch, tmp_path: Path) -> None:

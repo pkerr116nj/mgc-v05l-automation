@@ -1,11 +1,22 @@
 from __future__ import annotations
 
 from mgc_v05l.execution_core.track_b_exit_strategy_roster import (
+    MES_CHANGEOVER_0300_LONG_TIMEBOX_6H_V1,
+    MES_CHANGEOVER_0700_LONG_TIMEBOX_4H_V1,
+    MES_GLOBEX_ACTIVE_EVIDENCE_TIMEBOX_60M_V1,
+    MES_US_ACTIVE_EVIDENCE_TIMEBOX_60M_V1,
     MGC_DIAGNOSTIC_TIMEBOX_3X5M_V1,
+    ACTIVE_EVIDENCE_MANAGED_CLOSE_MAX_SLIPPAGE_TICKS,
+    ACTIVE_EVIDENCE_MANAGED_CLOSE_OFFSET_TICKS,
+    MNQ_CHANGEOVER_0300_LONG_TIMEBOX_6H_V1,
+    MNQ_CHANGEOVER_0700_LONG_TIMEBOX_4H_V1,
+    MNQ_GLOBEX_ACTIVE_EVIDENCE_TIMEBOX_60M_V1,
     MNQ_SNAP_TURN_TIMEBOX_3X5M_V1,
+    MNQ_US_ACTIVE_EVIDENCE_TIMEBOX_60M_V1,
     PAPER_DIAGNOSTIC_TIME_BOXED_3X5M_EXIT_V1,
     close_action_for_position_side,
     close_limit_from_profile,
+    managed_close_limit_from_reference,
     resolve_track_b_exit_profile,
     resolve_track_b_exit_profile_for_position,
 )
@@ -42,3 +53,108 @@ def test_mgc_diagnostic_timebox_profile_resolves_by_policy_and_instrument() -> N
     assert profile.managed_exit_policy_id == PAPER_DIAGNOSTIC_TIME_BOXED_3X5M_EXIT_V1
     assert profile.required_completed_5m_bars == 3
     assert close_limit_from_profile(latest_price="4534.9", side="LONG", profile=profile) == "4534.7"
+
+
+def test_mnq_changeover_timebox_profile_resolves_by_policy_and_instrument() -> None:
+    profile = resolve_track_b_exit_profile_for_position(
+        instrument_family="MNQ",
+        managed_exit_policy_id="CHANGEOVER_0300_LONG_TIMEBOX_6H_EXIT_V1",
+    )
+
+    assert profile.exit_profile_id == MNQ_CHANGEOVER_0300_LONG_TIMEBOX_6H_V1
+    assert profile.instrument_family == "MNQ"
+    assert profile.required_completed_5m_bars == 72
+    assert profile.paper_only is True
+    assert profile.live_money_eligible is False
+
+
+def test_changeover_continuation_profiles_cover_mnq_and_mes_timeboxes() -> None:
+    mnq_0700 = resolve_track_b_exit_profile(MNQ_CHANGEOVER_0700_LONG_TIMEBOX_4H_V1)
+    mes_0300 = resolve_track_b_exit_profile(MES_CHANGEOVER_0300_LONG_TIMEBOX_6H_V1)
+    mes_0700 = resolve_track_b_exit_profile(MES_CHANGEOVER_0700_LONG_TIMEBOX_4H_V1)
+
+    assert mnq_0700.instrument_family == "MNQ"
+    assert mnq_0700.managed_exit_policy_id == "CHANGEOVER_0700_LONG_TIMEBOX_4H_EXIT_V1"
+    assert mnq_0700.required_completed_5m_bars == 48
+    assert mes_0300.instrument_family == "MES"
+    assert mes_0300.required_completed_5m_bars == 72
+    assert mes_0700.instrument_family == "MES"
+    assert mes_0700.managed_exit_policy_id == "CHANGEOVER_0700_LONG_TIMEBOX_4H_EXIT_V1"
+
+
+def test_paper_active_evidence_profiles_cover_mnq_and_mes_60m_timeboxes() -> None:
+    mnq = resolve_track_b_exit_profile(MNQ_US_ACTIVE_EVIDENCE_TIMEBOX_60M_V1)
+    mes = resolve_track_b_exit_profile(MES_US_ACTIVE_EVIDENCE_TIMEBOX_60M_V1)
+
+    assert mnq.instrument_family == "MNQ"
+    assert mes.instrument_family == "MES"
+    assert mnq.managed_exit_policy_id == "US_ACTIVE_EVIDENCE_TIMEBOX_60M_EXIT_V1"
+    assert mes.managed_exit_policy_id == "US_ACTIVE_EVIDENCE_TIMEBOX_60M_EXIT_V1"
+    assert mnq.required_completed_5m_bars == 12
+    assert mes.required_completed_5m_bars == 12
+    assert mnq.price_offset_ticks == ACTIVE_EVIDENCE_MANAGED_CLOSE_OFFSET_TICKS
+    assert mes.max_slippage_ticks == ACTIVE_EVIDENCE_MANAGED_CLOSE_MAX_SLIPPAGE_TICKS
+    assert mnq.live_money_eligible is False
+    assert mes.paper_proof_allowed is False
+
+
+def test_active_evidence_managed_close_uses_more_aggressive_marketable_offset_than_entry() -> None:
+    profile = resolve_track_b_exit_profile(MNQ_US_ACTIVE_EVIDENCE_TIMEBOX_60M_V1)
+
+    assert profile.price_offset_ticks > 4
+    assert close_limit_from_profile(latest_price="30525.00", side="LONG", profile=profile) == "30523"
+
+
+def test_globex_active_evidence_profiles_cover_mnq_and_mes_60m_timeboxes() -> None:
+    mnq = resolve_track_b_exit_profile(MNQ_GLOBEX_ACTIVE_EVIDENCE_TIMEBOX_60M_V1)
+    mes = resolve_track_b_exit_profile(MES_GLOBEX_ACTIVE_EVIDENCE_TIMEBOX_60M_V1)
+
+    assert mnq.instrument_family == "MNQ"
+    assert mes.instrument_family == "MES"
+    assert mnq.managed_exit_policy_id == "GLOBEX_ACTIVE_EVIDENCE_TIMEBOX_60M_EXIT_V1"
+    assert mes.managed_exit_policy_id == "GLOBEX_ACTIVE_EVIDENCE_TIMEBOX_60M_EXIT_V1"
+    assert mnq.required_completed_5m_bars == 12
+    assert mes.required_completed_5m_bars == 12
+    assert mnq.live_money_eligible is False
+    assert mes.paper_proof_allowed is False
+
+
+def test_managed_close_reprice_escalates_within_cap_and_does_not_loop_unbounded() -> None:
+    first = managed_close_limit_from_reference(
+        reference_price="30525",
+        close_action="SELL",
+        tick_size="0.25",
+        base_offset_ticks=8,
+        max_slippage_ticks=16,
+        reprice_attempts=0,
+        reprice_escalation_ticks=4,
+    )
+    later = managed_close_limit_from_reference(
+        reference_price="30525",
+        close_action="SELL",
+        tick_size="0.25",
+        base_offset_ticks=8,
+        max_slippage_ticks=16,
+        reprice_attempts=9,
+        reprice_escalation_ticks=4,
+    )
+
+    assert first["classification"] == "MANAGED_CLOSE_PRICED"
+    assert first["limit_price"] == "30523"
+    assert later["limit_price"] == "30521"
+    assert later["marketable_limit_offset_ticks"] == 16.0
+
+
+def test_managed_close_blocks_stale_reference() -> None:
+    priced = managed_close_limit_from_reference(
+        reference_price="30525",
+        close_action="SELL",
+        tick_size="0.25",
+        base_offset_ticks=8,
+        max_slippage_ticks=16,
+        reference_age_seconds=121.0,
+        stale_reference_seconds=120,
+    )
+
+    assert priced["classification"] == "MANAGED_CLOSE_PRICING_BLOCKED"
+    assert priced["stale_reference_blocker"] == "MANAGED_CLOSE_REFERENCE_STALE"

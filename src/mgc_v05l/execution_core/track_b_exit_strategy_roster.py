@@ -9,18 +9,33 @@ guarded broker path.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from decimal import Decimal
-from typing import Mapping
+from decimal import Decimal, InvalidOperation
+from typing import Any, Mapping
 
 
 PAPER_DIAGNOSTIC_TIME_BOXED_3X5M_EXIT_V1 = "PAPER_DIAGNOSTIC_TIME_BOXED_3X5M_EXIT_V1"
 FORCED_SESSION_SEGMENT_LOCAL_EXIT_V1 = "FORCED_SESSION_SEGMENT_LOCAL_EXIT_V1"
 MNQ_SNAP_TURN_TIMEBOX_3X5M_V1 = "MNQ_SNAP_TURN_TIMEBOX_3X5M_V1"
+MNQ_CHANGEOVER_0300_LONG_TIMEBOX_6H_V1 = "MNQ_CHANGEOVER_0300_LONG_TIMEBOX_6H_V1"
+MES_CHANGEOVER_0300_LONG_TIMEBOX_6H_V1 = "MES_CHANGEOVER_0300_LONG_TIMEBOX_6H_V1"
+MNQ_CHANGEOVER_0700_LONG_TIMEBOX_4H_V1 = "MNQ_CHANGEOVER_0700_LONG_TIMEBOX_4H_V1"
+MES_CHANGEOVER_0700_LONG_TIMEBOX_4H_V1 = "MES_CHANGEOVER_0700_LONG_TIMEBOX_4H_V1"
+MNQ_US_SESSION_CONTINUATION_TIMEBOX_2H_V1 = "MNQ_US_SESSION_CONTINUATION_TIMEBOX_2H_V1"
+MES_US_SESSION_CONTINUATION_TIMEBOX_2H_V1 = "MES_US_SESSION_CONTINUATION_TIMEBOX_2H_V1"
+MNQ_US_ACTIVE_EVIDENCE_TIMEBOX_60M_V1 = "MNQ_US_ACTIVE_EVIDENCE_TIMEBOX_60M_V1"
+MES_US_ACTIVE_EVIDENCE_TIMEBOX_60M_V1 = "MES_US_ACTIVE_EVIDENCE_TIMEBOX_60M_V1"
+MNQ_GLOBEX_ACTIVE_EVIDENCE_TIMEBOX_60M_V1 = "MNQ_GLOBEX_ACTIVE_EVIDENCE_TIMEBOX_60M_V1"
+MES_GLOBEX_ACTIVE_EVIDENCE_TIMEBOX_60M_V1 = "MES_GLOBEX_ACTIVE_EVIDENCE_TIMEBOX_60M_V1"
 MNQ_GLOBEX_REOPEN_FIRST_CANDLE_TIMEBOX_60M_SHADOW_V1 = "MNQ_GLOBEX_REOPEN_FIRST_CANDLE_TIMEBOX_60M_SHADOW_V1"
 MGC_DIAGNOSTIC_TIMEBOX_3X5M_V1 = "MGC_DIAGNOSTIC_TIMEBOX_3X5M_V1"
 MGC_FORCED_SESSION_SEGMENT_TIMEBOX_3X5M_V1 = "MGC_FORCED_SESSION_SEGMENT_TIMEBOX_3X5M_V1"
 TIMEBOXED_3X5M_MANAGED_LIMIT_CLOSE_V1 = "timeboxed_3x5m_managed_limit_close_v1"
 TIMEBOXED_MANAGED_LIMIT_CLOSE_V1 = "timeboxed_managed_limit_close_v1"
+ACTIVE_EVIDENCE_MANAGED_CLOSE_OFFSET_TICKS = 8
+ACTIVE_EVIDENCE_MANAGED_CLOSE_MAX_SLIPPAGE_TICKS = 16
+ACTIVE_EVIDENCE_MANAGED_CLOSE_REPRICE_ESCALATION_TICKS = 4
+ACTIVE_EVIDENCE_MANAGED_CLOSE_WIDEN_AFTER_SECONDS = 60
+ACTIVE_EVIDENCE_MANAGED_CLOSE_STALE_AFTER_SECONDS = 120
 
 
 @dataclass(frozen=True)
@@ -35,6 +50,10 @@ class TrackBExitProfile:
     price_offset_ticks: int
     tick_size: str
     profile_explanation: str
+    max_slippage_ticks: int | None = None
+    reprice_escalation_ticks: int = 0
+    stale_reference_seconds: int | None = None
+    widen_reference_seconds: int | None = None
     paper_only: bool = True
     live_money_eligible: bool = False
     paper_proof_allowed: bool = False
@@ -52,6 +71,10 @@ class TrackBExitProfile:
             "required_completed_5m_bars": self.required_completed_5m_bars,
             "price_offset_ticks": self.price_offset_ticks,
             "tick_size": self.tick_size,
+            "max_slippage_ticks": self.max_slippage_ticks,
+            "reprice_escalation_ticks": self.reprice_escalation_ticks,
+            "stale_reference_seconds": self.stale_reference_seconds,
+            "widen_reference_seconds": self.widen_reference_seconds,
             "profile_explanation": self.profile_explanation,
             "paper_only": self.paper_only,
             "live_money_eligible": self.live_money_eligible,
@@ -75,6 +98,182 @@ EXIT_PROFILE_ROSTER: Mapping[str, TrackBExitProfile] = {
         profile_explanation=(
             "PAPER diagnostic snap-turn close profile: after three completed 5m bars, "
             "submit the managed lifecycle close as an exact SELL/BUY limit order for the owned position."
+        ),
+    ),
+    MNQ_CHANGEOVER_0300_LONG_TIMEBOX_6H_V1: TrackBExitProfile(
+        exit_strategy_id=TIMEBOXED_MANAGED_LIMIT_CLOSE_V1,
+        exit_profile_id=MNQ_CHANGEOVER_0300_LONG_TIMEBOX_6H_V1,
+        managed_exit_policy_id="CHANGEOVER_0300_LONG_TIMEBOX_6H_EXIT_V1",
+        instrument_family="MNQ",
+        strategy_family="changeover_continuation",
+        order_type="LMT",
+        required_completed_5m_bars=72,
+        price_offset_ticks=2,
+        tick_size="0.25",
+        profile_explanation=(
+            "PAPER evidence-generation changeover close profile: after seventy-two completed 5m bars "
+            "(about six hours), submit the managed lifecycle close as an exact opposite-side limit order "
+            "for the owned MNQ position."
+        ),
+    ),
+    MES_CHANGEOVER_0300_LONG_TIMEBOX_6H_V1: TrackBExitProfile(
+        exit_strategy_id=TIMEBOXED_MANAGED_LIMIT_CLOSE_V1,
+        exit_profile_id=MES_CHANGEOVER_0300_LONG_TIMEBOX_6H_V1,
+        managed_exit_policy_id="CHANGEOVER_0300_LONG_TIMEBOX_6H_EXIT_V1",
+        instrument_family="MES",
+        strategy_family="changeover_continuation",
+        order_type="LMT",
+        required_completed_5m_bars=72,
+        price_offset_ticks=2,
+        tick_size="0.25",
+        profile_explanation=(
+            "PAPER evidence-generation changeover close profile: after seventy-two completed 5m bars "
+            "(about six hours), submit the managed lifecycle close as an exact opposite-side limit order "
+            "for the owned MES position."
+        ),
+    ),
+    MNQ_CHANGEOVER_0700_LONG_TIMEBOX_4H_V1: TrackBExitProfile(
+        exit_strategy_id=TIMEBOXED_MANAGED_LIMIT_CLOSE_V1,
+        exit_profile_id=MNQ_CHANGEOVER_0700_LONG_TIMEBOX_4H_V1,
+        managed_exit_policy_id="CHANGEOVER_0700_LONG_TIMEBOX_4H_EXIT_V1",
+        instrument_family="MNQ",
+        strategy_family="changeover_continuation",
+        order_type="LMT",
+        required_completed_5m_bars=48,
+        price_offset_ticks=2,
+        tick_size="0.25",
+        profile_explanation=(
+            "PAPER evidence-generation Europe-to-US changeover close profile: after forty-eight "
+            "completed 5m bars (about four hours), submit the managed lifecycle close as an exact "
+            "opposite-side limit order for the owned MNQ position."
+        ),
+    ),
+    MES_CHANGEOVER_0700_LONG_TIMEBOX_4H_V1: TrackBExitProfile(
+        exit_strategy_id=TIMEBOXED_MANAGED_LIMIT_CLOSE_V1,
+        exit_profile_id=MES_CHANGEOVER_0700_LONG_TIMEBOX_4H_V1,
+        managed_exit_policy_id="CHANGEOVER_0700_LONG_TIMEBOX_4H_EXIT_V1",
+        instrument_family="MES",
+        strategy_family="changeover_continuation",
+        order_type="LMT",
+        required_completed_5m_bars=48,
+        price_offset_ticks=2,
+        tick_size="0.25",
+        profile_explanation=(
+            "PAPER evidence-generation Europe-to-US changeover close profile: after forty-eight "
+            "completed 5m bars (about four hours), submit the managed lifecycle close as an exact "
+            "opposite-side limit order for the owned MES position."
+        ),
+    ),
+    MNQ_US_SESSION_CONTINUATION_TIMEBOX_2H_V1: TrackBExitProfile(
+        exit_strategy_id=TIMEBOXED_MANAGED_LIMIT_CLOSE_V1,
+        exit_profile_id=MNQ_US_SESSION_CONTINUATION_TIMEBOX_2H_V1,
+        managed_exit_policy_id="US_SESSION_CONTINUATION_TIMEBOX_2H_EXIT_V1",
+        instrument_family="MNQ",
+        strategy_family="us_session_continuation",
+        order_type="LMT",
+        required_completed_5m_bars=24,
+        price_offset_ticks=2,
+        tick_size="0.25",
+        profile_explanation=(
+            "PAPER evidence-generation US-session continuation close profile: after twenty-four "
+            "completed 5m bars (about two hours), submit the managed lifecycle close as an exact "
+            "opposite-side limit order for the owned MNQ position."
+        ),
+    ),
+    MES_US_SESSION_CONTINUATION_TIMEBOX_2H_V1: TrackBExitProfile(
+        exit_strategy_id=TIMEBOXED_MANAGED_LIMIT_CLOSE_V1,
+        exit_profile_id=MES_US_SESSION_CONTINUATION_TIMEBOX_2H_V1,
+        managed_exit_policy_id="US_SESSION_CONTINUATION_TIMEBOX_2H_EXIT_V1",
+        instrument_family="MES",
+        strategy_family="us_session_continuation",
+        order_type="LMT",
+        required_completed_5m_bars=24,
+        price_offset_ticks=2,
+        tick_size="0.25",
+        profile_explanation=(
+            "PAPER evidence-generation US-session continuation close profile: after twenty-four "
+            "completed 5m bars (about two hours), submit the managed lifecycle close as an exact "
+            "opposite-side limit order for the owned MES position."
+        ),
+    ),
+    MNQ_US_ACTIVE_EVIDENCE_TIMEBOX_60M_V1: TrackBExitProfile(
+        exit_strategy_id=TIMEBOXED_MANAGED_LIMIT_CLOSE_V1,
+        exit_profile_id=MNQ_US_ACTIVE_EVIDENCE_TIMEBOX_60M_V1,
+        managed_exit_policy_id="US_ACTIVE_EVIDENCE_TIMEBOX_60M_EXIT_V1",
+        instrument_family="MNQ",
+        strategy_family="paper_active_evidence",
+        order_type="LMT",
+        required_completed_5m_bars=12,
+        price_offset_ticks=ACTIVE_EVIDENCE_MANAGED_CLOSE_OFFSET_TICKS,
+        tick_size="0.25",
+        max_slippage_ticks=ACTIVE_EVIDENCE_MANAGED_CLOSE_MAX_SLIPPAGE_TICKS,
+        reprice_escalation_ticks=ACTIVE_EVIDENCE_MANAGED_CLOSE_REPRICE_ESCALATION_TICKS,
+        stale_reference_seconds=ACTIVE_EVIDENCE_MANAGED_CLOSE_STALE_AFTER_SECONDS,
+        widen_reference_seconds=ACTIVE_EVIDENCE_MANAGED_CLOSE_WIDEN_AFTER_SECONDS,
+        profile_explanation=(
+            "PAPER active-evidence US-session close profile: after twelve completed 5m bars "
+            "(about one hour), submit the managed lifecycle close as an exact opposite-side "
+            "limit order for the owned MNQ position."
+        ),
+    ),
+    MES_US_ACTIVE_EVIDENCE_TIMEBOX_60M_V1: TrackBExitProfile(
+        exit_strategy_id=TIMEBOXED_MANAGED_LIMIT_CLOSE_V1,
+        exit_profile_id=MES_US_ACTIVE_EVIDENCE_TIMEBOX_60M_V1,
+        managed_exit_policy_id="US_ACTIVE_EVIDENCE_TIMEBOX_60M_EXIT_V1",
+        instrument_family="MES",
+        strategy_family="paper_active_evidence",
+        order_type="LMT",
+        required_completed_5m_bars=12,
+        price_offset_ticks=ACTIVE_EVIDENCE_MANAGED_CLOSE_OFFSET_TICKS,
+        tick_size="0.25",
+        max_slippage_ticks=ACTIVE_EVIDENCE_MANAGED_CLOSE_MAX_SLIPPAGE_TICKS,
+        reprice_escalation_ticks=ACTIVE_EVIDENCE_MANAGED_CLOSE_REPRICE_ESCALATION_TICKS,
+        stale_reference_seconds=ACTIVE_EVIDENCE_MANAGED_CLOSE_STALE_AFTER_SECONDS,
+        widen_reference_seconds=ACTIVE_EVIDENCE_MANAGED_CLOSE_WIDEN_AFTER_SECONDS,
+        profile_explanation=(
+            "PAPER active-evidence US-session close profile: after twelve completed 5m bars "
+            "(about one hour), submit the managed lifecycle close as an exact opposite-side "
+            "limit order for the owned MES position."
+        ),
+    ),
+    MNQ_GLOBEX_ACTIVE_EVIDENCE_TIMEBOX_60M_V1: TrackBExitProfile(
+        exit_strategy_id=TIMEBOXED_MANAGED_LIMIT_CLOSE_V1,
+        exit_profile_id=MNQ_GLOBEX_ACTIVE_EVIDENCE_TIMEBOX_60M_V1,
+        managed_exit_policy_id="GLOBEX_ACTIVE_EVIDENCE_TIMEBOX_60M_EXIT_V1",
+        instrument_family="MNQ",
+        strategy_family="paper_active_evidence",
+        order_type="LMT",
+        required_completed_5m_bars=12,
+        price_offset_ticks=ACTIVE_EVIDENCE_MANAGED_CLOSE_OFFSET_TICKS,
+        tick_size="0.25",
+        max_slippage_ticks=ACTIVE_EVIDENCE_MANAGED_CLOSE_MAX_SLIPPAGE_TICKS,
+        reprice_escalation_ticks=ACTIVE_EVIDENCE_MANAGED_CLOSE_REPRICE_ESCALATION_TICKS,
+        stale_reference_seconds=ACTIVE_EVIDENCE_MANAGED_CLOSE_STALE_AFTER_SECONDS,
+        widen_reference_seconds=ACTIVE_EVIDENCE_MANAGED_CLOSE_WIDEN_AFTER_SECONDS,
+        profile_explanation=(
+            "PAPER active-evidence Globex close profile: after twelve completed 5m bars "
+            "(about one hour), submit the managed lifecycle close as an exact opposite-side "
+            "limit order for the owned MNQ position."
+        ),
+    ),
+    MES_GLOBEX_ACTIVE_EVIDENCE_TIMEBOX_60M_V1: TrackBExitProfile(
+        exit_strategy_id=TIMEBOXED_MANAGED_LIMIT_CLOSE_V1,
+        exit_profile_id=MES_GLOBEX_ACTIVE_EVIDENCE_TIMEBOX_60M_V1,
+        managed_exit_policy_id="GLOBEX_ACTIVE_EVIDENCE_TIMEBOX_60M_EXIT_V1",
+        instrument_family="MES",
+        strategy_family="paper_active_evidence",
+        order_type="LMT",
+        required_completed_5m_bars=12,
+        price_offset_ticks=ACTIVE_EVIDENCE_MANAGED_CLOSE_OFFSET_TICKS,
+        tick_size="0.25",
+        max_slippage_ticks=ACTIVE_EVIDENCE_MANAGED_CLOSE_MAX_SLIPPAGE_TICKS,
+        reprice_escalation_ticks=ACTIVE_EVIDENCE_MANAGED_CLOSE_REPRICE_ESCALATION_TICKS,
+        stale_reference_seconds=ACTIVE_EVIDENCE_MANAGED_CLOSE_STALE_AFTER_SECONDS,
+        widen_reference_seconds=ACTIVE_EVIDENCE_MANAGED_CLOSE_WIDEN_AFTER_SECONDS,
+        profile_explanation=(
+            "PAPER active-evidence Globex close profile: after twelve completed 5m bars "
+            "(about one hour), submit the managed lifecycle close as an exact opposite-side "
+            "limit order for the owned MES position."
         ),
     ),
     MNQ_GLOBEX_REOPEN_FIRST_CANDLE_TIMEBOX_60M_SHADOW_V1: TrackBExitProfile(
@@ -166,9 +365,123 @@ def close_action_for_position_side(side: str) -> str:
 def close_limit_from_profile(*, latest_price: str | None, side: str, profile: TrackBExitProfile) -> str | None:
     if latest_price in {None, ""}:
         return None
-    latest = Decimal(str(latest_price))
-    tick = Decimal(str(profile.tick_size))
-    offset = tick * Decimal(max(profile.price_offset_ticks, 0))
-    raw = latest - offset if close_action_for_position_side(side) == "SELL" else latest + offset
+    priced = managed_close_limit_from_reference(
+        reference_price=latest_price,
+        close_action=close_action_for_position_side(side),
+        tick_size=profile.tick_size,
+        base_offset_ticks=profile.price_offset_ticks,
+        max_slippage_ticks=profile.max_slippage_ticks,
+        reprice_escalation_ticks=profile.reprice_escalation_ticks,
+        stale_reference_seconds=profile.stale_reference_seconds,
+        widen_reference_seconds=profile.widen_reference_seconds,
+    )
+    return priced["limit_price"] if priced["classification"] == "MANAGED_CLOSE_PRICED" else None
+
+
+def managed_close_limit_from_reference(
+    *,
+    reference_price: Any,
+    close_action: str,
+    tick_size: str,
+    base_offset_ticks: int,
+    max_slippage_ticks: int | None = None,
+    reprice_attempts: int = 0,
+    reprice_escalation_ticks: int = 0,
+    reference_age_seconds: float | None = None,
+    stale_reference_seconds: int | None = None,
+    widen_reference_seconds: int | None = None,
+) -> dict[str, Any]:
+    reference = _decimal_or_none(reference_price)
+    tick = _decimal_or_none(tick_size)
+    if reference is None or tick is None or tick <= Decimal("0"):
+        return _managed_close_pricing_block(
+            blocker="MANAGED_CLOSE_REFERENCE_MISSING",
+            reference_price=reference_price,
+            reference_age_seconds=reference_age_seconds,
+            base_offset_ticks=base_offset_ticks,
+            max_slippage_ticks=max_slippage_ticks,
+            reprice_attempts=reprice_attempts,
+        )
+    if (
+        stale_reference_seconds is not None
+        and reference_age_seconds is not None
+        and reference_age_seconds > float(stale_reference_seconds)
+    ):
+        return _managed_close_pricing_block(
+            blocker="MANAGED_CLOSE_REFERENCE_STALE",
+            reference_price=str(reference),
+            reference_age_seconds=reference_age_seconds,
+            base_offset_ticks=base_offset_ticks,
+            max_slippage_ticks=max_slippage_ticks,
+            reprice_attempts=reprice_attempts,
+        )
+    action = str(close_action or "").strip().upper()
+    if action not in {"SELL", "BUY"}:
+        return _managed_close_pricing_block(
+            blocker="MANAGED_CLOSE_ACTION_UNSUPPORTED",
+            reference_price=str(reference),
+            reference_age_seconds=reference_age_seconds,
+            base_offset_ticks=base_offset_ticks,
+            max_slippage_ticks=max_slippage_ticks,
+            reprice_attempts=reprice_attempts,
+        )
+
+    offset_ticks = Decimal(max(int(base_offset_ticks), 0))
+    if (
+        widen_reference_seconds is not None
+        and reference_age_seconds is not None
+        and reference_age_seconds > float(widen_reference_seconds)
+    ):
+        offset_ticks += Decimal(max(int(reprice_escalation_ticks), 0))
+    offset_ticks += Decimal(max(int(reprice_attempts), 0) * max(int(reprice_escalation_ticks), 0))
+    max_ticks = Decimal(max(int(max_slippage_ticks), 0)) if max_slippage_ticks is not None else offset_ticks
+    if max_slippage_ticks is not None:
+        offset_ticks = min(offset_ticks, max_ticks)
+
+    offset = tick * offset_ticks
+    raw = reference - offset if action == "SELL" else reference + offset
     rounded = (raw / tick).to_integral_value() * tick
-    return format(rounded.normalize(), "f")
+    return {
+        "classification": "MANAGED_CLOSE_PRICED",
+        "limit_price": format(rounded.normalize(), "f"),
+        "close_action": action,
+        "reference_price": format(reference.normalize(), "f"),
+        "reference_age_seconds": reference_age_seconds,
+        "marketable_limit_offset_ticks": float(offset_ticks),
+        "max_slippage_ticks": float(max_ticks),
+        "reprice_attempts": max(int(reprice_attempts), 0),
+        "reprice_escalation_ticks": max(int(reprice_escalation_ticks), 0),
+        "stale_reference_blocker": None,
+    }
+
+
+def _managed_close_pricing_block(
+    *,
+    blocker: str,
+    reference_price: Any,
+    reference_age_seconds: float | None,
+    base_offset_ticks: int,
+    max_slippage_ticks: int | None,
+    reprice_attempts: int,
+) -> dict[str, Any]:
+    return {
+        "classification": "MANAGED_CLOSE_PRICING_BLOCKED",
+        "limit_price": None,
+        "reference_price": reference_price,
+        "reference_age_seconds": reference_age_seconds,
+        "marketable_limit_offset_ticks": None,
+        "max_slippage_ticks": float(max_slippage_ticks) if max_slippage_ticks is not None else None,
+        "base_offset_ticks": base_offset_ticks,
+        "reprice_attempts": max(int(reprice_attempts), 0),
+        "stale_reference_blocker": blocker,
+        "block_reason": blocker,
+    }
+
+
+def _decimal_or_none(value: Any) -> Decimal | None:
+    if value in {None, ""}:
+        return None
+    try:
+        return Decimal(str(value))
+    except (InvalidOperation, ValueError):
+        return None
