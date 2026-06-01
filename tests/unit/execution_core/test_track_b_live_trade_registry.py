@@ -193,6 +193,89 @@ def test_registry_managed_exit_validator_allows_dry_run_and_live_from_same_snaps
     assert dry_run["owner_identity"] == live["owner_identity"]
 
 
+def test_registry_managed_exit_validator_uses_matched_registry_reconciliation_when_legacy_lifecycle_is_stale(tmp_path):
+    repo_root = tmp_path
+    trade_id = "trade_mnq_registry_reconciled"
+    lifecycle_id = "life_mnq_registry_reconciled"
+    source_path = str(repo_root / "outputs/track_b_execution_core/strategy_bridge/bridge_report.json")
+    base = {
+        "trade_id": trade_id,
+        "lifecycle_id": lifecycle_id,
+        "lane_id": "mnq_us_active_participation_long",
+        "thesis_strategy_id": "mnq_us_active_participation_long",
+        "account_id": "DUM882026",
+        "symbol": "MNQ",
+        "con_id": 770561201,
+        "local_symbol": "MNQM6",
+        "expiry": "202606",
+        "side": "LONG",
+        "action": "BUY",
+        "qty": Decimal("1"),
+        "source_artifact_path": source_path,
+        "generated_at": NOW,
+    }
+    for event_type, extra in (
+        (TradeEventType.ENTRY_INTENT_CREATED, {}),
+        (TradeEventType.ENTRY_ORDER_SUBMITTED, {"order_id": "1", "client_id": "11127"}),
+        (
+            TradeEventType.ENTRY_FILL_BROKER_BACKED,
+            {"order_id": "1", "client_id": "11127", "perm_id": "1955790757", "exec_id": "exec-mnq", "price": "30436.75"},
+        ),
+        (
+            TradeEventType.LIFECYCLE_OPEN_MANAGED,
+            {"order_id": "1", "client_id": "11127", "perm_id": "1955790757", "exec_id": "exec-mnq", "price": "30436.75"},
+        ),
+    ):
+        append_live_trade_registry_event(
+            repo_root=repo_root,
+            event=make_live_trade_registry_event(event_type=event_type, **base, **extra),
+        )
+    phase1 = {
+        "ready": False,
+        "classification": "BROKER_TRUTH_SETTLEMENT_TIMEOUT",
+        "track_b_lifecycle_positions": [],
+        "track_b_broker_positions": [
+            {"account_id": "DUM882026", "symbol": "MNQ", "local_symbol": "MNQM6", "con_id": 770561201, "quantity": "1"}
+        ],
+        "registry_reconciliation": {
+            "classification": "REGISTRY_RECONCILIATION_MATCHED",
+            "blocking": False,
+            "mapped_records": [
+                {
+                    "trade_id": trade_id,
+                    "lifecycle_id": lifecycle_id,
+                    "account_id": "DUM882026",
+                    "instrument_family": "MNQ",
+                    "local_symbol": "MNQM6",
+                    "con_id": 770561201,
+                    "quantity": "1",
+                    "side": "LONG",
+                    "lane_id": "mnq_us_active_participation_long",
+                    "strategy_id": "mnq_us_active_participation_long",
+                    "entry_perm_id": "1955790757",
+                    "entry_exec_id": "exec-mnq",
+                }
+            ],
+        },
+    }
+
+    result = validate_registry_managed_exit_identity(
+        repo_root=repo_root,
+        trade_id=trade_id,
+        lifecycle_id=lifecycle_id,
+        account_id="DUM882026",
+        con_id=770561201,
+        local_symbol="MNQM6",
+        quantity=1,
+        action="SELL",
+        phase1_reconciliation_gate=phase1,
+    )
+
+    assert result["allowed"] is True
+    assert result["lifecycle_row"]["source"] == "CENTRAL_TRADE_REGISTRY_RECONCILIATION"
+    assert result["broker_position"]["con_id"] == 770561201
+
+
 def test_registry_managed_exit_validator_fails_closed_without_trade_id(tmp_path):
     result = validate_registry_managed_exit_identity(
         repo_root=tmp_path,

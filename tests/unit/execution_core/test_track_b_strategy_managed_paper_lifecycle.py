@@ -1787,6 +1787,330 @@ def test_managed_cleanup_close_allows_prior_runtime_generation_owner(tmp_path: P
     assert authorization["submit_allowed"] is True
 
 
+def test_managed_exit_close_authority_allows_when_entry_submit_readiness_is_blocked(tmp_path: Path) -> None:
+    config = base_config(
+        tmp_path,
+        strategy_id="MNQ_FIRST_BULL_SNAP_TURN_V1",
+        instrument_family="MNQ",
+        contract_key="MNQ-202606",
+        local_symbol="MNQM6",
+        con_id=770561201,
+        side="LONG",
+        close_limit_price="28728.5",
+        managed_exit_policy_id=TrackBManagedExitPolicy.PAPER_DIAGNOSTIC_TIME_BOXED_3X5M_EXIT_V1.value,
+    )
+    close_intent = {
+        "lifecycle_id": "open-managed-existing",
+        "trade_id": "MNQ_FIRST_BULL_SNAP_TURN_V1:open-managed-existing",
+        "order_action": "SELL",
+        "quantity": 1,
+        "close_limit_price": "28728.5",
+    }
+    seed_strategy_submit_authority(
+        tmp_path,
+        config=config,
+        intent_payload=close_intent,
+        intent_kind=IntentKind.CLOSE,
+        limit_price="28728.5",
+        safe_state_overrides={
+            "submit_allowed": False,
+            "broker_mutation_allowed": True,
+        },
+        snapshot_overrides={
+            "position_truth_classification": "REVIEW_REQUIRED",
+            "managed_position_registry_classification": "OPEN_MANAGED_EXIT_DUE",
+        },
+    )
+    _write_json(
+        tmp_path / "outputs/track_b_execution_core/paper_autonomous_recovery/latest_paper_autonomous_recovery_plan.json",
+        {
+            "generated_at": aware_now().isoformat(),
+            "classification": "PLAN_BLOCKED_ENTRY_READINESS",
+            "control_plane_snapshot_id": "snapshot-1",
+            "shared_truth_refresh_generation_id": "generation-1",
+            "execution_enabled": False,
+            "live_money_eligible": False,
+            "proposed_actions": [],
+        },
+    )
+
+    authorization = lifecycle_module.build_strategy_managed_submit_authorization(
+        config=config,
+        intent_payload=close_intent,
+        intent_kind=IntentKind.CLOSE,
+        limit_price="28728.5",
+        now=aware_now(),
+    )
+
+    assert authorization["authority_mode"] == lifecycle_module.MANAGED_EXIT_CLOSE_AUTHORITY
+    assert authorization["classification"] == lifecycle_module.STRATEGY_SUBMIT_AUTHORIZED
+    assert authorization["managed_exit_close_authority"]["allowed"] is True
+    assert authorization["managed_exit_close_authority"]["requires_entry_submit_authority"] is False
+    assert authorization["managed_exit_close_authority"]["requires_flat_position_state"] is False
+
+
+def test_managed_exit_close_authority_blocks_unsafe_safe_state(tmp_path: Path) -> None:
+    config = base_config(tmp_path)
+    close_intent = {
+        "lifecycle_id": "open-managed-existing",
+        "trade_id": "MNQ_FIRST_BULL_SNAP_TURN_V1:open-managed-existing",
+        "order_action": "SELL",
+        "quantity": 1,
+        "close_limit_price": "4705.1",
+    }
+    seed_strategy_submit_authority(
+        tmp_path,
+        config=config,
+        intent_payload=close_intent,
+        intent_kind=IntentKind.CLOSE,
+        limit_price="4705.1",
+        safe_state_overrides={"broker_mutation_allowed": False},
+    )
+
+    authorization = lifecycle_module.build_strategy_managed_submit_authorization(
+        config=config,
+        intent_payload=close_intent,
+        intent_kind=IntentKind.CLOSE,
+        limit_price="4705.1",
+        now=aware_now(),
+    )
+
+    assert authorization["classification"] == lifecycle_module.STRATEGY_SUBMIT_BLOCKED_ENTRY_EXPOSURE
+    assert "SAFE_STATE_BROKER_MUTATION_NOT_ALLOWED" in authorization["reason"]
+
+
+def test_managed_exit_close_authority_blocks_stale_control_plane(tmp_path: Path) -> None:
+    config = base_config(tmp_path, pre_action_snapshot_max_age_seconds=60)
+    close_intent = {
+        "lifecycle_id": "open-managed-existing",
+        "trade_id": "MNQ_FIRST_BULL_SNAP_TURN_V1:open-managed-existing",
+        "order_action": "SELL",
+        "quantity": 1,
+        "close_limit_price": "4705.1",
+    }
+    seed_strategy_submit_authority(
+        tmp_path,
+        config=config,
+        intent_payload=close_intent,
+        intent_kind=IntentKind.CLOSE,
+        limit_price="4705.1",
+        snapshot_overrides={"generated_at": "2026-05-06T22:00:00+00:00"},
+    )
+
+    authorization = lifecycle_module.build_strategy_managed_submit_authorization(
+        config=config,
+        intent_payload=close_intent,
+        intent_kind=IntentKind.CLOSE,
+        limit_price="4705.1",
+        now=aware_now(),
+    )
+
+    assert authorization["classification"] == lifecycle_module.STRATEGY_SUBMIT_BLOCKED_ENTRY_EXPOSURE
+    assert "CONTROL_PLANE_CLOSE_AUTHORITY_STALE" in authorization["reason"]
+
+
+def test_managed_exit_close_authority_blocks_missing_trade_id(tmp_path: Path) -> None:
+    config = base_config(tmp_path)
+    close_intent = {
+        "lifecycle_id": "open-managed-existing",
+        "order_action": "SELL",
+        "quantity": 1,
+        "close_limit_price": "4705.1",
+    }
+    seed_strategy_submit_authority(
+        tmp_path,
+        config=config,
+        intent_payload=close_intent,
+        intent_kind=IntentKind.CLOSE,
+        limit_price="4705.1",
+    )
+
+    authorization = lifecycle_module.build_strategy_managed_submit_authorization(
+        config=config,
+        intent_payload=close_intent,
+        intent_kind=IntentKind.CLOSE,
+        limit_price="4705.1",
+        now=aware_now(),
+    )
+
+    assert authorization["classification"] == lifecycle_module.STRATEGY_SUBMIT_BLOCKED_ENTRY_EXPOSURE
+    assert "TRADE_ID_MISSING" in authorization["reason"]
+
+
+def test_managed_exit_close_authority_blocks_conflicting_close_order(tmp_path: Path) -> None:
+    config = base_config(tmp_path)
+    close_intent = {
+        "lifecycle_id": "open-managed-existing",
+        "trade_id": "MNQ_FIRST_BULL_SNAP_TURN_V1:open-managed-existing",
+        "order_action": "SELL",
+        "quantity": 1,
+        "close_limit_price": "4705.1",
+    }
+    seed_strategy_submit_authority(
+        tmp_path,
+        config=config,
+        intent_payload=close_intent,
+        intent_kind=IntentKind.CLOSE,
+        limit_price="4705.1",
+        snapshot_overrides={
+            "open_order_truth_classification": "DUPLICATE_CLOSE_ORDER",
+            "managed_order_registry_classification": "DUPLICATE_CLOSE_ORDER",
+        },
+    )
+
+    authorization = lifecycle_module.build_strategy_managed_submit_authorization(
+        config=config,
+        intent_payload=close_intent,
+        intent_kind=IntentKind.CLOSE,
+        limit_price="4705.1",
+        now=aware_now(),
+    )
+
+    assert authorization["classification"] == lifecycle_module.STRATEGY_SUBMIT_BLOCKED_ENTRY_EXPOSURE
+    assert "CONFLICTING_CLOSE_ORDER" in authorization["reason"]
+
+
+def test_blocked_managed_close_preserves_open_managed_lifecycle(tmp_path: Path) -> None:
+    def blocked_close_submitter(
+        config: TrackBStrategyManagedPaperLifecycleConfig,
+        close_intent: Mapping[str, Any],
+    ) -> Mapping[str, Any]:
+        return {
+            "submitted": False,
+            "submit_attempted": True,
+            "broker_state_mutated": False,
+            "review_required": True,
+            "primary_blocker": "Managed-exit close authority blocked close: SAFE_STATE_BROKER_MUTATION_NOT_ALLOWED",
+            "close_intent": dict(close_intent),
+        }
+
+    stages = TrackBStrategyManagedPaperLifecycleStages(
+        entry_submitter=fake_stages().entry_submitter,
+        exit_policy=fake_stages(close=True).exit_policy,
+        close_submitter=blocked_close_submitter,
+    )
+
+    result = maintain_open_track_b_strategy_managed_paper_lifecycle(
+        config=base_config(
+            tmp_path,
+            strategy_id="MNQ_FIRST_BULL_SNAP_TURN_V1",
+            instrument_family="MNQ",
+            contract_key="MNQ-202606",
+            local_symbol="MNQM6",
+            con_id=770561201,
+            side="LONG",
+            close_limit_price="28728.5",
+            managed_exit_policy_id=TrackBManagedExitPolicy.PAPER_DIAGNOSTIC_TIME_BOXED_3X5M_EXIT_V1.value,
+            completed_5m_bars_since_entry=12,
+            submit_enabled=True,
+        ),
+        existing_lifecycle_report=open_managed_report(),
+        stages=stages,
+        now=aware_now(),
+    )
+
+    assert result.classification == TrackBManagedPaperLifecycleClassification.OPEN_MANAGED
+    assert result.report["final_position_status"] == "OPEN_MANAGED"
+    assert result.report["review_required"] is False
+    assert result.report["close_submit_attempt"]["broker_state_mutated"] is False
+    assert "SAFE_STATE_BROKER_MUTATION_NOT_ALLOWED" in result.report["primary_blocker"]
+
+
+def test_managed_exit_close_authority_uses_registry_reconciliation_when_phase1_gate_is_stale(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    config = base_config(
+        tmp_path,
+        strategy_id="mnq_us_active_participation_long",
+        lane_id="mnq_us_active_participation_long",
+        instrument_family="MNQ",
+        contract_key="MNQ-202606",
+        local_symbol="MNQM6",
+        con_id=770561201,
+        side="LONG",
+        close_limit_price="30437.5",
+        managed_exit_policy_id=TrackBManagedExitPolicy.US_ACTIVE_EVIDENCE_TIMEBOX_60M_EXIT_V1.value,
+    )
+    close_intent = {
+        "lifecycle_id": "open-managed-existing",
+        "trade_id": "MNQ_FIRST_BULL_SNAP_TURN_V1:open-managed-existing",
+        "order_action": "SELL",
+        "quantity": 1,
+        "close_limit_price": "30437.5",
+    }
+    seed_strategy_submit_authority(
+        tmp_path,
+        config=config,
+        intent_payload=close_intent,
+        intent_kind=IntentKind.CLOSE,
+        limit_price="30437.5",
+    )
+    monkeypatch.setattr(
+        lifecycle_module,
+        "evaluate_phase1_broker_reconciliation_submit_gate",
+        lambda **_kwargs: {
+            "ready": False,
+            "classification": "BROKER_TRUTH_SETTLEMENT_TIMEOUT",
+            "track_b_lifecycle_positions": [],
+            "track_b_broker_positions": [
+                {
+                    "account_id": "DUM882026",
+                    "symbol": "MNQ",
+                    "local_symbol": "MNQM6",
+                    "con_id": 770561201,
+                    "quantity": "1",
+                }
+            ],
+        },
+    )
+    _write_json(
+        tmp_path / "outputs/reports/track_b_paper_broker_reconciliation/latest_track_b_paper_broker_reconciliation.json",
+        {
+            "registry_reconciliation": {
+                "classification": "REGISTRY_RECONCILIATION_MATCHED",
+                "blocking": False,
+                "mapped_records": [
+                    {
+                        "trade_id": "MNQ_FIRST_BULL_SNAP_TURN_V1:open-managed-existing",
+                        "lifecycle_id": "open-managed-existing",
+                        "account_id": "DUM882026",
+                        "instrument_family": "MNQ",
+                        "local_symbol": "MNQM6",
+                        "con_id": 770561201,
+                        "quantity": "1",
+                        "side": "LONG",
+                        "lane_id": "mnq_us_active_participation_long",
+                        "strategy_id": "mnq_us_active_participation_long",
+                        "entry_perm_id": "347068100",
+                        "entry_exec_id": "exec-1",
+                    }
+                ],
+            },
+            "track_b_broker_positions": [
+                {
+                    "account_id": "DUM882026",
+                    "symbol": "MNQ",
+                    "local_symbol": "MNQM6",
+                    "con_id": 770561201,
+                    "quantity": "1",
+                }
+            ],
+        },
+    )
+
+    authorization = lifecycle_module.build_strategy_managed_submit_authorization(
+        config=config,
+        intent_payload=close_intent,
+        intent_kind=IntentKind.CLOSE,
+        limit_price="30437.5",
+        now=aware_now(),
+    )
+
+    assert authorization["classification"] == lifecycle_module.STRATEGY_SUBMIT_AUTHORIZED
+    assert authorization["managed_exit_close_authority"]["registry_exit_validation"]["allowed"] is True
+
+
 def test_maintenance_blocks_close_when_broker_position_missing_before_submit(
     tmp_path: Path,
     monkeypatch,

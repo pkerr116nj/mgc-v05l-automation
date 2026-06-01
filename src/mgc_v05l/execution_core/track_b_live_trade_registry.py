@@ -183,7 +183,12 @@ def validate_registry_managed_exit_identity(
         blockers.append("missing_trade_id")
     if not requested_lifecycle_id:
         blockers.append("missing_lifecycle_id")
-    if not bool(phase1_reconciliation_gate.get("ready")):
+    registry_reconciliation_row = _exact_registry_reconciliation_row(
+        phase1_reconciliation_gate=phase1_reconciliation_gate,
+        trade_id=requested_trade_id,
+        lifecycle_id=requested_lifecycle_id,
+    )
+    if not bool(phase1_reconciliation_gate.get("ready")) and not registry_reconciliation_row:
         blockers.append("broker_lifecycle_reconciliation_not_clean")
     if blockers:
         return _managed_exit_validation_result(blockers=blockers)
@@ -206,10 +211,12 @@ def validate_registry_managed_exit_identity(
     if owner.lifecycle_id != requested_lifecycle_id:
         blockers.append("lifecycle_id_mismatch")
 
-    lifecycle_row = _exact_lifecycle_row(phase1_reconciliation_gate, requested_lifecycle_id)
+    lifecycle_row = _exact_lifecycle_row(phase1_reconciliation_gate, requested_lifecycle_id) or registry_reconciliation_row
     if not lifecycle_row:
         blockers.append("lifecycle_identity_row_missing")
     broker_row = _matching_broker_position(lifecycle_row, phase1_reconciliation_gate) if lifecycle_row else {}
+    if not broker_row:
+        blockers.append("broker_position_missing_for_managed_exit")
 
     requested_account = _valid_identity_text(account_id)
     owner_account = _valid_identity_text(owner.account_id)
@@ -393,6 +400,44 @@ def _exact_lifecycle_row(phase1_reconciliation_gate: Mapping[str, Any], lifecycl
     for row in list(phase1_reconciliation_gate.get("track_b_lifecycle_positions") or []):
         if isinstance(row, Mapping) and str(row.get("lifecycle_id") or "").strip() == lifecycle_id:
             return dict(row)
+    return {}
+
+
+def _exact_registry_reconciliation_row(
+    *,
+    phase1_reconciliation_gate: Mapping[str, Any],
+    trade_id: str,
+    lifecycle_id: str,
+) -> dict[str, Any]:
+    registry_reconciliation = phase1_reconciliation_gate.get("registry_reconciliation")
+    if not isinstance(registry_reconciliation, Mapping):
+        return {}
+    if registry_reconciliation.get("classification") != "REGISTRY_RECONCILIATION_MATCHED":
+        return {}
+    if registry_reconciliation.get("blocking") is True:
+        return {}
+    for row in list(registry_reconciliation.get("mapped_records") or []):
+        if not isinstance(row, Mapping):
+            continue
+        if str(row.get("trade_id") or "").strip() != trade_id:
+            continue
+        if str(row.get("lifecycle_id") or "").strip() != lifecycle_id:
+            continue
+        return {
+            "lifecycle_id": row.get("lifecycle_id"),
+            "account_id": row.get("account_id"),
+            "lane_id": row.get("lane_id"),
+            "strategy_id": row.get("strategy_id"),
+            "track_b_root": row.get("instrument_family") or row.get("symbol"),
+            "instrument_family": row.get("instrument_family") or row.get("symbol"),
+            "local_symbol": row.get("local_symbol"),
+            "con_id": row.get("con_id"),
+            "quantity": row.get("quantity"),
+            "side": row.get("side"),
+            "entry_perm_id": row.get("entry_perm_id"),
+            "entry_exec_id": row.get("entry_exec_id"),
+            "source": "CENTRAL_TRADE_REGISTRY_RECONCILIATION",
+        }
     return {}
 
 

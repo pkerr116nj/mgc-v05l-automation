@@ -93,6 +93,11 @@ STRATEGY_SUBMIT_BLOCKED_PAPER_PROOF = "STRATEGY_SUBMIT_BLOCKED_PAPER_PROOF"
 STRATEGY_SUBMIT_BLOCKED_TARGET_MISMATCH = "STRATEGY_SUBMIT_BLOCKED_TARGET_MISMATCH"
 STRATEGY_SUBMIT_BLOCKED_ENTRY_EXPOSURE = "STRATEGY_SUBMIT_BLOCKED_ENTRY_EXPOSURE"
 
+ENTRY_SUBMIT_AUTHORITY = "ENTRY_SUBMIT_AUTHORITY"
+MANAGED_EXIT_CLOSE_AUTHORITY = "MANAGED_EXIT_CLOSE_AUTHORITY"
+MANAGED_EXIT_CLOSE_AUTHORITY_ALLOWED = "MANAGED_EXIT_CLOSE_AUTHORITY_ALLOWED"
+MANAGED_EXIT_CLOSE_AUTHORITY_BLOCKED = "MANAGED_EXIT_CLOSE_AUTHORITY_BLOCKED"
+
 PLAN_STRATEGY_MANAGED_ENTRY_SUBMIT = "PLAN_STRATEGY_MANAGED_ENTRY_SUBMIT"
 PLAN_STRATEGY_MANAGED_CLOSE_SUBMIT = "PLAN_STRATEGY_MANAGED_CLOSE_SUBMIT"
 ACTION_STRATEGY_MANAGED_ENTRY_SUBMIT = "STRATEGY_MANAGED_ENTRY_SUBMIT"
@@ -436,6 +441,10 @@ def maintain_open_track_b_strategy_managed_paper_lifecycle(
                     classification = TrackBManagedPaperLifecycleClassification.OPEN_MANAGED
                     primary_blocker = None
                     required_next_action = "Managed close order is working; wait for fill or broker/order truth convergence."
+                elif close_submit.get("review_required") is True and close_submit.get("broker_state_mutated") is not True:
+                    classification = TrackBManagedPaperLifecycleClassification.OPEN_MANAGED
+                    primary_blocker = str(close_submit.get("primary_blocker") or "Managed close submit remains blocked.")
+                    required_next_action = "Position remains broker-backed OPEN_MANAGED; resolve close authorization blocker before retrying."
                 elif close_submit.get("review_required") is True:
                     classification = TrackBManagedPaperLifecycleClassification.REVIEW_REQUIRED
                     primary_blocker = str(close_submit.get("primary_blocker") or "Managed close submit requires review.")
@@ -1575,6 +1584,11 @@ def build_strategy_managed_submit_authorization(
         if intent_kind is IntentKind.OPEN
         else {"classification": ENTRY_EXPOSURE_GATE_ALLOWED, "allowed": True}
     )
+    phase1_reconciliation_gate = (
+        _managed_exit_phase1_reconciliation_gate(config)
+        if intent_kind is IntentKind.CLOSE
+        else None
+    )
     registry_exit_validation = (
         validate_registry_managed_exit_identity(
             repo_root=Path(config.repo_root),
@@ -1585,10 +1599,7 @@ def build_strategy_managed_submit_authorization(
             local_symbol=config.local_symbol,
             quantity=intent_payload.get("quantity") or config.quantity,
             action=str(intent_payload.get("order_action") or "").strip(),
-            phase1_reconciliation_gate=evaluate_phase1_broker_reconciliation_submit_gate(
-                repo_root=Path(config.repo_root),
-                max_age_seconds=float(config.pre_action_snapshot_max_age_seconds),
-            ),
+            phase1_reconciliation_gate=phase1_reconciliation_gate or {},
         )
         if intent_kind is IntentKind.CLOSE
         else None
@@ -1602,10 +1613,25 @@ def build_strategy_managed_submit_authorization(
         )
         if managed_cleanup_pre_action.get("classification") == PRE_ACTION_SNAPSHOT_VALID:
             pre_action = managed_cleanup_pre_action
+    authority_mode = MANAGED_EXIT_CLOSE_AUTHORITY if intent_kind is IntentKind.CLOSE else ENTRY_SUBMIT_AUTHORITY
+    managed_exit_close_authority = (
+        _evaluate_managed_exit_close_authority(
+            config=config,
+            pre_action=pre_action,
+            snapshot=snapshot,
+            safe_state=safe_state,
+            target_identity=target_identity,
+            registry_exit_validation=registry_exit_validation,
+            now=actual_now,
+        )
+        if intent_kind is IntentKind.CLOSE
+        else None
+    )
     base = {
         "schema_version": "track_b_strategy_managed_submit_authorization_v1",
         "authorized_at": actual_now.isoformat(),
         "mode": "PAPER",
+        "authority_mode": authority_mode,
         "read_only_validation": True,
         "paper_only": True,
         "execution_enabled": False,
@@ -1628,7 +1654,9 @@ def build_strategy_managed_submit_authorization(
         "target_identity": target_identity,
         "pre_action_validation": pre_action,
         "entry_exposure_gate": entry_exposure_gate,
+        "phase1_reconciliation_gate": phase1_reconciliation_gate,
         "registry_exit_validation": registry_exit_validation,
+        "managed_exit_close_authority": managed_exit_close_authority,
         "safe_state_classification": safe_state.get("safe_state_classification") or safe_state.get("classification"),
         "supervisor_classification": pre_action.get("supervisor_classification")
         or snapshot.get("runtime_supervisor_classification"),
@@ -1655,6 +1683,7 @@ def build_strategy_managed_submit_authorization(
         target_identity=target_identity,
         entry_exposure_gate=entry_exposure_gate,
         registry_exit_validation=registry_exit_validation,
+        managed_exit_close_authority=managed_exit_close_authority,
     )
     authorized = classification == STRATEGY_SUBMIT_AUTHORIZED
     return {
@@ -1677,7 +1706,18 @@ def _strategy_submit_authorization_blocker(
     target_identity: Mapping[str, Any],
     entry_exposure_gate: Mapping[str, Any],
     registry_exit_validation: Mapping[str, Any] | None = None,
+    managed_exit_close_authority: Mapping[str, Any] | None = None,
 ) -> tuple[str, str]:
+    if target_identity.get("intent_kind") == IntentKind.CLOSE.value:
+        close_authority = dict(managed_exit_close_authority or {})
+        if close_authority.get("allowed") is True:
+            return STRATEGY_SUBMIT_AUTHORIZED, "Registry/truth managed-exit close authority is valid."
+        if close_authority:
+            return (
+                STRATEGY_SUBMIT_BLOCKED_ENTRY_EXPOSURE,
+                "Managed-exit close authority blocked close: "
+                + ",".join(str(reason) for reason in list(close_authority.get("block_reasons") or [])),
+            )
     cleanup_close = (
         target_identity.get("intent_kind") == IntentKind.CLOSE.value
         and (
@@ -1776,6 +1816,124 @@ def _strategy_submit_authorization_blocker(
     return STRATEGY_SUBMIT_AUTHORIZED, "Strategy-managed PAPER submit authorization is valid."
 
 
+def _evaluate_managed_exit_close_authority(
+    *,
+    config: TrackBStrategyManagedPaperLifecycleConfig,
+    pre_action: Mapping[str, Any],
+    snapshot: Mapping[str, Any],
+    safe_state: Mapping[str, Any],
+    target_identity: Mapping[str, Any],
+    registry_exit_validation: Mapping[str, Any] | None,
+    now: datetime,
+) -> dict[str, Any]:
+    block_reasons: list[str] = []
+    if target_identity.get("intent_kind") != IntentKind.CLOSE.value:
+        block_reasons.append("NOT_MANAGED_EXIT_CLOSE")
+    registry_validation = dict(registry_exit_validation or {})
+    if registry_validation.get("allowed") is not True:
+        registry_reasons = list(registry_validation.get("block_reasons") or [])
+        block_reasons.append(
+            "REGISTRY_EXIT_IDENTITY_BLOCKED:"
+            + ",".join(str(reason) for reason in registry_reasons or ["UNKNOWN"])
+        )
+    if _any_true(snapshot, safe_state, key="live_money_eligible"):
+        block_reasons.append("LIVE_MONEY_ELIGIBLE")
+    if _any_true(snapshot, safe_state, key="paper_proof_invoked"):
+        block_reasons.append("PAPER_PROOF_INVOKED")
+    if not safe_state:
+        block_reasons.append("SAFE_STATE_MISSING")
+    safe_classification = str(safe_state.get("safe_state_classification") or safe_state.get("classification") or "")
+    if safe_state.get("broker_mutation_allowed") is not True:
+        block_reasons.append("SAFE_STATE_BROKER_MUTATION_NOT_ALLOWED")
+    if safe_state.get("observe_only") is True or "HARD_HOLD" in safe_classification:
+        block_reasons.append(f"SAFE_STATE_BLOCKS_CLOSE:{safe_classification or 'UNKNOWN'}")
+    if list(safe_state.get("tripped_limits") or []):
+        block_reasons.append("SAFE_STATE_TRIPPED_LIMITS")
+    if not snapshot:
+        block_reasons.append("CONTROL_PLANE_SNAPSHOT_MISSING")
+    if snapshot.get("shared_truth_coherence_status") != "COHERENT":
+        block_reasons.append(
+            "CONTROL_PLANE_NOT_COHERENT:"
+            + str(snapshot.get("shared_truth_coherence_status") or "UNKNOWN")
+        )
+    if snapshot.get("agent_health_has_duplicate_writer") is True:
+        block_reasons.append("DUPLICATE_WRITER")
+    generated_at = _parse_iso_datetime(snapshot.get("generated_at"))
+    if generated_at is None:
+        block_reasons.append("CONTROL_PLANE_GENERATED_AT_MISSING")
+        snapshot_age_seconds = None
+    else:
+        snapshot_age_seconds = max(0.0, (now - generated_at).total_seconds())
+        if snapshot_age_seconds > float(config.pre_action_snapshot_max_age_seconds):
+            block_reasons.append("CONTROL_PLANE_CLOSE_AUTHORITY_STALE")
+    order_truth_blocker = _order_truth_blocker(snapshot=snapshot, safe_state=safe_state)
+    if order_truth_blocker:
+        block_reasons.append("CONFLICTING_CLOSE_ORDER:" + order_truth_blocker)
+    position_truth_blocker = _position_truth_blocker(
+        snapshot=snapshot,
+        safe_state=safe_state,
+        allow_review_required_cleanup=True,
+    )
+    if position_truth_blocker:
+        block_reasons.append("POSITION_TRUTH_UNSAFE_FOR_CLOSE:" + position_truth_blocker)
+    if not target_identity:
+        block_reasons.append("TARGET_IDENTITY_MISSING")
+    if not str(target_identity.get("lifecycle_id") or "").strip():
+        block_reasons.append("LIFECYCLE_ID_MISSING")
+    if not str(target_identity.get("trade_id") or "").strip():
+        block_reasons.append("TRADE_ID_MISSING")
+    if not str(target_identity.get("con_id") or "").strip() or not str(target_identity.get("contract") or "").strip():
+        block_reasons.append("CONTRACT_IDENTITY_MISSING")
+    allowed = not block_reasons
+    return {
+        "authority_mode": MANAGED_EXIT_CLOSE_AUTHORITY,
+        "classification": MANAGED_EXIT_CLOSE_AUTHORITY_ALLOWED if allowed else MANAGED_EXIT_CLOSE_AUTHORITY_BLOCKED,
+        "allowed": allowed,
+        "authoritative_source": "REGISTRY_TRUTH",
+        "requires_entry_submit_authority": False,
+        "requires_entry_lane_window": False,
+        "requires_flat_position_state": False,
+        "requires_entry_exposure_allow": False,
+        "requires_broker_mutation_allowed": True,
+        "requires_control_plane_close_authority": True,
+        "control_plane_snapshot_id": snapshot.get("control_plane_snapshot_id"),
+        "control_plane_snapshot_age_seconds": snapshot_age_seconds,
+        "control_plane_snapshot_max_age_seconds": int(config.pre_action_snapshot_max_age_seconds),
+        "safe_state_classification": safe_classification,
+        "safe_state_broker_mutation_allowed": safe_state.get("broker_mutation_allowed"),
+        "registry_exit_validation": registry_validation,
+        "legacy_pre_action_classification": pre_action.get("classification"),
+        "legacy_pre_action_reason": pre_action.get("reason"),
+        "block_reasons": block_reasons,
+    }
+
+
+def _managed_exit_phase1_reconciliation_gate(config: TrackBStrategyManagedPaperLifecycleConfig) -> dict[str, Any]:
+    gate = dict(
+        evaluate_phase1_broker_reconciliation_submit_gate(
+            repo_root=Path(config.repo_root),
+            max_age_seconds=float(config.pre_action_snapshot_max_age_seconds),
+        )
+    )
+    if gate.get("registry_reconciliation"):
+        return gate
+    report = _read_json_object(
+        Path(config.repo_root)
+        / "outputs"
+        / "reports"
+        / "track_b_paper_broker_reconciliation"
+        / "latest_track_b_paper_broker_reconciliation.json"
+    )
+    registry_reconciliation = report.get("registry_reconciliation")
+    if isinstance(registry_reconciliation, Mapping):
+        gate["registry_reconciliation"] = dict(registry_reconciliation)
+    if not gate.get("track_b_broker_positions") and isinstance(report.get("track_b_broker_positions"), list):
+        gate["track_b_broker_positions"] = list(report.get("track_b_broker_positions") or [])
+    if not gate.get("track_b_lifecycle_positions") and isinstance(report.get("track_b_lifecycle_positions"), list):
+        gate["track_b_lifecycle_positions"] = list(report.get("track_b_lifecycle_positions") or [])
+    return gate
+
+
 def _managed_close_cleanup_pre_action(
     *,
     pre_action: Mapping[str, Any],
@@ -1849,6 +2007,7 @@ def _strategy_submit_target_identity(
             "lane_id": config.lane_id,
             "runtime_generation_id": config.runtime_generation_id,
             "lifecycle_id": lifecycle_id,
+            "trade_id": intent_payload.get("trade_id"),
             "intent_kind": intent_kind.value,
             "symbol": config.instrument_family,
             "contract": config.local_symbol,
@@ -1940,6 +2099,18 @@ def _read_json_object(path: Path) -> dict[str, Any]:
     except (FileNotFoundError, json.JSONDecodeError, OSError):
         return {}
     return dict(payload) if isinstance(payload, Mapping) else {}
+
+
+def _parse_iso_datetime(value: object) -> datetime | None:
+    if not value:
+        return None
+    try:
+        parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=UTC)
+    return parsed.astimezone(UTC)
 
 
 def _resolve_path(repo_root: Path, path: Path) -> Path:
