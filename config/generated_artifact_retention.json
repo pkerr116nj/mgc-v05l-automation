@@ -1,0 +1,106 @@
+{
+  "schema_version": "generated_artifact_retention_policy_v1",
+  "compression_enabled": true,
+  "max_archives_per_stream": 5,
+  "max_file_size_mb": 512,
+  "keep_latest_tail_mb": 256,
+  "generated_roots": [
+    "outputs",
+    "logs"
+  ],
+  "forbidden_roots": [
+    "src",
+    "tests",
+    "docs",
+    "scripts",
+    "config",
+    "var"
+  ],
+  "protected_globs": [
+    "outputs/track_b_execution_core/trade_registry/**",
+    "outputs/track_b_execution_core/paper_trade_ledger/**",
+    "outputs/track_b_execution_core/managed_positions/latest*",
+    "outputs/track_b_execution_core/managed_orders/latest*",
+    "outputs/track_b_execution_core/open_order_truth/latest*",
+    "outputs/track_b_execution_core/position_truth/latest*",
+    "outputs/track_b_execution_core/runtime_truth/latest*",
+    "outputs/track_b_execution_core/shared_truth/latest*",
+    "outputs/track_b_execution_core/control_plane/latest*",
+    "outputs/track_b_execution_core/runtime_supervisor/latest*",
+    "outputs/track_b_execution_core/safe_state/latest*",
+    "outputs/track_b_execution_core/proof_readiness/latest*",
+    "outputs/track_b_execution_core/track_b_strategy_managed_paper_lifecycle/**",
+    "outputs/reports/track_b_paper_broker_reconciliation/**",
+    "outputs/reports/ibkr_read_only_verification/**",
+    "outputs/operator_dashboard/runtime/latest_broker_truth_lease.json",
+    "outputs/operator_dashboard/runtime/latest_canonical_readiness*.json",
+    "outputs/track_b_execution_core/lifecycle_stress/latest*"
+  ],
+  "streams": [
+    {
+      "stream_id": "paper_strategy_monitor",
+      "description": "High-volume PAPER strategy monitor audit history.",
+      "patterns": [
+        "outputs/reports/paper_strategy_monitor/paper_strategy_monitor_audit.jsonl"
+      ],
+      "max_file_size_mb": 1024,
+      "keep_latest_tail_mb": 1024,
+      "max_archives_per_stream": 5,
+      "compression_enabled": true,
+      "recreate_live_file": true
+    },
+    {
+      "stream_id": "no_trade_diagnostics",
+      "description": "Track B no-trade diagnostic event stream.",
+      "patterns": [
+        "outputs/track_b_execution_core/no_trade_diagnostics/no_trade_diagnostics.jsonl"
+      ],
+      "max_file_size_mb": 256,
+      "keep_latest_tail_mb": 128,
+      "max_archives_per_stream": 8,
+      "compression_enabled": true,
+      "recreate_live_file": true
+    },
+    {
+      "stream_id": "lifecycle_stress",
+      "description": "Lifecycle stress event streams and non-latest stress output shards.",
+      "patterns": [
+        "outputs/track_b_execution_core/lifecycle_stress/*.jsonl",
+        "outputs/track_b_execution_core/lifecycle_stress/lifecycle_stress_*.json",
+        "outputs/track_b_execution_core/lifecycle_stress/lifecycle_stress_*.md"
+      ],
+      "max_file_size_mb": 128,
+      "keep_latest_tail_mb": 64,
+      "max_archives_per_stream": 8,
+      "compression_enabled": true,
+      "recreate_live_file": true
+    },
+    {
+      "stream_id": "operator_dashboard_snapshots",
+      "description": "Large generated dashboard snapshots; unnumbered latest snapshots are protected separately.",
+      "patterns": [
+        "outputs/operator_dashboard/dashboard_api_snapshot *.json",
+        "outputs/operator_dashboard/strategy_analysis_snapshot *.json",
+        "outputs/operator_dashboard/historical_playback_snapshot *.json",
+        "outputs/operator_dashboard/production_link_snapshot *.json"
+      ],
+      "max_file_size_mb": 64,
+      "keep_latest_tail_mb": 0,
+      "max_archives_per_stream": 12,
+      "compression_enabled": true,
+      "recreate_live_file": false
+    },
+    {
+      "stream_id": "probationary_pattern_engine",
+      "description": "Probationary pattern engine JSONL runtime streams.",
+      "patterns": [
+        "outputs/probationary_pattern_engine/**/*.jsonl"
+      ],
+      "max_file_size_mb": 512,
+      "keep_latest_tail_mb": 128,
+      "max_archives_per_stream": 8,
+      "compression_enabled": true,
+      "recreate_live_file": true
+    }
+  ]
+}

@@ -15,6 +15,7 @@ dependencies = [
 
 [project.scripts]
 mgc-v05l = "mgc_v05l.app.main:main"
+generated-artifact-retention = "mgc_v05l.execution_core.generated_artifact_retention:main"
 
 [project.optional-dependencies]
 dev = [
