@@ -1330,6 +1330,7 @@ def _trade_record_from_filled_bridge_result(
         or (f"bridge_fill_{order_intent_id}" if order_intent_id else f"bridge_fill_{filled_bridge_result.get('broker_order_id')}")
     )
     strategy_id = str(filled_bridge_result.get("strategy_id") or filled_bridge_result.get("lane_id") or "UNKNOWN")
+    trade_id = str(filled_bridge_result.get("trade_id") or "").strip() or f"{strategy_id}:{lifecycle_id}"
     contract = filled_bridge_result.get("contract") if isinstance(filled_bridge_result.get("contract"), Mapping) else {}
     quantity = _decimal(filled_bridge_result.get("quantity"))
     entry_fill_price = _decimal(filled_bridge_result.get("fill_price"))
@@ -1397,7 +1398,7 @@ def _trade_record_from_filled_bridge_result(
             lifecycle_report_path = str(written_lifecycle_report)
     return {
         "ledger_schema_version": LEDGER_SCHEMA_VERSION,
-        "trade_id": f"{strategy_id}:{lifecycle_id}",
+        "trade_id": trade_id,
         "lifecycle_id": lifecycle_id,
         "signal_id": order_intent_id or lifecycle_id,
         "strategy_id": strategy_id,
@@ -2973,6 +2974,8 @@ def _positions_by(records: Iterable[Mapping[str, Any]], key: str, now: datetime)
             "strategy_ids": distinct_values["strategy_id"],
             "lane_id": _position_group_value(latest, "lane_id") if len(distinct_values["lane_id"]) == 1 else "MULTIPLE",
             "lane_ids": distinct_values["lane_id"],
+            "trade_id": latest.get("trade_id") if len({str(item.get("trade_id") or "") for item in units}) == 1 else "MULTIPLE",
+            "trade_ids": [str(item.get("trade_id") or "") for item in units if item.get("trade_id")],
             "lifecycle_id": latest.get("lifecycle_id"),
             "lifecycle_ids": [str(item.get("lifecycle_id") or "") for item in units if item.get("lifecycle_id")],
             "instrument_family": latest.get("instrument_family")

@@ -95,6 +95,7 @@ def resolve_broker_backed_fill_evidence(
     unique_by_exec: dict[str, dict[str, Any]] = {}
     for row in with_exec:
         unique_by_exec.setdefault(_text(row.get("exec_id") or row.get("execution_id")), row)
+    unique_by_exec = _narrow_unique_exec_matches(unique_by_exec)
     if len(unique_by_exec) == 1:
         evidence = next(iter(unique_by_exec.values()))
         return BrokerFillEvidenceResult(
@@ -110,7 +111,7 @@ def resolve_broker_backed_fill_evidence(
         return BrokerFillEvidenceResult(
             classification=AMBIGUOUS_EXECUTION,
             broker_backed_evidence_valid=False,
-            matches=tuple(with_exec),
+            matches=tuple(unique_by_exec.values()),
             rejected=tuple(rejected),
             searched_paths=tuple(searched),
             reason_codes=("MULTIPLE_MATCHING_EXEC_IDS",),
@@ -222,6 +223,8 @@ def _bridge_report_candidates(report: Mapping[str, Any], source_path: str) -> li
     context = {
         "source": "bridge_execution_report",
         "source_artifact_path": source_path,
+        "latest_order_status_price": latest_status.get("last_fill_price") or latest_status.get("avg_fill_price"),
+        "latest_order_status_updated_at": latest_status.get("updated_at"),
         "account_id": report.get("selected_account_id") or environment.get("account_id") or metadata.get("account_id"),
         "symbol": contract.get("symbol") or intent.get("symbol") or report.get("symbol"),
         "local_symbol": contract.get("local_symbol") or metadata.get("local_symbol"),
@@ -363,7 +366,35 @@ def _normalized_evidence(candidate: Mapping[str, Any], request: BrokerFillEviden
         "fill_timestamp": _text(candidate.get("fill_timestamp") or candidate.get("executed_at") or candidate.get("updated_at")) or None,
         "source": candidate.get("source"),
         "source_artifact_path": candidate.get("source_artifact_path"),
+        "latest_order_status_price": _text(candidate.get("latest_order_status_price")) or None,
+        "latest_order_status_updated_at": _text(candidate.get("latest_order_status_updated_at")) or None,
     }
+
+
+def _narrow_unique_exec_matches(unique_by_exec: Mapping[str, dict[str, Any]]) -> dict[str, dict[str, Any]]:
+    """Prefer the execution row that exactly matches bridge orderStatus fill price.
+
+    IBKR order ids can be reused across clients, and bridge reports preserve an
+    execution list that can include older fills.  Those rows may inherit the
+    current bridge order/client/perm context while still carrying their own
+    execution price.  When the bridge has a Filled orderStatus price, that price
+    is the deterministic discriminator for the current submit.
+    """
+
+    rows = list(unique_by_exec.values())
+    if len(rows) <= 1:
+        return dict(unique_by_exec)
+    priced = [
+        row
+        for row in rows
+        if _decimal(row.get("latest_order_status_price")) is not None
+        and _decimal(row.get("price")) is not None
+        and _decimal(row.get("latest_order_status_price")) == _decimal(row.get("price"))
+    ]
+    if len(priced) == 1:
+        exec_id = _text(priced[0].get("exec_id") or priced[0].get("execution_id"))
+        return {exec_id: priced[0]}
+    return dict(unique_by_exec)
 
 
 def _optional_text_match(candidate: Mapping[str, Any], expected: object, *keys: str) -> bool:

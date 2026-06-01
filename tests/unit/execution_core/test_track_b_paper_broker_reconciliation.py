@@ -410,6 +410,7 @@ def test_broker_position_without_fill_evidence_is_recovery_review_required(tmp_p
     adoption = report["broker_backed_entry_adoption"]
     assert adoption["classification"] == "BROKER_BACKED_ENTRY_ADOPTION_REVIEW_REQUIRED"
     assert adoption["broker_backed_evidence_valid"] is False
+    assert any(blocker["code"] == "REVIEW_REQUIRED_UNMANAGED_BROKER_EXPOSURE" for blocker in report["blockers"])
     assert any(event["event_type"] == "REVIEW_REQUIRED" for event in _read_registry_events(config))
 
 
@@ -465,6 +466,187 @@ def test_missing_submit_exec_id_resolves_from_bridge_execution_report_for_adopti
     events = _read_registry_events(config)
     assert [event["event_type"] for event in events[-2:]] == ["ENTRY_FILL_BROKER_BACKED", "RECOVERY_ADOPTION_RECORDED"]
     assert events[-2]["exec_id"] == "0000e1a7.current.01.01"
+    assert report["post_fill_lifecycle_adoption"]["classification"] == "POST_FILL_LIFECYCLE_ADOPTION_APPLIED"
+    live_status = json.loads(config.live_position_status_path.read_text(encoding="utf-8"))
+    assert live_status["open_position_count"] == 1
+    open_position = next(iter(live_status["positions_by_instrument"].values()))
+    assert open_position["trade_id"] == record["extra"]["trade_id"]
+    assert open_position["managed_exit_policy_id"] == "PAPER_DIAGNOSTIC_TIME_BOXED_3X5M_EXIT_V1"
+
+
+def test_simultaneous_reused_order_id_fills_auto_adopt_by_exact_bridge_fill_price(tmp_path: Path) -> None:
+    config = _write_base_artifacts(tmp_path)
+    mnq_record = _write_submit_intent_ownership(
+        config,
+        ownership_intent_id="submit_owner_mnq_globex_short",
+        lane_id="mnq_globex_active_participation_short",
+        strategy_id="mnq_globex_active_participation_short",
+        action="SELL",
+        symbol="MNQ",
+        local_symbol="MNQM6",
+        expiry="20260618",
+        con_id=770561201,
+        broker_order_id="1",
+        client_id=10851,
+        perm_id=1955790772,
+        exec_id=None,
+        trade_id="trade_original_mnq_globex_short",
+        created_at="2026-05-11T11:50:10+00:00",
+        broker_effect_confirmed=True,
+    )
+    mes_record = _write_submit_intent_ownership(
+        config,
+        ownership_intent_id="submit_owner_mes_globex_short",
+        lane_id="mes_globex_active_participation_short",
+        strategy_id="mes_globex_active_participation_short",
+        action="SELL",
+        symbol="MES",
+        local_symbol="MESM6",
+        expiry="20260618",
+        con_id=770561194,
+        broker_order_id="1",
+        client_id=10922,
+        perm_id=1955790779,
+        exec_id=None,
+        trade_id="trade_original_mes_globex_short",
+        created_at="2026-05-11T11:50:12+00:00",
+        broker_effect_confirmed=True,
+    )
+    _write_registry_open_managed_trade(
+        config,
+        trade_id="trade_submit_owner_mnq_globex_short",
+        lifecycle_id="reserved_submit_mnq_globex_active_participation_short_1",
+        lane_id="mnq_globex_active_participation_short",
+        strategy_id="mnq_globex_active_participation_short",
+        symbol="MNQ",
+        local_symbol="MNQM6",
+        con_id=770561201,
+        expiry="20260618",
+    )
+    _write_registry_open_managed_trade(
+        config,
+        trade_id="trade_submit_owner_mes_globex_short",
+        lifecycle_id="reserved_submit_mes_globex_active_participation_short_1",
+        lane_id="mes_globex_active_participation_short",
+        strategy_id="mes_globex_active_participation_short",
+        symbol="MES",
+        local_symbol="MESM6",
+        con_id=770561194,
+        expiry="20260618",
+    )
+    _write_bridge_execution_report(
+        config,
+        lane_id="mnq_globex_active_participation_short",
+        symbol="MNQ",
+        local_symbol="MNQM6",
+        con_id=770561201,
+        order_id="1",
+        client_id=10851,
+        perm_id=1955790772,
+        exec_id="0000e1a7.mnq.current.01.01",
+        account_id="DUM882026",
+        fill_price="30480.5",
+        extra_executions=[
+            {
+                "execution_id": "0000e1a7.mnq.old.01.01",
+                "account_id": "DUM882026",
+                "symbol": "MNQ",
+                "quantity": 1,
+                "side": "SLD",
+                "price": "30436.75",
+                "executed_at": "2026-05-11T11:59:13+00:00",
+            },
+            {
+                "execution_id": "0000e1a7.mes.other.01.01",
+                "account_id": "DUM882026",
+                "symbol": "MES",
+                "quantity": 1,
+                "side": "SLD",
+                "price": "7598.75",
+                "executed_at": "2026-05-11T11:59:13+00:00",
+            },
+        ],
+    )
+    _write_bridge_execution_report(
+        config,
+        lane_id="mes_globex_active_participation_short",
+        symbol="MES",
+        local_symbol="MESM6",
+        con_id=770561194,
+        order_id="1",
+        client_id=10922,
+        perm_id=1955790779,
+        exec_id="0000e1a7.mes.current.01.01",
+        account_id="DUM882026",
+        fill_price="7598.75",
+        extra_executions=[
+            {
+                "execution_id": "0000e1a7.mnq.other.01.01",
+                "account_id": "DUM882026",
+                "symbol": "MNQ",
+                "quantity": 1,
+                "side": "SLD",
+                "price": "30480.5",
+                "executed_at": "2026-05-11T11:59:14+00:00",
+            },
+            {
+                "execution_id": "0000e1a7.mes.old.01.01",
+                "account_id": "DUM882026",
+                "symbol": "MES",
+                "quantity": 1,
+                "side": "SLD",
+                "price": "7590.75",
+                "executed_at": "2026-05-11T11:59:14+00:00",
+            },
+        ],
+    )
+    _write_broker_truth(
+        config,
+        positions=[
+            {
+                "account_id": "DUM882026",
+                "symbol": "MNQ",
+                "local_symbol": "MNQM6",
+                "expiry": "20260618",
+                "con_id": 770561201,
+                "security_type": "FUT",
+                "quantity": "-1",
+            },
+            {
+                "account_id": "DUM882026",
+                "symbol": "MES",
+                "local_symbol": "MESM6",
+                "expiry": "20260618",
+                "con_id": 770561194,
+                "security_type": "FUT",
+                "quantity": "-1",
+            },
+        ],
+    )
+
+    report = reconcile_track_b_paper_broker_truth(config=config, now=NOW)
+
+    adoption = report["broker_backed_entry_adoption"]
+    assert adoption["classification"] == "BROKER_BACKED_ENTRIES_ADOPTION_REQUIRED"
+    assert adoption["adoption_allowed"] is True
+    assert {item["exec_id"] for item in adoption["adoptions"]} == {
+        "0000e1a7.mnq.current.01.01",
+        "0000e1a7.mes.current.01.01",
+    }
+    assert report["post_fill_lifecycle_adoption"]["classification"] == "POST_FILL_LIFECYCLE_ADOPTION_APPLIED"
+    live_status = json.loads(config.live_position_status_path.read_text(encoding="utf-8"))
+    assert live_status["open_position_count"] == 2
+    trade_ids = {row["trade_id"] for row in live_status["positions_by_instrument"].values()}
+    assert trade_ids == {mnq_record["extra"]["trade_id"], mes_record["extra"]["trade_id"]}
+
+    followup = reconcile_track_b_paper_broker_truth(config=config, now=NOW)
+    assert followup["registry_reconciliation"]["classification"] == "REGISTRY_RECONCILIATION_MATCHED", followup[
+        "registry_reconciliation"
+    ]["blockers"]
+    assert set(followup["registry_reconciliation"]["mapped_trade_ids"]) == {
+        mnq_record["extra"]["trade_id"],
+        mes_record["extra"]["trade_id"],
+    }
 
 
 def test_ambiguous_registry_trade_ids_block_recovery_adoption(tmp_path: Path) -> None:
@@ -2219,6 +2401,67 @@ def test_lifecycle_review_summary_debris_resolves_when_broker_lifecycle_flat(tmp
     assert report["historical_reconciliation_debris_resolution"]["classification"] == "HISTORICAL_RECONCILIATION_DEBRIS_RESOLVED"
 
 
+def test_old_review_trade_does_not_block_matched_current_open_position(tmp_path: Path) -> None:
+    old_review = {
+        "trade_id": "mnq_us_active_participation_long:old_lifecycle",
+        "lifecycle_id": "old_lifecycle",
+        "strategy_id": "mnq_us_active_participation_long",
+        "instrument_family": "MNQ",
+        "symbol": "MNQ",
+        "local_symbol": "MNQM6",
+        "con_id": 770561201,
+        "side": "LONG",
+        "quantity": "1",
+        "review_required": True,
+        "final_position_status": "REVIEW_REQUIRED",
+    }
+    current_short = {
+        "strategy_id": "mnq_globex_active_participation_short",
+        "lane_id": "mnq_globex_active_participation_short",
+        "trade_id": "trade_current_short",
+        "trade_ids": ["trade_current_short"],
+        "lifecycle_id": "current_short_lifecycle",
+        "lifecycle_ids": ["current_short_lifecycle"],
+        "instrument_family": "MNQ",
+        "contract_key": "MNQ-202606",
+        "local_symbol": "MNQM6",
+        "con_id": 770561201,
+        "side": "SHORT",
+        "quantity": "1",
+        "avg_entry_price": "30480.5",
+    }
+    config = _write_base_artifacts(
+        tmp_path,
+        review_required_count=1,
+        open_position=current_short,
+        recent_trades=[old_review],
+    )
+    _write_broker_truth(
+        config,
+        positions=[
+            {
+                "account_id": "DUM882026",
+                "symbol": "MNQ",
+                "local_symbol": "MNQM6",
+                "con_id": 770561201,
+                "security_type": "FUT",
+                "quantity": "-1",
+                "average_cost": "60960.38",
+                "multiplier": "2",
+            }
+        ],
+    )
+
+    report = reconcile_track_b_paper_broker_truth(config=config, now=NOW)
+
+    assert report["broker_reconciled"] is True
+    assert report["classification"] == "TRACK_B_PAPER_BROKER_RECONCILED"
+    assert report["review_required_count"] == 0
+    assert report["current_scope_review_required_count"] == 0
+    assert report["historical_review_required_count"] == 1
+    assert not any(blocker["code"] == "LIFECYCLE_REVIEW_REQUIRED_PRESENT" for blocker in report["blockers"])
+
+
 def test_blocks_when_bridge_fill_persistence_is_review_required(tmp_path: Path) -> None:
     config = _write_base_artifacts(tmp_path, review_required_count=1)
     _write_broker_truth(
@@ -2404,6 +2647,7 @@ def _write_submit_intent_ownership(
     exec_id: str | None = "exec-1",
     trade_id: str | None = None,
     ownership_intent_id: str | None = None,
+    broker_effect_confirmed: bool = False,
 ) -> dict[str, object]:
     parsed_created_at = datetime.fromisoformat(created_at.replace("Z", "+00:00"))
     resolved_ownership_intent_id = ownership_intent_id or f"submit_owner_test_{broker_order_id}"
@@ -2413,9 +2657,28 @@ def _write_submit_intent_ownership(
         "delegated_classification": "PAPER_ORDER_UNKNOWN_NEEDS_MANUAL_TWS_REVIEW",
         "bridge_classification": "PAPER_STRATEGY_NEEDS_MANUAL_REVIEW",
         "trade_id": resolved_trade_id,
+        "caller_metadata": {
+            "trade_id": resolved_trade_id,
+            "lane_id": lane_id,
+            "strategy_id": strategy_id,
+            "managed_exit_policy_id": "PAPER_DIAGNOSTIC_TIME_BOXED_3X5M_EXIT_V1",
+        },
     }
+    if broker_effect_confirmed:
+        extra.update(
+            {
+                "broker_effect_classification": "BROKER_EFFECT_CONFIRMED",
+                "bridge_classification": "PAPER_STRATEGY_ORDER_FILLED",
+                "delegated_status": "filled",
+            }
+        )
     if exec_id is not None:
         extra["exec_id"] = exec_id
+    state = (
+        SubmitIntentOwnershipState.BROKER_POSITION_OBSERVED_ADOPTION_REQUIRED
+        if broker_effect_confirmed
+        else SubmitIntentOwnershipState.BROKER_RESULT_UNKNOWN_REFRESH_REQUIRED
+    )
     record = SubmitIntentOwnershipRecord(
         mode="PAPER",
         account_id="DUM882026",
@@ -2434,7 +2697,7 @@ def _write_submit_intent_ownership(
         repo_root=str(config.repo_root),
         git_head="abc123",
         created_at=parsed_created_at,
-        state=SubmitIntentOwnershipState.BROKER_RESULT_UNKNOWN_REFRESH_REQUIRED,
+        state=state,
         ownership_intent_id=resolved_ownership_intent_id,
         lifecycle_id=f"reserved_submit_{lane_id}_{broker_order_id}",
         lifecycle_id_reserved_only=True,
@@ -2478,6 +2741,8 @@ def _write_registry_open_managed_trade(
     include_close_fill: bool = False,
     include_manual_close: bool = False,
 ) -> None:
+    side = "SHORT" if "short" in lane_id else "LONG"
+    action = "SELL" if side == "SHORT" else "BUY"
     base = {
         "trade_id": trade_id,
         "lifecycle_id": lifecycle_id,
@@ -2488,8 +2753,8 @@ def _write_registry_open_managed_trade(
         "con_id": con_id,
         "local_symbol": local_symbol,
         "expiry": expiry,
-        "side": "LONG",
-        "action": "BUY",
+        "side": side,
+        "action": action,
         "qty": "1",
         "source_artifact_path": str(config.report_path),
         "generated_at": NOW,
@@ -2546,13 +2811,17 @@ def _write_bridge_execution_report(
     perm_id: int,
     exec_id: str,
     account_id: str,
+    fill_price: str = "30437.00",
+    extra_executions: list[dict[str, object]] | None = None,
 ) -> Path:
     path = config.repo_root / "outputs/reports/ibkr_runtime_route_dispatch" / lane_id / "ibkr_paper_strategy_bridge_report.json"
+    action = "SELL" if "short" in lane_id else "BUY"
+    side = "SLD" if action == "SELL" else "BOT"
     _write_json(
         path,
         {
             "selected_account_id": account_id,
-            "intent": {"strategy_id": lane_id, "symbol": symbol, "quantity": 1, "action": "BUY"},
+            "intent": {"strategy_id": lane_id, "symbol": symbol, "quantity": 1, "action": action},
             "qualified_contract_report": {
                 "qualified_contract": {
                     "symbol": symbol,
@@ -2571,6 +2840,8 @@ def _write_bridge_execution_report(
                             "client_id": client_id,
                             "perm_id": perm_id,
                             "filled": 1,
+                            "last_fill_price": fill_price,
+                            "avg_fill_price": fill_price,
                         },
                         "executions_after_submit": [
                             {
@@ -2578,10 +2849,11 @@ def _write_bridge_execution_report(
                                 "account_id": account_id,
                                 "symbol": symbol,
                                 "quantity": 1,
-                                "side": "BOT",
-                                "price": "30437.00",
+                                "side": side,
+                                "price": fill_price,
                                 "executed_at": "2026-06-01T13:36:09+00:00",
-                            }
+                            },
+                            *(extra_executions or []),
                         ],
                     }
                 },

@@ -137,6 +137,144 @@ def test_recovery_adoption_event_attaches_existing_broker_backed_position() -> N
     assert record.ownership_identity.lifecycle_id == "life-1"
 
 
+def test_recovery_adoption_repairs_prior_missing_broker_fill_review() -> None:
+    intent = _base_event(TradeEventType.ENTRY_INTENT_CREATED)
+    missing_fill = replace(
+        _base_event(TradeEventType.ENTRY_FILL_BROKER_BACKED, offset=1),
+        order_id="entry-order-1",
+        client_id="client-7",
+        perm_id="2047276405",
+        exec_id=None,
+        price=Decimal("30395.00"),
+        reason_codes=("BROKER_BACKED_FILL_MISSING_PERM_OR_EXEC",),
+    )
+    review = replace(
+        _base_event(TradeEventType.REVIEW_REQUIRED, offset=2),
+        reason_codes=("RECOVERY_ADOPTION_REVIEW_REQUIRED",),
+    )
+    adoption = replace(
+        _base_event(TradeEventType.RECOVERY_ADOPTION_RECORDED, offset=3),
+        lifecycle_id="life-1",
+        order_id="entry-order-1",
+        client_id="client-7",
+        perm_id="2047276405",
+        exec_id="0000e1a7.6a29f525.01.01",
+        price=Decimal("30395.00"),
+        reason_codes=("RECOVERY_ADOPTION_RECORDED",),
+    )
+
+    record = reduce_trade_events([intent, missing_fill, review, adoption])
+
+    assert record.current_state == TradeCurrentState.OPEN_MANAGED
+    assert record.broker_backed_entry is True
+    assert record.ownership_identity is not None
+    assert record.ownership_identity.lifecycle_id == "life-1"
+    assert "BROKER_BACKED_FILL_MISSING_PERM_OR_EXEC" not in record.latest_reason_codes
+
+
+def test_aggregate_review_event_does_not_override_exact_broker_backed_open_identity() -> None:
+    adoption = replace(
+        _base_event(TradeEventType.RECOVERY_ADOPTION_RECORDED),
+        lifecycle_id="life-1",
+        order_id="entry-order-1",
+        client_id="client-7",
+        perm_id="2047276405",
+        exec_id="0000e1a7.6a29f525.01.01",
+        price=Decimal("30395.00"),
+        reason_codes=("RECOVERY_ADOPTION_RECORDED",),
+    )
+    aggregate_review = replace(
+        _base_event(TradeEventType.REVIEW_REQUIRED, offset=1),
+        lifecycle_id="life-1",
+        account_id="MULTIPLE",
+        reason_codes=("REGISTRY_RECONCILIATION_REVIEW_REQUIRED",),
+    )
+
+    record = reduce_trade_events([adoption, aggregate_review])
+
+    assert record.current_state == TradeCurrentState.OPEN_MANAGED
+    assert record.broker_backed_entry is True
+    assert "REGISTRY_RECONCILIATION_REVIEW_REQUIRED" not in record.latest_reason_codes
+    assert "ACCOUNT_ID_MISMATCH" not in record.latest_reason_codes
+
+
+def test_late_exact_adoption_supersedes_transient_settlement_review_rows() -> None:
+    intent = _base_event(TradeEventType.ENTRY_INTENT_CREATED)
+    missing_fill_review = replace(
+        _base_event(TradeEventType.REVIEW_REQUIRED, offset=1),
+        lifecycle_id="life-1",
+        reason_codes=("BROKER_BACKED_FILL_MISSING_PERM_OR_EXEC",),
+    )
+    settlement_review = replace(
+        _base_event(TradeEventType.REVIEW_REQUIRED, offset=2),
+        lifecycle_id="life-1",
+        reason_codes=("REGISTRY_RECONCILIATION_REVIEW_REQUIRED",),
+    )
+    adoption_review = replace(
+        _base_event(TradeEventType.REVIEW_REQUIRED, offset=3),
+        lifecycle_id="life-1",
+        reason_codes=("RECOVERY_ADOPTION_REVIEW_REQUIRED",),
+    )
+    adoption = replace(
+        _base_event(TradeEventType.RECOVERY_ADOPTION_RECORDED, offset=4),
+        lifecycle_id="life-1",
+        order_id="entry-order-1",
+        client_id="client-7",
+        perm_id="2047276405",
+        exec_id="0000e1a7.6a29f525.01.01",
+        price=Decimal("30395.00"),
+        reason_codes=("RECOVERY_ADOPTION_RECORDED",),
+    )
+    managed = _managed(offset=5)
+    aggregate_review = replace(
+        _base_event(TradeEventType.REVIEW_REQUIRED, offset=6),
+        lifecycle_id="life-1",
+        account_id="MULTIPLE",
+        reason_codes=("REGISTRY_RECONCILIATION_REVIEW_REQUIRED",),
+    )
+
+    record = reduce_trade_events([
+        intent,
+        missing_fill_review,
+        settlement_review,
+        adoption_review,
+        adoption,
+        managed,
+        aggregate_review,
+    ])
+
+    assert record.current_state == TradeCurrentState.OPEN_MANAGED
+    assert record.broker_backed_entry is True
+    assert "REVIEW_REQUIRED_EVENT" not in record.latest_reason_codes
+    assert "BROKER_BACKED_FILL_MISSING_PERM_OR_EXEC" not in record.latest_reason_codes
+    assert "REGISTRY_RECONCILIATION_REVIEW_REQUIRED" not in record.latest_reason_codes
+    assert "RECOVERY_ADOPTION_REVIEW_REQUIRED" not in record.latest_reason_codes
+
+
+def test_exact_review_event_still_blocks_broker_backed_open_identity() -> None:
+    adoption = replace(
+        _base_event(TradeEventType.RECOVERY_ADOPTION_RECORDED),
+        lifecycle_id="life-1",
+        order_id="entry-order-1",
+        client_id="client-7",
+        perm_id="2047276405",
+        exec_id="0000e1a7.6a29f525.01.01",
+        price=Decimal("30395.00"),
+        reason_codes=("RECOVERY_ADOPTION_RECORDED",),
+    )
+    current_review = replace(
+        _base_event(TradeEventType.REVIEW_REQUIRED, offset=1),
+        lifecycle_id="life-1",
+        account_id="DUM882026",
+        reason_codes=("REGISTRY_RECONCILIATION_REVIEW_REQUIRED",),
+    )
+
+    record = reduce_trade_events([adoption, current_review])
+
+    assert record.current_state == TradeCurrentState.REVIEW_REQUIRED
+    assert "REGISTRY_RECONCILIATION_REVIEW_REQUIRED" in record.latest_reason_codes
+
+
 def test_conflicting_lifecycle_conid_or_account_creates_review_required() -> None:
     events = [_base_event(TradeEventType.ENTRY_INTENT_CREATED), _entry_fill(offset=1), _managed(offset=2)]
     conflicting_exit = replace(

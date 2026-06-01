@@ -167,7 +167,7 @@ class TradeOwnershipIdentity:
             conflicts.append("LANE_ID_MISMATCH")
         if self.thesis_strategy_id != event.thesis_strategy_id:
             conflicts.append("THESIS_STRATEGY_ID_MISMATCH")
-        if self.account_id != event.account_id:
+        if not (_is_placeholder_identity_value(self.account_id) or _is_placeholder_identity_value(event.account_id)) and self.account_id != event.account_id:
             conflicts.append("ACCOUNT_ID_MISMATCH")
         if self.con_id != event.con_id:
             conflicts.append("CON_ID_MISMATCH")
@@ -255,6 +255,12 @@ def reduce_trade_events(events: Sequence[TradeEvent]) -> TradeRegistryRecord:
     recovery_adoption_recorded = False
 
     for event in ordered:
+        if _is_non_authoritative_aggregate_review_event(
+            ownership=ownership,
+            event=event,
+            broker_backed_entry=broker_backed_entry,
+        ):
+            continue
         reason_codes.extend(event.reason_codes)
         event_conflicts = _event_identity_conflicts(ownership, event)
         if event_conflicts:
@@ -290,6 +296,8 @@ def reduce_trade_events(events: Sequence[TradeEvent]) -> TradeRegistryRecord:
             open_qty = event.qty
             state = TradeCurrentState.OPEN_MANAGED
             ownership = _identity_from_event(event)
+            if _has_fill_broker_ids(event):
+                reason_codes = _clear_superseded_entry_adoption_review_reasons(reason_codes)
         elif event.event_type == TradeEventType.LIFECYCLE_OPEN_MANAGED:
             state = TradeCurrentState.OPEN_MANAGED
             ownership = _identity_from_event(event, lifecycle_required=True)
@@ -398,6 +406,29 @@ def _event_identity_conflicts(ownership: TradeOwnershipIdentity | None, event: T
     return ownership.conflicts_with(event)
 
 
+def _is_non_authoritative_aggregate_review_event(
+    *,
+    ownership: TradeOwnershipIdentity | None,
+    event: TradeEvent,
+    broker_backed_entry: bool,
+) -> bool:
+    if event.event_type != TradeEventType.REVIEW_REQUIRED:
+        return False
+    if ownership is None or not broker_backed_entry:
+        return False
+    if not _is_placeholder_identity_value(event.account_id):
+        return False
+    if event.lifecycle_id and ownership.lifecycle_id and event.lifecycle_id != ownership.lifecycle_id:
+        return False
+    if event.lane_id != ownership.lane_id or event.thesis_strategy_id != ownership.thesis_strategy_id:
+        return False
+    if event.con_id != ownership.con_id or event.local_symbol != ownership.local_symbol or event.qty != ownership.qty:
+        return False
+    if not set(event.reason_codes).issubset(_NON_AUTHORITATIVE_AGGREGATE_REVIEW_REASONS):
+        return False
+    return True
+
+
 def _broker_backed_malformed_reason(event: TradeEvent) -> str | None:
     if event.event_type in BROKER_BACKED_EVENT_TYPES and not event.broker_backed:
         return "BROKER_BACKED_EVENT_MISSING_BROKER_IDS"
@@ -411,6 +442,39 @@ def _broker_backed_malformed_reason(event: TradeEvent) -> str | None:
 
 def _has_fill_broker_ids(event: TradeEvent) -> bool:
     return bool(event.order_id and event.client_id and event.perm_id and event.exec_id)
+
+
+def _clear_superseded_entry_adoption_review_reasons(reason_codes: Sequence[str]) -> list[str]:
+    return [
+        reason
+        for reason in reason_codes
+        if reason not in _SUPERSEDED_BY_EXACT_ENTRY_ADOPTION_REASONS
+    ]
+
+
+_PLACEHOLDER_IDENTITY_VALUES = {"", "MULTIPLE", "UNKNOWN", "UNRESOLVED", "NONE", "NULL", "N/A"}
+
+
+_NON_AUTHORITATIVE_AGGREGATE_REVIEW_REASONS = {
+    "REGISTRY_RECONCILIATION_REVIEW_REQUIRED",
+    "REGISTRY_RECONCILIATION_MATCHED",
+    "RECOVERY_ADOPTION_REVIEW_REQUIRED",
+    "BROKER_BACKED_FILL_MISSING_PERM_OR_EXEC",
+}
+
+
+_SUPERSEDED_BY_EXACT_ENTRY_ADOPTION_REASONS = {
+    "BROKER_BACKED_EVENT_MISSING_BROKER_IDS",
+    "BROKER_BACKED_FILL_MISSING_PERM_OR_EXEC",
+    "REVIEW_REQUIRED_EVENT",
+    "RECOVERY_ADOPTION_REVIEW_REQUIRED",
+    "REGISTRY_RECONCILIATION_REVIEW_REQUIRED",
+    "REGISTRY_RECONCILIATION_MATCHED",
+}
+
+
+def _is_placeholder_identity_value(value: str | None) -> bool:
+    return str(value or "").strip().upper() in _PLACEHOLDER_IDENTITY_VALUES
 
 
 def _ownership_from_dict(payload: Mapping[str, Any]) -> TradeOwnershipIdentity:

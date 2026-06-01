@@ -247,8 +247,9 @@ def reconcile_track_b_paper_broker_truth(
     historical_debris_resolution = resolve_historical_reconciliation_debris(
         config=HistoricalReconciliationDebrisResolverConfig(
             repo_root=config.repo_root,
-            submit_intent_ownership_path=config.submit_intent_ownership_path,
-            latest_submit_intent_ownership_path=DEFAULT_TRACK_B_SUBMIT_INTENT_OWNERSHIP_LATEST_JSON,
+            submit_intent_ownership_path=_repo_scoped_path(config.repo_root, config.submit_intent_ownership_path),
+            latest_submit_intent_ownership_path=config.repo_root
+            / DEFAULT_TRACK_B_SUBMIT_INTENT_OWNERSHIP_LATEST_JSON,
             stale_after_seconds=config.broker_truth_settlement_seconds,
             apply=True,
         ),
@@ -269,6 +270,15 @@ def reconcile_track_b_paper_broker_truth(
     lifecycle_blockers = _filter_historical_resolved_lifecycle_blockers(
         lifecycle_blockers,
         historical_debris_resolution=historical_debris_resolution,
+    )
+    lifecycle_blockers = _filter_non_current_lifecycle_review_blockers(
+        lifecycle_blockers,
+        trade_summary=trade_summary,
+        live_position_status=live_position_status,
+        broker_positions=track_b_positions,
+        lifecycle_positions=lifecycle_positions,
+        position_match_report=position_match_report,
+        symbols=config.symbols,
     )
     current_scope_review_required_count = _current_scope_review_required_count(lifecycle_blockers)
     historical_review_required_count = max(raw_review_required_count - current_scope_review_required_count, 0)
@@ -307,6 +317,11 @@ def reconcile_track_b_paper_broker_truth(
         submit_intent_ownership_reconciliation=submit_intent_ownership_reconciliation,
         registry_reconciliation=registry_reconciliation,
     )
+    post_fill_lifecycle_adoption = _apply_post_fill_lifecycle_adoption_invariant(
+        config=config,
+        broker_backed_entry_adoption=broker_backed_entry_adoption,
+        now=actual_now,
+    )
     if registry_reconciliation.get("blocking") is True:
         blockers.append(
             {
@@ -336,6 +351,15 @@ def reconcile_track_b_paper_broker_truth(
             "SUBMIT_INTENT_BROKER_POSITION_ADOPTION_REQUIRED",
             "SUBMIT_INTENT_BROKER_POSITIONS_ADOPTION_REQUIRED",
         }:
+            if broker_backed_entry_adoption and broker_backed_entry_adoption.get("adoption_allowed") is not True:
+                blockers.append(
+                    {
+                        "code": "REVIEW_REQUIRED_UNMANAGED_BROKER_EXPOSURE",
+                        "detail": "Broker-backed PAPER exposure exists but no OPEN_MANAGED lifecycle state was created within the adoption grace path.",
+                        "broker_backed_entry_adoption": broker_backed_entry_adoption,
+                        "position_match_blocker": position_match_report.get("blocker"),
+                    }
+                )
             blockers.append(
                 {
                     "code": submit_intent_classification,
@@ -485,6 +509,7 @@ def reconcile_track_b_paper_broker_truth(
         "submit_intent_ownership_reconciliation": submit_intent_ownership_reconciliation,
         "historical_reconciliation_debris_resolution": historical_debris_resolution,
         "broker_backed_entry_adoption": broker_backed_entry_adoption,
+        "post_fill_lifecycle_adoption": post_fill_lifecycle_adoption,
         "stale_managed_exit_orders": stale_managed_exit_orders,
         "hard_exit_order_not_marketable_orders": hard_exit_order_not_marketable,
         "unknown_broker_open_orders": unknown_track_b_open_orders,
@@ -576,13 +601,35 @@ def _registry_reconciliation_state(
             mapped_trade_ids.add(matches[0].trade_id)
             mapped_records[matches[0].trade_id] = _registry_record_event_row(matches[0])
         elif len(matches) > 1:
-            blockers.append(
-                {
-                    "code": "REGISTRY_AMBIGUOUS_BROKER_POSITION",
-                    "broker_position": dict(broker_position),
-                    "matching_trade_ids": [record.trade_id for record in matches],
-                }
+            lifecycle_matches = _registry_lifecycle_records_for_broker_position_match(
+                active_records=active_records,
+                broker_position=broker_position,
+                position_match_report=position_match_report,
             )
+            direct_lifecycle_trade_ids = _lifecycle_trade_ids_for_broker_position(
+                broker_position=broker_position,
+                lifecycle_positions=lifecycle_positions,
+            )
+            lifecycle_trade_ids = direct_lifecycle_trade_ids or {
+                *_lifecycle_trade_ids_for_broker_position_match(
+                    broker_position=broker_position,
+                    position_match_report=position_match_report,
+                ),
+                *(record.trade_id for record in lifecycle_matches),
+            }
+            narrowed_matches = [record for record in matches if record.trade_id in lifecycle_trade_ids]
+            if len(narrowed_matches) == 1:
+                mapped_trade_ids.add(narrowed_matches[0].trade_id)
+                mapped_records[narrowed_matches[0].trade_id] = _registry_record_event_row(narrowed_matches[0])
+            else:
+                blockers.append(
+                    {
+                        "code": "REGISTRY_AMBIGUOUS_BROKER_POSITION",
+                        "broker_position": dict(broker_position),
+                        "matching_trade_ids": [record.trade_id for record in matches],
+                        "lifecycle_matching_trade_ids": sorted(lifecycle_trade_ids),
+                    }
+                )
         else:
             blockers.append(
                 {
@@ -605,13 +652,20 @@ def _registry_reconciliation_state(
                     }
                 )
         elif len(matches) > 1:
-            blockers.append(
-                {
-                    "code": "REGISTRY_AMBIGUOUS_LIFECYCLE_POSITION",
-                    "lifecycle_position": dict(lifecycle_position),
-                    "matching_trade_ids": [record.trade_id for record in matches],
-                }
-            )
+            direct_trade_ids = _trade_ids_from_lifecycle_position(lifecycle_position)
+            narrowed_matches = [record for record in matches if record.trade_id in direct_trade_ids]
+            if len(narrowed_matches) == 1:
+                mapped_trade_ids.add(narrowed_matches[0].trade_id)
+                mapped_records[narrowed_matches[0].trade_id] = _registry_record_event_row(narrowed_matches[0])
+            else:
+                blockers.append(
+                    {
+                        "code": "REGISTRY_AMBIGUOUS_LIFECYCLE_POSITION",
+                        "lifecycle_position": dict(lifecycle_position),
+                        "matching_trade_ids": [record.trade_id for record in matches],
+                        "lifecycle_trade_ids": sorted(direct_trade_ids),
+                    }
+                )
         else:
             blockers.append(
                 {
@@ -627,7 +681,7 @@ def _registry_reconciliation_state(
         lifecycle_position = match.get("lifecycle_position") if isinstance(match.get("lifecycle_position"), Mapping) else {}
         broker_trade_ids = {record.trade_id for record in _registry_records_for_broker_position(active_records, broker_position)}
         lifecycle_trade_ids = {record.trade_id for record in _registry_records_for_lifecycle_position(active_records, lifecycle_position)}
-        if broker_trade_ids and lifecycle_trade_ids and broker_trade_ids != lifecycle_trade_ids:
+        if broker_trade_ids and lifecycle_trade_ids and not lifecycle_trade_ids.issubset(broker_trade_ids):
             blockers.append(
                 {
                     "code": "REGISTRY_BROKER_LIFECYCLE_TRADE_ID_CONFLICT",
@@ -867,6 +921,110 @@ def _registry_records_for_lifecycle_position(
     ]
 
 
+def _registry_lifecycle_records_for_broker_position_match(
+    *,
+    active_records: Sequence[TradeRegistryRecord],
+    broker_position: Mapping[str, Any],
+    position_match_report: Mapping[str, Any],
+) -> list[TradeRegistryRecord]:
+    records_by_trade_id: dict[str, TradeRegistryRecord] = {}
+    for match in position_match_report.get("matches") or []:
+        if not isinstance(match, Mapping):
+            continue
+        matched_broker = match.get("broker_position") if isinstance(match.get("broker_position"), Mapping) else {}
+        if not _broker_position_rows_equivalent(broker_position, matched_broker):
+            continue
+        lifecycle_position = match.get("lifecycle_position") if isinstance(match.get("lifecycle_position"), Mapping) else {}
+        for record in _registry_records_for_lifecycle_position(active_records, lifecycle_position):
+            records_by_trade_id.setdefault(record.trade_id, record)
+    return list(records_by_trade_id.values())
+
+
+def _lifecycle_trade_ids_for_broker_position_match(
+    *,
+    broker_position: Mapping[str, Any],
+    position_match_report: Mapping[str, Any],
+) -> set[str]:
+    trade_ids: set[str] = set()
+    for match in position_match_report.get("matches") or []:
+        if not isinstance(match, Mapping):
+            continue
+        matched_broker = match.get("broker_position") if isinstance(match.get("broker_position"), Mapping) else {}
+        if not _broker_position_rows_equivalent(broker_position, matched_broker):
+            continue
+        lifecycle_position = match.get("lifecycle_position") if isinstance(match.get("lifecycle_position"), Mapping) else {}
+        trade_id = str(lifecycle_position.get("trade_id") or "").strip()
+        if trade_id:
+            trade_ids.add(trade_id)
+        trade_ids.update(str(item).strip() for item in lifecycle_position.get("trade_ids") or [] if str(item or "").strip())
+    return trade_ids
+
+
+def _lifecycle_trade_ids_for_broker_position(
+    *,
+    broker_position: Mapping[str, Any],
+    lifecycle_positions: Sequence[Mapping[str, Any]],
+) -> set[str]:
+    trade_ids: set[str] = set()
+    for lifecycle_position in lifecycle_positions:
+        if not _lifecycle_position_matches_broker_position(lifecycle_position, broker_position):
+            continue
+        trade_ids.update(_trade_ids_from_lifecycle_position(lifecycle_position))
+    return trade_ids
+
+
+def _trade_ids_from_lifecycle_position(lifecycle_position: Mapping[str, Any]) -> set[str]:
+    trade_ids: set[str] = set()
+    trade_id = str(lifecycle_position.get("trade_id") or "").strip()
+    if trade_id:
+        trade_ids.add(trade_id)
+    trade_ids.update(str(item).strip() for item in lifecycle_position.get("trade_ids") or [] if str(item or "").strip())
+    return trade_ids
+
+
+def _lifecycle_position_matches_broker_position(
+    lifecycle_position: Mapping[str, Any],
+    broker_position: Mapping[str, Any],
+) -> bool:
+    broker_con_id = _int_or_none(broker_position.get("con_id") or broker_position.get("conId"))
+    lifecycle_con_id = _int_or_none(lifecycle_position.get("con_id") or lifecycle_position.get("conId"))
+    if broker_con_id is not None and lifecycle_con_id is not None and broker_con_id != lifecycle_con_id:
+        return False
+    broker_local = str(broker_position.get("local_symbol") or broker_position.get("localSymbol") or "").strip().upper()
+    lifecycle_local = str(lifecycle_position.get("local_symbol") or lifecycle_position.get("localSymbol") or "").strip().upper()
+    if broker_local and lifecycle_local and broker_local != lifecycle_local:
+        return False
+    broker_symbol = str(broker_position.get("track_b_root") or broker_position.get("symbol") or "").strip().upper()
+    lifecycle_symbol = str(lifecycle_position.get("track_b_root") or lifecycle_position.get("instrument_family") or lifecycle_position.get("symbol") or "").strip().upper()
+    if broker_symbol and lifecycle_symbol and broker_symbol != lifecycle_symbol:
+        return False
+    return bool(broker_con_id is not None or lifecycle_con_id is not None or broker_local or lifecycle_local or broker_symbol or lifecycle_symbol)
+
+
+def _broker_position_rows_equivalent(left: Mapping[str, Any], right: Mapping[str, Any]) -> bool:
+    left_account = _valid_registry_identity_text(left.get("account_id") or left.get("account"))
+    right_account = _valid_registry_identity_text(right.get("account_id") or right.get("account"))
+    if left_account and right_account and left_account != right_account:
+        return False
+    left_con_id = _int_or_none(left.get("con_id") or left.get("conId"))
+    right_con_id = _int_or_none(right.get("con_id") or right.get("conId"))
+    if left_con_id is not None and right_con_id is not None and left_con_id != right_con_id:
+        return False
+    left_local = str(left.get("local_symbol") or left.get("localSymbol") or "").strip().upper()
+    right_local = str(right.get("local_symbol") or right.get("localSymbol") or "").strip().upper()
+    if left_local and right_local and left_local != right_local:
+        return False
+    left_symbol = str(left.get("track_b_root") or left.get("symbol") or left.get("instrument_family") or "").strip().upper()
+    right_symbol = str(right.get("track_b_root") or right.get("symbol") or right.get("instrument_family") or "").strip().upper()
+    if left_symbol and right_symbol and left_symbol != right_symbol:
+        return False
+    left_qty = _decimal_value(left.get("quantity"))
+    right_qty = _decimal_value(right.get("quantity"))
+    if left_qty is not None and right_qty is not None and left_qty != right_qty:
+        return False
+    return bool(left_con_id is not None or right_con_id is not None or left_local or right_local or left_symbol or right_symbol)
+
+
 def _record_contract_matches_row(record: TradeRegistryRecord, row: Mapping[str, Any]) -> bool:
     owner = record.ownership_identity
     if owner is None:
@@ -1030,6 +1188,112 @@ def _append_recovery_adoption_registry_events(
             )
         except Exception:
             continue
+
+
+def _apply_post_fill_lifecycle_adoption_invariant(
+    *,
+    config: ReconciliationConfig,
+    broker_backed_entry_adoption: Mapping[str, Any] | None,
+    now: datetime,
+) -> dict[str, Any] | None:
+    from mgc_v05l.execution_core.track_b_broker_backed_entry_auto_adoption import (
+        auto_adopt_broker_backed_entry,
+    )
+
+    if not isinstance(broker_backed_entry_adoption, Mapping):
+        return None
+    adoption_rows = [
+        row
+        for row in broker_backed_entry_adoption.get("adoptions") or []
+        if isinstance(row, Mapping)
+    ]
+    if not adoption_rows and broker_backed_entry_adoption.get("trade_id"):
+        adoption_rows = [broker_backed_entry_adoption]
+    if not adoption_rows:
+        return None
+    results: list[dict[str, Any]] = []
+    for row in adoption_rows:
+        if row.get("adoption_allowed") is not True or row.get("broker_backed_evidence_valid") is not True:
+            results.append(
+                {
+                    "classification": "REVIEW_REQUIRED_UNMANAGED_BROKER_EXPOSURE",
+                    "trade_id": row.get("trade_id"),
+                    "lifecycle_id": row.get("lifecycle_id"),
+                    "reason_codes": list((row.get("fill_evidence_resolver") or {}).get("reason_codes") or ()),
+                    "fill_evidence_resolver": row.get("fill_evidence_resolver"),
+                }
+            )
+            continue
+        payload = _auto_adoption_payload_from_remediation(row)
+        result = auto_adopt_broker_backed_entry(
+            entry_fill_evidence=payload,
+            evidence_path=Path(str((row.get("fill_evidence_resolver") or {}).get("selected_source_artifact_path") or config.report_path)),
+            paper_trade_ledger_output_root=config.ledger_root,
+            now=now,
+        )
+        if result.open_managed:
+            _append_recovery_adoption_registry_events(
+                config=config,
+                broker_backed_entry_adoption={"classification": "POST_FILL_LIFECYCLE_ADOPTION_APPLIED", "adoptions": [row]},
+                now=now,
+            )
+        results.append(
+            {
+                "classification": result.classification,
+                "transition_classification": result.transition_classification,
+                "trade_id": row.get("trade_id"),
+                "lifecycle_id": row.get("lifecycle_id"),
+                "open_managed": result.open_managed,
+                "lifecycle_report_path": str(result.lifecycle_report_path) if result.lifecycle_report_path else None,
+                "manifest_path": str(result.manifest_path) if result.manifest_path else None,
+                "blockers": list(result.blockers),
+            }
+        )
+    return {
+        "classification": "POST_FILL_LIFECYCLE_ADOPTION_APPLIED"
+        if results and all(item.get("open_managed") is True for item in results)
+        else "POST_FILL_LIFECYCLE_ADOPTION_REVIEW_REQUIRED",
+        "adoption_count": len(results),
+        "results": results,
+        "live_money_eligible": False,
+        "paper_proof_invoked": False,
+    }
+
+
+def _auto_adoption_payload_from_remediation(row: Mapping[str, Any]) -> dict[str, Any]:
+    contract = row.get("contract") if isinstance(row.get("contract"), Mapping) else {}
+    action = str(row.get("action") or "").strip().upper()
+    intent_type = "SELL_TO_OPEN" if action == "SELL" else "BUY_TO_OPEN"
+    symbol = str(contract.get("symbol") or row.get("symbol") or "").strip().upper()
+    expiry = str(contract.get("expiry") or row.get("expiry") or "").strip()
+    return {
+        "classification": "PAPER_STRATEGY_ORDER_FILLED_PERSISTED",
+        "strategy_id": row.get("strategy_id") or row.get("lane_id"),
+        "lane_id": row.get("lane_id") or row.get("strategy_id"),
+        "instrument": symbol,
+        "symbol": symbol,
+        "action": action or ("SELL" if intent_type == "SELL_TO_OPEN" else "BUY"),
+        "quantity": row.get("qty") or row.get("quantity") or 1,
+        "order_intent_id": row.get("order_intent_id") or row.get("ownership_intent_id") or row.get("lifecycle_id"),
+        "intent_type": intent_type,
+        "decision_bar_timestamp": row.get("decision_bar_timestamp") or row.get("fill_timestamp"),
+        "broker_order_id": row.get("broker_order_id") or row.get("order_id"),
+        "account_id": row.get("account_id"),
+        "perm_id": row.get("perm_id"),
+        "client_id": row.get("client_id"),
+        "exec_id": row.get("exec_id"),
+        "local_symbol": contract.get("local_symbol") or row.get("local_symbol"),
+        "con_id": contract.get("con_id") or row.get("con_id"),
+        "contract_key": f"{symbol}-{expiry[:6]}" if symbol and expiry else symbol,
+        "fill_price": row.get("fill_price"),
+        "fill_timestamp": row.get("fill_timestamp"),
+        "managed_exit_policy_id": row.get("managed_exit_policy_id") or "GLOBEX_ACTIVE_EVIDENCE_TIMEBOX_60M_EXIT_V1",
+        "trade_id": row.get("trade_id"),
+        "lifecycle_id": row.get("lifecycle_id"),
+        "paper_proof_invoked": False,
+        "live_money_readiness": False,
+        "review_required": False,
+    }
 
 
 def _recovery_adoption_trade_ids(broker_backed_entry_adoption: Mapping[str, Any] | None) -> set[str]:
@@ -1515,6 +1779,167 @@ def _filter_historical_resolved_lifecycle_blockers(
     ]
 
 
+def _filter_non_current_lifecycle_review_blockers(
+    blockers: Sequence[Mapping[str, Any]],
+    *,
+    trade_summary: Mapping[str, Any],
+    live_position_status: Mapping[str, Any],
+    broker_positions: Sequence[Mapping[str, Any]],
+    lifecycle_positions: Sequence[Mapping[str, Any]],
+    position_match_report: Mapping[str, Any],
+    symbols: Sequence[str],
+) -> list[dict[str, Any]]:
+    current_count = _current_linked_lifecycle_review_required_count(
+        trade_summary=trade_summary,
+        live_position_status=live_position_status,
+        broker_positions=broker_positions,
+        lifecycle_positions=lifecycle_positions,
+        position_match_report=position_match_report,
+        symbols=symbols,
+    )
+    filtered: list[dict[str, Any]] = []
+    for row in blockers:
+        if row.get("code") != "LIFECYCLE_REVIEW_REQUIRED_PRESENT":
+            filtered.append(dict(row))
+            continue
+        if current_count <= 0:
+            continue
+        updated = dict(row)
+        updated["count"] = current_count
+        filtered.append(updated)
+    return filtered
+
+
+def _current_linked_lifecycle_review_required_count(
+    *,
+    trade_summary: Mapping[str, Any],
+    live_position_status: Mapping[str, Any],
+    broker_positions: Sequence[Mapping[str, Any]],
+    lifecycle_positions: Sequence[Mapping[str, Any]],
+    position_match_report: Mapping[str, Any],
+    symbols: Sequence[str],
+) -> int:
+    review_positions = [
+        dict(item)
+        for item in live_position_status.get("review_required_positions") or []
+        if isinstance(item, Mapping)
+    ]
+    if review_positions:
+        return len(review_positions)
+
+    review_trades = [
+        dict(item)
+        for item in trade_summary.get("recent_trades") or []
+        if isinstance(item, Mapping) and item.get("review_required") is True
+    ]
+    if not review_trades:
+        if broker_positions and position_match_report.get("matched") is not True:
+            return _lifecycle_review_required_count(
+                trade_summary=trade_summary,
+                live_position_status=live_position_status,
+                pnl_summary={},
+            )
+        return 0
+
+    current_lifecycle_ids = _current_lifecycle_ids(lifecycle_positions)
+    current_trade_ids = _current_trade_ids(lifecycle_positions)
+    current_linked = [
+        row
+        for row in review_trades
+        if _review_trade_links_to_current_lifecycle(
+            row,
+            current_lifecycle_ids=current_lifecycle_ids,
+            current_trade_ids=current_trade_ids,
+        )
+    ]
+    if current_linked:
+        return len(current_linked)
+
+    if position_match_report.get("matched") is True and lifecycle_positions:
+        return 0
+
+    return sum(
+        1
+        for row in review_trades
+        if _review_trade_matches_unowned_current_broker_position(
+            row,
+            broker_positions=broker_positions,
+            symbols=symbols,
+        )
+    )
+
+
+def _current_lifecycle_ids(lifecycle_positions: Sequence[Mapping[str, Any]]) -> set[str]:
+    ids: set[str] = set()
+    for position in lifecycle_positions:
+        for value in (position.get("lifecycle_id"), *(position.get("lifecycle_ids") or [])):
+            text = str(value or "").strip()
+            if text:
+                ids.add(text)
+        for unit in position.get("lifecycle_units") or []:
+            if isinstance(unit, Mapping):
+                text = str(unit.get("lifecycle_id") or "").strip()
+                if text:
+                    ids.add(text)
+    return ids
+
+
+def _current_trade_ids(lifecycle_positions: Sequence[Mapping[str, Any]]) -> set[str]:
+    ids: set[str] = set()
+    for position in lifecycle_positions:
+        for value in (position.get("trade_id"), *(position.get("trade_ids") or [])):
+            text = str(value or "").strip()
+            if text:
+                ids.add(text)
+        for unit in position.get("lifecycle_units") or []:
+            if isinstance(unit, Mapping):
+                text = str(unit.get("trade_id") or "").strip()
+                if text:
+                    ids.add(text)
+    return ids
+
+
+def _review_trade_links_to_current_lifecycle(
+    row: Mapping[str, Any],
+    *,
+    current_lifecycle_ids: set[str],
+    current_trade_ids: set[str],
+) -> bool:
+    lifecycle_id = str(row.get("lifecycle_id") or "").strip()
+    trade_id = str(row.get("trade_id") or "").strip()
+    return bool((lifecycle_id and lifecycle_id in current_lifecycle_ids) or (trade_id and trade_id in current_trade_ids))
+
+
+def _review_trade_matches_unowned_current_broker_position(
+    row: Mapping[str, Any],
+    *,
+    broker_positions: Sequence[Mapping[str, Any]],
+    symbols: Sequence[str],
+) -> bool:
+    review_root = _track_b_root(row, symbols)
+    review_qty = _signed_review_quantity(row)
+    if review_root is None or review_qty is None:
+        return False
+    for position in broker_positions:
+        broker_root = _track_b_root(position, symbols)
+        broker_qty = _decimal_value(position.get("quantity"))
+        if broker_root == review_root and broker_qty == review_qty and _local_symbols_compatible(position, row):
+            return True
+    return False
+
+
+def _signed_review_quantity(row: Mapping[str, Any]) -> Decimal | None:
+    qty = _decimal_value(row.get("quantity") or row.get("qty"))
+    if qty is None:
+        return None
+    side = str(row.get("side") or row.get("action") or "").upper()
+    if "SHORT" in side or side.startswith("SELL"):
+        return -abs(qty)
+    if "LONG" in side or side.startswith("BUY"):
+        return abs(qty)
+    return qty
+
+
 def _repo_scoped_path(repo_root: Path, path: Path) -> Path:
     candidate = Path(path)
     if not candidate.is_absolute():
@@ -1614,27 +2039,6 @@ def _broker_backed_entry_adoption_remediation(
     mapped_trade_ids = [str(item).strip() for item in registry_reconciliation.get("mapped_trade_ids") or [] if str(item).strip()]
     broker_position_count = int(registry_reconciliation.get("broker_position_count") or 0)
     lifecycle_position_count = int(registry_reconciliation.get("lifecycle_position_count") or 0)
-    open_resume_records = [
-        row
-        for row in mapped_records
-        if str(row.get("current_state") or "") in {"OPEN_MANAGED", "EXIT_DUE", "WORKING_EXIT"}
-    ]
-    if open_resume_records and mapped_trade_ids and broker_position_count > 0 and lifecycle_position_count == 0:
-        return {
-            "classification": "BROKER_BACKED_ENTRY_REGISTRY_RESUME_REQUIRED",
-            "detail": "Broker-backed PAPER position maps to exactly one central registry trade_id and should resume from that trade chain.",
-            "adoption_allowed": True,
-            "resume_existing_trade": True,
-            "trade_id": mapped_trade_ids[0] if len(mapped_trade_ids) == 1 else None,
-            "adoption_count": len(open_resume_records),
-            "adoptions": [
-                _registry_resume_adoption_item(row)
-                for row in open_resume_records
-            ],
-            "live_money_eligible": False,
-            "paper_proof_invoked": False,
-            "required_action": "Resume guarded PAPER lifecycle management from the exact central registry trade_id.",
-        }
     classification = str(submit_intent_ownership_reconciliation.get("classification") or "")
     if classification == "SUBMIT_INTENT_BROKER_POSITIONS_ADOPTION_REQUIRED":
         remediations = []
@@ -1658,11 +2062,34 @@ def _broker_backed_entry_adoption_remediation(
             "paper_proof_invoked": False,
             "required_action": "Run guarded PAPER lifecycle adoption for each exact ownership/order/contract before allowing submit.",
         }
+    if classification == "SUBMIT_INTENT_BROKER_POSITION_ADOPTION_REQUIRED":
+        submit_intent = submit_intent_ownership_reconciliation.get("matching_submit_intent")
+        broker_position = submit_intent_ownership_reconciliation.get("broker_position")
+        return _broker_backed_entry_adoption_item(config=config, submit_intent=submit_intent, broker_position=broker_position)
+    open_resume_records = [
+        row
+        for row in mapped_records
+        if str(row.get("current_state") or "") in {"OPEN_MANAGED", "EXIT_DUE", "WORKING_EXIT"}
+    ]
+    if open_resume_records and mapped_trade_ids and broker_position_count > 0 and lifecycle_position_count == 0:
+        return {
+            "classification": "BROKER_BACKED_ENTRY_REGISTRY_RESUME_REQUIRED",
+            "detail": "Broker-backed PAPER position maps to exactly one central registry trade_id and should resume from that trade chain.",
+            "adoption_allowed": True,
+            "resume_existing_trade": True,
+            "trade_id": mapped_trade_ids[0] if len(mapped_trade_ids) == 1 else None,
+            "adoption_count": len(open_resume_records),
+            "adoptions": [
+                _registry_resume_adoption_item(row)
+                for row in open_resume_records
+            ],
+            "live_money_eligible": False,
+            "paper_proof_invoked": False,
+            "required_action": "Resume guarded PAPER lifecycle management from the exact central registry trade_id.",
+        }
     if classification != "SUBMIT_INTENT_BROKER_POSITION_ADOPTION_REQUIRED":
         return None
-    submit_intent = submit_intent_ownership_reconciliation.get("matching_submit_intent")
-    broker_position = submit_intent_ownership_reconciliation.get("broker_position")
-    return _broker_backed_entry_adoption_item(config=config, submit_intent=submit_intent, broker_position=broker_position)
+    return None
 
 
 def _broker_backed_entry_adoption_item(
@@ -1675,6 +2102,7 @@ def _broker_backed_entry_adoption_item(
         return None
     perm_id = submit_intent.get("perm_id")
     extra = submit_intent.get("extra") if isinstance(submit_intent.get("extra"), Mapping) else {}
+    caller_metadata = extra.get("caller_metadata") if isinstance(extra.get("caller_metadata"), Mapping) else {}
     resolver = resolve_broker_backed_fill_evidence(
         repo_root=config.repo_root,
         request=BrokerFillEvidenceRequest(
@@ -1728,6 +2156,9 @@ def _broker_backed_entry_adoption_item(
             "reason_codes": list(resolver.reason_codes),
             "selected_source_artifact_path": resolved_evidence.get("source_artifact_path"),
             "matching_execution_count": len(resolver.matches),
+            "matching_executions": list(resolver.matches),
+            "rejected_execution_count": len(resolver.rejected),
+            "rejected_executions": list(resolver.rejected),
         },
         "trade_id": trade_id,
         "lifecycle_id": submit_intent.get("lifecycle_id"),
@@ -1739,6 +2170,7 @@ def _broker_backed_entry_adoption_item(
         "exec_id": exec_id,
         "lane_id": submit_intent.get("lane_id"),
         "strategy_id": submit_intent.get("strategy_id"),
+        "managed_exit_policy_id": submit_intent.get("managed_exit_policy_id") or caller_metadata.get("managed_exit_policy_id"),
         "action": submit_intent.get("action"),
         "contract": {
             "symbol": submit_intent.get("symbol") or broker_position.get("symbol"),
@@ -1860,37 +2292,30 @@ def _submit_intent_match_for_broker_position(
         for row in same_contract
         if _submit_intent_matches_broker_position(row, broker_position, config=config)
     ]
-    current_matches: list[dict[str, Any]] = []
-    stale_or_unusable_matches: list[dict[str, Any]] = []
-    for row in exact_matches:
-        event_age = _submit_intent_age_seconds(row, now)
-        if event_age is None or event_age > config.broker_truth_settlement_seconds:
-            stale_or_unusable_matches.append(row)
-        else:
-            current_matches.append(row)
-    if len(current_matches) > 1 or (current_matches and stale_or_unusable_matches):
+    if len(exact_matches) > 1:
         return {
             "classification": "SUBMIT_INTENT_COMPETING_UNRESOLVED_REVIEW_REQUIRED",
-            "detail": "Multiple current or stale unresolved submit-intent ownership records match the same broker position.",
+            "detail": "Multiple unresolved submit-intent ownership records match the same broker position.",
             "broker_position": broker_position,
-            "matching_submit_intents": current_matches,
-            "stale_or_unusable_submit_intents": stale_or_unusable_matches,
+            "matching_submit_intents": exact_matches,
         }
-    if len(current_matches) == 1:
-        event_age = _submit_intent_age_seconds(current_matches[0], now)
+    if len(exact_matches) == 1:
+        event_age = _submit_intent_age_seconds(exact_matches[0], now)
+        delayed_adoption = event_age is None or event_age > config.broker_truth_settlement_seconds
+        if delayed_adoption and not _submit_intent_has_broker_effect_proof(exact_matches[0]):
+            return {
+                "classification": "SUBMIT_INTENT_IDENTITY_MISMATCH_REVIEW_REQUIRED",
+                "detail": "Matching submit-intent ownership record is stale and lacks broker-effect/adoption evidence.",
+                "broker_position": broker_position,
+                "stale_or_unusable_submit_intents": exact_matches,
+            }
         return {
             "classification": "SUBMIT_INTENT_BROKER_POSITION_ADOPTION_REQUIRED",
             "detail": "Broker position is exactly attributed to one unresolved Track B submit intent and needs lifecycle adoption.",
             "broker_position": broker_position,
-            "matching_submit_intent": current_matches[0],
+            "matching_submit_intent": exact_matches[0],
             "event_age_seconds": event_age,
-        }
-    if stale_or_unusable_matches:
-        return {
-            "classification": "SUBMIT_INTENT_IDENTITY_MISMATCH_REVIEW_REQUIRED",
-            "detail": "Matching submit-intent ownership records are missing timestamps or outside the uncertainty window.",
-            "broker_position": broker_position,
-            "stale_or_unusable_submit_intents": stale_or_unusable_matches,
+            "delayed_adoption": delayed_adoption,
         }
     if same_contract:
         return {
@@ -2009,6 +2434,18 @@ def _submit_intent_is_entry(submit_intent: Mapping[str, Any]) -> bool:
     intent_type = str(submit_intent.get("intent_type") or "").upper()
     action = str(submit_intent.get("action") or "").upper()
     return intent_type in {"BUY_TO_OPEN", "SELL_TO_OPEN", "ENTRY"} or action in {"BUY", "SELL"}
+
+
+def _submit_intent_has_broker_effect_proof(submit_intent: Mapping[str, Any]) -> bool:
+    state = str(submit_intent.get("state") or "").strip().upper()
+    if state in {"BROKER_POSITION_OBSERVED_ADOPTION_REQUIRED", "LIFECYCLE_OPEN_PERSISTED"}:
+        return True
+    extra = submit_intent.get("extra") if isinstance(submit_intent.get("extra"), Mapping) else {}
+    return (
+        str(extra.get("broker_effect_classification") or "").strip().upper() == "BROKER_EFFECT_CONFIRMED"
+        or str(extra.get("bridge_classification") or "").strip().upper() in {"PAPER_STRATEGY_ORDER_FILLED", "PAPER_ORDER_FILLED"}
+        or str(extra.get("delegated_status") or "").strip().lower() == "filled"
+    )
 
 
 def _submit_intent_competition_key(submit_intent: Mapping[str, Any]) -> tuple[str, str, str, str, str]:
