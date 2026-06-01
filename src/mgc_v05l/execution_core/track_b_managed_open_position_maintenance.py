@@ -50,6 +50,9 @@ DEFAULT_TRACK_B_MANAGED_OPEN_POSITION_MAINTENANCE_JSON = (
     Path("outputs/track_b_execution_core/diagnostics") / "latest_track_b_managed_open_position_maintenance.json"
 )
 DEFAULT_TRACK_B_PHASE1_RUNTIME_MARKET_DATA_ROOT = Path("outputs/track_b_execution_core/phase1_runtime_market_data")
+DEFAULT_TRACK_B_MANAGED_POSITION_PROJECTION_JSON = (
+    Path("outputs/track_b_execution_core/managed_positions") / "latest_managed_positions.json"
+)
 
 TICK_SIZE_BY_INSTRUMENT = {
     "MGC": Decimal("0.1"),
@@ -76,6 +79,7 @@ class TrackBManagedOpenPositionMaintenanceConfig:
     lane_registry_paths: tuple[Path, ...] = ()
     paper_trade_summary_json: Path = DEFAULT_TRACK_B_PAPER_TRADE_SUMMARY_JSON
     live_position_status_json: Path = DEFAULT_TRACK_B_LIVE_POSITION_STATUS_JSON
+    managed_position_projection_json: Path = DEFAULT_TRACK_B_MANAGED_POSITION_PROJECTION_JSON
     diagnostic_json: Path = DEFAULT_TRACK_B_MANAGED_OPEN_POSITION_MAINTENANCE_JSON
     paper_exit_price_offset_ticks: int = 2
     broker_truth_max_age_seconds: float = 120.0
@@ -100,6 +104,8 @@ def run_track_b_managed_open_position_maintenance(
     require_aware_datetime(actual_now, "now")
     live_position_status = _read_json(actual_config.live_position_status_json)
     trade_summary = _read_json(actual_config.paper_trade_summary_json)
+    managed_position_projection = _read_json(actual_config.managed_position_projection_json)
+    projected_positions = _managed_position_projection_by_lifecycle_id(managed_position_projection)
     source_paths = [
         Path(str(item))
         for item in live_position_status.get("source_artifact_paths", [])
@@ -164,6 +170,7 @@ def run_track_b_managed_open_position_maintenance(
             )
             continue
 
+        projected_position = projected_positions.get(lifecycle_id, {})
         instrument = str(position.get("instrument_family") or lifecycle_report.get("instrument_family") or "")
         completed_payload = _read_json(_completed_5m_path(actual_config.live_runtime_feed_output_root, instrument))
         live_1m_payload = _read_json(_live_1m_path(actual_config.live_runtime_feed_output_root, instrument))
@@ -174,6 +181,16 @@ def run_track_b_managed_open_position_maintenance(
             entry_timestamp=entry_timestamp,
         )
         completed_bars_since_entry = len(completed_timestamps)
+        projected_bars_since_entry = _int_or_none(
+            projected_position.get("completed_bars_since_entry")
+            or projected_position.get("bars_since_entry")
+            or projected_position.get("bars_since_fill")
+        )
+        projected_exit_due = _projection_exit_due(projected_position)
+        effective_completed_bars_since_entry = max(
+            completed_bars_since_entry,
+            projected_bars_since_entry or 0,
+        )
         completed_bars_since_signal = len(
             _completed_bar_timestamps_after_entry(
                 completed_payload=completed_payload,
@@ -222,7 +239,24 @@ def run_track_b_managed_open_position_maintenance(
         if managed_exit_policy_id:
             lifecycle_report = {**dict(lifecycle_report), "managed_exit_policy_id": managed_exit_policy_id}
         required_bars = int(lifecycle_report.get("managed_exit_policy_max_completed_5m_bars") or 3)
-        exit_eligible = completed_bars_since_entry >= required_bars and not suppress_discretionary_exit
+        projected_required_bars = _int_or_none(
+            projected_position.get("required_completed_5m_bars")
+            or projected_position.get("managed_exit_policy_max_completed_5m_bars")
+        )
+        if projected_required_bars is not None:
+            required_bars = projected_required_bars
+            lifecycle_report = {
+                **dict(lifecycle_report),
+                "managed_exit_policy_max_completed_5m_bars": required_bars,
+            }
+        exit_eligible = (
+            effective_completed_bars_since_entry >= required_bars or projected_exit_due
+        ) and not suppress_discretionary_exit
+        lifecycle_projection_conflict = (
+            projected_exit_due
+            and int(lifecycle_report.get("bars_since_fill") or lifecycle_report.get("open_position_age_completed_5m_bars") or 0)
+            < required_bars
+        )
         if not metadata.complete:
             position_reports.append(
                 {
@@ -230,6 +264,11 @@ def run_track_b_managed_open_position_maintenance(
                     "maintenance_invoked": False,
                     "latest_completed_5m_bar_timestamp": completed_timestamps[-1] if completed_timestamps else None,
                     "completed_bars_since_entry": completed_bars_since_entry,
+                    "effective_completed_bars_since_entry": effective_completed_bars_since_entry,
+                    "managed_position_projection_classification": projected_position.get("classification"),
+                    "managed_position_projection_exit_due": projected_exit_due,
+                    "managed_position_projection_bars_since_entry": projected_bars_since_entry,
+                    "lifecycle_report_stale_exit_due_conflict": lifecycle_projection_conflict,
                     "bars_since_fill": completed_bars_since_entry,
                     "data_freshness": market_data_state.to_json_dict(),
                     "data_freshness_state": market_data_state.state.value,
@@ -263,7 +302,7 @@ def run_track_b_managed_open_position_maintenance(
             maintenance_config=actual_config,
             lifecycle_report=lifecycle_report,
             position=position,
-            completed_bars_since_entry=completed_bars_since_entry,
+            completed_bars_since_entry=effective_completed_bars_since_entry,
             completed_bars_since_signal=completed_bars_since_signal,
             close_limit_price=close_limit_price,
             data_freshness_state=market_data_state.state.value,
@@ -278,6 +317,11 @@ def run_track_b_managed_open_position_maintenance(
                     "maintenance_mode": "DIAGNOSTIC_DRY_RUN_SUBMIT_DISABLED",
                     "latest_completed_5m_bar_timestamp": completed_timestamps[-1] if completed_timestamps else None,
                     "completed_bars_since_entry": completed_bars_since_entry,
+                    "effective_completed_bars_since_entry": effective_completed_bars_since_entry,
+                    "managed_position_projection_classification": projected_position.get("classification"),
+                    "managed_position_projection_exit_due": projected_exit_due,
+                    "managed_position_projection_bars_since_entry": projected_bars_since_entry,
+                    "lifecycle_report_stale_exit_due_conflict": lifecycle_projection_conflict,
                     "bars_since_fill": completed_bars_since_entry,
                     "bars_since_signal": completed_bars_since_signal,
                     "fill_timestamp_source": "BROKER_ENTRY_FILL",
@@ -334,6 +378,11 @@ def run_track_b_managed_open_position_maintenance(
                 "maintenance_invoked": True,
                 "latest_completed_5m_bar_timestamp": completed_timestamps[-1] if completed_timestamps else None,
                 "completed_bars_since_entry": completed_bars_since_entry,
+                "effective_completed_bars_since_entry": effective_completed_bars_since_entry,
+                "managed_position_projection_classification": projected_position.get("classification"),
+                "managed_position_projection_exit_due": projected_exit_due,
+                "managed_position_projection_bars_since_entry": projected_bars_since_entry,
+                "lifecycle_report_stale_exit_due_conflict": lifecycle_projection_conflict,
                 "bars_since_fill": completed_bars_since_entry,
                 "bars_since_signal": completed_bars_since_signal,
                 "fill_timestamp_source": "BROKER_ENTRY_FILL",
@@ -400,6 +449,34 @@ def _open_positions(live_position_status: Mapping[str, Any]) -> list[dict[str, A
         if isinstance(value, Mapping) and value.get("lifecycle_id"):
             positions.append(dict(value))
     return positions
+
+
+def _managed_position_projection_by_lifecycle_id(payload: Mapping[str, Any]) -> dict[str, dict[str, Any]]:
+    raw_positions = payload.get("positions") or payload.get("managed_positions") or []
+    if not isinstance(raw_positions, list):
+        return {}
+    projected: dict[str, dict[str, Any]] = {}
+    for item in raw_positions:
+        if not isinstance(item, Mapping):
+            continue
+        lifecycle_id = str(item.get("lifecycle_id") or "").strip()
+        if lifecycle_id:
+            projected[lifecycle_id] = dict(item)
+    return projected
+
+
+def _projection_exit_due(position: Mapping[str, Any]) -> bool:
+    if not position:
+        return False
+    classification = str(
+        position.get("classification")
+        or position.get("managed_position_classification")
+        or position.get("state")
+        or ""
+    ).upper()
+    if classification == "OPEN_MANAGED_EXIT_DUE":
+        return True
+    return position.get("exit_due") is True or position.get("timebox_due") is True
 
 
 def _lifecycle_report_path(

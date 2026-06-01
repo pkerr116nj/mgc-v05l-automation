@@ -29,6 +29,11 @@ from .track_b_strategy_managed_paper_lifecycle import (
     ACTION_STRATEGY_MANAGED_ENTRY_SUBMIT,
     PLAN_STRATEGY_MANAGED_ENTRY_SUBMIT,
 )
+from .track_b_managed_open_position_maintenance import (
+    TrackBManagedOpenPositionMaintenanceConfig,
+    TrackBManagedOpenPositionMaintenanceResult,
+    run_track_b_managed_open_position_maintenance,
+)
 from .track_b_strategy_paper_runner import (
     DEFAULT_TRACK_B_STRATEGY_PAPER_RUNNER_OUTPUT_ROOT,
     TrackBStrategyPaperRunnerConfig,
@@ -174,6 +179,10 @@ class TrackBMultiStrategyRuntimeCycleStages:
         [TrackBMultiStrategyRuntimeCycleConfig, TrackBMultiStrategyInput, Mapping[str, object]],
         TrackBStrategyPaperRunnerResult,
     ]
+    managed_open_position_maintenance: Callable[
+        [TrackBManagedOpenPositionMaintenanceConfig, datetime],
+        TrackBManagedOpenPositionMaintenanceResult,
+    ] | None = None
 
 
 @dataclass(frozen=True)
@@ -189,6 +198,7 @@ def default_stages() -> TrackBMultiStrategyRuntimeCycleStages:
     return TrackBMultiStrategyRuntimeCycleStages(
         strategy_rule=_run_strategy_rule,
         paper_runner=_run_strategy_paper_runner,
+        managed_open_position_maintenance=_run_managed_open_position_maintenance,
     )
 
 
@@ -206,6 +216,7 @@ def run_track_b_multi_strategy_runtime_cycle(
     actual_stages = stages or default_stages()
     strategy_results: list[TrackBStrategyRuleRunnerResult] = []
     paper_result: TrackBStrategyPaperRunnerResult | None = None
+    maintenance_result: TrackBManagedOpenPositionMaintenanceResult | None = None
     paper_order_parameters: dict[str, object] = _empty_paper_order_parameters(config)
     cycle_authority: dict[str, object] = build_track_b_multi_strategy_cycle_authority(
         config=config,
@@ -214,6 +225,11 @@ def run_track_b_multi_strategy_runtime_cycle(
     )
 
     try:
+        maintenance_result = _maybe_run_managed_open_position_maintenance(
+            config=config,
+            stages=actual_stages,
+            now=actual_now,
+        )
         strategy_reports: list[dict[str, object]] = []
         candidate_signals: list[dict[str, object]] = []
         for strategy_input in _strategy_inputs(config):
@@ -328,6 +344,7 @@ def run_track_b_multi_strategy_runtime_cycle(
             cycle_authority=cycle_authority,
             primary_blocker=primary_blocker,
             required_next_action=required_next_action,
+            maintenance_result=maintenance_result,
         )
         _write_report(report_json, report)
         report.update(_maybe_record_decision_journal(config, report, report_json, actual_now))
@@ -356,6 +373,7 @@ def run_track_b_multi_strategy_runtime_cycle(
             cycle_authority=cycle_authority,
             primary_blocker=f"Track B multi-strategy runtime cycle stage error: {exc}",
             required_next_action="Review multi-strategy cycle diagnostics before retrying.",
+            maintenance_result=maintenance_result,
         )
         _write_report(report_json, report)
         report.update(_maybe_record_decision_journal(config, report, report_json, actual_now))
@@ -468,6 +486,49 @@ def _run_strategy_paper_runner(
             managed_lifecycle_id=config.managed_lifecycle_id,
         )
     )
+
+
+def _run_managed_open_position_maintenance(
+    config: TrackBManagedOpenPositionMaintenanceConfig,
+    now: datetime,
+) -> TrackBManagedOpenPositionMaintenanceResult:
+    return run_track_b_managed_open_position_maintenance(config=config, now=now)
+
+
+def _maybe_run_managed_open_position_maintenance(
+    *,
+    config: TrackBMultiStrategyRuntimeCycleConfig,
+    stages: TrackBMultiStrategyRuntimeCycleStages,
+    now: datetime,
+) -> TrackBManagedOpenPositionMaintenanceResult | None:
+    if str(config.mode).upper() != "PAPER":
+        return None
+    stage = stages.managed_open_position_maintenance
+    if stage is None:
+        return None
+    maintenance_config = TrackBManagedOpenPositionMaintenanceConfig(
+        mode=config.mode,
+        account_id=config.account_id,
+        expected_account_id=config.expected_account_id,
+        submit_enabled=_paper_submit_requested(config),
+        host=config.host,
+        port=config.port,
+        client_id=config.client_id,
+        order_type="LMT",
+        time_in_force="DAY",
+        live_money_readiness=False,
+        live_runtime_feed_output_root=config.repo_root
+        / "outputs"
+        / "track_b_execution_core"
+        / "phase1_runtime_market_data",
+        managed_position_projection_json=config.repo_root
+        / "outputs"
+        / "track_b_execution_core"
+        / "managed_positions"
+        / "latest_managed_positions.json",
+        paper_exit_price_offset_ticks=config.paper_exit_price_offset_ticks,
+    )
+    return stage(maintenance_config, now)
 
 
 def _paper_config_for_chosen_signal(
@@ -1330,8 +1391,10 @@ def _build_report(
     cycle_authority: Mapping[str, object],
     primary_blocker: object | None,
     required_next_action: str,
+    maintenance_result: TrackBManagedOpenPositionMaintenanceResult | None = None,
 ) -> dict[str, object]:
     paper_report = paper_result.report if paper_result is not None else {}
+    maintenance_report = maintenance_result.report if maintenance_result is not None else {}
     chosen_signal = arbitration.get("chosen_candidate") if isinstance(arbitration.get("chosen_candidate"), Mapping) else None
     return {
         "schema_version": "track_b_multi_strategy_runtime_cycle_v1",
@@ -1348,6 +1411,14 @@ def _build_report(
         "chosen_strategy_id": chosen_signal.get("strategy_id") if isinstance(chosen_signal, Mapping) else None,
         "reason_no_signal_chosen": _reason_no_signal_chosen(verdict, arbitration, primary_blocker),
         "paper_submit_requested": _paper_submit_requested(config),
+        "managed_open_position_maintenance_path": str(maintenance_result.report_json) if maintenance_result else None,
+        "managed_open_position_maintenance": maintenance_report or None,
+        "managed_open_position_maintenance_close_intent_created_count": maintenance_report.get("close_intent_created_count"),
+        "managed_open_position_maintenance_close_submitted_count": maintenance_report.get("close_submitted_count"),
+        "managed_open_position_maintenance_close_filled_count": maintenance_report.get("close_filled_count"),
+        "managed_open_position_maintenance_review_required_count": maintenance_report.get("review_required_count"),
+        "managed_open_position_maintenance_broker_state_mutated": maintenance_report.get("broker_state_mutated") is True,
+        "managed_open_position_maintenance_submit_attempted": maintenance_report.get("submit_attempted") is True,
         "multi_strategy_cycle_authority": dict(cycle_authority),
         "multi_strategy_cycle_authorization_classification": cycle_authority.get("authorization_classification"),
         "control_plane_snapshot_id": cycle_authority.get("control_plane_snapshot_id"),
@@ -1378,8 +1449,14 @@ def _build_report(
         "readiness_invoked": bool(paper_report.get("readiness_invoked")) if paper_report else False,
         "paper_proof_invoked": bool(paper_report.get("paper_proof_invoked")) if paper_report else False,
         "submit_allowed": bool(paper_report.get("submit_allowed")) if paper_report else False,
-        "submit_attempted": bool(paper_report.get("submit_attempted")) if paper_report else False,
-        "broker_state_mutated": bool(paper_report.get("broker_state_mutated")) if paper_report else False,
+        "submit_attempted": (
+            bool(paper_report.get("submit_attempted")) if paper_report else False
+        )
+        or maintenance_report.get("submit_attempted") is True,
+        "broker_state_mutated": (
+            bool(paper_report.get("broker_state_mutated")) if paper_report else False
+        )
+        or maintenance_report.get("broker_state_mutated") is True,
         "paper_runner_report_path": str(paper_result.report_json) if paper_result else None,
         "paper_runner_verdict": paper_report.get("strategy_paper_runner_verdict"),
         "strategy_trade_intent_created": paper_report.get("strategy_trade_intent_created"),

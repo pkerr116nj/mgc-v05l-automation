@@ -204,6 +204,7 @@ def seed_open_position(
         paper_trade_ledger_output_root=tmp_path / "ledger",
         paper_trade_summary_json=tmp_path / "ledger" / "latest_track_b_paper_trade_summary.json",
         live_position_status_json=tmp_path / "ledger" / "latest_track_b_live_position_status.json",
+        managed_position_projection_json=tmp_path / "managed_positions" / "latest_managed_positions.json",
         diagnostic_json=tmp_path / "diagnostics" / "latest_track_b_managed_open_position_maintenance.json",
     )
 
@@ -242,9 +243,10 @@ def fake_close_stages() -> TrackBStrategyManagedPaperLifecycleStages:
 def test_open_managed_position_age_two_keeps_waiting(tmp_path: Path) -> None:
     cfg = seed_open_position(
         tmp_path,
+        entry_filled_at="2026-05-07T16:31:07+00:00",
         completed_timestamps=[
-            "2026-05-07T16:30:00+00:00",
             "2026-05-07T16:35:00+00:00",
+            "2026-05-07T16:40:00+00:00",
         ],
     )
 
@@ -418,6 +420,65 @@ def test_open_managed_position_age_three_submits_close_and_clears_open_summary(t
     assert summary["managed_strategy_trade_count"] == 1
     assert summary["completed_trade_count"] == 1
     assert positions["open_position_count"] == 0
+
+
+def test_exit_due_projection_creates_close_despite_stale_lifecycle_waiting_report(tmp_path: Path) -> None:
+    cfg = seed_open_position(
+        tmp_path,
+        entry_filled_at="2026-05-07T16:31:07+00:00",
+        completed_timestamps=[
+            "2026-05-07T16:35:00+00:00",
+            "2026-05-07T16:40:00+00:00",
+        ],
+    )
+    lifecycle_path = (
+        tmp_path
+        / "managed"
+        / "strategy_managed_fe30248d4d6c42acaf106c8313b0b33b"
+        / "track_b_strategy_managed_paper_lifecycle_report.json"
+    )
+    lifecycle = json.loads(lifecycle_path.read_text(encoding="utf-8"))
+    lifecycle["managed_exit_policy_id"] = "US_ACTIVE_EVIDENCE_TIMEBOX_60M_EXIT_V1"
+    lifecycle["managed_exit_policy_max_completed_5m_bars"] = 12
+    lifecycle["bars_since_fill"] = 0
+    lifecycle["open_position_age_completed_5m_bars"] = 0
+    lifecycle["close_intent_status"] = "WAITING_FOR_EXIT_POLICY_CONDITION"
+    lifecycle_path.write_text(json.dumps(lifecycle), encoding="utf-8")
+    write_json(
+        cfg.managed_position_projection_json,
+        {
+            "schema_version": "track_b_managed_positions_v1",
+            "generated_at": aware_now().isoformat(),
+            "positions": [
+                {
+                    "trade_id": lifecycle["trade_id"],
+                    "lifecycle_id": lifecycle["lifecycle_id"],
+                    "classification": "OPEN_MANAGED_EXIT_DUE",
+                    "exit_due": True,
+                    "bars_since_entry": 17,
+                    "required_completed_5m_bars": 12,
+                    "close_order_present": False,
+                }
+            ],
+        },
+    )
+
+    result = run_track_b_managed_open_position_maintenance(
+        config=cfg,
+        lifecycle_stages=fake_close_stages(),
+        now=aware_now(),
+    )
+
+    position = result.report["positions"][0]
+    assert position["completed_bars_since_entry"] == 2
+    assert position["effective_completed_bars_since_entry"] == 17
+    assert position["managed_position_projection_classification"] == "OPEN_MANAGED_EXIT_DUE"
+    assert position["managed_position_projection_exit_due"] is True
+    assert position["lifecycle_report_stale_exit_due_conflict"] is True
+    assert position["required_completed_5m_bars"] == 12
+    assert position["exit_eligible"] is True
+    assert position["close_intent_created"] is True
+    assert position["close_submitted"] is True
 
 
 @pytest.mark.parametrize(
