@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import uuid
 from dataclasses import dataclass
 from datetime import UTC, datetime, time, timedelta
@@ -46,6 +47,12 @@ from mgc_v05l.execution_core.track_b_artifact_retention_inventory import (
     write_track_b_artifact_retention_inventory,
 )
 from mgc_v05l.execution_core.track_b_atomic_io import write_json_atomic
+from mgc_v05l.execution_core.generated_artifact_retention import (
+    CHECK_OK,
+    RetentionConfig,
+    check_generated_artifacts,
+    maintain_generated_artifacts,
+)
 from mgc_v05l.paths import ARCHIVED_ROOT_FRAGMENTS, PROJECT_ROOT
 
 
@@ -81,6 +88,7 @@ OTHER_DIAGNOSTIC = "OTHER_DIAGNOSTIC"
 LANE_IDS = (
     "historical_data_maintenance",
     "artifact_hygiene",
+    "generated_artifact_retention_check",
     "artifact_retention_inventory",
     "artifact_archive_planner",
     "artifact_archive_executor_boundary",
@@ -103,6 +111,7 @@ DEFAULT_DATA_MAINTENANCE_REPORT_PATH = (
     / "track_b_data_maintenance"
     / "latest_track_b_data_maintenance_report.json"
 )
+DEFAULT_RETENTION_POLICY_PATH = Path("config") / "generated_artifact_retention.json"
 
 
 @dataclass(frozen=True)
@@ -112,8 +121,11 @@ class TrackBWeeklyMaintenanceOrchestratorConfig:
     markdown_report_root: Path = DEFAULT_MARKDOWN_REPORT_ROOT
     data_maintenance_report_path: Path = DEFAULT_DATA_MAINTENANCE_REPORT_PATH
     historical_data_proof_critical: bool = False
+    retention_policy_path: Path = DEFAULT_RETENTION_POLICY_PATH
+    run_retention_maintenance_dry_run: bool = False
     max_research_files: int = 1000
     max_old_root_scan_files: int = 5000
+    max_disk_usage_scan_files: int = 5000
     write_lane_artifacts: bool = True
     force: bool = False
     maintained_history_runner_enabled: bool = False
@@ -188,7 +200,19 @@ def build_track_b_weekly_maintenance_orchestrator(
     attempts = _attempt_count(previous_state) + 1
     artifact_archive_lane = _lane_by_id(lanes, "artifact_archive_planner")
     historical_lane = _lane_by_id(lanes, "historical_data_maintenance")
+    retention_lane = _lane_by_id(lanes, "generated_artifact_retention_check")
     old_root_lane = _lane_by_id(lanes, "old_root_contamination_check")
+    disk_usage = _disk_usage_snapshot(repo_root=config.repo_root, max_files=config.max_disk_usage_scan_files)
+    backfill_tracking = _historical_backfill_tracking(historical_lane=historical_lane, now=actual_now)
+    utility_statuses = _utility_statuses(lanes=lanes, backfill_tracking=backfill_tracking, now=actual_now)
+    pass_fail_summary = _pass_fail_summary(
+        lanes=lanes,
+        missing_lanes=missing_lanes,
+        failures=failures,
+        incomplete=incomplete,
+        maintenance_incomplete=maintenance_incomplete,
+        diagnostics=diagnostics,
+    )
     return {
         "schema_version": "track_b_weekly_maintenance_orchestrator_v1",
         "generated_at": actual_now.isoformat(),
@@ -223,6 +247,23 @@ def build_track_b_weekly_maintenance_orchestrator(
         "maintenance_incomplete_findings": maintenance_incomplete,
         "archive_posture": artifact_archive_lane.get("summary", {}),
         "historical_data_posture": historical_lane.get("summary", {}),
+        "generated_artifact_retention_status": retention_lane.get("summary", {}),
+        "utility_statuses": utility_statuses,
+        "backfill_tracking": backfill_tracking,
+        "disk_usage_before": disk_usage,
+        "disk_usage_after": disk_usage,
+        "pass_fail_summary": pass_fail_summary,
+        "weekly_maintenance_manifest": {
+            "schema_version": "weekly_maintenance_manifest_v1",
+            "generated_at": actual_now.isoformat(),
+            "expected_cadence": "weekly",
+            "utility_statuses": utility_statuses,
+            "backfill_tracking": backfill_tracking,
+            "generated_artifact_retention_status": retention_lane.get("summary", {}),
+            "disk_usage_before": disk_usage,
+            "disk_usage_after": disk_usage,
+            "pass_fail_summary": pass_fail_summary,
+        },
         "old_root_hits": old_root_lane.get("summary", {}).get("old_root_hits", []),
         "old_root_active_path_blockers": old_root_lane.get("summary", {}).get("active_path_blockers", []),
         "sunday_proof_blocked": bool(canonical_proof_blockers),
@@ -247,6 +288,7 @@ def build_track_b_weekly_maintenance_orchestrator(
         "source_artifact_paths": {
             "weekly_maintenance_orchestrator": str(config.resolve(config.output_path)),
             "data_maintenance_report": str(config.resolve(config.data_maintenance_report_path)),
+            "generated_artifact_retention_policy": str(config.resolve(config.retention_policy_path)),
         },
     }
 
@@ -273,8 +315,10 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--repo-root", type=Path, default=REPO_ROOT)
     parser.add_argument("--output-path", type=Path, default=DEFAULT_OUTPUT_PATH)
     parser.add_argument("--markdown-report-root", type=Path, default=DEFAULT_MARKDOWN_REPORT_ROOT)
+    parser.add_argument("--retention-policy", type=Path, default=DEFAULT_RETENTION_POLICY_PATH)
     parser.add_argument("--historical-data-proof-critical", action="store_true")
     parser.add_argument("--maintained-history-runner-enabled", action="store_true")
+    parser.add_argument("--retention-maintenance-dry-run", action="store_true")
     parser.add_argument("--force", action="store_true")
     parser.add_argument("--no-write", action="store_true")
     parser.add_argument("--json", action="store_true")
@@ -288,6 +332,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         output_path=Path(args.output_path),
         markdown_report_root=Path(args.markdown_report_root),
         historical_data_proof_critical=bool(args.historical_data_proof_critical),
+        retention_policy_path=Path(args.retention_policy),
+        run_retention_maintenance_dry_run=bool(args.retention_maintenance_dry_run),
         maintained_history_runner_enabled=bool(args.maintained_history_runner_enabled),
         force=bool(args.force),
     )
@@ -330,6 +376,8 @@ def _run_lane(
         return _historical_data_maintenance_lane(config=config, now=now)
     if lane_id == "artifact_hygiene":
         return _artifact_hygiene_lane(config=config, now=now)
+    if lane_id == "generated_artifact_retention_check":
+        return _generated_artifact_retention_lane(config=config)
     if lane_id == "artifact_retention_inventory":
         return _artifact_retention_inventory_lane(config=config, now=now)
     if lane_id == "artifact_archive_planner":
@@ -359,6 +407,7 @@ def _historical_data_maintenance_lane(
 ) -> dict[str, Any]:
     path = config.resolve(config.data_maintenance_report_path)
     report = _read_json(path)
+    latest_success = _latest_successful_historical_data_report(config=config)
     cutoff = _prior_friday_close_utc(now)
     if not report:
         classification = LANE_DIAGNOSTIC_WARNING
@@ -373,6 +422,7 @@ def _historical_data_maintenance_lane(
             summary={
                 "expected_command": "python -m mgc_v05l.execution_core.track_b_data_maintenance_cli",
                 "expected_complete_through_prior_friday_close": cutoff.isoformat(),
+                **latest_success,
                 "optional_mgc_runner_blocking": config.maintained_history_runner_enabled,
                 "report_path": str(path),
             },
@@ -404,9 +454,52 @@ def _historical_data_maintenance_lane(
             "latest_bar_timestamp": report.get("latest_bar_timestamp"),
             "complete_through_cutoff": complete,
             "expected_complete_through_prior_friday_close": cutoff.isoformat(),
+            **latest_success,
             "proof_critical": config.historical_data_proof_critical,
             "optional_mgc_runner_blocking": not ok and config.maintained_history_runner_enabled,
             "report_path": str(path),
+        },
+    )
+
+
+def _generated_artifact_retention_lane(
+    *,
+    config: TrackBWeeklyMaintenanceOrchestratorConfig,
+) -> dict[str, Any]:
+    retention_config = RetentionConfig(
+        repo_root=config.repo_root,
+        policy_path=config.retention_policy_path,
+    )
+    check = check_generated_artifacts(config=retention_config)
+    maintenance_dry_run: dict[str, Any] = {}
+    if config.run_retention_maintenance_dry_run:
+        maintenance_dry_run = maintain_generated_artifacts(config=retention_config, apply=False)
+    ok = check.get("classification") == CHECK_OK
+    return _lane_result(
+        lane_id="generated_artifact_retention_check",
+        classification=LANE_READY if ok else LANE_DIAGNOSTIC_WARNING,
+        status="ready" if ok else "attention",
+        reason=(
+            "Generated artifact retention check is within configured thresholds."
+            if ok
+            else "Generated artifact retention check found oversized generated files."
+        ),
+        proof_blocking=False,
+        diagnostic_only=True,
+        summary={
+            "classification": check.get("classification"),
+            "check_command": "generated-artifact-retention check --warn-only",
+            "maintenance_dry_run_command": "generated-artifact-retention maintain --dry-run",
+            "policy_path": str(retention_config.resolve(retention_config.policy_path)),
+            "candidate_count": check.get("candidate_count"),
+            "violation_count": check.get("violation_count"),
+            "protected_over_threshold_count": check.get("protected_over_threshold_count"),
+            "top_large_files": check.get("top_large_files", []),
+            "retention_maintenance_dry_run_included": bool(maintenance_dry_run),
+            "retention_maintenance_action_count": maintenance_dry_run.get("action_count"),
+            "retention_maintenance_rotated_count": maintenance_dry_run.get("rotated_count"),
+            "dry_run_only": True,
+            "apply_enabled": False,
         },
     )
 
@@ -941,6 +1034,263 @@ def _diagnostic_findings(lanes: Sequence[Mapping[str, Any]]) -> list[dict[str, A
     ]
 
 
+def _latest_successful_historical_data_report(
+    *,
+    config: TrackBWeeklyMaintenanceOrchestratorConfig,
+) -> dict[str, Any]:
+    root = config.resolve(DEFAULT_DATA_MAINTENANCE_REPORT_PATH).parent
+    candidates = [config.resolve(config.data_maintenance_report_path)]
+    if root.exists():
+        candidates.extend(sorted(root.glob("track_b_data_maintenance_*/track_b_data_maintenance_report.json")))
+    latest: dict[str, Any] = {}
+    latest_path: Path | None = None
+    latest_generated_at: datetime | None = None
+    for path in candidates:
+        report = _read_json(path)
+        if not _historical_report_successful(report):
+            continue
+        generated_at = _parse_datetime(report.get("generated_at")) or _parse_datetime(report.get("latest_bar_timestamp"))
+        if generated_at is None:
+            continue
+        if latest_generated_at is None or generated_at > latest_generated_at:
+            latest = report
+            latest_path = path
+            latest_generated_at = generated_at
+    return {
+        "last_successful_run_at": latest_generated_at.isoformat() if latest_generated_at else None,
+        "last_successful_latest_bar_timestamp": latest.get("latest_bar_timestamp"),
+        "last_successful_report_path": "" if latest_path is None else str(latest_path),
+    }
+
+
+def _historical_report_successful(report: Mapping[str, Any]) -> bool:
+    return (
+        report.get("data_maintenance_verdict") == "TRACK_B_DATA_MAINTENANCE_UPDATED_HISTORY_READY"
+        and report.get("complete_through_cutoff") is True
+        and report.get("history_ready") is not False
+    )
+
+
+def _historical_backfill_tracking(
+    *,
+    historical_lane: Mapping[str, Any],
+    now: datetime,
+) -> dict[str, Any]:
+    summary = _mapping(historical_lane.get("summary"))
+    latest_bar = _parse_datetime(summary.get("latest_bar_timestamp"))
+    expected_cutoff = _parse_datetime(summary.get("expected_complete_through_prior_friday_close")) or _prior_friday_close_utc(now)
+    last_success = _parse_datetime(summary.get("last_successful_run_at"))
+    last_success_bar = _parse_datetime(summary.get("last_successful_latest_bar_timestamp"))
+    range_start = latest_bar or last_success_bar
+    missing_ranges: list[dict[str, str]] = []
+    recommended_ranges: list[dict[str, str]] = []
+    if range_start is not None and expected_cutoff is not None and range_start < expected_cutoff:
+        start = range_start + timedelta(minutes=1)
+        missing = {
+            "from": start.isoformat(),
+            "to": expected_cutoff.isoformat(),
+            "reason": "latest_historical_bar_before_expected_prior_friday_close",
+        }
+        missing_ranges.append(missing)
+        recommended_ranges.append(missing)
+    elif range_start is None and expected_cutoff is not None:
+        recommended_ranges.append(
+            {
+                "from": "",
+                "to": expected_cutoff.isoformat(),
+                "reason": "no_successful_historical_maintenance_artifact_found",
+            }
+        )
+    recent_windows = _recent_weekly_windows(now=now, count=2)
+    missed_recent_windows = [
+        window
+        for window in recent_windows
+        if last_success is None or last_success < _parse_datetime(window["window_start"])
+    ]
+    return {
+        "utility_id": "historical_data_backfill",
+        "expected_cadence": "weekly",
+        "last_successful_run_at": last_success.isoformat() if last_success else None,
+        "latest_bar_timestamp": summary.get("latest_bar_timestamp"),
+        "expected_complete_through": expected_cutoff.isoformat() if expected_cutoff else None,
+        "overdue": bool(historical_lane.get("classification") != LANE_READY),
+        "last_two_weekly_runs_missed": len(missed_recent_windows) >= 2,
+        "missed_week_count": len(missed_recent_windows),
+        "missed_weekly_windows": missed_recent_windows,
+        "missing_data_ranges": missing_ranges,
+        "recommended_backfill_date_ranges": recommended_ranges,
+        "backfill_execution_allowed": False,
+    }
+
+
+def _recent_weekly_windows(*, now: datetime, count: int) -> list[dict[str, str]]:
+    eastern = ZoneInfo("America/New_York")
+    local_now = _ensure_utc(now).astimezone(eastern)
+    days_since_saturday = (local_now.weekday() - 5) % 7
+    saturday = local_now.date() - timedelta(days=days_since_saturday)
+    if local_now.weekday() == 5 and (local_now.hour, local_now.minute, local_now.second) < (0, 0, 0):
+        saturday -= timedelta(days=7)
+    windows: list[dict[str, str]] = []
+    for offset in range(max(0, count)):
+        day = saturday - timedelta(days=7 * offset)
+        start = datetime.combine(day, time(0, 0), tzinfo=eastern)
+        windows.append(
+            {
+                "week_id": f"{day.isoformat()}_saturday_et",
+                "window_start": start.astimezone(UTC).isoformat(),
+                "expected_complete_through_prior_friday_close": (start - timedelta(hours=7)).astimezone(UTC).isoformat(),
+            }
+        )
+    return list(reversed(windows))
+
+
+def _utility_statuses(
+    *,
+    lanes: Sequence[Mapping[str, Any]],
+    backfill_tracking: Mapping[str, Any],
+    now: datetime,
+) -> list[dict[str, Any]]:
+    return [
+        _utility_status(
+            utility_id="historical_data_backfill",
+            lane=_lane_by_id(lanes, "historical_data_maintenance"),
+            expected_cadence="weekly",
+            last_successful_run_at=backfill_tracking.get("last_successful_run_at"),
+            missing_data_ranges=_list(backfill_tracking.get("missing_data_ranges")),
+            recommended_backfill_date_ranges=_list(backfill_tracking.get("recommended_backfill_date_ranges")),
+            now=now,
+        ),
+        _utility_status(
+            utility_id="research_platform_refresh",
+            lane=_lane_by_id(lanes, "research_offline_labeling_check"),
+            expected_cadence="weekly",
+            last_successful_run_at=None,
+            now=now,
+        ),
+        _utility_status(
+            utility_id="generated_artifact_retention",
+            lane=_lane_by_id(lanes, "generated_artifact_retention_check"),
+            expected_cadence="weekly",
+            last_successful_run_at=None,
+            now=now,
+        ),
+        _utility_status(
+            utility_id="archive_cleanup_planning",
+            lane=_lane_by_id(lanes, "artifact_archive_planner"),
+            expected_cadence="weekly",
+            last_successful_run_at=None,
+            now=now,
+        ),
+        _utility_status(
+            utility_id="generated_artifact_hygiene_inventory",
+            lane=_lane_by_id(lanes, "artifact_hygiene"),
+            expected_cadence="weekly",
+            last_successful_run_at=None,
+            now=now,
+        ),
+    ]
+
+
+def _utility_status(
+    *,
+    utility_id: str,
+    lane: Mapping[str, Any],
+    expected_cadence: str,
+    last_successful_run_at: Any,
+    now: datetime,
+    missing_data_ranges: Sequence[Any] = (),
+    recommended_backfill_date_ranges: Sequence[Any] = (),
+) -> dict[str, Any]:
+    lane_ready = lane.get("classification") == LANE_READY
+    successful_at = str(last_successful_run_at) if last_successful_run_at else (now.isoformat() if lane_ready else None)
+    overdue = not lane_ready
+    if successful_at:
+        parsed = _parse_datetime(successful_at)
+        if parsed is not None and _ensure_utc(now) - parsed > timedelta(days=8):
+            overdue = True
+    return {
+        "utility_id": utility_id,
+        "lane_id": lane.get("lane_id"),
+        "expected_cadence": expected_cadence,
+        "last_successful_run_at": successful_at,
+        "overdue": overdue,
+        "classification": lane.get("classification"),
+        "status": lane.get("status"),
+        "missing_data_ranges": list(missing_data_ranges),
+        "recommended_backfill_date_ranges": list(recommended_backfill_date_ranges),
+    }
+
+
+def _pass_fail_summary(
+    *,
+    lanes: Sequence[Mapping[str, Any]],
+    missing_lanes: Sequence[str],
+    failures: Sequence[Mapping[str, Any]],
+    incomplete: Sequence[Mapping[str, Any]],
+    maintenance_incomplete: Sequence[Mapping[str, Any]],
+    diagnostics: Sequence[Mapping[str, Any]],
+) -> dict[str, Any]:
+    return {
+        "pass": not missing_lanes and not failures and not incomplete and not maintenance_incomplete,
+        "lane_count": len(lanes),
+        "failed_count": len(failures),
+        "incomplete_count": len(incomplete),
+        "missing_lane_count": len(missing_lanes),
+        "maintenance_incomplete_count": len(maintenance_incomplete),
+        "diagnostic_count": len(diagnostics),
+    }
+
+
+def _disk_usage_snapshot(*, repo_root: Path, max_files: int) -> dict[str, Any]:
+    stat = os.statvfs(repo_root)
+    total = int(stat.f_frsize * stat.f_blocks)
+    free = int(stat.f_frsize * stat.f_bavail)
+    roots = []
+    for relative in (Path("outputs"), Path("var"), Path("logs")):
+        size, scanned, limited = _apparent_size_bytes(repo_root / relative, max_files=max_files)
+        roots.append(
+            {
+                "path": str(relative),
+                "exists": (repo_root / relative).exists(),
+                "apparent_size_bytes": size,
+                "files_scanned": scanned,
+                "scan_limited": limited,
+            }
+        )
+    return {
+        "filesystem_total_bytes": total,
+        "filesystem_used_bytes": total - free,
+        "filesystem_free_bytes": free,
+        "generated_roots": roots,
+    }
+
+
+def _apparent_size_bytes(path: Path, *, max_files: int) -> tuple[int, int, bool]:
+    if not path.exists():
+        return 0, 0, False
+    total = 0
+    scanned = 0
+    stack = [path]
+    while stack:
+        current = stack.pop()
+        try:
+            with os.scandir(current) as entries:
+                for entry in entries:
+                    if scanned >= max_files:
+                        return total, scanned, True
+                    try:
+                        if entry.is_dir(follow_symlinks=False):
+                            stack.append(Path(entry.path))
+                        elif entry.is_file(follow_symlinks=False):
+                            total += int(entry.stat(follow_symlinks=False).st_size)
+                            scanned += 1
+                    except OSError:
+                        continue
+        except OSError:
+            continue
+    return total, scanned, False
+
+
 def _recommended_actions(overall: str, lanes: Sequence[Mapping[str, Any]]) -> list[str]:
     if overall == WEEKLY_MAINTENANCE_READY:
         return ["No weekly maintenance action required before proof."]
@@ -984,9 +1334,20 @@ def _render_markdown(payload: Mapping[str, Any]) -> str:
         f"- optional_strategy_blocking_findings: {len(payload.get('optional_strategy_blocking_findings') or [])}",
         f"- maintenance_incomplete_findings: {len(payload.get('maintenance_incomplete_findings') or [])}",
         f"- diagnostic_findings: {len(payload.get('diagnostic_findings') or [])}",
+        f"- last_two_weekly_runs_missed: {_mapping(payload.get('backfill_tracking')).get('last_two_weekly_runs_missed')}",
+        f"- retention_violation_count: {_mapping(payload.get('generated_artifact_retention_status')).get('violation_count')}",
+        "",
+        "## Utility Status",
+    ]
+    for utility in _list(payload.get("utility_statuses")):
+        lines.append(
+            f"- {utility.get('utility_id')}: {utility.get('classification')} "
+            f"(overdue={utility.get('overdue')}, last_successful_run_at={utility.get('last_successful_run_at')})"
+        )
+    lines.extend([
         "",
         "## Lanes",
-    ]
+    ])
     for lane in _list(payload.get("lanes")):
         summary = _mapping(lane).get("summary") or {}
         lines.append(
@@ -1090,9 +1451,11 @@ def _old_root_line_is_guard_only(*, lines: Sequence[str], line_number: int, line
     )
     if any(marker in line for marker in guard_markers):
         return True
-    if (" in text" in stripped or " in line" in stripped or " in normalized" in stripped) and (
-        "Documents" in stripped or "Mobile Documents" in stripped or "iCloud" in stripped
-    ):
+    if (
+        " in text" in context
+        or " in line" in context
+        or " in normalized" in context
+    ) and ("Documents" in stripped or "Mobile Documents" in stripped or "iCloud" in stripped):
         return True
     return stripped.startswith("*\"/Users/patrick/Documents\"*") or stripped.startswith("*\"Mobile Documents\"*")
 

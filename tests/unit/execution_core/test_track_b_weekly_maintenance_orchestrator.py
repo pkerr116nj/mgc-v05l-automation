@@ -6,6 +6,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 from mgc_v05l.execution_core import track_b_weekly_maintenance_orchestrator as orchestrator
+from mgc_v05l.execution_core import weekly_maintenance
 from mgc_v05l.execution_core.track_b_weekly_maintenance_orchestrator import (
     COMPLETION_COMPLETE,
     COMPLETION_COMPLETE_WITH_DIAGNOSTICS,
@@ -198,7 +199,9 @@ def test_pycache_old_root_hits_are_diagnostic_only(tmp_path: Path) -> None:
 
     assert payload["overall_classification"] == WEEKLY_MAINTENANCE_READY
     assert payload["canonical_proof_blocking_findings"] == []
-    details = payload["lanes"][6]["summary"]["old_root_hit_details"]
+    details = [
+        lane for lane in payload["lanes"] if lane["lane_id"] == "old_root_contamination_check"
+    ][0]["summary"]["old_root_hit_details"]
     assert details[0]["severity"] == GENERATED_CACHE_DIAGNOSTIC
 
 
@@ -356,6 +359,159 @@ def test_completed_week_is_already_complete_noop(tmp_path: Path) -> None:
     assert second["alert_required"] is False
 
 
+def test_generated_artifact_retention_check_is_weekly_lane(tmp_path: Path) -> None:
+    _write_good_data_maintenance_report(tmp_path)
+    _write_retention_policy(tmp_path)
+
+    payload = build_track_b_weekly_maintenance_orchestrator(
+        config=TrackBWeeklyMaintenanceOrchestratorConfig(
+            repo_root=tmp_path,
+            retention_policy_path=Path("config/generated_artifact_retention.json"),
+        ),
+        now=NOW,
+    )
+
+    assert "generated_artifact_retention_check" in payload["lanes_run"]
+    assert payload["generated_artifact_retention_status"]["classification"] == "GENERATED_ARTIFACT_RETENTION_CHECK_OK"
+    assert any(item["utility_id"] == "generated_artifact_retention" for item in payload["utility_statuses"])
+
+
+def test_missed_week_backfill_range_detection(tmp_path: Path) -> None:
+    _write_retention_policy(tmp_path)
+    _write_data_maintenance_report(
+        tmp_path,
+        {
+            "data_maintenance_verdict": "TRACK_B_DATA_MAINTENANCE_STALE_OR_INSUFFICIENT",
+            "complete_through_cutoff": False,
+            "latest_bar_timestamp": "2026-05-16T21:00:00+00:00",
+            "history_ready": False,
+        },
+    )
+    _write_json(
+        tmp_path
+        / "outputs"
+        / "track_b_execution_core"
+        / "track_b_data_maintenance"
+        / "track_b_data_maintenance_success"
+        / "track_b_data_maintenance_report.json",
+        {
+            "generated_at": "2026-05-17T05:00:00+00:00",
+            "data_maintenance_verdict": "TRACK_B_DATA_MAINTENANCE_UPDATED_HISTORY_READY",
+            "complete_through_cutoff": True,
+            "latest_bar_timestamp": "2026-05-16T21:00:00+00:00",
+            "history_ready": True,
+        },
+    )
+
+    payload = build_track_b_weekly_maintenance_orchestrator(
+        config=TrackBWeeklyMaintenanceOrchestratorConfig(
+            repo_root=tmp_path,
+            retention_policy_path=Path("config/generated_artifact_retention.json"),
+            maintained_history_runner_enabled=True,
+        ),
+        now=datetime(2026, 6, 1, 12, 0, tzinfo=UTC),
+    )
+
+    tracking = payload["backfill_tracking"]
+    assert tracking["last_two_weekly_runs_missed"] is True
+    assert [item["week_id"] for item in tracking["missed_weekly_windows"]] == [
+        "2026-05-23_saturday_et",
+        "2026-05-30_saturday_et",
+    ]
+    assert tracking["recommended_backfill_date_ranges"] == [
+        {
+            "from": "2026-05-16T21:01:00+00:00",
+            "to": "2026-05-29T21:00:00+00:00",
+            "reason": "latest_historical_bar_before_expected_prior_friday_close",
+        }
+    ]
+
+
+def test_weekly_maintenance_dry_run_writes_report_and_includes_retention(tmp_path: Path) -> None:
+    _write_good_data_maintenance_report(tmp_path)
+    _write_retention_policy(tmp_path)
+
+    rc = weekly_maintenance.main(
+        [
+            "--repo-root",
+            str(tmp_path),
+            "--retention-policy",
+            "config/generated_artifact_retention.json",
+            "dry-run",
+        ]
+    )
+
+    report = (
+        tmp_path
+        / "outputs"
+        / "track_b_execution_core"
+        / "weekly_maintenance"
+        / "latest_weekly_maintenance_orchestrator.json"
+    )
+    payload = json.loads(report.read_text(encoding="utf-8"))
+    assert rc == 0
+    assert report.exists()
+    assert payload["generated_artifact_retention_status"]["retention_maintenance_dry_run_included"] is True
+    assert payload["broker_mutation_allowed"] is False
+
+
+def test_weekly_maintenance_apply_requires_approved(tmp_path: Path) -> None:
+    _write_good_data_maintenance_report(tmp_path)
+    _write_retention_policy(tmp_path)
+
+    rc = weekly_maintenance.main(
+        [
+            "--repo-root",
+            str(tmp_path),
+            "--retention-policy",
+            "config/generated_artifact_retention.json",
+            "apply",
+        ]
+    )
+
+    assert rc == 2
+    assert not (
+        tmp_path
+        / "outputs"
+        / "track_b_execution_core"
+        / "weekly_maintenance"
+        / "latest_weekly_maintenance_orchestrator.json"
+    ).exists()
+
+
+def test_weekly_maintenance_backfill_is_plan_only(tmp_path: Path) -> None:
+    _write_good_data_maintenance_report(tmp_path)
+    _write_retention_policy(tmp_path)
+
+    rc = weekly_maintenance.main(
+        [
+            "--repo-root",
+            str(tmp_path),
+            "--retention-policy",
+            "config/generated_artifact_retention.json",
+            "backfill",
+            "--from",
+            "2026-05-16",
+            "--to",
+            "2026-05-29",
+            "--dry-run",
+        ]
+    )
+
+    report = (
+        tmp_path
+        / "outputs"
+        / "track_b_execution_core"
+        / "weekly_maintenance"
+        / "latest_weekly_maintenance_orchestrator.json"
+    )
+    payload = json.loads(report.read_text(encoding="utf-8"))
+    assert rc == 0
+    assert payload["requested_backfill"]["execute_backfill"] is False
+    assert payload["requested_backfill"]["from"] == "2026-05-16T00:00:00+00:00"
+    assert payload["backfill_execution_invoked"] is False
+
+
 def test_no_broker_order_lifecycle_mutation_or_archive_execution_terms() -> None:
     source = inspect.getsource(orchestrator)
 
@@ -402,6 +558,8 @@ def _write_stale_data_maintenance_report(root: Path) -> None:
 
 
 def _write_data_maintenance_report(root: Path, payload: dict) -> None:
+    if not (root / "config" / "generated_artifact_retention.json").exists():
+        _write_retention_policy(root)
     _write_json(
         root
         / "outputs"
@@ -415,6 +573,37 @@ def _write_data_maintenance_report(root: Path, payload: dict) -> None:
 def _write_json(path: Path, payload: dict) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+
+
+def _write_retention_policy(root: Path) -> None:
+    _write_json(
+        root / "config" / "generated_artifact_retention.json",
+        {
+            "schema_version": "generated_artifact_retention_policy_v1",
+            "compression_enabled": True,
+            "max_archives_per_stream": 2,
+            "max_file_size_mb": 1,
+            "keep_latest_tail_mb": 1,
+            "generated_roots": ["outputs"],
+            "forbidden_roots": ["src", "tests", "docs", "scripts", "config", "var"],
+            "protected_globs": [
+                "outputs/track_b_execution_core/trade_registry/**",
+                "outputs/track_b_execution_core/paper_trade_ledger/**",
+                "outputs/track_b_execution_core/lifecycle_stress/latest*",
+            ],
+            "streams": [
+                {
+                    "stream_id": "test_stream",
+                    "patterns": ["outputs/test/*.jsonl"],
+                    "max_file_size_mb": 1,
+                    "keep_latest_tail_mb": 1,
+                    "max_archives_per_stream": 2,
+                    "compression_enabled": True,
+                    "recreate_live_file": True,
+                }
+            ],
+        },
+    )
 
 
 def _incomplete_lane_override() -> dict[str, dict[str, object]]:
