@@ -10,7 +10,7 @@ import argparse
 import json
 from collections import Counter
 from dataclasses import dataclass
-from datetime import UTC, datetime, time
+from datetime import UTC, datetime, time, timedelta
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
@@ -46,8 +46,25 @@ class LondonShadowSpec:
     active_spec: _PaperActiveEvidenceSpec
 
 
+@dataclass(frozen=True)
+class LondonShadowCandidate:
+    lane_id: str
+    strategy_id: str
+    symbol: str
+    direction: str
+    london_window: str
+    bar_end_ts: datetime
+    decision: Mapping[str, Any]
+
+
 LONDON_OPEN_WINDOW = (time(3, 0), time(5, 30))
 LONDON_LATE_WINDOW = (time(5, 30), time(8, 20))
+LONDON_SHADOW_CONFLICT_GROUP = "equity_index_mnq_mes_london_shadow"
+LONDON_SHADOW_TIMEBOX_MINUTES = 60
+LONDON_SHADOW_TIMEBOX_5M_BARS = 12
+LONDON_SHADOW_5M_CONFIRMATION_MIN_COUNT = 3
+LONDON_SHADOW_15M_CONFIRMATION_MIN_COUNT = 8
+LONDON_SHADOW_SYMBOL_PRIORITY = {"MNQ": 0, "MES": 1}
 
 
 def _shadow_spec(
@@ -147,6 +164,13 @@ def build_london_active_evidence_shadow_report(
         )
         for spec in LONDON_ACTIVE_EVIDENCE_SHADOW_SPECS
     ]
+    candidates = _candidate_events_for_specs(resolved_root)
+    selector = _select_london_shadow_trade(
+        candidates,
+        rows=rows,
+        entry_exposure_hypothetical=entry_exposure_hypothetical,
+        governance_hypothetical=governance_hypothetical,
+    )
     return {
         "schema_version": REPORT_SCHEMA_VERSION,
         "generated_at": generated_at.astimezone(UTC).isoformat(),
@@ -160,6 +184,7 @@ def build_london_active_evidence_shadow_report(
         "would_be_candidate_count": sum(int(row["would_be_candidate_count"]) for row in rows),
         "would_be_intent_count": sum(int(row["would_be_intent_count"]) for row in rows),
         "rows": rows,
+        "shadow_trade_selector": selector,
         "existing_london_candidate_comparison": _existing_london_candidate_comparison(resolved_root),
     }
 
@@ -258,6 +283,278 @@ def _evaluate_shadow_spec(
             "paper_proof_invoked": False,
         },
     }
+
+
+def _candidate_events_for_specs(repo_root: Path) -> list[LondonShadowCandidate]:
+    candidates: list[LondonShadowCandidate] = []
+    for spec in LONDON_ACTIVE_EVIDENCE_SHADOW_SPECS:
+        path = (
+            repo_root
+            / "outputs"
+            / "track_b_execution_core"
+            / "phase1_runtime_market_data"
+            / spec.symbol
+            / "1m"
+            / "latest_runtime_candles.json"
+        )
+        history = _phase1_runtime_bar_history_from_path(path)
+        for bar in history:
+            current_end = getattr(bar, "end_ts", None)
+            if not isinstance(current_end, datetime):
+                continue
+            local_time = current_end.astimezone(NEW_YORK_TZ).timetz().replace(tzinfo=None)
+            if not _time_inside_active_evidence_window(local_time, spec=spec.active_spec):
+                continue
+            slice_history = [
+                item
+                for item in history
+                if getattr(item, "end_ts", datetime.max.replace(tzinfo=UTC)) <= current_end
+            ]
+            decision = _paper_active_evidence_shadow_decision(slice_history, spec=spec.active_spec)
+            if decision.get("accepted") is not True:
+                continue
+            candidates.append(
+                LondonShadowCandidate(
+                    lane_id=spec.lane_id,
+                    strategy_id=spec.strategy_id,
+                    symbol=spec.symbol,
+                    direction=spec.direction,
+                    london_window=spec.london_window,
+                    bar_end_ts=current_end.astimezone(UTC),
+                    decision=decision,
+                )
+            )
+    return sorted(
+        candidates,
+        key=lambda item: (
+            item.bar_end_ts,
+            LONDON_SHADOW_SYMBOL_PRIORITY.get(item.symbol, 99),
+            0 if item.direction == "LONG" else 1,
+        ),
+    )
+
+
+def _select_london_shadow_trade(
+    candidates: Sequence[LondonShadowCandidate],
+    *,
+    rows: Sequence[Mapping[str, Any]],
+    entry_exposure_hypothetical: Mapping[str, Any],
+    governance_hypothetical: Mapping[str, Any],
+) -> dict[str, Any]:
+    cluster_index = _cluster_index(candidates)
+    rejected: list[dict[str, Any]] = []
+    selected: LondonShadowCandidate | None = None
+    selected_cluster: dict[str, Any] | None = None
+    for candidate in candidates:
+        cluster = cluster_index.get((candidate.symbol, candidate.direction, candidate.bar_end_ts))
+        if not cluster or not cluster.get("confirmed"):
+            rejected.append(_candidate_rejection(candidate, "confirmation_cluster_missing", cluster))
+            continue
+        if selected is not None:
+            if candidate.symbol != selected.symbol:
+                reason = "mnq_mes_conflict_group_already_selected"
+            elif candidate.direction != selected.direction:
+                reason = "no_direct_long_short_flip_after_shadow_entry"
+            else:
+                reason = "same_london_session_reentry_after_timebox_not_allowed"
+            rejected.append(_candidate_rejection(candidate, reason, cluster))
+            continue
+        selected = candidate
+        selected_cluster = cluster
+    overlap_summary = _overlap_summary(candidates)
+    if selected is None:
+        return {
+            "schema_version": "london_active_evidence_shadow_trade_selector_v1",
+            "selected_hypothetical_trade": None,
+            "rejected_candidate_count": len(rejected),
+            "rejected_candidates": rejected,
+            "selection_rationale": "no_candidate_met_confirmation_cluster_policy",
+            "conflict_group": LONDON_SHADOW_CONFLICT_GROUP,
+            "overlap_conflict_summary": overlap_summary,
+            "policy": _selector_policy(),
+            "broker_action": _no_broker_action_payload(),
+        }
+    selected_trade = _selected_trade_payload(
+        selected,
+        cluster=selected_cluster or {},
+        entry_exposure_hypothetical=entry_exposure_hypothetical,
+        governance_hypothetical=governance_hypothetical,
+    )
+    return {
+        "schema_version": "london_active_evidence_shadow_trade_selector_v1",
+        "selected_hypothetical_trade": selected_trade,
+        "rejected_candidate_count": len(rejected),
+        "rejected_candidates": rejected,
+        "mnq_vs_mes_selection_rationale": _mnq_mes_selection_rationale(selected, rows, overlap_summary),
+        "selection_rationale": "first_confirmed_cluster_in_combined_mnq_mes_london_conflict_group",
+        "conflict_group": LONDON_SHADOW_CONFLICT_GROUP,
+        "overlap_conflict_summary": overlap_summary,
+        "policy": _selector_policy(),
+        "broker_action": _no_broker_action_payload(),
+    }
+
+
+def _selected_trade_payload(
+    candidate: LondonShadowCandidate,
+    *,
+    cluster: Mapping[str, Any],
+    entry_exposure_hypothetical: Mapping[str, Any],
+    governance_hypothetical: Mapping[str, Any],
+) -> dict[str, Any]:
+    entry_ts = candidate.bar_end_ts.astimezone(UTC)
+    exit_ts = entry_ts + timedelta(minutes=LONDON_SHADOW_TIMEBOX_MINUTES)
+    return {
+        "trade_id": f"shadow_london_{candidate.symbol.lower()}_{candidate.direction.lower()}_{entry_ts.strftime('%Y%m%dT%H%M%SZ')}",
+        "trade_id_namespace": "SHADOW_ONLY_NOT_LIVE_SUBMIT_ELIGIBLE",
+        "can_be_used_for_live_submit": False,
+        "lane_id": candidate.lane_id,
+        "strategy_id": candidate.strategy_id,
+        "symbol": candidate.symbol,
+        "direction": candidate.direction,
+        "london_window": candidate.london_window,
+        "entry_timestamp": entry_ts.isoformat(),
+        "expected_timebox_exit": exit_ts.isoformat(),
+        "managed_exit_policy": {
+            "policy_id": "HYPOTHETICAL_ACTIVE_EVIDENCE_TIMEBOX_60M_EXIT_V1",
+            "timebox_minutes": LONDON_SHADOW_TIMEBOX_MINUTES,
+            "completed_5m_bars": LONDON_SHADOW_TIMEBOX_5M_BARS,
+        },
+        "confirmation_cluster": dict(cluster),
+        "registry_truth_entry_exposure_hypothetical": dict(entry_exposure_hypothetical),
+        "governance_safe_state_hypothetical": dict(governance_hypothetical),
+        "broker_action": _no_broker_action_payload(),
+    }
+
+
+def _cluster_index(candidates: Sequence[LondonShadowCandidate]) -> dict[tuple[str, str, datetime], dict[str, Any]]:
+    five_minute: Counter[tuple[str, str, datetime]] = Counter()
+    fifteen_minute: Counter[tuple[str, str, datetime]] = Counter()
+    for candidate in candidates:
+        five_minute[(candidate.symbol, candidate.direction, _floor_minutes(candidate.bar_end_ts, 5))] += 1
+        fifteen_minute[(candidate.symbol, candidate.direction, _floor_minutes(candidate.bar_end_ts, 15))] += 1
+    index: dict[tuple[str, str, datetime], dict[str, Any]] = {}
+    for candidate in candidates:
+        bucket_5m = _floor_minutes(candidate.bar_end_ts, 5)
+        bucket_15m = _floor_minutes(candidate.bar_end_ts, 15)
+        count_5m = five_minute[(candidate.symbol, candidate.direction, bucket_5m)]
+        count_15m = fifteen_minute[(candidate.symbol, candidate.direction, bucket_15m)]
+        confirmed_5m = count_5m >= LONDON_SHADOW_5M_CONFIRMATION_MIN_COUNT
+        confirmed_15m = count_15m >= LONDON_SHADOW_15M_CONFIRMATION_MIN_COUNT
+        index[(candidate.symbol, candidate.direction, candidate.bar_end_ts)] = {
+            "confirmed": confirmed_5m or confirmed_15m,
+            "confirmed_by": (
+                "5m_cluster"
+                if confirmed_5m
+                else "15m_cluster"
+                if confirmed_15m
+                else None
+            ),
+            "bucket_5m": bucket_5m.isoformat(),
+            "bucket_5m_candidate_count": count_5m,
+            "bucket_5m_min_required": LONDON_SHADOW_5M_CONFIRMATION_MIN_COUNT,
+            "bucket_15m": bucket_15m.isoformat(),
+            "bucket_15m_candidate_count": count_15m,
+            "bucket_15m_min_required": LONDON_SHADOW_15M_CONFIRMATION_MIN_COUNT,
+        }
+    return index
+
+
+def _overlap_summary(candidates: Sequence[LondonShadowCandidate]) -> dict[str, Any]:
+    by_ts: dict[datetime, dict[str, set[str]]] = {}
+    for candidate in candidates:
+        by_ts.setdefault(candidate.bar_end_ts, {}).setdefault(candidate.symbol, set()).add(candidate.direction)
+    same_direction = Counter()
+    direction_set_differs = 0
+    any_overlap = 0
+    for symbols in by_ts.values():
+        mnq = symbols.get("MNQ", set())
+        mes = symbols.get("MES", set())
+        if not mnq or not mes:
+            continue
+        any_overlap += 1
+        if mnq != mes:
+            direction_set_differs += 1
+        for direction in ("LONG", "SHORT"):
+            if direction in mnq and direction in mes:
+                same_direction[direction] += 1
+    return {
+        "mnq_mes_any_overlap_bars": any_overlap,
+        "mnq_mes_same_direction_long_overlap_bars": same_direction["LONG"],
+        "mnq_mes_same_direction_short_overlap_bars": same_direction["SHORT"],
+        "mnq_mes_direction_set_differs_bars": direction_set_differs,
+        "conflict_group": LONDON_SHADOW_CONFLICT_GROUP,
+    }
+
+
+def _candidate_rejection(
+    candidate: LondonShadowCandidate,
+    reason: str,
+    cluster: Mapping[str, Any] | None,
+) -> dict[str, Any]:
+    return {
+        "lane_id": candidate.lane_id,
+        "strategy_id": candidate.strategy_id,
+        "symbol": candidate.symbol,
+        "direction": candidate.direction,
+        "bar_end_ts": candidate.bar_end_ts.isoformat(),
+        "reason": reason,
+        "cluster": dict(cluster or {}),
+    }
+
+
+def _mnq_mes_selection_rationale(
+    selected: LondonShadowCandidate,
+    rows: Sequence[Mapping[str, Any]],
+    overlap_summary: Mapping[str, Any],
+) -> str:
+    symbol_rows = {
+        symbol: sum(
+            int(row.get("would_be_candidate_count") or 0)
+            for row in rows
+            if row.get("symbol") == symbol
+        )
+        for symbol in ("MNQ", "MES")
+    }
+    return (
+        f"selected {selected.symbol} {selected.direction} because it was the earliest confirmed "
+        f"cluster in the combined MNQ/MES London conflict group; MNQ/MES overlap bars="
+        f"{overlap_summary.get('mnq_mes_any_overlap_bars')}; aggregate candidates={symbol_rows}"
+    )
+
+
+def _selector_policy() -> dict[str, Any]:
+    return {
+        "max_total_mnq_mes_london_shadow_trades_per_session": 1,
+        "conflict_group": LONDON_SHADOW_CONFLICT_GROUP,
+        "require_confirmation_cluster": True,
+        "confirmation_cluster_policy": {
+            "min_candidates_per_5m_bucket": LONDON_SHADOW_5M_CONFIRMATION_MIN_COUNT,
+            "min_candidates_per_15m_bucket": LONDON_SHADOW_15M_CONFIRMATION_MIN_COUNT,
+        },
+        "no_direct_long_short_flip": True,
+        "no_reentry_after_timebox_exit_same_london_session": True,
+        "hypothetical_exit_policy": "60m_timebox_12_completed_5m_bars",
+        "shadow_trade_id_namespace_only": True,
+        "broker_authoritative_activation": False,
+    }
+
+
+def _no_broker_action_payload() -> dict[str, bool]:
+    return {
+        "broker_authority": False,
+        "submit_allowed": False,
+        "submit_attempted": False,
+        "route_created": False,
+        "broker_mutation_allowed": False,
+        "lifecycle_authority": False,
+        "live_money_eligible": False,
+        "paper_proof_invoked": False,
+    }
+
+
+def _floor_minutes(value: datetime, minutes: int) -> datetime:
+    value_utc = value.astimezone(UTC)
+    return value_utc.replace(minute=(value_utc.minute // minutes) * minutes, second=0, microsecond=0)
 
 
 def _paper_active_evidence_shadow_decision(

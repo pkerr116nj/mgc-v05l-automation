@@ -210,3 +210,127 @@ def test_existing_london_candidate_comparison_is_diagnostic_only(tmp_path: Path)
 
     assert report["existing_london_candidate_comparison"]
     assert all(row["diagnostic_only"] is True for row in report["existing_london_candidate_comparison"])
+
+
+def test_shadow_selector_collapses_candidate_spam_to_one_trade(tmp_path: Path) -> None:
+    _write_runtime_bars(
+        tmp_path,
+        "MNQ",
+        [
+            {
+                "bar_start": "2026-06-01T06:59:00+00:00",
+                "bar_end": "2026-06-01T07:00:00+00:00",
+                "open": 100,
+                "high": 100,
+                "low": 99,
+                "close": 100,
+                "volume": 10,
+                "completed": True,
+            },
+            {
+                "bar_start": "2026-06-01T07:00:00+00:00",
+                "bar_end": "2026-06-01T07:01:00+00:00",
+                "open": 100,
+                "high": 103,
+                "low": 100,
+                "close": 102,
+                "volume": 20,
+                "completed": True,
+            },
+            {
+                "bar_start": "2026-06-01T07:01:00+00:00",
+                "bar_end": "2026-06-01T07:02:00+00:00",
+                "open": 102,
+                "high": 104,
+                "low": 102,
+                "close": 103,
+                "volume": 20,
+                "completed": True,
+            },
+            {
+                "bar_start": "2026-06-01T07:02:00+00:00",
+                "bar_end": "2026-06-01T07:03:00+00:00",
+                "open": 103,
+                "high": 105,
+                "low": 103,
+                "close": 104,
+                "volume": 20,
+                "completed": True,
+            },
+        ],
+    )
+
+    report = build_london_active_evidence_shadow_report(repo_root=tmp_path, paper_stack_status=_clean_status())
+    selector = report["shadow_trade_selector"]
+
+    assert selector["selected_hypothetical_trade"]["symbol"] == "MNQ"
+    assert selector["selected_hypothetical_trade"]["direction"] == "LONG"
+    assert selector["selected_hypothetical_trade"]["confirmation_cluster"]["confirmed"] is True
+    assert selector["selected_hypothetical_trade"]["broker_action"]["route_created"] is False
+    assert selector["rejected_candidate_count"] >= 2
+    assert {row["reason"] for row in selector["rejected_candidates"]} == {
+        "same_london_session_reentry_after_timebox_not_allowed"
+    }
+
+
+def test_shadow_selector_blocks_direct_long_short_flip(tmp_path: Path) -> None:
+    _write_runtime_bars(
+        tmp_path,
+        "MNQ",
+        [
+            {"bar_start": "2026-06-01T06:59:00+00:00", "bar_end": "2026-06-01T07:00:00+00:00", "open": 100, "high": 100, "low": 99, "close": 100, "volume": 10, "completed": True},
+            {"bar_start": "2026-06-01T07:00:00+00:00", "bar_end": "2026-06-01T07:01:00+00:00", "open": 100, "high": 103, "low": 100, "close": 102, "volume": 20, "completed": True},
+            {"bar_start": "2026-06-01T07:01:00+00:00", "bar_end": "2026-06-01T07:02:00+00:00", "open": 102, "high": 104, "low": 102, "close": 103, "volume": 20, "completed": True},
+            {"bar_start": "2026-06-01T07:02:00+00:00", "bar_end": "2026-06-01T07:03:00+00:00", "open": 103, "high": 105, "low": 103, "close": 104, "volume": 20, "completed": True},
+                {"bar_start": "2026-06-01T07:03:00+00:00", "bar_end": "2026-06-01T07:04:00+00:00", "open": 104, "high": 104, "low": 99, "close": 99, "volume": 20, "completed": True},
+                {"bar_start": "2026-06-01T07:04:00+00:00", "bar_end": "2026-06-01T07:05:00+00:00", "open": 99, "high": 99, "low": 96, "close": 97, "volume": 20, "completed": True},
+                {"bar_start": "2026-06-01T07:05:00+00:00", "bar_end": "2026-06-01T07:06:00+00:00", "open": 97, "high": 97, "low": 94, "close": 95, "volume": 20, "completed": True},
+                {"bar_start": "2026-06-01T07:06:00+00:00", "bar_end": "2026-06-01T07:07:00+00:00", "open": 95, "high": 95, "low": 92, "close": 93, "volume": 20, "completed": True},
+                {"bar_start": "2026-06-01T07:07:00+00:00", "bar_end": "2026-06-01T07:08:00+00:00", "open": 93, "high": 93, "low": 90, "close": 91, "volume": 20, "completed": True},
+            ],
+        )
+
+    report = build_london_active_evidence_shadow_report(repo_root=tmp_path, paper_stack_status=_clean_status())
+    reasons = {row["reason"] for row in report["shadow_trade_selector"]["rejected_candidates"]}
+
+    assert "no_direct_long_short_flip_after_shadow_entry" in reasons
+
+
+def test_shadow_selector_enforces_combined_mnq_mes_conflict_group(tmp_path: Path) -> None:
+    bars = [
+        {"bar_start": "2026-06-01T06:59:00+00:00", "bar_end": "2026-06-01T07:00:00+00:00", "open": 100, "high": 100, "low": 99, "close": 100, "volume": 10, "completed": True},
+        {"bar_start": "2026-06-01T07:00:00+00:00", "bar_end": "2026-06-01T07:01:00+00:00", "open": 100, "high": 103, "low": 100, "close": 102, "volume": 20, "completed": True},
+        {"bar_start": "2026-06-01T07:01:00+00:00", "bar_end": "2026-06-01T07:02:00+00:00", "open": 102, "high": 104, "low": 102, "close": 103, "volume": 20, "completed": True},
+        {"bar_start": "2026-06-01T07:02:00+00:00", "bar_end": "2026-06-01T07:03:00+00:00", "open": 103, "high": 105, "low": 103, "close": 104, "volume": 20, "completed": True},
+    ]
+    _write_runtime_bars(tmp_path, "MNQ", bars)
+    _write_runtime_bars(tmp_path, "MES", bars)
+
+    report = build_london_active_evidence_shadow_report(repo_root=tmp_path, paper_stack_status=_clean_status())
+    selector = report["shadow_trade_selector"]
+
+    assert selector["selected_hypothetical_trade"]["symbol"] == "MNQ"
+    assert selector["conflict_group"] == "equity_index_mnq_mes_london_shadow"
+    assert "mnq_mes_conflict_group_already_selected" in {row["reason"] for row in selector["rejected_candidates"]}
+
+
+def test_shadow_trade_id_cannot_be_used_for_live_submit(tmp_path: Path) -> None:
+    _write_runtime_bars(
+        tmp_path,
+        "MNQ",
+        [
+            {"bar_start": "2026-06-01T06:59:00+00:00", "bar_end": "2026-06-01T07:00:00+00:00", "open": 100, "high": 100, "low": 99, "close": 100, "volume": 10, "completed": True},
+            {"bar_start": "2026-06-01T07:00:00+00:00", "bar_end": "2026-06-01T07:01:00+00:00", "open": 100, "high": 103, "low": 100, "close": 102, "volume": 20, "completed": True},
+            {"bar_start": "2026-06-01T07:01:00+00:00", "bar_end": "2026-06-01T07:02:00+00:00", "open": 102, "high": 104, "low": 102, "close": 103, "volume": 20, "completed": True},
+            {"bar_start": "2026-06-01T07:02:00+00:00", "bar_end": "2026-06-01T07:03:00+00:00", "open": 103, "high": 105, "low": 103, "close": 104, "volume": 20, "completed": True},
+        ],
+    )
+
+    report = build_london_active_evidence_shadow_report(repo_root=tmp_path, paper_stack_status=_clean_status())
+    selected = report["shadow_trade_selector"]["selected_hypothetical_trade"]
+
+    assert selected["trade_id"].startswith("shadow_london_")
+    assert selected["trade_id_namespace"] == "SHADOW_ONLY_NOT_LIVE_SUBMIT_ELIGIBLE"
+    assert selected["can_be_used_for_live_submit"] is False
+    assert selected["broker_action"]["submit_attempted"] is False
+    assert selected["broker_action"]["route_created"] is False
