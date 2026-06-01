@@ -129,14 +129,21 @@ def build_track_b_managed_position_registry(
         item for item in _list(reconciliation.get("track_b_lifecycle_positions")) if _lifecycle_position_registry_eligible(item)
     ]
     unresolved_ownership = _list(reconciliation.get("unresolved_submit_intent_ownership_records"))
-    review_positions = _review_required_positions(
+    open_order_states = _list(open_order_truth.get("order_states"))
+    managed_order_states = _list(managed_order_registry.get("managed_orders"))
+    review_scope = _review_required_position_scope(
         reconciliation=reconciliation,
         live_position_status=live_position_status,
         lifecycle_reports=lifecycle_reports,
         position_truth=position_truth,
+        broker_positions=broker_positions,
+        lifecycle_positions=lifecycle_positions,
+        open_order_states=open_order_states,
+        managed_order_states=managed_order_states,
+        unresolved_ownership=unresolved_ownership,
     )
-    open_order_states = _list(open_order_truth.get("order_states"))
-    managed_order_states = _list(managed_order_registry.get("managed_orders"))
+    review_positions = review_scope["current_scope"]
+    historical_review_positions = review_scope["historical"]
     source_stale = _source_stale(
         now=actual_now,
         config=config,
@@ -193,6 +200,7 @@ def build_track_b_managed_position_registry(
         "broker_positions": broker_positions,
         "lifecycle_open_positions": lifecycle_positions,
         "review_required_positions": review_positions,
+        "historical_review_positions": historical_review_positions,
         "unresolved_submit_ownership": unresolved_ownership,
         "source_freshness": source_stale,
         "position_truth": _authority_summary(position_truth, config.resolve(config.position_truth_path)),
@@ -231,6 +239,7 @@ def build_track_b_managed_position_registry(
             "broker_position_count": len(broker_positions),
             "lifecycle_position_count": len(lifecycle_positions),
             "review_required_count": len(review_positions),
+            "historical_review_position_count": len(historical_review_positions),
         },
         "event_state": _event_state(classification=classification, managed_positions=managed_positions),
         "artifact_paths": {
@@ -521,12 +530,51 @@ def _overall_classification(
     return classifications[0] if classifications else NO_MANAGED_POSITIONS
 
 
+def _review_required_position_scope(
+    *,
+    reconciliation: Mapping[str, Any],
+    live_position_status: Mapping[str, Any],
+    lifecycle_reports: list[dict[str, Any]],
+    position_truth: Mapping[str, Any],
+    broker_positions: list[dict[str, Any]],
+    lifecycle_positions: list[dict[str, Any]],
+    open_order_states: list[dict[str, Any]],
+    managed_order_states: list[dict[str, Any]],
+    unresolved_ownership: list[dict[str, Any]],
+) -> dict[str, list[dict[str, Any]]]:
+    current_scope: list[dict[str, Any]] = []
+    historical: list[dict[str, Any]] = []
+    for row in _review_required_positions(
+        reconciliation=reconciliation,
+        live_position_status=live_position_status,
+        lifecycle_reports=lifecycle_reports,
+        position_truth=position_truth,
+        open_order_states=open_order_states,
+        managed_order_states=managed_order_states,
+        unresolved_ownership=unresolved_ownership,
+    ):
+        scoped = _classify_review_position_scope(
+            row,
+            reconciliation=reconciliation,
+            broker_positions=broker_positions,
+            lifecycle_positions=lifecycle_positions,
+            open_order_states=open_order_states,
+            managed_order_states=managed_order_states,
+            unresolved_ownership=unresolved_ownership,
+        )
+        (current_scope if scoped["current_scope"] else historical).append(scoped["row"])
+    return {"current_scope": current_scope, "historical": historical}
+
+
 def _review_required_positions(
     *,
     reconciliation: Mapping[str, Any],
     live_position_status: Mapping[str, Any],
     lifecycle_reports: list[dict[str, Any]],
     position_truth: Mapping[str, Any],
+    open_order_states: list[dict[str, Any]],
+    managed_order_states: list[dict[str, Any]],
+    unresolved_ownership: list[dict[str, Any]],
 ) -> list[dict[str, Any]]:
     active_lifecycle_ids = {
         str(item.get("lifecycle_id") or "").strip()
@@ -561,12 +609,6 @@ def _review_required_positions(
                 active_position_keys=active_position_keys,
             )
         ] or ([] if (active_lifecycle_ids or active_position_keys) else values)
-    if not _active_lifecycle_report_evidence(
-        reconciliation=reconciliation,
-        live_position_status=live_position_status,
-        position_truth=position_truth,
-    ):
-        return []
     return [
         report
         for report in lifecycle_reports
@@ -578,6 +620,80 @@ def _review_required_positions(
             active_position_keys=active_position_keys,
         )
     ]
+
+
+def _classify_review_position_scope(
+    row: Mapping[str, Any],
+    *,
+    reconciliation: Mapping[str, Any],
+    broker_positions: list[dict[str, Any]],
+    lifecycle_positions: list[dict[str, Any]],
+    open_order_states: list[dict[str, Any]],
+    managed_order_states: list[dict[str, Any]],
+    unresolved_ownership: list[dict[str, Any]],
+) -> dict[str, Any]:
+    lifecycle_id = str(row.get("lifecycle_id") or "").strip()
+    trade_id = str(row.get("trade_id") or "").strip()
+    key = _position_key(row)
+    current_ids = {
+        str(item.get("lifecycle_id") or "").strip()
+        for item in [
+            *lifecycle_positions,
+            *_list(reconciliation.get("review_required_positions")),
+            *unresolved_ownership,
+        ]
+        if str(item.get("lifecycle_id") or "").strip()
+    }
+    current_trade_ids = {
+        str(item.get("trade_id") or _mapping(item.get("extra")).get("trade_id") or "").strip()
+        for item in unresolved_ownership
+        if str(item.get("trade_id") or _mapping(item.get("extra")).get("trade_id") or "").strip()
+    }
+    registry = _mapping(reconciliation.get("registry_reconciliation"))
+    if registry.get("blocking") is True:
+        current_trade_ids.update(str(item).strip() for item in registry.get("review_required_trade_ids") or [] if str(item).strip())
+    current_keys = {
+        key
+        for item in [
+            *broker_positions,
+            *lifecycle_positions,
+            *_list(reconciliation.get("review_required_positions")),
+            *open_order_states,
+            *managed_order_states,
+            *unresolved_ownership,
+        ]
+        for key in _current_linkage_keys(item)
+    }
+    linked = bool(
+        (lifecycle_id and lifecycle_id in current_ids)
+        or (trade_id and trade_id in current_trade_ids)
+        or (key and key in current_keys)
+    )
+    scoped_row = dict(row)
+    scoped_row["current_hot_path_scope"] = "CURRENT_SCOPE" if linked else _historical_scope_classification(row, registry)
+    scoped_row["current_scope_linked"] = linked
+    scoped_row["historical_only"] = not linked
+    scoped_row["full_artifact_audit_visible"] = True
+    return {"current_scope": linked, "row": scoped_row}
+
+
+def _current_linkage_keys(row: Mapping[str, Any]) -> set[str]:
+    keys = {_position_key(row)}
+    nested_order = row.get("order")
+    if isinstance(nested_order, Mapping):
+        keys.add(_position_key(nested_order))
+    nested_position = row.get("position")
+    if isinstance(nested_position, Mapping):
+        keys.add(_position_key(nested_position))
+    return {key for key in keys if key}
+
+
+def _historical_scope_classification(row: Mapping[str, Any], registry: Mapping[str, Any]) -> str:
+    trade_id = str(row.get("trade_id") or "").strip()
+    mapped = {str(item).strip() for item in registry.get("mapped_trade_ids") or [] if str(item).strip()}
+    if trade_id and trade_id in mapped and registry.get("classification") == "REGISTRY_RECONCILIATION_MATCHED":
+        return "HISTORICAL_RESOLVED"
+    return "HISTORICAL_UNRESOLVED_FULL_AUDIT_ONLY"
 
 
 def _review_position_matches_active_context(
@@ -600,12 +716,19 @@ def _active_lifecycle_report_evidence(
     reconciliation: Mapping[str, Any],
     live_position_status: Mapping[str, Any],
     position_truth: Mapping[str, Any],
+    open_order_states: list[dict[str, Any]],
+    managed_order_states: list[dict[str, Any]],
+    unresolved_ownership: list[dict[str, Any]],
 ) -> bool:
     if _list(reconciliation.get("track_b_broker_positions")):
         return True
     if _list(reconciliation.get("track_b_lifecycle_positions")):
         return True
     if _list(reconciliation.get("unresolved_submit_intent_ownership_records")):
+        return True
+    if unresolved_ownership:
+        return True
+    if open_order_states or managed_order_states:
         return True
     if _int_or_none(reconciliation.get("review_required_count")):
         return True
@@ -632,14 +755,19 @@ def _exit_due(
     if classification != OPEN_MANAGED_MATCHED:
         return False
     policy = str(_managed_exit_policy_id(lifecycle, None, lifecycle_report, None) or "")
-    if policy not in {
-        "PAPER_DIAGNOSTIC_TIME_BOXED_3X5M_EXIT_V1",
-        "FORCED_SESSION_SEGMENT_LOCAL_EXIT_V1",
-    }:
+    required_by_policy = {
+        "PAPER_DIAGNOSTIC_TIME_BOXED_3X5M_EXIT_V1": 3,
+        "FORCED_SESSION_SEGMENT_LOCAL_EXIT_V1": 3,
+        "CHANGEOVER_0300_LONG_TIMEBOX_6H_EXIT_V1": 72,
+        "CHANGEOVER_0700_LONG_TIMEBOX_4H_EXIT_V1": 48,
+        "US_SESSION_CONTINUATION_TIMEBOX_2H_EXIT_V1": 24,
+        "US_ACTIVE_EVIDENCE_TIMEBOX_60M_EXIT_V1": 12,
+        "GLOBEX_ACTIVE_EVIDENCE_TIMEBOX_60M_EXIT_V1": 12,
+        "GLOBEX_REOPEN_FIRST_CANDLE_60M_TIMEBOX_SHADOW_EXIT_V1": 12,
+    }
+    if policy not in required_by_policy:
         return False
-    required = _int_or_none((lifecycle or {}).get("required_completed_5m_bars")) or _int_or_none(
-        lifecycle_report.get("managed_exit_policy_max_completed_5m_bars")
-    ) or 3
+    required = _int_or_none((lifecycle or {}).get("required_completed_5m_bars")) or required_by_policy[policy]
     return bars_since_entry is not None and bars_since_entry >= required
 
 
@@ -813,7 +941,17 @@ def _retryable_unmutated_managed_close_review(payload: Mapping[str, Any]) -> boo
         return False
     if not isinstance(payload.get("close_intent"), Mapping):
         return False
-    if "quantity must be exactly 1 for milestone one" not in str(payload.get("primary_blocker") or ""):
+    primary_blocker = str(payload.get("primary_blocker") or "")
+    submit_diagnostics = close_submit.get("submit_diagnostics") if isinstance(close_submit, Mapping) else {}
+    if not isinstance(submit_diagnostics, Mapping):
+        submit_diagnostics = {}
+    retryable_legacy_attach_guard = "quantity must be exactly 1 for milestone one" in primary_blocker
+    retryable_pre_submit_no_broker_effect = (
+        "PRE_SUBMIT" in primary_blocker
+        and submit_diagnostics.get("pre_submit_blocked") is True
+        and submit_diagnostics.get("place_order_called") is not True
+    )
+    if not retryable_legacy_attach_guard and not retryable_pre_submit_no_broker_effect:
         return False
     return bool(payload.get("entry_fill") or payload.get("entry_fill_confirmed") is True)
 

@@ -56,6 +56,54 @@ def test_historical_review_required_lifecycle_ignored_when_active_truth_clean_fl
     assert payload["classification"] == NO_MANAGED_POSITIONS
     assert payload["managed_positions"] == []
     assert payload["review_required_positions"] == []
+    assert payload["historical_review_positions"][0]["current_hot_path_scope"] == "HISTORICAL_UNRESOLVED_FULL_AUDIT_ONLY"
+
+
+def test_historical_review_required_lifecycle_with_cleanup_evidence_stays_full_audit_only(tmp_path: Path) -> None:
+    _seed_base(tmp_path)
+    _write_position_truth_clean_flat(tmp_path)
+    _write_json(
+        tmp_path
+        / "outputs"
+        / "reports"
+        / "track_b_paper_broker_reconciliation"
+        / "latest_track_b_paper_broker_reconciliation.json",
+        {
+            "classification": "TRACK_B_PAPER_BROKER_RECONCILED",
+            "generated_at": NOW.isoformat(),
+            "broker_reconciled": True,
+            "track_b_broker_positions": [],
+            "track_b_lifecycle_positions": [],
+            "track_b_broker_open_orders": [],
+            "review_required_positions": [],
+            "unresolved_submit_intent_ownership_records": [],
+            "review_required_count": 1,
+            "registry_reconciliation": {
+                "classification": "REGISTRY_RECONCILIATION_MATCHED",
+                "blocking": False,
+                "mapped_trade_ids": ["old_trade"],
+                "broker_position_count": 0,
+                "lifecycle_position_count": 0,
+                "broker_open_order_count": 0,
+            },
+        },
+    )
+    _write_lifecycle_report(
+        tmp_path,
+        lifecycle_id="old_review_required_lifecycle",
+        review_required=True,
+        paper_lifecycle_classification="TRACK_B_STRATEGY_PAPER_REVIEW_REQUIRED",
+    )
+
+    payload = build_track_b_managed_position_registry(
+        config=TrackBManagedPositionRegistryConfig(repo_root=tmp_path),
+        now=NOW,
+    )
+
+    assert payload["classification"] == NO_MANAGED_POSITIONS
+    assert payload["managed_positions"] == []
+    assert payload["review_required_positions"] == []
+    assert payload["historical_review_positions"][0]["current_hot_path_scope"] == "HISTORICAL_UNRESOLVED_FULL_AUDIT_ONLY"
 
 
 def test_active_review_required_lifecycle_still_surfaces(tmp_path: Path) -> None:
@@ -75,6 +123,33 @@ def test_active_review_required_lifecycle_still_surfaces(tmp_path: Path) -> None
 
     assert payload["classification"] == REVIEW_REQUIRED
     assert payload["managed_positions"][0]["classification"] == REVIEW_REQUIRED
+    assert payload["managed_positions"][0]["review_required_position"]["current_hot_path_scope"] == "CURRENT_SCOPE"
+
+
+def test_open_order_linked_review_lifecycle_still_surfaces_current_scope(tmp_path: Path) -> None:
+    _seed_base(
+        tmp_path,
+        order_states=[
+            {
+                "is_close_order": True,
+                "order": {"local_symbol": "MNQM6", "con_id": 770561201, "symbol": "MNQ"},
+            }
+        ],
+    )
+    _write_lifecycle_report(
+        tmp_path,
+        lifecycle_id="old_review_required_lifecycle",
+        review_required=True,
+        paper_lifecycle_classification="TRACK_B_STRATEGY_PAPER_REVIEW_REQUIRED",
+    )
+
+    payload = build_track_b_managed_position_registry(
+        config=TrackBManagedPositionRegistryConfig(repo_root=tmp_path),
+        now=NOW,
+    )
+
+    assert payload["classification"] == REVIEW_REQUIRED
+    assert payload["managed_positions"][0]["review_required_position"]["current_hot_path_scope"] == "CURRENT_SCOPE"
 
 
 def test_retryable_unmutated_aggregate_close_review_does_not_mask_exit_due(tmp_path: Path) -> None:
@@ -96,6 +171,50 @@ def test_retryable_unmutated_aggregate_close_review_does_not_mask_exit_due(tmp_p
             "order_action": "BUY",
             "quantity": 3,
             "managed_exit_policy_id": "PAPER_DIAGNOSTIC_TIME_BOXED_3X5M_EXIT_V1",
+        },
+    )
+
+    payload = build_track_b_managed_position_registry(
+        config=TrackBManagedPositionRegistryConfig(repo_root=tmp_path),
+        now=NOW,
+    )
+
+    assert payload["classification"] == OPEN_MANAGED_EXIT_DUE
+    assert payload["review_required_positions"] == []
+    assert payload["managed_positions"][0]["attention_required"] is False
+
+
+def test_retryable_pre_submit_contract_review_does_not_mask_exit_due(tmp_path: Path) -> None:
+    lifecycle = _lifecycle_position(bars_since_fill=3)
+    _seed_base(tmp_path, broker_positions=[_broker_position()], lifecycle_positions=[lifecycle])
+    _write_lifecycle_report(
+        tmp_path,
+        lifecycle_id=lifecycle["lifecycle_id"],
+        bars_since_fill=3,
+        review_required=True,
+        paper_lifecycle_classification="TRACK_B_STRATEGY_PAPER_REVIEW_REQUIRED",
+        broker_state_mutated=False,
+        primary_blocker=(
+            "Managed PAPER adapter submit stage failed: CONTRACT_EXPIRY_MISMATCH_PRE_SUBMIT: "
+            "configured shorthand contract month 202606 has no canonical IBKR expiry"
+        ),
+        close_intent={
+            "lifecycle_id": lifecycle["lifecycle_id"],
+            "strategy_id": "track_b_paper_execution_test_mule_v1__mnq",
+            "local_symbol": "MNQM6",
+            "con_id": 770561201,
+            "order_action": "BUY",
+            "quantity": 1,
+            "managed_exit_policy_id": "PAPER_DIAGNOSTIC_TIME_BOXED_3X5M_EXIT_V1",
+        },
+        close_submit_attempt={
+            "submitted": False,
+            "broker_state_mutated": False,
+            "broker_order_id": None,
+            "submit_diagnostics": {
+                "pre_submit_blocked": True,
+                "place_order_called": False,
+            },
         },
     )
 
@@ -181,6 +300,48 @@ def test_exit_due_from_policy_and_completed_bars(tmp_path: Path) -> None:
     assert payload["classification"] == OPEN_MANAGED_EXIT_DUE
     assert payload["managed_positions"][0]["exit_due"] is True
     assert payload["managed_positions"][0]["recommended_operator_action"].startswith("Observe runtime-managed exit")
+
+
+def test_globex_active_exit_policy_ignores_stale_three_bar_report_threshold(tmp_path: Path) -> None:
+    lifecycle = _lifecycle_position(policy="GLOBEX_ACTIVE_EVIDENCE_TIMEBOX_60M_EXIT_V1", bars_since_fill=3)
+    _seed_base(tmp_path, broker_positions=[_broker_position()], lifecycle_positions=[lifecycle])
+    _write_lifecycle_report(
+        tmp_path,
+        lifecycle_id=lifecycle["lifecycle_id"],
+        policy="GLOBEX_ACTIVE_EVIDENCE_TIMEBOX_60M_EXIT_V1",
+        bars_since_fill=3,
+    )
+
+    payload = build_track_b_managed_position_registry(
+        config=TrackBManagedPositionRegistryConfig(repo_root=tmp_path),
+        now=NOW,
+    )
+
+    assert payload["classification"] == OPEN_MANAGED_MATCHED
+    assert payload["managed_positions"][0]["managed_exit_policy_id"] == "GLOBEX_ACTIVE_EVIDENCE_TIMEBOX_60M_EXIT_V1"
+    assert payload["managed_positions"][0]["bars_since_entry"] == 3
+    assert payload["managed_positions"][0]["exit_due"] is False
+
+
+def test_globex_active_exit_policy_due_after_twelve_completed_5m_bars(tmp_path: Path) -> None:
+    lifecycle = _lifecycle_position(policy="GLOBEX_ACTIVE_EVIDENCE_TIMEBOX_60M_EXIT_V1", bars_since_fill=12)
+    _seed_base(tmp_path, broker_positions=[_broker_position()], lifecycle_positions=[lifecycle])
+    _write_lifecycle_report(
+        tmp_path,
+        lifecycle_id=lifecycle["lifecycle_id"],
+        policy="GLOBEX_ACTIVE_EVIDENCE_TIMEBOX_60M_EXIT_V1",
+        bars_since_fill=12,
+    )
+
+    payload = build_track_b_managed_position_registry(
+        config=TrackBManagedPositionRegistryConfig(repo_root=tmp_path),
+        now=NOW,
+    )
+
+    assert payload["classification"] == OPEN_MANAGED_EXIT_DUE
+    assert payload["managed_positions"][0]["managed_exit_policy_id"] == "GLOBEX_ACTIVE_EVIDENCE_TIMEBOX_60M_EXIT_V1"
+    assert payload["managed_positions"][0]["bars_since_entry"] == 12
+    assert payload["managed_positions"][0]["exit_due"] is True
 
 
 def test_exit_due_uses_current_phase1_completed_5m_bars_over_stale_lifecycle_counter(tmp_path: Path) -> None:
@@ -478,6 +639,7 @@ def _write_lifecycle_report(
     broker_state_mutated: bool = True,
     primary_blocker: str | None = None,
     close_intent: dict | None = None,
+    close_submit_attempt: dict | None = None,
 ) -> None:
     _write_json(
         root
@@ -505,6 +667,7 @@ def _write_lifecycle_report(
             "broker_state_mutated": broker_state_mutated,
             "primary_blocker": primary_blocker,
             "close_intent": close_intent,
+            "close_submit_attempt": close_submit_attempt,
             "entry_intent": {"side": "SHORT", "order_action": "SELL", "quantity": 1},
             "entry_fill": {"price": "29688.69", "filled_at": "2026-05-22T16:20:00+00:00"},
         },

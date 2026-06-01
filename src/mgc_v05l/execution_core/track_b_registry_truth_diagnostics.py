@@ -373,9 +373,40 @@ def _current_scope_shadow_rows(
         )
         for row in bucket
     }
+    current_trade_ids = _current_trade_ids_from_reconciliation_source(truth)
+    if current_trade_ids:
+        current_id_rows = tuple(row for row in shadow.rows if getattr(row, "trade_id", None) in current_trade_ids)
+        if current_id_rows:
+            return current_id_rows
     if not current_keys:
         return ()
     return tuple(row for row in shadow.rows if any(_keys_match(_row_key(row), current_key) for current_key in current_keys))
+
+
+def _current_trade_ids_from_reconciliation_source(truth: TrackBTruthSnapshot) -> set[str]:
+    path_text = str(truth.reconciliation.source.artifact_path or "")
+    if not path_text:
+        return set()
+    path = Path(path_text)
+    if not path.is_absolute():
+        path = Path.cwd() / path
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return set()
+    registry = payload.get("registry_reconciliation")
+    if not isinstance(registry, Mapping):
+        return set()
+    broker_count = int(registry.get("broker_position_count") or payload.get("track_b_broker_position_count") or 0)
+    lifecycle_count = int(registry.get("lifecycle_position_count") or payload.get("lifecycle_open_position_count") or 0)
+    order_count = int(registry.get("broker_open_order_count") or payload.get("track_b_broker_open_order_count") or 0)
+    blocking = registry.get("blocking") is True
+    current_ids: set[str] = set()
+    if blocking:
+        current_ids.update(str(trade_id) for trade_id in registry.get("review_required_trade_ids") or [] if str(trade_id or "").strip())
+    if broker_count or lifecycle_count or order_count:
+        current_ids.update(str(trade_id) for trade_id in registry.get("mapped_trade_ids") or [] if str(trade_id or "").strip())
+    return current_ids
 
 
 def _review_required_rows_for_mode(

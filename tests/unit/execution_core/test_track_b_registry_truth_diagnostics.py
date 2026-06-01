@@ -138,6 +138,52 @@ def test_flat_current_reconciliation_with_old_review_chains_is_clean_current_sco
     assert report.registry_trade_state_counts == {}
 
 
+def test_flat_reconciliation_mapped_closed_rows_do_not_become_current_scope(tmp_path: Path) -> None:
+    config = _seed_config(tmp_path)
+    _write_json(
+        tmp_path / config.truth_config.reconciliation_path,  # type: ignore[union-attr]
+        {
+            "generated_at": NOW.isoformat(),
+            "classification": "BROKER_LIFECYCLE_RECONCILED",
+            "broker_reconciled": True,
+            "review_required_count": 0,
+            "track_b_broker_position_count": 0,
+            "track_b_broker_open_order_count": 0,
+            "lifecycle_open_position_count": 0,
+            "registry_reconciliation": {
+                "classification": "REGISTRY_RECONCILIATION_MATCHED",
+                "blocking": False,
+                "broker_position_count": 0,
+                "broker_open_order_count": 0,
+                "lifecycle_position_count": 0,
+                "mapped_trade_ids": ["trade_closed"],
+                "review_required_trade_ids": [],
+            },
+        },
+    )
+    _write_jsonl(
+        tmp_path / "fixtures/ledger.jsonl",
+        [
+            _event(
+                TradeEventType.ENTRY_FILL_BROKER_BACKED,
+                trade_id="trade_closed",
+                lifecycle_id="life_closed",
+                order_id="1",
+                client_id="17",
+                perm_id="2",
+                exec_id="3",
+            ),
+            _event(TradeEventType.RECONCILED_FLAT, trade_id="trade_closed", lifecycle_id="life_closed"),
+        ],
+    )
+
+    report = build_track_b_registry_truth_diagnostics(config=config, now=NOW)
+
+    assert report.classification == TRACK_B_DIAGNOSTICS_CLEAN_CURRENT_SCOPE
+    assert report.current_scope_trade_states == ()
+    assert report.registry_trade_state_counts == {}
+
+
 def test_full_artifact_audit_still_reports_old_review_required_trades(tmp_path: Path) -> None:
     config = _seed_config(tmp_path, mode=TrackBDiagnosticsMode.FULL_ARTIFACT_AUDIT)
     _write_jsonl(
