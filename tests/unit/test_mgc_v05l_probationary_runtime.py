@@ -180,6 +180,17 @@ def test_paper_runtime_truth_artifact_schema_contains_operational_fields(tmp_pat
     assert metadata["submit_authority"] is False
 
 
+def test_paper_runtime_invokes_read_only_authority_refresh_heartbeat() -> None:
+    source = Path(probationary_runtime_module.__file__).read_text(encoding="utf-8")
+
+    assert "TrackBAuthorityRefreshHeartbeatConfig" in source
+    assert "refresh_track_b_paper_authority_if_due" in source
+    assert "_refresh_track_b_authority_for_active_paper_runtime(self._settings)" in source
+    assert "TrackBLiveRuntimeEnvironmentWatchdogConfig" in source
+    assert "run_track_b_live_runtime_environment_watchdog_if_due" in source
+    assert "_write_track_b_live_runtime_environment_watchdog_for_active_paper_runtime(self._settings)" in source
+
+
 def test_track_b_rule_runner_promotion_lane_loads_as_probationary_paper_spec(tmp_path: Path) -> None:
     settings = _build_probationary_settings(tmp_path)
     row = {

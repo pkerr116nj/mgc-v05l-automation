@@ -115,6 +115,10 @@ from ..execution_core.track_b_authority_refresh_heartbeat import (
     record_track_b_authority_refresh_runtime_failure,
     refresh_track_b_paper_authority_if_due,
 )
+from ..execution_core.track_b_live_runtime_environment_watchdog import (
+    TrackBLiveRuntimeEnvironmentWatchdogConfig,
+    run_track_b_live_runtime_environment_watchdog_if_due,
+)
 from ..research.trend_participation.canary import _CANARY_LANES
 from ..research.trend_participation.canary import atpe_runtime_lane_id, atpe_runtime_lane_name
 from ..research.trend_participation.engine import DEFAULT_POINT_VALUES as ATPE_POINT_VALUES
@@ -7362,6 +7366,7 @@ class ProbationaryPaperSupervisor:
                 runtime_started_at=self._runtime_started_at,
             )
             _refresh_track_b_authority_for_active_paper_runtime(self._settings)
+            _write_track_b_live_runtime_environment_watchdog_for_active_paper_runtime(self._settings)
             risk_state = _load_probationary_paper_risk_state(self._settings)
 
             for lane in self._lanes:
@@ -7565,6 +7570,7 @@ class ProbationaryPaperSupervisor:
                     runtime_started_at=self._runtime_started_at,
                 )
                 _refresh_track_b_authority_for_active_paper_runtime(self._settings)
+                _write_track_b_live_runtime_environment_watchdog_for_active_paper_runtime(self._settings)
 
                 if not reconciliation_clean:
                     stop_reason = "paper_reconciliation_mismatch"
@@ -9451,6 +9457,26 @@ def _refresh_track_b_authority_for_active_paper_runtime(settings: StrategySettin
         )
         payload["runtime_artifacts_root"] = str(getattr(settings, "probationary_artifacts_path", ""))
         return payload
+
+
+def _write_track_b_live_runtime_environment_watchdog_for_active_paper_runtime(settings: StrategySettings) -> dict[str, Any]:
+    repo_root = Path(__file__).resolve().parents[3]
+    config = TrackBLiveRuntimeEnvironmentWatchdogConfig(repo_root=repo_root)
+    try:
+        return run_track_b_live_runtime_environment_watchdog_if_due(config=config)
+    except Exception as exc:
+        return {
+            "schema_version": "track_b_live_runtime_environment_watchdog_runtime_failure_v1",
+            "generated_at": datetime.now(timezone.utc).isoformat(),
+            "classification": "REVIEW_REQUIRED",
+            "reason_codes": ["LIVE_RUNTIME_ENVIRONMENT_WATCHDOG_FAILED", type(exc).__name__],
+            "exception_message": str(exc),
+            "runtime_artifacts_root": str(getattr(settings, "probationary_artifacts_path", "")),
+            "read_only": True,
+            "submit_authority": False,
+            "broker_mutation_allowed": False,
+            "runtime_mutation_allowed": False,
+        }
 
 
 def _write_probationary_paper_pid_metadata(*, settings: StrategySettings, runtime_truth: dict[str, Any]) -> Path:

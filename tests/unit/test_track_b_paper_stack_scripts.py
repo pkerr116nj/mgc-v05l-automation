@@ -141,6 +141,27 @@ def test_status_surfaces_current_hot_path_registry_truth_diagnostics_read_only()
     assert "submit_gate" not in source
 
 
+def test_status_refreshes_runtime_authority_and_reports_idle_window_classification() -> None:
+    source = STATUS_SCRIPT.read_text(encoding="utf-8")
+
+    assert "track_b_authority_refresh_heartbeat" in source
+    assert "track_b_live_runtime_environment_watchdog" in source
+    assert "AUTHORITY_REFRESH_RC" in source
+    assert "LIVE_RUNTIME_ENVIRONMENT_RC" in source
+    assert "authority_refresh" in source
+    assert "live_runtime_environment" in source
+    assert "liveness_contract" in source
+    assert "latest_successful_refresh_at" in source
+    assert "authority_refresh_fresh" in source
+    assert "all_lanes_out_of_window" in source
+    assert "OUT_OF_WINDOW_BUT_AUTHORITY_FRESH" in source
+    assert "BLOCKED_STALE_TRUTH" in source
+    assert "activity_classification" in source
+    assert "active_window_lane_count" in source
+    assert "out_of_window_lane_count" in source
+    assert "broker_mutation_allowed" in source
+
+
 def test_canonical_paper_config_uses_phase1_artifact_market_data() -> None:
     source = PAPER_CONFIG.read_text(encoding="utf-8")
 

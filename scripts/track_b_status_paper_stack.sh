@@ -16,6 +16,7 @@ STATUS_DIR="${REPO_ROOT}/outputs/track_b_execution_core/paper_stack"
 STATUS_ARTIFACT="${STATUS_DIR}/latest_paper_stack_status.json"
 AUTHORITY_REFRESH_TMP="${STATUS_DIR}/.authority_refresh.$$.json"
 OPERABILITY_TMP="${STATUS_DIR}/.operability_status.$$.json"
+LIVE_RUNTIME_ENVIRONMENT_TMP="${STATUS_DIR}/.live_runtime_environment.$$.json"
 
 mkdir -p "${STATUS_DIR}"
 
@@ -33,7 +34,15 @@ set +e
 OPERABILITY_RC=$?
 set -e
 
-"${PYTHON_BIN}" - "${REPO_ROOT}" "${RUNTIME_DIR}" "${OPERABILITY_TMP}" "${OPERABILITY_RC}" "${AUTHORITY_REFRESH_TMP}" "${AUTHORITY_REFRESH_RC}" "${STATUS_ARTIFACT}" <<'PY'
+set +e
+"${PYTHON_BIN}" -m mgc_v05l.execution_core.track_b_live_runtime_environment_watchdog \
+  --repo-root "${REPO_ROOT}" \
+  --force \
+  --json > "${LIVE_RUNTIME_ENVIRONMENT_TMP}"
+LIVE_RUNTIME_ENVIRONMENT_RC=$?
+set -e
+
+"${PYTHON_BIN}" - "${REPO_ROOT}" "${RUNTIME_DIR}" "${OPERABILITY_TMP}" "${OPERABILITY_RC}" "${AUTHORITY_REFRESH_TMP}" "${AUTHORITY_REFRESH_RC}" "${LIVE_RUNTIME_ENVIRONMENT_TMP}" "${LIVE_RUNTIME_ENVIRONMENT_RC}" "${STATUS_ARTIFACT}" <<'PY'
 import json
 import os
 import subprocess
@@ -61,7 +70,9 @@ operability_path = Path(sys.argv[3])
 operability_rc = int(sys.argv[4])
 authority_refresh_path = Path(sys.argv[5])
 authority_refresh_rc = int(sys.argv[6])
-status_artifact = Path(sys.argv[7])
+live_runtime_environment_path = Path(sys.argv[7])
+live_runtime_environment_rc = int(sys.argv[8])
+status_artifact = Path(sys.argv[9])
 
 
 def read_json(path: Path) -> dict:
@@ -158,6 +169,7 @@ def parse_iso(value: object):
 
 operability = read_json(operability_path)
 authority_refresh = read_json(authority_refresh_path)
+live_runtime_environment = read_json(live_runtime_environment_path)
 pid_metadata = read_json(runtime_dir / "probationary_paper.pid.json")
 runtime_truth = read_json(runtime_dir / "paper_runtime_truth.json")
 launch_guard = read_json(runtime_dir / "probationary_paper.pid.json.launch_guard.json")
@@ -447,6 +459,7 @@ payload = {
     "repo_root": str(repo_root),
     "operability_rc": operability_rc,
     "authority_refresh_rc": authority_refresh_rc,
+    "live_runtime_environment_rc": live_runtime_environment_rc,
     "startup_artifact": str(repo_root / "outputs/track_b_execution_core/paper_stack/latest_paper_stack_startup.json"),
     "status_artifact": str(status_artifact),
     "runtime": {
@@ -492,6 +505,22 @@ payload = {
         "broker_truth_fresh": broker_truth_status.get("fresh"),
     },
     "registry_truth_diagnostics": registry_truth_diagnostics,
+    "live_runtime_environment": {
+        "classification": live_runtime_environment.get("classification"),
+        "reason_codes": live_runtime_environment.get("reason_codes") or [],
+        "generated_at": live_runtime_environment.get("generated_at"),
+        "liveness_contract": live_runtime_environment.get("liveness_contract") or {},
+        "restart_policy": live_runtime_environment.get("restart_policy") or {},
+        "runtime": live_runtime_environment.get("runtime") or {},
+        "lanes": live_runtime_environment.get("lanes") or {},
+        "artifact_path": (
+            live_runtime_environment.get("artifact_path")
+            or (live_runtime_environment.get("artifact_paths") or {}).get("watchdog")
+            or str(live_runtime_environment_path)
+        ),
+        "read_only": live_runtime_environment.get("read_only") is True,
+        "broker_mutation_allowed": live_runtime_environment.get("broker_mutation_allowed") is True,
+    },
     "authority_refresh": {
         "classification": authority_refresh.get("classification"),
         "reason_codes": authority_refresh.get("reason_codes") or [],
