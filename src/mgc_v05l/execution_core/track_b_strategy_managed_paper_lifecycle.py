@@ -45,6 +45,10 @@ from .track_b_pre_action_snapshot_validator import (
     validate_track_b_pre_action_snapshot,
 )
 from .track_b_lifecycle_state_transition import validate_open_managed_evidence
+from .track_b_broker_contract_identity import (
+    BrokerContractIdentityError,
+    canonicalize_broker_bound_contract_identity,
+)
 from .track_b_central_trade_registry import TradeEventType
 from .track_b_live_trade_registry import (
     append_live_trade_registry_event,
@@ -2171,6 +2175,17 @@ def _contract_allowlist_entry(config: TrackBStrategyManagedPaperLifecycleConfig)
         "expiry": str(config.contract_expiry or "").strip() or _contract_month(config.contract_key),
         "tick_size": config.tick_size,
     }
+    try:
+        canonical_identity = canonicalize_broker_bound_contract_identity(
+            base=fallback,
+            sources=(canonical,),
+        )
+    except BrokerContractIdentityError:
+        canonical_identity = None
+    if canonical_identity is not None:
+        canonicalized = canonical_identity.as_allowlist_entry(tick_size=config.tick_size)
+        canonicalized["contract_month"] = _contract_month(config.contract_key) or canonical_identity.expiry[:6]
+        return canonicalized
     if not canonical:
         return fallback
     matches_config = (

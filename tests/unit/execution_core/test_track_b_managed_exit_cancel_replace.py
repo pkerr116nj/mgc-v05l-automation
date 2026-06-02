@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Any
 
 from mgc_v05l.execution_core.models import BrokerOrder, FillEvent
+from mgc_v05l.execution_core import track_b_managed_exit_cancel_replace as cancel_replace_module
 from mgc_v05l.execution_core.track_b_managed_exit_cancel_replace import (
     GUARDED_CANCEL_REPLACE_IDENTITY_MISMATCH,
     GUARDED_CANCEL_REPLACE_ORDER_NOT_FOUND,
@@ -215,6 +216,39 @@ def test_apply_cancels_exact_order_and_persists_working_replacement(tmp_path: Pa
     state_path = tmp_path / "outputs" / "track_b_execution_core" / "managed_exit_orders" / "latest_known_managed_exit_orders.json"
     assert state_path.exists()
     assert "2" in state_path.read_text(encoding="utf-8")
+
+
+def test_cancel_replace_allowlist_canonicalizes_mes_shorthand_expiry() -> None:
+    proposal = {
+        "replacement_order": {
+            "account_id": "DUM882026",
+            "symbol": "MES",
+            "local_symbol": "MESM6",
+            "expiry": "202606",
+            "con_id": 770561194,
+            "action": "BUY",
+            "quantity": "1.0",
+            "order_type": "LMT",
+            "tif": "DAY",
+            "limit_price": 7578.7,
+            "min_tick": 0.25,
+        },
+        "cancel_identity": {
+            "account_id": "DUM882026",
+            "symbol": "MES",
+            "local_symbol": "MESM6",
+            "expiry": "20260618",
+            "con_id": 770561194,
+        },
+    }
+
+    entry = cancel_replace_module._contract_allowlist_entry(proposal)
+
+    assert entry["symbol"] == "MES"
+    assert entry["local_symbol"] == "MESM6"
+    assert entry["con_id"] == 770561194
+    assert entry["contract_month"] == "202606"
+    assert entry["expiry"] == "20260618"
 
 
 def test_replacement_fill_persists_lifecycle_close(tmp_path: Path) -> None:

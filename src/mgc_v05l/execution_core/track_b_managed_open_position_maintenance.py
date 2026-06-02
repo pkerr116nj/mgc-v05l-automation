@@ -16,6 +16,10 @@ from pathlib import Path
 from typing import Any, Mapping
 
 from .models import require_aware_datetime, to_jsonable
+from .track_b_broker_contract_identity import (
+    BrokerContractIdentityError,
+    canonicalize_broker_bound_contract_identity,
+)
 from .track_b_databento_live_runtime_feed import DEFAULT_TRACK_B_DATABENTO_LIVE_RUNTIME_FEED_OUTPUT_ROOT
 from .track_b_exit_safety import (
     DEFAULT_BRIDGE_TERMINAL_EVENT_GRACE_SECONDS,
@@ -57,6 +61,7 @@ DEFAULT_TRACK_B_MANAGED_POSITION_PROJECTION_JSON = (
 TICK_SIZE_BY_INSTRUMENT = {
     "MGC": Decimal("0.1"),
     "MNQ": Decimal("0.25"),
+    "MES": Decimal("0.25"),
 }
 
 
@@ -302,6 +307,7 @@ def run_track_b_managed_open_position_maintenance(
             maintenance_config=actual_config,
             lifecycle_report=lifecycle_report,
             position=position,
+            projected_position=projected_position,
             completed_bars_since_entry=effective_completed_bars_since_entry,
             completed_bars_since_signal=completed_bars_since_signal,
             close_limit_price=close_limit_price,
@@ -502,6 +508,7 @@ def _lifecycle_config_from_report(
     maintenance_config: TrackBManagedOpenPositionMaintenanceConfig,
     lifecycle_report: Mapping[str, Any],
     position: Mapping[str, Any],
+    projected_position: Mapping[str, Any] | None = None,
     completed_bars_since_entry: int,
     completed_bars_since_signal: int | None,
     close_limit_price: str | None,
@@ -516,6 +523,40 @@ def _lifecycle_config_from_report(
         else {}
     )
     instrument = str(lifecycle_report.get("instrument_family") or position.get("instrument_family") or "")
+    projected_position = projected_position if isinstance(projected_position, Mapping) else {}
+    projected_broker_position = (
+        projected_position.get("broker_position")
+        if isinstance(projected_position.get("broker_position"), Mapping)
+        else {}
+    )
+    projected_lifecycle_position = (
+        projected_position.get("lifecycle_position")
+        if isinstance(projected_position.get("lifecycle_position"), Mapping)
+        else {}
+    )
+    canonical_identity = _canonical_contract_identity_from_lifecycle(
+        lifecycle_report=lifecycle_report,
+        position=position,
+        projected_position=projected_position,
+        projected_broker_position=projected_broker_position,
+        projected_lifecycle_position=projected_lifecycle_position,
+        canonical_contract_fields=canonical_contract_fields,
+    )
+    local_symbol = (
+        canonical_identity.local_symbol
+        if canonical_identity is not None
+        else str(lifecycle_report.get("local_symbol") or position.get("local_symbol") or "")
+    )
+    con_id = (
+        int(canonical_identity.con_id)
+        if canonical_identity is not None and canonical_identity.con_id
+        else _int_or_none(lifecycle_report.get("con_id") or position.get("con_id"))
+    )
+    contract_expiry = (
+        canonical_identity.expiry
+        if canonical_identity is not None
+        else str(lifecycle_report.get("contract_expiry") or lifecycle_report.get("expiry") or "").strip() or None
+    )
     return TrackBStrategyManagedPaperLifecycleConfig(
         mode=maintenance_config.mode,
         account_id=str(lifecycle_report.get("account_id") or maintenance_config.account_id),
@@ -523,10 +564,11 @@ def _lifecycle_config_from_report(
         strategy_id=str(lifecycle_report.get("strategy_id") or position.get("strategy_id") or ""),
         instrument_family=instrument,
         contract_key=str(lifecycle_report.get("contract_key") or position.get("contract_key") or ""),
-        local_symbol=str(lifecycle_report.get("local_symbol") or position.get("local_symbol") or ""),
-        con_id=_int_or_none(lifecycle_report.get("con_id") or position.get("con_id")),
+        local_symbol=local_symbol,
+        con_id=con_id,
         side=str(entry_intent.get("side") or lifecycle_report.get("side") or ""),
         quantity=_int_or_none(position.get("quantity") or entry_intent.get("quantity") or lifecycle_report.get("quantity")),
+        contract_expiry=contract_expiry,
         signal_timestamp=entry_intent.get("signal_timestamp"),
         signal_reason=entry_intent.get("signal_reason"),
         decision_bar_timestamp=entry_intent.get("decision_bar_timestamp"),
@@ -548,8 +590,8 @@ def _lifecycle_config_from_report(
         client_id=maintenance_config.client_id,
         order_type=maintenance_config.order_type,
         time_in_force=maintenance_config.time_in_force,
-        exchange=str(canonical_contract_fields.get("exchange") or _default_exchange(instrument)),
-        currency=str(canonical_contract_fields.get("currency") or "USD"),
+        exchange=str((canonical_identity.exchange if canonical_identity is not None else None) or canonical_contract_fields.get("exchange") or _default_exchange(instrument)),
+        currency=str((canonical_identity.currency if canonical_identity is not None else None) or canonical_contract_fields.get("currency") or "USD"),
         tick_size=str(_tick_size(instrument)),
         source_id="track_b_managed_open_position_maintenance",
         output_root=maintenance_config.managed_lifecycle_output_root,
@@ -558,6 +600,44 @@ def _lifecycle_config_from_report(
         live_money_readiness=maintenance_config.live_money_readiness,
         broker_reconciled=False,
     )
+
+
+def _canonical_contract_identity_from_lifecycle(
+    *,
+    lifecycle_report: Mapping[str, Any],
+    position: Mapping[str, Any],
+    projected_position: Mapping[str, Any],
+    projected_broker_position: Mapping[str, Any],
+    projected_lifecycle_position: Mapping[str, Any],
+    canonical_contract_fields: Mapping[str, Any],
+):
+    base = {
+        "symbol": lifecycle_report.get("instrument_family") or position.get("instrument_family"),
+        "local_symbol": lifecycle_report.get("local_symbol") or position.get("local_symbol"),
+        "con_id": lifecycle_report.get("con_id") or position.get("con_id"),
+        "expiry": lifecycle_report.get("contract_expiry")
+        or lifecycle_report.get("expiry")
+        or position.get("expiry")
+        or position.get("contract_month")
+        or str(lifecycle_report.get("contract_key") or position.get("contract_key") or "").split("-", 1)[-1],
+        "exchange": canonical_contract_fields.get("exchange"),
+        "currency": canonical_contract_fields.get("currency"),
+        "multiplier": canonical_contract_fields.get("multiplier"),
+    }
+    try:
+        return canonicalize_broker_bound_contract_identity(
+            base=base,
+            sources=(
+                canonical_contract_fields,
+                projected_broker_position,
+                projected_lifecycle_position,
+                projected_position,
+                position,
+                lifecycle_report,
+            ),
+        )
+    except BrokerContractIdentityError:
+        return None
 
 
 def _recover_missing_lifecycle_report_from_position(

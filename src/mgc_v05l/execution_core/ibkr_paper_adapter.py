@@ -28,6 +28,7 @@ from .models import (
     require_aware_datetime,
 )
 from .pricing import QuoteObservation
+from .track_b_broker_contract_identity import CANONICAL_FUTURES_CONTRACTS
 
 
 class IbkrPaperAdapterError(RuntimeError):
@@ -48,30 +49,6 @@ class IbkrPaperCorrelationError(IbkrPaperAdapterError):
 
 class IbkrPaperSubmitDisabledError(IbkrPaperAdapterError):
     """Raised when submit is requested while submit_enabled is false."""
-
-
-CANONICAL_FUTURES_CONTRACTS: dict[tuple[str, str], dict[str, str]] = {
-    ("712565978", "MGCM6"): {
-        "symbol": "MGC",
-        "secType": "FUT",
-        "exchange": "COMEX",
-        "currency": "USD",
-        "localSymbol": "MGCM6",
-        "conId": "712565978",
-        "lastTradeDateOrContractMonth": "20260626",
-        "multiplier": "10",
-    },
-    ("770561201", "MNQM6"): {
-        "symbol": "MNQ",
-        "secType": "FUT",
-        "exchange": "CME",
-        "currency": "USD",
-        "localSymbol": "MNQM6",
-        "conId": "770561201",
-        "lastTradeDateOrContractMonth": "20260618",
-        "multiplier": "2",
-    },
-}
 
 
 @dataclass(frozen=True)

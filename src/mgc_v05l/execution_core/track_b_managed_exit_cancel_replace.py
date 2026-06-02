@@ -15,6 +15,10 @@ from typing import Any, Callable, Mapping, Protocol
 
 from .ibkr_paper_adapter import IbkrPaperAdapter
 from .models import IntentKind, OrderIntent, SubmitAttempt, SubmitAttemptState, to_jsonable
+from .track_b_broker_contract_identity import (
+    BrokerContractIdentityError,
+    canonicalize_broker_bound_contract_identity,
+)
 from .track_b_broker_truth_lease import DEFAULT_LEASE_ARTIFACT
 from .track_b_managed_order_registry import DEFAULT_MANAGED_ORDER_REGISTRY_ARTIFACT
 from .track_b_managed_position_registry import DEFAULT_MANAGED_POSITION_REGISTRY_ARTIFACT
@@ -981,6 +985,18 @@ def _persist_known_managed_exit_order(
 
 def _contract_allowlist_entry(proposal: Mapping[str, Any]) -> dict[str, Any]:
     replacement = proposal["replacement_order"]
+    try:
+        canonical = canonicalize_broker_bound_contract_identity(
+            base=replacement,
+            sources=(
+                proposal.get("cancel_identity") if isinstance(proposal.get("cancel_identity"), Mapping) else {},
+                proposal.get("known_order") if isinstance(proposal.get("known_order"), Mapping) else {},
+            ),
+        )
+    except BrokerContractIdentityError:
+        canonical = None
+    if canonical is not None:
+        return canonical.as_allowlist_entry(tick_size=str(replacement.get("min_tick") or "0.1"))
     return {
         "symbol": replacement.get("symbol"),
         "security_type": "FUT",

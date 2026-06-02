@@ -544,6 +544,38 @@ def test_submit_limit_order_canonicalizes_mnq_shorthand_expiry() -> None:
     assert diagnostics["contract_fields_submitted_to_ibkr"]["lastTradeDateOrContractMonth"] == "20260618"
 
 
+def test_submit_limit_order_canonicalizes_mes_shorthand_expiry() -> None:
+    mes_allowlist = {
+        "MES-202606": {
+            "symbol": "MES",
+            "security_type": "FUT",
+            "exchange": "CME",
+            "currency": "USD",
+            "local_symbol": "MESM6",
+            "con_id": "770561194",
+            "contract_month": "202606",
+            "expiry": "202606",
+            "multiplier": "5",
+            "tick_size": "0.25",
+        }
+    }
+    paper = adapter(submit_enabled=True, module_loader=fake_ibapi_loader(), contract_allowlist=mes_allowlist)
+    paper.connect()
+
+    paper.submit_limit_order(
+        submit_attempt=submit_attempt(broker_order_id="1001"),
+        order_intent=order_intent(symbol="MES", contract_key="MES-202606", limit_price="7578.7"),
+    )
+
+    placed = paper.bridge_for_test().placed_orders[0]
+    diagnostics = paper.submit_diagnostics("submit-1")
+    assert placed["contract"].conId == 770561194
+    assert placed["contract"].localSymbol == "MESM6"
+    assert placed["contract"].lastTradeDateOrContractMonth == "20260618"
+    assert diagnostics["canonical_broker_contract_fields"]["lastTradeDateOrContractMonth"] == "20260618"
+    assert diagnostics["contract_fields_submitted_to_ibkr"]["lastTradeDateOrContractMonth"] == "20260618"
+
+
 @pytest.mark.parametrize(
     ("field", "value", "message"),
     [

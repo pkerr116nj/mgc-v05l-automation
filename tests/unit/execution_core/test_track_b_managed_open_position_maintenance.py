@@ -481,6 +481,97 @@ def test_exit_due_projection_creates_close_despite_stale_lifecycle_waiting_repor
     assert position["close_submitted"] is True
 
 
+def test_exit_due_projection_canonicalizes_mes_close_expiry_from_broker_position(tmp_path: Path) -> None:
+    cfg = seed_open_position(
+        tmp_path,
+        instrument="MES",
+        strategy_id="mes_globex_active_participation_short",
+        contract_key="MES-202606",
+        local_symbol="MESM6",
+        con_id=770561194,
+        side="SHORT",
+        entry_price="7598.75",
+        completed_timestamps=[
+            "2026-06-01T22:10:00+00:00",
+            "2026-06-01T22:15:00+00:00",
+        ],
+    )
+    lifecycle_path = (
+        tmp_path
+        / "managed"
+        / "strategy_managed_fe30248d4d6c42acaf106c8313b0b33b"
+        / "track_b_strategy_managed_paper_lifecycle_report.json"
+    )
+    lifecycle = json.loads(lifecycle_path.read_text(encoding="utf-8"))
+    lifecycle["managed_exit_policy_id"] = "GLOBEX_ACTIVE_EVIDENCE_TIMEBOX_60M_EXIT_V1"
+    lifecycle["managed_exit_policy_max_completed_5m_bars"] = 12
+    lifecycle["bars_since_fill"] = 0
+    lifecycle["close_intent_status"] = "WAITING_FOR_EXIT_POLICY_CONDITION"
+    lifecycle_path.write_text(json.dumps(lifecycle), encoding="utf-8")
+    write_json(
+        cfg.managed_position_projection_json,
+        {
+            "schema_version": "track_b_managed_positions_v1",
+            "generated_at": aware_now().isoformat(),
+            "positions": [
+                {
+                    "trade_id": lifecycle["trade_id"],
+                    "lifecycle_id": lifecycle["lifecycle_id"],
+                    "classification": "OPEN_MANAGED_EXIT_DUE",
+                    "exit_due": True,
+                    "bars_since_entry": 17,
+                    "required_completed_5m_bars": 12,
+                    "close_order_present": False,
+                    "broker_position": {
+                        "account_id": "DUM882026",
+                        "symbol": "MES",
+                        "local_symbol": "MESM6",
+                        "con_id": 770561194,
+                        "expiry": "20260618",
+                        "quantity": "-1",
+                    },
+                }
+            ],
+        },
+    )
+    captured_configs: list[TrackBStrategyManagedPaperLifecycleConfig] = []
+
+    def entry_submitter(_config: TrackBStrategyManagedPaperLifecycleConfig, _entry_intent: Mapping[str, Any]) -> Mapping[str, Any]:
+        raise AssertionError("maintenance must not submit another entry")
+
+    def close_submitter(config: TrackBStrategyManagedPaperLifecycleConfig, close_intent: Mapping[str, Any]) -> Mapping[str, Any]:
+        captured_configs.append(config)
+        return {
+            "submitted": True,
+            "submit_attempted": True,
+            "broker_state_mutated": True,
+            "broker_order_id": "12",
+            "close_intent": dict(close_intent),
+        }
+
+    from mgc_v05l.execution_core.track_b_strategy_managed_paper_lifecycle import default_managed_lifecycle_stages
+
+    defaults = default_managed_lifecycle_stages()
+    stages = TrackBStrategyManagedPaperLifecycleStages(
+        entry_submitter=entry_submitter,
+        exit_policy=defaults.exit_policy,
+        close_submitter=close_submitter,
+    )
+
+    result = run_track_b_managed_open_position_maintenance(
+        config=cfg,
+        lifecycle_stages=stages,
+        now=aware_now(),
+    )
+
+    position = result.report["positions"][0]
+    assert position["close_intent_created"] is True
+    assert position["close_submitted"] is True
+    assert captured_configs[0].contract_expiry == "20260618"
+    assert captured_configs[0].local_symbol == "MESM6"
+    assert captured_configs[0].con_id == 770561194
+
+
 @pytest.mark.parametrize(
     ("instrument", "strategy_id", "contract_key", "local_symbol", "con_id", "side", "expected_close_action"),
     [
