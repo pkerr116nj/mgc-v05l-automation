@@ -50,6 +50,10 @@ PAPER_ACTIVE_EVIDENCE_MNQ_GLOBEX_LONG_ID = "PAPER_ACTIVE_EVIDENCE_MNQ_GLOBEX_PAR
 PAPER_ACTIVE_EVIDENCE_MNQ_GLOBEX_SHORT_ID = "PAPER_ACTIVE_EVIDENCE_MNQ_GLOBEX_PARTICIPATION_SHORT_V1"
 PAPER_ACTIVE_EVIDENCE_MES_GLOBEX_LONG_ID = "PAPER_ACTIVE_EVIDENCE_MES_GLOBEX_PARTICIPATION_LONG_V1"
 PAPER_ACTIVE_EVIDENCE_MES_GLOBEX_SHORT_ID = "PAPER_ACTIVE_EVIDENCE_MES_GLOBEX_PARTICIPATION_SHORT_V1"
+PAPER_ACTIVE_EVIDENCE_MNQ_LONDON_OPEN_LONG_ID = "PAPER_ACTIVE_EVIDENCE_MNQ_LONDON_OPEN_PARTICIPATION_LONG_V1"
+PAPER_ACTIVE_EVIDENCE_MNQ_LONDON_OPEN_SHORT_ID = "PAPER_ACTIVE_EVIDENCE_MNQ_LONDON_OPEN_PARTICIPATION_SHORT_V1"
+PAPER_ACTIVE_EVIDENCE_MES_LONDON_OPEN_LONG_ID = "PAPER_ACTIVE_EVIDENCE_MES_LONDON_OPEN_PARTICIPATION_LONG_V1"
+PAPER_ACTIVE_EVIDENCE_MES_LONDON_OPEN_SHORT_ID = "PAPER_ACTIVE_EVIDENCE_MES_LONDON_OPEN_PARTICIPATION_SHORT_V1"
 NEW_YORK_TZ = ZoneInfo("America/New_York")
 
 
@@ -228,6 +232,54 @@ PAPER_ACTIVE_EVIDENCE_SPECS: dict[str, _PaperActiveEvidenceSpec] = {
         reference_time_et=time(18, 0),
         reference_label="18_00_globex_session_open",
         require_reference_bar=False,
+    ),
+    PAPER_ACTIVE_EVIDENCE_MNQ_LONDON_OPEN_LONG_ID: _PaperActiveEvidenceSpec(
+        strategy_id=PAPER_ACTIVE_EVIDENCE_MNQ_LONDON_OPEN_LONG_ID,
+        direction="LONG",
+        overlay_label="PAPER_ONLY_LONDON_OPEN_ACTIVE_EVIDENCE_LANE",
+        start_time_et=time(3, 5),
+        end_time_et=time(5, 30),
+        benchmark_hold_bars_5m=12,
+        condition_label="03:05-05:30_ET_close_above_vwap_or_london_open",
+        reference_time_et=time(3, 0),
+        reference_label="03_00_london_open",
+        require_reference_bar=True,
+    ),
+    PAPER_ACTIVE_EVIDENCE_MNQ_LONDON_OPEN_SHORT_ID: _PaperActiveEvidenceSpec(
+        strategy_id=PAPER_ACTIVE_EVIDENCE_MNQ_LONDON_OPEN_SHORT_ID,
+        direction="SHORT",
+        overlay_label="PAPER_ONLY_LONDON_OPEN_ACTIVE_EVIDENCE_LANE",
+        start_time_et=time(3, 5),
+        end_time_et=time(5, 30),
+        benchmark_hold_bars_5m=12,
+        condition_label="03:05-05:30_ET_close_below_vwap_or_london_open",
+        reference_time_et=time(3, 0),
+        reference_label="03_00_london_open",
+        require_reference_bar=True,
+    ),
+    PAPER_ACTIVE_EVIDENCE_MES_LONDON_OPEN_LONG_ID: _PaperActiveEvidenceSpec(
+        strategy_id=PAPER_ACTIVE_EVIDENCE_MES_LONDON_OPEN_LONG_ID,
+        direction="LONG",
+        overlay_label="PAPER_ONLY_LONDON_OPEN_ACTIVE_EVIDENCE_LANE",
+        start_time_et=time(3, 5),
+        end_time_et=time(5, 30),
+        benchmark_hold_bars_5m=12,
+        condition_label="03:05-05:30_ET_close_above_vwap_or_london_open",
+        reference_time_et=time(3, 0),
+        reference_label="03_00_london_open",
+        require_reference_bar=True,
+    ),
+    PAPER_ACTIVE_EVIDENCE_MES_LONDON_OPEN_SHORT_ID: _PaperActiveEvidenceSpec(
+        strategy_id=PAPER_ACTIVE_EVIDENCE_MES_LONDON_OPEN_SHORT_ID,
+        direction="SHORT",
+        overlay_label="PAPER_ONLY_LONDON_OPEN_ACTIVE_EVIDENCE_LANE",
+        start_time_et=time(3, 5),
+        end_time_et=time(5, 30),
+        benchmark_hold_bars_5m=12,
+        condition_label="03:05-05:30_ET_close_below_vwap_or_london_open",
+        reference_time_et=time(3, 0),
+        reference_label="03_00_london_open",
+        require_reference_bar=True,
     ),
 }
 
@@ -616,11 +668,13 @@ class TrackBRuleRunnerPaperStrategyEngine(StrategyEngine):
     def _paper_active_evidence_decision_for_source(self, source: str, *, vwap: object = None) -> dict[str, Any]:
         current_end = getattr(self._bar_history[-1], "end_ts", None) if self._bar_history else None
         anchor_reference = None
-        if isinstance(current_end, datetime) and _uses_us_session_anchor(source):
-            anchor_reference = _resolve_us_session_anchor_reference(
+        anchor_type = _session_anchor_type_for_active_evidence_source(source)
+        if isinstance(current_end, datetime) and anchor_type is not None:
+            anchor_reference = _resolve_active_evidence_session_anchor_reference(
                 repo_root=self._track_b_repo_root,
                 symbol=str(getattr(self._settings, "symbol", "") or getattr(self._track_b_lane_spec, "symbol", "")),
                 current_end=current_end,
+                anchor_type=anchor_type,
             )
         decision = _paper_active_evidence_decision(
             self._bar_history,
@@ -985,15 +1039,35 @@ def _time_inside_active_evidence_window(local_time: time, *, spec: _PaperActiveE
     return local_time >= spec.start_time_et or local_time < spec.end_time_et
 
 
-def _uses_us_session_anchor(source: str) -> bool:
+def _session_anchor_type_for_active_evidence_source(source: str) -> SessionAnchorType | None:
     spec = PAPER_ACTIVE_EVIDENCE_SPECS.get(source)
-    return spec is not None and spec.reference_time_et == time(9, 30)
+    if spec is None:
+        return None
+    if spec.reference_time_et == time(9, 30):
+        return SessionAnchorType.US_0930_OPEN
+    if spec.reference_time_et == time(3, 0):
+        return SessionAnchorType.LONDON_0300_OPEN
+    return None
 
 
-def _resolve_us_session_anchor_reference(*, repo_root: Path, symbol: str, current_end: datetime) -> Any | None:
+def _uses_us_session_anchor(source: str) -> bool:
+    return _session_anchor_type_for_active_evidence_source(source) == SessionAnchorType.US_0930_OPEN
+
+
+def _uses_london_session_anchor(source: str) -> bool:
+    return _session_anchor_type_for_active_evidence_source(source) == SessionAnchorType.LONDON_0300_OPEN
+
+
+def _resolve_active_evidence_session_anchor_reference(
+    *,
+    repo_root: Path,
+    symbol: str,
+    current_end: datetime,
+    anchor_type: SessionAnchorType,
+) -> Any | None:
     result = resolve_session_anchor(
         symbol,
-        SessionAnchorType.US_0930_OPEN,
+        anchor_type,
         current_end,
         timeframe="1m",
         config=TrackBSessionAnchorConfig(repo_root=repo_root),

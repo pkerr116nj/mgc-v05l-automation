@@ -8,6 +8,10 @@ from mgc_v05l.execution_core.track_b_shadow_promotion_contract import (
     ATP_MGC_ASIA_PROMOTION_1_075R_5M_PROMOTED_ID,
     ATP_MGC_ASIA_PROMOTION_1_075R_PROMOTED_ID,
     LONDON_LATE_PAUSE_RESUME_SHORT_PROMOTED_ID,
+    PAPER_ACTIVE_EVIDENCE_MES_LONDON_OPEN_LONG_PROMOTED_ID,
+    PAPER_ACTIVE_EVIDENCE_MES_LONDON_OPEN_SHORT_PROMOTED_ID,
+    PAPER_ACTIVE_EVIDENCE_MNQ_LONDON_OPEN_LONG_PROMOTED_ID,
+    PAPER_ACTIVE_EVIDENCE_MNQ_LONDON_OPEN_SHORT_PROMOTED_ID,
     PROMOTION_CANDIDATE_GUARDED_PAPER_READY,
     PROMOTION_CANDIDATE_SHADOW_ONLY,
     PROMOTION_CONTRACT_READY,
@@ -85,6 +89,10 @@ def test_approved_short_side_candidates_export_rule_runner_rows_with_specific_ev
     enabled = [
         ASIA_EARLY_PAUSE_RESUME_SHORT_PROMOTED_ID,
         LONDON_LATE_PAUSE_RESUME_SHORT_PROMOTED_ID,
+    PAPER_ACTIVE_EVIDENCE_MES_LONDON_OPEN_LONG_PROMOTED_ID,
+    PAPER_ACTIVE_EVIDENCE_MES_LONDON_OPEN_SHORT_PROMOTED_ID,
+    PAPER_ACTIVE_EVIDENCE_MNQ_LONDON_OPEN_LONG_PROMOTED_ID,
+    PAPER_ACTIVE_EVIDENCE_MNQ_LONDON_OPEN_SHORT_PROMOTED_ID,
         US_DERIVATIVE_BEAR_TURN_PROMOTED_ID,
     ]
     rows = promoted_probationary_paper_lane_rows({"enabled_strategy_ids": enabled})
@@ -105,6 +113,42 @@ def test_approved_short_side_candidates_export_rule_runner_rows_with_specific_ev
         assert row["runtime_overlay_params"]["input_event_path"].startswith(
             "outputs/track_b_execution_core/session_strategy_state/latest_"
         )
+
+
+def test_london_open_active_evidence_cohort_exports_canonical_contract_paper_rows() -> None:
+    enabled = [
+        PAPER_ACTIVE_EVIDENCE_MNQ_LONDON_OPEN_LONG_PROMOTED_ID,
+        PAPER_ACTIVE_EVIDENCE_MNQ_LONDON_OPEN_SHORT_PROMOTED_ID,
+        PAPER_ACTIVE_EVIDENCE_MES_LONDON_OPEN_LONG_PROMOTED_ID,
+        PAPER_ACTIVE_EVIDENCE_MES_LONDON_OPEN_SHORT_PROMOTED_ID,
+    ]
+    rows = promoted_probationary_paper_lane_rows({"enabled_strategy_ids": enabled})
+
+    by_strategy = {row["standalone_strategy_id"]: row for row in rows}
+    assert set(by_strategy) == set(enabled)
+    assert by_strategy[PAPER_ACTIVE_EVIDENCE_MNQ_LONDON_OPEN_LONG_PROMOTED_ID]["lane_id"] == (
+        "mnq_london_open_active_participation_long"
+    )
+    assert by_strategy[PAPER_ACTIVE_EVIDENCE_MNQ_LONDON_OPEN_SHORT_PROMOTED_ID]["short_sources"] == [
+        PAPER_ACTIVE_EVIDENCE_MNQ_LONDON_OPEN_SHORT_PROMOTED_ID
+    ]
+    assert by_strategy[PAPER_ACTIVE_EVIDENCE_MES_LONDON_OPEN_LONG_PROMOTED_ID]["symbol"] == "MES"
+    assert by_strategy[PAPER_ACTIVE_EVIDENCE_MES_LONDON_OPEN_SHORT_PROMOTED_ID]["symbol"] == "MES"
+    for row in by_strategy.values():
+        assert row["lane_mode"] == "PAPER_ONLY_LONDON_OPEN_ACTIVE_EVIDENCE_LANE"
+        assert row["runtime_kind"] == TRACK_B_RULE_RUNNER_PAPER_RUNTIME_KIND
+        assert row["session_restriction"] == "LONDON_OPEN"
+        assert row["managed_exit_policy_id"] == "GLOBEX_ACTIVE_EVIDENCE_TIMEBOX_60M_EXIT_V1"
+        assert row["structural_signal_timeframe"] == "1m"
+        assert row["artifact_timeframe"] == "1m"
+        assert row["context_timeframes"] == ["1m"]
+        assert row["participation_policy"] == "SINGLE_ENTRY_ONLY"
+        assert row["max_position_quantity"] == 1
+        assert row["max_concurrent_entries"] == 1
+        assert row["live_money_eligible"] is False
+        assert row["paper_proof_invoked"] is False
+        assert row["broad_cancel_flatten_allowed"] is False
+        assert row["unguarded_broker_mutation_allowed"] is False
 
 
 def test_promotion_contract_reports_remaining_shadow_only_exception_groups() -> None:

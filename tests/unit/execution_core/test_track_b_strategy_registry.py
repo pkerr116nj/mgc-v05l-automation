@@ -393,3 +393,42 @@ def test_conflicting_signals_require_explicit_arbitration() -> None:
     assert result["strategy_arbitration_verdict"] == TrackBStrategyRegistryVerdict.BLOCKED_CONFLICTING_SIGNALS.value
     assert result["chosen_candidate"] is None
     assert "explicit arbitration" in result["primary_blocker"]
+
+
+def test_london_open_active_evidence_registry_metadata_is_valid() -> None:
+    for strategy_id, instrument_family, calibration_profile in (
+        (
+            "PAPER_ACTIVE_EVIDENCE_MNQ_LONDON_OPEN_PARTICIPATION_LONG_V1",
+            "MNQ",
+            "simple_london_open_reference_plus_recent_close_long",
+        ),
+        (
+            "PAPER_ACTIVE_EVIDENCE_MNQ_LONDON_OPEN_PARTICIPATION_SHORT_V1",
+            "MNQ",
+            "simple_london_open_reference_plus_recent_close_short",
+        ),
+        (
+            "PAPER_ACTIVE_EVIDENCE_MES_LONDON_OPEN_PARTICIPATION_LONG_V1",
+            "MES",
+            "simple_london_open_reference_plus_recent_close_long",
+        ),
+        (
+            "PAPER_ACTIVE_EVIDENCE_MES_LONDON_OPEN_PARTICIPATION_SHORT_V1",
+            "MES",
+            "simple_london_open_reference_plus_recent_close_short",
+        ),
+    ):
+        entry = resolve_track_b_strategy_registry_entry(
+            rule_mode=strategy_id,
+            rule_id=strategy_id,
+            strategy_id=strategy_id,
+        )
+
+        assert entry is not None
+        assert entry.instrument_family == instrument_family
+        assert entry.timeframe == "1m"
+        assert entry.paper_eligible is True
+        assert entry.live_money_eligible is False
+        assert entry.managed_exit_policy_id == "GLOBEX_ACTIVE_EVIDENCE_TIMEBOX_60M_EXIT_V1"
+        assert entry.exit_not_available is False
+        assert entry.calibration_profile == calibration_profile

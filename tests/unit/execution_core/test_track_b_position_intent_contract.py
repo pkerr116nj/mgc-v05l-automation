@@ -105,6 +105,23 @@ def test_roster_strategy_without_contract_template_reports_gap(tmp_path: Path) -
     assert payload["strategies"][0]["missing_metadata"] == ["strategy_contract_template"]
 
 
+def test_london_open_active_evidence_position_intents_use_canonical_current_contracts() -> None:
+    mnq = position_intent_from_template(
+        APPROVED_TRACK_B_POSITION_INTENT_TEMPLATES["PAPER_ACTIVE_EVIDENCE_MNQ_LONDON_OPEN_PARTICIPATION_LONG_V1"]
+    )
+    mes = position_intent_from_template(
+        APPROVED_TRACK_B_POSITION_INTENT_TEMPLATES["PAPER_ACTIVE_EVIDENCE_MES_LONDON_OPEN_PARTICIPATION_SHORT_V1"]
+    )
+
+    assert mnq.local_symbol == "MNQM6"
+    assert mnq.con_id == 770561201
+    assert mnq.expiry == "20260618"
+    assert mes.local_symbol == "MESM6"
+    assert mes.con_id == 770561194
+    assert mes.expiry == "20260618"
+    assert mnq.conflict_group == "equity_index_mnq_mes_london_open_active_evidence"
+    assert mes.conflict_group == "equity_index_mnq_mes_london_open_active_evidence"
+
 def _payload(intent) -> dict:
     return json.loads(json.dumps(intent, default=lambda value: getattr(value, "__dict__", str(value))))
 

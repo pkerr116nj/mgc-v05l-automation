@@ -73,6 +73,19 @@ def test_paper_stack_start_enables_recovery_service_unless_operator_opts_out() -
     assert "WARNING_RECOVERY_SERVICE_ENABLE_FAILED" in source
 
 
+def test_paper_stack_start_has_london_open_active_evidence_extension_profile() -> None:
+    source = START_SCRIPT.read_text(encoding="utf-8")
+
+    assert "mnq_mes_london_open_active_evidence" in source
+    assert '"extends_profile": "mnq_mes_session_coverage_active_evidence"' in source
+    assert '"PAPER_ACTIVE_EVIDENCE_MNQ_LONDON_OPEN_PARTICIPATION_LONG_V1"' in source
+    assert '"PAPER_ACTIVE_EVIDENCE_MNQ_LONDON_OPEN_PARTICIPATION_SHORT_V1"' in source
+    assert '"PAPER_ACTIVE_EVIDENCE_MES_LONDON_OPEN_PARTICIPATION_LONG_V1"' in source
+    assert '"PAPER_ACTIVE_EVIDENCE_MES_LONDON_OPEN_PARTICIPATION_SHORT_V1"' in source
+    assert '"PAPER_WATCH_ACTIVE_EVIDENCE_MNQ_LONDON_LATE_LONG_SHADOW_V1"' in source
+    assert "LONDON_LATE_CANONICAL_ANCHOR_NOT_YET_DEFINED_FOR_BROKER_AUTHORITY" in source
+
+
 def test_recovery_operator_controls_and_status_are_launchd_based() -> None:
     source = RECOVERY_SCRIPT.read_text(encoding="utf-8")
 
