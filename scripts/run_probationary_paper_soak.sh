@@ -40,6 +40,7 @@ DEFAULT_RUNTIME_TRUTH_FILE="${DEFAULT_RUNTIME_DIR}/paper_runtime_truth.json"
 DEFAULT_SHARED_TRUTH_PREFLIGHT_FILE="${DEFAULT_RUNTIME_DIR}/shared_truth_runtime_start_preflight.json"
 DEFAULT_RUNTIME_SUPERVISOR_AUTHORITY_FILE="${REPO_ROOT}/outputs/track_b_execution_core/runtime_supervisor/latest_runtime_supervisor_authority.json"
 DEFAULT_CONTROL_PLANE_SNAPSHOT_FILE="${REPO_ROOT}/outputs/track_b_execution_core/control_plane/latest_control_plane_snapshot.json"
+DEFAULT_PAPER_STACK_STATUS_FILE="${REPO_ROOT}/outputs/track_b_execution_core/paper_stack/latest_paper_stack_status.json"
 CANARY_ENABLE_SENTINEL="${DEFAULT_RUNTIME_DIR}/enable_paper_route_canary.flag"
 CONFIG_OVERRIDE_RAW="${MGC_PROBATIONARY_PAPER_CONFIG_PATHS:-}"
 LAUNCH_PYTHON_BIN="${MGC_PROBATIONARY_PAPER_LAUNCH_PYTHON_BIN:-${PYTHON_BIN}}"
@@ -51,6 +52,7 @@ SHARED_TRUTH_PREFLIGHT_FILE="${MGC_TRACK_B_SHARED_TRUTH_PREFLIGHT_FILE:-${DEFAUL
 SHARED_TRUTH_PREFLIGHT_REPO_ROOT="${MGC_TRACK_B_SHARED_TRUTH_PREFLIGHT_REPO_ROOT:-${REPO_ROOT}}"
 RUNTIME_SUPERVISOR_AUTHORITY_FILE="${MGC_TRACK_B_RUNTIME_SUPERVISOR_AUTHORITY_FILE:-${DEFAULT_RUNTIME_SUPERVISOR_AUTHORITY_FILE}}"
 CONTROL_PLANE_SNAPSHOT_FILE="${MGC_TRACK_B_CONTROL_PLANE_SNAPSHOT_FILE:-${DEFAULT_CONTROL_PLANE_SNAPSHOT_FILE}}"
+PAPER_STACK_STATUS_FILE="${MGC_TRACK_B_PAPER_STACK_STATUS_FILE:-${DEFAULT_PAPER_STACK_STATUS_FILE}}"
 LAUNCH_FIRST_TRUTH_GENERATED_AT=""
 LAUNCH_SECOND_TRUTH_GENERATED_AT=""
 LAUNCH_SUSTAINED_CONVERGENCE_CONFIRMED="false"
@@ -994,14 +996,16 @@ PY
   fi
   rm -f "${stderr_file}"
   set +e
-  "${PYTHON_BIN}" - <<'PY' "${CONTROL_PLANE_SNAPSHOT_FILE}"
+  "${PYTHON_BIN}" - <<'PY' "${CONTROL_PLANE_SNAPSHOT_FILE}" "${PAPER_STACK_STATUS_FILE}"
 import json
 import sys
 from pathlib import Path
 from mgc_v05l.execution_core.track_b_control_plane_snapshot_status import classify_control_plane_snapshot_status
 from mgc_v05l.execution_core.track_b_control_plane_top_line import build_track_b_control_plane_top_line
+from mgc_v05l.execution_core.track_b_paper_stack_restart_precheck import classify_paper_stack_restart_precheck
 
 path = Path(sys.argv[1])
+status_path = Path(sys.argv[2])
 try:
     payload = json.loads(path.read_text(encoding="utf-8"))
 except (OSError, json.JSONDecodeError):
@@ -1017,6 +1021,11 @@ except (OSError, json.JSONDecodeError):
 
 status = classify_control_plane_snapshot_status(payload, required_for_launch=True)
 top_line = build_track_b_control_plane_top_line(payload)
+try:
+    paper_stack_status = json.loads(status_path.read_text(encoding="utf-8"))
+except (OSError, json.JSONDecodeError):
+    paper_stack_status = {}
+restart_precheck = classify_paper_stack_restart_precheck(paper_stack_status)
 
 def agent_health_blocker_summary(payload):
     blockers = payload.get("agent_health_top_blockers") or []
@@ -1037,6 +1046,35 @@ def agent_health_blocker_summary(payload):
         )
     return "[" + ";".join(rows) + "]"
 
+def _safe_owned_exposure_restart_override(payload, status, restart_precheck):
+    if restart_precheck.restart_allowed is not True:
+        return False
+    if status.get("classification") != "CONTROL_PLANE_READY":
+        return False
+    if payload.get("runtime_supervisor_classification") != "SUPERVISOR_RUNTIME_START_ALLOWED":
+        return False
+    if payload.get("supervisor_mode") != "READY_FOR_OPERATOR_START":
+        return False
+    blocker_codes = {
+        str(item.get("code") or "")
+        for item in (payload.get("blockers") or [])
+        if isinstance(item, dict)
+    }
+    if blocker_codes and blocker_codes != {"agent_health_blocks_runtime_submit"}:
+        return False
+    blockers = payload.get("agent_health_top_blockers") or []
+    non_runtime_down_blockers = [
+        item
+        for item in blockers
+        if isinstance(item, dict)
+        and (
+            item.get("agent_id") != "track_b_paper_runtime"
+            or item.get("status") != "STOPPED_UNEXPECTED"
+            or item.get("reason") != "RUNTIME_DOWN_WITH_BROKER_EXPOSURE"
+        )
+    ]
+    return not non_runtime_down_blockers
+
 allowed = (
     status.get("classification") == "CONTROL_PLANE_READY"
     and payload.get("runtime_supervisor_classification") == "SUPERVISOR_RUNTIME_START_ALLOWED"
@@ -1044,7 +1082,8 @@ allowed = (
     and status.get("safe_to_start_runtime") is True
     and not payload.get("blockers")
 )
-if not allowed:
+restart_override_allowed = _safe_owned_exposure_restart_override(payload, status, restart_precheck)
+if not (allowed or restart_override_allowed):
     print(
         "CONTROL_PLANE_SNAPSHOT_START_BLOCKED: "
         f"control_plane_status_classification={status.get('classification')} "
@@ -1115,7 +1154,9 @@ if not allowed:
         f"primary_blocking_reason={json.dumps(payload.get('primary_blocking_reason') or '')} "
         f"operator_explanation={json.dumps(payload.get('operator_explanation') or '')} "
         f"recommended_observation_step={json.dumps(payload.get('recommended_observation_step') or '')} "
-        f"recommended_next_command={payload.get('recommended_next_command')}",
+        f"recommended_next_command={payload.get('recommended_next_command')} "
+        f"restart_precheck_classification={restart_precheck.classification} "
+        f"restart_precheck_allowed={restart_precheck.restart_allowed}",
         file=sys.stderr,
     )
     raise SystemExit(2)

@@ -50,9 +50,13 @@ def test_paper_stack_start_requires_sustained_readiness() -> None:
 
 def test_paper_stack_restart_uses_owned_exposure_authority() -> None:
     source = START_SCRIPT.read_text(encoding="utf-8")
+    soak_source = (REPO_ROOT / "scripts" / "run_probationary_paper_soak.sh").read_text(encoding="utf-8")
 
     assert "track_b_paper_stack_restart_precheck" in source
     assert "restart_authority_allowed" in source
+    assert "track_b_paper_stack_restart_precheck" in soak_source
+    assert "_safe_owned_exposure_restart_override" in soak_source
+    assert "RUNTIME_DOWN_WITH_BROKER_EXPOSURE" in soak_source
     assert "RESTART_ALLOWED_FLAT_RECONCILED" not in source
     assert "restart_precheck_classification" in source
     assert "BLOCKED_UNMANAGED_EXPOSURE" not in source
