@@ -14,6 +14,7 @@ STATE_DIR="${REPO_ROOT}/outputs/track_b_execution_core/runtime_recovery"
 DISABLED_MARKER="${STATE_DIR}/recovery_disabled_by_operator.json"
 STATUS_ARTIFACT="${STATE_DIR}/latest_launchd_recovery_status.json"
 LAST_TICK_ARTIFACT="${STATE_DIR}/latest_launchd_recovery_tick.json"
+RECOVERY_TICK_INTERVAL_SECONDS=120
 PYTHONPATH="${REPO_ROOT}/src${PYTHONPATH:+:${PYTHONPATH}}"
 export PYTHONPATH
 
@@ -150,6 +151,8 @@ payload = {
     "launchd_owned": loaded == "true",
     "can_restart_runtime_without_codex": loaded == "true" and disabled != "true",
     "label": "com.mgc.trackb.paper-runtime-recovery",
+    "run_interval_seconds": 120,
+    "cadence_classification": "ACTIVE_SESSION_WATCHDOG_120S",
     "plist_path": plist,
     "repo_template_path": template,
     "repo_root": repo,
@@ -162,6 +165,7 @@ payload = {
     "tick_command": "bash scripts/track_b_hourly_paper_runtime_recovery.sh tick",
     "runtime_start_path": "scripts/track_b_start_paper_stack.sh",
     "runtime_status_path": "scripts/track_b_status_paper_stack.sh",
+    "restart_authority_source": "canonical_paper_stack_restart_precheck",
     "paper_only": True,
     "live_money_eligible": False,
     "paper_proof_invoked": False,
@@ -222,7 +226,7 @@ case "${mode}" in
     cp "${TEMPLATE_PATH}" "${PLIST_PATH}"
     launchctl bootstrap "gui/$(id -u)" "${PLIST_PATH}" 2>/dev/null || true
     launchctl enable "gui/$(id -u)/${LABEL}" 2>/dev/null || true
-    echo "Track B hourly PAPER runtime recovery launchd service enabled: ${LABEL}"
+    echo "Track B PAPER runtime recovery launchd service enabled: ${LABEL} interval=${RECOVERY_TICK_INTERVAL_SECONDS}s"
     ;;
   disable)
     write_disabled_marker

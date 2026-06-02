@@ -45,10 +45,12 @@ def test_hourly_recovery_plist_is_launchd_owned_enabled_and_canonical_only(tmp_p
 
     assert recovery.owner == "launchd_user_agent"
     assert recovery.disabled_by_default is False
-    assert recovery.start_interval_seconds == 3600
+    assert recovery.start_interval_seconds == 120
+    assert int(recovery.start_interval_seconds or 0) < 300
     assert "Disabled" not in plist
     assert plist["RunAtLoad"] is True
-    assert plist["StartInterval"] == 3600
+    assert plist["StartInterval"] == 120
+    assert "canonical paper-stack status/start only" in recovery.restart_policy
     assert plist["ProgramArguments"] == ["/bin/bash", "scripts/track_b_hourly_paper_runtime_recovery.sh", "tick"]
     assert recovery.status_command == ("bash", "scripts/track_b_hourly_paper_runtime_recovery.sh", "status")
     assert recovery.start_command == ("bash", "scripts/track_b_hourly_paper_runtime_recovery.sh", "enable")

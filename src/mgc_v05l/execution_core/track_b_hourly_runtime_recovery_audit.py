@@ -192,17 +192,22 @@ def collect_hourly_runtime_recovery_audit(
 
 def collect_scheduler_evidence(*, repo_root: Path) -> dict[str, Any]:
     launchd = _run_command(("launchctl", "list"), repo_root)
+    launchd_print = _run_command(("launchctl", "print", f"gui/{os.getuid()}/com.mgc.trackb.paper-runtime-recovery"), repo_root)
     crontab = _run_command(("crontab", "-l"), repo_root)
     labels = _matching_scheduler_lines(launchd.get("stdout", ""))
+    print_loaded = int(launchd_print.get("returncode") or 0) == 0
     cron = _matching_scheduler_lines(crontab.get("stdout", ""))
     codex_automations = _matching_codex_automations()
     return {
         "launchd_query_returncode": launchd.get("returncode"),
+        "launchd_print_returncode": launchd_print.get("returncode"),
+        "launchd_print_loaded": print_loaded,
         "crontab_query_returncode": crontab.get("returncode"),
         "launchd_matching_labels": labels,
         "crontab_matching_entries": cron,
         "codex_automation_matching_entries": codex_automations,
         "launchd_query_error": launchd.get("stderr_tail"),
+        "launchd_print_error": launchd_print.get("stderr_tail"),
         "crontab_query_error": crontab.get("stderr_tail"),
     }
 
@@ -222,6 +227,8 @@ def classify_scheduler_evidence(evidence: Mapping[str, Any]) -> str:
     labels = list(evidence.get("launchd_matching_labels") or [])
     cron = list(evidence.get("crontab_matching_entries") or [])
     codex_automations = list(evidence.get("codex_automation_matching_entries") or [])
+    if evidence.get("launchd_print_loaded") is True:
+        return SUPERVISOR_RUNNING
     if not labels and not cron and not codex_automations:
         return SUPERVISOR_NOT_INSTALLED
     if any(str(item.get("status", "")).upper() == "ACTIVE" for item in codex_automations if isinstance(item, Mapping)):
@@ -247,6 +254,7 @@ def _scheduler_details(evidence: Mapping[str, Any], *, classification: str) -> d
         "codex_automation_active_count": sum(1 for status in statuses if status == "ACTIVE"),
         "codex_automation_paused_count": sum(1 for status in statuses if status == "PAUSED"),
         "launchd_match_count": len(list(evidence.get("launchd_matching_labels") or [])),
+        "launchd_print_loaded": evidence.get("launchd_print_loaded") is True,
         "crontab_match_count": len(list(evidence.get("crontab_matching_entries") or [])),
         "status_truth_source": "live_scheduler_probe",
         "stale_artifact_can_claim_active": False,

@@ -79,6 +79,9 @@ def test_recovery_operator_controls_and_status_are_launchd_based() -> None:
     assert "RECOVERY_ACTIVE" in source
     assert "RECOVERY_DISABLED_BY_OPERATOR" in source
     assert "SUPERVISOR_PAUSED" in source
+    assert "RECOVERY_TICK_INTERVAL_SECONDS=120" in source
+    assert "ACTIVE_SESSION_WATCHDOG_120S" in source
+    assert "canonical_paper_stack_restart_precheck" in source
     assert "launchctl print" in source
     assert "launchctl list" in source
     assert "last_action" in source
@@ -124,7 +127,10 @@ def test_status_reports_dashboard_as_non_authority_and_duplicate_writer_state() 
     assert "runtime_owner_metadata_unavailable" in source
     assert "live_scheduler_classification" in source
     assert "hourly_recovery_paused" in source
-    assert "stale_hourly_recovery_artifact_live_scheduler_paused" in source
+    assert "RECOVERY_TICK_INTERVAL_SECONDS = 120.0" in source
+    assert "RECOVERY_TICK_STALE_SECONDS" in source
+    assert "stale_recovery_tick_live_scheduler_paused" in source
+    assert "recovery_tick_fresh" in source
     assert "runtime_start_allowed" in source
     assert "submit_allowed" in source
     assert "recovery_authoritative" in source

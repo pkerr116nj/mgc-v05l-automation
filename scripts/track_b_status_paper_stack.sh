@@ -64,6 +64,10 @@ from mgc_v05l.execution_core.track_b_registry_truth_diagnostics import (
     write_track_b_registry_truth_diagnostics,
 )
 
+RECOVERY_TICK_INTERVAL_SECONDS = 120.0
+RECOVERY_TICK_STALE_GRACE_SECONDS = 60.0
+RECOVERY_TICK_STALE_SECONDS = RECOVERY_TICK_INTERVAL_SECONDS + RECOVERY_TICK_STALE_GRACE_SECONDS
+
 repo_root = Path(sys.argv[1]).resolve()
 runtime_dir = Path(sys.argv[2])
 operability_path = Path(sys.argv[3])
@@ -357,14 +361,14 @@ if screen_name and not screen_active:
     )
 if (
     hourly_recovery_age_seconds is not None
-    and hourly_recovery_age_seconds > 3900
+    and hourly_recovery_age_seconds > RECOVERY_TICK_STALE_SECONDS
     and live_scheduler_classification == SUPERVISOR_PAUSED
 ):
     warnings.append(
         {
-            "code": "stale_hourly_recovery_artifact_live_scheduler_paused",
-            "detail": "The last hourly recovery audit artifact is stale; live scheduler probe reports PAUSED.",
-            "source": "hourly_recovery_scheduler",
+            "code": "stale_recovery_tick_live_scheduler_paused",
+            "detail": "The last recovery tick is stale for the 120s watchdog cadence; live scheduler probe reports PAUSED.",
+            "source": "runtime_recovery_scheduler",
         }
     )
 if (
@@ -562,6 +566,12 @@ payload = {
         "hourly_recovery_artifact": str(hourly_recovery_audit_path),
         "hourly_recovery_artifact_generated_at": hourly_recovery_audit.get("generated_at"),
         "hourly_recovery_artifact_age_seconds": hourly_recovery_age_seconds,
+        "recovery_tick_interval_seconds": RECOVERY_TICK_INTERVAL_SECONDS,
+        "recovery_tick_stale_seconds": RECOVERY_TICK_STALE_SECONDS,
+        "recovery_tick_fresh": (
+            hourly_recovery_age_seconds is not None
+            and hourly_recovery_age_seconds <= RECOVERY_TICK_STALE_SECONDS
+        ),
         "hourly_recovery_artifact_classification": hourly_recovery_audit.get("classification"),
         "hourly_recovery_artifact_supervisor_classification": (
             hourly_recovery_audit.get("hourly_supervisor") or {}

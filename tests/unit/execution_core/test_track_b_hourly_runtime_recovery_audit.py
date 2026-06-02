@@ -138,6 +138,32 @@ def test_paused_codex_automation_is_reported_explicitly_and_not_running() -> Non
     assert payload["restart_decision"]["classification"] == "RUNTIME_HEALTHY_NO_RESTART_NEEDED"
 
 
+def test_launchd_print_loaded_overrides_paused_codex_automation_evidence() -> None:
+    payload = build_hourly_runtime_recovery_audit(
+        self_healing_health=_health(runtime_running=True, restart_allowed=False),
+        scheduler_evidence={
+            "launchd_print_loaded": True,
+            "launchd_matching_labels": [],
+            "crontab_matching_entries": [],
+            "codex_automation_matching_entries": [
+                {
+                    "id": "track-b-hourly-paper-runtime-recovery",
+                    "name": "Track B hourly PAPER runtime recovery",
+                    "status": "PAUSED",
+                    "rrule": "FREQ=HOURLY;INTERVAL=1;BYMINUTE=0;BYSECOND=0",
+                }
+            ],
+        },
+        operability_contract={"canonical_state": "READY_SUBMIT_CAPABLE", "restart_allowed_if_runtime_down": True},
+        now=NOW,
+    )
+
+    assert payload["classification"] == RUNTIME_HEALTHY_NO_ACTION
+    assert payload["hourly_supervisor"]["running"] is True
+    assert payload["hourly_supervisor"]["launchd_print_loaded"] is True
+    assert payload["hourly_supervisor"]["codex_automation_paused_count"] == 1
+
+
 def test_unrelated_launchd_labels_do_not_count_as_hourly_recovery() -> None:
     payload = build_hourly_runtime_recovery_audit(
         self_healing_health=_health(runtime_running=True, restart_allowed=False),
