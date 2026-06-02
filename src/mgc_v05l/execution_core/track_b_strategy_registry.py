@@ -589,6 +589,26 @@ PAPER_ACTIVE_EVIDENCE_MES_LONDON_OPEN_SHORT_V1 = TrackBStrategyRegistryEntry(
     accepted_rule_ids=("PAPER_ACTIVE_EVIDENCE_MES_LONDON_OPEN_PARTICIPATION_SHORT_V1",),
 )
 
+PAPER_ACTIVE_EVIDENCE_MNQ_LONDON_LATE_SHORT_V1 = TrackBStrategyRegistryEntry(
+    strategy_id="PAPER_ACTIVE_EVIDENCE_MNQ_LONDON_LATE_PARTICIPATION_SHORT_V1",
+    rule_id="PAPER_ACTIVE_EVIDENCE_MNQ_LONDON_LATE_PARTICIPATION_SHORT_V1",
+    rule_mode="PAPER_ACTIVE_EVIDENCE_MNQ_LONDON_LATE_PARTICIPATION_SHORT_V1",
+    instrument_family="MNQ",
+    timeframe="1m",
+    required_feature_schema=(),
+    required_state_schema=(),
+    feature_version="paper_active_evidence_london_late_participation_v1",
+    calibration_profile="simple_london_late_reference_plus_recent_close_short",
+    paper_eligible=True,
+    live_money_eligible=False,
+    required_1m_context_bars=2,
+    required_5m_context_bars=0,
+    managed_exit_policy_id="GLOBEX_ACTIVE_EVIDENCE_TIMEBOX_60M_EXIT_V1",
+    exit_not_available=False,
+    accepted_strategy_ids=("PAPER_ACTIVE_EVIDENCE_MNQ_LONDON_LATE_PARTICIPATION_SHORT_V1",),
+    accepted_rule_ids=("PAPER_ACTIVE_EVIDENCE_MNQ_LONDON_LATE_PARTICIPATION_SHORT_V1",),
+)
+
 US_LATE_PAUSE_RESUME_LONG_V1 = TrackBStrategyRegistryEntry(
     strategy_id="US_LATE_PAUSE_RESUME_LONG_V1",
     rule_id="US_LATE_PAUSE_RESUME_LONG_V1",
@@ -673,6 +693,7 @@ TRACK_B_STRATEGY_REGISTRY: tuple[TrackBStrategyRegistryEntry, ...] = (
     PAPER_ACTIVE_EVIDENCE_MNQ_LONDON_OPEN_SHORT_V1,
     PAPER_ACTIVE_EVIDENCE_MES_LONDON_OPEN_LONG_V1,
     PAPER_ACTIVE_EVIDENCE_MES_LONDON_OPEN_SHORT_V1,
+    PAPER_ACTIVE_EVIDENCE_MNQ_LONDON_LATE_SHORT_V1,
     US_LATE_PAUSE_RESUME_LONG_V1,
     DEMO_WIRING_PROOF,
     HUMAN_REVIEW_ONLY,

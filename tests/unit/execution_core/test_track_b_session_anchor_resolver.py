@@ -263,6 +263,86 @@ def test_conflicting_live_and_backfill_anchor_is_ambiguous(tmp_path: Path) -> No
     assert result.not_ready_reason == "CONFLICTING_ANCHOR_SOURCES"
 
 
+def test_london_late_0530_reference_resolved_from_runtime_bars(tmp_path: Path) -> None:
+    _write_runtime_bars(
+        tmp_path,
+        "MNQ",
+        [_bar("2026-06-02T09:30:00+00:00", "2026-06-02T09:31:00+00:00", open_="30510.50")],
+    )
+
+    result = resolve_session_anchor(
+        "MNQ",
+        SessionAnchorType.LONDON_LATE_0530_REFERENCE,
+        datetime(2026, 6, 2, 7, 0, tzinfo=NY),
+        config=TrackBSessionAnchorConfig(repo_root=tmp_path),
+    )
+
+    assert result.status == SessionAnchorStatus.READY
+    assert result.reason_code == SessionAnchorReasonCode.ANCHOR_READY_FROM_RUNTIME
+    assert result.anchor_time_et == "05:30:00"
+    assert result.reference_price == "30510.50"
+    assert result.to_dict()["broker_mutation_allowed"] is False
+    assert result.to_dict()["paper_proof_invoked"] is False
+
+
+def test_london_late_0530_reference_recovers_from_current_day_backfill(tmp_path: Path) -> None:
+    _write_runtime_bars(tmp_path, "MNQ", [_bar("2026-06-02T11:45:00+00:00", "2026-06-02T11:46:00+00:00", open_="30550")])
+    _write_intraday_backfill_bars(
+        tmp_path,
+        "MNQ",
+        [_bar("2026-06-02T09:30:00+00:00", "2026-06-02T09:31:00+00:00", open_="30510.50")],
+    )
+
+    result = resolve_session_anchor(
+        "MNQ",
+        "LONDON_LATE_0530_REFERENCE",
+        datetime(2026, 6, 2, 7, 0, tzinfo=NY),
+        config=TrackBSessionAnchorConfig(repo_root=tmp_path),
+    )
+
+    assert result.status == SessionAnchorStatus.READY
+    assert result.source == "RECOVERED_PHASE1_1M"
+    assert result.reason_code == SessionAnchorReasonCode.ANCHOR_RECOVERED_FROM_PHASE1_GAP_BACKFILL
+    assert result.reference_price == "30510.50"
+
+
+def test_london_late_0530_reference_rejects_prior_day_backfill(tmp_path: Path) -> None:
+    _write_intraday_backfill_bars(
+        tmp_path,
+        "MNQ",
+        [_bar("2026-06-01T09:30:00+00:00", "2026-06-01T09:31:00+00:00", open_="30400")],
+    )
+
+    result = resolve_session_anchor(
+        "MNQ",
+        "LONDON_LATE_0530_REFERENCE",
+        datetime(2026, 6, 2, 7, 0, tzinfo=NY),
+        config=TrackBSessionAnchorConfig(repo_root=tmp_path),
+    )
+
+    assert result.status == SessionAnchorStatus.NOT_READY
+    assert result.reason_code == SessionAnchorReasonCode.ANCHOR_BAR_NOT_FOUND
+
+
+def test_london_late_0530_reference_dst_timezone_handling(tmp_path: Path) -> None:
+    _write_runtime_bars(
+        tmp_path,
+        "MNQ",
+        [_bar("2026-12-01T10:30:00+00:00", "2026-12-01T10:31:00+00:00", open_="25010")],
+    )
+
+    result = resolve_session_anchor(
+        "MNQ",
+        "LONDON_LATE_0530_REFERENCE",
+        datetime(2026, 12, 1, 7, 0, tzinfo=NY),
+        config=TrackBSessionAnchorConfig(repo_root=tmp_path),
+    )
+
+    assert result.status == SessionAnchorStatus.READY
+    assert result.anchor_time_utc is not None
+    assert result.anchor_time_utc.isoformat() == "2026-12-01T10:30:00+00:00"
+
+
 def _bar(start: str, end: str, *, open_: str) -> dict[str, object]:
     return {
         "bar_start": start,

@@ -34,6 +34,7 @@ class SessionAnchorType(str, Enum):
     US_0930_OPEN = "US_0930_OPEN"
     GLOBEX_1800_REOPEN = "GLOBEX_1800_REOPEN"
     LONDON_0300_OPEN = "LONDON_0300_OPEN"
+    LONDON_LATE_0530_REFERENCE = "LONDON_LATE_0530_REFERENCE"
     ASIA_1800_OPEN = "ASIA_1800_OPEN"
     CHANGEOVER_REFERENCE = "CHANGEOVER_REFERENCE"
     ANCHORED_VWAP_START = "ANCHORED_VWAP_START"
@@ -282,6 +283,8 @@ def _anchor_time(anchor_type: SessionAnchorType) -> time:
         return time(18, 0)
     if anchor_type == SessionAnchorType.LONDON_0300_OPEN:
         return time(3, 0)
+    if anchor_type == SessionAnchorType.LONDON_LATE_0530_REFERENCE:
+        return time(5, 30)
     if anchor_type == SessionAnchorType.CHANGEOVER_REFERENCE:
         return time(3, 0)
     if anchor_type == SessionAnchorType.ANCHORED_VWAP_START:
@@ -518,7 +521,11 @@ def _gap_backfill_subdir(anchor_type: SessionAnchorType) -> str:
         return "us_session_reference"
     if anchor_type in {SessionAnchorType.GLOBEX_1800_REOPEN, SessionAnchorType.ASIA_1800_OPEN, SessionAnchorType.ANCHORED_VWAP_START}:
         return "globex_session_reference"
-    if anchor_type in {SessionAnchorType.LONDON_0300_OPEN, SessionAnchorType.CHANGEOVER_REFERENCE}:
+    if anchor_type in {
+        SessionAnchorType.LONDON_0300_OPEN,
+        SessionAnchorType.LONDON_LATE_0530_REFERENCE,
+        SessionAnchorType.CHANGEOVER_REFERENCE,
+    }:
         return "london_session_reference"
     return str(anchor_type.value).lower()
 
@@ -697,6 +704,7 @@ def build_parser() -> argparse.ArgumentParser:
             SessionAnchorType.US_0930_OPEN.value,
             SessionAnchorType.GLOBEX_1800_REOPEN.value,
             SessionAnchorType.LONDON_0300_OPEN.value,
+            SessionAnchorType.LONDON_LATE_0530_REFERENCE.value,
         ],
     )
     parser.add_argument("--as-of", default=None)

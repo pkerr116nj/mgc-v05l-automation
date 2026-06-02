@@ -73,6 +73,21 @@ def test_paper_stack_start_enables_recovery_service_unless_operator_opts_out() -
     assert "WARNING_RECOVERY_SERVICE_ENABLE_FAILED" in source
 
 
+def test_paper_stack_start_has_session_coverage_active_evidence_profile() -> None:
+    source = START_SCRIPT.read_text(encoding="utf-8")
+
+    assert "mnq_mes_session_coverage_active_evidence" in source
+    assert '"PAPER_ACTIVE_EVIDENCE_MNQ_US_PARTICIPATION_LONG_V1"' in source
+    assert '"PAPER_ACTIVE_EVIDENCE_MNQ_US_PARTICIPATION_SHORT_V1"' in source
+    assert '"PAPER_ACTIVE_EVIDENCE_MES_US_PARTICIPATION_LONG_V1"' in source
+    assert '"PAPER_ACTIVE_EVIDENCE_MES_US_PARTICIPATION_SHORT_V1"' in source
+    assert '"PAPER_ACTIVE_EVIDENCE_MNQ_GLOBEX_PARTICIPATION_LONG_V1"' in source
+    assert '"PAPER_ACTIVE_EVIDENCE_MNQ_GLOBEX_PARTICIPATION_SHORT_V1"' in source
+    assert '"PAPER_ACTIVE_EVIDENCE_MES_GLOBEX_PARTICIPATION_LONG_V1"' in source
+    assert '"PAPER_ACTIVE_EVIDENCE_MES_GLOBEX_PARTICIPATION_SHORT_V1"' in source
+    assert 'PROOF_REQUIRED_SYMBOLS="MNQ,MES"' in source
+
+
 def test_paper_stack_start_has_london_open_active_evidence_extension_profile() -> None:
     source = START_SCRIPT.read_text(encoding="utf-8")
 
@@ -84,6 +99,19 @@ def test_paper_stack_start_has_london_open_active_evidence_extension_profile() -
     assert '"PAPER_ACTIVE_EVIDENCE_MES_LONDON_OPEN_PARTICIPATION_SHORT_V1"' in source
     assert '"PAPER_WATCH_ACTIVE_EVIDENCE_MNQ_LONDON_LATE_LONG_SHADOW_V1"' in source
     assert "LONDON_LATE_CANONICAL_ANCHOR_NOT_YET_DEFINED_FOR_BROKER_AUTHORITY" in source
+
+
+def test_paper_stack_start_has_london_late_mnq_short_active_evidence_profile() -> None:
+    source = START_SCRIPT.read_text(encoding="utf-8")
+
+    assert "mnq_mes_london_late_mnq_short_active_evidence" in source
+    assert '"extends_profile": "mnq_mes_session_coverage_active_evidence"' in source
+    assert '"PAPER_ACTIVE_EVIDENCE_MNQ_LONDON_LATE_PARTICIPATION_SHORT_V1"' in source
+    assert '"PAPER_WATCH_ACTIVE_EVIDENCE_MNQ_LONDON_LATE_LONG_SHADOW_V1"' in source
+    assert '"PAPER_WATCH_ACTIVE_EVIDENCE_MES_LONDON_LATE_LONG_SHADOW_V1"' in source
+    assert '"PAPER_WATCH_ACTIVE_EVIDENCE_MES_LONDON_LATE_SHORT_SHADOW_V1"' in source
+    assert "LONDON_LATE_MNQ_SHORT_ONLY_INITIAL_PAPER_ELEVATION" in source
+    assert "COMBINED_MNQ_MES_LONDON_CONFLICT_GROUP_LIMITS_SESSION_TO_ONE_TRADE" in source
 
 
 def test_recovery_operator_controls_and_status_are_launchd_based() -> None:

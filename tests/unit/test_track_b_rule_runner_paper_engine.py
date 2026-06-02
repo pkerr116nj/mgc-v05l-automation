@@ -13,6 +13,7 @@ from mgc_v05l.app.track_b_rule_runner_paper_engine import (
     PAPER_ACTIVE_EVIDENCE_MES_GLOBEX_SHORT_ID,
     PAPER_ACTIVE_EVIDENCE_MES_LONDON_OPEN_SHORT_ID,
     PAPER_ACTIVE_EVIDENCE_MNQ_GLOBEX_LONG_ID,
+    PAPER_ACTIVE_EVIDENCE_MNQ_LONDON_LATE_SHORT_ID,
     PAPER_ACTIVE_EVIDENCE_MNQ_LONDON_OPEN_LONG_ID,
     PAPER_ACTIVE_EVIDENCE_MNQ_US_LONG_ID,
     PAPER_ACTIVE_EVIDENCE_MNQ_US_SHORT_ID,
@@ -579,6 +580,70 @@ def test_london_open_active_evidence_blocks_when_anchor_missing(tmp_path) -> Non
 
     assert decision["accepted"] is False
     assert decision["primary_blocker"] == "SESSION_ANCHOR_NOT_READY"
+    assert decision["session_anchor_status"] == "NOT_READY"
+    assert decision["session_anchor_reason_code"] == "ANCHOR_BAR_NOT_FOUND"
+
+
+def test_london_late_active_evidence_short_accepts_with_canonical_0530_reference(tmp_path) -> None:
+    ny = ZoneInfo("America/New_York")
+    anchor_path = tmp_path / "outputs/track_b_execution_core/session_anchors/MNQ/2026-05-28/LONDON_LATE_0530_REFERENCE.json"
+    anchor_path.parent.mkdir(parents=True, exist_ok=True)
+    anchor_path.write_text(
+        json.dumps(
+            {
+                "status": "READY",
+                "reason_code": "ANCHOR_READY_FROM_CANONICAL_ARTIFACT",
+                "session_date_et": "2026-05-28",
+                "anchor_time_utc": datetime(2026, 5, 28, 9, 30, tzinfo=UTC).isoformat(),
+                "timeframe": "1m",
+                "reference_price": "21000",
+                "source": "RECOVERED_PHASE1_1M",
+                "source_artifact_path": "anchor.json",
+                "bar": {
+                    "bar_start": datetime(2026, 5, 28, 5, 30, tzinfo=ny).astimezone(UTC).isoformat(),
+                    "bar_end": datetime(2026, 5, 28, 5, 31, tzinfo=ny).astimezone(UTC).isoformat(),
+                    "open": "21000",
+                    "high": "21002",
+                    "low": "20998",
+                    "close": "20999",
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    engine = object.__new__(TrackBRuleRunnerPaperStrategyEngine)
+    engine._bar_history = [
+        _bar(datetime(2026, 5, 28, 5, 45, tzinfo=ny), open_="20990", close="20980"),
+        _bar(datetime(2026, 5, 28, 5, 50, tzinfo=ny), open_="20980", close="20970"),
+    ]
+    engine._settings = SimpleNamespace(symbol="MNQ", trade_size=1)
+    engine._track_b_repo_root = tmp_path
+
+    decision = engine._paper_active_evidence_decision_for_source(
+        PAPER_ACTIVE_EVIDENCE_MNQ_LONDON_LATE_SHORT_ID
+    )
+
+    assert decision["accepted"] is True
+    assert decision["primary_blocker"] is None
+    assert decision["session_open_price"] == "21000"
+    assert decision["session_anchor_status"] == "READY"
+    assert decision["session_anchor_source"] == "RECOVERED_PHASE1_1M"
+
+
+def test_london_late_active_evidence_short_blocks_when_0530_reference_missing(tmp_path) -> None:
+    ny = ZoneInfo("America/New_York")
+    engine = object.__new__(TrackBRuleRunnerPaperStrategyEngine)
+    engine._bar_history = [_bar(datetime(2026, 5, 28, 5, 45, tzinfo=ny), open_="20990", close="20980")]
+    engine._settings = SimpleNamespace(symbol="MNQ", trade_size=1)
+    engine._track_b_repo_root = tmp_path
+
+    decision = engine._paper_active_evidence_decision_for_source(
+        PAPER_ACTIVE_EVIDENCE_MNQ_LONDON_LATE_SHORT_ID
+    )
+
+    assert decision["accepted"] is False
+    assert decision["primary_blocker"] == "SESSION_ANCHOR_NOT_READY"
+    assert decision["reference_recovery_blocker"] == "ANCHOR_BAR_NOT_FOUND"
     assert decision["session_anchor_status"] == "NOT_READY"
     assert decision["session_anchor_reason_code"] == "ANCHOR_BAR_NOT_FOUND"
 

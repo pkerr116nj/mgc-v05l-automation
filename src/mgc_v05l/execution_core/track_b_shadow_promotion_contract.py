@@ -47,6 +47,7 @@ PAPER_ACTIVE_EVIDENCE_MNQ_LONDON_OPEN_LONG_PROMOTED_ID = "PAPER_ACTIVE_EVIDENCE_
 PAPER_ACTIVE_EVIDENCE_MNQ_LONDON_OPEN_SHORT_PROMOTED_ID = "PAPER_ACTIVE_EVIDENCE_MNQ_LONDON_OPEN_PARTICIPATION_SHORT_V1"
 PAPER_ACTIVE_EVIDENCE_MES_LONDON_OPEN_LONG_PROMOTED_ID = "PAPER_ACTIVE_EVIDENCE_MES_LONDON_OPEN_PARTICIPATION_LONG_V1"
 PAPER_ACTIVE_EVIDENCE_MES_LONDON_OPEN_SHORT_PROMOTED_ID = "PAPER_ACTIVE_EVIDENCE_MES_LONDON_OPEN_PARTICIPATION_SHORT_V1"
+PAPER_ACTIVE_EVIDENCE_MNQ_LONDON_LATE_SHORT_PROMOTED_ID = "PAPER_ACTIVE_EVIDENCE_MNQ_LONDON_LATE_PARTICIPATION_SHORT_V1"
 US_DERIVATIVE_BEAR_TURN_PROMOTED_ID = "US_DERIVATIVE_BEAR_TURN_V1"
 TRACK_B_RULE_RUNNER_PAPER_RUNTIME_KIND = "track_b_rule_runner_paper_strategy_engine"
 ATP_COMPANION_BENCHMARK_PAPER_RUNTIME_KIND = "atp_companion_benchmark_paper"
@@ -441,6 +442,39 @@ PROMOTION_CANDIDATES: Mapping[str, ShadowPromotionCandidate] = {
         point_value="5",
         catastrophic_open_loss="-300",
     ),
+    PAPER_ACTIVE_EVIDENCE_MNQ_LONDON_LATE_SHORT_PROMOTED_ID: ShadowPromotionCandidate(
+        shadow_candidate_family="PAPER_ONLY_LONDON_LATE_ACTIVE_EVIDENCE_LANE",
+        promoted_strategy_id=PAPER_ACTIVE_EVIDENCE_MNQ_LONDON_LATE_SHORT_PROMOTED_ID,
+        lane_id="mnq_london_late_active_participation_short",
+        instrument_family="MNQ",
+        side="SHORT",
+        session_eligibility=("LONDON_LATE",),
+        contract_key="MNQ-202606",
+        local_symbol="MNQM6",
+        con_id=770561201,
+        lifecycle_policy_id="GLOBEX_ACTIVE_EVIDENCE_TIMEBOX_60M_EXIT_V1",
+        exit_profile_id=MNQ_GLOBEX_ACTIVE_EVIDENCE_TIMEBOX_60M_V1,
+        pyramiding_policy=PYRAMIDING_NOT_ALLOWED_REVIEW_REQUIRED,
+        conflict_group="equity_index_mnq_mes_london_late_active_evidence",
+        evidence_summary={
+            "source": "paper_london_late_active_evidence_cohort",
+            "condition": "05:30-08:20_ET_close_below_vwap_or_05_30_london_late_reference",
+            "benchmark_exit": "60m_timebox",
+            "classification": "PAPER_ONLY_LONDON_LATE_ACTIVE_EVIDENCE_LANE",
+            "session_anchor": "LONDON_LATE_0530_REFERENCE",
+            "purpose": "controlled_real_paper_lifecycle_evidence_generation_london_late_mnq_short",
+        },
+        experimental_reason="paper_only_london_late_active_evidence_generation_mnq_short",
+        display_name="MNQ / London Late active participation short / PAPER evidence",
+        identity_components=("paper", "mnq", "london_late", "active_participation_short"),
+        lane_mode="PAPER_ONLY_LONDON_LATE_ACTIVE_EVIDENCE_LANE",
+        strategy_family="paper_active_evidence",
+        observed_instruments=("MNQ",),
+        experimental_status="paper_evidence_generation",
+        input_event_path="outputs/track_b_execution_core/london_late_active_evidence/latest_mnq_london_late_active_participation_short_event_envelope.json",
+        point_value="2",
+        catastrophic_open_loss="-250",
+    ),
 }
 
 REMAINING_SHADOW_ONLY_EXCEPTIONS: tuple[dict[str, Any], ...] = (
@@ -599,6 +633,9 @@ def _probationary_paper_lane_row(candidate: ShadowPromotionCandidate) -> dict[st
         "lane_id": candidate.lane_id,
         "display_name": candidate.display_name or f"{candidate.instrument_family} / {candidate.promoted_strategy_id} / PAPER",
         "symbol": candidate.instrument_family,
+        "local_symbol": candidate.local_symbol,
+        "con_id": candidate.con_id,
+        "contract_key": candidate.contract_key,
         "standalone_strategy_id": candidate.promoted_strategy_id,
         "identity_components": list(candidate.identity_components)
         or ["paper", candidate.instrument_family.lower(), candidate.promoted_strategy_id.lower()],
@@ -609,6 +646,7 @@ def _probationary_paper_lane_row(candidate: ShadowPromotionCandidate) -> dict[st
         "point_value": candidate.point_value,
         "trade_size": 1,
         "participation_policy": candidate.participation_policy,
+        "conflict_group": candidate.conflict_group,
         "max_concurrent_entries": candidate.max_concurrent_entries,
         "max_position_quantity": candidate.max_position_quantity,
         "max_adds_after_entry": candidate.max_adds_after_entry,

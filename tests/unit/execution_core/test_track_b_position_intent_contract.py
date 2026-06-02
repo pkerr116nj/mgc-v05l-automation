@@ -122,6 +122,20 @@ def test_london_open_active_evidence_position_intents_use_canonical_current_cont
     assert mnq.conflict_group == "equity_index_mnq_mes_london_open_active_evidence"
     assert mes.conflict_group == "equity_index_mnq_mes_london_open_active_evidence"
 
+
+def test_london_late_mnq_short_position_intent_uses_canonical_current_contract() -> None:
+    intent = position_intent_from_template(
+        APPROVED_TRACK_B_POSITION_INTENT_TEMPLATES["PAPER_ACTIVE_EVIDENCE_MNQ_LONDON_LATE_PARTICIPATION_SHORT_V1"]
+    )
+
+    assert intent.local_symbol == "MNQM6"
+    assert intent.con_id == 770561201
+    assert intent.expiry == "20260618"
+    assert intent.side == "SHORT"
+    assert intent.quantity == 1
+    assert intent.conflict_group == "equity_index_mnq_mes_london_late_active_evidence"
+
+
 def _payload(intent) -> dict:
     return json.loads(json.dumps(intent, default=lambda value: getattr(value, "__dict__", str(value))))
 
