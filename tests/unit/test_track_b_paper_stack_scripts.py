@@ -48,6 +48,16 @@ def test_paper_stack_start_requires_sustained_readiness() -> None:
     assert "submit remains disabled" in source
 
 
+def test_paper_stack_restart_uses_owned_exposure_authority() -> None:
+    source = START_SCRIPT.read_text(encoding="utf-8")
+
+    assert "track_b_paper_stack_restart_precheck" in source
+    assert "RESTART_ALLOWED_FLAT_RECONCILED" not in source
+    assert "restart_precheck_classification" in source
+    assert "BLOCKED_UNMANAGED_EXPOSURE" not in source
+    assert "Broker/lifecycle/safety state is not clean enough for a controlled restart." in source
+
+
 def test_paper_stack_start_enables_recovery_service_unless_operator_opts_out() -> None:
     source = START_SCRIPT.read_text(encoding="utf-8")
 

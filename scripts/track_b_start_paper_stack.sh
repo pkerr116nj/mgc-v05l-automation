@@ -266,11 +266,15 @@ if [[ "${already_running}" == "true" ]]; then
     write_startup_artifact "BLOCKED_RESTART_REQUIRES_PROFILE" "Set TRACK_B_PAPER_STACK_PROFILE for an explicit restart generation." "${pid}"
     exit 2
   fi
-  broker_clean="$("${PYTHON_BIN}" -c 'import json,sys; p=json.loads(sys.stdin.read()); print(str(("RECONCILED" in str(p["broker_lifecycle"].get("reconciliation_classification") or "")) and p["broker_lifecycle"].get("broker_truth_fresh") is True and p["safety"].get("paper_only") is True and p["safety"].get("live_money_eligible") is False and p["safety"].get("paper_proof_invoked") is False).lower())' <<<"${status_json}")"
-  if [[ "${broker_clean}" != "true" ]]; then
-    write_startup_artifact "BLOCKED_RESTART_PRECHECK" "Broker/lifecycle/safety state is not clean enough for a controlled restart." "${pid}"
+  restart_precheck="$("${PYTHON_BIN}" -m mgc_v05l.execution_core.track_b_paper_stack_restart_precheck <<<"${status_json}")"
+  restart_precheck_allowed="$("${PYTHON_BIN}" -c 'import json,sys; print(str(json.loads(sys.stdin.read()).get("restart_allowed") is True).lower())' <<<"${restart_precheck}")"
+  restart_precheck_classification="$("${PYTHON_BIN}" -c 'import json,sys; print(json.loads(sys.stdin.read()).get("classification") or "")' <<<"${restart_precheck}")"
+  restart_precheck_detail="$("${PYTHON_BIN}" -c 'import json,sys; print(json.loads(sys.stdin.read()).get("detail") or "")' <<<"${restart_precheck}")"
+  if [[ "${restart_precheck_allowed}" != "true" ]]; then
+    write_startup_artifact "${restart_precheck_classification:-BLOCKED_RESTART_PRECHECK}" "${restart_precheck_detail:-Broker/lifecycle/safety state is not clean enough for a controlled restart.}" "${pid}"
     exit 2
   fi
+  write_startup_artifact "${restart_precheck_classification}" "${restart_precheck_detail}" "${pid}" >/dev/null
   PROBATIONARY_PAPER_PID_FILE="${PID_FILE}" bash "${SCRIPT_DIR}/stop_probationary_paper_soak.sh"
   status_json="$("${STATUS_SCRIPT}" --json)"
 fi
