@@ -98,8 +98,9 @@ def _write_phase1_reconciliation(
                 "classification": classification,
                 "broker_reconciled": broker_reconciled,
                 "review_required_count": review_required_count,
+                "current_scope_review_required_count": review_required_count,
                 "track_b_broker_open_order_count": open_order_count,
-                "track_b_broker_position_count": 0,
+                "track_b_broker_position_count": len(broker_positions or []),
                 "track_b_broker_positions": broker_positions or [],
                 "track_b_lifecycle_positions": lifecycle_positions or [],
                 "live_money_eligible": False,
@@ -111,10 +112,84 @@ def _write_phase1_reconciliation(
     )
 
 
+def _write_canonical_current_scope(
+    tmp_path: Path,
+    *,
+    registry_classification: str = "TRACK_B_DIAGNOSTICS_CLEAN_CURRENT_SCOPE",
+    registry_generated_at: str = "2999-01-01T00:00:00+00:00",
+    managed_position_count: int = 0,
+    managed_position_review_count: int = 0,
+    managed_order_count: int = 0,
+    open_order_count: int = 0,
+) -> None:
+    registry_path = tmp_path / "outputs" / "track_b_execution_core" / "diagnostics" / "latest_track_b_registry_truth_diagnostics.json"
+    registry_path.parent.mkdir(parents=True, exist_ok=True)
+    registry_path.write_text(
+        json.dumps(
+            {
+                "generated_at": registry_generated_at,
+                "classification": registry_classification,
+                "current_scope_review_required_count": 0 if registry_classification == "TRACK_B_DIAGNOSTICS_CLEAN_CURRENT_SCOPE" else 1,
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    managed_positions_path = tmp_path / "outputs" / "track_b_execution_core" / "managed_positions" / "latest_managed_positions.json"
+    managed_positions_path.parent.mkdir(parents=True, exist_ok=True)
+    managed_positions_path.write_text(
+        json.dumps(
+            {
+                "generated_at": "2999-01-01T00:00:00+00:00",
+                "classification": "NO_MANAGED_POSITIONS" if managed_position_count == 0 else "OPEN_MANAGED_MATCHED",
+                "summary": {
+                    "managed_position_count": managed_position_count,
+                    "lifecycle_position_count": managed_position_count,
+                    "review_required_count": managed_position_review_count,
+                    "attention_required_count": managed_position_review_count,
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    managed_orders_path = tmp_path / "outputs" / "track_b_execution_core" / "managed_orders" / "latest_managed_orders.json"
+    managed_orders_path.parent.mkdir(parents=True, exist_ok=True)
+    managed_orders_path.write_text(
+        json.dumps(
+            {
+                "generated_at": "2999-01-01T00:00:00+00:00",
+                "classification": "NO_MANAGED_ORDERS" if managed_order_count == 0 else "MANAGED_ORDERS_PRESENT",
+                "summary": {
+                    "managed_order_count": managed_order_count,
+                    "working_entry_order_count": managed_order_count,
+                    "working_close_order_count": 0,
+                    "position_without_close_order_count": 0,
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    open_order_truth_path = tmp_path / "outputs" / "track_b_execution_core" / "open_order_truth" / "latest_open_order_truth.json"
+    open_order_truth_path.parent.mkdir(parents=True, exist_ok=True)
+    open_order_truth_path.write_text(
+        json.dumps(
+            {
+                "generated_at": "2999-01-01T00:00:00+00:00",
+                "classification": "NO_OPEN_ORDERS" if open_order_count == 0 else "OPEN_ORDERS_PRESENT",
+                "summary": {"open_order_count": open_order_count},
+            }
+        ),
+        encoding="utf-8",
+    )
+
+
 @pytest.fixture(autouse=True)
 def _default_phase1_reconciliation(tmp_path: Path) -> None:
     _write_phase1_reconciliation(tmp_path)
     _write_contract_status(tmp_path)
+    _write_canonical_current_scope(tmp_path)
 
 
 def _write_broker_positions_snapshot(
@@ -428,6 +503,150 @@ def test_blocks_new_entry_by_unresolved_same_account_contract_submit_intent(tmp_
     assert "TRACK_B_UNRESOLVED_SUBMIT_INTENT_BLOCKS_NEW_ENTRY" in gate["diagnostic_reason_codes"]
     blocker = gate["unresolved_submit_intent_ownership_blocker"]
     assert blocker["matching_records"][0]["match_reason"] == "same_account_contract"
+
+
+def test_stale_raw_open_registry_rows_do_not_block_when_canonical_current_scope_is_clean(tmp_path: Path) -> None:
+    _write_monitor(tmp_path, broker_quantity=0.0)
+    _write_ledger(tmp_path, [])
+    _write_governance(tmp_path, [_governance_row("mnq_us_active_participation_long", "PAPER_ACTIVE_EVIDENCE_MNQ_US_PARTICIPATION_LONG_V1")])
+    _write_broker_positions_snapshot(tmp_path, positions=[])
+    _write_broker_open_orders_snapshot(tmp_path, open_orders=[])
+    _write_registry_open_managed_trade(
+        tmp_path,
+        trade_id="trade_submit_owner_mnq_exec_late",
+        lifecycle_id="reserved_submit_atp_companion_v1_asia_us_1",
+        lane_id="atp_companion_v1_asia_us",
+        thesis_strategy_id="atp_companion_v1__benchmark_mgc_asia_us",
+        symbol="MNQ",
+        con_id=770561201,
+        local_symbol="MNQM6",
+    )
+    _write_registry_open_managed_trade(
+        tmp_path,
+        trade_id="trade_original_mnq_globex_short",
+        lifecycle_id="reserved_submit_mnq_globex_active_participation_short_1",
+        lane_id="mnq_globex_active_participation_short",
+        thesis_strategy_id="mnq_globex_active_participation_short",
+        symbol="MNQ",
+        con_id=770561201,
+        local_symbol="MNQM6",
+    )
+    _write_registry_open_managed_trade(
+        tmp_path,
+        trade_id="trade_original_mes_globex_short",
+        lifecycle_id="reserved_submit_mes_globex_active_participation_short_1",
+        lane_id="mes_globex_active_participation_short",
+        thesis_strategy_id="mes_globex_active_participation_short",
+        symbol="MES",
+        con_id=770561194,
+        local_symbol="MESM6",
+    )
+
+    gate = evaluate_paper_strategy_exposure_gate(
+        repo_root=tmp_path,
+        strategy_id="mnq_us_active_participation_long",
+        bridge_strategy_id="PAPER_ACTIVE_EVIDENCE_MNQ_US_PARTICIPATION_LONG_V1",
+        action="BUY",
+        intent_type="BUY_TO_OPEN",
+        quantity=1.0,
+        executable_symbol="MNQ",
+        account_id="DUM882026",
+        con_id=770561201,
+        local_symbol="MNQM6",
+    )
+
+    assert gate["submit_allowed"] is True
+    assert gate["classification"] == "PAPER_EXPOSURE_ENTRY_ALLOWED"
+    assert gate["registry_truth_result"]["raw_active_registry_trade_count"] == 3
+    assert gate["registry_truth_result"]["active_registry_trade_count"] == 0
+    assert gate["registry_truth_result"]["canonical_current_scope_result"]["allowed"] is True
+    assert "strategy_stacking_disabled" not in gate["block_reasons"]
+
+
+def test_canonical_current_open_managed_position_blocks_entry(tmp_path: Path) -> None:
+    _write_monitor(tmp_path, broker_quantity=0.0)
+    _write_ledger(tmp_path, [])
+    _write_governance(tmp_path, [_governance_row("mnq_us_active_participation_long", "PAPER_ACTIVE_EVIDENCE_MNQ_US_PARTICIPATION_LONG_V1")])
+    _write_canonical_current_scope(tmp_path, managed_position_count=1)
+
+    gate = evaluate_paper_strategy_exposure_gate(
+        repo_root=tmp_path,
+        strategy_id="mnq_us_active_participation_long",
+        bridge_strategy_id="PAPER_ACTIVE_EVIDENCE_MNQ_US_PARTICIPATION_LONG_V1",
+        action="BUY",
+        intent_type="BUY_TO_OPEN",
+        quantity=1.0,
+        executable_symbol="MNQ",
+    )
+
+    assert gate["submit_allowed"] is False
+    assert gate["classification"] == "PAPER_EXPOSURE_BLOCKED_REGISTRY_TRUTH_ENTRY"
+    assert "CANONICAL_CURRENT_EXPOSURE_PRESENT" in gate["block_reasons"]
+    assert gate["registry_truth_result"]["canonical_current_scope_result"]["current_exposure_present"] is True
+
+
+def test_canonical_open_order_blocks_entry(tmp_path: Path) -> None:
+    _write_monitor(tmp_path, broker_quantity=0.0)
+    _write_ledger(tmp_path, [])
+    _write_governance(tmp_path, [_governance_row("mnq_us_active_participation_long", "PAPER_ACTIVE_EVIDENCE_MNQ_US_PARTICIPATION_LONG_V1")])
+    _write_phase1_reconciliation(tmp_path, open_order_count=1)
+    _write_canonical_current_scope(tmp_path, open_order_count=1)
+
+    gate = evaluate_paper_strategy_exposure_gate(
+        repo_root=tmp_path,
+        strategy_id="mnq_us_active_participation_long",
+        bridge_strategy_id="PAPER_ACTIVE_EVIDENCE_MNQ_US_PARTICIPATION_LONG_V1",
+        action="BUY",
+        intent_type="BUY_TO_OPEN",
+        quantity=1.0,
+        executable_symbol="MNQ",
+    )
+
+    assert gate["submit_allowed"] is False
+    assert "current_open_order_conflict" in gate["block_reasons"]
+    assert "CANONICAL_CURRENT_EXPOSURE_PRESENT" in gate["block_reasons"]
+
+
+def test_stale_canonical_registry_diagnostics_fail_closed(tmp_path: Path) -> None:
+    _write_monitor(tmp_path, broker_quantity=0.0)
+    _write_ledger(tmp_path, [])
+    _write_governance(tmp_path, [_governance_row("mnq_us_active_participation_long", "PAPER_ACTIVE_EVIDENCE_MNQ_US_PARTICIPATION_LONG_V1")])
+    _write_canonical_current_scope(tmp_path, registry_generated_at="2026-01-01T00:00:00+00:00")
+
+    gate = evaluate_paper_strategy_exposure_gate(
+        repo_root=tmp_path,
+        strategy_id="mnq_us_active_participation_long",
+        bridge_strategy_id="PAPER_ACTIVE_EVIDENCE_MNQ_US_PARTICIPATION_LONG_V1",
+        action="BUY",
+        intent_type="BUY_TO_OPEN",
+        quantity=1.0,
+        executable_symbol="MNQ",
+    )
+
+    assert gate["submit_allowed"] is False
+    assert "CANONICAL_REGISTRY_TRUTH_UNAVAILABLE" in gate["block_reasons"]
+    assert gate["registry_truth_result"]["canonical_current_scope_result"]["usable"] is False
+
+
+def test_ambiguous_canonical_registry_diagnostics_fail_closed(tmp_path: Path) -> None:
+    _write_monitor(tmp_path, broker_quantity=0.0)
+    _write_ledger(tmp_path, [])
+    _write_governance(tmp_path, [_governance_row("mnq_us_active_participation_long", "PAPER_ACTIVE_EVIDENCE_MNQ_US_PARTICIPATION_LONG_V1")])
+    _write_canonical_current_scope(tmp_path, registry_classification="TRACK_B_DIAGNOSTICS_CONFLICT_CURRENT_SCOPE")
+
+    gate = evaluate_paper_strategy_exposure_gate(
+        repo_root=tmp_path,
+        strategy_id="mnq_us_active_participation_long",
+        bridge_strategy_id="PAPER_ACTIVE_EVIDENCE_MNQ_US_PARTICIPATION_LONG_V1",
+        action="BUY",
+        intent_type="BUY_TO_OPEN",
+        quantity=1.0,
+        executable_symbol="MNQ",
+    )
+
+    assert gate["submit_allowed"] is False
+    assert "CANONICAL_REGISTRY_TRUTH_AMBIGUOUS" in gate["block_reasons"]
+    assert gate["registry_truth_result"]["canonical_current_scope_result"]["usable"] is False
 
 
 def test_blocks_new_entry_by_unresolved_same_lane_submit_intent(tmp_path: Path) -> None:
@@ -750,6 +969,7 @@ def test_registry_truth_blocks_duplicate_same_lane_entry(tmp_path: Path) -> None
         con_id=770561201,
         local_symbol="MNQM6",
     )
+    _write_canonical_current_scope(tmp_path, managed_position_count=1)
 
     gate = evaluate_paper_strategy_exposure_gate(
         repo_root=tmp_path,
@@ -1004,6 +1224,15 @@ def test_pl_lane_can_exit_turn_owner_from_clean_phase1_reconciliation(tmp_path: 
                 "avg_entry_price": "2086.2",
                 "entry_order_id": "1",
                 "lifecycle_id": lifecycle_id,
+            }
+        ],
+        broker_positions=[
+            {
+                "account_id": "DUM882026",
+                "symbol": "PL",
+                "local_symbol": "PLN6",
+                "con_id": 644855286,
+                "quantity": "1.0",
             }
         ],
     )

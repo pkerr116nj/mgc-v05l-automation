@@ -48,13 +48,25 @@ _DEFAULT_BROKER_POSITIONS_SNAPSHOT = Path("outputs") / "reports" / "ibkr_read_on
 _DEFAULT_BROKER_OPEN_ORDERS_SNAPSHOT = Path("outputs") / "reports" / "ibkr_read_only_verification" / "ibkr_open_orders_snapshot.json"
 _DEFAULT_INDEX_EXPOSURE_SNAPSHOT = Path("outputs") / "reports" / "ibkr_mnq_nq_scope_support" / "paper_index_exposure_state.json"
 _DEFAULT_SUBMIT_INTENT_OWNERSHIP_PATH = DEFAULT_TRACK_B_SUBMIT_INTENT_OWNERSHIP_JSONL
+_DEFAULT_REGISTRY_DIAGNOSTICS_PATH = (
+    Path("outputs") / "track_b_execution_core" / "diagnostics" / "latest_track_b_registry_truth_diagnostics.json"
+)
+_DEFAULT_MANAGED_POSITIONS_PATH = (
+    Path("outputs") / "track_b_execution_core" / "managed_positions" / "latest_managed_positions.json"
+)
+_DEFAULT_MANAGED_ORDERS_PATH = Path("outputs") / "track_b_execution_core" / "managed_orders" / "latest_managed_orders.json"
+_DEFAULT_OPEN_ORDER_TRUTH_PATH = Path("outputs") / "track_b_execution_core" / "open_order_truth" / "latest_open_order_truth.json"
 _UNRESOLVED_SUBMIT_INTENT_BLOCK_REASON = "TRACK_B_UNRESOLVED_SUBMIT_INTENT_BLOCKS_NEW_ENTRY"
+_CANONICAL_TRUTH_UNAVAILABLE_REASON = "CANONICAL_REGISTRY_TRUTH_UNAVAILABLE"
+_CANONICAL_TRUTH_AMBIGUOUS_REASON = "CANONICAL_REGISTRY_TRUTH_AMBIGUOUS"
+_CANONICAL_CURRENT_EXPOSURE_PRESENT_REASON = "CANONICAL_CURRENT_EXPOSURE_PRESENT"
 _SUPPORTED_ENTRY_ACTIONS = {"BUY"}
 _SUPPORTED_EXIT_ACTIONS = {"SELL", "EXIT"}
 _DEFAULT_MAX_TOTAL_MGC_CONTRACTS = 20.0
 _DEFAULT_MAX_TOTAL_GC_EQUIVALENT = 2.0
 _DEFAULT_MAX_PER_STRATEGY_MGC_CONTRACTS = 1.0
 _DEFAULT_BROKER_TRUTH_MAX_AGE_SECONDS = 300.0
+_DEFAULT_CANONICAL_CURRENT_SCOPE_MAX_AGE_SECONDS = 300.0
 _ENTRY_EXPOSURE_AUTHORITY_REGISTRY_TRUTH = "REGISTRY_TRUTH"
 _MANAGED_EXIT_AUTHORITY_REGISTRY_TRUTH = "REGISTRY_TRUTH"
 _ENTRY_ACTIVE_REGISTRY_STATES = {
@@ -981,6 +993,22 @@ def _entry_registry_truth_result(
         jsonl_path=config.live_trade_registry_events_path,
     )
     active_records = tuple(record for record in records if record.current_state in _ENTRY_ACTIVE_REGISTRY_STATES)
+    raw_active_registry_trade_count = len(active_records)
+
+    source_paths: dict[str, str] = {}
+    contract_entry_status = None
+    if truth is not None:
+        source_paths = dict(truth.source_paths)
+        contract_entry_status = truth.contract_status.entry_status
+        reason_codes.extend(_entry_truth_contract_block_reasons(truth))
+
+    canonical_current_scope = _entry_canonical_current_scope_result(config.repo_root)
+    reason_codes.extend(str(reason) for reason in list(canonical_current_scope.get("reason_codes") or []))
+    if canonical_current_scope.get("usable") is True and canonical_current_scope.get("current_exposure_present") is False:
+        active_records = ()
+    elif canonical_current_scope.get("current_exposure_present") is False:
+        active_records = ()
+
     matching_records = _matching_entry_registry_records(
         records=active_records,
         requested_strategy=requested_strategy,
@@ -994,13 +1022,6 @@ def _entry_registry_truth_result(
     broker_net_position = abs(float(aggregate_state.get("broker_net_position") or 0.0))
     if broker_net_position > 0.0 and not active_records:
         reason_codes.append("current_broker_position_without_registry_trade")
-
-    source_paths: dict[str, str] = {}
-    contract_entry_status = None
-    if truth is not None:
-        source_paths = dict(truth.source_paths)
-        contract_entry_status = truth.contract_status.entry_status
-        reason_codes.extend(_entry_truth_contract_block_reasons(truth))
 
     phase1_gate = dict(aggregate_state.get("phase1_broker_reconciliation_gate_full") or {})
     broker_open_order_count = _int_value(
@@ -1026,10 +1047,12 @@ def _entry_registry_truth_result(
         "authority_source": _ENTRY_EXPOSURE_AUTHORITY_REGISTRY_TRUTH,
         "trade_id": trade_id or None,
         "active_registry_trade_count": len(active_records),
+        "raw_active_registry_trade_count": raw_active_registry_trade_count,
         "matching_registry_trade_ids": [record.trade_id for record in matching_records],
         "contract_entry_status": contract_entry_status,
         "broker_open_order_count": broker_open_order_count,
         "broker_lifecycle_reconciled": broker_lifecycle_reconciled,
+        "canonical_current_scope_result": canonical_current_scope,
         "source_paths": source_paths,
     }
 
@@ -1046,6 +1069,217 @@ def _safe_build_entry_truth_snapshot(repo_root: Path) -> TrackBTruthSnapshot | N
         )
     except Exception:
         return None
+
+
+def _entry_canonical_current_scope_result(repo_root: Path) -> dict[str, Any]:
+    sources = {
+        "registry_diagnostics": _DEFAULT_REGISTRY_DIAGNOSTICS_PATH,
+        "reconciliation": Path(
+            "outputs/reports/track_b_paper_broker_reconciliation/latest_track_b_paper_broker_reconciliation.json"
+        ),
+        "managed_positions": _DEFAULT_MANAGED_POSITIONS_PATH,
+        "managed_orders": _DEFAULT_MANAGED_ORDERS_PATH,
+        "open_order_truth": _DEFAULT_OPEN_ORDER_TRUTH_PATH,
+    }
+    source_status: dict[str, Any] = {}
+    payloads: dict[str, dict[str, Any]] = {}
+    reason_codes: list[str] = []
+    blocking_fields: list[dict[str, Any]] = []
+
+    for name, relative_path in sources.items():
+        path = relative_path if relative_path.is_absolute() else repo_root / relative_path
+        payload = _load_json(path)
+        payloads[name] = payload
+        freshness = _artifact_freshness(payload, max_age_seconds=_DEFAULT_CANONICAL_CURRENT_SCOPE_MAX_AGE_SECONDS)
+        source_status[name] = {
+            "artifact_path": str(path),
+            "classification": payload.get("classification"),
+            "generated_at": payload.get("generated_at"),
+            **freshness,
+        }
+        if not payload or not freshness["fresh"]:
+            reason_codes.append(_CANONICAL_TRUTH_UNAVAILABLE_REASON)
+            blocking_fields.append(
+                {
+                    "source": name,
+                    "field": "generated_at",
+                    "value": payload.get("generated_at") if payload else None,
+                    "reason": "missing_or_stale_canonical_current_scope_artifact",
+                }
+            )
+
+    registry = payloads["registry_diagnostics"]
+    registry_classification = str(registry.get("classification") or "").strip()
+    if registry and registry_classification != "TRACK_B_DIAGNOSTICS_CLEAN_CURRENT_SCOPE":
+        reason_codes.append(_CANONICAL_TRUTH_AMBIGUOUS_REASON)
+        blocking_fields.append(
+            {
+                "source": "registry_diagnostics",
+                "field": "classification",
+                "value": registry_classification,
+                "reason": "registry_diagnostics_not_clean_current_scope",
+            }
+        )
+
+    reconciliation = payloads["reconciliation"]
+    reconciliation_classification = str(reconciliation.get("classification") or "").strip()
+    current_review_count = _int_value(reconciliation.get("current_scope_review_required_count") or reconciliation.get("review_required_count"))
+    broker_position_count = _int_value(reconciliation.get("track_b_broker_position_count") or reconciliation.get("broker_position_count"))
+    broker_open_order_count = _int_value(
+        reconciliation.get("track_b_broker_open_order_count")
+        or reconciliation.get("broker_open_order_count")
+        or reconciliation.get("open_order_count")
+    )
+    if reconciliation:
+        if reconciliation_classification != "TRACK_B_PAPER_BROKER_RECONCILED":
+            reason_codes.append(_CANONICAL_TRUTH_AMBIGUOUS_REASON)
+            blocking_fields.append(
+                {
+                    "source": "reconciliation",
+                    "field": "classification",
+                    "value": reconciliation_classification,
+                    "reason": "broker_lifecycle_reconciliation_not_canonical_clean",
+                }
+            )
+        if current_review_count > 0:
+            reason_codes.append(_CANONICAL_TRUTH_AMBIGUOUS_REASON)
+            blocking_fields.append(
+                {
+                    "source": "reconciliation",
+                    "field": "current_scope_review_required_count",
+                    "value": current_review_count,
+                    "reason": "current_scope_review_required",
+                }
+            )
+
+    managed_positions = payloads["managed_positions"]
+    managed_positions_summary = dict(managed_positions.get("summary") or {})
+    managed_position_count = _int_value(
+        managed_positions_summary.get("managed_position_count")
+        or managed_positions_summary.get("lifecycle_position_count")
+        or managed_positions.get("managed_position_count")
+    )
+    managed_position_review_count = _int_value(
+        managed_positions_summary.get("review_required_count") or managed_positions_summary.get("attention_required_count")
+    )
+    if managed_position_count > 0:
+        reason_codes.append(_CANONICAL_CURRENT_EXPOSURE_PRESENT_REASON)
+        blocking_fields.append(
+            {
+                "source": "managed_positions",
+                "field": "summary.managed_position_count",
+                "value": managed_position_count,
+                "reason": "canonical_managed_position_present",
+            }
+        )
+    if managed_position_review_count > 0:
+        reason_codes.append(_CANONICAL_TRUTH_AMBIGUOUS_REASON)
+        blocking_fields.append(
+            {
+                "source": "managed_positions",
+                "field": "summary.review_required_count",
+                "value": managed_position_review_count,
+                "reason": "managed_position_review_required",
+            }
+        )
+
+    managed_orders = payloads["managed_orders"]
+    managed_orders_summary = dict(managed_orders.get("summary") or {})
+    managed_order_count = _int_value(
+        managed_orders_summary.get("managed_order_count")
+        or managed_orders_summary.get("working_entry_order_count")
+        or managed_orders_summary.get("working_close_order_count")
+        or managed_orders_summary.get("position_without_close_order_count")
+    )
+    if managed_order_count > 0:
+        reason_codes.append(_CANONICAL_CURRENT_EXPOSURE_PRESENT_REASON)
+        blocking_fields.append(
+            {
+                "source": "managed_orders",
+                "field": "summary.managed_order_count",
+                "value": managed_order_count,
+                "reason": "canonical_managed_order_present",
+            }
+        )
+
+    open_order_truth = payloads["open_order_truth"]
+    open_order_summary = dict(open_order_truth.get("summary") or {})
+    open_order_count = _int_value(open_order_summary.get("open_order_count") or open_order_truth.get("open_order_count"))
+    if open_order_count > 0:
+        reason_codes.append(_CANONICAL_CURRENT_EXPOSURE_PRESENT_REASON)
+        reason_codes.append("current_open_order_conflict")
+        blocking_fields.append(
+            {
+                "source": "open_order_truth",
+                "field": "summary.open_order_count",
+                "value": open_order_count,
+                "reason": "canonical_open_order_present",
+            }
+        )
+    if broker_position_count > 0:
+        reason_codes.append(_CANONICAL_CURRENT_EXPOSURE_PRESENT_REASON)
+        blocking_fields.append(
+            {
+                "source": "reconciliation",
+                "field": "track_b_broker_position_count",
+                "value": broker_position_count,
+                "reason": "canonical_broker_position_present",
+            }
+        )
+    if broker_open_order_count > 0:
+        reason_codes.append(_CANONICAL_CURRENT_EXPOSURE_PRESENT_REASON)
+        reason_codes.append("current_open_order_conflict")
+        blocking_fields.append(
+            {
+                "source": "reconciliation",
+                "field": "track_b_broker_open_order_count",
+                "value": broker_open_order_count,
+                "reason": "canonical_broker_open_order_present",
+            }
+        )
+
+    unique_reasons = list(dict.fromkeys(reason_codes))
+    current_exposure_present = _CANONICAL_CURRENT_EXPOSURE_PRESENT_REASON in unique_reasons
+    unavailable = _CANONICAL_TRUTH_UNAVAILABLE_REASON in unique_reasons
+    ambiguous = _CANONICAL_TRUTH_AMBIGUOUS_REASON in unique_reasons
+    return {
+        "usable": not unavailable and not ambiguous,
+        "allowed": not unique_reasons,
+        "current_exposure_present": current_exposure_present,
+        "reason_codes": unique_reasons,
+        "blocking_fields": blocking_fields,
+        "source_status": source_status,
+        "canonical_values": {
+            "broker_position_count": broker_position_count,
+            "broker_open_order_count": broker_open_order_count,
+            "current_scope_review_required_count": current_review_count,
+            "managed_position_count": managed_position_count,
+            "managed_position_review_required_count": managed_position_review_count,
+            "managed_order_count": managed_order_count,
+            "open_order_count": open_order_count,
+            "registry_diagnostics_classification": registry_classification or None,
+            "reconciliation_classification": reconciliation_classification or None,
+        },
+    }
+
+
+def _artifact_freshness(payload: dict[str, Any], *, max_age_seconds: float) -> dict[str, Any]:
+    generated_at = payload.get("generated_at") if payload else None
+    if not generated_at:
+        return {"fresh": False, "age_seconds": None, "max_age_seconds": max_age_seconds, "freshness": "missing"}
+    try:
+        parsed = datetime.fromisoformat(str(generated_at).replace("Z", "+00:00"))
+    except ValueError:
+        return {"fresh": False, "age_seconds": None, "max_age_seconds": max_age_seconds, "freshness": "invalid"}
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    age_seconds = (datetime.now(timezone.utc) - parsed.astimezone(timezone.utc)).total_seconds()
+    return {
+        "fresh": age_seconds <= max_age_seconds,
+        "age_seconds": age_seconds,
+        "max_age_seconds": max_age_seconds,
+        "freshness": "fresh" if age_seconds <= max_age_seconds else "stale",
+    }
 
 
 def _entry_birth_trade_id(

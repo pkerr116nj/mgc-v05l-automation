@@ -209,6 +209,7 @@ def _write_phase1_reconciliation(
                 "classification": classification,
                 "broker_reconciled": broker_reconciled,
                 "review_required_count": review_required_count,
+                "current_scope_review_required_count": review_required_count,
                 "track_b_broker_open_order_count": open_order_count,
                 "track_b_broker_position_count": 0,
                 "track_b_broker_positions": [],
@@ -219,6 +220,51 @@ def _write_phase1_reconciliation(
             }
         ),
         encoding="utf-8",
+    )
+
+
+def _write_canonical_current_scope(tmp_path: Path) -> None:
+    _write_json(
+        tmp_path / "outputs/track_b_execution_core/diagnostics/latest_track_b_registry_truth_diagnostics.json",
+        {
+            "generated_at": "2999-01-01T00:00:00+00:00",
+            "classification": "TRACK_B_DIAGNOSTICS_CLEAN_CURRENT_SCOPE",
+            "current_scope_review_required_count": 0,
+        },
+    )
+    _write_json(
+        tmp_path / "outputs/track_b_execution_core/managed_positions/latest_managed_positions.json",
+        {
+            "generated_at": "2999-01-01T00:00:00+00:00",
+            "classification": "NO_MANAGED_POSITIONS",
+            "summary": {
+                "managed_position_count": 0,
+                "lifecycle_position_count": 0,
+                "review_required_count": 0,
+                "attention_required_count": 0,
+            },
+        },
+    )
+    _write_json(
+        tmp_path / "outputs/track_b_execution_core/managed_orders/latest_managed_orders.json",
+        {
+            "generated_at": "2999-01-01T00:00:00+00:00",
+            "classification": "NO_MANAGED_ORDERS",
+            "summary": {
+                "managed_order_count": 0,
+                "working_entry_order_count": 0,
+                "working_close_order_count": 0,
+                "position_without_close_order_count": 0,
+            },
+        },
+    )
+    _write_json(
+        tmp_path / "outputs/track_b_execution_core/open_order_truth/latest_open_order_truth.json",
+        {
+            "generated_at": "2999-01-01T00:00:00+00:00",
+            "classification": "NO_OPEN_ORDERS",
+            "summary": {"open_order_count": 0},
+        },
     )
 
 
@@ -369,6 +415,7 @@ def _write_contract_status(tmp_path: Path, *, entry_status: str = "CONTRACT_ENTR
 def _default_phase1_reconciliation(tmp_path: Path) -> None:
     _write_phase1_reconciliation(tmp_path)
     _write_contract_status(tmp_path)
+    _write_canonical_current_scope(tmp_path)
 
 
 def _config(tmp_path: Path, **overrides: object) -> IbkrPaperStrategyBridgeConfig:
