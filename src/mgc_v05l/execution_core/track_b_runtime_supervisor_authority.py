@@ -43,9 +43,14 @@ from mgc_v05l.execution_core.track_b_paper_proof_readiness import DEFAULT_OUTPUT
 from mgc_v05l.execution_core.track_b_paper_proof_readiness import READY_FOR_PROOF
 from mgc_v05l.execution_core.track_b_position_truth_monitor import DEFAULT_POSITION_TRUTH_ARTIFACT
 from mgc_v05l.execution_core.track_b_projection_metadata import build_projection_metadata
+from mgc_v05l.execution_core.track_b_pre_restart_exposure_reconciliation import (
+    PreRestartExposureResolverConfig,
+    resolve_pre_restart_exposure_reconciliation,
+)
 from mgc_v05l.execution_core.track_b_runtime_environment_truth import (
     DEFAULT_CANONICAL_READINESS_ARTIFACT,
     DEFAULT_RUNTIME_ENVIRONMENT_TRUTH_ARTIFACT,
+    RUNTIME_ACTIVE_OBSERVATION_ONLY,
     RUNTIME_ACTIVE_TRADE_CAPABLE,
     RUNTIME_DOWN_WITH_BROKER_EXPOSURE,
 )
@@ -196,6 +201,12 @@ def build_track_b_runtime_supervisor_authority(
         "paper_autonomous_recovery_plan": _read_json(config.resolve(config.paper_autonomous_recovery_plan_path)),
         "runtime_safe_state_envelope": _read_json(config.resolve(config.runtime_safe_state_envelope_path)),
     }
+    inputs["pre_restart_exposure_resolution"] = resolve_pre_restart_exposure_reconciliation(
+        config=PreRestartExposureResolverConfig(repo_root=config.repo_root),
+        broker_positions=_list(inputs["reconciliation"].get("track_b_broker_positions")),
+        lifecycle_positions=_list(inputs["reconciliation"].get("track_b_lifecycle_positions")),
+        broker_open_orders=_list(inputs["reconciliation"].get("track_b_broker_open_orders")),
+    )
     inputs["shared_truth_coherence"] = _shared_truth_coherence(inputs)
     decision = _classify_supervisor(inputs=inputs)
     v2 = _v2_advisory(decision=decision, inputs=inputs)
@@ -435,11 +446,14 @@ def _classify_supervisor(*, inputs: Mapping[str, Mapping[str, Any]]) -> dict[str
             ],
         )
 
-    if evidence["runtime_environment_truth_classification"] == RUNTIME_ACTIVE_TRADE_CAPABLE:
+    if evidence["runtime_environment_truth_classification"] in {
+        RUNTIME_ACTIVE_TRADE_CAPABLE,
+        RUNTIME_ACTIVE_OBSERVATION_ONLY,
+    }:
         return _decision(
             SUPERVISOR_RUNTIME_ALREADY_HEALTHY,
             "LEAVE_RUNTIME_RUNNING",
-            "Runtime Environment Truth is RUNTIME_ACTIVE_TRADE_CAPABLE.",
+            f"Runtime Environment Truth is {evidence['runtime_environment_truth_classification']}.",
             action_allowed=True,
             safe_to_leave_runtime_running=True,
         )
@@ -481,6 +495,27 @@ def _classify_supervisor(*, inputs: Mapping[str, Mapping[str, Any]]) -> dict[str
             ),
             action_allowed=True,
             safe_to_start_runtime=True,
+        )
+
+    if (
+        evidence["runtime_environment_truth_classification"] == RUNTIME_DOWN_WITH_BROKER_EXPOSURE
+        and _owned_managed_exposure_restart_allowed(evidence)
+    ):
+        return _decision(
+            SUPERVISOR_RUNTIME_START_ALLOWED,
+            "START_RUNTIME_WITH_OWNED_MANAGED_EXPOSURE",
+            (
+                "Exact registry-backed managed exposure is proven by the pre-restart resolver; "
+                "runtime start is allowed so managed-exit maintenance can resume."
+            ),
+            action_allowed=True,
+            safe_to_start_runtime=True,
+            warnings=[
+                _blocker(
+                    "pre_restart_exposure_resolution",
+                    evidence["pre_restart_exposure_resolution_classification"],
+                )
+            ],
         )
 
     if (
@@ -906,6 +941,14 @@ def _evidence(inputs: Mapping[str, Mapping[str, Any]]) -> dict[str, Any]:
         "agent_registry_classification": _classification(inputs["agent_registry"]),
         "proof_readiness_classification": _classification(inputs["proof_readiness"]),
         "shared_truth_classification": _classification(inputs["shared_truth"]),
+        "pre_restart_exposure_resolution": dict(_mapping(inputs.get("pre_restart_exposure_resolution"))),
+        "pre_restart_exposure_resolution_classification": str(
+            _mapping(inputs.get("pre_restart_exposure_resolution")).get("classification") or ""
+        ),
+        "restart_with_owned_exposure_allowed": _mapping(inputs.get("pre_restart_exposure_resolution")).get(
+            "restart_with_owned_exposure_allowed"
+        )
+        is True,
         "shared_truth_classifications": _mapping(inputs["shared_truth"].get("classifications")),
         "shared_truth_refresh_generation_id": str(
             _mapping(inputs["shared_truth_coherence"]).get("refresh_generation_id") or ""
@@ -1292,6 +1335,19 @@ def _managed_active_hold_pending(evidence: Mapping[str, Any]) -> bool:
         and evidence["managed_order_registry_classification"] == ACTIVE_HOLD_MANAGED_TIMED_EXIT_PENDING
         and evidence["position_truth_classification"] == ACTIVE_HOLD_MANAGED_TIMED_EXIT_PENDING
         and evidence["managed_position_registry_classification"] == "OPEN_MANAGED_MATCHED"
+        and evidence["reconciliation_classification"] in {"TRACK_B_PAPER_BROKER_RECONCILED", ""}
+        and evidence["live_money_eligible"] is False
+        and evidence["paper_proof_invoked"] is False
+    )
+
+
+def _owned_managed_exposure_restart_allowed(evidence: Mapping[str, Any]) -> bool:
+    return (
+        evidence.get("restart_with_owned_exposure_allowed") is True
+        and evidence["open_order_truth_classification"] in {NO_OPEN_ORDERS, BROKER_POSITION_WITHOUT_CLOSE_ORDER}
+        and evidence["managed_order_registry_classification"] == "POSITION_WITHOUT_CLOSE_ORDER"
+        and evidence["position_truth_classification"] == "ATTENTION_REQUIRED"
+        and evidence["managed_position_registry_classification"] == "OPEN_MANAGED_EXIT_DUE"
         and evidence["reconciliation_classification"] in {"TRACK_B_PAPER_BROKER_RECONCILED", ""}
         and evidence["live_money_eligible"] is False
         and evidence["paper_proof_invoked"] is False

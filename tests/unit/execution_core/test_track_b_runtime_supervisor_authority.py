@@ -4,6 +4,9 @@ import json
 from datetime import UTC, datetime
 from pathlib import Path
 
+import pytest
+
+from mgc_v05l.execution_core import track_b_runtime_supervisor_authority as supervisor_authority
 from mgc_v05l.execution_core.track_b_agent_health import HEALTHY, STOPPED_EXPECTED
 from mgc_v05l.execution_core.track_b_crash_loop_protection import NO_CRASH_LOOP, RESTART_COOLDOWN_ACTIVE
 from mgc_v05l.execution_core.track_b_managed_order_registry import (
@@ -14,6 +17,7 @@ from mgc_v05l.execution_core.track_b_managed_position_registry import NO_MANAGED
 from mgc_v05l.execution_core.track_b_open_order_truth import NO_OPEN_ORDERS
 from mgc_v05l.execution_core.track_b_paper_proof_readiness import READY_FOR_PROOF
 from mgc_v05l.execution_core.track_b_runtime_environment_truth import (
+    RUNTIME_ACTIVE_OBSERVATION_ONLY,
     RUNTIME_ACTIVE_TRADE_CAPABLE,
     RUNTIME_DOWN_CLEAN,
     RUNTIME_DOWN_WITH_BROKER_EXPOSURE,
@@ -159,6 +163,19 @@ def test_active_healthy_runtime_is_left_running(tmp_path: Path) -> None:
     assert payload["safe_to_start_runtime"] is False
 
 
+def test_active_observation_only_runtime_is_left_running(tmp_path: Path) -> None:
+    _seed_base(tmp_path, runtime_classification=RUNTIME_ACTIVE_OBSERVATION_ONLY)
+
+    payload = build_track_b_runtime_supervisor_authority(config=TrackBRuntimeSupervisorAuthorityConfig(repo_root=tmp_path), now=NOW)
+
+    assert payload["classification"] == SUPERVISOR_RUNTIME_ALREADY_HEALTHY
+    assert payload["supervisor_mode"] == RUNTIME_ACTIVE_MONITOR
+    assert payload["recommended_action"] == "LEAVE_RUNTIME_RUNNING"
+    assert payload["safe_to_leave_runtime_running"] is True
+    assert payload["safe_to_start_runtime"] is False
+    assert payload["blockers"] == []
+
+
 def test_broker_exposure_requires_cleanup(tmp_path: Path) -> None:
     _seed_base(tmp_path, runtime_classification=RUNTIME_DOWN_WITH_BROKER_EXPOSURE, position_classification="ATTENTION_REQUIRED")
 
@@ -169,6 +186,78 @@ def test_broker_exposure_requires_cleanup(tmp_path: Path) -> None:
     assert payload["recommended_action"] == "CLEANUP_REQUIRED_BEFORE_RUNTIME"
     assert payload["recommended_next_command"] == "perform exact scoped cleanup only after operator authorization"
     assert payload["safe_to_start_runtime"] is False
+
+
+def test_owned_exit_due_exposure_allows_runtime_start_for_managed_close_maintenance(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _seed_base(
+        tmp_path,
+        runtime_classification=RUNTIME_DOWN_WITH_BROKER_EXPOSURE,
+        position_classification="ATTENTION_REQUIRED",
+        open_order_classification="BROKER_POSITION_WITHOUT_CLOSE_ORDER",
+        managed_order_classification="POSITION_WITHOUT_CLOSE_ORDER",
+        managed_position_classification="OPEN_MANAGED_EXIT_DUE",
+    )
+    monkeypatch.setattr(
+        supervisor_authority,
+        "resolve_pre_restart_exposure_reconciliation",
+        lambda **_: {
+            "classification": "MANAGED_EXPOSURE_RESOLVED",
+            "restart_with_owned_exposure_allowed": True,
+            "broker_open_order_count": 0,
+            "review_required_exposure_count": 0,
+        },
+    )
+
+    payload = build_track_b_runtime_supervisor_authority(config=TrackBRuntimeSupervisorAuthorityConfig(repo_root=tmp_path), now=NOW)
+
+    assert payload["classification"] == SUPERVISOR_RUNTIME_START_ALLOWED
+    assert payload["recommended_action"] == "START_RUNTIME_WITH_OWNED_MANAGED_EXPOSURE"
+    assert payload["safe_to_start_runtime"] is True
+    assert payload["broker_mutation"] is False
+    assert payload["evidence_summary"]["restart_with_owned_exposure_allowed"] is True
+
+
+def test_market_closed_owned_exit_due_with_canonical_no_open_orders_allows_maintenance_start(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _seed_base(
+        tmp_path,
+        proof_classification=MARKET_CLOSED_NO_FRESH_BARS,
+        resume_classification=RESUME_BLOCKED_MARKET_CLOSED,
+        resume_action_policy=RESUME_POLICY_HOLD_MARKET_CLOSED,
+        resume_reason=MARKET_CLOSED_NO_FRESH_BARS,
+        runtime_classification=RUNTIME_DOWN_WITH_BROKER_EXPOSURE,
+        position_classification="ATTENTION_REQUIRED",
+        open_order_classification=NO_OPEN_ORDERS,
+        managed_order_classification="POSITION_WITHOUT_CLOSE_ORDER",
+        managed_position_classification="OPEN_MANAGED_EXIT_DUE",
+        self_recover_recommendation="WAIT_MARKET_CLOSED",
+        autonomous_plan_classification="WAIT_MARKET_CLOSED",
+        autonomous_plan_next_action="WAIT_MARKET_CLOSED",
+    )
+    monkeypatch.setattr(
+        supervisor_authority,
+        "resolve_pre_restart_exposure_reconciliation",
+        lambda **_: {
+            "classification": "MANAGED_EXPOSURE_RESOLVED",
+            "restart_with_owned_exposure_allowed": True,
+            "broker_open_order_count": 0,
+            "review_required_exposure_count": 0,
+        },
+    )
+
+    payload = build_track_b_runtime_supervisor_authority(config=TrackBRuntimeSupervisorAuthorityConfig(repo_root=tmp_path), now=NOW)
+
+    assert payload["classification"] == SUPERVISOR_RUNTIME_START_ALLOWED
+    assert payload["supervisor_mode"] == READY_FOR_OPERATOR_START
+    assert payload["recommended_action"] == "START_RUNTIME_WITH_OWNED_MANAGED_EXPOSURE"
+    assert payload["proof_window_status"] == "market_closed"
+    assert payload["safe_to_start_runtime"] is True
+    assert payload["broker_mutation"] is False
 
 
 def test_reconciled_managed_timed_hold_allows_nonconflicting_runtime_posture(tmp_path: Path) -> None:

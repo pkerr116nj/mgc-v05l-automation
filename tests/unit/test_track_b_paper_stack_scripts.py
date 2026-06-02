@@ -48,6 +48,15 @@ def test_paper_stack_start_requires_sustained_readiness() -> None:
     assert "submit remains disabled" in source
 
 
+def test_paper_stack_runtime_pid_metadata_temp_path_is_per_process() -> None:
+    source = START_SCRIPT.read_text(encoding="utf-8")
+
+    assert 'tmp = path.with_name(f".{path.name}.{sys.argv[2]}.tmp")' in source
+    metadata_block = source.split('"${PYTHON_BIN}" - <<\'PY\' "${PID_METADATA_FILE}"', 1)[1].split("PY", 1)[0]
+    assert 'tmp = path.with_name(f".{path.name}.{sys.argv[2]}.tmp")' in metadata_block
+    assert 'tmp = path.with_name(f".{path.name}.tmp")' not in metadata_block
+
+
 def test_paper_stack_restart_uses_owned_exposure_authority() -> None:
     source = START_SCRIPT.read_text(encoding="utf-8")
     soak_source = (REPO_ROOT / "scripts" / "run_probationary_paper_soak.sh").read_text(encoding="utf-8")
