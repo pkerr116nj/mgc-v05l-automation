@@ -177,13 +177,23 @@ def build_track_b_live_runtime_environment_watchdog(
     broker_lifecycle_clean = _broker_lifecycle_clean(reconciliation)
     registry_clean = _registry_clean(registry)
     duplicate_writer = _duplicate_writer_detected(runtime_truth)
-    track_b_positions = _int_or_zero(
-        reconciliation.get("track_b_broker_position_count")
-        or registry.get("track_b_managed_futures_position_count")
+    track_b_positions = _int_from_preferred_mapping(
+        primary=reconciliation,
+        primary_key="track_b_broker_position_count",
+        fallback=registry,
+        fallback_key="track_b_managed_futures_position_count",
     )
-    broker_open_orders = _int_or_zero(reconciliation.get("track_b_broker_open_order_count") or registry.get("broker_open_order_count"))
-    lifecycle_open_positions = _int_or_zero(
-        reconciliation.get("lifecycle_open_position_count") or registry.get("lifecycle_open_position_count")
+    broker_open_orders = _int_from_preferred_mapping(
+        primary=reconciliation,
+        primary_key="track_b_broker_open_order_count",
+        fallback=registry,
+        fallback_key="broker_open_order_count",
+    )
+    lifecycle_open_positions = _int_from_preferred_mapping(
+        primary=registry,
+        primary_key="lifecycle_open_position_count",
+        fallback=reconciliation,
+        fallback_key="lifecycle_open_position_count",
     )
     pre_restart_exposure_resolution = resolve_pre_restart_exposure_reconciliation(
         config=PreRestartExposureResolverConfig(repo_root=config.repo_root),
@@ -568,11 +578,28 @@ def _broker_lifecycle_clean(payload: Mapping[str, Any]) -> bool:
 
 def _registry_clean(payload: Mapping[str, Any]) -> bool:
     classification = str(payload.get("classification") or "").upper()
-    review_count = _int_or_zero(payload.get("current_scope_review_required_count") or len(payload.get("review_required_trade_ids") or []))
+    review_count = _int_from_preferred_mapping(
+        primary=payload,
+        primary_key="current_scope_review_required_count",
+        fallback={"review_required_trade_ids_count": len(payload.get("review_required_trade_ids") or [])},
+        fallback_key="review_required_trade_ids_count",
+    )
     return classification in {
         "TRACK_B_DIAGNOSTICS_CLEAN_CURRENT_SCOPE",
         "TRACK_B_DIAGNOSTICS_CLEAN",
     } and review_count == 0
+
+
+def _int_from_preferred_mapping(
+    *,
+    primary: Mapping[str, Any],
+    primary_key: str,
+    fallback: Mapping[str, Any],
+    fallback_key: str,
+) -> int:
+    if primary_key in primary:
+        return _int_or_zero(primary.get(primary_key))
+    return _int_or_zero(fallback.get(fallback_key))
 
 
 def _duplicate_writer_detected(runtime_truth: Mapping[str, Any]) -> bool:

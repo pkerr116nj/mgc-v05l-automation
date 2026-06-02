@@ -831,6 +831,77 @@ def test_closed_flat_registry_supersedes_stale_open_lifecycle_projection(tmp_pat
     assert superseded[0]["trade_id"] == trade_id
 
 
+def test_terminal_registry_truth_supersedes_post_close_review_noise(tmp_path: Path) -> None:
+    trade_id = "trade_terminal_review_noise"
+    lifecycle_id = "life_terminal_review_noise"
+    open_position = {
+        "strategy_id": "mes_globex_active_participation_long",
+        "lane_id": "mes_globex_active_participation_long",
+        "trade_id": trade_id,
+        "lifecycle_id": lifecycle_id,
+        "instrument_family": "MES",
+        "contract_key": "MES-202606",
+        "local_symbol": "MESM6",
+        "con_id": 770561194,
+        "expiry": "20260618",
+        "side": "LONG",
+        "quantity": "1",
+        "final_position_status": "OPEN_MANAGED",
+    }
+    config = _write_base_artifacts(tmp_path, open_position=open_position)
+    _write_registry_open_managed_trade(
+        config,
+        trade_id=trade_id,
+        lifecycle_id=lifecycle_id,
+        lane_id="mes_globex_active_participation_long",
+        strategy_id="mes_globex_active_participation_long",
+        symbol="MES",
+        local_symbol="MESM6",
+        con_id=770561194,
+        expiry="20260618",
+        include_close_fill=True,
+        order_id="1",
+        client_id="11192",
+        entry_perm_id="665735640",
+        entry_exec_id="0000e1a7.6a2d8658.01.01",
+        exit_order_id="63",
+        exit_perm_id="665735642",
+        exit_exec_id="0000e1a7.6a2d8f85.01.01",
+    )
+    append_live_trade_registry_event(
+        repo_root=config.repo_root,
+        event=make_live_trade_registry_event(
+            event_type=TradeEventType.REVIEW_REQUIRED,
+            generated_at=NOW + timedelta(seconds=10),
+            trade_id=trade_id,
+            lifecycle_id=lifecycle_id,
+            lane_id="mes_globex_active_participation_long",
+            thesis_strategy_id="mes_globex_active_participation_long",
+            account_id="DUM882026",
+            symbol="MES",
+            con_id=770561194,
+            local_symbol="MESM6",
+            expiry="20260618",
+            side="LONG",
+            action="RECONCILE",
+            qty="1",
+            source_artifact_path=str(config.report_path),
+            reason_codes=("REGISTRY_RECONCILIATION_REVIEW_REQUIRED",),
+        ),
+    )
+    _write_broker_truth(config)
+
+    report = reconcile_track_b_paper_broker_truth(config=config, now=NOW)
+
+    assert report["classification"] == "TRACK_B_PAPER_BROKER_RECONCILED"
+    assert report["broker_reconciled"] is True
+    assert report["track_b_lifecycle_positions"] == []
+    assert report["registry_reconciliation"]["classification"] == "REGISTRY_RECONCILIATION_MATCHED"
+    superseded = report["superseded_lifecycle_projections"]
+    assert superseded[0]["trade_id"] == trade_id
+    assert "BROKER_BACKED_EXIT_EVIDENCE_CONFIRMED" in superseded[0]["reason_codes"]
+
+
 def test_stale_open_lifecycle_projection_without_close_evidence_still_blocks(tmp_path: Path) -> None:
     trade_id = "trade_missing_close_evidence_still_blocks"
     lifecycle_id = "life_missing_close_evidence_still_blocks"

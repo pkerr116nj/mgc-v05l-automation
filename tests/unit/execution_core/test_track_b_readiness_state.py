@@ -9,6 +9,7 @@ from mgc_v05l.execution_core.track_b_readiness_state import (
     DEFAULT_CONTROL_PLANE_SNAPSHOT_ARTIFACT,
     _broker_truth_input,
     _market_data_input,
+    _reconciliation_input,
     _runtime_input,
     build_root_process_guard,
     classify_canonical_readiness,
@@ -240,6 +241,31 @@ def test_clean_shared_truth_and_fresh_phase1_preserve_submit_capable_readiness()
     assert result["ready_submit_capable"] is True
     assert result["execution_core_shared_truth"]["classifications"]["Position Truth"] == "CLEAN_FLAT_READY"
     assert result["readiness_blockers"] == []
+
+
+def test_reconciliation_input_prefers_current_scope_lifecycle_count_over_raw_projection() -> None:
+    payload = {
+        "generated_at": "2026-05-18T11:59:30+00:00",
+        "classification": "TRACK_B_PAPER_BROKER_RECONCILED",
+        "broker_reconciled": True,
+        "review_required_count": 0,
+        "current_scope_review_required_count": 0,
+        "lifecycle_open_position_count": 1,
+        "track_b_lifecycle_positions": [],
+        "registry_reconciliation": {
+            "classification": "REGISTRY_RECONCILIATION_MATCHED",
+            "lifecycle_position_count": 0,
+        },
+    }
+
+    normalized = _reconciliation_input(payload, now=datetime(2026, 5, 18, 12, 0, tzinfo=timezone.utc))
+
+    assert normalized["lifecycle_open_position_count"] == 0
+    assert normalized["review_required_count"] == 0
+    inputs = _clean_inputs()
+    inputs["phase1_reconciliation"] = normalized
+    result = classify_canonical_readiness(inputs)
+    assert result["canonical_readiness"] == "READY_SUBMIT_CAPABLE"
 
 
 def test_stale_bridge_control_plane_snapshot_blocks_submit_capable_readiness() -> None:

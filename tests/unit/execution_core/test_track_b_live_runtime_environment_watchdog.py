@@ -184,6 +184,40 @@ def test_safe_restart_allowed_only_when_flat_clean(tmp_path: Path) -> None:
     assert payload["restart_policy"]["reason_codes"] == []
 
 
+def test_current_scope_zero_diagnostics_outrank_stale_raw_lifecycle_count(tmp_path: Path) -> None:
+    config = _write_clean_fixture(tmp_path)
+    reconciliation = _read(config.resolve(config.broker_reconciliation_path))
+    reconciliation["lifecycle_open_position_count"] = 1
+    reconciliation["track_b_lifecycle_positions"] = [
+        {
+            "trade_id": "trade_closed",
+            "lifecycle_id": "life_closed",
+            "symbol": "MES",
+            "local_symbol": "MESM6",
+            "con_id": 770561194,
+            "quantity": "1",
+        }
+    ]
+    _write(config.resolve(config.broker_reconciliation_path), reconciliation)
+    registry = _read(config.resolve(config.registry_diagnostics_path))
+    registry["current_scope_review_required_count"] = 0
+    registry["review_required_trade_ids"] = ["historical_full_audit_only"]
+    registry["lifecycle_open_position_count"] = 0
+    _write(config.resolve(config.registry_diagnostics_path), registry)
+
+    payload = build_track_b_live_runtime_environment_watchdog(
+        config=config,
+        now=NOW,
+        pid_running=lambda pid: True,
+        source_commit_resolver=lambda root: "abc",
+    )
+
+    assert payload["classification"] == READY_SUBMIT_CAPABLE
+    assert payload["liveness_contract"]["registry_reconciliation_matched"] is True
+    assert "REGISTRY_RECONCILIATION_NOT_MATCHED" not in payload["reason_codes"]
+    assert payload["restart_policy"]["reason_codes"] == []
+
+
 def _write_clean_fixture(
     tmp_path: Path,
     *,

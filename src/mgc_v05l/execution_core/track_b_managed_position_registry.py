@@ -25,6 +25,10 @@ from mgc_v05l.execution_core.track_b_pre_restart_exposure_reconciliation import 
     resolve_pre_restart_exposure_reconciliation,
 )
 from mgc_v05l.execution_core.track_b_projection_metadata import build_projection_metadata
+from mgc_v05l.execution_core.track_b_live_trade_registry import load_live_trade_registry_records
+from mgc_v05l.execution_core.track_b_terminal_registry_truth import (
+    filter_terminal_superseded_current_rows,
+)
 
 
 NO_MANAGED_POSITIONS = "NO_MANAGED_POSITIONS"
@@ -143,6 +147,15 @@ def build_track_b_managed_position_registry(
         lifecycle_positions=lifecycle_positions,
         resolved_lifecycle_positions=_list(pre_restart_exposure_resolution.get("resolved_lifecycle_positions")),
     )
+    broker_open_orders = _list(reconciliation.get("track_b_broker_open_orders"))
+    terminal_records = load_live_trade_registry_records(repo_root=config.repo_root)
+    lifecycle_positions_tuple, superseded_lifecycle_positions = filter_terminal_superseded_current_rows(
+        rows=lifecycle_positions,
+        records=terminal_records,
+        broker_positions=broker_positions,
+        broker_open_orders=broker_open_orders,
+    )
+    lifecycle_positions = [dict(item) for item in lifecycle_positions_tuple if isinstance(item, Mapping)]
     unresolved_ownership = _list(reconciliation.get("unresolved_submit_intent_ownership_records"))
     open_order_states = _list(open_order_truth.get("order_states"))
     managed_order_states = _list(managed_order_registry.get("managed_orders"))
@@ -216,6 +229,7 @@ def build_track_b_managed_position_registry(
         "lifecycle_open_positions": lifecycle_positions,
         "review_required_positions": review_positions,
         "historical_review_positions": historical_review_positions,
+        "superseded_lifecycle_projections": list(superseded_lifecycle_positions),
         "unresolved_submit_ownership": unresolved_ownership,
         "pre_restart_exposure_resolution": pre_restart_exposure_resolution,
         "source_freshness": source_stale,

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import json
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
 
@@ -493,6 +493,27 @@ def test_lifecycle_without_broker_is_classified(tmp_path: Path) -> None:
     assert payload["managed_positions"][0]["attention_required"] is True
 
 
+def test_terminal_registry_truth_suppresses_stale_lifecycle_open_projection(tmp_path: Path) -> None:
+    lifecycle = _lifecycle_position(lifecycle_id="life_terminal_superseded")
+    lifecycle["trade_id"] = "trade_terminal_superseded"
+    _seed_base(tmp_path, lifecycle_positions=[lifecycle])
+    _write_lifecycle_report(tmp_path, lifecycle_id="life_terminal_superseded")
+    _write_registry_closed_flat_events(
+        tmp_path,
+        trade_id="trade_terminal_superseded",
+        lifecycle_id="life_terminal_superseded",
+    )
+
+    payload = build_track_b_managed_position_registry(
+        config=TrackBManagedPositionRegistryConfig(repo_root=tmp_path),
+        now=NOW,
+    )
+
+    assert payload["classification"] == NO_MANAGED_POSITIONS
+    assert payload["managed_positions"] == []
+    assert payload["superseded_lifecycle_projections"][0]["classification"] == "STALE_SUPERSEDED_LIFECYCLE_PROJECTION"
+
+
 def test_dashboard_projection_is_not_authority(tmp_path: Path) -> None:
     _seed_base(tmp_path)
     config = TrackBManagedPositionRegistryConfig(repo_root=tmp_path)
@@ -778,6 +799,101 @@ def _write_registry_open_managed_events(root: Path) -> None:
             qty=Decimal("1"),
             source_artifact_path="outputs/track_b_execution_core/test_lifecycle.json",
             metadata={"managed_exit_policy_id": "GLOBEX_ACTIVE_EVIDENCE_TIMEBOX_60M_EXIT_V1"},
+        ),
+    ]
+    path.write_text("\n".join(json.dumps(event.to_dict(), sort_keys=True) for event in events) + "\n", encoding="utf-8")
+
+
+def _write_registry_closed_flat_events(root: Path, *, trade_id: str, lifecycle_id: str) -> None:
+    path = root / "outputs" / "track_b_execution_core" / "trade_registry" / "live_trade_events.jsonl"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    events = [
+        TradeEvent(
+            event_id="trade_terminal_entry_fill",
+            event_type=TradeEventType.ENTRY_FILL_BROKER_BACKED,
+            generated_at=NOW,
+            trade_id=trade_id,
+            lifecycle_id=lifecycle_id,
+            lane_id="track_b_paper_execution_test_mule_v1__mnq",
+            thesis_strategy_id="track_b_paper_execution_test_mule_v1__mnq",
+            account_id="DUM882026",
+            symbol="MNQ",
+            con_id=770561201,
+            local_symbol="MNQM6",
+            expiry="20260618",
+            side="SHORT",
+            action="SELL",
+            qty=Decimal("1"),
+            source_artifact_path="outputs/track_b_execution_core/test_entry.json",
+            order_id="1",
+            client_id="111",
+            perm_id="perm_mnq_entry",
+            exec_id="exec_mnq_entry",
+            price=Decimal("29688.69"),
+        ),
+        TradeEvent(
+            event_id="trade_terminal_open_managed",
+            event_type=TradeEventType.LIFECYCLE_OPEN_MANAGED,
+            generated_at=NOW + timedelta(seconds=1),
+            trade_id=trade_id,
+            lifecycle_id=lifecycle_id,
+            lane_id="track_b_paper_execution_test_mule_v1__mnq",
+            thesis_strategy_id="track_b_paper_execution_test_mule_v1__mnq",
+            account_id="DUM882026",
+            symbol="MNQ",
+            con_id=770561201,
+            local_symbol="MNQM6",
+            expiry="20260618",
+            side="SHORT",
+            action="SELL",
+            qty=Decimal("1"),
+            source_artifact_path="outputs/track_b_execution_core/test_lifecycle.json",
+            order_id="1",
+            client_id="111",
+            perm_id="perm_mnq_entry",
+            exec_id="exec_mnq_entry",
+        ),
+        TradeEvent(
+            event_id="trade_terminal_exit_fill",
+            event_type=TradeEventType.EXIT_FILL_BROKER_BACKED,
+            generated_at=NOW + timedelta(seconds=2),
+            trade_id=trade_id,
+            lifecycle_id=lifecycle_id,
+            lane_id="track_b_paper_execution_test_mule_v1__mnq",
+            thesis_strategy_id="track_b_paper_execution_test_mule_v1__mnq",
+            account_id="DUM882026",
+            symbol="MNQ",
+            con_id=770561201,
+            local_symbol="MNQM6",
+            expiry="20260618",
+            side="SHORT",
+            action="BUY",
+            qty=Decimal("1"),
+            source_artifact_path="outputs/track_b_execution_core/test_exit.json",
+            order_id="2",
+            client_id="111",
+            perm_id="perm_mnq_exit",
+            exec_id="exec_mnq_exit",
+            price=Decimal("29690.00"),
+        ),
+        TradeEvent(
+            event_id="trade_terminal_review_noise",
+            event_type=TradeEventType.REVIEW_REQUIRED,
+            generated_at=NOW + timedelta(seconds=3),
+            trade_id=trade_id,
+            lifecycle_id=lifecycle_id,
+            lane_id="track_b_paper_execution_test_mule_v1__mnq",
+            thesis_strategy_id="track_b_paper_execution_test_mule_v1__mnq",
+            account_id="DUM882026",
+            symbol="MNQ",
+            con_id=770561201,
+            local_symbol="MNQM6",
+            expiry="20260618",
+            side="SHORT",
+            action="RECONCILE",
+            qty=Decimal("1"),
+            source_artifact_path="outputs/track_b_execution_core/test_reconcile.json",
+            reason_codes=("REGISTRY_RECONCILIATION_REVIEW_REQUIRED",),
         ),
     ]
     path.write_text("\n".join(json.dumps(event.to_dict(), sort_keys=True) for event in events) + "\n", encoding="utf-8")

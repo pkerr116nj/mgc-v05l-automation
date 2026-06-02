@@ -149,7 +149,9 @@ def test_flat_reconciliation_mapped_closed_rows_do_not_become_current_scope(tmp_
             "review_required_count": 0,
             "track_b_broker_position_count": 0,
             "track_b_broker_open_order_count": 0,
-            "lifecycle_open_position_count": 0,
+            # Top-level legacy count may be stale; the nested registry
+            # reconciliation source is the current-scope authority here.
+            "lifecycle_open_position_count": 1,
             "registry_reconciliation": {
                 "classification": "REGISTRY_RECONCILIATION_MATCHED",
                 "blocking": False,
@@ -182,6 +184,120 @@ def test_flat_reconciliation_mapped_closed_rows_do_not_become_current_scope(tmp_
     assert report.classification == TRACK_B_DIAGNOSTICS_CLEAN_CURRENT_SCOPE
     assert report.current_scope_trade_states == ()
     assert report.registry_trade_state_counts == {}
+
+
+def test_terminal_registry_truth_keeps_stale_lifecycle_projection_out_of_current_scope(tmp_path: Path) -> None:
+    config = _seed_config(tmp_path)
+    lifecycle_row = {
+        "trade_id": "trade_terminal_review_noise",
+        "lifecycle_id": "life_terminal_review_noise",
+        "strategy_id": "mes_globex_active_participation_long",
+        "lane_id": "mes_globex_active_participation_long",
+        "instrument_family": "MES",
+        "symbol": "MES",
+        "local_symbol": "MESM6",
+        "con_id": 770561194,
+        "account_id": "MULTIPLE",
+        "quantity": "1",
+        "side": "LONG",
+    }
+    _write_json(
+        tmp_path / config.truth_config.lifecycle_live_position_path,  # type: ignore[union-attr]
+        {"generated_at": NOW.isoformat(), "open_positions": [lifecycle_row]},
+    )
+    _write_json(
+        tmp_path / config.truth_config.reconciliation_path,  # type: ignore[union-attr]
+        {
+            "generated_at": NOW.isoformat(),
+            "classification": "BROKER_TRUTH_SETTLEMENT_TIMEOUT",
+            "broker_reconciled": False,
+            "review_required_count": 0,
+            "track_b_broker_position_count": 0,
+            "track_b_broker_open_order_count": 0,
+            "lifecycle_open_position_count": 1,
+            "track_b_lifecycle_positions": [lifecycle_row],
+            "registry_reconciliation": {
+                "classification": "REGISTRY_RECONCILIATION_REVIEW_REQUIRED",
+                "blocking": True,
+                "broker_position_count": 0,
+                "broker_open_order_count": 0,
+                "lifecycle_position_count": 1,
+                "mapped_trade_ids": ["trade_terminal_review_noise"],
+                "review_required_trade_ids": [],
+            },
+        },
+    )
+    terminal_events = [
+        _event(
+            TradeEventType.ENTRY_FILL_BROKER_BACKED,
+            trade_id="trade_terminal_review_noise",
+            lifecycle_id="life_terminal_review_noise",
+            symbol="MES",
+            local_symbol="MESM6",
+            con_id=770561194,
+            generated_at="2026-05-29T05:54:30+00:00",
+            order_id="1",
+            client_id="11192",
+            perm_id="665735640",
+            exec_id="0000e1a7.6a2d8658.01.01",
+        ),
+        _event(
+            TradeEventType.LIFECYCLE_OPEN_MANAGED,
+            trade_id="trade_terminal_review_noise",
+            lifecycle_id="life_terminal_review_noise",
+            symbol="MES",
+            local_symbol="MESM6",
+            con_id=770561194,
+            generated_at="2026-05-29T05:54:31+00:00",
+        ),
+        _event(
+            TradeEventType.EXIT_FILL_BROKER_BACKED,
+            trade_id="trade_terminal_review_noise",
+            lifecycle_id="life_terminal_review_noise",
+            symbol="MES",
+            local_symbol="MESM6",
+            con_id=770561194,
+            generated_at="2026-05-29T05:54:32+00:00",
+            action="SELL",
+            order_id="63",
+            client_id="11192",
+            perm_id="665735642",
+            exec_id="0000e1a7.6a2d8f85.01.01",
+        ),
+        _event(
+            TradeEventType.RECONCILED_FLAT,
+            trade_id="trade_terminal_review_noise",
+            lifecycle_id="life_terminal_review_noise",
+            symbol="MES",
+            local_symbol="MESM6",
+            con_id=770561194,
+            generated_at="2026-05-29T05:54:33+00:00",
+            action="SELL",
+        ),
+        _event(
+            TradeEventType.REVIEW_REQUIRED,
+            trade_id="trade_terminal_review_noise",
+            lifecycle_id="life_terminal_review_noise",
+            symbol="MES",
+            local_symbol="MESM6",
+            con_id=770561194,
+            generated_at="2026-05-29T05:54:34+00:00",
+            action="RECONCILE",
+        ),
+    ]
+    _write_jsonl(tmp_path / "fixtures/ledger.jsonl", terminal_events)
+    _write_jsonl(
+        tmp_path / "outputs" / "track_b_execution_core" / "trade_registry" / "live_trade_events.jsonl",
+        terminal_events,
+    )
+
+    report = build_track_b_registry_truth_diagnostics(config=config, now=NOW)
+
+    assert report.classification == TRACK_B_DIAGNOSTICS_CLEAN_CURRENT_SCOPE
+    assert report.current_scope_trade_states == ()
+    assert report.registry_trade_state_counts == {}
+    assert report.registry_reconciliation_disagreements == ()
+    assert report.terminal_superseded_current_rows[0]["classification"] == "STALE_SUPERSEDED_LIFECYCLE_PROJECTION"
 
 
 def test_full_artifact_audit_still_reports_old_review_required_trades(tmp_path: Path) -> None:

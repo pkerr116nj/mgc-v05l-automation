@@ -23,6 +23,8 @@ from mgc_v05l.execution_core.track_b_canonical_truth_snapshot import (
 )
 from mgc_v05l.execution_core.track_b_central_trade_registry import TradeCurrentState
 from mgc_v05l.execution_core.track_b_lifecycle_stress_preflight import DEFAULT_PREFLIGHT_SUMMARY_PATH
+from mgc_v05l.execution_core.track_b_live_trade_registry import load_live_trade_registry_records
+from mgc_v05l.execution_core.track_b_terminal_registry_truth import filter_terminal_superseded_current_rows
 from mgc_v05l.execution_core.track_b_trade_registry_reconstruction import (
     TradeRegistryReconstructionConfig,
     TradeRegistryReconstructionReport,
@@ -116,6 +118,7 @@ class TrackBRegistryTruthDiagnosticsReport:
     historical_review_required_trade_ids: tuple[str, ...]
     truth_conflicts: tuple[Mapping[str, Any], ...]
     registry_reconciliation_disagreements: tuple[str, ...]
+    terminal_superseded_current_rows: tuple[Mapping[str, Any], ...]
     latest_preflight_hard_failure_count: int
     latest_preflight_stale: bool
     latest_preflight_source_path: str
@@ -152,6 +155,7 @@ class TrackBRegistryTruthDiagnosticsReport:
             "historical_review_required_trade_ids": list(self.historical_review_required_trade_ids),
             "truth_conflicts": list(self.truth_conflicts),
             "registry_reconciliation_disagreements": list(self.registry_reconciliation_disagreements),
+            "terminal_superseded_current_rows": list(self.terminal_superseded_current_rows),
             "latest_preflight_hard_failure_count": self.latest_preflight_hard_failure_count,
             "latest_preflight_stale": self.latest_preflight_stale,
             "latest_preflight_source_path": self.latest_preflight_source_path,
@@ -181,6 +185,13 @@ def build_track_b_registry_truth_diagnostics(
         max_age_seconds=config.max_preflight_age_seconds,
     )
     current_rows = _current_scope_shadow_rows(truth=truth, shadow=shadow, scoped_positions=scoped_positions)
+    terminal_records = load_live_trade_registry_records(repo_root=config.repo_root)
+    current_rows, terminal_superseded_rows = filter_terminal_superseded_current_rows(
+        rows=current_rows,
+        records=terminal_records,
+        broker_positions=tuple(truth.broker_truth.positions),
+        broker_open_orders=tuple(truth.broker_truth.open_orders),
+    )
     reason_codes = _reason_codes(
         mode=config.mode,
         truth=truth,
@@ -196,6 +207,7 @@ def build_track_b_registry_truth_diagnostics(
         current_rows=current_rows,
         scoped_positions=scoped_positions,
         preflight=preflight,
+        terminal_superseded_rows=terminal_superseded_rows,
     )
     return TrackBRegistryTruthDiagnosticsReport(
         schema_version=SCHEMA_VERSION,
@@ -233,7 +245,9 @@ def build_track_b_registry_truth_diagnostics(
         ),
         truth_conflicts=tuple(_conflict_summary(conflict) for conflict in truth.conflicts),
         registry_reconciliation_disagreements=tuple(
-            row.trade_id for row in shadow.rows if not row.registry_agrees_with_reconciliation
+            row.trade_id
+            for row in (current_rows if config.mode == TrackBDiagnosticsMode.CURRENT_HOT_PATH else shadow.rows)
+            if not row.registry_agrees_with_reconciliation
         ),
         latest_preflight_hard_failure_count=int(preflight["hard_failure_count"]),
         latest_preflight_stale=bool(preflight["stale"]),
@@ -242,6 +256,7 @@ def build_track_b_registry_truth_diagnostics(
         truth_snapshot=_truth_surface(truth),
         reconstruction_summary=_reconstruction_summary(reconstruction),
         shadow_summary=shadow.to_dict()["summary"],
+        terminal_superseded_current_rows=tuple(terminal_superseded_rows),
     )
 
 
@@ -264,11 +279,17 @@ def _classification(
     current_rows: tuple[Any, ...],
     scoped_positions: Mapping[str, Any],
     preflight: Mapping[str, Any],
+    terminal_superseded_rows: tuple[Mapping[str, Any], ...] = (),
 ) -> str:
     if _truth_has_stale_authority(truth) or preflight["stale"]:
         return TRACK_B_DIAGNOSTICS_STALE_AUTHORITY
     if mode == TrackBDiagnosticsMode.CURRENT_HOT_PATH:
-        if _current_scope_conflict(truth=truth, rows=current_rows, scoped_positions=scoped_positions):
+        if _current_scope_conflict(
+            truth=truth,
+            rows=current_rows,
+            scoped_positions=scoped_positions,
+            terminal_superseded_rows=terminal_superseded_rows,
+        ):
             return TRACK_B_DIAGNOSTICS_CONFLICT_CURRENT_SCOPE
         if any(row.current_derived_state == TradeCurrentState.REVIEW_REQUIRED.value for row in current_rows):
             return TRACK_B_DIAGNOSTICS_HISTORICAL_REVIEW_REQUIRED
@@ -397,9 +418,24 @@ def _current_trade_ids_from_reconciliation_source(truth: TrackBTruthSnapshot) ->
     registry = payload.get("registry_reconciliation")
     if not isinstance(registry, Mapping):
         return set()
-    broker_count = int(registry.get("broker_position_count") or payload.get("track_b_broker_position_count") or 0)
-    lifecycle_count = int(registry.get("lifecycle_position_count") or payload.get("lifecycle_open_position_count") or 0)
-    order_count = int(registry.get("broker_open_order_count") or payload.get("track_b_broker_open_order_count") or 0)
+    broker_count = _int_from_preferred_mapping(
+        primary=registry,
+        primary_key="broker_position_count",
+        fallback=payload,
+        fallback_key="track_b_broker_position_count",
+    )
+    lifecycle_count = _int_from_preferred_mapping(
+        primary=registry,
+        primary_key="lifecycle_position_count",
+        fallback=payload,
+        fallback_key="lifecycle_open_position_count",
+    )
+    order_count = _int_from_preferred_mapping(
+        primary=registry,
+        primary_key="broker_open_order_count",
+        fallback=payload,
+        fallback_key="track_b_broker_open_order_count",
+    )
     blocking = registry.get("blocking") is True
     current_ids: set[str] = set()
     if blocking:
@@ -407,6 +443,18 @@ def _current_trade_ids_from_reconciliation_source(truth: TrackBTruthSnapshot) ->
     if broker_count or lifecycle_count or order_count:
         current_ids.update(str(trade_id) for trade_id in registry.get("mapped_trade_ids") or [] if str(trade_id or "").strip())
     return current_ids
+
+
+def _int_from_preferred_mapping(
+    *,
+    primary: Mapping[str, Any],
+    primary_key: str,
+    fallback: Mapping[str, Any],
+    fallback_key: str,
+) -> int:
+    if primary_key in primary:
+        return int(primary.get(primary_key) or 0)
+    return int(fallback.get(fallback_key) or 0)
 
 
 def _review_required_rows_for_mode(
@@ -442,14 +490,19 @@ def _current_scope_conflict(
     truth: TrackBTruthSnapshot,
     rows: tuple[Any, ...],
     scoped_positions: Mapping[str, Any],
+    terminal_superseded_rows: tuple[Mapping[str, Any], ...] = (),
 ) -> bool:
     if scoped_positions["unknown_scope_positions"]:
         return True
+    effective_lifecycle_open_count = max(
+        0,
+        int(truth.lifecycle.open_position_count) - len(terminal_superseded_rows),
+    )
     has_current_exposure_or_order = bool(
         scoped_positions["track_b_managed_futures_positions"]
         or scoped_positions["unknown_scope_positions"]
         or truth.broker_truth.open_order_count
-        or truth.lifecycle.open_position_count
+        or effective_lifecycle_open_count
         or rows
     )
     if truth.classification == TRUTH_CONFLICT_REVIEW_REQUIRED and (

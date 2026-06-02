@@ -52,6 +52,9 @@ from mgc_v05l.execution_core.track_b_historical_reconciliation_debris_resolver i
     HistoricalReconciliationDebrisResolverConfig,
     resolve_historical_reconciliation_debris,
 )
+from mgc_v05l.execution_core.track_b_terminal_registry_truth import (
+    resolve_terminal_registry_truth,
+)
 from mgc_v05l.execution_core.track_b_live_trade_registry import (
     append_live_trade_registry_event,
     load_live_trade_registry_records,
@@ -795,34 +798,21 @@ def _closed_flat_lifecycle_projection_precedence(
         }
 
     records = load_live_trade_registry_records(repo_root=config.repo_root)
-    closed_records = [
-        record
-        for record in records
-        if record.current_state == TradeCurrentState.CLOSED_FLAT
-        and record.broker_backed_exit is True
-        and record.open_qty == 0
-    ]
     current_scope: list[dict[str, Any]] = []
     superseded: list[dict[str, Any]] = []
     for lifecycle_position in lifecycle_positions:
-        closed_record = _closed_flat_record_for_lifecycle_projection(closed_records, lifecycle_position)
-        current_broker_linked = any(
-            _lifecycle_position_matches_broker_position(lifecycle_position, broker_position)
-            for broker_position in broker_positions
+        terminal_truth = resolve_terminal_registry_truth(
+            records=records,
+            identity=lifecycle_position,
+            broker_positions=broker_positions,
+            broker_open_orders=broker_open_orders,
         )
-        current_order_linked = any(
-            _lifecycle_position_matches_broker_position(lifecycle_position, broker_order)
-            for broker_order in broker_open_orders
-        )
-        if closed_record is not None and not current_broker_linked and not current_order_linked:
+        if terminal_truth.terminal_closed_flat and terminal_truth.record is not None:
+            closed_record = terminal_truth.record
             superseded.append(
                 {
                     "classification": "STALE_SUPERSEDED_LIFECYCLE_PROJECTION",
-                    "reason_codes": [
-                        "BROKER_BACKED_CLOSED_FLAT_REGISTRY_SUPERSEDES_OPEN_LIFECYCLE_PROJECTION",
-                        "BROKER_FLAT_PROOF_CONFIRMED",
-                        "NO_OPEN_ORDER_PROOF_CONFIRMED",
-                    ],
+                    "reason_codes": list(terminal_truth.reason_codes),
                     "trade_id": closed_record.trade_id,
                     "lifecycle_id": closed_record.ownership_identity.lifecycle_id
                     if closed_record.ownership_identity
@@ -832,6 +822,7 @@ def _closed_flat_lifecycle_projection_precedence(
                     "open_qty": str(closed_record.open_qty),
                     "lifecycle_position": dict(lifecycle_position),
                     "registry_record": _registry_record_event_row(closed_record),
+                    "terminal_registry_truth": terminal_truth.to_dict(),
                 }
             )
             continue

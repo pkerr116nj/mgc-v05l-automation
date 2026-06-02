@@ -1494,6 +1494,19 @@ def _reconciliation_input(payload: Mapping[str, Any], *, now: datetime) -> dict[
         }
     age_seconds = _age_seconds(payload.get("generated_at"), now)
     threshold = max(_float_value(payload.get("max_age_seconds"), 120.0) * 1.5, RECONCILIATION_FRESHNESS_DEFAULT_SECONDS)
+    registry = _mapping(payload.get("registry_reconciliation"))
+    lifecycle_positions = payload.get("track_b_lifecycle_positions")
+    if isinstance(lifecycle_positions, list):
+        lifecycle_open_position_count = len(lifecycle_positions)
+    elif "lifecycle_position_count" in registry:
+        lifecycle_open_position_count = int(registry.get("lifecycle_position_count") or 0)
+    else:
+        lifecycle_open_position_count = int(payload.get("lifecycle_open_position_count") or 0)
+    review_required_count = (
+        int(payload.get("current_scope_review_required_count") or 0)
+        if "current_scope_review_required_count" in payload
+        else int(payload.get("review_required_count") or 0)
+    )
     return {
         "available": True,
         "fresh": bool(age_seconds is not None and age_seconds <= threshold),
@@ -1502,8 +1515,8 @@ def _reconciliation_input(payload: Mapping[str, Any], *, now: datetime) -> dict[
         "age_seconds": age_seconds,
         "freshness_threshold_seconds": threshold,
         "broker_reconciled": payload.get("broker_reconciled") is True,
-        "review_required_count": payload.get("review_required_count"),
-        "lifecycle_open_position_count": payload.get("lifecycle_open_position_count"),
+        "review_required_count": review_required_count,
+        "lifecycle_open_position_count": lifecycle_open_position_count,
         "track_b_broker_open_order_count": payload.get("track_b_broker_open_order_count"),
         "blockers": list(payload.get("blockers") or []) if isinstance(payload.get("blockers"), list) else [],
         "live_money_eligible": payload.get("live_money_eligible") is True,
