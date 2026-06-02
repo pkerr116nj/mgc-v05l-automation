@@ -9710,6 +9710,110 @@ def test_probationary_supervisor_unsafe_reconciliation_stop_has_provenance(
     assert summary.stop_provenance["broker_safe_at_stop"] is False
 
 
+def test_probationary_supervisor_runs_managed_maintenance_without_lane_candidates(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = _build_probationary_paper_settings(tmp_path)
+    root_logger = StructuredLogger(tmp_path / "root")
+    lane = _prepare_supervisor_test_lane(
+        _seed_test_lane(
+            tmp_path,
+            lane_id="mnq_lane",
+            symbol="MNQ",
+            source="usLatePauseResumeLongTurn",
+            session_restriction="US_LATE",
+            point_value=Decimal("2"),
+        )
+    )
+    lane.restore_startup = lambda: None
+    lane.poll_and_process = lambda: (0, {"clean": True}, None)
+    calls: list[probationary_runtime_module.TrackBManagedOpenPositionMaintenanceConfig] = []
+
+    def _maintenance_stage(*, config, now):  # type: ignore[no-untyped-def]
+        calls.append(config)
+        report = {
+            "schema_version": "track_b_managed_open_position_maintenance_v1",
+            "generated_at": now.isoformat(),
+            "close_intent_created_count": 1,
+            "close_submitted_count": 1,
+            "close_filled_count": 0,
+            "review_required_count": 0,
+            "broker_state_mutated": True,
+            "submit_attempted": True,
+        }
+        config.diagnostic_json.parent.mkdir(parents=True, exist_ok=True)
+        config.diagnostic_json.write_text(json.dumps(report, sort_keys=True) + "\n", encoding="utf-8")
+        return probationary_runtime_module.TrackBManagedOpenPositionMaintenanceResult(
+            report_json=config.diagnostic_json,
+            report=report,
+            lifecycle_results=(),
+        )
+
+    monkeypatch.setattr(probationary_runtime_module, "run_track_b_managed_open_position_maintenance", _maintenance_stage)
+    supervisor = probationary_runtime_module.ProbationaryPaperSupervisor(
+        settings=settings,
+        lanes=[lane],
+        structured_logger=root_logger,
+        alert_dispatcher=AlertDispatcher(root_logger),
+    )
+    monkeypatch.setattr(supervisor, "_install_signal_handlers", lambda: {})
+    monkeypatch.setattr(supervisor, "_restore_signal_handlers", lambda _previous: None)
+
+    summary = supervisor.run(poll_once=True)
+
+    assert summary.stop_reason is None
+    assert summary.reconciliation_clean is True
+    assert len(calls) == 1
+    assert calls[0].submit_enabled is True
+    assert calls[0].live_money_readiness is False
+    assert calls[0].diagnostic_json == tmp_path / "outputs" / "track_b_execution_core" / "diagnostics" / "latest_track_b_managed_open_position_maintenance.json"
+
+
+def test_probationary_supervisor_writes_managed_maintenance_failure_diagnostic(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = _build_probationary_paper_settings(tmp_path)
+    root_logger = StructuredLogger(tmp_path / "root")
+    lane = _prepare_supervisor_test_lane(
+        _seed_test_lane(
+            tmp_path,
+            lane_id="mnq_lane",
+            symbol="MNQ",
+            source="usLatePauseResumeLongTurn",
+            session_restriction="US_LATE",
+            point_value=Decimal("2"),
+        )
+    )
+    lane.restore_startup = lambda: None
+    lane.poll_and_process = lambda: (0, {"clean": True}, None)
+
+    def _maintenance_stage(*, config, now):  # type: ignore[no-untyped-def]
+        raise RuntimeError("synthetic maintenance failure")
+
+    monkeypatch.setattr(probationary_runtime_module, "run_track_b_managed_open_position_maintenance", _maintenance_stage)
+    supervisor = probationary_runtime_module.ProbationaryPaperSupervisor(
+        settings=settings,
+        lanes=[lane],
+        structured_logger=root_logger,
+        alert_dispatcher=AlertDispatcher(root_logger),
+    )
+    monkeypatch.setattr(supervisor, "_install_signal_handlers", lambda: {})
+    monkeypatch.setattr(supervisor, "_restore_signal_handlers", lambda _previous: None)
+
+    summary = supervisor.run(poll_once=True)
+
+    assert summary.stop_reason is None
+    diagnostic_path = tmp_path / "outputs" / "track_b_execution_core" / "diagnostics" / "latest_track_b_managed_open_position_maintenance.json"
+    diagnostic = json.loads(diagnostic_path.read_text(encoding="utf-8"))
+    assert diagnostic["classification"] == "MANAGED_OPEN_POSITION_MAINTENANCE_FAILED"
+    assert diagnostic["primary_blocker"] == "MANAGED_OPEN_POSITION_MAINTENANCE_INVOCATION_FAILED"
+    assert diagnostic["maintenance_invocation_failed"] is True
+    assert diagnostic["broker_state_mutated"] is False
+    assert diagnostic["submit_attempted"] is False
+
+
 def test_clear_risk_halts_does_not_restore_same_session_readiness_for_realized_loser_limit(tmp_path: Path) -> None:
     settings = _build_probationary_paper_settings(tmp_path)
     root_logger = StructuredLogger(tmp_path / "root")

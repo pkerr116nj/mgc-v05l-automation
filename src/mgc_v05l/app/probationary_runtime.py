@@ -119,6 +119,18 @@ from ..execution_core.track_b_live_runtime_environment_watchdog import (
     TrackBLiveRuntimeEnvironmentWatchdogConfig,
     run_track_b_live_runtime_environment_watchdog_if_due,
 )
+from ..execution_core.track_b_managed_open_position_maintenance import (
+    DEFAULT_TRACK_B_LIVE_POSITION_STATUS_JSON,
+    DEFAULT_TRACK_B_MANAGED_OPEN_POSITION_MAINTENANCE_JSON,
+    DEFAULT_TRACK_B_MANAGED_POSITION_PROJECTION_JSON,
+    DEFAULT_TRACK_B_PAPER_TRADE_LEDGER_OUTPUT_ROOT,
+    DEFAULT_TRACK_B_PAPER_TRADE_SUMMARY_JSON,
+    DEFAULT_TRACK_B_PHASE1_RUNTIME_MARKET_DATA_ROOT,
+    DEFAULT_TRACK_B_STRATEGY_MANAGED_PAPER_LIFECYCLE_OUTPUT_ROOT,
+    TrackBManagedOpenPositionMaintenanceConfig,
+    TrackBManagedOpenPositionMaintenanceResult,
+    run_track_b_managed_open_position_maintenance,
+)
 from ..research.trend_participation.canary import _CANARY_LANES
 from ..research.trend_participation.canary import atpe_runtime_lane_id, atpe_runtime_lane_name
 from ..research.trend_participation.engine import DEFAULT_POINT_VALUES as ATPE_POINT_VALUES
@@ -7527,6 +7539,29 @@ class ProbationaryPaperSupervisor:
                     if not _effective_reconciliation_clean(reconciliation):
                         reconciliation_clean = False
 
+                managed_open_position_maintenance = _run_probationary_managed_open_position_maintenance(
+                    settings=self._settings,
+                    now=datetime.now(timezone.utc),
+                )
+                if (
+                    managed_open_position_maintenance is not None
+                    and managed_open_position_maintenance.report.get("maintenance_invocation_failed") is True
+                ):
+                    self._alert_dispatcher.emit(
+                        severity="ACTION",
+                        code="paper_managed_open_position_maintenance_failed",
+                        message=(
+                            "Managed open-position maintenance failed during the paper supervisor cycle; "
+                            "exit-due positions require review until the maintenance diagnostic clears."
+                        ),
+                        payload=dict(managed_open_position_maintenance.report),
+                        category="managed_position_maintenance",
+                        title="Paper Managed Position Maintenance Failed",
+                        dedup_key="paper_managed_open_position_maintenance_failed",
+                        recommended_action="Inspect the managed open-position maintenance diagnostic and rerun after the root cause is fixed.",
+                        active=True,
+                    )
+
                 session_date = _resolve_probationary_supervisor_session_date(self._settings, self._lanes)
                 risk_state = _ensure_probationary_paper_risk_state_session(risk_state, session_date)
                 lane_metrics = {
@@ -9477,6 +9512,99 @@ def _write_track_b_live_runtime_environment_watchdog_for_active_paper_runtime(se
             "broker_mutation_allowed": False,
             "runtime_mutation_allowed": False,
         }
+
+
+def _track_b_repo_root_for_probationary_runtime(settings: StrategySettings) -> Path:
+    artifact_path = Path(getattr(settings, "probationary_artifacts_path", ""))
+    if artifact_path.is_absolute():
+        if artifact_path.name == "probationary" and artifact_path.parent.name == "outputs":
+            return artifact_path.parent.parent
+        return artifact_path.parent
+    return Path(__file__).resolve().parents[3]
+
+
+def _probationary_managed_open_position_maintenance_config(
+    settings: StrategySettings,
+) -> TrackBManagedOpenPositionMaintenanceConfig:
+    repo_root = _track_b_repo_root_for_probationary_runtime(settings)
+    return TrackBManagedOpenPositionMaintenanceConfig(
+        mode="PAPER",
+        account_id="DUM882026",
+        expected_account_id="DUM882026",
+        submit_enabled=bool(settings.mode == RuntimeMode.PAPER),
+        host="127.0.0.1",
+        port=7497,
+        client_id=17086,
+        order_type="LMT",
+        time_in_force="DAY",
+        live_money_readiness=False,
+        live_runtime_feed_output_root=repo_root / DEFAULT_TRACK_B_PHASE1_RUNTIME_MARKET_DATA_ROOT,
+        managed_lifecycle_output_root=repo_root / DEFAULT_TRACK_B_STRATEGY_MANAGED_PAPER_LIFECYCLE_OUTPUT_ROOT,
+        paper_trade_ledger_output_root=repo_root / DEFAULT_TRACK_B_PAPER_TRADE_LEDGER_OUTPUT_ROOT,
+        paper_trade_summary_json=repo_root / DEFAULT_TRACK_B_PAPER_TRADE_SUMMARY_JSON,
+        live_position_status_json=repo_root / DEFAULT_TRACK_B_LIVE_POSITION_STATUS_JSON,
+        managed_position_projection_json=repo_root / DEFAULT_TRACK_B_MANAGED_POSITION_PROJECTION_JSON,
+        diagnostic_json=repo_root / DEFAULT_TRACK_B_MANAGED_OPEN_POSITION_MAINTENANCE_JSON,
+        paper_exit_price_offset_ticks=2,
+    )
+
+
+def _write_probationary_managed_open_position_maintenance_failure(
+    *,
+    config: TrackBManagedOpenPositionMaintenanceConfig,
+    exc: Exception,
+    now: datetime,
+) -> TrackBManagedOpenPositionMaintenanceResult:
+    report = {
+        "schema_version": "track_b_managed_open_position_maintenance_v1",
+        "generated_at": now.isoformat(),
+        "mode": config.mode,
+        "source": "PROBATIONARY_PAPER_SUPERVISOR",
+        "classification": "MANAGED_OPEN_POSITION_MAINTENANCE_FAILED",
+        "maintenance_invoked": True,
+        "maintenance_invocation_failed": True,
+        "primary_blocker": "MANAGED_OPEN_POSITION_MAINTENANCE_INVOCATION_FAILED",
+        "reason_codes": ["MANAGED_OPEN_POSITION_MAINTENANCE_INVOCATION_FAILED", type(exc).__name__],
+        "exception_type": type(exc).__name__,
+        "exception_message": str(exc),
+        "open_lifecycle_count": None,
+        "positions": [],
+        "close_intent_created_count": 0,
+        "close_submitted_count": 0,
+        "close_filled_count": 0,
+        "review_required_count": 1,
+        "broker_state_mutated": False,
+        "submit_attempted": False,
+        "paper_proof_invoked": False,
+        "live_money_readiness": False,
+        "diagnostic_json_path": str(config.diagnostic_json),
+    }
+    config.diagnostic_json.parent.mkdir(parents=True, exist_ok=True)
+    config.diagnostic_json.write_text(json.dumps(report, indent=2, sort_keys=True, default=str) + "\n", encoding="utf-8")
+    return TrackBManagedOpenPositionMaintenanceResult(
+        report_json=config.diagnostic_json,
+        report=report,
+        lifecycle_results=(),
+    )
+
+
+def _run_probationary_managed_open_position_maintenance(
+    *,
+    settings: StrategySettings,
+    now: datetime | None = None,
+) -> TrackBManagedOpenPositionMaintenanceResult | None:
+    if settings.mode != RuntimeMode.PAPER:
+        return None
+    actual_now = now or datetime.now(timezone.utc)
+    config = _probationary_managed_open_position_maintenance_config(settings)
+    try:
+        return run_track_b_managed_open_position_maintenance(config=config, now=actual_now)
+    except Exception as exc:
+        return _write_probationary_managed_open_position_maintenance_failure(
+            config=config,
+            exc=exc,
+            now=actual_now,
+        )
 
 
 def _write_probationary_paper_pid_metadata(*, settings: StrategySettings, runtime_truth: dict[str, Any]) -> Path:
