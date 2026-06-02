@@ -52,6 +52,7 @@ def test_paper_stack_restart_uses_owned_exposure_authority() -> None:
     source = START_SCRIPT.read_text(encoding="utf-8")
 
     assert "track_b_paper_stack_restart_precheck" in source
+    assert "restart_authority_allowed" in source
     assert "RESTART_ALLOWED_FLAT_RECONCILED" not in source
     assert "restart_precheck_classification" in source
     assert "BLOCKED_UNMANAGED_EXPOSURE" not in source

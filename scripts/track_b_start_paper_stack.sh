@@ -309,8 +309,10 @@ ok = (
 )
 print(str(ok).lower())
 ' <<<"${status_json}")"
+restart_authority="$("${PYTHON_BIN}" -m mgc_v05l.execution_core.track_b_paper_stack_restart_precheck <<<"${status_json}")"
+restart_authority_allowed="$("${PYTHON_BIN}" -c 'import json,sys; p=json.loads(sys.stdin.read()); print(str(p.get("restart_allowed") is True).lower())' <<<"${restart_authority}")"
 scoped_profile_allowed="$(scoped_profile_start_allowed || true)"
-if [[ ( "${runtime_start_allowed}" != "true" || "${blocker_count}" != "0" ) && ( "${restart_allowed}" != "true" || "${blocker_count}" != "0" ) && "${launch_guard_restart_allowed}" != "true" && "${scoped_profile_allowed}" != "true" ]]; then
+if [[ ( "${runtime_start_allowed}" != "true" || "${blocker_count}" != "0" ) && ( "${restart_allowed}" != "true" || "${blocker_count}" != "0" ) && "${launch_guard_restart_allowed}" != "true" && "${restart_authority_allowed}" != "true" && "${scoped_profile_allowed}" != "true" ]]; then
   write_startup_artifact "BLOCKED_PRECHECK" "Canonical readiness does not allow a clean PAPER runtime start." ""
   exit 2
 fi
