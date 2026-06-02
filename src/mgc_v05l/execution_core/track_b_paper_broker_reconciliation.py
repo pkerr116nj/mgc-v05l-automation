@@ -575,12 +575,28 @@ def _registry_reconciliation_state(
     position_match_report: Mapping[str, Any],
 ) -> dict[str, Any]:
     records = load_live_trade_registry_records(repo_root=config.repo_root)
+    superseded_lifecycle_positions = [
+        row
+        for row in position_match_report.get("superseded_unmatched_lifecycle_positions", [])
+        if isinstance(row, Mapping)
+    ]
+    superseded_lifecycle_keys = {
+        _lifecycle_position_scope_key(row)
+        for row in superseded_lifecycle_positions
+        if _lifecycle_position_scope_key(row)
+    }
+    current_scope_lifecycle_positions = [
+        dict(row)
+        for row in lifecycle_positions
+        if _lifecycle_position_scope_key(row) not in superseded_lifecycle_keys
+    ]
     base = {
         "source": "CENTRAL_TRADE_REGISTRY_READ_ONLY",
         "registry_event_path": str(config.repo_root / "outputs/track_b_execution_core/trade_registry/live_trade_events.jsonl"),
         "record_count": len(records),
         "broker_position_count": len(broker_positions),
         "lifecycle_position_count": len(lifecycle_positions),
+        "current_scope_lifecycle_position_count": len(current_scope_lifecycle_positions),
         "broker_open_order_count": len(broker_open_orders),
         "blocking": False,
         "paper_only": True,
@@ -613,7 +629,7 @@ def _registry_reconciliation_state(
         active_records=active_records,
         broker_positions=broker_positions,
         broker_open_orders=broker_open_orders,
-        lifecycle_positions=lifecycle_positions,
+        lifecycle_positions=current_scope_lifecycle_positions,
     )
     active_records = list(active_scope["current_scope_active_records"])
     blockers: list[dict[str, Any]] = []
@@ -633,7 +649,7 @@ def _registry_reconciliation_state(
             )
             direct_lifecycle_trade_ids = _lifecycle_trade_ids_for_broker_position(
                 broker_position=broker_position,
-                lifecycle_positions=lifecycle_positions,
+                lifecycle_positions=current_scope_lifecycle_positions,
             )
             lifecycle_trade_ids = direct_lifecycle_trade_ids or {
                 *_lifecycle_trade_ids_for_broker_position_match(
@@ -663,7 +679,7 @@ def _registry_reconciliation_state(
                 }
             )
 
-    for lifecycle_position in lifecycle_positions:
+    for lifecycle_position in current_scope_lifecycle_positions:
         matches = _registry_records_for_lifecycle_position(active_records, lifecycle_position)
         if len(matches) == 1:
             mapped_trade_ids.add(matches[0].trade_id)
@@ -716,7 +732,7 @@ def _registry_reconciliation_state(
                 }
             )
 
-    if not broker_positions and not lifecycle_positions:
+    if not broker_positions and not current_scope_lifecycle_positions:
         stale_open_records = [
             record
             for record in active_records
@@ -761,6 +777,7 @@ def _registry_reconciliation_state(
             "review_required_trade_ids": review_trade_ids,
             "review_records": review_records,
             "superseded_lifecycle_only_records": active_scope["superseded_lifecycle_only_records"],
+            "superseded_unmatched_lifecycle_positions": [dict(row) for row in superseded_lifecycle_positions],
         }
     return {
         **base,
@@ -772,6 +789,7 @@ def _registry_reconciliation_state(
         "review_required_trade_ids": [],
         "working_order_trade_ids": sorted(set(working_order_trade_ids)),
         "superseded_lifecycle_only_records": active_scope["superseded_lifecycle_only_records"],
+        "superseded_unmatched_lifecycle_positions": [dict(row) for row in superseded_lifecycle_positions],
     }
 
 
@@ -3748,8 +3766,7 @@ def _broker_lifecycle_position_match(
     for broker_position in broker_positions:
         broker_root = _track_b_root(broker_position, symbols)
         broker_qty = _decimal_value(broker_position.get("quantity"))
-        match_index = None
-        match_detail: dict[str, Any] | None = None
+        candidate_matches: list[tuple[int, dict[str, Any]]] = []
         for index, lifecycle_position in enumerate(unmatched_lifecycle):
             lifecycle_root = _track_b_root(lifecycle_position, symbols)
             lifecycle_qty = _decimal_value(lifecycle_position.get("quantity"))
@@ -3758,7 +3775,6 @@ def _broker_lifecycle_position_match(
             local_matches = _local_symbols_compatible(broker_position, lifecycle_position)
             quantity_matches = broker_qty is not None and lifecycle_signed_qty is not None and broker_qty == lifecycle_signed_qty
             if root_matches and local_matches and quantity_matches:
-                match_index = index
                 match_detail = {
                     "root": broker_root,
                     "broker_local_symbol": broker_position.get("local_symbol") or broker_position.get("localSymbol"),
@@ -3781,14 +3797,41 @@ def _broker_lifecycle_position_match(
                 )
                 if cost_basis_adjustment is not None:
                     match_detail["broker_cost_basis_adjustment"] = cost_basis_adjustment
-                break
+                candidate_matches.append((index, match_detail))
+        if candidate_matches:
+            match_index, match_detail = max(
+                candidate_matches,
+                key=lambda item: _broker_lifecycle_match_score(
+                    broker_position=broker_position,
+                    lifecycle_position=item[1]["lifecycle_position"],
+                ),
+            )
+        else:
+            match_index = None
+            match_detail = None
         if match_index is None or match_detail is None:
             mismatches.append({"broker_position": dict(broker_position), "unmatched_lifecycle_positions": unmatched_lifecycle})
             continue
         matches.append(match_detail)
         unmatched_lifecycle.pop(match_index)
 
-    if count_mismatch or mismatches or unmatched_lifecycle:
+    superseded_unmatched_lifecycle = _superseded_unmatched_lifecycle_positions(
+        unmatched_lifecycle=unmatched_lifecycle,
+        matches=matches,
+        symbols=symbols,
+    )
+    superseded_keys = {
+        _lifecycle_position_scope_key(row)
+        for row in superseded_unmatched_lifecycle
+        if _lifecycle_position_scope_key(row)
+    }
+    current_unmatched_lifecycle = [
+        row for row in unmatched_lifecycle if _lifecycle_position_scope_key(row) not in superseded_keys
+    ]
+    current_lifecycle_count = len(lifecycle_positions) - len(superseded_unmatched_lifecycle)
+    count_mismatch = len(broker_positions) != current_lifecycle_count
+
+    if count_mismatch or mismatches or current_unmatched_lifecycle:
         blocker_code = (
             "TRACK_B_BROKER_LIFECYCLE_POSITION_COUNT_MISMATCH"
             if count_mismatch
@@ -3805,22 +3848,149 @@ def _broker_lifecycle_position_match(
             "state": state,
             "broker": [dict(item) for item in broker_positions],
             "lifecycle": [dict(item) for item in lifecycle_positions],
+            "current_scope_lifecycle": [
+                dict(item)
+                for item in lifecycle_positions
+                if _lifecycle_position_scope_key(item) not in superseded_keys
+            ],
             "matches": matches,
             "mismatches": mismatches,
-            "unmatched_lifecycle_positions": unmatched_lifecycle,
+            "unmatched_lifecycle_positions": current_unmatched_lifecycle,
+            "superseded_unmatched_lifecycle_positions": superseded_unmatched_lifecycle,
             "blocker": {
                 "code": blocker_code,
                 "detail": detail,
                 "broker_position_count": len(broker_positions),
                 "lifecycle_position_count": len(lifecycle_positions),
+                "current_scope_lifecycle_position_count": current_lifecycle_count,
                 "broker_positions": [dict(item) for item in broker_positions],
                 "lifecycle_positions": [dict(item) for item in lifecycle_positions],
                 "matches": matches,
                 "mismatches": mismatches,
-                "unmatched_lifecycle_positions": unmatched_lifecycle,
+                "unmatched_lifecycle_positions": current_unmatched_lifecycle,
+                "superseded_unmatched_lifecycle_positions": superseded_unmatched_lifecycle,
             },
         }
-    return {"matched": True, "state": "BROKER_AND_LIFECYCLE_OPEN_MATCHED", "matches": matches}
+    return {
+        "matched": True,
+        "state": "BROKER_AND_LIFECYCLE_OPEN_MATCHED",
+        "matches": matches,
+        "superseded_unmatched_lifecycle_positions": superseded_unmatched_lifecycle,
+    }
+
+
+def _superseded_unmatched_lifecycle_positions(
+    *,
+    unmatched_lifecycle: Sequence[Mapping[str, Any]],
+    matches: Sequence[Mapping[str, Any]],
+    symbols: Sequence[str],
+) -> list[dict[str, Any]]:
+    superseded: list[dict[str, Any]] = []
+    if not matches:
+        return superseded
+    for lifecycle_position in unmatched_lifecycle:
+        for match in matches:
+            broker_position = match.get("broker_position") if isinstance(match.get("broker_position"), Mapping) else {}
+            matched_lifecycle = match.get("lifecycle_position") if isinstance(match.get("lifecycle_position"), Mapping) else {}
+            if not broker_position or not matched_lifecycle:
+                continue
+            if not _lifecycle_rows_compete_for_same_broker_position(
+                stale_lifecycle=lifecycle_position,
+                matched_lifecycle=matched_lifecycle,
+                broker_position=broker_position,
+                symbols=symbols,
+            ):
+                continue
+            matched_score = _broker_lifecycle_match_score(
+                broker_position=broker_position,
+                lifecycle_position=matched_lifecycle,
+            )
+            stale_score = _broker_lifecycle_match_score(
+                broker_position=broker_position,
+                lifecycle_position=lifecycle_position,
+            )
+            if matched_score <= stale_score:
+                continue
+            if not _lifecycle_position_has_broker_backed_identity(matched_lifecycle):
+                continue
+            if not _lifecycle_position_is_weaker_broker_identity(lifecycle_position, broker_position):
+                continue
+            payload = dict(lifecycle_position)
+            payload["classification"] = "STALE_SUPERSEDED_LIFECYCLE_PROJECTION"
+            payload["reason_codes"] = [
+                "CURRENT_BROKER_POSITION_MATCHED_TO_STRONGER_BROKER_BACKED_LIFECYCLE",
+                "WEAKER_LIFECYCLE_ROW_HAS_NO_CURRENT_BROKER_IDENTITY_MATCH",
+            ]
+            payload["superseding_lifecycle_id"] = matched_lifecycle.get("lifecycle_id")
+            payload["superseding_trade_id"] = matched_lifecycle.get("trade_id")
+            payload["broker_position"] = dict(broker_position)
+            superseded.append(payload)
+            break
+    return superseded
+
+
+def _lifecycle_rows_compete_for_same_broker_position(
+    *,
+    stale_lifecycle: Mapping[str, Any],
+    matched_lifecycle: Mapping[str, Any],
+    broker_position: Mapping[str, Any],
+    symbols: Sequence[str],
+) -> bool:
+    stale_root = _track_b_root(stale_lifecycle, symbols)
+    matched_root = _track_b_root(matched_lifecycle, symbols)
+    broker_root = _track_b_root(broker_position, symbols)
+    if broker_root and (stale_root != broker_root or matched_root != broker_root):
+        return False
+    if not (
+        _local_symbols_compatible(broker_position, stale_lifecycle)
+        and _local_symbols_compatible(broker_position, matched_lifecycle)
+    ):
+        return False
+    broker_qty = _decimal_value(broker_position.get("quantity"))
+    stale_qty = _signed_lifecycle_quantity(stale_lifecycle, _decimal_value(stale_lifecycle.get("quantity")))
+    matched_qty = _signed_lifecycle_quantity(matched_lifecycle, _decimal_value(matched_lifecycle.get("quantity")))
+    return broker_qty is not None and stale_qty == broker_qty and matched_qty == broker_qty
+
+
+def _lifecycle_position_has_broker_backed_identity(lifecycle_position: Mapping[str, Any]) -> bool:
+    identity = _nested_mapping(lifecycle_position, "entry_broker_identity")
+    evidence_fields = (
+        lifecycle_position.get("entry_exec_id"),
+        lifecycle_position.get("exec_id"),
+        identity.get("exec_id"),
+        lifecycle_position.get("entry_perm_id"),
+        lifecycle_position.get("perm_id"),
+        identity.get("perm_id"),
+        lifecycle_position.get("entry_order_id"),
+        lifecycle_position.get("order_id"),
+        identity.get("order_id"),
+    )
+    return any(str(value or "").strip() for value in evidence_fields)
+
+
+def _lifecycle_position_is_weaker_broker_identity(
+    lifecycle_position: Mapping[str, Any],
+    broker_position: Mapping[str, Any],
+) -> bool:
+    if not _lifecycle_account_matches_broker(lifecycle_position, broker_position):
+        return True
+    if not _lifecycle_identity_matches_broker(lifecycle_position, broker_position):
+        return True
+    price_distance = -_negative_price_distance(broker_position=broker_position, lifecycle_position=lifecycle_position)
+    return price_distance > Decimal("1")
+
+
+def _lifecycle_position_scope_key(row: Mapping[str, Any]) -> str:
+    lifecycle_id = str(row.get("lifecycle_id") or "").strip()
+    trade_id = str(row.get("trade_id") or "").strip()
+    if lifecycle_id or trade_id:
+        return f"{trade_id}|{lifecycle_id}"
+    local_symbol = str(row.get("local_symbol") or row.get("localSymbol") or "").strip().upper()
+    con_id = str(row.get("con_id") or row.get("conId") or "").strip()
+    side = str(row.get("side") or row.get("position_side") or "").strip().upper()
+    qty = str(row.get("quantity") or "").strip()
+    entry = str(row.get("entry_timestamp") or row.get("as_of") or "").strip()
+    return f"{con_id}|{local_symbol}|{side}|{qty}|{entry}"
 
 
 def _broker_cost_basis_adjustments_from_match_report(match_report: Mapping[str, Any]) -> list[dict[str, Any]]:
@@ -3869,6 +4039,69 @@ def _broker_cost_basis_adjustment(
         "absolute_points_total": str(abs(total_points)),
         "note": "Captured for broker fee/cost-basis tracking only; IBKR broker truth remains authoritative for live PAPER position state.",
     }
+
+
+def _broker_lifecycle_match_score(
+    *,
+    broker_position: Mapping[str, Any],
+    lifecycle_position: Mapping[str, Any],
+) -> tuple[int, int, Decimal, str]:
+    return (
+        1 if _lifecycle_account_matches_broker(lifecycle_position, broker_position) else 0,
+        1 if _lifecycle_identity_matches_broker(lifecycle_position, broker_position) else 0,
+        _negative_price_distance(broker_position=broker_position, lifecycle_position=lifecycle_position),
+        str(lifecycle_position.get("as_of") or lifecycle_position.get("entry_timestamp") or ""),
+    )
+
+
+def _lifecycle_account_matches_broker(lifecycle_position: Mapping[str, Any], broker_position: Mapping[str, Any]) -> bool:
+    expected = str(broker_position.get("account_id") or broker_position.get("account") or "").strip()
+    if not expected:
+        return False
+    candidates = [
+        lifecycle_position.get("account_id"),
+        _nested_mapping(lifecycle_position, "entry_broker_identity").get("account_id"),
+    ]
+    for unit in lifecycle_position.get("lifecycle_units") or []:
+        if isinstance(unit, Mapping):
+            candidates.append(unit.get("account_id"))
+    return any(str(candidate or "").strip() == expected for candidate in candidates)
+
+
+def _lifecycle_identity_matches_broker(lifecycle_position: Mapping[str, Any], broker_position: Mapping[str, Any]) -> bool:
+    broker_con_id = str(broker_position.get("con_id") or broker_position.get("conId") or "").strip()
+    lifecycle_con_id = str(
+        lifecycle_position.get("con_id")
+        or lifecycle_position.get("conId")
+        or _nested_mapping(lifecycle_position, "entry_broker_identity").get("con_id")
+        or ""
+    ).strip()
+    broker_local = str(broker_position.get("local_symbol") or broker_position.get("localSymbol") or "").strip().upper()
+    lifecycle_local = str(
+        lifecycle_position.get("local_symbol")
+        or lifecycle_position.get("localSymbol")
+        or _nested_mapping(lifecycle_position, "entry_broker_identity").get("local_symbol")
+        or ""
+    ).strip().upper()
+    return bool(broker_con_id and lifecycle_con_id and broker_con_id == lifecycle_con_id) or bool(
+        broker_local and lifecycle_local and broker_local == lifecycle_local
+    )
+
+
+def _negative_price_distance(
+    *,
+    broker_position: Mapping[str, Any],
+    lifecycle_position: Mapping[str, Any],
+) -> Decimal:
+    broker_average = _broker_average_price(broker_position)
+    lifecycle_average = _decimal_value(
+        lifecycle_position.get("avg_entry_price")
+        or lifecycle_position.get("average_entry_price")
+        or lifecycle_position.get("entry_price")
+    )
+    if broker_average is None or lifecycle_average is None:
+        return Decimal("-999999")
+    return -abs(broker_average - lifecycle_average)
 
 
 def _broker_average_price(position: Mapping[str, Any]) -> Decimal | None:

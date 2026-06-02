@@ -95,6 +95,61 @@ def test_broker_lifecycle_match_blocks_collapsed_same_lane_quantity() -> None:
     assert report["state"] == "BROKER_LIFECYCLE_POSITION_DETAIL_MISMATCH"
 
 
+def test_broker_lifecycle_match_scopes_weaker_duplicate_lifecycle_to_full_audit() -> None:
+    report = _broker_lifecycle_position_match(
+        broker_positions=[
+            {
+                "account_id": "DUM882026",
+                "symbol": "MES",
+                "local_symbol": "MESM6",
+                "con_id": 770561194,
+                "expiry": "20260618",
+                "quantity": "1",
+                "average_cost": "38089.37",
+                "multiplier": "5",
+            }
+        ],
+        lifecycle_positions=[
+            {
+                "account_id": "MULTIPLE",
+                "trade_id": "trade_older_globex_lifecycle",
+                "lifecycle_id": "reserved_submit_mes_globex_active_participation_long_older",
+                "instrument_family": "MES",
+                "contract_key": "MES-M6",
+                "local_symbol": "MESM6",
+                "con_id": 770561194,
+                "expiry": "20260618",
+                "side": "LONG",
+                "quantity": "1",
+                "entry_price": "7601.5",
+                "entry_exec_id": "0000e1a7.older.01.01",
+            },
+            {
+                "account_id": "DUM882026",
+                "trade_id": "trade_current_us_long",
+                "lifecycle_id": "reserved_submit_mes_us_active_participation_long_current",
+                "instrument_family": "MES",
+                "contract_key": "MES-202606",
+                "local_symbol": "MESM6",
+                "con_id": 770561194,
+                "expiry": "20260618",
+                "side": "LONG",
+                "quantity": "1",
+                "entry_price": "7617.75",
+                "entry_exec_id": "0000e1a7.6a2e7d49.01.01",
+                "entry_perm_id": "665735688",
+                "entry_order_id": "2",
+            },
+        ],
+        symbols=["MES"],
+    )
+
+    assert report["matched"] is True
+    assert report["matches"][0]["lifecycle_position"]["trade_id"] == "trade_current_us_long"
+    assert report["superseded_unmatched_lifecycle_positions"][0]["trade_id"] == "trade_older_globex_lifecycle"
+    assert report["superseded_unmatched_lifecycle_positions"][0]["classification"] == "STALE_SUPERSEDED_LIFECYCLE_PROJECTION"
+
+
 def test_reconciles_flat_lifecycle_with_fresh_broker_truth_and_unrelated_positions(tmp_path: Path) -> None:
     config = _write_base_artifacts(tmp_path)
     _write_broker_truth(
@@ -1274,6 +1329,114 @@ def test_identity_mismatch_prevents_lifecycle_only_supersession(tmp_path: Path) 
     assert report["registry_reconciliation"]["classification"] == "REGISTRY_RECONCILIATION_REVIEW_REQUIRED"
     assert report["registry_reconciliation"]["superseded_lifecycle_only_records"] == []
     assert "trade_original_mnq_globex_short" in report["registry_reconciliation"]["review_required_trade_ids"]
+
+
+def test_current_broker_position_maps_to_stronger_broker_backed_lifecycle_row(tmp_path: Path) -> None:
+    config = _write_base_artifacts(tmp_path)
+    old_lifecycle = {
+        "account_id": "MULTIPLE",
+        "trade_id": "trade_older_mes_globex_long",
+        "lifecycle_id": "reserved_submit_mes_globex_active_participation_long_older",
+        "strategy_id": "mes_globex_active_participation_long",
+        "instrument_family": "MES",
+        "contract_key": "MES-M6",
+        "local_symbol": "MESM6",
+        "con_id": 770561194,
+        "expiry": "20260618",
+        "side": "LONG",
+        "quantity": "1",
+        "entry_price": "7601.5",
+        "entry_exec_id": "0000e1a7.older.01.01",
+    }
+    current_lifecycle = {
+        "account_id": "DUM882026",
+        "trade_id": "trade_current_mes_us_long",
+        "lifecycle_id": "reserved_submit_mes_us_active_participation_long_current",
+        "strategy_id": "mes_us_active_participation_long",
+        "instrument_family": "MES",
+        "contract_key": "MES-202606",
+        "local_symbol": "MESM6",
+        "con_id": 770561194,
+        "expiry": "20260618",
+        "side": "LONG",
+        "quantity": "1",
+        "entry_price": "7617.75",
+        "entry_exec_id": "0000e1a7.6a2e7d49.01.01",
+        "entry_perm_id": "665735688",
+        "entry_order_id": "2",
+    }
+    _write_json(
+        config.live_position_status_path,
+        {
+            "source": "TRACK_B_LIFECYCLE_ARTIFACTS",
+            "broker_reconciled": False,
+            "open_position_count": 2,
+            "open_order_count": 0,
+            "positions_by_instrument": {
+                old_lifecycle["contract_key"]: old_lifecycle,
+                current_lifecycle["contract_key"]: current_lifecycle,
+            },
+            "positions_by_strategy": {
+                old_lifecycle["strategy_id"]: old_lifecycle,
+                current_lifecycle["strategy_id"]: current_lifecycle,
+            },
+            "review_required_positions": [],
+        },
+    )
+    _write_registry_open_managed_trade(
+        config,
+        trade_id="trade_older_mes_globex_long",
+        lifecycle_id="reserved_submit_mes_globex_active_participation_long_older",
+        lane_id="mes_globex_active_participation_long",
+        strategy_id="mes_globex_active_participation_long",
+        symbol="MES",
+        local_symbol="MESM6",
+        con_id=770561194,
+        expiry="20260618",
+        order_id="1",
+        client_id="11192",
+        entry_perm_id="665735640",
+        entry_exec_id="0000e1a7.older.01.01",
+    )
+    _write_registry_open_managed_trade(
+        config,
+        trade_id="trade_current_mes_us_long",
+        lifecycle_id="reserved_submit_mes_us_active_participation_long_current",
+        lane_id="mes_us_active_participation_long",
+        strategy_id="mes_us_active_participation_long",
+        symbol="MES",
+        local_symbol="MESM6",
+        con_id=770561194,
+        expiry="20260618",
+        order_id="2",
+        client_id="10844",
+        entry_perm_id="665735688",
+        entry_exec_id="0000e1a7.6a2e7d49.01.01",
+    )
+    _write_broker_truth(
+        config,
+        positions=[
+            {
+                "account_id": "DUM882026",
+                "symbol": "MES",
+                "local_symbol": "MESM6",
+                "expiry": "20260618",
+                "con_id": 770561194,
+                "security_type": "FUT",
+                "quantity": "1",
+                "average_cost": "38089.37",
+                "multiplier": "5",
+            }
+        ],
+    )
+
+    report = reconcile_track_b_paper_broker_truth(config=config, now=NOW)
+
+    assert report["position_match_report"]["matched"] is True
+    assert report["position_match_report"]["matches"][0]["lifecycle_position"]["trade_id"] == "trade_current_mes_us_long"
+    assert report["position_match_report"]["superseded_unmatched_lifecycle_positions"][0]["trade_id"] == "trade_older_mes_globex_long"
+    assert report["registry_reconciliation"]["classification"] == "REGISTRY_RECONCILIATION_MATCHED"
+    assert report["registry_reconciliation"]["mapped_trade_ids"] == ["trade_current_mes_us_long"]
 
 
 def test_managed_exit_after_recovery_uses_trade_id(tmp_path: Path) -> None:

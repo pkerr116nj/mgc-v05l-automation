@@ -416,7 +416,10 @@ def _is_non_authoritative_aggregate_review_event(
         return False
     if ownership is None or not broker_backed_entry:
         return False
-    if not _is_placeholder_identity_value(event.account_id):
+    if not (
+        _is_placeholder_identity_value(event.account_id)
+        or event.account_id == ownership.account_id
+    ):
         return False
     if event.lifecycle_id and ownership.lifecycle_id and event.lifecycle_id != ownership.lifecycle_id:
         return False

@@ -399,7 +399,7 @@ def _managed_positions(
     )
     for key in keys:
         broker = _first_match(broker_positions, key)
-        lifecycle = _first_match(lifecycle_positions, key)
+        lifecycle = _best_lifecycle_match(lifecycle_positions, key, broker)
         review = _first_match(review_positions, key)
         lifecycle_id = str((lifecycle or review or {}).get("lifecycle_id") or "")
         lifecycle_report = _lifecycle_report(lifecycle_id, lifecycle_reports)
@@ -1196,6 +1196,71 @@ def _position_key(row: Mapping[str, Any]) -> str:
 def _first_match(rows: list[dict[str, Any]], key: str) -> dict[str, Any] | None:
     matches = [row for row in rows if _position_key(row) == key]
     return matches[-1] if matches else None
+
+
+def _best_lifecycle_match(
+    rows: list[dict[str, Any]],
+    key: str,
+    broker: Mapping[str, Any] | None,
+) -> dict[str, Any] | None:
+    matches = [row for row in rows if _position_key(row) == key]
+    if not matches:
+        return None
+    if not broker:
+        return matches[-1]
+    return max(matches, key=lambda row: _lifecycle_broker_match_score(row, broker))
+
+
+def _lifecycle_broker_match_score(row: Mapping[str, Any], broker: Mapping[str, Any]) -> tuple[int, int, int, Decimal, str]:
+    account_score = 1 if _account_matches(row, broker) else 0
+    identity_score = 1 if _contract_identity_matches(row, broker) else 0
+    quantity_score = 1 if _signed_lifecycle_quantity(row) == _decimal(broker.get("quantity")) else 0
+    price_score = _negative_price_distance(row, broker)
+    as_of = str(row.get("as_of") or row.get("entry_timestamp") or "")
+    return (account_score, identity_score, quantity_score, price_score, as_of)
+
+
+def _account_matches(row: Mapping[str, Any], broker: Mapping[str, Any]) -> bool:
+    expected = str(broker.get("account_id") or broker.get("account") or "").strip()
+    if not expected:
+        return False
+    candidates = [
+        row.get("account_id"),
+        _mapping(row.get("entry_broker_identity")).get("account_id"),
+    ]
+    candidates.extend(unit.get("account_id") for unit in _list(row.get("lifecycle_units")))
+    return any(str(candidate or "").strip() == expected for candidate in candidates)
+
+
+def _contract_identity_matches(row: Mapping[str, Any], broker: Mapping[str, Any]) -> bool:
+    broker_con_id = str(broker.get("con_id") or broker.get("conId") or "").strip()
+    row_con_id = str(row.get("con_id") or row.get("conId") or _mapping(row.get("entry_broker_identity")).get("con_id") or "").strip()
+    broker_local = str(broker.get("local_symbol") or broker.get("localSymbol") or "").strip().upper()
+    row_local = str(row.get("local_symbol") or row.get("localSymbol") or _mapping(row.get("entry_broker_identity")).get("local_symbol") or "").strip().upper()
+    con_id_matches = bool(broker_con_id and row_con_id and broker_con_id == row_con_id)
+    local_matches = bool(broker_local and row_local and broker_local == row_local)
+    return con_id_matches or local_matches
+
+
+def _negative_price_distance(row: Mapping[str, Any], broker: Mapping[str, Any]) -> Decimal:
+    broker_price = _broker_average_price(broker)
+    lifecycle_price = _decimal(row.get("avg_entry_price") or row.get("entry_price"))
+    if broker_price is None or lifecycle_price is None:
+        return Decimal("-999999")
+    return -abs(broker_price - lifecycle_price)
+
+
+def _broker_average_price(row: Mapping[str, Any]) -> Decimal | None:
+    average_price = _decimal(row.get("average_price") or row.get("avg_entry_price"))
+    if average_price is not None:
+        return average_price
+    average_cost = _decimal(row.get("average_cost"))
+    multiplier = _decimal(row.get("multiplier"))
+    if average_cost is None:
+        return None
+    if multiplier is None or multiplier == 0:
+        return average_cost
+    return average_cost / multiplier
 
 
 def _symbol(row: Mapping[str, Any] | None) -> str | None:

@@ -195,6 +195,8 @@ def _read_payloads(path: Path) -> list[Any]:
 def _candidates_from_payload(payload: Any, *, source_path: Path) -> list[dict[str, Any]]:
     if not isinstance(payload, Mapping):
         return []
+    if source_path.name == Path(DEFAULT_TRACK_B_SUBMIT_INTENT_OWNERSHIP_JSONL).name:
+        return []
     source_path_text = str(source_path)
     candidates: list[dict[str, Any]] = []
     if source_path.name == "ibkr_paper_strategy_bridge_report.json":
@@ -295,6 +297,7 @@ def _merge_context(context: Mapping[str, Any], row: Mapping[str, Any]) -> dict[s
         "fill_price",
         "fill_timestamp",
         "executed_at",
+        "time",
     ):
         if row.get(key) not in (None, ""):
             merged.setdefault(key, row.get(key))
@@ -363,7 +366,13 @@ def _normalized_evidence(candidate: Mapping[str, Any], request: BrokerFillEviden
         "action": _normalize_action(candidate.get("action") or request.action) or None,
         "qty": _text(candidate.get("qty") or candidate.get("quantity") or request.qty) or None,
         "price": _text(candidate.get("price") or candidate.get("fill_price") or candidate.get("avg_fill_price")) or None,
-        "fill_timestamp": _text(candidate.get("fill_timestamp") or candidate.get("executed_at") or candidate.get("updated_at")) or None,
+        "fill_timestamp": _text(
+            candidate.get("fill_timestamp")
+            or candidate.get("executed_at")
+            or candidate.get("time")
+            or candidate.get("updated_at")
+        )
+        or None,
         "source": candidate.get("source"),
         "source_artifact_path": candidate.get("source_artifact_path"),
         "latest_order_status_price": _text(candidate.get("latest_order_status_price")) or None,
