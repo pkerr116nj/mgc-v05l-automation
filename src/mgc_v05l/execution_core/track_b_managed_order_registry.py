@@ -16,6 +16,10 @@ from pathlib import Path
 from typing import Any, Mapping
 
 from mgc_v05l.execution_core.track_b_atomic_io import write_json_atomic
+from mgc_v05l.execution_core.track_b_pre_restart_exposure_reconciliation import (
+    PreRestartExposureResolverConfig,
+    resolve_pre_restart_exposure_reconciliation,
+)
 from mgc_v05l.execution_core.track_b_projection_metadata import build_projection_metadata
 
 
@@ -107,6 +111,14 @@ def build_track_b_managed_order_registry(
     lifecycle_reports = _load_lifecycle_reports(config.resolve(config.lifecycle_root))
     manifests = _load_manifests(config.resolve(config.manifest_root))
     ownership_records = _load_submit_ownership_records(config.resolve(config.submit_ownership_jsonl_path))
+    pre_restart_exposure_resolution = resolve_pre_restart_exposure_reconciliation(
+        config=PreRestartExposureResolverConfig(repo_root=config.repo_root),
+        broker_positions=_list(open_order_truth.get("broker_positions_without_close_order"))
+        or _list(reconciliation.get("track_b_broker_positions")),
+        lifecycle_positions=_list(reconciliation.get("track_b_lifecycle_positions")),
+        broker_open_orders=_list(reconciliation.get("track_b_broker_open_orders")),
+        lifecycle_reports=lifecycle_reports,
+    )
 
     source_stale = _source_stale(
         now=actual_now,
@@ -137,6 +149,8 @@ def build_track_b_managed_order_registry(
         _position_without_close_rows(
             open_order_truth=open_order_truth,
             managed_positions=managed_positions,
+            reconciliation=reconciliation,
+            resolver_payload=pre_restart_exposure_resolution,
             lifecycle_reports=lifecycle_reports,
             manifests=manifests,
         )
@@ -152,6 +166,7 @@ def build_track_b_managed_order_registry(
         "live_money_eligible": reconciliation.get("live_money_eligible") is True,
         "classification": classification,
         "managed_orders": managed_orders,
+        "pre_restart_exposure_resolution": pre_restart_exposure_resolution,
         "source_freshness": source_stale,
         "open_order_truth": _authority_summary(open_order_truth, config.resolve(config.open_order_truth_path)),
         "position_truth": _authority_summary(position_truth, config.resolve(config.position_truth_path)),
@@ -372,11 +387,14 @@ def _position_without_close_rows(
     *,
     open_order_truth: Mapping[str, Any],
     managed_positions: Mapping[str, Any],
+    reconciliation: Mapping[str, Any],
+    resolver_payload: Mapping[str, Any],
     lifecycle_reports: list[dict[str, Any]],
     manifests: list[dict[str, Any]],
 ) -> list[dict[str, Any]]:
     rows: list[dict[str, Any]] = []
     registry_positions = _list(managed_positions.get("managed_positions"))
+    registry_positions.extend(_list(resolver_payload.get("resolved_lifecycle_positions")))
     for position in _list(open_order_truth.get("broker_positions_without_close_order")):
         registry_position = _registry_position_for_broker_position(position=position, registry_positions=registry_positions)
         lifecycle_report = _lifecycle_report_for_registry_position(

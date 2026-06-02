@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import json
 from datetime import UTC, datetime
+from decimal import Decimal
 from pathlib import Path
 
+from mgc_v05l.execution_core.track_b_central_trade_registry import TradeEvent, TradeEventType
 from mgc_v05l.execution_core.track_b_managed_order_registry import (
     ACTIVE_HOLD_MANAGED_TIMED_EXIT_PENDING,
     BROKER_FLAT_WITH_WORKING_CLOSE,
@@ -120,6 +122,25 @@ def test_position_without_close_order_is_tracked(tmp_path: Path) -> None:
     assert payload["classification"] == POSITION_WITHOUT_CLOSE_ORDER
     assert payload["managed_orders"][0]["classification"] == POSITION_WITHOUT_CLOSE_ORDER
     assert payload["managed_orders"][0]["action"] == "SELL"
+
+
+def test_position_without_close_order_uses_pre_restart_resolved_identity(tmp_path: Path) -> None:
+    _seed_base(tmp_path, positions_without_close=[_broker_position()])
+    _write_registry_open_managed_events(tmp_path)
+
+    payload = build_track_b_managed_order_registry(
+        config=TrackBManagedOrderRegistryConfig(repo_root=tmp_path),
+        now=NOW,
+    )
+
+    row = payload["managed_orders"][0]
+    assert payload["classification"] == POSITION_WITHOUT_CLOSE_ORDER
+    assert row["lifecycle_id"] == "life_mnq"
+    assert row["strategy_id"] == "mnq_globex_active_participation_long"
+    assert (
+        payload["pre_restart_exposure_resolution"]["classification"]
+        == "PROJECTION_STALE_MANAGED_EXPOSURE_RESOLVED"
+    )
 
 
 def test_managed_timed_hold_pending_is_not_review_required(tmp_path: Path) -> None:
@@ -354,6 +375,47 @@ def _broker_position() -> dict:
         "quantity": "1",
         "average_cost": "59138.12",
     }
+
+
+def _write_registry_open_managed_events(root: Path) -> None:
+    path = root / "outputs" / "track_b_execution_core" / "trade_registry" / "live_trade_events.jsonl"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    base = {
+        "trade_id": "trade_mnq",
+        "lifecycle_id": "life_mnq",
+        "lane_id": "mnq_globex_active_participation_long",
+        "thesis_strategy_id": "mnq_globex_active_participation_long",
+        "account_id": "DUM882026",
+        "symbol": "MNQ",
+        "con_id": 770561201,
+        "local_symbol": "MNQM6",
+        "expiry": "202606",
+        "side": "LONG",
+        "action": "BUY",
+        "qty": Decimal("1"),
+        "source_artifact_path": "outputs/track_b_execution_core/test.json",
+    }
+    events = [
+        TradeEvent(
+            event_id="trade_mnq_fill",
+            event_type=TradeEventType.ENTRY_FILL_BROKER_BACKED,
+            generated_at=NOW,
+            order_id="1",
+            client_id="111",
+            perm_id="perm_mnq",
+            exec_id="exec_mnq",
+            price=Decimal("29569.06"),
+            **base,
+        ),
+        TradeEvent(
+            event_id="trade_mnq_open",
+            event_type=TradeEventType.LIFECYCLE_OPEN_MANAGED,
+            generated_at=NOW,
+            metadata={"managed_exit_policy_id": "GLOBEX_ACTIVE_EVIDENCE_TIMEBOX_60M_EXIT_V1"},
+            **base,
+        ),
+    ]
+    path.write_text("\n".join(json.dumps(event.to_dict(), sort_keys=True) for event in events) + "\n", encoding="utf-8")
 
 
 def _write_json(path: Path, payload: dict) -> None:

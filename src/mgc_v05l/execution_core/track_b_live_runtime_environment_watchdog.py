@@ -28,6 +28,10 @@ from mgc_v05l.execution_core.track_b_runtime_supervisor_authority import (
     DEFAULT_RUNTIME_SUPERVISOR_AUTHORITY_ARTIFACT,
 )
 from mgc_v05l.execution_core.track_b_registry_truth_diagnostics import DEFAULT_DIAGNOSTICS_REPORT_PATH
+from mgc_v05l.execution_core.track_b_pre_restart_exposure_reconciliation import (
+    PreRestartExposureResolverConfig,
+    resolve_pre_restart_exposure_reconciliation,
+)
 
 
 SCHEMA_VERSION = "track_b_live_runtime_environment_watchdog_v1"
@@ -181,6 +185,12 @@ def build_track_b_live_runtime_environment_watchdog(
     lifecycle_open_positions = _int_or_zero(
         reconciliation.get("lifecycle_open_position_count") or registry.get("lifecycle_open_position_count")
     )
+    pre_restart_exposure_resolution = resolve_pre_restart_exposure_reconciliation(
+        config=PreRestartExposureResolverConfig(repo_root=config.repo_root),
+        broker_positions=_list(reconciliation.get("track_b_broker_positions")),
+        lifecycle_positions=_list(reconciliation.get("track_b_lifecycle_positions")),
+        broker_open_orders=_list(reconciliation.get("track_b_broker_open_orders")),
+    )
     recovery_active = _recovery_active(recovery)
     current_head = source_commit_resolver(config.repo_root)
     source_commit = str(runtime_truth.get("source_commit") or "").strip() or None
@@ -235,6 +245,7 @@ def build_track_b_live_runtime_environment_watchdog(
         registry_clean=registry_clean,
         duplicate_writer=duplicate_writer,
         recovery_active=recovery_active,
+        pre_restart_exposure_resolution=pre_restart_exposure_resolution,
     )
     return {
         "schema_version": SCHEMA_VERSION,
@@ -306,6 +317,7 @@ def build_track_b_live_runtime_environment_watchdog(
             or len(registry.get("review_required_trade_ids") or []),
             "generated_at": registry.get("generated_at"),
         },
+        "pre_restart_exposure_resolution": pre_restart_exposure_resolution,
         "recovery": {
             "active": recovery_active,
             "classification": recovery.get("classification"),
@@ -424,6 +436,7 @@ def _restart_policy(
     registry_clean: bool,
     duplicate_writer: bool,
     recovery_active: bool,
+    pre_restart_exposure_resolution: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     flat_clean = (
         track_b_positions == 0
@@ -435,15 +448,27 @@ def _restart_policy(
         and recovery_active
     )
     open_exposure = track_b_positions > 0 or broker_open_orders > 0 or lifecycle_open_positions > 0
+    exposure_resolution = dict(pre_restart_exposure_resolution or {})
+    owned_exposure_proven = (
+        track_b_positions > 0
+        and broker_open_orders == 0
+        and exposure_resolution.get("restart_with_owned_exposure_allowed") is True
+        and int(exposure_resolution.get("review_required_exposure_count") or 0) == 0
+        and not duplicate_writer
+        and recovery_active
+    )
+    restart_allowed = flat_clean or owned_exposure_proven
     return {
-        "process_died_restart_allowed": (not runtime_alive) and flat_clean,
+        "process_died_restart_allowed": (not runtime_alive) and restart_allowed,
         "degraded_restart_allowed": runtime_alive
         and classification in {DEGRADED_AUTHORITY_STALE, DEGRADED_DATA_STALE, DEGRADED_LANES_NOT_EVALUATING}
-        and flat_clean,
-        "requires_flat_clean_state": True,
+        and restart_allowed,
+        "requires_flat_clean_state": not owned_exposure_proven,
+        "owned_exposure_restart_allowed": owned_exposure_proven,
         "open_exposure_or_orders_present": open_exposure,
         "recovery_active_required": True,
-        "reason_codes": [] if flat_clean else _restart_blockers(
+        "pre_restart_exposure_resolution_classification": exposure_resolution.get("classification"),
+        "reason_codes": [] if restart_allowed else _restart_blockers(
             track_b_positions=track_b_positions,
             broker_open_orders=broker_open_orders,
             lifecycle_open_positions=lifecycle_open_positions,
@@ -451,6 +476,7 @@ def _restart_policy(
             registry_clean=registry_clean,
             duplicate_writer=duplicate_writer,
             recovery_active=recovery_active,
+            owned_exposure_proven=owned_exposure_proven,
         ),
     }
 
@@ -464,9 +490,10 @@ def _restart_blockers(
     registry_clean: bool,
     duplicate_writer: bool,
     recovery_active: bool,
+    owned_exposure_proven: bool = False,
 ) -> list[str]:
     blockers: list[str] = []
-    if track_b_positions or broker_open_orders or lifecycle_open_positions:
+    if (track_b_positions or broker_open_orders or lifecycle_open_positions) and not owned_exposure_proven:
         blockers.append("NO_AUTOMATIC_RESTART_OPEN_EXPOSURE_WITHOUT_PROVEN_IDENTITY")
     if not broker_lifecycle_clean:
         blockers.append("BROKER_LIFECYCLE_NOT_RECONCILED")
@@ -566,6 +593,10 @@ def _read_json(path: Path) -> dict[str, Any]:
     except (OSError, json.JSONDecodeError):
         return {}
     return dict(payload) if isinstance(payload, Mapping) else {}
+
+
+def _list(value: object) -> list[dict[str, Any]]:
+    return [dict(item) for item in value if isinstance(item, Mapping)] if isinstance(value, list) else []
 
 
 def _artifact_age_seconds(payload: Mapping[str, Any], now: datetime) -> float | None:

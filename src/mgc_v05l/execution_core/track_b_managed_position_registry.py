@@ -20,6 +20,10 @@ from mgc_v05l.execution_core.track_b_lifecycle_state_transition import (
     normalize_lifecycle_state,
     requires_operator_action,
 )
+from mgc_v05l.execution_core.track_b_pre_restart_exposure_reconciliation import (
+    PreRestartExposureResolverConfig,
+    resolve_pre_restart_exposure_reconciliation,
+)
 from mgc_v05l.execution_core.track_b_projection_metadata import build_projection_metadata
 
 
@@ -128,6 +132,17 @@ def build_track_b_managed_position_registry(
     lifecycle_positions = [
         item for item in _list(reconciliation.get("track_b_lifecycle_positions")) if _lifecycle_position_registry_eligible(item)
     ]
+    pre_restart_exposure_resolution = resolve_pre_restart_exposure_reconciliation(
+        config=PreRestartExposureResolverConfig(repo_root=config.repo_root),
+        broker_positions=broker_positions,
+        lifecycle_positions=lifecycle_positions,
+        broker_open_orders=_list(reconciliation.get("track_b_broker_open_orders")),
+        lifecycle_reports=lifecycle_reports,
+    )
+    lifecycle_positions = _merge_resolved_lifecycle_positions(
+        lifecycle_positions=lifecycle_positions,
+        resolved_lifecycle_positions=_list(pre_restart_exposure_resolution.get("resolved_lifecycle_positions")),
+    )
     unresolved_ownership = _list(reconciliation.get("unresolved_submit_intent_ownership_records"))
     open_order_states = _list(open_order_truth.get("order_states"))
     managed_order_states = _list(managed_order_registry.get("managed_orders"))
@@ -202,6 +217,7 @@ def build_track_b_managed_position_registry(
         "review_required_positions": review_positions,
         "historical_review_positions": historical_review_positions,
         "unresolved_submit_ownership": unresolved_ownership,
+        "pre_restart_exposure_resolution": pre_restart_exposure_resolution,
         "source_freshness": source_stale,
         "position_truth": _authority_summary(position_truth, config.resolve(config.position_truth_path)),
         "open_order_truth": _authority_summary(open_order_truth, config.resolve(config.open_order_truth_path)),
@@ -240,6 +256,12 @@ def build_track_b_managed_position_registry(
             "lifecycle_position_count": len(lifecycle_positions),
             "review_required_count": len(review_positions),
             "historical_review_position_count": len(historical_review_positions),
+            "pre_restart_resolved_managed_exposure_count": pre_restart_exposure_resolution.get(
+                "resolved_managed_exposure_count"
+            ),
+            "pre_restart_review_required_exposure_count": pre_restart_exposure_resolution.get(
+                "review_required_exposure_count"
+            ),
         },
         "event_state": _event_state(classification=classification, managed_positions=managed_positions),
         "artifact_paths": {
@@ -438,6 +460,7 @@ def _managed_positions(
             "unmanaged_qty": None if broker_qty_match else _decimal_display(signed_broker_qty),
             "lane_id": (lifecycle or review or manifest or {}).get("lane_id"),
             "strategy_id": (lifecycle or review or lifecycle_report or manifest or {}).get("strategy_id"),
+            "trade_id": (lifecycle or review or lifecycle_report or manifest or {}).get("trade_id"),
             "lifecycle_id": lifecycle_id or None,
             "manifest_id": (manifest or {}).get("entry_intent_id"),
             "manifest_path": _manifest_path(manifest),
@@ -918,6 +941,33 @@ def _lifecycle_position_registry_eligible(position: Mapping[str, Any]) -> bool:
     if not state:
         return True
     return is_registry_eligible(state)
+
+
+def _merge_resolved_lifecycle_positions(
+    *,
+    lifecycle_positions: list[dict[str, Any]],
+    resolved_lifecycle_positions: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    merged = list(lifecycle_positions)
+    existing_keys = {_position_key(item) for item in merged if _position_key(item)}
+    existing_lifecycle_ids = {
+        str(item.get("lifecycle_id") or "").strip()
+        for item in merged
+        if str(item.get("lifecycle_id") or "").strip()
+    }
+    for row in resolved_lifecycle_positions:
+        key = _position_key(row)
+        lifecycle_id = str(row.get("lifecycle_id") or "").strip()
+        if lifecycle_id and lifecycle_id in existing_lifecycle_ids:
+            continue
+        if key and key in existing_keys:
+            continue
+        merged.append(dict(row))
+        if key:
+            existing_keys.add(key)
+        if lifecycle_id:
+            existing_lifecycle_ids.add(lifecycle_id)
+    return merged
 
 
 def _lifecycle_requires_operator_action(

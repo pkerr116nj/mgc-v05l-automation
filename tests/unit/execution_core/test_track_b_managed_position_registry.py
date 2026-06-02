@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import json
 from datetime import UTC, datetime
+from decimal import Decimal
 from pathlib import Path
 
+from mgc_v05l.execution_core.track_b_central_trade_registry import TradeEvent, TradeEventType
 from mgc_v05l.execution_core.track_b_managed_position_registry import (
     BROKER_BACKED_ADOPTION_REQUIRED,
     LIFECYCLE_WITHOUT_BROKER,
@@ -436,6 +438,31 @@ def test_broker_backed_position_without_lifecycle_requires_adoption(tmp_path: Pa
     assert payload["managed_positions"][0]["recommended_operator_action"].startswith("Run scoped broker-backed adoption")
 
 
+def test_registry_backed_broker_position_repairs_stale_lifecycle_projection(tmp_path: Path) -> None:
+    _seed_base(tmp_path, broker_positions=[_broker_position()])
+    _write_registry_open_managed_events(tmp_path)
+    _write_lifecycle_report(
+        tmp_path,
+        lifecycle_id="bridge_fill_mnq_short",
+        policy="GLOBEX_ACTIVE_EVIDENCE_TIMEBOX_60M_EXIT_V1",
+        bars_since_fill=12,
+    )
+
+    payload = build_track_b_managed_position_registry(
+        config=TrackBManagedPositionRegistryConfig(repo_root=tmp_path),
+        now=NOW,
+    )
+
+    assert payload["classification"] == OPEN_MANAGED_EXIT_DUE
+    assert payload["managed_positions"][0]["trade_id"] == "trade_mnq"
+    assert payload["managed_positions"][0]["lifecycle_id"] == "bridge_fill_mnq_short"
+    assert payload["managed_positions"][0]["attention_required"] is False
+    assert (
+        payload["pre_restart_exposure_resolution"]["classification"]
+        == "PROJECTION_STALE_MANAGED_EXPOSURE_RESOLVED"
+    )
+
+
 def test_lifecycle_missing_policy_is_metadata_incomplete(tmp_path: Path) -> None:
     lifecycle = _lifecycle_position(policy="")
     _seed_base(tmp_path, broker_positions=[_broker_position()], lifecycle_positions=[lifecycle])
@@ -702,6 +729,56 @@ def _write_phase1_5m_bars(root: Path, *, symbol: str, bar_ends: list[str]) -> No
             "bars": [{"bar_end": value, "close": "100.0"} for value in bar_ends],
         },
     )
+
+
+def _write_registry_open_managed_events(root: Path) -> None:
+    path = root / "outputs" / "track_b_execution_core" / "trade_registry" / "live_trade_events.jsonl"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    events = [
+        TradeEvent(
+            event_id="trade_mnq_entry_fill",
+            event_type=TradeEventType.ENTRY_FILL_BROKER_BACKED,
+            generated_at=NOW,
+            trade_id="trade_mnq",
+            lifecycle_id="bridge_fill_mnq_short",
+            lane_id="track_b_paper_execution_test_mule_v1__mnq",
+            thesis_strategy_id="track_b_paper_execution_test_mule_v1__mnq",
+            account_id="DUM882026",
+            symbol="MNQ",
+            con_id=770561201,
+            local_symbol="MNQM6",
+            expiry="20260618",
+            side="SHORT",
+            action="SELL",
+            qty=Decimal("1"),
+            source_artifact_path="outputs/track_b_execution_core/test_entry.json",
+            order_id="1",
+            client_id="111",
+            perm_id="perm_mnq",
+            exec_id="exec_mnq",
+            price=Decimal("29688.69"),
+        ),
+        TradeEvent(
+            event_id="trade_mnq_open_managed",
+            event_type=TradeEventType.LIFECYCLE_OPEN_MANAGED,
+            generated_at=NOW,
+            trade_id="trade_mnq",
+            lifecycle_id="bridge_fill_mnq_short",
+            lane_id="track_b_paper_execution_test_mule_v1__mnq",
+            thesis_strategy_id="track_b_paper_execution_test_mule_v1__mnq",
+            account_id="DUM882026",
+            symbol="MNQ",
+            con_id=770561201,
+            local_symbol="MNQM6",
+            expiry="20260618",
+            side="SHORT",
+            action="SELL",
+            qty=Decimal("1"),
+            source_artifact_path="outputs/track_b_execution_core/test_lifecycle.json",
+            metadata={"managed_exit_policy_id": "GLOBEX_ACTIVE_EVIDENCE_TIMEBOX_60M_EXIT_V1"},
+        ),
+    ]
+    path.write_text("\n".join(json.dumps(event.to_dict(), sort_keys=True) for event in events) + "\n", encoding="utf-8")
 
 
 def _write_position_truth_clean_flat(root: Path) -> None:
