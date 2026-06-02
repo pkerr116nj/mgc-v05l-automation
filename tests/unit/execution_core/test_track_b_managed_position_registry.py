@@ -439,7 +439,9 @@ def test_broker_backed_position_without_lifecycle_requires_adoption(tmp_path: Pa
 
 
 def test_registry_backed_broker_position_repairs_stale_lifecycle_projection(tmp_path: Path) -> None:
-    _seed_base(tmp_path, broker_positions=[_broker_position()])
+    broker = _broker_position()
+    broker.pop("con_id")
+    _seed_base(tmp_path, broker_positions=[broker])
     _write_registry_open_managed_events(tmp_path)
     _write_lifecycle_report(
         tmp_path,

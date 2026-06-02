@@ -340,7 +340,6 @@ def test_restart_with_registry_backed_open_position_resumes_same_trade_id(tmp_pa
                 "account_id": "DUM882026",
                 "symbol": "MNQ",
                 "local_symbol": "MNQM6",
-                "con_id": 770561201,
                 "expiry": "20260618",
                 "security_type": "FUT",
                 "quantity": "1",

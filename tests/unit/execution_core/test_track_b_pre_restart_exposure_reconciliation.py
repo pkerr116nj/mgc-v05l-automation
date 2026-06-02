@@ -45,6 +45,49 @@ def test_broker_position_and_registry_open_managed_stale_lifecycle_projection_re
     assert payload["resolved_lifecycle_positions"][0]["lifecycle_id"] == "life_mes"
 
 
+def test_mes_regression_missing_broker_con_id_resolves_from_registry_identity(tmp_path: Path) -> None:
+    record = _registry_record(symbol="MES", local_symbol="MESM6", con_id=770561194, side="SHORT")
+
+    payload = resolve_pre_restart_exposure_reconciliation(
+        config=PreRestartExposureResolverConfig(repo_root=tmp_path),
+        broker_positions=[_broker_position(symbol="MES", local_symbol="MESM6", con_id=None, quantity="-1")],
+        lifecycle_positions=[],
+        registry_records=[record],
+    )
+
+    assert payload["classification"] == PROJECTION_STALE_MANAGED_EXPOSURE_RESOLVED
+    assert payload["restart_with_owned_exposure_allowed"] is True
+    assert payload["managed_exposures"][0]["canonical_broker_position"]["con_id"] == 770561194
+    assert payload["managed_exposures"][0]["canonical_identity_resolution"]["classification"] == (
+        "BROKER_POSITION_IDENTITY_READY"
+    )
+
+
+def test_ambiguous_missing_broker_con_id_blocks_restart(tmp_path: Path) -> None:
+    first = _registry_record(symbol="MES", local_symbol="MESM6", con_id=770561194, side="SHORT")
+    second = _registry_record(
+        symbol="MES",
+        local_symbol="MESM6",
+        con_id=999999999,
+        side="SHORT",
+        trade_id="trade_mes_ambiguous",
+        lifecycle_id="life_mes_ambiguous",
+    )
+
+    payload = resolve_pre_restart_exposure_reconciliation(
+        config=PreRestartExposureResolverConfig(repo_root=tmp_path),
+        broker_positions=[_broker_position(symbol="MES", local_symbol="MESM6", con_id=None, quantity="-1")],
+        lifecycle_positions=[],
+        registry_records=[first, second],
+    )
+
+    assert payload["classification"] == REVIEW_REQUIRED_UNMANAGED_BROKER_EXPOSURE
+    assert payload["restart_with_owned_exposure_allowed"] is False
+    assert payload["review_required_exposures"][0]["reason_codes"] == [
+        "AMBIGUOUS_CON_ID_FOR_LOCAL_SYMBOL_ACCOUNT"
+    ]
+
+
 def test_broker_position_and_existing_lifecycle_projection_resolves_managed(tmp_path: Path) -> None:
     lifecycle = _lifecycle_position(symbol="MNQ", local_symbol="MNQM6", con_id=770561201, side="SHORT")
 
@@ -88,9 +131,17 @@ def test_open_order_prevents_restart_even_when_exposure_identity_resolves(tmp_pa
     assert payload["restart_with_owned_exposure_allowed"] is False
 
 
-def _registry_record(*, symbol: str, local_symbol: str, con_id: int, side: str):
-    trade_id = f"trade_{symbol.lower()}"
-    lifecycle_id = f"life_{symbol.lower()}"
+def _registry_record(
+    *,
+    symbol: str,
+    local_symbol: str,
+    con_id: int,
+    side: str,
+    trade_id: str | None = None,
+    lifecycle_id: str | None = None,
+):
+    trade_id = trade_id or f"trade_{symbol.lower()}"
+    lifecycle_id = lifecycle_id or f"life_{symbol.lower()}"
     return reduce_trade_events(
         [
             _event(
@@ -161,16 +212,18 @@ def _event(
     )
 
 
-def _broker_position(*, symbol: str, local_symbol: str, con_id: int, quantity: str) -> dict:
-    return {
+def _broker_position(*, symbol: str, local_symbol: str, con_id: int | None, quantity: str) -> dict:
+    row = {
         "account_id": "DUM882026",
         "symbol": symbol,
         "track_b_root": symbol,
         "local_symbol": local_symbol,
-        "con_id": con_id,
         "expiry": "202606",
         "quantity": quantity,
     }
+    if con_id is not None:
+        row["con_id"] = con_id
+    return row
 
 
 def _lifecycle_position(*, symbol: str, local_symbol: str, con_id: int, side: str) -> dict:

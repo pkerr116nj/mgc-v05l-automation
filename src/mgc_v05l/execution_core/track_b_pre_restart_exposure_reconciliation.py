@@ -8,11 +8,17 @@ state.
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
+from mgc_v05l.execution_core.track_b_broker_position_identity import (
+    IDENTITY_AMBIGUOUS,
+    IDENTITY_NOT_READY,
+    canonicalize_broker_position_identity,
+)
 from mgc_v05l.execution_core.track_b_central_trade_registry import TradeCurrentState, TradeRegistryRecord
 from mgc_v05l.execution_core.track_b_live_trade_registry import load_live_trade_registry_records
 
@@ -34,6 +40,12 @@ OPEN_REGISTRY_STATES = {
 @dataclass(frozen=True)
 class PreRestartExposureResolverConfig:
     repo_root: Path
+    contract_resolver_status_path: Path = (
+        Path("outputs") / "track_b_execution_core" / "contract_resolver" / "latest_contract_resolver_status.json"
+    )
+
+    def resolve(self, path: Path) -> Path:
+        return path if path.is_absolute() else self.repo_root / path
 
 
 def resolve_pre_restart_exposure_reconciliation(
@@ -68,19 +80,41 @@ def resolve_pre_restart_exposure_reconciliation(
         repo_root=config.repo_root
     )
     active_records = [record for record in records if record.current_state in OPEN_REGISTRY_STATES]
+    contract_resolver_status = _read_json(config.resolve(config.contract_resolver_status_path))
     managed: list[dict[str, Any]] = []
     review: list[dict[str, Any]] = []
     resolved_lifecycle_positions: list[dict[str, Any]] = []
 
-    for broker_position in broker_rows:
+    for raw_broker_position in broker_rows:
+        identity_resolution = canonicalize_broker_position_identity(
+            broker_position=raw_broker_position,
+            registry_records=active_records,
+            lifecycle_positions=lifecycle_rows,
+            lifecycle_reports=lifecycle_reports,
+            contract_resolver_status=contract_resolver_status,
+        )
+        broker_position = identity_resolution.canonical_position
         key = _position_key(broker_position)
+        if identity_resolution.classification in {IDENTITY_NOT_READY, IDENTITY_AMBIGUOUS}:
+            review.append(
+                {
+                    "classification": REVIEW_REQUIRED_UNMANAGED_BROKER_EXPOSURE,
+                    "reason_codes": list(identity_resolution.reason_codes),
+                    "broker_position": raw_broker_position,
+                    "canonical_identity_resolution": identity_resolution.to_dict(),
+                    "position_key": key,
+                }
+            )
+            continue
         lifecycle_match = _matching_lifecycle_position(broker_position, lifecycle_rows)
         registry_matches = _registry_matches_for_broker_position(active_records, broker_position)
         if lifecycle_match and _lifecycle_identity_proves_broker_position(lifecycle_match, broker_position):
             exposure = {
                 "classification": MANAGED_EXPOSURE_RESOLVED,
                 "reason_codes": ["EXACT_LIFECYCLE_PROJECTION_MATCHED_BROKER_POSITION"],
-                "broker_position": broker_position,
+                "broker_position": raw_broker_position,
+                "canonical_broker_position": broker_position,
+                "canonical_identity_resolution": identity_resolution.to_dict(),
                 "lifecycle_position": lifecycle_match,
                 "trade_id": lifecycle_match.get("trade_id"),
                 "lifecycle_id": lifecycle_match.get("lifecycle_id"),
@@ -101,7 +135,9 @@ def resolve_pre_restart_exposure_reconciliation(
                     "REGISTRY_OPEN_MANAGED_MATCHED_BROKER_POSITION",
                     "LIFECYCLE_PROJECTION_STALE_OR_EMPTY",
                 ],
-                "broker_position": broker_position,
+                "broker_position": raw_broker_position,
+                "canonical_broker_position": broker_position,
+                "canonical_identity_resolution": identity_resolution.to_dict(),
                 "lifecycle_position": row,
                 "trade_id": row.get("trade_id"),
                 "lifecycle_id": row.get("lifecycle_id"),
@@ -115,7 +151,9 @@ def resolve_pre_restart_exposure_reconciliation(
                 {
                     "classification": REVIEW_REQUIRED_AMBIGUOUS_MANAGED_EXPOSURE,
                     "reason_codes": ["MULTIPLE_REGISTRY_TRADE_IDS_MATCH_BROKER_POSITION"],
-                    "broker_position": broker_position,
+                    "broker_position": raw_broker_position,
+                    "canonical_broker_position": broker_position,
+                    "canonical_identity_resolution": identity_resolution.to_dict(),
                     "matching_trade_ids": [record.trade_id for record in registry_matches],
                     "position_key": key,
                 }
@@ -131,7 +169,9 @@ def resolve_pre_restart_exposure_reconciliation(
                 {
                     "classification": ADOPTABLE_BROKER_BACKED_EXPOSURE,
                     "reason_codes": ["EXACT_BROKER_BACKED_LIFECYCLE_REPORT_CAN_REPAIR_PROJECTION"],
-                    "broker_position": broker_position,
+                    "broker_position": raw_broker_position,
+                    "canonical_broker_position": broker_position,
+                    "canonical_identity_resolution": identity_resolution.to_dict(),
                     "lifecycle_position": row,
                     "trade_id": row.get("trade_id"),
                     "lifecycle_id": row.get("lifecycle_id"),
@@ -144,7 +184,9 @@ def resolve_pre_restart_exposure_reconciliation(
             {
                 "classification": REVIEW_REQUIRED_UNMANAGED_BROKER_EXPOSURE,
                 "reason_codes": ["NO_EXACT_REGISTRY_OR_BROKER_BACKED_LIFECYCLE_IDENTITY"],
-                "broker_position": broker_position,
+                "broker_position": raw_broker_position,
+                "canonical_broker_position": broker_position,
+                "canonical_identity_resolution": identity_resolution.to_dict(),
                 "position_key": key,
             }
         )
@@ -427,3 +469,11 @@ def _decimal_display(value: Decimal | None) -> str | None:
     if value == value.to_integral_value():
         return str(value.quantize(Decimal("1")))
     return str(value.normalize())
+
+
+def _read_json(path: Path) -> dict[str, Any]:
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+    return dict(payload) if isinstance(payload, Mapping) else {}

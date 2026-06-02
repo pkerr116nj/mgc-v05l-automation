@@ -16,6 +16,10 @@ from pathlib import Path
 from typing import Any, Mapping, Sequence
 
 from mgc_v05l.execution_core.track_b_atomic_io import write_json_atomic
+from mgc_v05l.execution_core.track_b_broker_position_identity import (
+    IDENTITY_READY,
+    canonicalize_broker_position_identity,
+)
 
 
 BROKER_POSITION_GUARDIAN_READY = "BROKER_POSITION_GUARDIAN_READY"
@@ -254,7 +258,15 @@ def _registry_verified_managed_close_authority(
     if not mapped_records:
         reason_codes.append("REGISTRY_MAPPED_RECORD_MISSING")
 
-    for broker_position in open_broker_positions:
+    for raw_broker_position in open_broker_positions:
+        canonical = canonicalize_broker_position_identity(
+            broker_position=raw_broker_position,
+            registry_rows=mapped_records,
+        )
+        if canonical.classification != IDENTITY_READY:
+            reason_codes.extend(canonical.reason_codes)
+            continue
+        broker_position = canonical.canonical_position
         matches = [
             record
             for record in mapped_records

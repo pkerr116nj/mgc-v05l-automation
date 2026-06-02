@@ -125,7 +125,9 @@ def test_position_without_close_order_is_tracked(tmp_path: Path) -> None:
 
 
 def test_position_without_close_order_uses_pre_restart_resolved_identity(tmp_path: Path) -> None:
-    _seed_base(tmp_path, positions_without_close=[_broker_position()])
+    broker = _broker_position()
+    broker.pop("con_id")
+    _seed_base(tmp_path, positions_without_close=[broker])
     _write_registry_open_managed_events(tmp_path)
 
     payload = build_track_b_managed_order_registry(

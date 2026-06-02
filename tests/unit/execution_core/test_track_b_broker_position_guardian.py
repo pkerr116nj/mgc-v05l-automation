@@ -115,6 +115,24 @@ def test_hard_hold_allows_exact_registry_backed_risk_reducing_close() -> None:
     assert payload["managed_close_authority"]["candidates"][0]["action"] == "SELL"
 
 
+def test_registry_backed_close_canonicalizes_missing_broker_con_id() -> None:
+    broker_position = _mnq_position("1")
+    broker_position.pop("con_id")
+    payload = build_track_b_broker_position_guardian(
+        config=TrackBBrokerPositionGuardianConfig(),
+        now=NOW,
+        input_overrides=_inputs(
+            position_truth={"broker_positions": [broker_position]},
+            reconciliation=_registry_matched_reconciliation(quantity="1"),
+        ),
+    )
+
+    assert payload["managed_close_mutation_allowed"] is True
+    assert payload["managed_close_authority"]["classification"] == BROKER_POSITION_GUARDIAN_CLOSE_ALLOWED_RISK_REDUCING
+    assert payload["managed_close_authority"]["candidates"][0]["con_id"] == 770561201
+    assert payload["managed_close_authority"]["broad_flatten_allowed"] is False
+
+
 def test_registry_backed_close_blocks_wrong_quantity() -> None:
     payload = build_track_b_broker_position_guardian(
         config=TrackBBrokerPositionGuardianConfig(),

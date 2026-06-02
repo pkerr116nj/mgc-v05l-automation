@@ -143,7 +143,6 @@ def test_restart_allowed_with_exact_registry_backed_managed_exposure(tmp_path: P
                     "symbol": "MES",
                     "track_b_root": "MES",
                     "local_symbol": "MESM6",
-                    "con_id": 770561194,
                     "expiry": "202606",
                     "quantity": "-1",
                 }

@@ -38,6 +38,10 @@ from mgc_v05l.execution_core.track_b_submit_intent_ownership import (
     DEFAULT_TRACK_B_SUBMIT_INTENT_OWNERSHIP_JSONL,
     load_unresolved_submit_intent_ownership_records,
 )
+from mgc_v05l.execution_core.track_b_broker_position_identity import (
+    IDENTITY_READY,
+    canonicalize_broker_position_identity,
+)
 from mgc_v05l.execution_core.track_b_central_trade_registry import TradeCurrentState, TradeEventType, TradeRegistryRecord
 from mgc_v05l.execution_core.track_b_broker_fill_evidence_resolver import (
     BrokerFillEvidenceRequest,
@@ -863,13 +867,20 @@ def _registry_records_for_broker_position(
     records: Sequence[TradeRegistryRecord],
     broker_position: Mapping[str, Any],
 ) -> list[TradeRegistryRecord]:
+    canonical = canonicalize_broker_position_identity(
+        broker_position=broker_position,
+        registry_records=records,
+    )
+    if canonical.classification != IDENTITY_READY:
+        return []
+    canonical_position = canonical.canonical_position
     return [
         record
         for record in records
         if record.ownership_identity is not None
-        and _record_contract_matches_row(record, broker_position)
-        and _record_account_matches_row(record, broker_position)
-        and _record_quantity_matches_broker_position(record, broker_position)
+        and _record_contract_matches_row(record, canonical_position)
+        and _record_account_matches_row(record, canonical_position)
+        and _record_quantity_matches_broker_position(record, canonical_position)
     ]
 
 
