@@ -201,6 +201,13 @@ def reconcile_track_b_paper_broker_truth(
     track_b_positions = _track_b_broker_positions(positions_snapshot, config.symbols)
     track_b_open_orders = _track_b_broker_open_orders(open_orders_snapshot, config.symbols)
     lifecycle_positions = _track_b_lifecycle_positions(live_position_status, config.symbols)
+    lifecycle_projection_precedence = _closed_flat_lifecycle_projection_precedence(
+        config=config,
+        broker_positions=track_b_positions,
+        broker_open_orders=track_b_open_orders,
+        lifecycle_positions=lifecycle_positions,
+    )
+    lifecycle_positions = list(lifecycle_projection_precedence["current_scope_lifecycle_positions"])
     terminal_event_grace = _bridge_terminal_event_grace_for_flat_lifecycle(
         trade_summary=trade_summary,
         live_position_status=live_position_status,
@@ -518,6 +525,8 @@ def reconcile_track_b_paper_broker_truth(
         "hard_exit_order_not_marketable_orders": hard_exit_order_not_marketable,
         "unknown_broker_open_orders": unknown_track_b_open_orders,
         "track_b_lifecycle_positions": lifecycle_positions,
+        "superseded_lifecycle_projections": lifecycle_projection_precedence["superseded_lifecycle_projections"],
+        "lifecycle_projection_precedence": lifecycle_projection_precedence,
         "position_match_report": position_match_report,
         "broker_cost_basis_adjustments": broker_cost_basis_adjustments,
         "bridge_terminal_event_grace": terminal_event_grace,
@@ -750,6 +759,108 @@ def _registry_reconciliation_state(
         "review_required_trade_ids": [],
         "working_order_trade_ids": sorted(set(working_order_trade_ids)),
     }
+
+
+def _closed_flat_lifecycle_projection_precedence(
+    *,
+    config: ReconciliationConfig,
+    broker_positions: Sequence[Mapping[str, Any]],
+    broker_open_orders: Sequence[Mapping[str, Any]],
+    lifecycle_positions: Sequence[Mapping[str, Any]],
+) -> dict[str, Any]:
+    """Scope stale lifecycle-open rows after broker-backed registry flat close.
+
+    Managed lifecycle reports can be regenerated from stale open-state inputs.
+    Once the append-only registry has exact broker-backed close evidence and
+    broker truth no longer shows the position/order, that stale projection must
+    remain visible for audit but must not reopen current reconciliation.
+    """
+
+    if not lifecycle_positions:
+        return {
+            "classification": "NO_LIFECYCLE_PROJECTION_SUPERSESSION_NEEDED",
+            "current_scope_lifecycle_positions": [],
+            "superseded_lifecycle_projections": [],
+        }
+
+    records = load_live_trade_registry_records(repo_root=config.repo_root)
+    closed_records = [
+        record
+        for record in records
+        if record.current_state == TradeCurrentState.CLOSED_FLAT
+        and record.broker_backed_exit is True
+        and record.open_qty == 0
+    ]
+    current_scope: list[dict[str, Any]] = []
+    superseded: list[dict[str, Any]] = []
+    for lifecycle_position in lifecycle_positions:
+        closed_record = _closed_flat_record_for_lifecycle_projection(closed_records, lifecycle_position)
+        current_broker_linked = any(
+            _lifecycle_position_matches_broker_position(lifecycle_position, broker_position)
+            for broker_position in broker_positions
+        )
+        current_order_linked = any(
+            _lifecycle_position_matches_broker_position(lifecycle_position, broker_order)
+            for broker_order in broker_open_orders
+        )
+        if closed_record is not None and not current_broker_linked and not current_order_linked:
+            superseded.append(
+                {
+                    "classification": "STALE_SUPERSEDED_LIFECYCLE_PROJECTION",
+                    "reason_codes": [
+                        "BROKER_BACKED_CLOSED_FLAT_REGISTRY_SUPERSEDES_OPEN_LIFECYCLE_PROJECTION",
+                        "BROKER_FLAT_PROOF_CONFIRMED",
+                        "NO_OPEN_ORDER_PROOF_CONFIRMED",
+                    ],
+                    "trade_id": closed_record.trade_id,
+                    "lifecycle_id": closed_record.ownership_identity.lifecycle_id
+                    if closed_record.ownership_identity
+                    else lifecycle_position.get("lifecycle_id"),
+                    "registry_current_state": closed_record.current_state.value,
+                    "broker_backed_exit": closed_record.broker_backed_exit,
+                    "open_qty": str(closed_record.open_qty),
+                    "lifecycle_position": dict(lifecycle_position),
+                    "registry_record": _registry_record_event_row(closed_record),
+                }
+            )
+            continue
+        current_scope.append(dict(lifecycle_position))
+
+    classification = (
+        "STALE_LIFECYCLE_PROJECTIONS_SUPERSEDED_BY_BROKER_BACKED_CLOSED_FLAT"
+        if superseded
+        else "NO_LIFECYCLE_PROJECTION_SUPERSESSION_NEEDED"
+    )
+    return {
+        "classification": classification,
+        "current_scope_lifecycle_positions": current_scope,
+        "superseded_lifecycle_projections": superseded,
+    }
+
+
+def _closed_flat_record_for_lifecycle_projection(
+    records: Sequence[TradeRegistryRecord],
+    lifecycle_position: Mapping[str, Any],
+) -> TradeRegistryRecord | None:
+    exact_matches = _registry_records_for_lifecycle_position(records, lifecycle_position)
+    if len(exact_matches) == 1:
+        return exact_matches[0]
+    if len(exact_matches) > 1:
+        return None
+    direct_trade_ids = _trade_ids_from_lifecycle_position(lifecycle_position)
+    if direct_trade_ids:
+        direct_matches = [record for record in records if record.trade_id in direct_trade_ids]
+        if len(direct_matches) == 1:
+            return direct_matches[0]
+        return None
+    contract_matches = [
+        record
+        for record in records
+        if _record_contract_matches_row(record, lifecycle_position)
+        and _record_account_matches_row(record, lifecycle_position)
+        and _record_quantity_matches_lifecycle_position(record, lifecycle_position)
+    ]
+    return contract_matches[0] if len(contract_matches) == 1 else None
 
 
 def _append_reconciliation_registry_events(

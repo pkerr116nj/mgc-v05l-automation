@@ -776,6 +776,152 @@ def test_closed_historical_registry_record_does_not_adopt_current_broker_positio
     )
 
 
+def test_closed_flat_registry_supersedes_stale_open_lifecycle_projection(tmp_path: Path) -> None:
+    trade_id = "trade_closed_flat_supersedes_stale_open"
+    lifecycle_id = "life_closed_flat_supersedes_stale_open"
+    open_position = {
+        "strategy_id": "mes_globex_active_participation_long",
+        "lane_id": "mes_globex_active_participation_long",
+        "trade_id": trade_id,
+        "lifecycle_id": lifecycle_id,
+        "instrument_family": "MES",
+        "contract_key": "MES-202606",
+        "local_symbol": "MESM6",
+        "con_id": 770561194,
+        "expiry": "20260618",
+        "side": "LONG",
+        "quantity": "1",
+        "final_position_status": "OPEN_MANAGED",
+    }
+    config = _write_base_artifacts(tmp_path, open_position=open_position)
+    _write_registry_open_managed_trade(
+        config,
+        trade_id=trade_id,
+        lifecycle_id=lifecycle_id,
+        lane_id="mes_globex_active_participation_long",
+        strategy_id="mes_globex_active_participation_long",
+        symbol="MES",
+        local_symbol="MESM6",
+        con_id=770561194,
+        expiry="20260618",
+        include_close_fill=True,
+    )
+    _write_broker_truth(config)
+
+    report = reconcile_track_b_paper_broker_truth(config=config, now=NOW)
+
+    assert report["classification"] == "TRACK_B_PAPER_BROKER_RECONCILED"
+    assert report["broker_reconciled"] is True
+    assert report["track_b_broker_position_count"] == 0
+    assert report["track_b_broker_open_order_count"] == 0
+    assert report["track_b_lifecycle_positions"] == []
+    assert report["current_scope_review_required_count"] == 0
+    assert report["registry_reconciliation"]["classification"] == "REGISTRY_RECONCILIATION_MATCHED"
+    superseded = report["superseded_lifecycle_projections"]
+    assert len(superseded) == 1
+    assert superseded[0]["classification"] == "STALE_SUPERSEDED_LIFECYCLE_PROJECTION"
+    assert superseded[0]["trade_id"] == trade_id
+
+
+def test_stale_open_lifecycle_projection_without_close_evidence_still_blocks(tmp_path: Path) -> None:
+    trade_id = "trade_missing_close_evidence_still_blocks"
+    lifecycle_id = "life_missing_close_evidence_still_blocks"
+    open_position = {
+        "strategy_id": "mes_globex_active_participation_long",
+        "lane_id": "mes_globex_active_participation_long",
+        "trade_id": trade_id,
+        "lifecycle_id": lifecycle_id,
+        "instrument_family": "MES",
+        "contract_key": "MES-202606",
+        "local_symbol": "MESM6",
+        "con_id": 770561194,
+        "expiry": "20260618",
+        "side": "LONG",
+        "quantity": "1",
+        "final_position_status": "OPEN_MANAGED",
+    }
+    config = _write_base_artifacts(tmp_path, open_position=open_position)
+    _write_registry_open_managed_trade(
+        config,
+        trade_id=trade_id,
+        lifecycle_id=lifecycle_id,
+        lane_id="mes_globex_active_participation_long",
+        strategy_id="mes_globex_active_participation_long",
+        symbol="MES",
+        local_symbol="MESM6",
+        con_id=770561194,
+        expiry="20260618",
+    )
+    _write_broker_truth(config)
+
+    report = reconcile_track_b_paper_broker_truth(config=config, now=NOW)
+
+    assert report["broker_reconciled"] is False
+    assert report["track_b_lifecycle_positions"]
+    assert report["superseded_lifecycle_projections"] == []
+    assert any(
+        blocker["code"] == "REGISTRY_RECONCILIATION_REVIEW_REQUIRED"
+        for blocker in report["blockers"]
+    )
+
+
+def test_closed_flat_registry_does_not_supersede_current_broker_exposure(tmp_path: Path) -> None:
+    trade_id = "trade_closed_registry_broker_still_open"
+    lifecycle_id = "life_closed_registry_broker_still_open"
+    open_position = {
+        "strategy_id": "mes_globex_active_participation_long",
+        "lane_id": "mes_globex_active_participation_long",
+        "trade_id": trade_id,
+        "lifecycle_id": lifecycle_id,
+        "instrument_family": "MES",
+        "contract_key": "MES-202606",
+        "local_symbol": "MESM6",
+        "con_id": 770561194,
+        "expiry": "20260618",
+        "side": "LONG",
+        "quantity": "1",
+        "final_position_status": "OPEN_MANAGED",
+    }
+    config = _write_base_artifacts(tmp_path, open_position=open_position)
+    _write_registry_open_managed_trade(
+        config,
+        trade_id=trade_id,
+        lifecycle_id=lifecycle_id,
+        lane_id="mes_globex_active_participation_long",
+        strategy_id="mes_globex_active_participation_long",
+        symbol="MES",
+        local_symbol="MESM6",
+        con_id=770561194,
+        expiry="20260618",
+        include_close_fill=True,
+    )
+    _write_broker_truth(
+        config,
+        positions=[
+            {
+                "account_id": "DUM882026",
+                "symbol": "MES",
+                "local_symbol": "MESM6",
+                "expiry": "20260618",
+                "con_id": 770561194,
+                "security_type": "FUT",
+                "quantity": "1",
+            }
+        ],
+    )
+
+    report = reconcile_track_b_paper_broker_truth(config=config, now=NOW)
+
+    assert report["broker_reconciled"] is False
+    assert report["track_b_broker_position_count"] == 1
+    assert report["track_b_lifecycle_positions"]
+    assert report["superseded_lifecycle_projections"] == []
+    assert any(
+        blocker["code"] == "REGISTRY_RECONCILIATION_REVIEW_REQUIRED"
+        for blocker in report["blockers"]
+    )
+
+
 def test_managed_exit_after_recovery_uses_trade_id(tmp_path: Path) -> None:
     config = _write_base_artifacts(tmp_path)
     record = _write_submit_intent_ownership(config, ownership_intent_id="submit_owner_mnq_exit_after_recovery", symbol="MNQ", local_symbol="MNQM6", expiry="20260618", con_id=770561201)
