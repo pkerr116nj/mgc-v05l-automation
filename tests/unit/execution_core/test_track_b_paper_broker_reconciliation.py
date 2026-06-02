@@ -751,6 +751,10 @@ def test_closed_historical_registry_record_does_not_adopt_current_broker_positio
         con_id=770561201,
         expiry="20260618",
         include_close_fill=True,
+        order_id="1",
+        client_id="10851",
+        entry_perm_id="1955790772",
+        entry_exec_id="0000e1a7.6a2d1b84.01.01",
     )
     _write_broker_truth(
         config,
@@ -805,6 +809,10 @@ def test_closed_flat_registry_supersedes_stale_open_lifecycle_projection(tmp_pat
         con_id=770561194,
         expiry="20260618",
         include_close_fill=True,
+        order_id="1",
+        client_id="10922",
+        entry_perm_id="1955790779",
+        entry_exec_id="0000e1a7.6a2d1b87.01.01",
     )
     _write_broker_truth(config)
 
@@ -894,6 +902,10 @@ def test_closed_flat_registry_does_not_supersede_current_broker_exposure(tmp_pat
         con_id=770561194,
         expiry="20260618",
         include_close_fill=True,
+        order_id="1",
+        client_id="10922",
+        entry_perm_id="1955790779",
+        entry_exec_id="0000e1a7.6a2d1b87.01.01",
     )
     _write_broker_truth(
         config,
@@ -920,6 +932,277 @@ def test_closed_flat_registry_does_not_supersede_current_broker_exposure(tmp_pat
         blocker["code"] == "REGISTRY_RECONCILIATION_REVIEW_REQUIRED"
         for blocker in report["blockers"]
     )
+
+
+def test_duplicate_lifecycle_only_mnq_chain_superseded_by_broker_backed_closed_flat_chain(tmp_path: Path) -> None:
+    config = _write_base_artifacts(tmp_path)
+    _write_registry_lifecycle_only_open_trade(
+        config,
+        trade_id="trade_original_mnq_globex_short",
+        lifecycle_id="reserved_submit_mnq_globex_active_participation_short_1",
+        lane_id="mnq_globex_active_participation_short",
+        strategy_id="mnq_globex_active_participation_short",
+        symbol="MNQ",
+        local_symbol="MNQM6",
+        con_id=770561201,
+        expiry="202606",
+        order_id="1",
+        client_id="10851",
+        perm_id="1955790772",
+    )
+    _write_registry_open_managed_trade(
+        config,
+        trade_id="trade_def5fb2c-ddce-4428-83b7-c906119225d5",
+        lifecycle_id="reserved_submit_mnq_globex_active_participation_short_20260601T220616753074Z_420c66bf3c42",
+        lane_id="mnq_globex_active_participation_short",
+        strategy_id="mnq_globex_active_participation_short",
+        symbol="MNQ",
+        local_symbol="MNQM6",
+        con_id=770561201,
+        expiry="20260618",
+        include_close_fill=True,
+        order_id="1",
+        client_id="10851",
+        entry_perm_id="1955790772",
+        entry_exec_id="0000e1a7.6a2d1b84.01.01",
+    )
+    _write_broker_truth(config)
+
+    report = reconcile_track_b_paper_broker_truth(config=config, now=NOW)
+
+    assert report["registry_reconciliation"]["classification"] == "REGISTRY_RECONCILIATION_MATCHED"
+    assert report["current_scope_review_required_count"] == 0
+    superseded = report["registry_reconciliation"]["superseded_lifecycle_only_records"]
+    assert len(superseded) == 1
+    assert superseded[0]["classification"] == "DUPLICATE_SUPERSEDED_FULL_AUDIT_ONLY"
+    assert superseded[0]["trade_id"] == "trade_original_mnq_globex_short"
+    assert superseded[0]["superseding_trade_id"] == "trade_def5fb2c-ddce-4428-83b7-c906119225d5"
+
+
+def test_duplicate_lifecycle_only_mes_chain_superseded_by_broker_backed_closed_flat_chain(tmp_path: Path) -> None:
+    config = _write_base_artifacts(tmp_path)
+    _write_registry_lifecycle_only_open_trade(
+        config,
+        trade_id="trade_original_mes_globex_short",
+        lifecycle_id="reserved_submit_mes_globex_active_participation_short_1",
+        lane_id="mes_globex_active_participation_short",
+        strategy_id="mes_globex_active_participation_short",
+        symbol="MES",
+        local_symbol="MESM6",
+        con_id=770561194,
+        expiry="202606",
+        order_id="1",
+        client_id="10922",
+        perm_id="1955790779",
+    )
+    _write_registry_open_managed_trade(
+        config,
+        trade_id="trade_3018ab96-7608-4e40-877a-ed0d7b995184",
+        lifecycle_id="reserved_submit_mes_globex_active_participation_short_20260601T220620676808Z_e3785d1f3061",
+        lane_id="mes_globex_active_participation_short",
+        strategy_id="mes_globex_active_participation_short",
+        symbol="MES",
+        local_symbol="MESM6",
+        con_id=770561194,
+        expiry="20260618",
+        include_close_fill=True,
+        order_id="1",
+        client_id="10922",
+        entry_perm_id="1955790779",
+        entry_exec_id="0000e1a7.6a2d1b87.01.01",
+    )
+    _write_broker_truth(config)
+
+    report = reconcile_track_b_paper_broker_truth(config=config, now=NOW)
+
+    assert report["registry_reconciliation"]["classification"] == "REGISTRY_RECONCILIATION_MATCHED"
+    superseded = report["registry_reconciliation"]["superseded_lifecycle_only_records"]
+    assert len(superseded) == 1
+    assert superseded[0]["classification"] == "DUPLICATE_SUPERSEDED_FULL_AUDIT_ONLY"
+    assert superseded[0]["trade_id"] == "trade_original_mes_globex_short"
+    assert superseded[0]["superseding_trade_id"] == "trade_3018ab96-7608-4e40-877a-ed0d7b995184"
+
+
+def test_stale_derived_registry_chain_without_current_broker_linkage_is_full_audit_only(tmp_path: Path) -> None:
+    config = _write_base_artifacts(tmp_path)
+    source_path = config.repo_root / "outputs/track_b_execution_core/track_b_strategy_managed_paper_lifecycle/reserved_submit_atp_companion_v1_asia_us_1/track_b_strategy_managed_paper_lifecycle_report.json"
+    _write_json(
+        source_path,
+        {
+            "generated_at": "2026-05-11T12:00:00+00:00",
+            "trade_id": "trade_submit_owner_mnq_exec_late",
+            "lifecycle_id": "reserved_submit_atp_companion_v1_asia_us_1",
+            "final_position_status": "OPEN_MANAGED",
+            "entry_fill": {
+                "broker_order_id": "1",
+                "execution_id": "0000e1a7.current.01.01",
+                "filled_at": "2026-06-01T13:36:09+00:00",
+                "perm_id": 1955790757,
+                "price": "30437",
+                "quantity": "1",
+            },
+            "close_fill": None,
+        },
+    )
+    _write_registry_lifecycle_only_open_trade(
+        config,
+        trade_id="trade_submit_owner_mnq_exec_late",
+        lifecycle_id="reserved_submit_atp_companion_v1_asia_us_1",
+        lane_id="atp_companion_v1_asia_us",
+        strategy_id="atp_companion_v1__benchmark_mgc_asia_us",
+        symbol="MNQ",
+        local_symbol="MNQM6",
+        con_id=770561201,
+        expiry="202606",
+        order_id="1",
+        client_id="11127",
+        perm_id="1955790757",
+        exec_id="0000e1a7.current.01.01",
+        source_artifact_path=str(source_path),
+        generated_at=NOW,
+    )
+    _write_broker_truth(config)
+
+    report = reconcile_track_b_paper_broker_truth(config=config, now=NOW)
+
+    assert report["registry_reconciliation"]["classification"] == "REGISTRY_RECONCILIATION_MATCHED"
+    superseded = report["registry_reconciliation"]["superseded_lifecycle_only_records"]
+    assert len(superseded) == 1
+    assert superseded[0]["classification"] == "STALE_DERIVED_REGISTRY_CHAIN_FULL_AUDIT_ONLY"
+    assert superseded[0]["trade_id"] == "trade_submit_owner_mnq_exec_late"
+    assert superseded[0]["stale_source"]["source_reports"][0]["impossible_timestamps"] is True
+
+
+def test_current_broker_exposure_prevents_lifecycle_only_supersession(tmp_path: Path) -> None:
+    config = _write_base_artifacts(tmp_path)
+    _write_registry_lifecycle_only_open_trade(
+        config,
+        trade_id="trade_original_mnq_globex_short",
+        lifecycle_id="reserved_submit_mnq_globex_active_participation_short_1",
+        lane_id="mnq_globex_active_participation_short",
+        strategy_id="mnq_globex_active_participation_short",
+        symbol="MNQ",
+        local_symbol="MNQM6",
+        con_id=770561201,
+        expiry="202606",
+        order_id="1",
+        client_id="10851",
+        perm_id="1955790772",
+    )
+    _write_registry_open_managed_trade(
+        config,
+        trade_id="trade_def5fb2c-ddce-4428-83b7-c906119225d5",
+        lifecycle_id="reserved_submit_mnq_globex_active_participation_short_20260601T220616753074Z_420c66bf3c42",
+        lane_id="mnq_globex_active_participation_short",
+        strategy_id="mnq_globex_active_participation_short",
+        symbol="MNQ",
+        local_symbol="MNQM6",
+        con_id=770561201,
+        expiry="20260618",
+        include_close_fill=True,
+    )
+    _write_broker_truth(
+        config,
+        positions=[
+            {
+                "account_id": "DUM882026",
+                "symbol": "MNQ",
+                "local_symbol": "MNQM6",
+                "expiry": "20260618",
+                "con_id": 770561201,
+                "security_type": "FUT",
+                "quantity": "-1",
+            }
+        ],
+    )
+
+    report = reconcile_track_b_paper_broker_truth(config=config, now=NOW)
+
+    assert report["track_b_broker_position_count"] == 1
+    assert report["registry_reconciliation"]["classification"] == "REGISTRY_RECONCILIATION_MATCHED"
+    assert "trade_original_mnq_globex_short" in report["registry_reconciliation"]["mapped_trade_ids"]
+    assert report["registry_reconciliation"]["superseded_lifecycle_only_records"] == []
+
+
+def test_missing_broker_backed_exit_prevents_lifecycle_only_supersession(tmp_path: Path) -> None:
+    config = _write_base_artifacts(tmp_path)
+    _write_registry_lifecycle_only_open_trade(
+        config,
+        trade_id="trade_original_mnq_globex_short",
+        lifecycle_id="reserved_submit_mnq_globex_active_participation_short_1",
+        lane_id="mnq_globex_active_participation_short",
+        strategy_id="mnq_globex_active_participation_short",
+        symbol="MNQ",
+        local_symbol="MNQM6",
+        con_id=770561201,
+        expiry="202606",
+        order_id="1",
+        client_id="10851",
+        perm_id="1955790772",
+    )
+    _write_registry_open_managed_trade(
+        config,
+        trade_id="trade_def5fb2c-ddce-4428-83b7-c906119225d5",
+        lifecycle_id="reserved_submit_mnq_globex_active_participation_short_20260601T220616753074Z_420c66bf3c42",
+        lane_id="mnq_globex_active_participation_short",
+        strategy_id="mnq_globex_active_participation_short",
+        symbol="MNQ",
+        local_symbol="MNQM6",
+        con_id=770561201,
+        expiry="20260618",
+        order_id="1",
+        client_id="10851",
+        entry_perm_id="1955790772",
+        entry_exec_id="0000e1a7.6a2d1b84.01.01",
+    )
+    _write_broker_truth(config)
+
+    report = reconcile_track_b_paper_broker_truth(config=config, now=NOW)
+
+    assert report["registry_reconciliation"]["classification"] == "REGISTRY_RECONCILIATION_REVIEW_REQUIRED"
+    assert report["registry_reconciliation"]["superseded_lifecycle_only_records"] == []
+    assert "trade_original_mnq_globex_short" in report["registry_reconciliation"]["review_required_trade_ids"]
+
+
+def test_identity_mismatch_prevents_lifecycle_only_supersession(tmp_path: Path) -> None:
+    config = _write_base_artifacts(tmp_path)
+    _write_registry_lifecycle_only_open_trade(
+        config,
+        trade_id="trade_original_mnq_globex_short",
+        lifecycle_id="reserved_submit_mnq_globex_active_participation_short_1",
+        lane_id="mnq_globex_active_participation_short",
+        strategy_id="mnq_globex_active_participation_short",
+        symbol="MNQ",
+        local_symbol="MNQM6",
+        con_id=770561201,
+        expiry="202606",
+        order_id="1",
+        client_id="10851",
+        perm_id="1955790772",
+    )
+    _write_registry_open_managed_trade(
+        config,
+        trade_id="trade_def5fb2c-ddce-4428-83b7-c906119225d5",
+        lifecycle_id="reserved_submit_mnq_globex_active_participation_short_20260601T220616753074Z_420c66bf3c42",
+        lane_id="mnq_globex_active_participation_short",
+        strategy_id="mnq_globex_active_participation_short",
+        symbol="MNQ",
+        local_symbol="MNQZ6",
+        con_id=770561202,
+        expiry="20260618",
+        include_close_fill=True,
+        order_id="1",
+        client_id="10851",
+        entry_perm_id="1955790772",
+        entry_exec_id="0000e1a7.6a2d1b84.01.01",
+    )
+    _write_broker_truth(config)
+
+    report = reconcile_track_b_paper_broker_truth(config=config, now=NOW)
+
+    assert report["registry_reconciliation"]["classification"] == "REGISTRY_RECONCILIATION_REVIEW_REQUIRED"
+    assert report["registry_reconciliation"]["superseded_lifecycle_only_records"] == []
+    assert "trade_original_mnq_globex_short" in report["registry_reconciliation"]["review_required_trade_ids"]
 
 
 def test_managed_exit_after_recovery_uses_trade_id(tmp_path: Path) -> None:
@@ -2885,6 +3168,13 @@ def _write_registry_open_managed_trade(
     expiry: str,
     include_close_fill: bool = False,
     include_manual_close: bool = False,
+    order_id: str = "101",
+    client_id: str = "17086",
+    entry_perm_id: str = "2047276405",
+    entry_exec_id: str = "exec-1",
+    exit_order_id: str = "102",
+    exit_perm_id: str = "2047276406",
+    exit_exec_id: str = "exec-2",
 ) -> None:
     side = "SHORT" if "short" in lane_id else "LONG"
     action = "SELL" if side == "SHORT" else "BUY"
@@ -2906,29 +3196,29 @@ def _write_registry_open_managed_trade(
     }
     events: list[tuple[TradeEventType, dict[str, object]]] = [
         (TradeEventType.ENTRY_INTENT_CREATED, {}),
-        (TradeEventType.ENTRY_ORDER_SUBMITTED, {"order_id": "101", "client_id": "17086"}),
+        (TradeEventType.ENTRY_ORDER_SUBMITTED, {"order_id": order_id, "client_id": client_id}),
         (
             TradeEventType.ENTRY_FILL_BROKER_BACKED,
-            {"order_id": "101", "client_id": "17086", "perm_id": "2047276405", "exec_id": "exec-1", "price": "28981.25"},
+            {"order_id": order_id, "client_id": client_id, "perm_id": entry_perm_id, "exec_id": entry_exec_id, "price": "28981.25"},
         ),
         (
             TradeEventType.LIFECYCLE_OPEN_MANAGED,
-            {"order_id": "101", "client_id": "17086", "perm_id": "2047276405", "exec_id": "exec-1", "price": "28981.25"},
+            {"order_id": order_id, "client_id": client_id, "perm_id": entry_perm_id, "exec_id": entry_exec_id, "price": "28981.25"},
         ),
     ]
     if include_close_fill:
         events.extend(
             [
                 (TradeEventType.EXIT_INTENT_CREATED, {"action": "SELL"}),
-                (TradeEventType.EXIT_ORDER_SUBMITTED, {"action": "SELL", "order_id": "102", "client_id": "17086"}),
+                (TradeEventType.EXIT_ORDER_SUBMITTED, {"action": "SELL", "order_id": exit_order_id, "client_id": client_id}),
                 (
                     TradeEventType.EXIT_FILL_BROKER_BACKED,
                     {
                         "action": "SELL",
-                        "order_id": "102",
-                        "client_id": "17086",
-                        "perm_id": "2047276406",
-                        "exec_id": "exec-2",
+                        "order_id": exit_order_id,
+                        "client_id": client_id,
+                        "perm_id": exit_perm_id,
+                        "exec_id": exit_exec_id,
                         "price": "28985.00",
                     },
                 ),
@@ -2942,6 +3232,55 @@ def _write_registry_open_managed_trade(
             repo_root=config.repo_root,
             event=make_live_trade_registry_event(event_type=event_type, **payload),
         )
+
+
+def _write_registry_lifecycle_only_open_trade(
+    config: ReconciliationConfig,
+    *,
+    trade_id: str,
+    lifecycle_id: str,
+    lane_id: str,
+    strategy_id: str,
+    symbol: str,
+    local_symbol: str,
+    con_id: int,
+    expiry: str,
+    account_id: str = "DUM882026",
+    order_id: str = "101",
+    client_id: str = "17086",
+    perm_id: str = "2047276405",
+    exec_id: str = "exec-lifecycle-only",
+    source_artifact_path: str | None = None,
+    generated_at: datetime = NOW,
+) -> None:
+    side = "SHORT" if "short" in lane_id else "LONG"
+    action = "SELL" if side == "SHORT" else "BUY"
+    append_live_trade_registry_event(
+        repo_root=config.repo_root,
+        event=make_live_trade_registry_event(
+            event_type=TradeEventType.LIFECYCLE_OPEN_MANAGED,
+            trade_id=trade_id,
+            lifecycle_id=lifecycle_id,
+            lane_id=lane_id,
+            thesis_strategy_id=strategy_id,
+            account_id=account_id,
+            symbol=symbol,
+            con_id=con_id,
+            local_symbol=local_symbol,
+            expiry=expiry,
+            side=side,
+            action=action,
+            qty="1",
+            order_id=order_id,
+            client_id=client_id,
+            perm_id=perm_id,
+            exec_id=exec_id,
+            price="28981.25",
+            source_artifact_path=source_artifact_path or str(config.report_path),
+            generated_at=generated_at,
+            reason_codes=["LIFECYCLE_OPEN_MANAGED"],
+        ),
+    )
 
 
 def _write_bridge_execution_report(

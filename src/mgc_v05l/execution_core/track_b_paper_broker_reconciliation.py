@@ -11,7 +11,7 @@ import argparse
 import json
 import os
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Any, Mapping, Sequence
@@ -604,6 +604,15 @@ def _registry_reconciliation_state(
             TradeCurrentState.WORKING_ENTRY,
         }
     ]
+    active_scope = _scope_superseded_lifecycle_only_registry_records(
+        config=config,
+        records=records,
+        active_records=active_records,
+        broker_positions=broker_positions,
+        broker_open_orders=broker_open_orders,
+        lifecycle_positions=lifecycle_positions,
+    )
+    active_records = list(active_scope["current_scope_active_records"])
     blockers: list[dict[str, Any]] = []
     mapped_trade_ids: set[str] = set()
     mapped_records: dict[str, dict[str, Any]] = {}
@@ -748,6 +757,7 @@ def _registry_reconciliation_state(
             "mapped_records": [mapped_records[key] for key in sorted(mapped_records)],
             "review_required_trade_ids": review_trade_ids,
             "review_records": review_records,
+            "superseded_lifecycle_only_records": active_scope["superseded_lifecycle_only_records"],
         }
     return {
         **base,
@@ -758,6 +768,7 @@ def _registry_reconciliation_state(
         "mapped_records": [mapped_records[key] for key in sorted(mapped_records)],
         "review_required_trade_ids": [],
         "working_order_trade_ids": sorted(set(working_order_trade_ids)),
+        "superseded_lifecycle_only_records": active_scope["superseded_lifecycle_only_records"],
     }
 
 
@@ -836,6 +847,263 @@ def _closed_flat_lifecycle_projection_precedence(
         "current_scope_lifecycle_positions": current_scope,
         "superseded_lifecycle_projections": superseded,
     }
+
+
+def _scope_superseded_lifecycle_only_registry_records(
+    *,
+    config: ReconciliationConfig,
+    records: Sequence[TradeRegistryRecord],
+    active_records: Sequence[TradeRegistryRecord],
+    broker_positions: Sequence[Mapping[str, Any]],
+    broker_open_orders: Sequence[Mapping[str, Any]],
+    lifecycle_positions: Sequence[Mapping[str, Any]],
+) -> dict[str, Any]:
+    if broker_positions or broker_open_orders:
+        return {
+            "current_scope_active_records": list(active_records),
+            "superseded_lifecycle_only_records": [],
+        }
+
+    terminal_records = [
+        record
+        for record in records
+        if _registry_record_has_broker_backed_flat_exit(record)
+    ]
+    current_scope: list[TradeRegistryRecord] = []
+    superseded: list[dict[str, Any]] = []
+    for record in active_records:
+        if not _registry_record_is_lifecycle_only_open(record):
+            current_scope.append(record)
+            continue
+        if _record_linked_to_current_lifecycle_position(record, lifecycle_positions):
+            current_scope.append(record)
+            continue
+
+        superseding_record = _superseding_broker_backed_flat_record(record, terminal_records)
+        if superseding_record is not None:
+            superseded.append(
+                _superseded_lifecycle_only_record_payload(
+                    record=record,
+                    classification="DUPLICATE_SUPERSEDED_FULL_AUDIT_ONLY",
+                    reason_codes=[
+                        "DUPLICATE_LIFECYCLE_ONLY_CHAIN_SUPERSEDED_BY_BROKER_BACKED_REGISTRY_CHAIN",
+                        "BROKER_BACKED_CLOSED_FLAT_REGISTRY_CHAIN_FOUND",
+                        "BROKER_FLAT_PROOF_CONFIRMED",
+                        "NO_OPEN_ORDER_PROOF_CONFIRMED",
+                    ],
+                    superseding_record=superseding_record,
+                )
+            )
+            continue
+
+        stale_source = _stale_derived_lifecycle_source_context(config=config, record=record)
+        if stale_source is not None:
+            superseded.append(
+                _superseded_lifecycle_only_record_payload(
+                    record=record,
+                    classification="STALE_DERIVED_REGISTRY_CHAIN_FULL_AUDIT_ONLY",
+                    reason_codes=[
+                        "STALE_DERIVED_LIFECYCLE_REPORT_WITHOUT_CURRENT_BROKER_LINKAGE",
+                        "BROKER_FLAT_PROOF_CONFIRMED",
+                        "NO_OPEN_ORDER_PROOF_CONFIRMED",
+                    ],
+                    stale_source=stale_source,
+                )
+            )
+            continue
+
+        current_scope.append(record)
+
+    return {
+        "current_scope_active_records": current_scope,
+        "superseded_lifecycle_only_records": superseded,
+    }
+
+
+def _registry_record_is_lifecycle_only_open(record: TradeRegistryRecord) -> bool:
+    if record.current_state not in {
+        TradeCurrentState.OPEN_MANAGED,
+        TradeCurrentState.EXIT_DUE,
+        TradeCurrentState.WORKING_EXIT,
+    }:
+        return False
+    return record.broker_backed_entry is False and record.broker_backed_exit is False
+
+
+def _registry_record_has_broker_backed_flat_exit(record: TradeRegistryRecord) -> bool:
+    return record.broker_backed_exit is True and record.open_qty == 0
+
+
+def _record_linked_to_current_lifecycle_position(
+    record: TradeRegistryRecord,
+    lifecycle_positions: Sequence[Mapping[str, Any]],
+) -> bool:
+    for lifecycle_position in lifecycle_positions:
+        if record.trade_id in _trade_ids_from_lifecycle_position(lifecycle_position):
+            return True
+        if not (_record_contract_matches_row(record, lifecycle_position) and _record_quantity_matches_lifecycle_position(record, lifecycle_position)):
+            continue
+        lifecycle_id = _valid_registry_identity_text(lifecycle_position.get("lifecycle_id"))
+        owner_lifecycle_id = _valid_registry_identity_text(record.ownership_identity.lifecycle_id if record.ownership_identity else None)
+        if lifecycle_id and owner_lifecycle_id and lifecycle_id == owner_lifecycle_id:
+            return True
+    return False
+
+
+def _superseding_broker_backed_flat_record(
+    record: TradeRegistryRecord,
+    terminal_records: Sequence[TradeRegistryRecord],
+) -> TradeRegistryRecord | None:
+    matches = [
+        candidate
+        for candidate in terminal_records
+        if candidate.trade_id != record.trade_id
+        and _registry_records_share_contract_account(record, candidate)
+        and _registry_records_share_entry_order_context(record, candidate)
+    ]
+    return matches[0] if len(matches) == 1 else None
+
+
+def _registry_records_share_contract_account(left: TradeRegistryRecord, right: TradeRegistryRecord) -> bool:
+    left_owner = left.ownership_identity
+    right_owner = right.ownership_identity
+    if left_owner is None or right_owner is None:
+        return False
+    return (
+        left_owner.account_id == right_owner.account_id
+        and left_owner.con_id == right_owner.con_id
+        and left_owner.local_symbol.upper() == right_owner.local_symbol.upper()
+        and left_owner.symbol.upper() == right_owner.symbol.upper()
+    )
+
+
+def _registry_records_share_entry_order_context(left: TradeRegistryRecord, right: TradeRegistryRecord) -> bool:
+    left_context = _entry_order_context_values(left)
+    right_context = _entry_order_context_values(right)
+    for key in ("perm_id", "client_id", "order_id"):
+        left_value = left_context.get(key)
+        right_value = right_context.get(key)
+        if left_value and right_value and left_value != right_value:
+            return False
+    return bool(
+        (left_context.get("perm_id") and right_context.get("perm_id"))
+        or (
+            left_context.get("client_id")
+            and right_context.get("client_id")
+            and left_context.get("order_id")
+            and right_context.get("order_id")
+        )
+    )
+
+
+def _entry_order_context_values(record: TradeRegistryRecord) -> dict[str, str]:
+    values = {"perm_id": "", "client_id": "", "order_id": ""}
+    for event in record.event_chain:
+        if event.event_type not in {
+            TradeEventType.ENTRY_FILL_BROKER_BACKED,
+            TradeEventType.RECOVERY_ADOPTION_RECORDED,
+            TradeEventType.LIFECYCLE_OPEN_MANAGED,
+            TradeEventType.ENTRY_ORDER_SUBMITTED,
+        }:
+            continue
+        if event.perm_id and not values["perm_id"]:
+            values["perm_id"] = str(event.perm_id)
+        if event.client_id and not values["client_id"]:
+            values["client_id"] = str(event.client_id)
+        if event.order_id and not values["order_id"]:
+            values["order_id"] = str(event.order_id)
+    return values
+
+
+def _stale_derived_lifecycle_source_context(
+    *,
+    config: ReconciliationConfig,
+    record: TradeRegistryRecord,
+) -> dict[str, Any] | None:
+    reports: list[dict[str, Any]] = []
+    source_paths = sorted({event.source_artifact_path for event in record.event_chain if event.source_artifact_path})
+    for path_text in source_paths:
+        path = Path(path_text)
+        if not path.is_absolute():
+            path = config.repo_root / path
+        if not path.exists() or path.suffix != ".json":
+            continue
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+        source_generated_at = _parse_datetime_value(payload.get("generated_at"))
+        entry_fill = payload.get("entry_fill") if isinstance(payload.get("entry_fill"), Mapping) else {}
+        close_fill = payload.get("close_fill") if isinstance(payload.get("close_fill"), Mapping) else {}
+        entry_filled_at = _parse_datetime_value(entry_fill.get("filled_at"))
+        close_filled_at = _parse_datetime_value(close_fill.get("filled_at"))
+        impossible_timestamps = (
+            source_generated_at is not None
+            and (
+                (entry_filled_at is not None and source_generated_at < entry_filled_at)
+                or (close_filled_at is not None and source_generated_at < close_filled_at)
+            )
+        )
+        generated_at_values = [event.generated_at for event in record.event_chain]
+        stale_reemitted_report = (
+            source_generated_at is not None
+            and bool(generated_at_values)
+            and max(generated_at_values) - source_generated_at > timedelta(hours=24)
+        )
+        if impossible_timestamps or stale_reemitted_report:
+            reports.append(
+                {
+                    "source_artifact_path": str(path),
+                    "source_generated_at": source_generated_at.isoformat() if source_generated_at else None,
+                    "entry_filled_at": entry_filled_at.isoformat() if entry_filled_at else None,
+                    "close_filled_at": close_filled_at.isoformat() if close_filled_at else None,
+                    "impossible_timestamps": impossible_timestamps,
+                    "stale_reemitted_report": stale_reemitted_report,
+                }
+            )
+    if not reports:
+        return None
+    return {"source_reports": reports}
+
+
+def _parse_datetime_value(value: object) -> datetime | None:
+    if value is None:
+        return None
+    text = str(value).strip()
+    if not text:
+        return None
+    try:
+        parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return parsed if parsed.tzinfo is not None else parsed.replace(tzinfo=timezone.utc)
+
+
+def _superseded_lifecycle_only_record_payload(
+    *,
+    record: TradeRegistryRecord,
+    classification: str,
+    reason_codes: Sequence[str],
+    superseding_record: TradeRegistryRecord | None = None,
+    stale_source: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    payload: dict[str, Any] = {
+        "classification": classification,
+        "reason_codes": list(reason_codes),
+        "trade_id": record.trade_id,
+        "lifecycle_id": record.ownership_identity.lifecycle_id if record.ownership_identity else None,
+        "current_state": record.current_state.value,
+        "broker_backed_entry": record.broker_backed_entry,
+        "broker_backed_exit": record.broker_backed_exit,
+        "open_qty": str(record.open_qty),
+        "registry_record": _registry_record_event_row(record),
+    }
+    if superseding_record is not None:
+        payload["superseding_trade_id"] = superseding_record.trade_id
+        payload["superseding_record"] = _registry_record_event_row(superseding_record)
+    if stale_source is not None:
+        payload["stale_source"] = dict(stale_source)
+    return payload
 
 
 def _closed_flat_record_for_lifecycle_projection(
