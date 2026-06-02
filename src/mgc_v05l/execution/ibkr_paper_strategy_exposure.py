@@ -57,6 +57,8 @@ _DEFAULT_MANAGED_POSITIONS_PATH = (
 _DEFAULT_MANAGED_ORDERS_PATH = Path("outputs") / "track_b_execution_core" / "managed_orders" / "latest_managed_orders.json"
 _DEFAULT_OPEN_ORDER_TRUTH_PATH = Path("outputs") / "track_b_execution_core" / "open_order_truth" / "latest_open_order_truth.json"
 _UNRESOLVED_SUBMIT_INTENT_BLOCK_REASON = "TRACK_B_UNRESOLVED_SUBMIT_INTENT_BLOCKS_NEW_ENTRY"
+_SAME_SYMBOL_PENDING_FILL_ANTI_FLIP_REASON = "SAME_SYMBOL_PENDING_FILL_ANTI_FLIP_LOCK"
+_SAME_SYMBOL_UNRESOLVED_EXPOSURE_REASON = "SAME_SYMBOL_UNRESOLVED_CURRENT_EXPOSURE_LOCK"
 _CANONICAL_TRUTH_UNAVAILABLE_REASON = "CANONICAL_REGISTRY_TRUTH_UNAVAILABLE"
 _CANONICAL_TRUTH_AMBIGUOUS_REASON = "CANONICAL_REGISTRY_TRUTH_AMBIGUOUS"
 _CANONICAL_CURRENT_EXPOSURE_PRESENT_REASON = "CANONICAL_CURRENT_EXPOSURE_PRESENT"
@@ -794,6 +796,8 @@ def _evaluate_strategy_gate(
             executable_symbol=config.executable_symbol,
             quantity=quantity,
             allow_stacking=bool(config.allow_stacking),
+            requested_direction=semantics.direction,
+            unresolved_submit_intents=unresolved_submit_intents,
         )
         registry_allowed = bool(entry_registry_truth_result.get("allowed"))
         legacy_allowed = bool(entry_legacy_result.get("allowed"))
@@ -965,6 +969,8 @@ def _evaluate_strategy_gate(
                 "broker_position_truth_stale_or_missing",
                 "phase1_broker_reconciliation_not_clear",
                 _UNRESOLVED_SUBMIT_INTENT_BLOCK_REASON,
+                _SAME_SYMBOL_PENDING_FILL_ANTI_FLIP_REASON,
+                _SAME_SYMBOL_UNRESOLVED_EXPOSURE_REASON,
             }
         ),
     }
@@ -979,6 +985,8 @@ def _entry_registry_truth_result(
     executable_symbol: str,
     quantity: float,
     allow_stacking: bool,
+    requested_direction: str | None,
+    unresolved_submit_intents: list[dict[str, Any]],
 ) -> dict[str, Any]:
     reason_codes: list[str] = []
     trade_id = _entry_birth_trade_id(config=config, requested_strategy=requested_strategy, executable_symbol=executable_symbol)
@@ -1008,6 +1016,15 @@ def _entry_registry_truth_result(
         active_records = ()
     elif canonical_current_scope.get("current_exposure_present") is False:
         active_records = ()
+
+    same_symbol_pending_fill_lock = _same_symbol_pending_fill_entry_lock(
+        config=config,
+        requested_direction=requested_direction,
+        allow_stacking=allow_stacking,
+        unresolved_submit_intents=unresolved_submit_intents,
+    )
+    if same_symbol_pending_fill_lock:
+        reason_codes.extend(str(reason) for reason in list(same_symbol_pending_fill_lock.get("reason_codes") or []))
 
     matching_records = _matching_entry_registry_records(
         records=active_records,
@@ -1053,6 +1070,7 @@ def _entry_registry_truth_result(
         "broker_open_order_count": broker_open_order_count,
         "broker_lifecycle_reconciled": broker_lifecycle_reconciled,
         "canonical_current_scope_result": canonical_current_scope,
+        "same_symbol_pending_fill_lock": same_symbol_pending_fill_lock,
         "source_paths": source_paths,
     }
 
@@ -1502,6 +1520,96 @@ def _unresolved_submit_intent_new_entry_blocker(
     }
 
 
+def _same_symbol_pending_fill_entry_lock(
+    *,
+    config: IbkrPaperStrategyExposureConfig,
+    requested_direction: str | None,
+    allow_stacking: bool,
+    unresolved_submit_intents: list[dict[str, Any]],
+) -> dict[str, Any] | None:
+    requested = str(requested_direction or "").strip().upper()
+    if requested not in {"LONG", "SHORT"}:
+        return None
+
+    matching_records: list[dict[str, Any]] = []
+    reason_codes: list[str] = []
+    for record in unresolved_submit_intents:
+        if not _unresolved_submit_intent_same_account_contract(record=record, config=config):
+            continue
+        record_direction = _unresolved_submit_intent_entry_direction(record)
+        if record_direction not in {"LONG", "SHORT"}:
+            continue
+
+        lock_reason = ""
+        if _directions_are_opposite(requested, record_direction):
+            lock_reason = _SAME_SYMBOL_PENDING_FILL_ANTI_FLIP_REASON
+        elif not allow_stacking and _unresolved_submit_intent_has_broker_effect_or_adoption_risk(record):
+            lock_reason = _SAME_SYMBOL_UNRESOLVED_EXPOSURE_REASON
+        if not lock_reason:
+            continue
+
+        reason_codes.append(lock_reason)
+        matching_records.append(
+            {
+                "ownership_intent_id": record.get("ownership_intent_id"),
+                "state": record.get("state"),
+                "reason_code": lock_reason,
+                "match_reason": "same_account_contract",
+                "account_id": record.get("account_id"),
+                "lane_id": record.get("lane_id"),
+                "strategy_id": record.get("strategy_id"),
+                "symbol": record.get("symbol"),
+                "local_symbol": record.get("local_symbol"),
+                "expiry": record.get("expiry"),
+                "con_id": record.get("con_id"),
+                "action": record.get("action"),
+                "intent_type": record.get("intent_type"),
+                "direction": record_direction,
+                "qty": record.get("qty"),
+                "created_at": record.get("created_at"),
+                "updated_at": record.get("updated_at"),
+                "trade_id": dict(record.get("extra") or {}).get("trade_id"),
+            }
+        )
+
+    if not matching_records:
+        return None
+    return {
+        "classification": "SAME_SYMBOL_PENDING_FILL_OR_UNRESOLVED_EXPOSURE_ENTRY_LOCK",
+        "detail": (
+            "Same-account/contract unresolved submit or broker-effect ownership blocks new entries until "
+            "broker ack, fill adoption, and reconciliation are current-scope clean for that symbol."
+        ),
+        "reason_codes": list(dict.fromkeys(reason_codes)),
+        "matching_record_count": len(matching_records),
+        "matching_records": matching_records,
+    }
+
+
+def _unresolved_submit_intent_entry_direction(record: dict[str, Any]) -> str | None:
+    semantics = _normalize_intent_semantics(
+        action=str(record.get("action") or "").strip().upper(),
+        intent_type=str(record.get("intent_type") or "").strip().upper(),
+    )
+    if semantics.operation != "OPEN":
+        return None
+    return semantics.direction
+
+
+def _directions_are_opposite(left: str, right: str) -> bool:
+    return {str(left or "").strip().upper(), str(right or "").strip().upper()} == {"LONG", "SHORT"}
+
+
+def _unresolved_submit_intent_has_broker_effect_or_adoption_risk(record: dict[str, Any]) -> bool:
+    state = str(record.get("state") or "").strip().upper()
+    return (
+        state in {"BROKER_ORDER_WORKING", "BROKER_POSITION_OBSERVED_ADOPTION_REQUIRED", "REVIEW_REQUIRED"}
+        or "ADOPTION" in state
+        or "BROKER_POSITION" in state
+        or "FILL" in state
+    )
+
+
 def _unresolved_submit_intent_match_reason(
     *,
     record: dict[str, Any],
@@ -1527,7 +1635,11 @@ def _unresolved_submit_intent_same_account_contract(
     record: dict[str, Any],
     config: IbkrPaperStrategyExposureConfig,
 ) -> bool:
-    if str(record.get("account_id") or "") != "DUM882026":
+    requested_account = _valid_owner_identity_value(config.account_id)
+    record_account = _valid_owner_identity_value(record.get("account_id"))
+    if requested_account and record_account and requested_account != record_account:
+        return False
+    if not record_account:
         return False
     config_con_id = _int_or_none(config.con_id)
     record_con_id = _int_or_none(record.get("con_id"))

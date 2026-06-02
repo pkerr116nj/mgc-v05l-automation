@@ -395,19 +395,22 @@ def _write_submit_intent_ownership(
     tmp_path: Path,
     *,
     state: SubmitIntentOwnershipState = SubmitIntentOwnershipState.BROKER_RESULT_UNKNOWN_REFRESH_REQUIRED,
+    account_id: str = "DUM882026",
     lane_id: str = "gc_1x_all_lanes__asia_early_long",
     strategy_id: str = "gold_forced_session_baseline_v2__GC",
     symbol: str = "GC",
     local_symbol: str = "GCM6",
     con_id: int = 430360630,
+    action: str = "BUY",
+    intent_type: str = "BUY_TO_OPEN",
 ) -> None:
     record = SubmitIntentOwnershipRecord(
         mode="PAPER",
-        account_id="DUM882026",
+        account_id=account_id,
         lane_id=lane_id,
         strategy_id=strategy_id,
-        intent_type="BUY_TO_OPEN",
-        action="BUY",
+        intent_type=intent_type,
+        action=action,
         symbol=symbol,
         local_symbol=local_symbol,
         expiry="20260626",
@@ -503,6 +506,147 @@ def test_blocks_new_entry_by_unresolved_same_account_contract_submit_intent(tmp_
     assert "TRACK_B_UNRESOLVED_SUBMIT_INTENT_BLOCKS_NEW_ENTRY" in gate["diagnostic_reason_codes"]
     blocker = gate["unresolved_submit_intent_ownership_blocker"]
     assert blocker["matching_records"][0]["match_reason"] == "same_account_contract"
+
+
+def test_opposite_direction_pending_fill_blocks_same_symbol_entry(tmp_path: Path) -> None:
+    _write_monitor(tmp_path, broker_quantity=0.0)
+    _write_ledger(tmp_path, [])
+    _write_governance(tmp_path, [_governance_row("mnq_us_active_participation_short", "PAPER_ACTIVE_EVIDENCE_MNQ_US_PARTICIPATION_SHORT_V1")])
+    _write_submit_intent_ownership(
+        tmp_path,
+        state=SubmitIntentOwnershipState.BROKER_RESULT_UNKNOWN_REFRESH_REQUIRED,
+        lane_id="mnq_us_active_participation_long",
+        strategy_id="PAPER_ACTIVE_EVIDENCE_MNQ_US_PARTICIPATION_LONG_V1",
+        symbol="MNQ",
+        local_symbol="MNQM6",
+        con_id=770561201,
+        action="BUY",
+        intent_type="BUY_TO_OPEN",
+    )
+
+    gate = evaluate_paper_strategy_exposure_gate(
+        repo_root=tmp_path,
+        strategy_id="mnq_us_active_participation_short",
+        bridge_strategy_id="PAPER_ACTIVE_EVIDENCE_MNQ_US_PARTICIPATION_SHORT_V1",
+        action="SELL",
+        intent_type="SELL_TO_OPEN",
+        quantity=1.0,
+        executable_symbol="MNQ",
+        account_id="DUM882026",
+        con_id=770561201,
+        local_symbol="MNQM6",
+    )
+
+    assert gate["submit_allowed"] is False
+    assert gate["classification"] == "PAPER_EXPOSURE_BLOCKED_REGISTRY_TRUTH_ENTRY"
+    assert "SAME_SYMBOL_PENDING_FILL_ANTI_FLIP_LOCK" in gate["block_reasons"]
+    lock = gate["registry_truth_result"]["same_symbol_pending_fill_lock"]
+    assert lock["matching_records"][0]["direction"] == "LONG"
+    assert lock["matching_records"][0]["reason_code"] == "SAME_SYMBOL_PENDING_FILL_ANTI_FLIP_LOCK"
+
+
+def test_fill_awaiting_adoption_blocks_opposite_same_symbol_entry(tmp_path: Path) -> None:
+    _write_monitor(tmp_path, broker_quantity=0.0)
+    _write_ledger(tmp_path, [])
+    _write_governance(tmp_path, [_governance_row("mes_us_active_participation_short", "PAPER_ACTIVE_EVIDENCE_MES_US_PARTICIPATION_SHORT_V1")])
+    _write_submit_intent_ownership(
+        tmp_path,
+        state=SubmitIntentOwnershipState.BROKER_POSITION_OBSERVED_ADOPTION_REQUIRED,
+        lane_id="mes_us_active_participation_long",
+        strategy_id="PAPER_ACTIVE_EVIDENCE_MES_US_PARTICIPATION_LONG_V1",
+        symbol="MES",
+        local_symbol="MESM6",
+        con_id=770561194,
+        action="BUY",
+        intent_type="BUY_TO_OPEN",
+    )
+
+    gate = evaluate_paper_strategy_exposure_gate(
+        repo_root=tmp_path,
+        strategy_id="mes_us_active_participation_short",
+        bridge_strategy_id="PAPER_ACTIVE_EVIDENCE_MES_US_PARTICIPATION_SHORT_V1",
+        action="SELL",
+        intent_type="SELL_TO_OPEN",
+        quantity=1.0,
+        executable_symbol="MES",
+        account_id="DUM882026",
+        con_id=770561194,
+        local_symbol="MESM6",
+    )
+
+    assert gate["submit_allowed"] is False
+    assert "SAME_SYMBOL_PENDING_FILL_ANTI_FLIP_LOCK" in gate["block_reasons"]
+    assert gate["registry_truth_result"]["same_symbol_pending_fill_lock"]["matching_record_count"] == 1
+
+
+def test_adoption_required_exposure_blocks_same_direction_stacking(tmp_path: Path) -> None:
+    _write_monitor(tmp_path, broker_quantity=0.0)
+    _write_ledger(tmp_path, [])
+    _write_governance(tmp_path, [_governance_row("mnq_us_active_participation_long_2", "PAPER_ACTIVE_EVIDENCE_MNQ_US_PARTICIPATION_LONG_V2")])
+    _write_submit_intent_ownership(
+        tmp_path,
+        state=SubmitIntentOwnershipState.BROKER_POSITION_OBSERVED_ADOPTION_REQUIRED,
+        lane_id="mnq_us_active_participation_long",
+        strategy_id="PAPER_ACTIVE_EVIDENCE_MNQ_US_PARTICIPATION_LONG_V1",
+        symbol="MNQ",
+        local_symbol="MNQM6",
+        con_id=770561201,
+        action="BUY",
+        intent_type="BUY_TO_OPEN",
+    )
+
+    gate = evaluate_paper_strategy_exposure_gate(
+        repo_root=tmp_path,
+        strategy_id="mnq_us_active_participation_long_2",
+        bridge_strategy_id="PAPER_ACTIVE_EVIDENCE_MNQ_US_PARTICIPATION_LONG_V2",
+        action="BUY",
+        intent_type="BUY_TO_OPEN",
+        quantity=1.0,
+        executable_symbol="MNQ",
+        account_id="DUM882026",
+        con_id=770561201,
+        local_symbol="MNQM6",
+        allow_stacking=False,
+    )
+
+    assert gate["submit_allowed"] is False
+    assert "SAME_SYMBOL_UNRESOLVED_CURRENT_EXPOSURE_LOCK" in gate["block_reasons"]
+    assert gate["registry_truth_result"]["same_symbol_pending_fill_lock"]["matching_records"][0]["direction"] == "LONG"
+
+
+def test_same_symbol_pending_fill_different_contract_does_not_lock(tmp_path: Path) -> None:
+    _write_monitor(tmp_path, broker_quantity=0.0)
+    _write_ledger(tmp_path, [])
+    _write_governance(tmp_path, [_governance_row("mnq_us_active_participation_short", "PAPER_ACTIVE_EVIDENCE_MNQ_US_PARTICIPATION_SHORT_V1")])
+    _write_broker_positions_snapshot(tmp_path, positions=[])
+    _write_broker_open_orders_snapshot(tmp_path, open_orders=[])
+    _write_submit_intent_ownership(
+        tmp_path,
+        lane_id="mnq_us_active_participation_long",
+        strategy_id="PAPER_ACTIVE_EVIDENCE_MNQ_US_PARTICIPATION_LONG_V1",
+        symbol="MNQ",
+        local_symbol="MNQU6",
+        con_id=770561999,
+        action="BUY",
+        intent_type="BUY_TO_OPEN",
+    )
+
+    gate = evaluate_paper_strategy_exposure_gate(
+        repo_root=tmp_path,
+        strategy_id="mnq_us_active_participation_short",
+        bridge_strategy_id="PAPER_ACTIVE_EVIDENCE_MNQ_US_PARTICIPATION_SHORT_V1",
+        action="SELL",
+        intent_type="SELL_TO_OPEN",
+        quantity=1.0,
+        executable_symbol="MNQ",
+        account_id="DUM882026",
+        con_id=770561201,
+        local_symbol="MNQM6",
+    )
+
+    assert gate["submit_allowed"] is True
+    assert gate["classification"] == "PAPER_EXPOSURE_ENTRY_ALLOWED_REGISTRY_TRUTH_LEGACY_DIAGNOSTIC"
+    assert gate["registry_truth_result"]["same_symbol_pending_fill_lock"] is None
 
 
 def test_stale_raw_open_registry_rows_do_not_block_when_canonical_current_scope_is_clean(tmp_path: Path) -> None:
