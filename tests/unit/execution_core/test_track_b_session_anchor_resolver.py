@@ -324,6 +324,30 @@ def test_london_late_0530_reference_rejects_prior_day_backfill(tmp_path: Path) -
     assert result.reason_code == SessionAnchorReasonCode.ANCHOR_BAR_NOT_FOUND
 
 
+def test_london_late_0530_reference_conflicting_sources_are_ambiguous(tmp_path: Path) -> None:
+    _write_runtime_bars(
+        tmp_path,
+        "MNQ",
+        [_bar("2026-06-02T09:30:00+00:00", "2026-06-02T09:31:00+00:00", open_="30510.50")],
+    )
+    _write_intraday_backfill_bars(
+        tmp_path,
+        "MNQ",
+        [_bar("2026-06-02T09:30:00+00:00", "2026-06-02T09:31:00+00:00", open_="30511.00")],
+    )
+
+    result = resolve_session_anchor(
+        "MNQ",
+        "LONDON_LATE_0530_REFERENCE",
+        datetime(2026, 6, 2, 7, 0, tzinfo=NY),
+        config=TrackBSessionAnchorConfig(repo_root=tmp_path),
+    )
+
+    assert result.status == SessionAnchorStatus.AMBIGUOUS
+    assert result.reason_code == SessionAnchorReasonCode.ANCHOR_AMBIGUOUS
+    assert result.not_ready_reason == "CONFLICTING_ANCHOR_SOURCES"
+
+
 def test_london_late_0530_reference_dst_timezone_handling(tmp_path: Path) -> None:
     _write_runtime_bars(
         tmp_path,

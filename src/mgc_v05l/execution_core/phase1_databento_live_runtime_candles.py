@@ -317,14 +317,14 @@ def run_phase1_databento_live_listener(
         client = _create_phase1_live_client(api_key=api_key, live_client_factory=live_client_factory)
         client.add_callback(state.on_record, state.on_error)
         client.add_stream(raw_dbn_path, exception_callback=state.on_error)
+        intraday_replay_start = config.intraday_replay_start or _current_futures_session_replay_start(started_at)
         subscribe_kwargs: dict[str, Any] = {
             "dataset": _single_dataset(selection=selection, fallback=config.dataset),
             "schema": _single_schema(selection=selection, fallback=config.schema),
             "symbols": requested_symbols,
             "stype_in": config.stype_in,
+            "start": intraday_replay_start,
         }
-        if config.intraday_replay_start:
-            subscribe_kwargs["start"] = config.intraday_replay_start
         client.subscribe(**subscribe_kwargs)
         state.subscription_status = "SUBSCRIBED"
         state.subscribe_kwargs = dict(subscribe_kwargs)
@@ -757,7 +757,22 @@ def _current_session_anchor_bars(*, bars: Sequence[Mapping[str, Any]], generated
     """Retain the current futures session for anchor recovery, independent of the hot rolling window."""
 
     generated_at = _coerce_now(generated_at)
-    generated_et = generated_at.astimezone(NEW_YORK)
+    session_start_utc = _current_futures_session_start_utc(generated_at)
+    retained = []
+    for bar in bars:
+        end = _parse_datetime(bar.get("bar_end"))
+        if end is not None and session_start_utc <= end <= generated_at + timedelta(minutes=1):
+            retained.append(dict(bar))
+    return _dedupe_phase1_bars(retained)
+
+
+def _current_futures_session_replay_start(value: datetime) -> str:
+    return _current_futures_session_start_utc(value).isoformat()
+
+
+def _current_futures_session_start_utc(value: datetime) -> datetime:
+    value = _coerce_now(value)
+    generated_et = value.astimezone(NEW_YORK)
     session_start_date = generated_et.date()
     if generated_et.hour < 18:
         session_start_date -= timedelta(days=1)
@@ -766,13 +781,7 @@ def _current_session_anchor_bars(*, bars: Sequence[Mapping[str, Any]], generated
         datetime.min.time().replace(hour=18),
         tzinfo=NEW_YORK,
     )
-    session_start_utc = session_start_et.astimezone(timezone.utc)
-    retained = []
-    for bar in bars:
-        end = _parse_datetime(bar.get("bar_end"))
-        if end is not None and session_start_utc <= end <= generated_at + timedelta(minutes=1):
-            retained.append(dict(bar))
-    return _dedupe_phase1_bars(retained)
+    return session_start_et.astimezone(timezone.utc)
 
 
 def _write_symbol_runtime_artifacts_from_bars(
@@ -1121,6 +1130,22 @@ def _row_and_artifacts_for_live_result(
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
             written.append(path)
+        intraday_one_minute = _current_session_anchor_bars(
+            bars=candles_1m,
+            generated_at=_parse_datetime(live_result.report.get("generated_at")) or now,
+        )
+        intraday_timeframe_bars = _timeframe_bars(intraday_one_minute)
+        for timeframe in PHASE1_RUNTIME_TIMEFRAMES:
+            payload = _runtime_payload(
+                config=config,
+                live_symbol=live_symbol,
+                symbol=symbol,
+                timeframe=timeframe,
+                generated_at=_parse_datetime(live_result.report.get("generated_at")) or now,
+                bars=intraday_timeframe_bars.get(timeframe, []),
+                live_result=live_result,
+                live_connected=live_connected,
+            )
             intraday_payload = {
                 **payload,
                 "source": "RECOVERED_PHASE1_1M",

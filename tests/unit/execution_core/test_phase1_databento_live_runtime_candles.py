@@ -522,6 +522,7 @@ def test_live_listener_follows_databento_session_pattern_and_writes_raw_stream_p
     assert client.subscribe_kwargs == {
         "dataset": "GLBX.MDP3",
         "schema": "ohlcv-1m",
+        "start": "2026-05-10T22:00:00+00:00",
         "symbols": ["GC.v.0"],
         "stype_in": "continuous",
     }
@@ -736,6 +737,49 @@ def test_live_listener_retains_current_session_intraday_backfill_for_session_anc
         )
         assert anchor.status == SessionAnchorStatus.READY
         assert anchor.source == "RECOVERED_PHASE1_1M"
+
+
+def test_live_listener_defaults_replay_to_current_session_for_london_late_anchor(tmp_path: Path) -> None:
+    now = datetime(2026, 6, 2, 12, 13, tzinfo=timezone.utc)
+    records = _live_records(164, symbol="MNQ", end=now - timedelta(minutes=1))
+    client = FakeLiveClient(records)
+
+    run_phase1_databento_live_listener(
+        config=_listener_config(tmp_path, symbols=("MNQ",), now=now, max_bars=90),
+        live_client_factory=lambda _key: client,
+        now_func=lambda: now,
+    )
+
+    assert client.subscribe_kwargs is not None
+    assert client.subscribe_kwargs["start"] == "2026-06-01T22:00:00+00:00"
+
+    hot_payload = json.loads(
+        (
+            tmp_path
+            / "outputs/track_b_execution_core/phase1_runtime_market_data/MNQ/1m/latest_runtime_candles.json"
+        ).read_text(encoding="utf-8")
+    )
+    assert hot_payload["bar_count"] == 90
+    assert all(str(bar["bar_end"]) != "2026-06-02T09:30:00+00:00" for bar in hot_payload["bars"])
+
+    backfill_payload = json.loads(
+        (
+            tmp_path
+            / "outputs/track_b_execution_core/phase1_runtime_market_data_intraday_backfill/MNQ/1m/latest_runtime_candles.json"
+        ).read_text(encoding="utf-8")
+    )
+    assert backfill_payload["source"] == "RECOVERED_PHASE1_1M"
+    assert backfill_payload["retention_policy"] == "CURRENT_FUTURES_SESSION_FROM_1800_ET"
+    assert any(str(bar["bar_end"]) == "2026-06-02T09:30:00+00:00" for bar in backfill_payload["bars"])
+
+    anchor = resolve_session_anchor(
+        "MNQ",
+        "LONDON_LATE_0530_REFERENCE",
+        now,
+        config=TrackBSessionAnchorConfig(repo_root=tmp_path),
+    )
+    assert anchor.status == SessionAnchorStatus.READY
+    assert anchor.source == "RECOVERED_PHASE1_1M"
 
 
 def test_no_broker_or_paper_proof_terms_in_phase1_live_module() -> None:
