@@ -14,7 +14,9 @@ from pathlib import Path
 from typing import Any, Mapping
 
 from mgc_v05l.execution_core.track_b_atomic_io import write_json_atomic
+from mgc_v05l.execution_core.track_b_live_trade_registry import load_live_trade_registry_records
 from mgc_v05l.execution_core.track_b_projection_metadata import build_projection_metadata
+from mgc_v05l.execution_core.track_b_terminal_registry_truth import resolve_terminal_registry_truth
 
 
 NO_OPEN_ORDERS = "NO_OPEN_ORDERS"
@@ -107,6 +109,7 @@ def build_track_b_open_order_truth_from_reconciliation(
     live_position_status = _read_json(config.resolve(config.live_position_status_path))
     market_refs = _market_refs(config=config)
     lifecycle_reports = _load_lifecycle_reports(config.resolve(config.lifecycle_root))
+    terminal_records = load_live_trade_registry_records(repo_root=config.repo_root)
 
     open_orders = _list(reconciliation.get("track_b_broker_open_orders"))
     broker_positions = _list(reconciliation.get("track_b_broker_positions"))
@@ -125,6 +128,7 @@ def build_track_b_open_order_truth_from_reconciliation(
             unknown_orders=unknown_orders,
             known_managed_exit_orders=known_managed_exit_orders,
             lifecycle_reports=lifecycle_reports,
+            terminal_records=terminal_records,
             market_ref=market_refs.get(_row_symbol(order), {}),
             now=actual_now,
             close_order_stale_seconds=config.close_order_stale_seconds,
@@ -172,6 +176,11 @@ def build_track_b_open_order_truth_from_reconciliation(
         "duplicate_close_order_groups": duplicate_groups,
         "broker_positions_without_close_order": broker_positions_without_close,
         "broker_flat_with_open_close_order": flat_with_close,
+        "terminal_registry_truth_overlay": {
+            "enabled": True,
+            "record_count": len(terminal_records),
+            "source": "track_b_live_trade_registry",
+        },
         "position_truth_summary": position_truth.get("summary") or {},
         "live_position_status_summary": {
             "open_position_count": live_position_status.get("open_position_count"),
@@ -286,12 +295,19 @@ def _classify_order(
     unknown_orders: list[dict[str, Any]],
     known_managed_exit_orders: list[dict[str, Any]],
     lifecycle_reports: list[dict[str, Any]],
+    terminal_records: list[Any] | tuple[Any, ...],
     market_ref: Mapping[str, Any],
     now: datetime,
     close_order_stale_seconds: float,
     marketable_unfilled_seconds: float,
 ) -> dict[str, Any]:
-    lifecycle_report = _lifecycle_report_for_order(order=order, lifecycle_reports=lifecycle_reports)
+    lifecycle_report = _lifecycle_report_for_order(
+        order=order,
+        lifecycle_reports=lifecycle_reports,
+        terminal_records=terminal_records,
+        broker_positions=broker_positions,
+        broker_open_orders=[dict(order)],
+    )
     reasons = _suspicious_reasons(order=order, lifecycle_report=lifecycle_report)
     is_close_order = _is_close_order(
         order=order,
@@ -377,8 +393,6 @@ def _overall_classification(
         return OPEN_CLOSE_ORDER_WORKING
     if any(state.get("is_entry_order") is True for state in order_states):
         return OPEN_ENTRY_ORDER_WORKING
-    if broker_positions_without_close:
-        return BROKER_POSITION_WITHOUT_CLOSE_ORDER
     return NO_OPEN_ORDERS
 
 
@@ -634,15 +648,50 @@ def _load_lifecycle_reports(root: Path) -> list[dict[str, Any]]:
     return reports
 
 
-def _lifecycle_report_for_order(*, order: Mapping[str, Any], lifecycle_reports: list[dict[str, Any]]) -> dict[str, Any]:
+def _lifecycle_report_for_order(
+    *,
+    order: Mapping[str, Any],
+    lifecycle_reports: list[dict[str, Any]],
+    terminal_records: list[Any] | tuple[Any, ...],
+    broker_positions: list[dict[str, Any]],
+    broker_open_orders: list[dict[str, Any]],
+) -> dict[str, Any]:
     order_id = str(order.get("broker_order_id") or order.get("order_id") or "")
     if not order_id:
         return {}
     for report in lifecycle_reports:
         close_attempt = _mapping(report.get("close_submit_attempt"))
         if str(close_attempt.get("broker_order_id") or "") == order_id:
-            return report
+            return _terminal_scoped_lifecycle_report(
+                report=report,
+                terminal_records=terminal_records,
+                broker_positions=broker_positions,
+                broker_open_orders=broker_open_orders,
+            )
     return {}
+
+
+def _terminal_scoped_lifecycle_report(
+    *,
+    report: Mapping[str, Any],
+    terminal_records: list[Any] | tuple[Any, ...],
+    broker_positions: list[dict[str, Any]],
+    broker_open_orders: list[dict[str, Any]],
+) -> dict[str, Any]:
+    terminal = resolve_terminal_registry_truth(
+        records=terminal_records,
+        identity=report,
+        broker_positions=broker_positions,
+        broker_open_orders=broker_open_orders,
+    )
+    if terminal.terminal_closed_flat:
+        return {
+            "classification": "STALE_SUPERSEDED_LIFECYCLE_PROJECTION",
+            "full_audit_only": True,
+            "terminal_registry_truth": terminal.to_dict(),
+            "superseded_lifecycle_report": dict(report),
+        }
+    return dict(report)
 
 
 def _contract_key(row: Mapping[str, Any]) -> str:

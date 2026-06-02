@@ -92,6 +92,10 @@ CANONICAL_READINESS_STATES = {
     "NOT_READY_CONFIG",
     "NOT_READY_WRONG_ROOT",
 }
+RECONCILIATION_CLEAN_CLASSIFICATIONS = {
+    "BROKER_LIFECYCLE_RECONCILED",
+    "TRACK_B_PAPER_BROKER_RECONCILED",
+}
 BROKER_FRESHNESS_DEFAULT_SECONDS = 150.0
 RECONCILIATION_FRESHNESS_DEFAULT_SECONDS = 180.0
 MARKET_DATA_FRESHNESS_DEFAULT_SECONDS = 180.0
@@ -351,7 +355,7 @@ def classify_canonical_readiness(inputs: Mapping[str, Any]) -> dict[str, Any]:
     if (
         not _bool(reconciliation.get("available"))
         or not _bool(reconciliation.get("fresh"))
-        or str(reconciliation.get("classification") or "") != "TRACK_B_PAPER_BROKER_RECONCILED"
+        or not _reconciliation_classification_clean(str(reconciliation.get("classification") or ""))
         or not _bool(reconciliation.get("broker_reconciled"))
         or int(reconciliation.get("review_required_count") or 0) != 0
         or int(reconciliation.get("lifecycle_open_position_count") or 0) != 0
@@ -1033,7 +1037,7 @@ def _execution_core_shared_truth_decision(evidence: Mapping[str, Any]) -> dict[s
         )
 
     reconciliation_classification = str(classifications.get("Reconciliation") or "")
-    if reconciliation_classification and reconciliation_classification != "TRACK_B_PAPER_BROKER_RECONCILED":
+    if reconciliation_classification and not _reconciliation_classification_clean(reconciliation_classification):
         blockers.append(
             {
                 "code": "execution_core_reconciliation_not_clean",
@@ -1103,6 +1107,10 @@ def _execution_core_shared_truth_decision(evidence: Mapping[str, Any]) -> dict[s
         )
 
     return {"blockers": blockers, "warnings": warnings}
+
+
+def _reconciliation_classification_clean(classification: str) -> bool:
+    return classification in RECONCILIATION_CLEAN_CLASSIFICATIONS
 
 
 def _proof_readiness_allows_market_data_startup(

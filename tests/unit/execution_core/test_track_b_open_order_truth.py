@@ -111,8 +111,9 @@ def test_broker_position_without_close_order_is_classified(tmp_path: Path) -> No
 
     payload = build_track_b_open_order_truth(config=TrackBOpenOrderTruthConfig(repo_root=tmp_path), now=NOW)
 
-    assert payload["classification"] == BROKER_POSITION_WITHOUT_CLOSE_ORDER
+    assert payload["classification"] == NO_OPEN_ORDERS
     assert payload["summary"]["broker_position_without_close_order_count"] == 1
+    assert payload["broker_positions_without_close_order"][0]["local_symbol"] == "MGCM6"
 
 
 def test_marketable_sell_limit_unfilled_is_classified(tmp_path: Path) -> None:

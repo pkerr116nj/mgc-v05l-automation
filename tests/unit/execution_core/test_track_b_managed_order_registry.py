@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import json
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
 
@@ -145,6 +145,50 @@ def test_position_without_close_order_uses_pre_restart_resolved_identity(tmp_pat
     )
 
 
+def test_terminal_closed_flat_suppresses_stale_position_without_close_row(tmp_path: Path) -> None:
+    stale_position = _broker_position()
+    _seed_base(tmp_path, positions_without_close=[stale_position])
+    _write_terminal_closed_flat_events(tmp_path)
+    _write_lifecycle_report(
+        tmp_path,
+        {
+            "lifecycle_id": "life_mnq",
+            "symbol": "MNQ",
+            "local_symbol": "MNQM6",
+            "con_id": 770561201,
+            "quantity": "1",
+            "side": "LONG",
+            "final_position_status": "OPEN_MANAGED",
+        },
+    )
+    _write_json(
+        tmp_path / "outputs" / "reports" / "track_b_paper_broker_reconciliation" / "latest_track_b_paper_broker_reconciliation.json",
+        {
+            "schema_version": "track_b_paper_broker_reconciliation_v1",
+            "generated_at": NOW.isoformat(),
+            "classification": "TRACK_B_PAPER_BROKER_RECONCILED",
+            "broker_reconciled": True,
+            "track_b_broker_open_order_count": 0,
+            "track_b_broker_position_count": 0,
+            "track_b_broker_positions": [],
+            "track_b_broker_open_orders": [],
+            "unresolved_submit_intent_ownership_count": 0,
+            "live_money_eligible": False,
+        },
+    )
+
+    payload = build_track_b_managed_order_registry(
+        config=TrackBManagedOrderRegistryConfig(repo_root=tmp_path),
+        now=NOW,
+    )
+
+    assert payload["classification"] == NO_MANAGED_ORDERS
+    assert payload["managed_orders"] == []
+    overlay = payload["terminal_registry_truth_overlay"]
+    assert overlay["superseded_full_audit_only_count"] == 1
+    assert overlay["superseded_full_audit_only"][0]["classification"] == "STALE_SUPERSEDED_LIFECYCLE_PROJECTION"
+
+
 def test_managed_timed_hold_pending_is_not_review_required(tmp_path: Path) -> None:
     managed_position = {
         "classification": "OPEN_MANAGED_MATCHED",
@@ -178,6 +222,39 @@ def test_managed_timed_hold_pending_is_not_review_required(tmp_path: Path) -> No
     assert row["managed_exit_profile_present"] is True
     assert row["exit_not_yet_eligible"] is True
     assert row["close_order_required_now"] is False
+
+
+def test_exit_due_without_close_order_is_managed_order_blocker_only(tmp_path: Path) -> None:
+    managed_position = {
+        "classification": "OPEN_MANAGED_EXIT_DUE",
+        "symbol": "MNQ",
+        "local_symbol": "MNQM6",
+        "con_id": 770561201,
+        "side": "LONG",
+        "quantity": "1",
+        "lifecycle_id": "current_managed_mnq",
+        "lane_id": "mnq_globex_active_participation_long",
+        "strategy_id": "mnq_globex_active_participation_long",
+        "managed_exit_policy_id": "GLOBEX_ACTIVE_EVIDENCE_TIMEBOX_60M_EXIT_V1",
+        "exit_due": True,
+        "attention_required": False,
+    }
+    _seed_base(
+        tmp_path,
+        positions_without_close=[_broker_position()],
+        managed_positions=[managed_position],
+    )
+
+    payload = build_track_b_managed_order_registry(
+        config=TrackBManagedOrderRegistryConfig(repo_root=tmp_path),
+        now=NOW,
+    )
+
+    assert payload["classification"] == POSITION_WITHOUT_CLOSE_ORDER
+    row = payload["managed_orders"][0]
+    assert row["classification"] == POSITION_WITHOUT_CLOSE_ORDER
+    assert row["close_order_required_now"] is True
+    assert row["managed_active_hold"] is False
 
 
 def test_marketable_close_order_is_modify_in_place_candidate(tmp_path: Path) -> None:
@@ -418,6 +495,94 @@ def _write_registry_open_managed_events(root: Path) -> None:
         ),
     ]
     path.write_text("\n".join(json.dumps(event.to_dict(), sort_keys=True) for event in events) + "\n", encoding="utf-8")
+
+
+def _write_terminal_closed_flat_events(root: Path) -> None:
+    path = root / "outputs" / "track_b_execution_core" / "trade_registry" / "live_trade_events.jsonl"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    base = {
+        "trade_id": "trade_mnq",
+        "lifecycle_id": "life_mnq",
+        "lane_id": "mnq_globex_active_participation_long",
+        "thesis_strategy_id": "mnq_globex_active_participation_long",
+        "account_id": "DUM882026",
+        "symbol": "MNQ",
+        "con_id": 770561201,
+        "local_symbol": "MNQM6",
+        "expiry": "20260618",
+        "side": "LONG",
+        "qty": Decimal("1"),
+        "source_artifact_path": "outputs/track_b_execution_core/test.json",
+    }
+    events = [
+        TradeEvent(
+            event_id="trade_mnq_entry_fill",
+            event_type=TradeEventType.ENTRY_FILL_BROKER_BACKED,
+            generated_at=NOW,
+            action="BUY",
+            order_id="1",
+            client_id="111",
+            perm_id="perm_mnq_entry",
+            exec_id="exec_mnq_entry",
+            price=Decimal("29569.06"),
+            **base,
+        ),
+        TradeEvent(
+            event_id="trade_mnq_open",
+            event_type=TradeEventType.LIFECYCLE_OPEN_MANAGED,
+            generated_at=NOW + timedelta(seconds=1),
+            action="BUY",
+            metadata={"managed_exit_policy_id": "GLOBEX_ACTIVE_EVIDENCE_TIMEBOX_60M_EXIT_V1"},
+            **base,
+        ),
+        TradeEvent(
+            event_id="trade_mnq_exit_fill",
+            event_type=TradeEventType.EXIT_FILL_BROKER_BACKED,
+            generated_at=NOW + timedelta(seconds=2),
+            action="SELL",
+            order_id="2",
+            client_id="111",
+            perm_id="perm_mnq_exit",
+            exec_id="exec_mnq_exit",
+            price=Decimal("29571.25"),
+            **base,
+        ),
+        TradeEvent(
+            event_id="trade_mnq_reconciled_flat",
+            event_type=TradeEventType.RECONCILED_FLAT,
+            generated_at=NOW + timedelta(seconds=3),
+            action="SELL",
+            **base,
+        ),
+    ]
+    path.write_text("\n".join(json.dumps(event.to_dict(), sort_keys=True) for event in events) + "\n", encoding="utf-8")
+
+
+def _write_lifecycle_report(root: Path, payload: dict) -> None:
+    lifecycle_id = str(payload.get("lifecycle_id") or "life_mnq")
+    report = {
+        "generated_at": NOW.isoformat(),
+        "lifecycle_id": lifecycle_id,
+        "final_position_status": "OPEN_MANAGED",
+        **payload,
+    }
+    _write_json(
+        root
+        / "outputs"
+        / "track_b_execution_core"
+        / "track_b_strategy_managed_paper_lifecycle"
+        / lifecycle_id
+        / "track_b_strategy_managed_paper_lifecycle_report.json",
+        report,
+    )
+    _write_json(
+        root
+        / "outputs"
+        / "track_b_execution_core"
+        / "track_b_strategy_managed_paper_lifecycle"
+        / "latest_track_b_strategy_managed_paper_lifecycle_report.json",
+        report,
+    )
 
 
 def _write_json(path: Path, payload: dict) -> None:

@@ -16,11 +16,13 @@ from pathlib import Path
 from typing import Any, Mapping
 
 from mgc_v05l.execution_core.track_b_atomic_io import write_json_atomic
+from mgc_v05l.execution_core.track_b_live_trade_registry import load_live_trade_registry_records
 from mgc_v05l.execution_core.track_b_pre_restart_exposure_reconciliation import (
     PreRestartExposureResolverConfig,
     resolve_pre_restart_exposure_reconciliation,
 )
 from mgc_v05l.execution_core.track_b_projection_metadata import build_projection_metadata
+from mgc_v05l.execution_core.track_b_terminal_registry_truth import resolve_terminal_registry_truth
 
 
 NO_MANAGED_ORDERS = "NO_MANAGED_ORDERS"
@@ -109,6 +111,7 @@ def build_track_b_managed_order_registry(
     managed_positions = _read_json(config.resolve(config.managed_position_registry_path))
     reconciliation = _read_json(config.resolve(config.reconciliation_path))
     lifecycle_reports = _load_lifecycle_reports(config.resolve(config.lifecycle_root))
+    terminal_records = load_live_trade_registry_records(repo_root=config.repo_root)
     manifests = _load_manifests(config.resolve(config.manifest_root))
     ownership_records = _load_submit_ownership_records(config.resolve(config.submit_ownership_jsonl_path))
     pre_restart_exposure_resolution = resolve_pre_restart_exposure_reconciliation(
@@ -140,21 +143,24 @@ def build_track_b_managed_order_registry(
             duplicate_order_ids=duplicate_order_ids,
             flat_close_order_ids=flat_close_order_ids,
             lifecycle_reports=lifecycle_reports,
+            terminal_records=terminal_records,
+            broker_positions=_list(reconciliation.get("track_b_broker_positions")),
+            broker_open_orders=_list(reconciliation.get("track_b_broker_open_orders")),
             manifests=manifests,
             ownership_records=ownership_records,
         )
         for state in order_states
     ]
-    managed_orders.extend(
-        _position_without_close_rows(
-            open_order_truth=open_order_truth,
-            managed_positions=managed_positions,
-            reconciliation=reconciliation,
-            resolver_payload=pre_restart_exposure_resolution,
-            lifecycle_reports=lifecycle_reports,
-            manifests=manifests,
-        )
+    position_without_close_rows, terminal_superseded_rows = _position_without_close_rows(
+        open_order_truth=open_order_truth,
+        managed_positions=managed_positions,
+        reconciliation=reconciliation,
+        resolver_payload=pre_restart_exposure_resolution,
+        lifecycle_reports=lifecycle_reports,
+        terminal_records=terminal_records,
+        manifests=manifests,
     )
+    managed_orders.extend(position_without_close_rows)
     classification = _overall_classification(source_stale=source_stale, managed_orders=managed_orders)
     payload = {
         "schema_version": "track_b_managed_order_registry_v1",
@@ -166,6 +172,13 @@ def build_track_b_managed_order_registry(
         "live_money_eligible": reconciliation.get("live_money_eligible") is True,
         "classification": classification,
         "managed_orders": managed_orders,
+        "terminal_registry_truth_overlay": {
+            "enabled": True,
+            "record_count": len(terminal_records),
+            "superseded_full_audit_only_count": len(terminal_superseded_rows),
+            "superseded_full_audit_only": terminal_superseded_rows,
+            "source": "track_b_live_trade_registry",
+        },
         "pre_restart_exposure_resolution": pre_restart_exposure_resolution,
         "source_freshness": source_stale,
         "open_order_truth": _authority_summary(open_order_truth, config.resolve(config.open_order_truth_path)),
@@ -291,12 +304,21 @@ def _managed_order_from_open_order_state(
     duplicate_order_ids: set[str],
     flat_close_order_ids: set[str],
     lifecycle_reports: list[dict[str, Any]],
+    terminal_records: list[Any] | tuple[Any, ...],
+    broker_positions: list[dict[str, Any]],
+    broker_open_orders: list[dict[str, Any]],
     manifests: list[dict[str, Any]],
     ownership_records: list[dict[str, Any]],
 ) -> dict[str, Any]:
     order = _mapping(state.get("order"))
     order_identity = _order_identity(order or state)
-    lifecycle_report = _lifecycle_report_for_order(order=order, lifecycle_reports=lifecycle_reports)
+    lifecycle_report = _lifecycle_report_for_order(
+        order=order,
+        lifecycle_reports=lifecycle_reports,
+        terminal_records=terminal_records,
+        broker_positions=broker_positions,
+        broker_open_orders=broker_open_orders or [dict(order)],
+    )
     manifest = _manifest_for_order(order=order, lifecycle_report=lifecycle_report, manifests=manifests)
     ownership = _ownership_for_order(order=order, lifecycle_report=lifecycle_report, ownership_records=ownership_records)
     classification = _classify_managed_order_state(
@@ -390,17 +412,46 @@ def _position_without_close_rows(
     reconciliation: Mapping[str, Any],
     resolver_payload: Mapping[str, Any],
     lifecycle_reports: list[dict[str, Any]],
+    terminal_records: list[Any] | tuple[Any, ...],
     manifests: list[dict[str, Any]],
-) -> list[dict[str, Any]]:
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     rows: list[dict[str, Any]] = []
+    terminal_superseded_rows: list[dict[str, Any]] = []
+    broker_positions = _list(reconciliation.get("track_b_broker_positions"))
+    broker_open_orders = _list(reconciliation.get("track_b_broker_open_orders"))
     registry_positions = _list(managed_positions.get("managed_positions"))
     registry_positions.extend(_list(resolver_payload.get("resolved_lifecycle_positions")))
     for position in _list(open_order_truth.get("broker_positions_without_close_order")):
+        terminal = resolve_terminal_registry_truth(
+            records=terminal_records,
+            identity=position,
+            broker_positions=broker_positions,
+            broker_open_orders=broker_open_orders,
+        )
+        if terminal.terminal_closed_flat:
+            terminal_superseded_rows.append(
+                {
+                    "classification": "STALE_SUPERSEDED_LIFECYCLE_PROJECTION",
+                    "full_audit_only": True,
+                    "terminal_registry_truth": terminal.to_dict(),
+                    "row": dict(position),
+                }
+            )
+            continue
         registry_position = _registry_position_for_broker_position(position=position, registry_positions=registry_positions)
         lifecycle_report = _lifecycle_report_for_registry_position(
             registry_position=registry_position,
             lifecycle_reports=lifecycle_reports,
-        ) or _lifecycle_report_for_position(position=position, lifecycle_reports=lifecycle_reports)
+            terminal_records=terminal_records,
+            broker_positions=broker_positions,
+            broker_open_orders=broker_open_orders,
+        ) or _lifecycle_report_for_position(
+            position=position,
+            lifecycle_reports=lifecycle_reports,
+            terminal_records=terminal_records,
+            broker_positions=broker_positions,
+            broker_open_orders=broker_open_orders,
+        )
         manifest = _manifest_for_position(position=position, lifecycle_report=lifecycle_report, manifests=manifests)
         active_hold_pending = _active_hold_managed_timed_exit_pending(registry_position=registry_position)
         classification = ACTIVE_HOLD_MANAGED_TIMED_EXIT_PENDING if active_hold_pending else POSITION_WITHOUT_CLOSE_ORDER
@@ -446,7 +497,7 @@ def _position_without_close_rows(
                 "managed_active_hold": active_hold_pending,
             }
         )
-    return rows
+    return rows, terminal_superseded_rows
 
 
 def _overall_classification(*, source_stale: Mapping[str, Any], managed_orders: list[dict[str, Any]]) -> str:
@@ -574,30 +625,69 @@ def _order_identity(order: Mapping[str, Any]) -> str:
     return ""
 
 
-def _lifecycle_report_for_order(*, order: Mapping[str, Any], lifecycle_reports: list[dict[str, Any]]) -> dict[str, Any]:
+def _lifecycle_report_for_order(
+    *,
+    order: Mapping[str, Any],
+    lifecycle_reports: list[dict[str, Any]],
+    terminal_records: list[Any] | tuple[Any, ...],
+    broker_positions: list[dict[str, Any]],
+    broker_open_orders: list[dict[str, Any]],
+) -> dict[str, Any]:
     order_id = str(order.get("broker_order_id") or order.get("order_id") or "").strip()
     perm_id = str(order.get("perm_id") or "").strip()
     for report in lifecycle_reports:
         close_attempt = _mapping(report.get("close_submit_attempt"))
         close_fill = _mapping(report.get("close_fill"))
         if order_id and str(close_attempt.get("broker_order_id") or "") == order_id:
-            return report
+            return _terminal_scoped_lifecycle_report(
+                report=report,
+                terminal_records=terminal_records,
+                broker_positions=broker_positions,
+                broker_open_orders=broker_open_orders,
+            )
         if order_id and str(close_fill.get("broker_order_id") or "") == order_id:
-            return report
+            return _terminal_scoped_lifecycle_report(
+                report=report,
+                terminal_records=terminal_records,
+                broker_positions=broker_positions,
+                broker_open_orders=broker_open_orders,
+            )
         if perm_id and str(close_fill.get("perm_id") or "") == perm_id:
-            return report
+            return _terminal_scoped_lifecycle_report(
+                report=report,
+                terminal_records=terminal_records,
+                broker_positions=broker_positions,
+                broker_open_orders=broker_open_orders,
+            )
     lifecycle_id = str(order.get("lifecycle_id") or "").strip()
     if lifecycle_id:
         for report in lifecycle_reports:
             if _lifecycle_id(report) == lifecycle_id:
-                return report
+                return _terminal_scoped_lifecycle_report(
+                    report=report,
+                    terminal_records=terminal_records,
+                    broker_positions=broker_positions,
+                    broker_open_orders=broker_open_orders,
+                )
     return {}
 
 
-def _lifecycle_report_for_position(*, position: Mapping[str, Any], lifecycle_reports: list[dict[str, Any]]) -> dict[str, Any]:
+def _lifecycle_report_for_position(
+    *,
+    position: Mapping[str, Any],
+    lifecycle_reports: list[dict[str, Any]],
+    terminal_records: list[Any] | tuple[Any, ...],
+    broker_positions: list[dict[str, Any]],
+    broker_open_orders: list[dict[str, Any]],
+) -> dict[str, Any]:
     for report in reversed(lifecycle_reports):
         if _same_contract(position, report) and str(report.get("final_position_status") or "").upper() == "OPEN_MANAGED":
-            return report
+            return _terminal_scoped_lifecycle_report(
+                report=report,
+                terminal_records=terminal_records,
+                broker_positions=broker_positions,
+                broker_open_orders=broker_open_orders,
+            )
     return {}
 
 
@@ -605,14 +695,45 @@ def _lifecycle_report_for_registry_position(
     *,
     registry_position: Mapping[str, Any],
     lifecycle_reports: list[dict[str, Any]],
+    terminal_records: list[Any] | tuple[Any, ...],
+    broker_positions: list[dict[str, Any]],
+    broker_open_orders: list[dict[str, Any]],
 ) -> dict[str, Any]:
     lifecycle_id = str(registry_position.get("lifecycle_id") or "").strip()
     if not lifecycle_id:
         return {}
     for report in reversed(lifecycle_reports):
         if _lifecycle_id(report) == lifecycle_id:
-            return report
+            return _terminal_scoped_lifecycle_report(
+                report=report,
+                terminal_records=terminal_records,
+                broker_positions=broker_positions,
+                broker_open_orders=broker_open_orders,
+            )
     return {}
+
+
+def _terminal_scoped_lifecycle_report(
+    *,
+    report: Mapping[str, Any],
+    terminal_records: list[Any] | tuple[Any, ...],
+    broker_positions: list[dict[str, Any]],
+    broker_open_orders: list[dict[str, Any]],
+) -> dict[str, Any]:
+    terminal = resolve_terminal_registry_truth(
+        records=terminal_records,
+        identity=report,
+        broker_positions=broker_positions,
+        broker_open_orders=broker_open_orders,
+    )
+    if terminal.terminal_closed_flat:
+        return {
+            "classification": "STALE_SUPERSEDED_LIFECYCLE_PROJECTION",
+            "full_audit_only": True,
+            "terminal_registry_truth": terminal.to_dict(),
+            "superseded_lifecycle_report": dict(report),
+        }
+    return dict(report)
 
 
 def _registry_position_for_broker_position(

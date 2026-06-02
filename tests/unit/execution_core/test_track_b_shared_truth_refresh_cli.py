@@ -140,7 +140,7 @@ def test_refresh_broker_exposure_produces_attention_required(tmp_path: Path) -> 
     result = _refresh(tmp_path)
 
     assert result["exit_code"] == 2
-    assert result["classifications"]["Open Order Truth"] == "BROKER_POSITION_WITHOUT_CLOSE_ORDER"
+    assert result["classifications"]["Open Order Truth"] == "NO_OPEN_ORDERS"
     assert result["classifications"]["Position Truth"] == "ATTENTION_REQUIRED"
     assert result["classifications"]["Runtime Environment Truth"] == "RUNTIME_DOWN_WITH_BROKER_EXPOSURE"
     assert any(blocker["code"] == "position_truth_attention_required" for blocker in result["unsafe_blockers"])
@@ -176,7 +176,7 @@ def test_refresh_allows_reconciled_managed_timed_hold_pending(tmp_path: Path) ->
     result = _refresh(tmp_path)
 
     assert result["exit_code"] == 0
-    assert result["classifications"]["Open Order Truth"] == "BROKER_POSITION_WITHOUT_CLOSE_ORDER"
+    assert result["classifications"]["Open Order Truth"] == "NO_OPEN_ORDERS"
     assert result["classifications"]["Managed Order Registry"] == "ACTIVE_HOLD_MANAGED_TIMED_EXIT_PENDING"
     assert result["classifications"]["Position Truth"] == "ACTIVE_HOLD_MANAGED_TIMED_EXIT_PENDING"
     assert result["classifications"]["Managed Position Registry"] == "OPEN_MANAGED_MATCHED"
@@ -184,6 +184,43 @@ def test_refresh_allows_reconciled_managed_timed_hold_pending(tmp_path: Path) ->
     preflight = build_runtime_start_preflight_summary(result)
     assert preflight["classification"] == "SHARED_TRUTH_PREFLIGHT_CLEAN"
     assert preflight["active_hold_managed_timed_exit_pending"] is True
+
+
+def test_refresh_allows_reconciled_managed_exit_due_without_close_order(tmp_path: Path) -> None:
+    _seed_clean_stack(tmp_path)
+    broker_position = {"symbol": "MES", "local_symbol": "MESM6", "con_id": 770561194, "quantity": "1", "account": "DUM882026"}
+    lifecycle_position = {
+        "instrument_family": "MES",
+        "local_symbol": "MESM6",
+        "con_id": 770561194,
+        "quantity": "1",
+        "side": "LONG",
+        "lifecycle_id": "current_managed_mes",
+        "managed_exit_policy_id": "GLOBEX_ACTIVE_EVIDENCE_TIMEBOX_60M_EXIT_V1",
+        "bars_since_fill": 12,
+    }
+    _write_reconciliation(
+        tmp_path,
+        classification="TRACK_B_PAPER_BROKER_RECONCILED",
+        broker_reconciled=True,
+        broker_positions=[broker_position],
+        lifecycle_positions=[lifecycle_position],
+    )
+    _write_broker_status(tmp_path, positions=[broker_position])
+    _write_live_position_status(tmp_path, open_positions=[lifecycle_position])
+    _write_lifecycle_report(tmp_path, lifecycle_position)
+
+    result = _refresh(tmp_path)
+
+    assert result["exit_code"] == 0
+    assert result["classifications"]["Open Order Truth"] == "NO_OPEN_ORDERS"
+    assert result["classifications"]["Managed Order Registry"] == "POSITION_WITHOUT_CLOSE_ORDER"
+    assert result["classifications"]["Position Truth"] == "ATTENTION_REQUIRED"
+    assert result["classifications"]["Managed Position Registry"] == "OPEN_MANAGED_EXIT_DUE"
+    assert result["unsafe_blockers"] == []
+    preflight = build_runtime_start_preflight_summary(result)
+    assert preflight["classification"] == "SHARED_TRUTH_PREFLIGHT_CLEAN"
+    assert preflight["active_managed_exit_due"] is True
 
 
 def test_runtime_start_preflight_blocks_open_order(tmp_path: Path) -> None:

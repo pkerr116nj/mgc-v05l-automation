@@ -231,6 +231,21 @@ def test_clean_submit_capable_state_returns_ready_submit_capable() -> None:
     assert result["runtime_truth_heartbeat"] == {}
 
 
+def test_broker_lifecycle_reconciled_alias_preserves_submit_capable_readiness() -> None:
+    inputs = _clean_inputs()
+    inputs["phase1_reconciliation"] = {
+        **inputs["phase1_reconciliation"],
+        "classification": "BROKER_LIFECYCLE_RECONCILED",
+    }
+    inputs["execution_core_shared_truth"] = _shared_truth_evidence(reconciliation="BROKER_LIFECYCLE_RECONCILED")
+
+    result = classify_canonical_readiness(inputs)
+
+    assert result["canonical_readiness"] == "READY_SUBMIT_CAPABLE"
+    assert result["ready_submit_capable"] is True
+    assert result["readiness_blockers"] == []
+
+
 def test_clean_shared_truth_and_fresh_phase1_preserve_submit_capable_readiness() -> None:
     inputs = _clean_inputs()
     inputs["execution_core_shared_truth"] = _shared_truth_evidence()

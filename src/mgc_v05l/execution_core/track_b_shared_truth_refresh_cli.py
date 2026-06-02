@@ -90,7 +90,7 @@ RUNTIME_START_REQUIRED_CLASSIFICATIONS = {
     "Position Truth": {"CLEAN_FLAT_READY"},
     "Runtime Environment Truth": {RUNTIME_DOWN_CLEAN},
     "Managed Position Registry": {NO_MANAGED_POSITIONS},
-    "Reconciliation": {"TRACK_B_PAPER_BROKER_RECONCILED"},
+    "Reconciliation": {"BROKER_LIFECYCLE_RECONCILED", "TRACK_B_PAPER_BROKER_RECONCILED"},
     "Broker Truth Lease": {"ACTIVE", "ACTIVE_DEGRADED_REFRESH_FAILING"},
     "Broker Position Guardian": {BROKER_POSITION_GUARDIAN_READY},
 }
@@ -306,11 +306,19 @@ def build_runtime_start_preflight_summary(result: Mapping[str, Any]) -> dict[str
         managed_position_class=str(classifications.get("Managed Position Registry") or ""),
         reconciliation_class=str(classifications.get("Reconciliation") or ""),
     )
+    active_exit_due = _managed_exit_due(
+        open_order_class=str(classifications.get("Open Order Truth") or ""),
+        managed_order_class=str(classifications.get("Managed Order Registry") or ""),
+        position_class=str(classifications.get("Position Truth") or ""),
+        managed_position_class=str(classifications.get("Managed Position Registry") or ""),
+        reconciliation_class=str(classifications.get("Reconciliation") or ""),
+    )
+    managed_exit_context = active_hold or active_exit_due
     blockers: list[dict[str, str]] = []
     for service, allowed_values in RUNTIME_START_REQUIRED_CLASSIFICATIONS.items():
         observed = str(classifications.get(service) or "MISSING")
         if observed not in allowed_values:
-            if active_hold and service in {
+            if managed_exit_context and service in {
                 "Open Order Truth",
                 "Managed Order Registry",
                 "Position Truth",
@@ -367,6 +375,7 @@ def build_runtime_start_preflight_summary(result: Mapping[str, Any]) -> dict[str
         "source": "track_b_shared_truth_refresh_cli",
         "clean_for_runtime_start": not blockers,
         "active_hold_managed_timed_exit_pending": active_hold,
+        "active_managed_exit_due": active_exit_due,
         "classification": "SHARED_TRUTH_PREFLIGHT_CLEAN" if not blockers else "SHARED_TRUTH_PREFLIGHT_BLOCKED",
         "required_classifications": {
             service: sorted(values) for service, values in RUNTIME_START_REQUIRED_CLASSIFICATIONS.items()
@@ -674,26 +683,43 @@ def _unsafe_blockers(
         managed_position_class=managed_position_class,
         reconciliation_class=reconciliation_class,
     )
+    active_exit_due = _managed_exit_due(
+        open_order_class=open_order_class,
+        managed_order_class=managed_order_class,
+        position_class=position_class,
+        managed_position_class=managed_position_class,
+        reconciliation_class=reconciliation_class,
+    )
+    managed_exit_context = active_hold or active_exit_due
 
-    if open_order_class not in {NO_OPEN_ORDERS, "OPEN_CLOSE_ORDER_WORKING", "OPEN_ENTRY_ORDER_WORKING"} and not active_hold:
+    if (
+        open_order_class not in {NO_OPEN_ORDERS, "OPEN_CLOSE_ORDER_WORKING", "OPEN_ENTRY_ORDER_WORKING"}
+        and not managed_exit_context
+    ):
         blockers.append({"code": "open_order_truth_blocked", "detail": f"Open Order Truth is {open_order_class}."})
     if managed_order_class not in {
         NO_MANAGED_ORDERS,
         "WORKING_CLOSE_ORDER",
         "WORKING_ENTRY_ORDER",
         "CLOSE_ORDER_MODIFIABLE",
-    } and not active_hold:
+    } and not managed_exit_context:
         blockers.append({"code": "managed_order_registry_blocked", "detail": f"Managed Order Registry is {managed_order_class}."})
-    if position_class and position_class != "CLEAN_FLAT_READY" and not active_hold:
+    if position_class and position_class != "CLEAN_FLAT_READY" and not managed_exit_context:
         blockers.append({"code": "position_truth_attention_required", "detail": f"Position Truth is {position_class}."})
-    if runtime_class not in {RUNTIME_DOWN_CLEAN, RUNTIME_ACTIVE_TRADE_CAPABLE, RUNTIME_ACTIVE_OBSERVATION_ONLY} and not active_hold:
+    if (
+        runtime_class not in {RUNTIME_DOWN_CLEAN, RUNTIME_ACTIVE_TRADE_CAPABLE, RUNTIME_ACTIVE_OBSERVATION_ONLY}
+        and not managed_exit_context
+    ):
         blockers.append({"code": "runtime_environment_blocked", "detail": f"Runtime Environment Truth is {runtime_class}."})
     if managed_position_class not in {NO_MANAGED_POSITIONS, "OPEN_MANAGED_MATCHED", "OPEN_MANAGED_EXIT_DUE", "OPEN_MANAGED_CLOSE_WORKING"}:
         if not (managed_position_class == "STALE_MANAGED_POSITION_EVIDENCE" and position_class == "CLEAN_FLAT_READY"):
             blockers.append(
                 {"code": "managed_position_registry_blocked", "detail": f"Managed Position Registry is {managed_position_class}."}
             )
-    if reconciliation_class and reconciliation_class != "TRACK_B_PAPER_BROKER_RECONCILED":
+    if reconciliation_class and reconciliation_class not in {
+        "BROKER_LIFECYCLE_RECONCILED",
+        "TRACK_B_PAPER_BROKER_RECONCILED",
+    }:
         blockers.append({"code": "reconciliation_blocked", "detail": f"Reconciliation is {reconciliation_class}."})
     if lease_state.startswith("INVALIDATED"):
         blockers.append({"code": "broker_lease_invalidated", "detail": f"Broker Truth Lease is {lease_state}."})
@@ -719,11 +745,28 @@ def _managed_active_hold_pending(
     reconciliation_class: str,
 ) -> bool:
     return (
-        open_order_class == BROKER_POSITION_WITHOUT_CLOSE_ORDER
+        open_order_class in {NO_OPEN_ORDERS, BROKER_POSITION_WITHOUT_CLOSE_ORDER}
         and managed_order_class == ACTIVE_HOLD_MANAGED_TIMED_EXIT_PENDING
         and position_class == ACTIVE_HOLD_MANAGED_TIMED_EXIT_PENDING
         and managed_position_class == "OPEN_MANAGED_MATCHED"
-        and reconciliation_class == "TRACK_B_PAPER_BROKER_RECONCILED"
+        and reconciliation_class in {"BROKER_LIFECYCLE_RECONCILED", "TRACK_B_PAPER_BROKER_RECONCILED"}
+    )
+
+
+def _managed_exit_due(
+    *,
+    open_order_class: str,
+    managed_order_class: str,
+    position_class: str,
+    managed_position_class: str,
+    reconciliation_class: str,
+) -> bool:
+    return (
+        open_order_class in {NO_OPEN_ORDERS, BROKER_POSITION_WITHOUT_CLOSE_ORDER}
+        and managed_order_class == "POSITION_WITHOUT_CLOSE_ORDER"
+        and position_class == "ATTENTION_REQUIRED"
+        and managed_position_class == "OPEN_MANAGED_EXIT_DUE"
+        and reconciliation_class in {"BROKER_LIFECYCLE_RECONCILED", "TRACK_B_PAPER_BROKER_RECONCILED"}
     )
 
 
