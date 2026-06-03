@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
@@ -171,6 +172,68 @@ def test_current_owner_overlay_deduplicates_stale_same_contract_lifecycle_aggreg
     assert superseded[0]["raw_lifecycle_position"]["aggregate_qty"] == "-2"
 
 
+def test_fresh_submit_owner_with_exact_lifecycle_fill_beats_stale_same_contract_owner(tmp_path: Path) -> None:
+    stale = _registry_record(
+        trade_id="trade_submit_owner_mes_globex_short",
+        lifecycle_id="reserved_submit_mes_globex_active_participation_short_1",
+        generated_at=NOW - timedelta(days=1),
+        exit_due=False,
+        symbol="MES",
+        local_symbol="MESM6",
+        con_id=770561194,
+    )
+    current = _submit_owner_record(
+        trade_id="trade_6b84a270-86cc-4a30-bbe5-90c0de1040a0",
+        lifecycle_id="reserved_submit_mes_us_active_participation_short_20260603T175011604765Z_1528ebb927d8",
+        generated_at=NOW,
+        symbol="MES",
+        local_symbol="MESM6",
+        con_id=770561194,
+        order_id="2",
+        client_id="11011",
+        perm_id="1421892956",
+    )
+    broker_position = _broker_position(quantity="-1")
+    broker_position.update({"symbol": "MES", "track_b_root": "MES", "local_symbol": "MESM6", "con_id": 770561194})
+
+    report = _lifecycle_report(
+        trade_id="trade_bridge_fill_MES_1m_2026-06-03T17_49_00Z_SELL_TO_OPEN",
+        lifecycle_id="bridge_fill_MES|1m|2026-06-03T17:49:00Z|SELL_TO_OPEN",
+        symbol="MES",
+        local_symbol="MESM6",
+        con_id=770561194,
+        order_id="2",
+        perm_id="1421892956",
+        exec_id="0000e1a7.6a316b2f.01.01",
+        filled_at=NOW + timedelta(seconds=2),
+        lane_id="mes_us_active_participation_short",
+    )
+    report_path = (
+        tmp_path
+        / "outputs"
+        / "track_b_execution_core"
+        / "track_b_strategy_managed_paper_lifecycle"
+        / "bridge_fill_MES|1m|2026-06-03T17:49:00Z|SELL_TO_OPEN"
+        / "track_b_strategy_managed_paper_lifecycle_report.json"
+    )
+    report_path.parent.mkdir(parents=True, exist_ok=True)
+    report_path.write_text(json.dumps(report), encoding="utf-8")
+
+    payload = resolve_current_exposure_ownership(
+        config=CurrentExposureOwnerResolverConfig(repo_root=tmp_path),
+        broker_positions=[broker_position],
+        registry_records=[stale, current],
+    )
+
+    assert payload["classification"] == OWNED_MANAGED_EXPOSURE
+    exposure = payload["owned_exposures"][0]
+    assert exposure["trade_id"] == "trade_6b84a270-86cc-4a30-bbe5-90c0de1040a0"
+    assert exposure["lifecycle_id"] == "reserved_submit_mes_us_active_participation_short_20260603T175011604765Z_1528ebb927d8"
+    assert exposure["lifecycle_position"]["entry_exec_ids"] == ["0000e1a7.6a316b2f.01.01"]
+    assert exposure["lifecycle_position"]["managed_exit_policy_id"] == "US_ACTIVE_EVIDENCE_TIMEBOX_60M_EXIT_V1"
+    assert payload["stale_superseded_full_audit_only"][0]["trade_id"] == "trade_submit_owner_mes_globex_short"
+
+
 def _registry_record(
     *,
     trade_id: str,
@@ -218,6 +281,96 @@ def _registry_record(
             )
         )
     return reduce_trade_events(events)
+
+
+def _submit_owner_record(
+    *,
+    trade_id: str,
+    lifecycle_id: str,
+    generated_at: datetime,
+    symbol: str,
+    local_symbol: str,
+    con_id: int,
+    order_id: str,
+    client_id: str,
+    perm_id: str,
+):
+    events = [
+        _event(
+            event_type=TradeEventType.ENTRY_INTENT_CREATED,
+            trade_id=trade_id,
+            lifecycle_id=lifecycle_id,
+            generated_at=generated_at,
+            order_id=None,
+            client_id=client_id,
+            perm_id=None,
+            exec_id=None,
+            symbol=symbol,
+            local_symbol=local_symbol,
+            con_id=con_id,
+        ),
+        _event(
+            event_type=TradeEventType.ENTRY_ORDER_SUBMITTED,
+            trade_id=trade_id,
+            lifecycle_id=lifecycle_id,
+            generated_at=generated_at + timedelta(seconds=1),
+            order_id=order_id,
+            client_id=client_id,
+            perm_id=perm_id,
+            exec_id=None,
+            symbol=symbol,
+            local_symbol=local_symbol,
+            con_id=con_id,
+        ),
+        _event(
+            event_type=TradeEventType.REVIEW_REQUIRED,
+            trade_id=trade_id,
+            lifecycle_id=lifecycle_id,
+            generated_at=generated_at + timedelta(seconds=2),
+            order_id=order_id,
+            client_id=client_id,
+            perm_id=perm_id,
+            exec_id=None,
+            symbol=symbol,
+            local_symbol=local_symbol,
+            con_id=con_id,
+        ),
+    ]
+    return reduce_trade_events(events)
+
+
+def _lifecycle_report(
+    *,
+    trade_id: str,
+    lifecycle_id: str,
+    symbol: str,
+    local_symbol: str,
+    con_id: int,
+    order_id: str,
+    perm_id: str,
+    exec_id: str,
+    filled_at: datetime,
+    lane_id: str,
+) -> dict:
+    return {
+        "trade_id": trade_id,
+        "lifecycle_id": lifecycle_id,
+        "account_id": "DUM882026",
+        "instrument_family": symbol,
+        "local_symbol": local_symbol,
+        "con_id": con_id,
+        "lane_id": lane_id,
+        "strategy_id": lane_id,
+        "managed_exit_policy_id": "US_ACTIVE_EVIDENCE_TIMEBOX_60M_EXIT_V1",
+        "entry_fill": {
+            "broker_order_id": order_id,
+            "perm_id": perm_id,
+            "execution_id": exec_id,
+            "filled_at": filled_at.isoformat(),
+            "price": "7579.75",
+            "quantity": "1",
+        },
+    }
 
 
 def _event(

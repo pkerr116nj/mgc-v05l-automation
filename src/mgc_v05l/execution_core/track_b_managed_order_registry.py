@@ -442,20 +442,25 @@ def _position_without_close_rows(
                 }
             )
             continue
-        registry_position = _registry_position_for_broker_position(position=position, registry_positions=registry_positions)
+        registry_position = _mapping(position.get("canonical_managed_position")) or _registry_position_for_broker_position(
+            position=position,
+            registry_positions=registry_positions,
+        )
         lifecycle_report = _lifecycle_report_for_registry_position(
             registry_position=registry_position,
             lifecycle_reports=lifecycle_reports,
             terminal_records=terminal_records,
             broker_positions=broker_positions,
             broker_open_orders=broker_open_orders,
-        ) or _lifecycle_report_for_position(
-            position=position,
-            lifecycle_reports=lifecycle_reports,
-            terminal_records=terminal_records,
-            broker_positions=broker_positions,
-            broker_open_orders=broker_open_orders,
         )
+        if not lifecycle_report and not registry_position:
+            lifecycle_report = _lifecycle_report_for_position(
+                position=position,
+                lifecycle_reports=lifecycle_reports,
+                terminal_records=terminal_records,
+                broker_positions=broker_positions,
+                broker_open_orders=broker_open_orders,
+            )
         manifest = _manifest_for_position(position=position, lifecycle_report=lifecycle_report, manifests=manifests)
         active_hold_pending = _active_hold_managed_timed_exit_pending(registry_position=registry_position)
         classification = ACTIVE_HOLD_MANAGED_TIMED_EXIT_PENDING if active_hold_pending else POSITION_WITHOUT_CLOSE_ORDER
@@ -470,6 +475,7 @@ def _position_without_close_rows(
                 "action": _expected_close_action(position=position, lifecycle_report=lifecycle_report),
                 "side": registry_position.get("side") or lifecycle_report.get("side"),
                 "quantity": _decimal_text(abs(_quantity(position))),
+                "trade_id": registry_position.get("trade_id") or lifecycle_report.get("trade_id"),
                 "broker_order_id": None,
                 "perm_id": None,
                 "client_id": None,
@@ -480,6 +486,8 @@ def _position_without_close_rows(
                 "filled_quantity": None,
                 "remaining_quantity": None,
                 "lifecycle_id": _lifecycle_id(lifecycle_report) or registry_position.get("lifecycle_id"),
+                "required_close_action": _expected_close_action(position=position, lifecycle_report=lifecycle_report),
+                "required_close_quantity": _decimal_text(abs(_quantity(position))),
                 "manifest_id": manifest.get("entry_intent_id") or manifest.get("manifest_id"),
                 "manifest_path": manifest.get("manifest_path"),
                 "ownership_id": None,

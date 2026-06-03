@@ -148,13 +148,17 @@ def build_track_b_managed_position_registry(
         broker_open_orders=_list(reconciliation.get("track_b_broker_open_orders")),
         lifecycle_reports=lifecycle_reports,
     )
+    owner_resolution = _mapping(reconciliation.get("current_exposure_owner_resolution")) or _mapping(
+        pre_restart_exposure_resolution.get("current_exposure_owner_resolution")
+    )
     lifecycle_positions, owner_superseded_lifecycle_positions = apply_current_exposure_owner_lifecycle_overlay(
         lifecycle_positions=lifecycle_positions,
-        owner_resolution=_mapping(pre_restart_exposure_resolution.get("current_exposure_owner_resolution")),
+        owner_resolution=owner_resolution,
     )
     lifecycle_positions = _merge_resolved_lifecycle_positions(
         lifecycle_positions=lifecycle_positions,
-        resolved_lifecycle_positions=_list(pre_restart_exposure_resolution.get("resolved_lifecycle_positions")),
+        resolved_lifecycle_positions=_list(owner_resolution.get("resolved_lifecycle_positions"))
+        or _list(pre_restart_exposure_resolution.get("resolved_lifecycle_positions")),
     )
     broker_open_orders = _list(reconciliation.get("track_b_broker_open_orders"))
     terminal_records = load_live_trade_registry_records(repo_root=config.repo_root)
@@ -202,8 +206,7 @@ def build_track_b_managed_position_registry(
     )
     managed_positions, projection_authority_diagnostics = _apply_current_owner_projection_overlay(
         managed_positions=managed_positions,
-        owner_resolution=_mapping(pre_restart_exposure_resolution.get("current_exposure_owner_resolution"))
-        or pre_restart_exposure_resolution,
+        owner_resolution=owner_resolution or pre_restart_exposure_resolution,
         open_order_states=open_order_states,
         managed_order_states=managed_order_states,
         lifecycle_reports=lifecycle_reports,
@@ -652,6 +655,25 @@ def _apply_current_owner_projection_overlay(
                 }
             )
             continue
+        if _owner_exposure_supersedes_existing_projection(exposure):
+            positions[existing_index] = {
+                **owner_position,
+                "superseded_projection_lifecycle_id": existing_lifecycle_id,
+                "superseded_projection_trade_id": existing.get("trade_id"),
+            }
+            diagnostics["repaired_missing_owner_count"] += 1
+            diagnostics["repairs"].append(
+                {
+                    "classification": "CURRENT_OWNER_PROJECTION_REPAIRED",
+                    "reason": "Newest exact broker-backed owner superseded older same-contract managed-position projection.",
+                    "position_key": key,
+                    "owner_trade_id": owner_trade_id,
+                    "owner_lifecycle_id": owner_lifecycle_id,
+                    "superseded_trade_id": existing.get("trade_id"),
+                    "superseded_lifecycle_id": existing_lifecycle_id,
+                }
+            )
+            continue
         divergent = {
             **dict(existing),
             "classification": PROJECTION_AUTHORITY_DIVERGENCE,
@@ -671,6 +693,11 @@ def _apply_current_owner_projection_overlay(
         diagnostics["divergence_count"] += 1
         diagnostics["divergences"].append(divergent["projection_authority_divergence"])
     return positions, diagnostics
+
+
+def _owner_exposure_supersedes_existing_projection(owner_exposure: Mapping[str, Any]) -> bool:
+    reason_codes = {str(code or "") for code in owner_exposure.get("reason_codes") or []}
+    return "NEWEST_EXACT_BROKER_BACKED_LIFECYCLE_REPORT_SELECTED" in reason_codes
 
 
 def _position_classification(

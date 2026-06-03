@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Any, Mapping, Sequence
@@ -52,6 +52,9 @@ class CurrentExposureOwnerResolverConfig:
     managed_position_registry_path: Path = (
         Path("outputs") / "track_b_execution_core" / "managed_positions" / "latest_managed_positions.json"
     )
+    lifecycle_reports_root: Path = (
+        Path("outputs") / "track_b_execution_core" / "track_b_strategy_managed_paper_lifecycle"
+    )
 
     def resolve(self, path: Path) -> Path:
         return path if path.is_absolute() else self.repo_root / path
@@ -80,6 +83,11 @@ def resolve_current_exposure_ownership(
         else _read_json(config.resolve(config.managed_position_registry_path))
     )
     lifecycle_rows = [dict(row) for row in lifecycle_positions if _position_key(row)]
+    lifecycle_report_rows = (
+        [dict(row) for row in lifecycle_reports if isinstance(row, Mapping)]
+        if lifecycle_reports
+        else _load_lifecycle_reports(config.resolve(config.lifecycle_reports_root))
+    )
     contract_resolver_status = _read_json(config.resolve(config.contract_resolver_status_path))
     terminal_filtered, terminal_superseded_rows = filter_terminal_superseded_current_rows(
         rows=tuple(lifecycle_rows),
@@ -115,7 +123,7 @@ def resolve_current_exposure_ownership(
             broker_position=raw_broker_position,
             registry_records=active_records,
             lifecycle_positions=lifecycle_rows,
-            lifecycle_reports=lifecycle_reports,
+            lifecycle_reports=lifecycle_report_rows,
             contract_resolver_status=contract_resolver_status,
         )
         broker_position = identity.canonical_position
@@ -137,6 +145,51 @@ def resolve_current_exposure_ownership(
 
         lifecycle_match = _matching_lifecycle_position(broker_position, lifecycle_rows)
         registry_matches = _registry_matches_for_broker_position(active_records, broker_position)
+        lifecycle_report_owner = _select_broker_backed_lifecycle_report_owner(
+            records=records,
+            broker_position=broker_position,
+            lifecycle_reports=lifecycle_report_rows,
+        )
+        if lifecycle_report_owner.get("ambiguous"):
+            review.append(
+                {
+                    "classification": AMBIGUOUS_EXPOSURE_OWNERSHIP,
+                    "reason_codes": list(lifecycle_report_owner.get("reason_codes") or []),
+                    "broker_position": raw_broker_position,
+                    "canonical_broker_position": broker_position,
+                    "canonical_identity_resolution": identity.to_dict(),
+                    "position_key": key,
+                    "matching_trade_ids": list(lifecycle_report_owner.get("matching_trade_ids") or []),
+                }
+            )
+            continue
+        if lifecycle_report_owner.get("record") is not None:
+            owner_record = lifecycle_report_owner["record"]
+            lifecycle_row = lifecycle_report_owner["lifecycle_position"]
+            stale.extend(_stale_record_rows(tuple(record for record in registry_matches if record.trade_id != owner_record.trade_id)))
+            exit_due = _owner_exit_due(
+                record=owner_record,
+                lifecycle_row=lifecycle_row,
+                lifecycle_match=lifecycle_match,
+                managed_position_registry=managed_positions_payload,
+            )
+            classification = OWNED_MANAGED_EXIT_DUE if exit_due else OWNED_MANAGED_EXPOSURE
+            exposure = {
+                "classification": classification,
+                "reason_codes": list(lifecycle_report_owner.get("reason_codes") or []),
+                "broker_position": raw_broker_position,
+                "canonical_broker_position": broker_position,
+                "canonical_identity_resolution": identity.to_dict(),
+                "lifecycle_position": lifecycle_row,
+                "trade_id": owner_record.trade_id,
+                "lifecycle_id": lifecycle_row.get("lifecycle_id"),
+                "position_key": key,
+                "current_state": owner_record.current_state.value,
+                "exit_due": exit_due,
+            }
+            owned.append(exposure)
+            resolved_lifecycle_positions.append(lifecycle_row)
+            continue
         lifecycle_identity_conflicts = _registry_lifecycle_identity_conflicts(
             registry_matches=registry_matches,
             lifecycle_rows=lifecycle_rows,
@@ -178,7 +231,7 @@ def resolve_current_exposure_ownership(
             lifecycle_row = _lifecycle_position_from_registry_record(
                 record=owner_record,
                 broker_position=broker_position,
-                lifecycle_reports=lifecycle_reports,
+                lifecycle_reports=lifecycle_report_rows,
             )
             exit_due = _owner_exit_due(
                 record=owner_record,
@@ -224,7 +277,7 @@ def resolve_current_exposure_ownership(
 
         adoptable = _adoptable_lifecycle_report_for_broker_position(
             broker_position=broker_position,
-            lifecycle_reports=lifecycle_reports,
+            lifecycle_reports=lifecycle_report_rows,
         )
         if adoptable:
             lifecycle_row = _lifecycle_position_from_lifecycle_report(adoptable, broker_position=broker_position)
@@ -459,6 +512,106 @@ def _select_current_registry_owner(
     return None, (), ["MULTIPLE_PLAUSIBLE_CURRENT_REGISTRY_OWNERS"]
 
 
+def _select_broker_backed_lifecycle_report_owner(
+    *,
+    records: Sequence[TradeRegistryRecord],
+    broker_position: Mapping[str, Any],
+    lifecycle_reports: Sequence[Mapping[str, Any]],
+) -> dict[str, Any]:
+    candidates: list[dict[str, Any]] = []
+    for report in lifecycle_reports:
+        if not isinstance(report, Mapping) or not _lifecycle_report_broker_backed(report):
+            continue
+        if _position_key(report) != _position_key(broker_position):
+            continue
+        if not _same_account(report.get("account_id"), broker_position.get("account_id")):
+            continue
+        if int(report.get("con_id") or 0) != int(broker_position.get("con_id") or 0):
+            continue
+        if _signed_report_qty(report) != _decimal(broker_position.get("quantity")):
+            continue
+        fill = _entry_fill(report)
+        matching_records = [
+            record for record in records if _record_has_order_matching_lifecycle_fill(record=record, report=report, fill=fill)
+        ]
+        for record in matching_records:
+            event = _matching_order_event(record=record, fill=fill)
+            if event is None:
+                continue
+            candidates.append(
+                {
+                    "record": record,
+                    "report": dict(report),
+                    "event": event,
+                    "fill_time": _parse_optional_datetime(fill.get("filled_at")),
+                }
+            )
+
+    if not candidates:
+        return {}
+    ranked = sorted(
+        candidates,
+        key=lambda item: item.get("fill_time") or datetime.min.replace(tzinfo=timezone.utc),
+        reverse=True,
+    )
+    newest = ranked[0]
+    newest_time = newest.get("fill_time")
+    if newest_time is not None and sum(1 for item in ranked if item.get("fill_time") == newest_time) > 1:
+        return {
+            "ambiguous": True,
+            "reason_codes": ["MULTIPLE_EXACT_BROKER_BACKED_LIFECYCLE_REPORT_OWNERS"],
+            "matching_trade_ids": [str(item["record"].trade_id) for item in ranked],
+        }
+    record = newest["record"]
+    report = newest["report"]
+    event = newest["event"]
+    return {
+        "record": record,
+        "report": report,
+        "lifecycle_position": _lifecycle_position_from_submit_intent_lifecycle_report(
+            record=record,
+            report=report,
+            order_event=event,
+            broker_position=broker_position,
+        ),
+        "reason_codes": [
+            "NEWEST_EXACT_BROKER_BACKED_LIFECYCLE_REPORT_SELECTED",
+            "OLDER_MATCHING_OPEN_CHAINS_SCOPED_FULL_AUDIT_ONLY",
+        ],
+    }
+
+
+def _record_has_order_matching_lifecycle_fill(
+    *,
+    record: TradeRegistryRecord,
+    report: Mapping[str, Any],
+    fill: Mapping[str, Any],
+) -> bool:
+    event = _matching_order_event(record=record, fill=fill)
+    if event is None:
+        return False
+    if not _same_account(event.account_id, report.get("account_id")):
+        return False
+    if int(event.con_id or 0) != int(report.get("con_id") or 0):
+        return False
+    if str(event.local_symbol or "").upper() != str(report.get("local_symbol") or "").upper():
+        return False
+    return True
+
+
+def _matching_order_event(*, record: TradeRegistryRecord, fill: Mapping[str, Any]) -> Any | None:
+    fill_order_id = str(fill.get("order_id") or "").strip()
+    fill_perm_id = str(fill.get("perm_id") or "").strip()
+    for event in reversed(record.event_chain):
+        if fill_order_id and str(event.order_id or "").strip() != fill_order_id:
+            continue
+        if fill_perm_id and str(event.perm_id or "").strip() != fill_perm_id:
+            continue
+        if fill_order_id or fill_perm_id:
+            return event
+    return None
+
+
 def _registry_matches_for_broker_position(
     records: Sequence[TradeRegistryRecord],
     broker_position: Mapping[str, Any],
@@ -659,6 +812,80 @@ def _lifecycle_position_from_lifecycle_report(
     }
 
 
+def _lifecycle_position_from_submit_intent_lifecycle_report(
+    *,
+    record: TradeRegistryRecord,
+    report: Mapping[str, Any],
+    order_event: Any,
+    broker_position: Mapping[str, Any],
+) -> dict[str, Any]:
+    fill = _entry_fill(report)
+    side = str(order_event.side or _entry_side_from_action(order_event.action) or _entry_side_from_report(report, fill)).upper()
+    qty = _decimal(order_event.qty) or _decimal(fill.get("quantity")) or Decimal("1")
+    signed_qty = -qty if side == "SHORT" else qty
+    unit = {
+        "trade_id": record.trade_id,
+        "lifecycle_id": order_event.lifecycle_id,
+        "lane_id": order_event.lane_id,
+        "strategy_id": order_event.thesis_strategy_id,
+        "account_id": order_event.account_id,
+        "instrument_family": order_event.symbol,
+        "local_symbol": order_event.local_symbol,
+        "con_id": order_event.con_id,
+        "quantity": str(qty),
+        "signed_qty": _decimal_display(signed_qty),
+        "side": side,
+        "entry_price": fill.get("price") or _decimal_display(order_event.price),
+        "entry_time": fill.get("filled_at") or report.get("entry_timestamp"),
+        "entry_order_id": fill.get("order_id") or order_event.order_id,
+        "entry_perm_id": fill.get("perm_id") or order_event.perm_id,
+        "entry_exec_id": fill.get("exec_id"),
+        "managed_exit_policy_id": _first_nonempty(
+            report.get("managed_exit_policy_id"),
+            _metadata_value(record, "managed_exit_policy_id"),
+            order_event.metadata.get("managed_exit_policy_id") if isinstance(order_event.metadata, Mapping) else "",
+        ),
+        "paper_lifecycle_report_path": report.get("report_json_path"),
+    }
+    return {
+        "source": "CURRENT_EXPOSURE_OWNER_RESOLVER",
+        "projection_repair": "BROKER_BACKED_LIFECYCLE_REPORT_SUBMIT_INTENT_OWNER",
+        "trade_id": record.trade_id,
+        "lifecycle_id": order_event.lifecycle_id,
+        "lane_id": order_event.lane_id,
+        "strategy_id": order_event.thesis_strategy_id,
+        "account_id": order_event.account_id or broker_position.get("account_id"),
+        "instrument_family": order_event.symbol or report.get("instrument_family") or broker_position.get("symbol"),
+        "track_b_root": order_event.symbol or report.get("instrument_family") or broker_position.get("symbol"),
+        "symbol": order_event.symbol or report.get("instrument_family") or broker_position.get("symbol"),
+        "contract_key": _contract_key(
+            str(order_event.symbol or report.get("instrument_family") or broker_position.get("symbol") or ""),
+            str(order_event.expiry or report.get("expiry") or broker_position.get("expiry") or ""),
+        ),
+        "local_symbol": order_event.local_symbol or broker_position.get("local_symbol"),
+        "con_id": order_event.con_id or broker_position.get("con_id"),
+        "expiry": order_event.expiry or report.get("expiry") or broker_position.get("expiry"),
+        "quantity": str(qty),
+        "aggregate_qty": _decimal_display(signed_qty),
+        "gross_unit_qty": str(qty),
+        "unit_count": 1,
+        "lifecycle_unit_count": 1,
+        "lifecycle_units": [unit],
+        "duplicate_same_lane_exposure": False,
+        "pyramiding_allowed": False,
+        "pyramiding_policy": "NOT_APPLICABLE",
+        "side": side,
+        "avg_entry_price": fill.get("price") or _decimal_display(order_event.price),
+        "entry_timestamp": fill.get("filled_at") or report.get("entry_timestamp"),
+        "managed_exit_policy_id": unit["managed_exit_policy_id"],
+        "exit_due": _lifecycle_exit_due(report),
+        "entry_perm_ids": [fill.get("perm_id") or order_event.perm_id],
+        "entry_order_ids": [fill.get("order_id") or order_event.order_id],
+        "entry_exec_ids": [fill.get("exec_id")],
+        "paper_lifecycle_report_path": report.get("report_json_path"),
+    }
+
+
 def _matching_lifecycle_position(
     broker_position: Mapping[str, Any],
     lifecycle_positions: Sequence[Mapping[str, Any]],
@@ -793,7 +1020,7 @@ def _signed_report_qty(report: Mapping[str, Any]) -> Decimal | None:
     qty = _decimal(report.get("quantity") or fill.get("qty") or fill.get("quantity") or "1")
     if qty is None:
         return None
-    side = str(report.get("side") or _entry_side_from_action(fill.get("action") or report.get("action")) or "").upper()
+    side = _entry_side_from_report(report, fill)
     return -qty if side == "SHORT" else qty
 
 
@@ -835,7 +1062,14 @@ def _contract_key(symbol: str, expiry: str) -> str:
 
 def _entry_fill(report: Mapping[str, Any]) -> dict[str, Any]:
     fill = report.get("entry_fill")
-    return dict(fill) if isinstance(fill, Mapping) else {}
+    if not isinstance(fill, Mapping):
+        return {}
+    payload = dict(fill)
+    if not payload.get("exec_id") and payload.get("execution_id"):
+        payload["exec_id"] = payload.get("execution_id")
+    if not payload.get("order_id") and payload.get("broker_order_id"):
+        payload["order_id"] = payload.get("broker_order_id")
+    return payload
 
 
 def _entry_side_from_action(action: object) -> str:
@@ -844,6 +1078,31 @@ def _entry_side_from_action(action: object) -> str:
         return "SHORT"
     if value in {"BUY", "BUY_TO_OPEN"}:
         return "LONG"
+    return ""
+
+
+def _entry_side_from_report(report: Mapping[str, Any], fill: Mapping[str, Any]) -> str:
+    for value in (
+        report.get("side"),
+        report.get("action"),
+        fill.get("action"),
+        report.get("lifecycle_id"),
+        report.get("trade_id"),
+    ):
+        text = str(value or "").upper()
+        if "SELL_TO_OPEN" in text:
+            return "SHORT"
+        if "BUY_TO_OPEN" in text:
+            return "LONG"
+        side = _entry_side_from_action(value)
+        if side:
+            return side
+    for key in ("lane_id", "strategy_id"):
+        value = str(report.get(key) or "").strip().lower()
+        if value.endswith("_short") or "_short_" in value:
+            return "SHORT"
+        if value.endswith("_long") or "_long_" in value:
+            return "LONG"
     return ""
 
 
@@ -878,12 +1137,38 @@ def _decimal(value: object) -> Decimal | None:
         return None
 
 
+def _parse_optional_datetime(value: object) -> datetime | None:
+    text = str(value or "").strip()
+    if not text:
+        return None
+    try:
+        return datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+
+
 def _decimal_display(value: Decimal | None) -> str | None:
     if value is None:
         return None
     if value == value.to_integral_value():
         return str(value.quantize(Decimal("1")))
     return str(value.normalize())
+
+
+def _load_lifecycle_reports(root: Path) -> list[dict[str, Any]]:
+    if not root.exists():
+        return []
+    reports: list[dict[str, Any]] = []
+    for path in root.glob("*/track_b_strategy_managed_paper_lifecycle_report.json"):
+        payload = _read_json(path)
+        if payload:
+            payload.setdefault("report_json_path", str(path))
+            reports.append(payload)
+    latest = _read_json(root / "latest_track_b_strategy_managed_paper_lifecycle_report.json")
+    if latest:
+        latest.setdefault("report_json_path", str(root / "latest_track_b_strategy_managed_paper_lifecycle_report.json"))
+        reports.append(latest)
+    return reports
 
 
 def _read_json(path: Path) -> dict[str, Any]:

@@ -360,6 +360,7 @@ def reconcile_track_b_paper_broker_truth(
         lifecycle_positions=lifecycle_positions,
         broker_open_orders=track_b_open_orders,
         position_match_report=position_match_report,
+        current_exposure_owner_resolution=current_exposure_owner_resolution,
     )
     broker_backed_entry_adoption = _broker_backed_entry_adoption_remediation(
         config=config,
@@ -609,8 +610,24 @@ def _registry_reconciliation_state(
     lifecycle_positions: Sequence[Mapping[str, Any]],
     broker_open_orders: Sequence[Mapping[str, Any]],
     position_match_report: Mapping[str, Any],
+    current_exposure_owner_resolution: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     records = load_live_trade_registry_records(repo_root=config.repo_root)
+    owner_resolution = current_exposure_owner_resolution if isinstance(current_exposure_owner_resolution, Mapping) else {}
+    owner_exposures = [
+        dict(row)
+        for row in owner_resolution.get("owned_exposures") or []
+        if isinstance(row, Mapping)
+        and str(row.get("trade_id") or "").strip()
+        and _owner_exposure_has_lifecycle_report_authority(row)
+    ]
+    owner_trade_ids = {str(row.get("trade_id") or "").strip() for row in owner_exposures}
+    owner_superseded_trade_ids = {
+        str(row.get("trade_id") or "").strip()
+        for row in owner_resolution.get("stale_superseded_full_audit_only") or []
+        if owner_trade_ids and isinstance(row, Mapping) and str(row.get("trade_id") or "").strip()
+    }
+    records_by_trade_id = {record.trade_id: record for record in records}
     superseded_lifecycle_positions = [
         row
         for row in position_match_report.get("superseded_unmatched_lifecycle_positions", [])
@@ -667,12 +684,27 @@ def _registry_reconciliation_state(
         broker_open_orders=broker_open_orders,
         lifecycle_positions=current_scope_lifecycle_positions,
     )
-    active_records = list(active_scope["current_scope_active_records"])
+    active_records = [
+        record
+        for record in active_scope["current_scope_active_records"]
+        if record.trade_id not in owner_superseded_trade_ids
+    ]
     blockers: list[dict[str, Any]] = []
     mapped_trade_ids: set[str] = set()
     mapped_records: dict[str, dict[str, Any]] = {}
 
     for broker_position in broker_positions:
+        owner_exposure = _owner_exposure_for_broker_position(
+            owner_exposures=owner_exposures,
+            broker_position=broker_position,
+        )
+        if owner_exposure is not None:
+            owner_trade_id = str(owner_exposure.get("trade_id") or "").strip()
+            owner_record = records_by_trade_id.get(owner_trade_id)
+            if owner_record is not None:
+                mapped_trade_ids.add(owner_record.trade_id)
+                mapped_records[owner_record.trade_id] = _registry_record_event_row(owner_record)
+                continue
         matches = _registry_records_for_broker_position(active_records, broker_position)
         if len(matches) == 1:
             mapped_trade_ids.add(matches[0].trade_id)
@@ -730,6 +762,14 @@ def _registry_reconciliation_state(
             )
 
     for lifecycle_position in current_scope_lifecycle_positions:
+        lifecycle_trade_ids = _trade_ids_from_lifecycle_position(lifecycle_position)
+        authoritative_trade_ids = lifecycle_trade_ids.intersection(owner_trade_ids)
+        if len(authoritative_trade_ids) == 1:
+            owner_record = records_by_trade_id.get(next(iter(authoritative_trade_ids)))
+            if owner_record is not None:
+                mapped_trade_ids.add(owner_record.trade_id)
+                mapped_records[owner_record.trade_id] = _registry_record_event_row(owner_record)
+                continue
         matches = _registry_records_for_lifecycle_position(active_records, lifecycle_position)
         if len(matches) == 1:
             mapped_trade_ids.add(matches[0].trade_id)
@@ -1548,6 +1588,31 @@ def _registry_lifecycle_records_for_broker_position_match(
         for record in _registry_records_for_lifecycle_position(active_records, lifecycle_position):
             records_by_trade_id.setdefault(record.trade_id, record)
     return list(records_by_trade_id.values())
+
+
+def _owner_exposure_for_broker_position(
+    *,
+    owner_exposures: Sequence[Mapping[str, Any]],
+    broker_position: Mapping[str, Any],
+) -> Mapping[str, Any] | None:
+    matches: list[Mapping[str, Any]] = []
+    for exposure in owner_exposures:
+        owner_position = exposure.get("canonical_broker_position")
+        if not isinstance(owner_position, Mapping):
+            owner_position = exposure.get("broker_position")
+        if isinstance(owner_position, Mapping) and _broker_position_rows_equivalent(owner_position, broker_position):
+            matches.append(exposure)
+    return matches[0] if len(matches) == 1 else None
+
+
+def _owner_exposure_has_lifecycle_report_authority(owner_exposure: Mapping[str, Any]) -> bool:
+    reason_codes = {str(code or "") for code in owner_exposure.get("reason_codes") or []}
+    if "NEWEST_EXACT_BROKER_BACKED_LIFECYCLE_REPORT_SELECTED" in reason_codes:
+        return True
+    lifecycle_position = owner_exposure.get("lifecycle_position")
+    if not isinstance(lifecycle_position, Mapping):
+        return False
+    return str(lifecycle_position.get("projection_repair") or "") == "BROKER_BACKED_LIFECYCLE_REPORT_SUBMIT_INTENT_OWNER"
 
 
 def _lifecycle_trade_ids_for_broker_position_match(
