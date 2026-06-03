@@ -32,11 +32,12 @@ from ..execution_core.track_b_session_anchor_resolver import (
     TrackBSessionAnchorConfig,
     resolve_session_anchor,
 )
-from ..execution_core.track_b_london_active_evidence_broker_envelope import (
-    LondonActiveEvidenceBrokerEnvelopeConfig,
-    build_london_active_evidence_broker_envelope,
-    london_active_evidence_lane_ids,
-    write_london_active_evidence_broker_envelope,
+from ..execution_core.track_b_broker_event_envelope import (
+    BrokerEventEnvelopeConfig,
+    BrokerEventEnvelopeLaneContext,
+    broker_event_report_fields,
+    build_broker_event_envelope,
+    write_broker_event_envelope,
 )
 
 
@@ -523,37 +524,44 @@ class TrackBRuleRunnerPaperStrategyEngine(StrategyEngine):
                 reason_code=source,
                 signal_id=self._signal_id_for_actionable_signal(bar, side, source),
             )
-            self._maybe_write_london_active_evidence_broker_envelope(bar=bar, intent=intent)
+            self._enforce_broker_event_envelope_contract(bar=bar, intent=intent)
             return intent
 
         return super()._maybe_create_order_intent(bar, signal_packet, state, exit_decision)
 
-    def _maybe_write_london_active_evidence_broker_envelope(self, *, bar: Any, intent: OrderIntent) -> None:
+    def _enforce_broker_event_envelope_contract(self, *, bar: Any, intent: OrderIntent) -> None:
         lane_spec = getattr(self, "_track_b_lane_spec", None)
-        lane_id = str(getattr(lane_spec, "lane_id", "") or "")
-        if lane_id not in london_active_evidence_lane_ids():
+        if lane_spec is None:
             return
+        lane_id = str(getattr(lane_spec, "lane_id", "") or "")
+        strategy_id = str(intent.reason_code or self._track_b_rule_runner_config().get("strategy_id") or "")
+        config = dict(getattr(lane_spec, "runtime_overlay_params", None) or {})
         latest_report = dict(getattr(self, "_latest_track_b_rule_report", {}) or {})
-        result = build_london_active_evidence_broker_envelope(
-            lane_id=lane_id,
+        bridge_adapter_present = _lane_has_bridge_submit_adapter(lane_id)
+        result = build_broker_event_envelope(
+            context=BrokerEventEnvelopeLaneContext(
+                lane_id=lane_id,
+                strategy_id=strategy_id,
+                lane_classification=_broker_event_lane_classification(lane_spec=lane_spec, config=config),
+                session=str(latest_report.get("session_label") or latest_report.get("session") or ""),
+                window=str(latest_report.get("condition") or ""),
+                artifact_family=_broker_event_artifact_family(lane_id),
+                anchor_type=_broker_event_anchor_type(latest_report),
+                input_artifact_path=str(config.get("input_event_path") or ""),
+                runtime_profile=str(config.get("profile_name") or config.get("track_b_paper_stack_profile") or "UNKNOWN_RUNTIME_PROFILE"),
+                runtime_commit=str(config.get("runtime_git_head") or config.get("source_runtime_git_head") or "UNKNOWN_RUNTIME_COMMIT"),
+                bridge_submit_adapter_present=bridge_adapter_present,
+                promotion_ready=not bridge_adapter_present,
+                broker_authoritative=bridge_adapter_present,
+            ),
             order_intent=intent,
             rule_report=latest_report,
             source_candle_timestamp=getattr(bar, "end_ts", None),
-            config=LondonActiveEvidenceBrokerEnvelopeConfig(repo_root=self._track_b_repo_root),
+            config=BrokerEventEnvelopeConfig(repo_root=getattr(self, "_track_b_repo_root", Path(__file__).resolve().parents[3])),
         )
         if result.envelope is not None:
-            write_london_active_evidence_broker_envelope(result=result)
-        latest_report.update(
-            {
-                "broker_authoritative_envelope_classification": result.classification,
-                "broker_authoritative_envelope_path": str(result.latest_path) if result.latest_path else None,
-                "broker_authoritative_envelope_event_stream_path": str(result.event_path) if result.event_path else None,
-                "broker_authoritative_envelope_dry_run": result.envelope is not None,
-                "broker_authoritative_submit_enabled": False,
-                "broker_authoritative_submit_blocker": "LONDON_ACTIVE_EVIDENCE_ENVELOPE_ONLY_NOT_ACTIVATED",
-                "ibkr_call_path_invoked": False,
-            }
-        )
+            write_broker_event_envelope(result=result)
+        latest_report.update(broker_event_report_fields(result))
         self._latest_track_b_rule_report = latest_report
 
     def _evaluate_changeover_runtime_rule(self, feature_packet: FeaturePacket) -> SignalPacket | None:
@@ -811,6 +819,53 @@ class TrackBRuleRunnerPaperStrategyEngine(StrategyEngine):
             "paper_proof_invoked": False,
         }
         return promoted_packet
+
+
+def _lane_has_bridge_submit_adapter(lane_id: str) -> bool:
+    try:
+        from ..execution.ibkr_paper_strategy_porting import lane_submit_bridge_adapter
+    except Exception:
+        return False
+    return lane_submit_bridge_adapter(lane_id=lane_id) is not None
+
+
+def _broker_event_lane_classification(*, lane_spec: Any, config: Mapping[str, Any]) -> str:
+    values = (
+        getattr(lane_spec, "lane_mode", None),
+        getattr(lane_spec, "source_family", None),
+        getattr(lane_spec, "status", None),
+        config.get("lane_mode"),
+        config.get("experimental_reason"),
+        config.get("promotion_status"),
+        config.get("entry_source"),
+    )
+    return "|".join(str(value) for value in values if value)
+
+
+def _broker_event_artifact_family(lane_id: str) -> str | None:
+    lowered = str(lane_id or "").lower()
+    if "london_open_active_participation" in lowered:
+        return "london_open_active_evidence"
+    if "london_late_active_participation" in lowered:
+        return "london_late_active_evidence"
+    if "_us_active_participation_" in lowered:
+        return "us_active_evidence"
+    if "globex_active_participation" in lowered:
+        return "globex_active_evidence"
+    return None
+
+
+def _broker_event_anchor_type(rule_report: Mapping[str, Any]) -> str | None:
+    condition = str(rule_report.get("condition") or "").lower()
+    if "london_late_reference" in condition or "05:30" in condition:
+        return "LONDON_LATE_0530_REFERENCE"
+    if "london_open" in condition or "03:00" in condition:
+        return "LONDON_0300_OPEN"
+    if "us_session_open" in condition or "09:30" in condition:
+        return "US_0930_OPEN"
+    if "globex" in condition or "18:00" in condition:
+        return "GLOBEX_1800_REOPEN"
+    return None
 
 
 def _read_json(path: Path) -> dict[str, Any]:

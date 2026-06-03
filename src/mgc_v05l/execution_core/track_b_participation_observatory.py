@@ -186,7 +186,7 @@ def _lane_bar_funnel(*, lane: Mapping[str, Any], bar: Mapping[str, Any], now: da
     route_authorized = intent_created and not _has_blocker(gate_blocker, "ROUTE")
     simulated_paper_submit = _simulated_paper_submit(intent)
     simulated_paper_fill = _simulated_paper_fill(intent)
-    broker_envelope_produced = _broker_envelope_produced(rule_report)
+    broker_envelope_produced = _broker_envelope_produced(rule_report, bar_ts=bar_ts)
     submit_attempted = _broker_submit_attempted(intent)
     broker_ack = _broker_ack(intent)
     fill = _fill_reached(lane=lane, intent=intent)
@@ -518,11 +518,21 @@ def _is_simulated_paper_order_id(value: object) -> bool:
     return str(value or "").strip().startswith("paper-")
 
 
-def _broker_envelope_produced(rule_report: Mapping[str, Any]) -> bool:
-    classification = str(rule_report.get("broker_authoritative_envelope_classification") or "").upper()
-    return classification == "BROKER_AUTHORITATIVE_ENVELOPE_READY_DRY_RUN" and bool(
-        rule_report.get("broker_authoritative_envelope_path")
-    )
+def _broker_envelope_produced(rule_report: Mapping[str, Any], *, bar_ts: datetime) -> bool:
+    classification = str(
+        rule_report.get("broker_event_envelope_classification")
+        or rule_report.get("broker_authoritative_envelope_classification")
+        or ""
+    ).upper()
+    if classification not in {"BROKER_EVENT_ENVELOPE_READY_DRY_RUN", "BROKER_AUTHORITATIVE_ENVELOPE_READY_DRY_RUN"}:
+        return False
+    path = rule_report.get("broker_event_envelope_path") or rule_report.get("broker_authoritative_envelope_path")
+    if not path:
+        return False
+    source_ts = _parse_time(rule_report.get("broker_event_envelope_source_candle_timestamp"))
+    if source_ts is None:
+        return True
+    return _same_minute(source_ts, bar_ts)
 
 
 def _lifecycle_adopted(*, lane: Mapping[str, Any], intent: Mapping[str, Any], fill: bool) -> bool:

@@ -8,24 +8,27 @@ and never calls an IBKR path.
 
 from __future__ import annotations
 
-import hashlib
-from dataclasses import asdict, dataclass
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Mapping
 
 from mgc_v05l.execution.order_models import OrderIntent
-from mgc_v05l.execution_core.track_b_atomic_io import write_json_atomic
-from mgc_v05l.execution_core.track_b_position_intent_contract import (
-    APPROVED_TRACK_B_POSITION_INTENT_TEMPLATES,
-    position_intent_from_template,
+from mgc_v05l.execution_core.track_b_broker_event_envelope import (
+    BROKER_EVENT_ENVELOPE_BLOCKED,
+    BROKER_EVENT_ENVELOPE_NOT_ELIGIBLE,
+    BROKER_EVENT_ENVELOPE_READY_DRY_RUN,
+    BrokerEventEnvelopeConfig,
+    BrokerEventEnvelopeLaneContext,
+    build_broker_event_envelope,
+    write_broker_event_envelope,
 )
 
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 SCHEMA_VERSION = "track_b_london_active_evidence_broker_envelope_v1"
 DEFAULT_ACCOUNT_ID = "DUM882026"
-BRIDGE_DRY_RUN_CLASSIFICATION = "BROKER_AUTHORITATIVE_ENVELOPE_READY_DRY_RUN"
+BRIDGE_DRY_RUN_CLASSIFICATION = BROKER_EVENT_ENVELOPE_READY_DRY_RUN
 NO_ENVELOPE_NO_ACCEPTED_INTENT = "NO_BROKER_ENVELOPE_NO_ACCEPTED_INTENT"
 ANCHOR_NOT_READY = "SESSION_ANCHOR_NOT_READY"
 UNSUPPORTED_LONDON_LANE = "UNSUPPORTED_LONDON_ACTIVE_EVIDENCE_LANE"
@@ -128,124 +131,39 @@ def build_london_active_evidence_broker_envelope(
             event_path=None,
             reason_code=UNSUPPORTED_LONDON_LANE,
         )
-    if order_intent is None:
-        return LondonActiveEvidenceBrokerEnvelopeResult(
-            classification=NO_ENVELOPE_NO_ACCEPTED_INTENT,
-            envelope=None,
-            latest_path=None,
-            event_path=None,
-            reason_code=NO_ENVELOPE_NO_ACCEPTED_INTENT,
-        )
-
-    report = dict(rule_report)
-    if str(report.get("session_anchor_status") or "").upper() != "READY":
-        return LondonActiveEvidenceBrokerEnvelopeResult(
-            classification=ANCHOR_NOT_READY,
-            envelope=None,
-            latest_path=None,
-            event_path=None,
-            reason_code=str(report.get("session_anchor_reason_code") or ANCHOR_NOT_READY),
-        )
-
-    template = APPROVED_TRACK_B_POSITION_INTENT_TEMPLATES[spec.strategy_id]
-    contract = position_intent_from_template(template)
-    created_at = _intent_created_at(order_intent) or _parse_time(source_candle_timestamp) or _utc_now(generated_at)
-    source_ts = _parse_time(source_candle_timestamp) or created_at
-    action = "BUY" if contract.side.upper() == "LONG" else "SELL"
-    intent_id = _intent_value(order_intent, "order_intent_id") or f"{source_ts.isoformat()}|{action}_TO_OPEN"
-    identity_seed = "|".join(
-        (
-            cfg.account_id,
-            contract.local_symbol,
-            str(contract.con_id),
-            spec.lane_id,
-            spec.strategy_id,
-            action,
-            source_ts.isoformat(),
-            intent_id,
-        )
+    result = build_broker_event_envelope(
+        context=BrokerEventEnvelopeLaneContext(
+            lane_id=spec.lane_id,
+            strategy_id=spec.strategy_id,
+            lane_classification="PAPER_ONLY_PROMOTION_READY_ACTIVE_EVIDENCE",
+            session=spec.session,
+            artifact_family=spec.output_family,
+            anchor_type=spec.anchor_type,
+            promotion_ready=True,
+        ),
+        order_intent=order_intent,
+        rule_report=rule_report,
+        source_candle_timestamp=source_candle_timestamp,
+        config=BrokerEventEnvelopeConfig(
+            repo_root=cfg.repo_root,
+            output_root=cfg.output_root,
+            account_id=cfg.account_id,
+        ),
+        generated_at=generated_at,
     )
-    digest = hashlib.sha256(identity_seed.encode("utf-8")).hexdigest()
-    trade_id = f"trade_london_active_evidence_{digest[:16]}"
-    lifecycle_id = f"reserved_submit_{spec.lane_id}_{source_ts.strftime('%Y%m%dT%H%M%S%fZ')}_{digest[:12]}"
-    output_dir = cfg.resolve(cfg.output_root) / spec.output_family
-    latest_path = output_dir / f"latest_{spec.lane_id}_event_envelope.json"
-    event_path = output_dir / "broker_event_envelope_events.jsonl"
-    now = _utc_now(generated_at)
-    envelope = {
-        "schema_version": SCHEMA_VERSION,
-        "classification": BRIDGE_DRY_RUN_CLASSIFICATION,
-        "generated_at": now.isoformat(),
-        "dry_run": True,
-        "broker_mutation_allowed": False,
-        "submit_allowed": False,
-        "submit_attempted": False,
-        "ibkr_call_path_invoked": False,
-        "no_ibkr_call_path_reason": NO_IBKR_CALL_PATH_INVOKED,
-        "current_order_destination": "ibkr_paper_bridge_submit_capable",
-        "bridge_activation_status": "ENVELOPE_ONLY_NOT_SUBMIT_CAPABLE",
-        "bridge_path_reused_if_activated": {
-            "exposure_gate": True,
-            "anti_flip_lock": True,
-            "same_symbol_pending_fill_lock": True,
-            "managed_close_exclusivity": True,
-            "current_exposure_owner_resolver": True,
-            "contract_resolver": True,
-            "safe_state_guardian": True,
-            "lifecycle_adoption": True,
-            "managed_exit_timebox": True,
-        },
-        "trade_id_generation_rule": "sha256(account/localSymbol/conId/lane_id/strategy_id/action/source_candle_timestamp/intent_id)",
-        "trade_id": trade_id,
-        "lifecycle_id": lifecycle_id,
-        "account_id": cfg.account_id,
-        "symbol": contract.instrument_family,
-        "instrument_family": contract.instrument_family,
-        "contract_key": contract.contract_key,
-        "localSymbol": contract.local_symbol,
-        "local_symbol": contract.local_symbol,
-        "conId": contract.con_id,
-        "con_id": contract.con_id,
-        "expiry": contract.expiry,
-        "currency": "USD",
-        "exchange": "CME",
-        "side": contract.side,
-        "action": action,
-        "quantity": contract.quantity,
-        "qty": contract.quantity,
-        "strategy_id": spec.strategy_id,
-        "lane_id": spec.lane_id,
-        "session": spec.session,
-        "exit_policy": asdict(contract.exit_policy),
-        "hold_policy": asdict(contract.hold_policy),
-        "conflict_group": contract.conflict_group,
-        "anchor_reference": {
-            "anchor_type": spec.anchor_type,
-            "status": report.get("session_anchor_status"),
-            "reason_code": report.get("session_anchor_reason_code"),
-            "source": report.get("session_anchor_source"),
-            "source_artifact_path": report.get("session_anchor_source_artifact_path"),
-            "reference_price": report.get("session_open_price"),
-        },
-        "source_candle_timestamp": source_ts.isoformat(),
-        "source_order_intent_id": intent_id,
-        "source_order_intent_type": _intent_value(order_intent, "intent_type"),
-        "source_reason_code": _intent_value(order_intent, "reason_code"),
-        "source_bar_id": _intent_value(order_intent, "bar_id"),
-        "provenance": {
-            "adapter": "track_b_london_active_evidence_broker_envelope",
-            "source_rule_report": dict(report),
-            "paper_lane_order_fill_is_simulated": True,
-            "broker_authoritative_submit_requires_follow_up_activation": True,
-            "latest_artifact_path": str(latest_path),
-            "event_stream_path": str(event_path),
-        },
-    }
+    classification = result.classification
+    reason_code = result.reason_code
+    if classification == BROKER_EVENT_ENVELOPE_NOT_ELIGIBLE and reason_code == "NO_ACCEPTED_ENTRY_INTENT":
+        classification = NO_ENVELOPE_NO_ACCEPTED_INTENT
+        reason_code = NO_ENVELOPE_NO_ACCEPTED_INTENT
+    if classification == BROKER_EVENT_ENVELOPE_BLOCKED and str(reason_code or "").startswith("ANCHOR"):
+        classification = ANCHOR_NOT_READY
     return LondonActiveEvidenceBrokerEnvelopeResult(
-        classification=BRIDGE_DRY_RUN_CLASSIFICATION,
-        envelope=envelope,
-        latest_path=latest_path,
-        event_path=event_path,
+        classification=classification,
+        envelope=result.envelope,
+        latest_path=result.latest_path,
+        event_path=result.event_path,
+        reason_code=reason_code,
     )
 
 
@@ -255,13 +173,7 @@ def write_london_active_evidence_broker_envelope(
 ) -> tuple[Path, Path] | None:
     if result.envelope is None or result.latest_path is None or result.event_path is None:
         return None
-    write_json_atomic(result.latest_path, result.envelope)
-    result.event_path.parent.mkdir(parents=True, exist_ok=True)
-    with result.event_path.open("a", encoding="utf-8") as handle:
-        import json
-
-        handle.write(json.dumps(result.envelope, sort_keys=True) + "\n")
-    return result.latest_path, result.event_path
+    return write_broker_event_envelope(result=result)  # type: ignore[arg-type]
 
 
 def write_london_active_evidence_broker_envelope_for_intent(

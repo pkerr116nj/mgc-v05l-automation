@@ -617,9 +617,10 @@ def test_london_open_active_evidence_intent_writes_dry_run_broker_envelope(tmp_p
         / "outputs/track_b_execution_core/london_open_active_evidence/latest_mnq_london_open_active_participation_long_event_envelope.json"
     )
     payload = json.loads(envelope_path.read_text(encoding="utf-8"))
-    assert payload["classification"] == "BROKER_AUTHORITATIVE_ENVELOPE_READY_DRY_RUN"
+    assert payload["classification"] == "BROKER_EVENT_ENVELOPE_READY_DRY_RUN"
     assert payload["submit_allowed"] is False
     assert payload["ibkr_call_path_invoked"] is False
+    assert engine._latest_track_b_rule_report["broker_event_envelope_classification"] == "BROKER_EVENT_ENVELOPE_READY_DRY_RUN"
     assert engine._latest_track_b_rule_report["broker_authoritative_envelope_path"] == str(envelope_path)
 
 

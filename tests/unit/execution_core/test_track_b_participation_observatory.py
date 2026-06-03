@@ -230,6 +230,28 @@ def test_simulated_paper_orders_are_not_counted_as_broker_submits_or_fills(tmp_p
     assert report["conversion"]["broker_authoritative_envelope_count"] == 1
 
 
+def test_stale_broker_event_envelope_is_not_counted_current(tmp_path: Path) -> None:
+    bar_ts = "2026-06-01T07:20:00+00:00"
+    lane = _lane(
+        bar_ts=bar_ts,
+        lane_id="mnq_london_open_active_participation_long",
+        rule_report={
+            "classification": "TRACK_B_PAPER_ACTIVE_EVIDENCE_SIGNAL",
+            "broker_event_envelope_classification": "BROKER_EVENT_ENVELOPE_READY_DRY_RUN",
+            "broker_event_envelope_path": "outputs/track_b_execution_core/london_open_active_evidence/latest_mnq_london_open_active_participation_long_event_envelope.json",
+            "broker_event_envelope_source_candle_timestamp": "2026-05-28T07:20:00+00:00",
+        },
+        latest_live_strategy_intent={"trade_id": "trade-stale-envelope", "created_at": bar_ts},
+    )
+    _write_fixture(tmp_path, [lane], {"MNQ": [bar_ts]})
+
+    report = _build(tmp_path)
+
+    assert report["bar_evaluations"][0]["broker_authoritative_envelope_produced"] is False
+    assert report["lane_reports"][0]["broker_envelope_count"] == 0
+    assert report["conversion"]["broker_authoritative_envelope_count"] == 0
+
+
 def test_lane_silent_during_active_window_flagged(tmp_path: Path) -> None:
     bar_ts = "2026-06-01T14:00:00+00:00"
     lane = _lane(
