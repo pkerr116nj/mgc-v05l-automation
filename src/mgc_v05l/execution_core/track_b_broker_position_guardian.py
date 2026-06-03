@@ -544,15 +544,30 @@ def _scoped_remediation_plan(
 
 
 def _identity_fallback(findings: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
+    candidates: list[Mapping[str, Any]] = []
     for finding in findings:
-        event = _mapping(finding.get("settlement_event"))
-        if event:
-            return {
-                "con_id": event.get("con_id"),
-                "local_symbol": event.get("local_symbol"),
-                "contract_key": event.get("contract_key"),
-            }
-    return {}
+        for key in ("settlement_event", "lifecycle_position", "managed_position", "broker_position"):
+            row = _mapping(finding.get(key))
+            if row:
+                candidates.append(row)
+    con_ids = {
+        _text(row.get("con_id") or row.get("conId"))
+        for row in candidates
+        if _text(row.get("con_id") or row.get("conId"))
+    }
+    local_symbols = {
+        _text(row.get("local_symbol") or row.get("localSymbol"))
+        for row in candidates
+        if _text(row.get("local_symbol") or row.get("localSymbol"))
+    }
+    contract_keys = {_text(row.get("contract_key")) for row in candidates if _text(row.get("contract_key"))}
+    if len(con_ids) > 1 or len(local_symbols) > 1:
+        return {}
+    return {
+        "con_id": next(iter(con_ids), None),
+        "local_symbol": next(iter(local_symbols), None),
+        "contract_key": next(iter(contract_keys), None),
+    }
 
 
 def _broker_positions(inputs: Mapping[str, Mapping[str, Any]]) -> list[dict[str, Any]]:

@@ -94,6 +94,39 @@ def test_exit_fill_expected_flat_with_short_broker_position_is_unauthorized_reve
     assert payload["scoped_remediation_plan"]["broad_flatten_allowed"] is False
 
 
+def test_reverse_exposure_plan_canonicalizes_missing_broker_con_id_from_lifecycle_owner() -> None:
+    broker_position = _mnq_position("-1")
+    broker_position.pop("con_id")
+    lifecycle_position = {
+        "account_id": "DUM882026",
+        "symbol": "MNQ",
+        "local_symbol": "MNQM6",
+        "con_id": 770561201,
+        "quantity": "1",
+        "side": "LONG",
+        "lifecycle_id": "lifecycle-long",
+    }
+    payload = build_track_b_broker_position_guardian(
+        config=TrackBBrokerPositionGuardianConfig(),
+        now=NOW,
+        input_overrides=_inputs(
+            position_truth={"broker_positions": [broker_position]},
+            managed_position_registry={
+                "classification": "OPEN_MANAGED_EXIT_DUE",
+                "managed_positions": [lifecycle_position],
+                "lifecycle_open_positions": [lifecycle_position],
+            },
+        ),
+    )
+
+    assert payload["classification"] == BROKER_POSITION_GUARDIAN_HARD_HOLD
+    assert UNAUTHORIZED_REVERSE_EXPOSURE in payload["hard_classifications"]
+    assert payload["scoped_remediation_plan"]["classification"] == "SCOPED_REVERSE_EXPOSURE_FLATTEN_PLAN_READY"
+    assert payload["scoped_remediation_plan"]["action"] == "BUY"
+    assert payload["scoped_remediation_plan"]["con_id"] == "770561201"
+    assert payload["scoped_remediation_plan"]["broad_flatten_allowed"] is False
+
+
 def test_hard_hold_allows_exact_registry_backed_risk_reducing_close() -> None:
     inputs = _inputs(
         position_truth={"broker_positions": [_mnq_position("1")]},

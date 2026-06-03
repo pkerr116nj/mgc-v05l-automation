@@ -267,7 +267,7 @@ def _apply_exact_scoped_buy(
         time_in_force="DAY",
         paper_only=True,
         created_at=now,
-        reason="Exact scoped guardian remediation for unauthorized reverse MNQ exposure.",
+        reason=f"Exact scoped guardian remediation for unauthorized reverse {config.expected_symbol} exposure.",
     )
     submit_attempt = SubmitAttempt(
         submit_attempt_id=f"{run_id}_submit",
