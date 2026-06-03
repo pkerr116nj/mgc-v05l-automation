@@ -150,6 +150,7 @@ def run_track_b_managed_open_position_maintenance(
             lifecycle_report_path = Path(str(position.get("paper_lifecycle_report_path")))
         lifecycle_report = _read_json(lifecycle_report_path)
         base_position_report = {
+            "trade_id": position.get("trade_id") or lifecycle_report.get("trade_id"),
             "lifecycle_id": lifecycle_id,
             "strategy_id": position.get("strategy_id") or lifecycle_report.get("strategy_id"),
             "instrument": position.get("instrument_family") or lifecycle_report.get("instrument_family"),
@@ -168,6 +169,7 @@ def run_track_b_managed_open_position_maintenance(
             if lifecycle_report:
                 base_position_report = {
                     **base_position_report,
+                    "trade_id": position.get("trade_id") or lifecycle_report.get("trade_id"),
                     "strategy_id": position.get("strategy_id") or lifecycle_report.get("strategy_id"),
                     "instrument": position.get("instrument_family") or lifecycle_report.get("instrument_family"),
                     "contract_key": position.get("contract_key") or lifecycle_report.get("contract_key"),

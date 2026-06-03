@@ -43,6 +43,8 @@ MANAGED_POSITION_METADATA_INCOMPLETE = "MANAGED_POSITION_METADATA_INCOMPLETE"
 LIFECYCLE_WITHOUT_BROKER = "LIFECYCLE_WITHOUT_BROKER"
 REVIEW_REQUIRED = "REVIEW_REQUIRED"
 STALE_MANAGED_POSITION_EVIDENCE = "STALE_MANAGED_POSITION_EVIDENCE"
+PROJECTION_AUTHORITY_DIVERGENCE = "PROJECTION_AUTHORITY_DIVERGENCE"
+PROJECTION_AUTHORITY_COHERENT = "PROJECTION_AUTHORITY_COHERENT"
 
 DEFAULT_MANAGED_POSITION_REGISTRY_ARTIFACT = (
     Path("outputs") / "track_b_execution_core" / "managed_positions" / "latest_managed_positions.json"
@@ -198,6 +200,17 @@ def build_track_b_managed_position_registry(
         market_data_root=config.resolve(config.market_data_root),
         source_stale=source_stale,
     )
+    managed_positions, projection_authority_diagnostics = _apply_current_owner_projection_overlay(
+        managed_positions=managed_positions,
+        owner_resolution=_mapping(pre_restart_exposure_resolution.get("current_exposure_owner_resolution"))
+        or pre_restart_exposure_resolution,
+        open_order_states=open_order_states,
+        managed_order_states=managed_order_states,
+        lifecycle_reports=lifecycle_reports,
+        manifests=manifests,
+        market_data_root=config.resolve(config.market_data_root),
+        source_stale=source_stale,
+    )
     classification = _overall_classification(
         managed_positions=managed_positions,
         broker_positions=broker_positions,
@@ -240,6 +253,7 @@ def build_track_b_managed_position_registry(
             *list(superseded_lifecycle_positions),
             *owner_superseded_lifecycle_positions,
         ],
+        "projection_authority_diagnostics": projection_authority_diagnostics,
         "unresolved_submit_ownership": unresolved_ownership,
         "pre_restart_exposure_resolution": pre_restart_exposure_resolution,
         "source_freshness": source_stale,
@@ -518,6 +532,147 @@ def _managed_positions(
     return positions
 
 
+def _apply_current_owner_projection_overlay(
+    *,
+    managed_positions: list[dict[str, Any]],
+    owner_resolution: Mapping[str, Any],
+    open_order_states: list[dict[str, Any]],
+    managed_order_states: list[dict[str, Any]],
+    lifecycle_reports: list[dict[str, Any]],
+    manifests: list[dict[str, Any]],
+    market_data_root: Path,
+    source_stale: Mapping[str, Any],
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    """Keep managed-position authority aligned with the shared owner resolver."""
+
+    positions = [dict(item) for item in managed_positions]
+    diagnostics: dict[str, Any] = {
+        "classification": PROJECTION_AUTHORITY_COHERENT,
+        "authority_source": "CURRENT_EXPOSURE_OWNER_RESOLVER",
+        "repaired_missing_owner_count": 0,
+        "divergence_count": 0,
+        "repairs": [],
+        "divergences": [],
+    }
+    owned_exposures = [
+        dict(item)
+        for item in owner_resolution.get("owned_exposures") or []
+        if isinstance(item, Mapping)
+    ]
+    if not owned_exposures:
+        return positions, diagnostics
+
+    by_key = {_position_key(item): idx for idx, item in enumerate(positions) if _position_key(item)}
+    for exposure in owned_exposures:
+        lifecycle = _mapping(exposure.get("lifecycle_position"))
+        broker = _mapping(exposure.get("canonical_broker_position")) or _mapping(exposure.get("broker_position"))
+        key = _position_key(broker) or _position_key(lifecycle)
+        owner_lifecycle_id = str(exposure.get("lifecycle_id") or lifecycle.get("lifecycle_id") or "").strip()
+        owner_trade_id = str(exposure.get("trade_id") or lifecycle.get("trade_id") or "").strip()
+        if not key or not owner_lifecycle_id:
+            diagnostics["classification"] = PROJECTION_AUTHORITY_DIVERGENCE
+            diagnostics["divergence_count"] += 1
+            diagnostics["divergences"].append(
+                {
+                    "classification": PROJECTION_AUTHORITY_DIVERGENCE,
+                    "reason": "Owned exposure from resolver is missing contract key or lifecycle identity.",
+                    "position_key": key,
+                    "owner_trade_id": owner_trade_id,
+                    "owner_lifecycle_id": owner_lifecycle_id,
+                }
+            )
+            continue
+        lifecycle = {
+            **lifecycle,
+            "trade_id": lifecycle.get("trade_id") or owner_trade_id,
+            "lifecycle_id": lifecycle.get("lifecycle_id") or owner_lifecycle_id,
+        }
+
+        existing_index = by_key.get(key)
+        existing = positions[existing_index] if existing_index is not None else None
+        existing_lifecycle_id = str((existing or {}).get("lifecycle_id") or "").strip()
+        if existing and existing_lifecycle_id == owner_lifecycle_id:
+            existing["projection_authority_owner_confirmed"] = True
+            existing["projection_authority_source"] = "CURRENT_EXPOSURE_OWNER_RESOLVER"
+            continue
+
+        repaired = _managed_positions(
+            broker_positions=[broker] if broker else [],
+            lifecycle_positions=[lifecycle] if lifecycle else [],
+            review_positions=[],
+            open_order_states=open_order_states,
+            managed_order_states=managed_order_states,
+            lifecycle_reports=lifecycle_reports,
+            manifests=manifests,
+            market_data_root=market_data_root,
+            source_stale=source_stale,
+        )
+        if not repaired:
+            diagnostics["classification"] = PROJECTION_AUTHORITY_DIVERGENCE
+            diagnostics["divergence_count"] += 1
+            diagnostics["divergences"].append(
+                {
+                    "classification": PROJECTION_AUTHORITY_DIVERGENCE,
+                    "reason": "Managed-position projection could not be built from resolver-proven owner.",
+                    "position_key": key,
+                    "owner_trade_id": owner_trade_id,
+                    "owner_lifecycle_id": owner_lifecycle_id,
+                }
+            )
+            continue
+        owner_position = {
+            **repaired[0],
+            "projection_authority_owner_confirmed": True,
+            "projection_authority_source": "CURRENT_EXPOSURE_OWNER_RESOLVER",
+        }
+        if existing_index is None:
+            positions.append(owner_position)
+            by_key[key] = len(positions) - 1
+            diagnostics["repaired_missing_owner_count"] += 1
+            diagnostics["repairs"].append(
+                {
+                    "classification": "CURRENT_OWNER_PROJECTION_REPAIRED",
+                    "reason": "Resolver-proven current owner was missing from managed-position projection.",
+                    "position_key": key,
+                    "owner_trade_id": owner_trade_id,
+                    "owner_lifecycle_id": owner_lifecycle_id,
+                }
+            )
+            continue
+        if not existing_lifecycle_id:
+            positions[existing_index] = owner_position
+            diagnostics["repaired_missing_owner_count"] += 1
+            diagnostics["repairs"].append(
+                {
+                    "classification": "CURRENT_OWNER_PROJECTION_REPAIRED",
+                    "reason": "Broker exposure projection lacked canonical lifecycle owner.",
+                    "position_key": key,
+                    "owner_trade_id": owner_trade_id,
+                    "owner_lifecycle_id": owner_lifecycle_id,
+                }
+            )
+            continue
+        divergent = {
+            **dict(existing),
+            "classification": PROJECTION_AUTHORITY_DIVERGENCE,
+            "attention_required": True,
+            "projection_authority_divergence": {
+                "classification": PROJECTION_AUTHORITY_DIVERGENCE,
+                "reason": "Managed-position projection disagrees with shared current exposure owner resolver.",
+                "position_key": key,
+                "projected_trade_id": existing.get("trade_id"),
+                "projected_lifecycle_id": existing_lifecycle_id,
+                "owner_trade_id": owner_trade_id,
+                "owner_lifecycle_id": owner_lifecycle_id,
+            },
+        }
+        positions[existing_index] = divergent
+        diagnostics["classification"] = PROJECTION_AUTHORITY_DIVERGENCE
+        diagnostics["divergence_count"] += 1
+        diagnostics["divergences"].append(divergent["projection_authority_divergence"])
+    return positions, diagnostics
+
+
 def _position_classification(
     *,
     broker: Mapping[str, Any] | None,
@@ -562,6 +717,7 @@ def _overall_classification(
     if not broker_positions and not lifecycle_positions and not review_positions and not managed_positions:
         return NO_MANAGED_POSITIONS
     priority = [
+        PROJECTION_AUTHORITY_DIVERGENCE,
         REVIEW_REQUIRED,
         BROKER_BACKED_ADOPTION_REQUIRED,
         MANAGED_POSITION_METADATA_INCOMPLETE,
@@ -910,6 +1066,9 @@ def _recommended_action(*, classification: str) -> str:
         LIFECYCLE_WITHOUT_BROKER: "Review lifecycle artifact against broker-flat truth; local cleanup may be needed.",
         REVIEW_REQUIRED: "Review lifecycle diagnostics; do not restart trading until resolved.",
         STALE_MANAGED_POSITION_EVIDENCE: "Refresh authority artifacts before acting.",
+        PROJECTION_AUTHORITY_DIVERGENCE: (
+            "Refresh current exposure owner and managed-position projections; do not submit until they agree."
+        ),
     }.get(classification, "Review managed position state.")
 
 

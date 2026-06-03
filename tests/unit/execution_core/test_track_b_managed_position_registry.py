@@ -6,6 +6,7 @@ from decimal import Decimal
 from pathlib import Path
 
 from mgc_v05l.execution_core.track_b_central_trade_registry import TradeEvent, TradeEventType
+import mgc_v05l.execution_core.track_b_managed_position_registry as managed_position_registry_module
 from mgc_v05l.execution_core.track_b_managed_position_registry import (
     BROKER_BACKED_ADOPTION_REQUIRED,
     LIFECYCLE_WITHOUT_BROKER,
@@ -14,6 +15,7 @@ from mgc_v05l.execution_core.track_b_managed_position_registry import (
     OPEN_MANAGED_CLOSE_WORKING,
     OPEN_MANAGED_EXIT_DUE,
     OPEN_MANAGED_MATCHED,
+    PROJECTION_AUTHORITY_COHERENT,
     REVIEW_REQUIRED,
     TrackBManagedPositionRegistryConfig,
     build_track_b_managed_position_registry,
@@ -538,6 +540,71 @@ def test_registry_backed_broker_position_repairs_stale_lifecycle_projection(tmp_
         payload["pre_restart_exposure_resolution"]["classification"]
         == "PROJECTION_STALE_MANAGED_EXPOSURE_RESOLVED"
     )
+
+
+def test_owner_resolution_overlay_repairs_missing_managed_position_projection(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    broker = _broker_position()
+    lifecycle = _lifecycle_position(policy="GLOBEX_ACTIVE_EVIDENCE_TIMEBOX_60M_EXIT_V1", bars_since_fill=12)
+    _seed_base(tmp_path, broker_positions=[broker])
+    _write_lifecycle_report(
+        tmp_path,
+        lifecycle_id=lifecycle["lifecycle_id"],
+        policy="GLOBEX_ACTIVE_EVIDENCE_TIMEBOX_60M_EXIT_V1",
+        bars_since_fill=12,
+    )
+
+    def fake_resolver(**_kwargs):
+        return {
+            "classification": "OWNED_MANAGED_EXIT_DUE",
+            "broker_position_count": 1,
+            "broker_open_order_count": 0,
+            "owned_exposure_count": 1,
+            "review_required_exposure_count": 0,
+            "owned_exposures": [
+                {
+                    "classification": "OWNED_MANAGED_EXIT_DUE",
+                    "broker_position": broker,
+                    "canonical_broker_position": broker,
+                    "lifecycle_position": lifecycle,
+                    "trade_id": "trade_mnq",
+                    "lifecycle_id": lifecycle["lifecycle_id"],
+                    "position_key": "DUM882026|MNQM6|770561201",
+                    "exit_due": True,
+                }
+            ],
+            "review_required_exposures": [],
+            "resolved_lifecycle_positions": [lifecycle],
+            "stale_superseded_full_audit_only": [],
+            "read_only": True,
+            "no_broad_flatten_generated": True,
+        }
+
+    monkeypatch.setattr(managed_position_registry_module, "resolve_pre_restart_exposure_reconciliation", fake_resolver)
+    monkeypatch.setattr(
+        managed_position_registry_module,
+        "_merge_resolved_lifecycle_positions",
+        lambda *, lifecycle_positions, resolved_lifecycle_positions: list(lifecycle_positions),
+    )
+
+    payload = build_track_b_managed_position_registry(
+        config=TrackBManagedPositionRegistryConfig(repo_root=tmp_path),
+        now=NOW,
+    )
+
+    assert payload["classification"] == OPEN_MANAGED_EXIT_DUE
+    assert payload["summary"]["managed_position_count"] == 1
+    position = payload["managed_positions"][0]
+    assert position["trade_id"] == "trade_mnq"
+    assert position["lifecycle_id"] == lifecycle["lifecycle_id"]
+    assert position["classification"] == OPEN_MANAGED_EXIT_DUE
+    assert position["projection_authority_owner_confirmed"] is True
+    diagnostics = payload["projection_authority_diagnostics"]
+    assert diagnostics["classification"] == PROJECTION_AUTHORITY_COHERENT
+    assert diagnostics["repaired_missing_owner_count"] == 1
+    assert diagnostics["repairs"][0]["classification"] == "CURRENT_OWNER_PROJECTION_REPAIRED"
 
 
 def test_lifecycle_missing_policy_is_metadata_incomplete(tmp_path: Path) -> None:
