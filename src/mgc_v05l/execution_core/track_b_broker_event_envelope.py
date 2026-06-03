@@ -219,6 +219,10 @@ def envelope_requirement_for_lane(context: BrokerEventEnvelopeLaneContext) -> Br
 
 
 def broker_event_report_fields(result: BrokerEventEnvelopeResult) -> dict[str, Any]:
+    mapped_to_bridge = result.classification == BROKER_EVENT_ENVELOPE_MAPPED_TO_BRIDGE
+    submit_blocker = None if mapped_to_bridge else (
+        "BROKER_EVENT_ENVELOPE_DRY_RUN_NOT_ACTIVATED" if result.envelope is not None else result.reason_code
+    )
     return {
         "broker_event_envelope_classification": result.classification,
         "broker_event_envelope_requirement": result.requirement,
@@ -235,10 +239,8 @@ def broker_event_report_fields(result: BrokerEventEnvelopeResult) -> dict[str, A
         "broker_authoritative_envelope_event_stream_path": str(result.event_path) if result.event_path else None,
         "broker_authoritative_envelope_dry_run": result.envelope is not None
         and result.envelope_mode == BrokerEnvelopeMode.DRY_RUN.value,
-        "broker_authoritative_submit_enabled": False,
-        "broker_authoritative_submit_blocker": (
-            "BROKER_EVENT_ENVELOPE_DRY_RUN_NOT_ACTIVATED" if result.envelope is not None else result.reason_code
-        ),
+        "broker_authoritative_submit_enabled": mapped_to_bridge,
+        "broker_authoritative_submit_blocker": submit_blocker,
         "ibkr_call_path_invoked": False,
     }
 

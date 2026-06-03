@@ -80,6 +80,9 @@ _NQ_PHASE1_SUBMIT_LANE_IDS = (
 )
 _MNQ_PHASE1_SUBMIT_LANE_IDS = (
     "track_b_paper_execution_test_mule_v1__mnq",
+    "mnq_london_open_active_participation_long",
+    "mnq_london_open_active_participation_short",
+    "mnq_london_late_active_participation_short",
     "mnq_1x_asia_london_participation__asia_london_long_v5",
     "mnq_1x_asia_london_participation__asia_london_long_v6",
     "mnq_1x_asia_london_participation__asia_london_short_v2",
@@ -102,6 +105,8 @@ _ES_PHASE1_SUBMIT_LANE_IDS = (
     "es_1x_ny_early_core__us_midday_short_breakdown",
 )
 _MES_PHASE1_SUBMIT_LANE_IDS = (
+    "mes_london_open_active_participation_long",
+    "mes_london_open_active_participation_short",
     "mes_1x_ny_early_core__us_early_long",
     "mes_1x_ny_early_core__us_early_short_breakdown",
     "mes_1x_ny_early_core__us_early_short_reclaim_fail",
@@ -252,6 +257,27 @@ for lane_id in (
                 "entry_execution_note": (
                     "Index forced-session core lanes currently emit immediate participation signals; "
                     "no strategy-defined pullback/resting limit is present in the runtime intent."
+                ),
+            }
+        )
+
+for lane_id in (
+    "mnq_london_open_active_participation_long",
+    "mnq_london_open_active_participation_short",
+    "mes_london_open_active_participation_long",
+    "mes_london_open_active_participation_short",
+    "mnq_london_late_active_participation_short",
+):
+    adapter = _SUBMIT_CAPABLE_LANE_ADAPTERS.get(lane_id)
+    if adapter is not None:
+        adapter.update(
+            {
+                "entry_execution_intent": "PARTICIPATE_NOW",
+                "entry_execution_policy": "MARKETABLE_LIMIT_FROM_RUNTIME_TAPE",
+                "entry_marketable_limit_offset_ticks": 4,
+                "entry_execution_note": (
+                    "London active-evidence lanes participate from the fresh runtime tape "
+                    "with the bounded ordinary PAPER marketable limit cap."
                 ),
             }
         )

@@ -12,6 +12,7 @@ from mgc_v05l.execution_core.track_b_broker_event_envelope import (
     BrokerEventEnvelopeConfig,
     BrokerEventEnvelopeLaneContext,
     BrokerEnvelopeRequirement,
+    broker_event_report_fields,
     build_broker_event_envelope,
     envelope_requirement_for_lane,
 )
@@ -86,6 +87,10 @@ def test_broker_authoritative_lane_maps_to_existing_bridge_contract_without_dry_
     assert result.requirement == "SATISFIED_BY_BRIDGE"
     assert result.envelope is None
     assert result.reason_code == "LANE_USES_EXISTING_BRIDGE_SUBMIT_ADAPTER"
+    fields = broker_event_report_fields(result)
+    assert fields["broker_authoritative_submit_enabled"] is True
+    assert fields["broker_authoritative_submit_blocker"] is None
+    assert fields["ibkr_call_path_invoked"] is False
 
 
 def test_shadow_only_lane_is_explicitly_not_envelope_eligible() -> None:

@@ -567,7 +567,7 @@ def test_london_open_active_evidence_accepts_with_canonical_london_anchor(tmp_pa
     assert decision["session_anchor_source"] == "RECOVERED_PHASE1_1M"
 
 
-def test_london_open_active_evidence_intent_writes_dry_run_broker_envelope(tmp_path) -> None:
+def test_london_open_active_evidence_intent_maps_to_bridge_submit_adapter(tmp_path) -> None:
     ny = ZoneInfo("America/New_York")
     bar = _bar(datetime(2026, 5, 28, 3, 20, tzinfo=ny), open_="21010", close="21030")
     engine = object.__new__(TrackBRuleRunnerPaperStrategyEngine)
@@ -616,12 +616,15 @@ def test_london_open_active_evidence_intent_writes_dry_run_broker_envelope(tmp_p
         tmp_path
         / "outputs/track_b_execution_core/london_open_active_evidence/latest_mnq_london_open_active_participation_long_event_envelope.json"
     )
-    payload = json.loads(envelope_path.read_text(encoding="utf-8"))
-    assert payload["classification"] == "BROKER_EVENT_ENVELOPE_READY_DRY_RUN"
-    assert payload["submit_allowed"] is False
-    assert payload["ibkr_call_path_invoked"] is False
-    assert engine._latest_track_b_rule_report["broker_event_envelope_classification"] == "BROKER_EVENT_ENVELOPE_READY_DRY_RUN"
-    assert engine._latest_track_b_rule_report["broker_authoritative_envelope_path"] == str(envelope_path)
+    assert not envelope_path.exists()
+    assert (
+        engine._latest_track_b_rule_report["broker_event_envelope_classification"]
+        == "BROKER_EVENT_ENVELOPE_MAPPED_TO_BRIDGE_SUBMIT_ADAPTER"
+    )
+    assert engine._latest_track_b_rule_report["broker_event_envelope_requirement"] == "SATISFIED_BY_BRIDGE"
+    assert engine._latest_track_b_rule_report["broker_authoritative_submit_enabled"] is True
+    assert engine._latest_track_b_rule_report["broker_authoritative_submit_blocker"] is None
+    assert engine._latest_track_b_rule_report["ibkr_call_path_invoked"] is False
 
 
 def test_london_open_active_evidence_blocks_when_anchor_missing(tmp_path) -> None:

@@ -100,9 +100,21 @@ def test_anchor_not_ready_blocks_envelope_without_ibkr_path(tmp_path: Path) -> N
     assert result.envelope is None
 
 
-def test_london_envelope_does_not_register_lane_as_submit_capable() -> None:
-    assert lane_submit_bridge_adapter(lane_id="mnq_london_open_active_participation_long") is None
-    assert lane_submit_bridge_adapter(lane_id="mnq_london_late_active_participation_short") is None
+def test_approved_london_lanes_register_as_submit_capable() -> None:
+    for lane_id in (
+        "mnq_london_open_active_participation_long",
+        "mnq_london_open_active_participation_short",
+        "mes_london_open_active_participation_long",
+        "mes_london_open_active_participation_short",
+        "mnq_london_late_active_participation_short",
+    ):
+        adapter = lane_submit_bridge_adapter(lane_id=lane_id)
+
+        assert adapter is not None
+        assert adapter["current_order_destination"] == "ibkr_paper_bridge_submit_capable"
+        assert adapter["entry_execution_intent"] == "PARTICIPATE_NOW"
+        assert adapter["entry_execution_policy"] == "MARKETABLE_LIMIT_FROM_RUNTIME_TAPE"
+        assert adapter["entry_marketable_limit_offset_ticks"] == 4
 
 
 def _intent(intent_type: OrderIntentType) -> OrderIntent:
