@@ -37,6 +37,8 @@ SCHEMA_VERSION = "track_b_historical_reconciliation_debris_resolver_v1"
 RESOLVER_CLEAN = "HISTORICAL_RECONCILIATION_DEBRIS_RESOLVED"
 RESOLVER_BLOCKED = "HISTORICAL_RECONCILIATION_DEBRIS_BLOCKED"
 RESOLVER_NOT_APPLICABLE = "HISTORICAL_RECONCILIATION_DEBRIS_NOT_APPLICABLE"
+SUBMIT_INTENT_NO_BROKER_EFFECT_TERMINAL = "SUBMIT_INTENT_NO_BROKER_EFFECT_TERMINAL"
+SUBMIT_INTENT_BROKER_EFFECT_RESOLVED_FLAT = "SUBMIT_INTENT_BROKER_EFFECT_RESOLVED_FLAT"
 
 
 @dataclass(frozen=True)
@@ -211,8 +213,14 @@ def _resolve_submit_intent_debris(
     ]
     if evidence.classification == RESOLVED:
         reason_codes.append("BROKER_EXECUTION_EVIDENCE_FOUND")
+        terminal_classification = SUBMIT_INTENT_BROKER_EFFECT_RESOLVED_FLAT
+    elif _submit_intent_has_broker_ack_or_effect_evidence(row):
+        reason_codes.append("BROKER_ACK_OR_EFFECT_EVIDENCE_PRESENT")
+        terminal_classification = SUBMIT_INTENT_BROKER_EFFECT_RESOLVED_FLAT
     else:
         reason_codes.append("NO_EXACT_EXECUTION_EVIDENCE_FOUND")
+        reason_codes.append(SUBMIT_INTENT_NO_BROKER_EFFECT_TERMINAL)
+        terminal_classification = SUBMIT_INTENT_NO_BROKER_EFFECT_TERMINAL
 
     if config.apply:
         if evidence.classification == RESOLVED:
@@ -242,6 +250,7 @@ def _resolve_submit_intent_debris(
                 "historical_only": True,
                 "not_current_exposure": True,
                 "not_current_open_order": True,
+                "submit_intent_terminal_classification": terminal_classification,
                 "broker_flat_proof_path": str(broker_flat_proof_path or ""),
                 "open_orders_proof_path": str(open_orders_proof_path or ""),
                 "broker_fill_evidence_classification": evidence.classification,
@@ -254,6 +263,7 @@ def _resolve_submit_intent_debris(
         "kind": "submit_intent",
         "resolved": True,
         "artifact_age_seconds": age,
+        "submit_intent_terminal_classification": terminal_classification,
         "broker_fill_evidence_classification": evidence.classification,
         "reason_codes": reason_codes,
     }
@@ -336,6 +346,21 @@ def _append_submit_intent_resolution(
         payload,
         jsonl_path=config.resolve(config.submit_intent_ownership_path),
         latest_path=config.resolve(config.latest_submit_intent_ownership_path),
+    )
+
+
+def _submit_intent_has_broker_ack_or_effect_evidence(row: Mapping[str, Any]) -> bool:
+    for key in ("broker_order_id", "perm_id", "exec_id", "execution_id"):
+        if _text(row.get(key)):
+            return True
+    extra = row.get("extra") if isinstance(row.get("extra"), Mapping) else {}
+    for key in ("broker_order_id", "perm_id", "exec_id", "execution_id"):
+        if _text(extra.get(key)):
+            return True
+    return (
+        _text(extra.get("broker_effect_classification")).upper() == "BROKER_EFFECT_CONFIRMED"
+        or _text(extra.get("bridge_classification")).upper() in {"PAPER_STRATEGY_ORDER_FILLED", "PAPER_ORDER_FILLED"}
+        or _text(extra.get("delegated_status")).lower() == "filled"
     )
 
 

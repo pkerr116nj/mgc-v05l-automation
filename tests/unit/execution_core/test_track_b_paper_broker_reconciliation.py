@@ -3127,7 +3127,13 @@ def test_unresolved_submit_intent_without_broker_effect_times_out_resolves_as_hi
     tmp_path: Path,
 ) -> None:
     config = _write_base_artifacts(tmp_path)
-    _write_submit_intent_ownership(config, created_at="2026-05-11T11:50:00+00:00")
+    _write_submit_intent_ownership(
+        config,
+        broker_order_id="",
+        perm_id=None,
+        exec_id=None,
+        created_at="2026-05-11T11:50:00+00:00",
+    )
     _write_broker_truth(config, positions=[])
 
     report = reconcile_track_b_paper_broker_truth(config=config, now=NOW)
@@ -3136,6 +3142,8 @@ def test_unresolved_submit_intent_without_broker_effect_times_out_resolves_as_hi
     assert report["broker_reconciled"] is True
     assert report["submit_intent_ownership_reconciliation"]["classification"] == "SUBMIT_INTENT_OWNERSHIP_NOT_APPLICABLE"
     assert report["historical_reconciliation_debris_resolution"]["classification"] == "HISTORICAL_RECONCILIATION_DEBRIS_RESOLVED"
+    item = report["historical_reconciliation_debris_resolution"]["resolved_items"][0]
+    assert item["submit_intent_terminal_classification"] == "SUBMIT_INTENT_NO_BROKER_EFFECT_TERMINAL"
     assert report["blockers"] == []
     events = _read_registry_events(config)
     assert any(event["event_type"] == "RECONCILED_FLAT_HISTORICAL_CLEANUP" for event in events)
@@ -3145,6 +3153,67 @@ def test_unresolved_submit_intent_without_broker_effect_times_out_resolves_as_hi
         )
     )
     assert latest_ownership["unresolved_count"] == 0
+
+
+def test_resolved_submit_intent_does_not_block_when_other_historical_debris_is_pending(
+    tmp_path: Path,
+) -> None:
+    config = _write_base_artifacts(tmp_path, review_required_count=1)
+    _write_submit_intent_ownership(
+        config,
+        broker_order_id="",
+        perm_id=None,
+        exec_id=None,
+        created_at="2026-05-11T11:50:00+00:00",
+    )
+    managed_path = config.repo_root / "outputs/track_b_execution_core/managed_positions/latest_managed_positions.json"
+    _write_json(
+        managed_path,
+        {
+            "generated_at": NOW.isoformat(),
+            "classification": "REVIEW_REQUIRED",
+            "managed_positions": [
+                {
+                    "classification": "REVIEW_REQUIRED",
+                    "review_required_position": {
+                        "trade_id": "trade_recent_review",
+                        "lifecycle_id": "recent_lifecycle_review",
+                        "account_id": "DUM882026",
+                        "instrument_family": "MGC",
+                        "symbol": "MGC",
+                        "local_symbol": "MGCM6",
+                        "con_id": 712565978,
+                        "quantity": 1,
+                        "side": "LONG",
+                        "strategy_id": "recent_strategy",
+                        "generated_at": NOW.isoformat(),
+                        "final_position_status": "REVIEW_REQUIRED",
+                    },
+                }
+            ],
+        },
+    )
+    _write_broker_truth(config, positions=[])
+
+    report = reconcile_track_b_paper_broker_truth(config=config, now=NOW)
+
+    assert report["historical_reconciliation_debris_resolution"]["classification"] == "HISTORICAL_RECONCILIATION_DEBRIS_BLOCKED"
+    assert report["unresolved_submit_intent_ownership_count"] == 0
+    assert report["submit_intent_ownership_reconciliation"]["classification"] == "SUBMIT_INTENT_OWNERSHIP_NOT_APPLICABLE"
+    assert not any(str(blocker.get("code")) == "SUBMIT_INTENT_NO_BROKER_EFFECT_TIMEOUT" for blocker in report["blockers"])
+
+
+def test_submit_intent_with_broker_ack_is_not_classified_as_no_effect_terminal(tmp_path: Path) -> None:
+    config = _write_base_artifacts(tmp_path)
+    _write_submit_intent_ownership(config, created_at="2026-05-11T11:50:00+00:00", exec_id=None)
+    _write_broker_truth(config, positions=[])
+
+    report = reconcile_track_b_paper_broker_truth(config=config, now=NOW)
+
+    item = report["historical_reconciliation_debris_resolution"]["resolved_items"][0]
+    assert item["submit_intent_terminal_classification"] == "SUBMIT_INTENT_BROKER_EFFECT_RESOLVED_FLAT"
+    assert "SUBMIT_INTENT_NO_BROKER_EFFECT_TERMINAL" not in item["reason_codes"]
+    assert report["broker_reconciled"] is True
 
 
 def test_unsafe_unresolved_submit_intent_blocks_reconciliation(tmp_path: Path) -> None:

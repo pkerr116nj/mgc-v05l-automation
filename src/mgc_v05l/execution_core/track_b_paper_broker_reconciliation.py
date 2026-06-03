@@ -2344,18 +2344,18 @@ def _filter_historical_resolved_submit_intents(
     *,
     historical_debris_resolution: Mapping[str, Any],
 ) -> list[dict[str, Any]]:
-    if historical_debris_resolution.get("classification") != RESOLVER_CLEAN:
-        return [dict(row) for row in rows]
     resolved_ids = {
         str(item.get("ownership_intent_id") or "").strip()
         for item in historical_debris_resolution.get("resolved_items") or []
-        if isinstance(item, Mapping) and item.get("kind") == "submit_intent"
+        if isinstance(item, Mapping) and item.get("kind") == "submit_intent" and item.get("resolved") is True
     }
     resolved_trade_ids = {
         str(item.get("trade_id") or "").strip()
         for item in historical_debris_resolution.get("resolved_items") or []
-        if isinstance(item, Mapping) and item.get("kind") == "submit_intent"
+        if isinstance(item, Mapping) and item.get("kind") == "submit_intent" and item.get("resolved") is True
     }
+    if not resolved_ids and not resolved_trade_ids:
+        return [dict(row) for row in rows]
     filtered: list[dict[str, Any]] = []
     for row in rows:
         extra = row.get("extra") if isinstance(row.get("extra"), Mapping) else {}
