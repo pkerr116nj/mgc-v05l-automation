@@ -15,6 +15,11 @@ from decimal import Decimal, ROUND_HALF_UP
 from pathlib import Path
 from typing import Any, Mapping
 
+from mgc_v05l.market_data.phase1_market_session import (
+    MARKET_CLOSED_NO_FRESH_BARS,
+    classify_phase1_futures_market_session,
+)
+
 from .models import require_aware_datetime, to_jsonable
 from .track_b_broker_contract_identity import (
     BrokerContractIdentityError,
@@ -61,6 +66,7 @@ DEFAULT_TRACK_B_MANAGED_POSITION_PROJECTION_JSON = (
 MAINTENANCE_CANONICAL_OWNER_REQUIRED = "MAINTENANCE_CANONICAL_OWNER_REQUIRED"
 MAINTENANCE_CANONICAL_OWNER_AMBIGUOUS = "MAINTENANCE_CANONICAL_OWNER_AMBIGUOUS"
 STALE_LIFECYCLE_REPORT_DIAGNOSTIC_ONLY = "STALE_LIFECYCLE_REPORT_DIAGNOSTIC_ONLY"
+ORDER_ROUTE_CLOSED_FOR_CLOSE = "ORDER_ROUTE_CLOSED_FOR_CLOSE"
 
 TICK_SIZE_BY_INSTRUMENT = {
     "MGC": Decimal("0.1"),
@@ -329,10 +335,11 @@ def run_track_b_managed_open_position_maintenance(
             else classify_broker_truth_freshness(age_seconds=0.0, max_age_seconds=actual_config.broker_truth_max_age_seconds)
         )
         broker_state_value = getattr(broker_truth_state, "state", TrackBStaleDataState.FRESH)
-        suppress_discretionary_exit = market_data_state.suppress_discretionary_exits or broker_state_value in {
+        broker_truth_blocks_exit = broker_state_value in {
             TrackBStaleDataState.STALE_RESTRICT_DISCRETIONARY_EXITS,
             TrackBStaleDataState.SEVERE_STALE_EMERGENCY_REVIEW,
         }
+        suppress_discretionary_exit = market_data_state.suppress_discretionary_exits or broker_truth_blocks_exit
         metadata = resolve_management_metadata(
             source={**dict(lifecycle_report), **dict(position)},
             output_root=actual_config.position_management_manifest_root,
@@ -352,9 +359,17 @@ def run_track_b_managed_open_position_maintenance(
                 **dict(lifecycle_report),
                 "managed_exit_policy_max_completed_5m_bars": required_bars,
             }
-        exit_eligible = (
-            effective_completed_bars_since_entry >= required_bars or projected_exit_due
-        ) and not suppress_discretionary_exit
+        timebox_exit_due = effective_completed_bars_since_entry >= required_bars or projected_exit_due
+        close_route_state = _classify_managed_close_route_state(actual_now)
+        route_closed_for_close = timebox_exit_due and bool(close_route_state.get("route_closed_for_close"))
+        suppress_lifecycle_discretionary_exit = suppress_discretionary_exit and not timebox_exit_due
+        exit_eligible = timebox_exit_due and not broker_truth_blocks_exit and not route_closed_for_close
+        exit_blocker = _managed_close_exit_blocker(
+            timebox_exit_due=timebox_exit_due,
+            broker_truth_blocks_exit=broker_truth_blocks_exit,
+            broker_state_value=broker_state_value,
+            route_closed_for_close=route_closed_for_close,
+        )
         lifecycle_projection_conflict = (
             projected_exit_due
             and int(lifecycle_report.get("bars_since_fill") or lifecycle_report.get("open_position_age_completed_5m_bars") or 0)
@@ -376,9 +391,14 @@ def run_track_b_managed_open_position_maintenance(
                     "data_freshness": market_data_state.to_json_dict(),
                     "data_freshness_state": market_data_state.state.value,
                     "broker_truth_state": broker_state_value.value,
-                    "suppressed_due_to_stale_data": suppress_discretionary_exit,
+                    "broker_truth_blocks_exit": broker_truth_blocks_exit,
+                    "close_route_state": close_route_state,
+                    "route_closed_for_close": route_closed_for_close,
+                    "suppressed_due_to_stale_data": market_data_state.suppress_discretionary_exits,
+                    "discretionary_exit_suppressed_due_to_stale_data": market_data_state.suppress_discretionary_exits,
                     "exit_policy_id": None,
                     "required_completed_5m_bars": required_bars,
+                    "timebox_exit_due": timebox_exit_due,
                     "exit_eligible": False,
                     "close_intent_created": False,
                     "close_submitted": False,
@@ -411,7 +431,7 @@ def run_track_b_managed_open_position_maintenance(
             close_limit_price=close_limit_price,
             data_freshness_state=market_data_state.state.value,
             broker_truth_state=broker_state_value.value,
-            suppress_discretionary_exit=suppress_discretionary_exit,
+            suppress_discretionary_exit=suppress_lifecycle_discretionary_exit,
         )
         lifecycle_config = TrackBStrategyManagedPaperLifecycleConfig(
             **{
@@ -442,15 +462,22 @@ def run_track_b_managed_open_position_maintenance(
                     "broker_truth_state": broker_state_value.value,
                     "broker_truth_freshness": broker_truth_state.to_json_dict(),
                     "bridge_terminal_event_grace": None,
-                    "suppressed_due_to_stale_data": suppress_discretionary_exit,
+                    "broker_truth_blocks_exit": broker_truth_blocks_exit,
+                    "close_route_state": close_route_state,
+                    "route_closed_for_close": route_closed_for_close,
+                    "suppressed_due_to_stale_data": market_data_state.suppress_discretionary_exits,
+                    "discretionary_exit_suppressed_due_to_stale_data": market_data_state.suppress_discretionary_exits,
                     "exit_family": "DIAGNOSTIC_TIME" if managed_exit_policy_id else None,
-                    "exit_reason": "TIME_BOXED_EXIT" if exit_eligible else None,
+                    "exit_reason": "TIME_BOXED_EXIT" if timebox_exit_due else None,
                     "hard_exit": False,
-                    "discretionary_exit": bool(exit_eligible),
+                    "discretionary_exit": False,
+                    "risk_control_exit": bool(timebox_exit_due),
+                    "maintenance_exit": bool(timebox_exit_due),
                     "mfe": None,
                     "mae": None,
                     "exit_policy_id": managed_exit_policy_id,
                     "required_completed_5m_bars": required_bars,
+                    "timebox_exit_due": timebox_exit_due,
                     "exit_eligible": exit_eligible,
                     "close_limit_price": close_limit_price,
                     "close_intent_created": bool(exit_eligible),
@@ -464,7 +491,62 @@ def run_track_b_managed_open_position_maintenance(
                     "final_classification": lifecycle_report.get("paper_lifecycle_classification"),
                     "final_position_status": lifecycle_report.get("final_position_status") or "OPEN_MANAGED",
                     "review_required": lifecycle_report.get("review_required") is True,
-                    "blocker": "SUBMIT_DISABLED_DRY_RUN" if exit_eligible else None,
+                    "blocker": "SUBMIT_DISABLED_DRY_RUN" if exit_eligible else exit_blocker,
+                }
+            )
+            continue
+        if timebox_exit_due and exit_blocker is not None:
+            position_reports.append(
+                {
+                    **base_position_report,
+                    "maintenance_invoked": True,
+                    "maintenance_mode": "MANAGED_CLOSE_BLOCKED_BEFORE_LIFECYCLE",
+                    "latest_completed_5m_bar_timestamp": completed_timestamps[-1] if completed_timestamps else None,
+                    "completed_bars_since_entry": completed_bars_since_entry,
+                    "effective_completed_bars_since_entry": effective_completed_bars_since_entry,
+                    "managed_position_projection_classification": projected_position.get("classification"),
+                    "managed_position_projection_exit_due": projected_exit_due,
+                    "managed_position_projection_bars_since_entry": projected_bars_since_entry,
+                    "lifecycle_report_stale_exit_due_conflict": lifecycle_projection_conflict,
+                    "bars_since_fill": completed_bars_since_entry,
+                    "bars_since_signal": completed_bars_since_signal,
+                    "fill_timestamp_source": "BROKER_ENTRY_FILL",
+                    "completed_5m_bar_timestamps_since_entry": completed_timestamps,
+                    "data_freshness": market_data_state.to_json_dict(),
+                    "data_freshness_state": market_data_state.state.value,
+                    "broker_truth_state": broker_state_value.value,
+                    "broker_truth_freshness": broker_truth_state.to_json_dict(),
+                    "bridge_terminal_event_grace": None,
+                    "broker_truth_blocks_exit": broker_truth_blocks_exit,
+                    "close_route_state": close_route_state,
+                    "route_closed_for_close": route_closed_for_close,
+                    "suppressed_due_to_stale_data": market_data_state.suppress_discretionary_exits,
+                    "discretionary_exit_suppressed_due_to_stale_data": market_data_state.suppress_discretionary_exits,
+                    "exit_family": "DIAGNOSTIC_TIME" if managed_exit_policy_id else None,
+                    "exit_reason": "TIME_BOXED_EXIT",
+                    "hard_exit": False,
+                    "discretionary_exit": False,
+                    "risk_control_exit": True,
+                    "maintenance_exit": True,
+                    "mfe": None,
+                    "mae": None,
+                    "exit_policy_id": managed_exit_policy_id,
+                    "required_completed_5m_bars": required_bars,
+                    "timebox_exit_due": True,
+                    "exit_eligible": False,
+                    "close_limit_price": close_limit_price,
+                    "close_intent_created": False,
+                    "close_submitted": False,
+                    "close_filled": False,
+                    "close_order_id": None,
+                    "close_submit_timestamp": None,
+                    "close_fill_timestamp": None,
+                    "exit_price": None,
+                    "realized_pnl": None,
+                    "final_classification": lifecycle_report.get("paper_lifecycle_classification"),
+                    "final_position_status": lifecycle_report.get("final_position_status") or "OPEN_MANAGED",
+                    "review_required": lifecycle_report.get("review_required") is True,
+                    "blocker": exit_blocker,
                 }
             )
             continue
@@ -512,15 +594,22 @@ def run_track_b_managed_open_position_maintenance(
                 "broker_truth_state": broker_state_value.value,
                 "broker_truth_freshness": broker_truth_state.to_json_dict(),
                 "bridge_terminal_event_grace": broker_truth_state.to_json_dict() if close_fill else None,
-                "suppressed_due_to_stale_data": suppress_discretionary_exit,
+                "broker_truth_blocks_exit": broker_truth_blocks_exit,
+                "close_route_state": close_route_state,
+                "route_closed_for_close": route_closed_for_close,
+                "suppressed_due_to_stale_data": market_data_state.suppress_discretionary_exits,
+                "discretionary_exit_suppressed_due_to_stale_data": market_data_state.suppress_discretionary_exits,
                 "exit_family": "DIAGNOSTIC_TIME" if managed_exit_policy_id else None,
                 "exit_reason": result.report.get("close_intent", {}).get("close_reason") if isinstance(result.report.get("close_intent"), Mapping) else None,
                 "hard_exit": bool((result.report.get("close_intent") or {}).get("hard_exit")) if isinstance(result.report.get("close_intent"), Mapping) else False,
                 "discretionary_exit": bool((result.report.get("close_intent") or {}).get("discretionary_exit")) if isinstance(result.report.get("close_intent"), Mapping) else False,
+                "risk_control_exit": bool((result.report.get("close_intent") or {}).get("risk_control_exit")) if isinstance(result.report.get("close_intent"), Mapping) else False,
+                "maintenance_exit": bool((result.report.get("close_intent") or {}).get("maintenance_exit")) if isinstance(result.report.get("close_intent"), Mapping) else False,
                 "mfe": None,
                 "mae": None,
                 "exit_policy_id": managed_exit_policy_id,
                 "required_completed_5m_bars": required_bars,
+                "timebox_exit_due": timebox_exit_due,
                 "exit_eligible": exit_eligible,
                 "close_limit_price": close_limit_price,
                 "close_intent_created": result.report.get("close_intent") is not None,
@@ -1384,6 +1473,37 @@ def _lifecycle_report_path(
             if value:
                 return Path(str(value))
     return Path(lifecycle_output_root) / lifecycle_id / "track_b_strategy_managed_paper_lifecycle_report.json"
+
+
+def _classify_managed_close_route_state(now: datetime) -> dict[str, Any]:
+    session_state = classify_phase1_futures_market_session(now)
+    route_closed = session_state.get("classification") == MARKET_CLOSED_NO_FRESH_BARS or bool(
+        session_state.get("market_closed")
+    )
+    return {
+        "classification": "ORDER_ROUTE_CLOSED_FOR_CLOSE" if route_closed else "ORDER_ROUTE_OPEN_FOR_CLOSE",
+        "route_closed_for_close": route_closed,
+        "reason": str(session_state.get("reason") or ""),
+        "session_classification": str(session_state.get("classification") or ""),
+        "evaluated_at": str(session_state.get("evaluated_at") or now.isoformat()),
+        "evaluated_at_new_york": str(session_state.get("evaluated_at_new_york") or ""),
+    }
+
+
+def _managed_close_exit_blocker(
+    *,
+    timebox_exit_due: bool,
+    broker_truth_blocks_exit: bool,
+    broker_state_value: TrackBStaleDataState,
+    route_closed_for_close: bool,
+) -> str | None:
+    if not timebox_exit_due:
+        return None
+    if broker_truth_blocks_exit:
+        return broker_state_value.value
+    if route_closed_for_close:
+        return ORDER_ROUTE_CLOSED_FOR_CLOSE
+    return None
 
 
 def _lifecycle_config_from_report(

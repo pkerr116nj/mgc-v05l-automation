@@ -1651,7 +1651,7 @@ def test_gc_style_recent_fill_clock_does_not_use_stale_signal_age(tmp_path: Path
     assert position["fill_timestamp_source"] == "BROKER_ENTRY_FILL"
 
 
-def test_stale_restrict_state_suppresses_discretionary_time_exit(tmp_path: Path) -> None:
+def test_expired_timebox_close_ignores_stale_signal_data_when_route_open(tmp_path: Path) -> None:
     cfg = seed_open_position(
         tmp_path,
         latest_1m_age_seconds=500.0,
@@ -1671,7 +1671,42 @@ def test_stale_restrict_state_suppresses_discretionary_time_exit(tmp_path: Path)
     position = result.report["positions"][0]
     assert position["data_freshness_state"] == "STALE_RESTRICT_DISCRETIONARY_EXITS"
     assert position["suppressed_due_to_stale_data"] is True
+    assert position["close_route_state"]["classification"] == "ORDER_ROUTE_OPEN_FOR_CLOSE"
+    assert position["timebox_exit_due"] is True
+    assert position["risk_control_exit"] is True
+    assert position["discretionary_exit"] is False
+    assert position["close_intent_created"] is True
+    assert position["close_submitted"] is True
+
+
+def test_expired_timebox_close_blocks_during_daily_halt_as_route_closed(tmp_path: Path) -> None:
+    cfg = seed_open_position(
+        tmp_path,
+        entry_filled_at="2026-06-03T20:00:00+00:00",
+        latest_1m_age_seconds=1300.0,
+        completed_timestamps=[
+            "2026-06-03T20:05:00+00:00",
+            "2026-06-03T20:10:00+00:00",
+            "2026-06-03T20:15:00+00:00",
+        ],
+    )
+
+    result = run_track_b_managed_open_position_maintenance(
+        config=cfg,
+        lifecycle_stages=fake_close_stages(),
+        now=datetime(2026, 6, 3, 21, 21, tzinfo=timezone.utc),
+    )
+
+    position = result.report["positions"][0]
+    assert position["data_freshness_state"] == "SEVERE_STALE_EMERGENCY_REVIEW"
+    assert position["timebox_exit_due"] is True
+    assert position["risk_control_exit"] is True
+    assert position["discretionary_exit"] is False
+    assert position["route_closed_for_close"] is True
+    assert position["close_route_state"]["reason"] == "DAILY_GLOBEX_MAINTENANCE_HALT"
     assert position["close_intent_created"] is False
+    assert position["close_submitted"] is False
+    assert position["blocker"] == "ORDER_ROUTE_CLOSED_FOR_CLOSE"
 
 
 def test_micro_stale_warns_without_becoming_emergency_exit_state(tmp_path: Path) -> None:

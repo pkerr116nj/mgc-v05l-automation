@@ -269,13 +269,13 @@ def fake_stages(*, close: bool = False) -> TrackBStrategyManagedPaperLifecycleSt
         config: TrackBStrategyManagedPaperLifecycleConfig,
         open_state: Mapping[str, Any],
     ) -> Mapping[str, Any] | None:
+        required_bars = lifecycle_module._required_completed_5m_bars_for_policy(
+            str(config.managed_exit_policy_id or ""),
+            configured_bars=int(config.managed_exit_policy_max_completed_5m_bars),
+        )
         time_boxed_ready = (
-            config.managed_exit_policy_id
-            in {
-                TrackBManagedExitPolicy.PAPER_DIAGNOSTIC_TIME_BOXED_3X5M_EXIT_V1.value,
-                TrackBManagedExitPolicy.FORCED_SESSION_SEGMENT_LOCAL_EXIT_V1.value,
-            }
-            and int(config.completed_5m_bars_since_entry or 0) >= int(config.managed_exit_policy_max_completed_5m_bars)
+            lifecycle_module._is_timeboxed_managed_close_policy(str(config.managed_exit_policy_id or ""))
+            and int(config.completed_5m_bars_since_entry or 0) >= required_bars
         )
         if not close and not time_boxed_ready:
             return None
@@ -287,9 +287,11 @@ def fake_stages(*, close: bool = False) -> TrackBStrategyManagedPaperLifecycleSt
             "close_reason": "TIME_BOXED_EXIT" if time_boxed_ready else "DIAGNOSTIC_TIME_EXIT_IMMEDIATE",
             "managed_exit_policy_id": config.managed_exit_policy_id,
             "hard_exit": False,
-            "discretionary_exit": True,
+            "discretionary_exit": not time_boxed_ready,
+            "risk_control_exit": time_boxed_ready,
+            "maintenance_exit": time_boxed_ready,
             "elapsed_completed_5m_bars": config.completed_5m_bars_since_entry,
-            "required_completed_5m_bars": config.managed_exit_policy_max_completed_5m_bars,
+            "required_completed_5m_bars": required_bars,
             "bars_since_fill": int(config.completed_5m_bars_since_entry or 0),
             "bars_since_signal": None if config.completed_5m_bars_since_signal is None else int(config.completed_5m_bars_since_signal),
             "fill_timestamp_source": config.fill_timestamp_source or "BROKER_ENTRY_FILL",
@@ -1124,7 +1126,48 @@ def test_time_boxed_exit_policy_creates_close_intent_after_required_completed_ba
     assert result.report["close_intent"]["bars_since_fill"] == 3
     assert result.report["close_intent"]["fill_timestamp_source"] == "BROKER_ENTRY_FILL"
     assert result.report["close_intent"]["hard_exit"] is False
-    assert result.report["close_intent"]["discretionary_exit"] is True
+    assert result.report["close_intent"]["discretionary_exit"] is False
+    assert result.report["close_intent"]["risk_control_exit"] is True
+    assert result.report["close_intent"]["maintenance_exit"] is True
+
+
+def test_time_boxed_exit_policy_is_not_discretionary_stale_data_exit(tmp_path: Path) -> None:
+    result = run_track_b_strategy_managed_paper_lifecycle(
+        config=base_config(
+            tmp_path,
+            managed_exit_policy_id=TrackBManagedExitPolicy.PAPER_DIAGNOSTIC_TIME_BOXED_3X5M_EXIT_V1.value,
+            completed_5m_bars_since_entry=3,
+            suppress_discretionary_exits_due_to_stale_data=True,
+            data_freshness_state="STALE_RESTRICT_DISCRETIONARY_EXITS",
+        ),
+        stages=fake_stages(),
+        lifecycle_id="time-boxed-close-stale-signal-data",
+        now=aware_now(),
+    )
+
+    assert result.classification == TrackBManagedPaperLifecycleClassification.CLOSED_FLAT
+    assert result.report["close_intent"]["close_reason"] == "TIME_BOXED_EXIT"
+    assert result.report["close_intent"]["discretionary_exit"] is False
+    assert result.report["close_intent"]["risk_control_exit"] is True
+
+
+def test_discretionary_immediate_exit_policy_remains_suppressed_by_stale_data(tmp_path: Path) -> None:
+    result = run_track_b_strategy_managed_paper_lifecycle(
+        config=base_config(
+            tmp_path,
+            managed_exit_policy_id=TrackBManagedExitPolicy.DIAGNOSTIC_TIME_EXIT_IMMEDIATE.value,
+            completed_5m_bars_since_entry=3,
+            suppress_discretionary_exits_due_to_stale_data=True,
+            data_freshness_state="STALE_RESTRICT_DISCRETIONARY_EXITS",
+        ),
+        stages=fake_stages(),
+        lifecycle_id="discretionary-close-stale-signal-data",
+        now=aware_now(),
+    )
+
+    assert result.classification == TrackBManagedPaperLifecycleClassification.OPEN_MANAGED
+    assert result.report["close_intent"] is None
+    assert result.report["suppressed_due_to_stale_data"] is True
 
 
 def test_forced_session_segment_exit_policy_uses_time_boxed_close(tmp_path: Path) -> None:

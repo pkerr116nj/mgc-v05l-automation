@@ -1101,7 +1101,9 @@ def _default_exit_policy(
             "exit_family": "DIAGNOSTIC_TIME",
             "close_reason": "TIME_BOXED_EXIT",
             "hard_exit": False,
-            "discretionary_exit": True,
+            "discretionary_exit": False,
+            "risk_control_exit": True,
+            "maintenance_exit": True,
             "managed_exit_policy_id": policy_id,
             "elapsed_completed_5m_bars": elapsed,
             "required_completed_5m_bars": required,
@@ -1122,14 +1124,6 @@ def _discretionary_exits_suppressed(config: TrackBStrategyManagedPaperLifecycleC
         return False
     return policy_id in {
         TrackBManagedExitPolicy.DIAGNOSTIC_TIME_EXIT_IMMEDIATE.value,
-        TrackBManagedExitPolicy.PAPER_DIAGNOSTIC_TIME_BOXED_3X5M_EXIT_V1.value,
-        TrackBManagedExitPolicy.FORCED_SESSION_SEGMENT_LOCAL_EXIT_V1.value,
-        TrackBManagedExitPolicy.CHANGEOVER_0300_LONG_TIMEBOX_6H_EXIT_V1.value,
-        TrackBManagedExitPolicy.CHANGEOVER_0700_LONG_TIMEBOX_4H_EXIT_V1.value,
-        TrackBManagedExitPolicy.US_SESSION_CONTINUATION_TIMEBOX_2H_EXIT_V1.value,
-        TrackBManagedExitPolicy.US_ACTIVE_EVIDENCE_TIMEBOX_60M_EXIT_V1.value,
-        TrackBManagedExitPolicy.GLOBEX_ACTIVE_EVIDENCE_TIMEBOX_60M_EXIT_V1.value,
-        TrackBManagedExitPolicy.GLOBEX_REOPEN_FIRST_CANDLE_60M_TIMEBOX_SHADOW_EXIT_V1.value,
     }
 
 
