@@ -11,10 +11,11 @@ from dataclasses import dataclass
 from decimal import Decimal
 from typing import Any, Mapping, Sequence
 
-from mgc_v05l.execution_core.track_b_central_trade_registry import TradeRegistryRecord
+from mgc_v05l.execution_core.track_b_central_trade_registry import TradeCurrentState, TradeEventType, TradeRegistryRecord
 
 
 TERMINAL_CLOSED_FLAT = "CLOSED_FLAT"
+BROKER_FLAT_EVIDENCE_GATED_CLEANUP_TERMINAL = "BROKER_FLAT_EVIDENCE_GATED_CLEANUP_TERMINAL"
 TERMINAL_NOT_SUPERSEDED = "NOT_SUPERSEDED"
 TERMINAL_AMBIGUOUS = "AMBIGUOUS"
 
@@ -27,7 +28,10 @@ class TerminalRegistryTruth:
 
     @property
     def terminal_closed_flat(self) -> bool:
-        return self.classification == TERMINAL_CLOSED_FLAT and self.record is not None
+        return self.classification in {
+            TERMINAL_CLOSED_FLAT,
+            BROKER_FLAT_EVIDENCE_GATED_CLEANUP_TERMINAL,
+        } and self.record is not None
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -52,9 +56,11 @@ def resolve_terminal_registry_truth(
 ) -> TerminalRegistryTruth:
     """Resolve terminal CLOSED_FLAT truth for a current-scope identity.
 
-    The overlay only returns CLOSED_FLAT when a matching registry chain has
-    broker-backed exit evidence, open quantity is zero, and current broker truth
-    is flat with no linked open order. It fails closed on ambiguity.
+    Broker-backed exit evidence is the strongest terminal proof. Evidence-gated
+    historical cleanup can also suppress stale lifecycle projections when the
+    registry is CLOSED_FLAT and the cleanup event proves broker flat/no-order
+    state without pretending a broker-backed exit fill occurred. The resolver
+    fails closed on ambiguity or any current broker position/order linkage.
     """
 
     candidates = _terminal_candidates(records=records, identity=identity)
@@ -73,15 +79,33 @@ def resolve_terminal_registry_truth(
             record,
             ("CURRENT_BROKER_EXPOSURE_OR_ORDER_LINKED",),
         )
+    if _record_has_broker_backed_flat_exit(record):
+        return TerminalRegistryTruth(
+            TERMINAL_CLOSED_FLAT,
+            record,
+            (
+                "BROKER_BACKED_CLOSED_FLAT_REGISTRY_SUPERSEDES_OPEN_LIFECYCLE_PROJECTION",
+                "BROKER_BACKED_EXIT_EVIDENCE_CONFIRMED",
+                "BROKER_FLAT_PROOF_CONFIRMED",
+                "NO_OPEN_ORDER_PROOF_CONFIRMED",
+            ),
+        )
+    if _record_has_evidence_gated_broker_flat_cleanup(record):
+        return TerminalRegistryTruth(
+            BROKER_FLAT_EVIDENCE_GATED_CLEANUP_TERMINAL,
+            record,
+            (
+                "EVIDENCE_GATED_BROKER_FLAT_CLEANUP_SUPERSEDES_OPEN_LIFECYCLE_PROJECTION",
+                "BROKER_BACKED_ENTRY_EVIDENCE_CONFIRMED",
+                "BROKER_BACKED_EXIT_EVIDENCE_NOT_CLAIMED",
+                "BROKER_FLAT_PROOF_CONFIRMED",
+                "NO_OPEN_ORDER_PROOF_CONFIRMED",
+            ),
+        )
     return TerminalRegistryTruth(
-        TERMINAL_CLOSED_FLAT,
+        TERMINAL_NOT_SUPERSEDED,
         record,
-        (
-            "BROKER_BACKED_CLOSED_FLAT_REGISTRY_SUPERSEDES_OPEN_LIFECYCLE_PROJECTION",
-            "BROKER_BACKED_EXIT_EVIDENCE_CONFIRMED",
-            "BROKER_FLAT_PROOF_CONFIRMED",
-            "NO_OPEN_ORDER_PROOF_CONFIRMED",
-        ),
+        ("NO_BROKER_BACKED_EXIT_OR_EVIDENCE_GATED_CLEANUP_TERMINAL_PROOF",),
     )
 
 
@@ -119,26 +143,98 @@ def _record_has_broker_backed_flat_exit(record: TradeRegistryRecord) -> bool:
     return record.broker_backed_exit is True and record.open_qty == Decimal("0")
 
 
+def _record_has_evidence_gated_broker_flat_cleanup(record: TradeRegistryRecord) -> bool:
+    if record.current_state != TradeCurrentState.CLOSED_FLAT:
+        return False
+    if record.open_qty != Decimal("0"):
+        return False
+    if record.broker_backed_entry is not True or record.broker_backed_exit is True:
+        return False
+    if "RECONCILED_FLAT_HISTORICAL_CLEANUP" not in record.latest_reason_codes:
+        return False
+    cleanup_events = [
+        event for event in record.event_chain if event.event_type == TradeEventType.RECONCILED_FLAT_HISTORICAL_CLEANUP
+    ]
+    return any(_cleanup_event_has_flat_no_order_proof(event) for event in cleanup_events)
+
+
+def _cleanup_event_has_flat_no_order_proof(event: Any) -> bool:
+    reason_codes = {str(item).strip().upper() for item in getattr(event, "reason_codes", ()) or ()}
+    metadata = getattr(event, "metadata", None)
+    metadata = metadata if isinstance(metadata, Mapping) else {}
+    has_flat_reason = bool(
+        reason_codes
+        & {
+            "BROKER_FLAT_PROOF_CONFIRMED",
+            "BROKER_LIFECYCLE_FLAT_CONFIRMED",
+        }
+    )
+    has_no_order_reason = "NO_OPEN_ORDER_PROOF_CONFIRMED" in reason_codes
+    not_current_exposure = metadata.get("not_current_exposure") is True or "NOT_CURRENT_EXPOSURE" in reason_codes
+    not_current_open_order = metadata.get("not_current_open_order") is True or "NOT_CURRENT_OPEN_ORDER" in reason_codes
+    broker_flat_proof_path = _text(metadata.get("broker_flat_proof_path") or metadata.get("broker_positions_snapshot_path"))
+    open_orders_proof_path = _text(metadata.get("open_orders_proof_path") or metadata.get("broker_open_orders_snapshot_path"))
+    return all(
+        (
+            has_flat_reason,
+            has_no_order_reason,
+            not_current_exposure,
+            not_current_open_order,
+            broker_flat_proof_path,
+            open_orders_proof_path,
+        )
+    )
+
+
 def _terminal_candidates(
     *,
     records: Sequence[TradeRegistryRecord],
     identity: Mapping[str, Any],
 ) -> list[TradeRegistryRecord]:
-    terminal_records = [record for record in records if _record_has_broker_backed_flat_exit(record)]
+    terminal_records = [
+        record
+        for record in records
+        if _record_has_broker_backed_flat_exit(record) or _record_has_evidence_gated_broker_flat_cleanup(record)
+    ]
     trade_id = _text(identity.get("trade_id"))
     if trade_id:
-        return [record for record in terminal_records if record.trade_id == trade_id]
+        return [
+            record
+            for record in terminal_records
+            if record.trade_id == trade_id and _record_identity_fields_compatible(record, identity)
+        ]
     trade_ids = {str(item).strip() for item in identity.get("trade_ids") or [] if str(item or "").strip()}
     if trade_ids:
-        return [record for record in terminal_records if record.trade_id in trade_ids]
+        return [
+            record
+            for record in terminal_records
+            if record.trade_id in trade_ids and _record_identity_fields_compatible(record, identity)
+        ]
     lifecycle_id = _text(identity.get("lifecycle_id"))
     if lifecycle_id:
         return [
             record
             for record in terminal_records
-            if record.ownership_identity is not None and record.ownership_identity.lifecycle_id == lifecycle_id
+            if record.ownership_identity is not None
+            and record.ownership_identity.lifecycle_id == lifecycle_id
+            and _record_identity_fields_compatible(record, identity)
         ]
     return [record for record in terminal_records if _record_matches_identity(record, identity)]
+
+
+def _record_identity_fields_compatible(record: TradeRegistryRecord, identity: Mapping[str, Any]) -> bool:
+    owner = record.ownership_identity
+    if owner is None:
+        return False
+    ident_con = _int_or_none(identity.get("con_id") or identity.get("conId"))
+    if ident_con is not None and ident_con != owner.con_id:
+        return False
+    ident_local = _text(identity.get("local_symbol") or identity.get("localSymbol")).upper()
+    if ident_local and ident_local != owner.local_symbol.upper():
+        return False
+    if not _account_matches(owner.account_id, identity.get("account_id") or identity.get("account")):
+        return False
+    return _quantity_matches(owner.qty, identity)
 
 
 def _record_matches_identity(record: TradeRegistryRecord, identity: Mapping[str, Any]) -> bool:
@@ -148,9 +244,9 @@ def _record_matches_identity(record: TradeRegistryRecord, identity: Mapping[str,
     trade_id = _text(identity.get("trade_id"))
     lifecycle_id = _text(identity.get("lifecycle_id"))
     if trade_id and record.trade_id == trade_id:
-        return True
+        return _record_identity_fields_compatible(record, identity)
     if lifecycle_id and owner.lifecycle_id == lifecycle_id:
-        return True
+        return _record_identity_fields_compatible(record, identity)
     return (
         _int_or_none(identity.get("con_id") or identity.get("conId")) == owner.con_id
         and _text(identity.get("local_symbol") or identity.get("localSymbol")).upper() == owner.local_symbol.upper()

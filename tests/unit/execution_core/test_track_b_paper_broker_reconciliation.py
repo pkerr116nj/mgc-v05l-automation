@@ -886,6 +886,87 @@ def test_closed_flat_registry_supersedes_stale_open_lifecycle_projection(tmp_pat
     assert superseded[0]["trade_id"] == trade_id
 
 
+def test_evidence_gated_broker_flat_cleanup_supersedes_stale_open_lifecycle_projection(tmp_path: Path) -> None:
+    trade_id = "trade_696f40f3-5a3a-4166-b11e-fb59401c50ed"
+    lifecycle_id = "reserved_submit_mes_us_active_participation_short_20260602T185428677911Z_0c5caf5f40f7"
+    open_position = {
+        "strategy_id": "mes_us_active_participation_short",
+        "lane_id": "mes_us_active_participation_short",
+        "trade_id": trade_id,
+        "lifecycle_id": lifecycle_id,
+        "instrument_family": "MES",
+        "contract_key": "MES-M6",
+        "local_symbol": "MESM6",
+        "con_id": 770561194,
+        "expiry": "20260618",
+        "side": "SHORT",
+        "quantity": "1",
+        "final_position_status": "OPEN_MANAGED",
+    }
+    config = _write_base_artifacts(tmp_path, open_position=open_position)
+    _write_registry_open_managed_trade(
+        config,
+        trade_id=trade_id,
+        lifecycle_id=lifecycle_id,
+        lane_id="mes_us_active_participation_short",
+        strategy_id="mes_us_active_participation_short",
+        symbol="MES",
+        local_symbol="MESM6",
+        con_id=770561194,
+        expiry="20260618",
+        include_close_fill=False,
+        order_id="2",
+        client_id="10973",
+        entry_perm_id="665735662",
+        entry_exec_id="0000e1a7.6a2e7d30.01.01",
+    )
+    append_live_trade_registry_event(
+        repo_root=config.repo_root,
+        event=make_live_trade_registry_event(
+            event_type=TradeEventType.RECONCILED_FLAT_HISTORICAL_CLEANUP,
+            trade_id=trade_id,
+            lifecycle_id=lifecycle_id,
+            lane_id="mes_us_active_participation_short",
+            thesis_strategy_id="mes_us_active_participation_short",
+            account_id="DUM882026",
+            symbol="MES",
+            con_id=770561194,
+            local_symbol="MESM6",
+            expiry="20260618",
+            side="SHORT",
+            action="HISTORICAL_FLAT_CLEANUP",
+            qty="1",
+            source_artifact_path=str(config.report_path),
+            generated_at=NOW + timedelta(seconds=5),
+            reason_codes=(
+                "HISTORICAL_SUBMIT_INTENT_RESOLVED_FLAT",
+                "BROKER_FLAT_PROOF_CONFIRMED",
+                "NO_OPEN_ORDER_PROOF_CONFIRMED",
+                "NOT_CURRENT_EXPOSURE",
+                "NOT_CURRENT_OPEN_ORDER",
+            ),
+            metadata={
+                "historical_only": True,
+                "not_current_exposure": True,
+                "not_current_open_order": True,
+                "broker_flat_proof_path": str(config.broker_truth_root / "ibkr_positions_snapshot.json"),
+                "open_orders_proof_path": str(config.broker_truth_root / "ibkr_open_orders_snapshot.json"),
+            },
+        ),
+    )
+    _write_broker_truth(config)
+
+    report = reconcile_track_b_paper_broker_truth(config=config, now=NOW + timedelta(seconds=6))
+
+    assert report["classification"] == "TRACK_B_PAPER_BROKER_RECONCILED"
+    assert report["broker_reconciled"] is True
+    assert report["track_b_lifecycle_positions"] == []
+    superseded = report["superseded_lifecycle_projections"]
+    assert superseded[0]["classification"] == "STALE_SUPERSEDED_LIFECYCLE_PROJECTION"
+    assert superseded[0]["terminal_registry_truth"]["classification"] == "BROKER_FLAT_EVIDENCE_GATED_CLEANUP_TERMINAL"
+    assert superseded[0]["terminal_registry_truth"]["broker_backed_exit"] is False
+
+
 def test_terminal_registry_truth_supersedes_post_close_review_noise(tmp_path: Path) -> None:
     trade_id = "trade_terminal_review_noise"
     lifecycle_id = "life_terminal_review_noise"

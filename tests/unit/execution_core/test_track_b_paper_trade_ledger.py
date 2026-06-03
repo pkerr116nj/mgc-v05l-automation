@@ -2,9 +2,11 @@ from __future__ import annotations
 
 import json
 from datetime import datetime, timezone
+from decimal import Decimal
 from pathlib import Path
 
 from mgc_v05l.execution_core.operator_status import OperatorStatusInputs, create_operator_status_summary
+from mgc_v05l.execution_core.track_b_central_trade_registry import TradeEvent, TradeEventType
 from mgc_v05l.execution_core.track_b_paper_trade_ledger import (
     DUPLICATE_EXIT_OVERFILL_SCOPED_REMEDIATION_REVIEWED,
     MALFORMED_BROKER_BACKED_MANUALLY_RECONCILED_ARTIFACT,
@@ -86,6 +88,41 @@ def _open_unit(
         "managed_exit_policy_id": "PAPER_DIAGNOSTIC_TIME_BOXED_3X5M_EXIT_V1",
         "paper_lifecycle_report_path": f"outputs/lifecycle/{lifecycle_id}.json",
     }
+
+
+def _registry_event(
+    event_type: TradeEventType,
+    *,
+    trade_id: str,
+    lifecycle_id: str,
+    action: str = "SELL",
+    reason_codes: tuple[str, ...] = (),
+    metadata: dict[str, object] | None = None,
+) -> TradeEvent:
+    return TradeEvent(
+        event_id=f"{event_type.value}_{lifecycle_id}",
+        event_type=event_type,
+        generated_at=aware_now(),
+        trade_id=trade_id,
+        lifecycle_id=lifecycle_id,
+        lane_id="mes_us_active_participation_short",
+        thesis_strategy_id="mes_us_active_participation_short",
+        account_id="DUM882026",
+        symbol="MES",
+        con_id=770561194,
+        local_symbol="MESM6",
+        expiry="20260618",
+        side="SHORT",
+        action=action,
+        qty=Decimal("1"),
+        source_artifact_path="outputs/reports/track_b_paper_broker_reconciliation/latest_track_b_paper_broker_reconciliation.json",
+        order_id="2",
+        client_id="10973",
+        perm_id="665735662",
+        exec_id="0000e1a7.6a2e7d30.01.01",
+        reason_codes=reason_codes,
+        metadata=metadata or {},
+    )
 
 
 def test_updates_open_position_from_direct_bridge_fill_artifact(tmp_path: Path) -> None:
@@ -959,6 +996,98 @@ def test_no_paper_lifecycle_writes_zero_summaries_only(tmp_path: Path) -> None:
     assert summary["trade_count"] == 0
     assert summary["open_position_count"] == 0
     assert summary["paper_trades_attempted_count"] == 0
+
+
+def test_evidence_gated_broker_flat_cleanup_suppresses_stale_live_position(tmp_path: Path) -> None:
+    trade_id = "trade_696f40f3-5a3a-4166-b11e-fb59401c50ed"
+    lifecycle_id = "reserved_submit_mes_us_active_participation_short_20260602T185428677911Z_0c5caf5f40f7"
+    ledger_root = tmp_path / "outputs" / "track_b_execution_core" / "paper_trade_ledger"
+    registry_path = tmp_path / "outputs" / "track_b_execution_core" / "trade_registry" / "live_trade_events.jsonl"
+    registry_path.parent.mkdir(parents=True, exist_ok=True)
+    broker_truth_root = tmp_path / "outputs" / "reports" / "ibkr_read_only_verification"
+    broker_truth_root.mkdir(parents=True, exist_ok=True)
+    (broker_truth_root / "ibkr_positions_snapshot.json").write_text(
+        json.dumps({"positions": []}),
+        encoding="utf-8",
+    )
+    (broker_truth_root / "ibkr_open_orders_snapshot.json").write_text(
+        json.dumps({"open_orders": []}),
+        encoding="utf-8",
+    )
+    registry_events = [
+        _registry_event(
+            TradeEventType.ENTRY_FILL_BROKER_BACKED,
+            trade_id=trade_id,
+            lifecycle_id=lifecycle_id,
+        ),
+        _registry_event(
+            TradeEventType.RECONCILED_FLAT_HISTORICAL_CLEANUP,
+            trade_id=trade_id,
+            lifecycle_id=lifecycle_id,
+            action="HISTORICAL_FLAT_CLEANUP",
+            reason_codes=(
+                "HISTORICAL_SUBMIT_INTENT_RESOLVED_FLAT",
+                "BROKER_FLAT_PROOF_CONFIRMED",
+                "NO_OPEN_ORDER_PROOF_CONFIRMED",
+                "NOT_CURRENT_EXPOSURE",
+                "NOT_CURRENT_OPEN_ORDER",
+            ),
+            metadata={
+                "historical_only": True,
+                "not_current_exposure": True,
+                "not_current_open_order": True,
+                "broker_flat_proof_path": "outputs/reports/ibkr_read_only_verification/ibkr_positions_snapshot.json",
+                "open_orders_proof_path": "outputs/reports/ibkr_read_only_verification/ibkr_open_orders_snapshot.json",
+            },
+        ),
+    ]
+    registry_path.write_text("\n".join(json.dumps(event.to_dict(), sort_keys=True) for event in registry_events) + "\n")
+
+    summaries = build_track_b_paper_trade_summaries(
+        ledger_records=[
+            {
+                "ledger_schema_version": "track_b_paper_trade_ledger_v1",
+                "trade_id": trade_id,
+                "lifecycle_id": lifecycle_id,
+                "strategy_id": "mes_us_active_participation_short",
+                "lane_id": "mes_us_active_participation_short",
+                "instrument_family": "MES",
+                "contract_key": "MES-M6",
+                "local_symbol": "MESM6",
+                "con_id": 770561194,
+                "account_id": "DUM882026",
+                "paper_lifecycle_type": "STRATEGY_MANAGED",
+                "paper_lifecycle_classification": "TRACK_B_STRATEGY_PAPER_OPEN_MANAGED",
+                "final_position_status": "OPEN_MANAGED",
+                "entry_fill_confirmed": True,
+                "entry_fill_price": "7618",
+                "entry_timestamp": "20260602  14:54:30",
+                "entry_order_id": "2",
+                "entry_perm_id": "665735662",
+                "entry_client_id": "10973",
+                "entry_exec_id": "0000e1a7.6a2e7d30.01.01",
+                "quantity": "1",
+                "side": "SHORT",
+                "managed_exit_policy_id": "US_ACTIVE_EVIDENCE_TIMEBOX_60M_EXIT_V1",
+                "broker_backed_position_confirmed": True,
+                "review_required": False,
+                "created_at": "2026-06-02T23:01:54+00:00",
+            }
+        ],
+        ledger_jsonl=ledger_root / "track_b_paper_trade_ledger.jsonl",
+        trade_summary_json=ledger_root / "latest_track_b_paper_trade_summary.json",
+        live_position_status_json=ledger_root / "latest_track_b_live_position_status.json",
+        pnl_summary_json=ledger_root / "latest_track_b_pnl_summary.json",
+        now=aware_now(),
+    )
+
+    live_status = summaries["live_position_status"]
+    assert live_status["open_position_count"] == 0
+    assert live_status["positions_by_instrument"] == {}
+    assert live_status["terminal_superseded_open_records"][0]["classification"] == "STALE_SUPERSEDED_LIFECYCLE_PROJECTION"
+    terminal = live_status["terminal_superseded_open_records"][0]["terminal_registry_truth"]
+    assert terminal["classification"] == "BROKER_FLAT_EVIDENCE_GATED_CLEANUP_TERMINAL"
+    assert terminal["broker_backed_exit"] is False
 
 
 def test_malformed_manual_cleanup_is_excluded_from_clean_trade_stats(tmp_path: Path) -> None:

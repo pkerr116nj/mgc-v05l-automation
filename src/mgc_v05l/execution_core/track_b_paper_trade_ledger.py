@@ -26,12 +26,14 @@ from .track_b_lifecycle_state_transition import (
     ledger_projection_from_transition,
     normalize_lifecycle_state,
 )
+from .track_b_live_trade_registry import load_live_trade_registry_records
 from .track_b_position_management_manifest import (
     DEFAULT_TRACK_B_POSITION_MANAGEMENT_MANIFEST_ROOT,
     OPEN_MANAGED_METADATA_INCOMPLETE,
     resolve_management_metadata,
     update_manifest_from_filled_bridge_result,
 )
+from .track_b_terminal_registry_truth import resolve_terminal_registry_truth
 
 
 DEFAULT_TRACK_B_PAPER_TRADE_LEDGER_OUTPUT_ROOT = Path("outputs/track_b_execution_core/paper_trade_ledger")
@@ -964,9 +966,13 @@ def build_track_b_paper_trade_summaries(
         for item in pnl_records
         if str(item.get("exit_timestamp") or item.get("created_at") or "")[:10] >= year_start
     ]
-    open_records = [item for item in latest_trade_records if _is_open_position_record(item)]
-    positions_by_instrument = _positions_by(latest_trade_records, "contract_key", actual_now)
-    positions_by_strategy = _positions_by(latest_trade_records, "strategy_id", actual_now)
+    current_trade_records, terminal_superseded_open_records = _filter_terminal_superseded_open_records(
+        latest_trade_records,
+        repo_root=_repo_root_from_output_path(ledger_jsonl),
+    )
+    open_records = [item for item in current_trade_records if _is_open_position_record(item)]
+    positions_by_instrument = _positions_by(current_trade_records, "contract_key", actual_now)
+    positions_by_strategy = _positions_by(current_trade_records, "strategy_id", actual_now)
     review_required = [item for item in latest_trade_records if item.get("review_required") is True and not _is_manual_flat_reviewed(item)]
     managed_records = [item for item in latest_trade_records if _is_meaningful_managed_trade_record(item)]
     broker_backed_records = [item for item in latest_trade_records if _is_broker_backed_trade_record(item)]
@@ -1027,6 +1033,7 @@ def build_track_b_paper_trade_summaries(
         "broker_reconciled": False,
         "positions_by_instrument": positions_by_instrument,
         "positions_by_strategy": positions_by_strategy,
+        "terminal_superseded_open_records": terminal_superseded_open_records,
         "open_position_count": len(positions_by_instrument),
         "open_position_record_count": len(open_records),
         "open_order_count": 0,
@@ -1642,6 +1649,78 @@ def _latest_trade_records_by_lifecycle(records: Iterable[Mapping[str, Any]]) -> 
             order.append(lifecycle_id)
         latest[lifecycle_id] = dict(item)
     return [latest[lifecycle_id] for lifecycle_id in order if lifecycle_id in latest]
+
+
+def _filter_terminal_superseded_open_records(
+    records: Iterable[Mapping[str, Any]],
+    *,
+    repo_root: Path,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    rows = [dict(item) for item in records]
+    try:
+        registry_records = load_live_trade_registry_records(repo_root=repo_root)
+    except Exception:
+        return rows, []
+    if not registry_records:
+        return rows, []
+    broker_truth = _current_broker_truth_rows(repo_root)
+    if broker_truth is None:
+        return rows, []
+    broker_positions, broker_open_orders = broker_truth
+    current: list[dict[str, Any]] = []
+    superseded: list[dict[str, Any]] = []
+    for row in rows:
+        if not _is_open_position_record(row):
+            current.append(row)
+            continue
+        terminal = resolve_terminal_registry_truth(
+            records=registry_records,
+            identity=row,
+            broker_positions=broker_positions,
+            broker_open_orders=broker_open_orders,
+        )
+        if terminal.terminal_closed_flat:
+            superseded.append(
+                {
+                    "classification": "STALE_SUPERSEDED_LIFECYCLE_PROJECTION",
+                    "terminal_registry_truth": terminal.to_dict(),
+                    "row": _compact_trade_row(row),
+                }
+            )
+            continue
+        current.append(row)
+    return current, superseded
+
+
+def _repo_root_from_output_path(path: Path) -> Path:
+    try:
+        resolved = path.resolve()
+    except OSError:
+        resolved = path.absolute()
+    parts = resolved.parts
+    if "outputs" in parts:
+        return Path(*parts[: parts.index("outputs")])
+    return Path.cwd()
+
+
+def _current_broker_truth_rows(repo_root: Path) -> tuple[list[dict[str, Any]], list[dict[str, Any]]] | None:
+    payload = _load_json_path(repo_root / "outputs" / "reports" / "ibkr_read_only_verification" / "ibkr_positions_snapshot.json")
+    position_rows = payload.get("positions") if isinstance(payload, Mapping) else None
+    if not isinstance(position_rows, list):
+        return None
+    payload = _load_json_path(repo_root / "outputs" / "reports" / "ibkr_read_only_verification" / "ibkr_open_orders_snapshot.json")
+    order_rows = payload.get("open_orders") if isinstance(payload, Mapping) else None
+    if not isinstance(order_rows, list):
+        return None
+    nonzero: list[dict[str, Any]] = []
+    for row in position_rows:
+        if not isinstance(row, Mapping):
+            continue
+        qty = _decimal(row.get("quantity"))
+        if qty is not None and qty != 0:
+            nonzero.append(dict(row))
+    open_orders = [dict(row) for row in order_rows if isinstance(row, Mapping)]
+    return nonzero, open_orders
 
 
 def _existing_manual_flat_reconciliation(records: Iterable[Mapping[str, Any]], lifecycle_id: str) -> dict[str, Any] | None:
