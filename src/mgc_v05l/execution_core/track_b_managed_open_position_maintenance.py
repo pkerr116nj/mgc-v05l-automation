@@ -58,6 +58,9 @@ DEFAULT_TRACK_B_PHASE1_RUNTIME_MARKET_DATA_ROOT = Path("outputs/track_b_executio
 DEFAULT_TRACK_B_MANAGED_POSITION_PROJECTION_JSON = (
     Path("outputs/track_b_execution_core/managed_positions") / "latest_managed_positions.json"
 )
+MAINTENANCE_CANONICAL_OWNER_REQUIRED = "MAINTENANCE_CANONICAL_OWNER_REQUIRED"
+MAINTENANCE_CANONICAL_OWNER_AMBIGUOUS = "MAINTENANCE_CANONICAL_OWNER_AMBIGUOUS"
+STALE_LIFECYCLE_REPORT_DIAGNOSTIC_ONLY = "STALE_LIFECYCLE_REPORT_DIAGNOSTIC_ONLY"
 
 TICK_SIZE_BY_INSTRUMENT = {
     "MGC": Decimal("0.1"),
@@ -119,9 +122,14 @@ def run_track_b_managed_open_position_maintenance(
         for item in live_position_status.get("source_artifact_paths", [])
         if str(item).endswith(".json")
     ]
-    open_positions = _open_positions(live_position_status)
+    raw_open_positions = _open_positions(live_position_status)
+    open_positions, authority_diagnostics = _canonical_maintenance_open_positions(
+        managed_position_projection=managed_position_projection,
+        raw_open_positions=raw_open_positions,
+        canonical_owner_by_contract=canonical_owner_by_contract,
+    )
     preexisting_close_locks = _preexisting_managed_close_contract_locks(
-        open_positions=open_positions,
+        open_positions=raw_open_positions,
         source_paths=source_paths,
         trade_summary=trade_summary,
         lifecycle_output_root=actual_config.managed_lifecycle_output_root,
@@ -138,6 +146,8 @@ def run_track_b_managed_open_position_maintenance(
             trade_summary=trade_summary,
             lifecycle_output_root=actual_config.managed_lifecycle_output_root,
         )
+        if position.get("paper_lifecycle_report_path"):
+            lifecycle_report_path = Path(str(position.get("paper_lifecycle_report_path")))
         lifecycle_report = _read_json(lifecycle_report_path)
         base_position_report = {
             "lifecycle_id": lifecycle_id,
@@ -171,6 +181,31 @@ def run_track_b_managed_open_position_maintenance(
                     **base_position_report,
                     "maintenance_invoked": False,
                     "blocker": "OPEN_MANAGED lifecycle report is missing.",
+                }
+            )
+            continue
+        authority_blocker = _canonical_owner_authority_blocker(
+            lifecycle_id=lifecycle_id,
+            position=position,
+            canonical_owner_by_contract=canonical_owner_by_contract,
+            positions_by_contract=projected_positions_by_contract,
+        )
+        if authority_blocker is not None:
+            position_reports.append(
+                {
+                    **base_position_report,
+                    "maintenance_invoked": False,
+                    "managed_position_projection_classification": _mapping(
+                        projected_positions.get(lifecycle_id, {})
+                    ).get("classification"),
+                    "close_intent_created": False,
+                    "close_submitted": False,
+                    "close_filled": False,
+                    "review_required": True,
+                    "final_classification": STALE_LIFECYCLE_REPORT_DIAGNOSTIC_ONLY,
+                    "final_position_status": "FULL_AUDIT_ONLY",
+                    "blocker": authority_blocker.get("primary_blocker"),
+                    "canonical_owner_authority_blocker": authority_blocker,
                 }
             )
             continue
@@ -477,8 +512,12 @@ def run_track_b_managed_open_position_maintenance(
         "schema_version": "track_b_managed_open_position_maintenance_v1",
         "generated_at": actual_now.isoformat(),
         "mode": actual_config.mode,
-        "source": "TRACK_B_LIFECYCLE_ARTIFACTS",
+        "source": "CANONICAL_MANAGED_POSITION_AUTHORITY",
+        "raw_lifecycle_reports_are_diagnostic_only": True,
         "open_lifecycle_count": len(open_positions),
+        "raw_open_lifecycle_count": len(raw_open_positions),
+        "canonical_authorized_open_lifecycle_count": len(open_positions),
+        "maintenance_authority_diagnostics": authority_diagnostics,
         "positions": position_reports,
         "close_intent_created_count": sum(1 for item in position_reports if item.get("close_intent_created") is True),
         "close_submitted_count": sum(1 for item in position_reports if item.get("close_submitted") is True),
@@ -513,6 +552,263 @@ def _open_positions(live_position_status: Mapping[str, Any]) -> list[dict[str, A
     return positions
 
 
+def _canonical_maintenance_open_positions(
+    *,
+    managed_position_projection: Mapping[str, Any],
+    raw_open_positions: list[dict[str, Any]],
+    canonical_owner_by_contract: Mapping[str, str | None],
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    projected_positions = [
+        dict(item)
+        for item in (
+            managed_position_projection.get("positions")
+            or managed_position_projection.get("managed_positions")
+            or []
+        )
+        if isinstance(item, Mapping)
+    ]
+    raw_by_lifecycle = {str(item.get("lifecycle_id") or ""): item for item in raw_open_positions}
+    current_positions = [
+        _maintenance_position_from_managed_projection(
+            item,
+            raw_position=raw_by_lifecycle.get(str(item.get("lifecycle_id") or "")),
+        )
+        for item in projected_positions
+        if _managed_projection_current_for_close_authority(item)
+        and str(item.get("lifecycle_id") or "").strip()
+    ]
+    current_positions = [item for item in current_positions if item.get("lifecycle_id")]
+    diagnostics = {
+        "authority_source": "CANONICAL_MANAGED_POSITION_REGISTRY",
+        "raw_lifecycle_reports_are_diagnostic_only": True,
+        "projected_position_count": len(projected_positions),
+        "canonical_current_claim_count": len(current_positions),
+        "raw_open_lifecycle_count": len(raw_open_positions),
+        "stale_lifecycle_diagnostic_only": [],
+        "authority_blockers": [],
+    }
+    if not projected_positions:
+        blocked = [
+            {
+                **dict(position),
+                "_maintenance_authority_blocker": {
+                    "classification": MAINTENANCE_CANONICAL_OWNER_REQUIRED,
+                    "primary_blocker": (
+                        "Canonical managed-position registry is unavailable; "
+                        "raw lifecycle reports are diagnostic-only and cannot authorize close intent generation."
+                    ),
+                    "source": "managed_open_position_maintenance_authority",
+                },
+            }
+            for position in raw_open_positions
+        ]
+        diagnostics["authority_blockers"] = [
+            {
+                "classification": MAINTENANCE_CANONICAL_OWNER_REQUIRED,
+                "lifecycle_id": position.get("lifecycle_id"),
+            }
+            for position in blocked
+        ]
+        return blocked, diagnostics
+
+    current_by_lifecycle = {str(item.get("lifecycle_id") or ""): item for item in current_positions}
+    raw_lifecycle_ids = {str(item.get("lifecycle_id") or "") for item in raw_open_positions}
+    diagnostics["stale_lifecycle_diagnostic_only"] = [
+        {
+            "classification": STALE_LIFECYCLE_REPORT_DIAGNOSTIC_ONLY,
+            "lifecycle_id": lifecycle_id,
+            "reason": "Raw lifecycle report is not a canonical current exposure owner.",
+        }
+        for lifecycle_id in sorted(raw_lifecycle_ids - set(current_by_lifecycle))
+        if lifecycle_id
+    ]
+    blocked_positions: list[dict[str, Any]] = []
+    for key, owner in canonical_owner_by_contract.items():
+        if owner is not None:
+            continue
+        contract_claims = [
+            item
+            for item in current_positions
+            if _managed_close_contract_key(
+                lifecycle_report=item,
+                position=item,
+                projected_position=item,
+            )
+            == key
+        ]
+        for item in contract_claims:
+            blocked_positions.append(
+                {
+                    **dict(item),
+                    "_maintenance_authority_blocker": {
+                        "classification": MAINTENANCE_CANONICAL_OWNER_AMBIGUOUS,
+                        "primary_blocker": (
+                            "Multiple canonical managed-position claims exist for this contract; "
+                            "maintenance close authority fails closed."
+                        ),
+                        "contract_key": key,
+                        "claiming_lifecycle_ids": [
+                            str(claim.get("lifecycle_id") or "") for claim in contract_claims
+                        ],
+                        "source": "managed_position_projection_ownership_arbitration",
+                    },
+                }
+            )
+    if blocked_positions:
+        diagnostics["authority_blockers"] = [
+            item.get("_maintenance_authority_blocker") for item in blocked_positions
+        ]
+        return blocked_positions, diagnostics
+    authorized_positions: list[dict[str, Any]] = []
+    for item in current_positions:
+        key = _managed_close_contract_key(
+            lifecycle_report=item,
+            position=item,
+            projected_position=item,
+        )
+        owner = canonical_owner_by_contract.get(key or "")
+        if owner and owner != str(item.get("lifecycle_id") or ""):
+            diagnostics["stale_lifecycle_diagnostic_only"].append(
+                {
+                    "classification": STALE_LIFECYCLE_REPORT_DIAGNOSTIC_ONLY,
+                    "lifecycle_id": item.get("lifecycle_id"),
+                    "owner_lifecycle_id": owner,
+                    "contract_key": key,
+                    "reason": "Canonical managed-position registry selected a different owner.",
+                }
+            )
+            continue
+        authorized_positions.append(item)
+    return authorized_positions, diagnostics
+
+
+def _maintenance_position_from_managed_projection(
+    position: Mapping[str, Any],
+    *,
+    raw_position: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    raw = _mapping(raw_position)
+    broker_position = _mapping(position.get("broker_position"))
+    lifecycle_position = _mapping(position.get("lifecycle_position"))
+    lifecycle_unit = {}
+    lifecycle_units = lifecycle_position.get("lifecycle_units")
+    if isinstance(lifecycle_units, list) and lifecycle_units and isinstance(lifecycle_units[0], Mapping):
+        lifecycle_unit = dict(lifecycle_units[0])
+    entry_time = (
+        position.get("entry_time")
+        or position.get("entry_timestamp")
+        or lifecycle_position.get("entry_timestamp")
+        or lifecycle_unit.get("entry_time")
+        or raw.get("entry_timestamp")
+    )
+    return {
+        **raw,
+        **dict(position),
+        "source": "CANONICAL_MANAGED_POSITION_REGISTRY",
+        "trade_id": position.get("trade_id") or lifecycle_position.get("trade_id") or lifecycle_unit.get("trade_id") or raw.get("trade_id"),
+        "lifecycle_id": position.get("lifecycle_id")
+        or lifecycle_position.get("lifecycle_id")
+        or lifecycle_unit.get("lifecycle_id")
+        or raw.get("lifecycle_id"),
+        "strategy_id": position.get("strategy_id") or position.get("lane_id") or lifecycle_position.get("strategy_id") or raw.get("strategy_id"),
+        "instrument_family": position.get("instrument_family") or position.get("symbol") or broker_position.get("symbol") or raw.get("instrument_family"),
+        "contract_key": position.get("contract_key") or lifecycle_position.get("contract_key") or raw.get("contract_key"),
+        "local_symbol": position.get("local_symbol") or broker_position.get("local_symbol") or raw.get("local_symbol"),
+        "con_id": position.get("con_id") or broker_position.get("con_id") or raw.get("con_id"),
+        "account_id": position.get("account_id") or broker_position.get("account_id") or raw.get("account_id"),
+        "side": position.get("side") or lifecycle_position.get("side") or raw.get("side"),
+        "quantity": position.get("quantity") or lifecycle_position.get("quantity") or lifecycle_unit.get("quantity") or raw.get("quantity"),
+        "avg_entry_price": position.get("entry_price") or lifecycle_position.get("avg_entry_price") or raw.get("avg_entry_price"),
+        "entry_timestamp": entry_time,
+        "entry_order_id": _first_item(position.get("entry_order_ids"))
+        or _first_item(lifecycle_position.get("entry_order_ids"))
+        or lifecycle_unit.get("entry_order_id")
+        or raw.get("entry_order_id"),
+        "entry_perm_id": _first_item(position.get("entry_perm_ids"))
+        or _first_item(lifecycle_position.get("entry_perm_ids"))
+        or lifecycle_unit.get("entry_perm_id")
+        or raw.get("entry_perm_id"),
+        "entry_exec_id": _first_item(position.get("entry_exec_ids"))
+        or _first_item(lifecycle_position.get("entry_exec_ids"))
+        or lifecycle_unit.get("entry_exec_id")
+        or raw.get("entry_exec_id"),
+        "managed_exit_policy_id": position.get("managed_exit_policy_id")
+        or lifecycle_position.get("managed_exit_policy_id")
+        or lifecycle_unit.get("managed_exit_policy_id")
+        or raw.get("managed_exit_policy_id"),
+        "paper_lifecycle_report_path": lifecycle_position.get("paper_lifecycle_report_path")
+        or position.get("paper_lifecycle_report_path")
+        or raw.get("paper_lifecycle_report_path"),
+        "entry_broker_identity": {
+            "broker_order_id": _first_item(position.get("entry_order_ids"))
+            or _first_item(lifecycle_position.get("entry_order_ids"))
+            or lifecycle_unit.get("entry_order_id")
+            or raw.get("entry_order_id")
+            or _mapping(raw.get("entry_broker_identity")).get("broker_order_id"),
+            "perm_id": _first_item(position.get("entry_perm_ids"))
+            or _first_item(lifecycle_position.get("entry_perm_ids"))
+            or lifecycle_unit.get("entry_perm_id")
+            or raw.get("entry_perm_id")
+            or _mapping(raw.get("entry_broker_identity")).get("perm_id"),
+            "exec_id": _first_item(position.get("entry_exec_ids"))
+            or _first_item(lifecycle_position.get("entry_exec_ids"))
+            or lifecycle_unit.get("entry_exec_id")
+            or raw.get("entry_exec_id")
+            or _mapping(raw.get("entry_broker_identity")).get("exec_id"),
+            "con_id": position.get("con_id") or broker_position.get("con_id") or raw.get("con_id"),
+            "local_symbol": position.get("local_symbol") or broker_position.get("local_symbol") or raw.get("local_symbol"),
+        },
+    }
+
+
+def _canonical_owner_authority_blocker(
+    *,
+    lifecycle_id: str,
+    position: Mapping[str, Any],
+    canonical_owner_by_contract: Mapping[str, str | None],
+    positions_by_contract: Mapping[str, list[dict[str, Any]]],
+) -> dict[str, Any] | None:
+    explicit = position.get("_maintenance_authority_blocker")
+    if isinstance(explicit, Mapping):
+        return dict(explicit)
+    contract_key = _managed_close_contract_key(
+        lifecycle_report=position,
+        position=position,
+        projected_position=position,
+    )
+    if not contract_key:
+        return {
+            "classification": MAINTENANCE_CANONICAL_OWNER_REQUIRED,
+            "primary_blocker": "Canonical account/localSymbol/conId owner identity is incomplete.",
+            "source": "managed_open_position_maintenance_authority",
+        }
+    owner = canonical_owner_by_contract.get(contract_key)
+    if owner is None and len(positions_by_contract.get(contract_key) or []) > 1:
+        return {
+            "classification": MAINTENANCE_CANONICAL_OWNER_AMBIGUOUS,
+            "primary_blocker": (
+                "Multiple current managed-position claims exist for this contract and no unique canonical owner exists."
+            ),
+            "contract_key": contract_key,
+            "claiming_lifecycle_ids": [
+                str(item.get("lifecycle_id") or "") for item in positions_by_contract.get(contract_key) or []
+            ],
+            "source": "managed_position_projection_ownership_arbitration",
+        }
+    if owner and owner != str(lifecycle_id or ""):
+        return {
+            "classification": STALE_LIFECYCLE_REPORT_DIAGNOSTIC_ONLY,
+            "primary_blocker": (
+                "Raw lifecycle report is not the canonical current exposure owner and cannot authorize close intent."
+            ),
+            "contract_key": contract_key,
+            "owner_lifecycle_id": owner,
+            "blocked_lifecycle_id": lifecycle_id,
+            "source": "canonical_managed_position_registry",
+        }
+    return None
+
+
 def _managed_position_projection_by_lifecycle_id(payload: Mapping[str, Any]) -> dict[str, dict[str, Any]]:
     raw_positions = payload.get("positions") or payload.get("managed_positions") or []
     if not isinstance(raw_positions, list):
@@ -525,6 +821,16 @@ def _managed_position_projection_by_lifecycle_id(payload: Mapping[str, Any]) -> 
         if lifecycle_id:
             projected[lifecycle_id] = dict(item)
     return projected
+
+
+def _mapping(value: Any) -> dict[str, Any]:
+    return dict(value) if isinstance(value, Mapping) else {}
+
+
+def _first_item(value: Any) -> Any:
+    if isinstance(value, list) and value:
+        return value[0]
+    return None
 
 
 def _managed_position_projection_by_contract_key(payload: Mapping[str, Any]) -> dict[str, list[dict[str, Any]]]:
@@ -792,6 +1098,8 @@ def _lifecycle_report_path(
     trade_summary: Mapping[str, Any],
     lifecycle_output_root: Path,
 ) -> Path:
+    # The canonical managed-position owner can carry the exact lifecycle report
+    # path even when raw live-position source paths are stale.
     for path in source_paths:
         if lifecycle_id and lifecycle_id in str(path):
             return path

@@ -146,6 +146,7 @@ def seed_open_position(
             "positions_by_instrument": {
                 contract_key: {
                     "lifecycle_id": lifecycle_id,
+                    "account_id": "DUM882026",
                     "strategy_id": strategy_id,
                     "instrument_family": instrument,
                     "contract_key": contract_key,
@@ -176,6 +177,70 @@ def seed_open_position(
     write_json(
         tmp_path / "ledger" / "latest_track_b_paper_trade_summary.json",
         {"recent_trades": [], "open_position_count": 1, "review_required_count": 0},
+    )
+    signed_qty = "-1" if side == "SHORT" else "1"
+    write_json(
+        tmp_path / "managed_positions" / "latest_managed_positions.json",
+        {
+            "schema_version": "track_b_managed_position_registry_v1",
+            "generated_at": aware_now().isoformat(),
+            "classification": "OPEN_MANAGED_MATCHED",
+            "positions": [
+                {
+                    "classification": "OPEN_MANAGED_MATCHED",
+                    "trade_id": payload["trade_id"],
+                    "lifecycle_id": lifecycle_id,
+                    "lane_id": strategy_id,
+                    "strategy_id": strategy_id,
+                    "symbol": instrument,
+                    "instrument_family": instrument,
+                    "contract_key": contract_key,
+                    "local_symbol": local_symbol,
+                    "con_id": con_id,
+                    "account_id": "DUM882026",
+                    "side": side,
+                    "quantity": "1",
+                    "aggregate_qty": signed_qty,
+                    "entry_time": entry_filled_at,
+                    "entry_price": entry_price,
+                    "managed_exit_policy_id": "PAPER_DIAGNOSTIC_TIME_BOXED_3X5M_EXIT_V1",
+                    "broker_qty_match": True,
+                    "reconciliation_status": "OPEN_MANAGED_MATCHED",
+                    "entry_order_ids": ["11"],
+                    "entry_perm_ids": ["194800011"],
+                    "entry_exec_ids": ["exec-1"],
+                    "paper_lifecycle_report_path": str(lifecycle_path),
+                    "broker_position": {
+                        "account_id": "DUM882026",
+                        "symbol": instrument,
+                        "local_symbol": local_symbol,
+                        "con_id": con_id,
+                        "quantity": signed_qty,
+                    },
+                    "lifecycle_position": {
+                        "trade_id": payload["trade_id"],
+                        "lifecycle_id": lifecycle_id,
+                        "lane_id": strategy_id,
+                        "strategy_id": strategy_id,
+                        "account_id": "DUM882026",
+                        "instrument_family": instrument,
+                        "contract_key": contract_key,
+                        "local_symbol": local_symbol,
+                        "con_id": con_id,
+                        "quantity": "1",
+                        "aggregate_qty": signed_qty,
+                        "side": side,
+                        "avg_entry_price": entry_price,
+                        "entry_timestamp": entry_filled_at,
+                        "managed_exit_policy_id": "PAPER_DIAGNOSTIC_TIME_BOXED_3X5M_EXIT_V1",
+                        "entry_order_ids": ["11"],
+                        "entry_perm_ids": ["194800011"],
+                        "entry_exec_ids": ["exec-1"],
+                        "paper_lifecycle_report_path": str(lifecycle_path),
+                    },
+                }
+            ],
+        },
     )
     write_json(
         tmp_path / "live" / f"latest_live_{instrument.lower()}_completed_5m_candles.json",
@@ -319,8 +384,8 @@ def test_open_managed_position_age_two_keeps_waiting(tmp_path: Path) -> None:
     position = result.report["positions"][0]
     assert position["completed_bars_since_entry"] == 2
     assert position["exit_eligible"] is False
-    assert position["close_intent_created"] is False
-    assert position["close_submitted"] is False
+    assert position.get("close_intent_created") is not True
+    assert position.get("close_submitted") is not True
 
 
 def test_missing_exit_policy_recovers_from_lane_registry(tmp_path: Path) -> None:
@@ -386,6 +451,13 @@ def test_missing_exit_policy_is_incomplete_and_does_not_submit(tmp_path: Path) -
     live_status["positions_by_instrument"]["MNQ-202606"]["managed_exit_policy_id"] = None
     live_status["positions_by_instrument"]["MNQ-202606"]["strategy_id"] = "UNKNOWN_STRATEGY_WITHOUT_POLICY"
     live_status_path.write_text(json.dumps(live_status), encoding="utf-8")
+    managed_positions = json.loads(cfg.managed_position_projection_json.read_text(encoding="utf-8"))
+    managed_positions["positions"][0]["managed_exit_policy_id"] = None
+    managed_positions["positions"][0]["strategy_id"] = "UNKNOWN_STRATEGY_WITHOUT_POLICY"
+    managed_positions["positions"][0]["lane_id"] = "UNKNOWN_STRATEGY_WITHOUT_POLICY"
+    managed_positions["positions"][0]["lifecycle_position"]["managed_exit_policy_id"] = None
+    managed_positions["positions"][0]["lifecycle_position"]["strategy_id"] = "UNKNOWN_STRATEGY_WITHOUT_POLICY"
+    cfg.managed_position_projection_json.write_text(json.dumps(managed_positions), encoding="utf-8")
 
     result = run_track_b_managed_open_position_maintenance(
         config=cfg,
@@ -396,8 +468,8 @@ def test_missing_exit_policy_is_incomplete_and_does_not_submit(tmp_path: Path) -
     position = result.report["positions"][0]
     assert position["final_classification"] == OPEN_MANAGED_METADATA_INCOMPLETE
     assert position["review_required"] is True
-    assert position["close_intent_created"] is False
-    assert position["close_submitted"] is False
+    assert position.get("close_intent_created") is not True
+    assert position.get("close_submitted") is not True
 
 
 def test_missing_lifecycle_report_recovers_from_complete_mule_position_metadata(tmp_path: Path) -> None:
@@ -632,6 +704,119 @@ def test_exit_due_projection_canonicalizes_mes_close_expiry_from_broker_position
     assert captured_configs[0].con_id == 770561194
 
 
+def test_maintenance_uses_canonical_owner_when_raw_lifecycle_status_is_stale(tmp_path: Path) -> None:
+    cfg = seed_open_position(
+        tmp_path,
+        instrument="MES",
+        strategy_id="mes_us_active_participation_short",
+        contract_key="MES-202606",
+        local_symbol="MESM6",
+        con_id=770561194,
+        side="SHORT",
+        entry_price="7604.75",
+        completed_timestamps=[
+            "2026-06-03T13:40:00+00:00",
+            "2026-06-03T13:45:00+00:00",
+        ],
+    )
+    stale_lifecycle_id = "strategy_managed_fe30248d4d6c42acaf106c8313b0b33b"
+    current_lifecycle_id = "reserved_submit_current_owner_20260603T133628Z"
+    current_trade_id = "trade-current-owner"
+    stale_path = tmp_path / "managed" / stale_lifecycle_id / "track_b_strategy_managed_paper_lifecycle_report.json"
+    current_path = tmp_path / "managed" / current_lifecycle_id / "track_b_strategy_managed_paper_lifecycle_report.json"
+    current_lifecycle = json.loads(stale_path.read_text(encoding="utf-8"))
+    current_lifecycle["lifecycle_id"] = current_lifecycle_id
+    current_lifecycle["trade_id"] = current_trade_id
+    current_lifecycle["report_json_path"] = str(current_path)
+    current_lifecycle["managed_exit_policy_id"] = "US_ACTIVE_EVIDENCE_TIMEBOX_60M_EXIT_V1"
+    current_lifecycle["managed_exit_policy_max_completed_5m_bars"] = 12
+    current_lifecycle["bars_since_fill"] = 0
+    current_lifecycle["entry_intent"]["lifecycle_id"] = current_lifecycle_id
+    current_lifecycle["entry_intent"]["trade_id"] = current_trade_id
+    current_lifecycle["entry_intent"]["managed_exit_policy_id"] = "US_ACTIVE_EVIDENCE_TIMEBOX_60M_EXIT_V1"
+    current_lifecycle["entry_submit_attempt"]["broker_order_id"] = "1"
+    current_lifecycle["entry_submit_attempt"]["perm_id"] = "1421892784"
+    current_lifecycle["entry_fill"]["broker_order_id"] = "1"
+    current_lifecycle["entry_fill"]["perm_id"] = "1421892784"
+    current_lifecycle["entry_fill"]["execution_id"] = "exec-current"
+    write_json(current_path, current_lifecycle)
+    write_json(
+        cfg.managed_position_projection_json,
+        {
+            "schema_version": "track_b_managed_position_registry_v1",
+            "generated_at": aware_now().isoformat(),
+            "positions": [
+                {
+                    "classification": "OPEN_MANAGED_EXIT_DUE",
+                    "trade_id": current_trade_id,
+                    "lifecycle_id": current_lifecycle_id,
+                    "lane_id": "mes_us_active_participation_short",
+                    "strategy_id": "mes_us_active_participation_short",
+                    "symbol": "MES",
+                    "contract_key": "MES-202606",
+                    "local_symbol": "MESM6",
+                    "con_id": 770561194,
+                    "account_id": "DUM882026",
+                    "side": "SHORT",
+                    "quantity": "1",
+                    "entry_time": "2026-06-03T13:36:30+00:00",
+                    "entry_price": "7604.75",
+                    "managed_exit_policy_id": "US_ACTIVE_EVIDENCE_TIMEBOX_60M_EXIT_V1",
+                    "exit_due": True,
+                    "bars_since_entry": 17,
+                    "required_completed_5m_bars": 12,
+                    "broker_qty_match": True,
+                    "reconciliation_status": "OPEN_MANAGED_MATCHED",
+                    "entry_order_ids": ["1"],
+                    "entry_perm_ids": ["1421892784"],
+                    "entry_exec_ids": ["exec-current"],
+                    "paper_lifecycle_report_path": str(current_path),
+                    "broker_position": {
+                        "account_id": "DUM882026",
+                        "symbol": "MES",
+                        "local_symbol": "MESM6",
+                        "con_id": 770561194,
+                        "expiry": "20260618",
+                        "quantity": "-1",
+                    },
+                }
+            ],
+        },
+    )
+    submitted_lifecycle_ids: list[str] = []
+
+    def close_submitter(config: TrackBStrategyManagedPaperLifecycleConfig, close_intent: Mapping[str, Any]) -> Mapping[str, Any]:
+        submitted_lifecycle_ids.append(str(close_intent.get("lifecycle_id") or config.strategy_id))
+        return {
+            "submitted": True,
+            "submit_attempted": True,
+            "broker_state_mutated": True,
+            "broker_order_id": "77",
+            "close_intent": dict(close_intent),
+        }
+
+    from mgc_v05l.execution_core.track_b_strategy_managed_paper_lifecycle import default_managed_lifecycle_stages
+
+    defaults = default_managed_lifecycle_stages()
+    result = run_track_b_managed_open_position_maintenance(
+        config=cfg,
+        lifecycle_stages=TrackBStrategyManagedPaperLifecycleStages(
+            entry_submitter=lambda _config, _intent: {},
+            exit_policy=defaults.exit_policy,
+            close_submitter=close_submitter,
+        ),
+        now=aware_now(),
+    )
+
+    assert submitted_lifecycle_ids == [current_lifecycle_id]
+    position = result.report["positions"][0]
+    assert position["lifecycle_id"] == current_lifecycle_id
+    assert position["close_intent_created"] is True
+    assert position["close_submitted"] is True
+    stale = result.report["maintenance_authority_diagnostics"]["stale_lifecycle_diagnostic_only"]
+    assert any(item.get("lifecycle_id") == stale_lifecycle_id for item in stale)
+
+
 def test_contract_close_lock_blocks_second_lifecycle_close_submit_same_contract(tmp_path: Path) -> None:
     cfg = seed_open_position(
         tmp_path,
@@ -690,11 +875,12 @@ def test_contract_close_lock_blocks_second_lifecycle_close_submit_same_contract(
     )
 
     assert len(submit_calls) == 1
-    first, second = result.report["positions"]
+    assert len(result.report["positions"]) == 1
+    first = result.report["positions"][0]
     assert first["close_submitted"] is True
-    assert second["close_submitted"] is False
-    assert second["blocker"]
-    assert second["managed_close_contract_lock"]["classification"] == "MANAGED_CLOSE_CONTRACT_LOCK_ACTIVE"
+    stale = result.report["maintenance_authority_diagnostics"]["stale_lifecycle_diagnostic_only"]
+    assert stale
+    assert stale[0]["classification"] == "STALE_LIFECYCLE_REPORT_DIAGNOSTIC_ONLY"
 
 
 @pytest.mark.parametrize(
@@ -849,9 +1035,12 @@ def test_stale_superseded_lifecycle_chain_cannot_submit_managed_close(tmp_path: 
     )
 
     position = result.report["positions"][0]
-    assert position["close_submitted"] is False
-    assert position["managed_close_contract_lock"]["classification"] == "MANAGED_CLOSE_CONTRACT_LOCK_ACTIVE"
-    assert position["managed_close_contract_lock"]["owner_lifecycle_id"] == canonical_lifecycle_id
+    assert position["lifecycle_id"] == canonical_lifecycle_id
+    assert position.get("close_intent_created") is not True
+    assert position.get("close_submitted") is not True
+    assert position["blocker"] == "OPEN_MANAGED lifecycle report is missing."
+    stale = result.report["maintenance_authority_diagnostics"]["stale_lifecycle_diagnostic_only"]
+    assert any(item.get("lifecycle_id") == stale_lifecycle_id for item in stale)
 
 
 @pytest.mark.parametrize(
