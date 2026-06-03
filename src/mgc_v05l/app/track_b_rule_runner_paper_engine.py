@@ -10,6 +10,7 @@ SignalPacket only when the rule emits a timestamp-coherent PAPER signal.
 from __future__ import annotations
 
 import json
+import os
 from dataclasses import dataclass
 from datetime import UTC, datetime, time, timedelta
 from decimal import Decimal
@@ -548,8 +549,8 @@ class TrackBRuleRunnerPaperStrategyEngine(StrategyEngine):
                 artifact_family=_broker_event_artifact_family(lane_id),
                 anchor_type=_broker_event_anchor_type(latest_report),
                 input_artifact_path=str(config.get("input_event_path") or ""),
-                runtime_profile=str(config.get("profile_name") or config.get("track_b_paper_stack_profile") or "UNKNOWN_RUNTIME_PROFILE"),
-                runtime_commit=str(config.get("runtime_git_head") or config.get("source_runtime_git_head") or "UNKNOWN_RUNTIME_COMMIT"),
+                runtime_profile=_broker_event_runtime_profile(config),
+                runtime_commit=_broker_event_runtime_commit(config),
                 bridge_submit_adapter_present=bridge_adapter_present,
                 promotion_ready=not bridge_adapter_present,
                 broker_authoritative=bridge_adapter_present,
@@ -866,6 +867,39 @@ def _broker_event_anchor_type(rule_report: Mapping[str, Any]) -> str | None:
     if "globex" in condition or "18:00" in condition:
         return "GLOBEX_1800_REOPEN"
     return None
+
+
+def _broker_event_runtime_profile(config: Mapping[str, Any]) -> str:
+    for value in (
+        config.get("profile_name"),
+        config.get("track_b_paper_stack_profile"),
+        os.environ.get("TRACK_B_PAPER_STACK_PROFILE"),
+    ):
+        text = str(value or "").strip()
+        if text:
+            return text
+    config_paths = str(
+        os.environ.get("MGC_PROBATIONARY_PAPER_CONFIG_PATHS")
+        or os.environ.get("MGC_HEADLESS_SUPERVISED_PAPER_CONFIG_PATHS")
+        or ""
+    )
+    for item in config_paths.split(":"):
+        name = Path(item).name
+        if name.startswith("paper_stack_") and name.endswith(".yaml"):
+            return name.removeprefix("paper_stack_").removesuffix(".yaml")
+    return "UNKNOWN_RUNTIME_PROFILE"
+
+
+def _broker_event_runtime_commit(config: Mapping[str, Any]) -> str:
+    for value in (
+        config.get("runtime_git_head"),
+        config.get("source_runtime_git_head"),
+        os.environ.get("MGC_TRACK_B_EXPECTED_SOURCE_COMMIT"),
+    ):
+        text = str(value or "").strip()
+        if text:
+            return text
+    return "UNKNOWN_RUNTIME_COMMIT"
 
 
 def _read_json(path: Path) -> dict[str, Any]:

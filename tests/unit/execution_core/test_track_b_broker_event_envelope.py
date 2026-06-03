@@ -40,7 +40,9 @@ def test_promotion_ready_accepted_intent_emits_standard_dry_run_envelope(tmp_pat
     assert result.envelope["qty"] == 1
     assert result.envelope["localSymbol"] == "MNQM6"
     assert result.envelope["conId"] == 770561201
+    assert result.envelope["account"] == "DUM882026"
     assert result.envelope["account_id"] == "DUM882026"
+    assert result.envelope["session"] == "LONDON_LATE"
     assert result.envelope["source_candle_timestamp"] == NOW.isoformat()
     assert result.envelope["exit_policy"]["managed_exit_policy_id"] == "GLOBEX_ACTIVE_EVIDENCE_TIMEBOX_60M_EXIT_V1"
     assert result.envelope["anchor_reference"]["anchor_type"] == "LONDON_LATE_0530_REFERENCE"
@@ -48,6 +50,21 @@ def test_promotion_ready_accepted_intent_emits_standard_dry_run_envelope(tmp_pat
     assert result.envelope["provenance"]["runtime_commit"] == "abc123"
     assert result.envelope["broker_submit_enabled"] is False
     assert result.envelope["ibkr_call_path_invoked"] is False
+
+
+def test_missing_session_is_derived_from_lane_metadata(tmp_path) -> None:  # type: ignore[no-untyped-def]
+    result = build_broker_event_envelope(
+        context=_context(session=""),
+        order_intent=_intent(),
+        rule_report=_rule_report(),
+        source_candle_timestamp=NOW,
+        config=BrokerEventEnvelopeConfig(repo_root=tmp_path),
+        generated_at=NOW,
+    )
+
+    assert result.envelope is not None
+    assert result.envelope["session"] == "LONDON_LATE"
+    assert result.envelope["account"] == result.envelope["account_id"] == "DUM882026"
 
 
 def test_broker_authoritative_lane_maps_to_existing_bridge_contract_without_dry_run_envelope() -> None:
@@ -110,12 +127,13 @@ def _context(
     artifact_family: str = "london_late_active_evidence",
     bridge_submit_adapter_present: bool = False,
     broker_authoritative: bool = False,
+    session: str = "LONDON_LATE",
 ) -> BrokerEventEnvelopeLaneContext:
     return BrokerEventEnvelopeLaneContext(
         lane_id=lane_id,
         strategy_id=strategy_id,
         lane_classification=lane_classification,
-        session="LONDON_LATE",
+        session=session,
         window="05:30-08:20_ET",
         artifact_family=artifact_family,
         anchor_type="LONDON_LATE_0530_REFERENCE",

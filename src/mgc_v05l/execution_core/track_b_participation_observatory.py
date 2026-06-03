@@ -15,6 +15,7 @@ from pathlib import Path
 from typing import Any, Mapping, Sequence
 
 from mgc_v05l.execution_core.track_b_atomic_io import write_json_atomic
+from mgc_v05l.execution_core.track_b_monitoring_honesty import one_shot_monitoring_contract
 
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
@@ -52,6 +53,7 @@ class TrackBParticipationObservatoryConfig:
     output_md_path: Path = DEFAULT_OUTPUT_MD
     event_jsonl_path: Path | None = DEFAULT_EVENT_JSONL
     max_bars_per_lane: int = 120
+    broker_envelope_freshness_seconds: float = 900.0
     write_event_stream: bool = False
     max_event_stream_rows: int = 5000
 
@@ -64,7 +66,8 @@ def build_track_b_participation_observatory(
     config: TrackBParticipationObservatoryConfig,
     now: datetime | None = None,
 ) -> dict[str, Any]:
-    actual_now = _ensure_utc(now or datetime.now(UTC))
+    started_at = _ensure_utc(now or datetime.now(UTC))
+    actual_now = started_at
     operator_status = _read_json(config.resolve(config.operator_status_path))
     lanes = [lane for lane in _list(operator_status.get("lanes")) if _is_active_paper_lane(lane)]
     bar_rows: list[dict[str, Any]] = []
@@ -75,12 +78,19 @@ def build_track_b_participation_observatory(
         for bar in bars[-max(int(config.max_bars_per_lane), 1) :]:
             bar_rows.append(_lane_bar_funnel(lane=lane, bar=bar, now=actual_now))
 
-    lane_reports = _lane_reports(lanes=lanes, bar_rows=bar_rows, now=actual_now)
+    lane_reports = _lane_reports(config=config, lanes=lanes, bar_rows=bar_rows, now=actual_now)
     first_fail_leaderboard = _first_fail_leaderboard(bar_rows)
     hidden_blockers = _hidden_blockers(lanes=lanes, bar_rows=bar_rows)
+    ended_at = _ensure_utc(datetime.now(UTC) if now is None else actual_now)
     report = {
         "schema_version": SCHEMA_VERSION,
         "generated_at": actual_now.isoformat(),
+        "monitoring_contract": one_shot_monitoring_contract(
+            started_at=started_at,
+            ended_at=ended_at,
+            command_or_process="mgc_v05l.execution_core.track_b_participation_observatory",
+            artifact_path=str(config.resolve(config.output_json_path)),
+        ).to_dict(),
         "read_only": True,
         "broker_mutation_allowed": False,
         "runtime_restart_allowed": False,
@@ -124,11 +134,17 @@ def write_track_b_participation_observatory(
 
 
 def render_participation_observatory_markdown(report: Mapping[str, Any]) -> str:
+    monitoring_contract = _mapping(report.get("monitoring_contract"))
     lines = [
         "# Track B Participation Observatory",
         "",
         f"- classification: `{report.get('classification')}`",
         f"- generated_at: `{report.get('generated_at')}`",
+        f"- monitoring_mode: `{monitoring_contract.get('monitoring_mode')}`",
+        f"- requested_duration_seconds: `{monitoring_contract.get('requested_duration_seconds')}`",
+        f"- actual_elapsed_seconds: `{monitoring_contract.get('actual_elapsed_seconds')}`",
+        f"- sample_count: `{monitoring_contract.get('sample_count')}`",
+        f"- truthful_summary_label: `{monitoring_contract.get('truthful_summary_label')}`",
         f"- active lanes: `{report.get('active_lane_count')}`",
         f"- bar evaluations: `{report.get('bar_evaluation_count')}`",
         "",
@@ -242,7 +258,13 @@ def _lane_bar_funnel(*, lane: Mapping[str, Any], bar: Mapping[str, Any], now: da
     }
 
 
-def _lane_reports(*, lanes: Sequence[Mapping[str, Any]], bar_rows: Sequence[Mapping[str, Any]], now: datetime) -> list[dict[str, Any]]:
+def _lane_reports(
+    *,
+    config: TrackBParticipationObservatoryConfig,
+    lanes: Sequence[Mapping[str, Any]],
+    bar_rows: Sequence[Mapping[str, Any]],
+    now: datetime,
+) -> list[dict[str, Any]]:
     reports: list[dict[str, Any]] = []
     for lane in lanes:
         lane_id = str(lane.get("lane_id") or "")
@@ -252,6 +274,7 @@ def _lane_reports(*, lanes: Sequence[Mapping[str, Any]], bar_rows: Sequence[Mapp
         for row in rows:
             reason = str(row.get("first_fail_reason") or "UNKNOWN")
             first_fail_counts[reason] = first_fail_counts.get(reason, 0) + 1
+        envelope_summary = _current_broker_envelope_summary(config=config, lane=lane, rows=rows, now=now)
         reports.append(
             {
                 "lane_id": lane_id,
@@ -266,10 +289,18 @@ def _lane_reports(*, lanes: Sequence[Mapping[str, Any]], bar_rows: Sequence[Mapp
                 "candidate_count": counts.get("CANDIDATE_CREATED", 0),
                 "intent_count": int(lane.get("intent_count") or counts.get("INTENT_CREATED", 0) or 0),
                 "submit_attempt_count": counts.get("SUBMIT_ATTEMPTED", 0),
+                "broker_submit_count": counts.get("SUBMIT_ATTEMPTED", 0),
                 "broker_ack_count": counts.get("BROKER_ACK", 0),
+                "broker_fill_count": counts.get("FILL", 0),
                 "fill_count": counts.get("FILL", 0),
                 "raw_lane_fill_count": int(lane.get("fill_count") or 0),
-                "broker_envelope_count": sum(1 for row in rows if row.get("broker_authoritative_envelope_produced") is True),
+                "broker_envelope_count": envelope_summary["broker_envelope_count"],
+                "broker_envelope_dry_run_count": envelope_summary["broker_envelope_dry_run_count"],
+                "broker_envelope_submit_enabled_count": envelope_summary["broker_envelope_submit_enabled_count"],
+                "broker_envelope_latest_path": envelope_summary["broker_envelope_latest_path"],
+                "broker_envelope_event_stream_path": envelope_summary["broker_envelope_event_stream_path"],
+                "simulated_submit_count": sum(1 for row in rows if row.get("simulated_paper_submit") is True),
+                "simulated_fill_count": sum(1 for row in rows if row.get("simulated_paper_fill") is True),
                 "simulated_paper_submit_count": sum(1 for row in rows if row.get("simulated_paper_submit") is True),
                 "simulated_paper_fill_count": sum(1 for row in rows if row.get("simulated_paper_fill") is True),
                 "funnel_counts": counts,
@@ -326,6 +357,128 @@ def _relevant_bars(*, config: TrackBParticipationObservatoryConfig, lane: Mappin
     return bars
 
 
+def _current_broker_envelope_summary(
+    *,
+    config: TrackBParticipationObservatoryConfig,
+    lane: Mapping[str, Any],
+    rows: Sequence[Mapping[str, Any]],
+    now: datetime,
+) -> dict[str, Any]:
+    row_envelope_count = sum(1 for row in rows if row.get("broker_authoritative_envelope_produced") is True)
+    lane_id = str(lane.get("lane_id") or "")
+    current_envelopes = _current_standardized_broker_envelopes(config=config, lane_id=lane_id, now=now)
+    return {
+        "broker_envelope_count": max(row_envelope_count, len(current_envelopes)),
+        "broker_envelope_dry_run_count": sum(1 for item in current_envelopes if str(item.get("envelope_mode") or "").upper() == "DRY_RUN")
+        or row_envelope_count,
+        "broker_envelope_submit_enabled_count": sum(1 for item in current_envelopes if item.get("broker_submit_enabled") is True),
+        "broker_envelope_latest_path": str(current_envelopes[-1].get("_source_path")) if current_envelopes else None,
+        "broker_envelope_event_stream_path": str(current_envelopes[-1].get("_event_stream_path")) if current_envelopes else None,
+    }
+
+
+def _current_standardized_broker_envelopes(
+    *,
+    config: TrackBParticipationObservatoryConfig,
+    lane_id: str,
+    now: datetime,
+) -> list[dict[str, Any]]:
+    if not lane_id:
+        return []
+    envelopes: dict[str, dict[str, Any]] = {}
+    for path in _broker_envelope_candidate_paths(config=config, lane_id=lane_id):
+        payload = _read_json(path)
+        if _standardized_envelope_is_current(payload, lane_id=lane_id, now=now, config=config):
+            item = dict(payload)
+            item["_source_path"] = str(path)
+            envelopes[_envelope_identity(item)] = item
+        event_path = path.with_name("broker_event_envelope_events.jsonl")
+        for event in _read_jsonl(event_path):
+            if _standardized_envelope_is_current(event, lane_id=lane_id, now=now, config=config):
+                item = dict(event)
+                item["_source_path"] = str(path)
+                item["_event_stream_path"] = str(event_path)
+                envelopes[_envelope_identity(item)] = item
+    return sorted(envelopes.values(), key=lambda item: str(item.get("generated_at") or ""))
+
+
+def _broker_envelope_candidate_paths(*, config: TrackBParticipationObservatoryConfig, lane_id: str) -> list[Path]:
+    root = config.resolve(Path("outputs/track_b_execution_core"))
+    family = _broker_envelope_artifact_family(lane_id)
+    paths: list[Path] = []
+    if family:
+        paths.append(root / family / f"latest_{lane_id}_event_envelope.json")
+    paths.append(root / "broker_event_envelopes" / lane_id / "latest_event_envelope.json")
+    return list(dict.fromkeys(paths))
+
+
+def _broker_envelope_artifact_family(lane_id: str) -> str | None:
+    lowered = str(lane_id or "").lower()
+    if "london_open_active_participation" in lowered:
+        return "london_open_active_evidence"
+    if "london_late_active_participation" in lowered:
+        return "london_late_active_evidence"
+    if "_us_active_participation_" in lowered:
+        return "us_active_evidence"
+    if "globex_active_participation" in lowered:
+        return "globex_active_evidence"
+    return None
+
+
+def _standardized_envelope_is_current(
+    envelope: Mapping[str, Any],
+    *,
+    lane_id: str,
+    now: datetime,
+    config: TrackBParticipationObservatoryConfig,
+) -> bool:
+    if envelope.get("schema_version") != "track_b_broker_event_envelope_v1":
+        return False
+    if str(envelope.get("classification") or "").upper() != "BROKER_EVENT_ENVELOPE_READY_DRY_RUN":
+        return False
+    if str(envelope.get("lane_id") or "") != lane_id:
+        return False
+    generated_at = _parse_time(envelope.get("generated_at"))
+    if generated_at is None:
+        return False
+    age = (now - generated_at).total_seconds()
+    if age < 0:
+        return False
+    if age > float(config.broker_envelope_freshness_seconds):
+        return False
+    if envelope.get("ibkr_call_path_invoked") is True:
+        return False
+    return True
+
+
+def _envelope_identity(envelope: Mapping[str, Any]) -> str:
+    return str(
+        envelope.get("source_order_intent_id")
+        or envelope.get("trade_id")
+        or envelope.get("lifecycle_id")
+        or envelope.get("generated_at")
+        or id(envelope)
+    )
+
+
+def _read_jsonl(path: Path) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return rows
+    for line in lines:
+        if not line.strip():
+            continue
+        try:
+            payload = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(payload, Mapping):
+            rows.append(dict(payload))
+    return rows
+
+
 def _synthetic_lane_bar(lane: Mapping[str, Any]) -> dict[str, Any]:
     return {
         "symbol": lane.get("symbol"),
@@ -359,14 +512,26 @@ def _conversion_summary(lane_reports: Sequence[Mapping[str, Any]]) -> dict[str, 
     submits = sum(int(row.get("submit_attempt_count") or 0) for row in lane_reports)
     fills = sum(int(row.get("fill_count") or 0) for row in lane_reports)
     broker_envelopes = sum(int(row.get("broker_envelope_count") or 0) for row in lane_reports)
+    broker_envelope_dry_runs = sum(int(row.get("broker_envelope_dry_run_count") or 0) for row in lane_reports)
+    broker_envelope_submit_enabled = sum(
+        int(row.get("broker_envelope_submit_enabled_count") or 0) for row in lane_reports
+    )
     simulated_submits = sum(int(row.get("simulated_paper_submit_count") or 0) for row in lane_reports)
     simulated_fills = sum(int(row.get("simulated_paper_fill_count") or 0) for row in lane_reports)
     return {
         "candidate_count": candidates,
         "intent_count": intents,
         "broker_authoritative_envelope_count": broker_envelopes,
+        "broker_envelope_count": broker_envelopes,
+        "broker_envelope_dry_run_count": broker_envelope_dry_runs,
+        "broker_envelope_submit_enabled_count": broker_envelope_submit_enabled,
         "submit_attempt_count": submits,
+        "broker_submit_count": submits,
+        "broker_ack_count": sum(int(row.get("broker_ack_count") or 0) for row in lane_reports),
         "fill_count": fills,
+        "broker_fill_count": fills,
+        "simulated_submit_count": simulated_submits,
+        "simulated_fill_count": simulated_fills,
         "simulated_paper_submit_count": simulated_submits,
         "simulated_paper_fill_count": simulated_fills,
         "candidate_to_intent_rate": _ratio(intents, candidates),

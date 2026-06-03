@@ -272,6 +272,9 @@ def _envelope_payload(
     digest = hashlib.sha256(identity_seed.encode("utf-8")).hexdigest()
     trade_id = f"trade_broker_event_{digest[:16]}"
     lifecycle_id = f"reserved_submit_{context.lane_id}_{source_ts.strftime('%Y%m%dT%H%M%S%fZ')}_{digest[:12]}"
+    session = _session_for_context(context)
+    runtime_profile = _normalized_context_value(context.runtime_profile, "UNKNOWN_RUNTIME_PROFILE")
+    runtime_commit = _normalized_context_value(context.runtime_commit, "UNKNOWN_RUNTIME_COMMIT")
     return {
         "schema_version": SCHEMA_VERSION,
         "classification": BROKER_EVENT_ENVELOPE_READY_DRY_RUN,
@@ -302,8 +305,9 @@ def _envelope_payload(
         "lifecycle_id": lifecycle_id,
         "lane_id": context.lane_id,
         "strategy_id": context.strategy_id,
-        "session": context.session,
+        "session": session,
         "window": context.window,
+        "account": cfg.account_id,
         "account_id": cfg.account_id,
         "symbol": contract.instrument_family,
         "instrument_family": contract.instrument_family,
@@ -339,8 +343,8 @@ def _envelope_payload(
         "conflict_group": contract.conflict_group,
         "provenance": {
             "adapter": "track_b_broker_event_envelope",
-            "runtime_profile": context.runtime_profile or "UNKNOWN_RUNTIME_PROFILE",
-            "runtime_commit": context.runtime_commit or "UNKNOWN_RUNTIME_COMMIT",
+            "runtime_profile": runtime_profile,
+            "runtime_commit": runtime_commit,
             "generated_at": generated_at.isoformat(),
             "input_artifact_path": context.input_artifact_path,
             "source_rule_report": dict(rule_report),
@@ -390,7 +394,9 @@ def _missing_required_fields(envelope: Mapping[str, Any]) -> list[str]:
         "symbol",
         "localSymbol",
         "conId",
+        "account",
         "account_id",
+        "session",
         "source_candle_timestamp",
         "exit_policy",
         "provenance",
@@ -405,6 +411,31 @@ def _missing_required_fields(envelope: Mapping[str, Any]) -> list[str]:
         if provenance.get(key) in (None, ""):
             missing.append(f"provenance.{key}")
     return missing
+
+
+def _session_for_context(context: BrokerEventEnvelopeLaneContext) -> str:
+    explicit = str(context.session or "").strip()
+    if explicit:
+        return explicit
+    lane_id = str(context.lane_id or "").lower()
+    window = str(context.window or "").lower()
+    anchor = str(context.anchor_type or "").upper()
+    if "london_late" in lane_id or "london_late" in anchor or "05:30" in window:
+        return "LONDON_LATE"
+    if "london_open" in lane_id or "london_open" in anchor or "03:00" in window:
+        return "LONDON_OPEN"
+    if "_us_" in lane_id or "09:30" in window:
+        return "US"
+    if "globex" in lane_id or "18:00" in window:
+        return "GLOBEX"
+    return "UNKNOWN_SESSION"
+
+
+def _normalized_context_value(value: str | None, unknown: str) -> str:
+    text = str(value or "").strip()
+    if not text or text == unknown:
+        return unknown
+    return text
 
 
 def _intent_value(order_intent: OrderIntent | Mapping[str, Any], key: str) -> str | None:

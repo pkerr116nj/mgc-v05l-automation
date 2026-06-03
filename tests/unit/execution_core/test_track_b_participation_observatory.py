@@ -252,6 +252,57 @@ def test_stale_broker_event_envelope_is_not_counted_current(tmp_path: Path) -> N
     assert report["conversion"]["broker_authoritative_envelope_count"] == 0
 
 
+def test_current_standardized_envelope_counted_when_sampled_bar_misses_source_bar(tmp_path: Path) -> None:
+    sampled_bar_ts = "2026-06-01T14:00:00+00:00"
+    envelope_source_ts = "2026-06-01T13:55:00+00:00"
+    lane_id = "mnq_london_late_active_participation_short"
+    lane = _lane(
+        bar_ts=sampled_bar_ts,
+        lane_id=lane_id,
+        rule_report={"classification": "TRACK_B_PAPER_ACTIVE_EVIDENCE_NO_SIGNAL", "primary_blocker": "already_in_position"},
+    )
+    _write_fixture(tmp_path, [lane], {"MNQ": [sampled_bar_ts]})
+    _write_standardized_envelope(
+        tmp_path,
+        lane_id=lane_id,
+        generated_at=NOW.isoformat(),
+        source_candle_timestamp=envelope_source_ts,
+    )
+
+    report = _build(tmp_path)
+    lane_report = report["lane_reports"][0]
+
+    assert report["bar_evaluations"][0]["broker_authoritative_envelope_produced"] is False
+    assert lane_report["broker_envelope_count"] == 1
+    assert lane_report["broker_envelope_dry_run_count"] == 1
+    assert lane_report["broker_envelope_submit_enabled_count"] == 0
+    assert lane_report["broker_submit_count"] == 0
+    assert lane_report["broker_fill_count"] == 0
+    assert report["conversion"]["broker_envelope_count"] == 1
+    assert report["conversion"]["broker_envelope_dry_run_count"] == 1
+    assert report["conversion"]["broker_envelope_submit_enabled_count"] == 0
+    assert report["conversion"]["broker_submit_count"] == 0
+    assert report["conversion"]["broker_fill_count"] == 0
+
+
+def test_stale_standardized_envelope_artifact_is_ignored(tmp_path: Path) -> None:
+    bar_ts = "2026-06-01T14:00:00+00:00"
+    lane_id = "mnq_london_late_active_participation_short"
+    lane = _lane(bar_ts=bar_ts, lane_id=lane_id, rule_report={"classification": "TRACK_B_PAPER_ACTIVE_EVIDENCE_SIGNAL"})
+    _write_fixture(tmp_path, [lane], {"MNQ": [bar_ts]})
+    _write_standardized_envelope(
+        tmp_path,
+        lane_id=lane_id,
+        generated_at="2026-06-01T13:00:00+00:00",
+        source_candle_timestamp="2026-06-01T13:00:00+00:00",
+    )
+
+    report = _build(tmp_path)
+
+    assert report["lane_reports"][0]["broker_envelope_count"] == 0
+    assert report["conversion"]["broker_envelope_count"] == 0
+
+
 def test_lane_silent_during_active_window_flagged(tmp_path: Path) -> None:
     bar_ts = "2026-06-01T14:00:00+00:00"
     lane = _lane(
@@ -283,9 +334,27 @@ def test_report_aggregation_and_bounded_event_stream(tmp_path: Path) -> None:
     json_path, md_path = write_track_b_participation_observatory(config=config, report=report)
 
     assert json.loads(json_path.read_text(encoding="utf-8"))["schema_version"] == "track_b_participation_observatory_v1"
-    assert "Track B Participation Observatory" in md_path.read_text(encoding="utf-8")
+    md = md_path.read_text(encoding="utf-8")
+    assert "Track B Participation Observatory" in md
+    assert "monitoring_mode: `ONE_SHOT_STATUS_CHECK`" in md
+    assert "truthful_summary_label: `checked current status`" in md
     assert len((tmp_path / "out/events.jsonl").read_text(encoding="utf-8").splitlines()) == 1
     assert report["conversion"]["candidate_count"] == 1
+
+
+def test_observatory_report_declares_one_shot_monitoring_contract(tmp_path: Path) -> None:
+    bar_ts = "2026-06-01T14:00:00+00:00"
+    lane = _lane(bar_ts=bar_ts, rule_report={"classification": "TRACK_B_PAPER_ACTIVE_EVIDENCE_SIGNAL"})
+    _write_fixture(tmp_path, [lane], {"MNQ": [bar_ts]})
+
+    report = _build(tmp_path)
+
+    contract = report["monitoring_contract"]
+    assert contract["monitoring_mode"] == "ONE_SHOT_STATUS_CHECK"
+    assert contract["continuous_sampled_or_one_shot"] == "one-shot"
+    assert contract["sample_count"] == 1
+    assert contract["truthful_summary_label"] == "checked current status"
+    assert contract["claim_guardrails"]["observed_for_15_minutes_allowed"] is False
 
 
 def _build(tmp_path: Path) -> dict[str, object]:
@@ -348,6 +417,38 @@ def _write_fixture(tmp_path: Path, lanes: list[dict[str, object]], bars_by_symbo
             tmp_path / f"outputs/track_b_execution_core/phase1_runtime_market_data/{symbol}/1m/latest_runtime_candles.json",
             {"bars": [{"bar_end": bar_ts, "close": "100.0"} for bar_ts in bars]},
         )
+
+
+def _write_standardized_envelope(
+    tmp_path: Path,
+    *,
+    lane_id: str,
+    generated_at: str,
+    source_candle_timestamp: str,
+) -> None:
+    payload: dict[str, object] = {
+        "schema_version": "track_b_broker_event_envelope_v1",
+        "classification": "BROKER_EVENT_ENVELOPE_READY_DRY_RUN",
+        "generated_at": generated_at,
+        "envelope_mode": "DRY_RUN",
+        "broker_submit_enabled": False,
+        "submit_allowed": False,
+        "ibkr_call_path_invoked": False,
+        "lane_id": lane_id,
+        "strategy_id": "PAPER_ACTIVE_EVIDENCE_MNQ_LONDON_LATE_PARTICIPATION_SHORT_V1",
+        "trade_id": "trade-envelope-current",
+        "lifecycle_id": "reserved-submit-envelope-current",
+        "source_order_intent_id": "MNQ|1m|2026-06-01T13:55:00Z|SELL_TO_OPEN",
+        "source_candle_timestamp": source_candle_timestamp,
+    }
+    latest = (
+        tmp_path
+        / "outputs/track_b_execution_core/london_late_active_evidence"
+        / f"latest_{lane_id}_event_envelope.json"
+    )
+    event_stream = latest.with_name("broker_event_envelope_events.jsonl")
+    _write_json(latest, payload)
+    event_stream.write_text(json.dumps(payload) + "\n", encoding="utf-8")
 
 
 def _write_json(path: Path, payload: dict[str, object]) -> None:
