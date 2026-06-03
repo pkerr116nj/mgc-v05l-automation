@@ -1230,6 +1230,124 @@ def test_duplicate_lifecycle_only_mes_chain_superseded_by_broker_backed_closed_f
     assert superseded[0]["superseding_trade_id"] == "trade_3018ab96-7608-4e40-877a-ed0d7b995184"
 
 
+def test_broker_backed_duplicate_submit_owner_chain_superseded_by_closed_flat_chain(tmp_path: Path) -> None:
+    config = _write_base_artifacts(tmp_path)
+    _write_registry_open_managed_trade(
+        config,
+        trade_id="trade_submit_owner_mes_globex_short",
+        lifecycle_id="reserved_submit_mes_globex_active_participation_short_1",
+        lane_id="mes_globex_active_participation_short",
+        strategy_id="mes_globex_active_participation_short",
+        symbol="MES",
+        local_symbol="MESM6",
+        con_id=770561194,
+        expiry="202606",
+        order_id="1",
+        client_id="10922",
+        entry_perm_id="1955790779",
+        entry_exec_id="0000e1a7.mes.current.01.01",
+    )
+    _write_registry_open_managed_trade(
+        config,
+        trade_id="trade_3018ab96-7608-4e40-877a-ed0d7b995184",
+        lifecycle_id="reserved_submit_mes_globex_active_participation_short_20260601T220620676808Z_e3785d1f3061",
+        lane_id="mes_globex_active_participation_short",
+        strategy_id="mes_globex_active_participation_short",
+        symbol="MES",
+        local_symbol="MESM6",
+        con_id=770561194,
+        expiry="20260618",
+        include_close_fill=True,
+        order_id="1",
+        client_id="10922",
+        entry_perm_id="1955790779",
+        entry_exec_id="0000e1a7.6a2d1b87.01.01",
+    )
+    _write_broker_truth(config)
+
+    report = reconcile_track_b_paper_broker_truth(config=config, now=NOW)
+
+    assert report["registry_reconciliation"]["classification"] == "REGISTRY_RECONCILIATION_MATCHED"
+    assert report["current_scope_review_required_count"] == 0
+    superseded = report["registry_reconciliation"]["superseded_lifecycle_only_records"]
+    assert len(superseded) == 1
+    assert superseded[0]["classification"] == "DUPLICATE_SUPERSEDED_FULL_AUDIT_ONLY"
+    assert superseded[0]["trade_id"] == "trade_submit_owner_mes_globex_short"
+    assert superseded[0]["broker_backed_entry"] is True
+    assert superseded[0]["superseding_trade_id"] == "trade_3018ab96-7608-4e40-877a-ed0d7b995184"
+
+
+def test_open_registry_row_suppressed_by_scoped_remediation_terminal_proof(tmp_path: Path) -> None:
+    config = _write_base_artifacts(tmp_path)
+    trade_id = "trade_bb50eab2-ca16-460d-98ff-21a9ada8083d"
+    lifecycle_id = "reserved_submit_mes_us_active_participation_long_20260602T185515869214Z_feff416a9245"
+    _write_registry_open_managed_trade(
+        config,
+        trade_id=trade_id,
+        lifecycle_id=lifecycle_id,
+        lane_id="mes_us_active_participation_long",
+        strategy_id="mes_us_active_participation_long",
+        symbol="MES",
+        local_symbol="MESM6",
+        con_id=770561194,
+        expiry="20260618",
+        order_id="2",
+        client_id="10844",
+        entry_perm_id="665735688",
+        entry_exec_id="0000e1a7.6a2e7d49.01.01",
+    )
+    _write_jsonl(
+        config.ledger_root / "track_b_paper_trade_ledger.jsonl",
+        [
+            {
+                "ledger_schema_version": "track_b_paper_trade_ledger_v1",
+                "record_type": "ARTIFACT_RECONCILIATION",
+                "trade_id": f"{trade_id}:duplicate_exit_overfill_scoped_remediation_review",
+                "lifecycle_id": lifecycle_id,
+                "strategy_id": "mes_us_active_participation_long",
+                "instrument_family": "MES",
+                "contract_key": "MES-202606",
+                "local_symbol": "MESM6",
+                "con_id": 770561194,
+                "account_id": "DUM882026",
+                "reconciliation_action": "DUPLICATE_EXIT_OVERFILL_SCOPED_REMEDIATION_REVIEWED",
+                "new_artifact_classification": "DUPLICATE_EXIT_OVERFILL_SCOPED_REMEDIATION_REVIEWED",
+                "final_position_status": "DUPLICATE_EXIT_OVERFILL_SCOPED_REMEDIATION_REVIEWED",
+                "broker_reconciled": True,
+                "historical_broker_backed_exposure_confirmed": True,
+                "remediation_broker_order_id": "7",
+                "remediation_perm_id": "665807058",
+                "remediation_execution_id": "0000e1a7.6a2eb979.01.01",
+                "remediation_fill_time": "2026-06-03T00:41:49.494075+00:00",
+                "remediation_fill_price": "7625.0",
+                "broker_flat": True,
+                "open_orders_zero": True,
+                "guardian_remediation_artifact_path": str(
+                    config.repo_root
+                    / "outputs/track_b_execution_core/broker_position_guardian/latest_scoped_guardian_remediation_filled_normalized.json"
+                ),
+                "broker_positions_snapshot_path": str(config.broker_truth_root / "ibkr_positions_snapshot.json"),
+                "broker_open_orders_snapshot_path": str(config.broker_truth_root / "ibkr_open_orders_snapshot.json"),
+                "source": "BROKER_POSITION_GUARDIAN_SCOPED_REMEDIATION_FILLED_AND_BROKER_FLAT_TRUTH",
+                "created_at": NOW.isoformat(),
+            }
+        ],
+    )
+    _write_broker_truth(config)
+
+    report = reconcile_track_b_paper_broker_truth(config=config, now=NOW)
+
+    assert report["registry_reconciliation"]["classification"] == "REGISTRY_RECONCILIATION_MATCHED"
+    assert report["current_scope_review_required_count"] == 0
+    superseded = report["registry_reconciliation"]["superseded_lifecycle_only_records"]
+    assert len(superseded) == 1
+    assert superseded[0]["classification"] == "BROKER_FLAT_EVIDENCE_GATED_CLEANUP_TERMINAL_FULL_AUDIT_ONLY"
+    assert superseded[0]["trade_id"] == trade_id
+    assert superseded[0]["broker_backed_entry"] is True
+    assert superseded[0]["broker_backed_exit"] is False
+    assert superseded[0]["remediation_terminal"]["remediation_execution_id"] == "0000e1a7.6a2eb979.01.01"
+
+
 def test_stale_derived_registry_chain_without_current_broker_linkage_is_full_audit_only(tmp_path: Path) -> None:
     config = _write_base_artifacts(tmp_path)
     source_path = config.repo_root / "outputs/track_b_execution_core/track_b_strategy_managed_paper_lifecycle/reserved_submit_atp_companion_v1_asia_us_1/track_b_strategy_managed_paper_lifecycle_report.json"
@@ -3688,3 +3806,11 @@ def _write_market_price(config: ReconciliationConfig, root: str, *, close: float
 def _write_json(path: Path, payload: dict[str, object]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
+
+
+def _write_jsonl(path: Path, rows: list[dict[str, object]]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        "".join(json.dumps(row, sort_keys=True) + "\n" for row in rows),
+        encoding="utf-8",
+    )

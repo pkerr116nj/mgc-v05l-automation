@@ -878,10 +878,11 @@ def _scope_superseded_lifecycle_only_registry_records(
         for record in records
         if _registry_record_has_broker_backed_flat_exit(record)
     ]
+    remediation_terminal_records = _load_evidence_gated_remediation_terminal_records(config=config)
     current_scope: list[TradeRegistryRecord] = []
     superseded: list[dict[str, Any]] = []
     for record in active_records:
-        if not _registry_record_is_lifecycle_only_open(record):
+        if not _registry_record_is_supersedable_open_projection(record):
             current_scope.append(record)
             continue
         if _record_linked_to_current_lifecycle_position(record, lifecycle_positions):
@@ -901,6 +902,23 @@ def _scope_superseded_lifecycle_only_registry_records(
                         "NO_OPEN_ORDER_PROOF_CONFIRMED",
                     ],
                     superseding_record=superseding_record,
+                )
+            )
+            continue
+
+        remediation_terminal = _evidence_gated_remediation_terminal_for_record(record, remediation_terminal_records)
+        if remediation_terminal is not None:
+            superseded.append(
+                _superseded_lifecycle_only_record_payload(
+                    record=record,
+                    classification="BROKER_FLAT_EVIDENCE_GATED_CLEANUP_TERMINAL_FULL_AUDIT_ONLY",
+                    reason_codes=[
+                        "EVIDENCE_GATED_BROKER_FLAT_REMEDIATION_SUPERSEDES_OPEN_REGISTRY_ROW",
+                        "BROKER_FLAT_PROOF_CONFIRMED",
+                        "NO_OPEN_ORDER_PROOF_CONFIRMED",
+                        "BROKER_BACKED_EXIT_EVIDENCE_NOT_CLAIMED",
+                    ],
+                    remediation_terminal=remediation_terminal,
                 )
             )
             continue
@@ -929,14 +947,14 @@ def _scope_superseded_lifecycle_only_registry_records(
     }
 
 
-def _registry_record_is_lifecycle_only_open(record: TradeRegistryRecord) -> bool:
+def _registry_record_is_supersedable_open_projection(record: TradeRegistryRecord) -> bool:
     if record.current_state not in {
         TradeCurrentState.OPEN_MANAGED,
         TradeCurrentState.EXIT_DUE,
         TradeCurrentState.WORKING_EXIT,
     }:
         return False
-    return record.broker_backed_entry is False and record.broker_backed_exit is False
+    return record.broker_backed_exit is False
 
 
 def _registry_record_has_broker_backed_flat_exit(record: TradeRegistryRecord) -> bool:
@@ -971,6 +989,94 @@ def _superseding_broker_backed_flat_record(
         and _registry_records_share_entry_order_context(record, candidate)
     ]
     return matches[0] if len(matches) == 1 else None
+
+
+def _load_evidence_gated_remediation_terminal_records(*, config: ReconciliationConfig) -> tuple[dict[str, Any], ...]:
+    ledger_path = config.ledger_root / "track_b_paper_trade_ledger.jsonl"
+    if not ledger_path.exists():
+        return ()
+    records: list[dict[str, Any]] = []
+    try:
+        lines = ledger_path.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return ()
+    for line in lines:
+        if not line.strip():
+            continue
+        try:
+            payload = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(payload, Mapping):
+            continue
+        if _ledger_record_has_evidence_gated_remediation_terminal(payload):
+            records.append(dict(payload))
+    return tuple(records)
+
+
+def _ledger_record_has_evidence_gated_remediation_terminal(payload: Mapping[str, Any]) -> bool:
+    if payload.get("source") != "BROKER_POSITION_GUARDIAN_SCOPED_REMEDIATION_FILLED_AND_BROKER_FLAT_TRUTH":
+        return False
+    if payload.get("broker_flat") is not True or payload.get("open_orders_zero") is not True:
+        return False
+    if payload.get("historical_broker_backed_exposure_confirmed") is not True:
+        return False
+    if not _valid_registry_identity_text(payload.get("lifecycle_id")):
+        return False
+    if not _valid_registry_identity_text(payload.get("account_id")):
+        return False
+    if not _valid_registry_identity_text(payload.get("local_symbol")):
+        return False
+    if _int_or_none(payload.get("con_id")) is None:
+        return False
+    if not _valid_registry_identity_text(payload.get("broker_positions_snapshot_path")):
+        return False
+    if not _valid_registry_identity_text(payload.get("broker_open_orders_snapshot_path")):
+        return False
+    return all(
+        _valid_registry_identity_text(payload.get(key))
+        for key in (
+            "remediation_broker_order_id",
+            "remediation_perm_id",
+            "remediation_execution_id",
+            "remediation_fill_time",
+        )
+    )
+
+
+def _evidence_gated_remediation_terminal_for_record(
+    record: TradeRegistryRecord,
+    remediation_records: Sequence[Mapping[str, Any]],
+) -> Mapping[str, Any] | None:
+    matches = [
+        remediation
+        for remediation in remediation_records
+        if _remediation_record_matches_registry_record(record=record, remediation=remediation)
+    ]
+    return matches[0] if len(matches) == 1 else None
+
+
+def _remediation_record_matches_registry_record(
+    *,
+    record: TradeRegistryRecord,
+    remediation: Mapping[str, Any],
+) -> bool:
+    owner = record.ownership_identity
+    if owner is None:
+        return False
+    remediation_trade_id = _valid_registry_identity_text(remediation.get("trade_id"))
+    if remediation_trade_id:
+        base_trade_id = remediation_trade_id.split(":", 1)[0]
+        if base_trade_id != record.trade_id:
+            return False
+    lifecycle_id = _valid_registry_identity_text(remediation.get("lifecycle_id"))
+    if owner.lifecycle_id and lifecycle_id and lifecycle_id != owner.lifecycle_id:
+        return False
+    return (
+        _valid_registry_identity_text(remediation.get("account_id")) == owner.account_id
+        and _int_or_none(remediation.get("con_id")) == owner.con_id
+        and _valid_registry_identity_text(remediation.get("local_symbol")).upper() == owner.local_symbol.upper()
+    )
 
 
 def _registry_records_share_contract_account(left: TradeRegistryRecord, right: TradeRegistryRecord) -> bool:
@@ -1095,6 +1201,7 @@ def _superseded_lifecycle_only_record_payload(
     reason_codes: Sequence[str],
     superseding_record: TradeRegistryRecord | None = None,
     stale_source: Mapping[str, Any] | None = None,
+    remediation_terminal: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     payload: dict[str, Any] = {
         "classification": classification,
@@ -1112,6 +1219,8 @@ def _superseded_lifecycle_only_record_payload(
         payload["superseding_record"] = _registry_record_event_row(superseding_record)
     if stale_source is not None:
         payload["stale_source"] = dict(stale_source)
+    if remediation_terminal is not None:
+        payload["remediation_terminal"] = dict(remediation_terminal)
     return payload
 
 
