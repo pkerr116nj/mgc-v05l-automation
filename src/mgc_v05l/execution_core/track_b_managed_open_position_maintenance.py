@@ -42,6 +42,7 @@ from .track_b_position_management_manifest import (
 )
 from .track_b_strategy_managed_paper_lifecycle import (
     DEFAULT_TRACK_B_STRATEGY_MANAGED_PAPER_LIFECYCLE_OUTPUT_ROOT,
+    MANAGED_CLOSE_CONTRACT_LOCK_ACTIVE,
     TrackBManagedPaperLifecycleClassification,
     TrackBStrategyManagedPaperLifecycleConfig,
     TrackBStrategyManagedPaperLifecycleResult,
@@ -111,12 +112,21 @@ def run_track_b_managed_open_position_maintenance(
     trade_summary = _read_json(actual_config.paper_trade_summary_json)
     managed_position_projection = _read_json(actual_config.managed_position_projection_json)
     projected_positions = _managed_position_projection_by_lifecycle_id(managed_position_projection)
+    projected_positions_by_contract = _managed_position_projection_by_contract_key(managed_position_projection)
+    canonical_owner_by_contract = _canonical_close_owner_by_contract(projected_positions_by_contract)
     source_paths = [
         Path(str(item))
         for item in live_position_status.get("source_artifact_paths", [])
         if str(item).endswith(".json")
     ]
     open_positions = _open_positions(live_position_status)
+    preexisting_close_locks = _preexisting_managed_close_contract_locks(
+        open_positions=open_positions,
+        source_paths=source_paths,
+        trade_summary=trade_summary,
+        lifecycle_output_root=actual_config.managed_lifecycle_output_root,
+    )
+    runtime_close_locks: dict[str, dict[str, Any]] = {}
     lifecycle_results: list[TrackBStrategyManagedPaperLifecycleResult] = []
     position_reports: list[dict[str, Any]] = []
 
@@ -176,6 +186,27 @@ def run_track_b_managed_open_position_maintenance(
             continue
 
         projected_position = projected_positions.get(lifecycle_id, {})
+        managed_close_contract_key = _managed_close_contract_key(
+            lifecycle_report=lifecycle_report,
+            position=position,
+            projected_position=projected_position,
+        )
+        close_contract_lock = _managed_close_contract_lock_for_lifecycle(
+            contract_key=managed_close_contract_key,
+            lifecycle_id=lifecycle_id,
+            preexisting_locks=preexisting_close_locks,
+            runtime_locks=runtime_close_locks,
+        ) or _managed_close_ownership_lock_for_lifecycle(
+            contract_key=managed_close_contract_key,
+            lifecycle_id=lifecycle_id,
+            positions_by_contract=projected_positions_by_contract,
+            canonical_owner_by_contract=canonical_owner_by_contract,
+        )
+        broker_position_snapshot = _broker_position_snapshot_for_close(
+            lifecycle_report=lifecycle_report,
+            position=position,
+            projected_position=projected_position,
+        )
         instrument = str(position.get("instrument_family") or lifecycle_report.get("instrument_family") or "")
         completed_payload = _read_json(_completed_5m_path(actual_config.live_runtime_feed_output_root, instrument))
         live_1m_payload = _read_json(_live_1m_path(actual_config.live_runtime_feed_output_root, instrument))
@@ -315,6 +346,13 @@ def run_track_b_managed_open_position_maintenance(
             broker_truth_state=broker_state_value.value,
             suppress_discretionary_exit=suppress_discretionary_exit,
         )
+        lifecycle_config = TrackBStrategyManagedPaperLifecycleConfig(
+            **{
+                **lifecycle_config.__dict__,
+                "managed_close_contract_lock": close_contract_lock,
+                "managed_close_broker_position_snapshot": broker_position_snapshot,
+            }
+        )
         if actual_config.submit_enabled is not True:
             position_reports.append(
                 {
@@ -378,6 +416,15 @@ def run_track_b_managed_open_position_maintenance(
             )
         close_submit = result.report.get("close_submit_attempt") or {}
         close_fill = result.report.get("close_fill") or {}
+        if managed_close_contract_key and _close_submit_or_fill_blocks_same_contract(close_submit, close_fill):
+            runtime_close_locks[managed_close_contract_key] = _managed_close_contract_lock(
+                lifecycle_id=lifecycle_id,
+                trade_id=str(lifecycle_report.get("trade_id") or ""),
+                reason="Managed close submit/fill for this contract is already pending settlement in this maintenance pass.",
+                source="runtime_maintenance_pass",
+                close_submit=close_submit,
+                close_fill=close_fill,
+            )
         position_reports.append(
             {
                 **base_position_report,
@@ -417,6 +464,8 @@ def run_track_b_managed_open_position_maintenance(
                 "close_fill_timestamp": close_fill.get("filled_at"),
                 "exit_price": close_fill.get("price") or close_fill.get("avg_price"),
                 "realized_pnl": result.report.get("realized_pnl"),
+                "managed_close_contract_lock": close_contract_lock,
+                "managed_close_broker_position_snapshot": broker_position_snapshot,
                 "final_classification": result.report.get("paper_lifecycle_classification"),
                 "final_position_status": result.report.get("final_position_status"),
                 "review_required": result.report.get("review_required"),
@@ -454,6 +503,13 @@ def _open_positions(live_position_status: Mapping[str, Any]) -> list[dict[str, A
     for value in (live_position_status.get("positions_by_instrument") or {}).values():
         if isinstance(value, Mapping) and value.get("lifecycle_id"):
             positions.append(dict(value))
+    for value in live_position_status.get("positions") or []:
+        if not isinstance(value, Mapping) or not value.get("lifecycle_id"):
+            continue
+        lifecycle_id = str(value.get("lifecycle_id") or "")
+        if any(str(item.get("lifecycle_id") or "") == lifecycle_id for item in positions):
+            continue
+        positions.append(dict(value))
     return positions
 
 
@@ -469,6 +525,250 @@ def _managed_position_projection_by_lifecycle_id(payload: Mapping[str, Any]) -> 
         if lifecycle_id:
             projected[lifecycle_id] = dict(item)
     return projected
+
+
+def _managed_position_projection_by_contract_key(payload: Mapping[str, Any]) -> dict[str, list[dict[str, Any]]]:
+    raw_positions = payload.get("positions") or payload.get("managed_positions") or []
+    if not isinstance(raw_positions, list):
+        return {}
+    grouped: dict[str, list[dict[str, Any]]] = {}
+    for item in raw_positions:
+        if not isinstance(item, Mapping):
+            continue
+        key = _managed_close_contract_key(
+            lifecycle_report=item,
+            position=item,
+            projected_position=item,
+        )
+        if not key:
+            continue
+        grouped.setdefault(key, []).append(dict(item))
+    return grouped
+
+
+def _canonical_close_owner_by_contract(
+    positions_by_contract: Mapping[str, list[dict[str, Any]]],
+) -> dict[str, str | None]:
+    owners: dict[str, str | None] = {}
+    for key, positions in positions_by_contract.items():
+        current_positions = [
+            item
+            for item in positions
+            if _managed_projection_current_for_close_authority(item)
+            and str(item.get("lifecycle_id") or "").strip()
+        ]
+        if len(current_positions) == 1:
+            owners[key] = str(current_positions[0].get("lifecycle_id") or "").strip()
+        elif len(current_positions) > 1:
+            matched = [
+                item
+                for item in current_positions
+                if item.get("broker_qty_match") is True
+                or str(item.get("reconciliation_status") or "").upper() == "OPEN_MANAGED_MATCHED"
+            ]
+            owners[key] = str(matched[0].get("lifecycle_id") or "").strip() if len(matched) == 1 else None
+    return owners
+
+
+def _managed_projection_current_for_close_authority(position: Mapping[str, Any]) -> bool:
+    text = " ".join(
+        str(position.get(key) or "")
+        for key in ("classification", "managed_position_classification", "state", "reconciliation_status")
+    ).upper()
+    if any(token in text for token in ("STALE", "SUPERSEDED", "FULL_AUDIT_ONLY", "CLOSED_FLAT", "RECONCILED_FLAT")):
+        return False
+    return "OPEN_MANAGED" in text or "EXIT_DUE" in text or position.get("exit_due") is True
+
+
+def _preexisting_managed_close_contract_locks(
+    *,
+    open_positions: list[dict[str, Any]],
+    source_paths: list[Path],
+    trade_summary: Mapping[str, Any],
+    lifecycle_output_root: Path,
+) -> dict[str, dict[str, Any]]:
+    locks: dict[str, dict[str, Any]] = {}
+    for position in open_positions:
+        lifecycle_id = str(position.get("lifecycle_id") or "")
+        if not lifecycle_id:
+            continue
+        lifecycle_path = _lifecycle_report_path(
+            lifecycle_id=lifecycle_id,
+            source_paths=source_paths,
+            trade_summary=trade_summary,
+            lifecycle_output_root=lifecycle_output_root,
+        )
+        lifecycle_report = _read_json(lifecycle_path)
+        close_submit = lifecycle_report.get("close_submit_attempt") if isinstance(lifecycle_report.get("close_submit_attempt"), Mapping) else {}
+        close_fill = lifecycle_report.get("close_fill") if isinstance(lifecycle_report.get("close_fill"), Mapping) else {}
+        if not _close_submit_or_fill_blocks_same_contract(close_submit, close_fill):
+            continue
+        key = _managed_close_contract_key(
+            lifecycle_report=lifecycle_report,
+            position=position,
+            projected_position={},
+        )
+        if not key:
+            continue
+        locks.setdefault(
+            key,
+            _managed_close_contract_lock(
+                lifecycle_id=lifecycle_id,
+                trade_id=str(lifecycle_report.get("trade_id") or position.get("trade_id") or ""),
+                reason="Existing managed close submit/fill for this contract blocks duplicate same-contract close submit.",
+                source=str(lifecycle_path),
+                close_submit=close_submit,
+                close_fill=close_fill,
+            ),
+        )
+    return locks
+
+
+def _managed_close_contract_lock_for_lifecycle(
+    *,
+    contract_key: str | None,
+    lifecycle_id: str,
+    preexisting_locks: Mapping[str, dict[str, Any]],
+    runtime_locks: Mapping[str, dict[str, Any]],
+) -> dict[str, Any] | None:
+    if not contract_key:
+        return None
+    for locks in (runtime_locks, preexisting_locks):
+        lock = locks.get(contract_key)
+        if not lock:
+            continue
+        owner_lifecycle_id = str(lock.get("owner_lifecycle_id") or "")
+        if owner_lifecycle_id == str(lifecycle_id or ""):
+            continue
+        return dict(lock)
+    return None
+
+
+def _managed_close_ownership_lock_for_lifecycle(
+    *,
+    contract_key: str | None,
+    lifecycle_id: str,
+    positions_by_contract: Mapping[str, list[dict[str, Any]]],
+    canonical_owner_by_contract: Mapping[str, str | None],
+) -> dict[str, Any] | None:
+    if not contract_key:
+        return None
+    contract_positions = positions_by_contract.get(contract_key) or []
+    current_claims = [
+        item
+        for item in contract_positions
+        if _managed_projection_current_for_close_authority(item)
+        and str(item.get("lifecycle_id") or "").strip()
+    ]
+    if len(current_claims) <= 1:
+        return None
+    owner = canonical_owner_by_contract.get(contract_key)
+    if owner and owner == str(lifecycle_id or ""):
+        return None
+    reason = (
+        "Canonical managed-position projection selected a different lifecycle owner for this contract."
+        if owner
+        else "Multiple lifecycle chains claim close authority for this contract and no unique canonical owner exists."
+    )
+    return {
+        "classification": MANAGED_CLOSE_CONTRACT_LOCK_ACTIVE,
+        "owner_lifecycle_id": owner,
+        "blocked_lifecycle_id": lifecycle_id,
+        "reason": reason,
+        "primary_blocker": reason,
+        "contract_key": contract_key,
+        "claiming_lifecycle_ids": [str(item.get("lifecycle_id") or "") for item in current_claims],
+        "source": "managed_position_projection_ownership_arbitration",
+    }
+
+
+def _close_submit_or_fill_blocks_same_contract(
+    close_submit: Mapping[str, Any] | None,
+    close_fill: Mapping[str, Any] | None,
+) -> bool:
+    close_fill = close_fill if isinstance(close_fill, Mapping) else {}
+    if close_fill:
+        return True
+    close_submit = close_submit if isinstance(close_submit, Mapping) else {}
+    if not close_submit:
+        return False
+    if str(close_submit.get("broker_order_id") or "").strip():
+        return True
+    return close_submit.get("broker_state_mutated") is True or close_submit.get("submit_attempted") is True
+
+
+def _managed_close_contract_lock(
+    *,
+    lifecycle_id: str,
+    trade_id: str,
+    reason: str,
+    source: str,
+    close_submit: Mapping[str, Any] | None,
+    close_fill: Mapping[str, Any] | None,
+) -> dict[str, Any]:
+    return {
+        "classification": MANAGED_CLOSE_CONTRACT_LOCK_ACTIVE,
+        "owner_lifecycle_id": lifecycle_id,
+        "owner_trade_id": trade_id,
+        "reason": reason,
+        "primary_blocker": reason,
+        "source": source,
+        "close_order_id": (close_submit or {}).get("broker_order_id"),
+        "close_perm_id": (close_submit or {}).get("perm_id") or (close_fill or {}).get("perm_id"),
+        "close_exec_id": (close_fill or {}).get("execution_id") or (close_fill or {}).get("exec_id"),
+    }
+
+
+def _managed_close_contract_key(
+    *,
+    lifecycle_report: Mapping[str, Any],
+    position: Mapping[str, Any],
+    projected_position: Mapping[str, Any],
+) -> str | None:
+    broker_position = (
+        projected_position.get("broker_position")
+        if isinstance(projected_position.get("broker_position"), Mapping)
+        else {}
+    )
+    account_id = str(
+        broker_position.get("account_id")
+        or broker_position.get("account")
+        or lifecycle_report.get("account_id")
+        or position.get("account_id")
+        or ""
+    ).strip()
+    local_symbol = str(
+        broker_position.get("local_symbol")
+        or broker_position.get("localSymbol")
+        or lifecycle_report.get("local_symbol")
+        or position.get("local_symbol")
+        or ""
+    ).strip().upper()
+    con_id = _int_or_none(
+        broker_position.get("con_id")
+        or broker_position.get("conId")
+        or lifecycle_report.get("con_id")
+        or position.get("con_id")
+    )
+    if not account_id or not local_symbol or con_id is None:
+        return None
+    return f"{account_id}|{local_symbol}|{con_id}"
+
+
+def _broker_position_snapshot_for_close(
+    *,
+    lifecycle_report: Mapping[str, Any],
+    position: Mapping[str, Any],
+    projected_position: Mapping[str, Any],
+) -> dict[str, Any]:
+    broker_position = (
+        projected_position.get("broker_position")
+        if isinstance(projected_position.get("broker_position"), Mapping)
+        else {}
+    )
+    if broker_position:
+        return dict(broker_position)
+    return {}
 
 
 def _projection_exit_due(position: Mapping[str, Any]) -> bool:

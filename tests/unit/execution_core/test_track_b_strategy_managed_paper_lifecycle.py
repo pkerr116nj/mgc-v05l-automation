@@ -2308,7 +2308,7 @@ def test_maintenance_blocks_close_when_broker_position_direction_mismatches(
     )
 
     close_attempt = result.report["close_submit_attempt"]
-    assert close_attempt["classification"] == "BROKER_POSITION_NOT_OPEN_FOR_MANAGED_CLOSE"
+    assert close_attempt["classification"] == "CLOSE_WOULD_INCREASE_REVERSE_EXPOSURE"
     assert close_attempt["broker_position"]["signed_quantity"] == -1
     assert close_attempt["submitted"] is False
     assert close_attempt["broker_state_mutated"] is False

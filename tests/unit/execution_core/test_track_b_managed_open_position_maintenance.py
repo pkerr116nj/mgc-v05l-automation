@@ -240,6 +240,66 @@ def fake_close_stages() -> TrackBStrategyManagedPaperLifecycleStages:
     )
 
 
+def _add_duplicate_open_lifecycle(
+    *,
+    tmp_path: Path,
+    cfg: TrackBManagedOpenPositionMaintenanceConfig,
+    original_lifecycle_id: str,
+    duplicate_lifecycle_id: str,
+    strategy_id: str,
+) -> None:
+    original_path = (
+        tmp_path
+        / "managed"
+        / original_lifecycle_id
+        / "track_b_strategy_managed_paper_lifecycle_report.json"
+    )
+    duplicate_path = (
+        tmp_path
+        / "managed"
+        / duplicate_lifecycle_id
+        / "track_b_strategy_managed_paper_lifecycle_report.json"
+    )
+    payload = json.loads(original_path.read_text(encoding="utf-8"))
+    duplicate_trade_id = f"{strategy_id}:{duplicate_lifecycle_id}"
+    payload["lifecycle_id"] = duplicate_lifecycle_id
+    payload["trade_id"] = duplicate_trade_id
+    payload["strategy_id"] = strategy_id
+    payload["report_json_path"] = str(duplicate_path)
+    payload["entry_intent"]["lifecycle_id"] = duplicate_lifecycle_id
+    payload["entry_intent"]["trade_id"] = duplicate_trade_id
+    payload["entry_intent"]["strategy_id"] = strategy_id
+    payload["entry_submit_attempt"]["broker_order_id"] = "22"
+    payload["entry_submit_attempt"]["perm_id"] = "194800022"
+    payload["entry_fill"]["broker_order_id"] = "22"
+    payload["entry_fill"]["perm_id"] = "194800022"
+    payload["entry_fill"]["execution_id"] = "exec-duplicate"
+    write_json(duplicate_path, payload)
+
+    live_status_path = cfg.live_position_status_json
+    live_status = json.loads(live_status_path.read_text(encoding="utf-8"))
+    original_position = dict(live_status["positions_by_instrument"]["MES-202606"])
+    original_position.update(
+        {
+            "lifecycle_id": duplicate_lifecycle_id,
+            "trade_id": duplicate_trade_id,
+            "strategy_id": strategy_id,
+            "entry_order_id": "22",
+            "entry_perm_id": "194800022",
+            "entry_broker_identity": {
+                "broker_order_id": "22",
+                "perm_id": "194800022",
+                "exec_id": "exec-duplicate",
+                "con_id": 770561194,
+                "local_symbol": "MESM6",
+            },
+        }
+    )
+    live_status["positions_by_instrument"]["MES-202606-duplicate"] = original_position
+    live_status["source_artifact_paths"].append(str(duplicate_path))
+    write_json(live_status_path, live_status)
+
+
 def test_open_managed_position_age_two_keeps_waiting(tmp_path: Path) -> None:
     cfg = seed_open_position(
         tmp_path,
@@ -570,6 +630,228 @@ def test_exit_due_projection_canonicalizes_mes_close_expiry_from_broker_position
     assert captured_configs[0].contract_expiry == "20260618"
     assert captured_configs[0].local_symbol == "MESM6"
     assert captured_configs[0].con_id == 770561194
+
+
+def test_contract_close_lock_blocks_second_lifecycle_close_submit_same_contract(tmp_path: Path) -> None:
+    cfg = seed_open_position(
+        tmp_path,
+        instrument="MES",
+        strategy_id="mes_us_active_participation_long",
+        contract_key="MES-202606",
+        local_symbol="MESM6",
+        con_id=770561194,
+        side="LONG",
+        entry_price="7617.75",
+        completed_timestamps=[
+            "2026-05-07T16:30:00+00:00",
+            "2026-05-07T16:35:00+00:00",
+            "2026-05-07T16:40:00+00:00",
+        ],
+    )
+    original_lifecycle_id = "strategy_managed_fe30248d4d6c42acaf106c8313b0b33b"
+    duplicate_lifecycle_id = "reserved_submit_mes_globex_active_participation_long_duplicate"
+    _add_duplicate_open_lifecycle(
+        tmp_path=tmp_path,
+        cfg=cfg,
+        original_lifecycle_id=original_lifecycle_id,
+        duplicate_lifecycle_id=duplicate_lifecycle_id,
+        strategy_id="mes_globex_active_participation_long",
+    )
+    submit_calls: list[str] = []
+
+    def entry_submitter(_config: TrackBStrategyManagedPaperLifecycleConfig, _entry_intent: Mapping[str, Any]) -> Mapping[str, Any]:
+        raise AssertionError("maintenance must not submit another entry")
+
+    def close_submitter(config: TrackBStrategyManagedPaperLifecycleConfig, close_intent: Mapping[str, Any]) -> Mapping[str, Any]:
+        submit_calls.append(str(close_intent.get("lifecycle_id") or config.strategy_id))
+        return {
+            "submitted": True,
+            "submit_attempted": True,
+            "broker_state_mutated": True,
+            "broker_order_id": "65",
+            "submitted_at": "2026-06-02T22:58:55+00:00",
+            "close_intent": dict(close_intent),
+            "submit_diagnostics": {"orderStatus_seen": True},
+        }
+
+    from mgc_v05l.execution_core.track_b_strategy_managed_paper_lifecycle import default_managed_lifecycle_stages
+
+    defaults = default_managed_lifecycle_stages()
+    stages = TrackBStrategyManagedPaperLifecycleStages(
+        entry_submitter=entry_submitter,
+        exit_policy=defaults.exit_policy,
+        close_submitter=close_submitter,
+    )
+
+    result = run_track_b_managed_open_position_maintenance(
+        config=cfg,
+        lifecycle_stages=stages,
+        now=aware_now(),
+    )
+
+    assert len(submit_calls) == 1
+    first, second = result.report["positions"]
+    assert first["close_submitted"] is True
+    assert second["close_submitted"] is False
+    assert second["blocker"]
+    assert second["managed_close_contract_lock"]["classification"] == "MANAGED_CLOSE_CONTRACT_LOCK_ACTIVE"
+
+
+@pytest.mark.parametrize(
+    ("broker_qty", "expected_blocker"),
+    [
+        ("0", "CLOSE_NOT_RISK_REDUCING_BROKER_FLAT"),
+        ("-1", "CLOSE_WOULD_INCREASE_REVERSE_EXPOSURE"),
+    ],
+)
+def test_close_submit_rechecks_broker_position_freshness_before_submit(
+    tmp_path: Path,
+    broker_qty: str,
+    expected_blocker: str,
+) -> None:
+    cfg = seed_open_position(
+        tmp_path,
+        instrument="MES",
+        strategy_id="mes_us_active_participation_long",
+        contract_key="MES-202606",
+        local_symbol="MESM6",
+        con_id=770561194,
+        side="LONG",
+        entry_price="7617.75",
+        completed_timestamps=[
+            "2026-05-07T16:30:00+00:00",
+            "2026-05-07T16:35:00+00:00",
+            "2026-05-07T16:40:00+00:00",
+        ],
+    )
+    lifecycle_path = (
+        tmp_path
+        / "managed"
+        / "strategy_managed_fe30248d4d6c42acaf106c8313b0b33b"
+        / "track_b_strategy_managed_paper_lifecycle_report.json"
+    )
+    lifecycle = json.loads(lifecycle_path.read_text(encoding="utf-8"))
+    write_json(
+        cfg.managed_position_projection_json,
+        {
+            "schema_version": "track_b_managed_positions_v1",
+            "positions": [
+                {
+                    "trade_id": lifecycle["trade_id"],
+                    "lifecycle_id": lifecycle["lifecycle_id"],
+                    "classification": "OPEN_MANAGED_EXIT_DUE",
+                    "exit_due": True,
+                    "broker_position": {
+                        "account_id": "DUM882026",
+                        "symbol": "MES",
+                        "local_symbol": "MESM6",
+                        "con_id": 770561194,
+                        "quantity": broker_qty,
+                    },
+                }
+            ],
+        },
+    )
+
+    def close_submitter(_config: TrackBStrategyManagedPaperLifecycleConfig, _close_intent: Mapping[str, Any]) -> Mapping[str, Any]:
+        raise AssertionError("freshness guard must block before the close submitter")
+
+    from mgc_v05l.execution_core.track_b_strategy_managed_paper_lifecycle import default_managed_lifecycle_stages
+
+    defaults = default_managed_lifecycle_stages()
+    result = run_track_b_managed_open_position_maintenance(
+        config=cfg,
+        lifecycle_stages=TrackBStrategyManagedPaperLifecycleStages(
+            entry_submitter=lambda _config, _intent: {},
+            exit_policy=defaults.exit_policy,
+            close_submitter=close_submitter,
+        ),
+        now=aware_now(),
+    )
+
+    position = result.report["positions"][0]
+    assert position["close_intent_created"] is True
+    assert position["close_submitted"] is False
+    assert expected_blocker in str(position["blocker"])
+
+
+def test_stale_superseded_lifecycle_chain_cannot_submit_managed_close(tmp_path: Path) -> None:
+    cfg = seed_open_position(
+        tmp_path,
+        instrument="MES",
+        strategy_id="mes_stale_lifecycle_only_long",
+        contract_key="MES-202606",
+        local_symbol="MESM6",
+        con_id=770561194,
+        side="LONG",
+        entry_price="7617.75",
+        completed_timestamps=[
+            "2026-05-07T16:30:00+00:00",
+            "2026-05-07T16:35:00+00:00",
+            "2026-05-07T16:40:00+00:00",
+        ],
+    )
+    stale_lifecycle_id = "strategy_managed_fe30248d4d6c42acaf106c8313b0b33b"
+    canonical_lifecycle_id = "reserved_submit_mes_us_active_participation_long_canonical"
+    lifecycle_path = tmp_path / "managed" / stale_lifecycle_id / "track_b_strategy_managed_paper_lifecycle_report.json"
+    lifecycle = json.loads(lifecycle_path.read_text(encoding="utf-8"))
+    write_json(
+        cfg.managed_position_projection_json,
+        {
+            "schema_version": "track_b_managed_positions_v1",
+            "positions": [
+                {
+                    "trade_id": lifecycle["trade_id"],
+                    "lifecycle_id": stale_lifecycle_id,
+                    "classification": "OPEN_MANAGED_EXIT_DUE",
+                    "exit_due": True,
+                    "broker_qty_match": False,
+                    "broker_position": {
+                        "account_id": "DUM882026",
+                        "symbol": "MES",
+                        "local_symbol": "MESM6",
+                        "con_id": 770561194,
+                        "quantity": "1",
+                    },
+                },
+                {
+                    "trade_id": "trade-canonical",
+                    "lifecycle_id": canonical_lifecycle_id,
+                    "classification": "OPEN_MANAGED_EXIT_DUE",
+                    "reconciliation_status": "OPEN_MANAGED_MATCHED",
+                    "broker_qty_match": True,
+                    "broker_position": {
+                        "account_id": "DUM882026",
+                        "symbol": "MES",
+                        "local_symbol": "MESM6",
+                        "con_id": 770561194,
+                        "quantity": "1",
+                    },
+                },
+            ],
+        },
+    )
+
+    def close_submitter(_config: TrackBStrategyManagedPaperLifecycleConfig, _close_intent: Mapping[str, Any]) -> Mapping[str, Any]:
+        raise AssertionError("non-canonical lifecycle owner must not reach close submitter")
+
+    from mgc_v05l.execution_core.track_b_strategy_managed_paper_lifecycle import default_managed_lifecycle_stages
+
+    defaults = default_managed_lifecycle_stages()
+    result = run_track_b_managed_open_position_maintenance(
+        config=cfg,
+        lifecycle_stages=TrackBStrategyManagedPaperLifecycleStages(
+            entry_submitter=lambda _config, _intent: {},
+            exit_policy=defaults.exit_policy,
+            close_submitter=close_submitter,
+        ),
+        now=aware_now(),
+    )
+
+    position = result.report["positions"][0]
+    assert position["close_submitted"] is False
+    assert position["managed_close_contract_lock"]["classification"] == "MANAGED_CLOSE_CONTRACT_LOCK_ACTIVE"
+    assert position["managed_close_contract_lock"]["owner_lifecycle_id"] == canonical_lifecycle_id
 
 
 @pytest.mark.parametrize(

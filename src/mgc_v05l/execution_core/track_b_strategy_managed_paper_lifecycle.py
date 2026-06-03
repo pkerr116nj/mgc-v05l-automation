@@ -84,6 +84,9 @@ DEFAULT_TRACK_B_STRATEGY_MANAGED_PAPER_LIFECYCLE_OUTPUT_ROOT = Path(
 )
 REPO_ROOT = Path(__file__).resolve().parents[3]
 CLOSE_ORDER_ALREADY_WORKING = "CLOSE_ORDER_ALREADY_WORKING"
+MANAGED_CLOSE_CONTRACT_LOCK_ACTIVE = "MANAGED_CLOSE_CONTRACT_LOCK_ACTIVE"
+CLOSE_NOT_RISK_REDUCING_BROKER_FLAT = "CLOSE_NOT_RISK_REDUCING_BROKER_FLAT"
+CLOSE_WOULD_INCREASE_REVERSE_EXPOSURE = "CLOSE_WOULD_INCREASE_REVERSE_EXPOSURE"
 
 STRATEGY_SUBMIT_AUTHORIZED = "STRATEGY_SUBMIT_AUTHORIZED"
 STRATEGY_SUBMIT_BLOCKED_NO_SNAPSHOT = "STRATEGY_SUBMIT_BLOCKED_NO_SNAPSHOT"
@@ -202,6 +205,8 @@ class TrackBStrategyManagedPaperLifecycleConfig:
     continuation_source_strategy_report_path: str | Path | None = None
     pyramiding_policy: str = PYRAMIDING_NOT_ALLOWED_REVIEW_REQUIRED
     max_units_per_lane: int = 1
+    managed_close_contract_lock: Mapping[str, Any] | None = None
+    managed_close_broker_position_snapshot: Mapping[str, Any] | None = None
 
 
 @dataclass(frozen=True)
@@ -413,11 +418,19 @@ def maintain_open_track_b_strategy_managed_paper_lifecycle(
             if close_intent is None:
                 classification = TrackBManagedPaperLifecycleClassification.OPEN_MANAGED
             else:
+                pre_submit_guard = _managed_close_pre_submit_guard(
+                    config=config,
+                    close_intent=close_intent,
+                )
                 existing_close_submit = _prior_close_submit_attempt_guard(
                     existing_lifecycle_report=existing_lifecycle_report,
                     close_intent=close_intent,
                 )
-                if existing_close_submit:
+                if pre_submit_guard:
+                    close_submit = pre_submit_guard
+                    submit_attempted = submit_attempted or bool(close_submit.get("submit_attempted"))
+                    broker_state_mutated = False
+                elif existing_close_submit:
                     close_submit = existing_close_submit
                     submit_attempted = submit_attempted or bool(close_submit.get("submit_attempted"))
                     broker_state_mutated = False
@@ -1132,6 +1145,9 @@ def _default_close_submitter(
             "close_intent": dict(close_intent),
             "primary_blocker": "Managed PAPER close submit is not enabled for this lifecycle invocation.",
         }
+    pre_submit_guard = _managed_close_pre_submit_guard(config=config, close_intent=close_intent)
+    if pre_submit_guard:
+        return pre_submit_guard
     return _submit_managed_limit_order(
         config=config,
         intent_payload=close_intent,
@@ -2145,20 +2161,122 @@ def _managed_close_position_guard(
             "close_intent": dict(close_intent),
         }
     expected_signed_quantity = _signed_position_quantity(config)
-    if int(position.signed_quantity) != expected_signed_quantity:
+    observed_signed_quantity = int(position.signed_quantity)
+    blocker = _managed_close_broker_position_blocker(
+        expected_signed_quantity=expected_signed_quantity,
+        observed_signed_quantity=observed_signed_quantity,
+    )
+    if blocker:
         return {
             "submitted": False,
             "submit_attempted": False,
             "broker_state_mutated": False,
-            "classification": "BROKER_POSITION_NOT_OPEN_FOR_MANAGED_CLOSE",
+            "classification": blocker,
             "primary_blocker": (
-                "Managed PAPER close blocked because broker position direction/quantity does not "
-                f"match lifecycle side: expected_signed_quantity={expected_signed_quantity}; "
-                f"observed_signed_quantity={position.signed_quantity}."
+                "Managed PAPER close blocked because the refreshed broker position is not "
+                f"risk-reducing for this lifecycle: expected_signed_quantity={expected_signed_quantity}; "
+                f"observed_signed_quantity={observed_signed_quantity}; reason={blocker}."
             ),
             "close_intent": dict(close_intent),
             "broker_position": position.to_json_dict(),
         }
+    return None
+
+
+def _managed_close_pre_submit_guard(
+    *,
+    config: TrackBStrategyManagedPaperLifecycleConfig,
+    close_intent: Mapping[str, Any],
+) -> dict[str, Any]:
+    lock = config.managed_close_contract_lock if isinstance(config.managed_close_contract_lock, Mapping) else {}
+    if lock:
+        return {
+            "submitted": False,
+            "submit_attempted": False,
+            "broker_state_mutated": False,
+            "review_required": True,
+            "classification": str(lock.get("classification") or MANAGED_CLOSE_CONTRACT_LOCK_ACTIVE),
+            "primary_blocker": str(
+                lock.get("primary_blocker")
+                or lock.get("reason")
+                or "Managed close contract lock blocks duplicate same-contract close submit."
+            ),
+            "close_intent": dict(close_intent),
+            "managed_close_contract_lock": dict(lock),
+        }
+    broker_position = (
+        config.managed_close_broker_position_snapshot
+        if isinstance(config.managed_close_broker_position_snapshot, Mapping)
+        else {}
+    )
+    if not broker_position:
+        return {}
+    observed_signed_quantity = _signed_quantity_from_broker_position(broker_position)
+    if observed_signed_quantity is None:
+        return {
+            "submitted": False,
+            "submit_attempted": False,
+            "broker_state_mutated": False,
+            "review_required": True,
+            "classification": "BROKER_POSITION_NOT_OPEN_FOR_MANAGED_CLOSE",
+            "primary_blocker": "Managed PAPER close blocked because broker position quantity is unavailable before submit.",
+            "close_intent": dict(close_intent),
+            "broker_position": dict(broker_position),
+        }
+    blocker = _managed_close_broker_position_blocker(
+        expected_signed_quantity=_signed_position_quantity(config),
+        observed_signed_quantity=observed_signed_quantity,
+    )
+    if not blocker:
+        return {}
+    return {
+        "submitted": False,
+        "submit_attempted": False,
+        "broker_state_mutated": False,
+        "review_required": True,
+        "classification": blocker,
+        "primary_blocker": (
+            "Managed PAPER close blocked before submit because broker position freshness "
+            f"shows observed_signed_quantity={observed_signed_quantity}; "
+            f"expected_signed_quantity={_signed_position_quantity(config)}; reason={blocker}."
+        ),
+        "close_intent": dict(close_intent),
+        "broker_position": dict(broker_position),
+    }
+
+
+def _managed_close_broker_position_blocker(
+    *,
+    expected_signed_quantity: int,
+    observed_signed_quantity: int,
+) -> str | None:
+    if observed_signed_quantity == expected_signed_quantity:
+        return None
+    if observed_signed_quantity == 0:
+        return CLOSE_NOT_RISK_REDUCING_BROKER_FLAT
+    if expected_signed_quantity > 0 and observed_signed_quantity < 0:
+        return CLOSE_WOULD_INCREASE_REVERSE_EXPOSURE
+    if expected_signed_quantity < 0 and observed_signed_quantity > 0:
+        return CLOSE_WOULD_INCREASE_REVERSE_EXPOSURE
+    return "BROKER_POSITION_NOT_OPEN_FOR_MANAGED_CLOSE"
+
+
+def _signed_quantity_from_broker_position(position: Mapping[str, Any]) -> int | None:
+    for key in (
+        "signed_quantity",
+        "signed_broker_qty",
+        "quantity",
+        "qty",
+        "position",
+        "broker_position_quantity",
+    ):
+        value = position.get(key)
+        if value in {None, ""}:
+            continue
+        try:
+            return int(Decimal(str(value)))
+        except (InvalidOperation, TypeError, ValueError):
+            continue
     return None
 
 
