@@ -1,3 +1,4 @@
+import json
 from pathlib import Path
 
 
@@ -121,6 +122,57 @@ def test_paper_stack_start_has_london_late_mnq_short_active_evidence_profile() -
     assert '"PAPER_WATCH_ACTIVE_EVIDENCE_MES_LONDON_LATE_SHORT_SHADOW_V1"' in source
     assert "LONDON_LATE_MNQ_SHORT_ONLY_INITIAL_PAPER_ELEVATION" in source
     assert "COMBINED_MNQ_MES_LONDON_CONFLICT_GROUP_LIMITS_SESSION_TO_ONE_TRADE" in source
+
+
+def test_paper_stack_start_has_full_session_active_evidence_profile() -> None:
+    source = START_SCRIPT.read_text(encoding="utf-8")
+
+    assert "mnq_mes_full_session_active_evidence" in source
+    assert '"profile": "mnq_mes_full_session_active_evidence"' in source
+    assert '"extends_profile": "mnq_mes_session_coverage_active_evidence"' in source
+    assert '"PAPER_ACTIVE_EVIDENCE_MNQ_US_PARTICIPATION_LONG_V1"' in source
+    assert '"PAPER_ACTIVE_EVIDENCE_MNQ_US_PARTICIPATION_SHORT_V1"' in source
+    assert '"PAPER_ACTIVE_EVIDENCE_MES_US_PARTICIPATION_LONG_V1"' in source
+    assert '"PAPER_ACTIVE_EVIDENCE_MES_US_PARTICIPATION_SHORT_V1"' in source
+    assert '"PAPER_ACTIVE_EVIDENCE_MNQ_GLOBEX_PARTICIPATION_LONG_V1"' in source
+    assert '"PAPER_ACTIVE_EVIDENCE_MNQ_GLOBEX_PARTICIPATION_SHORT_V1"' in source
+    assert '"PAPER_ACTIVE_EVIDENCE_MES_GLOBEX_PARTICIPATION_LONG_V1"' in source
+    assert '"PAPER_ACTIVE_EVIDENCE_MES_GLOBEX_PARTICIPATION_SHORT_V1"' in source
+    assert '"PAPER_ACTIVE_EVIDENCE_MNQ_LONDON_OPEN_PARTICIPATION_LONG_V1"' in source
+    assert '"PAPER_ACTIVE_EVIDENCE_MNQ_LONDON_OPEN_PARTICIPATION_SHORT_V1"' in source
+    assert '"PAPER_ACTIVE_EVIDENCE_MES_LONDON_OPEN_PARTICIPATION_LONG_V1"' in source
+    assert '"PAPER_ACTIVE_EVIDENCE_MES_LONDON_OPEN_PARTICIPATION_SHORT_V1"' in source
+    assert '"PAPER_ACTIVE_EVIDENCE_MNQ_LONDON_LATE_PARTICIPATION_SHORT_V1"' in source
+    assert '"PAPER_WATCH_ACTIVE_EVIDENCE_MNQ_LONDON_LATE_LONG_SHADOW_V1"' in source
+    assert '"PAPER_WATCH_ACTIVE_EVIDENCE_MES_LONDON_LATE_LONG_SHADOW_V1"' in source
+    assert '"PAPER_WATCH_ACTIVE_EVIDENCE_MES_LONDON_LATE_SHORT_SHADOW_V1"' in source
+    assert "FULL_SESSION_PROFILE_INITIAL_LONDON_LATE_MNQ_SHORT_ONLY_ELEVATION" in source
+    assert 'PROOF_REQUIRED_SYMBOLS="MNQ,MES"' in source
+
+    block = source.split('elif [[ "${STACK_PROFILE}" == "mnq_mes_full_session_active_evidence" ]]; then', 1)[1]
+    roster_json = block.split("cat > \"${SCOPED_ROSTER_PATH}\" <<'JSON'", 1)[1].split("\nJSON", 1)[0]
+    roster = json.loads(roster_json)
+    assert roster["enabled_strategy_ids"] == [
+        "PAPER_ACTIVE_EVIDENCE_MNQ_US_PARTICIPATION_LONG_V1",
+        "PAPER_ACTIVE_EVIDENCE_MNQ_US_PARTICIPATION_SHORT_V1",
+        "PAPER_ACTIVE_EVIDENCE_MES_US_PARTICIPATION_LONG_V1",
+        "PAPER_ACTIVE_EVIDENCE_MES_US_PARTICIPATION_SHORT_V1",
+        "PAPER_ACTIVE_EVIDENCE_MNQ_GLOBEX_PARTICIPATION_LONG_V1",
+        "PAPER_ACTIVE_EVIDENCE_MNQ_GLOBEX_PARTICIPATION_SHORT_V1",
+        "PAPER_ACTIVE_EVIDENCE_MES_GLOBEX_PARTICIPATION_LONG_V1",
+        "PAPER_ACTIVE_EVIDENCE_MES_GLOBEX_PARTICIPATION_SHORT_V1",
+        "PAPER_ACTIVE_EVIDENCE_MNQ_LONDON_OPEN_PARTICIPATION_LONG_V1",
+        "PAPER_ACTIVE_EVIDENCE_MNQ_LONDON_OPEN_PARTICIPATION_SHORT_V1",
+        "PAPER_ACTIVE_EVIDENCE_MES_LONDON_OPEN_PARTICIPATION_LONG_V1",
+        "PAPER_ACTIVE_EVIDENCE_MES_LONDON_OPEN_PARTICIPATION_SHORT_V1",
+        "PAPER_ACTIVE_EVIDENCE_MNQ_LONDON_LATE_PARTICIPATION_SHORT_V1",
+    ]
+    assert len(roster["enabled_strategy_ids"]) == 13
+    assert roster["shadow_only_strategy_ids"] == [
+        "PAPER_WATCH_ACTIVE_EVIDENCE_MNQ_LONDON_LATE_LONG_SHADOW_V1",
+        "PAPER_WATCH_ACTIVE_EVIDENCE_MES_LONDON_LATE_LONG_SHADOW_V1",
+        "PAPER_WATCH_ACTIVE_EVIDENCE_MES_LONDON_LATE_SHORT_SHADOW_V1",
+    ]
 
 
 def test_recovery_operator_controls_and_status_are_launchd_based() -> None:

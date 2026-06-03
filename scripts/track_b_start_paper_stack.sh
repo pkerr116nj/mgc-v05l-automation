@@ -208,13 +208,52 @@ JSON
   CANONICAL_CONFIGS+=("${SCOPED_CONFIG_PATH}")
   ROSTER_ENV_PATH="${SCOPED_ROSTER_PATH}"
   PROOF_REQUIRED_SYMBOLS="MNQ,MES"
+elif [[ "${STACK_PROFILE}" == "mnq_mes_full_session_active_evidence" ]]; then
+  cat > "${SCOPED_CONFIG_PATH}" <<'YAML'
+probationary_paper_runtime_exclusive_config: true
+probationary_paper_lanes_json: '[]'
+YAML
+  cat > "${SCOPED_ROSTER_PATH}" <<'JSON'
+{
+  "schema_version": "track_b_guarded_paper_roster_v1",
+  "profile": "mnq_mes_full_session_active_evidence",
+  "extends_profile": "mnq_mes_session_coverage_active_evidence",
+  "enabled_strategy_ids": [
+    "PAPER_ACTIVE_EVIDENCE_MNQ_US_PARTICIPATION_LONG_V1",
+    "PAPER_ACTIVE_EVIDENCE_MNQ_US_PARTICIPATION_SHORT_V1",
+    "PAPER_ACTIVE_EVIDENCE_MES_US_PARTICIPATION_LONG_V1",
+    "PAPER_ACTIVE_EVIDENCE_MES_US_PARTICIPATION_SHORT_V1",
+    "PAPER_ACTIVE_EVIDENCE_MNQ_GLOBEX_PARTICIPATION_LONG_V1",
+    "PAPER_ACTIVE_EVIDENCE_MNQ_GLOBEX_PARTICIPATION_SHORT_V1",
+    "PAPER_ACTIVE_EVIDENCE_MES_GLOBEX_PARTICIPATION_LONG_V1",
+    "PAPER_ACTIVE_EVIDENCE_MES_GLOBEX_PARTICIPATION_SHORT_V1",
+    "PAPER_ACTIVE_EVIDENCE_MNQ_LONDON_OPEN_PARTICIPATION_LONG_V1",
+    "PAPER_ACTIVE_EVIDENCE_MNQ_LONDON_OPEN_PARTICIPATION_SHORT_V1",
+    "PAPER_ACTIVE_EVIDENCE_MES_LONDON_OPEN_PARTICIPATION_LONG_V1",
+    "PAPER_ACTIVE_EVIDENCE_MES_LONDON_OPEN_PARTICIPATION_SHORT_V1",
+    "PAPER_ACTIVE_EVIDENCE_MNQ_LONDON_LATE_PARTICIPATION_SHORT_V1"
+  ],
+  "shadow_only_strategy_ids": [
+    "PAPER_WATCH_ACTIVE_EVIDENCE_MNQ_LONDON_LATE_LONG_SHADOW_V1",
+    "PAPER_WATCH_ACTIVE_EVIDENCE_MES_LONDON_LATE_LONG_SHADOW_V1",
+    "PAPER_WATCH_ACTIVE_EVIDENCE_MES_LONDON_LATE_SHORT_SHADOW_V1"
+  ],
+  "shadow_only_reason_codes": [
+    "FULL_SESSION_PROFILE_INITIAL_LONDON_LATE_MNQ_SHORT_ONLY_ELEVATION",
+    "COMBINED_MNQ_MES_LONDON_CONFLICT_GROUP_LIMITS_SESSION_TO_ONE_TRADE"
+  ]
+}
+JSON
+  CANONICAL_CONFIGS+=("${SCOPED_CONFIG_PATH}")
+  ROSTER_ENV_PATH="${SCOPED_ROSTER_PATH}"
+  PROOF_REQUIRED_SYMBOLS="MNQ,MES"
 elif [[ "${STACK_PROFILE}" != "canonical" ]]; then
   echo "BLOCKED_UNKNOWN_PROFILE: Unknown Track B PAPER stack profile: ${STACK_PROFILE}" >&2
   exit 2
 fi
 
 scoped_profile_start_allowed() {
-  [[ "${STACK_PROFILE}" == "mnq_mes_active_evidence" || "${STACK_PROFILE}" == "mnq_mes_globex_active_evidence" || "${STACK_PROFILE}" == "mnq_mes_session_coverage_active_evidence" || "${STACK_PROFILE}" == "mnq_mes_london_open_active_evidence" || "${STACK_PROFILE}" == "mnq_mes_london_late_mnq_short_active_evidence" ]] || return 1
+  [[ "${STACK_PROFILE}" == "mnq_mes_active_evidence" || "${STACK_PROFILE}" == "mnq_mes_globex_active_evidence" || "${STACK_PROFILE}" == "mnq_mes_session_coverage_active_evidence" || "${STACK_PROFILE}" == "mnq_mes_london_open_active_evidence" || "${STACK_PROFILE}" == "mnq_mes_london_late_mnq_short_active_evidence" || "${STACK_PROFILE}" == "mnq_mes_full_session_active_evidence" ]] || return 1
   "${PYTHON_BIN}" - "${status_json}" "${REPO_ROOT}" <<'PY'
 import json
 import sys
