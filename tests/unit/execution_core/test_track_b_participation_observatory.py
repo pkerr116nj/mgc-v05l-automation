@@ -285,6 +285,41 @@ def test_current_standardized_envelope_counted_when_sampled_bar_misses_source_ba
     assert report["conversion"]["broker_fill_count"] == 0
 
 
+def test_submit_enabled_standardized_envelope_is_not_counted_as_broker_submit(tmp_path: Path) -> None:
+    sampled_bar_ts = "2026-06-01T14:00:00+00:00"
+    envelope_source_ts = "2026-06-01T13:55:00+00:00"
+    lane_id = "mnq_london_late_active_participation_short"
+    lane = _lane(
+        bar_ts=sampled_bar_ts,
+        lane_id=lane_id,
+        rule_report={"classification": "TRACK_B_PAPER_ACTIVE_EVIDENCE_NO_SIGNAL", "primary_blocker": "no_signal"},
+    )
+    _write_fixture(tmp_path, [lane], {"MNQ": [sampled_bar_ts]})
+    _write_standardized_envelope(
+        tmp_path,
+        lane_id=lane_id,
+        generated_at=NOW.isoformat(),
+        source_candle_timestamp=envelope_source_ts,
+        classification="BROKER_EVENT_ENVELOPE_READY_SUBMIT_CAPABLE",
+        envelope_mode="BROKER_AUTHORITATIVE",
+        broker_submit_enabled=True,
+        submit_allowed=True,
+    )
+
+    report = _build(tmp_path)
+    lane_report = report["lane_reports"][0]
+
+    assert lane_report["broker_envelope_count"] == 1
+    assert lane_report["broker_envelope_dry_run_count"] == 0
+    assert lane_report["broker_envelope_submit_enabled_count"] == 1
+    assert lane_report["broker_submit_count"] == 0
+    assert lane_report["broker_ack_count"] == 0
+    assert lane_report["broker_fill_count"] == 0
+    assert report["conversion"]["broker_envelope_submit_enabled_count"] == 1
+    assert report["conversion"]["broker_submit_count"] == 0
+    assert report["conversion"]["broker_fill_count"] == 0
+
+
 def test_stale_standardized_envelope_artifact_is_ignored(tmp_path: Path) -> None:
     bar_ts = "2026-06-01T14:00:00+00:00"
     lane_id = "mnq_london_late_active_participation_short"
@@ -425,14 +460,18 @@ def _write_standardized_envelope(
     lane_id: str,
     generated_at: str,
     source_candle_timestamp: str,
+    classification: str = "BROKER_EVENT_ENVELOPE_READY_DRY_RUN",
+    envelope_mode: str = "DRY_RUN",
+    broker_submit_enabled: bool = False,
+    submit_allowed: bool = False,
 ) -> None:
     payload: dict[str, object] = {
         "schema_version": "track_b_broker_event_envelope_v1",
-        "classification": "BROKER_EVENT_ENVELOPE_READY_DRY_RUN",
+        "classification": classification,
         "generated_at": generated_at,
-        "envelope_mode": "DRY_RUN",
-        "broker_submit_enabled": False,
-        "submit_allowed": False,
+        "envelope_mode": envelope_mode,
+        "broker_submit_enabled": broker_submit_enabled,
+        "submit_allowed": submit_allowed,
         "ibkr_call_path_invoked": False,
         "lane_id": lane_id,
         "strategy_id": "PAPER_ACTIVE_EVIDENCE_MNQ_LONDON_LATE_PARTICIPATION_SHORT_V1",

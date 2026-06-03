@@ -6,9 +6,9 @@ from mgc_v05l.domain.enums import OrderIntentType
 from mgc_v05l.execution.order_models import OrderIntent
 from mgc_v05l.execution_core.track_b_broker_event_envelope import (
     BROKER_EVENT_ENVELOPE_BLOCKED,
-    BROKER_EVENT_ENVELOPE_MAPPED_TO_BRIDGE,
     BROKER_EVENT_ENVELOPE_NOT_ELIGIBLE,
     BROKER_EVENT_ENVELOPE_READY_DRY_RUN,
+    BROKER_EVENT_ENVELOPE_READY_SUBMIT_CAPABLE,
     BrokerEventEnvelopeConfig,
     BrokerEventEnvelopeLaneContext,
     BrokerEnvelopeRequirement,
@@ -68,7 +68,7 @@ def test_missing_session_is_derived_from_lane_metadata(tmp_path) -> None:  # typ
     assert result.envelope["account"] == result.envelope["account_id"] == "DUM882026"
 
 
-def test_broker_authoritative_lane_maps_to_existing_bridge_contract_without_dry_run_envelope() -> None:
+def test_broker_authoritative_lane_emits_submit_capable_envelope_without_ibkr_call(tmp_path) -> None:  # type: ignore[no-untyped-def]
     result = build_broker_event_envelope(
         context=_context(
             lane_id="mnq_globex_active_participation_short",
@@ -81,12 +81,19 @@ def test_broker_authoritative_lane_maps_to_existing_bridge_contract_without_dry_
         order_intent=_intent(reason_code="PAPER_ACTIVE_EVIDENCE_MNQ_GLOBEX_PARTICIPATION_SHORT_V1"),
         rule_report=_rule_report(anchor_type="GLOBEX_1800_REOPEN"),
         source_candle_timestamp=NOW,
+        config=BrokerEventEnvelopeConfig(repo_root=tmp_path),
+        generated_at=NOW,
     )
 
-    assert result.classification == BROKER_EVENT_ENVELOPE_MAPPED_TO_BRIDGE
-    assert result.requirement == "SATISFIED_BY_BRIDGE"
-    assert result.envelope is None
-    assert result.reason_code == "LANE_USES_EXISTING_BRIDGE_SUBMIT_ADAPTER"
+    assert result.classification == BROKER_EVENT_ENVELOPE_READY_SUBMIT_CAPABLE
+    assert result.requirement == "REQUIRED"
+    assert result.envelope is not None
+    assert result.envelope["envelope_mode"] == "BROKER_AUTHORITATIVE"
+    assert result.envelope["dry_run"] is False
+    assert result.envelope["broker_submit_enabled"] is True
+    assert result.envelope["submit_allowed"] is True
+    assert result.envelope["bridge_activation_status"] == "SUBMIT_CAPABLE_PENDING_RUNTIME_GATES"
+    assert result.envelope["ibkr_call_path_invoked"] is False
     fields = broker_event_report_fields(result)
     assert fields["broker_authoritative_submit_enabled"] is True
     assert fields["broker_authoritative_submit_blocker"] is None
@@ -121,7 +128,7 @@ def test_missing_contract_blocks_with_explicit_required_field_reason() -> None:
 def test_requirement_policy_by_lane_classification() -> None:
     assert envelope_requirement_for_lane(_context()).value == BrokerEnvelopeRequirement.REQUIRED.value
     assert envelope_requirement_for_lane(_context(lane_classification="SHADOW_ONLY")).value == "FORBIDDEN"
-    assert envelope_requirement_for_lane(_context(bridge_submit_adapter_present=True)).value == "SATISFIED_BY_BRIDGE"
+    assert envelope_requirement_for_lane(_context(bridge_submit_adapter_present=True)).value == "REQUIRED"
 
 
 def _context(

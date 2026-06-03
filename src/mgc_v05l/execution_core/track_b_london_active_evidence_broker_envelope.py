@@ -1,9 +1,8 @@
-"""Dry-run broker envelope adapter for London active-evidence PAPER lanes.
+"""Broker envelope adapter for London active-evidence PAPER lanes.
 
-The adapter is intentionally envelope-only. It records the broker-authoritative
-contract that an accepted London active-evidence intent would need before the
-normal Track B bridge could submit it, but it never marks the lane submit-capable
-and never calls an IBKR path.
+The adapter is artifact-only. It records the broker-authoritative contract that
+an accepted London active-evidence intent needs before the normal Track B bridge
+can submit it, but it never calls an IBKR path itself.
 """
 
 from __future__ import annotations
@@ -14,10 +13,12 @@ from pathlib import Path
 from typing import Any, Mapping
 
 from mgc_v05l.execution.order_models import OrderIntent
+from mgc_v05l.execution.ibkr_paper_strategy_porting import lane_submit_bridge_adapter
 from mgc_v05l.execution_core.track_b_broker_event_envelope import (
     BROKER_EVENT_ENVELOPE_BLOCKED,
     BROKER_EVENT_ENVELOPE_NOT_ELIGIBLE,
     BROKER_EVENT_ENVELOPE_READY_DRY_RUN,
+    BROKER_EVENT_ENVELOPE_READY_SUBMIT_CAPABLE,
     BrokerEventEnvelopeConfig,
     BrokerEventEnvelopeLaneContext,
     build_broker_event_envelope,
@@ -29,6 +30,7 @@ REPO_ROOT = Path(__file__).resolve().parents[3]
 SCHEMA_VERSION = "track_b_london_active_evidence_broker_envelope_v1"
 DEFAULT_ACCOUNT_ID = "DUM882026"
 BRIDGE_DRY_RUN_CLASSIFICATION = BROKER_EVENT_ENVELOPE_READY_DRY_RUN
+BRIDGE_SUBMIT_CAPABLE_CLASSIFICATION = BROKER_EVENT_ENVELOPE_READY_SUBMIT_CAPABLE
 NO_ENVELOPE_NO_ACCEPTED_INTENT = "NO_BROKER_ENVELOPE_NO_ACCEPTED_INTENT"
 ANCHOR_NOT_READY = "SESSION_ANCHOR_NOT_READY"
 UNSUPPORTED_LONDON_LANE = "UNSUPPORTED_LONDON_ACTIVE_EVIDENCE_LANE"
@@ -131,6 +133,7 @@ def build_london_active_evidence_broker_envelope(
             event_path=None,
             reason_code=UNSUPPORTED_LONDON_LANE,
         )
+    bridge_submit_capable = lane_submit_bridge_adapter(lane_id=spec.lane_id) is not None
     result = build_broker_event_envelope(
         context=BrokerEventEnvelopeLaneContext(
             lane_id=spec.lane_id,
@@ -140,6 +143,8 @@ def build_london_active_evidence_broker_envelope(
             artifact_family=spec.output_family,
             anchor_type=spec.anchor_type,
             promotion_ready=True,
+            bridge_submit_adapter_present=bridge_submit_capable,
+            broker_authoritative=bridge_submit_capable,
         ),
         order_intent=order_intent,
         rule_report=rule_report,

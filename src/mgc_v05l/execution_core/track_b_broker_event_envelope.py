@@ -29,10 +29,12 @@ REPO_ROOT = Path(__file__).resolve().parents[3]
 SCHEMA_VERSION = "track_b_broker_event_envelope_v1"
 DEFAULT_ACCOUNT_ID = "DUM882026"
 BROKER_EVENT_ENVELOPE_READY_DRY_RUN = "BROKER_EVENT_ENVELOPE_READY_DRY_RUN"
+BROKER_EVENT_ENVELOPE_READY_SUBMIT_CAPABLE = "BROKER_EVENT_ENVELOPE_READY_SUBMIT_CAPABLE"
 BROKER_EVENT_ENVELOPE_MAPPED_TO_BRIDGE = "BROKER_EVENT_ENVELOPE_MAPPED_TO_BRIDGE_SUBMIT_ADAPTER"
 BROKER_EVENT_ENVELOPE_NOT_ELIGIBLE = "NOT_BROKER_ENVELOPE_ELIGIBLE"
 BROKER_EVENT_ENVELOPE_BLOCKED = "BROKER_EVENT_ENVELOPE_BLOCKED"
 NO_IBKR_CALL_PATH_INVOKED = "NO_IBKR_CALL_PATH_INVOKED"
+SUBMIT_CAPABLE_PENDING_RUNTIME_GATES = "SUBMIT_CAPABLE_PENDING_RUNTIME_GATES"
 
 
 class BrokerEnvelopeMode(str, Enum):
@@ -107,16 +109,6 @@ def build_broker_event_envelope(
             event_path=None,
             reason_code="LANE_CLASSIFICATION_FORBIDS_BROKER_EVENT_ENVELOPE",
         )
-    if requirement == BrokerEnvelopeRequirement.SATISFIED_BY_BRIDGE:
-        return BrokerEventEnvelopeResult(
-            classification=BROKER_EVENT_ENVELOPE_MAPPED_TO_BRIDGE,
-            requirement=requirement.value,
-            envelope_mode=BrokerEnvelopeMode.BROKER_AUTHORITATIVE.value,
-            envelope=None,
-            latest_path=None,
-            event_path=None,
-            reason_code="LANE_USES_EXISTING_BRIDGE_SUBMIT_ADAPTER",
-        )
     if order_intent is None:
         return BrokerEventEnvelopeResult(
             classification=BROKER_EVENT_ENVELOPE_NOT_ELIGIBLE,
@@ -170,6 +162,7 @@ def build_broker_event_envelope(
         latest_path=latest_path,
         event_path=event_path,
         generated_at=_utc_now(generated_at),
+        submit_capability=_submit_capability_for_context(context),
     )
     missing = _missing_required_fields(envelope)
     if missing:
@@ -184,9 +177,9 @@ def build_broker_event_envelope(
             missing_fields=tuple(missing),
         )
     return BrokerEventEnvelopeResult(
-        classification=BROKER_EVENT_ENVELOPE_READY_DRY_RUN,
+        classification=str(envelope["classification"]),
         requirement=requirement.value,
-        envelope_mode=BrokerEnvelopeMode.DRY_RUN.value,
+        envelope_mode=str(envelope["envelope_mode"]),
         envelope=envelope,
         latest_path=latest_path,
         event_path=event_path,
@@ -206,7 +199,7 @@ def write_broker_event_envelope(*, result: BrokerEventEnvelopeResult) -> tuple[P
 def envelope_requirement_for_lane(context: BrokerEventEnvelopeLaneContext) -> BrokerEnvelopeRequirement:
     classification = str(context.lane_classification or "").upper()
     if context.bridge_submit_adapter_present or context.broker_authoritative:
-        return BrokerEnvelopeRequirement.SATISFIED_BY_BRIDGE
+        return BrokerEnvelopeRequirement.REQUIRED
     if "SHADOW" in classification:
         return BrokerEnvelopeRequirement.FORBIDDEN
     if "RESEARCH" in classification:
@@ -220,7 +213,8 @@ def envelope_requirement_for_lane(context: BrokerEventEnvelopeLaneContext) -> Br
 
 def broker_event_report_fields(result: BrokerEventEnvelopeResult) -> dict[str, Any]:
     mapped_to_bridge = result.classification == BROKER_EVENT_ENVELOPE_MAPPED_TO_BRIDGE
-    submit_blocker = None if mapped_to_bridge else (
+    submit_enabled = mapped_to_bridge or bool(result.envelope and result.envelope.get("broker_submit_enabled") is True)
+    submit_blocker = None if submit_enabled else (
         "BROKER_EVENT_ENVELOPE_DRY_RUN_NOT_ACTIVATED" if result.envelope is not None else result.reason_code
     )
     return {
@@ -239,10 +233,43 @@ def broker_event_report_fields(result: BrokerEventEnvelopeResult) -> dict[str, A
         "broker_authoritative_envelope_event_stream_path": str(result.event_path) if result.event_path else None,
         "broker_authoritative_envelope_dry_run": result.envelope is not None
         and result.envelope_mode == BrokerEnvelopeMode.DRY_RUN.value,
-        "broker_authoritative_submit_enabled": mapped_to_bridge,
+        "broker_authoritative_submit_enabled": submit_enabled,
         "broker_authoritative_submit_blocker": submit_blocker,
         "ibkr_call_path_invoked": False,
     }
+
+
+@dataclass(frozen=True)
+class _EnvelopeSubmitCapability:
+    mode: BrokerEnvelopeMode
+    classification: str
+    dry_run: bool
+    broker_submit_enabled: bool
+    submit_allowed: bool
+    bridge_activation_status: str
+    broker_authoritative_submit_requires_follow_up_activation: bool
+
+
+def _submit_capability_for_context(context: BrokerEventEnvelopeLaneContext) -> _EnvelopeSubmitCapability:
+    if context.broker_authoritative and context.bridge_submit_adapter_present:
+        return _EnvelopeSubmitCapability(
+            mode=BrokerEnvelopeMode.BROKER_AUTHORITATIVE,
+            classification=BROKER_EVENT_ENVELOPE_READY_SUBMIT_CAPABLE,
+            dry_run=False,
+            broker_submit_enabled=True,
+            submit_allowed=True,
+            bridge_activation_status=SUBMIT_CAPABLE_PENDING_RUNTIME_GATES,
+            broker_authoritative_submit_requires_follow_up_activation=False,
+        )
+    return _EnvelopeSubmitCapability(
+        mode=BrokerEnvelopeMode.DRY_RUN,
+        classification=BROKER_EVENT_ENVELOPE_READY_DRY_RUN,
+        dry_run=True,
+        broker_submit_enabled=False,
+        submit_allowed=False,
+        bridge_activation_status="ENVELOPE_ONLY_NOT_SUBMIT_CAPABLE",
+        broker_authoritative_submit_requires_follow_up_activation=True,
+    )
 
 
 def _envelope_payload(
@@ -258,6 +285,7 @@ def _envelope_payload(
     latest_path: Path,
     event_path: Path,
     generated_at: datetime,
+    submit_capability: _EnvelopeSubmitCapability,
 ) -> dict[str, Any]:
     identity_seed = "|".join(
         (
@@ -279,18 +307,18 @@ def _envelope_payload(
     runtime_commit = _normalized_context_value(context.runtime_commit, "UNKNOWN_RUNTIME_COMMIT")
     return {
         "schema_version": SCHEMA_VERSION,
-        "classification": BROKER_EVENT_ENVELOPE_READY_DRY_RUN,
+        "classification": submit_capability.classification,
         "generated_at": generated_at.isoformat(),
-        "envelope_mode": BrokerEnvelopeMode.DRY_RUN.value,
-        "dry_run": True,
+        "envelope_mode": submit_capability.mode.value,
+        "dry_run": submit_capability.dry_run,
         "broker_mutation_allowed": False,
-        "broker_submit_enabled": False,
-        "submit_allowed": False,
+        "broker_submit_enabled": submit_capability.broker_submit_enabled,
+        "submit_allowed": submit_capability.submit_allowed,
         "submit_attempted": False,
         "ibkr_call_path_invoked": False,
         "no_ibkr_call_path_reason": NO_IBKR_CALL_PATH_INVOKED,
         "current_order_destination": "ibkr_paper_bridge_submit_capable",
-        "bridge_activation_status": "ENVELOPE_ONLY_NOT_SUBMIT_CAPABLE",
+        "bridge_activation_status": submit_capability.bridge_activation_status,
         "bridge_path_reused_if_activated": {
             "exposure_gate": True,
             "anti_flip_lock": True,
@@ -351,7 +379,9 @@ def _envelope_payload(
             "input_artifact_path": context.input_artifact_path,
             "source_rule_report": dict(rule_report),
             "paper_lane_order_fill_is_simulated": True,
-            "broker_authoritative_submit_requires_follow_up_activation": True,
+            "broker_authoritative_submit_requires_follow_up_activation": (
+                submit_capability.broker_authoritative_submit_requires_follow_up_activation
+            ),
             "latest_artifact_path": str(latest_path),
             "event_stream_path": str(event_path),
         },

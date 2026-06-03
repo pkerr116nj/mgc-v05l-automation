@@ -434,7 +434,10 @@ def _standardized_envelope_is_current(
 ) -> bool:
     if envelope.get("schema_version") != "track_b_broker_event_envelope_v1":
         return False
-    if str(envelope.get("classification") or "").upper() != "BROKER_EVENT_ENVELOPE_READY_DRY_RUN":
+    if str(envelope.get("classification") or "").upper() not in {
+        "BROKER_EVENT_ENVELOPE_READY_DRY_RUN",
+        "BROKER_EVENT_ENVELOPE_READY_SUBMIT_CAPABLE",
+    }:
         return False
     if str(envelope.get("lane_id") or "") != lane_id:
         return False
@@ -689,7 +692,11 @@ def _broker_envelope_produced(rule_report: Mapping[str, Any], *, bar_ts: datetim
         or rule_report.get("broker_authoritative_envelope_classification")
         or ""
     ).upper()
-    if classification not in {"BROKER_EVENT_ENVELOPE_READY_DRY_RUN", "BROKER_AUTHORITATIVE_ENVELOPE_READY_DRY_RUN"}:
+    if classification not in {
+        "BROKER_EVENT_ENVELOPE_READY_DRY_RUN",
+        "BROKER_EVENT_ENVELOPE_READY_SUBMIT_CAPABLE",
+        "BROKER_AUTHORITATIVE_ENVELOPE_READY_DRY_RUN",
+    }:
         return False
     path = rule_report.get("broker_event_envelope_path") or rule_report.get("broker_authoritative_envelope_path")
     if not path:

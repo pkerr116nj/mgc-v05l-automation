@@ -9,7 +9,7 @@ from mgc_v05l.execution.ibkr_paper_strategy_porting import lane_submit_bridge_ad
 from mgc_v05l.execution.order_models import OrderIntent
 from mgc_v05l.execution_core.track_b_london_active_evidence_broker_envelope import (
     ANCHOR_NOT_READY,
-    BRIDGE_DRY_RUN_CLASSIFICATION,
+    BRIDGE_SUBMIT_CAPABLE_CLASSIFICATION,
     NO_ENVELOPE_NO_ACCEPTED_INTENT,
     LondonActiveEvidenceBrokerEnvelopeConfig,
     build_london_active_evidence_broker_envelope,
@@ -30,12 +30,14 @@ def test_london_open_accepted_intent_produces_broker_envelope(tmp_path: Path) ->
         generated_at=NOW,
     )
 
-    assert result.classification == BRIDGE_DRY_RUN_CLASSIFICATION
+    assert result.classification == BRIDGE_SUBMIT_CAPABLE_CLASSIFICATION
     assert result.latest_path is not None
     assert result.latest_path.name == "latest_mnq_london_open_active_participation_long_event_envelope.json"
     payload = json.loads(result.latest_path.read_text(encoding="utf-8"))
-    assert payload["dry_run"] is True
-    assert payload["submit_allowed"] is False
+    assert payload["dry_run"] is False
+    assert payload["broker_submit_enabled"] is True
+    assert payload["submit_allowed"] is True
+    assert payload["bridge_activation_status"] == "SUBMIT_CAPABLE_PENDING_RUNTIME_GATES"
     assert payload["ibkr_call_path_invoked"] is False
     assert payload["strategy_id"] == "PAPER_ACTIVE_EVIDENCE_MNQ_LONDON_OPEN_PARTICIPATION_LONG_V1"
     assert payload["lane_id"] == "mnq_london_open_active_participation_long"
@@ -58,8 +60,10 @@ def test_london_late_mnq_short_accepted_intent_produces_broker_envelope(tmp_path
         generated_at=NOW,
     )
 
-    assert result.classification == BRIDGE_DRY_RUN_CLASSIFICATION
+    assert result.classification == BRIDGE_SUBMIT_CAPABLE_CLASSIFICATION
     assert result.envelope is not None
+    assert result.envelope["broker_submit_enabled"] is True
+    assert result.envelope["submit_allowed"] is True
     assert result.envelope["session"] == "LONDON_LATE"
     assert result.envelope["action"] == "SELL"
     assert result.envelope["localSymbol"] == "MNQM6"
