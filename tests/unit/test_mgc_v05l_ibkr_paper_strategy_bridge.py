@@ -1255,6 +1255,149 @@ def test_working_order_still_blocks_duplicate_entry_even_with_runtime_pricing(tm
     assert duplicate_guard["blocking"] is True
 
 
+def test_entry_preflight_blocks_opposite_direction_when_broker_quantity_nonzero(tmp_path: Path) -> None:
+    config = _config(
+        tmp_path,
+        strategy_id="mes_us_active_participation_short",
+        symbol="MES",
+        action="SELL",
+        caller_metadata=_approved_runtime_metadata(
+            strategy_id="mes_us_active_participation_short",
+            source_instrument="MES",
+            executable_proxy="MES",
+            action="SELL",
+            intent_type="SELL_TO_OPEN",
+        ),
+    )
+    checks = _build_preflight_checks(
+        config=config,
+        intent=_intent_from_config(config),
+        selected_account_id="DUM882026",
+        open_orders={"open_order_count": 0},
+        current_position_quantity=1.0,
+        quote_context=_quote_context(),
+        exact_contract_report={"exact_contract": {}},
+        qualified_contract_report=_qualified_contract_report(min_tick=0.25),
+        audit_events=[],
+        entry_execution_pricing={"is_entry": True, "execution_price_source": "RUNTIME_DATABENTO_1M_CLOSE", "block_submit": False},
+    )
+
+    failure = next(row for row in checks if row["name"] == "same_symbol_broker_qty_anti_flip")
+    assert failure["passed"] is False
+    assert failure["blocking"] is True
+    assert "SAME_SYMBOL_BROKER_QTY_ANTI_FLIP_LOCK" in failure["detail"]
+
+
+def test_entry_preflight_blocks_same_direction_stacking_when_broker_quantity_nonzero(tmp_path: Path) -> None:
+    config = _config(
+        tmp_path,
+        strategy_id="mnq_us_active_participation_long_2",
+        symbol="MNQ",
+        action="BUY",
+        caller_metadata=_approved_runtime_metadata(
+            strategy_id="mnq_us_active_participation_long_2",
+            source_instrument="MNQ",
+            executable_proxy="MNQ",
+            action="BUY",
+            intent_type="BUY_TO_OPEN",
+        ),
+    )
+    checks = _build_preflight_checks(
+        config=config,
+        intent=_intent_from_config(config),
+        selected_account_id="DUM882026",
+        open_orders={"open_order_count": 0},
+        current_position_quantity=1.0,
+        quote_context=_quote_context(),
+        exact_contract_report={"exact_contract": {}},
+        qualified_contract_report=_qualified_contract_report(min_tick=0.25),
+        audit_events=[],
+        entry_execution_pricing={"is_entry": True, "execution_price_source": "RUNTIME_DATABENTO_1M_CLOSE", "block_submit": False},
+    )
+
+    failure = next(row for row in checks if row["name"] == "same_symbol_broker_qty_anti_flip")
+    assert failure["passed"] is False
+    assert failure["blocking"] is True
+
+
+def test_entry_preflight_allows_flat_broker_quantity(tmp_path: Path) -> None:
+    config = _config(
+        tmp_path,
+        strategy_id="mnq_us_active_participation_short",
+        symbol="MNQ",
+        action="SELL",
+        caller_metadata=_approved_runtime_metadata(
+            strategy_id="mnq_us_active_participation_short",
+            source_instrument="MNQ",
+            executable_proxy="MNQ",
+            action="SELL",
+            intent_type="SELL_TO_OPEN",
+        ),
+    )
+    checks = _build_preflight_checks(
+        config=config,
+        intent=_intent_from_config(config),
+        selected_account_id="DUM882026",
+        open_orders={"open_order_count": 0},
+        current_position_quantity=0.0,
+        quote_context=_quote_context(),
+        exact_contract_report={"exact_contract": {}},
+        qualified_contract_report=_qualified_contract_report(min_tick=0.25),
+        audit_events=[],
+        entry_execution_pricing={"is_entry": True, "execution_price_source": "RUNTIME_DATABENTO_1M_CLOSE", "block_submit": False},
+    )
+
+    row = next(row for row in checks if row["name"] == "same_symbol_broker_qty_anti_flip")
+    assert row["passed"] is True
+    assert row["blocking"] is True
+
+
+def test_managed_close_preflight_not_blocked_by_entry_broker_quantity_lock(tmp_path: Path) -> None:
+    config = _config(
+        tmp_path,
+        strategy_id="mes_us_active_participation_long",
+        symbol="MES",
+        action="SELL",
+        limit_price_model="DELAYED_BID_MINUS_1T_MARKETABLE_SELL",
+        caller_metadata={
+            **_approved_runtime_metadata(
+                strategy_id="mes_us_active_participation_long",
+                source_instrument="MES",
+                executable_proxy="MES",
+                action="SELL",
+                intent_type="SELL_TO_CLOSE",
+            ),
+            "lifecycle_id": "managed-mes-long",
+        },
+    )
+    intent = _intent_from_config(config)
+    policy = _exit_attempt_policy_for_bridge(
+        config=config,
+        intent=intent,
+        history_events=[],
+        current_position_quantity=1.0,
+        open_orders={"open_order_count": 0},
+        phase1_gate={"ready": True},
+    )
+    checks = _build_preflight_checks(
+        config=config,
+        intent=intent,
+        selected_account_id="DUM882026",
+        open_orders={"open_order_count": 0},
+        current_position_quantity=1.0,
+        quote_context=_quote_context(),
+        exact_contract_report={"exact_contract": {}},
+        qualified_contract_report=_qualified_contract_report(min_tick=0.25),
+        audit_events=[],
+        exit_attempt_policy=policy,
+        entry_execution_pricing={"is_close": True, "execution_price_source": "RUNTIME_DATABENTO_1M_CLOSE", "block_submit": False},
+    )
+
+    assert not any(row["name"] == "same_symbol_broker_qty_anti_flip" for row in checks)
+    close_row = next(row for row in checks if row["name"] == "broker_position_present_for_close")
+    assert close_row["passed"] is True
+
+
 def test_schema_contains_required_fields() -> None:
     schema = strategy_order_intent_schema()
 

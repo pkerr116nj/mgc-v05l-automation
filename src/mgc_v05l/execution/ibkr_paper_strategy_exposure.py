@@ -59,6 +59,7 @@ _DEFAULT_OPEN_ORDER_TRUTH_PATH = Path("outputs") / "track_b_execution_core" / "o
 _UNRESOLVED_SUBMIT_INTENT_BLOCK_REASON = "TRACK_B_UNRESOLVED_SUBMIT_INTENT_BLOCKS_NEW_ENTRY"
 _SAME_SYMBOL_PENDING_FILL_ANTI_FLIP_REASON = "SAME_SYMBOL_PENDING_FILL_ANTI_FLIP_LOCK"
 _SAME_SYMBOL_UNRESOLVED_EXPOSURE_REASON = "SAME_SYMBOL_UNRESOLVED_CURRENT_EXPOSURE_LOCK"
+_SAME_SYMBOL_BROKER_QTY_ANTI_FLIP_REASON = "SAME_SYMBOL_BROKER_QTY_ANTI_FLIP_LOCK"
 _CANONICAL_TRUTH_UNAVAILABLE_REASON = "CANONICAL_REGISTRY_TRUTH_UNAVAILABLE"
 _CANONICAL_TRUTH_AMBIGUOUS_REASON = "CANONICAL_REGISTRY_TRUTH_AMBIGUOUS"
 _CANONICAL_CURRENT_EXPOSURE_PRESENT_REASON = "CANONICAL_CURRENT_EXPOSURE_PRESENT"
@@ -971,6 +972,7 @@ def _evaluate_strategy_gate(
                 _UNRESOLVED_SUBMIT_INTENT_BLOCK_REASON,
                 _SAME_SYMBOL_PENDING_FILL_ANTI_FLIP_REASON,
                 _SAME_SYMBOL_UNRESOLVED_EXPOSURE_REASON,
+                _SAME_SYMBOL_BROKER_QTY_ANTI_FLIP_REASON,
             }
         ),
     }
@@ -1026,6 +1028,14 @@ def _entry_registry_truth_result(
     if same_symbol_pending_fill_lock:
         reason_codes.extend(str(reason) for reason in list(same_symbol_pending_fill_lock.get("reason_codes") or []))
 
+    same_symbol_broker_qty_lock = _same_symbol_broker_quantity_entry_lock(
+        config=config,
+        requested_direction=requested_direction,
+        allow_stacking=allow_stacking,
+    )
+    if same_symbol_broker_qty_lock:
+        reason_codes.extend(str(reason) for reason in list(same_symbol_broker_qty_lock.get("reason_codes") or []))
+
     matching_records = _matching_entry_registry_records(
         records=active_records,
         requested_strategy=requested_strategy,
@@ -1071,6 +1081,7 @@ def _entry_registry_truth_result(
         "broker_lifecycle_reconciled": broker_lifecycle_reconciled,
         "canonical_current_scope_result": canonical_current_scope,
         "same_symbol_pending_fill_lock": same_symbol_pending_fill_lock,
+        "same_symbol_broker_quantity_lock": same_symbol_broker_qty_lock,
         "source_paths": source_paths,
     }
 
@@ -1584,6 +1595,114 @@ def _same_symbol_pending_fill_entry_lock(
         "matching_record_count": len(matching_records),
         "matching_records": matching_records,
     }
+
+
+def _same_symbol_broker_quantity_entry_lock(
+    *,
+    config: IbkrPaperStrategyExposureConfig,
+    requested_direction: str | None,
+    allow_stacking: bool,
+) -> dict[str, Any] | None:
+    requested = str(requested_direction or "").strip().upper()
+    if requested not in {"LONG", "SHORT"}:
+        return None
+
+    positions_path = config.repo_root / config.broker_positions_snapshot_path
+    positions_payload = _load_json(positions_path)
+    positions_fresh = _snapshot_freshness_with_requirements(
+        payload=positions_payload,
+        path=positions_path,
+        max_age_seconds=float(config.broker_truth_max_age_seconds),
+        require_ok=True,
+        completeness_key="positions_complete",
+    )
+    if not positions_fresh.get("fresh"):
+        return None
+
+    matching_rows: list[dict[str, Any]] = []
+    reason_codes: list[str] = []
+    for row in list(positions_payload.get("positions") or []):
+        if not isinstance(row, dict):
+            continue
+        if not _broker_position_row_same_account_contract(row=row, config=config, default_account=positions_payload.get("selected_account_id")):
+            continue
+        qty = _broker_position_quantity(row)
+        if qty == 0.0:
+            continue
+
+        broker_direction = "LONG" if qty > 0.0 else "SHORT"
+        lock_reason = ""
+        if _directions_are_opposite(requested, broker_direction):
+            lock_reason = _SAME_SYMBOL_BROKER_QTY_ANTI_FLIP_REASON
+        elif not allow_stacking:
+            lock_reason = _SAME_SYMBOL_UNRESOLVED_EXPOSURE_REASON
+        if not lock_reason:
+            continue
+
+        reason_codes.append(lock_reason)
+        matching_rows.append(
+            {
+                "reason_code": lock_reason,
+                "match_reason": "same_account_contract_broker_position",
+                "account_id": row.get("account_id") or row.get("account") or positions_payload.get("selected_account_id"),
+                "symbol": row.get("symbol"),
+                "local_symbol": row.get("local_symbol") or row.get("localSymbol"),
+                "con_id": row.get("con_id") or row.get("conId"),
+                "quantity": qty,
+                "direction": broker_direction,
+                "avg_cost": row.get("avg_cost") or row.get("avgCost") or row.get("average_cost") or row.get("averageCost"),
+            }
+        )
+
+    if not matching_rows:
+        return None
+    return {
+        "classification": "SAME_SYMBOL_BROKER_QUANTITY_ENTRY_LOCK",
+        "detail": (
+            "Exact same-account/contract broker quantity is nonzero; new entry orders are blocked until "
+            "broker truth is flat/current-scope clean. Risk-reducing managed closes are not blocked by this entry lock."
+        ),
+        "reason_codes": list(dict.fromkeys(reason_codes)),
+        "matching_record_count": len(matching_rows),
+        "matching_records": matching_rows,
+        "positions_snapshot": positions_fresh,
+    }
+
+
+def _broker_position_row_same_account_contract(
+    *,
+    row: dict[str, Any],
+    config: IbkrPaperStrategyExposureConfig,
+    default_account: Any = None,
+) -> bool:
+    requested_account = _valid_owner_identity_value(config.account_id)
+    row_account = _valid_owner_identity_value(row.get("account_id") or row.get("account") or default_account)
+    if requested_account and row_account and requested_account != row_account:
+        return False
+    if requested_account and not row_account:
+        return False
+
+    config_con_id = _int_or_none(config.con_id)
+    row_con_id = _int_or_none(row.get("con_id") or row.get("conId"))
+    if config_con_id is not None:
+        return row_con_id == config_con_id
+
+    config_local = str(config.local_symbol or "").strip().upper()
+    row_local = str(row.get("local_symbol") or row.get("localSymbol") or "").strip().upper()
+    if config_local:
+        return bool(row_local) and row_local == config_local
+    return False
+
+
+def _broker_position_quantity(row: dict[str, Any]) -> float:
+    for key in ("quantity", "position", "qty", "position_qty"):
+        if key not in row or row.get(key) is None:
+            continue
+        try:
+            return float(row.get(key))
+        except (TypeError, ValueError):
+            continue
+    return 0.0
 
 
 def _unresolved_submit_intent_entry_direction(record: dict[str, Any]) -> str | None:

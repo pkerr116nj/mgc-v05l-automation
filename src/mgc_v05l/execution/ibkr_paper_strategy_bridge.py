@@ -2126,6 +2126,8 @@ def _build_preflight_checks(
         )
     else:
         pricing = dict(entry_execution_pricing or {})
+        broker_qty = float(current_position_quantity or 0.0)
+        broker_qty_lock_passed = abs(broker_qty) == 0.0
         checks.append(
             _check(
                 "entry_execution_price_source",
@@ -2143,10 +2145,18 @@ def _build_preflight_checks(
         )
         checks.append(
             _check(
-                "position_gate_buy_to_open",
+                "same_symbol_broker_qty_anti_flip",
+                broker_qty_lock_passed,
                 True,
-                True,
-                "BUY intents are governed by per-strategy exposure attribution; aggregate broker flat is not required when stacking is explicitly allowed.",
+                (
+                    "Exact same-contract broker quantity is flat for this new entry."
+                    if broker_qty_lock_passed
+                    else (
+                        "SAME_SYMBOL_BROKER_QTY_ANTI_FLIP_LOCK: exact same-contract broker quantity "
+                        f"{broker_qty} blocks new entry orders until broker truth is flat/current-scope clean. "
+                        "Risk-reducing managed closes use the close path and remain allowed."
+                    )
+                ),
             )
         )
     _record_bridge_audit(
