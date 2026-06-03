@@ -196,6 +196,26 @@ def refresh_track_b_shared_truth(
         payload=managed_position_registry,
         now=actual_now,
     )
+    managed_order_registry = build_track_b_managed_order_registry(config=managed_order_config, now=actual_now)
+    managed_order_path, _ = write_track_b_managed_order_registry(
+        config=managed_order_config,
+        payload=managed_order_registry,
+        now=actual_now,
+    )
+    position_truth = build_track_b_position_truth(config=position_config, now=actual_now)
+    position_path, _ = write_track_b_position_truth(config=position_config, payload=position_truth, now=actual_now)
+    runtime_environment_truth = build_track_b_runtime_environment_truth(
+        config=runtime_config,
+        now=actual_now,
+        pid_running=pid_running,
+        process_root_resolver=process_root_resolver,
+        source_commit_resolver=source_commit_resolver,
+    )
+    runtime_path, _ = write_track_b_runtime_environment_truth(
+        config=runtime_config,
+        payload=runtime_environment_truth,
+        now=actual_now,
+    )
 
     reconciliation = _read_json(config.resolve(DEFAULT_RECONCILIATION_ARTIFACT))
     broker_position_guardian_config = TrackBBrokerPositionGuardianConfig(

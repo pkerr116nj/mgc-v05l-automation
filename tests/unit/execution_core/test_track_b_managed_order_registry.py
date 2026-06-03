@@ -251,10 +251,107 @@ def test_exit_due_without_close_order_is_managed_order_blocker_only(tmp_path: Pa
     )
 
     assert payload["classification"] == POSITION_WITHOUT_CLOSE_ORDER
+    assert payload["summary"]["managed_order_count"] == 1
     row = payload["managed_orders"][0]
     assert row["classification"] == POSITION_WITHOUT_CLOSE_ORDER
     assert row["close_order_required_now"] is True
     assert row["managed_active_hold"] is False
+
+
+def test_exit_due_managed_position_creates_blocker_without_open_order_truth_row(tmp_path: Path) -> None:
+    managed_position = {
+        "classification": "OPEN_MANAGED_EXIT_DUE",
+        "symbol": "MES",
+        "local_symbol": "MESM6",
+        "con_id": 770561194,
+        "side": "SHORT",
+        "quantity": "1",
+        "aggregate_qty": "-1",
+        "signed_broker_qty": "-1",
+        "lifecycle_id": "current_managed_mes_short",
+        "lane_id": "mes_us_active_participation_short",
+        "strategy_id": "mes_us_active_participation_short",
+        "managed_exit_policy_id": "US_ACTIVE_EVIDENCE_TIMEBOX_60M_EXIT_V1",
+        "exit_due": True,
+        "attention_required": False,
+        "working_close_qty": "0",
+        "broker_position": {
+            "account_id": "DUM882026",
+            "symbol": "MES",
+            "local_symbol": "MESM6",
+            "con_id": 770561194,
+            "expiry": "20260618",
+            "quantity": "-1",
+        },
+    }
+    _seed_base(tmp_path, managed_positions=[managed_position])
+
+    payload = build_track_b_managed_order_registry(
+        config=TrackBManagedOrderRegistryConfig(repo_root=tmp_path),
+        now=NOW,
+    )
+
+    assert payload["classification"] == POSITION_WITHOUT_CLOSE_ORDER
+    row = payload["managed_orders"][0]
+    assert row["classification"] == POSITION_WITHOUT_CLOSE_ORDER
+    assert row["lifecycle_id"] == "current_managed_mes_short"
+    assert row["action"] == "BUY"
+    assert row["close_order_required_now"] is True
+
+
+def test_canonical_exit_due_position_dedupes_open_order_truth_missing_con_id(tmp_path: Path) -> None:
+    managed_position = {
+        "classification": "OPEN_MANAGED_EXIT_DUE",
+        "symbol": "MES",
+        "local_symbol": "MESM6",
+        "con_id": 770561194,
+        "side": "SHORT",
+        "quantity": "1",
+        "aggregate_qty": "-1",
+        "signed_broker_qty": "-1",
+        "lifecycle_id": "current_managed_mes_short",
+        "lane_id": "mes_us_active_participation_short",
+        "strategy_id": "mes_us_active_participation_short",
+        "managed_exit_policy_id": "US_ACTIVE_EVIDENCE_TIMEBOX_60M_EXIT_V1",
+        "exit_due": True,
+        "attention_required": False,
+        "working_close_qty": "0",
+        "broker_position": {
+            "account_id": "DUM882026",
+            "symbol": "MES",
+            "local_symbol": "MESM6",
+            "con_id": 770561194,
+            "expiry": "20260618",
+            "quantity": "-1",
+        },
+    }
+    broker_position_without_con_id = {
+        "account_id": "DUM882026",
+        "symbol": "MES",
+        "track_b_root": "MES",
+        "local_symbol": "MESM6",
+        "quantity": "-1",
+        "average_cost": "38023.13",
+    }
+    _seed_base(
+        tmp_path,
+        positions_without_close=[broker_position_without_con_id],
+        managed_positions=[managed_position],
+    )
+
+    payload = build_track_b_managed_order_registry(
+        config=TrackBManagedOrderRegistryConfig(repo_root=tmp_path),
+        now=NOW,
+    )
+
+    assert payload["classification"] == POSITION_WITHOUT_CLOSE_ORDER
+    assert payload["summary"]["managed_order_count"] == 1
+    assert payload["summary"]["position_without_close_order_count"] == 1
+    row = payload["managed_orders"][0]
+    assert row["lifecycle_id"] == "current_managed_mes_short"
+    assert row["local_symbol"] == "MESM6"
+    assert row["con_id"] == 770561194
+    assert row["action"] == "BUY"
 
 
 def test_marketable_close_order_is_modify_in_place_candidate(tmp_path: Path) -> None:

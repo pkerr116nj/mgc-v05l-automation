@@ -69,7 +69,7 @@ def resolve_current_exposure_ownership(
 ) -> dict[str, Any]:
     """Resolve current broker exposure to exactly one canonical owner when provable."""
 
-    broker_rows = [dict(row) for row in broker_positions if _position_key(row) and _decimal(row.get("quantity"))]
+    broker_rows = [dict(row) for row in broker_positions if _position_key(row) and _broker_position_qty(row)]
     open_order_rows = [dict(row) for row in broker_open_orders]
     records = tuple(registry_records) if registry_records is not None else load_live_trade_registry_records(
         repo_root=config.repo_root
@@ -137,6 +137,24 @@ def resolve_current_exposure_ownership(
 
         lifecycle_match = _matching_lifecycle_position(broker_position, lifecycle_rows)
         registry_matches = _registry_matches_for_broker_position(active_records, broker_position)
+        lifecycle_identity_conflicts = _registry_lifecycle_identity_conflicts(
+            registry_matches=registry_matches,
+            lifecycle_rows=lifecycle_rows,
+            broker_position=broker_position,
+        )
+        if lifecycle_identity_conflicts:
+            review.append(
+                {
+                    "classification": AMBIGUOUS_EXPOSURE_OWNERSHIP,
+                    "reason_codes": ["REGISTRY_LIFECYCLE_IDENTITY_CONFLICT"],
+                    "broker_position": raw_broker_position,
+                    "canonical_broker_position": broker_position,
+                    "canonical_identity_resolution": identity.to_dict(),
+                    "position_key": key,
+                    "lifecycle_identity_conflicts": lifecycle_identity_conflicts,
+                }
+            )
+            continue
         owner_record, superseded_records, owner_reason_codes = _select_current_registry_owner(
             registry_matches=registry_matches,
             lifecycle_match=lifecycle_match,
@@ -322,14 +340,22 @@ def apply_current_exposure_owner_lifecycle_overlay(
         if not owner:
             current.append(row)
             continue
-        if not _requires_lifecycle_aggregate_overlay(row, owner):
-            current.append(row)
-            continue
         owner_lifecycle_id = str(owner.get("lifecycle_id") or "")
         raw_lifecycle_ids = {
             str(row.get("lifecycle_id") or ""),
             *[str(item) for item in row.get("lifecycle_ids") or []],
         }
+        raw_lifecycle_ids = {item for item in raw_lifecycle_ids if item}
+        if owner_lifecycle_id and raw_lifecycle_ids == {owner_lifecycle_id}:
+            if key in emitted_keys or owner_lifecycle_id in emitted_lifecycle_ids:
+                continue
+            current.append(row)
+            emitted_keys.add(key)
+            emitted_lifecycle_ids.add(owner_lifecycle_id)
+            continue
+        if not _requires_lifecycle_aggregate_overlay(row, owner):
+            current.append(row)
+            continue
         if key not in emitted_keys and (not owner_lifecycle_id or owner_lifecycle_id not in emitted_lifecycle_ids):
             current.append(dict(owner))
             emitted_keys.add(key)
@@ -356,6 +382,12 @@ def apply_current_exposure_owner_lifecycle_overlay(
 
 def _requires_lifecycle_aggregate_overlay(raw: Mapping[str, Any], owner: Mapping[str, Any]) -> bool:
     raw_lifecycle_ids = {str(item) for item in raw.get("lifecycle_ids") or [] if str(item)}
+    raw_lifecycle_id = str(raw.get("lifecycle_id") or "")
+    if raw_lifecycle_id:
+        raw_lifecycle_ids.add(raw_lifecycle_id)
+    owner_lifecycle_id = str(owner.get("lifecycle_id") or "")
+    if owner_lifecycle_id and raw_lifecycle_ids and raw_lifecycle_ids != {owner_lifecycle_id}:
+        return True
     if len(raw_lifecycle_ids) > 1:
         return True
     raw_unit_count = _decimal(raw.get("lifecycle_unit_count") or raw.get("unit_count"))
@@ -379,6 +411,16 @@ def _select_current_registry_owner(
         return None, (), []
     lifecycle_id = str(lifecycle_match.get("lifecycle_id") or "")
     trade_id = str(lifecycle_match.get("trade_id") or "")
+    if lifecycle_id and trade_id:
+        same_trade_records = [record for record in required if record.trade_id == trade_id]
+        if len(same_trade_records) == 1:
+            owner_lifecycle_id = (
+                same_trade_records[0].ownership_identity.lifecycle_id
+                if same_trade_records[0].ownership_identity is not None
+                else ""
+            )
+            if owner_lifecycle_id and owner_lifecycle_id != lifecycle_id:
+                return None, (), ["REGISTRY_LIFECYCLE_IDENTITY_CONFLICT"]
     if lifecycle_id or trade_id:
         lifecycle_records = [
             record
@@ -432,6 +474,42 @@ def _registry_matches_for_broker_position(
         and int(record.ownership_identity.con_id) == int(broker_position.get("con_id") or 0)
         and _signed_owner_qty(record) == _decimal(broker_position.get("quantity"))
     ]
+
+
+def _registry_lifecycle_identity_conflicts(
+    *,
+    registry_matches: Sequence[TradeRegistryRecord],
+    lifecycle_rows: Sequence[Mapping[str, Any]],
+    broker_position: Mapping[str, Any],
+) -> list[dict[str, Any]]:
+    conflicts: list[dict[str, Any]] = []
+    broker_qty = _decimal(broker_position.get("quantity") if broker_position.get("quantity") not in (None, "") else broker_position.get("position"))
+    for record in registry_matches:
+        owner = record.ownership_identity
+        if owner is None:
+            continue
+        for row in lifecycle_rows:
+            if str(row.get("trade_id") or "") != record.trade_id:
+                continue
+            lifecycle_id = str(row.get("lifecycle_id") or "")
+            if not lifecycle_id or lifecycle_id == owner.lifecycle_id:
+                continue
+            if _contract_identity_key(row) != _contract_identity_key(broker_position):
+                continue
+            row_qty = _signed_lifecycle_qty(row)
+            if broker_qty is not None and row_qty is not None and row_qty != broker_qty:
+                continue
+            conflicts.append(
+                {
+                    "trade_id": record.trade_id,
+                    "registry_lifecycle_id": owner.lifecycle_id,
+                    "projection_lifecycle_id": lifecycle_id,
+                    "local_symbol": owner.local_symbol,
+                    "con_id": owner.con_id,
+                    "account_id": owner.account_id,
+                }
+            )
+    return conflicts
 
 
 def _registry_record_has_required_identity(record: TradeRegistryRecord) -> bool:
@@ -720,14 +798,18 @@ def _signed_report_qty(report: Mapping[str, Any]) -> Decimal | None:
 
 
 def _position_key(row: Mapping[str, Any]) -> str:
-    return str(row.get("local_symbol") or row.get("contract_key") or row.get("position_key") or "").upper()
+    return str(row.get("local_symbol") or row.get("localSymbol") or row.get("contract_key") or row.get("position_key") or "").upper()
+
+
+def _broker_position_qty(row: Mapping[str, Any]) -> Decimal | None:
+    return _decimal(row.get("quantity") if row.get("quantity") not in (None, "") else row.get("position"))
 
 
 def _exposure_identity_key(row: Mapping[str, Any]) -> str:
     account = str(row.get("account_id") or row.get("account") or "").strip().upper()
     if account == "MULTIPLE":
         account = ""
-    local_symbol = str(row.get("local_symbol") or "").strip().upper()
+    local_symbol = str(row.get("local_symbol") or row.get("localSymbol") or "").strip().upper()
     con_id = str(row.get("con_id") or row.get("conId") or "").strip()
     if account and local_symbol and con_id:
         return f"{account}|{local_symbol}|{con_id}"
@@ -736,7 +818,7 @@ def _exposure_identity_key(row: Mapping[str, Any]) -> str:
 
 
 def _contract_identity_key(row: Mapping[str, Any]) -> str:
-    local_symbol = str(row.get("local_symbol") or "").strip().upper()
+    local_symbol = str(row.get("local_symbol") or row.get("localSymbol") or "").strip().upper()
     con_id = str(row.get("con_id") or row.get("conId") or "").strip()
     if local_symbol and con_id:
         return f"{local_symbol}|{con_id}"

@@ -30,6 +30,12 @@ from mgc_v05l.execution_core.track_b_order_adjustment_planner import (
     build_track_b_order_adjustment_plan,
     write_track_b_order_adjustment_plan,
 )
+from mgc_v05l.execution_core.track_b_paper_autonomous_recovery_planner import (
+    DEFAULT_PAPER_AUTONOMOUS_RECOVERY_PLAN_ARTIFACT,
+    TrackBPaperAutonomousRecoveryPlannerConfig,
+    build_track_b_paper_autonomous_recovery_plan,
+    write_track_b_paper_autonomous_recovery_plan,
+)
 from mgc_v05l.execution_core.track_b_readiness_state import (
     DEFAULT_CANONICAL_READINESS_ARTIFACT,
     write_canonical_readiness_artifact,
@@ -92,6 +98,7 @@ class TrackBAuthorityRefreshHeartbeatConfig:
     shared_truth_refresh_path: Path = DEFAULT_SHARED_TRUTH_REFRESH_ARTIFACT
     canonical_readiness_path: Path = DEFAULT_CANONICAL_READINESS_ARTIFACT
     order_adjustment_plan_path: Path = DEFAULT_ORDER_ADJUSTMENT_PLAN_ARTIFACT
+    paper_autonomous_recovery_plan_path: Path = DEFAULT_PAPER_AUTONOMOUS_RECOVERY_PLAN_ARTIFACT
     interval_seconds: float = AUTHORITY_REFRESH_INTERVAL_SECONDS
     bridge_max_age_seconds: float = BRIDGE_PRE_ACTION_MAX_AGE_SECONDS
 
@@ -187,6 +194,26 @@ def refresh_track_b_paper_authority_if_due(
             config=control_plane_config,
             payload=control_plane,
         )
+        refresh_stage = "paper_autonomous_recovery_planner"
+        recovery_plan_config = TrackBPaperAutonomousRecoveryPlannerConfig(
+            repo_root=config.repo_root,
+            output_path=config.paper_autonomous_recovery_plan_path,
+            control_plane_snapshot_path=config.control_plane_snapshot_path,
+        )
+        recovery_plan = build_track_b_paper_autonomous_recovery_plan(
+            config=recovery_plan_config,
+            now=actual_now,
+        )
+        recovery_plan_path = write_track_b_paper_autonomous_recovery_plan(
+            config=recovery_plan_config,
+            payload=recovery_plan,
+        )
+        shared_truth = _align_shared_truth_recovery_plan_row(
+            config=config,
+            shared_truth=shared_truth,
+            recovery_plan=recovery_plan,
+            recovery_plan_path=recovery_plan_path,
+        )
         refresh_stage = "runtime_supervisor_authority"
         supervisor_config = TrackBRuntimeSupervisorAuthorityConfig(
             repo_root=config.repo_root,
@@ -245,6 +272,10 @@ def refresh_track_b_paper_authority_if_due(
             "safe_state_classification": control_plane.get("runtime_safe_state_classification"),
             "runtime_supervisor_classification": runtime_supervisor.get("classification"),
             "planner_classification": planner.get("classification"),
+            "paper_autonomous_recovery_plan_classification": recovery_plan.get("classification"),
+            "paper_autonomous_recovery_plan_control_plane_snapshot_id": recovery_plan.get(
+                "control_plane_snapshot_id"
+            ),
             "canonical_readiness": readiness.get("canonical_readiness") or readiness.get("state"),
             "ready_submit_capable": readiness.get("canonical_readiness") == "READY_SUBMIT_CAPABLE"
             or readiness.get("state") == "READY_SUBMIT_CAPABLE",
@@ -259,11 +290,65 @@ def refresh_track_b_paper_authority_if_due(
                 "runtime_supervisor_authority": str(runtime_supervisor_path),
                 "canonical_readiness": str(config.resolve(config.canonical_readiness_path)),
                 "order_adjustment_planner": str(planner_path),
+                "paper_autonomous_recovery_planner": str(recovery_plan_path),
                 "shared_truth_refresh": str(config.resolve(config.shared_truth_refresh_path)),
             },
         }
     )
     return _write_heartbeat(config=config, payload=payload)
+
+
+def _align_shared_truth_recovery_plan_row(
+    *,
+    config: TrackBAuthorityRefreshHeartbeatConfig,
+    shared_truth: Mapping[str, Any],
+    recovery_plan: Mapping[str, Any],
+    recovery_plan_path: Path,
+) -> dict[str, Any]:
+    payload = dict(shared_truth)
+    services = []
+    replaced = False
+    for row in payload.get("services") or []:
+        if not isinstance(row, Mapping):
+            continue
+        item = dict(row)
+        if item.get("service") == "PAPER Autonomous Recovery Planner":
+            item.update(
+                {
+                    "classification": recovery_plan.get("classification") or "MISSING",
+                    "generated_at": recovery_plan.get("generated_at"),
+                    "artifact_path": str(recovery_plan_path),
+                }
+            )
+            replaced = True
+        services.append(item)
+    if not replaced:
+        services.append(
+            {
+                "service": "PAPER Autonomous Recovery Planner",
+                "classification": recovery_plan.get("classification") or "MISSING",
+                "generated_at": recovery_plan.get("generated_at"),
+                "artifact_path": str(recovery_plan_path),
+            }
+        )
+    payload["services"] = services
+    classifications = dict(payload.get("classifications") or {})
+    classifications["PAPER Autonomous Recovery Planner"] = recovery_plan.get("classification") or "MISSING"
+    payload["classifications"] = classifications
+    artifact_paths = dict(payload.get("artifact_paths") or {})
+    artifact_paths["PAPER Autonomous Recovery Planner"] = str(recovery_plan_path)
+    payload["artifact_paths"] = artifact_paths
+    payload["autonomous_recovery_plan_classification"] = recovery_plan.get("classification")
+    payload["autonomous_recovery_execution_enabled"] = recovery_plan.get("execution_enabled") is True
+    warnings = [
+        dict(row)
+        for row in payload.get("warnings") or []
+        if (row if isinstance(row, Mapping) else {}).get("code") != "paper_autonomous_recovery_plan_advisory_stale"
+        or recovery_plan.get("classification") in {"PLAN_BLOCKED_STALE_EVIDENCE", "MISSING"}
+    ]
+    payload["warnings"] = warnings
+    write_json_atomic(config.resolve(config.shared_truth_refresh_path), payload)
+    return payload
 
 
 def record_track_b_authority_refresh_runtime_failure(

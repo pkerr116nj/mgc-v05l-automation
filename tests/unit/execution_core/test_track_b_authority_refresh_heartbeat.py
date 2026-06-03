@@ -70,6 +70,15 @@ def _patch_successful_refresh(monkeypatch: pytest.MonkeyPatch, calls: list[str])
             "runtime_safe_state_classification": "SAFE_STATE_NORMAL",
         }
 
+    def _recovery_plan(*, config, now: datetime, **_: object) -> dict:
+        calls.append("recovery_plan")
+        snapshot = json.loads(config.resolve(config.control_plane_snapshot_path).read_text(encoding="utf-8"))
+        return {
+            "generated_at": now.isoformat(),
+            "classification": "PLAN_SCOPED_POSITION_CLEANUP",
+            "control_plane_snapshot_id": snapshot["control_plane_snapshot_id"],
+        }
+
     def _supervisor(*, now: datetime, **_: object) -> dict:
         calls.append("supervisor")
         return {
@@ -88,6 +97,13 @@ def _patch_successful_refresh(monkeypatch: pytest.MonkeyPatch, calls: list[str])
     monkeypatch.setattr(
         heartbeat,
         "write_track_b_control_plane_snapshot",
+        lambda *, config, payload: _write_json(config.resolve(config.output_path), dict(payload))
+        or config.resolve(config.output_path),
+    )
+    monkeypatch.setattr(heartbeat, "build_track_b_paper_autonomous_recovery_plan", _recovery_plan)
+    monkeypatch.setattr(
+        heartbeat,
+        "write_track_b_paper_autonomous_recovery_plan",
         lambda *, config, payload: _write_json(config.resolve(config.output_path), dict(payload))
         or config.resolve(config.output_path),
     )
@@ -141,6 +157,20 @@ def test_runtime_active_stale_control_plane_triggers_refresh(tmp_path: Path, mon
     )
     monkeypatch.setattr(
         heartbeat,
+        "build_track_b_paper_autonomous_recovery_plan",
+        lambda **_: calls.append("recovery_plan")
+        or {
+            "classification": "PLAN_SCOPED_POSITION_CLEANUP",
+            "control_plane_snapshot_id": "cp-1",
+        },
+    )
+    monkeypatch.setattr(
+        heartbeat,
+        "write_track_b_paper_autonomous_recovery_plan",
+        lambda *, config, payload: config.resolve(config.output_path),
+    )
+    monkeypatch.setattr(
+        heartbeat,
         "build_track_b_runtime_supervisor_authority",
         lambda **_: calls.append("supervisor") or {"classification": "SUPERVISOR_RUNTIME_ALREADY_HEALTHY"},
     )
@@ -161,9 +191,10 @@ def test_runtime_active_stale_control_plane_triggers_refresh(tmp_path: Path, mon
     )
 
     assert payload["classification"] == AUTHORITY_REFRESHED
-    assert calls == ["shared", "planner", "control_plane", "supervisor", "readiness"]
+    assert calls == ["shared", "planner", "control_plane", "recovery_plan", "supervisor", "readiness"]
     assert payload["latest_successful_refresh_at"] == now.isoformat()
     assert payload["control_plane_snapshot_id"] == "cp-1"
+    assert payload["paper_autonomous_recovery_plan_control_plane_snapshot_id"] == "cp-1"
     assert payload["runtime_supervisor_classification"] == "SUPERVISOR_RUNTIME_ALREADY_HEALTHY"
     assert payload["artifact_paths"]["runtime_supervisor_authority"].endswith(
         "latest_runtime_supervisor_authority.json"
@@ -328,6 +359,16 @@ def test_stale_readiness_state_triggers_refresh_even_when_interval_not_due(
         },
     )
     monkeypatch.setattr(heartbeat, "write_track_b_control_plane_snapshot", lambda *, config, payload: config.resolve(config.output_path))
+    monkeypatch.setattr(
+        heartbeat,
+        "build_track_b_paper_autonomous_recovery_plan",
+        lambda **_: {"classification": "PLAN_SCOPED_POSITION_CLEANUP", "control_plane_snapshot_id": "cp-fresh"},
+    )
+    monkeypatch.setattr(
+        heartbeat,
+        "write_track_b_paper_autonomous_recovery_plan",
+        lambda *, config, payload: config.resolve(config.output_path),
+    )
     monkeypatch.setattr(heartbeat, "write_canonical_readiness_artifact", lambda **_: {"canonical_readiness": "READY_SUBMIT_CAPABLE", "submit_allowed": True})
 
     payload = refresh_track_b_paper_authority_if_due(
@@ -337,6 +378,208 @@ def test_stale_readiness_state_triggers_refresh_even_when_interval_not_due(
 
     assert payload["classification"] == AUTHORITY_REFRESHED
     assert calls == ["shared"]
+
+
+def test_heartbeat_refreshes_recovery_planner_after_control_plane_snapshot(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    now = datetime(2026, 6, 1, 12, 0, tzinfo=UTC)
+    _active_runtime_truth(tmp_path, now)
+    _write_json(
+        tmp_path / DEFAULT_CONTROL_PLANE_SNAPSHOT_ARTIFACT,
+        {
+            "generated_at": (now - timedelta(minutes=10)).isoformat(),
+            "control_plane_snapshot_id": "old-cp",
+        },
+    )
+    monkeypatch.setattr(heartbeat, "refresh_track_b_shared_truth", lambda **_: {"classification": "OK"})
+    monkeypatch.setattr(
+        heartbeat,
+        "build_track_b_order_adjustment_plan",
+        lambda **_: {"classification": "NO_ACTION_NEEDED"},
+    )
+    monkeypatch.setattr(
+        heartbeat,
+        "write_track_b_order_adjustment_plan",
+        lambda *, config, payload: config.resolve(config.output_path),
+    )
+    monkeypatch.setattr(
+        heartbeat,
+        "build_track_b_control_plane_snapshot",
+        lambda **_: {
+            "generated_at": now.isoformat(),
+            "classification": "CONTROL_PLANE_SNAPSHOT_READY",
+            "control_plane_snapshot_id": "new-cp",
+            "runtime_safe_state_classification": "SAFE_STATE_NORMAL",
+        },
+    )
+    monkeypatch.setattr(
+        heartbeat,
+        "write_track_b_control_plane_snapshot",
+        lambda *, config, payload: _write_json(config.resolve(config.output_path), dict(payload))
+        or config.resolve(config.output_path),
+    )
+
+    def _recovery_plan(*, config, now: datetime) -> dict:
+        snapshot = json.loads(config.resolve(config.control_plane_snapshot_path).read_text(encoding="utf-8"))
+        return {
+            "generated_at": now.isoformat(),
+            "classification": "PLAN_SCOPED_POSITION_CLEANUP",
+            "control_plane_snapshot_id": snapshot["control_plane_snapshot_id"],
+        }
+
+    monkeypatch.setattr(heartbeat, "build_track_b_paper_autonomous_recovery_plan", _recovery_plan)
+    monkeypatch.setattr(
+        heartbeat,
+        "write_track_b_paper_autonomous_recovery_plan",
+        lambda *, config, payload: _write_json(config.resolve(config.output_path), dict(payload))
+        or config.resolve(config.output_path),
+    )
+    monkeypatch.setattr(
+        heartbeat,
+        "build_track_b_runtime_supervisor_authority",
+        lambda **_: {"classification": "SUPERVISOR_RUNTIME_ALREADY_HEALTHY"},
+    )
+    monkeypatch.setattr(
+        heartbeat,
+        "write_track_b_runtime_supervisor_authority",
+        lambda *, config, payload: config.resolve(config.output_path),
+    )
+    monkeypatch.setattr(
+        heartbeat,
+        "write_canonical_readiness_artifact",
+        lambda **_: {"canonical_readiness": "READY_SUBMIT_CAPABLE", "submit_allowed": True},
+    )
+
+    payload = refresh_track_b_paper_authority_if_due(
+        config=TrackBAuthorityRefreshHeartbeatConfig(repo_root=tmp_path),
+        now=now,
+        force=True,
+    )
+
+    recovery_plan = json.loads(
+        (tmp_path / heartbeat.DEFAULT_PAPER_AUTONOMOUS_RECOVERY_PLAN_ARTIFACT).read_text(encoding="utf-8")
+    )
+    assert payload["control_plane_snapshot_id"] == "new-cp"
+    assert payload["paper_autonomous_recovery_plan_control_plane_snapshot_id"] == "new-cp"
+    assert recovery_plan["control_plane_snapshot_id"] == "new-cp"
+
+
+def test_heartbeat_aligns_shared_truth_with_final_recovery_plan(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    now = datetime(2026, 6, 1, 12, 0, tzinfo=UTC)
+    _active_runtime_truth(tmp_path, now)
+    _write_json(
+        tmp_path / DEFAULT_CONTROL_PLANE_SNAPSHOT_ARTIFACT,
+        {"generated_at": (now - timedelta(minutes=10)).isoformat()},
+    )
+
+    def _shared_truth(*, config, now: datetime) -> dict:
+        payload = {
+            "generated_at": now.isoformat(),
+            "refresh_generation_id": "shared-generation",
+            "classifications": {
+                "PAPER Autonomous Recovery Planner": "PLAN_BLOCKED_STALE_EVIDENCE",
+            },
+            "artifact_paths": {
+                "PAPER Autonomous Recovery Planner": str(config.resolve(config.repo_root / "stale-plan.json")),
+            },
+            "services": [
+                {
+                    "service": "PAPER Autonomous Recovery Planner",
+                    "classification": "PLAN_BLOCKED_STALE_EVIDENCE",
+                    "generated_at": now.isoformat(),
+                    "artifact_path": str(config.resolve(config.repo_root / "stale-plan.json")),
+                }
+            ],
+            "warnings": [
+                {
+                    "code": "paper_autonomous_recovery_plan_advisory_stale",
+                    "detail": "stale planner",
+                }
+            ],
+        }
+        _write_json(config.resolve(config.shared_truth_refresh_path), payload)
+        return payload
+
+    monkeypatch.setattr(heartbeat, "refresh_track_b_shared_truth", _shared_truth)
+    monkeypatch.setattr(
+        heartbeat,
+        "build_track_b_order_adjustment_plan",
+        lambda **_: {"classification": "NO_ACTION_NEEDED"},
+    )
+    monkeypatch.setattr(
+        heartbeat,
+        "write_track_b_order_adjustment_plan",
+        lambda *, config, payload: config.resolve(config.output_path),
+    )
+    monkeypatch.setattr(
+        heartbeat,
+        "build_track_b_control_plane_snapshot",
+        lambda **_: {
+            "generated_at": now.isoformat(),
+            "classification": "CONTROL_PLANE_SNAPSHOT_READY",
+            "control_plane_snapshot_id": "cp-final",
+            "runtime_safe_state_classification": "SAFE_STATE_NORMAL",
+        },
+    )
+    monkeypatch.setattr(
+        heartbeat,
+        "write_track_b_control_plane_snapshot",
+        lambda *, config, payload: _write_json(config.resolve(config.output_path), dict(payload))
+        or config.resolve(config.output_path),
+    )
+    monkeypatch.setattr(
+        heartbeat,
+        "build_track_b_paper_autonomous_recovery_plan",
+        lambda **_: {
+            "generated_at": now.isoformat(),
+            "classification": "PLAN_SCOPED_POSITION_CLEANUP",
+            "control_plane_snapshot_id": "cp-final",
+            "execution_enabled": False,
+        },
+    )
+    monkeypatch.setattr(
+        heartbeat,
+        "write_track_b_paper_autonomous_recovery_plan",
+        lambda *, config, payload: _write_json(config.resolve(config.output_path), dict(payload))
+        or config.resolve(config.output_path),
+    )
+    monkeypatch.setattr(
+        heartbeat,
+        "build_track_b_runtime_supervisor_authority",
+        lambda **_: {"classification": "SUPERVISOR_RUNTIME_ALREADY_HEALTHY"},
+    )
+    monkeypatch.setattr(
+        heartbeat,
+        "write_track_b_runtime_supervisor_authority",
+        lambda *, config, payload: config.resolve(config.output_path),
+    )
+    monkeypatch.setattr(
+        heartbeat,
+        "write_canonical_readiness_artifact",
+        lambda **_: {"canonical_readiness": "READY_SUBMIT_CAPABLE", "submit_allowed": True},
+    )
+
+    payload = refresh_track_b_paper_authority_if_due(
+        config=TrackBAuthorityRefreshHeartbeatConfig(repo_root=tmp_path),
+        now=now,
+        force=True,
+    )
+
+    shared_truth = json.loads(
+        (tmp_path / heartbeat.DEFAULT_SHARED_TRUTH_REFRESH_ARTIFACT).read_text(encoding="utf-8")
+    )
+    planner_rows = [
+        row for row in shared_truth["services"] if row["service"] == "PAPER Autonomous Recovery Planner"
+    ]
+    assert payload["classification"] == AUTHORITY_REFRESHED
+    assert planner_rows[0]["classification"] == "PLAN_SCOPED_POSITION_CLEANUP"
+    assert shared_truth["classifications"]["PAPER Autonomous Recovery Planner"] == "PLAN_SCOPED_POSITION_CLEANUP"
+    assert shared_truth["warnings"] == []
 
 
 def test_runtime_inactive_skips_refresh(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

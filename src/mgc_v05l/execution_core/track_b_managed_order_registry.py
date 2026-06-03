@@ -421,7 +421,11 @@ def _position_without_close_rows(
     broker_open_orders = _list(reconciliation.get("track_b_broker_open_orders"))
     registry_positions = _list(managed_positions.get("managed_positions"))
     registry_positions.extend(_list(resolver_payload.get("resolved_lifecycle_positions")))
-    for position in _list(open_order_truth.get("broker_positions_without_close_order")):
+    positions_without_close = _canonical_positions_without_close_order(
+        managed_positions=managed_positions,
+        open_order_truth=open_order_truth,
+    )
+    for position in positions_without_close:
         terminal = resolve_terminal_registry_truth(
             records=terminal_records,
             identity=position,
@@ -498,6 +502,70 @@ def _position_without_close_rows(
             }
         )
     return rows, terminal_superseded_rows
+
+
+def _canonical_positions_without_close_order(
+    *,
+    managed_positions: Mapping[str, Any],
+    open_order_truth: Mapping[str, Any],
+) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    seen_dedupe_keys: set[str] = set()
+    for position in _list(managed_positions.get("managed_positions")):
+        if str(position.get("classification") or "") not in {"OPEN_MANAGED_EXIT_DUE", "OPEN_MANAGED_MATCHED"}:
+            continue
+        exit_due = position.get("exit_due") is True or str(position.get("exit_due_state") or "") == "EXIT_DUE"
+        if not exit_due:
+            continue
+        if _decimal_or_none(position.get("working_close_qty")) not in {None, Decimal("0")}:
+            continue
+        broker_position = _mapping(position.get("broker_position"))
+        row = dict(broker_position or position)
+        row.setdefault("symbol", position.get("symbol"))
+        row.setdefault("local_symbol", position.get("local_symbol"))
+        row.setdefault("con_id", position.get("con_id"))
+        row.setdefault("quantity", position.get("signed_broker_qty") or position.get("aggregate_qty"))
+        row["canonical_managed_position"] = dict(position)
+        key = _position_without_close_key(row)
+        dedupe_keys = _position_without_close_dedupe_keys(row)
+        if key and key not in seen:
+            seen.add(key)
+            seen_dedupe_keys.update(dedupe_keys)
+            rows.append(row)
+    for position in _list(open_order_truth.get("broker_positions_without_close_order")):
+        key = _position_without_close_key(position)
+        dedupe_keys = _position_without_close_dedupe_keys(position)
+        if key and key in seen:
+            continue
+        if dedupe_keys & seen_dedupe_keys:
+            continue
+        if key:
+            seen.add(key)
+        seen_dedupe_keys.update(dedupe_keys)
+        rows.append(dict(position))
+    return rows
+
+
+def _position_without_close_key(row: Mapping[str, Any]) -> str:
+    account = str(row.get("account_id") or row.get("account") or "").strip().upper()
+    local_symbol = str(row.get("local_symbol") or row.get("localSymbol") or row.get("contract_key") or "").strip().upper()
+    con_id = str(row.get("con_id") or row.get("conId") or "").strip()
+    return "|".join(part for part in (account, local_symbol, con_id) if part)
+
+
+def _position_without_close_dedupe_keys(row: Mapping[str, Any]) -> set[str]:
+    account = str(row.get("account_id") or row.get("account") or "").strip().upper()
+    local_symbol = str(row.get("local_symbol") or row.get("localSymbol") or row.get("contract_key") or "").strip().upper()
+    con_id = str(row.get("con_id") or row.get("conId") or "").strip()
+    keys: set[str] = set()
+    if account and local_symbol:
+        keys.add(f"account_local|{account}|{local_symbol}")
+    if local_symbol and con_id:
+        keys.add(f"local_con|{local_symbol}|{con_id}")
+    if local_symbol:
+        keys.add(f"local|{local_symbol}")
+    return keys
 
 
 def _overall_classification(*, source_stale: Mapping[str, Any], managed_orders: list[dict[str, Any]]) -> str:

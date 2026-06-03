@@ -257,6 +257,11 @@ def reconcile_track_b_paper_broker_truth(
         lifecycle_positions=lifecycle_positions,
         symbols=config.symbols,
     )
+    if owner_superseded_lifecycle_positions:
+        position_match_report = _append_owner_superseded_lifecycle_positions_to_match_report(
+            position_match_report=position_match_report,
+            owner_superseded_lifecycle_positions=owner_superseded_lifecycle_positions,
+        )
     known_managed_exit_orders = _known_managed_exit_orders(
         broker_open_orders=track_b_open_orders,
         lifecycle_status=live_position_status,
@@ -4083,6 +4088,37 @@ def _broker_lifecycle_position_match(
         "matches": matches,
         "superseded_unmatched_lifecycle_positions": superseded_unmatched_lifecycle,
     }
+
+
+def _append_owner_superseded_lifecycle_positions_to_match_report(
+    *,
+    position_match_report: Mapping[str, Any],
+    owner_superseded_lifecycle_positions: Sequence[Mapping[str, Any]],
+) -> dict[str, Any]:
+    payload = dict(position_match_report)
+    existing = [dict(row) for row in payload.get("superseded_unmatched_lifecycle_positions") or [] if isinstance(row, Mapping)]
+    seen = {_lifecycle_position_scope_key(row) for row in existing if _lifecycle_position_scope_key(row)}
+    for row in owner_superseded_lifecycle_positions:
+        raw = row.get("raw_lifecycle_position") if isinstance(row.get("raw_lifecycle_position"), Mapping) else row
+        if not isinstance(raw, Mapping):
+            continue
+        item = dict(raw)
+        item.setdefault("classification", row.get("classification") or "STALE_SUPERSEDED_LIFECYCLE_PROJECTION")
+        item.setdefault("reason_codes", list(row.get("reason_codes") or []))
+        item.setdefault("superseding_lifecycle_id", row.get("owner_lifecycle_id"))
+        item.setdefault("superseding_trade_id", row.get("owner_trade_id"))
+        key = _lifecycle_position_scope_key(item)
+        if key and key in seen:
+            continue
+        if key:
+            seen.add(key)
+        existing.append(item)
+    payload["superseded_unmatched_lifecycle_positions"] = existing
+    if "blocker" in payload and isinstance(payload.get("blocker"), Mapping):
+        blocker = dict(payload["blocker"])
+        blocker["superseded_unmatched_lifecycle_positions"] = existing
+        payload["blocker"] = blocker
+    return payload
 
 
 def _superseded_unmatched_lifecycle_positions(

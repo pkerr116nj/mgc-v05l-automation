@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from datetime import UTC, datetime, timedelta
+from decimal import Decimal
 from pathlib import Path
 
 from mgc_v05l.execution_core.track_b_canonical_truth_snapshot import (
@@ -15,6 +16,7 @@ from mgc_v05l.execution_core.track_b_canonical_truth_snapshot import (
     FILL_NOT_BROKER_BACKED,
     LOCAL_ARTIFACT_NOT_AUTHORITY,
     PLANNER_SNAPSHOT_MISMATCH,
+    PROJECTION_AUTHORITY_DIVERGENCE,
     RECOVERY_ACTIVE,
     RECOVERY_PAUSED,
     SAFE_STATE_RUNTIME_AUTHORITY_CONFLICT,
@@ -24,6 +26,7 @@ from mgc_v05l.execution_core.track_b_canonical_truth_snapshot import (
     TrackBTruthSnapshotConfig,
     build_track_b_truth_snapshot,
 )
+from mgc_v05l.execution_core.track_b_central_trade_registry import TradeEvent, TradeEventType
 
 
 NOW = datetime(2026, 5, 31, 12, 0, tzinfo=UTC)
@@ -146,6 +149,83 @@ def test_lifecycle_exact_identity_overrides_aggregate_multiple(tmp_path: Path) -
     assert EXACT_LIFECYCLE_OWNER_RESOLVED in snapshot.reason_codes
     assert AGGREGATE_PLACEHOLDER_DIAGNOSTIC_ONLY in snapshot.reason_codes
     assert not any(conflict.classification == BROKER_TRUTH_CONFLICT_REVIEW_REQUIRED for conflict in snapshot.conflicts)
+
+
+def test_current_exposure_owner_authority_demotes_stale_lifecycle_projection(tmp_path: Path) -> None:
+    config = _seed_clean(tmp_path)
+    current_lifecycle = _lifecycle_row("trade_current", "life_current")
+    stale_lifecycle = _lifecycle_row("trade_stale", "life_stale")
+    _write_json(
+        tmp_path / config.broker_positions_path,
+        {"generated_at": NOW.isoformat(), "positions": [_broker_position(quantity="-1")]},
+    )
+    _write_json(
+        tmp_path / config.lifecycle_live_position_path,
+        {"generated_at": NOW.isoformat(), "open_positions": [current_lifecycle, stale_lifecycle]},
+    )
+    _write_live_registry_events(
+        tmp_path,
+        [
+            _registry_event(
+                trade_id="trade_current",
+                lifecycle_id="life_current",
+                event_type=TradeEventType.ENTRY_FILL_BROKER_BACKED,
+            ),
+            _registry_event(
+                trade_id="trade_current",
+                lifecycle_id="life_current",
+                event_type=TradeEventType.EXIT_INTENT_CREATED,
+                generated_at=NOW + timedelta(minutes=60),
+            ),
+        ],
+    )
+
+    snapshot = build_track_b_truth_snapshot(config=config, now=NOW)
+
+    assert snapshot.current_exposure_owner_authority.classification == "OWNED_MANAGED_EXIT_DUE"
+    assert snapshot.lifecycle.open_position_count == 1
+    assert snapshot.lifecycle.open_positions[0]["lifecycle_id"] == "life_current"
+    assert snapshot.current_exposure_owner_authority.projection_authority_divergences == ()
+    assert PROJECTION_AUTHORITY_DIVERGENCE not in snapshot.reason_codes
+
+
+def test_projection_authority_divergence_fails_closed_for_wrong_current_owner(tmp_path: Path) -> None:
+    config = _seed_clean(tmp_path)
+    _write_json(
+        tmp_path / config.broker_positions_path,
+        {"generated_at": NOW.isoformat(), "positions": [_broker_position(quantity="-1")]},
+    )
+    _write_json(
+        tmp_path / config.managed_position_registry_path,
+        {
+            "generated_at": NOW.isoformat(),
+            "managed_positions": [_lifecycle_row("trade_wrong", "life_wrong")],
+        },
+    )
+    _write_live_registry_events(
+        tmp_path,
+        [
+            _registry_event(
+                trade_id="trade_current",
+                lifecycle_id="life_current",
+                event_type=TradeEventType.ENTRY_FILL_BROKER_BACKED,
+            ),
+            _registry_event(
+                trade_id="trade_current",
+                lifecycle_id="life_current",
+                event_type=TradeEventType.EXIT_INTENT_CREATED,
+                generated_at=NOW + timedelta(minutes=60),
+            ),
+        ],
+    )
+
+    snapshot = build_track_b_truth_snapshot(config=config, now=NOW)
+
+    assert snapshot.current_exposure_owner_authority.classification == "OWNED_MANAGED_EXIT_DUE"
+    assert snapshot.current_exposure_owner_authority.projection_authority_divergences
+    assert PROJECTION_AUTHORITY_DIVERGENCE in snapshot.reason_codes
+    assert any(conflict.classification == PROJECTION_AUTHORITY_DIVERGENCE for conflict in snapshot.conflicts)
+    assert snapshot.classification == TRUTH_CONFLICT_REVIEW_REQUIRED
 
 
 def test_safe_state_submit_authority_is_separate_from_runtime_start_authority(tmp_path: Path) -> None:
@@ -413,3 +493,72 @@ def _seed_clean(tmp_path: Path) -> TrackBTruthSnapshotConfig:
 def _write_json(path: Path, payload: dict) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+
+
+def _write_live_registry_events(tmp_path: Path, events: list[TradeEvent]) -> None:
+    path = tmp_path / "outputs/track_b_execution_core/trade_registry/live_trade_events.jsonl"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("".join(json.dumps(event.to_dict(), sort_keys=True) + "\n" for event in events), encoding="utf-8")
+
+
+def _registry_event(
+    *,
+    trade_id: str,
+    lifecycle_id: str,
+    event_type: TradeEventType,
+    generated_at: datetime = NOW,
+) -> TradeEvent:
+    return TradeEvent(
+        event_id=f"{trade_id}_{event_type.value}_{generated_at.timestamp()}",
+        event_type=event_type,
+        generated_at=generated_at,
+        trade_id=trade_id,
+        lifecycle_id=lifecycle_id,
+        lane_id="mnq_globex_active_participation_short",
+        thesis_strategy_id="mnq_globex_active_participation_short",
+        account_id="DUM882026",
+        symbol="MNQ",
+        con_id=770561201,
+        local_symbol="MNQM6",
+        expiry="20260618",
+        side="SHORT",
+        action="SELL",
+        qty=Decimal("1"),
+        source_artifact_path="outputs/test.json",
+        order_id="1",
+        client_id="17",
+        perm_id="1421892784",
+        exec_id="0000e1a7.test.01.01",
+        price=Decimal("30675"),
+        metadata={"managed_exit_policy_id": "GLOBEX_ACTIVE_EVIDENCE_TIMEBOX_60M_EXIT_V1"},
+    )
+
+
+def _broker_position(*, quantity: str) -> dict:
+    return {
+        "account_id": "DUM882026",
+        "symbol": "MNQ",
+        "track_b_root": "MNQ",
+        "local_symbol": "MNQM6",
+        "con_id": 770561201,
+        "expiry": "20260618",
+        "quantity": quantity,
+    }
+
+
+def _lifecycle_row(trade_id: str, lifecycle_id: str) -> dict:
+    return {
+        "trade_id": trade_id,
+        "lifecycle_id": lifecycle_id,
+        "account_id": "DUM882026",
+        "symbol": "MNQ",
+        "instrument_family": "MNQ",
+        "local_symbol": "MNQM6",
+        "con_id": 770561201,
+        "quantity": "1",
+        "aggregate_qty": "-1",
+        "side": "SHORT",
+        "state": "OPEN_MANAGED",
+        "lane_id": "mnq_globex_active_participation_short",
+        "strategy_id": "mnq_globex_active_participation_short",
+    }

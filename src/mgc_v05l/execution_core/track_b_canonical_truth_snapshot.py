@@ -17,6 +17,15 @@ from typing import Any, Mapping, Sequence
 
 from mgc_v05l.execution_core.track_b_atomic_io import write_json_atomic
 from mgc_v05l.execution_core.track_b_control_plane_snapshot import DEFAULT_CONTROL_PLANE_SNAPSHOT_ARTIFACT
+from mgc_v05l.execution_core.track_b_current_exposure_owner_resolver import (
+    AMBIGUOUS_EXPOSURE_OWNERSHIP,
+    NO_OPEN_EXPOSURE,
+    OWNED_MANAGED_EXIT_DUE,
+    OWNED_MANAGED_EXPOSURE,
+    CurrentExposureOwnerResolverConfig,
+    apply_current_exposure_owner_lifecycle_overlay,
+    resolve_current_exposure_ownership,
+)
 from mgc_v05l.execution_core.track_b_hourly_runtime_recovery_audit import DEFAULT_LATEST_OUTPUT_PATH
 from mgc_v05l.execution_core.track_b_paper_autonomous_recovery_planner import (
     DEFAULT_PAPER_AUTONOMOUS_RECOVERY_PLAN_ARTIFACT,
@@ -94,6 +103,7 @@ EXACT_LIFECYCLE_IDENTITY_MISMATCH = "EXACT_LIFECYCLE_IDENTITY_MISMATCH"
 LANE_THESIS_STRATEGY_MISMATCH = "LANE_THESIS_STRATEGY_MISMATCH"
 MANAGED_EXIT_POLICY_CONFLICT = "MANAGED_EXIT_POLICY_CONFLICT"
 DUPLICATE_WRITER_DETECTED = "DUPLICATE_WRITER_DETECTED"
+PROJECTION_AUTHORITY_DIVERGENCE = "PROJECTION_AUTHORITY_DIVERGENCE"
 
 
 class SourceAuthorityLevel(str, Enum):
@@ -236,6 +246,21 @@ class BrokerBackedEvidenceSection:
 
 
 @dataclass(frozen=True)
+class CurrentExposureOwnerAuthoritySection:
+    classification: str
+    broker_position_count: int
+    broker_open_order_count: int
+    owned_exposure_count: int
+    review_required_exposure_count: int
+    owned_exposures: tuple[Mapping[str, Any], ...]
+    review_required_exposures: tuple[Mapping[str, Any], ...]
+    resolved_lifecycle_positions: tuple[Mapping[str, Any], ...]
+    stale_superseded_full_audit_only: tuple[Mapping[str, Any], ...]
+    projection_authority_divergences: tuple[Mapping[str, Any], ...]
+    reason_codes: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
 class TruthConflict:
     classification: str
     question: str
@@ -263,6 +288,7 @@ class TrackBTruthSnapshot:
     planner_supervisor: PlannerSupervisorTruthSection
     contract_status: ContractTruthSection
     broker_backed_evidence: BrokerBackedEvidenceSection
+    current_exposure_owner_authority: CurrentExposureOwnerAuthoritySection
     conflicts: tuple[TruthConflict, ...]
     reason_codes: tuple[str, ...]
     source_paths: Mapping[str, str]
@@ -487,6 +513,17 @@ def build_track_b_truth_snapshot(
         managed_positions_source=managed_positions_source,
         managed_orders_payload=managed_orders_payload,
     )
+    current_exposure_owner_authority = _current_exposure_owner_authority_section(
+        config=config,
+        broker_truth=broker_truth,
+        lifecycle=lifecycle,
+        broker_open_orders=broker_truth.open_orders,
+        managed_positions_payload=managed_positions_payload,
+    )
+    lifecycle = _lifecycle_with_owner_authority_overlay(
+        lifecycle=lifecycle,
+        owner_authority=current_exposure_owner_authority,
+    )
     reconciliation = _reconciliation_section(reconciliation_payload, reconciliation_source)
     safe_state = _safe_state_section(safe_state_payload, safe_state_source)
     control_plane = _control_plane_section(control_plane_payload, control_plane_source)
@@ -510,6 +547,7 @@ def build_track_b_truth_snapshot(
         planner_supervisor=planner_supervisor,
         contract_status=contract_status,
         broker_backed_evidence=broker_backed_evidence,
+        current_exposure_owner_authority=current_exposure_owner_authority,
     )
     reason_codes = _reason_codes(
         runtime,
@@ -522,6 +560,7 @@ def build_track_b_truth_snapshot(
         planner_supervisor,
         contract_status,
         broker_backed_evidence,
+        current_exposure_owner_authority,
         conflicts,
     )
     source_paths = {
@@ -560,6 +599,7 @@ def build_track_b_truth_snapshot(
         planner_supervisor=planner_supervisor,
         contract_status=contract_status,
         broker_backed_evidence=broker_backed_evidence,
+        current_exposure_owner_authority=current_exposure_owner_authority,
         conflicts=tuple(conflicts),
         reason_codes=tuple(reason_codes),
         source_paths=source_paths,
@@ -708,8 +748,14 @@ def _lifecycle_section(
     managed_positions_source: TrackBTruthSource,
     managed_orders_payload: Mapping[str, Any],
 ) -> LifecycleTruthSection:
-    lifecycle_rows = _rows(lifecycle_payload, ("open_positions", "positions", "live_positions", "rows"))
-    managed_rows = _rows(managed_positions_payload, ("open_positions", "managed_positions", "positions", "rows"))
+    lifecycle_rows = _tag_projection_rows(
+        _rows(lifecycle_payload, ("open_positions", "positions", "live_positions", "rows")),
+        "lifecycle_report",
+    )
+    managed_rows = _tag_projection_rows(
+        _rows(managed_positions_payload, ("open_positions", "managed_positions", "positions", "rows")),
+        "managed_position_registry",
+    )
     open_positions = tuple(row for row in [*lifecycle_rows, *managed_rows] if _lifecycle_open(row))
     managed_orders = tuple(row for row in _rows(managed_orders_payload, ("managed_orders", "orders", "rows")) if _open_order_active(row))
     aggregate_accounts = tuple(
@@ -750,6 +796,142 @@ def _lifecycle_section(
         source=lifecycle_source if lifecycle_source.fresh else managed_positions_source,
         reason_codes=tuple(reasons),
     )
+
+
+def _current_exposure_owner_authority_section(
+    *,
+    config: TrackBTruthSnapshotConfig,
+    broker_truth: BrokerTruthSection,
+    lifecycle: LifecycleTruthSection,
+    broker_open_orders: Sequence[Mapping[str, Any]],
+    managed_positions_payload: Mapping[str, Any],
+) -> CurrentExposureOwnerAuthoritySection:
+    track_b_positions = [
+        dict(row)
+        for row in broker_truth.positions
+        if _track_b_futures_position(row)
+    ]
+    payload = resolve_current_exposure_ownership(
+        config=CurrentExposureOwnerResolverConfig(repo_root=config.repo_root),
+        broker_positions=track_b_positions,
+        broker_open_orders=broker_open_orders,
+        lifecycle_positions=lifecycle.open_positions,
+        managed_position_registry=managed_positions_payload,
+    )
+    current_lifecycle, owner_superseded = apply_current_exposure_owner_lifecycle_overlay(
+        lifecycle_positions=lifecycle.open_positions,
+        owner_resolution=payload,
+    )
+    divergences = _projection_authority_divergences(
+        owner_resolution=payload,
+        current_lifecycle_positions=[
+            row for row in lifecycle.open_positions if row.get("truth_projection_source") == "managed_position_registry"
+        ],
+    )
+    divergences.extend(
+        _projection_authority_divergences(
+            owner_resolution=payload,
+            current_lifecycle_positions=current_lifecycle,
+        )
+    )
+    reason_codes = list(payload.get("reason_codes") or [])
+    if divergences:
+        reason_codes.append(PROJECTION_AUTHORITY_DIVERGENCE)
+    return CurrentExposureOwnerAuthoritySection(
+        classification=str(payload.get("classification") or NO_OPEN_EXPOSURE),
+        broker_position_count=int(payload.get("broker_position_count") or 0),
+        broker_open_order_count=int(payload.get("broker_open_order_count") or 0),
+        owned_exposure_count=int(payload.get("owned_exposure_count") or 0),
+        review_required_exposure_count=int(payload.get("review_required_exposure_count") or 0),
+        owned_exposures=tuple(_mapping(row) for row in payload.get("owned_exposures") or []),
+        review_required_exposures=tuple(_mapping(row) for row in payload.get("review_required_exposures") or []),
+        resolved_lifecycle_positions=tuple(_mapping(row) for row in payload.get("resolved_lifecycle_positions") or []),
+        stale_superseded_full_audit_only=tuple(
+            [
+                *[_mapping(row) for row in payload.get("stale_superseded_full_audit_only") or []],
+                *[_mapping(row) for row in owner_superseded],
+            ]
+        ),
+        projection_authority_divergences=tuple(divergences),
+        reason_codes=tuple(dict.fromkeys(str(code) for code in reason_codes if str(code))),
+    )
+
+
+def _lifecycle_with_owner_authority_overlay(
+    *,
+    lifecycle: LifecycleTruthSection,
+    owner_authority: CurrentExposureOwnerAuthoritySection,
+) -> LifecycleTruthSection:
+    if owner_authority.classification not in {
+        OWNED_MANAGED_EXPOSURE,
+        OWNED_MANAGED_EXIT_DUE,
+        NO_OPEN_EXPOSURE,
+    }:
+        return lifecycle
+    if owner_authority.projection_authority_divergences:
+        return lifecycle
+    if owner_authority.classification == NO_OPEN_EXPOSURE:
+        positions: tuple[Mapping[str, Any], ...] = ()
+    else:
+        positions = owner_authority.resolved_lifecycle_positions or tuple(
+            _mapping(exposure.get("lifecycle_position"))
+            for exposure in owner_authority.owned_exposures
+            if isinstance(exposure.get("lifecycle_position"), Mapping)
+        )
+    reasons = list(lifecycle.reason_codes)
+    if owner_authority.classification in {OWNED_MANAGED_EXPOSURE, OWNED_MANAGED_EXIT_DUE}:
+        reasons.append(EXACT_LIFECYCLE_OWNER_RESOLVED)
+    if owner_authority.stale_superseded_full_audit_only:
+        reasons.append(AGGREGATE_PLACEHOLDER_DIAGNOSTIC_ONLY)
+    return LifecycleTruthSection(
+        fresh=lifecycle.fresh,
+        open_position_count=len(positions),
+        managed_order_count=lifecycle.managed_order_count,
+        open_positions=positions,
+        exact_owner_resolved=lifecycle.exact_owner_resolved
+        or owner_authority.classification in {OWNED_MANAGED_EXPOSURE, OWNED_MANAGED_EXIT_DUE},
+        aggregate_placeholder_accounts=lifecycle.aggregate_placeholder_accounts,
+        source=lifecycle.source,
+        reason_codes=tuple(dict.fromkeys(reasons)),
+    )
+
+
+def _projection_authority_divergences(
+    *,
+    owner_resolution: Mapping[str, Any],
+    current_lifecycle_positions: Sequence[Mapping[str, Any]],
+) -> list[dict[str, Any]]:
+    if owner_resolution.get("classification") not in {OWNED_MANAGED_EXPOSURE, OWNED_MANAGED_EXIT_DUE}:
+        return []
+    owner_by_key: dict[str, set[str]] = {}
+    for exposure in owner_resolution.get("owned_exposures") or []:
+        exposure_map = _mapping(exposure)
+        lifecycle = _mapping(exposure_map.get("lifecycle_position"))
+        key = _contract_identity_key(
+            _mapping(exposure_map.get("canonical_broker_position")) or lifecycle
+        )
+        lifecycle_id = str(lifecycle.get("lifecycle_id") or exposure_map.get("lifecycle_id") or "")
+        if key and lifecycle_id:
+            owner_by_key.setdefault(key, set()).add(lifecycle_id)
+    divergences: list[dict[str, Any]] = []
+    for row in current_lifecycle_positions:
+        row_map = _mapping(row)
+        key = _contract_identity_key(row_map)
+        if key not in owner_by_key:
+            continue
+        lifecycle_id = str(row_map.get("lifecycle_id") or "")
+        if lifecycle_id and lifecycle_id not in owner_by_key[key]:
+            divergences.append(
+                {
+                    "classification": PROJECTION_AUTHORITY_DIVERGENCE,
+                    "position_key": key,
+                    "owner_lifecycle_ids": sorted(owner_by_key[key]),
+                    "projection_lifecycle_id": lifecycle_id,
+                    "projection_trade_id": row_map.get("trade_id"),
+                    "projection_source": row_map.get("source"),
+                }
+            )
+    return divergences
 
 
 def _reconciliation_section(payload: Mapping[str, Any], source: TrackBTruthSource) -> ReconciliationTruthSection:
@@ -937,10 +1119,31 @@ def _conflicts(
     planner_supervisor: PlannerSupervisorTruthSection,
     contract_status: ContractTruthSection,
     broker_backed_evidence: BrokerBackedEvidenceSection,
+    current_exposure_owner_authority: CurrentExposureOwnerAuthoritySection,
 ) -> list[TruthConflict]:
     conflicts: list[TruthConflict] = []
     if runtime.duplicate_writer_detected:
         conflicts.append(_conflict(DUPLICATE_WRITER_DETECTED, "Is there a duplicate runtime writer?", runtime.source, (runtime.source,)))
+    if current_exposure_owner_authority.projection_authority_divergences:
+        conflicts.append(
+            _conflict(
+                PROJECTION_AUTHORITY_DIVERGENCE,
+                "Do current-scope projections use the shared current exposure owner authority?",
+                lifecycle.source,
+                (lifecycle.source, reconciliation.source),
+                (PROJECTION_AUTHORITY_DIVERGENCE,),
+            )
+        )
+    if current_exposure_owner_authority.classification == AMBIGUOUS_EXPOSURE_OWNERSHIP:
+        conflicts.append(
+            _conflict(
+                AMBIGUOUS_EXPOSURE_OWNERSHIP,
+                "Can current broker exposure ownership be proven uniquely?",
+                broker_truth.source,
+                (broker_truth.source, lifecycle.source, reconciliation.source),
+                (AMBIGUOUS_EXPOSURE_OWNERSHIP,),
+            )
+        )
     if runtime.submit_capable and (not broker_truth.fresh or not control_plane.fresh or not safe_state.fresh):
         conflicts.append(
             _conflict(
@@ -1141,6 +1344,15 @@ def _rows(payload: Mapping[str, Any], keys: Sequence[str]) -> list[dict[str, Any
     return []
 
 
+def _tag_projection_rows(rows: Sequence[Mapping[str, Any]], source: str) -> list[dict[str, Any]]:
+    tagged: list[dict[str, Any]] = []
+    for row in rows:
+        item = dict(row)
+        item.setdefault("truth_projection_source", source)
+        tagged.append(item)
+    return tagged
+
+
 def _first_evidence_row(payload: Mapping[str, Any]) -> dict[str, Any]:
     rows = _rows(payload, ("fills", "executions", "trades", "rows", "orders"))
     if rows:
@@ -1190,6 +1402,25 @@ def _qty(row: Mapping[str, Any]) -> float:
         except (TypeError, ValueError):
             continue
     return 0.0
+
+
+def _contract_identity_key(row: Mapping[str, Any]) -> str:
+    account = str(row.get("account_id") or row.get("account") or "").strip().upper()
+    local_symbol = str(row.get("local_symbol") or row.get("localSymbol") or "").strip().upper()
+    con_id = str(row.get("con_id") or row.get("conId") or "").strip()
+    if account and local_symbol and con_id:
+        return f"{account}|{local_symbol}|{con_id}"
+    if local_symbol and con_id:
+        return f"{local_symbol}|{con_id}"
+    return str(row.get("contract_key") or row.get("position_key") or local_symbol or "").strip().upper()
+
+
+def _track_b_futures_position(row: Mapping[str, Any]) -> bool:
+    security_type = str(row.get("security_type") or row.get("secType") or row.get("sec_type") or "").upper()
+    symbol = str(row.get("track_b_root") or row.get("symbol") or "").upper()
+    local_symbol = str(row.get("local_symbol") or row.get("localSymbol") or "").upper()
+    root = symbol or "".join(ch for ch in local_symbol if ch.isalpha())[:3]
+    return root in {"MGC", "GC", "MNQ", "MES"} and security_type in {"", "FUT"}
 
 
 def _path_from_payload(value: Any, *, default: Path) -> Path:
