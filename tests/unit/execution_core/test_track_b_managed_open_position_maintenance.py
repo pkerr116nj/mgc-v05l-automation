@@ -817,6 +817,254 @@ def test_maintenance_uses_canonical_owner_when_raw_lifecycle_status_is_stale(tmp
     assert any(item.get("lifecycle_id") == stale_lifecycle_id for item in stale)
 
 
+def test_current_mes_regression_uses_canonical_owner_before_close_intent(tmp_path: Path) -> None:
+    cfg = seed_open_position(
+        tmp_path,
+        instrument="MES",
+        strategy_id="mes_us_active_participation_short",
+        contract_key="MES-M6",
+        local_symbol="MESM6",
+        con_id=770561194,
+        side="SHORT",
+        entry_price="7604.75",
+        completed_timestamps=[
+            "2026-06-03T15:10:00+00:00",
+            "2026-06-03T15:15:00+00:00",
+            "2026-06-03T15:20:00+00:00",
+            "2026-06-03T15:25:00+00:00",
+            "2026-06-03T15:30:00+00:00",
+            "2026-06-03T15:35:00+00:00",
+            "2026-06-03T15:40:00+00:00",
+            "2026-06-03T15:45:00+00:00",
+            "2026-06-03T15:50:00+00:00",
+            "2026-06-03T15:55:00+00:00",
+            "2026-06-03T16:00:00+00:00",
+            "2026-06-03T16:05:00+00:00",
+            "2026-06-03T16:10:00+00:00",
+            "2026-06-03T16:15:00+00:00",
+            "2026-06-03T16:20:00+00:00",
+            "2026-06-03T16:25:00+00:00",
+            "2026-06-03T16:30:00+00:00",
+        ],
+    )
+    stale_lifecycle_id = "reserved_submit_mes_us_active_participation_short_20260602T185428677911Z_0c5caf5f40f7"
+    canonical_lifecycle_id = "reserved_submit_mes_us_active_participation_short_20260603T133628483955Z_3fe308fd049d"
+    canonical_trade_id = "trade_df6b60cf-9848-4c2e-b71d-a0b649317b52"
+    original_lifecycle_id = "strategy_managed_fe30248d4d6c42acaf106c8313b0b33b"
+    original_path = tmp_path / "managed" / original_lifecycle_id / "track_b_strategy_managed_paper_lifecycle_report.json"
+    stale_path = tmp_path / "managed" / stale_lifecycle_id / "track_b_strategy_managed_paper_lifecycle_report.json"
+    canonical_path = tmp_path / "managed" / canonical_lifecycle_id / "track_b_strategy_managed_paper_lifecycle_report.json"
+    stale_lifecycle = json.loads(original_path.read_text(encoding="utf-8"))
+    stale_lifecycle["lifecycle_id"] = stale_lifecycle_id
+    stale_lifecycle["trade_id"] = "stale-diagnostic-only"
+    stale_lifecycle["report_json_path"] = str(stale_path)
+    stale_lifecycle["entry_intent"]["lifecycle_id"] = stale_lifecycle_id
+    stale_lifecycle["entry_intent"]["trade_id"] = "stale-diagnostic-only"
+    write_json(stale_path, stale_lifecycle)
+    canonical_lifecycle = json.loads(original_path.read_text(encoding="utf-8"))
+    canonical_lifecycle["lifecycle_id"] = canonical_lifecycle_id
+    canonical_lifecycle["trade_id"] = canonical_trade_id
+    canonical_lifecycle["report_json_path"] = str(canonical_path)
+    canonical_lifecycle["managed_exit_policy_id"] = "US_ACTIVE_EVIDENCE_TIMEBOX_60M_EXIT_V1"
+    canonical_lifecycle["managed_exit_policy_max_completed_5m_bars"] = 12
+    canonical_lifecycle["entry_intent"]["lifecycle_id"] = canonical_lifecycle_id
+    canonical_lifecycle["entry_intent"]["trade_id"] = canonical_trade_id
+    canonical_lifecycle["entry_intent"]["managed_exit_policy_id"] = "US_ACTIVE_EVIDENCE_TIMEBOX_60M_EXIT_V1"
+    canonical_lifecycle["entry_submit_attempt"]["broker_order_id"] = "1"
+    canonical_lifecycle["entry_submit_attempt"]["perm_id"] = "1421892784"
+    canonical_lifecycle["entry_fill"]["broker_order_id"] = "1"
+    canonical_lifecycle["entry_fill"]["perm_id"] = "1421892784"
+    canonical_lifecycle["entry_fill"]["execution_id"] = "0000e1a7.current.01.01"
+    write_json(canonical_path, canonical_lifecycle)
+    live_status = json.loads(cfg.live_position_status_json.read_text(encoding="utf-8"))
+    live_status["positions_by_instrument"] = {
+        "MES-M6": {
+            **live_status["positions_by_instrument"]["MES-M6"],
+            "lifecycle_id": stale_lifecycle_id,
+            "trade_id": "stale-diagnostic-only",
+        }
+    }
+    live_status["source_artifact_paths"] = [str(stale_path)]
+    write_json(cfg.live_position_status_json, live_status)
+    write_json(
+        cfg.managed_position_projection_json,
+        {
+            "schema_version": "track_b_managed_position_registry_v1",
+            "generated_at": aware_now().isoformat(),
+            "managed_positions": [
+                {
+                    "classification": "OPEN_MANAGED_EXIT_DUE",
+                    "trade_id": canonical_trade_id,
+                    "lifecycle_id": canonical_lifecycle_id,
+                    "lane_id": "mes_us_active_participation_short",
+                    "strategy_id": "mes_us_active_participation_short",
+                    "symbol": "MES",
+                    "contract_key": "MES-M6",
+                    "local_symbol": "MESM6",
+                    "con_id": 770561194,
+                    "account_id": "DUM882026",
+                    "side": "SHORT",
+                    "quantity": "1",
+                    "entry_time": "2026-06-03T13:36:30+00:00",
+                    "entry_price": "7604.75",
+                    "managed_exit_policy_id": "US_ACTIVE_EVIDENCE_TIMEBOX_60M_EXIT_V1",
+                    "exit_due": True,
+                    "bars_since_entry": 17,
+                    "required_completed_5m_bars": 12,
+                    "broker_qty_match": True,
+                    "reconciliation_status": "OPEN_MANAGED_MATCHED",
+                    "entry_order_ids": ["1"],
+                    "entry_perm_ids": ["1421892784"],
+                    "entry_exec_ids": ["0000e1a7.current.01.01"],
+                    "paper_lifecycle_report_path": str(canonical_path),
+                    "broker_position": {
+                        "account_id": "DUM882026",
+                        "symbol": "MES",
+                        "local_symbol": "MESM6",
+                        "con_id": 770561194,
+                        "expiry": "20260618",
+                        "quantity": "-1",
+                    },
+                }
+            ],
+        },
+    )
+    submitted: list[Mapping[str, Any]] = []
+
+    def close_submitter(_config: TrackBStrategyManagedPaperLifecycleConfig, close_intent: Mapping[str, Any]) -> Mapping[str, Any]:
+        submitted.append(dict(close_intent))
+        return {
+            "submitted": True,
+            "submit_attempted": True,
+            "broker_state_mutated": True,
+            "broker_order_id": "77",
+            "close_intent": dict(close_intent),
+        }
+
+    from mgc_v05l.execution_core.track_b_strategy_managed_paper_lifecycle import default_managed_lifecycle_stages
+
+    defaults = default_managed_lifecycle_stages()
+    result = run_track_b_managed_open_position_maintenance(
+        config=cfg,
+        lifecycle_stages=TrackBStrategyManagedPaperLifecycleStages(
+            entry_submitter=lambda _config, _intent: {},
+            exit_policy=defaults.exit_policy,
+            close_submitter=close_submitter,
+        ),
+        now=aware_now(),
+    )
+
+    assert [position["lifecycle_id"] for position in result.report["positions"]] == [canonical_lifecycle_id]
+    assert submitted and submitted[0]["order_action"] == "BUY"
+    assert submitted[0]["lifecycle_id"] == canonical_lifecycle_id
+    assert result.report["positions"][0]["close_intent_created"] is True
+    stale = result.report["maintenance_authority_diagnostics"]["stale_lifecycle_diagnostic_only"]
+    assert any(item.get("lifecycle_id") == stale_lifecycle_id for item in stale)
+
+
+def test_stale_lifecycle_report_path_is_blocked_before_close_intent(tmp_path: Path) -> None:
+    cfg = seed_open_position(
+        tmp_path,
+        instrument="MES",
+        strategy_id="mes_us_active_participation_short",
+        contract_key="MES-M6",
+        local_symbol="MESM6",
+        con_id=770561194,
+        side="SHORT",
+        entry_price="7604.75",
+        completed_timestamps=[
+            "2026-06-03T15:10:00+00:00",
+            "2026-06-03T15:15:00+00:00",
+            "2026-06-03T15:20:00+00:00",
+        ],
+    )
+    stale_lifecycle_id = "reserved_submit_stale_owner_20260602T185428Z"
+    canonical_lifecycle_id = "reserved_submit_current_owner_20260603T133628Z"
+    canonical_trade_id = "trade-current-owner"
+    original_lifecycle_id = "strategy_managed_fe30248d4d6c42acaf106c8313b0b33b"
+    original_path = tmp_path / "managed" / original_lifecycle_id / "track_b_strategy_managed_paper_lifecycle_report.json"
+    stale_path = tmp_path / "managed" / stale_lifecycle_id / "track_b_strategy_managed_paper_lifecycle_report.json"
+    stale_lifecycle = json.loads(original_path.read_text(encoding="utf-8"))
+    stale_lifecycle["lifecycle_id"] = stale_lifecycle_id
+    stale_lifecycle["trade_id"] = "trade-stale-owner"
+    stale_lifecycle["report_json_path"] = str(stale_path)
+    stale_lifecycle["entry_intent"]["lifecycle_id"] = stale_lifecycle_id
+    stale_lifecycle["entry_intent"]["trade_id"] = "trade-stale-owner"
+    write_json(stale_path, stale_lifecycle)
+    write_json(
+        cfg.managed_position_projection_json,
+        {
+            "schema_version": "track_b_managed_position_registry_v1",
+            "generated_at": aware_now().isoformat(),
+            "managed_positions": [
+                {
+                    "classification": "OPEN_MANAGED_EXIT_DUE",
+                    "trade_id": canonical_trade_id,
+                    "lifecycle_id": canonical_lifecycle_id,
+                    "lane_id": "mes_us_active_participation_short",
+                    "strategy_id": "mes_us_active_participation_short",
+                    "symbol": "MES",
+                    "contract_key": "MES-M6",
+                    "local_symbol": "MESM6",
+                    "con_id": 770561194,
+                    "account_id": "DUM882026",
+                    "side": "SHORT",
+                    "quantity": "1",
+                    "entry_time": "2026-06-03T13:36:30+00:00",
+                    "entry_price": "7604.75",
+                    "managed_exit_policy_id": "US_ACTIVE_EVIDENCE_TIMEBOX_60M_EXIT_V1",
+                    "exit_due": True,
+                    "bars_since_entry": 17,
+                    "required_completed_5m_bars": 12,
+                    "broker_qty_match": True,
+                    "reconciliation_status": "OPEN_MANAGED_MATCHED",
+                    "entry_order_ids": ["1"],
+                    "entry_perm_ids": ["1421892784"],
+                    "entry_exec_ids": ["exec-current"],
+                    "paper_lifecycle_report_path": str(stale_path),
+                    "broker_position": {
+                        "account_id": "DUM882026",
+                        "symbol": "MES",
+                        "local_symbol": "MESM6",
+                        "con_id": 770561194,
+                        "expiry": "20260618",
+                        "quantity": "-1",
+                    },
+                }
+            ],
+        },
+    )
+    submitted: list[Mapping[str, Any]] = []
+
+    def close_submitter(_config: TrackBStrategyManagedPaperLifecycleConfig, close_intent: Mapping[str, Any]) -> Mapping[str, Any]:
+        submitted.append(dict(close_intent))
+        raise AssertionError("stale lifecycle report must be blocked before close intent submission")
+
+    from mgc_v05l.execution_core.track_b_strategy_managed_paper_lifecycle import default_managed_lifecycle_stages
+
+    defaults = default_managed_lifecycle_stages()
+    result = run_track_b_managed_open_position_maintenance(
+        config=cfg,
+        lifecycle_stages=TrackBStrategyManagedPaperLifecycleStages(
+            entry_submitter=lambda _config, _intent: {},
+            exit_policy=defaults.exit_policy,
+            close_submitter=close_submitter,
+        ),
+        now=aware_now(),
+    )
+
+    assert submitted == []
+    assert result.report["close_intent_created_count"] == 0
+    position = result.report["positions"][0]
+    assert position["lifecycle_id"] == canonical_lifecycle_id
+    assert position["close_intent_created"] is False
+    assert position["final_classification"] == "STALE_LIFECYCLE_REPORT_DIAGNOSTIC_ONLY"
+    blocker = position["canonical_owner_authority_blocker"]
+    assert blocker["source"] == "managed_open_position_maintenance_lifecycle_identity_filter"
+    assert blocker["owner_lifecycle_id"] == canonical_lifecycle_id
+    assert blocker["blocked_lifecycle_id"] == stale_lifecycle_id
+
+
 def test_contract_close_lock_blocks_second_lifecycle_close_submit_same_contract(tmp_path: Path) -> None:
     cfg = seed_open_position(
         tmp_path,

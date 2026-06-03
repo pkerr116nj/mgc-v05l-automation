@@ -209,6 +209,30 @@ def run_track_b_managed_open_position_maintenance(
                 }
             )
             continue
+        identity_blocker = _lifecycle_report_identity_blocker(
+            position=position,
+            lifecycle_report=lifecycle_report,
+        )
+        if identity_blocker is not None:
+            authority_diagnostics.setdefault("stale_lifecycle_diagnostic_only", []).append(identity_blocker)
+            position_reports.append(
+                {
+                    **base_position_report,
+                    "maintenance_invoked": False,
+                    "managed_position_projection_classification": _mapping(
+                        projected_positions.get(lifecycle_id, {})
+                    ).get("classification"),
+                    "close_intent_created": False,
+                    "close_submitted": False,
+                    "close_filled": False,
+                    "review_required": True,
+                    "final_classification": STALE_LIFECYCLE_REPORT_DIAGNOSTIC_ONLY,
+                    "final_position_status": "FULL_AUDIT_ONLY",
+                    "blocker": identity_blocker.get("primary_blocker"),
+                    "canonical_owner_authority_blocker": identity_blocker,
+                }
+            )
+            continue
         if lifecycle_report.get("paper_lifecycle_classification") != TrackBManagedPaperLifecycleClassification.OPEN_MANAGED.value:
             position_reports.append(
                 {
@@ -807,6 +831,49 @@ def _canonical_owner_authority_blocker(
             "source": "canonical_managed_position_registry",
         }
     return None
+
+
+def _lifecycle_report_identity_blocker(
+    *,
+    position: Mapping[str, Any],
+    lifecycle_report: Mapping[str, Any],
+) -> dict[str, Any] | None:
+    expected_lifecycle_id = str(position.get("lifecycle_id") or "").strip()
+    actual_lifecycle_id = str(lifecycle_report.get("lifecycle_id") or "").strip()
+    expected_trade_id = str(position.get("trade_id") or "").strip()
+    actual_trade_id = str(lifecycle_report.get("trade_id") or "").strip()
+    mismatches: list[dict[str, str]] = []
+    if expected_lifecycle_id and actual_lifecycle_id and expected_lifecycle_id != actual_lifecycle_id:
+        mismatches.append(
+            {
+                "field": "lifecycle_id",
+                "canonical_value": expected_lifecycle_id,
+                "lifecycle_report_value": actual_lifecycle_id,
+            }
+        )
+    if expected_trade_id and actual_trade_id and expected_trade_id != actual_trade_id:
+        mismatches.append(
+            {
+                "field": "trade_id",
+                "canonical_value": expected_trade_id,
+                "lifecycle_report_value": actual_trade_id,
+            }
+        )
+    if not mismatches:
+        return None
+    return {
+        "classification": STALE_LIFECYCLE_REPORT_DIAGNOSTIC_ONLY,
+        "primary_blocker": (
+            "Lifecycle report identity does not match canonical managed-position owner; "
+            "raw lifecycle reports are diagnostic-only and cannot authorize close intent."
+        ),
+        "blocked_lifecycle_id": actual_lifecycle_id,
+        "owner_lifecycle_id": expected_lifecycle_id,
+        "blocked_trade_id": actual_trade_id,
+        "owner_trade_id": expected_trade_id,
+        "mismatches": mismatches,
+        "source": "managed_open_position_maintenance_lifecycle_identity_filter",
+    }
 
 
 def _managed_position_projection_by_lifecycle_id(payload: Mapping[str, Any]) -> dict[str, dict[str, Any]]:
