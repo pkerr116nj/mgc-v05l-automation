@@ -201,6 +201,8 @@ def _candidates_from_payload(payload: Any, *, source_path: Path) -> list[dict[st
     candidates: list[dict[str, Any]] = []
     if source_path.name == "ibkr_paper_strategy_bridge_report.json":
         candidates.extend(_bridge_report_candidates(payload, source_path_text))
+    if source_path.name == "track_b_strategy_managed_paper_lifecycle_report.json":
+        candidates.extend(_strategy_lifecycle_report_candidates(payload, source_path_text))
     candidates.extend(_recursive_execution_candidates(payload, source_path_text, context={}))
     return candidates
 
@@ -257,6 +259,67 @@ def _bridge_execution_rows(lifecycle: Mapping[str, Any]) -> list[dict[str, Any]]
     return rows
 
 
+def _strategy_lifecycle_report_candidates(report: Mapping[str, Any], source_path: str) -> list[dict[str, Any]]:
+    entry_fill = _mapping(report.get("entry_fill"))
+    if not entry_fill:
+        return []
+    entry_submit = _mapping(report.get("entry_submit_attempt"))
+    entry_intent = _mapping(report.get("entry_intent"))
+    canonical = _first_mapping(
+        _mapping(report.get("canonical_contract")),
+        _mapping(entry_intent.get("canonical_contract")),
+        _mapping(entry_submit.get("canonical_contract")),
+    )
+    row = {
+        "source": "strategy_managed_lifecycle_entry_fill",
+        "source_artifact_path": source_path,
+        "trade_id": report.get("trade_id") or entry_intent.get("trade_id"),
+        "lifecycle_id": report.get("lifecycle_id") or entry_intent.get("lifecycle_id"),
+        "order_id": entry_fill.get("broker_order_id")
+        or entry_fill.get("order_id")
+        or entry_submit.get("broker_order_id")
+        or entry_submit.get("order_id"),
+        "broker_order_id": entry_fill.get("broker_order_id") or entry_submit.get("broker_order_id"),
+        "client_id": entry_fill.get("client_id") or entry_submit.get("client_id"),
+        "perm_id": entry_fill.get("perm_id") or entry_submit.get("perm_id"),
+        "exec_id": entry_fill.get("exec_id")
+        or entry_fill.get("execution_id")
+        or entry_fill.get("execId"),
+        "execution_id": entry_fill.get("execution_id") or entry_fill.get("exec_id") or entry_fill.get("execId"),
+        "account_id": entry_fill.get("account_id")
+        or entry_intent.get("account_id")
+        or entry_submit.get("account_id")
+        or report.get("account_id"),
+        "con_id": entry_fill.get("con_id")
+        or entry_intent.get("con_id")
+        or entry_submit.get("con_id")
+        or canonical.get("con_id")
+        or canonical.get("conId")
+        or report.get("con_id"),
+        "local_symbol": entry_fill.get("local_symbol")
+        or entry_intent.get("local_symbol")
+        or entry_submit.get("local_symbol")
+        or canonical.get("local_symbol")
+        or canonical.get("localSymbol")
+        or report.get("local_symbol"),
+        "symbol": entry_fill.get("symbol")
+        or entry_intent.get("symbol")
+        or canonical.get("symbol")
+        or report.get("symbol")
+        or report.get("instrument_family"),
+        "action": entry_fill.get("action") or entry_intent.get("order_action") or entry_intent.get("action"),
+        "order_action": entry_intent.get("order_action"),
+        "qty": entry_fill.get("qty") or entry_fill.get("quantity") or entry_intent.get("quantity"),
+        "quantity": entry_fill.get("quantity") or entry_intent.get("quantity"),
+        "price": entry_fill.get("price") or entry_fill.get("fill_price"),
+        "fill_timestamp": entry_fill.get("filled_at")
+        or entry_fill.get("fill_timestamp")
+        or entry_fill.get("executed_at")
+        or entry_fill.get("time"),
+    }
+    return [row]
+
+
 def _recursive_execution_candidates(payload: Any, source_path: str, context: Mapping[str, Any]) -> list[dict[str, Any]]:
     rows: list[dict[str, Any]] = []
     if isinstance(payload, Mapping):
@@ -275,6 +338,7 @@ def _merge_context(context: Mapping[str, Any], row: Mapping[str, Any]) -> dict[s
     merged = dict(context)
     for key in (
         "trade_id",
+        "lifecycle_id",
         "submit_intent_id",
         "ownership_intent_id",
         "order_intent_id",
@@ -290,6 +354,7 @@ def _merge_context(context: Mapping[str, Any], row: Mapping[str, Any]) -> dict[s
         "localSymbol",
         "symbol",
         "action",
+        "order_action",
         "side",
         "qty",
         "quantity",
@@ -314,7 +379,12 @@ def _looks_like_execution_or_fill(row: Mapping[str, Any]) -> bool:
 
 
 def _candidate_matches_request(candidate: Mapping[str, Any], request: BrokerFillEvidenceRequest) -> tuple[bool, str]:
-    if request.trade_id and _has_text(candidate, "trade_id") and _text(candidate.get("trade_id")) != _text(request.trade_id):
+    trade_id_mismatch = (
+        bool(request.trade_id)
+        and _has_text(candidate, "trade_id")
+        and _text(candidate.get("trade_id")) != _text(request.trade_id)
+    )
+    if trade_id_mismatch and not _bridge_fill_synthetic_trade_id_alias_allowed(candidate, request):
         return False, "trade_id_mismatch"
     if request.submit_intent_id:
         candidate_intent_ids = {
@@ -351,8 +421,19 @@ def _candidate_matches_request(candidate: Mapping[str, Any], request: BrokerFill
 def _normalized_evidence(candidate: Mapping[str, Any], request: BrokerFillEvidenceRequest) -> dict[str, Any]:
     exec_id = _text(candidate.get("exec_id") or candidate.get("execution_id") or candidate.get("execId"))
     perm_id = _text(candidate.get("perm_id") or request.perm_id)
+    candidate_trade_id = _text(candidate.get("trade_id"))
+    request_trade_id = _text(request.trade_id)
+    trade_id = (
+        request_trade_id
+        if request_trade_id
+        and candidate_trade_id
+        and candidate_trade_id != request_trade_id
+        and _bridge_fill_synthetic_trade_id_alias_allowed(candidate, request)
+        else _text(candidate.get("trade_id") or request.trade_id)
+    )
     return {
-        "trade_id": _text(candidate.get("trade_id") or request.trade_id) or None,
+        "trade_id": trade_id or None,
+        "source_trade_id": candidate_trade_id or None,
         "submit_intent_id": _text(candidate.get("submit_intent_id") or candidate.get("ownership_intent_id") or request.submit_intent_id) or None,
         "order_id": _text(candidate.get("order_id") or candidate.get("broker_order_id") or request.order_id) or None,
         "client_id": _text(candidate.get("client_id") or request.client_id) or None,
@@ -378,6 +459,53 @@ def _normalized_evidence(candidate: Mapping[str, Any], request: BrokerFillEviden
         "latest_order_status_price": _text(candidate.get("latest_order_status_price")) or None,
         "latest_order_status_updated_at": _text(candidate.get("latest_order_status_updated_at")) or None,
     }
+
+
+def _bridge_fill_synthetic_trade_id_alias_allowed(
+    candidate: Mapping[str, Any],
+    request: BrokerFillEvidenceRequest,
+) -> bool:
+    """Allow synthetic bridge-fill artifacts to prove a submit-owner trade.
+
+    Runtime lifecycle adoption can write broker execution evidence under a
+    synthetic ``bridge_fill_*`` trade id even though submit ownership already
+    reserved the durable registry trade id.  That synthetic id is not ownership
+    authority, but its execution row is valid evidence when the broker identity
+    is exact.  Keep this fail-closed by requiring order, client, perm, account,
+    contract, action, and quantity to match.
+    """
+
+    if not _is_bridge_fill_synthetic_candidate(candidate):
+        return False
+    required_checks = (
+        (request.order_id, _has_any(candidate, "order_id", "broker_order_id", "submitted_order_id"), _optional_text_match(candidate, request.order_id, "order_id", "broker_order_id", "submitted_order_id")),
+        (request.client_id, _has_any(candidate, "client_id"), _optional_int_match(candidate, request.client_id, "client_id")),
+        (request.perm_id, _has_any(candidate, "perm_id"), _optional_int_match(candidate, request.perm_id, "perm_id")),
+        (request.account_id, _has_any(candidate, "account_id", "account"), _optional_text_match(candidate, request.account_id, "account_id", "account")),
+        (request.action, _has_any(candidate, "action", "side", "order_action"), _optional_action_match(candidate, request.action)),
+        (request.qty, _has_any(candidate, "qty", "quantity", "filled", "shares"), _optional_qty_match(candidate, request.qty)),
+    )
+    for expected, present, matched in required_checks:
+        if expected not in (None, "") and (not present or not matched):
+            return False
+    has_con_id = _has_any(candidate, "con_id", "conId")
+    has_local_symbol = _has_any(candidate, "local_symbol", "localSymbol")
+    if request.con_id not in (None, "") and (not has_con_id or not _optional_int_match(candidate, request.con_id, "con_id", "conId")):
+        return False
+    if request.local_symbol and (not has_local_symbol or not _optional_text_match(candidate, request.local_symbol, "local_symbol", "localSymbol")):
+        return False
+    return True
+
+
+def _is_bridge_fill_synthetic_candidate(candidate: Mapping[str, Any]) -> bool:
+    trade_id = _text(candidate.get("trade_id"))
+    lifecycle_id = _text(candidate.get("lifecycle_id"))
+    source_path = _text(candidate.get("source_artifact_path"))
+    return (
+        trade_id.startswith("trade_bridge_fill_")
+        or lifecycle_id.startswith("bridge_fill_")
+        or "/bridge_fill_" in source_path
+    )
 
 
 def _narrow_unique_exec_matches(unique_by_exec: Mapping[str, dict[str, Any]]) -> dict[str, dict[str, Any]]:

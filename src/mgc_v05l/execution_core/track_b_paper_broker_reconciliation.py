@@ -42,7 +42,12 @@ from mgc_v05l.execution_core.track_b_broker_position_identity import (
     IDENTITY_READY,
     canonicalize_broker_position_identity,
 )
-from mgc_v05l.execution_core.track_b_central_trade_registry import TradeCurrentState, TradeEventType, TradeRegistryRecord
+from mgc_v05l.execution_core.track_b_central_trade_registry import (
+    TradeCurrentState,
+    TradeEvent,
+    TradeEventType,
+    TradeRegistryRecord,
+)
 from mgc_v05l.execution_core.track_b_broker_fill_evidence_resolver import (
     BrokerFillEvidenceRequest,
     resolve_broker_backed_fill_evidence,
@@ -662,6 +667,20 @@ def _registry_reconciliation_state(
             if len(narrowed_matches) == 1:
                 mapped_trade_ids.add(narrowed_matches[0].trade_id)
                 mapped_records[narrowed_matches[0].trade_id] = _registry_record_event_row(narrowed_matches[0])
+            elif not lifecycle_trade_ids:
+                latest_entry_matches = _narrow_registry_matches_by_latest_broker_backed_entry(matches)
+                if len(latest_entry_matches) == 1:
+                    mapped_trade_ids.add(latest_entry_matches[0].trade_id)
+                    mapped_records[latest_entry_matches[0].trade_id] = _registry_record_event_row(latest_entry_matches[0])
+                    continue
+                blockers.append(
+                    {
+                        "code": "REGISTRY_AMBIGUOUS_BROKER_POSITION",
+                        "broker_position": dict(broker_position),
+                        "matching_trade_ids": [record.trade_id for record in matches],
+                        "lifecycle_matching_trade_ids": sorted(lifecycle_trade_ids),
+                    }
+                )
             else:
                 blockers.append(
                     {
@@ -1358,6 +1377,58 @@ def _append_reconciliation_registry_events(
         broker_backed_entry_adoption=broker_backed_entry_adoption,
         now=now,
     )
+
+
+def _narrow_registry_matches_by_latest_broker_backed_entry(
+    records: Sequence[TradeRegistryRecord],
+) -> list[TradeRegistryRecord]:
+    """Resolve same-contract registry ambiguity only when one entry is newest.
+
+    A current broker position may have no lifecycle projection yet during
+    post-fill adoption.  In that gap, stale historical OPEN_MANAGED chains can
+    match by account/contract/side/qty.  The only safe registry-side
+    discriminator available is exact broker-backed entry evidence recency.
+    Equal newest timestamps or missing broker-backed entry evidence still fail
+    closed as ambiguity.
+    """
+
+    candidates: list[tuple[datetime, tuple[str, str, str, str], TradeRegistryRecord]] = []
+    for record in records:
+        latest_entry = _latest_broker_backed_entry_event(record)
+        if latest_entry is None:
+            continue
+        identity = (
+            str(latest_entry.order_id or ""),
+            str(latest_entry.client_id or ""),
+            str(latest_entry.perm_id or ""),
+            str(latest_entry.exec_id or ""),
+        )
+        if not all(identity):
+            continue
+        candidates.append((latest_entry.generated_at, identity, record))
+    if not candidates:
+        return []
+    newest = max(item[0] for item in candidates)
+    newest_candidates = [item for item in candidates if item[0] == newest]
+    newest_identities = {item[1] for item in newest_candidates}
+    if len(newest_candidates) == 1 and len(newest_identities) == 1:
+        return [newest_candidates[0][2]]
+    return []
+
+
+def _latest_broker_backed_entry_event(record: TradeRegistryRecord) -> TradeEvent | None:
+    events = [
+        event
+        for event in record.event_chain
+        if event.event_type == TradeEventType.ENTRY_FILL_BROKER_BACKED
+        and event.order_id
+        and event.client_id
+        and event.perm_id
+        and event.exec_id
+    ]
+    if not events:
+        return None
+    return max(events, key=lambda event: event.generated_at)
 
 
 def _registry_records_for_broker_position(

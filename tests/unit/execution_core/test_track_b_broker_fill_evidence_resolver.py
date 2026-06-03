@@ -75,6 +75,39 @@ def test_account_mismatch_blocks(tmp_path: Path) -> None:
     assert any(row["reason"] == "account_mismatch" for row in result.rejected)
 
 
+def test_synthetic_bridge_fill_trade_id_can_prove_submit_owner_when_broker_identity_exact(tmp_path: Path) -> None:
+    _write_bridge_fill_lifecycle_report(
+        tmp_path,
+        source_trade_id="trade_bridge_fill_MNQ_1m_2026-06-03T02_47_00Z_SELL_TO_OPEN",
+        lifecycle_id="bridge_fill_MNQ|1m|2026-06-03T02:47:00Z|SELL_TO_OPEN",
+        exec_id="0000e1a7.6a2ecf0d.01.01",
+    )
+
+    result = resolve_broker_backed_fill_evidence(repo_root=tmp_path, request=_request())
+
+    assert result.classification == RESOLVED
+    assert result.broker_backed_evidence_valid is True
+    assert result.evidence is not None
+    assert result.evidence["trade_id"] == "trade_mnq_current"
+    assert result.evidence["source_trade_id"] == "trade_bridge_fill_MNQ_1m_2026-06-03T02_47_00Z_SELL_TO_OPEN"
+    assert result.evidence["exec_id"] == "0000e1a7.6a2ecf0d.01.01"
+
+
+def test_synthetic_bridge_fill_trade_id_still_blocks_when_broker_identity_not_exact(tmp_path: Path) -> None:
+    _write_bridge_fill_lifecycle_report(
+        tmp_path,
+        source_trade_id="trade_bridge_fill_MNQ_1m_2026-06-03T02_47_00Z_SELL_TO_OPEN",
+        lifecycle_id="bridge_fill_MNQ|1m|2026-06-03T02:47:00Z|SELL_TO_OPEN",
+        exec_id="0000e1a7.6a2ecf0d.01.01",
+        perm_id=999,
+    )
+
+    result = resolve_broker_backed_fill_evidence(repo_root=tmp_path, request=_request())
+
+    assert result.classification == MISSING_EXEC_ID
+    assert any(row["reason"] == "trade_id_mismatch" for row in result.rejected)
+
+
 def test_broker_position_alone_cannot_create_broker_backed_fill(tmp_path: Path) -> None:
     path = tmp_path / "outputs/reports/ibkr_read_only_verification/ibkr_positions_snapshot.json"
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -196,6 +229,54 @@ def _write_bridge_report(
                     "executions_after_submit": executions,
                 }
             }
+        },
+    }
+    path.write_text(json.dumps(payload), encoding="utf-8")
+
+
+def _write_bridge_fill_lifecycle_report(
+    tmp_path: Path,
+    *,
+    source_trade_id: str,
+    lifecycle_id: str,
+    exec_id: str | None,
+    perm_id: int = 1955790757,
+) -> None:
+    path = (
+        tmp_path
+        / "outputs/track_b_execution_core/track_b_strategy_managed_paper_lifecycle"
+        / lifecycle_id
+        / "track_b_strategy_managed_paper_lifecycle_report.json"
+    )
+    path.parent.mkdir(parents=True, exist_ok=True)
+    payload = {
+        "trade_id": source_trade_id,
+        "lifecycle_id": lifecycle_id,
+        "account_id": "DUM882026",
+        "instrument_family": "MNQ",
+        "local_symbol": "MNQM6",
+        "con_id": 770561201,
+        "entry_intent": {
+            "trade_id": source_trade_id,
+            "lifecycle_id": lifecycle_id,
+            "order_action": "BUY",
+            "quantity": 1,
+            "account_id": "DUM882026",
+            "local_symbol": "MNQM6",
+            "con_id": 770561201,
+        },
+        "entry_submit_attempt": {
+            "broker_order_id": "1",
+            "client_id": 11127,
+            "perm_id": perm_id,
+        },
+        "entry_fill": {
+            "broker_order_id": "1",
+            "execution_id": exec_id,
+            "perm_id": perm_id,
+            "price": "30437.00",
+            "quantity": "1",
+            "filled_at": "2026-06-03T02:49:10.058184+00:00",
         },
     }
     path.write_text(json.dumps(payload), encoding="utf-8")
