@@ -613,6 +613,195 @@ def test_exit_due_projection_creates_close_despite_stale_lifecycle_waiting_repor
     assert position["close_submitted"] is True
 
 
+def test_maintenance_refreshes_managed_position_authority_before_worklist(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    cfg = seed_open_position(
+        tmp_path,
+        entry_filled_at="2026-05-07T16:31:07+00:00",
+        completed_timestamps=[
+            "2026-05-07T16:35:00+00:00",
+            "2026-05-07T16:40:00+00:00",
+            "2026-05-07T16:45:00+00:00",
+        ],
+    )
+    cfg = TrackBManagedOpenPositionMaintenanceConfig(
+        **{
+            **cfg.__dict__,
+            "repo_root": tmp_path,
+        }
+    )
+    fresh_projection = json.loads(cfg.managed_position_projection_json.read_text(encoding="utf-8"))
+    stale_lifecycle_id = "reserved_submit_mes_globex_active_participation_short_1"
+    write_json(
+        cfg.managed_position_projection_json,
+        {
+            "schema_version": "track_b_managed_position_registry_v1",
+            "generated_at": aware_now().isoformat(),
+            "classification": "OPEN_MANAGED_EXIT_DUE",
+            "managed_positions": [
+                {
+                    "classification": "OPEN_MANAGED_EXIT_DUE",
+                    "trade_id": "trade_submit_owner_mes_globex_short",
+                    "lifecycle_id": stale_lifecycle_id,
+                    "symbol": "MES",
+                    "contract_key": "MES-202606",
+                    "local_symbol": "MESM6",
+                    "con_id": 770561194,
+                    "side": "SHORT",
+                    "quantity": "1",
+                    "exit_due": True,
+                    "bars_since_entry": 18,
+                }
+            ],
+        },
+    )
+
+    import mgc_v05l.execution_core.track_b_managed_order_registry as managed_order_registry
+    import mgc_v05l.execution_core.track_b_managed_position_registry as managed_position_registry
+
+    def build_positions(*, config: Any, now: datetime | None = None) -> dict[str, Any]:
+        return dict(fresh_projection)
+
+    def write_positions(*, config: Any, payload: Mapping[str, Any], now: datetime | None = None) -> tuple[Path, list[dict[str, Any]]]:
+        return config.resolve(config.output_path), []
+
+    def build_orders(*, config: Any, now: datetime | None = None) -> dict[str, Any]:
+        return {
+            "schema_version": "track_b_managed_order_registry_v1",
+            "generated_at": aware_now().isoformat(),
+            "classification": "NO_MANAGED_ORDERS",
+            "managed_orders": [],
+        }
+
+    def write_orders(*, config: Any, payload: Mapping[str, Any], now: datetime | None = None) -> tuple[Path, list[dict[str, Any]]]:
+        return config.resolve(config.output_path), []
+
+    monkeypatch.setattr(managed_position_registry, "build_track_b_managed_position_registry", build_positions)
+    monkeypatch.setattr(managed_position_registry, "write_track_b_managed_position_registry", write_positions)
+    monkeypatch.setattr(managed_order_registry, "build_track_b_managed_order_registry", build_orders)
+    monkeypatch.setattr(managed_order_registry, "write_track_b_managed_order_registry", write_orders)
+
+    result = run_track_b_managed_open_position_maintenance(
+        config=cfg,
+        lifecycle_stages=fake_close_stages(),
+        now=aware_now(),
+    )
+
+    position = result.report["positions"][0]
+    assert position["lifecycle_id"] == "strategy_managed_fe30248d4d6c42acaf106c8313b0b33b"
+    assert position["lifecycle_id"] != stale_lifecycle_id
+    assert result.report["maintenance_authority_diagnostics"]["canonical_current_claim_count"] == 1
+    assert position["close_intent_created"] is True
+    assert position["close_submitted"] is True
+
+
+def test_maintenance_fails_closed_when_managed_position_authority_refresh_fails(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    cfg = seed_open_position(
+        tmp_path,
+        entry_filled_at="2026-05-07T16:31:07+00:00",
+        completed_timestamps=[
+            "2026-05-07T16:35:00+00:00",
+            "2026-05-07T16:40:00+00:00",
+            "2026-05-07T16:45:00+00:00",
+        ],
+    )
+    cfg = TrackBManagedOpenPositionMaintenanceConfig(
+        **{
+            **cfg.__dict__,
+            "repo_root": tmp_path,
+        }
+    )
+
+    import mgc_v05l.execution_core.track_b_managed_position_registry as managed_position_registry
+
+    def build_positions(*, config: Any, now: datetime | None = None) -> dict[str, Any]:
+        raise RuntimeError("authority unavailable")
+
+    monkeypatch.setattr(managed_position_registry, "build_track_b_managed_position_registry", build_positions)
+
+    result = run_track_b_managed_open_position_maintenance(
+        config=cfg,
+        lifecycle_stages=fake_close_stages(),
+        now=aware_now(),
+    )
+
+    position = result.report["positions"][0]
+    assert position["close_intent_created"] is False
+    assert position["close_submitted"] is False
+    assert position["canonical_owner_authority_blocker"]["classification"] == "MAINTENANCE_CANONICAL_OWNER_REQUIRED"
+
+
+def test_maintenance_overlays_canonical_owner_identity_on_synthetic_lifecycle_report(tmp_path: Path) -> None:
+    cfg = seed_open_position(
+        tmp_path,
+        entry_filled_at="2026-05-07T16:31:07+00:00",
+        completed_timestamps=[
+            "2026-05-07T16:35:00+00:00",
+            "2026-05-07T16:40:00+00:00",
+            "2026-05-07T16:45:00+00:00",
+        ],
+    )
+    cfg = TrackBManagedOpenPositionMaintenanceConfig(
+        **{
+            **cfg.__dict__,
+            "refresh_managed_position_authority": False,
+        }
+    )
+    canonical_lifecycle_id = "strategy_managed_fe30248d4d6c42acaf106c8313b0b33b"
+    canonical_trade_id = f"MNQ_FIRST_BULL_SNAP_TURN_V1:{canonical_lifecycle_id}"
+    canonical_report_path = (
+        tmp_path
+        / "managed"
+        / canonical_lifecycle_id
+        / "track_b_strategy_managed_paper_lifecycle_report.json"
+    )
+    synthetic_lifecycle_id = "bridge_fill_MNQ|1m|2026-05-07T16:31:00Z|BUY_TO_OPEN"
+    synthetic_report_path = (
+        tmp_path
+        / "managed"
+        / synthetic_lifecycle_id
+        / "track_b_strategy_managed_paper_lifecycle_report.json"
+    )
+    synthetic_report = json.loads(canonical_report_path.read_text(encoding="utf-8"))
+    synthetic_report["lifecycle_id"] = synthetic_lifecycle_id
+    synthetic_report["trade_id"] = "trade_bridge_fill_MNQ_1m_2026_05_07T16_31_00Z_BUY_TO_OPEN"
+    synthetic_report["entry_intent"]["lifecycle_id"] = synthetic_lifecycle_id
+    synthetic_report["entry_intent"]["trade_id"] = synthetic_report["trade_id"]
+    synthetic_report["open_state"] = {
+        "lifecycle_id": synthetic_lifecycle_id,
+        "trade_id": synthetic_report["trade_id"],
+        "entry_timestamp": "2026-05-07T16:31:07+00:00",
+        "entry_price": "28729",
+        "managed_exit_policy_id": "PAPER_DIAGNOSTIC_TIME_BOXED_3X5M_EXIT_V1",
+    }
+    write_json(synthetic_report_path, synthetic_report)
+    projection = json.loads(cfg.managed_position_projection_json.read_text(encoding="utf-8"))
+    projection["managed_positions"] = projection.pop("positions")
+    projection["managed_positions"][0]["projection_authority_source"] = "CURRENT_EXPOSURE_OWNER_RESOLVER"
+    projection["managed_positions"][0]["paper_lifecycle_report_path"] = str(synthetic_report_path)
+    projection["managed_positions"][0]["lifecycle_position"]["source"] = "CURRENT_EXPOSURE_OWNER_RESOLVER"
+    projection["managed_positions"][0]["lifecycle_position"]["paper_lifecycle_report_path"] = str(synthetic_report_path)
+    write_json(cfg.managed_position_projection_json, projection)
+
+    result = run_track_b_managed_open_position_maintenance(
+        config=cfg,
+        lifecycle_stages=fake_close_stages(),
+        now=aware_now(),
+    )
+
+    position = result.report["positions"][0]
+    assert position["trade_id"] == canonical_trade_id
+    assert position["lifecycle_id"] == canonical_lifecycle_id
+    assert position["close_intent_created"] is True
+    assert position["close_submitted"] is True
+    assert position.get("canonical_owner_authority_blocker") is None
+
+
 def test_exit_due_projection_canonicalizes_mes_close_expiry_from_broker_position(tmp_path: Path) -> None:
     cfg = seed_open_position(
         tmp_path,

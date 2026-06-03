@@ -81,6 +81,8 @@ class TrackBManagedOpenPositionMaintenanceConfig:
     order_type: str = "LMT"
     time_in_force: str = "DAY"
     live_money_readiness: bool = False
+    repo_root: Path | None = None
+    refresh_managed_position_authority: bool = True
     live_runtime_feed_output_root: Path = DEFAULT_TRACK_B_PHASE1_RUNTIME_MARKET_DATA_ROOT
     managed_lifecycle_output_root: Path = DEFAULT_TRACK_B_STRATEGY_MANAGED_PAPER_LIFECYCLE_OUTPUT_ROOT
     paper_trade_ledger_output_root: Path = DEFAULT_TRACK_B_PAPER_TRADE_LEDGER_OUTPUT_ROOT
@@ -113,7 +115,7 @@ def run_track_b_managed_open_position_maintenance(
     require_aware_datetime(actual_now, "now")
     live_position_status = _read_json(actual_config.live_position_status_json)
     trade_summary = _read_json(actual_config.paper_trade_summary_json)
-    managed_position_projection = _read_json(actual_config.managed_position_projection_json)
+    managed_position_projection = _managed_position_authority_projection(actual_config, now=actual_now)
     projected_positions = _managed_position_projection_by_lifecycle_id(managed_position_projection)
     projected_positions_by_contract = _managed_position_projection_by_contract_key(managed_position_projection)
     canonical_owner_by_contract = _canonical_close_owner_by_contract(projected_positions_by_contract)
@@ -186,6 +188,10 @@ def run_track_b_managed_open_position_maintenance(
                 }
             )
             continue
+        lifecycle_report = _canonicalized_lifecycle_report_for_owner_position(
+            position=position,
+            lifecycle_report=lifecycle_report,
+        )
         authority_blocker = _canonical_owner_authority_blocker(
             lifecycle_id=lifecycle_id,
             position=position,
@@ -563,6 +569,60 @@ def run_track_b_managed_open_position_maintenance(
     )
 
 
+def _managed_position_authority_projection(
+    config: TrackBManagedOpenPositionMaintenanceConfig,
+    *,
+    now: datetime,
+) -> dict[str, Any]:
+    existing_projection = _read_json(config.managed_position_projection_json)
+    if config.refresh_managed_position_authority is not True:
+        return existing_projection
+    repo_root = _managed_position_authority_repo_root(config)
+    if repo_root is None:
+        return existing_projection
+    try:
+        from mgc_v05l.execution_core.track_b_managed_order_registry import (
+            TrackBManagedOrderRegistryConfig,
+            build_track_b_managed_order_registry,
+            write_track_b_managed_order_registry,
+        )
+        from mgc_v05l.execution_core.track_b_managed_position_registry import (
+            TrackBManagedPositionRegistryConfig,
+            build_track_b_managed_position_registry,
+            write_track_b_managed_position_registry,
+        )
+
+        position_config = TrackBManagedPositionRegistryConfig(repo_root=repo_root)
+        position_payload = build_track_b_managed_position_registry(config=position_config, now=now)
+        write_track_b_managed_position_registry(config=position_config, payload=position_payload, now=now)
+        order_config = TrackBManagedOrderRegistryConfig(repo_root=repo_root)
+        order_payload = build_track_b_managed_order_registry(config=order_config, now=now)
+        write_track_b_managed_order_registry(config=order_config, payload=order_payload, now=now)
+        position_payload = build_track_b_managed_position_registry(config=position_config, now=now)
+        write_track_b_managed_position_registry(config=position_config, payload=position_payload, now=now)
+        return dict(position_payload)
+    except Exception as exc:
+        return {
+            "schema_version": "track_b_managed_position_registry_v1",
+            "classification": "PROJECTION_AUTHORITY_DIVERGENCE",
+            "positions": [],
+            "managed_positions": [],
+            "projection_authority_refresh": {
+                "classification": "PROJECTION_AUTHORITY_REFRESH_FAILED",
+                "source": "managed_open_position_maintenance",
+                "error": f"{type(exc).__name__}: {exc}",
+            },
+        }
+
+
+def _managed_position_authority_repo_root(config: TrackBManagedOpenPositionMaintenanceConfig) -> Path | None:
+    if config.repo_root is not None:
+        return config.repo_root
+    if not config.managed_position_projection_json.is_absolute():
+        return Path.cwd()
+    return None
+
+
 def _open_positions(live_position_status: Mapping[str, Any]) -> list[dict[str, Any]]:
     positions: list[dict[str, Any]] = []
     for value in (live_position_status.get("positions_by_instrument") or {}).values():
@@ -785,6 +845,152 @@ def _maintenance_position_from_managed_projection(
             "local_symbol": position.get("local_symbol") or broker_position.get("local_symbol") or raw.get("local_symbol"),
         },
     }
+
+
+def _canonicalized_lifecycle_report_for_owner_position(
+    *,
+    position: Mapping[str, Any],
+    lifecycle_report: Mapping[str, Any],
+) -> dict[str, Any]:
+    if not lifecycle_report:
+        return {}
+    lifecycle_position = _mapping(position.get("lifecycle_position"))
+    lifecycle_unit = _first_lifecycle_unit(lifecycle_position)
+    owner_trade_id = str(position.get("trade_id") or lifecycle_position.get("trade_id") or lifecycle_unit.get("trade_id") or "").strip()
+    owner_lifecycle_id = str(
+        position.get("lifecycle_id")
+        or lifecycle_position.get("lifecycle_id")
+        or lifecycle_unit.get("lifecycle_id")
+        or ""
+    ).strip()
+    if not owner_trade_id or not owner_lifecycle_id:
+        return dict(lifecycle_report)
+    if not _position_authority_is_current_owner(position=position, lifecycle_position=lifecycle_position):
+        return dict(lifecycle_report)
+    report_trade_id = str(lifecycle_report.get("trade_id") or "").strip()
+    report_lifecycle_id = str(lifecycle_report.get("lifecycle_id") or "").strip()
+    if report_trade_id == owner_trade_id and report_lifecycle_id == owner_lifecycle_id:
+        return dict(lifecycle_report)
+
+    entry_fill = _mapping(lifecycle_report.get("entry_fill"))
+    entry_intent = _mapping(lifecycle_report.get("entry_intent"))
+    open_state = _mapping(lifecycle_report.get("open_state"))
+    entry_exec_id = (
+        _first_item(position.get("entry_exec_ids"))
+        or _first_item(lifecycle_position.get("entry_exec_ids"))
+        or lifecycle_unit.get("entry_exec_id")
+    )
+    entry_order_id = (
+        _first_item(position.get("entry_order_ids"))
+        or _first_item(lifecycle_position.get("entry_order_ids"))
+        or lifecycle_unit.get("entry_order_id")
+    )
+    entry_perm_id = (
+        _first_item(position.get("entry_perm_ids"))
+        or _first_item(lifecycle_position.get("entry_perm_ids"))
+        or lifecycle_unit.get("entry_perm_id")
+    )
+    entry_time = position.get("entry_time") or lifecycle_position.get("entry_timestamp") or lifecycle_unit.get("entry_time")
+    entry_price = position.get("entry_price") or lifecycle_position.get("avg_entry_price") or lifecycle_unit.get("entry_price")
+    strategy_id = position.get("strategy_id") or lifecycle_position.get("strategy_id") or lifecycle_unit.get("strategy_id")
+    instrument = position.get("instrument_family") or position.get("symbol") or lifecycle_position.get("instrument_family")
+    local_symbol = position.get("local_symbol") or lifecycle_position.get("local_symbol") or lifecycle_unit.get("local_symbol")
+    con_id = position.get("con_id") or lifecycle_position.get("con_id") or lifecycle_unit.get("con_id")
+    account_id = position.get("account_id") or lifecycle_position.get("account_id") or lifecycle_unit.get("account_id")
+    side = position.get("side") or lifecycle_position.get("side") or lifecycle_unit.get("side")
+    quantity = position.get("quantity") or lifecycle_position.get("quantity") or lifecycle_unit.get("quantity")
+    policy_id = (
+        position.get("managed_exit_policy_id")
+        or lifecycle_position.get("managed_exit_policy_id")
+        or lifecycle_unit.get("managed_exit_policy_id")
+    )
+    contract_key = position.get("contract_key") or lifecycle_position.get("contract_key")
+    patched_entry_fill = {
+        **entry_fill,
+        "broker_order_id": entry_fill.get("broker_order_id") or entry_order_id,
+        "execution_id": entry_fill.get("execution_id") or entry_fill.get("exec_id") or entry_exec_id,
+        "exec_id": entry_fill.get("exec_id") or entry_fill.get("execution_id") or entry_exec_id,
+        "perm_id": entry_fill.get("perm_id") or entry_perm_id,
+        "filled_at": entry_fill.get("filled_at") or entry_fill.get("timestamp") or entry_time,
+        "price": entry_fill.get("price") or entry_price,
+        "quantity": entry_fill.get("quantity") or quantity,
+    }
+    patched_entry_intent = {
+        **entry_intent,
+        "trade_id": owner_trade_id,
+        "lifecycle_id": owner_lifecycle_id,
+        "strategy_id": strategy_id,
+        "lane_id": entry_intent.get("lane_id") or position.get("lane_id") or strategy_id,
+        "instrument_family": instrument,
+        "contract_key": contract_key,
+        "local_symbol": local_symbol,
+        "con_id": con_id,
+        "account_id": account_id,
+        "expected_account_id": entry_intent.get("expected_account_id") or account_id,
+        "side": side,
+        "quantity": entry_intent.get("quantity") or quantity,
+        "managed_exit_policy_id": policy_id,
+    }
+    patched_open_state = {
+        **open_state,
+        "trade_id": owner_trade_id,
+        "lifecycle_id": owner_lifecycle_id,
+        "strategy_id": strategy_id,
+        "instrument_family": instrument,
+        "contract_key": contract_key,
+        "local_symbol": local_symbol,
+        "con_id": con_id,
+        "side": side,
+        "quantity": quantity,
+        "entry_timestamp": open_state.get("entry_timestamp") or entry_time,
+        "entry_price": open_state.get("entry_price") or entry_price,
+        "managed_exit_policy_id": policy_id,
+    }
+    return {
+        **dict(lifecycle_report),
+        "trade_id": owner_trade_id,
+        "lifecycle_id": owner_lifecycle_id,
+        "strategy_id": strategy_id,
+        "instrument_family": instrument,
+        "contract_key": contract_key,
+        "local_symbol": local_symbol,
+        "con_id": con_id,
+        "account_id": account_id,
+        "expected_account_id": lifecycle_report.get("expected_account_id") or account_id,
+        "side": side,
+        "quantity": quantity,
+        "managed_exit_policy_id": policy_id,
+        "entry_fill": patched_entry_fill,
+        "entry_intent": patched_entry_intent,
+        "open_state": patched_open_state,
+        "canonical_owner_lifecycle_report_overlay": {
+            "applied": True,
+            "source": "CURRENT_EXPOSURE_OWNER_RESOLVER",
+            "original_trade_id": report_trade_id or None,
+            "original_lifecycle_id": report_lifecycle_id or None,
+            "owner_trade_id": owner_trade_id,
+            "owner_lifecycle_id": owner_lifecycle_id,
+        },
+    }
+
+
+def _position_authority_is_current_owner(
+    *,
+    position: Mapping[str, Any],
+    lifecycle_position: Mapping[str, Any],
+) -> bool:
+    return (
+        str(position.get("projection_authority_source") or "") == "CURRENT_EXPOSURE_OWNER_RESOLVER"
+        or str(position.get("source") or "") == "CURRENT_EXPOSURE_OWNER_RESOLVER"
+        or str(lifecycle_position.get("source") or "") == "CURRENT_EXPOSURE_OWNER_RESOLVER"
+    )
+
+
+def _first_lifecycle_unit(lifecycle_position: Mapping[str, Any]) -> dict[str, Any]:
+    lifecycle_units = lifecycle_position.get("lifecycle_units")
+    if isinstance(lifecycle_units, list) and lifecycle_units and isinstance(lifecycle_units[0], Mapping):
+        return dict(lifecycle_units[0])
+    return {}
 
 
 def _canonical_owner_authority_blocker(
