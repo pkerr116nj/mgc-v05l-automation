@@ -32,6 +32,9 @@ OWNED_MANAGED_EXIT_DUE = "OWNED_MANAGED_EXIT_DUE"
 UNMANAGED_BROKER_EXPOSURE = "UNMANAGED_BROKER_EXPOSURE"
 AMBIGUOUS_EXPOSURE_OWNERSHIP = "AMBIGUOUS_EXPOSURE_OWNERSHIP"
 STALE_SUPERSEDED_FULL_AUDIT_ONLY = "STALE_SUPERSEDED_FULL_AUDIT_ONLY"
+STALE_DUPLICATE_LIFECYCLE_AGGREGATION_FULL_AUDIT_ONLY = (
+    "STALE_DUPLICATE_LIFECYCLE_AGGREGATION_FULL_AUDIT_ONLY"
+)
 
 OPEN_REGISTRY_STATES = {
     TradeCurrentState.OPEN_MANAGED,
@@ -267,6 +270,105 @@ def resolve_current_exposure_ownership(
     }
 
 
+def apply_current_exposure_owner_lifecycle_overlay(
+    *,
+    lifecycle_positions: Sequence[Mapping[str, Any]],
+    owner_resolution: Mapping[str, Any],
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """Replace raw same-contract lifecycle aggregates with proven current owners.
+
+    The raw lifecycle projection can contain stale duplicate rows for the same
+    account/contract/direction.  Once the shared owner resolver proves a unique
+    broker-backed owner for a current broker position, downstream current-scope
+    consumers must use that owner row instead of double-counting older rows.
+    """
+
+    owned_by_key: dict[str, dict[str, Any]] = {}
+    for exposure in owner_resolution.get("owned_exposures") or []:
+        if not isinstance(exposure, Mapping):
+            continue
+        lifecycle = exposure.get("lifecycle_position")
+        if not isinstance(lifecycle, Mapping) or not lifecycle:
+            continue
+        canonical_broker_position = exposure.get("canonical_broker_position")
+        key = _exposure_identity_key(
+            canonical_broker_position if isinstance(canonical_broker_position, Mapping) else lifecycle
+        )
+        if not key:
+            continue
+        row = dict(lifecycle)
+        row.setdefault("source", "CURRENT_EXPOSURE_OWNER_RESOLVER")
+        row.setdefault("projection_repair", "CURRENT_OWNER_LIFECYCLE_AGGREGATION_OVERLAY")
+        owned_by_key[key] = row
+        fallback_key = _contract_identity_key(row)
+        if fallback_key:
+            owned_by_key.setdefault(fallback_key, row)
+
+    if not owned_by_key:
+        return [dict(row) for row in lifecycle_positions if isinstance(row, Mapping)], []
+
+    current: list[dict[str, Any]] = []
+    superseded: list[dict[str, Any]] = []
+    emitted_keys: set[str] = set()
+    emitted_lifecycle_ids: set[str] = set()
+    for raw in lifecycle_positions:
+        if not isinstance(raw, Mapping):
+            continue
+        row = dict(raw)
+        key = _exposure_identity_key(row)
+        if key not in owned_by_key:
+            key = _contract_identity_key(row)
+        owner = owned_by_key.get(key)
+        if not owner:
+            current.append(row)
+            continue
+        if not _requires_lifecycle_aggregate_overlay(row, owner):
+            current.append(row)
+            continue
+        owner_lifecycle_id = str(owner.get("lifecycle_id") or "")
+        raw_lifecycle_ids = {
+            str(row.get("lifecycle_id") or ""),
+            *[str(item) for item in row.get("lifecycle_ids") or []],
+        }
+        if key not in emitted_keys and (not owner_lifecycle_id or owner_lifecycle_id not in emitted_lifecycle_ids):
+            current.append(dict(owner))
+            emitted_keys.add(key)
+            owner_lifecycle_id = str(owner.get("lifecycle_id") or "")
+            if owner_lifecycle_id:
+                emitted_lifecycle_ids.add(owner_lifecycle_id)
+        if raw_lifecycle_ids != {owner_lifecycle_id} or _signed_lifecycle_qty(row) != _signed_lifecycle_qty(owner):
+            superseded.append(
+                {
+                    "classification": STALE_DUPLICATE_LIFECYCLE_AGGREGATION_FULL_AUDIT_ONLY,
+                    "reason_codes": [
+                        "CURRENT_EXPOSURE_OWNER_RESOLVER_SELECTED_UNIQUE_BROKER_BACKED_OWNER",
+                        "RAW_LIFECYCLE_AGGREGATE_SUPERSEDED_FOR_CURRENT_SCOPE",
+                    ],
+                    "position_key": key,
+                    "owner_trade_id": owner.get("trade_id"),
+                    "owner_lifecycle_id": owner.get("lifecycle_id"),
+                    "raw_lifecycle_position": row,
+                }
+            )
+
+    return current, superseded
+
+
+def _requires_lifecycle_aggregate_overlay(raw: Mapping[str, Any], owner: Mapping[str, Any]) -> bool:
+    raw_lifecycle_ids = {str(item) for item in raw.get("lifecycle_ids") or [] if str(item)}
+    if len(raw_lifecycle_ids) > 1:
+        return True
+    raw_unit_count = _decimal(raw.get("lifecycle_unit_count") or raw.get("unit_count"))
+    owner_unit_count = _decimal(owner.get("lifecycle_unit_count") or owner.get("unit_count") or "1")
+    if raw_unit_count is not None and owner_unit_count is not None and raw_unit_count > owner_unit_count:
+        return True
+    raw_qty = _signed_lifecycle_qty(raw)
+    owner_qty = _signed_lifecycle_qty(owner)
+    if raw_qty is not None and owner_qty is not None and abs(raw_qty) > abs(owner_qty):
+        return True
+    return False
+
+
 def _select_current_registry_owner(
     *,
     registry_matches: Sequence[TradeRegistryRecord],
@@ -354,6 +456,30 @@ def _lifecycle_position_from_registry_record(
     owner = record.ownership_identity
     assert owner is not None
     report = _lifecycle_report_for_id(owner.lifecycle_id or "", lifecycle_reports)
+    signed_qty = _signed_owner_qty(record)
+    unit = {
+        "trade_id": record.trade_id,
+        "lifecycle_id": owner.lifecycle_id,
+        "lane_id": owner.lane_id,
+        "strategy_id": owner.thesis_strategy_id,
+        "account_id": owner.account_id,
+        "instrument_family": owner.symbol,
+        "local_symbol": owner.local_symbol,
+        "con_id": owner.con_id,
+        "quantity": str(owner.qty),
+        "signed_qty": _decimal_display(signed_qty),
+        "side": owner.side,
+        "entry_price": _first_nonempty(record.entry_price, _entry_fill(report).get("price")),
+        "entry_time": _first_nonempty(report.get("entry_timestamp"), _entry_fill(report).get("filled_at")),
+        "entry_order_id": _latest_event_value(record, "order_id"),
+        "entry_perm_id": _latest_event_value(record, "perm_id"),
+        "entry_exec_id": _latest_event_value(record, "exec_id"),
+        "managed_exit_policy_id": _first_nonempty(
+            report.get("managed_exit_policy_id"),
+            _metadata_value(record, "managed_exit_policy_id"),
+        ),
+        "paper_lifecycle_report_path": report.get("report_json_path"),
+    }
     return {
         "source": "CURRENT_EXPOSURE_OWNER_RESOLVER",
         "projection_repair": "LIFECYCLE_PROJECTION_STALE",
@@ -370,7 +496,14 @@ def _lifecycle_position_from_registry_record(
         "con_id": owner.con_id,
         "expiry": owner.expiry or str(broker_position.get("expiry") or ""),
         "quantity": str(owner.qty),
-        "aggregate_qty": _decimal_display(_signed_owner_qty(record)),
+        "aggregate_qty": _decimal_display(signed_qty),
+        "gross_unit_qty": str(owner.qty),
+        "unit_count": 1,
+        "lifecycle_unit_count": 1,
+        "lifecycle_units": [unit],
+        "duplicate_same_lane_exposure": False,
+        "pyramiding_allowed": False,
+        "pyramiding_policy": "NOT_APPLICABLE",
         "side": owner.side,
         "avg_entry_price": _first_nonempty(record.entry_price, _entry_fill(report).get("price")),
         "entry_timestamp": _first_nonempty(report.get("entry_timestamp"), _entry_fill(report).get("filled_at")),
@@ -588,6 +721,26 @@ def _signed_report_qty(report: Mapping[str, Any]) -> Decimal | None:
 
 def _position_key(row: Mapping[str, Any]) -> str:
     return str(row.get("local_symbol") or row.get("contract_key") or row.get("position_key") or "").upper()
+
+
+def _exposure_identity_key(row: Mapping[str, Any]) -> str:
+    account = str(row.get("account_id") or row.get("account") or "").strip().upper()
+    if account == "MULTIPLE":
+        account = ""
+    local_symbol = str(row.get("local_symbol") or "").strip().upper()
+    con_id = str(row.get("con_id") or row.get("conId") or "").strip()
+    if account and local_symbol and con_id:
+        return f"{account}|{local_symbol}|{con_id}"
+    fallback = _position_key(row)
+    return f"{account}|{fallback}" if account and fallback else fallback
+
+
+def _contract_identity_key(row: Mapping[str, Any]) -> str:
+    local_symbol = str(row.get("local_symbol") or "").strip().upper()
+    con_id = str(row.get("con_id") or row.get("conId") or "").strip()
+    if local_symbol and con_id:
+        return f"{local_symbol}|{con_id}"
+    return _position_key(row)
 
 
 def _same_account(left: object, right: object) -> bool:

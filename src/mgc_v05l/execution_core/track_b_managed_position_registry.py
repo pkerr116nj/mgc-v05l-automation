@@ -24,6 +24,9 @@ from mgc_v05l.execution_core.track_b_pre_restart_exposure_reconciliation import 
     PreRestartExposureResolverConfig,
     resolve_pre_restart_exposure_reconciliation,
 )
+from mgc_v05l.execution_core.track_b_current_exposure_owner_resolver import (
+    apply_current_exposure_owner_lifecycle_overlay,
+)
 from mgc_v05l.execution_core.track_b_projection_metadata import build_projection_metadata
 from mgc_v05l.execution_core.track_b_live_trade_registry import load_live_trade_registry_records
 from mgc_v05l.execution_core.track_b_terminal_registry_truth import (
@@ -143,6 +146,10 @@ def build_track_b_managed_position_registry(
         broker_open_orders=_list(reconciliation.get("track_b_broker_open_orders")),
         lifecycle_reports=lifecycle_reports,
     )
+    lifecycle_positions, owner_superseded_lifecycle_positions = apply_current_exposure_owner_lifecycle_overlay(
+        lifecycle_positions=lifecycle_positions,
+        owner_resolution=_mapping(pre_restart_exposure_resolution.get("current_exposure_owner_resolution")),
+    )
     lifecycle_positions = _merge_resolved_lifecycle_positions(
         lifecycle_positions=lifecycle_positions,
         resolved_lifecycle_positions=_list(pre_restart_exposure_resolution.get("resolved_lifecycle_positions")),
@@ -229,7 +236,10 @@ def build_track_b_managed_position_registry(
         "lifecycle_open_positions": lifecycle_positions,
         "review_required_positions": review_positions,
         "historical_review_positions": historical_review_positions,
-        "superseded_lifecycle_projections": list(superseded_lifecycle_positions),
+        "superseded_lifecycle_projections": [
+            *list(superseded_lifecycle_positions),
+            *owner_superseded_lifecycle_positions,
+        ],
         "unresolved_submit_ownership": unresolved_ownership,
         "pre_restart_exposure_resolution": pre_restart_exposure_resolution,
         "source_freshness": source_stale,

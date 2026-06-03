@@ -57,6 +57,11 @@ from mgc_v05l.execution_core.track_b_historical_reconciliation_debris_resolver i
     HistoricalReconciliationDebrisResolverConfig,
     resolve_historical_reconciliation_debris,
 )
+from mgc_v05l.execution_core.track_b_current_exposure_owner_resolver import (
+    CurrentExposureOwnerResolverConfig,
+    apply_current_exposure_owner_lifecycle_overlay,
+    resolve_current_exposure_ownership,
+)
 from mgc_v05l.execution_core.track_b_terminal_registry_truth import (
     resolve_terminal_registry_truth,
 )
@@ -216,6 +221,26 @@ def reconcile_track_b_paper_broker_truth(
         lifecycle_positions=lifecycle_positions,
     )
     lifecycle_positions = list(lifecycle_projection_precedence["current_scope_lifecycle_positions"])
+    current_exposure_owner_resolution = resolve_current_exposure_ownership(
+        config=CurrentExposureOwnerResolverConfig(repo_root=config.repo_root),
+        broker_positions=track_b_positions,
+        broker_open_orders=track_b_open_orders,
+        lifecycle_positions=lifecycle_positions,
+        managed_position_registry={},
+    )
+    lifecycle_positions, owner_superseded_lifecycle_positions = apply_current_exposure_owner_lifecycle_overlay(
+        lifecycle_positions=lifecycle_positions,
+        owner_resolution=current_exposure_owner_resolution,
+    )
+    if owner_superseded_lifecycle_positions:
+        lifecycle_projection_precedence = {
+            **lifecycle_projection_precedence,
+            "current_scope_lifecycle_positions": lifecycle_positions,
+            "superseded_lifecycle_projections": [
+                *list(lifecycle_projection_precedence.get("superseded_lifecycle_projections") or []),
+                *owner_superseded_lifecycle_positions,
+            ],
+        }
     terminal_event_grace = _bridge_terminal_event_grace_for_flat_lifecycle(
         trade_summary=trade_summary,
         live_position_status=live_position_status,
@@ -533,6 +558,7 @@ def reconcile_track_b_paper_broker_truth(
         "hard_exit_order_not_marketable_orders": hard_exit_order_not_marketable,
         "unknown_broker_open_orders": unknown_track_b_open_orders,
         "track_b_lifecycle_positions": lifecycle_positions,
+        "current_exposure_owner_resolution": current_exposure_owner_resolution,
         "superseded_lifecycle_projections": lifecycle_projection_precedence["superseded_lifecycle_projections"],
         "lifecycle_projection_precedence": lifecycle_projection_precedence,
         "position_match_report": position_match_report,

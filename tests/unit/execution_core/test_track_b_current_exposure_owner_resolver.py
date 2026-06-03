@@ -8,9 +8,12 @@ from mgc_v05l.execution_core.track_b_central_trade_registry import TradeEvent, T
 from mgc_v05l.execution_core.track_b_current_exposure_owner_resolver import (
     AMBIGUOUS_EXPOSURE_OWNERSHIP,
     NO_OPEN_EXPOSURE,
+    OWNED_MANAGED_EXPOSURE,
     OWNED_MANAGED_EXIT_DUE,
     UNMANAGED_BROKER_EXPOSURE,
+    STALE_DUPLICATE_LIFECYCLE_AGGREGATION_FULL_AUDIT_ONLY,
     CurrentExposureOwnerResolverConfig,
+    apply_current_exposure_owner_lifecycle_overlay,
     resolve_current_exposure_ownership,
 )
 
@@ -98,12 +101,85 @@ def test_open_order_is_reported_and_prevents_restart_consumers_from_allowing_sta
     assert payload["broker_open_order_count"] == 1
 
 
+def test_current_owner_overlay_deduplicates_stale_same_contract_lifecycle_aggregate(tmp_path: Path) -> None:
+    stale = _registry_record(
+        trade_id="trade_old_mes_short",
+        lifecycle_id="life_old_mes_short",
+        generated_at=NOW - timedelta(days=1),
+        exit_due=False,
+        symbol="MES",
+        local_symbol="MESM6",
+        con_id=770561194,
+    )
+    current = _registry_record(
+        trade_id="trade_current_mes_short",
+        lifecycle_id="life_current_mes_short",
+        generated_at=NOW,
+        exit_due=False,
+        symbol="MES",
+        local_symbol="MESM6",
+        con_id=770561194,
+    )
+    broker_position = _broker_position(quantity="-1")
+    broker_position.update({"symbol": "MES", "track_b_root": "MES", "local_symbol": "MESM6", "con_id": 770561194})
+
+    owner_resolution = resolve_current_exposure_ownership(
+        config=CurrentExposureOwnerResolverConfig(repo_root=tmp_path),
+        broker_positions=[broker_position],
+        registry_records=[stale, current],
+        lifecycle_positions=[
+            {
+                "account_id": "MULTIPLE",
+                "local_symbol": "MESM6",
+                "con_id": 770561194,
+                "aggregate_qty": "-2",
+                "quantity": "2",
+                "side": "SHORT",
+                "lifecycle_id": "life_old_mes_short",
+                "lifecycle_ids": ["life_old_mes_short", "life_current_mes_short"],
+                "trade_ids": ["trade_old_mes_short", "trade_current_mes_short"],
+                "lifecycle_units": [
+                    {"lifecycle_id": "life_old_mes_short", "signed_qty": "-1"},
+                    {"lifecycle_id": "life_current_mes_short", "signed_qty": "-1"},
+                ],
+            }
+        ],
+    )
+
+    current_scope, superseded = apply_current_exposure_owner_lifecycle_overlay(
+        lifecycle_positions=[
+            {
+                "account_id": "MULTIPLE",
+                "local_symbol": "MESM6",
+                "con_id": 770561194,
+                "aggregate_qty": "-2",
+                "quantity": "2",
+                "side": "SHORT",
+                "lifecycle_id": "life_old_mes_short",
+                "lifecycle_ids": ["life_old_mes_short", "life_current_mes_short"],
+            }
+        ],
+        owner_resolution=owner_resolution,
+    )
+
+    assert owner_resolution["classification"] == OWNED_MANAGED_EXPOSURE
+    assert current_scope == [owner_resolution["owned_exposures"][0]["lifecycle_position"]]
+    assert current_scope[0]["trade_id"] == "trade_current_mes_short"
+    assert current_scope[0]["aggregate_qty"] == "-1"
+    assert current_scope[0]["lifecycle_unit_count"] == 1
+    assert superseded[0]["classification"] == STALE_DUPLICATE_LIFECYCLE_AGGREGATION_FULL_AUDIT_ONLY
+    assert superseded[0]["raw_lifecycle_position"]["aggregate_qty"] == "-2"
+
+
 def _registry_record(
     *,
     trade_id: str,
     lifecycle_id: str,
     generated_at: datetime,
     exit_due: bool,
+    symbol: str = "MNQ",
+    local_symbol: str = "MNQM6",
+    con_id: int = 770561201,
 ):
     events = [
         _event(
@@ -115,12 +191,18 @@ def _registry_record(
             client_id="10898",
             perm_id=f"perm_{trade_id}",
             exec_id=f"exec_{trade_id}",
+            symbol=symbol,
+            local_symbol=local_symbol,
+            con_id=con_id,
         ),
         _event(
             event_type=TradeEventType.LIFECYCLE_OPEN_MANAGED,
             trade_id=trade_id,
             lifecycle_id=lifecycle_id,
             generated_at=generated_at + timedelta(seconds=1),
+            symbol=symbol,
+            local_symbol=local_symbol,
+            con_id=con_id,
         ),
     ]
     if exit_due:
@@ -130,6 +212,9 @@ def _registry_record(
                 trade_id=trade_id,
                 lifecycle_id=lifecycle_id,
                 generated_at=generated_at + timedelta(minutes=60),
+                symbol=symbol,
+                local_symbol=local_symbol,
+                con_id=con_id,
             )
         )
     return reduce_trade_events(events)
@@ -145,6 +230,9 @@ def _event(
     client_id: str | None = None,
     perm_id: str | None = None,
     exec_id: str | None = None,
+    symbol: str = "MNQ",
+    local_symbol: str = "MNQM6",
+    con_id: int = 770561201,
 ) -> TradeEvent:
     return TradeEvent(
         event_id=f"{trade_id}_{event_type.value}_{generated_at.timestamp()}",
@@ -155,9 +243,9 @@ def _event(
         lane_id="mnq_globex_active_participation_short",
         thesis_strategy_id="mnq_globex_active_participation_short",
         account_id="DUM882026",
-        symbol="MNQ",
-        con_id=770561201,
-        local_symbol="MNQM6",
+        symbol=symbol,
+        con_id=con_id,
+        local_symbol=local_symbol,
         expiry="20260618",
         side="SHORT",
         action="SELL",

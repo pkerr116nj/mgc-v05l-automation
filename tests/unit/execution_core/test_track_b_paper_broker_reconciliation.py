@@ -1638,6 +1638,114 @@ def test_current_broker_position_maps_to_stronger_broker_backed_lifecycle_row(tm
     assert report["registry_reconciliation"]["mapped_trade_ids"] == ["trade_current_mes_us_long"]
 
 
+def test_current_owner_overlay_prevents_stale_duplicate_lifecycle_aggregate_mismatch(tmp_path: Path) -> None:
+    config = _write_base_artifacts(tmp_path)
+    aggregate_lifecycle = {
+        "account_id": "MULTIPLE",
+        "trade_id": "trade_older_mes_short",
+        "trade_ids": ["trade_older_mes_short", "trade_current_mes_short"],
+        "lifecycle_id": "reserved_submit_mes_us_active_participation_short_older",
+        "lifecycle_ids": [
+            "reserved_submit_mes_us_active_participation_short_older",
+            "reserved_submit_mes_us_active_participation_short_current",
+        ],
+        "strategy_id": "mes_us_active_participation_short",
+        "instrument_family": "MES",
+        "contract_key": "MES-202606",
+        "local_symbol": "MESM6",
+        "con_id": 770561194,
+        "expiry": "20260618",
+        "side": "SHORT",
+        "quantity": "2",
+        "aggregate_qty": "-2",
+        "lifecycle_unit_count": 2,
+        "lifecycle_units": [
+            {
+                "trade_id": "trade_older_mes_short",
+                "lifecycle_id": "reserved_submit_mes_us_active_participation_short_older",
+                "signed_qty": "-1",
+            },
+            {
+                "trade_id": "trade_current_mes_short",
+                "lifecycle_id": "reserved_submit_mes_us_active_participation_short_current",
+                "signed_qty": "-1",
+            },
+        ],
+    }
+    _write_json(
+        config.live_position_status_path,
+        {
+            "source": "TRACK_B_LIFECYCLE_ARTIFACTS",
+            "broker_reconciled": False,
+            "open_position_count": 1,
+            "open_order_count": 0,
+            "positions_by_instrument": {"MES-202606": aggregate_lifecycle},
+            "positions_by_strategy": {"mes_us_active_participation_short": aggregate_lifecycle},
+            "review_required_positions": [],
+        },
+    )
+    _write_registry_open_managed_trade(
+        config,
+        trade_id="trade_older_mes_short",
+        lifecycle_id="reserved_submit_mes_us_active_participation_short_older",
+        lane_id="mes_us_active_participation_short",
+        strategy_id="mes_us_active_participation_short",
+        symbol="MES",
+        local_symbol="MESM6",
+        con_id=770561194,
+        expiry="20260618",
+        order_id="6",
+        client_id="11180",
+        entry_perm_id="old_perm",
+        entry_exec_id="old_exec",
+        generated_at=NOW - timedelta(days=1),
+    )
+    _write_registry_open_managed_trade(
+        config,
+        trade_id="trade_current_mes_short",
+        lifecycle_id="reserved_submit_mes_us_active_participation_short_current",
+        lane_id="mes_us_active_participation_short",
+        strategy_id="mes_us_active_participation_short",
+        symbol="MES",
+        local_symbol="MESM6",
+        con_id=770561194,
+        expiry="20260618",
+        order_id="1",
+        client_id="11182",
+        entry_perm_id="1421892784",
+        entry_exec_id="0000e1a7.6a30b55c.01.01",
+        generated_at=NOW,
+    )
+    _write_broker_truth(
+        config,
+        positions=[
+            {
+                "account_id": "DUM882026",
+                "symbol": "MES",
+                "local_symbol": "MESM6",
+                "expiry": "20260618",
+                "con_id": 770561194,
+                "security_type": "FUT",
+                "quantity": "-1",
+                "average_cost": "38023.13",
+                "multiplier": "5",
+            }
+        ],
+    )
+
+    report = reconcile_track_b_paper_broker_truth(config=config, now=NOW)
+
+    assert report["classification"] == "TRACK_B_PAPER_BROKER_RECONCILED"
+    assert report["position_match_report"]["matched"] is True
+    assert report["position_match_report"]["matches"][0]["lifecycle_position"]["trade_id"] == "trade_current_mes_short"
+    assert report["position_match_report"]["matches"][0]["lifecycle_aggregate_qty"] == "-1"
+    assert report["registry_reconciliation"]["classification"] == "REGISTRY_RECONCILIATION_MATCHED"
+    assert report["registry_reconciliation"]["mapped_trade_ids"] == ["trade_current_mes_short"]
+    assert report["superseded_lifecycle_projections"][0]["classification"] == (
+        "STALE_DUPLICATE_LIFECYCLE_AGGREGATION_FULL_AUDIT_ONLY"
+    )
+
+
 def test_managed_exit_after_recovery_uses_trade_id(tmp_path: Path) -> None:
     config = _write_base_artifacts(tmp_path)
     record = _write_submit_intent_ownership(config, ownership_intent_id="submit_owner_mnq_exit_after_recovery", symbol="MNQ", local_symbol="MNQM6", expiry="20260618", con_id=770561201)

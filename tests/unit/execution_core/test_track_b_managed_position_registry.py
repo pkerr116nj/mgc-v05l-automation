@@ -268,6 +268,81 @@ def test_valid_lifecycle_and_broker_match_reports_open_managed_matched(tmp_path:
     assert payload["managed_positions"][0]["attention_required"] is False
 
 
+def test_current_owner_overlay_prevents_stale_duplicate_lifecycle_aggregate(tmp_path: Path) -> None:
+    broker = {
+        **_broker_position(),
+        "symbol": "MES",
+        "track_b_root": "MES",
+        "local_symbol": "MESM6",
+        "con_id": 770561194,
+        "quantity": "-1.0",
+    }
+    aggregate_lifecycle = {
+        **_lifecycle_position(lifecycle_id="old_lifecycle"),
+        "account_id": "MULTIPLE",
+        "instrument_family": "MES",
+        "track_b_root": "MES",
+        "contract_key": "MES-202606",
+        "local_symbol": "MESM6",
+        "con_id": 770561194,
+        "quantity": "2",
+        "aggregate_qty": "-2",
+        "lifecycle_id": "old_lifecycle",
+        "lifecycle_ids": ["old_lifecycle", "current_lifecycle"],
+        "trade_ids": ["old_trade", "current_trade"],
+        "lifecycle_unit_count": 2,
+        "lifecycle_units": [
+            {"trade_id": "old_trade", "lifecycle_id": "old_lifecycle", "signed_qty": "-1"},
+            {"trade_id": "current_trade", "lifecycle_id": "current_lifecycle", "signed_qty": "-1"},
+        ],
+    }
+    _seed_base(tmp_path, broker_positions=[broker], lifecycle_positions=[aggregate_lifecycle])
+    _write_registry_open_managed_events_for(
+        tmp_path,
+        trade_id="old_trade",
+        lifecycle_id="old_lifecycle",
+        generated_at=NOW - timedelta(days=1),
+        symbol="MES",
+        local_symbol="MESM6",
+        con_id=770561194,
+        order_id="2",
+        perm_id="old_perm",
+        exec_id="old_exec",
+    )
+    _write_registry_open_managed_events_for(
+        tmp_path,
+        trade_id="current_trade",
+        lifecycle_id="current_lifecycle",
+        generated_at=NOW,
+        symbol="MES",
+        local_symbol="MESM6",
+        con_id=770561194,
+        order_id="1",
+        perm_id="current_perm",
+        exec_id="current_exec",
+        append=True,
+    )
+    _write_lifecycle_report(tmp_path, lifecycle_id="current_lifecycle")
+
+    payload = build_track_b_managed_position_registry(
+        config=TrackBManagedPositionRegistryConfig(repo_root=tmp_path),
+        now=NOW,
+    )
+
+    assert payload["classification"] == OPEN_MANAGED_MATCHED
+    assert payload["summary"]["managed_position_count"] == 1
+    position = payload["managed_positions"][0]
+    assert position["local_symbol"] == "MESM6"
+    assert position["trade_id"] == "current_trade"
+    assert position["lifecycle_id"] == "current_lifecycle"
+    assert position["aggregate_qty"] == "-1"
+    assert position["broker_qty_match"] is True
+    assert position["duplicate_same_lane_exposure"] is False
+    assert payload["superseded_lifecycle_projections"][0]["classification"] == (
+        "STALE_DUPLICATE_LIFECYCLE_AGGREGATION_FULL_AUDIT_ONLY"
+    )
+
+
 def test_historical_review_required_same_contract_does_not_pollute_active_matched_position(tmp_path: Path) -> None:
     lifecycle = _lifecycle_position(lifecycle_id="current_managed_mnq", bars_since_fill=1)
     _seed_base(tmp_path, broker_positions=[_broker_position()], lifecycle_positions=[lifecycle])
@@ -802,6 +877,72 @@ def _write_registry_open_managed_events(root: Path) -> None:
         ),
     ]
     path.write_text("\n".join(json.dumps(event.to_dict(), sort_keys=True) for event in events) + "\n", encoding="utf-8")
+
+
+def _write_registry_open_managed_events_for(
+    root: Path,
+    *,
+    trade_id: str,
+    lifecycle_id: str,
+    generated_at: datetime,
+    symbol: str,
+    local_symbol: str,
+    con_id: int,
+    order_id: str,
+    perm_id: str,
+    exec_id: str,
+    append: bool = False,
+) -> None:
+    path = root / "outputs" / "track_b_execution_core" / "trade_registry" / "live_trade_events.jsonl"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    events = [
+        TradeEvent(
+            event_id=f"{trade_id}_entry_fill",
+            event_type=TradeEventType.ENTRY_FILL_BROKER_BACKED,
+            generated_at=generated_at,
+            trade_id=trade_id,
+            lifecycle_id=lifecycle_id,
+            lane_id=f"{symbol.lower()}_us_active_participation_short",
+            thesis_strategy_id=f"{symbol.lower()}_us_active_participation_short",
+            account_id="DUM882026",
+            symbol=symbol,
+            con_id=con_id,
+            local_symbol=local_symbol,
+            expiry="20260618",
+            side="SHORT",
+            action="SELL",
+            qty=Decimal("1"),
+            source_artifact_path="outputs/track_b_execution_core/test_entry.json",
+            order_id=order_id,
+            client_id="111",
+            perm_id=perm_id,
+            exec_id=exec_id,
+            price=Decimal("7604.75"),
+        ),
+        TradeEvent(
+            event_id=f"{trade_id}_open_managed",
+            event_type=TradeEventType.LIFECYCLE_OPEN_MANAGED,
+            generated_at=generated_at + timedelta(seconds=1),
+            trade_id=trade_id,
+            lifecycle_id=lifecycle_id,
+            lane_id=f"{symbol.lower()}_us_active_participation_short",
+            thesis_strategy_id=f"{symbol.lower()}_us_active_participation_short",
+            account_id="DUM882026",
+            symbol=symbol,
+            con_id=con_id,
+            local_symbol=local_symbol,
+            expiry="20260618",
+            side="SHORT",
+            action="SELL",
+            qty=Decimal("1"),
+            source_artifact_path="outputs/track_b_execution_core/test_lifecycle.json",
+            metadata={"managed_exit_policy_id": "US_ACTIVE_EVIDENCE_TIMEBOX_60M_EXIT_V1"},
+        ),
+    ]
+    mode = "a" if append and path.exists() else "w"
+    with path.open(mode, encoding="utf-8") as handle:
+        for event in events:
+            handle.write(json.dumps(event.to_dict(), sort_keys=True) + "\n")
 
 
 def _write_registry_closed_flat_events(root: Path, *, trade_id: str, lifecycle_id: str) -> None:
