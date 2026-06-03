@@ -14,10 +14,14 @@ from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
-from mgc_v05l.execution_core.track_b_broker_position_identity import (
-    IDENTITY_AMBIGUOUS,
-    IDENTITY_NOT_READY,
-    canonicalize_broker_position_identity,
+from mgc_v05l.execution_core.track_b_current_exposure_owner_resolver import (
+    AMBIGUOUS_EXPOSURE_OWNERSHIP,
+    NO_OPEN_EXPOSURE as CURRENT_NO_OPEN_EXPOSURE,
+    OWNED_MANAGED_EXIT_DUE,
+    OWNED_MANAGED_EXPOSURE,
+    UNMANAGED_BROKER_EXPOSURE,
+    CurrentExposureOwnerResolverConfig,
+    resolve_current_exposure_ownership,
 )
 from mgc_v05l.execution_core.track_b_central_trade_registry import TradeCurrentState, TradeRegistryRecord
 from mgc_v05l.execution_core.track_b_live_trade_registry import load_live_trade_registry_records
@@ -59,9 +63,18 @@ def resolve_pre_restart_exposure_reconciliation(
 ) -> dict[str, Any]:
     """Resolve current broker exposure into managed/adoptable/unmanaged buckets."""
 
-    broker_rows = [dict(row) for row in broker_positions if _position_key(row)]
-    lifecycle_rows = [dict(row) for row in lifecycle_positions if _position_key(row)]
-    if not broker_rows:
+    owner_payload = resolve_current_exposure_ownership(
+        config=CurrentExposureOwnerResolverConfig(
+            repo_root=config.repo_root,
+            contract_resolver_status_path=config.contract_resolver_status_path,
+        ),
+        broker_positions=broker_positions,
+        broker_open_orders=broker_open_orders,
+        registry_records=registry_records,
+        lifecycle_positions=lifecycle_positions,
+        lifecycle_reports=lifecycle_reports,
+    )
+    if owner_payload.get("classification") == CURRENT_NO_OPEN_EXPOSURE:
         return {
             "classification": NO_OPEN_EXPOSURE,
             "broker_position_count": 0,
@@ -74,134 +87,28 @@ def resolve_pre_restart_exposure_reconciliation(
             "restart_with_owned_exposure_allowed": False,
             "no_broad_flatten_generated": True,
             "read_only": True,
+            "current_exposure_owner_resolution": owner_payload,
         }
 
-    records = tuple(registry_records) if registry_records is not None else load_live_trade_registry_records(
-        repo_root=config.repo_root
-    )
-    active_records = [record for record in records if record.current_state in OPEN_REGISTRY_STATES]
-    contract_resolver_status = _read_json(config.resolve(config.contract_resolver_status_path))
-    managed: list[dict[str, Any]] = []
-    review: list[dict[str, Any]] = []
-    resolved_lifecycle_positions: list[dict[str, Any]] = []
-
-    for raw_broker_position in broker_rows:
-        identity_resolution = canonicalize_broker_position_identity(
-            broker_position=raw_broker_position,
-            registry_records=active_records,
-            lifecycle_positions=lifecycle_rows,
-            lifecycle_reports=lifecycle_reports,
-            contract_resolver_status=contract_resolver_status,
+    managed = [_legacy_managed_exposure(item) for item in owner_payload.get("owned_exposures") or []]
+    review = [_legacy_review_exposure(item) for item in owner_payload.get("review_required_exposures") or []]
+    resolved_lifecycle_positions = [dict(item) for item in owner_payload.get("resolved_lifecycle_positions") or []]
+    all_resolved = bool(managed) and int(owner_payload.get("owned_exposure_count") or 0) == int(
+        owner_payload.get("broker_position_count") or 0
+    ) and not review
+    if all_resolved:
+        classification = (
+            MANAGED_EXPOSURE_RESOLVED
+            if all("EXACT_LIFECYCLE_PROJECTION_MATCHED_BROKER_POSITION" in item.get("reason_codes", []) for item in managed)
+            else PROJECTION_STALE_MANAGED_EXPOSURE_RESOLVED
         )
-        broker_position = identity_resolution.canonical_position
-        key = _position_key(broker_position)
-        if identity_resolution.classification in {IDENTITY_NOT_READY, IDENTITY_AMBIGUOUS}:
-            review.append(
-                {
-                    "classification": REVIEW_REQUIRED_UNMANAGED_BROKER_EXPOSURE,
-                    "reason_codes": list(identity_resolution.reason_codes),
-                    "broker_position": raw_broker_position,
-                    "canonical_identity_resolution": identity_resolution.to_dict(),
-                    "position_key": key,
-                }
-            )
-            continue
-        lifecycle_match = _matching_lifecycle_position(broker_position, lifecycle_rows)
-        registry_matches = _registry_matches_for_broker_position(active_records, broker_position)
-        if lifecycle_match and _lifecycle_identity_proves_broker_position(lifecycle_match, broker_position):
-            exposure = {
-                "classification": MANAGED_EXPOSURE_RESOLVED,
-                "reason_codes": ["EXACT_LIFECYCLE_PROJECTION_MATCHED_BROKER_POSITION"],
-                "broker_position": raw_broker_position,
-                "canonical_broker_position": broker_position,
-                "canonical_identity_resolution": identity_resolution.to_dict(),
-                "lifecycle_position": lifecycle_match,
-                "trade_id": lifecycle_match.get("trade_id"),
-                "lifecycle_id": lifecycle_match.get("lifecycle_id"),
-                "position_key": key,
-            }
-            managed.append(exposure)
-            resolved_lifecycle_positions.append(lifecycle_match)
-            continue
-        if len(registry_matches) == 1 and _registry_record_has_required_identity(registry_matches[0]):
-            row = _lifecycle_position_from_registry_record(
-                record=registry_matches[0],
-                broker_position=broker_position,
-                lifecycle_reports=lifecycle_reports,
-            )
-            exposure = {
-                "classification": PROJECTION_STALE_MANAGED_EXPOSURE_RESOLVED,
-                "reason_codes": [
-                    "REGISTRY_OPEN_MANAGED_MATCHED_BROKER_POSITION",
-                    "LIFECYCLE_PROJECTION_STALE_OR_EMPTY",
-                ],
-                "broker_position": raw_broker_position,
-                "canonical_broker_position": broker_position,
-                "canonical_identity_resolution": identity_resolution.to_dict(),
-                "lifecycle_position": row,
-                "trade_id": row.get("trade_id"),
-                "lifecycle_id": row.get("lifecycle_id"),
-                "position_key": key,
-            }
-            managed.append(exposure)
-            resolved_lifecycle_positions.append(row)
-            continue
-        if len(registry_matches) > 1:
-            review.append(
-                {
-                    "classification": REVIEW_REQUIRED_AMBIGUOUS_MANAGED_EXPOSURE,
-                    "reason_codes": ["MULTIPLE_REGISTRY_TRADE_IDS_MATCH_BROKER_POSITION"],
-                    "broker_position": raw_broker_position,
-                    "canonical_broker_position": broker_position,
-                    "canonical_identity_resolution": identity_resolution.to_dict(),
-                    "matching_trade_ids": [record.trade_id for record in registry_matches],
-                    "position_key": key,
-                }
-            )
-            continue
-        adoptable = _adoptable_lifecycle_report_for_broker_position(
-            broker_position=broker_position,
-            lifecycle_reports=lifecycle_reports,
-        )
-        if adoptable:
-            row = _lifecycle_position_from_lifecycle_report(adoptable, broker_position=broker_position)
-            managed.append(
-                {
-                    "classification": ADOPTABLE_BROKER_BACKED_EXPOSURE,
-                    "reason_codes": ["EXACT_BROKER_BACKED_LIFECYCLE_REPORT_CAN_REPAIR_PROJECTION"],
-                    "broker_position": raw_broker_position,
-                    "canonical_broker_position": broker_position,
-                    "canonical_identity_resolution": identity_resolution.to_dict(),
-                    "lifecycle_position": row,
-                    "trade_id": row.get("trade_id"),
-                    "lifecycle_id": row.get("lifecycle_id"),
-                    "position_key": key,
-                }
-            )
-            resolved_lifecycle_positions.append(row)
-            continue
-        review.append(
-            {
-                "classification": REVIEW_REQUIRED_UNMANAGED_BROKER_EXPOSURE,
-                "reason_codes": ["NO_EXACT_REGISTRY_OR_BROKER_BACKED_LIFECYCLE_IDENTITY"],
-                "broker_position": raw_broker_position,
-                "canonical_broker_position": broker_position,
-                "canonical_identity_resolution": identity_resolution.to_dict(),
-                "position_key": key,
-            }
-        )
-
-    all_resolved = len(managed) == len(broker_rows) and not review
-    classification = (
-        MANAGED_EXPOSURE_RESOLVED
-        if all(item["classification"] == MANAGED_EXPOSURE_RESOLVED for item in managed) and all_resolved
-        else PROJECTION_STALE_MANAGED_EXPOSURE_RESOLVED
-        if all_resolved
-        else REVIEW_REQUIRED_UNMANAGED_BROKER_EXPOSURE
-    )
+    elif owner_payload.get("classification") == AMBIGUOUS_EXPOSURE_OWNERSHIP:
+        classification = REVIEW_REQUIRED_AMBIGUOUS_MANAGED_EXPOSURE
+    else:
+        classification = REVIEW_REQUIRED_UNMANAGED_BROKER_EXPOSURE
     return {
         "classification": classification,
-        "broker_position_count": len(broker_rows),
+        "broker_position_count": owner_payload.get("broker_position_count", 0),
         "broker_open_order_count": len(list(broker_open_orders)),
         "resolved_managed_exposure_count": len(managed),
         "review_required_exposure_count": len(review),
@@ -211,6 +118,53 @@ def resolve_pre_restart_exposure_reconciliation(
         "restart_with_owned_exposure_allowed": all_resolved and not list(broker_open_orders),
         "no_broad_flatten_generated": True,
         "read_only": True,
+        "current_exposure_owner_resolution": owner_payload,
+    }
+
+
+def _legacy_managed_exposure(exposure: Mapping[str, Any]) -> dict[str, Any]:
+    shared_classification = str(exposure.get("classification") or "")
+    reason_codes = [str(item) for item in exposure.get("reason_codes") or []]
+    lifecycle_position = dict(exposure.get("lifecycle_position") or {})
+    if shared_classification in {OWNED_MANAGED_EXPOSURE, OWNED_MANAGED_EXIT_DUE}:
+        classification = (
+            MANAGED_EXPOSURE_RESOLVED
+            if "EXACT_LIFECYCLE_PROJECTION_MATCHED_BROKER_POSITION" in reason_codes
+            else PROJECTION_STALE_MANAGED_EXPOSURE_RESOLVED
+        )
+    else:
+        classification = ADOPTABLE_BROKER_BACKED_EXPOSURE
+    return {
+        "classification": classification,
+        "shared_owner_classification": shared_classification,
+        "reason_codes": reason_codes,
+        "broker_position": dict(exposure.get("broker_position") or {}),
+        "canonical_broker_position": dict(exposure.get("canonical_broker_position") or {}),
+        "canonical_identity_resolution": dict(exposure.get("canonical_identity_resolution") or {}),
+        "lifecycle_position": lifecycle_position,
+        "trade_id": exposure.get("trade_id") or lifecycle_position.get("trade_id"),
+        "lifecycle_id": exposure.get("lifecycle_id") or lifecycle_position.get("lifecycle_id"),
+        "position_key": exposure.get("position_key"),
+        "exit_due": exposure.get("exit_due") is True,
+    }
+
+
+def _legacy_review_exposure(exposure: Mapping[str, Any]) -> dict[str, Any]:
+    shared_classification = str(exposure.get("classification") or "")
+    classification = (
+        REVIEW_REQUIRED_AMBIGUOUS_MANAGED_EXPOSURE
+        if shared_classification == AMBIGUOUS_EXPOSURE_OWNERSHIP
+        else REVIEW_REQUIRED_UNMANAGED_BROKER_EXPOSURE
+    )
+    return {
+        "classification": classification,
+        "shared_owner_classification": shared_classification,
+        "reason_codes": [str(item) for item in exposure.get("reason_codes") or []],
+        "broker_position": dict(exposure.get("broker_position") or {}),
+        "canonical_broker_position": dict(exposure.get("canonical_broker_position") or {}),
+        "canonical_identity_resolution": dict(exposure.get("canonical_identity_resolution") or {}),
+        "matching_trade_ids": list(exposure.get("matching_trade_ids") or []),
+        "position_key": exposure.get("position_key"),
     }
 
 

@@ -81,7 +81,7 @@ def test_ambiguous_missing_broker_con_id_blocks_restart(tmp_path: Path) -> None:
         registry_records=[first, second],
     )
 
-    assert payload["classification"] == REVIEW_REQUIRED_UNMANAGED_BROKER_EXPOSURE
+    assert payload["classification"] == "REVIEW_REQUIRED_AMBIGUOUS_MANAGED_EXPOSURE"
     assert payload["restart_with_owned_exposure_allowed"] is False
     assert payload["review_required_exposures"][0]["reason_codes"] == [
         "AMBIGUOUS_CON_ID_FOR_LOCAL_SYMBOL_ACCOUNT"
