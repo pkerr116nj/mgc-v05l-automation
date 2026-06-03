@@ -189,6 +189,47 @@ def test_submit_fill_and_lifecycle_adoption_path_recorded(tmp_path: Path) -> Non
     assert row["first_fail_reason"] == "FUNNEL_COMPLETE"
 
 
+def test_simulated_paper_orders_are_not_counted_as_broker_submits_or_fills(tmp_path: Path) -> None:
+    bar_ts = "2026-06-01T07:20:00+00:00"
+    lane = _lane(
+        bar_ts=bar_ts,
+        lane_id="mnq_london_open_active_participation_long",
+        rule_report={
+            "classification": "TRACK_B_PAPER_ACTIVE_EVIDENCE_SIGNAL",
+            "broker_authoritative_envelope_classification": "BROKER_AUTHORITATIVE_ENVELOPE_READY_DRY_RUN",
+            "broker_authoritative_envelope_path": "outputs/track_b_execution_core/london_open_active_evidence/latest_mnq_london_open_active_participation_long_event_envelope.json",
+        },
+        latest_live_strategy_intent={
+            "trade_id": "paper-only-trade",
+            "created_at": bar_ts,
+            "submitted_at": bar_ts,
+            "submit_attempted": True,
+            "broker_order_id": "paper-MNQ|1m|2026-06-01T07:20:00+00:00|BUY_TO_OPEN",
+            "filled_at": bar_ts,
+        },
+    )
+    lane["fill_count"] = 90
+    _write_fixture(tmp_path, [lane], {"MNQ": [bar_ts]})
+
+    report = _build(tmp_path)
+    row = report["bar_evaluations"][0]
+    lane_report = report["lane_reports"][0]
+
+    assert row["stage_results"]["SUBMIT_ATTEMPTED"] is False
+    assert row["stage_results"]["BROKER_ACK"] is False
+    assert row["stage_results"]["FILL"] is False
+    assert row["simulated_paper_submit"] is True
+    assert row["simulated_paper_fill"] is True
+    assert row["broker_authoritative_envelope_produced"] is True
+    assert lane_report["submit_attempt_count"] == 0
+    assert lane_report["fill_count"] == 0
+    assert lane_report["raw_lane_fill_count"] == 90
+    assert lane_report["simulated_paper_fill_count"] == 1
+    assert report["conversion"]["fill_count"] == 0
+    assert report["conversion"]["simulated_paper_fill_count"] == 1
+    assert report["conversion"]["broker_authoritative_envelope_count"] == 1
+
+
 def test_lane_silent_during_active_window_flagged(tmp_path: Path) -> None:
     bar_ts = "2026-06-01T14:00:00+00:00"
     lane = _lane(

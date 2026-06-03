@@ -146,7 +146,8 @@ def render_participation_observatory_markdown(report: Mapping[str, Any]) -> str:
             f"- `{lane.get('lane_id')}` {lane.get('symbol')} {lane.get('session_window')}: "
             f"bars={lane.get('bars_evaluated')} candidates={counts.get('CANDIDATE_CREATED', 0)} "
             f"intents={counts.get('INTENT_CREATED', 0)} submits={counts.get('SUBMIT_ATTEMPTED', 0)} "
-            f"fills={counts.get('FILL', 0)} first_fail=`{lane.get('latest_first_fail_reason')}`"
+            f"fills={counts.get('FILL', 0)} envelopes={lane.get('broker_envelope_count', 0)} "
+            f"sim_fills={lane.get('simulated_paper_fill_count', 0)} first_fail=`{lane.get('latest_first_fail_reason')}`"
         )
     lines.extend(["", "## Hidden Blockers"])
     blockers = list(report.get("hidden_blockers") or [])
@@ -183,8 +184,11 @@ def _lane_bar_funnel(*, lane: Mapping[str, Any], bar: Mapping[str, Any], now: da
     entry_exposure_authorized = intent_created and not _has_blocker(gate_blocker, "EXPOSURE")
     governance_authorized = intent_created and not _has_blocker(gate_blocker, "GOVERNANCE")
     route_authorized = intent_created and not _has_blocker(gate_blocker, "ROUTE")
-    submit_attempted = bool(intent.get("submit_attempted")) or bool(intent.get("submitted_at"))
-    broker_ack = bool(intent.get("broker_order_id") or intent.get("perm_id") or intent.get("acknowledged_at"))
+    simulated_paper_submit = _simulated_paper_submit(intent)
+    simulated_paper_fill = _simulated_paper_fill(intent)
+    broker_envelope_produced = _broker_envelope_produced(rule_report)
+    submit_attempted = _broker_submit_attempted(intent)
+    broker_ack = _broker_ack(intent)
     fill = _fill_reached(lane=lane, intent=intent)
     lifecycle_adopted = _lifecycle_adopted(lane=lane, intent=intent, fill=fill)
     stage_results = {
@@ -226,6 +230,10 @@ def _lane_bar_funnel(*, lane: Mapping[str, Any], bar: Mapping[str, Any], now: da
         ),
         "candidate_created": candidate_created,
         "intent_created": intent_created,
+        "broker_authoritative_envelope_produced": broker_envelope_produced,
+        "broker_authoritative_envelope_path": rule_report.get("broker_authoritative_envelope_path"),
+        "simulated_paper_submit": simulated_paper_submit,
+        "simulated_paper_fill": simulated_paper_fill,
         "trade_id": intent.get("trade_id") or intent.get("strategy_trade_id"),
         "gate_blocker": gate_blocker,
         "submit_status": _submit_status(intent),
@@ -259,7 +267,11 @@ def _lane_reports(*, lanes: Sequence[Mapping[str, Any]], bar_rows: Sequence[Mapp
                 "intent_count": int(lane.get("intent_count") or counts.get("INTENT_CREATED", 0) or 0),
                 "submit_attempt_count": counts.get("SUBMIT_ATTEMPTED", 0),
                 "broker_ack_count": counts.get("BROKER_ACK", 0),
-                "fill_count": int(lane.get("fill_count") or counts.get("FILL", 0) or 0),
+                "fill_count": counts.get("FILL", 0),
+                "raw_lane_fill_count": int(lane.get("fill_count") or 0),
+                "broker_envelope_count": sum(1 for row in rows if row.get("broker_authoritative_envelope_produced") is True),
+                "simulated_paper_submit_count": sum(1 for row in rows if row.get("simulated_paper_submit") is True),
+                "simulated_paper_fill_count": sum(1 for row in rows if row.get("simulated_paper_fill") is True),
                 "funnel_counts": counts,
                 "first_fail_counts": first_fail_counts,
                 "latest_first_fail_reason": rows[-1].get("first_fail_reason") if rows else "NO_BARS",
@@ -346,11 +358,17 @@ def _conversion_summary(lane_reports: Sequence[Mapping[str, Any]]) -> dict[str, 
     intents = sum(int(row.get("intent_count") or 0) for row in lane_reports)
     submits = sum(int(row.get("submit_attempt_count") or 0) for row in lane_reports)
     fills = sum(int(row.get("fill_count") or 0) for row in lane_reports)
+    broker_envelopes = sum(int(row.get("broker_envelope_count") or 0) for row in lane_reports)
+    simulated_submits = sum(int(row.get("simulated_paper_submit_count") or 0) for row in lane_reports)
+    simulated_fills = sum(int(row.get("simulated_paper_fill_count") or 0) for row in lane_reports)
     return {
         "candidate_count": candidates,
         "intent_count": intents,
+        "broker_authoritative_envelope_count": broker_envelopes,
         "submit_attempt_count": submits,
         "fill_count": fills,
+        "simulated_paper_submit_count": simulated_submits,
+        "simulated_paper_fill_count": simulated_fills,
         "candidate_to_intent_rate": _ratio(intents, candidates),
         "intent_to_submit_rate": _ratio(submits, intents),
         "submit_to_fill_rate": _ratio(fills, submits),
@@ -459,6 +477,8 @@ def _gate_blocker(*, lane: Mapping[str, Any], intent: Mapping[str, Any]) -> str 
 def _submit_status(intent: Mapping[str, Any]) -> str:
     if not intent:
         return "NO_INTENT"
+    if _simulated_paper_submit(intent):
+        return "SIMULATED_PAPER_ORDER_NOT_BROKER_SUBMIT"
     if intent.get("submit_attempted") is True:
         return "SUBMIT_ATTEMPTED"
     if intent.get("submit_suppressed") is True:
@@ -467,9 +487,42 @@ def _submit_status(intent: Mapping[str, Any]) -> str:
 
 
 def _fill_reached(*, lane: Mapping[str, Any], intent: Mapping[str, Any]) -> bool:
+    if _simulated_paper_submit(intent):
+        return False
     if intent.get("exec_id") or intent.get("fill_exec_id") or intent.get("filled_at"):
         return True
     return int(lane.get("fill_count") or 0) > 0 and str(lane.get("position_side") or "").upper() != "FLAT"
+
+
+def _broker_submit_attempted(intent: Mapping[str, Any]) -> bool:
+    if _simulated_paper_submit(intent):
+        return False
+    return bool(intent.get("submit_attempted")) or bool(intent.get("submitted_at"))
+
+
+def _broker_ack(intent: Mapping[str, Any]) -> bool:
+    if _simulated_paper_submit(intent):
+        return False
+    return bool(intent.get("broker_order_id") or intent.get("perm_id") or intent.get("acknowledged_at"))
+
+
+def _simulated_paper_submit(intent: Mapping[str, Any]) -> bool:
+    return _is_simulated_paper_order_id(intent.get("broker_order_id") or intent.get("order_id"))
+
+
+def _simulated_paper_fill(intent: Mapping[str, Any]) -> bool:
+    return _simulated_paper_submit(intent) and bool(intent.get("filled_at") or intent.get("exec_id") or intent.get("fill_exec_id"))
+
+
+def _is_simulated_paper_order_id(value: object) -> bool:
+    return str(value or "").strip().startswith("paper-")
+
+
+def _broker_envelope_produced(rule_report: Mapping[str, Any]) -> bool:
+    classification = str(rule_report.get("broker_authoritative_envelope_classification") or "").upper()
+    return classification == "BROKER_AUTHORITATIVE_ENVELOPE_READY_DRY_RUN" and bool(
+        rule_report.get("broker_authoritative_envelope_path")
+    )
 
 
 def _lifecycle_adopted(*, lane: Mapping[str, Any], intent: Mapping[str, Any], fill: bool) -> bool:

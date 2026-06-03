@@ -32,6 +32,12 @@ from ..execution_core.track_b_session_anchor_resolver import (
     TrackBSessionAnchorConfig,
     resolve_session_anchor,
 )
+from ..execution_core.track_b_london_active_evidence_broker_envelope import (
+    LondonActiveEvidenceBrokerEnvelopeConfig,
+    build_london_active_evidence_broker_envelope,
+    london_active_evidence_lane_ids,
+    write_london_active_evidence_broker_envelope,
+)
 
 
 TRACK_B_RULE_RUNNER_PAPER_RUNTIME_KIND = "track_b_rule_runner_paper_strategy_engine"
@@ -507,7 +513,7 @@ class TrackBRuleRunnerPaperStrategyEngine(StrategyEngine):
             and not state.same_underlying_entry_hold
             and self._entry_side_is_currently_allowed(side, state)
         ):
-            return OrderIntent(
+            intent = OrderIntent(
                 order_intent_id=f"{bar.bar_id}|{intent_type.value}",
                 bar_id=bar.bar_id,
                 symbol=self._settings.symbol,
@@ -517,8 +523,38 @@ class TrackBRuleRunnerPaperStrategyEngine(StrategyEngine):
                 reason_code=source,
                 signal_id=self._signal_id_for_actionable_signal(bar, side, source),
             )
+            self._maybe_write_london_active_evidence_broker_envelope(bar=bar, intent=intent)
+            return intent
 
         return super()._maybe_create_order_intent(bar, signal_packet, state, exit_decision)
+
+    def _maybe_write_london_active_evidence_broker_envelope(self, *, bar: Any, intent: OrderIntent) -> None:
+        lane_spec = getattr(self, "_track_b_lane_spec", None)
+        lane_id = str(getattr(lane_spec, "lane_id", "") or "")
+        if lane_id not in london_active_evidence_lane_ids():
+            return
+        latest_report = dict(getattr(self, "_latest_track_b_rule_report", {}) or {})
+        result = build_london_active_evidence_broker_envelope(
+            lane_id=lane_id,
+            order_intent=intent,
+            rule_report=latest_report,
+            source_candle_timestamp=getattr(bar, "end_ts", None),
+            config=LondonActiveEvidenceBrokerEnvelopeConfig(repo_root=self._track_b_repo_root),
+        )
+        if result.envelope is not None:
+            write_london_active_evidence_broker_envelope(result=result)
+        latest_report.update(
+            {
+                "broker_authoritative_envelope_classification": result.classification,
+                "broker_authoritative_envelope_path": str(result.latest_path) if result.latest_path else None,
+                "broker_authoritative_envelope_event_stream_path": str(result.event_path) if result.event_path else None,
+                "broker_authoritative_envelope_dry_run": result.envelope is not None,
+                "broker_authoritative_submit_enabled": False,
+                "broker_authoritative_submit_blocker": "LONDON_ACTIVE_EVIDENCE_ENVELOPE_ONLY_NOT_ACTIVATED",
+                "ibkr_call_path_invoked": False,
+            }
+        )
+        self._latest_track_b_rule_report = latest_report
 
     def _evaluate_changeover_runtime_rule(self, feature_packet: FeaturePacket) -> SignalPacket | None:
         config = self._track_b_rule_runner_config()

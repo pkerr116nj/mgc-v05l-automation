@@ -567,6 +567,62 @@ def test_london_open_active_evidence_accepts_with_canonical_london_anchor(tmp_pa
     assert decision["session_anchor_source"] == "RECOVERED_PHASE1_1M"
 
 
+def test_london_open_active_evidence_intent_writes_dry_run_broker_envelope(tmp_path) -> None:
+    ny = ZoneInfo("America/New_York")
+    bar = _bar(datetime(2026, 5, 28, 3, 20, tzinfo=ny), open_="21010", close="21030")
+    engine = object.__new__(TrackBRuleRunnerPaperStrategyEngine)
+    engine._bar_history = [bar]
+    engine._settings = SimpleNamespace(symbol="MNQ", trade_size=1)
+    engine._track_b_repo_root = tmp_path
+    engine._track_b_lane_spec = SimpleNamespace(
+        lane_id="mnq_london_open_active_participation_long",
+        strategy_family=PAPER_ACTIVE_EVIDENCE_MNQ_LONDON_OPEN_LONG_ID,
+        runtime_overlay_params={"entry_source": PAPER_ACTIVE_EVIDENCE_MNQ_LONDON_OPEN_LONG_ID},
+    )
+    engine._latest_track_b_rule_report = {
+        "classification": "TRACK_B_PAPER_ACTIVE_EVIDENCE_ACCEPTED",
+        "entry_source": PAPER_ACTIVE_EVIDENCE_MNQ_LONDON_OPEN_LONG_ID,
+        "direction": PAPER_ACTIVE_EVIDENCE_SPECS[PAPER_ACTIVE_EVIDENCE_MNQ_LONDON_OPEN_LONG_ID].direction,
+        "primary_blocker": None,
+        "session_anchor_status": "READY",
+        "session_anchor_reason_code": "ANCHOR_READY_FROM_CANONICAL_ARTIFACT",
+        "session_anchor_source": "RECOVERED_PHASE1_1M",
+        "session_anchor_source_artifact_path": "outputs/track_b_execution_core/session_anchors/MNQ/2026-05-28/LONDON_0300_OPEN.json",
+        "session_open_price": "21000",
+    }
+    payload = _empty_signal_packet_payload(bar.bar_id)
+    payload.update(
+        {
+            "long_entry_raw": True,
+            "recent_long_setup": True,
+            "long_entry": True,
+            "long_entry_source": PAPER_ACTIVE_EVIDENCE_MNQ_LONDON_OPEN_LONG_ID,
+        }
+    )
+    state = SimpleNamespace(
+        strategy_status=StrategyStatus.READY,
+        position_side=PositionSide.FLAT,
+        open_broker_order_id=None,
+        entries_enabled=True,
+        operator_halt=False,
+        same_underlying_entry_hold=False,
+        same_underlying_hold_reason=None,
+    )
+
+    intent = engine._maybe_create_order_intent(bar, SignalPacket(**payload), state, SimpleNamespace())
+
+    assert intent is not None
+    envelope_path = (
+        tmp_path
+        / "outputs/track_b_execution_core/london_open_active_evidence/latest_mnq_london_open_active_participation_long_event_envelope.json"
+    )
+    payload = json.loads(envelope_path.read_text(encoding="utf-8"))
+    assert payload["classification"] == "BROKER_AUTHORITATIVE_ENVELOPE_READY_DRY_RUN"
+    assert payload["submit_allowed"] is False
+    assert payload["ibkr_call_path_invoked"] is False
+    assert engine._latest_track_b_rule_report["broker_authoritative_envelope_path"] == str(envelope_path)
+
+
 def test_london_open_active_evidence_blocks_when_anchor_missing(tmp_path) -> None:
     ny = ZoneInfo("America/New_York")
     engine = object.__new__(TrackBRuleRunnerPaperStrategyEngine)
