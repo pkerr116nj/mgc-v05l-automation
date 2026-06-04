@@ -41,6 +41,34 @@ def test_identifies_hot_authority_artifacts(tmp_path: Path) -> None:
     assert payload["dashboard_projection_consumed"] is False
 
 
+def test_protects_startup_restart_authority_latest_patterns(tmp_path: Path) -> None:
+    protected_paths = [
+        "outputs/track_b_execution_core/control_plane/latest_control_plane_snapshot.json",
+        "outputs/track_b_execution_core/safe_state/latest_runtime_safe_state_envelope.json",
+        "outputs/track_b_execution_core/broker_position_guardian/latest_broker_position_guardian.json",
+        "outputs/track_b_execution_core/diagnostics/latest_track_b_registry_truth_diagnostics.json",
+        "outputs/track_b_execution_core/paper_stack/latest_paper_stack_status.json",
+        "outputs/operator_dashboard/runtime/latest_broker_truth_lease.json",
+        "outputs/operator_dashboard/runtime/latest_canonical_readiness.json",
+    ]
+    for relative_path in protected_paths:
+        path = tmp_path / relative_path
+        _write_json(path, {"classification": "CURRENT_AUTHORITY"})
+        _set_mtime(path, NOW - timedelta(days=90))
+
+    payload = build_track_b_artifact_retention_inventory(
+        config=TrackBArtifactRetentionInventoryConfig(repo_root=tmp_path, cold_candidate_days=30),
+        now=NOW,
+    )
+
+    hot = _by_relative(payload["hot_authority_artifacts"])
+    candidates = _by_relative(payload["archive_candidates"])
+    for relative_path in protected_paths:
+        assert hot[relative_path]["retention_tier"] == HOT_AUTHORITY_PROTECTED
+        assert hot[relative_path]["protected"] is True
+        assert relative_path not in candidates
+
+
 def test_identifies_old_diagnostics_as_archive_candidates(tmp_path: Path) -> None:
     old_report = tmp_path / "outputs" / "reports" / "old_runtime_report.json"
     _write_json(old_report, {"report": "old"})

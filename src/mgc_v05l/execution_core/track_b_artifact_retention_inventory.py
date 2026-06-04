@@ -43,20 +43,71 @@ HOT_AUTHORITY_PATHS: tuple[Path, ...] = (
     Path("outputs/track_b_execution_core/open_order_truth/latest_open_order_truth.json"),
     Path("outputs/track_b_execution_core/managed_orders/latest_managed_orders.json"),
     Path("outputs/track_b_execution_core/managed_orders/latest_order_adjustment_plan.json"),
+    Path("outputs/track_b_execution_core/managed_exit_orders/latest_known_managed_exit_orders.json"),
     Path("outputs/track_b_execution_core/position_truth/latest_position_truth.json"),
     Path("outputs/track_b_execution_core/runtime_truth/latest_runtime_environment_truth.json"),
+    Path("outputs/track_b_execution_core/runtime_environment/latest_live_runtime_environment_watchdog.json"),
     Path("outputs/track_b_execution_core/proof_readiness/latest_track_b_paper_proof_readiness.json"),
+    Path("outputs/track_b_execution_core/phase1_runtime_market_data/latest_phase1_runtime_market_data_status.json"),
     Path("outputs/track_b_execution_core/managed_positions/latest_managed_positions.json"),
     Path("outputs/track_b_execution_core/agent_registry/latest_agent_registry.json"),
     Path("outputs/track_b_execution_core/agent_health/latest_agent_health.json"),
+    Path("outputs/track_b_execution_core/control_plane/latest_control_plane_snapshot.json"),
+    Path("outputs/track_b_execution_core/safe_state/latest_runtime_safe_state_envelope.json"),
+    Path("outputs/track_b_execution_core/broker_position_guardian/latest_broker_position_guardian.json"),
+    Path("outputs/track_b_execution_core/diagnostics/latest_track_b_registry_truth_diagnostics.json"),
+    Path("outputs/track_b_execution_core/paper_stack/latest_paper_stack_status.json"),
+    Path("outputs/track_b_execution_core/paper_stack/latest_paper_stack_startup.json"),
     Path("outputs/track_b_execution_core/self_recover/latest_self_recover_rules.json"),
     Path("outputs/track_b_execution_core/crash_loop_protection/latest_crash_loop_protection.json"),
     Path("outputs/track_b_execution_core/runtime_resume/latest_runtime_resume_semantics.json"),
     Path("outputs/track_b_execution_core/runtime_supervisor/latest_runtime_supervisor_authority.json"),
+    Path("outputs/track_b_execution_core/paper_recovery_policy/latest_paper_recovery_policy.json"),
+    Path("outputs/track_b_execution_core/paper_autonomous_recovery/latest_paper_autonomous_recovery_plan.json"),
+    Path("outputs/track_b_execution_core/paper_autonomous_recovery/latest_recovery_attempt_history.json"),
+    Path("outputs/track_b_execution_core/recovery_budget/latest_recovery_budget_ledger.json"),
+    Path("outputs/track_b_execution_core/artifact_retention/latest_artifact_retention_inventory.json"),
+    Path("outputs/track_b_execution_core/artifact_retention/latest_artifact_archive_plan.json"),
+    Path("outputs/reports/phase1_runtime_data_readiness/latest_phase1_runtime_data_readiness.json"),
+    Path("outputs/reports/phase1_databento_live_runtime_candles/latest_phase1_databento_live_listener_status.json"),
+    Path("outputs/reports/phase1_databento_live_runtime_candles/latest_phase1_databento_live_supervisor_status.json"),
     Path("outputs/reports/track_b_paper_broker_reconciliation/latest_track_b_paper_broker_reconciliation.json"),
     Path("outputs/operator_dashboard/runtime/latest_broker_truth_lease.json"),
     Path("outputs/operator_dashboard/runtime/latest_canonical_readiness.json"),
     Path("outputs/track_b_execution_core/shared_truth/latest_track_b_shared_truth_refresh.json"),
+)
+
+HOT_AUTHORITY_LATEST_ROOTS: tuple[Path, ...] = (
+    Path("outputs/track_b_execution_core/open_order_truth"),
+    Path("outputs/track_b_execution_core/managed_orders"),
+    Path("outputs/track_b_execution_core/managed_positions"),
+    Path("outputs/track_b_execution_core/managed_exit_orders"),
+    Path("outputs/track_b_execution_core/position_truth"),
+    Path("outputs/track_b_execution_core/runtime_truth"),
+    Path("outputs/track_b_execution_core/runtime_environment"),
+    Path("outputs/track_b_execution_core/shared_truth"),
+    Path("outputs/track_b_execution_core/control_plane"),
+    Path("outputs/track_b_execution_core/safe_state"),
+    Path("outputs/track_b_execution_core/broker_position_guardian"),
+    Path("outputs/track_b_execution_core/diagnostics"),
+    Path("outputs/track_b_execution_core/proof_readiness"),
+    Path("outputs/track_b_execution_core/phase1_runtime_market_data"),
+    Path("outputs/track_b_execution_core/phase1_runtime_features"),
+    Path("outputs/track_b_execution_core/paper_stack"),
+    Path("outputs/track_b_execution_core/agent_registry"),
+    Path("outputs/track_b_execution_core/agent_health"),
+    Path("outputs/track_b_execution_core/self_recover"),
+    Path("outputs/track_b_execution_core/crash_loop_protection"),
+    Path("outputs/track_b_execution_core/runtime_resume"),
+    Path("outputs/track_b_execution_core/runtime_supervisor"),
+    Path("outputs/track_b_execution_core/paper_recovery_policy"),
+    Path("outputs/track_b_execution_core/paper_autonomous_recovery"),
+    Path("outputs/track_b_execution_core/recovery_budget"),
+    Path("outputs/track_b_execution_core/artifact_retention"),
+    Path("outputs/reports/phase1_runtime_data_readiness"),
+    Path("outputs/reports/phase1_databento_live_runtime_candles"),
+    Path("outputs/reports/track_b_paper_broker_reconciliation"),
+    Path("outputs/operator_dashboard/runtime"),
 )
 
 WARM_DIAGNOSTIC_ROOTS: tuple[Path, ...] = (
@@ -71,6 +122,7 @@ class TrackBArtifactRetentionInventoryConfig:
     repo_root: Path = REPO_ROOT
     output_path: Path = DEFAULT_OUTPUT_PATH
     hot_authority_paths: tuple[Path, ...] = HOT_AUTHORITY_PATHS
+    hot_authority_latest_roots: tuple[Path, ...] = HOT_AUTHORITY_LATEST_ROOTS
     warm_diagnostic_roots: tuple[Path, ...] = WARM_DIAGNOSTIC_ROOTS
     lifecycle_root: Path = DEFAULT_LIFECYCLE_ROOT
     recent_diagnostics_days: int = 30
@@ -106,7 +158,19 @@ def build_track_b_artifact_retention_inventory(
     archive_candidates: list[dict[str, Any]] = []
 
     for path in sorted(scanned_paths):
-        if path in hot_paths:
+        hot_authority_reason = _hot_authority_protection_reason(path=path, config=config, hot_paths=hot_paths)
+        if hot_authority_reason is not None:
+            record = _artifact_record(
+                path=path,
+                repo_root=config.repo_root,
+                now=actual_now,
+                retention_tier=HOT_AUTHORITY_PROTECTED,
+                protected=True,
+                protection_reason=hot_authority_reason,
+            )
+            protected_by_path[path] = record
+            if path not in hot_paths:
+                hot_authority_artifacts.append(record)
             continue
         lifecycle_protection = _lifecycle_protection_reason(path=path, lifecycle_root=config.resolve(config.lifecycle_root))
         if lifecycle_protection is not None:
@@ -282,6 +346,25 @@ def _scan_candidate_paths(config: TrackBArtifactRetentionInventoryConfig) -> tup
                 )
                 return paths, warnings
     return paths, warnings
+
+
+def _hot_authority_protection_reason(
+    *,
+    path: Path,
+    config: TrackBArtifactRetentionInventoryConfig,
+    hot_paths: set[Path],
+) -> str | None:
+    if path in hot_paths:
+        return "explicit protected hot-authority artifact"
+    if not path.name.startswith("latest_"):
+        return None
+    for root in config.hot_authority_latest_roots:
+        try:
+            path.relative_to(config.resolve(root))
+        except ValueError:
+            continue
+        return "latest artifact under protected hot-authority root"
+    return None
 
 
 def _artifact_record(

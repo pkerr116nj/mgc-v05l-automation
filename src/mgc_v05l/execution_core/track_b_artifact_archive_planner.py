@@ -18,6 +18,8 @@ from typing import Any, Mapping, Sequence
 from mgc_v05l.execution_core.track_b_artifact_retention_inventory import (
     COLD_ARCHIVE_CANDIDATE,
     HOT_ACTIVE_LIFECYCLE_PROTECTED,
+    HOT_AUTHORITY_LATEST_ROOTS,
+    HOT_AUTHORITY_PATHS,
     HOT_AUTHORITY_PROTECTED,
     TrackBArtifactRetentionInventoryConfig,
     build_track_b_artifact_retention_inventory,
@@ -56,15 +58,7 @@ DEFAULT_COLD_CANDIDATE_DAYS = 30
 NO_MANAGED_POSITIONS = "NO_MANAGED_POSITIONS"
 
 ADDITIONAL_HOT_AUTHORITY_PATHS: tuple[Path, ...] = (
-    DEFAULT_ARTIFACT_RETENTION_INVENTORY_PATH,
-    DEFAULT_ARTIFACT_ARCHIVE_PLAN_PATH,
-    DEFAULT_CONTROL_PLANE_SNAPSHOT_ARTIFACT,
-    DEFAULT_AGENT_HEALTH_ARTIFACT,
-    DEFAULT_RECOVERY_ATTEMPT_HISTORY_ARTIFACT,
-    DEFAULT_MANAGED_POSITION_REGISTRY_ARTIFACT,
-    Path("outputs/track_b_execution_core/paper_recovery_policy/latest_paper_recovery_policy.json"),
-    Path("outputs/track_b_execution_core/paper_autonomous_recovery/latest_paper_autonomous_recovery_plan.json"),
-    Path("outputs/track_b_execution_core/recovery_budget/latest_recovery_budget_ledger.json"),
+    *HOT_AUTHORITY_PATHS,
 )
 
 
@@ -121,12 +115,16 @@ def build_track_b_artifact_archive_plan(
     for item in inventory_candidates:
         candidate = _candidate_record(item=item, source="retention_inventory", reason="older than retention window")
         relative_path = str(candidate.get("relative_path") or "")
-        if relative_path in protected_relative_paths or _is_latest_authority_path(relative_path):
+        protection_reason = _cleanup_candidate_protection_reason(
+            candidate=candidate,
+            protected_relative_paths=protected_relative_paths,
+        )
+        if protection_reason:
             blocked_candidates.append(
                 {
                     **candidate,
                     "blocked": True,
-                    "blocked_reason": "current/latest authority artifacts are protected from cold archive",
+                    "blocked_reason": protection_reason,
                 }
             )
             continue
@@ -140,7 +138,7 @@ def build_track_b_artifact_archive_plan(
         managed_positions=managed_positions,
     )
     active_authority_blocked = any(
-        str(item.get("blocked_reason") or "").startswith("current/latest authority") for item in blocked_candidates
+        "authority" in str(item.get("blocked_reason") or "") for item in blocked_candidates
     )
     classification = _classification(
         scan_warnings=scan_warnings,
@@ -149,6 +147,15 @@ def build_track_b_artifact_archive_plan(
         cold_candidate_count=len(cold_candidates),
     )
     estimated_bytes = sum(int(item.get("size_bytes") or 0) for item in cold_candidates)
+    protected_count = len(hot_protected) + len(active_lifecycle_protected)
+    blocked_candidate_paths = [str(item.get("relative_path") or "") for item in blocked_candidates]
+    path_classifications = _path_classification_records(
+        hot_protected=hot_protected,
+        active_lifecycle_protected=active_lifecycle_protected,
+        cold_candidates=cold_candidates,
+        blocked_candidates=blocked_candidates,
+        warm_diagnostics=warm_diagnostics,
+    )
     return {
         "schema_version": "track_b_artifact_archive_plan_v2",
         "generated_at": actual_now.isoformat(),
@@ -169,15 +176,27 @@ def build_track_b_artifact_archive_plan(
         "classification": classification,
         "hot_authority_protected_count": len(hot_protected),
         "active_lifecycle_protected_count": len(active_lifecycle_protected),
+        "protected_count": protected_count,
         "warm_diagnostic_count": len(warm_diagnostics),
         "cold_archive_candidate_count": len(cold_candidates),
+        "cleanup_candidate_count": len(cold_candidates),
         "blocked_candidate_count": len(blocked_candidates),
+        "blocked_candidate_paths": blocked_candidate_paths,
         "archive_candidates_sample": cold_candidates[: config.sample_limit],
         "blocked_candidates_sample": blocked_candidates[: config.sample_limit],
         "proposed_archive_batches": _archive_batches(cold_candidates),
         "estimated_bytes": estimated_bytes,
         "hot_authority_protected_sample": hot_protected[: config.sample_limit],
         "active_lifecycle_protected_sample": active_lifecycle_protected[: config.sample_limit],
+        "path_classification_report": path_classifications[: config.sample_limit * 4],
+        "dry_run_safety_report": {
+            "protected_count": protected_count,
+            "cleanup_candidate_count": len(cold_candidates),
+            "blocked_candidate_count": len(blocked_candidates),
+            "blocked_candidate_paths": blocked_candidate_paths,
+            "future_destructive_cleanup_allowed": len(blocked_candidates) == 0,
+            "path_classifications": path_classifications[: config.sample_limit * 4],
+        },
         "warnings": scan_warnings,
         "evidence_summary": {
             "inventory_classification": inventory.get("classification"),
@@ -392,13 +411,90 @@ def _archive_batches(candidates: Sequence[Mapping[str, Any]]) -> list[dict[str, 
 
 def _is_latest_authority_path(relative_path: str) -> bool:
     path = Path(relative_path)
-    if path.name.startswith("latest_") and (
-        relative_path.startswith("outputs/track_b_execution_core/")
-        or relative_path.startswith("outputs/reports/track_b_paper_broker_reconciliation/")
-        or relative_path.startswith("outputs/operator_dashboard/runtime/")
-    ):
+    if path.name.startswith("latest_") and _is_under_hot_authority_latest_root(path):
         return True
     return relative_path in {str(path) for path in ADDITIONAL_HOT_AUTHORITY_PATHS}
+
+
+def _is_under_hot_authority_latest_root(path: Path) -> bool:
+    for root in HOT_AUTHORITY_LATEST_ROOTS:
+        try:
+            path.relative_to(root)
+        except ValueError:
+            continue
+        return True
+    return False
+
+
+def _cleanup_candidate_protection_reason(
+    *,
+    candidate: Mapping[str, Any],
+    protected_relative_paths: set[str],
+) -> str | None:
+    relative_path = str(candidate.get("relative_path") or "")
+    if relative_path in protected_relative_paths or _is_latest_authority_path(relative_path):
+        return "current/latest hot-authority artifact is protected from cleanup/archive/quarantine"
+    retention_tier = str(candidate.get("retention_tier") or "")
+    if retention_tier in {HOT_AUTHORITY_PROTECTED, HOT_ACTIVE_LIFECYCLE_PROTECTED}:
+        return "candidate is marked with protected retention tier"
+    if candidate.get("protected") is True:
+        return "candidate is marked protected"
+    return None
+
+
+def _path_classification_records(
+    *,
+    hot_protected: Sequence[Mapping[str, Any]],
+    active_lifecycle_protected: Sequence[Mapping[str, Any]],
+    cold_candidates: Sequence[Mapping[str, Any]],
+    blocked_candidates: Sequence[Mapping[str, Any]],
+    warm_diagnostics: Sequence[Mapping[str, Any]],
+) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    rows.extend(
+        _path_classification_record(item, default_reason="hot authority protected", blocked=False)
+        for item in hot_protected
+    )
+    rows.extend(
+        _path_classification_record(item, default_reason="active lifecycle protected", blocked=False)
+        for item in active_lifecycle_protected
+    )
+    rows.extend(
+        _path_classification_record(item, default_reason="dry-run cleanup/archive candidate", blocked=False)
+        for item in cold_candidates
+    )
+    rows.extend(_path_classification_record(item, default_reason="blocked candidate", blocked=True) for item in blocked_candidates)
+    rows.extend(_path_classification_record(item, default_reason="warm diagnostic retain", blocked=False) for item in warm_diagnostics)
+    by_path: dict[str, dict[str, Any]] = {}
+    for row in rows:
+        relative_path = str(row.get("relative_path") or "")
+        existing = by_path.get(relative_path)
+        if existing is None or row.get("blocked") is True:
+            by_path[relative_path] = row
+    return sorted(by_path.values(), key=lambda item: str(item.get("relative_path") or ""))
+
+
+def _path_classification_record(
+    item: Mapping[str, Any],
+    *,
+    default_reason: str,
+    blocked: bool,
+) -> dict[str, Any]:
+    reason = (
+        item.get("blocked_reason")
+        or item.get("protection_reason")
+        or item.get("candidate_reason")
+        or default_reason
+    )
+    return {
+        "relative_path": item.get("relative_path") or "",
+        "retention_tier": item.get("retention_tier"),
+        "plan_role": item.get("plan_role"),
+        "protected": item.get("protected") is True,
+        "archive_candidate": item.get("archive_candidate") is True,
+        "blocked": bool(blocked or item.get("blocked") is True),
+        "classification_reason": reason,
+    }
 
 
 def _is_research_offline_payload(payload: Mapping[str, Any]) -> bool:
