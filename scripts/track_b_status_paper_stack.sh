@@ -63,6 +63,7 @@ from mgc_v05l.execution_core.track_b_registry_truth_diagnostics import (
     build_track_b_registry_truth_diagnostics,
     write_track_b_registry_truth_diagnostics,
 )
+from mgc_v05l.execution_core.track_b_startup_phase_classifier import classify_track_b_startup_phase
 
 RECOVERY_TICK_INTERVAL_SECONDS = 120.0
 RECOVERY_TICK_STALE_GRACE_SECONDS = 60.0
@@ -176,6 +177,7 @@ authority_refresh = read_json(authority_refresh_path)
 live_runtime_environment = read_json(live_runtime_environment_path)
 pid_metadata = read_json(runtime_dir / "probationary_paper.pid.json")
 runtime_truth = read_json(runtime_dir / "paper_runtime_truth.json")
+config_in_force = read_json(runtime_dir / "paper_config_in_force.json")
 launch_guard = read_json(runtime_dir / "probationary_paper.pid.json.launch_guard.json")
 launch_status = read_json(runtime_dir / "probationary_paper_launch_status.json")
 broker_reconciliation = read_json(
@@ -331,6 +333,18 @@ authority_refresh_fresh = (
     in {"AUTHORITY_REFRESHED", "AUTHORITY_REFRESH_SKIPPED_NOT_DUE"}
     and authority_refresh_age_seconds is not None
     and authority_refresh_age_seconds <= float(authority_refresh.get("bridge_max_age_seconds") or 120.0)
+)
+startup_phase = classify_track_b_startup_phase(
+    artifacts={
+        "runtime_truth": runtime_truth,
+        "pid_metadata": pid_metadata,
+        "config_in_force": config_in_force,
+        "operator_status": operator_status,
+        "phase1_listener_status": phase1_status,
+        "authority_refresh": authority_refresh,
+        "canonical_readiness": canonical_readiness,
+        "broker_reconciliation": broker_reconciliation,
+    }
 )
 all_lanes_out_of_window = bool(operator_lanes) and active_window_lane_count == 0
 if running and all_lanes_out_of_window and authority_refresh_fresh:
@@ -595,6 +609,16 @@ payload = {
         "broker_truth_classification": broker_truth_status.get("classification"),
         "broker_truth_fresh": broker_truth_status.get("fresh"),
     },
+    "startup_phase": startup_phase,
+    "startup_phase_diagnostic_only": True,
+    "startup_phase_classification": startup_phase.get("classification"),
+    "startup_phase_current_phase": startup_phase.get("phase"),
+    "startup_phase_next_expected_phase": startup_phase.get("next_expected_phase"),
+    "startup_phase_current_blocker": (startup_phase.get("current_blockers") or [None])[0],
+    "startup_phase_submit_authority": startup_phase.get("submit_authority"),
+    "startup_phase_broker_mutation_allowed": startup_phase.get("broker_mutation_allowed"),
+    "startup_phase_paper_proof_invoked": startup_phase.get("paper_proof_invoked"),
+    "startup_phase_live_money_eligible": startup_phase.get("live_money_eligible"),
     "registry_truth_diagnostics": registry_truth_diagnostics,
     "live_runtime_environment": {
         "classification": live_runtime_environment.get("classification"),
@@ -711,6 +735,8 @@ print(
     "Track B PAPER stack: "
     f"state={readiness['canonical_state']} "
     f"activity={readiness['activity_classification']} "
+    f"startup_phase={payload.get('startup_phase_current_phase')} "
+    f"startup_classification={payload.get('startup_phase_classification')} "
     f"ready_submit_capable={readiness['ready_submit_capable']} "
     f"pid={runtime['pid']} running={runtime['running']} owner={runtime['owner']} "
     f"lane_count={config['lane_count']} "

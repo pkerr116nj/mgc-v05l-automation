@@ -50,6 +50,38 @@ def test_paper_stack_start_requires_sustained_readiness() -> None:
     assert "submit remains disabled" in source
 
 
+def test_paper_stack_start_timeout_reports_startup_phase_without_exit_change() -> None:
+    source = START_SCRIPT.read_text(encoding="utf-8")
+
+    assert "startup_phase_timeout_detail" in source
+    assert "startup_phase_current_phase" in source
+    assert "startup_phase_current_blocker" in source
+    assert "startup_blocker_phase" in source
+    assert "startup_blocker=" in source
+    timeout_block = source[source.index('write_startup_artifact "BLOCKED_START_TIMEOUT"') :]
+    assert "timeout_startup_phase_detail" in timeout_block
+    assert timeout_block.index('write_startup_artifact "BLOCKED_START_TIMEOUT"') < timeout_block.index("exit 1")
+    assert "exit 0" not in timeout_block[: timeout_block.index("exit 1")]
+
+
+def test_paper_stack_status_surfaces_startup_phase_diagnostic_only() -> None:
+    source = STATUS_SCRIPT.read_text(encoding="utf-8")
+
+    assert "classify_track_b_startup_phase" in source
+    assert '"startup_phase": startup_phase' in source
+    assert '"startup_phase_diagnostic_only": True' in source
+    assert '"startup_phase_classification": startup_phase.get("classification")' in source
+    assert '"startup_phase_current_phase": startup_phase.get("phase")' in source
+    assert '"startup_phase_current_blocker": (startup_phase.get("current_blockers") or [None])[0]' in source
+    assert '"startup_phase_submit_authority": startup_phase.get("submit_authority")' in source
+    assert '"startup_phase_broker_mutation_allowed": startup_phase.get("broker_mutation_allowed")' in source
+    assert '"startup_phase_paper_proof_invoked": startup_phase.get("paper_proof_invoked")' in source
+    assert '"startup_phase_live_money_eligible": startup_phase.get("live_money_eligible")' in source
+    assert "startup_phase=" in source
+    assert "ready_submit_capable = startup_phase" not in source
+    assert "normal_submit_allowed = startup_phase" not in source
+
+
 def test_paper_stack_runtime_pid_metadata_temp_path_is_per_process() -> None:
     source = START_SCRIPT.read_text(encoding="utf-8")
 

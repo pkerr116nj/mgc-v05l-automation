@@ -404,6 +404,31 @@ print(json.dumps(payload, indent=2, sort_keys=True))
 PY
 }
 
+startup_phase_timeout_detail() {
+  "${PYTHON_BIN}" - <<'PY'
+import json
+import sys
+
+try:
+    payload = json.loads(sys.stdin.read() or "{}")
+except json.JSONDecodeError:
+    payload = {}
+startup = payload.get("startup_phase") if isinstance(payload.get("startup_phase"), dict) else {}
+phase = payload.get("startup_phase_current_phase") or startup.get("phase") or "UNKNOWN"
+classification = payload.get("startup_phase_classification") or startup.get("classification") or "UNKNOWN"
+blocker = payload.get("startup_phase_current_blocker") or (startup.get("current_blockers") or [{}])[0]
+if not isinstance(blocker, dict):
+    blocker = {}
+blocker_phase = blocker.get("phase") or startup.get("next_expected_phase") or payload.get("startup_phase_next_expected_phase") or "UNKNOWN"
+blocker_detail = blocker.get("detail") or blocker.get("code") or "startup_phase_blocker_unavailable"
+print(
+    "startup_phase="
+    f"{phase}; startup_classification={classification}; "
+    f"startup_blocker_phase={blocker_phase}; startup_blocker={blocker_detail}"
+)
+PY
+}
+
 screen_available() {
   local smoke_name="track_b_screen_smoke_$(date -u +%Y%m%dT%H%M%SZ)_$$"
   screen -wipe >/dev/null 2>&1 || true
@@ -686,5 +711,6 @@ while [[ "${SECONDS}" -lt "${deadline}" ]]; do
   fi
 done
 
-write_startup_artifact "BLOCKED_START_TIMEOUT" "Runtime did not remain READY_SUBMIT_CAPABLE or scheduled-halt diagnostic-start-ready for ${STABLE_SECONDS}s before timeout; inspect status artifact and runtime log." ""
+timeout_startup_phase_detail="$(startup_phase_timeout_detail <<<"${last_status}")"
+write_startup_artifact "BLOCKED_START_TIMEOUT" "Runtime did not remain READY_SUBMIT_CAPABLE or scheduled-halt diagnostic-start-ready for ${STABLE_SECONDS}s before timeout; ${timeout_startup_phase_detail}; inspect status artifact and runtime log." ""
 exit 1
