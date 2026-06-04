@@ -5,12 +5,14 @@ from pathlib import Path
 
 from mgc_v05l.execution_core.track_b_fault_injection_harness import (
     FAULT_INJECTION_SCENARIOS,
+    SAFETY_INVARIANTS_CHECKED,
     SCENARIO_BROKER_FILL_NO_LIFECYCLE_CLOSE,
     SCENARIO_DEAD_PID_STALE_HEARTBEAT,
     SCENARIO_DUPLICATE_LIFECYCLE_ROWS,
     SCENARIO_HISTORICAL_REGISTRY_DEBRIS,
     SCENARIO_NEAR_EXPIRY_CONTRACT,
     SCENARIO_PHASE1_FRESH_RUNTIME_STALE,
+    SCENARIO_METADATA,
     SCENARIO_STALE_OWNER_FRESH_BROKER,
     SCENARIO_STALE_RUNTIME_EXIT_DUE,
     list_track_b_fault_injection_scenarios,
@@ -30,6 +32,32 @@ from mgc_v05l.execution_core.track_b_risk_reducing_close_authority import (
 
 
 NOW = datetime(2026, 6, 4, 14, 0, tzinfo=UTC)
+EXPECTED_SCENARIO_IDS = (
+    "stale_runtime_with_exit_due_position",
+    "stale_owner_candidates_with_fresh_broker_owner",
+    "historical_registry_debris_clean_current_scope",
+    "duplicate_lifecycle_rows_same_contract",
+    "dead_pid_with_stale_heartbeat",
+    "near_expiry_contract_submit_attempt",
+    "phase1_fresh_runtime_ingestion_stale",
+    "broker_fill_without_lifecycle_close",
+)
+REQUIRED_METADATA_FIELDS = {
+    "bug_class",
+    "retired_invariant",
+    "authority_helpers_exercised",
+    "expected_primary_classification",
+    "safety_invariants_checked",
+    "retirement_status",
+    "notes",
+    "evidence",
+}
+
+
+def test_scenario_ids_remain_stable() -> None:
+    assert FAULT_INJECTION_SCENARIOS == EXPECTED_SCENARIO_IDS
+    assert list_track_b_fault_injection_scenarios() == EXPECTED_SCENARIO_IDS
+    assert tuple(SCENARIO_METADATA) == EXPECTED_SCENARIO_IDS
 
 
 def test_fault_injection_harness_runs_all_named_scenarios(tmp_path: Path) -> None:
@@ -60,6 +88,23 @@ def test_fault_injection_harness_runs_all_named_scenarios(tmp_path: Path) -> Non
             "no_broad_flatten",
             "no_unguarded_broker_mutation",
         }
+
+
+def test_every_scenario_includes_complete_metadata(tmp_path: Path) -> None:
+    report = run_track_b_fault_injection_harness(artifact_root=tmp_path, now=NOW)
+
+    for scenario in report["scenarios"]:
+        metadata = scenario["metadata"]
+        assert set(metadata) == REQUIRED_METADATA_FIELDS
+        assert metadata["bug_class"]
+        assert metadata["retired_invariant"]
+        assert metadata["authority_helpers_exercised"]
+        assert all(isinstance(item, str) and item for item in metadata["authority_helpers_exercised"])
+        assert metadata["expected_primary_classification"] == _primary_classification(scenario)
+        assert metadata["safety_invariants_checked"] == list(SAFETY_INVARIANTS_CHECKED)
+        assert metadata["retirement_status"] == "FAULT_INJECTION_V1_COVERED"
+        assert metadata["notes"].startswith("Evidence placeholder:")
+        assert metadata["evidence"] == {"placeholder": True}
 
 
 def test_stale_runtime_exit_due_blocks_submit_but_allows_exact_risk_reducing_close(tmp_path: Path) -> None:
@@ -157,3 +202,14 @@ def test_broker_fill_without_lifecycle_close_keeps_owner_and_reconciliation_path
 
 def _run(tmp_path: Path, name: str) -> dict:
     return run_track_b_fault_injection_scenario(name=name, artifact_root=tmp_path / name, now=NOW)
+
+
+def _primary_classification(scenario: dict) -> str:
+    scenario_id = scenario["scenario"]
+    if scenario_id == SCENARIO_STALE_RUNTIME_EXIT_DUE:
+        return scenario["risk_reducing_close_authority"]["classification"]
+    if scenario_id in {SCENARIO_STALE_OWNER_FRESH_BROKER, SCENARIO_BROKER_FILL_NO_LIFECYCLE_CLOSE}:
+        return scenario["ownership"]["classification"]
+    if scenario_id == SCENARIO_DUPLICATE_LIFECYCLE_ROWS:
+        return scenario["registry"]["diagnostic_only_rows"][0]["classification"]
+    return scenario["submit_authority"]["classification"]

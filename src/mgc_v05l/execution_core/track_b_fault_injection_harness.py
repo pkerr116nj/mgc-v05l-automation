@@ -59,6 +59,105 @@ FAULT_INJECTION_SCENARIOS: tuple[str, ...] = (
 
 DEFAULT_FAULT_INJECTION_NOW = datetime(2026, 6, 4, 14, 0, tzinfo=UTC)
 
+SAFETY_INVARIANTS_CHECKED: tuple[str, ...] = (
+    "no_live_money_eligibility",
+    "no_paper_proof",
+    "no_broad_flatten",
+    "no_unguarded_broker_mutation",
+)
+
+SCENARIO_METADATA: dict[str, dict[str, Any]] = {
+    SCENARIO_STALE_RUNTIME_EXIT_DUE: {
+        "bug_class": "Stranded Exit-Due Positions",
+        "retired_invariant": "Fresh broker-backed exit-due exposure retains an exact scoped risk-reducing close path.",
+        "authority_helpers_exercised": [
+            "resolve_current_exposure_ownership",
+            "classify_runtime_stale_risk_reducing_close",
+        ],
+        "expected_primary_classification": "RISK_REDUCING_CLOSE_ALLOWED_RUNTIME_STALE_WITH_BROKER_EXPOSURE",
+        "safety_invariants_checked": list(SAFETY_INVARIANTS_CHECKED),
+        "retirement_status": "FAULT_INJECTION_V1_COVERED",
+        "notes": "Evidence placeholder: attach observed stale-runtime exit-due regression artifact links here.",
+        "evidence": {"placeholder": True},
+    },
+    SCENARIO_STALE_OWNER_FRESH_BROKER: {
+        "bug_class": "Ownership Ambiguity",
+        "retired_invariant": "Newest broker-backed owner wins and stale candidates become diagnostic-only.",
+        "authority_helpers_exercised": ["resolve_current_exposure_ownership"],
+        "expected_primary_classification": "OWNED_MANAGED_EXIT_DUE",
+        "safety_invariants_checked": list(SAFETY_INVARIANTS_CHECKED),
+        "retirement_status": "FAULT_INJECTION_V1_COVERED",
+        "notes": "Evidence placeholder: attach stale-owner/fresh-owner arbitration artifacts here.",
+        "evidence": {"placeholder": True},
+    },
+    SCENARIO_HISTORICAL_REGISTRY_DEBRIS: {
+        "bug_class": "Historical Registry Debris Blocking Current Truth",
+        "retired_invariant": "Current hot-path truth is evaluated separately from historical audit debris.",
+        "authority_helpers_exercised": ["build_track_b_live_runtime_environment_watchdog"],
+        "expected_primary_classification": "READY_SUBMIT_CAPABLE",
+        "safety_invariants_checked": list(SAFETY_INVARIANTS_CHECKED),
+        "retirement_status": "FAULT_INJECTION_V1_COVERED",
+        "notes": "Evidence placeholder: attach historical registry debris/current-scope-clean artifacts here.",
+        "evidence": {"placeholder": True},
+    },
+    SCENARIO_DUPLICATE_LIFECYCLE_ROWS: {
+        "bug_class": "Ownership Ambiguity",
+        "retired_invariant": "Duplicate same-contract lifecycle rows do not double-count current broker exposure.",
+        "authority_helpers_exercised": [
+            "resolve_current_exposure_ownership",
+            "apply_current_exposure_owner_lifecycle_overlay",
+        ],
+        "expected_primary_classification": "STALE_DUPLICATE_LIFECYCLE_AGGREGATION_FULL_AUDIT_ONLY",
+        "safety_invariants_checked": list(SAFETY_INVARIANTS_CHECKED),
+        "retirement_status": "FAULT_INJECTION_V1_COVERED",
+        "notes": "Evidence placeholder: attach duplicate lifecycle aggregation artifacts here.",
+        "evidence": {"placeholder": True},
+    },
+    SCENARIO_DEAD_PID_STALE_HEARTBEAT: {
+        "bug_class": "Runtime Ingestion Freshness Confusion",
+        "retired_invariant": "Dead PID plus stale heartbeat cannot classify as runtime-ready.",
+        "authority_helpers_exercised": ["build_track_b_live_runtime_environment_watchdog"],
+        "expected_primary_classification": "RECOVERY_REQUIRED",
+        "safety_invariants_checked": list(SAFETY_INVARIANTS_CHECKED),
+        "retirement_status": "FAULT_INJECTION_V1_COVERED",
+        "notes": "Evidence placeholder: attach dead-PID/stale-heartbeat watchdog artifacts here.",
+        "evidence": {"placeholder": True},
+    },
+    SCENARIO_NEAR_EXPIRY_CONTRACT: {
+        "bug_class": "Contract Ambiguity",
+        "retired_invariant": "Canonical futures contract resolution is required before submit.",
+        "authority_helpers_exercised": ["evaluate_futures_contract_pre_submit"],
+        "expected_primary_classification": "CONTRACT_NEAR_EXPIRY",
+        "safety_invariants_checked": list(SAFETY_INVARIANTS_CHECKED),
+        "retirement_status": "FAULT_INJECTION_V1_COVERED",
+        "notes": "Evidence placeholder: attach near-expiry contract resolver artifacts here.",
+        "evidence": {"placeholder": True},
+    },
+    SCENARIO_PHASE1_FRESH_RUNTIME_STALE: {
+        "bug_class": "Runtime Ingestion Freshness Confusion",
+        "retired_invariant": "Readiness distinguishes feed healthy, runtime alive, and runtime ingestion stale.",
+        "authority_helpers_exercised": ["build_track_b_live_runtime_environment_watchdog"],
+        "expected_primary_classification": "DEGRADED_LANES_NOT_EVALUATING",
+        "safety_invariants_checked": list(SAFETY_INVARIANTS_CHECKED),
+        "retirement_status": "FAULT_INJECTION_V1_COVERED",
+        "notes": "Evidence placeholder: attach feed-fresh/runtime-ingestion-stale artifacts here.",
+        "evidence": {"placeholder": True},
+    },
+    SCENARIO_BROKER_FILL_NO_LIFECYCLE_CLOSE: {
+        "bug_class": "Managed Exit Owner Identity Loss",
+        "retired_invariant": "Broker-backed ownership remains visible when a fill exists without lifecycle close.",
+        "authority_helpers_exercised": [
+            "resolve_current_exposure_ownership",
+            "classify_runtime_stale_risk_reducing_close",
+        ],
+        "expected_primary_classification": "OWNED_MANAGED_EXPOSURE",
+        "safety_invariants_checked": list(SAFETY_INVARIANTS_CHECKED),
+        "retirement_status": "FAULT_INJECTION_V1_COVERED",
+        "notes": "Evidence placeholder: attach broker-fill-without-lifecycle-close artifacts here.",
+        "evidence": {"placeholder": True},
+    },
+}
+
 
 def list_track_b_fault_injection_scenarios() -> tuple[str, ...]:
     return FAULT_INJECTION_SCENARIOS
@@ -413,6 +512,7 @@ def _scenario_broker_fill_without_lifecycle_close(artifact_root: Path, now: date
 
 
 def _finalize_scenario(*, name: str, generated_at: datetime, payload: Mapping[str, Any]) -> dict[str, Any]:
+    metadata = dict(SCENARIO_METADATA.get(name) or {})
     submit = dict(payload.get("submit") or {})
     broker_exposure = dict(payload.get("broker_exposure") or {})
     ownership = dict(payload.get("ownership") or {})
@@ -436,8 +536,9 @@ def _finalize_scenario(*, name: str, generated_at: datetime, payload: Mapping[st
     return {
         "scenario": name,
         "generated_at": generated_at.isoformat(),
-        "retired_bug_class": payload.get("retired_bug_class"),
-        "invariant": payload.get("invariant"),
+        "metadata": metadata,
+        "retired_bug_class": payload.get("retired_bug_class") or metadata.get("bug_class"),
+        "invariant": payload.get("invariant") or metadata.get("retired_invariant"),
         "read_only": True,
         "submit_authority": submit,
         "broker_exposure": broker_exposure,
