@@ -192,6 +192,11 @@ def build_track_b_registry_truth_diagnostics(
         broker_positions=tuple(truth.broker_truth.positions),
         broker_open_orders=tuple(truth.broker_truth.open_orders),
     )
+    current_rows, owner_suppressed_rows = _filter_reconciliation_authorized_owner_rows(
+        truth=truth,
+        rows=current_rows,
+    )
+    terminal_superseded_rows = (*terminal_superseded_rows, *owner_suppressed_rows)
     reason_codes = _reason_codes(
         mode=config.mode,
         truth=truth,
@@ -443,6 +448,88 @@ def _current_trade_ids_from_reconciliation_source(truth: TrackBTruthSnapshot) ->
     if broker_count or lifecycle_count or order_count:
         current_ids.update(str(trade_id) for trade_id in registry.get("mapped_trade_ids") or [] if str(trade_id or "").strip())
     return current_ids
+
+
+def _filter_reconciliation_authorized_owner_rows(
+    *,
+    truth: TrackBTruthSnapshot,
+    rows: tuple[Any, ...],
+) -> tuple[tuple[Any, ...], tuple[Mapping[str, Any], ...]]:
+    owner_trade_ids = _reconciliation_authorized_owner_trade_ids(truth)
+    if not owner_trade_ids:
+        return rows, ()
+    kept: list[Any] = []
+    suppressed: list[Mapping[str, Any]] = []
+    for row in rows:
+        trade_id = str(getattr(row, "trade_id", "") or "").strip()
+        if (
+            trade_id in owner_trade_ids
+            and getattr(row, "current_derived_state", "") == TradeCurrentState.REVIEW_REQUIRED.value
+            and getattr(row, "registry_agrees_with_reconciliation", True) is False
+        ):
+            suppressed.append(
+                {
+                    "classification": "CANONICAL_OWNER_RECONCILIATION_SUPPRESSED_REVIEW_ROW",
+                    "full_audit_only": True,
+                    "reason_codes": [
+                        "RECONCILIATION_MATCHED_CURRENT_OWNER",
+                        "NEWEST_EXACT_BROKER_BACKED_LIFECYCLE_REPORT_SELECTED",
+                    ],
+                    "trade_id": trade_id,
+                    "lifecycle_id": getattr(row, "lifecycle_id", None),
+                    "current_derived_state": getattr(row, "current_derived_state", None),
+                    "registry_agrees_with_reconciliation": getattr(row, "registry_agrees_with_reconciliation", None),
+                }
+            )
+            continue
+        kept.append(row)
+    return tuple(kept), tuple(suppressed)
+
+
+def _reconciliation_authorized_owner_trade_ids(truth: TrackBTruthSnapshot) -> set[str]:
+    payload = _reconciliation_payload(truth)
+    if not payload:
+        return set()
+    registry = payload.get("registry_reconciliation")
+    if not isinstance(registry, Mapping):
+        return set()
+    if str(registry.get("classification") or "") != "REGISTRY_RECONCILIATION_MATCHED":
+        return set()
+    if registry.get("blocking") is True:
+        return set()
+    current_review_count = _int_from_preferred_mapping(
+        primary=payload,
+        primary_key="current_scope_review_required_count",
+        fallback=payload,
+        fallback_key="review_required_count",
+    )
+    if current_review_count != 0:
+        return set()
+    mapped_trade_ids = {str(item).strip() for item in registry.get("mapped_trade_ids") or [] if str(item or "").strip()}
+    owner_resolution = payload.get("current_exposure_owner_resolution")
+    if not isinstance(owner_resolution, Mapping):
+        return set()
+    owner_trade_ids: set[str] = set()
+    for exposure in owner_resolution.get("owned_exposures") or []:
+        if not isinstance(exposure, Mapping):
+            continue
+        reason_codes = {str(code or "") for code in exposure.get("reason_codes") or []}
+        if "NEWEST_EXACT_BROKER_BACKED_LIFECYCLE_REPORT_SELECTED" not in reason_codes:
+            continue
+        trade_id = str(exposure.get("trade_id") or "").strip()
+        if trade_id and (not mapped_trade_ids or trade_id in mapped_trade_ids):
+            owner_trade_ids.add(trade_id)
+    return owner_trade_ids
+
+
+def _reconciliation_payload(truth: TrackBTruthSnapshot) -> Mapping[str, Any]:
+    path_text = str(truth.reconciliation.source.artifact_path or "")
+    if not path_text:
+        return {}
+    path = Path(path_text)
+    if not path.is_absolute():
+        path = Path.cwd() / path
+    return _read_json(path)
 
 
 def _int_from_preferred_mapping(

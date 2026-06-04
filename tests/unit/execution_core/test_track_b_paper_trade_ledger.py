@@ -307,6 +307,80 @@ def test_duplicate_exit_overfill_scoped_remediation_clears_review_without_broker
     assert result.reconciliation_report["broker_mutation_attempted"] is False
 
 
+def test_duplicate_exit_overfill_scoped_remediation_clears_open_mes_after_exact_flat_proof(tmp_path: Path) -> None:
+    lifecycle_id = "reserved_submit_mes_us_active_participation_long_20260602T185515869214Z_feff416a9245"
+    ledger = tmp_path / "ledger" / "track_b_paper_trade_ledger.jsonl"
+    ledger.parent.mkdir(parents=True)
+    open_row = {
+        "ledger_schema_version": "track_b_paper_trade_ledger_v1",
+        "trade_id": "trade_bb50eab2-ca16-460d-98ff-21a9ada8083d",
+        "lifecycle_id": lifecycle_id,
+        "strategy_id": "mes_us_active_participation_long",
+        "paper_lifecycle_type": "STRATEGY_MANAGED",
+        "broker_backed_position_confirmed": True,
+        "entry_fill_confirmed": True,
+        "entry_order_id": "2",
+        "entry_fill_price": "7617.75",
+        "entry_timestamp": "2026-06-02T18:55:15.869214+00:00",
+        "paper_lifecycle_classification": "TRACK_B_STRATEGY_PAPER_OPEN_MANAGED",
+        "final_position_status": "OPEN_MANAGED",
+        "final_broker_state_classification": "TRACK_B_STRATEGY_PAPER_OPEN_MANAGED",
+        "review_required": False,
+        "instrument_family": "MES",
+        "contract_key": "MES-202606",
+        "local_symbol": "MESM6",
+        "con_id": 770561194,
+        "account_id": "DUM882026",
+        "side": "LONG",
+        "quantity": "1",
+    }
+    ledger.write_text(json.dumps(open_row, sort_keys=True) + "\n", encoding="utf-8")
+    remediation = {
+        "classification": "SCOPED_GUARDIAN_REMEDIATION_FILLED",
+        "guardian_hard_classifications": ["UNAUTHORIZED_REVERSE_EXPOSURE", "BROKER_LIFECYCLE_POSITION_MISMATCH"],
+        "target_identity": {"account_id": "DUM882026", "local_symbol": "MESM6", "con_id": 770561194},
+        "apply_result": {
+            "broker_order_id": "7",
+            "fill": {
+                "account_id": "DUM882026",
+                "action": "BUY",
+                "contract_key": "MES-202606",
+                "quantity": "1.0",
+                "price": "7625.0",
+                "perm_id": "665807058",
+                "execution_id": "0000e1a7.6a2eb979.01.01",
+                "filled_at": "2026-06-03T00:41:49.494075+00:00",
+            },
+        },
+    }
+    remediation_path = write_json(tmp_path / "remediation.json", remediation)
+    positions_path = write_json(
+        tmp_path / "positions.json",
+        {"positions": [{"account_id": "DUM882026", "symbol": "MES", "local_symbol": "MESM6", "con_id": 770561194, "quantity": "0.0"}]},
+    )
+    orders_path = write_json(tmp_path / "orders.json", {"open_orders": []})
+
+    result = reconcile_duplicate_exit_overfill_scoped_remediation(
+        lifecycle_id=lifecycle_id,
+        guardian_remediation_json=remediation_path,
+        broker_positions_snapshot_json=positions_path,
+        broker_open_orders_snapshot_json=orders_path,
+        ledger_jsonl=ledger,
+        output_root=tmp_path / "ledger",
+        diagnostics_root=tmp_path / "diagnostics",
+        now=aware_now(),
+    )
+
+    assert result.reconciliation_record_written is True
+    assert result.reconciliation_report["reconciliation_action"] == DUPLICATE_EXIT_OVERFILL_SCOPED_REMEDIATION_REVIEWED
+    assert result.trade_summary["review_required_count"] == 0
+    assert result.trade_summary["open_position_count"] == 0
+    assert result.reconciliation_report["scoped_remediation_evidence"]["remediation_execution_id"] == (
+        "0000e1a7.6a2eb979.01.01"
+    )
+    assert result.reconciliation_report["scoped_remediation_evidence"]["broker_flat"] is True
+
+
 def test_direct_bridge_fill_inherits_exit_policy_from_manifest(tmp_path: Path) -> None:
     manifest_root = tmp_path / "manifests"
     intent_id = "MNQ|1m|2026-05-21T15:07:00Z|BUY_TO_OPEN"
@@ -982,6 +1056,94 @@ def test_strategy_managed_lifecycle_update_appends_close_for_same_trade_id(tmp_p
     assert second.trade_summary["completed_trade_count"] == 1
     assert second.pnl_summary["total_realized_pnl_today"] == "-93"
     assert second.live_position_status["open_position_count"] == 0
+
+
+def test_strategy_managed_lifecycle_repair_preserves_original_trade_id_after_stale_review(
+    tmp_path: Path,
+) -> None:
+    output_root = tmp_path / "outputs" / "track_b_execution_core" / "paper_trade_ledger"
+    lifecycle_path = tmp_path / "managed" / "track_b_strategy_managed_paper_lifecycle_report.json"
+    lifecycle_id = "reserved_submit_mes_globex_active_participation_short_20260601T220620676808Z_e3785d1f3061"
+    trade_id = "trade_3018ab96-7608-4e40-877a-ed0d7b995184"
+    open_payload = {
+        "trade_id": trade_id,
+        "lifecycle_id": lifecycle_id,
+        "strategy_id": "mes_globex_active_participation_short",
+        "instrument_family": "MES",
+        "contract_key": "MES-202606",
+        "local_symbol": "MESM6",
+        "con_id": 770561194,
+        "account_id": "DUM882026",
+        "managed_exit_policy_id": "GLOBEX_ACTIVE_EVIDENCE_TIMEBOX_60M_EXIT_V1",
+        "strategy_managed_lifecycle_classification": "TRACK_B_STRATEGY_PAPER_OPEN_MANAGED",
+        "entry_intent": {
+            "strategy_id": "mes_globex_active_participation_short",
+            "contract_key": "MES-202606",
+            "local_symbol": "MESM6",
+            "side": "SHORT",
+            "order_action": "SELL",
+            "quantity": 1,
+            "entry_limit_price": "7598.75",
+            "latest_decision_bar_source": "DATABENTO_LIVE_ARTIFACT",
+        },
+        "entry_submit_attempt": {"broker_order_id": "1", "submitted_at": "2026-06-01T22:06:20+00:00"},
+        "entry_fill": {
+            "broker_order_id": "1",
+            "filled_at": "2026-06-01T22:06:22+00:00",
+            "price": "7598.75",
+            "quantity": 1,
+        },
+        "final_position_status": "OPEN_MANAGED",
+        "final_broker_state_classification": "TRACK_B_STRATEGY_PAPER_OPEN_MANAGED",
+        "review_required": False,
+    }
+    write_json(lifecycle_path, open_payload)
+    runner = {
+        "strategy_id": "mes_globex_active_participation_short",
+        "mode": "PAPER",
+        "account_id": "DUM882026",
+        "contract_key": "MES-202606",
+        "local_symbol": "MESM6",
+        "con_id": 770561194,
+        "quantity": 1,
+        "managed_lifecycle_invoked": True,
+        "managed_lifecycle_classification": "TRACK_B_STRATEGY_PAPER_OPEN_MANAGED",
+        "managed_lifecycle_report_path": str(lifecycle_path),
+        "paper_proof_invoked": False,
+    }
+    first = update_track_b_paper_trade_ledger_from_runner_report(
+        runner_report=runner,
+        runner_report_json=tmp_path / "runner.json",
+        output_root=output_root,
+        now=datetime(2026, 6, 1, 22, 6, tzinfo=timezone.utc),
+    )
+    stale_review = {
+        **first.trade_record,
+        "trade_id": f"mes_globex_active_participation_short:{lifecycle_id}",
+        "paper_lifecycle_classification": "TRACK_B_STRATEGY_PAPER_REVIEW_REQUIRED",
+        "final_position_status": "REVIEW_REQUIRED",
+        "final_broker_state_classification": "TRACK_B_STRATEGY_PAPER_REVIEW_REQUIRED",
+        "exit_timestamp": "2026-06-01T23:50:19+00:00",
+        "review_required": True,
+    }
+    with first.ledger_jsonl.open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps(stale_review, sort_keys=True) + "\n")
+
+    repaired = update_track_b_paper_trade_ledger_from_runner_report(
+        runner_report=runner,
+        runner_report_json=tmp_path / "runner.json",
+        output_root=output_root,
+        now=datetime(2026, 6, 2, 0, 51, tzinfo=timezone.utc),
+    )
+
+    assert repaired.trade_record_written is True
+    assert repaired.trade_record is not None
+    assert repaired.trade_record["trade_id"] == trade_id
+    assert repaired.trade_record["lifecycle_id"] == lifecycle_id
+    assert repaired.live_position_status["open_position_count"] == 1
+    position = repaired.live_position_status["positions_by_instrument"]["MES-202606"]
+    assert position["trade_id"] == trade_id
+    assert position["local_symbol"] == "MESM6"
 
 
 def test_no_paper_lifecycle_writes_zero_summaries_only(tmp_path: Path) -> None:

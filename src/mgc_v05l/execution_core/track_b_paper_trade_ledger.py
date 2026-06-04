@@ -903,21 +903,29 @@ def _should_append_trade_record(
     existing_records: Iterable[Mapping[str, Any]],
     trade_record: Mapping[str, Any],
 ) -> bool:
+    existing = [dict(item) for item in existing_records]
     trade_id = str(trade_record.get("trade_id") or "")
+    lifecycle_id = str(trade_record.get("lifecycle_id") or "")
     if not trade_id:
         return True
     matching = [
         dict(item)
-        for item in existing_records
+        for item in existing
         if not _is_reconciliation_record(item) and str(item.get("trade_id") or "") == trade_id
     ]
-    if not matching:
+    lifecycle_matching = [
+        dict(item)
+        for item in existing
+        if lifecycle_id
+        and not _is_reconciliation_record(item)
+        and str(item.get("lifecycle_id") or "") == lifecycle_id
+    ]
+    identity_matches = lifecycle_matching or matching
+    if not identity_matches:
         return True
-    latest = max(
-        matching,
-        key=lambda item: str(item.get("exit_timestamp") or item.get("entry_timestamp") or item.get("created_at") or ""),
-    )
+    latest = identity_matches[-1]
     comparable_fields = (
+        "trade_id",
         "paper_lifecycle_classification",
         "final_position_status",
         "final_broker_state_classification",
@@ -1241,9 +1249,12 @@ def _managed_trade_record_from_runner_report(
         entry_fill=entry_fill,
         broker_backed_position_confirmed=broker_backed_position_confirmed,
     )
+    trade_id = str(lifecycle_report.get("trade_id") or runner_report.get("trade_id") or "").strip()
+    if not trade_id:
+        trade_id = f"{strategy_id}:{lifecycle_id}"
     return {
         "ledger_schema_version": LEDGER_SCHEMA_VERSION,
-        "trade_id": f"{strategy_id}:{lifecycle_id}",
+        "trade_id": trade_id,
         "lifecycle_id": lifecycle_id,
         "signal_id": str(entry_intent.get("signal_id") or entry_intent.get("lifecycle_id") or lifecycle_id),
         "strategy_id": strategy_id,
@@ -2134,7 +2145,7 @@ def _duplicate_exit_overfill_scoped_remediation_evidence(
     fill_matches = (
         str(fill.get("action") or "").upper() == "BUY"
         and _decimal(fill.get("quantity")) == Decimal("1.0")
-        and str(fill.get("contract_key") or "") == "MNQ-202606"
+        and str(fill.get("contract_key") or "") == str(target.get("contract_key") or "")
         and str(fill.get("account_id") or "") == account_id
     )
     identity_matches = (
@@ -2145,12 +2156,16 @@ def _duplicate_exit_overfill_scoped_remediation_evidence(
     broker_flat = not nonzero_positions
     no_open_orders = not open_orders
     target_is_review = target.get("review_required") is True
+    target_is_resolvable_state = target_is_review or str(target.get("final_position_status") or "").upper() in {
+        "OPEN_MANAGED",
+        "OPEN_MANAGED_EXIT_DUE",
+    }
     duplicate_exit_context = (
         "UNAUTHORIZED_REVERSE_EXPOSURE" in hard_classifications
         and "BROKER_LIFECYCLE_POSITION_MISMATCH" in hard_classifications
     )
     confirmed = (
-        target_is_review
+        target_is_resolvable_state
         and remediation_filled
         and fill_matches
         and identity_matches
@@ -2159,8 +2174,8 @@ def _duplicate_exit_overfill_scoped_remediation_evidence(
         and duplicate_exit_context
     )
     blocker = None
-    if not target_is_review:
-        blocker = "TARGET_NOT_REVIEW_REQUIRED"
+    if not target_is_resolvable_state:
+        blocker = "TARGET_NOT_REVIEW_OR_OPEN_MANAGED"
     elif not remediation_filled:
         blocker = "SCOPED_REMEDIATION_NOT_FILLED"
     elif not fill_matches:

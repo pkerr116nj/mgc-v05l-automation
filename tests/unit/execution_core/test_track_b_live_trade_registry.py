@@ -9,6 +9,7 @@ from mgc_v05l.execution_core.track_b_live_trade_registry import (
     broker_backed_fill_has_required_ids,
     load_live_trade_registry_records,
     make_live_trade_registry_event,
+    resolve_live_trade_id_for_lifecycle_id,
     validate_registry_managed_exit_identity,
 )
 from mgc_v05l.execution_core.track_b_trade_registry_reconstruction import (
@@ -274,6 +275,63 @@ def test_registry_managed_exit_validator_uses_matched_registry_reconciliation_wh
     assert result["allowed"] is True
     assert result["lifecycle_row"]["source"] == "CENTRAL_TRADE_REGISTRY_RECONCILIATION"
     assert result["broker_position"]["con_id"] == 770561201
+
+
+def test_resolve_live_trade_id_for_lifecycle_id_requires_unique_broker_backed_open_owner(tmp_path):
+    repo_root = tmp_path
+    source_path = str(repo_root / "outputs/track_b_execution_core/strategy_bridge/bridge_report.json")
+    base = {
+        "lifecycle_id": "life_shared",
+        "lane_id": "mnq_us_active_participation_long",
+        "thesis_strategy_id": "mnq_us_active_participation_long",
+        "account_id": "DUM882026",
+        "symbol": "MNQ",
+        "con_id": 770561201,
+        "local_symbol": "MNQM6",
+        "expiry": "202606",
+        "side": "LONG",
+        "action": "BUY",
+        "qty": Decimal("1"),
+        "source_artifact_path": source_path,
+        "generated_at": NOW,
+    }
+    for event_type, extra in (
+        (TradeEventType.ENTRY_INTENT_CREATED, {}),
+        (TradeEventType.ENTRY_ORDER_SUBMITTED, {"order_id": "1", "client_id": "17086"}),
+        (
+            TradeEventType.ENTRY_FILL_BROKER_BACKED,
+            {"order_id": "1", "client_id": "17086", "perm_id": "perm-1", "exec_id": "exec-1", "price": "30380.25"},
+        ),
+        (
+            TradeEventType.LIFECYCLE_OPEN_MANAGED,
+            {"order_id": "1", "client_id": "17086", "perm_id": "perm-1", "exec_id": "exec-1", "price": "30380.25"},
+        ),
+    ):
+        append_live_trade_registry_event(
+            repo_root=repo_root,
+            event=make_live_trade_registry_event(event_type=event_type, trade_id="trade_current", **base, **extra),
+        )
+
+    assert resolve_live_trade_id_for_lifecycle_id(repo_root=repo_root, lifecycle_id="life_shared") == "trade_current"
+
+    for event_type, extra in (
+        (TradeEventType.ENTRY_INTENT_CREATED, {}),
+        (TradeEventType.ENTRY_ORDER_SUBMITTED, {"order_id": "2", "client_id": "17086"}),
+        (
+            TradeEventType.ENTRY_FILL_BROKER_BACKED,
+            {"order_id": "2", "client_id": "17086", "perm_id": "perm-2", "exec_id": "exec-2", "price": "30381.25"},
+        ),
+        (
+            TradeEventType.LIFECYCLE_OPEN_MANAGED,
+            {"order_id": "2", "client_id": "17086", "perm_id": "perm-2", "exec_id": "exec-2", "price": "30381.25"},
+        ),
+    ):
+        append_live_trade_registry_event(
+            repo_root=repo_root,
+            event=make_live_trade_registry_event(event_type=event_type, trade_id="trade_ambiguous", **base, **extra),
+        )
+
+    assert resolve_live_trade_id_for_lifecycle_id(repo_root=repo_root, lifecycle_id="life_shared") is None
 
 
 def test_registry_managed_exit_validator_fails_closed_without_trade_id(tmp_path):

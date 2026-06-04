@@ -156,6 +156,38 @@ def load_live_trade_registry_records(
     return tuple(records)
 
 
+def resolve_live_trade_id_for_lifecycle_id(
+    *,
+    repo_root: Path,
+    lifecycle_id: str,
+    jsonl_path: Path = DEFAULT_TRACK_B_LIVE_TRADE_REGISTRY_EVENTS_JSONL,
+) -> str | None:
+    """Return the unique live registry trade id for an exact lifecycle id.
+
+    Lifecycle artifacts created before registry wiring can carry a placeholder
+    trade id. Managed exits must prefer the append-only registry owner identity
+    when exactly one current broker-backed open record maps to the lifecycle.
+    """
+
+    requested_lifecycle_id = str(lifecycle_id or "").strip()
+    if not requested_lifecycle_id:
+        return None
+    matches: list[str] = []
+    for record in load_live_trade_registry_records(repo_root=repo_root, jsonl_path=jsonl_path):
+        owner = record.ownership_identity
+        if owner is None or owner.lifecycle_id != requested_lifecycle_id:
+            continue
+        if record.current_state not in {TradeCurrentState.OPEN_MANAGED, TradeCurrentState.EXIT_DUE}:
+            continue
+        if record.broker_backed_entry is not True:
+            continue
+        matches.append(record.trade_id)
+    unique_matches = sorted(set(matches))
+    if len(unique_matches) == 1:
+        return unique_matches[0]
+    return None
+
+
 def validate_registry_managed_exit_identity(
     *,
     repo_root: Path,

@@ -483,6 +483,102 @@ def test_registry_reconciliation_disagreement_reports_current_scope_conflict(tmp
     assert "CURRENT_SCOPE_REGISTRY_RECONCILIATION_DISAGREEMENT" in report.reason_codes
 
 
+def test_reconciliation_authorized_exact_owner_suppresses_raw_review_row_from_current_scope(tmp_path: Path) -> None:
+    config = _seed_config(
+        tmp_path,
+        broker_positions=[
+            {
+                "symbol": "MES",
+                "position": -1,
+                "con_id": 770561194,
+                "localSymbol": "MESM6",
+                "track_b_scope": "TRACK_B",
+            }
+        ],
+    )
+    _write_json(
+        tmp_path / config.truth_config.reconciliation_path,  # type: ignore[union-attr]
+        {
+            "generated_at": NOW.isoformat(),
+            "classification": "TRACK_B_PAPER_BROKER_RECONCILED",
+            "broker_reconciled": True,
+            "current_scope_review_required_count": 0,
+            "track_b_broker_position_count": 1,
+            "track_b_broker_open_order_count": 0,
+            "registry_reconciliation": {
+                "classification": "REGISTRY_RECONCILIATION_MATCHED",
+                "blocking": False,
+                "broker_position_count": 1,
+                "lifecycle_position_count": 1,
+                "broker_open_order_count": 0,
+                "mapped_trade_ids": ["trade_current"],
+            },
+            "current_exposure_owner_resolution": {
+                "owned_exposures": [
+                    {
+                        "trade_id": "trade_current",
+                        "lifecycle_id": "life_current",
+                        "reason_codes": [
+                            "NEWEST_EXACT_BROKER_BACKED_LIFECYCLE_REPORT_SELECTED",
+                            "OLDER_MATCHING_OPEN_CHAINS_SCOPED_FULL_AUDIT_ONLY",
+                        ],
+                    }
+                ]
+            },
+        },
+    )
+    _write_jsonl(
+        tmp_path / "fixtures/ledger.jsonl",
+        [
+            _event(
+                TradeEventType.ENTRY_INTENT_CREATED,
+                trade_id="trade_current",
+                lifecycle_id="life_current",
+                symbol="MES",
+                local_symbol="MESM6",
+                con_id=770561194,
+                side="SHORT",
+                action="SELL_TO_OPEN",
+            ),
+            _event(
+                TradeEventType.ENTRY_ORDER_SUBMITTED,
+                trade_id="trade_current",
+                lifecycle_id="life_current",
+                symbol="MES",
+                local_symbol="MESM6",
+                con_id=770561194,
+                side="SHORT",
+                action="SELL_TO_OPEN",
+                order_id="2",
+                perm_id="1421892956",
+            ),
+            _event(
+                TradeEventType.REVIEW_REQUIRED,
+                trade_id="trade_current",
+                lifecycle_id="life_current",
+                symbol="MES",
+                local_symbol="MESM6",
+                con_id=770561194,
+                side="SHORT",
+                action="SELL_TO_OPEN",
+                order_id="2",
+                perm_id="1421892956",
+            ),
+        ],
+    )
+
+    report = build_track_b_registry_truth_diagnostics(config=config, now=NOW)
+
+    assert report.classification == TRACK_B_DIAGNOSTICS_CLEAN_CURRENT_SCOPE
+    assert report.review_required_trade_ids == ()
+    assert report.registry_reconciliation_disagreements == ()
+    assert report.registry_trade_state_counts == {}
+    assert report.terminal_superseded_current_rows[0]["classification"] == (
+        "CANONICAL_OWNER_RECONCILIATION_SUPPRESSED_REVIEW_ROW"
+    )
+    assert report.historical_review_required_trade_ids == ("trade_current",)
+
+
 def test_stress_preflight_hard_failure_blocks_clean_status(tmp_path: Path) -> None:
     config = _seed_config(tmp_path)
     _write_preflight(tmp_path / config.preflight_summary_path, hard_failures=2)
