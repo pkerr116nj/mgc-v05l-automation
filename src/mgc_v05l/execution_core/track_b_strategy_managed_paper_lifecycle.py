@@ -54,6 +54,7 @@ from .track_b_live_trade_registry import (
     append_live_trade_registry_event,
     broker_backed_fill_has_required_ids,
     make_live_trade_registry_event,
+    repair_registry_identity_for_broker_backed_managed_position,
     trade_id_from_live_identity,
     validate_registry_managed_exit_identity,
 )
@@ -1618,6 +1619,33 @@ def build_strategy_managed_submit_authorization(
         if intent_kind is IntentKind.CLOSE
         else None
     )
+    registry_identity_normalization = (
+        _normalize_registry_identity_before_managed_exit(
+            config=config,
+            intent_payload=intent_payload,
+            phase1_reconciliation_gate=phase1_reconciliation_gate or {},
+            registry_exit_validation=registry_exit_validation,
+            now=actual_now,
+        )
+        if intent_kind is IntentKind.CLOSE
+        else None
+    )
+    if (
+        intent_kind is IntentKind.CLOSE
+        and isinstance(registry_identity_normalization, Mapping)
+        and registry_identity_normalization.get("repaired") is True
+    ):
+        registry_exit_validation = validate_registry_managed_exit_identity(
+            repo_root=Path(config.repo_root),
+            trade_id=str(intent_payload.get("trade_id") or "").strip(),
+            lifecycle_id=str(intent_payload.get("lifecycle_id") or "").strip(),
+            account_id=str(intent_payload.get("account_id") or config.account_id or "").strip(),
+            con_id=config.con_id,
+            local_symbol=config.local_symbol,
+            quantity=intent_payload.get("quantity") or config.quantity,
+            action=str(intent_payload.get("order_action") or "").strip(),
+            phase1_reconciliation_gate=phase1_reconciliation_gate or {},
+        )
     if intent_kind is IntentKind.CLOSE and pre_action.get("classification") != PRE_ACTION_SNAPSHOT_VALID:
         managed_cleanup_pre_action = _managed_close_cleanup_pre_action(
             pre_action=pre_action,
@@ -1670,6 +1698,7 @@ def build_strategy_managed_submit_authorization(
         "entry_exposure_gate": entry_exposure_gate,
         "phase1_reconciliation_gate": phase1_reconciliation_gate,
         "registry_exit_validation": registry_exit_validation,
+        "registry_identity_normalization": registry_identity_normalization,
         "managed_exit_close_authority": managed_exit_close_authority,
         "safe_state_classification": safe_state.get("safe_state_classification") or safe_state.get("classification"),
         "supervisor_classification": pre_action.get("supervisor_classification")
@@ -1708,6 +1737,73 @@ def build_strategy_managed_submit_authorization(
         "submit_allowed": authorized,
         "broker_mutation_allowed": authorized,
         "reason": reason,
+    }
+
+
+def _normalize_registry_identity_before_managed_exit(
+    *,
+    config: TrackBStrategyManagedPaperLifecycleConfig,
+    intent_payload: Mapping[str, Any],
+    phase1_reconciliation_gate: Mapping[str, Any],
+    registry_exit_validation: Mapping[str, Any] | None,
+    now: datetime,
+) -> dict[str, Any]:
+    validation = dict(registry_exit_validation or {})
+    if validation.get("allowed") is True:
+        return {
+            "classification": "REGISTRY_IDENTITY_NORMALIZATION_NOT_REQUIRED",
+            "repaired": False,
+            "broker_mutation_performed": False,
+            "live_money_eligible": False,
+            "paper_proof_invoked": False,
+        }
+    block_reasons = [str(reason) for reason in list(validation.get("block_reasons") or [])]
+    repairable = (
+        validation.get("registry_current_state") == "REVIEW_REQUIRED"
+        and validation.get("broker_backed_entry") is False
+        and "trade_registry_state_not_open_managed" in block_reasons
+    )
+    if not repairable:
+        return {
+            "classification": "REGISTRY_IDENTITY_NORMALIZATION_NOT_REPAIRABLE",
+            "repaired": False,
+            "block_reasons": block_reasons,
+            "broker_mutation_performed": False,
+            "live_money_eligible": False,
+            "paper_proof_invoked": False,
+        }
+
+    trade_id = str(intent_payload.get("trade_id") or "").strip()
+    lifecycle_id = str(intent_payload.get("lifecycle_id") or "").strip()
+    lifecycle_path = Path(config.output_root) / lifecycle_id / "track_b_strategy_managed_paper_lifecycle_report.json"
+    lifecycle_report = _read_json_object(lifecycle_path)
+    if not lifecycle_report:
+        return {
+            "classification": "REGISTRY_IDENTITY_NORMALIZATION_BLOCKED",
+            "repaired": False,
+            "block_reasons": ["lifecycle_report_missing"],
+            "broker_mutation_performed": False,
+            "live_money_eligible": False,
+            "paper_proof_invoked": False,
+            "lifecycle_report_path": str(lifecycle_path),
+        }
+
+    repair = repair_registry_identity_for_broker_backed_managed_position(
+        repo_root=Path(config.repo_root),
+        trade_id=trade_id,
+        lifecycle_id=lifecycle_id,
+        phase1_reconciliation_gate=phase1_reconciliation_gate,
+        lifecycle_report=lifecycle_report,
+        generated_at=now,
+    )
+    return {
+        **repair,
+        "classification": (
+            "REGISTRY_IDENTITY_NORMALIZATION_APPLIED"
+            if repair.get("repaired") is True
+            else "REGISTRY_IDENTITY_NORMALIZATION_BLOCKED"
+        ),
+        "lifecycle_report_path": str(lifecycle_path),
     }
 
 

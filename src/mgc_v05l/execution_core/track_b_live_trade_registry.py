@@ -403,7 +403,7 @@ def repair_registry_identity_for_broker_backed_managed_position(
     )
     if not policy_id:
         blockers.append("managed_exit_policy_missing")
-    if lifecycle_report.get("close_fill") or lifecycle_report.get("close_submit_attempt"):
+    if _lifecycle_has_terminal_or_mutating_close_evidence(lifecycle_report):
         blockers.append("lifecycle_already_has_close_evidence")
 
     target_identity = _repair_target_identity(
@@ -422,6 +422,7 @@ def repair_registry_identity_for_broker_backed_managed_position(
             jsonl_path=jsonl_path,
             trade_id=requested_trade_id,
             target_identity=target_identity,
+            phase1_reconciliation_gate=phase1_reconciliation_gate,
         )
     )
 
@@ -829,7 +830,9 @@ def _conflicting_registry_owner_blockers(
     jsonl_path: Path,
     trade_id: str,
     target_identity: Mapping[str, Any],
+    phase1_reconciliation_gate: Mapping[str, Any],
 ) -> list[str]:
+    current_scope_trade_ids, current_scope_lifecycle_ids = _current_scope_identity_sets(phase1_reconciliation_gate)
     target_account = _valid_identity_text(target_identity.get("account_id"))
     target_con_id = _valid_identity_text(target_identity.get("con_id"))
     target_local = _valid_identity_text(target_identity.get("local_symbol")).upper()
@@ -843,6 +846,10 @@ def _conflicting_registry_owner_blockers(
         if record.broker_backed_entry is not True or record.ownership_identity is None:
             continue
         owner = record.ownership_identity
+        if current_scope_trade_ids or current_scope_lifecycle_ids:
+            owner_lifecycle = _valid_identity_text(owner.lifecycle_id)
+            if record.trade_id not in current_scope_trade_ids and owner_lifecycle not in current_scope_lifecycle_ids:
+                continue
         owner_account = _valid_identity_text(owner.account_id)
         same_account = not target_account or not owner_account or target_account == owner_account
         same_contract = (target_con_id and str(owner.con_id) == target_con_id) or (
@@ -853,6 +860,56 @@ def _conflicting_registry_owner_blockers(
         if same_account and same_contract and same_qty and same_side:
             return ["conflicting_current_registry_owner"]
     return []
+
+
+def _current_scope_identity_sets(phase1_reconciliation_gate: Mapping[str, Any]) -> tuple[set[str], set[str]]:
+    trade_ids: set[str] = set()
+    lifecycle_ids: set[str] = set()
+    for row in list(phase1_reconciliation_gate.get("track_b_lifecycle_positions") or []):
+        if not isinstance(row, Mapping):
+            continue
+        trade_id = _valid_identity_text(row.get("trade_id"))
+        lifecycle_id = _valid_identity_text(row.get("lifecycle_id"))
+        if trade_id:
+            trade_ids.add(trade_id)
+        if lifecycle_id:
+            lifecycle_ids.add(lifecycle_id)
+    registry_reconciliation = phase1_reconciliation_gate.get("registry_reconciliation")
+    if isinstance(registry_reconciliation, Mapping):
+        for row in list(registry_reconciliation.get("mapped_records") or []):
+            if not isinstance(row, Mapping):
+                continue
+            trade_id = _valid_identity_text(row.get("trade_id"))
+            lifecycle_id = _valid_identity_text(row.get("lifecycle_id"))
+            if trade_id:
+                trade_ids.add(trade_id)
+            if lifecycle_id:
+                lifecycle_ids.add(lifecycle_id)
+        for trade_id in list(registry_reconciliation.get("mapped_trade_ids") or []):
+            trade_id_text = _valid_identity_text(trade_id)
+            if trade_id_text:
+                trade_ids.add(trade_id_text)
+    return trade_ids, lifecycle_ids
+
+
+def _lifecycle_has_terminal_or_mutating_close_evidence(lifecycle_report: Mapping[str, Any]) -> bool:
+    if lifecycle_report.get("close_fill"):
+        return True
+    if lifecycle_report.get("close_order"):
+        return True
+    if list(lifecycle_report.get("working_managed_exit_orders") or []):
+        return True
+    attempt = lifecycle_report.get("close_submit_attempt")
+    if not isinstance(attempt, Mapping):
+        return False
+    if attempt.get("broker_state_mutated") is True:
+        return True
+    if attempt.get("submitted") is True:
+        return True
+    authorization = attempt.get("strategy_submit_authorization")
+    if isinstance(authorization, Mapping) and authorization.get("broker_mutation_allowed") is True:
+        return True
+    return False
 
 
 def _matching_broker_position(

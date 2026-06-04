@@ -445,12 +445,27 @@ def test_registry_identity_repair_fails_closed_with_conflicting_current_owner(tm
         perm_id="perm-conflict",
         exec_id="exec-conflict",
     )
+    phase1 = _phase1_repair_gate(trade_id=trade_id, lifecycle_id=lifecycle_id)
+    phase1["registry_reconciliation"]["mapped_records"].append(
+        {
+            "trade_id": "trade_mes_conflicting_owner",
+            "lifecycle_id": "life_mes_conflicting_owner",
+            "account_id": "DUM882026",
+            "instrument_family": "MES",
+            "local_symbol": "MESM6",
+            "con_id": 770561194,
+            "quantity": "1",
+            "side": "LONG",
+            "lane_id": "mes_us_active_participation_long",
+            "strategy_id": "mes_us_active_participation_long",
+        }
+    )
 
     result = repair_registry_identity_for_broker_backed_managed_position(
         repo_root=repo_root,
         trade_id=trade_id,
         lifecycle_id=lifecycle_id,
-        phase1_reconciliation_gate=_phase1_repair_gate(trade_id=trade_id, lifecycle_id=lifecycle_id),
+        phase1_reconciliation_gate=phase1,
         lifecycle_report=_lifecycle_repair_report(trade_id=trade_id, lifecycle_id=lifecycle_id),
         generated_at=NOW + timedelta(minutes=1),
     )
@@ -458,6 +473,46 @@ def test_registry_identity_repair_fails_closed_with_conflicting_current_owner(tm
     assert result["classification"] == "REGISTRY_IDENTITY_REPAIR_BLOCKED"
     assert "conflicting_current_registry_owner" in result["block_reasons"]
     assert result["persisted_events"] == []
+
+
+def test_registry_identity_repair_ignores_stale_owner_and_failed_close_attempt(tmp_path):
+    repo_root = tmp_path
+    trade_id = "trade_mes_review_stale_owner"
+    lifecycle_id = "life_mes_current"
+    _write_review_required_null_lifecycle_registry_chain(repo_root, trade_id=trade_id, lifecycle_id=lifecycle_id)
+    _write_open_managed_registry_chain(
+        repo_root,
+        trade_id="trade_mes_stale_owner",
+        lifecycle_id="life_mes_stale_owner",
+        order_id="2",
+        perm_id="perm-stale",
+        exec_id="exec-stale",
+    )
+    lifecycle_report = _lifecycle_repair_report(trade_id=trade_id, lifecycle_id=lifecycle_id)
+    lifecycle_report["close_submit_attempt"] = {
+        "classification": "STRATEGY_SUBMIT_BLOCKED_ENTRY_EXPOSURE",
+        "broker_state_mutated": False,
+        "submitted": False,
+        "strategy_submit_authorization": {
+            "broker_mutation_allowed": False,
+        },
+    }
+
+    result = repair_registry_identity_for_broker_backed_managed_position(
+        repo_root=repo_root,
+        trade_id=trade_id,
+        lifecycle_id=lifecycle_id,
+        phase1_reconciliation_gate=_phase1_repair_gate(trade_id=trade_id, lifecycle_id=lifecycle_id),
+        lifecycle_report=lifecycle_report,
+        generated_at=NOW + timedelta(minutes=1),
+    )
+
+    assert result["classification"] == "REGISTRY_IDENTITY_REPAIR_APPLIED"
+    assert result["broker_mutation_performed"] is False
+    assert result["live_money_eligible"] is False
+    assert result["paper_proof_invoked"] is False
+    assert "lifecycle_already_has_close_evidence" not in result["block_reasons"]
+    assert "conflicting_current_registry_owner" not in result["block_reasons"]
 
 
 def _write_review_required_null_lifecycle_registry_chain(repo_root, *, trade_id: str, lifecycle_id: str) -> None:

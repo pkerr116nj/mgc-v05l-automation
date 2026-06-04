@@ -249,6 +249,171 @@ def _seed_registry_backed_close_truth(
     )
 
 
+def _write_review_required_registry_entry(
+    tmp_path: Path,
+    *,
+    config: TrackBStrategyManagedPaperLifecycleConfig,
+    trade_id: str,
+    lifecycle_id: str,
+) -> None:
+    base = {
+        "trade_id": trade_id,
+        "lifecycle_id": None,
+        "lane_id": str(config.lane_id),
+        "thesis_strategy_id": str(config.strategy_id),
+        "account_id": str(config.account_id),
+        "symbol": str(config.instrument_family),
+        "con_id": int(config.con_id),
+        "local_symbol": str(config.local_symbol),
+        "expiry": str(config.contract_expiry or "20260618"),
+        "side": "LONG",
+        "action": "BUY",
+        "qty": 1,
+        "source_artifact_path": str(tmp_path / "registry_fixture.json"),
+        "generated_at": aware_now(),
+    }
+    append_live_trade_registry_event(
+        repo_root=tmp_path,
+        event=make_live_trade_registry_event(event_type=TradeEventType.ENTRY_INTENT_CREATED, **base),
+    )
+    append_live_trade_registry_event(
+        repo_root=tmp_path,
+        event=make_live_trade_registry_event(
+            event_type=TradeEventType.ENTRY_ORDER_SUBMITTED,
+            lifecycle_id=lifecycle_id,
+            order_id="1",
+            client_id="10986",
+            **{key: value for key, value in base.items() if key != "lifecycle_id"},
+        ),
+    )
+    append_live_trade_registry_event(
+        repo_root=tmp_path,
+        event=make_live_trade_registry_event(
+            event_type=TradeEventType.ENTRY_FILL_BROKER_BACKED,
+            lifecycle_id=lifecycle_id,
+            order_id="1",
+            client_id="10986",
+            perm_id="1092553538",
+            exec_id=None,
+            price="7605",
+            reason_codes=("BROKER_BACKED_FILL_MISSING_PERM_OR_EXEC",),
+            **{key: value for key, value in base.items() if key != "lifecycle_id"},
+        ),
+    )
+    append_live_trade_registry_event(
+        repo_root=tmp_path,
+        event=make_live_trade_registry_event(
+            event_type=TradeEventType.REVIEW_REQUIRED,
+            lifecycle_id=None,
+            reason_codes=("REVIEW_REQUIRED_EVENT",),
+            **{key: value for key, value in base.items() if key != "lifecycle_id"},
+        ),
+    )
+
+
+def _managed_lifecycle_repair_report(
+    *,
+    config: TrackBStrategyManagedPaperLifecycleConfig,
+    trade_id: str,
+    lifecycle_id: str,
+) -> dict[str, Any]:
+    return {
+        "trade_id": trade_id,
+        "lifecycle_id": lifecycle_id,
+        "account_id": config.account_id,
+        "strategy_id": config.strategy_id,
+        "lane_id": config.lane_id,
+        "instrument_family": config.instrument_family,
+        "symbol": config.instrument_family,
+        "contract_key": config.contract_key,
+        "con_id": config.con_id,
+        "local_symbol": config.local_symbol,
+        "expiry": "20260618",
+        "side": "LONG",
+        "quantity": "1",
+        "managed_exit_policy_id": config.managed_exit_policy_id,
+        "live_money_eligible": False,
+        "paper_proof_invoked": False,
+        "report_json_path": str(config.output_root / lifecycle_id / "track_b_strategy_managed_paper_lifecycle_report.json"),
+        "entry_fill": {
+            "broker_order_id": "1",
+            "order_id": "1",
+            "client_id": "10986",
+            "perm_id": "1092553538",
+            "execution_id": "0000e1a7.6a34ef5d.01.01",
+            "exec_id": "0000e1a7.6a34ef5d.01.01",
+            "price": "7605",
+            "quantity": "1",
+        },
+    }
+
+
+def _phase1_repair_gate_for_config(
+    *,
+    config: TrackBStrategyManagedPaperLifecycleConfig,
+    trade_id: str,
+    lifecycle_id: str,
+) -> dict[str, Any]:
+    lifecycle_row = {
+        "trade_id": trade_id,
+        "lifecycle_id": lifecycle_id,
+        "account_id": config.account_id,
+        "strategy_id": config.strategy_id,
+        "lane_id": config.lane_id,
+        "instrument_family": config.instrument_family,
+        "track_b_root": config.instrument_family,
+        "contract_key": config.contract_key,
+        "local_symbol": config.local_symbol,
+        "con_id": config.con_id,
+        "expiry": "20260618",
+        "quantity": "1",
+        "side": "LONG",
+        "managed_exit_policy_id": config.managed_exit_policy_id,
+        "entry_client_id": "10986",
+        "entry_order_ids": ["1"],
+        "entry_perm_ids": [1092553538],
+        "entry_exec_ids": ["0000e1a7.6a34ef5d.01.01"],
+        "avg_entry_price": "7605",
+    }
+    return {
+        "ready": True,
+        "broker_reconciled": True,
+        "classification": "TRACK_B_PAPER_BROKER_RECONCILED",
+        "current_scope_review_required_count": 0,
+        "review_required_count": 0,
+        "track_b_broker_open_order_count": 0,
+        "track_b_broker_open_orders": [],
+        "track_b_broker_positions": [
+            {
+                "account_id": config.account_id,
+                "symbol": config.instrument_family,
+                "track_b_root": config.instrument_family,
+                "local_symbol": config.local_symbol,
+                "con_id": config.con_id,
+                "expiry": "20260618",
+                "quantity": "1.0",
+            }
+        ],
+        "track_b_lifecycle_positions": [lifecycle_row],
+        "registry_reconciliation": {
+            "classification": "REGISTRY_RECONCILIATION_MATCHED",
+            "blocking": False,
+            "mapped_records": [
+                {
+                    **lifecycle_row,
+                    "current_state": "REVIEW_REQUIRED",
+                    "entry_order_id": "1",
+                    "entry_client_id": "10986",
+                    "entry_perm_id": "1092553538",
+                    "entry_exec_id": None,
+                }
+            ],
+            "mapped_trade_ids": [trade_id],
+            "review_required_trade_ids": [],
+        },
+    }
+
+
 def fake_stages(*, close: bool = False) -> TrackBStrategyManagedPaperLifecycleStages:
     def entry_submitter(
         config: TrackBStrategyManagedPaperLifecycleConfig,
@@ -1977,6 +2142,128 @@ def test_managed_exit_close_authority_allows_registry_verified_close_under_guard
     assert authorization["managed_exit_close_authority"]["allowed"] is True
     assert authorization["managed_exit_close_authority"]["safe_state_broker_mutation_allowed"] is False
     assert authorization["managed_exit_close_authority"]["safe_state_managed_close_mutation_allowed"] is True
+    assert authorization["registry_identity_normalization"]["classification"] == "REGISTRY_IDENTITY_NORMALIZATION_NOT_REQUIRED"
+
+
+def test_managed_exit_close_authority_normalizes_review_required_registry_identity(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    config = base_config(
+        tmp_path,
+        strategy_id="mes_us_active_participation_long",
+        lane_id="mes_us_active_participation_long",
+        instrument_family="MES",
+        contract_key="MES-202606",
+        local_symbol="MESM6",
+        con_id=770561194,
+        side="LONG",
+        close_limit_price="7595.25",
+        managed_exit_policy_id=TrackBManagedExitPolicy.US_ACTIVE_EVIDENCE_TIMEBOX_60M_EXIT_V1.value,
+    )
+    trade_id = "trade_mes_review_required"
+    lifecycle_id = "reserved-submit-mes-review-required"
+    close_intent = {
+        "lifecycle_id": lifecycle_id,
+        "trade_id": trade_id,
+        "order_action": "SELL",
+        "quantity": 1,
+        "close_limit_price": "7595.25",
+    }
+    seed_strategy_submit_authority(
+        tmp_path,
+        config=config,
+        intent_payload=close_intent,
+        intent_kind=IntentKind.CLOSE,
+        limit_price="7595.25",
+    )
+    registry_path = tmp_path / "outputs/track_b_execution_core/trade_registry/live_trade_events.jsonl"
+    registry_path.unlink()
+    _write_review_required_registry_entry(tmp_path, config=config, trade_id=trade_id, lifecycle_id=lifecycle_id)
+    lifecycle_report = _managed_lifecycle_repair_report(config=config, trade_id=trade_id, lifecycle_id=lifecycle_id)
+    _write_json(config.output_root / lifecycle_id / "track_b_strategy_managed_paper_lifecycle_report.json", lifecycle_report)
+    phase1 = _phase1_repair_gate_for_config(config=config, trade_id=trade_id, lifecycle_id=lifecycle_id)
+    monkeypatch.setattr(
+        lifecycle_module,
+        "evaluate_phase1_broker_reconciliation_submit_gate",
+        lambda **_kwargs: phase1,
+    )
+    _write_json(
+        tmp_path / "outputs/reports/track_b_paper_broker_reconciliation/latest_track_b_paper_broker_reconciliation.json",
+        phase1,
+    )
+
+    authorization = lifecycle_module.build_strategy_managed_submit_authorization(
+        config=config,
+        intent_payload=close_intent,
+        intent_kind=IntentKind.CLOSE,
+        limit_price="7595.25",
+        now=aware_now(),
+    )
+
+    assert authorization["classification"] == lifecycle_module.STRATEGY_SUBMIT_AUTHORIZED
+    assert authorization["registry_identity_normalization"]["classification"] == "REGISTRY_IDENTITY_NORMALIZATION_APPLIED"
+    assert authorization["registry_identity_normalization"]["broker_mutation_performed"] is False
+    assert authorization["registry_identity_normalization"]["live_money_eligible"] is False
+    assert authorization["registry_identity_normalization"]["paper_proof_invoked"] is False
+    assert authorization["registry_exit_validation"]["allowed"] is True
+    assert authorization["managed_exit_close_authority"]["allowed"] is True
+
+
+def test_managed_exit_close_authority_blocks_when_registry_normalization_lacks_fill_identity(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    config = base_config(
+        tmp_path,
+        strategy_id="mes_us_active_participation_long",
+        lane_id="mes_us_active_participation_long",
+        instrument_family="MES",
+        contract_key="MES-202606",
+        local_symbol="MESM6",
+        con_id=770561194,
+        side="LONG",
+        close_limit_price="7595.25",
+        managed_exit_policy_id=TrackBManagedExitPolicy.US_ACTIVE_EVIDENCE_TIMEBOX_60M_EXIT_V1.value,
+    )
+    trade_id = "trade_mes_missing_fill"
+    lifecycle_id = "reserved-submit-mes-missing-fill"
+    close_intent = {
+        "lifecycle_id": lifecycle_id,
+        "trade_id": trade_id,
+        "order_action": "SELL",
+        "quantity": 1,
+        "close_limit_price": "7595.25",
+    }
+    seed_strategy_submit_authority(
+        tmp_path,
+        config=config,
+        intent_payload=close_intent,
+        intent_kind=IntentKind.CLOSE,
+        limit_price="7595.25",
+    )
+    (tmp_path / "outputs/track_b_execution_core/trade_registry/live_trade_events.jsonl").unlink()
+    _write_review_required_registry_entry(tmp_path, config=config, trade_id=trade_id, lifecycle_id=lifecycle_id)
+    lifecycle_report = _managed_lifecycle_repair_report(config=config, trade_id=trade_id, lifecycle_id=lifecycle_id)
+    lifecycle_report["entry_fill"].pop("execution_id")
+    lifecycle_report["entry_fill"].pop("exec_id")
+    _write_json(config.output_root / lifecycle_id / "track_b_strategy_managed_paper_lifecycle_report.json", lifecycle_report)
+    phase1 = _phase1_repair_gate_for_config(config=config, trade_id=trade_id, lifecycle_id=lifecycle_id)
+    phase1["track_b_lifecycle_positions"][0].pop("entry_exec_ids")
+    monkeypatch.setattr(lifecycle_module, "evaluate_phase1_broker_reconciliation_submit_gate", lambda **_kwargs: phase1)
+
+    authorization = lifecycle_module.build_strategy_managed_submit_authorization(
+        config=config,
+        intent_payload=close_intent,
+        intent_kind=IntentKind.CLOSE,
+        limit_price="7595.25",
+        now=aware_now(),
+    )
+
+    assert authorization["classification"] == lifecycle_module.STRATEGY_SUBMIT_BLOCKED_ENTRY_EXPOSURE
+    assert authorization["registry_identity_normalization"]["classification"] == "REGISTRY_IDENTITY_NORMALIZATION_BLOCKED"
+    assert "entry_fill_exec_id_missing" in authorization["registry_identity_normalization"]["block_reasons"]
+    assert authorization["registry_identity_normalization"]["broker_mutation_performed"] is False
 
 
 def test_managed_exit_close_authority_blocks_stale_control_plane(tmp_path: Path) -> None:
