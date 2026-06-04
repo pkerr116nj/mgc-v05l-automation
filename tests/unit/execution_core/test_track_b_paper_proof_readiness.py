@@ -6,6 +6,7 @@ from pathlib import Path
 
 from mgc_v05l.execution_core.track_b_paper_proof_readiness import (
     DEFAULT_OUTPUT_PATH,
+    LOW_LIQUIDITY_1M_QUIET_WITH_FRESH_CONTEXT,
     MARKET_CLOSED_NO_FRESH_BARS,
     PHASE1_DATA_UNHEALTHY,
     READY_FOR_PROOF,
@@ -137,6 +138,71 @@ def test_planned_equity_index_halt_mnq_stale_does_not_block_metals_readiness(tmp
     assert all(warning["scope_impact"] == "EQUITY_INDEX_ONLY" for warning in stale_mnq)
 
 
+def test_low_liquidity_mgc_1m_quiet_with_fresh_5m_context_does_not_block_start(tmp_path: Path) -> None:
+    _seed_clean_shared_truth(tmp_path, now=OPEN_NOW)
+    _write_phase1_candle(tmp_path, symbol="MGC", timeframe="1m", generated_at=OPEN_NOW - timedelta(minutes=4))
+    _write_phase1_candle(tmp_path, symbol="MGC", timeframe="5m", generated_at=OPEN_NOW)
+    _write_phase1_candle(tmp_path, symbol="MNQ", timeframe="1m", generated_at=OPEN_NOW)
+    _write_phase1_candle(tmp_path, symbol="MNQ", timeframe="5m", generated_at=OPEN_NOW)
+
+    payload = _build(tmp_path, now=OPEN_NOW)
+
+    assert payload["classification"] == READY_FOR_PROOF
+    assert payload["ready_for_proof"] is True
+    assert payload["blockers"] == []
+    quiet_mgc = [
+        warning for warning in payload["secondary_warnings"]
+        if warning.get("symbol") == "MGC" and warning.get("timeframe") == "1m"
+    ]
+    assert [warning["reason"] for warning in quiet_mgc] == [LOW_LIQUIDITY_1M_QUIET_WITH_FRESH_CONTEXT]
+    assert quiet_mgc[0]["blocking_for_proof"] is False
+    assert quiet_mgc[0]["scope_impact"] == "START_ALLOWED_TRADE_WAITS_FOR_FRESH_1M"
+
+
+def test_low_liquidity_warning_requires_fresh_same_symbol_context(tmp_path: Path) -> None:
+    _seed_clean_shared_truth(tmp_path, now=OPEN_NOW)
+    _write_phase1_candle(tmp_path, symbol="MGC", timeframe="1m", generated_at=OPEN_NOW - timedelta(minutes=4))
+    _write_phase1_candle(tmp_path, symbol="MGC", timeframe="5m", generated_at=OPEN_NOW - timedelta(minutes=45))
+    _write_phase1_candle(tmp_path, symbol="MNQ", timeframe="1m", generated_at=OPEN_NOW)
+    _write_phase1_candle(tmp_path, symbol="MNQ", timeframe="5m", generated_at=OPEN_NOW)
+
+    payload = _build(tmp_path, now=OPEN_NOW)
+
+    assert payload["classification"] == PHASE1_DATA_UNHEALTHY
+    assert payload["ready_for_proof"] is False
+    assert {
+        (blocker.get("symbol"), blocker.get("timeframe"), blocker.get("reason"))
+        for blocker in payload["blockers"]
+    } == {
+        ("MGC", "1m", "RUNTIME_CANDLES_STALE"),
+        ("MGC", "5m", "RUNTIME_CANDLES_STALE"),
+    }
+
+
+def test_low_liquidity_warning_does_not_apply_to_required_equity_index_1m(tmp_path: Path) -> None:
+    _seed_clean_shared_truth(tmp_path, now=OPEN_NOW)
+    _write_phase1_candle(tmp_path, symbol="MNQ", timeframe="1m", generated_at=OPEN_NOW - timedelta(minutes=4))
+    _write_phase1_candle(tmp_path, symbol="MNQ", timeframe="5m", generated_at=OPEN_NOW)
+
+    payload = build_track_b_paper_proof_readiness(
+        config=TrackBPaperProofReadinessConfig(
+            repo_root=tmp_path,
+            broker_lease_history_path=None,
+            now=OPEN_NOW,
+            required_symbols=("MNQ",),
+        ),
+        pid_running=lambda _pid: False,
+        process_root_resolver=lambda _pid: None,
+        source_commit_resolver=lambda _root: "test-head",
+    )
+
+    assert payload["classification"] == PHASE1_DATA_UNHEALTHY
+    assert payload["ready_for_proof"] is False
+    assert payload["blockers"][0]["symbol"] == "MNQ"
+    assert payload["blockers"][0]["timeframe"] == "1m"
+    assert payload["blockers"][0]["reason"] == "RUNTIME_CANDLES_STALE"
+
+
 def test_scoped_required_symbols_ignore_unrelated_stale_market_data(tmp_path: Path) -> None:
     _seed_clean_shared_truth(tmp_path, now=OPEN_NOW)
     for symbol in ("MNQ", "MES"):
@@ -162,6 +228,37 @@ def test_scoped_required_symbols_ignore_unrelated_stale_market_data(tmp_path: Pa
     assert payload["phase1_required_symbols"] == ["MNQ", "MES"]
     assert {check["symbol"] for check in payload["phase1_required_checks"]} == {"MNQ", "MES"}
     assert payload["blockers"] == []
+
+
+def test_scoped_required_symbols_are_not_satisfied_by_unrelated_fresh_market_data(tmp_path: Path) -> None:
+    _seed_clean_shared_truth(tmp_path, now=OPEN_NOW)
+    for symbol in ("MGC", "GC"):
+        for timeframe in ("1m", "5m"):
+            _write_phase1_candle(tmp_path, symbol=symbol, timeframe=timeframe, generated_at=OPEN_NOW)
+
+    payload = build_track_b_paper_proof_readiness(
+        config=TrackBPaperProofReadinessConfig(
+            repo_root=tmp_path,
+            broker_lease_history_path=None,
+            now=OPEN_NOW,
+            required_symbols=("MNQ", "MES"),
+        ),
+        pid_running=lambda _pid: False,
+        process_root_resolver=lambda _pid: None,
+        source_commit_resolver=lambda _root: "test-head",
+    )
+
+    assert payload["classification"] == PHASE1_DATA_UNHEALTHY
+    assert payload["phase1_required_symbols"] == ["MNQ", "MES"]
+    assert {
+        (blocker.get("symbol"), blocker.get("timeframe"), blocker.get("reason"))
+        for blocker in payload["blockers"]
+    } == {
+        ("MNQ", "1m", "RUNTIME_CANDLES_MISSING"),
+        ("MNQ", "5m", "RUNTIME_CANDLES_MISSING"),
+        ("MES", "1m", "RUNTIME_CANDLES_MISSING"),
+        ("MES", "5m", "RUNTIME_CANDLES_MISSING"),
+    }
 
 
 def test_active_runtime_blocks_as_already_active(tmp_path: Path) -> None:

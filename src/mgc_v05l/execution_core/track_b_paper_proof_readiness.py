@@ -47,6 +47,7 @@ PHASE1_DATA_UNHEALTHY = "PHASE1_DATA_UNHEALTHY"
 RUNTIME_ALREADY_ACTIVE = "RUNTIME_ALREADY_ACTIVE"
 BROKER_STATE_UNSAFE = "BROKER_STATE_UNSAFE"
 PLANNED_EQUITY_INDEX_FUTURES_HALT_NO_FRESH_BARS = "PLANNED_EQUITY_INDEX_FUTURES_HALT_NO_FRESH_BARS"
+LOW_LIQUIDITY_1M_QUIET_WITH_FRESH_CONTEXT = "LOW_LIQUIDITY_1M_QUIET_WITH_FRESH_CONTEXT"
 
 _EQUITY_INDEX_PHASE1_SYMBOLS = {"MNQ", "NQ", "MES", "ES", "MYM", "YM"}
 
@@ -328,23 +329,73 @@ def _required_phase1_checks(
                 "RUNTIME_CANDLES_MISSING",
                 "PHASE1_RUNTIME_CANDLE_CHECK_MISSING",
             }
+            low_liquidity_start_warning = _low_liquidity_1m_start_warning(
+                symbol=symbol_key,
+                timeframe=timeframe,
+                reason=reason,
+                candle_checks=candle_checks,
+            )
+            nonblocking = nonblocking_planned_halt or low_liquidity_start_warning
             checks.append(
                 {
                     "symbol": symbol_key,
                     "timeframe": timeframe,
                     "ready": check.get("ready") is True,
-                    "reason": PLANNED_EQUITY_INDEX_FUTURES_HALT_NO_FRESH_BARS if nonblocking_planned_halt else reason,
+                    "reason": _nonblocking_phase1_reason(
+                        reason=reason,
+                        planned_halt=nonblocking_planned_halt,
+                        low_liquidity_start_warning=low_liquidity_start_warning,
+                    ),
                     "path": check.get("path"),
                     "generated_at": check.get("generated_at"),
                     "age_seconds": check.get("age_seconds"),
                     "freshness_seconds": check.get("freshness_seconds"),
                     "market_session": check.get("market_session") or {},
                     "planned_halt": bool(planned_halt),
-                    "blocking_for_proof": False if nonblocking_planned_halt else True,
-                    "scope_impact": "EQUITY_INDEX_ONLY" if nonblocking_planned_halt else "TRACK_B_REQUIRED_SCOPE",
+                    "blocking_for_proof": not nonblocking,
+                    "scope_impact": _nonblocking_phase1_scope(
+                        planned_halt=nonblocking_planned_halt,
+                        low_liquidity_start_warning=low_liquidity_start_warning,
+                    ),
                 }
             )
     return checks
+
+
+def _low_liquidity_1m_start_warning(
+    *,
+    symbol: str,
+    timeframe: str,
+    reason: str,
+    candle_checks: Mapping[str, Any],
+) -> bool:
+    if symbol.upper() in _EQUITY_INDEX_PHASE1_SYMBOLS:
+        return False
+    if timeframe != "1m" or reason != "RUNTIME_CANDLES_STALE":
+        return False
+    context_5m = _mapping(candle_checks.get("5m"))
+    return context_5m.get("ready") is True
+
+
+def _nonblocking_phase1_reason(
+    *,
+    reason: str,
+    planned_halt: bool,
+    low_liquidity_start_warning: bool,
+) -> str:
+    if planned_halt:
+        return PLANNED_EQUITY_INDEX_FUTURES_HALT_NO_FRESH_BARS
+    if low_liquidity_start_warning:
+        return LOW_LIQUIDITY_1M_QUIET_WITH_FRESH_CONTEXT
+    return reason
+
+
+def _nonblocking_phase1_scope(*, planned_halt: bool, low_liquidity_start_warning: bool) -> str:
+    if planned_halt:
+        return "EQUITY_INDEX_ONLY"
+    if low_liquidity_start_warning:
+        return "START_ALLOWED_TRADE_WAITS_FOR_FRESH_1M"
+    return "TRACK_B_REQUIRED_SCOPE"
 
 
 def _phase1_blockers(checks: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
