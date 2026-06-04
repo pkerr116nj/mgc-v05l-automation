@@ -491,6 +491,74 @@ def test_owned_exit_due_exposure_tolerates_runtime_down_agent_health_for_start(
     assert payload["top_line_classification"] == "READY_FOR_OPERATOR_START"
 
 
+def test_control_plane_reports_stale_runtime_close_path_without_entry_submit(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    _seed_clean_stack(tmp_path)
+    _seed_control_plane(tmp_path)
+
+    def fake_agent_health(**_kwargs):
+        return {
+            "schema_version": "track_b_agent_health_v2",
+            "classification": "AGENT_HEALTH_BLOCKING",
+            "summary": {
+                "agent_count": 1,
+                "blocking_for_proof_count": 1,
+                "blocking_for_runtime_submit_count": 1,
+                "blocking_for_recovery_count": 0,
+                "duplicate_process_count": 0,
+            },
+            "agents": [
+                {
+                    "agent_id": "track_b_paper_runtime",
+                    "display_name": "Track B PAPER runtime",
+                    "status": "STOPPED_UNEXPECTED",
+                    "reason": "RUNTIME_DOWN_WITH_BROKER_EXPOSURE",
+                    "blocking_for_proof": True,
+                    "blocking_for_runtime_submit": True,
+                    "blocking_for_recovery": False,
+                    "diagnostic_only": False,
+                }
+            ],
+        }
+
+    def fake_supervisor(**_kwargs):
+        return {
+            "generated_at": NOW.isoformat(),
+            "classification": "SUPERVISOR_RUNTIME_START_ALLOWED",
+            "supervisor_mode": "READY_FOR_OPERATOR_START",
+            "proof_window_status": "ready",
+            "safe_to_start_runtime": True,
+            "shared_truth_refresh_generation_id": "track-b-shared-truth-20260523T120000000000Z",
+            "shared_truth_coherence_status": "COHERENT",
+            "live_money_eligible": False,
+            "evidence_summary": {
+                "runtime_environment_truth_classification": "RUNTIME_DOWN_WITH_BROKER_EXPOSURE",
+                "pre_restart_exposure_resolution_classification": "MANAGED_EXPOSURE_RESOLVED",
+                "restart_with_owned_exposure_allowed": True,
+            },
+        }
+
+    monkeypatch.setattr(cp_module, "build_track_b_agent_health", fake_agent_health)
+    monkeypatch.setattr(cp_module, "build_track_b_runtime_supervisor_authority", fake_supervisor)
+
+    payload = _snapshot(tmp_path, post_hook=lambda _shared_truth: _seed_exit_due_mnq_authority(tmp_path))
+
+    assert payload["submit_authority"] is False
+    assert payload["broker_mutation"] is False
+    assert payload["runtime_authority_exposure_classification"] == "RUNTIME_AUTHORITY_STALE_WITH_BROKER_EXPOSURE"
+    assert payload["fresh_broker_exposure_visible_when_runtime_stale"] is True
+    assert payload["safe_state_submit_allowed"] is False
+    assert payload["safe_state_entry_mutation_allowed"] is False
+    assert payload["risk_reducing_close_classification"] == (
+        "RISK_REDUCING_CLOSE_ALLOWED_RUNTIME_STALE_WITH_BROKER_EXPOSURE"
+    )
+    assert payload["risk_reducing_close_allowed_runtime_stale"] is True
+    assert payload["risk_reducing_close_candidate"]["action"] == "BUY"
+    assert payload["risk_reducing_close_candidate"]["local_symbol"] == "MNQM6"
+
+
 def test_safe_state_broker_mutation_limit_blocks_snapshot_status(tmp_path: Path) -> None:
     _seed_clean_stack(tmp_path)
     _seed_control_plane(tmp_path)
@@ -921,6 +989,85 @@ def _write_trade_summary(root: Path) -> None:
             "review_required_count": 0,
             "unknown_open_order_count": 0,
             "unresolved_intent_count": 0,
+            "live_money_eligible": False,
+        },
+    )
+
+
+def _seed_exit_due_mnq_authority(root: Path) -> None:
+    position = {
+        "classification": "OPEN_MANAGED_EXIT_DUE",
+        "trade_id": "trade-1",
+        "lifecycle_id": "lifecycle-1",
+        "account_id": "DUM882026",
+        "symbol": "MNQ",
+        "local_symbol": "MNQM6",
+        "con_id": 770561201,
+        "quantity": "1",
+        "side": "SHORT",
+        "broker_position": {
+            "account_id": "DUM882026",
+            "symbol": "MNQ",
+            "local_symbol": "MNQM6",
+            "con_id": 770561201,
+            "quantity": "-1",
+        },
+        "lifecycle_position": {
+            "entry_exec_id": "0000e1a7.test.01.01",
+            "entry_perm_id": 1421894440,
+            "entry_broker_identity": {"exec_id": "0000e1a7.test.01.01", "perm_id": 1421894440},
+        },
+    }
+    _write(
+        root / "outputs/track_b_execution_core/managed_positions/latest_managed_positions.json",
+        {
+            "generated_at": NOW.isoformat(),
+            "classification": "OPEN_MANAGED_EXIT_DUE",
+            "managed_positions": [position],
+            "live_money_eligible": False,
+        },
+    )
+    _write(
+        root / "outputs/track_b_execution_core/managed_orders/latest_managed_orders.json",
+        {
+            "generated_at": NOW.isoformat(),
+            "classification": "POSITION_WITHOUT_CLOSE_ORDER",
+            "managed_orders": [
+                {
+                    "classification": "POSITION_WITHOUT_CLOSE_ORDER",
+                    "trade_id": "trade-1",
+                    "lifecycle_id": "lifecycle-1",
+                    "action": "BUY",
+                    "quantity": "1",
+                    "working": False,
+                }
+            ],
+            "summary": {"managed_order_count": 1},
+            "live_money_eligible": False,
+        },
+    )
+    _write(
+        root / "outputs/track_b_execution_core/broker_position_guardian/latest_broker_position_guardian.json",
+        {
+            "generated_at": NOW.isoformat(),
+            "classification": "BROKER_POSITION_GUARDIAN_READY",
+            "managed_close_authority": {
+                "classification": "BROKER_POSITION_GUARDIAN_CLOSE_ALLOWED_RISK_REDUCING",
+                "allowed": True,
+                "reason_codes": [],
+                "candidates": [
+                    {
+                        "trade_id": "trade-1",
+                        "lifecycle_id": "lifecycle-1",
+                        "account_id": "DUM882026",
+                        "symbol": "MNQ",
+                        "local_symbol": "MNQM6",
+                        "con_id": 770561201,
+                        "action": "BUY",
+                        "quantity": "1",
+                    }
+                ],
+            },
             "live_money_eligible": False,
         },
     )

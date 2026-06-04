@@ -19,6 +19,9 @@ from mgc_v05l.execution_core.track_b_broker_position_guardian import (
     BROKER_POSITION_GUARDIAN_HARD_HOLD,
     DEFAULT_BROKER_POSITION_GUARDIAN_ARTIFACT,
 )
+from mgc_v05l.execution_core.track_b_risk_reducing_close_authority import (
+    classify_runtime_stale_risk_reducing_close,
+)
 
 
 SAFE_STATE_NORMAL = "SAFE_STATE_NORMAL"
@@ -122,6 +125,13 @@ def build_track_b_runtime_safe_state_envelope(
     classification = _classify(inputs=inputs, tripped_limits=tripped_limits)
     posture = _posture(classification=classification, inputs=inputs, tripped_limits=tripped_limits)
     close_authority = _managed_close_authority(inputs=inputs, tripped_limits=tripped_limits)
+    runtime_stale_close_authority = classify_runtime_stale_risk_reducing_close(
+        control_plane_snapshot=inputs["control_plane_snapshot"],
+        guardian=inputs["broker_position_guardian"],
+        managed_position_registry=inputs["managed_position_registry"],
+        managed_order_registry=inputs["managed_order_registry"],
+        open_order_truth=inputs["open_order_truth"],
+    )
     control_plane = inputs["control_plane_snapshot"]
     runtime_generation_id = _runtime_generation_id(inputs)
     snapshot_id = str(control_plane.get("control_plane_snapshot_id") or "")
@@ -150,6 +160,10 @@ def build_track_b_runtime_safe_state_envelope(
         "managed_close_mutation_allowed": posture["managed_close_mutation_allowed"],
         "close_authority_reason_codes": close_authority["reason_codes"],
         "close_authority": close_authority,
+        "risk_reducing_close_authority": runtime_stale_close_authority,
+        "risk_reducing_close_classification": runtime_stale_close_authority["classification"],
+        "risk_reducing_close_allowed_runtime_stale": runtime_stale_close_authority["allowed"],
+        "risk_reducing_close_candidate": runtime_stale_close_authority.get("close_candidate") or {},
         "runtime_start_allowed": posture["runtime_start_allowed"],
         "submit_allowed": posture["submit_allowed"],
         "observe_only": posture["observe_only"],
@@ -494,12 +508,13 @@ def _posture(
             "observe_only": True,
             "recovery_only": False,
         }
+    runtime_stale_with_broker_exposure = _runtime_stale_with_broker_exposure(inputs["control_plane_snapshot"])
     return {
-        "broker_mutation_allowed": True,
-        "entry_mutation_allowed": True,
+        "broker_mutation_allowed": not runtime_stale_with_broker_exposure,
+        "entry_mutation_allowed": not runtime_stale_with_broker_exposure,
         "managed_close_mutation_allowed": True,
         "runtime_start_allowed": inputs["control_plane_snapshot"].get("safe_to_start_runtime") is True,
-        "submit_allowed": inputs["control_plane_snapshot"].get("safe_to_start_runtime") is True,
+        "submit_allowed": not runtime_stale_with_broker_exposure,
         "observe_only": False,
         "recovery_only": False,
     }
@@ -584,6 +599,14 @@ def _runtime_generation_id(inputs: Mapping[str, Mapping[str, Any]]) -> str:
         or resume.get("proposed_next_runtime_generation_id")
         or resume.get("previous_runtime_generation_id")
         or ""
+    )
+
+
+def _runtime_stale_with_broker_exposure(snapshot: Mapping[str, Any]) -> bool:
+    return (
+        snapshot.get("runtime_authority_stale_with_broker_exposure") is True
+        or str(snapshot.get("runtime_authority_exposure_classification") or "")
+        == "RUNTIME_AUTHORITY_STALE_WITH_BROKER_EXPOSURE"
     )
 
 
