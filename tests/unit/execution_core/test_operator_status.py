@@ -6,6 +6,10 @@ from pathlib import Path
 
 from mgc_v05l.execution_core.operator_status import OperatorStatusInputs, OperatorStatusVerdict, create_operator_status_summary
 from mgc_v05l.execution_core.operator_status_cli import main as operator_status_cli_main
+from mgc_v05l.execution_core.track_b_startup_phase_classifier import (
+    STARTED_NOT_SUBMIT_CAPABLE_AUTHORITY_PENDING,
+    TrackBStartupPhaseClassifierConfig,
+)
 
 
 def aware_now() -> datetime:
@@ -569,6 +573,80 @@ def readiness_summary(tmp_path: Path, **overrides: object) -> Path:
     return write_json(tmp_path / "readiness.json", payload)
 
 
+def write_startup_phase_artifacts(repo_root: Path, **overrides: dict[str, object]) -> TrackBStartupPhaseClassifierConfig:
+    config = TrackBStartupPhaseClassifierConfig(repo_root=repo_root)
+    now = aware_now().isoformat()
+    artifacts: dict[str, dict[str, object]] = {
+        "runtime_truth": {
+            "generated_at": now,
+            "process_alive": True,
+            "producer_pid": 1234,
+            "runtime_instance_id": "startup-phase-test",
+            "source_commit": "abc123",
+            "producer_root": str(repo_root),
+            "restart_generation": 1,
+            "lane_count": 2,
+            "heartbeat_state": "HEALTHY",
+        },
+        "pid_metadata": {
+            "generated_at": now,
+            "running": True,
+            "pid": 1234,
+            "runtime_instance_id": "startup-phase-test",
+            "source_commit": "abc123",
+            "producer_root": str(repo_root),
+            "restart_generation": 1,
+        },
+        "config_in_force": {
+            "generated_at": now,
+            "profile_id": "mnq_mes_full_session_active_evidence",
+            "config_fingerprint": "sha256:test",
+            "probationary_paper_runtime_exclusive_config": True,
+        },
+        "operator_status": {
+            "generated_at": now,
+            "expected_lane_count": 2,
+            "runtime_ingestion_fresh": True,
+            "lanes": [
+                {"lane_id": "mnq", "last_processed_bar_end_ts": now, "last_execution_bar_evaluated_at": now},
+                {"lane_id": "mes", "last_processed_bar_end_ts": now, "last_execution_bar_evaluated_at": now},
+            ],
+        },
+        "phase1_listener_status": {
+            "generated_at": now,
+            "classification": "READY_FOR_PROOF",
+            "fresh": True,
+            "latest_record_at": now,
+        },
+        "authority_refresh": {
+            "generated_at": now,
+            "classification": "AUTHORITY_REFRESH_STALE",
+            "fresh": False,
+        },
+        "canonical_readiness": {
+            "generated_at": now,
+            "canonical_readiness": "READY_SUBMIT_CAPABLE",
+            "submit_allowed": True,
+            "market_schedule_state": "MARKET_OPEN_EXPECT_FRESH_BARS",
+        },
+        "broker_reconciliation": {
+            "generated_at": now,
+            "classification": "TRACK_B_PAPER_BROKER_RECONCILED",
+        },
+    }
+    for key, value in overrides.items():
+        artifacts[key] = dict(value)
+    write_json(config.resolve(config.runtime_truth_path), artifacts["runtime_truth"])
+    write_json(config.resolve(config.pid_metadata_path), artifacts["pid_metadata"])
+    write_json(config.resolve(config.config_in_force_path), artifacts["config_in_force"])
+    write_json(config.resolve(config.operator_status_path), artifacts["operator_status"])
+    write_json(config.resolve(config.phase1_listener_status_path), artifacts["phase1_listener_status"])
+    write_json(config.resolve(config.authority_refresh_path), artifacts["authority_refresh"])
+    write_json(config.resolve(config.canonical_readiness_path), artifacts["canonical_readiness"])
+    write_json(config.resolve(config.broker_reconciliation_path), artifacts["broker_reconciliation"])
+    return config
+
+
 def test_listener_health_ok_produces_ok_for_shadow_review(tmp_path: Path) -> None:
     result = create_operator_status_summary(
         inputs=OperatorStatusInputs(
@@ -594,6 +672,37 @@ def test_listener_health_ok_produces_ok_for_shadow_review(tmp_path: Path) -> Non
     latest_payload = json.loads(latest_report.read_text(encoding="utf-8"))
     assert latest_payload["operator_status_id"] == "status-ok"
     assert latest_payload["report_json_path"] == str(result.report_json)
+
+
+def test_operator_status_surfaces_startup_phase_as_diagnostic_only(tmp_path: Path) -> None:
+    startup_config = write_startup_phase_artifacts(tmp_path)
+
+    result = create_operator_status_summary(
+        inputs=OperatorStatusInputs(
+            listener_health_json=listener_health(tmp_path),
+            startup_phase_config=startup_config,
+            output_root=tmp_path / "operator_status",
+        ),
+        status_id="status-startup-phase",
+        now=aware_now(),
+    )
+
+    assert result.report["track_b_startup_phase_classification"] == STARTED_NOT_SUBMIT_CAPABLE_AUTHORITY_PENDING
+    assert result.report["track_b_startup_phase"] == "RUNTIME_INGESTION_ADVANCING"
+    diagnostic = result.report["track_b_startup_phase_diagnostic"]
+    assert diagnostic["startup_grants_submit_authority"] is False
+    assert diagnostic["submit_authority"] is False
+    assert diagnostic["broker_mutation_allowed"] is False
+    assert diagnostic["paper_proof_invoked"] is False
+    assert diagnostic["live_money_eligible"] is False
+    assert result.report["track_b_startup_phase_broker_mutation_allowed"] is False
+    assert result.report["track_b_startup_phase_paper_proof_invoked"] is False
+    assert result.report["track_b_startup_phase_live_money_eligible"] is False
+    assert result.report["submit_allowed"] is False
+    assert result.report["submit_attempted"] is False
+    assert result.report["live_money_readiness"] is False
+    assert result.report["paper_proof_cli_called"] is False
+    assert result.report["broker_connection_attempted"] is False
 
 
 def test_listener_heartbeat_is_summarized_for_watch_mode(tmp_path: Path) -> None:

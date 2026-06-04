@@ -17,6 +17,10 @@ from typing import Any, Mapping
 
 from .models import require_aware_datetime, to_jsonable
 from .track_b_paper_trade_ledger import DEFAULT_TRACK_B_PAPER_TRADE_LEDGER_OUTPUT_ROOT
+from .track_b_startup_phase_classifier import (
+    TrackBStartupPhaseClassifierConfig,
+    classify_track_b_startup_phase,
+)
 
 
 DEFAULT_OPERATOR_STATUS_OUTPUT_ROOT = Path("outputs/track_b_execution_core/operator_status")
@@ -67,6 +71,7 @@ class OperatorStatusInputs:
     track_b_paper_trade_summary_json: Path | None = DEFAULT_TRACK_B_PAPER_TRADE_SUMMARY_JSON
     track_b_live_position_status_json: Path | None = DEFAULT_TRACK_B_LIVE_POSITION_STATUS_JSON
     track_b_pnl_summary_json: Path | None = DEFAULT_TRACK_B_PNL_SUMMARY_JSON
+    startup_phase_config: TrackBStartupPhaseClassifierConfig | None = None
     output_root: Path = DEFAULT_OPERATOR_STATUS_OUTPUT_ROOT
 
 
@@ -148,7 +153,17 @@ def _load_reports(inputs: OperatorStatusInputs) -> dict[str, dict[str, Any] | No
             inputs.track_b_pnl_summary_json,
             DEFAULT_TRACK_B_PNL_SUMMARY_JSON,
         ),
+        "track_b_startup_phase": _startup_phase_status(inputs),
     }
+
+
+def _startup_phase_status(inputs: OperatorStatusInputs) -> dict[str, Any] | None:
+    config = inputs.startup_phase_config
+    if config is None:
+        if Path(inputs.output_root) != DEFAULT_OPERATOR_STATUS_OUTPUT_ROOT:
+            return None
+        config = TrackBStartupPhaseClassifierConfig(repo_root=Path("."))
+    return classify_track_b_startup_phase(config=config)
 
 
 def _classify(reports: Mapping[str, Mapping[str, Any] | None]) -> tuple[OperatorStatusVerdict, str | None, str]:
@@ -390,6 +405,7 @@ def _report(
     track_b_paper_trade_summary = reports.get("track_b_paper_trade_summary") or {}
     track_b_live_position_status = reports.get("track_b_live_position_status") or {}
     track_b_pnl_summary = reports.get("track_b_pnl_summary") or {}
+    track_b_startup_phase = reports.get("track_b_startup_phase") or {}
     latest_output_paths = {
         "backend_health": backend_health.get("report_json_path") or backend_health.get("health_json_path") or backend_health.get("info_file"),
         "listener_heartbeat": listener_heartbeat.get("heartbeat_json_path"),
@@ -463,6 +479,22 @@ def _report(
         "generated_at": now.isoformat(),
         "operator_status_id": status_id,
         "status_verdict": verdict.value,
+        "track_b_startup_phase": track_b_startup_phase.get("phase") or NOT_PROVIDED,
+        "track_b_startup_phase_classification": track_b_startup_phase.get("classification") or NOT_PROVIDED,
+        "track_b_startup_phase_next_expected_phase": track_b_startup_phase.get("next_expected_phase") or NOT_PROVIDED,
+        "track_b_startup_phase_diagnostic": track_b_startup_phase or NOT_PROVIDED,
+        "track_b_startup_phase_submit_authority": (
+            track_b_startup_phase.get("submit_authority") if track_b_startup_phase else NOT_PROVIDED
+        ),
+        "track_b_startup_phase_broker_mutation_allowed": (
+            track_b_startup_phase.get("broker_mutation_allowed") if track_b_startup_phase else NOT_PROVIDED
+        ),
+        "track_b_startup_phase_paper_proof_invoked": (
+            track_b_startup_phase.get("paper_proof_invoked") if track_b_startup_phase else NOT_PROVIDED
+        ),
+        "track_b_startup_phase_live_money_eligible": (
+            track_b_startup_phase.get("live_money_eligible") if track_b_startup_phase else NOT_PROVIDED
+        ),
         "backend_health_status": _backend_health_status(backend_health) or NOT_PROVIDED,
         "backend_health_ready": _backend_health_ready(backend_health) if backend_health else NOT_PROVIDED,
         "backend_health_url": backend_health.get("url") or backend_health.get("configured_url") or NOT_PROVIDED,
@@ -928,11 +960,15 @@ def _readiness_check_runner_ready_for_paper_proof_review(report: Mapping[str, An
 
 
 def _all_missing(reports: Mapping[str, Mapping[str, Any] | None]) -> bool:
-    return all(report is None for report in reports.values())
+    return all(report is None for name, report in reports.items() if name != "track_b_startup_phase")
 
 
 def _all_track_b_runtime_reports_missing(reports: Mapping[str, Mapping[str, Any] | None]) -> bool:
-    return all(report is None for name, report in reports.items() if name != "backend_health")
+    return all(
+        report is None
+        for name, report in reports.items()
+        if name not in {"backend_health", "track_b_startup_phase"}
+    )
 
 
 def _backend_health_ok(report: Mapping[str, Any]) -> bool:
