@@ -476,15 +476,11 @@ def _position_without_close_rows(
                 broker_open_orders=broker_open_orders,
             )
         manifest = _manifest_for_position(position=position, lifecycle_report=lifecycle_report, manifests=manifests)
-        active_hold_pending = (
-            (
-                str(position.get("position_without_close_source") or "") != "OPEN_ORDER_TRUTH_BROKER_POSITION_WITHOUT_CLOSE_ORDER"
-                or (
-                    str(registry_position.get("_managed_order_registry_position_source") or "") == "MANAGED_POSITION_AUTHORITY"
-                    and str(registry_position.get("projection_authority_source") or "") != "CURRENT_EXPOSURE_OWNER_RESOLVER"
-                )
-            )
-            and _active_hold_managed_timed_exit_pending(registry_position=registry_position)
+        active_hold_pending = _position_without_close_can_remain_active_hold(
+            position=position,
+            registry_position=registry_position,
+            reconciliation=reconciliation,
+            resolver_payload=resolver_payload,
         )
         classification = ACTIVE_HOLD_MANAGED_TIMED_EXIT_PENDING if active_hold_pending else POSITION_WITHOUT_CLOSE_ORDER
         rows.append(
@@ -992,6 +988,64 @@ def _active_hold_managed_timed_exit_pending(*, registry_position: Mapping[str, A
     if _mapping(registry_position.get("close_order_state")):
         return False
     return bool(registry_position.get("lifecycle_id"))
+
+
+def _position_without_close_can_remain_active_hold(
+    *,
+    position: Mapping[str, Any],
+    registry_position: Mapping[str, Any],
+    reconciliation: Mapping[str, Any],
+    resolver_payload: Mapping[str, Any],
+) -> bool:
+    if not _active_hold_managed_timed_exit_pending(registry_position=registry_position):
+        return False
+    if str(position.get("position_without_close_source") or "") != "OPEN_ORDER_TRUTH_BROKER_POSITION_WITHOUT_CLOSE_ORDER":
+        return True
+    if str(registry_position.get("_managed_order_registry_position_source") or "") != "MANAGED_POSITION_AUTHORITY":
+        return False
+    projection_source = str(registry_position.get("projection_authority_source") or "")
+    if projection_source != "CURRENT_EXPOSURE_OWNER_RESOLVER":
+        return True
+    if not _reconciliation_clean_current_scope(reconciliation):
+        return False
+    if _resolver_has_unowned_or_review_exposure(resolver_payload):
+        return False
+    return _broker_backed_matched_position(registry_position)
+
+
+def _reconciliation_clean_current_scope(reconciliation: Mapping[str, Any]) -> bool:
+    if reconciliation.get("broker_reconciled") is not True:
+        return False
+    if str(reconciliation.get("classification") or "") != "TRACK_B_PAPER_BROKER_RECONCILED":
+        return False
+    if int(reconciliation.get("current_scope_review_required_count") or 0) != 0:
+        return False
+    if int(reconciliation.get("review_required_count") or 0) != 0:
+        return False
+    if reconciliation.get("blockers"):
+        return False
+    broker_position_count = int(reconciliation.get("track_b_broker_position_count") or 0)
+    lifecycle_position_count = int(reconciliation.get("lifecycle_open_position_count") or 0)
+    if broker_position_count > 0 and lifecycle_position_count != broker_position_count:
+        return False
+    return True
+
+
+def _resolver_has_unowned_or_review_exposure(resolver_payload: Mapping[str, Any]) -> bool:
+    if not resolver_payload:
+        return False
+    if _list(resolver_payload.get("unowned_exposures")):
+        return True
+    if _list(resolver_payload.get("review_required_exposures")):
+        return True
+    try:
+        return int(resolver_payload.get("review_required_exposure_count") or 0) > 0
+    except (TypeError, ValueError):
+        return True
+
+
+def _broker_backed_matched_position(registry_position: Mapping[str, Any]) -> bool:
+    return registry_position.get("projection_authority_owner_confirmed") is True
 
 
 def _manifest_for_order(

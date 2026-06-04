@@ -378,6 +378,175 @@ def test_managed_order_uses_current_owner_when_managed_position_artifact_is_stal
     assert row["close_order_required_now"] is True
 
 
+def test_owner_repaired_matched_position_with_policy_remains_active_hold(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    broker_position = {
+        "account_id": "DUM882026",
+        "symbol": "MES",
+        "local_symbol": "MESM6",
+        "con_id": 770561194,
+        "quantity": "1",
+    }
+    fresh_lifecycle = {
+        "classification": "OPEN_MANAGED_MATCHED",
+        "trade_id": "trade_fresh_us_owner",
+        "lifecycle_id": "fresh_us_lifecycle",
+        "symbol": "MES",
+        "local_symbol": "MESM6",
+        "con_id": 770561194,
+        "side": "LONG",
+        "quantity": "1",
+        "aggregate_qty": "1",
+        "lane_id": "mes_us_active_participation_long",
+        "strategy_id": "mes_us_active_participation_long",
+        "managed_exit_policy_id": "US_ACTIVE_EVIDENCE_TIMEBOX_60M_EXIT_V1",
+        "exit_due": False,
+        "attention_required": False,
+    }
+    _seed_base(tmp_path, positions_without_close=[broker_position], managed_positions=[])
+    reconciliation_path = (
+        tmp_path
+        / "outputs"
+        / "reports"
+        / "track_b_paper_broker_reconciliation"
+        / "latest_track_b_paper_broker_reconciliation.json"
+    )
+    reconciliation = json.loads(reconciliation_path.read_text(encoding="utf-8"))
+    reconciliation["lifecycle_open_position_count"] = 1
+    reconciliation["track_b_lifecycle_positions"] = [fresh_lifecycle]
+    reconciliation["track_b_broker_positions"] = [broker_position]
+    _write_json(reconciliation_path, reconciliation)
+    monkeypatch.setattr(
+        managed_order_registry_module,
+        "resolve_pre_restart_exposure_reconciliation",
+        lambda **_kwargs: _owner_resolution_payload(
+            broker_position=broker_position,
+            lifecycle_position=fresh_lifecycle,
+        ),
+    )
+
+    payload = build_track_b_managed_order_registry(
+        config=TrackBManagedOrderRegistryConfig(repo_root=tmp_path),
+        now=NOW,
+    )
+
+    assert payload["classification"] == ACTIVE_HOLD_MANAGED_TIMED_EXIT_PENDING
+    row = payload["managed_orders"][0]
+    assert row["classification"] == ACTIVE_HOLD_MANAGED_TIMED_EXIT_PENDING
+    assert row["trade_id"] == "trade_fresh_us_owner"
+    assert row["managed_exit_profile_present"] is True
+    assert row["close_order_required_now"] is False
+
+
+def test_owner_repaired_matched_position_without_policy_still_requires_review(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    broker_position = {
+        "account_id": "DUM882026",
+        "symbol": "MES",
+        "local_symbol": "MESM6",
+        "con_id": 770561194,
+        "quantity": "1",
+    }
+    repaired_lifecycle = {
+        "classification": "OPEN_MANAGED_MATCHED",
+        "trade_id": "trade_fresh_us_owner",
+        "lifecycle_id": "fresh_us_lifecycle",
+        "symbol": "MES",
+        "local_symbol": "MESM6",
+        "con_id": 770561194,
+        "side": "LONG",
+        "quantity": "1",
+        "aggregate_qty": "1",
+        "lane_id": "mes_us_active_participation_long",
+        "strategy_id": "mes_us_active_participation_long",
+        "exit_due": False,
+        "attention_required": False,
+    }
+    _seed_base(tmp_path, positions_without_close=[broker_position], managed_positions=[])
+    monkeypatch.setattr(
+        managed_order_registry_module,
+        "resolve_pre_restart_exposure_reconciliation",
+        lambda **_kwargs: _owner_resolution_payload(
+            broker_position=broker_position,
+            lifecycle_position=repaired_lifecycle,
+        ),
+    )
+
+    payload = build_track_b_managed_order_registry(
+        config=TrackBManagedOrderRegistryConfig(repo_root=tmp_path),
+        now=NOW,
+    )
+
+    row = payload["managed_orders"][0]
+    assert payload["classification"] == POSITION_WITHOUT_CLOSE_ORDER
+    assert row["classification"] == POSITION_WITHOUT_CLOSE_ORDER
+    assert row["managed_exit_profile_present"] is False
+    assert row["close_order_required_now"] is True
+
+
+def test_owner_repaired_matched_position_with_current_review_still_blocks(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    broker_position = {
+        "account_id": "DUM882026",
+        "symbol": "MES",
+        "local_symbol": "MESM6",
+        "con_id": 770561194,
+        "quantity": "1",
+    }
+    repaired_lifecycle = {
+        "classification": "OPEN_MANAGED_MATCHED",
+        "trade_id": "trade_fresh_us_owner",
+        "lifecycle_id": "fresh_us_lifecycle",
+        "symbol": "MES",
+        "local_symbol": "MESM6",
+        "con_id": 770561194,
+        "side": "LONG",
+        "quantity": "1",
+        "aggregate_qty": "1",
+        "lane_id": "mes_us_active_participation_long",
+        "strategy_id": "mes_us_active_participation_long",
+        "managed_exit_policy_id": "US_ACTIVE_EVIDENCE_TIMEBOX_60M_EXIT_V1",
+        "exit_due": False,
+        "attention_required": False,
+    }
+    _seed_base(tmp_path, positions_without_close=[broker_position], managed_positions=[])
+    reconciliation_path = (
+        tmp_path
+        / "outputs"
+        / "reports"
+        / "track_b_paper_broker_reconciliation"
+        / "latest_track_b_paper_broker_reconciliation.json"
+    )
+    reconciliation = json.loads(reconciliation_path.read_text(encoding="utf-8"))
+    reconciliation["current_scope_review_required_count"] = 1
+    _write_json(reconciliation_path, reconciliation)
+    monkeypatch.setattr(
+        managed_order_registry_module,
+        "resolve_pre_restart_exposure_reconciliation",
+        lambda **_kwargs: _owner_resolution_payload(
+            broker_position=broker_position,
+            lifecycle_position=repaired_lifecycle,
+        ),
+    )
+
+    payload = build_track_b_managed_order_registry(
+        config=TrackBManagedOrderRegistryConfig(repo_root=tmp_path),
+        now=NOW,
+    )
+
+    row = payload["managed_orders"][0]
+    assert payload["classification"] == POSITION_WITHOUT_CLOSE_ORDER
+    assert row["classification"] == POSITION_WITHOUT_CLOSE_ORDER
+    assert row["managed_exit_profile_present"] is False
+    assert row["close_order_required_now"] is True
+
+
 def test_canonical_exit_due_position_dedupes_open_order_truth_missing_con_id(tmp_path: Path) -> None:
     managed_position = {
         "classification": "OPEN_MANAGED_EXIT_DUE",
@@ -629,6 +798,28 @@ def _broker_position() -> dict:
         "con_id": 770561201,
         "quantity": "1",
         "average_cost": "59138.12",
+    }
+
+
+def _owner_resolution_payload(*, broker_position: dict, lifecycle_position: dict) -> dict:
+    return {
+        "classification": "OWNED_MANAGED_EXPOSURE",
+        "owned_exposure_count": 1,
+        "review_required_exposure_count": 0,
+        "owned_exposures": [
+            {
+                "classification": "OWNED_MANAGED_EXPOSURE",
+                "broker_position": broker_position,
+                "canonical_broker_position": broker_position,
+                "lifecycle_position": lifecycle_position,
+                "trade_id": lifecycle_position["trade_id"],
+                "lifecycle_id": lifecycle_position["lifecycle_id"],
+                "exit_due": lifecycle_position.get("exit_due") is True,
+                "reason_codes": ["NEWEST_EXACT_BROKER_BACKED_LIFECYCLE_REPORT_SELECTED"],
+            }
+        ],
+        "review_required_exposures": [],
+        "resolved_lifecycle_positions": [lifecycle_position],
     }
 
 

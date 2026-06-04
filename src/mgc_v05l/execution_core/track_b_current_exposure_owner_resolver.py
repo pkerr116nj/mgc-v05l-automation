@@ -569,6 +569,8 @@ def _select_broker_backed_lifecycle_report_owner(
     )
     if expired_candidates and not candidates:
         return {}
+    candidates, duplicate_diagnostic_only = _dedupe_same_fill_lifecycle_report_owner_candidates(candidates)
+    expired_candidates.extend(duplicate_diagnostic_only)
     ranked = sorted(
         candidates,
         key=lambda item: item.get("fill_time") or datetime.min.replace(tzinfo=timezone.utc),
@@ -600,6 +602,116 @@ def _select_broker_backed_lifecycle_report_owner(
         ],
         "expired_diagnostic_only": expired_candidates,
     }
+
+
+def _dedupe_same_fill_lifecycle_report_owner_candidates(
+    candidates: Sequence[Mapping[str, Any]],
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    grouped: dict[str, list[dict[str, Any]]] = {}
+    ungrouped: list[dict[str, Any]] = []
+    for candidate in candidates:
+        row = dict(candidate)
+        key = _lifecycle_report_owner_fill_identity(row)
+        if not key:
+            ungrouped.append(row)
+            continue
+        grouped.setdefault(key, []).append(row)
+
+    active: list[dict[str, Any]] = list(ungrouped)
+    diagnostic: list[dict[str, Any]] = []
+    for key, rows in grouped.items():
+        if len(rows) == 1:
+            active.append(rows[0])
+            continue
+        winner = _canonical_lifecycle_report_owner_candidate(rows)
+        if winner is None:
+            active.extend(rows)
+            continue
+        active.append(winner)
+        for row in rows:
+            if row is winner:
+                continue
+            diagnostic.append(
+                {
+                    "classification": EXPIRED_DIAGNOSTIC_ONLY,
+                    "reason_codes": [
+                        "DUPLICATE_EXACT_BROKER_FILL_LIFECYCLE_REPORT_OWNER_COLLAPSED",
+                        "BRIDGE_FILL_ALIAS_OR_DUPLICATE_REPORT_SCOPED_FULL_AUDIT_ONLY",
+                    ],
+                    "authority_scope": key,
+                    "trade_id": row["record"].trade_id,
+                    "lifecycle_id": _report_lifecycle_id(row.get("report") or {}),
+                    "candidate_observed_at": row.get("fill_time").isoformat()
+                    if isinstance(row.get("fill_time"), datetime)
+                    else None,
+                    "current_scope_authority": False,
+                    "diagnostic_only": True,
+                }
+            )
+    return active, diagnostic
+
+
+def _canonical_lifecycle_report_owner_candidate(rows: Sequence[dict[str, Any]]) -> dict[str, Any] | None:
+    if not rows:
+        return None
+    trade_ids = {str(row["record"].trade_id or "") for row in rows}
+    if len(trade_ids) != 1:
+        return None
+    exact_lifecycle_matches = [
+        row
+        for row in rows
+        if row["record"].ownership_identity is not None
+        and _report_lifecycle_id(row.get("report") or {}) == row["record"].ownership_identity.lifecycle_id
+    ]
+    if exact_lifecycle_matches:
+        return exact_lifecycle_matches[-1]
+    non_bridge = [
+        row for row in rows if not _report_lifecycle_id(row.get("report") or {}).startswith("bridge_fill_")
+    ]
+    if non_bridge:
+        return non_bridge[-1]
+    return rows[-1]
+
+
+def _lifecycle_report_owner_fill_identity(candidate: Mapping[str, Any]) -> str:
+    record = candidate.get("record")
+    report = candidate.get("report")
+    event = candidate.get("event")
+    if not isinstance(report, Mapping) or record is None or event is None:
+        return ""
+    fill = _entry_fill(report)
+    owner = record.ownership_identity
+    if owner is None:
+        return ""
+    account = str(getattr(event, "account_id", "") or report.get("account_id") or owner.account_id or "").strip().upper()
+    local_symbol = str(getattr(event, "local_symbol", "") or report.get("local_symbol") or owner.local_symbol or "").strip().upper()
+    con_id = str(getattr(event, "con_id", "") or report.get("con_id") or owner.con_id or "").strip()
+    order_id = str(fill.get("order_id") or getattr(event, "order_id", "") or "").strip()
+    perm_id = str(fill.get("perm_id") or getattr(event, "perm_id", "") or "").strip()
+    exec_id = str(fill.get("exec_id") or getattr(event, "exec_id", "") or "").strip()
+    qty = _signed_report_qty(report)
+    return "|".join(
+        [
+            account,
+            con_id,
+            local_symbol,
+            _entry_side_from_report(report, fill),
+            _decimal_display(qty) or "",
+            order_id,
+            perm_id,
+            exec_id,
+            str(record.trade_id or ""),
+        ]
+    )
+
+
+def _report_lifecycle_id(report: Mapping[str, Any]) -> str:
+    entry_intent = report.get("entry_intent")
+    return str(
+        report.get("lifecycle_id")
+        or (entry_intent.get("lifecycle_id") if isinstance(entry_intent, Mapping) else "")
+        or ""
+    ).strip()
 
 
 def _record_has_order_matching_lifecycle_fill(

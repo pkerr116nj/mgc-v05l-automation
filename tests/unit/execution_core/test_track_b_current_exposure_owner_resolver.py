@@ -292,6 +292,180 @@ def test_fresh_submit_owner_with_exact_lifecycle_fill_beats_stale_same_contract_
     assert payload["stale_superseded_full_audit_only"][0]["trade_id"] == "trade_submit_owner_mes_globex_short"
 
 
+def test_same_fill_duplicate_lifecycle_report_owners_collapse_to_one_owner(tmp_path: Path) -> None:
+    trade_id = "trade_current_mnq"
+    lifecycle_id = "reserved_submit_mnq_us_active_participation_long_20260604T144415893875Z_89996348b109"
+    current = _submit_owner_record(
+        trade_id=trade_id,
+        lifecycle_id=lifecycle_id,
+        generated_at=NOW,
+        symbol="MNQ",
+        local_symbol="MNQM6",
+        con_id=770561201,
+        order_id="1",
+        client_id="10887",
+        perm_id="1092553520",
+    )
+    filled_at = NOW + timedelta(seconds=2)
+    _write_lifecycle_report(
+        tmp_path,
+        "bridge_fill_MNQ|1m|2026-06-04T14:43:00Z|BUY_TO_OPEN",
+        _lifecycle_report(
+            trade_id=trade_id,
+            lifecycle_id="bridge_fill_MNQ|1m|2026-06-04T14:43:00Z|BUY_TO_OPEN",
+            symbol="MNQ",
+            local_symbol="MNQM6",
+            con_id=770561201,
+            order_id="1",
+            perm_id="1092553520",
+            exec_id="0000e1a7.6a3488ea.01.01",
+            filled_at=filled_at,
+            lane_id="mnq_us_active_participation_long",
+        ),
+    )
+    _write_lifecycle_report(
+        tmp_path,
+        lifecycle_id,
+        _lifecycle_report(
+            trade_id=trade_id,
+            lifecycle_id=lifecycle_id,
+            symbol="MNQ",
+            local_symbol="MNQM6",
+            con_id=770561201,
+            order_id="1",
+            perm_id="1092553520",
+            exec_id="0000e1a7.6a3488ea.01.01",
+            filled_at=filled_at,
+            lane_id="mnq_us_active_participation_long",
+        ),
+    )
+
+    payload = resolve_current_exposure_ownership(
+        config=CurrentExposureOwnerResolverConfig(repo_root=tmp_path),
+        broker_positions=[_broker_position(quantity="1")],
+        registry_records=[current],
+    )
+
+    assert payload["classification"] == OWNED_MANAGED_EXPOSURE
+    assert payload["owned_exposure_count"] == 1
+    assert payload["review_required_exposure_count"] == 0
+    exposure = payload["owned_exposures"][0]
+    assert exposure["trade_id"] == trade_id
+    assert exposure["lifecycle_id"] == lifecycle_id
+    diagnostic = payload["stale_superseded_full_audit_only"]
+    assert any(
+        "DUPLICATE_EXACT_BROKER_FILL_LIFECYCLE_REPORT_OWNER_COLLAPSED" in row.get("reason_codes", [])
+        for row in diagnostic
+    )
+
+
+def test_conflicting_same_timestamp_lifecycle_report_owners_still_fail_closed(tmp_path: Path) -> None:
+    first = _submit_owner_record(
+        trade_id="trade_current_mnq_one",
+        lifecycle_id="life_current_mnq_one",
+        generated_at=NOW,
+        symbol="MNQ",
+        local_symbol="MNQM6",
+        con_id=770561201,
+        order_id="1",
+        client_id="10887",
+        perm_id="1092553520",
+    )
+    second = _submit_owner_record(
+        trade_id="trade_current_mnq_two",
+        lifecycle_id="life_current_mnq_two",
+        generated_at=NOW,
+        symbol="MNQ",
+        local_symbol="MNQM6",
+        con_id=770561201,
+        order_id="2",
+        client_id="10887",
+        perm_id="1092553521",
+    )
+    filled_at = NOW + timedelta(seconds=2)
+    _write_lifecycle_report(
+        tmp_path,
+        "life_current_mnq_one",
+        _lifecycle_report(
+            trade_id="trade_current_mnq_one",
+            lifecycle_id="life_current_mnq_one",
+            symbol="MNQ",
+            local_symbol="MNQM6",
+            con_id=770561201,
+            order_id="1",
+            perm_id="1092553520",
+            exec_id="exec_one",
+            filled_at=filled_at,
+            lane_id="mnq_us_active_participation_long",
+        ),
+    )
+    _write_lifecycle_report(
+        tmp_path,
+        "life_current_mnq_two",
+        _lifecycle_report(
+            trade_id="trade_current_mnq_two",
+            lifecycle_id="life_current_mnq_two",
+            symbol="MNQ",
+            local_symbol="MNQM6",
+            con_id=770561201,
+            order_id="2",
+            perm_id="1092553521",
+            exec_id="exec_two",
+            filled_at=filled_at,
+            lane_id="mnq_us_active_participation_long",
+        ),
+    )
+
+    payload = resolve_current_exposure_ownership(
+        config=CurrentExposureOwnerResolverConfig(repo_root=tmp_path),
+        broker_positions=[_broker_position(quantity="1")],
+        registry_records=[first, second],
+    )
+
+    assert payload["classification"] == AMBIGUOUS_EXPOSURE_OWNERSHIP
+    assert payload["owned_exposure_count"] == 0
+    assert payload["review_required_exposures"][0]["reason_codes"] == [
+        "MULTIPLE_EXACT_BROKER_BACKED_LIFECYCLE_REPORT_OWNERS"
+    ]
+
+
+def test_distinct_mnq_mes_current_positions_resolve_as_separate_owned_exposures(tmp_path: Path) -> None:
+    mnq = _registry_record(
+        trade_id="trade_current_mnq",
+        lifecycle_id="life_current_mnq",
+        generated_at=NOW,
+        exit_due=False,
+        symbol="MNQ",
+        local_symbol="MNQM6",
+        con_id=770561201,
+    )
+    mes = _registry_record(
+        trade_id="trade_current_mes",
+        lifecycle_id="life_current_mes",
+        generated_at=NOW,
+        exit_due=False,
+        symbol="MES",
+        local_symbol="MESM6",
+        con_id=770561194,
+    )
+    mes_position = _broker_position(quantity="-1")
+    mes_position.update({"symbol": "MES", "track_b_root": "MES", "local_symbol": "MESM6", "con_id": 770561194})
+
+    payload = resolve_current_exposure_ownership(
+        config=CurrentExposureOwnerResolverConfig(repo_root=tmp_path),
+        broker_positions=[_broker_position(quantity="-1"), mes_position],
+        registry_records=[mnq, mes],
+    )
+
+    assert payload["classification"] == OWNED_MANAGED_EXPOSURE
+    assert payload["owned_exposure_count"] == 2
+    assert payload["review_required_exposure_count"] == 0
+    assert {row["trade_id"] for row in payload["owned_exposures"]} == {
+        "trade_current_mnq",
+        "trade_current_mes",
+    }
+
+
 def _registry_record(
     *,
     trade_id: str,
@@ -429,6 +603,19 @@ def _lifecycle_report(
             "quantity": "1",
         },
     }
+
+
+def _write_lifecycle_report(root: Path, lifecycle_id: str, payload: dict) -> None:
+    report_path = (
+        root
+        / "outputs"
+        / "track_b_execution_core"
+        / "track_b_strategy_managed_paper_lifecycle"
+        / lifecycle_id
+        / "track_b_strategy_managed_paper_lifecycle_report.json"
+    )
+    report_path.parent.mkdir(parents=True, exist_ok=True)
+    report_path.write_text(json.dumps(payload), encoding="utf-8")
 
 
 def _event(
