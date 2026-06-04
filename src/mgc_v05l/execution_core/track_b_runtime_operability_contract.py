@@ -15,10 +15,11 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, Mapping, Sequence
+from typing import Any, Callable, Mapping, Sequence
 
 from mgc_v05l.execution_core.models import to_jsonable
 from mgc_v05l.execution_core.track_b_atomic_io import write_json_atomic
@@ -134,6 +135,7 @@ def build_runtime_operability_contract(
     *,
     config: RuntimeOperabilityConfig,
     now: datetime | None = None,
+    process_probe: Callable[[int], Mapping[str, Any]] | None = None,
 ) -> dict[str, Any]:
     actual_now = _ensure_utc(now or datetime.now(UTC))
     surfaces = build_runtime_authority_map(config=config, now=actual_now)
@@ -146,6 +148,7 @@ def build_runtime_operability_contract(
         surfaces=surfaces,
         payloads=payloads,
         now=actual_now,
+        process_probe=process_probe,
     )
     return {
         "schema_version": "track_b_runtime_operability_contract_v1",
@@ -303,6 +306,7 @@ def classify_runtime_operability(
     surfaces: Mapping[str, Mapping[str, Any]],
     payloads: Mapping[str, Mapping[str, Any]],
     now: datetime | None = None,
+    process_probe: Callable[[int], Mapping[str, Any]] | None = None,
 ) -> dict[str, Any]:
     _ = now
     blockers: list[dict[str, Any]] = []
@@ -420,6 +424,15 @@ def classify_runtime_operability(
         runtime_running = runtime_truth.get("process_running")
     if runtime_running is None:
         runtime_running = _runtime_truth_implies_running(runtime_truth)
+    runtime_process_probe = _runtime_process_probe(runtime_truth, process_probe=process_probe)
+    if runtime_process_probe.get("pid") is not None and runtime_process_probe.get("running") is False:
+        if runtime_running is True:
+            warn(
+                "runtime_pid_not_alive",
+                "Runtime truth claimed a healthy PID, but the process table no longer has that PID.",
+                "runtime_truth",
+            )
+        runtime_running = False
     lane_count = _int(config.get("lane_count"), default=None)
     if lane_count is None:
         lanes = config.get("lanes") or config.get("enabled_lanes") or []
@@ -494,6 +507,7 @@ def classify_runtime_operability(
         "runtime_summary": {
             "running": runtime_running,
             "pid": runtime_truth.get("producer_pid") or runtime_truth.get("pid"),
+            "process_probe": runtime_process_probe,
             "lane_count": runtime_lane_count or lane_count,
             "heartbeat_state": runtime_truth.get("heartbeat_state"),
             "freshness_state": runtime_truth.get("freshness_state"),
@@ -558,6 +572,32 @@ def _runtime_truth_implies_running(runtime_truth: Mapping[str, Any]) -> bool | N
     if heartbeat in {"STOPPED", "DEAD", "MISSING"}:
         return False
     return None
+
+
+def _runtime_process_probe(
+    runtime_truth: Mapping[str, Any],
+    *,
+    process_probe: Callable[[int], Mapping[str, Any]] | None,
+) -> dict[str, Any]:
+    pid = _int(runtime_truth.get("producer_pid") or runtime_truth.get("pid"), default=None)
+    if pid is None:
+        return {"pid": None, "running": None, "source": "runtime_truth_missing_pid"}
+    probe = process_probe or _default_process_probe
+    try:
+        raw = dict(probe(pid))
+    except Exception as exc:  # pragma: no cover - defensive status path
+        return {"pid": pid, "running": None, "source": "process_probe_exception", "error": str(exc)}
+    return {"pid": pid, "running": raw.get("running") is True, "source": raw.get("source") or "process_probe"}
+
+
+def _default_process_probe(pid: int) -> dict[str, Any]:
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return {"running": False, "source": "os.kill"}
+    except PermissionError:
+        return {"running": True, "source": "os.kill_permission_only"}
+    return {"running": True, "source": "os.kill"}
 
 
 def _freshness(path: Path, *, now: datetime, stale_after_seconds: float | None) -> dict[str, Any]:

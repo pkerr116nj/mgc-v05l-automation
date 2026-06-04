@@ -17,6 +17,7 @@ TOP_LINE_HARD_UNSAFE_SAFE_STATE = "HARD_UNSAFE_SAFE_STATE"
 TOP_LINE_MISSING_AUTHORITY_ARTIFACT = "MISSING_AUTHORITY_ARTIFACT"
 TOP_LINE_CONTROL_PLANE_BLOCKED = "CONTROL_PLANE_BLOCKED"
 TOP_LINE_CONTROL_PLANE_STATUS = "CONTROL_PLANE_STATUS"
+TOP_LINE_RUNTIME_ACTIVE_HEALTHY = "RUNTIME_ACTIVE_HEALTHY"
 
 
 def build_track_b_control_plane_top_line(snapshot: Mapping[str, Any]) -> dict[str, Any]:
@@ -26,8 +27,9 @@ def build_track_b_control_plane_top_line(snapshot: Mapping[str, Any]) -> dict[st
     supervisor_mode = _text(snapshot.get("supervisor_mode"))
     supervisor_classification = _text(snapshot.get("runtime_supervisor_classification"))
     primary_blocking_agent_id = _text(snapshot.get("primary_blocking_agent_id"))
-    operator_explanation = _text(snapshot.get("operator_explanation"))
-    recommended_observation_step = _text(snapshot.get("recommended_observation_step"))
+    runtime_already_healthy = supervisor_classification == "SUPERVISOR_RUNTIME_ALREADY_HEALTHY"
+    operator_explanation = "" if runtime_already_healthy else _text(snapshot.get("operator_explanation"))
+    recommended_observation_step = "" if runtime_already_healthy else _text(snapshot.get("recommended_observation_step"))
     safe_to_start_runtime = snapshot.get("safe_to_start_runtime") is True
 
     if _duplicate_writer_detected(snapshot):
@@ -71,6 +73,9 @@ def build_track_b_control_plane_top_line(snapshot: Mapping[str, Any]) -> dict[st
             operator_explanation,
             recommended_observation_step,
         )
+    elif runtime_already_healthy and supervisor_mode == "RUNTIME_ACTIVE_MONITOR":
+        classification = TOP_LINE_RUNTIME_ACTIVE_HEALTHY
+        status = "Guarded Track B PAPER runtime is active and monitor-ready."
     elif snapshot.get("blockers"):
         classification = TOP_LINE_CONTROL_PLANE_BLOCKED
         status = _join_status(

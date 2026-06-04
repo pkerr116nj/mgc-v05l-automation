@@ -202,7 +202,7 @@ def test_fresh_healthy_runtime_truth_with_producer_pid_reports_runtime_up(tmp_pa
     _write(
         config.resolve(config.paper_runtime_truth_path),
         {
-            "producer_pid": 1234,
+            "producer_pid": os.getpid(),
             "lane_count": 7,
             "heartbeat_state": "HEALTHY",
             "freshness_state": "FRESH",
@@ -216,6 +216,31 @@ def test_fresh_healthy_runtime_truth_with_producer_pid_reports_runtime_up(tmp_pa
 
     assert payload["canonical_state"] == READY_SUBMIT_CAPABLE
     assert payload["runtime_summary"]["running"] is True
+    assert payload["runtime_summary"]["process_probe"]["running"] is True
+
+
+def test_dead_runtime_pid_cannot_imply_runtime_up(tmp_path: Path) -> None:
+    config = _write_ready_authority(tmp_path)
+    _write(
+        config.resolve(config.paper_runtime_truth_path),
+        {
+            "producer_pid": 999_999_999,
+            "lane_count": 7,
+            "heartbeat_state": "HEALTHY",
+            "freshness_state": "FRESH",
+            "writer_authority": "SINGLE_WRITER",
+            "live_money_eligible": False,
+            "paper_proof_invoked": False,
+        },
+    )
+
+    payload = build_runtime_operability_contract(config=config, now=NOW)
+
+    assert payload["canonical_state"] == READY_DIAGNOSTIC_ONLY
+    assert payload["ready_submit_capable"] is False
+    assert payload["runtime_summary"]["running"] is False
+    assert payload["runtime_summary"]["process_probe"]["running"] is False
+    assert any(row["code"] == "runtime_pid_not_alive" for row in payload["warnings"])
 
 
 def test_classification_does_not_read_quarantined_five_lane_surface_as_authority(tmp_path: Path) -> None:
@@ -265,7 +290,7 @@ def _write_ready_authority(
         config.resolve(config.paper_runtime_truth_path),
         {
             "running": runtime_running,
-            "producer_pid": 1234 if runtime_running else None,
+            "producer_pid": os.getpid() if runtime_running else None,
             "lane_count": 7,
             "heartbeat_state": "HEALTHY",
             "freshness_state": "FRESH",

@@ -5,6 +5,7 @@ from mgc_v05l.execution_core.track_b_control_plane_top_line import (
     TOP_LINE_MARKET_CLOSED_WAIT,
     TOP_LINE_MISSING_AUTHORITY_ARTIFACT,
     TOP_LINE_READY_FOR_OPERATOR_START,
+    TOP_LINE_RUNTIME_ACTIVE_HEALTHY,
     build_track_b_control_plane_top_line,
 )
 
@@ -47,6 +48,28 @@ def test_ready_for_start_top_line_is_clear() -> None:
     assert top_line["top_line_classification"] == TOP_LINE_READY_FOR_OPERATOR_START
     assert "Ready for supervised Track B PAPER runtime start" in top_line["top_line_status"]
     assert top_line["safe_to_start_runtime"] is True
+
+
+def test_runtime_already_healthy_top_line_ignores_stale_planner_advisory_text() -> None:
+    top_line = build_track_b_control_plane_top_line(
+        {
+            "runtime_supervisor_classification": "SUPERVISOR_RUNTIME_ALREADY_HEALTHY",
+            "supervisor_mode": "RUNTIME_ACTIVE_MONITOR",
+            "proof_window_status": "data_stale",
+            "safe_to_start_runtime": False,
+            "operator_explanation": (
+                "Refresh evidence before recovery planning: shared truth reports Authority evidence is stale."
+            ),
+            "recommended_observation_step": "Run the Control Plane Snapshot refresh path.",
+            "blockers": [],
+        }
+    )
+
+    assert top_line["top_line_classification"] == TOP_LINE_RUNTIME_ACTIVE_HEALTHY
+    assert "active and monitor-ready" in top_line["top_line_status"]
+    assert "Refresh evidence" not in top_line["top_line_status"]
+    assert top_line["operator_explanation"] == ""
+    assert top_line["recommended_observation_step"] == ""
 
 
 def test_duplicate_writer_top_line_is_loud() -> None:

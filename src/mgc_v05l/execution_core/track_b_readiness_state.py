@@ -217,7 +217,20 @@ def classify_canonical_readiness(inputs: Mapping[str, Any]) -> dict[str, Any]:
             inputs=inputs,
         )
 
-    shared_truth_decision = _execution_core_shared_truth_decision(execution_core_shared_truth)
+    managed_exit_pending = _shared_truth_has_managed_exit_pending(execution_core_shared_truth)
+    managed_exit_due = _shared_truth_has_managed_exit_due(execution_core_shared_truth)
+    managed_exit_submit_allowed = (
+        (managed_exit_pending or managed_exit_due)
+        and _bool(broker_truth_lease.get("available"))
+        and _bool(broker_truth_lease.get("submit_exit_allowed"))
+        and _bool(broker_truth_lease.get("broker_reconciled"))
+        and int(broker_truth_lease.get("unknown_broker_open_order_count") or 0) == 0
+        and int(broker_truth_lease.get("review_required_count") or 0) == 0
+    )
+    shared_truth_decision = _execution_core_shared_truth_decision(
+        execution_core_shared_truth,
+        allow_managed_exit_pending=managed_exit_submit_allowed,
+    )
     for warning in shared_truth_decision["warnings"]:
         warn(
             str(warning.get("code") or "execution_core_shared_truth_warning"),
@@ -352,13 +365,15 @@ def classify_canonical_readiness(inputs: Mapping[str, Any]) -> dict[str, Any]:
             inputs=inputs,
         )
 
+    lifecycle_open_position_count = int(reconciliation.get("lifecycle_open_position_count") or 0)
+    reconciliation_has_allowed_managed_exit = managed_exit_submit_allowed and lifecycle_open_position_count > 0
     if (
         not _bool(reconciliation.get("available"))
         or not _bool(reconciliation.get("fresh"))
         or not _reconciliation_classification_clean(str(reconciliation.get("classification") or ""))
         or not _bool(reconciliation.get("broker_reconciled"))
         or int(reconciliation.get("review_required_count") or 0) != 0
-        or int(reconciliation.get("lifecycle_open_position_count") or 0) != 0
+        or (lifecycle_open_position_count != 0 and not reconciliation_has_allowed_managed_exit)
     ):
         block(
             "phase1_reconciliation_not_clean",
@@ -483,6 +498,12 @@ def classify_canonical_readiness(inputs: Mapping[str, Any]) -> dict[str, Any]:
             "lane_quarantine_active",
             f"{quarantine_count} lane(s) are quarantined; quarantined lanes are excluded from submit eligibility.",
             source="lane_quarantine",
+        )
+    if managed_exit_submit_allowed:
+        warn(
+            "managed_exit_due_submit_capable" if managed_exit_due else "managed_exit_pending_submit_capable",
+            "A broker-backed managed position is awaiting its governed exit; submit capability is limited by downstream lifecycle/exposure/bridge gates.",
+            source="execution_core_shared_truth",
         )
 
     if not live_bars_fresh and scheduled_market_data_wait and not runtime_running:
@@ -926,21 +947,28 @@ def _execution_core_shared_truth_input(artifacts: Mapping[str, Any], *, now: dat
     managed_order_registry = _mapping(artifacts.get("managed_order_registry"))
     order_adjustment_plan = _mapping(artifacts.get("order_adjustment_plan"))
     position_truth = _mapping(artifacts.get("position_truth"))
+    position_truth_summary = _mapping(position_truth.get("summary"))
     runtime_environment_truth = _mapping(artifacts.get("runtime_environment_truth"))
     managed_position_registry = _mapping(artifacts.get("managed_position_registry"))
-    proof_classifications = _mapping(proof_readiness.get("shared_truth_classifications"))
+    proof_age_seconds = _age_seconds(proof_readiness.get("generated_at"), now)
+    proof_classifications = (
+        _mapping(proof_readiness.get("shared_truth_classifications"))
+        if proof_age_seconds is not None and proof_age_seconds <= PROOF_CLASSIFICATION_MAX_AGE_SECONDS
+        else {}
+    )
     classifications = {
-        "Open Order Truth": proof_classifications.get("Open Order Truth")
-        or _classification(open_order_truth),
-        "Managed Order Registry": proof_classifications.get("Managed Order Registry")
-        or _classification(managed_order_registry),
+        "Open Order Truth": _classification(open_order_truth)
+        or proof_classifications.get("Open Order Truth"),
+        "Managed Order Registry": _classification(managed_order_registry)
+        or proof_classifications.get("Managed Order Registry"),
         "Order Adjustment Planner": _classification(order_adjustment_plan),
-        "Position Truth": proof_classifications.get("Position Truth")
-        or _classification(position_truth, "overall_classification", "classification"),
-        "Runtime Environment Truth": proof_classifications.get("Runtime Environment Truth")
-        or _classification(runtime_environment_truth),
-        "Managed Position Registry": proof_classifications.get("Managed Position Registry")
-        or _classification(managed_position_registry),
+        "Position Truth": _classification(position_truth, "overall_classification", "classification")
+        or _classification(position_truth_summary, "overall_classification", "classification")
+        or proof_classifications.get("Position Truth"),
+        "Runtime Environment Truth": _classification(runtime_environment_truth)
+        or proof_classifications.get("Runtime Environment Truth"),
+        "Managed Position Registry": _classification(managed_position_registry)
+        or proof_classifications.get("Managed Position Registry"),
         "Reconciliation": proof_classifications.get("Reconciliation"),
         "Broker Truth Lease": proof_classifications.get("Broker Truth Lease"),
     }
@@ -971,7 +999,7 @@ def _execution_core_shared_truth_input(artifacts: Mapping[str, Any], *, now: dat
             "broker_lease_warning": _mapping(proof_readiness.get("broker_lease_warning")),
             "phase1_session_reason": proof_readiness.get("phase1_session_reason"),
             "blockers": list(proof_readiness.get("blockers") or []),
-            "age_seconds": _age_seconds(proof_readiness.get("generated_at"), now),
+            "age_seconds": proof_age_seconds,
         },
         "classifications": {key: value for key, value in classifications.items() if value},
         "artifact_paths": {
@@ -987,7 +1015,33 @@ def _execution_core_shared_truth_input(artifacts: Mapping[str, Any], *, now: dat
     }
 
 
-def _execution_core_shared_truth_decision(evidence: Mapping[str, Any]) -> dict[str, list[dict[str, Any]]]:
+def _shared_truth_has_managed_exit_pending(evidence: Mapping[str, Any]) -> bool:
+    classifications = _mapping(evidence.get("classifications"))
+    return (
+        str(classifications.get("Open Order Truth") or "") == "BROKER_POSITION_WITHOUT_CLOSE_ORDER"
+        and str(classifications.get("Managed Order Registry") or "") == "ACTIVE_HOLD_MANAGED_TIMED_EXIT_PENDING"
+        and str(classifications.get("Position Truth") or "") == "ACTIVE_HOLD_MANAGED_TIMED_EXIT_PENDING"
+        and str(classifications.get("Managed Position Registry") or "") == "OPEN_MANAGED_MATCHED"
+        and str(classifications.get("Order Adjustment Planner") or "") == "NO_ACTION_NEEDED"
+    )
+
+
+def _shared_truth_has_managed_exit_due(evidence: Mapping[str, Any]) -> bool:
+    classifications = _mapping(evidence.get("classifications"))
+    return (
+        str(classifications.get("Open Order Truth") or "") == "BROKER_POSITION_WITHOUT_CLOSE_ORDER"
+        and str(classifications.get("Managed Order Registry") or "") == "POSITION_WITHOUT_CLOSE_ORDER"
+        and str(classifications.get("Position Truth") or "") == "ATTENTION_REQUIRED"
+        and str(classifications.get("Managed Position Registry") or "") == "OPEN_MANAGED_EXIT_DUE"
+        and str(classifications.get("Order Adjustment Planner") or "") in {"NO_ACTION_NEEDED", "ORDER_NOT_FOUND"}
+    )
+
+
+def _execution_core_shared_truth_decision(
+    evidence: Mapping[str, Any],
+    *,
+    allow_managed_exit_pending: bool = False,
+) -> dict[str, list[dict[str, Any]]]:
     if not evidence or evidence.get("available") is not True:
         return {"blockers": [], "warnings": []}
 
@@ -1048,20 +1102,36 @@ def _execution_core_shared_truth_decision(evidence: Mapping[str, Any]) -> dict[s
         )
         return {"blockers": blockers, "warnings": warnings}
 
-    expected_clean = {
+    expected_clean: dict[str, str | set[str]] = {
         "Open Order Truth": "NO_OPEN_ORDERS",
         "Managed Order Registry": "NO_MANAGED_ORDERS",
         "Order Adjustment Planner": "NO_ACTION_NEEDED",
         "Position Truth": "CLEAN_FLAT_READY",
         "Managed Position Registry": "NO_MANAGED_POSITIONS",
     }
+    if allow_managed_exit_pending:
+        expected_clean.update(
+            {
+                "Open Order Truth": {"NO_OPEN_ORDERS", "BROKER_POSITION_WITHOUT_CLOSE_ORDER"},
+                "Managed Order Registry": {
+                    "NO_MANAGED_ORDERS",
+                    "ACTIVE_HOLD_MANAGED_TIMED_EXIT_PENDING",
+                    "POSITION_WITHOUT_CLOSE_ORDER",
+                },
+                "Position Truth": {"CLEAN_FLAT_READY", "ACTIVE_HOLD_MANAGED_TIMED_EXIT_PENDING", "ATTENTION_REQUIRED"},
+                "Managed Position Registry": {"NO_MANAGED_POSITIONS", "OPEN_MANAGED_MATCHED", "OPEN_MANAGED_EXIT_DUE"},
+                "Order Adjustment Planner": {"NO_ACTION_NEEDED", "ORDER_NOT_FOUND"},
+            }
+        )
     for service, expected in expected_clean.items():
         observed = str(classifications.get(service) or "")
-        if observed and observed != expected:
+        expected_values = expected if isinstance(expected, set) else {expected}
+        if observed and observed not in expected_values:
+            expected_detail = "/".join(sorted(expected_values))
             blockers.append(
                 {
                     "code": f"{service.lower().replace(' ', '_')}_not_clean",
-                    "detail": f"{service} is {observed}; expected {expected} for submit-capable readiness.",
+                    "detail": f"{service} is {observed}; expected {expected_detail} for submit-capable readiness.",
                     "source": "execution_core_shared_truth",
                     "state": "NOT_READY_DEPENDENCY",
                 }
@@ -1549,7 +1619,12 @@ def _market_data_input(
         fallback.update(_scheduled_market_data_fields(now))
         return fallback
 
-    listener = _phase1_listener_market_data_input(listener_payload, repo_root=repo_root, now=now)
+    listener = _phase1_listener_market_data_input(
+        listener_payload,
+        repo_root=repo_root,
+        now=now,
+        active_required_symbols=_active_runtime_market_data_symbols(operator_status),
+    )
     if listener["fresh"]:
         return listener
     listener_global_issue = listener.get("listener_global_issue") is True
@@ -1713,6 +1788,8 @@ def _phase1_listener_market_data_input(
         "freshness_threshold_seconds": listener_threshold,
         "required_symbols": required_symbols,
         "optional_symbols": optional_symbols,
+        "active_required_symbols": sorted(active_symbols),
+        "configured_required_symbols": configured_required_symbols,
         "required_blocked_symbols": [row["symbol"] for row in rows if row["required"] and row["ready"] is not True],
         "optional_degraded_symbols": [row["symbol"] for row in rows if not row["required"] and row["ready"] is not True],
         "rows": rows,
@@ -1920,9 +1997,16 @@ def _evaluate_phase1_listener_symbol(
     min_bars = _first_int(row.get("min_confirmed_bars"), row.get("minimum_bar_count")) or 1
     confirmed = row.get("realtime_feed_confirmed") is True
     fresh = age_seconds is not None and age_seconds <= threshold
-    ready = bool(confirmed and fresh and bar_count >= min_bars)
+    primary_1m_live_ready = bool(
+        not confirmed
+        and str(row.get("schema") or "").strip().lower() == "ohlcv-1m"
+        and latest_completed
+        and fresh
+        and bar_count >= min_bars
+    )
+    ready = bool((confirmed or primary_1m_live_ready) and fresh and bar_count >= min_bars)
     if ready:
-        block_reason = "READY"
+        block_reason = "READY" if confirmed else "READY_PRIMARY_1M_FEED_DERIVED_TIMEFRAMES_PENDING"
     elif not confirmed:
         block_reason = f"{symbol} realtime feed is not confirmed."
     elif bar_count < min_bars:
@@ -1941,6 +2025,7 @@ def _evaluate_phase1_listener_symbol(
         threshold=threshold,
         bar_count=bar_count,
         min_bars=min_bars,
+        primary_1m_live_ready=primary_1m_live_ready,
     )
 
 
@@ -1955,12 +2040,15 @@ def _phase1_symbol_evaluation(
     threshold: float | None = None,
     bar_count: int | None = None,
     min_bars: int | None = None,
+    primary_1m_live_ready: bool = False,
 ) -> dict[str, Any]:
     return {
         "symbol": symbol,
         "required": required,
         "ready": ready,
         "realtime_feed_confirmed": row.get("realtime_feed_confirmed") is True,
+        "primary_1m_live_ready": bool(primary_1m_live_ready),
+        "derived_timeframes_pending": bool(primary_1m_live_ready),
         "latest_completed_bar_ts": row.get("latest_completed_bar_ts") or row.get("last_completed_bar_ts"),
         "age_seconds": age_seconds,
         "freshness_threshold_seconds": threshold,

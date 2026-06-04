@@ -109,6 +109,24 @@ def test_stale_legacy_pid_ignored_when_current_guarded_loop_is_valid(tmp_path: P
     assert result["dashboard_projection_consumed"] is False
 
 
+def test_runtime_already_healthy_supervisor_is_current_authority(tmp_path: Path) -> None:
+    _write_current_artifacts(tmp_path)
+    control_plane_path = tmp_path / "outputs/track_b_execution_core/control_plane/latest_control_plane_snapshot.json"
+    payload = json.loads(control_plane_path.read_text(encoding="utf-8"))
+    payload["runtime_supervisor_classification"] = "SUPERVISOR_RUNTIME_ALREADY_HEALTHY"
+    _write_json(control_plane_path, payload)
+
+    result = resolve_track_b_runtime_authority(
+        RuntimeAuthorityResolverConfig(repo_root=tmp_path),
+        process_rows_provider=lambda root: _process_rows(root),
+        pid_running=lambda _pid: True,
+    )
+
+    assert result["valid"] is True
+    assert result["classification"] == "RUNTIME_AUTHORITY_CURRENT"
+    assert "runtime_supervisor_not_start_or_monitor_ready" not in result["blockers"]
+
+
 def test_stale_legacy_pid_blocks_when_no_current_authority_exists(tmp_path: Path) -> None:
     result = resolve_track_b_runtime_authority(
         RuntimeAuthorityResolverConfig(repo_root=tmp_path),

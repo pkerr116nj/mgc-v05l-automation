@@ -434,6 +434,147 @@ def test_open_order_blocks_via_open_order_truth_before_legacy_reconstruction() -
     assert result["readiness_blockers"][0]["source"] == "execution_core_shared_truth"
 
 
+def test_managed_exit_pending_allows_exit_submit_readiness_with_active_exit_lease() -> None:
+    inputs = _clean_inputs()
+    inputs["phase1_reconciliation"]["lifecycle_open_position_count"] = 1
+    inputs["broker_truth_lease"] = {
+        "available": True,
+        "lease_state": "ACTIVE",
+        "submit_entry_allowed": True,
+        "submit_exit_allowed": True,
+        "broker_reconciled": True,
+        "unknown_broker_open_order_count": 0,
+        "review_required_count": 0,
+        "live_money_eligible": False,
+    }
+    inputs["execution_core_shared_truth"] = _shared_truth_evidence(
+        open_order_truth="BROKER_POSITION_WITHOUT_CLOSE_ORDER",
+        managed_order_registry="ACTIVE_HOLD_MANAGED_TIMED_EXIT_PENDING",
+        position_truth="ACTIVE_HOLD_MANAGED_TIMED_EXIT_PENDING",
+        managed_position_registry="OPEN_MANAGED_MATCHED",
+        runtime_environment_truth="RUNTIME_ACTIVE_OBSERVATION_ONLY",
+    )
+
+    result = classify_canonical_readiness(inputs)
+
+    assert result["canonical_readiness"] == "READY_SUBMIT_CAPABLE"
+    assert result["ready_submit_capable"] is True
+    assert {row["code"] for row in result["readiness_blockers"]} == set()
+    assert "managed_exit_pending_submit_capable" in {row["code"] for row in result["readiness_warnings"]}
+
+
+def test_managed_exit_due_allows_exit_submit_readiness_with_active_exit_lease() -> None:
+    inputs = _clean_inputs()
+    inputs["phase1_reconciliation"]["lifecycle_open_position_count"] = 1
+    inputs["broker_truth_lease"] = {
+        "available": True,
+        "lease_state": "ACTIVE",
+        "submit_entry_allowed": True,
+        "submit_exit_allowed": True,
+        "broker_reconciled": True,
+        "unknown_broker_open_order_count": 0,
+        "review_required_count": 0,
+        "live_money_eligible": False,
+    }
+    inputs["execution_core_shared_truth"] = _shared_truth_evidence(
+        open_order_truth="BROKER_POSITION_WITHOUT_CLOSE_ORDER",
+        managed_order_registry="POSITION_WITHOUT_CLOSE_ORDER",
+        position_truth="ATTENTION_REQUIRED",
+        managed_position_registry="OPEN_MANAGED_EXIT_DUE",
+        runtime_environment_truth="RUNTIME_ACTIVE_OBSERVATION_ONLY",
+    )
+
+    result = classify_canonical_readiness(inputs)
+
+    assert result["canonical_readiness"] == "READY_SUBMIT_CAPABLE"
+    assert result["ready_submit_capable"] is True
+    assert {row["code"] for row in result["readiness_blockers"]} == set()
+    assert "managed_exit_due_submit_capable" in {row["code"] for row in result["readiness_warnings"]}
+
+
+def test_managed_exit_due_without_close_order_allows_order_adjustment_not_found() -> None:
+    inputs = _clean_inputs()
+    inputs["phase1_reconciliation"]["lifecycle_open_position_count"] = 1
+    inputs["broker_truth_lease"] = {
+        "available": True,
+        "lease_state": "ACTIVE",
+        "submit_entry_allowed": True,
+        "submit_exit_allowed": True,
+        "broker_reconciled": True,
+        "unknown_broker_open_order_count": 0,
+        "review_required_count": 0,
+        "live_money_eligible": False,
+    }
+    inputs["execution_core_shared_truth"] = _shared_truth_evidence(
+        open_order_truth="BROKER_POSITION_WITHOUT_CLOSE_ORDER",
+        managed_order_registry="POSITION_WITHOUT_CLOSE_ORDER",
+        order_adjustment_planner="ORDER_NOT_FOUND",
+        position_truth="ATTENTION_REQUIRED",
+        managed_position_registry="OPEN_MANAGED_EXIT_DUE",
+        runtime_environment_truth="RUNTIME_ACTIVE_OBSERVATION_ONLY",
+    )
+
+    result = classify_canonical_readiness(inputs)
+
+    assert result["canonical_readiness"] == "READY_SUBMIT_CAPABLE"
+    assert result["ready_submit_capable"] is True
+    assert result["readiness_blockers"] == []
+    assert "managed_exit_due_submit_capable" in {row["code"] for row in result["readiness_warnings"]}
+
+
+def test_managed_exit_pending_uses_position_truth_summary_classification() -> None:
+    inputs = _clean_inputs()
+    inputs["phase1_reconciliation"]["lifecycle_open_position_count"] = 1
+    inputs["broker_truth_lease"] = {
+        "available": True,
+        "lease_state": "ACTIVE",
+        "submit_entry_allowed": True,
+        "submit_exit_allowed": True,
+        "broker_reconciled": True,
+        "unknown_broker_open_order_count": 0,
+        "review_required_count": 0,
+        "live_money_eligible": False,
+    }
+    inputs["execution_core_shared_truth"] = _shared_truth_evidence(
+        open_order_truth="BROKER_POSITION_WITHOUT_CLOSE_ORDER",
+        managed_order_registry="ACTIVE_HOLD_MANAGED_TIMED_EXIT_PENDING",
+        position_truth="ACTIVE_HOLD_MANAGED_TIMED_EXIT_PENDING",
+        managed_position_registry="OPEN_MANAGED_MATCHED",
+        runtime_environment_truth="RUNTIME_ACTIVE_OBSERVATION_ONLY",
+    )
+
+    result = classify_canonical_readiness(inputs)
+
+    assert result["canonical_readiness"] == "READY_SUBMIT_CAPABLE"
+
+
+def test_managed_exit_pending_still_blocks_when_exit_lease_is_not_allowed() -> None:
+    inputs = _clean_inputs()
+    inputs["phase1_reconciliation"]["lifecycle_open_position_count"] = 1
+    inputs["broker_truth_lease"] = {
+        "available": True,
+        "lease_state": "ACTIVE",
+        "submit_entry_allowed": True,
+        "submit_exit_allowed": False,
+        "broker_reconciled": True,
+        "unknown_broker_open_order_count": 0,
+        "review_required_count": 0,
+        "live_money_eligible": False,
+    }
+    inputs["execution_core_shared_truth"] = _shared_truth_evidence(
+        open_order_truth="BROKER_POSITION_WITHOUT_CLOSE_ORDER",
+        managed_order_registry="ACTIVE_HOLD_MANAGED_TIMED_EXIT_PENDING",
+        position_truth="ACTIVE_HOLD_MANAGED_TIMED_EXIT_PENDING",
+        managed_position_registry="OPEN_MANAGED_MATCHED",
+        runtime_environment_truth="RUNTIME_ACTIVE_OBSERVATION_ONLY",
+    )
+
+    result = classify_canonical_readiness(inputs)
+
+    assert result["canonical_readiness"] == "NOT_READY_DEPENDENCY"
+    assert result["readiness_blockers"][0]["code"] == "open_order_truth_not_clean"
+
+
 def test_order_adjustment_planner_review_required_blocks_submit_capable_readiness() -> None:
     inputs = _clean_inputs()
     inputs["execution_core_shared_truth"] = _shared_truth_evidence(
@@ -658,6 +799,39 @@ def test_required_symbol_unconfirmed_or_under_min_bars_blocks_market_data() -> N
     assert result["market_data"]["rows"][0]["realtime_feed_confirmed"] is False
 
 
+def test_required_symbol_with_fresh_primary_1m_bars_allows_runtime_startup_when_derived_timeframes_pending() -> None:
+    now = datetime(2026, 5, 18, 12, 0, tzinfo=timezone.utc)
+    inputs = _clean_inputs()
+    inputs["market_data"] = _market_data_input(
+        {},
+        {},
+        _phase1_listener_status(
+            rows=[
+                _listener_row(
+                    "MGC",
+                    realtime_feed_confirmed=False,
+                    latest_completed_bar_ts="2026-05-18T11:59:00+00:00",
+                    bar_count=90,
+                    min_confirmed_bars=8,
+                    schema="ohlcv-1m",
+                )
+            ]
+        ),
+        now=now,
+    )
+
+    result = classify_canonical_readiness(inputs)
+
+    assert result["canonical_readiness"] == "READY_SUBMIT_CAPABLE"
+    assert result["readiness_blockers"] == []
+    row = result["market_data"]["rows"][0]
+    assert row["ready"] is True
+    assert row["realtime_feed_confirmed"] is False
+    assert row["primary_1m_live_ready"] is True
+    assert row["derived_timeframes_pending"] is True
+    assert row["block_reason"] == "READY_PRIMARY_1M_FEED_DERIVED_TIMEFRAMES_PENDING"
+
+
 def test_required_symbol_confirmed_but_under_min_bars_blocks_market_data() -> None:
     now = datetime(2026, 5, 18, 12, 0, tzinfo=timezone.utc)
     inputs = _clean_inputs()
@@ -711,6 +885,104 @@ def test_optional_symbol_stale_warns_without_hard_market_data_blocker() -> None:
     assert result["market_data"]["optional_degraded_symbols"] == ["PL"]
     assert "optional_market_data_degraded" in {row["code"] for row in result["readiness_warnings"]}
     assert result["readiness_blockers"] == []
+
+
+def test_active_lane_symbols_scope_required_market_data_readiness() -> None:
+    now = datetime(2026, 5, 18, 12, 0, tzinfo=timezone.utc)
+    inputs = _clean_inputs()
+    operator_status = {
+        "active_lane_ids": ["mgc_lane"],
+        "lanes": [{"lane_id": "mgc_lane", "symbol": "MGC"}],
+        "last_processed_bar_end_ts": "2026-05-18T11:59:00+00:00",
+        "health": {"market_data_ok": True},
+    }
+    inputs["market_data"] = _market_data_input(
+        operator_status,
+        {},
+        _phase1_listener_status(
+            rows=[
+                _listener_row("MGC", required=True),
+                _listener_row("GC", required=True, realtime_feed_confirmed=False, bar_count=2),
+            ]
+        ),
+        now=now,
+    )
+
+    result = classify_canonical_readiness(inputs)
+
+    assert result["canonical_readiness"] == "READY_SUBMIT_CAPABLE"
+    assert result["market_data"]["required_symbols"] == ["MGC"]
+    assert result["market_data"]["configured_required_symbols"] == ["MGC", "GC"]
+    assert result["market_data"]["optional_degraded_symbols"] == ["GC"]
+    assert "optional_market_data_degraded" in {row["code"] for row in result["readiness_warnings"]}
+    assert result["readiness_blockers"] == []
+
+
+def test_mnq_mes_active_lanes_do_not_require_stale_gold_feeds() -> None:
+    now = datetime(2026, 5, 18, 12, 0, tzinfo=timezone.utc)
+    inputs = _clean_inputs()
+    operator_status = {
+        "active_lane_ids": ["mnq_evidence", "mes_evidence"],
+        "lanes": [
+            {"lane_id": "mnq_evidence", "symbol": "MNQ"},
+            {"lane_id": "mes_evidence", "symbol": "MES"},
+        ],
+        "last_processed_bar_end_ts": "2026-05-18T11:59:00+00:00",
+        "health": {"market_data_ok": True},
+    }
+    inputs["market_data"] = _market_data_input(
+        operator_status,
+        {},
+        _phase1_listener_status(
+            rows=[
+                _listener_row("MNQ", required=True),
+                _listener_row("MES", required=True),
+                _listener_row("NQ", required=True),
+                _listener_row("ES", required=True),
+                _listener_row("GC", required=True, realtime_feed_confirmed=False, bar_count=0),
+                _listener_row("MGC", required=True, realtime_feed_confirmed=False, bar_count=0),
+            ]
+        ),
+        now=now,
+    )
+
+    result = classify_canonical_readiness(inputs)
+
+    assert result["canonical_readiness"] == "READY_SUBMIT_CAPABLE"
+    assert result["market_data"]["required_symbols"] == ["MES", "MNQ"]
+    assert result["market_data"]["required_blocked_symbols"] == []
+    assert result["market_data"]["optional_degraded_symbols"] == ["GC", "MGC"]
+    assert "optional_market_data_degraded" in {row["code"] for row in result["readiness_warnings"]}
+
+
+def test_stale_gold_feed_still_blocks_when_gold_lane_is_active() -> None:
+    now = datetime(2026, 5, 18, 12, 0, tzinfo=timezone.utc)
+    inputs = _clean_inputs()
+    operator_status = {
+        "active_lane_ids": ["mgc_lane"],
+        "lanes": [{"lane_id": "mgc_lane", "symbol": "MGC"}],
+        "last_processed_bar_end_ts": "2026-05-18T11:59:00+00:00",
+        "health": {"market_data_ok": True},
+    }
+    inputs["market_data"] = _market_data_input(
+        operator_status,
+        {},
+        _phase1_listener_status(
+            rows=[
+                _listener_row("MNQ", required=True),
+                _listener_row("MES", required=True),
+                _listener_row("MGC", required=True, realtime_feed_confirmed=False, bar_count=0),
+            ]
+        ),
+        now=now,
+    )
+
+    result = classify_canonical_readiness(inputs)
+
+    assert result["canonical_readiness"] == "NOT_READY_DEPENDENCY"
+    assert result["readiness_blockers"][0]["code"] == "market_data_not_fresh"
+    assert result["market_data"]["required_symbols"] == ["MGC"]
+    assert result["market_data"]["required_blocked_symbols"] == ["MGC"]
 
 
 def test_submit_capable_blocks_when_runtime_ingestion_is_stale_even_if_phase1_listener_is_fresh() -> None:

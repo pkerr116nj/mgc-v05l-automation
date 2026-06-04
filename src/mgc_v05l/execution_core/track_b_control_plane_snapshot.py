@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -130,6 +131,7 @@ class TrackBControlPlaneSnapshotConfig:
     runtime_safe_state_envelope_path: Path = DEFAULT_RUNTIME_SAFE_STATE_ENVELOPE_ARTIFACT
     broker_lease_history_path: Path | None = None
     refresh_proof_readiness_before_snapshot: bool = True
+    proof_required_symbols: tuple[str, ...] | None = None
 
     def resolve(self, path: Path) -> Path:
         return path if path.is_absolute() else self.repo_root / path
@@ -392,6 +394,7 @@ def _refresh_proof_readiness_for_snapshot(
     proof_config = TrackBPaperProofReadinessConfig(
         repo_root=config.repo_root,
         output_path=config.proof_readiness_path,
+        required_symbols=config.proof_required_symbols or TrackBPaperProofReadinessConfig.required_symbols,
         now=now,
         broker_lease_history_path=config.broker_lease_history_path,
     )
@@ -449,6 +452,15 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--no-dashboard-projection", action="store_true")
     parser.add_argument("--no-broker-lease-history", action="store_true")
+    parser.add_argument(
+        "--proof-required-symbols",
+        default=os.environ.get("TRACK_B_PAPER_PROOF_REQUIRED_SYMBOLS"),
+        help=(
+            "Comma-separated Phase-1 symbols required by this launch scope. "
+            "Defaults to the proof-readiness contract default unless "
+            "TRACK_B_PAPER_PROOF_REQUIRED_SYMBOLS is set."
+        ),
+    )
     parser.add_argument("--json", action="store_true")
     return parser
 
@@ -460,6 +472,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         output_path=Path(args.output_path),
         dashboard_projection_path=None if bool(args.no_dashboard_projection) else Path(args.dashboard_projection_path),
         broker_lease_history_path=None if bool(args.no_broker_lease_history) else None,
+        proof_required_symbols=_csv_tuple(args.proof_required_symbols),
     )
     payload = build_track_b_control_plane_snapshot(config=config)
     authority_path = write_track_b_control_plane_snapshot(config=config, payload=payload)
@@ -1190,6 +1203,11 @@ def _as_int(value: Any) -> int:
         return int(value or 0)
     except (TypeError, ValueError):
         return 0
+
+
+def _csv_tuple(value: str | None) -> tuple[str, ...] | None:
+    symbols = tuple(symbol.strip().upper() for symbol in str(value or "").split(",") if symbol.strip())
+    return symbols or None
 
 
 def _ensure_utc(value: datetime) -> datetime:

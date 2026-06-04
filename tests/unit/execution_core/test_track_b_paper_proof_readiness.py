@@ -137,6 +137,33 @@ def test_planned_equity_index_halt_mnq_stale_does_not_block_metals_readiness(tmp
     assert all(warning["scope_impact"] == "EQUITY_INDEX_ONLY" for warning in stale_mnq)
 
 
+def test_scoped_required_symbols_ignore_unrelated_stale_market_data(tmp_path: Path) -> None:
+    _seed_clean_shared_truth(tmp_path, now=OPEN_NOW)
+    for symbol in ("MNQ", "MES"):
+        for timeframe in ("1m", "5m"):
+            _write_phase1_candle(tmp_path, symbol=symbol, timeframe=timeframe, generated_at=OPEN_NOW)
+    for symbol in ("MGC", "GC"):
+        for timeframe in ("1m", "5m"):
+            _write_phase1_candle(tmp_path, symbol=symbol, timeframe=timeframe, generated_at=OPEN_NOW - timedelta(minutes=45))
+
+    payload = build_track_b_paper_proof_readiness(
+        config=TrackBPaperProofReadinessConfig(
+            repo_root=tmp_path,
+            broker_lease_history_path=None,
+            now=OPEN_NOW,
+            required_symbols=("MNQ", "MES"),
+        ),
+        pid_running=lambda _pid: False,
+        process_root_resolver=lambda _pid: None,
+        source_commit_resolver=lambda _root: "test-head",
+    )
+
+    assert payload["classification"] == READY_FOR_PROOF
+    assert payload["phase1_required_symbols"] == ["MNQ", "MES"]
+    assert {check["symbol"] for check in payload["phase1_required_checks"]} == {"MNQ", "MES"}
+    assert payload["blockers"] == []
+
+
 def test_active_runtime_blocks_as_already_active(tmp_path: Path) -> None:
     _seed_clean_shared_truth(tmp_path, now=OPEN_NOW)
     _seed_required_phase1_candles(tmp_path, generated_at=OPEN_NOW)

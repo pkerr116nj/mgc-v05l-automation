@@ -4,6 +4,9 @@ import json
 from datetime import UTC, datetime
 from pathlib import Path
 
+import pytest
+
+from mgc_v05l.execution_core import track_b_runtime_resume_semantics as resume_semantics
 from mgc_v05l.execution_core.track_b_agent_health import HEALTHY, STOPPED_EXPECTED
 from mgc_v05l.execution_core.track_b_crash_loop_protection import NO_CRASH_LOOP, RESTART_COOLDOWN_ACTIVE
 from mgc_v05l.execution_core.track_b_managed_order_registry import NO_MANAGED_ORDERS
@@ -23,6 +26,7 @@ from mgc_v05l.execution_core.track_b_runtime_resume_semantics import (
     RESUME_POLICY_NEW_RUNTIME_GENERATION_ALLOWED,
     RESUME_POLICY_QUARANTINE_OBSERVE_ONLY,
     RESUME_ALLOWED_CLEAN,
+    RESUME_ALLOWED_OWNED_MANAGED_EXPOSURE,
     RESUME_ALLOWED_PAPER_BOUNDED_RETRY,
     RESUME_BLOCKED_BROKER_EXPOSURE,
     RESUME_BLOCKED_CRASH_LOOP,
@@ -104,6 +108,39 @@ def test_broker_exposure_blocks_resume(tmp_path: Path) -> None:
     assert payload["classification"] == RESUME_BLOCKED_BROKER_EXPOSURE
     assert payload["allowed"] is False
     assert payload["safe_to_start_runtime"] is False
+
+
+def test_owned_exit_due_exposure_allows_resume_for_managed_close_maintenance(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _seed_base(
+        tmp_path,
+        runtime_classification=RUNTIME_DOWN_WITH_BROKER_EXPOSURE,
+        position_classification="ATTENTION_REQUIRED",
+        open_order_classification="BROKER_POSITION_WITHOUT_CLOSE_ORDER",
+        managed_order_classification="POSITION_WITHOUT_CLOSE_ORDER",
+        managed_position_classification="OPEN_MANAGED_EXIT_DUE",
+    )
+    monkeypatch.setattr(
+        resume_semantics,
+        "resolve_pre_restart_exposure_reconciliation",
+        lambda **_: {
+            "classification": "MANAGED_EXPOSURE_RESOLVED",
+            "restart_with_owned_exposure_allowed": True,
+            "broker_open_order_count": 0,
+            "review_required_exposure_count": 0,
+        },
+    )
+
+    payload = build_track_b_runtime_resume_semantics(config=TrackBRuntimeResumeSemanticsConfig(repo_root=tmp_path), now=NOW)
+
+    assert payload["classification"] == RESUME_ALLOWED_OWNED_MANAGED_EXPOSURE
+    assert payload["allowed"] is True
+    assert payload["safe_to_start_runtime"] is True
+    assert payload["broker_mutation"] is False
+    assert payload["resume_action_policy"] == RESUME_POLICY_NEW_RUNTIME_GENERATION_ALLOWED
+    assert payload["evidence"]["restart_with_owned_exposure_allowed"] is True
 
 
 def test_open_order_blocks_resume(tmp_path: Path) -> None:

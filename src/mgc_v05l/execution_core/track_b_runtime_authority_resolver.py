@@ -206,6 +206,7 @@ def _validate_execution_core_state(
         blockers.append("control_plane_not_coherent")
     if supervisor and supervisor not in {
         "SUPERVISOR_RUNTIME_START_ALLOWED",
+        "SUPERVISOR_RUNTIME_ALREADY_HEALTHY",
         "SUPERVISOR_RUNTIME_ACTIVE_MONITOR",
         "SUPERVISOR_NO_ACTION_NEEDED",
     }:

@@ -88,6 +88,7 @@ def test_snapshot_refreshes_stale_proof_readiness_before_supervisor(monkeypatch,
     payload = build_track_b_control_plane_snapshot(
         config=TrackBControlPlaneSnapshotConfig(repo_root=tmp_path),
         now=NOW,
+        process_rows=[],
         process_root_resolver=lambda _pid: None,
         source_commit_resolver=lambda _root: "test-head",
     )
@@ -96,6 +97,86 @@ def test_snapshot_refreshes_stale_proof_readiness_before_supervisor(monkeypatch,
     assert payload["classification"] == CONTROL_PLANE_SNAPSHOT_READY
     assert payload["runtime_supervisor_classification"] == "SUPERVISOR_RUNTIME_START_ALLOWED"
     assert payload["proof_window_status"] == "ready"
+
+
+def test_snapshot_refreshes_proof_readiness_with_scoped_symbols(monkeypatch, tmp_path: Path) -> None:
+    _seed_clean_stack(tmp_path)
+    _seed_control_plane(tmp_path, proof_classification="PHASE1_DATA_UNHEALTHY")
+
+    proof_calls = []
+
+    def fake_build_proof(**kwargs):
+        proof_calls.append(kwargs["config"])
+        return {
+            "generated_at": NOW.isoformat(),
+            "classification": "READY_FOR_PROOF",
+            "phase1_session_reason": "GLOBEX_SESSION_OPEN",
+            "phase1_market_session": {"market_closed": False, "reason": "GLOBEX_SESSION_OPEN"},
+            "live_money_eligible": False,
+            "paper_proof_invoked": False,
+        }
+
+    def fake_write_proof(*, config, payload):
+        path = config.resolve(config.output_path)
+        _write(path, payload)
+        return path
+
+    monkeypatch.setattr(cp_module, "build_track_b_paper_proof_readiness", fake_build_proof)
+    monkeypatch.setattr(cp_module, "write_track_b_paper_proof_readiness", fake_write_proof)
+
+    payload = build_track_b_control_plane_snapshot(
+        config=TrackBControlPlaneSnapshotConfig(
+            repo_root=tmp_path,
+            proof_required_symbols=("MNQ", "MES"),
+        ),
+        now=NOW,
+        process_rows=[],
+        process_root_resolver=lambda _pid: None,
+        source_commit_resolver=lambda _root: "test-head",
+    )
+
+    assert proof_calls
+    assert proof_calls[0].required_symbols == ("MNQ", "MES")
+    assert payload["classification"] == CONTROL_PLANE_SNAPSHOT_READY
+
+
+def test_snapshot_ready_when_runtime_is_already_active_observation_only(monkeypatch, tmp_path: Path) -> None:
+    _seed_clean_stack(tmp_path)
+    _seed_control_plane(tmp_path)
+    _seed_active_runtime_truth(tmp_path)
+
+    def fake_build_proof(**_kwargs):
+        return {
+            "generated_at": NOW.isoformat(),
+            "classification": "RUNTIME_ALREADY_ACTIVE",
+            "phase1_session_reason": "GLOBEX_SESSION_OPEN",
+            "phase1_market_session": {"market_closed": False, "reason": "GLOBEX_SESSION_OPEN"},
+            "live_money_eligible": False,
+            "paper_proof_invoked": False,
+        }
+
+    def fake_write_proof(*, config, payload):
+        path = config.resolve(config.output_path)
+        _write(path, payload)
+        return path
+
+    monkeypatch.setattr(cp_module, "build_track_b_paper_proof_readiness", fake_build_proof)
+    monkeypatch.setattr(cp_module, "write_track_b_paper_proof_readiness", fake_write_proof)
+
+    payload = build_track_b_control_plane_snapshot(
+        config=TrackBControlPlaneSnapshotConfig(repo_root=tmp_path),
+        now=NOW,
+        pid_running=lambda pid: pid == 123,
+        process_rows=[],
+        process_root_resolver=lambda _pid: tmp_path,
+        source_commit_resolver=lambda _root: "test-head",
+    )
+
+    assert payload["classification"] == CONTROL_PLANE_SNAPSHOT_READY
+    assert payload["runtime_supervisor_classification"] == "SUPERVISOR_RUNTIME_ALREADY_HEALTHY"
+    assert payload["supervisor_mode"] == "RUNTIME_ACTIVE_MONITOR"
+    assert payload["safe_to_start_runtime"] is False
+    assert payload["blockers"] == []
 
 
 def test_snapshot_preserves_real_stale_phase1_proof_blocker(monkeypatch, tmp_path: Path) -> None:
@@ -124,6 +205,7 @@ def test_snapshot_preserves_real_stale_phase1_proof_blocker(monkeypatch, tmp_pat
     payload = build_track_b_control_plane_snapshot(
         config=TrackBControlPlaneSnapshotConfig(repo_root=tmp_path),
         now=NOW,
+        process_rows=[],
         process_root_resolver=lambda _pid: None,
         source_commit_resolver=lambda _root: "test-head",
     )
@@ -655,6 +737,7 @@ def test_dashboard_projection_is_not_authority(tmp_path: Path) -> None:
         config=config,
         now=NOW,
         pid_running=lambda _pid: False,
+        process_rows=[],
         process_root_resolver=lambda _pid: None,
         source_commit_resolver=lambda _root: "test-head",
     )
@@ -703,7 +786,7 @@ def _snapshot(
         config=TrackBControlPlaneSnapshotConfig(repo_root=root, refresh_proof_readiness_before_snapshot=False),
         now=NOW,
         pid_running=(lambda _pid: False) if process_rows is not None else None,
-        process_rows=process_rows,
+        process_rows=[] if process_rows is None else process_rows,
         process_root_resolver=lambda _pid: None,
         source_commit_resolver=lambda _root: "test-head",
         post_shared_truth_refresh_hook=post_hook,
@@ -846,6 +929,62 @@ def _seed_control_plane(
             "stop_reason": "expected_clean_down",
             "live_money_eligible": False,
         },
+    )
+
+
+def _seed_active_runtime_truth(root: Path) -> None:
+    runtime_truth = {
+        "generated_at": NOW.isoformat(),
+        "last_success_at": NOW.isoformat(),
+        "freshness_ttl_seconds": 180.0,
+        "heartbeat_state": "HEALTHY",
+        "producer_pid": 123,
+        "producer_root": str(root),
+        "source_commit": "test-head",
+        "runtime_generation_id": "runtime-generation-current",
+        "writer_authority": "SINGLE_WRITER",
+        "duplicate_writer_detection": {"duplicate_writer_detected": False},
+        "live_money_eligible": False,
+        "paper_proof_invoked": False,
+    }
+    _write(
+        root / "outputs/probationary_pattern_engine/paper_session/runtime/paper_runtime_truth.json",
+        runtime_truth,
+    )
+    _write(
+        root / "outputs/probationary_pattern_engine/paper_session/runtime/probationary_paper.pid.json",
+        {
+            "generated_at": NOW.isoformat(),
+            "pid": 123,
+            "root": str(root),
+            "source_commit": "test-head",
+            "config_paths": [],
+            "live_money_eligible": False,
+            "paper_proof_invoked": False,
+        },
+    )
+    _write(
+        root / "outputs/probationary_pattern_engine/paper_session/operator_status.json",
+        {
+            "generated_at": NOW.isoformat(),
+            "source_runtime_pid": 123,
+            "config_paths": [],
+            "live_money_eligible": False,
+            "paper_proof_invoked": False,
+        },
+    )
+    _write(
+        root / "outputs/probationary_pattern_engine/paper_session/runtime/probationary_paper_launch_status.json",
+        {
+            "generated_at": NOW.isoformat(),
+            "duplicate_writer_detected": False,
+            "live_money_eligible": False,
+            "paper_proof_invoked": False,
+        },
+    )
+    _write(
+        root / "outputs/operator_dashboard/runtime/latest_canonical_readiness.json",
+        {"generated_at": NOW.isoformat(), "canonical_readiness": "NOT_READY_DEPENDENCY"},
     )
 
 
