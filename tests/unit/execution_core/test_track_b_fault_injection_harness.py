@@ -17,12 +17,14 @@ from mgc_v05l.execution_core.track_b_fault_injection_harness import (
     SCENARIO_DUPLICATE_LIFECYCLE_ROWS,
     SCENARIO_HISTORICAL_REGISTRY_DEBRIS,
     SCENARIO_MALFORMED_BROKER_POSITION_TRUTH,
+    SCENARIO_MANAGED_CLOSE_DISAPPEARS_BROKER_FLAT,
     SCENARIO_MANAGED_CLOSE_ORDER_BROKER_ZERO,
     SCENARIO_MISSING_GUARDIAN_WITH_BROKER_EXPOSURE,
     SCENARIO_MISSING_LIFECYCLE_RECONCILIATION,
     SCENARIO_NEAR_EXPIRY_CONTRACT,
     SCENARIO_PHASE1_FRESH_RUNTIME_STALE,
     SCENARIO_REGISTRY_DIAGNOSTIC_MISSING_CURRENT_SCOPE,
+    SCENARIO_REGISTRY_REVIEW_REQUIRED_NULL_LIFECYCLE_EXIT,
     SCENARIO_METADATA,
     SCENARIO_STALE_OWNER_FRESH_BROKER,
     SCENARIO_STALE_RUNTIME_EXIT_DUE,
@@ -62,6 +64,8 @@ EXPECTED_SCENARIO_IDS = (
     "managed_close_order_artifact_broker_open_orders_zero",
     "broker_open_order_exists_lifecycle_registry_none",
     "missing_guardian_artifact_with_broker_exposure",
+    "managed_close_order_disappears_broker_flat_without_fill_callback",
+    "registry_review_required_null_lifecycle_blocks_valid_exit",
 )
 REQUIRED_METADATA_FIELDS = {
     "bug_class",
@@ -352,6 +356,70 @@ def test_malformed_authority_artifact_scenarios_fail_closed(
         assert scenario["risk_reducing_close_authority"]["classification"] == "RISK_REDUCING_CLOSE_BLOCKED_MISSING_GUARDIAN"
         assert scenario["risk_reducing_close_authority"]["allowed"] is False
         assert scenario["risk_reducing_close_authority"]["broad_flatten_allowed"] is False
+
+
+def test_managed_close_order_disappears_broker_flat_requires_local_reconciliation(tmp_path: Path) -> None:
+    scenario = _run(tmp_path, SCENARIO_MANAGED_CLOSE_DISAPPEARS_BROKER_FLAT)
+
+    assert (
+        scenario["submit_authority"]["classification"]
+        == "MANAGED_CLOSE_DISAPPEARED_BROKER_FLAT_RECONCILIATION_REQUIRED"
+    )
+    assert scenario["submit_authority"]["allowed"] is False
+    assert scenario["broker_exposure"]["broker_flat"] is True
+    assert scenario["broker_exposure"]["broker_open_order_count"] == 0
+    assert scenario["ownership"]["classification"] == "LIFECYCLE_WITHOUT_BROKER_LOCAL_CLOSE_RECONCILIATION_REQUIRED"
+    assert scenario["registry"]["reconciliation_path_available"] is True
+    assert scenario["registry"]["broker_flat_without_fill_callback"] is True
+    assert scenario["registry"]["prior_scoped_managed_close_order"]["order_id"] == "69"
+    assert scenario["risk_reducing_close_authority"]["classification"] == "RISK_REDUCING_CLOSE_BLOCKED_BROKER_ALREADY_FLAT"
+    assert scenario["risk_reducing_close_authority"]["allowed"] is False
+    assert scenario["observability"]["local_reconciliation_allowed"] is True
+    assert scenario["safety"] == {
+        "live_money_eligible": False,
+        "paper_proof_invoked": False,
+        "broad_flatten_allowed": False,
+        "broker_mutation_allowed": False,
+    }
+    assert scenario["passed"] is True
+
+
+def test_registry_review_required_null_lifecycle_blocks_valid_exit_until_exact_repair(
+    tmp_path: Path,
+) -> None:
+    scenario = _run(tmp_path, SCENARIO_REGISTRY_REVIEW_REQUIRED_NULL_LIFECYCLE_EXIT)
+
+    assert (
+        scenario["submit_authority"]["classification"]
+        == "REGISTRY_REVIEW_REQUIRED_NULL_LIFECYCLE_BLOCKED_MANAGED_EXIT"
+    )
+    assert scenario["submit_authority"]["allowed"] is False
+    assert scenario["broker_exposure"]["visible"] is True
+    assert scenario["broker_exposure"]["local_symbol"] == "MESM6"
+    assert scenario["ownership"]["classification"] == "OWNED_MANAGED_EXPOSURE_REGISTRY_IDENTITY_REPAIR_REQUIRED"
+    assert scenario["ownership"]["exact_broker_lifecycle_projection"] is True
+    assert scenario["registry"]["classification"] == "REGISTRY_IDENTITY_NORMALIZATION_REPAIR_NEEDED_EXACT_EVIDENCE"
+    assert scenario["registry"]["registry_current_state_before"] == "REVIEW_REQUIRED"
+    assert scenario["registry"]["registry_lifecycle_id_before"] is None
+    assert scenario["registry"]["target_state_after_repair"] == "OPEN_MANAGED"
+    assert scenario["registry"]["exact_fill_identity_recoverable"] is True
+    assert scenario["registry"]["conflicting_trade_or_lifecycle_identity"] is False
+    assert (
+        scenario["risk_reducing_close_authority"]["classification"]
+        == "MANAGED_EXIT_BLOCKED_PENDING_REGISTRY_IDENTITY_NORMALIZATION"
+    )
+    assert scenario["risk_reducing_close_authority"]["close_candidate"] == {
+        "action": "SELL",
+        "quantity": "1",
+        "account_id": "DUM882026",
+        "local_symbol": "MESM6",
+        "con_id": 770561194,
+        "trade_id": "trade_mes_valid_exit",
+        "lifecycle_id": "reserved_submit_mes_valid_exit",
+    }
+    assert scenario["observability"]["registry_identity_normalization_required"] is True
+    assert scenario["observability"]["registry_identity_normalization_broker_mutation_allowed"] is False
+    assert scenario["passed"] is True
 
 
 def _run(tmp_path: Path, name: str) -> dict:

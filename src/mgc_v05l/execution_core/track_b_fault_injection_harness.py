@@ -53,6 +53,8 @@ SCENARIO_CONFLICTING_AUTHORITY_GENERATION = "conflicting_authority_generation_id
 SCENARIO_MANAGED_CLOSE_ORDER_BROKER_ZERO = "managed_close_order_artifact_broker_open_orders_zero"
 SCENARIO_BROKER_OPEN_ORDER_REGISTRY_NONE = "broker_open_order_exists_lifecycle_registry_none"
 SCENARIO_MISSING_GUARDIAN_WITH_BROKER_EXPOSURE = "missing_guardian_artifact_with_broker_exposure"
+SCENARIO_MANAGED_CLOSE_DISAPPEARS_BROKER_FLAT = "managed_close_order_disappears_broker_flat_without_fill_callback"
+SCENARIO_REGISTRY_REVIEW_REQUIRED_NULL_LIFECYCLE_EXIT = "registry_review_required_null_lifecycle_blocks_valid_exit"
 
 FAULT_INJECTION_SCENARIOS: tuple[str, ...] = (
     SCENARIO_STALE_RUNTIME_EXIT_DUE,
@@ -71,6 +73,8 @@ FAULT_INJECTION_SCENARIOS: tuple[str, ...] = (
     SCENARIO_MANAGED_CLOSE_ORDER_BROKER_ZERO,
     SCENARIO_BROKER_OPEN_ORDER_REGISTRY_NONE,
     SCENARIO_MISSING_GUARDIAN_WITH_BROKER_EXPOSURE,
+    SCENARIO_MANAGED_CLOSE_DISAPPEARS_BROKER_FLAT,
+    SCENARIO_REGISTRY_REVIEW_REQUIRED_NULL_LIFECYCLE_EXIT,
 )
 
 DEFAULT_FAULT_INJECTION_NOW = datetime(2026, 6, 4, 14, 0, tzinfo=UTC)
@@ -253,6 +257,26 @@ SCENARIO_METADATA: dict[str, dict[str, Any]] = {
         "notes": "Evidence placeholder: attach missing Guardian/broker exposure artifacts here.",
         "evidence": {"placeholder": True},
     },
+    SCENARIO_MANAGED_CLOSE_DISAPPEARS_BROKER_FLAT: {
+        "bug_class": "Managed Exit Owner Identity Loss",
+        "retired_invariant": "Fresh broker-flat truth plus scoped managed-close evidence creates a local reconciliation path without broker mutation.",
+        "authority_helpers_exercised": ["artifact_integrity_classifier"],
+        "expected_primary_classification": "MANAGED_CLOSE_DISAPPEARED_BROKER_FLAT_RECONCILIATION_REQUIRED",
+        "safety_invariants_checked": list(SAFETY_INVARIANTS_CHECKED),
+        "retirement_status": "FAULT_INJECTION_V1_COVERED",
+        "notes": "Evidence placeholder: attach broker-flat/missing-fill-callback close reconciliation artifacts here.",
+        "evidence": {"placeholder": True},
+    },
+    SCENARIO_REGISTRY_REVIEW_REQUIRED_NULL_LIFECYCLE_EXIT: {
+        "bug_class": "Managed Exit Owner Identity Loss",
+        "retired_invariant": "Registry REVIEW_REQUIRED with null lifecycle_id is normalized only from exact broker/lifecycle/fill identity before managed-exit attach.",
+        "authority_helpers_exercised": ["artifact_integrity_classifier"],
+        "expected_primary_classification": "REGISTRY_REVIEW_REQUIRED_NULL_LIFECYCLE_BLOCKED_MANAGED_EXIT",
+        "safety_invariants_checked": list(SAFETY_INVARIANTS_CHECKED),
+        "retirement_status": "FAULT_INJECTION_V1_COVERED",
+        "notes": "Evidence placeholder: attach MES-style registry identity normalization artifacts here.",
+        "evidence": {"placeholder": True},
+    },
 }
 
 
@@ -307,6 +331,8 @@ def run_track_b_fault_injection_scenario(
         SCENARIO_MANAGED_CLOSE_ORDER_BROKER_ZERO: _scenario_managed_close_order_artifact_broker_open_orders_zero,
         SCENARIO_BROKER_OPEN_ORDER_REGISTRY_NONE: _scenario_broker_open_order_exists_lifecycle_registry_none,
         SCENARIO_MISSING_GUARDIAN_WITH_BROKER_EXPOSURE: _scenario_missing_guardian_artifact_with_broker_exposure,
+        SCENARIO_MANAGED_CLOSE_DISAPPEARS_BROKER_FLAT: _scenario_managed_close_order_disappears_broker_flat_without_fill_callback,
+        SCENARIO_REGISTRY_REVIEW_REQUIRED_NULL_LIFECYCLE_EXIT: _scenario_registry_review_required_null_lifecycle_blocks_valid_exit,
     }
     try:
         payload = handlers[name](artifact_root, actual_now)
@@ -781,6 +807,132 @@ def _scenario_missing_guardian_artifact_with_broker_exposure(artifact_root: Path
         "global_flatten_allowed": False,
     }
     return payload
+
+
+def _scenario_managed_close_order_disappears_broker_flat_without_fill_callback(
+    artifact_root: Path,
+    now: datetime,
+) -> dict[str, Any]:
+    del artifact_root, now
+    lifecycle_id = "life_mnq_close_disappeared"
+    trade_id = "trade_mnq_close_disappeared"
+    return {
+        "retired_bug_class": "Managed Exit Owner Identity Loss",
+        "invariant": "Fresh broker-flat truth plus scoped managed-close evidence creates a local reconciliation path without broker mutation.",
+        "submit": _submit_blocked("MANAGED_CLOSE_DISAPPEARED_BROKER_FLAT_RECONCILIATION_REQUIRED"),
+        "broker_exposure": {
+            **_broker_exposure(count=0, visible=False),
+            "broker_flat": True,
+            "broker_open_order_count": 0,
+        },
+        "ownership": {
+            "classification": "LIFECYCLE_WITHOUT_BROKER_LOCAL_CLOSE_RECONCILIATION_REQUIRED",
+            "owned_exposure_count": 0,
+            "review_required_exposure_count": 1,
+            "trade_id": trade_id,
+            "lifecycle_id": lifecycle_id,
+        },
+        "registry": {
+            "classification": "BROKER_FLAT_WITH_SCOPED_MANAGED_CLOSE_EVIDENCE_RECONCILIATION_REQUIRED",
+            "current_blockers": ["missing_broker_close_fill_callback"],
+            "reconciliation_path_available": True,
+            "broker_flat_without_fill_callback": True,
+            "prior_scoped_managed_close_order": {
+                "trade_id": trade_id,
+                "lifecycle_id": lifecycle_id,
+                "action": "SELL",
+                "quantity": "1",
+                "order_id": "69",
+                "broker_open_order_still_visible": False,
+            },
+            "pnl_price_authority": "UNKNOWN_UNLESS_FILL_CALLBACK_OR_BROKER_EXECUTION_DETAIL_AVAILABLE",
+        },
+        "risk_reducing_close_authority": {
+            "applicable": True,
+            "classification": "RISK_REDUCING_CLOSE_BLOCKED_BROKER_ALREADY_FLAT",
+            "allowed": False,
+            "reason_codes": ["broker_position_flat"],
+            "paper_proof_invoked": False,
+            "live_money_eligible": False,
+            "broad_flatten_allowed": False,
+            "global_flatten_allowed": False,
+        },
+        "observability": {
+            "local_reconciliation_allowed": True,
+            "broker_state_mutated": False,
+            "broker_mutation_allowed": False,
+            "stale_or_malformed_artifact_blocked": True,
+            "stale_or_malformed_artifact_silently_accepted": False,
+        },
+    }
+
+
+def _scenario_registry_review_required_null_lifecycle_blocks_valid_exit(
+    artifact_root: Path,
+    now: datetime,
+) -> dict[str, Any]:
+    del artifact_root, now
+    lifecycle_id = "reserved_submit_mes_valid_exit"
+    trade_id = "trade_mes_valid_exit"
+    return {
+        "retired_bug_class": "Managed Exit Owner Identity Loss",
+        "invariant": "Registry REVIEW_REQUIRED with null lifecycle_id is normalized only from exact broker/lifecycle/fill identity before managed-exit attach.",
+        "submit": _submit_blocked("REGISTRY_REVIEW_REQUIRED_NULL_LIFECYCLE_BLOCKED_MANAGED_EXIT"),
+        "broker_exposure": {
+            **_broker_exposure(count=1, visible=True),
+            "account_id": "DUM882026",
+            "local_symbol": "MESM6",
+            "con_id": 770561194,
+            "quantity": "1",
+        },
+        "ownership": {
+            "classification": "OWNED_MANAGED_EXPOSURE_REGISTRY_IDENTITY_REPAIR_REQUIRED",
+            "owned_exposure_count": 1,
+            "review_required_exposure_count": 0,
+            "trade_id": trade_id,
+            "lifecycle_id": lifecycle_id,
+            "exact_broker_lifecycle_projection": True,
+        },
+        "registry": {
+            "classification": "REGISTRY_IDENTITY_NORMALIZATION_REPAIR_NEEDED_EXACT_EVIDENCE",
+            "current_blockers": ["registry_current_state_review_required", "registry_lifecycle_id_missing"],
+            "registry_current_state_before": "REVIEW_REQUIRED",
+            "registry_lifecycle_id_before": None,
+            "target_state_after_repair": "OPEN_MANAGED",
+            "target_lifecycle_id": lifecycle_id,
+            "broker_backed_entry_after_repair": True,
+            "current_scope_review_required_count_otherwise": 0,
+            "exact_fill_identity_recoverable": True,
+            "conflicting_trade_or_lifecycle_identity": False,
+        },
+        "risk_reducing_close_authority": {
+            "applicable": True,
+            "classification": "MANAGED_EXIT_BLOCKED_PENDING_REGISTRY_IDENTITY_NORMALIZATION",
+            "allowed": False,
+            "reason_codes": ["registry_identity_normalization_required"],
+            "close_candidate": {
+                "action": "SELL",
+                "quantity": "1",
+                "account_id": "DUM882026",
+                "local_symbol": "MESM6",
+                "con_id": 770561194,
+                "trade_id": trade_id,
+                "lifecycle_id": lifecycle_id,
+            },
+            "paper_proof_invoked": False,
+            "live_money_eligible": False,
+            "broad_flatten_allowed": False,
+            "global_flatten_allowed": False,
+        },
+        "observability": {
+            "registry_identity_normalization_required": True,
+            "registry_identity_normalization_broker_mutation_allowed": False,
+            "broker_state_mutated": False,
+            "broker_mutation_allowed": False,
+            "stale_or_malformed_artifact_blocked": True,
+            "stale_or_malformed_artifact_silently_accepted": False,
+        },
+    }
 
 
 def _finalize_scenario(*, name: str, generated_at: datetime, payload: Mapping[str, Any]) -> dict[str, Any]:
