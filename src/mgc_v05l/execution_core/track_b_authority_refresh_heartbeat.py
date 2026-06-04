@@ -11,6 +11,7 @@ import argparse
 import errno
 import json
 import os
+import time
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -158,27 +159,71 @@ def refresh_track_b_paper_authority_if_due(
         )
         return _write_heartbeat(config=config, payload=payload)
 
+    substage_durations: list[dict[str, Any]] = []
+
+    def _timed_substage(
+        name: str,
+        fn,
+        *,
+        mandatory_each_refresh: bool = True,
+        cache_or_throttle_candidate: bool = False,
+        move_off_hot_path_candidate: bool = False,
+        touches_broker_tws: bool = False,
+        scans_historical_artifacts: bool = False,
+        can_delay_submit_capable_readiness: bool = True,
+    ):
+        started = time.perf_counter()
+        try:
+            return fn()
+        finally:
+            substage_durations.append(
+                {
+                    "substage": name,
+                    "duration_seconds": round(max(time.perf_counter() - started, 0.0), 6),
+                    "mandatory_each_refresh": mandatory_each_refresh,
+                    "cache_or_throttle_candidate": cache_or_throttle_candidate,
+                    "move_off_hot_path_candidate": move_off_hot_path_candidate,
+                    "touches_broker_tws": touches_broker_tws,
+                    "scans_historical_artifacts": scans_historical_artifacts,
+                    "can_delay_submit_capable_readiness": can_delay_submit_capable_readiness,
+                }
+            )
+
     refresh_stage = "shared_truth"
     try:
-        shared_truth = refresh_track_b_shared_truth(
-            config=TrackBSharedTruthRefreshConfig(
-                repo_root=config.repo_root,
-                shared_truth_refresh_path=config.shared_truth_refresh_path,
-                broker_lease_history_path=None,
+        shared_truth = _timed_substage(
+            "shared_truth_refresh",
+            lambda: refresh_track_b_shared_truth(
+                config=TrackBSharedTruthRefreshConfig(
+                    repo_root=config.repo_root,
+                    shared_truth_refresh_path=config.shared_truth_refresh_path,
+                    broker_lease_history_path=None,
+                ),
+                now=actual_now,
             ),
-            now=actual_now,
+            cache_or_throttle_candidate=True,
+            move_off_hot_path_candidate=True,
+            scans_historical_artifacts=True,
         )
         refresh_stage = "order_adjustment_planner"
         planner_config = TrackBOrderAdjustmentPlannerConfig(
             repo_root=config.repo_root,
             output_path=config.order_adjustment_plan_path,
         )
-        planner = build_track_b_order_adjustment_plan(
-            config=planner_config,
-            now=actual_now,
-            shared_truth_refresh=shared_truth,
+        planner = _timed_substage(
+            "order_adjustment_planner_build",
+            lambda: build_track_b_order_adjustment_plan(
+                config=planner_config,
+                now=actual_now,
+                shared_truth_refresh=shared_truth,
+            ),
+            cache_or_throttle_candidate=True,
+            move_off_hot_path_candidate=True,
         )
-        planner_path = write_track_b_order_adjustment_plan(config=planner_config, payload=planner)
+        planner_path = _timed_substage(
+            "order_adjustment_planner_write",
+            lambda: write_track_b_order_adjustment_plan(config=planner_config, payload=planner),
+        )
 
         refresh_stage = "control_plane_safe_state"
         control_plane_config = TrackBControlPlaneSnapshotConfig(
@@ -189,10 +234,19 @@ def refresh_track_b_paper_authority_if_due(
             dashboard_projection_path=None,
             broker_lease_history_path=None,
         )
-        control_plane = build_track_b_control_plane_snapshot(config=control_plane_config, now=actual_now)
-        control_plane_path = write_track_b_control_plane_snapshot(
-            config=control_plane_config,
-            payload=control_plane,
+        control_plane = _timed_substage(
+            "control_plane_snapshot_build",
+            lambda: build_track_b_control_plane_snapshot(config=control_plane_config, now=actual_now),
+            cache_or_throttle_candidate=True,
+            move_off_hot_path_candidate=True,
+            scans_historical_artifacts=True,
+        )
+        control_plane_path = _timed_substage(
+            "control_plane_snapshot_write",
+            lambda: write_track_b_control_plane_snapshot(
+                config=control_plane_config,
+                payload=control_plane,
+            ),
         )
         refresh_stage = "paper_autonomous_recovery_planner"
         recovery_plan_config = TrackBPaperAutonomousRecoveryPlannerConfig(
@@ -200,19 +254,32 @@ def refresh_track_b_paper_authority_if_due(
             output_path=config.paper_autonomous_recovery_plan_path,
             control_plane_snapshot_path=config.control_plane_snapshot_path,
         )
-        recovery_plan = build_track_b_paper_autonomous_recovery_plan(
-            config=recovery_plan_config,
-            now=actual_now,
+        recovery_plan = _timed_substage(
+            "paper_autonomous_recovery_planner_build",
+            lambda: build_track_b_paper_autonomous_recovery_plan(
+                config=recovery_plan_config,
+                now=actual_now,
+            ),
+            cache_or_throttle_candidate=True,
+            move_off_hot_path_candidate=True,
         )
-        recovery_plan_path = write_track_b_paper_autonomous_recovery_plan(
-            config=recovery_plan_config,
-            payload=recovery_plan,
+        recovery_plan_path = _timed_substage(
+            "paper_autonomous_recovery_planner_write",
+            lambda: write_track_b_paper_autonomous_recovery_plan(
+                config=recovery_plan_config,
+                payload=recovery_plan,
+            ),
         )
-        shared_truth = _align_shared_truth_recovery_plan_row(
-            config=config,
-            shared_truth=shared_truth,
-            recovery_plan=recovery_plan,
-            recovery_plan_path=recovery_plan_path,
+        shared_truth = _timed_substage(
+            "shared_truth_recovery_plan_alignment_write",
+            lambda: _align_shared_truth_recovery_plan_row(
+                config=config,
+                shared_truth=shared_truth,
+                recovery_plan=recovery_plan,
+                recovery_plan_path=recovery_plan_path,
+            ),
+            cache_or_throttle_candidate=True,
+            move_off_hot_path_candidate=True,
         )
         refresh_stage = "runtime_supervisor_authority"
         supervisor_config = TrackBRuntimeSupervisorAuthorityConfig(
@@ -222,19 +289,33 @@ def refresh_track_b_paper_authority_if_due(
             shared_truth_path=config.shared_truth_refresh_path,
             runtime_safe_state_envelope_path=config.runtime_safe_state_envelope_path,
         )
-        runtime_supervisor = build_track_b_runtime_supervisor_authority(
-            config=supervisor_config,
-            now=actual_now,
+        runtime_supervisor = _timed_substage(
+            "runtime_supervisor_authority_build",
+            lambda: build_track_b_runtime_supervisor_authority(
+                config=supervisor_config,
+                now=actual_now,
+            ),
+            cache_or_throttle_candidate=True,
+            move_off_hot_path_candidate=True,
         )
-        runtime_supervisor_path = write_track_b_runtime_supervisor_authority(
-            config=supervisor_config,
-            payload=runtime_supervisor,
+        runtime_supervisor_path = _timed_substage(
+            "runtime_supervisor_authority_write",
+            lambda: write_track_b_runtime_supervisor_authority(
+                config=supervisor_config,
+                payload=runtime_supervisor,
+            ),
         )
         refresh_stage = "canonical_readiness"
-        readiness = write_canonical_readiness_artifact(
-            repo_root=config.repo_root,
-            output_path=config.resolve(config.canonical_readiness_path),
-            now=actual_now,
+        readiness = _timed_substage(
+            "canonical_readiness_write",
+            lambda: write_canonical_readiness_artifact(
+                repo_root=config.repo_root,
+                output_path=config.resolve(config.canonical_readiness_path),
+                now=actual_now,
+            ),
+            cache_or_throttle_candidate=True,
+            move_off_hot_path_candidate=True,
+            scans_historical_artifacts=True,
         )
     except Exception as exc:  # pragma: no cover - exercised through tests with monkeypatch
         payload = _base_payload(
@@ -251,6 +332,9 @@ def refresh_track_b_paper_authority_if_due(
                 "last_failure_at": actual_now.isoformat(),
                 "exception_type": type(exc).__name__,
                 "exception_message": str(exc),
+                "refresh_stage": refresh_stage,
+                "substage_durations": substage_durations,
+                "slowest_substage": _slowest_substage(substage_durations),
             }
         )
         return _write_heartbeat(config=config, payload=payload)
@@ -281,6 +365,8 @@ def refresh_track_b_paper_authority_if_due(
             or readiness.get("state") == "READY_SUBMIT_CAPABLE",
             "submit_allowed": readiness.get("submit_allowed") is True,
             "shared_truth_refresh_classification": shared_truth.get("classification"),
+            "substage_durations": substage_durations,
+            "slowest_substage": _slowest_substage(substage_durations),
             "artifact_paths": {
                 "authority_refresh": str(config.resolve(config.output_path)),
                 "control_plane_snapshot": str(control_plane_path),
@@ -296,6 +382,12 @@ def refresh_track_b_paper_authority_if_due(
         }
     )
     return _write_heartbeat(config=config, payload=payload)
+
+
+def _slowest_substage(rows: Sequence[Mapping[str, Any]]) -> dict[str, Any] | None:
+    if not rows:
+        return None
+    return dict(max(rows, key=lambda row: float(row.get("duration_seconds") or 0.0)))
 
 
 def _align_shared_truth_recovery_plan_row(

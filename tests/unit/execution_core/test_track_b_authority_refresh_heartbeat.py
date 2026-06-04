@@ -196,6 +196,25 @@ def test_runtime_active_stale_control_plane_triggers_refresh(tmp_path: Path, mon
     assert payload["control_plane_snapshot_id"] == "cp-1"
     assert payload["paper_autonomous_recovery_plan_control_plane_snapshot_id"] == "cp-1"
     assert payload["runtime_supervisor_classification"] == "SUPERVISOR_RUNTIME_ALREADY_HEALTHY"
+    substage_names = [row["substage"] for row in payload["substage_durations"]]
+    assert substage_names == [
+        "shared_truth_refresh",
+        "order_adjustment_planner_build",
+        "order_adjustment_planner_write",
+        "control_plane_snapshot_build",
+        "control_plane_snapshot_write",
+        "paper_autonomous_recovery_planner_build",
+        "paper_autonomous_recovery_planner_write",
+        "shared_truth_recovery_plan_alignment_write",
+        "runtime_supervisor_authority_build",
+        "runtime_supervisor_authority_write",
+        "canonical_readiness_write",
+    ]
+    assert payload["slowest_substage"]["substage"] in substage_names
+    assert all("duration_seconds" in row for row in payload["substage_durations"])
+    assert all(row["touches_broker_tws"] is False for row in payload["substage_durations"])
+    assert any(row["scans_historical_artifacts"] is True for row in payload["substage_durations"])
+    assert any(row["move_off_hot_path_candidate"] is True for row in payload["substage_durations"])
     assert payload["artifact_paths"]["runtime_supervisor_authority"].endswith(
         "latest_runtime_supervisor_authority.json"
     )
@@ -232,6 +251,15 @@ def test_refresh_failure_preserves_previous_success_and_does_not_fake_freshness(
     assert payload["authority_fresh"] is False
     assert payload["activity_classification"] == "AUTHORITY_REFRESH_FAILED"
     assert payload["last_failure_at"] == now.isoformat()
+    assert [row["substage"] for row in payload["substage_durations"]] == [
+        "shared_truth_refresh",
+        "order_adjustment_planner_build",
+    ]
+    assert payload["slowest_substage"]["substage"] in {
+        "shared_truth_refresh",
+        "order_adjustment_planner_build",
+    }
+    assert payload["refresh_stage"] == "order_adjustment_planner"
     stale_payload = json.loads((tmp_path / DEFAULT_CONTROL_PLANE_SNAPSHOT_ARTIFACT).read_text(encoding="utf-8"))
     assert stale_payload["generated_at"] == stale.isoformat()
 

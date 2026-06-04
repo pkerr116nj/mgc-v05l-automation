@@ -7608,14 +7608,83 @@ class ProbationaryPaperSupervisor:
                     reconciliation_clean=reconciliation_clean,
                 )
                 authority_status_started_at = time_module.perf_counter()
+                authority_status_substages: list[dict[str, Any]] = []
+
+                def _record_authority_status_substage(
+                    *,
+                    name: str,
+                    started_at: float,
+                    mandatory_each_cycle: bool = True,
+                    cache_or_throttle_candidate: bool = False,
+                    move_off_hot_path_candidate: bool = False,
+                    touches_broker_tws: bool = False,
+                    scans_historical_artifacts: bool = False,
+                    can_delay_submit_capable_readiness: bool = True,
+                    nested_substages: Sequence[Mapping[str, Any]] | None = None,
+                    slowest_nested_substage: Mapping[str, Any] | None = None,
+                ) -> None:
+                    authority_status_substages.append(
+                        {
+                            "substage": name,
+                            "duration_seconds": round(max(time_module.perf_counter() - started_at, 0.0), 6),
+                            "mandatory_each_cycle": mandatory_each_cycle,
+                            "cache_or_throttle_candidate": cache_or_throttle_candidate,
+                            "move_off_hot_path_candidate": move_off_hot_path_candidate,
+                            "touches_broker_tws": touches_broker_tws,
+                            "scans_historical_artifacts": scans_historical_artifacts,
+                            "can_delay_submit_capable_readiness": can_delay_submit_capable_readiness,
+                            "nested_substage_count": len(nested_substages or []),
+                            "slowest_nested_substage": dict(slowest_nested_substage or {}) or None,
+                        }
+                    )
+
+                substage_started_at = time_module.perf_counter()
                 _write_probationary_paper_runtime_truth(
                     settings=self._settings,
                     lanes=self._lanes,
                     runtime_instance_id=self._runtime_instance_id,
                     runtime_started_at=self._runtime_started_at,
                 )
-                _refresh_track_b_authority_for_active_paper_runtime(self._settings)
-                _write_track_b_live_runtime_environment_watchdog_for_active_paper_runtime(self._settings)
+                _record_authority_status_substage(
+                    name="runtime_truth_write",
+                    started_at=substage_started_at,
+                    can_delay_submit_capable_readiness=True,
+                )
+                substage_started_at = time_module.perf_counter()
+                authority_refresh_payload = _refresh_track_b_authority_for_active_paper_runtime(self._settings)
+                _record_authority_status_substage(
+                    name="authority_refresh_heartbeat",
+                    started_at=substage_started_at,
+                    cache_or_throttle_candidate=True,
+                    move_off_hot_path_candidate=True,
+                    scans_historical_artifacts=True,
+                    can_delay_submit_capable_readiness=True,
+                    nested_substages=(
+                        authority_refresh_payload.get("substage_durations")
+                        if isinstance(authority_refresh_payload, Mapping)
+                        else None
+                    ),
+                    slowest_nested_substage=(
+                        authority_refresh_payload.get("slowest_substage")
+                        if isinstance(authority_refresh_payload, Mapping)
+                        else None
+                    ),
+                )
+                substage_started_at = time_module.perf_counter()
+                watchdog_payload = _write_track_b_live_runtime_environment_watchdog_for_active_paper_runtime(self._settings)
+                _record_authority_status_substage(
+                    name="watchdog_liveness_refresh",
+                    started_at=substage_started_at,
+                    cache_or_throttle_candidate=True,
+                    move_off_hot_path_candidate=True,
+                    scans_historical_artifacts=True,
+                    can_delay_submit_capable_readiness=True,
+                    slowest_nested_substage=(
+                        watchdog_payload.get("slowest_substage")
+                        if isinstance(watchdog_payload, Mapping)
+                        else None
+                    ),
+                )
                 authority_status_refresh_duration_seconds = round(
                     max(time_module.perf_counter() - authority_status_started_at, 0.0),
                     6,
@@ -7647,11 +7716,21 @@ class ProbationaryPaperSupervisor:
                     "phase1_read_cache_duration_seconds": stage_durations["phase1_read_cache"],
                     "managed_open_position_maintenance_duration_seconds": managed_maintenance_duration_seconds,
                     "authority_status_refresh_duration_seconds": authority_status_refresh_duration_seconds,
+                    "authority_status_refresh_substages": authority_status_substages,
+                    "authority_status_refresh_slowest_substage": (
+                        max(
+                            authority_status_substages,
+                            key=lambda row: float(row.get("duration_seconds") or 0.0),
+                        )
+                        if authority_status_substages
+                        else None
+                    ),
                     "slowest_stage": {
                         "stage": slowest_stage_name,
                         "duration_seconds": round(float(slowest_stage_duration), 6),
                     },
                 }
+                status_publication_started_at = time_module.perf_counter()
                 status_path = _write_probationary_supervisor_operator_status(
                     settings=self._settings,
                     lanes=self._lanes,
@@ -7666,6 +7745,38 @@ class ProbationaryPaperSupervisor:
                     runtime_instance_id=self._runtime_instance_id,
                     runtime_cycle_observability=runtime_cycle_observability,
                 )
+                operator_status_publication_duration_seconds = round(
+                    max(time_module.perf_counter() - status_publication_started_at, 0.0),
+                    6,
+                )
+                runtime_cycle_observability["operator_status_publication_duration_seconds"] = (
+                    operator_status_publication_duration_seconds
+                )
+                runtime_cycle_observability["total_cycle_duration_with_operator_status_seconds"] = round(
+                    max(time_module.perf_counter() - cycle_started_at, 0.0),
+                    6,
+                )
+                runtime_cycle_observability.setdefault("authority_status_refresh_substages", []).append(
+                    {
+                        "substage": "operator_status_publication",
+                        "duration_seconds": operator_status_publication_duration_seconds,
+                        "mandatory_each_cycle": True,
+                        "cache_or_throttle_candidate": False,
+                        "move_off_hot_path_candidate": False,
+                        "touches_broker_tws": False,
+                        "scans_historical_artifacts": False,
+                        "can_delay_submit_capable_readiness": False,
+                        "nested_substage_count": 0,
+                        "slowest_nested_substage": None,
+                    }
+                )
+                runtime_cycle_observability["authority_status_refresh_slowest_substage"] = max(
+                    runtime_cycle_observability["authority_status_refresh_substages"],
+                    key=lambda row: float(row.get("duration_seconds") or 0.0),
+                )
+                status_payload = _read_json(status_path)
+                status_payload["runtime_cycle_observability"] = runtime_cycle_observability
+                self._structured_logger._write_json(status_path, status_payload)  # noqa: SLF001
 
                 if not reconciliation_clean:
                     stop_reason = "paper_reconciliation_mismatch"
