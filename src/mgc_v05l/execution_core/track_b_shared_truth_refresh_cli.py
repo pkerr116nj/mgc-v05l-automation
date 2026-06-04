@@ -144,20 +144,6 @@ def refresh_track_b_shared_truth(
     position_truth = build_track_b_position_truth(config=position_config, now=actual_now)
     position_path, _ = write_track_b_position_truth(config=position_config, payload=position_truth, now=actual_now)
 
-    runtime_config = TrackBRuntimeEnvironmentTruthConfig(repo_root=config.repo_root, dashboard_projection_path=None)
-    runtime_environment_truth = build_track_b_runtime_environment_truth(
-        config=runtime_config,
-        now=actual_now,
-        pid_running=pid_running,
-        process_root_resolver=process_root_resolver,
-        source_commit_resolver=source_commit_resolver,
-    )
-    runtime_path, _ = write_track_b_runtime_environment_truth(
-        config=runtime_config,
-        payload=runtime_environment_truth,
-        now=actual_now,
-    )
-
     managed_position_config = TrackBManagedPositionRegistryConfig(repo_root=config.repo_root, dashboard_projection_path=None)
     managed_position_registry = build_track_b_managed_position_registry(config=managed_position_config, now=actual_now)
     managed_position_path, _ = write_track_b_managed_position_registry(
@@ -166,10 +152,9 @@ def refresh_track_b_shared_truth(
         now=actual_now,
     )
 
-    # Managed Order Registry enriches lower-level Open Order Truth with managed
-    # position context, while Position Truth and Managed Position Registry also
-    # consume Managed Order Registry evidence. One bounded convergence pass keeps
-    # the command one-shot even when prior artifacts were stale.
+    # Managed Order Registry and Managed Position Registry are mutually
+    # informative. Build each once from the other fresh current-cycle artifact,
+    # then rebuild Position Truth from the final managed-order projection.
     managed_order_registry = build_track_b_managed_order_registry(config=managed_order_config, now=actual_now)
     managed_order_path, _ = write_track_b_managed_order_registry(
         config=managed_order_config,
@@ -178,32 +163,7 @@ def refresh_track_b_shared_truth(
     )
     position_truth = build_track_b_position_truth(config=position_config, now=actual_now)
     position_path, _ = write_track_b_position_truth(config=position_config, payload=position_truth, now=actual_now)
-    runtime_environment_truth = build_track_b_runtime_environment_truth(
-        config=runtime_config,
-        now=actual_now,
-        pid_running=pid_running,
-        process_root_resolver=process_root_resolver,
-        source_commit_resolver=source_commit_resolver,
-    )
-    runtime_path, _ = write_track_b_runtime_environment_truth(
-        config=runtime_config,
-        payload=runtime_environment_truth,
-        now=actual_now,
-    )
-    managed_position_registry = build_track_b_managed_position_registry(config=managed_position_config, now=actual_now)
-    managed_position_path, _ = write_track_b_managed_position_registry(
-        config=managed_position_config,
-        payload=managed_position_registry,
-        now=actual_now,
-    )
-    managed_order_registry = build_track_b_managed_order_registry(config=managed_order_config, now=actual_now)
-    managed_order_path, _ = write_track_b_managed_order_registry(
-        config=managed_order_config,
-        payload=managed_order_registry,
-        now=actual_now,
-    )
-    position_truth = build_track_b_position_truth(config=position_config, now=actual_now)
-    position_path, _ = write_track_b_position_truth(config=position_config, payload=position_truth, now=actual_now)
+    runtime_config = TrackBRuntimeEnvironmentTruthConfig(repo_root=config.repo_root, dashboard_projection_path=None)
     runtime_environment_truth = build_track_b_runtime_environment_truth(
         config=runtime_config,
         now=actual_now,

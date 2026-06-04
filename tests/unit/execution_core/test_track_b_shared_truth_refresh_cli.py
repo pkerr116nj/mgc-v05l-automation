@@ -117,6 +117,38 @@ def test_refresh_replaces_stale_autonomous_recovery_plan(tmp_path: Path) -> None
     assert refreshed["execution_enabled"] is False
 
 
+def test_refresh_uses_bounded_current_cycle_authority_rebuilds(monkeypatch, tmp_path: Path) -> None:
+    _seed_clean_stack(tmp_path)
+    calls: list[str] = []
+
+    def count_call(name: str) -> None:
+        original = getattr(shared_truth_module, name)
+
+        def counted(*args, **kwargs):
+            calls.append(name)
+            return original(*args, **kwargs)
+
+        monkeypatch.setattr(shared_truth_module, name, counted)
+
+    for name in [
+        "build_track_b_open_order_truth",
+        "build_track_b_managed_order_registry",
+        "build_track_b_position_truth",
+        "build_track_b_runtime_environment_truth",
+        "build_track_b_managed_position_registry",
+    ]:
+        count_call(name)
+
+    result = _refresh(tmp_path)
+
+    assert result["exit_code"] == 0
+    assert calls.count("build_track_b_open_order_truth") == 1
+    assert calls.count("build_track_b_managed_order_registry") == 2
+    assert calls.count("build_track_b_position_truth") == 2
+    assert calls.count("build_track_b_runtime_environment_truth") == 1
+    assert calls.count("build_track_b_managed_position_registry") == 1
+
+
 def test_refresh_market_closed_autonomous_plan_waits(tmp_path: Path) -> None:
     _seed_clean_stack(tmp_path)
     _seed_recovery_control_plane(

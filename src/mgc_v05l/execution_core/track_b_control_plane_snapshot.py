@@ -280,9 +280,13 @@ def build_track_b_control_plane_snapshot(
                 source_commit_resolver=source_commit_resolver,
             ),
             current_hot_path_required=True,
-            scans_historical_artifacts=True,
+            scans_historical_artifacts=False,
             can_consume_compact_latest_artifact=True,
             cache_or_throttle_candidate=True,
+            notes=(
+                "Uses compact latest shared-truth artifact from the initial refresh, "
+                "then refreshes the compact order-adjustment diagnostic before Supervisor."
+            ),
         )
 
     supervisor_config = TrackBRuntimeSupervisorAuthorityConfig(
@@ -324,9 +328,13 @@ def build_track_b_control_plane_snapshot(
                 source_commit_resolver=source_commit_resolver,
             ),
             current_hot_path_required=True,
-            scans_historical_artifacts=True,
+            scans_historical_artifacts=False,
             can_consume_compact_latest_artifact=True,
             cache_or_throttle_candidate=True,
+            notes=(
+                "Uses compact latest shared-truth artifact from the prior convergence, "
+                "then refreshes the compact order-adjustment diagnostic before Supervisor rebuild."
+            ),
         )
         runtime_supervisor = _timed_step(
             "runtime_supervisor_authority_rebuild_after_reconvergence",
@@ -513,33 +521,26 @@ def _converge_shared_truth_for_snapshot(
     process_root_resolver: Callable[[int], Path | None] | None,
     source_commit_resolver: Callable[[Path], str | None] | None,
 ) -> dict[str, Any]:
-    """Refresh the authority generation after local producers finish writing.
+    """Converge compact shared-truth dependent diagnostics before Supervisor.
 
-    Control Plane builds several read-only authority artifacts before Runtime
-    Supervisor checks shared-truth coherence. Some of those producers rebuild
-    lower-level current-scope artifacts. This bounded convergence pass makes the
-    Supervisor compare against the final shared-truth generation, and it also
-    refreshes the dry-run order-adjustment plan so a stale suspicious plan cannot
-    outlive a broker-flat/no-open-order shared truth state.
+    The initial shared-truth refresh already rebuilt the current-scope authority
+    stack. The remaining startup hot-path need here is to refresh compact
+    diagnostics that depend on that stack before Runtime Supervisor reads them.
+    Avoiding a second full shared-truth rebuild keeps historical/audit scans out
+    of this convergence substage while preserving current blocker visibility.
     """
 
-    shared_truth = _refresh_shared_truth_for_snapshot(
-        config=config,
-        now=now,
-        pid_running=pid_running,
-        process_root_resolver=process_root_resolver,
-        source_commit_resolver=source_commit_resolver,
-    )
+    shared_truth = _read_json(config.resolve(config.shared_truth_refresh_path))
+    if not shared_truth or not _list(shared_truth.get("services")):
+        shared_truth = _refresh_shared_truth_for_snapshot(
+            config=config,
+            now=now,
+            pid_running=pid_running,
+            process_root_resolver=process_root_resolver,
+            source_commit_resolver=source_commit_resolver,
+        )
     _refresh_order_adjustment_plan_for_snapshot(config=config, now=now, shared_truth=shared_truth)
-    shared_truth = _refresh_shared_truth_for_snapshot(
-        config=config,
-        now=now,
-        pid_running=pid_running,
-        process_root_resolver=process_root_resolver,
-        source_commit_resolver=source_commit_resolver,
-    )
-    _refresh_order_adjustment_plan_for_snapshot(config=config, now=now, shared_truth=shared_truth)
-    return shared_truth
+    return dict(shared_truth)
 
 
 def _refresh_order_adjustment_plan_for_snapshot(

@@ -59,8 +59,9 @@ def test_snapshot_ties_supervisor_to_shared_truth_generation(tmp_path: Path) -> 
     assert "runtime_safe_state_envelope_build" in substages
     assert payload["control_plane_snapshot_build_slowest_substage"]["substage"] in substages
     assert all("duration_seconds" in row for row in substages.values())
-    assert substages["shared_truth_convergence"]["scans_historical_artifacts"] is True
+    assert substages["shared_truth_convergence"]["scans_historical_artifacts"] is False
     assert substages["shared_truth_convergence"]["can_consume_compact_latest_artifact"] is True
+    assert "compact latest shared-truth artifact" in substages["shared_truth_convergence"]["notes"]
     assert substages["artifact_archive_plan_diagnostic"]["current_hot_path_required"] is False
     assert substages["artifact_archive_plan_diagnostic"]["move_off_hot_path_candidate"] is True
     assert payload["safe_state_classification"] == "SAFE_STATE_NORMAL"
@@ -298,6 +299,38 @@ def test_snapshot_converges_stale_order_adjustment_after_clean_shared_truth(tmp_
     assert payload["runtime_supervisor_classification"] == "SUPERVISOR_RUNTIME_START_ALLOWED"
     assert refreshed_plan["classification"] == "NO_ACTION_NEEDED"
     assert refreshed_plan["summary"]["plan_count"] == 0
+
+
+def test_snapshot_convergence_uses_compact_shared_truth_without_full_refresh(monkeypatch, tmp_path: Path) -> None:
+    _seed_clean_stack(tmp_path)
+    _seed_control_plane(tmp_path)
+    refresh_calls = []
+    original_refresh = cp_module.refresh_track_b_shared_truth
+    planner_calls = []
+    original_planner = cp_module.build_track_b_order_adjustment_plan
+
+    def counted_refresh(**kwargs):
+        refresh_calls.append(kwargs)
+        return original_refresh(**kwargs)
+
+    def counted_planner(**kwargs):
+        planner_calls.append(kwargs)
+        return original_planner(**kwargs)
+
+    monkeypatch.setattr(cp_module, "refresh_track_b_shared_truth", counted_refresh)
+    monkeypatch.setattr(cp_module, "build_track_b_order_adjustment_plan", counted_planner)
+
+    payload = _snapshot(tmp_path)
+
+    assert payload["classification"] == CONTROL_PLANE_SNAPSHOT_READY
+    assert len(refresh_calls) == 1
+    assert len(planner_calls) == 1
+    assert planner_calls[0]["shared_truth_refresh"]["refresh_generation_id"] == payload[
+        "shared_truth_refresh_generation_id"
+    ]
+    substages = {row["substage"]: row for row in payload["control_plane_snapshot_build_substages"]}
+    assert substages["shared_truth_convergence"]["scans_historical_artifacts"] is False
+    assert substages["shared_truth_convergence"]["can_consume_compact_latest_artifact"] is True
 
 
 def test_snapshot_includes_recovery_and_planner_fields(tmp_path: Path) -> None:
