@@ -1139,7 +1139,8 @@ def _entry_canonical_current_scope_result(repo_root: Path) -> dict[str, Any]:
 
     registry = payloads["registry_diagnostics"]
     registry_classification = str(registry.get("classification") or "").strip()
-    if registry and registry_classification != "TRACK_B_DIAGNOSTICS_CLEAN_CURRENT_SCOPE":
+    registry_current_scope_clean = _registry_diagnostics_current_scope_clean(registry)
+    if registry and not registry_current_scope_clean:
         reason_codes.append(_CANONICAL_TRUTH_AMBIGUOUS_REASON)
         blocking_fields.append(
             {
@@ -1286,10 +1287,76 @@ def _entry_canonical_current_scope_result(repo_root: Path) -> dict[str, Any]:
             "managed_position_review_required_count": managed_position_review_count,
             "managed_order_count": managed_order_count,
             "open_order_count": open_order_count,
+            "registry_current_scope_clean": registry_current_scope_clean,
             "registry_diagnostics_classification": registry_classification or None,
             "reconciliation_classification": reconciliation_classification or None,
         },
     }
+
+
+def _registry_diagnostics_current_scope_clean(payload: dict[str, Any]) -> bool:
+    classification = str(payload.get("classification") or "").strip()
+    if not classification:
+        return False
+    if classification == "TRACK_B_DIAGNOSTICS_CONFLICT_CURRENT_SCOPE":
+        return False
+    if classification == "TRACK_B_DIAGNOSTICS_CLEAN_CURRENT_SCOPE":
+        return True
+    if payload.get("diagnostic_only") is not True:
+        return False
+    if "HISTORICAL" not in classification:
+        return False
+
+    current_review_count = _int_value(payload.get("current_scope_review_required_count"))
+    current_scope_trade_states = payload.get("current_scope_trade_states")
+    current_blockers = payload.get("current_blockers")
+    review_required_trade_ids = payload.get("review_required_trade_ids")
+
+    current_evidence_present = (
+        "current_scope_review_required_count" in payload
+        or "review_required_trade_ids" in payload
+        or "current_scope_trade_states" in payload
+    )
+    if not current_evidence_present:
+        return False
+    if current_review_count != 0:
+        return False
+    if _list_value(current_scope_trade_states):
+        return False
+    if _list_value(current_blockers):
+        return False
+    if review_required_trade_ids is not None and _list_value(review_required_trade_ids):
+        return False
+
+    lifecycle_open_position_count = _int_value(payload.get("lifecycle_open_position_count"))
+    lifecycle_open_order_count = _int_value(payload.get("lifecycle_open_order_count"))
+    track_b_position_count = _int_value(
+        payload.get("track_b_broker_position_count") or payload.get("track_b_managed_futures_position_count")
+    )
+    track_b_open_order_count = _int_value(
+        payload.get("track_b_broker_open_order_count") or payload.get("broker_open_order_count")
+    )
+    unknown_scope_position_count = _int_value(payload.get("unknown_scope_position_count"))
+    broker_lifecycle_reconciled = payload.get("broker_lifecycle_reconciled")
+    if broker_lifecycle_reconciled is not None and broker_lifecycle_reconciled is not True:
+        return False
+    return (
+        lifecycle_open_position_count == 0
+        and lifecycle_open_order_count == 0
+        and track_b_position_count == 0
+        and track_b_open_order_count == 0
+        and unknown_scope_position_count == 0
+    )
+
+
+def _list_value(value: Any) -> list[Any]:
+    if value is None:
+        return []
+    if isinstance(value, list):
+        return value
+    if isinstance(value, tuple):
+        return list(value)
+    return [value]
 
 
 def _artifact_freshness(payload: dict[str, Any], *, max_age_seconds: float) -> dict[str, Any]:

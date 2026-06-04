@@ -117,6 +117,16 @@ def _write_canonical_current_scope(
     *,
     registry_classification: str = "TRACK_B_DIAGNOSTICS_CLEAN_CURRENT_SCOPE",
     registry_generated_at: str = "2999-01-01T00:00:00+00:00",
+    registry_diagnostic_only: bool = False,
+    registry_current_scope_review_required_count: int | None = None,
+    registry_current_scope_trade_states: list[dict[str, object]] | None = None,
+    registry_current_blockers: list[dict[str, object]] | None = None,
+    registry_review_required_trade_ids: list[str] | None = None,
+    registry_lifecycle_open_position_count: int = 0,
+    registry_lifecycle_open_order_count: int = 0,
+    registry_track_b_broker_position_count: int = 0,
+    registry_track_b_broker_open_order_count: int = 0,
+    registry_unknown_scope_position_count: int = 0,
     managed_position_count: int = 0,
     managed_position_review_count: int = 0,
     managed_order_count: int = 0,
@@ -124,14 +134,30 @@ def _write_canonical_current_scope(
 ) -> None:
     registry_path = tmp_path / "outputs" / "track_b_execution_core" / "diagnostics" / "latest_track_b_registry_truth_diagnostics.json"
     registry_path.parent.mkdir(parents=True, exist_ok=True)
+    if registry_current_scope_review_required_count is None:
+        registry_current_scope_review_required_count = (
+            0 if registry_classification == "TRACK_B_DIAGNOSTICS_CLEAN_CURRENT_SCOPE" else 1
+        )
+    registry_payload = {
+        "generated_at": registry_generated_at,
+        "classification": registry_classification,
+        "diagnostic_only": registry_diagnostic_only,
+        "current_scope_review_required_count": registry_current_scope_review_required_count,
+        "lifecycle_open_position_count": registry_lifecycle_open_position_count,
+        "lifecycle_open_order_count": registry_lifecycle_open_order_count,
+        "track_b_broker_position_count": registry_track_b_broker_position_count,
+        "track_b_broker_open_order_count": registry_track_b_broker_open_order_count,
+        "unknown_scope_position_count": registry_unknown_scope_position_count,
+        "broker_lifecycle_reconciled": True,
+    }
+    if registry_current_scope_trade_states is not None:
+        registry_payload["current_scope_trade_states"] = registry_current_scope_trade_states
+    if registry_current_blockers is not None:
+        registry_payload["current_blockers"] = registry_current_blockers
+    if registry_review_required_trade_ids is not None:
+        registry_payload["review_required_trade_ids"] = registry_review_required_trade_ids
     registry_path.write_text(
-        json.dumps(
-            {
-                "generated_at": registry_generated_at,
-                "classification": registry_classification,
-                "current_scope_review_required_count": 0 if registry_classification == "TRACK_B_DIAGNOSTICS_CLEAN_CURRENT_SCOPE" else 1,
-            }
-        ),
+        json.dumps(registry_payload),
         encoding="utf-8",
     )
 
@@ -908,6 +934,45 @@ def test_stale_canonical_registry_diagnostics_fail_closed(tmp_path: Path) -> Non
     assert gate["registry_truth_result"]["canonical_current_scope_result"]["usable"] is False
 
 
+def test_diagnostic_only_historical_registry_debris_with_clean_current_scope_allows_entry(tmp_path: Path) -> None:
+    _write_monitor(tmp_path, broker_quantity=0.0)
+    _write_ledger(tmp_path, [])
+    _write_governance(tmp_path, [_governance_row("mnq_us_active_participation_long", "PAPER_ACTIVE_EVIDENCE_MNQ_US_PARTICIPATION_LONG_V1")])
+    _write_broker_positions_snapshot(tmp_path, positions=[])
+    _write_broker_open_orders_snapshot(tmp_path, open_orders=[])
+    _write_canonical_current_scope(
+        tmp_path,
+        registry_classification="TRACK_B_DIAGNOSTICS_HISTORICAL_REVIEW_REQUIRED",
+        registry_diagnostic_only=True,
+        registry_current_scope_review_required_count=0,
+        registry_current_scope_trade_states=[],
+        registry_current_blockers=[],
+        registry_review_required_trade_ids=[],
+    )
+
+    gate = evaluate_paper_strategy_exposure_gate(
+        repo_root=tmp_path,
+        strategy_id="mnq_us_active_participation_long",
+        bridge_strategy_id="PAPER_ACTIVE_EVIDENCE_MNQ_US_PARTICIPATION_LONG_V1",
+        action="BUY",
+        intent_type="BUY_TO_OPEN",
+        quantity=1.0,
+        executable_symbol="MNQ",
+        account_id="DUM882026",
+        con_id=770561201,
+        local_symbol="MNQM6",
+    )
+
+    assert gate["submit_allowed"] is True
+    assert gate["classification"] == "PAPER_EXPOSURE_ENTRY_ALLOWED"
+    assert gate["registry_truth_result"]["allowed"] is True
+    assert gate["registry_truth_result"]["canonical_current_scope_result"]["allowed"] is True
+    assert gate["registry_truth_result"]["canonical_current_scope_result"]["usable"] is True
+    assert gate["registry_truth_result"]["canonical_current_scope_result"]["canonical_values"][
+        "registry_current_scope_clean"
+    ] is True
+
+
 def test_ambiguous_canonical_registry_diagnostics_fail_closed(tmp_path: Path) -> None:
     _write_monitor(tmp_path, broker_quantity=0.0)
     _write_ledger(tmp_path, [])
@@ -927,6 +992,143 @@ def test_ambiguous_canonical_registry_diagnostics_fail_closed(tmp_path: Path) ->
     assert gate["submit_allowed"] is False
     assert "CANONICAL_REGISTRY_TRUTH_AMBIGUOUS" in gate["block_reasons"]
     assert gate["registry_truth_result"]["canonical_current_scope_result"]["usable"] is False
+
+
+def test_diagnostic_only_historical_registry_current_blockers_fail_closed(tmp_path: Path) -> None:
+    _write_monitor(tmp_path, broker_quantity=0.0)
+    _write_ledger(tmp_path, [])
+    _write_governance(tmp_path, [_governance_row("mnq_us_active_participation_long", "PAPER_ACTIVE_EVIDENCE_MNQ_US_PARTICIPATION_LONG_V1")])
+    _write_canonical_current_scope(
+        tmp_path,
+        registry_classification="TRACK_B_DIAGNOSTICS_HISTORICAL_REVIEW_REQUIRED",
+        registry_diagnostic_only=True,
+        registry_current_scope_review_required_count=0,
+        registry_current_scope_trade_states=[],
+        registry_current_blockers=[{"code": "current_scope_blocker"}],
+        registry_review_required_trade_ids=[],
+    )
+
+    gate = evaluate_paper_strategy_exposure_gate(
+        repo_root=tmp_path,
+        strategy_id="mnq_us_active_participation_long",
+        bridge_strategy_id="PAPER_ACTIVE_EVIDENCE_MNQ_US_PARTICIPATION_LONG_V1",
+        action="BUY",
+        intent_type="BUY_TO_OPEN",
+        quantity=1.0,
+        executable_symbol="MNQ",
+    )
+
+    assert gate["submit_allowed"] is False
+    assert "CANONICAL_REGISTRY_TRUTH_AMBIGUOUS" in gate["block_reasons"]
+    assert gate["registry_truth_result"]["canonical_current_scope_result"]["usable"] is False
+
+
+def test_diagnostic_only_historical_registry_missing_current_scope_evidence_fail_closed(tmp_path: Path) -> None:
+    _write_monitor(tmp_path, broker_quantity=0.0)
+    _write_ledger(tmp_path, [])
+    _write_governance(tmp_path, [_governance_row("mnq_us_active_participation_long", "PAPER_ACTIVE_EVIDENCE_MNQ_US_PARTICIPATION_LONG_V1")])
+    _write_canonical_current_scope(
+        tmp_path,
+        registry_classification="TRACK_B_DIAGNOSTICS_HISTORICAL_REVIEW_REQUIRED",
+        registry_diagnostic_only=True,
+    )
+    registry_path = tmp_path / "outputs" / "track_b_execution_core" / "diagnostics" / "latest_track_b_registry_truth_diagnostics.json"
+    registry = json.loads(registry_path.read_text(encoding="utf-8"))
+    registry.pop("current_scope_review_required_count", None)
+    registry.pop("current_scope_trade_states", None)
+    registry.pop("review_required_trade_ids", None)
+    registry_path.write_text(json.dumps(registry), encoding="utf-8")
+
+    gate = evaluate_paper_strategy_exposure_gate(
+        repo_root=tmp_path,
+        strategy_id="mnq_us_active_participation_long",
+        bridge_strategy_id="PAPER_ACTIVE_EVIDENCE_MNQ_US_PARTICIPATION_LONG_V1",
+        action="BUY",
+        intent_type="BUY_TO_OPEN",
+        quantity=1.0,
+        executable_symbol="MNQ",
+    )
+
+    assert gate["submit_allowed"] is False
+    assert "CANONICAL_REGISTRY_TRUTH_AMBIGUOUS" in gate["block_reasons"]
+    assert gate["registry_truth_result"]["canonical_current_scope_result"]["usable"] is False
+
+
+@pytest.mark.parametrize(
+    ("symbol", "con_id", "local_symbol", "lane_id", "bridge_strategy_id"),
+    [
+        ("MNQ", 770561201, "MNQM6", "mnq_us_active_participation_long", "PAPER_ACTIVE_EVIDENCE_MNQ_US_PARTICIPATION_LONG_V1"),
+        ("MES", 770561194, "MESM6", "mes_us_active_participation_long", "PAPER_ACTIVE_EVIDENCE_MES_US_PARTICIPATION_LONG_V1"),
+    ],
+)
+def test_unrelated_stock_positions_do_not_block_index_futures_when_track_b_scope_is_clean(
+    tmp_path: Path,
+    symbol: str,
+    con_id: int,
+    local_symbol: str,
+    lane_id: str,
+    bridge_strategy_id: str,
+) -> None:
+    _write_monitor(tmp_path, broker_quantity=0.0)
+    _write_ledger(tmp_path, [])
+    _write_governance(tmp_path, [_governance_row(lane_id, bridge_strategy_id)])
+    _write_broker_positions_snapshot(
+        tmp_path,
+        positions=[
+            {
+                "account_id": "DUM882026",
+                "symbol": "NFLX",
+                "local_symbol": "NFLX",
+                "security_type": "STK",
+                "quantity": "3000",
+            },
+            {
+                "account_id": "DUM882026",
+                "symbol": symbol,
+                "local_symbol": local_symbol,
+                "security_type": "FUT",
+                "con_id": con_id,
+                "quantity": "0",
+            },
+        ],
+    )
+    _write_broker_open_orders_snapshot(tmp_path, open_orders=[])
+    _write_canonical_current_scope(
+        tmp_path,
+        registry_classification="TRACK_B_DIAGNOSTICS_HISTORICAL_REVIEW_REQUIRED",
+        registry_diagnostic_only=True,
+        registry_current_scope_review_required_count=0,
+        registry_current_scope_trade_states=[],
+        registry_current_blockers=[],
+        registry_review_required_trade_ids=[],
+        registry_track_b_broker_position_count=0,
+        registry_track_b_broker_open_order_count=0,
+    )
+    registry_path = tmp_path / "outputs" / "track_b_execution_core" / "diagnostics" / "latest_track_b_registry_truth_diagnostics.json"
+    registry = json.loads(registry_path.read_text(encoding="utf-8"))
+    registry["broker_position_count"] = 1
+    registry["unrelated_broker_position_count"] = 1
+    registry_path.write_text(json.dumps(registry), encoding="utf-8")
+
+    gate = evaluate_paper_strategy_exposure_gate(
+        repo_root=tmp_path,
+        strategy_id=lane_id,
+        bridge_strategy_id=bridge_strategy_id,
+        action="BUY",
+        intent_type="BUY_TO_OPEN",
+        quantity=1.0,
+        executable_symbol=symbol,
+        account_id="DUM882026",
+        con_id=con_id,
+        local_symbol=local_symbol,
+    )
+
+    assert gate["submit_allowed"] is True
+    assert gate["registry_truth_result"]["allowed"] is True
+    assert gate["aggregate_broker_position"] == 0.0
+    assert gate["registry_truth_result"]["canonical_current_scope_result"]["canonical_values"][
+        "broker_position_count"
+    ] == 0
 
 
 def test_blocks_new_entry_by_unresolved_same_lane_submit_intent(tmp_path: Path) -> None:
