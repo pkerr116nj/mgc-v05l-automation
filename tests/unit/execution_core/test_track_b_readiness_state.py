@@ -989,8 +989,15 @@ def test_submit_capable_blocks_when_runtime_ingestion_is_stale_even_if_phase1_li
     now = datetime(2026, 5, 18, 12, 0, tzinfo=timezone.utc)
     inputs = _clean_inputs()
     inputs["runtime"]["last_processed_bar_end_ts"] = "2026-05-18T11:44:00+00:00"
+    inputs["runtime"]["latest_runtime_ingested_bar"] = "2026-05-18T11:44:00+00:00"
     inputs["runtime"]["runtime_ingestion_fresh"] = False
     inputs["runtime"]["ingestion_age_seconds"] = 960.0
+    inputs["runtime"]["ingestion_freshness_threshold_seconds"] = 180.0
+    inputs["runtime"]["affected_symbols"] = ["MGC"]
+    inputs["runtime"]["affected_lanes"] = ["mgc_lane"]
+    inputs["runtime"]["runtime_pid"] = 5677
+    inputs["runtime"]["runtime_commit"] = "abc123"
+    inputs["runtime"]["profile"] = "mnq_mes_full_session_active_evidence"
     inputs["market_data"] = _market_data_input(
         {},
         {},
@@ -1001,7 +1008,19 @@ def test_submit_capable_blocks_when_runtime_ingestion_is_stale_even_if_phase1_li
     result = classify_canonical_readiness(inputs)
 
     assert result["canonical_readiness"] == "NOT_READY_DEPENDENCY"
-    assert result["readiness_blockers"][0]["code"] == "runtime_ingestion_not_fresh"
+    blocker = result["readiness_blockers"][0]
+    assert blocker["code"] == "runtime_ingestion_not_fresh"
+    assert blocker["classification"] == "RUNTIME_ALIVE_PHASE1_FRESH_RUNTIME_INGESTION_STALE"
+    assert blocker["latest_phase1_bar_by_symbol_timeframe"] == {"MGC": {"1m": "2026-05-18T11:59:00+00:00"}}
+    assert blocker["latest_runtime_ingested_bar"] == "2026-05-18T11:44:00+00:00"
+    assert blocker["ingestion_lag_seconds"] == 900.0
+    assert blocker["threshold_seconds"] == 180.0
+    assert blocker["affected_symbols"] == ["MGC"]
+    assert blocker["affected_lanes"] == ["mgc_lane"]
+    assert blocker["runtime_pid"] == 5677
+    assert blocker["runtime_commit"] == "abc123"
+    assert blocker["profile"] == "mnq_mes_full_session_active_evidence"
+    assert "Phase-1 listener/feed freshness is evaluated separately" in blocker["distinction_from_listener_feed_failure"]
     assert result["market_data"]["fresh"] is True
 
 
@@ -1012,11 +1031,14 @@ def test_runtime_ingestion_uses_latest_lane_processed_bar_when_top_level_lags() 
             "strategy_status": "RUNNING",
             "operator_halt": False,
             "entries_enabled": True,
+            "source_runtime_pid": 5677,
+            "source_runtime_git_head": "abc123",
+            "source_runtime_command": "/repo/src/mgc_v05l/app/main.py probationary-paper-soak --config /repo/outputs/probationary_pattern_engine/paper_session/runtime/paper_stack_mnq_mes_full_session_active_evidence.yaml",
             "active_lane_ids": ["lane_a", "lane_b"],
             "last_processed_bar_end_ts": "2026-05-18T11:44:00+00:00",
             "lanes": [
-                {"lane_id": "lane_a", "last_processed_bar_end_ts": "2026-05-18T11:59:00+00:00"},
-                {"lane_id": "lane_b", "last_processed_bar_end_ts": "2026-05-18T11:58:00+00:00"},
+                {"lane_id": "lane_a", "symbol": "MNQ", "last_processed_bar_end_ts": "2026-05-18T11:59:00+00:00"},
+                {"lane_id": "lane_b", "symbol": "MES", "last_processed_bar_end_ts": "2026-05-18T11:58:00+00:00"},
             ],
         },
         {"lanes": [{"id": "lane_a"}, {"id": "lane_b"}]},
@@ -1031,6 +1053,12 @@ def test_runtime_ingestion_uses_latest_lane_processed_bar_when_top_level_lags() 
     assert runtime["last_processed_bar_end_ts"] == "2026-05-18T11:59:00+00:00"
     assert runtime["runtime_ingestion_fresh"] is True
     assert runtime["ingestion_age_seconds"] == 60.0
+    assert runtime["latest_runtime_ingested_bar"] == "2026-05-18T11:59:00+00:00"
+    assert runtime["runtime_pid"] == 5677
+    assert runtime["runtime_commit"] == "abc123"
+    assert runtime["profile"] == "mnq_mes_full_session_active_evidence"
+    assert runtime["runtime_lane_ingestion"][0]["lane_id"] == "lane_a"
+    assert runtime["affected_lanes"] == []
 
 
 def test_invalid_phase1_listener_provenance_blocks_market_data() -> None:

@@ -168,8 +168,10 @@ def classify_canonical_readiness(inputs: Mapping[str, Any]) -> dict[str, Any]:
     warnings: list[dict[str, Any]] = []
     reasons: list[str] = []
 
-    def block(code: str, detail: str, *, source: str | None = None) -> None:
-        blockers.append({"code": code, "detail": detail, "source": source})
+    def block(code: str, detail: str, *, source: str | None = None, **extra: Any) -> None:
+        row = {"code": code, "detail": detail, "source": source}
+        row.update(extra)
+        blockers.append(row)
         reasons.append(detail)
 
     def warn(code: str, detail: str, *, source: str | None = None) -> None:
@@ -624,6 +626,7 @@ def classify_canonical_readiness(inputs: Mapping[str, Any]) -> dict[str, Any]:
             "runtime_ingestion_not_fresh",
             "PAPER runtime has eligible lanes but has not ingested a fresh runtime bar; Phase-1 producer freshness alone is not submit-capable proof.",
             source="runtime",
+            **_runtime_ingestion_not_fresh_context(runtime=runtime, market_data=market_data),
         )
         return _readiness_result(
             generated_at=generated_at,
@@ -1375,6 +1378,15 @@ def _runtime_input(
     runtime_ingestion_fresh = bool(
         ingestion_age_seconds is not None and ingestion_age_seconds <= ingestion_threshold
     )
+    runtime_pid = _first_int(operator_status.get("source_runtime_pid"), config_in_force.get("source_runtime_pid"))
+    runtime_commit = (
+        operator_status.get("source_runtime_git_head")
+        or operator_status.get("source_runtime_commit")
+        or config_in_force.get("source_runtime_git_head")
+        or config_in_force.get("source_runtime_commit")
+    )
+    profile = _runtime_profile(operator_status, config_in_force)
+    lane_ingestion = _runtime_lane_ingestion_rows(lane_rows, now=now, threshold=ingestion_threshold)
     return {
         "running": process_running,
         "healthy": bool(process_running and not faulted and operator_status.get("operator_halt") is not True),
@@ -1384,12 +1396,70 @@ def _runtime_input(
         "loaded_lane_count": len(active_lane_ids) or len(configured_lanes),
         "eligible_lane_count": eligible_count,
         "active_lane_ids": active_lane_ids,
+        "runtime_pid": runtime_pid,
+        "runtime_commit": runtime_commit,
+        "profile": profile,
         "last_processed_bar_end_ts": last_processed_bar_end_ts,
+        "latest_runtime_ingested_bar": last_processed_bar_end_ts,
         "ingestion_age_seconds": ingestion_age_seconds,
         "ingestion_freshness_threshold_seconds": ingestion_threshold,
+        "runtime_lane_ingestion": lane_ingestion,
+        "affected_lanes": [row["lane_id"] for row in lane_ingestion if row.get("fresh") is not True],
+        "affected_symbols": sorted(
+            {
+                str(row.get("symbol") or "").strip().upper()
+                for row in lane_ingestion
+                if row.get("fresh") is not True and str(row.get("symbol") or "").strip()
+            }
+        ),
         "runtime_ingestion_fresh": runtime_ingestion_fresh,
         "live_money_eligible": operator_status.get("live_money_eligible") is True,
     }
+
+
+def _runtime_lane_ingestion_rows(
+    lane_rows: Sequence[Mapping[str, Any]],
+    *,
+    now: datetime,
+    threshold: float,
+) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    for lane in lane_rows:
+        lane_id = str(lane.get("lane_id") or lane.get("id") or "").strip()
+        if not lane_id:
+            continue
+        latest = (
+            lane.get("last_processed_bar_end_ts")
+            or lane.get("last_execution_bar_evaluated_at")
+            or lane.get("latest_completed_bar_end_ts")
+        )
+        age_seconds = _age_seconds(latest, now)
+        symbol = str(lane.get("symbol") or lane.get("instrument") or "").strip().upper()
+        rows.append(
+            {
+                "lane_id": lane_id,
+                "symbol": symbol or None,
+                "latest_runtime_ingested_bar": latest,
+                "age_seconds": age_seconds,
+                "threshold_seconds": threshold,
+                "fresh": bool(age_seconds is not None and age_seconds <= threshold),
+            }
+        )
+    return rows
+
+
+def _runtime_profile(operator_status: Mapping[str, Any], config_in_force: Mapping[str, Any]) -> str | None:
+    for payload in (operator_status, config_in_force):
+        for key in ("profile", "runtime_profile", "track_b_paper_stack_profile", "paper_stack_profile"):
+            value = str(payload.get(key) or "").strip()
+            if value:
+                return value
+        command = str(payload.get("source_runtime_command") or "").strip()
+        for token in command.split():
+            name = Path(token).name
+            if name.startswith("paper_stack_") and name.endswith(".yaml"):
+                return name.removeprefix("paper_stack_").removesuffix(".yaml")
+    return None
 
 
 def _latest_runtime_processed_bar_ts(operator_status: Mapping[str, Any]) -> Any:
@@ -1408,6 +1478,85 @@ def _latest_runtime_processed_bar_ts(operator_status: Mapping[str, Any]) -> Any:
         return operator_status.get("last_processed_bar_end_ts")
     candidates.sort(key=lambda item: item[0])
     return candidates[-1][1]
+
+
+def _runtime_ingestion_not_fresh_context(
+    *,
+    runtime: Mapping[str, Any],
+    market_data: Mapping[str, Any],
+) -> dict[str, Any]:
+    latest_runtime = runtime.get("latest_runtime_ingested_bar") or runtime.get("last_processed_bar_end_ts")
+    phase1_latest = _latest_phase1_bar_by_symbol_timeframe(market_data)
+    latest_phase1_dt = _latest_phase1_datetime(phase1_latest)
+    latest_runtime_dt = _parse_iso(latest_runtime)
+    if latest_phase1_dt is not None and latest_runtime_dt is not None:
+        ingestion_lag_seconds = max(0.0, (latest_phase1_dt - latest_runtime_dt).total_seconds())
+    else:
+        ingestion_lag_seconds = runtime.get("ingestion_age_seconds")
+    affected_lanes = list(runtime.get("affected_lanes") or [])
+    affected_symbols = list(runtime.get("affected_symbols") or [])
+    if not affected_symbols:
+        affected_symbols = list(market_data.get("required_symbols") or market_data.get("active_required_symbols") or [])
+    return {
+        "classification": "RUNTIME_ALIVE_PHASE1_FRESH_RUNTIME_INGESTION_STALE",
+        "dependency_status": "RUNTIME_INGESTION_STALE",
+        "distinction_from_listener_feed_failure": (
+            "Phase-1 listener/feed freshness is evaluated separately; this block means live bars are fresh "
+            "but the PAPER runtime has not ingested/evaluated a fresh runtime bar."
+        ),
+        "latest_phase1_bar_by_symbol_timeframe": phase1_latest,
+        "latest_runtime_ingested_bar": latest_runtime,
+        "ingestion_lag_seconds": ingestion_lag_seconds,
+        "threshold_seconds": runtime.get("ingestion_freshness_threshold_seconds"),
+        "affected_symbols": affected_symbols,
+        "affected_lanes": affected_lanes,
+        "runtime_pid": runtime.get("runtime_pid"),
+        "runtime_commit": runtime.get("runtime_commit"),
+        "profile": runtime.get("profile"),
+    }
+
+
+def _latest_phase1_bar_by_symbol_timeframe(market_data: Mapping[str, Any]) -> dict[str, dict[str, Any]]:
+    by_symbol: dict[str, dict[str, Any]] = {}
+    scoped_symbols = {
+        str(symbol).strip().upper()
+        for symbol in list(market_data.get("active_required_symbols") or market_data.get("required_symbols") or [])
+        if str(symbol).strip()
+    }
+    for row in list(market_data.get("rows") or []):
+        if not isinstance(row, Mapping):
+            continue
+        symbol = str(row.get("symbol") or "").strip().upper()
+        if not symbol:
+            continue
+        if scoped_symbols and symbol not in scoped_symbols:
+            continue
+        timeframe = _phase1_row_timeframe(row)
+        by_symbol.setdefault(symbol, {})[timeframe] = row.get("latest_completed_bar_ts")
+    return by_symbol
+
+
+def _phase1_row_timeframe(row: Mapping[str, Any]) -> str:
+    for key in ("timeframe", "bar_size", "interval"):
+        value = str(row.get(key) or "").strip()
+        if value:
+            return value
+    schema = str(row.get("schema") or "").strip().lower()
+    if schema.startswith("ohlcv-"):
+        return schema.removeprefix("ohlcv-")
+    return "unknown"
+
+
+def _latest_phase1_datetime(phase1_latest: Mapping[str, Mapping[str, Any]]) -> datetime | None:
+    candidates: list[datetime] = []
+    for timeframes in phase1_latest.values():
+        if not isinstance(timeframes, Mapping):
+            continue
+        for value in timeframes.values():
+            parsed = _parse_iso(value)
+            if parsed is not None:
+                candidates.append(parsed)
+    return max(candidates) if candidates else None
 
 
 def _runtime_truth_heartbeat_input(payload: Mapping[str, Any], *, now: datetime) -> dict[str, Any]:

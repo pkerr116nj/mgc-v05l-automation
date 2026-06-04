@@ -197,6 +197,44 @@ def test_pre_reopen_diagnostic_start_state_allows_runtime_start_without_submit(t
     assert payload["readiness_block_is_scheduled_halt"] is True
 
 
+def test_operability_preserves_canonical_runtime_ingestion_stale_context(tmp_path: Path) -> None:
+    config = _write_ready_authority(
+        tmp_path,
+        canonical_readiness="NOT_READY_DEPENDENCY",
+        canonical_extra={
+            "ready_submit_capable": False,
+            "submit_allowed": False,
+            "readiness_blockers": [
+                {
+                    "code": "runtime_ingestion_not_fresh",
+                    "detail": "Runtime ingestion is stale.",
+                    "source": "runtime",
+                    "classification": "RUNTIME_ALIVE_PHASE1_FRESH_RUNTIME_INGESTION_STALE",
+                    "latest_phase1_bar_by_symbol_timeframe": {"MNQ": {"1m": "2026-06-04T09:09:00+00:00"}},
+                    "latest_runtime_ingested_bar": "2026-06-04T09:06:00+00:00",
+                    "ingestion_lag_seconds": 180.0,
+                    "threshold_seconds": 180.0,
+                    "affected_symbols": ["MNQ"],
+                    "affected_lanes": ["mnq_london_open_active_participation_short"],
+                    "runtime_pid": 5677,
+                    "runtime_commit": "e8dbf2091d",
+                    "profile": "mnq_mes_full_session_active_evidence",
+                }
+            ],
+        },
+    )
+
+    payload = build_runtime_operability_contract(config=config, now=NOW)
+
+    assert payload["canonical_state"] == "BLOCKED_INFRASTRUCTURE"
+    blocker = next(row for row in payload["blockers"] if row["code"] == "canonical_readiness_infrastructure_block")
+    canonical_blocker = blocker["canonical_readiness_blocker"]
+    assert canonical_blocker["code"] == "runtime_ingestion_not_fresh"
+    assert canonical_blocker["classification"] == "RUNTIME_ALIVE_PHASE1_FRESH_RUNTIME_INGESTION_STALE"
+    assert canonical_blocker["runtime_pid"] == 5677
+    assert canonical_blocker["affected_lanes"] == ["mnq_london_open_active_participation_short"]
+
+
 def test_fresh_healthy_runtime_truth_with_producer_pid_reports_runtime_up(tmp_path: Path) -> None:
     config = _write_ready_authority(tmp_path)
     _write(

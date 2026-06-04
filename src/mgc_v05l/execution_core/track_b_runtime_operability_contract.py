@@ -312,8 +312,10 @@ def classify_runtime_operability(
     blockers: list[dict[str, Any]] = []
     warnings: list[dict[str, Any]] = []
 
-    def block(code: str, detail: str, source: str, family: str) -> None:
-        blockers.append({"code": code, "detail": detail, "source": source, "family": family})
+    def block(code: str, detail: str, source: str, family: str, **extra: Any) -> None:
+        row = {"code": code, "detail": detail, "source": source, "family": family}
+        row.update(extra)
+        blockers.append(row)
 
     def warn(code: str, detail: str, source: str) -> None:
         warnings.append({"code": code, "detail": detail, "source": source})
@@ -413,7 +415,14 @@ def classify_runtime_operability(
     elif readiness_state in {WAITING_FOR_MARKET_REOPEN, READY_TO_START_DIAGNOSTIC_ONLY}:
         warn("canonical_readiness_waiting_for_market_reopen", readiness_state, "canonical_readiness")
     elif readiness_state in {"NOT_READY_DEPENDENCY", "NOT_READY_RECONCILIATION", "DEGRADED_NO_SUBMIT"}:
-        block("canonical_readiness_infrastructure_block", readiness_state, "canonical_readiness", BLOCKED_INFRASTRUCTURE)
+        readiness_context = _canonical_readiness_primary_blocker_context(readiness_blockers)
+        block(
+            "canonical_readiness_infrastructure_block",
+            readiness_state,
+            "canonical_readiness",
+            BLOCKED_INFRASTRUCTURE,
+            **readiness_context,
+        )
     elif readiness_state == "READY_OBSERVATION_ONLY":
         warn("canonical_readiness_observation_only", readiness_state, "canonical_readiness")
     elif readiness_state and readiness_state != READY_SUBMIT_CAPABLE:
@@ -572,6 +581,15 @@ def _runtime_truth_implies_running(runtime_truth: Mapping[str, Any]) -> bool | N
     if heartbeat in {"STOPPED", "DEAD", "MISSING"}:
         return False
     return None
+
+
+def _canonical_readiness_primary_blocker_context(blockers: Sequence[Any]) -> dict[str, Any]:
+    for blocker in blockers:
+        if isinstance(blocker, Mapping):
+            row = dict(blocker)
+            row.pop("source", None)
+            return {"canonical_readiness_blocker": row}
+    return {}
 
 
 def _runtime_process_probe(
