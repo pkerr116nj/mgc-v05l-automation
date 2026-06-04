@@ -25,6 +25,7 @@ from mgc_v05l.execution_core.track_b_p0_observe_only_loop import (
     P0_SUBMIT_DISABLED_LOOP_SAFETY_BOUNDARY_FAILED,
     P0_ROSTER,
     P0_STRATEGY_IDS,
+    TRACK_B_GUARDED_PAPER_ROSTER_BLOCKED_INVALID_CONFIG,
     TRACK_B_GUARDED_PAPER_ROSTER_READY_WITH_REJECTIONS,
     TrackBP0ObserveOnlyLoopConfig,
     TrackBP0ObserveOnlyLoopStages,
@@ -369,6 +370,7 @@ def test_hot_reload_roster_file_controls_enabled_strategy_ids(tmp_path: Path) ->
     roster = write_json(
         tmp_path / "config/track_b_guarded_paper_roster.json",
         {
+            "schema_version": "track_b_guarded_paper_roster_v1",
             "paper_account_id": "DUM882026",
             "live_money_eligible": False,
             "paper_proof_invoked": False,
@@ -378,6 +380,7 @@ def test_hot_reload_roster_file_controls_enabled_strategy_ids(tmp_path: Path) ->
                 "mgc_ema_momentum_reclaim_long_v1",
             ],
             "disabled_strategy_ids": ["asian_drift_v1"],
+            "max_quantity_per_strategy": 1,
         },
     )
 
@@ -406,10 +409,13 @@ def test_hot_reload_roster_blocks_when_no_hardened_strategy_remains(tmp_path: Pa
     roster = write_json(
         tmp_path / "config/track_b_guarded_paper_roster.json",
         {
+            "schema_version": "track_b_guarded_paper_roster_v1",
             "paper_account_id": "DUM882026",
             "live_money_eligible": False,
             "paper_proof_invoked": False,
             "enabled_strategy_ids": ["mgc_ema_momentum_reclaim_long_v1"],
+            "disabled_strategy_ids": [],
+            "max_quantity_per_strategy": 1,
         },
     )
     calls = Calls()
@@ -429,6 +435,36 @@ def test_hot_reload_roster_blocks_when_no_hardened_strategy_remains(tmp_path: Pa
     assert payload["classification"] == P0_GUARDED_PAPER_LOOP_BLOCKED_ROSTER
     assert payload["iterations"][0]["roster_validation"]["enabled_strategy_ids"] == []
     assert "No guarded PAPER strategies" in payload["iterations"][0]["primary_blocker"]
+    assert calls.asian == 0
+    assert calls.cycle == 0
+
+
+def test_guarded_paper_roster_blocks_malformed_authority_config(tmp_path: Path) -> None:
+    roster = write_json(
+        tmp_path / "config/track_b_guarded_paper_roster.json",
+        {
+            "enabled_strategy_ids": ["FIRST_BULL_SNAP_TURN_V1"],
+        },
+    )
+    calls = Calls()
+
+    payload = run_track_b_p0_observe_only_loop(
+        config=config(
+            tmp_path,
+            mode=P0_LOOP_MODE_GUARDED_PAPER,
+            roster_name=APPROVED_PAPER_ROSTER,
+            roster_config_path=roster.relative_to(tmp_path),
+        ),
+        stages=fake_stages(tmp_path, calls),
+        now_factory=aware_now,
+        loop_id="malformed-hot-roster",
+    )
+
+    roster_validation = payload["iterations"][0]["roster_validation"]
+    assert payload["classification"] == P0_GUARDED_PAPER_LOOP_BLOCKED_ROSTER
+    assert roster_validation["classification"] == TRACK_B_GUARDED_PAPER_ROSTER_BLOCKED_INVALID_CONFIG
+    assert "schema_version" in roster_validation["primary_blocker"]
+    assert roster_validation["enabled_strategy_ids"] == []
     assert calls.asian == 0
     assert calls.cycle == 0
 

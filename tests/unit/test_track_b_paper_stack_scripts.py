@@ -7,6 +7,7 @@ START_SCRIPT = REPO_ROOT / "scripts" / "track_b_start_paper_stack.sh"
 STATUS_SCRIPT = REPO_ROOT / "scripts" / "track_b_status_paper_stack.sh"
 RECOVERY_SCRIPT = REPO_ROOT / "scripts" / "track_b_hourly_paper_runtime_recovery.sh"
 PAPER_CONFIG = REPO_ROOT / "config" / "probationary_pattern_engine_paper.yaml"
+GUARDED_ROSTER_CONFIG = REPO_ROOT / "config" / "track_b_guarded_paper_roster.json"
 
 
 def test_paper_stack_start_uses_canonical_config_without_review_overlay() -> None:
@@ -184,6 +185,37 @@ def test_paper_stack_start_has_full_session_active_evidence_profile() -> None:
         "PAPER_WATCH_ACTIVE_EVIDENCE_MES_LONDON_LATE_LONG_SHADOW_V1",
         "PAPER_WATCH_ACTIVE_EVIDENCE_MES_LONDON_LATE_SHORT_SHADOW_V1",
     ]
+
+
+def test_paper_stack_generated_profile_rosters_carry_authority_contract() -> None:
+    source = START_SCRIPT.read_text(encoding="utf-8")
+    blocks = source.split("cat > \"${SCOPED_ROSTER_PATH}\" <<'JSON'")[1:]
+
+    assert blocks
+    for block in blocks:
+        roster_json = block.split("\nJSON", 1)[0]
+        roster = json.loads(roster_json)
+        assert roster["schema_version"] == "track_b_guarded_paper_roster_v1"
+        assert roster["paper_account_id"] == "DUM882026"
+        assert roster["live_money_eligible"] is False
+        assert roster["paper_proof_invoked"] is False
+        assert isinstance(roster["enabled_strategy_ids"], list)
+        assert roster["disabled_strategy_ids"] == []
+        assert roster["max_quantity_per_strategy"] == 1
+
+
+def test_source_controlled_guarded_roster_carries_authority_contract() -> None:
+    roster = json.loads(GUARDED_ROSTER_CONFIG.read_text(encoding="utf-8"))
+
+    assert roster["schema_version"] == "track_b_guarded_paper_roster_v1"
+    assert roster["authority_scope"] == "DEFAULT_FALLBACK_GUARDED_PAPER_ROSTER"
+    assert "TRACK_B_GUARDED_PAPER_ROSTER_PATH" in roster["update_policy"]
+    assert roster["paper_account_id"] == "DUM882026"
+    assert roster["live_money_eligible"] is False
+    assert roster["paper_proof_invoked"] is False
+    assert isinstance(roster["enabled_strategy_ids"], list)
+    assert roster["disabled_strategy_ids"] == []
+    assert roster["max_quantity_per_strategy"] == 1
 
 
 def test_recovery_operator_controls_and_status_are_launchd_based() -> None:

@@ -131,6 +131,7 @@ TRACK_B_GUARDED_PAPER_ROSTER_READY = "TRACK_B_GUARDED_PAPER_ROSTER_READY"
 TRACK_B_GUARDED_PAPER_ROSTER_READY_WITH_REJECTIONS = "TRACK_B_GUARDED_PAPER_ROSTER_READY_WITH_REJECTIONS"
 TRACK_B_GUARDED_PAPER_ROSTER_BLOCKED_EMPTY = "TRACK_B_GUARDED_PAPER_ROSTER_BLOCKED_EMPTY"
 TRACK_B_GUARDED_PAPER_ROSTER_BLOCKED_INVALID_CONFIG = "TRACK_B_GUARDED_PAPER_ROSTER_BLOCKED_INVALID_CONFIG"
+TRACK_B_GUARDED_PAPER_ROSTER_SCHEMA_VERSION = "track_b_guarded_paper_roster_v1"
 
 P0_STRATEGY_IDS = (
     "asian_drift_v1",
@@ -941,6 +942,20 @@ def _resolve_guarded_paper_roster(config: TrackBP0ObserveOnlyLoopConfig) -> dict
             "hot_reload_enabled": source_path is not None,
             "dashboard_projection_consumed": False,
         }
+    required_error = _guarded_paper_roster_required_field_error(payload) if source_exists else None
+    if required_error:
+        return {
+            "classification": TRACK_B_GUARDED_PAPER_ROSTER_BLOCKED_INVALID_CONFIG,
+            "source_path": str(source_path) if source_path is not None else None,
+            "source_exists": source_exists,
+            "enabled_strategy_ids": [],
+            "enabled_strategy_count": 0,
+            "rejected_strategy_ids": list(requested),
+            "rejections": [{"strategy_id": strategy_id, "reason": required_error} for strategy_id in requested],
+            "primary_blocker": required_error,
+            "hot_reload_enabled": source_path is not None,
+            "dashboard_projection_consumed": False,
+        }
     if config_account != config.expected_account_id:
         return {
             "classification": TRACK_B_GUARDED_PAPER_ROSTER_BLOCKED_INVALID_CONFIG,
@@ -1023,6 +1038,39 @@ def _coerce_strategy_ids(value: Any) -> list[str]:
     if not isinstance(value, list):
         return []
     return [str(item).strip() for item in value if str(item).strip()]
+
+
+def _guarded_paper_roster_required_field_error(payload: Mapping[str, Any]) -> str | None:
+    if not isinstance(payload, Mapping):
+        return "Guarded PAPER roster must be a JSON object."
+    schema_version = str(payload.get("schema_version") or "").strip()
+    if schema_version != TRACK_B_GUARDED_PAPER_ROSTER_SCHEMA_VERSION:
+        return (
+            "Guarded PAPER roster schema_version must be "
+            f"{TRACK_B_GUARDED_PAPER_ROSTER_SCHEMA_VERSION}."
+        )
+    required_fields = (
+        "paper_account_id",
+        "live_money_eligible",
+        "paper_proof_invoked",
+        "enabled_strategy_ids",
+        "disabled_strategy_ids",
+        "max_quantity_per_strategy",
+    )
+    missing = [field for field in required_fields if field not in payload]
+    if missing:
+        return f"Guarded PAPER roster missing required field(s): {', '.join(missing)}."
+    if not isinstance(payload.get("enabled_strategy_ids"), list):
+        return "Guarded PAPER roster enabled_strategy_ids must be a list."
+    if not isinstance(payload.get("disabled_strategy_ids"), list):
+        return "Guarded PAPER roster disabled_strategy_ids must be a list."
+    try:
+        max_qty = int(payload.get("max_quantity_per_strategy"))
+    except (TypeError, ValueError):
+        return "Guarded PAPER roster max_quantity_per_strategy must be integer 1."
+    if max_qty != 1:
+        return "Guarded PAPER roster max_quantity_per_strategy must be exactly 1."
+    return None
 
 
 def _guarded_paper_strategy_rejection_reason(entry: Any) -> str | None:

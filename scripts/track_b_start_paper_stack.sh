@@ -80,12 +80,17 @@ YAML
 {
   "schema_version": "track_b_guarded_paper_roster_v1",
   "profile": "mnq_mes_active_evidence",
+  "paper_account_id": "DUM882026",
+  "live_money_eligible": false,
+  "paper_proof_invoked": false,
   "enabled_strategy_ids": [
     "PAPER_ACTIVE_EVIDENCE_MNQ_US_PARTICIPATION_LONG_V1",
     "PAPER_ACTIVE_EVIDENCE_MNQ_US_PARTICIPATION_SHORT_V1",
     "PAPER_ACTIVE_EVIDENCE_MES_US_PARTICIPATION_LONG_V1",
     "PAPER_ACTIVE_EVIDENCE_MES_US_PARTICIPATION_SHORT_V1"
-  ]
+  ],
+  "disabled_strategy_ids": [],
+  "max_quantity_per_strategy": 1
 }
 JSON
   CANONICAL_CONFIGS+=("${SCOPED_CONFIG_PATH}")
@@ -100,12 +105,17 @@ YAML
 {
   "schema_version": "track_b_guarded_paper_roster_v1",
   "profile": "mnq_mes_globex_active_evidence",
+  "paper_account_id": "DUM882026",
+  "live_money_eligible": false,
+  "paper_proof_invoked": false,
   "enabled_strategy_ids": [
     "PAPER_ACTIVE_EVIDENCE_MNQ_GLOBEX_PARTICIPATION_LONG_V1",
     "PAPER_ACTIVE_EVIDENCE_MNQ_GLOBEX_PARTICIPATION_SHORT_V1",
     "PAPER_ACTIVE_EVIDENCE_MES_GLOBEX_PARTICIPATION_LONG_V1",
     "PAPER_ACTIVE_EVIDENCE_MES_GLOBEX_PARTICIPATION_SHORT_V1"
-  ]
+  ],
+  "disabled_strategy_ids": [],
+  "max_quantity_per_strategy": 1
 }
 JSON
   CANONICAL_CONFIGS+=("${SCOPED_CONFIG_PATH}")
@@ -120,6 +130,9 @@ YAML
 {
   "schema_version": "track_b_guarded_paper_roster_v1",
   "profile": "mnq_mes_session_coverage_active_evidence",
+  "paper_account_id": "DUM882026",
+  "live_money_eligible": false,
+  "paper_proof_invoked": false,
   "enabled_strategy_ids": [
     "PAPER_ACTIVE_EVIDENCE_MNQ_US_PARTICIPATION_LONG_V1",
     "PAPER_ACTIVE_EVIDENCE_MNQ_US_PARTICIPATION_SHORT_V1",
@@ -129,7 +142,9 @@ YAML
     "PAPER_ACTIVE_EVIDENCE_MNQ_GLOBEX_PARTICIPATION_SHORT_V1",
     "PAPER_ACTIVE_EVIDENCE_MES_GLOBEX_PARTICIPATION_LONG_V1",
     "PAPER_ACTIVE_EVIDENCE_MES_GLOBEX_PARTICIPATION_SHORT_V1"
-  ]
+  ],
+  "disabled_strategy_ids": [],
+  "max_quantity_per_strategy": 1
 }
 JSON
   CANONICAL_CONFIGS+=("${SCOPED_CONFIG_PATH}")
@@ -145,6 +160,9 @@ YAML
   "schema_version": "track_b_guarded_paper_roster_v1",
   "profile": "mnq_mes_london_open_active_evidence",
   "extends_profile": "mnq_mes_session_coverage_active_evidence",
+  "paper_account_id": "DUM882026",
+  "live_money_eligible": false,
+  "paper_proof_invoked": false,
   "enabled_strategy_ids": [
     "PAPER_ACTIVE_EVIDENCE_MNQ_US_PARTICIPATION_LONG_V1",
     "PAPER_ACTIVE_EVIDENCE_MNQ_US_PARTICIPATION_SHORT_V1",
@@ -167,7 +185,9 @@ YAML
   ],
   "shadow_only_reason_codes": [
     "LONDON_LATE_CANONICAL_ANCHOR_NOT_YET_DEFINED_FOR_BROKER_AUTHORITY"
-  ]
+  ],
+  "disabled_strategy_ids": [],
+  "max_quantity_per_strategy": 1
 }
 JSON
   CANONICAL_CONFIGS+=("${SCOPED_CONFIG_PATH}")
@@ -183,6 +203,9 @@ YAML
   "schema_version": "track_b_guarded_paper_roster_v1",
   "profile": "mnq_mes_london_late_mnq_short_active_evidence",
   "extends_profile": "mnq_mes_session_coverage_active_evidence",
+  "paper_account_id": "DUM882026",
+  "live_money_eligible": false,
+  "paper_proof_invoked": false,
   "enabled_strategy_ids": [
     "PAPER_ACTIVE_EVIDENCE_MNQ_US_PARTICIPATION_LONG_V1",
     "PAPER_ACTIVE_EVIDENCE_MNQ_US_PARTICIPATION_SHORT_V1",
@@ -202,7 +225,9 @@ YAML
   "shadow_only_reason_codes": [
     "LONDON_LATE_MNQ_SHORT_ONLY_INITIAL_PAPER_ELEVATION",
     "COMBINED_MNQ_MES_LONDON_CONFLICT_GROUP_LIMITS_SESSION_TO_ONE_TRADE"
-  ]
+  ],
+  "disabled_strategy_ids": [],
+  "max_quantity_per_strategy": 1
 }
 JSON
   CANONICAL_CONFIGS+=("${SCOPED_CONFIG_PATH}")
@@ -218,6 +243,9 @@ YAML
   "schema_version": "track_b_guarded_paper_roster_v1",
   "profile": "mnq_mes_full_session_active_evidence",
   "extends_profile": "mnq_mes_session_coverage_active_evidence",
+  "paper_account_id": "DUM882026",
+  "live_money_eligible": false,
+  "paper_proof_invoked": false,
   "enabled_strategy_ids": [
     "PAPER_ACTIVE_EVIDENCE_MNQ_US_PARTICIPATION_LONG_V1",
     "PAPER_ACTIVE_EVIDENCE_MNQ_US_PARTICIPATION_SHORT_V1",
@@ -241,7 +269,9 @@ YAML
   "shadow_only_reason_codes": [
     "FULL_SESSION_PROFILE_INITIAL_LONDON_LATE_MNQ_SHORT_ONLY_ELEVATION",
     "COMBINED_MNQ_MES_LONDON_CONFLICT_GROUP_LIMITS_SESSION_TO_ONE_TRADE"
-  ]
+  ],
+  "disabled_strategy_ids": [],
+  "max_quantity_per_strategy": 1
 }
 JSON
   CANONICAL_CONFIGS+=("${SCOPED_CONFIG_PATH}")
