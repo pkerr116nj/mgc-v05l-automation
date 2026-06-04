@@ -166,6 +166,76 @@ def test_registry_backed_close_canonicalizes_missing_broker_con_id() -> None:
     assert payload["managed_close_authority"]["broad_flatten_allowed"] is False
 
 
+def test_close_authority_prefers_reconciliation_match_owner_over_stale_managed_position() -> None:
+    stale_position = {
+        "classification": "OPEN_MANAGED_EXIT_DUE",
+        "account_id": "DUM882026",
+        "symbol": "MNQ",
+        "local_symbol": "MNQM6",
+        "con_id": 770561201,
+        "quantity": "1",
+        "side": "SHORT",
+        "trade_id": "trade_stale_owner",
+        "lifecycle_id": "stale_lifecycle",
+        "broker_position": _mnq_position("-1"),
+        "lifecycle_position": {
+            "trade_id": "trade_stale_owner",
+            "lifecycle_id": "stale_lifecycle",
+            "entry_exec_ids": ["exec_stale"],
+            "entry_perm_ids": ["perm_stale"],
+        },
+    }
+    current_lifecycle = {
+        "trade_id": "trade_current_owner",
+        "lifecycle_id": "current_lifecycle",
+        "account_id": "DUM882026",
+        "symbol": "MNQ",
+        "local_symbol": "MNQM6",
+        "con_id": 770561201,
+        "quantity": "1",
+        "side": "SHORT",
+        "entry_exec_ids": ["exec_current"],
+        "entry_perm_ids": ["perm_current"],
+    }
+
+    payload = build_track_b_broker_position_guardian(
+        config=TrackBBrokerPositionGuardianConfig(),
+        now=NOW,
+        input_overrides=_inputs(
+            position_truth={"broker_positions": [_mnq_position("-1")]},
+            managed_position_registry={
+                "classification": "OPEN_MANAGED_EXIT_DUE",
+                "managed_positions": [stale_position],
+                "lifecycle_open_positions": [stale_position],
+            },
+            reconciliation={
+                "classification": "TRACK_B_PAPER_BROKER_RECONCILED",
+                "registry_reconciliation": {
+                    "classification": "REGISTRY_RECONCILIATION_MATCHED",
+                    "blocking": False,
+                    "mapped_records": [],
+                },
+                "position_match_report": {
+                    "state": "BROKER_AND_LIFECYCLE_OPEN_MATCHED",
+                    "matched": True,
+                    "matches": [
+                        {
+                            "broker_position": _mnq_position("-1"),
+                            "lifecycle_position": current_lifecycle,
+                        }
+                    ],
+                },
+            },
+        ),
+    )
+
+    assert payload["managed_close_mutation_allowed"] is True
+    candidate = payload["managed_close_authority"]["candidates"][0]
+    assert candidate["trade_id"] == "trade_current_owner"
+    assert candidate["lifecycle_id"] == "current_lifecycle"
+    assert candidate["action"] == "BUY"
+
+
 def test_registry_backed_close_blocks_wrong_quantity() -> None:
     payload = build_track_b_broker_position_guardian(
         config=TrackBBrokerPositionGuardianConfig(),

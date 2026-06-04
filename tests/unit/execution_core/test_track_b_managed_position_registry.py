@@ -607,6 +607,113 @@ def test_owner_resolution_overlay_repairs_missing_managed_position_projection(
     assert diagnostics["repairs"][0]["classification"] == "CURRENT_OWNER_PROJECTION_REPAIRED"
 
 
+def test_reconciled_owned_exposure_cannot_publish_no_managed_positions(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    broker = _broker_position()
+    lifecycle = _lifecycle_position(policy="GLOBEX_ACTIVE_EVIDENCE_TIMEBOX_60M_EXIT_V1", bars_since_fill=12)
+    _seed_base(tmp_path, broker_positions=[broker], lifecycle_positions=[lifecycle])
+    _write_lifecycle_report(
+        tmp_path,
+        lifecycle_id=lifecycle["lifecycle_id"],
+        policy="GLOBEX_ACTIVE_EVIDENCE_TIMEBOX_60M_EXIT_V1",
+        bars_since_fill=12,
+    )
+    reconciliation_path = (
+        tmp_path
+        / "outputs"
+        / "reports"
+        / "track_b_paper_broker_reconciliation"
+        / "latest_track_b_paper_broker_reconciliation.json"
+    )
+    reconciliation = json.loads(reconciliation_path.read_text(encoding="utf-8"))
+    reconciliation["classification"] = "TRACK_B_PAPER_BROKER_RECONCILED"
+    reconciliation["broker_reconciled"] = True
+    reconciliation["current_exposure_owner_resolution"] = {
+        "classification": "OWNED_MANAGED_EXIT_DUE",
+        "broker_position_count": 1,
+        "broker_open_order_count": 0,
+        "owned_exposure_count": 1,
+        "owned_exposures": [
+            {
+                "classification": "OWNED_MANAGED_EXIT_DUE",
+                "broker_position": broker,
+                "canonical_broker_position": broker,
+                "lifecycle_position": lifecycle,
+                "trade_id": "trade_mnq",
+                "lifecycle_id": lifecycle["lifecycle_id"],
+                "position_key": "DUM882026|MNQM6|770561201",
+                "exit_due": True,
+            }
+        ],
+        "review_required_exposure_count": 0,
+        "review_required_exposures": [],
+        "resolved_lifecycle_positions": [lifecycle],
+        "read_only": True,
+        "no_broad_flatten_generated": True,
+    }
+    reconciliation_path.write_text(json.dumps(reconciliation), encoding="utf-8")
+
+    monkeypatch.setattr(managed_position_registry_module, "_managed_positions", lambda **_kwargs: [])
+
+    payload = build_track_b_managed_position_registry(
+        config=TrackBManagedPositionRegistryConfig(repo_root=tmp_path),
+        now=NOW,
+    )
+
+    assert payload["classification"] == "PROJECTION_AUTHORITY_DIVERGENCE"
+    assert payload["classification"] != NO_MANAGED_POSITIONS
+    assert payload["summary"]["broker_position_count"] == 1
+    assert payload["projection_authority_diagnostics"]["classification"] == "PROJECTION_AUTHORITY_DIVERGENCE"
+    assert payload["projection_authority_diagnostics"]["divergences"][0]["owner_trade_id"] == "trade_mnq"
+    assert payload["managed_positions"][0]["classification"] == "PROJECTION_AUTHORITY_DIVERGENCE"
+
+
+def test_reconciliation_match_report_owner_cannot_disappear_from_managed_positions(tmp_path: Path) -> None:
+    broker = _broker_position()
+    lifecycle = _lifecycle_position(policy="GLOBEX_ACTIVE_EVIDENCE_TIMEBOX_60M_EXIT_V1", bars_since_fill=12)
+    lifecycle["trade_id"] = "trade_mnq_match_report_owner"
+    _seed_base(tmp_path)
+    _write_lifecycle_report(
+        tmp_path,
+        lifecycle_id=lifecycle["lifecycle_id"],
+        policy="GLOBEX_ACTIVE_EVIDENCE_TIMEBOX_60M_EXIT_V1",
+        bars_since_fill=12,
+    )
+    reconciliation_path = (
+        tmp_path
+        / "outputs"
+        / "reports"
+        / "track_b_paper_broker_reconciliation"
+        / "latest_track_b_paper_broker_reconciliation.json"
+    )
+    reconciliation = json.loads(reconciliation_path.read_text(encoding="utf-8"))
+    reconciliation.update(
+        {
+            "classification": "BROKER_LIFECYCLE_RECONCILED",
+            "broker_reconciled": True,
+            "track_b_broker_positions": None,
+            "track_b_lifecycle_positions": None,
+            "position_match_report": {
+                "state": "BROKER_AND_LIFECYCLE_OPEN_MATCHED",
+                "matched": True,
+                "matches": [{"broker_position": broker, "lifecycle_position": lifecycle}],
+            },
+        }
+    )
+    reconciliation_path.write_text(json.dumps(reconciliation), encoding="utf-8")
+
+    payload = build_track_b_managed_position_registry(
+        config=TrackBManagedPositionRegistryConfig(repo_root=tmp_path),
+        now=NOW,
+    )
+
+    assert payload["classification"] == "OPEN_MANAGED_EXIT_DUE"
+    assert payload["managed_positions"][0]["trade_id"] == lifecycle["trade_id"]
+    assert payload["managed_positions"][0]["lifecycle_id"] == lifecycle["lifecycle_id"]
+
+
 def test_lifecycle_missing_policy_is_metadata_incomplete(tmp_path: Path) -> None:
     lifecycle = _lifecycle_position(policy="")
     _seed_base(tmp_path, broker_positions=[_broker_position()], lifecycle_positions=[lifecycle])

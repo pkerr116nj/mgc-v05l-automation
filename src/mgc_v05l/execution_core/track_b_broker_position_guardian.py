@@ -247,6 +247,9 @@ def _registry_verified_managed_close_authority(
     candidates: list[dict[str, Any]] = []
     reconciliation = inputs["reconciliation"]
     registry = _mapping(reconciliation.get("registry_reconciliation"))
+    managed_position_records = _reconciliation_close_authority_records(
+        reconciliation
+    ) or _managed_position_close_authority_records(inputs["managed_position_registry"])
     if registry.get("classification") != "REGISTRY_RECONCILIATION_MATCHED" or registry.get("blocking") is True:
         reason_codes.append("REGISTRY_RECONCILIATION_NOT_MATCHED")
     open_broker_positions = [row for row in broker_positions if _decimal(row.get("quantity")) != Decimal("0")]
@@ -255,13 +258,20 @@ def _registry_verified_managed_close_authority(
     if _has_conflicting_close_order(open_orders=open_orders, managed_orders=managed_orders):
         reason_codes.append("CONFLICTING_CLOSE_ORDER")
     mapped_records = [_mapping(row) for row in _list(registry.get("mapped_records"))]
-    if not mapped_records:
+    if not mapped_records and not managed_position_records:
         reason_codes.append("REGISTRY_MAPPED_RECORD_MISSING")
 
     for raw_broker_position in open_broker_positions:
+        managed_matches = [
+            record
+            for record in managed_position_records
+            if _same_contract(left=raw_broker_position, right=record)
+            and _text(record.get("account_id")) == _text(raw_broker_position.get("account_id"))
+        ]
+        registry_rows = managed_matches or mapped_records
         canonical = canonicalize_broker_position_identity(
             broker_position=raw_broker_position,
-            registry_rows=mapped_records,
+            registry_rows=registry_rows,
         )
         if canonical.classification != IDENTITY_READY:
             reason_codes.extend(canonical.reason_codes)
@@ -269,7 +279,7 @@ def _registry_verified_managed_close_authority(
         broker_position = canonical.canonical_position
         matches = [
             record
-            for record in mapped_records
+            for record in registry_rows
             if _same_contract(left=broker_position, right=record)
             and _text(record.get("account_id")) == _text(broker_position.get("account_id"))
         ]
@@ -313,6 +323,104 @@ def _registry_verified_managed_close_authority(
         "candidates": candidates,
         "broad_flatten_allowed": False,
         "global_flatten_allowed": False,
+    }
+
+
+def _managed_position_close_authority_records(managed_position_registry: Mapping[str, Any]) -> list[dict[str, Any]]:
+    records: list[dict[str, Any]] = []
+    for position in _list(managed_position_registry.get("managed_positions")):
+        if not isinstance(position, Mapping):
+            continue
+        classification = str(position.get("classification") or "").upper()
+        if classification not in {"OPEN_MANAGED_EXIT_DUE", "OPEN_MANAGED_MATCHED"}:
+            continue
+        broker_position = _mapping(position.get("broker_position"))
+        lifecycle_position = _mapping(position.get("lifecycle_position"))
+        lifecycle_units = [_mapping(unit) for unit in _list(lifecycle_position.get("lifecycle_units"))]
+        entry_exec_id = _first_text(
+            lifecycle_position.get("entry_exec_id"),
+            *list(lifecycle_position.get("entry_exec_ids") or []),
+            *[unit.get("entry_exec_id") for unit in lifecycle_units],
+        )
+        entry_perm_id = _first_text(
+            lifecycle_position.get("entry_perm_id"),
+            *list(lifecycle_position.get("entry_perm_ids") or []),
+            *[unit.get("entry_perm_id") for unit in lifecycle_units],
+        )
+        records.append(
+            {
+                "trade_id": position.get("trade_id") or lifecycle_position.get("trade_id"),
+                "lifecycle_id": position.get("lifecycle_id") or lifecycle_position.get("lifecycle_id"),
+                "account_id": position.get("account_id")
+                or broker_position.get("account_id")
+                or lifecycle_position.get("account_id"),
+                "symbol": position.get("symbol")
+                or broker_position.get("symbol")
+                or lifecycle_position.get("symbol"),
+                "local_symbol": position.get("local_symbol")
+                or broker_position.get("local_symbol")
+                or lifecycle_position.get("local_symbol"),
+                "con_id": position.get("con_id")
+                or broker_position.get("con_id")
+                or lifecycle_position.get("con_id"),
+                "quantity": position.get("quantity") or lifecycle_position.get("quantity"),
+                "side": position.get("side") or lifecycle_position.get("side"),
+                "entry_exec_id": entry_exec_id,
+                "entry_perm_id": entry_perm_id,
+                "current_state": "OPEN_MANAGED",
+                "authority_source": "MANAGED_POSITION_REGISTRY",
+            }
+        )
+    return records
+
+
+def _reconciliation_close_authority_records(reconciliation: Mapping[str, Any]) -> list[dict[str, Any]]:
+    records: list[dict[str, Any]] = []
+    for match in _list(_mapping(reconciliation.get("position_match_report")).get("matches")):
+        if not isinstance(match, Mapping):
+            continue
+        broker_position = _mapping(match.get("broker_position"))
+        lifecycle_position = _mapping(match.get("lifecycle_position"))
+        if not broker_position or not lifecycle_position:
+            continue
+        records.append(
+            _close_authority_record_from_position(
+                position=lifecycle_position,
+                broker_position=broker_position,
+            )
+        )
+    return records
+
+
+def _close_authority_record_from_position(
+    *,
+    position: Mapping[str, Any],
+    broker_position: Mapping[str, Any],
+) -> dict[str, Any]:
+    lifecycle_units = [_mapping(unit) for unit in _list(position.get("lifecycle_units"))]
+    entry_exec_id = _first_text(
+        position.get("entry_exec_id"),
+        *list(position.get("entry_exec_ids") or []),
+        *[unit.get("entry_exec_id") for unit in lifecycle_units],
+    )
+    entry_perm_id = _first_text(
+        position.get("entry_perm_id"),
+        *list(position.get("entry_perm_ids") or []),
+        *[unit.get("entry_perm_id") for unit in lifecycle_units],
+    )
+    return {
+        "trade_id": position.get("trade_id"),
+        "lifecycle_id": position.get("lifecycle_id"),
+        "account_id": position.get("account_id") or broker_position.get("account_id"),
+        "symbol": position.get("symbol") or broker_position.get("symbol"),
+        "local_symbol": position.get("local_symbol") or broker_position.get("local_symbol"),
+        "con_id": position.get("con_id") or broker_position.get("con_id"),
+        "quantity": position.get("quantity"),
+        "side": position.get("side"),
+        "entry_exec_id": entry_exec_id,
+        "entry_perm_id": entry_perm_id,
+        "current_state": "OPEN_MANAGED",
+        "authority_source": "RECONCILIATION_POSITION_MATCH_REPORT",
     }
 
 
@@ -744,6 +852,14 @@ def _decimal_display(value: Decimal) -> str:
 
 def _text(value: Any) -> str:
     return str(value or "").strip()
+
+
+def _first_text(*values: Any) -> str:
+    for value in values:
+        text = str(value or "").strip()
+        if text:
+            return text
+    return ""
 
 
 def _dedupe(values: Sequence[str]) -> list[str]:

@@ -21,6 +21,7 @@ from mgc_v05l.execution_core.track_b_managed_order_registry import (
     build_track_b_managed_order_registry,
     write_track_b_managed_order_registry,
 )
+import mgc_v05l.execution_core.track_b_managed_order_registry as managed_order_registry_module
 
 
 NOW = datetime(2026, 5, 22, 17, 15, tzinfo=UTC)
@@ -295,6 +296,84 @@ def test_exit_due_managed_position_creates_blocker_without_open_order_truth_row(
     row = payload["managed_orders"][0]
     assert row["classification"] == POSITION_WITHOUT_CLOSE_ORDER
     assert row["lifecycle_id"] == "current_managed_mes_short"
+    assert row["action"] == "BUY"
+    assert row["close_order_required_now"] is True
+
+
+def test_managed_order_uses_current_owner_when_managed_position_artifact_is_stale(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    broker_position = {
+        "account_id": "DUM882026",
+        "symbol": "MES",
+        "local_symbol": "MESM6",
+        "con_id": 770561194,
+        "quantity": "-1",
+    }
+    stale_managed_position = {
+        "classification": "OPEN_MANAGED_EXIT_DUE",
+        "symbol": "MES",
+        "local_symbol": "MESM6",
+        "con_id": 770561194,
+        "side": "SHORT",
+        "quantity": "1",
+        "aggregate_qty": "-1",
+        "signed_broker_qty": "-1",
+        "trade_id": "trade_stale_globex_owner",
+        "lifecycle_id": "stale_globex_lifecycle",
+        "lane_id": "mes_globex_active_participation_short",
+        "strategy_id": "mes_globex_active_participation_short",
+        "managed_exit_policy_id": "GLOBEX_ACTIVE_EVIDENCE_TIMEBOX_60M_EXIT_V1",
+        "exit_due": True,
+        "attention_required": False,
+        "working_close_qty": "0",
+        "broker_position": broker_position,
+    }
+    fresh_lifecycle = {
+        "trade_id": "trade_fresh_us_owner",
+        "lifecycle_id": "fresh_us_lifecycle",
+        "symbol": "MES",
+        "local_symbol": "MESM6",
+        "con_id": 770561194,
+        "side": "SHORT",
+        "quantity": "1",
+        "lane_id": "mes_us_active_participation_short",
+        "strategy_id": "mes_us_active_participation_short",
+        "managed_exit_policy_id": "US_ACTIVE_EVIDENCE_TIMEBOX_60M_EXIT_V1",
+    }
+    _seed_base(tmp_path, positions_without_close=[broker_position], managed_positions=[stale_managed_position])
+    monkeypatch.setattr(
+        managed_order_registry_module,
+        "resolve_pre_restart_exposure_reconciliation",
+        lambda **_kwargs: {
+            "classification": "OWNED_MANAGED_EXIT_DUE",
+            "owned_exposure_count": 1,
+            "owned_exposures": [
+                {
+                    "classification": "OWNED_MANAGED_EXIT_DUE",
+                    "broker_position": broker_position,
+                    "canonical_broker_position": broker_position,
+                    "lifecycle_position": fresh_lifecycle,
+                    "trade_id": fresh_lifecycle["trade_id"],
+                    "lifecycle_id": fresh_lifecycle["lifecycle_id"],
+                    "exit_due": True,
+                    "reason_codes": ["NEWEST_EXACT_BROKER_BACKED_LIFECYCLE_REPORT_SELECTED"],
+                }
+            ],
+            "resolved_lifecycle_positions": [fresh_lifecycle],
+        },
+    )
+
+    payload = build_track_b_managed_order_registry(
+        config=TrackBManagedOrderRegistryConfig(repo_root=tmp_path),
+        now=NOW,
+    )
+
+    assert payload["classification"] == POSITION_WITHOUT_CLOSE_ORDER
+    row = payload["managed_orders"][0]
+    assert row["trade_id"] == "trade_fresh_us_owner"
+    assert row["lifecycle_id"] == "fresh_us_lifecycle"
     assert row["action"] == "BUY"
     assert row["close_order_required_now"] is True
 

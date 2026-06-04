@@ -117,11 +117,14 @@ def build_track_b_managed_order_registry(
     pre_restart_exposure_resolution = resolve_pre_restart_exposure_reconciliation(
         config=PreRestartExposureResolverConfig(repo_root=config.repo_root),
         broker_positions=_list(open_order_truth.get("broker_positions_without_close_order"))
-        or _list(reconciliation.get("track_b_broker_positions")),
-        lifecycle_positions=_list(reconciliation.get("track_b_lifecycle_positions")),
-        broker_open_orders=_list(reconciliation.get("track_b_broker_open_orders")),
+        or _reconciliation_broker_positions(reconciliation),
+        lifecycle_positions=_reconciliation_lifecycle_positions(reconciliation),
+        broker_open_orders=_reconciliation_broker_open_orders(reconciliation),
         lifecycle_reports=lifecycle_reports,
     )
+    owner_resolution = _mapping(reconciliation.get("current_exposure_owner_resolution")) or _mapping(
+        pre_restart_exposure_resolution.get("current_exposure_owner_resolution")
+    ) or pre_restart_exposure_resolution
 
     source_stale = _source_stale(
         now=actual_now,
@@ -151,9 +154,13 @@ def build_track_b_managed_order_registry(
         )
         for state in order_states
     ]
+    canonical_managed_positions = _managed_positions_with_owner_overlay(
+        managed_positions=managed_positions,
+        resolver_payload=owner_resolution,
+    )
     position_without_close_rows, terminal_superseded_rows = _position_without_close_rows(
         open_order_truth=open_order_truth,
-        managed_positions=managed_positions,
+        managed_positions=canonical_managed_positions,
         reconciliation=reconciliation,
         resolver_payload=pre_restart_exposure_resolution,
         lifecycle_reports=lifecycle_reports,
@@ -417,10 +424,17 @@ def _position_without_close_rows(
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     rows: list[dict[str, Any]] = []
     terminal_superseded_rows: list[dict[str, Any]] = []
-    broker_positions = _list(reconciliation.get("track_b_broker_positions"))
-    broker_open_orders = _list(reconciliation.get("track_b_broker_open_orders"))
-    registry_positions = _list(managed_positions.get("managed_positions"))
-    registry_positions.extend(_list(resolver_payload.get("resolved_lifecycle_positions")))
+    broker_positions = _reconciliation_broker_positions(reconciliation)
+    broker_open_orders = _reconciliation_broker_open_orders(reconciliation)
+    registry_positions = [
+        {**dict(item), "_managed_order_registry_position_source": "MANAGED_POSITION_AUTHORITY"}
+        for item in _list(managed_positions.get("managed_positions"))
+    ]
+    registry_positions.extend(
+        {**dict(item), "_managed_order_registry_position_source": "RESOLVED_LIFECYCLE_POSITION"}
+        for item in _list(resolver_payload.get("resolved_lifecycle_positions"))
+        if isinstance(item, Mapping)
+    )
     positions_without_close = _canonical_positions_without_close_order(
         managed_positions=managed_positions,
         open_order_truth=open_order_truth,
@@ -462,7 +476,16 @@ def _position_without_close_rows(
                 broker_open_orders=broker_open_orders,
             )
         manifest = _manifest_for_position(position=position, lifecycle_report=lifecycle_report, manifests=manifests)
-        active_hold_pending = _active_hold_managed_timed_exit_pending(registry_position=registry_position)
+        active_hold_pending = (
+            (
+                str(position.get("position_without_close_source") or "") != "OPEN_ORDER_TRUTH_BROKER_POSITION_WITHOUT_CLOSE_ORDER"
+                or (
+                    str(registry_position.get("_managed_order_registry_position_source") or "") == "MANAGED_POSITION_AUTHORITY"
+                    and str(registry_position.get("projection_authority_source") or "") != "CURRENT_EXPOSURE_OWNER_RESOLVER"
+                )
+            )
+            and _active_hold_managed_timed_exit_pending(registry_position=registry_position)
+        )
         classification = ACTIVE_HOLD_MANAGED_TIMED_EXIT_PENDING if active_hold_pending else POSITION_WITHOUT_CLOSE_ORDER
         rows.append(
             {
@@ -512,6 +535,136 @@ def _position_without_close_rows(
     return rows, terminal_superseded_rows
 
 
+def _managed_positions_with_owner_overlay(
+    *,
+    managed_positions: Mapping[str, Any],
+    resolver_payload: Mapping[str, Any],
+) -> dict[str, Any]:
+    payload = dict(managed_positions)
+    positions = [dict(item) for item in _list(managed_positions.get("managed_positions"))]
+    by_key = {
+        _position_without_close_key(_mapping(item.get("broker_position")) or item): idx
+        for idx, item in enumerate(positions)
+        if _position_without_close_key(_mapping(item.get("broker_position")) or item)
+    }
+    by_dedupe_key: dict[str, int] = {}
+    for idx, item in enumerate(positions):
+        for dedupe_key in _position_without_close_dedupe_keys(_mapping(item.get("broker_position")) or item):
+            by_dedupe_key.setdefault(dedupe_key, idx)
+    for exposure in _list(resolver_payload.get("owned_exposures")):
+        if not isinstance(exposure, Mapping):
+            continue
+        broker_position = _mapping(exposure.get("canonical_broker_position")) or _mapping(exposure.get("broker_position"))
+        if _decimal_or_none(broker_position.get("quantity")) in {None, Decimal("0")}:
+            continue
+        lifecycle_position = _mapping(exposure.get("lifecycle_position"))
+        key = _position_without_close_key(broker_position) or _position_without_close_key(lifecycle_position)
+        if not key:
+            continue
+        replacement_idx = by_key.get(key)
+        if replacement_idx is None:
+            for dedupe_key in _position_without_close_dedupe_keys(broker_position) | _position_without_close_dedupe_keys(lifecycle_position):
+                if dedupe_key in by_dedupe_key:
+                    replacement_idx = by_dedupe_key[dedupe_key]
+                    break
+        existing_position = positions[replacement_idx] if replacement_idx is not None else {}
+        owner_row = _managed_position_row_from_owner_exposure(
+            exposure=exposure,
+            broker_position=broker_position,
+            lifecycle_position=lifecycle_position,
+            existing_position=existing_position,
+        )
+        if replacement_idx is not None:
+            positions[replacement_idx] = owner_row
+        else:
+            replacement_idx = len(positions)
+            positions.append(owner_row)
+        by_key[key] = replacement_idx
+        for dedupe_key in _position_without_close_dedupe_keys(owner_row) | _position_without_close_dedupe_keys(broker_position):
+            by_dedupe_key[dedupe_key] = replacement_idx
+    payload["managed_positions"] = positions
+    if positions and str(payload.get("classification") or "") == NO_MANAGED_ORDERS:
+        payload["classification"] = positions[0].get("classification") or payload.get("classification")
+    return payload
+
+
+def _reconciliation_broker_positions(reconciliation: Mapping[str, Any]) -> list[dict[str, Any]]:
+    rows = _list(reconciliation.get("track_b_broker_positions"))
+    if rows:
+        return rows
+    return [
+        dict(position)
+        for match in _list(_mapping(reconciliation.get("position_match_report")).get("matches"))
+        for position in [_mapping(match.get("broker_position"))]
+        if position
+    ]
+
+
+def _reconciliation_lifecycle_positions(reconciliation: Mapping[str, Any]) -> list[dict[str, Any]]:
+    rows = _list(reconciliation.get("track_b_lifecycle_positions"))
+    if rows:
+        return rows
+    return [
+        dict(position)
+        for match in _list(_mapping(reconciliation.get("position_match_report")).get("matches"))
+        for position in [_mapping(match.get("lifecycle_position"))]
+        if position
+    ]
+
+
+def _reconciliation_broker_open_orders(reconciliation: Mapping[str, Any]) -> list[dict[str, Any]]:
+    rows = _list(reconciliation.get("track_b_broker_open_orders"))
+    if rows:
+        return rows
+    return [
+        dict(order)
+        for match in _list(_mapping(reconciliation.get("position_match_report")).get("matches"))
+        for order in _list(match.get("broker_open_orders"))
+        if isinstance(order, Mapping)
+    ]
+
+
+def _managed_position_row_from_owner_exposure(
+    *,
+    exposure: Mapping[str, Any],
+    broker_position: Mapping[str, Any],
+    lifecycle_position: Mapping[str, Any],
+    existing_position: Mapping[str, Any],
+) -> dict[str, Any]:
+    exit_due = (
+        exposure.get("exit_due") is True
+        or existing_position.get("exit_due") is True
+        or str(exposure.get("classification") or "") == "OWNED_MANAGED_EXIT_DUE"
+        or str(existing_position.get("exit_due_state") or "") == "EXIT_DUE"
+        or str(lifecycle_position.get("exit_due_state") or "") == "EXIT_DUE"
+    )
+    classification = "OPEN_MANAGED_EXIT_DUE" if exit_due else "OPEN_MANAGED_MATCHED"
+    signed_qty = _decimal_or_none(broker_position.get("quantity"))
+    return {
+        **dict(existing_position),
+        "classification": classification,
+        "symbol": broker_position.get("symbol") or lifecycle_position.get("symbol"),
+        "local_symbol": broker_position.get("local_symbol") or broker_position.get("localSymbol") or lifecycle_position.get("local_symbol"),
+        "con_id": broker_position.get("con_id") or broker_position.get("conId") or lifecycle_position.get("con_id"),
+        "account_id": broker_position.get("account_id") or broker_position.get("account") or lifecycle_position.get("account_id"),
+        "side": lifecycle_position.get("side") or ("SHORT" if signed_qty is not None and signed_qty < 0 else "LONG"),
+        "quantity": _decimal_text(abs(signed_qty)) if signed_qty is not None else lifecycle_position.get("quantity"),
+        "aggregate_qty": _decimal_text(signed_qty) if signed_qty is not None else lifecycle_position.get("aggregate_qty"),
+        "signed_broker_qty": _decimal_text(signed_qty) if signed_qty is not None else lifecycle_position.get("signed_broker_qty"),
+        "trade_id": exposure.get("trade_id") or lifecycle_position.get("trade_id"),
+        "lifecycle_id": exposure.get("lifecycle_id") or lifecycle_position.get("lifecycle_id"),
+        "lane_id": lifecycle_position.get("lane_id") or exposure.get("lane_id"),
+        "strategy_id": lifecycle_position.get("strategy_id") or exposure.get("strategy_id"),
+        "managed_exit_policy_id": lifecycle_position.get("managed_exit_policy_id") or exposure.get("managed_exit_policy_id"),
+        "exit_due": exit_due,
+        "attention_required": False,
+        "working_close_qty": "0",
+        "broker_position": dict(broker_position),
+        "projection_authority_owner_confirmed": True,
+        "projection_authority_source": "CURRENT_EXPOSURE_OWNER_RESOLVER",
+    }
+
+
 def _canonical_positions_without_close_order(
     *,
     managed_positions: Mapping[str, Any],
@@ -530,6 +683,7 @@ def _canonical_positions_without_close_order(
             continue
         broker_position = _mapping(position.get("broker_position"))
         row = dict(broker_position or position)
+        row["position_without_close_source"] = "MANAGED_POSITION_AUTHORITY"
         row.setdefault("symbol", position.get("symbol"))
         row.setdefault("local_symbol", position.get("local_symbol"))
         row.setdefault("con_id", position.get("con_id"))
@@ -551,7 +705,7 @@ def _canonical_positions_without_close_order(
         if key:
             seen.add(key)
         seen_dedupe_keys.update(dedupe_keys)
-        rows.append(dict(position))
+        rows.append({**dict(position), "position_without_close_source": "OPEN_ORDER_TRUTH_BROKER_POSITION_WITHOUT_CLOSE_ORDER"})
     return rows
 
 

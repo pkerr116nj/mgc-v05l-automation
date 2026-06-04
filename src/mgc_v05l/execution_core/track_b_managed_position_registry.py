@@ -137,9 +137,9 @@ def build_track_b_managed_position_registry(
     lifecycle_reports = _load_lifecycle_reports(config.resolve(config.lifecycle_root))
     manifests = _load_manifests(config.resolve(config.manifest_root))
 
-    broker_positions = _list(reconciliation.get("track_b_broker_positions"))
+    broker_positions = _reconciliation_broker_positions(reconciliation)
     lifecycle_positions = [
-        item for item in _list(reconciliation.get("track_b_lifecycle_positions")) if _lifecycle_position_registry_eligible(item)
+        item for item in _reconciliation_lifecycle_positions(reconciliation) if _lifecycle_position_registry_eligible(item)
     ]
     pre_restart_exposure_resolution = resolve_pre_restart_exposure_reconciliation(
         config=PreRestartExposureResolverConfig(repo_root=config.repo_root),
@@ -214,6 +214,17 @@ def build_track_b_managed_position_registry(
         market_data_root=config.resolve(config.market_data_root),
         source_stale=source_stale,
     )
+    managed_positions, projection_authority_diagnostics = _enforce_owned_exposure_projection_invariant(
+        managed_positions=managed_positions,
+        projection_authority_diagnostics=projection_authority_diagnostics,
+        owner_resolution=owner_resolution or pre_restart_exposure_resolution,
+        open_order_states=open_order_states,
+        managed_order_states=managed_order_states,
+        lifecycle_reports=lifecycle_reports,
+        manifests=manifests,
+        market_data_root=config.resolve(config.market_data_root),
+        source_stale=source_stale,
+    )
     classification = _overall_classification(
         managed_positions=managed_positions,
         broker_positions=broker_positions,
@@ -221,6 +232,8 @@ def build_track_b_managed_position_registry(
         review_positions=review_positions,
         source_stale=source_stale,
     )
+    if projection_authority_diagnostics.get("classification") == PROJECTION_AUTHORITY_DIVERGENCE:
+        classification = PROJECTION_AUTHORITY_DIVERGENCE
     from mgc_v05l.execution_core.track_b_managed_position_hold_exit_shadow import (
         ManagedPositionHoldExitShadowConfig,
         decorate_managed_positions_with_hold_exit_shadow,
@@ -693,6 +706,153 @@ def _apply_current_owner_projection_overlay(
         diagnostics["divergence_count"] += 1
         diagnostics["divergences"].append(divergent["projection_authority_divergence"])
     return positions, diagnostics
+
+
+def _enforce_owned_exposure_projection_invariant(
+    *,
+    managed_positions: list[dict[str, Any]],
+    projection_authority_diagnostics: Mapping[str, Any],
+    owner_resolution: Mapping[str, Any],
+    open_order_states: list[dict[str, Any]],
+    managed_order_states: list[dict[str, Any]],
+    lifecycle_reports: list[dict[str, Any]],
+    manifests: list[dict[str, Any]],
+    market_data_root: Path,
+    source_stale: Mapping[str, Any],
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    positions = [dict(item) for item in managed_positions]
+    diagnostics = {
+        **dict(projection_authority_diagnostics),
+        "classification": projection_authority_diagnostics.get("classification") or PROJECTION_AUTHORITY_COHERENT,
+        "divergence_count": int(projection_authority_diagnostics.get("divergence_count") or 0),
+        "divergences": list(projection_authority_diagnostics.get("divergences") or []),
+        "repairs": list(projection_authority_diagnostics.get("repairs") or []),
+    }
+    owned_exposures = _owned_current_exposures(owner_resolution)
+    expected_count = _int_or_none(owner_resolution.get("owned_exposure_count")) or len(owned_exposures)
+    if expected_count <= 0:
+        return positions, diagnostics
+    if not owned_exposures:
+        diagnostics["classification"] = PROJECTION_AUTHORITY_DIVERGENCE
+        diagnostics["divergence_count"] += 1
+        diagnostics["divergences"].append(
+            {
+                "classification": PROJECTION_AUTHORITY_DIVERGENCE,
+                "reason": "Owner resolver reported owned exposure count but did not publish owned exposure rows.",
+                "owned_exposure_count": expected_count,
+            }
+        )
+        return positions, diagnostics
+
+    by_key = {_position_key(item): idx for idx, item in enumerate(positions) if _position_key(item)}
+    for exposure in owned_exposures:
+        broker = _mapping(exposure.get("canonical_broker_position")) or _mapping(exposure.get("broker_position"))
+        if not _broker_position_nonzero(broker):
+            continue
+        lifecycle = _mapping(exposure.get("lifecycle_position"))
+        key = _position_key(broker) or _position_key(lifecycle)
+        owner_lifecycle_id = str(exposure.get("lifecycle_id") or lifecycle.get("lifecycle_id") or "").strip()
+        owner_trade_id = str(exposure.get("trade_id") or lifecycle.get("trade_id") or "").strip()
+        existing = positions[by_key[key]] if key and key in by_key else None
+        if existing and str(existing.get("lifecycle_id") or "").strip() == owner_lifecycle_id:
+            continue
+        repaired = _managed_positions(
+            broker_positions=[broker] if broker else [],
+            lifecycle_positions=[lifecycle] if lifecycle else [],
+            review_positions=[],
+            open_order_states=open_order_states,
+            managed_order_states=managed_order_states,
+            lifecycle_reports=lifecycle_reports,
+            manifests=manifests,
+            market_data_root=market_data_root,
+            source_stale=source_stale,
+        )
+        if repaired:
+            repaired_position = {
+                **repaired[0],
+                "projection_authority_owner_confirmed": True,
+                "projection_authority_source": "CURRENT_EXPOSURE_OWNER_RESOLVER",
+            }
+            if existing and key:
+                positions[by_key[key]] = repaired_position
+            else:
+                positions.append(repaired_position)
+                if key:
+                    by_key[key] = len(positions) - 1
+            diagnostics["repairs"].append(
+                {
+                    "classification": "CURRENT_OWNER_PROJECTION_REPAIRED",
+                    "reason": "Invariant repaired a resolver-proven owned broker exposure missing from managed-position authority.",
+                    "position_key": key,
+                    "owner_trade_id": owner_trade_id,
+                    "owner_lifecycle_id": owner_lifecycle_id,
+                }
+            )
+            continue
+        divergence = {
+            "classification": PROJECTION_AUTHORITY_DIVERGENCE,
+            "reason": "Reconciled owned broker exposure was missing from managed-position authority.",
+            "position_key": key,
+            "owner_trade_id": owner_trade_id,
+            "owner_lifecycle_id": owner_lifecycle_id,
+        }
+        diagnostics["classification"] = PROJECTION_AUTHORITY_DIVERGENCE
+        diagnostics["divergence_count"] += 1
+        diagnostics["divergences"].append(divergence)
+        positions.append(
+            {
+                "classification": PROJECTION_AUTHORITY_DIVERGENCE,
+                "attention_required": True,
+                "projection_authority_divergence": divergence,
+                "broker_position": broker,
+                "lifecycle_position": lifecycle,
+                "trade_id": owner_trade_id or None,
+                "lifecycle_id": owner_lifecycle_id or None,
+                "symbol": _symbol(broker or lifecycle),
+                "local_symbol": (broker or lifecycle).get("local_symbol"),
+                "con_id": (broker or lifecycle).get("con_id"),
+                "side": lifecycle.get("side") or _side_from_broker(broker),
+                "quantity": lifecycle.get("quantity") or broker.get("quantity"),
+            }
+        )
+    return positions, diagnostics
+
+
+def _owned_current_exposures(owner_resolution: Mapping[str, Any]) -> list[dict[str, Any]]:
+    return [
+        dict(item)
+        for item in owner_resolution.get("owned_exposures") or []
+        if isinstance(item, Mapping)
+    ]
+
+
+def _reconciliation_broker_positions(reconciliation: Mapping[str, Any]) -> list[dict[str, Any]]:
+    rows = _list(reconciliation.get("track_b_broker_positions"))
+    if rows:
+        return rows
+    return [
+        dict(position)
+        for match in _list(_mapping(reconciliation.get("position_match_report")).get("matches"))
+        for position in [_mapping(match.get("broker_position"))]
+        if position
+    ]
+
+
+def _reconciliation_lifecycle_positions(reconciliation: Mapping[str, Any]) -> list[dict[str, Any]]:
+    rows = _list(reconciliation.get("track_b_lifecycle_positions"))
+    if rows:
+        return rows
+    return [
+        dict(position)
+        for match in _list(_mapping(reconciliation.get("position_match_report")).get("matches"))
+        for position in [_mapping(match.get("lifecycle_position"))]
+        if position
+    ]
+
+
+def _broker_position_nonzero(position: Mapping[str, Any]) -> bool:
+    qty = _decimal(position.get("quantity"))
+    return qty is not None and qty != 0
 
 
 def _owner_exposure_supersedes_existing_projection(owner_exposure: Mapping[str, Any]) -> bool:
