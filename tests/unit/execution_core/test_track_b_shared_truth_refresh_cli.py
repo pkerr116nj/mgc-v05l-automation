@@ -46,7 +46,17 @@ def test_refresh_clean_flat_stack(tmp_path: Path) -> None:
     shared_truth_path = tmp_path / "outputs/track_b_execution_core/shared_truth/latest_track_b_shared_truth_refresh.json"
     shared_truth = _read(shared_truth_path)
     assert shared_truth["refresh_generation_id"] == result["refresh_generation_id"]
+    assert shared_truth["authority_generation_id"] == result["refresh_generation_id"]
+    assert shared_truth["authority_cycle_generated_at"] == result["generated_at"]
     assert shared_truth["refresh_phase"] == "pre_supervisor_refresh"
+    position_truth = _read(tmp_path / "outputs/track_b_execution_core/position_truth/latest_position_truth.json")
+    runtime_truth = _read(tmp_path / "outputs/track_b_execution_core/runtime_truth/latest_runtime_environment_truth.json")
+    assert position_truth["authority_generation_id"] == result["refresh_generation_id"]
+    assert runtime_truth["authority_generation_id"] == result["refresh_generation_id"]
+    assert runtime_truth["source_generation_references"]["position_truth_authority_generation_id"] == result[
+        "refresh_generation_id"
+    ]
+    assert runtime_truth["source_generation_references"]["position_truth_generated_at"] == position_truth["generated_at"]
     assert result["source_refresh_artifact_path"] == str(shared_truth_path)
     preflight = build_runtime_start_preflight_summary(result)
     assert preflight["classification"] == "SHARED_TRUTH_PREFLIGHT_CLEAN"

@@ -130,10 +130,21 @@ def refresh_track_b_shared_truth(
 
     open_order_config = TrackBOpenOrderTruthConfig(repo_root=config.repo_root, dashboard_projection_path=None)
     open_order_truth = build_track_b_open_order_truth(config=open_order_config, now=actual_now)
+    open_order_truth = _with_authority_cycle(
+        open_order_truth,
+        generation_id=refresh_generation_id,
+        cycle_generated_at=actual_now,
+    )
     open_order_path, _ = write_track_b_open_order_truth(config=open_order_config, payload=open_order_truth, now=actual_now)
 
     managed_order_config = TrackBManagedOrderRegistryConfig(repo_root=config.repo_root, dashboard_projection_path=None)
     managed_order_registry = build_track_b_managed_order_registry(config=managed_order_config, now=actual_now)
+    managed_order_registry = _with_authority_cycle(
+        managed_order_registry,
+        generation_id=refresh_generation_id,
+        cycle_generated_at=actual_now,
+        open_order_truth=open_order_truth,
+    )
     managed_order_path, _ = write_track_b_managed_order_registry(
         config=managed_order_config,
         payload=managed_order_registry,
@@ -142,10 +153,25 @@ def refresh_track_b_shared_truth(
 
     position_config = TrackBPositionTruthMonitorConfig(repo_root=config.repo_root, dashboard_projection_path=None)
     position_truth = build_track_b_position_truth(config=position_config, now=actual_now)
+    position_truth = _with_authority_cycle(
+        position_truth,
+        generation_id=refresh_generation_id,
+        cycle_generated_at=actual_now,
+        open_order_truth=open_order_truth,
+        managed_order_registry=managed_order_registry,
+    )
     position_path, _ = write_track_b_position_truth(config=position_config, payload=position_truth, now=actual_now)
 
     managed_position_config = TrackBManagedPositionRegistryConfig(repo_root=config.repo_root, dashboard_projection_path=None)
     managed_position_registry = build_track_b_managed_position_registry(config=managed_position_config, now=actual_now)
+    managed_position_registry = _with_authority_cycle(
+        managed_position_registry,
+        generation_id=refresh_generation_id,
+        cycle_generated_at=actual_now,
+        open_order_truth=open_order_truth,
+        managed_order_registry=managed_order_registry,
+        position_truth=position_truth,
+    )
     managed_position_path, _ = write_track_b_managed_position_registry(
         config=managed_position_config,
         payload=managed_position_registry,
@@ -156,12 +182,27 @@ def refresh_track_b_shared_truth(
     # informative. Build each once from the other fresh current-cycle artifact,
     # then rebuild Position Truth from the final managed-order projection.
     managed_order_registry = build_track_b_managed_order_registry(config=managed_order_config, now=actual_now)
+    managed_order_registry = _with_authority_cycle(
+        managed_order_registry,
+        generation_id=refresh_generation_id,
+        cycle_generated_at=actual_now,
+        open_order_truth=open_order_truth,
+        managed_position_registry=managed_position_registry,
+    )
     managed_order_path, _ = write_track_b_managed_order_registry(
         config=managed_order_config,
         payload=managed_order_registry,
         now=actual_now,
     )
     position_truth = build_track_b_position_truth(config=position_config, now=actual_now)
+    position_truth = _with_authority_cycle(
+        position_truth,
+        generation_id=refresh_generation_id,
+        cycle_generated_at=actual_now,
+        open_order_truth=open_order_truth,
+        managed_order_registry=managed_order_registry,
+        managed_position_registry=managed_position_registry,
+    )
     position_path, _ = write_track_b_position_truth(config=position_config, payload=position_truth, now=actual_now)
     runtime_config = TrackBRuntimeEnvironmentTruthConfig(repo_root=config.repo_root, dashboard_projection_path=None)
     runtime_environment_truth = build_track_b_runtime_environment_truth(
@@ -170,6 +211,12 @@ def refresh_track_b_shared_truth(
         pid_running=pid_running,
         process_root_resolver=process_root_resolver,
         source_commit_resolver=source_commit_resolver,
+    )
+    runtime_environment_truth = _with_authority_cycle(
+        runtime_environment_truth,
+        generation_id=refresh_generation_id,
+        cycle_generated_at=actual_now,
+        position_truth=position_truth,
     )
     runtime_path, _ = write_track_b_runtime_environment_truth(
         config=runtime_config,
@@ -192,6 +239,17 @@ def refresh_track_b_shared_truth(
             "managed_position_registry": managed_position_registry,
             "reconciliation": reconciliation,
         },
+    )
+    broker_position_guardian = _with_authority_cycle(
+        broker_position_guardian,
+        generation_id=refresh_generation_id,
+        cycle_generated_at=actual_now,
+        open_order_truth=open_order_truth,
+        managed_order_registry=managed_order_registry,
+        position_truth=position_truth,
+        runtime_environment_truth=runtime_environment_truth,
+        managed_position_registry=managed_position_registry,
+        reconciliation=reconciliation,
     )
     broker_position_guardian_path = write_track_b_broker_position_guardian(
         config=broker_position_guardian_config,
@@ -260,6 +318,16 @@ def refresh_track_b_shared_truth(
         "schema_version": "track_b_shared_truth_refresh_v1",
         "generated_at": actual_now.isoformat(),
         "refresh_generation_id": refresh_generation_id,
+        "authority_generation_id": refresh_generation_id,
+        "authority_cycle_generated_at": actual_now.isoformat(),
+        "source_generation_references": _source_generation_references(
+            open_order_truth=open_order_truth,
+            managed_order_registry=managed_order_registry,
+            position_truth=position_truth,
+            runtime_environment_truth=runtime_environment_truth,
+            managed_position_registry=managed_position_registry,
+            reconciliation=reconciliation,
+        ),
         "refresh_phase": "pre_supervisor_refresh",
         "mode": "PAPER",
         "read_only": True,
@@ -560,8 +628,44 @@ def _service_row(
         "service": service,
         "classification": classification,
         "generated_at": payload.get("generated_at"),
+        "authority_generation_id": payload.get("authority_generation_id"),
+        "authority_cycle_generated_at": payload.get("authority_cycle_generated_at"),
+        "source_generation_references": _mapping(payload.get("source_generation_references")),
         "artifact_path": str(artifact_path),
     }
+
+
+def _with_authority_cycle(
+    payload: Mapping[str, Any],
+    *,
+    generation_id: str,
+    cycle_generated_at: datetime,
+    **sources: Mapping[str, Any],
+) -> dict[str, Any]:
+    references = {
+        **_mapping(payload.get("source_generation_references")),
+        **_source_generation_references(**sources),
+    }
+    return {
+        **dict(payload),
+        "authority_generation_id": generation_id,
+        "authority_cycle_generated_at": cycle_generated_at.isoformat(),
+        "source_generation_references": references,
+    }
+
+
+def _source_generation_references(**sources: Mapping[str, Any]) -> dict[str, Any]:
+    references: dict[str, Any] = {}
+    for name, payload in sources.items():
+        key = str(name)
+        artifact = _mapping(payload)
+        generated_at = artifact.get("generated_at")
+        authority_generation_id = artifact.get("authority_generation_id")
+        if generated_at not in {None, ""}:
+            references[f"{key}_generated_at"] = generated_at
+        if authority_generation_id not in {None, ""}:
+            references[f"{key}_authority_generation_id"] = authority_generation_id
+    return references
 
 
 def _paper_recovery_policy_row(*, payload: Mapping[str, Any], artifact_path: Path) -> dict[str, Any]:

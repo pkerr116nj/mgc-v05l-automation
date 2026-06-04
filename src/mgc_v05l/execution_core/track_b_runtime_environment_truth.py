@@ -192,7 +192,14 @@ def build_track_b_runtime_environment_truth(
             "classification": position_classification,
             "broker_exposure_present": broker_exposure,
             "generated_at": position_truth.get("generated_at"),
+            "authority_generation_id": position_truth.get("authority_generation_id"),
+            "authority_cycle_generated_at": position_truth.get("authority_cycle_generated_at"),
             "summary": position_truth.get("summary") or {},
+        },
+        "source_generation_references": {
+            "position_truth_generated_at": position_truth.get("generated_at"),
+            "position_truth_authority_generation_id": position_truth.get("authority_generation_id"),
+            "broker_reconciliation_generated_at": reconciliation.get("generated_at"),
         },
         "reconciliation": {
             "classification": reconciliation.get("classification"),

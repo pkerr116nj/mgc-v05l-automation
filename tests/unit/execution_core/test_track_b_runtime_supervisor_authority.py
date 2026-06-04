@@ -410,6 +410,98 @@ def test_mixed_shared_truth_generation_blocks_supervisor(tmp_path: Path) -> None
     assert any(source["service"] == "Open Order Truth" for source in payload["stale_or_mixed_sources"])
 
 
+def test_shared_truth_coherence_prefers_authority_generation_over_timestamp(tmp_path: Path) -> None:
+    _seed_base(tmp_path)
+    shared_truth_path = (
+        tmp_path
+        / "outputs"
+        / "track_b_execution_core"
+        / "shared_truth"
+        / "latest_track_b_shared_truth_refresh.json"
+    )
+    shared_truth = json.loads(shared_truth_path.read_text(encoding="utf-8"))
+    for row in shared_truth["services"]:
+        if row["service"] == "Position Truth":
+            row["authority_generation_id"] = "test-shared-truth-generation"
+            row["authority_cycle_generated_at"] = NOW.isoformat()
+    _write_json(shared_truth_path, shared_truth)
+    _write_json(
+        tmp_path / "outputs" / "track_b_execution_core" / "position_truth" / "latest_position_truth.json",
+        {
+            "generated_at": "2026-05-23T12:00:05+00:00",
+            "authority_generation_id": "test-shared-truth-generation",
+            "authority_cycle_generated_at": NOW.isoformat(),
+            "classification": "CLEAN_FLAT_READY",
+            "summary": {"overall_classification": "CLEAN_FLAT_READY"},
+            "live_money_eligible": False,
+        },
+    )
+
+    payload = build_track_b_runtime_supervisor_authority(config=TrackBRuntimeSupervisorAuthorityConfig(repo_root=tmp_path), now=NOW)
+
+    assert payload["shared_truth_coherence_status"] == "COHERENT"
+    assert payload["stale_or_mixed_sources"] == []
+
+
+def test_shared_truth_coherence_blocks_authority_generation_mismatch(tmp_path: Path) -> None:
+    _seed_base(tmp_path)
+    shared_truth_path = (
+        tmp_path
+        / "outputs"
+        / "track_b_execution_core"
+        / "shared_truth"
+        / "latest_track_b_shared_truth_refresh.json"
+    )
+    shared_truth = json.loads(shared_truth_path.read_text(encoding="utf-8"))
+    for row in shared_truth["services"]:
+        if row["service"] == "Position Truth":
+            row["authority_generation_id"] = "test-shared-truth-generation"
+            row["authority_cycle_generated_at"] = NOW.isoformat()
+    _write_json(shared_truth_path, shared_truth)
+    _write_json(
+        tmp_path / "outputs" / "track_b_execution_core" / "position_truth" / "latest_position_truth.json",
+        {
+            "generated_at": NOW.isoformat(),
+            "authority_generation_id": "different-generation",
+            "authority_cycle_generated_at": NOW.isoformat(),
+            "classification": "CLEAN_FLAT_READY",
+            "summary": {"overall_classification": "CLEAN_FLAT_READY"},
+            "live_money_eligible": False,
+        },
+    )
+
+    payload = build_track_b_runtime_supervisor_authority(config=TrackBRuntimeSupervisorAuthorityConfig(repo_root=tmp_path), now=NOW)
+
+    assert payload["classification"] == SUPERVISOR_SHARED_TRUTH_STALE
+    assert payload["shared_truth_coherence_status"] == "STALE_OR_MIXED"
+    assert any(
+        source["service"] == "Position Truth" and source["reason"] == "authority_generation_id_mismatch"
+        for source in payload["stale_or_mixed_sources"]
+    )
+
+
+def test_shared_truth_coherence_legacy_generated_at_fallback_still_blocks(tmp_path: Path) -> None:
+    _seed_base(tmp_path)
+    _write_json(
+        tmp_path / "outputs" / "track_b_execution_core" / "position_truth" / "latest_position_truth.json",
+        {
+            "generated_at": "2026-05-23T12:00:05+00:00",
+            "classification": "CLEAN_FLAT_READY",
+            "summary": {"overall_classification": "CLEAN_FLAT_READY"},
+            "live_money_eligible": False,
+        },
+    )
+
+    payload = build_track_b_runtime_supervisor_authority(config=TrackBRuntimeSupervisorAuthorityConfig(repo_root=tmp_path), now=NOW)
+
+    assert payload["classification"] == SUPERVISOR_SHARED_TRUTH_STALE
+    assert payload["shared_truth_coherence_status"] == "STALE_OR_MIXED"
+    assert any(
+        source["service"] == "Position Truth" and source["reason"] == "generated_at_mismatch"
+        for source in payload["stale_or_mixed_sources"]
+    )
+
+
 def test_missing_shared_truth_generation_blocks_supervisor(tmp_path: Path) -> None:
     _seed_base(tmp_path, include_shared_truth=False)
 

@@ -1135,6 +1135,7 @@ def _shared_truth_coherence(inputs: Mapping[str, Mapping[str, Any]]) -> dict[str
     stale_or_mixed: list[dict[str, Any]] = []
     for service, input_key, observed_classification, observed_generated_at in _coherence_sources(inputs):
         row = rows.get(service)
+        observed_payload = _mapping(inputs.get(input_key))
         if not row:
             stale_or_mixed.append(
                 {
@@ -1156,6 +1157,20 @@ def _shared_truth_coherence(inputs: Mapping[str, Mapping[str, Any]]) -> dict[str
                     "observed": observed_classification,
                 }
             )
+        expected_generation_id = str(row.get("authority_generation_id") or "")
+        observed_generation_id = str(observed_payload.get("authority_generation_id") or "")
+        if expected_generation_id and observed_generation_id:
+            if expected_generation_id != observed_generation_id:
+                stale_or_mixed.append(
+                    {
+                        "service": service,
+                        "source": input_key,
+                        "reason": "authority_generation_id_mismatch",
+                        "expected": expected_generation_id,
+                        "observed": observed_generation_id,
+                    }
+                )
+            continue
         expected_generated_at = str(row.get("generated_at") or "")
         if expected_generated_at and observed_generated_at and expected_generated_at != str(observed_generated_at):
             stale_or_mixed.append(
@@ -1178,6 +1193,9 @@ def _shared_truth_coherence(inputs: Mapping[str, Mapping[str, Any]]) -> dict[str
                 "service": str(row.get("service") or ""),
                 "classification": row.get("classification"),
                 "generated_at": row.get("generated_at"),
+                "authority_generation_id": row.get("authority_generation_id"),
+                "authority_cycle_generated_at": row.get("authority_cycle_generated_at"),
+                "source_generation_references": _mapping(row.get("source_generation_references")),
                 "artifact_path": row.get("artifact_path"),
             }
             for row in rows.values()
