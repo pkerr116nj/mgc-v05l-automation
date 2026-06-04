@@ -22,6 +22,7 @@ from mgc_v05l.execution_core.track_b_control_plane_snapshot import (
     build_track_b_control_plane_snapshot,
     write_track_b_control_plane_snapshot,
 )
+from mgc_v05l.execution_core.track_b_live_trade_registry import resolve_live_trade_id_for_lifecycle_id
 from mgc_v05l.execution_core.track_b_exit_strategy_roster import (
     MNQ_SNAP_TURN_TIMEBOX_3X5M_V1,
     TIMEBOXED_3X5M_MANAGED_LIMIT_CLOSE_V1,
@@ -376,6 +377,7 @@ def _apply_managed_exit(
     required_completed_5m_bars: int,
     now: datetime,
 ) -> dict[str, Any]:
+    lifecycle_report = _with_registry_trade_id_for_managed_exit(config=config, lifecycle_report=lifecycle_report)
     entry_intent = lifecycle_report.get("entry_intent") if isinstance(lifecycle_report.get("entry_intent"), Mapping) else {}
     lifecycle_config = TrackBStrategyManagedPaperLifecycleConfig(
         mode=config.mode,
@@ -482,6 +484,28 @@ def _apply_managed_exit(
         "paper_trade_ledger_update": ledger_update,
         "primary_blocker": result.report.get("primary_blocker"),
     }
+
+
+def _with_registry_trade_id_for_managed_exit(
+    *,
+    config: TrackBManagedExitAttachConfig,
+    lifecycle_report: Mapping[str, Any],
+) -> dict[str, Any]:
+    report = dict(lifecycle_report)
+    registry_trade_id = resolve_live_trade_id_for_lifecycle_id(
+        repo_root=config.repo_root,
+        lifecycle_id=config.lifecycle_id,
+    )
+    if not registry_trade_id:
+        return report
+    report["trade_id"] = registry_trade_id
+    for key in ("entry_intent", "open_state"):
+        value = report.get(key)
+        if isinstance(value, Mapping):
+            nested = dict(value)
+            nested["trade_id"] = registry_trade_id
+            report[key] = nested
+    return report
 
 
 def _select_active_managed_exit_due_position(

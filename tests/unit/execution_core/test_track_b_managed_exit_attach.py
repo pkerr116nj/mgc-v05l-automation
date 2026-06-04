@@ -2,10 +2,16 @@ from __future__ import annotations
 
 import json
 from datetime import datetime, timezone
+from decimal import Decimal
 from pathlib import Path
 from typing import Any, Mapping
 
 import mgc_v05l.execution_core.track_b_managed_exit_attach as attach_module
+from mgc_v05l.execution_core.track_b_central_trade_registry import TradeEventType
+from mgc_v05l.execution_core.track_b_live_trade_registry import (
+    append_live_trade_registry_event,
+    make_live_trade_registry_event,
+)
 from mgc_v05l.execution_core.track_b_managed_exit_attach import (
     MANAGED_EXIT_APPLY_DISABLED,
     MANAGED_EXIT_BLOCKED_DUPLICATE_CLOSE_ORDER,
@@ -309,6 +315,82 @@ def test_apply_updates_paper_trade_ledger_projection(tmp_path: Path, monkeypatch
     assert payload["apply_result"]["paper_trade_ledger_update"]["trade_record_written"] is True
     assert payload["apply_result"]["paper_trade_ledger_update"]["open_position_count"] == 0
     assert payload["apply_result"]["paper_trade_ledger_update"]["realized_pnl_by_lifecycle"] == ["82.5"]
+
+
+def test_apply_uses_registry_born_trade_id_for_managed_exit_identity(tmp_path: Path, monkeypatch) -> None:
+    config = TrackBManagedExitAttachConfig(
+        **{
+            **_seed(tmp_path, completed_bars=3).__dict__,
+            "apply": True,
+            "operator_authorized_managed_exit": True,
+        }
+    )
+    lifecycle_report_path = (
+        tmp_path
+        / "outputs/track_b_execution_core/track_b_strategy_managed_paper_lifecycle"
+        / config.lifecycle_id
+        / "track_b_strategy_managed_paper_lifecycle_report.json"
+    )
+    lifecycle = json.loads(lifecycle_report_path.read_text(encoding="utf-8"))
+    lifecycle["trade_id"] = "placeholder_strategy_lifecycle_trade_id"
+    lifecycle["entry_intent"]["trade_id"] = "placeholder_strategy_lifecycle_trade_id"
+    _write_json(lifecycle_report_path, lifecycle)
+    registry_trade_id = "trade_registry_born_exact_owner"
+    source_path = str(tmp_path / "outputs/track_b_execution_core/strategy_bridge/bridge_report.json")
+    registry_base = {
+        "trade_id": registry_trade_id,
+        "lifecycle_id": config.lifecycle_id,
+        "lane_id": config.lane_id,
+        "thesis_strategy_id": config.strategy_id,
+        "account_id": config.account_id,
+        "symbol": config.instrument_family,
+        "con_id": config.con_id,
+        "local_symbol": config.local_symbol,
+        "expiry": config.expiry,
+        "side": config.side,
+        "action": "BUY",
+        "qty": Decimal("1"),
+        "source_artifact_path": source_path,
+        "generated_at": NOW,
+    }
+    for event_type, extra in (
+        (TradeEventType.ENTRY_INTENT_CREATED, {}),
+        (TradeEventType.ENTRY_ORDER_SUBMITTED, {"order_id": "33", "client_id": "17086"}),
+        (
+            TradeEventType.ENTRY_FILL_BROKER_BACKED,
+            {"order_id": "33", "client_id": "17086", "perm_id": "perm-33", "exec_id": "exec-33", "price": "29923.75"},
+        ),
+        (
+            TradeEventType.LIFECYCLE_OPEN_MANAGED,
+            {"order_id": "33", "client_id": "17086", "perm_id": "perm-33", "exec_id": "exec-33", "price": "29923.75"},
+        ),
+    ):
+        append_live_trade_registry_event(
+            repo_root=tmp_path,
+            event=make_live_trade_registry_event(event_type=event_type, **registry_base, **extra),
+        )
+
+    class Result:
+        report_json = lifecycle_report_path
+        report = {
+            **lifecycle,
+            "paper_lifecycle_classification": "TRACK_B_STRATEGY_PAPER_OPEN_MANAGED",
+            "final_position_status": "OPEN_MANAGED",
+        }
+
+    seen: dict[str, Any] = {}
+
+    def fake_maintain(**kwargs: Any) -> Result:
+        seen["existing_lifecycle_report"] = kwargs["existing_lifecycle_report"]
+        return Result()
+
+    monkeypatch.setattr(attach_module, "maintain_open_track_b_strategy_managed_paper_lifecycle", fake_maintain)
+
+    payload = build_track_b_managed_exit_attach_plan(config=config, now=NOW)
+
+    assert payload["broker_state_mutated"] is False
+    assert seen["existing_lifecycle_report"]["trade_id"] == registry_trade_id
+    assert seen["existing_lifecycle_report"]["entry_intent"]["trade_id"] == registry_trade_id
 
 
 def test_aggregate_close_persists_all_lifecycle_units(tmp_path: Path, monkeypatch) -> None:
