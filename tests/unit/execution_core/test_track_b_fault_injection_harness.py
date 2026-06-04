@@ -86,6 +86,17 @@ REQUIRED_METADATA_FIELDS = {
     "retirement_status",
     "notes",
     "evidence",
+    "live_incident_source",
+}
+COVERAGE_SUMMARY_FIELDS = {
+    "scenario_id",
+    "bug_class",
+    "protected_invariant",
+    "live_incident_source",
+    "authority_layers_exercised",
+    "expected_fail_closed_or_repair_path",
+    "safety_invariants",
+    "regression_status",
 }
 MALFORMED_AUTHORITY_SCENARIOS = (
     (
@@ -153,6 +164,7 @@ def test_fault_injection_harness_runs_all_named_scenarios(tmp_path: Path) -> Non
     assert report["broker_mutation_allowed"] is False
     assert report["passed"] is True
     assert [item["scenario"] for item in report["scenarios"]] == list(FAULT_INJECTION_SCENARIOS)
+    assert [item["scenario_id"] for item in report["coverage_summary"]] == list(FAULT_INJECTION_SCENARIOS)
     assert list_track_b_fault_injection_scenarios() == FAULT_INJECTION_SCENARIOS
     for scenario in report["scenarios"]:
         assert scenario["passed"] is True
@@ -194,6 +206,33 @@ def test_every_scenario_includes_complete_metadata(tmp_path: Path) -> None:
         assert metadata["retirement_status"] == "FAULT_INJECTION_V1_COVERED"
         assert metadata["notes"].startswith("Evidence placeholder:")
         assert metadata["evidence"] == {"placeholder": True}
+        assert "live_incident_source" in metadata
+
+
+def test_coverage_summary_includes_all_scenarios_by_bug_class_and_invariant(tmp_path: Path) -> None:
+    report = run_track_b_fault_injection_harness(artifact_root=tmp_path, now=NOW)
+    summary = report["coverage_summary"]
+
+    assert len(summary) == 23
+    assert [row["scenario_id"] for row in summary] == list(FAULT_INJECTION_SCENARIOS)
+    for row in summary:
+        assert set(row) == COVERAGE_SUMMARY_FIELDS
+        assert row["bug_class"]
+        assert row["protected_invariant"]
+        assert row["authority_layers_exercised"]
+        assert row["expected_fail_closed_or_repair_path"]
+        assert row["safety_invariants"] == list(SAFETY_INVARIANTS_CHECKED)
+        assert row["regression_status"] == "FAULT_INJECTION_V1_COVERED"
+
+
+def test_coverage_summary_marks_live_incident_sources_where_applicable(tmp_path: Path) -> None:
+    report = run_track_b_fault_injection_harness(artifact_root=tmp_path, now=NOW)
+    by_id = {row["scenario_id"]: row for row in report["coverage_summary"]}
+
+    assert by_id["broker_observed_fill_reserved_lifecycle_adoption_required"]["live_incident_source"]
+    assert by_id["simultaneous_mnq_mes_broker_observed_short_adoption"]["live_incident_source"]
+    assert by_id["raw_stale_lifecycle_count_current_scope_flat"]["live_incident_source"]
+    assert by_id["stale_runtime_with_exit_due_position"]["live_incident_source"] is None
 
 
 def test_json_report_writer_requires_explicit_tmp_path_output(tmp_path: Path) -> None:
@@ -210,11 +249,24 @@ def test_json_report_writer_requires_explicit_tmp_path_output(tmp_path: Path) ->
     assert written == output_path.resolve()
     written.relative_to(tmp_path)
     payload = json.loads(written.read_text(encoding="utf-8"))
+    assert set(payload) == {
+        "schema_version",
+        "generated_at",
+        "source_schema_version",
+        "read_only",
+        "broker_mutation_allowed",
+        "scenario_count",
+        "passed",
+        "coverage_summary",
+        "scenarios",
+    }
     assert payload["schema_version"] == FAULT_INJECTION_REPORT_SCHEMA_VERSION
     assert payload["generated_at"] == NOW.isoformat()
     assert payload["scenario_count"] == len(FAULT_INJECTION_SCENARIOS)
     assert payload["passed"] is True
     assert payload["broker_mutation_allowed"] is False
+    assert [row["scenario_id"] for row in payload["coverage_summary"]] == list(FAULT_INJECTION_SCENARIOS)
+    assert all(set(row) == COVERAGE_SUMMARY_FIELDS for row in payload["coverage_summary"])
     assert [scenario["scenario_id"] for scenario in payload["scenarios"]] == list(FAULT_INJECTION_SCENARIOS)
     for scenario in payload["scenarios"]:
         assert set(scenario) == {"scenario_id", "timestamp", "verdict", "metadata", "safety_checks"}

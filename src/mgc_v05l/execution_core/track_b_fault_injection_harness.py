@@ -99,6 +99,16 @@ SAFETY_INVARIANTS_CHECKED: tuple[str, ...] = (
     "no_live_outputs_or_var_writes",
 )
 
+LIVE_INCIDENT_SOURCE_BY_SCENARIO: dict[str, str] = {
+    SCENARIO_MANAGED_CLOSE_DISAPPEARS_BROKER_FLAT: "2026-06-04 Track B PAPER MNQ managed close order disappeared after broker became flat without fill callback",
+    SCENARIO_REGISTRY_REVIEW_REQUIRED_NULL_LIFECYCLE_EXIT: "2026-06-04 Track B PAPER MES managed-exit attach blocked by registry REVIEW_REQUIRED lifecycle_id null",
+    SCENARIO_BROKER_OBSERVED_RESERVED_LIFECYCLE_ADOPTION: "2026-06-04 Track B PAPER Globex MNQ/MES short fills observed by broker while lifecycle stayed reserved-only",
+    SCENARIO_BROKER_OBSERVED_CONFLICTING_CANDIDATE: "2026-06-04 Track B PAPER broker-observed adoption fail-closed design from reserved lifecycle ambiguity",
+    SCENARIO_BROKER_OBSERVED_STALE_INTENT: "2026-06-04 Track B PAPER broker-observed adoption fail-closed design from stale submit intent risk",
+    SCENARIO_SIMULTANEOUS_MNQ_MES_BROKER_OBSERVED_SHORT_ADOPTION: "2026-06-04 Track B PAPER simultaneous MNQ/MES Globex short broker-observed adoption",
+    SCENARIO_RAW_STALE_LIFECYCLE_COUNT_CURRENT_SCOPE_FLAT: "2026-06-04 Track B PAPER stale superseded lifecycle projection raw count mismatch",
+}
+
 SCENARIO_METADATA: dict[str, dict[str, Any]] = {
     SCENARIO_STALE_RUNTIME_EXIT_DUE: {
         "bug_class": "Stranded Exit-Due Positions",
@@ -368,6 +378,7 @@ def run_track_b_fault_injection_harness(
         "broker_mutation_allowed": False,
         "scenario_count": len(results),
         "passed": all(result["passed"] for result in results),
+        "coverage_summary": _coverage_summary(results),
         "scenarios": results,
     }
 
@@ -1199,7 +1210,7 @@ def _scenario_raw_stale_lifecycle_count_current_scope_flat(
 
 
 def _finalize_scenario(*, name: str, generated_at: datetime, payload: Mapping[str, Any]) -> dict[str, Any]:
-    metadata = dict(SCENARIO_METADATA.get(name) or {})
+    metadata = _scenario_metadata(name)
     submit = dict(payload.get("submit") or {})
     broker_exposure = dict(payload.get("broker_exposure") or {})
     ownership = dict(payload.get("ownership") or {})
@@ -1286,8 +1297,37 @@ def _json_report_payload(*, harness_report: Mapping[str, Any], generated_at: dat
         "broker_mutation_allowed": False,
         "scenario_count": len(scenarios),
         "passed": all(item["verdict"]["passed"] for item in scenarios),
+        "coverage_summary": _coverage_summary(harness_report.get("scenarios") or []),
         "scenarios": scenarios,
     }
+
+
+def _coverage_summary(raw_scenarios: Sequence[Any]) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    for raw in raw_scenarios:
+        if not isinstance(raw, Mapping):
+            continue
+        scenario_id = str(raw.get("scenario") or raw.get("scenario_id") or "")
+        metadata = _scenario_metadata(scenario_id, raw.get("metadata"))
+        rows.append(
+            {
+                "scenario_id": scenario_id,
+                "bug_class": str(metadata.get("bug_class") or ""),
+                "protected_invariant": str(metadata.get("retired_invariant") or ""),
+                "live_incident_source": metadata.get("live_incident_source"),
+                "authority_layers_exercised": list(metadata.get("authority_helpers_exercised") or []),
+                "expected_fail_closed_or_repair_path": str(metadata.get("expected_primary_classification") or ""),
+                "safety_invariants": list(metadata.get("safety_invariants_checked") or []),
+                "regression_status": str(metadata.get("retirement_status") or ""),
+            }
+        )
+    return rows
+
+
+def _scenario_metadata(name: str, raw_metadata: Any = None) -> dict[str, Any]:
+    metadata = dict(raw_metadata if isinstance(raw_metadata, Mapping) else SCENARIO_METADATA.get(name) or {})
+    metadata.setdefault("live_incident_source", LIVE_INCIDENT_SOURCE_BY_SCENARIO.get(name))
+    return metadata
 
 
 def _validate_report_output_path(*, output_path: Path, repo_root: Path | None) -> Path:
