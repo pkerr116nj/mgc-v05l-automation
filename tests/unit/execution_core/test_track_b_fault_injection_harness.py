@@ -1,10 +1,14 @@
 from __future__ import annotations
 
+import json
 from datetime import UTC, datetime
 from pathlib import Path
 
+import pytest
+
 from mgc_v05l.execution_core.track_b_fault_injection_harness import (
     FAULT_INJECTION_SCENARIOS,
+    FAULT_INJECTION_REPORT_SCHEMA_VERSION,
     SAFETY_INVARIANTS_CHECKED,
     SCENARIO_BROKER_FILL_NO_LIFECYCLE_CLOSE,
     SCENARIO_DEAD_PID_STALE_HEARTBEAT,
@@ -18,6 +22,7 @@ from mgc_v05l.execution_core.track_b_fault_injection_harness import (
     list_track_b_fault_injection_scenarios,
     run_track_b_fault_injection_harness,
     run_track_b_fault_injection_scenario,
+    write_track_b_fault_injection_json_report,
 )
 from mgc_v05l.execution_core.track_b_futures_contract_resolver import CONTRACT_NEAR_EXPIRY
 from mgc_v05l.execution_core.track_b_live_runtime_environment_watchdog import (
@@ -105,6 +110,53 @@ def test_every_scenario_includes_complete_metadata(tmp_path: Path) -> None:
         assert metadata["retirement_status"] == "FAULT_INJECTION_V1_COVERED"
         assert metadata["notes"].startswith("Evidence placeholder:")
         assert metadata["evidence"] == {"placeholder": True}
+
+
+def test_json_report_writer_requires_explicit_tmp_path_output(tmp_path: Path) -> None:
+    harness_report = run_track_b_fault_injection_harness(artifact_root=tmp_path / "artifacts", now=NOW)
+    output_path = tmp_path / "reports" / "fault_injection_report.json"
+
+    written = write_track_b_fault_injection_json_report(
+        harness_report=harness_report,
+        output_path=output_path,
+        repo_root=Path.cwd(),
+        now=NOW,
+    )
+
+    assert written == output_path.resolve()
+    written.relative_to(tmp_path)
+    payload = json.loads(written.read_text(encoding="utf-8"))
+    assert payload["schema_version"] == FAULT_INJECTION_REPORT_SCHEMA_VERSION
+    assert payload["generated_at"] == NOW.isoformat()
+    assert payload["scenario_count"] == len(FAULT_INJECTION_SCENARIOS)
+    assert payload["passed"] is True
+    assert payload["broker_mutation_allowed"] is False
+    assert [scenario["scenario_id"] for scenario in payload["scenarios"]] == list(FAULT_INJECTION_SCENARIOS)
+    for scenario in payload["scenarios"]:
+        assert set(scenario) == {"scenario_id", "timestamp", "verdict", "metadata", "safety_checks"}
+        assert scenario["timestamp"]
+        assert scenario["metadata"]["bug_class"]
+        assert scenario["verdict"]["passed"] is True
+        assert {item["name"] for item in scenario["safety_checks"]} == set(SAFETY_INVARIANTS_CHECKED)
+        assert all(item["passed"] is True for item in scenario["safety_checks"])
+
+
+def test_json_report_writer_rejects_live_repo_output_and_var_paths(tmp_path: Path) -> None:
+    harness_report = run_track_b_fault_injection_harness(artifact_root=tmp_path / "artifacts", now=NOW)
+    repo_root = tmp_path / "repo"
+
+    for rejected in (
+        repo_root / "outputs" / "track_b_execution_core" / "fault_injection_report.json",
+        repo_root / "var" / "fault_injection_report.json",
+    ):
+        with pytest.raises(ValueError, match="Refusing to write fault-injection report"):
+            write_track_b_fault_injection_json_report(
+                harness_report=harness_report,
+                output_path=rejected,
+                repo_root=repo_root,
+                now=NOW,
+            )
+        assert not rejected.exists()
 
 
 def test_stale_runtime_exit_due_blocks_submit_but_allows_exact_risk_reducing_close(tmp_path: Path) -> None:

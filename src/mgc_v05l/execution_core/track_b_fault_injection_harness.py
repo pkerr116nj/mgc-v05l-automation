@@ -58,6 +58,7 @@ FAULT_INJECTION_SCENARIOS: tuple[str, ...] = (
 )
 
 DEFAULT_FAULT_INJECTION_NOW = datetime(2026, 6, 4, 14, 0, tzinfo=UTC)
+FAULT_INJECTION_REPORT_SCHEMA_VERSION = "track_b_fault_injection_report_v1"
 
 SAFETY_INVARIANTS_CHECKED: tuple[str, ...] = (
     "no_live_money_eligibility",
@@ -208,6 +209,25 @@ def run_track_b_fault_injection_scenario(
     except KeyError as exc:
         raise ValueError(f"Unknown Track B fault-injection scenario: {name}") from exc
     return _finalize_scenario(name=name, generated_at=actual_now, payload=payload)
+
+
+def write_track_b_fault_injection_json_report(
+    *,
+    harness_report: Mapping[str, Any],
+    output_path: Path,
+    repo_root: Path | None = None,
+    now: datetime | None = None,
+) -> Path:
+    """Write a deterministic JSON report to an explicit caller-provided path.
+
+    The writer is intentionally not a CLI and has no default output location.
+    It rejects paths under the live repository ``outputs`` or ``var`` roots.
+    """
+
+    resolved_output = _validate_report_output_path(output_path=output_path, repo_root=repo_root)
+    report = _json_report_payload(harness_report=harness_report, generated_at=_ensure_utc(now or DEFAULT_FAULT_INJECTION_NOW))
+    _write_json(resolved_output, report)
+    return resolved_output
 
 
 def _scenario_stale_runtime_with_exit_due_position(artifact_root: Path, now: datetime) -> dict[str, Any]:
@@ -555,6 +575,78 @@ def _finalize_scenario(*, name: str, generated_at: datetime, payload: Mapping[st
         "assertions": assertions,
         "passed": all(item["passed"] for item in assertions),
     }
+
+
+def _json_report_payload(*, harness_report: Mapping[str, Any], generated_at: datetime) -> dict[str, Any]:
+    scenarios = []
+    for raw in harness_report.get("scenarios") or []:
+        if not isinstance(raw, Mapping):
+            continue
+        assertions = [dict(item) for item in raw.get("assertions") or [] if isinstance(item, Mapping)]
+        safety_checks = [
+            dict(item)
+            for item in assertions
+            if str(item.get("name") or "") in set(SAFETY_INVARIANTS_CHECKED)
+        ]
+        scenarios.append(
+            {
+                "scenario_id": raw.get("scenario"),
+                "timestamp": raw.get("generated_at"),
+                "verdict": {
+                    "passed": raw.get("passed") is True,
+                    "submit_authority_classification": _classification(raw.get("submit_authority")),
+                    "broker_exposure_classification": _classification(raw.get("broker_exposure")),
+                    "ownership_classification": _classification(raw.get("ownership")),
+                    "registry_classification": _classification(raw.get("registry")),
+                    "risk_reducing_close_classification": _classification(raw.get("risk_reducing_close_authority")),
+                },
+                "metadata": dict(raw.get("metadata") or {}),
+                "safety_checks": safety_checks,
+            }
+        )
+    return {
+        "schema_version": FAULT_INJECTION_REPORT_SCHEMA_VERSION,
+        "generated_at": generated_at.isoformat(),
+        "source_schema_version": harness_report.get("schema_version"),
+        "read_only": True,
+        "broker_mutation_allowed": False,
+        "scenario_count": len(scenarios),
+        "passed": all(item["verdict"]["passed"] for item in scenarios),
+        "scenarios": scenarios,
+    }
+
+
+def _validate_report_output_path(*, output_path: Path, repo_root: Path | None) -> Path:
+    if output_path is None:
+        raise ValueError("output_path is required.")
+    raw_text = str(output_path).strip()
+    if not raw_text:
+        raise ValueError("output_path is required.")
+    resolved = output_path.expanduser().resolve(strict=False)
+    if resolved.name in {"", ".", ".."}:
+        raise ValueError("output_path must include a JSON filename.")
+    effective_repo_root = (repo_root or Path.cwd()).expanduser().resolve(strict=False)
+    live_roots = (effective_repo_root / "outputs", effective_repo_root / "var")
+    for live_root in live_roots:
+        resolved_live_root = live_root.resolve(strict=False)
+        if resolved == resolved_live_root or _is_relative_to(resolved, resolved_live_root):
+            raise ValueError(f"Refusing to write fault-injection report under live repo path: {resolved_live_root}")
+    return resolved
+
+
+def _is_relative_to(path: Path, parent: Path) -> bool:
+    try:
+        path.relative_to(parent)
+    except ValueError:
+        return False
+    return True
+
+
+def _classification(value: Any) -> str | None:
+    if isinstance(value, Mapping):
+        raw = value.get("classification")
+        return str(raw) if raw not in (None, "") else None
+    return None
 
 
 def _owner_resolution(
