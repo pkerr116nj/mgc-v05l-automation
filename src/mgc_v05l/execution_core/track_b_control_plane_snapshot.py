@@ -113,6 +113,7 @@ DEFAULT_PAPER_AUTONOMOUS_RECOVERY_PLAN_ARTIFACT = (
 CONTROL_PLANE_SNAPSHOT_READY = "CONTROL_PLANE_SNAPSHOT_READY"
 CONTROL_PLANE_SNAPSHOT_BLOCKED = "CONTROL_PLANE_SNAPSHOT_BLOCKED"
 CONTROL_PLANE_SNAPSHOT_STALE_OR_MIXED = "CONTROL_PLANE_SNAPSHOT_STALE_OR_MIXED"
+ARTIFACT_ARCHIVE_PLAN_DEFERRED_HOT_PATH = "ARCHIVE_PLAN_DEFERRED_HOT_PATH"
 
 
 @dataclass(frozen=True)
@@ -131,6 +132,7 @@ class TrackBControlPlaneSnapshotConfig:
     runtime_safe_state_envelope_path: Path = DEFAULT_RUNTIME_SAFE_STATE_ENVELOPE_ARTIFACT
     broker_lease_history_path: Path | None = None
     refresh_proof_readiness_before_snapshot: bool = True
+    refresh_artifact_archive_plan_before_snapshot: bool = False
     proof_required_symbols: tuple[str, ...] | None = None
 
     def resolve(self, path: Path) -> Path:
@@ -260,20 +262,9 @@ def build_track_b_control_plane_snapshot(
         config=recovery_attempt_history_config,
         payload=recovery_attempt_history,
     )
-    artifact_archive_plan_config = TrackBArtifactArchivePlannerConfig(
-        repo_root=config.repo_root,
-        output_path=config.artifact_archive_plan_path,
-        control_plane_snapshot_path=config.output_path,
-        agent_health_path=config.agent_health_path,
-        recovery_attempt_history_path=config.recovery_attempt_history_path,
-    )
-    artifact_archive_plan = build_track_b_artifact_archive_plan(
-        config=artifact_archive_plan_config,
+    artifact_archive_plan, artifact_archive_plan_path = _artifact_archive_plan_for_snapshot(
+        config=config,
         now=actual_now,
-    )
-    artifact_archive_plan_path = write_track_b_artifact_archive_plan(
-        config=artifact_archive_plan_config,
-        payload=artifact_archive_plan,
     )
     payload = _snapshot_payload(
         config=config,
@@ -401,6 +392,91 @@ def _refresh_proof_readiness_for_snapshot(
     payload = build_track_b_paper_proof_readiness(config=proof_config, now=now)
     write_track_b_paper_proof_readiness(config=proof_config, payload=payload)
     return payload
+
+
+def _artifact_archive_plan_for_snapshot(
+    *,
+    config: TrackBControlPlaneSnapshotConfig,
+    now: datetime,
+) -> tuple[Mapping[str, Any], Path]:
+    """Return archive diagnostic metadata without scanning history on the startup path."""
+
+    artifact_archive_plan_config = TrackBArtifactArchivePlannerConfig(
+        repo_root=config.repo_root,
+        output_path=config.artifact_archive_plan_path,
+        control_plane_snapshot_path=config.output_path,
+        agent_health_path=config.agent_health_path,
+        recovery_attempt_history_path=config.recovery_attempt_history_path,
+    )
+    artifact_archive_plan_path = config.resolve(config.artifact_archive_plan_path)
+    if config.refresh_artifact_archive_plan_before_snapshot:
+        payload = build_track_b_artifact_archive_plan(
+            config=artifact_archive_plan_config,
+            now=now,
+        )
+        return (
+            payload,
+            write_track_b_artifact_archive_plan(
+                config=artifact_archive_plan_config,
+                payload=payload,
+            ),
+        )
+    payload = _read_json(artifact_archive_plan_path)
+    if payload:
+        return (
+            {
+                **payload,
+                "consumed_as_compact_latest_diagnostic": True,
+                "historical_scan_deferred_from_control_plane_hot_path": True,
+                "diagnostic_only": True,
+                "not_routing_authority": True,
+            },
+            artifact_archive_plan_path,
+        )
+    return (
+        {
+            "schema_version": "track_b_artifact_archive_plan_v2",
+            "generated_at": now.isoformat(),
+            "mode": "PAPER",
+            "read_only": True,
+            "dry_run_only": True,
+            "execution_enabled": False,
+            "delete_enabled": False,
+            "file_move_enabled": False,
+            "cold_storage_write_enabled": False,
+            "broker_mutation": False,
+            "lifecycle_mutation": False,
+            "runtime_restart_authority": False,
+            "submit_authority": False,
+            "paper_proof_invoked": False,
+            "live_money_eligible": False,
+            "dashboard_projection_consumed": False,
+            "classification": ARTIFACT_ARCHIVE_PLAN_DEFERRED_HOT_PATH,
+            "hot_authority_protected_count": None,
+            "active_lifecycle_protected_count": None,
+            "warm_diagnostic_count": None,
+            "cold_archive_candidate_count": None,
+            "blocked_candidate_count": None,
+            "estimated_bytes": None,
+            "warnings": [
+                {
+                    "code": "historical_artifact_scan_deferred_from_control_plane_hot_path",
+                    "detail": (
+                        "Control Plane startup/readiness uses bounded current-scope authority only; "
+                        "run the artifact archive planner separately for historical cleanup diagnostics."
+                    ),
+                }
+            ],
+            "diagnostic_only": True,
+            "not_routing_authority": True,
+            "consumed_as_compact_latest_diagnostic": False,
+            "historical_scan_deferred_from_control_plane_hot_path": True,
+            "source_artifact_paths": {
+                "archive_plan": str(artifact_archive_plan_path),
+            },
+        },
+        artifact_archive_plan_path,
+    )
 
 
 def write_track_b_control_plane_snapshot(

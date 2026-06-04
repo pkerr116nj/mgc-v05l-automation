@@ -6,6 +6,7 @@ from pathlib import Path
 
 from mgc_v05l.execution_core import track_b_control_plane_snapshot as cp_module
 from mgc_v05l.execution_core.track_b_control_plane_snapshot import (
+    ARTIFACT_ARCHIVE_PLAN_DEFERRED_HOT_PATH,
     CONTROL_PLANE_SNAPSHOT_READY,
     CONTROL_PLANE_SNAPSHOT_STALE_OR_MIXED,
     TrackBControlPlaneSnapshotConfig,
@@ -44,8 +45,8 @@ def test_snapshot_ties_supervisor_to_shared_truth_generation(tmp_path: Path) -> 
     assert payload["quarantine_required"] is False
     assert payload["recovery_attempt_history_no_history"] is True
     assert payload["latest_recovery_attempt_id"] == ""
-    assert payload["artifact_archive_plan_classification"] == "ARCHIVE_PLAN_EMPTY"
-    assert payload["artifact_archive_cold_archive_candidate_count"] == 0
+    assert payload["artifact_archive_plan_classification"] == ARTIFACT_ARCHIVE_PLAN_DEFERRED_HOT_PATH
+    assert payload["artifact_archive_cold_archive_candidate_count"] is None
     assert payload["artifact_archive_dry_run_only"] is True
     assert payload["artifact_archive_execution_enabled"] is False
     assert payload["artifact_archive_diagnostic_only"] is True
@@ -321,26 +322,74 @@ def test_snapshot_surfaces_recovery_attempt_history(tmp_path: Path) -> None:
     )
 
 
-def test_snapshot_surfaces_blocked_artifact_archive_plan(tmp_path: Path) -> None:
+def test_snapshot_uses_compact_latest_artifact_archive_plan_without_rebuilding(monkeypatch, tmp_path: Path) -> None:
     _seed_clean_stack(tmp_path)
     _seed_control_plane(tmp_path)
-
-    lifecycle = (
-        tmp_path
-        / "outputs/track_b_execution_core/track_b_strategy_managed_paper_lifecycle/lifecycle-1/"
-        / "track_b_strategy_managed_paper_lifecycle_report.json"
+    _write(
+        tmp_path / "outputs/track_b_execution_core/artifact_retention/latest_artifact_archive_plan.json",
+        {
+            "schema_version": "track_b_artifact_archive_plan_v2",
+            "generated_at": NOW.isoformat(),
+            "classification": "ARCHIVE_PLAN_BLOCKED_UNRESOLVED_LIFECYCLE",
+            "dry_run_only": True,
+            "execution_enabled": False,
+            "active_lifecycle_protected_count": 1,
+            "cold_archive_candidate_count": 3,
+        },
     )
-    _write(lifecycle, {"final_position_status": "OPEN_MANAGED"})
+
+    def fail_full_archive_scan(**_kwargs):
+        raise AssertionError("Control Plane hot path must not rebuild historical archive scans")
+
+    monkeypatch.setattr(cp_module, "build_track_b_artifact_archive_plan", fail_full_archive_scan)
 
     payload = _snapshot(tmp_path)
 
     assert payload["artifact_archive_plan_classification"] == "ARCHIVE_PLAN_BLOCKED_UNRESOLVED_LIFECYCLE"
     assert payload["artifact_archive_active_lifecycle_protected_count"] == 1
+    assert payload["artifact_archive_cold_archive_candidate_count"] == 3
     assert payload["artifact_archive_dry_run_only"] is True
     assert payload["artifact_archive_execution_enabled"] is False
+    assert payload["artifact_archive_diagnostic_only"] is True
+    assert payload["artifact_archive_not_routing_authority"] is True
     assert payload["source_artifact_paths"]["artifact_archive_plan"].endswith(
         "outputs/track_b_execution_core/artifact_retention/latest_artifact_archive_plan.json"
     )
+
+
+def test_snapshot_can_opt_into_full_artifact_archive_plan_refresh(monkeypatch, tmp_path: Path) -> None:
+    _seed_clean_stack(tmp_path)
+    _seed_control_plane(tmp_path)
+    calls = []
+
+    def fake_full_archive_scan(**kwargs):
+        calls.append(kwargs["config"])
+        return {
+            "schema_version": "track_b_artifact_archive_plan_v2",
+            "generated_at": NOW.isoformat(),
+            "classification": "ARCHIVE_PLAN_EMPTY",
+            "dry_run_only": True,
+            "execution_enabled": False,
+            "cold_archive_candidate_count": 0,
+        }
+
+    monkeypatch.setattr(cp_module, "build_track_b_artifact_archive_plan", fake_full_archive_scan)
+
+    payload = build_track_b_control_plane_snapshot(
+        config=TrackBControlPlaneSnapshotConfig(
+            repo_root=tmp_path,
+            refresh_proof_readiness_before_snapshot=False,
+            refresh_artifact_archive_plan_before_snapshot=True,
+        ),
+        now=NOW,
+        process_rows=[],
+        process_root_resolver=lambda _pid: None,
+        source_commit_resolver=lambda _root: "test-head",
+    )
+
+    assert calls
+    assert payload["artifact_archive_plan_classification"] == "ARCHIVE_PLAN_EMPTY"
+    assert payload["artifact_archive_cold_archive_candidate_count"] == 0
 
 
 def test_snapshot_surfaces_continuation_aware_exit_preview_as_diagnostic_only(tmp_path: Path) -> None:
