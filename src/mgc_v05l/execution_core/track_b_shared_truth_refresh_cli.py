@@ -250,6 +250,15 @@ def refresh_track_b_shared_truth(
         repo_root=config.repo_root,
         now=actual_now,
     )
+    open_order_truth = _read_json(open_order_path) or open_order_truth
+    managed_order_registry = _read_json(managed_order_path) or managed_order_registry
+    position_truth = _read_json(position_path) or position_truth
+    runtime_environment_truth = _read_json(runtime_path) or runtime_environment_truth
+    managed_position_registry = _read_json(managed_position_path) or managed_position_registry
+    broker_position_guardian = _read_json(broker_position_guardian_path) or broker_position_guardian
+    broker_lease = _read_json(config.resolve(config.broker_lease_path)) or broker_lease
+    paper_recovery_policy = _read_json(paper_recovery_policy_path) or paper_recovery_policy
+    autonomous_recovery_plan = _read_json(autonomous_recovery_plan_path) or autonomous_recovery_plan
     services = [
         _service_row("Open Order Truth", open_order_truth, open_order_path),
         _service_row("Managed Order Registry", managed_order_registry, managed_order_path),

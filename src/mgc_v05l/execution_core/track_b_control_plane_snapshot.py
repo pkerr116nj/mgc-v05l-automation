@@ -49,6 +49,11 @@ from mgc_v05l.execution_core.track_b_paper_proof_readiness import (
     build_track_b_paper_proof_readiness,
     write_track_b_paper_proof_readiness,
 )
+from mgc_v05l.execution_core.track_b_order_adjustment_planner import (
+    TrackBOrderAdjustmentPlannerConfig,
+    build_track_b_order_adjustment_plan,
+    write_track_b_order_adjustment_plan,
+)
 from mgc_v05l.execution_core.track_b_recovery_attempt_history import (
     DEFAULT_RECOVERY_ATTEMPT_HISTORY_ARTIFACT,
     TrackBRecoveryAttemptHistoryConfig,
@@ -140,12 +145,8 @@ def build_track_b_control_plane_snapshot(
     actual_now = _ensure_utc(now or datetime.now(UTC))
     if config.refresh_proof_readiness_before_snapshot:
         _refresh_proof_readiness_for_snapshot(config=config, now=actual_now)
-    shared_truth = refresh_track_b_shared_truth(
-        config=TrackBSharedTruthRefreshConfig(
-            repo_root=config.repo_root,
-            shared_truth_refresh_path=config.shared_truth_refresh_path,
-            broker_lease_history_path=config.broker_lease_history_path,
-        ),
+    shared_truth = _refresh_shared_truth_for_snapshot(
+        config=config,
         now=actual_now,
         pid_running=pid_running,
         process_root_resolver=process_root_resolver,
@@ -181,6 +182,15 @@ def build_track_b_control_plane_snapshot(
     self_recover = build_track_b_self_recover_rules(config=self_recover_config, now=actual_now)
     write_track_b_self_recover_rules(config=self_recover_config, payload=self_recover)
 
+    if post_shared_truth_refresh_hook is None:
+        shared_truth = _converge_shared_truth_for_snapshot(
+            config=config,
+            now=actual_now,
+            pid_running=pid_running,
+            process_root_resolver=process_root_resolver,
+            source_commit_resolver=source_commit_resolver,
+        )
+
     supervisor_config = TrackBRuntimeSupervisorAuthorityConfig(
         repo_root=config.repo_root,
         dashboard_projection_path=None,
@@ -197,6 +207,25 @@ def build_track_b_control_plane_snapshot(
         config=supervisor_config,
         payload=runtime_supervisor,
     )
+    if (
+        post_shared_truth_refresh_hook is None
+        and runtime_supervisor.get("shared_truth_coherence_status") != SHARED_TRUTH_COHERENT
+    ):
+        shared_truth = _converge_shared_truth_for_snapshot(
+            config=config,
+            now=actual_now,
+            pid_running=pid_running,
+            process_root_resolver=process_root_resolver,
+            source_commit_resolver=source_commit_resolver,
+        )
+        runtime_supervisor = build_track_b_runtime_supervisor_authority(
+            config=supervisor_config,
+            now=actual_now,
+        )
+        runtime_supervisor_path = write_track_b_runtime_supervisor_authority(
+            config=supervisor_config,
+            payload=runtime_supervisor,
+        )
     autonomous_recovery_plan = _read_json(config.resolve(config.paper_autonomous_recovery_plan_path))
     continuation_aware_exit_preview = _read_json(config.resolve(config.continuation_aware_exit_preview_path))
     continuation_aware_exit_history_config = TrackBContinuationAwareExitHistoryConfig(
@@ -275,6 +304,80 @@ def build_track_b_control_plane_snapshot(
     _apply_safe_state_to_snapshot(payload=payload, safe_state=safe_state)
     payload["source_artifact_paths"]["runtime_safe_state_envelope"] = str(safe_state_path)
     payload.update(build_track_b_control_plane_top_line(payload))
+    return payload
+
+
+def _refresh_shared_truth_for_snapshot(
+    *,
+    config: TrackBControlPlaneSnapshotConfig,
+    now: datetime,
+    pid_running: Callable[[int], bool] | None,
+    process_root_resolver: Callable[[int], Path | None] | None,
+    source_commit_resolver: Callable[[Path], str | None] | None,
+) -> dict[str, Any]:
+    return refresh_track_b_shared_truth(
+        config=TrackBSharedTruthRefreshConfig(
+            repo_root=config.repo_root,
+            shared_truth_refresh_path=config.shared_truth_refresh_path,
+            broker_lease_history_path=config.broker_lease_history_path,
+        ),
+        now=now,
+        pid_running=pid_running,
+        process_root_resolver=process_root_resolver,
+        source_commit_resolver=source_commit_resolver,
+    )
+
+
+def _converge_shared_truth_for_snapshot(
+    *,
+    config: TrackBControlPlaneSnapshotConfig,
+    now: datetime,
+    pid_running: Callable[[int], bool] | None,
+    process_root_resolver: Callable[[int], Path | None] | None,
+    source_commit_resolver: Callable[[Path], str | None] | None,
+) -> dict[str, Any]:
+    """Refresh the authority generation after local producers finish writing.
+
+    Control Plane builds several read-only authority artifacts before Runtime
+    Supervisor checks shared-truth coherence. Some of those producers rebuild
+    lower-level current-scope artifacts. This bounded convergence pass makes the
+    Supervisor compare against the final shared-truth generation, and it also
+    refreshes the dry-run order-adjustment plan so a stale suspicious plan cannot
+    outlive a broker-flat/no-open-order shared truth state.
+    """
+
+    shared_truth = _refresh_shared_truth_for_snapshot(
+        config=config,
+        now=now,
+        pid_running=pid_running,
+        process_root_resolver=process_root_resolver,
+        source_commit_resolver=source_commit_resolver,
+    )
+    _refresh_order_adjustment_plan_for_snapshot(config=config, now=now, shared_truth=shared_truth)
+    shared_truth = _refresh_shared_truth_for_snapshot(
+        config=config,
+        now=now,
+        pid_running=pid_running,
+        process_root_resolver=process_root_resolver,
+        source_commit_resolver=source_commit_resolver,
+    )
+    _refresh_order_adjustment_plan_for_snapshot(config=config, now=now, shared_truth=shared_truth)
+    return shared_truth
+
+
+def _refresh_order_adjustment_plan_for_snapshot(
+    *,
+    config: TrackBControlPlaneSnapshotConfig,
+    now: datetime,
+    shared_truth: Mapping[str, Any],
+) -> Mapping[str, Any]:
+    planner_config = TrackBOrderAdjustmentPlannerConfig(repo_root=config.repo_root)
+    payload = build_track_b_order_adjustment_plan(
+        config=planner_config,
+        now=now,
+        shared_truth_refresh=shared_truth,
+    )
+    write_track_b_order_adjustment_plan(config=planner_config, payload=payload)
     return payload
 
 

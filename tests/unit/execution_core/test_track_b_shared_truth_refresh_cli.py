@@ -4,6 +4,7 @@ import json
 from datetime import UTC, datetime
 from pathlib import Path
 
+from mgc_v05l.execution_core import track_b_shared_truth_refresh_cli as shared_truth_module
 from mgc_v05l.execution_core.track_b_shared_truth_refresh_cli import (
     DEFAULT_RECONCILIATION_ARTIFACT,
     TrackBSharedTruthRefreshConfig,
@@ -79,6 +80,28 @@ def test_refresh_replaces_stale_upstream_authority_artifact(tmp_path: Path) -> N
     assert result["exit_code"] == 0
     assert refreshed["classification"] == "NO_OPEN_ORDERS"
     assert refreshed["generated_at"] == NOW.isoformat()
+
+
+def test_refresh_service_rows_match_written_authority_files(monkeypatch, tmp_path: Path) -> None:
+    _seed_clean_stack(tmp_path)
+    original_write = shared_truth_module.write_track_b_open_order_truth
+
+    def skew_open_order_generated_at(**kwargs):
+        path, events = original_write(**kwargs)
+        payload = _read(path)
+        payload["generated_at"] = OLD
+        _write(path, payload)
+        return path, events
+
+    monkeypatch.setattr(shared_truth_module, "write_track_b_open_order_truth", skew_open_order_generated_at)
+
+    result = _refresh(tmp_path)
+    row = next(row for row in result["services"] if row["service"] == "Open Order Truth")
+    disk = _read(tmp_path / "outputs/track_b_execution_core/open_order_truth/latest_open_order_truth.json")
+
+    assert row["classification"] == "NO_OPEN_ORDERS"
+    assert row["generated_at"] == disk["generated_at"] == OLD
+    assert result["classifications"]["Open Order Truth"] == disk["classification"]
 
 
 def test_refresh_replaces_stale_autonomous_recovery_plan(tmp_path: Path) -> None:

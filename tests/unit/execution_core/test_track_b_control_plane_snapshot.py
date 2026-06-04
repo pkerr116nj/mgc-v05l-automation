@@ -180,6 +180,31 @@ def test_stale_mixed_generation_blocks_snapshot(tmp_path: Path) -> None:
     assert any(source["service"] == "Open Order Truth" for source in payload["stale_or_mixed_sources"])
 
 
+def test_snapshot_converges_stale_order_adjustment_after_clean_shared_truth(tmp_path: Path) -> None:
+    _seed_clean_stack(tmp_path)
+    _seed_control_plane(tmp_path)
+    stale_plan_path = tmp_path / "outputs/track_b_execution_core/managed_orders/latest_order_adjustment_plan.json"
+    _write(
+        stale_plan_path,
+        {
+            "generated_at": "2026-05-23T11:55:00+00:00",
+            "classification": "REVIEW_REQUIRED_SUSPICIOUS_STATE",
+            "plans": [{"classification": "REVIEW_REQUIRED_SUSPICIOUS_STATE"}],
+            "summary": {"classification": "REVIEW_REQUIRED_SUSPICIOUS_STATE", "plan_count": 1},
+            "live_money_eligible": False,
+        },
+    )
+
+    payload = _snapshot(tmp_path)
+    refreshed_plan = json.loads(stale_plan_path.read_text(encoding="utf-8"))
+
+    assert payload["classification"] == CONTROL_PLANE_SNAPSHOT_READY
+    assert payload["shared_truth_coherence_status"] == "COHERENT"
+    assert payload["runtime_supervisor_classification"] == "SUPERVISOR_RUNTIME_START_ALLOWED"
+    assert refreshed_plan["classification"] == "NO_ACTION_NEEDED"
+    assert refreshed_plan["summary"]["plan_count"] == 0
+
+
 def test_snapshot_includes_recovery_and_planner_fields(tmp_path: Path) -> None:
     _seed_clean_stack(tmp_path)
     _seed_control_plane(tmp_path)
