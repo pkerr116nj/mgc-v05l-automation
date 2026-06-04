@@ -83,6 +83,17 @@ def test_paper_stack_start_enables_recovery_service_unless_operator_opts_out() -
     assert "WARNING_RECOVERY_SERVICE_ENABLE_FAILED" in source
 
 
+def test_recovery_tick_does_not_treat_absent_runtime_with_broker_exposure_as_running() -> None:
+    source = RECOVERY_SCRIPT.read_text(encoding="utf-8")
+
+    assert "live_runtime_environment.classification" in source
+    assert "live_runtime_environment.runtime.pid_alive" in source
+    assert '"${live_runtime_classification}" == "RUNTIME_DOWN_WITH_BROKER_EXPOSURE"' in source
+    assert '"${live_runtime_pid_alive}" == "false"' in source
+    runtime_running_block = source.split('if [[ "${runtime_running}" == "true" ]]; then', 1)[0]
+    assert "NO_ACTION_RUNTIME_RUNNING" not in runtime_running_block
+
+
 def test_paper_stack_start_has_session_coverage_active_evidence_profile() -> None:
     source = START_SCRIPT.read_text(encoding="utf-8")
 

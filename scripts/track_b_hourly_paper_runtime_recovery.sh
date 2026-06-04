@@ -197,6 +197,8 @@ case "${mode}" in
     trap 'rm -f "${status_tmp}"' EXIT
     bash "${STATUS_SCRIPT}" --json > "${status_tmp}"
     runtime_running="$(json_value "${status_tmp}" runtime.running)"
+    live_runtime_classification="$(json_value "${status_tmp}" live_runtime_environment.classification)"
+    live_runtime_pid_alive="$(json_value "${status_tmp}" live_runtime_environment.runtime.pid_alive)"
     ready_submit_capable="$(json_value "${status_tmp}" readiness.ready_submit_capable)"
     restart_allowed="$(json_value "${status_tmp}" readiness.restart_allowed_if_runtime_down)"
     next_action="$(json_value "${status_tmp}" next_action)"
@@ -205,6 +207,12 @@ case "${mode}" in
       write_tick_artifact "NO_ACTION_DUPLICATE_WRITER" "duplicate_writer_detected" "Duplicate writer guard blocks recovery start." "${status_tmp}"
       echo "Track B recovery tick: duplicate writer detected; no action."
       exit 0
+    fi
+    if [[ "${runtime_running}" == "true" && "${live_runtime_classification}" == "RUNTIME_DOWN_WITH_BROKER_EXPOSURE" ]]; then
+      runtime_running="false"
+    fi
+    if [[ "${runtime_running}" == "true" && "${live_runtime_pid_alive}" == "false" ]]; then
+      runtime_running="false"
     fi
     if [[ "${runtime_running}" == "true" ]]; then
       write_tick_artifact "NO_ACTION_RUNTIME_RUNNING" "" "Runtime is healthy/running; recovery did not start anything." "${status_tmp}"

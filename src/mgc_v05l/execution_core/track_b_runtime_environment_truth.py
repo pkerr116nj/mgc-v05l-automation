@@ -15,6 +15,7 @@ from pathlib import Path
 from typing import Any, Callable, Mapping
 
 from mgc_v05l.execution_core.track_b_atomic_io import write_json_atomic
+from mgc_v05l.execution_core.track_b_fresh_truth_contract import build_authority_freshness_metadata
 from mgc_v05l.execution_core.track_b_projection_metadata import build_projection_metadata
 
 
@@ -144,6 +145,13 @@ def build_track_b_runtime_environment_truth(
     payload = {
         "schema_version": "track_b_runtime_environment_truth_v1",
         "generated_at": actual_now.isoformat(),
+        **build_authority_freshness_metadata(
+            generated_at=actual_now,
+            observed_at=actual_now,
+            source_pid=os.getpid(),
+            ttl_seconds=180.0,
+            authority_scope="runtime_environment_truth",
+        ),
         "mode": "PAPER",
         "read_only": True,
         "submit_authority": False,

@@ -426,6 +426,71 @@ def test_duplicate_writer_blocks_snapshot_start_posture(tmp_path: Path) -> None:
     assert payload["safe_to_start_runtime"] is False
 
 
+def test_owned_exit_due_exposure_tolerates_runtime_down_agent_health_for_start(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    _seed_clean_stack(tmp_path)
+    _seed_control_plane(tmp_path)
+
+    def fake_agent_health(**_kwargs):
+        return {
+            "schema_version": "track_b_agent_health_v2",
+            "classification": "AGENT_HEALTH_BLOCKING",
+            "summary": {
+                "agent_count": 1,
+                "blocking_for_proof_count": 1,
+                "blocking_for_runtime_submit_count": 1,
+                "blocking_for_recovery_count": 0,
+                "duplicate_process_count": 0,
+            },
+            "agents": [
+                {
+                    "agent_id": "track_b_paper_runtime",
+                    "display_name": "Track B PAPER runtime",
+                    "status": "STOPPED_UNEXPECTED",
+                    "reason": "RUNTIME_DOWN_WITH_BROKER_EXPOSURE",
+                    "blocking_for_proof": True,
+                    "blocking_for_runtime_submit": True,
+                    "blocking_for_recovery": False,
+                    "diagnostic_only": False,
+                }
+            ],
+        }
+
+    def fake_supervisor(**_kwargs):
+        return {
+            "generated_at": NOW.isoformat(),
+            "classification": "SUPERVISOR_RUNTIME_START_ALLOWED",
+            "supervisor_mode": "READY_FOR_OPERATOR_START",
+            "proof_window_status": "ready",
+            "safe_to_start_runtime": True,
+            "shared_truth_refresh_generation_id": "track-b-shared-truth-20260523T120000000000Z",
+            "shared_truth_coherence_status": "COHERENT",
+            "live_money_eligible": False,
+            "evidence_summary": {
+                "pre_restart_exposure_resolution_classification": "MANAGED_EXPOSURE_RESOLVED",
+                "restart_with_owned_exposure_allowed": True,
+            },
+        }
+
+    monkeypatch.setattr(cp_module, "build_track_b_agent_health", fake_agent_health)
+    monkeypatch.setattr(cp_module, "build_track_b_runtime_supervisor_authority", fake_supervisor)
+
+    payload = _snapshot(tmp_path)
+
+    assert payload["classification"] == CONTROL_PLANE_SNAPSHOT_READY
+    assert payload["safe_to_start_runtime"] is True
+    assert payload["agent_health_blocks_runtime_submit"] is True
+    assert payload["runtime_authority_exposure_classification"] == "RUNTIME_AUTHORITY_STALE_WITH_BROKER_EXPOSURE"
+    assert payload["fresh_broker_exposure_visible_when_runtime_stale"] is True
+    assert payload["runtime_authority_stale_submit_blocked"] is True
+    assert payload["runtime_authority_stale_maintenance_needed"] is True
+    assert payload["runtime_supervisor_classification"] == "SUPERVISOR_RUNTIME_START_ALLOWED"
+    assert not any(blocker["code"] == "agent_health_blocks_runtime_submit" for blocker in payload["blockers"])
+    assert payload["top_line_classification"] == "READY_FOR_OPERATOR_START"
+
+
 def test_safe_state_broker_mutation_limit_blocks_snapshot_status(tmp_path: Path) -> None:
     _seed_clean_stack(tmp_path)
     _seed_control_plane(tmp_path)

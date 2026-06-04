@@ -17,6 +17,7 @@ from mgc_v05l.execution_core.track_b_current_exposure_owner_resolver import (
     apply_current_exposure_owner_lifecycle_overlay,
     resolve_current_exposure_ownership,
 )
+from mgc_v05l.execution_core.track_b_fresh_truth_contract import EXPIRED_DIAGNOSTIC_ONLY
 
 
 NOW = datetime(2026, 6, 3, 2, 49, tzinfo=UTC)
@@ -47,6 +48,7 @@ def test_current_mnq_regression_new_exact_owner_beats_stale_submit_owner(tmp_pat
     assert payload["classification"] == OWNED_MANAGED_EXIT_DUE
     assert payload["owned_exposures"][0]["trade_id"] == "trade_4636ee35-f089-47dd-be5b-dae468ee3228"
     assert payload["owned_exposures"][0]["exit_due"] is True
+    assert payload["stale_superseded_full_audit_only"][0]["classification"] == EXPIRED_DIAGNOSTIC_ONLY
     assert payload["stale_superseded_full_audit_only"][0]["trade_id"] == "trade_submit_owner_mnq_globex_short"
 
 
@@ -73,6 +75,44 @@ def test_two_equally_plausible_current_owners_fail_closed(tmp_path: Path) -> Non
 
     assert payload["classification"] == AMBIGUOUS_EXPOSURE_OWNERSHIP
     assert payload["review_required_exposures"][0]["matching_trade_ids"] == ["trade_one", "trade_two"]
+
+
+def test_stale_owner_candidate_does_not_create_ambiguity_against_fresh_exact_owner(tmp_path: Path) -> None:
+    stale = _registry_record(
+        trade_id="trade_stale_same_contract",
+        lifecycle_id="life_stale_same_contract",
+        generated_at=NOW - timedelta(hours=3),
+        exit_due=True,
+    )
+    current = _registry_record(
+        trade_id="trade_fresh_same_contract",
+        lifecycle_id="life_fresh_same_contract",
+        generated_at=NOW,
+        exit_due=True,
+    )
+
+    payload = resolve_current_exposure_ownership(
+        config=CurrentExposureOwnerResolverConfig(repo_root=tmp_path),
+        broker_positions=[_broker_position(quantity="-1")],
+        registry_records=[stale, current],
+        lifecycle_positions=[
+            {
+                "trade_id": "trade_stale_same_contract",
+                "lifecycle_id": "life_stale_same_contract",
+                "account_id": "DUM882026",
+                "local_symbol": "MNQM6",
+                "con_id": 770561201,
+                "aggregate_qty": "-1",
+                "quantity": "1",
+                "side": "SHORT",
+            }
+        ],
+    )
+
+    assert payload["classification"] == OWNED_MANAGED_EXIT_DUE
+    assert payload["owned_exposures"][0]["trade_id"] == "trade_fresh_same_contract"
+    assert not payload["review_required_exposures"]
+    assert payload["stale_superseded_full_audit_only"][0]["classification"] == EXPIRED_DIAGNOSTIC_ONLY
 
 
 def test_broker_flat_with_stale_open_rows_reports_no_open_exposure(tmp_path: Path) -> None:

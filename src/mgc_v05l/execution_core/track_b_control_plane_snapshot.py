@@ -42,6 +42,9 @@ from mgc_v05l.execution_core.track_b_continuation_aware_exit_history import (
     build_continuation_aware_exit_history,
     write_continuation_aware_exit_history,
 )
+from mgc_v05l.execution_core.track_b_fresh_truth_contract import (
+    RUNTIME_AUTHORITY_STALE_WITH_BROKER_EXPOSURE,
+)
 from mgc_v05l.execution_core.track_b_projection_metadata import build_projection_metadata
 from mgc_v05l.execution_core.track_b_paper_proof_readiness import (
     DEFAULT_OUTPUT_PATH as DEFAULT_PROOF_READINESS_ARTIFACT,
@@ -571,11 +574,20 @@ def _snapshot_payload(
     )
     evidence = _mapping(runtime_supervisor.get("evidence_summary"))
     agent_health_evidence = _agent_health_evidence(agent_health)
+    runtime_authority_exposure = _runtime_authority_exposure_fields(
+        runtime_supervisor=runtime_supervisor,
+        agent_health_evidence=agent_health_evidence,
+    )
+    agent_health_runtime_submit_start_tolerated = _agent_health_runtime_submit_start_tolerated(
+        runtime_supervisor=runtime_supervisor,
+        agent_health_evidence=agent_health_evidence,
+    )
     classification = _snapshot_classification(
         coherence_status=coherence_status,
         generation_matches=generation_matches,
         supervisor_classification=str(runtime_supervisor.get("classification") or ""),
         agent_health_evidence=agent_health_evidence,
+        agent_health_runtime_submit_start_tolerated=agent_health_runtime_submit_start_tolerated,
     )
     blockers = _snapshot_blockers(
         shared_truth=shared_truth,
@@ -583,6 +595,7 @@ def _snapshot_payload(
         agent_health_evidence=agent_health_evidence,
         coherence_status=coherence_status,
         generation_matches=generation_matches,
+        agent_health_runtime_submit_start_tolerated=agent_health_runtime_submit_start_tolerated,
     )
     warnings = list(shared_truth.get("warnings") or []) + list(runtime_supervisor.get("warnings") or [])
     warnings.extend(_agent_health_warnings(agent_health_evidence))
@@ -621,10 +634,14 @@ def _snapshot_payload(
         "safe_to_start_runtime": runtime_supervisor.get("safe_to_start_runtime") is True
         and classification == CONTROL_PLANE_SNAPSHOT_READY
         and agent_health_evidence.get("agent_health_has_duplicate_writer") is not True
-        and agent_health_evidence.get("agent_health_blocks_runtime_submit") is not True,
+        and (
+            agent_health_evidence.get("agent_health_blocks_runtime_submit") is not True
+            or agent_health_runtime_submit_start_tolerated
+        ),
         "paper_recovery_policy": evidence.get("paper_action_policy") or shared_truth.get("paper_recovery_policy"),
         **planner_explanation,
         **agent_health_evidence,
+        **runtime_authority_exposure,
         "autonomous_recovery_plan_classification": runtime_supervisor.get(
             "autonomous_recovery_plan_classification"
         ),
@@ -663,16 +680,24 @@ def _snapshot_classification(
     generation_matches: bool,
     supervisor_classification: str,
     agent_health_evidence: Mapping[str, Any],
+    agent_health_runtime_submit_start_tolerated: bool = False,
 ) -> str:
     if coherence_status != SHARED_TRUTH_COHERENT or not generation_matches:
         return CONTROL_PLANE_SNAPSHOT_STALE_OR_MIXED
     if (
         agent_health_evidence.get("agent_health_has_duplicate_writer") is True
-        or agent_health_evidence.get("agent_health_blocks_runtime_submit") is True
+        or (
+            agent_health_evidence.get("agent_health_blocks_runtime_submit") is True
+            and not agent_health_runtime_submit_start_tolerated
+        )
         or agent_health_evidence.get("agent_health_blocks_recovery") is True
     ):
         return CONTROL_PLANE_SNAPSHOT_BLOCKED
-    if supervisor_classification in {"SUPERVISOR_RUNTIME_START_ALLOWED", "SUPERVISOR_WAIT_MARKET_CLOSED"}:
+    if supervisor_classification in {
+        "SUPERVISOR_RUNTIME_START_ALLOWED",
+        "SUPERVISOR_RUNTIME_ALREADY_HEALTHY",
+        "SUPERVISOR_WAIT_MARKET_CLOSED",
+    }:
         return CONTROL_PLANE_SNAPSHOT_READY
     return CONTROL_PLANE_SNAPSHOT_BLOCKED
 
@@ -879,6 +904,7 @@ def _snapshot_blockers(
     agent_health_evidence: Mapping[str, Any],
     coherence_status: str,
     generation_matches: bool,
+    agent_health_runtime_submit_start_tolerated: bool = False,
 ) -> list[dict[str, str]]:
     blockers: list[dict[str, str]] = []
     if coherence_status != SHARED_TRUTH_COHERENT:
@@ -908,7 +934,10 @@ def _snapshot_blockers(
                 "detail": "Agent Health v2 reports duplicate Track B PAPER runtime writer evidence.",
             }
         )
-    if agent_health_evidence.get("agent_health_blocks_runtime_submit") is True:
+    if (
+        agent_health_evidence.get("agent_health_blocks_runtime_submit") is True
+        and not agent_health_runtime_submit_start_tolerated
+    ):
         blockers.append(
             {
                 "code": "agent_health_blocks_runtime_submit",
@@ -923,6 +952,71 @@ def _snapshot_blockers(
             }
         )
     return blockers
+
+
+def _agent_health_runtime_submit_start_tolerated(
+    *,
+    runtime_supervisor: Mapping[str, Any],
+    agent_health_evidence: Mapping[str, Any],
+) -> bool:
+    """Allow start-only recovery when the supervisor proves owned managed exposure.
+
+    Agent Health reports a stopped runtime with broker exposure as submit-blocking.
+    That remains true for new entries, but it must not veto a supervised runtime
+    start when the pre-restart resolver has proven the exposure is exact,
+    registry-backed, and restartable so managed-close maintenance can resume.
+    """
+
+    if runtime_supervisor.get("safe_to_start_runtime") is not True:
+        return False
+    if agent_health_evidence.get("agent_health_has_duplicate_writer") is True:
+        return False
+    if agent_health_evidence.get("agent_health_blocks_recovery") is True:
+        return False
+    if agent_health_evidence.get("agent_health_blocks_runtime_submit") is not True:
+        return False
+    evidence = _mapping(runtime_supervisor.get("evidence_summary"))
+    if evidence.get("restart_with_owned_exposure_allowed") is not True:
+        return False
+    if str(evidence.get("pre_restart_exposure_resolution_classification") or "") != "MANAGED_EXPOSURE_RESOLVED":
+        return False
+    blockers = _list(agent_health_evidence.get("agent_health_top_blockers"))
+    if not blockers:
+        return False
+    for blocker in blockers:
+        row = _mapping(blocker)
+        if row.get("blocking_for_runtime_submit") is not True:
+            continue
+        if str(row.get("reason") or "") != "RUNTIME_DOWN_WITH_BROKER_EXPOSURE":
+            return False
+    return True
+
+
+def _runtime_authority_exposure_fields(
+    *,
+    runtime_supervisor: Mapping[str, Any],
+    agent_health_evidence: Mapping[str, Any],
+) -> dict[str, Any]:
+    evidence = _mapping(runtime_supervisor.get("evidence_summary"))
+    runtime_classification = str(evidence.get("runtime_environment_truth_classification") or "")
+    agent_reports_runtime_down_exposure = any(
+        str(_mapping(blocker).get("reason") or "") == "RUNTIME_DOWN_WITH_BROKER_EXPOSURE"
+        for blocker in _list(agent_health_evidence.get("agent_health_top_blockers"))
+    )
+    stale_runtime_with_exposure = (
+        runtime_classification == "RUNTIME_DOWN_WITH_BROKER_EXPOSURE" or agent_reports_runtime_down_exposure
+    )
+    return {
+        "runtime_authority_exposure_classification": (
+            RUNTIME_AUTHORITY_STALE_WITH_BROKER_EXPOSURE if stale_runtime_with_exposure else ""
+        ),
+        "runtime_authority_stale_with_broker_exposure": stale_runtime_with_exposure,
+        "fresh_broker_exposure_visible_when_runtime_stale": stale_runtime_with_exposure,
+        "runtime_authority_stale_submit_blocked": stale_runtime_with_exposure,
+        "runtime_authority_stale_maintenance_needed": (
+            stale_runtime_with_exposure and evidence.get("restart_with_owned_exposure_allowed") is True
+        ),
+    }
 
 
 def _broker_order_position_summary(

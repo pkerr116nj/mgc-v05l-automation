@@ -20,6 +20,10 @@ from mgc_v05l.execution_core.track_b_broker_position_identity import (
     canonicalize_broker_position_identity,
 )
 from mgc_v05l.execution_core.track_b_central_trade_registry import TradeCurrentState, TradeRegistryRecord
+from mgc_v05l.execution_core.track_b_fresh_truth_contract import (
+    EXPIRED_DIAGNOSTIC_ONLY,
+    expire_superseded_same_scope_candidates,
+)
 from mgc_v05l.execution_core.track_b_live_trade_registry import load_live_trade_registry_records
 from mgc_v05l.execution_core.track_b_terminal_registry_truth import (
     filter_terminal_superseded_current_rows,
@@ -145,6 +149,8 @@ def resolve_current_exposure_ownership(
 
         lifecycle_match = _matching_lifecycle_position(broker_position, lifecycle_rows)
         registry_matches = _registry_matches_for_broker_position(active_records, broker_position)
+        registry_matches, expired_registry_matches = _expire_superseded_registry_owner_candidates(registry_matches)
+        stale.extend(expired_registry_matches)
         lifecycle_report_owner = _select_broker_backed_lifecycle_report_owner(
             records=records,
             broker_position=broker_position,
@@ -166,6 +172,7 @@ def resolve_current_exposure_ownership(
         if lifecycle_report_owner.get("record") is not None:
             owner_record = lifecycle_report_owner["record"]
             lifecycle_row = lifecycle_report_owner["lifecycle_position"]
+            stale.extend(list(lifecycle_report_owner.get("expired_diagnostic_only") or []))
             stale.extend(_stale_record_rows(tuple(record for record in registry_matches if record.trade_id != owner_record.trade_id)))
             exit_due = _owner_exit_due(
                 record=owner_record,
@@ -549,6 +556,14 @@ def _select_broker_backed_lifecycle_report_owner(
 
     if not candidates:
         return {}
+    candidates, expired_candidates = expire_superseded_same_scope_candidates(
+        candidates,
+        scope_key=lambda item: _record_scope_key(item["record"]),
+        observed_at=lambda item: item.get("fill_time"),
+        stale_reason="OLDER_EXACT_LIFECYCLE_REPORT_OWNER_EXPIRED_BEFORE_AMBIGUITY",
+    )
+    if expired_candidates and not candidates:
+        return {}
     ranked = sorted(
         candidates,
         key=lambda item: item.get("fill_time") or datetime.min.replace(tzinfo=timezone.utc),
@@ -578,6 +593,7 @@ def _select_broker_backed_lifecycle_report_owner(
             "NEWEST_EXACT_BROKER_BACKED_LIFECYCLE_REPORT_SELECTED",
             "OLDER_MATCHING_OPEN_CHAINS_SCOPED_FULL_AUDIT_ONLY",
         ],
+        "expired_diagnostic_only": expired_candidates,
     }
 
 
@@ -627,6 +643,45 @@ def _registry_matches_for_broker_position(
         and int(record.ownership_identity.con_id) == int(broker_position.get("con_id") or 0)
         and _signed_owner_qty(record) == _decimal(broker_position.get("quantity"))
     ]
+
+
+def _expire_superseded_registry_owner_candidates(
+    records: Sequence[TradeRegistryRecord],
+) -> tuple[list[TradeRegistryRecord], list[dict[str, Any]]]:
+    active, expired = expire_superseded_same_scope_candidates(
+        list(records),
+        scope_key=_record_scope_key,
+        observed_at=_latest_broker_backed_entry_time,
+        stale_reason="OLDER_BROKER_BACKED_OWNER_EXPIRED_BEFORE_AMBIGUITY",
+    )
+    rows: list[dict[str, Any]] = []
+    for item in expired:
+        candidate = item.get("candidate") if isinstance(item, Mapping) else {}
+        rows.append(
+            {
+                "classification": EXPIRED_DIAGNOSTIC_ONLY,
+                "reason_codes": list(item.get("reason_codes") or []),
+                "authority_scope": item.get("authority_scope"),
+                "trade_id": candidate.get("trade_id"),
+                "lifecycle_id": candidate.get("lifecycle_id"),
+                "current_state": candidate.get("current_state"),
+                "broker_backed_entry": candidate.get("broker_backed_entry"),
+                "broker_backed_exit": candidate.get("broker_backed_exit"),
+                "open_qty": candidate.get("open_qty"),
+                "candidate_observed_at": item.get("candidate_observed_at"),
+                "winner_observed_at": item.get("winner_observed_at"),
+                "current_scope_authority": False,
+                "diagnostic_only": True,
+            }
+        )
+    return list(active), rows
+
+
+def _record_scope_key(record: TradeRegistryRecord) -> str:
+    owner = record.ownership_identity
+    if owner is None:
+        return ""
+    return f"{owner.account_id}|{owner.local_symbol}|{owner.con_id}|{owner.side}"
 
 
 def _registry_lifecycle_identity_conflicts(
