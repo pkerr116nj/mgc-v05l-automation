@@ -218,6 +218,192 @@ def test_current_scope_zero_diagnostics_outrank_stale_raw_lifecycle_count(tmp_pa
     assert payload["restart_policy"]["reason_codes"] == []
 
 
+def test_diagnostic_only_stale_registry_with_clean_current_scope_warns_not_blocks(tmp_path: Path) -> None:
+    config = _write_clean_fixture(tmp_path)
+    registry = _read(config.resolve(config.registry_diagnostics_path))
+    registry.update(
+        {
+            "classification": "TRACK_B_DIAGNOSTICS_STALE_AUTHORITY",
+            "diagnostic_only": True,
+            "current_scope_review_required_count": 0,
+            "current_scope_trade_states": [],
+            "lifecycle_open_position_count": 0,
+            "broker_open_order_count": 0,
+            "reason_codes": [
+                "RUNTIME_TRUTH_STALE_OR_MISSING",
+                "HISTORICAL_REGISTRY_REVIEW_REQUIRED_TRADE",
+            ],
+        }
+    )
+    _write(config.resolve(config.registry_diagnostics_path), registry)
+
+    payload = build_track_b_live_runtime_environment_watchdog(
+        config=config,
+        now=NOW,
+        pid_running=lambda pid: True,
+        source_commit_resolver=lambda root: "abc",
+    )
+
+    assert payload["classification"] == READY_SUBMIT_CAPABLE
+    assert payload["liveness_contract"]["registry_reconciliation_matched"] is True
+    assert "REGISTRY_RECONCILIATION_NOT_MATCHED" not in payload["reason_codes"]
+    assert payload["warning_codes"] == ["REGISTRY_DIAGNOSTICS_STALE_OR_HISTORICAL_DIAGNOSTIC_ONLY"]
+    assert payload["registry"]["warning_code"] == "REGISTRY_DIAGNOSTICS_STALE_OR_HISTORICAL_DIAGNOSTIC_ONLY"
+    assert payload["restart_policy"]["reason_codes"] == []
+
+
+def test_diagnostic_only_registry_accepts_explicit_empty_review_ids_when_count_missing(tmp_path: Path) -> None:
+    config = _write_clean_fixture(tmp_path)
+    registry = _read(config.resolve(config.registry_diagnostics_path))
+    registry.update(
+        {
+            "classification": "TRACK_B_DIAGNOSTICS_STALE_AUTHORITY",
+            "diagnostic_only": True,
+            "current_scope_trade_states": [],
+            "lifecycle_open_position_count": 0,
+            "broker_open_order_count": 0,
+            "review_required_trade_ids": [],
+        }
+    )
+    registry.pop("current_scope_review_required_count", None)
+    _write(config.resolve(config.registry_diagnostics_path), registry)
+
+    payload = build_track_b_live_runtime_environment_watchdog(
+        config=config,
+        now=NOW,
+        pid_running=lambda pid: True,
+        source_commit_resolver=lambda root: "abc",
+    )
+
+    assert payload["classification"] == READY_SUBMIT_CAPABLE
+    assert "REGISTRY_RECONCILIATION_NOT_MATCHED" not in payload["reason_codes"]
+    assert payload["warning_codes"] == ["REGISTRY_DIAGNOSTICS_STALE_OR_HISTORICAL_DIAGNOSTIC_ONLY"]
+
+
+def test_diagnostic_only_registry_blocks_when_review_count_evidence_missing(tmp_path: Path) -> None:
+    config = _write_clean_fixture(tmp_path)
+    registry = _read(config.resolve(config.registry_diagnostics_path))
+    registry.update(
+        {
+            "classification": "TRACK_B_DIAGNOSTICS_STALE_AUTHORITY",
+            "diagnostic_only": True,
+            "current_scope_trade_states": [],
+            "lifecycle_open_position_count": 0,
+            "broker_open_order_count": 0,
+        }
+    )
+    registry.pop("current_scope_review_required_count", None)
+    registry.pop("current_scope_review_required_trade_ids", None)
+    registry.pop("review_required_trade_ids", None)
+    _write(config.resolve(config.registry_diagnostics_path), registry)
+
+    payload = build_track_b_live_runtime_environment_watchdog(
+        config=config,
+        now=NOW,
+        pid_running=lambda pid: True,
+        source_commit_resolver=lambda root: "abc",
+    )
+
+    assert payload["classification"] == REVIEW_REQUIRED
+    assert "REGISTRY_RECONCILIATION_NOT_MATCHED" in payload["reason_codes"]
+
+
+def test_diagnostic_only_registry_still_blocks_when_current_scope_not_clean(tmp_path: Path) -> None:
+    config = _write_clean_fixture(tmp_path)
+    registry = _read(config.resolve(config.registry_diagnostics_path))
+    registry.update(
+        {
+            "classification": "TRACK_B_DIAGNOSTICS_STALE_AUTHORITY",
+            "diagnostic_only": True,
+            "current_scope_review_required_count": 0,
+            "current_scope_trade_states": [{"trade_id": "trade_current_review"}],
+            "lifecycle_open_position_count": 0,
+            "broker_open_order_count": 0,
+        }
+    )
+    _write(config.resolve(config.registry_diagnostics_path), registry)
+
+    payload = build_track_b_live_runtime_environment_watchdog(
+        config=config,
+        now=NOW,
+        pid_running=lambda pid: True,
+        source_commit_resolver=lambda root: "abc",
+    )
+
+    assert payload["classification"] == REVIEW_REQUIRED
+    assert payload["liveness_contract"]["registry_reconciliation_matched"] is False
+    assert "REGISTRY_RECONCILIATION_NOT_MATCHED" in payload["reason_codes"]
+
+
+def test_diagnostic_only_registry_still_blocks_with_lifecycle_or_order_linkage(tmp_path: Path) -> None:
+    config = _write_clean_fixture(tmp_path)
+    registry = _read(config.resolve(config.registry_diagnostics_path))
+    registry.update(
+        {
+            "classification": "TRACK_B_DIAGNOSTICS_STALE_AUTHORITY",
+            "diagnostic_only": True,
+            "current_scope_review_required_count": 0,
+            "current_scope_trade_states": [],
+            "lifecycle_open_position_count": 1,
+            "broker_open_order_count": 0,
+        }
+    )
+    _write(config.resolve(config.registry_diagnostics_path), registry)
+
+    payload = build_track_b_live_runtime_environment_watchdog(
+        config=config,
+        now=NOW,
+        pid_running=lambda pid: True,
+        source_commit_resolver=lambda root: "abc",
+    )
+
+    assert payload["classification"] == REVIEW_REQUIRED
+    assert "REGISTRY_RECONCILIATION_NOT_MATCHED" in payload["reason_codes"]
+
+    registry["lifecycle_open_position_count"] = 0
+    registry["broker_open_order_count"] = 1
+    _write(config.resolve(config.registry_diagnostics_path), registry)
+    payload = build_track_b_live_runtime_environment_watchdog(
+        config=config,
+        now=NOW,
+        pid_running=lambda pid: True,
+        source_commit_resolver=lambda root: "abc",
+    )
+
+    assert payload["classification"] == REVIEW_REQUIRED
+    assert "REGISTRY_RECONCILIATION_NOT_MATCHED" in payload["reason_codes"]
+
+
+def test_diagnostic_only_registry_warning_does_not_override_broker_lifecycle_block(tmp_path: Path) -> None:
+    config = _write_clean_fixture(tmp_path)
+    registry = _read(config.resolve(config.registry_diagnostics_path))
+    registry.update(
+        {
+            "classification": "TRACK_B_DIAGNOSTICS_STALE_AUTHORITY",
+            "diagnostic_only": True,
+            "current_scope_review_required_count": 0,
+            "current_scope_trade_states": [],
+            "lifecycle_open_position_count": 0,
+            "broker_open_order_count": 0,
+        }
+    )
+    _write(config.resolve(config.registry_diagnostics_path), registry)
+    reconciliation = _read(config.resolve(config.broker_reconciliation_path))
+    reconciliation["classification"] = "TRACK_B_PAPER_BROKER_RECONCILIATION_BLOCKED"
+    _write(config.resolve(config.broker_reconciliation_path), reconciliation)
+
+    payload = build_track_b_live_runtime_environment_watchdog(
+        config=config,
+        now=NOW,
+        pid_running=lambda pid: True,
+        source_commit_resolver=lambda root: "abc",
+    )
+
+    assert payload["classification"] == REVIEW_REQUIRED
+    assert "BROKER_LIFECYCLE_NOT_RECONCILED" in payload["reason_codes"]
+    assert "REGISTRY_RECONCILIATION_NOT_MATCHED" not in payload["reason_codes"]
+
+
 def _write_clean_fixture(
     tmp_path: Path,
     *,

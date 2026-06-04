@@ -176,6 +176,7 @@ def build_track_b_live_runtime_environment_watchdog(
 
     broker_lifecycle_clean = _broker_lifecycle_clean(reconciliation)
     registry_clean = _registry_clean(registry)
+    registry_warning_code = _registry_warning_code(registry)
     duplicate_writer = _duplicate_writer_detected(runtime_truth)
     track_b_positions = _int_from_preferred_mapping(
         primary=reconciliation,
@@ -262,6 +263,7 @@ def build_track_b_live_runtime_environment_watchdog(
         "generated_at": actual_now.isoformat(),
         "classification": classification,
         "reason_codes": sorted(set(reason_codes)),
+        "warning_codes": sorted({registry_warning_code} if registry_warning_code else set()),
         "read_only": True,
         "submit_authority": False,
         "broker_mutation_allowed": False,
@@ -325,6 +327,7 @@ def build_track_b_live_runtime_environment_watchdog(
             "classification": registry.get("classification"),
             "current_scope_review_required_count": registry.get("current_scope_review_required_count")
             or len(registry.get("review_required_trade_ids") or []),
+            "warning_code": registry_warning_code,
             "generated_at": registry.get("generated_at"),
         },
         "pre_restart_exposure_resolution": pre_restart_exposure_resolution,
@@ -584,10 +587,62 @@ def _registry_clean(payload: Mapping[str, Any]) -> bool:
         fallback={"review_required_trade_ids_count": len(payload.get("review_required_trade_ids") or [])},
         fallback_key="review_required_trade_ids_count",
     )
-    return classification in {
+    classification_clean = classification in {
         "TRACK_B_DIAGNOSTICS_CLEAN_CURRENT_SCOPE",
         "TRACK_B_DIAGNOSTICS_CLEAN",
     } and review_count == 0
+    return classification_clean or _registry_diagnostic_only_current_scope_clean(payload)
+
+
+def _registry_warning_code(payload: Mapping[str, Any]) -> str | None:
+    classification = str(payload.get("classification") or "").upper()
+    if classification not in {
+        "TRACK_B_DIAGNOSTICS_CLEAN_CURRENT_SCOPE",
+        "TRACK_B_DIAGNOSTICS_CLEAN",
+    } and _registry_diagnostic_only_current_scope_clean(payload):
+        return "REGISTRY_DIAGNOSTICS_STALE_OR_HISTORICAL_DIAGNOSTIC_ONLY"
+    return None
+
+
+def _registry_diagnostic_only_current_scope_clean(payload: Mapping[str, Any]) -> bool:
+    required_keys = {
+        "current_scope_trade_states",
+        "lifecycle_open_position_count",
+        "broker_open_order_count",
+    }
+    if payload.get("diagnostic_only") is not True:
+        return False
+    if not required_keys.issubset(payload):
+        return False
+    if not any(
+        key in payload
+        for key in (
+            "current_scope_review_required_count",
+            "current_scope_review_required_trade_ids",
+            "review_required_trade_ids",
+        )
+    ):
+        return False
+    current_scope_trade_states = payload.get("current_scope_trade_states")
+    review_ids = (
+        payload.get("current_scope_review_required_trade_ids")
+        if "current_scope_review_required_trade_ids" in payload
+        else payload.get("review_required_trade_ids")
+    )
+    review_count = _int_from_preferred_mapping(
+        primary=payload,
+        primary_key="current_scope_review_required_count",
+        fallback={"review_required_trade_ids_count": len(review_ids or [])},
+        fallback_key="review_required_trade_ids_count",
+    )
+    return (
+        review_count == 0
+        and isinstance(current_scope_trade_states, Sequence)
+        and not isinstance(current_scope_trade_states, (str, bytes))
+        and len(current_scope_trade_states) == 0
+        and _int_or_zero(payload.get("lifecycle_open_position_count")) == 0
+        and _int_or_zero(payload.get("broker_open_order_count")) == 0
+    )
 
 
 def _int_from_preferred_mapping(
