@@ -47,6 +47,7 @@ _DEFAULT_LEDGER_PATH = Path("var") / "paper_strategy_position_ledger.json"
 _DEFAULT_PORTING_OUTPUT_DIR = Path("outputs") / "reports" / "ibkr_strategy_porting"
 _DEFAULT_PAPER_SESSION_LANES_DIR = Path("outputs") / "probationary_pattern_engine" / "paper_session" / "lanes"
 _DEFAULT_PAPER_CONFIG_IN_FORCE_PATH = Path("outputs") / "probationary_pattern_engine" / "paper_session" / "runtime" / "paper_config_in_force.json"
+_DEFAULT_PAPER_RUNTIME_TRUTH_PATH = Path("outputs") / "probationary_pattern_engine" / "paper_session" / "runtime" / "paper_runtime_truth.json"
 _PERFORMANCE_CSV = "per_strategy_paper_performance.csv"
 _STATUS_JSON = "per_strategy_paper_status.json"
 _PROBATION_DASHBOARD_JSON = "strategy_probation_dashboard.json"
@@ -220,11 +221,7 @@ def run_ibkr_paper_strategy_governance(
         lane_id = str(configured_row.get("lane_id") or "").strip()
         if not lane_id or lane_id in seen_lane_ids:
             continue
-        if not bool(configured_row.get("paper_only")):
-            continue
-        if not bool(configured_row.get("non_approved")):
-            continue
-        if not bool(configured_row.get("exclude_from_strategy_performance")):
+        if not _configured_runtime_lane_needs_governance_row(configured_row):
             continue
         bridge_adapter = lane_submit_bridge_adapter(lane_id=lane_id)
         if not bridge_adapter:
@@ -317,6 +314,20 @@ def run_ibkr_paper_strategy_governance(
         pause_rows=pause_rows,
         audit_events=audit_events,
     )
+
+
+def _configured_runtime_lane_needs_governance_row(configured_row: dict[str, Any]) -> bool:
+    if not bool(configured_row.get("paper_only")):
+        return False
+    lane_mode = str(configured_row.get("lane_mode") or "").strip().upper()
+    submit_authority = str(configured_row.get("submit_authority") or "").strip().upper()
+    active_evidence_lane = lane_mode in {
+        "PAPER_ONLY_ACTIVE_EVIDENCE_LANE",
+        "PAPER_ONLY_GLOBEX_ACTIVE_EVIDENCE_LANE",
+    }
+    promotion_contract_authorized = submit_authority == "PAPER_ONLY_GUARDED_RUNTIME_AFTER_PROMOTION_CONTRACT"
+    legacy_configured_canary = bool(configured_row.get("non_approved")) and bool(configured_row.get("exclude_from_strategy_performance"))
+    return active_evidence_lane or promotion_contract_authorized or legacy_configured_canary
 
 
 def write_ibkr_paper_strategy_governance_artifacts(
@@ -857,10 +868,22 @@ def _backend_shared_services_authority(
     safe_classification = str(safe_state.get("safe_state_classification") or safe_state.get("classification") or "").strip().upper()
 
     block_reasons.extend(str(reason) for reason in runtime_authority.get("blockers") or [])
+    if control_plane and cp_classification not in {"CONTROL_PLANE_READY", "CONTROL_PLANE_SNAPSHOT_READY"}:
+        block_reasons.append("control_plane_not_ready")
+    if control_plane and coherence and coherence != "COHERENT":
+        block_reasons.append("shared_truth_not_coherent")
+    if safe_state and safe_classification not in {"", "SAFE_STATE_NORMAL", "NORMAL"}:
+        block_reasons.append("safe_state_not_normal")
     if safe_state and safe_state.get("submit_allowed") is False:
         block_reasons.append("safe_state_submit_not_allowed")
     if safe_state and safe_state.get("broker_mutation_allowed") is False:
         block_reasons.append("safe_state_broker_mutation_not_allowed")
+    if control_plane.get("live_money_eligible") is True or safe_state.get("live_money_eligible") is True or guarded_loop.get("live_money_eligible") is True:
+        block_reasons.append("live_money_eligible_true")
+    if control_plane.get("paper_proof_invoked") is True or safe_state.get("paper_proof_invoked") is True or guarded_loop.get("paper_proof_invoked") is True:
+        block_reasons.append("paper_proof_invoked_true")
+    if control_plane.get("agent_health_has_duplicate_writer") is True:
+        block_reasons.append("duplicate_writer_detected")
 
     phase1_status = _phase1_market_data_readiness(config.repo_root, required_instruments)
     if required_instruments and not phase1_status.get("ready"):
@@ -1038,6 +1061,7 @@ def _backend_source_live_readiness(
 ) -> dict[str, Any]:
     freshness_window = float(config.freshness_window_seconds)
     canonical = _load_json(config.repo_root / _DEFAULT_CANONICAL_READINESS_PATH)
+    paper_runtime_truth = _load_json(config.repo_root / _DEFAULT_PAPER_RUNTIME_TRUTH_PATH)
     readiness = _load_json(config.repo_root / _DEFAULT_PAPER_READINESS_SNAPSHOT_PATH)
     startup = _load_json(config.repo_root / _DEFAULT_STARTUP_CONTROL_PLANE_SNAPSHOT_PATH)
     supervised = _load_json(config.repo_root / _DEFAULT_SUPERVISED_PAPER_OPERABILITY_SNAPSHOT_PATH)
@@ -1046,6 +1070,12 @@ def _backend_source_live_readiness(
         "canonical_readiness": _artifact_status(
             config.repo_root / _DEFAULT_CANONICAL_READINESS_PATH,
             canonical,
+            freshness_window_seconds=freshness_window,
+            required=False,
+        ),
+        "paper_runtime_truth": _artifact_status(
+            config.repo_root / _DEFAULT_PAPER_RUNTIME_TRUTH_PATH,
+            paper_runtime_truth,
             freshness_window_seconds=freshness_window,
             required=False,
         ),
@@ -1110,15 +1140,21 @@ def _backend_source_live_readiness(
     canonical_state = str(canonical.get("canonical_readiness") or canonical.get("state") or "").strip().upper()
     canonical_runtime = dict(canonical.get("runtime") or {})
     canonical_root_guard = dict(canonical.get("root_guard_summary") or {})
+    paper_stack_authority = _canonical_paper_stack_submit_authority(
+        canonical=canonical,
+        canonical_status=canonical_status,
+        paper_runtime_truth=paper_runtime_truth,
+        paper_runtime_truth_status=artifacts["paper_runtime_truth"],
+        freshness_window_seconds=freshness_window,
+    )
     if canonical_authoritative:
-        runtime_running = bool(canonical_runtime.get("running"))
-        paper_runtime_ready = bool(
-            runtime_running
-            and canonical_runtime.get("healthy") is True
-            and canonical_runtime.get("runtime_ingestion_fresh") is True
-        )
-        paper_trade_allowed = canonical_state == "READY_SUBMIT_CAPABLE"
-        startup_ready = canonical_state in {"READY_SUBMIT_CAPABLE", "READY_OBSERVATION_ONLY"}
+        runtime_running = bool(paper_stack_authority.get("runtime_running"))
+        paper_runtime_ready = bool(paper_stack_authority.get("paper_runtime_ready"))
+        paper_trade_allowed = bool(paper_stack_authority.get("paper_trade_allowed"))
+        startup_ready = paper_stack_authority.get("canonical_readiness") in {
+            "READY_SUBMIT_CAPABLE",
+            "READY_OBSERVATION_ONLY",
+        }
         supervised_usable = paper_trade_allowed
     else:
         paper_runtime_ready = bool(readiness.get("paper_runtime_ready"))
@@ -1130,10 +1166,14 @@ def _backend_source_live_readiness(
 
     if canonical_authoritative and canonical.get("live_money_eligible") is True:
         block_reasons.append("canonical_live_money_eligible_true")
+    if canonical_authoritative and canonical.get("paper_proof_invoked") is True:
+        block_reasons.append("canonical_paper_proof_invoked_true")
     if canonical_authoritative and canonical_root_guard.get("root_match") is not True:
         block_reasons.append("canonical_root_not_matched")
     if canonical_authoritative and canonical_state != "READY_SUBMIT_CAPABLE":
         block_reasons.append("canonical_readiness_not_submit_capable")
+    if canonical_authoritative and not bool(paper_stack_authority.get("ready")):
+        block_reasons.extend(str(reason) for reason in list(paper_stack_authority.get("block_reasons") or []))
     if (readiness or canonical_authoritative) and not runtime_running:
         block_reasons.append("paper_runtime_not_running")
     if (readiness or canonical_authoritative) and not paper_runtime_ready:
@@ -1167,35 +1207,44 @@ def _backend_source_live_readiness(
         block_reasons.append("backend_readiness_artifact_stale")
     if temp_paper_blocked:
         block_reasons.append("temp_paper_blocked")
+    shared_service_block_reasons = [
+        str(reason)
+        for reason in list(shared_services_authority.get("block_reasons") or [])
+        if str(reason)
+    ]
+    shared_phase1_status = dict(shared_services_authority.get("phase1_runtime_market_data") or {})
+    if shared_phase1_status and shared_phase1_status.get("ready") is not True and not canonical_authoritative:
+        block_reasons.append("phase1_runtime_market_data_not_ready")
     if shared_services_authority.get("present") is True and shared_services_authority.get("ready") is not True:
-        block_reasons.append("shared_services_authority_not_ready")
-        block_reasons.extend(str(reason) for reason in list(shared_services_authority.get("block_reasons") or []))
-
-    if shared_services_authority.get("ready") is True:
-        block_reasons = []
-        runtime_running = True
-        paper_runtime_ready = True
-        paper_trade_allowed = True
-        startup_ready = True
-        supervised_usable = True
-        market_data_stale_count = 0
-        bar_authority_unavailable_count = 0
-        blocking_fault_count = 0
-        source_faults = {
-            "market_data_stale_count": 0,
-            "bar_authority_unavailable_count": 0,
-            "blocking_fault_count": 0,
-            "readiness_scope": "execution_core_shared_services_authority",
-            "required_instruments": required_instrument_list,
-            "relevant_lane_ids": [],
-            "global_market_data_stale_count": int(readiness.get("market_data_stale_count") or 0),
-            "global_bar_authority_unavailable_count": int(readiness.get("bar_authority_unavailable_count") or 0),
-            "global_blocking_fault_count": int(readiness.get("blocking_fault_count") or 0),
-        }
+        if canonical_authoritative and canonical_state == "READY_SUBMIT_CAPABLE":
+            conflict_reasons = [
+                reason
+                for reason in shared_service_block_reasons
+                if reason.startswith("safe_state")
+                or "live_money" in reason
+                or "paper_proof" in reason
+                or "broker_reconciliation" in reason
+                or "duplicate_writer" in reason
+            ]
+            if conflict_reasons:
+                block_reasons.append("runtime_authority_conflict")
+                block_reasons.extend(conflict_reasons)
+        elif not canonical_authoritative:
+            block_reasons.append("shared_services_authority_not_ready")
+            block_reasons.extend(shared_service_block_reasons)
 
     block_reasons = list(dict.fromkeys(block_reasons))
     live_ready = not block_reasons
-    if shared_services_authority.get("ready") is True:
+    if canonical_authoritative and live_ready:
+        detail = (
+            "backend/source readiness ready from canonical_paper_stack_runtime_authority; "
+            "deprecated guarded-loop artifacts treated as diagnostic only; "
+            f"required_instruments={required_instrument_list}; "
+            f"runtime_instance_id={paper_runtime_truth.get('runtime_instance_id')} "
+            f"writer_authority={paper_runtime_truth.get('writer_authority')} "
+            f"canonical_readiness={canonical_state}"
+        )
+    elif shared_services_authority.get("ready") is True and not canonical_present:
         detail = (
             "backend/source readiness ready from execution_core_control_plane_safe_state_guarded_loop_phase1; "
             "legacy canonical/operator readiness treated as diagnostic projection; "
@@ -1247,16 +1296,145 @@ def _backend_source_live_readiness(
         "temp_paper_blocked": temp_paper_blocked,
         "canonical_readiness": canonical_state or None,
         "canonical_readiness_authoritative": canonical_authoritative,
+        "paper_stack_authority": paper_stack_authority,
         "canonical_readiness_artifact": artifacts["canonical_readiness"],
         "presentation_readiness_authority": "DIAGNOSTIC_ONLY_WHEN_CANONICAL_PRESENT",
         "source": (
-            str(shared_services_authority.get("source"))
-            if shared_services_authority.get("ready") is True
+            "canonical_paper_stack_runtime_authority"
+            if canonical_authoritative and live_ready
+            else str(shared_services_authority.get("source"))
+            if shared_services_authority.get("ready") is True and not canonical_present
             else "canonical_track_b_runtime_readiness" if canonical_present else "operator_dashboard_readiness_artifacts"
         ),
         "shared_services_authority": shared_services_authority,
         "shared_services_authority_ready": bool(shared_services_authority.get("ready")),
         "dashboard_projection_consumed": False,
+    }
+
+
+def _canonical_paper_stack_submit_authority(
+    *,
+    canonical: dict[str, Any],
+    canonical_status: dict[str, Any],
+    paper_runtime_truth: dict[str, Any],
+    paper_runtime_truth_status: dict[str, Any],
+    freshness_window_seconds: float,
+) -> dict[str, Any]:
+    canonical_state = str(canonical.get("canonical_readiness") or canonical.get("state") or "").strip().upper()
+    canonical_runtime = dict(canonical.get("runtime") or {})
+    broker_truth_lease = dict(canonical.get("broker_truth_lease") or {})
+    canonical_reconciliation = dict(canonical.get("phase1_reconciliation") or {})
+    root_guard = dict(canonical.get("root_guard_summary") or {})
+    duplicate_writer = dict(paper_runtime_truth.get("duplicate_writer_detection") or {})
+    block_reasons: list[str] = []
+
+    if not canonical:
+        block_reasons.append("canonical_readiness_artifact_missing")
+    elif not bool(canonical_status.get("fresh")):
+        block_reasons.append("canonical_readiness_artifact_stale")
+    if canonical and canonical_state != "READY_SUBMIT_CAPABLE":
+        block_reasons.append("canonical_readiness_not_submit_capable")
+    if canonical and canonical.get("paper_only") is not True:
+        block_reasons.append("canonical_paper_only_not_true")
+    if canonical.get("live_money_eligible") is True:
+        block_reasons.append("canonical_live_money_eligible_true")
+    if canonical.get("paper_proof_invoked") is True:
+        block_reasons.append("canonical_paper_proof_invoked_true")
+    if root_guard and root_guard.get("root_match") is not True:
+        block_reasons.append("canonical_root_not_matched")
+
+    runtime_running = bool(canonical_runtime.get("running"))
+    paper_runtime_ready = bool(
+        runtime_running
+        and canonical_runtime.get("healthy") is True
+        and canonical_runtime.get("runtime_ingestion_fresh") is True
+    )
+    paper_trade_allowed = canonical_state == "READY_SUBMIT_CAPABLE"
+    if canonical and not runtime_running:
+        block_reasons.append("paper_runtime_not_running")
+    if canonical and not paper_runtime_ready:
+        block_reasons.append("paper_runtime_not_ready")
+    if canonical and not paper_trade_allowed:
+        block_reasons.append("paper_trade_not_allowed")
+
+    if not paper_runtime_truth:
+        block_reasons.append("paper_runtime_truth_missing")
+    elif not bool(paper_runtime_truth_status.get("fresh")):
+        block_reasons.append("paper_runtime_truth_stale")
+    if paper_runtime_truth and str(paper_runtime_truth.get("writer_authority") or "").strip().upper() != "SINGLE_WRITER":
+        block_reasons.append("paper_runtime_truth_not_single_writer")
+    if paper_runtime_truth and paper_runtime_truth.get("paper_only") is not True:
+        block_reasons.append("paper_runtime_truth_paper_only_not_true")
+    if paper_runtime_truth.get("live_money_eligible") is True:
+        block_reasons.append("paper_runtime_truth_live_money_eligible_true")
+    if paper_runtime_truth.get("paper_proof_invoked") is True:
+        block_reasons.append("paper_runtime_truth_paper_proof_invoked_true")
+    if paper_runtime_truth and str(paper_runtime_truth.get("freshness_state") or "").strip().upper() not in {"", "FRESH"}:
+        block_reasons.append("paper_runtime_truth_not_fresh")
+    if paper_runtime_truth and str(paper_runtime_truth.get("heartbeat_state") or "").strip().upper() not in {"", "HEALTHY"}:
+        block_reasons.append("paper_runtime_truth_heartbeat_not_healthy")
+    if duplicate_writer.get("duplicate_writer_detected") is True:
+        block_reasons.append("paper_runtime_truth_duplicate_writer_detected")
+    duplicate_count = _int_or_none(duplicate_writer.get("duplicate_runtime_submitter_count")) or 0
+    if duplicate_count > 0:
+        block_reasons.append("paper_runtime_truth_duplicate_writer_detected")
+
+    if broker_truth_lease:
+        lease_age = _decimal_or_none(broker_truth_lease.get("age_seconds"))
+        if broker_truth_lease.get("available") is False:
+            block_reasons.append("broker_truth_lease_unavailable")
+        if str(broker_truth_lease.get("lease_state") or "").strip().upper() != "ACTIVE":
+            block_reasons.append("broker_truth_lease_not_active")
+        if lease_age is not None and lease_age > Decimal(str(freshness_window_seconds)):
+            block_reasons.append("broker_truth_lease_stale")
+        if broker_truth_lease.get("broker_reconciled") is False:
+            block_reasons.append("broker_truth_lease_not_reconciled")
+        if _int_or_none(broker_truth_lease.get("review_required_count")) not in {None, 0}:
+            block_reasons.append("broker_truth_review_required_present")
+        if broker_truth_lease.get("live_money_eligible") is True:
+            block_reasons.append("broker_truth_live_money_eligible_true")
+        for reason in list(broker_truth_lease.get("blockers") or []):
+            normalized = str(reason or "").strip()
+            if normalized:
+                block_reasons.append(normalized)
+
+    if canonical_reconciliation:
+        reconciliation_age = _decimal_or_none(canonical_reconciliation.get("age_seconds"))
+        classification = str(canonical_reconciliation.get("classification") or "").strip().upper()
+        if canonical_reconciliation.get("fresh") is False:
+            block_reasons.append("phase1_broker_reconciliation_stale")
+        if reconciliation_age is not None and reconciliation_age > Decimal(str(freshness_window_seconds)):
+            block_reasons.append("phase1_broker_reconciliation_stale")
+        if "RECONCILED" not in classification:
+            block_reasons.append("phase1_broker_reconciliation_not_reconciled")
+        if canonical_reconciliation.get("broker_reconciled") is False:
+            block_reasons.append("phase1_broker_reconciled_false")
+        if _int_or_none(canonical_reconciliation.get("review_required_count")) not in {None, 0}:
+            block_reasons.append("phase1_review_required_present")
+        if _int_or_none(canonical_reconciliation.get("track_b_broker_open_order_count")) not in {None, 0}:
+            block_reasons.append("phase1_open_orders_present")
+        if canonical_reconciliation.get("live_money_eligible") is True:
+            block_reasons.append("phase1_live_money_eligible_true")
+        for reason in list(canonical_reconciliation.get("blockers") or []):
+            normalized = str(reason or "").strip()
+            if normalized:
+                block_reasons.append(normalized)
+
+    block_reasons = list(dict.fromkeys(block_reasons))
+    return {
+        "ready": not block_reasons,
+        "source": "canonical_paper_stack_runtime_authority",
+        "block_reasons": block_reasons,
+        "canonical_readiness": canonical_state or None,
+        "runtime_running": runtime_running,
+        "paper_runtime_ready": paper_runtime_ready,
+        "paper_trade_allowed": paper_trade_allowed,
+        "paper_runtime_truth_artifact": paper_runtime_truth_status,
+        "paper_runtime_truth_writer_authority": paper_runtime_truth.get("writer_authority"),
+        "paper_runtime_truth_freshness_state": paper_runtime_truth.get("freshness_state"),
+        "paper_runtime_truth_heartbeat_state": paper_runtime_truth.get("heartbeat_state"),
+        "broker_truth_lease_state": broker_truth_lease.get("lease_state"),
+        "phase1_reconciliation_classification": canonical_reconciliation.get("classification"),
     }
 
 

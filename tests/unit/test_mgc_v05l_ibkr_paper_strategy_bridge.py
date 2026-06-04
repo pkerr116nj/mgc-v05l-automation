@@ -688,6 +688,270 @@ def test_entry_pricing_prefers_fresh_runtime_candle_when_delayed_ask_is_too_low(
     assert pricing["live_money_eligible"] is False
 
 
+def test_entry_pricing_honors_bounded_runtime_marketable_offset_metadata(tmp_path: Path) -> None:
+    _write_runtime_1m_candle(tmp_path, symbol="MNQ", close=29752.0)
+    config = _config(
+        tmp_path,
+        strategy_id="mnq_globex_active_participation_long",
+        symbol="MNQ",
+        contract_month="202606",
+        caller_metadata={
+            **_approved_runtime_metadata(
+                strategy_id="mnq_globex_active_participation_long",
+                source_instrument="MNQ",
+                executable_proxy="MNQ",
+                bridge_proxy_mode="MNQ_SIGNAL_DIRECT_PHASE1",
+            ),
+            "entry_marketable_limit_offset_ticks": 4,
+        },
+    )
+    pricing = _entry_execution_pricing_for_bridge(
+        config=config,
+        intent=_intent_from_config(config),
+        quote_context=_quote_context(ask=29714.0),
+        qualified_contract_report=_qualified_contract_report(),
+        now=datetime(2026, 5, 14, 12, 25, 30, tzinfo=timezone.utc),
+    )
+
+    assert pricing["execution_price_source"] == "RUNTIME_DATABENTO_1M_CLOSE"
+    assert pricing["limit_offset_ticks"] == 4.0
+    assert pricing["limit_price"] == 29753.0
+    assert pricing["limit_vs_runtime_price_points"] == 1.0
+    assert pricing["block_submit"] is False
+
+
+def test_entry_pricing_caps_runtime_marketable_offset_metadata(tmp_path: Path) -> None:
+    _write_runtime_1m_candle(tmp_path, symbol="MNQ", close=29752.0)
+    config = _config(
+        tmp_path,
+        strategy_id="mnq_globex_active_participation_long",
+        symbol="MNQ",
+        contract_month="202606",
+        caller_metadata={
+            **_approved_runtime_metadata(
+                strategy_id="mnq_globex_active_participation_long",
+                source_instrument="MNQ",
+                executable_proxy="MNQ",
+                bridge_proxy_mode="MNQ_SIGNAL_DIRECT_PHASE1",
+            ),
+            "entry_marketable_limit_offset_ticks": 99,
+        },
+    )
+    pricing = _entry_execution_pricing_for_bridge(
+        config=config,
+        intent=_intent_from_config(config),
+        quote_context=_quote_context(ask=29714.0),
+        qualified_contract_report=_qualified_contract_report(),
+        now=datetime(2026, 5, 14, 12, 25, 30, tzinfo=timezone.utc),
+    )
+
+    assert pricing["limit_offset_ticks"] == 4.0
+    assert pricing["limit_price"] == 29753.0
+
+
+def test_active_evidence_long_prefers_fresh_live_ask_reference(tmp_path: Path) -> None:
+    _write_runtime_1m_candle(tmp_path, symbol="MNQ", close=29752.0)
+    config = _config(
+        tmp_path,
+        strategy_id="mnq_us_active_participation_long",
+        symbol="MNQ",
+        contract_month="202606",
+        caller_metadata=_approved_runtime_metadata(
+            strategy_id="mnq_us_active_participation_long",
+            source_instrument="MNQ",
+            executable_proxy="MNQ",
+            bridge_proxy_mode="MNQ_SIGNAL_DIRECT_PHASE1",
+        ),
+    )
+
+    pricing = _entry_execution_pricing_for_bridge(
+        config=config,
+        intent=_intent_from_config(config),
+        quote_context={
+            "quote_source_label": "LIVE",
+            "updated_at": "2026-05-14T12:25:25+00:00",
+            "bid_price": 29752.0,
+            "ask_price": 29752.25,
+            "last_price": 29752.0,
+        },
+        qualified_contract_report=_qualified_contract_report(),
+        now=datetime(2026, 5, 14, 12, 25, 30, tzinfo=timezone.utc),
+    )
+
+    assert pricing["pricing_source"] == "IBKR_LIVE_ASK"
+    assert pricing["pricing_reference_price"] == 29752.25
+    assert pricing["pricing_reference_ts"] == "2026-05-14T12:25:25+00:00"
+    assert pricing["pricing_reference_age_seconds"] == 5.0
+    assert pricing["marketable_limit_offset_ticks"] == 1.0
+    assert pricing["max_slippage_ticks"] == 4.0
+    assert pricing["limit_price"] == 29752.5
+    assert pricing["block_submit"] is False
+
+
+def test_active_evidence_short_prefers_fresh_live_bid_reference(tmp_path: Path) -> None:
+    _write_runtime_1m_candle(tmp_path, symbol="MNQ", close=29752.0)
+    config = _config(
+        tmp_path,
+        strategy_id="mnq_us_active_participation_short",
+        symbol="MNQ",
+        contract_month="202606",
+        action="SELL",
+        limit_price_model="DELAYED_BID_MINUS_1T_MARKETABLE_SELL",
+        caller_metadata=_approved_runtime_metadata(
+            strategy_id="mnq_us_active_participation_short",
+            source_instrument="MNQ",
+            executable_proxy="MNQ",
+            bridge_proxy_mode="MNQ_SIGNAL_DIRECT_PHASE1",
+            intent_type="SELL_TO_OPEN",
+        ),
+    )
+
+    pricing = _entry_execution_pricing_for_bridge(
+        config=config,
+        intent=_intent_from_config(config),
+        quote_context={
+            "quote_source_label": "LIVE",
+            "updated_at": "2026-05-14T12:25:25+00:00",
+            "bid_price": 29751.75,
+            "ask_price": 29752.0,
+            "last_price": 29751.75,
+        },
+        qualified_contract_report=_qualified_contract_report(),
+        now=datetime(2026, 5, 14, 12, 25, 30, tzinfo=timezone.utc),
+    )
+
+    assert pricing["pricing_source"] == "IBKR_LIVE_BID"
+    assert pricing["pricing_reference_price"] == 29751.75
+    assert pricing["marketable_limit_offset_ticks"] == 1.0
+    assert pricing["limit_price"] == 29751.5
+    assert pricing["limit_vs_runtime_price_points"] == 0.5
+    assert pricing["marketable_by_runtime_context"] is True
+    assert pricing["block_submit"] is False
+
+
+def test_active_evidence_runtime_reference_near_edge_uses_wider_bounded_offset(tmp_path: Path) -> None:
+    _write_runtime_1m_candle(tmp_path, symbol="MNQ", close=29752.0)
+    config = _config(
+        tmp_path,
+        strategy_id="mnq_us_active_participation_long",
+        symbol="MNQ",
+        contract_month="202606",
+        caller_metadata=_approved_runtime_metadata(
+            strategy_id="mnq_us_active_participation_long",
+            source_instrument="MNQ",
+            executable_proxy="MNQ",
+            bridge_proxy_mode="MNQ_SIGNAL_DIRECT_PHASE1",
+        ),
+    )
+
+    pricing = _entry_execution_pricing_for_bridge(
+        config=config,
+        intent=_intent_from_config(config),
+        quote_context=_quote_context(ask=29714.0),
+        qualified_contract_report=_qualified_contract_report(),
+        now=datetime(2026, 5, 14, 12, 26, 15, tzinfo=timezone.utc),
+    )
+
+    assert pricing["pricing_source"] == "RUNTIME_DATABENTO_1M_CLOSE"
+    assert pricing["pricing_reference_age_seconds"] == 75.0
+    assert pricing["marketable_limit_offset_ticks"] == 4.0
+    assert pricing["limit_price"] == 29753.0
+    assert pricing["stale_reference_blocker"] is None
+    assert pricing["block_submit"] is False
+
+
+def test_active_evidence_runtime_reference_too_stale_blocks_submit(tmp_path: Path) -> None:
+    _write_runtime_1m_candle(tmp_path, symbol="MNQ", close=29752.0)
+    config = _config(
+        tmp_path,
+        strategy_id="mnq_us_active_participation_long",
+        symbol="MNQ",
+        contract_month="202606",
+        caller_metadata=_approved_runtime_metadata(
+            strategy_id="mnq_us_active_participation_long",
+            source_instrument="MNQ",
+            executable_proxy="MNQ",
+            bridge_proxy_mode="MNQ_SIGNAL_DIRECT_PHASE1",
+        ),
+    )
+
+    pricing = _entry_execution_pricing_for_bridge(
+        config=config,
+        intent=_intent_from_config(config),
+        quote_context=_quote_context(ask=29714.0),
+        qualified_contract_report=_qualified_contract_report(),
+        now=datetime(2026, 5, 14, 12, 26, 40, tzinfo=timezone.utc),
+    )
+
+    assert pricing["pricing_reference_age_seconds"] == 100.0
+    assert pricing["limit_price"] is None
+    assert pricing["block_submit"] is True
+    assert pricing["block_reason"] == "ACTIVE_EVIDENCE_ENTRY_REFERENCE_STALE"
+    assert pricing["stale_reference_blocker"] == "ACTIVE_EVIDENCE_ENTRY_REFERENCE_STALE"
+
+
+def test_active_evidence_offset_is_capped_by_max_slippage_ticks(tmp_path: Path) -> None:
+    _write_runtime_1m_candle(tmp_path, symbol="MNQ", close=29752.0)
+    config = _config(
+        tmp_path,
+        strategy_id="mnq_us_active_participation_long",
+        symbol="MNQ",
+        contract_month="202606",
+        caller_metadata={
+            **_approved_runtime_metadata(
+                strategy_id="mnq_us_active_participation_long",
+                source_instrument="MNQ",
+                executable_proxy="MNQ",
+                bridge_proxy_mode="MNQ_SIGNAL_DIRECT_PHASE1",
+            ),
+            "entry_marketable_limit_offset_ticks": 99,
+            "entry_max_slippage_ticks": 2,
+        },
+    )
+
+    pricing = _entry_execution_pricing_for_bridge(
+        config=config,
+        intent=_intent_from_config(config),
+        quote_context=_quote_context(ask=29714.0),
+        qualified_contract_report=_qualified_contract_report(),
+        now=datetime(2026, 5, 14, 12, 26, 15, tzinfo=timezone.utc),
+    )
+
+    assert pricing["max_slippage_ticks"] == 2.0
+    assert pricing["marketable_limit_offset_ticks"] == 2.0
+    assert pricing["limit_price"] == 29752.5
+    assert pricing["block_submit"] is False
+
+
+def test_non_active_evidence_lane_keeps_existing_runtime_pricing_window(tmp_path: Path) -> None:
+    _write_runtime_1m_candle(tmp_path, symbol="MNQ", close=29752.0)
+    config = _config(
+        tmp_path,
+        strategy_id="mnq_1x_ny_early_core__us_midday_long",
+        symbol="MNQ",
+        contract_month="202606",
+        caller_metadata=_approved_runtime_metadata(
+            strategy_id="mnq_1x_ny_early_core__us_midday_long",
+            source_instrument="MNQ",
+            executable_proxy="MNQ",
+            bridge_proxy_mode="MNQ_SIGNAL_DIRECT_PHASE1",
+        ),
+    )
+
+    pricing = _entry_execution_pricing_for_bridge(
+        config=config,
+        intent=_intent_from_config(config),
+        quote_context=_quote_context(ask=29714.0),
+        qualified_contract_report=_qualified_contract_report(),
+        now=datetime(2026, 5, 14, 12, 26, 40, tzinfo=timezone.utc),
+    )
+
+    assert pricing["execution_price_source"] == "RUNTIME_DATABENTO_1M_CLOSE"
+    assert pricing["limit_offset_ticks"] == 1.0
+    assert pricing["limit_price"] == 29752.25
+    assert pricing["block_submit"] is False
+
+
 def test_leak_test_buy_entry_uses_bounded_marketable_runtime_offset(tmp_path: Path) -> None:
     _write_runtime_1m_candle(tmp_path, symbol="MNQ", close=29321.0)
     config = _config(
@@ -1056,6 +1320,262 @@ def test_entry_execution_pricing_failure_is_a_blocking_preflight_check(tmp_path:
     assert failure["detail"] == "DELAYED_QUOTE_NOT_EXECUTION_SAFE"
 
 
+def test_entry_preflight_blocks_opposite_direction_when_broker_quantity_nonzero(tmp_path: Path) -> None:
+    config = _config(
+        tmp_path,
+        strategy_id="mes_us_active_participation_short",
+        symbol="MES",
+        action="SELL",
+        caller_metadata=_approved_runtime_metadata(
+            strategy_id="mes_us_active_participation_short",
+            source_instrument="MES",
+            executable_proxy="MES",
+            action="SELL",
+            intent_type="SELL_TO_OPEN",
+        ),
+    )
+    checks = _build_preflight_checks(
+        config=config,
+        intent=_intent_from_config(config),
+        selected_account_id="DUM882026",
+        open_orders={"open_order_count": 0},
+        current_position_quantity=1.0,
+        quote_context=_quote_context(),
+        exact_contract_report={"exact_contract": {}},
+        qualified_contract_report=_qualified_contract_report(min_tick=0.25),
+        audit_events=[],
+        entry_execution_pricing={"is_entry": True, "execution_price_source": "RUNTIME_DATABENTO_1M_CLOSE", "block_submit": False},
+    )
+
+    failure = next(row for row in checks if row["name"] == "same_symbol_broker_qty_anti_flip")
+    assert failure["passed"] is False
+    assert failure["blocking"] is True
+    assert "SAME_SYMBOL_BROKER_QTY_ANTI_FLIP_LOCK" in failure["detail"]
+
+
+def test_entry_preflight_blocks_same_direction_stacking_when_broker_quantity_nonzero(tmp_path: Path) -> None:
+    config = _config(
+        tmp_path,
+        strategy_id="mnq_us_active_participation_long_2",
+        symbol="MNQ",
+        action="BUY",
+        caller_metadata=_approved_runtime_metadata(
+            strategy_id="mnq_us_active_participation_long_2",
+            source_instrument="MNQ",
+            executable_proxy="MNQ",
+            action="BUY",
+            intent_type="BUY_TO_OPEN",
+        ),
+    )
+    checks = _build_preflight_checks(
+        config=config,
+        intent=_intent_from_config(config),
+        selected_account_id="DUM882026",
+        open_orders={"open_order_count": 0},
+        current_position_quantity=1.0,
+        quote_context=_quote_context(),
+        exact_contract_report={"exact_contract": {}},
+        qualified_contract_report=_qualified_contract_report(min_tick=0.25),
+        audit_events=[],
+        entry_execution_pricing={"is_entry": True, "execution_price_source": "RUNTIME_DATABENTO_1M_CLOSE", "block_submit": False},
+    )
+
+    failure = next(row for row in checks if row["name"] == "same_symbol_broker_qty_anti_flip")
+    assert failure["passed"] is False
+    assert failure["blocking"] is True
+
+
+def test_entry_preflight_allows_flat_broker_quantity(tmp_path: Path) -> None:
+    config = _config(
+        tmp_path,
+        strategy_id="mnq_us_active_participation_short",
+        symbol="MNQ",
+        action="SELL",
+        caller_metadata=_approved_runtime_metadata(
+            strategy_id="mnq_us_active_participation_short",
+            source_instrument="MNQ",
+            executable_proxy="MNQ",
+            action="SELL",
+            intent_type="SELL_TO_OPEN",
+        ),
+    )
+    checks = _build_preflight_checks(
+        config=config,
+        intent=_intent_from_config(config),
+        selected_account_id="DUM882026",
+        open_orders={"open_order_count": 0},
+        current_position_quantity=0.0,
+        quote_context=_quote_context(),
+        exact_contract_report={"exact_contract": {}},
+        qualified_contract_report=_qualified_contract_report(min_tick=0.25),
+        audit_events=[],
+        entry_execution_pricing={"is_entry": True, "execution_price_source": "RUNTIME_DATABENTO_1M_CLOSE", "block_submit": False},
+    )
+
+    row = next(row for row in checks if row["name"] == "same_symbol_broker_qty_anti_flip")
+    assert row["passed"] is True
+    assert row["blocking"] is True
+
+
+def test_managed_close_preflight_not_blocked_by_entry_broker_quantity_lock(tmp_path: Path) -> None:
+    config = _config(
+        tmp_path,
+        strategy_id="mes_us_active_participation_long",
+        symbol="MES",
+        action="SELL",
+        limit_price_model="DELAYED_BID_MINUS_1T_MARKETABLE_SELL",
+        caller_metadata={
+            **_approved_runtime_metadata(
+                strategy_id="mes_us_active_participation_long",
+                source_instrument="MES",
+                executable_proxy="MES",
+                action="SELL",
+                intent_type="SELL_TO_CLOSE",
+            ),
+            "lifecycle_id": "managed-mes-long",
+        },
+    )
+    intent = _intent_from_config(config)
+    policy = _exit_attempt_policy_for_bridge(
+        config=config,
+        intent=intent,
+        history_events=[],
+        current_position_quantity=1.0,
+        open_orders={"open_order_count": 0},
+        phase1_gate={"ready": True},
+    )
+    checks = _build_preflight_checks(
+        config=config,
+        intent=intent,
+        selected_account_id="DUM882026",
+        open_orders={"open_order_count": 0},
+        current_position_quantity=1.0,
+        quote_context=_quote_context(),
+        exact_contract_report={"exact_contract": {}},
+        qualified_contract_report=_qualified_contract_report(min_tick=0.25),
+        audit_events=[],
+        exit_attempt_policy=policy,
+        entry_execution_pricing={"is_close": True, "execution_price_source": "RUNTIME_DATABENTO_1M_CLOSE", "block_submit": False},
+    )
+
+    assert not any(row["name"] == "same_symbol_broker_qty_anti_flip" for row in checks)
+    close_row = next(row for row in checks if row["name"] == "broker_position_present_for_close")
+    assert close_row["passed"] is True
+
+
+def test_futures_contract_resolver_blocks_new_mgc_june_entry_before_submit(tmp_path: Path) -> None:
+    config = _config(
+        tmp_path,
+        submit=True,
+        caller_metadata={
+            **_approved_runtime_metadata(strategy_id="ATP_COMPANION_V1_ASIA_US", source_instrument="MGC", executable_proxy="MGC"),
+            "intent_type": "BUY_TO_OPEN",
+        },
+    )
+    checks = _build_preflight_checks(
+        config=config,
+        intent=_intent_from_config(config),
+        selected_account_id="DUM882026",
+        open_orders={"open_order_count": 0},
+        current_position_quantity=0.0,
+        quote_context=_quote_context(),
+        exact_contract_report={"exact_contract": {}},
+        qualified_contract_report={
+            "ok": True,
+            "qualified_contract": {
+                "symbol": "MGC",
+                "expiry": "20260626",
+                "con_id": 712565978,
+                "local_symbol": "MGCM6",
+                "min_tick": 0.1,
+            },
+            "qualified_contract_identifier": 712565978,
+            "api_contract_details": [
+                {
+                    "symbol": "MGC",
+                    "expiry": "20260626",
+                    "con_id": 712565978,
+                    "local_symbol": "MGCM6",
+                    "min_tick": 0.1,
+                    "multiplier": "10",
+                    "updated_at": "2999-01-01T00:00:00+00:00",
+                }
+            ],
+        },
+        audit_events=[],
+        entry_execution_pricing={
+            "is_entry": True,
+            "execution_price_source": "RUNTIME_DATABENTO_1M_CLOSE",
+            "block_submit": False,
+        },
+    )
+
+    resolver = next(row for row in checks if row["name"] == "futures_contract_resolver")
+    assert resolver["passed"] is False
+    assert resolver["blocking"] is True
+    assert resolver["blocker"] == "CONTRACT_NEAR_EXPIRY"
+    assert resolver["recommended_contract"]["contract_month"] == "202608"
+
+
+def test_futures_contract_resolver_does_not_rewrite_existing_lifecycle_exit_contract(tmp_path: Path) -> None:
+    config = _config(
+        tmp_path,
+        submit=True,
+        action="SELL",
+        limit_price_model="DELAYED_BID_MINUS_1T_MARKETABLE_SELL",
+        caller_metadata={
+            **_approved_runtime_metadata(
+                strategy_id="ATP_COMPANION_V1_ASIA_US",
+                source_instrument="MGC",
+                executable_proxy="MGC",
+                action="SELL",
+                intent_type="SELL_TO_CLOSE",
+            ),
+            "lifecycle_id": "existing-mgc-lifecycle",
+        },
+    )
+    intent = _intent_from_config(config)
+    policy = _exit_attempt_policy_for_bridge(
+        config=config,
+        intent=intent,
+        history_events=[],
+        current_position_quantity=1.0,
+        open_orders={"open_order_count": 0},
+        phase1_gate={"ready": True},
+    )
+    checks = _build_preflight_checks(
+        config=config,
+        intent=intent,
+        selected_account_id="DUM882026",
+        open_orders={"open_order_count": 0},
+        current_position_quantity=1.0,
+        quote_context=_quote_context(),
+        exact_contract_report={"exact_contract": {}},
+        qualified_contract_report={
+            "ok": True,
+            "qualified_contract": {
+                "symbol": "MGC",
+                "expiry": "20260626",
+                "con_id": 712565978,
+                "local_symbol": "MGCM6",
+                "min_tick": 0.1,
+            },
+            "api_contract_details": [],
+        },
+        audit_events=[],
+        exit_attempt_policy=policy,
+        entry_execution_pricing={
+            "is_close": True,
+            "execution_price_source": "RUNTIME_DATABENTO_1M_CLOSE",
+            "block_submit": False,
+        },
+    )
+
+    resolver = next(row for row in checks if row["name"] == "futures_contract_resolver")
+    assert resolver["passed"] is True
+    assert resolver["blocker"] == "CONTRACT_EXIT_OR_MANAGEMENT_ALLOWED"
+
+
 def test_stop_exit_uses_hard_policy_and_runtime_price_source(tmp_path: Path) -> None:
     _write_runtime_1m_candle(
         tmp_path,
@@ -1253,149 +1773,6 @@ def test_working_order_still_blocks_duplicate_entry_even_with_runtime_pricing(tm
     duplicate_guard = next(row for row in checks if row["name"] == "no_working_orders")
     assert duplicate_guard["passed"] is False
     assert duplicate_guard["blocking"] is True
-
-
-def test_entry_preflight_blocks_opposite_direction_when_broker_quantity_nonzero(tmp_path: Path) -> None:
-    config = _config(
-        tmp_path,
-        strategy_id="mes_us_active_participation_short",
-        symbol="MES",
-        action="SELL",
-        caller_metadata=_approved_runtime_metadata(
-            strategy_id="mes_us_active_participation_short",
-            source_instrument="MES",
-            executable_proxy="MES",
-            action="SELL",
-            intent_type="SELL_TO_OPEN",
-        ),
-    )
-    checks = _build_preflight_checks(
-        config=config,
-        intent=_intent_from_config(config),
-        selected_account_id="DUM882026",
-        open_orders={"open_order_count": 0},
-        current_position_quantity=1.0,
-        quote_context=_quote_context(),
-        exact_contract_report={"exact_contract": {}},
-        qualified_contract_report=_qualified_contract_report(min_tick=0.25),
-        audit_events=[],
-        entry_execution_pricing={"is_entry": True, "execution_price_source": "RUNTIME_DATABENTO_1M_CLOSE", "block_submit": False},
-    )
-
-    failure = next(row for row in checks if row["name"] == "same_symbol_broker_qty_anti_flip")
-    assert failure["passed"] is False
-    assert failure["blocking"] is True
-    assert "SAME_SYMBOL_BROKER_QTY_ANTI_FLIP_LOCK" in failure["detail"]
-
-
-def test_entry_preflight_blocks_same_direction_stacking_when_broker_quantity_nonzero(tmp_path: Path) -> None:
-    config = _config(
-        tmp_path,
-        strategy_id="mnq_us_active_participation_long_2",
-        symbol="MNQ",
-        action="BUY",
-        caller_metadata=_approved_runtime_metadata(
-            strategy_id="mnq_us_active_participation_long_2",
-            source_instrument="MNQ",
-            executable_proxy="MNQ",
-            action="BUY",
-            intent_type="BUY_TO_OPEN",
-        ),
-    )
-    checks = _build_preflight_checks(
-        config=config,
-        intent=_intent_from_config(config),
-        selected_account_id="DUM882026",
-        open_orders={"open_order_count": 0},
-        current_position_quantity=1.0,
-        quote_context=_quote_context(),
-        exact_contract_report={"exact_contract": {}},
-        qualified_contract_report=_qualified_contract_report(min_tick=0.25),
-        audit_events=[],
-        entry_execution_pricing={"is_entry": True, "execution_price_source": "RUNTIME_DATABENTO_1M_CLOSE", "block_submit": False},
-    )
-
-    failure = next(row for row in checks if row["name"] == "same_symbol_broker_qty_anti_flip")
-    assert failure["passed"] is False
-    assert failure["blocking"] is True
-
-
-def test_entry_preflight_allows_flat_broker_quantity(tmp_path: Path) -> None:
-    config = _config(
-        tmp_path,
-        strategy_id="mnq_us_active_participation_short",
-        symbol="MNQ",
-        action="SELL",
-        caller_metadata=_approved_runtime_metadata(
-            strategy_id="mnq_us_active_participation_short",
-            source_instrument="MNQ",
-            executable_proxy="MNQ",
-            action="SELL",
-            intent_type="SELL_TO_OPEN",
-        ),
-    )
-    checks = _build_preflight_checks(
-        config=config,
-        intent=_intent_from_config(config),
-        selected_account_id="DUM882026",
-        open_orders={"open_order_count": 0},
-        current_position_quantity=0.0,
-        quote_context=_quote_context(),
-        exact_contract_report={"exact_contract": {}},
-        qualified_contract_report=_qualified_contract_report(min_tick=0.25),
-        audit_events=[],
-        entry_execution_pricing={"is_entry": True, "execution_price_source": "RUNTIME_DATABENTO_1M_CLOSE", "block_submit": False},
-    )
-
-    row = next(row for row in checks if row["name"] == "same_symbol_broker_qty_anti_flip")
-    assert row["passed"] is True
-    assert row["blocking"] is True
-
-
-def test_managed_close_preflight_not_blocked_by_entry_broker_quantity_lock(tmp_path: Path) -> None:
-    config = _config(
-        tmp_path,
-        strategy_id="mes_us_active_participation_long",
-        symbol="MES",
-        action="SELL",
-        limit_price_model="DELAYED_BID_MINUS_1T_MARKETABLE_SELL",
-        caller_metadata={
-            **_approved_runtime_metadata(
-                strategy_id="mes_us_active_participation_long",
-                source_instrument="MES",
-                executable_proxy="MES",
-                action="SELL",
-                intent_type="SELL_TO_CLOSE",
-            ),
-            "lifecycle_id": "managed-mes-long",
-        },
-    )
-    intent = _intent_from_config(config)
-    policy = _exit_attempt_policy_for_bridge(
-        config=config,
-        intent=intent,
-        history_events=[],
-        current_position_quantity=1.0,
-        open_orders={"open_order_count": 0},
-        phase1_gate={"ready": True},
-    )
-    checks = _build_preflight_checks(
-        config=config,
-        intent=intent,
-        selected_account_id="DUM882026",
-        open_orders={"open_order_count": 0},
-        current_position_quantity=1.0,
-        quote_context=_quote_context(),
-        exact_contract_report={"exact_contract": {}},
-        qualified_contract_report=_qualified_contract_report(min_tick=0.25),
-        audit_events=[],
-        exit_attempt_policy=policy,
-        entry_execution_pricing={"is_close": True, "execution_price_source": "RUNTIME_DATABENTO_1M_CLOSE", "block_submit": False},
-    )
-
-    assert not any(row["name"] == "same_symbol_broker_qty_anti_flip" for row in checks)
-    close_row = next(row for row in checks if row["name"] == "broker_position_present_for_close")
-    assert close_row["passed"] is True
 
 
 def test_schema_contains_required_fields() -> None:

@@ -256,6 +256,51 @@ def _write_canonical_readiness(
     )
 
 
+def _write_paper_runtime_truth(
+    tmp_path: Path,
+    *,
+    generated_at: str = "2999-01-01T00:00:00+00:00",
+    writer_authority: str = "SINGLE_WRITER",
+    paper_only: bool = True,
+    live_money_eligible: bool = False,
+    paper_proof_invoked: bool = False,
+    freshness_state: str = "FRESH",
+    heartbeat_state: str = "HEALTHY",
+    duplicate_writer_detected: bool = False,
+) -> None:
+    path = (
+        tmp_path
+        / "outputs"
+        / "probationary_pattern_engine"
+        / "paper_session"
+        / "runtime"
+        / "paper_runtime_truth.json"
+    )
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        json.dumps(
+            {
+                "schema_version": "probationary_paper_runtime_truth_v1",
+                "generated_at": generated_at,
+                "runtime_instance_id": "test-paper-stack",
+                "runtime_mode": "PAPER",
+                "paper_only": paper_only,
+                "live_money_eligible": live_money_eligible,
+                "paper_proof_invoked": paper_proof_invoked,
+                "writer_authority": writer_authority,
+                "freshness_state": freshness_state,
+                "heartbeat_state": heartbeat_state,
+                "lane_count": 1,
+                "duplicate_writer_detection": {
+                    "duplicate_writer_detected": duplicate_writer_detected,
+                    "duplicate_runtime_submitter_count": 1 if duplicate_writer_detected else 0,
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+
 def _write_shared_services_authority(
     tmp_path: Path,
     *,
@@ -806,13 +851,14 @@ def test_governance_uses_fresh_canonical_readiness_over_stale_dashboard_snapshot
         paper_trade_allowed=False,
     )
     _write_canonical_readiness(tmp_path)
+    _write_paper_runtime_truth(tmp_path)
     _write_signal_audit(tmp_path)
     _write_strategy_performance(tmp_path)
 
     artifacts = run_ibkr_paper_strategy_governance(config=_config(tmp_path))
 
     nq = next(row for row in artifacts.performance_rows if row["strategy_id"] == "nq_1x_ny_early_core__us_late_long")
-    assert nq["backend_source_readiness"]["source"] == "canonical_track_b_runtime_readiness"
+    assert nq["backend_source_readiness"]["source"] == "canonical_paper_stack_runtime_authority"
     assert nq["backend_source_readiness"]["canonical_readiness_authoritative"] is True
     assert nq["backend_source_readiness"]["live_ready"] is True
     assert nq["backend_source_readiness"]["paper_trade_allowed"] is True
@@ -837,6 +883,7 @@ def test_governance_blocks_when_canonical_runtime_down_even_if_dashboard_snapsho
         runtime_healthy=False,
         runtime_ingestion_fresh=False,
     )
+    _write_paper_runtime_truth(tmp_path)
     _write_signal_audit(tmp_path)
     _write_strategy_performance(tmp_path)
 
@@ -878,6 +925,7 @@ def test_governance_uses_shared_services_authority_over_stale_canonical_runtime_
     )
     _write_shared_services_authority(tmp_path, symbol="NQ")
     _patch_guarded_loop_process(monkeypatch, tmp_path)
+    _write_paper_runtime_truth(tmp_path)
     _write_signal_audit(tmp_path)
     _write_strategy_performance(tmp_path)
 
@@ -885,13 +933,14 @@ def test_governance_uses_shared_services_authority_over_stale_canonical_runtime_
 
     nq = next(row for row in artifacts.performance_rows if row["strategy_id"] == "nq_1x_ny_early_core__us_late_long")
     readiness = nq["backend_source_readiness"]
-    assert readiness["source"] == "execution_core_control_plane_safe_state_guarded_loop_phase1"
+    assert readiness["source"] == "canonical_track_b_runtime_readiness"
     assert readiness["shared_services_authority_ready"] is True
     assert readiness["dashboard_projection_consumed"] is False
-    assert readiness["live_ready"] is True
-    assert readiness["paper_trade_allowed"] is True
-    assert "backend_or_source_not_live_ready" not in nq["submit_block_reasons"]
-    assert nq["submit_allowed"] is True
+    assert readiness["live_ready"] is False
+    assert readiness["paper_trade_allowed"] is False
+    assert "canonical_readiness_not_submit_capable" in readiness["block_reasons"]
+    assert nq["submit_block_reasons"] == ["backend_or_source_not_live_ready"]
+    assert nq["submit_allowed"] is False
 
 
 def test_governance_shared_services_blocks_when_control_plane_blocked(
@@ -1006,6 +1055,7 @@ def test_governance_blocks_when_canonical_readiness_is_stale(tmp_path: Path) -> 
     _write_dashboard(tmp_path)
     _write_backend_source_readiness(tmp_path)
     _write_canonical_readiness(tmp_path, generated_at="2026-04-29T12:28:50.338596+00:00")
+    _write_paper_runtime_truth(tmp_path)
     _write_signal_audit(tmp_path)
     _write_strategy_performance(tmp_path)
 
@@ -1027,6 +1077,7 @@ def test_governance_blocks_when_canonical_live_money_eligible_is_true(tmp_path: 
     _write_dashboard(tmp_path)
     _write_backend_source_readiness(tmp_path)
     _write_canonical_readiness(tmp_path, live_money_eligible=True)
+    _write_paper_runtime_truth(tmp_path)
     _write_signal_audit(tmp_path)
     _write_strategy_performance(tmp_path)
 
@@ -1037,6 +1088,83 @@ def test_governance_blocks_when_canonical_live_money_eligible_is_true(tmp_path: 
     assert "canonical_live_money_eligible_true" in nq["backend_source_readiness"]["block_reasons"]
     assert nq["live_money_eligible"] is False
     assert nq["submit_allowed"] is False
+
+
+def test_governance_blocks_when_canonical_paper_proof_invoked_is_true(tmp_path: Path) -> None:
+    _write_monitor(
+        tmp_path,
+        broker_position_quantity=0.0,
+        ledger_position_quantity=0.0,
+    )
+    _write_ledger(tmp_path)
+    _write_dashboard(tmp_path)
+    _write_backend_source_readiness(tmp_path)
+    _write_canonical_readiness(tmp_path)
+    path = tmp_path / "outputs" / "operator_dashboard" / "runtime" / "latest_canonical_readiness.json"
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    payload["paper_proof_invoked"] = True
+    path.write_text(json.dumps(payload), encoding="utf-8")
+    _write_paper_runtime_truth(tmp_path)
+    _write_signal_audit(tmp_path)
+    _write_strategy_performance(tmp_path)
+
+    artifacts = run_ibkr_paper_strategy_governance(config=_config(tmp_path))
+
+    nq = next(row for row in artifacts.performance_rows if row["strategy_id"] == "nq_1x_ny_early_core__us_late_long")
+    assert nq["backend_source_readiness"]["live_ready"] is False
+    assert "canonical_paper_proof_invoked_true" in nq["backend_source_readiness"]["block_reasons"]
+    assert nq["submit_allowed"] is False
+
+
+def test_governance_blocks_when_paper_runtime_truth_is_stale(tmp_path: Path) -> None:
+    _write_monitor(
+        tmp_path,
+        broker_position_quantity=0.0,
+        ledger_position_quantity=0.0,
+    )
+    _write_ledger(tmp_path)
+    _write_dashboard(tmp_path)
+    _write_backend_source_readiness(tmp_path)
+    _write_canonical_readiness(tmp_path)
+    _write_paper_runtime_truth(tmp_path, generated_at="2026-04-29T12:28:50.338596+00:00")
+    _write_signal_audit(tmp_path)
+    _write_strategy_performance(tmp_path)
+
+    artifacts = run_ibkr_paper_strategy_governance(config=_config(tmp_path))
+
+    nq = next(row for row in artifacts.performance_rows if row["strategy_id"] == "nq_1x_ny_early_core__us_late_long")
+    assert nq["backend_source_readiness"]["live_ready"] is False
+    assert "paper_runtime_truth_stale" in nq["backend_source_readiness"]["block_reasons"]
+    assert nq["submit_allowed"] is False
+
+
+def test_governance_blocks_when_canonical_and_deprecated_authority_conflict(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _write_monitor(
+        tmp_path,
+        broker_position_quantity=0.0,
+        ledger_position_quantity=0.0,
+    )
+    _write_ledger(tmp_path)
+    _write_dashboard(tmp_path)
+    _write_backend_source_readiness(tmp_path)
+    _write_canonical_readiness(tmp_path)
+    _write_paper_runtime_truth(tmp_path)
+    _write_shared_services_authority(tmp_path, symbol="NQ", safe_state_classification="SAFE_STATE_HARD_HOLD")
+    _patch_guarded_loop_process(monkeypatch, tmp_path)
+    _write_signal_audit(tmp_path)
+    _write_strategy_performance(tmp_path)
+
+    artifacts = run_ibkr_paper_strategy_governance(config=_config(tmp_path))
+
+    nq = next(row for row in artifacts.performance_rows if row["strategy_id"] == "nq_1x_ny_early_core__us_late_long")
+    reasons = nq["backend_source_readiness"]["block_reasons"]
+    assert "runtime_authority_conflict" in reasons
+    assert "safe_state_not_normal" in reasons
+    assert nq["submit_allowed"] is False
+
 
 def test_governance_blocks_healthy_monitor_when_source_readiness_is_not_live(tmp_path: Path) -> None:
     _write_monitor(

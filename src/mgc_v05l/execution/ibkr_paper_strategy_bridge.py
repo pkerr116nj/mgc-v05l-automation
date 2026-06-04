@@ -60,6 +60,12 @@ from ..execution_core.track_b_exit_safety import (
     classify_exit_attempt_policy,
     classify_exit_urgency,
 )
+from ..execution_core.track_b_futures_contract_resolver import (
+    CONTRACT_ALLOWED,
+    FuturesContractResolverInput,
+    evaluate_futures_contract_pre_submit,
+    recommended_gold_contract_month,
+)
 from ..execution_core.track_b_paper_broker_reconciliation import (
     ReconciliationConfig,
     reconcile_track_b_paper_broker_truth,
@@ -138,6 +144,9 @@ _ENTRY_DELAYED_DIAGNOSTIC_SOURCE = "IBKR_DELAYED_DIAGNOSTIC_ONLY"
 _ENTRY_STRATEGY_DEFINED_LIMIT_SOURCE = "STRATEGY_DEFINED_ENTRY_LIMIT"
 _ENTRY_RESTING_RUNTIME_PULLBACK_SOURCE = "RUNTIME_DATABENTO_1M_PULLBACK_LIMIT"
 _ENTRY_RUNTIME_CANDLE_MAX_AGE_SECONDS = 180.0
+_ACTIVE_EVIDENCE_REFERENCE_FRESH_SECONDS = 30.0
+_ACTIVE_EVIDENCE_RUNTIME_WIDEN_SECONDS = 60.0
+_ACTIVE_EVIDENCE_RUNTIME_MAX_AGE_SECONDS = 90.0
 _ENTRY_RUNTIME_LIMIT_OFFSET_TICKS = 1.0
 _ENTRY_AGGRESSIVE_LIMIT_OFFSET_TICKS = 2.0
 _ENTRY_MAX_LIMIT_OFFSET_TICKS = 4.0
@@ -154,6 +163,16 @@ _ENTRY_RUNTIME_CANDLE_PATH = (
     / "1m"
     / "latest_runtime_candles.json"
 )
+_ACTIVE_EVIDENCE_PARTICIPATION_LANE_IDS = {
+    "mnq_us_active_participation_long",
+    "mnq_us_active_participation_short",
+    "mnq_globex_active_participation_long",
+    "mnq_globex_active_participation_short",
+    "mes_us_active_participation_long",
+    "mes_us_active_participation_short",
+    "mes_globex_active_participation_long",
+    "mes_globex_active_participation_short",
+}
 _SCHEMA_ACTIONS = {"BUY", "SELL", "HOLD", "EXIT", "NO_ACTION"}
 _ARTIFACT_STEM = "ibkr_paper_strategy_bridge"
 _KNOWN_MANAGED_EXIT_STATE_PATH = (
@@ -589,6 +608,7 @@ def run_ibkr_paper_strategy_bridge(
     live_trade_registry_events: list[dict[str, Any]] = []
     pre_action_snapshot_validation: dict[str, Any] = {}
     runtime_control_plane_authorization: dict[str, Any] = {}
+    futures_contract_resolver_status: dict[str, Any] = {}
     _record_bridge_audit(
         audit_events,
         event_type="intent_received",
@@ -799,6 +819,22 @@ def run_ibkr_paper_strategy_bridge(
             timeout_seconds=config.timeout_seconds,
             sleep_fn=sleep_fn,
         )
+        recommendation_contract_report = _recommendation_contract_report_for_bridge(
+            config=config,
+            intent=intent,
+            target=expected_target,
+            runtime=runtime,
+            sleep_fn=sleep_fn,
+        )
+        futures_contract_resolver_status = _futures_contract_resolver_for_bridge(
+            config=config,
+            intent=intent,
+            target=expected_target,
+            qualified_contract_report=qualified_contract_report,
+            recommendation_contract_report=recommendation_contract_report,
+            runtime=runtime,
+            now=started_at,
+        )
         quote_context = _probe_delayed_quote_context(
             transport=runtime.transport,
             collector=runtime.collector,
@@ -844,6 +880,7 @@ def run_ibkr_paper_strategy_bridge(
             audit_events=audit_events,
             exit_attempt_policy=exit_attempt_policy,
             entry_execution_pricing=entry_execution_pricing,
+            futures_contract_resolver_status=futures_contract_resolver_status,
         )
         preflight_checks = [*static_checks, *dynamic_checks]
         blocking_failures = [row for row in preflight_checks if row.get("blocking") and not row.get("passed")]
@@ -886,6 +923,7 @@ def run_ibkr_paper_strategy_bridge(
                 connection_diagnostics=_bridge_connection_diagnostics(config=config, runtime=runtime),
                 pre_action_snapshot_validation=pre_action_snapshot_validation,
                 runtime_control_plane_authorization=runtime_control_plane_authorization,
+                futures_contract_resolver_status=futures_contract_resolver_status,
             )
             return IbkrPaperStrategyBridgeArtifacts(classification=classification, report=report, audit_events=audit_events)
 
@@ -1093,6 +1131,7 @@ def run_ibkr_paper_strategy_bridge(
             connection_diagnostics=_bridge_connection_diagnostics(config=config, runtime=runtime),
             pre_action_snapshot_validation=pre_action_snapshot_validation,
             runtime_control_plane_authorization=runtime_control_plane_authorization,
+            futures_contract_resolver_status=futures_contract_resolver_status,
         )
         if known_managed_exit_order_persistence:
             report["known_managed_exit_order_persistence"] = known_managed_exit_order_persistence
@@ -1145,6 +1184,7 @@ def run_ibkr_paper_strategy_bridge(
             "dashboard_projection_consumed": False,
             "pre_action_snapshot_validation": pre_action_snapshot_validation,
             "runtime_control_plane_authorization": runtime_control_plane_authorization,
+            "futures_contract_resolver_status": futures_contract_resolver_status,
             "detail": str(exc),
             "errors": [] if runtime is None else list(runtime.collector.errors),
         }
@@ -2024,6 +2064,116 @@ def _int_or_none(value: Any) -> int | None:
         return None
 
 
+def _recommendation_contract_report_for_bridge(
+    *,
+    config: IbkrPaperStrategyBridgeConfig,
+    intent: IbkrPaperStrategyOrderIntent,
+    target: dict[str, Any],
+    runtime: _Runtime,
+    sleep_fn: Callable[[float], None],
+) -> dict[str, Any]:
+    if not config.submit or _is_close_intent(config=config, intent=intent):
+        return {}
+    symbol = str(target.get("symbol") or config.symbol or intent.symbol or "").strip().upper()
+    contract_month = str(target.get("contract_month") or config.contract_month or intent.contract_month or "").strip()
+    if symbol not in {"GC", "MGC"} or contract_month != "202606":
+        return {}
+    try:
+        return _qualify_futures_contract(
+            transport=runtime.transport,
+            collector=runtime.collector,
+            symbol=symbol,
+            expiry=recommended_gold_contract_month(),
+            timeout_seconds=config.timeout_seconds,
+            sleep_fn=sleep_fn,
+        )
+    except Exception as exc:
+        return {
+            "ok": False,
+            "detail": f"August 2026 recommendation contractDetails qualification failed: {exc}",
+            "api_contract_details": [],
+            "qualified_contract": {},
+        }
+
+
+def _futures_contract_resolver_for_bridge(
+    *,
+    config: IbkrPaperStrategyBridgeConfig,
+    intent: IbkrPaperStrategyOrderIntent,
+    target: dict[str, Any],
+    qualified_contract_report: dict[str, Any],
+    recommendation_contract_report: dict[str, Any] | None = None,
+    runtime: _Runtime | None = None,
+    now: datetime | None = None,
+) -> dict[str, Any]:
+    metadata = dict(config.caller_metadata or {})
+    warnings = _futures_contract_warning_messages(runtime=runtime, report=qualified_contract_report)
+    return evaluate_futures_contract_pre_submit(
+        FuturesContractResolverInput(
+            strategy_id=config.strategy_id,
+            symbol=str(target.get("symbol") or config.symbol or intent.symbol or "").strip().upper(),
+            contract_month=str(target.get("contract_month") or config.contract_month or intent.contract_month or "").strip(),
+            action=str(intent.action or config.action or "").strip().upper(),
+            intent_type=str(metadata.get("intent_type") or "").strip().upper() or None,
+            selected_target=target,
+            qualified_contract_report=qualified_contract_report,
+            recommendation_contract_report=recommendation_contract_report or {},
+            ibkr_warnings=warnings,
+            now=now,
+        )
+    )
+
+
+def _futures_contract_warning_messages(
+    *,
+    runtime: _Runtime | None,
+    report: dict[str, Any],
+) -> tuple[str, ...]:
+    warnings: list[str] = []
+    for key in ("warnings", "ibkr_warnings", "messages"):
+        value = report.get(key)
+        if isinstance(value, list):
+            warnings.extend(str(item) for item in value if str(item or "").strip())
+    if runtime is not None:
+        for row in list(getattr(runtime.collector, "errors", []) or []):
+            if isinstance(row, dict):
+                message = str(row.get("message") or "").strip()
+                if message:
+                    warnings.append(message)
+    return tuple(warnings)
+
+
+def _futures_contract_resolver_check(
+    *,
+    config: IbkrPaperStrategyBridgeConfig,
+    resolver_status: dict[str, Any],
+) -> dict[str, Any]:
+    if not config.submit:
+        return _check(
+            "futures_contract_resolver",
+            True,
+            True,
+            "Futures contract resolver pre-submit authority is enforced only for submit-capable bridge calls.",
+        )
+    passed = bool(resolver_status.get("submit_allowed"))
+    blocker = str(resolver_status.get("blocker") or resolver_status.get("classification") or "")
+    detail = str(resolver_status.get("detail") or "")
+    row = _check(
+        "futures_contract_resolver",
+        passed,
+        True,
+        (
+            f"{blocker}: {detail}"
+            if blocker and blocker != CONTRACT_ALLOWED and not passed
+            else detail or "Futures contract resolver passed pre-submit authority."
+        ),
+    )
+    row["blocker"] = blocker or None
+    row["roll_status"] = resolver_status.get("roll_status")
+    row["recommended_contract"] = resolver_status.get("recommended_contract")
+    return row
+
+
 def _build_preflight_checks(
     *,
     config: IbkrPaperStrategyBridgeConfig,
@@ -2037,6 +2187,7 @@ def _build_preflight_checks(
     audit_events: list[dict[str, Any]],
     exit_attempt_policy: ExitAttemptPolicy | None = None,
     entry_execution_pricing: dict[str, Any] | None = None,
+    futures_contract_resolver_status: dict[str, Any] | None = None,
 ) -> list[dict[str, Any]]:
     if exit_attempt_policy is None:
         exit_attempt_policy = classify_exit_attempt_policy(
@@ -2055,6 +2206,17 @@ def _build_preflight_checks(
     )
     expected_target = _bridge_phase1_target(config=config, intent=intent)
     expected_label = _phase1_target_detail_label(expected_target)
+    resolver_status = dict(
+        futures_contract_resolver_status
+        or _futures_contract_resolver_for_bridge(
+            config=config,
+            intent=intent,
+            target=expected_target,
+            qualified_contract_report=qualified_contract_report,
+            recommendation_contract_report={},
+            runtime=None,
+        )
+    )
     checks = [
         _check("account_match", selected_account_id == config.account_id == _EXPECTED_ACCOUNT_ID, True, "Paper bridge account must match DUM882026 exactly."),
         _check("daily_order_cap", _submitted_order_count(audit_events) < int(config.daily_order_cap), True, f"Daily bridge order cap is {config.daily_order_cap}."),
@@ -2075,6 +2237,7 @@ def _build_preflight_checks(
             True,
             f"Submitted contract must match the approved phase-1 execution target {expected_label}.",
         ),
+        _futures_contract_resolver_check(config=config, resolver_status=resolver_status),
         _check("strategy_allowed_state", True, True, "The bridge remains manual-only and the shadow ledger stays separate from broker execution."),
     ]
     if _is_close_intent(config=config, intent=intent):
@@ -2169,6 +2332,7 @@ def _build_preflight_checks(
             "current_position_quantity": current_position_quantity,
             "exact_contract": exact_contract_report.get("exact_contract"),
             "entry_execution_pricing": entry_execution_pricing,
+            "futures_contract_resolver_status": resolver_status,
         },
     )
     return checks
@@ -2986,6 +3150,7 @@ def _build_report(
     connection_diagnostics: dict[str, Any] | None = None,
     pre_action_snapshot_validation: dict[str, Any] | None = None,
     runtime_control_plane_authorization: dict[str, Any] | None = None,
+    futures_contract_resolver_status: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     strategy_identity = _resolve_strategy_identity(intent.strategy_id)
     return {
@@ -3036,6 +3201,7 @@ def _build_report(
             "qualified_contract_identifier": qualified_contract_report.get("qualified_contract_identifier"),
             "api_contract_details": qualified_contract_report.get("api_contract_details"),
         },
+        "futures_contract_resolver_status": futures_contract_resolver_status or {},
         "current_position_quantity": current_position_quantity,
         "preflight_checks": preflight_checks,
         "exit_attempt_policy": exit_attempt_policy.to_json_dict(),
@@ -4218,6 +4384,17 @@ def _entry_execution_pricing_for_bridge(
     block_submit = False
     block_reason = None
     limit_offset_ticks = _entry_marketable_limit_offset_ticks(config=config, policy=policy)
+    active_evidence_pricing = _active_evidence_entry_pricing_reference(
+        config=config,
+        intent=intent,
+        action=action,
+        quote_context=quote_context,
+        runtime_snapshot=runtime_snapshot,
+        runtime_price=runtime_price,
+        min_tick=float(min_tick),
+        requested_offset_ticks=limit_offset_ticks,
+        now=now,
+    )
     if entry_intent in {_ENTRY_INTENT_RESTING_PULLBACK_LIMIT, _ENTRY_INTENT_PASSIVE_ONLY}:
         if strategy_limit_price is not None:
             selected_limit = _round_price_to_tick(float(strategy_limit_price), float(min_tick))
@@ -4238,6 +4415,19 @@ def _entry_execution_pricing_for_bridge(
             block_submit = True
             block_reason = "PASSIVE_ENTRY_LIMIT_NOT_DEFINED"
             execution_price_source = "UNKNOWN"
+    elif marketable_policy and active_evidence_pricing.get("is_active_evidence"):
+        execution_price_source = str(active_evidence_pricing.get("pricing_source") or "UNKNOWN")
+        block_submit = bool(active_evidence_pricing.get("block_submit"))
+        block_reason = active_evidence_pricing.get("stale_reference_blocker")
+        limit_offset_ticks = float(active_evidence_pricing.get("marketable_limit_offset_ticks") or limit_offset_ticks)
+        reference_price = _float_or_none(active_evidence_pricing.get("pricing_reference_price"))
+        if not block_submit and reference_price is not None:
+            selected_limit = (
+                float(reference_price) + limit_offset_ticks * float(min_tick)
+                if action == "BUY"
+                else float(reference_price) - limit_offset_ticks * float(min_tick)
+            )
+            selected_limit = _round_price_to_tick(selected_limit, float(min_tick))
     elif marketable_policy and runtime_fresh:
         selected_limit = (
             float(runtime_price) + limit_offset_ticks * float(min_tick)
@@ -4303,6 +4493,21 @@ def _entry_execution_pricing_for_bridge(
         "entry_execution_intent": entry_intent,
         "execution_policy": policy,
         "execution_price_source": execution_price_source,
+        "pricing_source": active_evidence_pricing.get("pricing_source") or execution_price_source,
+        "pricing_reference_price": (
+            active_evidence_pricing["pricing_reference_price"]
+            if "pricing_reference_price" in active_evidence_pricing
+            else runtime_price
+        ),
+        "pricing_reference_ts": active_evidence_pricing.get("pricing_reference_ts") or runtime_snapshot.get("runtime_candle_timestamp"),
+        "pricing_reference_age_seconds": (
+            active_evidence_pricing["pricing_reference_age_seconds"]
+            if "pricing_reference_age_seconds" in active_evidence_pricing
+            else runtime_snapshot.get("runtime_data_age_seconds")
+        ),
+        "marketable_limit_offset_ticks": limit_offset_ticks if selected_limit is not None else None,
+        "max_slippage_ticks": active_evidence_pricing.get("max_slippage_ticks") or _ENTRY_MAX_LIMIT_OFFSET_TICKS,
+        "stale_reference_blocker": active_evidence_pricing.get("stale_reference_blocker"),
         "broker_quote_type": _broker_quote_type(quote_context),
         "delayed_bid": delayed_bid,
         "delayed_ask": delayed_ask,
@@ -4549,6 +4754,132 @@ def _entry_has_resting_price_metadata(*, config: IbkrPaperStrategyBridgeConfig) 
     )
 
 
+def _active_evidence_entry_pricing_reference(
+    *,
+    config: IbkrPaperStrategyBridgeConfig,
+    intent: IbkrPaperStrategyOrderIntent,
+    action: str,
+    quote_context: dict[str, Any],
+    runtime_snapshot: dict[str, Any],
+    runtime_price: float | None,
+    min_tick: float,
+    requested_offset_ticks: float,
+    now: datetime,
+) -> dict[str, Any]:
+    if not _is_active_evidence_participation_entry(config=config, intent=intent):
+        return {"is_active_evidence": False}
+    max_slippage_ticks = _active_evidence_max_slippage_ticks(config=config)
+    quote_reference = _active_evidence_live_quote_reference(
+        action=action,
+        quote_context=quote_context,
+        now=now,
+    )
+    if quote_reference.get("price") is not None and bool(quote_reference.get("fresh")):
+        offset_ticks = min(max(float(requested_offset_ticks), _ENTRY_RUNTIME_LIMIT_OFFSET_TICKS), max_slippage_ticks)
+        return {
+            "is_active_evidence": True,
+            "pricing_source": quote_reference.get("source"),
+            "pricing_reference_price": quote_reference.get("price"),
+            "pricing_reference_ts": quote_reference.get("timestamp"),
+            "pricing_reference_age_seconds": quote_reference.get("age_seconds"),
+            "marketable_limit_offset_ticks": offset_ticks,
+            "max_slippage_ticks": max_slippage_ticks,
+            "stale_reference_blocker": None,
+            "block_submit": False,
+        }
+    runtime_age = _float_or_none(runtime_snapshot.get("runtime_data_age_seconds"))
+    if runtime_price is not None and runtime_age is not None and runtime_age <= _ACTIVE_EVIDENCE_RUNTIME_MAX_AGE_SECONDS:
+        offset_floor = _ENTRY_RUNTIME_LIMIT_OFFSET_TICKS
+        if runtime_age > _ACTIVE_EVIDENCE_RUNTIME_WIDEN_SECONDS:
+            offset_floor = _ENTRY_MAX_LIMIT_OFFSET_TICKS
+        elif runtime_age > _ACTIVE_EVIDENCE_REFERENCE_FRESH_SECONDS:
+            offset_floor = _ENTRY_AGGRESSIVE_LIMIT_OFFSET_TICKS
+        offset_ticks = min(max(float(requested_offset_ticks), offset_floor), max_slippage_ticks)
+        return {
+            "is_active_evidence": True,
+            "pricing_source": _ENTRY_RUNTIME_PRICE_SOURCE,
+            "pricing_reference_price": runtime_price,
+            "pricing_reference_ts": runtime_snapshot.get("runtime_candle_timestamp"),
+            "pricing_reference_age_seconds": runtime_age,
+            "marketable_limit_offset_ticks": offset_ticks,
+            "max_slippage_ticks": max_slippage_ticks,
+            "stale_reference_blocker": None,
+            "block_submit": False,
+        }
+    blocker = "ACTIVE_EVIDENCE_ENTRY_REFERENCE_STALE"
+    if runtime_price is None and quote_reference.get("price") is None:
+        blocker = "ACTIVE_EVIDENCE_ENTRY_REFERENCE_MISSING"
+    return {
+        "is_active_evidence": True,
+        "pricing_source": "UNKNOWN",
+        "pricing_reference_price": runtime_price or quote_reference.get("price"),
+        "pricing_reference_ts": runtime_snapshot.get("runtime_candle_timestamp") or quote_reference.get("timestamp"),
+        "pricing_reference_age_seconds": runtime_age or quote_reference.get("age_seconds"),
+        "marketable_limit_offset_ticks": None,
+        "max_slippage_ticks": max_slippage_ticks,
+        "stale_reference_blocker": blocker,
+        "block_submit": True,
+    }
+
+
+def _is_active_evidence_participation_entry(
+    *,
+    config: IbkrPaperStrategyBridgeConfig,
+    intent: IbkrPaperStrategyOrderIntent,
+) -> bool:
+    metadata = dict(config.caller_metadata or {})
+    candidates = {
+        str(config.strategy_id or "").strip(),
+        str(intent.strategy_id or "").strip(),
+        str(metadata.get("lane_id") or "").strip(),
+        str(metadata.get("strategy_id") or "").strip(),
+    }
+    if any(candidate in _ACTIVE_EVIDENCE_PARTICIPATION_LANE_IDS for candidate in candidates):
+        return True
+    reason = str(config.reason or metadata.get("reason") or intent.reason or "").strip().upper()
+    return reason.startswith("PAPER_ACTIVE_EVIDENCE_")
+
+
+def _active_evidence_live_quote_reference(
+    *,
+    action: str,
+    quote_context: dict[str, Any],
+    now: datetime,
+) -> dict[str, Any]:
+    label = str(quote_context.get("quote_source_label") or "").strip().upper()
+    if label != "LIVE":
+        return {"fresh": False, "source": None, "price": None, "timestamp": quote_context.get("updated_at"), "age_seconds": None}
+    updated_at = _parse_datetime(quote_context.get("updated_at"))
+    if updated_at is not None and updated_at.tzinfo is None:
+        updated_at = updated_at.replace(tzinfo=timezone.utc)
+    age_seconds = max(0.0, (now - updated_at).total_seconds()) if updated_at is not None else None
+    normalized_action = str(action or "").strip().upper()
+    source = "IBKR_LIVE_ASK" if normalized_action == "BUY" else "IBKR_LIVE_BID"
+    price = _float_or_none(quote_context.get("ask_price") if normalized_action == "BUY" else quote_context.get("bid_price"))
+    if price is None:
+        source = "IBKR_LIVE_LAST"
+        price = _float_or_none(quote_context.get("last_price"))
+    return {
+        "fresh": price is not None and age_seconds is not None and age_seconds <= _ACTIVE_EVIDENCE_REFERENCE_FRESH_SECONDS,
+        "source": source,
+        "price": price,
+        "timestamp": None if updated_at is None else updated_at.isoformat(),
+        "age_seconds": age_seconds,
+    }
+
+
+def _active_evidence_max_slippage_ticks(*, config: IbkrPaperStrategyBridgeConfig) -> float:
+    metadata = dict(config.caller_metadata or {})
+    explicit = _float_or_none(
+        metadata.get("active_evidence_max_slippage_ticks")
+        or metadata.get("entry_max_slippage_ticks")
+        or metadata.get("max_slippage_ticks")
+    )
+    if explicit is not None and explicit > 0:
+        return max(_ENTRY_RUNTIME_LIMIT_OFFSET_TICKS, min(float(explicit), _ENTRY_MAX_LIMIT_OFFSET_TICKS))
+    return _ENTRY_MAX_LIMIT_OFFSET_TICKS
+
+
 def _entry_marketable_limit_offset_ticks(
     *,
     config: IbkrPaperStrategyBridgeConfig,
@@ -4562,6 +4893,9 @@ def _entry_marketable_limit_offset_ticks(
         )
         if explicit is not None and explicit > 0:
             return min(max(float(explicit), _ENTRY_RUNTIME_LIMIT_OFFSET_TICKS), _LEAK_TEST_MAX_LIMIT_OFFSET_TICKS)
+    explicit = _float_or_none(metadata.get("entry_marketable_limit_offset_ticks"))
+    if explicit is not None and explicit > 0:
+        return min(max(float(explicit), _ENTRY_RUNTIME_LIMIT_OFFSET_TICKS), _ENTRY_MAX_LIMIT_OFFSET_TICKS)
     if policy == _ENTRY_POLICY_AGGRESSIVE_WITH_CAP:
         return min(_ENTRY_AGGRESSIVE_LIMIT_OFFSET_TICKS, _ENTRY_MAX_LIMIT_OFFSET_TICKS)
     return _ENTRY_RUNTIME_LIMIT_OFFSET_TICKS
