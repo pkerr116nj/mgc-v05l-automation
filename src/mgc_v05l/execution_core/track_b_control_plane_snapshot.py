@@ -12,6 +12,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import time
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -150,52 +151,138 @@ def build_track_b_control_plane_snapshot(
     post_shared_truth_refresh_hook: Callable[[Mapping[str, Any]], None] | None = None,
 ) -> dict[str, Any]:
     actual_now = _ensure_utc(now or datetime.now(UTC))
+    build_substages: list[dict[str, Any]] = []
+
+    def _timed_step(
+        name: str,
+        fn,
+        *,
+        current_hot_path_required: bool,
+        scans_historical_artifacts: bool = False,
+        can_consume_compact_latest_artifact: bool = False,
+        cache_or_throttle_candidate: bool = False,
+        move_off_hot_path_candidate: bool = False,
+        touches_broker_tws: bool = False,
+        invokes_subprocess: bool = False,
+        notes: str = "",
+    ):
+        started_at = time.perf_counter()
+        try:
+            return fn()
+        finally:
+            build_substages.append(
+                {
+                    "substage": name,
+                    "duration_seconds": round(max(time.perf_counter() - started_at, 0.0), 6),
+                    "current_hot_path_required": current_hot_path_required,
+                    "scans_historical_artifacts": scans_historical_artifacts,
+                    "can_consume_compact_latest_artifact": can_consume_compact_latest_artifact,
+                    "cache_or_throttle_candidate": cache_or_throttle_candidate,
+                    "move_off_hot_path_candidate": move_off_hot_path_candidate,
+                    "touches_broker_tws": touches_broker_tws,
+                    "invokes_subprocess": invokes_subprocess,
+                    "notes": notes,
+                }
+            )
+
     if config.refresh_proof_readiness_before_snapshot:
-        _refresh_proof_readiness_for_snapshot(config=config, now=actual_now)
-    shared_truth = _refresh_shared_truth_for_snapshot(
-        config=config,
-        now=actual_now,
-        pid_running=pid_running,
-        process_root_resolver=process_root_resolver,
-        source_commit_resolver=source_commit_resolver,
+        _timed_step(
+            "proof_readiness_refresh",
+            lambda: _refresh_proof_readiness_for_snapshot(config=config, now=actual_now),
+            current_hot_path_required=True,
+            cache_or_throttle_candidate=True,
+        )
+    shared_truth = _timed_step(
+        "shared_truth_refresh_initial",
+        lambda: _refresh_shared_truth_for_snapshot(
+            config=config,
+            now=actual_now,
+            pid_running=pid_running,
+            process_root_resolver=process_root_resolver,
+            source_commit_resolver=source_commit_resolver,
+        ),
+        current_hot_path_required=True,
+        scans_historical_artifacts=True,
+        can_consume_compact_latest_artifact=True,
+        cache_or_throttle_candidate=True,
     )
     if post_shared_truth_refresh_hook is not None:
-        post_shared_truth_refresh_hook(shared_truth)
+        _timed_step(
+            "post_shared_truth_refresh_hook",
+            lambda: post_shared_truth_refresh_hook(shared_truth),
+            current_hot_path_required=False,
+            notes="test/injection hook",
+        )
 
     agent_health_config = TrackBAgentHealthConfig(
         repo_root=config.repo_root,
         output_path=config.agent_health_path,
         dashboard_projection_path=None,
     )
-    agent_health = build_track_b_agent_health(
-        config=agent_health_config,
-        now=actual_now,
-        process_rows=process_rows,
-        pid_running=pid_running,
-        source_commit_resolver=source_commit_resolver,
+    agent_health = _timed_step(
+        "agent_health_build",
+        lambda: build_track_b_agent_health(
+            config=agent_health_config,
+            now=actual_now,
+            process_rows=process_rows,
+            pid_running=pid_running,
+            source_commit_resolver=source_commit_resolver,
+        ),
+        current_hot_path_required=True,
+        cache_or_throttle_candidate=True,
+        invokes_subprocess=process_rows is None,
     )
-    agent_health_path = write_track_b_agent_health(config=agent_health_config, payload=agent_health)
+    agent_health_path = _timed_step(
+        "agent_health_write",
+        lambda: write_track_b_agent_health(config=agent_health_config, payload=agent_health),
+        current_hot_path_required=True,
+    )
     runtime_resume_config = TrackBRuntimeResumeSemanticsConfig(
         repo_root=config.repo_root,
         dashboard_projection_path=None,
         allow_control_plane_build_context=True,
     )
-    runtime_resume = build_track_b_runtime_resume_semantics(config=runtime_resume_config, now=actual_now)
-    write_track_b_runtime_resume_semantics(config=runtime_resume_config, payload=runtime_resume)
+    runtime_resume = _timed_step(
+        "runtime_resume_semantics_build",
+        lambda: build_track_b_runtime_resume_semantics(config=runtime_resume_config, now=actual_now),
+        current_hot_path_required=True,
+        cache_or_throttle_candidate=True,
+    )
+    _timed_step(
+        "runtime_resume_semantics_write",
+        lambda: write_track_b_runtime_resume_semantics(config=runtime_resume_config, payload=runtime_resume),
+        current_hot_path_required=True,
+    )
     self_recover_config = TrackBSelfRecoverRulesConfig(
         repo_root=config.repo_root,
         dashboard_projection_path=None,
     )
-    self_recover = build_track_b_self_recover_rules(config=self_recover_config, now=actual_now)
-    write_track_b_self_recover_rules(config=self_recover_config, payload=self_recover)
+    self_recover = _timed_step(
+        "self_recover_rules_build",
+        lambda: build_track_b_self_recover_rules(config=self_recover_config, now=actual_now),
+        current_hot_path_required=True,
+        cache_or_throttle_candidate=True,
+    )
+    _timed_step(
+        "self_recover_rules_write",
+        lambda: write_track_b_self_recover_rules(config=self_recover_config, payload=self_recover),
+        current_hot_path_required=True,
+    )
 
     if post_shared_truth_refresh_hook is None:
-        shared_truth = _converge_shared_truth_for_snapshot(
-            config=config,
-            now=actual_now,
-            pid_running=pid_running,
-            process_root_resolver=process_root_resolver,
-            source_commit_resolver=source_commit_resolver,
+        shared_truth = _timed_step(
+            "shared_truth_convergence",
+            lambda: _converge_shared_truth_for_snapshot(
+                config=config,
+                now=actual_now,
+                pid_running=pid_running,
+                process_root_resolver=process_root_resolver,
+                source_commit_resolver=source_commit_resolver,
+            ),
+            current_hot_path_required=True,
+            scans_historical_artifacts=True,
+            can_consume_compact_latest_artifact=True,
+            cache_or_throttle_candidate=True,
         )
 
     supervisor_config = TrackBRuntimeSupervisorAuthorityConfig(
@@ -206,100 +293,188 @@ def build_track_b_control_plane_snapshot(
             "outputs/track_b_execution_core/safe_state/__control_plane_snapshot_pre_safe_state_not_authority.json"
         ),
     )
-    runtime_supervisor = build_track_b_runtime_supervisor_authority(
-        config=supervisor_config,
-        now=actual_now,
+    runtime_supervisor = _timed_step(
+        "runtime_supervisor_authority_build",
+        lambda: build_track_b_runtime_supervisor_authority(
+            config=supervisor_config,
+            now=actual_now,
+        ),
+        current_hot_path_required=True,
+        cache_or_throttle_candidate=True,
     )
-    runtime_supervisor_path = write_track_b_runtime_supervisor_authority(
-        config=supervisor_config,
-        payload=runtime_supervisor,
+    runtime_supervisor_path = _timed_step(
+        "runtime_supervisor_authority_write",
+        lambda: write_track_b_runtime_supervisor_authority(
+            config=supervisor_config,
+            payload=runtime_supervisor,
+        ),
+        current_hot_path_required=True,
     )
     if (
         post_shared_truth_refresh_hook is None
         and runtime_supervisor.get("shared_truth_coherence_status") != SHARED_TRUTH_COHERENT
     ):
-        shared_truth = _converge_shared_truth_for_snapshot(
-            config=config,
-            now=actual_now,
-            pid_running=pid_running,
-            process_root_resolver=process_root_resolver,
-            source_commit_resolver=source_commit_resolver,
+        shared_truth = _timed_step(
+            "shared_truth_reconvergence_after_supervisor_mismatch",
+            lambda: _converge_shared_truth_for_snapshot(
+                config=config,
+                now=actual_now,
+                pid_running=pid_running,
+                process_root_resolver=process_root_resolver,
+                source_commit_resolver=source_commit_resolver,
+            ),
+            current_hot_path_required=True,
+            scans_historical_artifacts=True,
+            can_consume_compact_latest_artifact=True,
+            cache_or_throttle_candidate=True,
         )
-        runtime_supervisor = build_track_b_runtime_supervisor_authority(
-            config=supervisor_config,
-            now=actual_now,
+        runtime_supervisor = _timed_step(
+            "runtime_supervisor_authority_rebuild_after_reconvergence",
+            lambda: build_track_b_runtime_supervisor_authority(
+                config=supervisor_config,
+                now=actual_now,
+            ),
+            current_hot_path_required=True,
+            cache_or_throttle_candidate=True,
         )
-        runtime_supervisor_path = write_track_b_runtime_supervisor_authority(
-            config=supervisor_config,
-            payload=runtime_supervisor,
+        runtime_supervisor_path = _timed_step(
+            "runtime_supervisor_authority_rewrite_after_reconvergence",
+            lambda: write_track_b_runtime_supervisor_authority(
+                config=supervisor_config,
+                payload=runtime_supervisor,
+            ),
+            current_hot_path_required=True,
         )
-    autonomous_recovery_plan = _read_json(config.resolve(config.paper_autonomous_recovery_plan_path))
-    continuation_aware_exit_preview = _read_json(config.resolve(config.continuation_aware_exit_preview_path))
+    autonomous_recovery_plan = _timed_step(
+        "paper_autonomous_recovery_plan_read",
+        lambda: _read_json(config.resolve(config.paper_autonomous_recovery_plan_path)),
+        current_hot_path_required=True,
+        can_consume_compact_latest_artifact=True,
+    )
+    continuation_aware_exit_preview = _timed_step(
+        "continuation_aware_exit_preview_read",
+        lambda: _read_json(config.resolve(config.continuation_aware_exit_preview_path)),
+        current_hot_path_required=False,
+        can_consume_compact_latest_artifact=True,
+        move_off_hot_path_candidate=True,
+    )
     continuation_aware_exit_history_config = TrackBContinuationAwareExitHistoryConfig(
         repo_root=config.repo_root,
         output_path=config.continuation_aware_exit_history_path,
         event_log_path=DEFAULT_CONTINUATION_AWARE_EXIT_PREVIEW_EVENT_LOG,
         latest_preview_path=config.continuation_aware_exit_preview_path,
     )
-    continuation_aware_exit_history = build_continuation_aware_exit_history(
-        config=continuation_aware_exit_history_config,
-        now=actual_now,
+    continuation_aware_exit_history = _timed_step(
+        "continuation_aware_exit_history_build",
+        lambda: build_continuation_aware_exit_history(
+            config=continuation_aware_exit_history_config,
+            now=actual_now,
+        ),
+        current_hot_path_required=False,
+        scans_historical_artifacts=True,
+        can_consume_compact_latest_artifact=True,
+        move_off_hot_path_candidate=True,
     )
-    continuation_aware_exit_history_path = write_continuation_aware_exit_history(
-        config=continuation_aware_exit_history_config,
-        payload=continuation_aware_exit_history,
+    continuation_aware_exit_history_path = _timed_step(
+        "continuation_aware_exit_history_write",
+        lambda: write_continuation_aware_exit_history(
+            config=continuation_aware_exit_history_config,
+            payload=continuation_aware_exit_history,
+        ),
+        current_hot_path_required=False,
+        move_off_hot_path_candidate=True,
     )
     recovery_attempt_history_config = TrackBRecoveryAttemptHistoryConfig(
         repo_root=config.repo_root,
         output_path=config.recovery_attempt_history_path,
         control_plane_snapshot_path=config.output_path,
     )
-    recovery_attempt_history = build_track_b_recovery_attempt_history(
-        config=recovery_attempt_history_config,
-        now=actual_now,
+    recovery_attempt_history = _timed_step(
+        "recovery_attempt_history_build",
+        lambda: build_track_b_recovery_attempt_history(
+            config=recovery_attempt_history_config,
+            now=actual_now,
+        ),
+        current_hot_path_required=True,
+        cache_or_throttle_candidate=True,
     )
-    recovery_attempt_history_path = write_track_b_recovery_attempt_history(
-        config=recovery_attempt_history_config,
-        payload=recovery_attempt_history,
+    recovery_attempt_history_path = _timed_step(
+        "recovery_attempt_history_write",
+        lambda: write_track_b_recovery_attempt_history(
+            config=recovery_attempt_history_config,
+            payload=recovery_attempt_history,
+        ),
+        current_hot_path_required=True,
     )
-    artifact_archive_plan, artifact_archive_plan_path = _artifact_archive_plan_for_snapshot(
-        config=config,
-        now=actual_now,
+    artifact_archive_plan, artifact_archive_plan_path = _timed_step(
+        "artifact_archive_plan_diagnostic",
+        lambda: _artifact_archive_plan_for_snapshot(
+            config=config,
+            now=actual_now,
+        ),
+        current_hot_path_required=False,
+        scans_historical_artifacts=config.refresh_artifact_archive_plan_before_snapshot,
+        can_consume_compact_latest_artifact=True,
+        move_off_hot_path_candidate=True,
     )
-    payload = _snapshot_payload(
-        config=config,
-        now=actual_now,
-        shared_truth=shared_truth,
-        agent_health=agent_health,
-        agent_health_path=agent_health_path,
-        runtime_supervisor=runtime_supervisor,
-        runtime_supervisor_path=runtime_supervisor_path,
-        autonomous_recovery_plan=autonomous_recovery_plan,
-        continuation_aware_exit_preview=continuation_aware_exit_preview,
-        continuation_aware_exit_history=continuation_aware_exit_history,
-        continuation_aware_exit_history_path=continuation_aware_exit_history_path,
-        recovery_attempt_history=recovery_attempt_history,
-        recovery_attempt_history_path=recovery_attempt_history_path,
-        artifact_archive_plan=artifact_archive_plan,
-        artifact_archive_plan_path=artifact_archive_plan_path,
+    payload = _timed_step(
+        "snapshot_payload_build",
+        lambda: _snapshot_payload(
+            config=config,
+            now=actual_now,
+            shared_truth=shared_truth,
+            agent_health=agent_health,
+            agent_health_path=agent_health_path,
+            runtime_supervisor=runtime_supervisor,
+            runtime_supervisor_path=runtime_supervisor_path,
+            autonomous_recovery_plan=autonomous_recovery_plan,
+            continuation_aware_exit_preview=continuation_aware_exit_preview,
+            continuation_aware_exit_history=continuation_aware_exit_history,
+            continuation_aware_exit_history_path=continuation_aware_exit_history_path,
+            recovery_attempt_history=recovery_attempt_history,
+            recovery_attempt_history_path=recovery_attempt_history_path,
+            artifact_archive_plan=artifact_archive_plan,
+            artifact_archive_plan_path=artifact_archive_plan_path,
+        ),
+        current_hot_path_required=True,
     )
     safe_state_config = TrackBRuntimeSafeStateEnvelopeConfig(
         repo_root=config.repo_root,
         output_path=config.runtime_safe_state_envelope_path,
         control_plane_snapshot_path=config.output_path,
     )
-    safe_state = build_track_b_runtime_safe_state_envelope(
-        config=safe_state_config,
-        now=actual_now,
-        input_overrides={
-            "control_plane_snapshot": payload,
-            "recovery_attempt_history": recovery_attempt_history,
-        },
+    safe_state = _timed_step(
+        "runtime_safe_state_envelope_build",
+        lambda: build_track_b_runtime_safe_state_envelope(
+            config=safe_state_config,
+            now=actual_now,
+            input_overrides={
+                "control_plane_snapshot": payload,
+                "recovery_attempt_history": recovery_attempt_history,
+            },
+        ),
+        current_hot_path_required=True,
+        cache_or_throttle_candidate=True,
     )
-    safe_state_path = write_track_b_runtime_safe_state_envelope(config=safe_state_config, payload=safe_state)
-    _apply_safe_state_to_snapshot(payload=payload, safe_state=safe_state)
+    safe_state_path = _timed_step(
+        "runtime_safe_state_envelope_write",
+        lambda: write_track_b_runtime_safe_state_envelope(config=safe_state_config, payload=safe_state),
+        current_hot_path_required=True,
+    )
+    _timed_step(
+        "safe_state_apply_to_snapshot",
+        lambda: _apply_safe_state_to_snapshot(payload=payload, safe_state=safe_state),
+        current_hot_path_required=True,
+    )
     payload["source_artifact_paths"]["runtime_safe_state_envelope"] = str(safe_state_path)
-    payload.update(build_track_b_control_plane_top_line(payload))
+    top_line = _timed_step(
+        "control_plane_top_line_build",
+        lambda: build_track_b_control_plane_top_line(payload),
+        current_hot_path_required=True,
+    )
+    payload.update(top_line)
+    payload["control_plane_snapshot_build_substages"] = build_substages
+    payload["control_plane_snapshot_build_slowest_substage"] = _slowest_control_plane_substage(build_substages)
     return payload
 
 
@@ -322,6 +497,12 @@ def _refresh_shared_truth_for_snapshot(
         process_root_resolver=process_root_resolver,
         source_commit_resolver=source_commit_resolver,
     )
+
+
+def _slowest_control_plane_substage(rows: Sequence[Mapping[str, Any]]) -> dict[str, Any] | None:
+    if not rows:
+        return None
+    return dict(max(rows, key=lambda row: float(row.get("duration_seconds") or 0.0)))
 
 
 def _converge_shared_truth_for_snapshot(

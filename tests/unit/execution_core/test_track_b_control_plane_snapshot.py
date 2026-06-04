@@ -51,6 +51,18 @@ def test_snapshot_ties_supervisor_to_shared_truth_generation(tmp_path: Path) -> 
     assert payload["artifact_archive_execution_enabled"] is False
     assert payload["artifact_archive_diagnostic_only"] is True
     assert payload["artifact_archive_not_routing_authority"] is True
+    substages = {row["substage"]: row for row in payload["control_plane_snapshot_build_substages"]}
+    assert "shared_truth_refresh_initial" in substages
+    assert "shared_truth_convergence" in substages
+    assert "runtime_supervisor_authority_build" in substages
+    assert "artifact_archive_plan_diagnostic" in substages
+    assert "runtime_safe_state_envelope_build" in substages
+    assert payload["control_plane_snapshot_build_slowest_substage"]["substage"] in substages
+    assert all("duration_seconds" in row for row in substages.values())
+    assert substages["shared_truth_convergence"]["scans_historical_artifacts"] is True
+    assert substages["shared_truth_convergence"]["can_consume_compact_latest_artifact"] is True
+    assert substages["artifact_archive_plan_diagnostic"]["current_hot_path_required"] is False
+    assert substages["artifact_archive_plan_diagnostic"]["move_off_hot_path_candidate"] is True
     assert payload["safe_state_classification"] == "SAFE_STATE_NORMAL"
     assert payload["safe_state_runtime_start_allowed"] is True
     assert payload["safe_state_submit_allowed"] is True
@@ -352,6 +364,11 @@ def test_snapshot_uses_compact_latest_artifact_archive_plan_without_rebuilding(m
     assert payload["artifact_archive_execution_enabled"] is False
     assert payload["artifact_archive_diagnostic_only"] is True
     assert payload["artifact_archive_not_routing_authority"] is True
+    archive_substage = {
+        row["substage"]: row for row in payload["control_plane_snapshot_build_substages"]
+    }["artifact_archive_plan_diagnostic"]
+    assert archive_substage["scans_historical_artifacts"] is False
+    assert archive_substage["can_consume_compact_latest_artifact"] is True
     assert payload["source_artifact_paths"]["artifact_archive_plan"].endswith(
         "outputs/track_b_execution_core/artifact_retention/latest_artifact_archive_plan.json"
     )
@@ -390,6 +407,10 @@ def test_snapshot_can_opt_into_full_artifact_archive_plan_refresh(monkeypatch, t
     assert calls
     assert payload["artifact_archive_plan_classification"] == "ARCHIVE_PLAN_EMPTY"
     assert payload["artifact_archive_cold_archive_candidate_count"] == 0
+    archive_substage = {
+        row["substage"]: row for row in payload["control_plane_snapshot_build_substages"]
+    }["artifact_archive_plan_diagnostic"]
+    assert archive_substage["scans_historical_artifacts"] is True
 
 
 def test_snapshot_surfaces_continuation_aware_exit_preview_as_diagnostic_only(tmp_path: Path) -> None:
