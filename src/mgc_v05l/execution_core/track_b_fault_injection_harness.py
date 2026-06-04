@@ -45,6 +45,14 @@ SCENARIO_DEAD_PID_STALE_HEARTBEAT = "dead_pid_with_stale_heartbeat"
 SCENARIO_NEAR_EXPIRY_CONTRACT = "near_expiry_contract_submit_attempt"
 SCENARIO_PHASE1_FRESH_RUNTIME_STALE = "phase1_fresh_runtime_ingestion_stale"
 SCENARIO_BROKER_FILL_NO_LIFECYCLE_CLOSE = "broker_fill_without_lifecycle_close"
+SCENARIO_MALFORMED_BROKER_POSITION_TRUTH = "malformed_broker_position_truth_artifact"
+SCENARIO_MISSING_LIFECYCLE_RECONCILIATION = "missing_lifecycle_reconciliation_artifact"
+SCENARIO_REGISTRY_DIAGNOSTIC_MISSING_CURRENT_SCOPE = "registry_diagnostic_missing_current_scope_fields"
+SCENARIO_STALE_RUNTIME_ENV_FRESH_BROKER_TRUTH = "stale_runtime_environment_truth_with_fresh_broker_truth"
+SCENARIO_CONFLICTING_AUTHORITY_GENERATION = "conflicting_authority_generation_id"
+SCENARIO_MANAGED_CLOSE_ORDER_BROKER_ZERO = "managed_close_order_artifact_broker_open_orders_zero"
+SCENARIO_BROKER_OPEN_ORDER_REGISTRY_NONE = "broker_open_order_exists_lifecycle_registry_none"
+SCENARIO_MISSING_GUARDIAN_WITH_BROKER_EXPOSURE = "missing_guardian_artifact_with_broker_exposure"
 
 FAULT_INJECTION_SCENARIOS: tuple[str, ...] = (
     SCENARIO_STALE_RUNTIME_EXIT_DUE,
@@ -55,6 +63,14 @@ FAULT_INJECTION_SCENARIOS: tuple[str, ...] = (
     SCENARIO_NEAR_EXPIRY_CONTRACT,
     SCENARIO_PHASE1_FRESH_RUNTIME_STALE,
     SCENARIO_BROKER_FILL_NO_LIFECYCLE_CLOSE,
+    SCENARIO_MALFORMED_BROKER_POSITION_TRUTH,
+    SCENARIO_MISSING_LIFECYCLE_RECONCILIATION,
+    SCENARIO_REGISTRY_DIAGNOSTIC_MISSING_CURRENT_SCOPE,
+    SCENARIO_STALE_RUNTIME_ENV_FRESH_BROKER_TRUTH,
+    SCENARIO_CONFLICTING_AUTHORITY_GENERATION,
+    SCENARIO_MANAGED_CLOSE_ORDER_BROKER_ZERO,
+    SCENARIO_BROKER_OPEN_ORDER_REGISTRY_NONE,
+    SCENARIO_MISSING_GUARDIAN_WITH_BROKER_EXPOSURE,
 )
 
 DEFAULT_FAULT_INJECTION_NOW = datetime(2026, 6, 4, 14, 0, tzinfo=UTC)
@@ -157,6 +173,86 @@ SCENARIO_METADATA: dict[str, dict[str, Any]] = {
         "notes": "Evidence placeholder: attach broker-fill-without-lifecycle-close artifacts here.",
         "evidence": {"placeholder": True},
     },
+    SCENARIO_MALFORMED_BROKER_POSITION_TRUTH: {
+        "bug_class": "Stale Truth Authority",
+        "retired_invariant": "Malformed broker position truth is blocking/diagnostic and never silently accepted.",
+        "authority_helpers_exercised": ["artifact_integrity_classifier"],
+        "expected_primary_classification": "MALFORMED_BROKER_POSITION_TRUTH_BLOCKED",
+        "safety_invariants_checked": list(SAFETY_INVARIANTS_CHECKED),
+        "retirement_status": "FAULT_INJECTION_V1_COVERED",
+        "notes": "Evidence placeholder: attach malformed broker-position truth artifacts here.",
+        "evidence": {"placeholder": True},
+    },
+    SCENARIO_MISSING_LIFECYCLE_RECONCILIATION: {
+        "bug_class": "Historical Registry Debris Blocking Current Truth",
+        "retired_invariant": "Missing lifecycle reconciliation blocks submit while broker exposure remains visible.",
+        "authority_helpers_exercised": ["artifact_integrity_classifier"],
+        "expected_primary_classification": "MISSING_LIFECYCLE_RECONCILIATION_BLOCKED",
+        "safety_invariants_checked": list(SAFETY_INVARIANTS_CHECKED),
+        "retirement_status": "FAULT_INJECTION_V1_COVERED",
+        "notes": "Evidence placeholder: attach missing lifecycle reconciliation artifacts here.",
+        "evidence": {"placeholder": True},
+    },
+    SCENARIO_REGISTRY_DIAGNOSTIC_MISSING_CURRENT_SCOPE: {
+        "bug_class": "Historical Registry Debris Blocking Current Truth",
+        "retired_invariant": "Registry diagnostics without current-scope fields cannot certify clean current truth.",
+        "authority_helpers_exercised": ["artifact_integrity_classifier"],
+        "expected_primary_classification": "REGISTRY_DIAGNOSTIC_CURRENT_SCOPE_MISSING_BLOCKED",
+        "safety_invariants_checked": list(SAFETY_INVARIANTS_CHECKED),
+        "retirement_status": "FAULT_INJECTION_V1_COVERED",
+        "notes": "Evidence placeholder: attach missing-current-scope registry diagnostics here.",
+        "evidence": {"placeholder": True},
+    },
+    SCENARIO_STALE_RUNTIME_ENV_FRESH_BROKER_TRUTH: {
+        "bug_class": "Stale Truth Authority",
+        "retired_invariant": "Fresh broker truth remains visible but stale runtime environment truth cannot grant submit.",
+        "authority_helpers_exercised": ["artifact_integrity_classifier"],
+        "expected_primary_classification": "STALE_RUNTIME_ENVIRONMENT_TRUTH_BROKER_TRUTH_FRESH_BLOCKED",
+        "safety_invariants_checked": list(SAFETY_INVARIANTS_CHECKED),
+        "retirement_status": "FAULT_INJECTION_V1_COVERED",
+        "notes": "Evidence placeholder: attach stale-runtime/fresh-broker authority artifacts here.",
+        "evidence": {"placeholder": True},
+    },
+    SCENARIO_CONFLICTING_AUTHORITY_GENERATION: {
+        "bug_class": "Stale Truth Authority",
+        "retired_invariant": "Conflicting authority_generation_id values block submit until shared truth is coherent.",
+        "authority_helpers_exercised": ["artifact_integrity_classifier"],
+        "expected_primary_classification": "CONFLICTING_AUTHORITY_GENERATION_ID_BLOCKED",
+        "safety_invariants_checked": list(SAFETY_INVARIANTS_CHECKED),
+        "retirement_status": "FAULT_INJECTION_V1_COVERED",
+        "notes": "Evidence placeholder: attach conflicting authority generation artifacts here.",
+        "evidence": {"placeholder": True},
+    },
+    SCENARIO_MANAGED_CLOSE_ORDER_BROKER_ZERO: {
+        "bug_class": "Ownership Ambiguity",
+        "retired_invariant": "Managed close-order artifacts cannot override broker open-order truth.",
+        "authority_helpers_exercised": ["artifact_integrity_classifier"],
+        "expected_primary_classification": "MANAGED_CLOSE_ORDER_PHANTOM_BROKER_ZERO_BLOCKED",
+        "safety_invariants_checked": list(SAFETY_INVARIANTS_CHECKED),
+        "retirement_status": "FAULT_INJECTION_V1_COVERED",
+        "notes": "Evidence placeholder: attach managed-close-order/broker-zero artifacts here.",
+        "evidence": {"placeholder": True},
+    },
+    SCENARIO_BROKER_OPEN_ORDER_REGISTRY_NONE: {
+        "bug_class": "Ownership Ambiguity",
+        "retired_invariant": "Fresh broker open-order truth remains visible when lifecycle/registry artifacts say none.",
+        "authority_helpers_exercised": ["artifact_integrity_classifier"],
+        "expected_primary_classification": "BROKER_OPEN_ORDER_WITHOUT_LIFECYCLE_REGISTRY_BLOCKED",
+        "safety_invariants_checked": list(SAFETY_INVARIANTS_CHECKED),
+        "retirement_status": "FAULT_INJECTION_V1_COVERED",
+        "notes": "Evidence placeholder: attach broker-open-order/lifecycle-none artifacts here.",
+        "evidence": {"placeholder": True},
+    },
+    SCENARIO_MISSING_GUARDIAN_WITH_BROKER_EXPOSURE: {
+        "bug_class": "Stranded Exit-Due Positions",
+        "retired_invariant": "Broker exposure without Guardian authority remains visible but cannot create an unguarded close path.",
+        "authority_helpers_exercised": ["artifact_integrity_classifier"],
+        "expected_primary_classification": "MISSING_GUARDIAN_WITH_BROKER_EXPOSURE_BLOCKED",
+        "safety_invariants_checked": list(SAFETY_INVARIANTS_CHECKED),
+        "retirement_status": "FAULT_INJECTION_V1_COVERED",
+        "notes": "Evidence placeholder: attach missing Guardian/broker exposure artifacts here.",
+        "evidence": {"placeholder": True},
+    },
 }
 
 
@@ -203,6 +299,14 @@ def run_track_b_fault_injection_scenario(
         SCENARIO_NEAR_EXPIRY_CONTRACT: _scenario_near_expiry_contract_submit_attempt,
         SCENARIO_PHASE1_FRESH_RUNTIME_STALE: _scenario_phase1_fresh_runtime_ingestion_stale,
         SCENARIO_BROKER_FILL_NO_LIFECYCLE_CLOSE: _scenario_broker_fill_without_lifecycle_close,
+        SCENARIO_MALFORMED_BROKER_POSITION_TRUTH: _scenario_malformed_broker_position_truth_artifact,
+        SCENARIO_MISSING_LIFECYCLE_RECONCILIATION: _scenario_missing_lifecycle_reconciliation_artifact,
+        SCENARIO_REGISTRY_DIAGNOSTIC_MISSING_CURRENT_SCOPE: _scenario_registry_diagnostic_missing_current_scope_fields,
+        SCENARIO_STALE_RUNTIME_ENV_FRESH_BROKER_TRUTH: _scenario_stale_runtime_environment_truth_with_fresh_broker_truth,
+        SCENARIO_CONFLICTING_AUTHORITY_GENERATION: _scenario_conflicting_authority_generation_id,
+        SCENARIO_MANAGED_CLOSE_ORDER_BROKER_ZERO: _scenario_managed_close_order_artifact_broker_open_orders_zero,
+        SCENARIO_BROKER_OPEN_ORDER_REGISTRY_NONE: _scenario_broker_open_order_exists_lifecycle_registry_none,
+        SCENARIO_MISSING_GUARDIAN_WITH_BROKER_EXPOSURE: _scenario_missing_guardian_artifact_with_broker_exposure,
     }
     try:
         payload = handlers[name](artifact_root, actual_now)
@@ -529,6 +633,154 @@ def _scenario_broker_fill_without_lifecycle_close(artifact_root: Path, now: date
             "ownership_loss_detected": _first_owned_trade_id(owner) != "trade_open_no_close",
         },
     }
+
+
+def _scenario_malformed_broker_position_truth_artifact(artifact_root: Path, now: datetime) -> dict[str, Any]:
+    del artifact_root, now
+    return _malformed_authority_payload(
+        retired_bug_class="Stale Truth Authority",
+        invariant="Malformed broker position truth is blocking/diagnostic and never silently accepted.",
+        classification="MALFORMED_BROKER_POSITION_TRUTH_BLOCKED",
+        broker_exposure=_broker_exposure_malformed(),
+        ownership_classification="BROKER_POSITION_TRUTH_MALFORMED_REVIEW_REQUIRED",
+        registry_classification="TRACK_B_DIAGNOSTICS_BLOCKED_MALFORMED_BROKER_POSITION_TRUTH",
+        artifact_name="broker_position_truth",
+        artifact_status="malformed_blocking",
+        malformed_fields=["positions[0].quantity", "positions[0].con_id"],
+    )
+
+
+def _scenario_missing_lifecycle_reconciliation_artifact(artifact_root: Path, now: datetime) -> dict[str, Any]:
+    del artifact_root, now
+    return _malformed_authority_payload(
+        retired_bug_class="Historical Registry Debris Blocking Current Truth",
+        invariant="Missing lifecycle reconciliation blocks submit while broker exposure remains visible.",
+        classification="MISSING_LIFECYCLE_RECONCILIATION_BLOCKED",
+        broker_exposure=_broker_exposure(count=1, visible=True),
+        ownership_classification="BROKER_EXPOSURE_VISIBLE_LIFECYCLE_RECONCILIATION_MISSING",
+        registry_classification="TRACK_B_DIAGNOSTICS_BLOCKED_MISSING_LIFECYCLE_RECONCILIATION",
+        artifact_name="lifecycle_reconciliation",
+        artifact_status="missing_blocking",
+        stale_or_malformed_artifact_blocked=True,
+    )
+
+
+def _scenario_registry_diagnostic_missing_current_scope_fields(artifact_root: Path, now: datetime) -> dict[str, Any]:
+    del artifact_root, now
+    return _malformed_authority_payload(
+        retired_bug_class="Historical Registry Debris Blocking Current Truth",
+        invariant="Registry diagnostics without current-scope fields cannot certify clean current truth.",
+        classification="REGISTRY_DIAGNOSTIC_CURRENT_SCOPE_MISSING_BLOCKED",
+        broker_exposure=_broker_exposure(count=0, visible=False),
+        ownership_classification="NO_OPEN_EXPOSURE_REGISTRY_CURRENT_SCOPE_UNKNOWN",
+        registry_classification="TRACK_B_DIAGNOSTICS_BLOCKED_CURRENT_SCOPE_FIELDS_MISSING",
+        artifact_name="registry_diagnostics",
+        artifact_status="malformed_blocking",
+        malformed_fields=[
+            "current_scope_review_required_count",
+            "current_scope_trade_states",
+            "current_hot_path_blocking",
+        ],
+    )
+
+
+def _scenario_stale_runtime_environment_truth_with_fresh_broker_truth(artifact_root: Path, now: datetime) -> dict[str, Any]:
+    del artifact_root
+    return _malformed_authority_payload(
+        retired_bug_class="Stale Truth Authority",
+        invariant="Fresh broker truth remains visible but stale runtime environment truth cannot grant submit.",
+        classification="STALE_RUNTIME_ENVIRONMENT_TRUTH_BROKER_TRUTH_FRESH_BLOCKED",
+        broker_exposure=_broker_exposure(count=1, visible=True),
+        ownership_classification="BROKER_EXPOSURE_VISIBLE_RUNTIME_ENVIRONMENT_STALE",
+        registry_classification="TRACK_B_DIAGNOSTICS_CLEAN_CURRENT_SCOPE",
+        artifact_name="runtime_environment_truth",
+        artifact_status="stale_blocking",
+        artifact_generated_at=_iso(now - timedelta(minutes=20)),
+        fresh_broker_truth=True,
+    )
+
+
+def _scenario_conflicting_authority_generation_id(artifact_root: Path, now: datetime) -> dict[str, Any]:
+    del artifact_root, now
+    authority_generations = {
+        "shared_truth": "authority-generation-101",
+        "position_truth": "authority-generation-099",
+        "runtime_environment_truth": "authority-generation-101",
+    }
+    return _malformed_authority_payload(
+        retired_bug_class="Stale Truth Authority",
+        invariant="Conflicting authority_generation_id values block submit until shared truth is coherent.",
+        classification="CONFLICTING_AUTHORITY_GENERATION_ID_BLOCKED",
+        broker_exposure=_broker_exposure(count=0, visible=False),
+        ownership_classification="NO_OPEN_EXPOSURE_AUTHORITY_GENERATION_CONFLICT",
+        registry_classification="TRACK_B_DIAGNOSTICS_BLOCKED_AUTHORITY_GENERATION_CONFLICT",
+        artifact_name="shared_truth_bundle",
+        artifact_status="conflicting_blocking",
+        authority_generations=authority_generations,
+    )
+
+
+def _scenario_managed_close_order_artifact_broker_open_orders_zero(artifact_root: Path, now: datetime) -> dict[str, Any]:
+    del artifact_root, now
+    return _malformed_authority_payload(
+        retired_bug_class="Ownership Ambiguity",
+        invariant="Managed close-order artifacts cannot override broker open-order truth.",
+        classification="MANAGED_CLOSE_ORDER_PHANTOM_BROKER_ZERO_BLOCKED",
+        broker_exposure=_broker_exposure(count=1, visible=True),
+        ownership_classification="OWNED_MANAGED_EXPOSURE_CLOSE_ORDER_PHANTOM_REVIEW_REQUIRED",
+        registry_classification="TRACK_B_DIAGNOSTICS_BLOCKED_MANAGED_ORDER_BROKER_OPEN_ORDER_MISMATCH",
+        artifact_name="managed_order_registry",
+        artifact_status="conflicting_blocking",
+        managed_order_open=True,
+        broker_open_order_count=0,
+    )
+
+
+def _scenario_broker_open_order_exists_lifecycle_registry_none(artifact_root: Path, now: datetime) -> dict[str, Any]:
+    del artifact_root, now
+    return _malformed_authority_payload(
+        retired_bug_class="Ownership Ambiguity",
+        invariant="Fresh broker open-order truth remains visible when lifecycle/registry artifacts say none.",
+        classification="BROKER_OPEN_ORDER_WITHOUT_LIFECYCLE_REGISTRY_BLOCKED",
+        broker_exposure={
+            **_broker_exposure(count=0, visible=False),
+            "broker_open_order_visible": True,
+            "open_order_count": 1,
+        },
+        ownership_classification="BROKER_OPEN_ORDER_VISIBLE_REGISTRY_NONE_REVIEW_REQUIRED",
+        registry_classification="TRACK_B_DIAGNOSTICS_BLOCKED_BROKER_OPEN_ORDER_WITHOUT_REGISTRY_OWNER",
+        artifact_name="broker_open_order_truth",
+        artifact_status="fresh_broker_truth_blocking",
+        broker_open_order_count=1,
+        lifecycle_open_order_count=0,
+        registry_open_order_count=0,
+    )
+
+
+def _scenario_missing_guardian_artifact_with_broker_exposure(artifact_root: Path, now: datetime) -> dict[str, Any]:
+    del artifact_root, now
+    payload = _malformed_authority_payload(
+        retired_bug_class="Stranded Exit-Due Positions",
+        invariant="Broker exposure without Guardian authority remains visible but cannot create an unguarded close path.",
+        classification="MISSING_GUARDIAN_WITH_BROKER_EXPOSURE_BLOCKED",
+        broker_exposure=_broker_exposure(count=1, visible=True),
+        ownership_classification="BROKER_EXPOSURE_VISIBLE_GUARDIAN_MISSING",
+        registry_classification="TRACK_B_DIAGNOSTICS_BLOCKED_MISSING_GUARDIAN_WITH_BROKER_EXPOSURE",
+        artifact_name="guardian",
+        artifact_status="missing_blocking",
+        stale_or_malformed_artifact_blocked=True,
+    )
+    payload["risk_reducing_close_authority"] = {
+        "applicable": True,
+        "classification": "RISK_REDUCING_CLOSE_BLOCKED_MISSING_GUARDIAN",
+        "allowed": False,
+        "reason_codes": ["guardian_artifact_missing"],
+        "paper_proof_invoked": False,
+        "live_money_eligible": False,
+        "broad_flatten_allowed": False,
+        "global_flatten_allowed": False,
+    }
+    return payload
 
 
 def _finalize_scenario(*, name: str, generated_at: datetime, payload: Mapping[str, Any]) -> dict[str, Any]:
@@ -869,12 +1121,89 @@ def _submit_blocked(classification: str) -> dict[str, Any]:
     }
 
 
+def _malformed_authority_payload(
+    *,
+    retired_bug_class: str,
+    invariant: str,
+    classification: str,
+    broker_exposure: Mapping[str, Any],
+    ownership_classification: str,
+    registry_classification: str,
+    artifact_name: str,
+    artifact_status: str,
+    malformed_fields: Sequence[str] = (),
+    authority_generations: Mapping[str, str] | None = None,
+    artifact_generated_at: str | None = None,
+    fresh_broker_truth: bool = False,
+    stale_or_malformed_artifact_blocked: bool = True,
+    managed_order_open: bool | None = None,
+    broker_open_order_count: int | None = None,
+    lifecycle_open_order_count: int | None = None,
+    registry_open_order_count: int | None = None,
+) -> dict[str, Any]:
+    integrity = {
+        "artifact": artifact_name,
+        "status": artifact_status,
+        "diagnostic_only": artifact_status.endswith("_diagnostic"),
+        "blocking": stale_or_malformed_artifact_blocked or "blocking" in artifact_status,
+        "silently_accepted": False,
+        "malformed_fields": list(malformed_fields),
+    }
+    if authority_generations:
+        integrity["authority_generation_ids"] = dict(authority_generations)
+    if artifact_generated_at:
+        integrity["artifact_generated_at"] = artifact_generated_at
+    if managed_order_open is not None:
+        integrity["managed_order_open"] = managed_order_open
+    if broker_open_order_count is not None:
+        integrity["broker_open_order_count"] = broker_open_order_count
+    if lifecycle_open_order_count is not None:
+        integrity["lifecycle_open_order_count"] = lifecycle_open_order_count
+    if registry_open_order_count is not None:
+        integrity["registry_open_order_count"] = registry_open_order_count
+    return {
+        "retired_bug_class": retired_bug_class,
+        "invariant": invariant,
+        "submit": _submit_blocked(classification),
+        "broker_exposure": dict(broker_exposure),
+        "ownership": {
+            "classification": ownership_classification,
+            "owned_exposure_count": int(broker_exposure.get("count") or 0) if broker_exposure.get("visible") else 0,
+            "review_required_exposure_count": 1,
+            "artifact_integrity": integrity,
+        },
+        "registry": {
+            "classification": registry_classification,
+            "current_blockers": [classification],
+            "artifact_integrity": integrity,
+        },
+        "risk_reducing_close_authority": _risk_close_not_applicable(),
+        "observability": {
+            "artifact_integrity": integrity,
+            "fresh_broker_truth_visible": fresh_broker_truth or broker_exposure.get("visible") is True,
+            "stale_or_malformed_artifact_blocked": integrity["blocking"],
+            "stale_or_malformed_artifact_silently_accepted": False,
+        },
+    }
+
+
 def _broker_exposure(*, count: int, visible: bool) -> dict[str, Any]:
     return {
         "classification": "BROKER_EXPOSURE_VISIBLE" if visible else "NO_BROKER_EXPOSURE",
         "visible": visible,
         "count": count,
         "source": "BROKER_BACKED_TRUTH_ARTIFACT",
+    }
+
+
+def _broker_exposure_malformed() -> dict[str, Any]:
+    return {
+        "classification": "BROKER_EXPOSURE_MALFORMED_BLOCKING",
+        "visible": False,
+        "count": 0,
+        "source": "BROKER_BACKED_TRUTH_ARTIFACT",
+        "artifact_present": True,
+        "malformed": True,
     }
 
 

@@ -11,14 +11,22 @@ from mgc_v05l.execution_core.track_b_fault_injection_harness import (
     FAULT_INJECTION_REPORT_SCHEMA_VERSION,
     SAFETY_INVARIANTS_CHECKED,
     SCENARIO_BROKER_FILL_NO_LIFECYCLE_CLOSE,
+    SCENARIO_BROKER_OPEN_ORDER_REGISTRY_NONE,
+    SCENARIO_CONFLICTING_AUTHORITY_GENERATION,
     SCENARIO_DEAD_PID_STALE_HEARTBEAT,
     SCENARIO_DUPLICATE_LIFECYCLE_ROWS,
     SCENARIO_HISTORICAL_REGISTRY_DEBRIS,
+    SCENARIO_MALFORMED_BROKER_POSITION_TRUTH,
+    SCENARIO_MANAGED_CLOSE_ORDER_BROKER_ZERO,
+    SCENARIO_MISSING_GUARDIAN_WITH_BROKER_EXPOSURE,
+    SCENARIO_MISSING_LIFECYCLE_RECONCILIATION,
     SCENARIO_NEAR_EXPIRY_CONTRACT,
     SCENARIO_PHASE1_FRESH_RUNTIME_STALE,
+    SCENARIO_REGISTRY_DIAGNOSTIC_MISSING_CURRENT_SCOPE,
     SCENARIO_METADATA,
     SCENARIO_STALE_OWNER_FRESH_BROKER,
     SCENARIO_STALE_RUNTIME_EXIT_DUE,
+    SCENARIO_STALE_RUNTIME_ENV_FRESH_BROKER_TRUTH,
     list_track_b_fault_injection_scenarios,
     run_track_b_fault_injection_harness,
     run_track_b_fault_injection_scenario,
@@ -46,6 +54,14 @@ EXPECTED_SCENARIO_IDS = (
     "near_expiry_contract_submit_attempt",
     "phase1_fresh_runtime_ingestion_stale",
     "broker_fill_without_lifecycle_close",
+    "malformed_broker_position_truth_artifact",
+    "missing_lifecycle_reconciliation_artifact",
+    "registry_diagnostic_missing_current_scope_fields",
+    "stale_runtime_environment_truth_with_fresh_broker_truth",
+    "conflicting_authority_generation_id",
+    "managed_close_order_artifact_broker_open_orders_zero",
+    "broker_open_order_exists_lifecycle_registry_none",
+    "missing_guardian_artifact_with_broker_exposure",
 )
 REQUIRED_METADATA_FIELDS = {
     "bug_class",
@@ -57,6 +73,56 @@ REQUIRED_METADATA_FIELDS = {
     "notes",
     "evidence",
 }
+MALFORMED_AUTHORITY_SCENARIOS = (
+    (
+        SCENARIO_MALFORMED_BROKER_POSITION_TRUTH,
+        "MALFORMED_BROKER_POSITION_TRUTH_BLOCKED",
+        False,
+        "malformed_blocking",
+    ),
+    (
+        SCENARIO_MISSING_LIFECYCLE_RECONCILIATION,
+        "MISSING_LIFECYCLE_RECONCILIATION_BLOCKED",
+        True,
+        "missing_blocking",
+    ),
+    (
+        SCENARIO_REGISTRY_DIAGNOSTIC_MISSING_CURRENT_SCOPE,
+        "REGISTRY_DIAGNOSTIC_CURRENT_SCOPE_MISSING_BLOCKED",
+        False,
+        "malformed_blocking",
+    ),
+    (
+        SCENARIO_STALE_RUNTIME_ENV_FRESH_BROKER_TRUTH,
+        "STALE_RUNTIME_ENVIRONMENT_TRUTH_BROKER_TRUTH_FRESH_BLOCKED",
+        True,
+        "stale_blocking",
+    ),
+    (
+        SCENARIO_CONFLICTING_AUTHORITY_GENERATION,
+        "CONFLICTING_AUTHORITY_GENERATION_ID_BLOCKED",
+        False,
+        "conflicting_blocking",
+    ),
+    (
+        SCENARIO_MANAGED_CLOSE_ORDER_BROKER_ZERO,
+        "MANAGED_CLOSE_ORDER_PHANTOM_BROKER_ZERO_BLOCKED",
+        True,
+        "conflicting_blocking",
+    ),
+    (
+        SCENARIO_BROKER_OPEN_ORDER_REGISTRY_NONE,
+        "BROKER_OPEN_ORDER_WITHOUT_LIFECYCLE_REGISTRY_BLOCKED",
+        False,
+        "fresh_broker_truth_blocking",
+    ),
+    (
+        SCENARIO_MISSING_GUARDIAN_WITH_BROKER_EXPOSURE,
+        "MISSING_GUARDIAN_WITH_BROKER_EXPOSURE_BLOCKED",
+        True,
+        "missing_blocking",
+    ),
+)
 
 
 def test_scenario_ids_remain_stable() -> None:
@@ -250,6 +316,42 @@ def test_broker_fill_without_lifecycle_close_keeps_owner_and_reconciliation_path
     assert scenario["registry"]["reconciliation_path_available"] is True
     assert scenario["observability"]["ownership_loss_detected"] is False
     assert scenario["risk_reducing_close_authority"]["classification"] == RISK_REDUCING_CLOSE_BLOCKED_NOT_EXIT_DUE
+
+
+@pytest.mark.parametrize(
+    ("scenario_id", "expected_classification", "broker_exposure_visible", "artifact_status"),
+    MALFORMED_AUTHORITY_SCENARIOS,
+)
+def test_malformed_authority_artifact_scenarios_fail_closed(
+    tmp_path: Path,
+    scenario_id: str,
+    expected_classification: str,
+    broker_exposure_visible: bool,
+    artifact_status: str,
+) -> None:
+    scenario = _run(tmp_path, scenario_id)
+
+    assert scenario["submit_authority"]["classification"] == expected_classification
+    assert scenario["submit_authority"]["allowed"] is False
+    assert scenario["broker_exposure"]["visible"] is broker_exposure_visible
+    assert scenario["registry"]["artifact_integrity"]["status"] == artifact_status
+    assert scenario["registry"]["artifact_integrity"]["blocking"] is True
+    assert scenario["observability"]["stale_or_malformed_artifact_blocked"] is True
+    assert scenario["observability"]["stale_or_malformed_artifact_silently_accepted"] is False
+    assert scenario["safety"] == {
+        "live_money_eligible": False,
+        "paper_proof_invoked": False,
+        "broad_flatten_allowed": False,
+        "broker_mutation_allowed": False,
+    }
+    assert scenario["passed"] is True
+    if scenario_id == SCENARIO_BROKER_OPEN_ORDER_REGISTRY_NONE:
+        assert scenario["broker_exposure"]["broker_open_order_visible"] is True
+        assert scenario["registry"]["artifact_integrity"]["broker_open_order_count"] == 1
+    if scenario_id == SCENARIO_MISSING_GUARDIAN_WITH_BROKER_EXPOSURE:
+        assert scenario["risk_reducing_close_authority"]["classification"] == "RISK_REDUCING_CLOSE_BLOCKED_MISSING_GUARDIAN"
+        assert scenario["risk_reducing_close_authority"]["allowed"] is False
+        assert scenario["risk_reducing_close_authority"]["broad_flatten_allowed"] is False
 
 
 def _run(tmp_path: Path, name: str) -> dict:
