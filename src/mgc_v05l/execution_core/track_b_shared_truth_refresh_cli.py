@@ -84,6 +84,10 @@ DEFAULT_RECONCILIATION_ARTIFACT = (
 DEFAULT_SHARED_TRUTH_REFRESH_ARTIFACT = (
     Path("outputs") / "track_b_execution_core" / "shared_truth" / "latest_track_b_shared_truth_refresh.json"
 )
+DEFAULT_REGISTRY_DIAGNOSTICS_ARTIFACT = (
+    Path("outputs") / "track_b_execution_core" / "diagnostics" / "latest_track_b_registry_truth_diagnostics.json"
+)
+TRACK_B_DIAGNOSTICS_CLEAN_CURRENT_SCOPE = "TRACK_B_DIAGNOSTICS_CLEAN_CURRENT_SCOPE"
 RUNTIME_START_REQUIRED_CLASSIFICATIONS = {
     "Open Order Truth": {NO_OPEN_ORDERS},
     "Managed Order Registry": {NO_MANAGED_ORDERS},
@@ -109,6 +113,7 @@ class TrackBSharedTruthRefreshConfig:
     broker_lease_history_path: Path | None = DEFAULT_LEASE_HISTORY
     broker_position_guardian_path: Path = DEFAULT_BROKER_POSITION_GUARDIAN_ARTIFACT
     shared_truth_refresh_path: Path = DEFAULT_SHARED_TRUTH_REFRESH_ARTIFACT
+    registry_diagnostics_path: Path = DEFAULT_REGISTRY_DIAGNOSTICS_ARTIFACT
     broker_lease_max_entry_age_seconds: float = 300.0
     broker_lease_max_exit_age_seconds: float = 900.0
     broker_lease_degraded_refresh_grace_seconds: float = 120.0
@@ -127,9 +132,24 @@ def refresh_track_b_shared_truth(
 ) -> dict[str, Any]:
     actual_now = _ensure_utc(now or datetime.now(UTC))
     refresh_generation_id = _refresh_generation_id(actual_now)
+    reconciliation = _read_json(config.resolve(DEFAULT_RECONCILIATION_ARTIFACT))
+    registry_diagnostics = _read_json(config.resolve(config.registry_diagnostics_path))
+    fast_path = _clean_flat_fast_path_eligibility(
+        reconciliation=reconciliation,
+        registry_diagnostics=registry_diagnostics,
+    )
 
     open_order_config = TrackBOpenOrderTruthConfig(repo_root=config.repo_root, dashboard_projection_path=None)
-    open_order_truth = build_track_b_open_order_truth(config=open_order_config, now=actual_now)
+    if fast_path["used"]:
+        open_order_truth = _clean_flat_open_order_truth(
+            now=actual_now,
+            config=open_order_config,
+            reconciliation=reconciliation,
+            registry_diagnostics=registry_diagnostics,
+            fast_path=fast_path,
+        )
+    else:
+        open_order_truth = build_track_b_open_order_truth(config=open_order_config, now=actual_now)
     open_order_truth = _with_authority_cycle(
         open_order_truth,
         generation_id=refresh_generation_id,
@@ -138,7 +158,17 @@ def refresh_track_b_shared_truth(
     open_order_path, _ = write_track_b_open_order_truth(config=open_order_config, payload=open_order_truth, now=actual_now)
 
     managed_order_config = TrackBManagedOrderRegistryConfig(repo_root=config.repo_root, dashboard_projection_path=None)
-    managed_order_registry = build_track_b_managed_order_registry(config=managed_order_config, now=actual_now)
+    if fast_path["used"]:
+        managed_order_registry = _clean_flat_managed_order_registry(
+            now=actual_now,
+            config=managed_order_config,
+            open_order_truth=open_order_truth,
+            reconciliation=reconciliation,
+            registry_diagnostics=registry_diagnostics,
+            fast_path=fast_path,
+        )
+    else:
+        managed_order_registry = build_track_b_managed_order_registry(config=managed_order_config, now=actual_now)
     managed_order_registry = _with_authority_cycle(
         managed_order_registry,
         generation_id=refresh_generation_id,
@@ -152,7 +182,18 @@ def refresh_track_b_shared_truth(
     )
 
     position_config = TrackBPositionTruthMonitorConfig(repo_root=config.repo_root, dashboard_projection_path=None)
-    position_truth = build_track_b_position_truth(config=position_config, now=actual_now)
+    if fast_path["used"]:
+        position_truth = _clean_flat_position_truth(
+            now=actual_now,
+            config=position_config,
+            open_order_truth=open_order_truth,
+            managed_order_registry=managed_order_registry,
+            reconciliation=reconciliation,
+            registry_diagnostics=registry_diagnostics,
+            fast_path=fast_path,
+        )
+    else:
+        position_truth = build_track_b_position_truth(config=position_config, now=actual_now)
     position_truth = _with_authority_cycle(
         position_truth,
         generation_id=refresh_generation_id,
@@ -163,7 +204,19 @@ def refresh_track_b_shared_truth(
     position_path, _ = write_track_b_position_truth(config=position_config, payload=position_truth, now=actual_now)
 
     managed_position_config = TrackBManagedPositionRegistryConfig(repo_root=config.repo_root, dashboard_projection_path=None)
-    managed_position_registry = build_track_b_managed_position_registry(config=managed_position_config, now=actual_now)
+    if fast_path["used"]:
+        managed_position_registry = _clean_flat_managed_position_registry(
+            now=actual_now,
+            config=managed_position_config,
+            open_order_truth=open_order_truth,
+            managed_order_registry=managed_order_registry,
+            position_truth=position_truth,
+            reconciliation=reconciliation,
+            registry_diagnostics=registry_diagnostics,
+            fast_path=fast_path,
+        )
+    else:
+        managed_position_registry = build_track_b_managed_position_registry(config=managed_position_config, now=actual_now)
     managed_position_registry = _with_authority_cycle(
         managed_position_registry,
         generation_id=refresh_generation_id,
@@ -181,7 +234,18 @@ def refresh_track_b_shared_truth(
     # Managed Order Registry and Managed Position Registry are mutually
     # informative. Build each once from the other fresh current-cycle artifact,
     # then rebuild Position Truth from the final managed-order projection.
-    managed_order_registry = build_track_b_managed_order_registry(config=managed_order_config, now=actual_now)
+    if fast_path["used"]:
+        managed_order_registry = _clean_flat_managed_order_registry(
+            now=actual_now,
+            config=managed_order_config,
+            open_order_truth=open_order_truth,
+            managed_position_registry=managed_position_registry,
+            reconciliation=reconciliation,
+            registry_diagnostics=registry_diagnostics,
+            fast_path=fast_path,
+        )
+    else:
+        managed_order_registry = build_track_b_managed_order_registry(config=managed_order_config, now=actual_now)
     managed_order_registry = _with_authority_cycle(
         managed_order_registry,
         generation_id=refresh_generation_id,
@@ -194,7 +258,19 @@ def refresh_track_b_shared_truth(
         payload=managed_order_registry,
         now=actual_now,
     )
-    position_truth = build_track_b_position_truth(config=position_config, now=actual_now)
+    if fast_path["used"]:
+        position_truth = _clean_flat_position_truth(
+            now=actual_now,
+            config=position_config,
+            open_order_truth=open_order_truth,
+            managed_order_registry=managed_order_registry,
+            managed_position_registry=managed_position_registry,
+            reconciliation=reconciliation,
+            registry_diagnostics=registry_diagnostics,
+            fast_path=fast_path,
+        )
+    else:
+        position_truth = build_track_b_position_truth(config=position_config, now=actual_now)
     position_truth = _with_authority_cycle(
         position_truth,
         generation_id=refresh_generation_id,
@@ -224,7 +300,6 @@ def refresh_track_b_shared_truth(
         now=actual_now,
     )
 
-    reconciliation = _read_json(config.resolve(DEFAULT_RECONCILIATION_ARTIFACT))
     broker_position_guardian_config = TrackBBrokerPositionGuardianConfig(
         repo_root=config.repo_root,
         output_path=config.broker_position_guardian_path,
@@ -338,6 +413,7 @@ def refresh_track_b_shared_truth(
         "classifications": {str(row["service"]): row.get("classification") for row in services},
         "artifact_paths": {str(row["service"]): row.get("artifact_path") for row in services if row.get("artifact_path")},
         "source_refresh_artifact_path": str(config.resolve(config.shared_truth_refresh_path)),
+        "bounded_current_scope_fast_path": fast_path,
         "recovery_budget_ledger": recovery_budget_ledger.get("classification"),
         "recovery_budget_exhausted": recovery_budget_ledger.get("budget_exhausted") is True,
         "paper_recovery_policy": paper_recovery_policy.get("paper_action_policy"),
@@ -446,6 +522,448 @@ def build_runtime_start_preflight_summary(result: Mapping[str, Any]) -> dict[str
         "warnings": _list(result.get("warnings")),
         "blockers": blockers,
     }
+
+
+def _clean_flat_fast_path_eligibility(
+    *,
+    reconciliation: Mapping[str, Any],
+    registry_diagnostics: Mapping[str, Any],
+) -> dict[str, Any]:
+    checks = {
+        "broker_positions_empty": len(_list(reconciliation.get("track_b_broker_positions"))) == 0
+        and _int(reconciliation.get("track_b_broker_position_count")) == 0,
+        "broker_open_orders_empty": len(_list(reconciliation.get("track_b_broker_open_orders"))) == 0
+        and _int(reconciliation.get("track_b_broker_open_order_count")) == 0,
+        "lifecycle_open_positions_empty": len(_list(reconciliation.get("track_b_lifecycle_positions"))) == 0
+        and _int(reconciliation.get("lifecycle_open_position_count")) == 0,
+        "lifecycle_open_orders_empty": _int(reconciliation.get("lifecycle_open_order_count")) == 0,
+        "current_scope_review_required_zero": _int(
+            _first_present(reconciliation, "current_scope_review_required_count", "review_required_count")
+        ) == 0,
+        "unresolved_submit_intent_ownership_zero": _int(
+            reconciliation.get("unresolved_submit_intent_ownership_count")
+        ) == 0,
+        "registry_diagnostics_current_scope_clean": _registry_diagnostics_current_scope_clean(registry_diagnostics),
+        "broker_lifecycle_reconciliation_clean": reconciliation.get("classification")
+        in {"BROKER_LIFECYCLE_RECONCILED", "TRACK_B_PAPER_BROKER_RECONCILED"}
+        and reconciliation.get("broker_reconciled") is not False,
+    }
+    failed = [name for name, passed in checks.items() if not passed]
+    return {
+        "used": not failed,
+        "classification": "CLEAN_FLAT_CURRENT_SCOPE_FAST_PATH_USED"
+        if not failed
+        else "CLEAN_FLAT_CURRENT_SCOPE_FAST_PATH_DISABLED",
+        "disabled_reasons": failed,
+        "checks": checks,
+        "registry_diagnostics_classification": registry_diagnostics.get("classification") or "MISSING",
+        "skipped_full_registry_reduction": not failed,
+        "skipped_manifest_directory_scan": not failed,
+        "skipped_lifecycle_report_scan": not failed,
+    }
+
+
+def _clean_flat_open_order_truth(
+    *,
+    now: datetime,
+    config: TrackBOpenOrderTruthConfig,
+    reconciliation: Mapping[str, Any],
+    registry_diagnostics: Mapping[str, Any],
+    fast_path: Mapping[str, Any],
+) -> dict[str, Any]:
+    return {
+        "schema_version": "track_b_open_order_truth_v1",
+        "generated_at": now.isoformat(),
+        "mode": "PAPER",
+        "read_only": True,
+        "submit_authority": False,
+        "paper_proof_invoked": False,
+        "live_money_eligible": reconciliation.get("live_money_eligible") is True,
+        "classification": NO_OPEN_ORDERS,
+        "source_freshness": {
+            "reconciliation_generated_at": reconciliation.get("generated_at"),
+            "age_seconds": 0.0,
+            "ttl_seconds": float(config.artifact_max_age_seconds),
+            "stale": False,
+        },
+        "broker_open_orders": [],
+        "broker_positions": [],
+        "lifecycle_open_positions": [],
+        "unresolved_submit_ownership": [],
+        "order_states": [],
+        "duplicate_close_order_groups": [],
+        "broker_positions_without_close_order": [],
+        "broker_flat_with_open_close_order": [],
+        "terminal_registry_truth_overlay": {
+            "enabled": True,
+            "record_count": None,
+            "source": "bounded_current_scope_fast_path",
+            "full_registry_reduction_skipped": True,
+        },
+        "registry_truth_diagnostics": _registry_diagnostics_summary(registry_diagnostics),
+        "bounded_current_scope_fast_path": dict(fast_path),
+        "position_truth_summary": {},
+        "live_position_status_summary": {"open_position_count": 0, "review_required_count": 0},
+        "reconciliation": _reconciliation_summary(reconciliation),
+        "summary": {
+            "classification": NO_OPEN_ORDERS,
+            "open_order_count": 0,
+            "working_close_order_count": 0,
+            "working_entry_order_count": 0,
+            "suspicious_order_count": 0,
+            "duplicate_close_order_group_count": 0,
+            "broker_position_without_close_order_count": 0,
+            "broker_flat_with_open_close_order_count": 0,
+        },
+        "event_state": {
+            "classification": NO_OPEN_ORDERS,
+            "signature": "NO_OPEN_ORDERS|0|0|0",
+            "order_count": 0,
+            "duplicate_close_order_group_count": 0,
+            "broker_position_without_close_order_count": 0,
+            "broker_flat_with_open_close_order_count": 0,
+        },
+        "artifact_paths": {
+            "authority": str(config.resolve(config.output_path)),
+            "event_log": str(config.resolve(config.event_log_path)),
+            "dashboard_projection": None,
+            "reconciliation": str(config.resolve(config.reconciliation_path)),
+            "position_truth": str(config.resolve(config.position_truth_path)),
+            "live_position_status": str(config.resolve(config.live_position_status_path)),
+            "lifecycle_root": str(config.resolve(config.lifecycle_root)),
+        },
+    }
+
+
+def _clean_flat_managed_order_registry(
+    *,
+    now: datetime,
+    config: TrackBManagedOrderRegistryConfig,
+    open_order_truth: Mapping[str, Any],
+    reconciliation: Mapping[str, Any],
+    registry_diagnostics: Mapping[str, Any],
+    fast_path: Mapping[str, Any],
+    managed_position_registry: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    return {
+        "schema_version": "track_b_managed_order_registry_v1",
+        "generated_at": now.isoformat(),
+        "mode": "PAPER",
+        "read_only": True,
+        "submit_authority": False,
+        "paper_proof_invoked": False,
+        "live_money_eligible": reconciliation.get("live_money_eligible") is True,
+        "classification": NO_MANAGED_ORDERS,
+        "managed_orders": [],
+        "terminal_registry_truth_overlay": {
+            "enabled": True,
+            "record_count": None,
+            "superseded_full_audit_only_count": 0,
+            "superseded_full_audit_only": [],
+            "source": "bounded_current_scope_fast_path",
+            "full_registry_reduction_skipped": True,
+        },
+        "pre_restart_exposure_resolution": _no_open_exposure_resolution(reconciliation),
+        "source_freshness": {},
+        "bounded_current_scope_fast_path": dict(fast_path),
+        "registry_truth_diagnostics": _registry_diagnostics_summary(registry_diagnostics),
+        "open_order_truth": _authority_summary(open_order_truth, config.resolve(config.open_order_truth_path)),
+        "position_truth": {},
+        "managed_position_registry": _authority_summary(
+            managed_position_registry or {},
+            config.resolve(config.managed_position_registry_path),
+        ),
+        "reconciliation": _reconciliation_summary(reconciliation),
+        "summary": {
+            "classification": NO_MANAGED_ORDERS,
+            "managed_order_count": 0,
+            "working_entry_order_count": 0,
+            "working_close_order_count": 0,
+            "modifiable_close_order_count": 0,
+            "cancel_replace_candidate_count": 0,
+            "suspicious_order_count": 0,
+            "duplicate_close_order_count": 0,
+            "position_without_close_order_count": 0,
+            "active_hold_managed_timed_exit_pending_count": 0,
+        },
+        "event_state": {
+            "classification": NO_MANAGED_ORDERS,
+            "signature": "NO_MANAGED_ORDERS|0|0|0|0",
+            "managed_order_count": 0,
+        },
+        "artifact_paths": {
+            "authority": str(config.resolve(config.output_path)),
+            "event_log": str(config.resolve(config.event_log_path)),
+            "dashboard_projection": None,
+            "open_order_truth": str(config.resolve(config.open_order_truth_path)),
+            "position_truth": str(config.resolve(config.position_truth_path)),
+            "managed_position_registry": str(config.resolve(config.managed_position_registry_path)),
+            "reconciliation": str(config.resolve(config.reconciliation_path)),
+            "lifecycle_root": str(config.resolve(config.lifecycle_root)),
+            "manifest_root": str(config.resolve(config.manifest_root)),
+            "submit_ownership_jsonl": str(config.resolve(config.submit_ownership_jsonl_path)),
+        },
+    }
+
+
+def _clean_flat_position_truth(
+    *,
+    now: datetime,
+    config: TrackBPositionTruthMonitorConfig,
+    open_order_truth: Mapping[str, Any],
+    managed_order_registry: Mapping[str, Any],
+    reconciliation: Mapping[str, Any],
+    registry_diagnostics: Mapping[str, Any],
+    fast_path: Mapping[str, Any],
+    managed_position_registry: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    symbols = sorted(str(item).upper() for item in reconciliation.get("symbols") or [] if str(item).strip())
+    position_states = [
+        {
+            "symbol": symbol,
+            "classification": "CLEAN_FLAT",
+            "detail": "No current broker, lifecycle, order, or registry exposure.",
+            "broker_quantity": "0",
+            "lifecycle_quantity": "0",
+            "open_order_count": 0,
+            "review_required_count": 0,
+        }
+        for symbol in symbols
+    ]
+    event_state = {
+        "reconciliation_classification": reconciliation.get("classification"),
+        "runtime_stopped_with_broker_exposure": False,
+        "symbols": {row["symbol"]: row for row in position_states},
+    }
+    return {
+        "schema_version": "track_b_position_truth_v1",
+        "generated_at": now.isoformat(),
+        "mode": "PAPER",
+        "read_only": True,
+        "submit_authority": False,
+        "paper_proof_invoked": False,
+        "live_money_eligible": reconciliation.get("live_money_eligible") is True,
+        "reconciliation": _reconciliation_summary(reconciliation),
+        "broker_lease": {},
+        "runtime_status": {},
+        "broker_positions": [],
+        "open_broker_orders": [],
+        "lifecycle_open_positions": [],
+        "review_required_positions": [],
+        "unresolved_submit_ownership": [],
+        "known_managed_exit_orders": [],
+        "unknown_broker_open_orders": [],
+        "open_order_truth": _authority_summary(open_order_truth, config.resolve(config.open_order_truth_path)),
+        "managed_order_registry": _authority_summary(
+            managed_order_registry,
+            config.resolve(config.managed_order_registry_path),
+        ),
+        "managed_position_registry": _authority_summary(
+            managed_position_registry or {},
+            config.resolve(config.managed_order_registry_path),
+        ),
+        "position_states": position_states,
+        "summary": {
+            "overall_classification": "CLEAN_FLAT_READY",
+            "broker_exposure_present": False,
+            "open_order_present": False,
+            "review_required_count": 0,
+            "unresolved_submit_ownership_count": 0,
+            "symbol_count": len(position_states),
+        },
+        "event_state": event_state,
+        "bounded_current_scope_fast_path": dict(fast_path),
+        "registry_truth_diagnostics": _registry_diagnostics_summary(registry_diagnostics),
+        "artifact_paths": {
+            "latest": str(config.resolve(config.output_path)),
+            "authority": str(config.resolve(config.output_path)),
+            "event_log": str(config.resolve(config.event_log_path)),
+            "dashboard_projection": None,
+            "reconciliation": str(config.resolve(config.reconciliation_path)),
+            "broker_lease": str(config.resolve(config.broker_lease_path)),
+            "runtime_truth": str(config.resolve(config.runtime_truth_path)),
+            "headless_status": str(config.resolve(config.headless_status_path)),
+            "live_position_status": str(config.resolve(config.live_position_status_path)),
+            "open_order_truth": str(config.resolve(config.open_order_truth_path)),
+            "managed_order_registry": str(config.resolve(config.managed_order_registry_path)),
+        },
+    }
+
+
+def _clean_flat_managed_position_registry(
+    *,
+    now: datetime,
+    config: TrackBManagedPositionRegistryConfig,
+    open_order_truth: Mapping[str, Any],
+    managed_order_registry: Mapping[str, Any],
+    position_truth: Mapping[str, Any],
+    reconciliation: Mapping[str, Any],
+    registry_diagnostics: Mapping[str, Any],
+    fast_path: Mapping[str, Any],
+) -> dict[str, Any]:
+    return {
+        "schema_version": "track_b_managed_position_registry_v1",
+        "generated_at": now.isoformat(),
+        "mode": "PAPER",
+        "read_only": True,
+        "submit_authority": False,
+        "paper_proof_invoked": False,
+        "live_money_eligible": reconciliation.get("live_money_eligible") is True,
+        "classification": NO_MANAGED_POSITIONS,
+        "managed_positions": [],
+        "broker_positions": [],
+        "lifecycle_open_positions": [],
+        "review_required_positions": [],
+        "historical_review_positions": [],
+        "superseded_lifecycle_projections": [],
+        "projection_authority_diagnostics": {
+            "classification": "PROJECTION_AUTHORITY_COHERENT",
+            "authority_source": "CLEAN_FLAT_CURRENT_SCOPE_FAST_PATH",
+            "repaired_missing_owner_count": 0,
+            "divergence_count": 0,
+        },
+        "unresolved_submit_ownership": [],
+        "pre_restart_exposure_resolution": _no_open_exposure_resolution(reconciliation),
+        "source_freshness": {},
+        "bounded_current_scope_fast_path": dict(fast_path),
+        "registry_truth_diagnostics": _registry_diagnostics_summary(registry_diagnostics),
+        "position_truth": _authority_summary(position_truth, config.resolve(config.position_truth_path)),
+        "open_order_truth": _authority_summary(open_order_truth, config.resolve(config.open_order_truth_path)),
+        "managed_order_registry": _authority_summary(
+            managed_order_registry,
+            config.resolve(config.managed_order_registry_path),
+        ),
+        "reconciliation": _reconciliation_summary(reconciliation),
+        "summary": {
+            "classification": NO_MANAGED_POSITIONS,
+            "managed_position_count": 0,
+            "attention_required_count": 0,
+            "exit_due_count": 0,
+            "close_working_count": 0,
+            "suspicious_managed_order_count": 0,
+            "duplicate_close_risk_count": 0,
+            "broker_position_count": 0,
+            "lifecycle_position_count": 0,
+            "review_required_count": 0,
+            "historical_review_position_count": 0,
+            "pre_restart_resolved_managed_exposure_count": 0,
+            "pre_restart_review_required_exposure_count": 0,
+        },
+        "event_state": {
+            "classification": NO_MANAGED_POSITIONS,
+            "signature": "NO_MANAGED_POSITIONS|0|0|0",
+            "managed_position_count": 0,
+        },
+        "artifact_paths": {
+            "authority": str(config.resolve(config.output_path)),
+            "event_log": str(config.resolve(config.event_log_path)),
+            "dashboard_projection": None,
+            "position_truth": str(config.resolve(config.position_truth_path)),
+            "open_order_truth": str(config.resolve(config.open_order_truth_path)),
+            "managed_order_registry": str(config.resolve(config.managed_order_registry_path)),
+            "reconciliation": str(config.resolve(config.reconciliation_path)),
+            "live_position_status": str(config.resolve(config.live_position_status_path)),
+            "lifecycle_root": str(config.resolve(config.lifecycle_root)),
+            "manifest_root": str(config.resolve(config.manifest_root)),
+            "market_data_root": str(config.resolve(config.market_data_root)),
+            "position_intent_audit": str(config.resolve(config.position_intent_audit_path)),
+            "hold_exit_shadow": str(config.resolve(config.hold_exit_shadow_output_path)),
+        },
+    }
+
+
+def _registry_diagnostics_summary(payload: Mapping[str, Any]) -> dict[str, Any]:
+    return {
+        "classification": payload.get("classification"),
+        "generated_at": payload.get("generated_at"),
+        "current_scope_review_required_count": payload.get("current_scope_review_required_count"),
+        "current_scope_trade_states": _list(payload.get("current_scope_trade_states")),
+        "current_blockers": _list(payload.get("current_blockers")),
+    }
+
+
+def _registry_diagnostics_current_scope_clean(payload: Mapping[str, Any]) -> bool:
+    classification = str(payload.get("classification") or "")
+    if not classification:
+        return False
+    current_review_count = _int(payload.get("current_scope_review_required_count"))
+    current_states = _list(payload.get("current_scope_trade_states"))
+    current_blockers = _list(payload.get("current_blockers"))
+    if current_review_count != 0 or current_states or current_blockers:
+        return False
+    if classification == TRACK_B_DIAGNOSTICS_CLEAN_CURRENT_SCOPE:
+        return True
+    return bool(payload.get("diagnostic_only") is True and "HISTORICAL" in classification)
+
+
+def _reconciliation_summary(payload: Mapping[str, Any]) -> dict[str, Any]:
+    return {
+        "classification": payload.get("classification"),
+        "broker_reconciled": payload.get("broker_reconciled"),
+        "blockers": payload.get("blockers") or [],
+        "review_required_count": payload.get("review_required_count"),
+        "current_scope_review_required_count": payload.get("current_scope_review_required_count"),
+        "unresolved_submit_intent_ownership_count": payload.get("unresolved_submit_intent_ownership_count"),
+        "track_b_broker_open_order_count": payload.get("track_b_broker_open_order_count"),
+        "track_b_broker_position_count": payload.get("track_b_broker_position_count"),
+        "lifecycle_open_position_count": payload.get("lifecycle_open_position_count"),
+        "lifecycle_open_order_count": payload.get("lifecycle_open_order_count"),
+        "generated_at": payload.get("generated_at"),
+    }
+
+
+def _authority_summary(payload: Mapping[str, Any], path: Path) -> dict[str, Any]:
+    summary = _mapping(payload.get("summary"))
+    return {
+        "classification": payload.get("classification") or summary.get("overall_classification"),
+        "summary": summary,
+        "generated_at": payload.get("generated_at"),
+        "authority_generation_id": payload.get("authority_generation_id"),
+        "authority_cycle_generated_at": payload.get("authority_cycle_generated_at"),
+        "artifact_path": str(path),
+    }
+
+
+def _no_open_exposure_resolution(reconciliation: Mapping[str, Any]) -> dict[str, Any]:
+    broker_open_order_count = _int(reconciliation.get("track_b_broker_open_order_count"))
+    return {
+        "classification": "NO_OPEN_EXPOSURE",
+        "broker_position_count": 0,
+        "broker_open_order_count": broker_open_order_count,
+        "resolved_managed_exposure_count": 0,
+        "review_required_exposure_count": 0,
+        "resolved_lifecycle_positions": [],
+        "managed_exposures": [],
+        "review_required_exposures": [],
+        "restart_with_owned_exposure_allowed": False,
+        "no_broad_flatten_generated": True,
+        "read_only": True,
+        "current_exposure_owner_resolution": {
+            "classification": "NO_OPEN_EXPOSURE",
+            "broker_position_count": 0,
+            "broker_open_order_count": broker_open_order_count,
+            "owned_exposure_count": 0,
+            "review_required_exposure_count": 0,
+            "owned_exposures": [],
+            "review_required_exposures": [],
+            "resolved_lifecycle_positions": [],
+        },
+    }
+
+
+def _first_present(payload: Mapping[str, Any], *keys: str) -> Any:
+    for key in keys:
+        value = payload.get(key)
+        if value not in {None, ""}:
+            return value
+    return 0
+
+
+def _int(value: Any) -> int:
+    try:
+        return int(float(str(value)))
+    except (TypeError, ValueError):
+        return 0
 
 
 def build_parser() -> argparse.ArgumentParser:

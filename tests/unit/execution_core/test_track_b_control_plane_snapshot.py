@@ -62,6 +62,9 @@ def test_snapshot_ties_supervisor_to_shared_truth_generation(tmp_path: Path) -> 
     assert substages["shared_truth_convergence"]["scans_historical_artifacts"] is False
     assert substages["shared_truth_convergence"]["can_consume_compact_latest_artifact"] is True
     assert "compact latest shared-truth artifact" in substages["shared_truth_convergence"]["notes"]
+    assert payload["bounded_current_scope_fast_path"]["used"] is True
+    assert substages["shared_truth_refresh_initial"]["scans_historical_artifacts"] is False
+    assert "fast path used" in substages["shared_truth_refresh_initial"]["notes"]
     assert substages["artifact_archive_plan_diagnostic"]["current_hot_path_required"] is False
     assert substages["artifact_archive_plan_diagnostic"]["move_off_hot_path_candidate"] is True
     assert payload["safe_state_classification"] == "SAFE_STATE_NORMAL"
@@ -898,6 +901,7 @@ def _snapshot(
 
 def _seed_clean_stack(root: Path) -> None:
     _write_reconciliation(root)
+    _write_registry_diagnostics(root)
     _write_broker_status(root)
     _write_live_position_status(root)
     _write_trade_summary(root)
@@ -1187,6 +1191,21 @@ def _write_reconciliation(root: Path) -> None:
             "lifecycle_open_order_count": 0,
             "position_match_report": {"state": "BROKER_AND_LIFECYCLE_FLAT", "matched": True},
             "blockers": [],
+        },
+    )
+
+
+def _write_registry_diagnostics(root: Path) -> None:
+    _write(
+        root / "outputs/track_b_execution_core/diagnostics/latest_track_b_registry_truth_diagnostics.json",
+        {
+            "generated_at": NOW.isoformat(),
+            "classification": "TRACK_B_DIAGNOSTICS_CLEAN_CURRENT_SCOPE",
+            "current_scope_review_required_count": 0,
+            "current_scope_trade_states": [],
+            "current_blockers": [],
+            "live_money_eligible": False,
+            "paper_proof_invoked": False,
         },
     )
 

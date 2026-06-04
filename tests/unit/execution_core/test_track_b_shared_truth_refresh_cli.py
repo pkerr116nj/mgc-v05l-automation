@@ -39,6 +39,9 @@ def test_refresh_clean_flat_stack(tmp_path: Path) -> None:
     assert result["autonomous_recovery_plan_classification"] == "PLAN_BLOCKED_STALE_EVIDENCE"
     assert result["autonomous_recovery_next_action"] == "REFRESH_EVIDENCE"
     assert result["autonomous_recovery_execution_enabled"] is False
+    assert result["bounded_current_scope_fast_path"]["used"] is True
+    assert result["bounded_current_scope_fast_path"]["skipped_full_registry_reduction"] is True
+    assert result["bounded_current_scope_fast_path"]["skipped_manifest_directory_scan"] is True
     assert result["unsafe_blockers"] == []
     assert _read(tmp_path / "outputs/track_b_execution_core/open_order_truth/latest_open_order_truth.json")[
         "classification"
@@ -127,7 +130,7 @@ def test_refresh_replaces_stale_autonomous_recovery_plan(tmp_path: Path) -> None
     assert refreshed["execution_enabled"] is False
 
 
-def test_refresh_uses_bounded_current_cycle_authority_rebuilds(monkeypatch, tmp_path: Path) -> None:
+def test_refresh_clean_flat_fast_path_avoids_historical_builders(monkeypatch, tmp_path: Path) -> None:
     _seed_clean_stack(tmp_path)
     calls: list[str] = []
 
@@ -152,11 +155,84 @@ def test_refresh_uses_bounded_current_cycle_authority_rebuilds(monkeypatch, tmp_
     result = _refresh(tmp_path)
 
     assert result["exit_code"] == 0
-    assert calls.count("build_track_b_open_order_truth") == 1
-    assert calls.count("build_track_b_managed_order_registry") == 2
-    assert calls.count("build_track_b_position_truth") == 2
+    assert result["bounded_current_scope_fast_path"]["used"] is True
+    assert calls.count("build_track_b_open_order_truth") == 0
+    assert calls.count("build_track_b_managed_order_registry") == 0
+    assert calls.count("build_track_b_position_truth") == 0
     assert calls.count("build_track_b_runtime_environment_truth") == 1
-    assert calls.count("build_track_b_managed_position_registry") == 1
+    assert calls.count("build_track_b_managed_position_registry") == 0
+
+
+def test_refresh_current_scope_blocker_disables_fast_path(monkeypatch, tmp_path: Path) -> None:
+    _seed_clean_stack(tmp_path)
+    _write_registry_diagnostics(
+        tmp_path,
+        classification="TRACK_B_DIAGNOSTICS_CONFLICT_CURRENT_SCOPE",
+        current_scope_review_required_count=1,
+        current_scope_trade_states=[{"trade_id": "trade_review", "current_state": "OPEN_MANAGED"}],
+    )
+    calls: list[str] = []
+    original = shared_truth_module.build_track_b_open_order_truth
+
+    def counted(*args, **kwargs):
+        calls.append("build_track_b_open_order_truth")
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(shared_truth_module, "build_track_b_open_order_truth", counted)
+
+    result = _refresh(tmp_path)
+
+    assert result["bounded_current_scope_fast_path"]["used"] is False
+    assert "registry_diagnostics_current_scope_clean" in result["bounded_current_scope_fast_path"]["disabled_reasons"]
+    assert calls == ["build_track_b_open_order_truth"]
+
+
+def test_refresh_non_flat_broker_exposure_disables_fast_path(monkeypatch, tmp_path: Path) -> None:
+    _seed_clean_stack(tmp_path)
+    _write_reconciliation(
+        tmp_path,
+        broker_positions=[
+            {
+                "account": "DUM882026",
+                "symbol": "MES",
+                "localSymbol": "MESM6",
+                "conId": 770561194,
+                "position": "-1",
+            }
+        ],
+    )
+    calls: list[str] = []
+    original = shared_truth_module.build_track_b_open_order_truth
+
+    def counted(*args, **kwargs):
+        calls.append("build_track_b_open_order_truth")
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(shared_truth_module, "build_track_b_open_order_truth", counted)
+
+    result = _refresh(tmp_path)
+
+    assert result["bounded_current_scope_fast_path"]["used"] is False
+    assert "broker_positions_empty" in result["bounded_current_scope_fast_path"]["disabled_reasons"]
+    assert calls == ["build_track_b_open_order_truth"]
+
+
+def test_refresh_historical_registry_debris_does_not_disable_fast_path(tmp_path: Path) -> None:
+    _seed_clean_stack(tmp_path)
+    _write_registry_diagnostics(
+        tmp_path,
+        classification="TRACK_B_DIAGNOSTICS_HISTORICAL_REVIEW_REQUIRED",
+        current_scope_review_required_count=0,
+        diagnostic_only=True,
+    )
+
+    result = _refresh(tmp_path)
+
+    assert result["exit_code"] == 0
+    assert result["bounded_current_scope_fast_path"]["used"] is True
+    assert result["bounded_current_scope_fast_path"]["registry_diagnostics_classification"] == (
+        "TRACK_B_DIAGNOSTICS_HISTORICAL_REVIEW_REQUIRED"
+    )
 
 
 def test_refresh_market_closed_autonomous_plan_waits(tmp_path: Path) -> None:
@@ -423,6 +499,7 @@ def _refresh(root: Path) -> dict:
 
 def _seed_clean_stack(root: Path, *, now: datetime = NOW) -> None:
     _write_reconciliation(root, now=now)
+    _write_registry_diagnostics(root, now=now)
     _write_broker_status(root, now=now)
     _write_live_position_status(root, now=now)
     _write_trade_summary(root, now=now)
@@ -560,12 +637,37 @@ def _write_reconciliation(
             "track_b_broker_position_count": len(positions),
             "track_b_broker_open_order_count": len(orders),
             "unknown_broker_open_order_count": len(orders),
+            "current_scope_review_required_count": 0,
             "review_required_count": 0,
             "unresolved_submit_intent_ownership_count": 0,
             "lifecycle_open_position_count": len(lifecycle_rows),
             "lifecycle_open_order_count": len(orders),
             "position_match_report": {"state": "BROKER_AND_LIFECYCLE_FLAT", "matched": broker_reconciled},
             "blockers": [] if broker_reconciled else [{"code": "broker_position_without_lifecycle"}],
+        },
+    )
+
+
+def _write_registry_diagnostics(
+    root: Path,
+    *,
+    now: datetime = NOW,
+    classification: str = "TRACK_B_DIAGNOSTICS_CLEAN_CURRENT_SCOPE",
+    current_scope_review_required_count: int = 0,
+    current_scope_trade_states: list[dict] | None = None,
+    diagnostic_only: bool = False,
+) -> None:
+    _write(
+        root / "outputs/track_b_execution_core/diagnostics/latest_track_b_registry_truth_diagnostics.json",
+        {
+            "generated_at": now.isoformat(),
+            "classification": classification,
+            "current_scope_review_required_count": current_scope_review_required_count,
+            "current_scope_trade_states": current_scope_trade_states or [],
+            "current_blockers": [],
+            "diagnostic_only": diagnostic_only,
+            "live_money_eligible": False,
+            "paper_proof_invoked": False,
         },
     )
 

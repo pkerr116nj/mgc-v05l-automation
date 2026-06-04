@@ -6,6 +6,7 @@ from decimal import Decimal
 from pathlib import Path
 
 from mgc_v05l.execution_core.track_b_central_trade_registry import TradeEvent, TradeEventType, reduce_trade_events
+from mgc_v05l.execution_core import track_b_current_exposure_owner_resolver as owner_resolver_module
 from mgc_v05l.execution_core.track_b_current_exposure_owner_resolver import (
     AMBIGUOUS_EXPOSURE_OWNERSHIP,
     NO_OPEN_EXPOSURE,
@@ -126,6 +127,23 @@ def test_broker_flat_with_stale_open_rows_reports_no_open_exposure(tmp_path: Pat
 
     assert payload["classification"] == NO_OPEN_EXPOSURE
     assert payload["owned_exposure_count"] == 0
+
+
+def test_broker_flat_without_supplied_records_skips_registry_load(monkeypatch, tmp_path: Path) -> None:
+    def fail_registry_load(*args, **kwargs):
+        raise AssertionError("flat no-exposure resolution must not reduce historical registry records")
+
+    monkeypatch.setattr(owner_resolver_module, "load_live_trade_registry_records", fail_registry_load)
+
+    payload = resolve_current_exposure_ownership(
+        config=CurrentExposureOwnerResolverConfig(repo_root=tmp_path),
+        broker_positions=[],
+        broker_open_orders=[],
+    )
+
+    assert payload["classification"] == NO_OPEN_EXPOSURE
+    assert payload["bounded_current_scope_fast_path"]["used"] is True
+    assert payload["bounded_current_scope_fast_path"]["skipped_full_registry_reduction"] is True
 
 
 def test_open_order_is_reported_and_prevents_restart_consumers_from_allowing_start(tmp_path: Path) -> None:

@@ -78,6 +78,26 @@ def resolve_current_exposure_ownership(
 
     broker_rows = [dict(row) for row in broker_positions if _position_key(row) and _broker_position_qty(row)]
     open_order_rows = [dict(row) for row in broker_open_orders]
+    if not broker_rows:
+        return {
+            "classification": NO_OPEN_EXPOSURE,
+            "broker_position_count": 0,
+            "broker_open_order_count": len(open_order_rows),
+            "owned_exposure_count": 0,
+            "review_required_exposure_count": 0,
+            "owned_exposures": [],
+            "review_required_exposures": [],
+            "resolved_lifecycle_positions": [],
+            "stale_superseded_full_audit_only": [],
+            "read_only": True,
+            "no_broad_flatten_generated": True,
+            "bounded_current_scope_fast_path": {
+                "used": True,
+                "reason": "broker_positions_empty",
+                "skipped_full_registry_reduction": registry_records is None,
+                "skipped_lifecycle_report_scan": not lifecycle_reports,
+            },
+        }
     records = tuple(registry_records) if registry_records is not None else load_live_trade_registry_records(
         repo_root=config.repo_root
     )
@@ -100,21 +120,6 @@ def resolve_current_exposure_ownership(
         broker_open_orders=open_order_rows,
     )
     lifecycle_rows = [dict(row) for row in terminal_filtered if isinstance(row, Mapping)]
-
-    if not broker_rows:
-        return {
-            "classification": NO_OPEN_EXPOSURE,
-            "broker_position_count": 0,
-            "broker_open_order_count": len(open_order_rows),
-            "owned_exposure_count": 0,
-            "review_required_exposure_count": 0,
-            "owned_exposures": [],
-            "review_required_exposures": [],
-            "resolved_lifecycle_positions": [],
-            "stale_superseded_full_audit_only": list(terminal_superseded_rows),
-            "read_only": True,
-            "no_broad_flatten_generated": True,
-        }
 
     owned: list[dict[str, Any]] = []
     review: list[dict[str, Any]] = []

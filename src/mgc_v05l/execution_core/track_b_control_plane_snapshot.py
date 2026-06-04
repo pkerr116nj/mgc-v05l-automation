@@ -206,6 +206,7 @@ def build_track_b_control_plane_snapshot(
         can_consume_compact_latest_artifact=True,
         cache_or_throttle_candidate=True,
     )
+    _annotate_shared_truth_fast_path_substage(build_substages, shared_truth)
     if post_shared_truth_refresh_hook is not None:
         _timed_step(
             "post_shared_truth_refresh_hook",
@@ -559,6 +560,24 @@ def _refresh_order_adjustment_plan_for_snapshot(
     return payload
 
 
+def _annotate_shared_truth_fast_path_substage(
+    substages: list[dict[str, Any]],
+    shared_truth: Mapping[str, Any],
+) -> None:
+    fast_path = _mapping(shared_truth.get("bounded_current_scope_fast_path"))
+    if fast_path.get("used") is not True:
+        return
+    for row in reversed(substages):
+        if row.get("substage") != "shared_truth_refresh_initial":
+            continue
+        row["scans_historical_artifacts"] = False
+        row["notes"] = (
+            "Clean-flat bounded current-scope fast path used; full registry reduction "
+            "and manifest directory scan skipped."
+        )
+        break
+
+
 def _refresh_proof_readiness_for_snapshot(
     *,
     config: TrackBControlPlaneSnapshotConfig,
@@ -888,6 +907,7 @@ def _snapshot_payload(
         "classification": classification,
         "shared_truth_refresh_generation_id": shared_truth.get("refresh_generation_id"),
         "shared_truth_refresh_generated_at": shared_truth.get("generated_at"),
+        "bounded_current_scope_fast_path": shared_truth.get("bounded_current_scope_fast_path"),
         "shared_truth_coherence_status": coherence_status,
         "shared_truth_generation_matches_supervisor": generation_matches,
         "stale_or_mixed_sources": list(runtime_supervisor.get("stale_or_mixed_sources") or []),
