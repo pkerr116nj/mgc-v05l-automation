@@ -390,11 +390,44 @@ if review_overlay_active:
             "detail": "27-lane review overlay is present in the runtime config stack; default startup must not use it.",
         }
     )
+warning_codes = {
+    str(row.get("code") or "")
+    for row in warnings
+    if isinstance(row, dict)
+}
+managed_exit_close_authority_visible = bool(
+    warning_codes
+    & {
+        "managed_exit_due_submit_capable",
+        "managed_exit_pending_submit_capable",
+    }
+)
+normal_submit_allowed = bool(ready_submit_capable and not managed_exit_close_authority_visible)
+if managed_exit_close_authority_visible:
+    normal_submit_reason = "risk_reducing_close_authority_visible_normal_entries_not_implied"
+elif ready_submit_capable:
+    normal_submit_reason = "ready_submit_capable"
+elif not running:
+    normal_submit_reason = "runtime_not_running"
+else:
+    normal_submit_reason = "not_ready_submit_capable"
+risk_reducing_close_classification = (
+    "RISK_REDUCING_CLOSE_AUTHORITY_VISIBLE"
+    if managed_exit_close_authority_visible
+    else "NO_RISK_REDUCING_CLOSE_AUTHORITY_SIGNAL"
+)
 
 registry_truth_diagnostics = {
     "mode": "CURRENT_HOT_PATH",
+    "authority_scope": "CURRENT_HOT_PATH_CURRENT_SCOPE",
     "classification": "TRACK_B_DIAGNOSTICS_UNAVAILABLE",
     "diagnostic_only": True,
+    "current_scope_diagnostic_only": True,
+    "historical_registry_debris": {
+        "diagnostic_only": True,
+        "historical_review_required_count": None,
+        "historical_quarantined_count": None,
+    },
     "error": None,
 }
 try:
@@ -408,24 +441,55 @@ try:
         report=registry_truth_report,
     )
     registry_truth_payload = registry_truth_report.to_dict()
+    historical_review_required_trade_ids = list(registry_truth_payload["historical_review_required_trade_ids"])
+    current_scope_review_required_trade_ids = list(registry_truth_payload["review_required_trade_ids"])
+    historical_quarantined_count = max(
+        0,
+        len(historical_review_required_trade_ids)
+        - len(current_scope_review_required_trade_ids),
+    )
     registry_truth_diagnostics = {
         "mode": registry_truth_payload["mode"],
+        "authority_scope": "CURRENT_HOT_PATH_CURRENT_SCOPE",
         "classification": registry_truth_payload["classification"],
         "diagnostic_only": True,
+        "current_scope_diagnostic_only": True,
         "report_path": str(registry_truth_path),
+        "current_broker_truth": {
+            "broker_position_count": registry_truth_payload["broker_position_count"],
+            "track_b_managed_futures_position_count": registry_truth_payload[
+                "track_b_managed_futures_position_count"
+            ],
+            "track_b_managed_futures_positions": registry_truth_payload["broker_positions_by_scope"][
+                "track_b_managed_futures_positions"
+            ],
+            "broker_open_order_count": registry_truth_payload["broker_open_order_count"],
+        },
+        "current_lifecycle_truth": {
+            "lifecycle_open_position_count": registry_truth_payload["lifecycle_open_position_count"],
+            "current_scope_trade_states": registry_truth_payload["current_scope_trade_states"],
+            "current_scope_trade_state_counts": registry_truth_payload["registry_trade_state_counts"],
+        },
         "track_b_managed_futures_position_count": registry_truth_payload["track_b_managed_futures_position_count"],
         "track_b_managed_futures_positions": registry_truth_payload["broker_positions_by_scope"][
             "track_b_managed_futures_positions"
         ],
         "broker_open_order_count": registry_truth_payload["broker_open_order_count"],
         "lifecycle_open_position_count": registry_truth_payload["lifecycle_open_position_count"],
-        "current_scope_review_required_count": len(registry_truth_payload["review_required_trade_ids"]),
-        "current_scope_review_required_trade_ids": registry_truth_payload["review_required_trade_ids"],
-        "historical_quarantined_count": max(
-            0,
-            len(registry_truth_payload["historical_review_required_trade_ids"])
-            - len(registry_truth_payload["review_required_trade_ids"]),
-        ),
+        "current_scope_review_required_count": len(current_scope_review_required_trade_ids),
+        "current_scope_review_required_trade_ids": current_scope_review_required_trade_ids,
+        "current_scope_trade_states": registry_truth_payload["current_scope_trade_states"],
+        "registry_trade_state_counts": registry_truth_payload["registry_trade_state_counts"],
+        "historical_review_required_count": len(historical_review_required_trade_ids),
+        "historical_review_required_trade_ids": historical_review_required_trade_ids,
+        "historical_quarantined_count": historical_quarantined_count,
+        "historical_registry_debris": {
+            "diagnostic_only": True,
+            "historical_review_required_count": len(historical_review_required_trade_ids),
+            "historical_review_required_trade_ids": historical_review_required_trade_ids,
+            "historical_quarantined_count": historical_quarantined_count,
+            "current_hot_path_blocking": False,
+        },
         "latest_lifecycle_stress_preflight_hard_failure_count": registry_truth_payload[
             "latest_preflight_hard_failure_count"
         ],
@@ -444,8 +508,15 @@ try:
 except Exception as exc:
     registry_truth_diagnostics = {
         "mode": "CURRENT_HOT_PATH",
+        "authority_scope": "CURRENT_HOT_PATH_CURRENT_SCOPE",
         "classification": "TRACK_B_DIAGNOSTICS_UNAVAILABLE",
         "diagnostic_only": True,
+        "current_scope_diagnostic_only": True,
+        "historical_registry_debris": {
+            "diagnostic_only": True,
+            "historical_review_required_count": None,
+            "historical_quarantined_count": None,
+        },
         "error": f"{type(exc).__name__}: {exc}",
     }
 
@@ -481,7 +552,23 @@ payload = {
         "canonical_state": canonical_state,
         "activity_classification": activity_classification,
         "ready_submit_capable": ready_submit_capable,
-        "submit_allowed": ready_submit_capable,
+        "submit_allowed": normal_submit_allowed,
+        "normal_submit_authority": {
+            "submit_allowed": normal_submit_allowed,
+            "reason": normal_submit_reason,
+            "runtime_required": True,
+            "risk_reducing_close_authority_not_implied": True,
+        },
+        "risk_reducing_close_authority": {
+            "classification": risk_reducing_close_classification,
+            "visible": managed_exit_close_authority_visible,
+            "normal_submit_authority": False,
+            "reason": (
+                "managed_exit_readiness_warning_present"
+                if managed_exit_close_authority_visible
+                else "no_managed_exit_readiness_warning"
+            ),
+        },
         "runtime_start_allowed": runtime_start_allowed,
         "restart_allowed_if_runtime_down": operability.get("restart_allowed_if_runtime_down") is True,
         "market_schedule_state": canonical_readiness.get("market_schedule_state"),

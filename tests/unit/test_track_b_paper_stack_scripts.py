@@ -294,12 +294,23 @@ def test_status_surfaces_current_hot_path_registry_truth_diagnostics_read_only()
     assert "TrackBRegistryTruthDiagnosticsConfig" in source
     assert "TrackBDiagnosticsMode.CURRENT_HOT_PATH" in source
     assert "registry_truth_diagnostics" in source
+    assert "CURRENT_HOT_PATH_CURRENT_SCOPE" in source
     assert '"diagnostic_only": True' in source
+    assert "current_scope_diagnostic_only" in source
+    assert "current_broker_truth" in source
+    assert "current_lifecycle_truth" in source
     assert "track_b_managed_futures_position_count" in source
     assert "broker_open_order_count" in source
     assert "lifecycle_open_position_count" in source
     assert "current_scope_review_required_count" in source
+    assert "current_scope_trade_states" in source
+    assert "current_scope_trade_state_counts" in source
+    assert "registry_trade_state_counts" in source
+    assert "historical_review_required_count" in source
+    assert "historical_review_required_trade_ids" in source
+    assert "historical_registry_debris" in source
     assert "historical_quarantined_count" in source
+    assert '"current_hot_path_blocking": False' in source
     assert "latest_lifecycle_stress_preflight_hard_failure_count" in source
     assert "stale_authority_reason_codes" in source
     assert "full_artifact_audit_mode" in source
@@ -323,6 +334,10 @@ def test_status_refreshes_runtime_authority_and_reports_idle_window_classificati
     assert "OUT_OF_WINDOW_BUT_AUTHORITY_FRESH" in source
     assert "BLOCKED_STALE_TRUTH" in source
     assert "activity_classification" in source
+    assert "normal_submit_authority" in source
+    assert "risk_reducing_close_authority" in source
+    assert "risk_reducing_close_authority_visible_normal_entries_not_implied" in source
+    assert "RISK_REDUCING_CLOSE_AUTHORITY_VISIBLE" in source
     assert "active_window_lane_count" in source
     assert "out_of_window_lane_count" in source
     assert "broker_mutation_allowed" in source
