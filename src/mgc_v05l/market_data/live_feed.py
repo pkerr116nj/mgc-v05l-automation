@@ -8,6 +8,8 @@ import os
 import socket
 import threading
 import time
+from contextlib import contextmanager
+from contextvars import ContextVar
 from copy import deepcopy
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
@@ -45,6 +47,77 @@ _PHASE1_RUNTIME_ARTIFACT_FRESHNESS_DEFAULT_SECONDS = 180.0
 _PHASE1_RUNTIME_ARTIFACT_DEFAULT_ROOT = (
     Path(__file__).resolve().parents[3] / "outputs" / "track_b_execution_core" / "phase1_runtime_market_data"
 )
+
+
+class Phase1RuntimeArtifactPollCache:
+    """Per-supervisor-cycle cache for canonical Phase-1 runtime candle artifacts."""
+
+    def __init__(self) -> None:
+        self._payloads_by_path: dict[str, dict[str, Any]] = {}
+        self.cache_hit_count = 0
+        self.cache_miss_count = 0
+        self.read_duration_seconds = 0.0
+
+    def read_payload(self, path: Path) -> dict[str, Any]:
+        cache_key = str(path)
+        if cache_key in self._payloads_by_path:
+            self.cache_hit_count += 1
+            return deepcopy(self._payloads_by_path[cache_key])
+        started_at = time.perf_counter()
+        payload = _read_phase1_runtime_artifact_payload(path)
+        self.read_duration_seconds += max(time.perf_counter() - started_at, 0.0)
+        self.cache_miss_count += 1
+        self._payloads_by_path[cache_key] = deepcopy(payload)
+        return deepcopy(payload)
+
+    def snapshot(self) -> dict[str, Any]:
+        paths = sorted(self._payloads_by_path)
+        symbol_timeframes = sorted(
+            {
+                f"{Path(path).parents[1].name}/{Path(path).parent.name}"
+                for path in paths
+                if len(Path(path).parents) >= 2
+            }
+        )
+        return {
+            "enabled": True,
+            "cache_hit_count": self.cache_hit_count,
+            "cache_miss_count": self.cache_miss_count,
+            "cached_artifact_count": len(paths),
+            "cached_symbol_timeframes": symbol_timeframes,
+            "artifact_paths": paths,
+            "read_duration_seconds": round(self.read_duration_seconds, 6),
+        }
+
+
+_PHASE1_RUNTIME_ARTIFACT_POLL_CACHE: ContextVar[Phase1RuntimeArtifactPollCache | None] = ContextVar(
+    "phase1_runtime_artifact_poll_cache",
+    default=None,
+)
+
+
+@contextmanager
+def phase1_runtime_artifact_poll_cache() -> Iterable[Phase1RuntimeArtifactPollCache]:
+    """Share Phase-1 artifact reads within one supervisor cycle only."""
+
+    cache = Phase1RuntimeArtifactPollCache()
+    token = _PHASE1_RUNTIME_ARTIFACT_POLL_CACHE.set(cache)
+    try:
+        yield cache
+    finally:
+        _PHASE1_RUNTIME_ARTIFACT_POLL_CACHE.reset(token)
+
+
+def _read_phase1_runtime_artifact_payload(path: Path) -> dict[str, Any]:
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except FileNotFoundError as exc:
+        raise Phase1RuntimeArtifactMissingError(f"Phase-1 runtime candle artifact is missing: {path}") from exc
+    except json.JSONDecodeError as exc:
+        raise Phase1RuntimeArtifactError(f"Phase-1 runtime candle artifact is not valid JSON: {path}") from exc
+    if not isinstance(payload, dict):
+        raise Phase1RuntimeArtifactError(f"Phase-1 runtime candle artifact must contain a JSON object: {path}")
+    return payload
 
 
 def databento_live_effective_end(
@@ -644,15 +717,10 @@ class Phase1RuntimeArtifactPollingClient:
 
     @staticmethod
     def _read_payload(path: Path) -> dict[str, Any]:
-        try:
-            payload = json.loads(path.read_text(encoding="utf-8"))
-        except FileNotFoundError as exc:
-            raise Phase1RuntimeArtifactMissingError(f"Phase-1 runtime candle artifact is missing: {path}") from exc
-        except json.JSONDecodeError as exc:
-            raise Phase1RuntimeArtifactError(f"Phase-1 runtime candle artifact is not valid JSON: {path}") from exc
-        if not isinstance(payload, dict):
-            raise Phase1RuntimeArtifactError(f"Phase-1 runtime candle artifact must contain a JSON object: {path}")
-        return payload
+        cache = _PHASE1_RUNTIME_ARTIFACT_POLL_CACHE.get()
+        if cache is not None:
+            return cache.read_payload(path)
+        return _read_phase1_runtime_artifact_payload(path)
 
     def _validate_payload(
         self,

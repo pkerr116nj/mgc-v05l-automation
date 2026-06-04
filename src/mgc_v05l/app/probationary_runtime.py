@@ -91,6 +91,7 @@ from ..market_data.live_feed import (
     databento_live_auth_response,
     databento_live_effective_end,
     databento_live_gateway_host,
+    phase1_runtime_artifact_poll_cache,
 )
 from ..monitoring.alerts import AlertDispatcher
 from ..monitoring.health import derive_health_status
@@ -7422,6 +7423,7 @@ class ProbationaryPaperSupervisor:
             cycles = 0
             new_bars = 0
             while True:
+                cycle_started_at = time_module.perf_counter()
                 risk_state = _ensure_probationary_paper_risk_state_session(
                     risk_state,
                     _resolve_probationary_supervisor_session_date(self._settings, self._lanes),
@@ -7455,93 +7457,113 @@ class ProbationaryPaperSupervisor:
                 market_data_failures: list[dict[str, Any]] = []
                 active_lanes = self._healthy_lanes()
                 higher_priority_signals = _probationary_supervisor_higher_priority_signals(active_lanes)
-                for lane in active_lanes:
-                    try:
-                        if getattr(lane.spec, "runtime_kind", "") in {
-                            ATPE_CANARY_RUNTIME_KIND,
-                            ATP_COMPANION_BENCHMARK_RUNTIME_KIND,
-                        }:
-                            lane_new_bars, reconciliation, _ = lane.poll_and_process(
-                                higher_priority_signals=higher_priority_signals
+                lane_processing_durations: list[dict[str, Any]] = []
+                with phase1_runtime_artifact_poll_cache() as phase1_poll_cache:
+                    for lane in active_lanes:
+                        lane_started_at = time_module.perf_counter()
+                        try:
+                            if getattr(lane.spec, "runtime_kind", "") in {
+                                ATPE_CANARY_RUNTIME_KIND,
+                                ATP_COMPANION_BENCHMARK_RUNTIME_KIND,
+                            }:
+                                lane_new_bars, reconciliation, _ = lane.poll_and_process(
+                                    higher_priority_signals=higher_priority_signals
+                                )
+                            else:
+                                lane_new_bars, reconciliation, _ = lane.poll_and_process()
+                        except Phase1RuntimeArtifactRecoverableError as exc:
+                            failure_payload = _probationary_phase1_artifact_failure_payload(lane=lane, exc=exc)
+                            market_data_failures.append(failure_payload)
+                            _write_probationary_runtime_transport_failure(
+                                lane.settings,
+                                {
+                                    **failure_payload,
+                                    "blocker_label": failure_payload["failure_kind"],
+                                    "runtime_ready": False,
+                                    "status": "lane_not_ready",
+                                    "next_fix": (
+                                        "Paper runtime stayed alive, but this lane will not evaluate or route until its "
+                                        "own Phase-1 runtime candle artifact is fresh and authoritative again."
+                                    ),
+                                },
                             )
-                        else:
-                            lane_new_bars, reconciliation, _ = lane.poll_and_process()
-                    except Phase1RuntimeArtifactRecoverableError as exc:
-                        failure_payload = _probationary_phase1_artifact_failure_payload(lane=lane, exc=exc)
-                        market_data_failures.append(failure_payload)
-                        _write_probationary_runtime_transport_failure(
-                            lane.settings,
-                            {
-                                **failure_payload,
-                                "blocker_label": failure_payload["failure_kind"],
-                                "runtime_ready": False,
-                                "status": "lane_not_ready",
-                                "next_fix": (
-                                    "Paper runtime stayed alive, but this lane will not evaluate or route until its "
-                                    "own Phase-1 runtime candle artifact is fresh and authoritative again."
+                            self._alert_dispatcher.emit(
+                                severity="WARNING",
+                                code="paper_lane_phase1_runtime_artifact_not_ready",
+                                message=(
+                                    f"Lane {lane.spec.lane_id} has a Phase-1 runtime artifact blocker; "
+                                    "keeping unrelated lanes alive and retrying next cycle."
                                 ),
-                            },
-                        )
-                        self._alert_dispatcher.emit(
-                            severity="WARNING",
-                            code="paper_lane_phase1_runtime_artifact_not_ready",
-                            message=(
-                                f"Lane {lane.spec.lane_id} has a Phase-1 runtime artifact blocker; "
-                                "keeping unrelated lanes alive and retrying next cycle."
-                            ),
-                            payload=failure_payload,
-                            category="market_data_transport",
-                            title="Paper Lane Phase-1 Artifact Not Ready",
-                            dedup_key=f"{lane.spec.lane_id}:paper_lane_phase1_runtime_artifact_not_ready",
-                            active=True,
-                        )
-                        continue
-                    except (SchwabHttpError, SchwabAuthError, TimeoutError, OSError, json.JSONDecodeError) as exc:
-                        failure_payload = {
-                            "generated_at": datetime.now(timezone.utc).isoformat(),
-                            "lane_id": lane.spec.lane_id,
-                            "display_name": lane.spec.display_name,
-                            "symbol": lane.spec.symbol,
-                            "exception_text": str(exc),
-                            "exception_type": type(exc).__name__,
-                            "failure_kind": "live_market_data_transport_failure",
-                            "runtime_pid": os.getpid(),
-                        }
-                        market_data_failures.append(failure_payload)
-                        _write_probationary_runtime_transport_failure(
-                            lane.settings,
-                            {
-                                **failure_payload,
-                                "blocker_label": "market_data_transport_failure",
-                                "runtime_ready": False,
-                                "status": "degraded",
-                                "next_fix": (
-                                    "Paper runtime stayed alive, but a lane-level Schwab transport request failed. "
-                                    "Retry automatically and inspect DNS/proxy stability if this repeats."
+                                payload=failure_payload,
+                                category="market_data_transport",
+                                title="Paper Lane Phase-1 Artifact Not Ready",
+                                dedup_key=f"{lane.spec.lane_id}:paper_lane_phase1_runtime_artifact_not_ready",
+                                active=True,
+                            )
+                            continue
+                        except (SchwabHttpError, SchwabAuthError, TimeoutError, OSError, json.JSONDecodeError) as exc:
+                            failure_payload = {
+                                "generated_at": datetime.now(timezone.utc).isoformat(),
+                                "lane_id": lane.spec.lane_id,
+                                "display_name": lane.spec.display_name,
+                                "symbol": lane.spec.symbol,
+                                "exception_text": str(exc),
+                                "exception_type": type(exc).__name__,
+                                "failure_kind": "live_market_data_transport_failure",
+                                "runtime_pid": os.getpid(),
+                            }
+                            market_data_failures.append(failure_payload)
+                            _write_probationary_runtime_transport_failure(
+                                lane.settings,
+                                {
+                                    **failure_payload,
+                                    "blocker_label": "market_data_transport_failure",
+                                    "runtime_ready": False,
+                                    "status": "degraded",
+                                    "next_fix": (
+                                        "Paper runtime stayed alive, but a lane-level Schwab transport request failed. "
+                                        "Retry automatically and inspect DNS/proxy stability if this repeats."
+                                    ),
+                                },
+                            )
+                            self._alert_dispatcher.emit(
+                                severity="WARNING",
+                                code="paper_lane_market_data_transport_failure",
+                                message=(
+                                    f"Lane {lane.spec.lane_id} hit a live market-data failure; "
+                                    "keeping the paper host alive and retrying next cycle."
                                 ),
-                            },
-                        )
-                        self._alert_dispatcher.emit(
-                            severity="WARNING",
-                            code="paper_lane_market_data_transport_failure",
-                            message=(
-                                f"Lane {lane.spec.lane_id} hit a live market-data failure; "
-                                "keeping the paper host alive and retrying next cycle."
-                            ),
-                            payload=failure_payload,
-                            category="market_data_transport",
-                            title="Paper Lane Market Data Failure",
-                            dedup_key=f"{lane.spec.lane_id}:paper_lane_market_data_transport_failure",
-                            active=True,
-                        )
-                        continue
-                    new_bars += lane_new_bars
-                    if not _effective_reconciliation_clean(reconciliation):
-                        reconciliation_clean = False
+                                payload=failure_payload,
+                                category="market_data_transport",
+                                title="Paper Lane Market Data Failure",
+                                dedup_key=f"{lane.spec.lane_id}:paper_lane_market_data_transport_failure",
+                                active=True,
+                            )
+                            continue
+                        finally:
+                            lane_processing_durations.append(
+                                {
+                                    "lane_id": lane.spec.lane_id,
+                                    "symbol": lane.spec.symbol,
+                                    "duration_seconds": round(
+                                        max(time_module.perf_counter() - lane_started_at, 0.0),
+                                        6,
+                                    ),
+                                }
+                            )
+                        new_bars += lane_new_bars
+                        if not _effective_reconciliation_clean(reconciliation):
+                            reconciliation_clean = False
+                    phase1_poll_cache_snapshot = phase1_poll_cache.snapshot()
 
+                maintenance_started_at = time_module.perf_counter()
                 managed_open_position_maintenance = _run_probationary_managed_open_position_maintenance(
                     settings=self._settings,
                     now=datetime.now(timezone.utc),
+                )
+                managed_maintenance_duration_seconds = round(
+                    max(time_module.perf_counter() - maintenance_started_at, 0.0),
+                    6,
                 )
                 if (
                     managed_open_position_maintenance is not None
@@ -7585,6 +7607,51 @@ class ProbationaryPaperSupervisor:
                     risk_events=risk_events,
                     reconciliation_clean=reconciliation_clean,
                 )
+                authority_status_started_at = time_module.perf_counter()
+                _write_probationary_paper_runtime_truth(
+                    settings=self._settings,
+                    lanes=self._lanes,
+                    runtime_instance_id=self._runtime_instance_id,
+                    runtime_started_at=self._runtime_started_at,
+                )
+                _refresh_track_b_authority_for_active_paper_runtime(self._settings)
+                _write_track_b_live_runtime_environment_watchdog_for_active_paper_runtime(self._settings)
+                authority_status_refresh_duration_seconds = round(
+                    max(time_module.perf_counter() - authority_status_started_at, 0.0),
+                    6,
+                )
+                slowest_lane = max(
+                    lane_processing_durations,
+                    key=lambda row: float(row.get("duration_seconds") or 0.0),
+                    default=None,
+                )
+                stage_durations = {
+                    "phase1_read_cache": float(phase1_poll_cache_snapshot.get("read_duration_seconds") or 0.0),
+                    "managed_open_position_maintenance": managed_maintenance_duration_seconds,
+                    "authority_status_refresh": authority_status_refresh_duration_seconds,
+                }
+                slowest_stage_name, slowest_stage_duration = max(
+                    stage_durations.items(),
+                    key=lambda item: item[1],
+                    default=("none", 0.0),
+                )
+                runtime_cycle_observability = {
+                    "generated_at": datetime.now(timezone.utc).isoformat(),
+                    "total_cycle_duration_seconds": round(
+                        max(time_module.perf_counter() - cycle_started_at, 0.0),
+                        6,
+                    ),
+                    "per_lane_processing_duration": lane_processing_durations,
+                    "slowest_lane": slowest_lane,
+                    "phase1_read_cache": phase1_poll_cache_snapshot,
+                    "phase1_read_cache_duration_seconds": stage_durations["phase1_read_cache"],
+                    "managed_open_position_maintenance_duration_seconds": managed_maintenance_duration_seconds,
+                    "authority_status_refresh_duration_seconds": authority_status_refresh_duration_seconds,
+                    "slowest_stage": {
+                        "stage": slowest_stage_name,
+                        "duration_seconds": round(float(slowest_stage_duration), 6),
+                    },
+                }
                 status_path = _write_probationary_supervisor_operator_status(
                     settings=self._settings,
                     lanes=self._lanes,
@@ -7597,15 +7664,8 @@ class ProbationaryPaperSupervisor:
                     reconciliation_clean=reconciliation_clean,
                     lane_quarantine=self._lane_quarantine,
                     runtime_instance_id=self._runtime_instance_id,
+                    runtime_cycle_observability=runtime_cycle_observability,
                 )
-                _write_probationary_paper_runtime_truth(
-                    settings=self._settings,
-                    lanes=self._lanes,
-                    runtime_instance_id=self._runtime_instance_id,
-                    runtime_started_at=self._runtime_started_at,
-                )
-                _refresh_track_b_authority_for_active_paper_runtime(self._settings)
-                _write_track_b_live_runtime_environment_watchdog_for_active_paper_runtime(self._settings)
 
                 if not reconciliation_clean:
                     stop_reason = "paper_reconciliation_mismatch"
@@ -10676,6 +10736,7 @@ def _write_probationary_supervisor_operator_status(
     reconciliation_clean: bool | None = None,
     lane_quarantine: dict[str, dict[str, Any]] | None = None,
     runtime_instance_id: str | None = None,
+    runtime_cycle_observability: Mapping[str, Any] | None = None,
 ) -> Path:
     now_local = datetime.now(settings.timezone_info)
     generated_at = datetime.now(timezone.utc).isoformat()
@@ -10834,6 +10895,7 @@ def _write_probationary_supervisor_operator_status(
         "paper_runtime_pid_metadata_path": str(_paper_runtime_pid_metadata_path(settings)),
         "latest_operator_control": latest_operator_control,
         "market_data_failures": [dict(row) for row in (market_data_failures or [])],
+        "runtime_cycle_observability": dict(runtime_cycle_observability or {}),
         "startup_restore_validation_summary": {
             "last_restore_completed_at": latest_restore.get("restore_completed_at") if latest_restore else None,
             "last_restore_result": latest_restore.get("restore_result") if latest_restore else "UNAVAILABLE",

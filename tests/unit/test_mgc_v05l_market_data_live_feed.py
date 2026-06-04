@@ -19,6 +19,7 @@ from mgc_v05l.market_data.live_feed import (
     Phase1RuntimeArtifactPollingClient,
     databento_live_effective_end,
     databento_live_format_timestamp,
+    phase1_runtime_artifact_poll_cache,
     _DatabentoRawLiveSession,
 )
 from mgc_v05l.market_data.databento_provider import DatabentoHttpError
@@ -247,6 +248,60 @@ def test_phase1_runtime_artifact_polling_client_reads_fresh_completed_bars_and_f
     assert [bar.end_ts.isoformat() for bar in bars] == ["2026-05-18T12:00:00+00:00"]
     assert bars[0].symbol == "MNQ"
     assert bars[0].bar_id.startswith("MNQ|1m|")
+
+
+def test_phase1_runtime_artifact_poll_cache_is_per_cycle(tmp_path: Path) -> None:
+    root = tmp_path / "phase1_runtime_market_data"
+    client = Phase1RuntimeArtifactPollingClient(
+        artifact_root=root,
+        now_fn=lambda: datetime.fromisoformat("2026-05-18T12:02:20+00:00"),
+    )
+    _write_phase1_runtime_artifact(
+        root,
+        generated_at="2026-05-18T12:01:10+00:00",
+        bars=[
+            {
+                "bar_start": "2026-05-18T12:00:00+00:00",
+                "bar_end": "2026-05-18T12:01:00+00:00",
+                "open": 100,
+                "high": 101,
+                "low": 99,
+                "close": 100.5,
+                "volume": 10,
+                "completed": True,
+            }
+        ],
+    )
+
+    with phase1_runtime_artifact_poll_cache() as cache:
+        first_cycle_first_read = client.poll_live_bars(None, "1m", SchwabLivePollRequest(internal_symbol="MNQ"))
+        _write_phase1_runtime_artifact(
+            root,
+            generated_at="2026-05-18T12:02:10+00:00",
+            bars=[
+                {
+                    "bar_start": "2026-05-18T12:01:00+00:00",
+                    "bar_end": "2026-05-18T12:02:00+00:00",
+                    "open": 101,
+                    "high": 102,
+                    "low": 100,
+                    "close": 101.5,
+                    "volume": 11,
+                    "completed": True,
+                }
+            ],
+        )
+        first_cycle_second_read = client.poll_live_bars(None, "1m", SchwabLivePollRequest(internal_symbol="MNQ"))
+        cache_snapshot = cache.snapshot()
+
+    next_cycle_read = client.poll_live_bars(None, "1m", SchwabLivePollRequest(internal_symbol="MNQ"))
+
+    assert [bar.end_ts.isoformat() for bar in first_cycle_first_read] == ["2026-05-18T12:01:00+00:00"]
+    assert [bar.end_ts.isoformat() for bar in first_cycle_second_read] == ["2026-05-18T12:01:00+00:00"]
+    assert [bar.end_ts.isoformat() for bar in next_cycle_read] == ["2026-05-18T12:02:00+00:00"]
+    assert cache_snapshot["cache_miss_count"] == 1
+    assert cache_snapshot["cache_hit_count"] == 1
+    assert cache_snapshot["cached_symbol_timeframes"] == ["MNQ/1m"]
 
 
 def test_phase1_runtime_artifact_polling_client_rejects_wrong_symbol_or_timeframe(tmp_path: Path) -> None:
