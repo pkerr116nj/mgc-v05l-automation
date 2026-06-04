@@ -118,7 +118,7 @@ def classify_paper_stack_restart_precheck(status: Mapping[str, Any]) -> PaperSta
             )
 
     current_positions = int(diagnostics.get("track_b_managed_futures_position_count") or 0)
-    lifecycle_positions = int(diagnostics.get("lifecycle_open_position_count") or 0)
+    lifecycle_positions = _current_scope_lifecycle_position_count(diagnostics)
     reason_codes = tuple(str(code) for code in restart_policy.get("reason_codes") or ())
     if current_positions or lifecycle_positions:
         return PaperStackRestartPrecheck(
@@ -148,6 +148,17 @@ def _broker_open_order_count(status: Mapping[str, Any]) -> int:
     if diagnostics.get("broker_open_order_count") not in {None, ""}:
         return int(diagnostics.get("broker_open_order_count") or 0)
     return int(_mapping(status.get("broker_lifecycle")).get("track_b_broker_open_order_count") or 0)
+
+
+def _current_scope_lifecycle_position_count(diagnostics: Mapping[str, Any]) -> int:
+    for key in ("current_scope_lifecycle_open_position_count", "current_scope_lifecycle_position_count"):
+        if diagnostics.get(key) not in {None, ""}:
+            return int(diagnostics.get(key) or 0)
+    current_lifecycle = _mapping(diagnostics.get("current_lifecycle_truth"))
+    for key in ("current_scope_lifecycle_open_position_count", "current_scope_lifecycle_position_count"):
+        if current_lifecycle.get(key) not in {None, ""}:
+            return int(current_lifecycle.get(key) or 0)
+    return int(diagnostics.get("lifecycle_open_position_count") or 0)
 
 
 def _recovery_active(recovery: Mapping[str, Any]) -> bool:

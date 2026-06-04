@@ -481,6 +481,10 @@ try:
         },
         "current_lifecycle_truth": {
             "lifecycle_open_position_count": registry_truth_payload["lifecycle_open_position_count"],
+            "current_scope_lifecycle_open_position_count": registry_truth_payload.get(
+                "current_scope_lifecycle_open_position_count",
+                registry_truth_payload["lifecycle_open_position_count"],
+            ),
             "current_scope_trade_states": registry_truth_payload["current_scope_trade_states"],
             "current_scope_trade_state_counts": registry_truth_payload["registry_trade_state_counts"],
         },
@@ -490,6 +494,18 @@ try:
         ],
         "broker_open_order_count": registry_truth_payload["broker_open_order_count"],
         "lifecycle_open_position_count": registry_truth_payload["lifecycle_open_position_count"],
+        "raw_lifecycle_open_position_count": registry_truth_payload.get(
+            "raw_lifecycle_open_position_count",
+            registry_truth_payload["lifecycle_open_position_count"],
+        ),
+        "current_scope_lifecycle_open_position_count": registry_truth_payload.get(
+            "current_scope_lifecycle_open_position_count",
+            registry_truth_payload["lifecycle_open_position_count"],
+        ),
+        "stale_superseded_lifecycle_projection_count": registry_truth_payload.get(
+            "stale_superseded_lifecycle_projection_count",
+            0,
+        ),
         "current_scope_review_required_count": len(current_scope_review_required_trade_ids),
         "current_scope_review_required_trade_ids": current_scope_review_required_trade_ids,
         "current_scope_trade_states": registry_truth_payload["current_scope_trade_states"],

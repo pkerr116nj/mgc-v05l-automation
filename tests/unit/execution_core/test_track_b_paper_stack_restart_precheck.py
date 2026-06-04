@@ -58,6 +58,61 @@ def test_unmanaged_exposure_blocks_restart() -> None:
     assert "NO_AUTOMATIC_RESTART_OPEN_EXPOSURE_WITHOUT_PROVEN_IDENTITY" in result.reason_codes
 
 
+def test_stale_raw_lifecycle_count_does_not_block_when_current_scope_flat() -> None:
+    payload = _status(
+        reconciliation_classification="BROKER_TRUTH_SETTLEMENT_TIMEOUT",
+        track_b_positions=0,
+        lifecycle_positions=1,
+        current_scope_lifecycle_positions=0,
+        stale_superseded_lifecycle_positions=1,
+    )
+    payload["live_runtime_environment"]["restart_policy"] = {
+        "owned_exposure_restart_allowed": False,
+        "reason_codes": [],
+    }
+
+    result = classify_paper_stack_restart_precheck(payload)
+
+    assert result.restart_allowed is False
+    assert result.classification == BLOCKED_UNMANAGED_EXPOSURE
+    assert result.reason_codes == ("BROKER_LIFECYCLE_NOT_RECONCILED",)
+
+
+def test_stale_raw_lifecycle_count_does_not_block_flat_reconciled_restart() -> None:
+    payload = _status(
+        reconciliation_classification="TRACK_B_PAPER_BROKER_RECONCILED",
+        track_b_positions=0,
+        lifecycle_positions=1,
+        current_scope_lifecycle_positions=0,
+        stale_superseded_lifecycle_positions=1,
+    )
+
+    result = classify_paper_stack_restart_precheck(payload)
+
+    assert result.restart_allowed is True
+    assert result.classification == RESTART_ALLOWED_FLAT_RECONCILED
+
+
+def test_current_scope_lifecycle_position_blocks_restart_when_not_reconciled() -> None:
+    payload = _status(
+        reconciliation_classification="BROKER_TRUTH_SETTLEMENT_TIMEOUT",
+        track_b_positions=0,
+        lifecycle_positions=1,
+        current_scope_lifecycle_positions=1,
+        stale_superseded_lifecycle_positions=0,
+    )
+    payload["live_runtime_environment"]["restart_policy"] = {
+        "owned_exposure_restart_allowed": False,
+        "reason_codes": ["CURRENT_SCOPE_LIFECYCLE_POSITION_PRESENT"],
+    }
+
+    result = classify_paper_stack_restart_precheck(payload)
+
+    assert result.restart_allowed is False
+    assert result.classification == BLOCKED_UNMANAGED_EXPOSURE
+    assert "CURRENT_SCOPE_LIFECYCLE_POSITION_PRESENT" in result.reason_codes
+
+
 def test_open_orders_block_restart_even_with_owned_exposure() -> None:
     payload = _status(
         reconciliation_classification="BROKER_TRUTH_SETTLEMENT_TIMEOUT",
@@ -102,6 +157,8 @@ def _status(
     broker_open_orders: int = 0,
     track_b_positions: int = 0,
     lifecycle_positions: int = 0,
+    current_scope_lifecycle_positions: int | None = None,
+    stale_superseded_lifecycle_positions: int = 0,
 ) -> dict:
     payload = {
         "safety": {
@@ -124,6 +181,11 @@ def _status(
         "registry_truth_diagnostics": {
             "broker_open_order_count": broker_open_orders,
             "track_b_managed_futures_position_count": track_b_positions,
+            "raw_lifecycle_open_position_count": lifecycle_positions,
+            "current_scope_lifecycle_open_position_count": (
+                lifecycle_positions if current_scope_lifecycle_positions is None else current_scope_lifecycle_positions
+            ),
+            "stale_superseded_lifecycle_projection_count": stale_superseded_lifecycle_positions,
             "lifecycle_open_position_count": lifecycle_positions,
         },
         "live_runtime_environment": {

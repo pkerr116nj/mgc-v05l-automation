@@ -186,6 +186,111 @@ def test_reconciles_flat_lifecycle_with_fresh_broker_truth_and_unrelated_positio
     assert reconciled_position["paper_proof_invoked"] is False
 
 
+def test_stale_superseded_lifecycle_projection_reports_current_scope_flat(tmp_path: Path) -> None:
+    stale_lifecycle = {
+        "account_id": "DUM882026",
+        "trade_id": "trade_stale_mes_short",
+        "lifecycle_id": "reserved_submit_mes_us_active_participation_short_stale",
+        "strategy_id": "mes_us_active_participation_short",
+        "instrument_family": "MES",
+        "contract_key": "MES-202606",
+        "local_symbol": "MESM6",
+        "con_id": 770561194,
+        "expiry": "20260618",
+        "side": "SHORT",
+        "quantity": "1",
+        "aggregate_qty": "-1",
+        "entry_order_id": "2",
+        "entry_perm_id": "665735662",
+        "entry_exec_id": "0000e1a7.6a2e7d30.01.01",
+    }
+    config = _write_base_artifacts(tmp_path, open_position=stale_lifecycle)
+    _write_registry_open_managed_trade(
+        config,
+        trade_id="trade_stale_mes_short",
+        lifecycle_id="reserved_submit_mes_us_active_participation_short_stale",
+        lane_id="mes_us_active_participation_short",
+        strategy_id="mes_us_active_participation_short",
+        symbol="MES",
+        local_symbol="MESM6",
+        con_id=770561194,
+        expiry="20260618",
+        include_close_fill=True,
+        order_id="2",
+        entry_perm_id="665735662",
+        entry_exec_id="0000e1a7.6a2e7d30.01.01",
+    )
+    _write_broker_truth(config)
+
+    report = reconcile_track_b_paper_broker_truth(config=config, now=NOW)
+
+    assert report["classification"] == "TRACK_B_PAPER_BROKER_RECONCILED"
+    assert report["raw_lifecycle_open_position_count"] == 1
+    assert report["current_scope_lifecycle_open_position_count"] == 0
+    assert report["stale_superseded_lifecycle_projection_count"] == 1
+    assert report["lifecycle_open_position_count"] == 0
+    assert report["track_b_lifecycle_positions"] == []
+    assert report["current_exposure_owner_resolution"]["classification"] == "NO_OPEN_EXPOSURE"
+    assert report["lifecycle_projection_precedence"]["classification"] == (
+        "STALE_LIFECYCLE_PROJECTIONS_SUPERSEDED_BY_BROKER_BACKED_CLOSED_FLAT"
+    )
+    superseded = report["superseded_lifecycle_projections"]
+    assert superseded[0]["classification"] == "STALE_SUPERSEDED_LIFECYCLE_PROJECTION"
+    assert superseded[0]["trade_id"] == "trade_stale_mes_short"
+    reconciled_position = json.loads(config.reconciled_live_position_status_path.read_text(encoding="utf-8"))
+    assert reconciled_position["raw_lifecycle_open_position_count"] == 1
+    assert reconciled_position["current_scope_lifecycle_open_position_count"] == 0
+    assert reconciled_position["stale_superseded_lifecycle_projection_count"] == 1
+    assert reconciled_position["lifecycle_open_position_count"] == 0
+
+
+def test_current_lifecycle_projection_still_counts_and_blocks_when_broker_flat(tmp_path: Path) -> None:
+    current_lifecycle = {
+        "account_id": "DUM882026",
+        "trade_id": "trade_current_mes_short",
+        "lifecycle_id": "reserved_submit_mes_us_active_participation_short_current",
+        "strategy_id": "mes_us_active_participation_short",
+        "instrument_family": "MES",
+        "contract_key": "MES-202606",
+        "local_symbol": "MESM6",
+        "con_id": 770561194,
+        "expiry": "20260618",
+        "side": "SHORT",
+        "quantity": "1",
+        "aggregate_qty": "-1",
+        "entry_order_id": "2",
+        "entry_perm_id": "665735662",
+        "entry_exec_id": "0000e1a7.6a2e7d30.01.01",
+    }
+    config = _write_base_artifacts(tmp_path, open_position=current_lifecycle)
+    _write_registry_open_managed_trade(
+        config,
+        trade_id="trade_current_mes_short",
+        lifecycle_id="reserved_submit_mes_us_active_participation_short_current",
+        lane_id="mes_us_active_participation_short",
+        strategy_id="mes_us_active_participation_short",
+        symbol="MES",
+        local_symbol="MESM6",
+        con_id=770561194,
+        expiry="20260618",
+        order_id="2",
+        entry_perm_id="665735662",
+        entry_exec_id="0000e1a7.6a2e7d30.01.01",
+    )
+    _write_broker_truth(config)
+
+    report = reconcile_track_b_paper_broker_truth(config=config, now=NOW)
+
+    assert report["classification"] == "TRACK_B_PAPER_BROKER_RECONCILIATION_BLOCKED"
+    assert report["raw_lifecycle_open_position_count"] == 1
+    assert report["current_scope_lifecycle_open_position_count"] == 1
+    assert report["stale_superseded_lifecycle_projection_count"] == 0
+    assert report["lifecycle_open_position_count"] == 1
+    assert report["track_b_lifecycle_positions"][0]["trade_id"] == "trade_current_mes_short"
+    assert any(blocker["code"] == "TRACK_B_BROKER_LIFECYCLE_POSITION_COUNT_MISMATCH" for blocker in report["blockers"])
+    assert not config.reconciled_live_position_status_path.exists()
+
+
 def test_reconciliation_reports_last_successful_truth_and_latest_attempt(tmp_path: Path) -> None:
     config = _write_base_artifacts(tmp_path)
     _write_broker_truth(config)

@@ -213,12 +213,13 @@ def reconcile_track_b_paper_broker_truth(
     )
     track_b_positions = _track_b_broker_positions(positions_snapshot, config.symbols)
     track_b_open_orders = _track_b_broker_open_orders(open_orders_snapshot, config.symbols)
-    lifecycle_positions = _track_b_lifecycle_positions(live_position_status, config.symbols)
+    raw_lifecycle_open_position_count = _int_value(live_position_status.get("open_position_count"))
+    raw_lifecycle_positions = _track_b_lifecycle_positions(live_position_status, config.symbols)
     lifecycle_projection_precedence = _closed_flat_lifecycle_projection_precedence(
         config=config,
         broker_positions=track_b_positions,
         broker_open_orders=track_b_open_orders,
-        lifecycle_positions=lifecycle_positions,
+        lifecycle_positions=raw_lifecycle_positions,
     )
     lifecycle_positions = list(lifecycle_projection_precedence["current_scope_lifecycle_positions"])
     current_exposure_owner_resolution = resolve_current_exposure_ownership(
@@ -572,7 +573,12 @@ def reconcile_track_b_paper_broker_truth(
         "bridge_terminal_event_grace": terminal_event_grace,
         "broker_truth_settlement": broker_truth_settlement,
         "registry_reconciliation": registry_reconciliation,
-        "lifecycle_open_position_count": _int_value(live_position_status.get("open_position_count")),
+        "raw_lifecycle_open_position_count": raw_lifecycle_open_position_count,
+        "current_scope_lifecycle_open_position_count": len(lifecycle_positions),
+        "stale_superseded_lifecycle_projection_count": len(
+            lifecycle_projection_precedence["superseded_lifecycle_projections"]
+        ),
+        "lifecycle_open_position_count": len(lifecycle_positions),
         "lifecycle_open_order_count": _int_value(live_position_status.get("open_order_count")),
         "review_required_count": current_scope_review_required_count,
         "current_scope_review_required_count": current_scope_review_required_count,
@@ -3970,6 +3976,19 @@ def _write_reconciled_summaries(
             "broker_truth_warning": broker_truth_warning,
             "broker_track_b_position_count": broker_position_count,
             "broker_track_b_open_order_count": int(report.get("track_b_broker_open_order_count") or 0),
+            "raw_lifecycle_open_position_count": int(report.get("raw_lifecycle_open_position_count") or 0),
+            "current_scope_lifecycle_open_position_count": int(
+                report.get("current_scope_lifecycle_open_position_count") or 0
+            ),
+            "stale_superseded_lifecycle_projection_count": int(
+                report.get("stale_superseded_lifecycle_projection_count") or 0
+            ),
+            "lifecycle_open_position_count": int(report.get("current_scope_lifecycle_open_position_count") or 0),
+            "stale_superseded_lifecycle_projections": [
+                dict(item)
+                for item in report.get("superseded_lifecycle_projections", [])
+                if isinstance(item, Mapping)
+            ],
             "known_managed_exit_order_count": int(report.get("known_managed_exit_order_count") or 0),
             "known_leak_test_entry_order_count": int(report.get("known_leak_test_entry_order_count") or 0),
             "stale_managed_exit_order_count": int(report.get("stale_managed_exit_order_count") or 0),
