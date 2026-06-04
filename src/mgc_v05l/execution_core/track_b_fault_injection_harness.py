@@ -55,6 +55,11 @@ SCENARIO_BROKER_OPEN_ORDER_REGISTRY_NONE = "broker_open_order_exists_lifecycle_r
 SCENARIO_MISSING_GUARDIAN_WITH_BROKER_EXPOSURE = "missing_guardian_artifact_with_broker_exposure"
 SCENARIO_MANAGED_CLOSE_DISAPPEARS_BROKER_FLAT = "managed_close_order_disappears_broker_flat_without_fill_callback"
 SCENARIO_REGISTRY_REVIEW_REQUIRED_NULL_LIFECYCLE_EXIT = "registry_review_required_null_lifecycle_blocks_valid_exit"
+SCENARIO_BROKER_OBSERVED_RESERVED_LIFECYCLE_ADOPTION = "broker_observed_fill_reserved_lifecycle_adoption_required"
+SCENARIO_BROKER_OBSERVED_CONFLICTING_CANDIDATE = "broker_observed_fill_conflicting_candidate_fails_closed"
+SCENARIO_BROKER_OBSERVED_STALE_INTENT = "broker_observed_fill_stale_intent_fails_closed"
+SCENARIO_SIMULTANEOUS_MNQ_MES_BROKER_OBSERVED_SHORT_ADOPTION = "simultaneous_mnq_mes_broker_observed_short_adoption"
+SCENARIO_RAW_STALE_LIFECYCLE_COUNT_CURRENT_SCOPE_FLAT = "raw_stale_lifecycle_count_current_scope_flat"
 
 FAULT_INJECTION_SCENARIOS: tuple[str, ...] = (
     SCENARIO_STALE_RUNTIME_EXIT_DUE,
@@ -75,6 +80,11 @@ FAULT_INJECTION_SCENARIOS: tuple[str, ...] = (
     SCENARIO_MISSING_GUARDIAN_WITH_BROKER_EXPOSURE,
     SCENARIO_MANAGED_CLOSE_DISAPPEARS_BROKER_FLAT,
     SCENARIO_REGISTRY_REVIEW_REQUIRED_NULL_LIFECYCLE_EXIT,
+    SCENARIO_BROKER_OBSERVED_RESERVED_LIFECYCLE_ADOPTION,
+    SCENARIO_BROKER_OBSERVED_CONFLICTING_CANDIDATE,
+    SCENARIO_BROKER_OBSERVED_STALE_INTENT,
+    SCENARIO_SIMULTANEOUS_MNQ_MES_BROKER_OBSERVED_SHORT_ADOPTION,
+    SCENARIO_RAW_STALE_LIFECYCLE_COUNT_CURRENT_SCOPE_FLAT,
 )
 
 DEFAULT_FAULT_INJECTION_NOW = datetime(2026, 6, 4, 14, 0, tzinfo=UTC)
@@ -85,6 +95,8 @@ SAFETY_INVARIANTS_CHECKED: tuple[str, ...] = (
     "no_paper_proof",
     "no_broad_flatten",
     "no_unguarded_broker_mutation",
+    "no_runtime_restart",
+    "no_live_outputs_or_var_writes",
 )
 
 SCENARIO_METADATA: dict[str, dict[str, Any]] = {
@@ -277,6 +289,59 @@ SCENARIO_METADATA: dict[str, dict[str, Any]] = {
         "notes": "Evidence placeholder: attach MES-style registry identity normalization artifacts here.",
         "evidence": {"placeholder": True},
     },
+    SCENARIO_BROKER_OBSERVED_RESERVED_LIFECYCLE_ADOPTION: {
+        "bug_class": "Broker-Observed Fill Adoption",
+        "retired_invariant": "Broker-observed fills with exact submit/lifecycle identity are eligible for artifact-only adoption when broker callbacks are missing.",
+        "authority_helpers_exercised": ["broker_observed_adoption_classifier"],
+        "expected_primary_classification": "BROKER_OBSERVED_FILL_ADOPTION_ELIGIBLE",
+        "safety_invariants_checked": list(SAFETY_INVARIANTS_CHECKED),
+        "retirement_status": "FAULT_INJECTION_V1_COVERED",
+        "notes": "Evidence placeholder: attach reserved-lifecycle broker-observed adoption artifacts here.",
+        "evidence": {"placeholder": True},
+    },
+    SCENARIO_BROKER_OBSERVED_CONFLICTING_CANDIDATE: {
+        "bug_class": "Broker-Observed Fill Adoption",
+        "retired_invariant": "Broker-observed fill adoption fails closed when multiple lifecycle/trade candidates conflict.",
+        "authority_helpers_exercised": ["broker_observed_adoption_classifier"],
+        "expected_primary_classification": "BROKER_OBSERVED_FILL_ADOPTION_BLOCKED_CONFLICTING_CANDIDATES",
+        "safety_invariants_checked": list(SAFETY_INVARIANTS_CHECKED),
+        "retirement_status": "FAULT_INJECTION_V1_COVERED",
+        "notes": "Evidence placeholder: attach conflicting broker-observed adoption candidate artifacts here.",
+        "evidence": {"placeholder": True},
+    },
+    SCENARIO_BROKER_OBSERVED_STALE_INTENT: {
+        "bug_class": "Broker-Observed Fill Adoption",
+        "retired_invariant": "Broker-observed fill adoption fails closed when the matching submit intent is stale.",
+        "authority_helpers_exercised": ["broker_observed_adoption_classifier"],
+        "expected_primary_classification": "BROKER_OBSERVED_FILL_ADOPTION_BLOCKED_STALE_INTENT",
+        "safety_invariants_checked": list(SAFETY_INVARIANTS_CHECKED),
+        "retirement_status": "FAULT_INJECTION_V1_COVERED",
+        "notes": "Evidence placeholder: attach stale-intent broker-observed adoption artifacts here.",
+        "evidence": {"placeholder": True},
+    },
+    SCENARIO_SIMULTANEOUS_MNQ_MES_BROKER_OBSERVED_SHORT_ADOPTION: {
+        "bug_class": "Ownership Ambiguity",
+        "retired_invariant": "Simultaneous broker-observed MNQ and MES shorts adopt as separate exact managed exposures, not ambiguity.",
+        "authority_helpers_exercised": [
+            "broker_observed_adoption_classifier",
+            "resolve_current_exposure_ownership",
+        ],
+        "expected_primary_classification": "BROKER_OBSERVED_SIMULTANEOUS_SHORTS_ADOPTABLE",
+        "safety_invariants_checked": list(SAFETY_INVARIANTS_CHECKED),
+        "retirement_status": "FAULT_INJECTION_V1_COVERED",
+        "notes": "Evidence placeholder: attach simultaneous MNQ/MES broker-observed short adoption artifacts here.",
+        "evidence": {"placeholder": True},
+    },
+    SCENARIO_RAW_STALE_LIFECYCLE_COUNT_CURRENT_SCOPE_FLAT: {
+        "bug_class": "Historical Registry Debris Blocking Current Truth",
+        "retired_invariant": "Raw stale lifecycle counts stay diagnostic and current-scope lifecycle count controls submit/restart gates.",
+        "authority_helpers_exercised": ["current_scope_lifecycle_count_classifier"],
+        "expected_primary_classification": "CURRENT_SCOPE_FLAT_STALE_LIFECYCLE_COUNT_DIAGNOSTIC_ONLY",
+        "safety_invariants_checked": list(SAFETY_INVARIANTS_CHECKED),
+        "retirement_status": "FAULT_INJECTION_V1_COVERED",
+        "notes": "Evidence placeholder: attach stale superseded lifecycle projection count artifacts here.",
+        "evidence": {"placeholder": True},
+    },
 }
 
 
@@ -333,6 +398,11 @@ def run_track_b_fault_injection_scenario(
         SCENARIO_MISSING_GUARDIAN_WITH_BROKER_EXPOSURE: _scenario_missing_guardian_artifact_with_broker_exposure,
         SCENARIO_MANAGED_CLOSE_DISAPPEARS_BROKER_FLAT: _scenario_managed_close_order_disappears_broker_flat_without_fill_callback,
         SCENARIO_REGISTRY_REVIEW_REQUIRED_NULL_LIFECYCLE_EXIT: _scenario_registry_review_required_null_lifecycle_blocks_valid_exit,
+        SCENARIO_BROKER_OBSERVED_RESERVED_LIFECYCLE_ADOPTION: _scenario_broker_observed_fill_reserved_lifecycle_adoption_required,
+        SCENARIO_BROKER_OBSERVED_CONFLICTING_CANDIDATE: _scenario_broker_observed_fill_conflicting_candidate_fails_closed,
+        SCENARIO_BROKER_OBSERVED_STALE_INTENT: _scenario_broker_observed_fill_stale_intent_fails_closed,
+        SCENARIO_SIMULTANEOUS_MNQ_MES_BROKER_OBSERVED_SHORT_ADOPTION: _scenario_simultaneous_mnq_mes_broker_observed_short_adoption,
+        SCENARIO_RAW_STALE_LIFECYCLE_COUNT_CURRENT_SCOPE_FLAT: _scenario_raw_stale_lifecycle_count_current_scope_flat,
     }
     try:
         payload = handlers[name](artifact_root, actual_now)
@@ -935,6 +1005,199 @@ def _scenario_registry_review_required_null_lifecycle_blocks_valid_exit(
     }
 
 
+def _scenario_broker_observed_fill_reserved_lifecycle_adoption_required(
+    artifact_root: Path,
+    now: datetime,
+) -> dict[str, Any]:
+    del artifact_root
+    mnq_candidate = _broker_observed_adoption_candidate(
+        symbol="MNQ",
+        local_symbol="MNQM6",
+        con_id=770561201,
+        trade_id="trade_mnq_broker_observed",
+        lifecycle_id="reserved_submit_mnq_globex_short",
+        intent_generated_at=now - timedelta(seconds=45),
+    )
+    mes_candidate = _broker_observed_adoption_candidate(
+        symbol="MES",
+        local_symbol="MESM6",
+        con_id=770561194,
+        trade_id="trade_mes_broker_observed",
+        lifecycle_id="reserved_submit_mes_globex_short",
+        intent_generated_at=now - timedelta(seconds=40),
+    )
+    return _broker_observed_adoption_payload(
+        retired_bug_class="Broker-Observed Fill Adoption",
+        invariant="Broker-observed fills with exact submit/lifecycle identity are eligible for artifact-only adoption when broker callbacks are missing.",
+        classification="BROKER_OBSERVED_FILL_ADOPTION_ELIGIBLE",
+        candidates=[mnq_candidate, mes_candidate],
+        broker_exposure=_broker_exposure(count=2, visible=True),
+        ownership_classification="BROKER_OBSERVED_ADOPTION_REQUIRED_EXACT_IDENTITY",
+        adoption_eligible=True,
+        current_blockers=[],
+        reason_codes=["exec_details_missing", "completed_order_missing", "reserved_lifecycle_exact_identity"],
+    )
+
+
+def _scenario_broker_observed_fill_conflicting_candidate_fails_closed(
+    artifact_root: Path,
+    now: datetime,
+) -> dict[str, Any]:
+    del artifact_root
+    primary = _broker_observed_adoption_candidate(
+        symbol="MNQ",
+        local_symbol="MNQM6",
+        con_id=770561201,
+        trade_id="trade_mnq_candidate_a",
+        lifecycle_id="reserved_submit_mnq_candidate_a",
+        intent_generated_at=now - timedelta(seconds=30),
+    )
+    conflicting = {
+        **primary,
+        "trade_id": "trade_mnq_candidate_b",
+        "lifecycle_id": "reserved_submit_mnq_candidate_b",
+        "submit_ownership_record": {
+            **primary["submit_ownership_record"],
+            "trade_id": "trade_mnq_candidate_b",
+            "lifecycle_id": "reserved_submit_mnq_candidate_b",
+        },
+    }
+    return _broker_observed_adoption_payload(
+        retired_bug_class="Broker-Observed Fill Adoption",
+        invariant="Broker-observed fill adoption fails closed when multiple lifecycle/trade candidates conflict.",
+        classification="BROKER_OBSERVED_FILL_ADOPTION_BLOCKED_CONFLICTING_CANDIDATES",
+        candidates=[primary, conflicting],
+        broker_exposure=_broker_exposure(count=1, visible=True),
+        ownership_classification="AMBIGUOUS_EXPOSURE_OWNERSHIP",
+        adoption_eligible=False,
+        current_blockers=["conflicting_lifecycle_candidates", "conflicting_trade_ids"],
+        reason_codes=["multiple_exact_broker_position_candidates"],
+    )
+
+
+def _scenario_broker_observed_fill_stale_intent_fails_closed(
+    artifact_root: Path,
+    now: datetime,
+) -> dict[str, Any]:
+    del artifact_root
+    stale_candidate = _broker_observed_adoption_candidate(
+        symbol="MES",
+        local_symbol="MESM6",
+        con_id=770561194,
+        trade_id="trade_mes_stale_intent",
+        lifecycle_id="reserved_submit_mes_stale_intent",
+        intent_generated_at=now - timedelta(minutes=45),
+    )
+    return _broker_observed_adoption_payload(
+        retired_bug_class="Broker-Observed Fill Adoption",
+        invariant="Broker-observed fill adoption fails closed when the matching submit intent is stale.",
+        classification="BROKER_OBSERVED_FILL_ADOPTION_BLOCKED_STALE_INTENT",
+        candidates=[stale_candidate],
+        broker_exposure=_broker_exposure(count=1, visible=True),
+        ownership_classification="BROKER_OBSERVED_ADOPTION_BLOCKED_STALE_SUBMIT_INTENT",
+        adoption_eligible=False,
+        current_blockers=["stale_submit_intent"],
+        reason_codes=["intent_outside_adoption_window"],
+    )
+
+
+def _scenario_simultaneous_mnq_mes_broker_observed_short_adoption(
+    artifact_root: Path,
+    now: datetime,
+) -> dict[str, Any]:
+    del artifact_root
+    candidates = [
+        _broker_observed_adoption_candidate(
+            symbol="MNQ",
+            local_symbol="MNQM6",
+            con_id=770561201,
+            trade_id="trade_mnq_simultaneous_short",
+            lifecycle_id="reserved_submit_mnq_simultaneous_short",
+            intent_generated_at=now - timedelta(seconds=35),
+        ),
+        _broker_observed_adoption_candidate(
+            symbol="MES",
+            local_symbol="MESM6",
+            con_id=770561194,
+            trade_id="trade_mes_simultaneous_short",
+            lifecycle_id="reserved_submit_mes_simultaneous_short",
+            intent_generated_at=now - timedelta(seconds=30),
+        ),
+    ]
+    return _broker_observed_adoption_payload(
+        retired_bug_class="Ownership Ambiguity",
+        invariant="Simultaneous broker-observed MNQ and MES shorts adopt as separate exact managed exposures, not ambiguity.",
+        classification="BROKER_OBSERVED_SIMULTANEOUS_SHORTS_ADOPTABLE",
+        candidates=candidates,
+        broker_exposure=_broker_exposure(count=2, visible=True),
+        ownership_classification="OWNED_MANAGED_EXPOSURE",
+        adoption_eligible=True,
+        current_blockers=[],
+        reason_codes=["distinct_contracts", "exact_identity_per_contract"],
+    )
+
+
+def _scenario_raw_stale_lifecycle_count_current_scope_flat(
+    artifact_root: Path,
+    now: datetime,
+) -> dict[str, Any]:
+    del artifact_root, now
+    classification = "CURRENT_SCOPE_FLAT_STALE_LIFECYCLE_COUNT_DIAGNOSTIC_ONLY"
+    return {
+        "retired_bug_class": "Historical Registry Debris Blocking Current Truth",
+        "invariant": "Raw stale lifecycle counts stay diagnostic and current-scope lifecycle count controls submit/restart gates.",
+        "submit": {
+            "classification": classification,
+            "allowed": True,
+            "reason_codes": [],
+            "authority_source": "TRACK_B_FAULT_INJECTION_HARNESS",
+            "blocked_by_raw_lifecycle_open_position_count": False,
+            "blocked_by_current_scope_lifecycle_open_position_count": False,
+        },
+        "broker_exposure": {
+            **_broker_exposure(count=0, visible=False),
+            "broker_flat": True,
+            "broker_position_count": 0,
+            "broker_open_order_count": 0,
+        },
+        "ownership": {
+            "classification": "NO_OPEN_EXPOSURE",
+            "owned_exposure_count": 0,
+            "review_required_exposure_count": 0,
+            "owner_resolution_current_scope_clean": True,
+        },
+        "registry": {
+            "classification": classification,
+            "current_blockers": [],
+            "raw_lifecycle_open_position_count": 1,
+            "current_scope_lifecycle_open_position_count": 0,
+            "stale_superseded_lifecycle_projection_count": 1,
+            "current_scope_lifecycle_positions": [],
+            "diagnostic_only_rows": [
+                {
+                    "classification": "STALE_SUPERSEDED_LIFECYCLE_PROJECTION",
+                    "diagnostic_only": True,
+                    "lifecycle_id": "stale_superseded_mnq_closed_lifecycle",
+                    "current_scope": False,
+                }
+            ],
+            "restart_precheck_classification": "RESTART_ALLOWED_FLAT_RECONCILED",
+            "submit_blocked_by_raw_lifecycle_count": False,
+            "submit_blocked_by_current_scope_lifecycle_count": False,
+            "broker_lifecycle_reconciliation": "TRACK_B_PAPER_BROKER_RECONCILED",
+        },
+        "risk_reducing_close_authority": _risk_close_not_applicable(),
+        "observability": {
+            "stale_lifecycle_debris_visible": True,
+            "stale_lifecycle_debris_diagnostic_only": True,
+            "current_scope_blockers_still_block": True,
+            "runtime_restart_invoked": False,
+            "live_outputs_write": False,
+            "live_var_write": False,
+        },
+    }
+
+
 def _finalize_scenario(*, name: str, generated_at: datetime, payload: Mapping[str, Any]) -> dict[str, Any]:
     metadata = dict(SCENARIO_METADATA.get(name) or {})
     submit = dict(payload.get("submit") or {})
@@ -956,6 +1219,11 @@ def _finalize_scenario(*, name: str, generated_at: datetime, payload: Mapping[st
         _assertion("no_paper_proof", not _any_true(components, ("paper_proof_invoked", "paper_proof_cli_called"))),
         _assertion("no_broad_flatten", not _any_true(components, ("broad_flatten_allowed", "global_flatten_allowed"))),
         _assertion("no_unguarded_broker_mutation", not _any_true(components, ("broker_mutation_allowed", "broker_state_mutated"))),
+        _assertion("no_runtime_restart", not _any_true(components, ("runtime_restart_invoked", "restart_invoked", "wrapper_restart_invoked"))),
+        _assertion(
+            "no_live_outputs_or_var_writes",
+            not _any_true(components, ("live_outputs_write", "live_var_write", "live_runtime_state_write")),
+        ),
     ]
     return {
         "scenario": name,
@@ -974,6 +1242,8 @@ def _finalize_scenario(*, name: str, generated_at: datetime, payload: Mapping[st
             "paper_proof_invoked": False,
             "broad_flatten_allowed": False,
             "broker_mutation_allowed": False,
+            "runtime_restart_invoked": False,
+            "live_outputs_or_var_writes": False,
         },
         "observability": dict(payload.get("observability") or {}),
         "assertions": assertions,
@@ -1335,6 +1605,120 @@ def _malformed_authority_payload(
             "fresh_broker_truth_visible": fresh_broker_truth or broker_exposure.get("visible") is True,
             "stale_or_malformed_artifact_blocked": integrity["blocking"],
             "stale_or_malformed_artifact_silently_accepted": False,
+        },
+    }
+
+
+def _broker_observed_adoption_candidate(
+    *,
+    symbol: str,
+    local_symbol: str,
+    con_id: int,
+    trade_id: str,
+    lifecycle_id: str,
+    intent_generated_at: datetime,
+) -> dict[str, Any]:
+    return {
+        "account_id": "DUM882026",
+        "symbol": symbol,
+        "local_symbol": local_symbol,
+        "con_id": con_id,
+        "side": "SHORT",
+        "action": "SELL",
+        "quantity": "1",
+        "trade_id": trade_id,
+        "lifecycle_id": lifecycle_id,
+        "lifecycle_state_before": "RESERVED_ONLY",
+        "entry_fill_callback_present": False,
+        "completed_order_callback_present": False,
+        "broker_position": _broker_position(
+            quantity="-1",
+            symbol=symbol,
+            local_symbol=local_symbol,
+            con_id=con_id,
+        ),
+        "submit_ownership_record": {
+            "trade_id": trade_id,
+            "lifecycle_id": lifecycle_id,
+            "order_id": f"order_{trade_id}",
+            "client_id": "fault-injection-client",
+            "perm_id": f"perm_{trade_id}",
+            "intent_generated_at": _iso(intent_generated_at),
+        },
+    }
+
+
+def _broker_observed_adoption_payload(
+    *,
+    retired_bug_class: str,
+    invariant: str,
+    classification: str,
+    candidates: Sequence[Mapping[str, Any]],
+    broker_exposure: Mapping[str, Any],
+    ownership_classification: str,
+    adoption_eligible: bool,
+    current_blockers: Sequence[str],
+    reason_codes: Sequence[str],
+) -> dict[str, Any]:
+    candidate_rows = [dict(candidate) for candidate in candidates]
+    managed_position_would_be_created = adoption_eligible and not current_blockers
+    adopted_exposure_count = len(candidate_rows) if managed_position_would_be_created else 0
+    return {
+        "retired_bug_class": retired_bug_class,
+        "invariant": invariant,
+        "submit": _submit_blocked(classification),
+        "broker_exposure": {
+            **dict(broker_exposure),
+            "broker_positions": [dict(candidate["broker_position"]) for candidate in candidate_rows],
+            "broker_open_order_count": 0,
+        },
+        "ownership": {
+            "classification": ownership_classification,
+            "owned_exposure_count": adopted_exposure_count,
+            "review_required_exposure_count": 0 if adoption_eligible else 1,
+            "broker_observed_adoption_required": True,
+            "would_resolve_to_distinct_owned_exposures": managed_position_would_be_created,
+            "owned_exposures_after_adoption": [
+                {
+                    "trade_id": candidate["trade_id"],
+                    "lifecycle_id": candidate["lifecycle_id"],
+                    "local_symbol": candidate["local_symbol"],
+                    "con_id": candidate["con_id"],
+                }
+                for candidate in candidate_rows
+            ]
+            if managed_position_would_be_created
+            else [],
+        },
+        "registry": {
+            "classification": classification,
+            "current_blockers": list(current_blockers),
+            "adoption": {
+                "eligible": adoption_eligible,
+                "artifact_only": True,
+                "apply_allowed_by_harness": False,
+                "managed_position_created": False,
+                "managed_position_would_be_created": managed_position_would_be_created,
+                "exec_details_missing": True,
+                "completed_order_missing": True,
+                "broker_open_order_conflict": False,
+                "competing_candidate_count": len(candidate_rows) if not adoption_eligible and len(candidate_rows) > 1 else 0,
+                "reason_codes": list(reason_codes),
+            },
+            "candidates": candidate_rows,
+            "current_scope_blockers_still_block": True,
+        },
+        "risk_reducing_close_authority": _risk_close_not_applicable(),
+        "observability": {
+            "broker_observed_fill_adoption_dry_run": True,
+            "adoption_eligible": adoption_eligible,
+            "managed_position_created": False,
+            "broker_state_mutated": False,
+            "broker_mutation_allowed": False,
+            "runtime_restart_invoked": False,
+            "live_outputs_write": False,
+            "live_var_write": False,
+            "conflicting_evidence_fails_closed": not adoption_eligible and bool(current_blockers),
         },
     }
 

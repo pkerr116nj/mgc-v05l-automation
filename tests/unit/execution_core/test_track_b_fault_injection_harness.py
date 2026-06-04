@@ -11,6 +11,9 @@ from mgc_v05l.execution_core.track_b_fault_injection_harness import (
     FAULT_INJECTION_REPORT_SCHEMA_VERSION,
     SAFETY_INVARIANTS_CHECKED,
     SCENARIO_BROKER_FILL_NO_LIFECYCLE_CLOSE,
+    SCENARIO_BROKER_OBSERVED_CONFLICTING_CANDIDATE,
+    SCENARIO_BROKER_OBSERVED_RESERVED_LIFECYCLE_ADOPTION,
+    SCENARIO_BROKER_OBSERVED_STALE_INTENT,
     SCENARIO_BROKER_OPEN_ORDER_REGISTRY_NONE,
     SCENARIO_CONFLICTING_AUTHORITY_GENERATION,
     SCENARIO_DEAD_PID_STALE_HEARTBEAT,
@@ -26,6 +29,8 @@ from mgc_v05l.execution_core.track_b_fault_injection_harness import (
     SCENARIO_REGISTRY_DIAGNOSTIC_MISSING_CURRENT_SCOPE,
     SCENARIO_REGISTRY_REVIEW_REQUIRED_NULL_LIFECYCLE_EXIT,
     SCENARIO_METADATA,
+    SCENARIO_RAW_STALE_LIFECYCLE_COUNT_CURRENT_SCOPE_FLAT,
+    SCENARIO_SIMULTANEOUS_MNQ_MES_BROKER_OBSERVED_SHORT_ADOPTION,
     SCENARIO_STALE_OWNER_FRESH_BROKER,
     SCENARIO_STALE_RUNTIME_EXIT_DUE,
     SCENARIO_STALE_RUNTIME_ENV_FRESH_BROKER_TRUTH,
@@ -66,6 +71,11 @@ EXPECTED_SCENARIO_IDS = (
     "missing_guardian_artifact_with_broker_exposure",
     "managed_close_order_disappears_broker_flat_without_fill_callback",
     "registry_review_required_null_lifecycle_blocks_valid_exit",
+    "broker_observed_fill_reserved_lifecycle_adoption_required",
+    "broker_observed_fill_conflicting_candidate_fails_closed",
+    "broker_observed_fill_stale_intent_fails_closed",
+    "simultaneous_mnq_mes_broker_observed_short_adoption",
+    "raw_stale_lifecycle_count_current_scope_flat",
 )
 REQUIRED_METADATA_FIELDS = {
     "bug_class",
@@ -151,6 +161,8 @@ def test_fault_injection_harness_runs_all_named_scenarios(tmp_path: Path) -> Non
             "paper_proof_invoked": False,
             "broad_flatten_allowed": False,
             "broker_mutation_allowed": False,
+            "runtime_restart_invoked": False,
+            "live_outputs_or_var_writes": False,
         }
         assert {item["name"] for item in scenario["assertions"]} == {
             "submit_authority_classified",
@@ -162,6 +174,8 @@ def test_fault_injection_harness_runs_all_named_scenarios(tmp_path: Path) -> Non
             "no_paper_proof",
             "no_broad_flatten",
             "no_unguarded_broker_mutation",
+            "no_runtime_restart",
+            "no_live_outputs_or_var_writes",
         }
 
 
@@ -347,6 +361,8 @@ def test_malformed_authority_artifact_scenarios_fail_closed(
         "paper_proof_invoked": False,
         "broad_flatten_allowed": False,
         "broker_mutation_allowed": False,
+        "runtime_restart_invoked": False,
+        "live_outputs_or_var_writes": False,
     }
     assert scenario["passed"] is True
     if scenario_id == SCENARIO_BROKER_OPEN_ORDER_REGISTRY_NONE:
@@ -380,6 +396,8 @@ def test_managed_close_order_disappears_broker_flat_requires_local_reconciliatio
         "paper_proof_invoked": False,
         "broad_flatten_allowed": False,
         "broker_mutation_allowed": False,
+        "runtime_restart_invoked": False,
+        "live_outputs_or_var_writes": False,
     }
     assert scenario["passed"] is True
 
@@ -419,6 +437,109 @@ def test_registry_review_required_null_lifecycle_blocks_valid_exit_until_exact_r
     }
     assert scenario["observability"]["registry_identity_normalization_required"] is True
     assert scenario["observability"]["registry_identity_normalization_broker_mutation_allowed"] is False
+    assert scenario["passed"] is True
+
+
+def test_broker_observed_reserved_lifecycle_adoption_is_artifact_only_eligible(
+    tmp_path: Path,
+) -> None:
+    scenario = _run(tmp_path, SCENARIO_BROKER_OBSERVED_RESERVED_LIFECYCLE_ADOPTION)
+
+    assert scenario["submit_authority"]["classification"] == "BROKER_OBSERVED_FILL_ADOPTION_ELIGIBLE"
+    assert scenario["submit_authority"]["allowed"] is False
+    assert scenario["broker_exposure"]["visible"] is True
+    assert scenario["broker_exposure"]["count"] == 2
+    assert scenario["broker_exposure"]["broker_open_order_count"] == 0
+    assert scenario["ownership"]["classification"] == "BROKER_OBSERVED_ADOPTION_REQUIRED_EXACT_IDENTITY"
+    assert scenario["registry"]["classification"] == "BROKER_OBSERVED_FILL_ADOPTION_ELIGIBLE"
+    assert scenario["registry"]["current_blockers"] == []
+    assert scenario["registry"]["adoption"]["eligible"] is True
+    assert scenario["registry"]["adoption"]["artifact_only"] is True
+    assert scenario["registry"]["adoption"]["apply_allowed_by_harness"] is False
+    assert scenario["registry"]["adoption"]["managed_position_created"] is False
+    assert scenario["registry"]["adoption"]["managed_position_would_be_created"] is True
+    assert scenario["registry"]["adoption"]["exec_details_missing"] is True
+    assert scenario["registry"]["adoption"]["completed_order_missing"] is True
+    assert {candidate["local_symbol"] for candidate in scenario["registry"]["candidates"]} == {"MNQM6", "MESM6"}
+    assert scenario["observability"]["broker_state_mutated"] is False
+    assert scenario["observability"]["runtime_restart_invoked"] is False
+    assert scenario["passed"] is True
+
+
+def test_broker_observed_conflicting_candidate_fails_closed(
+    tmp_path: Path,
+) -> None:
+    scenario = _run(tmp_path, SCENARIO_BROKER_OBSERVED_CONFLICTING_CANDIDATE)
+
+    assert scenario["submit_authority"]["classification"] == "BROKER_OBSERVED_FILL_ADOPTION_BLOCKED_CONFLICTING_CANDIDATES"
+    assert scenario["submit_authority"]["allowed"] is False
+    assert scenario["broker_exposure"]["visible"] is True
+    assert scenario["ownership"]["classification"] == "AMBIGUOUS_EXPOSURE_OWNERSHIP"
+    assert scenario["ownership"]["owned_exposure_count"] == 0
+    assert scenario["registry"]["adoption"]["eligible"] is False
+    assert scenario["registry"]["adoption"]["managed_position_created"] is False
+    assert scenario["registry"]["adoption"]["competing_candidate_count"] == 2
+    assert scenario["registry"]["current_blockers"] == ["conflicting_lifecycle_candidates", "conflicting_trade_ids"]
+    assert scenario["observability"]["conflicting_evidence_fails_closed"] is True
+    assert scenario["passed"] is True
+
+
+def test_broker_observed_stale_intent_fails_closed(
+    tmp_path: Path,
+) -> None:
+    scenario = _run(tmp_path, SCENARIO_BROKER_OBSERVED_STALE_INTENT)
+
+    assert scenario["submit_authority"]["classification"] == "BROKER_OBSERVED_FILL_ADOPTION_BLOCKED_STALE_INTENT"
+    assert scenario["submit_authority"]["allowed"] is False
+    assert scenario["broker_exposure"]["visible"] is True
+    assert scenario["registry"]["adoption"]["eligible"] is False
+    assert scenario["registry"]["adoption"]["managed_position_created"] is False
+    assert scenario["registry"]["current_blockers"] == ["stale_submit_intent"]
+    assert "intent_outside_adoption_window" in scenario["registry"]["adoption"]["reason_codes"]
+    assert scenario["passed"] is True
+
+
+def test_simultaneous_mnq_mes_broker_observed_shorts_adopt_without_ambiguity(
+    tmp_path: Path,
+) -> None:
+    scenario = _run(tmp_path, SCENARIO_SIMULTANEOUS_MNQ_MES_BROKER_OBSERVED_SHORT_ADOPTION)
+
+    assert scenario["submit_authority"]["classification"] == "BROKER_OBSERVED_SIMULTANEOUS_SHORTS_ADOPTABLE"
+    assert scenario["submit_authority"]["allowed"] is False
+    assert scenario["broker_exposure"]["visible"] is True
+    assert scenario["broker_exposure"]["count"] == 2
+    assert scenario["ownership"]["classification"] == "OWNED_MANAGED_EXPOSURE"
+    assert scenario["ownership"]["owned_exposure_count"] == 2
+    assert scenario["ownership"]["review_required_exposure_count"] == 0
+    assert scenario["registry"]["adoption"]["eligible"] is True
+    assert scenario["registry"]["adoption"]["competing_candidate_count"] == 0
+    assert scenario["registry"]["adoption"]["managed_position_would_be_created"] is True
+    owned = scenario["ownership"]["owned_exposures_after_adoption"]
+    assert {item["local_symbol"] for item in owned} == {"MNQM6", "MESM6"}
+    assert len({item["lifecycle_id"] for item in owned}) == 2
+    assert scenario["passed"] is True
+
+
+def test_raw_stale_lifecycle_count_is_diagnostic_only_when_current_scope_flat(
+    tmp_path: Path,
+) -> None:
+    scenario = _run(tmp_path, SCENARIO_RAW_STALE_LIFECYCLE_COUNT_CURRENT_SCOPE_FLAT)
+
+    assert scenario["submit_authority"]["classification"] == "CURRENT_SCOPE_FLAT_STALE_LIFECYCLE_COUNT_DIAGNOSTIC_ONLY"
+    assert scenario["submit_authority"]["allowed"] is True
+    assert scenario["submit_authority"]["blocked_by_raw_lifecycle_open_position_count"] is False
+    assert scenario["broker_exposure"]["broker_flat"] is True
+    assert scenario["ownership"]["classification"] == "NO_OPEN_EXPOSURE"
+    assert scenario["registry"]["raw_lifecycle_open_position_count"] == 1
+    assert scenario["registry"]["current_scope_lifecycle_open_position_count"] == 0
+    assert scenario["registry"]["stale_superseded_lifecycle_projection_count"] == 1
+    assert scenario["registry"]["current_scope_lifecycle_positions"] == []
+    assert scenario["registry"]["diagnostic_only_rows"][0]["classification"] == "STALE_SUPERSEDED_LIFECYCLE_PROJECTION"
+    assert scenario["registry"]["diagnostic_only_rows"][0]["diagnostic_only"] is True
+    assert scenario["registry"]["restart_precheck_classification"] == "RESTART_ALLOWED_FLAT_RECONCILED"
+    assert scenario["registry"]["submit_blocked_by_raw_lifecycle_count"] is False
+    assert scenario["registry"]["submit_blocked_by_current_scope_lifecycle_count"] is False
+    assert scenario["observability"]["stale_lifecycle_debris_diagnostic_only"] is True
     assert scenario["passed"] is True
 
 
