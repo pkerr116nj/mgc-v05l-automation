@@ -1,14 +1,17 @@
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
+from pathlib import Path
 
 from mgc_v05l.execution_core.track_b_central_trade_registry import TradeCurrentState, TradeEventType
 from mgc_v05l.execution_core.track_b_live_trade_registry import (
     append_live_trade_registry_event,
     broker_backed_fill_has_required_ids,
     load_live_trade_registry_records,
+    load_live_trade_registry_record,
     make_live_trade_registry_event,
+    repair_registry_identity_for_broker_backed_managed_position,
     resolve_live_trade_id_for_lifecycle_id,
     validate_registry_managed_exit_identity,
 )
@@ -58,7 +61,10 @@ def test_live_trade_registry_appends_and_reconstructs_one_trade_chain(tmp_path):
         )
 
     report = reconstruct_trade_registry_from_artifacts(
-        config=TradeRegistryReconstructionConfig(repo_root=repo_root),
+        config=TradeRegistryReconstructionConfig(
+            repo_root=repo_root,
+            reconciliation_path=Path("outputs/reports/track_b_paper_broker_reconciliation/missing.json"),
+        ),
         now=NOW,
     )
 
@@ -349,3 +355,280 @@ def test_registry_managed_exit_validator_fails_closed_without_trade_id(tmp_path)
 
     assert result["allowed"] is False
     assert "missing_trade_id" in result["block_reasons"]
+
+
+def test_registry_identity_repair_recovers_review_required_null_lifecycle_owner_with_exact_evidence(tmp_path):
+    repo_root = tmp_path
+    trade_id = "trade_mes_review_required"
+    lifecycle_id = "life_mes_managed"
+    _write_review_required_null_lifecycle_registry_chain(repo_root, trade_id=trade_id, lifecycle_id=lifecycle_id)
+
+    result = repair_registry_identity_for_broker_backed_managed_position(
+        repo_root=repo_root,
+        trade_id=trade_id,
+        lifecycle_id=lifecycle_id,
+        phase1_reconciliation_gate=_phase1_repair_gate(trade_id=trade_id, lifecycle_id=lifecycle_id),
+        lifecycle_report=_lifecycle_repair_report(trade_id=trade_id, lifecycle_id=lifecycle_id),
+        generated_at=NOW + timedelta(minutes=1),
+    )
+
+    assert result["classification"] == "REGISTRY_IDENTITY_REPAIR_APPLIED"
+    assert result["broker_mutation_performed"] is False
+    assert result["live_money_eligible"] is False
+    assert result["paper_proof_invoked"] is False
+    assert [event["event_type"] for event in result["persisted_events"]] == [
+        "ENTRY_FILL_BROKER_BACKED",
+        "LIFECYCLE_OPEN_MANAGED",
+    ]
+    record = load_live_trade_registry_record(repo_root=repo_root, trade_id=trade_id)
+    assert record is not None
+    assert record.current_state == TradeCurrentState.OPEN_MANAGED
+    assert record.broker_backed_entry is True
+    assert record.ownership_identity is not None
+    assert record.ownership_identity.lifecycle_id == lifecycle_id
+
+    validation = validate_registry_managed_exit_identity(
+        repo_root=repo_root,
+        trade_id=trade_id,
+        lifecycle_id=lifecycle_id,
+        account_id="DUM882026",
+        con_id=770561194,
+        local_symbol="MESM6",
+        quantity=1,
+        action="SELL",
+        phase1_reconciliation_gate=_phase1_repair_gate(trade_id=trade_id, lifecycle_id=lifecycle_id),
+    )
+    assert validation["allowed"] is True
+    assert validation["owner_identity"]["entry_exec_id"] == "exec-mes-entry"
+
+
+def test_registry_identity_repair_fails_closed_without_exact_fill_evidence(tmp_path):
+    repo_root = tmp_path
+    trade_id = "trade_mes_missing_exec"
+    lifecycle_id = "life_mes_missing_exec"
+    _write_review_required_null_lifecycle_registry_chain(repo_root, trade_id=trade_id, lifecycle_id=lifecycle_id)
+    lifecycle_report = _lifecycle_repair_report(trade_id=trade_id, lifecycle_id=lifecycle_id)
+    lifecycle_report["entry_fill"].pop("exec_id")
+    phase1 = _phase1_repair_gate(trade_id=trade_id, lifecycle_id=lifecycle_id)
+    phase1["track_b_lifecycle_positions"][0].pop("entry_exec_ids")
+    phase1["registry_reconciliation"]["mapped_records"][0]["entry_exec_id"] = None
+
+    result = repair_registry_identity_for_broker_backed_managed_position(
+        repo_root=repo_root,
+        trade_id=trade_id,
+        lifecycle_id=lifecycle_id,
+        phase1_reconciliation_gate=phase1,
+        lifecycle_report=lifecycle_report,
+        generated_at=NOW + timedelta(minutes=1),
+    )
+
+    assert result["classification"] == "REGISTRY_IDENTITY_REPAIR_BLOCKED"
+    assert "entry_fill_exec_id_missing" in result["block_reasons"]
+    assert result["persisted_events"] == []
+    record = load_live_trade_registry_record(repo_root=repo_root, trade_id=trade_id)
+    assert record is not None
+    assert record.current_state == TradeCurrentState.REVIEW_REQUIRED
+    assert record.ownership_identity is not None
+    assert record.ownership_identity.lifecycle_id is None
+
+
+def test_registry_identity_repair_fails_closed_with_conflicting_current_owner(tmp_path):
+    repo_root = tmp_path
+    trade_id = "trade_mes_review_conflict"
+    lifecycle_id = "life_mes_conflict"
+    _write_review_required_null_lifecycle_registry_chain(repo_root, trade_id=trade_id, lifecycle_id=lifecycle_id)
+    _write_open_managed_registry_chain(
+        repo_root,
+        trade_id="trade_mes_conflicting_owner",
+        lifecycle_id="life_mes_conflicting_owner",
+        order_id="2",
+        perm_id="perm-conflict",
+        exec_id="exec-conflict",
+    )
+
+    result = repair_registry_identity_for_broker_backed_managed_position(
+        repo_root=repo_root,
+        trade_id=trade_id,
+        lifecycle_id=lifecycle_id,
+        phase1_reconciliation_gate=_phase1_repair_gate(trade_id=trade_id, lifecycle_id=lifecycle_id),
+        lifecycle_report=_lifecycle_repair_report(trade_id=trade_id, lifecycle_id=lifecycle_id),
+        generated_at=NOW + timedelta(minutes=1),
+    )
+
+    assert result["classification"] == "REGISTRY_IDENTITY_REPAIR_BLOCKED"
+    assert "conflicting_current_registry_owner" in result["block_reasons"]
+    assert result["persisted_events"] == []
+
+
+def _write_review_required_null_lifecycle_registry_chain(repo_root, *, trade_id: str, lifecycle_id: str) -> None:
+    base = _mes_event_base(repo_root, trade_id=trade_id, lifecycle_id=None, generated_at=NOW)
+    append_live_trade_registry_event(
+        repo_root=repo_root,
+        event=make_live_trade_registry_event(
+            event_type=TradeEventType.ENTRY_INTENT_CREATED,
+            **base,
+        ),
+    )
+    append_live_trade_registry_event(
+        repo_root=repo_root,
+        event=make_live_trade_registry_event(
+            event_type=TradeEventType.ENTRY_ORDER_SUBMITTED,
+            lifecycle_id=lifecycle_id,
+            order_id="1",
+            client_id="11113",
+            generated_at=NOW.replace(second=NOW.second + 1),
+            **{key: value for key, value in base.items() if key not in {"lifecycle_id", "generated_at"}},
+        ),
+    )
+    append_live_trade_registry_event(
+        repo_root=repo_root,
+        event=make_live_trade_registry_event(
+            event_type=TradeEventType.ENTRY_FILL_BROKER_BACKED,
+            lifecycle_id=lifecycle_id,
+            order_id="1",
+            client_id="11113",
+            perm_id="1092553522",
+            exec_id=None,
+            price="7565.75",
+            reason_codes=("BROKER_BACKED_FILL_MISSING_PERM_OR_EXEC",),
+            generated_at=NOW.replace(second=NOW.second + 2),
+            **{key: value for key, value in base.items() if key not in {"lifecycle_id", "generated_at"}},
+        ),
+    )
+
+
+def _write_open_managed_registry_chain(
+    repo_root,
+    *,
+    trade_id: str,
+    lifecycle_id: str,
+    order_id: str,
+    perm_id: str,
+    exec_id: str,
+) -> None:
+    base = _mes_event_base(repo_root, trade_id=trade_id, lifecycle_id=lifecycle_id, generated_at=NOW)
+    base_without_generated_at = {key: value for key, value in base.items() if key != "generated_at"}
+    for offset, event_type, extra in (
+        (0, TradeEventType.ENTRY_INTENT_CREATED, {}),
+        (1, TradeEventType.ENTRY_ORDER_SUBMITTED, {"order_id": order_id, "client_id": "11113"}),
+        (
+            2,
+            TradeEventType.ENTRY_FILL_BROKER_BACKED,
+            {"order_id": order_id, "client_id": "11113", "perm_id": perm_id, "exec_id": exec_id, "price": "7565.75"},
+        ),
+        (3, TradeEventType.LIFECYCLE_OPEN_MANAGED, {}),
+    ):
+        append_live_trade_registry_event(
+            repo_root=repo_root,
+            event=make_live_trade_registry_event(
+                event_type=event_type,
+                generated_at=NOW.replace(second=NOW.second + offset),
+                **base_without_generated_at,
+                **extra,
+            ),
+        )
+
+
+def _mes_event_base(repo_root, *, trade_id: str, lifecycle_id: str | None, generated_at: datetime) -> dict:
+    return {
+        "trade_id": trade_id,
+        "lifecycle_id": lifecycle_id,
+        "lane_id": "mes_us_active_participation_long",
+        "thesis_strategy_id": "mes_us_active_participation_long",
+        "account_id": "DUM882026",
+        "symbol": "MES",
+        "con_id": 770561194,
+        "local_symbol": "MESM6",
+        "expiry": "20260618",
+        "side": "LONG",
+        "action": "BUY",
+        "qty": Decimal("1"),
+        "source_artifact_path": str(repo_root / "outputs/track_b_execution_core/strategy_bridge/mes_bridge_report.json"),
+        "generated_at": generated_at,
+    }
+
+
+def _phase1_repair_gate(*, trade_id: str, lifecycle_id: str) -> dict:
+    lifecycle_row = {
+        "trade_id": trade_id,
+        "lifecycle_id": lifecycle_id,
+        "account_id": "DUM882026",
+        "lane_id": "mes_us_active_participation_long",
+        "strategy_id": "mes_us_active_participation_long",
+        "instrument_family": "MES",
+        "track_b_root": "MES",
+        "local_symbol": "MESM6",
+        "con_id": 770561194,
+        "expiry": "20260618",
+        "quantity": "1",
+        "side": "LONG",
+        "managed_exit_policy_id": "US_ACTIVE_EVIDENCE_TIMEBOX_60M_EXIT_V1",
+        "entry_client_id": "11113",
+        "entry_order_ids": ["1"],
+        "entry_perm_ids": [1092553522],
+        "entry_exec_ids": ["exec-mes-entry"],
+        "avg_entry_price": "7565.75",
+    }
+    return {
+        "ready": True,
+        "broker_reconciled": True,
+        "classification": "TRACK_B_PAPER_BROKER_RECONCILED",
+        "current_scope_review_required_count": 0,
+        "track_b_broker_open_order_count": 0,
+        "track_b_broker_open_orders": [],
+        "track_b_lifecycle_positions": [lifecycle_row],
+        "track_b_broker_positions": [
+            {
+                "account_id": "DUM882026",
+                "symbol": "MES",
+                "track_b_root": "MES",
+                "local_symbol": "MESM6",
+                "con_id": 770561194,
+                "expiry": "20260618",
+                "quantity": "1.0",
+            }
+        ],
+        "registry_reconciliation": {
+            "classification": "REGISTRY_RECONCILIATION_MATCHED",
+            "blocking": False,
+            "mapped_records": [
+                {
+                    **lifecycle_row,
+                    "current_state": "REVIEW_REQUIRED",
+                    "entry_order_id": "1",
+                    "entry_client_id": "11113",
+                    "entry_perm_id": "1092553522",
+                    "entry_exec_id": None,
+                }
+            ],
+        },
+    }
+
+
+def _lifecycle_repair_report(*, trade_id: str, lifecycle_id: str) -> dict:
+    return {
+        "trade_id": trade_id,
+        "lifecycle_id": lifecycle_id,
+        "account_id": "DUM882026",
+        "lane_id": "mes_us_active_participation_long",
+        "strategy_id": "mes_us_active_participation_long",
+        "instrument_family": "MES",
+        "symbol": "MES",
+        "con_id": 770561194,
+        "local_symbol": "MESM6",
+        "expiry": "20260618",
+        "side": "LONG",
+        "quantity": "1",
+        "managed_exit_policy_id": "US_ACTIVE_EVIDENCE_TIMEBOX_60M_EXIT_V1",
+        "live_money_eligible": False,
+        "paper_proof_invoked": False,
+        "report_json_path": "outputs/track_b_execution_core/track_b_strategy_managed_paper_lifecycle/life_mes_managed/track_b_strategy_managed_paper_lifecycle_report.json",
+        "entry_fill": {
+            "order_id": "1",
+            "client_id": "11113",
+            "perm_id": "1092553522",
+            "exec_id": "exec-mes-entry",
+            "price": "7565.75",
+            "quantity": "1",
+        },
+    }

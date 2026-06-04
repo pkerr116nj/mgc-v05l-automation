@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import json
 import uuid
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Any, Mapping
@@ -314,6 +314,198 @@ def validate_registry_managed_exit_identity(
     )
 
 
+def repair_registry_identity_for_broker_backed_managed_position(
+    *,
+    repo_root: Path,
+    trade_id: str,
+    lifecycle_id: str,
+    phase1_reconciliation_gate: Mapping[str, Any],
+    lifecycle_report: Mapping[str, Any],
+    jsonl_path: Path = DEFAULT_TRACK_B_LIVE_TRADE_REGISTRY_EVENTS_JSONL,
+    latest_path: Path = DEFAULT_TRACK_B_LIVE_TRADE_REGISTRY_LATEST_EVENT_JSON,
+    generated_at: datetime | None = None,
+) -> dict[str, Any]:
+    """Append a scoped identity repair for an exact broker-backed lifecycle.
+
+    This is local artifact repair only. It never talks to the broker and never
+    creates close/submit authority by itself; callers must still pass canonical
+    managed-exit gates after the registry reduces to current truth.
+    """
+
+    blockers: list[str] = []
+    requested_trade_id = str(trade_id or "").strip()
+    requested_lifecycle_id = str(lifecycle_id or "").strip()
+    if not requested_trade_id:
+        blockers.append("missing_trade_id")
+    if not requested_lifecycle_id:
+        blockers.append("missing_lifecycle_id")
+    if _truthy(phase1_reconciliation_gate.get("live_money_eligible")) or _truthy(
+        lifecycle_report.get("live_money_eligible") or lifecycle_report.get("live_money_readiness")
+    ):
+        blockers.append("live_money_not_allowed")
+    if _truthy(phase1_reconciliation_gate.get("paper_proof_invoked")) or _truthy(
+        lifecycle_report.get("paper_proof_invoked") or lifecycle_report.get("paper_proof_cli_called")
+    ):
+        blockers.append("paper_proof_not_allowed")
+    if _nonzero_count(
+        phase1_reconciliation_gate.get("track_b_broker_open_order_count")
+        or phase1_reconciliation_gate.get("broker_open_order_count")
+    ) or list(phase1_reconciliation_gate.get("track_b_broker_open_orders") or []):
+        blockers.append("broker_open_orders_not_zero")
+    if phase1_reconciliation_gate.get("broker_reconciled") is not True and (
+        phase1_reconciliation_gate.get("classification") != "TRACK_B_PAPER_BROKER_RECONCILED"
+    ):
+        blockers.append("broker_lifecycle_reconciliation_not_clean")
+    if _nonzero_count(phase1_reconciliation_gate.get("current_scope_review_required_count")):
+        blockers.append("current_scope_review_not_clean")
+
+    registry_reconciliation = phase1_reconciliation_gate.get("registry_reconciliation")
+    if isinstance(registry_reconciliation, Mapping):
+        if registry_reconciliation.get("classification") != "REGISTRY_RECONCILIATION_MATCHED":
+            blockers.append("registry_reconciliation_not_matched")
+        if registry_reconciliation.get("blocking") is True:
+            blockers.append("registry_reconciliation_blocking")
+
+    record = (
+        None
+        if not requested_trade_id
+        else load_live_trade_registry_record(repo_root=repo_root, trade_id=requested_trade_id, jsonl_path=jsonl_path)
+    )
+    if record is None:
+        blockers.append("trade_registry_record_missing")
+    else:
+        if record.current_state != TradeCurrentState.REVIEW_REQUIRED:
+            blockers.append("trade_registry_state_not_review_required")
+        if record.ownership_identity is None:
+            blockers.append("trade_registry_owner_identity_missing")
+        elif record.ownership_identity.lifecycle_id:
+            blockers.append("trade_registry_owner_lifecycle_id_already_present")
+
+    lifecycle_row = _exact_lifecycle_row(phase1_reconciliation_gate, requested_lifecycle_id)
+    if not lifecycle_row:
+        blockers.append("lifecycle_identity_row_missing")
+    if lifecycle_row and str(lifecycle_row.get("trade_id") or requested_trade_id).strip() != requested_trade_id:
+        blockers.append("lifecycle_trade_id_mismatch")
+    broker_position = _matching_broker_position(lifecycle_row, phase1_reconciliation_gate) if lifecycle_row else {}
+    if not broker_position:
+        blockers.append("broker_position_missing_for_repair")
+
+    evidence = _entry_fill_identity_from_lifecycle_evidence(lifecycle_report=lifecycle_report, lifecycle_row=lifecycle_row)
+    missing_fill_fields = [
+        field
+        for field in ("order_id", "client_id", "perm_id", "exec_id", "price")
+        if not str(evidence.get(field) or "").strip()
+    ]
+    if missing_fill_fields:
+        blockers.extend(f"entry_fill_{field}_missing" for field in missing_fill_fields)
+    policy_id = _valid_identity_text(
+        lifecycle_report.get("managed_exit_policy_id") or lifecycle_row.get("managed_exit_policy_id")
+    )
+    if not policy_id:
+        blockers.append("managed_exit_policy_missing")
+    if lifecycle_report.get("close_fill") or lifecycle_report.get("close_submit_attempt"):
+        blockers.append("lifecycle_already_has_close_evidence")
+
+    target_identity = _repair_target_identity(
+        trade_id=requested_trade_id,
+        lifecycle_id=requested_lifecycle_id,
+        lifecycle_report=lifecycle_report,
+        lifecycle_row=lifecycle_row,
+        broker_position=broker_position,
+        entry_fill=evidence,
+        managed_exit_policy_id=policy_id,
+    )
+    blockers.extend(_repair_identity_mismatches(target_identity))
+    blockers.extend(
+        _conflicting_registry_owner_blockers(
+            repo_root=repo_root,
+            jsonl_path=jsonl_path,
+            trade_id=requested_trade_id,
+            target_identity=target_identity,
+        )
+    )
+
+    if blockers:
+        return _registry_identity_repair_result(
+            blockers=blockers,
+            target_identity=target_identity,
+            record=record,
+            persisted_events=(),
+        )
+
+    now = _ensure_utc(generated_at or _now())
+    source_path = str(
+        lifecycle_report.get("report_json_path")
+        or lifecycle_report.get("paper_lifecycle_report_path")
+        or lifecycle_row.get("paper_lifecycle_report_path")
+        or lifecycle_report.get("source_artifact_path")
+        or "outputs/track_b_execution_core/trade_registry/scoped_registry_identity_repair.json"
+    )
+    common = {
+        "trade_id": requested_trade_id,
+        "lifecycle_id": requested_lifecycle_id,
+        "lane_id": target_identity["lane_id"],
+        "thesis_strategy_id": target_identity["strategy_id"],
+        "account_id": target_identity["account_id"],
+        "symbol": target_identity["symbol"],
+        "con_id": target_identity["con_id"],
+        "local_symbol": target_identity["local_symbol"],
+        "expiry": target_identity["expiry"],
+        "side": target_identity["side"],
+        "action": "BUY" if target_identity["side"] == "LONG" else "SELL",
+        "qty": target_identity["quantity"],
+        "source_artifact_path": source_path,
+        "metadata": {
+            "repair_scope": "BROKER_BACKED_MANAGED_POSITION_REGISTRY_IDENTITY",
+            "managed_exit_policy_id": policy_id,
+            "broker_mutation_allowed": False,
+            "broker_mutation_performed": False,
+            "live_money_eligible": False,
+            "paper_proof_invoked": False,
+            "preserves_prior_review_required_as_audit_history": True,
+        },
+    }
+    events = (
+        make_live_trade_registry_event(
+            event_type=TradeEventType.ENTRY_FILL_BROKER_BACKED,
+            generated_at=now,
+            order_id=evidence["order_id"],
+            client_id=evidence["client_id"],
+            perm_id=evidence["perm_id"],
+            exec_id=evidence["exec_id"],
+            price=evidence["price"],
+            reason_codes=("SCOPED_REGISTRY_IDENTITY_REPAIR_BROKER_BACKED_ENTRY",),
+            **common,
+        ),
+        make_live_trade_registry_event(
+            event_type=TradeEventType.LIFECYCLE_OPEN_MANAGED,
+            generated_at=now + timedelta(microseconds=1),
+            reason_codes=("SCOPED_REGISTRY_IDENTITY_REPAIR_LIFECYCLE_OPEN_MANAGED",),
+            **common,
+        ),
+    )
+    persisted = tuple(
+        append_live_trade_registry_event(
+            repo_root=repo_root,
+            event=event,
+            jsonl_path=jsonl_path,
+            latest_path=latest_path,
+        )
+        for event in events
+    )
+    append_blockers = [
+        str(item.get("classification") or "registry_repair_event_not_persisted")
+        for item in persisted
+        if item.get("persisted") is not True
+    ]
+    return _registry_identity_repair_result(
+        blockers=append_blockers,
+        target_identity=target_identity,
+        record=load_live_trade_registry_record(repo_root=repo_root, trade_id=requested_trade_id, jsonl_path=jsonl_path),
+        persisted_events=persisted,
+    )
+
+
 def make_live_trade_registry_event(
     *,
     event_type: TradeEventType,
@@ -428,6 +620,30 @@ def _managed_exit_validation_result(
     }
 
 
+def _registry_identity_repair_result(
+    *,
+    blockers: list[str],
+    target_identity: Mapping[str, Any],
+    record: TradeRegistryRecord | None,
+    persisted_events: tuple[Mapping[str, Any], ...],
+) -> dict[str, Any]:
+    return {
+        "classification": "REGISTRY_IDENTITY_REPAIR_APPLIED" if not blockers else "REGISTRY_IDENTITY_REPAIR_BLOCKED",
+        "repaired": not blockers,
+        "block_reasons": list(dict.fromkeys(blockers)),
+        "trade_id": target_identity.get("trade_id"),
+        "lifecycle_id": target_identity.get("lifecycle_id"),
+        "target_identity": dict(target_identity),
+        "registry_current_state": None if record is None else record.current_state.value,
+        "broker_backed_entry": None if record is None else record.broker_backed_entry,
+        "broker_mutation_allowed": False,
+        "broker_mutation_performed": False,
+        "live_money_eligible": False,
+        "paper_proof_invoked": False,
+        "persisted_events": [dict(item) for item in persisted_events],
+    }
+
+
 def _exact_lifecycle_row(phase1_reconciliation_gate: Mapping[str, Any], lifecycle_id: str) -> dict[str, Any]:
     for row in list(phase1_reconciliation_gate.get("track_b_lifecycle_positions") or []):
         if isinstance(row, Mapping) and str(row.get("lifecycle_id") or "").strip() == lifecycle_id:
@@ -473,6 +689,172 @@ def _exact_registry_reconciliation_row(
     return {}
 
 
+def _entry_fill_identity_from_lifecycle_evidence(
+    *,
+    lifecycle_report: Mapping[str, Any],
+    lifecycle_row: Mapping[str, Any],
+) -> dict[str, str]:
+    entry_fill = lifecycle_report.get("entry_fill")
+    entry_fill = entry_fill if isinstance(entry_fill, Mapping) else {}
+    entry_submit_attempt = lifecycle_report.get("entry_submit_attempt")
+    entry_submit_attempt = entry_submit_attempt if isinstance(entry_submit_attempt, Mapping) else {}
+    lifecycle_units = list(lifecycle_row.get("lifecycle_units") or lifecycle_report.get("lifecycle_units") or [])
+    lifecycle_unit = lifecycle_units[0] if lifecycle_units and isinstance(lifecycle_units[0], Mapping) else {}
+    return {
+        "order_id": _first_text(
+            entry_fill.get("order_id"),
+            entry_fill.get("broker_order_id"),
+            entry_fill.get("entry_order_id"),
+            lifecycle_row.get("entry_order_id"),
+            _first_item(lifecycle_row.get("entry_order_ids")),
+            lifecycle_unit.get("entry_order_id"),
+        ),
+        "client_id": _first_text(
+            entry_fill.get("client_id"),
+            entry_fill.get("entry_client_id"),
+            entry_submit_attempt.get("client_id"),
+            lifecycle_row.get("entry_client_id"),
+            lifecycle_unit.get("entry_client_id"),
+        ),
+        "perm_id": _first_text(
+            entry_fill.get("perm_id"),
+            entry_fill.get("entry_perm_id"),
+            lifecycle_row.get("entry_perm_id"),
+            _first_item(lifecycle_row.get("entry_perm_ids")),
+            lifecycle_unit.get("entry_perm_id"),
+        ),
+        "exec_id": _first_text(
+            entry_fill.get("exec_id"),
+            entry_fill.get("execution_id"),
+            entry_fill.get("entry_exec_id"),
+            lifecycle_row.get("entry_exec_id"),
+            _first_item(lifecycle_row.get("entry_exec_ids")),
+            lifecycle_unit.get("entry_exec_id"),
+        ),
+        "price": _first_text(
+            entry_fill.get("price"),
+            entry_fill.get("fill_price"),
+            entry_fill.get("entry_price"),
+            lifecycle_row.get("avg_entry_price"),
+            lifecycle_unit.get("entry_price"),
+        ),
+    }
+
+
+def _repair_target_identity(
+    *,
+    trade_id: str,
+    lifecycle_id: str,
+    lifecycle_report: Mapping[str, Any],
+    lifecycle_row: Mapping[str, Any],
+    broker_position: Mapping[str, Any],
+    entry_fill: Mapping[str, Any],
+    managed_exit_policy_id: str,
+) -> dict[str, Any]:
+    return {
+        "trade_id": trade_id,
+        "lifecycle_id": lifecycle_id,
+        "account_id": _first_text(
+            broker_position.get("account_id"),
+            broker_position.get("account"),
+            lifecycle_row.get("account_id"),
+            lifecycle_report.get("account_id"),
+        ),
+        "lane_id": _first_text(lifecycle_row.get("lane_id"), lifecycle_report.get("lane_id")),
+        "strategy_id": _first_text(
+            lifecycle_row.get("strategy_id"),
+            lifecycle_row.get("thesis_strategy_id"),
+            lifecycle_report.get("strategy_id"),
+            lifecycle_report.get("thesis_strategy_id"),
+        ),
+        "symbol": _first_text(
+            broker_position.get("track_b_root"),
+            broker_position.get("symbol"),
+            lifecycle_row.get("instrument_family"),
+            lifecycle_row.get("symbol"),
+            lifecycle_report.get("instrument_family"),
+            lifecycle_report.get("symbol"),
+        ).upper(),
+        "con_id": _first_text(broker_position.get("con_id"), broker_position.get("conId"), lifecycle_row.get("con_id")),
+        "local_symbol": _first_text(
+            broker_position.get("local_symbol"),
+            broker_position.get("localSymbol"),
+            lifecycle_row.get("local_symbol"),
+            lifecycle_report.get("local_symbol"),
+        ),
+        "expiry": _first_text(
+            broker_position.get("expiry"),
+            lifecycle_row.get("expiry"),
+            lifecycle_report.get("expiry"),
+            lifecycle_report.get("contract_expiry"),
+        ),
+        "side": _first_text(lifecycle_row.get("side"), lifecycle_report.get("side")).upper(),
+        "quantity": _first_text(lifecycle_row.get("quantity"), lifecycle_report.get("quantity"), entry_fill.get("quantity")),
+        "managed_exit_policy_id": managed_exit_policy_id,
+        "entry_order_id": _first_text(entry_fill.get("order_id")),
+        "entry_client_id": _first_text(entry_fill.get("client_id")),
+        "entry_perm_id": _first_text(entry_fill.get("perm_id")),
+        "entry_exec_id": _first_text(entry_fill.get("exec_id")),
+    }
+
+
+def _repair_identity_mismatches(target_identity: Mapping[str, Any]) -> list[str]:
+    blockers: list[str] = []
+    required_fields = (
+        "trade_id",
+        "lifecycle_id",
+        "account_id",
+        "lane_id",
+        "strategy_id",
+        "symbol",
+        "con_id",
+        "local_symbol",
+        "expiry",
+        "side",
+        "quantity",
+    )
+    for field in required_fields:
+        if not _valid_identity_text(target_identity.get(field)):
+            blockers.append(f"{field}_missing")
+    if str(target_identity.get("side") or "").upper() not in {"LONG", "SHORT"}:
+        blockers.append("side_invalid")
+    if _decimal_or_none(target_identity.get("quantity")) is None:
+        blockers.append("quantity_invalid")
+    return blockers
+
+
+def _conflicting_registry_owner_blockers(
+    *,
+    repo_root: Path,
+    jsonl_path: Path,
+    trade_id: str,
+    target_identity: Mapping[str, Any],
+) -> list[str]:
+    target_account = _valid_identity_text(target_identity.get("account_id"))
+    target_con_id = _valid_identity_text(target_identity.get("con_id"))
+    target_local = _valid_identity_text(target_identity.get("local_symbol")).upper()
+    target_qty = _decimal_or_none(target_identity.get("quantity"))
+    target_side = _valid_identity_text(target_identity.get("side")).upper()
+    for record in load_live_trade_registry_records(repo_root=repo_root, jsonl_path=jsonl_path):
+        if record.trade_id == trade_id:
+            continue
+        if record.current_state not in {TradeCurrentState.OPEN_MANAGED, TradeCurrentState.EXIT_DUE}:
+            continue
+        if record.broker_backed_entry is not True or record.ownership_identity is None:
+            continue
+        owner = record.ownership_identity
+        owner_account = _valid_identity_text(owner.account_id)
+        same_account = not target_account or not owner_account or target_account == owner_account
+        same_contract = (target_con_id and str(owner.con_id) == target_con_id) or (
+            target_local and owner.local_symbol.upper() == target_local
+        )
+        same_qty = target_qty is not None and owner.qty == target_qty
+        same_side = not target_side or owner.side.upper() == target_side
+        if same_account and same_contract and same_qty and same_side:
+            return ["conflicting_current_registry_owner"]
+    return []
+
+
 def _matching_broker_position(
     lifecycle_row: Mapping[str, Any],
     phase1_reconciliation_gate: Mapping[str, Any],
@@ -493,6 +875,35 @@ def _matching_broker_position(
         if requested_symbol and broker_symbol and requested_symbol == broker_symbol and not requested_local and not requested_con_id:
             return dict(row)
     return {}
+
+
+def _truthy(value: object) -> bool:
+    if isinstance(value, bool):
+        return value
+    return str(value or "").strip().lower() in {"1", "true", "yes", "y"}
+
+
+def _nonzero_count(value: object) -> bool:
+    if value in (None, ""):
+        return False
+    try:
+        return Decimal(str(value)) != 0
+    except (InvalidOperation, ValueError):
+        return True
+
+
+def _first_item(value: object) -> object:
+    if isinstance(value, (list, tuple)) and value:
+        return value[0]
+    return None
+
+
+def _first_text(*values: object) -> str:
+    for value in values:
+        text = _valid_identity_text(value)
+        if text:
+            return text
+    return ""
 
 
 def _valid_identity_text(value: object) -> str:
