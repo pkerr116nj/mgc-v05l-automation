@@ -696,7 +696,7 @@ def build_readiness_inputs(
 ) -> dict[str, Any]:
     now = _ensure_utc(now or datetime.now(timezone.utc))
     broker_truth = _broker_truth_input(_mapping(artifacts.get("broker_truth_status")), now=now)
-    broker_truth_lease_artifact = _effective_broker_truth_lease_artifact(artifacts, now=now)
+    broker_truth_lease_artifact = _effective_broker_truth_lease_artifact(artifacts, repo_root=repo_root, now=now)
     broker_truth_lease = _broker_truth_lease_input(broker_truth_lease_artifact, now=now)
     broker_session_authority = _broker_session_authority_input(
         _mapping(artifacts.get("broker_session_authority"))
@@ -898,7 +898,9 @@ def _control_plane_authorization_input(payload: Mapping[str, Any], *, now: datet
     }
 
 
-def _effective_broker_truth_lease_artifact(artifacts: Mapping[str, Any], *, now: datetime) -> dict[str, Any]:
+def _effective_broker_truth_lease_artifact(
+    artifacts: Mapping[str, Any], *, repo_root: Path, now: datetime
+) -> dict[str, Any]:
     """Return a broker lease derived from current source truth when possible.
 
     The broker-truth lease is a derived safety artifact. Canonical readiness
@@ -915,7 +917,11 @@ def _effective_broker_truth_lease_artifact(artifacts: Mapping[str, Any], *, now:
         return existing_lease
 
     latest_attempt = _mapping(broker_status.get("latest_attempt_status"))
-    last_success = _mapping(broker_status.get("last_successful_broker_truth")) or broker_status
+    last_success = _broker_truth_with_connection_report(
+        repo_root=repo_root,
+        broker_status=broker_status,
+        broker_truth=_mapping(broker_status.get("last_successful_broker_truth")) or broker_status,
+    )
     lease = classify_broker_truth_lease(
         {
             "account_id": "DUM882026",
@@ -965,6 +971,41 @@ def _effective_broker_truth_lease_artifact(artifacts: Mapping[str, Any], *, now:
     lease["previous_lease_state"] = existing_lease.get("lease_state") or existing_lease.get("state")
     lease["previous_lease_generated_at"] = existing_lease.get("generated_at")
     return lease
+
+
+def _broker_truth_with_connection_report(
+    *,
+    repo_root: Path,
+    broker_status: Mapping[str, Any],
+    broker_truth: Mapping[str, Any],
+) -> dict[str, Any]:
+    result = dict(broker_truth)
+    connection_report_path = result.get("connection_report_path") or broker_status.get("connection_report_path")
+    connection_report = _read_json(_repo_scoped_optional_path(repo_root, connection_report_path))
+    connection_check = _mapping(connection_report.get("connection_check"))
+    if not connection_check:
+        return result
+    result.setdefault("connection_check", connection_check)
+    result.setdefault("server_version", connection_check.get("server_version"))
+    result.setdefault(
+        "submit_session_readiness",
+        {
+            "source": "ibkr_read_only_connection_report",
+            "client_id": connection_check.get("client_id"),
+            "connected": connection_check.get("connected") is True,
+            "server_version": connection_check.get("server_version"),
+            "connection_started_at": connection_check.get("connection_timestamp") or connection_report.get("started_at"),
+        },
+    )
+    return result
+
+
+def _repo_scoped_optional_path(repo_root: Path, value: Any) -> Path:
+    text = str(value or "").strip()
+    if not text:
+        return repo_root / "__missing__"
+    path = Path(text).expanduser()
+    return path if path.is_absolute() else repo_root / path
 
 
 def _write_refreshed_broker_truth_lease_if_present(*, repo_root: Path, payload: Mapping[str, Any]) -> None:

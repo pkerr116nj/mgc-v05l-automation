@@ -151,6 +151,10 @@ def order_state_path(repo_root: Path) -> Path:
     return repo_root / "outputs" / "track_b_execution_core" / "paper_trade_ledger" / "latest_track_b_paper_trade_summary.json"
 
 
+def connection_report_path(repo_root: Path) -> Path:
+    return repo_root / "outputs" / "reports" / "ibkr_read_only_verification" / "ibkr_read_only_connection_report.json"
+
+
 def test_active_lease_writes_artifacts_and_exits_0(tmp_path: Path, capsys) -> None:
     seed_clean_artifacts(tmp_path)
 
@@ -162,6 +166,37 @@ def test_active_lease_writes_artifacts_and_exits_0(tmp_path: Path, capsys) -> No
     assert exit_code == 0
     assert summary["lease_state"] == "ACTIVE"
     assert lease["lease_state"] == "ACTIVE"
+
+
+def test_connection_report_supplies_flat_no_order_submit_session_liveness(tmp_path: Path) -> None:
+    seed_clean_artifacts(tmp_path)
+    broker_status = json.loads(broker_status_path(tmp_path).read_text(encoding="utf-8"))
+    broker_status["connection_report_path"] = str(connection_report_path(tmp_path))
+    broker_status["last_successful_broker_truth"]["connection_report_path"] = str(connection_report_path(tmp_path))
+    write_json(broker_status_path(tmp_path), broker_status)
+    write_json(
+        connection_report_path(tmp_path),
+        {
+            "generated_at": TRUTH_TIME,
+            "connection_check": {
+                "client_id": 9077,
+                "connected": True,
+                "connection_timestamp": TRUTH_TIME,
+                "server_version": 157,
+            },
+        },
+    )
+
+    exit_code = cli.main([*base_args(tmp_path), "--json"])
+
+    lease = json.loads(lease_path(tmp_path).read_text(encoding="utf-8"))
+    context = lease["connection_health"]["flat_no_order_submit_capable_context"]
+    assert exit_code == 0
+    assert lease["connection_mode"] == "SUBMIT_CAPABLE_NO_RECENT_ORDER_EVENTS"
+    assert lease["allowed_uses"]["new_entry"] is True
+    assert lease["allowed_uses"]["managed_risk_reducing_close"] is False
+    assert context["submit_session_liveness_proven"] is True
+    assert context["submit_session_liveness_evidence"]["server_version"] == 157
 
 
 def test_historical_review_count_does_not_block_active_lease(tmp_path: Path, capsys) -> None:

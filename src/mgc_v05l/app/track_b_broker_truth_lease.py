@@ -74,7 +74,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     inputs = gather_lease_inputs(
         repo_root=repo_root,
         account_id=str(args.account_id),
-        allowed_instruments=list(args.allowed_instrument or ["MGC", "MNQ", "GC"]),
+        allowed_instruments=list(args.allowed_instrument or ["MGC", "MNQ", "MES", "GC"]),
         current_time=args.current_time,
         policy={
             "max_entry_age_seconds": float(args.max_entry_age_seconds),
@@ -234,6 +234,9 @@ def _broker_truth_with_snapshots(
     open_orders_snapshot = _read_json(
         _resolve_snapshot_path(repo_root, result.get("open_orders_snapshot_path") or broker_status.get("open_orders_snapshot_path"))
     )
+    connection_report = _read_json(
+        _resolve_snapshot_path(repo_root, result.get("connection_report_path") or broker_status.get("connection_report_path"))
+    )
     if positions_snapshot:
         result.setdefault("positions", positions_snapshot.get("positions") or [])
         result.setdefault("positions_complete", positions_snapshot.get("positions_complete"))
@@ -244,6 +247,13 @@ def _broker_truth_with_snapshots(
         result.setdefault("open_orders_complete", open_orders_snapshot.get("open_orders_complete"))
         result.setdefault("open_orders_generated_at", open_orders_snapshot.get("generated_at"))
         result.setdefault("client_id", open_orders_snapshot.get("client_id"))
+    if connection_report:
+        connection_check = _mapping(connection_report.get("connection_check"))
+        result.setdefault("connection_check", connection_check)
+        result.setdefault("server_version", connection_check.get("server_version"))
+        submit_session_readiness = _submit_session_readiness_from_connection_report(connection_report)
+        if submit_session_readiness:
+            result.setdefault("submit_session_readiness", submit_session_readiness)
     return result
 
 
@@ -256,6 +266,19 @@ def _resolve_snapshot_path(repo_root: Path, value: Any) -> Path:
 
 def _mapping(value: Any) -> dict[str, Any]:
     return dict(value) if isinstance(value, Mapping) else {}
+
+
+def _submit_session_readiness_from_connection_report(payload: Mapping[str, Any]) -> dict[str, Any]:
+    connection_check = _mapping(payload.get("connection_check"))
+    if not connection_check:
+        return {}
+    return {
+        "source": "ibkr_read_only_connection_report",
+        "client_id": connection_check.get("client_id"),
+        "connected": connection_check.get("connected") is True,
+        "server_version": connection_check.get("server_version"),
+        "connection_started_at": connection_check.get("connection_timestamp") or payload.get("started_at"),
+    }
 
 
 def _lifecycle_summary(payload: Mapping[str, Any]) -> dict[str, Any]:

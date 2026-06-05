@@ -26,6 +26,7 @@ SESSION_AUTHORITY_CLASSIFICATIONS = {
     "BROKER_SESSION_AUTHORITY_CONNECTION_DOWN",
     "BROKER_SESSION_AUTHORITY_POSITION_TRUTH_ONLY",
     "BROKER_SESSION_AUTHORITY_ORDER_STATUS_UNRELIABLE",
+    "BROKER_SESSION_AUTHORITY_SUBMIT_CAPABLE_NO_RECENT_ORDER_EVENTS",
     "BROKER_SESSION_AUTHORITY_SUBMIT_CAPABLE",
     "BROKER_SESSION_AUTHORITY_FILL_CALLBACK_CAPABLE",
     "BROKER_SESSION_AUTHORITY_DEGRADED_RECOVERED",
@@ -185,7 +186,11 @@ def should_use_published_authority_for_diagnostic(authority: Mapping[str, Any]) 
 
 def _published_allowed_uses(*, lease: Mapping[str, Any], connection_mode: str, lease_state: str) -> dict[str, bool]:
     lease_allowed = _mapping(lease.get("allowed_uses"))
-    submit_capable = connection_mode in {"SUBMIT_CAPABLE", "FILL_CALLBACK_CAPABLE"} and lease_state in {
+    submit_capable = connection_mode in {
+        "SUBMIT_CAPABLE_NO_RECENT_ORDER_EVENTS",
+        "SUBMIT_CAPABLE",
+        "FILL_CALLBACK_CAPABLE",
+    } and lease_state in {
         "ACTIVE",
         "ACTIVE_DEGRADED_REFRESH_FAILING",
     }
@@ -207,7 +212,8 @@ def _connection_allowed_uses(*, connection_health: Mapping[str, Any], connection
     return {
         "position_truth": bool(connection_health.get("position_truth_available")),
         "open_order_truth": bool(connection_health.get("order_status_reliable")),
-        "new_entry_connection": connection_mode in {"SUBMIT_CAPABLE", "FILL_CALLBACK_CAPABLE"},
+        "new_entry_connection": connection_mode
+        in {"SUBMIT_CAPABLE_NO_RECENT_ORDER_EVENTS", "SUBMIT_CAPABLE", "FILL_CALLBACK_CAPABLE"},
         "managed_risk_reducing_close_connection": connection_mode in {"SUBMIT_CAPABLE", "FILL_CALLBACK_CAPABLE"},
         "broker_observed_adoption_diagnosis_connection": bool(
             connection_health.get("broker_observed_adoption_diagnosis_allowed")
@@ -229,6 +235,7 @@ def _classification_for(*, connection_mode: str, lease_state: str) -> str:
         "IBKR_CONNECTION_DOWN": "BROKER_SESSION_AUTHORITY_CONNECTION_DOWN",
         "POSITION_TRUTH_ONLY": "BROKER_SESSION_AUTHORITY_POSITION_TRUTH_ONLY",
         "ORDER_STATUS_UNRELIABLE": "BROKER_SESSION_AUTHORITY_ORDER_STATUS_UNRELIABLE",
+        "SUBMIT_CAPABLE_NO_RECENT_ORDER_EVENTS": "BROKER_SESSION_AUTHORITY_SUBMIT_CAPABLE_NO_RECENT_ORDER_EVENTS",
         "SUBMIT_CAPABLE": "BROKER_SESSION_AUTHORITY_SUBMIT_CAPABLE",
         "FILL_CALLBACK_CAPABLE": "BROKER_SESSION_AUTHORITY_FILL_CALLBACK_CAPABLE",
         "DEGRADED_RECOVERED": "BROKER_SESSION_AUTHORITY_DEGRADED_RECOVERED",

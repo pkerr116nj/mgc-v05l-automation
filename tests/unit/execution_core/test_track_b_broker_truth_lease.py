@@ -337,6 +337,188 @@ def test_same_session_fresh_order_status_classifies_submit_capable() -> None:
     assert result["allowed_uses"]["managed_risk_reducing_close"] is True
 
 
+def test_flat_no_order_submit_session_liveness_allows_new_entry_without_recent_order_status() -> None:
+    inputs = base_inputs()
+    inputs["order_state"] = {
+        "generated_at": RECON_TIME,
+        "classification": "NO_OPEN_ORDERS",
+        "unknown_open_order_count": 0,
+        "unresolved_intent_count": 0,
+        "open_order_end_observed": True,
+        "live_money_eligible": False,
+    }
+    inputs["reconciliation"] = {
+        **dict(inputs["reconciliation"]),
+        "current_scope_lifecycle_open_position_count": 0,
+        "current_scope_lifecycle_open_order_count": 0,
+        "managed_position_count": 0,
+        "managed_open_position_count": 0,
+        "owner_resolution": {"classification": "NO_OPEN_EXPOSURE", "owned_exposure_count": 0},
+    }
+    inputs["submit_session_readiness"] = {
+        "submit_session_ready": True,
+        "next_valid_id_received": True,
+        "next_valid_id": 1001,
+        "managed_accounts_observed": True,
+        "managed_accounts": ["DUM882026"],
+        "source": "runtime_submit_session_readiness",
+    }
+
+    result = classify_broker_truth_lease(inputs)
+
+    context = result["connection_health"]["flat_no_order_submit_capable_context"]
+    assert result["connection_mode"] == "SUBMIT_CAPABLE_NO_RECENT_ORDER_EVENTS"
+    assert result["allowed_uses"]["new_entry"] is True
+    assert result["allowed_uses"]["managed_risk_reducing_close"] is False
+    assert result["submit_entry_allowed"] is True
+    assert result["submit_exit_allowed"] is False
+    assert context["ready"] is True
+    assert context["open_order_end_observed"] is True
+    assert context["submit_session_liveness_proven"] is True
+    assert result["callback_ownership_attribution"]["classification"] == "CALLBACK_ATTRIBUTION_GAP"
+
+
+def test_flat_no_order_without_submit_session_liveness_blocks_with_specific_reason() -> None:
+    inputs = base_inputs()
+    inputs["order_state"] = {
+        "generated_at": RECON_TIME,
+        "classification": "NO_OPEN_ORDERS",
+        "unknown_open_order_count": 0,
+        "unresolved_intent_count": 0,
+        "open_order_end_observed": True,
+        "live_money_eligible": False,
+    }
+    inputs["reconciliation"] = {
+        **dict(inputs["reconciliation"]),
+        "current_scope_lifecycle_open_position_count": 0,
+        "current_scope_lifecycle_open_order_count": 0,
+        "managed_position_count": 0,
+        "managed_open_position_count": 0,
+        "owner_resolution": {"classification": "NO_OPEN_EXPOSURE", "owned_exposure_count": 0},
+    }
+
+    result = classify_broker_truth_lease(inputs)
+
+    assert result["connection_mode"] == "ORDER_STATUS_UNRELIABLE"
+    assert result["allowed_uses"]["new_entry"] is False
+    assert result["connection_health"]["flat_no_order_submit_capable_context"]["flat_no_order_candidate"] is True
+    assert _authority_blocker_codes(result) >= {"submit_session_not_proven", "connection_not_submit_capable"}
+
+
+def test_flat_no_order_state_does_not_allow_open_order_without_order_status() -> None:
+    inputs = base_inputs()
+    inputs["last_successful_broker_truth"] = {
+        **dict(inputs["last_successful_broker_truth"]),
+        "open_order_count": 1,
+        "open_orders": [{"symbol": "MNQ", "local_symbol": "MNQM6", "quantity": "1", "known": True}],
+    }
+    inputs["latest_attempt_status"] = {
+        **dict(inputs["latest_attempt_status"]),
+        "open_order_count": 1,
+        "open_orders": [{"symbol": "MNQ", "local_symbol": "MNQM6", "quantity": "1", "known": True}],
+    }
+    inputs["order_state"] = {
+        "generated_at": RECON_TIME,
+        "classification": "NO_OPEN_ORDERS",
+        "unknown_open_order_count": 0,
+        "unresolved_intent_count": 0,
+        "open_order_end_observed": True,
+    }
+    inputs["submit_session_readiness"] = {"submit_session_ready": True, "next_valid_id": 1001}
+
+    result = classify_broker_truth_lease(inputs)
+
+    assert result["connection_mode"] == "ORDER_STATUS_UNRELIABLE"
+    assert result["allowed_uses"]["new_entry"] is False
+    assert result["connection_health"]["flat_no_order_submit_capable_context"]["broker_no_open_orders"] is False
+
+
+def test_flat_no_order_state_requires_fresh_open_order_truth() -> None:
+    inputs = base_inputs()
+    inputs["current_time"] = "2026-05-18T15:05:00+00:00"
+    inputs["policy"] = {
+        **dict(inputs["policy"]),
+        "max_open_order_lease_age_seconds": 60,
+    }
+    inputs["order_state"] = {
+        "generated_at": RECON_TIME,
+        "classification": "NO_OPEN_ORDERS",
+        "unknown_open_order_count": 0,
+        "unresolved_intent_count": 0,
+        "open_order_end_observed": True,
+    }
+    inputs["submit_session_readiness"] = {"submit_session_ready": True, "next_valid_id": 1001}
+
+    result = classify_broker_truth_lease(inputs)
+
+    assert result["connection_mode"] == "ORDER_STATUS_UNRELIABLE"
+    assert result["allowed_uses"]["new_entry"] is False
+    assert result["connection_health"]["flat_no_order_submit_capable_context"]["open_order_snapshot_fresh"] is False
+
+
+def test_flat_no_order_state_blocks_unknown_open_orders() -> None:
+    inputs = base_inputs()
+    inputs["order_state"] = {
+        "generated_at": RECON_TIME,
+        "classification": "NO_OPEN_ORDERS",
+        "unknown_open_order_count": 1,
+        "unresolved_intent_count": 0,
+        "open_order_end_observed": True,
+    }
+    inputs["submit_session_readiness"] = {"submit_session_ready": True, "next_valid_id": 1001}
+
+    result = classify_broker_truth_lease(inputs)
+
+    assert result["lease_state"] == "INVALIDATED_UNKNOWN_OPEN_ORDERS"
+    assert result["allowed_uses"]["new_entry"] is False
+
+
+def test_flat_no_order_state_blocks_exposure_even_with_submit_liveness() -> None:
+    inputs = base_inputs()
+    inputs["last_successful_broker_truth"] = {
+        **dict(inputs["last_successful_broker_truth"]),
+        "position_count": 1,
+        "positions": [{"symbol": "MNQ", "local_symbol": "MNQM6", "quantity": "1.0"}],
+    }
+    inputs["latest_attempt_status"] = {
+        **dict(inputs["latest_attempt_status"]),
+        "position_count": 1,
+        "positions": [{"symbol": "MNQ", "local_symbol": "MNQM6", "quantity": "1.0"}],
+    }
+    inputs["order_state"] = {
+        "generated_at": RECON_TIME,
+        "classification": "NO_OPEN_ORDERS",
+        "unknown_open_order_count": 0,
+        "unresolved_intent_count": 0,
+        "open_order_end_observed": True,
+    }
+    inputs["submit_session_readiness"] = {"submit_session_ready": True, "next_valid_id": 1001}
+
+    result = classify_broker_truth_lease(inputs)
+
+    assert result["allowed_uses"]["new_entry"] is False
+    assert result["connection_health"]["flat_no_order_submit_capable_context"]["broker_flat"] is False
+
+
+def test_flat_no_order_state_blocks_paper_proof_invocation() -> None:
+    inputs = base_inputs()
+    inputs["order_state"] = {
+        "generated_at": RECON_TIME,
+        "classification": "NO_OPEN_ORDERS",
+        "unknown_open_order_count": 0,
+        "unresolved_intent_count": 0,
+        "open_order_end_observed": True,
+    }
+    inputs["submit_session_readiness"] = {"submit_session_ready": True, "next_valid_id": 1001}
+    inputs["paper_proof_invoked"] = True
+
+    result = classify_broker_truth_lease(inputs)
+
+    assert result["connection_mode"] == "ORDER_STATUS_UNRELIABLE"
+    assert result["allowed_uses"]["new_entry"] is False
+    assert result["connection_health"]["flat_no_order_submit_capable_context"]["no_live_money_or_paper_proof"] is False
+
+
 def test_missing_fill_callback_routes_to_broker_observed_adoption_path() -> None:
     inputs = base_inputs()
     inputs["last_successful_broker_truth"] = {

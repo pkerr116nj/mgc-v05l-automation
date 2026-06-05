@@ -193,6 +193,71 @@ def test_aligned_callback_ownership_keeps_stronger_submit_capable_classification
     assert authority["allowed_uses"]["managed_risk_reducing_close"] is True
 
 
+def test_flat_no_order_submit_capable_without_recent_order_events_publishes_new_entry_only() -> None:
+    inputs = _base_inputs()
+    inputs["order_state"] = {
+        "generated_at": TRUTH_TIME,
+        "classification": "NO_OPEN_ORDERS",
+        "unknown_open_order_count": 0,
+        "unresolved_intent_count": 0,
+        "open_order_end_observed": True,
+        "live_money_eligible": False,
+    }
+    inputs["reconciliation"] = {
+        **dict(inputs["reconciliation"]),
+        "current_scope_lifecycle_open_position_count": 0,
+        "current_scope_lifecycle_open_order_count": 0,
+        "managed_position_count": 0,
+        "managed_open_position_count": 0,
+        "owner_resolution": {"classification": "NO_OPEN_EXPOSURE", "owned_exposure_count": 0},
+    }
+    inputs["submit_session_readiness"] = {
+        "submit_session_ready": True,
+        "next_valid_id_received": True,
+        "next_valid_id": 1001,
+        "managed_accounts_observed": True,
+        "managed_accounts": ["DUM882026"],
+    }
+    lease = classify_broker_truth_lease(inputs)
+
+    authority = build_broker_session_authority(lease=lease, generated_at=NOW)
+
+    assert authority["connection_mode"] == "SUBMIT_CAPABLE_NO_RECENT_ORDER_EVENTS"
+    assert authority["classification"] == "BROKER_SESSION_AUTHORITY_SUBMIT_CAPABLE_NO_RECENT_ORDER_EVENTS"
+    assert authority["allowed_uses"]["new_entry"] is True
+    assert authority["allowed_uses"]["managed_risk_reducing_close"] is False
+    assert authority["connection_allowed_uses"]["new_entry_connection"] is True
+    assert authority["connection_allowed_uses"]["managed_risk_reducing_close_connection"] is False
+    assert authority["callback_health"]["fill_callback_capable"] is False
+
+
+def test_flat_no_order_missing_submit_session_liveness_publishes_specific_blocker() -> None:
+    inputs = _base_inputs()
+    inputs["order_state"] = {
+        "generated_at": TRUTH_TIME,
+        "classification": "NO_OPEN_ORDERS",
+        "unknown_open_order_count": 0,
+        "unresolved_intent_count": 0,
+        "open_order_end_observed": True,
+        "live_money_eligible": False,
+    }
+    inputs["reconciliation"] = {
+        **dict(inputs["reconciliation"]),
+        "current_scope_lifecycle_open_position_count": 0,
+        "current_scope_lifecycle_open_order_count": 0,
+        "managed_position_count": 0,
+        "managed_open_position_count": 0,
+        "owner_resolution": {"classification": "NO_OPEN_EXPOSURE", "owned_exposure_count": 0},
+    }
+    lease = classify_broker_truth_lease(inputs)
+
+    authority = build_broker_session_authority(lease=lease, generated_at=NOW)
+
+    assert authority["classification"] == "BROKER_SESSION_AUTHORITY_ORDER_STATUS_UNRELIABLE"
+    assert authority["allowed_uses"]["new_entry"] is False
+    assert _blocker_codes(authority) >= {"submit_session_not_proven", "order_status_unreliable_blocks_submit_and_close"}
+
+
 def test_position_truth_only_allows_adoption_diagnosis_only() -> None:
     inputs = _base_inputs()
     inputs["connection_mode"] = "POSITION_TRUTH_ONLY"

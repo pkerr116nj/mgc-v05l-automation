@@ -30,6 +30,7 @@ CONNECTION_MODES = {
     "IBKR_CONNECTION_DOWN",
     "POSITION_TRUTH_ONLY",
     "ORDER_STATUS_UNRELIABLE",
+    "SUBMIT_CAPABLE_NO_RECENT_ORDER_EVENTS",
     "SUBMIT_CAPABLE",
     "FILL_CALLBACK_CAPABLE",
     "DEGRADED_RECOVERED",
@@ -91,7 +92,10 @@ def classify_broker_truth_lease(inputs: Mapping[str, Any]) -> dict[str, Any]:
         broker_truth=broker_truth,
         latest_attempt=latest_attempt,
         fill_evidence=fill_evidence,
+        reconciliation=reconciliation,
+        lifecycle=lifecycle,
         order_state=order_state,
+        allowed_instruments=allowed_instruments,
         broker_session_owner=broker_session_owner,
         current_time=current_time,
         max_open_order_lease_age_seconds=max_open_order_lease_age_seconds,
@@ -300,12 +304,14 @@ def classify_broker_truth_lease(inputs: Mapping[str, Any]) -> dict[str, Any]:
 
     authority_use_blockers = _authority_use_blockers(
         connection_mode=connection_mode,
+        connection_blockers=list(connection_health.get("blockers") or []),
         broker_position_lease=broker_position_lease,
         broker_open_order_lease=broker_open_order_lease,
         reconciliation_clean=_reconciliation_clean(reconciliation),
     )
     callback_ownership_attribution = _mapping(connection_health.get("callback_ownership_attribution"))
-    submit_connection_capable = _connection_allows_submit(connection_mode)
+    submit_connection_capable = _connection_allows_new_entry(connection_mode)
+    close_connection_capable = _connection_allows_close(connection_mode)
     submit_entry_allowed = bool(
         submit_entry_allowed
         and submit_connection_capable
@@ -315,7 +321,7 @@ def classify_broker_truth_lease(inputs: Mapping[str, Any]) -> dict[str, Any]:
     )
     submit_exit_allowed = bool(
         submit_exit_allowed
-        and submit_connection_capable
+        and close_connection_capable
         and _lease_allows(broker_position_lease, AUTHORITY_USE_RISK_REDUCING_CLOSE)
         and _lease_allows(broker_open_order_lease, AUTHORITY_USE_RISK_REDUCING_CLOSE)
     )
@@ -844,7 +850,10 @@ def _connection_health(
     broker_truth: Mapping[str, Any],
     latest_attempt: Mapping[str, Any],
     fill_evidence: Mapping[str, Any],
+    reconciliation: Mapping[str, Any],
+    lifecycle: Mapping[str, Any],
     order_state: Mapping[str, Any],
+    allowed_instruments: set[str],
     broker_session_owner: Mapping[str, Any],
     current_time: datetime,
     max_open_order_lease_age_seconds: float,
@@ -865,6 +874,18 @@ def _connection_health(
         or _mapping(inputs.get("connection_health")).get("connection_mode")
         or ""
     ).strip().upper()
+    flat_no_order_context = _flat_no_order_submit_capable_context(
+        inputs=inputs,
+        broker_truth=broker_truth,
+        latest_attempt=latest_attempt,
+        reconciliation=reconciliation,
+        lifecycle=lifecycle,
+        order_state=order_state,
+        allowed_instruments=allowed_instruments,
+        broker_session_owner=broker_session_owner,
+        current_time=current_time,
+        max_age_seconds=max_open_order_lease_age_seconds,
+    )
     if explicit:
         mode = explicit if explicit in CONNECTION_MODES else "IBKR_CONNECTION_DOWN"
     elif not broker_truth:
@@ -884,6 +905,8 @@ def _connection_health(
         or datetime.min.replace(tzinfo=timezone.utc),
     ):
         mode = "DEGRADED_RECOVERED"
+    elif flat_no_order_context.get("ready"):
+        mode = "SUBMIT_CAPABLE_NO_RECENT_ORDER_EVENTS"
     elif _open_order_status_unreliable(
         broker_truth=broker_truth,
         order_state=order_state,
@@ -912,10 +935,26 @@ def _connection_health(
             }
         )
     elif mode == "ORDER_STATUS_UNRELIABLE":
+        if flat_no_order_context.get("flat_no_order_candidate") and not flat_no_order_context.get(
+            "submit_session_liveness_proven"
+        ):
+            blockers.append(
+                {
+                    "code": "submit_session_not_proven",
+                    "detail": "Flat/no-order entry authority requires explicit non-order submit-session liveness evidence.",
+                }
+            )
         blockers.append(
             {
                 "code": "order_status_unreliable",
                 "detail": "Order status is unreliable; new entries and managed closes fail closed.",
+            }
+        )
+    elif mode == "SUBMIT_CAPABLE_NO_RECENT_ORDER_EVENTS":
+        blockers.append(
+            {
+                "code": "no_recent_order_status_events",
+                "detail": "Flat/no-order state is submit-capable for new entries only; close authority and fill callbacks are not proven.",
             }
         )
     elif mode == "DEGRADED_RECOVERED":
@@ -929,12 +968,30 @@ def _connection_health(
     return {
         "schema_version": "track_b_ibkr_connection_health_v1",
         "connection_mode": mode,
-        "submit_capable": _connection_allows_submit(mode),
+        "submit_capable": _connection_allows_new_entry(mode),
         "fill_callback_capable": mode == "FILL_CALLBACK_CAPABLE",
-        "position_truth_available": mode in {"POSITION_TRUTH_ONLY", "ORDER_STATUS_UNRELIABLE", "SUBMIT_CAPABLE", "FILL_CALLBACK_CAPABLE", "DEGRADED_RECOVERED"},
+        "position_truth_available": mode
+        in {
+            "POSITION_TRUTH_ONLY",
+            "ORDER_STATUS_UNRELIABLE",
+            "SUBMIT_CAPABLE_NO_RECENT_ORDER_EVENTS",
+            "SUBMIT_CAPABLE",
+            "FILL_CALLBACK_CAPABLE",
+            "DEGRADED_RECOVERED",
+        },
         "order_status_reliable": mode in {"SUBMIT_CAPABLE", "FILL_CALLBACK_CAPABLE"},
+        "open_order_snapshot_reliable": mode
+        in {"SUBMIT_CAPABLE_NO_RECENT_ORDER_EVENTS", "SUBMIT_CAPABLE", "FILL_CALLBACK_CAPABLE"},
         "broker_observed_adoption_diagnosis_allowed": mode
-        in {"POSITION_TRUTH_ONLY", "ORDER_STATUS_UNRELIABLE", "SUBMIT_CAPABLE", "FILL_CALLBACK_CAPABLE", "DEGRADED_RECOVERED"},
+        in {
+            "POSITION_TRUTH_ONLY",
+            "ORDER_STATUS_UNRELIABLE",
+            "SUBMIT_CAPABLE_NO_RECENT_ORDER_EVENTS",
+            "SUBMIT_CAPABLE",
+            "FILL_CALLBACK_CAPABLE",
+            "DEGRADED_RECOVERED",
+        },
+        "flat_no_order_submit_capable_context": flat_no_order_context,
         "callback_freshness": {
             "last_position_at": broker_session_owner.get("last_position_at"),
             "last_open_order_at": broker_session_owner.get("last_open_order_at"),
@@ -947,7 +1004,15 @@ def _connection_health(
     }
 
 
-def _connection_allows_submit(connection_mode: str) -> bool:
+def _connection_allows_new_entry(connection_mode: str) -> bool:
+    return str(connection_mode).strip().upper() in {
+        "SUBMIT_CAPABLE_NO_RECENT_ORDER_EVENTS",
+        "SUBMIT_CAPABLE",
+        "FILL_CALLBACK_CAPABLE",
+    }
+
+
+def _connection_allows_close(connection_mode: str) -> bool:
     return str(connection_mode).strip().upper() in {"SUBMIT_CAPABLE", "FILL_CALLBACK_CAPABLE"}
 
 
@@ -1133,6 +1198,255 @@ def _callback_attribution_classification(reasons: Sequence[Mapping[str, str]]) -
     return "CALLBACK_OWNERSHIP_ALIGNED"
 
 
+def _flat_no_order_submit_capable_context(
+    *,
+    inputs: Mapping[str, Any],
+    broker_truth: Mapping[str, Any],
+    latest_attempt: Mapping[str, Any],
+    reconciliation: Mapping[str, Any],
+    lifecycle: Mapping[str, Any],
+    order_state: Mapping[str, Any],
+    allowed_instruments: set[str],
+    broker_session_owner: Mapping[str, Any],
+    current_time: datetime,
+    max_age_seconds: float,
+) -> dict[str, Any]:
+    open_order_end_observed = _open_order_end_observed(
+        broker_truth=broker_truth,
+        latest_attempt=latest_attempt,
+        order_state=order_state,
+    )
+    submit_liveness = _submit_session_liveness_evidence(
+        inputs=inputs,
+        broker_truth=broker_truth,
+        latest_attempt=latest_attempt,
+        broker_session_owner=broker_session_owner,
+    )
+    open_order_snapshot_fresh = _callback_fresh(
+        broker_session_owner.get("last_open_order_at")
+        or broker_truth.get("open_orders_generated_at")
+        or broker_truth.get("generated_at"),
+        current_time=current_time,
+        max_age_seconds=max_age_seconds,
+    )
+    unknown_open_orders_zero = int(
+        reconciliation.get("unknown_broker_open_order_count") or order_state.get("unknown_open_order_count") or 0
+    ) == 0
+    live_money_or_proof = _bool(inputs.get("live_money_eligible")) or _bool(inputs.get("paper_proof_invoked"))
+    checks = {
+        "broker_flat": _broker_truth_flat(
+            broker_truth=broker_truth,
+            latest_attempt=latest_attempt,
+            allowed_instruments=allowed_instruments,
+        ),
+        "broker_no_open_orders": _broker_truth_no_open_orders(
+            broker_truth=broker_truth,
+            latest_attempt=latest_attempt,
+            allowed_instruments=allowed_instruments,
+        ),
+        "unknown_open_orders_zero": unknown_open_orders_zero,
+        "open_order_end_observed": open_order_end_observed,
+        "open_order_snapshot_fresh": open_order_snapshot_fresh,
+        "broker_lifecycle_reconciled": _reconciliation_clean(reconciliation),
+        "current_scope_lifecycle_flat": _current_scope_lifecycle_flat(
+            reconciliation=reconciliation,
+            lifecycle=lifecycle,
+            order_state=order_state,
+        ),
+        "managed_scope_flat": _managed_scope_flat(
+            inputs=inputs,
+            reconciliation=reconciliation,
+            lifecycle=lifecycle,
+            order_state=order_state,
+        ),
+        "owner_resolution_no_open_exposure": _owner_resolution_no_open_exposure(
+            inputs=inputs,
+            reconciliation=reconciliation,
+            lifecycle=lifecycle,
+        ),
+        "registry_current_scope_clean": _current_scope_review_required_count(reconciliation) == 0,
+        "order_state_clean": _flat_no_order_state_clean(order_state),
+        "submit_session_liveness_proven": submit_liveness["proven"],
+        "no_live_money_or_paper_proof": not live_money_or_proof,
+    }
+    no_session_keys = {
+        "broker_flat",
+        "broker_no_open_orders",
+        "unknown_open_orders_zero",
+        "open_order_end_observed",
+        "open_order_snapshot_fresh",
+        "broker_lifecycle_reconciled",
+        "current_scope_lifecycle_flat",
+        "managed_scope_flat",
+        "owner_resolution_no_open_exposure",
+        "registry_current_scope_clean",
+        "order_state_clean",
+        "no_live_money_or_paper_proof",
+    }
+    return {
+        "schema_version": "track_b_flat_no_order_submit_capable_context_v1",
+        "ready": all(checks.values()),
+        "flat_no_order_candidate": all(checks[key] for key in no_session_keys),
+        **checks,
+        "submit_session_liveness_evidence": submit_liveness,
+        "blockers": [
+            {"code": key, "detail": f"Flat/no-order submit-capable condition failed: {key}."}
+            for key, ok in checks.items()
+            if not ok
+        ],
+    }
+
+
+def _broker_truth_flat(
+    *, broker_truth: Mapping[str, Any], latest_attempt: Mapping[str, Any], allowed_instruments: set[str]
+) -> bool:
+    broker_count = int(broker_truth.get("track_b_broker_position_count") or 0)
+    latest_count = int(latest_attempt.get("track_b_broker_position_count") or 0)
+    broker_nonzero = any(abs(_quantity(row)) > 1e-9 for row in _scoped_positions(broker_truth, allowed_instruments))
+    latest_nonzero = any(abs(_quantity(row)) > 1e-9 for row in _scoped_positions(latest_attempt, allowed_instruments))
+    return broker_count == 0 and latest_count == 0 and not broker_nonzero and not latest_nonzero
+
+
+def _broker_truth_no_open_orders(
+    *, broker_truth: Mapping[str, Any], latest_attempt: Mapping[str, Any], allowed_instruments: set[str]
+) -> bool:
+    if not _bool(broker_truth.get("open_orders_complete")):
+        return False
+    broker_count = int(broker_truth.get("track_b_broker_open_order_count") or broker_truth.get("open_order_count") or 0)
+    latest_count = int(latest_attempt.get("track_b_broker_open_order_count") or latest_attempt.get("open_order_count") or 0)
+    return (
+        broker_count == 0
+        and latest_count == 0
+        and not _scoped_open_orders(broker_truth, allowed_instruments)
+        and not _scoped_open_orders(latest_attempt, allowed_instruments)
+    )
+
+
+def _open_order_end_observed(
+    *,
+    broker_truth: Mapping[str, Any],
+    latest_attempt: Mapping[str, Any],
+    order_state: Mapping[str, Any],
+) -> bool:
+    for source in (broker_truth, latest_attempt, order_state):
+        for key in ("open_order_end_observed", "open_orders_end_observed", "openOrderEnd_observed"):
+            if key in source:
+                return _bool(source.get(key))
+    return _bool(broker_truth.get("open_orders_complete")) or _bool(latest_attempt.get("open_orders_complete"))
+
+
+def _current_scope_lifecycle_flat(
+    *,
+    reconciliation: Mapping[str, Any],
+    lifecycle: Mapping[str, Any],
+    order_state: Mapping[str, Any],
+) -> bool:
+    position_count = int(
+        reconciliation.get("current_scope_lifecycle_open_position_count")
+        or reconciliation.get("lifecycle_open_position_count")
+        or lifecycle.get("current_scope_lifecycle_open_position_count")
+        or lifecycle.get("open_position_count")
+        or 0
+    )
+    order_count = int(
+        reconciliation.get("current_scope_lifecycle_open_order_count")
+        or reconciliation.get("lifecycle_open_order_count")
+        or lifecycle.get("current_scope_lifecycle_open_order_count")
+        or lifecycle.get("open_order_count")
+        or order_state.get("lifecycle_open_order_count")
+        or 0
+    )
+    positions = lifecycle.get("current_scope_lifecycle_positions") or lifecycle.get("open_positions") or []
+    return position_count == 0 and order_count == 0 and not list(positions or [])
+
+
+def _managed_scope_flat(
+    *,
+    inputs: Mapping[str, Any],
+    reconciliation: Mapping[str, Any],
+    lifecycle: Mapping[str, Any],
+    order_state: Mapping[str, Any],
+) -> bool:
+    managed_positions = _mapping(inputs.get("managed_positions") or inputs.get("managed_position_registry"))
+    managed_orders = _mapping(inputs.get("managed_orders") or inputs.get("managed_order_registry"))
+    counts = [
+        reconciliation.get("managed_position_count"),
+        reconciliation.get("managed_open_position_count"),
+        lifecycle.get("managed_position_count"),
+        lifecycle.get("managed_open_position_count"),
+        managed_positions.get("managed_position_count"),
+        managed_positions.get("open_position_count"),
+        managed_orders.get("managed_order_count"),
+        managed_orders.get("open_order_count"),
+        order_state.get("managed_order_count"),
+    ]
+    return all(int(value or 0) == 0 for value in counts)
+
+
+def _owner_resolution_no_open_exposure(
+    *,
+    inputs: Mapping[str, Any],
+    reconciliation: Mapping[str, Any],
+    lifecycle: Mapping[str, Any],
+) -> bool:
+    owner = _mapping(inputs.get("owner_resolution") or reconciliation.get("owner_resolution") or lifecycle.get("owner_resolution"))
+    classification = str(owner.get("classification") or owner.get("state") or "").strip().upper()
+    if not classification:
+        return True
+    return classification == "NO_OPEN_EXPOSURE" and int(owner.get("owned_exposure_count") or 0) == 0
+
+
+def _flat_no_order_state_clean(order_state: Mapping[str, Any]) -> bool:
+    status = str(order_state.get("classification") or "").upper()
+    explicit_no_order = status in {"", "NO_OPEN_ORDERS", "NO_OPEN_ORDER_TRUTH", "OPEN_ORDER_TRUTH_CLEAN_FLAT"}
+    if not explicit_no_order and any(
+        token in status for token in ("UNKNOWN", "STALE", "UNRELIABLE", "REVIEW_REQUIRED", "OPEN_ORDER")
+    ):
+        return False
+    return int(order_state.get("unknown_open_order_count") or 0) == 0 and int(order_state.get("unresolved_intent_count") or 0) == 0
+
+
+def _submit_session_liveness_evidence(
+    *,
+    inputs: Mapping[str, Any],
+    broker_truth: Mapping[str, Any],
+    latest_attempt: Mapping[str, Any],
+    broker_session_owner: Mapping[str, Any],
+) -> dict[str, Any]:
+    sources = [
+        _mapping(inputs.get("submit_session_readiness") or inputs.get("submit_session")),
+        _mapping(_mapping(inputs.get("connection")).get("submit_session_readiness")),
+        _mapping(_mapping(inputs.get("connection_health")).get("submit_session_readiness")),
+        _mapping(broker_truth.get("submit_session_readiness")),
+        _mapping(latest_attempt.get("submit_session_readiness")),
+        _mapping(broker_session_owner.get("submit_session_readiness")),
+    ]
+    evidence: dict[str, Any] = {}
+    for source in sources:
+        if source:
+            evidence.update(source)
+    next_valid_id = _first_present(evidence.get("next_valid_id"), evidence.get("nextValidId"))
+    managed_accounts = evidence.get("managed_accounts") or evidence.get("managedAccounts") or []
+    if isinstance(managed_accounts, str):
+        managed_accounts = [account.strip() for account in managed_accounts.split(",") if account.strip()]
+    checks = {
+        "explicit_submit_session_ready": _bool(evidence.get("submit_session_ready") or evidence.get("ready")),
+        "connected": _bool(evidence.get("connected") or evidence.get("api_connected")),
+        "next_valid_id_received": _bool(evidence.get("next_valid_id_received")) or next_valid_id not in {None, ""},
+        "managed_accounts_observed": _bool(evidence.get("managed_accounts_observed")) or bool(managed_accounts),
+        "server_version_observed": evidence.get("server_version") not in {None, ""},
+    }
+    return {
+        "proven": any(checks.values()),
+        "checks": checks,
+        "source": evidence.get("source") or evidence.get("source_artifact") or None,
+        "client_id": _int_or_none(_first_present(evidence.get("client_id"), broker_session_owner.get("client_id"))),
+        "next_valid_id": _int_or_none(next_valid_id),
+        "managed_accounts_observed": checks["managed_accounts_observed"],
+        "server_version": _int_or_none(evidence.get("server_version")),
+    }
+
+
 def _order_status_client_mismatch(callback_attribution: Mapping[str, Any]) -> bool:
     session_match = _mapping(callback_attribution.get("session_match"))
     return session_match.get("position_vs_order_status_same_session") is False
@@ -1303,18 +1617,26 @@ def _submit_ownership_available(
 def _authority_use_blockers(
     *,
     connection_mode: str,
+    connection_blockers: Sequence[Mapping[str, Any]],
     broker_position_lease: Mapping[str, Any],
     broker_open_order_lease: Mapping[str, Any],
     reconciliation_clean: bool,
 ) -> list[dict[str, str]]:
     blockers: list[dict[str, str]] = []
-    if not _connection_allows_submit(connection_mode):
+    if not _connection_allows_new_entry(connection_mode):
         blockers.append(
             {
                 "code": "connection_not_submit_capable",
                 "detail": f"Connection mode {connection_mode} cannot grant submit authority.",
             }
         )
+    for row in connection_blockers:
+        if not isinstance(row, Mapping):
+            continue
+        code = str(row.get("code") or "").strip()
+        detail = str(row.get("detail") or "").strip()
+        if code == "submit_session_not_proven":
+            blockers.append({"code": code, "detail": detail or "Submit-session liveness is not proven."})
     if not _lease_allows(broker_position_lease, AUTHORITY_USE_NEW_ENTRY):
         blockers.append(
             {
