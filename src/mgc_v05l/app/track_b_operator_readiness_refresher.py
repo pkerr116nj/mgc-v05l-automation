@@ -321,6 +321,20 @@ def _refresh_commands(
             ],
         ),
         (
+            "broker_truth_broker_truth_lease_bsa",
+            [
+                python_bin,
+                "-m",
+                "mgc_v05l.app.ibkr_broker_truth_refresher",
+                "--once",
+                "--read-only",
+                "--mode",
+                "PAPER",
+                "--account-id",
+                "DUM882026",
+            ],
+        ),
+        (
             "track_b_paper_broker_reconciliation",
             [
                 python_bin,
@@ -328,6 +342,59 @@ def _refresh_commands(
                 "mgc_v05l.execution_core.track_b_paper_broker_reconciliation",
                 "--repo-root",
                 str(repo_root),
+                "--account",
+                "DUM882026",
+                "--symbols",
+                "MNQ,MES",
+            ],
+        ),
+        (
+            "open_order_truth",
+            [
+                python_bin,
+                "-m",
+                "mgc_v05l.app.track_b_open_order_truth",
+                "--repo-root",
+                str(repo_root),
+                "--once",
+            ],
+        ),
+        (
+            "managed_position_registry",
+            [
+                python_bin,
+                "-m",
+                "mgc_v05l.app.track_b_managed_position_registry",
+                "--repo-root",
+                str(repo_root),
+                "--once",
+            ],
+        ),
+        (
+            "managed_order_registry",
+            [
+                python_bin,
+                "-m",
+                "mgc_v05l.app.track_b_managed_order_registry",
+                "--repo-root",
+                str(repo_root),
+                "--once",
+            ],
+        ),
+        (
+            "shared_truth",
+            [
+                python_bin,
+                "-m",
+                "mgc_v05l.execution_core.track_b_shared_truth_refresh_cli",
+                "--repo-root",
+                str(repo_root),
+                "--account",
+                "DUM882026",
+                "--symbols",
+                "MNQ,MES",
+                "--no-broker-lease-history",
+                "--json",
             ],
         ),
         (
@@ -351,6 +418,38 @@ def _refresh_commands(
             ],
         ),
         (
+            "agent_health",
+            [
+                python_bin,
+                "-m",
+                "mgc_v05l.execution_core.track_b_agent_health",
+                "--repo-root",
+                str(repo_root),
+                "--json",
+            ],
+        ),
+        (
+            "control_plane_snapshot",
+            [
+                python_bin,
+                "-m",
+                "mgc_v05l.execution_core.track_b_control_plane_snapshot",
+                "--repo-root",
+                str(repo_root),
+                "--output-path",
+                str(
+                    repo_root
+                    / "outputs"
+                    / "track_b_execution_core"
+                    / "control_plane"
+                    / "latest_control_plane_snapshot.json"
+                ),
+                "--no-dashboard-projection",
+                "--no-broker-lease-history",
+                "--json",
+            ],
+        ),
+        (
             "track_b_paper_preflight",
             [
                 "/bin/bash",
@@ -367,6 +466,8 @@ def _command_result_succeeded(result: RefreshCommandResult) -> bool:
         return True
     if result.name == "canonical_readiness" and result.returncode in {1, 2}:
         return '"classification"' in result.stdout_tail
+    if result.name in {"agent_health", "control_plane_snapshot"} and result.returncode == 2:
+        return bool(result.stdout_tail)
     return False
 
 
@@ -431,6 +532,27 @@ def _status_payload(
         "repo_root": str(config.repo_root),
         "refresh_seconds": config.refresh_seconds,
         "preflight_mode": config.preflight_mode,
+        "authority_refresh_orchestration": "TRACK_B_ACTIVE_RUNTIME_DEPENDENCY_CHAIN_V1",
+        "authority_refresh_cadence_seconds": config.refresh_seconds,
+        "dependency_refresh_steps": [
+            {
+                "step": result.name,
+                "returncode": result.returncode,
+                "succeeded": _command_result_succeeded(result),
+                "duration_seconds": result.duration_seconds,
+            }
+            for result in command_results
+        ],
+        "dependency_refresh_failures": [
+            {
+                "step": result.name,
+                "code": f"{result.name}_refresh_failed",
+                "returncode": result.returncode,
+                "stderr_tail": result.stderr_tail,
+            }
+            for result in command_results
+            if not _command_result_succeeded(result)
+        ],
         "submit_authority": False,
         "paper_proof_invoked": False,
         "live_money_eligible": False,
@@ -449,6 +571,23 @@ def _status_payload(
                 / "phase1_ticker_readiness_matrix"
                 / "latest_phase1_ticker_readiness_matrix.json"
             ),
+            "broker_truth_status": str(
+                config.repo_root
+                / "outputs"
+                / "reports"
+                / "ibkr_read_only_verification"
+                / "ibkr_broker_truth_refresh_status.json"
+            ),
+            "broker_truth_lease": str(
+                config.repo_root / "outputs" / "operator_dashboard" / "runtime" / "latest_broker_truth_lease.json"
+            ),
+            "broker_session_authority": str(
+                config.repo_root
+                / "outputs"
+                / "operator_dashboard"
+                / "runtime"
+                / "latest_broker_session_authority.json"
+            ),
             "track_b_paper_preflight": str(
                 config.repo_root
                 / "outputs"
@@ -463,8 +602,38 @@ def _status_payload(
                 / "track_b_paper_broker_reconciliation"
                 / "latest_track_b_paper_broker_reconciliation.json"
             ),
+            "open_order_truth": str(
+                config.repo_root / "outputs" / "track_b_execution_core" / "open_order_truth" / "latest_open_order_truth.json"
+            ),
+            "managed_position_registry": str(
+                config.repo_root
+                / "outputs"
+                / "track_b_execution_core"
+                / "managed_positions"
+                / "latest_managed_positions.json"
+            ),
+            "managed_order_registry": str(
+                config.repo_root / "outputs" / "track_b_execution_core" / "managed_orders" / "latest_managed_orders.json"
+            ),
+            "shared_truth": str(
+                config.repo_root
+                / "outputs"
+                / "track_b_execution_core"
+                / "shared_truth"
+                / "latest_track_b_shared_truth_refresh.json"
+            ),
             "canonical_readiness": str(config.canonical_readiness_path),
             "canonical_readiness_summary": str(config.canonical_readiness_summary_path),
+            "agent_health": str(
+                config.repo_root / "outputs" / "track_b_execution_core" / "agent_health" / "latest_agent_health.json"
+            ),
+            "control_plane_snapshot": str(
+                config.repo_root
+                / "outputs"
+                / "track_b_execution_core"
+                / "control_plane"
+                / "latest_control_plane_snapshot.json"
+            ),
         },
         "commands": [
             {
