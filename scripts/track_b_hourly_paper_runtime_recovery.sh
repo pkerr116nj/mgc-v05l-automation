@@ -202,6 +202,9 @@ case "${mode}" in
     ready_submit_capable="$(json_value "${status_tmp}" readiness.ready_submit_capable)"
     restart_allowed="$(json_value "${status_tmp}" readiness.restart_allowed_if_runtime_down)"
     next_action="$(json_value "${status_tmp}" next_action)"
+    restart_authority="$("${PYTHON_BIN}" -m mgc_v05l.execution_core.track_b_paper_stack_restart_precheck < "${status_tmp}")"
+    restart_authority_allowed="$(printf '%s' "${restart_authority}" | "${PYTHON_BIN}" -c 'import json,sys; print(str(json.loads(sys.stdin.read()).get("restart_allowed") is True).lower())')"
+    restart_authority_classification="$(printf '%s' "${restart_authority}" | "${PYTHON_BIN}" -c 'import json,sys; print(json.loads(sys.stdin.read()).get("classification") or "")')"
     duplicate_writer_detected="$(json_value "${status_tmp}" duplicate_writer.duplicate_writer_detected)"
     if [[ "${duplicate_writer_detected}" == "true" ]]; then
       write_tick_artifact "NO_ACTION_DUPLICATE_WRITER" "duplicate_writer_detected" "Duplicate writer guard blocks recovery start." "${status_tmp}"
@@ -219,12 +222,12 @@ case "${mode}" in
       echo "Track B recovery tick: runtime already running; no action."
       exit 0
     fi
-    if [[ "${restart_allowed}" != "true" || "${next_action}" != "run scripts/track_b_start_paper_stack.sh" ]]; then
-      write_tick_artifact "NO_ACTION_BLOCKED_GATES" "restart_not_allowed" "restart_allowed=${restart_allowed} ready=${ready_submit_capable} next_action=${next_action}" "${status_tmp}"
-      echo "Track B recovery tick: PAUSED by safety/status; restart_allowed=${restart_allowed} ready=${ready_submit_capable} next_action=${next_action}."
+    if [[ ( "${restart_allowed}" != "true" || "${next_action}" != "run scripts/track_b_start_paper_stack.sh" ) && "${restart_authority_allowed}" != "true" ]]; then
+      write_tick_artifact "NO_ACTION_BLOCKED_GATES" "restart_not_allowed" "restart_allowed=${restart_allowed} restart_authority_allowed=${restart_authority_allowed} restart_authority=${restart_authority_classification} ready=${ready_submit_capable} next_action=${next_action}" "${status_tmp}"
+      echo "Track B recovery tick: PAUSED by safety/status; restart_allowed=${restart_allowed} restart_authority_allowed=${restart_authority_allowed} restart_authority=${restart_authority_classification} ready=${ready_submit_capable} next_action=${next_action}."
       exit 0
     fi
-    write_tick_artifact "START_REQUESTED_CANONICAL_PAPER_STACK" "" "Runtime down and canonical gates allow recovery start." "${status_tmp}"
+    write_tick_artifact "START_REQUESTED_CANONICAL_PAPER_STACK" "" "Runtime down and canonical/precheck gates allow recovery start; restart_authority=${restart_authority_classification}." "${status_tmp}"
     bash "${START_SCRIPT}"
     ;;
   enable)

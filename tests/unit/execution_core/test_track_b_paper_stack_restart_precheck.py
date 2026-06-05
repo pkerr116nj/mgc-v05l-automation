@@ -4,6 +4,7 @@ from copy import deepcopy
 
 from mgc_v05l.execution_core.track_b_paper_stack_restart_precheck import (
     BLOCKED_DUPLICATE_WRITER,
+    BLOCKED_LIVE_MONEY_OR_PAPER_PROOF,
     BLOCKED_OPEN_ORDERS,
     BLOCKED_RECOVERY_INACTIVE,
     BLOCKED_UNMANAGED_EXPOSURE,
@@ -38,6 +39,26 @@ def test_owned_managed_exposure_restart_allowed() -> None:
 
     assert result.restart_allowed is True
     assert result.classification == RESTART_ALLOWED_OWNED_MANAGED_EXPOSURE
+
+
+def test_runtime_down_managed_exposure_restart_allowed_for_maintenance_restoration() -> None:
+    payload = _status(
+        reconciliation_classification="BROKER_TRUTH_SETTLEMENT_TIMEOUT",
+        track_b_positions=1,
+        lifecycle_positions=1,
+    )
+    payload["live_runtime_environment"]["classification"] = "RUNTIME_DOWN_WITH_BROKER_EXPOSURE"
+    payload["live_runtime_environment"]["restart_policy"] = {
+        "owned_exposure_restart_allowed": True,
+        "pre_restart_exposure_resolution_classification": "MANAGED_EXPOSURE_RESOLVED",
+        "reason_codes": [],
+    }
+
+    result = classify_paper_stack_restart_precheck(payload)
+
+    assert result.restart_allowed is True
+    assert result.classification == RESTART_ALLOWED_OWNED_MANAGED_EXPOSURE
+    assert "MANAGED_EXPOSURE_RESOLVED" in result.reason_codes
 
 
 def test_unmanaged_exposure_blocks_restart() -> None:
@@ -113,6 +134,26 @@ def test_current_scope_lifecycle_position_blocks_restart_when_not_reconciled() -
     assert "CURRENT_SCOPE_LIFECYCLE_POSITION_PRESENT" in result.reason_codes
 
 
+def test_runtime_down_ambiguous_broker_state_blocks_restart() -> None:
+    payload = _status(
+        reconciliation_classification="BROKER_TRUTH_SETTLEMENT_TIMEOUT",
+        track_b_positions=1,
+        lifecycle_positions=1,
+    )
+    payload["live_runtime_environment"]["classification"] = "RUNTIME_DOWN_WITH_BROKER_EXPOSURE"
+    payload["live_runtime_environment"]["restart_policy"] = {
+        "owned_exposure_restart_allowed": False,
+        "pre_restart_exposure_resolution_classification": "AMBIGUOUS_BROKER_STATE",
+        "reason_codes": ["AMBIGUOUS_BROKER_STATE"],
+    }
+
+    result = classify_paper_stack_restart_precheck(payload)
+
+    assert result.restart_allowed is False
+    assert result.classification == BLOCKED_UNMANAGED_EXPOSURE
+    assert "AMBIGUOUS_BROKER_STATE" in result.reason_codes
+
+
 def test_open_orders_block_restart_even_with_owned_exposure() -> None:
     payload = _status(
         reconciliation_classification="BROKER_TRUTH_SETTLEMENT_TIMEOUT",
@@ -149,6 +190,26 @@ def test_recovery_inactive_blocks_restart() -> None:
 
     assert result.restart_allowed is False
     assert result.classification == BLOCKED_RECOVERY_INACTIVE
+
+
+def test_live_money_blocks_restart() -> None:
+    payload = _status()
+    payload["safety"]["live_money_eligible"] = True
+
+    result = classify_paper_stack_restart_precheck(payload)
+
+    assert result.restart_allowed is False
+    assert result.classification == BLOCKED_LIVE_MONEY_OR_PAPER_PROOF
+
+
+def test_paper_proof_blocks_restart() -> None:
+    payload = _status()
+    payload["safety"]["paper_proof_invoked"] = True
+
+    result = classify_paper_stack_restart_precheck(payload)
+
+    assert result.restart_allowed is False
+    assert result.classification == BLOCKED_LIVE_MONEY_OR_PAPER_PROOF
 
 
 def _status(

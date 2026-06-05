@@ -286,6 +286,10 @@ def test_recovery_tick_actions_are_safe_and_canonical() -> None:
     assert "START_REQUESTED_CANONICAL_PAPER_STACK" in source
     assert "duplicate_writer.duplicate_writer_detected" in source
     assert "restart_allowed_if_runtime_down" in source
+    assert "track_b_paper_stack_restart_precheck" in source
+    assert "restart_authority_allowed" in source
+    assert "restart_authority_classification" in source
+    assert "canonical/precheck gates allow recovery start" in source
     assert "bash \"${START_SCRIPT}\"" in source
     assert "placeorder" not in source.lower()
     assert "cancelorder" not in source.lower()
