@@ -32,6 +32,7 @@ PROCESS_STARTED_LANES_PENDING = "PROCESS_STARTED_LANES_PENDING"
 STARTED_DEGRADED_RUNTIME_INGESTION_STALE = "STARTED_DEGRADED_RUNTIME_INGESTION_STALE"
 STARTED_NOT_SUBMIT_CAPABLE_AUTHORITY_PENDING = "STARTED_NOT_SUBMIT_CAPABLE_AUTHORITY_PENDING"
 STARTED_DIAGNOSTIC_ONLY_MARKET_CLOSED = "STARTED_DIAGNOSTIC_ONLY_MARKET_CLOSED"
+CONTROL_PLANE_SNAPSHOT_START_BLOCKED = "CONTROL_PLANE_SNAPSHOT_START_BLOCKED"
 
 PHASE_SEQUENCE: tuple[str, ...] = (
     PRECHECK_ACCEPTED,
@@ -63,6 +64,9 @@ DEFAULT_PID_METADATA_PATH = (
 DEFAULT_CONFIG_IN_FORCE_PATH = (
     Path("outputs") / "probationary_pattern_engine" / "paper_session" / "runtime" / "paper_config_in_force.json"
 )
+DEFAULT_LAUNCH_STATUS_PATH = (
+    Path("outputs") / "probationary_pattern_engine" / "paper_session" / "runtime" / "probationary_paper_launch_status.json"
+)
 DEFAULT_OPERATOR_STATUS_PATH = (
     Path("outputs") / "probationary_pattern_engine" / "paper_session" / "operator_status.json"
 )
@@ -92,6 +96,7 @@ class TrackBStartupPhaseClassifierConfig:
     runtime_truth_path: Path = DEFAULT_RUNTIME_TRUTH_PATH
     pid_metadata_path: Path = DEFAULT_PID_METADATA_PATH
     config_in_force_path: Path = DEFAULT_CONFIG_IN_FORCE_PATH
+    launch_status_path: Path = DEFAULT_LAUNCH_STATUS_PATH
     operator_status_path: Path = DEFAULT_OPERATOR_STATUS_PATH
     phase1_listener_status_path: Path = DEFAULT_PHASE1_LISTENER_STATUS_PATH
     authority_refresh_path: Path = DEFAULT_AUTHORITY_REFRESH_PATH
@@ -114,6 +119,7 @@ def classify_track_b_startup_phase(
     runtime_truth = payloads["runtime_truth"]
     pid_metadata = payloads["pid_metadata"]
     config_in_force = payloads["config_in_force"]
+    launch_status = payloads["launch_status"]
     operator_status = payloads["operator_status"]
     phase1 = payloads["phase1_listener_status"]
     authority_refresh = payloads["authority_refresh"]
@@ -150,6 +156,8 @@ def classify_track_b_startup_phase(
     }
     phase = _deepest_phase(completed)
     classification = _classification(
+        launch_status=launch_status,
+        runtime_truth=runtime_truth,
         phase=phase,
         process_spawned=process_spawned,
         process_identified=process_identified,
@@ -168,6 +176,7 @@ def classify_track_b_startup_phase(
         authority_refresh=authority_refresh,
         operator_status=operator_status,
         phase1=phase1,
+        launch_status=launch_status,
     )
     return {
         "schema_version": SCHEMA_VERSION,
@@ -206,6 +215,7 @@ def classify_track_b_startup_phase(
             "market_closed_or_scheduled_halt": market_closed,
             "canonical_readiness": _canonical_state(canonical),
             "authority_refresh_classification": _classification_text(authority_refresh),
+            "launch_status_classification": _classification_text(launch_status),
         },
     }
 
@@ -220,6 +230,7 @@ def _artifact_payloads(
             "runtime_truth": _mapping(artifacts.get("runtime_truth")),
             "pid_metadata": _mapping(artifacts.get("pid_metadata")),
             "config_in_force": _mapping(artifacts.get("config_in_force")),
+            "launch_status": _mapping(artifacts.get("launch_status")),
             "operator_status": _mapping(artifacts.get("operator_status")),
             "phase1_listener_status": _mapping(artifacts.get("phase1_listener_status")),
             "authority_refresh": _mapping(artifacts.get("authority_refresh")),
@@ -232,6 +243,7 @@ def _artifact_payloads(
         "runtime_truth": _read_json(config.resolve(config.runtime_truth_path)),
         "pid_metadata": _read_json(config.resolve(config.pid_metadata_path)),
         "config_in_force": _read_json(config.resolve(config.config_in_force_path)),
+        "launch_status": _read_json(config.resolve(config.launch_status_path)),
         "operator_status": _read_json(config.resolve(config.operator_status_path)),
         "phase1_listener_status": _read_json(config.resolve(config.phase1_listener_status_path)),
         "authority_refresh": _read_json(config.resolve(config.authority_refresh_path)),
@@ -375,6 +387,8 @@ def _next_expected_phase(completed: Mapping[str, bool]) -> str | None:
 
 def _classification(
     *,
+    launch_status: Mapping[str, Any],
+    runtime_truth: Mapping[str, Any],
     phase: str,
     process_spawned: bool,
     process_identified: bool,
@@ -386,6 +400,8 @@ def _classification(
     market_closed: bool,
     submit_capable: bool,
 ) -> str:
+    if _launch_control_plane_snapshot_start_blocked(launch_status, runtime_truth=runtime_truth):
+        return CONTROL_PLANE_SNAPSHOT_START_BLOCKED
     if submit_capable:
         return SUBMIT_CAPABLE
     if process_spawned and not process_identified:
@@ -411,7 +427,10 @@ def _blockers(
     authority_refresh: Mapping[str, Any],
     operator_status: Mapping[str, Any],
     phase1: Mapping[str, Any],
+    launch_status: Mapping[str, Any],
 ) -> list[dict[str, Any]]:
+    if classification == CONTROL_PLANE_SNAPSHOT_START_BLOCKED:
+        return [_launch_control_plane_blocker(launch_status)]
     next_phase = _next_expected_phase(completed)
     if next_phase is None:
         return []
@@ -440,6 +459,50 @@ def _blockers(
     if next_phase == SUBMIT_CAPABLE:
         blocker["canonical_readiness"] = _canonical_state(canonical)
     return [blocker]
+
+
+def _launch_control_plane_snapshot_start_blocked(
+    launch_status: Mapping[str, Any],
+    *,
+    runtime_truth: Mapping[str, Any],
+) -> bool:
+    if _classification_text(launch_status) != CONTROL_PLANE_SNAPSHOT_START_BLOCKED:
+        return False
+    launch_generated_at = _parse_datetime(launch_status.get("generated_at"))
+    runtime_generated_at = _parse_datetime(runtime_truth.get("generated_at"))
+    if launch_generated_at and runtime_generated_at and runtime_generated_at >= launch_generated_at:
+        return False
+    if launch_status.get("final_pid_alive") is True:
+        return False
+    if launch_status.get("first_truth_generated_at") or launch_status.get("second_truth_generated_at"):
+        return False
+    return str(launch_status.get("child_exit_code") or "") == "2"
+
+
+def _launch_control_plane_blocker(launch_status: Mapping[str, Any]) -> dict[str, Any]:
+    snapshot = _mapping(launch_status.get("control_plane_snapshot"))
+    detail = _first_text(
+        launch_status.get("detail"),
+        snapshot.get("top_line_status"),
+        "Control Plane Snapshot start preflight blocked before runtime profile/config load.",
+    )
+    blocker = {
+        "code": CONTROL_PLANE_SNAPSHOT_START_BLOCKED,
+        "phase": PROFILE_LOADED,
+        "detail": detail,
+        "source": "control_plane_snapshot_start_preflight",
+        "launch_child_exit_code": launch_status.get("child_exit_code"),
+        "control_plane_snapshot_classification": snapshot.get("classification"),
+        "runtime_supervisor_classification": snapshot.get("runtime_supervisor_classification"),
+        "proof_window_status": snapshot.get("proof_window_status"),
+    }
+    blocking_agent = _extract_field_from_detail(detail, "primary_blocking_agent_id")
+    blocking_reason = _extract_field_from_detail(detail, "primary_blocking_reason")
+    if blocking_agent:
+        blocker["primary_blocking_agent_id"] = blocking_agent
+    if blocking_reason:
+        blocker["primary_blocking_reason"] = blocking_reason
+    return blocker
 
 
 def _lane_count(operator_status: Mapping[str, Any]) -> int:
@@ -490,12 +553,31 @@ def _first_text(*values: Any) -> str:
     return ""
 
 
+def _extract_field_from_detail(detail: str, key: str) -> str:
+    marker = f"{key}="
+    if marker not in detail:
+        return ""
+    tail = detail.split(marker, 1)[1].strip()
+    if tail.startswith('"'):
+        return tail.split('"', 2)[1] if '"' in tail[1:] else tail.strip('"')
+    return tail.split(maxsplit=1)[0].strip().strip(",;")
+
+
 def _int_or_none(value: Any) -> int | None:
     try:
         if value in (None, ""):
             return None
         return int(value)
     except (TypeError, ValueError):
+        return None
+
+
+def _parse_datetime(value: Any) -> datetime | None:
+    if not value:
+        return None
+    try:
+        return _ensure_utc(datetime.fromisoformat(str(value).replace("Z", "+00:00")))
+    except ValueError:
         return None
 
 

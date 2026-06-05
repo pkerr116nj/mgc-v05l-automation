@@ -6,6 +6,7 @@ from pathlib import Path
 
 from mgc_v05l.execution_core.track_b_startup_phase_classifier import (
     AUTHORITY_REFRESHED,
+    CONTROL_PLANE_SNAPSHOT_START_BLOCKED,
     LANES_LOADED,
     MARKET_DATA_FEED_OBSERVED,
     PRECHECK_ACCEPTED,
@@ -39,6 +40,67 @@ def test_process_alive_with_profile_missing_is_profile_pending() -> None:
     assert result["next_expected_phase"] == PROFILE_LOADED
     assert _phase_state(result, PROCESS_SPAWNED) == "PASSED"
     assert _phase_state(result, PROFILE_LOADED) == "WAITING"
+    _assert_no_submit_authority(result)
+
+
+def test_control_plane_snapshot_start_blocked_surfaces_exact_launch_blocker() -> None:
+    result = classify_track_b_startup_phase(
+        artifacts=_artifacts(
+            runtime_truth={
+                "generated_at": "2026-06-04T14:59:00+00:00",
+                "process_alive": False,
+                "producer_pid": 1234,
+                "runtime_instance_id": "track-b-runtime-fixture",
+                "source_commit": "abc123",
+                "producer_root": "/tmp/mgc",
+                "restart_generation": 7,
+            },
+            config_in_force={},
+            launch_status={
+                "generated_at": NOW.isoformat(),
+                "classification": CONTROL_PLANE_SNAPSHOT_START_BLOCKED,
+                "child_exit_code": 2,
+                "final_pid_alive": False,
+                "first_truth_generated_at": None,
+                "second_truth_generated_at": None,
+                "detail": (
+                    "Control Plane Snapshot blocks runtime start. "
+                    "primary_blocking_agent_id=canonical_readiness_refresher "
+                    "primary_blocking_reason=\"artifact_stale\""
+                ),
+                "control_plane_snapshot": {
+                    "classification": "CONTROL_PLANE_SNAPSHOT_BLOCKED",
+                    "runtime_supervisor_classification": "SUPERVISOR_MANUAL_REVIEW_REQUIRED",
+                    "proof_window_status": "data_stale",
+                },
+            },
+        ),
+        now=NOW,
+    )
+
+    assert result["classification"] == CONTROL_PLANE_SNAPSHOT_START_BLOCKED
+    assert result["current_blockers"][0]["code"] == CONTROL_PLANE_SNAPSHOT_START_BLOCKED
+    assert result["current_blockers"][0]["source"] == "control_plane_snapshot_start_preflight"
+    assert result["current_blockers"][0]["primary_blocking_agent_id"] == "canonical_readiness_refresher"
+    assert result["current_blockers"][0]["primary_blocking_reason"] == "artifact_stale"
+    assert result["evidence"]["launch_status_classification"] == CONTROL_PLANE_SNAPSHOT_START_BLOCKED
+    _assert_no_submit_authority(result)
+
+
+def test_stale_control_plane_launch_failure_does_not_override_new_runtime_truth() -> None:
+    result = classify_track_b_startup_phase(
+        artifacts=_artifacts(
+            launch_status={
+                "generated_at": "2026-06-04T14:59:00+00:00",
+                "classification": CONTROL_PLANE_SNAPSHOT_START_BLOCKED,
+                "child_exit_code": 2,
+                "final_pid_alive": False,
+            }
+        ),
+        now=NOW,
+    )
+
+    assert result["classification"] == SUBMIT_CAPABLE
     _assert_no_submit_authority(result)
 
 
@@ -147,6 +209,7 @@ def test_classifier_reads_existing_artifacts_from_tmp_path_without_writing(tmp_p
     _write(config.resolve(config.runtime_truth_path), artifacts["runtime_truth"])
     _write(config.resolve(config.pid_metadata_path), artifacts["pid_metadata"])
     _write(config.resolve(config.config_in_force_path), artifacts["config_in_force"])
+    _write(config.resolve(config.launch_status_path), artifacts["launch_status"])
     _write(config.resolve(config.operator_status_path), artifacts["operator_status"])
     _write(config.resolve(config.phase1_listener_status_path), artifacts["phase1_listener_status"])
     _write(config.resolve(config.authority_refresh_path), artifacts["authority_refresh"])
@@ -192,6 +255,7 @@ def _artifacts(**overrides: dict) -> dict[str, dict]:
             "config_fingerprint": "sha256:fixture",
             "probationary_paper_runtime_exclusive_config": True,
         },
+        "launch_status": {},
         "operator_status": _operator_status(),
         "phase1_listener_status": {
             "generated_at": NOW.isoformat(),
