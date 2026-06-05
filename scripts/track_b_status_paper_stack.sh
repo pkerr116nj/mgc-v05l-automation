@@ -172,6 +172,16 @@ def parse_iso(value: object):
         return None
 
 
+def infer_profile_from_config_stack(config_stack: list[str]) -> str:
+    for item in config_stack:
+        name = Path(item).name
+        if name.startswith("paper_stack_") and name.endswith(".yaml"):
+            profile = name[len("paper_stack_") : -len(".yaml")]
+            if profile:
+                return profile
+    return ""
+
+
 operability = read_json(operability_path)
 authority_refresh = read_json(authority_refresh_path)
 live_runtime_environment = read_json(live_runtime_environment_path)
@@ -288,6 +298,20 @@ review_overlay = "config/probationary_pattern_engine_paper_mnq_mgc_plus_mnq_us_i
 review_overlay_active = any(item.endswith(review_overlay) for item in config_stack)
 config_summary = dict(operability.get("config_summary") or {})
 lane_count = config_summary.get("lane_count") or runtime_truth.get("lane_count")
+startup_config_in_force = dict(config_in_force)
+profile_from_stack = infer_profile_from_config_stack(config_stack)
+if profile_from_stack and not startup_config_in_force.get("profile_id"):
+    startup_config_in_force["profile_id"] = profile_from_stack
+if not startup_config_in_force.get("config_fingerprint"):
+    startup_config_in_force["config_fingerprint"] = (
+        runtime_truth.get("config_fingerprint") or pid_metadata.get("config_fingerprint")
+    )
+if not startup_config_in_force.get("lane_count") and lane_count:
+    startup_config_in_force["lane_count"] = lane_count
+if config_stack and "probationary_paper_runtime_exclusive_config" not in startup_config_in_force:
+    startup_config_in_force["probationary_paper_runtime_exclusive_config"] = not review_overlay_active
+if review_overlay_active:
+    startup_config_in_force["review_overlay_active"] = True
 canonical_state = str(operability.get("canonical_state") or "UNKNOWN")
 ready_submit_capable = bool(operability.get("ready_submit_capable")) and running
 runtime_start_allowed = bool(operability.get("runtime_start_allowed") or canonical_readiness.get("runtime_start_allowed"))
@@ -338,7 +362,7 @@ startup_phase = classify_track_b_startup_phase(
     artifacts={
         "runtime_truth": runtime_truth,
         "pid_metadata": pid_metadata,
-        "config_in_force": config_in_force,
+        "config_in_force": startup_config_in_force,
         "operator_status": operator_status,
         "phase1_listener_status": phase1_status,
         "authority_refresh": authority_refresh,

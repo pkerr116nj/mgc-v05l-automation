@@ -104,6 +104,208 @@ def test_stale_control_plane_launch_failure_does_not_override_new_runtime_truth(
     _assert_no_submit_authority(result)
 
 
+def test_profile_pending_launch_status_ignored_when_fresh_runtime_truth_matches_profile() -> None:
+    result = classify_track_b_startup_phase(
+        artifacts=_artifacts(
+            runtime_truth={
+                "generated_at": NOW.isoformat(),
+                "process_alive": True,
+                "producer_pid": 1234,
+                "runtime_instance_id": "track-b-runtime-fixture",
+                "source_commit": "abc123",
+                "producer_root": "/tmp/mgc",
+                "restart_generation": 7,
+                "config_fingerprint": "sha256:fixture",
+                "lane_count": 13,
+                "heartbeat_state": "HEALTHY",
+            },
+            pid_metadata={
+                "generated_at": NOW.isoformat(),
+                "running": True,
+                "pid": 1234,
+                "runtime_instance_id": "track-b-runtime-fixture",
+                "source_commit": "abc123",
+                "producer_root": "/tmp/mgc",
+                "restart_generation": 7,
+                "config_fingerprint": "sha256:fixture",
+            },
+            config_in_force={
+                "generated_at": NOW.isoformat(),
+                "profile_id": "mnq_mes_full_session_active_evidence",
+                "config_fingerprint": "sha256:fixture",
+                "lane_count": 13,
+                "probationary_paper_runtime_exclusive_config": True,
+            },
+            launch_status={
+                "generated_at": "2026-06-04T14:59:00+00:00",
+                "classification": PROCESS_STARTED_PROFILE_PENDING,
+                "detail": "Runtime profile/config fingerprint is not loaded.",
+            },
+            operator_status={"generated_at": NOW.isoformat(), "runtime_ingestion_fresh": True, "lanes": []},
+        ),
+        now=NOW,
+    )
+
+    assert result["classification"] == SUBMIT_CAPABLE
+    assert result["phase"] == SUBMIT_CAPABLE
+    assert _phase_state(result, PROFILE_LOADED) == "PASSED"
+    assert _phase_state(result, LANES_LOADED) == "PASSED"
+    _assert_no_submit_authority(result)
+
+
+def test_profile_pending_without_runtime_truth_remains_blocked() -> None:
+    result = classify_track_b_startup_phase(
+        artifacts=_artifacts(
+            runtime_truth={},
+            config_in_force={},
+            launch_status={"classification": PROCESS_STARTED_PROFILE_PENDING},
+            operator_status={"generated_at": NOW.isoformat(), "lanes": []},
+        ),
+        now=NOW,
+    )
+
+    assert result["classification"] == PROCESS_STARTED_PROFILE_PENDING
+    assert result["phase"] == PROCESS_IDENTIFIED
+    assert result["next_expected_phase"] == PROFILE_LOADED
+    _assert_no_submit_authority(result)
+
+
+def test_runtime_truth_wrong_profile_blocks_profile_loaded() -> None:
+    result = classify_track_b_startup_phase(
+        artifacts=_artifacts(
+            runtime_truth={
+                "generated_at": NOW.isoformat(),
+                "process_alive": True,
+                "producer_pid": 1234,
+                "runtime_instance_id": "track-b-runtime-fixture",
+                "source_commit": "abc123",
+                "producer_root": "/tmp/mgc",
+                "restart_generation": 7,
+                "config_fingerprint": "sha256:fixture",
+                "profile_id": "canonical",
+                "lane_count": 13,
+                "heartbeat_state": "HEALTHY",
+            },
+            config_in_force={
+                "generated_at": NOW.isoformat(),
+                "profile_id": "mnq_mes_full_session_active_evidence",
+                "config_fingerprint": "sha256:fixture",
+                "lane_count": 13,
+                "probationary_paper_runtime_exclusive_config": True,
+            },
+        ),
+        now=NOW,
+    )
+
+    assert result["classification"] == PROCESS_STARTED_PROFILE_PENDING
+    assert result["phase"] == PROCESS_IDENTIFIED
+    assert result["next_expected_phase"] == PROFILE_LOADED
+    _assert_no_submit_authority(result)
+
+
+def test_runtime_truth_wrong_lane_count_blocks_lane_loaded() -> None:
+    result = classify_track_b_startup_phase(
+        artifacts=_artifacts(
+            runtime_truth={
+                "generated_at": NOW.isoformat(),
+                "process_alive": True,
+                "producer_pid": 1234,
+                "runtime_instance_id": "track-b-runtime-fixture",
+                "source_commit": "abc123",
+                "producer_root": "/tmp/mgc",
+                "restart_generation": 7,
+                "config_fingerprint": "sha256:fixture",
+                "lane_count": 12,
+                "heartbeat_state": "HEALTHY",
+            },
+            config_in_force={
+                "generated_at": NOW.isoformat(),
+                "profile_id": "mnq_mes_full_session_active_evidence",
+                "config_fingerprint": "sha256:fixture",
+                "lane_count": 13,
+                "probationary_paper_runtime_exclusive_config": True,
+            },
+            operator_status={"generated_at": NOW.isoformat(), "lanes": []},
+        ),
+        now=NOW,
+    )
+
+    assert result["classification"] == PROCESS_STARTED_LANES_PENDING
+    assert result["phase"] == PROFILE_LOADED
+    assert result["next_expected_phase"] == LANES_LOADED
+    _assert_no_submit_authority(result)
+
+
+def test_runtime_truth_commit_mismatch_blocks_process_identity() -> None:
+    result = classify_track_b_startup_phase(
+        artifacts=_artifacts(
+            runtime_truth={
+                "generated_at": NOW.isoformat(),
+                "process_alive": True,
+                "producer_pid": 1234,
+                "runtime_instance_id": "track-b-runtime-fixture",
+                "source_commit": "wrong",
+                "producer_root": "/tmp/mgc",
+                "restart_generation": 7,
+                "config_fingerprint": "sha256:fixture",
+                "lane_count": 13,
+                "heartbeat_state": "HEALTHY",
+            },
+            pid_metadata={
+                "generated_at": NOW.isoformat(),
+                "running": True,
+                "pid": 1234,
+                "runtime_instance_id": "track-b-runtime-fixture",
+                "source_commit": "abc123",
+                "producer_root": "/tmp/mgc",
+                "restart_generation": 7,
+                "config_fingerprint": "sha256:fixture",
+            },
+        ),
+        now=NOW,
+    )
+
+    assert result["classification"] == PROCESS_STARTED_PROFILE_PENDING
+    assert result["phase"] == PROCESS_SPAWNED
+    assert result["next_expected_phase"] == PROCESS_IDENTIFIED
+    _assert_no_submit_authority(result)
+
+
+def test_stale_runtime_truth_from_prior_pid_is_ignored() -> None:
+    result = classify_track_b_startup_phase(
+        artifacts=_artifacts(
+            runtime_truth={
+                "generated_at": NOW.isoformat(),
+                "process_alive": True,
+                "producer_pid": 9999,
+                "runtime_instance_id": "track-b-runtime-fixture",
+                "source_commit": "abc123",
+                "producer_root": "/tmp/mgc",
+                "restart_generation": 7,
+                "config_fingerprint": "sha256:fixture",
+                "lane_count": 13,
+                "heartbeat_state": "HEALTHY",
+            },
+            pid_metadata={
+                "generated_at": NOW.isoformat(),
+                "running": True,
+                "pid": 1234,
+                "runtime_instance_id": "track-b-runtime-fixture",
+                "source_commit": "abc123",
+                "producer_root": "/tmp/mgc",
+                "restart_generation": 7,
+                "config_fingerprint": "sha256:fixture",
+            },
+        ),
+        now=NOW,
+    )
+
+    assert result["classification"] == PROCESS_STARTED_PROFILE_PENDING
+    assert result["phase"] == PROCESS_SPAWNED
+    assert result["next_expected_phase"] == PROCESS_IDENTIFIED
+    _assert_no_submit_authority(result)
+
+
 def test_profile_loaded_with_lanes_missing_is_lanes_pending() -> None:
     result = classify_track_b_startup_phase(
         artifacts=_artifacts(operator_status={"generated_at": NOW.isoformat(), "lanes": []}),

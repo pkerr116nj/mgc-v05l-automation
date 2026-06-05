@@ -130,7 +130,11 @@ def classify_track_b_startup_phase(
     process_spawned = _process_spawned(runtime_truth=runtime_truth, pid_metadata=pid_metadata)
     process_identified = process_spawned and _process_identified(runtime_truth=runtime_truth, pid_metadata=pid_metadata)
     profile_loaded = process_identified and _profile_loaded(config_in_force=config_in_force, runtime_truth=runtime_truth)
-    lanes_loaded = profile_loaded and _lanes_loaded(operator_status=operator_status, runtime_truth=runtime_truth)
+    lanes_loaded = profile_loaded and _lanes_loaded(
+        operator_status=operator_status,
+        runtime_truth=runtime_truth,
+        config_in_force=config_in_force,
+    )
     market_data_observed = lanes_loaded and _market_data_feed_observed(phase1=phase1, canonical=canonical)
     runtime_ingestion_advancing = market_data_observed and _runtime_ingestion_advancing(
         operator_status=operator_status,
@@ -266,45 +270,100 @@ def _process_spawned(*, runtime_truth: Mapping[str, Any], pid_metadata: Mapping[
     return any(
         value is True
         for value in (
-            runtime_truth.get("process_alive"),
-            runtime_truth.get("runtime_alive"),
-            runtime_truth.get("running"),
+            _runtime_value(runtime_truth, "process_alive"),
+            _runtime_value(runtime_truth, "runtime_alive"),
+            _runtime_value(runtime_truth, "running"),
+            _runtime_value(runtime_truth, "pid_alive"),
             pid_metadata.get("process_alive"),
             pid_metadata.get("running"),
         )
-    ) or bool(runtime_truth.get("producer_pid") or runtime_truth.get("pid") or pid_metadata.get("pid"))
+    ) or bool(
+        _runtime_value(runtime_truth, "producer_pid")
+        or _runtime_value(runtime_truth, "pid")
+        or pid_metadata.get("producer_pid")
+        or pid_metadata.get("pid")
+    )
 
 
 def _process_identified(*, runtime_truth: Mapping[str, Any], pid_metadata: Mapping[str, Any]) -> bool:
-    runtime_instance_id = _first_text(runtime_truth.get("runtime_instance_id"), pid_metadata.get("runtime_instance_id"))
-    source_commit = _first_text(runtime_truth.get("source_commit"), pid_metadata.get("source_commit"))
+    if not _identity_fields_match(runtime_truth, pid_metadata, "runtime_instance_id"):
+        return False
+    if not _identity_fields_match(runtime_truth, pid_metadata, "source_commit"):
+        return False
+    if not _identity_fields_match(runtime_truth, pid_metadata, "restart_generation"):
+        return False
+    if not _pid_fields_match(runtime_truth, pid_metadata):
+        return False
+    runtime_instance_id = _first_text(
+        _runtime_value(runtime_truth, "runtime_instance_id"),
+        pid_metadata.get("runtime_instance_id"),
+    )
+    source_commit = _first_text(_runtime_value(runtime_truth, "source_commit"), pid_metadata.get("source_commit"))
     root = _first_text(
-        runtime_truth.get("producer_root"),
-        runtime_truth.get("root"),
+        _runtime_value(runtime_truth, "producer_root"),
+        _runtime_value(runtime_truth, "root"),
+        _runtime_value(runtime_truth, "process_root"),
         pid_metadata.get("producer_root"),
         pid_metadata.get("root"),
     )
-    restart_generation = _first_text(runtime_truth.get("restart_generation"), pid_metadata.get("restart_generation"))
-    bad_heartbeat = str(runtime_truth.get("heartbeat_state") or "").upper() in {"PROCESS_DOWN", "WRONG_ROOT"}
+    restart_generation = _first_text(
+        _runtime_value(runtime_truth, "restart_generation"),
+        pid_metadata.get("restart_generation"),
+    )
+    bad_heartbeat = str(_runtime_value(runtime_truth, "heartbeat_state") or "").upper() in {
+        "PROCESS_DOWN",
+        "WRONG_ROOT",
+        "STALE",
+    }
     return bool(runtime_instance_id and source_commit and root and restart_generation and not bad_heartbeat)
 
 
 def _profile_loaded(*, config_in_force: Mapping[str, Any], runtime_truth: Mapping[str, Any]) -> bool:
-    profile_id = _first_text(
+    config_profile = _first_text(
         config_in_force.get("profile_id"),
         config_in_force.get("runtime_profile"),
     )
-    fingerprint = _first_text(config_in_force.get("config_fingerprint"))
+    runtime_profile = _first_text(
+        _runtime_value(runtime_truth, "profile_id"),
+        _runtime_value(runtime_truth, "runtime_profile"),
+    )
+    config_fingerprint = _first_text(config_in_force.get("config_fingerprint"))
+    runtime_fingerprint = _first_text(_runtime_value(runtime_truth, "config_fingerprint"))
+    has_config_profile_evidence = bool(config_profile or config_fingerprint)
+    if not has_config_profile_evidence:
+        return False
+    if config_profile and runtime_profile and config_profile != runtime_profile:
+        return False
+    if config_fingerprint and runtime_fingerprint and config_fingerprint != runtime_fingerprint:
+        return False
+    profile_id = _first_text(
+        config_profile,
+        runtime_profile,
+    )
+    fingerprint = _first_text(config_fingerprint, runtime_fingerprint)
     exclusive = config_in_force.get("probationary_paper_runtime_exclusive_config")
     forbidden_overlay = config_in_force.get("review_overlay_active") is True or config_in_force.get("forbidden_overlay_active") is True
     return bool((profile_id or fingerprint) and exclusive is not False and not forbidden_overlay)
 
 
-def _lanes_loaded(*, operator_status: Mapping[str, Any], runtime_truth: Mapping[str, Any]) -> bool:
+def _lanes_loaded(
+    *,
+    operator_status: Mapping[str, Any],
+    runtime_truth: Mapping[str, Any],
+    config_in_force: Mapping[str, Any],
+) -> bool:
     lane_count = _lane_count(operator_status)
-    expected = _int_or_none(runtime_truth.get("lane_count") or operator_status.get("expected_lane_count"))
+    runtime_lane_count = _int_or_none(_runtime_value(runtime_truth, "lane_count"))
+    expected = _int_or_none(
+        operator_status.get("expected_lane_count")
+        or config_in_force.get("expected_lane_count")
+        or config_in_force.get("lane_count")
+        or _runtime_value(runtime_truth, "expected_lane_count")
+    )
     if expected is not None and expected > 0:
-        return lane_count >= expected
+        if lane_count >= expected:
+            return True
+        return runtime_lane_count is not None and runtime_lane_count >= expected
     return lane_count > 0
 
 
@@ -535,6 +594,33 @@ def _classification_text(payload: Mapping[str, Any]) -> str:
 
 def _mapping(value: Any) -> dict[str, Any]:
     return dict(value) if isinstance(value, Mapping) else {}
+
+
+def _runtime_mapping(runtime_truth: Mapping[str, Any]) -> Mapping[str, Any]:
+    nested = runtime_truth.get("runtime")
+    return nested if isinstance(nested, Mapping) else {}
+
+
+def _runtime_value(runtime_truth: Mapping[str, Any], key: str) -> Any:
+    if key in runtime_truth:
+        return runtime_truth.get(key)
+    return _runtime_mapping(runtime_truth).get(key)
+
+
+def _identity_fields_match(
+    runtime_truth: Mapping[str, Any],
+    pid_metadata: Mapping[str, Any],
+    key: str,
+) -> bool:
+    runtime_value = _first_text(_runtime_value(runtime_truth, key))
+    pid_value = _first_text(pid_metadata.get(key))
+    return not (runtime_value and pid_value and runtime_value != pid_value)
+
+
+def _pid_fields_match(runtime_truth: Mapping[str, Any], pid_metadata: Mapping[str, Any]) -> bool:
+    runtime_pid = _int_or_none(_runtime_value(runtime_truth, "producer_pid") or _runtime_value(runtime_truth, "pid"))
+    pid_metadata_pid = _int_or_none(pid_metadata.get("producer_pid") or pid_metadata.get("pid"))
+    return not (runtime_pid is not None and pid_metadata_pid is not None and runtime_pid != pid_metadata_pid)
 
 
 def _read_json(path: Path) -> dict[str, Any]:

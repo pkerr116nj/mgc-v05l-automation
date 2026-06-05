@@ -552,6 +552,17 @@ def test_paper_stack_status_surfaces_startup_phase_diagnostic_only() -> None:
     assert "normal_submit_allowed = startup_phase" not in source
 
 
+def test_paper_stack_status_derives_startup_profile_from_config_stack() -> None:
+    source = STATUS_SCRIPT.read_text(encoding="utf-8")
+
+    assert "infer_profile_from_config_stack" in source
+    assert 'name.startswith("paper_stack_")' in source
+    assert 'startup_config_in_force["profile_id"] = profile_from_stack' in source
+    assert 'startup_config_in_force["config_fingerprint"]' in source
+    assert 'startup_config_in_force["lane_count"]' in source
+    assert '"config_in_force": startup_config_in_force' in source
+
+
 def test_paper_stack_runtime_pid_metadata_temp_path_is_per_process() -> None:
     source = START_SCRIPT.read_text(encoding="utf-8")
 
