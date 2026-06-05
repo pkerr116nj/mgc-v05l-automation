@@ -304,6 +304,7 @@ def classify_broker_truth_lease(inputs: Mapping[str, Any]) -> dict[str, Any]:
         broker_open_order_lease=broker_open_order_lease,
         reconciliation_clean=_reconciliation_clean(reconciliation),
     )
+    callback_ownership_attribution = _mapping(connection_health.get("callback_ownership_attribution"))
     submit_connection_capable = _connection_allows_submit(connection_mode)
     submit_entry_allowed = bool(
         submit_entry_allowed
@@ -354,6 +355,16 @@ def classify_broker_truth_lease(inputs: Mapping[str, Any]) -> dict[str, Any]:
         "connection_health": connection_health,
         "connection_mode": connection_mode,
         "broker_session_owner": broker_session_owner,
+        "callback_ownership_attribution": callback_ownership_attribution,
+        "position_truth_client_id": callback_ownership_attribution.get("position_truth_client_id"),
+        "open_order_truth_client_id": callback_ownership_attribution.get("open_order_truth_client_id"),
+        "last_order_status_client_id": callback_ownership_attribution.get("last_order_status_client_id"),
+        "last_exec_details_client_id": callback_ownership_attribution.get("last_exec_details_client_id"),
+        "last_completed_order_client_id": callback_ownership_attribution.get("last_completed_order_client_id"),
+        "submit_client_id": callback_ownership_attribution.get("submit_client_id"),
+        "session_match": callback_ownership_attribution.get("session_match"),
+        "callback_age_seconds": callback_ownership_attribution.get("callback_age_seconds"),
+        "callback_missing_reason": callback_ownership_attribution.get("callback_missing_reason"),
         "broker_position_lease": broker_position_lease,
         "broker_open_order_lease": broker_open_order_lease,
         "execution_fill_evidence_lease": execution_fill_evidence_lease,
@@ -839,6 +850,15 @@ def _connection_health(
     max_open_order_lease_age_seconds: float,
     max_fill_evidence_lease_age_seconds: float,
 ) -> dict[str, Any]:
+    callback_attribution = _callback_ownership_attribution(
+        inputs=inputs,
+        broker_truth=broker_truth,
+        latest_attempt=latest_attempt,
+        order_state=order_state,
+        fill_evidence=fill_evidence,
+        broker_session_owner=broker_session_owner,
+        current_time=current_time,
+    )
     explicit = str(
         inputs.get("connection_mode")
         or _mapping(inputs.get("connection")).get("mode")
@@ -870,7 +890,7 @@ def _connection_health(
         broker_session_owner=broker_session_owner,
         current_time=current_time,
         max_age_seconds=max_open_order_lease_age_seconds,
-    ):
+    ) or _order_status_client_mismatch(callback_attribution):
         mode = "ORDER_STATUS_UNRELIABLE"
     elif _fill_evidence_complete(fill_evidence) and _callback_fresh(
         broker_session_owner.get("last_exec_at"),
@@ -922,12 +942,225 @@ def _connection_health(
             "last_exec_at": broker_session_owner.get("last_exec_at"),
             "last_completed_order_at": broker_session_owner.get("last_completed_order_at"),
         },
+        "callback_ownership_attribution": callback_attribution,
         "blockers": blockers,
     }
 
 
 def _connection_allows_submit(connection_mode: str) -> bool:
     return str(connection_mode).strip().upper() in {"SUBMIT_CAPABLE", "FILL_CALLBACK_CAPABLE"}
+
+
+def _callback_ownership_attribution(
+    *,
+    inputs: Mapping[str, Any],
+    broker_truth: Mapping[str, Any],
+    latest_attempt: Mapping[str, Any],
+    order_state: Mapping[str, Any],
+    fill_evidence: Mapping[str, Any],
+    broker_session_owner: Mapping[str, Any],
+    current_time: datetime,
+) -> dict[str, Any]:
+    explicit = _mapping(inputs.get("callback_ownership") or inputs.get("callback_attribution"))
+    submit_ownership = _mapping(inputs.get("submit_ownership") or inputs.get("latest_submit_ownership"))
+    latest_order_status = _mapping(order_state.get("latest_order_status"))
+    latest_execution = _mapping(fill_evidence.get("latest_execution") or fill_evidence.get("latest_exec_details"))
+    latest_completed_order = _mapping(
+        order_state.get("latest_completed_order")
+        or fill_evidence.get("latest_completed_order")
+        or fill_evidence.get("completed_order")
+    )
+
+    position_truth_client_id = _int_or_none(
+        _first_present(
+            explicit.get("position_truth_client_id"),
+            broker_truth.get("position_truth_client_id"),
+            broker_truth.get("positions_client_id"),
+            latest_attempt.get("position_truth_client_id"),
+            latest_attempt.get("positions_client_id"),
+            broker_session_owner.get("client_id"),
+        )
+    )
+    open_order_truth_client_id = _int_or_none(
+        _first_present(
+            explicit.get("open_order_truth_client_id"),
+            broker_truth.get("open_order_truth_client_id"),
+            broker_truth.get("open_orders_client_id"),
+            latest_attempt.get("open_order_truth_client_id"),
+            latest_attempt.get("open_orders_client_id"),
+            broker_session_owner.get("client_id"),
+        )
+    )
+    last_order_status_client_id = _int_or_none(
+        _first_present(
+            explicit.get("last_order_status_client_id"),
+            order_state.get("last_order_status_client_id"),
+            order_state.get("order_status_client_id"),
+            latest_order_status.get("client_id"),
+            broker_truth.get("last_order_status_client_id"),
+            latest_attempt.get("last_order_status_client_id"),
+        )
+    )
+    last_exec_details_client_id = _int_or_none(
+        _first_present(
+            explicit.get("last_exec_details_client_id"),
+            fill_evidence.get("last_exec_details_client_id"),
+            fill_evidence.get("exec_details_client_id"),
+            fill_evidence.get("last_exec_client_id"),
+            latest_execution.get("client_id"),
+        )
+    )
+    last_completed_order_client_id = _int_or_none(
+        _first_present(
+            explicit.get("last_completed_order_client_id"),
+            order_state.get("last_completed_order_client_id"),
+            fill_evidence.get("last_completed_order_client_id"),
+            latest_completed_order.get("client_id"),
+        )
+    )
+    submit_client_id = _int_or_none(
+        _first_present(
+            explicit.get("submit_client_id"),
+            inputs.get("submit_client_id"),
+            submit_ownership.get("submit_client_id"),
+            submit_ownership.get("client_id"),
+            _mapping(submit_ownership.get("latest_broker_effect_order")).get("client_id"),
+            order_state.get("submit_client_id"),
+            order_state.get("latest_submit_client_id"),
+        )
+    )
+
+    last_position_at = broker_session_owner.get("last_position_at")
+    last_open_order_at = broker_session_owner.get("last_open_order_at")
+    last_order_status_at = broker_session_owner.get("last_order_status_at")
+    last_exec_at = broker_session_owner.get("last_exec_at")
+    last_completed_order_at = broker_session_owner.get("last_completed_order_at")
+    session_match = {
+        "position_vs_order_status_same_session": _same_known_client(
+            position_truth_client_id, last_order_status_client_id
+        ),
+        "submit_vs_exec_same_session": _same_known_client(submit_client_id, last_exec_details_client_id),
+        "submit_vs_position_same_session": _same_known_client(submit_client_id, position_truth_client_id),
+    }
+    callback_age_seconds = {
+        "position": _age_seconds(last_position_at, current_time=current_time),
+        "open_order": _age_seconds(last_open_order_at, current_time=current_time),
+        "order_status": _age_seconds(last_order_status_at, current_time=current_time),
+        "exec_details": _age_seconds(last_exec_at, current_time=current_time),
+        "completed_order": _age_seconds(last_completed_order_at, current_time=current_time),
+    }
+    missing_reasons = _callback_missing_reasons(
+        position_truth_client_id=position_truth_client_id,
+        open_order_truth_client_id=open_order_truth_client_id,
+        last_order_status_client_id=last_order_status_client_id,
+        last_exec_details_client_id=last_exec_details_client_id,
+        last_completed_order_client_id=last_completed_order_client_id,
+        submit_client_id=submit_client_id,
+        broker_session_owner=broker_session_owner,
+        session_match=session_match,
+    )
+    return {
+        "schema_version": "track_b_callback_ownership_attribution_v1",
+        "classification": _callback_attribution_classification(missing_reasons),
+        "position_truth_client_id": position_truth_client_id,
+        "open_order_truth_client_id": open_order_truth_client_id,
+        "last_order_status_client_id": last_order_status_client_id,
+        "last_exec_details_client_id": last_exec_details_client_id,
+        "last_completed_order_client_id": last_completed_order_client_id,
+        "submit_client_id": submit_client_id,
+        "session_match": session_match,
+        "callback_age_seconds": callback_age_seconds,
+        "callback_missing_reason": missing_reasons[0]["code"] if missing_reasons else None,
+        "callback_missing_reasons": missing_reasons,
+    }
+
+
+def _callback_missing_reasons(
+    *,
+    position_truth_client_id: int | None,
+    open_order_truth_client_id: int | None,
+    last_order_status_client_id: int | None,
+    last_exec_details_client_id: int | None,
+    last_completed_order_client_id: int | None,
+    submit_client_id: int | None,
+    broker_session_owner: Mapping[str, Any],
+    session_match: Mapping[str, Any],
+) -> list[dict[str, str]]:
+    reasons: list[dict[str, str]] = []
+    if position_truth_client_id is None:
+        reasons.append({"code": "position_truth_client_unknown", "detail": "Position truth client id is unavailable."})
+    if open_order_truth_client_id is None:
+        reasons.append({"code": "open_order_truth_client_unknown", "detail": "Open-order truth client id is unavailable."})
+    if broker_session_owner.get("last_order_status_at") is None:
+        reasons.append({"code": "order_status_callback_missing", "detail": "No orderStatus callback timestamp is available."})
+    if last_order_status_client_id is None:
+        reasons.append({"code": "order_status_client_unknown", "detail": "orderStatus callback client id is unavailable."})
+    if session_match.get("position_vs_order_status_same_session") is False:
+        reasons.append(
+            {
+                "code": "position_order_status_client_mismatch",
+                "detail": "Position truth and orderStatus callback evidence came from different IBKR clients.",
+            }
+        )
+    if submit_client_id is not None and broker_session_owner.get("last_exec_at") is None:
+        reasons.append({"code": "exec_details_callback_missing", "detail": "Submit evidence exists but execDetails is missing."})
+    if submit_client_id is not None and last_exec_details_client_id is None:
+        reasons.append({"code": "exec_details_client_unknown", "detail": "execDetails callback client id is unavailable."})
+    if session_match.get("submit_vs_exec_same_session") is False:
+        reasons.append(
+            {
+                "code": "submit_exec_client_mismatch",
+                "detail": "Submit evidence and execDetails callback evidence came from different IBKR clients.",
+            }
+        )
+    if submit_client_id is not None and broker_session_owner.get("last_completed_order_at") is None:
+        reasons.append(
+            {"code": "completed_order_callback_missing", "detail": "Submit evidence exists but completedOrder is missing."}
+        )
+    if submit_client_id is not None and last_completed_order_client_id is None:
+        reasons.append({"code": "completed_order_client_unknown", "detail": "completedOrder callback client id is unavailable."})
+    return _dedupe_reason_rows(reasons)
+
+
+def _callback_attribution_classification(reasons: Sequence[Mapping[str, str]]) -> str:
+    codes = {str(row.get("code") or "") for row in reasons}
+    if codes & {"position_order_status_client_mismatch", "submit_exec_client_mismatch"}:
+        return "SPLIT_CALLBACK_OWNERSHIP"
+    if codes & {"order_status_callback_missing", "exec_details_callback_missing", "completed_order_callback_missing"}:
+        return "CALLBACK_ATTRIBUTION_GAP"
+    if codes & {"position_truth_client_unknown", "open_order_truth_client_unknown", "order_status_client_unknown"}:
+        return "CALLBACK_OWNERSHIP_UNKNOWN"
+    return "CALLBACK_OWNERSHIP_ALIGNED"
+
+
+def _order_status_client_mismatch(callback_attribution: Mapping[str, Any]) -> bool:
+    session_match = _mapping(callback_attribution.get("session_match"))
+    return session_match.get("position_vs_order_status_same_session") is False
+
+
+def _same_known_client(left: int | None, right: int | None) -> bool | None:
+    if left is None or right is None:
+        return None
+    return left == right
+
+
+def _age_seconds(value: Any, *, current_time: datetime) -> float | None:
+    timestamp = _parse_time(value)
+    if timestamp is None:
+        return None
+    return max((current_time - timestamp.astimezone(timezone.utc)).total_seconds(), 0.0)
+
+
+def _dedupe_reason_rows(rows: list[dict[str, str]]) -> list[dict[str, str]]:
+    seen: set[str] = set()
+    result: list[dict[str, str]] = []
+    for row in rows:
+        code = str(row.get("code") or "")
+        if not code or code in seen:
+            continue
+        seen.add(code)
+        result.append(row)
+    return result
 
 
 def _open_order_status_unreliable(
@@ -957,6 +1190,8 @@ def _open_order_status_unreliable(
         )
     status = str(order_state.get("classification") or "").upper()
     if any(token in status for token in ("UNKNOWN", "STALE", "UNRELIABLE", "REVIEW_REQUIRED")):
+        return True
+    if order_state and not broker_session_owner.get("last_order_status_at"):
         return True
     if order_state or broker_session_owner.get("last_order_status_at"):
         return not _callback_fresh(

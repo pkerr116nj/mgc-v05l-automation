@@ -52,9 +52,17 @@ def build_broker_session_authority(
     owner = _mapping(lease.get("broker_session_owner"))
     connection_mode = str(lease.get("connection_mode") or "").strip().upper()
     connection_health = _mapping(lease.get("connection_health"))
+    callback_attribution = _mapping(
+        lease.get("callback_ownership_attribution") or connection_health.get("callback_ownership_attribution")
+    )
     lease_state = str(lease.get("lease_state") or "").strip().upper()
     allowed_uses = _published_allowed_uses(lease=lease, connection_mode=connection_mode, lease_state=lease_state)
-    authority_blockers = _authority_blockers(lease=lease, connection_mode=connection_mode, lease_state=lease_state)
+    authority_blockers = _authority_blockers(
+        lease=lease,
+        connection_mode=connection_mode,
+        lease_state=lease_state,
+        callback_attribution=callback_attribution,
+    )
     diagnostics_policy = diagnostic_probe_policy(active_track_b_exposure=active_track_b_exposure)
     split_ownership = _split_session_ownership(owner=owner, observed_submit_client_ids=observed_submit_client_ids or [])
 
@@ -87,6 +95,16 @@ def build_broker_session_authority(
         "last_exec_at": owner.get("last_exec_at"),
         "last_completed_order_at": owner.get("last_completed_order_at"),
         "source_connection_id": owner.get("source_connection_id"),
+        "position_truth_client_id": callback_attribution.get("position_truth_client_id"),
+        "open_order_truth_client_id": callback_attribution.get("open_order_truth_client_id"),
+        "last_order_status_client_id": callback_attribution.get("last_order_status_client_id"),
+        "last_exec_details_client_id": callback_attribution.get("last_exec_details_client_id"),
+        "last_completed_order_client_id": callback_attribution.get("last_completed_order_client_id"),
+        "submit_client_id": callback_attribution.get("submit_client_id"),
+        "session_match": callback_attribution.get("session_match"),
+        "callback_age_seconds": callback_attribution.get("callback_age_seconds"),
+        "callback_missing_reason": callback_attribution.get("callback_missing_reason"),
+        "callback_ownership_attribution": callback_attribution,
         "broker_position_lease": _mapping(lease.get("broker_position_lease")),
         "broker_open_order_lease": _mapping(lease.get("broker_open_order_lease")),
         "execution_fill_evidence_lease": _mapping(lease.get("execution_fill_evidence_lease")),
@@ -94,9 +112,13 @@ def build_broker_session_authority(
         "connection_allowed_uses": _connection_allowed_uses(connection_health=connection_health, connection_mode=connection_mode),
         "authority_blockers": authority_blockers,
         "callback_health": {
+            "classification": callback_attribution.get("classification"),
             "last_order_status_at": owner.get("last_order_status_at"),
             "last_exec_at": owner.get("last_exec_at"),
             "last_completed_order_at": owner.get("last_completed_order_at"),
+            "last_order_status_client_id": callback_attribution.get("last_order_status_client_id"),
+            "last_exec_details_client_id": callback_attribution.get("last_exec_details_client_id"),
+            "last_completed_order_client_id": callback_attribution.get("last_completed_order_client_id"),
             "order_status_reliable": bool(connection_health.get("order_status_reliable")),
             "fill_callback_capable": bool(connection_health.get("fill_callback_capable")),
             "missing_execution_callbacks_visible": not bool(
@@ -214,7 +236,13 @@ def _classification_for(*, connection_mode: str, lease_state: str) -> str:
     return mapping.get(connection_mode, "BROKER_SESSION_AUTHORITY_OPERATOR_REQUIRED")
 
 
-def _authority_blockers(*, lease: Mapping[str, Any], connection_mode: str, lease_state: str) -> list[dict[str, str]]:
+def _authority_blockers(
+    *,
+    lease: Mapping[str, Any],
+    connection_mode: str,
+    lease_state: str,
+    callback_attribution: Mapping[str, Any],
+) -> list[dict[str, str]]:
     blockers: list[dict[str, str]] = []
     for source_name in ("authority_use_blockers", "blockers"):
         for row in lease.get(source_name) or []:
@@ -224,10 +252,18 @@ def _authority_blockers(*, lease: Mapping[str, Any], connection_mode: str, lease
                 if code:
                     blockers.append({"code": code, "detail": detail})
     if connection_mode == "ORDER_STATUS_UNRELIABLE":
+        attribution_classification = str(callback_attribution.get("classification") or "").strip()
+        attribution_reason = str(callback_attribution.get("callback_missing_reason") or "").strip()
+        detail = "Order status callback truth is stale or unknown; entry and close authority fail closed."
+        if attribution_classification in {"SPLIT_CALLBACK_OWNERSHIP", "CALLBACK_ATTRIBUTION_GAP"}:
+            detail = (
+                "Order status is unreliable because broker truth and callback ownership are not aligned"
+                f" ({attribution_reason or attribution_classification})."
+            )
         blockers.append(
             {
                 "code": "order_status_unreliable_blocks_submit_and_close",
-                "detail": "Order status callback truth is stale or unknown; entry and close authority fail closed.",
+                "detail": detail,
             }
         )
     elif connection_mode == "POSITION_TRUTH_ONLY":

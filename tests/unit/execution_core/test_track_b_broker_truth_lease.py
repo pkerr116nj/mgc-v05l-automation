@@ -296,6 +296,47 @@ def test_stale_order_status_callback_blocks_submit_even_with_fresh_open_order_sn
     assert _authority_blocker_codes(result) >= {"connection_not_submit_capable"}
 
 
+def test_split_callback_client_ids_explain_order_status_unreliable() -> None:
+    inputs = base_inputs()
+    inputs["order_state"] = {
+        **dict(inputs["order_state"]),
+        "last_order_status_at": TRUTH_TIME,
+        "last_order_status_client_id": 17086,
+    }
+
+    result = classify_broker_truth_lease(inputs)
+
+    attribution = result["callback_ownership_attribution"]
+    assert result["connection_mode"] == "ORDER_STATUS_UNRELIABLE"
+    assert attribution["classification"] == "SPLIT_CALLBACK_OWNERSHIP"
+    assert attribution["position_truth_client_id"] == 9077
+    assert attribution["open_order_truth_client_id"] == 9077
+    assert attribution["last_order_status_client_id"] == 17086
+    assert attribution["session_match"]["position_vs_order_status_same_session"] is False
+    assert attribution["callback_missing_reason"] == "position_order_status_client_mismatch"
+    assert result["submit_entry_allowed"] is False
+    assert result["submit_exit_allowed"] is False
+
+
+def test_same_session_fresh_order_status_classifies_submit_capable() -> None:
+    inputs = base_inputs()
+    inputs["order_state"] = {
+        **dict(inputs["order_state"]),
+        "last_order_status_at": TRUTH_TIME,
+        "last_order_status_client_id": 9077,
+    }
+
+    result = classify_broker_truth_lease(inputs)
+
+    attribution = result["callback_ownership_attribution"]
+    assert result["connection_mode"] == "SUBMIT_CAPABLE"
+    assert attribution["classification"] == "CALLBACK_OWNERSHIP_ALIGNED"
+    assert attribution["session_match"]["position_vs_order_status_same_session"] is True
+    assert attribution["callback_age_seconds"]["order_status"] == 120.0
+    assert result["allowed_uses"]["new_entry"] is True
+    assert result["allowed_uses"]["managed_risk_reducing_close"] is True
+
+
 def test_missing_fill_callback_routes_to_broker_observed_adoption_path() -> None:
     inputs = base_inputs()
     inputs["last_successful_broker_truth"] = {
@@ -337,6 +378,58 @@ def test_missing_fill_callback_routes_to_broker_observed_adoption_path() -> None
     assert result["allowed_uses"]["fill_callback_adoption"] is False
     assert result["allowed_uses"]["broker_observed_adoption_diagnosis"] is True
     assert result["submit_entry_allowed"] is False
+
+
+def test_missing_exec_details_explains_adoption_only_mode() -> None:
+    inputs = base_inputs()
+    inputs["connection_mode"] = "POSITION_TRUTH_ONLY"
+    inputs["submit_ownership"] = {"available": True, "client_id": 11121, "trade_id": "trade-mes"}
+    inputs["last_successful_broker_truth"] = {
+        **dict(inputs["last_successful_broker_truth"]),
+        "positions": [{"symbol": "MES", "local_symbol": "MESM6", "quantity": "1.0"}],
+    }
+    inputs["latest_attempt_status"] = {
+        **dict(inputs["latest_attempt_status"]),
+        "positions": [{"symbol": "MES", "local_symbol": "MESM6", "quantity": "1.0"}],
+    }
+
+    result = classify_broker_truth_lease(inputs)
+
+    attribution = result["callback_ownership_attribution"]
+    assert result["connection_mode"] == "POSITION_TRUTH_ONLY"
+    assert result["allowed_uses"]["broker_observed_adoption_diagnosis"] is True
+    assert result["allowed_uses"]["new_entry"] is False
+    assert result["allowed_uses"]["managed_risk_reducing_close"] is False
+    assert attribution["submit_client_id"] == 11121
+    assert attribution["callback_missing_reason"] == "order_status_client_unknown"
+    assert {row["code"] for row in attribution["callback_missing_reasons"]} >= {
+        "exec_details_callback_missing",
+        "exec_details_client_unknown",
+        "completed_order_callback_missing",
+        "completed_order_client_unknown",
+    }
+
+
+def test_no_callback_metadata_fails_closed_with_unknown_callback_ownership() -> None:
+    inputs = base_inputs()
+    inputs["order_state"] = {
+        "generated_at": RECON_TIME,
+        "unknown_open_order_count": 0,
+        "unresolved_intent_count": 0,
+        "live_money_eligible": False,
+    }
+
+    result = classify_broker_truth_lease(inputs)
+
+    attribution = result["callback_ownership_attribution"]
+    assert result["connection_mode"] == "ORDER_STATUS_UNRELIABLE"
+    assert result["allowed_uses"]["new_entry"] is False
+    assert result["allowed_uses"]["managed_risk_reducing_close"] is False
+    assert attribution["classification"] == "CALLBACK_ATTRIBUTION_GAP"
+    assert {row["code"] for row in attribution["callback_missing_reasons"]} >= {
+        "order_status_callback_missing",
+        "order_status_client_unknown",
+    }
 
 
 def test_split_client_ownership_is_reported_and_adoption_diagnosis_still_allowed() -> None:

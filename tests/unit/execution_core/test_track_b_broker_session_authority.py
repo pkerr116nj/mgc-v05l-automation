@@ -147,7 +147,50 @@ def test_missing_order_status_blocks_submit_and_close_even_with_fresh_open_order
     assert authority["classification"] == "BROKER_SESSION_AUTHORITY_ORDER_STATUS_UNRELIABLE"
     assert authority["allowed_uses"]["new_entry"] is False
     assert authority["allowed_uses"]["managed_risk_reducing_close"] is False
+    assert authority["callback_ownership_attribution"]["classification"] == "CALLBACK_ATTRIBUTION_GAP"
+    assert authority["callback_missing_reason"] == "order_status_callback_missing"
     assert _blocker_codes(authority) >= {"order_status_unreliable_blocks_submit_and_close"}
+
+
+def test_split_callback_ownership_is_published_with_specific_blocker_reason() -> None:
+    inputs = _base_inputs()
+    inputs["order_state"] = {
+        **dict(inputs["order_state"]),
+        "last_order_status_at": TRUTH_TIME,
+        "last_order_status_client_id": 17086,
+    }
+    lease = classify_broker_truth_lease(inputs)
+
+    authority = build_broker_session_authority(lease=lease, generated_at=NOW)
+
+    assert authority["classification"] == "BROKER_SESSION_AUTHORITY_ORDER_STATUS_UNRELIABLE"
+    assert authority["position_truth_client_id"] == 9077
+    assert authority["open_order_truth_client_id"] == 9077
+    assert authority["last_order_status_client_id"] == 17086
+    assert authority["session_match"]["position_vs_order_status_same_session"] is False
+    assert authority["callback_ownership_attribution"]["classification"] == "SPLIT_CALLBACK_OWNERSHIP"
+    assert authority["callback_missing_reason"] == "position_order_status_client_mismatch"
+    blocker = next(row for row in authority["authority_blockers"] if row["code"] == "order_status_unreliable_blocks_submit_and_close")
+    assert "position_order_status_client_mismatch" in blocker["detail"]
+
+
+def test_aligned_callback_ownership_keeps_stronger_submit_capable_classification() -> None:
+    inputs = _base_inputs()
+    inputs["order_state"] = {
+        **dict(inputs["order_state"]),
+        "last_order_status_at": TRUTH_TIME,
+        "last_order_status_client_id": 9077,
+    }
+    lease = classify_broker_truth_lease(inputs)
+
+    authority = build_broker_session_authority(lease=lease, generated_at=NOW)
+
+    assert authority["classification"] == "BROKER_SESSION_AUTHORITY_SUBMIT_CAPABLE"
+    assert authority["callback_ownership_attribution"]["classification"] == "CALLBACK_OWNERSHIP_ALIGNED"
+    assert authority["session_match"]["position_vs_order_status_same_session"] is True
+    assert authority["callback_age_seconds"]["order_status"] == 120.0
+    assert authority["allowed_uses"]["new_entry"] is True
+    assert authority["allowed_uses"]["managed_risk_reducing_close"] is True
 
 
 def test_position_truth_only_allows_adoption_diagnosis_only() -> None:
@@ -163,6 +206,7 @@ def test_position_truth_only_allows_adoption_diagnosis_only() -> None:
     assert authority["allowed_uses"]["managed_risk_reducing_close"] is False
     assert authority["allowed_uses"]["broker_observed_adoption_diagnosis"] is True
     assert authority["connection_allowed_uses"]["broker_observed_adoption_diagnosis_connection"] is True
+    assert authority["callback_ownership_attribution"]["classification"] == "CALLBACK_OWNERSHIP_UNKNOWN"
 
 
 def test_missing_fill_callback_is_visible_as_callback_health() -> None:
