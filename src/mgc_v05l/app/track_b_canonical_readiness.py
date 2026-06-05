@@ -86,6 +86,7 @@ def _write_json_atomic(path: Path, payload: Mapping[str, Any]) -> None:
 def compact_readiness_summary(payload: Mapping[str, Any]) -> dict[str, Any]:
     broker_truth = _mapping(payload.get("broker_truth"))
     broker_truth_lease = _mapping(payload.get("broker_truth_lease"))
+    broker_session_allowed_uses = _mapping(payload.get("broker_session_allowed_uses"))
     phase1_reconciliation = _mapping(payload.get("phase1_reconciliation"))
     execution_core_shared_truth = _mapping(payload.get("execution_core_shared_truth"))
     shared_truth_classifications = _mapping(execution_core_shared_truth.get("classifications"))
@@ -111,6 +112,13 @@ def compact_readiness_summary(payload: Mapping[str, Any]) -> dict[str, Any]:
         "broker_lease_degraded_diagnostic": payload.get("broker_lease_degraded_diagnostic") is True,
         "broker_truth_lease_age_seconds": broker_truth_lease.get("age_seconds"),
         "broker_truth_lease_entry_seconds_remaining": broker_truth_lease.get("entry_seconds_remaining"),
+        "broker_session_authority_classification": payload.get("broker_session_authority_classification")
+        or "BROKER_SESSION_AUTHORITY_MISSING",
+        "broker_session_connection_mode": payload.get("broker_session_connection_mode") or "UNKNOWN",
+        "broker_session_allowed_uses": broker_session_allowed_uses,
+        "broker_session_authority_blockers": _codes(payload.get("broker_session_authority_blockers")),
+        "callback_ownership_attribution": payload.get("callback_ownership_attribution"),
+        "broker_session_submit_alignment": payload.get("broker_session_submit_alignment") or "UNKNOWN",
         "proof_readiness_classification": proof_readiness.get("classification"),
         "shared_truth_open_order_truth": shared_truth_classifications.get("Open Order Truth"),
         "shared_truth_managed_order_registry": shared_truth_classifications.get("Managed Order Registry"),
@@ -147,6 +155,12 @@ def print_summary(summary: Mapping[str, Any], *, as_json: bool) -> None:
         "broker_lease_degraded_diagnostic",
         "broker_truth_lease_age_seconds",
         "broker_truth_lease_entry_seconds_remaining",
+        "broker_session_authority_classification",
+        "broker_session_connection_mode",
+        "broker_session_allowed_uses",
+        "broker_session_authority_blockers",
+        "callback_ownership_attribution",
+        "broker_session_submit_alignment",
         "proof_readiness_classification",
         "shared_truth_open_order_truth",
         "shared_truth_managed_order_registry",

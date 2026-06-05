@@ -720,6 +720,16 @@ def _build_governance_row(
         "submit_block_reasons": list(dict.fromkeys(submit_block_reasons)),
         "submit_allowed": submit_allowed,
         "bridge_invocation_allowed": submit_allowed and bool(inventory_row.get("bridge_adapter_ready")),
+        "broker_session_authority_classification": backend_source_readiness.get(
+            "broker_session_authority_classification"
+        ),
+        "broker_session_connection_mode": backend_source_readiness.get("broker_session_connection_mode"),
+        "broker_session_allowed_uses": dict(backend_source_readiness.get("broker_session_allowed_uses") or {}),
+        "broker_session_authority_blockers": list(
+            backend_source_readiness.get("broker_session_authority_blockers") or []
+        ),
+        "callback_ownership_attribution": backend_source_readiness.get("callback_ownership_attribution"),
+        "broker_session_submit_alignment": backend_source_readiness.get("broker_session_submit_alignment"),
         "backend_source_readiness": backend_source_readiness,
         "backend_source_readiness_detail": backend_source_readiness.get("detail"),
         "monitor_health": monitor_status.get("health_classification"),
@@ -1140,6 +1150,7 @@ def _backend_source_live_readiness(
     canonical_state = str(canonical.get("canonical_readiness") or canonical.get("state") or "").strip().upper()
     canonical_runtime = dict(canonical.get("runtime") or {})
     canonical_root_guard = dict(canonical.get("root_guard_summary") or {})
+    broker_session_diagnostic = _canonical_broker_session_diagnostic(canonical)
     paper_stack_authority = _canonical_paper_stack_submit_authority(
         canonical=canonical,
         canonical_status=canonical_status,
@@ -1296,6 +1307,7 @@ def _backend_source_live_readiness(
         "temp_paper_blocked": temp_paper_blocked,
         "canonical_readiness": canonical_state or None,
         "canonical_readiness_authoritative": canonical_authoritative,
+        **broker_session_diagnostic,
         "paper_stack_authority": paper_stack_authority,
         "canonical_readiness_artifact": artifacts["canonical_readiness"],
         "presentation_readiness_authority": "DIAGNOSTIC_ONLY_WHEN_CANONICAL_PRESENT",
@@ -1435,6 +1447,36 @@ def _canonical_paper_stack_submit_authority(
         "paper_runtime_truth_heartbeat_state": paper_runtime_truth.get("heartbeat_state"),
         "broker_truth_lease_state": broker_truth_lease.get("lease_state"),
         "phase1_reconciliation_classification": canonical_reconciliation.get("classification"),
+    }
+
+
+def _canonical_broker_session_diagnostic(canonical: dict[str, Any]) -> dict[str, Any]:
+    if not canonical:
+        return {
+            "broker_session_authority_classification": "BROKER_SESSION_AUTHORITY_MISSING",
+            "broker_session_connection_mode": "UNKNOWN",
+            "broker_session_allowed_uses": {},
+            "broker_session_authority_blockers": ["broker_session_authority_missing"],
+            "callback_ownership_attribution": None,
+            "broker_session_submit_alignment": "UNKNOWN",
+        }
+    blockers = []
+    for row in list(canonical.get("broker_session_authority_blockers") or []):
+        if isinstance(row, dict):
+            code = str(row.get("code") or "").strip()
+            blockers.append(code or dict(row))
+        else:
+            text = str(row or "").strip()
+            if text:
+                blockers.append(text)
+    return {
+        "broker_session_authority_classification": canonical.get("broker_session_authority_classification")
+        or "BROKER_SESSION_AUTHORITY_MISSING",
+        "broker_session_connection_mode": canonical.get("broker_session_connection_mode") or "UNKNOWN",
+        "broker_session_allowed_uses": dict(canonical.get("broker_session_allowed_uses") or {}),
+        "broker_session_authority_blockers": blockers,
+        "callback_ownership_attribution": canonical.get("callback_ownership_attribution"),
+        "broker_session_submit_alignment": canonical.get("broker_session_submit_alignment") or "UNKNOWN",
     }
 
 
@@ -1826,6 +1868,10 @@ def _build_status_payload(
             "status_counts": _count_by_key(strategy_rows, "strategy_status"),
             "routing_mode_counts": _count_by_key(strategy_rows, "current_routing_mode"),
             "submit_capable_count": len([row for row in strategy_rows if row.get("submit_allowed")]),
+            "broker_session_submit_alignment_counts": _count_by_key(
+                strategy_rows,
+                "broker_session_submit_alignment",
+            ),
         },
     }
     return payload

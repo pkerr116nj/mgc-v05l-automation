@@ -224,9 +224,27 @@ def _write_canonical_readiness(
     runtime_ingestion_fresh: bool = True,
     root_match: bool = True,
     live_money_eligible: bool = False,
+    broker_session_allowed_uses: dict | None = None,
+    broker_session_classification: str = "BROKER_SESSION_AUTHORITY_SUBMIT_CAPABLE",
+    broker_session_connection_mode: str = "SUBMIT_CAPABLE",
+    broker_session_submit_alignment: str | None = None,
 ) -> None:
     path = tmp_path / "outputs" / "operator_dashboard" / "runtime" / "latest_canonical_readiness.json"
     path.parent.mkdir(parents=True, exist_ok=True)
+    session_allowed_uses = (
+        broker_session_allowed_uses
+        if broker_session_allowed_uses is not None
+        else {"new_entry": state == "READY_SUBMIT_CAPABLE", "managed_risk_reducing_close": True}
+    )
+    if broker_session_submit_alignment is None:
+        session_new_entry_allowed = session_allowed_uses.get("new_entry") is True
+        readiness_submit_allowed = state == "READY_SUBMIT_CAPABLE"
+        if readiness_submit_allowed and not session_new_entry_allowed:
+            broker_session_submit_alignment = "READINESS_SUBMIT_ALLOWED_BROKER_SESSION_BLOCKED"
+        elif not readiness_submit_allowed and session_new_entry_allowed:
+            broker_session_submit_alignment = "READINESS_BLOCKED_BROKER_SESSION_ALLOWED"
+        else:
+            broker_session_submit_alignment = "ALIGNED"
     path.write_text(
         json.dumps(
             {
@@ -248,6 +266,18 @@ def _write_canonical_readiness(
                     "live_money_eligible": live_money_eligible,
                 },
                 "broker_truth_lease": {"lease_state": "ACTIVE"},
+                "broker_session_authority_classification": broker_session_classification,
+                "broker_session_connection_mode": broker_session_connection_mode,
+                "broker_session_allowed_uses": session_allowed_uses,
+                "broker_session_authority_blockers": [
+                    {"code": "order_status_unreliable_blocks_submit_and_close"}
+                ]
+                if broker_session_allowed_uses is not None and broker_session_allowed_uses.get("new_entry") is False
+                else [],
+                "callback_ownership_attribution": {"last_order_status_client_id": None}
+                if broker_session_connection_mode == "ORDER_STATUS_UNRELIABLE"
+                else None,
+                "broker_session_submit_alignment": broker_session_submit_alignment,
                 "phase1_reconciliation": {"classification": "TRACK_B_PAPER_BROKER_RECONCILED"},
                 "live_money_eligible": live_money_eligible,
             }
@@ -867,6 +897,55 @@ def test_governance_uses_fresh_canonical_readiness_over_stale_dashboard_snapshot
     assert nq["submit_allowed"] is True
 
 
+def test_governance_surfaces_broker_session_submit_contradiction_without_blocking(tmp_path: Path) -> None:
+    _write_monitor(
+        tmp_path,
+        broker_position_quantity=0.0,
+        ledger_position_quantity=0.0,
+    )
+    _write_ledger(tmp_path)
+    _write_dashboard(tmp_path)
+    _write_backend_source_readiness(
+        tmp_path,
+        generated_at="2026-04-29T12:28:50.338596+00:00",
+        runtime_running=False,
+        paper_runtime_ready=False,
+        paper_trade_allowed=False,
+    )
+    _write_canonical_readiness(
+        tmp_path,
+        broker_session_allowed_uses={
+            "new_entry": False,
+            "managed_risk_reducing_close": False,
+            "status_diagnostic": True,
+        },
+        broker_session_classification="BROKER_SESSION_AUTHORITY_ORDER_STATUS_UNRELIABLE",
+        broker_session_connection_mode="ORDER_STATUS_UNRELIABLE",
+    )
+    _write_paper_runtime_truth(tmp_path)
+    _write_signal_audit(tmp_path)
+    _write_strategy_performance(tmp_path)
+
+    artifacts = run_ibkr_paper_strategy_governance(config=_config(tmp_path))
+
+    nq = next(row for row in artifacts.performance_rows if row["strategy_id"] == "nq_1x_ny_early_core__us_late_long")
+    readiness = nq["backend_source_readiness"]
+    assert nq["submit_allowed"] is True
+    assert "backend_or_source_not_live_ready" not in nq["submit_block_reasons"]
+    assert (
+        nq["broker_session_submit_alignment"]
+        == "READINESS_SUBMIT_ALLOWED_BROKER_SESSION_BLOCKED"
+    )
+    assert readiness["broker_session_submit_alignment"] == nq["broker_session_submit_alignment"]
+    assert nq["broker_session_authority_classification"] == "BROKER_SESSION_AUTHORITY_ORDER_STATUS_UNRELIABLE"
+    assert nq["broker_session_connection_mode"] == "ORDER_STATUS_UNRELIABLE"
+    assert nq["broker_session_allowed_uses"]["new_entry"] is False
+    assert nq["broker_session_authority_blockers"] == ["order_status_unreliable_blocks_submit_and_close"]
+    assert artifacts.status_payload["summary"]["broker_session_submit_alignment_counts"][
+        "READINESS_SUBMIT_ALLOWED_BROKER_SESSION_BLOCKED"
+    ] >= 1
+
+
 def test_governance_blocks_when_canonical_runtime_down_even_if_dashboard_snapshot_allows(tmp_path: Path) -> None:
     _write_monitor(
         tmp_path,
@@ -895,6 +974,37 @@ def test_governance_blocks_when_canonical_runtime_down_even_if_dashboard_snapsho
     assert "paper_runtime_not_running" in nq["backend_source_readiness"]["block_reasons"]
     assert nq["submit_block_reasons"] == ["backend_or_source_not_live_ready"]
     assert nq["submit_allowed"] is False
+
+
+def test_governance_surfaces_readiness_blocked_broker_session_allowed_alignment(tmp_path: Path) -> None:
+    _write_monitor(
+        tmp_path,
+        broker_position_quantity=0.0,
+        ledger_position_quantity=0.0,
+    )
+    _write_ledger(tmp_path)
+    _write_dashboard(tmp_path)
+    _write_backend_source_readiness(tmp_path)
+    _write_canonical_readiness(
+        tmp_path,
+        state="READY_OBSERVATION_ONLY",
+        runtime_running=False,
+        runtime_healthy=False,
+        runtime_ingestion_fresh=False,
+        broker_session_allowed_uses={"new_entry": True, "managed_risk_reducing_close": True},
+        broker_session_classification="BROKER_SESSION_AUTHORITY_SUBMIT_CAPABLE",
+        broker_session_connection_mode="SUBMIT_CAPABLE",
+    )
+    _write_paper_runtime_truth(tmp_path)
+    _write_signal_audit(tmp_path)
+    _write_strategy_performance(tmp_path)
+
+    artifacts = run_ibkr_paper_strategy_governance(config=_config(tmp_path))
+
+    nq = next(row for row in artifacts.performance_rows if row["strategy_id"] == "nq_1x_ny_early_core__us_late_long")
+    assert nq["submit_allowed"] is False
+    assert nq["submit_block_reasons"] == ["backend_or_source_not_live_ready"]
+    assert nq["broker_session_submit_alignment"] == "READINESS_BLOCKED_BROKER_SESSION_ALLOWED"
 
 
 def test_governance_uses_shared_services_authority_over_stale_canonical_runtime_down(

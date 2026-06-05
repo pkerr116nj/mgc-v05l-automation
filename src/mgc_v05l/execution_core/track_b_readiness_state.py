@@ -38,6 +38,9 @@ DEFAULT_CANONICAL_READINESS_ARTIFACT = (
 DEFAULT_BROKER_TRUTH_LEASE_ARTIFACT = (
     Path("outputs") / "operator_dashboard" / "runtime" / "latest_broker_truth_lease.json"
 )
+DEFAULT_BROKER_SESSION_AUTHORITY_ARTIFACT = (
+    Path("outputs") / "operator_dashboard" / "runtime" / "latest_broker_session_authority.json"
+)
 DEFAULT_PHASE1_DATABENTO_LIVE_LISTENER_STATUS_ARTIFACT = (
     Path("outputs")
     / "reports"
@@ -671,6 +674,9 @@ def build_readiness_inputs(
     broker_truth = _broker_truth_input(_mapping(artifacts.get("broker_truth_status")), now=now)
     broker_truth_lease_artifact = _effective_broker_truth_lease_artifact(artifacts, now=now)
     broker_truth_lease = _broker_truth_lease_input(broker_truth_lease_artifact, now=now)
+    broker_session_authority = _broker_session_authority_input(
+        _mapping(artifacts.get("broker_session_authority"))
+    )
     reconciliation = _reconciliation_input(_mapping(artifacts.get("phase1_reconciliation")), now=now)
     operator_status = _mapping(artifacts.get("operator_status"))
     config_in_force = _mapping(artifacts.get("config_in_force"))
@@ -720,6 +726,7 @@ def build_readiness_inputs(
         "runtime_truth_heartbeat": runtime_truth_heartbeat,
         "broker_truth": broker_truth,
         "broker_truth_lease": broker_truth_lease,
+        "broker_session_authority": broker_session_authority,
         "phase1_reconciliation": reconciliation,
         "execution_core_shared_truth": execution_core_shared_truth,
         "control_plane_authorization": control_plane_authorization,
@@ -829,6 +836,7 @@ def _load_readiness_artifacts(repo_root: Path) -> dict[str, Any]:
         ),
         "dashboard_health": _read_json(dashboard_runtime / "headless_supervised_paper_health.json"),
         "broker_truth_lease": _read_json(repo_root / DEFAULT_BROKER_TRUTH_LEASE_ARTIFACT),
+        "broker_session_authority": _read_json(repo_root / DEFAULT_BROKER_SESSION_AUTHORITY_ARTIFACT),
         "phase1_databento_live_listener_status": _read_json(
             repo_root / DEFAULT_PHASE1_DATABENTO_LIVE_LISTENER_STATUS_ARTIFACT
         ),
@@ -1710,6 +1718,52 @@ def _broker_truth_lease_input(payload: Mapping[str, Any], *, now: datetime) -> d
     }
 
 
+def _broker_session_authority_input(payload: Mapping[str, Any]) -> dict[str, Any]:
+    if not payload:
+        return {
+            "available": False,
+            "classification": "BROKER_SESSION_AUTHORITY_MISSING",
+            "connection_mode": "UNKNOWN",
+            "allowed_uses": {},
+            "authority_blockers": [
+                {
+                    "code": "broker_session_authority_missing",
+                    "detail": "Broker Session Authority artifact is missing; alignment is unknown.",
+                }
+            ],
+            "callback_ownership_attribution": None,
+        }
+    return {
+        "available": True,
+        "schema_version": payload.get("schema_version"),
+        "generated_at": payload.get("generated_at"),
+        "classification": payload.get("classification") or "BROKER_SESSION_AUTHORITY_UNKNOWN",
+        "connection_mode": payload.get("connection_mode") or "UNKNOWN",
+        "allowed_uses": _mapping(payload.get("allowed_uses")),
+        "authority_blockers": [
+            dict(row) for row in list(payload.get("authority_blockers") or []) if isinstance(row, Mapping)
+        ],
+        "callback_ownership_attribution": payload.get("callback_ownership_attribution"),
+        "broker_session_owner": _mapping(payload.get("broker_session_owner")),
+        "connection_health": _mapping(payload.get("connection_health")),
+        "callback_health": _mapping(payload.get("callback_health")),
+    }
+
+
+def _broker_session_submit_alignment(*, readiness_submit_allowed: bool, broker_session_authority: Mapping[str, Any]) -> str:
+    if not broker_session_authority or broker_session_authority.get("available") is False:
+        return "UNKNOWN"
+    allowed_uses = _mapping(broker_session_authority.get("allowed_uses"))
+    if "new_entry" not in allowed_uses:
+        return "UNKNOWN"
+    broker_session_new_entry_allowed = allowed_uses.get("new_entry") is True
+    if readiness_submit_allowed and not broker_session_new_entry_allowed:
+        return "READINESS_SUBMIT_ALLOWED_BROKER_SESSION_BLOCKED"
+    if not readiness_submit_allowed and broker_session_new_entry_allowed:
+        return "READINESS_BLOCKED_BROKER_SESSION_ALLOWED"
+    return "ALIGNED"
+
+
 def _reconciliation_input(payload: Mapping[str, Any], *, now: datetime) -> dict[str, Any]:
     if not payload:
         return {
@@ -2353,8 +2407,10 @@ def _readiness_result(
         state = "NOT_READY_CONFIG"
     root_guard = _mapping(inputs.get("root_guard_summary"))
     broker_truth_lease = _mapping(inputs.get("broker_truth_lease"))
+    broker_session_authority = _mapping(inputs.get("broker_session_authority"))
     execution_core_shared_truth = _mapping(inputs.get("execution_core_shared_truth"))
     shared_truth_classifications = _mapping(execution_core_shared_truth.get("classifications"))
+    submit_allowed = state == "READY_SUBMIT_CAPABLE"
     broker_lease_degraded_diagnostic = (
         str(broker_truth_lease.get("lease_state") or "").upper() == "ACTIVE_DEGRADED_REFRESH_FAILING"
         or str(shared_truth_classifications.get("Broker Truth Lease") or "").upper()
@@ -2369,8 +2425,8 @@ def _readiness_result(
         "paper_only": True,
         "canonical_readiness": state,
         "state": state,
-        "ready_submit_capable": state == "READY_SUBMIT_CAPABLE",
-        "submit_allowed": state == "READY_SUBMIT_CAPABLE",
+        "ready_submit_capable": submit_allowed,
+        "submit_allowed": submit_allowed,
         "runtime_start_allowed": state in {
             "READY_SUBMIT_CAPABLE",
             "READY_OBSERVATION_ONLY",
@@ -2387,6 +2443,16 @@ def _readiness_result(
         "broker_truth": _mapping(inputs.get("broker_truth")),
         "broker_truth_lease": broker_truth_lease,
         "broker_lease_degraded_diagnostic": broker_lease_degraded_diagnostic,
+        "broker_session_authority": broker_session_authority,
+        "broker_session_authority_classification": broker_session_authority.get("classification"),
+        "broker_session_connection_mode": broker_session_authority.get("connection_mode"),
+        "broker_session_allowed_uses": _mapping(broker_session_authority.get("allowed_uses")),
+        "broker_session_authority_blockers": list(broker_session_authority.get("authority_blockers") or []),
+        "callback_ownership_attribution": broker_session_authority.get("callback_ownership_attribution"),
+        "broker_session_submit_alignment": _broker_session_submit_alignment(
+            readiness_submit_allowed=submit_allowed,
+            broker_session_authority=broker_session_authority,
+        ),
         "phase1_reconciliation": _mapping(inputs.get("phase1_reconciliation")),
         "execution_core_shared_truth": execution_core_shared_truth,
         "control_plane_authorization": _mapping(inputs.get("control_plane_authorization")),

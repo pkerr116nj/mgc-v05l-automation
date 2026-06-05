@@ -1195,6 +1195,75 @@ def test_active_broker_truth_lease_clears_broker_freshness_blocker() -> None:
     assert result["broker_truth_lease"]["lease_state"] == "ACTIVE"
 
 
+def test_readiness_surfaces_submit_allowed_broker_session_blocked_alignment() -> None:
+    inputs = _clean_inputs()
+    inputs["broker_session_authority"] = {
+        "available": True,
+        "classification": "BROKER_SESSION_AUTHORITY_ORDER_STATUS_UNRELIABLE",
+        "connection_mode": "ORDER_STATUS_UNRELIABLE",
+        "allowed_uses": {"new_entry": False, "managed_risk_reducing_close": False, "status_diagnostic": True},
+        "authority_blockers": [{"code": "order_status_unreliable_blocks_submit_and_close"}],
+        "callback_ownership_attribution": {"last_order_status_client_id": None},
+    }
+
+    result = classify_canonical_readiness(inputs)
+
+    assert result["canonical_readiness"] == "READY_SUBMIT_CAPABLE"
+    assert result["submit_allowed"] is True
+    assert (
+        result["broker_session_submit_alignment"]
+        == "READINESS_SUBMIT_ALLOWED_BROKER_SESSION_BLOCKED"
+    )
+    assert result["broker_session_authority_classification"] == "BROKER_SESSION_AUTHORITY_ORDER_STATUS_UNRELIABLE"
+    assert result["broker_session_connection_mode"] == "ORDER_STATUS_UNRELIABLE"
+    assert result["broker_session_allowed_uses"]["new_entry"] is False
+    assert result["broker_session_authority_blockers"][0]["code"] == "order_status_unreliable_blocks_submit_and_close"
+
+
+def test_readiness_surfaces_blocked_broker_session_allowed_alignment_without_unblocking() -> None:
+    inputs = _clean_inputs()
+    inputs["runtime"]["running"] = False
+    inputs["broker_session_authority"] = {
+        "available": True,
+        "classification": "BROKER_SESSION_AUTHORITY_SUBMIT_CAPABLE",
+        "connection_mode": "SUBMIT_CAPABLE",
+        "allowed_uses": {"new_entry": True, "managed_risk_reducing_close": True},
+        "authority_blockers": [],
+    }
+
+    result = classify_canonical_readiness(inputs)
+
+    assert result["canonical_readiness"] == "READY_OBSERVATION_ONLY"
+    assert result["submit_allowed"] is False
+    assert result["broker_session_submit_alignment"] == "READINESS_BLOCKED_BROKER_SESSION_ALLOWED"
+
+
+def test_readiness_missing_broker_session_authority_alignment_unknown() -> None:
+    result = classify_canonical_readiness(_clean_inputs())
+
+    assert result["canonical_readiness"] == "READY_SUBMIT_CAPABLE"
+    assert result["submit_allowed"] is True
+    assert result["broker_session_authority_classification"] is None
+    assert result["broker_session_submit_alignment"] == "UNKNOWN"
+
+
+def test_readiness_surfaces_aligned_broker_session_submit_state() -> None:
+    inputs = _clean_inputs()
+    inputs["broker_session_authority"] = {
+        "available": True,
+        "classification": "BROKER_SESSION_AUTHORITY_SUBMIT_CAPABLE",
+        "connection_mode": "SUBMIT_CAPABLE",
+        "allowed_uses": {"new_entry": True, "managed_risk_reducing_close": True},
+        "authority_blockers": [],
+    }
+
+    result = classify_canonical_readiness(inputs)
+
+    assert result["canonical_readiness"] == "READY_SUBMIT_CAPABLE"
+    assert result["submit_allowed"] is True
+    assert result["broker_session_submit_alignment"] == "ALIGNED"
+
+
 def test_degraded_broker_truth_lease_warns_without_dependency_blocker() -> None:
     inputs = _clean_inputs()
     inputs["broker_truth"]["fresh"] = False
