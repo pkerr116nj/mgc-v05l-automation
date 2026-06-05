@@ -399,7 +399,7 @@ def _agent_health_row(
         blocking_for_runtime_submit = False
         blocking_for_recovery = False
     runtime_probe = _runtime_probe(runtime_environment_truth) if agent_id == "track_b_paper_runtime" else {}
-    heartbeat_fresh = artifact_status.get("status") == HEALTHY
+    heartbeat_fresh = str(artifact_status.get("heartbeat_status") or artifact_status.get("status") or "") == HEALTHY
     artifact_fresh = artifact_status.get("status") == HEALTHY
     return {
         "agent_id": agent_id,
@@ -439,6 +439,7 @@ def _agent_health_row(
         "blocking_for_runtime_submit": blocking_for_runtime_submit,
         "blocking_for_recovery": blocking_for_recovery,
         "diagnostic_only": diagnostic_only,
+        "warnings": _list(artifact_status.get("warnings")),
         "evidence_paths": _evidence_paths(agent=agent, primary_path=primary_path),
         "reason": reason,
     }
@@ -637,14 +638,18 @@ def _canonical_readiness_artifact_status(
     current_head: str | None,
     runtime_environment_truth: Mapping[str, Any],
 ) -> dict[str, Any]:
-    if runtime_environment_truth.get("classification") != RUNTIME_DOWN_CLEAN:
-        return _required_artifact_status(
-            _primary_path(agent),
-            now=now,
-            max_age_seconds=config.artifact_max_age_seconds,
-            repo_root=config.repo_root,
-            current_head=current_head,
-        )
+    heartbeat_status = _artifact_status(
+        config.resolve(Path(str(agent.get("heartbeat_artifact_path") or ""))),
+        now=now,
+        max_age_seconds=config.artifact_max_age_seconds,
+        repo_root=config.repo_root,
+        current_head=current_head,
+    ) if agent.get("heartbeat_artifact_path") else {
+        "status": MISSING_ARTIFACT,
+        "reason": "heartbeat_artifact_path_missing",
+        "last_seen_at": None,
+        "freshness_age_seconds": None,
+    }
     primary_path = _canonical_readiness_primary_artifact(agent, config=config)
     if primary_path is None:
         return {
@@ -652,6 +657,7 @@ def _canonical_readiness_artifact_status(
             "reason": "canonical_readiness_artifact_path_missing",
             "last_seen_at": None,
             "freshness_age_seconds": None,
+            **_canonical_readiness_heartbeat_evidence(heartbeat_status),
         }
     path = Path(primary_path)
     payload = _read_json(path)
@@ -663,9 +669,14 @@ def _canonical_readiness_artifact_status(
         current_head=current_head,
     )
     if artifact.get("status") in {MISSING_ARTIFACT, ROOT_MISMATCH, SOURCE_COMMIT_MISMATCH, STALE}:
-        return artifact
+        return {**artifact, **_canonical_readiness_heartbeat_evidence(heartbeat_status)}
     if not payload:
-        return {**artifact, "status": MISSING_ARTIFACT, "reason": "canonical_readiness_artifact_missing_or_invalid"}
+        return {
+            **artifact,
+            "status": MISSING_ARTIFACT,
+            "reason": "canonical_readiness_artifact_missing_or_invalid",
+            **_canonical_readiness_heartbeat_evidence(heartbeat_status),
+        }
     if _canonical_readiness_startup_preflight_evidence_clean(
         payload=payload,
         runtime_environment_truth=runtime_environment_truth,
@@ -675,19 +686,69 @@ def _canonical_readiness_artifact_status(
             "status": HEALTHY,
             "reason": "canonical_readiness_artifact_fresh_startup_preflight",
             "startup_preflight_compatible": True,
+            **_canonical_readiness_heartbeat_evidence(heartbeat_status, warn_if_unhealthy=True),
         }
     if str(payload.get("classification") or "") == "READY":
-        return {**artifact, "status": HEALTHY, "reason": "canonical_readiness_artifact_fresh"}
+        return {
+            **artifact,
+            "status": HEALTHY,
+            "reason": "canonical_readiness_artifact_fresh",
+            **_canonical_readiness_heartbeat_evidence(heartbeat_status, warn_if_unhealthy=True),
+        }
     if (
         str(payload.get("canonical_readiness") or "") == "READY_SUBMIT_CAPABLE"
-        and payload.get("submit_allowed") is not False
+        and payload.get("submit_allowed") is True
+        and not _list(payload.get("blockers"))
+        and payload.get("live_money_eligible") is not True
+        and payload.get("paper_proof_invoked") is not True
     ):
-        return {**artifact, "status": HEALTHY, "reason": "canonical_readiness_artifact_fresh_submit_capable"}
+        return {
+            **artifact,
+            "status": HEALTHY,
+            "reason": "canonical_readiness_artifact_fresh_submit_capable",
+            **_canonical_readiness_heartbeat_evidence(heartbeat_status, warn_if_unhealthy=True),
+        }
+    runtime_down = runtime_environment_truth.get("classification") == RUNTIME_DOWN_CLEAN
     return {
         **artifact,
         "status": STALE,
-        "reason": "canonical_readiness_artifact_not_startup_preflight_compatible",
-        "startup_preflight_compatible": False,
+        "reason": "canonical_readiness_artifact_not_startup_preflight_compatible"
+        if runtime_down
+        else "canonical_readiness_artifact_not_submit_capable",
+        "startup_preflight_compatible": False if runtime_down else None,
+        **_canonical_readiness_heartbeat_evidence(heartbeat_status),
+    }
+
+
+def _canonical_readiness_heartbeat_evidence(
+    heartbeat_status: Mapping[str, Any],
+    *,
+    warn_if_unhealthy: bool = False,
+) -> dict[str, Any]:
+    status = str(heartbeat_status.get("status") or "")
+    reason = str(heartbeat_status.get("reason") or "")
+    warnings: list[dict[str, Any]] = []
+    if warn_if_unhealthy and status != HEALTHY:
+        code = (
+            "canonical_readiness_refresher_heartbeat_missing"
+            if status in {MISSING, MISSING_ARTIFACT}
+            else "canonical_readiness_refresher_heartbeat_stale"
+        )
+        warnings.append(
+            {
+                "code": code,
+                "status": status,
+                "reason": reason,
+                "last_seen_at": heartbeat_status.get("last_seen_at"),
+                "freshness_age_seconds": heartbeat_status.get("freshness_age_seconds"),
+            }
+        )
+    return {
+        "heartbeat_status": status,
+        "heartbeat_reason": reason,
+        "heartbeat_last_seen_at": heartbeat_status.get("last_seen_at"),
+        "heartbeat_freshness_age_seconds": heartbeat_status.get("freshness_age_seconds"),
+        "warnings": warnings,
     }
 
 
