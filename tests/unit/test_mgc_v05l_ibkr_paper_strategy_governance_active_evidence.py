@@ -4,6 +4,7 @@ import json
 from pathlib import Path
 
 from mgc_v05l.execution.ibkr_paper_strategy_governance import (
+    GOVERNANCE_SHADOW_ONLY_NOT_BROKER_AUTHORIZED,
     IbkrPaperStrategyGovernanceConfig,
     load_paper_strategy_governance_status,
     run_ibkr_paper_strategy_governance,
@@ -21,6 +22,8 @@ ACTIVE_EVIDENCE_LANES = {
     "mes_globex_active_participation_long": "MES",
     "mes_globex_active_participation_short": "MES",
 }
+LONDON_LATE_SHADOW_LANE_ID = "mnq_london_late_active_participation_short"
+LONDON_LATE_PROMOTED_STRATEGY_ID = "PAPER_ACTIVE_EVIDENCE_MNQ_LONDON_LATE_PARTICIPATION_SHORT_V1"
 
 
 def _governance_config(tmp_path: Path) -> IbkrPaperStrategyGovernanceConfig:
@@ -139,6 +142,15 @@ def _write_canonical_ready_with_legacy_loop_probe_gap(tmp_path: Path) -> None:
                     "live_money_eligible": False,
                     "blockers": [],
                 },
+                "broker_session_authority_classification": "BROKER_SESSION_AUTHORITY_SUBMIT_CAPABLE_NO_RECENT_ORDER_EVENTS",
+                "broker_session_connection_mode": "SUBMIT_CAPABLE_NO_RECENT_ORDER_EVENTS",
+                "broker_session_allowed_uses": {
+                    "new_entry": True,
+                    "managed_risk_reducing_close": False,
+                    "broker_observed_adoption_diagnosis": True,
+                },
+                "broker_session_authority_blockers": [],
+                "broker_session_submit_alignment": "ALIGNED",
                 "phase1_reconciliation": {
                     "classification": "TRACK_B_PAPER_BROKER_RECONCILED",
                     "fresh": True,
@@ -272,6 +284,32 @@ def _write_paper_config_in_force(tmp_path: Path) -> None:
     path.write_text(json.dumps({"lanes": lanes}), encoding="utf-8")
 
 
+def _append_london_late_configured_lane(
+    tmp_path: Path,
+    *,
+    submit_authority: str | None = None,
+    standalone_strategy_id: str | None = None,
+) -> None:
+    path = tmp_path / "outputs" / "probationary_pattern_engine" / "paper_session" / "runtime" / "paper_config_in_force.json"
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    row = {
+        "lane_id": LONDON_LATE_SHADOW_LANE_ID,
+        "display_name": "MNQ London late active participation short",
+        "symbol": "MNQ",
+        "standalone_strategy_id": standalone_strategy_id,
+        "strategy_family": "paper_active_evidence",
+        "lane_mode": "PAPER_ONLY_LONDON_LATE_ACTIVE_EVIDENCE_LANE",
+        "paper_only": True,
+        "live_money_eligible": False,
+        "paper_proof_invoked": False,
+        "trade_size": 1,
+    }
+    if submit_authority is not None:
+        row["submit_authority"] = submit_authority
+    payload.setdefault("lanes", []).append(row)
+    path.write_text(json.dumps(payload), encoding="utf-8")
+
+
 def _write_clean_governance_inputs(tmp_path: Path) -> None:
     _write_phase1_reconciliation(tmp_path)
     _write_monitor(tmp_path)
@@ -335,3 +373,75 @@ def test_unknown_lane_without_bridge_adapter_still_blocks(tmp_path: Path) -> Non
     assert status["submit_allowed"] is False
     assert status["selected_strategy"] is None
     assert status["block_reasons"] == ["paper_strategy_governance_strategy_missing"]
+
+
+def test_london_late_shadow_only_lane_is_recognized_but_not_broker_authorized(tmp_path: Path) -> None:
+    _write_clean_governance_inputs(tmp_path)
+    _append_london_late_configured_lane(tmp_path)
+
+    config = _governance_config(tmp_path)
+    artifacts = run_ibkr_paper_strategy_governance(config=config)
+    write_ibkr_paper_strategy_governance_artifacts(config=config, artifacts=artifacts)
+
+    rows = {str(row["strategy_id"]): row for row in artifacts.performance_rows}
+    row = rows[LONDON_LATE_SHADOW_LANE_ID]
+
+    assert row["instrument"] == "MNQ"
+    assert row["current_order_destination"] == "ibkr_paper_bridge_submit_capable"
+    assert row["ibkr_bridge_submit_capable"] is True
+    assert row["submit_allowed"] is False
+    assert row["bridge_invocation_allowed"] is False
+    assert row["strategy_status"] == "WATCHLIST"
+    assert row["live_money_eligible"] is False
+    assert row["submit_block_reasons"] == [GOVERNANCE_SHADOW_ONLY_NOT_BROKER_AUTHORIZED]
+
+    status = load_paper_strategy_governance_status(repo_root=tmp_path, strategy_id=LONDON_LATE_SHADOW_LANE_ID)
+    assert status["selected_strategy"]["strategy_id"] == LONDON_LATE_SHADOW_LANE_ID
+    assert status["submit_allowed"] is False
+    assert status["block_reasons"] == [GOVERNANCE_SHADOW_ONLY_NOT_BROKER_AUTHORIZED]
+    assert "paper_strategy_governance_strategy_missing" not in status["block_reasons"]
+
+
+def test_future_approved_london_late_lane_can_have_broker_governance_row(tmp_path: Path) -> None:
+    _write_clean_governance_inputs(tmp_path)
+    _append_london_late_configured_lane(
+        tmp_path,
+        standalone_strategy_id=LONDON_LATE_PROMOTED_STRATEGY_ID,
+        submit_authority="PAPER_ONLY_GUARDED_RUNTIME_AFTER_PROMOTION_CONTRACT",
+    )
+
+    config = _governance_config(tmp_path)
+    artifacts = run_ibkr_paper_strategy_governance(config=config)
+    write_ibkr_paper_strategy_governance_artifacts(config=config, artifacts=artifacts)
+
+    status_by_lane = load_paper_strategy_governance_status(repo_root=tmp_path, strategy_id=LONDON_LATE_SHADOW_LANE_ID)
+    status_by_promoted_id = load_paper_strategy_governance_status(
+        repo_root=tmp_path,
+        strategy_id=LONDON_LATE_PROMOTED_STRATEGY_ID,
+    )
+
+    assert status_by_lane["selected_strategy"]["standalone_strategy_id"] == LONDON_LATE_PROMOTED_STRATEGY_ID
+    assert status_by_lane["submit_allowed"] is True
+    assert status_by_lane["block_reasons"] == []
+    assert status_by_lane["selected_strategy"]["bridge_invocation_allowed"] is True
+    assert status_by_lane["selected_strategy"]["live_money_eligible"] is False
+
+    assert status_by_promoted_id["selected_strategy"]["strategy_id"] == LONDON_LATE_SHADOW_LANE_ID
+    assert status_by_promoted_id["submit_allowed"] is True
+
+
+def test_london_late_shadow_only_is_distinguishable_from_missing_governance(tmp_path: Path) -> None:
+    _write_clean_governance_inputs(tmp_path)
+    _append_london_late_configured_lane(tmp_path)
+
+    config = _governance_config(tmp_path)
+    artifacts = run_ibkr_paper_strategy_governance(config=config)
+    write_ibkr_paper_strategy_governance_artifacts(config=config, artifacts=artifacts)
+
+    shadow_status = load_paper_strategy_governance_status(repo_root=tmp_path, strategy_id=LONDON_LATE_SHADOW_LANE_ID)
+    missing_status = load_paper_strategy_governance_status(repo_root=tmp_path, strategy_id="unknown_active_evidence_lane")
+
+    assert shadow_status["selected_strategy"] is not None
+    assert shadow_status["block_reasons"] == [GOVERNANCE_SHADOW_ONLY_NOT_BROKER_AUTHORIZED]
+    assert missing_status["selected_strategy"] is None
+    assert missing_status["block_reasons"] == ["paper_strategy_governance_strategy_missing"]

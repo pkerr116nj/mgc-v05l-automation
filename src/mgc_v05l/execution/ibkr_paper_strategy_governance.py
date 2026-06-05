@@ -77,6 +77,15 @@ _STATUS_PRECEDENCE = {
     "PROMISING": 1,
     "PROBATION_ACTIVE": 0,
 }
+GOVERNANCE_SHADOW_ONLY_NOT_BROKER_AUTHORIZED = "GOVERNANCE_SHADOW_ONLY_NOT_BROKER_AUTHORIZED"
+_BROKER_AUTHORIZED_SUBMIT_AUTHORITY = "PAPER_ONLY_GUARDED_RUNTIME_AFTER_PROMOTION_CONTRACT"
+_ACTIVE_EVIDENCE_LANE_MODES = {
+    "PAPER_ONLY_ACTIVE_EVIDENCE_LANE",
+    "PAPER_ONLY_GLOBEX_ACTIVE_EVIDENCE_LANE",
+    "PAPER_ONLY_LONDON_OPEN_ACTIVE_EVIDENCE_LANE",
+    "PAPER_ONLY_LONDON_LATE_ACTIVE_EVIDENCE_LANE",
+}
+_LONDON_LATE_ACTIVE_EVIDENCE_LANE_MODE = "PAPER_ONLY_LONDON_LATE_ACTIVE_EVIDENCE_LANE"
 
 
 @dataclass(frozen=True)
@@ -321,13 +330,18 @@ def _configured_runtime_lane_needs_governance_row(configured_row: dict[str, Any]
         return False
     lane_mode = str(configured_row.get("lane_mode") or "").strip().upper()
     submit_authority = str(configured_row.get("submit_authority") or "").strip().upper()
-    active_evidence_lane = lane_mode in {
-        "PAPER_ONLY_ACTIVE_EVIDENCE_LANE",
-        "PAPER_ONLY_GLOBEX_ACTIVE_EVIDENCE_LANE",
-    }
-    promotion_contract_authorized = submit_authority == "PAPER_ONLY_GUARDED_RUNTIME_AFTER_PROMOTION_CONTRACT"
+    active_evidence_lane = lane_mode in _ACTIVE_EVIDENCE_LANE_MODES
+    promotion_contract_authorized = submit_authority == _BROKER_AUTHORIZED_SUBMIT_AUTHORITY
     legacy_configured_canary = bool(configured_row.get("non_approved")) and bool(configured_row.get("exclude_from_strategy_performance"))
     return active_evidence_lane or promotion_contract_authorized or legacy_configured_canary
+
+
+def _configured_runtime_lane_shadow_only_blockers(configured_row: dict[str, Any]) -> list[str]:
+    lane_mode = str(configured_row.get("lane_mode") or "").strip().upper()
+    submit_authority = str(configured_row.get("submit_authority") or "").strip().upper()
+    if lane_mode == _LONDON_LATE_ACTIVE_EVIDENCE_LANE_MODE and submit_authority != _BROKER_AUTHORIZED_SUBMIT_AUTHORITY:
+        return [GOVERNANCE_SHADOW_ONLY_NOT_BROKER_AUTHORIZED]
+    return []
 
 
 def write_ibkr_paper_strategy_governance_artifacts(
@@ -594,6 +608,8 @@ def _build_governance_row(
         submit_block_reasons.append("unsupported_instrument_scope")
     if "lane_not_yet_submit_ported" in inventory_blockers or "strategy_lane_not_yet_submit_ported" in inventory_blockers:
         submit_block_reasons.append("lane_not_yet_submit_ported")
+    if GOVERNANCE_SHADOW_ONLY_NOT_BROKER_AUTHORIZED in inventory_blockers:
+        submit_block_reasons.append(GOVERNANCE_SHADOW_ONLY_NOT_BROKER_AUTHORIZED)
     if "unknown_strategy_state" in inventory_blockers or strategy_state in {"UNKNOWN", "BLOCKED"}:
         pause_reasons.append("unknown_strategy_state")
     if "broker_ledger_mismatch" in inventory_blockers:
@@ -662,7 +678,9 @@ def _build_governance_row(
     return {
         "strategy_id": lane_id,
         "bridge_strategy_id": bridge_strategy_id or None,
-        "standalone_strategy_id": performance_row.get("standalone_strategy_id") or signal_row.get("id"),
+        "standalone_strategy_id": performance_row.get("standalone_strategy_id")
+        or signal_row.get("id")
+        or inventory_row.get("standalone_strategy_id"),
         "instrument": instrument,
         "contract_symbol": dict(intent_row.get("contract_target") or {}).get("symbol"),
         "contract_month": dict(intent_row.get("contract_target") or {}).get("contract_month"),
@@ -779,6 +797,8 @@ def _strategy_governance_status(
     if current_app_runtime_status in {"DISABLED", "HALTED"} and strategy_state == "FLAT":
         return "DISABLED"
     if instrument not in _SUPPORTED_EXECUTABLE_INSTRUMENTS:
+        return "WATCHLIST"
+    if GOVERNANCE_SHADOW_ONLY_NOT_BROKER_AUTHORIZED in inventory_blockers:
         return "WATCHLIST"
     if "lane_not_yet_submit_ported" in inventory_blockers or "strategy_lane_not_yet_submit_ported" in inventory_blockers:
         return "WATCHLIST"
@@ -1741,10 +1761,12 @@ def _synthetic_configured_inventory_row(
     bridge_adapter: dict[str, Any],
 ) -> dict[str, Any]:
     lane_id = str(configured_row.get("lane_id") or "").strip()
+    standalone_strategy_id = str(configured_row.get("standalone_strategy_id") or lane_id).strip()
     instrument = str(configured_row.get("symbol") or "").strip().upper()
+    shadow_only_blockers = _configured_runtime_lane_shadow_only_blockers(configured_row)
     return {
         "strategy_id": lane_id,
-        "standalone_strategy_id": lane_id,
+        "standalone_strategy_id": standalone_strategy_id,
         "instrument": instrument,
         "strategy_family": str(configured_row.get("strategy_family") or configured_row.get("display_name") or lane_id),
         "current_app_runtime_status": "ACTIVE_RUNTIME_READY",
@@ -1754,15 +1776,17 @@ def _synthetic_configured_inventory_row(
         "entry_exit_capability": "ENTRY_AND_EXIT_WHEN_FLAT",
         "current_order_destination": str(bridge_adapter.get("current_order_destination") or ""),
         "can_emit_standardized_order_intent_now": True,
-        "blockers_to_ibkr_paper_routing": [],
+        "blockers_to_ibkr_paper_routing": shadow_only_blockers,
         "entries_enabled": True,
         "eligible_now": False,
         "last_signal_family": None,
         "last_signal_timestamp": None,
         "last_fill_timestamp": None,
-        "audit_verdict": "CONFIGURED_CANARY_ROUTE_READY",
+        "audit_verdict": "CONFIGURED_SHADOW_ONLY_ROUTE_BLOCKED" if shadow_only_blockers else "CONFIGURED_CANARY_ROUTE_READY",
         "monitor_submit_allowed": True,
         "bridge_adapter_ready": True,
+        "configured_lane_mode": str(configured_row.get("lane_mode") or ""),
+        "submit_authority": str(configured_row.get("submit_authority") or ""),
     }
 
 
