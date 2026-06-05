@@ -43,6 +43,9 @@ STARTUP_PREFLIGHT_REFRESH_ATTEMPTED="false"
 STARTUP_PREFLIGHT_REFRESH_CLASSIFICATION="NOT_ATTEMPTED"
 STARTUP_PREFLIGHT_REFRESHED_ARTIFACT_PATHS_JSON="[]"
 STARTUP_PREFLIGHT_REMAINING_START_BLOCKERS_JSON="[]"
+STARTUP_PREFLIGHT_DEPENDENCY_REFRESH_ATTEMPTED="false"
+STARTUP_PREFLIGHT_DEPENDENCY_REFRESH_STEPS_JSON="[]"
+STARTUP_PREFLIGHT_DEPENDENCY_REFRESH_FAILURES_JSON="[]"
 
 CANONICAL_CONFIGS=(
   "${REPO_ROOT}/config/base.yaml"
@@ -381,6 +384,9 @@ write_startup_artifact() {
   MGC_STARTUP_PREFLIGHT_REFRESH_CLASSIFICATION="${STARTUP_PREFLIGHT_REFRESH_CLASSIFICATION}" \
   MGC_STARTUP_PREFLIGHT_REFRESHED_ARTIFACT_PATHS_JSON="${STARTUP_PREFLIGHT_REFRESHED_ARTIFACT_PATHS_JSON}" \
   MGC_STARTUP_PREFLIGHT_REMAINING_START_BLOCKERS_JSON="${STARTUP_PREFLIGHT_REMAINING_START_BLOCKERS_JSON}" \
+  MGC_STARTUP_PREFLIGHT_DEPENDENCY_REFRESH_ATTEMPTED="${STARTUP_PREFLIGHT_DEPENDENCY_REFRESH_ATTEMPTED}" \
+  MGC_STARTUP_PREFLIGHT_DEPENDENCY_REFRESH_STEPS_JSON="${STARTUP_PREFLIGHT_DEPENDENCY_REFRESH_STEPS_JSON}" \
+  MGC_STARTUP_PREFLIGHT_DEPENDENCY_REFRESH_FAILURES_JSON="${STARTUP_PREFLIGHT_DEPENDENCY_REFRESH_FAILURES_JSON}" \
   "${PYTHON_BIN}" - "$STARTUP_ARTIFACT" "$classification" "$detail" "$pid" "$REPO_ROOT" "$CONFIG_PATHS_FILE" "$STACK_PROFILE" <<'PY'
 import json
 import os
@@ -418,6 +424,11 @@ payload = {
     "dashboard_authority": False,
     "startup_preflight_refresh_attempted": os.environ.get("MGC_STARTUP_PREFLIGHT_REFRESH_ATTEMPTED") == "true",
     "startup_preflight_refresh_classification": os.environ.get("MGC_STARTUP_PREFLIGHT_REFRESH_CLASSIFICATION") or "NOT_ATTEMPTED",
+    "startup_preflight_dependency_refresh_attempted": os.environ.get(
+        "MGC_STARTUP_PREFLIGHT_DEPENDENCY_REFRESH_ATTEMPTED"
+    ) == "true",
+    "dependency_refresh_steps": env_json_list("MGC_STARTUP_PREFLIGHT_DEPENDENCY_REFRESH_STEPS_JSON"),
+    "dependency_refresh_failures": env_json_list("MGC_STARTUP_PREFLIGHT_DEPENDENCY_REFRESH_FAILURES_JSON"),
     "refreshed_artifact_paths": env_json_list("MGC_STARTUP_PREFLIGHT_REFRESHED_ARTIFACT_PATHS_JSON"),
     "remaining_start_blockers": env_json_list("MGC_STARTUP_PREFLIGHT_REMAINING_START_BLOCKERS_JSON"),
 }
@@ -489,6 +500,19 @@ PY
 
 run_startup_preflight_evidence_refresh() {
   STARTUP_PREFLIGHT_REFRESH_ATTEMPTED="true"
+  STARTUP_PREFLIGHT_DEPENDENCY_REFRESH_ATTEMPTED="true"
+  local broker_truth_stdout="${STACK_DIR}/.startup_preflight_broker_truth.$$.json"
+  local broker_truth_stderr="${STACK_DIR}/.startup_preflight_broker_truth.$$.stderr"
+  local reconciliation_stdout="${STACK_DIR}/.startup_preflight_reconciliation.$$.json"
+  local reconciliation_stderr="${STACK_DIR}/.startup_preflight_reconciliation.$$.stderr"
+  local open_order_stdout="${STACK_DIR}/.startup_preflight_open_order_truth.$$.json"
+  local open_order_stderr="${STACK_DIR}/.startup_preflight_open_order_truth.$$.stderr"
+  local managed_position_stdout="${STACK_DIR}/.startup_preflight_managed_positions.$$.json"
+  local managed_position_stderr="${STACK_DIR}/.startup_preflight_managed_positions.$$.stderr"
+  local managed_order_stdout="${STACK_DIR}/.startup_preflight_managed_orders.$$.json"
+  local managed_order_stderr="${STACK_DIR}/.startup_preflight_managed_orders.$$.stderr"
+  local shared_truth_stdout="${STACK_DIR}/.startup_preflight_shared_truth.$$.json"
+  local shared_truth_stderr="${STACK_DIR}/.startup_preflight_shared_truth.$$.stderr"
   local readiness_stdout="${STACK_DIR}/.startup_preflight_canonical_readiness.$$.json"
   local readiness_stderr="${STACK_DIR}/.startup_preflight_canonical_readiness.$$.stderr"
   local control_stdout="${STACK_DIR}/.startup_preflight_control_plane.$$.json"
@@ -496,11 +520,54 @@ run_startup_preflight_evidence_refresh() {
   local status_stdout="${STACK_DIR}/.startup_preflight_status.$$.json"
   local status_stderr="${STACK_DIR}/.startup_preflight_status.$$.stderr"
   local result_json="${STACK_DIR}/.startup_preflight_refresh_result.$$.json"
+  local broker_truth_rc=0
+  local reconciliation_rc=0
+  local open_order_rc=0
+  local managed_position_rc=0
+  local managed_order_rc=0
+  local shared_truth_rc=0
   local readiness_rc=0
   local control_rc=0
   local status_rc=0
 
   set +e
+  "${PYTHON_BIN}" -m mgc_v05l.app.ibkr_broker_truth_refresher \
+    --once \
+    --read-only \
+    --mode PAPER \
+    --account-id DUM882026 \
+    > "${broker_truth_stdout}" 2> "${broker_truth_stderr}"
+  broker_truth_rc=$?
+  "${PYTHON_BIN}" -m mgc_v05l.execution_core.track_b_paper_broker_reconciliation \
+    --repo-root "${REPO_ROOT}" \
+    --account DUM882026 \
+    --symbols MNQ,MES \
+    > "${reconciliation_stdout}" 2> "${reconciliation_stderr}"
+  reconciliation_rc=$?
+  "${PYTHON_BIN}" -m mgc_v05l.app.track_b_open_order_truth \
+    --repo-root "${REPO_ROOT}" \
+    --once \
+    > "${open_order_stdout}" 2> "${open_order_stderr}"
+  open_order_rc=$?
+  "${PYTHON_BIN}" -m mgc_v05l.app.track_b_managed_position_registry \
+    --repo-root "${REPO_ROOT}" \
+    --once \
+    > "${managed_position_stdout}" 2> "${managed_position_stderr}"
+  managed_position_rc=$?
+  "${PYTHON_BIN}" -m mgc_v05l.app.track_b_managed_order_registry \
+    --repo-root "${REPO_ROOT}" \
+    --once \
+    > "${managed_order_stdout}" 2> "${managed_order_stderr}"
+  managed_order_rc=$?
+  "${PYTHON_BIN}" -m mgc_v05l.execution_core.track_b_shared_truth_refresh_cli \
+    --repo-root "${REPO_ROOT}" \
+    --account DUM882026 \
+    --symbols MNQ,MES \
+    --runtime-start-preflight \
+    --no-broker-lease-history \
+    --json \
+    > "${shared_truth_stdout}" 2> "${shared_truth_stderr}"
+  shared_truth_rc=$?
   "${PYTHON_BIN}" -m mgc_v05l.execution_core.track_b_readiness_state \
     --repo-root "${REPO_ROOT}" \
     --output "${CANONICAL_READINESS_FILE}" \
@@ -520,9 +587,21 @@ run_startup_preflight_evidence_refresh() {
 
   "${PYTHON_BIN}" - \
     "${REPO_ROOT}" \
+    "${broker_truth_stdout}" \
+    "${reconciliation_stdout}" \
+    "${open_order_stdout}" \
+    "${managed_position_stdout}" \
+    "${managed_order_stdout}" \
+    "${shared_truth_stdout}" \
     "${status_stdout}" \
     "${readiness_stdout}" \
     "${control_stdout}" \
+    "${broker_truth_rc}" \
+    "${reconciliation_rc}" \
+    "${open_order_rc}" \
+    "${managed_position_rc}" \
+    "${managed_order_rc}" \
+    "${shared_truth_rc}" \
     "${readiness_rc}" \
     "${control_rc}" \
     "${status_rc}" \
@@ -535,9 +614,21 @@ from pathlib import Path
 
 (
     repo_root,
+    broker_truth_stdout,
+    reconciliation_stdout,
+    open_order_stdout,
+    managed_position_stdout,
+    managed_order_stdout,
+    shared_truth_stdout,
     status_path,
     readiness_stdout,
     control_stdout,
+    broker_truth_rc,
+    reconciliation_rc,
+    open_order_rc,
+    managed_position_rc,
+    managed_order_rc,
+    shared_truth_rc,
     readiness_rc,
     control_rc,
     status_rc,
@@ -558,6 +649,12 @@ def first_present(payload, *keys, default=None):
         if key in payload:
             return payload.get(key)
     return default
+
+def to_int(value):
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return 0
 
 def add_path(paths, value):
     if not value:
@@ -580,6 +677,12 @@ def add_blocker(blockers, code, detail=None, source=None):
     if source:
         row["source"] = str(source)
     blockers.append(row)
+
+def add_failure(failures, step, code, detail=None):
+    row = {"step": step, "code": code}
+    if detail:
+        row["detail"] = str(detail)
+    failures.append(row)
 
 def list_rows(value):
     return value if isinstance(value, list) else []
@@ -610,23 +713,131 @@ def control_plane_has_explicit_unsafe_status(control):
     )
 
 status = load_json(status_path)
+broker_truth = load_json(broker_truth_stdout)
+reconciliation_stdout_payload = load_json(reconciliation_stdout)
+open_order_truth = load_json(open_order_stdout)
+managed_positions = load_json(managed_position_stdout)
+managed_orders = load_json(managed_order_stdout)
+shared_truth = load_json(shared_truth_stdout)
 readiness = load_json(readiness_stdout) or load_json(readiness_artifact)
 control = load_json(control_stdout) or load_json(control_artifact)
-reconciliation = load_json(
+reconciliation = reconciliation_stdout_payload or load_json(
     repo_root
     / "outputs/reports/track_b_paper_broker_reconciliation/latest_track_b_paper_broker_reconciliation.json"
 )
 
 paths = {str(Path(readiness_artifact)), str(Path(control_artifact))}
+for payload in (
+    broker_truth,
+    reconciliation_stdout_payload,
+    open_order_truth,
+    managed_positions,
+    managed_orders,
+    shared_truth,
+):
+    add_path(paths, payload.get("output_path"))
+    add_path(paths, payload.get("artifact_path"))
+    add_path(paths, payload.get("source_artifact_path"))
+    add_path(paths, payload.get("source_artifact_paths"))
+    add_path(paths, payload.get("refreshed_artifact_paths"))
 add_path(paths, control.get("source_artifact_paths"))
 add_path(paths, control.get("refreshed_artifact_paths"))
 
 blockers = []
-if int(readiness_rc) != 0:
+dependency_refresh_failures = []
+
+def nested_runtime_preflight_classification(payload):
+    runtime_start = payload.get("runtime_start_preflight")
+    if isinstance(runtime_start, dict):
+        return runtime_start.get("classification")
+    return None
+
+dependency_steps = [
+    {
+        "step": "broker_truth_broker_truth_lease_bsa",
+        "return_code": to_int(broker_truth_rc),
+        "classification": first_present(
+            broker_truth,
+            "classification",
+            "broker_session_authority_classification",
+            "broker_truth_lease_classification",
+        ),
+        "artifact_path": first_present(
+            broker_truth,
+            "output_path",
+            "artifact_path",
+            "broker_truth_lease_path",
+            "broker_session_authority_path",
+        ),
+    },
+    {
+        "step": "broker_lifecycle_reconciliation",
+        "return_code": to_int(reconciliation_rc),
+        "classification": first_present(
+            reconciliation,
+            "classification",
+            "reconciliation_classification",
+        ),
+        "artifact_path": first_present(reconciliation, "output_path", "artifact_path"),
+    },
+    {
+        "step": "open_order_truth",
+        "return_code": to_int(open_order_rc),
+        "classification": first_present(open_order_truth, "classification", "order_truth_classification"),
+        "artifact_path": first_present(open_order_truth, "output_path", "artifact_path"),
+    },
+    {
+        "step": "managed_position_registry",
+        "return_code": to_int(managed_position_rc),
+        "classification": first_present(managed_positions, "classification", "managed_position_classification"),
+        "artifact_path": first_present(managed_positions, "output_path", "artifact_path"),
+    },
+    {
+        "step": "managed_order_registry",
+        "return_code": to_int(managed_order_rc),
+        "classification": first_present(managed_orders, "classification", "managed_order_classification"),
+        "artifact_path": first_present(managed_orders, "output_path", "artifact_path"),
+    },
+    {
+        "step": "shared_truth",
+        "return_code": to_int(shared_truth_rc),
+        "classification": first_present(shared_truth, "classification")
+        or nested_runtime_preflight_classification(shared_truth),
+        "artifact_path": first_present(shared_truth, "output_path", "artifact_path"),
+    },
+    {
+        "step": "canonical_readiness",
+        "return_code": to_int(readiness_rc),
+        "classification": readiness.get("classification")
+        or readiness.get("canonical_state")
+        or readiness.get("readiness_classification"),
+        "artifact_path": str(Path(readiness_artifact)),
+    },
+    {
+        "step": "control_plane_snapshot",
+        "return_code": to_int(control_rc),
+        "classification": control.get("classification"),
+        "artifact_path": str(Path(control_artifact)),
+    },
+    {
+        "step": "paper_stack_status",
+        "return_code": to_int(status_rc),
+        "classification": first_present(status, "classification", "status_classification"),
+        "artifact_path": first_present(status, "output_path", "artifact_path"),
+    },
+]
+
+for step in dependency_steps:
+    if step["return_code"] != 0:
+        code = f"{step['step']}_refresh_failed"
+        add_failure(dependency_refresh_failures, step["step"], code, detail=f"return_code={step['return_code']}")
+        add_blocker(blockers, code, source=step["step"])
+
+if to_int(readiness_rc) != 0:
     add_blocker(blockers, "canonical_readiness_refresh_failed", source="canonical_readiness")
-if int(control_rc) != 0:
+if to_int(control_rc) != 0:
     add_blocker(blockers, "control_plane_refresh_failed", source="control_plane")
-if int(status_rc) != 0:
+if to_int(status_rc) != 0:
     add_blocker(blockers, "paper_stack_status_refresh_failed", source="paper_stack_status")
 
 safety = status.get("safety") if isinstance(status.get("safety"), dict) else {}
@@ -679,6 +890,63 @@ if lifecycle_position_count != 0 or lifecycle_order_count != 0:
         detail=f"positions={lifecycle_position_count} orders={lifecycle_order_count}",
         source="broker_lifecycle",
     )
+
+open_order_classification = str(
+    first_present(open_order_truth, "classification", "order_truth_classification", default="")
+    or ""
+)
+if open_order_classification and open_order_classification != "NO_OPEN_ORDERS":
+    add_blocker(
+        blockers,
+        "open_order_truth_not_clean",
+        detail=open_order_classification,
+        source="open_order_truth",
+    )
+
+managed_position_classification = str(
+    first_present(managed_positions, "classification", "managed_position_classification", default="")
+    or ""
+)
+if managed_position_classification and managed_position_classification not in {
+    "NO_MANAGED_POSITIONS",
+    "TRACK_B_MANAGED_POSITIONS_CLEAN_FLAT",
+}:
+    add_blocker(
+        blockers,
+        "managed_position_registry_not_clean",
+        detail=managed_position_classification,
+        source="managed_position_registry",
+    )
+
+managed_order_classification = str(
+    first_present(managed_orders, "classification", "managed_order_classification", default="")
+    or ""
+)
+if managed_order_classification and managed_order_classification != "NO_MANAGED_ORDERS":
+    add_blocker(
+        blockers,
+        "managed_order_registry_not_clean",
+        detail=managed_order_classification,
+        source="managed_order_registry",
+    )
+
+shared_runtime_start = shared_truth.get("runtime_start_preflight")
+if isinstance(shared_runtime_start, dict):
+    if shared_runtime_start.get("clean_for_runtime_start") is False:
+        add_blocker(
+            blockers,
+            "shared_truth_runtime_start_not_clean",
+            detail=shared_runtime_start.get("classification"),
+            source="shared_truth",
+        )
+    for row in list_rows(shared_runtime_start.get("blockers")):
+        if isinstance(row, dict):
+            add_blocker(
+                blockers,
+                "shared_truth_runtime_start_blocker",
+                detail=row.get("code") or row.get("detail") or row.get("reason") or row,
+                source="shared_truth",
+            )
 
 if control:
     is_start_safe = control_plane_start_safe(control)
@@ -734,9 +1002,20 @@ if control:
 else:
     add_blocker(blockers, "control_plane_snapshot_unavailable", source="control_plane")
 
-if int(readiness_rc) == 0 and int(control_rc) == 0 and int(status_rc) == 0 and not blockers:
+dependency_return_codes = [
+    to_int(broker_truth_rc),
+    to_int(reconciliation_rc),
+    to_int(open_order_rc),
+    to_int(managed_position_rc),
+    to_int(managed_order_rc),
+    to_int(shared_truth_rc),
+    to_int(readiness_rc),
+    to_int(control_rc),
+    to_int(status_rc),
+]
+if all(rc == 0 for rc in dependency_return_codes) and not blockers:
     classification = "STARTUP_PREFLIGHT_REFRESH_CLEAN"
-elif int(readiness_rc) != 0 or int(control_rc) != 0 or int(status_rc) != 0:
+elif any(rc != 0 for rc in dependency_return_codes):
     classification = "STARTUP_PREFLIGHT_REFRESH_FAILED"
 else:
     classification = "STARTUP_PREFLIGHT_REFRESH_BLOCKED"
@@ -744,6 +1023,9 @@ else:
 payload = {
     "classification": classification,
     "startup_preflight_refresh_attempted": True,
+    "startup_preflight_dependency_refresh_attempted": True,
+    "dependency_refresh_steps": dependency_steps,
+    "dependency_refresh_failures": dependency_refresh_failures,
     "refreshed_artifact_paths": sorted(paths),
     "remaining_start_blockers": blockers,
     "canonical_readiness_classification": readiness.get("classification")
@@ -755,6 +1037,8 @@ print(json.dumps(payload, indent=2, sort_keys=True))
 PY
 
   STARTUP_PREFLIGHT_REFRESH_CLASSIFICATION="$("${PYTHON_BIN}" -c 'import json,sys; print(json.load(open(sys.argv[1])).get("classification") or "UNKNOWN")' "${result_json}")"
+  STARTUP_PREFLIGHT_DEPENDENCY_REFRESH_STEPS_JSON="$("${PYTHON_BIN}" -c 'import json,sys; print(json.dumps(json.load(open(sys.argv[1])).get("dependency_refresh_steps") or []))' "${result_json}")"
+  STARTUP_PREFLIGHT_DEPENDENCY_REFRESH_FAILURES_JSON="$("${PYTHON_BIN}" -c 'import json,sys; print(json.dumps(json.load(open(sys.argv[1])).get("dependency_refresh_failures") or []))' "${result_json}")"
   STARTUP_PREFLIGHT_REFRESHED_ARTIFACT_PATHS_JSON="$("${PYTHON_BIN}" -c 'import json,sys; print(json.dumps(json.load(open(sys.argv[1])).get("refreshed_artifact_paths") or []))' "${result_json}")"
   STARTUP_PREFLIGHT_REMAINING_START_BLOCKERS_JSON="$("${PYTHON_BIN}" -c 'import json,sys; print(json.dumps(json.load(open(sys.argv[1])).get("remaining_start_blockers") or []))' "${result_json}")"
 

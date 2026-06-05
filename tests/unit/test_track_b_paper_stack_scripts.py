@@ -58,8 +58,17 @@ def test_paper_stack_start_refreshes_authority_evidence_before_carrier_launch() 
     assert "run_startup_preflight_evidence_refresh" in source
     assert "track_b_readiness_state" in source
     assert "track_b_control_plane_snapshot" in source
+    assert "ibkr_broker_truth_refresher" in source
+    assert "track_b_paper_broker_reconciliation" in source
+    assert "track_b_open_order_truth" in source
+    assert "track_b_managed_position_registry" in source
+    assert "track_b_managed_order_registry" in source
+    assert "track_b_shared_truth_refresh_cli" in source
     assert "--no-broker-lease-history" in source
     assert "startup_preflight_refresh_attempted" in source
+    assert "startup_preflight_dependency_refresh_attempted" in source
+    assert "dependency_refresh_steps" in source
+    assert "dependency_refresh_failures" in source
     assert "startup_preflight_refresh_classification" in source
     assert "refreshed_artifact_paths" in source
     assert "remaining_start_blockers" in source
@@ -107,6 +116,17 @@ def _run_startup_preflight_decision(
     reconciliation: dict | None = None,
     status: dict | None = None,
     readiness: dict | None = None,
+    broker_truth: dict | None = None,
+    open_order_truth: dict | None = None,
+    managed_positions: dict | None = None,
+    managed_orders: dict | None = None,
+    shared_truth: dict | None = None,
+    broker_truth_rc: int = 0,
+    reconciliation_rc: int = 0,
+    open_order_rc: int = 0,
+    managed_position_rc: int = 0,
+    managed_order_rc: int = 0,
+    shared_truth_rc: int = 0,
     readiness_rc: int = 0,
     control_rc: int = 0,
     status_rc: int = 0,
@@ -134,9 +154,78 @@ def _run_startup_preflight_decision(
         ),
         encoding="utf-8",
     )
+    broker_truth_path = tmp_path / "broker_truth.json"
+    reconciliation_stdout_path = tmp_path / "reconciliation_stdout.json"
+    open_order_truth_path = tmp_path / "open_order_truth.json"
+    managed_positions_path = tmp_path / "managed_positions.json"
+    managed_orders_path = tmp_path / "managed_orders.json"
+    shared_truth_path = tmp_path / "shared_truth.json"
     status_path = tmp_path / "status.json"
     readiness_path = tmp_path / "readiness.json"
     control_path = tmp_path / "control.json"
+    clean_reconciliation = reconciliation or {
+        "classification": "TRACK_B_PAPER_BROKER_RECONCILED",
+        "broker_reconciled": True,
+        "track_b_broker_position_count": 0,
+        "track_b_broker_open_order_count": 0,
+        "current_scope_lifecycle_open_position_count": 0,
+        "lifecycle_open_order_count": 0,
+    }
+    reconciliation_stdout_path.write_text(json.dumps(clean_reconciliation), encoding="utf-8")
+    broker_truth_path.write_text(
+        json.dumps(
+            broker_truth
+            or {
+                "classification": "BROKER_TRUTH_REFRESH_READY",
+                "output_path": str(tmp_path / "latest_broker_truth.json"),
+            }
+        ),
+        encoding="utf-8",
+    )
+    open_order_truth_path.write_text(
+        json.dumps(
+            open_order_truth
+            or {
+                "classification": "NO_OPEN_ORDERS",
+                "output_path": str(tmp_path / "latest_open_order_truth.json"),
+            }
+        ),
+        encoding="utf-8",
+    )
+    managed_positions_path.write_text(
+        json.dumps(
+            managed_positions
+            or {
+                "classification": "NO_MANAGED_POSITIONS",
+                "output_path": str(tmp_path / "latest_managed_positions.json"),
+            }
+        ),
+        encoding="utf-8",
+    )
+    managed_orders_path.write_text(
+        json.dumps(
+            managed_orders
+            or {
+                "classification": "NO_MANAGED_ORDERS",
+                "output_path": str(tmp_path / "latest_managed_orders.json"),
+            }
+        ),
+        encoding="utf-8",
+    )
+    shared_truth_path.write_text(
+        json.dumps(
+            shared_truth
+            or {
+                "runtime_start_preflight": {
+                    "classification": "SHARED_TRUTH_RUNTIME_START_CLEAN",
+                    "clean_for_runtime_start": True,
+                    "blockers": [],
+                },
+                "output_path": str(tmp_path / "latest_shared_truth.json"),
+            }
+        ),
+        encoding="utf-8",
+    )
     status_path.write_text(
         json.dumps(
             status
@@ -158,9 +247,21 @@ def _run_startup_preflight_decision(
             sys.executable,
             "-",
             str(repo_root),
+            str(broker_truth_path),
+            str(reconciliation_stdout_path),
+            str(open_order_truth_path),
+            str(managed_positions_path),
+            str(managed_orders_path),
+            str(shared_truth_path),
             str(status_path),
             str(readiness_path),
             str(control_path),
+            str(broker_truth_rc),
+            str(reconciliation_rc),
+            str(open_order_rc),
+            str(managed_position_rc),
+            str(managed_order_rc),
+            str(shared_truth_rc),
             str(readiness_rc),
             str(control_rc),
             str(status_rc),
@@ -191,6 +292,18 @@ def test_paper_stack_start_allows_ready_control_plane_with_informational_primary
 
     assert result["classification"] == "STARTUP_PREFLIGHT_REFRESH_CLEAN"
     assert result["remaining_start_blockers"] == []
+    assert result["startup_preflight_dependency_refresh_attempted"] is True
+    assert [row["step"] for row in result["dependency_refresh_steps"]] == [
+        "broker_truth_broker_truth_lease_bsa",
+        "broker_lifecycle_reconciliation",
+        "open_order_truth",
+        "managed_position_registry",
+        "managed_order_registry",
+        "shared_truth",
+        "canonical_readiness",
+        "control_plane_snapshot",
+        "paper_stack_status",
+    ]
 
 
 def test_paper_stack_start_blocks_control_plane_not_start_safe_with_primary_reason(tmp_path: Path) -> None:
@@ -273,6 +386,114 @@ def test_paper_stack_start_preflight_refresh_still_blocks_non_flat_broker_state(
     codes = {row["code"] for row in result["remaining_start_blockers"]}
     assert result["classification"] == "STARTUP_PREFLIGHT_REFRESH_BLOCKED"
     assert "broker_positions_or_orders_not_flat" in codes
+
+
+def test_paper_stack_start_preflight_refresh_blocks_dependency_refresh_failure(tmp_path: Path) -> None:
+    result = _run_startup_preflight_decision(
+        tmp_path,
+        control={
+            "classification": "CONTROL_PLANE_SNAPSHOT_READY",
+            "safe_to_start_runtime": True,
+            "top_line_classification": "READY_FOR_OPERATOR_START",
+            "blockers": [],
+        },
+        reconciliation_rc=1,
+    )
+
+    codes = {row["code"] for row in result["remaining_start_blockers"]}
+    assert result["classification"] == "STARTUP_PREFLIGHT_REFRESH_FAILED"
+    assert "broker_lifecycle_reconciliation_refresh_failed" in codes
+    assert result["dependency_refresh_failures"] == [
+        {
+            "step": "broker_lifecycle_reconciliation",
+            "code": "broker_lifecycle_reconciliation_refresh_failed",
+            "detail": "return_code=1",
+        }
+    ]
+
+
+def test_paper_stack_start_preflight_refresh_blocks_stale_open_order_truth(tmp_path: Path) -> None:
+    result = _run_startup_preflight_decision(
+        tmp_path,
+        control={
+            "classification": "CONTROL_PLANE_SNAPSHOT_READY",
+            "safe_to_start_runtime": True,
+            "top_line_classification": "READY_FOR_OPERATOR_START",
+            "blockers": [],
+        },
+        open_order_truth={"classification": "ORDER_TRUTH_STALE"},
+    )
+
+    codes = {row["code"] for row in result["remaining_start_blockers"]}
+    assert result["classification"] == "STARTUP_PREFLIGHT_REFRESH_BLOCKED"
+    assert "open_order_truth_not_clean" in codes
+
+
+def test_paper_stack_start_preflight_refresh_blocks_unknown_managed_orders(tmp_path: Path) -> None:
+    result = _run_startup_preflight_decision(
+        tmp_path,
+        control={
+            "classification": "CONTROL_PLANE_SNAPSHOT_READY",
+            "safe_to_start_runtime": True,
+            "top_line_classification": "READY_FOR_OPERATOR_START",
+            "blockers": [],
+        },
+        managed_orders={"classification": "ORDER_STATE_UNKNOWN_REVIEW_REQUIRED"},
+    )
+
+    codes = {row["code"] for row in result["remaining_start_blockers"]}
+    assert result["classification"] == "STARTUP_PREFLIGHT_REFRESH_BLOCKED"
+    assert "managed_order_registry_not_clean" in codes
+
+
+def test_paper_stack_start_preflight_refresh_blocks_dirty_reconciliation(tmp_path: Path) -> None:
+    result = _run_startup_preflight_decision(
+        tmp_path,
+        control={
+            "classification": "CONTROL_PLANE_SNAPSHOT_READY",
+            "safe_to_start_runtime": True,
+            "top_line_classification": "READY_FOR_OPERATOR_START",
+            "blockers": [],
+        },
+        reconciliation={
+            "classification": "TRACK_B_PAPER_BROKER_LIFECYCLE_MISMATCH",
+            "broker_reconciled": False,
+            "track_b_broker_position_count": 0,
+            "track_b_broker_open_order_count": 0,
+            "current_scope_lifecycle_open_position_count": 0,
+            "lifecycle_open_order_count": 0,
+        },
+    )
+
+    codes = {row["code"] for row in result["remaining_start_blockers"]}
+    assert result["classification"] == "STARTUP_PREFLIGHT_REFRESH_BLOCKED"
+    assert "broker_lifecycle_not_reconciled" in codes
+    assert "broker_lifecycle_reconciled_flag_false" in codes
+
+
+def test_paper_stack_start_preflight_refresh_blocks_live_money_and_paper_proof(tmp_path: Path) -> None:
+    result = _run_startup_preflight_decision(
+        tmp_path,
+        control={
+            "classification": "CONTROL_PLANE_SNAPSHOT_READY",
+            "safe_to_start_runtime": True,
+            "top_line_classification": "READY_FOR_OPERATOR_START",
+            "blockers": [],
+        },
+        status={
+            "safety": {
+                "paper_only": True,
+                "live_money_eligible": True,
+                "paper_proof_invoked": True,
+                "broker_mutation_allowed": False,
+            }
+        },
+    )
+
+    codes = {row["code"] for row in result["remaining_start_blockers"]}
+    assert result["classification"] == "STARTUP_PREFLIGHT_REFRESH_BLOCKED"
+    assert "live_money_eligible_not_false" in codes
+    assert "paper_proof_invoked_not_false" in codes
 
 
 def test_paper_stack_start_preflight_refresh_preserves_broker_safety_gates() -> None:
