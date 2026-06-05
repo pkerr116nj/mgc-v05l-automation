@@ -18,6 +18,10 @@ from typing import Any, Mapping, Sequence
 
 from mgc_v05l.execution_core.phase1_runtime_ticker_registry import PHASE1_RUNTIME_TICKER_ORDER
 from mgc_v05l.execution_core.track_b_atomic_io import write_json_atomic
+from mgc_v05l.execution_core.track_b_broker_session_authority import (
+    DEFAULT_BROKER_SESSION_AUTHORITY_ARTIFACT,
+)
+from mgc_v05l.execution_core.track_b_broker_truth_lease import DEFAULT_LEASE_ARTIFACT
 from mgc_v05l.execution_core.track_b_exit_safety import (
     DEFAULT_BRIDGE_TERMINAL_EVENT_GRACE_SECONDS,
     bridge_terminal_event_grace_state,
@@ -139,6 +143,8 @@ class ReconciliationConfig:
     symbols: tuple[str, ...] = PHASE1_RUNTIME_TICKER_ORDER
     submit_intent_ownership_path: Path = DEFAULT_SUBMIT_INTENT_OWNERSHIP_PATH
     managed_order_registry_path: Path = DEFAULT_MANAGED_ORDER_REGISTRY_ARTIFACT
+    broker_truth_lease_path: Path = DEFAULT_LEASE_ARTIFACT
+    broker_session_authority_path: Path = DEFAULT_BROKER_SESSION_AUTHORITY_ARTIFACT
 
     @property
     def trade_summary_path(self) -> Path:
@@ -179,6 +185,8 @@ def reconcile_track_b_paper_broker_truth(
     live_position_status = _load_json(config.live_position_status_path)
     pnl_summary = _load_json(config.pnl_summary_path)
     broker_status = _load_json(config.broker_status_path)
+    broker_truth_lease = _load_json(_repo_scoped_path(config.repo_root, config.broker_truth_lease_path))
+    broker_session_authority = _load_json(_repo_scoped_path(config.repo_root, config.broker_session_authority_path))
     positions_path = _path_from_payload(
         broker_status.get("positions_snapshot_path"),
         default=config.broker_truth_root / "ibkr_positions_snapshot.json",
@@ -374,6 +382,17 @@ def reconcile_track_b_paper_broker_truth(
         broker_backed_entry_adoption=broker_backed_entry_adoption,
         now=actual_now,
     )
+    broker_session_confidence = _broker_session_reconciliation_confidence(
+        broker_truth_lease=broker_truth_lease,
+        broker_session_authority=broker_session_authority,
+        position_match_report=position_match_report,
+        broker_positions=track_b_positions,
+        lifecycle_positions=lifecycle_positions,
+        broker_open_orders=track_b_open_orders,
+        broker_truth_settlement=broker_truth_settlement,
+        submit_intent_ownership_reconciliation=submit_intent_ownership_reconciliation,
+        broker_backed_entry_adoption=broker_backed_entry_adoption,
+    )
     if registry_reconciliation.get("blocking") is True:
         blockers.append(
             {
@@ -529,7 +548,26 @@ def reconcile_track_b_paper_broker_truth(
             "status": str(config.broker_status_path),
             "positions_snapshot": str(positions_path),
             "open_orders_snapshot": str(open_orders_path),
+            "broker_truth_lease": str(_repo_scoped_path(config.repo_root, config.broker_truth_lease_path)),
+            "broker_session_authority": str(_repo_scoped_path(config.repo_root, config.broker_session_authority_path)),
         },
+        "broker_session_authority_classification": broker_session_confidence[
+            "broker_session_authority_classification"
+        ],
+        "connection_mode": broker_session_confidence["connection_mode"],
+        "callback_ownership_attribution": broker_session_confidence["callback_ownership_attribution"],
+        "reconciliation_confidence": broker_session_confidence["reconciliation_confidence"],
+        "broker_truth_reliable_for_position": broker_session_confidence["broker_truth_reliable_for_position"],
+        "broker_truth_reliable_for_order_status": broker_session_confidence[
+            "broker_truth_reliable_for_order_status"
+        ],
+        "callback_truth_reliable": broker_session_confidence["callback_truth_reliable"],
+        "broker_truth_lease_state": broker_session_confidence["broker_truth_lease_state"],
+        "broker_truth_lease_allowed_uses": broker_session_confidence["broker_truth_lease_allowed_uses"],
+        "session_authority_blockers": broker_session_confidence["session_authority_blockers"],
+        "callback_missing_reason": broker_session_confidence["callback_missing_reason"],
+        "callback_missing_reasons": broker_session_confidence["callback_missing_reasons"],
+        "broker_session_reconciliation_confidence": broker_session_confidence,
         "last_successful_broker_truth": broker_status.get("last_successful_broker_truth")
         if isinstance(broker_status.get("last_successful_broker_truth"), Mapping)
         else _last_successful_broker_truth_from_status(broker_status),
@@ -2171,6 +2209,200 @@ def _managed_order_registry_evidence(*, config: ReconciliationConfig, now: datet
         "age_seconds": age_seconds,
         "projection_only": payload.get("projection_only") is True,
     }
+
+
+def _broker_session_reconciliation_confidence(
+    *,
+    broker_truth_lease: Mapping[str, Any],
+    broker_session_authority: Mapping[str, Any],
+    position_match_report: Mapping[str, Any],
+    broker_positions: Sequence[Mapping[str, Any]],
+    lifecycle_positions: Sequence[Mapping[str, Any]],
+    broker_open_orders: Sequence[Mapping[str, Any]],
+    broker_truth_settlement: Mapping[str, Any],
+    submit_intent_ownership_reconciliation: Mapping[str, Any],
+    broker_backed_entry_adoption: Mapping[str, Any] | None,
+) -> dict[str, Any]:
+    session_authority_missing = not bool(broker_session_authority)
+    lease_missing = not bool(broker_truth_lease)
+    connection_mode = str(broker_session_authority.get("connection_mode") or "UNKNOWN").strip().upper()
+    session_classification = str(
+        broker_session_authority.get("classification")
+        or ("BROKER_SESSION_AUTHORITY_MISSING" if session_authority_missing else "BROKER_SESSION_AUTHORITY_UNKNOWN")
+    )
+    lease_state = str(
+        broker_truth_lease.get("lease_state")
+        or broker_truth_lease.get("classification")
+        or ("MISSING" if lease_missing else "UNKNOWN")
+    ).strip().upper()
+    callback_attribution = _mapping_payload(
+        broker_session_authority.get("callback_ownership_attribution")
+        or broker_truth_lease.get("callback_ownership_attribution")
+    )
+    callback_missing_reasons = _callback_missing_reason_rows(
+        broker_session_authority=broker_session_authority,
+        broker_truth_lease=broker_truth_lease,
+        callback_attribution=callback_attribution,
+    )
+    callback_missing_reason = (
+        str(
+            broker_session_authority.get("callback_missing_reason")
+            or broker_truth_lease.get("callback_missing_reason")
+            or callback_attribution.get("callback_missing_reason")
+            or ""
+        ).strip()
+        or None
+    )
+    if callback_missing_reason is None and callback_missing_reasons:
+        callback_missing_reason = str(callback_missing_reasons[0].get("code") or "").strip() or None
+
+    position_lease = _mapping_payload(broker_truth_lease.get("broker_position_lease"))
+    open_order_lease = _mapping_payload(broker_truth_lease.get("broker_open_order_lease"))
+    fill_lease = _mapping_payload(broker_truth_lease.get("execution_fill_evidence_lease"))
+    position_reliable = _lease_is_fresh(position_lease)
+    order_status_reliable = connection_mode in {"SUBMIT_CAPABLE", "FILL_CALLBACK_CAPABLE"} and _lease_is_fresh(open_order_lease)
+    callback_truth_reliable = (
+        connection_mode == "FILL_CALLBACK_CAPABLE"
+        and _lease_is_fresh(fill_lease)
+        and not callback_missing_reasons
+    )
+    session_blockers = _list_of_mappings(broker_session_authority.get("authority_blockers"))
+    if session_authority_missing:
+        session_blockers = [
+            {
+                "code": "broker_session_authority_missing",
+                "detail": "Broker Session Authority artifact is missing; reconciliation confidence cannot claim order-status or callback reliability.",
+            }
+        ]
+    if lease_missing:
+        position_reliable = False
+        order_status_reliable = False
+        callback_truth_reliable = False
+
+    matched = position_match_report.get("matched") is True
+    submit_intent_classification = str(submit_intent_ownership_reconciliation.get("classification") or "")
+    settlement_classification = str(broker_truth_settlement.get("classification") or "")
+    adoption_classification = str((broker_backed_entry_adoption or {}).get("classification") or "")
+    confidence = "TRUE_BROKER_LIFECYCLE_MISMATCH"
+    if lease_missing or lease_state in {"MISSING", "STALE", "INCOMPLETE"} or not position_reliable:
+        confidence = "BROKER_TRUTH_STALE_OR_INCOMPLETE"
+    elif _close_persistence_gap_callback_missing(
+        broker_positions=broker_positions,
+        lifecycle_positions=lifecycle_positions,
+        broker_open_orders=broker_open_orders,
+        broker_truth_settlement=broker_truth_settlement,
+        callback_missing_reasons=callback_missing_reasons,
+    ):
+        confidence = "CLOSE_PERSISTENCE_GAP_CALLBACK_MISSING"
+    elif submit_intent_classification in {
+        "SUBMIT_INTENT_BROKER_POSITION_ADOPTION_REQUIRED",
+        "SUBMIT_INTENT_BROKER_POSITIONS_ADOPTION_REQUIRED",
+    } or adoption_classification in {
+        "BROKER_BACKED_ENTRY_ADOPTION_REQUIRED",
+        "BROKER_BACKED_ENTRIES_ADOPTION_REQUIRED",
+        "BROKER_BACKED_ENTRY_REGISTRY_RESUME_REQUIRED",
+    }:
+        confidence = "BROKER_OBSERVED_ADOPTION_REQUIRED_CALLBACK_DEGRADED"
+    elif matched:
+        if connection_mode == "POSITION_TRUTH_ONLY":
+            confidence = "POSITION_TRUTH_ONLY_RECONCILED"
+        elif order_status_reliable and callback_truth_reliable:
+            confidence = "FULL_BROKER_LIFECYCLE_RECONCILED"
+        else:
+            confidence = "POSITION_RECONCILED_ORDER_STATUS_DEGRADED"
+
+    return {
+        "broker_session_authority_classification": session_classification,
+        "connection_mode": connection_mode,
+        "callback_ownership_attribution": callback_attribution,
+        "reconciliation_confidence": confidence,
+        "broker_truth_reliable_for_position": position_reliable,
+        "broker_truth_reliable_for_order_status": order_status_reliable,
+        "callback_truth_reliable": callback_truth_reliable,
+        "broker_truth_lease_state": lease_state,
+        "broker_truth_lease_allowed_uses": broker_truth_lease.get("allowed_uses") or {},
+        "session_authority_blockers": session_blockers,
+        "callback_missing_reason": callback_missing_reason,
+        "callback_missing_reasons": callback_missing_reasons,
+    }
+
+
+def _close_persistence_gap_callback_missing(
+    *,
+    broker_positions: Sequence[Mapping[str, Any]],
+    lifecycle_positions: Sequence[Mapping[str, Any]],
+    broker_open_orders: Sequence[Mapping[str, Any]],
+    broker_truth_settlement: Mapping[str, Any],
+    callback_missing_reasons: Sequence[Mapping[str, Any]],
+) -> bool:
+    if broker_positions or broker_open_orders or not lifecycle_positions:
+        return False
+    if broker_truth_settlement.get("classification") != "BROKER_TRUTH_SETTLEMENT_TIMEOUT":
+        return False
+    reason_codes = {str(row.get("code") or "") for row in callback_missing_reasons}
+    if not reason_codes.intersection({"exec_details_callback_missing", "completed_order_callback_missing"}):
+        return False
+    return any(_lifecycle_position_has_close_order_identity(row) for row in lifecycle_positions)
+
+
+def _lifecycle_position_has_close_order_identity(row: Mapping[str, Any]) -> bool:
+    for key in (
+        "close_order_id",
+        "exit_order_id",
+        "working_close_order_id",
+        "broker_close_order_id",
+        "pending_close_order_id",
+    ):
+        if str(row.get(key) or "").strip():
+            return True
+    for key in ("known_managed_exit_orders", "pending_managed_exit_orders", "working_exit_orders"):
+        if row.get(key):
+            return True
+    return False
+
+
+def _callback_missing_reason_rows(
+    *,
+    broker_session_authority: Mapping[str, Any],
+    broker_truth_lease: Mapping[str, Any],
+    callback_attribution: Mapping[str, Any],
+) -> list[dict[str, Any]]:
+    rows = (
+        _list_of_mappings(broker_session_authority.get("callback_missing_reasons"))
+        or _list_of_mappings(callback_attribution.get("callback_missing_reasons"))
+        or _list_of_mappings(broker_truth_lease.get("callback_missing_reasons"))
+    )
+    reason = (
+        broker_session_authority.get("callback_missing_reason")
+        or callback_attribution.get("callback_missing_reason")
+        or broker_truth_lease.get("callback_missing_reason")
+    )
+    reason_text = str(reason or "").strip()
+    if reason_text and reason_text not in {str(row.get("code") or "") for row in rows}:
+        rows.insert(
+            0,
+            {
+                "code": reason_text,
+                "detail": "Broker session authority reported missing callback evidence.",
+            },
+        )
+    return rows
+
+
+def _lease_is_fresh(payload: Mapping[str, Any]) -> bool:
+    if not payload:
+        return False
+    if "fresh" in payload:
+        return payload.get("fresh") is True
+    return str(payload.get("state") or "").upper() == "FRESH"
+
+
+def _mapping_payload(value: object) -> dict[str, Any]:
+    return dict(value) if isinstance(value, Mapping) else {}
+
+
+def _list_of_mappings(value: object) -> list[dict[str, Any]]:
+    return [dict(row) for row in value if isinstance(row, Mapping)] if isinstance(value, list) else []
 
 
 def _validate_snapshot(

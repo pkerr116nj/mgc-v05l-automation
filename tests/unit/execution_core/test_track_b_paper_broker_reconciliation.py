@@ -186,6 +186,184 @@ def test_reconciles_flat_lifecycle_with_fresh_broker_truth_and_unrelated_positio
     assert reconciled_position["paper_proof_invoked"] is False
 
 
+def test_reconciliation_reports_order_status_unreliable_confidence_without_changing_match(
+    tmp_path: Path,
+) -> None:
+    lifecycle_position = _mnq_lifecycle_position()
+    config = _write_base_artifacts(tmp_path, open_position=lifecycle_position)
+    _write_broker_truth(config, positions=[_mnq_broker_position()])
+    _write_broker_session_context(
+        config,
+        classification="BROKER_SESSION_AUTHORITY_ORDER_STATUS_UNRELIABLE",
+        connection_mode="ORDER_STATUS_UNRELIABLE",
+    )
+
+    report = reconcile_track_b_paper_broker_truth(config=config, now=NOW)
+
+    assert report["classification"] == "TRACK_B_PAPER_BROKER_RECONCILED"
+    assert report["broker_reconciled"] is True
+    assert report["broker_session_authority_classification"] == "BROKER_SESSION_AUTHORITY_ORDER_STATUS_UNRELIABLE"
+    assert report["connection_mode"] == "ORDER_STATUS_UNRELIABLE"
+    assert report["reconciliation_confidence"] == "POSITION_RECONCILED_ORDER_STATUS_DEGRADED"
+    assert report["broker_truth_reliable_for_position"] is True
+    assert report["broker_truth_reliable_for_order_status"] is False
+    assert report["callback_truth_reliable"] is False
+    assert report["callback_missing_reason"] == "order_status_callback_missing"
+
+
+def test_reconciliation_reports_position_truth_only_confidence_without_changing_match(
+    tmp_path: Path,
+) -> None:
+    lifecycle_position = _mnq_lifecycle_position()
+    config = _write_base_artifacts(tmp_path, open_position=lifecycle_position)
+    _write_broker_truth(config, positions=[_mnq_broker_position()])
+    _write_broker_session_context(
+        config,
+        classification="BROKER_SESSION_AUTHORITY_POSITION_TRUTH_ONLY",
+        connection_mode="POSITION_TRUTH_ONLY",
+    )
+
+    report = reconcile_track_b_paper_broker_truth(config=config, now=NOW)
+
+    assert report["classification"] == "TRACK_B_PAPER_BROKER_RECONCILED"
+    assert report["broker_reconciled"] is True
+    assert report["reconciliation_confidence"] == "POSITION_TRUTH_ONLY_RECONCILED"
+    assert report["broker_truth_reliable_for_position"] is True
+    assert report["broker_truth_reliable_for_order_status"] is False
+    assert report["callback_truth_reliable"] is False
+
+
+def test_reconciliation_reports_missing_session_authority_without_implying_authority(
+    tmp_path: Path,
+) -> None:
+    lifecycle_position = _mnq_lifecycle_position()
+    config = _write_base_artifacts(tmp_path, open_position=lifecycle_position)
+    _write_broker_truth(config, positions=[_mnq_broker_position()])
+    _write_broker_truth_lease(config)
+
+    report = reconcile_track_b_paper_broker_truth(config=config, now=NOW)
+
+    assert report["classification"] == "TRACK_B_PAPER_BROKER_RECONCILED"
+    assert report["broker_reconciled"] is True
+    assert report["broker_session_authority_classification"] == "BROKER_SESSION_AUTHORITY_MISSING"
+    assert report["connection_mode"] == "UNKNOWN"
+    assert report["broker_truth_reliable_for_position"] is True
+    assert report["broker_truth_reliable_for_order_status"] is False
+    assert report["callback_truth_reliable"] is False
+    assert report["session_authority_blockers"][0]["code"] == "broker_session_authority_missing"
+
+
+def test_reconciliation_reports_adoption_needed_with_callback_degraded_confidence(
+    tmp_path: Path,
+) -> None:
+    config = _write_base_artifacts(tmp_path)
+    _write_submit_intent_ownership(config, broker_effect_confirmed=True)
+    _write_broker_truth(
+        config,
+        positions=[
+            {
+                "account_id": "DUM882026",
+                "symbol": "MGC",
+                "local_symbol": "MGCM6",
+                "expiry": "20260626",
+                "con_id": 712565978,
+                "security_type": "FUT",
+                "quantity": "1",
+            }
+        ],
+    )
+    _write_broker_session_context(config)
+
+    report = reconcile_track_b_paper_broker_truth(config=config, now=NOW)
+
+    assert report["classification"] == "TRACK_B_PAPER_BROKER_RECONCILIATION_BLOCKED"
+    assert report["broker_reconciled"] is False
+    assert report["submit_intent_ownership_reconciliation"]["classification"] == (
+        "SUBMIT_INTENT_BROKER_POSITION_ADOPTION_REQUIRED"
+    )
+    assert report["reconciliation_confidence"] == "BROKER_OBSERVED_ADOPTION_REQUIRED_CALLBACK_DEGRADED"
+    assert {row["code"] for row in report["callback_missing_reasons"]} >= {
+        "exec_details_callback_missing",
+        "completed_order_callback_missing",
+    }
+
+
+def test_reconciliation_reports_close_persistence_gap_callback_missing_confidence(
+    tmp_path: Path,
+) -> None:
+    lifecycle_position = {
+        **_mnq_lifecycle_position(),
+        "entry_timestamp": "2026-05-11T11:50:00+00:00",
+        "close_order_id": "75",
+        "exit_order_id": "75",
+    }
+    config = _write_base_artifacts(tmp_path, open_position=lifecycle_position)
+    _write_broker_truth(config, positions=[])
+    _write_broker_session_context(config)
+
+    report = reconcile_track_b_paper_broker_truth(config=config, now=NOW)
+
+    assert report["classification"] == "BROKER_TRUTH_SETTLEMENT_TIMEOUT"
+    assert report["broker_reconciled"] is False
+    assert report["reconciliation_confidence"] == "CLOSE_PERSISTENCE_GAP_CALLBACK_MISSING"
+    assert report["broker_truth_reliable_for_position"] is True
+    assert report["broker_truth_reliable_for_order_status"] is False
+    assert report["callback_truth_reliable"] is False
+
+
+def test_reconciliation_reports_full_confidence_for_fill_callback_capable_match(
+    tmp_path: Path,
+) -> None:
+    lifecycle_position = _mnq_lifecycle_position()
+    config = _write_base_artifacts(tmp_path, open_position=lifecycle_position)
+    _write_broker_truth(config, positions=[_mnq_broker_position()])
+    _write_broker_session_context(
+        config,
+        classification="BROKER_SESSION_AUTHORITY_FILL_CALLBACK_CAPABLE",
+        connection_mode="FILL_CALLBACK_CAPABLE",
+        callback_missing_reasons=[],
+        fill_fresh=True,
+    )
+
+    report = reconcile_track_b_paper_broker_truth(config=config, now=NOW)
+
+    assert report["classification"] == "TRACK_B_PAPER_BROKER_RECONCILED"
+    assert report["broker_reconciled"] is True
+    assert report["reconciliation_confidence"] == "FULL_BROKER_LIFECYCLE_RECONCILED"
+    assert report["broker_truth_reliable_for_position"] is True
+    assert report["broker_truth_reliable_for_order_status"] is True
+    assert report["callback_truth_reliable"] is True
+
+
+def test_reconciliation_reports_stale_lease_degraded_confidence_without_broker_mutation(
+    tmp_path: Path,
+) -> None:
+    lifecycle_position = _mnq_lifecycle_position()
+    config = _write_base_artifacts(tmp_path, open_position=lifecycle_position)
+    _write_broker_truth(config, positions=[_mnq_broker_position()])
+    _write_broker_session_context(
+        config,
+        classification="BROKER_SESSION_AUTHORITY_FILL_CALLBACK_CAPABLE",
+        connection_mode="FILL_CALLBACK_CAPABLE",
+        position_fresh=False,
+        open_order_fresh=False,
+        fill_fresh=False,
+        lease_state="STALE",
+    )
+
+    report = reconcile_track_b_paper_broker_truth(config=config, now=NOW)
+
+    assert report["classification"] == "TRACK_B_PAPER_BROKER_RECONCILED"
+    assert report["broker_reconciled"] is True
+    assert report["reconciliation_confidence"] == "BROKER_TRUTH_STALE_OR_INCOMPLETE"
+    assert report["broker_truth_reliable_for_position"] is False
+    assert report["broker_truth_reliable_for_order_status"] is False
+    assert report["callback_truth_reliable"] is False
+    assert report["submit_authority"] is False
+    assert report["live_money_eligible"] is False
+    assert report["paper_proof_invoked"] is False
+
+
 def test_stale_superseded_lifecycle_projection_reports_current_scope_flat(tmp_path: Path) -> None:
     stale_lifecycle = {
         "account_id": "DUM882026",
@@ -221,10 +399,18 @@ def test_stale_superseded_lifecycle_projection_reports_current_scope_flat(tmp_pa
         entry_exec_id="0000e1a7.6a2e7d30.01.01",
     )
     _write_broker_truth(config)
+    _write_broker_session_context(
+        config,
+        classification="BROKER_SESSION_AUTHORITY_FILL_CALLBACK_CAPABLE",
+        connection_mode="FILL_CALLBACK_CAPABLE",
+        callback_missing_reasons=[],
+        fill_fresh=True,
+    )
 
     report = reconcile_track_b_paper_broker_truth(config=config, now=NOW)
 
     assert report["classification"] == "TRACK_B_PAPER_BROKER_RECONCILED"
+    assert report["reconciliation_confidence"] == "FULL_BROKER_LIFECYCLE_RECONCILED"
     assert report["raw_lifecycle_open_position_count"] == 1
     assert report["current_scope_lifecycle_open_position_count"] == 0
     assert report["stale_superseded_lifecycle_projection_count"] == 1
@@ -3814,6 +4000,170 @@ def test_blocks_when_bridge_fill_persistence_is_review_required(tmp_path: Path) 
     assert report["classification"] == "TRACK_B_PAPER_BROKER_RECONCILIATION_BLOCKED"
     assert report["broker_reconciled"] is False
     assert not config.reconciled_live_position_status_path.exists()
+
+
+def _mnq_lifecycle_position() -> dict[str, object]:
+    return {
+        "account_id": "DUM882026",
+        "trade_id": "trade_mnq_session_confidence",
+        "lifecycle_id": "reserved_submit_mnq_session_confidence",
+        "strategy_id": "mnq_globex_active_participation_long",
+        "instrument_family": "MNQ",
+        "contract_key": "MNQ-202606",
+        "local_symbol": "MNQM6",
+        "con_id": 770561201,
+        "expiry": "20260618",
+        "side": "LONG",
+        "quantity": "1",
+        "entry_order_id": "11",
+        "entry_perm_id": "1092559001",
+        "entry_exec_id": "exec-mnq-session-confidence",
+        "entry_timestamp": "2026-05-11T11:59:00+00:00",
+    }
+
+
+def _mnq_broker_position() -> dict[str, object]:
+    return {
+        "account_id": "DUM882026",
+        "symbol": "MNQ",
+        "local_symbol": "MNQM6",
+        "con_id": 770561201,
+        "expiry": "20260618",
+        "security_type": "FUT",
+        "quantity": "1",
+        "average_cost": "28981.25",
+        "multiplier": "2",
+    }
+
+
+def _write_broker_session_context(
+    config: ReconciliationConfig,
+    *,
+    classification: str = "BROKER_SESSION_AUTHORITY_ORDER_STATUS_UNRELIABLE",
+    connection_mode: str = "ORDER_STATUS_UNRELIABLE",
+    callback_missing_reasons: list[dict[str, str]] | None = None,
+    position_fresh: bool = True,
+    open_order_fresh: bool = True,
+    fill_fresh: bool = False,
+    lease_state: str = "ACTIVE",
+) -> None:
+    missing_reasons = (
+        callback_missing_reasons
+        if callback_missing_reasons is not None
+        else [
+            {"code": "order_status_callback_missing", "detail": "No orderStatus callback timestamp is available."},
+            {"code": "exec_details_callback_missing", "detail": "Submit evidence exists but execDetails is missing."},
+            {"code": "completed_order_callback_missing", "detail": "Submit evidence exists but completedOrder is missing."},
+        ]
+    )
+    callback_missing_reason = missing_reasons[0]["code"] if missing_reasons else None
+    callback_attribution = {
+        "classification": "CALLBACK_ATTRIBUTION_GAP" if missing_reasons else "CALLBACK_OWNERSHIP_ALIGNED",
+        "position_truth_client_id": 9077,
+        "open_order_truth_client_id": 9077,
+        "last_order_status_client_id": None if missing_reasons else 9077,
+        "last_exec_details_client_id": None if missing_reasons else 9077,
+        "last_completed_order_client_id": None if missing_reasons else 9077,
+        "submit_client_id": 10846,
+        "session_match": {
+            "position_vs_order_status_same_session": None if missing_reasons else True,
+            "submit_vs_exec_same_session": None if missing_reasons else True,
+            "submit_vs_position_same_session": False,
+        },
+        "callback_age_seconds": {
+            "position": 30.0,
+            "open_order": 30.0,
+            "order_status": None if missing_reasons else 30.0,
+            "exec_details": None if missing_reasons else 30.0,
+            "completed_order": None if missing_reasons else 30.0,
+        },
+        "callback_missing_reason": callback_missing_reason,
+        "callback_missing_reasons": missing_reasons,
+    }
+    allowed_uses = {
+        "new_entry": connection_mode in {"SUBMIT_CAPABLE", "FILL_CALLBACK_CAPABLE"},
+        "managed_risk_reducing_close": connection_mode in {"SUBMIT_CAPABLE", "FILL_CALLBACK_CAPABLE"},
+        "broker_observed_adoption_diagnosis": connection_mode
+        in {"ORDER_STATUS_UNRELIABLE", "POSITION_TRUTH_ONLY", "SUBMIT_CAPABLE", "FILL_CALLBACK_CAPABLE"},
+        "fill_callback_adoption": connection_mode == "FILL_CALLBACK_CAPABLE",
+        "status_diagnostic": True,
+    }
+    _write_broker_truth_lease(
+        config,
+        lease_state=lease_state,
+        allowed_uses=allowed_uses,
+        callback_attribution=callback_attribution,
+        callback_missing_reasons=missing_reasons,
+        position_fresh=position_fresh,
+        open_order_fresh=open_order_fresh,
+        fill_fresh=fill_fresh,
+    )
+    _write_json(
+        _repo_artifact_path(config, config.broker_session_authority_path),
+        {
+            "schema_version": "track_b_broker_session_authority_v1",
+            "generated_at": NOW.isoformat(),
+            "classification": classification,
+            "connection_mode": connection_mode,
+            "allowed_uses": allowed_uses,
+            "authority_blockers": [
+                {
+                    "code": "order_status_unreliable_blocks_submit_and_close",
+                    "detail": "Order status is unreliable; reconciliation may use position truth only.",
+                }
+            ]
+            if connection_mode == "ORDER_STATUS_UNRELIABLE"
+            else [],
+            "callback_ownership_attribution": callback_attribution,
+            "callback_missing_reason": callback_missing_reason,
+            "callback_missing_reasons": missing_reasons,
+        },
+    )
+
+
+def _write_broker_truth_lease(
+    config: ReconciliationConfig,
+    *,
+    lease_state: str = "ACTIVE",
+    allowed_uses: dict[str, bool] | None = None,
+    callback_attribution: dict[str, object] | None = None,
+    callback_missing_reasons: list[dict[str, str]] | None = None,
+    position_fresh: bool = True,
+    open_order_fresh: bool = True,
+    fill_fresh: bool = False,
+) -> None:
+    missing_reasons = callback_missing_reasons or []
+    _write_json(
+        _repo_artifact_path(config, config.broker_truth_lease_path),
+        {
+            "schema_version": "track_b_broker_truth_lease_v1",
+            "generated_at": NOW.isoformat(),
+            "lease_state": lease_state,
+            "classification": lease_state,
+            "allowed_uses": allowed_uses or {"status_diagnostic": True},
+            "broker_position_lease": _lease_row(position_fresh),
+            "broker_open_order_lease": _lease_row(open_order_fresh),
+            "execution_fill_evidence_lease": _lease_row(fill_fresh),
+            "callback_ownership_attribution": callback_attribution or {},
+            "callback_missing_reason": missing_reasons[0]["code"] if missing_reasons else None,
+            "callback_missing_reasons": missing_reasons,
+        },
+    )
+
+
+def _lease_row(fresh: bool) -> dict[str, object]:
+    return {
+        "state": "FRESH" if fresh else "STALE",
+        "fresh": fresh,
+        "complete": fresh,
+        "generated_at": NOW.isoformat() if fresh else "2026-05-11T11:00:00+00:00",
+        "confidence": "HIGH" if fresh else "LOW",
+        "allowed_uses": ["STATUS_DIAGNOSTIC"] if fresh else [],
+    }
+
+
+def _repo_artifact_path(config: ReconciliationConfig, path: Path) -> Path:
+    return path if path.is_absolute() else config.repo_root / path
 
 
 def _write_base_artifacts(
