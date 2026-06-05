@@ -188,6 +188,28 @@ def test_retryable_unmutated_aggregate_close_review_does_not_mask_exit_due(tmp_p
     assert payload["managed_positions"][0]["attention_required"] is False
 
 
+def test_stale_managed_order_projection_does_not_stale_current_position_authority(tmp_path: Path) -> None:
+    lifecycle = _lifecycle_position(bars_since_fill=3)
+    _seed_base(tmp_path, broker_positions=[_broker_position()], lifecycle_positions=[lifecycle])
+    _write_lifecycle_report(tmp_path, lifecycle_id=lifecycle["lifecycle_id"], bars_since_fill=3)
+    managed_orders_path = (
+        tmp_path / "outputs" / "track_b_execution_core" / "managed_orders" / "latest_managed_orders.json"
+    )
+    managed_orders = json.loads(managed_orders_path.read_text(encoding="utf-8"))
+    managed_orders["generated_at"] = (NOW - timedelta(hours=2)).isoformat()
+    managed_orders_path.write_text(json.dumps(managed_orders, indent=2, sort_keys=True), encoding="utf-8")
+
+    payload = build_track_b_managed_position_registry(
+        config=TrackBManagedPositionRegistryConfig(repo_root=tmp_path),
+        now=NOW,
+    )
+
+    assert payload["source_freshness"]["stale"] is False
+    assert "managed_order_registry" not in payload["source_freshness"]["ages_seconds"]
+    assert payload["classification"] == OPEN_MANAGED_EXIT_DUE
+    assert payload["managed_positions"][0]["classification"] == OPEN_MANAGED_EXIT_DUE
+
+
 def test_retryable_pre_submit_contract_review_does_not_mask_exit_due(tmp_path: Path) -> None:
     lifecycle = _lifecycle_position(bars_since_fill=3)
     _seed_base(tmp_path, broker_positions=[_broker_position()], lifecycle_positions=[lifecycle])

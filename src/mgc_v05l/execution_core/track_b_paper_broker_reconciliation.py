@@ -236,6 +236,7 @@ def reconcile_track_b_paper_broker_truth(
     if owner_superseded_lifecycle_positions:
         lifecycle_projection_precedence = {
             **lifecycle_projection_precedence,
+            "classification": "STALE_LIFECYCLE_PROJECTIONS_SUPERSEDED_BY_CURRENT_EXPOSURE_OWNER",
             "current_scope_lifecycle_positions": lifecycle_positions,
             "superseded_lifecycle_projections": [
                 *list(lifecycle_projection_precedence.get("superseded_lifecycle_projections") or []),
@@ -568,6 +569,7 @@ def reconcile_track_b_paper_broker_truth(
         "current_exposure_owner_resolution": current_exposure_owner_resolution,
         "superseded_lifecycle_projections": lifecycle_projection_precedence["superseded_lifecycle_projections"],
         "lifecycle_projection_precedence": lifecycle_projection_precedence,
+        "lifecycle_projection_classification": lifecycle_projection_precedence.get("classification"),
         "position_match_report": position_match_report,
         "broker_cost_basis_adjustments": broker_cost_basis_adjustments,
         "bridge_terminal_event_grace": terminal_event_grace,
@@ -4015,7 +4017,26 @@ def _write_reconciled_summaries(
 
 
 def _track_b_lifecycle_positions(live_position_status: Mapping[str, Any], symbols: Sequence[str]) -> list[dict[str, Any]]:
-    rows = live_position_status.get("positions_by_instrument")
+    strategy_rows = _track_b_lifecycle_positions_from_rows(
+        live_position_status.get("positions_by_strategy"),
+        symbols,
+        key_field="strategy_position_key",
+    )
+    if strategy_rows:
+        return strategy_rows
+    return _track_b_lifecycle_positions_from_rows(
+        live_position_status.get("positions_by_instrument"),
+        symbols,
+        key_field="position_key",
+    )
+
+
+def _track_b_lifecycle_positions_from_rows(
+    rows: Any,
+    symbols: Sequence[str],
+    *,
+    key_field: str,
+) -> list[dict[str, Any]]:
     if not isinstance(rows, Mapping):
         return []
     matches: list[dict[str, Any]] = []
@@ -4023,7 +4044,9 @@ def _track_b_lifecycle_positions(live_position_status: Mapping[str, Any], symbol
         if not isinstance(value, Mapping):
             continue
         item = dict(value)
-        item.setdefault("position_key", key)
+        item.setdefault(key_field, key)
+        if key_field != "position_key":
+            item.setdefault("position_key", key)
         root = _track_b_root(item, symbols)
         if root is None:
             root = _track_b_root({"instrument": key, "contract_key": key}, symbols)

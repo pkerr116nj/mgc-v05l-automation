@@ -73,7 +73,8 @@ def resolve_terminal_registry_truth(
             ("AMBIGUOUS_TERMINAL_REGISTRY_PROOF",),
         )
     record = candidates[0]
-    if _has_linked_broker_position(identity, broker_positions) or _has_linked_open_order(identity, broker_open_orders):
+    linked_identity = _identity_with_record_direction(identity=identity, record=record)
+    if _has_linked_broker_position(linked_identity, broker_positions) or _has_linked_open_order(linked_identity, broker_open_orders):
         return TerminalRegistryTruth(
             TERMINAL_NOT_SUPERSEDED,
             record,
@@ -156,6 +157,19 @@ def _record_has_evidence_gated_broker_flat_cleanup(record: TradeRegistryRecord) 
         event for event in record.event_chain if event.event_type == TradeEventType.RECONCILED_FLAT_HISTORICAL_CLEANUP
     ]
     return any(_cleanup_event_has_flat_no_order_proof(event) for event in cleanup_events)
+
+
+def _identity_with_record_direction(
+    *,
+    identity: Mapping[str, Any],
+    record: TradeRegistryRecord,
+) -> dict[str, Any]:
+    payload = dict(identity)
+    owner = record.ownership_identity
+    if owner is not None:
+        payload.setdefault("side", owner.side)
+        payload.setdefault("qty", owner.qty)
+    return payload
 
 
 def _cleanup_event_has_flat_no_order_proof(event: Any) -> bool:
@@ -276,6 +290,8 @@ def _row_matches_identity(row: Mapping[str, Any], identity: Mapping[str, Any]) -
     ident_symbol = _symbol(identity)
     if row_symbol and ident_symbol and row_symbol != ident_symbol:
         return False
+    if not _direction_compatible(row, identity):
+        return False
     return bool(row_con is not None or ident_con is not None or row_local or ident_local or row_symbol or ident_symbol)
 
 
@@ -310,6 +326,31 @@ def _account_matches(owner_account: str, value: Any) -> bool:
 def _quantity_matches(owner_qty: Decimal, identity: Mapping[str, Any]) -> bool:
     qty = _decimal_or_none(identity.get("quantity") or identity.get("qty") or identity.get("aggregate_qty"))
     return qty is None or abs(qty) == abs(owner_qty)
+
+
+def _direction_compatible(row: Mapping[str, Any], identity: Mapping[str, Any]) -> bool:
+    row_sign = _signed_direction(row)
+    identity_sign = _signed_direction(identity)
+    return row_sign is None or identity_sign is None or row_sign == identity_sign
+
+
+def _signed_direction(row: Mapping[str, Any]) -> int | None:
+    signed = _decimal_or_none(row.get("signed_qty") or row.get("aggregate_qty"))
+    if signed is not None and signed != 0:
+        return 1 if signed > 0 else -1
+    qty = _decimal_or_none(row.get("quantity") or row.get("qty"))
+    side = _text(row.get("side") or row.get("action")).upper()
+    if qty is None:
+        return None
+    if qty < 0:
+        return -1
+    if qty > 0:
+        if side in {"SHORT", "SELL", "SELL_TO_OPEN"}:
+            return -1
+        if side in {"LONG", "BUY", "BUY_TO_OPEN"}:
+            return 1
+        return 1
+    return None
 
 
 def _symbol(row: Mapping[str, Any]) -> str:

@@ -1195,8 +1195,6 @@ def _source_stale(
         "open_order_truth": open_order_truth.get("generated_at"),
         "reconciliation": reconciliation.get("generated_at"),
     }
-    if managed_order_registry:
-        sources["managed_order_registry"] = managed_order_registry.get("generated_at")
     ages = {name: _age_seconds(value, now) for name, value in sources.items()}
     stale_sources = [
         name
