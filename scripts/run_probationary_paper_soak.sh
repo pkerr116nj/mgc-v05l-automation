@@ -467,6 +467,7 @@ run_shared_truth_runtime_start_preflight() {
   fi
   summary="$("${PYTHON_BIN}" - <<'PY' "${SHARED_TRUTH_PREFLIGHT_FILE}" "${stderr_file}" || true
 import json
+import os
 import sys
 from pathlib import Path
 
@@ -531,6 +532,7 @@ run_runtime_supervisor_start_preflight() {
   fi
   summary="$("${PYTHON_BIN}" - <<'PY' "${RUNTIME_SUPERVISOR_AUTHORITY_FILE}" "${stderr_file}" || true
 import json
+import os
 import sys
 from pathlib import Path
 
@@ -827,6 +829,36 @@ run_control_plane_snapshot_start_preflight() {
   local status=0
   local summary=""
   ensure_dir "$(dirname "${CONTROL_PLANE_SNAPSHOT_FILE}")"
+  if "${PYTHON_BIN}" - <<'PY' "${PAPER_STACK_STATUS_FILE}" >/dev/null; then
+import json
+import os
+import sys
+from pathlib import Path
+from mgc_v05l.execution_core.track_b_paper_stack_restart_precheck import classify_paper_stack_restart_precheck
+
+if os.environ.get("MGC_TRACK_B_PAPER_STACK_STARTUP_MODE") != "OWNED_MANAGED_EXPOSURE_MAINTENANCE_RESTORE":
+    raise SystemExit(1)
+try:
+    restore = json.loads(os.environ.get("MGC_TRACK_B_PAPER_STACK_OWNED_MANAGED_EXPOSURE_RESTORE_JSON") or "{}")
+except json.JSONDecodeError:
+    raise SystemExit(1)
+if restore.get("allowed") is not True or restore.get("blockers"):
+    raise SystemExit(1)
+try:
+    paper_stack_status = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
+except (OSError, json.JSONDecodeError):
+    raise SystemExit(1)
+restart_precheck = classify_paper_stack_restart_precheck(paper_stack_status)
+if (
+    restart_precheck.restart_allowed is True
+    and restart_precheck.classification == "RESTART_ALLOWED_OWNED_MANAGED_EXPOSURE"
+):
+    raise SystemExit(0)
+raise SystemExit(1)
+PY
+    echo "Track B Control Plane Snapshot start preflight: OWNED_MANAGED_EXPOSURE_MAINTENANCE_RESTORE handoff accepted by restart precheck."
+    return 0
+  fi
   set +e
   "${PYTHON_BIN}" -m mgc_v05l.execution_core.track_b_control_plane_snapshot \
     --repo-root "${REPO_ROOT}" \
@@ -998,6 +1030,7 @@ PY
   set +e
   "${PYTHON_BIN}" - <<'PY' "${CONTROL_PLANE_SNAPSHOT_FILE}" "${PAPER_STACK_STATUS_FILE}"
 import json
+import os
 import sys
 from pathlib import Path
 from mgc_v05l.execution_core.track_b_control_plane_snapshot_status import classify_control_plane_snapshot_status
@@ -1049,29 +1082,48 @@ def agent_health_blocker_summary(payload):
 def _safe_owned_exposure_restart_override(payload, status, restart_precheck):
     if restart_precheck.restart_allowed is not True:
         return False
-    if status.get("classification") != "CONTROL_PLANE_READY":
+    if restart_precheck.classification != "RESTART_ALLOWED_OWNED_MANAGED_EXPOSURE":
         return False
-    if payload.get("runtime_supervisor_classification") != "SUPERVISOR_RUNTIME_START_ALLOWED":
+    if os.environ.get("MGC_TRACK_B_PAPER_STACK_STARTUP_MODE") != "OWNED_MANAGED_EXPOSURE_MAINTENANCE_RESTORE":
         return False
-    if payload.get("supervisor_mode") != "READY_FOR_OPERATOR_START":
+    try:
+        restore = json.loads(os.environ.get("MGC_TRACK_B_PAPER_STACK_OWNED_MANAGED_EXPOSURE_RESTORE_JSON") or "{}")
+    except json.JSONDecodeError:
         return False
-    blocker_codes = {
-        str(item.get("code") or "")
-        for item in (payload.get("blockers") or [])
-        if isinstance(item, dict)
+    if restore.get("allowed") is not True:
+        return False
+    if payload.get("safe_state_classification") != "SAFE_STATE_NORMAL":
+        return False
+    if payload.get("safe_state_broker_mutation_allowed") is True:
+        return False
+    def allowed_control_blocker(row):
+        code = str(row.get("code") or "").strip()
+        detail = str(row.get("detail") or row.get("reason") or row.get("status") or "").strip()
+        if code == "agent_health_blocks_runtime_submit":
+            return True
+        if code == "shared_truth_coherence_not_confirmed" and "STALE_OR_MIXED" in detail:
+            return True
+        if code == "shared_truth_coherence" and detail == "STALE_OR_MIXED":
+            return True
+        if code == "stale_or_mixed_source" and detail in {"Position Truth", "Broker Truth Lease"}:
+            return True
+        return False
+
+    blocker_rows = [item for item in (payload.get("blockers") or []) if isinstance(item, dict)]
+    if any(not allowed_control_blocker(item) for item in blocker_rows):
+        return False
+    allowed_agent_reasons = {
+        ("canonical_readiness_refresher", "artifact_stale"),
+        ("track_b_paper_runtime", "RUNTIME_DOWN_WITH_BROKER_EXPOSURE"),
+        ("track_b_paper_runtime", "STOPPED_UNEXPECTED"),
     }
-    if blocker_codes and blocker_codes != {"agent_health_blocks_runtime_submit"}:
-        return False
     blockers = payload.get("agent_health_top_blockers") or []
     non_runtime_down_blockers = [
         item
         for item in blockers
         if isinstance(item, dict)
-        and (
-            item.get("agent_id") != "track_b_paper_runtime"
-            or item.get("status") != "STOPPED_UNEXPECTED"
-            or item.get("reason") != "RUNTIME_DOWN_WITH_BROKER_EXPOSURE"
-        )
+        and (str(item.get("agent_id") or ""), str(item.get("reason") or item.get("status") or ""))
+        not in allowed_agent_reasons
     ]
     return not non_runtime_down_blockers
 

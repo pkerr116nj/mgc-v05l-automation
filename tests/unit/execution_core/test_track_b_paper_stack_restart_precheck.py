@@ -41,6 +41,25 @@ def test_owned_managed_exposure_restart_allowed() -> None:
     assert result.classification == RESTART_ALLOWED_OWNED_MANAGED_EXPOSURE
 
 
+def test_reconciled_owned_managed_exposure_restart_uses_maintenance_restore_classification() -> None:
+    payload = _status(
+        reconciliation_classification="TRACK_B_PAPER_BROKER_RECONCILED",
+        track_b_positions=1,
+        lifecycle_positions=1,
+    )
+    payload["live_runtime_environment"]["restart_policy"] = {
+        "owned_exposure_restart_allowed": True,
+        "pre_restart_exposure_resolution_classification": "PROJECTION_STALE_MANAGED_EXPOSURE_RESOLVED",
+        "reason_codes": [],
+    }
+
+    result = classify_paper_stack_restart_precheck(payload)
+
+    assert result.restart_allowed is True
+    assert result.classification == RESTART_ALLOWED_OWNED_MANAGED_EXPOSURE
+    assert "PROJECTION_STALE_MANAGED_EXPOSURE_RESOLVED" in result.reason_codes
+
+
 def test_runtime_down_managed_exposure_restart_allowed_for_maintenance_restoration() -> None:
     payload = _status(
         reconciliation_classification="BROKER_TRUTH_SETTLEMENT_TIMEOUT",

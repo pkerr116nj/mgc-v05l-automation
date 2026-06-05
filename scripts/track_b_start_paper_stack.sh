@@ -46,6 +46,8 @@ STARTUP_PREFLIGHT_REMAINING_START_BLOCKERS_JSON="[]"
 STARTUP_PREFLIGHT_DEPENDENCY_REFRESH_ATTEMPTED="false"
 STARTUP_PREFLIGHT_DEPENDENCY_REFRESH_STEPS_JSON="[]"
 STARTUP_PREFLIGHT_DEPENDENCY_REFRESH_FAILURES_JSON="[]"
+STARTUP_MODE="STANDARD_START"
+STARTUP_OWNED_MANAGED_EXPOSURE_RESTORE_JSON="{}"
 
 CANONICAL_CONFIGS=(
   "${REPO_ROOT}/config/base.yaml"
@@ -387,6 +389,8 @@ write_startup_artifact() {
   MGC_STARTUP_PREFLIGHT_DEPENDENCY_REFRESH_ATTEMPTED="${STARTUP_PREFLIGHT_DEPENDENCY_REFRESH_ATTEMPTED}" \
   MGC_STARTUP_PREFLIGHT_DEPENDENCY_REFRESH_STEPS_JSON="${STARTUP_PREFLIGHT_DEPENDENCY_REFRESH_STEPS_JSON}" \
   MGC_STARTUP_PREFLIGHT_DEPENDENCY_REFRESH_FAILURES_JSON="${STARTUP_PREFLIGHT_DEPENDENCY_REFRESH_FAILURES_JSON}" \
+  MGC_TRACK_B_PAPER_STACK_STARTUP_MODE="${STARTUP_MODE}" \
+  MGC_TRACK_B_PAPER_STACK_OWNED_MANAGED_EXPOSURE_RESTORE_JSON="${STARTUP_OWNED_MANAGED_EXPOSURE_RESTORE_JSON}" \
   "${PYTHON_BIN}" - "$STARTUP_ARTIFACT" "$classification" "$detail" "$pid" "$REPO_ROOT" "$CONFIG_PATHS_FILE" "$STACK_PROFILE" <<'PY'
 import json
 import os
@@ -422,6 +426,10 @@ payload = {
     "paper_proof_invoked": False,
     "broker_mutation": False,
     "dashboard_authority": False,
+    "startup_mode": os.environ.get("MGC_TRACK_B_PAPER_STACK_STARTUP_MODE") or "STANDARD_START",
+    "owned_managed_exposure_maintenance_restore": json.loads(
+        os.environ.get("MGC_TRACK_B_PAPER_STACK_OWNED_MANAGED_EXPOSURE_RESTORE_JSON") or "{}"
+    ),
     "startup_preflight_refresh_attempted": os.environ.get("MGC_STARTUP_PREFLIGHT_REFRESH_ATTEMPTED") == "true",
     "startup_preflight_refresh_classification": os.environ.get("MGC_STARTUP_PREFLIGHT_REFRESH_CLASSIFICATION") or "NOT_ATTEMPTED",
     "startup_preflight_dependency_refresh_attempted": os.environ.get(
@@ -607,6 +615,7 @@ run_startup_preflight_evidence_refresh() {
     "${status_rc}" \
     "${CANONICAL_READINESS_FILE}" \
     "${CONTROL_PLANE_SNAPSHOT_FILE}" \
+    "${STACK_PROFILE}" \
     > "${result_json}" <<'PY'
 import json
 import sys
@@ -634,6 +643,7 @@ from pathlib import Path
     status_rc,
     readiness_artifact,
     control_artifact,
+    stack_profile,
 ) = sys.argv[1:]
 repo_root = Path(repo_root)
 
@@ -687,6 +697,21 @@ def add_failure(failures, step, code, detail=None):
 def list_rows(value):
     return value if isinstance(value, list) else []
 
+def as_mapping(value):
+    return value if isinstance(value, dict) else {}
+
+def int_value(value):
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        try:
+            return int(float(str(value)))
+        except (TypeError, ValueError):
+            return 0
+
+def normalized_text(value):
+    return str(value or "").strip().upper()
+
 def control_plane_start_safe(control):
     classification = str(control.get("classification") or "").strip().upper()
     top_line = str(control.get("top_line_classification") or "").strip().upper()
@@ -712,6 +737,44 @@ def control_plane_has_explicit_unsafe_status(control):
         for value in fields
     )
 
+def control_plane_maintenance_restore_blockers(control):
+    rows = [*list_rows(control.get("blockers")), *list_rows(control.get("prioritized_blockers"))]
+    disallowed = []
+    allowed_agent_reasons = {
+        ("canonical_readiness_refresher", "artifact_stale"),
+        ("track_b_paper_runtime", "RUNTIME_DOWN_WITH_BROKER_EXPOSURE"),
+        ("track_b_paper_runtime", "STOPPED_UNEXPECTED"),
+    }
+    for row in rows:
+        if not isinstance(row, dict):
+            disallowed.append(row)
+            continue
+        code = str(row.get("code") or "").strip()
+        agent_id = str(row.get("agent_id") or row.get("id") or "").strip()
+        reason = str(row.get("reason") or row.get("detail") or row.get("status") or "").strip()
+        if code == "agent_health_blocks_runtime_submit":
+            continue
+        if code == "shared_truth_coherence_not_confirmed" and "STALE_OR_MIXED" in reason:
+            continue
+        if code == "shared_truth_coherence" and reason == "STALE_OR_MIXED":
+            continue
+        if code == "stale_or_mixed_source" and reason in {"Position Truth", "Broker Truth Lease"}:
+            continue
+        if (agent_id, reason) in allowed_agent_reasons:
+            continue
+        disallowed.append(row)
+    return disallowed
+
+def hard_unsafe_for_maintenance_restore(control):
+    values = [
+        control.get("safe_state_classification"),
+        control.get("paper_action_policy"),
+        control.get("supervisor_mode"),
+        control.get("top_line_classification"),
+    ]
+    markers = ("HARD_HOLD", "HARD_UNSAFE", "UNSAFE", "QUARANTINE")
+    return any(any(marker in normalized_text(value) for marker in markers) for value in values)
+
 status = load_json(status_path)
 broker_truth = load_json(broker_truth_stdout)
 reconciliation_stdout_payload = load_json(reconciliation_stdout)
@@ -721,6 +784,14 @@ managed_orders = load_json(managed_order_stdout)
 shared_truth = load_json(shared_truth_stdout)
 readiness = load_json(readiness_stdout) or load_json(readiness_artifact)
 control = load_json(control_stdout) or load_json(control_artifact)
+safe_state = load_json(repo_root / "outputs/track_b_execution_core/safe_state/latest_runtime_safe_state_envelope.json")
+guardian = load_json(repo_root / "outputs/track_b_execution_core/broker_position_guardian/latest_broker_position_guardian.json")
+managed_positions_artifact = load_json(
+    repo_root / "outputs/track_b_execution_core/managed_positions/latest_managed_positions.json"
+)
+managed_orders_artifact = load_json(
+    repo_root / "outputs/track_b_execution_core/managed_orders/latest_managed_orders.json"
+)
 reconciliation = reconciliation_stdout_payload or load_json(
     repo_root
     / "outputs/reports/track_b_paper_broker_reconciliation/latest_track_b_paper_broker_reconciliation.json"
@@ -866,6 +937,14 @@ if first_present(reconciliation, "broker_reconciled", default=True) is False:
 
 broker_position_count = int(first_present(reconciliation, "track_b_broker_position_count", "broker_position_count", default=0) or 0)
 broker_order_count = int(first_present(reconciliation, "track_b_broker_open_order_count", "broker_open_order_count", default=0) or 0)
+unknown_broker_order_count = int(
+    first_present(
+        reconciliation,
+        "unknown_broker_open_order_count",
+        default=first_present(open_order_truth, "unknown_open_order_count", default=0),
+    )
+    or 0
+)
 lifecycle_position_count = int(
     first_present(
         reconciliation,
@@ -900,6 +979,13 @@ if open_order_classification and open_order_classification != "NO_OPEN_ORDERS":
         blockers,
         "open_order_truth_not_clean",
         detail=open_order_classification,
+        source="open_order_truth",
+    )
+if unknown_broker_order_count != 0:
+    add_blocker(
+        blockers,
+        "unknown_open_orders_present",
+        detail=unknown_broker_order_count,
         source="open_order_truth",
     )
 
@@ -1002,6 +1088,157 @@ if control:
 else:
     add_blocker(blockers, "control_plane_snapshot_unavailable", source="control_plane")
 
+def exact_owned_managed_exposure_restore_evidence():
+    evidence_blockers = []
+    if stack_profile != "mnq_mes_full_session_active_evidence":
+        evidence_blockers.append("profile_not_approved_for_maintenance_restore")
+    runtime = as_mapping(status.get("runtime"))
+    live_runtime = as_mapping(status.get("live_runtime_environment"))
+    liveness = as_mapping(live_runtime.get("liveness_contract"))
+    runtime_down = runtime.get("running") is False or liveness.get("process_alive") is False
+    if runtime_down is not True:
+        evidence_blockers.append("runtime_not_confirmed_down")
+    if "RECONCILED" not in recon_class or first_present(reconciliation, "broker_reconciled", default=True) is False:
+        evidence_blockers.append("broker_lifecycle_not_clean")
+    if broker_position_count <= 0 or lifecycle_position_count <= 0:
+        evidence_blockers.append("owned_restore_requires_current_exposure")
+    if broker_position_count != lifecycle_position_count:
+        evidence_blockers.append("broker_lifecycle_exposure_count_mismatch")
+    if broker_order_count != 0 or lifecycle_order_count != 0 or unknown_broker_order_count != 0:
+        evidence_blockers.append("owned_restore_requires_zero_open_orders")
+    if open_order_classification != "NO_OPEN_ORDERS":
+        evidence_blockers.append("open_order_truth_not_clean_for_owned_restore")
+
+    owner_resolution = as_mapping(reconciliation.get("current_exposure_owner_resolution"))
+    if owner_resolution.get("classification") != "OWNED_MANAGED_EXPOSURE":
+        evidence_blockers.append("owner_resolution_not_owned_managed_exposure")
+    owned_exposure_count = int_value(owner_resolution.get("owned_exposure_count"))
+    if owned_exposure_count <= 0:
+        evidence_blockers.append("owned_exposure_count_missing")
+    if owned_exposure_count != broker_position_count or owned_exposure_count != lifecycle_position_count:
+        evidence_blockers.append("owned_exposure_count_not_current_scope_count")
+    if list_rows(owner_resolution.get("ambiguous_exposures")):
+        evidence_blockers.append("ambiguous_owner_exposure_present")
+
+    def identity_key(row):
+        row = as_mapping(row)
+        lifecycle_id = row.get("lifecycle_id")
+        trade_id = row.get("trade_id")
+        if not lifecycle_id or not trade_id:
+            return None
+        return (str(lifecycle_id), str(trade_id))
+
+    def add_managed_candidate(candidates, row):
+        row = as_mapping(row)
+        key = identity_key(row)
+        if not key:
+            return
+        candidates.setdefault(key, row)
+
+    managed_candidates = {}
+    for source_payload in (managed_positions, managed_positions_artifact):
+        for row in list_rows(source_payload.get("managed_positions")):
+            add_managed_candidate(managed_candidates, row)
+    for row in list_rows(owner_resolution.get("owned_exposures")):
+        row = as_mapping(row)
+        add_managed_candidate(managed_candidates, row.get("lifecycle_position"))
+        add_managed_candidate(managed_candidates, row)
+    for source_payload in (managed_orders, managed_orders_artifact):
+        for row in list_rows(source_payload.get("managed_orders")):
+            row = as_mapping(row)
+            add_managed_candidate(managed_candidates, row.get("canonical_managed_position"))
+            broker_position = as_mapping(row.get("broker_position"))
+            add_managed_candidate(managed_candidates, broker_position.get("canonical_managed_position"))
+
+    managed_position_rows = list(managed_candidates.values())
+    active_managed_rows = [
+        row for row in managed_position_rows
+        if normalized_text(row.get("classification")) in {"OPEN_MANAGED", "OPEN_MANAGED_MATCHED", "OPEN_MANAGED_EXIT_DUE"}
+        or row.get("exit_due") is True
+        or row.get("managed_exit_policy_id")
+    ]
+    if len(active_managed_rows) != owned_exposure_count:
+        evidence_blockers.append("managed_position_count_not_current_owned_count")
+    if not active_managed_rows:
+        evidence_blockers.append("managed_position_classification_not_restore_safe")
+    for row in active_managed_rows:
+        if not (row.get("lifecycle_id") and row.get("trade_id")):
+            evidence_blockers.append("managed_position_identity_missing")
+        if not row.get("managed_exit_policy_id"):
+            evidence_blockers.append("managed_exit_policy_missing")
+
+    current_states = list_rows(as_mapping(status.get("registry_truth_diagnostics")).get("current_scope_trade_states"))
+    if len(current_states) != owned_exposure_count:
+        evidence_blockers.append("registry_current_scope_count_not_current_owned_count")
+    active_identity_keys = {identity_key(row) for row in active_managed_rows}
+    active_identity_keys.discard(None)
+    for raw_state in current_states:
+        state = as_mapping(raw_state)
+        if state.get("current_derived_state") != "OPEN_MANAGED":
+            evidence_blockers.append("registry_current_state_not_open_managed")
+        if state.get("registry_agrees_with_reconciliation") is not True:
+            evidence_blockers.append("registry_not_reconciled_to_current_exposure")
+        if identity_key(state) not in active_identity_keys:
+            evidence_blockers.append("registry_identity_differs_from_managed_position")
+
+    if safe_state.get("classification") != "SAFE_STATE_NORMAL":
+        evidence_blockers.append("safe_state_not_normal")
+    close_authority = as_mapping(safe_state.get("close_authority"))
+    if close_authority.get("broad_flatten_allowed") is True or close_authority.get("global_flatten_allowed") is True:
+        evidence_blockers.append("safe_state_flatten_path_available")
+    if safe_state.get("live_money_eligible") is True or safe_state.get("paper_proof_invoked") is True:
+        evidence_blockers.append("safe_state_live_money_or_paper_proof")
+
+    if guardian.get("classification") != "BROKER_POSITION_GUARDIAN_READY":
+        evidence_blockers.append("guardian_not_ready")
+    guardian_close = as_mapping(guardian.get("managed_close_authority"))
+    if guardian_close.get("broad_flatten_allowed") is True or guardian_close.get("global_flatten_allowed") is True:
+        evidence_blockers.append("guardian_flatten_path_available")
+    if hard_unsafe_for_maintenance_restore(control):
+        evidence_blockers.append("control_plane_hard_unsafe_for_maintenance_restore")
+    if control_plane_maintenance_restore_blockers(control):
+        evidence_blockers.append("control_plane_has_non_maintenance_blockers")
+    if safety.get("live_money_eligible") is not False or safety.get("paper_proof_invoked") is not False:
+        evidence_blockers.append("status_live_money_or_paper_proof")
+    if safety.get("broker_mutation_allowed") is not False:
+        evidence_blockers.append("status_broker_mutation_allowed")
+
+    return {
+        "allowed": not evidence_blockers,
+        "blockers": evidence_blockers,
+        "managed_exposure_count": len(active_managed_rows),
+        "lifecycle_ids": [row.get("lifecycle_id") for row in active_managed_rows],
+        "trade_ids": [row.get("trade_id") for row in active_managed_rows],
+        "lifecycle_id": active_managed_rows[0].get("lifecycle_id") if len(active_managed_rows) == 1 else None,
+        "trade_id": active_managed_rows[0].get("trade_id") if len(active_managed_rows) == 1 else None,
+        "managed_position_classification": managed_position_classification,
+        "managed_order_classification": managed_order_classification,
+        "owner_resolution_classification": owner_resolution.get("classification"),
+    }
+
+maintenance_restore = exact_owned_managed_exposure_restore_evidence()
+maintenance_allowed_blockers = {
+    "broker_positions_or_orders_not_flat",
+    "lifecycle_positions_or_orders_not_flat",
+    "managed_position_registry_not_clean",
+    "managed_order_registry_not_clean",
+    "control_plane_snapshot_refresh_failed",
+    "control_plane_refresh_failed",
+    "control_plane_start_not_allowed",
+    "control_plane_reported_blockers",
+    "control_plane_primary_blocker",
+    "control_plane_explicit_unsafe_status",
+}
+startup_mode = "OWNED_MANAGED_EXPOSURE_MAINTENANCE_RESTORE" if maintenance_restore["allowed"] else "STANDARD_START"
+effective_blockers = [
+    row for row in blockers
+    if not (maintenance_restore["allowed"] and row.get("code") in maintenance_allowed_blockers)
+]
+effective_dependency_refresh_failures = [
+    row for row in dependency_refresh_failures
+    if not (maintenance_restore["allowed"] and row.get("code") == "control_plane_snapshot_refresh_failed")
+]
+
 dependency_return_codes = [
     to_int(broker_truth_rc),
     to_int(reconciliation_rc),
@@ -1013,9 +1250,13 @@ dependency_return_codes = [
     to_int(control_rc),
     to_int(status_rc),
 ]
-if all(rc == 0 for rc in dependency_return_codes) and not blockers:
+effective_dependency_return_codes = list(dependency_return_codes)
+if maintenance_restore["allowed"]:
+    effective_dependency_return_codes[7] = 0
+
+if all(rc == 0 for rc in effective_dependency_return_codes) and not effective_blockers:
     classification = "STARTUP_PREFLIGHT_REFRESH_CLEAN"
-elif any(rc != 0 for rc in dependency_return_codes):
+elif any(rc != 0 for rc in effective_dependency_return_codes):
     classification = "STARTUP_PREFLIGHT_REFRESH_FAILED"
 else:
     classification = "STARTUP_PREFLIGHT_REFRESH_BLOCKED"
@@ -1024,10 +1265,12 @@ payload = {
     "classification": classification,
     "startup_preflight_refresh_attempted": True,
     "startup_preflight_dependency_refresh_attempted": True,
+    "startup_mode": startup_mode,
+    "owned_managed_exposure_maintenance_restore": maintenance_restore,
     "dependency_refresh_steps": dependency_steps,
-    "dependency_refresh_failures": dependency_refresh_failures,
+    "dependency_refresh_failures": effective_dependency_refresh_failures,
     "refreshed_artifact_paths": sorted(paths),
-    "remaining_start_blockers": blockers,
+    "remaining_start_blockers": effective_blockers,
     "canonical_readiness_classification": readiness.get("classification")
     or readiness.get("canonical_state")
     or readiness.get("readiness_classification"),
@@ -1041,6 +1284,8 @@ PY
   STARTUP_PREFLIGHT_DEPENDENCY_REFRESH_FAILURES_JSON="$("${PYTHON_BIN}" -c 'import json,sys; print(json.dumps(json.load(open(sys.argv[1])).get("dependency_refresh_failures") or []))' "${result_json}")"
   STARTUP_PREFLIGHT_REFRESHED_ARTIFACT_PATHS_JSON="$("${PYTHON_BIN}" -c 'import json,sys; print(json.dumps(json.load(open(sys.argv[1])).get("refreshed_artifact_paths") or []))' "${result_json}")"
   STARTUP_PREFLIGHT_REMAINING_START_BLOCKERS_JSON="$("${PYTHON_BIN}" -c 'import json,sys; print(json.dumps(json.load(open(sys.argv[1])).get("remaining_start_blockers") or []))' "${result_json}")"
+  STARTUP_MODE="$("${PYTHON_BIN}" -c 'import json,sys; print(json.load(open(sys.argv[1])).get("startup_mode") or "STANDARD_START")' "${result_json}")"
+  STARTUP_OWNED_MANAGED_EXPOSURE_RESTORE_JSON="$("${PYTHON_BIN}" -c 'import json,sys; print(json.dumps(json.load(open(sys.argv[1])).get("owned_managed_exposure_maintenance_restore") or {}))' "${result_json}")"
 
   if [[ -s "${status_stdout}" ]]; then
     status_json="$(cat "${status_stdout}")"
@@ -1177,6 +1422,8 @@ export MGC_TRACK_B_RUNTIME_INSTANCE_ID="${runtime_instance_id}"
 export MGC_TRACK_B_PAPER_RUNTIME_RESTART_GENERATION="1"
 export MGC_TRACK_B_EXPECTED_PROJECT_ROOT="${REPO_ROOT}"
 export MGC_TRACK_B_EXPECTED_SOURCE_COMMIT="${source_commit}"
+export MGC_TRACK_B_PAPER_STACK_STARTUP_MODE="${STARTUP_MODE}"
+export MGC_TRACK_B_PAPER_STACK_OWNED_MANAGED_EXPOSURE_RESTORE_JSON='${STARTUP_OWNED_MANAGED_EXPOSURE_RESTORE_JSON}'
 mkdir -p "${RUNTIME_DIR}"
 if "${PYTHON_BIN}" - <<'PY' "${RUNTIME_DIR}/paper_runtime_truth.json" "\$\$"
 import json
@@ -1305,6 +1552,31 @@ while [[ "${SECONDS}" -lt "${deadline}" ]]; do
   ready="$("${PYTHON_BIN}" -c 'import json,sys; print(str(json.loads(sys.stdin.read())["readiness"]["ready_submit_capable"]).lower())' <<<"${last_status}" 2>/dev/null || echo false)"
   start_allowed="$("${PYTHON_BIN}" -c 'import json,sys; print(str(json.loads(sys.stdin.read())["readiness"].get("runtime_start_allowed") is True).lower())' <<<"${last_status}" 2>/dev/null || echo false)"
   scheduled_halt="$("${PYTHON_BIN}" -c 'import json,sys; p=json.loads(sys.stdin.read())["readiness"]; print(str(p.get("readiness_block_is_scheduled_halt") is True and p.get("ready_submit_capable") is not True).lower())' <<<"${last_status}" 2>/dev/null || echo false)"
+  maintenance_restore_ready="$("${PYTHON_BIN}" -c '
+import json
+import sys
+payload = json.loads(sys.stdin.read())
+startup = payload.get("startup_phase") if isinstance(payload.get("startup_phase"), dict) else {}
+evidence = startup.get("evidence") if isinstance(startup.get("evidence"), dict) else {}
+readiness = payload.get("readiness") if isinstance(payload.get("readiness"), dict) else {}
+required = (
+    "runtime_process_alive",
+    "process_identified",
+    "profile_loaded",
+    "lanes_loaded",
+    "market_data_feed_observed",
+    "runtime_ingestion_advancing",
+    "authority_refreshed",
+    "readiness_evaluated",
+)
+ok = (
+    startup.get("phase") == "READINESS_EVALUATED"
+    and all(evidence.get(key) is True for key in required)
+    and readiness.get("submit_allowed") is not True
+    and readiness.get("ready_submit_capable") is not True
+)
+print(str(ok).lower())
+' <<<"${last_status}" 2>/dev/null || echo false)"
   pid="$("${PYTHON_BIN}" -c 'import json,sys; print(json.loads(sys.stdin.read())["runtime"]["pid"] or "")' <<<"${last_status}" 2>/dev/null || true)"
   if [[ "${running}" == "true" && "${ready}" == "true" ]]; then
     if [[ "${ready_pid}" != "${pid}" ]]; then
@@ -1328,6 +1600,18 @@ while [[ "${SECONDS}" -lt "${deadline}" ]]; do
       exit 0
     fi
     write_startup_artifact "RUNTIME_RUNNING_WAITING_FOR_DIAGNOSTIC_START_STABILITY" "Runtime is alive during scheduled halt; waiting for ${STABLE_SECONDS}s sustained diagnostic start readiness." "${pid}" >/dev/null
+    continue
+  fi
+  if [[ "${STARTUP_MODE}" == "OWNED_MANAGED_EXPOSURE_MAINTENANCE_RESTORE" && "${running}" == "true" && "${maintenance_restore_ready}" == "true" ]]; then
+    if [[ "${ready_pid}" != "${pid}" ]]; then
+      ready_pid="${pid}"
+      ready_since="${SECONDS}"
+    fi
+    if (( SECONDS - ready_since >= STABLE_SECONDS )); then
+      write_startup_artifact "OWNED_MANAGED_EXPOSURE_MAINTENANCE_RESTORE_ACTIVE" "Track B PAPER runtime restored managed-maintenance observability for owned managed exposure; new entries remain blocked by canonical readiness." "${pid}"
+      exit 0
+    fi
+    write_startup_artifact "RUNTIME_RUNNING_WAITING_FOR_MAINTENANCE_RESTORE_STABILITY" "Runtime is alive in owned-managed-exposure maintenance-restore mode; waiting for ${STABLE_SECONDS}s sustained maintenance observability." "${pid}" >/dev/null
     continue
   fi
   if [[ -n "${ready_pid}" && "${running}" != "true" ]]; then

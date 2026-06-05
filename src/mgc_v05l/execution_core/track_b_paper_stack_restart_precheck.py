@@ -96,13 +96,6 @@ def classify_paper_stack_restart_precheck(status: Mapping[str, Any]) -> PaperSta
             reason_codes=("BROKER_TRUTH_NOT_FRESH",),
         )
 
-    if _broker_lifecycle_reconciled(broker):
-        return PaperStackRestartPrecheck(
-            classification=RESTART_ALLOWED_FLAT_RECONCILED,
-            restart_allowed=True,
-            detail="Broker/lifecycle state is reconciled and PAPER safety gates are clean.",
-        )
-
     if restart_policy.get("owned_exposure_restart_allowed") is True:
         resolution = str(restart_policy.get("pre_restart_exposure_resolution_classification") or "")
         if resolution in {
@@ -119,6 +112,14 @@ def classify_paper_stack_restart_precheck(status: Mapping[str, Any]) -> PaperSta
 
     current_positions = int(diagnostics.get("track_b_managed_futures_position_count") or 0)
     lifecycle_positions = _current_scope_lifecycle_position_count(diagnostics)
+
+    if _broker_lifecycle_reconciled(broker) and current_positions == 0 and lifecycle_positions == 0:
+        return PaperStackRestartPrecheck(
+            classification=RESTART_ALLOWED_FLAT_RECONCILED,
+            restart_allowed=True,
+            detail="Broker/lifecycle state is reconciled and PAPER safety gates are clean.",
+        )
+
     reason_codes = tuple(str(code) for code in restart_policy.get("reason_codes") or ())
     if current_positions or lifecycle_positions:
         return PaperStackRestartPrecheck(

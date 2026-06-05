@@ -119,7 +119,9 @@ def _run_startup_preflight_decision(
     broker_truth: dict | None = None,
     open_order_truth: dict | None = None,
     managed_positions: dict | None = None,
+    managed_positions_artifact: dict | None = None,
     managed_orders: dict | None = None,
+    managed_orders_artifact: dict | None = None,
     shared_truth: dict | None = None,
     broker_truth_rc: int = 0,
     reconciliation_rc: int = 0,
@@ -130,6 +132,9 @@ def _run_startup_preflight_decision(
     readiness_rc: int = 0,
     control_rc: int = 0,
     status_rc: int = 0,
+    safe_state: dict | None = None,
+    guardian: dict | None = None,
+    stack_profile: str = "mnq_mes_full_session_active_evidence",
 ) -> dict:
     repo_root = tmp_path / "repo"
     reconciliation_path = (
@@ -140,6 +145,63 @@ def _run_startup_preflight_decision(
         / "latest_track_b_paper_broker_reconciliation.json"
     )
     reconciliation_path.parent.mkdir(parents=True, exist_ok=True)
+    safe_state_path = repo_root / "outputs" / "track_b_execution_core" / "safe_state" / "latest_runtime_safe_state_envelope.json"
+    guardian_path = (
+        repo_root
+        / "outputs"
+        / "track_b_execution_core"
+        / "broker_position_guardian"
+        / "latest_broker_position_guardian.json"
+    )
+    managed_positions_artifact_path = (
+        repo_root
+        / "outputs"
+        / "track_b_execution_core"
+        / "managed_positions"
+        / "latest_managed_positions.json"
+    )
+    managed_orders_artifact_path = (
+        repo_root
+        / "outputs"
+        / "track_b_execution_core"
+        / "managed_orders"
+        / "latest_managed_orders.json"
+    )
+    safe_state_path.parent.mkdir(parents=True, exist_ok=True)
+    guardian_path.parent.mkdir(parents=True, exist_ok=True)
+    managed_positions_artifact_path.parent.mkdir(parents=True, exist_ok=True)
+    managed_orders_artifact_path.parent.mkdir(parents=True, exist_ok=True)
+    safe_state_path.write_text(
+        json.dumps(
+            safe_state
+            or {
+                "classification": "SAFE_STATE_NORMAL",
+                "close_authority": {
+                    "allowed": True,
+                    "broad_flatten_allowed": False,
+                    "global_flatten_allowed": False,
+                },
+                "live_money_eligible": False,
+                "paper_proof_invoked": False,
+            }
+        ),
+        encoding="utf-8",
+    )
+    guardian_path.write_text(
+        json.dumps(
+            guardian
+            or {
+                "classification": "BROKER_POSITION_GUARDIAN_READY",
+                "managed_close_authority": {
+                    "allowed": True,
+                    "broad_flatten_allowed": False,
+                    "global_flatten_allowed": False,
+                    "candidates": [],
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
     reconciliation_path.write_text(
         json.dumps(
             reconciliation
@@ -202,9 +264,33 @@ def _run_startup_preflight_decision(
         ),
         encoding="utf-8",
     )
+    managed_positions_artifact_path.write_text(
+        json.dumps(
+            managed_positions_artifact
+            if managed_positions_artifact is not None
+            else managed_positions
+            or {
+                "classification": "NO_MANAGED_POSITIONS",
+                "output_path": str(tmp_path / "latest_managed_positions.json"),
+            }
+        ),
+        encoding="utf-8",
+    )
     managed_orders_path.write_text(
         json.dumps(
             managed_orders
+            or {
+                "classification": "NO_MANAGED_ORDERS",
+                "output_path": str(tmp_path / "latest_managed_orders.json"),
+            }
+        ),
+        encoding="utf-8",
+    )
+    managed_orders_artifact_path.write_text(
+        json.dumps(
+            managed_orders_artifact
+            if managed_orders_artifact is not None
+            else managed_orders
             or {
                 "classification": "NO_MANAGED_ORDERS",
                 "output_path": str(tmp_path / "latest_managed_orders.json"),
@@ -267,6 +353,7 @@ def _run_startup_preflight_decision(
             str(status_rc),
             str(readiness_path),
             str(control_path),
+            stack_profile,
         ],
         input=_startup_preflight_decision_python(),
         text=True,
@@ -386,6 +473,336 @@ def test_paper_stack_start_preflight_refresh_still_blocks_non_flat_broker_state(
     codes = {row["code"] for row in result["remaining_start_blockers"]}
     assert result["classification"] == "STARTUP_PREFLIGHT_REFRESH_BLOCKED"
     assert "broker_positions_or_orders_not_flat" in codes
+
+
+def test_paper_stack_start_allows_owned_managed_exposure_maintenance_restore(tmp_path: Path) -> None:
+    lifecycle_id = "reserved_submit_mnq_us_active_participation_short_20260605T153313319800Z_c9ec4e3f156c"
+    trade_id = "trade_e372351a-26f7-464f-ad9f-f5b4b2c04893"
+    result = _run_startup_preflight_decision(
+        tmp_path,
+        control={
+            "classification": "CONTROL_PLANE_SNAPSHOT_BLOCKED",
+            "safe_to_start_runtime": False,
+            "top_line_classification": "BLOCKED",
+            "blockers": [
+                {"code": "agent_health_blocks_runtime_submit", "detail": "runtime down"},
+                {
+                    "agent_id": "canonical_readiness_refresher",
+                    "reason": "artifact_stale",
+                    "status": "STALE",
+                },
+                {
+                    "agent_id": "track_b_paper_runtime",
+                    "reason": "RUNTIME_DOWN_WITH_BROKER_EXPOSURE",
+                    "status": "STOPPED_UNEXPECTED",
+                },
+            ],
+            "primary_blocking_agent_id": "canonical_readiness_refresher",
+            "primary_blocking_reason": "artifact_stale",
+        },
+        control_rc=2,
+        reconciliation={
+            "classification": "TRACK_B_PAPER_BROKER_RECONCILED",
+            "broker_reconciled": True,
+            "track_b_broker_position_count": 1,
+            "track_b_broker_open_order_count": 0,
+            "unknown_broker_open_order_count": 0,
+            "current_scope_lifecycle_open_position_count": 1,
+            "lifecycle_open_order_count": 0,
+            "current_exposure_owner_resolution": {
+                "classification": "OWNED_MANAGED_EXPOSURE",
+                "owned_exposure_count": 1,
+                "owned_exposures": [{"lifecycle_id": lifecycle_id, "trade_id": trade_id}],
+                "ambiguous_exposures": [],
+            },
+        },
+        status={
+            "runtime": {"running": False},
+            "safety": {
+                "paper_only": True,
+                "live_money_eligible": False,
+                "paper_proof_invoked": False,
+                "broker_mutation_allowed": False,
+            },
+            "registry_truth_diagnostics": {
+                "current_scope_trade_states": [
+                    {
+                        "current_derived_state": "OPEN_MANAGED",
+                        "registry_agrees_with_reconciliation": True,
+                        "lifecycle_id": lifecycle_id,
+                        "trade_id": trade_id,
+                    }
+                ]
+            },
+        },
+        managed_positions={
+            "classification": "OPEN_MANAGED_EXIT_DUE",
+            "managed_positions": [
+                {
+                    "classification": "OPEN_MANAGED_EXIT_DUE",
+                    "exit_due": True,
+                    "lifecycle_id": lifecycle_id,
+                    "trade_id": trade_id,
+                    "managed_exit_policy_id": "US_ACTIVE_EVIDENCE_TIMEBOX_60M_EXIT_V1",
+                }
+            ],
+        },
+        managed_orders={
+            "classification": "POSITION_WITHOUT_CLOSE_ORDER",
+            "managed_orders": [
+                {
+                    "classification": "POSITION_WITHOUT_CLOSE_ORDER",
+                    "lifecycle_id": lifecycle_id,
+                    "trade_id": trade_id,
+                    "working": False,
+                }
+            ],
+        },
+    )
+
+    assert result["classification"] == "STARTUP_PREFLIGHT_REFRESH_CLEAN"
+    assert result["startup_mode"] == "OWNED_MANAGED_EXPOSURE_MAINTENANCE_RESTORE"
+    assert result["remaining_start_blockers"] == []
+    assert result["dependency_refresh_failures"] == []
+    restore = result["owned_managed_exposure_maintenance_restore"]
+    assert restore["allowed"] is True
+    assert restore["lifecycle_id"] == lifecycle_id
+    assert restore["trade_id"] == trade_id
+
+
+def test_paper_stack_start_allows_owned_restore_from_durable_current_scope_when_refresh_is_stale(
+    tmp_path: Path,
+) -> None:
+    lifecycle_id = "reserved_submit_mes_globex_active_participation_long_20260605T025014090792Z_f15a0bc2cab9"
+    trade_id = "trade_c572b141-df6d-4c2b-8fae-f582cb8f4d2e"
+    current_managed_positions = {
+        "classification": "OPEN_MANAGED_EXIT_DUE",
+        "managed_positions": [
+            {
+                "classification": "OPEN_MANAGED_EXIT_DUE",
+                "exit_due": True,
+                "lifecycle_id": lifecycle_id,
+                "trade_id": trade_id,
+                "managed_exit_policy_id": "US_ACTIVE_EVIDENCE_TIMEBOX_60M_EXIT_V1",
+            }
+        ],
+    }
+    result = _run_startup_preflight_decision(
+        tmp_path,
+        control={
+            "classification": "CONTROL_PLANE_SNAPSHOT_BLOCKED",
+            "safe_to_start_runtime": False,
+            "top_line_classification": "CONTROL_PLANE_BLOCKED",
+            "paper_action_policy": "SCOPED_RECOVERY_ELIGIBLE",
+            "safe_state_classification": "SAFE_STATE_NORMAL",
+            "blockers": [{"code": "agent_health_blocks_runtime_submit", "detail": "runtime down"}],
+            "prioritized_blockers": [
+                {
+                    "agent_id": "canonical_readiness_refresher",
+                    "reason": "artifact_stale",
+                    "status": "STALE",
+                },
+                {
+                    "agent_id": "track_b_paper_runtime",
+                    "reason": "RUNTIME_DOWN_WITH_BROKER_EXPOSURE",
+                    "status": "STOPPED_UNEXPECTED",
+                },
+            ],
+            "primary_blocking_agent_id": "canonical_readiness_refresher",
+            "primary_blocking_reason": "artifact_stale",
+        },
+        control_rc=2,
+        reconciliation={
+            "classification": "TRACK_B_PAPER_BROKER_RECONCILED",
+            "broker_reconciled": True,
+            "track_b_broker_position_count": 1,
+            "track_b_broker_open_order_count": 0,
+            "unknown_broker_open_order_count": 0,
+            "current_scope_lifecycle_open_position_count": 1,
+            "lifecycle_open_order_count": 0,
+            "current_exposure_owner_resolution": {
+                "classification": "OWNED_MANAGED_EXPOSURE",
+                "owned_exposure_count": 1,
+                "owned_exposures": [
+                    {
+                        "classification": "OWNED_MANAGED_EXPOSURE",
+                        "lifecycle_id": lifecycle_id,
+                        "trade_id": trade_id,
+                        "lifecycle_position": {
+                            "classification": "OPEN_MANAGED",
+                            "lifecycle_id": lifecycle_id,
+                            "trade_id": trade_id,
+                            "managed_exit_policy_id": "US_ACTIVE_EVIDENCE_TIMEBOX_60M_EXIT_V1",
+                        },
+                    }
+                ],
+                "ambiguous_exposures": [],
+            },
+        },
+        status={
+            "runtime": {"running": False},
+            "safety": {
+                "paper_only": True,
+                "live_money_eligible": False,
+                "paper_proof_invoked": False,
+                "broker_mutation_allowed": False,
+            },
+            "registry_truth_diagnostics": {
+                "current_scope_trade_states": [
+                    {
+                        "current_derived_state": "OPEN_MANAGED",
+                        "registry_agrees_with_reconciliation": True,
+                        "lifecycle_id": lifecycle_id,
+                        "trade_id": trade_id,
+                    }
+                ]
+            },
+        },
+        managed_positions={"classification": "STALE_MANAGED_POSITION_EVIDENCE", "managed_positions": []},
+        managed_positions_artifact=current_managed_positions,
+        managed_orders={"classification": "ORDER_STATE_UNKNOWN_REVIEW_REQUIRED", "managed_orders": []},
+        managed_orders_artifact={
+            "classification": "POSITION_WITHOUT_CLOSE_ORDER",
+            "managed_orders": [
+                {
+                    "classification": "POSITION_WITHOUT_CLOSE_ORDER",
+                    "canonical_managed_position": current_managed_positions["managed_positions"][0],
+                }
+            ],
+        },
+    )
+
+    assert result["classification"] == "STARTUP_PREFLIGHT_REFRESH_CLEAN"
+    assert result["startup_mode"] == "OWNED_MANAGED_EXPOSURE_MAINTENANCE_RESTORE"
+    assert result["remaining_start_blockers"] == []
+    restore = result["owned_managed_exposure_maintenance_restore"]
+    assert restore["allowed"] is True
+    assert restore["managed_exposure_count"] == 1
+    assert restore["lifecycle_ids"] == [lifecycle_id]
+
+
+def test_paper_stack_start_allows_multiple_exact_owned_managed_exposures(tmp_path: Path) -> None:
+    exposures = [
+        (
+            "reserved_submit_mnq_globex_active_participation_long_20260605T024927888743Z_98114344bc68",
+            "trade_eb811018-c06f-468c-bb66-0daa6cd3d886",
+        ),
+        (
+            "reserved_submit_mes_globex_active_participation_long_20260605T025014090792Z_f15a0bc2cab9",
+            "trade_c572b141-df6d-4c2b-8fae-f582cb8f4d2e",
+        ),
+    ]
+    managed_rows = [
+        {
+            "classification": "OPEN_MANAGED_EXIT_DUE",
+            "exit_due": True,
+            "lifecycle_id": lifecycle_id,
+            "trade_id": trade_id,
+            "managed_exit_policy_id": "US_ACTIVE_EVIDENCE_TIMEBOX_60M_EXIT_V1",
+        }
+        for lifecycle_id, trade_id in exposures
+    ]
+    result = _run_startup_preflight_decision(
+        tmp_path,
+        control={
+            "classification": "CONTROL_PLANE_SNAPSHOT_BLOCKED",
+            "safe_to_start_runtime": False,
+            "top_line_classification": "CONTROL_PLANE_BLOCKED",
+            "safe_state_classification": "SAFE_STATE_NORMAL",
+            "blockers": [{"code": "agent_health_blocks_runtime_submit", "detail": "runtime down"}],
+            "prioritized_blockers": [
+                {"agent_id": "track_b_paper_runtime", "reason": "RUNTIME_DOWN_WITH_BROKER_EXPOSURE"}
+            ],
+        },
+        control_rc=2,
+        reconciliation={
+            "classification": "TRACK_B_PAPER_BROKER_RECONCILED",
+            "broker_reconciled": True,
+            "track_b_broker_position_count": 2,
+            "track_b_broker_open_order_count": 0,
+            "unknown_broker_open_order_count": 0,
+            "current_scope_lifecycle_open_position_count": 2,
+            "lifecycle_open_order_count": 0,
+            "current_exposure_owner_resolution": {
+                "classification": "OWNED_MANAGED_EXPOSURE",
+                "owned_exposure_count": 2,
+                "owned_exposures": [
+                    {"lifecycle_id": lifecycle_id, "trade_id": trade_id, "lifecycle_position": row}
+                    for row, (lifecycle_id, trade_id) in zip(managed_rows, exposures, strict=True)
+                ],
+                "ambiguous_exposures": [],
+            },
+        },
+        status={
+            "runtime": {"running": False},
+            "safety": {
+                "paper_only": True,
+                "live_money_eligible": False,
+                "paper_proof_invoked": False,
+                "broker_mutation_allowed": False,
+            },
+            "registry_truth_diagnostics": {
+                "current_scope_trade_states": [
+                    {
+                        "current_derived_state": "OPEN_MANAGED",
+                        "registry_agrees_with_reconciliation": True,
+                        "lifecycle_id": lifecycle_id,
+                        "trade_id": trade_id,
+                    }
+                    for lifecycle_id, trade_id in exposures
+                ]
+            },
+        },
+        managed_positions={"classification": "OPEN_MANAGED_EXIT_DUE", "managed_positions": managed_rows},
+        managed_orders={"classification": "POSITION_WITHOUT_CLOSE_ORDER", "managed_orders": []},
+    )
+
+    assert result["classification"] == "STARTUP_PREFLIGHT_REFRESH_CLEAN"
+    assert result["startup_mode"] == "OWNED_MANAGED_EXPOSURE_MAINTENANCE_RESTORE"
+    assert result["owned_managed_exposure_maintenance_restore"]["managed_exposure_count"] == 2
+
+
+def test_paper_stack_start_blocks_owned_restore_wrong_profile(tmp_path: Path) -> None:
+    result = _run_startup_preflight_decision(
+        tmp_path,
+        control={
+            "classification": "CONTROL_PLANE_SNAPSHOT_BLOCKED",
+            "safe_to_start_runtime": False,
+            "top_line_classification": "BLOCKED",
+            "blockers": [],
+        },
+        reconciliation={
+            "classification": "TRACK_B_PAPER_BROKER_RECONCILED",
+            "broker_reconciled": True,
+            "track_b_broker_position_count": 1,
+            "track_b_broker_open_order_count": 0,
+            "current_scope_lifecycle_open_position_count": 1,
+            "lifecycle_open_order_count": 0,
+            "current_exposure_owner_resolution": {
+                "classification": "OWNED_MANAGED_EXPOSURE",
+                "owned_exposure_count": 1,
+            },
+        },
+        managed_positions={
+            "classification": "OPEN_MANAGED_EXIT_DUE",
+            "managed_positions": [{"classification": "OPEN_MANAGED_EXIT_DUE", "exit_due": True}],
+        },
+        managed_orders={"classification": "POSITION_WITHOUT_CLOSE_ORDER"},
+        status={
+            "runtime": {"running": False},
+            "safety": {
+                "paper_only": True,
+                "live_money_eligible": False,
+                "paper_proof_invoked": False,
+                "broker_mutation_allowed": False,
+            },
+        },
+        stack_profile="canonical",
+    )
+
+    assert result["classification"] == "STARTUP_PREFLIGHT_REFRESH_BLOCKED"
+    assert result["startup_mode"] == "STANDARD_START"
+    assert "profile_not_approved_for_maintenance_restore" in result["owned_managed_exposure_maintenance_restore"]["blockers"]
 
 
 def test_paper_stack_start_preflight_refresh_blocks_dependency_refresh_failure(tmp_path: Path) -> None:
@@ -517,7 +934,7 @@ def test_paper_stack_start_preflight_refresh_preserves_broker_safety_gates() -> 
     assert "cancelorder" not in lowered
     assert "reqglobalcancel" not in lowered
     assert "global_cancel" not in lowered
-    assert "broad_flatten" not in lowered
+    assert "broad_flatten_allowed" in lowered
 
 
 def test_paper_stack_start_timeout_reports_startup_phase_without_exit_change() -> None:
@@ -580,6 +997,31 @@ def test_paper_stack_restart_uses_owned_exposure_authority() -> None:
     assert "restart_authority_allowed" in source
     assert "track_b_paper_stack_restart_precheck" in soak_source
     assert "_safe_owned_exposure_restart_override" in soak_source
+    assert "OWNED_MANAGED_EXPOSURE_MAINTENANCE_RESTORE" in source
+    assert "OWNED_MANAGED_EXPOSURE_MAINTENANCE_RESTORE" in soak_source
+    assert "OWNED_MANAGED_EXPOSURE_MAINTENANCE_RESTORE_ACTIVE" in source
+    assert "RUNTIME_RUNNING_WAITING_FOR_MAINTENANCE_RESTORE_STABILITY" in source
+    assert 'readiness.get("submit_allowed") is not True' in source
+    assert 'readiness.get("ready_submit_capable") is not True' in source
+    assert "RESTART_ALLOWED_OWNED_MANAGED_EXPOSURE" in soak_source
+    assert "MGC_TRACK_B_PAPER_STACK_OWNED_MANAGED_EXPOSURE_RESTORE_JSON" in source
+    assert "MGC_TRACK_B_PAPER_STACK_OWNED_MANAGED_EXPOSURE_RESTORE_JSON" in soak_source
+    assert "OWNED_MANAGED_EXPOSURE_MAINTENANCE_RESTORE handoff accepted by restart precheck" in soak_source
+    control_gate_python = soak_source.split(
+        '"${PYTHON_BIN}" - <<\'PY\' "${CONTROL_PLANE_SNAPSHOT_FILE}" "${PAPER_STACK_STATUS_FILE}"',
+        1,
+    )[1].split("\nPY\n", 1)[0]
+    assert "import os" in control_gate_python
+    control_handoff_python = soak_source.split(
+        'if "${PYTHON_BIN}" - <<\'PY\' "${PAPER_STACK_STATUS_FILE}" >/dev/null;',
+        1,
+    )[1].split("\nPY\n", 1)[0]
+    assert "RESTART_ALLOWED_OWNED_MANAGED_EXPOSURE" in control_handoff_python
+    assert "classify_paper_stack_restart_precheck" in control_handoff_python
+    assert "track_b_control_plane_snapshot" in soak_source
+    assert '("canonical_readiness_refresher", "artifact_stale")' in soak_source
+    assert 'reason in {"Position Truth", "Broker Truth Lease"}' in source
+    assert 'detail in {"Position Truth", "Broker Truth Lease"}' in soak_source
     assert "RUNTIME_DOWN_WITH_BROKER_EXPOSURE" in soak_source
     assert "RESTART_ALLOWED_FLAT_RECONCILED" not in source
     assert "restart_precheck_classification" in source
