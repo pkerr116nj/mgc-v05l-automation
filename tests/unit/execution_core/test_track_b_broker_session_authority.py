@@ -231,6 +231,87 @@ def test_flat_no_order_submit_capable_without_recent_order_events_publishes_new_
     assert authority["callback_health"]["fill_callback_capable"] is False
 
 
+def test_flat_no_order_submit_ready_lease_overrides_missing_order_status_for_new_entry() -> None:
+    lease = {
+        "lease_state": "ACTIVE",
+        "connection_mode": "ORDER_STATUS_UNRELIABLE",
+        "submit_entry_allowed": True,
+        "submit_exit_allowed": False,
+        "allowed_uses": {
+            "new_entry": True,
+            "managed_risk_reducing_close": False,
+            "broker_observed_adoption_diagnosis": True,
+            "fill_callback_adoption": False,
+        },
+        "connection_health": {
+            "connection_mode": "ORDER_STATUS_UNRELIABLE",
+            "position_truth_available": True,
+            "order_status_reliable": False,
+            "fill_callback_capable": False,
+            "broker_observed_adoption_diagnosis_allowed": True,
+            "flat_no_order_submit_capable_context": {
+                "ready": True,
+                "broker_flat": True,
+                "broker_no_open_orders": True,
+                "open_order_end_observed": True,
+                "submit_session_liveness_proven": True,
+            },
+            "callback_ownership_attribution": {
+                "classification": "CALLBACK_ATTRIBUTION_GAP",
+                "callback_missing_reason": "order_status_callback_missing",
+            },
+        },
+        "callback_ownership_attribution": {
+            "classification": "CALLBACK_ATTRIBUTION_GAP",
+            "callback_missing_reason": "order_status_callback_missing",
+        },
+    }
+
+    authority = build_broker_session_authority(lease=lease, generated_at=NOW)
+
+    assert authority["connection_mode"] == "SUBMIT_CAPABLE_NO_RECENT_ORDER_EVENTS"
+    assert authority["classification"] == "BROKER_SESSION_AUTHORITY_SUBMIT_CAPABLE_NO_RECENT_ORDER_EVENTS"
+    assert authority["allowed_uses"]["new_entry"] is True
+    assert authority["allowed_uses"]["managed_risk_reducing_close"] is False
+    assert authority["callback_ownership_attribution"]["classification"] == "CALLBACK_ATTRIBUTION_GAP"
+    assert authority["callback_missing_reason"] == "order_status_callback_missing"
+    assert "order_status_unreliable_blocks_submit_and_close" not in _blocker_codes(authority)
+
+
+def test_flat_no_order_lease_with_new_entry_false_keeps_bsa_blocked() -> None:
+    lease = {
+        "lease_state": "ACTIVE",
+        "connection_mode": "ORDER_STATUS_UNRELIABLE",
+        "submit_entry_allowed": False,
+        "allowed_uses": {"new_entry": False, "managed_risk_reducing_close": False},
+        "connection_health": {
+            "connection_mode": "ORDER_STATUS_UNRELIABLE",
+            "position_truth_available": True,
+            "order_status_reliable": False,
+            "flat_no_order_submit_capable_context": {
+                "ready": False,
+                "flat_no_order_candidate": True,
+                "submit_session_liveness_proven": False,
+            },
+            "callback_ownership_attribution": {
+                "classification": "CALLBACK_ATTRIBUTION_GAP",
+                "callback_missing_reason": "order_status_callback_missing",
+            },
+        },
+        "callback_ownership_attribution": {
+            "classification": "CALLBACK_ATTRIBUTION_GAP",
+            "callback_missing_reason": "order_status_callback_missing",
+        },
+    }
+
+    authority = build_broker_session_authority(lease=lease, generated_at=NOW)
+
+    assert authority["classification"] == "BROKER_SESSION_AUTHORITY_ORDER_STATUS_UNRELIABLE"
+    assert authority["allowed_uses"]["new_entry"] is False
+    assert authority["allowed_uses"]["managed_risk_reducing_close"] is False
+    assert _blocker_codes(authority) >= {"order_status_unreliable_blocks_submit_and_close"}
+
+
 def test_flat_no_order_missing_submit_session_liveness_publishes_specific_blocker() -> None:
     inputs = _base_inputs()
     inputs["order_state"] = {

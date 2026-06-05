@@ -51,8 +51,9 @@ def build_broker_session_authority(
 
     now_text = generated_at or datetime.now(timezone.utc).isoformat()
     owner = _mapping(lease.get("broker_session_owner"))
-    connection_mode = str(lease.get("connection_mode") or "").strip().upper()
+    source_connection_mode = str(lease.get("connection_mode") or "").strip().upper()
     connection_health = _mapping(lease.get("connection_health"))
+    connection_mode = _effective_connection_mode(lease=lease, source_connection_mode=source_connection_mode)
     callback_attribution = _mapping(
         lease.get("callback_ownership_attribution") or connection_health.get("callback_ownership_attribution")
     )
@@ -206,6 +207,31 @@ def _published_allowed_uses(*, lease: Mapping[str, Any], connection_mode: str, l
         ),
         "status_diagnostic": True,
     }
+
+
+def _effective_connection_mode(*, lease: Mapping[str, Any], source_connection_mode: str) -> str:
+    mode = str(source_connection_mode or "").strip().upper()
+    if _lease_allows_flat_no_order_new_entry(lease=lease):
+        return "SUBMIT_CAPABLE_NO_RECENT_ORDER_EVENTS"
+    return mode
+
+
+def _lease_allows_flat_no_order_new_entry(*, lease: Mapping[str, Any]) -> bool:
+    lease_allowed = _mapping(lease.get("allowed_uses"))
+    connection_health = _mapping(lease.get("connection_health"))
+    flat_context = _mapping(connection_health.get("flat_no_order_submit_capable_context"))
+    connection_mode = str(lease.get("connection_mode") or connection_health.get("connection_mode") or "").strip().upper()
+    classification = str(lease.get("classification") or lease.get("lease_classification") or "").strip().upper()
+    flat_no_order_classified = (
+        connection_mode == "SUBMIT_CAPABLE_NO_RECENT_ORDER_EVENTS"
+        or classification in {
+            "SUBMIT_CAPABLE_NO_RECENT_ORDER_EVENTS",
+            "BROKER_TRUTH_LEASE_SUBMIT_CAPABLE_NO_RECENT_ORDER_EVENTS",
+        }
+        or bool(flat_context.get("ready"))
+    )
+    new_entry_allowed = lease_allowed.get("new_entry") is True or lease.get("submit_entry_allowed") is True
+    return bool(flat_no_order_classified and new_entry_allowed)
 
 
 def _connection_allowed_uses(*, connection_health: Mapping[str, Any], connection_mode: str) -> dict[str, bool]:
