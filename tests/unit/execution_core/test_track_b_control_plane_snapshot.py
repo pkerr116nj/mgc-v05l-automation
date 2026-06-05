@@ -852,6 +852,50 @@ def test_stale_autonomous_recovery_blocker_does_not_override_current_agent_healt
     assert payload["safe_to_start_runtime"] is True
 
 
+def test_control_plane_does_not_block_on_stale_readiness_refresher_heartbeat_when_canonical_ready(
+    tmp_path: Path,
+) -> None:
+    _seed_clean_stack(tmp_path)
+    _seed_control_plane(tmp_path)
+    _write(
+        tmp_path / "outputs/operator_dashboard/runtime/latest_canonical_readiness.json",
+        {
+            "generated_at": NOW.isoformat(),
+            "canonical_readiness": "READY_SUBMIT_CAPABLE",
+            "ready_submit_capable": True,
+            "submit_allowed": True,
+            "blockers": [],
+            "readiness_blockers": [],
+            "live_money_eligible": False,
+            "paper_proof_invoked": False,
+            "broker_mutation_allowed": False,
+            "runtime": {"running": True},
+        },
+    )
+    _write(
+        tmp_path / "var/track_b_operator_readiness_refresh_heartbeat.json",
+        {"generated_at": "2026-05-23T11:00:00+00:00", "repo_root": str(tmp_path)},
+    )
+
+    payload = _snapshot(tmp_path)
+    agent_health = json.loads(
+        (tmp_path / "outputs/track_b_execution_core/agent_health/latest_agent_health.json").read_text(
+            encoding="utf-8"
+        )
+    )
+
+    canonical_row = next(
+        row for row in agent_health["agents"] if row.get("agent_id") == "canonical_readiness_refresher"
+    )
+    assert canonical_row["status"] == "HEALTHY"
+    assert canonical_row["blocking_for_runtime_submit"] is False
+    assert canonical_row["heartbeat_fresh"] is False
+    assert canonical_row["warnings"][0]["code"] == "canonical_readiness_refresher_heartbeat_stale"
+    assert payload["agent_health_top_blockers"] == []
+    assert payload["agent_health_blocks_runtime_submit"] is False
+    assert payload["classification"] == CONTROL_PLANE_SNAPSHOT_READY
+
+
 def test_missing_required_agent_health_artifact_blocks(tmp_path: Path) -> None:
     _seed_clean_stack(tmp_path)
     _seed_control_plane(tmp_path)
@@ -1051,7 +1095,17 @@ def _seed_control_plane(
     )
     _write(
         root / "outputs/operator_dashboard/runtime/latest_canonical_readiness.json",
-        {"generated_at": NOW.isoformat(), "canonical_readiness": "READY_SUBMIT_CAPABLE"},
+        {
+            "generated_at": NOW.isoformat(),
+            "canonical_readiness": "READY_SUBMIT_CAPABLE",
+            "ready_submit_capable": True,
+            "submit_allowed": True,
+            "blockers": [],
+            "readiness_blockers": [],
+            "live_money_eligible": False,
+            "paper_proof_invoked": False,
+            "broker_mutation_allowed": False,
+        },
     )
     _write(
         root / "var/track_b_operator_readiness_refresh_heartbeat.json",
@@ -1132,7 +1186,17 @@ def _seed_active_runtime_truth(root: Path) -> None:
     )
     _write(
         root / "outputs/operator_dashboard/runtime/latest_canonical_readiness.json",
-        {"generated_at": NOW.isoformat(), "canonical_readiness": "NOT_READY_DEPENDENCY"},
+        {
+            "generated_at": NOW.isoformat(),
+            "canonical_readiness": "READY_SUBMIT_CAPABLE",
+            "ready_submit_capable": True,
+            "submit_allowed": True,
+            "blockers": [],
+            "readiness_blockers": [],
+            "live_money_eligible": False,
+            "paper_proof_invoked": False,
+            "broker_mutation_allowed": False,
+        },
     )
 
 

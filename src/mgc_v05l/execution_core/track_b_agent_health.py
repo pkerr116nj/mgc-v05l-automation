@@ -696,11 +696,7 @@ def _canonical_readiness_artifact_status(
             **_canonical_readiness_heartbeat_evidence(heartbeat_status, warn_if_unhealthy=True),
         }
     if (
-        str(payload.get("canonical_readiness") or "") == "READY_SUBMIT_CAPABLE"
-        and payload.get("submit_allowed") is True
-        and not _list(payload.get("blockers"))
-        and payload.get("live_money_eligible") is not True
-        and payload.get("paper_proof_invoked") is not True
+        _canonical_readiness_submit_capable(payload)
     ):
         return {
             **artifact,
@@ -718,6 +714,20 @@ def _canonical_readiness_artifact_status(
         "startup_preflight_compatible": False if runtime_down else None,
         **_canonical_readiness_heartbeat_evidence(heartbeat_status),
     }
+
+
+def _canonical_readiness_submit_capable(payload: Mapping[str, Any]) -> bool:
+    if str(payload.get("canonical_readiness") or "") != "READY_SUBMIT_CAPABLE":
+        return False
+    if payload.get("submit_allowed") is not True:
+        return False
+    if _list(payload.get("blockers")) or _list(payload.get("readiness_blockers")):
+        return False
+    if payload.get("live_money_eligible") is True or payload.get("paper_proof_invoked") is True:
+        return False
+    if payload.get("broker_mutation_allowed") is True:
+        return False
+    return True
 
 
 def _canonical_readiness_heartbeat_evidence(

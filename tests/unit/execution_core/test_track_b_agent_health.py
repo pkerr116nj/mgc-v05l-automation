@@ -330,6 +330,51 @@ def test_runtime_canonical_readiness_not_ready_blocks_runtime_submit(tmp_path: P
     assert canonical["blocking_for_runtime_submit"] is True
 
 
+def test_runtime_canonical_readiness_with_readiness_blockers_blocks_runtime_submit(tmp_path: Path) -> None:
+    _seed_healthy_artifacts(tmp_path)
+    _write_json(
+        tmp_path / "outputs" / "track_b_execution_core" / "runtime_truth" / "latest_runtime_environment_truth.json",
+        {
+            "generated_at": NOW.isoformat(),
+            "classification": RUNTIME_ACTIVE_TRADE_CAPABLE,
+            "runtime": {"pid_alive": True, "root_match": True, "commit_matches_head": True},
+        },
+    )
+    _write_runtime_canonical_readiness(
+        tmp_path,
+        readiness_blockers=[{"code": "open_order_truth_not_clean"}],
+    )
+
+    payload = build_track_b_agent_health(config=TrackBAgentHealthConfig(repo_root=tmp_path), now=NOW, process_rows=[])
+
+    canonical = _agent(payload, "canonical_readiness_refresher")
+    assert payload["classification"] == AGENT_HEALTH_BLOCKING
+    assert canonical["status"] == STALE
+    assert canonical["reason"] == "canonical_readiness_artifact_not_submit_capable"
+    assert canonical["blocking_for_runtime_submit"] is True
+
+
+def test_unsafe_runtime_canonical_readiness_blocks_runtime_submit(tmp_path: Path) -> None:
+    _seed_healthy_artifacts(tmp_path)
+    _write_json(
+        tmp_path / "outputs" / "track_b_execution_core" / "runtime_truth" / "latest_runtime_environment_truth.json",
+        {
+            "generated_at": NOW.isoformat(),
+            "classification": RUNTIME_ACTIVE_TRADE_CAPABLE,
+            "runtime": {"pid_alive": True, "root_match": True, "commit_matches_head": True},
+        },
+    )
+    _write_runtime_canonical_readiness(tmp_path, live_money_eligible=True)
+
+    payload = build_track_b_agent_health(config=TrackBAgentHealthConfig(repo_root=tmp_path), now=NOW, process_rows=[])
+
+    canonical = _agent(payload, "canonical_readiness_refresher")
+    assert payload["classification"] == AGENT_HEALTH_BLOCKING
+    assert canonical["status"] == STALE
+    assert canonical["reason"] == "canonical_readiness_artifact_not_submit_capable"
+    assert canonical["blocking_for_runtime_submit"] is True
+
+
 def test_startup_canonical_readiness_with_open_orders_still_blocks(tmp_path: Path) -> None:
     _seed_healthy_artifacts(tmp_path)
     _write_startup_canonical_readiness(tmp_path, broker_open_order_count=1)
@@ -571,6 +616,10 @@ def _write_runtime_canonical_readiness(
     canonical_readiness: str = "READY_SUBMIT_CAPABLE",
     submit_allowed: bool = True,
     blockers: list[dict] | None = None,
+    readiness_blockers: list[dict] | None = None,
+    live_money_eligible: bool = False,
+    paper_proof_invoked: bool = False,
+    broker_mutation_allowed: bool = False,
 ) -> None:
     _write_json(
         root / "outputs/operator_dashboard/runtime/latest_canonical_readiness.json",
@@ -580,8 +629,10 @@ def _write_runtime_canonical_readiness(
             "ready_submit_capable": submit_allowed,
             "submit_allowed": submit_allowed,
             "blockers": blockers or [],
-            "live_money_eligible": False,
-            "paper_proof_invoked": False,
+            "readiness_blockers": readiness_blockers or [],
+            "live_money_eligible": live_money_eligible,
+            "paper_proof_invoked": paper_proof_invoked,
+            "broker_mutation_allowed": broker_mutation_allowed,
             "runtime": {"running": True},
             "broker_truth": {
                 "available": True,
