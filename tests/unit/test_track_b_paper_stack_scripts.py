@@ -50,6 +50,73 @@ def test_paper_stack_start_requires_sustained_readiness() -> None:
     assert "submit remains disabled" in source
 
 
+def test_paper_stack_start_refreshes_authority_evidence_before_carrier_launch() -> None:
+    source = START_SCRIPT.read_text(encoding="utf-8")
+
+    assert "run_startup_preflight_evidence_refresh" in source
+    assert "track_b_readiness_state" in source
+    assert "track_b_control_plane_snapshot" in source
+    assert "--no-broker-lease-history" in source
+    assert "startup_preflight_refresh_attempted" in source
+    assert "startup_preflight_refresh_classification" in source
+    assert "refreshed_artifact_paths" in source
+    assert "remaining_start_blockers" in source
+
+    launch_block = source[source.index('if ! run_startup_preflight_evidence_refresh; then') :]
+    assert launch_block.index("run_startup_preflight_evidence_refresh") < launch_block.index(
+        "write_approved_profile_artifact"
+    )
+    assert launch_block.index("run_startup_preflight_evidence_refresh") < launch_block.index(
+        'cat > "${WRAPPER_PATH}"'
+    )
+    assert launch_block.index("run_startup_preflight_evidence_refresh") < launch_block.index(
+        "launchctl submit"
+    )
+    assert launch_block.index("run_startup_preflight_evidence_refresh") < launch_block.index(
+        "screen -dmS"
+    )
+
+
+def test_paper_stack_start_blocks_before_carrier_when_preflight_refresh_fails() -> None:
+    source = START_SCRIPT.read_text(encoding="utf-8")
+
+    assert "BLOCKED_START_PREFLIGHT_REFRESH" in source
+    assert "STARTUP_PREFLIGHT_REFRESH_FAILED" in source
+    assert "STARTUP_PREFLIGHT_REFRESH_BLOCKED" in source
+    assert "canonical_readiness_refresh_failed" in source
+    assert "control_plane_refresh_failed" in source
+    assert "control_plane_primary_blocker" in source
+
+    launch_block = source[source.index('if ! run_startup_preflight_evidence_refresh; then') :]
+    blocked = launch_block.index('exit 2')
+    assert blocked < launch_block.index('cat > "${WRAPPER_PATH}"')
+    assert blocked < launch_block.index("launchctl submit")
+
+
+def test_paper_stack_start_preflight_refresh_preserves_broker_safety_gates() -> None:
+    source = START_SCRIPT.read_text(encoding="utf-8")
+    refresh_block = source.split("run_startup_preflight_evidence_refresh() {", 1)[1].split(
+        "\nscreen_available()",
+        1,
+    )[0]
+
+    assert "broker_positions_or_orders_not_flat" in refresh_block
+    assert "lifecycle_positions_or_orders_not_flat" in refresh_block
+    assert "broker_lifecycle_not_reconciled" in refresh_block
+    assert "live_money_eligible_not_false" in refresh_block
+    assert "paper_proof_invoked_not_false" in refresh_block
+    assert "broker_mutation_allowed_not_false" in refresh_block
+    assert "control_plane_start_not_allowed" in refresh_block
+    assert "STARTUP_PREFLIGHT_REFRESH_CLEAN" in refresh_block
+
+    lowered = refresh_block.lower()
+    assert "placeorder" not in lowered
+    assert "cancelorder" not in lowered
+    assert "reqglobalcancel" not in lowered
+    assert "global_cancel" not in lowered
+    assert "broad_flatten" not in lowered
+
+
 def test_paper_stack_start_timeout_reports_startup_phase_without_exit_change() -> None:
     source = START_SCRIPT.read_text(encoding="utf-8")
 

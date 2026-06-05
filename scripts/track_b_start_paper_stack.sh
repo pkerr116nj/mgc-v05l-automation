@@ -15,6 +15,8 @@ fi
 RUNTIME_DIR="${REPO_ROOT}/outputs/probationary_pattern_engine/paper_session/runtime"
 STACK_DIR="${REPO_ROOT}/outputs/track_b_execution_core/paper_stack"
 RECOVERY_STATE_DIR="${REPO_ROOT}/outputs/track_b_execution_core/runtime_recovery"
+CONTROL_PLANE_SNAPSHOT_FILE="${REPO_ROOT}/outputs/track_b_execution_core/control_plane/latest_control_plane_snapshot.json"
+CANONICAL_READINESS_FILE="${REPO_ROOT}/outputs/operator_dashboard/runtime/latest_canonical_readiness.json"
 STARTUP_ARTIFACT="${STACK_DIR}/latest_paper_stack_startup.json"
 APPROVED_PROFILE_ARTIFACT="${RECOVERY_STATE_DIR}/approved_paper_stack_profile.json"
 STATUS_SCRIPT="${SCRIPT_DIR}/track_b_status_paper_stack.sh"
@@ -37,6 +39,10 @@ SCOPED_ROSTER_PATH="${RUNTIME_DIR}/paper_stack_${STACK_PROFILE}_guarded_roster.j
 ROSTER_ENV_PATH=""
 PROOF_REQUIRED_SYMBOLS=""
 RECOVERY_SERVICE_OPT_OUT="${TRACK_B_PAPER_STACK_DISABLE_RECOVERY_SERVICE:-${MGC_TRACK_B_DISABLE_STANDALONE_RECOVERY:-0}}"
+STARTUP_PREFLIGHT_REFRESH_ATTEMPTED="false"
+STARTUP_PREFLIGHT_REFRESH_CLASSIFICATION="NOT_ATTEMPTED"
+STARTUP_PREFLIGHT_REFRESHED_ARTIFACT_PATHS_JSON="[]"
+STARTUP_PREFLIGHT_REMAINING_START_BLOCKERS_JSON="[]"
 
 CANONICAL_CONFIGS=(
   "${REPO_ROOT}/config/base.yaml"
@@ -371,8 +377,13 @@ write_startup_artifact() {
   local classification="$1"
   local detail="$2"
   local pid="${3:-}"
+  MGC_STARTUP_PREFLIGHT_REFRESH_ATTEMPTED="${STARTUP_PREFLIGHT_REFRESH_ATTEMPTED}" \
+  MGC_STARTUP_PREFLIGHT_REFRESH_CLASSIFICATION="${STARTUP_PREFLIGHT_REFRESH_CLASSIFICATION}" \
+  MGC_STARTUP_PREFLIGHT_REFRESHED_ARTIFACT_PATHS_JSON="${STARTUP_PREFLIGHT_REFRESHED_ARTIFACT_PATHS_JSON}" \
+  MGC_STARTUP_PREFLIGHT_REMAINING_START_BLOCKERS_JSON="${STARTUP_PREFLIGHT_REMAINING_START_BLOCKERS_JSON}" \
   "${PYTHON_BIN}" - "$STARTUP_ARTIFACT" "$classification" "$detail" "$pid" "$REPO_ROOT" "$CONFIG_PATHS_FILE" "$STACK_PROFILE" <<'PY'
 import json
+import os
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
@@ -383,6 +394,14 @@ try:
     paths = [line.strip() for line in Path(config_paths_file).read_text(encoding="utf-8").splitlines() if line.strip()]
 except OSError:
     pass
+
+def env_json_list(name):
+    try:
+        value = json.loads(os.environ.get(name, "[]"))
+    except json.JSONDecodeError:
+        return []
+    return value if isinstance(value, list) else []
+
 payload = {
     "schema_version": "track_b_paper_stack_startup_v1",
     "generated_at": datetime.now(timezone.utc).isoformat(),
@@ -397,6 +416,10 @@ payload = {
     "paper_proof_invoked": False,
     "broker_mutation": False,
     "dashboard_authority": False,
+    "startup_preflight_refresh_attempted": os.environ.get("MGC_STARTUP_PREFLIGHT_REFRESH_ATTEMPTED") == "true",
+    "startup_preflight_refresh_classification": os.environ.get("MGC_STARTUP_PREFLIGHT_REFRESH_CLASSIFICATION") or "NOT_ATTEMPTED",
+    "refreshed_artifact_paths": env_json_list("MGC_STARTUP_PREFLIGHT_REFRESHED_ARTIFACT_PATHS_JSON"),
+    "remaining_start_blockers": env_json_list("MGC_STARTUP_PREFLIGHT_REMAINING_START_BLOCKERS_JSON"),
 }
 path = Path(artifact)
 path.parent.mkdir(parents=True, exist_ok=True)
@@ -462,6 +485,234 @@ print(
     f"startup_blocker_phase={blocker_phase}; startup_blocker={blocker_detail}"
 )
 PY
+}
+
+run_startup_preflight_evidence_refresh() {
+  STARTUP_PREFLIGHT_REFRESH_ATTEMPTED="true"
+  local readiness_stdout="${STACK_DIR}/.startup_preflight_canonical_readiness.$$.json"
+  local readiness_stderr="${STACK_DIR}/.startup_preflight_canonical_readiness.$$.stderr"
+  local control_stdout="${STACK_DIR}/.startup_preflight_control_plane.$$.json"
+  local control_stderr="${STACK_DIR}/.startup_preflight_control_plane.$$.stderr"
+  local status_stdout="${STACK_DIR}/.startup_preflight_status.$$.json"
+  local status_stderr="${STACK_DIR}/.startup_preflight_status.$$.stderr"
+  local result_json="${STACK_DIR}/.startup_preflight_refresh_result.$$.json"
+  local readiness_rc=0
+  local control_rc=0
+  local status_rc=0
+
+  set +e
+  "${PYTHON_BIN}" -m mgc_v05l.execution_core.track_b_readiness_state \
+    --repo-root "${REPO_ROOT}" \
+    --output "${CANONICAL_READINESS_FILE}" \
+    > "${readiness_stdout}" 2> "${readiness_stderr}"
+  readiness_rc=$?
+  "${PYTHON_BIN}" -m mgc_v05l.execution_core.track_b_control_plane_snapshot \
+    --repo-root "${REPO_ROOT}" \
+    --output-path "${CONTROL_PLANE_SNAPSHOT_FILE}" \
+    --no-dashboard-projection \
+    --no-broker-lease-history \
+    --json \
+    > "${control_stdout}" 2> "${control_stderr}"
+  control_rc=$?
+  "${STATUS_SCRIPT}" --json > "${status_stdout}" 2> "${status_stderr}"
+  status_rc=$?
+  set -e
+
+  "${PYTHON_BIN}" - \
+    "${REPO_ROOT}" \
+    "${status_stdout}" \
+    "${readiness_stdout}" \
+    "${control_stdout}" \
+    "${readiness_rc}" \
+    "${control_rc}" \
+    "${status_rc}" \
+    "${CANONICAL_READINESS_FILE}" \
+    "${CONTROL_PLANE_SNAPSHOT_FILE}" \
+    > "${result_json}" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+(
+    repo_root,
+    status_path,
+    readiness_stdout,
+    control_stdout,
+    readiness_rc,
+    control_rc,
+    status_rc,
+    readiness_artifact,
+    control_artifact,
+) = sys.argv[1:]
+repo_root = Path(repo_root)
+
+def load_json(path_value):
+    path = Path(path_value)
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+
+def first_present(payload, *keys, default=None):
+    for key in keys:
+        if key in payload:
+            return payload.get(key)
+    return default
+
+def add_path(paths, value):
+    if not value:
+        return
+    if isinstance(value, str):
+        paths.add(value)
+        return
+    if isinstance(value, dict):
+        for item in value.values():
+            add_path(paths, item)
+        return
+    if isinstance(value, list):
+        for item in value:
+            add_path(paths, item)
+
+def add_blocker(blockers, code, detail=None, source=None):
+    row = {"code": code}
+    if detail:
+        row["detail"] = str(detail)
+    if source:
+        row["source"] = str(source)
+    blockers.append(row)
+
+status = load_json(status_path)
+readiness = load_json(readiness_stdout) or load_json(readiness_artifact)
+control = load_json(control_stdout) or load_json(control_artifact)
+reconciliation = load_json(
+    repo_root
+    / "outputs/reports/track_b_paper_broker_reconciliation/latest_track_b_paper_broker_reconciliation.json"
+)
+
+paths = {str(Path(readiness_artifact)), str(Path(control_artifact))}
+add_path(paths, control.get("source_artifact_paths"))
+add_path(paths, control.get("refreshed_artifact_paths"))
+
+blockers = []
+if int(readiness_rc) != 0:
+    add_blocker(blockers, "canonical_readiness_refresh_failed", source="canonical_readiness")
+if int(control_rc) != 0:
+    add_blocker(blockers, "control_plane_refresh_failed", source="control_plane")
+if int(status_rc) != 0:
+    add_blocker(blockers, "paper_stack_status_refresh_failed", source="paper_stack_status")
+
+safety = status.get("safety") if isinstance(status.get("safety"), dict) else {}
+if safety.get("paper_only") is not True:
+    add_blocker(blockers, "paper_only_not_confirmed", source="safety")
+if safety.get("live_money_eligible") is not False:
+    add_blocker(blockers, "live_money_eligible_not_false", source="safety")
+if safety.get("paper_proof_invoked") is not False:
+    add_blocker(blockers, "paper_proof_invoked_not_false", source="safety")
+if safety.get("broker_mutation_allowed") is not False:
+    add_blocker(blockers, "broker_mutation_allowed_not_false", source="safety")
+
+recon_class = str(
+    first_present(
+        reconciliation,
+        "classification",
+        "reconciliation_classification",
+        default=(status.get("broker_lifecycle") or {}).get("reconciliation_classification"),
+    )
+    or ""
+)
+if "RECONCILED" not in recon_class:
+    add_blocker(blockers, "broker_lifecycle_not_reconciled", detail=recon_class, source="broker_lifecycle")
+if first_present(reconciliation, "broker_reconciled", default=True) is False:
+    add_blocker(blockers, "broker_lifecycle_reconciled_flag_false", source="broker_lifecycle")
+
+broker_position_count = int(first_present(reconciliation, "track_b_broker_position_count", "broker_position_count", default=0) or 0)
+broker_order_count = int(first_present(reconciliation, "track_b_broker_open_order_count", "broker_open_order_count", default=0) or 0)
+lifecycle_position_count = int(
+    first_present(
+        reconciliation,
+        "current_scope_lifecycle_open_position_count",
+        "lifecycle_open_position_count",
+        default=0,
+    )
+    or 0
+)
+lifecycle_order_count = int(first_present(reconciliation, "lifecycle_open_order_count", default=0) or 0)
+if broker_position_count != 0 or broker_order_count != 0:
+    add_blocker(
+        blockers,
+        "broker_positions_or_orders_not_flat",
+        detail=f"positions={broker_position_count} orders={broker_order_count}",
+        source="broker_lifecycle",
+    )
+if lifecycle_position_count != 0 or lifecycle_order_count != 0:
+    add_blocker(
+        blockers,
+        "lifecycle_positions_or_orders_not_flat",
+        detail=f"positions={lifecycle_position_count} orders={lifecycle_order_count}",
+        source="broker_lifecycle",
+    )
+
+if control:
+    if control.get("safe_to_start_runtime") is not True:
+        add_blocker(
+            blockers,
+            "control_plane_start_not_allowed",
+            detail=control.get("top_line_status") or control.get("classification"),
+            source="control_plane",
+        )
+    primary_agent = control.get("primary_blocking_agent_id")
+    primary_reason = control.get("primary_blocking_reason")
+    if primary_agent or primary_reason:
+        add_blocker(
+            blockers,
+            "control_plane_primary_blocker",
+            detail=f"{primary_agent or 'unknown'}:{primary_reason or 'unknown'}",
+            source="control_plane",
+        )
+    for row in control.get("agent_health_blockers") or []:
+        if isinstance(row, dict):
+            add_blocker(
+                blockers,
+                "agent_health_blocker",
+                detail=f"{row.get('agent_id') or row.get('id') or row.get('source') or 'unknown'}:{row.get('reason') or row.get('code') or row.get('detail') or 'unknown'}",
+                source="agent_health",
+            )
+else:
+    add_blocker(blockers, "control_plane_snapshot_unavailable", source="control_plane")
+
+if int(readiness_rc) == 0 and int(control_rc) == 0 and int(status_rc) == 0 and not blockers:
+    classification = "STARTUP_PREFLIGHT_REFRESH_CLEAN"
+elif int(readiness_rc) != 0 or int(control_rc) != 0 or int(status_rc) != 0:
+    classification = "STARTUP_PREFLIGHT_REFRESH_FAILED"
+else:
+    classification = "STARTUP_PREFLIGHT_REFRESH_BLOCKED"
+
+payload = {
+    "classification": classification,
+    "startup_preflight_refresh_attempted": True,
+    "refreshed_artifact_paths": sorted(paths),
+    "remaining_start_blockers": blockers,
+    "canonical_readiness_classification": readiness.get("classification")
+    or readiness.get("canonical_state")
+    or readiness.get("readiness_classification"),
+    "control_plane_classification": control.get("classification"),
+}
+print(json.dumps(payload, indent=2, sort_keys=True))
+PY
+
+  STARTUP_PREFLIGHT_REFRESH_CLASSIFICATION="$("${PYTHON_BIN}" -c 'import json,sys; print(json.load(open(sys.argv[1])).get("classification") or "UNKNOWN")' "${result_json}")"
+  STARTUP_PREFLIGHT_REFRESHED_ARTIFACT_PATHS_JSON="$("${PYTHON_BIN}" -c 'import json,sys; print(json.dumps(json.load(open(sys.argv[1])).get("refreshed_artifact_paths") or []))' "${result_json}")"
+  STARTUP_PREFLIGHT_REMAINING_START_BLOCKERS_JSON="$("${PYTHON_BIN}" -c 'import json,sys; print(json.dumps(json.load(open(sys.argv[1])).get("remaining_start_blockers") or []))' "${result_json}")"
+
+  if [[ -s "${status_stdout}" ]]; then
+    status_json="$(cat "${status_stdout}")"
+  fi
+
+  if [[ "${STARTUP_PREFLIGHT_REFRESH_CLASSIFICATION}" != "STARTUP_PREFLIGHT_REFRESH_CLEAN" ]]; then
+    write_startup_artifact "BLOCKED_START_PREFLIGHT_REFRESH" "Startup preflight evidence refresh did not produce clean start authority." ""
+    return 1
+  fi
+  return 0
 }
 
 screen_available() {
@@ -540,6 +791,9 @@ restart_authority_allowed="$("${PYTHON_BIN}" -c 'import json,sys; p=json.loads(s
 scoped_profile_allowed="$(scoped_profile_start_allowed || true)"
 if [[ ( "${runtime_start_allowed}" != "true" || "${blocker_count}" != "0" ) && ( "${restart_allowed}" != "true" || "${blocker_count}" != "0" ) && "${launch_guard_restart_allowed}" != "true" && "${restart_authority_allowed}" != "true" && "${scoped_profile_allowed}" != "true" ]]; then
   write_startup_artifact "BLOCKED_PRECHECK" "Canonical readiness does not allow a clean PAPER runtime start." ""
+  exit 2
+fi
+if ! run_startup_preflight_evidence_refresh; then
   exit 2
 fi
 write_approved_profile_artifact
