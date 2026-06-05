@@ -155,6 +155,7 @@ def classify_canonical_readiness(inputs: Mapping[str, Any]) -> dict[str, Any]:
     root_guard = _mapping(inputs.get("root_guard_summary"))
     broker_truth = _mapping(inputs.get("broker_truth"))
     broker_truth_lease = _mapping(inputs.get("broker_truth_lease"))
+    broker_session_authority = _mapping(inputs.get("broker_session_authority"))
     execution_core_shared_truth = _mapping(inputs.get("execution_core_shared_truth"))
     latest_attempt = _mapping(broker_truth.get("latest_attempt_status"))
     reconciliation = _mapping(inputs.get("phase1_reconciliation"))
@@ -634,6 +635,29 @@ def classify_canonical_readiness(inputs: Mapping[str, Any]) -> dict[str, Any]:
         return _readiness_result(
             generated_at=generated_at,
             state="NOT_READY_DEPENDENCY",
+            reasons=reasons,
+            blockers=blockers,
+            warnings=warnings,
+            inputs=inputs,
+        )
+
+    if not _broker_session_new_entry_allowed(broker_session_authority):
+        authority_blockers = [
+            dict(row)
+            for row in list(broker_session_authority.get("authority_blockers") or [])
+            if isinstance(row, Mapping)
+        ]
+        block(
+            "BROKER_SESSION_NEW_ENTRY_NOT_ALLOWED",
+            "Broker Session Authority does not allow new Track B PAPER entries.",
+            source="broker_session_authority",
+            broker_session_authority_classification=broker_session_authority.get("classification"),
+            broker_session_connection_mode=broker_session_authority.get("connection_mode"),
+            broker_session_authority_blockers=authority_blockers,
+        )
+        return _readiness_result(
+            generated_at=generated_at,
+            state="DEGRADED_NO_SUBMIT",
             reasons=reasons,
             blockers=blockers,
             warnings=warnings,
@@ -1762,6 +1786,13 @@ def _broker_session_submit_alignment(*, readiness_submit_allowed: bool, broker_s
     if not readiness_submit_allowed and broker_session_new_entry_allowed:
         return "READINESS_BLOCKED_BROKER_SESSION_ALLOWED"
     return "ALIGNED"
+
+
+def _broker_session_new_entry_allowed(broker_session_authority: Mapping[str, Any]) -> bool:
+    if not broker_session_authority or broker_session_authority.get("available") is False:
+        return False
+    allowed_uses = _mapping(broker_session_authority.get("allowed_uses"))
+    return allowed_uses.get("new_entry") is True
 
 
 def _reconciliation_input(payload: Mapping[str, Any], *, now: datetime) -> dict[str, Any]:

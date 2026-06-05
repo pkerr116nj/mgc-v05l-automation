@@ -228,6 +228,7 @@ def _write_canonical_readiness(
     broker_session_classification: str = "BROKER_SESSION_AUTHORITY_SUBMIT_CAPABLE",
     broker_session_connection_mode: str = "SUBMIT_CAPABLE",
     broker_session_submit_alignment: str | None = None,
+    include_broker_session_authority: bool = True,
 ) -> None:
     path = tmp_path / "outputs" / "operator_dashboard" / "runtime" / "latest_canonical_readiness.json"
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -245,27 +246,31 @@ def _write_canonical_readiness(
             broker_session_submit_alignment = "READINESS_BLOCKED_BROKER_SESSION_ALLOWED"
         else:
             broker_session_submit_alignment = "ALIGNED"
-    path.write_text(
-        json.dumps(
+    payload = {
+        "schema_version": "track_b_canonical_readiness_v1",
+        "generated_at": generated_at,
+        "paper_only": True,
+        "canonical_readiness": state,
+        "state": state,
+        "ready_submit_capable": state == "READY_SUBMIT_CAPABLE",
+        "readiness_blockers": [] if state == "READY_SUBMIT_CAPABLE" else [{"code": "runtime_not_submit_capable"}],
+        "readiness_warnings": [],
+        "root_guard_summary": {"root_match": root_match},
+        "runtime": {
+            "running": runtime_running,
+            "healthy": runtime_healthy,
+            "runtime_ingestion_fresh": runtime_ingestion_fresh,
+            "eligible_lane_count": 15 if state == "READY_SUBMIT_CAPABLE" else 0,
+            "loaded_lane_count": 15,
+            "live_money_eligible": live_money_eligible,
+        },
+        "broker_truth_lease": {"lease_state": "ACTIVE"},
+        "phase1_reconciliation": {"classification": "TRACK_B_PAPER_BROKER_RECONCILED"},
+        "live_money_eligible": live_money_eligible,
+    }
+    if include_broker_session_authority:
+        payload.update(
             {
-                "schema_version": "track_b_canonical_readiness_v1",
-                "generated_at": generated_at,
-                "paper_only": True,
-                "canonical_readiness": state,
-                "state": state,
-                "ready_submit_capable": state == "READY_SUBMIT_CAPABLE",
-                "readiness_blockers": [] if state == "READY_SUBMIT_CAPABLE" else [{"code": "runtime_not_submit_capable"}],
-                "readiness_warnings": [],
-                "root_guard_summary": {"root_match": root_match},
-                "runtime": {
-                    "running": runtime_running,
-                    "healthy": runtime_healthy,
-                    "runtime_ingestion_fresh": runtime_ingestion_fresh,
-                    "eligible_lane_count": 15 if state == "READY_SUBMIT_CAPABLE" else 0,
-                    "loaded_lane_count": 15,
-                    "live_money_eligible": live_money_eligible,
-                },
-                "broker_truth_lease": {"lease_state": "ACTIVE"},
                 "broker_session_authority_classification": broker_session_classification,
                 "broker_session_connection_mode": broker_session_connection_mode,
                 "broker_session_allowed_uses": session_allowed_uses,
@@ -278,12 +283,9 @@ def _write_canonical_readiness(
                 if broker_session_connection_mode == "ORDER_STATUS_UNRELIABLE"
                 else None,
                 "broker_session_submit_alignment": broker_session_submit_alignment,
-                "phase1_reconciliation": {"classification": "TRACK_B_PAPER_BROKER_RECONCILED"},
-                "live_money_eligible": live_money_eligible,
             }
-        ),
-        encoding="utf-8",
-    )
+        )
+    path.write_text(json.dumps(payload), encoding="utf-8")
 
 
 def _write_paper_runtime_truth(
@@ -897,7 +899,7 @@ def test_governance_uses_fresh_canonical_readiness_over_stale_dashboard_snapshot
     assert nq["submit_allowed"] is True
 
 
-def test_governance_surfaces_broker_session_submit_contradiction_without_blocking(tmp_path: Path) -> None:
+def test_governance_blocks_broker_session_submit_contradiction(tmp_path: Path) -> None:
     _write_monitor(
         tmp_path,
         broker_position_quantity=0.0,
@@ -930,8 +932,9 @@ def test_governance_surfaces_broker_session_submit_contradiction_without_blockin
 
     nq = next(row for row in artifacts.performance_rows if row["strategy_id"] == "nq_1x_ny_early_core__us_late_long")
     readiness = nq["backend_source_readiness"]
-    assert nq["submit_allowed"] is True
-    assert "backend_or_source_not_live_ready" not in nq["submit_block_reasons"]
+    assert nq["submit_allowed"] is False
+    assert nq["submit_block_reasons"] == ["backend_or_source_not_live_ready"]
+    assert "BROKER_SESSION_NEW_ENTRY_NOT_ALLOWED" in readiness["block_reasons"]
     assert (
         nq["broker_session_submit_alignment"]
         == "READINESS_SUBMIT_ALLOWED_BROKER_SESSION_BLOCKED"
@@ -944,6 +947,37 @@ def test_governance_surfaces_broker_session_submit_contradiction_without_blockin
     assert artifacts.status_payload["summary"]["broker_session_submit_alignment_counts"][
         "READINESS_SUBMIT_ALLOWED_BROKER_SESSION_BLOCKED"
     ] >= 1
+
+
+def test_governance_blocks_missing_broker_session_authority_for_new_entry(tmp_path: Path) -> None:
+    _write_monitor(
+        tmp_path,
+        broker_position_quantity=0.0,
+        ledger_position_quantity=0.0,
+    )
+    _write_ledger(tmp_path)
+    _write_dashboard(tmp_path)
+    _write_backend_source_readiness(
+        tmp_path,
+        generated_at="2026-04-29T12:28:50.338596+00:00",
+        runtime_running=False,
+        paper_runtime_ready=False,
+        paper_trade_allowed=False,
+    )
+    _write_canonical_readiness(tmp_path, include_broker_session_authority=False)
+    _write_paper_runtime_truth(tmp_path)
+    _write_signal_audit(tmp_path)
+    _write_strategy_performance(tmp_path)
+
+    artifacts = run_ibkr_paper_strategy_governance(config=_config(tmp_path))
+
+    nq = next(row for row in artifacts.performance_rows if row["strategy_id"] == "nq_1x_ny_early_core__us_late_long")
+    readiness = nq["backend_source_readiness"]
+    assert nq["submit_allowed"] is False
+    assert nq["submit_block_reasons"] == ["backend_or_source_not_live_ready"]
+    assert "BROKER_SESSION_NEW_ENTRY_NOT_ALLOWED" in readiness["block_reasons"]
+    assert nq["broker_session_authority_classification"] == "BROKER_SESSION_AUTHORITY_MISSING"
+    assert nq["broker_session_submit_alignment"] == "UNKNOWN"
 
 
 def test_governance_blocks_when_canonical_runtime_down_even_if_dashboard_snapshot_allows(tmp_path: Path) -> None:

@@ -1181,6 +1181,8 @@ def _backend_source_live_readiness(
         block_reasons.append("canonical_paper_proof_invoked_true")
     if canonical_authoritative and canonical_root_guard.get("root_match") is not True:
         block_reasons.append("canonical_root_not_matched")
+    if canonical_authoritative and not _canonical_broker_session_new_entry_allowed(canonical):
+        block_reasons.append("BROKER_SESSION_NEW_ENTRY_NOT_ALLOWED")
     if canonical_authoritative and canonical_state != "READY_SUBMIT_CAPABLE":
         block_reasons.append("canonical_readiness_not_submit_capable")
     if canonical_authoritative and not bool(paper_stack_authority.get("ready")):
@@ -1478,6 +1480,11 @@ def _canonical_broker_session_diagnostic(canonical: dict[str, Any]) -> dict[str,
         "callback_ownership_attribution": canonical.get("callback_ownership_attribution"),
         "broker_session_submit_alignment": canonical.get("broker_session_submit_alignment") or "UNKNOWN",
     }
+
+
+def _canonical_broker_session_new_entry_allowed(canonical: dict[str, Any]) -> bool:
+    allowed_uses = dict(canonical.get("broker_session_allowed_uses") or {})
+    return allowed_uses.get("new_entry") is True
 
 
 def _scoped_backend_source_fault_counts(

@@ -112,6 +112,7 @@ def test_produces_artifact_without_dashboard(tmp_path: Path, monkeypatch, capsys
         """,
         encoding="utf-8",
     )
+    (repo_root / "outputs" / "operator_dashboard" / "runtime").mkdir(parents=True, exist_ok=True)
     (
         repo_root
         / "outputs"
@@ -128,6 +129,35 @@ def test_produces_artifact_without_dashboard(tmp_path: Path, monkeypatch, capsys
           "runtime_supervisor_decision_id": "track-b-paper-supervisor-test",
           "shared_truth_coherence_status": "COHERENT",
           "live_money_eligible": false
+        }
+        """,
+        encoding="utf-8",
+    )
+    (
+        repo_root
+        / "outputs"
+        / "operator_dashboard"
+        / "runtime"
+        / "latest_broker_session_authority.json"
+    ).write_text(
+        """
+        {
+          "schema_version": "track_b_broker_session_authority_v1",
+          "generated_at": "2026-05-18T11:59:40+00:00",
+          "classification": "BROKER_SESSION_AUTHORITY_SUBMIT_CAPABLE",
+          "connection_mode": "SUBMIT_CAPABLE",
+          "allowed_uses": {
+            "new_entry": true,
+            "managed_risk_reducing_close": true,
+            "status_diagnostic": true
+          },
+          "authority_blockers": [],
+          "live_money_eligible": false,
+          "paper_proof_invoked": false,
+          "read_only": true,
+          "submit_attempted": false,
+          "cancel_attempted": false,
+          "close_attempted": false
         }
         """,
         encoding="utf-8",

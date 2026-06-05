@@ -51,6 +51,14 @@ def _clean_inputs() -> dict:
             "live_money_eligible": False,
             "latest_attempt_status": {"classification": "BROKER_TRUTH_REFRESH_READY", "last_failure": False},
         },
+        "broker_session_authority": {
+            "available": True,
+            "classification": "BROKER_SESSION_AUTHORITY_SUBMIT_CAPABLE",
+            "connection_mode": "SUBMIT_CAPABLE",
+            "allowed_uses": {"new_entry": True, "managed_risk_reducing_close": True, "status_diagnostic": True},
+            "authority_blockers": [],
+            "callback_ownership_attribution": None,
+        },
         "phase1_reconciliation": {
             "available": True,
             "fresh": True,
@@ -158,6 +166,36 @@ def _write_control_plane_snapshot(repo_root: Path, generated_at: str = "2026-05-
                 "runtime_supervisor_decision_id": "track-b-paper-supervisor-test",
                 "shared_truth_coherence_status": "COHERENT",
                 "live_money_eligible": False,
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+
+def _write_broker_session_authority_snapshot(repo_root: Path, generated_at: str = "2026-05-18T11:59:40+00:00") -> None:
+    path = repo_root / "outputs" / "operator_dashboard" / "runtime" / "latest_broker_session_authority.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        json.dumps(
+            {
+                "schema_version": "track_b_broker_session_authority_v1",
+                "generated_at": generated_at,
+                "classification": "BROKER_SESSION_AUTHORITY_SUBMIT_CAPABLE",
+                "connection_mode": "SUBMIT_CAPABLE",
+                "allowed_uses": {
+                    "new_entry": True,
+                    "managed_risk_reducing_close": True,
+                    "status_diagnostic": True,
+                },
+                "authority_blockers": [],
+                "callback_ownership_attribution": None,
+                "live_money_eligible": False,
+                "paper_proof_invoked": False,
+                "read_only": True,
+                "submit_attempted": False,
+                "cancel_attempted": False,
+                "close_attempted": False,
             }
         )
         + "\n",
@@ -1195,7 +1233,7 @@ def test_active_broker_truth_lease_clears_broker_freshness_blocker() -> None:
     assert result["broker_truth_lease"]["lease_state"] == "ACTIVE"
 
 
-def test_readiness_surfaces_submit_allowed_broker_session_blocked_alignment() -> None:
+def test_readiness_blocks_submit_when_broker_session_new_entry_not_allowed() -> None:
     inputs = _clean_inputs()
     inputs["broker_session_authority"] = {
         "available": True,
@@ -1208,12 +1246,10 @@ def test_readiness_surfaces_submit_allowed_broker_session_blocked_alignment() ->
 
     result = classify_canonical_readiness(inputs)
 
-    assert result["canonical_readiness"] == "READY_SUBMIT_CAPABLE"
-    assert result["submit_allowed"] is True
-    assert (
-        result["broker_session_submit_alignment"]
-        == "READINESS_SUBMIT_ALLOWED_BROKER_SESSION_BLOCKED"
-    )
+    assert result["canonical_readiness"] == "DEGRADED_NO_SUBMIT"
+    assert result["submit_allowed"] is False
+    assert result["broker_session_submit_alignment"] == "ALIGNED"
+    assert result["readiness_blockers"][0]["code"] == "BROKER_SESSION_NEW_ENTRY_NOT_ALLOWED"
     assert result["broker_session_authority_classification"] == "BROKER_SESSION_AUTHORITY_ORDER_STATUS_UNRELIABLE"
     assert result["broker_session_connection_mode"] == "ORDER_STATUS_UNRELIABLE"
     assert result["broker_session_allowed_uses"]["new_entry"] is False
@@ -1239,12 +1275,16 @@ def test_readiness_surfaces_blocked_broker_session_allowed_alignment_without_unb
 
 
 def test_readiness_missing_broker_session_authority_alignment_unknown() -> None:
-    result = classify_canonical_readiness(_clean_inputs())
+    inputs = _clean_inputs()
+    inputs.pop("broker_session_authority")
 
-    assert result["canonical_readiness"] == "READY_SUBMIT_CAPABLE"
-    assert result["submit_allowed"] is True
+    result = classify_canonical_readiness(inputs)
+
+    assert result["canonical_readiness"] == "DEGRADED_NO_SUBMIT"
+    assert result["submit_allowed"] is False
     assert result["broker_session_authority_classification"] is None
     assert result["broker_session_submit_alignment"] == "UNKNOWN"
+    assert result["readiness_blockers"][0]["code"] == "BROKER_SESSION_NEW_ENTRY_NOT_ALLOWED"
 
 
 def test_readiness_surfaces_aligned_broker_session_submit_state() -> None:
@@ -1358,6 +1398,7 @@ def test_canonical_readiness_refreshes_stale_broker_truth_lease_from_fresh_sourc
         encoding="utf-8",
     )
     _write_control_plane_snapshot(repo_root)
+    _write_broker_session_authority_snapshot(repo_root)
     monkeypatch.setattr("mgc_v05l.execution_core.track_b_readiness_state._pid_running", lambda pid: pid == 100)
 
     result = write_canonical_readiness_artifact(
@@ -1431,6 +1472,7 @@ def test_canonical_readiness_keeps_stale_broker_truth_blocked_when_lease_is_refr
         encoding="utf-8",
     )
     _write_control_plane_snapshot(repo_root)
+    _write_broker_session_authority_snapshot(repo_root)
     monkeypatch.setattr("mgc_v05l.execution_core.track_b_readiness_state._pid_running", lambda pid: pid == 100)
 
     result = write_canonical_readiness_artifact(
@@ -1673,6 +1715,7 @@ def test_write_canonical_readiness_artifact_without_dashboard(tmp_path: Path, mo
         encoding="utf-8",
     )
     _write_control_plane_snapshot(repo_root)
+    _write_broker_session_authority_snapshot(repo_root)
     monkeypatch.setattr("mgc_v05l.execution_core.track_b_readiness_state._pid_running", lambda pid: pid == 100)
 
     output = repo_root / "outputs" / "operator_dashboard" / "runtime" / "latest_canonical_readiness.json"
