@@ -105,7 +105,11 @@ def gather_lease_inputs(
 ) -> dict[str, Any]:
     broker_status = _read_json(paths["broker_truth_status"])
     latest_attempt = _read_json(paths["latest_attempt"]) or _mapping(broker_status.get("latest_attempt_status"))
-    last_success = _mapping(broker_status.get("last_successful_broker_truth")) or broker_status
+    last_success = _broker_truth_with_snapshots(
+        repo_root=repo_root,
+        broker_status=broker_status,
+        broker_truth=_mapping(broker_status.get("last_successful_broker_truth")) or broker_status,
+    )
     reconciliation = _read_json(paths["reconciliation"])
     lifecycle = _read_json(paths["lifecycle"])
     order_state = _read_json(paths["order_state"])
@@ -217,6 +221,37 @@ def _read_json(path: Path) -> dict[str, Any]:
         return json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
         return {}
+
+
+def _broker_truth_with_snapshots(
+    *,
+    repo_root: Path,
+    broker_status: Mapping[str, Any],
+    broker_truth: Mapping[str, Any],
+) -> dict[str, Any]:
+    result = dict(broker_truth)
+    positions_snapshot = _read_json(_resolve_snapshot_path(repo_root, result.get("positions_snapshot_path") or broker_status.get("positions_snapshot_path")))
+    open_orders_snapshot = _read_json(
+        _resolve_snapshot_path(repo_root, result.get("open_orders_snapshot_path") or broker_status.get("open_orders_snapshot_path"))
+    )
+    if positions_snapshot:
+        result.setdefault("positions", positions_snapshot.get("positions") or [])
+        result.setdefault("positions_complete", positions_snapshot.get("positions_complete"))
+        result.setdefault("positions_generated_at", positions_snapshot.get("generated_at"))
+        result.setdefault("client_id", positions_snapshot.get("client_id"))
+    if open_orders_snapshot:
+        result.setdefault("open_orders", open_orders_snapshot.get("open_orders") or [])
+        result.setdefault("open_orders_complete", open_orders_snapshot.get("open_orders_complete"))
+        result.setdefault("open_orders_generated_at", open_orders_snapshot.get("generated_at"))
+        result.setdefault("client_id", open_orders_snapshot.get("client_id"))
+    return result
+
+
+def _resolve_snapshot_path(repo_root: Path, value: Any) -> Path:
+    path = Path(str(value or ""))
+    if not str(path):
+        return repo_root / "__missing__"
+    return path if path.is_absolute() else repo_root / path
 
 
 def _mapping(value: Any) -> dict[str, Any]:

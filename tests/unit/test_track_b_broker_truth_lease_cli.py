@@ -229,7 +229,11 @@ def test_degraded_but_valid_lease_exits_0(tmp_path: Path) -> None:
     lease = json.loads(lease_path(tmp_path).read_text(encoding="utf-8"))
     assert exit_code == 0
     assert lease["lease_state"] == "ACTIVE_DEGRADED_REFRESH_FAILING"
-    assert lease["submit_entry_allowed"] is True
+    assert lease["submit_entry_allowed"] is False
+    assert lease["submit_exit_allowed"] is False
+    assert lease["allowed_uses"]["new_entry"] is False
+    assert lease["allowed_uses"]["managed_risk_reducing_close"] is False
+    assert _codes(lease["authority_use_blockers"]) >= {"connection_not_submit_capable"}
 
 
 def test_expired_entry_lease_exits_1(tmp_path: Path) -> None:

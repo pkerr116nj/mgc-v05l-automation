@@ -44,6 +44,7 @@ class BrokerTruthRefreshConfig:
     timeout_seconds: float = 8.0
     skip_market_data_probe: bool = True
     skip_duplicate_client_id_probe: bool = True
+    skip_reconnect_check_when_active_exposure: bool = True
     refresh_lease_artifact: bool = True
     gc_expiry: str = "202606"
     mgc_expiry: str = "202606"
@@ -427,7 +428,7 @@ def _refresh_broker_truth_lease_if_enabled(*, config: BrokerTruthRefreshConfig, 
         inputs = gather_lease_inputs(
             repo_root=repo_root,
             account_id=config.account_id,
-            allowed_instruments=["MGC", "MNQ", "GC"],
+            allowed_instruments=["MGC", "MNQ", "MES", "GC"],
             current_time=current_time,
             policy={
                 "max_entry_age_seconds": 300.0,
@@ -640,6 +641,7 @@ def main(argv: list[str] | None = None) -> int:
 
 
 def _verification_config(config: BrokerTruthRefreshConfig) -> IbkrReadOnlyVerificationConfig:
+    active_exposure = _active_track_b_exposure_present(config.repo_root)
     return IbkrReadOnlyVerificationConfig(
         repo_root=config.repo_root,
         mode=config.mode,
@@ -651,9 +653,46 @@ def _verification_config(config: BrokerTruthRefreshConfig) -> IbkrReadOnlyVerifi
         timeout_seconds=float(config.timeout_seconds),
         probe_market_data=not bool(config.skip_market_data_probe),
         probe_duplicate_client_id=not bool(config.skip_duplicate_client_id_probe),
+        probe_reconnect=not (bool(config.skip_reconnect_check_when_active_exposure) and active_exposure),
         gc_expiry=config.gc_expiry,
         mgc_expiry=config.mgc_expiry,
     )
+
+
+def _active_track_b_exposure_present(repo_root: Path) -> bool:
+    lease = _read_json(repo_root / "outputs" / "operator_dashboard" / "runtime" / "latest_broker_truth_lease.json")
+    reconciliation = _read_json(
+        repo_root
+        / "outputs"
+        / "reports"
+        / "track_b_paper_broker_reconciliation"
+        / "latest_track_b_paper_broker_reconciliation.json"
+    )
+    lifecycle = _read_json(
+        repo_root / "outputs" / "track_b_execution_core" / "paper_trade_ledger" / "latest_track_b_live_position_status.json"
+    )
+    counts = (
+        lease.get("track_b_broker_position_count"),
+        reconciliation.get("track_b_broker_position_count"),
+        reconciliation.get("lifecycle_open_position_count"),
+        reconciliation.get("current_scope_lifecycle_open_position_count"),
+        lifecycle.get("open_position_count"),
+        lifecycle.get("current_scope_lifecycle_open_position_count"),
+    )
+    for value in counts:
+        try:
+            if int(value or 0) > 0:
+                return True
+        except (TypeError, ValueError):
+            continue
+    for row in list(lease.get("positions") or []) + list(reconciliation.get("track_b_broker_positions") or []):
+        if isinstance(row, dict):
+            try:
+                if abs(float(row.get("quantity") or row.get("qty") or 0)) > 1e-9:
+                    return True
+            except (TypeError, ValueError):
+                continue
+    return False
 
 
 def _connection_detail(connection: dict[str, Any]) -> str | None:

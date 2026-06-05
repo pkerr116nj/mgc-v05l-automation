@@ -19,7 +19,7 @@ RECON_TIME = "2026-05-18T14:58:30+00:00"
 def base_inputs() -> dict[str, object]:
     return {
         "account_id": "DUM882026",
-        "allowed_instruments": ["MGC", "MNQ"],
+        "allowed_instruments": ["MGC", "MNQ", "MES"],
         "current_time": NOW,
         "policy": {
             "max_entry_age_seconds": 300,
@@ -39,6 +39,9 @@ def base_inputs() -> dict[str, object]:
                 {"symbol": "MNQ", "local_symbol": "MNQM6", "quantity": "0.0"},
             ],
             "open_orders": [],
+            "client_id": 9077,
+            "pid": 1234,
+            "server_version": 157,
             "positions_snapshot_path": "outputs/reports/positions.json",
             "open_orders_snapshot_path": "outputs/reports/open_orders.json",
             "live_money_eligible": False,
@@ -55,6 +58,7 @@ def base_inputs() -> dict[str, object]:
                 {"symbol": "MNQ", "local_symbol": "MNQM6", "quantity": "0.0"},
             ],
             "open_orders": [],
+            "client_id": 9077,
             "live_money_eligible": False,
         },
         "reconciliation": {
@@ -82,6 +86,8 @@ def base_inputs() -> dict[str, object]:
             "generated_at": RECON_TIME,
             "unknown_open_order_count": 0,
             "unresolved_intent_count": 0,
+            "order_status_callbacks_complete": True,
+            "last_order_status_at": TRUTH_TIME,
             "live_money_eligible": False,
         },
         "source_artifact_paths": {
@@ -96,6 +102,11 @@ def test_active_lease_from_fresh_truth_and_clean_reconciliation() -> None:
 
     assert result["lease_state"] == "ACTIVE"
     assert result["connection_mode"] == "SUBMIT_CAPABLE"
+    assert result["broker_session_owner"]["pid"] == 1234
+    assert result["broker_session_owner"]["client_id"] == 9077
+    assert result["broker_session_owner"]["last_position_at"] == TRUTH_TIME
+    assert result["broker_session_owner"]["last_open_order_at"] == TRUTH_TIME
+    assert result["broker_session_owner"]["last_order_status_at"] == TRUTH_TIME
     assert result["submit_entry_allowed"] is True
     assert result["submit_exit_allowed"] is True
     assert result["allowed_uses"]["new_entry"] is True
@@ -254,6 +265,37 @@ def test_stale_open_order_lease_blocks_close_submit() -> None:
     assert _authority_blocker_codes(result) >= {"broker_open_order_lease_not_fresh"}
 
 
+def test_stale_order_status_callback_blocks_submit_even_with_fresh_open_order_snapshot() -> None:
+    inputs = base_inputs()
+    inputs["current_time"] = "2026-05-18T14:59:00+00:00"
+    inputs["policy"] = {
+        **dict(inputs["policy"]),
+        "max_open_order_lease_age_seconds": 300,
+    }
+    inputs["last_successful_broker_truth"] = {
+        **dict(inputs["last_successful_broker_truth"]),
+        "generated_at": "2026-05-18T14:58:30+00:00",
+    }
+    inputs["latest_attempt_status"] = {
+        **dict(inputs["latest_attempt_status"]),
+        "generated_at": "2026-05-18T14:58:30+00:00",
+    }
+    inputs["order_state"] = {
+        **dict(inputs["order_state"]),
+        "order_status_callbacks_complete": True,
+        "last_order_status_at": "2026-05-18T14:50:00+00:00",
+    }
+
+    result = classify_broker_truth_lease(inputs)
+
+    assert result["connection_mode"] == "ORDER_STATUS_UNRELIABLE"
+    assert result["submit_entry_allowed"] is False
+    assert result["submit_exit_allowed"] is False
+    assert result["allowed_uses"]["new_entry"] is False
+    assert result["allowed_uses"]["managed_risk_reducing_close"] is False
+    assert _authority_blocker_codes(result) >= {"connection_not_submit_capable"}
+
+
 def test_missing_fill_callback_routes_to_broker_observed_adoption_path() -> None:
     inputs = base_inputs()
     inputs["last_successful_broker_truth"] = {
@@ -276,6 +318,12 @@ def test_missing_fill_callback_routes_to_broker_observed_adoption_path() -> None
             "lifecycle_id": "life-mes",
         },
     }
+    inputs["lifecycle"] = {
+        **dict(inputs["lifecycle"]),
+        "open_position_count": 1,
+        "owned_open_position_count": 1,
+        "open_positions": [{"symbol": "MES", "local_symbol": "MESM6", "quantity": "1.0", "owned": True}],
+    }
     inputs["fill_evidence"] = {
         "classification": "FILL_CALLBACK_MISSING",
         "generated_at": "2026-05-18T14:59:00+00:00",
@@ -288,6 +336,57 @@ def test_missing_fill_callback_routes_to_broker_observed_adoption_path() -> None
     assert result["execution_fill_evidence_lease"]["state"] == "INCOMPLETE"
     assert result["allowed_uses"]["fill_callback_adoption"] is False
     assert result["allowed_uses"]["broker_observed_adoption_diagnosis"] is True
+    assert result["submit_entry_allowed"] is False
+
+
+def test_split_client_ownership_is_reported_and_adoption_diagnosis_still_allowed() -> None:
+    inputs = base_inputs()
+    inputs["last_successful_broker_truth"] = {
+        **dict(inputs["last_successful_broker_truth"]),
+        "client_id": 9077,
+        "positions": [{"symbol": "MES", "local_symbol": "MESM6", "quantity": "1.0"}],
+    }
+    inputs["latest_attempt_status"] = {
+        **dict(inputs["latest_attempt_status"]),
+        "client_id": 9077,
+        "positions": [{"symbol": "MES", "local_symbol": "MESM6", "quantity": "1.0"}],
+    }
+    inputs["submit_ownership"] = {
+        "available": True,
+        "client_id": 11121,
+        "trade_id": "trade-mes",
+        "lifecycle_id": "life-mes",
+    }
+    inputs["reconciliation"] = {
+        **dict(inputs["reconciliation"]),
+        "classification": "BROKER_TRUTH_SETTLEMENT_TIMEOUT",
+        "broker_reconciled": False,
+        "current_scope_review_required_count": 0,
+        "track_b_broker_position_count": 1,
+    }
+    inputs["lifecycle"] = {
+        **dict(inputs["lifecycle"]),
+        "open_position_count": 1,
+        "owned_open_position_count": 1,
+        "open_positions": [{"symbol": "MES", "local_symbol": "MESM6", "quantity": "1.0", "owned": True}],
+    }
+    inputs["broker_session_owner"] = {
+        "pid": 54210,
+        "client_id": 9077,
+        "connection_started_at": "2026-05-18T14:58:00+00:00",
+        "last_position_at": "2026-05-18T14:58:00+00:00",
+        "last_open_order_at": "2026-05-18T14:58:00+00:00",
+        "last_order_status_at": "2026-05-18T14:58:00+00:00",
+        "source_connection_id": "ibkr-client-9077",
+    }
+
+    result = classify_broker_truth_lease(inputs)
+
+    assert result["broker_session_owner"]["pid"] == 54210
+    assert result["broker_session_owner"]["client_id"] == 9077
+    assert result["broker_session_owner"]["source_connection_id"] == "ibkr-client-9077"
+    assert result["allowed_uses"]["broker_observed_adoption_diagnosis"] is True
+    assert result["allowed_uses"]["fill_callback_adoption"] is False
     assert result["submit_entry_allowed"] is False
 
 

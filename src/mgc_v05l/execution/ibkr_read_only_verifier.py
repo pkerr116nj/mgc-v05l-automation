@@ -60,6 +60,7 @@ class IbkrReadOnlyVerificationConfig:
     timeout_seconds: float = 15.0
     probe_market_data: bool = True
     probe_duplicate_client_id: bool = True
+    probe_reconnect: bool = True
     gc_expiry: str = _DEFAULT_GC_EXPIRY
     mgc_expiry: str = _DEFAULT_MGC_EXPIRY
 
@@ -668,11 +669,19 @@ def verify_ibkr_read_only_connection(
         except Exception:
             pass
 
-    reconnect_report = _run_reconnect_check(
-        config=config,
-        transport_factory=transport_factory,
-        module_loader=module_loader,
-        sleep_fn=sleep_fn,
+    reconnect_report = (
+        _run_reconnect_check(
+            config=config,
+            transport_factory=transport_factory,
+            module_loader=module_loader,
+            sleep_fn=sleep_fn,
+        )
+        if config.probe_reconnect
+        else {
+            "status": "DIAGNOSTIC_REFRESH_SKIPPED_ACTIVE_EXPOSURE",
+            "ok": True,
+            "detail": "Reconnect cycling was skipped because active Track B exposure may require callback continuity.",
+        }
     )
     unavailable_tws_report = {
         "status": "verified_by_unit_test",

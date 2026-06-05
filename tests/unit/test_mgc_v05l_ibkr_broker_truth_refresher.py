@@ -22,6 +22,7 @@ def _artifacts(
     open_orders_complete: bool = True,
     errors: list[dict[str, object]] | None = None,
     account_ok: bool | None = None,
+    generated_at: str = "2026-05-11T12:00:00+00:00",
 ) -> IbkrReadOnlyVerificationArtifacts:
     account_truth_ok = account_ok if account_ok is not None else classification != "IBKR_READ_ONLY_BLOCKED"
     return IbkrReadOnlyVerificationArtifacts(
@@ -36,7 +37,7 @@ def _artifacts(
         },
         account_truth_snapshot={"selected_account_id": "DUM882026"},
         positions_snapshot={
-            "generated_at": "2026-05-11T12:00:00+00:00",
+            "generated_at": generated_at,
             "selected_account_id": "DUM882026",
             "ok": positions_complete,
             "positions_complete": positions_complete,
@@ -44,7 +45,7 @@ def _artifacts(
             "positions": [{"symbol": "AAPL"}, {"symbol": "GC"}],
         },
         open_orders_snapshot={
-            "generated_at": "2026-05-11T12:00:00+00:00",
+            "generated_at": generated_at,
             "selected_account_id": "DUM882026",
             "ok": open_orders_complete,
             "open_orders_complete": open_orders_complete,
@@ -99,6 +100,8 @@ def _write_clean_reconciliation_inputs(repo_root: Path, generated_at: str) -> No
             "unknown_open_order_count": 0,
             "lifecycle_open_order_count": 0,
             "unresolved_intent_count": 0,
+            "order_status_callbacks_complete": True,
+            "last_order_status_at": generated_at,
             "live_money_eligible": False,
         },
     )
@@ -109,6 +112,18 @@ def _write_clean_reconciliation_inputs(repo_root: Path, generated_at: str) -> No
     _write_json(
         repo_root / "outputs" / "operator_dashboard" / "runtime" / "latest_maintenance_supervisor_decision.json",
         {"generated_at": generated_at, "supervisor_state": "OBSERVING", "live_money_eligible": False},
+    )
+    _write_json(
+        repo_root / "outputs" / "track_b_execution_core" / "control_plane" / "latest_control_plane_snapshot.json",
+        {
+            "classification": "CONTROL_PLANE_SNAPSHOT_READY",
+            "generated_at": generated_at,
+            "control_plane_snapshot_id": "track-b-control-plane-test",
+            "shared_truth_refresh_generation_id": "track-b-shared-truth-test",
+            "runtime_supervisor_decision_id": "track-b-paper-supervisor-test",
+            "shared_truth_coherence_status": "COHERENT",
+            "live_money_eligible": False,
+        },
     )
 
 
@@ -183,7 +198,7 @@ def test_broker_truth_refresh_writes_heartbeat_when_configured(tmp_path: Path) -
 
     status = run_broker_truth_refresh_once(
         config=config,
-        verifier=lambda *, config: _artifacts(),
+        verifier=lambda *, config: _artifacts(generated_at=fixed_time.isoformat()),
         artifact_writer=lambda *, output_dir, artifacts: output_dir.mkdir(parents=True, exist_ok=True),
         now_fn=lambda: fixed_time,
     )
@@ -196,6 +211,48 @@ def test_broker_truth_refresh_writes_heartbeat_when_configured(tmp_path: Path) -
     assert heartbeat["last_success"] is True
     assert heartbeat["submit_authority"] is False
     assert heartbeat["live_money_eligible"] is False
+
+
+def test_broker_truth_refresh_skips_reconnect_probe_during_active_exposure(tmp_path: Path) -> None:
+    fixed_time = datetime(2026, 5, 11, 12, 0, tzinfo=timezone.utc)
+    _write_clean_reconciliation_inputs(tmp_path, fixed_time.isoformat())
+    _write_json(
+        _lease_path(tmp_path),
+        {
+            "generated_at": fixed_time.isoformat(),
+            "track_b_broker_position_count": 1,
+            "positions": [{"symbol": "MES", "local_symbol": "MESM6", "quantity": "1.0"}],
+            "live_money_eligible": False,
+        },
+    )
+    observed_probe_reconnect: list[bool] = []
+
+    def verifier(*, config):
+        observed_probe_reconnect.append(bool(config.probe_reconnect))
+        artifacts = _artifacts()
+        artifacts.connection_report["reconnect_check"] = {
+            "status": "DIAGNOSTIC_REFRESH_SKIPPED_ACTIVE_EXPOSURE",
+            "ok": True,
+            "detail": "Reconnect cycling was skipped because active Track B exposure may require callback continuity.",
+        }
+        return artifacts
+
+    config = BrokerTruthRefreshConfig(
+        repo_root=tmp_path,
+        output_dir=tmp_path / "outputs" / "reports" / "ibkr_read_only_verification",
+        status_path=tmp_path / "outputs" / "reports" / "ibkr_read_only_verification" / "ibkr_broker_truth_refresh_status.json",
+        var_status_path=tmp_path / "var" / "ibkr_broker_truth_refresh_status.json",
+    )
+
+    status = run_broker_truth_refresh_once(
+        config=config,
+        verifier=verifier,
+        artifact_writer=lambda *, output_dir, artifacts: output_dir.mkdir(parents=True, exist_ok=True),
+        now_fn=lambda: fixed_time,
+    )
+
+    assert status["classification"] == "BROKER_TRUTH_REFRESH_READY"
+    assert observed_probe_reconnect == [False]
 
 
 def test_successful_broker_truth_refresh_clears_expired_lease(tmp_path: Path) -> None:
@@ -222,7 +279,7 @@ def test_successful_broker_truth_refresh_clears_expired_lease(tmp_path: Path) ->
 
     status = run_broker_truth_refresh_once(
         config=config,
-        verifier=lambda *, config: _artifacts(),
+        verifier=lambda *, config: _artifacts(generated_at=fixed_time.isoformat()),
         artifact_writer=lambda *, output_dir, artifacts: (
             output_dir.mkdir(parents=True, exist_ok=True),
             (output_dir / "ibkr_positions_snapshot.json").write_text(

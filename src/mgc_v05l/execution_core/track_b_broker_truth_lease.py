@@ -78,11 +78,24 @@ def classify_broker_truth_lease(inputs: Mapping[str, Any]) -> dict[str, Any]:
     entry_valid_until = _add_seconds(broker_truth_time, max_entry_age_seconds)
     exit_valid_until = _add_seconds(broker_truth_time, max_exit_age_seconds)
     valid_until = entry_valid_until
+    broker_session_owner = _broker_session_owner(
+        inputs=inputs,
+        broker_truth=broker_truth,
+        latest_attempt=latest_attempt,
+        order_state=order_state,
+        fill_evidence=fill_evidence,
+        current_time=current_time,
+    )
     connection_health = _connection_health(
         inputs=inputs,
         broker_truth=broker_truth,
         latest_attempt=latest_attempt,
         fill_evidence=fill_evidence,
+        order_state=order_state,
+        broker_session_owner=broker_session_owner,
+        current_time=current_time,
+        max_open_order_lease_age_seconds=max_open_order_lease_age_seconds,
+        max_fill_evidence_lease_age_seconds=max_fill_evidence_lease_age_seconds,
     )
     connection_mode = str(connection_health["connection_mode"])
 
@@ -340,6 +353,7 @@ def classify_broker_truth_lease(inputs: Mapping[str, Any]) -> dict[str, Any]:
         "lease_state": builder.state,
         "connection_health": connection_health,
         "connection_mode": connection_mode,
+        "broker_session_owner": broker_session_owner,
         "broker_position_lease": broker_position_lease,
         "broker_open_order_lease": broker_open_order_lease,
         "execution_fill_evidence_lease": execution_fill_evidence_lease,
@@ -487,6 +501,20 @@ def _float(value: Any, default: float) -> float:
         return default
 
 
+def _int_or_none(value: Any) -> int | None:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _first_present(*values: Any) -> Any:
+    for value in values:
+        if value not in (None, ""):
+            return value
+    return None
+
+
 def _parse_time(value: Any) -> datetime | None:
     if isinstance(value, datetime):
         return value if value.tzinfo is not None else value.replace(tzinfo=timezone.utc)
@@ -510,6 +538,13 @@ def _add_seconds(value: datetime | None, seconds: float) -> datetime | None:
 
 def _iso_or_none(value: datetime | None) -> str | None:
     return value.isoformat() if value is not None else None
+
+
+def _iso_text(value: Any) -> str | None:
+    parsed = _parse_time(value)
+    if parsed is not None:
+        return parsed.isoformat()
+    return str(value) if value not in (None, "") else None
 
 
 def _string_set(value: Any) -> set[str]:
@@ -688,12 +723,114 @@ def _current_scope_review_required_count(reconciliation: Mapping[str, Any]) -> i
     return int(reconciliation.get("review_required_count") or 0)
 
 
+def _broker_session_owner(
+    *,
+    inputs: Mapping[str, Any],
+    broker_truth: Mapping[str, Any],
+    latest_attempt: Mapping[str, Any],
+    order_state: Mapping[str, Any],
+    fill_evidence: Mapping[str, Any],
+    current_time: datetime,
+) -> dict[str, Any]:
+    explicit = _mapping(inputs.get("broker_session_owner") or inputs.get("session_owner"))
+    connection = _mapping(inputs.get("connection") or inputs.get("connection_health"))
+    connection_check = _mapping(
+        latest_attempt.get("connection_check")
+        or broker_truth.get("connection_check")
+        or connection.get("connection_check")
+        or inputs.get("connection_check")
+    )
+
+    client_id = _first_present(
+        explicit.get("client_id"),
+        broker_truth.get("client_id"),
+        latest_attempt.get("client_id"),
+        connection_check.get("client_id"),
+        inputs.get("client_id"),
+    )
+    connection_started_at = _first_present(
+        explicit.get("connection_started_at"),
+        explicit.get("connected_at"),
+        connection_check.get("connection_timestamp"),
+        broker_truth.get("started_at"),
+        latest_attempt.get("started_at"),
+    )
+    last_position_at = _first_present(
+        explicit.get("last_position_at"),
+        broker_truth.get("positions_generated_at"),
+        broker_truth.get("generated_at"),
+        latest_attempt.get("positions_generated_at"),
+        latest_attempt.get("generated_at"),
+    )
+    last_open_order_at = _first_present(
+        explicit.get("last_open_order_at"),
+        broker_truth.get("open_orders_generated_at"),
+        broker_truth.get("orders_generated_at"),
+        broker_truth.get("generated_at"),
+        latest_attempt.get("open_orders_generated_at"),
+        latest_attempt.get("orders_generated_at"),
+        latest_attempt.get("generated_at"),
+    )
+    last_order_status_at = _first_present(
+        explicit.get("last_order_status_at"),
+        order_state.get("last_order_status_at"),
+        order_state.get("latest_order_status_at"),
+        _mapping(order_state.get("latest_order_status")).get("updated_at"),
+        broker_truth.get("last_order_status_at"),
+        latest_attempt.get("last_order_status_at"),
+    )
+    last_exec_at = _first_present(
+        explicit.get("last_exec_at"),
+        fill_evidence.get("last_exec_at"),
+        fill_evidence.get("latest_execution_at"),
+        fill_evidence.get("latest_fill_at"),
+        fill_evidence.get("generated_at") if _fill_evidence_complete(fill_evidence) else None,
+    )
+    last_completed_order_at = _first_present(
+        explicit.get("last_completed_order_at"),
+        order_state.get("last_completed_order_at"),
+        order_state.get("latest_completed_order_at"),
+        fill_evidence.get("last_completed_order_at"),
+    )
+    pid = _first_present(explicit.get("pid"), broker_truth.get("pid"), latest_attempt.get("pid"), inputs.get("pid"))
+    source_connection_id = _first_present(
+        explicit.get("source_connection_id"),
+        explicit.get("session_id"),
+        broker_truth.get("source_connection_id"),
+        broker_truth.get("session_id"),
+        latest_attempt.get("source_connection_id"),
+        latest_attempt.get("session_id"),
+    )
+    if not source_connection_id and client_id not in {None, ""}:
+        source_connection_id = f"ibkr-client-{client_id}"
+
+    return {
+        "schema_version": "track_b_broker_session_owner_v1",
+        "pid": _int_or_none(pid),
+        "client_id": _int_or_none(client_id),
+        "connection_started_at": _iso_text(connection_started_at),
+        "server_version": _int_or_none(_first_present(explicit.get("server_version"), connection_check.get("server_version"))),
+        "last_position_at": _iso_text(last_position_at),
+        "last_open_order_at": _iso_text(last_open_order_at),
+        "last_order_status_at": _iso_text(last_order_status_at),
+        "last_exec_at": _iso_text(last_exec_at),
+        "last_completed_order_at": _iso_text(last_completed_order_at),
+        "source_connection_id": str(source_connection_id) if source_connection_id not in {None, ""} else None,
+        "generated_at": current_time.isoformat(),
+    }
+
+
 def _connection_health(
     *,
     inputs: Mapping[str, Any],
     broker_truth: Mapping[str, Any],
     latest_attempt: Mapping[str, Any],
     fill_evidence: Mapping[str, Any],
+    order_state: Mapping[str, Any],
+    broker_session_owner: Mapping[str, Any],
+    current_time: datetime,
+    max_open_order_lease_age_seconds: float,
+    max_fill_evidence_lease_age_seconds: float,
 ) -> dict[str, Any]:
     explicit = str(
         inputs.get("connection_mode")
@@ -720,7 +857,19 @@ def _connection_health(
         or datetime.min.replace(tzinfo=timezone.utc),
     ):
         mode = "DEGRADED_RECOVERED"
-    elif _fill_evidence_complete(fill_evidence):
+    elif _open_order_status_unreliable(
+        broker_truth=broker_truth,
+        order_state=order_state,
+        broker_session_owner=broker_session_owner,
+        current_time=current_time,
+        max_age_seconds=max_open_order_lease_age_seconds,
+    ):
+        mode = "ORDER_STATUS_UNRELIABLE"
+    elif _fill_evidence_complete(fill_evidence) and _callback_fresh(
+        broker_session_owner.get("last_exec_at"),
+        current_time=current_time,
+        max_age_seconds=max_fill_evidence_lease_age_seconds,
+    ):
         mode = "FILL_CALLBACK_CAPABLE"
     else:
         mode = "SUBMIT_CAPABLE"
@@ -757,12 +906,65 @@ def _connection_health(
         "fill_callback_capable": mode == "FILL_CALLBACK_CAPABLE",
         "position_truth_available": mode in {"POSITION_TRUTH_ONLY", "ORDER_STATUS_UNRELIABLE", "SUBMIT_CAPABLE", "FILL_CALLBACK_CAPABLE", "DEGRADED_RECOVERED"},
         "order_status_reliable": mode in {"SUBMIT_CAPABLE", "FILL_CALLBACK_CAPABLE"},
+        "broker_observed_adoption_diagnosis_allowed": mode
+        in {"POSITION_TRUTH_ONLY", "ORDER_STATUS_UNRELIABLE", "SUBMIT_CAPABLE", "FILL_CALLBACK_CAPABLE", "DEGRADED_RECOVERED"},
+        "callback_freshness": {
+            "last_position_at": broker_session_owner.get("last_position_at"),
+            "last_open_order_at": broker_session_owner.get("last_open_order_at"),
+            "last_order_status_at": broker_session_owner.get("last_order_status_at"),
+            "last_exec_at": broker_session_owner.get("last_exec_at"),
+            "last_completed_order_at": broker_session_owner.get("last_completed_order_at"),
+        },
         "blockers": blockers,
     }
 
 
 def _connection_allows_submit(connection_mode: str) -> bool:
     return str(connection_mode).strip().upper() in {"SUBMIT_CAPABLE", "FILL_CALLBACK_CAPABLE"}
+
+
+def _open_order_status_unreliable(
+    *,
+    broker_truth: Mapping[str, Any],
+    order_state: Mapping[str, Any],
+    broker_session_owner: Mapping[str, Any],
+    current_time: datetime,
+    max_age_seconds: float,
+) -> bool:
+    if not _bool(broker_truth.get("open_orders_complete")):
+        return True
+    explicit_reliable = order_state.get("order_status_reliable")
+    if explicit_reliable is not None and not _bool(explicit_reliable):
+        return True
+    if _bool(order_state.get("order_status_callbacks_complete")) or _bool(order_state.get("order_status_complete")):
+        return not _callback_fresh(
+            broker_session_owner.get("last_order_status_at") or order_state.get("generated_at"),
+            current_time=current_time,
+            max_age_seconds=max_age_seconds,
+        )
+    if int(broker_truth.get("open_order_count") or broker_truth.get("track_b_broker_open_order_count") or 0) > 0:
+        return not _callback_fresh(
+            broker_session_owner.get("last_order_status_at"),
+            current_time=current_time,
+            max_age_seconds=max_age_seconds,
+        )
+    status = str(order_state.get("classification") or "").upper()
+    if any(token in status for token in ("UNKNOWN", "STALE", "UNRELIABLE", "REVIEW_REQUIRED")):
+        return True
+    if order_state or broker_session_owner.get("last_order_status_at"):
+        return not _callback_fresh(
+            broker_session_owner.get("last_order_status_at") or order_state.get("generated_at"),
+            current_time=current_time,
+            max_age_seconds=max_age_seconds,
+        )
+    return True
+
+
+def _callback_fresh(value: Any, *, current_time: datetime, max_age_seconds: float) -> bool:
+    timestamp = _parse_time(value)
+    if timestamp is None:
+        return False
+    return current_time <= timestamp + timedelta(seconds=max(0.0, max_age_seconds))
 
 
 def _evidence_lease(
