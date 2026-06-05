@@ -18,6 +18,8 @@ from typing import Any, Mapping, Sequence
 
 from mgc_v05l.execution_core.track_b_atomic_io import write_json_atomic
 from mgc_v05l.execution_core.track_b_broker_position_guardian import DEFAULT_BROKER_POSITION_GUARDIAN_ARTIFACT
+from mgc_v05l.execution_core.track_b_broker_session_authority import DEFAULT_BROKER_SESSION_AUTHORITY_ARTIFACT
+from mgc_v05l.execution_core.track_b_broker_truth_lease import DEFAULT_LEASE_ARTIFACT
 from mgc_v05l.execution_core.track_b_managed_order_registry import DEFAULT_MANAGED_ORDER_REGISTRY_ARTIFACT
 from mgc_v05l.execution_core.track_b_managed_position_registry import DEFAULT_MANAGED_POSITION_REGISTRY_ARTIFACT
 from mgc_v05l.execution_core.track_b_open_order_truth import DEFAULT_OPEN_ORDER_TRUTH_ARTIFACT
@@ -49,6 +51,8 @@ class TrackBManagedExitRecoveryConfig:
     broker_position_guardian_path: Path = DEFAULT_BROKER_POSITION_GUARDIAN_ARTIFACT
     safe_state_path: Path = DEFAULT_RUNTIME_SAFE_STATE_ENVELOPE_ARTIFACT
     reconciliation_path: Path = DEFAULT_RECONCILIATION_REPORT_PATH
+    broker_truth_lease_path: Path = DEFAULT_LEASE_ARTIFACT
+    broker_session_authority_path: Path = DEFAULT_BROKER_SESSION_AUTHORITY_ARTIFACT
 
     def resolve(self, path: Path) -> Path:
         return path if path.is_absolute() else self.repo_root / path
@@ -72,8 +76,9 @@ def build_track_b_managed_exit_recovery_plan(
         _classify_position(position=position, positions=managed_positions, inputs=inputs)
         for position in exit_due_positions
     ]
-    ready = [row for row in per_position if row["eligible"] is True]
-    blocked = [row for row in per_position if row["eligible"] is not True]
+    diagnostic_ready = [row for row in per_position if row["diagnostic_close_candidate_ready"] is True]
+    ready = [row for row in per_position if row["apply_eligible"] is True]
+    blocked = [row for row in per_position if row["apply_eligible"] is not True]
 
     if not per_position:
         classification = NO_EXIT_DUE_POSITIONS
@@ -100,16 +105,27 @@ def build_track_b_managed_exit_recovery_plan(
         "live_money_eligible": global_flags["live_money_eligible"],
         "classification": classification,
         "eligible_count": len(ready),
+        "apply_eligible_count": len(ready),
         "blocked_count": len(blocked),
         "exit_due_count": len(per_position),
+        "diagnostic_close_candidate_count": len(diagnostic_ready),
+        "broker_session_authority_classification": inputs["broker_session_authority"].get("classification"),
+        "broker_session_connection_mode": inputs["broker_session_authority"].get("connection_mode"),
+        "broker_session_allowed_uses": _mapping(inputs["broker_session_authority"].get("allowed_uses")),
+        "broker_session_authority_blockers": _list(inputs["broker_session_authority"].get("authority_blockers")),
+        "callback_ownership_attribution": _mapping(inputs["broker_session_authority"].get("callback_ownership_attribution")),
         "managed_exit_recovery_plan": {
             "classification": classification,
             "eligible_positions": ready,
             "blocked_positions": blocked,
-            "close_candidates": [row["close_candidate"] for row in ready],
+            "diagnostic_positions": diagnostic_ready,
+            "diagnostic_close_candidates": [row["close_candidate"] for row in diagnostic_ready],
+            "close_candidates": [row["close_candidate"] for row in diagnostic_ready],
         },
         "eligible_positions": ready,
         "blocked_positions": blocked,
+        "diagnostic_positions": diagnostic_ready,
+        "diagnostic_close_candidates": [row["close_candidate"] for row in diagnostic_ready],
         "global_safety_flags": global_flags,
         "source_classifications": {
             "managed_position_registry": inputs["managed_positions"].get("classification"),
@@ -119,6 +135,8 @@ def build_track_b_managed_exit_recovery_plan(
             "safe_state": inputs["safe_state"].get("classification"),
             "reconciliation": inputs["reconciliation"].get("classification"),
             "registry_reconciliation": _mapping(inputs["reconciliation"].get("registry_reconciliation")).get("classification"),
+            "broker_truth_lease": inputs["broker_truth_lease"].get("lease_state"),
+            "broker_session_authority": inputs["broker_session_authority"].get("classification"),
         },
         "source_artifact_paths": {
             "managed_position_registry": str(config.resolve(config.managed_position_registry_path)),
@@ -127,6 +145,8 @@ def build_track_b_managed_exit_recovery_plan(
             "broker_position_guardian": str(config.resolve(config.broker_position_guardian_path)),
             "safe_state": str(config.resolve(config.safe_state_path)),
             "reconciliation": str(config.resolve(config.reconciliation_path)),
+            "broker_truth_lease": str(config.resolve(config.broker_truth_lease_path)),
+            "broker_session_authority": str(config.resolve(config.broker_session_authority_path)),
         },
     }
 
@@ -274,11 +294,18 @@ def _classify_position(
     if guardian_candidate:
         candidate.update({key: guardian_candidate.get(key) for key in ("classification", "reason") if guardian_candidate.get(key) is not None})
 
-    blockers = _dedupe(blockers)
+    diagnostic_blockers = _dedupe(blockers)
+    apply_blockers = _dedupe([*diagnostic_blockers, *_broker_session_apply_blockers(inputs=inputs)])
+    diagnostic_ready = not diagnostic_blockers
+    apply_eligible = diagnostic_ready and not apply_blockers
     return {
-        "classification": READY_POSITION if not blockers else BLOCKED_POSITION,
-        "eligible": not blockers,
-        "blockers": blockers,
+        "classification": READY_POSITION if apply_eligible else BLOCKED_POSITION,
+        "eligible": apply_eligible,
+        "diagnostic_close_candidate_ready": diagnostic_ready,
+        "apply_eligible": apply_eligible,
+        "blockers": apply_blockers,
+        "diagnostic_blockers": diagnostic_blockers,
+        "apply_blockers": apply_blockers,
         "close_candidate": candidate,
         "identity": {
             "account_id": account_id,
@@ -295,6 +322,10 @@ def _classify_position(
         "broker_position": broker_position,
         "registry_current_state": registry_record.get("current_state") if registry_record else None,
         "order_conflicts": order_conflicts,
+        "broker_session_authority_classification": inputs["broker_session_authority"].get("classification"),
+        "broker_session_connection_mode": inputs["broker_session_authority"].get("connection_mode"),
+        "broker_session_allowed_uses": _mapping(inputs["broker_session_authority"].get("allowed_uses")),
+        "callback_ownership_attribution": _mapping(inputs["broker_session_authority"].get("callback_ownership_attribution")),
     }
 
 
@@ -310,8 +341,10 @@ def _inputs(
         "guardian": config.broker_position_guardian_path,
         "safe_state": config.safe_state_path,
         "reconciliation": config.reconciliation_path,
+        "broker_truth_lease": config.broker_truth_lease_path,
+        "broker_session_authority": config.broker_session_authority_path,
     }
-    return {name: overrides.get(name) or _read_json(config.resolve(path)) for name, path in paths.items()}
+    return {name: overrides[name] if name in overrides else _read_json(config.resolve(path)) for name, path in paths.items()}
 
 
 def _matching_guardian_candidate(
@@ -509,6 +542,33 @@ def _conflicting_orders(
         if same_contract and (not order_account or order_account == account_id):
             conflicts.append(dict(order))
     return conflicts
+
+
+def _broker_session_apply_blockers(*, inputs: Mapping[str, Mapping[str, Any]]) -> list[str]:
+    authority = _mapping(inputs.get("broker_session_authority"))
+    if not authority:
+        return ["BROKER_SESSION_AUTHORITY_MISSING"]
+    blockers: list[str] = []
+    connection_mode = str(authority.get("connection_mode") or "").strip().upper()
+    classification = str(authority.get("classification") or "").strip().upper()
+    allowed_uses = _mapping(authority.get("allowed_uses"))
+    if connection_mode == "ORDER_STATUS_UNRELIABLE" or classification == "BROKER_SESSION_AUTHORITY_ORDER_STATUS_UNRELIABLE":
+        blockers.append("BROKER_SESSION_CLOSE_AUTHORITY_BLOCKED_ORDER_STATUS_UNRELIABLE")
+    elif connection_mode == "POSITION_TRUTH_ONLY" or classification == "BROKER_SESSION_AUTHORITY_POSITION_TRUTH_ONLY":
+        blockers.append("BROKER_SESSION_CLOSE_AUTHORITY_BLOCKED_POSITION_TRUTH_ONLY")
+    elif connection_mode in {"IBKR_CONNECTION_DOWN", ""} or classification in {
+        "BROKER_SESSION_AUTHORITY_CONNECTION_DOWN",
+        "BROKER_SESSION_AUTHORITY_OPERATOR_REQUIRED",
+        "",
+    }:
+        blockers.append("BROKER_SESSION_CLOSE_AUTHORITY_BLOCKED_NOT_SUBMIT_CAPABLE")
+    if allowed_uses.get("managed_risk_reducing_close") is not True:
+        blockers.append("BROKER_SESSION_MANAGED_RISK_REDUCING_CLOSE_NOT_ALLOWED")
+    if authority.get("live_money_eligible") is True:
+        blockers.append("BROKER_SESSION_LIVE_MONEY_ELIGIBLE_TRUE")
+    if authority.get("paper_proof_invoked") is True:
+        blockers.append("BROKER_SESSION_PAPER_PROOF_INVOKED_TRUE")
+    return _dedupe(blockers)
 
 
 def _global_safety_flags(inputs: Mapping[str, Mapping[str, Any]]) -> dict[str, Any]:
