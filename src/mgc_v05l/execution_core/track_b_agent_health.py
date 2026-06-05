@@ -668,7 +668,7 @@ def _canonical_readiness_artifact_status(
         repo_root=config.repo_root,
         current_head=current_head,
     )
-    if artifact.get("status") in {MISSING_ARTIFACT, ROOT_MISMATCH, SOURCE_COMMIT_MISMATCH, STALE}:
+    if artifact.get("status") in {MISSING_ARTIFACT, ROOT_MISMATCH, SOURCE_COMMIT_MISMATCH}:
         return {**artifact, **_canonical_readiness_heartbeat_evidence(heartbeat_status)}
     if not payload:
         return {
@@ -677,12 +677,20 @@ def _canonical_readiness_artifact_status(
             "reason": "canonical_readiness_artifact_missing_or_invalid",
             **_canonical_readiness_heartbeat_evidence(heartbeat_status),
         }
+    payload_freshness = _canonical_readiness_payload_freshness(
+        payload=payload,
+        now=now,
+        max_age_seconds=config.artifact_max_age_seconds,
+    )
+    if artifact.get("status") == STALE and not payload_freshness.get("fresh"):
+        return {**artifact, **_canonical_readiness_heartbeat_evidence(heartbeat_status)}
+    canonical_artifact = {**artifact, **payload_freshness}
     if _canonical_readiness_startup_preflight_evidence_clean(
         payload=payload,
         runtime_environment_truth=runtime_environment_truth,
     ):
         return {
-            **artifact,
+            **canonical_artifact,
             "status": HEALTHY,
             "reason": "canonical_readiness_artifact_fresh_startup_preflight",
             "startup_preflight_compatible": True,
@@ -690,7 +698,7 @@ def _canonical_readiness_artifact_status(
         }
     if str(payload.get("classification") or "") == "READY":
         return {
-            **artifact,
+            **canonical_artifact,
             "status": HEALTHY,
             "reason": "canonical_readiness_artifact_fresh",
             **_canonical_readiness_heartbeat_evidence(heartbeat_status, warn_if_unhealthy=True),
@@ -699,7 +707,7 @@ def _canonical_readiness_artifact_status(
         _canonical_readiness_submit_capable(payload)
     ):
         return {
-            **artifact,
+            **canonical_artifact,
             "status": HEALTHY,
             "reason": "canonical_readiness_artifact_fresh_submit_capable",
             **_canonical_readiness_heartbeat_evidence(heartbeat_status, warn_if_unhealthy=True),
@@ -713,6 +721,23 @@ def _canonical_readiness_artifact_status(
         else "canonical_readiness_artifact_not_submit_capable",
         "startup_preflight_compatible": False if runtime_down else None,
         **_canonical_readiness_heartbeat_evidence(heartbeat_status),
+    }
+
+
+def _canonical_readiness_payload_freshness(
+    *,
+    payload: Mapping[str, Any],
+    now: datetime,
+    max_age_seconds: float,
+) -> dict[str, Any]:
+    last_seen = _parse_time(payload.get("generated_at") or payload.get("updated_at"))
+    if last_seen is None:
+        return {"fresh": False}
+    age = max(0.0, (now - last_seen).total_seconds())
+    return {
+        "fresh": age <= max_age_seconds,
+        "last_seen_at": last_seen.isoformat(),
+        "freshness_age_seconds": age,
     }
 
 

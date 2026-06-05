@@ -4,6 +4,7 @@ import json
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
+import mgc_v05l.execution_core.track_b_agent_health as agent_health_module
 from mgc_v05l.execution_core.track_b_agent_health import (
     AGENT_HEALTH_BLOCKING,
     AGENT_HEALTH_DEGRADED,
@@ -257,6 +258,53 @@ def test_fresh_runtime_canonical_readiness_with_stale_refresher_heartbeat_warns_
     assert canonical["status"] == HEALTHY
     assert canonical["reason"] == "canonical_readiness_artifact_fresh_submit_capable"
     assert canonical["artifact_fresh"] is True
+    assert canonical["heartbeat_fresh"] is False
+    assert canonical["blocking_for_runtime_submit"] is False
+    assert canonical["warnings"][0]["code"] == "canonical_readiness_refresher_heartbeat_stale"
+
+
+def test_runtime_canonical_readiness_payload_authority_overrides_stale_generic_probe(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    _seed_healthy_artifacts(tmp_path)
+    _write_json(
+        tmp_path / "outputs" / "track_b_execution_core" / "runtime_truth" / "latest_runtime_environment_truth.json",
+        {
+            "generated_at": NOW.isoformat(),
+            "classification": RUNTIME_ACTIVE_TRADE_CAPABLE,
+            "runtime": {"pid_alive": True, "root_match": True, "commit_matches_head": True},
+        },
+    )
+    _write_runtime_canonical_readiness(tmp_path)
+    _write_json(
+        tmp_path / "var/track_b_operator_readiness_refresh_heartbeat.json",
+        {"generated_at": (NOW - timedelta(minutes=20)).isoformat(), "repo_root": str(tmp_path)},
+    )
+    original_artifact_status = agent_health_module._artifact_status
+
+    def stale_generic_probe(path: Path, **kwargs):
+        if path.name == "latest_canonical_readiness.json":
+            return {
+                "status": STALE,
+                "reason": "artifact_stale",
+                "last_seen_at": (NOW - timedelta(minutes=20)).isoformat(),
+                "freshness_age_seconds": 1200.0,
+                "root_matches": None,
+                "source_commit_matches": None,
+            }
+        return original_artifact_status(path, **kwargs)
+
+    monkeypatch.setattr(agent_health_module, "_artifact_status", stale_generic_probe)
+
+    payload = build_track_b_agent_health(config=TrackBAgentHealthConfig(repo_root=tmp_path), now=NOW, process_rows=[])
+
+    canonical = _agent(payload, "canonical_readiness_refresher")
+    assert payload["classification"] == AGENT_HEALTH_READY
+    assert canonical["status"] == HEALTHY
+    assert canonical["reason"] == "canonical_readiness_artifact_fresh_submit_capable"
+    assert canonical["last_seen_at"] == NOW.isoformat()
+    assert canonical["freshness_age_seconds"] == 0.0
     assert canonical["heartbeat_fresh"] is False
     assert canonical["blocking_for_runtime_submit"] is False
     assert canonical["warnings"][0]["code"] == "canonical_readiness_refresher_heartbeat_stale"

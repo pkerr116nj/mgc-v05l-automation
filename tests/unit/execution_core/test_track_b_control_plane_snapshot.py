@@ -852,6 +852,47 @@ def test_stale_autonomous_recovery_blocker_does_not_override_current_agent_healt
     assert payload["safe_to_start_runtime"] is True
 
 
+def test_stale_autonomous_recovery_reason_is_replaced_by_current_agent_health_reason(tmp_path: Path) -> None:
+    payload = cp_module._planner_explanation_fields(
+        {
+            "primary_blocking_agent_id": "canonical_readiness_refresher",
+            "primary_blocking_reason": "artifact_stale",
+            "operator_explanation": "stale prior recovery explanation",
+            "recommended_observation_step": "stale prior recovery command",
+            "prioritized_blockers": [
+                {
+                    "agent_id": "canonical_readiness_refresher",
+                    "display_name": "Canonical readiness refresher",
+                    "status": "STALE",
+                    "reason": "artifact_stale",
+                    "source": "agent_health",
+                    "priority": 4,
+                    "blocking_for_proof": True,
+                    "blocking_for_runtime_submit": True,
+                }
+            ],
+        },
+        agent_health_evidence={
+            "agent_health_top_blockers": [
+                {
+                    "agent_id": "canonical_readiness_refresher",
+                    "display_name": "Canonical readiness refresher",
+                    "status": "STALE",
+                    "reason": "canonical_readiness_artifact_not_submit_capable",
+                    "blocking_for_proof": True,
+                    "blocking_for_runtime_submit": True,
+                    "blocking_for_recovery": False,
+                    "diagnostic_only": False,
+                }
+            ]
+        },
+    )
+
+    assert payload["primary_blocking_agent_id"] == "canonical_readiness_refresher"
+    assert payload["primary_blocking_reason"] == "canonical_readiness_artifact_not_submit_capable"
+    assert payload["prioritized_blockers"][0]["reason"] == "canonical_readiness_artifact_not_submit_capable"
+
+
 def test_control_plane_does_not_block_on_stale_readiness_refresher_heartbeat_when_canonical_ready(
     tmp_path: Path,
 ) -> None:

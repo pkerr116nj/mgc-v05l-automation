@@ -1413,11 +1413,49 @@ def _planner_explanation_fields(
     agent_health_evidence: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     prioritized = _planner_prioritized_blockers(plan.get("prioritized_blockers"))
+    current_agent_blockers = [
+        row for row in _list(_mapping(agent_health_evidence).get("agent_health_top_blockers")) if isinstance(row, Mapping)
+    ]
     current_agent_blocker_ids = {
         str(_mapping(row).get("agent_id") or "")
-        for row in _list(_mapping(agent_health_evidence).get("agent_health_top_blockers"))
+        for row in current_agent_blockers
     }
     primary_id = str(plan.get("primary_blocking_agent_id") or "")
+    current_primary = next(
+        (row for row in current_agent_blockers if str(row.get("agent_id") or "") == primary_id),
+        None,
+    )
+    if current_primary is not None:
+        current_reason = str(current_primary.get("reason") or "")
+        current_status = str(current_primary.get("status") or "")
+        if current_reason and current_reason != str(plan.get("primary_blocking_reason") or ""):
+            prioritized = [
+                row
+                for row in prioritized
+                if str(row.get("agent_id") or "") != primary_id
+            ]
+            prioritized.insert(
+                0,
+                {
+                    "agent_id": primary_id,
+                    "display_name": str(current_primary.get("display_name") or primary_id),
+                    "status": current_status,
+                    "reason": current_reason,
+                    "blocking_for_proof": current_primary.get("blocking_for_proof") is True,
+                    "blocking_for_runtime_submit": current_primary.get("blocking_for_runtime_submit") is True,
+                    "blocking_for_recovery": current_primary.get("blocking_for_recovery") is True,
+                    "diagnostic_only": current_primary.get("diagnostic_only") is True,
+                    "source": "agent_health",
+                    "priority": 4,
+                },
+            )
+            return {
+                "primary_blocking_agent_id": primary_id,
+                "primary_blocking_reason": current_reason,
+                "operator_explanation": str(plan.get("operator_explanation") or ""),
+                "recommended_observation_step": str(plan.get("recommended_observation_step") or ""),
+                "prioritized_blockers": prioritized[:8],
+            }
     stale_canonical_refresher_carryover = (
         primary_id == "canonical_readiness_refresher"
         and str(plan.get("primary_blocking_reason") or "") == "artifact_stale"
