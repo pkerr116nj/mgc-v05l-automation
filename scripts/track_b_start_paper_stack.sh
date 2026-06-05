@@ -14,7 +14,9 @@ fi
 
 RUNTIME_DIR="${REPO_ROOT}/outputs/probationary_pattern_engine/paper_session/runtime"
 STACK_DIR="${REPO_ROOT}/outputs/track_b_execution_core/paper_stack"
+RECOVERY_STATE_DIR="${REPO_ROOT}/outputs/track_b_execution_core/runtime_recovery"
 STARTUP_ARTIFACT="${STACK_DIR}/latest_paper_stack_startup.json"
+APPROVED_PROFILE_ARTIFACT="${RECOVERY_STATE_DIR}/approved_paper_stack_profile.json"
 STATUS_SCRIPT="${SCRIPT_DIR}/track_b_status_paper_stack.sh"
 RUNTIME_LOG="${RUNTIME_DIR}/probationary_paper.log"
 PID_FILE="${RUNTIME_DIR}/probationary_paper.pid"
@@ -369,13 +371,13 @@ write_startup_artifact() {
   local classification="$1"
   local detail="$2"
   local pid="${3:-}"
-  "${PYTHON_BIN}" - "$STARTUP_ARTIFACT" "$classification" "$detail" "$pid" "$REPO_ROOT" "$CONFIG_PATHS_FILE" <<'PY'
+  "${PYTHON_BIN}" - "$STARTUP_ARTIFACT" "$classification" "$detail" "$pid" "$REPO_ROOT" "$CONFIG_PATHS_FILE" "$STACK_PROFILE" <<'PY'
 import json
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
-artifact, classification, detail, pid, repo_root, config_paths_file = sys.argv[1:]
+artifact, classification, detail, pid, repo_root, config_paths_file, stack_profile = sys.argv[1:]
 paths = []
 try:
     paths = [line.strip() for line in Path(config_paths_file).read_text(encoding="utf-8").splitlines() if line.strip()]
@@ -388,6 +390,7 @@ payload = {
     "detail": detail,
     "pid": int(pid) if pid.isdigit() else None,
     "repo_root": repo_root,
+    "stack_profile": stack_profile,
     "config_stack": paths,
     "paper_only": True,
     "live_money_eligible": False,
@@ -401,6 +404,38 @@ tmp = path.with_name(f".{path.name}.tmp")
 tmp.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 tmp.replace(path)
 print(json.dumps(payload, indent=2, sort_keys=True))
+PY
+}
+
+write_approved_profile_artifact() {
+  if [[ "${STACK_PROFILE}" == "canonical" ]]; then
+    return 0
+  fi
+  mkdir -p "${RECOVERY_STATE_DIR}"
+  "${PYTHON_BIN}" - "$APPROVED_PROFILE_ARTIFACT" "$STACK_PROFILE" "$REPO_ROOT" <<'PY'
+import json
+import sys
+from datetime import datetime, timezone
+from pathlib import Path
+
+artifact, stack_profile, repo_root = sys.argv[1:]
+payload = {
+    "schema_version": "track_b_approved_paper_stack_profile_v1",
+    "generated_at": datetime.now(timezone.utc).isoformat(),
+    "approved_profile": stack_profile,
+    "recovery_requested_profile": stack_profile,
+    "recovery_profile_source": "track_b_start_paper_stack_operator_profile",
+    "recovery_profile_approved": True,
+    "repo_root": repo_root,
+    "paper_only": True,
+    "live_money_eligible": False,
+    "paper_proof_invoked": False,
+    "broker_mutation": False,
+}
+path = Path(artifact)
+tmp = path.with_name(f".{path.name}.tmp")
+tmp.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+tmp.replace(path)
 PY
 }
 
@@ -507,6 +542,7 @@ if [[ ( "${runtime_start_allowed}" != "true" || "${blocker_count}" != "0" ) && (
   write_startup_artifact "BLOCKED_PRECHECK" "Canonical readiness does not allow a clean PAPER runtime start." ""
   exit 2
 fi
+write_approved_profile_artifact
 
 for config_path in "${CANONICAL_CONFIGS[@]}"; do
   if [[ ! -f "${config_path}" ]]; then

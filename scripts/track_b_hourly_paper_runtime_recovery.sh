@@ -10,10 +10,13 @@ STATUS_SCRIPT="${REPO_ROOT}/scripts/track_b_status_paper_stack.sh"
 START_SCRIPT="${REPO_ROOT}/scripts/track_b_start_paper_stack.sh"
 AUDIT_MODULE="mgc_v05l.execution_core.track_b_hourly_runtime_recovery_audit"
 PYTHON_BIN="${REPO_ROOT}/.venv/bin/python"
+RUNTIME_DIR="${REPO_ROOT}/outputs/probationary_pattern_engine/paper_session/runtime"
 STATE_DIR="${REPO_ROOT}/outputs/track_b_execution_core/runtime_recovery"
 DISABLED_MARKER="${STATE_DIR}/recovery_disabled_by_operator.json"
 STATUS_ARTIFACT="${STATE_DIR}/latest_launchd_recovery_status.json"
 LAST_TICK_ARTIFACT="${STATE_DIR}/latest_launchd_recovery_tick.json"
+APPROVED_PROFILE_ARTIFACT="${STATE_DIR}/approved_paper_stack_profile.json"
+STARTUP_ARTIFACT="${REPO_ROOT}/outputs/track_b_execution_core/paper_stack/latest_paper_stack_startup.json"
 RECOVERY_TICK_INTERVAL_SECONDS=120
 PYTHONPATH="${REPO_ROOT}/src${PYTHONPATH:+:${PYTHONPATH}}"
 export PYTHONPATH
@@ -78,20 +81,27 @@ write_tick_artifact() {
   local blocker="${2:-}"
   local detail="${3:-}"
   local status_path="${4:-}"
+  local profile_resolution_path="${5:-}"
   mkdir -p "${STATE_DIR}"
-  "${PYTHON_BIN}" - "$LAST_TICK_ARTIFACT" "$action" "$blocker" "$detail" "$status_path" "$REPO_ROOT" <<'PY'
+  "${PYTHON_BIN}" - "$LAST_TICK_ARTIFACT" "$action" "$blocker" "$detail" "$status_path" "$REPO_ROOT" "$profile_resolution_path" <<'PY'
 import json
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
-artifact, action, blocker, detail, status_path, repo_root = sys.argv[1:]
+artifact, action, blocker, detail, status_path, repo_root, profile_resolution_path = sys.argv[1:]
 status_payload = {}
 if status_path:
     try:
         status_payload = json.loads(Path(status_path).read_text(encoding="utf-8"))
     except Exception:
         status_payload = {}
+profile_resolution = {}
+if profile_resolution_path:
+    try:
+        profile_resolution = json.loads(Path(profile_resolution_path).read_text(encoding="utf-8"))
+    except Exception:
+        profile_resolution = {}
 payload = {
     "schema_version": "track_b_hourly_paper_runtime_recovery_tick_v1",
     "generated_at": datetime.now(timezone.utc).isoformat(),
@@ -104,6 +114,10 @@ payload = {
     "paper_proof_invoked": False,
     "runtime_running": (((status_payload.get("runtime") or {}).get("running")) if isinstance(status_payload, dict) else None),
     "ready_submit_capable": (((status_payload.get("readiness") or {}).get("ready_submit_capable")) if isinstance(status_payload, dict) else None),
+    "recovery_requested_profile": profile_resolution.get("recovery_requested_profile"),
+    "recovery_profile_source": profile_resolution.get("recovery_profile_source"),
+    "recovery_profile_approved": profile_resolution.get("recovery_profile_approved"),
+    "recovery_profile_blocker": profile_resolution.get("recovery_profile_blocker"),
 }
 path = Path(artifact)
 tmp = path.with_name(f".{path.name}.tmp")
@@ -159,6 +173,10 @@ payload = {
     "last_tick": last_tick.get("generated_at"),
     "last_action": last_tick.get("last_action"),
     "last_blocker": last_tick.get("last_blocker"),
+    "recovery_requested_profile": last_tick.get("recovery_requested_profile"),
+    "recovery_profile_source": last_tick.get("recovery_profile_source"),
+    "recovery_profile_approved": last_tick.get("recovery_profile_approved"),
+    "recovery_profile_blocker": last_tick.get("recovery_profile_blocker"),
     "enable_command": "bash scripts/track_b_hourly_paper_runtime_recovery.sh enable",
     "disable_command": "bash scripts/track_b_hourly_paper_runtime_recovery.sh disable",
     "status_command": "bash scripts/track_b_hourly_paper_runtime_recovery.sh status",
@@ -182,6 +200,142 @@ run_audit() {
   "${PYTHON_BIN}" -m "${AUDIT_MODULE}" --repo-root "${REPO_ROOT}" --json >/dev/null
 }
 
+resolve_recovery_profile() {
+  local status_path="${1:-}"
+  "${PYTHON_BIN}" - "$status_path" "$APPROVED_PROFILE_ARTIFACT" "$STARTUP_ARTIFACT" "$RUNTIME_DIR/probationary_paper.pid.json" "$RUNTIME_DIR/paper_runtime_config_paths.txt" "${TRACK_B_PAPER_RECOVERY_APPROVED_PROFILE:-}" "${TRACK_B_PAPER_STACK_PROFILE:-}" "${TRACK_B_PAPER_RECOVERY_ALLOW_CANONICAL:-0}" <<'PY'
+import json
+import re
+import sys
+from pathlib import Path
+
+(
+    status_path,
+    approved_profile_artifact,
+    startup_artifact,
+    pid_metadata_path,
+    config_paths_file,
+    explicit_recovery_profile,
+    explicit_stack_profile,
+    allow_canonical,
+) = sys.argv[1:]
+
+approved_profiles = {
+    "mnq_mes_active_evidence",
+    "mnq_mes_globex_active_evidence",
+    "mnq_mes_session_coverage_active_evidence",
+    "mnq_mes_london_open_active_evidence",
+    "mnq_mes_london_late_mnq_short_active_evidence",
+    "mnq_mes_full_session_active_evidence",
+}
+
+
+def load_json(path: str) -> dict:
+    if not path:
+        return {}
+    try:
+        payload = json.loads(Path(path).read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+    return payload if isinstance(payload, dict) else {}
+
+
+def read_lines(path: str) -> list[str]:
+    try:
+        return [line.strip() for line in Path(path).read_text(encoding="utf-8").splitlines() if line.strip()]
+    except Exception:
+        return []
+
+
+def profile_from_paths(paths: object) -> str:
+    if not isinstance(paths, list):
+        return ""
+    for raw in paths:
+        text = str(raw)
+        match = re.search(r"paper_stack_([A-Za-z0-9_]+)\.yaml$", text)
+        if match:
+            return match.group(1)
+    return ""
+
+
+def candidates() -> list[tuple[str, str]]:
+    if explicit_recovery_profile.strip():
+        yield explicit_recovery_profile.strip(), "TRACK_B_PAPER_RECOVERY_APPROVED_PROFILE"
+    if explicit_stack_profile.strip():
+        yield explicit_stack_profile.strip(), "TRACK_B_PAPER_STACK_PROFILE"
+
+    approved_payload = load_json(approved_profile_artifact)
+    for key in ("recovery_requested_profile", "approved_profile", "stack_profile", "profile"):
+        value = str(approved_payload.get(key) or "").strip()
+        if value:
+            yield value, f"approved_profile_artifact.{key}"
+
+    startup_payload = load_json(startup_artifact)
+    for key in ("recovery_requested_profile", "stack_profile", "profile", "runtime_profile", "profile_id"):
+        value = str(startup_payload.get(key) or "").strip()
+        if value:
+            yield value, f"startup_artifact.{key}"
+    inferred = profile_from_paths(startup_payload.get("config_stack"))
+    if inferred:
+        yield inferred, "startup_artifact.config_stack"
+
+    status_payload = load_json(status_path)
+    config = status_payload.get("config") if isinstance(status_payload.get("config"), dict) else {}
+    inferred = profile_from_paths(config.get("config_stack") or config.get("config_paths"))
+    if inferred:
+        yield inferred, "status.config_stack"
+    for key in ("stack_profile", "runtime_profile", "profile", "profile_id"):
+        value = str(config.get(key) or "").strip()
+        if value:
+            yield value, f"status.config.{key}"
+
+    pid_payload = load_json(pid_metadata_path)
+    for key in ("stack_profile", "runtime_profile", "profile", "profile_id"):
+        value = str(pid_payload.get(key) or "").strip()
+        if value:
+            yield value, f"pid_metadata.{key}"
+
+    inferred = profile_from_paths(read_lines(config_paths_file))
+    if inferred:
+        yield inferred, "paper_runtime_config_paths"
+
+
+requested_profile = ""
+profile_source = ""
+for profile, source in candidates():
+    requested_profile = profile
+    profile_source = source
+    break
+
+canonical_explicitly_allowed = str(allow_canonical).lower() in {"1", "true", "yes"} and profile_source in {
+    "TRACK_B_PAPER_RECOVERY_APPROVED_PROFILE",
+    "TRACK_B_PAPER_STACK_PROFILE",
+}
+approved = requested_profile in approved_profiles or (requested_profile == "canonical" and canonical_explicitly_allowed)
+if not requested_profile:
+    blocker = "RECOVERY_BLOCKED_PROFILE_NOT_APPROVED"
+elif requested_profile == "canonical" and not canonical_explicitly_allowed:
+    blocker = "RECOVERY_BLOCKED_CANONICAL_PROFILE_NOT_EXPLICITLY_APPROVED"
+elif not approved:
+    blocker = "RECOVERY_BLOCKED_PROFILE_NOT_APPROVED"
+else:
+    blocker = None
+
+print(
+    json.dumps(
+        {
+            "schema_version": "track_b_recovery_profile_resolution_v1",
+            "recovery_requested_profile": requested_profile or None,
+            "recovery_profile_source": profile_source or None,
+            "recovery_profile_approved": bool(approved),
+            "recovery_profile_blocker": blocker,
+        },
+        indent=2,
+        sort_keys=True,
+    )
+)
+PY
+}
+
 case "${mode}" in
   status)
     emit_status
@@ -194,7 +348,8 @@ case "${mode}" in
     fi
     run_audit
     status_tmp="$(mktemp "${TMPDIR:-/tmp}/track_b_paper_stack_status.XXXXXX.json")"
-    trap 'rm -f "${status_tmp}"' EXIT
+    profile_resolution_tmp=""
+    trap 'rm -f "${status_tmp}" "${profile_resolution_tmp:-}"' EXIT
     bash "${STATUS_SCRIPT}" --json > "${status_tmp}"
     runtime_running="$(json_value "${status_tmp}" runtime.running)"
     live_runtime_classification="$(json_value "${status_tmp}" live_runtime_environment.classification)"
@@ -227,8 +382,18 @@ case "${mode}" in
       echo "Track B recovery tick: PAUSED by safety/status; restart_allowed=${restart_allowed} restart_authority_allowed=${restart_authority_allowed} restart_authority=${restart_authority_classification} ready=${ready_submit_capable} next_action=${next_action}."
       exit 0
     fi
-    write_tick_artifact "START_REQUESTED_CANONICAL_PAPER_STACK" "" "Runtime down and canonical/precheck gates allow recovery start; restart_authority=${restart_authority_classification}." "${status_tmp}"
-    bash "${START_SCRIPT}"
+    profile_resolution_tmp="$(mktemp "${TMPDIR:-/tmp}/track_b_recovery_profile.XXXXXX.json")"
+    resolve_recovery_profile "${status_tmp}" > "${profile_resolution_tmp}"
+    recovery_requested_profile="$(json_value "${profile_resolution_tmp}" recovery_requested_profile)"
+    recovery_profile_approved="$(json_value "${profile_resolution_tmp}" recovery_profile_approved)"
+    recovery_profile_blocker="$(json_value "${profile_resolution_tmp}" recovery_profile_blocker)"
+    if [[ "${recovery_profile_approved}" != "true" ]]; then
+      write_tick_artifact "RECOVERY_BLOCKED_PROFILE_NOT_APPROVED" "${recovery_profile_blocker:-RECOVERY_BLOCKED_PROFILE_NOT_APPROVED}" "Runtime down and restart gates allow recovery start, but no approved PAPER stack profile was resolved; refusing canonical fallback." "${status_tmp}" "${profile_resolution_tmp}"
+      echo "Track B recovery tick: blocked; approved PAPER stack profile missing or unsafe (${recovery_profile_blocker:-RECOVERY_BLOCKED_PROFILE_NOT_APPROVED})."
+      exit 0
+    fi
+    write_tick_artifact "START_REQUESTED_APPROVED_PAPER_STACK" "" "Runtime down and restart gates allow recovery start; restart_authority=${restart_authority_classification}; profile=${recovery_requested_profile}." "${status_tmp}" "${profile_resolution_tmp}"
+    TRACK_B_PAPER_STACK_PROFILE="${recovery_requested_profile}" bash "${START_SCRIPT}"
     ;;
   enable)
     bash "${REPO_ROOT}/scripts/generate_track_b_launchd_plists.sh" --json >/dev/null

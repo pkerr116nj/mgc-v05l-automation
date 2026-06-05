@@ -277,23 +277,59 @@ def test_recovery_enable_disable_manage_launchd_and_operator_marker() -> None:
     assert "write_disabled_marker" in source
 
 
-def test_recovery_tick_actions_are_safe_and_canonical() -> None:
+def test_recovery_tick_actions_are_safe_and_profile_preserving() -> None:
     source = RECOVERY_SCRIPT.read_text(encoding="utf-8")
 
     assert "NO_ACTION_RUNTIME_RUNNING" in source
     assert "NO_ACTION_BLOCKED_GATES" in source
     assert "NO_ACTION_DUPLICATE_WRITER" in source
-    assert "START_REQUESTED_CANONICAL_PAPER_STACK" in source
+    assert "START_REQUESTED_APPROVED_PAPER_STACK" in source
+    assert "RECOVERY_BLOCKED_PROFILE_NOT_APPROVED" in source
     assert "duplicate_writer.duplicate_writer_detected" in source
     assert "restart_allowed_if_runtime_down" in source
     assert "track_b_paper_stack_restart_precheck" in source
     assert "restart_authority_allowed" in source
     assert "restart_authority_classification" in source
-    assert "canonical/precheck gates allow recovery start" in source
-    assert "bash \"${START_SCRIPT}\"" in source
+    assert "resolve_recovery_profile" in source
+    assert "approved PAPER stack profile missing or unsafe" in source
+    assert "TRACK_B_PAPER_STACK_PROFILE=\"${recovery_requested_profile}\" bash \"${START_SCRIPT}\"" in source
+    assert "\n    bash \"${START_SCRIPT}\"" not in source
+    assert "START_REQUESTED_CANONICAL_PAPER_STACK" not in source
     assert "placeorder" not in source.lower()
     assert "cancelorder" not in source.lower()
     assert "flatten" not in source.lower()
+
+
+def test_recovery_profile_status_fields_are_reported() -> None:
+    source = RECOVERY_SCRIPT.read_text(encoding="utf-8")
+
+    assert "recovery_requested_profile" in source
+    assert "recovery_profile_source" in source
+    assert "recovery_profile_approved" in source
+    assert "recovery_profile_blocker" in source
+    assert "approved_paper_stack_profile.json" in source
+
+
+def test_recovery_approved_profile_sources_exclude_implicit_canonical() -> None:
+    source = RECOVERY_SCRIPT.read_text(encoding="utf-8")
+
+    assert '"mnq_mes_full_session_active_evidence"' in source
+    assert '"mnq_mes_globex_active_evidence"' in source
+    assert '"mnq_mes_session_coverage_active_evidence"' in source
+    assert "TRACK_B_PAPER_RECOVERY_ALLOW_CANONICAL" in source
+    assert "RECOVERY_BLOCKED_CANONICAL_PROFILE_NOT_EXPLICITLY_APPROVED" in source
+    assert '"canonical"' not in source[source.index("approved_profiles = {") : source.index("def load_json")]
+
+
+def test_start_script_persists_approved_noncanonical_profile_for_recovery() -> None:
+    source = START_SCRIPT.read_text(encoding="utf-8")
+
+    assert "APPROVED_PROFILE_ARTIFACT" in source
+    assert "write_approved_profile_artifact" in source
+    assert '"track_b_approved_paper_stack_profile_v1"' in source
+    assert '"track_b_start_paper_stack_operator_profile"' in source
+    assert '"recovery_requested_profile": stack_profile' in source
+    assert 'if [[ "${STACK_PROFILE}" == "canonical" ]]' in source
 
 
 def test_status_reports_dashboard_as_non_authority_and_duplicate_writer_state() -> None:
