@@ -63,6 +63,9 @@ _SAME_SYMBOL_BROKER_QTY_ANTI_FLIP_REASON = "SAME_SYMBOL_BROKER_QTY_ANTI_FLIP_LOC
 _CANONICAL_TRUTH_UNAVAILABLE_REASON = "CANONICAL_REGISTRY_TRUTH_UNAVAILABLE"
 _CANONICAL_TRUTH_AMBIGUOUS_REASON = "CANONICAL_REGISTRY_TRUTH_AMBIGUOUS"
 _CANONICAL_CURRENT_EXPOSURE_PRESENT_REASON = "CANONICAL_CURRENT_EXPOSURE_PRESENT"
+_REGISTRY_CURRENT_SCOPE_CLEAN = "REGISTRY_CURRENT_SCOPE_CLEAN"
+_REGISTRY_DIAGNOSTIC_HISTORICAL_CURRENT_SCOPE_CLEAN = "REGISTRY_DIAGNOSTIC_HISTORICAL_CURRENT_SCOPE_CLEAN"
+_REGISTRY_DIAGNOSTIC_STALE_BUT_CURRENT_SCOPE_CLEAN = "REGISTRY_DIAGNOSTIC_STALE_BUT_CURRENT_SCOPE_CLEAN"
 _SUPPORTED_ENTRY_ACTIONS = {"BUY"}
 _SUPPORTED_EXIT_ACTIONS = {"SELL", "EXIT"}
 _DEFAULT_MAX_TOTAL_MGC_CONTRACTS = 20.0
@@ -1139,7 +1142,8 @@ def _entry_canonical_current_scope_result(repo_root: Path) -> dict[str, Any]:
 
     registry = payloads["registry_diagnostics"]
     registry_classification = str(registry.get("classification") or "").strip()
-    registry_current_scope_clean = _registry_diagnostics_current_scope_clean(registry)
+    registry_current_scope_status = _registry_diagnostics_current_scope_status(registry)
+    registry_current_scope_clean = bool(registry_current_scope_status.get("clean"))
     if registry and not registry_current_scope_clean:
         reason_codes.append(_CANONICAL_TRUTH_AMBIGUOUS_REASON)
         blocking_fields.append(
@@ -1181,6 +1185,38 @@ def _entry_canonical_current_scope_result(repo_root: Path) -> dict[str, Any]:
                     "reason": "current_scope_review_required",
                 }
             )
+        current_scope_lifecycle_open_position_count = _int_value(
+            reconciliation.get("current_scope_lifecycle_open_position_count")
+            or reconciliation.get("lifecycle_open_position_count")
+        )
+        lifecycle_open_order_count = _int_value(
+            reconciliation.get("current_scope_lifecycle_open_order_count")
+            or reconciliation.get("lifecycle_open_order_count")
+        )
+        if current_scope_lifecycle_open_position_count > 0:
+            reason_codes.append(_CANONICAL_CURRENT_EXPOSURE_PRESENT_REASON)
+            blocking_fields.append(
+                {
+                    "source": "reconciliation",
+                    "field": "current_scope_lifecycle_open_position_count",
+                    "value": current_scope_lifecycle_open_position_count,
+                    "reason": "canonical_lifecycle_position_present",
+                }
+            )
+        if lifecycle_open_order_count > 0:
+            reason_codes.append(_CANONICAL_CURRENT_EXPOSURE_PRESENT_REASON)
+            reason_codes.append("current_open_order_conflict")
+            blocking_fields.append(
+                {
+                    "source": "reconciliation",
+                    "field": "lifecycle_open_order_count",
+                    "value": lifecycle_open_order_count,
+                    "reason": "canonical_lifecycle_open_order_present",
+                }
+            )
+    else:
+        current_scope_lifecycle_open_position_count = 0
+        lifecycle_open_order_count = 0
 
     managed_positions = payloads["managed_positions"]
     managed_positions_summary = dict(managed_positions.get("summary") or {})
@@ -1234,7 +1270,23 @@ def _entry_canonical_current_scope_result(repo_root: Path) -> dict[str, Any]:
 
     open_order_truth = payloads["open_order_truth"]
     open_order_summary = dict(open_order_truth.get("summary") or {})
+    open_order_truth_classification = str(open_order_truth.get("classification") or "").strip()
     open_order_count = _int_value(open_order_summary.get("open_order_count") or open_order_truth.get("open_order_count"))
+    unknown_open_order_count = _int_value(
+        open_order_summary.get("unknown_open_order_count")
+        or open_order_summary.get("unknown_order_count")
+        or open_order_truth.get("unknown_open_order_count")
+    )
+    if open_order_truth and open_order_truth_classification != "NO_OPEN_ORDERS":
+        reason_codes.append(_CANONICAL_TRUTH_AMBIGUOUS_REASON)
+        blocking_fields.append(
+            {
+                "source": "open_order_truth",
+                "field": "classification",
+                "value": open_order_truth_classification,
+                "reason": "open_order_truth_not_clean",
+            }
+        )
     if open_order_count > 0:
         reason_codes.append(_CANONICAL_CURRENT_EXPOSURE_PRESENT_REASON)
         reason_codes.append("current_open_order_conflict")
@@ -1244,6 +1296,17 @@ def _entry_canonical_current_scope_result(repo_root: Path) -> dict[str, Any]:
                 "field": "summary.open_order_count",
                 "value": open_order_count,
                 "reason": "canonical_open_order_present",
+            }
+        )
+    if unknown_open_order_count > 0:
+        reason_codes.append(_CANONICAL_TRUTH_AMBIGUOUS_REASON)
+        reason_codes.append("unknown_open_order_conflict")
+        blocking_fields.append(
+            {
+                "source": "open_order_truth",
+                "field": "summary.unknown_open_order_count",
+                "value": unknown_open_order_count,
+                "reason": "canonical_unknown_open_order_present",
             }
         )
     if broker_position_count > 0:
@@ -1283,11 +1346,16 @@ def _entry_canonical_current_scope_result(repo_root: Path) -> dict[str, Any]:
             "broker_position_count": broker_position_count,
             "broker_open_order_count": broker_open_order_count,
             "current_scope_review_required_count": current_review_count,
+            "current_scope_lifecycle_open_position_count": current_scope_lifecycle_open_position_count,
+            "lifecycle_open_order_count": lifecycle_open_order_count,
             "managed_position_count": managed_position_count,
             "managed_position_review_required_count": managed_position_review_count,
             "managed_order_count": managed_order_count,
             "open_order_count": open_order_count,
+            "unknown_open_order_count": unknown_open_order_count,
             "registry_current_scope_clean": registry_current_scope_clean,
+            "registry_current_scope_classification": registry_current_scope_status.get("classification"),
+            "registry_current_scope_reason": registry_current_scope_status.get("reason"),
             "registry_diagnostics_classification": registry_classification or None,
             "reconciliation_classification": reconciliation_classification or None,
         },
@@ -1295,17 +1363,27 @@ def _entry_canonical_current_scope_result(repo_root: Path) -> dict[str, Any]:
 
 
 def _registry_diagnostics_current_scope_clean(payload: dict[str, Any]) -> bool:
+    return bool(_registry_diagnostics_current_scope_status(payload).get("clean"))
+
+
+def _registry_diagnostics_current_scope_status(payload: dict[str, Any]) -> dict[str, Any]:
     classification = str(payload.get("classification") or "").strip()
     if not classification:
-        return False
+        return {"clean": False, "classification": "REGISTRY_CURRENT_SCOPE_UNKNOWN", "reason": "missing_classification"}
     if classification == "TRACK_B_DIAGNOSTICS_CONFLICT_CURRENT_SCOPE":
-        return False
+        return {"clean": False, "classification": classification, "reason": "current_scope_conflict"}
     if classification == "TRACK_B_DIAGNOSTICS_CLEAN_CURRENT_SCOPE":
-        return True
+        return {"clean": True, "classification": _REGISTRY_CURRENT_SCOPE_CLEAN, "reason": "explicit_clean_current_scope"}
     if payload.get("diagnostic_only") is not True:
-        return False
-    if "HISTORICAL" not in classification:
-        return False
+        return {"clean": False, "classification": classification, "reason": "registry_diagnostics_not_diagnostic_only"}
+    if classification == "TRACK_B_DIAGNOSTICS_STALE_AUTHORITY":
+        success_classification = _REGISTRY_DIAGNOSTIC_STALE_BUT_CURRENT_SCOPE_CLEAN
+        require_trade_state_and_review_ids = True
+    elif "HISTORICAL" in classification:
+        success_classification = _REGISTRY_DIAGNOSTIC_HISTORICAL_CURRENT_SCOPE_CLEAN
+        require_trade_state_and_review_ids = False
+    else:
+        return {"clean": False, "classification": classification, "reason": "registry_diagnostics_not_clean_current_scope"}
 
     current_review_count = _int_value(payload.get("current_scope_review_required_count"))
     current_scope_trade_states = payload.get("current_scope_trade_states")
@@ -1318,15 +1396,19 @@ def _registry_diagnostics_current_scope_clean(payload: dict[str, Any]) -> bool:
         or "current_scope_trade_states" in payload
     )
     if not current_evidence_present:
-        return False
+        return {"clean": False, "classification": classification, "reason": "missing_current_scope_evidence"}
+    if require_trade_state_and_review_ids and (
+        "current_scope_trade_states" not in payload or "review_required_trade_ids" not in payload
+    ):
+        return {"clean": False, "classification": classification, "reason": "missing_stale_authority_current_scope_evidence"}
     if current_review_count != 0:
-        return False
+        return {"clean": False, "classification": classification, "reason": "current_scope_review_required"}
     if _list_value(current_scope_trade_states):
-        return False
+        return {"clean": False, "classification": classification, "reason": "current_scope_trade_states_present"}
     if _list_value(current_blockers):
-        return False
+        return {"clean": False, "classification": classification, "reason": "current_scope_blockers_present"}
     if review_required_trade_ids is not None and _list_value(review_required_trade_ids):
-        return False
+        return {"clean": False, "classification": classification, "reason": "review_required_trade_ids_present"}
 
     lifecycle_open_position_count = _int_value(payload.get("lifecycle_open_position_count"))
     lifecycle_open_order_count = _int_value(payload.get("lifecycle_open_order_count"))
@@ -1339,14 +1421,18 @@ def _registry_diagnostics_current_scope_clean(payload: dict[str, Any]) -> bool:
     unknown_scope_position_count = _int_value(payload.get("unknown_scope_position_count"))
     broker_lifecycle_reconciled = payload.get("broker_lifecycle_reconciled")
     if broker_lifecycle_reconciled is not None and broker_lifecycle_reconciled is not True:
-        return False
-    return (
-        lifecycle_open_position_count == 0
-        and lifecycle_open_order_count == 0
-        and track_b_position_count == 0
-        and track_b_open_order_count == 0
-        and unknown_scope_position_count == 0
-    )
+        return {"clean": False, "classification": classification, "reason": "broker_lifecycle_not_reconciled"}
+    if lifecycle_open_position_count != 0:
+        return {"clean": False, "classification": classification, "reason": "lifecycle_open_position_present"}
+    if lifecycle_open_order_count != 0:
+        return {"clean": False, "classification": classification, "reason": "lifecycle_open_order_present"}
+    if track_b_position_count != 0:
+        return {"clean": False, "classification": classification, "reason": "track_b_broker_position_present"}
+    if track_b_open_order_count != 0:
+        return {"clean": False, "classification": classification, "reason": "track_b_broker_open_order_present"}
+    if unknown_scope_position_count != 0:
+        return {"clean": False, "classification": classification, "reason": "unknown_scope_position_present"}
+    return {"clean": True, "classification": success_classification, "reason": "diagnostic_only_current_scope_clean"}
 
 
 def _list_value(value: Any) -> list[Any]:

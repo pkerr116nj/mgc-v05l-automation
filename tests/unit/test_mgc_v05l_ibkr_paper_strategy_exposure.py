@@ -80,6 +80,8 @@ def _write_phase1_reconciliation(
     review_required_count: int = 0,
     open_order_count: int = 0,
     block_reasons: list[str] | None = None,
+    lifecycle_open_position_count: int = 0,
+    lifecycle_open_order_count: int = 0,
     lifecycle_positions: list[dict[str, object]] | None = None,
     broker_positions: list[dict[str, object]] | None = None,
 ) -> None:
@@ -101,6 +103,8 @@ def _write_phase1_reconciliation(
                 "current_scope_review_required_count": review_required_count,
                 "track_b_broker_open_order_count": open_order_count,
                 "track_b_broker_position_count": len(broker_positions or []),
+                "current_scope_lifecycle_open_position_count": lifecycle_open_position_count,
+                "lifecycle_open_order_count": lifecycle_open_order_count,
                 "track_b_broker_positions": broker_positions or [],
                 "track_b_lifecycle_positions": lifecycle_positions or [],
                 "live_money_eligible": False,
@@ -131,6 +135,8 @@ def _write_canonical_current_scope(
     managed_position_review_count: int = 0,
     managed_order_count: int = 0,
     open_order_count: int = 0,
+    unknown_open_order_count: int = 0,
+    open_order_classification: str | None = None,
 ) -> None:
     registry_path = tmp_path / "outputs" / "track_b_execution_core" / "diagnostics" / "latest_track_b_registry_truth_diagnostics.json"
     registry_path.parent.mkdir(parents=True, exist_ok=True)
@@ -203,8 +209,12 @@ def _write_canonical_current_scope(
         json.dumps(
             {
                 "generated_at": "2999-01-01T00:00:00+00:00",
-                "classification": "NO_OPEN_ORDERS" if open_order_count == 0 else "OPEN_ORDERS_PRESENT",
-                "summary": {"open_order_count": open_order_count},
+                "classification": open_order_classification
+                or ("NO_OPEN_ORDERS" if open_order_count == 0 and unknown_open_order_count == 0 else "OPEN_ORDERS_PRESENT"),
+                "summary": {
+                    "open_order_count": open_order_count,
+                    "unknown_open_order_count": unknown_open_order_count,
+                },
             }
         ),
         encoding="utf-8",
@@ -973,6 +983,48 @@ def test_diagnostic_only_historical_registry_debris_with_clean_current_scope_all
     ] is True
 
 
+def test_diagnostic_only_stale_registry_authority_with_clean_current_scope_allows_entry(tmp_path: Path) -> None:
+    _write_monitor(tmp_path, broker_quantity=0.0)
+    _write_ledger(tmp_path, [])
+    _write_governance(tmp_path, [_governance_row("mnq_us_active_participation_short", "PAPER_ACTIVE_EVIDENCE_MNQ_US_PARTICIPATION_SHORT_V1")])
+    _write_broker_positions_snapshot(tmp_path, positions=[])
+    _write_broker_open_orders_snapshot(tmp_path, open_orders=[])
+    _write_canonical_current_scope(
+        tmp_path,
+        registry_classification="TRACK_B_DIAGNOSTICS_STALE_AUTHORITY",
+        registry_diagnostic_only=True,
+        registry_current_scope_review_required_count=0,
+        registry_current_scope_trade_states=[],
+        registry_current_blockers=[],
+        registry_review_required_trade_ids=[],
+    )
+
+    gate = evaluate_paper_strategy_exposure_gate(
+        repo_root=tmp_path,
+        strategy_id="mnq_us_active_participation_short",
+        bridge_strategy_id="PAPER_ACTIVE_EVIDENCE_MNQ_US_PARTICIPATION_SHORT_V1",
+        action="SELL",
+        intent_type="SELL_TO_OPEN",
+        quantity=1.0,
+        executable_symbol="MNQ",
+        account_id="DUM882026",
+        con_id=770561201,
+        local_symbol="MNQM6",
+    )
+
+    canonical = gate["registry_truth_result"]["canonical_current_scope_result"]
+    assert gate["submit_allowed"] is True
+    assert gate["classification"] == "PAPER_EXPOSURE_ENTRY_ALLOWED"
+    assert gate["registry_truth_result"]["allowed"] is True
+    assert canonical["allowed"] is True
+    assert canonical["usable"] is True
+    assert canonical["canonical_values"]["registry_current_scope_clean"] is True
+    assert (
+        canonical["canonical_values"]["registry_current_scope_classification"]
+        == "REGISTRY_DIAGNOSTIC_STALE_BUT_CURRENT_SCOPE_CLEAN"
+    )
+
+
 def test_ambiguous_canonical_registry_diagnostics_fail_closed(tmp_path: Path) -> None:
     _write_monitor(tmp_path, broker_quantity=0.0)
     _write_ledger(tmp_path, [])
@@ -992,6 +1044,202 @@ def test_ambiguous_canonical_registry_diagnostics_fail_closed(tmp_path: Path) ->
     assert gate["submit_allowed"] is False
     assert "CANONICAL_REGISTRY_TRUTH_AMBIGUOUS" in gate["block_reasons"]
     assert gate["registry_truth_result"]["canonical_current_scope_result"]["usable"] is False
+
+
+def test_diagnostic_only_stale_registry_current_review_fails_closed(tmp_path: Path) -> None:
+    _write_monitor(tmp_path, broker_quantity=0.0)
+    _write_ledger(tmp_path, [])
+    _write_governance(tmp_path, [_governance_row("mnq_us_active_participation_short", "PAPER_ACTIVE_EVIDENCE_MNQ_US_PARTICIPATION_SHORT_V1")])
+    _write_canonical_current_scope(
+        tmp_path,
+        registry_classification="TRACK_B_DIAGNOSTICS_STALE_AUTHORITY",
+        registry_diagnostic_only=True,
+        registry_current_scope_review_required_count=1,
+        registry_current_scope_trade_states=[],
+        registry_current_blockers=[],
+        registry_review_required_trade_ids=["trade_review"],
+    )
+
+    gate = evaluate_paper_strategy_exposure_gate(
+        repo_root=tmp_path,
+        strategy_id="mnq_us_active_participation_short",
+        bridge_strategy_id="PAPER_ACTIVE_EVIDENCE_MNQ_US_PARTICIPATION_SHORT_V1",
+        action="SELL",
+        intent_type="SELL_TO_OPEN",
+        quantity=1.0,
+        executable_symbol="MNQ",
+    )
+
+    canonical = gate["registry_truth_result"]["canonical_current_scope_result"]
+    assert gate["submit_allowed"] is False
+    assert "CANONICAL_REGISTRY_TRUTH_AMBIGUOUS" in gate["block_reasons"]
+    assert canonical["usable"] is False
+    assert canonical["canonical_values"]["registry_current_scope_reason"] == "current_scope_review_required"
+
+
+def test_diagnostic_only_stale_registry_open_broker_position_fails_closed(tmp_path: Path) -> None:
+    _write_monitor(tmp_path, broker_quantity=0.0)
+    _write_ledger(tmp_path, [])
+    _write_governance(tmp_path, [_governance_row("mnq_us_active_participation_short", "PAPER_ACTIVE_EVIDENCE_MNQ_US_PARTICIPATION_SHORT_V1")])
+    _write_phase1_reconciliation(
+        tmp_path,
+        broker_positions=[{"symbol": "MNQ", "local_symbol": "MNQM6", "quantity": 1}],
+    )
+    _write_canonical_current_scope(
+        tmp_path,
+        registry_classification="TRACK_B_DIAGNOSTICS_STALE_AUTHORITY",
+        registry_diagnostic_only=True,
+        registry_current_scope_review_required_count=0,
+        registry_current_scope_trade_states=[],
+        registry_current_blockers=[],
+        registry_review_required_trade_ids=[],
+        registry_track_b_broker_position_count=1,
+    )
+
+    gate = evaluate_paper_strategy_exposure_gate(
+        repo_root=tmp_path,
+        strategy_id="mnq_us_active_participation_short",
+        bridge_strategy_id="PAPER_ACTIVE_EVIDENCE_MNQ_US_PARTICIPATION_SHORT_V1",
+        action="SELL",
+        intent_type="SELL_TO_OPEN",
+        quantity=1.0,
+        executable_symbol="MNQ",
+    )
+
+    assert gate["submit_allowed"] is False
+    assert "CANONICAL_CURRENT_EXPOSURE_PRESENT" in gate["block_reasons"]
+    assert gate["registry_truth_result"]["canonical_current_scope_result"]["canonical_values"]["broker_position_count"] == 1
+
+
+def test_diagnostic_only_stale_registry_unknown_open_orders_fail_closed(tmp_path: Path) -> None:
+    _write_monitor(tmp_path, broker_quantity=0.0)
+    _write_ledger(tmp_path, [])
+    _write_governance(tmp_path, [_governance_row("mnq_us_active_participation_short", "PAPER_ACTIVE_EVIDENCE_MNQ_US_PARTICIPATION_SHORT_V1")])
+    _write_canonical_current_scope(
+        tmp_path,
+        registry_classification="TRACK_B_DIAGNOSTICS_STALE_AUTHORITY",
+        registry_diagnostic_only=True,
+        registry_current_scope_review_required_count=0,
+        registry_current_scope_trade_states=[],
+        registry_current_blockers=[],
+        registry_review_required_trade_ids=[],
+        unknown_open_order_count=1,
+        open_order_classification="UNKNOWN_OPEN_ORDERS_PRESENT",
+    )
+
+    gate = evaluate_paper_strategy_exposure_gate(
+        repo_root=tmp_path,
+        strategy_id="mnq_us_active_participation_short",
+        bridge_strategy_id="PAPER_ACTIVE_EVIDENCE_MNQ_US_PARTICIPATION_SHORT_V1",
+        action="SELL",
+        intent_type="SELL_TO_OPEN",
+        quantity=1.0,
+        executable_symbol="MNQ",
+    )
+
+    canonical = gate["registry_truth_result"]["canonical_current_scope_result"]
+    assert gate["submit_allowed"] is False
+    assert "CANONICAL_REGISTRY_TRUTH_AMBIGUOUS" in gate["block_reasons"]
+    assert "unknown_open_order_conflict" in gate["block_reasons"]
+    assert canonical["canonical_values"]["unknown_open_order_count"] == 1
+
+
+def test_non_diagnostic_stale_registry_authority_fails_closed(tmp_path: Path) -> None:
+    _write_monitor(tmp_path, broker_quantity=0.0)
+    _write_ledger(tmp_path, [])
+    _write_governance(tmp_path, [_governance_row("mnq_us_active_participation_short", "PAPER_ACTIVE_EVIDENCE_MNQ_US_PARTICIPATION_SHORT_V1")])
+    _write_canonical_current_scope(
+        tmp_path,
+        registry_classification="TRACK_B_DIAGNOSTICS_STALE_AUTHORITY",
+        registry_diagnostic_only=False,
+        registry_current_scope_review_required_count=0,
+        registry_current_scope_trade_states=[],
+        registry_current_blockers=[],
+        registry_review_required_trade_ids=[],
+    )
+
+    gate = evaluate_paper_strategy_exposure_gate(
+        repo_root=tmp_path,
+        strategy_id="mnq_us_active_participation_short",
+        bridge_strategy_id="PAPER_ACTIVE_EVIDENCE_MNQ_US_PARTICIPATION_SHORT_V1",
+        action="SELL",
+        intent_type="SELL_TO_OPEN",
+        quantity=1.0,
+        executable_symbol="MNQ",
+    )
+
+    canonical = gate["registry_truth_result"]["canonical_current_scope_result"]
+    assert gate["submit_allowed"] is False
+    assert "CANONICAL_REGISTRY_TRUTH_AMBIGUOUS" in gate["block_reasons"]
+    assert canonical["canonical_values"]["registry_current_scope_reason"] == "registry_diagnostics_not_diagnostic_only"
+
+
+def test_diagnostic_only_stale_registry_missing_current_scope_evidence_fails_closed(tmp_path: Path) -> None:
+    _write_monitor(tmp_path, broker_quantity=0.0)
+    _write_ledger(tmp_path, [])
+    _write_governance(tmp_path, [_governance_row("mnq_us_active_participation_short", "PAPER_ACTIVE_EVIDENCE_MNQ_US_PARTICIPATION_SHORT_V1")])
+    _write_canonical_current_scope(
+        tmp_path,
+        registry_classification="TRACK_B_DIAGNOSTICS_STALE_AUTHORITY",
+        registry_diagnostic_only=True,
+        registry_current_scope_review_required_count=0,
+        registry_current_scope_trade_states=[],
+        registry_current_blockers=[],
+        registry_review_required_trade_ids=[],
+    )
+    registry_path = tmp_path / "outputs" / "track_b_execution_core" / "diagnostics" / "latest_track_b_registry_truth_diagnostics.json"
+    registry = json.loads(registry_path.read_text(encoding="utf-8"))
+    registry.pop("current_scope_trade_states", None)
+    registry.pop("review_required_trade_ids", None)
+    registry_path.write_text(json.dumps(registry), encoding="utf-8")
+
+    gate = evaluate_paper_strategy_exposure_gate(
+        repo_root=tmp_path,
+        strategy_id="mnq_us_active_participation_short",
+        bridge_strategy_id="PAPER_ACTIVE_EVIDENCE_MNQ_US_PARTICIPATION_SHORT_V1",
+        action="SELL",
+        intent_type="SELL_TO_OPEN",
+        quantity=1.0,
+        executable_symbol="MNQ",
+    )
+
+    canonical = gate["registry_truth_result"]["canonical_current_scope_result"]
+    assert gate["submit_allowed"] is False
+    assert "CANONICAL_REGISTRY_TRUTH_AMBIGUOUS" in gate["block_reasons"]
+    assert canonical["canonical_values"]["registry_current_scope_reason"] == "missing_stale_authority_current_scope_evidence"
+
+
+def test_diagnostic_only_stale_registry_lifecycle_or_managed_nonempty_fails_closed(tmp_path: Path) -> None:
+    _write_monitor(tmp_path, broker_quantity=0.0)
+    _write_ledger(tmp_path, [])
+    _write_governance(tmp_path, [_governance_row("mnq_us_active_participation_short", "PAPER_ACTIVE_EVIDENCE_MNQ_US_PARTICIPATION_SHORT_V1")])
+    _write_phase1_reconciliation(tmp_path, lifecycle_open_position_count=1)
+    _write_canonical_current_scope(
+        tmp_path,
+        registry_classification="TRACK_B_DIAGNOSTICS_STALE_AUTHORITY",
+        registry_diagnostic_only=True,
+        registry_current_scope_review_required_count=0,
+        registry_current_scope_trade_states=[],
+        registry_current_blockers=[],
+        registry_review_required_trade_ids=[],
+        managed_position_count=1,
+    )
+
+    gate = evaluate_paper_strategy_exposure_gate(
+        repo_root=tmp_path,
+        strategy_id="mnq_us_active_participation_short",
+        bridge_strategy_id="PAPER_ACTIVE_EVIDENCE_MNQ_US_PARTICIPATION_SHORT_V1",
+        action="SELL",
+        intent_type="SELL_TO_OPEN",
+        quantity=1.0,
+        executable_symbol="MNQ",
+    )
+
+    canonical = gate["registry_truth_result"]["canonical_current_scope_result"]
+    assert gate["submit_allowed"] is False
+    assert "CANONICAL_CURRENT_EXPOSURE_PRESENT" in gate["block_reasons"]
+    assert canonical["canonical_values"]["current_scope_lifecycle_open_position_count"] == 1
+    assert canonical["canonical_values"]["managed_position_count"] == 1
 
 
 def test_diagnostic_only_historical_registry_current_blockers_fail_closed(tmp_path: Path) -> None:
