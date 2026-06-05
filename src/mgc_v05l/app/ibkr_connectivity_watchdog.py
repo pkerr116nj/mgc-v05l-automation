@@ -16,6 +16,11 @@ from ..execution_core.ibkr_readonly_transport import (
     IbkrReadOnlyTransportConfig,
     IbkrReadOnlyTwsTransport,
 )
+from ..execution_core.track_b_broker_session_authority import (
+    DEFAULT_BROKER_SESSION_AUTHORITY_ARTIFACT,
+    load_broker_session_authority,
+    should_use_published_authority_for_diagnostic,
+)
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 DEFAULT_OUTPUT_PATH = (
@@ -41,6 +46,7 @@ POSITIONS_TIMEOUT = "POSITIONS_TIMEOUT"
 OPEN_ORDERS_TIMEOUT = "OPEN_ORDERS_TIMEOUT"
 API_MODAL_OR_BLOCKED_SUSPECTED = "API_MODAL_OR_BLOCKED_SUSPECTED"
 CLIENT_ID_COLLISION_SUSPECTED = "CLIENT_ID_COLLISION_SUSPECTED"
+PUBLISHED_BROKER_SESSION_AUTHORITY_DIAGNOSTIC = "PUBLISHED_BROKER_SESSION_AUTHORITY_DIAGNOSTIC"
 
 
 @dataclass(frozen=True)
@@ -60,6 +66,8 @@ class IbkrConnectivityWatchdogConfig:
     client_id: int | None = None
     timeout_seconds: float = 8.0
     read_only: bool = True
+    broker_session_authority_path: Path | None = None
+    prefer_published_authority_when_active_exposure: bool = True
 
 
 def default_watchdog_client_id(*, now_fn: Callable[[], datetime] | None = None) -> int:
@@ -129,6 +137,16 @@ def run_ibkr_connectivity_watchdog(
             failure_reason=tcp_result.failure_reason,
             diagnostics={},
         )
+
+    published_authority_report = _published_authority_report_if_preferred(
+        config=config,
+        generated_at=generated_at,
+        client_id=client_id,
+        checks=checks,
+        started=started,
+    )
+    if published_authority_report:
+        return published_authority_report
 
     transport = (
         transport_factory()
@@ -297,6 +315,58 @@ def _watchdog_report(
         "transport_diagnostics": diagnostics,
         "recommendations": _recommendations_for(classification),
         "future_supervised_repair_policy": _future_supervised_repair_policy(),
+    }
+
+
+def _published_authority_report_if_preferred(
+    *,
+    config: IbkrConnectivityWatchdogConfig,
+    generated_at: str,
+    client_id: int,
+    checks: dict[str, Any],
+    started: float,
+) -> dict[str, Any]:
+    if not bool(config.prefer_published_authority_when_active_exposure):
+        return {}
+    path = (
+        Path(config.broker_session_authority_path)
+        if config.broker_session_authority_path is not None
+        else Path(config.repo_root) / DEFAULT_BROKER_SESSION_AUTHORITY_ARTIFACT
+    )
+    authority = load_broker_session_authority(path)
+    if not authority or not should_use_published_authority_for_diagnostic(authority):
+        return {}
+    report = _watchdog_report(
+        config=config,
+        generated_at=generated_at,
+        client_id=client_id,
+        classification=PUBLISHED_BROKER_SESSION_AUTHORITY_DIAGNOSTIC,
+        checks={
+            **checks,
+            "broker_session_authority": {
+                "ok": True,
+                "path": str(path),
+                "classification": authority.get("classification"),
+                "connection_mode": authority.get("connection_mode"),
+            },
+        },
+        latency_ms=_elapsed_ms(started),
+        failure_reason=None,
+        diagnostics={},
+    )
+    return {
+        **report,
+        "operator_diagnostic_only": True,
+        "independent_ibkr_session_opened": False,
+        "broker_session_authority_path": str(path),
+        "broker_session_authority": {
+            "classification": authority.get("classification"),
+            "lease_state": authority.get("lease_state"),
+            "connection_mode": authority.get("connection_mode"),
+            "allowed_uses": authority.get("allowed_uses"),
+            "broker_session_owner": authority.get("broker_session_owner"),
+            "diagnostics_policy": authority.get("diagnostics_policy"),
+        },
     }
 
 

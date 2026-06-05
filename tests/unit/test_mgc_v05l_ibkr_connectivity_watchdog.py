@@ -29,6 +29,7 @@ def refused_tcp(**kwargs: object) -> watchdog.TcpProbeResult:
 
 def config(tmp_path: Path) -> watchdog.IbkrConnectivityWatchdogConfig:
     return watchdog.IbkrConnectivityWatchdogConfig(
+        repo_root=tmp_path,
         output_path=tmp_path / "latest_ibkr_connectivity_watchdog.json",
         client_id=9811,
         timeout_seconds=0.01,
@@ -140,6 +141,50 @@ def test_artifact_writing(tmp_path: Path) -> None:
     assert payload["future_supervised_repair_policy"]["auto_repair_enabled"] is False
 
 
+def test_active_exposure_prefers_published_session_authority_without_opening_transport(tmp_path: Path) -> None:
+    authority_path = tmp_path / "outputs" / "operator_dashboard" / "runtime" / "latest_broker_session_authority.json"
+    authority_path.parent.mkdir(parents=True, exist_ok=True)
+    authority_path.write_text(
+        json.dumps(
+            {
+                "schema_version": "track_b_broker_session_authority_v1",
+                "classification": "BROKER_SESSION_AUTHORITY_ORDER_STATUS_UNRELIABLE",
+                "lease_state": "OPERATOR_REQUIRED",
+                "connection_mode": "ORDER_STATUS_UNRELIABLE",
+                "allowed_uses": {
+                    "new_entry": False,
+                    "managed_risk_reducing_close": False,
+                    "broker_observed_adoption_diagnosis": True,
+                    "status_diagnostic": True,
+                },
+                "broker_session_owner": {"pid": 54210, "client_id": 9077},
+                "diagnostics_policy": {
+                    "classification": "DIAGNOSTIC_USE_PUBLISHED_BROKER_SESSION_AUTHORITY_ACTIVE_EXPOSURE",
+                    "active_track_b_exposure": True,
+                    "operator_diagnostic_only": True,
+                    "independent_ibkr_probe_hot_path_authority": False,
+                },
+                "live_money_eligible": False,
+                "paper_proof_invoked": False,
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    report = watchdog.run_ibkr_connectivity_watchdog(
+        config=config(tmp_path),
+        tcp_checker=listening_tcp,
+        transport_factory=lambda: ExplodingTransport(),
+        now_fn=fixed_now,
+    )
+
+    assert report["classification"] == watchdog.PUBLISHED_BROKER_SESSION_AUTHORITY_DIAGNOSTIC
+    assert report["independent_ibkr_session_opened"] is False
+    assert report["broker_session_authority"]["connection_mode"] == "ORDER_STATUS_UNRELIABLE"
+    assert report["broker_session_authority"]["allowed_uses"]["managed_risk_reducing_close"] is False
+    assert report["checks"]["tcp_port"]["ok"] is True
+
+
 def test_default_client_id_uses_high_rotating_range() -> None:
     client_id = watchdog.default_watchdog_client_id(now_fn=fixed_now)
 
@@ -233,3 +278,8 @@ class TimeoutTransport(ReadyTransport):
             "ibkr_errors": self.errors,
             "suspected_causes": ["TWS modal dialog/API-block condition"] if self.errors else [],
         }
+
+
+class ExplodingTransport:
+    def connect(self, **kwargs: object) -> None:
+        raise AssertionError("watchdog should not open an independent IBKR session during active exposure")

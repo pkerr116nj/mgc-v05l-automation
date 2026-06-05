@@ -131,6 +131,10 @@ def _lease_path(repo_root: Path) -> Path:
     return repo_root / "outputs" / "operator_dashboard" / "runtime" / "latest_broker_truth_lease.json"
 
 
+def _broker_session_authority_path(repo_root: Path) -> Path:
+    return repo_root / "outputs" / "operator_dashboard" / "runtime" / "latest_broker_session_authority.json"
+
+
 def test_refresh_seconds_from_env_defaults_and_accepts_positive_values() -> None:
     assert refresh_seconds_from_env({}) == 60.0
     assert refresh_seconds_from_env({"TRACK_B_BROKER_TRUTH_REFRESH_SECONDS": "15"}) == 15.0
@@ -176,7 +180,16 @@ def test_broker_truth_refresh_once_uses_read_only_verifier_and_writes_status(tmp
     assert status["paper_proof_invoked"] is False
     assert status["broker_truth_lease_refresh"]["ok"] is True
     assert status["broker_truth_lease_refresh"]["lease_state"] == "ACTIVE"
+    assert (
+        status["broker_truth_lease_refresh"]["broker_session_authority_classification"]
+        == "BROKER_SESSION_AUTHORITY_SUBMIT_CAPABLE"
+    )
     assert _lease_path(tmp_path).exists()
+    authority = json.loads(_broker_session_authority_path(tmp_path).read_text(encoding="utf-8"))
+    assert authority["schema_version"] == "track_b_broker_session_authority_v1"
+    assert authority["broker_session_owner"]["client_id"] == 9077
+    assert authority["broker_mutation_allowed"] is False
+    assert authority["live_money_eligible"] is False
     loaded = load_broker_truth_refresh_status(status_path=config.status_path)
     assert loaded["source_classification"] == "BROKER_TRUTH_REFRESH_READY"
     assert loaded["classification"] in {"BROKER_TRUTH_REFRESH_FRESH", "BROKER_TRUTH_REFRESH_STALE"}

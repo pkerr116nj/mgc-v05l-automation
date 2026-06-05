@@ -390,10 +390,18 @@ def _refresh_broker_truth_lease_if_enabled(*, config: BrokerTruthRefreshConfig, 
             classify_broker_truth_lease,
             write_broker_truth_lease,
         )
+        from mgc_v05l.execution_core.track_b_broker_session_authority import (
+            DEFAULT_BROKER_SESSION_AUTHORITY_ARTIFACT,
+            DEFAULT_BROKER_SESSION_AUTHORITY_HISTORY,
+            build_broker_session_authority,
+            write_broker_session_authority,
+        )
 
         repo_root = Path(config.repo_root).expanduser().resolve()
         output_path = repo_root / DEFAULT_LEASE_ARTIFACT
         history_path = repo_root / DEFAULT_LEASE_HISTORY
+        authority_output_path = repo_root / DEFAULT_BROKER_SESSION_AUTHORITY_ARTIFACT
+        authority_history_path = repo_root / DEFAULT_BROKER_SESSION_AUTHORITY_HISTORY
         paths = {
             "broker_truth_status": config.status_path,
             "latest_attempt": config.output_dir / "ibkr_broker_truth_latest_attempt_status.json",
@@ -439,8 +447,24 @@ def _refresh_broker_truth_lease_if_enabled(*, config: BrokerTruthRefreshConfig, 
         )
         lease = classify_broker_truth_lease(inputs)
         write_broker_truth_lease(output_path=output_path, lease=lease, history_path=history_path)
+        authority = build_broker_session_authority(
+            lease=lease,
+            generated_at=current_time,
+            source_lease_path=output_path,
+            active_track_b_exposure=_active_track_b_exposure_present(repo_root),
+        )
+        write_broker_session_authority(
+            output_path=authority_output_path,
+            authority=authority,
+            history_path=authority_history_path,
+        )
         summary = compact_lease_summary(lease)
-        return {"ok": True, **summary}
+        return {
+            "ok": True,
+            **summary,
+            "broker_session_authority_classification": authority.get("classification"),
+            "broker_session_authority_path": str(authority_output_path),
+        }
     except Exception as exc:  # pragma: no cover - defensive status path
         return {"ok": False, "error": str(exc), "live_money_eligible": False}
 

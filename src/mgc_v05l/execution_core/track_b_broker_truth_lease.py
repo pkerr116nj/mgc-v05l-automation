@@ -809,7 +809,14 @@ def _broker_session_owner(
         "pid": _int_or_none(pid),
         "client_id": _int_or_none(client_id),
         "connection_started_at": _iso_text(connection_started_at),
-        "server_version": _int_or_none(_first_present(explicit.get("server_version"), connection_check.get("server_version"))),
+        "server_version": _int_or_none(
+            _first_present(
+                explicit.get("server_version"),
+                broker_truth.get("server_version"),
+                latest_attempt.get("server_version"),
+                connection_check.get("server_version"),
+            )
+        ),
         "last_position_at": _iso_text(last_position_at),
         "last_open_order_at": _iso_text(last_open_order_at),
         "last_order_status_at": _iso_text(last_order_status_at),
