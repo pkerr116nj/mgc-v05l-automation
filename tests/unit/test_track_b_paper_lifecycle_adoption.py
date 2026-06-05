@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from datetime import UTC, datetime
+from decimal import Decimal
 from pathlib import Path
 
 from mgc_v05l.app.track_b_paper_lifecycle_adoption import (
@@ -836,6 +837,242 @@ def test_submit_intent_adoption_preserves_original_trade_id_and_managed_timing(t
     )
 
 
+def test_broker_observed_globex_short_adoption_without_exec_details(tmp_path: Path) -> None:
+    repo = _write_globex_broker_observed_short_evidence(tmp_path)
+
+    result = run_track_b_paper_lifecycle_adoption(
+        config=LifecycleAdoptionConfig(
+            repo_root=repo,
+            lane_id="mnq_globex_active_participation_short",
+            symbol="MNQ",
+            local_symbol="MNQM6",
+            expiry="20260618",
+            quantity=Decimal("-1"),
+            apply=True,
+        ),
+        now=datetime(2026, 6, 4, 22, 14, tzinfo=UTC),
+    )
+
+    assert result.classification == "TRACK_B_PAPER_LIFECYCLE_ADOPTION_APPLIED"
+    fill = result.report["fill_payload"]
+    trade = result.report["trade_payload"]
+    assert fill["trade_id"] == "trade_mnq_globex_short"
+    assert fill["lifecycle_id"] == "reserved_submit_mnq_globex_active_participation_short_20260604T221218877972Z_a9151ba1bd1d"
+    assert fill["execution_id"] is None
+    assert fill["fill_price_source"] == "BROKER_POSITION_AVERAGE_PRICE"
+    assert fill["managed_exit_policy_id"] == "GLOBEX_ACTIVE_EVIDENCE_TIMEBOX_60M_EXIT_V1"
+    assert result.report["submit_attempted"] is False
+    assert result.report["cancel_attempted"] is False
+    assert result.report["place_order_attempted"] is False
+    assert result.report["broker_mutated"] is False
+    assert result.report["broker_session_authority_classification"] == (
+        "BROKER_SESSION_AUTHORITY_ORDER_STATUS_UNRELIABLE"
+    )
+    assert result.report["broker_session_connection_mode"] == "ORDER_STATUS_UNRELIABLE"
+    assert result.report["broker_observed_adoption_diagnosis_allowed"] is True
+    assert result.report["broker_observed_adoption_apply_allowed"] is True
+    assert result.report["callback_missing_reason"] == "order_status_callback_missing"
+    assert {
+        row["code"]
+        for row in result.report["callback_missing_reasons"]
+    } >= {"exec_details_callback_missing", "completed_order_callback_missing"}
+    assert trade["final_position_status"] == "OPEN_MANAGED"
+    latest_ownership = _read_json(
+        repo / "outputs/track_b_execution_core/submit_intent_ownership/latest_track_b_submit_intent_ownership.json"
+    )["latest_record"]
+    assert latest_ownership["state"] == "LIFECYCLE_OPEN_PERSISTED"
+    assert latest_ownership["lifecycle_id_reserved_only"] is False
+    assert latest_ownership["lifecycle_position_open"] is True
+
+
+def test_broker_observed_adoption_position_truth_only_permits_local_adoption(tmp_path: Path) -> None:
+    repo = _write_globex_broker_observed_short_evidence(tmp_path)
+    _write_broker_session_authority_for_adoption(
+        repo,
+        classification="BROKER_SESSION_AUTHORITY_POSITION_TRUTH_ONLY",
+        connection_mode="POSITION_TRUTH_ONLY",
+        callback_missing_reason="order_status_callback_missing",
+    )
+
+    result = run_track_b_paper_lifecycle_adoption(
+        config=LifecycleAdoptionConfig(
+            repo_root=repo,
+            lane_id="mnq_globex_active_participation_short",
+            symbol="MNQ",
+            local_symbol="MNQM6",
+            expiry="20260618",
+            quantity=Decimal("-1"),
+            apply=True,
+        ),
+        now=datetime(2026, 6, 4, 22, 14, tzinfo=UTC),
+    )
+
+    assert result.classification == "TRACK_B_PAPER_LIFECYCLE_ADOPTION_APPLIED"
+    assert result.report["broker_session_connection_mode"] == "POSITION_TRUTH_ONLY"
+    assert result.report["broker_observed_adoption_diagnosis_allowed"] is True
+    assert result.report["broker_observed_adoption_apply_allowed"] is True
+
+
+def test_broker_observed_adoption_reports_missing_broker_session_authority(tmp_path: Path) -> None:
+    repo = _write_globex_broker_observed_short_evidence(tmp_path)
+    (
+        repo / "outputs" / "operator_dashboard" / "runtime" / "latest_broker_session_authority.json"
+    ).unlink()
+
+    result = run_track_b_paper_lifecycle_adoption(
+        config=LifecycleAdoptionConfig(
+            repo_root=repo,
+            lane_id="mnq_globex_active_participation_short",
+            symbol="MNQ",
+            local_symbol="MNQM6",
+            expiry="20260618",
+            quantity=Decimal("-1"),
+            apply=True,
+        ),
+        now=datetime(2026, 6, 4, 22, 14, tzinfo=UTC),
+    )
+
+    assert result.classification == "TRACK_B_PAPER_LIFECYCLE_ADOPTION_REFUSED"
+    assert result.report["broker_observed_adoption_diagnosis_allowed"] is False
+    assert result.report["broker_observed_adoption_apply_allowed"] is False
+    assert any("Broker Session Authority artifact missing" in failure for failure in result.report["failures"])
+
+
+def test_broker_observed_adoption_submit_and_fill_callback_capable_preserve_adoption(tmp_path: Path) -> None:
+    for classification, connection_mode in (
+        ("BROKER_SESSION_AUTHORITY_SUBMIT_CAPABLE", "SUBMIT_CAPABLE"),
+        ("BROKER_SESSION_AUTHORITY_FILL_CALLBACK_CAPABLE", "FILL_CALLBACK_CAPABLE"),
+    ):
+        repo = _write_globex_broker_observed_short_evidence(tmp_path / connection_mode)
+        _write_broker_session_authority_for_adoption(
+            repo,
+            classification=classification,
+            connection_mode=connection_mode,
+            callback_missing_reason=None,
+            callback_missing_reasons=[],
+        )
+
+        result = run_track_b_paper_lifecycle_adoption(
+            config=LifecycleAdoptionConfig(
+                repo_root=repo,
+                lane_id="mnq_globex_active_participation_short",
+                symbol="MNQ",
+                local_symbol="MNQM6",
+                expiry="20260618",
+                quantity=Decimal("-1"),
+                apply=True,
+            ),
+            now=datetime(2026, 6, 4, 22, 14, tzinfo=UTC),
+        )
+
+        assert result.classification == "TRACK_B_PAPER_LIFECYCLE_ADOPTION_APPLIED"
+        assert result.report["broker_session_authority_classification"] == classification
+        assert result.report["broker_session_connection_mode"] == connection_mode
+        assert result.report["broker_observed_adoption_apply_allowed"] is True
+
+
+def test_broker_observed_adoption_refuses_conflicting_candidates(tmp_path: Path) -> None:
+    repo = _write_globex_broker_observed_short_evidence(tmp_path)
+    _append_globex_submit_ownership(
+        repo,
+        lane_id="mnq_globex_active_participation_short",
+        symbol="MNQ",
+        local_symbol="MNQM6",
+        expiry="20260618",
+        con_id=770561201,
+        qty=1,
+        action="SELL",
+        broker_order_id="2",
+        client_id=10846,
+        perm_id=1092555068,
+        created_at=datetime(2026, 6, 4, 22, 12, 19, tzinfo=UTC),
+        lifecycle_id="reserved_submit_mnq_globex_active_participation_short_competing",
+        ownership_intent_id="submit_owner_competing_mnq",
+        trade_id="trade_conflicting_mnq",
+    )
+
+    result = run_track_b_paper_lifecycle_adoption(
+        config=LifecycleAdoptionConfig(
+            repo_root=repo,
+            lane_id="mnq_globex_active_participation_short",
+            symbol="MNQ",
+            local_symbol="MNQM6",
+            expiry="20260618",
+            quantity=Decimal("-1"),
+            apply=True,
+        ),
+        now=datetime(2026, 6, 4, 22, 14, tzinfo=UTC),
+    )
+
+    assert result.classification == "TRACK_B_PAPER_LIFECYCLE_ADOPTION_REFUSED"
+    assert any("Competing unresolved submit-intent ownership records" in failure for failure in result.report["failures"])
+
+
+def test_broker_observed_adoption_refuses_stale_submit_intent(tmp_path: Path) -> None:
+    repo = _write_globex_broker_observed_short_evidence(
+        tmp_path,
+        mnq_created_at=datetime(2026, 6, 4, 20, 0, tzinfo=UTC),
+    )
+
+    result = run_track_b_paper_lifecycle_adoption(
+        config=LifecycleAdoptionConfig(
+            repo_root=repo,
+            lane_id="mnq_globex_active_participation_short",
+            symbol="MNQ",
+            local_symbol="MNQM6",
+            expiry="20260618",
+            quantity=Decimal("-1"),
+            submit_intent_max_age_seconds=600,
+            apply=True,
+        ),
+        now=datetime(2026, 6, 4, 22, 14, tzinfo=UTC),
+    )
+
+    assert result.classification == "TRACK_B_PAPER_LIFECYCLE_ADOPTION_REFUSED"
+    assert any("refused stale submit ownership" in failure for failure in result.report["failures"])
+
+
+def test_broker_observed_adoption_handles_mnq_and_mes_simultaneous_shorts(tmp_path: Path) -> None:
+    repo = _write_globex_broker_observed_short_evidence(tmp_path)
+
+    mnq = run_track_b_paper_lifecycle_adoption(
+        config=LifecycleAdoptionConfig(
+            repo_root=repo,
+            lane_id="mnq_globex_active_participation_short",
+            symbol="MNQ",
+            local_symbol="MNQM6",
+            expiry="20260618",
+            quantity=Decimal("-1"),
+            apply=True,
+        ),
+        now=datetime(2026, 6, 4, 22, 14, tzinfo=UTC),
+    )
+    mes = run_track_b_paper_lifecycle_adoption(
+        config=LifecycleAdoptionConfig(
+            repo_root=repo,
+            lane_id="mes_globex_active_participation_short",
+            symbol="MES",
+            local_symbol="MESM6",
+            expiry="20260618",
+            quantity=Decimal("-1"),
+            apply=True,
+        ),
+        now=datetime(2026, 6, 4, 22, 14, 5, tzinfo=UTC),
+    )
+
+    assert mnq.classification == "TRACK_B_PAPER_LIFECYCLE_ADOPTION_APPLIED"
+    assert mes.classification == "TRACK_B_PAPER_LIFECYCLE_ADOPTION_APPLIED"
+    lane_root = repo / "outputs/probationary_pattern_engine/paper_session/lanes"
+    assert len(_read_jsonl(lane_root / "mnq_globex_active_participation_short/fills.jsonl")) == 1
+    assert len(_read_jsonl(lane_root / "mes_globex_active_participation_short/fills.jsonl")) == 1
+    live_positions = _read_json(repo / "outputs/track_b_execution_core/paper_trade_ledger/latest_track_b_live_position_status.json")
+    assert live_positions["open_position_count"] == 2
+    assert {
+        position["local_symbol"]
+        for position in live_positions["positions_by_instrument"].values()
+    } == {"MNQM6", "MESM6"}
+
+
 def test_submit_intent_adoption_refuses_ambiguous_original_trade_id(tmp_path: Path) -> None:
     repo = _write_mgc_leak_test_unknown_after_submit_evidence(tmp_path)
     bridge_path = repo / "outputs/reports/track_b_paper_leak_test/atp_companion_v1_asia_us/ibkr_paper_strategy_bridge_report.json"
@@ -1520,7 +1757,346 @@ def _write_shared_truth_for_adoption(
         repo / "outputs" / "operator_dashboard" / "runtime" / "latest_broker_truth_lease.json",
         {"generated_at": generated_at, "classification": "ACTIVE"},
     )
+    _write_broker_session_authority_for_adoption(repo, generated_at=generated_at)
     _write_control_plane_snapshot(repo, generated_at=generated_at)
+
+
+def _write_globex_broker_observed_short_evidence(
+    tmp_path: Path,
+    *,
+    mnq_created_at: datetime | None = None,
+) -> Path:
+    repo = tmp_path
+    broker_dir = repo / "outputs/reports/ibkr_read_only_verification"
+    broker_dir.mkdir(parents=True, exist_ok=True)
+    for lane_id in ("mnq_globex_active_participation_short", "mes_globex_active_participation_short"):
+        lane_dir = repo / "outputs/probationary_pattern_engine/paper_session/lanes" / lane_id
+        lane_dir.mkdir(parents=True, exist_ok=True)
+        (lane_dir / "order_intents.jsonl").write_text("", encoding="utf-8")
+        (lane_dir / "fills.jsonl").write_text("", encoding="utf-8")
+        (lane_dir / "trades.jsonl").write_text("", encoding="utf-8")
+        bridge_dir = repo / "outputs/reports/ibkr_runtime_route_dispatch" / lane_id
+        bridge_dir.mkdir(parents=True, exist_ok=True)
+        _write_json(
+            bridge_dir / "ibkr_paper_strategy_bridge_report.json",
+            {
+                "classification": "PAPER_STRATEGY_BLOCKED",
+                "intent": {"intent_id": f"later_blocked_{lane_id}", "trade_id": f"later_trade_{lane_id}"},
+                "caller_metadata": {"trade_id": f"later_trade_{lane_id}"},
+                "delegated_result": {"classification": "PRE_SUBMIT_BLOCKED"},
+            },
+        )
+    _write_json(
+        broker_dir / "ibkr_positions_snapshot.json",
+        {
+            "account": "DUM882026",
+            "selected_account_id": "DUM882026",
+            "generated_at": "2026-06-04T22:13:55+00:00",
+            "mode": "PAPER",
+            "positions": [
+                {
+                    "account_id": "DUM882026",
+                    "average_cost": "60762.38",
+                    "con_id": 770561201,
+                    "currency": "USD",
+                    "expiry": "20260618",
+                    "local_symbol": "MNQM6",
+                    "multiplier": "2",
+                    "quantity": "-1",
+                    "security_type": "FUT",
+                    "symbol": "MNQ",
+                    "updated_at": "2026-06-04T22:12:42.214713+00:00",
+                },
+                {
+                    "account_id": "DUM882026",
+                    "average_cost": "37924.38",
+                    "con_id": 770561194,
+                    "currency": "USD",
+                    "expiry": "20260618",
+                    "local_symbol": "MESM6",
+                    "multiplier": "5",
+                    "quantity": "-1",
+                    "security_type": "FUT",
+                    "symbol": "MES",
+                    "updated_at": "2026-06-04T22:12:42.214618+00:00",
+                },
+            ],
+        },
+    )
+    mnq_created = mnq_created_at or datetime(2026, 6, 4, 22, 12, 18, 877972, tzinfo=UTC)
+    _append_globex_submit_ownership(
+        repo,
+        lane_id="mnq_globex_active_participation_short",
+        symbol="MNQ",
+        local_symbol="MNQM6",
+        expiry="20260618",
+        con_id=770561201,
+        qty=1,
+        action="SELL",
+        broker_order_id="2",
+        client_id=10846,
+        perm_id=1092555068,
+        created_at=mnq_created,
+        lifecycle_id="reserved_submit_mnq_globex_active_participation_short_20260604T221218877972Z_a9151ba1bd1d",
+        ownership_intent_id="submit_owner_mnq_globex_short",
+        trade_id="trade_mnq_globex_short",
+    )
+    _append_globex_submit_ownership(
+        repo,
+        lane_id="mes_globex_active_participation_short",
+        symbol="MES",
+        local_symbol="MESM6",
+        expiry="20260618",
+        con_id=770561194,
+        qty=1,
+        action="SELL",
+        broker_order_id="2",
+        client_id=10984,
+        perm_id=1092555078,
+        created_at=datetime(2026, 6, 4, 22, 12, 23, 799418, tzinfo=UTC),
+        lifecycle_id="reserved_submit_mes_globex_active_participation_short_20260604T221223799418Z_367521758fb2",
+        ownership_intent_id="submit_owner_mes_globex_short",
+        trade_id="trade_mes_globex_short",
+    )
+    _write_globex_shared_truth_for_adoption(repo)
+    return repo
+
+
+def _append_globex_submit_ownership(
+    repo: Path,
+    *,
+    lane_id: str,
+    symbol: str,
+    local_symbol: str,
+    expiry: str,
+    con_id: int,
+    qty: int,
+    action: str,
+    broker_order_id: str,
+    client_id: int,
+    perm_id: int,
+    created_at: datetime,
+    lifecycle_id: str,
+    ownership_intent_id: str,
+    trade_id: str,
+) -> dict[str, object]:
+    record = SubmitIntentOwnershipRecord(
+        mode="PAPER",
+        account_id="DUM882026",
+        lane_id=lane_id,
+        strategy_id=lane_id,
+        intent_type="SELL_TO_OPEN" if action == "SELL" else "BUY_TO_OPEN",
+        action=action,
+        symbol=symbol,
+        local_symbol=local_symbol,
+        expiry=expiry,
+        con_id=con_id,
+        qty=qty,
+        order_type="LMT",
+        limit_price="1",
+        time_in_force="DAY",
+        repo_root=str(repo),
+        git_head="abc123",
+        created_at=created_at,
+        state=SubmitIntentOwnershipState.BROKER_POSITION_OBSERVED_ADOPTION_REQUIRED,
+        ownership_intent_id=ownership_intent_id,
+        lifecycle_id=lifecycle_id,
+        lifecycle_id_reserved_only=True,
+        lifecycle_position_open=False,
+        pre_submit_reconciliation_classification="TRACK_B_PHASE1_BROKER_RECONCILIATION_SUBMIT_GATE_READY",
+        governance_classification="PAPER_STRATEGY_GOVERNANCE_PARTIAL",
+        exposure_classification="PAPER_EXPOSURE_ENTRY_ALLOWED",
+        open_order_count=0,
+        unknown_open_order_count=0,
+        review_required_count=0,
+        live_money_eligible=False,
+        paper_proof_invoked=False,
+        broker_order_id=broker_order_id,
+        client_id=client_id,
+        perm_id=perm_id,
+        exec_id=None,
+        source_artifact_paths=(
+            str(repo / "outputs/reports/ibkr_runtime_route_dispatch" / lane_id / "ibkr_paper_strategy_bridge_report.json"),
+        ),
+        extra={
+            "bridge_classification": "PAPER_STRATEGY_ORDER_FILLED",
+            "broker_effect_classification": "BROKER_EFFECT_CONFIRMED",
+            "delegated_classification": "PAPER_ORDER_FILLED",
+            "delegated_status": "filled",
+            "exposure_block_reasons": [],
+            "governance_block_reasons": [],
+            "intent_id": trade_id.removeprefix("trade_"),
+            "trade_id": trade_id,
+            "caller_metadata": {
+                "trade_id": trade_id,
+                "managed_exit_policy_id": "GLOBEX_ACTIVE_EVIDENCE_TIMEBOX_60M_EXIT_V1",
+                "runtime_candle_timestamp": "2026-06-04T22:12:00+00:00",
+            },
+        },
+    )
+    result = append_submit_intent_ownership_record(
+        record,
+        jsonl_path=repo / "outputs/track_b_execution_core/submit_intent_ownership/track_b_submit_intent_ownership.jsonl",
+        latest_path=repo / "outputs/track_b_execution_core/submit_intent_ownership/latest_track_b_submit_intent_ownership.json",
+    )
+    return result.record
+
+
+def _write_globex_shared_truth_for_adoption(repo: Path) -> None:
+    generated_at = "2026-06-04T22:13:30+00:00"
+    position_rows = [
+        {
+            "classification": "BROKER_POSITION_REQUIRES_ADOPTION",
+            "symbol": "MNQ",
+            "local_symbol": "MNQM6",
+            "con_id": 770561201,
+            "quantity": "-1",
+            "order_intent_id": "submit_owner_mnq_globex_short",
+        },
+        {
+            "classification": "BROKER_POSITION_REQUIRES_ADOPTION",
+            "symbol": "MES",
+            "local_symbol": "MESM6",
+            "con_id": 770561194,
+            "quantity": "-1",
+            "order_intent_id": "submit_owner_mes_globex_short",
+        },
+    ]
+    managed_rows = [
+        {
+            "classification": "BROKER_BACKED_ADOPTION_REQUIRED",
+            "symbol": row["symbol"],
+            "local_symbol": row["local_symbol"],
+            "con_id": row["con_id"],
+            "quantity": row["quantity"],
+            "order_intent_id": row["order_intent_id"],
+            "attention_required": True,
+        }
+        for row in position_rows
+    ]
+    _write_json(
+        repo / "outputs" / "track_b_execution_core" / "open_order_truth" / "latest_open_order_truth.json",
+        {"generated_at": generated_at, "classification": "NO_OPEN_ORDERS", "order_states": []},
+    )
+    _write_json(
+        repo / "outputs" / "track_b_execution_core" / "managed_orders" / "latest_managed_orders.json",
+        {"generated_at": generated_at, "classification": "NO_MANAGED_ORDERS", "managed_orders": []},
+    )
+    _write_json(
+        repo / "outputs" / "track_b_execution_core" / "position_truth" / "latest_position_truth.json",
+        {
+            "generated_at": generated_at,
+            "classification": "ATTENTION_REQUIRED",
+            "summary": {"overall_classification": "ATTENTION_REQUIRED"},
+            "position_states": position_rows,
+        },
+    )
+    _write_json(
+        repo / "outputs" / "track_b_execution_core" / "managed_positions" / "latest_managed_positions.json",
+        {
+            "generated_at": generated_at,
+            "classification": "BROKER_BACKED_ADOPTION_REQUIRED",
+            "managed_positions": managed_rows,
+        },
+    )
+    _write_json(
+        repo / "outputs" / "track_b_execution_core" / "runtime_supervisor" / "latest_runtime_supervisor_authority.json",
+        {"generated_at": generated_at, "classification": "SUPERVISOR_CLEANUP_REQUIRED_BEFORE_RUNTIME"},
+    )
+    _write_json(
+        repo
+        / "outputs"
+        / "reports"
+        / "track_b_paper_broker_reconciliation"
+        / "latest_track_b_paper_broker_reconciliation.json",
+        {"generated_at": generated_at, "classification": "SUBMIT_INTENT_NO_BROKER_EFFECT_PENDING_SETTLEMENT"},
+    )
+    _write_json(
+        repo / "outputs" / "operator_dashboard" / "runtime" / "latest_broker_truth_lease.json",
+        {
+            "generated_at": generated_at,
+            "classification": "INVALIDATED_CONTRADICTION",
+            "track_b_broker_open_order_count": 0,
+            "blockers": [{"code": "reconciliation_not_clean"}],
+        },
+    )
+    _write_broker_session_authority_for_adoption(repo, generated_at=generated_at)
+    _write_control_plane_snapshot(repo, generated_at=generated_at)
+
+
+def _write_broker_session_authority_for_adoption(
+    repo: Path,
+    *,
+    generated_at: str = "2026-06-04T22:13:30+00:00",
+    classification: str = "BROKER_SESSION_AUTHORITY_ORDER_STATUS_UNRELIABLE",
+    connection_mode: str = "ORDER_STATUS_UNRELIABLE",
+    callback_missing_reason: str | None = "order_status_callback_missing",
+    callback_missing_reasons: list[dict[str, str]] | None = None,
+) -> None:
+    missing_reasons = (
+        callback_missing_reasons
+        if callback_missing_reasons is not None
+        else [
+            {"code": "order_status_callback_missing", "detail": "No orderStatus callback timestamp is available."},
+            {"code": "exec_details_callback_missing", "detail": "Submit evidence exists but execDetails is missing."},
+            {"code": "completed_order_callback_missing", "detail": "Submit evidence exists but completedOrder is missing."},
+        ]
+    )
+    _write_json(
+        repo / "outputs" / "operator_dashboard" / "runtime" / "latest_broker_session_authority.json",
+        {
+            "schema_version": "track_b_broker_session_authority_v1",
+            "generated_at": generated_at,
+            "classification": classification,
+            "connection_mode": connection_mode,
+            "allowed_uses": {
+                "new_entry": connection_mode in {"SUBMIT_CAPABLE", "FILL_CALLBACK_CAPABLE"},
+                "managed_risk_reducing_close": False,
+                "broker_observed_adoption_diagnosis": connection_mode
+                in {
+                    "ORDER_STATUS_UNRELIABLE",
+                    "POSITION_TRUTH_ONLY",
+                    "SUBMIT_CAPABLE",
+                    "FILL_CALLBACK_CAPABLE",
+                },
+                "fill_callback_adoption": connection_mode == "FILL_CALLBACK_CAPABLE",
+                "status_diagnostic": True,
+            },
+            "authority_blockers": [
+                {
+                    "code": "order_status_unreliable_blocks_submit_and_close",
+                    "detail": "Order status is unreliable; broker-observed adoption remains local artifact-only.",
+                }
+            ]
+            if connection_mode == "ORDER_STATUS_UNRELIABLE"
+            else [],
+            "callback_missing_reason": callback_missing_reason,
+            "callback_missing_reasons": missing_reasons,
+            "callback_ownership_attribution": {
+                "classification": "CALLBACK_ATTRIBUTION_GAP" if missing_reasons else "CALLBACK_OWNERSHIP_ALIGNED",
+                "position_truth_client_id": 9077,
+                "open_order_truth_client_id": 9077,
+                "last_order_status_client_id": None if missing_reasons else 9077,
+                "last_exec_details_client_id": None if missing_reasons else 9077,
+                "last_completed_order_client_id": None if missing_reasons else 9077,
+                "submit_client_id": 10846,
+                "session_match": {
+                    "position_vs_order_status_same_session": None if missing_reasons else True,
+                    "submit_vs_exec_same_session": None if missing_reasons else True,
+                    "submit_vs_position_same_session": False,
+                },
+                "callback_age_seconds": {
+                    "position": 30.0,
+                    "open_order": 30.0,
+                    "order_status": None if missing_reasons else 30.0,
+                    "exec_details": None if missing_reasons else 30.0,
+                    "completed_order": None if missing_reasons else 30.0,
+                },
+                "callback_missing_reason": callback_missing_reason,
+                "callback_missing_reasons": missing_reasons,
+            },
+        },
+    )
 
 
 def _write_control_plane_snapshot(repo: Path, *, generated_at: str | None = None) -> None:

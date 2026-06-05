@@ -17,6 +17,9 @@ from pathlib import Path
 from typing import Any, Mapping, Sequence
 
 from mgc_v05l.execution.ibkr_paper_strategy_porting import lane_submit_bridge_adapter
+from mgc_v05l.execution_core.track_b_broker_session_authority import (
+    DEFAULT_BROKER_SESSION_AUTHORITY_ARTIFACT,
+)
 from mgc_v05l.execution_core.track_b_broker_truth_lease import DEFAULT_LEASE_ARTIFACT
 from mgc_v05l.execution_core.track_b_broker_fill_evidence_resolver import (
     RESOLVED as BROKER_FILL_EVIDENCE_RESOLVED,
@@ -115,9 +118,11 @@ class LifecycleAdoptionConfig:
     runtime_supervisor_authority_path: Path = DEFAULT_RUNTIME_SUPERVISOR_AUTHORITY_ARTIFACT
     reconciliation_path: Path = DEFAULT_RECONCILIATION_ARTIFACT
     broker_lease_path: Path = DEFAULT_LEASE_ARTIFACT
+    broker_session_authority_path: Path = DEFAULT_BROKER_SESSION_AUTHORITY_ARTIFACT
     control_plane_snapshot_path: Path = DEFAULT_CONTROL_PLANE_SNAPSHOT_ARTIFACT
     require_control_plane_snapshot_for_apply: bool = True
     local_repair_snapshot_max_age_seconds: int = 300
+    submit_intent_max_age_seconds: float = 7200.0
 
 
 @dataclass(frozen=True)
@@ -248,6 +253,14 @@ def run_track_b_paper_lifecycle_adoption(
             expected_fill_price=config.expected_fill_price,
             failures=failures,
         )
+    )
+    _validate_broker_observed_submit_ownership_adoption(
+        config=config,
+        submit_intent_ownership=submit_intent_ownership,
+        broker_position=broker_position,
+        bridge_evidence=bridge_evidence,
+        now=actual_now,
+        failures=failures,
     )
 
     fill_price = _decimal(bridge_evidence.get("fill_price")) if bridge_evidence else None
@@ -382,6 +395,21 @@ def run_track_b_paper_lifecycle_adoption(
             "unresolved_record_count": len(submit_intent_ownership_records),
         },
         "shared_truth_evidence": shared_truth_evidence,
+        "broker_session_authority_classification": shared_truth_evidence.get(
+            "broker_session_authority_classification"
+        ),
+        "broker_session_connection_mode": shared_truth_evidence.get("broker_session_connection_mode"),
+        "broker_session_allowed_uses": shared_truth_evidence.get("broker_session_allowed_uses"),
+        "broker_session_authority_blockers": shared_truth_evidence.get("broker_session_authority_blockers"),
+        "callback_ownership_attribution": shared_truth_evidence.get("callback_ownership_attribution"),
+        "callback_missing_reason": shared_truth_evidence.get("callback_missing_reason"),
+        "callback_missing_reasons": shared_truth_evidence.get("callback_missing_reasons"),
+        "broker_observed_adoption_diagnosis_allowed": shared_truth_evidence.get(
+            "broker_observed_adoption_diagnosis_allowed"
+        ),
+        "broker_observed_adoption_apply_allowed": shared_truth_evidence.get(
+            "broker_observed_adoption_apply_allowed"
+        ),
         "lifecycle_local_repair_guard": lifecycle_local_repair_guard,
         "control_plane_snapshot_id": lifecycle_local_repair_guard.get("control_plane_snapshot_id"),
         "shared_truth_refresh_generation_id": lifecycle_local_repair_guard.get("shared_truth_refresh_generation_id"),
@@ -859,6 +887,14 @@ def _extract_submit_intent_ownership_evidence(
     failures: list[str],
 ) -> dict[str, Any] | None:
     local_failures: list[str] = []
+    matching_bridge_report = (
+        bridge_report
+        if _bridge_report_matches_submit_intent_ownership(
+            bridge_report=bridge_report,
+            submit_intent_ownership=submit_intent_ownership,
+        )
+        else {}
+    )
     if broker_position is None:
         local_failures.append("Submit-intent adoption requires exact broker position truth.")
     if str(submit_intent_ownership.get("mode") or "").upper() != "PAPER":
@@ -887,7 +923,7 @@ def _extract_submit_intent_ownership_evidence(
     if expected_client_id is not None and _decimal(client_id) != Decimal(expected_client_id):
         local_failures.append("Submit-intent ownership client_id does not match expected client_id.")
     perm_id = submit_intent_ownership.get("perm_id")
-    bridge_lifecycle = _nested(bridge_report, "delegated_result", "report", "submit_cancel_lifecycle")
+    bridge_lifecycle = _nested(matching_bridge_report, "delegated_result", "report", "submit_cancel_lifecycle")
     bridge_lifecycle = bridge_lifecycle if isinstance(bridge_lifecycle, Mapping) else {}
     bridge_latest_status = (
         bridge_lifecycle.get("latest_order_status")
@@ -895,7 +931,7 @@ def _extract_submit_intent_ownership_evidence(
         else {}
     )
     bridge_execution = _select_exact_bridge_execution_for_submit_ownership(
-        bridge_report=bridge_report,
+        bridge_report=matching_bridge_report,
         account_id=account_id,
         symbol=symbol,
         quantity=quantity,
@@ -906,7 +942,7 @@ def _extract_submit_intent_ownership_evidence(
         local_failures.append("Submit-intent ownership perm_id does not match expected perm_id.")
     original_trade_id = _single_trade_id_from_sources(
         submit_intent_ownership,
-        None if broker_fill_evidence else bridge_report,
+        None if broker_fill_evidence else matching_bridge_report,
     )
     if original_trade_id == "__AMBIGUOUS__":
         local_failures.append("Multiple distinct registry trade_id values match the broker-backed fill.")
@@ -942,8 +978,8 @@ def _extract_submit_intent_ownership_evidence(
         submit_intent_ownership.get("managed_exit_policy_id")
         or _nested(submit_intent_ownership, "extra", "managed_exit_policy_id")
         or _nested(submit_intent_ownership, "extra", "caller_metadata", "managed_exit_policy_id")
-        or _nested(bridge_report, "intent", "managed_exit_policy_id")
-        or _nested(bridge_report, "caller_metadata", "managed_exit_policy_id")
+        or _nested(matching_bridge_report, "intent", "managed_exit_policy_id")
+        or _nested(matching_bridge_report, "caller_metadata", "managed_exit_policy_id")
     )
     missing_fields = [
         field
@@ -1012,6 +1048,114 @@ def _extract_submit_intent_ownership_evidence(
         "bridge_classification": _nested(submit_intent_ownership, "extra", "bridge_classification"),
         "source_artifact_paths": submit_intent_ownership.get("source_artifact_paths") or [],
     }
+
+
+def _validate_broker_observed_submit_ownership_adoption(
+    *,
+    config: LifecycleAdoptionConfig,
+    submit_intent_ownership: Mapping[str, Any] | None,
+    broker_position: Mapping[str, Any] | None,
+    bridge_evidence: Mapping[str, Any] | None,
+    now: datetime,
+    failures: list[str],
+) -> None:
+    if not isinstance(submit_intent_ownership, Mapping):
+        return
+    if not isinstance(broker_position, Mapping):
+        return
+
+    lifecycle_id = str(submit_intent_ownership.get("lifecycle_id") or "").strip()
+    if not lifecycle_id:
+        failures.append("Broker-observed adoption requires a matching reserved lifecycle_id.")
+    if (
+        str(submit_intent_ownership.get("state") or "").upper() != "LIFECYCLE_OPEN_PERSISTED"
+        and submit_intent_ownership.get("lifecycle_id_reserved_only") is not True
+    ):
+        failures.append("Broker-observed adoption requires reserved-only lifecycle ownership before promotion.")
+    trade_id = _single_trade_id_from_sources(submit_intent_ownership)
+    submit_state = str(submit_intent_ownership.get("state") or "").upper()
+    if not trade_id and submit_state == "BROKER_POSITION_OBSERVED_ADOPTION_REQUIRED":
+        failures.append("Broker-observed adoption requires a matching trade_id in submit ownership.")
+    if trade_id == "__AMBIGUOUS__":
+        failures.append("Broker-observed adoption requires one unambiguous trade_id in submit ownership.")
+
+    age_seconds = _age_seconds(submit_intent_ownership.get("created_at"), now)
+    if age_seconds is None:
+        failures.append("Broker-observed adoption requires a parseable submit ownership created_at timestamp.")
+    elif age_seconds > config.submit_intent_max_age_seconds:
+        failures.append(
+            "Broker-observed adoption refused stale submit ownership: "
+            f"age_seconds={age_seconds:.3f} max_age_seconds={config.submit_intent_max_age_seconds:.3f}."
+        )
+
+    if _decimal(submit_intent_ownership.get("open_order_count")) not in {None, Decimal("0")}:
+        failures.append("Broker-observed adoption requires submit ownership open_order_count=0.")
+    if _decimal(submit_intent_ownership.get("unknown_open_order_count")) not in {None, Decimal("0")}:
+        failures.append("Broker-observed adoption requires submit ownership unknown_open_order_count=0.")
+    if _decimal(submit_intent_ownership.get("review_required_count")) not in {None, Decimal("0")}:
+        failures.append("Broker-observed adoption requires submit ownership review_required_count=0.")
+
+    for reason_field in ("governance_block_reasons", "exposure_block_reasons"):
+        reasons = _nested(submit_intent_ownership, "extra", reason_field)
+        if isinstance(reasons, list) and reasons:
+            failures.append(f"Broker-observed adoption refuses submit ownership with {reason_field}.")
+
+    broker_con_id = _decimal(broker_position.get("con_id") or broker_position.get("conId"))
+    ownership_con_id = _decimal(submit_intent_ownership.get("con_id"))
+    if broker_con_id is not None and ownership_con_id is not None and broker_con_id != ownership_con_id:
+        failures.append("Broker-observed adoption broker con_id does not match submit ownership con_id.")
+    if str(broker_position.get("account_id") or "") != config.account_id:
+        failures.append("Broker-observed adoption broker account does not match expected account.")
+    if str(broker_position.get("local_symbol") or "").upper() != config.local_symbol.upper():
+        failures.append("Broker-observed adoption broker local_symbol does not match expected contract.")
+    if _decimal(broker_position.get("quantity")) != _decimal(config.quantity):
+        failures.append("Broker-observed adoption broker side/quantity does not match expected adoption quantity.")
+
+    if bridge_evidence and bridge_evidence.get("broker_position_confirmed") is not True:
+        failures.append("Broker-observed adoption requires broker_position_confirmed evidence.")
+
+
+def _bridge_report_matches_submit_intent_ownership(
+    *,
+    bridge_report: Mapping[str, Any],
+    submit_intent_ownership: Mapping[str, Any],
+) -> bool:
+    if not isinstance(bridge_report, Mapping) or not bridge_report:
+        return False
+    ownership_ids = {
+        str(value).strip()
+        for value in (
+            submit_intent_ownership.get("ownership_intent_id"),
+            _nested(submit_intent_ownership, "extra", "intent_id"),
+            _nested(submit_intent_ownership, "extra", "trade_id"),
+            _nested(submit_intent_ownership, "extra", "caller_metadata", "trade_id"),
+        )
+        if value not in {None, ""}
+    }
+    bridge_ids = {
+        str(value).strip()
+        for value in (
+            _nested(bridge_report, "intent", "intent_id"),
+            _nested(bridge_report, "caller_metadata", "trade_id"),
+            _nested(bridge_report, "intent", "trade_id"),
+        )
+        if value not in {None, ""}
+    }
+    if ownership_ids & bridge_ids:
+        return True
+
+    ownership_order_id = str(submit_intent_ownership.get("broker_order_id") or "").strip()
+    if not ownership_order_id:
+        return False
+    lifecycle = _nested(bridge_report, "delegated_result", "report", "submit_cancel_lifecycle")
+    lifecycle = lifecycle if isinstance(lifecycle, Mapping) else {}
+    latest_status = lifecycle.get("latest_order_status") if isinstance(lifecycle.get("latest_order_status"), Mapping) else {}
+    delegated = bridge_report.get("delegated_result") if isinstance(bridge_report.get("delegated_result"), Mapping) else {}
+    return ownership_order_id in _bridge_known_order_ids(
+        lifecycle=lifecycle,
+        latest_status=latest_status,
+        delegated=delegated,
+    )
 
 
 def _select_exact_bridge_execution_for_submit_ownership(
@@ -1532,7 +1676,7 @@ def _build_fill_payload(
         "contract_month": str(bridge_evidence.get("contract_month") or config.expiry[:6]),
         "con_id": bridge_evidence.get("con_id"),
         "multiplier": str(broker_position.get("multiplier") or bridge_evidence.get("multiplier") or ""),
-        "quantity": _decimal_text(config.quantity),
+        "quantity": _decimal_text(abs(_decimal(config.quantity) or Decimal("0"))),
         "fill_price": fill_price,
         "fill_timestamp": broker_execution_timestamp,
         "managed_entry_time": managed_entry_time,
@@ -1895,12 +2039,17 @@ def _shared_truth_adoption_evidence(
         "runtime_supervisor_authority": config.runtime_supervisor_authority_path,
         "reconciliation": config.reconciliation_path,
         "broker_lease": config.broker_lease_path,
+        "broker_session_authority": config.broker_session_authority_path,
     }
     payloads = {name: _read_json(_resolve(repo_root=config.repo_root, path=path)) for name, path in paths.items()}
     classifications = {name: _shared_classification(name=name, payload=payload) for name, payload in payloads.items()}
     broker_backed_adoption_context = _broker_backed_adoption_context(
         submit_intent_ownership=submit_intent_ownership,
         broker_position=broker_position,
+    )
+    broker_session_adoption = _broker_session_authority_adoption_evidence(
+        payload=payloads["broker_session_authority"],
+        broker_backed_adoption_context=broker_backed_adoption_context,
     )
     circular_adoption_allowances: list[dict[str, str]] = []
     freshness = {
@@ -1995,6 +2144,8 @@ def _shared_truth_adoption_evidence(
             )
         else:
             blockers.append(f"Broker Truth Lease is unsafe for lifecycle adoption: {classifications['broker_lease']}.")
+    if broker_backed_adoption_context and not broker_session_adoption["broker_observed_adoption_apply_allowed"]:
+        blockers.extend(broker_session_adoption["blockers"])
 
     target_agreement = {}
     for name, rows in {
@@ -2062,6 +2213,21 @@ def _shared_truth_adoption_evidence(
         "dashboard_projection_consumed": False,
         "required": config.require_shared_truth_evidence,
         "broker_backed_adoption_context": broker_backed_adoption_context,
+        "broker_session_authority_classification": broker_session_adoption[
+            "broker_session_authority_classification"
+        ],
+        "broker_session_connection_mode": broker_session_adoption["broker_session_connection_mode"],
+        "broker_session_allowed_uses": broker_session_adoption["broker_session_allowed_uses"],
+        "broker_session_authority_blockers": broker_session_adoption["broker_session_authority_blockers"],
+        "callback_ownership_attribution": broker_session_adoption["callback_ownership_attribution"],
+        "callback_missing_reason": broker_session_adoption["callback_missing_reason"],
+        "callback_missing_reasons": broker_session_adoption["callback_missing_reasons"],
+        "broker_observed_adoption_diagnosis_allowed": broker_session_adoption[
+            "broker_observed_adoption_diagnosis_allowed"
+        ],
+        "broker_observed_adoption_apply_allowed": broker_session_adoption[
+            "broker_observed_adoption_apply_allowed"
+        ],
         "circular_adoption_allowances": circular_adoption_allowances,
         "max_age_seconds": config.shared_truth_max_age_seconds,
         "artifact_paths": {name: str(_resolve(repo_root=config.repo_root, path=path)) for name, path in paths.items()},
@@ -2157,6 +2323,92 @@ def _broker_lease_allows_broker_backed_adoption(payload: Mapping[str, Any]) -> b
     if open_order_count not in {None, Decimal("0")}:
         return False
     return all(str(blocker.get("code") or "") in allowed_codes for blocker in blockers)
+
+
+def _broker_session_authority_adoption_evidence(
+    *,
+    payload: Mapping[str, Any],
+    broker_backed_adoption_context: bool,
+) -> dict[str, Any]:
+    classification = _shared_classification(name="broker_session_authority", payload=payload)
+    connection_mode = str(payload.get("connection_mode") or "").strip().upper()
+    allowed_uses = dict(_mapping_or_empty(payload.get("allowed_uses")))
+    authority_blockers = _list(payload.get("authority_blockers"))
+    callback_attribution = _mapping_or_empty(payload.get("callback_ownership_attribution"))
+    callback_missing_reasons = _callback_missing_reasons_from_authority(payload, callback_attribution)
+    callback_missing_reason = (
+        str(payload.get("callback_missing_reason") or callback_attribution.get("callback_missing_reason") or "")
+        or None
+    )
+    if callback_missing_reason is None and callback_missing_reasons:
+        first_reason = callback_missing_reasons[0]
+        if isinstance(first_reason, Mapping):
+            callback_missing_reason = str(first_reason.get("code") or "") or None
+
+    blockers: list[str] = []
+    if not payload:
+        blockers.append("Broker Session Authority artifact missing for broker-observed adoption.")
+    elif not broker_backed_adoption_context:
+        blockers.append("Broker Session Authority adoption requires exact broker-backed adoption context.")
+    elif not _broker_session_authority_supports_broker_observed_adoption(
+        classification=classification,
+        connection_mode=connection_mode,
+        allowed_uses=allowed_uses,
+    ):
+        blockers.append(
+            "Broker Session Authority does not allow broker-observed adoption: "
+            f"classification={classification or 'UNKNOWN'} connection_mode={connection_mode or 'UNKNOWN'}."
+        )
+
+    allowed = bool(payload and broker_backed_adoption_context and not blockers)
+    return {
+        "broker_session_authority_classification": classification,
+        "broker_session_connection_mode": connection_mode,
+        "broker_session_allowed_uses": allowed_uses,
+        "broker_session_authority_blockers": authority_blockers,
+        "callback_ownership_attribution": dict(callback_attribution),
+        "callback_missing_reason": callback_missing_reason,
+        "callback_missing_reasons": callback_missing_reasons,
+        "broker_observed_adoption_diagnosis_allowed": allowed,
+        "broker_observed_adoption_apply_allowed": allowed,
+        "blockers": blockers,
+    }
+
+
+def _broker_session_authority_supports_broker_observed_adoption(
+    *,
+    classification: str,
+    connection_mode: str,
+    allowed_uses: Mapping[str, Any],
+) -> bool:
+    if bool(allowed_uses.get("broker_observed_adoption_diagnosis")):
+        return True
+    supported_modes = {
+        "ORDER_STATUS_UNRELIABLE",
+        "POSITION_TRUTH_ONLY",
+        "SUBMIT_CAPABLE",
+        "FILL_CALLBACK_CAPABLE",
+    }
+    supported_classifications = {
+        "BROKER_SESSION_AUTHORITY_ORDER_STATUS_UNRELIABLE",
+        "BROKER_SESSION_AUTHORITY_POSITION_TRUTH_ONLY",
+        "BROKER_SESSION_AUTHORITY_SUBMIT_CAPABLE",
+        "BROKER_SESSION_AUTHORITY_FILL_CALLBACK_CAPABLE",
+    }
+    return connection_mode in supported_modes or classification in supported_classifications
+
+
+def _callback_missing_reasons_from_authority(
+    payload: Mapping[str, Any],
+    callback_attribution: Mapping[str, Any],
+) -> list[Any]:
+    direct_reasons = _list(payload.get("callback_missing_reasons"))
+    attribution_reasons = _list(callback_attribution.get("callback_missing_reasons"))
+    reasons = direct_reasons or attribution_reasons
+    reason = payload.get("callback_missing_reason") or callback_attribution.get("callback_missing_reason")
+    if reason and not any(isinstance(row, Mapping) and row.get("code") == reason for row in reasons):
+        return [{"code": str(reason), "detail": "Broker session authority reported missing callback evidence."}] + reasons
+    return reasons
 
 
 def _control_plane_incoherence_allows_broker_backed_adoption(
