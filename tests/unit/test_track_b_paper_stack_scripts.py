@@ -1,4 +1,6 @@
 import json
+import subprocess
+import sys
 from pathlib import Path
 
 
@@ -91,6 +93,186 @@ def test_paper_stack_start_blocks_before_carrier_when_preflight_refresh_fails() 
     blocked = launch_block.index('exit 2')
     assert blocked < launch_block.index('cat > "${WRAPPER_PATH}"')
     assert blocked < launch_block.index("launchctl submit")
+
+
+def _startup_preflight_decision_python() -> str:
+    source = START_SCRIPT.read_text(encoding="utf-8")
+    return source.split('> "${result_json}" <<\'PY\'\n', 1)[1].split("\nPY\n", 1)[0]
+
+
+def _run_startup_preflight_decision(
+    tmp_path: Path,
+    *,
+    control: dict,
+    reconciliation: dict | None = None,
+    status: dict | None = None,
+    readiness: dict | None = None,
+    readiness_rc: int = 0,
+    control_rc: int = 0,
+    status_rc: int = 0,
+) -> dict:
+    repo_root = tmp_path / "repo"
+    reconciliation_path = (
+        repo_root
+        / "outputs"
+        / "reports"
+        / "track_b_paper_broker_reconciliation"
+        / "latest_track_b_paper_broker_reconciliation.json"
+    )
+    reconciliation_path.parent.mkdir(parents=True, exist_ok=True)
+    reconciliation_path.write_text(
+        json.dumps(
+            reconciliation
+            or {
+                "classification": "TRACK_B_PAPER_BROKER_RECONCILED",
+                "broker_reconciled": True,
+                "track_b_broker_position_count": 0,
+                "track_b_broker_open_order_count": 0,
+                "current_scope_lifecycle_open_position_count": 0,
+                "lifecycle_open_order_count": 0,
+            }
+        ),
+        encoding="utf-8",
+    )
+    status_path = tmp_path / "status.json"
+    readiness_path = tmp_path / "readiness.json"
+    control_path = tmp_path / "control.json"
+    status_path.write_text(
+        json.dumps(
+            status
+            or {
+                "safety": {
+                    "paper_only": True,
+                    "live_money_eligible": False,
+                    "paper_proof_invoked": False,
+                    "broker_mutation_allowed": False,
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    readiness_path.write_text(json.dumps(readiness or {}), encoding="utf-8")
+    control_path.write_text(json.dumps(control), encoding="utf-8")
+    completed = subprocess.run(
+        [
+            sys.executable,
+            "-",
+            str(repo_root),
+            str(status_path),
+            str(readiness_path),
+            str(control_path),
+            str(readiness_rc),
+            str(control_rc),
+            str(status_rc),
+            str(readiness_path),
+            str(control_path),
+        ],
+        input=_startup_preflight_decision_python(),
+        text=True,
+        capture_output=True,
+        check=True,
+    )
+    return json.loads(completed.stdout)
+
+
+def test_paper_stack_start_allows_ready_control_plane_with_informational_primary_reason(tmp_path: Path) -> None:
+    result = _run_startup_preflight_decision(
+        tmp_path,
+        control={
+            "classification": "CONTROL_PLANE_SNAPSHOT_READY",
+            "safe_to_start_runtime": True,
+            "top_line_classification": "READY_FOR_OPERATOR_START",
+            "supervisor_mode": "READY_FOR_OPERATOR_START",
+            "blockers": [],
+            "primary_blocking_agent_id": "",
+            "primary_blocking_reason": "Shared truth is clean and PAPER policy allows bounded autonomous runtime retry.",
+        },
+    )
+
+    assert result["classification"] == "STARTUP_PREFLIGHT_REFRESH_CLEAN"
+    assert result["remaining_start_blockers"] == []
+
+
+def test_paper_stack_start_blocks_control_plane_not_start_safe_with_primary_reason(tmp_path: Path) -> None:
+    result = _run_startup_preflight_decision(
+        tmp_path,
+        control={
+            "classification": "CONTROL_PLANE_SNAPSHOT_BLOCKED",
+            "safe_to_start_runtime": False,
+            "top_line_classification": "BLOCKED",
+            "blockers": [],
+            "primary_blocking_agent_id": "",
+            "primary_blocking_reason": "canonical_readiness_refresher: artifact_stale",
+        },
+    )
+
+    codes = {row["code"] for row in result["remaining_start_blockers"]}
+    assert result["classification"] == "STARTUP_PREFLIGHT_REFRESH_BLOCKED"
+    assert "control_plane_start_not_allowed" in codes
+    assert "control_plane_primary_blocker" in codes
+
+
+def test_paper_stack_start_blocks_real_control_plane_blocker_sources(tmp_path: Path) -> None:
+    result = _run_startup_preflight_decision(
+        tmp_path,
+        control={
+            "classification": "CONTROL_PLANE_SNAPSHOT_READY",
+            "safe_to_start_runtime": True,
+            "top_line_classification": "READY_FOR_OPERATOR_START",
+            "blockers": [{"code": "open_order_truth", "detail": "ORDER_TRUTH_STALE"}],
+            "primary_blocking_agent_id": "managed_order_registry",
+            "primary_blocking_reason": "ORDER_STATE_UNKNOWN_REVIEW_REQUIRED",
+        },
+    )
+
+    codes = {row["code"] for row in result["remaining_start_blockers"]}
+    assert result["classification"] == "STARTUP_PREFLIGHT_REFRESH_BLOCKED"
+    assert "control_plane_reported_blockers" in codes
+    assert "control_plane_primary_blocker" in codes
+
+
+def test_paper_stack_start_blocks_explicit_unsafe_or_hard_hold_status(tmp_path: Path) -> None:
+    result = _run_startup_preflight_decision(
+        tmp_path,
+        control={
+            "classification": "CONTROL_PLANE_SNAPSHOT_READY",
+            "safe_to_start_runtime": True,
+            "top_line_classification": "READY_FOR_OPERATOR_START",
+            "safe_state_classification": "SAFE_STATE_HARD_HOLD",
+            "blockers": [],
+            "primary_blocking_agent_id": "",
+            "primary_blocking_reason": "diagnostic text",
+        },
+    )
+
+    assert result["classification"] == "STARTUP_PREFLIGHT_REFRESH_BLOCKED"
+    assert {row["code"] for row in result["remaining_start_blockers"]} == {
+        "control_plane_explicit_unsafe_status"
+    }
+
+
+def test_paper_stack_start_preflight_refresh_still_blocks_non_flat_broker_state(tmp_path: Path) -> None:
+    result = _run_startup_preflight_decision(
+        tmp_path,
+        control={
+            "classification": "CONTROL_PLANE_SNAPSHOT_READY",
+            "safe_to_start_runtime": True,
+            "top_line_classification": "READY_FOR_OPERATOR_START",
+            "blockers": [],
+        },
+        reconciliation={
+            "classification": "TRACK_B_PAPER_BROKER_RECONCILED",
+            "broker_reconciled": True,
+            "track_b_broker_position_count": 1,
+            "track_b_broker_open_order_count": 0,
+            "current_scope_lifecycle_open_position_count": 0,
+            "lifecycle_open_order_count": 0,
+        },
+    )
+
+    codes = {row["code"] for row in result["remaining_start_blockers"]}
+    assert result["classification"] == "STARTUP_PREFLIGHT_REFRESH_BLOCKED"
+    assert "broker_positions_or_orders_not_flat" in codes
 
 
 def test_paper_stack_start_preflight_refresh_preserves_broker_safety_gates() -> None:

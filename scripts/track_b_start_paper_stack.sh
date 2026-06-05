@@ -581,6 +581,34 @@ def add_blocker(blockers, code, detail=None, source=None):
         row["source"] = str(source)
     blockers.append(row)
 
+def list_rows(value):
+    return value if isinstance(value, list) else []
+
+def control_plane_start_safe(control):
+    classification = str(control.get("classification") or "").strip().upper()
+    top_line = str(control.get("top_line_classification") or "").strip().upper()
+    supervisor_mode = str(control.get("supervisor_mode") or "").strip().upper()
+    ready_classifications = {"CONTROL_PLANE_SNAPSHOT_READY"}
+    ready_modes = {"READY_FOR_OPERATOR_START"}
+    return bool(
+        control.get("safe_to_start_runtime") is True
+        and (classification in ready_classifications or top_line in ready_modes or supervisor_mode in ready_modes)
+    )
+
+def control_plane_has_explicit_unsafe_status(control):
+    fields = [
+        control.get("classification"),
+        control.get("top_line_classification"),
+        control.get("supervisor_mode"),
+        control.get("paper_action_policy"),
+        control.get("safe_state_classification"),
+    ]
+    unsafe_markers = ("HARD_HOLD", "HARD_UNSAFE", "UNSAFE", "QUARANTINE", "BLOCKED")
+    return any(
+        any(marker in str(value or "").strip().upper() for marker in unsafe_markers)
+        for value in fields
+    )
+
 status = load_json(status_path)
 readiness = load_json(readiness_stdout) or load_json(readiness_artifact)
 control = load_json(control_stdout) or load_json(control_artifact)
@@ -653,7 +681,8 @@ if lifecycle_position_count != 0 or lifecycle_order_count != 0:
     )
 
 if control:
-    if control.get("safe_to_start_runtime") is not True:
+    is_start_safe = control_plane_start_safe(control)
+    if not is_start_safe:
         add_blocker(
             blockers,
             "control_plane_start_not_allowed",
@@ -662,11 +691,36 @@ if control:
         )
     primary_agent = control.get("primary_blocking_agent_id")
     primary_reason = control.get("primary_blocking_reason")
-    if primary_agent or primary_reason:
+    control_blocker_rows = [
+        *list_rows(control.get("blockers")),
+        *list_rows(control.get("prioritized_blockers")),
+    ]
+    if control_blocker_rows:
+        add_blocker(
+            blockers,
+            "control_plane_reported_blockers",
+            detail=json.dumps(control_blocker_rows, sort_keys=True),
+            source="control_plane",
+        )
+    if str(primary_agent or "").strip():
         add_blocker(
             blockers,
             "control_plane_primary_blocker",
             detail=f"{primary_agent or 'unknown'}:{primary_reason or 'unknown'}",
+            source="control_plane",
+        )
+    elif primary_reason and not is_start_safe:
+        add_blocker(
+            blockers,
+            "control_plane_primary_blocker",
+            detail=f"unknown:{primary_reason}",
+            source="control_plane",
+        )
+    if control_plane_has_explicit_unsafe_status(control):
+        add_blocker(
+            blockers,
+            "control_plane_explicit_unsafe_status",
+            detail=control.get("classification") or control.get("top_line_classification"),
             source="control_plane",
         )
     for row in control.get("agent_health_blockers") or []:
