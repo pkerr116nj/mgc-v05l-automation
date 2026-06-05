@@ -1201,12 +1201,84 @@ def _source_stale(
         for name, age in ages.items()
         if age is None or age > float(config.artifact_max_age_seconds)
     ]
+    current_scope_flat_authority_clean = _current_scope_flat_authority_clean(
+        reconciliation=reconciliation,
+        open_order_truth=open_order_truth,
+    )
+    stale_diagnostic_only = bool(stale_sources) and current_scope_flat_authority_clean
     return {
-        "stale": bool(stale_sources),
+        "stale": bool(stale_sources) and not stale_diagnostic_only,
+        "diagnostic_stale": bool(stale_sources),
+        "stale_diagnostic_only": stale_diagnostic_only,
+        "current_scope_flat_authority_clean": current_scope_flat_authority_clean,
         "stale_sources": stale_sources,
         "ages_seconds": ages,
         "ttl_seconds": float(config.artifact_max_age_seconds),
     }
+
+
+def _current_scope_flat_authority_clean(
+    *,
+    reconciliation: Mapping[str, Any],
+    open_order_truth: Mapping[str, Any],
+) -> bool:
+    if reconciliation.get("broker_reconciled") is not True:
+        return False
+    reconciliation_classification = str(reconciliation.get("classification") or "")
+    if reconciliation_classification not in {"BROKER_LIFECYCLE_RECONCILED", "TRACK_B_PAPER_BROKER_RECONCILED"}:
+        return False
+    if _current_scope_review_required_count(reconciliation) != 0:
+        return False
+    if _list(reconciliation.get("track_b_broker_positions")):
+        return False
+    if _list(reconciliation.get("track_b_lifecycle_positions")):
+        return False
+    if _list(reconciliation.get("review_required_positions")):
+        return False
+    if _list(reconciliation.get("track_b_broker_open_orders")):
+        return False
+    if _int_or_none(reconciliation.get("track_b_broker_position_count")) not in {None, 0}:
+        return False
+    if _int_or_none(reconciliation.get("track_b_broker_open_order_count")) not in {None, 0}:
+        return False
+    if _int_or_none(reconciliation.get("current_scope_lifecycle_open_position_count")) not in {None, 0}:
+        return False
+    if _int_or_none(reconciliation.get("lifecycle_open_position_count")) not in {None, 0}:
+        return False
+    if _int_or_none(reconciliation.get("lifecycle_open_order_count")) not in {None, 0}:
+        return False
+    if _int_or_none(reconciliation.get("unknown_broker_open_order_count")) not in {None, 0}:
+        return False
+    if _int_or_none(reconciliation.get("unresolved_submit_intent_ownership_count")) not in {None, 0}:
+        return False
+    if _list(reconciliation.get("unresolved_submit_intent_ownership_records")):
+        return False
+    registry = _mapping(reconciliation.get("registry_reconciliation"))
+    if registry:
+        if registry.get("blocking") is True:
+            return False
+        if _int_or_none(registry.get("broker_position_count")) not in {None, 0}:
+            return False
+        if _int_or_none(registry.get("lifecycle_position_count")) not in {None, 0}:
+            return False
+        if _int_or_none(registry.get("broker_open_order_count")) not in {None, 0}:
+            return False
+        if [str(item).strip() for item in registry.get("review_required_trade_ids") or [] if str(item).strip()]:
+            return False
+    open_order_classification = str(
+        open_order_truth.get("classification")
+        or _mapping(open_order_truth.get("summary")).get("classification")
+        or ""
+    )
+    if open_order_classification in {"", "NO_OPEN_ORDERS"}:
+        return True
+    open_order_summary = _mapping(open_order_truth.get("summary"))
+    return (
+        open_order_classification == "ORDER_TRUTH_STALE"
+        and not _list(open_order_truth.get("order_states"))
+        and _int_or_none(open_order_truth.get("open_order_count") or open_order_summary.get("open_order_count")) in {None, 0}
+        and _int_or_none(open_order_truth.get("unknown_open_order_count")) in {None, 0}
+    )
 
 
 def _authority_summary(payload: Mapping[str, Any], path: Path) -> dict[str, Any]:

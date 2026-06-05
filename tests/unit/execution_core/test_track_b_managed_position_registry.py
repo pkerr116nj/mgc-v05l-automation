@@ -110,6 +110,53 @@ def test_historical_review_required_lifecycle_with_cleanup_evidence_stays_full_a
     assert payload["historical_review_positions"][0]["current_hot_path_scope"] == "HISTORICAL_UNRESOLVED_FULL_AUDIT_ONLY"
 
 
+def test_historical_review_debris_with_stale_sources_projects_current_scope_flat(tmp_path: Path) -> None:
+    _seed_base(tmp_path)
+    _write_position_truth_clean_flat(tmp_path)
+    position_truth_path = (
+        tmp_path / "outputs" / "track_b_execution_core" / "position_truth" / "latest_position_truth.json"
+    )
+    position_truth = json.loads(position_truth_path.read_text(encoding="utf-8"))
+    position_truth["generated_at"] = (NOW - timedelta(minutes=10)).isoformat()
+    position_truth_path.write_text(json.dumps(position_truth, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    open_order_truth_path = (
+        tmp_path / "outputs" / "track_b_execution_core" / "open_order_truth" / "latest_open_order_truth.json"
+    )
+    open_order_truth = json.loads(open_order_truth_path.read_text(encoding="utf-8"))
+    open_order_truth["classification"] = "ORDER_TRUTH_STALE"
+    open_order_truth["summary"] = {"classification": "ORDER_TRUTH_STALE", "open_order_count": 0}
+    open_order_truth_path.write_text(json.dumps(open_order_truth, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    _write_lifecycle_report(
+        tmp_path,
+        lifecycle_id="old_test_mule_review_required_lifecycle",
+        review_required=True,
+        paper_lifecycle_classification="TRACK_B_STRATEGY_PAPER_REVIEW_REQUIRED",
+    )
+
+    config = TrackBManagedPositionRegistryConfig(repo_root=tmp_path)
+    payload = build_track_b_managed_position_registry(config=config, now=NOW)
+    authority_path, _events = write_track_b_managed_position_registry(config=config, payload=payload, now=NOW)
+    projection_path = config.resolve(config.dashboard_projection_path)  # type: ignore[arg-type]
+    projection = json.loads(projection_path.read_text(encoding="utf-8"))
+
+    assert payload["classification"] == NO_MANAGED_POSITIONS
+    assert payload["managed_positions"] == []
+    assert payload["review_required_positions"] == []
+    assert payload["historical_review_positions"][0]["current_hot_path_scope"] == "HISTORICAL_UNRESOLVED_FULL_AUDIT_ONLY"
+    assert payload["source_freshness"]["stale"] is False
+    assert payload["source_freshness"]["diagnostic_stale"] is True
+    assert payload["source_freshness"]["stale_diagnostic_only"] is True
+    assert payload["source_freshness"]["current_scope_flat_authority_clean"] is True
+    assert "position_truth" in payload["source_freshness"]["stale_sources"]
+    assert payload["open_order_truth"]["classification"] == "ORDER_TRUTH_STALE"
+    assert projection["classification"] == NO_MANAGED_POSITIONS
+    assert projection["managed_positions"] == []
+    assert projection["review_required_positions"] == []
+    assert projection["historical_review_positions"]
+    assert projection["projection_only"] is True
+    assert projection["source_authority_path"] == str(authority_path)
+
+
 def test_active_review_required_lifecycle_still_surfaces(tmp_path: Path) -> None:
     review = _lifecycle_position()
     _seed_base(tmp_path, review_positions=[review])
