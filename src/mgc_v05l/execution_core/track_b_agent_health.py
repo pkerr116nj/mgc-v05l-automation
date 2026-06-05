@@ -316,6 +316,17 @@ def _agent_health_row(
         )
         status = str(artifact_status.get("status") or MISSING_ARTIFACT)
         reason = str(artifact_status.get("reason") or "broker_truth_artifact_status")
+    elif agent_id == "canonical_readiness_refresher":
+        primary_path = _canonical_readiness_primary_artifact(agent, config=config)
+        artifact_status = _canonical_readiness_artifact_status(
+            agent=agent,
+            config=config,
+            now=now,
+            current_head=current_head,
+            runtime_environment_truth=runtime_environment_truth,
+        )
+        status = str(artifact_status.get("status") or MISSING_ARTIFACT)
+        reason = str(artifact_status.get("reason") or "canonical_readiness_artifact_status")
     elif expected_state == ON_DEMAND:
         status, reason = HEALTHY, "on_demand_agent_invoked_by_callers"
         primary_path = None
@@ -607,6 +618,118 @@ def _broker_truth_artifact_status(
         "reason": "broker_truth_lease_not_active",
         "lease_state": lease_state,
     }
+
+
+def _canonical_readiness_primary_artifact(agent: Mapping[str, Any], *, config: TrackBAgentHealthConfig) -> str | None:
+    for path_text in _list(agent.get("expected_artifact_paths")):
+        text = str(path_text)
+        if text.endswith("latest_canonical_readiness.json"):
+            return str(config.resolve(Path(text)))
+    primary = _primary_path(agent)
+    return str(config.resolve(Path(primary))) if primary else None
+
+
+def _canonical_readiness_artifact_status(
+    *,
+    agent: Mapping[str, Any],
+    config: TrackBAgentHealthConfig,
+    now: datetime,
+    current_head: str | None,
+    runtime_environment_truth: Mapping[str, Any],
+) -> dict[str, Any]:
+    if runtime_environment_truth.get("classification") != RUNTIME_DOWN_CLEAN:
+        return _required_artifact_status(
+            _primary_path(agent),
+            now=now,
+            max_age_seconds=config.artifact_max_age_seconds,
+            repo_root=config.repo_root,
+            current_head=current_head,
+        )
+    primary_path = _canonical_readiness_primary_artifact(agent, config=config)
+    if primary_path is None:
+        return {
+            "status": MISSING_ARTIFACT,
+            "reason": "canonical_readiness_artifact_path_missing",
+            "last_seen_at": None,
+            "freshness_age_seconds": None,
+        }
+    path = Path(primary_path)
+    payload = _read_json(path)
+    artifact = _artifact_status(
+        path,
+        now=now,
+        max_age_seconds=config.artifact_max_age_seconds,
+        repo_root=config.repo_root,
+        current_head=current_head,
+    )
+    if artifact.get("status") in {MISSING_ARTIFACT, ROOT_MISMATCH, SOURCE_COMMIT_MISMATCH, STALE}:
+        return artifact
+    if not payload:
+        return {**artifact, "status": MISSING_ARTIFACT, "reason": "canonical_readiness_artifact_missing_or_invalid"}
+    if _canonical_readiness_startup_preflight_evidence_clean(
+        payload=payload,
+        runtime_environment_truth=runtime_environment_truth,
+    ):
+        return {
+            **artifact,
+            "status": HEALTHY,
+            "reason": "canonical_readiness_artifact_fresh_startup_preflight",
+            "startup_preflight_compatible": True,
+        }
+    if str(payload.get("classification") or "") == "READY":
+        return {**artifact, "status": HEALTHY, "reason": "canonical_readiness_artifact_fresh"}
+    if (
+        str(payload.get("canonical_readiness") or "") == "READY_SUBMIT_CAPABLE"
+        and payload.get("submit_allowed") is not False
+    ):
+        return {**artifact, "status": HEALTHY, "reason": "canonical_readiness_artifact_fresh_submit_capable"}
+    return {
+        **artifact,
+        "status": STALE,
+        "reason": "canonical_readiness_artifact_not_startup_preflight_compatible",
+        "startup_preflight_compatible": False,
+    }
+
+
+def _canonical_readiness_startup_preflight_evidence_clean(
+    *,
+    payload: Mapping[str, Any],
+    runtime_environment_truth: Mapping[str, Any],
+) -> bool:
+    runtime = _mapping(payload.get("runtime"))
+    broker_truth = _mapping(payload.get("broker_truth"))
+    reconciliation = _mapping(payload.get("phase1_reconciliation"))
+    broker_session = _mapping(payload.get("broker_session_authority"))
+    safety_live_money = payload.get("live_money_eligible") is True or broker_truth.get("live_money_eligible") is True
+    paper_proof = payload.get("paper_proof_invoked") is True or broker_truth.get("paper_proof_invoked") is True
+    if safety_live_money or paper_proof:
+        return False
+    runtime_down = runtime_environment_truth.get("classification") == RUNTIME_DOWN_CLEAN or runtime.get("running") is False
+    if not runtime_down:
+        return False
+    if broker_truth.get("available") is not True or broker_truth.get("fresh") is not True:
+        return False
+    if broker_truth.get("positions_complete") is not True or broker_truth.get("open_orders_complete") is not True:
+        return False
+    if _as_int(broker_truth.get("open_order_count")) != 0:
+        return False
+    if "RECONCILED" not in str(reconciliation.get("classification") or ""):
+        return False
+    if reconciliation.get("broker_reconciled") is False:
+        return False
+    if _as_int(reconciliation.get("track_b_broker_open_order_count")) != 0:
+        return False
+    if _as_int(reconciliation.get("lifecycle_open_order_count")) != 0:
+        return False
+    if _as_int(reconciliation.get("lifecycle_open_position_count")) != 0:
+        return False
+    if _as_int(reconciliation.get("review_required_count")) != 0:
+        return False
+    if reconciliation.get("live_money_eligible") is True:
+        return False
+    if broker_session and broker_session.get("available") is not True:
+        return False
+    return True
 
 
 def _optional_artifact_status(
@@ -952,6 +1075,13 @@ def _list(value: Any) -> list[Any]:
 
 def _mapping(value: Any) -> Mapping[str, Any]:
     return value if isinstance(value, Mapping) else {}
+
+
+def _as_int(value: Any) -> int:
+    try:
+        return int(value or 0)
+    except (TypeError, ValueError):
+        return 0
 
 
 def _first_text(*values: Any) -> str | None:

@@ -811,6 +811,47 @@ def test_stale_noncritical_agent_health_artifact_is_warning(tmp_path: Path) -> N
     assert any(warning["code"] == "agent_health_stale_pid_detected" for warning in payload["warnings"])
 
 
+def test_stale_autonomous_recovery_blocker_does_not_override_current_agent_health(tmp_path: Path) -> None:
+    _seed_clean_stack(tmp_path)
+    _seed_control_plane(tmp_path)
+    _write(
+        tmp_path
+        / "outputs/track_b_execution_core/paper_autonomous_recovery/latest_paper_autonomous_recovery_plan.json",
+        {
+            "generated_at": NOW.isoformat(),
+            "classification": "PLAN_BLOCKED_STALE_EVIDENCE",
+            "primary_blocking_agent_id": "canonical_readiness_refresher",
+            "primary_blocking_reason": "artifact_stale",
+            "operator_explanation": "stale prior recovery explanation",
+            "recommended_observation_step": "stale prior recovery command",
+            "prioritized_blockers": [
+                {
+                    "agent_id": "canonical_readiness_refresher",
+                    "display_name": "Canonical readiness refresher",
+                    "status": "STALE",
+                    "reason": "artifact_stale",
+                    "source": "agent_health",
+                    "priority": 4,
+                    "blocking_for_proof": True,
+                    "blocking_for_runtime_submit": True,
+                }
+            ],
+        },
+    )
+
+    payload = _snapshot(tmp_path)
+
+    assert payload["agent_health_top_blockers"] == []
+    assert not any(
+        blocker.get("agent_id") == "canonical_readiness_refresher"
+        for blocker in payload["prioritized_blockers"]
+    )
+    assert payload["primary_blocking_agent_id"] != "canonical_readiness_refresher"
+    assert "Canonical readiness refresher" not in payload["operator_explanation"]
+    assert payload["classification"] == CONTROL_PLANE_SNAPSHOT_READY
+    assert payload["safe_to_start_runtime"] is True
+
+
 def test_missing_required_agent_health_artifact_blocks(tmp_path: Path) -> None:
     _seed_clean_stack(tmp_path)
     _seed_control_plane(tmp_path)

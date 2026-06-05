@@ -889,7 +889,10 @@ def _snapshot_payload(
     )
     warnings = list(shared_truth.get("warnings") or []) + list(runtime_supervisor.get("warnings") or [])
     warnings.extend(_agent_health_warnings(agent_health_evidence))
-    planner_explanation = _planner_explanation_fields(autonomous_recovery_plan)
+    planner_explanation = _planner_explanation_fields(
+        autonomous_recovery_plan,
+        agent_health_evidence=agent_health_evidence,
+    )
     payload = {
         "schema_version": "track_b_control_plane_snapshot_v1",
         "control_plane_snapshot_id": _snapshot_id(now),
@@ -1404,13 +1407,42 @@ def _agent_health_warnings(evidence: Mapping[str, Any]) -> list[dict[str, str]]:
     return warnings
 
 
-def _planner_explanation_fields(plan: Mapping[str, Any]) -> dict[str, Any]:
+def _planner_explanation_fields(
+    plan: Mapping[str, Any],
+    *,
+    agent_health_evidence: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    prioritized = _planner_prioritized_blockers(plan.get("prioritized_blockers"))
+    current_agent_blocker_ids = {
+        str(_mapping(row).get("agent_id") or "")
+        for row in _list(_mapping(agent_health_evidence).get("agent_health_top_blockers"))
+    }
+    primary_id = str(plan.get("primary_blocking_agent_id") or "")
+    stale_canonical_refresher_carryover = (
+        primary_id == "canonical_readiness_refresher"
+        and str(plan.get("primary_blocking_reason") or "") == "artifact_stale"
+        and primary_id not in current_agent_blocker_ids
+    )
+    if stale_canonical_refresher_carryover:
+        prioritized = [
+            row
+            for row in prioritized
+            if not row.get("agent_id") or str(row.get("agent_id")) in current_agent_blocker_ids
+        ]
+        if not prioritized:
+            return {
+                "primary_blocking_agent_id": "",
+                "primary_blocking_reason": "",
+                "operator_explanation": "",
+                "recommended_observation_step": "",
+                "prioritized_blockers": [],
+            }
     return {
-        "primary_blocking_agent_id": str(plan.get("primary_blocking_agent_id") or ""),
+        "primary_blocking_agent_id": primary_id,
         "primary_blocking_reason": str(plan.get("primary_blocking_reason") or ""),
         "operator_explanation": str(plan.get("operator_explanation") or ""),
         "recommended_observation_step": str(plan.get("recommended_observation_step") or ""),
-        "prioritized_blockers": _planner_prioritized_blockers(plan.get("prioritized_blockers")),
+        "prioritized_blockers": prioritized,
     }
 
 
