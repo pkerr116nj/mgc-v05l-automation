@@ -73,6 +73,7 @@ class TrackBArtifactArchivePlannerConfig:
     managed_position_registry_path: Path = DEFAULT_MANAGED_POSITION_REGISTRY_ARTIFACT
     research_roots: tuple[Path, ...] = DEFAULT_RESEARCH_ROOTS
     cold_candidate_days: int = DEFAULT_COLD_CANDIDATE_DAYS
+    max_inventory_scanned_files: int = 100000
     max_research_scanned_files: int = 5000
     sample_limit: int = 10
 
@@ -87,12 +88,13 @@ def build_track_b_artifact_archive_plan(
 ) -> dict[str, Any]:
     actual_now = _ensure_utc(now or datetime.now(UTC))
     inventory = _read_json(config.resolve(config.inventory_path))
-    if not inventory:
+    if not inventory or _inventory_scan_incomplete(inventory):
         inventory = build_track_b_artifact_retention_inventory(
             config=TrackBArtifactRetentionInventoryConfig(
                 repo_root=config.repo_root,
                 output_path=config.inventory_path,
                 cold_candidate_days=config.cold_candidate_days,
+                max_scanned_files=config.max_inventory_scanned_files,
             ),
             now=actual_now,
         )
@@ -133,6 +135,7 @@ def build_track_b_artifact_archive_plan(
     cold_candidates.extend(research_candidates)
     warm_diagnostics.extend(research_warm)
     scan_warnings = [*_list(inventory.get("warnings")), *research_warnings]
+    scan_truncated = _inventory_scan_incomplete(inventory) or bool(scan_warnings)
     active_lifecycle_blocked = _has_unresolved_lifecycle(
         active_lifecycle_protected=active_lifecycle_protected,
         managed_positions=managed_positions,
@@ -141,7 +144,7 @@ def build_track_b_artifact_archive_plan(
         "authority" in str(item.get("blocked_reason") or "") for item in blocked_candidates
     )
     classification = _classification(
-        scan_warnings=scan_warnings,
+        scan_truncated=scan_truncated,
         active_lifecycle_blocked=active_lifecycle_blocked,
         active_authority_blocked=active_authority_blocked,
         cold_candidate_count=len(cold_candidates),
@@ -149,6 +152,7 @@ def build_track_b_artifact_archive_plan(
     estimated_bytes = sum(int(item.get("size_bytes") or 0) for item in cold_candidates)
     protected_count = len(hot_protected) + len(active_lifecycle_protected)
     blocked_candidate_paths = [str(item.get("relative_path") or "") for item in blocked_candidates]
+    future_destructive_cleanup_allowed = len(blocked_candidates) == 0 and not scan_truncated and not active_lifecycle_blocked
     path_classifications = _path_classification_records(
         hot_protected=hot_protected,
         active_lifecycle_protected=active_lifecycle_protected,
@@ -174,6 +178,8 @@ def build_track_b_artifact_archive_plan(
         "live_money_eligible": False,
         "dashboard_projection_consumed": False,
         "classification": classification,
+        "scan_truncated": scan_truncated,
+        "destructive_cleanup_allowed": future_destructive_cleanup_allowed,
         "hot_authority_protected_count": len(hot_protected),
         "active_lifecycle_protected_count": len(active_lifecycle_protected),
         "protected_count": protected_count,
@@ -194,9 +200,11 @@ def build_track_b_artifact_archive_plan(
             "cleanup_candidate_count": len(cold_candidates),
             "blocked_candidate_count": len(blocked_candidates),
             "blocked_candidate_paths": blocked_candidate_paths,
-            "future_destructive_cleanup_allowed": len(blocked_candidates) == 0,
+            "scan_truncated": scan_truncated,
+            "future_destructive_cleanup_allowed": future_destructive_cleanup_allowed,
             "path_classifications": path_classifications[: config.sample_limit * 4],
         },
+        "scan_summaries": list(_list(inventory.get("scan_summaries"))),
         "warnings": scan_warnings,
         "evidence_summary": {
             "inventory_classification": inventory.get("classification"),
@@ -233,6 +241,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--output-path", type=Path, default=DEFAULT_ARTIFACT_ARCHIVE_PLAN_PATH)
     parser.add_argument("--inventory-path", type=Path, default=DEFAULT_ARTIFACT_RETENTION_INVENTORY_PATH)
     parser.add_argument("--cold-candidate-days", type=int, default=DEFAULT_COLD_CANDIDATE_DAYS)
+    parser.add_argument("--max-inventory-scanned-files", type=int, default=100000)
     parser.add_argument("--max-research-scanned-files", type=int, default=5000)
     parser.add_argument("--no-write", action="store_true")
     parser.add_argument("--json", action="store_true")
@@ -246,6 +255,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         output_path=Path(args.output_path),
         inventory_path=Path(args.inventory_path),
         cold_candidate_days=int(args.cold_candidate_days),
+        max_inventory_scanned_files=int(args.max_inventory_scanned_files),
         max_research_scanned_files=int(args.max_research_scanned_files),
     )
     payload = build_track_b_artifact_archive_plan(config=config)
@@ -259,6 +269,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         "warm_diagnostic_count": payload.get("warm_diagnostic_count"),
         "cold_archive_candidate_count": payload.get("cold_archive_candidate_count"),
         "blocked_candidate_count": payload.get("blocked_candidate_count"),
+        "scan_truncated": payload.get("scan_truncated"),
+        "destructive_cleanup_allowed": payload.get("destructive_cleanup_allowed"),
         "estimated_bytes": payload.get("estimated_bytes"),
         "output_path": str(output_path or config.resolve(config.output_path)),
         "dry_run_only": True,
@@ -355,12 +367,12 @@ def _research_candidates(
 
 def _classification(
     *,
-    scan_warnings: Sequence[Mapping[str, Any]],
+    scan_truncated: bool,
     active_lifecycle_blocked: bool,
     active_authority_blocked: bool,
     cold_candidate_count: int,
 ) -> str:
-    if scan_warnings:
+    if scan_truncated:
         return ARCHIVE_PLAN_BLOCKED_SCAN_LIMIT
     if active_lifecycle_blocked:
         return ARCHIVE_PLAN_BLOCKED_UNRESOLVED_LIFECYCLE
@@ -391,6 +403,18 @@ def _candidate_record(*, item: Mapping[str, Any], source: str, reason: str) -> d
         "candidate_reason": reason,
         "blocked": False,
     }
+
+
+def _inventory_scan_incomplete(inventory: Mapping[str, Any]) -> bool:
+    if inventory.get("scan_truncated") is True:
+        return True
+    summary = _mapping(inventory.get("summary"))
+    if summary.get("scan_truncated") is True:
+        return True
+    for warning in _list(inventory.get("warnings")):
+        if isinstance(warning, Mapping) and str(warning.get("code") or "") == "scan_file_cap_reached":
+            return True
+    return False
 
 
 def _archive_batches(candidates: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:

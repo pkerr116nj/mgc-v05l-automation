@@ -36,6 +36,9 @@ def test_identifies_hot_authority_artifacts(tmp_path: Path) -> None:
     assert item["exists"] is True
     assert payload["read_only"] is True
     assert payload["dry_run_only"] is True
+    assert payload["scan_truncated"] is False
+    assert payload["summary"]["scan_truncated"] is False
+    assert payload["scan_summaries"]
     assert payload["deletion_performed"] is False
     assert payload["archive_performed"] is False
     assert payload["dashboard_projection_consumed"] is False
@@ -84,6 +87,33 @@ def test_identifies_old_diagnostics_as_archive_candidates(tmp_path: Path) -> Non
     assert item["retention_tier"] == COLD_ARCHIVE_CANDIDATE
     assert item["archive_candidate"] is True
     assert item["protected"] is False
+    reports_summary = _scan_summary(payload, "outputs/reports")
+    assert reports_summary["scan_truncated"] is False
+    assert reports_summary["scanned_file_count"] == 1
+
+
+def test_inventory_reports_truncated_scan_with_per_root_summary(tmp_path: Path) -> None:
+    for index in range(3):
+        old_report = tmp_path / "outputs" / "reports" / f"old_runtime_report_{index}.json"
+        _write_json(old_report, {"report": index})
+        _set_mtime(old_report, NOW - timedelta(days=45))
+
+    payload = build_track_b_artifact_retention_inventory(
+        config=TrackBArtifactRetentionInventoryConfig(
+            repo_root=tmp_path,
+            cold_candidate_days=30,
+            max_scanned_files=2,
+        ),
+        now=NOW,
+    )
+
+    assert payload["classification"] == "ARTIFACT_RETENTION_INVENTORY_PARTIAL"
+    assert payload["scan_truncated"] is True
+    assert payload["summary"]["scan_truncated"] is True
+    assert payload["warnings"][0]["code"] == "scan_file_cap_reached"
+    reports_summary = _scan_summary(payload, "outputs/reports")
+    assert reports_summary["scan_truncated"] is True
+    assert reports_summary["scanned_file_count"] == 2
 
 
 def test_protects_active_lifecycle_and_reconciliation_latest(tmp_path: Path) -> None:
@@ -157,3 +187,10 @@ def _set_mtime(path: Path, when: datetime) -> None:
 
 def _by_relative(items: list[dict]) -> dict[str, dict]:
     return {item["relative_path"]: item for item in items}
+
+
+def _scan_summary(payload: dict, suffix: str) -> dict:
+    for item in payload["scan_summaries"]:
+        if str(item["root"]).endswith(suffix):
+            return item
+    raise AssertionError(f"missing scan summary for {suffix}")

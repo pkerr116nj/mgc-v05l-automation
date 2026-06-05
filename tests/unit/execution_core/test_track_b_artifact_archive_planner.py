@@ -91,7 +91,7 @@ def test_hot_authority_guardrail_protects_restart_submit_close_artifacts(tmp_pat
     report = payload["dry_run_safety_report"]
     assert report["protected_count"] == payload["protected_count"]
     assert report["cleanup_candidate_count"] == 0
-    assert report["future_destructive_cleanup_allowed"] is True
+    assert report["future_destructive_cleanup_allowed"] is False
 
 
 def test_active_lifecycle_files_are_protected(tmp_path: Path) -> None:
@@ -203,39 +203,54 @@ def test_stale_inventory_candidate_for_hot_authority_is_blocked_and_reported(tmp
 
 
 def test_scan_limit_warning_blocks_ready_classification(tmp_path: Path) -> None:
-    inventory_path = (
-        tmp_path / "outputs/track_b_execution_core/artifact_retention/latest_artifact_retention_inventory.json"
-    )
-    _write_json(
-        inventory_path,
-        {
-            "classification": "ARTIFACT_RETENTION_INVENTORY_PARTIAL",
-            "hot_authority_artifacts": [],
-            "active_lifecycle_artifacts": [],
-            "warm_diagnostics": [],
-            "archive_candidates": [
-                {
-                    "relative_path": "outputs/reports/old_report.json",
-                    "absolute_path": str(tmp_path / "outputs/reports/old_report.json"),
-                    "exists": True,
-                    "size_bytes": 10,
-                    "retention_tier": "COLD_ARCHIVE_CANDIDATE",
-                    "archive_candidate": True,
-                    "protected": False,
-                }
-            ],
-            "warnings": [{"code": "scan_file_cap_reached"}],
-        },
-    )
+    for index in range(3):
+        report = tmp_path / "outputs" / "reports" / f"old_report_{index}.json"
+        _write_json(report, {"report": index})
+        _set_mtime(report, NOW - timedelta(days=45))
 
     payload = build_track_b_artifact_archive_plan(
-        config=TrackBArtifactArchivePlannerConfig(repo_root=tmp_path),
+        config=TrackBArtifactArchivePlannerConfig(repo_root=tmp_path, max_inventory_scanned_files=2),
         now=NOW,
     )
 
     assert payload["classification"] == ARCHIVE_PLAN_BLOCKED_SCAN_LIMIT
-    assert payload["cold_archive_candidate_count"] == 1
+    assert payload["scan_truncated"] is True
+    assert payload["destructive_cleanup_allowed"] is False
+    assert payload["dry_run_safety_report"]["scan_truncated"] is True
+    assert payload["dry_run_safety_report"]["future_destructive_cleanup_allowed"] is False
     assert payload["warnings"][0]["code"] == "scan_file_cap_reached"
+    assert payload["warnings"][0]["root"].endswith("outputs/reports")
+
+
+def test_partial_inventory_is_rebuilt_into_complete_bounded_plan(tmp_path: Path) -> None:
+    inventory_path = (
+        tmp_path / "outputs/track_b_execution_core/artifact_retention/latest_artifact_retention_inventory.json"
+    )
+    old_report = tmp_path / "outputs" / "reports" / "old_report.json"
+    _write_json(old_report, {"report": "old"})
+    _set_mtime(old_report, NOW - timedelta(days=45))
+    _write_json(
+        inventory_path,
+        {
+            "classification": "ARTIFACT_RETENTION_INVENTORY_PARTIAL",
+            "scan_truncated": True,
+            "archive_candidates": [],
+            "warnings": [{"code": "scan_file_cap_reached", "root": "outputs/reports"}],
+        },
+    )
+
+    payload = build_track_b_artifact_archive_plan(
+        config=TrackBArtifactArchivePlannerConfig(repo_root=tmp_path, max_inventory_scanned_files=100),
+        now=NOW,
+    )
+
+    assert payload["classification"] == ARCHIVE_PLAN_READY
+    assert payload["scan_truncated"] is False
+    assert payload["warnings"] == []
+    assert payload["cleanup_candidate_count"] == 1
+    assert payload["dry_run_safety_report"]["future_destructive_cleanup_allowed"] is True
+    candidates = _by_relative(payload["archive_candidates_sample"])
+    assert candidates["outputs/reports/old_report.json"]["retention_tier"] == "COLD_ARCHIVE_CANDIDATE"
 
 
 def test_no_history_no_candidates_is_empty(tmp_path: Path) -> None:
@@ -245,6 +260,8 @@ def test_no_history_no_candidates_is_empty(tmp_path: Path) -> None:
     )
 
     assert payload["classification"] == ARCHIVE_PLAN_EMPTY
+    assert payload["scan_truncated"] is False
+    assert payload["destructive_cleanup_allowed"] is True
     assert payload["cold_archive_candidate_count"] == 0
     assert payload["blocked_candidate_count"] == 0
     assert payload["archive_candidates_sample"] == []

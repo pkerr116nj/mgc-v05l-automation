@@ -127,7 +127,7 @@ class TrackBArtifactRetentionInventoryConfig:
     lifecycle_root: Path = DEFAULT_LIFECYCLE_ROOT
     recent_diagnostics_days: int = 30
     cold_candidate_days: int = 30
-    max_scanned_files: int = 25000
+    max_scanned_files: int = 100000
 
     def resolve(self, path: Path) -> Path:
         return path if path.is_absolute() else self.repo_root / path
@@ -139,7 +139,8 @@ def build_track_b_artifact_retention_inventory(
     now: datetime | None = None,
 ) -> dict[str, Any]:
     actual_now = _ensure_utc(now or datetime.now(UTC))
-    scanned_paths, scan_warnings = _scan_candidate_paths(config)
+    scanned_paths, directory_summary_paths, scan_warnings, scan_summaries = _scan_candidate_paths(config)
+    scan_truncated = bool(scan_warnings)
     hot_paths = {config.resolve(path) for path in config.hot_authority_paths}
     hot_authority_artifacts = [
         _artifact_record(
@@ -210,8 +211,34 @@ def build_track_b_artifact_retention_inventory(
                     protection_reason=f"within {config.recent_diagnostics_days} day warm diagnostic window",
                 )
             )
+    for path in sorted(directory_summary_paths):
+        age_days = _age_days(path=path, now=actual_now)
+        retention_tier = (
+            COLD_ARCHIVE_CANDIDATE
+            if age_days is not None and age_days >= config.cold_candidate_days
+            else WARM_DIAGNOSTIC_RETAIN
+        )
+        record = {
+            **_artifact_record(
+                path=path,
+                repo_root=config.repo_root,
+                now=actual_now,
+                retention_tier=retention_tier,
+                protected=False,
+                protection_reason=None
+                if retention_tier == COLD_ARCHIVE_CANDIDATE
+                else f"directory summary within {config.recent_diagnostics_days} day warm diagnostic window",
+            ),
+            "record_kind": "directory_summary",
+            "bounded_summary": True,
+            "recursive_scan_performed": False,
+        }
+        if retention_tier == COLD_ARCHIVE_CANDIDATE:
+            archive_candidates.append(record)
+        else:
+            warm_diagnostics.append(record)
 
-    classification = ARTIFACT_RETENTION_INVENTORY_READY
+    classification = ARTIFACT_RETENTION_INVENTORY_PARTIAL if scan_truncated else ARTIFACT_RETENTION_INVENTORY_READY
     return {
         "schema_version": "track_b_artifact_retention_inventory_v1",
         "generated_at": actual_now.isoformat(),
@@ -228,6 +255,7 @@ def build_track_b_artifact_retention_inventory(
         "dashboard_projection_consumed": False,
         "authority_owner": "execution_core",
         "classification": classification,
+        "scan_truncated": scan_truncated,
         "policy": {
             "hot_latest_keep": "always keep current/latest authority artifacts",
             "recent_diagnostics_days": config.recent_diagnostics_days,
@@ -243,12 +271,15 @@ def build_track_b_artifact_retention_inventory(
             "warm_diagnostic_count": len(warm_diagnostics),
             "cold_archive_candidate_count": len(archive_candidates),
             "scan_warning_count": len(scan_warnings),
+            "scan_truncated": scan_truncated,
+            "scanned_file_count": sum(int(item.get("scanned_file_count") or 0) for item in scan_summaries),
         },
         "hot_authority_artifacts": hot_authority_artifacts,
         "active_lifecycle_artifacts": active_lifecycle_artifacts,
         "warm_diagnostics": warm_diagnostics,
         "archive_candidates": archive_candidates,
         "protected_artifacts": sorted(protected_by_path.values(), key=lambda item: item["relative_path"]),
+        "scan_summaries": scan_summaries,
         "warnings": scan_warnings,
         "artifact_paths": {
             "authority": str(config.resolve(config.output_path)),
@@ -318,34 +349,126 @@ def main(argv: Sequence[str] | None = None) -> int:
     return 0
 
 
-def _scan_candidate_paths(config: TrackBArtifactRetentionInventoryConfig) -> tuple[set[Path], list[dict[str, Any]]]:
+def _scan_candidate_paths(
+    config: TrackBArtifactRetentionInventoryConfig,
+) -> tuple[set[Path], set[Path], list[dict[str, Any]], list[dict[str, Any]]]:
     paths: set[Path] = set()
+    directory_summary_paths: set[Path] = set()
     warnings: list[dict[str, Any]] = []
-    scanned = 0
+    scan_summaries: list[dict[str, Any]] = []
     lifecycle_root = config.resolve(config.lifecycle_root)
+    lifecycle_scanned = 0
     if lifecycle_root.exists():
         for path in lifecycle_root.rglob("*"):
             if path.is_file():
                 paths.add(path)
+                lifecycle_scanned += 1
+                if lifecycle_scanned >= config.max_scanned_files:
+                    warnings.append(
+                        {
+                            "code": "scan_file_cap_reached",
+                            "root_category": "active_lifecycle",
+                            "root": str(lifecycle_root),
+                            "max_scanned_files": config.max_scanned_files,
+                        }
+                    )
+                    break
+    scan_summaries.append(
+        {
+            "root_category": "active_lifecycle",
+            "root": str(lifecycle_root),
+            "scanned_file_count": lifecycle_scanned,
+            "scan_truncated": any(
+                item.get("root_category") == "active_lifecycle" and item.get("root") == str(lifecycle_root)
+                for item in warnings
+            ),
+        }
+    )
     for root in config.warm_diagnostic_roots:
         resolved = config.resolve(root)
+        root_scanned = 0
+        root_truncated = False
+        summarized_directory_count = 0
         if not resolved.exists():
+            scan_summaries.append(
+                {
+                    "root_category": "warm_diagnostic",
+                    "root": str(resolved),
+                    "scanned_file_count": 0,
+                    "scan_truncated": False,
+                    "exists": False,
+                }
+            )
             continue
-        for path in resolved.rglob("*"):
-            if not path.is_file():
+        for path in sorted(resolved.iterdir()):
+            if path.is_dir():
+                if _path_is_hot_authority_latest_root(path=path, config=config):
+                    nested_paths, nested_truncated, nested_count = _bounded_recursive_files(
+                        root=path,
+                        max_scanned_files=config.max_scanned_files,
+                    )
+                    paths.update(nested_paths)
+                    root_scanned += nested_count
+                    if nested_truncated:
+                        root_truncated = True
+                        warnings.append(
+                            {
+                                "code": "scan_file_cap_reached",
+                                "root_category": "hot_authority_latest_root",
+                                "max_scanned_files": config.max_scanned_files,
+                                "root": str(path),
+                            }
+                        )
+                    continue
+                directory_summary_paths.add(path)
+                summarized_directory_count += 1
                 continue
             paths.add(path)
-            scanned += 1
-            if scanned >= config.max_scanned_files:
+            root_scanned += 1
+            if root_scanned >= config.max_scanned_files:
+                root_truncated = True
                 warnings.append(
                     {
                         "code": "scan_file_cap_reached",
+                        "root_category": "warm_diagnostic",
                         "max_scanned_files": config.max_scanned_files,
-                        "last_root": str(resolved),
+                        "root": str(resolved),
+                        "last_path": str(path),
                     }
                 )
-                return paths, warnings
-    return paths, warnings
+                break
+        scan_summaries.append(
+            {
+                "root_category": "warm_diagnostic",
+                "root": str(resolved),
+                "scanned_file_count": root_scanned,
+                "summarized_directory_count": summarized_directory_count,
+                "scan_truncated": root_truncated,
+                "exists": True,
+            }
+        )
+    return paths, directory_summary_paths, warnings, scan_summaries
+
+
+def _bounded_recursive_files(*, root: Path, max_scanned_files: int) -> tuple[set[Path], bool, int]:
+    paths: set[Path] = set()
+    scanned = 0
+    for path in sorted(root.rglob("*")):
+        if not path.is_file():
+            continue
+        paths.add(path)
+        scanned += 1
+        if scanned >= max_scanned_files:
+            return paths, True, scanned
+    return paths, False, scanned
+
+
+def _path_is_hot_authority_latest_root(*, path: Path, config: TrackBArtifactRetentionInventoryConfig) -> bool:
+    for root in config.hot_authority_latest_roots:
+        resolved_root = config.resolve(root)
+        if path == resolved_root:
+            return True
+    return False
 
 
 def _hot_authority_protection_reason(
