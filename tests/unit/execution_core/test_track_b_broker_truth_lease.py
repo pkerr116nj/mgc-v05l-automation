@@ -95,13 +95,36 @@ def test_active_lease_from_fresh_truth_and_clean_reconciliation() -> None:
     result = classify_broker_truth_lease(base_inputs())
 
     assert result["lease_state"] == "ACTIVE"
+    assert result["connection_mode"] == "SUBMIT_CAPABLE"
     assert result["submit_entry_allowed"] is True
     assert result["submit_exit_allowed"] is True
+    assert result["allowed_uses"]["new_entry"] is True
+    assert result["allowed_uses"]["managed_risk_reducing_close"] is True
+    assert result["broker_position_lease"]["state"] == "FRESH"
+    assert result["broker_open_order_lease"]["state"] == "FRESH"
+    assert "NEW_ENTRY_AUTHORITY" in result["broker_position_lease"]["allowed_uses"]
+    assert "RISK_REDUCING_CLOSE_AUTHORITY" in result["broker_open_order_lease"]["allowed_uses"]
     assert result["valid_until"] == "2026-05-18T15:03:00+00:00"
     assert result["exit_valid_until"] == "2026-05-18T15:13:00+00:00"
     assert result["live_money_eligible"] is False
     assert result["operator_action_required"] is False
     assert result["blockers"] == []
+
+
+def test_fresh_fill_callback_lease_allows_callback_adoption() -> None:
+    inputs = base_inputs()
+    inputs["fill_evidence"] = {
+        "classification": "FILL_CALLBACK_EVIDENCE_READY",
+        "generated_at": "2026-05-18T14:59:30+00:00",
+        "fill_callbacks_complete": True,
+        "source_path": "outputs/reports/ibkr_read_only_verification/executions.json",
+    }
+
+    result = classify_broker_truth_lease(inputs)
+
+    assert result["connection_mode"] == "FILL_CALLBACK_CAPABLE"
+    assert result["execution_fill_evidence_lease"]["state"] == "FRESH"
+    assert result["allowed_uses"]["fill_callback_adoption"] is True
 
 
 def test_failed_latest_attempt_degrades_unexpired_lease_without_invalidation() -> None:
@@ -118,9 +141,12 @@ def test_failed_latest_attempt_degrades_unexpired_lease_without_invalidation() -
     result = classify_broker_truth_lease(inputs)
 
     assert result["lease_state"] == "ACTIVE_DEGRADED_REFRESH_FAILING"
-    assert result["submit_entry_allowed"] is True
-    assert result["submit_exit_allowed"] is True
+    assert result["connection_mode"] == "DEGRADED_RECOVERED"
+    assert result["submit_entry_allowed"] is False
+    assert result["submit_exit_allowed"] is False
+    assert result["allowed_uses"]["new_entry"] is False
     assert _warning_codes(result) >= {"broker_truth_refresh_failing"}
+    assert _authority_blocker_codes(result) >= {"connection_not_submit_capable"}
     assert result["contradiction_details"] == []
 
 
@@ -133,6 +159,9 @@ def test_entry_expiry_blocks_new_entries() -> None:
     assert result["lease_state"] == "EXPIRED_BLOCK_NEW_ENTRIES"
     assert result["submit_entry_allowed"] is False
     assert result["submit_exit_allowed"] is False
+    assert result["broker_position_lease"]["state"] == "FRESH"
+    assert result["broker_open_order_lease"]["state"] == "FRESH"
+    assert result["allowed_uses"]["new_entry"] is False
     assert _blocker_codes(result) >= {"entry_lease_expired"}
 
 
@@ -165,6 +194,101 @@ def test_expired_entry_allows_lifecycle_owned_exit_inside_exit_window() -> None:
     assert result["lease_state"] == "EXPIRED_EXITS_ONLY"
     assert result["submit_entry_allowed"] is False
     assert result["submit_exit_allowed"] is True
+
+
+def test_position_truth_only_allows_adoption_diagnosis_but_not_new_entry() -> None:
+    inputs = base_inputs()
+    inputs["connection_mode"] = "POSITION_TRUTH_ONLY"
+    inputs["submit_ownership"] = {"available": True, "trade_id": "trade-mes", "lifecycle_id": "life-mes"}
+
+    result = classify_broker_truth_lease(inputs)
+
+    assert result["connection_mode"] == "POSITION_TRUTH_ONLY"
+    assert result["submit_entry_allowed"] is False
+    assert result["submit_exit_allowed"] is False
+    assert result["allowed_uses"]["new_entry"] is False
+    assert result["allowed_uses"]["managed_risk_reducing_close"] is False
+    assert result["allowed_uses"]["broker_observed_adoption_diagnosis"] is True
+    assert _authority_blocker_codes(result) >= {"connection_not_submit_capable"}
+
+
+def test_stale_open_order_lease_blocks_close_submit() -> None:
+    inputs = base_inputs()
+    inputs["current_time"] = "2026-05-18T14:59:00+00:00"
+    inputs["policy"] = {
+        **dict(inputs["policy"]),
+        "max_position_lease_age_seconds": 300,
+        "max_open_order_lease_age_seconds": 60,
+    }
+    inputs["last_successful_broker_truth"] = {
+        **dict(inputs["last_successful_broker_truth"]),
+        "generated_at": "2026-05-18T14:58:30+00:00",
+        "open_orders_generated_at": "2026-05-18T14:55:00+00:00",
+        "positions": [{"symbol": "MNQ", "local_symbol": "MNQM6", "quantity": "1.0"}],
+    }
+    inputs["latest_attempt_status"] = {
+        **dict(inputs["latest_attempt_status"]),
+        "generated_at": "2026-05-18T14:58:30+00:00",
+        "open_orders_generated_at": "2026-05-18T14:55:00+00:00",
+        "positions": [{"symbol": "MNQ", "local_symbol": "MNQM6", "quantity": "1.0"}],
+    }
+    inputs["reconciliation"] = {
+        **dict(inputs["reconciliation"]),
+        "track_b_broker_position_count": 1,
+        "lifecycle_open_position_count": 1,
+        "position_match_report": {"state": "BROKER_AND_LIFECYCLE_MATCH", "matched": True},
+    }
+    inputs["lifecycle"] = {
+        **dict(inputs["lifecycle"]),
+        "open_position_count": 1,
+        "owned_open_position_count": 1,
+        "open_positions": [{"symbol": "MNQ", "local_symbol": "MNQM6", "quantity": "1.0", "owned": True}],
+    }
+
+    result = classify_broker_truth_lease(inputs)
+
+    assert result["broker_position_lease"]["state"] == "FRESH"
+    assert result["broker_open_order_lease"]["state"] == "STALE"
+    assert result["submit_exit_allowed"] is False
+    assert result["allowed_uses"]["managed_risk_reducing_close"] is False
+    assert _authority_blocker_codes(result) >= {"broker_open_order_lease_not_fresh"}
+
+
+def test_missing_fill_callback_routes_to_broker_observed_adoption_path() -> None:
+    inputs = base_inputs()
+    inputs["last_successful_broker_truth"] = {
+        **dict(inputs["last_successful_broker_truth"]),
+        "positions": [{"symbol": "MES", "local_symbol": "MESM6", "quantity": "1.0"}],
+    }
+    inputs["latest_attempt_status"] = {
+        **dict(inputs["latest_attempt_status"]),
+        "positions": [{"symbol": "MES", "local_symbol": "MESM6", "quantity": "1.0"}],
+    }
+    inputs["reconciliation"] = {
+        **dict(inputs["reconciliation"]),
+        "classification": "BROKER_TRUTH_SETTLEMENT_TIMEOUT",
+        "broker_reconciled": False,
+        "current_scope_review_required_count": 0,
+        "track_b_broker_position_count": 1,
+        "broker_backed_entry_adoption": {
+            "classification": "BROKER_BACKED_ENTRY_ADOPTION_REQUIRED",
+            "trade_id": "trade-mes",
+            "lifecycle_id": "life-mes",
+        },
+    }
+    inputs["fill_evidence"] = {
+        "classification": "FILL_CALLBACK_MISSING",
+        "generated_at": "2026-05-18T14:59:00+00:00",
+        "fill_callbacks_complete": False,
+    }
+
+    result = classify_broker_truth_lease(inputs)
+
+    assert result["lease_state"] == "OPERATOR_REQUIRED"
+    assert result["execution_fill_evidence_lease"]["state"] == "INCOMPLETE"
+    assert result["allowed_uses"]["fill_callback_adoption"] is False
+    assert result["allowed_uses"]["broker_observed_adoption_diagnosis"] is True
+    assert result["submit_entry_allowed"] is False
 
 
 def test_unknown_open_orders_invalidate_immediately() -> None:
@@ -335,3 +459,7 @@ def _blocker_codes(result: dict[str, object]) -> set[str]:
 
 def _contradiction_codes(result: dict[str, object]) -> set[str]:
     return {str(row.get("code")) for row in result.get("contradiction_details", []) if isinstance(row, dict)}
+
+
+def _authority_blocker_codes(result: dict[str, object]) -> set[str]:
+    return {str(row.get("code")) for row in result.get("authority_use_blockers", []) if isinstance(row, dict)}

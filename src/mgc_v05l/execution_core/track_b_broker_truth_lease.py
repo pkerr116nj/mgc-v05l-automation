@@ -26,6 +26,21 @@ LEASE_STATES = {
     "OPERATOR_REQUIRED",
 }
 
+CONNECTION_MODES = {
+    "IBKR_CONNECTION_DOWN",
+    "POSITION_TRUTH_ONLY",
+    "ORDER_STATUS_UNRELIABLE",
+    "SUBMIT_CAPABLE",
+    "FILL_CALLBACK_CAPABLE",
+    "DEGRADED_RECOVERED",
+}
+
+AUTHORITY_USE_NEW_ENTRY = "NEW_ENTRY_AUTHORITY"
+AUTHORITY_USE_RISK_REDUCING_CLOSE = "RISK_REDUCING_CLOSE_AUTHORITY"
+AUTHORITY_USE_BROKER_OBSERVED_ADOPTION = "BROKER_OBSERVED_ADOPTION_DIAGNOSIS"
+AUTHORITY_USE_FILL_CALLBACK_ADOPTION = "FILL_CALLBACK_ADOPTION"
+AUTHORITY_USE_STATUS_DIAGNOSTIC = "STATUS_DIAGNOSTIC"
+
 DEFAULT_LEASE_ARTIFACT = Path("outputs") / "operator_dashboard" / "runtime" / "latest_broker_truth_lease.json"
 DEFAULT_LEASE_HISTORY = Path("outputs") / "operator_dashboard" / "runtime" / "broker_truth_lease_history.jsonl"
 
@@ -40,10 +55,14 @@ def classify_broker_truth_lease(inputs: Mapping[str, Any]) -> dict[str, Any]:
     max_entry_age_seconds = _float(policy.get("max_entry_age_seconds"), 0.0)
     max_exit_age_seconds = _float(policy.get("max_exit_age_seconds"), max_entry_age_seconds)
     degraded_refresh_grace_seconds = _float(policy.get("degraded_refresh_grace_seconds"), max_entry_age_seconds)
+    max_position_lease_age_seconds = _float(policy.get("max_position_lease_age_seconds"), max_exit_age_seconds)
+    max_open_order_lease_age_seconds = _float(policy.get("max_open_order_lease_age_seconds"), max_exit_age_seconds)
+    max_fill_evidence_lease_age_seconds = _float(policy.get("max_fill_evidence_lease_age_seconds"), max_exit_age_seconds)
     allowed_instruments = _string_set(inputs.get("allowed_instruments") or inputs.get("allowed_scope"))
 
     broker_truth = _mapping(inputs.get("last_successful_broker_truth") or inputs.get("broker_truth"))
     latest_attempt = _mapping(inputs.get("latest_attempt_status"))
+    fill_evidence = _mapping(inputs.get("fill_evidence") or inputs.get("execution_fill_evidence"))
     reconciliation = _mapping(inputs.get("reconciliation") or inputs.get("phase1_reconciliation"))
     lifecycle = _mapping(inputs.get("lifecycle") or inputs.get("lifecycle_state"))
     order_state = _mapping(inputs.get("order_state") or inputs.get("order_intent_state") or inputs.get("open_order_state"))
@@ -59,6 +78,13 @@ def classify_broker_truth_lease(inputs: Mapping[str, Any]) -> dict[str, Any]:
     entry_valid_until = _add_seconds(broker_truth_time, max_entry_age_seconds)
     exit_valid_until = _add_seconds(broker_truth_time, max_exit_age_seconds)
     valid_until = entry_valid_until
+    connection_health = _connection_health(
+        inputs=inputs,
+        broker_truth=broker_truth,
+        latest_attempt=latest_attempt,
+        fill_evidence=fill_evidence,
+    )
+    connection_mode = str(connection_health["connection_mode"])
 
     builder = _LeaseBuilder(
         generated_at=generated_at,
@@ -81,7 +107,8 @@ def classify_broker_truth_lease(inputs: Mapping[str, Any]) -> dict[str, Any]:
         "lifecycle": lifecycle,
         "order_state": order_state,
     }
-    if any(_bool(_mapping(value).get("live_money_eligible")) for value in live_money_sources.values()):
+    live_money_flag_present = any(_bool(_mapping(value).get("live_money_eligible")) for value in live_money_sources.values())
+    if live_money_flag_present:
         builder.invalidate(
             "INVALIDATED_CONTRADICTION",
             "live_money_eligible_enabled",
@@ -193,6 +220,55 @@ def classify_broker_truth_lease(inputs: Mapping[str, Any]) -> dict[str, Any]:
             builder.state = "EXPIRED_BLOCK_NEW_ENTRIES"
             builder.block("entry_lease_expired", "Entry lease expired; new entries are blocked.")
 
+    broker_position_lease = _evidence_lease(
+        lease_type="broker_position_lease",
+        generated_at=broker_truth_time,
+        current_time=current_time,
+        max_age_seconds=max_position_lease_age_seconds,
+        source=broker_truth.get("positions_snapshot_path") or source_paths.get("positions") or source_paths.get("broker_truth"),
+        complete=_bool(broker_truth.get("positions_complete")),
+        base_authority_uses=(
+            AUTHORITY_USE_NEW_ENTRY,
+            AUTHORITY_USE_RISK_REDUCING_CLOSE,
+            AUTHORITY_USE_BROKER_OBSERVED_ADOPTION,
+        ),
+    )
+    broker_open_order_lease = _evidence_lease(
+        lease_type="broker_open_order_lease",
+        generated_at=_parse_time(
+            broker_truth.get("open_orders_generated_at")
+            or broker_truth.get("orders_generated_at")
+            or broker_truth.get("generated_at")
+            or broker_truth.get("last_success_at")
+        ),
+        current_time=current_time,
+        max_age_seconds=max_open_order_lease_age_seconds,
+        source=broker_truth.get("open_orders_snapshot_path") or source_paths.get("open_orders") or source_paths.get("broker_truth"),
+        complete=_bool(broker_truth.get("open_orders_complete")),
+        base_authority_uses=(AUTHORITY_USE_NEW_ENTRY, AUTHORITY_USE_RISK_REDUCING_CLOSE),
+    )
+    fill_evidence_time = _parse_time(
+        fill_evidence.get("generated_at")
+        or fill_evidence.get("last_callback_at")
+        or fill_evidence.get("latest_fill_at")
+        or fill_evidence.get("latest_execution_at")
+    )
+    execution_fill_evidence_lease = _evidence_lease(
+        lease_type="execution_fill_evidence_lease",
+        generated_at=fill_evidence_time,
+        current_time=current_time,
+        max_age_seconds=max_fill_evidence_lease_age_seconds,
+        source=fill_evidence.get("source_path") or source_paths.get("fill_evidence") or source_paths.get("executions"),
+        complete=_fill_evidence_complete(fill_evidence),
+        base_authority_uses=(AUTHORITY_USE_FILL_CALLBACK_ADOPTION,),
+    )
+    submit_ownership_available = _submit_ownership_available(
+        inputs=inputs,
+        reconciliation=reconciliation,
+        order_state=order_state,
+    )
+    current_scope_clean = _current_scope_review_required_count(reconciliation) == 0
+
     submit_entry_allowed = builder.state in {"ACTIVE", "ACTIVE_DEGRADED_REFRESH_FAILING"} and valid_until is not None and current_time <= valid_until
     submit_exit_allowed = (
         builder.state in {"ACTIVE", "ACTIVE_DEGRADED_REFRESH_FAILING"}
@@ -208,6 +284,42 @@ def classify_broker_truth_lease(inputs: Mapping[str, Any]) -> dict[str, Any]:
         submit_exit_allowed = False
     if builder.state == "EXPIRED_EXITS_ONLY":
         submit_entry_allowed = False
+
+    authority_use_blockers = _authority_use_blockers(
+        connection_mode=connection_mode,
+        broker_position_lease=broker_position_lease,
+        broker_open_order_lease=broker_open_order_lease,
+        reconciliation_clean=_reconciliation_clean(reconciliation),
+    )
+    submit_connection_capable = _connection_allows_submit(connection_mode)
+    submit_entry_allowed = bool(
+        submit_entry_allowed
+        and submit_connection_capable
+        and _lease_allows(broker_position_lease, AUTHORITY_USE_NEW_ENTRY)
+        and _lease_allows(broker_open_order_lease, AUTHORITY_USE_NEW_ENTRY)
+        and _reconciliation_clean(reconciliation)
+    )
+    submit_exit_allowed = bool(
+        submit_exit_allowed
+        and submit_connection_capable
+        and _lease_allows(broker_position_lease, AUTHORITY_USE_RISK_REDUCING_CLOSE)
+        and _lease_allows(broker_open_order_lease, AUTHORITY_USE_RISK_REDUCING_CLOSE)
+    )
+    broker_observed_adoption_allowed = bool(
+        _lease_allows(broker_position_lease, AUTHORITY_USE_BROKER_OBSERVED_ADOPTION)
+        and submit_ownership_available
+        and current_scope_clean
+        and not live_money_flag_present
+        and not _bool(inputs.get("paper_proof_invoked"))
+        and not any(_bool(_mapping(value).get("paper_proof_invoked")) for value in live_money_sources.values())
+    )
+    allowed_uses = {
+        "new_entry": submit_entry_allowed,
+        "managed_risk_reducing_close": submit_exit_allowed,
+        "broker_observed_adoption_diagnosis": broker_observed_adoption_allowed,
+        "fill_callback_adoption": _lease_allows(execution_fill_evidence_lease, AUTHORITY_USE_FILL_CALLBACK_ADOPTION),
+        "status_diagnostic": True,
+    }
 
     payload = {
         "schema_version": "track_b_broker_truth_lease_v1",
@@ -226,6 +338,13 @@ def classify_broker_truth_lease(inputs: Mapping[str, Any]) -> dict[str, Any]:
         "max_exit_age_seconds": max_exit_age_seconds,
         "degraded_refresh_grace_seconds": degraded_refresh_grace_seconds,
         "lease_state": builder.state,
+        "connection_health": connection_health,
+        "connection_mode": connection_mode,
+        "broker_position_lease": broker_position_lease,
+        "broker_open_order_lease": broker_open_order_lease,
+        "execution_fill_evidence_lease": execution_fill_evidence_lease,
+        "allowed_uses": allowed_uses,
+        "authority_use_blockers": authority_use_blockers,
         "positions_snapshot_path": broker_truth.get("positions_snapshot_path"),
         "open_orders_snapshot_path": broker_truth.get("open_orders_snapshot_path"),
         "broker_truth_status_path": source_paths.get("broker_truth_status") or source_paths.get("broker_truth"),
@@ -569,6 +688,221 @@ def _current_scope_review_required_count(reconciliation: Mapping[str, Any]) -> i
     return int(reconciliation.get("review_required_count") or 0)
 
 
+def _connection_health(
+    *,
+    inputs: Mapping[str, Any],
+    broker_truth: Mapping[str, Any],
+    latest_attempt: Mapping[str, Any],
+    fill_evidence: Mapping[str, Any],
+) -> dict[str, Any]:
+    explicit = str(
+        inputs.get("connection_mode")
+        or _mapping(inputs.get("connection")).get("mode")
+        or _mapping(inputs.get("connection_health")).get("connection_mode")
+        or ""
+    ).strip().upper()
+    if explicit:
+        mode = explicit if explicit in CONNECTION_MODES else "IBKR_CONNECTION_DOWN"
+    elif not broker_truth:
+        mode = "IBKR_CONNECTION_DOWN"
+    elif not _bool(broker_truth.get("positions_complete")):
+        mode = "IBKR_CONNECTION_DOWN"
+    elif not _bool(broker_truth.get("open_orders_complete")):
+        mode = "POSITION_TRUTH_ONLY"
+    elif _latest_attempt_failed_after_success(
+        latest_attempt=latest_attempt,
+        broker_truth_time=_parse_time(
+            broker_truth.get("generated_at")
+            or broker_truth.get("last_success_at")
+            or broker_truth.get("latest_refresh_time")
+            or broker_truth.get("completed_at")
+        )
+        or datetime.min.replace(tzinfo=timezone.utc),
+    ):
+        mode = "DEGRADED_RECOVERED"
+    elif _fill_evidence_complete(fill_evidence):
+        mode = "FILL_CALLBACK_CAPABLE"
+    else:
+        mode = "SUBMIT_CAPABLE"
+
+    blockers: list[dict[str, str]] = []
+    if mode == "IBKR_CONNECTION_DOWN":
+        blockers.append({"code": "ibkr_connection_down", "detail": "IBKR broker truth connection is unavailable."})
+    elif mode == "POSITION_TRUTH_ONLY":
+        blockers.append(
+            {
+                "code": "position_truth_only",
+                "detail": "Position truth is available, but open-order/submit status is not reliable enough for submits.",
+            }
+        )
+    elif mode == "ORDER_STATUS_UNRELIABLE":
+        blockers.append(
+            {
+                "code": "order_status_unreliable",
+                "detail": "Order status is unreliable; new entries and managed closes fail closed.",
+            }
+        )
+    elif mode == "DEGRADED_RECOVERED":
+        blockers.append(
+            {
+                "code": "degraded_recovered_not_submit_capable",
+                "detail": "Cached broker truth recovered diagnostics, but connection is not classified submit-capable.",
+            }
+        )
+
+    return {
+        "schema_version": "track_b_ibkr_connection_health_v1",
+        "connection_mode": mode,
+        "submit_capable": _connection_allows_submit(mode),
+        "fill_callback_capable": mode == "FILL_CALLBACK_CAPABLE",
+        "position_truth_available": mode in {"POSITION_TRUTH_ONLY", "ORDER_STATUS_UNRELIABLE", "SUBMIT_CAPABLE", "FILL_CALLBACK_CAPABLE", "DEGRADED_RECOVERED"},
+        "order_status_reliable": mode in {"SUBMIT_CAPABLE", "FILL_CALLBACK_CAPABLE"},
+        "blockers": blockers,
+    }
+
+
+def _connection_allows_submit(connection_mode: str) -> bool:
+    return str(connection_mode).strip().upper() in {"SUBMIT_CAPABLE", "FILL_CALLBACK_CAPABLE"}
+
+
+def _evidence_lease(
+    *,
+    lease_type: str,
+    generated_at: datetime | None,
+    current_time: datetime,
+    max_age_seconds: float,
+    source: Any,
+    complete: bool,
+    base_authority_uses: Sequence[str],
+) -> dict[str, Any]:
+    expires_at = _add_seconds(generated_at, max_age_seconds)
+    age_seconds = None if generated_at is None else max(0.0, (current_time - generated_at).total_seconds())
+    if generated_at is None:
+        state = "MISSING"
+        confidence = "NONE"
+    elif not complete:
+        state = "INCOMPLETE"
+        confidence = "LOW"
+    elif expires_at is not None and current_time > expires_at:
+        state = "STALE"
+        confidence = "LOW"
+    else:
+        state = "FRESH"
+        confidence = "HIGH"
+
+    allowed_uses = [AUTHORITY_USE_STATUS_DIAGNOSTIC]
+    if state == "FRESH":
+        allowed_uses.extend(str(use) for use in base_authority_uses)
+
+    return {
+        "schema_version": "track_b_broker_truth_evidence_lease_v1",
+        "lease_type": lease_type,
+        "state": state,
+        "fresh": state == "FRESH",
+        "complete": bool(complete),
+        "generated_at": _iso_or_none(generated_at),
+        "age_seconds": age_seconds,
+        "max_age_seconds": max_age_seconds,
+        "expires_at": _iso_or_none(expires_at),
+        "source": str(source) if source not in {None, ""} else None,
+        "confidence": confidence,
+        "allowed_uses": _dedupe(allowed_uses),
+    }
+
+
+def _lease_allows(lease: Mapping[str, Any], authority_use: str) -> bool:
+    return str(authority_use) in {str(item) for item in lease.get("allowed_uses") or []}
+
+
+def _fill_evidence_complete(fill_evidence: Mapping[str, Any]) -> bool:
+    if not fill_evidence:
+        return False
+    if "complete" in fill_evidence:
+        return _bool(fill_evidence.get("complete"))
+    if "fill_callbacks_complete" in fill_evidence:
+        return _bool(fill_evidence.get("fill_callbacks_complete"))
+    classification = str(fill_evidence.get("classification") or "").upper()
+    if any(token in classification for token in {"MISSING", "INCOMPLETE", "UNCERTAIN", "STALE"}):
+        return False
+    return bool(
+        fill_evidence.get("latest_fill_at")
+        or fill_evidence.get("latest_execution_at")
+        or fill_evidence.get("last_callback_at")
+        or fill_evidence.get("exec_id")
+        or fill_evidence.get("execution_id")
+    )
+
+
+def _submit_ownership_available(
+    *,
+    inputs: Mapping[str, Any],
+    reconciliation: Mapping[str, Any],
+    order_state: Mapping[str, Any],
+) -> bool:
+    submit_ownership = _mapping(inputs.get("submit_ownership") or inputs.get("submit_intent_ownership"))
+    if submit_ownership:
+        if submit_ownership.get("available") is False:
+            return False
+        return True
+    if reconciliation.get("broker_backed_entry_adoption"):
+        return True
+    ownership = _mapping(reconciliation.get("submit_intent_ownership_reconciliation"))
+    if ownership.get("matching_submit_intent") or ownership.get("matching_submit_intents"):
+        return True
+    if int(ownership.get("unresolved_count") or reconciliation.get("unresolved_submit_intent_ownership_count") or 0) > 0:
+        return True
+    if order_state.get("matching_submit_intent") or order_state.get("submit_ownership_record"):
+        return True
+    return False
+
+
+def _authority_use_blockers(
+    *,
+    connection_mode: str,
+    broker_position_lease: Mapping[str, Any],
+    broker_open_order_lease: Mapping[str, Any],
+    reconciliation_clean: bool,
+) -> list[dict[str, str]]:
+    blockers: list[dict[str, str]] = []
+    if not _connection_allows_submit(connection_mode):
+        blockers.append(
+            {
+                "code": "connection_not_submit_capable",
+                "detail": f"Connection mode {connection_mode} cannot grant submit authority.",
+            }
+        )
+    if not _lease_allows(broker_position_lease, AUTHORITY_USE_NEW_ENTRY):
+        blockers.append(
+            {
+                "code": "broker_position_lease_not_fresh",
+                "detail": "Fresh broker position lease is required for new entry and close authority.",
+            }
+        )
+    if not _lease_allows(broker_open_order_lease, AUTHORITY_USE_NEW_ENTRY):
+        blockers.append(
+            {
+                "code": "broker_open_order_lease_not_fresh",
+                "detail": "Fresh broker open-order lease is required for new entry and close authority.",
+            }
+        )
+    if not reconciliation_clean:
+        blockers.append(
+            {
+                "code": "reconciliation_not_clean",
+                "detail": "Clean broker/lifecycle reconciliation is required for new entry authority.",
+            }
+        )
+    return blockers
+
+
+def _dedupe(values: Sequence[str]) -> list[str]:
+    result: list[str] = []
+    for value in values:
+        if value and value not in result:
+            result.append(value)
+    return result
+
+
 def _source_timestamps(
     *,
     explicit: Mapping[str, Any],
@@ -607,6 +941,12 @@ def _lease_id(*, account_id: str, broker_truth: Mapping[str, Any], reconciliatio
 
 
 __all__ = [
+    "AUTHORITY_USE_BROKER_OBSERVED_ADOPTION",
+    "AUTHORITY_USE_FILL_CALLBACK_ADOPTION",
+    "AUTHORITY_USE_NEW_ENTRY",
+    "AUTHORITY_USE_RISK_REDUCING_CLOSE",
+    "AUTHORITY_USE_STATUS_DIAGNOSTIC",
+    "CONNECTION_MODES",
     "DEFAULT_LEASE_ARTIFACT",
     "DEFAULT_LEASE_HISTORY",
     "LEASE_STATES",
