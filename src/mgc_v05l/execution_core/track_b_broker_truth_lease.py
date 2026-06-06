@@ -344,6 +344,12 @@ def classify_broker_truth_lease(inputs: Mapping[str, Any]) -> dict[str, Any]:
     payload = {
         "schema_version": "track_b_broker_truth_lease_v1",
         "lease_id": _lease_id(account_id=account_id, broker_truth=broker_truth, reconciliation=reconciliation),
+        "authority_generation_id": str(
+            inputs.get("authority_generation_id")
+            or _authority_generation_id(generated_at=generated_at, account_id=account_id, broker_truth=broker_truth)
+        ),
+        "authority_writer": str(inputs.get("authority_writer") or "track_b_broker_truth_lease_classifier"),
+        "authority_source_timestamp": str(inputs.get("authority_source_timestamp") or generated_at),
         "account_id": account_id,
         "mode": "PAPER",
         "paper_only": True,
@@ -361,6 +367,18 @@ def classify_broker_truth_lease(inputs: Mapping[str, Any]) -> dict[str, Any]:
         "connection_health": connection_health,
         "connection_mode": connection_mode,
         "broker_session_owner": broker_session_owner,
+        "position_snapshot_timestamp": broker_session_owner.get("last_position_at"),
+        "open_order_snapshot_timestamp": broker_session_owner.get("last_open_order_at"),
+        "callback_timestamps": _callback_timestamps(broker_session_owner),
+        "observation_basis": {
+            "broker_truth_generated_at": _iso_or_none(broker_truth_time),
+            "position_snapshot_timestamp": broker_session_owner.get("last_position_at"),
+            "open_order_snapshot_timestamp": broker_session_owner.get("last_open_order_at"),
+            "last_order_status_at": broker_session_owner.get("last_order_status_at"),
+            "last_exec_at": broker_session_owner.get("last_exec_at"),
+            "last_completed_order_at": broker_session_owner.get("last_completed_order_at"),
+            "source_connection_id": broker_session_owner.get("source_connection_id"),
+        },
         "callback_ownership_attribution": callback_ownership_attribution,
         "position_truth_client_id": callback_ownership_attribution.get("position_truth_client_id"),
         "open_order_truth_client_id": callback_ownership_attribution.get("open_order_truth_client_id"),
@@ -442,6 +460,8 @@ def write_broker_truth_lease(
     """Write the lease artifact and optional JSONL history; no actions are executed."""
 
     path = Path(output_path)
+    if _preserve_existing_hot_broker_authority(path=path, incoming_lease=lease):
+        return
     write_json_atomic(path, lease)
 
     if history_path is not None:
@@ -1704,6 +1724,51 @@ def _lease_id(*, account_id: str, broker_truth: Mapping[str, Any], reconciliatio
         sort_keys=True,
     )
     return f"btlease-{hashlib.sha256(material.encode('utf-8')).hexdigest()[:16]}"
+
+
+def _authority_generation_id(*, generated_at: str, account_id: str, broker_truth: Mapping[str, Any]) -> str:
+    material = json.dumps(
+        {
+            "generated_at": generated_at,
+            "account_id": account_id,
+            "broker_truth_generated_at": broker_truth.get("generated_at") or broker_truth.get("last_success_at"),
+            "client_id": broker_truth.get("client_id"),
+            "source_connection_id": broker_truth.get("source_connection_id") or broker_truth.get("session_id"),
+        },
+        sort_keys=True,
+    )
+    return f"broker-authority-{hashlib.sha256(material.encode('utf-8')).hexdigest()[:16]}"
+
+
+def _callback_timestamps(owner: Mapping[str, Any]) -> dict[str, Any]:
+    return {
+        "last_position_at": owner.get("last_position_at"),
+        "last_open_order_at": owner.get("last_open_order_at"),
+        "last_order_status_at": owner.get("last_order_status_at"),
+        "last_exec_at": owner.get("last_exec_at"),
+        "last_completed_order_at": owner.get("last_completed_order_at"),
+    }
+
+
+def _preserve_existing_hot_broker_authority(*, path: Path, incoming_lease: Mapping[str, Any]) -> bool:
+    if str(incoming_lease.get("authority_writer") or "") == "ibkr_broker_truth_refresher":
+        return False
+    if not _is_default_hot_lease_path(path):
+        return False
+    try:
+        existing = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return False
+    if not isinstance(existing, Mapping):
+        return False
+    return (
+        str(existing.get("authority_writer") or "") == "ibkr_broker_truth_refresher"
+        and str(existing.get("lease_state") or "").upper() in {"ACTIVE", "ACTIVE_DEGRADED_REFRESH_FAILING", "OPERATOR_REQUIRED"}
+    )
+
+
+def _is_default_hot_lease_path(path: Path) -> bool:
+    return path.as_posix().endswith(DEFAULT_LEASE_ARTIFACT.as_posix())
 
 
 __all__ = [

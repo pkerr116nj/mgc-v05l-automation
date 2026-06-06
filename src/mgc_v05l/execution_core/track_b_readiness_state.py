@@ -913,6 +913,8 @@ def _effective_broker_truth_lease_artifact(
     broker_status = _mapping(artifacts.get("broker_truth_status"))
     reconciliation = _mapping(artifacts.get("phase1_reconciliation"))
     existing_lease = _mapping(artifacts.get("broker_truth_lease"))
+    if _published_broker_authority_lease_healthy(existing_lease, now=now):
+        return existing_lease
     if not broker_status and not reconciliation:
         return existing_lease
 
@@ -971,6 +973,19 @@ def _effective_broker_truth_lease_artifact(
     lease["previous_lease_state"] = existing_lease.get("lease_state") or existing_lease.get("state")
     lease["previous_lease_generated_at"] = existing_lease.get("generated_at")
     return lease
+
+
+def _published_broker_authority_lease_healthy(payload: Mapping[str, Any], *, now: datetime) -> bool:
+    if not payload:
+        return False
+    if str(payload.get("authority_writer") or "") != "ibkr_broker_truth_refresher":
+        return False
+    lease_state = str(payload.get("lease_state") or "").upper()
+    if lease_state not in BROKER_TRUTH_LEASE_READY_STATES:
+        return False
+    entry_valid_until = payload.get("entry_valid_until") or payload.get("valid_until")
+    seconds_remaining = _seconds_until(entry_valid_until, now)
+    return bool(seconds_remaining is not None and seconds_remaining > 0)
 
 
 def _broker_truth_with_connection_report(
@@ -1748,6 +1763,13 @@ def _broker_truth_lease_input(payload: Mapping[str, Any], *, now: datetime) -> d
         "available": True,
         "lease_state": effective_lease_state,
         "source_lease_state": lease_state,
+        "authority_generation_id": payload.get("authority_generation_id"),
+        "authority_writer": payload.get("authority_writer"),
+        "authority_source_timestamp": payload.get("authority_source_timestamp"),
+        "broker_session_owner": _mapping(payload.get("broker_session_owner")),
+        "position_snapshot_timestamp": payload.get("position_snapshot_timestamp"),
+        "open_order_snapshot_timestamp": payload.get("open_order_snapshot_timestamp"),
+        "callback_timestamps": _mapping(payload.get("callback_timestamps")),
         "generated_at": generated_at,
         "broker_truth_generated_at": payload.get("broker_truth_generated_at"),
         "reconciliation_generated_at": payload.get("reconciliation_generated_at"),

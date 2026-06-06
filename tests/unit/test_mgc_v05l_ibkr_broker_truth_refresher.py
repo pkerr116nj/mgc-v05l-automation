@@ -185,7 +185,16 @@ def test_broker_truth_refresh_once_uses_read_only_verifier_and_writes_status(tmp
         == "BROKER_SESSION_AUTHORITY_SUBMIT_CAPABLE"
     )
     assert _lease_path(tmp_path).exists()
+    lease = json.loads(_lease_path(tmp_path).read_text(encoding="utf-8"))
     authority = json.loads(_broker_session_authority_path(tmp_path).read_text(encoding="utf-8"))
+    assert lease["authority_writer"] == "ibkr_broker_truth_refresher"
+    assert authority["authority_writer"] == "ibkr_broker_truth_refresher"
+    assert lease["authority_generation_id"] == authority["authority_generation_id"]
+    assert lease["authority_source_timestamp"] == authority["authority_source_timestamp"]
+    assert lease["broker_session_owner"] == authority["broker_session_owner"]
+    assert lease["position_snapshot_timestamp"] == authority["position_snapshot_timestamp"]
+    assert lease["open_order_snapshot_timestamp"] == authority["open_order_snapshot_timestamp"]
+    assert lease["callback_timestamps"] == authority["callback_timestamps"]
     assert authority["schema_version"] == "track_b_broker_session_authority_v1"
     assert authority["broker_session_owner"]["client_id"] == 9077
     assert authority["broker_mutation_allowed"] is False

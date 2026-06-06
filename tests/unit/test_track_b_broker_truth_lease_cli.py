@@ -168,6 +168,31 @@ def test_active_lease_writes_artifacts_and_exits_0(tmp_path: Path, capsys) -> No
     assert lease["lease_state"] == "ACTIVE"
 
 
+def test_cli_does_not_overwrite_healthy_broker_published_hot_lease(tmp_path: Path, capsys) -> None:
+    seed_clean_artifacts(tmp_path)
+    existing = {
+        "schema_version": "track_b_broker_truth_lease_v1",
+        "lease_state": "ACTIVE",
+        "authority_writer": "ibkr_broker_truth_refresher",
+        "authority_generation_id": "ibkr-broker-truth-refresher-existing",
+        "generated_at": "2026-05-18T14:59:00+00:00",
+        "valid_until": "2026-05-18T15:04:00+00:00",
+        "entry_valid_until": "2026-05-18T15:04:00+00:00",
+        "exit_valid_until": "2026-05-18T15:14:00+00:00",
+        "live_money_eligible": False,
+    }
+    write_json(lease_path(tmp_path), existing)
+
+    exit_code = cli.main([*base_args(tmp_path), "--json"])
+
+    summary = json.loads(capsys.readouterr().out)
+    persisted = json.loads(lease_path(tmp_path).read_text(encoding="utf-8"))
+    assert exit_code == 0
+    assert summary["hot_authority_write_skipped"] is True
+    assert persisted == existing
+    assert not history_path(tmp_path).exists()
+
+
 def test_connection_report_supplies_flat_no_order_submit_session_liveness(tmp_path: Path) -> None:
     seed_clean_artifacts(tmp_path)
     broker_status = json.loads(broker_status_path(tmp_path).read_text(encoding="utf-8"))

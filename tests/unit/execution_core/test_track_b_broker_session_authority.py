@@ -91,6 +91,9 @@ def _base_inputs() -> dict[str, object]:
 
 def test_session_authority_publishes_owner_metadata_and_schema() -> None:
     lease = classify_broker_truth_lease(_base_inputs())
+    lease["authority_generation_id"] = "ibkr-broker-truth-refresher-20260518T150000Z"
+    lease["authority_writer"] = "ibkr_broker_truth_refresher"
+    lease["authority_source_timestamp"] = TRUTH_TIME
 
     authority = build_broker_session_authority(
         lease=lease,
@@ -100,6 +103,9 @@ def test_session_authority_publishes_owner_metadata_and_schema() -> None:
 
     assert authority["schema_version"] == "track_b_broker_session_authority_v1"
     assert authority["classification"] == "BROKER_SESSION_AUTHORITY_SUBMIT_CAPABLE"
+    assert authority["authority_generation_id"] == lease["authority_generation_id"]
+    assert authority["authority_writer"] == "ibkr_broker_truth_refresher"
+    assert authority["authority_source_timestamp"] == TRUTH_TIME
     assert authority["broker_session_owner"]["pid"] == 54210
     assert authority["broker_session_owner"]["client_id"] == 9077
     assert authority["pid"] == 54210
@@ -108,6 +114,9 @@ def test_session_authority_publishes_owner_metadata_and_schema() -> None:
     assert authority["last_position_at"] == TRUTH_TIME
     assert authority["last_open_order_at"] == TRUTH_TIME
     assert authority["last_order_status_at"] == TRUTH_TIME
+    assert authority["position_snapshot_timestamp"] == TRUTH_TIME
+    assert authority["open_order_snapshot_timestamp"] == TRUTH_TIME
+    assert authority["callback_timestamps"]["last_order_status_at"] == TRUTH_TIME
     assert authority["allowed_uses"]["new_entry"] is True
     assert authority["allowed_uses"]["managed_risk_reducing_close"] is True
     assert authority["broker_mutation_allowed"] is False

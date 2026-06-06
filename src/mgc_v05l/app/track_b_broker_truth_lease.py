@@ -84,12 +84,29 @@ def main(argv: Sequence[str] | None = None) -> int:
         paths=paths,
     )
     lease = classify_broker_truth_lease(inputs)
-    write_broker_truth_lease(
+    existing_hot_lease = _read_json(paths["output"])
+    hot_authority_write_skipped = _hot_authority_write_should_be_skipped(
+        repo_root=repo_root,
         output_path=paths["output"],
-        lease=lease,
-        history_path=None if bool(args.no_history) else paths["history"],
+        existing_lease=existing_hot_lease,
+        current_time=str(inputs["current_time"]),
     )
+    if hot_authority_write_skipped:
+        lease = {
+            **lease,
+            "diagnostic_only": True,
+            "hot_authority_write_skipped": True,
+            "hot_authority_writer": existing_hot_lease.get("authority_writer"),
+            "hot_authority_generation_id": existing_hot_lease.get("authority_generation_id"),
+        }
+    else:
+        write_broker_truth_lease(
+            output_path=paths["output"],
+            lease=lease,
+            history_path=None if bool(args.no_history) else paths["history"],
+        )
     summary = compact_lease_summary(lease)
+    summary["hot_authority_write_skipped"] = hot_authority_write_skipped
     print_summary(summary, as_json=bool(args.json))
     return exit_code_for_state(str(summary["lease_state"]))
 
@@ -150,6 +167,15 @@ def compact_lease_summary(payload: Mapping[str, Any]) -> dict[str, Any]:
         "lease_state": str(payload.get("lease_state") or "OPERATOR_REQUIRED"),
         "account_id": payload.get("account_id"),
         "generated_at": payload.get("generated_at"),
+        "authority_generation_id": payload.get("authority_generation_id"),
+        "authority_writer": payload.get("authority_writer"),
+        "authority_source_timestamp": payload.get("authority_source_timestamp"),
+        "broker_session_owner": payload.get("broker_session_owner"),
+        "client_id": _mapping(payload.get("broker_session_owner")).get("client_id"),
+        "position_snapshot_timestamp": payload.get("position_snapshot_timestamp"),
+        "open_order_snapshot_timestamp": payload.get("open_order_snapshot_timestamp"),
+        "callback_timestamps": payload.get("callback_timestamps"),
+        "allowed_uses": payload.get("allowed_uses"),
         "valid_until": payload.get("valid_until"),
         "entry_valid_until": payload.get("entry_valid_until"),
         "exit_valid_until": payload.get("exit_valid_until"),
@@ -171,6 +197,12 @@ def print_summary(summary: Mapping[str, Any], *, as_json: bool) -> None:
         "lease_state",
         "account_id",
         "generated_at",
+        "authority_generation_id",
+        "authority_writer",
+        "authority_source_timestamp",
+        "client_id",
+        "position_snapshot_timestamp",
+        "open_order_snapshot_timestamp",
         "valid_until",
         "entry_valid_until",
         "exit_valid_until",
@@ -216,11 +248,48 @@ def _resolve_path(repo_root: Path, configured: str | None, default: Path) -> Pat
     return path if path.is_absolute() else repo_root / path
 
 
+def _hot_authority_write_should_be_skipped(
+    *,
+    repo_root: Path,
+    output_path: Path,
+    existing_lease: Mapping[str, Any],
+    current_time: str,
+) -> bool:
+    if output_path.resolve() != (repo_root / DEFAULT_LEASE_ARTIFACT).resolve():
+        return False
+    if str(existing_lease.get("authority_writer") or "") != "ibkr_broker_truth_refresher":
+        return False
+    if str(existing_lease.get("lease_state") or "").upper() not in {"ACTIVE", "ACTIVE_DEGRADED_REFRESH_FAILING"}:
+        return False
+    valid_until = existing_lease.get("entry_valid_until") or existing_lease.get("valid_until")
+    seconds_remaining = _seconds_until(valid_until, current_time)
+    return bool(seconds_remaining is not None and seconds_remaining > 0)
+
+
 def _read_json(path: Path) -> dict[str, Any]:
     try:
         return json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
         return {}
+
+
+def _seconds_until(value: Any, current_time: str) -> float | None:
+    target = _parse_iso(value)
+    now = _parse_iso(current_time)
+    if target is None or now is None:
+        return None
+    return (target - now).total_seconds()
+
+
+def _parse_iso(value: Any) -> datetime | None:
+    text = str(value or "").strip()
+    if not text:
+        return None
+    try:
+        parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return parsed if parsed.tzinfo is not None else parsed.replace(tzinfo=timezone.utc)
 
 
 def _broker_truth_with_snapshots(

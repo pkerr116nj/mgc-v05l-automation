@@ -445,11 +445,16 @@ def _refresh_broker_truth_lease_if_enabled(*, config: BrokerTruthRefreshConfig, 
             },
             paths=paths,
         )
+        source_timestamp = current_time or datetime.now(timezone.utc).isoformat()
+        authority_generation_id = _broker_authority_generation_id(source_timestamp)
+        inputs["authority_generation_id"] = authority_generation_id
+        inputs["authority_writer"] = "ibkr_broker_truth_refresher"
+        inputs["authority_source_timestamp"] = source_timestamp
         lease = classify_broker_truth_lease(inputs)
         write_broker_truth_lease(output_path=output_path, lease=lease, history_path=history_path)
         authority = build_broker_session_authority(
             lease=lease,
-            generated_at=current_time,
+            generated_at=source_timestamp,
             source_lease_path=output_path,
             active_track_b_exposure=_active_track_b_exposure_present(repo_root),
         )
@@ -461,6 +466,9 @@ def _refresh_broker_truth_lease_if_enabled(*, config: BrokerTruthRefreshConfig, 
         summary = compact_lease_summary(lease)
         return {
             "ok": True,
+            "authority_generation_id": authority_generation_id,
+            "authority_writer": "ibkr_broker_truth_refresher",
+            "authority_source_timestamp": source_timestamp,
             **summary,
             "broker_session_authority_classification": authority.get("classification"),
             "broker_session_authority_path": str(authority_output_path),
@@ -727,11 +735,46 @@ def _connection_detail(connection: dict[str, Any]) -> str | None:
     return None
 
 
+def _broker_authority_generation_id(source_timestamp: str) -> str:
+    compact = (
+        source_timestamp.replace("-", "")
+        .replace(":", "")
+        .replace("+00:00", "Z")
+        .replace(".", "")
+    )
+    return f"ibkr-broker-truth-refresher-{compact}"
+
+
 def _write_json_atomically(path: Path, payload: dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    temp_path = path.with_name(f".{path.name}.tmp")
-    temp_path.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
-    temp_path.replace(path)
+    # Use a unique temp file in the same directory to avoid collisions across
+    # concurrent writers and to keep os.replace() atomic on the same filesystem.
+    import os
+    import tempfile
+
+    serialized = json.dumps(payload, indent=2, sort_keys=True)
+    fd: int | None = None
+    temp_path: Path | None = None
+    try:
+        fd, temp_name = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=str(path.parent))
+        temp_path = Path(temp_name)
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write(serialized)
+            handle.flush()
+            os.fsync(handle.fileno())
+        fd = None
+        os.replace(str(temp_path), str(path))
+    finally:
+        if fd is not None:
+            try:
+                os.close(fd)
+            except OSError:
+                pass
+        if temp_path is not None and temp_path.exists():
+            try:
+                temp_path.unlink()
+            except OSError:
+                pass
 
 
 if __name__ == "__main__":  # pragma: no cover

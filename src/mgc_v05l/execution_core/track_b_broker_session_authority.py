@@ -67,10 +67,25 @@ def build_broker_session_authority(
     )
     diagnostics_policy = diagnostic_probe_policy(active_track_b_exposure=active_track_b_exposure)
     split_ownership = _split_session_ownership(owner=owner, observed_submit_client_ids=observed_submit_client_ids or [])
+    authority_source_timestamp = (
+        lease.get("authority_source_timestamp") or lease.get("broker_truth_generated_at") or lease.get("generated_at")
+    )
+    position_snapshot_timestamp = lease.get("position_snapshot_timestamp") or owner.get("last_position_at")
+    open_order_snapshot_timestamp = lease.get("open_order_snapshot_timestamp") or owner.get("last_open_order_at")
+    callback_timestamps = _mapping(lease.get("callback_timestamps")) or {
+        "last_position_at": owner.get("last_position_at"),
+        "last_open_order_at": owner.get("last_open_order_at"),
+        "last_order_status_at": owner.get("last_order_status_at"),
+        "last_exec_at": owner.get("last_exec_at"),
+        "last_completed_order_at": owner.get("last_completed_order_at"),
+    }
 
     return {
         "schema_version": "track_b_broker_session_authority_v1",
         "generated_at": now_text,
+        "authority_generation_id": lease.get("authority_generation_id"),
+        "authority_writer": lease.get("authority_writer"),
+        "authority_source_timestamp": authority_source_timestamp,
         "mode": "PAPER",
         "paper_only": True,
         "read_only": True,
@@ -96,6 +111,17 @@ def build_broker_session_authority(
         "last_order_status_at": owner.get("last_order_status_at"),
         "last_exec_at": owner.get("last_exec_at"),
         "last_completed_order_at": owner.get("last_completed_order_at"),
+        "position_snapshot_timestamp": position_snapshot_timestamp,
+        "open_order_snapshot_timestamp": open_order_snapshot_timestamp,
+        "callback_timestamps": callback_timestamps,
+        "observation_basis": {
+            "position_snapshot_timestamp": position_snapshot_timestamp,
+            "open_order_snapshot_timestamp": open_order_snapshot_timestamp,
+            "last_order_status_at": callback_timestamps.get("last_order_status_at"),
+            "last_exec_at": callback_timestamps.get("last_exec_at"),
+            "last_completed_order_at": callback_timestamps.get("last_completed_order_at"),
+            "source_connection_id": owner.get("source_connection_id"),
+        },
         "source_connection_id": owner.get("source_connection_id"),
         "position_truth_client_id": callback_attribution.get("position_truth_client_id"),
         "open_order_truth_client_id": callback_attribution.get("open_order_truth_client_id"),

@@ -802,6 +802,49 @@ def test_writer_outputs_latest_and_history(tmp_path: Path) -> None:
     assert history_rows[-1]["lease_id"] == latest["lease_id"]
 
 
+def test_writer_preserves_broker_publisher_hot_authority_from_non_owner(tmp_path: Path) -> None:
+    latest_path = tmp_path / "outputs" / "operator_dashboard" / "runtime" / "latest_broker_truth_lease.json"
+    history_path = tmp_path / "outputs" / "operator_dashboard" / "runtime" / "broker_truth_lease_history.jsonl"
+    existing = {
+        "schema_version": "track_b_broker_truth_lease_v1",
+        "lease_state": "OPERATOR_REQUIRED",
+        "authority_writer": "ibkr_broker_truth_refresher",
+        "authority_generation_id": "ibkr-broker-truth-refresher-existing",
+        "generated_at": "2026-05-18T15:00:00+00:00",
+    }
+    latest_path.parent.mkdir(parents=True)
+    latest_path.write_text(json.dumps(existing), encoding="utf-8")
+    derived = classify_broker_truth_lease(base_inputs())
+
+    write_broker_truth_lease(output_path=latest_path, lease=derived, history_path=history_path)
+
+    assert json.loads(latest_path.read_text(encoding="utf-8")) == existing
+    assert not history_path.exists()
+
+
+def test_writer_allows_broker_publisher_to_replace_hot_authority(tmp_path: Path) -> None:
+    latest_path = tmp_path / "outputs" / "operator_dashboard" / "runtime" / "latest_broker_truth_lease.json"
+    existing = {
+        "schema_version": "track_b_broker_truth_lease_v1",
+        "lease_state": "OPERATOR_REQUIRED",
+        "authority_writer": "ibkr_broker_truth_refresher",
+        "authority_generation_id": "ibkr-broker-truth-refresher-existing",
+        "generated_at": "2026-05-18T15:00:00+00:00",
+    }
+    latest_path.parent.mkdir(parents=True)
+    latest_path.write_text(json.dumps(existing), encoding="utf-8")
+    replacement = {
+        **classify_broker_truth_lease(base_inputs()),
+        "authority_writer": "ibkr_broker_truth_refresher",
+        "authority_generation_id": "ibkr-broker-truth-refresher-new",
+    }
+
+    write_broker_truth_lease(output_path=latest_path, lease=replacement)
+
+    persisted = json.loads(latest_path.read_text(encoding="utf-8"))
+    assert persisted["authority_generation_id"] == "ibkr-broker-truth-refresher-new"
+
+
 def test_source_has_no_broker_order_or_runtime_action_calls() -> None:
     source = inspect.getsource(lease_module)
 
