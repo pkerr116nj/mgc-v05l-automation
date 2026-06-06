@@ -66,6 +66,28 @@ def test_refresh_once_writes_status_and_keeps_submit_authority_false(tmp_path: P
         return subprocess.CompletedProcess(list(command), 0, stdout="ok", stderr="")
 
     status_path = tmp_path / "latest_status.json"
+    ownership_path = tmp_path / "outputs" / "operator_dashboard" / "runtime" / "latest_broker_authority_ownership.json"
+    ownership_path.parent.mkdir(parents=True)
+    ownership_path.write_text(
+        json.dumps(
+            {
+                "classification": "BROKER_AUTHORITY_PUBLISHER_HEALTHY",
+                "authority_writer": "ibkr_broker_truth_refresher",
+                "authority_generation_id": "gen-1",
+                "writer_pid": 123,
+                "service_label": "track_b_ibkr_broker_truth_refresh",
+                "source_commit": "c56ad805",
+                "expected_min_commit": "c56ad805",
+                "broker_authority_publisher_healthy": True,
+                "lease_bsa_generation_aligned": True,
+                "duplicate_hot_writer_detected": False,
+                "non_owner_hot_write_attempt_count": 0,
+                "running_writer_needs_reload": False,
+                "next_safe_action": "NO_ACTION",
+            }
+        ),
+        encoding="utf-8",
+    )
     payload = refresh_once(
         config=RefreshConfig(repo_root=tmp_path, status_path=status_path),
         runner=fake_runner,
@@ -78,6 +100,9 @@ def test_refresh_once_writes_status_and_keeps_submit_authority_false(tmp_path: P
     assert payload["authority_refresh_orchestration"] == "TRACK_B_ACTIVE_RUNTIME_DEPENDENCY_CHAIN_V1"
     assert payload["authority_refresh_cadence_seconds"] == payload["refresh_seconds"]
     assert payload["submit_authority"] is False
+    assert payload["broker_authority_ownership"]["classification"] == "BROKER_AUTHORITY_PUBLISHER_HEALTHY"
+    assert payload["broker_authority_ownership"]["lease_bsa_generation_aligned"] is True
+    assert payload["broker_authority_ownership"]["next_safe_action"] == "NO_ACTION"
     assert payload["paper_proof_invoked"] is False
     assert payload["live_money_eligible"] is False
     assert payload["dependency_refresh_failures"] == []

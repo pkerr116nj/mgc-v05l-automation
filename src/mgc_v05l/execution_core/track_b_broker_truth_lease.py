@@ -1761,10 +1761,20 @@ def _preserve_existing_hot_broker_authority(*, path: Path, incoming_lease: Mappi
         return False
     if not isinstance(existing, Mapping):
         return False
-    return (
+    preserve = (
         str(existing.get("authority_writer") or "") == "ibkr_broker_truth_refresher"
         and str(existing.get("lease_state") or "").upper() in {"ACTIVE", "ACTIVE_DEGRADED_REFRESH_FAILING", "OPERATOR_REQUIRED"}
     )
+    if preserve:
+        try:
+            from mgc_v05l.execution_core.track_b_broker_authority_ownership import (
+                record_non_owner_hot_write_attempt,
+            )
+
+            record_non_owner_hot_write_attempt(path=path, incoming_lease=incoming_lease, existing_lease=existing)
+        except Exception:
+            pass
+    return preserve
 
 
 def _is_default_hot_lease_path(path: Path) -> bool:

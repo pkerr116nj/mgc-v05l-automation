@@ -396,12 +396,19 @@ def _refresh_broker_truth_lease_if_enabled(*, config: BrokerTruthRefreshConfig, 
             build_broker_session_authority,
             write_broker_session_authority,
         )
+        from mgc_v05l.execution_core.track_b_broker_authority_ownership import (
+            DEFAULT_BROKER_AUTHORITY_OWNERSHIP_ARTIFACT,
+            build_broker_authority_ownership_status,
+            load_broker_authority_ownership_status,
+            write_broker_authority_ownership_status,
+        )
 
         repo_root = Path(config.repo_root).expanduser().resolve()
         output_path = repo_root / DEFAULT_LEASE_ARTIFACT
         history_path = repo_root / DEFAULT_LEASE_HISTORY
         authority_output_path = repo_root / DEFAULT_BROKER_SESSION_AUTHORITY_ARTIFACT
         authority_history_path = repo_root / DEFAULT_BROKER_SESSION_AUTHORITY_HISTORY
+        ownership_output_path = repo_root / DEFAULT_BROKER_AUTHORITY_OWNERSHIP_ARTIFACT
         paths = {
             "broker_truth_status": config.status_path,
             "latest_attempt": config.output_dir / "ibkr_broker_truth_latest_attempt_status.json",
@@ -463,6 +470,20 @@ def _refresh_broker_truth_lease_if_enabled(*, config: BrokerTruthRefreshConfig, 
             authority=authority,
             history_path=authority_history_path,
         )
+        ownership_status = build_broker_authority_ownership_status(
+            repo_root=repo_root,
+            lease=lease,
+            broker_session_authority=authority,
+            generated_at=source_timestamp,
+            writer_pid=os.getpid(),
+            service_label="track_b_ibkr_broker_truth_refresh",
+            existing_status=load_broker_authority_ownership_status(repo_root),
+        )
+        write_broker_authority_ownership_status(
+            repo_root=repo_root,
+            status=ownership_status,
+            output_path=ownership_output_path,
+        )
         summary = compact_lease_summary(lease)
         return {
             "ok": True,
@@ -472,6 +493,8 @@ def _refresh_broker_truth_lease_if_enabled(*, config: BrokerTruthRefreshConfig, 
             **summary,
             "broker_session_authority_classification": authority.get("classification"),
             "broker_session_authority_path": str(authority_output_path),
+            "broker_authority_ownership_classification": ownership_status.get("classification"),
+            "broker_authority_ownership_path": str(ownership_output_path),
         }
     except Exception as exc:  # pragma: no cover - defensive status path
         return {"ok": False, "error": str(exc), "live_money_eligible": False}

@@ -135,6 +135,10 @@ def _broker_session_authority_path(repo_root: Path) -> Path:
     return repo_root / "outputs" / "operator_dashboard" / "runtime" / "latest_broker_session_authority.json"
 
 
+def _broker_authority_ownership_path(repo_root: Path) -> Path:
+    return repo_root / "outputs" / "operator_dashboard" / "runtime" / "latest_broker_authority_ownership.json"
+
+
 def test_refresh_seconds_from_env_defaults_and_accepts_positive_values() -> None:
     assert refresh_seconds_from_env({}) == 60.0
     assert refresh_seconds_from_env({"TRACK_B_BROKER_TRUTH_REFRESH_SECONDS": "15"}) == 15.0
@@ -199,6 +203,17 @@ def test_broker_truth_refresh_once_uses_read_only_verifier_and_writes_status(tmp
     assert authority["broker_session_owner"]["client_id"] == 9077
     assert authority["broker_mutation_allowed"] is False
     assert authority["live_money_eligible"] is False
+    ownership = json.loads(_broker_authority_ownership_path(tmp_path).read_text(encoding="utf-8"))
+    assert ownership["authority_generation_id"] == lease["authority_generation_id"]
+    assert ownership["authority_writer"] == "ibkr_broker_truth_refresher"
+    assert ownership["lease_bsa_generation_aligned"] is True
+    assert ownership["writer_pid"] is not None
+    assert ownership["service_label"] == "track_b_ibkr_broker_truth_refresh"
+    assert ownership["broker_mutation_allowed"] is False
+    assert (
+        status["broker_truth_lease_refresh"]["broker_authority_ownership_classification"]
+        == ownership["classification"]
+    )
     loaded = load_broker_truth_refresh_status(status_path=config.status_path)
     assert loaded["source_classification"] == "BROKER_TRUTH_REFRESH_READY"
     assert loaded["classification"] in {"BROKER_TRUTH_REFRESH_FRESH", "BROKER_TRUTH_REFRESH_STALE"}

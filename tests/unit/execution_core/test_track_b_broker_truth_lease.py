@@ -820,6 +820,14 @@ def test_writer_preserves_broker_publisher_hot_authority_from_non_owner(tmp_path
 
     assert json.loads(latest_path.read_text(encoding="utf-8")) == existing
     assert not history_path.exists()
+    ownership = json.loads(
+        (tmp_path / "outputs" / "operator_dashboard" / "runtime" / "latest_broker_authority_ownership.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    assert ownership["classification"] == "BROKER_AUTHORITY_DUPLICATE_HOT_WRITER_DETECTED"
+    assert ownership["non_owner_hot_write_attempt_count"] == 1
+    assert ownership["non_owner_hot_write_attempts"][0]["write_skipped"] is True
 
 
 def test_writer_allows_broker_publisher_to_replace_hot_authority(tmp_path: Path) -> None:

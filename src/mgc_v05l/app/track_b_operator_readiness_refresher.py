@@ -12,7 +12,7 @@ import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Callable, Sequence
+from typing import Any, Callable, Mapping, Sequence
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 DEFAULT_STATUS_PATH = (
@@ -507,6 +507,9 @@ def _status_payload(
 ) -> dict[str, Any]:
     now = _utc_now()
     authority_generation_id = f"track-b-operator-authority-refresh-{now.strftime('%Y%m%dT%H%M%S%fZ')}"
+    broker_authority_ownership = _read_json(
+        config.repo_root / "outputs" / "operator_dashboard" / "runtime" / "latest_broker_authority_ownership.json"
+    )
     return {
         "schema_version": "track_b_operator_readiness_refresher_status_v1",
         "generated_at": now.isoformat(),
@@ -527,6 +530,7 @@ def _status_payload(
         "preflight_mode": config.preflight_mode,
         "authority_refresh_orchestration": "TRACK_B_ACTIVE_RUNTIME_DEPENDENCY_CHAIN_V1",
         "authority_refresh_cadence_seconds": config.refresh_seconds,
+        "broker_authority_ownership": _broker_authority_ownership_summary(broker_authority_ownership),
         "dependency_refresh_steps": [
             {
                 "step": result.name,
@@ -583,6 +587,13 @@ def _status_payload(
                 / "runtime"
                 / "latest_broker_session_authority.json"
             ),
+            "broker_authority_ownership": str(
+                config.repo_root
+                / "outputs"
+                / "operator_dashboard"
+                / "runtime"
+                / "latest_broker_authority_ownership.json"
+            ),
             "track_b_paper_broker_reconciliation": str(
                 config.repo_root
                 / "outputs"
@@ -637,6 +648,44 @@ def _status_payload(
             for result in command_results
         ],
     }
+
+
+def _broker_authority_ownership_summary(payload: Mapping[str, Any]) -> dict[str, Any]:
+    if not payload:
+        return {
+            "available": False,
+            "classification": "BROKER_AUTHORITY_OWNERSHIP_STATUS_MISSING",
+            "broker_authority_publisher_healthy": False,
+            "lease_bsa_generation_aligned": False,
+            "duplicate_hot_writer_detected": False,
+            "non_owner_hot_write_attempt_count": 0,
+            "running_writer_needs_reload": True,
+            "next_safe_action": "INVESTIGATE_DUPLICATE_WRITER",
+        }
+    return {
+        "available": True,
+        "classification": payload.get("classification"),
+        "authority_writer": payload.get("authority_writer"),
+        "authority_generation_id": payload.get("authority_generation_id"),
+        "writer_pid": payload.get("writer_pid"),
+        "service_label": payload.get("service_label"),
+        "source_commit": payload.get("source_commit"),
+        "expected_min_commit": payload.get("expected_min_commit"),
+        "broker_authority_publisher_healthy": payload.get("broker_authority_publisher_healthy") is True,
+        "lease_bsa_generation_aligned": payload.get("lease_bsa_generation_aligned") is True,
+        "duplicate_hot_writer_detected": payload.get("duplicate_hot_writer_detected") is True,
+        "non_owner_hot_write_attempt_count": int(payload.get("non_owner_hot_write_attempt_count") or 0),
+        "running_writer_needs_reload": payload.get("running_writer_needs_reload") is True,
+        "next_safe_action": payload.get("next_safe_action"),
+    }
+
+
+def _read_json(path: Path) -> dict[str, Any]:
+    try:
+        payload = json.loads(Path(path).read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+    return dict(payload) if isinstance(payload, Mapping) else {}
 
 
 def _status_with_freshness(payload: dict[str, Any]) -> dict[str, Any]:
