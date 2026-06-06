@@ -449,15 +449,6 @@ def _refresh_commands(
                 "--json",
             ],
         ),
-        (
-            "track_b_paper_preflight",
-            [
-                "/bin/bash",
-                str(repo_root / "scripts" / "track_b_paper_preflight.sh"),
-                "--mode",
-                preflight_mode,
-            ],
-        ),
     ]
 
 
@@ -515,9 +506,11 @@ def _status_payload(
     succeeded: bool,
 ) -> dict[str, Any]:
     now = _utc_now()
+    authority_generation_id = f"track-b-operator-authority-refresh-{now.strftime('%Y%m%dT%H%M%S%fZ')}"
     return {
         "schema_version": "track_b_operator_readiness_refresher_status_v1",
         "generated_at": now.isoformat(),
+        "authority_generation_id": authority_generation_id,
         "last_refresh_started_at": started_at.isoformat(),
         "last_refresh_finished_at": now.isoformat(),
         "last_success": succeeded,
@@ -537,6 +530,7 @@ def _status_payload(
         "dependency_refresh_steps": [
             {
                 "step": result.name,
+                "authority_generation_id": authority_generation_id,
                 "returncode": result.returncode,
                 "succeeded": _command_result_succeeded(result),
                 "duration_seconds": result.duration_seconds,
@@ -547,6 +541,7 @@ def _status_payload(
             {
                 "step": result.name,
                 "code": f"{result.name}_refresh_failed",
+                "authority_generation_id": authority_generation_id,
                 "returncode": result.returncode,
                 "stderr_tail": result.stderr_tail,
             }
@@ -587,13 +582,6 @@ def _status_payload(
                 / "operator_dashboard"
                 / "runtime"
                 / "latest_broker_session_authority.json"
-            ),
-            "track_b_paper_preflight": str(
-                config.repo_root
-                / "outputs"
-                / "reports"
-                / "track_b_paper_preflight"
-                / "latest_track_b_paper_preflight.json"
             ),
             "track_b_paper_broker_reconciliation": str(
                 config.repo_root
@@ -638,6 +626,7 @@ def _status_payload(
         "commands": [
             {
                 "name": result.name,
+                "authority_generation_id": authority_generation_id,
                 "command": result.command,
                 "returncode": result.returncode,
                 "succeeded": _command_result_succeeded(result),
@@ -680,10 +669,15 @@ def _write_heartbeat(*, config: RefreshConfig, payload: dict[str, Any], refresh_
         {
             "schema_version": "track_b_operator_readiness_refresher_heartbeat_v1",
             "generated_at": _utc_now().isoformat(),
+            "authority_generation_id": payload.get("authority_generation_id"),
             "classification": payload.get("classification"),
             "repo_root": str(config.repo_root),
             "status_path": str(config.status_path),
             "refresh_seconds": config.refresh_seconds,
+            "authority_refresh_cadence_seconds": config.refresh_seconds,
+            "dependency_refresh_steps": payload.get("dependency_refresh_steps", []),
+            "dependency_refresh_failures": payload.get("dependency_refresh_failures", []),
+            "refreshed_artifacts": payload.get("refreshed_artifacts", {}),
             "preflight_mode": config.preflight_mode,
             "refresh_running": refresh_running,
             "last_success": payload.get("last_success"),

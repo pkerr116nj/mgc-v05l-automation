@@ -19,7 +19,6 @@ from .track_b_broker_truth_lease import (
     DEFAULT_LEASE_ARTIFACT,
     DEFAULT_LEASE_HISTORY,
     classify_broker_truth_lease,
-    write_broker_truth_lease,
 )
 from .track_b_broker_position_guardian import (
     BROKER_POSITION_GUARDIAN_READY,
@@ -1041,6 +1040,9 @@ def _refresh_broker_lease(
     reconciliation: Mapping[str, Any],
     now: datetime,
 ) -> dict[str, Any]:
+    published_lease = _read_json(config.resolve(config.broker_lease_path))
+    if published_lease:
+        return published_lease
     broker_status = _read_json(config.resolve(config.broker_truth_status_path))
     latest_attempt = _read_json(config.resolve(config.broker_truth_latest_attempt_path)) or _mapping(
         broker_status.get("latest_attempt_status")
@@ -1083,11 +1085,6 @@ def _refresh_broker_lease(
                 if value is not None
             },
         }
-    )
-    write_broker_truth_lease(
-        output_path=config.resolve(config.broker_lease_path),
-        lease=lease,
-        history_path=None if config.broker_lease_history_path is None else config.resolve(config.broker_lease_history_path),
     )
     return lease
 

@@ -1407,15 +1407,16 @@ def test_canonical_readiness_refreshes_stale_broker_truth_lease_from_fresh_sourc
         output_path=lease_dir / "latest_canonical_readiness.json",
         now=now,
     )
-    refreshed_lease = json.loads((lease_dir / "latest_broker_truth_lease.json").read_text(encoding="utf-8"))
+    persisted_lease = json.loads((lease_dir / "latest_broker_truth_lease.json").read_text(encoding="utf-8"))
 
     assert result["canonical_readiness"] == "READY_SUBMIT_CAPABLE"
     assert result["broker_truth_lease"]["source_lease_state"] == "ACTIVE"
     assert result["broker_truth_lease"]["lease_state"] == "ACTIVE"
     assert result["broker_truth_lease"]["previous_lease_state"] == "ACTIVE"
     assert result["broker_truth_lease"]["refreshed_by_canonical_readiness"] is True
-    assert refreshed_lease["lease_state"] == "ACTIVE"
-    assert refreshed_lease["refreshed_by_canonical_readiness"] is True
+    assert persisted_lease["lease_state"] == "ACTIVE"
+    assert persisted_lease["generated_at"] == "2026-05-18T05:30:00+00:00"
+    assert "refreshed_by_canonical_readiness" not in persisted_lease
     assert result["readiness_blockers"] == []
 
 

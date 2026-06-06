@@ -1009,12 +1009,12 @@ def _repo_scoped_optional_path(repo_root: Path, value: Any) -> Path:
 
 
 def _write_refreshed_broker_truth_lease_if_present(*, repo_root: Path, payload: Mapping[str, Any]) -> None:
-    lease = _mapping(payload.get("broker_truth_lease"))
-    if lease.get("refreshed_by_canonical_readiness") is not True:
-        return
-    lease_path = repo_root / DEFAULT_BROKER_TRUTH_LEASE_ARTIFACT
-    lease_path.parent.mkdir(parents=True, exist_ok=True)
-    _atomic_write_json(lease_path, lease)
+    # Canonical readiness may recompute an effective lease for its own
+    # dependency decision, but broker truth lease publication belongs to the
+    # broker truth/BSA publisher.  Rewriting the canonical lease here creates
+    # mixed-generation authority artifacts.
+    _ = repo_root, payload
+    return
 
 
 def _execution_core_shared_truth_input(artifacts: Mapping[str, Any], *, now: datetime) -> dict[str, Any]:

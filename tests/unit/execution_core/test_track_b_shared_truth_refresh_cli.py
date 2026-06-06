@@ -95,6 +95,27 @@ def test_refresh_replaces_stale_upstream_authority_artifact(tmp_path: Path) -> N
     assert refreshed["generated_at"] == NOW.isoformat()
 
 
+def test_refresh_consumes_published_broker_lease_without_overwriting_it(tmp_path: Path) -> None:
+    _seed_clean_stack(tmp_path)
+    lease_path = tmp_path / "outputs/operator_dashboard/runtime/latest_broker_truth_lease.json"
+    published_lease = {
+        "schema_version": "track_b_broker_truth_lease_v1",
+        "generated_at": OLD,
+        "lease_state": "ACTIVE",
+        "connection_mode": "SUBMIT_CAPABLE_NO_RECENT_ORDER_EVENTS",
+        "publisher": "broker_truth_refresher",
+    }
+    _write(lease_path, published_lease)
+
+    result = _refresh(tmp_path)
+
+    disk = _read(lease_path)
+    row = next(row for row in result["services"] if row["service"] == "Broker Truth Lease")
+    assert disk == published_lease
+    assert row["classification"] == "ACTIVE"
+    assert row["generated_at"] == OLD
+
+
 def test_refresh_service_rows_match_written_authority_files(monkeypatch, tmp_path: Path) -> None:
     _seed_clean_stack(tmp_path)
     original_write = shared_truth_module.write_track_b_open_order_truth

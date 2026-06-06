@@ -31,14 +31,11 @@ def test_refresh_commands_are_read_only_and_cover_dashboard_artifacts(tmp_path: 
         "canonical_readiness",
         "agent_health",
         "control_plane_snapshot",
-        "track_b_paper_preflight",
     ]
-    assert "--mode monday-live" in flattened
     assert "phase1_runtime_data_readiness" in flattened
     assert "phase1_ticker_readiness_matrix" in flattened
     assert "ibkr_broker_truth_refresher" in flattened
     assert "--read-only" in flattened
-    assert "track_b_paper_preflight.sh" in flattened
     assert "track_b_paper_broker_reconciliation" in flattened
     assert "track_b_open_order_truth" in flattened
     assert "track_b_managed_position_registry" in flattened
@@ -53,9 +50,7 @@ def test_refresh_commands_are_read_only_and_cover_dashboard_artifacts(tmp_path: 
     assert names.index("managed_position_registry") < names.index("managed_order_registry")
     assert names.index("managed_order_registry") < names.index("shared_truth")
     assert names.index("shared_truth") < names.index("canonical_readiness")
-    assert names.index("canonical_readiness") < names.index("track_b_paper_preflight")
     assert names.index("agent_health") < names.index("control_plane_snapshot")
-    assert names.index("control_plane_snapshot") < names.index("track_b_paper_preflight")
     assert "placeOrder" not in flattened
     assert "--summary-output-path" in flattened
     assert "cancelOrder" not in flattened
@@ -76,10 +71,12 @@ def test_refresh_once_writes_status_and_keeps_submit_authority_false(tmp_path: P
         runner=fake_runner,
     )
 
-    assert len(calls) == 12
+    assert len(calls) == 11
     assert payload["classification"] == "TRACK_B_OPERATOR_READINESS_REFRESH_READY"
+    assert payload["authority_generation_id"].startswith("track-b-operator-authority-refresh-")
     assert payload["last_success"] is True
     assert payload["authority_refresh_orchestration"] == "TRACK_B_ACTIVE_RUNTIME_DEPENDENCY_CHAIN_V1"
+    assert payload["authority_refresh_cadence_seconds"] == payload["refresh_seconds"]
     assert payload["submit_authority"] is False
     assert payload["paper_proof_invoked"] is False
     assert payload["live_money_eligible"] is False
@@ -96,9 +93,11 @@ def test_refresh_once_writes_status_and_keeps_submit_authority_false(tmp_path: P
         "canonical_readiness",
         "agent_health",
         "control_plane_snapshot",
-        "track_b_paper_preflight",
     ]
-    assert "latest_track_b_paper_preflight.json" in payload["refreshed_artifacts"]["track_b_paper_preflight"]
+    assert all(
+        row["authority_generation_id"] == payload["authority_generation_id"]
+        for row in payload["dependency_refresh_steps"]
+    )
     assert "latest_open_order_truth.json" in payload["refreshed_artifacts"]["open_order_truth"]
     assert "latest_managed_orders.json" in payload["refreshed_artifacts"]["managed_order_registry"]
     assert "latest_managed_positions.json" in payload["refreshed_artifacts"]["managed_position_registry"]
@@ -127,7 +126,12 @@ def test_refresh_once_writes_heartbeat_when_configured(tmp_path: Path) -> None:
     heartbeat = json.loads(heartbeat_path.read_text(encoding="utf-8"))
     assert payload["classification"] == "TRACK_B_OPERATOR_READINESS_REFRESH_READY"
     assert heartbeat["schema_version"] == "track_b_operator_readiness_refresher_heartbeat_v1"
+    assert heartbeat["authority_generation_id"] == payload["authority_generation_id"]
     assert heartbeat["classification"] == "TRACK_B_OPERATOR_READINESS_REFRESH_READY"
+    assert heartbeat["authority_refresh_cadence_seconds"] == payload["refresh_seconds"]
+    assert heartbeat["dependency_refresh_steps"] == payload["dependency_refresh_steps"]
+    assert heartbeat["dependency_refresh_failures"] == []
+    assert heartbeat["refreshed_artifacts"] == payload["refreshed_artifacts"]
     assert heartbeat["fresh"] is True
     assert heartbeat["refresh_running"] is False
     assert heartbeat["submit_authority"] is False
@@ -175,7 +179,7 @@ def test_refresh_once_treats_classified_control_plane_block_as_refreshed_state(t
 def test_refresh_once_fails_closed_when_a_refresh_command_fails(tmp_path: Path) -> None:
     def fake_runner(command: Sequence[str], _repo_root: Path, _timeout_seconds: float) -> subprocess.CompletedProcess[str]:
         name = " ".join(command)
-        return subprocess.CompletedProcess(list(command), 1 if "track_b_paper_preflight" in name else 0, stdout="", stderr="blocked")
+        return subprocess.CompletedProcess(list(command), 1 if "track_b_managed_order_registry" in name else 0, stdout="", stderr="blocked")
 
     payload = refresh_once(
         config=RefreshConfig(repo_root=tmp_path, status_path=tmp_path / "status.json"),
@@ -188,10 +192,10 @@ def test_refresh_once_fails_closed_when_a_refresh_command_fails(tmp_path: Path) 
     assert payload["submit_authority"] is False
     assert payload["last_failure"] is True
     failure = payload["dependency_refresh_failures"][0]
-    assert failure["step"] == "track_b_paper_preflight"
-    assert failure["code"] == "track_b_paper_preflight_refresh_failed"
-    assert payload["commands"][-1]["name"] == "track_b_paper_preflight"
-    assert payload["commands"][-1]["returncode"] == 1
+    assert failure["step"] == "managed_order_registry"
+    assert failure["code"] == "managed_order_registry_refresh_failed"
+    managed_order = next(row for row in payload["commands"] if row["name"] == "managed_order_registry")
+    assert managed_order["returncode"] == 1
 
 
 def test_refresh_once_fails_with_exact_dependency_when_reconciliation_refresh_fails(tmp_path: Path) -> None:
@@ -212,6 +216,7 @@ def test_refresh_once_fails_with_exact_dependency_when_reconciliation_refresh_fa
         {
             "step": "track_b_paper_broker_reconciliation",
             "code": "track_b_paper_broker_reconciliation_refresh_failed",
+            "authority_generation_id": payload["authority_generation_id"],
             "returncode": 1,
             "stderr_tail": "reconciliation stale",
         }
@@ -256,7 +261,7 @@ def test_stale_status_is_reclassified_loudly(tmp_path: Path) -> None:
 
 def test_refresh_once_reports_runner_exceptions_without_dying(tmp_path: Path) -> None:
     def fake_runner(command: Sequence[str], _repo_root: Path, _timeout_seconds: float) -> subprocess.CompletedProcess[str]:
-        if "track_b_paper_preflight.sh" in " ".join(command):
+        if "track_b_managed_order_registry" in " ".join(command):
             raise RuntimeError("boom")
         return subprocess.CompletedProcess(list(command), 0, stdout="ok", stderr="")
 
@@ -267,9 +272,9 @@ def test_refresh_once_reports_runner_exceptions_without_dying(tmp_path: Path) ->
 
     assert payload["classification"] == "TRACK_B_OPERATOR_READINESS_REFRESH_FAILED"
     assert payload["last_failure"] is True
-    preflight = next(row for row in payload["commands"] if row["name"] == "track_b_paper_preflight")
-    assert preflight["returncode"] == 1
-    assert "refresh command exception" in preflight["stderr_tail"]
+    managed_order = next(row for row in payload["commands"] if row["name"] == "managed_order_registry")
+    assert managed_order["returncode"] == 1
+    assert "refresh command exception" in managed_order["stderr_tail"]
 
 
 def test_run_supervisor_writes_supervisor_status_and_pid_files(monkeypatch, tmp_path: Path) -> None:
