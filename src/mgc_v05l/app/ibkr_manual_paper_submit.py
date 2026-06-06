@@ -50,6 +50,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--submit", action="store_true", help="Explicitly attempt one paper submit/cancel lifecycle after preview and approval validation.")
     parser.add_argument("--approval-digest", default=None, help="Exact preview digest required for submit.")
     parser.add_argument("--approval-phrase", default=None, help="Exact typed confirmation phrase required for submit.")
+    parser.add_argument("--order-ref", default=None, help="Optional explicit IBKR orderRef for the single approved PAPER test order.")
     parser.add_argument(
         "--pre-action-snapshot-max-age-seconds",
         type=int,
@@ -91,6 +92,7 @@ def main(argv: list[str] | None = None) -> int:
         submit=bool(args.submit),
         approval_digest=str(args.approval_digest or "").strip() or None,
         approval_phrase=str(args.approval_phrase or "").strip() or None,
+        order_ref=str(args.order_ref or "").strip() or None,
         pre_action_snapshot_max_age_seconds=int(args.pre_action_snapshot_max_age_seconds),
         output_dir=output_dir,
         frozen_preview_path=Path(args.frozen_preview_path) if args.frozen_preview_path is not None else None,

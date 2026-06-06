@@ -392,6 +392,24 @@ def test_manual_mgc_futures_order_does_not_include_etradeonly() -> None:
     assert raw_order.transmit is True
 
 
+def test_manual_futures_order_sets_paper_lifecycle_test_order_ref() -> None:
+    raw_order = SimpleNamespace()
+
+    _configure_minimal_futures_limit_order(
+        raw_order,
+        order_id=1,
+        account_id="DUM882026",
+        action="BUY",
+        quantity=1.0,
+        limit_price=4599.6,
+        time_in_force="DAY",
+        common_module=SimpleNamespace(),
+        order_ref="TRACK_B_API_LIFECYCLE_TEST_20260606T071500Z_MESM6_BUY_REST_CANCEL",
+    )
+
+    assert raw_order.orderRef == "TRACK_B_API_LIFECYCLE_TEST_20260606T071500Z_MESM6_BUY_REST_CANCEL"
+
+
 def test_manual_mgc_futures_order_omits_unsupported_stock_only_attributes() -> None:
     raw_order = SimpleNamespace(
         eTradeOnly=True,

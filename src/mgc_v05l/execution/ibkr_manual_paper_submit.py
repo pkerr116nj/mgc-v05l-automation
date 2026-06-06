@@ -151,6 +151,7 @@ class IbkrManualPaperSubmitConfig:
     pre_action_snapshot_max_age_seconds: int = 300
     pre_action_snapshot_already_validated: bool = False
     pre_action_snapshot_validation_context: dict[str, Any] | None = None
+    order_ref: str | None = None
 
 
 @dataclass(frozen=True)
@@ -246,8 +247,10 @@ class IbkrManualPaperSubmitCollector(IbkrReadOnlyProbeCollector):
         status: str,
         quantity: str | int | float,
         filled_quantity: str | int | float | None = None,
+        remaining_quantity: str | int | float | None = None,
         limit_price: str | int | float | None = None,
         stop_price: str | int | float | None = None,
+        order_ref: str | None = None,
         occurred_at: datetime | None = None,
     ) -> None:
         super().open_order(
@@ -259,8 +262,10 @@ class IbkrManualPaperSubmitCollector(IbkrReadOnlyProbeCollector):
             status=status,
             quantity=quantity,
             filled_quantity=filled_quantity,
+            remaining_quantity=remaining_quantity,
             limit_price=limit_price,
             stop_price=stop_price,
+            order_ref=order_ref,
             occurred_at=occurred_at,
         )
         self.order_status_event(int(broker_order_id)).set()
@@ -469,6 +474,7 @@ class IbkrManualPaperSubmitTransport:
         quantity: float,
         limit_price: float,
         time_in_force: str,
+        order_ref: str | None = None,
     ) -> None:
         order_cls = getattr(self._module_loader("ibapi.order"), "Order", None)
         if order_cls is None:
@@ -484,6 +490,7 @@ class IbkrManualPaperSubmitTransport:
             limit_price=limit_price,
             time_in_force=time_in_force,
             common_module=common_module,
+            order_ref=order_ref,
         )
         self._ensure_bridge().placeOrder(int(order_id), self._raw_contract(contract), raw_order)
 
@@ -541,6 +548,7 @@ def _configure_minimal_futures_limit_order(
     limit_price: float,
     time_in_force: str,
     common_module: Any | None,
+    order_ref: str | None = None,
 ) -> None:
     unset_double = getattr(common_module, "UNSET_DOUBLE", None) if common_module is not None else None
     unset_integer = getattr(common_module, "UNSET_INTEGER", None) if common_module is not None else None
@@ -552,6 +560,8 @@ def _configure_minimal_futures_limit_order(
     raw_order.lmtPrice = float(limit_price)
     raw_order.tif = str(time_in_force)
     raw_order.transmit = True
+    if order_ref:
+        raw_order.orderRef = str(order_ref)
     if hasattr(raw_order, "eTradeOnly"):
         raw_order.eTradeOnly = False
     if hasattr(raw_order, "firmQuoteOnly"):
@@ -2465,6 +2475,19 @@ def _contract_for_order_submission(contract_report: dict[str, Any]) -> IbkrQuali
     return contract
 
 
+def _order_ref_for_submit(*, config: IbkrManualPaperSubmitConfig, requested_order: dict[str, Any], order_id: int) -> str:
+    explicit = str(config.order_ref or "").strip()
+    if explicit:
+        return explicit
+    symbol = str(requested_order.get("symbol") or config.symbol or "").strip().upper()
+    action = str(requested_order.get("action") or config.action or "").strip().upper()
+    return (
+        "TRACK_B_API_LIFECYCLE_TEST_"
+        f"{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')}_"
+        f"{symbol}_OID{int(order_id)}_{action}_REST_CANCEL"
+    )
+
+
 def _probe_delayed_quote_context(
     *,
     transport: IbkrManualPaperSubmitTransport,
@@ -3128,6 +3151,7 @@ def _execute_submit_cancel_lifecycle(
         quantity=requested_order["quantity"],
         limit_price=requested_order["limit_price"],
         time_in_force=requested_order["time_in_force"],
+        order_ref=_order_ref_for_submit(config=config, requested_order=requested_order, order_id=order_id),
     )
     _record_audit(
         audit_events,
