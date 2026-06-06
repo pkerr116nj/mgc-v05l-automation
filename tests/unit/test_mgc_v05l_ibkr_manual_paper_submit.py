@@ -13,8 +13,10 @@ from mgc_v05l.execution.ibkr_manual_paper_submit import (
     _FILL_TEST_MODE,
     _MANUAL_CONFIRMATION_WAIT_STATE,
     _build_delayed_quote_pricing_context,
+    _classify_manual_test_open_order_baseline,
     _classify_submit_lifecycle,
     _configure_minimal_futures_limit_order,
+    _contract_for_order_submission,
     _detect_order_rejection,
     _derive_marketable_limit_price,
     _delayed_quote_pricing_guardrails,
@@ -462,6 +464,55 @@ def test_qualified_mgc_submit_payload_uses_exact_last_trade_date() -> None:
     assert raw_contract.localSymbol == "MGCM6"
 
 
+def test_qualified_mes_submit_payload_preserves_resolved_expiry() -> None:
+    qualified = IbkrQualifiedContract(
+        internal_symbol="MES",
+        broker_symbol="MES",
+        local_symbol="MESM26",
+        security_type="FUT",
+        exchange="CME",
+        currency="USD",
+        expiry="202606",
+        multiplier="5",
+        trading_class="MES",
+        con_id=770561194,
+        metadata={"contract_month": "202606"},
+    )
+    exact = _contract_for_order_submission(
+        {
+            "qualified_contract_object": qualified,
+            "api_contract_details": [
+                {
+                    "con_id": 770561194,
+                    "expiry": "20260618",
+                    "local_symbol": "MESM6",
+                    "exchange": "CME",
+                    "currency": "USD",
+                    "multiplier": "5",
+                    "trading_class": "MES",
+                }
+            ],
+        }
+    )
+
+    class _FakeContract:
+        pass
+
+    transport = IbkrManualPaperSubmitTransport(
+        client=SimpleNamespace(record_event=lambda *args, **kwargs: None),
+        collector=SimpleNamespace(),
+        config=IbkrReadOnlyApiTransportConfig(host="127.0.0.1", port=7497, client_id=1, read_only=False),
+        module_loader=lambda name: SimpleNamespace(Contract=_FakeContract) if name == "ibapi.contract" else SimpleNamespace(),
+    )
+    raw_contract = transport._raw_contract(exact)
+
+    assert exact.expiry == "20260618"
+    assert exact.local_symbol == "MESM6"
+    assert raw_contract.lastTradeDateOrContractMonth == "20260618"
+    assert raw_contract.conId == 770561194
+    assert raw_contract.localSymbol == "MESM6"
+
+
 def test_unqualified_contract_lookup_does_not_force_local_symbol() -> None:
     unqualified = IbkrQualifiedContract(
         internal_symbol="MGC",
@@ -490,6 +541,50 @@ def test_unqualified_contract_lookup_does_not_force_local_symbol() -> None:
 
     assert raw_contract.lastTradeDateOrContractMonth == "202606"
     assert not hasattr(raw_contract, "localSymbol")
+
+
+def test_scoped_cancel_uses_installed_one_argument_ibapi_shape() -> None:
+    class _OneArgumentCancelBridge:
+        def __init__(self) -> None:
+            self.cancel_calls: list[int] = []
+
+        def cancelOrder(self, order_id: int) -> None:
+            self.cancel_calls.append(int(order_id))
+
+    bridge = _OneArgumentCancelBridge()
+    transport = IbkrManualPaperSubmitTransport(
+        client=SimpleNamespace(record_event=lambda *args, **kwargs: None),
+        collector=SimpleNamespace(),
+        config=IbkrReadOnlyApiTransportConfig(host="127.0.0.1", port=7497, client_id=1, read_only=False),
+        module_loader=lambda name: SimpleNamespace(),
+    )
+    transport._bridge = bridge
+
+    transport.cancel_order(order_id=123)
+
+    assert bridge.cancel_calls == [123]
+
+
+def test_scoped_cancel_keeps_legacy_two_argument_ibapi_fallback() -> None:
+    class _TwoArgumentCancelBridge:
+        def __init__(self) -> None:
+            self.cancel_calls: list[tuple[int, str]] = []
+
+        def cancelOrder(self, order_id: int, manual_cancel_order_time: str) -> None:
+            self.cancel_calls.append((int(order_id), manual_cancel_order_time))
+
+    bridge = _TwoArgumentCancelBridge()
+    transport = IbkrManualPaperSubmitTransport(
+        client=SimpleNamespace(record_event=lambda *args, **kwargs: None),
+        collector=SimpleNamespace(),
+        config=IbkrReadOnlyApiTransportConfig(host="127.0.0.1", port=7497, client_id=1, read_only=False),
+        module_loader=lambda name: SimpleNamespace(),
+    )
+    transport._bridge = bridge
+
+    transport.cancel_order(order_id=456)
+
+    assert bridge.cancel_calls == [(456, "")]
 
 
 def test_error_478_is_classified_as_paper_order_rejected_with_contract_expiry_conflict() -> None:
@@ -1076,6 +1171,84 @@ def test_timeout_during_manual_confirmation_fails_closed(monkeypatch) -> None:
     ]
 
 
+def test_submit_lifecycle_uses_exact_contract_details_for_mes(monkeypatch) -> None:
+    runtime = _fake_runtime()
+    context = _context()
+    context["contract_report"] = {
+        "ok": True,
+        "qualified_contract_identifier": 770561194,
+        "qualified_contract_object": IbkrQualifiedContract(
+            internal_symbol="MES",
+            broker_symbol="MES",
+            local_symbol="MESM26",
+            security_type="FUT",
+            exchange="CME",
+            currency="USD",
+            expiry="202606",
+            multiplier="5",
+            trading_class="MES",
+            con_id=770561194,
+            metadata={"contract_month": "202606"},
+        ),
+        "qualified_contract": {
+            "internal_symbol": "MES",
+            "broker_symbol": "MES",
+            "local_symbol": "MESM26",
+            "security_type": "FUT",
+            "exchange": "CME",
+            "currency": "USD",
+            "expiry": "202606",
+            "multiplier": "5",
+            "trading_class": "MES",
+            "con_id": 770561194,
+            "metadata": {"contract_month": "202606"},
+        },
+        "api_contract_details": [
+            {
+                "con_id": 770561194,
+                "expiry": "20260618",
+                "local_symbol": "MESM6",
+                "exchange": "CME",
+                "currency": "USD",
+                "multiplier": "5",
+                "trading_class": "MES",
+                "min_tick": 0.25,
+            }
+        ],
+    }
+    monkeypatch.setattr(
+        "mgc_v05l.execution.ibkr_manual_paper_submit._refresh_open_orders_snapshot",
+        lambda **kwargs: {"selected_account_id": "DUM882026", "open_order_count": 0, "open_orders": []},
+    )
+    monkeypatch.setattr(
+        "mgc_v05l.execution.ibkr_manual_paper_submit._snapshot_digest",
+        lambda snapshot: "baseline",
+    )
+
+    _execute_submit_cancel_lifecycle(
+        config=_config(submit=True, symbol="MES", approval_digest="digest", approval_phrase="phrase"),
+        runtime=runtime,
+        context=context,
+        requested_order=_requested_order(),
+        sleep_fn=lambda _: None,
+        audit_events=[],
+        preview_payload={},
+        preview_digest="digest",
+        manual_confirmation_fn=lambda **kwargs: {
+            "state": _MANUAL_CONFIRMATION_WAIT_STATE,
+            "operator_outcome": "timeout",
+            "response_text": None,
+            "detail": "Timed out waiting for the operator.",
+            "timed_out": True,
+        },
+    )
+
+    submitted_contract = runtime.transport.place_calls[0]["contract"]
+    assert submitted_contract.expiry == "20260618"
+    assert submitted_contract.local_symbol == "MESM6"
+    assert submitted_contract.con_id == 770561194
+
+
 def test_operator_rejected_path_does_not_attempt_cancel_unless_order_exists(monkeypatch) -> None:
     runtime = _fake_runtime()
     snapshots = iter(
@@ -1115,6 +1288,65 @@ def test_operator_rejected_path_does_not_attempt_cancel_unless_order_exists(monk
     assert result["status"] == "manual_confirmation_rejected_no_order"
     assert runtime.transport.cancel_calls == []
     assert "cancel_requested" not in _event_types(audit_events)
+
+
+def test_manual_test_harness_allows_only_quarantined_pending_cancel_test_orders() -> None:
+    baseline = _classify_manual_test_open_order_baseline(
+        open_orders_before={
+            "open_order_count": 1,
+            "open_orders": [
+                {
+                    "account_id": "DUM882026",
+                    "broker_order_id": 2,
+                    "client_id": 9088,
+                    "perm_id": 1773955119,
+                    "symbol": "MES",
+                    "local_symbol": "MESM6",
+                    "action": "BUY",
+                    "quantity": "1",
+                    "status": "PendingCancel",
+                    "order_ref": "TRACK_B_API_LIFECYCLE_TEST_20260606T062305Z_MESM6_BUY_REST_CANCEL",
+                    "filled_quantity": "0",
+                    "remaining_quantity": "1",
+                }
+            ],
+        },
+        positions={"positions": []},
+        requested_order={"symbol": "MES"},
+    )
+
+    assert baseline["classification"] == "PAPER_TEST_ORDER_PENDING_CANCEL_QUARANTINED"
+    assert baseline["test_harness_allowed"] is True
+    assert baseline["quarantined_test_order_count"] == 1
+
+
+def test_manual_test_harness_blocks_unknown_open_order_baseline() -> None:
+    baseline = _classify_manual_test_open_order_baseline(
+        open_orders_before={
+            "open_order_count": 1,
+            "open_orders": [
+                {
+                    "account_id": "DUM882026",
+                    "broker_order_id": 12,
+                    "client_id": 9088,
+                    "symbol": "MES",
+                    "local_symbol": "MESM6",
+                    "action": "BUY",
+                    "quantity": "1",
+                    "status": "Submitted",
+                    "order_ref": "not_a_test",
+                    "filled_quantity": "0",
+                    "remaining_quantity": "1",
+                }
+            ],
+        },
+        positions={"positions": []},
+        requested_order={"symbol": "MES"},
+    )
+
+    assert baseline["classification"] == "OPEN_ORDER_BASELINE_BLOCKED"
+    assert baseline["test_harness_allowed"] is False
+    assert baseline["same_symbol_blocking_orders"][0]["broker_order_id"] == 12
 
 
 def test_operator_approved_path_proceeds_to_broker_truth_verification(monkeypatch) -> None:

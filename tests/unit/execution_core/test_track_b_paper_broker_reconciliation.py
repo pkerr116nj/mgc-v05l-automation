@@ -2778,6 +2778,40 @@ def test_blocks_when_track_b_open_order_exists(tmp_path: Path) -> None:
     assert report["open_order_truth"]["summary"]["suspicious_order_count"] == 1
 
 
+def test_pending_cancel_paper_lifecycle_test_order_is_quarantined_not_unknown(tmp_path: Path) -> None:
+    config = _write_base_artifacts(tmp_path)
+    _write_broker_truth(
+        config,
+        positions=[],
+        open_orders=[
+            {
+                "account_id": "DUM882026",
+                "broker_order_id": 2,
+                "client_id": 9088,
+                "perm_id": 1773955119,
+                "action": "BUY",
+                "quantity": "1",
+                "filled_quantity": "1.7976931348623157e+308",
+                "remaining_quantity": None,
+                "status": "PendingCancel",
+                "order_ref": "TRACK_B_API_LIFECYCLE_TEST_20260606T062305Z_MESM6_BUY_REST_CANCEL",
+                "contract": {"symbol": "MES", "local_symbol": "MESM6", "security_type": "FUT"},
+            }
+        ],
+    )
+
+    report = reconcile_track_b_paper_broker_truth(config=config, now=NOW)
+
+    assert report["classification"] == "TRACK_B_PAPER_BROKER_RECONCILED_WITH_QUARANTINED_PAPER_TEST_ORDER"
+    assert report["unknown_broker_open_order_count"] == 0
+    assert report["quarantined_paper_test_order_count"] == 1
+    assert report["quarantined_paper_test_orders"][0]["broker_order_id"] == 2
+    assert not any(blocker["code"] == "UNKNOWN_BROKER_OPEN_ORDER" for blocker in report["blockers"])
+    assert report["open_order_truth_classification"] == "PAPER_TEST_ORDER_PENDING_CANCEL_QUARANTINED"
+    assert report["open_order_truth"]["summary"]["strategy_submit_allowed"] is False
+    assert report["open_order_truth"]["summary"]["test_harness_allowed"] is True
+
+
 def test_duplicate_close_order_uses_open_order_truth_evidence(tmp_path: Path) -> None:
     config = _write_base_artifacts(tmp_path)
     _write_broker_truth(

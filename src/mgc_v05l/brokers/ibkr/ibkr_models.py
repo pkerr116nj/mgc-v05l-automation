@@ -100,6 +100,7 @@ class IbkrOpenOrderRecord:
     remaining_quantity: str | None = None
     limit_price: str | None = None
     stop_price: str | None = None
+    order_ref: str | None = None
     updated_at: datetime | None = None
     raw_payload: dict[str, Any] = field(default_factory=dict)
 

@@ -28,6 +28,7 @@ from ..execution_core.track_b_pre_action_snapshot_validator import (
     TrackBPreActionSnapshotValidatorConfig,
     validate_track_b_pre_action_snapshot,
 )
+from ..execution_core.track_b_open_order_truth import paper_test_pending_cancel_quarantine_evidence
 from .ibkr_phase1_futures_scope import phase1_execution_target_for_symbol
 from .ibkr_execution_provider import IbkrExecutionProvider
 from .ibkr_paper_order_preview import (
@@ -492,9 +493,9 @@ class IbkrManualPaperSubmitTransport:
         if cancel_method is None:
             raise IbkrManualPaperSubmitError("Installed ibapi bridge is missing cancelOrder.")
         try:
-            cancel_method(int(order_id), "")
-        except TypeError:
             cancel_method(int(order_id))
+        except TypeError:
+            cancel_method(int(order_id), "")
 
     def _raw_contract(self, contract: IbkrQualifiedContract) -> Any:
         contract_cls = getattr(self._module_loader("ibapi.contract"), "Contract", None)
@@ -2094,6 +2095,44 @@ def _start_runtime(runtime: _SubmitRuntime) -> None:
     thread.start()
 
 
+def _classify_manual_test_open_order_baseline(
+    *,
+    open_orders_before: dict[str, Any],
+    positions: dict[str, Any],
+    requested_order: dict[str, Any],
+) -> dict[str, Any]:
+    open_orders = [row for row in list(open_orders_before.get("open_orders") or []) if isinstance(row, dict)]
+    position_rows = [row for row in list(positions.get("positions") or []) if isinstance(row, dict)]
+    expected_symbol = str(requested_order.get("symbol") or "").strip().upper()
+    quarantined: list[dict[str, Any]] = []
+    same_symbol_blocking_orders: list[dict[str, Any]] = []
+    unknown_open_orders: list[dict[str, Any]] = []
+    for row in open_orders:
+        evidence = paper_test_pending_cancel_quarantine_evidence(
+            order=row,
+            broker_positions=position_rows,
+        )
+        if evidence.get("quarantined") is True:
+            quarantined.append({"order": dict(row), "quarantine_evidence": evidence})
+            continue
+        row_symbol = str(row.get("symbol") or "").strip().upper()
+        if expected_symbol and row_symbol == expected_symbol:
+            same_symbol_blocking_orders.append(dict(row))
+        else:
+            unknown_open_orders.append(dict(row))
+    return {
+        "classification": "PAPER_TEST_ORDER_PENDING_CANCEL_QUARANTINED"
+        if open_orders and len(quarantined) == len(open_orders)
+        else "OPEN_ORDER_BASELINE_BLOCKED",
+        "test_harness_allowed": bool(open_orders) and len(quarantined) == len(open_orders),
+        "quarantined_test_order_count": len(quarantined),
+        "quarantined_test_orders": quarantined,
+        "same_symbol_blocking_orders": same_symbol_blocking_orders,
+        "unknown_open_orders": unknown_open_orders,
+        "requested_symbol": expected_symbol,
+    }
+
+
 def _collect_truth_and_preview_context(
     *,
     config: IbkrManualPaperSubmitConfig,
@@ -2192,19 +2231,22 @@ def _collect_truth_and_preview_context(
     positions = _build_positions_snapshot(config=read_only_config, client=runtime.client, selected_account_id=selected_account_id)
     open_orders_before = _build_open_orders_snapshot(config=read_only_config, client=runtime.client, selected_account_id=selected_account_id)
     if open_orders_before.get("open_order_count"):
-        expected_symbol = str(requested_order.get("symbol") or "").strip().upper()
-        mgc_rows = [
-            row
-            for row in list(open_orders_before.get("open_orders") or [])
-            if str(row.get("symbol") or "").strip().upper() == expected_symbol
-        ]
-        if mgc_rows:
+        baseline = _classify_manual_test_open_order_baseline(
+            open_orders_before=open_orders_before,
+            positions=positions,
+            requested_order=requested_order,
+        )
+        if baseline["test_harness_allowed"] is True:
+            open_orders_before["paper_test_order_quarantine"] = baseline
+        elif baseline["same_symbol_blocking_orders"]:
+            expected_symbol = str(requested_order.get("symbol") or "").strip().upper()
             raise IbkrManualPaperSubmitError(
                 f"Open-order baseline contains working {expected_symbol} orders. Cancel them manually in TWS before rerunning the manual paper submit/cancel test."
             )
-        raise IbkrManualPaperSubmitError(
-            f"Open-order baseline is not empty for the first manual submit test: {open_orders_before['open_order_count']} existing open orders."
-        )
+        else:
+            raise IbkrManualPaperSubmitError(
+                f"Open-order baseline is not empty for the first manual submit test: {open_orders_before['open_order_count']} existing open orders."
+            )
     contract_report = _qualify_futures_contract(
         transport=runtime.transport,
         collector=runtime.collector,
@@ -2413,6 +2455,14 @@ def _qualified_contract_with_api_details(
         con_id=con_id,
         metadata=qualified.metadata,
     )
+
+
+def _contract_for_order_submission(contract_report: dict[str, Any]) -> IbkrQualifiedContract:
+    contract = contract_report["qualified_contract_object"]
+    api_details = next(iter(contract_report.get("api_contract_details") or []), {})
+    if isinstance(contract, IbkrQualifiedContract) and api_details:
+        return _qualified_contract_with_api_details(contract, api_details)
+    return contract
 
 
 def _probe_delayed_quote_context(
@@ -3073,7 +3123,7 @@ def _execute_submit_cancel_lifecycle(
     runtime.transport.place_limit_order(
         order_id=order_id,
         account_id=context["selected_account_id"],
-        contract=context["contract_report"]["qualified_contract_object"],
+        contract=_contract_for_order_submission(context["contract_report"]),
         action=requested_order["action"],
         quantity=requested_order["quantity"],
         limit_price=requested_order["limit_price"],
@@ -4321,6 +4371,7 @@ def _build_submit_bridge(*, wrapper_cls: type[Any], client_cls: type[Any], colle
                 status=str(getattr(orderState, "status", "") or ""),
                 total_quantity=getattr(order, "totalQuantity", 0),
                 limit_price=getattr(order, "lmtPrice", None),
+                order_ref=str(getattr(order, "orderRef", "") or ""),
             )
             collector.open_order(
                 account_id=getattr(order, "account", "") or "",
@@ -4331,7 +4382,9 @@ def _build_submit_bridge(*, wrapper_cls: type[Any], client_cls: type[Any], colle
                 status=getattr(orderState, "status", "") or "",
                 quantity=getattr(order, "totalQuantity", 0),
                 filled_quantity=getattr(order, "filledQuantity", None),
+                remaining_quantity=getattr(order, "remainingQuantity", None),
                 limit_price=getattr(order, "lmtPrice", None),
+                order_ref=getattr(order, "orderRef", None),
                 stop_price=getattr(order, "auxPrice", None),
             )
 

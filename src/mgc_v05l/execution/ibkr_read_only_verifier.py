@@ -183,6 +183,7 @@ class IbkrReadOnlyProbeCollector:
         remaining_quantity: str | int | float | None = None,
         limit_price: str | int | float | None = None,
         stop_price: str | int | float | None = None,
+        order_ref: str | None = None,
         occurred_at: datetime | None = None,
     ) -> None:
         self._adapter.open_order(
@@ -200,6 +201,7 @@ class IbkrReadOnlyProbeCollector:
             remaining_quantity=remaining_quantity,
             limit_price=limit_price,
             stop_price=stop_price,
+            order_ref=order_ref,
             occurred_at=occurred_at,
         )
 
@@ -990,6 +992,7 @@ def _build_bridge(*, wrapper_cls: type[Any], client_cls: type[Any], collector: I
                 filled_quantity=getattr(order, "filledQuantity", None),
                 remaining_quantity=getattr(order, "remainingQuantity", None),
                 limit_price=getattr(order, "lmtPrice", None),
+                order_ref=getattr(order, "orderRef", None),
                 stop_price=getattr(order, "auxPrice", None),
             )
 
@@ -1220,6 +1223,9 @@ def _build_open_orders_snapshot(*, config: IbkrReadOnlyVerificationConfig, clien
                 "tif": order.tif,
                 "filled_quantity": order.filled_quantity,
                 "remaining_quantity": order.remaining_quantity,
+                "limit_price": order.limit_price,
+                "order_ref": order.order_ref,
+                "stop_price": order.stop_price,
                 "status": order.status,
                 "updated_at": order.updated_at.isoformat() if order.updated_at is not None else None,
             }

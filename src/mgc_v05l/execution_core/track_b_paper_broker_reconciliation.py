@@ -33,9 +33,11 @@ from mgc_v05l.execution_core.track_b_lifecycle_state_transition import (
 )
 from mgc_v05l.execution_core.track_b_open_order_truth import (
     DUPLICATE_CLOSE_ORDER,
+    PAPER_TEST_ORDER_PENDING_CANCEL_QUARANTINED,
     SUSPICIOUS_ORDER_STATE,
     TrackBOpenOrderTruthConfig,
     build_track_b_open_order_truth_from_reconciliation,
+    paper_test_pending_cancel_quarantine_evidence,
 )
 from mgc_v05l.execution_core.track_b_submit_intent_ownership import (
     DEFAULT_TRACK_B_SUBMIT_INTENT_OWNERSHIP_LATEST_JSON,
@@ -287,10 +289,15 @@ def reconcile_track_b_paper_broker_truth(
         persisted_known_orders=_persisted_known_leak_test_entry_orders(config.repo_root, config.symbols),
         artifact_known_orders=_artifact_known_leak_test_entry_orders(config.repo_root, config.symbols),
     )
+    quarantined_paper_test_orders = _quarantined_paper_test_orders(
+        broker_open_orders=track_b_open_orders,
+        broker_positions=track_b_positions,
+    )
     unknown_track_b_open_orders = _unknown_track_b_open_orders(
         broker_open_orders=track_b_open_orders,
         known_managed_exit_orders=known_managed_exit_orders,
         known_leak_test_entry_orders=known_leak_test_entry_orders,
+        known_quarantined_paper_test_orders=quarantined_paper_test_orders,
     )
     open_order_truth_evidence = _open_order_truth_evidence(
         config=config,
@@ -522,6 +529,8 @@ def reconcile_track_b_paper_broker_truth(
         classification = "TRACK_B_PAPER_BROKER_RECONCILED_WITH_KNOWN_MANAGED_EXIT_ORDER"
     elif reconciled and known_leak_test_entry_orders:
         classification = "TRACK_B_PAPER_BROKER_RECONCILED_WITH_KNOWN_LEAK_TEST_ENTRY_ORDER"
+    elif reconciled and quarantined_paper_test_orders:
+        classification = "TRACK_B_PAPER_BROKER_RECONCILED_WITH_QUARANTINED_PAPER_TEST_ORDER"
     else:
         classification = "TRACK_B_PAPER_BROKER_RECONCILED" if reconciled else "TRACK_B_PAPER_BROKER_RECONCILIATION_BLOCKED"
     report = {
@@ -583,6 +592,7 @@ def reconcile_track_b_paper_broker_truth(
         "track_b_broker_open_order_count": len(track_b_open_orders),
         "known_managed_exit_order_count": len(known_managed_exit_orders),
         "known_leak_test_entry_order_count": len(known_leak_test_entry_orders),
+        "quarantined_paper_test_order_count": len(quarantined_paper_test_orders),
         "unresolved_submit_intent_ownership_count": len(unresolved_submit_intents),
         "stale_managed_exit_order_count": len(stale_managed_exit_orders),
         "hard_exit_order_not_marketable_count": len(hard_exit_order_not_marketable),
@@ -595,6 +605,7 @@ def reconcile_track_b_paper_broker_truth(
         "track_b_broker_open_orders": track_b_open_orders,
         "known_managed_exit_orders": known_managed_exit_orders,
         "known_leak_test_entry_orders": known_leak_test_entry_orders,
+        "quarantined_paper_test_orders": quarantined_paper_test_orders,
         "unresolved_submit_intent_ownership_records": unresolved_submit_intents,
         "submit_intent_ownership_reconciliation": submit_intent_ownership_reconciliation,
         "historical_reconciliation_debris_resolution": historical_debris_resolution,
@@ -4131,15 +4142,57 @@ def _unknown_track_b_open_orders(
     broker_open_orders: Sequence[Mapping[str, Any]],
     known_managed_exit_orders: Sequence[Mapping[str, Any]],
     known_leak_test_entry_orders: Sequence[Mapping[str, Any]] = (),
+    known_quarantined_paper_test_orders: Sequence[Mapping[str, Any]] = (),
 ) -> list[dict[str, Any]]:
     known_ids = {_order_id_text(row) for row in known_managed_exit_orders if _order_id_text(row)}
     known_ids.update(_order_id_text(row) for row in known_leak_test_entry_orders if _order_id_text(row))
+    known_ids.update(_order_id_text(row) for row in known_quarantined_paper_test_orders if _order_id_text(row))
     unknown: list[dict[str, Any]] = []
     for row in broker_open_orders:
         if _order_id_text(row) in known_ids:
             continue
         unknown.append(dict(row))
     return unknown
+
+
+def _quarantined_paper_test_orders(
+    *,
+    broker_open_orders: Sequence[Mapping[str, Any]],
+    broker_positions: Sequence[Mapping[str, Any]],
+) -> list[dict[str, Any]]:
+    quarantined: list[dict[str, Any]] = []
+    position_rows = [dict(row) for row in broker_positions if isinstance(row, Mapping)]
+    for row in broker_open_orders:
+        evidence = paper_test_pending_cancel_quarantine_evidence(
+            order=row,
+            broker_positions=position_rows,
+        )
+        if evidence.get("quarantined") is not True:
+            continue
+        quarantined.append(
+            {
+                "classification": PAPER_TEST_ORDER_PENDING_CANCEL_QUARANTINED,
+                "source": "IBKR_PAPER_API_LIFECYCLE_TEST_QUARANTINE",
+                "broker_order_id": row.get("broker_order_id") or row.get("order_id") or row.get("orderId"),
+                "client_id": row.get("client_id") or row.get("clientId"),
+                "perm_id": row.get("perm_id") or row.get("permId"),
+                "account_id": row.get("account_id") or row.get("account"),
+                "symbol": row.get("symbol"),
+                "local_symbol": row.get("local_symbol") or row.get("localSymbol"),
+                "con_id": row.get("con_id") or row.get("conId"),
+                "action": row.get("action") or row.get("side"),
+                "quantity": row.get("quantity") or row.get("total_quantity") or row.get("totalQuantity"),
+                "order_ref": row.get("order_ref") or row.get("orderRef"),
+                "status": row.get("status"),
+                "filled_quantity": row.get("filled_quantity") or row.get("filled"),
+                "remaining_quantity": row.get("remaining_quantity") or row.get("remaining"),
+                "prior_scoped_cancel_attempted": True,
+                "production_strategy_submit_allowed": False,
+                "test_harness_submit_allowed": True,
+                "quarantine_evidence": evidence,
+            }
+        )
+    return quarantined
 
 
 def _order_id_text(row: Mapping[str, Any]) -> str:

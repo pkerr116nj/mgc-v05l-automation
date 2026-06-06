@@ -25,6 +25,7 @@ OPEN_ENTRY_ORDER_WORKING = "OPEN_ENTRY_ORDER_WORKING"
 DUPLICATE_CLOSE_ORDER = "DUPLICATE_CLOSE_ORDER"
 UNKNOWN_OPEN_ORDER = "UNKNOWN_OPEN_ORDER"
 SUSPICIOUS_ORDER_STATE = "SUSPICIOUS_ORDER_STATE"
+PAPER_TEST_ORDER_PENDING_CANCEL_QUARANTINED = "PAPER_TEST_ORDER_PENDING_CANCEL_QUARANTINED"
 CLOSE_ORDER_STALE = "CLOSE_ORDER_STALE"
 CLOSE_ORDER_MARKETABLE_NOT_FILLED = "CLOSE_ORDER_MARKETABLE_NOT_FILLED"
 BROKER_FLAT_WITH_OPEN_CLOSE_ORDER = "BROKER_FLAT_WITH_OPEN_CLOSE_ORDER"
@@ -63,6 +64,15 @@ DEFAULT_LIFECYCLE_ROOT = (
 _SENTINEL_FILLED_QUANTITY = Decimal("1e100")
 _WORKING_ORDER_STATUSES = {"SUBMITTED", "PRESUBMITTED", "PENDING_SUBMIT", "APIPENDING"}
 _TERMINAL_ORDER_STATUSES = {"FILLED", "CANCELLED", "INACTIVE", "APICANCELLED"}
+_PAPER_TEST_ACCOUNT_ID = "DUM882026"
+_PAPER_TEST_ORDER_REF_PREFIX = "TRACK_B_API_LIFECYCLE_TEST_"
+_PAPER_TEST_APPROVED_LOCAL_SYMBOLS = {"MESM6", "MNQM6"}
+_PAPER_TEST_PENDING_CANCEL_STATUSES = {
+    "PENDINGCANCEL",
+    "PENDING_CANCEL",
+    "PRESUBMITTED_PENDING_CANCEL",
+    "PRE_SUBMITTED_PENDING_CANCEL",
+}
 
 
 @dataclass(frozen=True)
@@ -146,6 +156,9 @@ def build_track_b_open_order_truth_from_reconciliation(
         for state in order_states
         if state.get("is_close_order") is True and not _matching_broker_positions(state.get("order") or {}, broker_positions)
     ]
+    quarantined_test_orders = [
+        state for state in order_states if state.get("classification") == PAPER_TEST_ORDER_PENDING_CANCEL_QUARANTINED
+    ]
     classification = _overall_classification(
         source_stale=source_stale,
         order_states=order_states,
@@ -176,6 +189,7 @@ def build_track_b_open_order_truth_from_reconciliation(
         "duplicate_close_order_groups": duplicate_groups,
         "broker_positions_without_close_order": broker_positions_without_close,
         "broker_flat_with_open_close_order": flat_with_close,
+        "quarantined_test_orders": quarantined_test_orders,
         "terminal_registry_truth_overlay": {
             "enabled": True,
             "record_count": len(terminal_records),
@@ -202,6 +216,9 @@ def build_track_b_open_order_truth_from_reconciliation(
             "working_close_order_count": sum(1 for state in order_states if state.get("is_close_order") is True),
             "working_entry_order_count": sum(1 for state in order_states if state.get("is_entry_order") is True),
             "suspicious_order_count": sum(1 for state in order_states if state.get("suspicious") is True),
+            "quarantined_test_order_count": len(quarantined_test_orders),
+            "strategy_submit_allowed": False if quarantined_test_orders else None,
+            "test_harness_allowed": bool(quarantined_test_orders) and len(quarantined_test_orders) == len(order_states),
             "duplicate_close_order_group_count": len(duplicate_groups),
             "broker_position_without_close_order_count": len(broker_positions_without_close),
             "broker_flat_with_open_close_order_count": len(flat_with_close),
@@ -308,6 +325,10 @@ def _classify_order(
         broker_positions=broker_positions,
         broker_open_orders=[dict(order)],
     )
+    quarantine_evidence = paper_test_pending_cancel_quarantine_evidence(
+        order=order,
+        broker_positions=broker_positions,
+    )
     reasons = _suspicious_reasons(order=order, lifecycle_report=lifecycle_report)
     is_close_order = _is_close_order(
         order=order,
@@ -340,6 +361,9 @@ def _classify_order(
         classification = CLOSE_ORDER_MARKETABLE_NOT_FILLED
     if reasons:
         classification = SUSPICIOUS_ORDER_STATE
+    if quarantine_evidence.get("quarantined") is True:
+        classification = PAPER_TEST_ORDER_PENDING_CANCEL_QUARANTINED
+        condition_flags.extend(quarantine_evidence.get("tolerated_status_gaps") or [])
     return {
         "classification": classification,
         "order": dict(order),
@@ -357,11 +381,13 @@ def _classify_order(
         "market_reference": dict(market_ref),
         "marketable": bool(marketable),
         "working": _order_working(order),
-        "is_close_order": bool(is_close_order),
-        "is_entry_order": not bool(is_close_order),
+        "is_close_order": bool(is_close_order) and classification != PAPER_TEST_ORDER_PENDING_CANCEL_QUARANTINED,
+        "is_entry_order": (not bool(is_close_order)) and classification != PAPER_TEST_ORDER_PENDING_CANCEL_QUARANTINED,
         "unknown_open_order": bool(is_unknown),
-        "suspicious": bool(reasons),
+        "suspicious": bool(reasons) and classification != PAPER_TEST_ORDER_PENDING_CANCEL_QUARANTINED,
         "suspicious_reasons": reasons,
+        "quarantined": classification == PAPER_TEST_ORDER_PENDING_CANCEL_QUARANTINED,
+        "quarantine_evidence": quarantine_evidence,
         "condition_flags": condition_flags,
         "duplicate_key": _close_duplicate_key(order) if is_close_order else None,
     }
@@ -389,6 +415,10 @@ def _overall_classification(
         return CLOSE_ORDER_STALE
     if any(state.get("classification") == UNKNOWN_OPEN_ORDER for state in order_states):
         return UNKNOWN_OPEN_ORDER
+    if order_states and all(
+        state.get("classification") == PAPER_TEST_ORDER_PENDING_CANCEL_QUARANTINED for state in order_states
+    ):
+        return PAPER_TEST_ORDER_PENDING_CANCEL_QUARANTINED
     if any(state.get("is_close_order") is True for state in order_states):
         return OPEN_CLOSE_ORDER_WORKING
     if any(state.get("is_entry_order") is True for state in order_states):
@@ -410,6 +440,90 @@ def _suspicious_reasons(*, order: Mapping[str, Any], lifecycle_report: Mapping[s
     if close_attempt and diagnostics.get("execDetails_seen") is False:
         reasons.append("open_close_order_without_execDetails")
     return reasons
+
+
+def paper_test_pending_cancel_quarantine_evidence(
+    *,
+    order: Mapping[str, Any],
+    broker_positions: list[dict[str, Any]] | tuple[Mapping[str, Any], ...] = (),
+) -> dict[str, Any]:
+    """Classify known PAPER API lifecycle-test orders stuck in IBKR PendingCancel.
+
+    This is deliberately narrow: it only covers approved PAPER test order refs
+    with zero broker exposure. It never grants production strategy authority.
+    """
+
+    blockers: list[str] = []
+    tolerated_status_gaps: list[str] = []
+    account_id = str(order.get("account_id") or order.get("account") or "").strip()
+    if account_id != _PAPER_TEST_ACCOUNT_ID:
+        blockers.append("account_not_paper_test_account")
+    local_symbol = _order_local_symbol(order)
+    if local_symbol not in _PAPER_TEST_APPROVED_LOCAL_SYMBOLS:
+        blockers.append("instrument_not_paper_test_approved")
+    order_ref = str(order.get("order_ref") or order.get("orderRef") or "").strip()
+    if not order_ref.startswith(_PAPER_TEST_ORDER_REF_PREFIX):
+        blockers.append("order_ref_not_paper_lifecycle_test")
+    if not str(order.get("broker_order_id") or order.get("order_id") or order.get("orderId") or "").strip():
+        blockers.append("missing_broker_order_id")
+    if not str(order.get("client_id") or order.get("clientId") or "").strip():
+        blockers.append("missing_client_id")
+    status = _normalize_status(order.get("status"))
+    if status not in _PAPER_TEST_PENDING_CANCEL_STATUSES:
+        blockers.append("status_not_pending_cancel")
+    filled = _decimal_or_none(order.get("filled_quantity") or order.get("filled"))
+    if filled is None:
+        tolerated_status_gaps.append("missing_filled_quantity")
+    elif abs(filled) >= _SENTINEL_FILLED_QUANTITY:
+        tolerated_status_gaps.append("sentinel_filled_quantity")
+    elif filled != Decimal("0"):
+        blockers.append("filled_quantity_nonzero")
+    remaining = _decimal_or_none(order.get("remaining_quantity") or order.get("remaining"))
+    if remaining is None:
+        tolerated_status_gaps.append("missing_remaining_quantity")
+    elif remaining < Decimal("0"):
+        blockers.append("remaining_quantity_negative")
+    matching_positions = _matching_broker_positions(order, [dict(position) for position in broker_positions])
+    if matching_positions:
+        blockers.append("broker_position_exists_for_test_order")
+    return {
+        "classification": PAPER_TEST_ORDER_PENDING_CANCEL_QUARANTINED
+        if not blockers
+        else "PAPER_TEST_ORDER_NOT_QUARANTINED",
+        "quarantined": not blockers,
+        "blockers": blockers,
+        "tolerated_status_gaps": tolerated_status_gaps,
+        "account_id": account_id,
+        "local_symbol": local_symbol,
+        "order_ref": order_ref or None,
+        "broker_order_id": order.get("broker_order_id") or order.get("order_id") or order.get("orderId"),
+        "client_id": order.get("client_id") or order.get("clientId"),
+        "perm_id": order.get("perm_id") or order.get("permId"),
+        "status": order.get("status"),
+        "filled_quantity": order.get("filled_quantity") or order.get("filled"),
+        "remaining_quantity": order.get("remaining_quantity") or order.get("remaining"),
+        "production_strategy_submit_allowed": False,
+        "test_harness_submit_allowed": not blockers,
+    }
+
+
+def _normalize_status(value: Any) -> str:
+    raw = str(value or "").strip().upper()
+    compact = raw.replace(" ", "_").replace("-", "_")
+    if compact in {"PRESUBMITTED_PENDINGCANCEL", "PRE_SUBMITTED_PENDINGCANCEL"}:
+        return "PRESUBMITTED_PENDING_CANCEL"
+    return compact
+
+
+def _order_local_symbol(order: Mapping[str, Any]) -> str:
+    contract = order.get("contract") if isinstance(order.get("contract"), Mapping) else {}
+    return str(
+        order.get("local_symbol")
+        or order.get("localSymbol")
+        or contract.get("local_symbol")
+        or contract.get("localSymbol")
+        or ""
+    ).strip().upper()
 
 
 def _known_working_managed_exit_order(*, order: Mapping[str, Any], lifecycle_report: Mapping[str, Any]) -> bool:
@@ -482,6 +596,8 @@ def _event_state(
             "quantity": state.get("quantity"),
             "status": state.get("status"),
             "suspicious_reasons": state.get("suspicious_reasons") or [],
+            "quarantined": state.get("quarantined") is True,
+            "quarantine_evidence": state.get("quarantine_evidence") or {},
         }
         for state in order_states
     ]
@@ -788,6 +904,7 @@ __all__ = [
     "OPEN_CLOSE_ORDER_WORKING",
     "OPEN_ENTRY_ORDER_WORKING",
     "ORDER_TRUTH_STALE",
+    "PAPER_TEST_ORDER_PENDING_CANCEL_QUARANTINED",
     "SUSPICIOUS_ORDER_STATE",
     "UNKNOWN_OPEN_ORDER",
     "TrackBOpenOrderTruthConfig",
@@ -795,5 +912,6 @@ __all__ = [
     "build_open_order_truth_events",
     "build_track_b_open_order_truth",
     "build_track_b_open_order_truth_from_reconciliation",
+    "paper_test_pending_cancel_quarantine_evidence",
     "write_track_b_open_order_truth",
 ]

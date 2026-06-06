@@ -11,6 +11,8 @@ from mgc_v05l.execution_core.track_b_open_order_truth import (
     DUPLICATE_CLOSE_ORDER,
     NO_OPEN_ORDERS,
     OPEN_CLOSE_ORDER_WORKING,
+    OPEN_ENTRY_ORDER_WORKING,
+    PAPER_TEST_ORDER_PENDING_CANCEL_QUARANTINED,
     SUSPICIOUS_ORDER_STATE,
     TrackBOpenOrderTruthConfig,
     build_track_b_open_order_truth,
@@ -84,6 +86,128 @@ def test_sentinel_filled_quantity_is_suspicious(tmp_path: Path) -> None:
     assert payload["classification"] == SUSPICIOUS_ORDER_STATE
     assert "sentinel_filled_quantity" in payload["order_states"][0]["suspicious_reasons"]
     assert "missing_remaining_quantity" in payload["order_states"][0]["suspicious_reasons"]
+
+
+def test_pending_cancel_paper_test_order_is_quarantined(tmp_path: Path) -> None:
+    _seed_reconciliation(
+        tmp_path,
+        open_orders=[
+            _order(
+                symbol="MES",
+                local_symbol="MESM6",
+                action="BUY",
+                order_id=2,
+                client_id=9088,
+                perm_id=1773955119,
+                status="PendingCancel",
+                order_ref="TRACK_B_API_LIFECYCLE_TEST_20260606T062305Z_MESM6_BUY_REST_CANCEL",
+                filled_quantity="1.7976931348623157e+308",
+                remaining_quantity=None,
+            )
+        ],
+    )
+
+    payload = build_track_b_open_order_truth(config=TrackBOpenOrderTruthConfig(repo_root=tmp_path), now=NOW)
+
+    assert payload["classification"] == PAPER_TEST_ORDER_PENDING_CANCEL_QUARANTINED
+    assert payload["summary"]["quarantined_test_order_count"] == 1
+    assert payload["summary"]["strategy_submit_allowed"] is False
+    assert payload["summary"]["test_harness_allowed"] is True
+    state = payload["order_states"][0]
+    assert state["quarantined"] is True
+    assert state["suspicious"] is False
+    assert "sentinel_filled_quantity" in state["quarantine_evidence"]["tolerated_status_gaps"]
+    assert "missing_remaining_quantity" in state["quarantine_evidence"]["tolerated_status_gaps"]
+
+
+def test_multiple_pending_cancel_paper_test_orders_are_quarantined(tmp_path: Path) -> None:
+    _seed_reconciliation(
+        tmp_path,
+        open_orders=[
+            _order(
+                symbol="MES",
+                local_symbol="MESM6",
+                action="BUY",
+                order_id=2,
+                client_id=9088,
+                status="PendingCancel",
+                order_ref="TRACK_B_API_LIFECYCLE_TEST_20260606T062305Z_MESM6_BUY_REST_CANCEL",
+            ),
+            _order(
+                symbol="MNQ",
+                local_symbol="MNQM6",
+                action="BUY",
+                order_id=3,
+                client_id=9089,
+                status="PendingCancel",
+                order_ref="TRACK_B_API_LIFECYCLE_TEST_20260606T062610Z_MNQM6_BUY_REST_CANCEL",
+            ),
+        ],
+    )
+
+    payload = build_track_b_open_order_truth(config=TrackBOpenOrderTruthConfig(repo_root=tmp_path), now=NOW)
+
+    assert payload["classification"] == PAPER_TEST_ORDER_PENDING_CANCEL_QUARANTINED
+    assert payload["summary"]["quarantined_test_order_count"] == 2
+
+
+def test_filled_paper_test_order_is_not_quarantined(tmp_path: Path) -> None:
+    _seed_reconciliation(
+        tmp_path,
+        open_orders=[
+            _order(
+                symbol="MES",
+                local_symbol="MESM6",
+                action="BUY",
+                order_id=2,
+                status="PendingCancel",
+                order_ref="TRACK_B_API_LIFECYCLE_TEST_20260606T062305Z_MESM6_BUY_REST_CANCEL",
+                filled_quantity="1",
+                remaining_quantity="0",
+            )
+        ],
+    )
+
+    payload = build_track_b_open_order_truth(config=TrackBOpenOrderTruthConfig(repo_root=tmp_path), now=NOW)
+
+    assert payload["classification"] == OPEN_ENTRY_ORDER_WORKING
+    assert payload["order_states"][0]["quarantine_evidence"]["blockers"] == ["filled_quantity_nonzero"]
+
+
+def test_missing_order_ref_is_not_quarantined(tmp_path: Path) -> None:
+    _seed_reconciliation(
+        tmp_path,
+        open_orders=[
+            _order(symbol="MES", local_symbol="MESM6", action="BUY", order_id=2, status="PendingCancel")
+        ],
+    )
+
+    payload = build_track_b_open_order_truth(config=TrackBOpenOrderTruthConfig(repo_root=tmp_path), now=NOW)
+
+    assert payload["classification"] == OPEN_ENTRY_ORDER_WORKING
+    assert "order_ref_not_paper_lifecycle_test" in payload["order_states"][0]["quarantine_evidence"]["blockers"]
+
+
+def test_non_paper_account_test_order_is_not_quarantined(tmp_path: Path) -> None:
+    _seed_reconciliation(
+        tmp_path,
+        open_orders=[
+            _order(
+                account_id="U1234567",
+                symbol="MES",
+                local_symbol="MESM6",
+                action="BUY",
+                order_id=2,
+                status="PendingCancel",
+                order_ref="TRACK_B_API_LIFECYCLE_TEST_20260606T062305Z_MESM6_BUY_REST_CANCEL",
+            )
+        ],
+    )
+
+    payload = build_track_b_open_order_truth(config=TrackBOpenOrderTruthConfig(repo_root=tmp_path), now=NOW)
+
+    assert payload["classification"] == OPEN_ENTRY_ORDER_WORKING
+    assert "account_not_paper_test_account" in payload["order_states"][0]["quarantine_evidence"]["blockers"]
 
 
 def test_broker_flat_with_open_close_order_is_classified(tmp_path: Path) -> None:
@@ -238,24 +362,28 @@ def _position(symbol: str, local_symbol: str, quantity: str) -> dict:
 
 def _order(
     *,
+    account_id: str = "DUM882026",
     symbol: str,
     local_symbol: str,
     action: str,
     order_id: int,
+    client_id: int = 17102,
     perm_id: int = 347000001,
     limit_price: str = "100.0",
     filled_quantity: str = "0",
     remaining_quantity: str | None = "1",
+    status: str = "Submitted",
+    order_ref: str | None = None,
     updated_at: str | None = None,
     intent_type: str | None = None,
 ) -> dict:
     row = {
-        "account_id": "DUM882026",
+        "account_id": account_id,
         "symbol": symbol,
         "track_b_root": symbol,
         "local_symbol": local_symbol,
         "broker_order_id": order_id,
-        "client_id": 17102,
+        "client_id": client_id,
         "perm_id": perm_id,
         "action": action,
         "quantity": "1",
@@ -263,9 +391,11 @@ def _order(
         "remaining_quantity": remaining_quantity,
         "order_type": "LMT",
         "limit_price": limit_price,
-        "status": "Submitted",
+        "status": status,
         "updated_at": updated_at or NOW.isoformat(),
     }
+    if order_ref is not None:
+        row["order_ref"] = order_ref
     if intent_type:
         row["intent_type"] = intent_type
     return row

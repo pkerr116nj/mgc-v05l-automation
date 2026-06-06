@@ -161,6 +161,7 @@ class IbkrReadOnlyCallbackAdapter:
         remaining_quantity: str | Decimal | int | float | None = None,
         limit_price: str | Decimal | int | float | None = None,
         stop_price: str | Decimal | int | float | None = None,
+        order_ref: str | None = None,
         occurred_at: datetime | None = None,
     ) -> None:
         self._open_order_rows.append(
@@ -179,6 +180,7 @@ class IbkrReadOnlyCallbackAdapter:
                 remaining_quantity=_stringify_optional(remaining_quantity),
                 limit_price=_stringify_optional(limit_price),
                 stop_price=_stringify_optional(stop_price),
+                order_ref=_stringify_optional(order_ref),
                 updated_at=occurred_at or datetime.now(timezone.utc),
             )
         )
