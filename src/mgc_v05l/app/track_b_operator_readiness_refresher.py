@@ -449,6 +449,25 @@ def _refresh_commands(
                 "--json",
             ],
         ),
+        (
+            "operator_decision_surface",
+            [
+                python_bin,
+                "-m",
+                "mgc_v05l.execution_core.track_b_operator_decision_surface",
+                "--repo-root",
+                str(repo_root),
+                "--output-path",
+                str(
+                    repo_root
+                    / "outputs"
+                    / "track_b_execution_core"
+                    / "operator_decision_surface"
+                    / "latest_operator_decision_surface.json"
+                ),
+                "--json",
+            ],
+        ),
     ]
 
 
@@ -632,6 +651,13 @@ def _status_payload(
                 / "track_b_execution_core"
                 / "control_plane"
                 / "latest_control_plane_snapshot.json"
+            ),
+            "operator_decision_surface": str(
+                config.repo_root
+                / "outputs"
+                / "track_b_execution_core"
+                / "operator_decision_surface"
+                / "latest_operator_decision_surface.json"
             ),
         },
         "commands": [

@@ -31,6 +31,7 @@ def test_refresh_commands_are_read_only_and_cover_dashboard_artifacts(tmp_path: 
         "canonical_readiness",
         "agent_health",
         "control_plane_snapshot",
+        "operator_decision_surface",
     ]
     assert "phase1_runtime_data_readiness" in flattened
     assert "phase1_ticker_readiness_matrix" in flattened
@@ -44,6 +45,7 @@ def test_refresh_commands_are_read_only_and_cover_dashboard_artifacts(tmp_path: 
     assert "track_b_canonical_readiness" in flattened
     assert "track_b_agent_health" in flattened
     assert "track_b_control_plane_snapshot" in flattened
+    assert "track_b_operator_decision_surface" in flattened
     assert names.index("broker_truth_broker_truth_lease_bsa") < names.index("track_b_paper_broker_reconciliation")
     assert names.index("track_b_paper_broker_reconciliation") < names.index("open_order_truth")
     assert names.index("open_order_truth") < names.index("managed_order_registry")
@@ -51,6 +53,7 @@ def test_refresh_commands_are_read_only_and_cover_dashboard_artifacts(tmp_path: 
     assert names.index("managed_order_registry") < names.index("shared_truth")
     assert names.index("shared_truth") < names.index("canonical_readiness")
     assert names.index("agent_health") < names.index("control_plane_snapshot")
+    assert names.index("control_plane_snapshot") < names.index("operator_decision_surface")
     assert "placeOrder" not in flattened
     assert "--summary-output-path" in flattened
     assert "cancelOrder" not in flattened
@@ -93,7 +96,7 @@ def test_refresh_once_writes_status_and_keeps_submit_authority_false(tmp_path: P
         runner=fake_runner,
     )
 
-    assert len(calls) == 11
+    assert len(calls) == 12
     assert payload["classification"] == "TRACK_B_OPERATOR_READINESS_REFRESH_READY"
     assert payload["authority_generation_id"].startswith("track-b-operator-authority-refresh-")
     assert payload["last_success"] is True
@@ -118,6 +121,7 @@ def test_refresh_once_writes_status_and_keeps_submit_authority_false(tmp_path: P
         "canonical_readiness",
         "agent_health",
         "control_plane_snapshot",
+        "operator_decision_surface",
     ]
     assert all(
         row["authority_generation_id"] == payload["authority_generation_id"]
@@ -130,6 +134,10 @@ def test_refresh_once_writes_status_and_keeps_submit_authority_false(tmp_path: P
     assert "latest_canonical_readiness.json" in payload["refreshed_artifacts"]["canonical_readiness"]
     assert "latest_canonical_readiness_summary.json" in payload["refreshed_artifacts"]["canonical_readiness_summary"]
     assert "latest_control_plane_snapshot.json" in payload["refreshed_artifacts"]["control_plane_snapshot"]
+    assert (
+        "latest_operator_decision_surface.json"
+        in payload["refreshed_artifacts"]["operator_decision_surface"]
+    )
     assert json.loads(status_path.read_text(encoding="utf-8"))["classification"] == payload["classification"]
 
 
