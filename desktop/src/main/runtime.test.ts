@@ -722,6 +722,36 @@ test("Track B PAPER trading renderer is ODS-first with current blotter and evide
   assert.doesNotMatch(appTsx, /page === "track-b-paper"[\s\S]{0,3000}submit\/cancel/);
 });
 
+test("home renderer is ODS-first and retires stale Track 1 operator panels", () => {
+  const appTsx = fs.readFileSync(path.resolve(__dirname, "../../src/renderer/App.tsx"), "utf8");
+  const homeStart = appTsx.indexOf('!loading && page === "home"');
+  const runtimeStart = appTsx.indexOf('!loading && page === "runtime"');
+  assert.ok(homeStart >= 0);
+  assert.ok(runtimeStart > homeStart);
+  const homeBlock = appTsx.slice(homeStart, runtimeStart);
+
+  assert.match(homeBlock, /TrackBOdsFirstSurface/);
+  assert.match(homeBlock, /Operator Decision Surface/);
+  [
+    "What Needs Attention Now",
+    "Startup Control Plane",
+    "ATP / Temp Paper Truth",
+    "Why Not Trading Now",
+    "Operator Timeline",
+    "Strategy Roster Table",
+    "Desktop Startup",
+    "Paper Runtime Launch",
+    "Paper Soak Continuity",
+    "Same-Underlying Review Events",
+    "Live Eligibility",
+  ].forEach((label) => {
+    assert.doesNotMatch(homeBlock, new RegExp(label.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
+  });
+  assert.doesNotMatch(homeBlock, /runDashboardAction/);
+  assert.doesNotMatch(homeBlock, /paper_proof_cli/);
+  assert.doesNotMatch(homeBlock, /placeOrder|cancelOrder|reqGlobalCancel/);
+});
+
 test("paper mode does not silently replace historical backcast with paper ledger when replay history exists", () => {
   const appTsx = fs.readFileSync(path.resolve(__dirname, "../../src/renderer/App.tsx"), "utf8");
 
