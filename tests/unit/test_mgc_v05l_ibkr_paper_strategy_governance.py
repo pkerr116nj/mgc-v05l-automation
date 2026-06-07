@@ -1211,6 +1211,58 @@ def test_governance_blocks_when_canonical_readiness_is_stale(tmp_path: Path) -> 
     assert nq["submit_allowed"] is False
 
 
+def test_governance_does_not_fall_back_to_stale_dashboard_when_canonical_is_stale(tmp_path: Path) -> None:
+    _write_monitor(
+        tmp_path,
+        broker_position_quantity=0.0,
+        ledger_position_quantity=0.0,
+    )
+    _write_ledger(tmp_path)
+    _write_dashboard(tmp_path)
+    _write_backend_source_readiness(
+        tmp_path,
+        generated_at="2026-04-29T12:28:50.338596+00:00",
+        runtime_running=False,
+        paper_runtime_ready=False,
+        paper_trade_allowed=False,
+        market_data_stale_count=3,
+        startup_state="BLOCKED",
+        supervised_usable=False,
+        temp_paper_blocked=True,
+        lane_eligibility_rows=[
+            {
+                "lane_id": "nq_1x_ny_early_core__us_late_long",
+                "symbol": "NQ",
+                "market_data_stale": True,
+            }
+        ],
+    )
+    _write_canonical_readiness(tmp_path, generated_at="2026-04-29T12:28:50.338596+00:00")
+    _write_paper_runtime_truth(tmp_path)
+    _write_signal_audit(tmp_path)
+    _write_strategy_performance(tmp_path)
+
+    artifacts = run_ibkr_paper_strategy_governance(config=_config(tmp_path))
+
+    nq = next(row for row in artifacts.performance_rows if row["strategy_id"] == "nq_1x_ny_early_core__us_late_long")
+    readiness = nq["backend_source_readiness"]
+    reasons = readiness["block_reasons"]
+    assert readiness["source"] == "canonical_track_b_runtime_readiness"
+    assert readiness["canonical_readiness_authoritative"] is False
+    assert readiness["dashboard_projection_consumed"] is False
+    assert readiness["paper_trade_allowed"] is True
+    assert readiness["market_data_stale_count"] == 0
+    assert "canonical_readiness_artifact_stale" in reasons
+    assert "backend_readiness_artifact_stale" not in reasons
+    assert "startup_control_plane_not_ready" not in reasons
+    assert "supervised_paper_not_usable" not in reasons
+    assert "source_market_data_stale" not in reasons
+    assert "temp_paper_blocked" not in reasons
+    assert "from canonical_track_b_runtime_readiness" in nq["backend_source_readiness_detail"]
+    assert "from operator_dashboard_readiness_artifacts" not in nq["backend_source_readiness_detail"]
+    assert nq["submit_allowed"] is False
+
+
 def test_governance_blocks_when_canonical_live_money_eligible_is_true(tmp_path: Path) -> None:
     _write_monitor(
         tmp_path,

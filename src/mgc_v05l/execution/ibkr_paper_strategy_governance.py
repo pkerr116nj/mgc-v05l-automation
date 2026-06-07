@@ -1144,6 +1144,7 @@ def _backend_source_live_readiness(
     if canonical_present and not canonical_fresh:
         block_reasons.append("canonical_readiness_artifact_stale")
 
+    legacy_dashboard_authoritative = not canonical_present
     source_faults = (
         {
             "market_data_stale_count": 0,
@@ -1156,7 +1157,7 @@ def _backend_source_live_readiness(
             "global_bar_authority_unavailable_count": int(readiness.get("bar_authority_unavailable_count") or 0),
             "global_blocking_fault_count": int(readiness.get("blocking_fault_count") or 0),
         }
-        if canonical_authoritative
+        if canonical_present
         else _scoped_backend_source_fault_counts(
             readiness=readiness,
             strategy_id=strategy_id,
@@ -1178,7 +1179,7 @@ def _backend_source_live_readiness(
         paper_runtime_truth_status=artifacts["paper_runtime_truth"],
         freshness_window_seconds=freshness_window,
     )
-    if canonical_authoritative:
+    if canonical_present:
         runtime_running = bool(paper_stack_authority.get("runtime_running"))
         paper_runtime_ready = bool(paper_stack_authority.get("paper_runtime_ready"))
         paper_trade_allowed = bool(paper_stack_authority.get("paper_trade_allowed"))
@@ -1195,23 +1196,23 @@ def _backend_source_live_readiness(
         supervised_usable = bool(supervised.get("app_usable_for_supervised_paper"))
     temp_paper_blocked = bool(temp_integrity.get("temp_paper_blocked"))
 
-    if canonical_authoritative and canonical.get("live_money_eligible") is True:
+    if canonical_present and canonical.get("live_money_eligible") is True:
         block_reasons.append("canonical_live_money_eligible_true")
-    if canonical_authoritative and canonical.get("paper_proof_invoked") is True:
+    if canonical_present and canonical.get("paper_proof_invoked") is True:
         block_reasons.append("canonical_paper_proof_invoked_true")
-    if canonical_authoritative and canonical_root_guard.get("root_match") is not True:
+    if canonical_present and canonical_root_guard.get("root_match") is not True:
         block_reasons.append("canonical_root_not_matched")
-    if canonical_authoritative and not _canonical_broker_session_new_entry_allowed(canonical):
+    if canonical_present and not _canonical_broker_session_new_entry_allowed(canonical):
         block_reasons.append("BROKER_SESSION_NEW_ENTRY_NOT_ALLOWED")
-    if canonical_authoritative and canonical_state != "READY_SUBMIT_CAPABLE":
+    if canonical_present and canonical_state != "READY_SUBMIT_CAPABLE":
         block_reasons.append("canonical_readiness_not_submit_capable")
-    if canonical_authoritative and not bool(paper_stack_authority.get("ready")):
+    if canonical_present and not bool(paper_stack_authority.get("ready")):
         block_reasons.extend(str(reason) for reason in list(paper_stack_authority.get("block_reasons") or []))
-    if (readiness or canonical_authoritative) and not runtime_running:
+    if (readiness or canonical_present) and not runtime_running:
         block_reasons.append("paper_runtime_not_running")
-    if (readiness or canonical_authoritative) and not paper_runtime_ready:
+    if (readiness or canonical_present) and not paper_runtime_ready:
         block_reasons.append("paper_runtime_not_ready")
-    if (readiness or canonical_authoritative) and not paper_trade_allowed:
+    if (readiness or canonical_present) and not paper_trade_allowed:
         block_reasons.append("paper_trade_not_allowed")
     if market_data_stale_count > 0:
         block_reasons.append("source_market_data_stale")
@@ -1219,7 +1220,7 @@ def _backend_source_live_readiness(
         block_reasons.append("bar_authority_unavailable")
     if blocking_fault_count > 0:
         block_reasons.append("blocking_faults_present")
-    if not canonical_authoritative:
+    if legacy_dashboard_authoritative:
         required_artifacts = [
             artifacts["paper_readiness"],
             artifacts["startup_control_plane"],
@@ -1236,9 +1237,9 @@ def _backend_source_live_readiness(
         if supervised and not supervised_usable:
             block_reasons.append("supervised_paper_not_usable")
     temp_status = artifacts["temporary_paper_runtime_integrity"]
-    if not canonical_authoritative and temp_status["present"] and not temp_status["fresh"]:
+    if legacy_dashboard_authoritative and temp_status["present"] and not temp_status["fresh"]:
         block_reasons.append("backend_readiness_artifact_stale")
-    if temp_paper_blocked:
+    if legacy_dashboard_authoritative and temp_paper_blocked:
         block_reasons.append("temp_paper_blocked")
     shared_service_block_reasons = [
         str(reason)
@@ -1669,7 +1670,7 @@ def _backend_source_readiness_detail(
     temp_status = artifacts["temporary_paper_runtime_integrity"]
     return (
         f"backend/source readiness {'ready' if live_ready else 'not live-ready'} "
-        f"from {'canonical_track_b_runtime_readiness' if canonical_authoritative else 'operator_dashboard_readiness_artifacts'}; "
+        f"from {'canonical_track_b_runtime_readiness' if canonical else 'operator_dashboard_readiness_artifacts'}; "
         f"block_reasons={block_reasons}; "
         f"canonical_readiness={(canonical or {}).get('canonical_readiness') or (canonical or {}).get('state')} "
         f"canonical_authoritative={canonical_authoritative}; "
