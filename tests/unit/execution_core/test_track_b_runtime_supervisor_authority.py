@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import json
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
@@ -498,6 +498,121 @@ def test_shared_truth_coherence_legacy_generated_at_fallback_still_blocks(tmp_pa
     assert payload["shared_truth_coherence_status"] == "STALE_OR_MIXED"
     assert any(
         source["service"] == "Position Truth" and source["reason"] == "generated_at_mismatch"
+        for source in payload["stale_or_mixed_sources"]
+    )
+
+
+def test_shared_truth_accepts_newer_clean_reconciliation_timestamp(tmp_path: Path) -> None:
+    _seed_base(tmp_path)
+    _write_json(
+        tmp_path
+        / "outputs"
+        / "reports"
+        / "track_b_paper_broker_reconciliation"
+        / "latest_track_b_paper_broker_reconciliation.json",
+        {
+            "generated_at": (NOW + timedelta(seconds=60)).isoformat(),
+            "classification": "TRACK_B_PAPER_BROKER_RECONCILED",
+            "broker_reconciled": True,
+            "lifecycle_broker_reconciled": True,
+            "track_b_broker_position_count": 0,
+            "track_b_broker_open_order_count": 0,
+            "unknown_open_order_count": 0,
+            "current_scope_lifecycle_open_position_count": 0,
+            "lifecycle_open_order_count": 0,
+            "review_required_count": 0,
+            "blockers": [],
+            "live_money_eligible": False,
+        },
+    )
+
+    payload = build_track_b_runtime_supervisor_authority(config=TrackBRuntimeSupervisorAuthorityConfig(repo_root=tmp_path), now=NOW)
+
+    assert payload["shared_truth_coherence_status"] == "COHERENT"
+    assert payload["stale_or_mixed_sources"] == []
+
+
+def test_shared_truth_blocks_older_reconciliation_timestamp(tmp_path: Path) -> None:
+    _seed_base(tmp_path)
+    _write_json(
+        tmp_path
+        / "outputs"
+        / "reports"
+        / "track_b_paper_broker_reconciliation"
+        / "latest_track_b_paper_broker_reconciliation.json",
+        {
+            "generated_at": (NOW - timedelta(seconds=60)).isoformat(),
+            "classification": "TRACK_B_PAPER_BROKER_RECONCILED",
+            "broker_reconciled": True,
+            "track_b_broker_position_count": 0,
+            "track_b_broker_open_order_count": 0,
+            "blockers": [],
+            "live_money_eligible": False,
+        },
+    )
+
+    payload = build_track_b_runtime_supervisor_authority(config=TrackBRuntimeSupervisorAuthorityConfig(repo_root=tmp_path), now=NOW)
+
+    assert payload["shared_truth_coherence_status"] == "STALE_OR_MIXED"
+    assert any(
+        source["service"] == "Reconciliation" and source["reason"] == "generated_at_mismatch"
+        for source in payload["stale_or_mixed_sources"]
+    )
+
+
+def test_shared_truth_blocks_newer_dirty_reconciliation_timestamp(tmp_path: Path) -> None:
+    _seed_base(tmp_path)
+    _write_json(
+        tmp_path
+        / "outputs"
+        / "reports"
+        / "track_b_paper_broker_reconciliation"
+        / "latest_track_b_paper_broker_reconciliation.json",
+        {
+            "generated_at": (NOW + timedelta(seconds=60)).isoformat(),
+            "classification": "TRACK_B_PAPER_BROKER_RECONCILED",
+            "broker_reconciled": False,
+            "track_b_broker_position_count": 0,
+            "track_b_broker_open_order_count": 0,
+            "blockers": [],
+            "live_money_eligible": False,
+        },
+    )
+
+    payload = build_track_b_runtime_supervisor_authority(config=TrackBRuntimeSupervisorAuthorityConfig(repo_root=tmp_path), now=NOW)
+
+    assert payload["shared_truth_coherence_status"] == "STALE_OR_MIXED"
+    assert any(
+        source["service"] == "Reconciliation" and source["reason"] == "generated_at_mismatch"
+        for source in payload["stale_or_mixed_sources"]
+    )
+
+
+def test_shared_truth_blocks_newer_reconciliation_with_broker_or_order_dirtiness(tmp_path: Path) -> None:
+    _seed_base(tmp_path)
+    _write_json(
+        tmp_path
+        / "outputs"
+        / "reports"
+        / "track_b_paper_broker_reconciliation"
+        / "latest_track_b_paper_broker_reconciliation.json",
+        {
+            "generated_at": (NOW + timedelta(seconds=60)).isoformat(),
+            "classification": "TRACK_B_PAPER_BROKER_RECONCILED",
+            "broker_reconciled": True,
+            "track_b_broker_position_count": 0,
+            "track_b_broker_open_order_count": 1,
+            "unknown_open_order_count": 0,
+            "blockers": [],
+            "live_money_eligible": False,
+        },
+    )
+
+    payload = build_track_b_runtime_supervisor_authority(config=TrackBRuntimeSupervisorAuthorityConfig(repo_root=tmp_path), now=NOW)
+
+    assert payload["shared_truth_coherence_status"] == "STALE_OR_MIXED"
+    assert any(
+        source["service"] == "Reconciliation" and source["reason"] == "generated_at_mismatch"
         for source in payload["stale_or_mixed_sources"]
     )
 

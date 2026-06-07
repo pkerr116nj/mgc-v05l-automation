@@ -1173,6 +1173,13 @@ def _shared_truth_coherence(inputs: Mapping[str, Mapping[str, Any]]) -> dict[str
             continue
         expected_generated_at = str(row.get("generated_at") or "")
         if expected_generated_at and observed_generated_at and expected_generated_at != str(observed_generated_at):
+            if _newer_clean_reconciliation_supersedes_expected(
+                service=service,
+                expected_generated_at=expected_generated_at,
+                observed_generated_at=str(observed_generated_at),
+                observed_payload=observed_payload,
+            ):
+                continue
             stale_or_mixed.append(
                 {
                     "service": service,
@@ -1201,6 +1208,64 @@ def _shared_truth_coherence(inputs: Mapping[str, Mapping[str, Any]]) -> dict[str
             for row in rows.values()
         ],
     }
+
+
+def _newer_clean_reconciliation_supersedes_expected(
+    *,
+    service: str,
+    expected_generated_at: str,
+    observed_generated_at: str,
+    observed_payload: Mapping[str, Any],
+) -> bool:
+    if service != "Reconciliation":
+        return False
+    expected_at = _parse_datetime(expected_generated_at)
+    observed_at = _parse_datetime(observed_generated_at)
+    if expected_at is None or observed_at is None or observed_at <= expected_at:
+        return False
+    classification = _classification(observed_payload)
+    if classification != "TRACK_B_PAPER_BROKER_RECONCILED":
+        return False
+    if observed_payload.get("broker_reconciled") is False:
+        return False
+    if observed_payload.get("lifecycle_broker_reconciled") is False:
+        return False
+    if _int_or_none(observed_payload.get("track_b_broker_position_count")) not in {None, 0}:
+        return False
+    if _int_or_none(observed_payload.get("track_b_broker_open_order_count")) not in {None, 0}:
+        return False
+    if _int_or_none(observed_payload.get("unknown_open_order_count")) not in {None, 0}:
+        return False
+    if _int_or_none(observed_payload.get("current_scope_lifecycle_open_position_count")) not in {None, 0}:
+        return False
+    if _int_or_none(observed_payload.get("lifecycle_open_order_count")) not in {None, 0}:
+        return False
+    if _int_or_none(observed_payload.get("review_required_count")) not in {None, 0}:
+        return False
+    if list(observed_payload.get("blockers") or []):
+        return False
+    return True
+
+
+def _parse_datetime(value: Any) -> datetime | None:
+    if not value:
+        return None
+    try:
+        parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=UTC)
+    return parsed.astimezone(UTC)
+
+
+def _int_or_none(value: Any) -> int | None:
+    if value is None or value == "":
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
 
 
 def _coherence_sources(inputs: Mapping[str, Mapping[str, Any]]) -> list[tuple[str, str, str, str]]:
