@@ -134,9 +134,14 @@ function makeDesktopState(overrides: Partial<DesktopState> = {}): DesktopState {
     },
     trackB: {
       operatorStatusPath: "/tmp/latest_operator_status_summary.json",
+      operatorDecisionSurfacePath: "/tmp/latest_operator_decision_surface.json",
       available: false,
       malformed: false,
       status: null,
+      operatorDecisionSurfaceAvailable: false,
+      operatorDecisionSurfaceMalformed: false,
+      operatorDecisionSurface: null,
+      operatorDecisionSurfaceMissingReason: "No Track B operator decision surface artifact found.",
       missingReason: "No Track B operator status artifact found.",
       loadedAt: new Date().toISOString(),
       ...(overrides.trackB ?? {}),
@@ -520,7 +525,9 @@ test("electron renderer readiness cards map corrected fireability fields", () =>
 
 test("Track B read-only status loads latest operator status artifact without invoking runtime actions", async () => {
   const previous = process.env.MGC_TRACK_B_OPERATOR_STATUS_SUMMARY_PATH;
+  const previousOds = process.env.MGC_TRACK_B_OPERATOR_DECISION_SURFACE_PATH;
   const tempPath = path.join("/private/tmp", `tmp_track_b_operator_status_test_${process.pid}.json`);
+  const tempOdsPath = path.join("/private/tmp", `tmp_track_b_ods_test_${process.pid}.json`);
   fs.writeFileSync(
     tempPath,
     JSON.stringify(
@@ -574,12 +581,36 @@ test("Track B read-only status loads latest operator status artifact without inv
     ),
     "utf8",
   );
+  fs.writeFileSync(
+    tempOdsPath,
+    JSON.stringify(
+      {
+        schema_version: "track_b_operator_decision_surface_v1",
+        runtime_live: { state: "LIVE", pid: 1234, profile: "mnq_mes_full_session_active_evidence", lane_count: 13 },
+        broker_state: "FLAT",
+        submit_allowed: { canonical_readiness: "READY_SUBMIT_CAPABLE", submit_allowed: true },
+        first_blocker: null,
+        next_safe_action: "NO_ACTION",
+        authority_health: { classification: "BROKER_AUTHORITY_PUBLISHER_HEALTHY", lease_bsa_aligned: true, writer: "ibkr_broker_truth_refresher" },
+        control_plane_state: { classification: "CONTROL_PLANE_SNAPSHOT_READY", safe_to_start_runtime: true, blockers: [] },
+      },
+      null,
+      2,
+    ),
+    "utf8",
+  );
   process.env.MGC_TRACK_B_OPERATOR_STATUS_SUMMARY_PATH = tempPath;
+  process.env.MGC_TRACK_B_OPERATOR_DECISION_SURFACE_PATH = tempOdsPath;
   try {
     const trackB = await __testing.buildTrackBReadOnlyStatus();
     assert.equal(trackB.available, true);
     assert.equal(trackB.malformed, false);
     assert.equal(trackB.operatorStatusPath, tempPath);
+    assert.equal(trackB.operatorDecisionSurfaceAvailable, true);
+    assert.equal(trackB.operatorDecisionSurfaceMalformed, false);
+    assert.equal(trackB.operatorDecisionSurfacePath, tempOdsPath);
+    assert.equal(trackB.operatorDecisionSurface?.broker_state, "FLAT");
+    assert.equal((trackB.operatorDecisionSurface?.submit_allowed as Record<string, any>).submit_allowed, true);
     assert.equal(trackB.status?.status_verdict, "OPERATOR_STATUS_OK_FOR_SHADOW_REVIEW");
     assert.equal(trackB.status?.backend_health_status, "ok");
     assert.equal(trackB.status?.backend_health_ready, true);
@@ -601,7 +632,13 @@ test("Track B read-only status loads latest operator status artifact without inv
     } else {
       process.env.MGC_TRACK_B_OPERATOR_STATUS_SUMMARY_PATH = previous;
     }
+    if (previousOds === undefined) {
+      delete process.env.MGC_TRACK_B_OPERATOR_DECISION_SURFACE_PATH;
+    } else {
+      process.env.MGC_TRACK_B_OPERATOR_DECISION_SURFACE_PATH = previousOds;
+    }
     fs.rmSync(tempPath, { force: true });
+    fs.rmSync(tempOdsPath, { force: true });
   }
 });
 
@@ -630,64 +667,55 @@ test("Track B read-only status handles missing and malformed artifacts safely", 
   }
 });
 
-test("Track B status renderer is display-only and no-submit", () => {
+test("Track B status renderer is ODS-first and retires legacy top-level panels", () => {
   const appTsx = fs.readFileSync(path.resolve(__dirname, "../../src/renderer/App.tsx"), "utf8");
 
   assert.match(appTsx, /TrackBStatusPage/);
-  assert.match(appTsx, /NO-SUBMIT \/ SHADOW REVIEW/);
-  assert.match(appTsx, /Desktop Build/);
-  assert.match(appTsx, /buildMetadata\?\.git_commit/);
-  assert.match(appTsx, /buildMetadata\?\.packaged_app_path/);
-  assert.match(appTsx, /Observation Runner/);
-  assert.match(appTsx, /observation_runner_verdict/);
-  assert.match(appTsx, /observation_runner_latest_operator_status_path/);
-  assert.match(appTsx, /Multi-Strategy Runtime Cycle/);
-  assert.match(appTsx, /multi_strategy_runtime_cycle_verdict/);
-  assert.match(appTsx, /multi_strategy_chosen_strategy_id/);
-  assert.match(appTsx, /multi_strategy_submit_attempted/);
-  assert.match(appTsx, /Readiness Check Runner/);
-  assert.match(appTsx, /readiness_check_runner_verdict/);
-  assert.match(appTsx, /readiness_check_runner_current_quote_available/);
-  assert.match(appTsx, /Market Data Observer/);
-  assert.match(appTsx, /databento_observer_verdict/);
-  assert.match(appTsx, /databento_observer_last_verdict/);
-  assert.match(appTsx, /databento_output_event_path/);
-  assert.match(appTsx, /Upstream Signal Chain/);
-  assert.match(appTsx, /strategy_adapter_verdict/);
-  assert.match(appTsx, /candle_producer_verdict/);
-  assert.match(appTsx, /signal_batch_writer_verdict/);
-  assert.match(appTsx, /latest_operator_status_summary\.json/);
+  assert.match(appTsx, /TrackBOdsSummary/);
+  assert.match(appTsx, /Track B ODS/);
+  assert.match(appTsx, /Authoritative top-level Track B operator state/);
+  assert.match(appTsx, /operator_decision_surface\/latest_operator_decision_surface\.json/);
+  assert.match(appTsx, /Broker \/ Reconciliation/);
+  assert.match(appTsx, /Managed Exposure \/ Lifecycle/);
+  assert.match(appTsx, /Feed \/ Signal/);
+  assert.match(appTsx, /Current Positions/);
+  assert.match(appTsx, /Recent Trades/);
+  assert.doesNotMatch(appTsx, /NO-SUBMIT \/ SHADOW REVIEW/);
+  assert.doesNotMatch(appTsx, /GC Phase-1 PAPER Readiness/);
+  assert.doesNotMatch(appTsx, /Legacy Shadow Track B Status/);
+  assert.doesNotMatch(appTsx, /Autonomous Track B Monitor/);
+  assert.doesNotMatch(appTsx, /Track B Instrument Runtime/);
+  assert.doesNotMatch(appTsx, /Observation Runner/);
+  assert.doesNotMatch(appTsx, /Multi-Strategy Runtime Cycle/);
+  assert.doesNotMatch(appTsx, /Readiness Check Runner/);
+  assert.doesNotMatch(appTsx, /Track B Artifact Inputs/);
   assert.match(appTsx, /page !== "track-b" && !PRIMARY_WORKSTATION_PAGES\.has\(page\)/);
   assert.match(appTsx, /const showSidebarEmergencyHalt = page !== "track-b"/);
   assert.doesNotMatch(appTsx, /page === "track-b"[\s\S]{0,2000}runDashboardAction/);
   assert.doesNotMatch(appTsx, /page === "track-b"[\s\S]{0,2000}paper_proof_cli/);
 });
 
-test("Track B PAPER trading renderer is standalone read-only blotter view", () => {
+test("Track B PAPER trading renderer is ODS-first with current blotter and evidence drilldowns", () => {
   const appTsx = fs.readFileSync(path.resolve(__dirname, "../../src/renderer/App.tsx"), "utf8");
 
   assert.match(appTsx, /TrackBPaperTradingPage/);
   assert.match(appTsx, /\{ id: "track-b-paper", label: "Track B PAPER" \}/);
   assert.match(appTsx, /page === "track-b-paper"/);
-  assert.match(appTsx, /No Track B PAPER trades have been recorded yet/);
+  assert.match(appTsx, /Track B PAPER ODS/);
+  assert.match(appTsx, /PAPER operator state, current positions, recent trades, and evidence drilldowns/);
   assert.match(appTsx, /Current Positions/);
   assert.match(appTsx, /Recent Trades/);
   assert.match(appTsx, /Strategy Performance/);
   assert.match(appTsx, /Instrument Performance/);
-  assert.match(appTsx, /Startup Readiness/);
-  assert.match(appTsx, /Feature context/);
-  assert.match(appTsx, /Live Approved/);
-  assert.match(appTsx, /Decision Bar/);
-  assert.match(appTsx, /Live Confirm 1m/);
-  assert.match(appTsx, /Live Confirm 5m/);
-  assert.match(appTsx, /Artifact-derived PAPER lifecycle view/);
-  assert.match(appTsx, /TRACK_B_PAPER_READY_NO_SIGNAL/);
-  assert.match(appTsx, /Track B PAPER evaluating live decision bars; no trade signals observed/);
-  assert.match(appTsx, /Submit State/);
-  assert.match(appTsx, /IDLE_AWAITING_SETUP/);
-  assert.match(appTsx, /Submit State Reason/);
-  assert.match(appTsx, /Idle: route\/session eligible; no current signal\/candidate\/live intent is present for this lane/);
-  assert.match(appTsx, /Latest signal\/intent is stale/);
+  assert.match(appTsx, /Broker \/ Reconciliation/);
+  assert.match(appTsx, /Managed Exposure \/ Lifecycle/);
+  assert.match(appTsx, /Feed \/ Signal/);
+  assert.doesNotMatch(appTsx, /Zero Activity Diagnosis/);
+  assert.doesNotMatch(appTsx, /NO_SIGNAL Attribution/);
+  assert.doesNotMatch(appTsx, /Startup Readiness/);
+  assert.doesNotMatch(appTsx, /TRACK_B_PAPER_READY_NO_SIGNAL/);
+  assert.doesNotMatch(appTsx, /Artifact-derived PAPER lifecycle view/);
+  assert.doesNotMatch(appTsx, /Restored Active PAPER Runtime Lanes/);
   assert.doesNotMatch(appTsx, /page === "track-b-paper"[\s\S]{0,3000}runDashboardAction/);
   assert.doesNotMatch(appTsx, /page === "track-b-paper"[\s\S]{0,3000}paper_proof_cli/);
   assert.doesNotMatch(appTsx, /page === "track-b-paper"[\s\S]{0,3000}placeOrder/);

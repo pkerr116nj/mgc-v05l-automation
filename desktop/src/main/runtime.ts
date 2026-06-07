@@ -161,9 +161,14 @@ export interface DesktopState {
 
 export interface TrackBReadOnlyStatus {
   operatorStatusPath: string;
+  operatorDecisionSurfacePath: string;
   available: boolean;
   malformed: boolean;
   status: JsonRecord | null;
+  operatorDecisionSurfaceAvailable: boolean;
+  operatorDecisionSurfaceMalformed: boolean;
+  operatorDecisionSurface: JsonRecord | null;
+  operatorDecisionSurfaceMissingReason: string | null;
   missingReason: string | null;
   loadedAt: string;
 }
@@ -308,6 +313,7 @@ const REPO_ROOT = resolveWorkspaceRepoRoot();
 const DESKTOP_ROOT = path.join(REPO_ROOT, "desktop");
 const OUTPUT_ROOT = path.join(REPO_ROOT, "outputs", "operator_dashboard");
 const TRACK_B_OPERATOR_STATUS_LATEST_FILE = path.join(REPO_ROOT, "outputs", "track_b_execution_core", "operator_status", "latest_operator_status_summary.json");
+const TRACK_B_OPERATOR_DECISION_SURFACE_LATEST_FILE = path.join(REPO_ROOT, "outputs", "track_b_execution_core", "operator_decision_surface", "latest_operator_decision_surface.json");
 const TRACK_B_PORTFOLIO_STATE_LATEST_FILE = path.join(REPO_ROOT, "outputs", "reports", "track_b_portfolio", "latest_track_b_portfolio_state.json");
 const TRACK_B_PNL_CALENDAR_LATEST_FILE = path.join(REPO_ROOT, "outputs", "reports", "track_b_portfolio", "calendar", "latest_track_b_pnl_calendar.json");
 const RUNTIME_ROOT = path.join(OUTPUT_ROOT, "runtime");
@@ -1830,15 +1836,72 @@ function trackBOperatorStatusPath(): string {
   return explicit || TRACK_B_OPERATOR_STATUS_LATEST_FILE;
 }
 
+function trackBOperatorDecisionSurfacePath(): string {
+  const explicit = String(process.env.MGC_TRACK_B_OPERATOR_DECISION_SURFACE_PATH || "").trim();
+  return explicit || TRACK_B_OPERATOR_DECISION_SURFACE_LATEST_FILE;
+}
+
+function missingTrackBOperatorDecisionSurface(
+  operatorDecisionSurfacePath: string,
+  malformed: boolean,
+  reason: string,
+): Pick<
+  TrackBReadOnlyStatus,
+  "operatorDecisionSurfacePath" | "operatorDecisionSurfaceAvailable" | "operatorDecisionSurfaceMalformed" | "operatorDecisionSurface" | "operatorDecisionSurfaceMissingReason"
+> {
+  return {
+    operatorDecisionSurfacePath,
+    operatorDecisionSurfaceAvailable: false,
+    operatorDecisionSurfaceMalformed: malformed,
+    operatorDecisionSurface: null,
+    operatorDecisionSurfaceMissingReason: reason,
+  };
+}
+
+async function readTrackBOperatorDecisionSurface(): Promise<Pick<
+  TrackBReadOnlyStatus,
+  "operatorDecisionSurfacePath" | "operatorDecisionSurfaceAvailable" | "operatorDecisionSurfaceMalformed" | "operatorDecisionSurface" | "operatorDecisionSurfaceMissingReason"
+>> {
+  const operatorDecisionSurfacePath = trackBOperatorDecisionSurfacePath();
+  try {
+    const raw = await fs.readFile(operatorDecisionSurfacePath, "utf8");
+    const parsed = JSON.parse(raw);
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+      return missingTrackBOperatorDecisionSurface(
+        operatorDecisionSurfacePath,
+        true,
+        "Track B operator decision surface artifact is not a JSON object.",
+      );
+    }
+    return {
+      operatorDecisionSurfacePath,
+      operatorDecisionSurfaceAvailable: true,
+      operatorDecisionSurfaceMalformed: false,
+      operatorDecisionSurface: parsed as JsonRecord,
+      operatorDecisionSurfaceMissingReason: null,
+    };
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    const missing = message.includes("ENOENT");
+    return missingTrackBOperatorDecisionSurface(
+      operatorDecisionSurfacePath,
+      !missing,
+      missing ? "No Track B operator decision surface artifact found." : `Could not read Track B operator decision surface artifact: ${message}`,
+    );
+  }
+}
+
 async function buildTrackBReadOnlyStatus(): Promise<TrackBReadOnlyStatus> {
   const operatorStatusPath = trackBOperatorStatusPath();
   const loadedAt = new Date().toISOString();
+  const operatorDecisionSurface = await readTrackBOperatorDecisionSurface();
   try {
     const raw = await fs.readFile(operatorStatusPath, "utf8");
     const parsed = JSON.parse(raw);
     if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
       return {
         operatorStatusPath,
+        ...operatorDecisionSurface,
         available: false,
         malformed: true,
         status: null,
@@ -1848,6 +1911,7 @@ async function buildTrackBReadOnlyStatus(): Promise<TrackBReadOnlyStatus> {
     }
     return {
       operatorStatusPath,
+      ...operatorDecisionSurface,
       available: true,
       malformed: false,
       status: parsed as JsonRecord,
@@ -1859,6 +1923,7 @@ async function buildTrackBReadOnlyStatus(): Promise<TrackBReadOnlyStatus> {
     const missing = message.includes("ENOENT");
     return {
       operatorStatusPath,
+      ...operatorDecisionSurface,
       available: false,
       malformed: !missing,
       status: null,

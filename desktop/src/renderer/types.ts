@@ -167,9 +167,14 @@ export interface DesktopState {
   localAuth: LocalOperatorAuthState;
   trackB: {
     operatorStatusPath: string;
+    operatorDecisionSurfacePath: string;
     available: boolean;
     malformed: boolean;
     status: JsonRecord | null;
+    operatorDecisionSurfaceAvailable: boolean;
+    operatorDecisionSurfaceMalformed: boolean;
+    operatorDecisionSurface: JsonRecord | null;
+    operatorDecisionSurfaceMissingReason: string | null;
     missingReason: string | null;
     loadedAt: string;
   };
