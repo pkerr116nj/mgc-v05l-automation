@@ -702,7 +702,10 @@ def build_readiness_inputs(
         _mapping(artifacts.get("broker_session_authority"))
     )
     reconciliation = _reconciliation_input(_mapping(artifacts.get("phase1_reconciliation")), now=now)
-    operator_status = _mapping(artifacts.get("operator_status"))
+    operator_status = _operator_status_with_lane_artifacts(
+        _mapping(artifacts.get("operator_status")),
+        artifacts.get("lane_operator_statuses"),
+    )
     config_in_force = _mapping(artifacts.get("config_in_force"))
     lane_quarantine = _lane_quarantine_input(_mapping(artifacts.get("lane_quarantine")))
     runtime = _runtime_input(operator_status, config_in_force, root_guard, now=now)
@@ -717,6 +720,7 @@ def build_readiness_inputs(
         repo_root=repo_root,
         now=now,
     )
+    runtime = _runtime_with_phase1_relative_ingestion(runtime, market_data)
     execution_core_shared_truth = _execution_core_shared_truth_input(artifacts, now=now)
     control_plane_authorization = _control_plane_authorization_input(
         _mapping(artifacts.get("control_plane_snapshot")),
@@ -846,6 +850,7 @@ def _load_readiness_artifacts(repo_root: Path) -> dict[str, Any]:
     dashboard_runtime = repo_root / "outputs" / "operator_dashboard" / "runtime"
     return {
         "operator_status": _read_json(paper_root / "operator_status.json"),
+        "lane_operator_statuses": _read_lane_operator_statuses(paper_root / "lanes"),
         "config_in_force": _read_json(runtime_dir / "paper_config_in_force.json"),
         "lane_quarantine": _read_json(runtime_dir / "paper_lane_quarantine_status.json"),
         "market_data_probe": _read_json(runtime_dir / "market_data_transport_probe.json"),
@@ -876,6 +881,50 @@ def _load_readiness_artifacts(repo_root: Path) -> dict[str, Any]:
         "managed_position_registry": _read_json(repo_root / DEFAULT_MANAGED_POSITION_REGISTRY_ARTIFACT),
         "control_plane_snapshot": _read_json(repo_root / DEFAULT_CONTROL_PLANE_SNAPSHOT_ARTIFACT),
     }
+
+
+def _read_lane_operator_statuses(lanes_root: Path) -> list[dict[str, Any]]:
+    if not lanes_root.exists():
+        return []
+    rows: list[dict[str, Any]] = []
+    for path in sorted(lanes_root.glob("*/operator_status.json")):
+        payload = _read_json(path)
+        if payload:
+            rows.append(payload)
+    return rows
+
+
+def _operator_status_with_lane_artifacts(
+    operator_status: Mapping[str, Any],
+    lane_operator_statuses: Any,
+) -> dict[str, Any]:
+    merged = dict(operator_status)
+    lane_rows = [dict(row) for row in list(merged.get("lanes") or []) if isinstance(row, Mapping)]
+    if not isinstance(lane_operator_statuses, list) or not lane_rows:
+        return merged
+    lane_by_id: dict[str, dict[str, Any]] = {
+        str(row.get("lane_id") or row.get("id") or "").strip(): row
+        for row in lane_rows
+        if str(row.get("lane_id") or row.get("id") or "").strip()
+    }
+    for lane_payload in lane_operator_statuses:
+        if not isinstance(lane_payload, Mapping):
+            continue
+        lane_id = str(lane_payload.get("lane_id") or lane_payload.get("id") or "").strip()
+        current = lane_by_id.get(lane_id)
+        if current is None:
+            continue
+        current_ts = _parse_iso(current.get("last_processed_bar_end_ts"))
+        candidate_ts = _parse_iso(lane_payload.get("last_processed_bar_end_ts"))
+        if candidate_ts is None or (current_ts is not None and candidate_ts <= current_ts):
+            continue
+        lane_by_id[lane_id] = {**current, **dict(lane_payload)}
+    merged_lanes = [lane_by_id.get(str(row.get("lane_id") or row.get("id") or "").strip(), row) for row in lane_rows]
+    merged["lanes"] = merged_lanes
+    latest = _latest_runtime_processed_bar_ts(merged)
+    if latest is not None:
+        merged["last_processed_bar_end_ts"] = latest
+    return merged
 
 
 def _control_plane_authorization_input(payload: Mapping[str, Any], *, now: datetime) -> dict[str, Any]:
@@ -1534,6 +1583,43 @@ def _runtime_lane_ingestion_rows(
             }
         )
     return rows
+
+
+def _runtime_with_phase1_relative_ingestion(
+    runtime: Mapping[str, Any],
+    market_data: Mapping[str, Any],
+) -> dict[str, Any]:
+    updated = dict(runtime)
+    threshold = _float_or_none(updated.get("ingestion_freshness_threshold_seconds"))
+    if threshold is None:
+        return updated
+    phase1_latest = _latest_phase1_bar_by_symbol_timeframe(market_data)
+    latest_phase1_dt = _latest_phase1_datetime(phase1_latest)
+    latest_runtime_dt = _parse_iso(updated.get("latest_runtime_ingested_bar") or updated.get("last_processed_bar_end_ts"))
+    if latest_phase1_dt is None or latest_runtime_dt is None:
+        return updated
+    lag_seconds = max(0.0, (latest_phase1_dt - latest_runtime_dt).total_seconds())
+    updated["ingestion_lag_seconds"] = lag_seconds
+    if lag_seconds <= threshold:
+        updated["runtime_ingestion_fresh"] = True
+        updated["affected_lanes"] = []
+        updated["affected_symbols"] = []
+        updated["runtime_lane_ingestion"] = [
+            {
+                **dict(row),
+                "fresh": True,
+                "phase1_relative_lag_seconds": max(
+                    0.0,
+                    (
+                        latest_phase1_dt
+                        - (_parse_iso(row.get("latest_runtime_ingested_bar")) or latest_runtime_dt)
+                    ).total_seconds(),
+                ),
+            }
+            for row in list(updated.get("runtime_lane_ingestion") or [])
+            if isinstance(row, Mapping)
+        ]
+    return updated
 
 
 def _runtime_profile(operator_status: Mapping[str, Any], config_in_force: Mapping[str, Any]) -> str | None:
@@ -2690,6 +2776,13 @@ def _float_value(value: Any, default: float) -> float:
         return float(value)
     except (TypeError, ValueError):
         return default
+
+
+def _float_or_none(value: Any) -> float | None:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
 
 
 def _first_int(*values: Any) -> int | None:

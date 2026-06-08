@@ -9,8 +9,10 @@ from mgc_v05l.execution_core.track_b_readiness_state import (
     DEFAULT_CONTROL_PLANE_SNAPSHOT_ARTIFACT,
     _broker_truth_input,
     _market_data_input,
+    _operator_status_with_lane_artifacts,
     _reconciliation_input,
     _runtime_input,
+    _runtime_with_phase1_relative_ingestion,
     build_root_process_guard,
     classify_canonical_readiness,
     write_canonical_readiness_artifact,
@@ -1097,6 +1099,67 @@ def test_runtime_ingestion_uses_latest_lane_processed_bar_when_top_level_lags() 
     assert runtime["profile"] == "mnq_mes_full_session_active_evidence"
     assert runtime["runtime_lane_ingestion"][0]["lane_id"] == "lane_a"
     assert runtime["affected_lanes"] == []
+
+
+def test_runtime_input_uses_fresher_lane_operator_status_artifacts() -> None:
+    operator_status = {
+        "active_lane_ids": ["lane_a", "lane_b"],
+        "last_processed_bar_end_ts": "2026-05-18T11:54:00+00:00",
+        "lanes": [
+            {"lane_id": "lane_a", "symbol": "MNQ", "last_processed_bar_end_ts": "2026-05-18T11:54:00+00:00"},
+            {"lane_id": "lane_b", "symbol": "MES", "last_processed_bar_end_ts": "2026-05-18T11:54:00+00:00"},
+        ],
+    }
+    merged = _operator_status_with_lane_artifacts(
+        operator_status,
+        [
+            {"lane_id": "lane_a", "last_processed_bar_end_ts": "2026-05-18T11:59:00+00:00"},
+            {"lane_id": "lane_b", "last_processed_bar_end_ts": "2026-05-18T11:58:00+00:00"},
+        ],
+    )
+
+    assert merged["last_processed_bar_end_ts"] == "2026-05-18T11:59:00+00:00"
+    assert merged["lanes"][0]["last_processed_bar_end_ts"] == "2026-05-18T11:59:00+00:00"
+    assert merged["lanes"][0]["symbol"] == "MNQ"
+    assert merged["lanes"][1]["last_processed_bar_end_ts"] == "2026-05-18T11:58:00+00:00"
+
+
+def test_runtime_ingestion_freshness_can_use_phase1_relative_lag_boundary() -> None:
+    runtime = {
+        "last_processed_bar_end_ts": "2026-05-18T11:57:00+00:00",
+        "latest_runtime_ingested_bar": "2026-05-18T11:57:00+00:00",
+        "runtime_ingestion_fresh": False,
+        "ingestion_age_seconds": 210.0,
+        "ingestion_freshness_threshold_seconds": 180.0,
+        "affected_lanes": ["lane_a"],
+        "affected_symbols": ["MNQ"],
+        "runtime_lane_ingestion": [
+            {
+                "lane_id": "lane_a",
+                "symbol": "MNQ",
+                "latest_runtime_ingested_bar": "2026-05-18T11:57:00+00:00",
+                "fresh": False,
+            }
+        ],
+    }
+    market_data = {
+        "rows": [
+            {
+                "symbol": "MNQ",
+                "timeframe": "1m",
+                "latest_completed_bar_ts": "2026-05-18T12:00:00+00:00",
+            }
+        ],
+        "active_required_symbols": ["MNQ"],
+    }
+
+    updated = _runtime_with_phase1_relative_ingestion(runtime, market_data)
+
+    assert updated["runtime_ingestion_fresh"] is True
+    assert updated["ingestion_lag_seconds"] == 180.0
+    assert updated["affected_lanes"] == []
+    assert updated["affected_symbols"] == []
+    assert updated["runtime_lane_ingestion"][0]["fresh"] is True
 
 
 def test_invalid_phase1_listener_provenance_blocks_market_data() -> None:
