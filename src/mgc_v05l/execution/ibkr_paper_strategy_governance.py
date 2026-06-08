@@ -26,6 +26,13 @@ from ..execution_core.track_b_runtime_authority_resolver import (
     RuntimeAuthorityResolverConfig,
     resolve_track_b_runtime_authority,
 )
+from ..execution_core.track_b_strategy_exit_coverage import (
+    DEFAULT_EXIT_COVERAGE_REPORT_PATH,
+    TrackBStrategyExitCoverageConfig,
+    build_track_b_strategy_exit_coverage_report,
+    lane_exit_coverage_for,
+    write_track_b_strategy_exit_coverage_report,
+)
 
 _DEFAULT_OUTPUT_DIR = Path("outputs") / "reports" / "ibkr_strategy_governance"
 _DEFAULT_VAR_STATUS_PATH = Path("var") / "per_strategy_paper_status.json"
@@ -101,6 +108,7 @@ class IbkrPaperStrategyGovernanceConfig:
     ledger_path: Path = _DEFAULT_LEDGER_PATH
     porting_output_dir: Path = _DEFAULT_PORTING_OUTPUT_DIR
     paper_session_lanes_dir: Path = _DEFAULT_PAPER_SESSION_LANES_DIR
+    strategy_exit_coverage_path: Path = DEFAULT_EXIT_COVERAGE_REPORT_PATH
     freshness_window_seconds: float = 120.0
     daily_order_limit: int = 2
     weekly_order_limit: int = 5
@@ -155,6 +163,14 @@ def run_ibkr_paper_strategy_governance(
     ledger_positions = list(ledger.get("positions") or [])
     trade_stats_by_lane = _trade_stats_by_lane(trade_log)
     paper_config_in_force = _load_json(config.repo_root / _DEFAULT_PAPER_CONFIG_IN_FORCE_PATH)
+    strategy_exit_coverage = build_track_b_strategy_exit_coverage_report(
+        config=TrackBStrategyExitCoverageConfig(
+            repo_root=config.repo_root,
+            config_in_force_path=_DEFAULT_PAPER_CONFIG_IN_FORCE_PATH,
+            output_path=config.strategy_exit_coverage_path,
+        ),
+        config_in_force=paper_config_in_force,
+    )
     shared_identity_map = {
         identity.lane_id: identity.identity_id
         for identity in shared_strategy_identities()
@@ -179,6 +195,7 @@ def run_ibkr_paper_strategy_governance(
             ledger_positions=ledger_positions,
             monitor_status=monitor_status,
             phase1_reconciliation_gate=phase1_reconciliation_gate,
+            strategy_exit_coverage=strategy_exit_coverage,
             trade_stats=trade_stats_by_lane.get(str(inventory_row.get("strategy_id") or ""), {}),
             shared_strategy_id=shared_identity_map.get(str(inventory_row.get("strategy_id") or "")),
             global_monitor_owner="",
@@ -219,6 +236,7 @@ def run_ibkr_paper_strategy_governance(
             ledger_positions=ledger_positions,
             monitor_status=monitor_status,
             phase1_reconciliation_gate=phase1_reconciliation_gate,
+            strategy_exit_coverage=strategy_exit_coverage,
             trade_stats=trade_stats_by_lane.get(synthetic_lane_id, {}),
             shared_strategy_id=bridge_strategy_id,
             global_monitor_owner="",
@@ -246,6 +264,7 @@ def run_ibkr_paper_strategy_governance(
             ledger_positions=ledger_positions,
             monitor_status=monitor_status,
             phase1_reconciliation_gate=phase1_reconciliation_gate,
+            strategy_exit_coverage=strategy_exit_coverage,
             trade_stats=trade_stats_by_lane.get(lane_id, {}),
             shared_strategy_id=shared_identity_map.get(lane_id),
             global_monitor_owner="",
@@ -266,6 +285,7 @@ def run_ibkr_paper_strategy_governance(
         classification=overall_classification,
         monitor_status=monitor_status,
         phase1_reconciliation_gate=phase1_reconciliation_gate,
+        strategy_exit_coverage=strategy_exit_coverage,
         strategy_rows=strategy_rows,
         config=config,
     )
@@ -296,6 +316,7 @@ def run_ibkr_paper_strategy_governance(
             ]
         },
         "phase1_broker_reconciliation_gate": phase1_reconciliation_gate,
+        "strategy_exit_coverage": strategy_exit_coverage,
         "strategy_count": len(strategy_rows),
         "status_counts": _count_by_key(strategy_rows, "strategy_status"),
         "routing_mode_counts": _count_by_key(strategy_rows, "current_routing_mode"),
@@ -312,6 +333,8 @@ def run_ibkr_paper_strategy_governance(
             "classification": overall_classification,
             "strategy_count": len(strategy_rows),
             "submit_capable_count": len([row for row in strategy_rows if row.get("submit_allowed")]),
+            "exit_coverage_classification": strategy_exit_coverage.get("classification"),
+            "exit_coverage_blocked_lanes": list(strategy_exit_coverage.get("blocked_lanes") or []),
         },
     )
     return IbkrPaperStrategyGovernanceArtifacts(
@@ -352,6 +375,16 @@ def write_ibkr_paper_strategy_governance_artifacts(
     output_dir = config.repo_root / config.output_dir
     output_dir.mkdir(parents=True, exist_ok=True)
     _write_csv(output_dir / _PERFORMANCE_CSV, artifacts.performance_rows)
+    strategy_exit_coverage = dict(artifacts.report.get("strategy_exit_coverage") or {})
+    if strategy_exit_coverage:
+        write_track_b_strategy_exit_coverage_report(
+            config=TrackBStrategyExitCoverageConfig(
+                repo_root=config.repo_root,
+                config_in_force_path=_DEFAULT_PAPER_CONFIG_IN_FORCE_PATH,
+                output_path=config.strategy_exit_coverage_path,
+            ),
+            payload=strategy_exit_coverage,
+        )
     _write_csv(output_dir / _ROUTING_POLICY_REPORT_CSV, [_routing_policy_row(row) for row in artifacts.performance_rows])
     _write_csv(output_dir / _LOCAL_ONLY_AUDIT_CSV, [_local_only_audit_row(row) for row in artifacts.performance_rows if row.get("current_routing_mode") != "IBKR_ROUTED"])
     (output_dir / _STATUS_JSON).write_text(json.dumps(artifacts.status_payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
@@ -539,6 +572,7 @@ def _build_governance_row(
     ledger_positions: list[dict[str, Any]],
     monitor_status: dict[str, Any],
     phase1_reconciliation_gate: dict[str, Any],
+    strategy_exit_coverage: dict[str, Any],
     trade_stats: dict[str, Any],
     shared_strategy_id: str | None,
     global_monitor_owner: str,
@@ -625,6 +659,9 @@ def _build_governance_row(
         submit_block_reasons.append("drawdown_limit_reached")
     if not bool(backend_source_readiness.get("live_ready")):
         submit_block_reasons.append("backend_or_source_not_live_ready")
+    exit_coverage = lane_exit_coverage_for(lane_id, strategy_exit_coverage)
+    if exit_coverage.get("classification") != "EXIT_COVERAGE_COMPLETE":
+        submit_block_reasons.append("strategy_exit_coverage_incomplete")
 
     strategy_status = _strategy_governance_status(
         instrument=instrument,
@@ -762,6 +799,7 @@ def _build_governance_row(
             "generated_at": phase1_reconciliation_gate.get("generated_at"),
             "age_seconds": phase1_reconciliation_gate.get("age_seconds"),
         },
+        "strategy_exit_coverage": exit_coverage,
         "broker_path_pnl": _format_decimal(broker_path_pnl),
         "internal_sim_pnl": _format_decimal(internal_sim_pnl),
         "diagnostic_only_pnl": _format_decimal(diagnostic_only_pnl),
@@ -1871,6 +1909,8 @@ def _overall_governance_classification(
         return "PAPER_STRATEGY_GOVERNANCE_PARTIAL"
     if any(str(row.get("strategy_status") or "").upper() in {"WATCHLIST", "DEGRADED"} for row in strategy_rows):
         return "PAPER_STRATEGY_GOVERNANCE_PARTIAL"
+    if any("strategy_exit_coverage_incomplete" in list(row.get("submit_block_reasons") or []) for row in strategy_rows):
+        return "PAPER_STRATEGY_GOVERNANCE_PARTIAL"
     return "PAPER_STRATEGY_GOVERNANCE_READY"
 
 
@@ -1880,6 +1920,7 @@ def _build_status_payload(
     classification: str,
     monitor_status: dict[str, Any],
     phase1_reconciliation_gate: dict[str, Any],
+    strategy_exit_coverage: dict[str, Any],
     strategy_rows: list[dict[str, Any]],
     config: IbkrPaperStrategyGovernanceConfig,
 ) -> dict[str, Any]:
@@ -1894,12 +1935,15 @@ def _build_status_payload(
         "monitor_block_reasons": list(monitor_status.get("block_reasons") or []),
         "legacy_monitor_authority": "DIAGNOSTIC_ONLY_FOR_PHASE1_SUBMIT_AUTHORITY",
         "phase1_broker_reconciliation_gate": phase1_reconciliation_gate,
+        "strategy_exit_coverage": strategy_exit_coverage,
         "strategies": strategy_rows,
         "summary": {
             "strategy_count": len(strategy_rows),
             "status_counts": _count_by_key(strategy_rows, "strategy_status"),
             "routing_mode_counts": _count_by_key(strategy_rows, "current_routing_mode"),
             "submit_capable_count": len([row for row in strategy_rows if row.get("submit_allowed")]),
+            "exit_coverage_classification": strategy_exit_coverage.get("classification"),
+            "exit_coverage_blocked_lanes": list(strategy_exit_coverage.get("blocked_lanes") or []),
             "broker_session_submit_alignment_counts": _count_by_key(
                 strategy_rows,
                 "broker_session_submit_alignment",

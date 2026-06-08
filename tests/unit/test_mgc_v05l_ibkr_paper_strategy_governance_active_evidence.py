@@ -341,8 +341,39 @@ def test_active_evidence_lanes_generate_submit_capable_governance_rows(tmp_path:
 
         status = load_paper_strategy_governance_status(repo_root=tmp_path, strategy_id=lane_id)
         assert status["submit_allowed"] is True
-        assert status["selected_strategy"]["strategy_id"] == lane_id
-        assert status["selected_strategy"]["live_money_eligible"] is False
+    assert status["selected_strategy"]["strategy_id"] == lane_id
+    assert status["selected_strategy"]["live_money_eligible"] is False
+
+
+def test_exit_coverage_gap_blocks_governance_submit_for_entry_lane(tmp_path: Path, monkeypatch) -> None:
+    _write_clean_governance_inputs(tmp_path)
+
+    def _gap_report(**_: object) -> dict:
+        return {
+            "classification": "TRACK_B_STRATEGY_EXIT_COVERAGE_GAPS_FOUND",
+            "blocked_lanes": ["mnq_us_active_participation_long"],
+            "strategies": [
+                {
+                    "lane_id": "mnq_us_active_participation_long",
+                    "classification": "EXIT_POLICY_MISSING",
+                    "missing_or_weak_pieces": ["explicit_exit_policy"],
+                }
+            ],
+        }
+
+    monkeypatch.setattr(
+        "mgc_v05l.execution.ibkr_paper_strategy_governance.build_track_b_strategy_exit_coverage_report",
+        _gap_report,
+    )
+
+    artifacts = run_ibkr_paper_strategy_governance(config=_governance_config(tmp_path))
+    rows = {str(row["strategy_id"]): row for row in artifacts.performance_rows}
+
+    row = rows["mnq_us_active_participation_long"]
+    assert row["submit_allowed"] is False
+    assert row["bridge_invocation_allowed"] is False
+    assert "strategy_exit_coverage_incomplete" in row["submit_block_reasons"]
+    assert row["strategy_exit_coverage"]["classification"] == "EXIT_POLICY_MISSING"
 
 
 def test_active_evidence_governance_uses_canonical_ready_when_legacy_loop_probe_is_stale(tmp_path: Path) -> None:

@@ -99,6 +99,11 @@ def _clean_inputs() -> dict:
             "live_money_eligible": False,
             "bridge_pre_action_authority": True,
         },
+        "strategy_exit_coverage": {
+            "classification": "TRACK_B_STRATEGY_EXIT_COVERAGE_READY",
+            "blocked_lanes": [],
+            "strategies": [],
+        },
     }
 
 
@@ -1867,3 +1872,25 @@ def test_write_canonical_readiness_artifact_without_dashboard(tmp_path: Path, mo
     assert output.exists()
     assert result["canonical_readiness"] == "READY_SUBMIT_CAPABLE"
     assert [row["lane_id"] for row in result["submit_bridge"]["route_rows"]] == ["mnq"]
+
+
+def test_exit_coverage_gap_blocks_submit_capable_readiness() -> None:
+    inputs = _clean_inputs()
+    inputs["strategy_exit_coverage"] = {
+        "classification": "TRACK_B_STRATEGY_EXIT_COVERAGE_GAPS_FOUND",
+        "blocked_lanes": ["uncovered_active_lane"],
+        "strategies": [
+            {
+                "lane_id": "uncovered_active_lane",
+                "classification": "EXIT_POLICY_MISSING",
+                "missing_or_weak_pieces": ["explicit_exit_policy"],
+            }
+        ],
+    }
+
+    result = classify_canonical_readiness(inputs)
+
+    assert result["canonical_readiness"] == "NOT_READY_DEPENDENCY"
+    assert result["submit_allowed"] is False
+    assert result["readiness_blockers"][0]["code"] == "strategy_exit_coverage_incomplete"
+    assert result["readiness_blockers"][0]["blocked_lanes"] == ["uncovered_active_lane"]

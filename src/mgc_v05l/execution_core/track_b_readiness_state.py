@@ -26,6 +26,12 @@ from mgc_v05l.execution_core.track_b_live_market_data_symbols import (
 from mgc_v05l.execution_core.track_b_pre_action_snapshot_validator import (
     DEFAULT_CONTROL_PLANE_SNAPSHOT_ARTIFACT,
 )
+from mgc_v05l.execution_core.track_b_strategy_exit_coverage import (
+    DEFAULT_EXIT_COVERAGE_REPORT_PATH,
+    TrackBStrategyExitCoverageConfig,
+    build_track_b_strategy_exit_coverage_report,
+    exit_coverage_blocks_submit,
+)
 from mgc_v05l.market_data.phase1_market_session import classify_phase1_futures_market_session
 from mgc_v05l.session_phase_labels import NEW_YORK
 
@@ -84,6 +90,7 @@ DEFAULT_RUNTIME_ENVIRONMENT_TRUTH_ARTIFACT = (
 DEFAULT_MANAGED_POSITION_REGISTRY_ARTIFACT = (
     Path("outputs") / "track_b_execution_core" / "managed_positions" / "latest_managed_positions.json"
 )
+DEFAULT_STRATEGY_EXIT_COVERAGE_ARTIFACT = DEFAULT_EXIT_COVERAGE_REPORT_PATH
 CANONICAL_READINESS_STATES = {
     "READY_SUBMIT_CAPABLE",
     "READY_TO_START_DIAGNOSTIC_ONLY",
@@ -167,6 +174,7 @@ def classify_canonical_readiness(inputs: Mapping[str, Any]) -> dict[str, Any]:
     lane_quarantine = _mapping(inputs.get("lane_quarantine"))
     submit_bridge = _mapping(inputs.get("submit_bridge"))
     control_plane_authorization = _mapping(inputs.get("control_plane_authorization"))
+    strategy_exit_coverage = _mapping(inputs.get("strategy_exit_coverage"))
 
     blockers: list[dict[str, Any]] = []
     warnings: list[dict[str, Any]] = []
@@ -641,6 +649,24 @@ def classify_canonical_readiness(inputs: Mapping[str, Any]) -> dict[str, Any]:
             inputs=inputs,
         )
 
+    if exit_coverage_blocks_submit(strategy_exit_coverage):
+        blocked_lanes = list(strategy_exit_coverage.get("blocked_lanes") or [])
+        block(
+            "strategy_exit_coverage_incomplete",
+            "Every submit-capable Track B PAPER lane must have complete managed-exit coverage before new entries are allowed.",
+            source="strategy_exit_coverage",
+            blocked_lanes=blocked_lanes,
+            strategy_exit_coverage_classification=strategy_exit_coverage.get("classification"),
+        )
+        return _readiness_result(
+            generated_at=generated_at,
+            state="NOT_READY_DEPENDENCY",
+            reasons=reasons,
+            blockers=blockers,
+            warnings=warnings,
+            inputs=inputs,
+        )
+
     if not _broker_session_new_entry_allowed(broker_session_authority):
         authority_blockers = [
             dict(row)
@@ -726,6 +752,11 @@ def build_readiness_inputs(
         _mapping(artifacts.get("control_plane_snapshot")),
         now=now,
     )
+    strategy_exit_coverage = build_track_b_strategy_exit_coverage_report(
+        config=TrackBStrategyExitCoverageConfig(repo_root=repo_root),
+        now=now,
+        config_in_force=config_in_force,
+    )
     submit_bridge = _submit_bridge_input(repo_root, operator_status, _mapping(artifacts.get("live_timing_summary")))
     backend = _backend_input(_mapping(artifacts.get("dashboard_health")), root_guard)
     live_money_eligible = any(
@@ -758,6 +789,7 @@ def build_readiness_inputs(
         "phase1_reconciliation": reconciliation,
         "execution_core_shared_truth": execution_core_shared_truth,
         "control_plane_authorization": control_plane_authorization,
+        "strategy_exit_coverage": strategy_exit_coverage,
         "market_data": market_data,
         "lane_quarantine": lane_quarantine,
         "submit_bridge": submit_bridge,
@@ -880,6 +912,7 @@ def _load_readiness_artifacts(repo_root: Path) -> dict[str, Any]:
         "runtime_environment_truth": _read_json(repo_root / DEFAULT_RUNTIME_ENVIRONMENT_TRUTH_ARTIFACT),
         "managed_position_registry": _read_json(repo_root / DEFAULT_MANAGED_POSITION_REGISTRY_ARTIFACT),
         "control_plane_snapshot": _read_json(repo_root / DEFAULT_CONTROL_PLANE_SNAPSHOT_ARTIFACT),
+        "strategy_exit_coverage": _read_json(repo_root / DEFAULT_STRATEGY_EXIT_COVERAGE_ARTIFACT),
     }
 
 
@@ -1150,6 +1183,7 @@ def _execution_core_shared_truth_input(artifacts: Mapping[str, Any], *, now: dat
             "position_truth": str(DEFAULT_POSITION_TRUTH_ARTIFACT),
             "runtime_environment_truth": str(DEFAULT_RUNTIME_ENVIRONMENT_TRUTH_ARTIFACT),
             "managed_position_registry": str(DEFAULT_MANAGED_POSITION_REGISTRY_ARTIFACT),
+            "strategy_exit_coverage": str(DEFAULT_STRATEGY_EXIT_COVERAGE_ARTIFACT),
         },
         "live_money_eligible": proof_readiness.get("live_money_eligible") is True,
     }
@@ -2636,6 +2670,7 @@ def _readiness_result(
         "phase1_reconciliation": _mapping(inputs.get("phase1_reconciliation")),
         "execution_core_shared_truth": execution_core_shared_truth,
         "control_plane_authorization": _mapping(inputs.get("control_plane_authorization")),
+        "strategy_exit_coverage": _mapping(inputs.get("strategy_exit_coverage")),
         "market_data": _mapping(inputs.get("market_data")),
         **market_schedule,
         "lane_quarantine": _mapping(inputs.get("lane_quarantine")),
