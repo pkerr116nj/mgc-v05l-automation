@@ -1223,6 +1223,21 @@ def test_recovery_tick_actions_are_safe_and_profile_preserving() -> None:
     assert "flatten" not in source.lower()
 
 
+def test_recovery_tick_runs_close_only_managed_exit_actuator_before_restart() -> None:
+    source = RECOVERY_SCRIPT.read_text(encoding="utf-8")
+
+    assert "mgc_v05l.execution_core.track_b_managed_exit_actuator" in source
+    assert "--apply" in source
+    assert "--operator-authorized-managed-exit" in source
+    assert "managed-exit actuator submitted" in source
+
+    actuator_call = source.index("run_managed_exit_actuator")
+    restart_gate = source.index('if [[ ( "${restart_allowed}" != "true"')
+    runtime_start = source.index('TRACK_B_PAPER_STACK_PROFILE="${recovery_requested_profile}" bash "${START_SCRIPT}"')
+    assert actuator_call < restart_gate
+    assert actuator_call < runtime_start
+
+
 def test_recovery_profile_status_fields_are_reported() -> None:
     source = RECOVERY_SCRIPT.read_text(encoding="utf-8")
 

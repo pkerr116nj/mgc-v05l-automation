@@ -207,6 +207,12 @@ def _classify_position(
         blockers.append("REVIEW_REQUIRED_POSITION_PRESENT")
     if position.get("duplicate_same_lane_exposure") is True or lifecycle_position.get("duplicate_same_lane_exposure") is True:
         blockers.append("DUPLICATE_OR_COMPETING_EXPOSURE")
+    if not _top_level_broker_lifecycle_reconciled(inputs["reconciliation"]):
+        blockers.append("BROKER_LIFECYCLE_RECONCILIATION_NOT_CLEAN")
+    if int(inputs["reconciliation"].get("track_b_broker_open_order_count") or 0) != 0:
+        blockers.append("RECONCILIATION_BROKER_OPEN_ORDERS_PRESENT")
+    if int(inputs["reconciliation"].get("unknown_broker_open_order_count") or 0) != 0:
+        blockers.append("RECONCILIATION_UNKNOWN_OPEN_ORDERS_PRESENT")
 
     if _matching_position_count(positions=positions, account_id=account_id, local_symbol=local_symbol, con_id=con_id) != 1:
         blockers.append("COMPETING_MANAGED_POSITION_CANDIDATE")

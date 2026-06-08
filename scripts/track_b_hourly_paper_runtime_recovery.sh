@@ -126,6 +126,15 @@ tmp.replace(path)
 PY
 }
 
+run_managed_exit_actuator() {
+  local output_path="$1"
+  "${PYTHON_BIN}" -m mgc_v05l.execution_core.track_b_managed_exit_actuator \
+    --repo-root "${REPO_ROOT}" \
+    --apply \
+    --operator-authorized-managed-exit \
+    --json > "${output_path}"
+}
+
 emit_status() {
   local loaded="false"
   local state="SUPERVISOR_PAUSED"
@@ -349,7 +358,8 @@ case "${mode}" in
     run_audit
     status_tmp="$(mktemp "${TMPDIR:-/tmp}/track_b_paper_stack_status.XXXXXX.json")"
     profile_resolution_tmp=""
-    trap 'rm -f "${status_tmp}" "${profile_resolution_tmp:-}"' EXIT
+    managed_exit_actuator_tmp=""
+    trap 'rm -f "${status_tmp}" "${profile_resolution_tmp:-}" "${managed_exit_actuator_tmp:-}"' EXIT
     bash "${STATUS_SCRIPT}" --json > "${status_tmp}"
     runtime_running="$(json_value "${status_tmp}" runtime.running)"
     live_runtime_classification="$(json_value "${status_tmp}" live_runtime_environment.classification)"
@@ -376,6 +386,20 @@ case "${mode}" in
       write_tick_artifact "NO_ACTION_RUNTIME_RUNNING" "" "Runtime is healthy/running; recovery did not start anything." "${status_tmp}"
       echo "Track B recovery tick: runtime already running; no action."
       exit 0
+    fi
+    managed_exit_actuator_tmp="$(mktemp "${TMPDIR:-/tmp}/track_b_managed_exit_actuator.XXXXXX.json")"
+    if run_managed_exit_actuator "${managed_exit_actuator_tmp}"; then
+      managed_exit_actuator_classification="$(json_value "${managed_exit_actuator_tmp}" classification)"
+      managed_exit_actuator_submit_attempted="$(json_value "${managed_exit_actuator_tmp}" submit_attempted)"
+      managed_exit_actuator_submitted_count="$(json_value "${managed_exit_actuator_tmp}" submitted_count)"
+      if [[ "${managed_exit_actuator_submit_attempted}" == "true" ]]; then
+        write_tick_artifact "${managed_exit_actuator_classification:-MANAGED_EXIT_ACTUATOR_APPLIED_OR_PENDING}" "" "Runtime down; close-only managed exit actuator submitted ${managed_exit_actuator_submitted_count:-0} exact risk-reducing close(s). Runtime restart deferred until broker/managed truth refreshes." "${status_tmp}"
+        echo "Track B recovery tick: managed-exit actuator submitted ${managed_exit_actuator_submitted_count:-0} exact close(s); restart deferred."
+        exit 0
+      fi
+    else
+      managed_exit_actuator_classification="$(json_value "${managed_exit_actuator_tmp}" classification)"
+      echo "Track B recovery tick: managed-exit actuator did not apply (${managed_exit_actuator_classification:-unavailable}); continuing restart gate evaluation."
     fi
     if [[ ( "${restart_allowed}" != "true" || "${next_action}" != "run scripts/track_b_start_paper_stack.sh" ) && "${restart_authority_allowed}" != "true" ]]; then
       write_tick_artifact "NO_ACTION_BLOCKED_GATES" "restart_not_allowed" "restart_allowed=${restart_allowed} restart_authority_allowed=${restart_authority_allowed} restart_authority=${restart_authority_classification} ready=${ready_submit_capable} next_action=${next_action}" "${status_tmp}"

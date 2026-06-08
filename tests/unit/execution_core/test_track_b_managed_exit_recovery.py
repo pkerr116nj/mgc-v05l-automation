@@ -395,7 +395,10 @@ def _inputs(*, runtime_down: bool = True) -> dict:
             "global_flatten_allowed": False,
         },
         "reconciliation": {
-            "classification": "BROKER_TRUTH_SETTLEMENT_TIMEOUT" if runtime_down else "TRACK_B_PAPER_BROKER_RECONCILED",
+            "classification": "TRACK_B_PAPER_BROKER_RECONCILED",
+            "broker_reconciled": True,
+            "track_b_broker_open_order_count": 0,
+            "unknown_broker_open_order_count": 0,
             "registry_reconciliation": {
                 "classification": "REGISTRY_RECONCILIATION_MATCHED",
                 "blocking": False,
