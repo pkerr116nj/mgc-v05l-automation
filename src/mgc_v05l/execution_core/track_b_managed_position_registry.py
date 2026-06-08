@@ -193,6 +193,15 @@ def build_track_b_managed_position_registry(
         managed_order_registry=managed_order_registry,
         reconciliation=reconciliation,
     )
+    if review_positions and _current_scope_flat_authority_clean(
+        reconciliation=reconciliation,
+        open_order_truth=open_order_truth,
+    ) and _managed_order_registry_flat(managed_order_registry):
+        historical_review_positions = [
+            *historical_review_positions,
+            *[_demote_review_position_to_historical_flat_diagnostic(row) for row in review_positions],
+        ]
+        review_positions = []
     managed_positions = _managed_positions(
         broker_positions=broker_positions,
         lifecycle_positions=lifecycle_positions,
@@ -1358,6 +1367,37 @@ def _current_scope_flat_authority_clean(
         and _int_or_none(open_order_truth.get("open_order_count") or open_order_summary.get("open_order_count")) in {None, 0}
         and _int_or_none(open_order_truth.get("unknown_open_order_count")) in {None, 0}
     )
+
+
+def _managed_order_registry_flat(managed_order_registry: Mapping[str, Any]) -> bool:
+    classification = str(managed_order_registry.get("classification") or "")
+    if classification not in {"", "NO_MANAGED_ORDERS"}:
+        return False
+    if _list(managed_order_registry.get("managed_orders")):
+        return False
+    summary = _mapping(managed_order_registry.get("summary"))
+    for key in (
+        "managed_order_count",
+        "working_close_order_count",
+        "suspicious_order_count",
+        "duplicate_close_order_count",
+    ):
+        if _int_or_none(summary.get(key)) not in {None, 0}:
+            return False
+    return True
+
+
+def _demote_review_position_to_historical_flat_diagnostic(row: Mapping[str, Any]) -> dict[str, Any]:
+    diagnostic = dict(row)
+    diagnostic["current_hot_path_scope"] = "HISTORICAL_SUPERSEDED_BY_CURRENT_FLAT_AUTHORITY"
+    diagnostic["current_scope_linked"] = False
+    diagnostic["historical_only"] = True
+    diagnostic["diagnostic_only"] = True
+    diagnostic["full_artifact_audit_visible"] = True
+    diagnostic["current_scope_demoted_reason"] = (
+        "current broker, reconciliation, open-order, and managed-order authority is clean flat"
+    )
+    return diagnostic
 
 
 def _authority_summary(payload: Mapping[str, Any], path: Path) -> dict[str, Any]:

@@ -285,6 +285,13 @@ def _broker_state(
     managed_classification = str(managed_positions.get("classification") or "")
     managed_order_classification = str(managed_orders.get("classification") or "")
     if broker_positions == 0:
+        if _current_scope_flat_authority_clean(
+            reconciliation=reconciliation,
+            open_order_truth=open_order_truth,
+            managed_orders=managed_orders,
+            broker_reconciled=broker_reconciled,
+        ):
+            return "FLAT"
         if (
             broker_reconciled
             and managed_classification in {"", "NO_MANAGED_POSITIONS"}
@@ -299,6 +306,43 @@ def _broker_state(
     if broker_reconciled and owner_classification in {"OWNED_MANAGED_EXPOSURE", "NO_OPEN_EXPOSURE"}:
         return "EXPOSED_MANAGED"
     return "EXPOSED_AMBIGUOUS"
+
+
+def _current_scope_flat_authority_clean(
+    *,
+    reconciliation: Mapping[str, Any],
+    open_order_truth: Mapping[str, Any],
+    managed_orders: Mapping[str, Any],
+    broker_reconciled: bool,
+) -> bool:
+    if not broker_reconciled:
+        return False
+    if _count(reconciliation, "track_b_broker_position_count") != 0:
+        return False
+    if _count(reconciliation, "track_b_broker_open_order_count") != 0:
+        return False
+    if _count(reconciliation, "unknown_broker_open_order_count") != 0:
+        return False
+    if _count(reconciliation, "current_scope_lifecycle_open_position_count") != 0:
+        return False
+    if _count(reconciliation, "current_scope_review_required_count") != 0:
+        return False
+    if _list(reconciliation.get("track_b_broker_positions")):
+        return False
+    if _list(reconciliation.get("track_b_lifecycle_positions")):
+        return False
+    if _list(reconciliation.get("review_required_positions")):
+        return False
+    if _list(reconciliation.get("track_b_broker_open_orders")):
+        return False
+    if str(open_order_truth.get("classification") or "") != "NO_OPEN_ORDERS":
+        return False
+    managed_order_classification = str(managed_orders.get("classification") or "")
+    if managed_order_classification not in {"", "NO_MANAGED_ORDERS"}:
+        return False
+    if _list(managed_orders.get("managed_orders")):
+        return False
+    return True
 
 
 def _submit_allowed(

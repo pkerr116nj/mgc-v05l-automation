@@ -488,6 +488,41 @@ def test_zero_quantity_broker_rows_do_not_make_flat_state_exposed(tmp_path: Path
     assert ods["first_blocker"] is None
 
 
+def test_clean_current_flat_authority_beats_historical_managed_review_projection(tmp_path: Path) -> None:
+    _seed_sources(tmp_path)
+    _write(
+        tmp_path / "outputs/track_b_execution_core/managed_positions/latest_managed_positions.json",
+        {
+            "schema_version": "track_b_managed_positions_v1",
+            "generated_at": NOW.isoformat(),
+            "classification": "REVIEW_REQUIRED",
+            "managed_positions": [
+                {
+                    "classification": "REVIEW_REQUIRED",
+                    "local_symbol": "MNQM6",
+                    "lifecycle_id": "bridge_fill_MNQ|1m|2026-05-22T17:42:00Z|BUY_TO_OPEN",
+                    "current_hot_path_scope": "HISTORICAL_UNRESOLVED_FULL_AUDIT_ONLY",
+                    "historical_only": True,
+                }
+            ],
+            "historical_review_positions": [
+                {
+                    "local_symbol": "MNQM6",
+                    "lifecycle_id": "bridge_fill_MNQ|1m|2026-05-22T17:42:00Z|BUY_TO_OPEN",
+                    "historical_only": True,
+                }
+            ],
+            "live_money_eligible": False,
+            "paper_proof_invoked": False,
+        },
+    )
+
+    ods = build_operator_decision_surface(repo_root=tmp_path, now=NOW)
+
+    assert ods["broker_state"] == "FLAT"
+    assert ods["first_blocker"] is None
+
+
 def test_stale_reconciliation_still_makes_broker_state_unknown(tmp_path: Path) -> None:
     _seed_sources(tmp_path)
     reconciliation_path = (

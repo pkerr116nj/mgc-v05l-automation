@@ -158,6 +158,47 @@ def test_historical_review_debris_with_stale_sources_projects_current_scope_flat
     assert projection["source_authority_path"] == str(authority_path)
 
 
+def test_stale_live_position_review_row_does_not_override_clean_current_flat_authority(tmp_path: Path) -> None:
+    _seed_base(tmp_path)
+    stale_review = {
+        "account_id": "DUM882026",
+        "symbol": "MNQ",
+        "track_b_root": "MNQ",
+        "local_symbol": "MNQM6",
+        "con_id": 770561201,
+        "quantity": "1",
+        "side": "LONG",
+        "lifecycle_id": "bridge_fill_MNQ|1m|2026-05-22T17:42:00Z|BUY_TO_OPEN",
+        "trade_id": "trade_old_bridge_fill",
+    }
+    _write_json(
+        tmp_path
+        / "outputs"
+        / "track_b_execution_core"
+        / "paper_trade_ledger"
+        / "latest_track_b_live_position_status.json",
+        {
+            "generated_at": NOW.isoformat(),
+            "open_position_count": 1,
+            "positions": [stale_review],
+            "review_required_positions": [stale_review],
+        },
+    )
+
+    payload = build_track_b_managed_position_registry(
+        config=TrackBManagedPositionRegistryConfig(repo_root=tmp_path),
+        now=NOW,
+    )
+
+    assert payload["classification"] == NO_MANAGED_POSITIONS
+    assert payload["managed_positions"] == []
+    assert payload["review_required_positions"] == []
+    assert payload["summary"]["managed_position_count"] == 0
+    assert payload["historical_review_positions"][0]["lifecycle_id"] == stale_review["lifecycle_id"]
+    assert payload["historical_review_positions"][0]["historical_only"] is True
+    assert payload["historical_review_positions"][0]["current_scope_linked"] is False
+
+
 def test_active_review_required_lifecycle_still_surfaces(tmp_path: Path) -> None:
     review = _lifecycle_position()
     _seed_base(tmp_path, review_positions=[review])
