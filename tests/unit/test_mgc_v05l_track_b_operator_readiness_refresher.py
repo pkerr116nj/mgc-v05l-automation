@@ -2,12 +2,16 @@ from __future__ import annotations
 
 import json
 import subprocess
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Sequence
+
+import pytest
 
 from mgc_v05l.app.track_b_operator_readiness_refresher import (
     RefreshConfig,
     _refresh_commands,
+    _write_json_atomic,
     read_status,
     refresh_once,
     run_supervisor,
@@ -171,6 +175,54 @@ def test_refresh_once_writes_heartbeat_when_configured(tmp_path: Path) -> None:
     assert heartbeat["paper_proof_invoked"] is False
     assert heartbeat["live_money_eligible"] is False
 
+
+def test_atomic_json_writer_handles_repeated_rapid_writes(tmp_path: Path) -> None:
+    target = tmp_path / "status.json"
+
+    for index in range(50):
+        _write_json_atomic(target, {"sequence": index, "submit_authority": False})
+
+    assert json.loads(target.read_text(encoding="utf-8")) == {
+        "sequence": 49,
+        "submit_authority": False,
+    }
+    assert not list(tmp_path.glob(".status.json.*.tmp"))
+
+
+def test_atomic_json_writer_handles_overlapping_writes_without_temp_collision(tmp_path: Path) -> None:
+    target = tmp_path / "heartbeat.json"
+
+    def write_one(index: int) -> None:
+        _write_json_atomic(target, {"sequence": index, "submit_authority": False})
+
+    with ThreadPoolExecutor(max_workers=8) as executor:
+        list(executor.map(write_one, range(40)))
+
+    written = json.loads(target.read_text(encoding="utf-8"))
+    assert 0 <= written["sequence"] < 40
+    assert written["submit_authority"] is False
+    assert not list(tmp_path.glob(".heartbeat.json.*.tmp"))
+
+
+def test_atomic_json_writer_reports_failure_without_corrupting_existing_json(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    target = tmp_path / "status.json"
+    target.write_text(json.dumps({"sequence": "old"}) + "\n", encoding="utf-8")
+
+    def fail_replace(self: Path, target_path: Path) -> None:
+        raise FileNotFoundError(f"forced replace failure for {target_path}")
+
+    monkeypatch.setattr(Path, "replace", fail_replace)
+
+    with pytest.raises(RuntimeError, match="atomic json write failed"):
+        _write_json_atomic(target, {"sequence": "new"})
+
+    assert json.loads(target.read_text(encoding="utf-8")) == {"sequence": "old"}
+    assert not list(tmp_path.glob(".status.json.*.tmp"))
+
+
 def test_refresh_once_treats_non_ready_canonical_readiness_as_refreshed_state(tmp_path: Path) -> None:
     def fake_runner(command: Sequence[str], _repo_root: Path, _timeout_seconds: float) -> subprocess.CompletedProcess[str]:
         name = " ".join(command)
@@ -179,7 +231,11 @@ def test_refresh_once_treats_non_ready_canonical_readiness_as_refreshed_state(tm
         return subprocess.CompletedProcess(list(command), 0, stdout="ok", stderr="")
 
     payload = refresh_once(
-        config=RefreshConfig(repo_root=tmp_path, status_path=tmp_path / "status.json"),
+        config=RefreshConfig(
+            repo_root=tmp_path,
+            status_path=tmp_path
+            / "outputs/reports/track_b_operator_readiness_refresher/latest_track_b_operator_readiness_refresher_status.json",
+        ),
         runner=fake_runner,
     )
 
@@ -198,7 +254,11 @@ def test_refresh_once_treats_classified_control_plane_block_as_refreshed_state(t
         return subprocess.CompletedProcess(list(command), 0, stdout="ok", stderr="")
 
     payload = refresh_once(
-        config=RefreshConfig(repo_root=tmp_path, status_path=tmp_path / "status.json"),
+        config=RefreshConfig(
+            repo_root=tmp_path,
+            status_path=tmp_path
+            / "outputs/reports/track_b_operator_readiness_refresher/latest_track_b_operator_readiness_refresher_status.json",
+        ),
         runner=fake_runner,
     )
 
@@ -254,6 +314,38 @@ def test_refresh_once_fails_with_exact_dependency_when_reconciliation_refresh_fa
             "stderr_tail": "reconciliation stale",
         }
     ]
+
+
+def test_refresh_once_publishes_degraded_ods_when_shared_truth_fails(tmp_path: Path) -> None:
+    def fake_runner(command: Sequence[str], _repo_root: Path, _timeout_seconds: float) -> subprocess.CompletedProcess[str]:
+        name = " ".join(command)
+        if "track_b_shared_truth_refresh_cli" in name:
+            return subprocess.CompletedProcess(list(command), 2, stdout="", stderr="shared truth blocked")
+        return subprocess.CompletedProcess(list(command), 0, stdout="ok", stderr="")
+
+    payload = refresh_once(
+        config=RefreshConfig(
+            repo_root=tmp_path,
+            status_path=tmp_path
+            / "outputs/reports/track_b_operator_readiness_refresher/latest_track_b_operator_readiness_refresher_status.json",
+        ),
+        runner=fake_runner,
+    )
+
+    ods_path = tmp_path / "outputs/track_b_execution_core/operator_decision_surface/latest_operator_decision_surface.json"
+    ods = json.loads(ods_path.read_text(encoding="utf-8"))
+
+    assert payload["classification"] == "TRACK_B_OPERATOR_READINESS_REFRESH_FAILED"
+    assert payload["dependency_refresh_failures"][0]["code"] == "shared_truth_refresh_failed"
+    assert payload["post_status_ods_publication"]["succeeded"] is True
+    assert payload["post_status_ods_publication"]["broker_state"] == "UNKNOWN"
+    assert ods["first_blocker"] == {
+        "code": "shared_truth_refresh_failed",
+        "detail": "shared_truth refresh failed with returncode=2.",
+        "source": "operator_readiness_refresher",
+    }
+    assert ods["next_safe_action"] == "REFRESH_AUTHORITY"
+    assert ods["submit_allowed"]["submit_allowed"] is False
 
 
 def test_missing_status_is_safe_and_non_authoritative(tmp_path: Path) -> None:

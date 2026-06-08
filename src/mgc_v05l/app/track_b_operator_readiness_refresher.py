@@ -8,7 +8,9 @@ import os
 import signal
 import subprocess
 import sys
+import threading
 import time
+import uuid
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -85,13 +87,16 @@ def refresh_once(*, config: RefreshConfig, runner: Runner | None = None) -> dict
                 duration_seconds=round(time.monotonic() - command_started, 3),
             )
         )
-    succeeded = all(_command_result_succeeded(result) for result in results)
+    succeeded = all(_authority_dependency_succeeded(result) for result in results)
     payload = _status_payload(
         config=config,
         started_at=started,
         command_results=results,
         succeeded=succeeded,
     )
+    _write_json_atomic(config.status_path, payload)
+    ods_publication = _publish_operator_decision_surface_after_status(config=config)
+    payload["post_status_ods_publication"] = ods_publication
     _write_json_atomic(config.status_path, payload)
     _write_heartbeat(config=config, payload=payload, refresh_running=False)
     return payload
@@ -481,6 +486,12 @@ def _command_result_succeeded(result: RefreshCommandResult) -> bool:
     return False
 
 
+def _authority_dependency_succeeded(result: RefreshCommandResult) -> bool:
+    if result.name == "operator_decision_surface":
+        return True
+    return _command_result_succeeded(result)
+
+
 def _run_safely(
     runner: Runner,
     command: Sequence[str],
@@ -515,6 +526,36 @@ def _run_command(command: Sequence[str], repo_root: Path, timeout_seconds: float
         timeout=timeout_seconds,
         check=False,
     )
+
+
+def _publish_operator_decision_surface_after_status(*, config: RefreshConfig) -> dict[str, Any]:
+    output_path = (
+        config.repo_root
+        / "outputs"
+        / "track_b_execution_core"
+        / "operator_decision_surface"
+        / "latest_operator_decision_surface.json"
+    )
+    try:
+        from mgc_v05l.execution_core.track_b_operator_decision_surface import write_operator_decision_surface
+
+        payload = write_operator_decision_surface(repo_root=config.repo_root, output_path=output_path)
+    except Exception as exc:  # defensive: ODS should never take down the refresher.
+        return {
+            "succeeded": False,
+            "output_path": str(output_path),
+            "classification": "OPERATOR_DECISION_SURFACE_PUBLICATION_FAILED",
+            "error": str(exc),
+        }
+    return {
+        "succeeded": True,
+        "output_path": str(output_path),
+        "classification": "OPERATOR_DECISION_SURFACE_PUBLISHED",
+        "generated_at": payload.get("generated_at"),
+        "first_blocker": payload.get("first_blocker"),
+        "next_safe_action": payload.get("next_safe_action"),
+        "broker_state": payload.get("broker_state"),
+    }
 
 
 def _status_payload(
@@ -556,6 +597,7 @@ def _status_payload(
                 "authority_generation_id": authority_generation_id,
                 "returncode": result.returncode,
                 "succeeded": _command_result_succeeded(result),
+                "best_effort_final_step": result.name == "operator_decision_surface",
                 "duration_seconds": result.duration_seconds,
             }
             for result in command_results
@@ -569,7 +611,7 @@ def _status_payload(
                 "stderr_tail": result.stderr_tail,
             }
             for result in command_results
-            if not _command_result_succeeded(result)
+            if result.name != "operator_decision_surface" and not _command_result_succeeded(result)
         ],
         "submit_authority": False,
         "paper_proof_invoked": False,
@@ -667,6 +709,7 @@ def _status_payload(
                 "command": result.command,
                 "returncode": result.returncode,
                 "succeeded": _command_result_succeeded(result),
+                "best_effort_final_step": result.name == "operator_decision_surface",
                 "duration_seconds": result.duration_seconds,
                 "stdout_tail": result.stdout_tail,
                 "stderr_tail": result.stderr_tail,
@@ -789,9 +832,21 @@ def _tail(value: str, *, max_chars: int = 2000) -> str:
 def _write_json_atomic(path: Path, payload: dict[str, Any]) -> None:
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_name(f".{path.name}.tmp")
-    tmp.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-    tmp.replace(path)
+    tmp = path.with_name(
+        f".{path.name}.{os.getpid()}.{threading.get_ident()}.{time.monotonic_ns()}.{uuid.uuid4().hex}.tmp"
+    )
+    try:
+        with tmp.open("w", encoding="utf-8") as handle:
+            handle.write(json.dumps(payload, indent=2, sort_keys=True) + "\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        tmp.replace(path)
+    except Exception as exc:
+        try:
+            tmp.unlink(missing_ok=True)
+        except OSError:
+            pass
+        raise RuntimeError(f"atomic json write failed for {path}: {exc}") from exc
 
 
 def _utc_now() -> datetime:
