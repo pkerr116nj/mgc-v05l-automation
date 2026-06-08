@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import json
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from mgc_v05l.execution_core.track_b_operator_decision_surface import (
@@ -61,6 +61,38 @@ def _seed_sources(tmp_path: Path, *, submit_allowed: bool = True, bsa_new_entry:
             "track_b_broker_open_order_count": 0,
             "unknown_broker_open_order_count": 0,
             "current_scope_review_required_count": 0,
+            "live_money_eligible": False,
+            "paper_proof_invoked": False,
+        },
+    )
+    _write(
+        tmp_path / "outputs/track_b_execution_core/open_order_truth/latest_open_order_truth.json",
+        {
+            "schema_version": "track_b_open_order_truth_v1",
+            "generated_at": generated_at,
+            "classification": "NO_OPEN_ORDERS",
+            "live_money_eligible": False,
+            "paper_proof_invoked": False,
+        },
+    )
+    _write(
+        tmp_path / "outputs/operator_dashboard/runtime/latest_track_b_managed_positions.json",
+        {
+            "schema_version": "track_b_managed_positions_v1",
+            "generated_at": generated_at,
+            "classification": "NO_MANAGED_POSITIONS",
+            "managed_positions": [],
+            "live_money_eligible": False,
+            "paper_proof_invoked": False,
+        },
+    )
+    _write(
+        tmp_path / "outputs/track_b_execution_core/managed_orders/latest_managed_orders.json",
+        {
+            "schema_version": "track_b_managed_orders_v1",
+            "generated_at": generated_at,
+            "classification": "NO_MANAGED_ORDERS",
+            "managed_orders": [],
             "live_money_eligible": False,
             "paper_proof_invoked": False,
         },
@@ -132,6 +164,69 @@ def _seed_sources(tmp_path: Path, *, submit_allowed: bool = True, bsa_new_entry:
     )
 
 
+def _seed_managed_mes_position(tmp_path: Path) -> None:
+    _write(
+        tmp_path / "outputs/operator_dashboard/runtime/latest_broker_truth_lease.json",
+        {
+            "schema_version": "track_b_broker_truth_lease_v1",
+            "generated_at": NOW.isoformat(),
+            "account_id": "DUM882026",
+            "broker_reconciled": True,
+            "track_b_broker_position_count": 1,
+            "track_b_broker_open_order_count": 0,
+            "unknown_broker_open_order_count": 0,
+            "positions": [{"local_symbol": "MESM6", "quantity": "1.0", "account_id": "DUM882026"}],
+            "live_money_eligible": False,
+            "paper_proof_invoked": False,
+        },
+    )
+    _write(
+        tmp_path / "outputs/reports/track_b_paper_broker_reconciliation/latest_track_b_paper_broker_reconciliation.json",
+        {
+            "schema_version": "track_b_paper_broker_reconciliation_v1",
+            "generated_at": NOW.isoformat(),
+            "classification": "TRACK_B_PAPER_BROKER_RECONCILED",
+            "broker_reconciled": True,
+            "track_b_broker_position_count": 1,
+            "track_b_broker_open_order_count": 0,
+            "unknown_broker_open_order_count": 0,
+            "current_scope_lifecycle_open_position_count": 1,
+            "current_exposure_owner_resolution": {"classification": "OWNED_MANAGED_EXPOSURE"},
+            "live_money_eligible": False,
+            "paper_proof_invoked": False,
+        },
+    )
+    _write(
+        tmp_path / "outputs/operator_dashboard/runtime/latest_track_b_managed_positions.json",
+        {
+            "schema_version": "track_b_managed_positions_v1",
+            "generated_at": NOW.isoformat(),
+            "classification": "OPEN_MANAGED_MATCHED",
+            "managed_positions": [
+                {
+                    "local_symbol": "MESM6",
+                    "quantity": "1",
+                    "side": "LONG",
+                    "lifecycle_id": "reserved_submit_mes_globex_active_participation_long",
+                }
+            ],
+            "live_money_eligible": False,
+            "paper_proof_invoked": False,
+        },
+    )
+    _write(
+        tmp_path / "outputs/track_b_execution_core/managed_orders/latest_managed_orders.json",
+        {
+            "schema_version": "track_b_managed_orders_v1",
+            "generated_at": NOW.isoformat(),
+            "classification": "ACTIVE_HOLD_MANAGED_TIMED_EXIT_PENDING",
+            "managed_orders": [],
+            "live_money_eligible": False,
+            "paper_proof_invoked": False,
+        },
+    )
+
+
 def test_ods_v1_summarizes_clean_submit_ready_state(tmp_path: Path) -> None:
     _seed_sources(tmp_path)
     _write(
@@ -160,6 +255,84 @@ def test_ods_v1_summarizes_clean_submit_ready_state(tmp_path: Path) -> None:
     assert ods["latest_accepted_signal"]["stage"] == "PAPER_STRATEGY_INTENT_ACCEPTED"
     assert ods["broker_mutation_allowed"] is False
     assert ods["submit_attempted"] is False
+
+
+def test_degraded_refresher_failure_overrides_submit_and_surfaces_blocker(tmp_path: Path) -> None:
+    _seed_sources(tmp_path, submit_allowed=True, bsa_new_entry=True)
+    _seed_managed_mes_position(tmp_path)
+    _write(
+        tmp_path / "outputs/reports/track_b_operator_readiness_refresher/latest_track_b_operator_readiness_refresher_status.json",
+        {
+            "schema_version": "track_b_operator_readiness_refresher_status_v1",
+            "generated_at": NOW.isoformat(),
+            "classification": "TRACK_B_OPERATOR_READINESS_REFRESH_FAILED",
+            "dependency_refresh_failures": [
+                {
+                    "step": "shared_truth",
+                    "code": "shared_truth_refresh_failed",
+                    "returncode": 2,
+                }
+            ],
+            "live_money_eligible": False,
+            "paper_proof_invoked": False,
+        },
+    )
+
+    ods = build_operator_decision_surface(repo_root=tmp_path, now=NOW)
+
+    assert ods["broker_state"] == "EXPOSED_MANAGED"
+    assert ods["submit_allowed"] == {
+        "submit_allowed": False,
+        "canonical_readiness": "READY_SUBMIT_CAPABLE",
+        "degraded": True,
+        "degraded_reason": "shared_truth_refresh_failed",
+    }
+    assert ods["first_blocker"] == {
+        "code": "shared_truth_refresh_failed",
+        "detail": "shared_truth refresh failed with returncode=2.",
+        "source": "operator_readiness_refresher",
+    }
+    assert ods["next_safe_action"] == "REFRESH_AUTHORITY"
+
+
+def test_later_clean_current_authority_supersedes_earlier_refresher_failure(tmp_path: Path) -> None:
+    _seed_sources(tmp_path, submit_allowed=True, bsa_new_entry=True)
+    _write(
+        tmp_path / "outputs/reports/track_b_operator_readiness_refresher/latest_track_b_operator_readiness_refresher_status.json",
+        {
+            "schema_version": "track_b_operator_readiness_refresher_status_v1",
+            "generated_at": (NOW - timedelta(seconds=120)).isoformat(),
+            "classification": "TRACK_B_OPERATOR_READINESS_REFRESH_FAILED",
+            "dependency_refresh_failures": [
+                {
+                    "step": "track_b_paper_broker_reconciliation",
+                    "code": "track_b_paper_broker_reconciliation_refresh_failed",
+                    "returncode": 1,
+                }
+            ],
+            "live_money_eligible": False,
+            "paper_proof_invoked": False,
+        },
+    )
+
+    ods = build_operator_decision_surface(repo_root=tmp_path, now=NOW)
+
+    assert ods["broker_state"] == "FLAT"
+    assert ods["submit_allowed"] == {"submit_allowed": True, "canonical_readiness": "READY_SUBMIT_CAPABLE"}
+    assert ods["first_blocker"] is None
+    assert ods["next_safe_action"] == "NO_ACTION"
+    assert ods["diagnostic_warnings"] == [
+        {
+            "code": "operator_readiness_refresh_failure_superseded",
+            "detail": "Earlier operator readiness refresh failure was superseded by newer clean current authority.",
+            "source": "operator_readiness_refresher",
+            "superseded_blocker": {
+                "code": "track_b_paper_broker_reconciliation_refresh_failed",
+                "detail": "track_b_paper_broker_reconciliation refresh failed with returncode=1.",
+                "source": "operator_readiness_refresher",
+            },
+        }
+    ]
 
 
 def test_canonical_readiness_owns_submit_allowed_and_root_blocker(tmp_path: Path) -> None:
@@ -201,6 +374,71 @@ def test_broker_open_orders_beat_projection_ready_state(tmp_path: Path) -> None:
     assert ods["broker_state"] == "OPEN_ORDERS"
     assert ods["first_blocker"]["code"] == "broker_state_open_orders"
     assert ods["first_blocker"]["source"] == "broker_state"
+
+
+def test_clean_flat_authority_tolerates_reconciliation_action_ttl_age(tmp_path: Path) -> None:
+    _seed_sources(tmp_path)
+    reconciliation_path = (
+        tmp_path / "outputs/reports/track_b_paper_broker_reconciliation/latest_track_b_paper_broker_reconciliation.json"
+    )
+    reconciliation = json.loads(reconciliation_path.read_text(encoding="utf-8"))
+    reconciliation["generated_at"] = "2026-06-07T05:56:00+00:00"
+    reconciliation["max_age_seconds"] = 120
+    _write(reconciliation_path, reconciliation)
+
+    ods = build_operator_decision_surface(repo_root=tmp_path, now=NOW)
+
+    assert ods["source_states"]["broker_reconciliation"] == {"state": "FRESH", "age_seconds": 240.0}
+    assert ods["broker_state"] == "FLAT"
+    assert ods["first_blocker"] is None
+
+
+def test_zero_quantity_broker_rows_do_not_make_flat_state_exposed(tmp_path: Path) -> None:
+    _seed_sources(tmp_path)
+    lease_path = tmp_path / "outputs/operator_dashboard/runtime/latest_broker_truth_lease.json"
+    lease = json.loads(lease_path.read_text(encoding="utf-8"))
+    lease["positions"] = [
+        {"local_symbol": "MESM6", "quantity": "0.0", "account_id": "DUM882026"},
+        {"local_symbol": "MNQM6", "quantity": "0.0", "account_id": "DUM882026"},
+    ]
+    _write(lease_path, lease)
+
+    ods = build_operator_decision_surface(repo_root=tmp_path, now=NOW)
+
+    assert ods["broker_state"] == "FLAT"
+    assert ods["first_blocker"] is None
+
+
+def test_stale_reconciliation_still_makes_broker_state_unknown(tmp_path: Path) -> None:
+    _seed_sources(tmp_path)
+    reconciliation_path = (
+        tmp_path / "outputs/reports/track_b_paper_broker_reconciliation/latest_track_b_paper_broker_reconciliation.json"
+    )
+    reconciliation = json.loads(reconciliation_path.read_text(encoding="utf-8"))
+    reconciliation["generated_at"] = "2026-06-07T05:54:30+00:00"
+    _write(reconciliation_path, reconciliation)
+
+    ods = build_operator_decision_surface(repo_root=tmp_path, now=NOW)
+
+    assert ods["source_states"]["broker_reconciliation"]["state"] == "STALE"
+    assert ods["broker_state"] == "UNKNOWN"
+    assert ods["first_blocker"]["code"] == "broker_state_unknown"
+
+
+def test_dirty_reconciliation_keeps_flat_projection_unknown(tmp_path: Path) -> None:
+    _seed_sources(tmp_path)
+    reconciliation_path = (
+        tmp_path / "outputs/reports/track_b_paper_broker_reconciliation/latest_track_b_paper_broker_reconciliation.json"
+    )
+    reconciliation = json.loads(reconciliation_path.read_text(encoding="utf-8"))
+    reconciliation["classification"] = "TRACK_B_PAPER_BROKER_POSITION_MISMATCH"
+    reconciliation["broker_reconciled"] = False
+    _write(reconciliation_path, reconciliation)
+
+    ods = build_operator_decision_surface(repo_root=tmp_path, now=NOW)
+
+    assert ods["broker_state"] == "UNKNOWN"
+    assert ods["first_blocker"]["code"] == "broker_state_unknown"
 
 
 def test_missing_or_stale_sources_are_unknown(tmp_path: Path) -> None:

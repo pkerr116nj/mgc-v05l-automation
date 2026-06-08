@@ -28,6 +28,12 @@ CANONICAL_READINESS_PATH = "outputs/operator_dashboard/runtime/latest_canonical_
 CONTROL_PLANE_PATH = "outputs/track_b_execution_core/control_plane/latest_control_plane_snapshot.json"
 BROKER_AUTHORITY_OWNERSHIP_PATH = "outputs/operator_dashboard/runtime/latest_broker_authority_ownership.json"
 BROKER_SESSION_AUTHORITY_PATH = "outputs/operator_dashboard/runtime/latest_broker_session_authority.json"
+OPEN_ORDER_TRUTH_PATH = "outputs/track_b_execution_core/open_order_truth/latest_open_order_truth.json"
+MANAGED_POSITIONS_PATH = "outputs/operator_dashboard/runtime/latest_track_b_managed_positions.json"
+MANAGED_ORDERS_PATH = "outputs/track_b_execution_core/managed_orders/latest_managed_orders.json"
+OPERATOR_READINESS_REFRESHER_STATUS_PATH = (
+    "outputs/reports/track_b_operator_readiness_refresher/latest_track_b_operator_readiness_refresher_status.json"
+)
 PAPER_SESSION_PATH = "outputs/probationary_pattern_engine/paper_session"
 
 FRESHNESS_TTL_SECONDS = 300.0
@@ -90,8 +96,25 @@ def build_operator_decision_surface(
         ],
     }
     runtime_live = _runtime_live(sources["runtime_truth"], sources["canonical_readiness"])
-    broker_state = _broker_state(sources["broker_truth_lease"], sources["broker_reconciliation"])
-    submit_allowed = _submit_allowed(sources["canonical_readiness"])
+    broker_state = _broker_state(
+        sources["broker_truth_lease"],
+        sources["broker_reconciliation"],
+        sources["open_order_truth"],
+        sources["managed_positions"],
+        sources["managed_orders"],
+    )
+    refresh_failure = _refresh_failure(sources["operator_readiness_refresher"])
+    refresh_failure_superseded = _refresh_failure_superseded_by_current_authority(
+        refresh_failure=refresh_failure,
+        sources=sources,
+        broker_state=broker_state,
+    )
+    submit_allowed = _submit_allowed(
+        sources["canonical_readiness"],
+        sources["operator_readiness_refresher"],
+        refresh_failure=refresh_failure,
+        refresh_failure_superseded=refresh_failure_superseded,
+    )
     authority_health = _authority_health(sources["broker_authority_ownership"], sources["broker_session_authority"])
     control_plane_state = _control_plane_state(sources["control_plane"])
     latest_accepted_signal = _latest_accepted_signal(repo_root=repo_root, now=now)
@@ -119,6 +142,10 @@ def build_operator_decision_surface(
             ),
             "authority_health": authority_health,
             "control_plane_state": control_plane_state,
+            "diagnostic_warnings": _diagnostic_warnings(
+                refresh_failure=refresh_failure,
+                refresh_failure_superseded=refresh_failure_superseded,
+            ),
         }
     )
     return ods
@@ -139,15 +166,33 @@ def _load_sources(*, repo_root: Path, now: datetime) -> dict[str, SourceArtifact
     return {
         "runtime_truth": _read_source(repo_root / RUNTIME_TRUTH_PATH, now=now, ttl_seconds=RUNTIME_TTL_SECONDS),
         "broker_truth_lease": _read_source(repo_root / BROKER_TRUTH_LEASE_PATH, now=now),
-        "broker_reconciliation": _read_source(repo_root / BROKER_RECONCILIATION_PATH, now=now),
+        "broker_reconciliation": _read_source(
+            repo_root / BROKER_RECONCILIATION_PATH,
+            now=now,
+            honor_payload_threshold=False,
+        ),
         "canonical_readiness": _read_source(repo_root / CANONICAL_READINESS_PATH, now=now),
         "control_plane": _read_source(repo_root / CONTROL_PLANE_PATH, now=now),
         "broker_authority_ownership": _read_source(repo_root / BROKER_AUTHORITY_OWNERSHIP_PATH, now=now),
         "broker_session_authority": _read_source(repo_root / BROKER_SESSION_AUTHORITY_PATH, now=now),
+        "open_order_truth": _read_source(repo_root / OPEN_ORDER_TRUTH_PATH, now=now),
+        "managed_positions": _read_source(repo_root / MANAGED_POSITIONS_PATH, now=now),
+        "managed_orders": _read_source(repo_root / MANAGED_ORDERS_PATH, now=now),
+        "operator_readiness_refresher": _read_source(
+            repo_root / OPERATOR_READINESS_REFRESHER_STATUS_PATH,
+            now=now,
+            ttl_seconds=RUNTIME_TTL_SECONDS,
+        ),
     }
 
 
-def _read_source(path: Path, *, now: datetime, ttl_seconds: float = FRESHNESS_TTL_SECONDS) -> SourceArtifact:
+def _read_source(
+    path: Path,
+    *,
+    now: datetime,
+    ttl_seconds: float = FRESHNESS_TTL_SECONDS,
+    honor_payload_threshold: bool = True,
+) -> SourceArtifact:
     try:
         raw = json.loads(path.read_text(encoding="utf-8"))
     except FileNotFoundError:
@@ -160,7 +205,7 @@ def _read_source(path: Path, *, now: datetime, ttl_seconds: float = FRESHNESS_TT
     if _artifact_reports_ambiguity(payload):
         return SourceArtifact(path=path, payload=payload, source_state="AMBIGUOUS", age_seconds=_age_seconds(payload, now))
     age = _age_seconds(payload, now)
-    threshold = _freshness_threshold(payload, default=ttl_seconds)
+    threshold = _freshness_threshold(payload, default=ttl_seconds) if honor_payload_threshold else ttl_seconds
     if age is None or age > threshold:
         return SourceArtifact(path=path, payload=payload, source_state="STALE", age_seconds=age)
     return SourceArtifact(path=path, payload=payload, source_state="FRESH", age_seconds=age)
@@ -200,24 +245,55 @@ def _runtime_live(source: SourceArtifact, canonical_source: SourceArtifact | Non
     }
 
 
-def _broker_state(lease_source: SourceArtifact, reconciliation_source: SourceArtifact) -> str:
+def _broker_state(
+    lease_source: SourceArtifact,
+    reconciliation_source: SourceArtifact,
+    open_order_truth_source: SourceArtifact | None = None,
+    managed_positions_source: SourceArtifact | None = None,
+    managed_orders_source: SourceArtifact | None = None,
+) -> str:
     if not lease_source.available or not reconciliation_source.available:
+        return "UNKNOWN"
+    if open_order_truth_source is not None and not open_order_truth_source.available:
+        return "UNKNOWN"
+    if managed_positions_source is not None and not managed_positions_source.available:
+        return "UNKNOWN"
+    if managed_orders_source is not None and not managed_orders_source.available:
         return "UNKNOWN"
     lease = lease_source.payload
     reconciliation = reconciliation_source.payload
+    open_order_truth = open_order_truth_source.payload if open_order_truth_source and open_order_truth_source.available else {}
+    managed_positions = managed_positions_source.payload if managed_positions_source and managed_positions_source.available else {}
+    managed_orders = managed_orders_source.payload if managed_orders_source and managed_orders_source.available else {}
     if _count(lease, "unknown_broker_open_order_count") > 0 or _count(reconciliation, "unknown_broker_open_order_count") > 0:
         return "OPEN_ORDERS"
     if _count(lease, "track_b_broker_open_order_count") > 0 or _count(reconciliation, "track_b_broker_open_order_count") > 0:
         return "OPEN_ORDERS"
+    open_order_classification = str(open_order_truth.get("classification") or "")
+    if open_order_classification and open_order_classification != "NO_OPEN_ORDERS":
+        return "OPEN_ORDERS" if "ORDER" in open_order_classification else "UNKNOWN"
     broker_positions = max(
         _count(lease, "track_b_broker_position_count"),
         _count(reconciliation, "track_b_broker_position_count"),
-        len(_list(lease.get("positions"))),
-        len(_list(reconciliation.get("track_b_broker_positions"))),
+        _nonzero_position_count(lease.get("positions")),
+        _nonzero_position_count(reconciliation.get("track_b_broker_positions")),
     )
-    broker_reconciled = lease.get("broker_reconciled") is True or reconciliation.get("broker_reconciled") is True
+    reconciliation_classification = str(reconciliation.get("classification") or "")
+    broker_reconciled = (
+        lease.get("broker_reconciled") is True or reconciliation.get("broker_reconciled") is True
+    ) and reconciliation_classification in {"", "TRACK_B_PAPER_BROKER_RECONCILED"}
+    managed_classification = str(managed_positions.get("classification") or "")
+    managed_order_classification = str(managed_orders.get("classification") or "")
     if broker_positions == 0:
-        return "FLAT" if broker_reconciled else "EXPOSED_AMBIGUOUS"
+        if (
+            broker_reconciled
+            and managed_classification in {"", "NO_MANAGED_POSITIONS"}
+            and managed_order_classification in {"", "NO_MANAGED_ORDERS"}
+        ):
+            return "FLAT"
+        return "UNKNOWN"
+    if broker_reconciled and managed_classification in {"OPEN_MANAGED_MATCHED", "OPEN_MANAGED_EXIT_DUE"}:
+        return "EXPOSED_MANAGED"
     owner = _mapping(reconciliation.get("current_exposure_owner_resolution"))
     owner_classification = str(owner.get("classification") or "")
     if broker_reconciled and owner_classification in {"OWNED_MANAGED_EXPOSURE", "NO_OPEN_EXPOSURE"}:
@@ -225,10 +301,25 @@ def _broker_state(lease_source: SourceArtifact, reconciliation_source: SourceArt
     return "EXPOSED_AMBIGUOUS"
 
 
-def _submit_allowed(source: SourceArtifact) -> dict[str, Any]:
+def _submit_allowed(
+    source: SourceArtifact,
+    refresher_source: SourceArtifact | None = None,
+    *,
+    refresh_failure: Mapping[str, Any] | None = None,
+    refresh_failure_superseded: bool = False,
+) -> dict[str, Any]:
     if not source.available:
         return {"submit_allowed": False, "canonical_readiness": "UNKNOWN"}
     payload = source.payload
+    if refresh_failure is None:
+        refresh_failure = _refresh_failure(refresher_source)
+    if refresh_failure is not None and not refresh_failure_superseded:
+        return {
+            "submit_allowed": False,
+            "canonical_readiness": payload.get("canonical_readiness") or payload.get("state") or "UNKNOWN",
+            "degraded": True,
+            "degraded_reason": refresh_failure["code"],
+        }
     return {
         "submit_allowed": payload.get("submit_allowed") is True,
         "canonical_readiness": payload.get("canonical_readiness") or payload.get("state") or "UNKNOWN",
@@ -277,6 +368,13 @@ def _first_blocker(
     safety = _safety_blocker(sources)
     if safety is not None:
         return safety
+    refresh_failure = _refresh_failure(sources.get("operator_readiness_refresher"))
+    if refresh_failure is not None and not _refresh_failure_superseded_by_current_authority(
+        refresh_failure=refresh_failure,
+        sources=sources,
+        broker_state=broker_state,
+    ):
+        return refresh_failure
     if broker_state in {"OPEN_ORDERS", "EXPOSED_AMBIGUOUS", "UNKNOWN"}:
         readiness_blocker = _matching_blocker(
             sources["canonical_readiness"].payload,
@@ -315,6 +413,83 @@ def _first_blocker(
     return None
 
 
+def _refresh_failure_superseded_by_current_authority(
+    *,
+    refresh_failure: Mapping[str, Any] | None,
+    sources: Mapping[str, SourceArtifact],
+    broker_state: str,
+) -> bool:
+    if refresh_failure is None:
+        return False
+    refresher = sources.get("operator_readiness_refresher")
+    if refresher is None or not refresher.available:
+        return False
+    current_names = (
+        "broker_truth_lease",
+        "broker_reconciliation",
+        "open_order_truth",
+        "managed_positions",
+        "managed_orders",
+    )
+    current_sources = [sources.get(name) for name in current_names]
+    if any(source is None or not source.available for source in current_sources):
+        return False
+    refresher_ts = _source_generated_at(refresher)
+    if refresher_ts is None:
+        return False
+    if any((_source_generated_at(source) is None or _source_generated_at(source) < refresher_ts) for source in current_sources if source):
+        return False
+    return broker_state == "FLAT"
+
+
+def _diagnostic_warnings(
+    *,
+    refresh_failure: Mapping[str, Any] | None,
+    refresh_failure_superseded: bool,
+) -> list[dict[str, Any]]:
+    if refresh_failure is None or not refresh_failure_superseded:
+        return []
+    return [
+        {
+            "code": "operator_readiness_refresh_failure_superseded",
+            "detail": "Earlier operator readiness refresh failure was superseded by newer clean current authority.",
+            "source": refresh_failure.get("source") or "operator_readiness_refresher",
+            "superseded_blocker": dict(refresh_failure),
+        }
+    ]
+
+
+def _refresh_failure(source: SourceArtifact | None) -> dict[str, Any] | None:
+    if source is None:
+        return None
+    if not source.available:
+        if source.source_state == "MISSING":
+            return None
+        return {
+            "code": "operator_readiness_refresher_not_fresh",
+            "detail": f"Operator readiness refresher status is {source.source_state}.",
+            "source": "operator_readiness_refresher",
+        }
+    payload = source.payload
+    classification = str(payload.get("classification") or "")
+    if classification != "TRACK_B_OPERATOR_READINESS_REFRESH_FAILED":
+        return None
+    failures = _list(payload.get("dependency_refresh_failures"))
+    if failures:
+        first = _mapping(failures[0])
+        code = str(first.get("code") or f"{first.get('step') or 'dependency'}_refresh_failed")
+        return {
+            "code": code,
+            "detail": f"{first.get('step') or 'dependency'} refresh failed with returncode={first.get('returncode')}.",
+            "source": "operator_readiness_refresher",
+        }
+    return {
+        "code": "operator_readiness_refresh_failed",
+        "detail": "Operator readiness refresh failed before completing the authority chain.",
+        "source": "operator_readiness_refresher",
+    }
+
+
 def _next_safe_action(
     *,
     first_blocker: Mapping[str, Any] | None,
@@ -335,7 +510,17 @@ def _next_safe_action(
         return "OPERATOR_REVIEW_REQUIRED"
     if any(
         token in code
-        for token in ("stale", "reconciliation", "open_order", "authority", "bsa", "broker_session", "connection")
+        for token in (
+            "stale",
+            "refresh",
+            "shared_truth",
+            "reconciliation",
+            "open_order",
+            "authority",
+            "bsa",
+            "broker_session",
+            "connection",
+        )
     ):
         return "REFRESH_AUTHORITY"
     if runtime_live.get("state") != "LIVE" and control_plane_state.get("safe_to_start_runtime") is True:
@@ -515,6 +700,14 @@ def _age_seconds(payload: Mapping[str, Any], now: datetime) -> float | None:
     return max((now - timestamp.astimezone(timezone.utc)).total_seconds(), 0.0)
 
 
+def _source_generated_at(source: SourceArtifact) -> datetime | None:
+    return _parse_dt(
+        source.payload.get("generated_at")
+        or source.payload.get("observed_at")
+        or source.payload.get("authority_source_timestamp")
+    )
+
+
 def _parse_dt(value: Any) -> datetime | None:
     if not value:
         return None
@@ -561,6 +754,16 @@ def _count(payload: Mapping[str, Any], key: str) -> int:
         return int(payload.get(key) or 0)
     except (TypeError, ValueError):
         return 0
+
+
+def _nonzero_position_count(value: Any) -> int:
+    count = 0
+    for row in _list(value):
+        position = _mapping(row)
+        quantity = _number(position.get("quantity") or position.get("position") or position.get("signed_qty"))
+        if quantity is not None and quantity != 0:
+            count += 1
+    return count
 
 
 def _number(value: Any) -> float | None:
