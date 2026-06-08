@@ -158,6 +158,101 @@ def test_missing_registry_lifecycle_identity_blocks() -> None:
     assert "REGISTRY_OPEN_MANAGED_RECORD_MISSING" in payload["blocked_positions"][0]["blockers"]
 
 
+def test_incomplete_registry_review_row_superseded_by_current_scope_lifecycle_for_close() -> None:
+    inputs = _inputs(runtime_down=False)
+    inputs["reconciliation"]["broker_reconciled"] = True
+    inputs["reconciliation"]["current_scope_lifecycle_positions"] = [
+        {
+            "account_id": "DUM882026",
+            "local_symbol": "MNQM6",
+            "con_id": 770561201,
+            "trade_id": "trade-mnq",
+            "lifecycle_id": "life-mnq",
+            "quantity": "1",
+        }
+    ]
+    inputs["reconciliation"]["registry_reconciliation"]["mapped_records"] = [
+        {
+            "account_id": "DUM882026",
+            "local_symbol": "MNQM6",
+            "con_id": 770561201,
+            "trade_id": "trade-mnq",
+            "lifecycle_id": None,
+            "current_state": "REVIEW_REQUIRED",
+        }
+    ]
+
+    payload = _build(inputs)
+
+    assert payload["classification"] == EXIT_DUE_CLOSE_READY
+    assert payload["eligible_count"] == 1
+    assert payload["eligible_positions"][0]["registry_current_state"] == "OPEN_MANAGED"
+    assert payload["eligible_positions"][0]["apply_blockers"] == []
+
+
+def test_track_b_lifecycle_positions_supersede_incomplete_registry_review_for_close() -> None:
+    inputs = _inputs(runtime_down=False)
+    inputs["reconciliation"]["broker_reconciled"] = True
+    inputs["reconciliation"]["track_b_lifecycle_positions"] = [
+        {
+            "account_id": "DUM882026",
+            "local_symbol": "MNQM6",
+            "con_id": 770561201,
+            "trade_id": "trade-mnq",
+            "lifecycle_id": "life-mnq",
+            "quantity": "1",
+        }
+    ]
+    inputs["reconciliation"]["registry_reconciliation"]["mapped_records"] = [
+        {
+            "account_id": "DUM882026",
+            "local_symbol": "MNQM6",
+            "con_id": 770561201,
+            "trade_id": "trade-mnq",
+            "lifecycle_id": None,
+            "current_state": "REVIEW_REQUIRED",
+        }
+    ]
+
+    payload = _build(inputs)
+
+    assert payload["classification"] == EXIT_DUE_CLOSE_READY
+    assert payload["eligible_count"] == 1
+    assert payload["eligible_positions"][0]["registry_current_state"] == "OPEN_MANAGED"
+    assert payload["eligible_positions"][0]["apply_blockers"] == []
+
+
+def test_registry_current_scope_identity_conflict_blocks_close() -> None:
+    inputs = _inputs(runtime_down=False)
+    inputs["reconciliation"]["broker_reconciled"] = True
+    inputs["reconciliation"]["current_scope_lifecycle_positions"] = [
+        {
+            "account_id": "DUM882026",
+            "local_symbol": "MNQM6",
+            "con_id": 770561201,
+            "trade_id": "trade-mnq",
+            "lifecycle_id": "life-mnq",
+            "quantity": "1",
+        }
+    ]
+    inputs["reconciliation"]["registry_reconciliation"]["mapped_records"] = [
+        {
+            "account_id": "DUM882026",
+            "local_symbol": "MNQM6",
+            "con_id": 770561201,
+            "trade_id": "trade-other",
+            "lifecycle_id": "life-other",
+            "current_state": "REVIEW_REQUIRED",
+        }
+    ]
+
+    payload = _build(inputs)
+
+    assert payload["classification"] == EXIT_DUE_CLOSE_BLOCKED
+    assert "REGISTRY_OPEN_MANAGED_RECORD_MISSING" in payload["blocked_positions"][0]["blockers"]
+    assert "COMPETING_REGISTRY_CANDIDATE" in payload["blocked_positions"][0]["blockers"]
+
+
 def test_exact_mnq_mes_simultaneous_long_exits_are_ready() -> None:
     inputs = _inputs()
     inputs["managed_positions"]["managed_positions"].append(_position(symbol="MES", local_symbol="MESM6", con_id=770561194, lifecycle_id="life-mes", trade_id="trade-mes"))
@@ -171,6 +266,39 @@ def test_exact_mnq_mes_simultaneous_long_exits_are_ready() -> None:
     assert payload["eligible_count"] == 2
     assert payload["diagnostic_close_candidate_count"] == 2
     assert {row["close_candidate"]["local_symbol"] for row in payload["eligible_positions"]} == {"MNQM6", "MESM6"}
+
+
+def test_order_status_unreliable_with_multiple_exact_degraded_close_positions_is_ready() -> None:
+    inputs = _inputs(runtime_down=True)
+    inputs["managed_positions"]["managed_positions"].append(_position(symbol="MES", local_symbol="MESM6", con_id=770561194, lifecycle_id="life-mes", trade_id="trade-mes"))
+    inputs["reconciliation"]["registry_reconciliation"]["mapped_records"].append(_registry_record(symbol="MES", local_symbol="MESM6", con_id=770561194, lifecycle_id="life-mes", trade_id="trade-mes"))
+    inputs["guardian"]["managed_close_authority"]["candidates"].append(_candidate(symbol="MES", local_symbol="MESM6", con_id=770561194, lifecycle_id="life-mes", trade_id="trade-mes"))
+    inputs["safe_state"]["close_authority"]["guardian_close_candidates"].append(_candidate(symbol="MES", local_symbol="MESM6", con_id=770561194, lifecycle_id="life-mes", trade_id="trade-mes"))
+    inputs["broker_session_authority"] = _broker_session_authority(
+        classification="BROKER_SESSION_AUTHORITY_ORDER_STATUS_UNRELIABLE",
+        connection_mode="ORDER_STATUS_UNRELIABLE",
+        close_allowed=True,
+    )
+    inputs["broker_session_authority"]["risk_reducing_close_connection_mode"] = "RISK_REDUCING_CLOSE_CAPABLE_ORDER_STATUS_DEGRADED"
+    inputs["broker_session_authority"]["degraded_exact_risk_reducing_close_context"] = {
+        "ready": True,
+        "broker_positions_present": True,
+        "broker_position_exactly_one": False,
+        "position_count": 2,
+        "broker_open_orders_zero": True,
+        "unknown_open_orders_zero": True,
+        "broker_lifecycle_reconciled": True,
+        "current_scope_lifecycle_positions_match_broker": True,
+        "current_scope_lifecycle_position_exact": True,
+        "no_lifecycle_open_order": True,
+    }
+
+    payload = _build(inputs)
+
+    assert payload["classification"] == EXIT_DUE_CLOSE_READY
+    assert payload["apply_eligible_count"] == 2
+    assert {row["close_candidate"]["local_symbol"] for row in payload["eligible_positions"]} == {"MNQM6", "MESM6"}
+    assert all(row["broker_session_connection_mode"] == "ORDER_STATUS_UNRELIABLE" for row in payload["eligible_positions"])
 
 
 def test_no_exit_due_positions_is_noop() -> None:

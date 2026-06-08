@@ -207,6 +207,47 @@ def test_degraded_exact_risk_reducing_close_is_published_without_new_entry() -> 
     assert authority["callback_missing_reason"] == "order_status_callback_missing"
 
 
+def test_degraded_exact_risk_reducing_close_publishes_multiple_current_scope_positions() -> None:
+    lease = {
+        "lease_state": "ACTIVE",
+        "connection_mode": "ORDER_STATUS_UNRELIABLE",
+        "submit_entry_allowed": False,
+        "submit_exit_allowed": True,
+        "allowed_uses": {
+            "new_entry": False,
+            "managed_risk_reducing_close": True,
+            "broker_observed_adoption_diagnosis": True,
+            "fill_callback_adoption": False,
+        },
+        "connection_health": {
+            "connection_mode": "ORDER_STATUS_UNRELIABLE",
+            "position_truth_available": True,
+            "order_status_reliable": False,
+            "fill_callback_capable": False,
+            "broker_observed_adoption_diagnosis_allowed": True,
+        },
+        "degraded_exact_risk_reducing_close_context": {
+            "ready": True,
+            "broker_positions_present": True,
+            "broker_position_exactly_one": False,
+            "current_scope_lifecycle_positions_match_broker": True,
+            "broker_open_orders_zero": True,
+            "unknown_open_orders_zero": True,
+            "broker_lifecycle_reconciled": True,
+            "position_count": 2,
+        },
+    }
+
+    authority = build_broker_session_authority(lease=lease, generated_at=NOW)
+
+    assert authority["classification"] == "BROKER_SESSION_AUTHORITY_ORDER_STATUS_UNRELIABLE"
+    assert authority["allowed_uses"]["new_entry"] is False
+    assert authority["allowed_uses"]["managed_risk_reducing_close"] is True
+    assert authority["risk_reducing_close_connection_mode"] == "RISK_REDUCING_CLOSE_CAPABLE_ORDER_STATUS_DEGRADED"
+    assert authority["degraded_exact_risk_reducing_close_context"]["position_count"] == 2
+    assert authority["degraded_exact_risk_reducing_close_context"]["broker_position_exactly_one"] is False
+
+
 def test_degraded_exact_risk_reducing_close_requires_lease_allowed_use() -> None:
     lease = {
         "lease_state": "ACTIVE",

@@ -189,6 +189,7 @@ def test_expired_entry_allows_lifecycle_owned_exit_inside_exit_window() -> None:
     }
     inputs["reconciliation"] = {
         **dict(inputs["reconciliation"]),
+        "broker_reconciled": True,
         "track_b_broker_position_count": 1,
         "lifecycle_open_position_count": 1,
         "position_match_report": {"state": "BROKER_AND_LIFECYCLE_MATCH", "matched": True},
@@ -245,6 +246,7 @@ def test_stale_open_order_lease_blocks_close_submit() -> None:
     }
     inputs["reconciliation"] = {
         **dict(inputs["reconciliation"]),
+        "broker_reconciled": True,
         "track_b_broker_position_count": 1,
         "lifecycle_open_position_count": 1,
         "position_match_report": {"state": "BROKER_AND_LIFECYCLE_MATCH", "matched": True},
@@ -325,6 +327,7 @@ def test_order_status_unreliable_allows_exact_owned_risk_reducing_close() -> Non
     }
     inputs["reconciliation"] = {
         **dict(inputs["reconciliation"]),
+        "broker_reconciled": True,
         "track_b_broker_position_count": 1,
         "track_b_broker_open_order_count": 0,
         "unknown_broker_open_order_count": 0,
@@ -391,6 +394,176 @@ def test_degraded_exact_risk_reducing_close_blocks_unknown_orders() -> None:
 
     assert result["allowed_uses"]["managed_risk_reducing_close"] is False
     assert result["degraded_exact_risk_reducing_close_context"]["unknown_open_orders_zero"] is False
+
+
+def test_degraded_exact_risk_reducing_close_allows_clean_current_scope_multiple_positions() -> None:
+    inputs = base_inputs()
+    positions = [
+        {"symbol": "MES", "local_symbol": "MESM6", "quantity": "1.0", "con_id": 770561194},
+        {"symbol": "MNQ", "local_symbol": "MNQM6", "quantity": "1.0", "con_id": 770561201},
+    ]
+    inputs["last_successful_broker_truth"] = {
+        **dict(inputs["last_successful_broker_truth"]),
+        "positions": positions,
+        "position_count": 2,
+    }
+    inputs["latest_attempt_status"] = {
+        **dict(inputs["latest_attempt_status"]),
+        "positions": positions,
+        "position_count": 2,
+    }
+    inputs["lifecycle"] = {
+        **dict(inputs["lifecycle"]),
+        "open_position_count": 2,
+        "owned_open_position_count": 2,
+        "open_positions": [{**row, "owned": True} for row in positions],
+    }
+    inputs["reconciliation"] = {
+        **dict(inputs["reconciliation"]),
+        "track_b_broker_position_count": 2,
+        "track_b_broker_open_order_count": 0,
+        "unknown_broker_open_order_count": 0,
+        "lifecycle_open_position_count": 2,
+        "lifecycle_open_order_count": 0,
+        "current_scope_lifecycle_position_count": 2,
+        "current_scope_lifecycle_positions": [{**row, "owned": True} for row in positions],
+    }
+    inputs["order_state"] = {
+        **dict(inputs["order_state"]),
+        "unknown_open_order_count": 0,
+        "lifecycle_open_order_count": 0,
+        "order_status_callbacks_complete": False,
+        "last_order_status_at": None,
+    }
+
+    result = classify_broker_truth_lease(inputs)
+
+    context = result["degraded_exact_risk_reducing_close_context"]
+    assert result["connection_mode"] == "ORDER_STATUS_UNRELIABLE"
+    assert result["allowed_uses"]["new_entry"] is False
+    assert result["allowed_uses"]["managed_risk_reducing_close"] is True
+    assert result["risk_reducing_close_connection_mode"] == "RISK_REDUCING_CLOSE_CAPABLE_ORDER_STATUS_DEGRADED"
+    assert context["ready"] is True
+    assert context["broker_positions_present"] is True
+    assert context["broker_position_exactly_one"] is False
+    assert context["current_scope_lifecycle_positions_match_broker"] is True
+    assert context["position_count"] == 2
+
+
+def test_degraded_exact_close_supersedes_incomplete_registry_review_with_current_scope_lifecycle() -> None:
+    inputs = base_inputs()
+    broker_position = {"symbol": "MES", "local_symbol": "MESM6", "quantity": "1.0", "con_id": 770561194}
+    lifecycle_position = {
+        **broker_position,
+        "owned": True,
+        "trade_id": "trade-mes-current",
+        "lifecycle_id": "life-mes-current",
+    }
+    inputs["last_successful_broker_truth"] = {
+        **dict(inputs["last_successful_broker_truth"]),
+        "positions": [broker_position],
+        "position_count": 1,
+        "open_orders": [],
+        "open_order_count": 0,
+    }
+    inputs["latest_attempt_status"] = {
+        **dict(inputs["latest_attempt_status"]),
+        "positions": [broker_position],
+        "position_count": 1,
+        "open_orders": [],
+        "open_order_count": 0,
+    }
+    inputs["lifecycle"] = {
+        **dict(inputs["lifecycle"]),
+        "open_position_count": 1,
+        "owned_open_position_count": 1,
+        "open_positions": [lifecycle_position],
+    }
+    inputs["reconciliation"] = {
+        **dict(inputs["reconciliation"]),
+        "track_b_broker_position_count": 1,
+        "track_b_broker_open_order_count": 0,
+        "unknown_broker_open_order_count": 0,
+        "lifecycle_open_position_count": 1,
+        "lifecycle_open_order_count": 0,
+        "current_scope_lifecycle_position_count": 1,
+        "current_scope_lifecycle_positions": [lifecycle_position],
+        "broker_reconciled": True,
+        "current_scope_review_required_count": 1,
+        "review_required_count": 1,
+        "registry_reconciliation": {
+            "classification": "REGISTRY_RECONCILIATION_MATCHED",
+            "mapped_records": [
+                {
+                    "account_id": "DUM882026",
+                    "local_symbol": "MESM6",
+                    "con_id": 770561194,
+                    "trade_id": "trade-mes-current",
+                    "lifecycle_id": None,
+                    "current_state": "REVIEW_REQUIRED",
+                }
+            ],
+        },
+    }
+    inputs["order_state"] = {
+        **dict(inputs["order_state"]),
+        "order_status_callbacks_complete": False,
+        "last_order_status_at": None,
+    }
+
+    result = classify_broker_truth_lease(inputs)
+
+    assert result["lease_state"] == "ACTIVE"
+    assert result["connection_mode"] == "ORDER_STATUS_UNRELIABLE"
+    assert result["allowed_uses"]["new_entry"] is False
+    assert result["allowed_uses"]["managed_risk_reducing_close"] is True
+    assert result["degraded_exact_risk_reducing_close_context"]["ready"] is True
+    assert result["degraded_exact_risk_reducing_close_context"]["registry_current_scope_clean"] is True
+    assert result["degraded_exact_risk_reducing_close_context"]["registry_current_scope_clean_strict"] is False
+    assert result["degraded_exact_risk_reducing_close_context"]["registry_current_scope_review_required_count"] == 1
+
+
+def test_degraded_exact_close_blocks_registry_current_scope_identity_conflict() -> None:
+    inputs = base_inputs()
+    broker_position = {"symbol": "MES", "local_symbol": "MESM6", "quantity": "1.0", "con_id": 770561194}
+    lifecycle_position = {
+        **broker_position,
+        "owned": True,
+        "trade_id": "trade-mes-current",
+        "lifecycle_id": "life-mes-current",
+    }
+    inputs["last_successful_broker_truth"] = {**dict(inputs["last_successful_broker_truth"]), "positions": [broker_position], "position_count": 1}
+    inputs["latest_attempt_status"] = {**dict(inputs["latest_attempt_status"]), "positions": [broker_position], "position_count": 1}
+    inputs["lifecycle"] = {**dict(inputs["lifecycle"]), "open_position_count": 1, "owned_open_position_count": 1, "open_positions": [lifecycle_position]}
+    inputs["reconciliation"] = {
+        **dict(inputs["reconciliation"]),
+        "broker_reconciled": True,
+        "track_b_broker_position_count": 1,
+        "lifecycle_open_position_count": 1,
+        "current_scope_lifecycle_position_count": 1,
+        "current_scope_lifecycle_positions": [lifecycle_position],
+        "current_scope_review_required_count": 1,
+        "review_required_count": 1,
+        "registry_reconciliation": {
+            "classification": "REGISTRY_RECONCILIATION_MATCHED",
+            "mapped_records": [
+                {
+                    "account_id": "DUM882026",
+                    "local_symbol": "MESM6",
+                    "con_id": 770561194,
+                    "trade_id": "trade-other-current",
+                    "lifecycle_id": "life-other-current",
+                    "current_state": "REVIEW_REQUIRED",
+                }
+            ],
+        },
+    }
+    inputs["order_state"] = {**dict(inputs["order_state"]), "order_status_callbacks_complete": False, "last_order_status_at": None}
+
+    result = classify_broker_truth_lease(inputs)
+
+    assert result["allowed_uses"]["managed_risk_reducing_close"] is False
+    assert result["degraded_exact_risk_reducing_close_context"]["broker_lifecycle_reconciled"] is False
 
 
 def test_split_callback_client_ids_explain_order_status_unreliable() -> None:

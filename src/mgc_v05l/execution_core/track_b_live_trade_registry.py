@@ -229,6 +229,19 @@ def validate_registry_managed_exit_identity(
     if record is None:
         return _managed_exit_validation_result(blockers=["trade_registry_record_missing"])
     if record.current_state not in {TradeCurrentState.OPEN_MANAGED, TradeCurrentState.EXIT_DUE}:
+        current_scope_result = _current_scope_review_registry_managed_exit_result(
+            record=record,
+            requested_trade_id=requested_trade_id,
+            requested_lifecycle_id=requested_lifecycle_id,
+            account_id=account_id,
+            con_id=con_id,
+            local_symbol=local_symbol,
+            quantity=quantity,
+            action=action,
+            phase1_reconciliation_gate=phase1_reconciliation_gate,
+        )
+        if current_scope_result.get("allowed") is True:
+            return current_scope_result
         return _managed_exit_validation_result(
             blockers=["trade_registry_state_not_open_managed"],
             record=record,
@@ -304,6 +317,124 @@ def validate_registry_managed_exit_identity(
         "quantity": str(owner.qty),
         "entry_perm_id": _latest_event_value(record, "perm_id"),
         "entry_exec_id": _latest_event_value(record, "exec_id"),
+    }
+    return _managed_exit_validation_result(
+        blockers=blockers,
+        record=record,
+        owner_identity=owner_payload,
+        lifecycle_row=lifecycle_row,
+        broker_position=broker_row,
+    )
+
+
+def _current_scope_review_registry_managed_exit_result(
+    *,
+    record: TradeRegistryRecord,
+    requested_trade_id: str,
+    requested_lifecycle_id: str,
+    account_id: str | None,
+    con_id: int | str | None,
+    local_symbol: str | None,
+    quantity: Any,
+    action: str | None,
+    phase1_reconciliation_gate: Mapping[str, Any],
+) -> dict[str, Any]:
+    blockers: list[str] = []
+    if record.current_state != TradeCurrentState.REVIEW_REQUIRED:
+        blockers.append("trade_registry_state_conflicts_current_scope")
+    if phase1_reconciliation_gate.get("ready") is not True and phase1_reconciliation_gate.get("broker_reconciled") is not True:
+        blockers.append("broker_lifecycle_reconciliation_not_clean")
+    if _truthy(phase1_reconciliation_gate.get("live_money_eligible")):
+        blockers.append("live_money_not_allowed")
+    if _truthy(phase1_reconciliation_gate.get("paper_proof_invoked")):
+        blockers.append("paper_proof_not_allowed")
+    if _nonzero_count(
+        phase1_reconciliation_gate.get("track_b_broker_open_order_count")
+        or phase1_reconciliation_gate.get("broker_open_order_count")
+    ) or list(phase1_reconciliation_gate.get("track_b_broker_open_orders") or []):
+        blockers.append("broker_open_orders_not_zero")
+    if _nonzero_count(
+        phase1_reconciliation_gate.get("unknown_open_order_count")
+        or phase1_reconciliation_gate.get("unknown_broker_open_order_count")
+    ):
+        blockers.append("unknown_open_orders_not_zero")
+    registry_reconciliation = phase1_reconciliation_gate.get("registry_reconciliation")
+    if isinstance(registry_reconciliation, Mapping):
+        if registry_reconciliation.get("classification") != "REGISTRY_RECONCILIATION_MATCHED":
+            blockers.append("registry_reconciliation_not_matched")
+        if registry_reconciliation.get("blocking") is True:
+            blockers.append("registry_reconciliation_blocking")
+        review_trade_ids = {
+            str(value or "").strip()
+            for value in list(registry_reconciliation.get("review_required_trade_ids") or [])
+            if str(value or "").strip()
+        }
+        if requested_trade_id in review_trade_ids:
+            blockers.append("registry_current_scope_review_required")
+
+    lifecycle_row = _exact_lifecycle_row(phase1_reconciliation_gate, requested_lifecycle_id)
+    if not lifecycle_row:
+        blockers.append("lifecycle_identity_row_missing")
+    elif str(lifecycle_row.get("trade_id") or requested_trade_id).strip() != requested_trade_id:
+        blockers.append("lifecycle_trade_id_mismatch")
+    broker_row = _matching_broker_position(lifecycle_row, phase1_reconciliation_gate) if lifecycle_row else {}
+    if not broker_row:
+        blockers.append("broker_position_missing_for_managed_exit")
+
+    requested_account = _valid_identity_text(account_id)
+    lifecycle_account = _valid_identity_text(lifecycle_row.get("account_id") if lifecycle_row else None)
+    broker_account = _valid_identity_text(
+        broker_row.get("account_id") or broker_row.get("account") if broker_row else None
+    )
+    exact_account = broker_account or lifecycle_account
+    if requested_account and exact_account and requested_account != exact_account:
+        blockers.append("account_id_mismatch")
+
+    requested_con_id = str(con_id or "").strip()
+    exact_con_id = str((lifecycle_row or {}).get("con_id") or (broker_row or {}).get("con_id") or (broker_row or {}).get("conId") or "").strip()
+    if requested_con_id and exact_con_id and requested_con_id != exact_con_id:
+        blockers.append("con_id_mismatch")
+
+    requested_local = str(local_symbol or "").strip().upper()
+    exact_local = str((lifecycle_row or {}).get("local_symbol") or (broker_row or {}).get("local_symbol") or (broker_row or {}).get("localSymbol") or "").strip().upper()
+    if requested_local and exact_local and requested_local != exact_local:
+        blockers.append("local_symbol_mismatch")
+
+    requested_qty = _decimal_or_none(quantity)
+    exact_qty = _decimal_or_none((lifecycle_row or {}).get("quantity") or (broker_row or {}).get("quantity"))
+    if requested_qty is not None and exact_qty is not None and requested_qty != exact_qty:
+        blockers.append("quantity_mismatch")
+
+    lifecycle_side = str((lifecycle_row or {}).get("side") or "").strip().upper()
+    expected_action = "SELL" if lifecycle_side == "LONG" else "BUY" if lifecycle_side == "SHORT" else ""
+    requested_action = str(action or "").strip().upper()
+    if requested_action and expected_action and requested_action != expected_action:
+        blockers.append("close_action_mismatch")
+    if not expected_action:
+        blockers.append("lifecycle_side_missing")
+    entry_perm_id = (lifecycle_row or {}).get("entry_perm_id") or next(iter((lifecycle_row or {}).get("entry_perm_ids") or []), None)
+    entry_exec_id = (lifecycle_row or {}).get("entry_exec_id") or next(iter((lifecycle_row or {}).get("entry_exec_ids") or []), None)
+    if not entry_perm_id or not entry_exec_id:
+        blockers.append("current_scope_entry_fill_identity_missing")
+
+    owner_payload = {
+        "trade_id": requested_trade_id,
+        "current_state": "OPEN_MANAGED",
+        "broker_backed_entry": True,
+        "lifecycle_id": requested_lifecycle_id,
+        "lane_id": (lifecycle_row or {}).get("lane_id"),
+        "strategy_id": (lifecycle_row or {}).get("strategy_id"),
+        "account_id": exact_account,
+        "con_id": int(exact_con_id) if str(exact_con_id or "").isdigit() else exact_con_id,
+        "local_symbol": exact_local,
+        "symbol": (lifecycle_row or {}).get("track_b_root") or (lifecycle_row or {}).get("instrument_family") or (broker_row or {}).get("symbol"),
+        "expiry": (lifecycle_row or {}).get("expiry") or (broker_row or {}).get("expiry"),
+        "side": lifecycle_side,
+        "quantity": str(exact_qty if exact_qty is not None else ""),
+        "entry_perm_id": entry_perm_id,
+        "entry_exec_id": entry_exec_id,
+        "source": "CURRENT_SCOPE_BROKER_LIFECYCLE_RECONCILIATION",
+        "superseded_registry_state": record.current_state.value,
     }
     return _managed_exit_validation_result(
         blockers=blockers,

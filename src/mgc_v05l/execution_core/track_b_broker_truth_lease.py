@@ -201,13 +201,48 @@ def classify_broker_truth_lease(inputs: Mapping[str, Any]) -> dict[str, Any]:
                 broker_position_contradiction["detail"],
                 operator_action_required=True,
             )
-        elif not _reconciliation_clean(reconciliation):
+        elif not _reconciliation_clean(reconciliation) and not _reconciliation_clean_for_current_scope_close_authority(
+            reconciliation=reconciliation,
+            positions=[
+                row
+                for row in _scoped_positions(broker_truth, allowed_instruments)
+                if abs(_quantity(row)) > 1e-9
+            ],
+        ):
             builder.invalidate(
                 "OPERATOR_REQUIRED",
                 "reconciliation_not_clean",
                 "Phase-1 reconciliation is not clean.",
                 operator_action_required=True,
             )
+        elif not _reconciliation_clean(reconciliation):
+            if broker_truth_time is None or entry_valid_until is None or exit_valid_until is None:
+                builder.invalidate(
+                    "OPERATOR_REQUIRED",
+                    "broker_truth_time_missing",
+                    "Broker truth generated_at/last_success_at timestamp is missing or invalid.",
+                    operator_action_required=True,
+                )
+            else:
+                builder.warn(
+                    "reconciliation_current_scope_close_authority_normalized",
+                    "Strict reconciliation has diagnostic registry review debris, but current broker/lifecycle scope is clean for exact managed close authority.",
+                )
+                if current_time <= entry_valid_until:
+                    if _latest_attempt_failed_after_success(latest_attempt=latest_attempt, broker_truth_time=broker_truth_time):
+                        builder.state = "ACTIVE_DEGRADED_REFRESH_FAILING"
+                        builder.warn(
+                            "broker_truth_refresh_failing",
+                            "Latest broker-truth refresh failed; active lease is preserved until entry validity expires.",
+                        )
+                    else:
+                        builder.state = "ACTIVE"
+                elif _lifecycle_has_owned_position(lifecycle) and current_time <= exit_valid_until:
+                    builder.state = "EXPIRED_EXITS_ONLY"
+                    builder.block("entry_lease_expired", "Entry lease expired; new entries are blocked.")
+                else:
+                    builder.state = "EXPIRED_BLOCK_NEW_ENTRIES"
+                    builder.block("entry_lease_expired", "Entry lease expired; new entries are blocked.")
         elif broker_truth_time is None or entry_valid_until is None or exit_valid_until is None:
             builder.invalidate(
                 "OPERATOR_REQUIRED",
@@ -539,6 +574,14 @@ def _mapping(value: Any) -> dict[str, Any]:
     return dict(value) if isinstance(value, Mapping) else {}
 
 
+def _list(value: Any) -> list[Any]:
+    return list(value) if isinstance(value, list) else []
+
+
+def _text(value: Any) -> str:
+    return str(value or "").strip()
+
+
 def _bool(value: Any) -> bool:
     if isinstance(value, bool):
         return value
@@ -732,7 +775,10 @@ def _broker_position_contradiction(
             }
         return None
     if not _lifecycle_positions_match(positions=nonzero_positions, lifecycle=lifecycle):
-        if _reconciliation_clean(reconciliation) and _reconciliation_scope_matches_broker_positions(
+        if _reconciliation_clean_for_current_scope_close_authority(
+            reconciliation=reconciliation,
+            positions=nonzero_positions,
+        ) and _reconciliation_scope_matches_broker_positions(
             positions=nonzero_positions,
             reconciliation=reconciliation,
         ):
@@ -1415,16 +1461,29 @@ def _degraded_exact_risk_reducing_close_context(
         or lifecycle.get("open_position_count")
         or 0
     )
+    broker_positions_present = len(positions) > 0
+    current_scope_lifecycle_positions_match_broker = broker_positions_present and lifecycle_count == len(positions)
+    broker_lifecycle_reconciled = _reconciliation_clean_for_current_scope_close_authority(
+        reconciliation=reconciliation,
+        positions=positions,
+    )
+    registry_current_scope_clean = _current_scope_review_required_count(reconciliation) == 0
+    registry_current_scope_usable_for_close = registry_current_scope_clean or (
+        broker_lifecycle_reconciled
+        and current_scope_lifecycle_positions_match_broker
+        and not _registry_current_scope_conflicts_with_lifecycle(reconciliation=reconciliation)
+    )
     checks = {
         "order_status_degraded": str(connection_mode or "").strip().upper() == "ORDER_STATUS_UNRELIABLE",
-        "broker_position_exactly_one": len(positions) == 1,
+        "broker_positions_present": broker_positions_present,
+        "current_scope_lifecycle_positions_match_broker": current_scope_lifecycle_positions_match_broker,
         "latest_attempt_position_not_conflicting": not latest_positions
         or _broker_positions_equivalent(left=positions, right=latest_positions),
         "broker_open_orders_zero": not open_orders and not latest_open_orders,
         "unknown_open_orders_zero": unknown_open_orders == 0,
-        "broker_lifecycle_reconciled": _reconciliation_clean(reconciliation),
-        "current_scope_lifecycle_position_exact": lifecycle_count == len(positions),
-        "registry_current_scope_clean": _current_scope_review_required_count(reconciliation) == 0,
+        "broker_lifecycle_reconciled": broker_lifecycle_reconciled,
+        "current_scope_lifecycle_position_exact": current_scope_lifecycle_positions_match_broker,
+        "registry_current_scope_clean": registry_current_scope_usable_for_close,
         "broker_position_lease_fresh": _lease_allows(broker_position_lease, AUTHORITY_USE_RISK_REDUCING_CLOSE),
         "broker_open_order_lease_fresh": _lease_allows(broker_open_order_lease, AUTHORITY_USE_RISK_REDUCING_CLOSE),
         "no_lifecycle_open_order": int(
@@ -1446,6 +1505,9 @@ def _degraded_exact_risk_reducing_close_context(
         "schema_version": "track_b_degraded_exact_risk_reducing_close_context_v1",
         "ready": all(checks.values()),
         **checks,
+        "registry_current_scope_clean_strict": registry_current_scope_clean,
+        "registry_current_scope_review_required_count": _current_scope_review_required_count(reconciliation),
+        "broker_position_exactly_one": len(positions) == 1,
         "position_count": len(positions),
         "open_order_count": len(open_orders) + len(latest_open_orders),
         "unknown_open_order_count": unknown_open_orders,
@@ -1722,6 +1784,84 @@ def _open_order_status_unreliable(
             max_age_seconds=max_age_seconds,
         )
     return True
+
+
+def _reconciliation_clean_for_current_scope_close_authority(
+    *,
+    reconciliation: Mapping[str, Any],
+    positions: Sequence[Mapping[str, Any]],
+) -> bool:
+    if _reconciliation_clean(reconciliation):
+        return True
+    clean_classifications = {
+        "BROKER_LIFECYCLE_RECONCILED",
+        "TRACK_B_PAPER_BROKER_RECONCILED",
+        "TRACK_B_PAPER_BROKER_RECONCILED_WITH_KNOWN_MANAGED_EXIT_ORDER",
+    }
+    if str(reconciliation.get("classification") or "") not in clean_classifications:
+        return False
+    if not _bool(reconciliation.get("broker_reconciled")):
+        return False
+    if not positions:
+        return False
+    if not _reconciliation_scope_matches_broker_positions(positions=positions, reconciliation=reconciliation):
+        return False
+    if _registry_current_scope_conflicts_with_lifecycle(reconciliation=reconciliation):
+        return False
+    return True
+
+
+def _registry_current_scope_conflicts_with_lifecycle(*, reconciliation: Mapping[str, Any]) -> bool:
+    lifecycle_rows = _current_scope_lifecycle_identity_rows(reconciliation)
+    if not lifecycle_rows:
+        return True
+    registry = _mapping(reconciliation.get("registry_reconciliation"))
+    mapped_records = [_mapping(row) for row in _list(registry.get("mapped_records"))]
+    for lifecycle_row in lifecycle_rows:
+        matching_registry_rows = [
+            row
+            for row in mapped_records
+            if _same_contract_identity(left=row, right=lifecycle_row)
+        ]
+        if not matching_registry_rows:
+            continue
+        if not any(_registry_row_is_compatible_with_lifecycle(row=record, lifecycle_row=lifecycle_row) for record in matching_registry_rows):
+            return True
+    return False
+
+
+def _current_scope_lifecycle_identity_rows(reconciliation: Mapping[str, Any]) -> list[dict[str, Any]]:
+    rows = (
+        reconciliation.get("current_scope_lifecycle_positions")
+        or reconciliation.get("lifecycle_positions")
+        or reconciliation.get("open_positions")
+        or []
+    )
+    return [
+        _mapping(row)
+        for row in _list(rows)
+        if _text(row.get("lifecycle_id")) and _text(row.get("trade_id"))
+    ]
+
+
+def _registry_row_is_compatible_with_lifecycle(*, row: Mapping[str, Any], lifecycle_row: Mapping[str, Any]) -> bool:
+    row_trade_id = _text(row.get("trade_id"))
+    row_lifecycle_id = _text(row.get("lifecycle_id"))
+    lifecycle_trade_id = _text(lifecycle_row.get("trade_id"))
+    lifecycle_id = _text(lifecycle_row.get("lifecycle_id"))
+    if row_trade_id and row_trade_id != lifecycle_trade_id:
+        return False
+    if row_lifecycle_id and row_lifecycle_id != lifecycle_id:
+        return False
+    return bool(row_trade_id or row_lifecycle_id)
+
+
+def _same_contract_identity(*, left: Mapping[str, Any], right: Mapping[str, Any]) -> bool:
+    left_con_id = _text(left.get("con_id") or left.get("conId"))
+    right_con_id = _text(right.get("con_id") or right.get("conId"))
+    if left_con_id and right_con_id and left_con_id == right_con_id:
+        return True
+    return _text(left.get("local_symbol") or left.get("contract")) == _text(right.get("local_symbol") or right.get("contract"))
 
 
 def _callback_fresh(value: Any, *, current_time: datetime, max_age_seconds: float) -> bool:

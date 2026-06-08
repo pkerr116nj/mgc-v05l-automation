@@ -1756,8 +1756,14 @@ def _normalize_registry_identity_before_managed_exit(
 ) -> dict[str, Any]:
     validation = dict(registry_exit_validation or {})
     if validation.get("allowed") is True:
+        owner_identity = validation.get("owner_identity") if isinstance(validation.get("owner_identity"), Mapping) else {}
+        current_scope_superseded = str(owner_identity.get("source") or "") == "CURRENT_SCOPE_BROKER_LIFECYCLE_RECONCILIATION"
         return {
-            "classification": "REGISTRY_IDENTITY_NORMALIZATION_NOT_REQUIRED",
+            "classification": (
+                "REGISTRY_IDENTITY_NORMALIZATION_CURRENT_SCOPE_SUPERSEDED"
+                if current_scope_superseded
+                else "REGISTRY_IDENTITY_NORMALIZATION_NOT_REQUIRED"
+            ),
             "repaired": False,
             "broker_mutation_performed": False,
             "live_money_eligible": False,

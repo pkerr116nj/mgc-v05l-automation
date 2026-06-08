@@ -219,16 +219,30 @@ def _classify_position(
         local_symbol=local_symbol,
         con_id=con_id,
     )
+    registry_record_from_current_scope = False
+    if not registry_record:
+        registry_record = _current_scope_lifecycle_registry_owner_record(
+            reconciliation=inputs["reconciliation"],
+            trade_id=trade_id,
+            lifecycle_id=lifecycle_id,
+            account_id=account_id,
+            local_symbol=local_symbol,
+            con_id=con_id,
+        )
+        registry_record_from_current_scope = bool(registry_record)
     if not registry_record:
         blockers.append("REGISTRY_OPEN_MANAGED_RECORD_MISSING")
     elif str(registry_record.get("current_state") or "") != "OPEN_MANAGED":
         blockers.append("REGISTRY_CURRENT_STATE_NOT_OPEN_MANAGED")
-    if _registry_competing_count(
+    competing_registry_count = _registry_competing_count(
         reconciliation=inputs["reconciliation"],
         account_id=account_id,
         local_symbol=local_symbol,
         con_id=con_id,
-    ) != 1:
+    )
+    if registry_record_from_current_scope:
+        competing_registry_count = 1
+    if competing_registry_count != 1:
         blockers.append("COMPETING_REGISTRY_CANDIDATE")
 
     order_conflicts = _conflicting_orders(inputs=inputs, account_id=account_id, local_symbol=local_symbol, con_id=con_id, lifecycle_id=lifecycle_id)
@@ -448,6 +462,106 @@ def _matching_registry_record(
         ):
             return row
     return {}
+
+
+def _current_scope_lifecycle_registry_owner_record(
+    *,
+    reconciliation: Mapping[str, Any],
+    trade_id: str,
+    lifecycle_id: str,
+    account_id: str,
+    local_symbol: str,
+    con_id: str,
+) -> dict[str, Any]:
+    if not trade_id or not lifecycle_id:
+        return {}
+    if not _top_level_broker_lifecycle_reconciled(reconciliation):
+        return {}
+    if int(reconciliation.get("track_b_broker_open_order_count") or 0) != 0:
+        return {}
+    if int(reconciliation.get("unknown_broker_open_order_count") or 0) != 0:
+        return {}
+    current_scope_rows = [
+        row
+        for row in _current_scope_lifecycle_rows(reconciliation)
+        if _same_contract_identity(row=row, account_id=account_id, local_symbol=local_symbol, con_id=con_id)
+    ]
+    exact_scope_rows = [
+        row
+        for row in current_scope_rows
+        if _text(row.get("trade_id")) == trade_id and _text(row.get("lifecycle_id")) == lifecycle_id
+    ]
+    if len(exact_scope_rows) != 1:
+        return {}
+    registry_rows = [
+        row
+        for row in _registry_records(reconciliation)
+        if _same_contract_identity(row=row, account_id=account_id, local_symbol=local_symbol, con_id=con_id)
+    ]
+    compatible_debris = [
+        row
+        for row in registry_rows
+        if _registry_row_compatible_with_current_scope(row=row, trade_id=trade_id, lifecycle_id=lifecycle_id)
+    ]
+    if not compatible_debris:
+        return {}
+    if any(not _registry_row_compatible_with_current_scope(row=row, trade_id=trade_id, lifecycle_id=lifecycle_id) for row in registry_rows):
+        return {}
+    return {
+        **exact_scope_rows[0],
+        "account_id": account_id,
+        "local_symbol": local_symbol,
+        "con_id": _int_or_text(con_id),
+        "trade_id": trade_id,
+        "lifecycle_id": lifecycle_id,
+        "current_state": "OPEN_MANAGED",
+        "source": "CURRENT_SCOPE_LIFECYCLE_SUPERSEDES_STALE_REGISTRY_REVIEW",
+        "superseded_registry_records": compatible_debris,
+    }
+
+
+def _top_level_broker_lifecycle_reconciled(reconciliation: Mapping[str, Any]) -> bool:
+    return (
+        str(reconciliation.get("classification") or "")
+        in {
+            "BROKER_LIFECYCLE_RECONCILED",
+            "TRACK_B_PAPER_BROKER_RECONCILED",
+            "TRACK_B_PAPER_BROKER_RECONCILED_WITH_KNOWN_MANAGED_EXIT_ORDER",
+        }
+        and reconciliation.get("broker_reconciled") is True
+    )
+
+
+def _current_scope_lifecycle_rows(reconciliation: Mapping[str, Any]) -> list[dict[str, Any]]:
+    rows = (
+        reconciliation.get("current_scope_lifecycle_positions")
+        or reconciliation.get("track_b_lifecycle_positions")
+        or reconciliation.get("lifecycle_positions")
+        or reconciliation.get("open_positions")
+        or []
+    )
+    return [_mapping(row) for row in _list(rows)]
+
+
+def _same_contract_identity(*, row: Mapping[str, Any], account_id: str, local_symbol: str, con_id: str) -> bool:
+    row_account = _text(row.get("account_id") or row.get("account"))
+    if row_account and account_id and row_account != account_id:
+        return False
+    row_con_id = _text(row.get("con_id") or row.get("conId"))
+    if row_con_id and con_id and row_con_id == _text(con_id):
+        return True
+    row_symbol = _text(row.get("local_symbol") or row.get("contract"))
+    return bool(row_symbol and row_symbol == local_symbol)
+
+
+def _registry_row_compatible_with_current_scope(*, row: Mapping[str, Any], trade_id: str, lifecycle_id: str) -> bool:
+    row_trade_id = _text(row.get("trade_id"))
+    row_lifecycle_id = _text(row.get("lifecycle_id"))
+    if row_trade_id and row_trade_id != trade_id:
+        return False
+    if row_lifecycle_id and row_lifecycle_id != lifecycle_id:
+        return False
+    return bool(row_trade_id or row_lifecycle_id)
 
 
 def _registry_competing_count(*, reconciliation: Mapping[str, Any], account_id: str, local_symbol: str, con_id: str) -> int:

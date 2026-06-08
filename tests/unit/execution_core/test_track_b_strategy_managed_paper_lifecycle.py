@@ -2243,6 +2243,66 @@ def test_managed_exit_close_authority_allows_exact_close_when_control_plane_entr
     assert "CONTROL_PLANE_NOT_COHERENT:STALE_OR_MIXED" not in close_authority["block_reasons"]
 
 
+def test_managed_exit_close_authority_allows_exact_close_when_runtime_identity_unhealthy(
+    tmp_path: Path,
+) -> None:
+    config = base_config(
+        tmp_path,
+        strategy_id="mes_globex_active_participation_long",
+        lane_id="mes_globex_active_participation_long",
+        instrument_family="MES",
+        contract_key="MES-202606",
+        local_symbol="MESM6",
+        con_id=770561194,
+        side="LONG",
+        close_limit_price="7397",
+        managed_exit_policy_id=TrackBManagedExitPolicy.GLOBEX_ACTIVE_EVIDENCE_TIMEBOX_60M_EXIT_V1.value,
+    )
+    close_intent = {
+        "lifecycle_id": "reserved-submit-mes",
+        "trade_id": "trade-mes-managed",
+        "order_action": "SELL",
+        "quantity": 1,
+        "close_limit_price": "7397",
+    }
+    seed_strategy_submit_authority(
+        tmp_path,
+        config=config,
+        intent_payload=close_intent,
+        intent_kind=IntentKind.CLOSE,
+        limit_price="7397",
+        safe_state_overrides={
+            "submit_allowed": False,
+            "broker_mutation_allowed": False,
+            "managed_close_mutation_allowed": True,
+            "close_authority_reason_codes": [],
+        },
+        snapshot_overrides={
+            "runtime_supervisor_classification": "PROCESS_STARTED_PROFILE_PENDING",
+            "safe_to_start_runtime": False,
+            "safe_to_leave_runtime_running": False,
+            "runtime_resume_action_policy": "RUNTIME_IDENTITY_UNHEALTHY",
+            "shared_truth_coherence_status": "STALE_OR_MIXED",
+            "position_truth_classification": "OPEN_MANAGED_MATCHED",
+            "managed_position_registry_classification": "OPEN_MANAGED_EXIT_DUE",
+            "managed_order_registry_classification": "POSITION_WITHOUT_CLOSE_ORDER",
+        },
+    )
+
+    authorization = lifecycle_module.build_strategy_managed_submit_authorization(
+        config=config,
+        intent_payload=close_intent,
+        intent_kind=IntentKind.CLOSE,
+        limit_price="7397",
+        now=aware_now(),
+    )
+
+    assert authorization["classification"] == lifecycle_module.STRATEGY_SUBMIT_AUTHORIZED
+    assert authorization["submit_allowed"] is True
+    assert authorization["managed_exit_close_authority"]["allowed"] is True
+    assert authorization["managed_exit_close_authority"]["control_plane_coherence_bypassed_for_exact_managed_close"] is True
+
+
 def test_entry_submit_remains_blocked_when_control_plane_entry_coherence_stale(tmp_path: Path) -> None:
     config = base_config(tmp_path)
     entry_intent = {
@@ -2491,7 +2551,7 @@ def test_managed_exit_close_authority_normalizes_review_required_registry_identi
     )
 
     assert authorization["classification"] == lifecycle_module.STRATEGY_SUBMIT_AUTHORIZED
-    assert authorization["registry_identity_normalization"]["classification"] == "REGISTRY_IDENTITY_NORMALIZATION_APPLIED"
+    assert authorization["registry_identity_normalization"]["classification"] == "REGISTRY_IDENTITY_NORMALIZATION_CURRENT_SCOPE_SUPERSEDED"
     assert authorization["registry_identity_normalization"]["broker_mutation_performed"] is False
     assert authorization["registry_identity_normalization"]["live_money_eligible"] is False
     assert authorization["registry_identity_normalization"]["paper_proof_invoked"] is False

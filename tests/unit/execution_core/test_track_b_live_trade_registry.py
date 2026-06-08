@@ -283,6 +283,164 @@ def test_registry_managed_exit_validator_uses_matched_registry_reconciliation_wh
     assert result["broker_position"]["con_id"] == 770561201
 
 
+def test_registry_managed_exit_validator_accepts_current_scope_when_registry_review_is_stale(tmp_path):
+    repo_root = tmp_path
+    trade_id = "trade_mes_current_scope_review_stale"
+    lifecycle_id = "life_mes_current_scope_exact"
+    source_path = str(repo_root / "outputs/track_b_execution_core/strategy_bridge/bridge_report.json")
+    base = {
+        "trade_id": trade_id,
+        "lifecycle_id": lifecycle_id,
+        "lane_id": "mes_globex_active_participation_long",
+        "thesis_strategy_id": "mes_globex_active_participation_long",
+        "account_id": "DUM882026",
+        "symbol": "MES",
+        "con_id": 770561194,
+        "local_symbol": "MESM6",
+        "expiry": "20260618",
+        "side": "LONG",
+        "action": "BUY",
+        "qty": Decimal("1"),
+        "source_artifact_path": source_path,
+        "generated_at": NOW,
+    }
+    for event_type, extra in (
+        (TradeEventType.ENTRY_INTENT_CREATED, {}),
+        (TradeEventType.ENTRY_ORDER_SUBMITTED, {"order_id": "2", "client_id": "11194"}),
+        (
+            TradeEventType.ENTRY_FILL_BROKER_BACKED,
+            {"order_id": "2", "client_id": "11194", "perm_id": "629785904", "exec_id": "exec-mes", "price": "7400.5"},
+        ),
+        (
+            TradeEventType.LIFECYCLE_OPEN_MANAGED,
+            {"order_id": "2", "client_id": "11194", "perm_id": "629785904", "exec_id": "exec-mes", "price": "7400.5"},
+        ),
+        (TradeEventType.REVIEW_REQUIRED, {"reason_codes": ("STALE_INCOMPLETE_REGISTRY_ROW",)}),
+    ):
+        append_live_trade_registry_event(
+            repo_root=repo_root,
+            event=make_live_trade_registry_event(event_type=event_type, **base, **extra),
+        )
+    phase1 = {
+        "ready": True,
+        "broker_reconciled": True,
+        "track_b_broker_open_order_count": 0,
+        "unknown_open_order_count": 0,
+        "track_b_lifecycle_positions": [
+            {
+                "trade_id": trade_id,
+                "lifecycle_id": lifecycle_id,
+                "account_id": "DUM882026",
+                "lane_id": "mes_globex_active_participation_long",
+                "strategy_id": "mes_globex_active_participation_long",
+                "track_b_root": "MES",
+                "local_symbol": "MESM6",
+                "con_id": 770561194,
+                "quantity": "1",
+                "side": "LONG",
+                "entry_perm_id": "629785904",
+                "entry_exec_id": "exec-mes",
+            }
+        ],
+        "track_b_broker_positions": [
+            {"account_id": "DUM882026", "symbol": "MES", "local_symbol": "MESM6", "con_id": 770561194, "quantity": "1"}
+        ],
+        "registry_reconciliation": {
+            "classification": "REGISTRY_RECONCILIATION_MATCHED",
+            "blocking": False,
+            "review_required_trade_ids": [],
+        },
+    }
+
+    result = validate_registry_managed_exit_identity(
+        repo_root=repo_root,
+        trade_id=trade_id,
+        lifecycle_id=lifecycle_id,
+        account_id="DUM882026",
+        con_id=770561194,
+        local_symbol="MESM6",
+        quantity=1,
+        action="SELL",
+        phase1_reconciliation_gate=phase1,
+    )
+
+    assert result["allowed"] is True
+    assert result["registry_current_state"] == "REVIEW_REQUIRED"
+    assert result["owner_identity"]["source"] == "CURRENT_SCOPE_BROKER_LIFECYCLE_RECONCILIATION"
+
+
+def test_registry_managed_exit_validator_blocks_current_scope_review_conflict(tmp_path):
+    repo_root = tmp_path
+    trade_id = "trade_mes_current_scope_review_conflict"
+    lifecycle_id = "life_mes_current_scope_exact"
+    source_path = str(repo_root / "outputs/track_b_execution_core/strategy_bridge/bridge_report.json")
+    base = {
+        "trade_id": trade_id,
+        "lifecycle_id": lifecycle_id,
+        "lane_id": "mes_globex_active_participation_long",
+        "thesis_strategy_id": "mes_globex_active_participation_long",
+        "account_id": "DUM882026",
+        "symbol": "MES",
+        "con_id": 770561194,
+        "local_symbol": "MESM6",
+        "expiry": "20260618",
+        "side": "LONG",
+        "action": "BUY",
+        "qty": Decimal("1"),
+        "source_artifact_path": source_path,
+        "generated_at": NOW,
+    }
+    for event_type, extra in (
+        (TradeEventType.ENTRY_INTENT_CREATED, {}),
+        (TradeEventType.REVIEW_REQUIRED, {"reason_codes": ("CURRENT_SCOPE_REVIEW",)}),
+    ):
+        append_live_trade_registry_event(
+            repo_root=repo_root,
+            event=make_live_trade_registry_event(event_type=event_type, **base, **extra),
+        )
+    phase1 = {
+        "ready": True,
+        "broker_reconciled": True,
+        "track_b_broker_open_order_count": 0,
+        "unknown_open_order_count": 0,
+        "track_b_lifecycle_positions": [
+            {
+                "trade_id": trade_id,
+                "lifecycle_id": lifecycle_id,
+                "account_id": "DUM882026",
+                "track_b_root": "MES",
+                "local_symbol": "MESM6",
+                "con_id": 770561194,
+                "quantity": "1",
+                "side": "LONG",
+            }
+        ],
+        "track_b_broker_positions": [
+            {"account_id": "DUM882026", "symbol": "MES", "local_symbol": "MESM6", "con_id": 770561194, "quantity": "1"}
+        ],
+        "registry_reconciliation": {
+            "classification": "REGISTRY_RECONCILIATION_MATCHED",
+            "blocking": False,
+            "review_required_trade_ids": [trade_id],
+        },
+    }
+
+    result = validate_registry_managed_exit_identity(
+        repo_root=repo_root,
+        trade_id=trade_id,
+        lifecycle_id=lifecycle_id,
+        account_id="DUM882026",
+        con_id=770561194,
+        local_symbol="MESM6",
+        quantity=1,
+        action="SELL",
+        phase1_reconciliation_gate=phase1,
+    )
+
+    assert result["allowed"] is False
+    assert "trade_registry_state_not_open_managed" in result["block_reasons"]
+
+
 def test_resolve_live_trade_id_for_lifecycle_id_requires_unique_broker_backed_open_owner(tmp_path):
     repo_root = tmp_path
     source_path = str(repo_root / "outputs/track_b_execution_core/strategy_bridge/bridge_report.json")

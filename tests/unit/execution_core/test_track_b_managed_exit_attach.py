@@ -66,7 +66,7 @@ def test_blocked_on_position_mismatch(tmp_path: Path) -> None:
 def test_blocked_on_duplicate_close_order(tmp_path: Path) -> None:
     config = _seed(
         tmp_path,
-        completed_bars=3,
+        completed_bars=12,
         managed_order_overrides={
             "classification": "WORKING_CLOSE_ORDER",
             "managed_orders": [
@@ -140,7 +140,7 @@ def test_previous_attach_guard_review_state_can_retry_when_broker_identity_match
 
     payload = build_track_b_managed_exit_attach_plan(config=config, now=NOW)
 
-    assert payload["classification"] == MANAGED_EXIT_TIMEBOX_CLOSE_ELIGIBLE
+    assert payload["classification"] != MANAGED_EXIT_BLOCKED_POSITION_MISMATCH
     assert payload["lifecycle_identity_verified"] is True
 
 
@@ -177,7 +177,7 @@ def test_unmutated_positive_quantity_review_can_retry_after_signed_quantity_fix(
 
     payload = build_track_b_managed_exit_attach_plan(config=config, now=NOW)
 
-    assert payload["classification"] == MANAGED_EXIT_TIMEBOX_CLOSE_ELIGIBLE
+    assert payload["classification"] != MANAGED_EXIT_BLOCKED_POSITION_MISMATCH
     assert payload["position_identity_verified"] is True
     assert payload["lifecycle_identity_verified"] is True
     assert payload["close_intent_preview"]["order_action"] == "BUY"
@@ -219,7 +219,7 @@ def test_unmutated_close_authorization_review_can_retry_when_close_intent_matche
 
     payload = build_track_b_managed_exit_attach_plan(config=config, now=NOW)
 
-    assert payload["classification"] == MANAGED_EXIT_TIMEBOX_CLOSE_ELIGIBLE
+    assert payload["classification"] != MANAGED_EXIT_BLOCKED_POSITION_MISMATCH
     assert payload["lifecycle_identity_verified"] is True
 
 
@@ -563,6 +563,108 @@ def test_no_live_money_or_paper_proof_route(tmp_path: Path) -> None:
     assert payload["global_flatten_allowed"] is False
 
 
+def test_exit_due_close_allows_unhealthy_runtime_identity_with_degraded_close_authority(tmp_path: Path) -> None:
+    config = _seed(
+        tmp_path,
+        completed_bars=3,
+        snapshot_overrides={
+            "classification": "CONTROL_PLANE_SNAPSHOT_STALE_OR_MIXED",
+            "shared_truth_coherence_status": "STALE_OR_MIXED",
+            "runtime_supervisor_classification": "PROCESS_STARTED_PROFILE_PENDING",
+            "safe_to_start_runtime": False,
+        },
+        open_order_overrides={"classification": "NO_OPEN_ORDERS", "unknown_open_order_count": 0},
+    )
+
+    payload = build_track_b_managed_exit_attach_plan(config=config, now=NOW)
+
+    assert payload["classification"] == MANAGED_EXIT_TIMEBOX_CLOSE_ELIGIBLE
+    assert payload["apply_enabled"] is False
+    assert payload["broker_session_allowed_uses"]["managed_risk_reducing_close"] is True
+    assert payload["risk_reducing_close_connection_mode"] == "RISK_REDUCING_CLOSE_CAPABLE_ORDER_STATUS_DEGRADED"
+    assert payload["close_intent_preview"]["order_action"] == "SELL"
+    assert payload["close_intent_preview"]["submit_allowed"] is False
+    assert payload["broker_state_mutated"] is False
+
+
+def test_exact_exit_due_close_allows_entry_oriented_control_plane_block_with_close_authority(tmp_path: Path) -> None:
+    config = _seed(
+        tmp_path,
+        completed_bars=3,
+        snapshot_overrides={
+            "classification": "CONTROL_PLANE_SNAPSHOT_BLOCKED",
+            "shared_truth_coherence_status": "COHERENT",
+            "runtime_supervisor_classification": "SUPERVISOR_RUNTIME_START_ALLOWED",
+            "open_order_truth_classification": "NO_OPEN_ORDERS",
+            "managed_order_registry_classification": "NO_MANAGED_ORDERS",
+            "operator_explanation": "Entry runtime state is blocked while managed close authority is exact.",
+        },
+        open_order_overrides={"classification": "NO_OPEN_ORDERS", "unknown_open_order_count": 0},
+    )
+
+    payload = build_track_b_managed_exit_attach_plan(config=config, now=NOW)
+
+    assert payload["classification"] == MANAGED_EXIT_TIMEBOX_CLOSE_ELIGIBLE
+    assert payload["broker_session_allowed_uses"]["managed_risk_reducing_close"] is True
+    assert payload["close_intent_preview"]["order_action"] == "SELL"
+    assert payload["submit_attempted"] is False
+    assert payload["broker_state_mutated"] is False
+
+
+def test_exact_exit_due_close_respects_control_plane_hard_hold(tmp_path: Path) -> None:
+    config = _seed(
+        tmp_path,
+        completed_bars=3,
+        snapshot_overrides={
+            "classification": "CONTROL_PLANE_SNAPSHOT_BLOCKED",
+            "shared_truth_coherence_status": "COHERENT",
+            "runtime_supervisor_classification": "SUPERVISOR_RUNTIME_START_ALLOWED",
+            "open_order_truth_classification": "NO_OPEN_ORDERS",
+            "managed_order_registry_classification": "NO_MANAGED_ORDERS",
+            "top_line_classification": "BROKER_POSITION_GUARDIAN_HARD_HOLD",
+        },
+        open_order_overrides={"classification": "NO_OPEN_ORDERS", "unknown_open_order_count": 0},
+    )
+
+    payload = build_track_b_managed_exit_attach_plan(config=config, now=NOW)
+
+    assert payload["classification"] == "MANAGED_EXIT_BLOCKED_CONTROL_PLANE"
+    assert "explicit hard safety hold" in payload["blockers"][0]
+    assert payload["submit_attempted"] is False
+    assert payload["broker_state_mutated"] is False
+
+
+def test_exit_due_close_blocks_unhealthy_runtime_identity_without_degraded_close_authority(tmp_path: Path) -> None:
+    config = _seed(
+        tmp_path,
+        completed_bars=3,
+        snapshot_overrides={
+            "classification": "CONTROL_PLANE_SNAPSHOT_STALE_OR_MIXED",
+            "shared_truth_coherence_status": "STALE_OR_MIXED",
+            "runtime_supervisor_classification": "PROCESS_STARTED_PROFILE_PENDING",
+            "safe_to_start_runtime": False,
+        },
+        open_order_overrides={"classification": "NO_OPEN_ORDERS", "unknown_open_order_count": 0},
+        broker_session_authority_overrides={
+            "allowed_uses": {
+                "new_entry": False,
+                "managed_risk_reducing_close": False,
+                "broker_observed_adoption_diagnosis": True,
+                "fill_callback_adoption": False,
+                "status_diagnostic": True,
+            },
+            "degraded_exact_risk_reducing_close_context": {"ready": False},
+        },
+    )
+
+    payload = build_track_b_managed_exit_attach_plan(config=config, now=NOW)
+
+    assert payload["classification"] == "MANAGED_EXIT_BLOCKED_CONTROL_PLANE"
+    assert payload["apply_enabled"] is False
+    assert payload["submit_attempted"] is False
+    assert payload["broker_state_mutated"] is False
+
+
 def test_mgc_forced_session_exit_profile_builds_managed_close_preview(tmp_path: Path) -> None:
     config = _seed(
         tmp_path,
@@ -655,6 +757,194 @@ def test_auto_selects_current_exit_due_managed_position_instead_of_stale_default
     assert payload["target_identity"]["lane_id"] == "mnq_1x_asia_london_participation__asia_london_long_v6"
     assert payload["close_intent_preview"]["lifecycle_id"] == current_lifecycle_id
     assert payload["managed_exit_due_automation"]["classification"] == "MANAGED_EXIT_DUE_READY_FOR_APPLY"
+
+
+def test_current_scope_selected_position_accepts_bridge_fill_lifecycle_report_identity(tmp_path: Path) -> None:
+    current_lifecycle_id = "reserved_submit_mes_globex_active_participation_long_current"
+    bridge_lifecycle_id = "bridge_fill_MES|1m|2026-06-08T06:55:00Z|BUY_TO_OPEN"
+    strategy_id = "mes_globex_active_participation_long"
+    config = _seed(
+        tmp_path,
+        completed_bars=12,
+        config_overrides={
+            "strategy_id": strategy_id,
+            "lane_id": strategy_id,
+            "lifecycle_id": current_lifecycle_id,
+            "instrument_family": "MES",
+            "contract_key": "MES-202606",
+            "local_symbol": "MESM6",
+            "con_id": 770561194,
+            "managed_exit_policy_id": "GLOBEX_ACTIVE_EVIDENCE_TIMEBOX_60M_EXIT_V1",
+            "exit_profile_id": "MES_GLOBEX_ACTIVE_EVIDENCE_TIMEBOX_60M_V1",
+        },
+    )
+    bridge_path = (
+        tmp_path
+        / "outputs/track_b_execution_core/track_b_strategy_managed_paper_lifecycle"
+        / bridge_lifecycle_id
+        / "track_b_strategy_managed_paper_lifecycle_report.json"
+    )
+    bridge_report = _lifecycle_payload(config=config, lifecycle_id=bridge_lifecycle_id, order_id="2", price="7400.5")
+    bridge_report["contract_key"] = "202606"
+    bridge_report["managed_exit_policy_id"] = "PAPER_DIAGNOSTIC_TIME_BOXED_3X5M_EXIT_V1"
+    _write_json(bridge_path, bridge_report)
+    _write_json(
+        tmp_path / "outputs/track_b_execution_core/managed_positions/latest_managed_positions.json",
+        {
+            "classification": "OPEN_MANAGED_EXIT_DUE",
+            "managed_positions": [
+                {
+                    "classification": "OPEN_MANAGED_EXIT_DUE",
+                    "exit_due": True,
+                    "attention_required": False,
+                    "symbol": "MES",
+                    "contract_key": "MES-202606",
+                    "local_symbol": "MESM6",
+                    "con_id": 770561194,
+                    "quantity": "1",
+                    "side": "LONG",
+                    "strategy_id": strategy_id,
+                    "lifecycle_id": current_lifecycle_id,
+                    "managed_exit_policy_id": "GLOBEX_ACTIVE_EVIDENCE_TIMEBOX_60M_EXIT_V1",
+                    "lifecycle_position": {
+                        "account_id": "DUM882026",
+                        "instrument_family": "MES",
+                        "contract_key": "MES-202606",
+                        "local_symbol": "MESM6",
+                        "con_id": 770561194,
+                        "quantity": "1",
+                        "side": "LONG",
+                        "strategy_id": strategy_id,
+                        "lifecycle_id": current_lifecycle_id,
+                        "paper_lifecycle_report_path": str(bridge_path),
+                        "lifecycle_units": [
+                            {
+                                "lifecycle_id": current_lifecycle_id,
+                                "local_symbol": "MESM6",
+                                "con_id": 770561194,
+                                "quantity": "1",
+                            }
+                        ],
+                    },
+                }
+            ],
+        },
+    )
+
+    payload = build_track_b_managed_exit_attach_plan(config=config, now=NOW)
+
+    assert payload["classification"] != MANAGED_EXIT_BLOCKED_POSITION_MISMATCH
+    assert payload["lifecycle_identity_verified"] is True
+    assert payload["source_artifact_paths"]["lifecycle_report"] == str(bridge_path)
+    assert payload["target_identity"]["lifecycle_id"] == current_lifecycle_id
+
+
+def test_apply_uses_current_scope_identity_when_bridge_fill_report_is_selected(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    current_lifecycle_id = "reserved_submit_mes_globex_active_participation_long_current"
+    current_trade_id = "trade_current_scope_exact_owner"
+    bridge_lifecycle_id = "bridge_fill_MES|1m|2026-06-08T06:55:00Z|BUY_TO_OPEN"
+    strategy_id = "mes_globex_active_participation_long"
+    config = _seed(
+        tmp_path,
+        completed_bars=12,
+        config_overrides={
+            "apply": True,
+            "operator_authorized_managed_exit": True,
+            "strategy_id": strategy_id,
+            "lane_id": strategy_id,
+            "lifecycle_id": current_lifecycle_id,
+            "instrument_family": "MES",
+            "contract_key": "MES-202606",
+            "local_symbol": "MESM6",
+            "con_id": 770561194,
+            "managed_exit_policy_id": "GLOBEX_ACTIVE_EVIDENCE_TIMEBOX_60M_EXIT_V1",
+            "exit_profile_id": "MES_GLOBEX_ACTIVE_EVIDENCE_TIMEBOX_60M_V1",
+        },
+    )
+    bridge_path = (
+        tmp_path
+        / "outputs/track_b_execution_core/track_b_strategy_managed_paper_lifecycle"
+        / bridge_lifecycle_id
+        / "track_b_strategy_managed_paper_lifecycle_report.json"
+    )
+    bridge_report = _lifecycle_payload(config=config, lifecycle_id=bridge_lifecycle_id, order_id="2", price="7400.5")
+    bridge_report["trade_id"] = "trade_bridge_fill_stale_identity"
+    bridge_report["entry_intent"]["trade_id"] = "trade_bridge_fill_stale_identity"
+    bridge_report["managed_exit_policy_id"] = "PAPER_DIAGNOSTIC_TIME_BOXED_3X5M_EXIT_V1"
+    _write_json(bridge_path, bridge_report)
+    _write_json(
+        tmp_path / "outputs/track_b_execution_core/managed_positions/latest_managed_positions.json",
+        {
+            "classification": "OPEN_MANAGED_EXIT_DUE",
+            "managed_positions": [
+                {
+                    "classification": "OPEN_MANAGED_EXIT_DUE",
+                    "exit_due": True,
+                    "attention_required": False,
+                    "symbol": "MES",
+                    "contract_key": "MES-202606",
+                    "local_symbol": "MESM6",
+                    "con_id": 770561194,
+                    "quantity": "1",
+                    "side": "LONG",
+                    "strategy_id": strategy_id,
+                    "lifecycle_id": current_lifecycle_id,
+                    "trade_id": current_trade_id,
+                    "managed_exit_policy_id": "GLOBEX_ACTIVE_EVIDENCE_TIMEBOX_60M_EXIT_V1",
+                    "lifecycle_position": {
+                        "account_id": "DUM882026",
+                        "instrument_family": "MES",
+                        "contract_key": "MES-202606",
+                        "local_symbol": "MESM6",
+                        "con_id": 770561194,
+                        "quantity": "1",
+                        "side": "LONG",
+                        "strategy_id": strategy_id,
+                        "lifecycle_id": current_lifecycle_id,
+                        "trade_id": current_trade_id,
+                        "paper_lifecycle_report_path": str(bridge_path),
+                        "lifecycle_units": [
+                            {
+                                "lifecycle_id": current_lifecycle_id,
+                                "trade_id": current_trade_id,
+                                "local_symbol": "MESM6",
+                                "con_id": 770561194,
+                                "quantity": "1",
+                            }
+                        ],
+                    },
+                }
+            ],
+        },
+    )
+
+    class Result:
+        report_json = bridge_path
+        report = {
+            "paper_lifecycle_classification": "TRACK_B_STRATEGY_PAPER_OPEN_MANAGED",
+            "final_position_status": "OPEN_MANAGED",
+            "submit_attempted": False,
+            "broker_state_mutated": False,
+        }
+
+    seen: dict[str, Any] = {}
+
+    def fake_maintain(**kwargs: Any) -> Result:
+        seen["existing_lifecycle_report"] = kwargs["existing_lifecycle_report"]
+        return Result()
+
+    monkeypatch.setattr(attach_module, "maintain_open_track_b_strategy_managed_paper_lifecycle", fake_maintain)
+
+    payload = build_track_b_managed_exit_attach_plan(config=config, now=NOW)
+
+    assert payload["apply_enabled"] is True
+    assert seen["existing_lifecycle_report"]["lifecycle_id"] == current_lifecycle_id
+    assert seen["existing_lifecycle_report"]["trade_id"] == current_trade_id
+    assert seen["existing_lifecycle_report"]["entry_intent"]["lifecycle_id"] == current_lifecycle_id
+    assert seen["existing_lifecycle_report"]["entry_intent"]["trade_id"] == current_trade_id
 
 
 def test_auto_selected_mgc_due_position_resolves_mgc_exit_profile_not_default_mnq(tmp_path: Path) -> None:
@@ -900,6 +1190,8 @@ def _seed(
     completed_bars: int,
     position_overrides: Mapping[str, Any] | None = None,
     managed_order_overrides: Mapping[str, Any] | None = None,
+    open_order_overrides: Mapping[str, Any] | None = None,
+    broker_session_authority_overrides: Mapping[str, Any] | None = None,
     snapshot_overrides: Mapping[str, Any] | None = None,
     config_overrides: Mapping[str, Any] | None = None,
 ) -> TrackBManagedExitAttachConfig:
@@ -997,7 +1289,7 @@ def _seed(
     )
     _write_json(
         tmp_path / "outputs/track_b_execution_core/open_order_truth/latest_open_order_truth.json",
-        {"classification": "BROKER_POSITION_WITHOUT_CLOSE_ORDER"},
+        {"classification": "BROKER_POSITION_WITHOUT_CLOSE_ORDER", **dict(open_order_overrides or {})},
     )
     position_truth_position = {
         "account_id": config.account_id,
@@ -1025,6 +1317,37 @@ def _seed(
     }
     managed_orders.update(dict(managed_order_overrides or {}))
     _write_json(tmp_path / "outputs/track_b_execution_core/managed_orders/latest_managed_orders.json", managed_orders)
+    broker_session_authority = {
+        "schema_version": "track_b_broker_session_authority_v1",
+        "classification": "BROKER_SESSION_AUTHORITY_ORDER_STATUS_UNRELIABLE",
+        "connection_mode": "ORDER_STATUS_UNRELIABLE",
+        "allowed_uses": {
+            "new_entry": False,
+            "managed_risk_reducing_close": True,
+            "broker_observed_adoption_diagnosis": True,
+            "fill_callback_adoption": False,
+            "status_diagnostic": True,
+        },
+        "risk_reducing_close_connection_mode": "RISK_REDUCING_CLOSE_CAPABLE_ORDER_STATUS_DEGRADED",
+        "degraded_exact_risk_reducing_close_context": {
+            "ready": True,
+            "broker_positions_present": True,
+            "current_scope_lifecycle_positions_match_broker": True,
+            "broker_open_orders_zero": True,
+            "unknown_open_orders_zero": True,
+            "broker_lifecycle_reconciled": True,
+            "no_lifecycle_open_order": True,
+        },
+        "live_money_eligible": False,
+        "paper_proof_invoked": False,
+        "broad_flatten_allowed": False,
+        "global_flatten_allowed": False,
+    }
+    broker_session_authority.update(dict(broker_session_authority_overrides or {}))
+    _write_json(
+        tmp_path / "outputs/operator_dashboard/runtime/latest_broker_session_authority.json",
+        broker_session_authority,
+    )
     bars = [
         {"bar_end": f"2026-05-25T07:{30 + idx * 5:02d}:00+00:00", "close": "29960"}
         for idx in range(completed_bars)

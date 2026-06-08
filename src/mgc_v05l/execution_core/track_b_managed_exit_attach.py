@@ -48,6 +48,7 @@ from mgc_v05l.execution_core.track_b_paper_trade_ledger import (
 )
 from mgc_v05l.execution_core.track_b_position_truth_monitor import DEFAULT_POSITION_TRUTH_ARTIFACT
 from mgc_v05l.execution_core.track_b_runtime_safe_state_envelope import DEFAULT_RUNTIME_SAFE_STATE_ENVELOPE_ARTIFACT
+from mgc_v05l.execution_core.track_b_broker_session_authority import DEFAULT_BROKER_SESSION_AUTHORITY_ARTIFACT
 from mgc_v05l.execution_core.track_b_strategy_managed_paper_lifecycle import (
     DEFAULT_TRACK_B_STRATEGY_MANAGED_PAPER_LIFECYCLE_OUTPUT_ROOT,
     TrackBManagedExitPolicy,
@@ -111,6 +112,7 @@ class TrackBManagedExitAttachConfig:
         Path("outputs") / "track_b_execution_core" / "control_plane" / "latest_control_plane_snapshot.json"
     )
     safe_state_path: Path = DEFAULT_RUNTIME_SAFE_STATE_ENVELOPE_ARTIFACT
+    broker_session_authority_path: Path = DEFAULT_BROKER_SESSION_AUTHORITY_ARTIFACT
     open_order_truth_path: Path = DEFAULT_OPEN_ORDER_TRUTH_ARTIFACT
     position_truth_path: Path = DEFAULT_POSITION_TRUTH_ARTIFACT
     managed_order_registry_path: Path = DEFAULT_MANAGED_ORDER_REGISTRY_ARTIFACT
@@ -148,13 +150,22 @@ def build_track_b_managed_exit_attach_plan(
     config = _config_for_selected_managed_position(config=config, selected_position=selected_managed_position)
     snapshot = _read_json(config.resolve(config.control_plane_snapshot_path))
     safe_state = _read_json(config.resolve(config.safe_state_path))
+    broker_session_authority = _read_json(config.resolve(config.broker_session_authority_path))
     open_order_truth = _read_json(config.resolve(config.open_order_truth_path))
     position_truth = _read_json(config.resolve(config.position_truth_path))
     managed_orders = _read_json(config.resolve(config.managed_order_registry_path))
     live_position_status = _read_json(config.resolve(config.live_position_status_path))
-    lifecycle_path = _lifecycle_report_path(config=config, live_position_status=live_position_status)
+    lifecycle_path = _lifecycle_report_path(
+        config=config,
+        live_position_status=live_position_status,
+        selected_position=selected_managed_position,
+    )
     lifecycle_report = _read_json(lifecycle_path)
-    config = _config_with_lifecycle_policy(config=config, lifecycle_report=lifecycle_report)
+    config = _config_with_lifecycle_policy(
+        config=config,
+        lifecycle_report=lifecycle_report,
+        selected_position=selected_managed_position,
+    )
     exit_profile = _resolve_exit_profile_for_config(config)
     managed_exit_policy_id = exit_profile.managed_exit_policy_id
     required_completed_5m_bars = int(exit_profile.required_completed_5m_bars)
@@ -183,7 +194,12 @@ def build_track_b_managed_exit_attach_plan(
     )
 
     blockers: list[str] = []
-    control_plane_ok, control_plane_reason = _control_plane_allows_managed_exit(snapshot)
+    control_plane_ok, control_plane_reason = _control_plane_allows_managed_exit(
+        snapshot=snapshot,
+        broker_session_authority=broker_session_authority,
+        open_order_truth=open_order_truth,
+        managed_orders=managed_orders,
+    )
     safe_state_ok, safe_state_reason = _safe_state_allows_managed_exit(safe_state)
     position_ok, position_reason = _position_identity_matches(
         config=config,
@@ -195,6 +211,7 @@ def build_track_b_managed_exit_attach_plan(
         config=config,
         lifecycle_report=lifecycle_report,
         managed_exit_policy_id=managed_exit_policy_id,
+        selected_position=selected_managed_position,
     )
     duplicate_close = _duplicate_close_order(config=config, managed_orders=managed_orders, open_order_truth=open_order_truth, close_action=close_action)
     prior_lifecycle_close = _prior_lifecycle_close_submit_blocker(lifecycle_report)
@@ -264,6 +281,10 @@ def build_track_b_managed_exit_attach_plan(
         "safe_state_classification": safe_state.get("safe_state_classification") or safe_state.get("classification"),
         "safe_state_submit_allowed": safe_state.get("submit_allowed") is True,
         "safe_state_broker_mutation_allowed": safe_state.get("broker_mutation_allowed") is True,
+        "safe_state_managed_close_mutation_allowed": safe_state.get("managed_close_mutation_allowed") is True,
+        "broker_session_authority_classification": broker_session_authority.get("classification"),
+        "broker_session_allowed_uses": broker_session_authority.get("allowed_uses") if isinstance(broker_session_authority.get("allowed_uses"), Mapping) else {},
+        "risk_reducing_close_connection_mode": broker_session_authority.get("risk_reducing_close_connection_mode"),
         "open_order_truth_classification": open_order_truth.get("classification"),
         "managed_order_registry_classification": managed_orders.get("classification"),
         "managed_position_registry_classification": managed_position_registry.get("classification"),
@@ -318,6 +339,7 @@ def build_track_b_managed_exit_attach_plan(
         "source_artifact_paths": {
             "control_plane_snapshot": str(config.resolve(config.control_plane_snapshot_path)),
             "runtime_safe_state_envelope": str(config.resolve(config.safe_state_path)),
+            "broker_session_authority": str(config.resolve(config.broker_session_authority_path)),
             "open_order_truth": str(config.resolve(config.open_order_truth_path)),
             "position_truth": str(config.resolve(config.position_truth_path)),
             "managed_order_registry": str(config.resolve(config.managed_order_registry_path)),
@@ -339,6 +361,7 @@ def build_track_b_managed_exit_attach_plan(
     apply_result = _apply_managed_exit(
         config=config,
         lifecycle_report=lifecycle_report,
+        selected_position=selected_managed_position,
         completed_bar_count=completed_bar_count,
         close_limit_price=close_limit_price,
         managed_exit_policy_id=managed_exit_policy_id,
@@ -371,13 +394,19 @@ def _apply_managed_exit(
     *,
     config: TrackBManagedExitAttachConfig,
     lifecycle_report: Mapping[str, Any],
+    selected_position: Mapping[str, Any],
     completed_bar_count: int,
     close_limit_price: str | None,
     managed_exit_policy_id: str,
     required_completed_5m_bars: int,
     now: datetime,
 ) -> dict[str, Any]:
-    lifecycle_report = _with_registry_trade_id_for_managed_exit(config=config, lifecycle_report=lifecycle_report)
+    lifecycle_report = _with_registry_trade_id_for_managed_exit(
+        config=config,
+        lifecycle_report=lifecycle_report,
+        selected_position=selected_position,
+        managed_exit_policy_id=managed_exit_policy_id,
+    )
     entry_intent = lifecycle_report.get("entry_intent") if isinstance(lifecycle_report.get("entry_intent"), Mapping) else {}
     lifecycle_config = TrackBStrategyManagedPaperLifecycleConfig(
         mode=config.mode,
@@ -490,19 +519,45 @@ def _with_registry_trade_id_for_managed_exit(
     *,
     config: TrackBManagedExitAttachConfig,
     lifecycle_report: Mapping[str, Any],
+    selected_position: Mapping[str, Any] | None = None,
+    managed_exit_policy_id: str | None = None,
 ) -> dict[str, Any]:
     report = dict(lifecycle_report)
-    registry_trade_id = resolve_live_trade_id_for_lifecycle_id(
+    selected_trade_id = ""
+    if _selected_current_scope_lifecycle_matches(
+        config=config,
+        lifecycle_report=lifecycle_report,
+        managed_exit_policy_id=str(managed_exit_policy_id or report.get("managed_exit_policy_id") or ""),
+        selected_position=selected_position,
+    ):
+        selected = _mapping(selected_position)
+        lifecycle_position = _mapping(selected.get("lifecycle_position"))
+        units = [
+            _mapping(item)
+            for item in (selected.get("lifecycle_units") or lifecycle_position.get("lifecycle_units") or [])
+            if isinstance(item, Mapping)
+        ]
+        selected_trade_id = str(
+            selected.get("trade_id")
+            or lifecycle_position.get("trade_id")
+            or next((unit.get("trade_id") for unit in units if unit.get("trade_id")), "")
+            or ""
+        ).strip()
+    registry_trade_id = selected_trade_id or resolve_live_trade_id_for_lifecycle_id(
         repo_root=config.repo_root,
         lifecycle_id=config.lifecycle_id,
     )
-    if not registry_trade_id:
+    if not registry_trade_id and not selected_trade_id:
         return report
+    report["lifecycle_id"] = config.lifecycle_id
     report["trade_id"] = registry_trade_id
-    for key in ("entry_intent", "open_state"):
+    if selected_trade_id:
+        report["current_scope_identity_source"] = "MANAGED_POSITION_REGISTRY_SELECTED_POSITION"
+    for key in ("entry_intent", "open_state", "close_intent"):
         value = report.get(key)
         if isinstance(value, Mapping):
             nested = dict(value)
+            nested["lifecycle_id"] = config.lifecycle_id
             nested["trade_id"] = registry_trade_id
             report[key] = nested
     return report
@@ -574,7 +629,16 @@ def _config_with_lifecycle_policy(
     *,
     config: TrackBManagedExitAttachConfig,
     lifecycle_report: Mapping[str, Any],
+    selected_position: Mapping[str, Any] | None = None,
 ) -> TrackBManagedExitAttachConfig:
+    selected = _mapping(selected_position)
+    selected_policy = str(
+        selected.get("managed_exit_policy_id")
+        or _mapping(selected.get("lifecycle_position")).get("managed_exit_policy_id")
+        or ""
+    ).strip()
+    if selected_policy and selected_policy == config.managed_exit_policy_id:
+        return config
     managed_exit_policy_id = str(lifecycle_report.get("managed_exit_policy_id") or "").strip()
     if not managed_exit_policy_id or managed_exit_policy_id == config.managed_exit_policy_id:
         return config
@@ -715,22 +779,41 @@ def _lane_from_strategy_id(strategy_id: str) -> str:
     return "__".join(parts[1:]) if len(parts) > 1 else ""
 
 
-def _control_plane_allows_managed_exit(snapshot: Mapping[str, Any]) -> tuple[bool, str]:
+def _control_plane_allows_managed_exit(
+    *,
+    snapshot: Mapping[str, Any],
+    broker_session_authority: Mapping[str, Any],
+    open_order_truth: Mapping[str, Any],
+    managed_orders: Mapping[str, Any],
+) -> tuple[bool, str]:
     if not snapshot:
         return False, "Control Plane Snapshot is missing."
-    if snapshot.get("shared_truth_coherence_status") != "COHERENT":
-        return False, "Control Plane Snapshot is not coherent."
     if snapshot.get("live_money_eligible") is True:
         return False, "live_money_eligible=true blocks managed-exit attach."
     if snapshot.get("paper_proof_invoked") is True:
         return False, "paper_proof_invoked=true blocks managed-exit attach."
+    if snapshot.get("agent_health_has_duplicate_writer") is True:
+        return False, "Control Plane reports duplicate writer."
     classification = str(snapshot.get("classification") or "")
     supervisor = str(snapshot.get("runtime_supervisor_classification") or "")
+    close_only_authority = _close_only_authority_allows_unhealthy_runtime(
+        broker_session_authority=broker_session_authority,
+        open_order_truth=open_order_truth,
+        managed_orders=managed_orders,
+    )
+    if _control_plane_has_explicit_hard_hold(snapshot):
+        return False, "Control Plane reports an explicit hard safety hold."
+    if snapshot.get("shared_truth_coherence_status") != "COHERENT" and close_only_authority:
+        return True, "Close-only BSA authority permits exact managed-exit recovery while entry Control Plane coherence is degraded."
+    if snapshot.get("shared_truth_coherence_status") != "COHERENT":
+        return False, "Control Plane Snapshot is not coherent."
     if classification == "CONTROL_PLANE_SNAPSHOT_READY":
         return True, "Control Plane Snapshot is ready."
     cleanup_state = supervisor == "SUPERVISOR_CLEANUP_REQUIRED_BEFORE_RUNTIME" or _snapshot_has_position_without_close(snapshot)
     if classification == "CONTROL_PLANE_SNAPSHOT_BLOCKED" and cleanup_state:
         return True, "Control Plane is blocked by the exact cleanup condition this managed-exit attach addresses."
+    if classification == "CONTROL_PLANE_SNAPSHOT_BLOCKED" and close_only_authority:
+        return True, "Close-only BSA authority permits exact managed-exit recovery while entry Control Plane is blocked."
     return False, f"Control Plane classification does not permit managed-exit attach: {classification or 'UNKNOWN'}."
 
 
@@ -742,15 +825,72 @@ def _safe_state_allows_managed_exit(safe_state: Mapping[str, Any]) -> tuple[bool
     if safe_state.get("paper_proof_invoked") is True:
         return False, "Safe-State reports paper_proof_invoked=true."
     classification = str(safe_state.get("safe_state_classification") or safe_state.get("classification") or "")
-    if classification != "SAFE_STATE_NORMAL":
+    managed_close_allowed = safe_state.get("managed_close_mutation_allowed") is True
+    if classification != "SAFE_STATE_NORMAL" and not managed_close_allowed:
         return False, f"Safe-State classification is {classification or 'UNKNOWN'}."
-    if safe_state.get("broker_mutation_allowed") is not True:
+    if safe_state.get("broker_mutation_allowed") is not True and not managed_close_allowed:
         return False, "Safe-State does not permit exact broker mutation for cleanup."
-    if safe_state.get("observe_only") is True:
+    if safe_state.get("observe_only") is True and not managed_close_allowed:
         return False, "Safe-State is observe-only."
-    if list(safe_state.get("tripped_limits") or []):
+    if list(safe_state.get("tripped_limits") or []) and not managed_close_allowed:
         return False, "Safe-State has tripped limits."
     return True, "Safe-State permits exact managed-exit cleanup."
+
+
+def _close_only_authority_allows_unhealthy_runtime(
+    *,
+    broker_session_authority: Mapping[str, Any],
+    open_order_truth: Mapping[str, Any],
+    managed_orders: Mapping[str, Any],
+) -> bool:
+    allowed_uses = _mapping(broker_session_authority.get("allowed_uses"))
+    if allowed_uses.get("managed_risk_reducing_close") is not True:
+        return False
+    if broker_session_authority.get("live_money_eligible") is True or broker_session_authority.get("paper_proof_invoked") is True:
+        return False
+    if broker_session_authority.get("broad_flatten_allowed") is True or broker_session_authority.get("global_flatten_allowed") is True:
+        return False
+    open_order_classification = str(open_order_truth.get("classification") or "")
+    if open_order_classification != "NO_OPEN_ORDERS":
+        return False
+    if int(open_order_truth.get("unknown_open_order_count") or 0) != 0:
+        return False
+    managed_order_classification = str(managed_orders.get("classification") or "")
+    if managed_order_classification not in {POSITION_WITHOUT_CLOSE_ORDER, BROKER_POSITION_WITHOUT_CLOSE_ORDER}:
+        return False
+    close_mode = str(broker_session_authority.get("risk_reducing_close_connection_mode") or "")
+    if close_mode == "RISK_REDUCING_CLOSE_CAPABLE_ORDER_STATUS_DEGRADED":
+        context = _mapping(broker_session_authority.get("degraded_exact_risk_reducing_close_context"))
+        return context.get("ready") is True
+    return True
+
+
+def _control_plane_has_explicit_hard_hold(snapshot: Mapping[str, Any]) -> bool:
+    hard_tokens = (
+        "live_money",
+        "paper_proof",
+        "duplicate_writer",
+        "hard_hold",
+        "hard_unsafe",
+        "broad_flatten",
+        "global_flatten",
+    )
+    values: list[Any] = [
+        snapshot.get("classification"),
+        snapshot.get("top_line_classification"),
+        snapshot.get("primary_blocking_agent_id"),
+        snapshot.get("primary_blocking_reason"),
+        snapshot.get("operator_explanation"),
+        snapshot.get("paper_action_policy"),
+    ]
+    values.extend(snapshot.get("blockers") or [])
+    values.extend(snapshot.get("prioritized_blockers") or [])
+    for value in values:
+        text = json.dumps(value, sort_keys=True) if isinstance(value, Mapping) else str(value or "")
+        normalized = text.lower()
+        if any(token in normalized for token in hard_tokens):
+            return True
+    return False
 
 
 def _position_identity_matches(
@@ -865,6 +1005,7 @@ def _lifecycle_matches(
     config: TrackBManagedExitAttachConfig,
     lifecycle_report: Mapping[str, Any],
     managed_exit_policy_id: str,
+    selected_position: Mapping[str, Any] | None = None,
     retryable_close_quantity: int | None = None,
 ) -> tuple[bool, str]:
     checks = {
@@ -876,9 +1017,24 @@ def _lifecycle_matches(
     }
     for key, expected in checks.items():
         if str(lifecycle_report.get(key) or "") != str(expected):
+            selected_ok = _selected_current_scope_lifecycle_matches(
+                config=config,
+                lifecycle_report=lifecycle_report,
+                managed_exit_policy_id=managed_exit_policy_id,
+                selected_position=selected_position,
+            )
+            if selected_ok:
+                break
             return False, f"Lifecycle {key} mismatch."
     if _int_or_none(lifecycle_report.get("con_id")) != config.con_id:
-        return False, "Lifecycle con_id mismatch."
+        selected_ok = _selected_current_scope_lifecycle_matches(
+            config=config,
+            lifecycle_report=lifecycle_report,
+            managed_exit_policy_id=managed_exit_policy_id,
+            selected_position=selected_position,
+        )
+        if not selected_ok:
+            return False, "Lifecycle con_id mismatch."
     lifecycle_classification = str(lifecycle_report.get("paper_lifecycle_classification") or "")
     if lifecycle_classification != "TRACK_B_STRATEGY_PAPER_OPEN_MANAGED":
         previous_attach_guard = (
@@ -901,9 +1057,62 @@ def _lifecycle_matches(
         )
         if not previous_attach_guard and not retryable_unmutated_close_review:
             return False, "Lifecycle is not OPEN_MANAGED."
-    if str(lifecycle_report.get("managed_exit_policy_id") or "") != managed_exit_policy_id:
+    if str(lifecycle_report.get("managed_exit_policy_id") or "") != managed_exit_policy_id and not _selected_current_scope_lifecycle_matches(
+        config=config,
+        lifecycle_report=lifecycle_report,
+        managed_exit_policy_id=managed_exit_policy_id,
+        selected_position=selected_position,
+    ):
         return False, "Lifecycle managed exit policy mismatch."
     return True, "Lifecycle identity matches."
+
+
+def _selected_current_scope_lifecycle_matches(
+    *,
+    config: TrackBManagedExitAttachConfig,
+    lifecycle_report: Mapping[str, Any],
+    managed_exit_policy_id: str,
+    selected_position: Mapping[str, Any] | None,
+) -> bool:
+    selected = _mapping(selected_position)
+    lifecycle_position = _mapping(selected.get("lifecycle_position"))
+    units = [
+        _mapping(item)
+        for item in (selected.get("lifecycle_units") or lifecycle_position.get("lifecycle_units") or [])
+        if isinstance(item, Mapping)
+    ]
+    selected_lifecycle_ids = {
+        str(value or "").strip()
+        for value in [
+            selected.get("lifecycle_id"),
+            lifecycle_position.get("lifecycle_id"),
+            *(unit.get("lifecycle_id") for unit in units),
+        ]
+        if str(value or "").strip()
+    }
+    if config.lifecycle_id not in selected_lifecycle_ids:
+        return False
+    if str(selected.get("strategy_id") or lifecycle_position.get("strategy_id") or "") != config.strategy_id:
+        return False
+    if _valid_account_id(selected.get("account_id") or lifecycle_position.get("account_id")) not in {"", config.account_id}:
+        return False
+    if str(selected.get("local_symbol") or lifecycle_position.get("local_symbol") or "") != config.local_symbol:
+        return False
+    if _int_or_none(selected.get("con_id") or lifecycle_position.get("con_id")) != config.con_id:
+        return False
+    if str(lifecycle_report.get("strategy_id") or "") != config.strategy_id:
+        return False
+    if _valid_account_id(lifecycle_report.get("account_id")) not in {"", config.account_id}:
+        return False
+    if str(lifecycle_report.get("local_symbol") or "") != config.local_symbol:
+        return False
+    if _int_or_none(lifecycle_report.get("con_id")) != config.con_id:
+        return False
+    selected_policy = str(selected.get("managed_exit_policy_id") or lifecycle_position.get("managed_exit_policy_id") or "").strip()
+    report_policy = str(lifecycle_report.get("managed_exit_policy_id") or "").strip()
+    if selected_policy != managed_exit_policy_id and report_policy != managed_exit_policy_id:
+        return False
+    return str(lifecycle_report.get("paper_lifecycle_classification") or "") == "TRACK_B_STRATEGY_PAPER_OPEN_MANAGED"
 
 
 def _retryable_unmutated_close_review(
@@ -1194,7 +1403,18 @@ def _target_identity(
     }
 
 
-def _lifecycle_report_path(*, config: TrackBManagedExitAttachConfig, live_position_status: Mapping[str, Any]) -> Path:
+def _lifecycle_report_path(
+    *,
+    config: TrackBManagedExitAttachConfig,
+    live_position_status: Mapping[str, Any],
+    selected_position: Mapping[str, Any] | None = None,
+) -> Path:
+    selected = _mapping(selected_position)
+    lifecycle_position = _mapping(selected.get("lifecycle_position"))
+    for source in (selected, lifecycle_position):
+        path_value = source.get("paper_lifecycle_report_path")
+        if path_value:
+            return config.resolve(Path(str(path_value)))
     position = (live_position_status.get("positions_by_instrument") or {}).get(config.contract_key)
     if isinstance(position, Mapping) and position.get("paper_lifecycle_report_path"):
         return config.resolve(Path(str(position.get("paper_lifecycle_report_path"))))
