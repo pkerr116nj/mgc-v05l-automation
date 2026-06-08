@@ -465,11 +465,25 @@ def _managed_positions(
             lifecycle_report=lifecycle_report,
             market_data_root=market_data_root,
         )
+        due_classification = _exit_due_classification(
+            classification=classification,
+            broker=broker,
+            lifecycle=lifecycle,
+            review=review,
+            lifecycle_report=lifecycle_report,
+            close_order_state=effective_close_order_state,
+            source_stale=source_stale,
+        )
         exit_due = _exit_due(
             lifecycle=lifecycle,
             lifecycle_report=lifecycle_report,
-            classification=classification,
+            classification=due_classification,
             bars_since_entry=bars_since_entry,
+        )
+        effective_classification = (
+            OPEN_MANAGED_EXIT_DUE
+            if exit_due and due_classification == OPEN_MANAGED_MATCHED
+            else classification
         )
         lifecycle_units = _list((lifecycle or {}).get("lifecycle_units"))
         aggregate_qty = (lifecycle or {}).get("aggregate_qty")
@@ -481,7 +495,7 @@ def _managed_positions(
             and signed_lifecycle_qty == signed_broker_qty
         )
         position = {
-            "classification": OPEN_MANAGED_EXIT_DUE if exit_due and classification == OPEN_MANAGED_MATCHED else classification,
+            "classification": effective_classification,
             "symbol": _symbol(broker or lifecycle or review),
             "contract_key": (lifecycle or review or {}).get("contract_key") or _contract_key_from_broker(broker or {}),
             "local_symbol": (lifecycle or review or broker or {}).get("local_symbol"),
@@ -526,6 +540,19 @@ def _managed_positions(
             "bars_since_entry": bars_since_entry,
             "exit_due": bool(exit_due),
             "exit_due_state": _exit_due_state(exit_due),
+            "exit_due_evidence_stale": bool(exit_due and source_stale.get("diagnostic_stale") is True),
+            "freshness_state": _position_freshness_state(source_stale=source_stale),
+            "apply_authority_degraded": bool(exit_due and source_stale.get("stale") is True),
+            "stale_dependency_sources": list(source_stale.get("stale_sources") or []),
+            "required_close_action": _required_close_action(
+                side=(lifecycle or review or {}).get("side") or _side_from_broker(broker or {}),
+                signed_broker_qty=signed_broker_qty,
+            )
+            if exit_due
+            else None,
+            "required_close_quantity": _decimal_display(abs(signed_broker_qty))
+            if exit_due and signed_broker_qty is not None
+            else None,
             "close_order_state": effective_close_order_state,
             "managed_order_state": managed_order_state,
             "reconciliation_status": _reconciliation_status(broker=broker, lifecycle=lifecycle, review=review),
@@ -538,7 +565,7 @@ def _managed_positions(
                 STALE_MANAGED_POSITION_EVIDENCE,
             },
             "recommended_operator_action": _recommended_action(
-                classification=OPEN_MANAGED_EXIT_DUE if exit_due and classification == OPEN_MANAGED_MATCHED else classification
+                classification=effective_classification
             ),
             "broker_position": broker,
             "lifecycle_position": lifecycle,
@@ -891,6 +918,58 @@ def _position_classification(
     return NO_MANAGED_POSITIONS
 
 
+def _exit_due_classification(
+    *,
+    classification: str,
+    broker: Mapping[str, Any] | None,
+    lifecycle: Mapping[str, Any] | None,
+    review: Mapping[str, Any] | None,
+    lifecycle_report: Mapping[str, Any],
+    close_order_state: Mapping[str, Any] | None,
+    source_stale: Mapping[str, Any],
+) -> str:
+    if classification == OPEN_MANAGED_MATCHED:
+        return classification
+    if classification != STALE_MANAGED_POSITION_EVIDENCE:
+        return classification
+    if source_stale.get("stale") is not True:
+        return classification
+    if not broker or not lifecycle:
+        return classification
+    if review:
+        return classification
+    if close_order_state:
+        return classification
+    if not str(lifecycle.get("lifecycle_id") or lifecycle_report.get("lifecycle_id") or "").strip():
+        return classification
+    if not str(lifecycle.get("trade_id") or lifecycle_report.get("trade_id") or "").strip():
+        return classification
+    if not _managed_exit_policy_id(lifecycle, None, lifecycle_report, None):
+        return classification
+    if _signed_lifecycle_quantity(lifecycle) is None or _decimal((broker or {}).get("quantity")) is None:
+        return classification
+    return OPEN_MANAGED_MATCHED
+
+
+def _position_freshness_state(*, source_stale: Mapping[str, Any]) -> str:
+    if source_stale.get("stale") is True:
+        return "STALE_DEPENDENCY"
+    if source_stale.get("diagnostic_stale") is True:
+        return "DIAGNOSTIC_STALE_DEPENDENCY"
+    return "FRESH"
+
+
+def _required_close_action(*, side: Any, signed_broker_qty: Decimal | None) -> str | None:
+    normalized_side = str(side or "").upper()
+    if normalized_side == "LONG":
+        return "SELL"
+    if normalized_side == "SHORT":
+        return "BUY"
+    if signed_broker_qty is None or signed_broker_qty == 0:
+        return None
+    return "SELL" if signed_broker_qty > 0 else "BUY"
+
+
 def _overall_classification(
     *,
     managed_positions: list[dict[str, Any]],
@@ -899,8 +978,6 @@ def _overall_classification(
     review_positions: list[dict[str, Any]],
     source_stale: Mapping[str, Any],
 ) -> str:
-    if source_stale.get("stale") is True:
-        return STALE_MANAGED_POSITION_EVIDENCE
     if not broker_positions and not lifecycle_positions and not review_positions and not managed_positions:
         return NO_MANAGED_POSITIONS
     priority = [
@@ -917,6 +994,8 @@ def _overall_classification(
     for item in priority:
         if item in classifications:
             return item
+    if source_stale.get("stale") is True:
+        return STALE_MANAGED_POSITION_EVIDENCE
     return classifications[0] if classifications else NO_MANAGED_POSITIONS
 
 

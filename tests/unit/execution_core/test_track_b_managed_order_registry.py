@@ -300,6 +300,68 @@ def test_exit_due_managed_position_creates_blocker_without_open_order_truth_row(
     assert row["close_order_required_now"] is True
 
 
+def test_stale_due_managed_position_still_reports_position_without_close_order(tmp_path: Path) -> None:
+    managed_position = {
+        "classification": "OPEN_MANAGED_EXIT_DUE",
+        "symbol": "MNQ",
+        "local_symbol": "MNQM6",
+        "con_id": 770561201,
+        "side": "SHORT",
+        "quantity": "1",
+        "aggregate_qty": "-1",
+        "signed_broker_qty": "-1",
+        "lifecycle_id": "current_managed_mnq_short",
+        "trade_id": "trade_mnq_short",
+        "lane_id": "mnq_us_active_participation_short",
+        "strategy_id": "mnq_us_active_participation_short",
+        "managed_exit_policy_id": "US_ACTIVE_EVIDENCE_TIMEBOX_60M_EXIT_V1",
+        "exit_due": True,
+        "exit_due_state": "EXIT_DUE",
+        "freshness_state": "STALE_DEPENDENCY",
+        "exit_due_evidence_stale": True,
+        "apply_authority_degraded": True,
+        "stale_dependency_sources": ["position_truth"],
+        "attention_required": True,
+        "working_close_qty": "0",
+        "broker_position": {
+            "account_id": "DUM882026",
+            "symbol": "MNQ",
+            "local_symbol": "MNQM6",
+            "con_id": 770561201,
+            "expiry": "20260618",
+            "quantity": "-1",
+        },
+    }
+    _seed_base(tmp_path, managed_positions=[managed_position])
+    managed_positions_path = (
+        tmp_path / "outputs" / "track_b_execution_core" / "managed_positions" / "latest_managed_positions.json"
+    )
+    managed_positions = json.loads(managed_positions_path.read_text(encoding="utf-8"))
+    managed_positions["generated_at"] = (NOW - timedelta(minutes=10)).isoformat()
+    managed_positions["source_freshness"] = {
+        "stale": True,
+        "stale_sources": ["position_truth"],
+        "ttl_seconds": 180,
+    }
+    managed_positions_path.write_text(json.dumps(managed_positions, indent=2, sort_keys=True), encoding="utf-8")
+
+    payload = build_track_b_managed_order_registry(
+        config=TrackBManagedOrderRegistryConfig(repo_root=tmp_path),
+        now=NOW,
+    )
+
+    assert payload["source_freshness"]["stale"] is True
+    assert payload["classification"] == POSITION_WITHOUT_CLOSE_ORDER
+    row = payload["managed_orders"][0]
+    assert row["classification"] == POSITION_WITHOUT_CLOSE_ORDER
+    assert row["close_order_required_now"] is True
+    assert row["managed_active_hold"] is False
+    assert row["managed_position_freshness_state"] == "STALE_DEPENDENCY"
+    assert row["exit_due_evidence_stale"] is True
+    assert row["apply_authority_degraded"] is True
+    assert row["stale_dependency_sources"] == ["position_truth"]
+
+
 def test_managed_order_uses_current_owner_when_managed_position_artifact_is_stale(
     tmp_path: Path,
     monkeypatch,

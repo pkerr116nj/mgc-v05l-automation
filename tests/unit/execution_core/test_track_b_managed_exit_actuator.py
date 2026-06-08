@@ -177,6 +177,32 @@ def test_dirty_reconciliation_blocks_before_attach(tmp_path: Path) -> None:
     assert "BROKER_LIFECYCLE_RECONCILIATION_NOT_CLEAN" in payload["blocked_positions"][0]["blockers"]
 
 
+def test_stale_due_projection_blocks_apply_but_not_due_detection(tmp_path: Path) -> None:
+    inputs = _inputs(runtime_down=True)
+    inputs["managed_positions"]["source_freshness"] = {
+        "stale": True,
+        "stale_sources": ["position_truth"],
+    }
+    inputs["managed_positions"]["managed_positions"][0]["freshness_state"] = "STALE_DEPENDENCY"
+    inputs["managed_positions"]["managed_positions"][0]["exit_due_evidence_stale"] = True
+    inputs["managed_positions"]["managed_positions"][0]["apply_authority_degraded"] = True
+
+    payload = run_track_b_managed_exit_actuator(
+        config=TrackBManagedExitActuatorConfig(repo_root=tmp_path, apply=True, operator_authorized_managed_exit=True),
+        now=NOW,
+        input_overrides=inputs,
+        attach_runner=lambda config, now: {"submit_attempted": True},
+        write=False,
+    )
+
+    blockers = payload["blocked_positions"][0]["blockers"]
+    assert payload["classification"] == MANAGED_EXIT_ACTUATOR_BLOCKED
+    assert payload["exit_due_count"] == 1
+    assert payload["submit_attempted"] is False
+    assert "MANAGED_POSITION_APPLY_AUTHORITY_DEGRADED" in blockers
+    assert "MANAGED_POSITION_SOURCE_STALE" in blockers
+
+
 def test_ambiguous_ownership_blocks_before_attach(tmp_path: Path) -> None:
     inputs = _inputs(runtime_down=True)
     duplicate = _position(lifecycle_id="life-other", trade_id="trade-other")
@@ -259,8 +285,13 @@ def test_close_candidate_mismatch_blocks_before_attach(tmp_path: Path) -> None:
 def _inputs(*, runtime_down: bool) -> dict:
     candidate = _candidate()
     return {
-        "managed_positions": {"classification": "OPEN_MANAGED_EXIT_DUE", "managed_positions": [_position()]},
+        "managed_positions": {
+            "generated_at": NOW.isoformat(),
+            "classification": "OPEN_MANAGED_EXIT_DUE",
+            "managed_positions": [_position()],
+        },
         "managed_orders": {
+            "generated_at": NOW.isoformat(),
             "classification": "POSITION_WITHOUT_CLOSE_ORDER",
             "managed_orders": [_managed_order()],
         },

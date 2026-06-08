@@ -53,6 +53,7 @@ class TrackBManagedExitRecoveryConfig:
     reconciliation_path: Path = DEFAULT_RECONCILIATION_REPORT_PATH
     broker_truth_lease_path: Path = DEFAULT_LEASE_ARTIFACT
     broker_session_authority_path: Path = DEFAULT_BROKER_SESSION_AUTHORITY_ARTIFACT
+    artifact_max_age_seconds: float = 180.0
 
     def resolve(self, path: Path) -> Path:
         return path if path.is_absolute() else self.repo_root / path
@@ -73,7 +74,13 @@ def build_track_b_managed_exit_recovery_plan(
         if str(row.get("classification") or "") == "OPEN_MANAGED_EXIT_DUE" or row.get("exit_due") is True
     ]
     per_position = [
-        _classify_position(position=position, positions=managed_positions, inputs=inputs)
+        _classify_position(
+            position=position,
+            positions=managed_positions,
+            inputs=inputs,
+            now=actual_now,
+            artifact_max_age_seconds=float(config.artifact_max_age_seconds),
+        )
         for position in exit_due_positions
     ]
     diagnostic_ready = [row for row in per_position if row["diagnostic_close_candidate_ready"] is True]
@@ -176,6 +183,8 @@ def _classify_position(
     position: Mapping[str, Any],
     positions: Sequence[Mapping[str, Any]],
     inputs: Mapping[str, Mapping[str, Any]],
+    now: datetime,
+    artifact_max_age_seconds: float,
 ) -> dict[str, Any]:
     broker_position = _mapping(position.get("broker_position"))
     lifecycle_position = _mapping(position.get("lifecycle_position"))
@@ -315,7 +324,19 @@ def _classify_position(
         candidate.update({key: guardian_candidate.get(key) for key in ("classification", "reason") if guardian_candidate.get(key) is not None})
 
     diagnostic_blockers = _dedupe(blockers)
-    apply_blockers = _dedupe([*diagnostic_blockers, *_broker_session_apply_blockers(inputs=inputs)])
+    apply_blockers = _dedupe(
+        [
+            *diagnostic_blockers,
+            *_managed_position_freshness_apply_blockers(
+                position=position,
+                managed_positions=inputs["managed_positions"],
+                managed_orders=inputs["managed_orders"],
+                now=now,
+                artifact_max_age_seconds=artifact_max_age_seconds,
+            ),
+            *_broker_session_apply_blockers(inputs=inputs),
+        ]
+    )
     diagnostic_ready = not diagnostic_blockers
     apply_eligible = diagnostic_ready and not apply_blockers
     return {
@@ -347,6 +368,27 @@ def _classify_position(
         "broker_session_allowed_uses": _mapping(inputs["broker_session_authority"].get("allowed_uses")),
         "callback_ownership_attribution": _mapping(inputs["broker_session_authority"].get("callback_ownership_attribution")),
     }
+
+
+def _managed_position_freshness_apply_blockers(
+    *,
+    position: Mapping[str, Any],
+    managed_positions: Mapping[str, Any],
+    managed_orders: Mapping[str, Any],
+    now: datetime,
+    artifact_max_age_seconds: float,
+) -> list[str]:
+    blockers: list[str] = []
+    source_freshness = _mapping(managed_positions.get("source_freshness"))
+    if position.get("apply_authority_degraded") is True:
+        blockers.append("MANAGED_POSITION_APPLY_AUTHORITY_DEGRADED")
+    if source_freshness.get("stale") is True:
+        blockers.append("MANAGED_POSITION_SOURCE_STALE")
+    if _artifact_stale(managed_positions, now=now, max_age_seconds=artifact_max_age_seconds):
+        blockers.append("MANAGED_POSITION_ARTIFACT_STALE")
+    if _artifact_stale(managed_orders, now=now, max_age_seconds=artifact_max_age_seconds):
+        blockers.append("MANAGED_ORDER_ARTIFACT_STALE")
+    return blockers
 
 
 def _inputs(
@@ -725,6 +767,25 @@ def _read_json(path: Path) -> dict[str, Any]:
     except json.JSONDecodeError:
         return {}
     return payload if isinstance(payload, dict) else {}
+
+
+def _artifact_stale(payload: Mapping[str, Any], *, now: datetime, max_age_seconds: float) -> bool:
+    generated_at = _parse_time(payload.get("generated_at"))
+    if generated_at is None:
+        return True
+    return (now - generated_at).total_seconds() > max_age_seconds
+
+
+def _parse_time(value: Any) -> datetime | None:
+    if value is None:
+        return None
+    try:
+        parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=UTC)
+    return parsed.astimezone(UTC)
 
 
 def _list(value: Any) -> list[Any]:

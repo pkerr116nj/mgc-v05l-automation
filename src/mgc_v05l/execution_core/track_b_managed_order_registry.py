@@ -522,6 +522,10 @@ def _position_without_close_rows(
                 "source_open_order_truth_classification": "BROKER_POSITION_WITHOUT_CLOSE_ORDER",
                 "source_order": None,
                 "broker_position": dict(position),
+                "managed_position_freshness_state": _managed_position_freshness_state(position),
+                "exit_due_evidence_stale": _managed_position_exit_due_evidence_stale(position),
+                "apply_authority_degraded": _managed_position_apply_authority_degraded(position),
+                "stale_dependency_sources": _managed_position_stale_dependency_sources(position),
                 "managed_exit_profile_present": active_hold_pending,
                 "exit_not_yet_eligible": active_hold_pending,
                 "close_order_required_now": not active_hold_pending,
@@ -653,6 +657,11 @@ def _managed_position_row_from_owner_exposure(
         "strategy_id": lifecycle_position.get("strategy_id") or exposure.get("strategy_id"),
         "managed_exit_policy_id": lifecycle_position.get("managed_exit_policy_id") or exposure.get("managed_exit_policy_id"),
         "exit_due": exit_due,
+        "exit_due_state": "EXIT_DUE" if exit_due else "NOT_DUE_OR_UNKNOWN",
+        "freshness_state": existing_position.get("freshness_state"),
+        "exit_due_evidence_stale": existing_position.get("exit_due_evidence_stale") is True,
+        "apply_authority_degraded": existing_position.get("apply_authority_degraded") is True,
+        "stale_dependency_sources": list(existing_position.get("stale_dependency_sources") or []),
         "attention_required": False,
         "working_close_qty": "0",
         "broker_position": dict(broker_position),
@@ -727,7 +736,7 @@ def _position_without_close_dedupe_keys(row: Mapping[str, Any]) -> set[str]:
 
 
 def _overall_classification(*, source_stale: Mapping[str, Any], managed_orders: list[dict[str, Any]]) -> str:
-    if source_stale.get("stale") is True:
+    if source_stale.get("stale") is True and not _has_due_position_without_close_order(managed_orders):
         return ORDER_STATE_UNKNOWN_REVIEW_REQUIRED
     if not managed_orders:
         return NO_MANAGED_ORDERS
@@ -750,6 +759,35 @@ def _overall_classification(*, source_stale: Mapping[str, Any], managed_orders: 
         if classification in classes:
             return classification
     return ORDER_STATE_UNKNOWN_REVIEW_REQUIRED
+
+
+def _has_due_position_without_close_order(managed_orders: list[dict[str, Any]]) -> bool:
+    return any(
+        str(item.get("classification") or "") == POSITION_WITHOUT_CLOSE_ORDER
+        and item.get("close_order_required_now") is True
+        for item in managed_orders
+    )
+
+
+def _managed_position_freshness_state(position: Mapping[str, Any]) -> str | None:
+    managed_position = _mapping(position.get("canonical_managed_position"))
+    value = managed_position.get("freshness_state") or position.get("freshness_state")
+    return str(value) if value is not None else None
+
+
+def _managed_position_exit_due_evidence_stale(position: Mapping[str, Any]) -> bool:
+    managed_position = _mapping(position.get("canonical_managed_position"))
+    return managed_position.get("exit_due_evidence_stale") is True or position.get("exit_due_evidence_stale") is True
+
+
+def _managed_position_apply_authority_degraded(position: Mapping[str, Any]) -> bool:
+    managed_position = _mapping(position.get("canonical_managed_position"))
+    return managed_position.get("apply_authority_degraded") is True or position.get("apply_authority_degraded") is True
+
+
+def _managed_position_stale_dependency_sources(position: Mapping[str, Any]) -> list[Any]:
+    managed_position = _mapping(position.get("canonical_managed_position"))
+    return list(managed_position.get("stale_dependency_sources") or position.get("stale_dependency_sources") or [])
 
 
 def _recommended_next_action(*, classification: str, state: Mapping[str, Any]) -> str:

@@ -365,8 +365,13 @@ def _inputs(*, runtime_down: bool = True) -> dict:
     position = _position()
     candidate = _candidate()
     return {
-        "managed_positions": {"classification": "OPEN_MANAGED_EXIT_DUE", "managed_positions": [position]},
+        "managed_positions": {
+            "generated_at": NOW.isoformat(),
+            "classification": "OPEN_MANAGED_EXIT_DUE",
+            "managed_positions": [position],
+        },
         "managed_orders": {
+            "generated_at": NOW.isoformat(),
             "classification": "POSITION_WITHOUT_CLOSE_ORDER",
             "managed_orders": [
                 {

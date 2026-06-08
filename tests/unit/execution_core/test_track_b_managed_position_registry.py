@@ -17,6 +17,7 @@ from mgc_v05l.execution_core.track_b_managed_position_registry import (
     OPEN_MANAGED_MATCHED,
     PROJECTION_AUTHORITY_COHERENT,
     REVIEW_REQUIRED,
+    STALE_MANAGED_POSITION_EVIDENCE,
     TrackBManagedPositionRegistryConfig,
     build_track_b_managed_position_registry,
     write_track_b_managed_position_registry,
@@ -514,6 +515,61 @@ def test_exit_due_uses_current_phase1_completed_5m_bars_over_stale_lifecycle_cou
     assert payload["classification"] == OPEN_MANAGED_EXIT_DUE
     assert payload["managed_positions"][0]["bars_since_entry"] == 3
     assert payload["managed_positions"][0]["exit_due"] is True
+
+
+def test_exit_due_survives_stale_dependency_freshness_when_current_owner_is_exact(tmp_path: Path) -> None:
+    lifecycle = {**_lifecycle_position(bars_since_fill=3), "trade_id": "trade_mnq_due"}
+    _seed_base(tmp_path, broker_positions=[_broker_position()], lifecycle_positions=[lifecycle])
+    _write_lifecycle_report(tmp_path, lifecycle_id=lifecycle["lifecycle_id"], bars_since_fill=3)
+    position_truth_path = (
+        tmp_path / "outputs" / "track_b_execution_core" / "position_truth" / "latest_position_truth.json"
+    )
+    position_truth = json.loads(position_truth_path.read_text(encoding="utf-8"))
+    position_truth["generated_at"] = (NOW - timedelta(minutes=10)).isoformat()
+    position_truth_path.write_text(json.dumps(position_truth, indent=2, sort_keys=True), encoding="utf-8")
+
+    payload = build_track_b_managed_position_registry(
+        config=TrackBManagedPositionRegistryConfig(repo_root=tmp_path),
+        now=NOW,
+    )
+
+    assert payload["classification"] == OPEN_MANAGED_EXIT_DUE
+    assert payload["source_freshness"]["stale"] is True
+    position = payload["managed_positions"][0]
+    assert position["classification"] == OPEN_MANAGED_EXIT_DUE
+    assert position["exit_due"] is True
+    assert position["exit_due_state"] == "EXIT_DUE"
+    assert position["freshness_state"] == "STALE_DEPENDENCY"
+    assert position["exit_due_evidence_stale"] is True
+    assert position["apply_authority_degraded"] is True
+    assert "position_truth" in position["stale_dependency_sources"]
+    assert position["required_close_action"] == "BUY"
+    assert position["required_close_quantity"] == "1"
+    assert position["lifecycle_id"] == lifecycle["lifecycle_id"]
+    assert position["trade_id"] == "trade_mnq_due"
+
+
+def test_stale_dependency_does_not_invent_exit_due_without_bar_evidence(tmp_path: Path) -> None:
+    lifecycle = {**_lifecycle_position(bars_since_fill=1), "trade_id": "trade_mnq_not_due"}
+    _seed_base(tmp_path, broker_positions=[_broker_position()], lifecycle_positions=[lifecycle])
+    _write_lifecycle_report(tmp_path, lifecycle_id=lifecycle["lifecycle_id"], bars_since_fill=1)
+    position_truth_path = (
+        tmp_path / "outputs" / "track_b_execution_core" / "position_truth" / "latest_position_truth.json"
+    )
+    position_truth = json.loads(position_truth_path.read_text(encoding="utf-8"))
+    position_truth["generated_at"] = (NOW - timedelta(minutes=10)).isoformat()
+    position_truth_path.write_text(json.dumps(position_truth, indent=2, sort_keys=True), encoding="utf-8")
+
+    payload = build_track_b_managed_position_registry(
+        config=TrackBManagedPositionRegistryConfig(repo_root=tmp_path),
+        now=NOW,
+    )
+
+    assert payload["classification"] == STALE_MANAGED_POSITION_EVIDENCE
+    position = payload["managed_positions"][0]
+    assert position["classification"] == STALE_MANAGED_POSITION_EVIDENCE
+    assert position["exit_due"] is False
+    assert position["freshness_state"] == "STALE_DEPENDENCY"
 
 
 def test_close_working_comes_from_open_order_truth(tmp_path: Path) -> None:
