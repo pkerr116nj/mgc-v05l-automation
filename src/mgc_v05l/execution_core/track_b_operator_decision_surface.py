@@ -29,7 +29,7 @@ CONTROL_PLANE_PATH = "outputs/track_b_execution_core/control_plane/latest_contro
 BROKER_AUTHORITY_OWNERSHIP_PATH = "outputs/operator_dashboard/runtime/latest_broker_authority_ownership.json"
 BROKER_SESSION_AUTHORITY_PATH = "outputs/operator_dashboard/runtime/latest_broker_session_authority.json"
 OPEN_ORDER_TRUTH_PATH = "outputs/track_b_execution_core/open_order_truth/latest_open_order_truth.json"
-MANAGED_POSITIONS_PATH = "outputs/operator_dashboard/runtime/latest_track_b_managed_positions.json"
+MANAGED_POSITIONS_PATH = "outputs/track_b_execution_core/managed_positions/latest_managed_positions.json"
 MANAGED_ORDERS_PATH = "outputs/track_b_execution_core/managed_orders/latest_managed_orders.json"
 OPERATOR_READINESS_REFRESHER_STATUS_PATH = (
     "outputs/reports/track_b_operator_readiness_refresher/latest_track_b_operator_readiness_refresher_status.json"
@@ -437,9 +437,9 @@ def _refresh_failure_superseded_by_current_authority(
     refresher_ts = _source_generated_at(refresher)
     if refresher_ts is None:
         return False
-    if any((_source_generated_at(source) is None or _source_generated_at(source) < refresher_ts) for source in current_sources if source):
+    if any((_source_generated_at(source) is None or _source_generated_at(source) <= refresher_ts) for source in current_sources if source):
         return False
-    return broker_state == "FLAT"
+    return broker_state in {"FLAT", "EXPOSED_MANAGED"}
 
 
 def _diagnostic_warnings(
