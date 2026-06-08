@@ -809,6 +809,16 @@ def _control_plane_allows_managed_exit(
     )
     if _control_plane_has_explicit_hard_hold(snapshot):
         return False, "Control Plane reports an explicit hard safety hold."
+    if close_only_authority and classification in {
+        "CONTROL_PLANE_SNAPSHOT_BLOCKED",
+        "CONTROL_PLANE_SNAPSHOT_STALE_OR_MIXED",
+        "CONTROL_PLANE_SNAPSHOT_START_BLOCKED",
+        "CONTROL_PLANE_SNAPSHOT_BLOCKED_START_PREFLIGHT",
+    }:
+        return True, (
+            "Close-only BSA authority permits exact managed-exit recovery while "
+            "entry/runtime Control Plane authority is degraded."
+        )
     if snapshot.get("shared_truth_coherence_status") != "COHERENT" and close_only_authority:
         return True, "Close-only BSA authority permits exact managed-exit recovery while entry Control Plane coherence is degraded."
     if snapshot.get("shared_truth_coherence_status") != "COHERENT":
@@ -818,8 +828,6 @@ def _control_plane_allows_managed_exit(
     cleanup_state = supervisor == "SUPERVISOR_CLEANUP_REQUIRED_BEFORE_RUNTIME" or _snapshot_has_position_without_close(snapshot)
     if classification == "CONTROL_PLANE_SNAPSHOT_BLOCKED" and cleanup_state:
         return True, "Control Plane is blocked by the exact cleanup condition this managed-exit attach addresses."
-    if classification == "CONTROL_PLANE_SNAPSHOT_BLOCKED" and close_only_authority:
-        return True, "Close-only BSA authority permits exact managed-exit recovery while entry Control Plane is blocked."
     return False, f"Control Plane classification does not permit managed-exit attach: {classification or 'UNKNOWN'}."
 
 
