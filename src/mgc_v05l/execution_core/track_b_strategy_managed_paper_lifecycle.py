@@ -1972,7 +1972,16 @@ def _evaluate_managed_exit_close_authority(
         block_reasons.append("SAFE_STATE_TRIPPED_LIMITS")
     if not snapshot:
         block_reasons.append("CONTROL_PLANE_SNAPSHOT_MISSING")
-    if snapshot.get("shared_truth_coherence_status") != "COHERENT":
+    close_specific_control_plane_coherence_bypass = _managed_close_can_bypass_entry_control_plane_coherence(
+        safe_state=safe_state,
+        broker_session_authority=broker_session_authority,
+        target_identity=target_identity,
+        registry_exit_validation=registry_validation,
+    )
+    if (
+        snapshot.get("shared_truth_coherence_status") != "COHERENT"
+        and not close_specific_control_plane_coherence_bypass
+    ):
         block_reasons.append(
             "CONTROL_PLANE_NOT_COHERENT:"
             + str(snapshot.get("shared_truth_coherence_status") or "UNKNOWN")
@@ -2018,6 +2027,8 @@ def _evaluate_managed_exit_close_authority(
         "requires_broker_mutation_allowed": not safe_close_allowed,
         "requires_managed_close_mutation_allowed": True,
         "requires_control_plane_close_authority": True,
+        "control_plane_coherence_bypassed_for_exact_managed_close": close_specific_control_plane_coherence_bypass
+        and snapshot.get("shared_truth_coherence_status") != "COHERENT",
         "control_plane_snapshot_id": snapshot.get("control_plane_snapshot_id"),
         "control_plane_snapshot_age_seconds": snapshot_age_seconds,
         "control_plane_snapshot_max_age_seconds": int(config.pre_action_snapshot_max_age_seconds),
@@ -2037,6 +2048,29 @@ def _evaluate_managed_exit_close_authority(
         "legacy_pre_action_reason": pre_action.get("reason"),
         "block_reasons": block_reasons,
     }
+
+
+def _managed_close_can_bypass_entry_control_plane_coherence(
+    *,
+    safe_state: Mapping[str, Any],
+    broker_session_authority: Mapping[str, Any],
+    target_identity: Mapping[str, Any],
+    registry_exit_validation: Mapping[str, Any],
+) -> bool:
+    if target_identity.get("intent_kind") != IntentKind.CLOSE.value:
+        return False
+    if registry_exit_validation.get("allowed") is not True:
+        return False
+    if _broker_session_managed_close_blocker(broker_session_authority):
+        return False
+    if safe_state.get("managed_close_mutation_allowed") is not True and safe_state.get("broker_mutation_allowed") is not True:
+        return False
+    if safe_state.get("live_money_eligible") is True or safe_state.get("paper_proof_invoked") is True:
+        return False
+    for key in ("action", "quantity", "lifecycle_id", "trade_id", "con_id", "contract"):
+        if not str(target_identity.get(key) or "").strip():
+            return False
+    return True
 
 
 def _broker_session_managed_close_blocker(authority: Mapping[str, Any]) -> str | None:
