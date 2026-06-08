@@ -611,6 +611,64 @@ def test_exact_exit_due_close_allows_entry_oriented_control_plane_block_with_clo
     assert payload["broker_state_mutated"] is False
 
 
+def test_exact_exit_due_close_allows_degraded_managed_order_topline_with_exact_row(tmp_path: Path) -> None:
+    config = _seed(
+        tmp_path,
+        completed_bars=3,
+        snapshot_overrides={
+            "classification": "CONTROL_PLANE_SNAPSHOT_BLOCKED",
+            "shared_truth_coherence_status": "COHERENT",
+            "runtime_supervisor_classification": "SUPERVISOR_RUNTIME_START_ALLOWED",
+            "open_order_truth_classification": "NO_OPEN_ORDERS",
+            "managed_order_registry_classification": "ORDER_STATE_UNKNOWN_REVIEW_REQUIRED",
+        },
+        open_order_overrides={"classification": "NO_OPEN_ORDERS", "unknown_open_order_count": 0},
+        managed_order_overrides={"classification": "ORDER_STATE_UNKNOWN_REVIEW_REQUIRED"},
+    )
+
+    payload = build_track_b_managed_exit_attach_plan(config=config, now=NOW)
+
+    assert payload["classification"] == MANAGED_EXIT_TIMEBOX_CLOSE_ELIGIBLE
+    assert payload["managed_order_registry_classification"] == "ORDER_STATE_UNKNOWN_REVIEW_REQUIRED"
+    assert payload["broker_session_allowed_uses"]["managed_risk_reducing_close"] is True
+    assert payload["close_intent_preview"]["order_action"] == "SELL"
+    assert payload["submit_attempted"] is False
+    assert payload["broker_state_mutated"] is False
+
+
+def test_exact_exit_due_close_blocks_degraded_managed_order_topline_without_exact_row(tmp_path: Path) -> None:
+    config = _seed(
+        tmp_path,
+        completed_bars=3,
+        snapshot_overrides={
+            "classification": "CONTROL_PLANE_SNAPSHOT_BLOCKED",
+            "shared_truth_coherence_status": "COHERENT",
+            "runtime_supervisor_classification": "SUPERVISOR_RUNTIME_START_ALLOWED",
+            "open_order_truth_classification": "NO_OPEN_ORDERS",
+            "managed_order_registry_classification": "ORDER_STATE_UNKNOWN_REVIEW_REQUIRED",
+        },
+        open_order_overrides={"classification": "NO_OPEN_ORDERS", "unknown_open_order_count": 0},
+        managed_order_overrides={
+            "classification": "ORDER_STATE_UNKNOWN_REVIEW_REQUIRED",
+            "managed_orders": [
+                {
+                    "working": False,
+                    "local_symbol": "MESM6",
+                    "action": "SELL",
+                    "quantity": "1",
+                    "classification": "POSITION_WITHOUT_CLOSE_ORDER",
+                }
+            ],
+        },
+    )
+
+    payload = build_track_b_managed_exit_attach_plan(config=config, now=NOW)
+
+    assert payload["classification"] == "MANAGED_EXIT_BLOCKED_CONTROL_PLANE"
+    assert payload["submit_attempted"] is False
+    assert payload["broker_state_mutated"] is False
+
+
 def test_exact_exit_due_close_respects_control_plane_hard_hold(tmp_path: Path) -> None:
     config = _seed(
         tmp_path,

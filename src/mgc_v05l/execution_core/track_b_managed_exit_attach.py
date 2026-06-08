@@ -195,10 +195,12 @@ def build_track_b_managed_exit_attach_plan(
 
     blockers: list[str] = []
     control_plane_ok, control_plane_reason = _control_plane_allows_managed_exit(
+        config=config,
         snapshot=snapshot,
         broker_session_authority=broker_session_authority,
         open_order_truth=open_order_truth,
         managed_orders=managed_orders,
+        close_action=close_action,
     )
     safe_state_ok, safe_state_reason = _safe_state_allows_managed_exit(safe_state)
     position_ok, position_reason = _position_identity_matches(
@@ -781,10 +783,12 @@ def _lane_from_strategy_id(strategy_id: str) -> str:
 
 def _control_plane_allows_managed_exit(
     *,
+    config: TrackBManagedExitAttachConfig,
     snapshot: Mapping[str, Any],
     broker_session_authority: Mapping[str, Any],
     open_order_truth: Mapping[str, Any],
     managed_orders: Mapping[str, Any],
+    close_action: str,
 ) -> tuple[bool, str]:
     if not snapshot:
         return False, "Control Plane Snapshot is missing."
@@ -797,9 +801,11 @@ def _control_plane_allows_managed_exit(
     classification = str(snapshot.get("classification") or "")
     supervisor = str(snapshot.get("runtime_supervisor_classification") or "")
     close_only_authority = _close_only_authority_allows_unhealthy_runtime(
+        config=config,
         broker_session_authority=broker_session_authority,
         open_order_truth=open_order_truth,
         managed_orders=managed_orders,
+        close_action=close_action,
     )
     if _control_plane_has_explicit_hard_hold(snapshot):
         return False, "Control Plane reports an explicit hard safety hold."
@@ -839,9 +845,11 @@ def _safe_state_allows_managed_exit(safe_state: Mapping[str, Any]) -> tuple[bool
 
 def _close_only_authority_allows_unhealthy_runtime(
     *,
+    config: TrackBManagedExitAttachConfig,
     broker_session_authority: Mapping[str, Any],
     open_order_truth: Mapping[str, Any],
     managed_orders: Mapping[str, Any],
+    close_action: str,
 ) -> bool:
     allowed_uses = _mapping(broker_session_authority.get("allowed_uses"))
     if allowed_uses.get("managed_risk_reducing_close") is not True:
@@ -856,13 +864,47 @@ def _close_only_authority_allows_unhealthy_runtime(
     if int(open_order_truth.get("unknown_open_order_count") or 0) != 0:
         return False
     managed_order_classification = str(managed_orders.get("classification") or "")
-    if managed_order_classification not in {POSITION_WITHOUT_CLOSE_ORDER, BROKER_POSITION_WITHOUT_CLOSE_ORDER}:
+    if managed_order_classification not in {
+        POSITION_WITHOUT_CLOSE_ORDER,
+        BROKER_POSITION_WITHOUT_CLOSE_ORDER,
+    } and not _managed_orders_have_exact_position_without_close_row(
+        config=config,
+        managed_orders=managed_orders,
+        close_action=close_action,
+    ):
         return False
     close_mode = str(broker_session_authority.get("risk_reducing_close_connection_mode") or "")
     if close_mode == "RISK_REDUCING_CLOSE_CAPABLE_ORDER_STATUS_DEGRADED":
         context = _mapping(broker_session_authority.get("degraded_exact_risk_reducing_close_context"))
         return context.get("ready") is True
     return True
+
+
+def _managed_orders_have_exact_position_without_close_row(
+    *,
+    config: TrackBManagedExitAttachConfig,
+    managed_orders: Mapping[str, Any],
+    close_action: str,
+) -> bool:
+    rows = [row for row in managed_orders.get("managed_orders") or managed_orders.get("orders") or [] if isinstance(row, Mapping)]
+    if not rows:
+        return False
+    exact_rows = []
+    for row in rows:
+        local_symbol = str(row.get("local_symbol") or row.get("contract") or "")
+        row_action = str(row.get("required_close_action") or row.get("action") or "")
+        quantity = _decimal(row.get("required_close_quantity") or row.get("quantity"))
+        classification = str(row.get("classification") or "")
+        if (
+            local_symbol == config.local_symbol
+            and row_action == close_action
+            and quantity == Decimal(str(config.quantity))
+            and classification in {POSITION_WITHOUT_CLOSE_ORDER, BROKER_POSITION_WITHOUT_CLOSE_ORDER}
+            and row.get("working") is not True
+            and not list(row.get("suspicious_reasons") or [])
+        ):
+            exact_rows.append(row)
+    return len(exact_rows) == 1
 
 
 def _control_plane_has_explicit_hard_hold(snapshot: Mapping[str, Any]) -> bool:
