@@ -475,6 +475,48 @@ def test_flat_no_order_submit_session_liveness_allows_new_entry_without_recent_o
     assert result["callback_ownership_attribution"]["classification"] == "CALLBACK_ATTRIBUTION_GAP"
 
 
+def test_flat_no_order_uses_clean_reconciliation_over_stale_lifecycle_projection() -> None:
+    inputs = base_inputs()
+    inputs["order_state"] = {
+        "generated_at": RECON_TIME,
+        "classification": "NO_OPEN_ORDERS",
+        "unknown_open_order_count": 0,
+        "unresolved_intent_count": 0,
+        "open_order_end_observed": True,
+        "live_money_eligible": False,
+    }
+    inputs["reconciliation"] = {
+        **dict(inputs["reconciliation"]),
+        "current_scope_lifecycle_open_position_count": 0,
+        "current_scope_lifecycle_open_order_count": 0,
+        "current_scope_lifecycle_positions": [],
+        "managed_position_count": 0,
+        "managed_open_position_count": 0,
+        "owner_resolution": {"classification": "NO_OPEN_EXPOSURE", "owned_exposure_count": 0},
+    }
+    inputs["lifecycle"] = {
+        **dict(inputs["lifecycle"]),
+        "open_position_count": 1,
+        "open_positions": [{"local_symbol": "MESM6", "quantity": "1", "stale_diagnostic_only": True}],
+    }
+    inputs["submit_session_readiness"] = {
+        "submit_session_ready": True,
+        "next_valid_id_received": True,
+        "next_valid_id": 1001,
+        "managed_accounts_observed": True,
+        "managed_accounts": ["DUM882026"],
+        "source": "runtime_submit_session_readiness",
+    }
+
+    result = classify_broker_truth_lease(inputs)
+
+    context = result["connection_health"]["flat_no_order_submit_capable_context"]
+    assert context["current_scope_lifecycle_flat"] is True
+    assert context["ready"] is True
+    assert result["connection_mode"] == "SUBMIT_CAPABLE_NO_RECENT_ORDER_EVENTS"
+    assert result["allowed_uses"]["new_entry"] is True
+
+
 def test_flat_no_order_without_submit_session_liveness_blocks_with_specific_reason() -> None:
     inputs = base_inputs()
     inputs["order_state"] = {

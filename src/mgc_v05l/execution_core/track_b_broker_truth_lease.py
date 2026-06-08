@@ -1520,19 +1520,48 @@ def _current_scope_lifecycle_flat(
     lifecycle: Mapping[str, Any],
     order_state: Mapping[str, Any],
 ) -> bool:
+    if _reconciliation_clean(reconciliation) and (
+        "current_scope_lifecycle_open_position_count" in reconciliation
+        or "lifecycle_open_position_count" in reconciliation
+    ):
+        position_count = int(
+            _first_present(
+                reconciliation.get("current_scope_lifecycle_open_position_count"),
+                reconciliation.get("lifecycle_open_position_count"),
+                0,
+            )
+            or 0
+        )
+        order_count = int(
+            _first_present(
+                reconciliation.get("current_scope_lifecycle_open_order_count"),
+                reconciliation.get("lifecycle_open_order_count"),
+                0,
+            )
+            or 0
+        )
+        positions = reconciliation.get("current_scope_lifecycle_positions") or reconciliation.get("track_b_lifecycle_positions") or []
+        return position_count == 0 and order_count == 0 and not list(positions or [])
+
     position_count = int(
-        reconciliation.get("current_scope_lifecycle_open_position_count")
-        or reconciliation.get("lifecycle_open_position_count")
-        or lifecycle.get("current_scope_lifecycle_open_position_count")
-        or lifecycle.get("open_position_count")
+        _first_present(
+            reconciliation.get("current_scope_lifecycle_open_position_count"),
+            reconciliation.get("lifecycle_open_position_count"),
+            lifecycle.get("current_scope_lifecycle_open_position_count"),
+            lifecycle.get("open_position_count"),
+            0,
+        )
         or 0
     )
     order_count = int(
-        reconciliation.get("current_scope_lifecycle_open_order_count")
-        or reconciliation.get("lifecycle_open_order_count")
-        or lifecycle.get("current_scope_lifecycle_open_order_count")
-        or lifecycle.get("open_order_count")
-        or order_state.get("lifecycle_open_order_count")
+        _first_present(
+            reconciliation.get("current_scope_lifecycle_open_order_count"),
+            reconciliation.get("lifecycle_open_order_count"),
+            lifecycle.get("current_scope_lifecycle_open_order_count"),
+            lifecycle.get("open_order_count"),
+            order_state.get("lifecycle_open_order_count"),
+            0,
+        )
         or 0
     )
     positions = lifecycle.get("current_scope_lifecycle_positions") or lifecycle.get("open_positions") or []
