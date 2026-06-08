@@ -75,6 +75,7 @@ def seed_strategy_submit_authority(
     safe_state_overrides: Mapping[str, Any] | None = None,
     snapshot_overrides: Mapping[str, Any] | None = None,
     planner_target_overrides: Mapping[str, Any] | None = None,
+    broker_session_authority_overrides: Mapping[str, Any] | None = None,
 ) -> None:
     target = lifecycle_module._strategy_submit_target_identity(
         config=config,
@@ -161,12 +162,51 @@ def seed_strategy_submit_authority(
     safe_state.update(dict(safe_state_overrides or {}))
     _write_json(tmp_path / "outputs/track_b_execution_core/safe_state/latest_runtime_safe_state_envelope.json", safe_state)
     if intent_kind is IntentKind.CLOSE:
+        broker_session_authority = _default_close_capable_broker_session_authority()
+        broker_session_authority.update(dict(broker_session_authority_overrides or {}))
+        _write_json(
+            tmp_path / "outputs/operator_dashboard/runtime/latest_broker_session_authority.json",
+            broker_session_authority,
+        )
         _seed_registry_backed_close_truth(tmp_path, config=config, intent_payload=intent_payload)
 
 
 def _write_json(path: Path, payload: Mapping[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(dict(payload), indent=2, sort_keys=True) + "\n", encoding="utf-8")
+
+
+def _default_close_capable_broker_session_authority() -> dict[str, Any]:
+    return {
+        "schema_version": "track_b_broker_session_authority_v1",
+        "generated_at": aware_now().isoformat(),
+        "classification": "BROKER_SESSION_AUTHORITY_ORDER_STATUS_UNRELIABLE",
+        "connection_mode": "ORDER_STATUS_UNRELIABLE",
+        "allowed_uses": {
+            "new_entry": False,
+            "managed_risk_reducing_close": True,
+            "broker_observed_adoption_diagnosis": True,
+            "fill_callback_adoption": False,
+            "status_diagnostic": True,
+        },
+        "risk_reducing_close_connection_mode": "RISK_REDUCING_CLOSE_CAPABLE_ORDER_STATUS_DEGRADED",
+        "degraded_exact_risk_reducing_close_context": {
+            "ready": True,
+            "broker_position_exactly_one": True,
+            "broker_open_orders_zero": True,
+            "unknown_open_orders_zero": True,
+            "broker_lifecycle_reconciled": True,
+            "current_scope_lifecycle_position_exact": True,
+            "broker_position_lease_fresh": True,
+            "broker_open_order_lease_fresh": True,
+            "no_lifecycle_open_order": True,
+            "no_live_money_or_paper_proof": True,
+        },
+        "live_money_eligible": False,
+        "paper_proof_invoked": False,
+        "broad_flatten_allowed": False,
+        "global_flatten_allowed": False,
+    }
 
 
 def _seed_registry_backed_close_truth(
@@ -1083,6 +1123,94 @@ def test_time_boxed_exit_policy_waits_until_required_completed_bars(tmp_path: Pa
     assert result.report["expected_exit_condition"] == "TIME_BOXED_EXIT_AFTER_3_COMPLETED_5M_BARS"
     assert result.report["close_intent_status"] == "WAITING_FOR_EXIT_POLICY_CONDITION"
     assert result.report["close_intent"] is None
+
+
+def test_globex_active_evidence_policy_waits_for_twelve_completed_5m_bars(tmp_path: Path) -> None:
+    result = run_track_b_strategy_managed_paper_lifecycle(
+        config=base_config(
+            tmp_path,
+            strategy_id="PAPER_ACTIVE_EVIDENCE_MES_GLOBEX_PARTICIPATION_LONG_V1",
+            lane_id="mes_globex_active_participation_long",
+            instrument_family="MES",
+            contract_key="MES-202606",
+            local_symbol="MESM6",
+            con_id=770561194,
+            managed_exit_policy_id=TrackBManagedExitPolicy.GLOBEX_ACTIVE_EVIDENCE_TIMEBOX_60M_EXIT_V1.value,
+            managed_exit_policy_max_completed_5m_bars=3,
+            completed_5m_bars_since_entry=11,
+        ),
+        stages=fake_stages(),
+        lifecycle_id="globex-active-wait",
+        now=aware_now(),
+    )
+
+    assert result.classification == TrackBManagedPaperLifecycleClassification.OPEN_MANAGED
+    assert result.report["managed_exit_policy_id"] == "GLOBEX_ACTIVE_EVIDENCE_TIMEBOX_60M_EXIT_V1"
+    assert result.report["managed_exit_policy_max_completed_5m_bars"] == 12
+    assert result.report["expected_exit_condition"] == "TIME_BOXED_EXIT_AFTER_12_COMPLETED_5M_BARS"
+    assert result.report["close_intent_status"] == "WAITING_FOR_EXIT_POLICY_CONDITION"
+    assert result.report["close_intent"] is None
+
+
+def test_globex_active_evidence_policy_creates_timebox_close_after_twelve_bars(tmp_path: Path) -> None:
+    result = run_track_b_strategy_managed_paper_lifecycle(
+        config=base_config(
+            tmp_path,
+            strategy_id="PAPER_ACTIVE_EVIDENCE_MES_GLOBEX_PARTICIPATION_LONG_V1",
+            lane_id="mes_globex_active_participation_long",
+            instrument_family="MES",
+            contract_key="MES-202606",
+            local_symbol="MESM6",
+            con_id=770561194,
+            managed_exit_policy_id=TrackBManagedExitPolicy.GLOBEX_ACTIVE_EVIDENCE_TIMEBOX_60M_EXIT_V1.value,
+            managed_exit_policy_max_completed_5m_bars=3,
+            completed_5m_bars_since_entry=12,
+        ),
+        stages=fake_stages(),
+        lifecycle_id="globex-active-close",
+        now=aware_now(),
+    )
+
+    assert result.classification == TrackBManagedPaperLifecycleClassification.CLOSED_FLAT
+    assert result.report["managed_exit_policy_max_completed_5m_bars"] == 12
+    assert result.report["expected_exit_condition"] == "TIME_BOXED_EXIT_AFTER_12_COMPLETED_5M_BARS"
+    assert result.report["close_intent"]["close_reason"] == "TIME_BOXED_EXIT"
+    assert result.report["close_intent"]["required_completed_5m_bars"] == 12
+
+
+def test_filled_bridge_result_persists_globex_active_evidence_as_60m_policy(tmp_path: Path) -> None:
+    path = write_open_managed_lifecycle_report_from_filled_bridge_result(
+        filled_bridge_result={
+            "intent_type": "BUY_TO_OPEN",
+            "paper_proof_invoked": False,
+            "live_money_readiness": False,
+            "managed_exit_policy_id": "GLOBEX_ACTIVE_EVIDENCE_TIMEBOX_60M_EXIT_V1",
+            "order_intent_id": "MES|1m|2026-05-29T05:51:00Z|BUY_TO_OPEN",
+            "instrument": "MES",
+            "symbol": "MES",
+            "contract_key": "MES-202606",
+            "local_symbol": "MESM6",
+            "con_id": 770561194,
+            "quantity": 1,
+            "account_id": "DUM882026",
+            "strategy_id": "PAPER_ACTIVE_EVIDENCE_MES_GLOBEX_PARTICIPATION_LONG_V1",
+            "lane_id": "mes_globex_active_participation_long",
+            "broker_order_id": "1",
+            "perm_id": 2047276068,
+            "exec_id": "0000e1a7.6a2870c7.01.01",
+            "fill_price": "7586.75",
+            "fill_timestamp": "2026-05-29T05:54:30.918694+00:00",
+        },
+        output_root=tmp_path / "managed",
+        now=aware_now(),
+    )
+
+    assert path is not None
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    assert payload["managed_exit_policy_id"] == "GLOBEX_ACTIVE_EVIDENCE_TIMEBOX_60M_EXIT_V1"
+    assert payload["managed_exit_policy_max_completed_5m_bars"] == 12
+    assert payload["expected_exit_condition"] == "TIME_BOXED_EXIT_AFTER_12_COMPLETED_5M_BARS"
+    assert payload["open_state"]["managed_exit_policy_max_completed_5m_bars"] == 12
 
 
 def test_continuation_aware_preview_is_diagnostic_only_for_first_p0_strategy(tmp_path: Path) -> None:
@@ -2087,6 +2215,78 @@ def test_managed_exit_close_authority_blocks_unsafe_safe_state(tmp_path: Path) -
     assert "SAFE_STATE_BROKER_MUTATION_NOT_ALLOWED" in authorization["reason"]
 
 
+def test_managed_exit_close_authority_blocks_when_bsa_close_not_allowed(tmp_path: Path) -> None:
+    config = base_config(tmp_path)
+    close_intent = {
+        "lifecycle_id": "open-managed-existing",
+        "trade_id": "MNQ_FIRST_BULL_SNAP_TURN_V1:open-managed-existing",
+        "order_action": "SELL",
+        "quantity": 1,
+        "close_limit_price": "4705.1",
+    }
+    seed_strategy_submit_authority(
+        tmp_path,
+        config=config,
+        intent_payload=close_intent,
+        intent_kind=IntentKind.CLOSE,
+        limit_price="4705.1",
+        broker_session_authority_overrides={
+            "allowed_uses": {
+                "new_entry": False,
+                "managed_risk_reducing_close": False,
+                "broker_observed_adoption_diagnosis": True,
+                "fill_callback_adoption": False,
+                "status_diagnostic": True,
+            },
+            "risk_reducing_close_connection_mode": "ORDER_STATUS_UNRELIABLE",
+        },
+    )
+
+    authorization = lifecycle_module.build_strategy_managed_submit_authorization(
+        config=config,
+        intent_payload=close_intent,
+        intent_kind=IntentKind.CLOSE,
+        limit_price="4705.1",
+        now=aware_now(),
+    )
+
+    assert authorization["classification"] == lifecycle_module.STRATEGY_SUBMIT_BLOCKED_ENTRY_EXPOSURE
+    assert "BROKER_SESSION_CLOSE_AUTHORITY_BLOCKED:MANAGED_RISK_REDUCING_CLOSE_NOT_ALLOWED" in authorization["reason"]
+
+
+def test_managed_exit_close_authority_blocks_when_degraded_bsa_context_not_ready(tmp_path: Path) -> None:
+    config = base_config(tmp_path)
+    close_intent = {
+        "lifecycle_id": "open-managed-existing",
+        "trade_id": "MNQ_FIRST_BULL_SNAP_TURN_V1:open-managed-existing",
+        "order_action": "SELL",
+        "quantity": 1,
+        "close_limit_price": "4705.1",
+    }
+    seed_strategy_submit_authority(
+        tmp_path,
+        config=config,
+        intent_payload=close_intent,
+        intent_kind=IntentKind.CLOSE,
+        limit_price="4705.1",
+        broker_session_authority_overrides={
+            "risk_reducing_close_connection_mode": "ORDER_STATUS_UNRELIABLE",
+            "degraded_exact_risk_reducing_close_context": {"ready": False},
+        },
+    )
+
+    authorization = lifecycle_module.build_strategy_managed_submit_authorization(
+        config=config,
+        intent_payload=close_intent,
+        intent_kind=IntentKind.CLOSE,
+        limit_price="4705.1",
+        now=aware_now(),
+    )
+
+    assert authorization["classification"] == lifecycle_module.STRATEGY_SUBMIT_BLOCKED_ENTRY_EXPOSURE
+    assert "BROKER_SESSION_CLOSE_AUTHORITY_BLOCKED:DEGRADED_CLOSE_MODE_NOT_GRANTED" in authorization["reason"]
+
+
 def test_managed_exit_close_authority_allows_registry_verified_close_under_guardian_hold(tmp_path: Path) -> None:
     config = base_config(
         tmp_path,
@@ -2564,6 +2764,25 @@ def test_maintenance_blocks_close_when_broker_position_missing_before_submit(
     assert close_attempt["classification"] == "BROKER_POSITION_NOT_OPEN_FOR_MANAGED_CLOSE"
     assert close_attempt["submitted"] is False
     assert close_attempt["broker_state_mutated"] is False
+
+
+def test_managed_close_allowlist_uses_exact_existing_contract_expiry(tmp_path: Path) -> None:
+    config = base_config(
+        tmp_path,
+        instrument_family="MES",
+        contract_key="MES-202606",
+        local_symbol="MESM6",
+        con_id=770561194,
+        contract_expiry="20260618",
+        close_limit_price="7584",
+    )
+
+    allowlist_entry = lifecycle_module._contract_allowlist_entry(config)
+
+    assert allowlist_entry["contract_month"] == "202606"
+    assert allowlist_entry["expiry"] == "20260618"
+    assert allowlist_entry["local_symbol"] == "MESM6"
+    assert allowlist_entry["con_id"] == 770561194
 
 
 def test_maintenance_blocks_close_when_broker_position_direction_mismatches(

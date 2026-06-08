@@ -54,6 +54,7 @@ def build_broker_session_authority(
     source_connection_mode = str(lease.get("connection_mode") or "").strip().upper()
     connection_health = _mapping(lease.get("connection_health"))
     connection_mode = _effective_connection_mode(lease=lease, source_connection_mode=source_connection_mode)
+    degraded_exact_close_context = _mapping(lease.get("degraded_exact_risk_reducing_close_context"))
     callback_attribution = _mapping(
         lease.get("callback_ownership_attribution") or connection_health.get("callback_ownership_attribution")
     )
@@ -136,6 +137,13 @@ def build_broker_session_authority(
         "broker_position_lease": _mapping(lease.get("broker_position_lease")),
         "broker_open_order_lease": _mapping(lease.get("broker_open_order_lease")),
         "execution_fill_evidence_lease": _mapping(lease.get("execution_fill_evidence_lease")),
+        "degraded_exact_risk_reducing_close_context": degraded_exact_close_context,
+        "risk_reducing_close_connection_mode": (
+            "RISK_REDUCING_CLOSE_CAPABLE_ORDER_STATUS_DEGRADED"
+            if degraded_exact_close_context.get("ready") is True
+            and allowed_uses.get("managed_risk_reducing_close") is True
+            else connection_mode
+        ),
         "allowed_uses": allowed_uses,
         "connection_allowed_uses": _connection_allowed_uses(connection_health=connection_health, connection_mode=connection_mode),
         "authority_blockers": authority_blockers,
@@ -222,10 +230,12 @@ def _published_allowed_uses(*, lease: Mapping[str, Any], connection_mode: str, l
         "ACTIVE_DEGRADED_REFRESH_FAILING",
     }
     open_order_reliable = connection_mode in {"SUBMIT_CAPABLE", "FILL_CALLBACK_CAPABLE"}
+    degraded_exact_close = _lease_allows_degraded_exact_risk_reducing_close(lease=lease)
     return {
         "new_entry": bool(submit_capable and lease_allowed.get("new_entry") is True),
         "managed_risk_reducing_close": bool(
-            submit_capable and open_order_reliable and lease_allowed.get("managed_risk_reducing_close") is True
+            lease_allowed.get("managed_risk_reducing_close") is True
+            and ((submit_capable and open_order_reliable) or degraded_exact_close)
         ),
         "broker_observed_adoption_diagnosis": bool(lease_allowed.get("broker_observed_adoption_diagnosis") is True),
         "fill_callback_adoption": bool(
@@ -258,6 +268,17 @@ def _lease_allows_flat_no_order_new_entry(*, lease: Mapping[str, Any]) -> bool:
     )
     new_entry_allowed = lease_allowed.get("new_entry") is True or lease.get("submit_entry_allowed") is True
     return bool(flat_no_order_classified and new_entry_allowed)
+
+
+def _lease_allows_degraded_exact_risk_reducing_close(*, lease: Mapping[str, Any]) -> bool:
+    lease_allowed = _mapping(lease.get("allowed_uses"))
+    context = _mapping(lease.get("degraded_exact_risk_reducing_close_context"))
+    connection_mode = str(lease.get("connection_mode") or "").strip().upper()
+    return bool(
+        connection_mode == "ORDER_STATUS_UNRELIABLE"
+        and context.get("ready") is True
+        and lease_allowed.get("managed_risk_reducing_close") is True
+    )
 
 
 def _connection_allowed_uses(*, connection_health: Mapping[str, Any], connection_mode: str) -> dict[str, bool]:

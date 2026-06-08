@@ -78,6 +78,7 @@ from .track_b_open_order_truth import (
 from .track_b_paper_trade_ledger import DEFAULT_TRACK_B_PAPER_TRADE_LEDGER_OUTPUT_ROOT
 from .track_b_runtime_safe_state_envelope import DEFAULT_RUNTIME_SAFE_STATE_ENVELOPE_ARTIFACT
 from .track_b_runtime_supervisor_authority import DEFAULT_RUNTIME_SUPERVISOR_AUTHORITY_ARTIFACT
+from .track_b_broker_session_authority import DEFAULT_BROKER_SESSION_AUTHORITY_ARTIFACT
 
 
 DEFAULT_TRACK_B_STRATEGY_MANAGED_PAPER_LIFECYCLE_OUTPUT_ROOT = Path(
@@ -190,6 +191,7 @@ class TrackBStrategyManagedPaperLifecycleConfig:
     autonomous_recovery_plan_path: Path = DEFAULT_PAPER_AUTONOMOUS_RECOVERY_PLAN_ARTIFACT
     runtime_supervisor_authority_path: Path = DEFAULT_RUNTIME_SUPERVISOR_AUTHORITY_ARTIFACT
     runtime_safe_state_envelope_path: Path = DEFAULT_RUNTIME_SAFE_STATE_ENVELOPE_ARTIFACT
+    broker_session_authority_path: Path = DEFAULT_BROKER_SESSION_AUTHORITY_ARTIFACT
     pre_action_snapshot_max_age_seconds: int = 300
     expected_control_plane_snapshot_id: str | None = None
     expected_shared_truth_generation_id: str | None = None
@@ -1577,8 +1579,10 @@ def build_strategy_managed_submit_authorization(
             }
     snapshot_path = validator_config.resolve(Path(config.control_plane_snapshot_path))
     safe_state_path = _resolve_path(config.repo_root, Path(config.runtime_safe_state_envelope_path))
+    broker_session_authority_path = _resolve_path(config.repo_root, Path(config.broker_session_authority_path))
     snapshot = _read_json_object(snapshot_path)
     safe_state = _read_json_object(safe_state_path)
+    broker_session_authority = _read_json_object(broker_session_authority_path)
     entry_exposure_gate = (
         evaluate_track_b_entry_exposure_gate(
             TrackBEntryExposureGateConfig(
@@ -1662,6 +1666,7 @@ def build_strategy_managed_submit_authorization(
             pre_action=pre_action,
             snapshot=snapshot,
             safe_state=safe_state,
+            broker_session_authority=broker_session_authority,
             target_identity=target_identity,
             registry_exit_validation=registry_exit_validation,
             now=actual_now,
@@ -1714,6 +1719,7 @@ def build_strategy_managed_submit_authorization(
         "source_artifact_paths": {
             "control_plane_snapshot": str(snapshot_path),
             "runtime_safe_state_envelope": str(safe_state_path),
+            "broker_session_authority": str(broker_session_authority_path),
             "autonomous_recovery_plan": str(validator_config.resolve(Path(config.autonomous_recovery_plan_path))),
             "runtime_supervisor_authority": str(validator_config.resolve(Path(config.runtime_supervisor_authority_path))),
         },
@@ -1932,6 +1938,7 @@ def _evaluate_managed_exit_close_authority(
     pre_action: Mapping[str, Any],
     snapshot: Mapping[str, Any],
     safe_state: Mapping[str, Any],
+    broker_session_authority: Mapping[str, Any],
     target_identity: Mapping[str, Any],
     registry_exit_validation: Mapping[str, Any] | None,
     now: datetime,
@@ -1950,6 +1957,9 @@ def _evaluate_managed_exit_close_authority(
         block_reasons.append("LIVE_MONEY_ELIGIBLE")
     if _any_true(snapshot, safe_state, key="paper_proof_invoked"):
         block_reasons.append("PAPER_PROOF_INVOKED")
+    broker_session_blocker = _broker_session_managed_close_blocker(broker_session_authority)
+    if broker_session_blocker:
+        block_reasons.append("BROKER_SESSION_CLOSE_AUTHORITY_BLOCKED:" + broker_session_blocker)
     if not safe_state:
         block_reasons.append("SAFE_STATE_MISSING")
     safe_classification = str(safe_state.get("safe_state_classification") or safe_state.get("classification") or "")
@@ -2015,11 +2025,43 @@ def _evaluate_managed_exit_close_authority(
         "safe_state_broker_mutation_allowed": safe_state.get("broker_mutation_allowed"),
         "safe_state_managed_close_mutation_allowed": safe_state.get("managed_close_mutation_allowed"),
         "safe_state_close_authority_reason_codes": list(safe_state.get("close_authority_reason_codes") or []),
+        "broker_session_authority_classification": broker_session_authority.get("classification"),
+        "broker_session_connection_mode": broker_session_authority.get("connection_mode"),
+        "broker_session_allowed_uses": dict(_mapping(broker_session_authority.get("allowed_uses"))),
+        "risk_reducing_close_connection_mode": broker_session_authority.get("risk_reducing_close_connection_mode"),
+        "degraded_exact_risk_reducing_close_context": dict(
+            _mapping(broker_session_authority.get("degraded_exact_risk_reducing_close_context"))
+        ),
         "registry_exit_validation": registry_validation,
         "legacy_pre_action_classification": pre_action.get("classification"),
         "legacy_pre_action_reason": pre_action.get("reason"),
         "block_reasons": block_reasons,
     }
+
+
+def _broker_session_managed_close_blocker(authority: Mapping[str, Any]) -> str | None:
+    if not authority:
+        return "BROKER_SESSION_AUTHORITY_MISSING"
+    if authority.get("live_money_eligible") is True:
+        return "LIVE_MONEY_ELIGIBLE"
+    if authority.get("paper_proof_invoked") is True:
+        return "PAPER_PROOF_INVOKED"
+    allowed_uses = _mapping(authority.get("allowed_uses"))
+    if allowed_uses.get("managed_risk_reducing_close") is not True:
+        return "MANAGED_RISK_REDUCING_CLOSE_NOT_ALLOWED"
+    if authority.get("broad_flatten_allowed") is True:
+        return "BROAD_FLATTEN_ALLOWED_UNEXPECTED"
+    if authority.get("global_flatten_allowed") is True:
+        return "GLOBAL_FLATTEN_ALLOWED_UNEXPECTED"
+    connection_mode = str(authority.get("connection_mode") or "").strip().upper()
+    if connection_mode == "ORDER_STATUS_UNRELIABLE":
+        close_mode = str(authority.get("risk_reducing_close_connection_mode") or "").strip().upper()
+        context = _mapping(authority.get("degraded_exact_risk_reducing_close_context"))
+        if close_mode != "RISK_REDUCING_CLOSE_CAPABLE_ORDER_STATUS_DEGRADED":
+            return "DEGRADED_CLOSE_MODE_NOT_GRANTED"
+        if context.get("ready") is not True:
+            return "DEGRADED_EXACT_CLOSE_CONTEXT_NOT_READY"
+    return None
 
 
 def _managed_exit_phase1_reconciliation_gate(config: TrackBStrategyManagedPaperLifecycleConfig) -> dict[str, Any]:

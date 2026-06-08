@@ -310,8 +310,20 @@ def classify_broker_truth_lease(inputs: Mapping[str, Any]) -> dict[str, Any]:
         reconciliation_clean=_reconciliation_clean(reconciliation),
     )
     callback_ownership_attribution = _mapping(connection_health.get("callback_ownership_attribution"))
+    degraded_close_context = _degraded_exact_risk_reducing_close_context(
+        inputs=inputs,
+        broker_truth=broker_truth,
+        latest_attempt=latest_attempt,
+        reconciliation=reconciliation,
+        lifecycle=lifecycle,
+        order_state=order_state,
+        allowed_instruments=allowed_instruments,
+        connection_mode=connection_mode,
+        broker_position_lease=broker_position_lease,
+        broker_open_order_lease=broker_open_order_lease,
+    )
     submit_connection_capable = _connection_allows_new_entry(connection_mode)
-    close_connection_capable = _connection_allows_close(connection_mode)
+    close_connection_capable = _connection_allows_close(connection_mode) or degraded_close_context["ready"]
     submit_entry_allowed = bool(
         submit_entry_allowed
         and submit_connection_capable
@@ -389,6 +401,12 @@ def classify_broker_truth_lease(inputs: Mapping[str, Any]) -> dict[str, Any]:
         "session_match": callback_ownership_attribution.get("session_match"),
         "callback_age_seconds": callback_ownership_attribution.get("callback_age_seconds"),
         "callback_missing_reason": callback_ownership_attribution.get("callback_missing_reason"),
+        "degraded_exact_risk_reducing_close_context": degraded_close_context,
+        "risk_reducing_close_connection_mode": (
+            "RISK_REDUCING_CLOSE_CAPABLE_ORDER_STATUS_DEGRADED"
+            if degraded_close_context["ready"]
+            else connection_mode
+        ),
         "broker_position_lease": broker_position_lease,
         "broker_open_order_lease": broker_open_order_lease,
         "execution_fill_evidence_lease": execution_fill_evidence_lease,
@@ -714,6 +732,11 @@ def _broker_position_contradiction(
             }
         return None
     if not _lifecycle_positions_match(positions=nonzero_positions, lifecycle=lifecycle):
+        if _reconciliation_clean(reconciliation) and _reconciliation_scope_matches_broker_positions(
+            positions=nonzero_positions,
+            reconciliation=reconciliation,
+        ):
+            return None
         return {"code": "unexpected_broker_position", "detail": "Broker truth reports an unexpected in-scope position."}
     return None
 
@@ -739,6 +762,36 @@ def _lifecycle_positions_match(*, positions: Sequence[Mapping[str, Any]], lifecy
         if not matched:
             return False
     return True
+
+
+def _reconciliation_scope_matches_broker_positions(
+    *,
+    positions: Sequence[Mapping[str, Any]],
+    reconciliation: Mapping[str, Any],
+) -> bool:
+    if not positions:
+        return False
+    lifecycle_count = int(
+        reconciliation.get("current_scope_lifecycle_position_count")
+        or reconciliation.get("lifecycle_open_position_count")
+        or 0
+    )
+    broker_count = int(reconciliation.get("track_b_broker_position_count") or reconciliation.get("broker_position_count") or 0)
+    if lifecycle_count != len(positions) or broker_count != len(positions):
+        return False
+    rows = [
+        row
+        for row in (
+            reconciliation.get("current_scope_lifecycle_positions")
+            or reconciliation.get("lifecycle_positions")
+            or reconciliation.get("open_positions")
+            or []
+        )
+        if isinstance(row, Mapping)
+    ]
+    if not rows:
+        return True
+    return _lifecycle_positions_match(positions=positions, lifecycle={"open_positions": rows})
 
 
 def _reconciliation_clean(reconciliation: Mapping[str, Any]) -> bool:
@@ -1315,6 +1368,112 @@ def _flat_no_order_submit_capable_context(
             if not ok
         ],
     }
+
+
+def _degraded_exact_risk_reducing_close_context(
+    *,
+    inputs: Mapping[str, Any],
+    broker_truth: Mapping[str, Any],
+    latest_attempt: Mapping[str, Any],
+    reconciliation: Mapping[str, Any],
+    lifecycle: Mapping[str, Any],
+    order_state: Mapping[str, Any],
+    allowed_instruments: set[str],
+    connection_mode: str,
+    broker_position_lease: Mapping[str, Any],
+    broker_open_order_lease: Mapping[str, Any],
+) -> dict[str, Any]:
+    positions = [
+        row
+        for row in _scoped_positions(broker_truth, allowed_instruments)
+        if abs(_quantity(row)) > 1e-9
+    ]
+    latest_positions = [
+        row
+        for row in _scoped_positions(latest_attempt, allowed_instruments)
+        if abs(_quantity(row)) > 1e-9
+    ]
+    open_orders = [
+        row
+        for row in _scoped_open_orders(broker_truth, allowed_instruments)
+        if isinstance(row, Mapping)
+    ]
+    latest_open_orders = [
+        row
+        for row in _scoped_open_orders(latest_attempt, allowed_instruments)
+        if isinstance(row, Mapping)
+    ]
+    unknown_open_orders = int(
+        reconciliation.get("unknown_broker_open_order_count")
+        or order_state.get("unknown_open_order_count")
+        or latest_attempt.get("unknown_broker_open_order_count")
+        or 0
+    )
+    lifecycle_count = int(
+        reconciliation.get("current_scope_lifecycle_position_count")
+        or reconciliation.get("lifecycle_open_position_count")
+        or lifecycle.get("open_position_count")
+        or 0
+    )
+    checks = {
+        "order_status_degraded": str(connection_mode or "").strip().upper() == "ORDER_STATUS_UNRELIABLE",
+        "broker_position_exactly_one": len(positions) == 1,
+        "latest_attempt_position_not_conflicting": not latest_positions
+        or _broker_positions_equivalent(left=positions, right=latest_positions),
+        "broker_open_orders_zero": not open_orders and not latest_open_orders,
+        "unknown_open_orders_zero": unknown_open_orders == 0,
+        "broker_lifecycle_reconciled": _reconciliation_clean(reconciliation),
+        "current_scope_lifecycle_position_exact": lifecycle_count == len(positions),
+        "registry_current_scope_clean": _current_scope_review_required_count(reconciliation) == 0,
+        "broker_position_lease_fresh": _lease_allows(broker_position_lease, AUTHORITY_USE_RISK_REDUCING_CLOSE),
+        "broker_open_order_lease_fresh": _lease_allows(broker_open_order_lease, AUTHORITY_USE_RISK_REDUCING_CLOSE),
+        "no_lifecycle_open_order": int(
+            reconciliation.get("lifecycle_open_order_count")
+            or order_state.get("lifecycle_open_order_count")
+            or lifecycle.get("open_order_count")
+            or 0
+        )
+        == 0,
+        "no_live_money_or_paper_proof": not (
+            _bool(inputs.get("live_money_eligible"))
+            or _bool(inputs.get("paper_proof_invoked"))
+            or _bool(reconciliation.get("live_money_eligible"))
+            or _bool(order_state.get("live_money_eligible"))
+            or _bool(lifecycle.get("live_money_eligible"))
+        ),
+    }
+    return {
+        "schema_version": "track_b_degraded_exact_risk_reducing_close_context_v1",
+        "ready": all(checks.values()),
+        **checks,
+        "position_count": len(positions),
+        "open_order_count": len(open_orders) + len(latest_open_orders),
+        "unknown_open_order_count": unknown_open_orders,
+        "positions": [dict(row) for row in positions],
+        "blockers": [
+            {"code": key, "detail": f"Degraded exact risk-reducing close condition failed: {key}."}
+            for key, ok in checks.items()
+            if not ok
+        ],
+    }
+
+
+def _broker_positions_equivalent(
+    *,
+    left: Sequence[Mapping[str, Any]],
+    right: Sequence[Mapping[str, Any]],
+) -> bool:
+    if len(left) != len(right):
+        return False
+    unmatched = list(right)
+    for left_row in left:
+        for index, right_row in enumerate(unmatched):
+            if _symbol(left_row) == _symbol(right_row) and abs(_quantity(left_row) - _quantity(right_row)) <= 1e-9:
+                unmatched.pop(index)
+                break
+        else:
+            return False
+    return not unmatched
 
 
 def _broker_truth_flat(

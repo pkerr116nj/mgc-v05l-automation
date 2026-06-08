@@ -296,6 +296,103 @@ def test_stale_order_status_callback_blocks_submit_even_with_fresh_open_order_sn
     assert _authority_blocker_codes(result) >= {"connection_not_submit_capable"}
 
 
+def test_order_status_unreliable_allows_exact_owned_risk_reducing_close() -> None:
+    inputs = base_inputs()
+    inputs["current_time"] = "2026-05-18T14:59:00+00:00"
+    broker_position = {"symbol": "MES", "local_symbol": "MESM6", "quantity": "1.0", "con_id": 770561194}
+    inputs["last_successful_broker_truth"] = {
+        **dict(inputs["last_successful_broker_truth"]),
+        "generated_at": "2026-05-18T14:58:30+00:00",
+        "positions": [broker_position],
+        "position_count": 1,
+        "open_orders": [],
+        "open_order_count": 0,
+    }
+    inputs["latest_attempt_status"] = {
+        **dict(inputs["latest_attempt_status"]),
+        "generated_at": "2026-05-18T14:58:30+00:00",
+        "positions": [broker_position],
+        "position_count": 1,
+        "open_orders": [],
+        "open_order_count": 0,
+    }
+    inputs["lifecycle"] = {
+        **dict(inputs["lifecycle"]),
+        "open_position_count": 1,
+        "owned_open_position_count": 1,
+        "open_positions": [{**broker_position, "owned": True}],
+        "open_order_count": 0,
+    }
+    inputs["reconciliation"] = {
+        **dict(inputs["reconciliation"]),
+        "track_b_broker_position_count": 1,
+        "track_b_broker_open_order_count": 0,
+        "unknown_broker_open_order_count": 0,
+        "lifecycle_open_position_count": 1,
+        "lifecycle_open_order_count": 0,
+        "current_scope_lifecycle_position_count": 1,
+        "current_scope_lifecycle_positions": [{**broker_position, "owned": True}],
+    }
+    inputs["order_state"] = {
+        **dict(inputs["order_state"]),
+        "unknown_open_order_count": 0,
+        "lifecycle_open_order_count": 0,
+        "order_status_callbacks_complete": False,
+        "last_order_status_at": None,
+    }
+
+    result = classify_broker_truth_lease(inputs)
+
+    context = result["degraded_exact_risk_reducing_close_context"]
+    assert result["connection_mode"] == "ORDER_STATUS_UNRELIABLE"
+    assert result["allowed_uses"]["new_entry"] is False
+    assert result["allowed_uses"]["managed_risk_reducing_close"] is True
+    assert result["submit_exit_allowed"] is True
+    assert result["risk_reducing_close_connection_mode"] == "RISK_REDUCING_CLOSE_CAPABLE_ORDER_STATUS_DEGRADED"
+    assert context["ready"] is True
+    assert context["broker_position_exactly_one"] is True
+    assert context["broker_open_orders_zero"] is True
+    assert context["broker_open_order_lease_fresh"] is True
+
+
+def test_degraded_exact_risk_reducing_close_blocks_unknown_orders() -> None:
+    inputs = base_inputs()
+    broker_position = {"symbol": "MES", "local_symbol": "MESM6", "quantity": "1.0", "con_id": 770561194}
+    inputs["last_successful_broker_truth"] = {
+        **dict(inputs["last_successful_broker_truth"]),
+        "positions": [broker_position],
+        "position_count": 1,
+    }
+    inputs["latest_attempt_status"] = {
+        **dict(inputs["latest_attempt_status"]),
+        "positions": [broker_position],
+        "position_count": 1,
+    }
+    inputs["lifecycle"] = {
+        **dict(inputs["lifecycle"]),
+        "open_position_count": 1,
+        "owned_open_position_count": 1,
+        "open_positions": [{**broker_position, "owned": True}],
+    }
+    inputs["reconciliation"] = {
+        **dict(inputs["reconciliation"]),
+        "track_b_broker_position_count": 1,
+        "unknown_broker_open_order_count": 1,
+        "lifecycle_open_position_count": 1,
+    }
+    inputs["order_state"] = {
+        **dict(inputs["order_state"]),
+        "unknown_open_order_count": 1,
+        "order_status_callbacks_complete": False,
+        "last_order_status_at": None,
+    }
+
+    result = classify_broker_truth_lease(inputs)
+
+    assert result["allowed_uses"]["managed_risk_reducing_close"] is False
+    assert result["degraded_exact_risk_reducing_close_context"]["unknown_open_orders_zero"] is False
+
+
 def test_split_callback_client_ids_explain_order_status_unreliable() -> None:
     inputs = base_inputs()
     inputs["order_state"] = {

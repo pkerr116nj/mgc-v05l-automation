@@ -552,8 +552,13 @@ def _broker_session_apply_blockers(*, inputs: Mapping[str, Mapping[str, Any]]) -
     connection_mode = str(authority.get("connection_mode") or "").strip().upper()
     classification = str(authority.get("classification") or "").strip().upper()
     allowed_uses = _mapping(authority.get("allowed_uses"))
+    degraded_exact_close_allowed = (
+        allowed_uses.get("managed_risk_reducing_close") is True
+        and _mapping(authority.get("degraded_exact_risk_reducing_close_context")).get("ready") is True
+    )
     if connection_mode == "ORDER_STATUS_UNRELIABLE" or classification == "BROKER_SESSION_AUTHORITY_ORDER_STATUS_UNRELIABLE":
-        blockers.append("BROKER_SESSION_CLOSE_AUTHORITY_BLOCKED_ORDER_STATUS_UNRELIABLE")
+        if not degraded_exact_close_allowed:
+            blockers.append("BROKER_SESSION_CLOSE_AUTHORITY_BLOCKED_ORDER_STATUS_UNRELIABLE")
     elif connection_mode == "POSITION_TRUTH_ONLY" or classification == "BROKER_SESSION_AUTHORITY_POSITION_TRUTH_ONLY":
         blockers.append("BROKER_SESSION_CLOSE_AUTHORITY_BLOCKED_POSITION_TRUTH_ONLY")
     elif connection_mode in {"IBKR_CONNECTION_DOWN", ""} or classification in {

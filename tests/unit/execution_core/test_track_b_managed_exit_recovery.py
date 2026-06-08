@@ -69,6 +69,29 @@ def test_order_status_unreliable_reports_candidate_but_blocks_apply() -> None:
     assert "BROKER_SESSION_MANAGED_RISK_REDUCING_CLOSE_NOT_ALLOWED" in blocked["apply_blockers"]
 
 
+def test_order_status_unreliable_with_exact_degraded_close_authority_is_ready() -> None:
+    inputs = _inputs()
+    inputs["broker_session_authority"] = _broker_session_authority(
+        classification="BROKER_SESSION_AUTHORITY_ORDER_STATUS_UNRELIABLE",
+        connection_mode="ORDER_STATUS_UNRELIABLE",
+        close_allowed=True,
+    )
+    inputs["broker_session_authority"]["degraded_exact_risk_reducing_close_context"] = {
+        "ready": True,
+        "broker_position_exactly_one": True,
+        "broker_open_orders_zero": True,
+        "unknown_open_orders_zero": True,
+        "broker_lifecycle_reconciled": True,
+    }
+
+    payload = _build(inputs)
+
+    assert payload["classification"] == EXIT_DUE_CLOSE_READY
+    assert payload["eligible_count"] == 1
+    assert payload["apply_eligible_count"] == 1
+    assert payload["eligible_positions"][0]["apply_blockers"] == []
+
+
 def test_position_truth_only_allows_diagnosis_but_blocks_close_apply() -> None:
     inputs = _inputs()
     inputs["broker_session_authority"] = _broker_session_authority(
