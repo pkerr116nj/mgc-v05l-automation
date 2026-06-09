@@ -10,13 +10,17 @@ from mgc_v05l.execution_core.track_b_exit_authority_contract import (
     EXIT_INTENT_SCHEMA_VERSION,
     CloseAction,
     ExitAuthorityDecision,
+    ExitAuthorityCheckCategory,
+    ExitAuthorityCurrentState,
     ExitAuthorityDecisionValue,
+    ExitAuthorityValidator,
     ExitIntent,
     ExitType,
     ExitUrgency,
     PositionSide,
     SourceArtifactRef,
     build_exit_intent_idempotency_key,
+    validate_exit_authority,
     validate_exit_intent,
 )
 
@@ -212,6 +216,132 @@ def test_authority_decision_carries_check_sections_and_validator_version() -> No
     assert decision.source_artifact_refs[0].name == "bsa"
 
 
+def test_exit_authority_validator_allows_valid_full_close() -> None:
+    decision = validate_exit_authority(intent=_intent(), current_state=_state(), validated_at=NOW)
+
+    assert decision.decision == ExitAuthorityDecisionValue.ALLOWED
+    assert decision.block_reasons == ()
+    assert decision.hard_required_checks["reconciliation_clean"]["category"] == ExitAuthorityCheckCategory.HARD_REQUIRED
+    assert decision.hard_required_checks["bsa_close_authority"]["passed"] is True
+    assert decision.conditional_checks["partial_close_policy"]["passed"] is True
+
+
+def test_exit_authority_validator_allows_valid_degraded_exact_close() -> None:
+    state = _state(bsa_managed_risk_reducing_close=False, bsa_degraded_exact_close_ready=True)
+
+    decision = ExitAuthorityValidator().validate(intent=_intent(), current_state=state, validated_at=NOW)
+
+    assert decision.decision == ExitAuthorityDecisionValue.DEGRADED_ALLOWED
+    assert decision.diagnostics["degraded_exact_close_authority"] is True
+    assert decision.hard_required_checks["bsa_close_authority"]["passed"] is True
+
+
+def test_exit_authority_validator_allows_valid_partial_close_when_declared() -> None:
+    intent = _intent(
+        owned_qty=3,
+        close_qty=1,
+        remaining_qty_after=2,
+        exit_type="PARTIAL_SCALE_OUT",
+        allow_partial=True,
+        partial_policy_supported=True,
+    )
+    state = _state(position_qty=3)
+
+    decision = validate_exit_authority(intent=intent, current_state=state, validated_at=NOW)
+
+    assert decision.decision == ExitAuthorityDecisionValue.ALLOWED
+    assert decision.conditional_checks["partial_close_policy"]["passed"] is True
+
+
+def test_exit_authority_validator_blocks_partial_close_when_not_declared() -> None:
+    payload = _intent_payload(owned_qty=3, close_qty=1, remaining_qty_after=2, exit_type="PARTIAL_SCALE_OUT")
+    state = _state(position_qty=3)
+
+    decision = validate_exit_authority(intent=payload, current_state=state, validated_at=NOW)
+
+    assert decision.decision == ExitAuthorityDecisionValue.BLOCKED
+    assert "partial closes require allow_partial=true" in decision.block_reasons[0]
+
+
+def test_exit_authority_validator_blocks_dirty_reconciliation() -> None:
+    decision = validate_exit_authority(intent=_intent(), current_state=_state(reconciliation_clean=False), validated_at=NOW)
+
+    assert decision.decision == ExitAuthorityDecisionValue.BLOCKED
+    assert "reconciliation_not_clean" in decision.block_reasons
+
+
+def test_exit_authority_validator_blocks_unknown_or_open_orders() -> None:
+    for override, expected in (
+        ({"open_order_count": 1}, "open_orders_present"),
+        ({"unknown_open_order_count": 1}, "unknown_open_orders_present"),
+    ):
+        decision = validate_exit_authority(intent=_intent(), current_state=_state(**override), validated_at=NOW)
+
+        assert decision.decision == ExitAuthorityDecisionValue.BLOCKED
+        assert expected in decision.block_reasons
+
+
+def test_exit_authority_validator_blocks_duplicate_close() -> None:
+    decision = validate_exit_authority(
+        intent=_intent(),
+        current_state=_state(duplicate_close_order_exists=True),
+        validated_at=NOW,
+    )
+
+    assert decision.decision == ExitAuthorityDecisionValue.BLOCKED
+    assert "duplicate_close_exists" in decision.block_reasons
+
+
+def test_exit_authority_validator_blocks_safe_state_or_guardian() -> None:
+    for override, expected in (
+        ({"safe_state_allows_managed_close": False}, "safe_state_blocks_managed_close"),
+        ({"guardian_allows_exact_close": False}, "guardian_blocks_exact_close"),
+    ):
+        decision = validate_exit_authority(intent=_intent(), current_state=_state(**override), validated_at=NOW)
+
+        assert decision.decision == ExitAuthorityDecisionValue.BLOCKED
+        assert expected in decision.block_reasons
+
+
+def test_exit_authority_validator_blocks_bsa_close_false() -> None:
+    decision = validate_exit_authority(
+        intent=_intent(),
+        current_state=_state(bsa_managed_risk_reducing_close=False, bsa_degraded_exact_close_ready=False),
+        validated_at=NOW,
+    )
+
+    assert decision.decision == ExitAuthorityDecisionValue.BLOCKED
+    assert "bsa_close_authority_false" in decision.block_reasons
+
+
+def test_exit_authority_validator_blocks_live_money_or_paper_proof() -> None:
+    for override in ({"live_money_eligible": True}, {"paper_proof_invoked": True}):
+        decision = validate_exit_authority(intent=_intent(), current_state=_state_payload(**override), validated_at=NOW)
+
+        assert decision.decision == ExitAuthorityDecisionValue.BLOCKED
+        assert "must be explicit false" in decision.block_reasons[0]
+
+
+def test_exit_authority_validator_diagnostics_do_not_block() -> None:
+    decision = validate_exit_authority(
+        intent=_intent(),
+        current_state=_state(diagnostics={"ods_fresh": False, "control_plane_ready_for_entries": False}),
+        validated_at=NOW,
+    )
+
+    assert decision.decision == ExitAuthorityDecisionValue.ALLOWED
+    assert decision.diagnostic_checks["ods_fresh"]["category"] == ExitAuthorityCheckCategory.DIAGNOSTIC
+    assert decision.diagnostic_checks["ods_fresh"]["passed"] is False
+    assert decision.block_reasons == ()
+
+
+def test_exit_authority_validator_blocks_position_identity_mismatch() -> None:
+    decision = validate_exit_authority(intent=_intent(), current_state=_state(local_symbol="MNQM6"), validated_at=NOW)
+
+    assert decision.decision == ExitAuthorityDecisionValue.BLOCKED
+    assert "position_identity_mismatch" in decision.block_reasons
+
+
 def _intent(**overrides) -> ExitIntent:
     return ExitIntent(**_intent_payload(**overrides))
 
@@ -255,6 +385,45 @@ def _intent_payload(**overrides) -> dict:
         "paper_proof_invoked": False,
         "broad_flatten_allowed": False,
         "global_flatten_allowed": False,
+    }
+    payload.update(overrides)
+    return payload
+
+
+def _state(**overrides) -> ExitAuthorityCurrentState:
+    return ExitAuthorityCurrentState(**_state_payload(**overrides))
+
+
+def _state_payload(**overrides) -> dict:
+    payload = {
+        "known_position": True,
+        "owned_position": True,
+        "position_side": "LONG",
+        "position_qty": "1",
+        "account": "DUM882026",
+        "local_symbol": "MESM6",
+        "con_id": 770561194,
+        "open_order_count": 0,
+        "unknown_open_order_count": 0,
+        "duplicate_close_order_exists": False,
+        "reconciliation_clean": True,
+        "safe_state_allows_managed_close": True,
+        "guardian_allows_exact_close": True,
+        "bsa_managed_risk_reducing_close": True,
+        "bsa_degraded_exact_close_ready": False,
+        "live_money_eligible": False,
+        "paper_proof_invoked": False,
+        "broad_flatten_allowed": False,
+        "global_flatten_allowed": False,
+        "diagnostics": {},
+        "source_artifact_refs": (
+            {
+                "name": "bsa",
+                "path": "outputs/operator_dashboard/runtime/latest_broker_session_authority.json",
+                "generated_at": NOW,
+                "authority_layer": "Exit Authority Validator",
+            },
+        ),
     }
     payload.update(overrides)
     return payload
