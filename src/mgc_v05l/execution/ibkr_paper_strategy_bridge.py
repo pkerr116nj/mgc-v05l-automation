@@ -2513,6 +2513,13 @@ def _build_static_preflight_checks(
         governance_status=governance_status,
         phase1_reconciliation_gate=phase1_reconciliation_gate,
         exposure_status=exposure_status,
+    ) or _lifecycle_validation_entry_governance_allowed(
+        config=config,
+        intent=intent,
+        governance_status=governance_status,
+        phase1_reconciliation_gate=phase1_reconciliation_gate,
+        exposure_status=exposure_status,
+        leak_test_authorization=leak_test_authorization,
     ) or _leak_test_explicit_lane_flow_governance_allowed(
         config=config,
         intent=intent,
@@ -2534,6 +2541,19 @@ def _build_static_preflight_checks(
                 "Paper strategy governance legacy runtime-loop readiness blocker is bypassed for explicit metals-only "
                 "Leak Test v2 lane flow; valid leak-test authorization, Phase-1 broker reconciliation, exposure, "
                 "Control Plane/Safe-State precheck, and PAPER invariants remain required."
+            )
+        elif _lifecycle_validation_entry_governance_allowed(
+            config=config,
+            intent=intent,
+            governance_status=governance_status,
+            phase1_reconciliation_gate=phase1_reconciliation_gate,
+            exposure_status=exposure_status,
+            leak_test_authorization=leak_test_authorization,
+        ):
+            governance_detail = (
+                "Autonomous strategy governance submit readiness is diagnostic for a controlled PAPER lifecycle "
+                "validation entry; valid lifecycle-validation authorization, dedicated PAPER entry authority, "
+                "Phase-1 broker reconciliation, exposure, and PAPER invariants remain required."
             )
         else:
             governance_detail = (
@@ -2735,6 +2755,49 @@ def _governance_exit_override_allowed(
     if str(selected.get("strategy_status") or "").strip().upper() in {"PAUSED", "DISABLED", "KILL_CANDIDATE"}:
         return False
     return True
+
+
+def _lifecycle_validation_entry_governance_allowed(
+    *,
+    config: IbkrPaperStrategyBridgeConfig,
+    intent: IbkrPaperStrategyOrderIntent,
+    governance_status: dict[str, Any],
+    phase1_reconciliation_gate: dict[str, Any],
+    exposure_status: dict[str, Any],
+    leak_test_authorization: dict[str, Any],
+) -> bool:
+    if not config.submit:
+        return False
+    if not _bridge_paper_lifecycle_validation_entry_invocation(config=config, intent=intent):
+        return False
+    if not bool(leak_test_authorization.get("passed")):
+        return False
+    block_reasons = {str(reason).strip() for reason in governance_status.get("block_reasons") or [] if str(reason).strip()}
+    selected = dict(governance_status.get("selected_strategy") or {})
+    selected_reasons = {
+        str(reason).strip()
+        for reason in list(selected.get("submit_block_reasons") or [])
+        if str(reason).strip()
+    }
+    combined_reasons = block_reasons | selected_reasons
+    if combined_reasons and not combined_reasons.issubset({"backend_or_source_not_live_ready"}):
+        return False
+    if str(selected.get("strategy_status") or "").strip().upper() in {"PAUSED", "DISABLED", "KILL_CANDIDATE"}:
+        return False
+    if not bool(phase1_reconciliation_gate.get("ready")):
+        return False
+    if not bool(exposure_status.get("submit_allowed")):
+        return False
+    authority = _paper_lifecycle_validation_entry_authority_for_bridge(
+        config=config,
+        intent=intent,
+        now=datetime.now(timezone.utc),
+    )
+    return authority.get("classification") in {
+        _LIFECYCLE_VALIDATION_ENTRY_AUTHORITY_VALID,
+        PAPER_LIFECYCLE_VALIDATION_ENTRY_ALLOWED,
+        PAPER_LIFECYCLE_VALIDATION_ENTRY_DEGRADED_ALLOWED,
+    }
 
 
 def _leak_test_explicit_lane_flow_governance_allowed(

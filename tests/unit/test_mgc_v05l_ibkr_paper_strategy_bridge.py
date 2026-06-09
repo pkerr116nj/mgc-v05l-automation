@@ -561,16 +561,24 @@ def _leak_auth_digest(payload: dict[str, object]) -> str:
     return hashlib.sha256(json.dumps(critical, sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode("utf-8")).hexdigest()
 
 
-def _write_leak_authorization(tmp_path: Path, *, action: str = "BUY") -> tuple[Path, str]:
+def _write_leak_authorization(
+    tmp_path: Path,
+    *,
+    action: str = "BUY",
+    lane_id: str = "gc_1x_asia_london_participation__asia_london_long_v5",
+    strategy_id: str = "asia_london_participation_core_v1__GC",
+    symbol: str = "GC",
+    local_symbol: str = "GCM6",
+) -> tuple[Path, str]:
     now = datetime.now(timezone.utc)
     payload: dict[str, object] = {
         "artifact_type": "TRACK_B_PAPER_LEAK_TEST_AUTHORIZATION",
         "account_id": "DUM882026",
         "mode": "PAPER",
-        "lane_id": "gc_1x_asia_london_participation__asia_london_long_v5",
-        "strategy_id": "asia_london_participation_core_v1__GC",
-        "symbol": "GC",
-        "local_symbol": "GCM6",
+        "lane_id": lane_id,
+        "strategy_id": strategy_id,
+        "symbol": symbol,
+        "local_symbol": local_symbol,
         "expiry": "202606",
         "con_id": None,
         "action": action,
@@ -2441,6 +2449,130 @@ def test_lifecycle_validation_entry_uses_dedicated_authority_not_runtime_start_g
     assert validation["authority_classification"] == "PAPER_LIFECYCLE_VALIDATION_ENTRY_ALLOWED"
     assert validation["not_runtime_start_authority"] is True
     assert "runtime next gate reached" in artifacts.report["detail"]
+
+
+def test_lifecycle_validation_entry_governance_readiness_blockers_are_diagnostic(tmp_path: Path) -> None:
+    _write_phase1_reconciliation(tmp_path)
+    _write_canonical_current_scope(tmp_path)
+    auth_path, digest = _write_leak_authorization(
+        tmp_path,
+        lane_id="mes_globex_active_participation_long",
+        strategy_id="PAPER_ACTIVE_EVIDENCE_MES_GLOBEX_PARTICIPATION_LONG_V1",
+        symbol="MES",
+        local_symbol="MESM6",
+    )
+    config = _config(
+        tmp_path,
+        submit=True,
+        strategy_id="mes_globex_active_participation_long",
+        symbol="MES",
+        contract_month="202606",
+        caller_path="track_b_paper_leak_test_apply",
+        leak_test_authorization_path=auth_path,
+        leak_test_authorization_digest=digest,
+        caller_metadata={
+            "caller_type": "track_b_paper_leak_test",
+            "lane_id": "mes_globex_active_participation_long",
+            "strategy_id": "PAPER_ACTIVE_EVIDENCE_MES_GLOBEX_PARTICIPATION_LONG_V1",
+            "route_destination": "ibkr_paper_bridge_submit_capable",
+            "intent_type": "BUY_TO_OPEN",
+            "intent_action": "BUY",
+            "account_id": "DUM882026",
+            "mode": "PAPER",
+            "host": "127.0.0.1",
+            "port": 7497,
+            "local_symbol": "MESM6",
+            "paper_only": True,
+            "live_money_eligible": False,
+        },
+    )
+    governance = {
+        "classification": "PAPER_STRATEGY_GOVERNANCE_BLOCKED",
+        "submit_allowed": False,
+        "block_reasons": ["backend_or_source_not_live_ready"],
+        "detail": "Paper strategy governance blocked submit: backend_or_source_not_live_ready.",
+        "selected_strategy": {
+            "strategy_id": "mes_globex_active_participation_long",
+            "bridge_strategy_id": "paper_active_evidence__MES",
+            "strategy_status": "PROBATION_ACTIVE",
+            "submit_allowed": False,
+            "submit_block_reasons": ["backend_or_source_not_live_ready"],
+        },
+    }
+
+    checks = _build_static_preflight_checks(
+        config=config,
+        intent=_intent_from_config(config),
+        environment_lock=evaluate_paper_preview_environment_lock(mode=config.mode, host=config.host, port=config.port),
+        caller_gate={"passed": True, "detail": "approved leak-test caller"},
+        monitor_status={},
+        governance_status=governance,
+        exposure_status=_healthy_exposure(),
+    )
+
+    governance_gate = next(row for row in checks if row["name"] == "paper_strategy_governance_submit_gate")
+    assert governance_gate["passed"] is True
+    assert "diagnostic for a controlled PAPER lifecycle validation entry" in governance_gate["detail"]
+
+
+def test_lifecycle_validation_entry_governance_override_does_not_hide_non_readiness_blockers(tmp_path: Path) -> None:
+    _write_phase1_reconciliation(tmp_path)
+    _write_canonical_current_scope(tmp_path)
+    auth_path, digest = _write_leak_authorization(
+        tmp_path,
+        lane_id="mes_globex_active_participation_long",
+        strategy_id="PAPER_ACTIVE_EVIDENCE_MES_GLOBEX_PARTICIPATION_LONG_V1",
+        symbol="MES",
+        local_symbol="MESM6",
+    )
+    config = _config(
+        tmp_path,
+        submit=True,
+        strategy_id="mes_globex_active_participation_long",
+        symbol="MES",
+        contract_month="202606",
+        caller_path="track_b_paper_leak_test_apply",
+        leak_test_authorization_path=auth_path,
+        leak_test_authorization_digest=digest,
+        caller_metadata={
+            "caller_type": "track_b_paper_leak_test",
+            "lane_id": "mes_globex_active_participation_long",
+            "strategy_id": "PAPER_ACTIVE_EVIDENCE_MES_GLOBEX_PARTICIPATION_LONG_V1",
+            "route_destination": "ibkr_paper_bridge_submit_capable",
+            "intent_type": "BUY_TO_OPEN",
+            "intent_action": "BUY",
+            "account_id": "DUM882026",
+            "mode": "PAPER",
+            "local_symbol": "MESM6",
+            "paper_only": True,
+            "live_money_eligible": False,
+        },
+    )
+    governance = {
+        "classification": "PAPER_STRATEGY_GOVERNANCE_BLOCKED",
+        "submit_allowed": False,
+        "block_reasons": ["backend_or_source_not_live_ready", "strategy_kill_switch_active"],
+        "selected_strategy": {
+            "strategy_id": "mes_globex_active_participation_long",
+            "bridge_strategy_id": "paper_active_evidence__MES",
+            "strategy_status": "PROBATION_ACTIVE",
+            "submit_allowed": False,
+            "submit_block_reasons": ["strategy_kill_switch_active"],
+        },
+    }
+
+    checks = _build_static_preflight_checks(
+        config=config,
+        intent=_intent_from_config(config),
+        environment_lock=evaluate_paper_preview_environment_lock(mode=config.mode, host=config.host, port=config.port),
+        caller_gate={"passed": True, "detail": "approved leak-test caller"},
+        monitor_status={},
+        governance_status=governance,
+        exposure_status=_healthy_exposure(),
+    )
+
+    governance_gate = next(row for row in checks if row["name"] == "paper_strategy_governance_submit_gate")
+    assert governance_gate["passed"] is False
 
 
 def test_runtime_supervised_bridge_reaches_existing_next_gate_with_snapshot(monkeypatch, tmp_path: Path) -> None:
