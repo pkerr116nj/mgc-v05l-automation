@@ -2520,14 +2520,28 @@ def test_lifecycle_validation_entry_governance_readiness_blockers_are_diagnostic
     governance = {
         "classification": "PAPER_STRATEGY_GOVERNANCE_BLOCKED",
         "submit_allowed": False,
-        "block_reasons": ["backend_or_source_not_live_ready"],
-        "detail": "Paper strategy governance blocked submit: backend_or_source_not_live_ready.",
+        "block_reasons": [
+            "backend_or_source_not_live_ready",
+            "canonical_readiness_artifact_stale",
+            "canonical_readiness_not_submit_capable",
+            "paper_runtime_not_ready",
+            "paper_trade_not_allowed",
+            "paper_runtime_truth_stale",
+            "shared_services_authority_not_ready",
+            "control_plane_not_ready",
+        ],
+        "detail": "Paper strategy governance blocked submit: backend/source runtime readiness stale.",
         "selected_strategy": {
             "strategy_id": "mes_globex_active_participation_long",
             "bridge_strategy_id": "paper_active_evidence__MES",
             "strategy_status": "PROBATION_ACTIVE",
             "submit_allowed": False,
-            "submit_block_reasons": ["backend_or_source_not_live_ready"],
+            "submit_block_reasons": [
+                "backend_or_source_not_live_ready",
+                "guarded_paper_loop_artifact_not_guarded_mode",
+                "guarded_paper_loop_process_missing",
+                "safe_to_start_runtime=false",
+            ],
         },
     }
 
@@ -2544,6 +2558,67 @@ def test_lifecycle_validation_entry_governance_readiness_blockers_are_diagnostic
     governance_gate = next(row for row in checks if row["name"] == "paper_strategy_governance_submit_gate")
     assert governance_gate["passed"] is True
     assert "diagnostic for a controlled PAPER lifecycle validation entry" in governance_gate["detail"]
+
+
+def test_non_validation_entry_governance_readiness_subreasons_still_block(tmp_path: Path) -> None:
+    _write_phase1_reconciliation(tmp_path)
+    _write_canonical_current_scope(tmp_path)
+    config = _config(
+        tmp_path,
+        submit=True,
+        strategy_id="mes_globex_active_participation_long",
+        symbol="MES",
+        contract_month="202606",
+        caller_path="manual_strategy_bridge_cli",
+        manual_frozen_preview_path=tmp_path / "frozen_preview.json",
+        approval_digest="digest",
+        approval_phrase="phrase",
+        caller_metadata={
+            "caller_type": "manual_strategy_bridge_cli",
+            "lane_id": "mes_globex_active_participation_long",
+            "strategy_id": "PAPER_ACTIVE_EVIDENCE_MES_GLOBEX_PARTICIPATION_LONG_V1",
+            "intent_type": "BUY_TO_OPEN",
+            "intent_action": "BUY",
+            "account_id": "DUM882026",
+            "mode": "PAPER",
+            "local_symbol": "MESM6",
+            "paper_only": True,
+            "live_money_eligible": False,
+        },
+    )
+    governance = {
+        "classification": "PAPER_STRATEGY_GOVERNANCE_BLOCKED",
+        "submit_allowed": False,
+        "block_reasons": [
+            "backend_or_source_not_live_ready",
+            "canonical_readiness_artifact_stale",
+            "paper_runtime_not_ready",
+            "control_plane_not_ready",
+        ],
+        "selected_strategy": {
+            "strategy_id": "mes_globex_active_participation_long",
+            "bridge_strategy_id": "paper_active_evidence__MES",
+            "strategy_status": "PROBATION_ACTIVE",
+            "submit_allowed": False,
+            "submit_block_reasons": [
+                "paper_runtime_truth_stale",
+                "shared_services_authority_not_ready",
+            ],
+        },
+    }
+
+    checks = _build_static_preflight_checks(
+        config=config,
+        intent=_intent_from_config(config),
+        environment_lock=evaluate_paper_preview_environment_lock(mode=config.mode, host=config.host, port=config.port),
+        caller_gate={"passed": True, "detail": "approved manual caller"},
+        monitor_status={},
+        governance_status=governance,
+        exposure_status=_healthy_exposure(),
+    )
+
+    governance_gate = next(row for row in checks if row["name"] == "paper_strategy_governance_submit_gate")
+    assert governance_gate["passed"] is False
 
 
 def test_lifecycle_validation_entry_governance_override_does_not_hide_non_readiness_blockers(tmp_path: Path) -> None:

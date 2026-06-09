@@ -207,6 +207,19 @@ _BROKER_AVAILABILITY_AVAILABLE = "BROKER_AVAILABLE"
 _BROKER_AVAILABILITY_RETRYABLE_BLOCK = "broker_unavailable_retryable"
 _BROKER_AVAILABILITY_FATAL_BLOCK = "broker_unavailable_fatal"
 _BROKER_AVAILABILITY_UNKNOWN_BLOCK = "broker_availability_unknown"
+_LIFECYCLE_VALIDATION_ENTRY_GOVERNANCE_DIAGNOSTIC_REASONS = {
+    "backend_or_source_not_live_ready",
+    "canonical_readiness_artifact_stale",
+    "canonical_readiness_not_submit_capable",
+    "paper_runtime_not_ready",
+    "paper_trade_not_allowed",
+    "paper_runtime_truth_stale",
+    "shared_services_authority_not_ready",
+    "control_plane_not_ready",
+    "guarded_paper_loop_artifact_not_guarded_mode",
+    "guarded_paper_loop_process_missing",
+    "safe_to_start_runtime=false",
+}
 _LEAK_TEST_AUTHORIZATION_DIGEST_FIELDS = (
     "artifact_type",
     "account_id",
@@ -2856,7 +2869,7 @@ def _lifecycle_validation_entry_governance_allowed(
         if str(reason).strip()
     }
     combined_reasons = block_reasons | selected_reasons
-    if combined_reasons and not combined_reasons.issubset({"backend_or_source_not_live_ready"}):
+    if combined_reasons and not combined_reasons.issubset(_LIFECYCLE_VALIDATION_ENTRY_GOVERNANCE_DIAGNOSTIC_REASONS):
         return False
     if str(selected.get("strategy_status") or "").strip().upper() in {"PAUSED", "DISABLED", "KILL_CANDIDATE"}:
         return False
