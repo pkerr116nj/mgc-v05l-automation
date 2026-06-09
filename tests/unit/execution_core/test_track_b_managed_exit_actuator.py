@@ -249,7 +249,8 @@ def test_open_orders_block_before_attach(tmp_path: Path) -> None:
 
 def test_unknown_open_orders_block_before_attach(tmp_path: Path) -> None:
     inputs = _inputs(runtime_down=True)
-    inputs["reconciliation"]["unknown_broker_open_order_count"] = 1
+    inputs["open_order_truth"]["unknown_open_order_count"] = 1
+    inputs["open_order_truth"]["unknown_open_orders"] = [{"account_id": "DUM882026", "local_symbol": "MNQM6"}]
 
     payload = run_track_b_managed_exit_actuator(
         config=TrackBManagedExitActuatorConfig(repo_root=tmp_path, apply=True, operator_authorized_managed_exit=True),
@@ -261,28 +262,30 @@ def test_unknown_open_orders_block_before_attach(tmp_path: Path) -> None:
 
     assert payload["classification"] == MANAGED_EXIT_ACTUATOR_BLOCKED
     assert payload["submit_attempted"] is False
-    assert "RECONCILIATION_UNKNOWN_OPEN_ORDERS_PRESENT" in payload["blocked_positions"][0]["blockers"]
+    assert "same_contract_unknown_order_over_close_risk" in payload["blocked_positions"][0]["blockers"]
 
 
-def test_dirty_reconciliation_blocks_before_attach(tmp_path: Path) -> None:
+def test_dirty_reconciliation_is_legacy_diagnostic_when_v11_allows(tmp_path: Path) -> None:
     inputs = _inputs(runtime_down=True)
     inputs["reconciliation"]["classification"] = "BROKER_TRUTH_SETTLEMENT_TIMEOUT"
     inputs["reconciliation"]["broker_reconciled"] = False
+    calls = []
 
     payload = run_track_b_managed_exit_actuator(
         config=TrackBManagedExitActuatorConfig(repo_root=tmp_path, apply=True, operator_authorized_managed_exit=True),
         now=NOW,
         input_overrides=inputs,
-        attach_runner=lambda config, now: {"submit_attempted": True},
+        attach_runner=lambda config, now: calls.append(config) or {"classification": "TRACK_B_STRATEGY_PAPER_CLOSE_SUBMITTED", "submit_attempted": True, "broker_state_mutated": True},
         write=False,
     )
 
-    assert payload["classification"] == MANAGED_EXIT_ACTUATOR_BLOCKED
-    assert payload["submit_attempted"] is False
-    assert "BROKER_LIFECYCLE_RECONCILIATION_NOT_CLEAN" in payload["blocked_positions"][0]["blockers"]
+    assert payload["classification"] == MANAGED_EXIT_ACTUATOR_APPLIED_OR_PENDING
+    assert payload["submit_attempted"] is True
+    assert calls
+    assert "BROKER_LIFECYCLE_RECONCILIATION_NOT_CLEAN" in payload["eligible_positions"][0]["legacy_apply_blockers_diagnostic"]
 
 
-def test_stale_due_projection_blocks_apply_but_not_due_detection(tmp_path: Path) -> None:
+def test_stale_due_projection_is_diagnostic_when_broker_risk_exit_allowed(tmp_path: Path) -> None:
     inputs = _inputs(runtime_down=True)
     inputs["managed_positions"]["source_freshness"] = {
         "stale": True,
@@ -300,12 +303,12 @@ def test_stale_due_projection_blocks_apply_but_not_due_detection(tmp_path: Path)
         write=False,
     )
 
-    blockers = payload["blocked_positions"][0]["blockers"]
-    assert payload["classification"] == MANAGED_EXIT_ACTUATOR_BLOCKED
+    assert payload["classification"] == MANAGED_EXIT_ACTUATOR_APPLIED_OR_PENDING
     assert payload["exit_due_count"] == 1
-    assert payload["submit_attempted"] is False
-    assert "MANAGED_POSITION_APPLY_AUTHORITY_DEGRADED" in blockers
-    assert "MANAGED_POSITION_SOURCE_STALE" in blockers
+    assert payload["submit_attempted"] is True
+    diagnostics = payload["eligible_positions"][0]["legacy_apply_blockers_diagnostic"]
+    assert "MANAGED_POSITION_APPLY_AUTHORITY_DEGRADED" in diagnostics
+    assert "MANAGED_POSITION_SOURCE_STALE" in diagnostics
 
 
 def test_ambiguous_ownership_blocks_before_attach(tmp_path: Path) -> None:
@@ -371,7 +374,7 @@ def test_live_money_or_paper_proof_blocks_before_attach(tmp_path: Path) -> None:
     assert payload["submit_attempted"] is False
 
 
-def test_close_candidate_mismatch_blocks_before_attach(tmp_path: Path) -> None:
+def test_guardian_close_candidate_mismatch_is_diagnostic_when_v11_allows(tmp_path: Path) -> None:
     inputs = _inputs(runtime_down=True)
     inputs["guardian"]["managed_close_authority"]["candidates"][0]["action"] = "BUY"
 
@@ -383,8 +386,8 @@ def test_close_candidate_mismatch_blocks_before_attach(tmp_path: Path) -> None:
         write=False,
     )
 
-    assert "GUARDIAN_EXACT_CLOSE_CANDIDATE_MISSING" in payload["blocked_positions"][0]["blockers"]
-    assert payload["submit_attempted"] is False
+    assert payload["submit_attempted"] is True
+    assert "GUARDIAN_EXACT_CLOSE_CANDIDATE_MISSING" in payload["eligible_positions"][0]["legacy_apply_blockers_diagnostic"]
 
 
 def _inputs(*, runtime_down: bool) -> dict:

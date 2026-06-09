@@ -55,6 +55,19 @@ from mgc_v05l.execution_core.track_b_strategy_managed_paper_lifecycle import (
     TrackBStrategyManagedPaperLifecycleConfig,
     maintain_open_track_b_strategy_managed_paper_lifecycle,
 )
+from mgc_v05l.execution_core.track_b_exit_intent_dry_run_report import (
+    TrackBExitIntentDryRunReportConfig,
+    build_track_b_exit_intent_dry_run_report,
+)
+from mgc_v05l.execution_core.track_b_exit_authority_contract import (
+    CloseQtySource,
+    ExecutionDomain,
+    ExitAuthorityCurrentState,
+    ExitIntent,
+    ExitType,
+    ExitUrgency,
+    validate_exit_authority,
+)
 
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
@@ -192,6 +205,25 @@ def build_track_b_managed_exit_attach_plan(
         exit_strategy_id=exit_profile.exit_strategy_id,
         exit_profile_id=exit_profile.exit_profile_id,
     )
+    exit_authority_candidate = _exit_authority_candidate_for_config(
+        config=config,
+        now=actual_now,
+        close_action=close_action,
+    )
+    exit_authority_decision = (
+        _mapping(exit_authority_candidate.get("authority_decision"))
+        if exit_authority_candidate
+        else {}
+    )
+    exit_authority_allows = str(exit_authority_decision.get("decision") or "") in {
+        "ALLOWED",
+        "DEGRADED_ALLOWED",
+    }
+    exit_authority_block_reasons = [
+        str(item)
+        for item in (exit_authority_decision.get("block_reasons") or [])
+        if str(item or "").strip()
+    ]
 
     blockers: list[str] = []
     control_plane_ok, control_plane_reason = _control_plane_allows_managed_exit(
@@ -222,13 +254,35 @@ def build_track_b_managed_exit_attach_plan(
         managed_exit_policy_id=managed_exit_policy_id,
     )
 
-    if not control_plane_ok:
+    if exit_authority_candidate and not exit_authority_allows:
+        blockers.extend(exit_authority_block_reasons or ["ExitAuthorityDecision V1.1 blocked exact close."])
+        classification = _classification_for_exit_authority_blockers(exit_authority_block_reasons)
+    elif not exit_authority_candidate:
+        blockers.append("ExitAuthorityDecision V1.1 did not find a matching broker-scoped close intent.")
+        classification = MANAGED_EXIT_BLOCKED_POSITION_MISMATCH
+    elif not close_limit_price:
+        blockers.append("Current executable close price is unavailable.")
+        classification = MANAGED_EXIT_BLOCKED_POSITION_MISMATCH
+    elif (
+        snapshot.get("live_money_eligible") is True
+        or snapshot.get("paper_proof_invoked") is True
+        or broker_session_authority.get("live_money_eligible") is True
+        or broker_session_authority.get("paper_proof_invoked") is True
+        or safe_state.get("live_money_eligible") is True
+        or safe_state.get("paper_proof_invoked") is True
+    ):
+        blockers.append("live_money/paper_proof safety flag blocks managed-exit attach.")
+        classification = MANAGED_EXIT_BLOCKED_CONTROL_PLANE
+    elif exit_authority_allows and _control_plane_has_explicit_hard_hold(snapshot):
+        blockers.append("Control Plane reports an explicit hard safety hold.")
+        classification = MANAGED_EXIT_BLOCKED_CONTROL_PLANE
+    elif not control_plane_ok and not exit_authority_allows:
         blockers.append(control_plane_reason)
         classification = MANAGED_EXIT_BLOCKED_CONTROL_PLANE
-    elif not safe_state_ok:
+    elif not safe_state_ok and not exit_authority_allows:
         blockers.append(safe_state_reason)
         classification = MANAGED_EXIT_BLOCKED_SAFE_STATE
-    elif not position_ok or not lifecycle_ok:
+    elif (not position_ok or not lifecycle_ok) and not exit_authority_allows:
         blockers.extend(reason for reason in (position_reason, lifecycle_reason) if reason)
         classification = MANAGED_EXIT_BLOCKED_POSITION_MISMATCH
     elif duplicate_close or prior_lifecycle_close or aggregate_lifecycle_blocker:
@@ -287,6 +341,25 @@ def build_track_b_managed_exit_attach_plan(
         "broker_session_authority_classification": broker_session_authority.get("classification"),
         "broker_session_allowed_uses": broker_session_authority.get("allowed_uses") if isinstance(broker_session_authority.get("allowed_uses"), Mapping) else {},
         "risk_reducing_close_connection_mode": broker_session_authority.get("risk_reducing_close_connection_mode"),
+        "exit_authority_contract": {
+            "schema_version": "track_b_managed_exit_attach_exit_authority_v1",
+            "source": "ExitAuthorityDecision V1.1",
+            "candidate": exit_authority_candidate,
+            "decision": exit_authority_decision,
+            "legacy_diagnostics": {
+                "control_plane_ok": control_plane_ok,
+                "control_plane_reason": control_plane_reason,
+                "safe_state_ok": safe_state_ok,
+                "safe_state_reason": safe_state_reason,
+                "position_identity_ok": position_ok,
+                "position_identity_reason": position_reason,
+                "lifecycle_identity_ok": lifecycle_ok,
+                "lifecycle_identity_reason": lifecycle_reason,
+                "duplicate_close": duplicate_close,
+                "prior_lifecycle_close": prior_lifecycle_close,
+                "aggregate_lifecycle_blocker": aggregate_lifecycle_blocker,
+            },
+        },
         "open_order_truth_classification": open_order_truth.get("classification"),
         "managed_order_registry_classification": managed_orders.get("classification"),
         "managed_position_registry_classification": managed_position_registry.get("classification"),
@@ -886,6 +959,239 @@ def _close_only_authority_allows_unhealthy_runtime(
         context = _mapping(broker_session_authority.get("degraded_exact_risk_reducing_close_context"))
         return context.get("ready") is True
     return True
+
+
+def _classification_for_exit_authority_blockers(blockers: Sequence[str]) -> str:
+    blocker_text = " ".join(str(item) for item in blockers)
+    if "working_close" in blocker_text or "unknown_order" in blocker_text:
+        return MANAGED_EXIT_BLOCKED_DUPLICATE_CLOSE_ORDER
+    if "live_money" in blocker_text or "paper_proof" in blocker_text or "safe_state_hard_halt" in blocker_text:
+        return MANAGED_EXIT_BLOCKED_CONTROL_PLANE
+    return MANAGED_EXIT_BLOCKED_POSITION_MISMATCH
+
+
+def _exit_authority_candidate_for_config(
+    *,
+    config: TrackBManagedExitAttachConfig,
+    now: datetime,
+    close_action: str,
+) -> dict[str, Any]:
+    report = build_track_b_exit_intent_dry_run_report(
+        config=TrackBExitIntentDryRunReportConfig(repo_root=config.repo_root),
+        now=now,
+    )
+    for candidate in report.get("candidate_exit_intents") or []:
+        if not isinstance(candidate, Mapping):
+            continue
+        if (
+            str(candidate.get("account_id") or "") == str(config.account_id)
+            and str(candidate.get("local_symbol") or "") == str(config.local_symbol)
+            and _int_or_none(candidate.get("con_id")) == config.con_id
+            and str(candidate.get("candidate_close_action") or "") == str(close_action)
+            and _decimal(candidate.get("candidate_close_qty")) == Decimal(str(config.quantity))
+        ):
+            return dict(candidate)
+    return _synthetic_exit_authority_candidate_for_config(
+        config=config,
+        now=now,
+        close_action=close_action,
+    )
+
+
+def _synthetic_exit_authority_candidate_for_config(
+    *,
+    config: TrackBManagedExitAttachConfig,
+    now: datetime,
+    close_action: str,
+) -> dict[str, Any]:
+    position_truth = _read_json(config.resolve(config.position_truth_path))
+    safe_state = _read_json(config.resolve(config.safe_state_path))
+    broker_session_authority = _read_json(config.resolve(config.broker_session_authority_path))
+    open_order_truth = _read_json(config.resolve(config.open_order_truth_path))
+    managed_orders = _read_json(config.resolve(config.managed_order_registry_path))
+    broker_position = _exact_broker_position_for_config(config=config, position_truth=position_truth)
+    if not broker_position:
+        return {}
+    qty = abs(_decimal(broker_position.get("quantity")) or Decimal("0"))
+    if qty <= Decimal("0"):
+        return {}
+    side = "LONG" if (_decimal(broker_position.get("quantity")) or Decimal("0")) > 0 else "SHORT"
+    intent = ExitIntent(
+        exit_intent_id=f"exit_intent_attach_{config.account_id}_{config.local_symbol}_{config.con_id}".lower(),
+        execution_domain=ExecutionDomain.TRACK_B_PAPER,
+        account_id=config.account_id,
+        instrument=config.instrument_family,
+        local_symbol=config.local_symbol,
+        con_id=config.con_id,
+        position_side=side,
+        owned_qty=str(qty),
+        close_action=close_action,
+        close_qty=str(config.quantity),
+        remaining_qty_after=str(max(qty - Decimal(str(config.quantity)), Decimal("0"))),
+        close_qty_source=CloseQtySource.RISK_POLICY,
+        exit_type=ExitType.FULL_CLOSE if qty == Decimal(str(config.quantity)) else ExitType.PARTIAL_SCALE_OUT,
+        exit_reason="managed_exit_attach_broker_scoped_risk_reduction",
+        priority=50,
+        urgency=ExitUrgency.NORMAL,
+        price_policy={
+            "type": "MANAGED_EXIT_ATTACH_LIMIT",
+            "source": "track_b_managed_exit_attach",
+            "requires_current_executable_price_before_apply": True,
+        },
+        idempotency_key="",
+        allow_partial=qty != Decimal(str(config.quantity)),
+        allow_reverse=False,
+        source_policy_id="TRACK_B_MANAGED_EXIT_ATTACH_V1",
+        generated_at=now,
+        attribution={
+            "lifecycle_id": config.lifecycle_id or None,
+            "trade_id": None,
+            "strategy_id": config.strategy_id or None,
+            "lane_id": config.lane_id or None,
+        },
+        lifecycle_id=config.lifecycle_id or None,
+        strategy_id=config.strategy_id or None,
+        lane_id=config.lane_id or None,
+        partial_policy_supported=qty != Decimal(str(config.quantity)),
+        live_money_eligible=False,
+        live_money_allowed=False,
+        paper_proof_invoked=False,
+        broad_flatten_allowed=False,
+        global_flatten_allowed=False,
+    )
+    same_contract_unknown_orders = _same_contract_unknown_order_count_for_config(
+        config=config,
+        open_order_truth=open_order_truth,
+    )
+    state = ExitAuthorityCurrentState(
+        execution_domain=ExecutionDomain.TRACK_B_PAPER,
+        known_position=True,
+        broker_position_side=side,
+        broker_position_qty=str(qty),
+        account_id=config.account_id,
+        local_symbol=config.local_symbol,
+        con_id=config.con_id,
+        safe_state_hard_halt=_safe_state_has_hard_halt(safe_state),
+        same_contract_working_close_qty=str(
+            _same_contract_working_close_qty_for_config(
+                config=config,
+                managed_orders=managed_orders,
+                open_order_truth=open_order_truth,
+            )
+        ),
+        unrelated_unknown_order_count=max(_unknown_open_order_count(open_order_truth) - same_contract_unknown_orders, 0),
+        same_contract_unknown_order_count=same_contract_unknown_orders,
+        same_contract_unknown_order_could_over_close=same_contract_unknown_orders > 0,
+        same_contract_unknown_order_over_close_ruled_out=False,
+        reconciliation_clean=None,
+        safe_state_allows_managed_close=_safe_state_allows_managed_exit(safe_state)[0],
+        guardian_allows_exact_close=None,
+        bsa_managed_risk_reducing_close=_mapping(broker_session_authority.get("allowed_uses")).get("managed_risk_reducing_close") is True,
+        bsa_degraded_exact_close_ready=_mapping(
+            broker_session_authority.get("degraded_exact_risk_reducing_close_context")
+        ).get("ready")
+        is True,
+        live_money_eligible=broker_session_authority.get("live_money_eligible") is True
+        or safe_state.get("live_money_eligible") is True,
+        live_money_allowed=False,
+        paper_proof_invoked=broker_session_authority.get("paper_proof_invoked") is True
+        or safe_state.get("paper_proof_invoked") is True,
+        broad_flatten_allowed=broker_session_authority.get("broad_flatten_allowed") is True,
+        global_flatten_allowed=broker_session_authority.get("global_flatten_allowed") is True,
+        attribution_status="PARTIALLY_ATTRIBUTED" if config.lifecycle_id else "UNATTRIBUTED",
+        attribution_diagnostics={
+            "lifecycle_id": config.lifecycle_id,
+            "strategy_id": config.strategy_id,
+            "lane_id": config.lane_id,
+            "source": "track_b_managed_exit_attach_config",
+            "blocks_authority": False,
+        },
+        diagnostics={
+            "position_truth_classification": position_truth.get("classification"),
+            "open_order_truth_classification": open_order_truth.get("classification"),
+            "broker_session_authority_classification": broker_session_authority.get("classification"),
+            "managed_order_registry_classification": managed_orders.get("classification"),
+        },
+    )
+    decision = validate_exit_authority(intent=intent, current_state=state, validated_at=now)
+    return {
+        "instrument": intent.instrument,
+        "local_symbol": intent.local_symbol,
+        "con_id": intent.con_id,
+        "account_id": intent.account_id,
+        "position_side": intent.position_side.value,
+        "broker_position_qty": str(qty),
+        "candidate_close_action": intent.close_action.value,
+        "candidate_close_qty": str(intent.close_qty),
+        "price_policy": intent.price_policy,
+        "attribution_status": decision.attribution_status.value,
+        "attribution": intent.attribution.to_json_dict(),
+        "exit_due": True,
+        "exit_intent": intent.to_json_dict(),
+        "authority_decision": decision.to_json_dict(),
+        "block_reasons": list(decision.block_reasons),
+    }
+
+
+def _exact_broker_position_for_config(
+    *,
+    config: TrackBManagedExitAttachConfig,
+    position_truth: Mapping[str, Any],
+) -> dict[str, Any]:
+    for row in position_truth.get("broker_positions") or []:
+        if not isinstance(row, Mapping):
+            continue
+        account = _valid_account_id(row.get("account_id") or row.get("account"))
+        if (
+            account == config.account_id
+            and str(row.get("local_symbol") or row.get("localSymbol") or "") == config.local_symbol
+            and _int_or_none(row.get("con_id") or row.get("conId")) == config.con_id
+        ):
+            return dict(row)
+    return {}
+
+
+def _same_contract_working_close_qty_for_config(
+    *,
+    config: TrackBManagedExitAttachConfig,
+    managed_orders: Mapping[str, Any],
+    open_order_truth: Mapping[str, Any],
+) -> Decimal:
+    total = Decimal("0")
+    rows = [*(managed_orders.get("managed_orders") or []), *(open_order_truth.get("broker_open_orders") or [])]
+    for row in rows:
+        if not isinstance(row, Mapping):
+            continue
+        if str(row.get("local_symbol") or row.get("contract") or "") != config.local_symbol:
+            continue
+        if row.get("working") is True or str(row.get("status") or "").upper() in {"SUBMITTED", "PRESUBMITTED", "PENDING_SUBMIT"}:
+            total += abs(_decimal(row.get("remaining_quantity") or row.get("quantity")) or Decimal("0"))
+    return total
+
+
+def _same_contract_unknown_order_count_for_config(
+    *,
+    config: TrackBManagedExitAttachConfig,
+    open_order_truth: Mapping[str, Any],
+) -> int:
+    return sum(
+        1
+        for row in open_order_truth.get("unknown_open_orders") or []
+        if isinstance(row, Mapping)
+        and str(row.get("local_symbol") or row.get("contract") or "") == config.local_symbol
+    )
+
+
+def _unknown_open_order_count(open_order_truth: Mapping[str, Any]) -> int:
+    try:
+        return int(open_order_truth.get("unknown_open_order_count") or 0)
+    except (TypeError, ValueError):
+        return len([row for row in open_order_truth.get("unknown_open_orders") or [] if isinstance(row, Mapping)])
+
+
+def _safe_state_has_hard_halt(safe_state: Mapping[str, Any]) -> bool:
+    classification = str(safe_state.get("safe_state_classification") or safe_state.get("classification") or "").upper()
+    return "HARD" in classification or "HALT" in classification or "UNSAFE" in classification
 
 
 def _managed_orders_have_exact_position_without_close_row(

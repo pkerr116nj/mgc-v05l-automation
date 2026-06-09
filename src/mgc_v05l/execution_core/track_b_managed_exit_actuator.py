@@ -24,6 +24,10 @@ from mgc_v05l.execution_core.track_b_managed_exit_attach import (
     TrackBManagedExitAttachConfig,
     run_track_b_managed_exit_attach,
 )
+from mgc_v05l.execution_core.track_b_exit_intent_dry_run_report import (
+    TrackBExitIntentDryRunReportConfig,
+    build_track_b_exit_intent_dry_run_report,
+)
 from mgc_v05l.execution_core.track_b_managed_exit_recovery import (
     EXIT_DUE_CLOSE_PARTIAL_READY,
     EXIT_DUE_CLOSE_READY,
@@ -77,8 +81,9 @@ def build_track_b_managed_exit_actuator_report(
     phase_timings: list[dict[str, Any]] = []
     _record_phase(phase_timings, "startup", actual_now)
     recovery = _recovery_plan(config=config, now=actual_now, input_overrides=input_overrides)
+    exit_authority = _exit_authority_report(config=config, now=actual_now, input_overrides=input_overrides)
     _record_phase(phase_timings, "candidate_discovery", actual_now)
-    eligible = _eligible_positions(recovery)
+    eligible = _v11_eligible_positions(recovery=recovery, exit_authority=exit_authority)
     if not eligible:
         classification = MANAGED_EXIT_ACTUATOR_NOOP if int(recovery.get("exit_due_count") or 0) == 0 else MANAGED_EXIT_ACTUATOR_BLOCKED
     elif config.apply is not True or config.operator_authorized_managed_exit is not True:
@@ -89,6 +94,7 @@ def build_track_b_managed_exit_actuator_report(
         config=config,
         now=actual_now,
         recovery=recovery,
+        exit_authority=exit_authority,
         classification=classification,
         attempted=[],
         phase_timings=phase_timings,
@@ -121,8 +127,9 @@ def run_track_b_managed_exit_actuator(
     if write:
         _write_phase_status(config=config, now=actual_now, phase="candidate_discovery", phase_timings=phase_timings)
     recovery = _recovery_plan(config=config, now=actual_now, input_overrides=input_overrides)
+    exit_authority = _exit_authority_report(config=config, now=actual_now, input_overrides=input_overrides)
     _record_phase(phase_timings, "candidate_discovery", actual_now)
-    initial_eligible = _eligible_positions(recovery)
+    initial_eligible = _v11_eligible_positions(recovery=recovery, exit_authority=exit_authority)
 
     if not initial_eligible:
         classification = MANAGED_EXIT_ACTUATOR_NOOP if int(recovery.get("exit_due_count") or 0) == 0 else MANAGED_EXIT_ACTUATOR_BLOCKED
@@ -130,6 +137,7 @@ def run_track_b_managed_exit_actuator(
             config=config,
             now=actual_now,
             recovery=recovery,
+            exit_authority=exit_authority,
             classification=classification,
             attempted=attempted,
             phase_timings=phase_timings,
@@ -143,6 +151,7 @@ def run_track_b_managed_exit_actuator(
             config=config,
             now=actual_now,
             recovery=recovery,
+            exit_authority=exit_authority,
             classification=MANAGED_EXIT_ACTUATOR_DRY_RUN_READY,
             attempted=attempted,
             phase_timings=phase_timings,
@@ -156,8 +165,12 @@ def run_track_b_managed_exit_actuator(
         if write:
             _write_phase_status(config=config, now=actual_now, phase="pre_submit_recheck", phase_timings=phase_timings)
         latest_recovery = _recovery_plan(config=config, now=actual_now, input_overrides=input_overrides)
+        latest_exit_authority = _exit_authority_report(config=config, now=actual_now, input_overrides=input_overrides)
         _record_phase(phase_timings, "pre_submit_recheck", actual_now)
-        latest = _matching_eligible_position(_eligible_positions(latest_recovery), planned)
+        latest = _matching_eligible_position(
+            _v11_eligible_positions(recovery=latest_recovery, exit_authority=latest_exit_authority),
+            planned,
+        )
         if latest is None:
             attempted.append(
                 {
@@ -172,6 +185,7 @@ def run_track_b_managed_exit_actuator(
                 }
             )
             recovery = latest_recovery
+            exit_authority = latest_exit_authority
             break
         attach_config = _attach_config(config=config, position=latest)
         if write:
@@ -198,6 +212,7 @@ def run_track_b_managed_exit_actuator(
         if refresh_hook is not None:
             refresh_hook(attempted_row)
         recovery = _recovery_plan(config=config, now=actual_now, input_overrides=input_overrides)
+        exit_authority = _exit_authority_report(config=config, now=actual_now, input_overrides=input_overrides)
         _record_phase(phase_timings, "post_attempt_recovery_refresh", actual_now)
         if _unsafe_after_attempt(attempted_row):
             break
@@ -214,6 +229,7 @@ def run_track_b_managed_exit_actuator(
         config=config,
         now=actual_now,
         recovery=recovery,
+        exit_authority=exit_authority,
         classification=classification,
         attempted=attempted,
         phase_timings=phase_timings,
@@ -234,11 +250,12 @@ def _base_report(
     config: TrackBManagedExitActuatorConfig,
     now: datetime,
     recovery: Mapping[str, Any],
+    exit_authority: Mapping[str, Any] | None,
     classification: str,
     attempted: Sequence[Mapping[str, Any]],
     phase_timings: Sequence[Mapping[str, Any]] | None = None,
 ) -> dict[str, Any]:
-    eligible = _eligible_positions(recovery)
+    eligible = _v11_eligible_positions(recovery=recovery, exit_authority=exit_authority or {})
     return {
         "schema_version": "track_b_managed_exit_actuator_v1",
         "generated_at": now.isoformat(),
@@ -263,7 +280,20 @@ def _base_report(
         "attempted_count": len(attempted),
         "submitted_count": sum(1 for row in attempted if row.get("submit_attempted") is True),
         "eligible_positions": eligible,
-        "blocked_positions": recovery.get("blocked_positions") or [],
+        "blocked_positions": [
+            *[dict(row) for row in recovery.get("blocked_positions") or [] if isinstance(row, Mapping)],
+            *_v11_blocked_positions(exit_authority or {}),
+        ],
+        "exit_authority_contract": {
+            "schema_version": "track_b_managed_exit_actuator_exit_authority_v1",
+            "source": "ExitAuthorityDecision V1.1",
+            "classification": (exit_authority or {}).get("classification"),
+            "candidate_count": (exit_authority or {}).get("candidate_count"),
+            "allowed_count": (exit_authority or {}).get("allowed_count"),
+            "degraded_allowed_count": (exit_authority or {}).get("degraded_allowed_count"),
+            "blocked_count": (exit_authority or {}).get("blocked_count"),
+            "source_classifications": (exit_authority or {}).get("source_classifications") or {},
+        },
         "attempted_closes": list(attempted),
         "recovery_classification": recovery.get("classification"),
         "recovery_plan_path": str(_recovery_config(config).resolve(_recovery_config(config).output_path)),
@@ -305,6 +335,160 @@ def _eligible_positions(recovery: Mapping[str, Any]) -> list[dict[str, Any]]:
     if str(recovery.get("classification") or "") not in {EXIT_DUE_CLOSE_READY, EXIT_DUE_CLOSE_PARTIAL_READY}:
         return []
     return [dict(row) for row in recovery.get("eligible_positions") or [] if isinstance(row, Mapping)]
+
+
+def _exit_authority_report(
+    *,
+    config: TrackBManagedExitActuatorConfig,
+    now: datetime,
+    input_overrides: Mapping[str, Mapping[str, Any]] | None,
+) -> dict[str, Any]:
+    dry_run_config = TrackBExitIntentDryRunReportConfig(repo_root=config.repo_root)
+    return build_track_b_exit_intent_dry_run_report(
+        config=dry_run_config,
+        now=now,
+        input_overrides=input_overrides,
+    )
+
+
+def _v11_eligible_positions(
+    *,
+    recovery: Mapping[str, Any],
+    exit_authority: Mapping[str, Any],
+) -> list[dict[str, Any]]:
+    recovery_rows = [
+        dict(row)
+        for row in [
+            *[item for item in recovery.get("eligible_positions") or [] if isinstance(item, Mapping)],
+            *[item for item in recovery.get("blocked_positions") or [] if isinstance(item, Mapping)],
+        ]
+    ]
+    positions: list[dict[str, Any]] = []
+    for candidate in exit_authority.get("candidate_exit_intents") or []:
+        if not isinstance(candidate, Mapping):
+            continue
+        decision = candidate.get("authority_decision") if isinstance(candidate.get("authority_decision"), Mapping) else {}
+        if str(decision.get("decision") or "") not in {"ALLOWED", "DEGRADED_ALLOWED"}:
+            continue
+        if candidate.get("exit_due") is not True:
+            continue
+        row = _matching_recovery_row(recovery_rows, candidate) or _position_from_exit_authority_candidate(candidate)
+        if not row:
+            continue
+        row["exit_authority_decision"] = dict(decision)
+        row["exit_intent"] = dict(candidate.get("exit_intent") or {})
+        row["exit_authority_attribution_status"] = candidate.get("attribution_status")
+        row["legacy_apply_blockers_diagnostic"] = list(row.get("apply_blockers") or row.get("blockers") or [])
+        row["legacy_diagnostic_blockers"] = list(row.get("diagnostic_blockers") or [])
+        row["apply_eligible"] = True
+        row["eligible"] = True
+        row["classification"] = "EXIT_DUE_POSITION_CLOSE_READY_VIA_EXIT_AUTHORITY_V1_1"
+        row["blockers"] = []
+        row["apply_blockers"] = []
+        positions.append(row)
+    return positions
+
+
+def _v11_blocked_positions(exit_authority: Mapping[str, Any]) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    for candidate in exit_authority.get("candidate_exit_intents") or []:
+        if not isinstance(candidate, Mapping):
+            continue
+        decision = candidate.get("authority_decision") if isinstance(candidate.get("authority_decision"), Mapping) else {}
+        if str(decision.get("decision") or "") != "BLOCKED":
+            continue
+        rows.append(
+            {
+                "classification": "EXIT_DUE_POSITION_CLOSE_BLOCKED_BY_EXIT_AUTHORITY_V1_1",
+                "eligible": False,
+                "apply_eligible": False,
+                "blockers": list(decision.get("block_reasons") or candidate.get("block_reasons") or []),
+                "apply_blockers": list(decision.get("block_reasons") or candidate.get("block_reasons") or []),
+                "exit_authority_decision": dict(decision),
+                "exit_intent": dict(candidate.get("exit_intent") or {}),
+                "identity": {
+                    "account_id": candidate.get("account_id"),
+                    "local_symbol": candidate.get("local_symbol"),
+                    "con_id": candidate.get("con_id"),
+                    "lifecycle_id": _mapping(candidate.get("attribution")).get("lifecycle_id"),
+                    "trade_id": _mapping(candidate.get("attribution")).get("trade_id"),
+                },
+                "close_candidate": {
+                    "account_id": candidate.get("account_id"),
+                    "local_symbol": candidate.get("local_symbol"),
+                    "con_id": candidate.get("con_id"),
+                    "action": candidate.get("candidate_close_action"),
+                    "quantity": candidate.get("candidate_close_qty"),
+                    "risk_reducing_only": True,
+                    "classification": "EXIT_AUTHORITY_V1_1_CLOSE_BLOCKED",
+                },
+            }
+        )
+    return rows
+
+
+def _matching_recovery_row(
+    recovery_rows: Sequence[Mapping[str, Any]],
+    candidate: Mapping[str, Any],
+) -> dict[str, Any] | None:
+    candidate_key = _candidate_identity_key(candidate)
+    for row in recovery_rows:
+        if _identity_key(row) == candidate_key:
+            return dict(row)
+    for row in recovery_rows:
+        row_key = _identity_key(row)
+        if row_key[:3] == candidate_key[:3]:
+            return dict(row)
+    return None
+
+
+def _candidate_identity_key(candidate: Mapping[str, Any]) -> tuple[str, str, str, str, str]:
+    intent = candidate.get("exit_intent") if isinstance(candidate.get("exit_intent"), Mapping) else {}
+    attribution = candidate.get("attribution") if isinstance(candidate.get("attribution"), Mapping) else {}
+    return (
+        str(candidate.get("account_id") or intent.get("account_id") or ""),
+        str(candidate.get("local_symbol") or intent.get("local_symbol") or ""),
+        str(candidate.get("con_id") or intent.get("con_id") or ""),
+        str(attribution.get("lifecycle_id") or intent.get("lifecycle_id") or ""),
+        str(attribution.get("trade_id") or intent.get("trade_id") or ""),
+    )
+
+
+def _position_from_exit_authority_candidate(candidate: Mapping[str, Any]) -> dict[str, Any]:
+    intent = candidate.get("exit_intent") if isinstance(candidate.get("exit_intent"), Mapping) else {}
+    attribution = candidate.get("attribution") if isinstance(candidate.get("attribution"), Mapping) else {}
+    qty = str(candidate.get("broker_position_qty") or intent.get("owned_qty") or "")
+    signed_qty = f"-{qty}" if str(candidate.get("position_side") or intent.get("position_side")) == "SHORT" else qty
+    return {
+        "identity": {
+            "account_id": candidate.get("account_id") or intent.get("account_id"),
+            "local_symbol": candidate.get("local_symbol") or intent.get("local_symbol"),
+            "con_id": candidate.get("con_id") or intent.get("con_id"),
+            "lifecycle_id": attribution.get("lifecycle_id") or intent.get("lifecycle_id"),
+            "trade_id": attribution.get("trade_id") or intent.get("trade_id"),
+        },
+        "broker_position": {
+            "account_id": candidate.get("account_id") or intent.get("account_id"),
+            "local_symbol": candidate.get("local_symbol") or intent.get("local_symbol"),
+            "con_id": candidate.get("con_id") or intent.get("con_id"),
+            "symbol": candidate.get("instrument") or intent.get("instrument"),
+            "quantity": signed_qty,
+        },
+        "close_candidate": {
+            "account_id": candidate.get("account_id") or intent.get("account_id"),
+            "local_symbol": candidate.get("local_symbol") or intent.get("local_symbol"),
+            "con_id": candidate.get("con_id") or intent.get("con_id"),
+            "symbol": candidate.get("instrument") or intent.get("instrument"),
+            "action": candidate.get("candidate_close_action") or intent.get("close_action"),
+            "quantity": candidate.get("candidate_close_qty") or intent.get("close_qty"),
+            "lifecycle_id": attribution.get("lifecycle_id") or intent.get("lifecycle_id"),
+            "trade_id": attribution.get("trade_id") or intent.get("trade_id"),
+            "strategy_id": attribution.get("strategy_id") or intent.get("strategy_id"),
+            "lane_id": attribution.get("lane_id") or intent.get("lane_id"),
+            "risk_reducing_only": True,
+            "classification": "EXIT_AUTHORITY_V1_1_CLOSE_ALLOWED",
+        },
+    }
 
 
 def _matching_eligible_position(positions: Sequence[Mapping[str, Any]], planned: Mapping[str, Any]) -> dict[str, Any] | None:
@@ -546,6 +730,10 @@ def _nested(payload: Mapping[str, Any], *keys: str) -> Any:
             return None
         current = current.get(key)
     return current
+
+
+def _mapping(value: Any) -> dict[str, Any]:
+    return dict(value) if isinstance(value, Mapping) else {}
 
 
 def _int(value: Any) -> int:

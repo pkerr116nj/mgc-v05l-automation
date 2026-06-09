@@ -23,7 +23,6 @@ from mgc_v05l.execution_core.track_b_exit_authority_contract import (
     AttributionStatus,
     CloseQtySource,
     ExecutionDomain,
-    ExitAuthorityCurrentState,
     ExitIntent,
     ExitType,
     ExitUrgency,
@@ -80,6 +79,8 @@ def build_track_b_exit_intent_dry_run_report(
         for row in (_mapping(item) for item in _list(inputs["reconciliation"].get("track_b_broker_positions")))
         if abs(_decimal(row.get("quantity"))) > Decimal("0")
     ]
+    if not broker_positions and "track_b_broker_positions" not in inputs["reconciliation"]:
+        broker_positions = _broker_positions_from_managed_positions(inputs["managed_positions"])
     candidates = [
         _candidate_report(
             broker_position=position,
@@ -131,6 +132,34 @@ def build_track_b_exit_intent_dry_run_report(
             "safe_state": str(config.resolve(config.safe_state_path)),
         },
     }
+
+
+def _broker_positions_from_managed_positions(managed_positions: Mapping[str, Any]) -> list[dict[str, Any]]:
+    positions: list[dict[str, Any]] = []
+    for row in (_mapping(item) for item in _list(managed_positions.get("managed_positions"))):
+        broker = _mapping(row.get("broker_position"))
+        local_symbol = _text(broker.get("local_symbol") or row.get("local_symbol") or row.get("contract"))
+        con_id = _int(broker.get("con_id") or row.get("con_id"))
+        quantity = _decimal(broker.get("quantity") or row.get("quantity"))
+        if not local_symbol or con_id <= 0 or abs(quantity) <= Decimal("0"):
+            continue
+        side = _text(row.get("side") or broker.get("side")).upper()
+        if side == "SHORT" and quantity > 0:
+            quantity = -quantity
+        elif side == "LONG" and quantity < 0:
+            quantity = abs(quantity)
+        positions.append(
+            {
+                "account_id": broker.get("account_id") or row.get("account_id") or "DUM882026",
+                "local_symbol": local_symbol,
+                "con_id": con_id,
+                "quantity": str(quantity),
+                "symbol": broker.get("symbol") or broker.get("track_b_root") or row.get("symbol") or row.get("instrument_family"),
+                "track_b_root": broker.get("track_b_root") or row.get("track_b_root") or row.get("symbol"),
+                "expiry": broker.get("expiry") or row.get("expiry"),
+            }
+        )
+    return positions
 
 
 def run_track_b_exit_intent_dry_run_report(
@@ -275,7 +304,7 @@ def _current_state(
     inputs: Mapping[str, Mapping[str, Any]],
     source_refs: Sequence[SourceArtifactRef],
     managed_position: Mapping[str, Any],
-) -> ExitAuthorityCurrentState:
+) -> Mapping[str, Any]:
     qty = _decimal(broker_position.get("quantity"))
     same_contract_working_qty = _same_contract_working_close_qty(
         broker_position=broker_position,
@@ -288,47 +317,46 @@ def _current_state(
         open_order_truth=inputs["open_order_truth"],
         reconciliation=inputs["reconciliation"],
     )
-    return ExitAuthorityCurrentState(
-        execution_domain=ExecutionDomain.TRACK_B_PAPER,
-        known_position=True,
-        broker_position_side="LONG" if qty > 0 else "SHORT",
-        broker_position_qty=str(abs(qty)),
-        account_id=_text(broker_position.get("account_id") or broker_position.get("account") or "DUM882026"),
-        local_symbol=_text(broker_position.get("local_symbol")),
-        con_id=_int(broker_position.get("con_id") or managed_position.get("con_id")),
-        safe_state_hard_halt=_safe_state_hard_halt(inputs["safe_state"]),
-        same_contract_working_close_qty=str(same_contract_working_qty),
-        unrelated_unknown_order_count=max(unknown_open_orders - same_contract_unknown_orders, 0),
-        same_contract_unknown_order_count=same_contract_unknown_orders,
-        same_contract_unknown_order_could_over_close=same_contract_unknown_orders > 0,
-        same_contract_unknown_order_over_close_ruled_out=False,
-        reconciliation_clean=_reconciliation_clean(inputs["reconciliation"]),
-        safe_state_allows_managed_close=_safe_state_allows_managed_close(inputs["safe_state"]),
-        guardian_allows_exact_close=_guardian_allows_exact_close(inputs["guardian"]),
-        bsa_managed_risk_reducing_close=_bsa_managed_close(inputs["broker_session_authority"]),
-        bsa_degraded_exact_close_ready=_bsa_degraded_ready(inputs["broker_session_authority"]),
-        live_money_eligible=_flag_true(inputs, "live_money_eligible"),
-        live_money_allowed=False,
-        paper_proof_invoked=_flag_true(inputs, "paper_proof_invoked"),
-        broad_flatten_allowed=_flag_true(inputs, "broad_flatten_allowed"),
-        global_flatten_allowed=_flag_true(inputs, "global_flatten_allowed")
-        or _flag_true(inputs, "global_cancel_allowed"),
-        attribution_status=_attribution_status(managed_position),
-        attribution_diagnostics={
+    return {
+        "execution_domain": ExecutionDomain.TRACK_B_PAPER,
+        "known_position": True,
+        "broker_position_side": "LONG" if qty > 0 else "SHORT",
+        "broker_position_qty": str(abs(qty)),
+        "account_id": _text(broker_position.get("account_id") or broker_position.get("account") or "DUM882026"),
+        "local_symbol": _text(broker_position.get("local_symbol")),
+        "con_id": _int(broker_position.get("con_id") or managed_position.get("con_id")),
+        "safe_state_hard_halt": _safe_state_hard_halt(inputs["safe_state"]),
+        "same_contract_working_close_qty": str(same_contract_working_qty),
+        "unrelated_unknown_order_count": max(unknown_open_orders - same_contract_unknown_orders, 0),
+        "same_contract_unknown_order_count": same_contract_unknown_orders,
+        "same_contract_unknown_order_could_over_close": same_contract_unknown_orders > 0,
+        "same_contract_unknown_order_over_close_ruled_out": False,
+        "reconciliation_clean": _reconciliation_clean(inputs["reconciliation"]),
+        "safe_state_allows_managed_close": _safe_state_allows_managed_close(inputs["safe_state"]),
+        "guardian_allows_exact_close": _guardian_allows_exact_close(inputs["guardian"]),
+        "bsa_managed_risk_reducing_close": _bsa_managed_close(inputs["broker_session_authority"]),
+        "bsa_degraded_exact_close_ready": _bsa_degraded_ready(inputs["broker_session_authority"]),
+        "live_money_eligible": _flag_true(inputs, "live_money_eligible"),
+        "live_money_allowed": False,
+        "paper_proof_invoked": _flag_true(inputs, "paper_proof_invoked"),
+        "broad_flatten_allowed": _flag_true(inputs, "broad_flatten_allowed"),
+        "global_flatten_allowed": _flag_true(inputs, "global_flatten_allowed") or _flag_true(inputs, "global_cancel_allowed"),
+        "attribution_status": _attribution_status(managed_position),
+        "attribution_diagnostics": {
             "managed_position_classification": managed_position.get("classification"),
             "lifecycle_id": managed_position.get("lifecycle_id"),
             "trade_id": managed_position.get("trade_id"),
             "strategy_id": managed_position.get("strategy_id"),
             "lane_id": managed_position.get("lane_id"),
         },
-        diagnostics={
+        "diagnostics": {
             "managed_position_artifact_classification": inputs["managed_positions"].get("classification"),
             "managed_order_artifact_classification": inputs["managed_orders"].get("classification"),
             "open_order_truth_classification": inputs["open_order_truth"].get("classification"),
             "broker_session_authority_classification": inputs["broker_session_authority"].get("classification"),
         },
-        source_artifact_refs=(),
-    )
+        "source_artifact_refs": (),
+    }
 
 
 def _matching_managed_position(
@@ -382,11 +410,15 @@ def _same_contract_working_close_qty(
     open_order_truth: Mapping[str, Any],
 ) -> Decimal:
     total = Decimal("0")
-    rows = [*_list(open_order_truth.get("broker_open_orders")), *_list(open_order_truth.get("open_orders"))]
-    rows.extend(row for row in _list(managed_orders.get("managed_orders")) if _mapping(row).get("working") is True)
-    for row in (_mapping(item) for item in rows):
+    rows = [(row, True) for row in [*_list(open_order_truth.get("broker_open_orders")), *_list(open_order_truth.get("open_orders"))]]
+    rows.extend((row, False) for row in _list(managed_orders.get("managed_orders")) if _mapping(row).get("working") is True)
+    for item, from_open_order_truth in rows:
+        row = _mapping(item)
         if _same_position(row=row, broker_position=broker_position):
-            total += abs(_decimal(row.get("remaining_quantity") or row.get("quantity") or 0))
+            quantity = _decimal(row.get("remaining_quantity") or row.get("quantity") or 0)
+            if quantity == Decimal("0") and (row.get("working") is True or from_open_order_truth):
+                quantity = abs(_decimal(broker_position.get("quantity")))
+            total += abs(quantity)
     return total
 
 

@@ -686,7 +686,7 @@ def test_exact_exit_due_close_allows_degraded_managed_order_topline_with_exact_r
     assert payload["broker_state_mutated"] is False
 
 
-def test_exact_exit_due_close_blocks_degraded_managed_order_topline_without_exact_row(tmp_path: Path) -> None:
+def test_exact_exit_due_close_allows_degraded_managed_order_topline_without_exact_row_when_v11_allows(tmp_path: Path) -> None:
     config = _seed(
         tmp_path,
         completed_bars=3,
@@ -714,9 +714,10 @@ def test_exact_exit_due_close_blocks_degraded_managed_order_topline_without_exac
 
     payload = build_track_b_managed_exit_attach_plan(config=config, now=NOW)
 
-    assert payload["classification"] == "MANAGED_EXIT_BLOCKED_CONTROL_PLANE"
+    assert payload["classification"] == MANAGED_EXIT_TIMEBOX_CLOSE_ELIGIBLE
     assert payload["submit_attempted"] is False
     assert payload["broker_state_mutated"] is False
+    assert payload["exit_authority_contract"]["decision"]["decision"] in {"ALLOWED", "DEGRADED_ALLOWED"}
 
 
 def test_exact_exit_due_close_respects_control_plane_hard_hold(tmp_path: Path) -> None:
@@ -742,7 +743,7 @@ def test_exact_exit_due_close_respects_control_plane_hard_hold(tmp_path: Path) -
     assert payload["broker_state_mutated"] is False
 
 
-def test_exit_due_close_blocks_unhealthy_runtime_identity_without_degraded_close_authority(tmp_path: Path) -> None:
+def test_exit_due_close_allows_unhealthy_runtime_identity_without_legacy_bsa_close_flag_when_v11_allows(tmp_path: Path) -> None:
     config = _seed(
         tmp_path,
         completed_bars=3,
@@ -767,10 +768,12 @@ def test_exit_due_close_blocks_unhealthy_runtime_identity_without_degraded_close
 
     payload = build_track_b_managed_exit_attach_plan(config=config, now=NOW)
 
-    assert payload["classification"] == "MANAGED_EXIT_BLOCKED_CONTROL_PLANE"
+    assert payload["classification"] == MANAGED_EXIT_TIMEBOX_CLOSE_ELIGIBLE
     assert payload["apply_enabled"] is False
     assert payload["submit_attempted"] is False
     assert payload["broker_state_mutated"] is False
+    assert payload["broker_session_allowed_uses"]["managed_risk_reducing_close"] is False
+    assert payload["exit_authority_contract"]["decision"]["decision"] in {"ALLOWED", "DEGRADED_ALLOWED"}
 
 
 def test_mgc_forced_session_exit_profile_builds_managed_close_preview(tmp_path: Path) -> None:
@@ -1245,7 +1248,7 @@ def test_auto_selected_aggregate_multiple_account_uses_broker_backed_account(tmp
     assert payload["lifecycle_identity_verified"] is True
 
 
-def test_auto_selected_true_account_mismatch_still_blocks(tmp_path: Path) -> None:
+def test_auto_selected_lifecycle_account_mismatch_is_attribution_diagnostic_when_broker_account_matches(tmp_path: Path) -> None:
     config = _seed(tmp_path, completed_bars=3)
     lifecycle_path = (
         tmp_path
@@ -1267,10 +1270,11 @@ def test_auto_selected_true_account_mismatch_still_blocks(tmp_path: Path) -> Non
 
     payload = build_track_b_managed_exit_attach_plan(config=stale_default_config, now=NOW)
 
-    assert payload["classification"] == MANAGED_EXIT_BLOCKED_POSITION_MISMATCH
+    assert payload["classification"] == MANAGED_EXIT_TIMEBOX_CLOSE_ELIGIBLE
     assert payload["position_identity_verified"] is True
     assert payload["lifecycle_identity_verified"] is False
     assert payload["broker_state_mutated"] is False
+    assert payload["exit_authority_contract"]["decision"]["decision"] in {"ALLOWED", "DEGRADED_ALLOWED"}
 
 
 def test_auto_selected_missing_account_fails_closed(tmp_path: Path) -> None:
