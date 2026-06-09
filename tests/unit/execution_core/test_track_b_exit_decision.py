@@ -47,6 +47,149 @@ def test_timebox_due_produces_full_close(tmp_path: Path) -> None:
     assert decision["source_policy_id"] == "TIMEBOX_60M"
 
 
+def test_attributed_long_due_timebox_policy_evidence_produces_full_close(tmp_path: Path) -> None:
+    report = _report(
+        tmp_path,
+        positions=[
+            _position(
+                side="LONG",
+                lifecycle_id="life-mes",
+                trade_id="trade-mes",
+                strategy_id="mes_strategy",
+                lane_id="mes_lane",
+            )
+        ],
+        managed_positions=[
+            _managed_position(
+                side="LONG",
+                classification="OPEN_MANAGED_EXIT_DUE",
+                exit_due=True,
+                managed_exit_policy_id="GLOBEX_ACTIVE_EVIDENCE_TIMEBOX_60M_EXIT_V1",
+            )
+        ],
+    )
+
+    evidence = report["exit_policy_evidence"][0]
+    decision = report["decisions"][0]
+    assert evidence["policy_type"] == "TIMEBOX"
+    assert evidence["due"] is True
+    assert evidence["suggested_decision"] == "FULL_CLOSE"
+    assert decision["action"] == "FULL_CLOSE"
+    assert decision["source_policy_id"] == "GLOBEX_ACTIVE_EVIDENCE_TIMEBOX_60M_EXIT_V1"
+    assert decision["reason"] == "timebox_exit_due"
+
+
+def test_attributed_short_due_timebox_policy_evidence_produces_full_close(tmp_path: Path) -> None:
+    report = _report(
+        tmp_path,
+        positions=[
+            _position(
+                side="SHORT",
+                lifecycle_id="life-mes",
+                trade_id="trade-mes",
+                strategy_id="mes_strategy",
+                lane_id="mes_lane",
+            )
+        ],
+        managed_positions=[
+            _managed_position(
+                side="SHORT",
+                classification="OPEN_MANAGED_EXIT_DUE",
+                exit_due=True,
+                managed_exit_policy_id="GLOBEX_ACTIVE_EVIDENCE_TIMEBOX_60M_EXIT_V1",
+            )
+        ],
+    )
+
+    assert report["exit_policy_evidence"][0]["suggested_decision"] == "FULL_CLOSE"
+    assert report["decisions"][0]["action"] == "FULL_CLOSE"
+
+
+def test_not_due_policy_evidence_remains_hold(tmp_path: Path) -> None:
+    report = _report(
+        tmp_path,
+        positions=[_position(lifecycle_id="life-mes", trade_id="trade-mes", strategy_id="mes_strategy", lane_id="mes_lane")],
+        managed_positions=[_managed_position(classification="OPEN_MANAGED_MATCHED", exit_due=False)],
+    )
+
+    evidence = report["exit_policy_evidence"][0]
+    decision = report["decisions"][0]
+    assert evidence["due"] is False
+    assert evidence["suggested_decision"] == "HOLD"
+    assert decision["action"] == "HOLD"
+    assert decision["reason"] == "exit_policy_not_due"
+
+
+def test_stale_lifecycle_hold_does_not_override_current_managed_due_evidence(tmp_path: Path) -> None:
+    report = _report(
+        tmp_path,
+        positions=[_position(lifecycle_id="life-mes", trade_id="trade-mes", strategy_id="mes_strategy", lane_id="mes_lane")],
+        managed_positions=[
+            _managed_position(
+                classification="OPEN_MANAGED_EXIT_DUE",
+                exit_due=True,
+                lifecycle_position={"exit_due": False},
+            )
+        ],
+    )
+
+    decision = report["decisions"][0]
+    assert decision["action"] == "FULL_CLOSE"
+    assert any(
+        row.get("classification") == "CURRENT_MANAGED_POSITION_DUE_SUPERSEDES_STALE_LIFECYCLE_HOLD"
+        for row in decision["diagnostics"]
+    )
+
+
+def test_missing_policy_evidence_stays_hold_with_diagnostic(tmp_path: Path) -> None:
+    report = _report(tmp_path, positions=[_position()], managed_positions=[])
+
+    assert report["exit_policy_evidence"] == []
+    decision = report["decisions"][0]
+    assert decision["action"] == "HOLD"
+    assert any(row.get("classification") == "EXIT_POLICY_EVIDENCE_MISSING" for row in decision["diagnostics"])
+
+
+def test_partial_scale_out_policy_evidence_can_represent_reduce(tmp_path: Path) -> None:
+    report = _report(
+        tmp_path,
+        positions=[_position(qty="3", lifecycle_id="life-mes", trade_id="trade-mes", strategy_id="mes_strategy", lane_id="mes_lane")],
+        managed_positions=[
+            _managed_position(
+                classification="OPEN_MANAGED_EXIT_DUE",
+                policy_type="PARTIAL_SCALE_OUT",
+                exit_due=True,
+                reduce_qty="1",
+            )
+        ],
+    )
+
+    evidence = report["exit_policy_evidence"][0]
+    decision = report["decisions"][0]
+    assert evidence["policy_type"] == "PARTIAL_SCALE_OUT"
+    assert evidence["close_qty"] == "1"
+    assert decision["action"] == "REDUCE"
+    assert decision["reduce_qty"] == "1"
+
+
+def test_hard_stop_and_profit_target_policy_placeholders_are_represented(tmp_path: Path) -> None:
+    hard_stop = _report(
+        tmp_path,
+        positions=[_position(lifecycle_id="life-mes", trade_id="trade-mes", strategy_id="mes_strategy", lane_id="mes_lane")],
+        managed_positions=[_managed_position(policy_type="HARD_STOP", exit_due=True)],
+    )
+    profit_target = _report(
+        tmp_path,
+        positions=[_position(lifecycle_id="life-mes", trade_id="trade-mes", strategy_id="mes_strategy", lane_id="mes_lane")],
+        managed_positions=[_managed_position(policy_type="PROFIT_TARGET", exit_due=True)],
+    )
+
+    assert hard_stop["exit_policy_evidence"][0]["policy_type"] == "HARD_STOP"
+    assert hard_stop["decisions"][0]["action"] == "PROTECT"
+    assert profit_target["exit_policy_evidence"][0]["policy_type"] == "PROFIT_TARGET"
+    assert profit_target["decisions"][0]["action"] == "FULL_CLOSE"
+
+
 def test_bars_since_entry_reaching_timebox_produces_full_close(tmp_path: Path) -> None:
     report = _report(
         tmp_path,
@@ -152,6 +295,7 @@ def _report(
     tmp_path: Path,
     *,
     positions: list[dict],
+    managed_positions: list[dict] | None = None,
     decision_inputs: dict[str, dict] | None = None,
 ) -> dict:
     return build_track_b_exit_decision_report(
@@ -163,6 +307,14 @@ def _report(
                 "generated_at": NOW.isoformat(),
                 "classification": "POSITION_STATE_CURRENT_POSITIONS" if positions else "POSITION_STATE_FLAT",
                 "positions": positions,
+                "live_money_eligible": False,
+                "paper_proof_invoked": False,
+            },
+            "managed_positions": {
+                "schema_version": "track_b_managed_positions_v1",
+                "generated_at": NOW.isoformat(),
+                "classification": "OPEN_MANAGED_EXIT_DUE" if managed_positions else "NO_MANAGED_POSITIONS",
+                "managed_positions": managed_positions or [],
                 "live_money_eligible": False,
                 "paper_proof_invoked": False,
             }
@@ -205,3 +357,44 @@ def _position(
         "source_artifact_refs": [],
         "diagnostic_rows": diagnostic_rows or [],
     }
+
+
+def _managed_position(
+    *,
+    account_id: str = "DUM882026",
+    local_symbol: str = "MESM6",
+    con_id: int = 770561194,
+    instrument: str = "MES",
+    side: str = "SHORT",
+    quantity: str = "1",
+    classification: str = "OPEN_MANAGED_MATCHED",
+    exit_due: bool = False,
+    managed_exit_policy_id: str = "GLOBEX_ACTIVE_EVIDENCE_TIMEBOX_60M_EXIT_V1",
+    policy_type: str | None = None,
+    reduce_qty: str | None = None,
+    lifecycle_position: dict | None = None,
+) -> dict:
+    row = {
+        "classification": classification,
+        "account_id": account_id,
+        "local_symbol": local_symbol,
+        "con_id": con_id,
+        "symbol": instrument,
+        "side": side,
+        "quantity": quantity,
+        "exit_due": exit_due,
+        "managed_exit_policy_id": managed_exit_policy_id,
+        "lifecycle_id": "life-mes",
+        "trade_id": "trade-mes",
+        "strategy_id": "mes_strategy",
+        "lane_id": "mes_lane",
+        "freshness_state": "FRESH",
+        "required_close_quantity": quantity,
+    }
+    if policy_type is not None:
+        row["policy_type"] = policy_type
+    if reduce_qty is not None:
+        row["reduce_qty"] = reduce_qty
+    if lifecycle_position is not None:
+        row["lifecycle_position"] = lifecycle_position
+    return row

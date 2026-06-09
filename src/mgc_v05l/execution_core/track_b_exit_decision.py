@@ -33,6 +33,9 @@ EXIT_DECISION_REPORT_SCHEMA_VERSION = "track_b_exit_decision_report_v1"
 DEFAULT_EXIT_DECISION_REPORT = (
     Path("outputs") / "track_b_execution_core" / "exit_decision" / "latest_exit_decision.json"
 )
+DEFAULT_MANAGED_POSITION_REGISTRY_PATH = (
+    Path("outputs") / "track_b_execution_core" / "managed_positions" / "latest_managed_positions.json"
+)
 
 
 class ExitDecisionAction(str, Enum):
@@ -48,6 +51,63 @@ class ExitDecisionReportClassification(str, Enum):
     DECISIONS_READY = "EXIT_DECISION_READY"
     POSITION_STATE_BLOCKED = "EXIT_DECISION_POSITION_STATE_BLOCKED"
     SOURCE_MISSING = "EXIT_DECISION_SOURCE_MISSING"
+
+
+class ExitPolicyType(str, Enum):
+    TIMEBOX = "TIMEBOX"
+    HARD_STOP = "HARD_STOP"
+    PROFIT_TARGET = "PROFIT_TARGET"
+    TRAILING_STOP = "TRAILING_STOP"
+    OPERATOR = "OPERATOR"
+    REVERSAL = "REVERSAL"
+    PARTIAL_SCALE_OUT = "PARTIAL_SCALE_OUT"
+
+
+class ExitPolicyEvidenceFreshness(str, Enum):
+    FRESH = "FRESH"
+    STALE_DEPENDENCY = "STALE_DEPENDENCY"
+    UNKNOWN = "UNKNOWN"
+
+
+@dataclass(frozen=True)
+class TrackBExitPolicyEvidence(JsonSerializable):
+    position_key: str
+    execution_domain: str
+    account_id: str
+    con_id: int
+    local_symbol: str
+    instrument: str
+    side: str
+    policy_id: str | None
+    policy_type: ExitPolicyType | str
+    due: bool
+    suggested_decision: ExitDecisionAction | str
+    close_qty: Decimal | int | str | None
+    evidence_freshness: ExitPolicyEvidenceFreshness | str
+    source_artifact_refs: tuple[SourceArtifactRef | Mapping[str, Any], ...]
+    diagnostics: tuple[Mapping[str, Any], ...] = ()
+    schema_version: str = "track_b_exit_policy_evidence_v1"
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "position_key", _required_text(self.position_key, "position_key"))
+        object.__setattr__(self, "execution_domain", _required_text(self.execution_domain, "execution_domain"))
+        object.__setattr__(self, "account_id", _required_text(self.account_id, "account_id"))
+        con_id = int(self.con_id)
+        if con_id < 0:
+            raise TrackBModelError("con_id must not be negative.")
+        object.__setattr__(self, "con_id", con_id)
+        object.__setattr__(self, "local_symbol", _required_text(self.local_symbol, "local_symbol").upper())
+        object.__setattr__(self, "instrument", _required_text(self.instrument, "instrument").upper())
+        object.__setattr__(self, "side", _required_text(self.side, "side").upper())
+        object.__setattr__(self, "policy_id", _optional_text(self.policy_id))
+        object.__setattr__(self, "policy_type", _normalize_policy_type(self.policy_type))
+        object.__setattr__(self, "due", bool(self.due))
+        object.__setattr__(self, "suggested_decision", _normalize_action(self.suggested_decision))
+        if self.close_qty is not None:
+            object.__setattr__(self, "close_qty", _positive_decimal(self.close_qty, "close_qty"))
+        object.__setattr__(self, "evidence_freshness", _normalize_evidence_freshness(self.evidence_freshness))
+        object.__setattr__(self, "source_artifact_refs", tuple(_normalize_source_ref(row) for row in self.source_artifact_refs))
+        object.__setattr__(self, "diagnostics", tuple(dict(row) for row in self.diagnostics))
 
 
 @dataclass(frozen=True)
@@ -105,6 +165,7 @@ class TrackBExitDecisionReportConfig:
     repo_root: Path = REPO_ROOT
     output_path: Path = DEFAULT_EXIT_DECISION_REPORT
     position_state_path: Path = DEFAULT_POSITION_STATE_REPORT
+    managed_position_registry_path: Path = DEFAULT_MANAGED_POSITION_REGISTRY_PATH
 
     def resolve(self, path: Path) -> Path:
         return path if path.is_absolute() else self.repo_root / path
@@ -119,16 +180,36 @@ def build_track_b_exit_decision_report(
 ) -> dict[str, Any]:
     actual_now = require_aware_datetime(now or datetime.now(UTC), "now")
     position_state = dict((input_overrides or {}).get("position_state") or _read_json(config.resolve(config.position_state_path)))
+    managed_positions = dict(
+        (input_overrides or {}).get("managed_positions")
+        or _read_json(config.resolve(config.managed_position_registry_path))
+    )
     source_ref = SourceArtifactRef(
         name="position_state",
         path=str(config.resolve(config.position_state_path)),
         generated_at=_parse_dt(position_state.get("generated_at")),
         authority_layer="ExitDecision",
     )
+    managed_source_ref = SourceArtifactRef(
+        name="managed_positions",
+        path=str(config.resolve(config.managed_position_registry_path)),
+        generated_at=_parse_dt(managed_positions.get("generated_at")),
+        authority_layer="ExitPolicyEvidence",
+    )
     position_state_blocked = _position_state_blocked(position_state)
     positions = [] if position_state_blocked else [_mapping(row) for row in _list(position_state.get("positions"))]
+    policy_evidence = build_exit_policy_evidence_from_managed_positions(
+        positions=positions,
+        managed_positions=managed_positions,
+        source_ref=managed_source_ref,
+    )
     decisions = [
-        _decision_for_position(position=position, source_ref=source_ref, decision_inputs=decision_inputs or {})
+        _decision_for_position(
+            position=position,
+            source_ref=source_ref,
+            policy_evidence=policy_evidence,
+            decision_inputs=decision_inputs or {},
+        )
         for position in positions
     ]
     classification = _classification(position_state=position_state, decisions=decisions)
@@ -146,10 +227,14 @@ def build_track_b_exit_decision_report(
         "paper_proof_invoked": position_state.get("paper_proof_invoked") is True,
         "classification": classification.value,
         "position_state_classification": position_state.get("classification"),
+        "exit_policy_evidence": [evidence.to_json_dict() for evidence in policy_evidence],
         "decision_count": len(decisions),
         "decisions": [decision.to_json_dict() for decision in decisions],
         "action_counts": {action.value: sum(1 for decision in decisions if decision.action == action) for action in ExitDecisionAction},
-        "source_artifact_paths": {"position_state": str(config.resolve(config.position_state_path))},
+        "source_artifact_paths": {
+            "position_state": str(config.resolve(config.position_state_path)),
+            "managed_positions": str(config.resolve(config.managed_position_registry_path)),
+        },
     }
 
 
@@ -174,6 +259,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--repo-root", type=Path, default=REPO_ROOT)
     parser.add_argument("--output-path", type=Path, default=DEFAULT_EXIT_DECISION_REPORT)
     parser.add_argument("--position-state-path", type=Path, default=DEFAULT_POSITION_STATE_REPORT)
+    parser.add_argument("--managed-position-registry-path", type=Path, default=DEFAULT_MANAGED_POSITION_REGISTRY_PATH)
     parser.add_argument("--json", action="store_true")
     parser.add_argument("--no-write", action="store_true")
     return parser
@@ -185,6 +271,7 @@ def main(argv: list[str] | None = None) -> int:
         repo_root=args.repo_root,
         output_path=args.output_path,
         position_state_path=args.position_state_path,
+        managed_position_registry_path=args.managed_position_registry_path,
     )
     payload = run_track_b_exit_decision_report(config=config, write=not args.no_write)
     if args.json or args.no_write:
@@ -198,12 +285,29 @@ def _decision_for_position(
     *,
     position: Mapping[str, Any],
     source_ref: SourceArtifactRef,
+    policy_evidence: list[TrackBExitPolicyEvidence],
     decision_inputs: Mapping[str, Mapping[str, Any]],
 ) -> TrackBExitDecision:
-    facts = _facts_for_position(position=position, decision_inputs=decision_inputs)
+    evidence = _policy_evidence_for_position(position=position, policy_evidence=policy_evidence)
+    facts = _facts_for_position(position=position, evidence=evidence, decision_inputs=decision_inputs)
     action = _select_action(position=position, facts=facts)
     reason = _reason_for_action(action=action, facts=facts)
     reduce_qty = facts.get("reduce_qty") if action == ExitDecisionAction.REDUCE else None
+    diagnostics = [*_list(position.get("diagnostic_rows"))]
+    if evidence:
+        diagnostics.extend(evidence.to_json_dict().get("diagnostics", []))
+        diagnostics.append(
+            {
+                "source": "exit_policy_evidence",
+                "policy_id": evidence.policy_id,
+                "policy_type": evidence.policy_type.value,
+                "due": evidence.due,
+                "suggested_decision": evidence.suggested_decision.value,
+                "evidence_freshness": evidence.evidence_freshness.value,
+            }
+        )
+    else:
+        diagnostics.append({"source": "exit_policy_evidence", "classification": "EXIT_POLICY_EVIDENCE_MISSING"})
     return TrackBExitDecision(
         decision_id=_decision_id(position),
         action=action,
@@ -221,7 +325,7 @@ def _decision_for_position(
         source_policy_id=_text_or_none(facts.get("source_policy_id")),
         position=position,
         source_artifact_refs=(source_ref,),
-        diagnostics=tuple(_list(position.get("diagnostic_rows"))),
+        diagnostics=tuple(diagnostics),
     )
 
 
@@ -246,6 +350,7 @@ def _select_action(*, position: Mapping[str, Any], facts: Mapping[str, Any]) -> 
 def _facts_for_position(
     *,
     position: Mapping[str, Any],
+    evidence: TrackBExitPolicyEvidence | None,
     decision_inputs: Mapping[str, Mapping[str, Any]],
 ) -> dict[str, Any]:
     keys = [
@@ -256,12 +361,258 @@ def _facts_for_position(
         str(position.get("strategy_id") or ""),
     ]
     facts: dict[str, Any] = {}
+    if evidence is not None:
+        facts.update(_facts_from_exit_policy_evidence(evidence))
     for key in keys:
         if key and key in decision_inputs:
             facts.update(dict(decision_inputs[key]))
     inline = _mapping(position.get("exit_decision_inputs"))
     facts.update(inline)
     return facts
+
+
+def build_exit_policy_evidence_from_managed_positions(
+    *,
+    positions: list[Mapping[str, Any]],
+    managed_positions: Mapping[str, Any],
+    source_ref: SourceArtifactRef,
+) -> list[TrackBExitPolicyEvidence]:
+    evidence: list[TrackBExitPolicyEvidence] = []
+    managed_rows = [_mapping(item) for item in _list(managed_positions.get("managed_positions"))]
+    for position in positions:
+        row = _matching_managed_policy_row(position=position, managed_rows=managed_rows)
+        if not row:
+            continue
+        evidence.append(_exit_policy_evidence(position=position, managed_row=row, source_ref=source_ref))
+    return evidence
+
+
+def _exit_policy_evidence(
+    *,
+    position: Mapping[str, Any],
+    managed_row: Mapping[str, Any],
+    source_ref: SourceArtifactRef,
+) -> TrackBExitPolicyEvidence:
+    policy_id = _policy_id(managed_row)
+    policy_type = _policy_type(policy_id=policy_id, managed_row=managed_row)
+    due = _managed_row_due(managed_row)
+    suggested_decision = _suggested_decision(policy_type=policy_type, due=due, managed_row=managed_row)
+    close_qty = _close_qty_for_evidence(position=position, managed_row=managed_row, suggested_decision=suggested_decision)
+    diagnostics = _policy_evidence_diagnostics(managed_row=managed_row, due=due)
+    return TrackBExitPolicyEvidence(
+        position_key=_position_key(position),
+        execution_domain=str(position.get("execution_domain") or ""),
+        account_id=str(position.get("account_id") or ""),
+        con_id=_int(position.get("con_id")),
+        local_symbol=str(position.get("local_symbol") or ""),
+        instrument=str(position.get("instrument") or ""),
+        side=str(position.get("side") or ""),
+        policy_id=policy_id,
+        policy_type=policy_type,
+        due=due,
+        suggested_decision=suggested_decision,
+        close_qty=close_qty,
+        evidence_freshness=_evidence_freshness(managed_row),
+        source_artifact_refs=(source_ref,),
+        diagnostics=tuple(diagnostics),
+    )
+
+
+def _matching_managed_policy_row(
+    *,
+    position: Mapping[str, Any],
+    managed_rows: list[Mapping[str, Any]],
+) -> Mapping[str, Any] | None:
+    for row in managed_rows:
+        if _row_is_diagnostic_only(row):
+            continue
+        if not _same_position_identity(position=position, row=row):
+            continue
+        return row
+    return None
+
+
+def _same_position_identity(*, position: Mapping[str, Any], row: Mapping[str, Any]) -> bool:
+    broker = _mapping(row.get("broker_position"))
+    account = str(broker.get("account_id") or row.get("account_id") or "")
+    if account and account != str(position.get("account_id") or ""):
+        return False
+    position_con_id = _int(position.get("con_id"))
+    row_con_id = _int(row.get("con_id") or broker.get("con_id") or _mapping(row.get("lifecycle_position")).get("con_id"))
+    if position_con_id > 0 and row_con_id > 0 and position_con_id != row_con_id:
+        return False
+    position_symbol = str(position.get("local_symbol") or "").upper()
+    row_symbol = str(row.get("local_symbol") or broker.get("local_symbol") or "").upper()
+    if position_symbol and row_symbol and position_symbol != row_symbol:
+        return False
+    return bool(position_symbol or position_con_id > 0)
+
+
+def _policy_id(managed_row: Mapping[str, Any]) -> str | None:
+    lifecycle = _mapping(managed_row.get("lifecycle_position"))
+    return _text_or_none(
+        managed_row.get("managed_exit_policy_id")
+        or managed_row.get("policy_id")
+        or lifecycle.get("managed_exit_policy_id")
+        or _first_lifecycle_unit_value(managed_row, "managed_exit_policy_id")
+        or _mapping(managed_row.get("hold_exit_shadow")).get("assigned_live_exit_policy")
+    )
+
+
+def _policy_type(*, policy_id: str | None, managed_row: Mapping[str, Any]) -> ExitPolicyType:
+    explicit = str(managed_row.get("policy_type") or managed_row.get("exit_policy_type") or "").upper()
+    text = explicit or str(policy_id or "").upper()
+    if "HARD_STOP" in text or text == "STOP":
+        return ExitPolicyType.HARD_STOP
+    if "PROFIT" in text or "TARGET" in text:
+        return ExitPolicyType.PROFIT_TARGET
+    if "TRAIL" in text:
+        return ExitPolicyType.TRAILING_STOP
+    if "OPERATOR" in text:
+        return ExitPolicyType.OPERATOR
+    if "REVERS" in text:
+        return ExitPolicyType.REVERSAL
+    if "PARTIAL" in text or "SCALE" in text:
+        return ExitPolicyType.PARTIAL_SCALE_OUT
+    return ExitPolicyType.TIMEBOX
+
+
+def _managed_row_due(managed_row: Mapping[str, Any]) -> bool:
+    classification = str(managed_row.get("classification") or "").upper()
+    if "EXIT_DUE" in classification:
+        return True
+    return _truthy(managed_row.get("exit_due")) or str(managed_row.get("exit_due_state") or "").upper() == "EXIT_DUE"
+
+
+def _suggested_decision(
+    *,
+    policy_type: ExitPolicyType,
+    due: bool,
+    managed_row: Mapping[str, Any],
+) -> ExitDecisionAction:
+    if not due:
+        return ExitDecisionAction.HOLD
+    if policy_type == ExitPolicyType.PARTIAL_SCALE_OUT:
+        return ExitDecisionAction.REDUCE
+    if policy_type == ExitPolicyType.REVERSAL:
+        return ExitDecisionAction.REVERSE_CONSIDER
+    if policy_type == ExitPolicyType.HARD_STOP:
+        return ExitDecisionAction.PROTECT
+    return ExitDecisionAction.FULL_CLOSE
+
+
+def _close_qty_for_evidence(
+    *,
+    position: Mapping[str, Any],
+    managed_row: Mapping[str, Any],
+    suggested_decision: ExitDecisionAction,
+) -> Any:
+    if suggested_decision == ExitDecisionAction.HOLD:
+        return None
+    if suggested_decision == ExitDecisionAction.REDUCE:
+        return managed_row.get("close_qty") or managed_row.get("reduce_qty") or managed_row.get("required_close_quantity")
+    return managed_row.get("required_close_quantity") or managed_row.get("quantity") or position.get("owned_qty") or position.get("qty")
+
+
+def _evidence_freshness(managed_row: Mapping[str, Any]) -> ExitPolicyEvidenceFreshness:
+    if managed_row.get("exit_due_evidence_stale") is True or str(managed_row.get("freshness_state") or "").upper().startswith("STALE"):
+        return ExitPolicyEvidenceFreshness.STALE_DEPENDENCY
+    if managed_row.get("freshness_state"):
+        return ExitPolicyEvidenceFreshness.FRESH
+    return ExitPolicyEvidenceFreshness.UNKNOWN
+
+
+def _policy_evidence_diagnostics(*, managed_row: Mapping[str, Any], due: bool) -> list[dict[str, Any]]:
+    diagnostics: list[dict[str, Any]] = []
+    lifecycle = _mapping(managed_row.get("lifecycle_position"))
+    lifecycle_exit_due = lifecycle.get("exit_due")
+    if due and lifecycle_exit_due is False:
+        diagnostics.append(
+            {
+                "source": "managed_positions",
+                "classification": "CURRENT_MANAGED_POSITION_DUE_SUPERSEDES_STALE_LIFECYCLE_HOLD",
+                "detail": "Current managed-position exit_due evidence is due while embedded lifecycle exit_due is false.",
+            }
+        )
+    if managed_row.get("exit_due_evidence_stale") is True:
+        diagnostics.append(
+            {
+                "source": "managed_positions",
+                "classification": "EXIT_DUE_EVIDENCE_STALE",
+            }
+        )
+    stale_sources = _list(managed_row.get("stale_dependency_sources"))
+    if stale_sources:
+        diagnostics.append(
+            {
+                "source": "managed_positions",
+                "classification": "STALE_DEPENDENCY_SOURCES",
+                "stale_dependency_sources": stale_sources,
+            }
+        )
+    return diagnostics
+
+
+def _facts_from_exit_policy_evidence(evidence: TrackBExitPolicyEvidence) -> dict[str, Any]:
+    facts: dict[str, Any] = {
+        "source_policy_id": evidence.policy_id,
+        "exit_reason": _exit_reason_from_policy(evidence),
+        "exit_policy_evidence": evidence.to_json_dict(),
+    }
+    if evidence.suggested_decision == ExitDecisionAction.HOLD:
+        return facts
+    if evidence.suggested_decision == ExitDecisionAction.FULL_CLOSE:
+        facts["exit_due"] = evidence.due
+        facts["timebox_due"] = evidence.due and evidence.policy_type == ExitPolicyType.TIMEBOX
+    elif evidence.suggested_decision == ExitDecisionAction.REDUCE:
+        facts["partial_scale_out_due"] = evidence.due
+        facts["reduce_qty"] = evidence.close_qty
+    elif evidence.suggested_decision == ExitDecisionAction.PROTECT:
+        facts["protective_close_due"] = evidence.due
+    elif evidence.suggested_decision == ExitDecisionAction.REVERSE_CONSIDER:
+        facts["reverse_consider"] = evidence.due
+    return facts
+
+
+def _exit_reason_from_policy(evidence: TrackBExitPolicyEvidence) -> str:
+    if evidence.suggested_decision == ExitDecisionAction.HOLD:
+        return "exit_policy_not_due"
+    return f"{evidence.policy_type.value.lower()}_exit_due"
+
+
+def _policy_evidence_for_position(
+    *,
+    position: Mapping[str, Any],
+    policy_evidence: list[TrackBExitPolicyEvidence],
+) -> TrackBExitPolicyEvidence | None:
+    position_key = _position_key(position)
+    for evidence in policy_evidence:
+        if evidence.position_key == position_key:
+            return evidence
+    return None
+
+
+def _position_key(position: Mapping[str, Any]) -> str:
+    return "|".join(
+        str(part or "").upper()
+        for part in (
+            position.get("account_id"),
+            position.get("con_id"),
+            position.get("local_symbol"),
+            position.get("side"),
+        )
+    )
+
+
+def _first_lifecycle_unit_value(managed_row: Mapping[str, Any], key: str) -> Any:
+    for unit in (_mapping(item) for item in _list(managed_row.get("lifecycle_units"))):
+        if unit.get(key) not in (None, ""):
+            return unit.get(key)
+    lifecycle = _mapping(managed_row.get("lifecycle_position"))
+    for unit in (_mapping(item) for item in _list(lifecycle.get("lifecycle_units"))):
+        if unit.get(key) not in (None, ""):
+            return unit.get(key)
+    return None
 
 
 def _reason_for_action(*, action: ExitDecisionAction, facts: Mapping[str, Any]) -> str:
@@ -328,6 +679,24 @@ def _normalize_action(value: ExitDecisionAction | str) -> ExitDecisionAction:
         return value if isinstance(value, ExitDecisionAction) else ExitDecisionAction(str(value))
     except ValueError as exc:
         raise TrackBModelError("exit decision action is not valid.") from exc
+
+
+def _normalize_policy_type(value: ExitPolicyType | str) -> ExitPolicyType:
+    try:
+        return value if isinstance(value, ExitPolicyType) else ExitPolicyType(str(value).upper())
+    except ValueError as exc:
+        raise TrackBModelError("exit policy type is not valid.") from exc
+
+
+def _normalize_evidence_freshness(value: ExitPolicyEvidenceFreshness | str) -> ExitPolicyEvidenceFreshness:
+    try:
+        return (
+            value
+            if isinstance(value, ExitPolicyEvidenceFreshness)
+            else ExitPolicyEvidenceFreshness(str(value).upper())
+        )
+    except ValueError as exc:
+        raise TrackBModelError("exit policy evidence freshness is not valid.") from exc
 
 
 def _normalize_position(value: TrackBPositionState | Mapping[str, Any]) -> TrackBPositionState | dict[str, Any]:
@@ -413,6 +782,16 @@ def _text_or_none(value: Any) -> str | None:
 def _position_state_blocked(position_state: Mapping[str, Any]) -> bool:
     state_classification = str(position_state.get("classification") or "")
     return "BLOCKED" in state_classification or "WRONG_SCOPE" in state_classification
+
+
+def _row_is_diagnostic_only(row: Mapping[str, Any]) -> bool:
+    if row.get("historical_only") is True or row.get("diagnostic_only") is True:
+        return True
+    scope = str(row.get("current_hot_path_scope") or row.get("scope") or "").upper()
+    if "HISTORICAL" in scope or "FULL_AUDIT_ONLY" in scope or "DIAGNOSTIC" in scope:
+        return True
+    classification = str(row.get("classification") or "").upper()
+    return "HISTORICAL" in classification or "STALE_DERIVED" in classification
 
 
 if __name__ == "__main__":  # pragma: no cover

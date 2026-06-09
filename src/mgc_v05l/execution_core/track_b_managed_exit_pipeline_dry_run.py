@@ -147,7 +147,10 @@ def build_track_b_managed_exit_pipeline_dry_run_report(
                     position_state_path=config.position_state_path,
                 ),
                 now=actual_now,
-                input_overrides={"position_state": position_state},
+                input_overrides={
+                    "position_state": position_state,
+                    "managed_positions": inputs["managed_positions"],
+                },
                 decision_inputs=decision_inputs or {},
             )
             ),
@@ -472,10 +475,13 @@ def _source_refs(
 
 def _broker_position_for_intent(*, intent: ExitIntent, reconciliation: Mapping[str, Any]) -> dict[str, Any]:
     for row in (_mapping(item) for item in _list(reconciliation.get("track_b_broker_positions"))):
+        account = str(row.get("account_id") or row.get("account") or intent.account_id)
+        local_symbol = str(row.get("local_symbol") or "").upper()
+        row_con_id = _int(row.get("con_id"))
         if (
-            str(row.get("account_id") or row.get("account") or intent.account_id) == intent.account_id
-            and str(row.get("local_symbol") or "").upper() == intent.local_symbol
-            and _int(row.get("con_id")) == intent.con_id
+            account == intent.account_id
+            and local_symbol == intent.local_symbol
+            and (row_con_id == intent.con_id or row_con_id == 0)
             and abs(_decimal(row.get("quantity"))) > Decimal("0")
         ):
             return row

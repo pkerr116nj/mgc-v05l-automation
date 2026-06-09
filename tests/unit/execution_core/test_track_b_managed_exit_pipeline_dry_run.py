@@ -48,6 +48,30 @@ def test_timebox_due_long_builds_sell_intent_and_allowed_decision(tmp_path: Path
     assert payload["exit_authority_decisions"][0]["decision"] == "ALLOWED"
 
 
+def test_timebox_due_with_broker_missing_con_id_uses_enriched_position_identity(tmp_path: Path) -> None:
+    inputs = _inputs(
+        broker_positions=[
+            _broker_position(quantity="1", local_symbol="MESM6", con_id=0, symbol="MES")
+        ],
+        managed_side="LONG",
+        managed_qty="1",
+    )
+    inputs["managed_positions"]["managed_positions"][0].update(
+        {
+            "classification": "OPEN_MANAGED_EXIT_DUE",
+            "exit_due": True,
+            "managed_exit_policy_id": "GLOBEX_ACTIVE_EVIDENCE_TIMEBOX_60M_EXIT_V1",
+        }
+    )
+
+    payload = _build(tmp_path, inputs)
+
+    assert payload["position_state"]["positions"][0]["con_id"] == 770561194
+    assert payload["generated_exit_intents"][0]["con_id"] == 770561194
+    assert payload["classification"] == ManagedExitPipelineDryRunClassification.EXIT_INTENT_ALLOWED.value
+    assert payload["exit_authority_decisions"][0]["decision"] == "ALLOWED"
+
+
 def test_timebox_due_short_builds_buy_intent_and_allowed_decision(tmp_path: Path) -> None:
     payload = _build(tmp_path, _inputs(), decision_inputs={"life-mes": {"timebox_due": True}})
 
