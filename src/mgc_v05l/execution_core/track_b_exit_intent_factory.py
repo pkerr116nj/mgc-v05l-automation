@@ -384,7 +384,7 @@ def _source_refs(
 ) -> list[SourceArtifactRef | Mapping[str, Any]]:
     refs: list[SourceArtifactRef | Mapping[str, Any]] = [source_ref]
     for container in (selection, decision, position):
-        refs.extend(_list(container.get("source_artifact_refs")))
+        refs.extend(_normalize_source_ref(row) for row in _list(container.get("source_artifact_refs")))
     return refs
 
 
@@ -412,6 +412,15 @@ def _intent_metadata(intent: ExitIntent) -> dict[str, Any]:
         "execution_domain": intent.execution_domain.value,
         "account_id": intent.account_id,
     }
+
+
+def _normalize_source_ref(value: Any) -> SourceArtifactRef:
+    if isinstance(value, SourceArtifactRef):
+        return value
+    row = _mapping(value)
+    if "generated_at" in row:
+        row["generated_at"] = _parse_dt(row.get("generated_at"))
+    return SourceArtifactRef(**row)
 
 
 def _read_json(path: Path) -> dict[str, Any]:
