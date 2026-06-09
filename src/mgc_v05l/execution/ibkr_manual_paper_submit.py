@@ -88,6 +88,13 @@ _FILL_TEST_MODE = "PAPER_FILL_TEST"
 _CLOSE_TEST_MODE = "PAPER_CLOSE_TEST"
 _MARKETABLE_LIMIT_LABEL = "MARKETABLE_LIMIT_INTENDED_TO_FILL_IN_PAPER"
 _CLOSE_MARKETABLE_LIMIT_LABEL = "MARKETABLE_LIMIT_INTENDED_TO_CLOSE_IN_PAPER"
+_LIFECYCLE_VALIDATION_ENTRY_AUTHORITY_VALID = "LIFECYCLE_VALIDATION_ENTRY_AUTHORITY_VALID"
+_PAPER_LIFECYCLE_VALIDATION_ENTRY_ALLOWED = "PAPER_LIFECYCLE_VALIDATION_ENTRY_ALLOWED"
+_PAPER_LIFECYCLE_VALIDATION_ENTRY_DEGRADED_ALLOWED = "PAPER_LIFECYCLE_VALIDATION_ENTRY_DEGRADED_ALLOWED"
+_LIFECYCLE_VALIDATION_ENTRY_ALLOWED_AUTHORITY = {
+    _PAPER_LIFECYCLE_VALIDATION_ENTRY_ALLOWED,
+    _PAPER_LIFECYCLE_VALIDATION_ENTRY_DEGRADED_ALLOWED,
+}
 _NON_MARKETABLE_LIMIT_LABEL = "NEAR_MARKET_NON_MARKETABLE_LIMIT"
 _FILLED_ORDER_STATUS = {"Filled"}
 _PARTIAL_FILL_STATUS = {"PartiallyFilled"}
@@ -665,7 +672,7 @@ def run_ibkr_manual_paper_submit_test(
                 requested_order=requested_order,
                 now=started_at,
             )
-        if pre_action_validation.get("classification") != PRE_ACTION_SNAPSHOT_VALID:
+        if not _pre_action_submit_authorized(pre_action_validation):
             detail = (
                 "Pre-action Control Plane Snapshot validation blocked manual PAPER submit harness: "
                 f"{pre_action_validation.get('classification')} - {pre_action_validation.get('reason')}"
@@ -4259,6 +4266,24 @@ def _first_failed_guardrail_detail(guardrail_checks: list[dict[str, Any]]) -> st
         if check.get("blocking") and not check.get("passed"):
             return str(check.get("detail") or f"Blocking guardrail failed: {check.get('name')}")
     return "The manual paper submit harness was blocked by a required guardrail."
+
+
+def _pre_action_submit_authorized(pre_action_validation: dict[str, Any]) -> bool:
+    classification = str(pre_action_validation.get("classification") or "").strip()
+    if classification == PRE_ACTION_SNAPSHOT_VALID:
+        return True
+    if classification != _LIFECYCLE_VALIDATION_ENTRY_AUTHORITY_VALID:
+        return False
+    if pre_action_validation.get("upstream_bridge_validation") is not True:
+        return False
+    authority_classification = str(pre_action_validation.get("authority_classification") or "").strip()
+    if authority_classification not in _LIFECYCLE_VALIDATION_ENTRY_ALLOWED_AUTHORITY:
+        return False
+    if pre_action_validation.get("live_money_eligible") is not False:
+        return False
+    if pre_action_validation.get("paper_proof_invoked") is not False:
+        return False
+    return bool(pre_action_validation.get("valid", True))
 
 
 def _read_only_config_from_submit(config: IbkrManualPaperSubmitConfig) -> Any:

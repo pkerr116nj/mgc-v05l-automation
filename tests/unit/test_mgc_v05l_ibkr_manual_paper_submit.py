@@ -123,6 +123,135 @@ def test_manual_submit_valid_snapshot_reaches_existing_next_gate(monkeypatch, tm
     assert "next gate reached" in artifacts.report["submit_cancel_lifecycle"]["detail"]
 
 
+def test_manual_submit_accepts_allowed_lifecycle_validation_entry_authority(monkeypatch, tmp_path: Path) -> None:
+    preview_artifacts, frozen_path = _preview_bundle(monkeypatch, tmp_path)
+    monkeypatch.setattr(
+        "mgc_v05l.execution.ibkr_manual_paper_submit._build_runtime",
+        lambda **_kwargs: (_ for _ in ()).throw(RuntimeError("next gate reached")),
+    )
+
+    artifacts = run_ibkr_manual_paper_submit_test(
+        config=_config(
+            submit=True,
+            approval_digest=str(preview_artifacts.report["preview"]["preview_digest"]),
+            approval_phrase=str(preview_artifacts.report["preview"]["expected_approval_phrase"]),
+            output_dir=tmp_path,
+            frozen_preview_path=frozen_path,
+            pre_action_snapshot_already_validated=True,
+            pre_action_snapshot_validation_context=_lifecycle_validation_entry_authority_context(
+                "PAPER_LIFECYCLE_VALIDATION_ENTRY_ALLOWED"
+            ),
+        ),
+        stack_provider=_manual_stack,
+    )
+
+    validation = artifacts.report["pre_action_snapshot_validation"]
+    assert validation["classification"] == "LIFECYCLE_VALIDATION_ENTRY_AUTHORITY_VALID"
+    assert validation["authority_classification"] == "PAPER_LIFECYCLE_VALIDATION_ENTRY_ALLOWED"
+    assert "next gate reached" in artifacts.report["submit_cancel_lifecycle"]["detail"]
+
+
+def test_manual_submit_accepts_degraded_lifecycle_validation_entry_authority(monkeypatch, tmp_path: Path) -> None:
+    preview_artifacts, frozen_path = _preview_bundle(monkeypatch, tmp_path)
+    monkeypatch.setattr(
+        "mgc_v05l.execution.ibkr_manual_paper_submit._build_runtime",
+        lambda **_kwargs: (_ for _ in ()).throw(RuntimeError("next gate reached")),
+    )
+
+    artifacts = run_ibkr_manual_paper_submit_test(
+        config=_config(
+            submit=True,
+            approval_digest=str(preview_artifacts.report["preview"]["preview_digest"]),
+            approval_phrase=str(preview_artifacts.report["preview"]["expected_approval_phrase"]),
+            output_dir=tmp_path,
+            frozen_preview_path=frozen_path,
+            pre_action_snapshot_already_validated=True,
+            pre_action_snapshot_validation_context=_lifecycle_validation_entry_authority_context(
+                "PAPER_LIFECYCLE_VALIDATION_ENTRY_DEGRADED_ALLOWED",
+                degraded_reasons=["diagnostic_runtime_readiness_stale"],
+            ),
+        ),
+        stack_provider=_manual_stack,
+    )
+
+    validation = artifacts.report["pre_action_snapshot_validation"]
+    assert validation["authority_classification"] == "PAPER_LIFECYCLE_VALIDATION_ENTRY_DEGRADED_ALLOWED"
+    assert validation["degraded_reasons"] == ["diagnostic_runtime_readiness_stale"]
+    assert "next gate reached" in artifacts.report["submit_cancel_lifecycle"]["detail"]
+
+
+def test_manual_submit_blocks_invalid_lifecycle_validation_entry_authority(monkeypatch, tmp_path: Path) -> None:
+    preview_artifacts, frozen_path = _preview_bundle(monkeypatch, tmp_path)
+    runtime_called = False
+
+    def _runtime(**_kwargs):
+        nonlocal runtime_called
+        runtime_called = True
+        raise RuntimeError("next gate reached")
+
+    monkeypatch.setattr("mgc_v05l.execution.ibkr_manual_paper_submit._build_runtime", _runtime)
+
+    artifacts = run_ibkr_manual_paper_submit_test(
+        config=_config(
+            submit=True,
+            approval_digest=str(preview_artifacts.report["preview"]["preview_digest"]),
+            approval_phrase=str(preview_artifacts.report["preview"]["expected_approval_phrase"]),
+            output_dir=tmp_path,
+            frozen_preview_path=frozen_path,
+            pre_action_snapshot_already_validated=True,
+            pre_action_snapshot_validation_context=_lifecycle_validation_entry_authority_context(
+                "PAPER_LIFECYCLE_VALIDATION_ENTRY_BLOCKED",
+                block_reasons=["invalid_authorization"],
+                valid=False,
+            ),
+        ),
+        stack_provider=_manual_stack,
+    )
+
+    assert runtime_called is False
+    assert artifacts.classification == "IBKR_MANUAL_PAPER_SUBMIT_CANCEL_BLOCKED"
+    assert artifacts.report["submit_cancel_lifecycle"]["status"] == "blocked"
+    assert "LIFECYCLE_VALIDATION_ENTRY_AUTHORITY_VALID" in artifacts.report["submit_cancel_lifecycle"]["detail"]
+
+
+def test_manual_submit_blocks_lifecycle_validation_authority_with_live_or_proof_flags(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    preview_artifacts, frozen_path = _preview_bundle(monkeypatch, tmp_path)
+    runtime_called = False
+    unsafe_live_money = True
+    unsafe_paper_proof = True
+
+    def _runtime(**_kwargs):
+        nonlocal runtime_called
+        runtime_called = True
+        raise RuntimeError("next gate reached")
+
+    monkeypatch.setattr("mgc_v05l.execution.ibkr_manual_paper_submit._build_runtime", _runtime)
+
+    artifacts = run_ibkr_manual_paper_submit_test(
+        config=_config(
+            submit=True,
+            approval_digest=str(preview_artifacts.report["preview"]["preview_digest"]),
+            approval_phrase=str(preview_artifacts.report["preview"]["expected_approval_phrase"]),
+            output_dir=tmp_path,
+            frozen_preview_path=frozen_path,
+            pre_action_snapshot_already_validated=True,
+            pre_action_snapshot_validation_context=_lifecycle_validation_entry_authority_context(
+                "PAPER_LIFECYCLE_VALIDATION_ENTRY_ALLOWED",
+                live_money_eligible=unsafe_live_money,
+                paper_proof_invoked=unsafe_paper_proof,
+            ),
+        ),
+        stack_provider=_manual_stack,
+    )
+
+    assert runtime_called is False
+    assert artifacts.classification == "IBKR_MANUAL_PAPER_SUBMIT_CANCEL_BLOCKED"
+    assert artifacts.report["submit_cancel_lifecycle"]["status"] == "blocked"
+
+
 def test_submit_cannot_occur_without_typed_phrase(monkeypatch, tmp_path: Path) -> None:
     _, frozen_path = _preview_bundle(monkeypatch, tmp_path)
 
@@ -1786,6 +1915,31 @@ def _context() -> dict[str, object]:
     }
 
 
+def _lifecycle_validation_entry_authority_context(
+    authority_classification: str,
+    **overrides: object,
+) -> dict[str, object]:
+    payload: dict[str, object] = {
+        "classification": "LIFECYCLE_VALIDATION_ENTRY_AUTHORITY_VALID",
+        "authority_classification": authority_classification,
+        "upstream_bridge_validation": True,
+        "valid": True,
+        "reason": "Dedicated PAPER lifecycle-validation entry authority allowed this controlled entry.",
+        "account_id": "DUM882026",
+        "execution_domain": "TRACK_B_PAPER",
+        "symbol": "MGC",
+        "local_symbol": "MGCM6",
+        "action": "BUY",
+        "quantity": 1.0,
+        "live_money_eligible": False,
+        "paper_proof_invoked": False,
+        "block_reasons": [],
+        "degraded_reasons": [],
+    }
+    payload.update(overrides)
+    return payload
+
+
 def _config(
     *,
     port: int = 7497,
@@ -1802,6 +1956,8 @@ def _config(
     frozen_preview_path: Path | None = None,
     fill_timeout_seconds: float = 60.0,
     execution_pricing_context: dict[str, object] | None = None,
+    pre_action_snapshot_already_validated: bool = False,
+    pre_action_snapshot_validation_context: dict[str, object] | None = None,
 ) -> IbkrManualPaperSubmitConfig:
     return IbkrManualPaperSubmitConfig(
         repo_root=output_dir or Path("."),
@@ -1826,6 +1982,8 @@ def _config(
         output_dir=output_dir,
         frozen_preview_path=frozen_preview_path,
         execution_pricing_context=execution_pricing_context,
+        pre_action_snapshot_already_validated=pre_action_snapshot_already_validated,
+        pre_action_snapshot_validation_context=pre_action_snapshot_validation_context,
     )
 
 
