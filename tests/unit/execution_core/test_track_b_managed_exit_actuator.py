@@ -1,12 +1,16 @@
 from __future__ import annotations
 
+import json
+import subprocess
 from datetime import UTC, datetime
 from pathlib import Path
 
 from mgc_v05l.execution_core.track_b_managed_exit_actuator import (
     MANAGED_EXIT_ACTUATOR_APPLIED_OR_PENDING,
+    MANAGED_EXIT_ACTUATOR_ATTACH_TIMEOUT,
     MANAGED_EXIT_ACTUATOR_BLOCKED,
     MANAGED_EXIT_ACTUATOR_DRY_RUN_READY,
+    MANAGED_EXIT_ACTUATOR_PHASE_RUNNING,
     TrackBManagedExitActuatorConfig,
     run_track_b_managed_exit_actuator,
 )
@@ -63,6 +67,107 @@ def test_dry_run_ready_does_not_call_attach(tmp_path: Path) -> None:
     assert payload["eligible_count"] == 1
     assert payload["submit_attempted"] is False
     assert calls == []
+
+
+def test_actuator_writes_phase_progress_before_candidate_discovery(tmp_path: Path) -> None:
+    output_path = tmp_path / "actuator.json"
+    seen = []
+
+    def _attach(config, now):
+        seen.append(json.loads(output_path.read_text()))
+        return {
+            "classification": "TRACK_B_STRATEGY_PAPER_CLOSE_SUBMITTED",
+            "submit_attempted": True,
+            "broker_state_mutated": True,
+        }
+
+    payload = run_track_b_managed_exit_actuator(
+        config=TrackBManagedExitActuatorConfig(
+            repo_root=tmp_path,
+            output_path=output_path,
+            apply=True,
+            operator_authorized_managed_exit=True,
+            max_closes_per_run=1,
+        ),
+        now=NOW,
+        input_overrides=_inputs(runtime_down=True),
+        attach_runner=_attach,
+        write=True,
+    )
+
+    assert seen
+    assert seen[0]["classification"] == MANAGED_EXIT_ACTUATOR_PHASE_RUNNING
+    assert seen[0]["phase"] == "guarded_attach"
+    assert seen[0]["submit_attempted"] is False
+    assert payload["phase_timings"][0]["phase"] == "startup"
+    assert "candidate_discovery" in [row["phase"] for row in payload["phase_timings"]]
+
+
+def test_default_attach_timeout_fails_closed_before_submit(tmp_path: Path) -> None:
+    calls = []
+
+    def _timeout_command(command, repo_root, timeout):
+        calls.append(command)
+        return subprocess.CompletedProcess(command, 124, stdout="", stderr="attach timed out")
+
+    payload = run_track_b_managed_exit_actuator(
+        config=TrackBManagedExitActuatorConfig(
+            repo_root=tmp_path,
+            apply=True,
+            operator_authorized_managed_exit=True,
+            max_closes_per_run=1,
+            attach_timeout_seconds=0.01,
+        ),
+        now=NOW,
+        input_overrides=_inputs(runtime_down=True),
+        command_runner=_timeout_command,
+        write=False,
+    )
+
+    assert payload["classification"] == MANAGED_EXIT_ACTUATOR_BLOCKED
+    assert payload["submit_attempted"] is False
+    assert payload["submitted_count"] == 0
+    assert payload["attempted_closes"][0]["classification"] == MANAGED_EXIT_ACTUATOR_ATTACH_TIMEOUT
+    assert payload["attempted_closes"][0]["primary_blocker"] == "BROKER_HANDSHAKE_OR_ATTACH_TIMEOUT_BEFORE_SUBMIT"
+    assert "--skip-control-plane-refresh" in calls[0]
+
+
+def test_default_attach_child_fast_path_remains_apply_eligible(tmp_path: Path) -> None:
+    calls = []
+
+    def _ok_command(command, repo_root, timeout):
+        calls.append(command)
+        return subprocess.CompletedProcess(
+            command,
+            0,
+            stdout=json.dumps(
+                {
+                    "classification": "TRACK_B_STRATEGY_PAPER_CLOSE_SUBMITTED",
+                    "submit_attempted": True,
+                    "broker_state_mutated": True,
+                    "apply_result": {"close_submit_attempt": {"broker_order_id": "101", "perm_id": 202}},
+                }
+            ),
+            stderr="",
+        )
+
+    payload = run_track_b_managed_exit_actuator(
+        config=TrackBManagedExitActuatorConfig(
+            repo_root=tmp_path,
+            apply=True,
+            operator_authorized_managed_exit=True,
+            max_closes_per_run=1,
+        ),
+        now=NOW,
+        input_overrides=_inputs(runtime_down=True),
+        command_runner=_ok_command,
+        write=False,
+    )
+
+    assert payload["classification"] == MANAGED_EXIT_ACTUATOR_APPLIED_OR_PENDING
+    assert payload["submit_attempted"] is True
+    assert payload["attempted_closes"][0]["order_id"] == "101"
+    assert "--skip-control-plane-refresh" in calls[0]
 
 
 def test_multiple_positions_are_processed_one_at_a_time_with_refresh_between(tmp_path: Path) -> None:

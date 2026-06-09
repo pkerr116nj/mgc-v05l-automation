@@ -9,6 +9,11 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
+import signal
+import subprocess
+import sys
+import time
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -38,6 +43,8 @@ MANAGED_EXIT_ACTUATOR_DRY_RUN_READY = "MANAGED_EXIT_ACTUATOR_DRY_RUN_READY"
 MANAGED_EXIT_ACTUATOR_BLOCKED = "MANAGED_EXIT_ACTUATOR_BLOCKED"
 MANAGED_EXIT_ACTUATOR_PARTIAL = "MANAGED_EXIT_ACTUATOR_PARTIAL"
 MANAGED_EXIT_ACTUATOR_APPLIED_OR_PENDING = "MANAGED_EXIT_ACTUATOR_APPLIED_OR_PENDING"
+MANAGED_EXIT_ACTUATOR_ATTACH_TIMEOUT = "MANAGED_EXIT_ACTUATOR_ATTACH_TIMEOUT"
+MANAGED_EXIT_ACTUATOR_PHASE_RUNNING = "MANAGED_EXIT_ACTUATOR_PHASE_RUNNING"
 
 
 @dataclass(frozen=True)
@@ -47,6 +54,7 @@ class TrackBManagedExitActuatorConfig:
     apply: bool = False
     operator_authorized_managed_exit: bool = False
     max_closes_per_run: int | None = None
+    attach_timeout_seconds: float = 90.0
     recovery_config: TrackBManagedExitRecoveryConfig | None = None
 
     def resolve(self, path: Path) -> Path:
@@ -55,6 +63,7 @@ class TrackBManagedExitActuatorConfig:
 
 AttachRunner = Callable[[TrackBManagedExitAttachConfig, datetime], Mapping[str, Any]]
 RefreshHook = Callable[[dict[str, Any]], None]
+CommandRunner = Callable[[Sequence[str], Path, float], subprocess.CompletedProcess[str]]
 
 
 def build_track_b_managed_exit_actuator_report(
@@ -65,7 +74,10 @@ def build_track_b_managed_exit_actuator_report(
 ) -> dict[str, Any]:
     actual_now = now or datetime.now(UTC)
     require_aware_datetime(actual_now, "now")
+    phase_timings: list[dict[str, Any]] = []
+    _record_phase(phase_timings, "startup", actual_now)
     recovery = _recovery_plan(config=config, now=actual_now, input_overrides=input_overrides)
+    _record_phase(phase_timings, "candidate_discovery", actual_now)
     eligible = _eligible_positions(recovery)
     if not eligible:
         classification = MANAGED_EXIT_ACTUATOR_NOOP if int(recovery.get("exit_due_count") or 0) == 0 else MANAGED_EXIT_ACTUATOR_BLOCKED
@@ -79,6 +91,7 @@ def build_track_b_managed_exit_actuator_report(
         recovery=recovery,
         classification=classification,
         attempted=[],
+        phase_timings=phase_timings,
     )
 
 
@@ -88,19 +101,39 @@ def run_track_b_managed_exit_actuator(
     now: datetime | None = None,
     input_overrides: Mapping[str, Mapping[str, Any]] | None = None,
     attach_runner: AttachRunner | None = None,
+    command_runner: CommandRunner | None = None,
     refresh_hook: RefreshHook | None = None,
     write: bool = True,
 ) -> dict[str, Any]:
     actual_now = now or datetime.now(UTC)
     require_aware_datetime(actual_now, "now")
-    attach_runner = attach_runner or _run_attach
+    attach_runner = attach_runner or (
+        lambda attach_config, attach_now: _run_attach_child(
+            attach_config,
+            attach_now,
+            timeout_seconds=config.attach_timeout_seconds,
+            command_runner=command_runner,
+        )
+    )
     attempted: list[dict[str, Any]] = []
+    phase_timings: list[dict[str, Any]] = []
+    _record_phase(phase_timings, "startup", actual_now)
+    if write:
+        _write_phase_status(config=config, now=actual_now, phase="candidate_discovery", phase_timings=phase_timings)
     recovery = _recovery_plan(config=config, now=actual_now, input_overrides=input_overrides)
+    _record_phase(phase_timings, "candidate_discovery", actual_now)
     initial_eligible = _eligible_positions(recovery)
 
     if not initial_eligible:
         classification = MANAGED_EXIT_ACTUATOR_NOOP if int(recovery.get("exit_due_count") or 0) == 0 else MANAGED_EXIT_ACTUATOR_BLOCKED
-        report = _base_report(config=config, now=actual_now, recovery=recovery, classification=classification, attempted=attempted)
+        report = _base_report(
+            config=config,
+            now=actual_now,
+            recovery=recovery,
+            classification=classification,
+            attempted=attempted,
+            phase_timings=phase_timings,
+        )
         if write:
             write_track_b_managed_exit_actuator_report(config=config, payload=report)
         return report
@@ -112,6 +145,7 @@ def run_track_b_managed_exit_actuator(
             recovery=recovery,
             classification=MANAGED_EXIT_ACTUATOR_DRY_RUN_READY,
             attempted=attempted,
+            phase_timings=phase_timings,
         )
         if write:
             write_track_b_managed_exit_actuator_report(config=config, payload=report)
@@ -119,7 +153,10 @@ def run_track_b_managed_exit_actuator(
 
     limit = config.max_closes_per_run if config.max_closes_per_run is not None else len(initial_eligible)
     for planned in initial_eligible[: max(limit, 0)]:
+        if write:
+            _write_phase_status(config=config, now=actual_now, phase="pre_submit_recheck", phase_timings=phase_timings)
         latest_recovery = _recovery_plan(config=config, now=actual_now, input_overrides=input_overrides)
+        _record_phase(phase_timings, "pre_submit_recheck", actual_now)
         latest = _matching_eligible_position(_eligible_positions(latest_recovery), planned)
         if latest is None:
             attempted.append(
@@ -137,7 +174,10 @@ def run_track_b_managed_exit_actuator(
             recovery = latest_recovery
             break
         attach_config = _attach_config(config=config, position=latest)
+        if write:
+            _write_phase_status(config=config, now=actual_now, phase="guarded_attach", phase_timings=phase_timings)
         attach_result = dict(attach_runner(attach_config, actual_now))
+        _record_phase(phase_timings, "guarded_attach", actual_now)
         attempted_row = {
             "classification": attach_result.get("classification"),
             "identity": latest.get("identity"),
@@ -158,6 +198,7 @@ def run_track_b_managed_exit_actuator(
         if refresh_hook is not None:
             refresh_hook(attempted_row)
         recovery = _recovery_plan(config=config, now=actual_now, input_overrides=input_overrides)
+        _record_phase(phase_timings, "post_attempt_recovery_refresh", actual_now)
         if _unsafe_after_attempt(attempted_row):
             break
 
@@ -169,7 +210,14 @@ def run_track_b_managed_exit_actuator(
         classification = MANAGED_EXIT_ACTUATOR_PARTIAL
     else:
         classification = MANAGED_EXIT_ACTUATOR_BLOCKED
-    report = _base_report(config=config, now=actual_now, recovery=recovery, classification=classification, attempted=attempted)
+    report = _base_report(
+        config=config,
+        now=actual_now,
+        recovery=recovery,
+        classification=classification,
+        attempted=attempted,
+        phase_timings=phase_timings,
+    )
     if write:
         write_track_b_managed_exit_actuator_report(config=config, payload=report)
     return report
@@ -188,6 +236,7 @@ def _base_report(
     recovery: Mapping[str, Any],
     classification: str,
     attempted: Sequence[Mapping[str, Any]],
+    phase_timings: Sequence[Mapping[str, Any]] | None = None,
 ) -> dict[str, Any]:
     eligible = _eligible_positions(recovery)
     return {
@@ -201,6 +250,9 @@ def _base_report(
         "global_flatten_allowed": False,
         "paper_proof_invoked": False,
         "live_money_eligible": False,
+        "phase_timings": list(phase_timings or []),
+        "latest_phase": (phase_timings or [{}])[-1].get("phase") if phase_timings else None,
+        "attach_timeout_seconds": config.attach_timeout_seconds,
         "apply_requested": config.apply is True,
         "operator_authorized_managed_exit": config.operator_authorized_managed_exit is True,
         "broker_state_mutated": any(row.get("broker_state_mutated") is True for row in attempted),
@@ -297,7 +349,7 @@ def _attach_config(*, config: TrackBManagedExitActuatorConfig, position: Mapping
         quantity=_int(candidate.get("quantity")) or 1,
         apply=True,
         operator_authorized_managed_exit=True,
-        refresh_control_plane=True,
+        refresh_control_plane=False,
         auto_select_active_managed_position=True,
     )
 
@@ -313,6 +365,174 @@ def _side_from_candidate(candidate: Mapping[str, Any]) -> str:
 
 def _run_attach(config: TrackBManagedExitAttachConfig, now: datetime) -> Mapping[str, Any]:
     return run_track_b_managed_exit_attach(config=config, now=now)
+
+
+def _run_attach_child(
+    config: TrackBManagedExitAttachConfig,
+    now: datetime,
+    *,
+    timeout_seconds: float,
+    command_runner: CommandRunner | None = None,
+) -> Mapping[str, Any]:
+    command_runner = command_runner or _run_command
+    command = [
+        sys.executable,
+        "-m",
+        "mgc_v05l.execution_core.track_b_managed_exit_attach",
+        "--repo-root",
+        str(config.repo_root),
+        "--account",
+        config.account_id,
+        "--strategy-id",
+        config.strategy_id,
+        "--lane-id",
+        config.lane_id,
+        "--runtime-generation-id",
+        config.runtime_generation_id,
+        "--lifecycle-id",
+        config.lifecycle_id,
+        "--instrument-family",
+        config.instrument_family,
+        "--contract-key",
+        config.contract_key,
+        "--local-symbol",
+        config.local_symbol,
+        "--con-id",
+        str(config.con_id),
+        "--expiry",
+        config.expiry,
+        "--quantity",
+        str(config.quantity),
+        "--side",
+        config.side,
+        "--skip-control-plane-refresh",
+        "--json",
+    ]
+    if config.close_limit_price:
+        command.extend(["--close-limit-price", str(config.close_limit_price)])
+    if config.apply:
+        command.append("--apply")
+    if config.operator_authorized_managed_exit:
+        command.append("--operator-authorized-managed-exit")
+    completed = command_runner(command, config.repo_root, timeout_seconds)
+    if completed.returncode == 124:
+        return {
+            "classification": MANAGED_EXIT_ACTUATOR_ATTACH_TIMEOUT,
+            "generated_at": now.isoformat(),
+            "timeout_seconds": timeout_seconds,
+            "command": command,
+            "stdout_tail": _tail(completed.stdout),
+            "stderr_tail": _tail(completed.stderr),
+            "submit_attempted": False,
+            "broker_state_mutated": False,
+            "primary_blocker": "BROKER_HANDSHAKE_OR_ATTACH_TIMEOUT_BEFORE_SUBMIT",
+        }
+    try:
+        payload = json.loads(completed.stdout or "{}")
+    except json.JSONDecodeError:
+        return {
+            "classification": MANAGED_EXIT_ACTUATOR_BLOCKED,
+            "generated_at": now.isoformat(),
+            "returncode": completed.returncode,
+            "command": command,
+            "stdout_tail": _tail(completed.stdout),
+            "stderr_tail": _tail(completed.stderr),
+            "submit_attempted": False,
+            "broker_state_mutated": False,
+            "primary_blocker": "MANAGED_EXIT_ATTACH_INVALID_JSON",
+        }
+    if isinstance(payload, Mapping):
+        result = dict(payload)
+        result.setdefault("returncode", completed.returncode)
+        result.setdefault("command", command)
+        result.setdefault("stdout_tail", _tail(completed.stdout))
+        result.setdefault("stderr_tail", _tail(completed.stderr))
+        return result
+    return {
+        "classification": MANAGED_EXIT_ACTUATOR_BLOCKED,
+        "generated_at": now.isoformat(),
+        "returncode": completed.returncode,
+        "command": command,
+        "stdout_tail": _tail(completed.stdout),
+        "stderr_tail": _tail(completed.stderr),
+        "submit_attempted": False,
+        "broker_state_mutated": False,
+        "primary_blocker": "MANAGED_EXIT_ATTACH_NON_OBJECT_JSON",
+    }
+
+
+def _run_command(command: Sequence[str], repo_root: Path, timeout_seconds: float) -> subprocess.CompletedProcess[str]:
+    env = dict(os.environ)
+    existing_pythonpath = env.get("PYTHONPATH", "")
+    env["PYTHONPATH"] = f"{repo_root / 'src'}{':' + existing_pythonpath if existing_pythonpath else ''}"
+    process = subprocess.Popen(
+        list(command),
+        cwd=repo_root,
+        env=env,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        start_new_session=True,
+    )
+    try:
+        stdout, stderr = process.communicate(timeout=timeout_seconds)
+    except subprocess.TimeoutExpired:
+        try:
+            os.killpg(process.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        except OSError:
+            process.kill()
+        stdout, stderr = process.communicate(timeout=10)
+        return subprocess.CompletedProcess(list(command), 124, stdout=stdout or "", stderr=stderr or "")
+    return subprocess.CompletedProcess(list(command), process.returncode, stdout=stdout or "", stderr=stderr or "")
+
+
+def _record_phase(phase_timings: list[dict[str, Any]], phase: str, started_at: datetime) -> None:
+    phase_timings.append(
+        {
+            "phase": phase,
+            "recorded_at": datetime.now(UTC).isoformat(),
+            "elapsed_seconds": round(max((datetime.now(UTC) - started_at).total_seconds(), 0.0), 3),
+        }
+    )
+
+
+def _write_phase_status(
+    *,
+    config: TrackBManagedExitActuatorConfig,
+    now: datetime,
+    phase: str,
+    phase_timings: Sequence[Mapping[str, Any]],
+) -> None:
+    write_track_b_managed_exit_actuator_report(
+        config=config,
+        payload={
+            "schema_version": "track_b_managed_exit_actuator_v1",
+            "generated_at": now.isoformat(),
+            "classification": MANAGED_EXIT_ACTUATOR_PHASE_RUNNING,
+            "phase": phase,
+            "phase_timings": list(phase_timings),
+            "mode": "PAPER",
+            "close_only": True,
+            "entry_allowed": False,
+            "broad_flatten_allowed": False,
+            "global_flatten_allowed": False,
+            "paper_proof_invoked": False,
+            "live_money_eligible": False,
+            "apply_requested": config.apply is True,
+            "operator_authorized_managed_exit": config.operator_authorized_managed_exit is True,
+            "submit_attempted": False,
+            "submitted_count": 0,
+            "broker_state_mutated": False,
+            "output_path": str(config.resolve(config.output_path)),
+        },
+    )
+
+
+def _tail(value: str | None, limit: int = 4000) -> str:
+    text = value or ""
+    return text[-limit:]
 
 
 def _unsafe_after_attempt(row: Mapping[str, Any]) -> bool:
