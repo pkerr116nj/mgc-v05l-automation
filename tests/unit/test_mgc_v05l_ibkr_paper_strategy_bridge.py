@@ -133,6 +133,39 @@ def _healthy_exposure() -> dict[str, object]:
     }
 
 
+def _diagnostic_registry_exposure() -> dict[str, object]:
+    return {
+        "classification": "PAPER_EXPOSURE_BLOCKED_REGISTRY_TRUTH_ENTRY",
+        "submit_allowed": False,
+        "block_reasons": [
+            "CANONICAL_REGISTRY_TRUTH_UNAVAILABLE",
+            "legacy_allowed_registry_truth_blocked_fail_closed",
+        ],
+        "detail": "Registry/truth current-hot-path authority blocked this new entry.",
+        "aggregate_broker_position": 0.0,
+        "review_required": False,
+        "broker_truth": {"truth_available": True},
+        "registry_truth_result": {
+            "broker_open_order_count": 0,
+            "contract_entry_status": "CONTRACT_ENTRY_ELIGIBLE",
+            "same_symbol_broker_quantity_lock": None,
+            "same_symbol_pending_fill_lock": None,
+            "canonical_current_scope_result": {
+                "canonical_values": {
+                    "broker_position_count": 0,
+                    "broker_open_order_count": 0,
+                    "unknown_open_order_count": 0,
+                    "current_scope_lifecycle_open_position_count": 0,
+                    "current_scope_review_required_count": 0,
+                    "lifecycle_open_order_count": 0,
+                    "managed_position_count": 0,
+                    "managed_order_count": 0,
+                },
+            },
+        },
+    }
+
+
 def _write_runtime_files(
     tmp_path: Path,
     *,
@@ -2560,6 +2593,199 @@ def test_lifecycle_validation_entry_governance_readiness_blockers_are_diagnostic
     assert "diagnostic for a controlled PAPER lifecycle validation entry" in governance_gate["detail"]
 
 
+def test_lifecycle_validation_blocker_classifier_uses_categories_not_exact_strings() -> None:
+    assert (
+        bridge_module.classify_governance_blocker_for_lifecycle_validation("runtime_authority_heartbeat_projection_stale")
+        == "AUTONOMOUS_RUNTIME_READINESS_DIAGNOSTIC"
+    )
+    assert (
+        bridge_module.classify_governance_blocker_for_lifecycle_validation(
+            {"source": "legacy_dashboard_operator_readiness", "reason": "projection stale"}
+        )
+        == "AUTONOMOUS_RUNTIME_READINESS_DIAGNOSTIC"
+    )
+    assert (
+        bridge_module.classify_governance_blocker_for_lifecycle_validation("canonical_registry_truth_unavailable")
+        == "ATTRIBUTION_OR_LIFECYCLE_DIAGNOSTIC"
+    )
+    assert (
+        bridge_module.classify_governance_blocker_for_lifecycle_validation("unknown_open_order_present")
+        == "ORDER_CONFLICT_BLOCKER"
+    )
+    assert (
+        bridge_module.classify_governance_blocker_for_lifecycle_validation("unexpected_new_blocker_family")
+        == "UNKNOWN_BLOCKER"
+    )
+
+
+def test_lifecycle_validation_entry_variant_readiness_blockers_are_diagnostic(tmp_path: Path) -> None:
+    _write_phase1_reconciliation(tmp_path)
+    _write_canonical_current_scope(tmp_path)
+    auth_path, digest = _write_leak_authorization(
+        tmp_path,
+        lane_id="mes_globex_active_participation_long",
+        strategy_id="PAPER_ACTIVE_EVIDENCE_MES_GLOBEX_PARTICIPATION_LONG_V1",
+        symbol="MES",
+        local_symbol="MESM6",
+    )
+    config = _config(
+        tmp_path,
+        submit=True,
+        strategy_id="mes_globex_active_participation_long",
+        symbol="MES",
+        contract_month="202606",
+        caller_path="track_b_paper_leak_test_apply",
+        leak_test_authorization_path=auth_path,
+        leak_test_authorization_digest=digest,
+        caller_metadata={
+            "caller_type": "track_b_paper_leak_test",
+            "lane_id": "mes_globex_active_participation_long",
+            "strategy_id": "PAPER_ACTIVE_EVIDENCE_MES_GLOBEX_PARTICIPATION_LONG_V1",
+            "route_destination": "ibkr_paper_bridge_submit_capable",
+            "intent_type": "BUY_TO_OPEN",
+            "intent_action": "BUY",
+            "account_id": "DUM882026",
+            "mode": "PAPER",
+            "host": "127.0.0.1",
+            "port": 7497,
+            "local_symbol": "MESM6",
+            "paper_only": True,
+            "live_money_eligible": False,
+        },
+    )
+    governance = {
+        "classification": "PAPER_STRATEGY_GOVERNANCE_BLOCKED",
+        "submit_allowed": False,
+        "block_reasons": [
+            "runtime_authority_heartbeat_projection_stale",
+            "operator_dashboard_readiness_projection_stale",
+        ],
+        "selected_strategy": {
+            "strategy_id": "mes_globex_active_participation_long",
+            "bridge_strategy_id": "paper_active_evidence__MES",
+            "strategy_status": "PROBATION_ACTIVE",
+            "submit_allowed": False,
+            "submit_block_reasons": [
+                "control_plane_snapshot_not_coherent",
+                "paper_gateway_supervisor_startup_posture_mismatch",
+            ],
+        },
+    }
+
+    checks = _build_static_preflight_checks(
+        config=config,
+        intent=_intent_from_config(config),
+        environment_lock=evaluate_paper_preview_environment_lock(mode=config.mode, host=config.host, port=config.port),
+        caller_gate={"passed": True, "detail": "approved leak-test caller"},
+        monitor_status={},
+        governance_status=governance,
+        exposure_status=_healthy_exposure(),
+    )
+
+    governance_gate = next(row for row in checks if row["name"] == "paper_strategy_governance_submit_gate")
+    assert governance_gate["passed"] is True
+
+
+def test_lifecycle_validation_entry_reaches_submit_boundary_with_current_readiness_blockers(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    auth_path, digest = _write_leak_authorization(
+        tmp_path,
+        lane_id="mes_globex_active_participation_long",
+        strategy_id="PAPER_ACTIVE_EVIDENCE_MES_GLOBEX_PARTICIPATION_LONG_V1",
+        symbol="MES",
+        local_symbol="MESM6",
+    )
+    governance = {
+        "classification": "PAPER_STRATEGY_GOVERNANCE_PARTIAL",
+        "generated_at": "2999-01-01T00:00:00+00:00",
+        "submit_allowed": False,
+        "block_reasons": ["backend_or_source_not_live_ready"],
+        "detail": "Paper strategy governance blocked submit: backend_or_source_not_live_ready.",
+        "selected_strategy": {
+            "strategy_id": "mes_globex_active_participation_long",
+            "bridge_strategy_id": "paper_active_evidence__MES",
+            "strategy_status": "PROBATION_ACTIVE",
+            "submit_allowed": False,
+            "submit_block_reasons": [
+                "backend_or_source_not_live_ready",
+                "canonical_readiness_artifact_stale",
+                "canonical_readiness_not_submit_capable",
+                "paper_trade_not_allowed",
+                "shared_services_authority_not_ready",
+                "control_plane_not_ready",
+                "guarded_paper_loop_artifact_not_guarded_mode",
+                "guarded_paper_loop_process_missing",
+            ],
+        },
+    }
+    governance["strategies"] = [governance["selected_strategy"]]
+    _write_runtime_files(tmp_path, governance_status=governance)
+    _write_phase1_reconciliation(tmp_path)
+    _write_fresh_broker_truth(tmp_path)
+    _write_strategy_bridge_snapshot(
+        tmp_path,
+        target_identity={
+            "strategy_id": "mes_globex_active_participation_long",
+            "lane_id": "mes_globex_active_participation_long",
+            "symbol": "MES",
+            "contract_month": "202606",
+            "action": "BUY",
+            "quantity": "1.0",
+            "intent_type": "BUY_TO_OPEN",
+            "caller_path": "track_b_paper_leak_test_apply",
+        },
+    )
+    monkeypatch.setattr(
+        bridge_module,
+        "evaluate_paper_strategy_exposure_gate",
+        lambda **_kwargs: _diagnostic_registry_exposure(),
+    )
+    transport_called = False
+
+    def _transport_factory(**kwargs: object) -> _HandshakeFailureTransport:
+        nonlocal transport_called
+        transport_called = True
+        return _HandshakeFailureTransport(**kwargs)
+
+    artifacts = run_ibkr_paper_strategy_bridge(
+        config=_config(
+            tmp_path,
+            strategy_id="mes_globex_active_participation_long",
+            symbol="MES",
+            contract_month="202606",
+            client_id=10940,
+            submit=True,
+            timeout_seconds=0.01,
+            caller_path="track_b_paper_leak_test_apply",
+            leak_test_authorization_path=auth_path,
+            leak_test_authorization_digest=digest,
+            caller_metadata={
+                "caller_type": "track_b_paper_leak_test",
+                "lane_id": "mes_globex_active_participation_long",
+                "strategy_id": "PAPER_ACTIVE_EVIDENCE_MES_GLOBEX_PARTICIPATION_LONG_V1",
+                "route_destination": "ibkr_paper_bridge_submit_capable",
+                "intent_type": "BUY_TO_OPEN",
+                "intent_action": "BUY",
+                "account_id": "DUM882026",
+                "mode": "PAPER",
+                "host": "127.0.0.1",
+                "port": 7497,
+                "local_symbol": "MESM6",
+                "paper_only": True,
+                "live_money_eligible": False,
+            },
+        ),
+        transport_factory=_transport_factory,
+        sleep_fn=lambda _seconds: None,
+    )
+
+    assert transport_called is True
+    assert artifacts.classification == "PAPER_STRATEGY_INTENT_BLOCKED"
+    assert "handshake failed" in artifacts.report["detail"]
+
+
 def test_non_validation_entry_governance_readiness_subreasons_still_block(tmp_path: Path) -> None:
     _write_phase1_reconciliation(tmp_path)
     _write_canonical_current_scope(tmp_path)
@@ -2612,6 +2838,124 @@ def test_non_validation_entry_governance_readiness_subreasons_still_block(tmp_pa
         intent=_intent_from_config(config),
         environment_lock=evaluate_paper_preview_environment_lock(mode=config.mode, host=config.host, port=config.port),
         caller_gate={"passed": True, "detail": "approved manual caller"},
+        monitor_status={},
+        governance_status=governance,
+        exposure_status=_healthy_exposure(),
+    )
+
+    governance_gate = next(row for row in checks if row["name"] == "paper_strategy_governance_submit_gate")
+    assert governance_gate["passed"] is False
+
+
+def test_lifecycle_validation_unknown_governance_blocker_still_blocks(tmp_path: Path) -> None:
+    _write_phase1_reconciliation(tmp_path)
+    _write_canonical_current_scope(tmp_path)
+    auth_path, digest = _write_leak_authorization(
+        tmp_path,
+        lane_id="mes_globex_active_participation_long",
+        strategy_id="PAPER_ACTIVE_EVIDENCE_MES_GLOBEX_PARTICIPATION_LONG_V1",
+        symbol="MES",
+        local_symbol="MESM6",
+    )
+    config = _config(
+        tmp_path,
+        submit=True,
+        strategy_id="mes_globex_active_participation_long",
+        symbol="MES",
+        contract_month="202606",
+        caller_path="track_b_paper_leak_test_apply",
+        leak_test_authorization_path=auth_path,
+        leak_test_authorization_digest=digest,
+        caller_metadata={
+            "caller_type": "track_b_paper_leak_test",
+            "lane_id": "mes_globex_active_participation_long",
+            "strategy_id": "PAPER_ACTIVE_EVIDENCE_MES_GLOBEX_PARTICIPATION_LONG_V1",
+            "intent_type": "BUY_TO_OPEN",
+            "intent_action": "BUY",
+            "account_id": "DUM882026",
+            "mode": "PAPER",
+            "local_symbol": "MESM6",
+            "paper_only": True,
+            "live_money_eligible": False,
+        },
+    )
+    governance = {
+        "classification": "PAPER_STRATEGY_GOVERNANCE_BLOCKED",
+        "submit_allowed": False,
+        "block_reasons": ["new_unclassified_governance_condition"],
+        "selected_strategy": {
+            "strategy_id": "mes_globex_active_participation_long",
+            "bridge_strategy_id": "paper_active_evidence__MES",
+            "strategy_status": "PROBATION_ACTIVE",
+            "submit_allowed": False,
+            "submit_block_reasons": [],
+        },
+    }
+
+    checks = _build_static_preflight_checks(
+        config=config,
+        intent=_intent_from_config(config),
+        environment_lock=evaluate_paper_preview_environment_lock(mode=config.mode, host=config.host, port=config.port),
+        caller_gate={"passed": True, "detail": "approved leak-test caller"},
+        monitor_status={},
+        governance_status=governance,
+        exposure_status=_healthy_exposure(),
+    )
+
+    governance_gate = next(row for row in checks if row["name"] == "paper_strategy_governance_submit_gate")
+    assert governance_gate["passed"] is False
+
+
+def test_lifecycle_validation_broker_risk_blocker_still_blocks(tmp_path: Path) -> None:
+    _write_phase1_reconciliation(tmp_path)
+    _write_canonical_current_scope(tmp_path)
+    auth_path, digest = _write_leak_authorization(
+        tmp_path,
+        lane_id="mes_globex_active_participation_long",
+        strategy_id="PAPER_ACTIVE_EVIDENCE_MES_GLOBEX_PARTICIPATION_LONG_V1",
+        symbol="MES",
+        local_symbol="MESM6",
+    )
+    config = _config(
+        tmp_path,
+        submit=True,
+        strategy_id="mes_globex_active_participation_long",
+        symbol="MES",
+        contract_month="202606",
+        caller_path="track_b_paper_leak_test_apply",
+        leak_test_authorization_path=auth_path,
+        leak_test_authorization_digest=digest,
+        caller_metadata={
+            "caller_type": "track_b_paper_leak_test",
+            "lane_id": "mes_globex_active_participation_long",
+            "strategy_id": "PAPER_ACTIVE_EVIDENCE_MES_GLOBEX_PARTICIPATION_LONG_V1",
+            "intent_type": "BUY_TO_OPEN",
+            "intent_action": "BUY",
+            "account_id": "DUM882026",
+            "mode": "PAPER",
+            "local_symbol": "MESM6",
+            "paper_only": True,
+            "live_money_eligible": False,
+        },
+    )
+    governance = {
+        "classification": "PAPER_STRATEGY_GOVERNANCE_BLOCKED",
+        "submit_allowed": False,
+        "block_reasons": ["broker_reconciliation_dirty"],
+        "selected_strategy": {
+            "strategy_id": "mes_globex_active_participation_long",
+            "bridge_strategy_id": "paper_active_evidence__MES",
+            "strategy_status": "PROBATION_ACTIVE",
+            "submit_allowed": False,
+            "submit_block_reasons": [],
+        },
+    }
+
+    checks = _build_static_preflight_checks(
+        config=config,
+        intent=_intent_from_config(config),
+        environment_lock=evaluate_paper_preview_environment_lock(mode=config.mode, host=config.host, port=config.port),
+        caller_gate={"passed": True, "detail": "approved leak-test caller"},
         monitor_status={},
         governance_status=governance,
         exposure_status=_healthy_exposure(),

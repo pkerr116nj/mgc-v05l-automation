@@ -207,18 +207,20 @@ _BROKER_AVAILABILITY_AVAILABLE = "BROKER_AVAILABLE"
 _BROKER_AVAILABILITY_RETRYABLE_BLOCK = "broker_unavailable_retryable"
 _BROKER_AVAILABILITY_FATAL_BLOCK = "broker_unavailable_fatal"
 _BROKER_AVAILABILITY_UNKNOWN_BLOCK = "broker_availability_unknown"
-_LIFECYCLE_VALIDATION_ENTRY_GOVERNANCE_DIAGNOSTIC_REASONS = {
-    "backend_or_source_not_live_ready",
-    "canonical_readiness_artifact_stale",
-    "canonical_readiness_not_submit_capable",
-    "paper_runtime_not_ready",
-    "paper_trade_not_allowed",
-    "paper_runtime_truth_stale",
-    "shared_services_authority_not_ready",
-    "control_plane_not_ready",
-    "guarded_paper_loop_artifact_not_guarded_mode",
-    "guarded_paper_loop_process_missing",
-    "safe_to_start_runtime=false",
+_LIFECYCLE_VALIDATION_BROKER_RISK_BLOCKER = "BROKER_RISK_BLOCKER"
+_LIFECYCLE_VALIDATION_LIVE_OR_PROOF_BLOCKER = "LIVE_OR_PROOF_BLOCKER"
+_LIFECYCLE_VALIDATION_ACCOUNT_DOMAIN_BLOCKER = "ACCOUNT_DOMAIN_BLOCKER"
+_LIFECYCLE_VALIDATION_CONTRACT_QTY_BLOCKER = "CONTRACT_QTY_BLOCKER"
+_LIFECYCLE_VALIDATION_ORDER_CONFLICT_BLOCKER = "ORDER_CONFLICT_BLOCKER"
+_LIFECYCLE_VALIDATION_SAFE_STATE_HARD_HALT = "SAFE_STATE_HARD_HALT"
+_LIFECYCLE_VALIDATION_AUTONOMOUS_RUNTIME_READINESS_DIAGNOSTIC = "AUTONOMOUS_RUNTIME_READINESS_DIAGNOSTIC"
+_LIFECYCLE_VALIDATION_GOVERNANCE_HEALTH_DIAGNOSTIC = "GOVERNANCE_HEALTH_DIAGNOSTIC"
+_LIFECYCLE_VALIDATION_ATTRIBUTION_OR_LIFECYCLE_DIAGNOSTIC = "ATTRIBUTION_OR_LIFECYCLE_DIAGNOSTIC"
+_LIFECYCLE_VALIDATION_UNKNOWN_BLOCKER = "UNKNOWN_BLOCKER"
+_LIFECYCLE_VALIDATION_DIAGNOSTIC_CATEGORIES = {
+    _LIFECYCLE_VALIDATION_AUTONOMOUS_RUNTIME_READINESS_DIAGNOSTIC,
+    _LIFECYCLE_VALIDATION_GOVERNANCE_HEALTH_DIAGNOSTIC,
+    _LIFECYCLE_VALIDATION_ATTRIBUTION_OR_LIFECYCLE_DIAGNOSTIC,
 }
 _LEAK_TEST_AUTHORIZATION_DIGEST_FIELDS = (
     "artifact_type",
@@ -2596,6 +2598,11 @@ def _build_static_preflight_checks(
             else f"Paper strategy exposure attribution blocked submit: {', '.join(list(exposure_status.get('block_reasons') or [])) or 'unknown_reason'}"
         )
     )
+    lifecycle_validation_exposure_allowed = _lifecycle_validation_entry_exposure_allowed(
+        config=config,
+        intent=intent,
+        exposure_status=exposure_status,
+    )
     governance_submit_allowed = bool(governance_status.get("submit_allowed")) or _governance_exit_override_allowed(
         config=config,
         intent=intent,
@@ -2649,6 +2656,12 @@ def _build_static_preflight_checks(
                 "Paper strategy governance entry-readiness blocker is bypassed for a supervised PAPER exit only; "
                 "Phase-1 broker reconciliation and owning-strategy exposure gates remain required."
             )
+    if lifecycle_validation_exposure_allowed and not bool(exposure_status.get("submit_allowed")):
+        exposure_detail = (
+            "Registry/exposure stale current-scope diagnostics are diagnostic for a controlled PAPER lifecycle "
+            "validation entry; broker truth is flat, open orders are clean, and dedicated PAPER validation "
+            "authority remains required."
+        )
     caller_path = str(config.caller_path or "").strip()
     leak_test_authorized = caller_path == _LEAK_TEST_CALLER_PATH and bool(leak_test_authorization.get("passed"))
     deprecated_root_detail = _deprecated_submit_root_detail(Path(config.repo_root))
@@ -2806,7 +2819,7 @@ def _build_static_preflight_checks(
         ),
         _check(
             "paper_strategy_exposure_gate",
-            (not config.submit) or bool(exposure_status.get("submit_allowed")),
+            (not config.submit) or bool(exposure_status.get("submit_allowed")) or lifecycle_validation_exposure_allowed,
             True,
             exposure_detail,
         ),
@@ -2869,13 +2882,19 @@ def _lifecycle_validation_entry_governance_allowed(
         if str(reason).strip()
     }
     combined_reasons = block_reasons | selected_reasons
-    if combined_reasons and not combined_reasons.issubset(_LIFECYCLE_VALIDATION_ENTRY_GOVERNANCE_DIAGNOSTIC_REASONS):
+    if not combined_reasons:
+        return False
+    if not _lifecycle_validation_blockers_are_diagnostic(combined_reasons):
         return False
     if str(selected.get("strategy_status") or "").strip().upper() in {"PAUSED", "DISABLED", "KILL_CANDIDATE"}:
         return False
     if not bool(phase1_reconciliation_gate.get("ready")):
         return False
-    if not bool(exposure_status.get("submit_allowed")):
+    if not _lifecycle_validation_entry_exposure_allowed(
+        config=config,
+        intent=intent,
+        exposure_status=exposure_status,
+    ):
         return False
     authority = _paper_lifecycle_validation_entry_authority_for_bridge(
         config=config,
@@ -2887,6 +2906,123 @@ def _lifecycle_validation_entry_governance_allowed(
         PAPER_LIFECYCLE_VALIDATION_ENTRY_ALLOWED,
         PAPER_LIFECYCLE_VALIDATION_ENTRY_DEGRADED_ALLOWED,
     }
+
+
+def _lifecycle_validation_entry_exposure_allowed(
+    *,
+    config: IbkrPaperStrategyBridgeConfig,
+    intent: IbkrPaperStrategyOrderIntent,
+    exposure_status: dict[str, Any],
+) -> bool:
+    if bool(exposure_status.get("submit_allowed")):
+        return True
+    if not _bridge_paper_lifecycle_validation_entry_invocation(config=config, intent=intent):
+        return False
+    reasons = {str(reason).strip() for reason in exposure_status.get("block_reasons") or [] if str(reason).strip()}
+    if not reasons:
+        return False
+    if not _lifecycle_validation_blockers_are_diagnostic(reasons):
+        return False
+    registry_truth = dict(exposure_status.get("registry_truth_result") or {})
+    canonical_scope = dict(registry_truth.get("canonical_current_scope_result") or {})
+    canonical_values = dict(canonical_scope.get("canonical_values") or {})
+    broker_truth = dict(exposure_status.get("broker_truth") or {})
+    if bool(exposure_status.get("review_required")):
+        return False
+    if str(registry_truth.get("contract_entry_status") or "CONTRACT_ENTRY_ELIGIBLE").strip().upper() != "CONTRACT_ENTRY_ELIGIBLE":
+        return False
+    if registry_truth.get("same_symbol_broker_quantity_lock") is not None:
+        return False
+    if registry_truth.get("same_symbol_pending_fill_lock") is not None:
+        return False
+    if not bool(broker_truth.get("truth_available")):
+        return False
+    if _float_or_none(exposure_status.get("aggregate_broker_position")) not in {0.0, None}:
+        return False
+    broker_open_orders = _int_or_none(registry_truth.get("broker_open_order_count"))
+    if broker_open_orders not in {0, None}:
+        return False
+    for field in (
+        "broker_position_count",
+        "broker_open_order_count",
+        "unknown_open_order_count",
+        "current_scope_lifecycle_open_position_count",
+        "current_scope_review_required_count",
+        "lifecycle_open_order_count",
+        "managed_position_count",
+        "managed_order_count",
+    ):
+        value = _int_or_none(canonical_values.get(field))
+        if value not in {0, None}:
+            return False
+    return True
+
+
+def _lifecycle_validation_blockers_are_diagnostic(blockers: set[str]) -> bool:
+    if not blockers:
+        return True
+    return all(
+        classify_governance_blocker_for_lifecycle_validation(blocker)
+        in _LIFECYCLE_VALIDATION_DIAGNOSTIC_CATEGORIES
+        for blocker in blockers
+    )
+
+
+def classify_governance_blocker_for_lifecycle_validation(blocker: Any) -> str:
+    """Classify bridge/governance blockers for controlled PAPER lifecycle validation."""
+    if isinstance(blocker, dict):
+        explicit_category = str(blocker.get("category") or blocker.get("blocker_category") or "").strip().upper()
+        if explicit_category in {
+            _LIFECYCLE_VALIDATION_BROKER_RISK_BLOCKER,
+            _LIFECYCLE_VALIDATION_LIVE_OR_PROOF_BLOCKER,
+            _LIFECYCLE_VALIDATION_ACCOUNT_DOMAIN_BLOCKER,
+            _LIFECYCLE_VALIDATION_CONTRACT_QTY_BLOCKER,
+            _LIFECYCLE_VALIDATION_ORDER_CONFLICT_BLOCKER,
+            _LIFECYCLE_VALIDATION_SAFE_STATE_HARD_HALT,
+            _LIFECYCLE_VALIDATION_AUTONOMOUS_RUNTIME_READINESS_DIAGNOSTIC,
+            _LIFECYCLE_VALIDATION_GOVERNANCE_HEALTH_DIAGNOSTIC,
+            _LIFECYCLE_VALIDATION_ATTRIBUTION_OR_LIFECYCLE_DIAGNOSTIC,
+        }:
+            return explicit_category
+        parts = [
+            blocker.get("reason"),
+            blocker.get("reason_code"),
+            blocker.get("code"),
+            blocker.get("name"),
+            blocker.get("classification"),
+            blocker.get("source"),
+            blocker.get("component"),
+            blocker.get("authority_layer"),
+        ]
+        text = " ".join(str(part) for part in parts if part is not None)
+    else:
+        text = str(blocker or "")
+    normalized = text.strip().lower().replace("-", "_").replace(" ", "_")
+    if not normalized:
+        return _LIFECYCLE_VALIDATION_UNKNOWN_BLOCKER
+    if _contains_any(normalized, ("live_money", "live_account", "live_route", "paper_proof", "proof_invoked")):
+        return _LIFECYCLE_VALIDATION_LIVE_OR_PROOF_BLOCKER
+    if _contains_any(normalized, ("wrong_account", "account_mismatch", "account_not_allowed", "domain_mismatch", "wrong_domain", "not_paper", "paper_account")):
+        return _LIFECYCLE_VALIDATION_ACCOUNT_DOMAIN_BLOCKER
+    if _contains_any(normalized, ("safe_state_hard", "hard_halt", "hard_stop", "kill_switch", "broker_kill", "unsafe_state")):
+        return _LIFECYCLE_VALIDATION_SAFE_STATE_HARD_HALT
+    if _contains_any(normalized, ("unknown_order", "open_order", "working_order", "conflicting_order", "pending_fill", "duplicate_order", "order_conflict")):
+        return _LIFECYCLE_VALIDATION_ORDER_CONFLICT_BLOCKER
+    if _contains_any(normalized, ("reconciliation_dirty", "dirty_reconciliation", "broker_reconciliation", "broker_position", "broker_truth_missing", "exposure_violation", "position_limit", "risk_limit")):
+        return _LIFECYCLE_VALIDATION_BROKER_RISK_BLOCKER
+    if _contains_any(normalized, ("contract", "conid", "con_id", "local_symbol", "instrument_allowlist", "disallowed_instrument", "quantity", "qty", "size_limit")):
+        return _LIFECYCLE_VALIDATION_CONTRACT_QTY_BLOCKER
+    if _contains_any(normalized, ("runtime", "readiness", "control_plane", "supervisor", "guarded_paper_loop", "safe_to_start_runtime", "backend", "source", "shared_services", "dashboard", "operator_readiness", "not_submit_capable", "not_live_ready", "trade_not_allowed")):
+        return _LIFECYCLE_VALIDATION_AUTONOMOUS_RUNTIME_READINESS_DIAGNOSTIC
+    if _contains_any(normalized, ("submit_disabled", "submit_not_allowed", "health", "stale_authority", "projection_stale")):
+        return _LIFECYCLE_VALIDATION_GOVERNANCE_HEALTH_DIAGNOSTIC
+    if _contains_any(normalized, ("registry", "attribution", "lifecycle", "ownership", "owner", "canonical_current_scope", "review_required", "legacy_allowed")):
+        return _LIFECYCLE_VALIDATION_ATTRIBUTION_OR_LIFECYCLE_DIAGNOSTIC
+    return _LIFECYCLE_VALIDATION_UNKNOWN_BLOCKER
+
+
+def _contains_any(value: str, needles: tuple[str, ...]) -> bool:
+    return any(needle in value for needle in needles)
 
 
 def _leak_test_explicit_lane_flow_governance_allowed(
