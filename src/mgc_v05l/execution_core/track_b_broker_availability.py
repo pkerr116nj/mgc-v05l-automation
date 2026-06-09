@@ -213,11 +213,17 @@ def classify_broker_availability(
             source_refs=source_refs,
         )
 
-    connected = _connected(broker_status=broker_status, connection_report=connection_report)
-    account_visible = _account_visible(config=config, broker_status=broker_status, positions_snapshot=positions_snapshot, open_orders_snapshot=open_orders_snapshot)
     positions_readable = _positions_readable(broker_status=broker_status, positions_snapshot=positions_snapshot)
     open_orders_readable = _open_orders_readable(broker_status=broker_status, open_orders_snapshot=open_orders_snapshot)
-    if connected and account_visible and positions_readable and open_orders_readable and not _stale(last_success_at, now=actual_now, max_age=config.stale_after_seconds):
+    connected = _connected(
+        broker_status=broker_status,
+        connection_report=connection_report,
+        positions_readable=positions_readable,
+        open_orders_readable=open_orders_readable,
+    )
+    account_visible = _account_visible(config=config, broker_status=broker_status, positions_snapshot=positions_snapshot, open_orders_snapshot=open_orders_snapshot)
+    source_success_at = last_success_at or _latest_snapshot_time(positions_snapshot, open_orders_snapshot)
+    if connected and account_visible and positions_readable and open_orders_readable and not _stale(source_success_at, now=actual_now, max_age=config.stale_after_seconds):
         return _availability(
             config=config,
             classification=BrokerAvailabilityClassification.AVAILABLE,
@@ -225,7 +231,7 @@ def classify_broker_availability(
             account_visible=True,
             positions_readable=True,
             open_orders_readable=True,
-            last_success_at=last_success_at,
+            last_success_at=source_success_at,
             last_failure_at=last_failure_at,
             failure_code=None,
             failure_message=None,
@@ -471,10 +477,18 @@ def _is_retryable_failure(
     return False
 
 
-def _connected(*, broker_status: Mapping[str, Any], connection_report: Mapping[str, Any]) -> bool:
+def _connected(
+    *,
+    broker_status: Mapping[str, Any],
+    connection_report: Mapping[str, Any],
+    positions_readable: bool,
+    open_orders_readable: bool,
+) -> bool:
     if connection_report.get("classification") == "IBKR_READ_ONLY_CONNECTED":
         return True
     if broker_status.get("verifier_classification") == "IBKR_READ_ONLY_CONNECTED":
+        return True
+    if positions_readable and open_orders_readable:
         return True
     return bool(broker_status.get("last_success") and broker_status.get("positions_complete") and broker_status.get("open_orders_complete"))
 
@@ -499,12 +513,16 @@ def _account_visible(
 def _positions_readable(*, broker_status: Mapping[str, Any], positions_snapshot: Mapping[str, Any]) -> bool:
     if broker_status.get("positions_complete") is True:
         return True
+    if positions_snapshot.get("positions_complete") is True or positions_snapshot.get("ok") is True:
+        return "positions" in positions_snapshot
     return "positions" in positions_snapshot and positions_snapshot.get("position_count") is not None
 
 
 def _open_orders_readable(*, broker_status: Mapping[str, Any], open_orders_snapshot: Mapping[str, Any]) -> bool:
     if broker_status.get("open_orders_complete") is True:
         return True
+    if open_orders_snapshot.get("open_orders_complete") is True or open_orders_snapshot.get("ok") is True:
+        return "open_orders" in open_orders_snapshot
     return "open_orders" in open_orders_snapshot and open_orders_snapshot.get("open_order_count") is not None
 
 
@@ -512,6 +530,12 @@ def _stale(value: datetime | None, *, now: datetime, max_age: float) -> bool:
     if value is None:
         return True
     return (now - value).total_seconds() > max_age
+
+
+def _latest_snapshot_time(*payloads: Mapping[str, Any]) -> datetime | None:
+    values = [_parse_datetime(payload.get("generated_at")) for payload in payloads]
+    values = [value for value in values if value is not None]
+    return max(values) if values else None
 
 
 def _read_json(path: Path) -> dict[str, Any]:

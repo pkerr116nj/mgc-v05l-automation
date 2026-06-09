@@ -55,6 +55,10 @@ from .ibkr_position_reconciliation import (
 from .ibkr_read_only_verifier import _wait_for_connection_ready, IbkrReadOnlyApiTransportConfig
 from .track_b_phase1_submit_authority import evaluate_phase1_broker_reconciliation_submit_gate
 from ..execution_core.track_b_atomic_io import write_json_atomic
+from ..execution_core.track_b_broker_availability import (
+    BrokerAvailabilityReportConfig,
+    build_broker_availability_report,
+)
 from ..execution_core.track_b_exit_safety import (
     ExitAttemptPolicy,
     classify_exit_attempt_policy,
@@ -199,6 +203,10 @@ _APPROVED_RUNTIME_CALLER_PATHS = {
 }
 _LEAK_TEST_CALLER_PATH = "track_b_paper_leak_test_apply"
 _LEAK_TEST_AUTHORIZATION_ARTIFACT_TYPE = "TRACK_B_PAPER_LEAK_TEST_AUTHORIZATION"
+_BROKER_AVAILABILITY_AVAILABLE = "BROKER_AVAILABLE"
+_BROKER_AVAILABILITY_RETRYABLE_BLOCK = "broker_unavailable_retryable"
+_BROKER_AVAILABILITY_FATAL_BLOCK = "broker_unavailable_fatal"
+_BROKER_AVAILABILITY_UNKNOWN_BLOCK = "broker_availability_unknown"
 _LEAK_TEST_AUTHORIZATION_DIGEST_FIELDS = (
     "artifact_type",
     "account_id",
@@ -805,6 +813,50 @@ def run_ibkr_paper_strategy_bridge(
                     **pre_action_snapshot_validation,
                     "snapshot_trade_capable": snapshot_trade_capable,
                 }
+        broker_availability: dict[str, Any] = {}
+        if _bridge_paper_lifecycle_validation_entry_invocation(config=config, intent=intent):
+            broker_availability = _broker_availability_for_bridge(config=config, now=started_at)
+            broker_availability_blocker = _broker_availability_boundary_blocker(broker_availability)
+            if broker_availability_blocker:
+                detail = (
+                    "Broker availability blocked final PAPER lifecycle-validation submit boundary: "
+                    f"{broker_availability.get('classification')}."
+                )
+                _record_bridge_audit(
+                    audit_events,
+                    event_type="broker_availability_submit_blocked",
+                    detail=detail,
+                    config=config,
+                    extra={"broker_availability": broker_availability, "broker_availability_blocker": broker_availability_blocker},
+                )
+                report = _pre_runtime_blocked_report(
+                    config=config,
+                    started_at=started_at,
+                    intent=intent,
+                    caller_gate=caller_gate,
+                    environment_lock=environment_lock,
+                    monitor_status=monitor_status,
+                    governance_status=governance_status,
+                    exposure_status=exposure_status,
+                    preflight_checks=static_checks,
+                    detail=detail,
+                    pre_action_snapshot_validation=pre_action_snapshot_validation,
+                    runtime_control_plane_authorization=runtime_control_plane_authorization,
+                )
+                report["classification"] = f"PAPER_STRATEGY_{broker_availability_blocker.upper()}"
+                report["broker_availability"] = broker_availability
+                report["broker_availability_blocker"] = broker_availability_blocker
+                report["primary_blocker"] = broker_availability_blocker
+                report["submit_attempted"] = False
+                report["broker_state_mutated"] = False
+                report["strategy_authority_failed"] = False
+                report["entry_authority_failed"] = False
+                report["lifecycle_validation_failed"] = False
+                return IbkrPaperStrategyBridgeArtifacts(
+                    classification=str(report["classification"]),
+                    report=report,
+                    audit_events=audit_events,
+                )
     try:
         runtime = _build_runtime(config=config, transport_factory=transport_factory, module_loader=module_loader)
         runtime.transport.connect()
@@ -1736,6 +1788,30 @@ def _pre_runtime_blocked_report(
         "detail": detail,
         "errors": [],
     }
+
+
+def _broker_availability_for_bridge(*, config: IbkrPaperStrategyBridgeConfig, now: datetime) -> dict[str, Any]:
+    return build_broker_availability_report(
+        config=BrokerAvailabilityReportConfig(
+            repo_root=config.repo_root,
+            execution_domain="TRACK_B_PAPER",
+            account_id=config.account_id,
+            endpoint_host=config.host,
+            endpoint_port=config.port,
+        ),
+        now=now,
+    )
+
+
+def _broker_availability_boundary_blocker(broker_availability: Mapping[str, Any]) -> str | None:
+    classification = str(broker_availability.get("classification") or "").strip().upper()
+    if classification == _BROKER_AVAILABILITY_AVAILABLE:
+        return None
+    if classification == "BROKER_UNAVAILABLE_RETRYABLE":
+        return _BROKER_AVAILABILITY_RETRYABLE_BLOCK
+    if classification == "BROKER_UNAVAILABLE_FATAL":
+        return _BROKER_AVAILABILITY_FATAL_BLOCK
+    return _BROKER_AVAILABILITY_UNKNOWN_BLOCK
 
 
 def _runtime_caller_metadata_is_authorized(

@@ -17,6 +17,10 @@ from typing import Any, Mapping, Sequence
 
 from mgc_v05l.execution_core.models import require_aware_datetime, to_jsonable
 from mgc_v05l.execution_core.track_b_atomic_io import write_json_atomic
+from mgc_v05l.execution_core.track_b_broker_availability import (
+    BrokerAvailabilityReportConfig,
+    build_broker_availability_report,
+)
 from mgc_v05l.execution_core.track_b_control_plane_snapshot import (
     TrackBControlPlaneSnapshotConfig,
     build_track_b_control_plane_snapshot,
@@ -86,6 +90,9 @@ MANAGED_EXIT_BLOCKED_SAFE_STATE = "MANAGED_EXIT_BLOCKED_SAFE_STATE"
 MANAGED_EXIT_APPLY_DISABLED = "MANAGED_EXIT_APPLY_DISABLED"
 MANAGED_EXIT_APPLIED_OR_PENDING = "MANAGED_EXIT_APPLIED_OR_PENDING"
 MANAGED_EXIT_DUE_READY_FOR_APPLY = "MANAGED_EXIT_DUE_READY_FOR_APPLY"
+MANAGED_EXIT_BLOCKED_BROKER_UNAVAILABLE_RETRYABLE = "MANAGED_EXIT_BLOCKED_BROKER_UNAVAILABLE_RETRYABLE"
+MANAGED_EXIT_BLOCKED_BROKER_UNAVAILABLE_FATAL = "MANAGED_EXIT_BLOCKED_BROKER_UNAVAILABLE_FATAL"
+MANAGED_EXIT_BLOCKED_BROKER_AVAILABILITY_UNKNOWN = "MANAGED_EXIT_BLOCKED_BROKER_AVAILABILITY_UNKNOWN"
 
 
 @dataclass(frozen=True)
@@ -433,6 +440,20 @@ def build_track_b_managed_exit_attach_plan(
         )
         return payload
 
+    broker_availability = _broker_availability_for_attach(config=config, now=actual_now)
+    broker_availability_blocker = _broker_availability_boundary_blocker(broker_availability)
+    payload["broker_availability"] = broker_availability
+    payload["broker_availability_blocker"] = broker_availability_blocker
+    if broker_availability_blocker:
+        payload["classification"] = _managed_exit_classification_for_broker_availability_blocker(broker_availability_blocker)
+        payload["apply_enabled"] = False
+        payload["apply_boundary_classification"] = broker_availability_blocker
+        payload["broker_state_mutated"] = False
+        payload["submit_attempted"] = False
+        payload["primary_blocker"] = broker_availability_blocker
+        payload["required_next_action"] = "Retry managed-exit attach after BrokerAvailability returns BROKER_AVAILABLE."
+        return payload
+
     apply_result = _apply_managed_exit(
         config=config,
         lifecycle_report=lifecycle_report,
@@ -463,6 +484,38 @@ def run_track_b_managed_exit_attach(
     payload = build_track_b_managed_exit_attach_plan(config=config, now=now)
     write_track_b_managed_exit_attach_plan(config=config, payload=payload)
     return payload
+
+
+def _broker_availability_for_attach(*, config: TrackBManagedExitAttachConfig, now: datetime) -> dict[str, Any]:
+    return build_broker_availability_report(
+        config=BrokerAvailabilityReportConfig(
+            repo_root=config.repo_root,
+            execution_domain=ExecutionDomain.TRACK_B_PAPER,
+            account_id=config.account_id,
+            endpoint_host=config.host,
+            endpoint_port=config.port,
+        ),
+        now=now,
+    )
+
+
+def _broker_availability_boundary_blocker(broker_availability: Mapping[str, Any]) -> str | None:
+    classification = str(broker_availability.get("classification") or "").strip().upper()
+    if classification == "BROKER_AVAILABLE":
+        return None
+    if classification == "BROKER_UNAVAILABLE_RETRYABLE":
+        return "broker_unavailable_retryable"
+    if classification == "BROKER_UNAVAILABLE_FATAL":
+        return "broker_unavailable_fatal"
+    return "broker_availability_unknown"
+
+
+def _managed_exit_classification_for_broker_availability_blocker(blocker: str) -> str:
+    if blocker == "broker_unavailable_retryable":
+        return MANAGED_EXIT_BLOCKED_BROKER_UNAVAILABLE_RETRYABLE
+    if blocker == "broker_unavailable_fatal":
+        return MANAGED_EXIT_BLOCKED_BROKER_UNAVAILABLE_FATAL
+    return MANAGED_EXIT_BLOCKED_BROKER_AVAILABILITY_UNKNOWN
 
 
 def _apply_managed_exit(

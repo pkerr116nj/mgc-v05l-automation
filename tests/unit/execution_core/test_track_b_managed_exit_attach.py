@@ -1058,6 +1058,39 @@ def test_apply_uses_current_scope_identity_when_bridge_fill_report_is_selected(
     assert seen["existing_lifecycle_report"]["entry_intent"]["trade_id"] == current_trade_id
 
 
+def test_apply_blocks_with_broker_unavailable_retryable_before_lifecycle_submit(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    config = _seed(
+        tmp_path,
+        completed_bars=12,
+        config_overrides={
+            "apply": True,
+            "operator_authorized_managed_exit": True,
+        },
+    )
+    _write_broker_retryable_unavailable(tmp_path, account_id=config.account_id)
+    called = False
+
+    def fake_maintain(**kwargs: Any) -> object:
+        nonlocal called
+        called = True
+        raise AssertionError("managed lifecycle submit path should not be reached")
+
+    monkeypatch.setattr(attach_module, "maintain_open_track_b_strategy_managed_paper_lifecycle", fake_maintain)
+
+    payload = build_track_b_managed_exit_attach_plan(config=config, now=NOW)
+
+    assert called is False
+    assert payload["classification"] == "MANAGED_EXIT_BLOCKED_BROKER_UNAVAILABLE_RETRYABLE"
+    assert payload["apply_boundary_classification"] == "broker_unavailable_retryable"
+    assert payload["broker_availability"]["classification"] == "BROKER_UNAVAILABLE_RETRYABLE"
+    assert payload["submit_attempted"] is False
+    assert payload["broker_state_mutated"] is False
+    assert payload["exit_authority_contract"]["decision"]["decision"] in {"ALLOWED", "DEGRADED_ALLOWED"}
+
+
 def test_auto_selected_mgc_due_position_resolves_mgc_exit_profile_not_default_mnq(tmp_path: Path) -> None:
     current_lifecycle_id = "reserved_submit_mgc_1x_all_lanes_asia_early_short"
     strategy_id = "gc_mgc_forced_session_baseline_v2__mgc_1x_all_lanes__asia_early_short"
@@ -1472,7 +1505,56 @@ def _seed(
         tmp_path / "outputs/track_b_execution_core/phase1_runtime_market_data" / config.instrument_family / "1m/latest_runtime_candles.json",
         {"bars": [{"bar_end": "2026-05-25T07:47:00+00:00", "close": "29965.5"}]},
     )
+    _write_broker_available(tmp_path, account_id=config.account_id)
     return config
+
+
+def _write_broker_available(tmp_path: Path, *, account_id: str = "DUM882026") -> None:
+    broker_root = tmp_path / "outputs/reports/ibkr_read_only_verification"
+    _write_json(
+        broker_root / "ibkr_positions_snapshot.json",
+        {
+            "ok": True,
+            "positions_complete": True,
+            "generated_at": NOW.isoformat(),
+            "selected_account_id": account_id,
+            "positions": [],
+        },
+    )
+    _write_json(
+        broker_root / "ibkr_open_orders_snapshot.json",
+        {
+            "ok": True,
+            "open_orders_complete": True,
+            "generated_at": NOW.isoformat(),
+            "selected_account_id": account_id,
+            "open_orders": [],
+        },
+    )
+
+
+def _write_broker_retryable_unavailable(tmp_path: Path, *, account_id: str = "DUM882026") -> None:
+    broker_root = tmp_path / "outputs/reports/ibkr_read_only_verification"
+    _write_json(
+        broker_root / "ibkr_broker_truth_latest_attempt_status.json",
+        {
+            "classification": "BROKER_TRUTH_REFRESH_FAILED",
+            "generated_at": NOW.isoformat(),
+            "last_failure": True,
+            "last_success": False,
+            "last_error": "TWS paper API error 502: Couldn't connect to TWS.",
+            "mode": "PAPER",
+            "account": account_id,
+        },
+    )
+    _write_json(
+        broker_root / "ibkr_read_only_connection_report.json",
+        {
+            "classification": "IBKR_READ_ONLY_BLOCKED",
+            "generated_at": NOW.isoformat(),
+            "detail": "TWS paper API error 502: Couldn't connect to TWS.",
+        },
+    )
 
 
 def _write_exit_due_managed_position(

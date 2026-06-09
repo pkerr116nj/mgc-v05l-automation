@@ -425,6 +425,36 @@ def _write_fresh_broker_truth(tmp_path: Path) -> None:
     )
 
 
+def _write_retryable_broker_unavailable(tmp_path: Path) -> None:
+    broker_root = tmp_path / "outputs" / "reports" / "ibkr_read_only_verification"
+    broker_root.mkdir(parents=True, exist_ok=True)
+    generated_at = "2999-01-01T00:00:00+00:00"
+    (broker_root / "ibkr_broker_truth_latest_attempt_status.json").write_text(
+        json.dumps(
+            {
+                "classification": "BROKER_TRUTH_REFRESH_FAILED",
+                "generated_at": generated_at,
+                "last_failure": True,
+                "last_success": False,
+                "last_error": "TWS paper API error 502: Couldn't connect to TWS.",
+                "mode": "PAPER",
+                "account": "DUM882026",
+            }
+        ),
+        encoding="utf-8",
+    )
+    (broker_root / "ibkr_read_only_connection_report.json").write_text(
+        json.dumps(
+            {
+                "classification": "IBKR_READ_ONLY_BLOCKED",
+                "generated_at": generated_at,
+                "detail": "TWS paper API error 502: Couldn't connect to TWS.",
+            }
+        ),
+        encoding="utf-8",
+    )
+
+
 def _write_contract_status(tmp_path: Path, *, entry_status: str = "CONTRACT_ENTRY_ELIGIBLE") -> None:
     _write_json(
         tmp_path / "outputs/track_b_execution_core/contract_resolver/latest_contract_resolver_status.json",
@@ -2390,6 +2420,7 @@ def test_lifecycle_validation_entry_uses_dedicated_authority_not_runtime_start_g
 ) -> None:
     auth_path, digest = _write_leak_authorization(tmp_path)
     _write_runtime_files(tmp_path, governance_status=_healthy_lane_governance())
+    _write_fresh_broker_truth(tmp_path)
     _write_strategy_bridge_snapshot(
         tmp_path,
         target_identity={
@@ -2768,6 +2799,7 @@ def test_leak_test_caller_uses_lifecycle_validation_entry_authority_without_pre_
 ) -> None:
     auth_path, digest = _write_leak_authorization(tmp_path)
     _write_runtime_files(tmp_path, governance_status=_healthy_lane_governance())
+    _write_fresh_broker_truth(tmp_path)
     _write_strategy_bridge_snapshot(tmp_path)
     plan_path = tmp_path / "outputs/track_b_execution_core/paper_autonomous_recovery/latest_paper_autonomous_recovery_plan.json"
     plan_path.unlink()
@@ -3452,6 +3484,147 @@ def test_leak_test_submit_handshake_failure_reports_paper_connection_config(tmp_
     assert diagnostics["connection_error_type"] == "IbkrPaperStrategyBridgeError"
     assert diagnostics["latest_error"]["code"] == 502
     assert report["errors"][0]["code"] == 502
+
+
+def test_lifecycle_validation_entry_502_blocks_as_broker_unavailable_retryable_before_transport(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    auth_path, digest = _write_leak_authorization(tmp_path)
+    governance_status = _healthy_lane_governance()
+    governance_status["generated_at"] = "2999-01-01T00:00:00+00:00"
+    governance_status["strategies"] = [governance_status["selected_strategy"]]
+    _write_runtime_files(tmp_path, governance_status=governance_status)
+    _write_phase1_reconciliation(tmp_path)
+    _write_retryable_broker_unavailable(tmp_path)
+    _write_strategy_bridge_snapshot(
+        tmp_path,
+        target_identity={
+            "strategy_id": "gc_1x_asia_london_participation__asia_london_long_v5",
+            "lane_id": "gc_1x_asia_london_participation__asia_london_long_v5",
+            "symbol": "GC",
+            "contract_month": "202606",
+            "action": "BUY",
+            "quantity": "1.0",
+            "intent_type": "BUY_TO_OPEN",
+            "caller_path": "track_b_paper_leak_test_apply",
+        },
+    )
+    monkeypatch.setattr(
+        bridge_module,
+        "evaluate_paper_strategy_exposure_gate",
+        lambda **_kwargs: _healthy_exposure(),
+    )
+    transport_called = False
+
+    def _transport_factory(**kwargs: object) -> _HandshakeFailureTransport:
+        nonlocal transport_called
+        transport_called = True
+        return _HandshakeFailureTransport(**kwargs)
+
+    artifacts = run_ibkr_paper_strategy_bridge(
+        config=_config(
+            tmp_path,
+            strategy_id="gc_1x_asia_london_participation__asia_london_long_v5",
+            symbol="GC",
+            contract_month="202606",
+            client_id=10940,
+            submit=True,
+            caller_path="track_b_paper_leak_test_apply",
+            leak_test_authorization_path=auth_path,
+            leak_test_authorization_digest=digest,
+            caller_metadata={
+                "caller_type": "track_b_paper_leak_test",
+                "lane_id": "gc_1x_asia_london_participation__asia_london_long_v5",
+                "strategy_id": "asia_london_participation_core_v1__GC",
+                "route_destination": "ibkr_paper_bridge_submit_capable",
+                "intent_type": "BUY_TO_OPEN",
+                "intent_action": "BUY",
+                "account_id": "DUM882026",
+                "mode": "PAPER",
+                "host": "127.0.0.1",
+                "port": 7497,
+                "local_symbol": "GCM6",
+                "paper_only": True,
+                "live_money_eligible": False,
+            },
+        ),
+        transport_factory=_transport_factory,
+        sleep_fn=lambda _seconds: None,
+    )
+
+    assert transport_called is False
+    assert artifacts.classification == "PAPER_STRATEGY_BROKER_UNAVAILABLE_RETRYABLE"
+    assert artifacts.report["broker_availability_blocker"] == "broker_unavailable_retryable"
+    assert artifacts.report["broker_availability"]["classification"] == "BROKER_UNAVAILABLE_RETRYABLE"
+    assert artifacts.report["submit_attempted"] is False
+    assert artifacts.report["strategy_authority_failed"] is False
+    assert artifacts.report["entry_authority_failed"] is False
+    assert artifacts.report["lifecycle_validation_failed"] is False
+
+
+def test_lifecycle_validation_entry_broker_available_reaches_existing_submit_path(tmp_path: Path) -> None:
+    auth_path, digest = _write_leak_authorization(tmp_path)
+    governance_status = _healthy_lane_governance()
+    governance_status["generated_at"] = "2999-01-01T00:00:00+00:00"
+    governance_status["strategies"] = [governance_status["selected_strategy"]]
+    _write_runtime_files(tmp_path, governance_status=governance_status)
+    _write_fresh_broker_truth(tmp_path)
+    _write_strategy_bridge_snapshot(
+        tmp_path,
+        target_identity={
+            "strategy_id": "gc_1x_asia_london_participation__asia_london_long_v5",
+            "lane_id": "gc_1x_asia_london_participation__asia_london_long_v5",
+            "symbol": "GC",
+            "contract_month": "202606",
+            "action": "BUY",
+            "quantity": "1.0",
+            "intent_type": "BUY_TO_OPEN",
+            "caller_path": "track_b_paper_leak_test_apply",
+        },
+    )
+    transport_called = False
+
+    def _transport_factory(**kwargs: object) -> _HandshakeFailureTransport:
+        nonlocal transport_called
+        transport_called = True
+        return _HandshakeFailureTransport(**kwargs)
+
+    artifacts = run_ibkr_paper_strategy_bridge(
+        config=_config(
+            tmp_path,
+            strategy_id="gc_1x_asia_london_participation__asia_london_long_v5",
+            symbol="GC",
+            contract_month="202606",
+            client_id=10940,
+            submit=True,
+            timeout_seconds=0.01,
+            caller_path="track_b_paper_leak_test_apply",
+            leak_test_authorization_path=auth_path,
+            leak_test_authorization_digest=digest,
+            caller_metadata={
+                "caller_type": "track_b_paper_leak_test",
+                "lane_id": "gc_1x_asia_london_participation__asia_london_long_v5",
+                "strategy_id": "asia_london_participation_core_v1__GC",
+                "route_destination": "ibkr_paper_bridge_submit_capable",
+                "intent_type": "BUY_TO_OPEN",
+                "intent_action": "BUY",
+                "account_id": "DUM882026",
+                "mode": "PAPER",
+                "host": "127.0.0.1",
+                "port": 7497,
+                "local_symbol": "GCM6",
+                "paper_only": True,
+                "live_money_eligible": False,
+            },
+        ),
+        transport_factory=_transport_factory,
+        sleep_fn=lambda _seconds: None,
+    )
+
+    assert transport_called is True
+    assert artifacts.classification == "PAPER_STRATEGY_INTENT_BLOCKED"
+    assert "handshake failed" in artifacts.report["detail"]
 
 
 def test_submit_is_blocked_when_paper_strategy_monitor_disallows_submit(tmp_path: Path) -> None:
