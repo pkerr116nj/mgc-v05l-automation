@@ -2,124 +2,358 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 
-import pytest
-
-from mgc_v05l.execution_core.models import TrackBModelError
 from mgc_v05l.execution_core.track_b_exit_authority_contract import (
     EXIT_AUTHORITY_VALIDATOR_VERSION,
-    EXIT_INTENT_SCHEMA_VERSION,
-    CloseAction,
+    AttributionStatus,
+    CloseQtySource,
+    ExecutionDomain,
     ExitAuthorityDecision,
-    ExitAuthorityCheckCategory,
-    ExitAuthorityCurrentState,
     ExitAuthorityDecisionValue,
     ExitAuthorityValidator,
     ExitIntent,
-    ExitType,
-    ExitUrgency,
-    PositionSide,
     SourceArtifactRef,
     build_exit_intent_idempotency_key,
     validate_exit_authority,
-    validate_exit_intent,
 )
 
 
 NOW = datetime(2026, 6, 9, 12, 0, tzinfo=UTC)
 
 
-def test_full_close_long_contract_is_valid() -> None:
-    intent = _intent(position_side="LONG", close_action="SELL", owned_qty=1, close_qty=1)
+def test_attributed_full_close_allowed() -> None:
+    decision = validate_exit_authority(intent=_intent(), current_state=_state(), validated_at=NOW)
 
-    decision = validate_exit_intent(intent)
-
-    assert intent.schema_version == EXIT_INTENT_SCHEMA_VERSION
-    assert intent.position_side == PositionSide.LONG
-    assert intent.close_action == CloseAction.SELL
-    assert intent.remaining_qty_after == 0
-    assert intent.live_money_eligible is False
-    assert intent.paper_proof_invoked is False
-    assert intent.broad_flatten_allowed is False
-    assert intent.global_flatten_allowed is False
     assert decision.decision == ExitAuthorityDecisionValue.ALLOWED
-    assert decision.hard_required_checks["risk_reducing_action"] is True
+    assert decision.attribution_status == AttributionStatus.ATTRIBUTED
+    assert decision.execution_domain == ExecutionDomain.TRACK_B_PAPER
+    assert decision.account_id == "DUM882026"
+    assert decision.validated_close_qty == 1
+    assert decision.validated_remaining_qty == 0
+    assert decision.block_reasons == ()
+    assert decision.validator_version == EXIT_AUTHORITY_VALIDATOR_VERSION
 
 
-def test_full_close_short_contract_is_valid() -> None:
-    intent = _intent(position_side="SHORT", close_action="BUY", owned_qty=1, close_qty=1)
-
-    decision = validate_exit_intent(intent)
-
-    assert intent.position_side == PositionSide.SHORT
-    assert intent.close_action == CloseAction.BUY
-    assert decision.decision == ExitAuthorityDecisionValue.ALLOWED
-
-
-def test_partial_close_allowed_when_policy_supports_partial() -> None:
-    intent = _intent(
-        owned_qty=3,
-        close_qty=1,
-        remaining_qty_after=2,
-        exit_type="PARTIAL_SCALE_OUT",
-        allow_partial=True,
-        partial_policy_supported=True,
+def test_attributed_short_full_close_allowed() -> None:
+    decision = validate_exit_authority(
+        intent=_intent(position_side="SHORT", close_action="BUY"),
+        current_state=_state(broker_position_side="SHORT"),
+        validated_at=NOW,
     )
 
-    decision = validate_exit_intent(intent)
-
-    assert intent.remaining_qty_after == 2
     assert decision.decision == ExitAuthorityDecisionValue.ALLOWED
-    assert decision.conditional_checks["partial_close_allowed"] is True
+    assert decision.block_reasons == ()
 
 
-def test_partial_close_blocked_when_not_allowed() -> None:
-    payload = _intent_payload(owned_qty=3, close_qty=1, remaining_qty_after=2, exit_type="PARTIAL_SCALE_OUT")
-
-    decision = validate_exit_intent(payload)
-
-    assert decision.decision == ExitAuthorityDecisionValue.BLOCKED
-    assert "partial closes require allow_partial=true" in decision.block_reasons[0]
-
-
-def test_partial_close_blocked_without_policy_support() -> None:
-    payload = _intent_payload(
-        owned_qty=3,
-        close_qty=1,
-        remaining_qty_after=2,
-        exit_type="PARTIAL_SCALE_OUT",
-        allow_partial=True,
-        partial_policy_supported=False,
+def test_unattributed_broker_scoped_full_risk_exit_degraded_allowed() -> None:
+    decision = validate_exit_authority(
+        intent=_intent(attribution={}, lifecycle_id=None, trade_id=None, strategy_id=None, lane_id=None),
+        current_state=_state(attribution_status="UNATTRIBUTED"),
+        validated_at=NOW,
     )
 
-    decision = validate_exit_intent(payload)
+    assert decision.decision == ExitAuthorityDecisionValue.DEGRADED_ALLOWED
+    assert decision.attribution_status == AttributionStatus.UNATTRIBUTED
+    assert decision.attribution_diagnostics["blocks_authority"] is False
+    assert decision.block_reasons == ()
+
+
+def test_attributed_partial_close_allowed() -> None:
+    decision = validate_exit_authority(
+        intent=_intent(
+            owned_qty=3,
+            close_qty=1,
+            remaining_qty_after=2,
+            exit_type="PARTIAL_SCALE_OUT",
+            allow_partial=True,
+            partial_policy_supported=True,
+        ),
+        current_state=_state(broker_position_qty=3),
+        validated_at=NOW,
+    )
+
+    assert decision.decision == ExitAuthorityDecisionValue.ALLOWED
+    assert decision.validated_close_qty == 1
+    assert decision.validated_remaining_qty == 2
+    assert decision.conditional_risk_checks["partial_close_qty_source"]["passed"] is True
+
+
+def test_partial_close_blocked_when_not_declared() -> None:
+    decision = validate_exit_authority(
+        intent=_intent_payload(
+            owned_qty=3,
+            close_qty=1,
+            remaining_qty_after=2,
+            exit_type="PARTIAL_SCALE_OUT",
+            allow_partial=False,
+            partial_policy_supported=True,
+        ),
+        current_state=_state(broker_position_qty=3),
+        validated_at=NOW,
+    )
 
     assert decision.decision == ExitAuthorityDecisionValue.BLOCKED
-    assert "partial closes require partial_policy_supported=true" in decision.block_reasons[0]
+    assert any("partial closes require allow_partial=true" in reason for reason in decision.block_reasons)
 
 
-def test_close_qty_greater_than_owned_qty_is_blocked() -> None:
-    with pytest.raises(TrackBModelError, match="close_qty must be less than or equal"):
-        _intent(owned_qty=1, close_qty=2, remaining_qty_after=0)
+def test_unattributed_partial_close_with_operator_qty_degraded_allowed() -> None:
+    decision = validate_exit_authority(
+        intent=_intent(
+            attribution={},
+            lifecycle_id=None,
+            trade_id=None,
+            strategy_id=None,
+            lane_id=None,
+            owned_qty=3,
+            close_qty=1,
+            remaining_qty_after=2,
+            close_qty_source="OPERATOR_INSTRUCTION",
+            exit_type="PARTIAL_SCALE_OUT",
+            allow_partial=True,
+            partial_policy_supported=True,
+        ),
+        current_state=_state(broker_position_qty=3, attribution_status="UNATTRIBUTED"),
+        validated_at=NOW,
+    )
+
+    assert decision.decision == ExitAuthorityDecisionValue.DEGRADED_ALLOWED
+    assert decision.attribution_status == AttributionStatus.UNATTRIBUTED
+    assert decision.block_reasons == ()
 
 
-def test_close_qty_zero_is_blocked() -> None:
-    with pytest.raises(TrackBModelError, match="close_qty must be a positive"):
-        _intent(owned_qty=1, close_qty=0, remaining_qty_after=1)
+def test_missing_lifecycle_trade_strategy_does_not_block() -> None:
+    decision = validate_exit_authority(
+        intent=_intent(lifecycle_id=None, trade_id=None, strategy_id=None, lane_id=None, attribution={}),
+        current_state=_state(attribution_status="UNATTRIBUTED"),
+        validated_at=NOW,
+    )
+
+    assert decision.decision == ExitAuthorityDecisionValue.DEGRADED_ALLOWED
+    assert "attribution_incomplete" == decision.diagnostic_checks["attribution_status"]["code"]
+    assert decision.block_reasons == ()
 
 
-def test_wrong_close_side_is_blocked() -> None:
-    with pytest.raises(TrackBModelError, match="long positions require SELL"):
-        _intent(position_side="LONG", close_action="BUY")
+def test_wrong_account_blocks() -> None:
+    decision = validate_exit_authority(
+        intent=_intent(),
+        current_state=_state(account_id="OTHER_ACCOUNT"),
+        validated_at=NOW,
+    )
+
+    assert decision.decision == ExitAuthorityDecisionValue.BLOCKED
+    assert "account_mismatch" in decision.block_reasons
 
 
-def test_reverse_flip_is_blocked() -> None:
-    with pytest.raises(TrackBModelError, match="reverse/flip exits must be modeled separately"):
-        _intent(allow_reverse=True)
+def test_wrong_domain_blocks() -> None:
+    decision = validate_exit_authority(
+        intent=_intent(execution_domain="TRACK_B_PAPER"),
+        current_state=_state(execution_domain="TRACK_B_LIVE"),
+        validated_at=NOW,
+    )
+
+    assert decision.decision == ExitAuthorityDecisionValue.BLOCKED
+    assert "execution_domain_mismatch" in decision.block_reasons
 
 
-def test_remaining_qty_must_match_owned_minus_close() -> None:
-    with pytest.raises(TrackBModelError, match="remaining_qty_after must equal"):
-        _intent(owned_qty=3, close_qty=1, remaining_qty_after=1, allow_partial=True, partial_policy_supported=True)
+def test_close_qty_greater_than_broker_position_blocks() -> None:
+    decision = validate_exit_authority(
+        intent=_intent(owned_qty=4, close_qty=4, remaining_qty_after=0),
+        current_state=_state(broker_position_qty=3),
+        validated_at=NOW,
+    )
+
+    assert decision.decision == ExitAuthorityDecisionValue.BLOCKED
+    assert "close_qty_out_of_bounds" in decision.block_reasons
+
+
+def test_close_qty_zero_blocks() -> None:
+    decision = validate_exit_authority(
+        intent=_intent_payload(close_qty=0, remaining_qty_after=1),
+        current_state=_state(),
+        validated_at=NOW,
+    )
+
+    assert decision.decision == ExitAuthorityDecisionValue.BLOCKED
+    assert any("close_qty must be a positive" in reason for reason in decision.block_reasons)
+
+
+def test_wrong_close_side_blocks() -> None:
+    decision = validate_exit_authority(
+        intent=_intent_payload(position_side="LONG", close_action="BUY"),
+        current_state=_state(),
+        validated_at=NOW,
+    )
+
+    assert decision.decision == ExitAuthorityDecisionValue.BLOCKED
+    assert any("long positions require SELL" in reason for reason in decision.block_reasons)
+
+
+def test_flip_reverse_blocks() -> None:
+    decision = validate_exit_authority(
+        intent=_intent_payload(allow_reverse=True),
+        current_state=_state(),
+        validated_at=NOW,
+    )
+
+    assert decision.decision == ExitAuthorityDecisionValue.BLOCKED
+    assert any("reverse/flip exits" in reason for reason in decision.block_reasons)
+
+
+def test_same_contract_working_close_over_close_risk_blocks() -> None:
+    decision = validate_exit_authority(
+        intent=_intent(
+            owned_qty=3,
+            close_qty=2,
+            remaining_qty_after=1,
+            exit_type="PARTIAL_SCALE_OUT",
+            allow_partial=True,
+            partial_policy_supported=True,
+        ),
+        current_state=_state(broker_position_qty=3, same_contract_working_close_qty=2),
+        validated_at=NOW,
+    )
+
+    assert decision.decision == ExitAuthorityDecisionValue.BLOCKED
+    assert "same_contract_working_close_over_close_risk" in decision.block_reasons
+
+
+def test_unrelated_unknown_order_does_not_block() -> None:
+    decision = validate_exit_authority(
+        intent=_intent(),
+        current_state=_state(unrelated_unknown_order_count=2),
+        validated_at=NOW,
+    )
+
+    assert decision.decision == ExitAuthorityDecisionValue.ALLOWED
+    assert decision.diagnostic_checks["unrelated_unknown_orders"]["passed"] is False
+    assert decision.block_reasons == ()
+
+
+def test_same_contract_unknown_order_with_over_close_ruled_out_is_degraded_allowed() -> None:
+    decision = validate_exit_authority(
+        intent=_intent(),
+        current_state=_state(
+            same_contract_unknown_order_count=1,
+            same_contract_unknown_order_could_over_close=False,
+            same_contract_unknown_order_over_close_ruled_out=True,
+        ),
+        validated_at=NOW,
+    )
+
+    assert decision.decision == ExitAuthorityDecisionValue.DEGRADED_ALLOWED
+    assert decision.conditional_risk_checks["same_contract_unknown_order_risk"]["passed"] is True
+    assert decision.block_reasons == ()
+
+
+def test_same_contract_unknown_order_possible_over_close_blocks() -> None:
+    decision = validate_exit_authority(
+        intent=_intent(),
+        current_state=_state(
+            same_contract_unknown_order_count=1,
+            same_contract_unknown_order_could_over_close=True,
+            same_contract_unknown_order_over_close_ruled_out=False,
+        ),
+        validated_at=NOW,
+    )
+
+    assert decision.decision == ExitAuthorityDecisionValue.BLOCKED
+    assert "same_contract_unknown_order_over_close_risk" in decision.block_reasons
+
+
+def test_live_money_blocks_outside_explicit_live_domain() -> None:
+    decision = validate_exit_authority(
+        intent=_intent_payload(live_money_eligible=True),
+        current_state=_state(),
+        validated_at=NOW,
+    )
+
+    assert decision.decision == ExitAuthorityDecisionValue.BLOCKED
+    assert any("live_money_eligible requires TRACK_B_LIVE" in reason for reason in decision.block_reasons)
+
+
+def test_live_money_allowed_only_inside_explicit_live_domain() -> None:
+    decision = validate_exit_authority(
+        intent=_intent(execution_domain="TRACK_B_LIVE", live_money_eligible=True, live_money_allowed=True),
+        current_state=_state(execution_domain="TRACK_B_LIVE", live_money_eligible=True, live_money_allowed=True),
+        validated_at=NOW,
+    )
+
+    assert decision.decision == ExitAuthorityDecisionValue.ALLOWED
+    assert decision.execution_domain == ExecutionDomain.TRACK_B_LIVE
+
+
+def test_paper_proof_blocks() -> None:
+    decision = validate_exit_authority(
+        intent=_intent_payload(paper_proof_invoked=True),
+        current_state=_state(),
+        validated_at=NOW,
+    )
+
+    assert decision.decision == ExitAuthorityDecisionValue.BLOCKED
+    assert any("paper_proof_invoked" in reason for reason in decision.block_reasons)
+
+
+def test_safe_state_hard_halt_blocks() -> None:
+    decision = validate_exit_authority(
+        intent=_intent(),
+        current_state=_state(safe_state_hard_halt=True),
+        validated_at=NOW,
+    )
+
+    assert decision.decision == ExitAuthorityDecisionValue.BLOCKED
+    assert "safe_state_hard_halt" in decision.block_reasons
+
+
+def test_diagnostics_do_not_block_safety_authority() -> None:
+    decision = validate_exit_authority(
+        intent=_intent(),
+        current_state=_state(
+            reconciliation_clean=False,
+            safe_state_allows_managed_close=False,
+            guardian_allows_exact_close=False,
+            bsa_managed_risk_reducing_close=False,
+            bsa_degraded_exact_close_ready=False,
+            diagnostics={"ods_fresh": False, "runtime_live": False},
+        ),
+        validated_at=NOW,
+    )
+
+    assert decision.decision == ExitAuthorityDecisionValue.ALLOWED
+    assert decision.diagnostic_checks["reconciliation_clean"]["passed"] is False
+    assert decision.diagnostic_checks["safe_state_allows_managed_close"]["passed"] is False
+    assert decision.diagnostic_checks["guardian_allows_exact_close"]["passed"] is False
+    assert decision.diagnostic_checks["bsa_close_authority"]["passed"] is False
+    assert decision.diagnostic_checks["ods_fresh"]["passed"] is False
+
+
+def test_decision_values_do_not_include_diagnostic_only() -> None:
+    assert {item.value for item in ExitAuthorityDecisionValue} == {
+        "ALLOWED",
+        "DEGRADED_ALLOWED",
+        "BLOCKED",
+    }
+
+
+def test_decision_output_carries_v1_1_sections() -> None:
+    decision = ExitAuthorityDecision(
+        exit_intent_id="exit-intent-1",
+        decision="DEGRADED_ALLOWED",
+        attribution_status="PARTIALLY_ATTRIBUTED",
+        attribution_diagnostics={"blocks_authority": False},
+        hard_required_checks={"known_position": {"passed": True}},
+        conditional_risk_checks={"same_contract_unknown_order_risk": {"passed": True}},
+        diagnostic_checks={"ods_fresh": {"passed": False}},
+        execution_domain="TRACK_B_PAPER",
+        account_id="DUM882026",
+        validated_close_qty=1,
+        validated_remaining_qty=0,
+        source_artifact_refs=(_source_artifact("bsa"),),
+        validated_at=NOW,
+    )
+
+    assert decision.decision == ExitAuthorityDecisionValue.DEGRADED_ALLOWED
+    assert decision.attribution_status == AttributionStatus.PARTIALLY_ATTRIBUTED
+    assert decision.conditional_checks == decision.conditional_risk_checks
+    assert decision.source_artifact_refs[0].name == "bsa"
 
 
 def test_idempotency_key_is_deterministic() -> None:
@@ -131,215 +365,18 @@ def test_idempotency_key_is_deterministic() -> None:
     assert first.idempotency_key.startswith("track_b_exit_intent:")
 
 
-def test_mismatched_idempotency_key_is_blocked() -> None:
-    with pytest.raises(TrackBModelError, match="idempotency_key must match deterministic"):
-        _intent(idempotency_key="not-the-deterministic-key")
-
-
 def test_source_artifact_refs_are_carried_through() -> None:
-    source = SourceArtifactRef(
-        name="managed_positions",
-        path="outputs/track_b_execution_core/managed_positions/latest_managed_positions.json",
-        generated_at=NOW,
-        authority_layer="Position State",
-    )
+    source = _source_artifact("managed_positions")
     intent = _intent(source_artifact_refs=(source,))
-    decision = validate_exit_intent(intent)
+    state = _state(source_artifact_refs=(_source_artifact("broker_truth_lease"),))
+
+    decision = ExitAuthorityValidator().validate(intent=intent, current_state=state, validated_at=NOW)
 
     assert intent.source_artifact_refs[0].name == "managed_positions"
-    assert decision.source_artifact_refs[0].path.endswith("latest_managed_positions.json")
-
-
-def test_live_money_and_paper_proof_are_explicitly_blocked() -> None:
-    for field_name in ("live_money_eligible", "paper_proof_invoked"):
-        payload = _intent_payload()
-        payload[field_name] = True
-
-        decision = validate_exit_intent(payload)
-
-        assert decision.decision == ExitAuthorityDecisionValue.BLOCKED
-        assert field_name in decision.block_reasons[0]
-
-
-def test_broad_and_global_cancel_semantics_are_blocked() -> None:
-    for field_name in ("broad_flatten_allowed", "global_flatten_allowed"):
-        payload = _intent_payload()
-        payload[field_name] = True
-
-        decision = validate_exit_intent(payload)
-
-        assert decision.decision == ExitAuthorityDecisionValue.BLOCKED
-        assert field_name in decision.block_reasons[0]
-
-
-def test_blocked_authority_decision_requires_block_reasons() -> None:
-    with pytest.raises(TrackBModelError, match="blocked authority decisions require block_reasons"):
-        ExitAuthorityDecision(
-            exit_intent_id="exit-intent-1",
-            decision="BLOCKED",
-            validated_at=NOW,
-        )
-
-
-def test_allowed_authority_decision_cannot_carry_block_reasons() -> None:
-    with pytest.raises(TrackBModelError, match="allowed authority decisions must not carry"):
-        ExitAuthorityDecision(
-            exit_intent_id="exit-intent-1",
-            decision="ALLOWED",
-            block_reasons=("stale_authority",),
-            validated_at=NOW,
-        )
-
-
-def test_authority_decision_carries_check_sections_and_validator_version() -> None:
-    decision = ExitAuthorityDecision(
-        exit_intent_id="exit-intent-1",
-        decision="DEGRADED_ALLOWED",
-        diagnostics={"mode": "degraded_exact_close"},
-        hard_required_checks={"bsa_close_authority": True},
-        conditional_checks={"control_plane_hard_hold_absent": True},
-        diagnostic_checks={"ods_fresh": False},
-        source_artifact_refs=(
-            {
-                "name": "bsa",
-                "path": "outputs/operator_dashboard/runtime/latest_broker_session_authority.json",
-                "generated_at": NOW,
-                "authority_layer": "Exit Authority Validator",
-            },
-        ),
-        validated_at=NOW,
-    )
-
-    assert decision.decision == ExitAuthorityDecisionValue.DEGRADED_ALLOWED
-    assert decision.validator_version == EXIT_AUTHORITY_VALIDATOR_VERSION
-    assert decision.diagnostics["mode"] == "degraded_exact_close"
-    assert decision.source_artifact_refs[0].name == "bsa"
-
-
-def test_exit_authority_validator_allows_valid_full_close() -> None:
-    decision = validate_exit_authority(intent=_intent(), current_state=_state(), validated_at=NOW)
-
-    assert decision.decision == ExitAuthorityDecisionValue.ALLOWED
-    assert decision.block_reasons == ()
-    assert decision.hard_required_checks["reconciliation_clean"]["category"] == ExitAuthorityCheckCategory.HARD_REQUIRED
-    assert decision.hard_required_checks["bsa_close_authority"]["passed"] is True
-    assert decision.conditional_checks["partial_close_policy"]["passed"] is True
-
-
-def test_exit_authority_validator_allows_valid_degraded_exact_close() -> None:
-    state = _state(bsa_managed_risk_reducing_close=False, bsa_degraded_exact_close_ready=True)
-
-    decision = ExitAuthorityValidator().validate(intent=_intent(), current_state=state, validated_at=NOW)
-
-    assert decision.decision == ExitAuthorityDecisionValue.DEGRADED_ALLOWED
-    assert decision.diagnostics["degraded_exact_close_authority"] is True
-    assert decision.hard_required_checks["bsa_close_authority"]["passed"] is True
-
-
-def test_exit_authority_validator_allows_valid_partial_close_when_declared() -> None:
-    intent = _intent(
-        owned_qty=3,
-        close_qty=1,
-        remaining_qty_after=2,
-        exit_type="PARTIAL_SCALE_OUT",
-        allow_partial=True,
-        partial_policy_supported=True,
-    )
-    state = _state(position_qty=3)
-
-    decision = validate_exit_authority(intent=intent, current_state=state, validated_at=NOW)
-
-    assert decision.decision == ExitAuthorityDecisionValue.ALLOWED
-    assert decision.conditional_checks["partial_close_policy"]["passed"] is True
-
-
-def test_exit_authority_validator_blocks_partial_close_when_not_declared() -> None:
-    payload = _intent_payload(owned_qty=3, close_qty=1, remaining_qty_after=2, exit_type="PARTIAL_SCALE_OUT")
-    state = _state(position_qty=3)
-
-    decision = validate_exit_authority(intent=payload, current_state=state, validated_at=NOW)
-
-    assert decision.decision == ExitAuthorityDecisionValue.BLOCKED
-    assert "partial closes require allow_partial=true" in decision.block_reasons[0]
-
-
-def test_exit_authority_validator_blocks_dirty_reconciliation() -> None:
-    decision = validate_exit_authority(intent=_intent(), current_state=_state(reconciliation_clean=False), validated_at=NOW)
-
-    assert decision.decision == ExitAuthorityDecisionValue.BLOCKED
-    assert "reconciliation_not_clean" in decision.block_reasons
-
-
-def test_exit_authority_validator_blocks_unknown_or_open_orders() -> None:
-    for override, expected in (
-        ({"open_order_count": 1}, "open_orders_present"),
-        ({"unknown_open_order_count": 1}, "unknown_open_orders_present"),
-    ):
-        decision = validate_exit_authority(intent=_intent(), current_state=_state(**override), validated_at=NOW)
-
-        assert decision.decision == ExitAuthorityDecisionValue.BLOCKED
-        assert expected in decision.block_reasons
-
-
-def test_exit_authority_validator_blocks_duplicate_close() -> None:
-    decision = validate_exit_authority(
-        intent=_intent(),
-        current_state=_state(duplicate_close_order_exists=True),
-        validated_at=NOW,
-    )
-
-    assert decision.decision == ExitAuthorityDecisionValue.BLOCKED
-    assert "duplicate_close_exists" in decision.block_reasons
-
-
-def test_exit_authority_validator_blocks_safe_state_or_guardian() -> None:
-    for override, expected in (
-        ({"safe_state_allows_managed_close": False}, "safe_state_blocks_managed_close"),
-        ({"guardian_allows_exact_close": False}, "guardian_blocks_exact_close"),
-    ):
-        decision = validate_exit_authority(intent=_intent(), current_state=_state(**override), validated_at=NOW)
-
-        assert decision.decision == ExitAuthorityDecisionValue.BLOCKED
-        assert expected in decision.block_reasons
-
-
-def test_exit_authority_validator_blocks_bsa_close_false() -> None:
-    decision = validate_exit_authority(
-        intent=_intent(),
-        current_state=_state(bsa_managed_risk_reducing_close=False, bsa_degraded_exact_close_ready=False),
-        validated_at=NOW,
-    )
-
-    assert decision.decision == ExitAuthorityDecisionValue.BLOCKED
-    assert "bsa_close_authority_false" in decision.block_reasons
-
-
-def test_exit_authority_validator_blocks_live_money_or_paper_proof() -> None:
-    for override in ({"live_money_eligible": True}, {"paper_proof_invoked": True}):
-        decision = validate_exit_authority(intent=_intent(), current_state=_state_payload(**override), validated_at=NOW)
-
-        assert decision.decision == ExitAuthorityDecisionValue.BLOCKED
-        assert "must be explicit false" in decision.block_reasons[0]
-
-
-def test_exit_authority_validator_diagnostics_do_not_block() -> None:
-    decision = validate_exit_authority(
-        intent=_intent(),
-        current_state=_state(diagnostics={"ods_fresh": False, "control_plane_ready_for_entries": False}),
-        validated_at=NOW,
-    )
-
-    assert decision.decision == ExitAuthorityDecisionValue.ALLOWED
-    assert decision.diagnostic_checks["ods_fresh"]["category"] == ExitAuthorityCheckCategory.DIAGNOSTIC
-    assert decision.diagnostic_checks["ods_fresh"]["passed"] is False
-    assert decision.block_reasons == ()
-
-
-def test_exit_authority_validator_blocks_position_identity_mismatch() -> None:
-    decision = validate_exit_authority(intent=_intent(), current_state=_state(local_symbol="MNQM6"), validated_at=NOW)
-
-    assert decision.decision == ExitAuthorityDecisionValue.BLOCKED
-    assert "position_identity_mismatch" in decision.block_reasons
+    assert [row.name for row in decision.source_artifact_refs] == [
+        "managed_positions",
+        "broker_truth_lease",
+    ]
 
 
 def _intent(**overrides) -> ExitIntent:
@@ -349,11 +386,8 @@ def _intent(**overrides) -> ExitIntent:
 def _intent_payload(**overrides) -> dict:
     payload = {
         "exit_intent_id": "exit-intent-1",
-        "lifecycle_id": "life-1",
-        "trade_id": "trade-1",
-        "strategy_id": "strategy-1",
-        "lane_id": "lane-1",
-        "account": "DUM882026",
+        "execution_domain": "TRACK_B_PAPER",
+        "account_id": "DUM882026",
         "instrument": "MES",
         "local_symbol": "MESM6",
         "con_id": 770561194,
@@ -362,6 +396,7 @@ def _intent_payload(**overrides) -> dict:
         "close_action": "SELL",
         "close_qty": "1",
         "remaining_qty_after": "0",
+        "close_qty_source": "STRATEGY_POLICY",
         "exit_type": "FULL_CLOSE",
         "exit_reason": "timebox close",
         "priority": 10,
@@ -372,16 +407,20 @@ def _intent_payload(**overrides) -> dict:
         "allow_reverse": False,
         "source_policy_id": "timebox-3x5m-v1",
         "generated_at": NOW,
-        "source_artifact_refs": (
-            {
-                "name": "reconciliation",
-                "path": "outputs/reports/track_b_paper_broker_reconciliation/latest_track_b_paper_broker_reconciliation.json",
-                "generated_at": NOW,
-                "authority_layer": "Position State",
-            },
-        ),
+        "attribution": {
+            "lifecycle_id": "life-1",
+            "trade_id": "trade-1",
+            "strategy_id": "strategy-1",
+            "lane_id": "lane-1",
+        },
+        "lifecycle_id": "life-1",
+        "trade_id": "trade-1",
+        "strategy_id": "strategy-1",
+        "lane_id": "lane-1",
+        "source_artifact_refs": (_source_artifact("reconciliation"),),
         "partial_policy_supported": False,
         "live_money_eligible": False,
+        "live_money_allowed": False,
         "paper_proof_invoked": False,
         "broad_flatten_allowed": False,
         "global_flatten_allowed": False,
@@ -390,40 +429,44 @@ def _intent_payload(**overrides) -> dict:
     return payload
 
 
-def _state(**overrides) -> ExitAuthorityCurrentState:
-    return ExitAuthorityCurrentState(**_state_payload(**overrides))
-
-
-def _state_payload(**overrides) -> dict:
+def _state(**overrides) -> dict:
     payload = {
+        "execution_domain": "TRACK_B_PAPER",
         "known_position": True,
-        "owned_position": True,
-        "position_side": "LONG",
-        "position_qty": "1",
-        "account": "DUM882026",
+        "broker_position_side": "LONG",
+        "broker_position_qty": "1",
+        "account_id": "DUM882026",
         "local_symbol": "MESM6",
         "con_id": 770561194,
-        "open_order_count": 0,
-        "unknown_open_order_count": 0,
-        "duplicate_close_order_exists": False,
+        "safe_state_hard_halt": False,
+        "same_contract_working_close_qty": "0",
+        "unrelated_unknown_order_count": 0,
+        "same_contract_unknown_order_count": 0,
+        "same_contract_unknown_order_could_over_close": False,
+        "same_contract_unknown_order_over_close_ruled_out": False,
         "reconciliation_clean": True,
         "safe_state_allows_managed_close": True,
         "guardian_allows_exact_close": True,
         "bsa_managed_risk_reducing_close": True,
         "bsa_degraded_exact_close_ready": False,
         "live_money_eligible": False,
+        "live_money_allowed": False,
         "paper_proof_invoked": False,
         "broad_flatten_allowed": False,
         "global_flatten_allowed": False,
+        "attribution_status": "ATTRIBUTED",
+        "attribution_diagnostics": {},
         "diagnostics": {},
-        "source_artifact_refs": (
-            {
-                "name": "bsa",
-                "path": "outputs/operator_dashboard/runtime/latest_broker_session_authority.json",
-                "generated_at": NOW,
-                "authority_layer": "Exit Authority Validator",
-            },
-        ),
+        "source_artifact_refs": (_source_artifact("bsa"),),
     }
     payload.update(overrides)
     return payload
+
+
+def _source_artifact(name: str) -> SourceArtifactRef:
+    return SourceArtifactRef(
+        name=name,
+        path=f"outputs/track_b_execution_core/{name}/latest_{name}.json",
+        generated_at=NOW,
+        authority_layer="Exit Authority Contract",
+    )

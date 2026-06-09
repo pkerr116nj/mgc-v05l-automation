@@ -1,8 +1,9 @@
 """Pure Track B managed-exit intent and authority contracts.
 
 The contracts in this module do not submit, cancel, close, refresh broker
-state, or mutate lifecycle state. They define the typed shape and invariant
-checks that future managed-exit layers must consume.
+state, or mutate lifecycle state. V1.1 separates risk-reduction authority from
+strategy/lifecycle attribution: the validator answers only whether a proposed
+action can safely reduce current broker exposure in the intended domain.
 """
 
 from __future__ import annotations
@@ -25,9 +26,20 @@ from mgc_v05l.execution_core.models import (
 )
 
 
-EXIT_INTENT_SCHEMA_VERSION = "track_b_exit_intent_v1"
-EXIT_AUTHORITY_DECISION_SCHEMA_VERSION = "track_b_exit_authority_decision_v1"
-EXIT_AUTHORITY_VALIDATOR_VERSION = "track_b_exit_authority_validator_v1"
+EXIT_INTENT_SCHEMA_VERSION = "track_b_exit_intent_v1_1"
+EXIT_AUTHORITY_DECISION_SCHEMA_VERSION = "track_b_exit_authority_decision_v1_1"
+EXIT_AUTHORITY_VALIDATOR_VERSION = "track_b_exit_authority_validator_v1_1"
+
+
+class ExecutionDomain(str, Enum):
+    TRACK_B_PAPER = "TRACK_B_PAPER"
+    TRACK_B_LIVE = "TRACK_B_LIVE"
+
+
+class AttributionStatus(str, Enum):
+    ATTRIBUTED = "ATTRIBUTED"
+    PARTIALLY_ATTRIBUTED = "PARTIALLY_ATTRIBUTED"
+    UNATTRIBUTED = "UNATTRIBUTED"
 
 
 class PositionSide(str, Enum):
@@ -38,6 +50,13 @@ class PositionSide(str, Enum):
 class CloseAction(str, Enum):
     BUY = "BUY"
     SELL = "SELL"
+
+
+class CloseQtySource(str, Enum):
+    STRATEGY_POLICY = "STRATEGY_POLICY"
+    RISK_POLICY = "RISK_POLICY"
+    OPERATOR_INSTRUCTION = "OPERATOR_INSTRUCTION"
+    PORTFOLIO_RISK_MANAGER = "PORTFOLIO_RISK_MANAGER"
 
 
 class ExitType(str, Enum):
@@ -62,9 +81,8 @@ class ExitUrgency(str, Enum):
 
 class ExitAuthorityDecisionValue(str, Enum):
     ALLOWED = "ALLOWED"
-    BLOCKED = "BLOCKED"
     DEGRADED_ALLOWED = "DEGRADED_ALLOWED"
-    DIAGNOSTIC_ONLY = "DIAGNOSTIC_ONLY"
+    BLOCKED = "BLOCKED"
 
 
 class ExitAuthorityCheckCategory(str, Enum):
@@ -92,13 +110,34 @@ class SourceArtifactRef(JsonSerializable):
 
 
 @dataclass(frozen=True)
+class ExitAttribution(JsonSerializable):
+    lifecycle_id: str | None = None
+    trade_id: str | None = None
+    strategy_id: str | None = None
+    lane_id: str | None = None
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "lifecycle_id", _optional_id(self.lifecycle_id))
+        object.__setattr__(self, "trade_id", _optional_id(self.trade_id))
+        object.__setattr__(self, "strategy_id", _optional_id(self.strategy_id))
+        object.__setattr__(self, "lane_id", _optional_id(self.lane_id))
+
+    @property
+    def status(self) -> AttributionStatus:
+        present = [self.lifecycle_id, self.trade_id, self.strategy_id, self.lane_id]
+        count = sum(1 for item in present if item)
+        if count == len(present):
+            return AttributionStatus.ATTRIBUTED
+        if count:
+            return AttributionStatus.PARTIALLY_ATTRIBUTED
+        return AttributionStatus.UNATTRIBUTED
+
+
+@dataclass(frozen=True)
 class ExitIntent(JsonSerializable):
     exit_intent_id: str
-    lifecycle_id: str
-    trade_id: str
-    strategy_id: str
-    lane_id: str
-    account: str
+    execution_domain: ExecutionDomain | str
+    account_id: str
     instrument: str
     local_symbol: str
     con_id: int
@@ -107,6 +146,7 @@ class ExitIntent(JsonSerializable):
     close_action: CloseAction | str
     close_qty: Decimal | int | str
     remaining_qty_after: Decimal | int | str
+    close_qty_source: CloseQtySource | str
     exit_type: ExitType | str
     exit_reason: str
     priority: int
@@ -117,9 +157,15 @@ class ExitIntent(JsonSerializable):
     allow_reverse: bool
     source_policy_id: str
     generated_at: datetime
+    attribution: ExitAttribution | Mapping[str, Any] | None = None
+    lifecycle_id: str | None = None
+    trade_id: str | None = None
+    strategy_id: str | None = None
+    lane_id: str | None = None
     source_artifact_refs: tuple[SourceArtifactRef | Mapping[str, Any], ...] = ()
     partial_policy_supported: bool = False
     live_money_eligible: bool = False
+    live_money_allowed: bool = False
     paper_proof_invoked: bool = False
     broad_flatten_allowed: bool = False
     global_flatten_allowed: bool = False
@@ -127,11 +173,8 @@ class ExitIntent(JsonSerializable):
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "exit_intent_id", require_id(self.exit_intent_id, "exit_intent_id"))
-        object.__setattr__(self, "lifecycle_id", require_id(self.lifecycle_id, "lifecycle_id"))
-        object.__setattr__(self, "trade_id", require_id(self.trade_id, "trade_id"))
-        object.__setattr__(self, "strategy_id", require_id(self.strategy_id, "strategy_id"))
-        object.__setattr__(self, "lane_id", require_id(self.lane_id, "lane_id"))
-        object.__setattr__(self, "account", require_id(self.account, "account"))
+        object.__setattr__(self, "execution_domain", _normalize_execution_domain(self.execution_domain))
+        object.__setattr__(self, "account_id", require_id(self.account_id, "account_id"))
         object.__setattr__(self, "instrument", require_id(self.instrument, "instrument").upper())
         object.__setattr__(self, "local_symbol", require_id(self.local_symbol, "local_symbol").upper())
         if int(self.con_id) <= 0:
@@ -146,6 +189,7 @@ class ExitIntent(JsonSerializable):
             "remaining_qty_after",
             _normalize_non_negative_integral_quantity(self.remaining_qty_after, "remaining_qty_after"),
         )
+        object.__setattr__(self, "close_qty_source", _normalize_close_qty_source(self.close_qty_source))
         object.__setattr__(self, "exit_type", _normalize_exit_type(self.exit_type))
         object.__setattr__(self, "exit_reason", require_id(self.exit_reason, "exit_reason"))
         if int(self.priority) < 0:
@@ -157,6 +201,7 @@ class ExitIntent(JsonSerializable):
         object.__setattr__(self, "price_policy", dict(self.price_policy))
         object.__setattr__(self, "source_policy_id", require_id(self.source_policy_id, "source_policy_id"))
         object.__setattr__(self, "generated_at", require_aware_datetime(self.generated_at, "generated_at"))
+        object.__setattr__(self, "attribution", _normalize_attribution(self))
         object.__setattr__(self, "source_artifact_refs", tuple(_normalize_artifact_ref(row) for row in self.source_artifact_refs))
         _validate_exit_intent_invariants(self)
         expected_key = build_exit_intent_idempotency_key(self)
@@ -169,14 +214,21 @@ class ExitIntent(JsonSerializable):
 class ExitAuthorityDecision(JsonSerializable):
     exit_intent_id: str
     decision: ExitAuthorityDecisionValue | str
-    block_reasons: tuple[str, ...] = ()
-    diagnostics: Mapping[str, Any] = field(default_factory=dict)
+    attribution_status: AttributionStatus | str = AttributionStatus.UNATTRIBUTED
+    attribution_diagnostics: Mapping[str, Any] = field(default_factory=dict)
     hard_required_checks: Mapping[str, Any] = field(default_factory=dict)
-    conditional_checks: Mapping[str, Any] = field(default_factory=dict)
+    conditional_risk_checks: Mapping[str, Any] = field(default_factory=dict)
     diagnostic_checks: Mapping[str, Any] = field(default_factory=dict)
+    block_reasons: tuple[str, ...] = ()
+    execution_domain: ExecutionDomain | str | None = None
+    account_id: str | None = None
+    validated_close_qty: Decimal | int | str | None = None
+    validated_remaining_qty: Decimal | int | str | None = None
     source_artifact_refs: tuple[SourceArtifactRef | Mapping[str, Any], ...] = ()
     validated_at: datetime = field(default_factory=lambda: datetime.now(UTC))
     validator_version: str = EXIT_AUTHORITY_VALIDATOR_VERSION
+    diagnostics: Mapping[str, Any] = field(default_factory=dict)
+    conditional_checks: Mapping[str, Any] = field(default_factory=dict)
     live_money_eligible: bool = False
     paper_proof_invoked: bool = False
     broad_flatten_allowed: bool = False
@@ -186,15 +238,35 @@ class ExitAuthorityDecision(JsonSerializable):
     def __post_init__(self) -> None:
         object.__setattr__(self, "exit_intent_id", require_id(self.exit_intent_id, "exit_intent_id"))
         object.__setattr__(self, "decision", _normalize_authority_decision(self.decision))
-        object.__setattr__(self, "block_reasons", tuple(str(row) for row in self.block_reasons if str(row or "").strip()))
-        object.__setattr__(self, "diagnostics", dict(self.diagnostics))
+        object.__setattr__(self, "attribution_status", _normalize_attribution_status(self.attribution_status))
+        object.__setattr__(self, "attribution_diagnostics", dict(self.attribution_diagnostics))
         object.__setattr__(self, "hard_required_checks", dict(self.hard_required_checks))
-        object.__setattr__(self, "conditional_checks", dict(self.conditional_checks))
+        risk_checks = dict(self.conditional_risk_checks or self.conditional_checks)
+        object.__setattr__(self, "conditional_risk_checks", risk_checks)
+        object.__setattr__(self, "conditional_checks", risk_checks)
         object.__setattr__(self, "diagnostic_checks", dict(self.diagnostic_checks))
+        object.__setattr__(self, "block_reasons", tuple(str(row) for row in self.block_reasons if str(row or "").strip()))
+        if self.execution_domain is not None:
+            object.__setattr__(self, "execution_domain", _normalize_execution_domain(self.execution_domain))
+        if self.account_id is not None:
+            object.__setattr__(self, "account_id", require_id(self.account_id, "account_id"))
+        if self.validated_close_qty is not None:
+            object.__setattr__(
+                self,
+                "validated_close_qty",
+                require_positive_integral_quantity(self.validated_close_qty, "validated_close_qty"),
+            )
+        if self.validated_remaining_qty is not None:
+            object.__setattr__(
+                self,
+                "validated_remaining_qty",
+                _normalize_non_negative_integral_quantity(self.validated_remaining_qty, "validated_remaining_qty"),
+            )
         object.__setattr__(self, "source_artifact_refs", tuple(_normalize_artifact_ref(row) for row in self.source_artifact_refs))
         object.__setattr__(self, "validated_at", require_aware_datetime(self.validated_at, "validated_at"))
         object.__setattr__(self, "validator_version", require_id(self.validator_version, "validator_version"))
-        _validate_safety_booleans(self)
+        object.__setattr__(self, "diagnostics", dict(self.diagnostics))
+        _validate_output_safety_booleans(self)
         if self.decision == ExitAuthorityDecisionValue.BLOCKED and not self.block_reasons:
             raise TrackBModelError("blocked authority decisions require block_reasons.")
         if self.decision in {ExitAuthorityDecisionValue.ALLOWED, ExitAuthorityDecisionValue.DEGRADED_ALLOWED} and self.block_reasons:
@@ -203,54 +275,71 @@ class ExitAuthorityDecision(JsonSerializable):
 
 @dataclass(frozen=True)
 class ExitAuthorityCurrentState(JsonSerializable):
+    execution_domain: ExecutionDomain | str
     known_position: bool
-    owned_position: bool
-    position_side: PositionSide | str
-    position_qty: Decimal | int | str
-    account: str
+    broker_position_side: PositionSide | str
+    broker_position_qty: Decimal | int | str
+    account_id: str
     local_symbol: str
     con_id: int
-    open_order_count: int = 0
-    unknown_open_order_count: int = 0
-    duplicate_close_order_exists: bool = False
-    reconciliation_clean: bool = False
-    safe_state_allows_managed_close: bool = False
-    guardian_allows_exact_close: bool = False
-    bsa_managed_risk_reducing_close: bool = False
-    bsa_degraded_exact_close_ready: bool = False
+    safe_state_hard_halt: bool = False
+    same_contract_working_close_qty: Decimal | int | str = 0
+    unrelated_unknown_order_count: int = 0
+    same_contract_unknown_order_count: int = 0
+    same_contract_unknown_order_could_over_close: bool = False
+    same_contract_unknown_order_over_close_ruled_out: bool = False
+    reconciliation_clean: bool | None = None
+    safe_state_allows_managed_close: bool | None = None
+    guardian_allows_exact_close: bool | None = None
+    bsa_managed_risk_reducing_close: bool | None = None
+    bsa_degraded_exact_close_ready: bool | None = None
     live_money_eligible: bool = False
+    live_money_allowed: bool = False
     paper_proof_invoked: bool = False
     broad_flatten_allowed: bool = False
     global_flatten_allowed: bool = False
+    attribution_status: AttributionStatus | str = AttributionStatus.UNATTRIBUTED
+    attribution_diagnostics: Mapping[str, Any] = field(default_factory=dict)
     diagnostics: Mapping[str, Any] = field(default_factory=dict)
     source_artifact_refs: tuple[SourceArtifactRef | Mapping[str, Any], ...] = ()
 
     def __post_init__(self) -> None:
-        object.__setattr__(self, "position_side", _normalize_position_side(self.position_side))
-        object.__setattr__(self, "position_qty", require_positive_integral_quantity(self.position_qty, "position_qty"))
-        object.__setattr__(self, "account", require_id(self.account, "state.account"))
+        object.__setattr__(self, "execution_domain", _normalize_execution_domain(self.execution_domain))
+        object.__setattr__(self, "broker_position_side", _normalize_position_side(self.broker_position_side))
+        object.__setattr__(
+            self,
+            "broker_position_qty",
+            require_positive_integral_quantity(self.broker_position_qty, "broker_position_qty"),
+        )
+        object.__setattr__(self, "account_id", require_id(self.account_id, "state.account_id"))
         object.__setattr__(self, "local_symbol", require_id(self.local_symbol, "state.local_symbol").upper())
         if int(self.con_id) <= 0:
             raise TrackBModelError("state.con_id must be positive.")
         object.__setattr__(self, "con_id", int(self.con_id))
-        object.__setattr__(self, "open_order_count", _normalize_non_negative_int(self.open_order_count, "open_order_count"))
         object.__setattr__(
             self,
-            "unknown_open_order_count",
-            _normalize_non_negative_int(self.unknown_open_order_count, "unknown_open_order_count"),
+            "same_contract_working_close_qty",
+            _normalize_non_negative_integral_quantity(self.same_contract_working_close_qty, "same_contract_working_close_qty"),
         )
+        object.__setattr__(
+            self,
+            "unrelated_unknown_order_count",
+            _normalize_non_negative_int(self.unrelated_unknown_order_count, "unrelated_unknown_order_count"),
+        )
+        object.__setattr__(
+            self,
+            "same_contract_unknown_order_count",
+            _normalize_non_negative_int(self.same_contract_unknown_order_count, "same_contract_unknown_order_count"),
+        )
+        object.__setattr__(self, "attribution_status", _normalize_attribution_status(self.attribution_status))
+        object.__setattr__(self, "attribution_diagnostics", dict(self.attribution_diagnostics))
         object.__setattr__(self, "diagnostics", dict(self.diagnostics))
         object.__setattr__(self, "source_artifact_refs", tuple(_normalize_artifact_ref(row) for row in self.source_artifact_refs))
-        _validate_safety_booleans(self)
+        _validate_state_safety_flags(self)
 
 
 class ExitAuthorityValidator:
-    """Pure validator for managed-exit authority facts.
-
-    The validator consumes already-collected state supplied by callers. It does
-    not read artifacts, connect to brokers, submit orders, cancel orders, close
-    positions, or start services.
-    """
+    """Pure validator for managed-exit authority facts."""
 
     validator_version = EXIT_AUTHORITY_VALIDATOR_VERSION
 
@@ -280,16 +369,23 @@ class ExitAuthorityValidator:
                 source_artifact_refs=normalized_intent.source_artifact_refs,
             )
 
+        attribution_status = _combined_attribution_status(normalized_intent, normalized_state)
         hard_required_checks = _hard_required_checks(normalized_intent, normalized_state)
-        conditional_checks = _conditional_checks(normalized_intent)
-        diagnostic_checks = _diagnostic_checks(normalized_state)
+        conditional_risk_checks = _conditional_risk_checks(normalized_intent, normalized_state)
+        diagnostic_checks = _diagnostic_checks(normalized_intent, normalized_state)
         block_reasons = tuple(
             check["code"]
-            for checks in (hard_required_checks, conditional_checks)
+            for checks in (hard_required_checks, conditional_risk_checks)
             for check in checks.values()
             if check.get("passed") is not True
         )
-        degraded = bool(normalized_state.bsa_degraded_exact_close_ready and not normalized_state.bsa_managed_risk_reducing_close)
+        degraded = (
+            not block_reasons
+            and (
+                attribution_status != AttributionStatus.ATTRIBUTED
+                or _same_contract_unknown_order_degraded(normalized_state)
+            )
+        )
         decision = (
             ExitAuthorityDecisionValue.BLOCKED
             if block_reasons
@@ -300,32 +396,38 @@ class ExitAuthorityValidator:
         return ExitAuthorityDecision(
             exit_intent_id=normalized_intent.exit_intent_id,
             decision=decision,
-            block_reasons=block_reasons,
-            diagnostics={
-                "diagnostic_only": diagnostic_checks,
-                "degraded_exact_close_authority": degraded,
-            },
+            attribution_status=attribution_status,
+            attribution_diagnostics=_attribution_diagnostics(normalized_intent, normalized_state),
             hard_required_checks=hard_required_checks,
-            conditional_checks=conditional_checks,
+            conditional_risk_checks=conditional_risk_checks,
             diagnostic_checks=diagnostic_checks,
+            block_reasons=block_reasons,
+            execution_domain=normalized_intent.execution_domain,
+            account_id=normalized_intent.account_id,
+            validated_close_qty=normalized_intent.close_qty,
+            validated_remaining_qty=normalized_intent.remaining_qty_after,
             source_artifact_refs=tuple(normalized_intent.source_artifact_refs) + tuple(normalized_state.source_artifact_refs),
             validated_at=actual_validated_at,
             validator_version=self.validator_version,
+            diagnostics={
+                "risk_reduction_only": True,
+                "attribution_blocks_authority": False,
+            },
         )
 
 
 def build_exit_intent_idempotency_key(intent: ExitIntent | Mapping[str, Any]) -> str:
     payload = intent.to_json_dict() if isinstance(intent, ExitIntent) else dict(intent)
     stable = {
-        "account": str(payload.get("account") or ""),
+        "account_id": str(payload.get("account_id") or ""),
         "close_action": str(_enum_value(payload.get("close_action"))),
         "close_qty": str(normalize_decimal(payload.get("close_qty") or "0", "close_qty")),
+        "close_qty_source": str(_enum_value(payload.get("close_qty_source"))),
         "con_id": int(payload.get("con_id") or 0),
+        "execution_domain": str(_enum_value(payload.get("execution_domain"))),
         "exit_type": str(_enum_value(payload.get("exit_type"))),
-        "lifecycle_id": str(payload.get("lifecycle_id") or ""),
         "local_symbol": str(payload.get("local_symbol") or "").upper(),
         "source_policy_id": str(payload.get("source_policy_id") or ""),
-        "trade_id": str(payload.get("trade_id") or ""),
     }
     digest = hashlib.sha256(json.dumps(stable, sort_keys=True, separators=(",", ":")).encode("utf-8")).hexdigest()[:24]
     return f"track_b_exit_intent:{digest}"
@@ -348,139 +450,194 @@ def validate_exit_intent(intent: ExitIntent | Mapping[str, Any]) -> ExitAuthorit
             exit_intent_id=str(_mapping(intent).get("exit_intent_id") or "invalid_exit_intent"),
             decision=ExitAuthorityDecisionValue.BLOCKED,
             block_reasons=(str(exc),),
-            hard_required_checks={"exit_intent_contract_valid": False},
+            hard_required_checks={"exit_intent_contract_valid": _check(ExitAuthorityCheckCategory.HARD_REQUIRED, False, "exit_intent_contract_valid", str(exc))},
             validated_at=_safe_now(),
         )
     return ExitAuthorityDecision(
         exit_intent_id=normalized.exit_intent_id,
         decision=ExitAuthorityDecisionValue.ALLOWED,
+        attribution_status=normalized.attribution.status,
         hard_required_checks={
-            "exit_intent_contract_valid": True,
-            "risk_reducing_action": True,
-            "close_qty_within_owned_qty": True,
-            "no_reverse_or_flip": True,
-            "paper_safety_flags": True,
+            "exit_intent_contract_valid": _check(
+                ExitAuthorityCheckCategory.HARD_REQUIRED,
+                True,
+                "exit_intent_contract_valid",
+                "ExitIntent schema and quantity invariants are valid.",
+            ),
         },
-        conditional_checks={
-            "partial_close_allowed": normalized.remaining_qty_after == 0
-            or (normalized.allow_partial is True and normalized.partial_policy_supported is True),
+        conditional_risk_checks={
+            "partial_close_policy": _check(
+                ExitAuthorityCheckCategory.CONDITIONAL,
+                True,
+                "partial_close_policy",
+                "Partial close quantity source is explicit when required.",
+            ),
         },
+        execution_domain=normalized.execution_domain,
+        account_id=normalized.account_id,
+        validated_close_qty=normalized.close_qty,
+        validated_remaining_qty=normalized.remaining_qty_after,
         source_artifact_refs=normalized.source_artifact_refs,
         validated_at=_safe_now(),
     )
 
 
 def _hard_required_checks(intent: ExitIntent, state: ExitAuthorityCurrentState) -> dict[str, dict[str, Any]]:
-    bsa_close_authority = bool(state.bsa_managed_risk_reducing_close or state.bsa_degraded_exact_close_ready)
     return {
-        "known_position": _check(
+        "known_current_broker_position": _check(
             ExitAuthorityCheckCategory.HARD_REQUIRED,
             state.known_position is True,
-            "known_position",
-            "Current state must identify a known broker-backed position.",
+            "known_current_broker_position_missing",
+            "Current state must identify a known broker position.",
         ),
-        "owned_position": _check(
+        "execution_domain_matches": _check(
             ExitAuthorityCheckCategory.HARD_REQUIRED,
-            state.owned_position is True,
-            "owned_position",
-            "Current state must identify strategy/lifecycle ownership.",
+            state.execution_domain == intent.execution_domain,
+            "execution_domain_mismatch",
+            "Current state must be in the ExitIntent execution domain.",
         ),
-        "position_identity_matches_intent": _check(
+        "account_matches": _check(
             ExitAuthorityCheckCategory.HARD_REQUIRED,
-            state.account == intent.account
-            and state.local_symbol == intent.local_symbol
-            and state.con_id == intent.con_id
-            and state.position_side == intent.position_side
-            and state.position_qty == intent.owned_qty,
-            "position_identity_mismatch",
-            "Current position identity must match the ExitIntent.",
+            state.account_id == intent.account_id,
+            "account_mismatch",
+            "Current broker account must match the ExitIntent account.",
+        ),
+        "contract_matches": _check(
+            ExitAuthorityCheckCategory.HARD_REQUIRED,
+            state.local_symbol == intent.local_symbol and state.con_id == intent.con_id,
+            "contract_mismatch",
+            "Current broker contract must match the ExitIntent contract.",
+        ),
+        "position_side_matches": _check(
+            ExitAuthorityCheckCategory.HARD_REQUIRED,
+            state.broker_position_side == intent.position_side,
+            "position_side_mismatch",
+            "Current broker position side must match the ExitIntent.",
+        ),
+        "close_qty_within_broker_position": _check(
+            ExitAuthorityCheckCategory.HARD_REQUIRED,
+            Decimal("0") < intent.close_qty <= state.broker_position_qty,
+            "close_qty_out_of_bounds",
+            "Close quantity must be greater than zero and not exceed current broker position quantity.",
         ),
         "risk_reducing_action": _check(
             ExitAuthorityCheckCategory.HARD_REQUIRED,
             _close_action_reduces_position(intent),
             "not_risk_reducing",
-            "Close action must reduce the owned position side.",
-        ),
-        "close_qty_within_owned_qty": _check(
-            ExitAuthorityCheckCategory.HARD_REQUIRED,
-            Decimal("0") < intent.close_qty <= intent.owned_qty,
-            "close_qty_out_of_bounds",
-            "Close quantity must be greater than zero and not exceed owned quantity.",
+            "Close action must reduce absolute exposure.",
         ),
         "no_reverse_or_flip": _check(
             ExitAuthorityCheckCategory.HARD_REQUIRED,
             intent.allow_reverse is False and intent.remaining_qty_after >= 0,
             "reverse_or_flip_forbidden",
-            "Reverse/flip actions are forbidden in this contract.",
+            "Reverse/flip actions must be modeled separately.",
         ),
-        "no_open_orders": _check(
+        "price_policy_present": _check(
             ExitAuthorityCheckCategory.HARD_REQUIRED,
-            state.open_order_count == 0,
-            "open_orders_present",
-            "No conflicting broker open orders may be present.",
+            bool(intent.price_policy),
+            "price_policy_missing",
+            "Executable price policy is required.",
         ),
-        "no_unknown_open_orders": _check(
+        "same_contract_working_close_does_not_over_close": _check(
             ExitAuthorityCheckCategory.HARD_REQUIRED,
-            state.unknown_open_order_count == 0,
-            "unknown_open_orders_present",
-            "Unknown open orders fail closed.",
+            state.same_contract_working_close_qty + intent.close_qty <= state.broker_position_qty,
+            "same_contract_working_close_over_close_risk",
+            "Known same-contract working closes plus proposed close must not over-close.",
         ),
-        "no_duplicate_close": _check(
+        "paper_proof_not_invoked": _check(
             ExitAuthorityCheckCategory.HARD_REQUIRED,
-            state.duplicate_close_order_exists is False,
-            "duplicate_close_exists",
-            "A duplicate working close order blocks a new close.",
+            intent.paper_proof_invoked is False and state.paper_proof_invoked is False,
+            "paper_proof_invoked",
+            "paper_proof must not be invoked for exit authority.",
         ),
-        "reconciliation_clean": _check(
+        "live_money_domain_allowed": _check(
             ExitAuthorityCheckCategory.HARD_REQUIRED,
-            state.reconciliation_clean is True,
-            "reconciliation_not_clean",
-            "Broker/lifecycle reconciliation must be clean.",
+            _live_money_allowed(intent, state),
+            "live_money_not_allowed",
+            "live_money is only allowed when explicitly scoped to TRACK_B_LIVE.",
         ),
-        "safe_state_allows_managed_close": _check(
+        "safe_state_no_hard_halt": _check(
             ExitAuthorityCheckCategory.HARD_REQUIRED,
-            state.safe_state_allows_managed_close is True,
-            "safe_state_blocks_managed_close",
-            "Safe-State must allow managed close.",
+            state.safe_state_hard_halt is False,
+            "safe_state_hard_halt",
+            "Safe-State hard halt blocks exit authority.",
         ),
-        "guardian_allows_exact_close": _check(
+        "broad_or_global_flatten_not_requested": _check(
             ExitAuthorityCheckCategory.HARD_REQUIRED,
-            state.guardian_allows_exact_close is True,
-            "guardian_blocks_exact_close",
-            "Guardian must allow the exact close candidate.",
-        ),
-        "bsa_close_authority": _check(
-            ExitAuthorityCheckCategory.HARD_REQUIRED,
-            bsa_close_authority,
-            "bsa_close_authority_false",
-            "BSA must allow managed risk-reducing close or degraded exact close.",
-        ),
-        "paper_safety_flags": _check(
-            ExitAuthorityCheckCategory.HARD_REQUIRED,
-            state.live_money_eligible is False
-            and state.paper_proof_invoked is False
+            intent.broad_flatten_allowed is False
+            and intent.global_flatten_allowed is False
             and state.broad_flatten_allowed is False
             and state.global_flatten_allowed is False,
-            "paper_safety_flags_not_false",
-            "live_money, paper_proof, broad flatten, and global flatten must be false.",
+            "broad_or_global_flatten_requested",
+            "Broad/global flatten semantics are outside ExitIntent.",
         ),
     }
 
 
-def _conditional_checks(intent: ExitIntent) -> dict[str, dict[str, Any]]:
+def _conditional_risk_checks(intent: ExitIntent, state: ExitAuthorityCurrentState) -> dict[str, dict[str, Any]]:
     partial = intent.remaining_qty_after > 0
+    same_contract_unknown_safe = (
+        state.same_contract_unknown_order_count == 0
+        or (
+            state.same_contract_unknown_order_over_close_ruled_out is True
+            and state.same_contract_unknown_order_could_over_close is False
+        )
+    )
     return {
-        "partial_close_policy": _check(
+        "partial_close_qty_source": _check(
             ExitAuthorityCheckCategory.CONDITIONAL,
             (not partial) or (intent.allow_partial is True and intent.partial_policy_supported is True),
             "partial_close_not_authorized",
-            "Partial closes require explicit intent and policy support.",
-        )
+            "Partial exits require explicit partial permission and policy/source support.",
+        ),
+        "same_contract_unknown_order_risk": _check(
+            ExitAuthorityCheckCategory.CONDITIONAL,
+            same_contract_unknown_safe,
+            "same_contract_unknown_order_over_close_risk",
+            "Same-contract unknown orders block when over-close risk cannot be ruled out.",
+        ),
     }
 
 
-def _diagnostic_checks(state: ExitAuthorityCurrentState) -> dict[str, dict[str, Any]]:
-    checks: dict[str, dict[str, Any]] = {}
+def _diagnostic_checks(intent: ExitIntent, state: ExitAuthorityCurrentState) -> dict[str, dict[str, Any]]:
+    checks = {
+        "attribution_status": _check(
+            ExitAuthorityCheckCategory.DIAGNOSTIC,
+            _combined_attribution_status(intent, state) == AttributionStatus.ATTRIBUTED,
+            "attribution_incomplete",
+            "Attribution is diagnostic unless it creates safety ambiguity.",
+        ),
+        "unrelated_unknown_orders": _check(
+            ExitAuthorityCheckCategory.DIAGNOSTIC,
+            state.unrelated_unknown_order_count == 0,
+            "unrelated_unknown_orders_present",
+            "Unrelated unknown orders are diagnostic-only for this contract.",
+        ),
+        "reconciliation_clean": _check(
+            ExitAuthorityCheckCategory.DIAGNOSTIC,
+            state.reconciliation_clean is True,
+            "reconciliation_not_clean",
+            "Strategy/lifecycle reconciliation cleanliness is diagnostic for risk-reducing exit authority.",
+        ),
+        "safe_state_allows_managed_close": _check(
+            ExitAuthorityCheckCategory.DIAGNOSTIC,
+            state.safe_state_allows_managed_close is not False,
+            "safe_state_managed_close_warning",
+            "Only explicit Safe-State hard halt blocks this contract.",
+        ),
+        "guardian_allows_exact_close": _check(
+            ExitAuthorityCheckCategory.DIAGNOSTIC,
+            state.guardian_allows_exact_close is not False,
+            "guardian_exact_close_warning",
+            "Guardian attribution is diagnostic unless current broker risk is ambiguous.",
+        ),
+        "bsa_close_authority": _check(
+            ExitAuthorityCheckCategory.DIAGNOSTIC,
+            state.bsa_managed_risk_reducing_close is not False or state.bsa_degraded_exact_close_ready is True,
+            "bsa_close_authority_warning",
+            "BSA is diagnostic in V1.1 unless separate broker/session safety facts are unsafe.",
+        ),
+    }
     for name, value in state.diagnostics.items():
         checks[str(name)] = _check(
             ExitAuthorityCheckCategory.DIAGNOSTIC,
@@ -536,26 +693,17 @@ def _coerce_current_state(
         return None, exc
 
 
-def _close_action_reduces_position(intent: ExitIntent) -> bool:
-    return (
-        intent.position_side == PositionSide.LONG
-        and intent.close_action == CloseAction.SELL
-        or intent.position_side == PositionSide.SHORT
-        and intent.close_action == CloseAction.BUY
-    )
-
-
 def _validate_exit_intent_invariants(intent: ExitIntent) -> None:
-    _validate_safety_booleans(intent)
+    _validate_intent_safety_flags(intent)
     if intent.close_qty > intent.owned_qty:
         raise TrackBModelError("close_qty must be less than or equal to owned_qty.")
     expected_remaining = intent.owned_qty - intent.close_qty
     if intent.remaining_qty_after != expected_remaining:
         raise TrackBModelError("remaining_qty_after must equal owned_qty - close_qty.")
-    if intent.position_side == PositionSide.LONG and intent.close_action != CloseAction.SELL:
-        raise TrackBModelError("long positions require SELL close_action.")
-    if intent.position_side == PositionSide.SHORT and intent.close_action != CloseAction.BUY:
-        raise TrackBModelError("short positions require BUY close_action.")
+    if not _close_action_reduces_position(intent):
+        side = "long" if intent.position_side == PositionSide.LONG else "short"
+        action = "SELL" if intent.position_side == PositionSide.LONG else "BUY"
+        raise TrackBModelError(f"{side} positions require {action} close_action.")
     if intent.allow_reverse is True:
         raise TrackBModelError("reverse/flip exits must be modeled separately and are forbidden in ExitIntent.")
     is_partial = expected_remaining > 0
@@ -569,15 +717,106 @@ def _validate_exit_intent_invariants(intent: ExitIntent) -> None:
         raise TrackBModelError("FULL_CLOSE requires remaining_qty_after equal to zero.")
 
 
-def _validate_safety_booleans(value: Any) -> None:
-    if getattr(value, "live_money_eligible") is not False:
-        raise TrackBModelError("live_money_eligible must be explicit false.")
-    if getattr(value, "paper_proof_invoked") is not False:
+def _validate_intent_safety_flags(intent: ExitIntent) -> None:
+    if intent.paper_proof_invoked is not False:
         raise TrackBModelError("paper_proof_invoked must be explicit false.")
-    if getattr(value, "broad_flatten_allowed") is not False:
+    if intent.broad_flatten_allowed is not False:
         raise TrackBModelError("broad_flatten_allowed must be explicit false.")
-    if getattr(value, "global_flatten_allowed") is not False:
+    if intent.global_flatten_allowed is not False:
         raise TrackBModelError("global_flatten_allowed must be explicit false.")
+    if intent.live_money_eligible is True and not (
+        intent.execution_domain == ExecutionDomain.TRACK_B_LIVE and intent.live_money_allowed is True
+    ):
+        raise TrackBModelError("live_money_eligible requires TRACK_B_LIVE and live_money_allowed=true.")
+
+
+def _validate_state_safety_flags(state: ExitAuthorityCurrentState) -> None:
+    if state.paper_proof_invoked is not False:
+        raise TrackBModelError("paper_proof_invoked must be explicit false.")
+    if state.broad_flatten_allowed is not False:
+        raise TrackBModelError("broad_flatten_allowed must be explicit false.")
+    if state.global_flatten_allowed is not False:
+        raise TrackBModelError("global_flatten_allowed must be explicit false.")
+    if state.live_money_eligible is True and not (
+        state.execution_domain == ExecutionDomain.TRACK_B_LIVE and state.live_money_allowed is True
+    ):
+        raise TrackBModelError("live_money_eligible requires TRACK_B_LIVE and live_money_allowed=true.")
+
+
+def _validate_output_safety_booleans(value: ExitAuthorityDecision) -> None:
+    if value.paper_proof_invoked is not False:
+        raise TrackBModelError("paper_proof_invoked must be explicit false.")
+    if value.broad_flatten_allowed is not False:
+        raise TrackBModelError("broad_flatten_allowed must be explicit false.")
+    if value.global_flatten_allowed is not False:
+        raise TrackBModelError("global_flatten_allowed must be explicit false.")
+
+
+def _combined_attribution_status(intent: ExitIntent, state: ExitAuthorityCurrentState) -> AttributionStatus:
+    statuses = (intent.attribution.status, state.attribution_status)
+    if AttributionStatus.ATTRIBUTED in statuses:
+        return AttributionStatus.ATTRIBUTED
+    if AttributionStatus.PARTIALLY_ATTRIBUTED in statuses:
+        return AttributionStatus.PARTIALLY_ATTRIBUTED
+    return AttributionStatus.UNATTRIBUTED
+
+
+def _attribution_diagnostics(intent: ExitIntent, state: ExitAuthorityCurrentState) -> dict[str, Any]:
+    return {
+        "intent_attribution_status": intent.attribution.status.value,
+        "state_attribution_status": state.attribution_status.value,
+        "lifecycle_id": intent.attribution.lifecycle_id,
+        "trade_id": intent.attribution.trade_id,
+        "strategy_id": intent.attribution.strategy_id,
+        "lane_id": intent.attribution.lane_id,
+        "state": dict(state.attribution_diagnostics),
+        "blocks_authority": False,
+    }
+
+
+def _same_contract_unknown_order_degraded(state: ExitAuthorityCurrentState) -> bool:
+    return (
+        state.same_contract_unknown_order_count > 0
+        and state.same_contract_unknown_order_over_close_ruled_out is True
+        and state.same_contract_unknown_order_could_over_close is False
+    )
+
+
+def _live_money_allowed(intent: ExitIntent, state: ExitAuthorityCurrentState) -> bool:
+    if intent.paper_proof_invoked or state.paper_proof_invoked:
+        return False
+    live_requested = bool(intent.live_money_eligible or state.live_money_eligible)
+    if not live_requested:
+        return True
+    return (
+        intent.execution_domain == ExecutionDomain.TRACK_B_LIVE
+        and state.execution_domain == ExecutionDomain.TRACK_B_LIVE
+        and intent.live_money_allowed is True
+        and state.live_money_allowed is True
+    )
+
+
+def _close_action_reduces_position(intent: ExitIntent) -> bool:
+    return (
+        intent.position_side == PositionSide.LONG
+        and intent.close_action == CloseAction.SELL
+        or intent.position_side == PositionSide.SHORT
+        and intent.close_action == CloseAction.BUY
+    )
+
+
+def _normalize_execution_domain(value: ExecutionDomain | str) -> ExecutionDomain:
+    try:
+        return value if isinstance(value, ExecutionDomain) else ExecutionDomain(str(value).strip().upper())
+    except ValueError as exc:
+        raise TrackBModelError("execution_domain must be TRACK_B_PAPER or TRACK_B_LIVE.") from exc
+
+
+def _normalize_attribution_status(value: AttributionStatus | str) -> AttributionStatus:
+    try:
+        return value if isinstance(value, AttributionStatus) else AttributionStatus(str(value).strip().upper())
+    except ValueError as exc:
+        raise TrackBModelError("attribution_status is not valid.") from exc
 
 
 def _normalize_position_side(value: PositionSide | str) -> PositionSide:
@@ -592,6 +831,13 @@ def _normalize_close_action(value: CloseAction | str) -> CloseAction:
         return value if isinstance(value, CloseAction) else CloseAction(str(value).strip().upper())
     except ValueError as exc:
         raise TrackBModelError("close_action must be BUY or SELL.") from exc
+
+
+def _normalize_close_qty_source(value: CloseQtySource | str) -> CloseQtySource:
+    try:
+        return value if isinstance(value, CloseQtySource) else CloseQtySource(str(value).strip().upper())
+    except ValueError as exc:
+        raise TrackBModelError("close_qty_source is not valid.") from exc
 
 
 def _normalize_exit_type(value: ExitType | str) -> ExitType:
@@ -639,6 +885,27 @@ def _normalize_artifact_ref(value: SourceArtifactRef | Mapping[str, Any]) -> Sou
     if not isinstance(value, Mapping):
         raise TrackBModelError("source_artifact_refs must contain mappings or SourceArtifactRef values.")
     return SourceArtifactRef(**dict(value))
+
+
+def _normalize_attribution(intent: ExitIntent) -> ExitAttribution:
+    if isinstance(intent.attribution, ExitAttribution):
+        return intent.attribution
+    if isinstance(intent.attribution, Mapping):
+        base = dict(intent.attribution)
+    else:
+        base = {}
+    base.setdefault("lifecycle_id", intent.lifecycle_id)
+    base.setdefault("trade_id", intent.trade_id)
+    base.setdefault("strategy_id", intent.strategy_id)
+    base.setdefault("lane_id", intent.lane_id)
+    return ExitAttribution(**base)
+
+
+def _optional_id(value: str | None) -> str | None:
+    if value is None:
+        return None
+    normalized = str(value).strip()
+    return normalized or None
 
 
 def _mapping(value: Any) -> Mapping[str, Any]:
