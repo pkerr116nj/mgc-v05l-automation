@@ -564,6 +564,51 @@ class _HandshakeFailureTransport:
         self.disconnected = True
 
 
+def _submit_client_available_preflight(**kwargs: object) -> dict[str, object]:
+    config = kwargs["config"]
+    return {
+        "classification": "BROKER_SUBMIT_CLIENT_AVAILABLE",
+        "host": config.host,
+        "port": int(config.port),
+        "client_id": int(config.client_id),
+        "account_id": config.account_id,
+        "selected_account_id": config.account_id,
+        "read_only": True,
+        "submit_attempted": False,
+        "broker_state_mutated": False,
+        "connected": True,
+        "account_visible": True,
+        "retryable": False,
+        "failure_code": None,
+        "failure_message": None,
+    }
+
+
+def _submit_client_502_preflight(**kwargs: object) -> dict[str, object]:
+    config = kwargs["config"]
+    return {
+        "classification": "BROKER_SUBMIT_CLIENT_UNAVAILABLE_RETRYABLE",
+        "host": config.host,
+        "port": int(config.port),
+        "client_id": int(config.client_id),
+        "account_id": config.account_id,
+        "selected_account_id": None,
+        "read_only": True,
+        "submit_attempted": False,
+        "broker_state_mutated": False,
+        "connected": False,
+        "account_visible": False,
+        "retryable": True,
+        "failure_code": 502,
+        "failure_message": "IBKR submit-client handshake failed for client 10940: 502 Couldn't connect to TWS",
+        "latest_error": {
+            "code": 502,
+            "message": "Couldn't connect to TWS",
+            "request_id": -1,
+        },
+    }
+
+
 def _approved_runtime_metadata(
     *,
     strategy_id: str,
@@ -2394,7 +2439,8 @@ def test_direct_bridge_submit_blocked_without_snapshot(tmp_path: Path) -> None:
             manual_frozen_preview_path=manual_bundle,
             approval_digest="digest",
             approval_phrase="phrase",
-        )
+        ),
+        submit_client_availability_preflight=_submit_client_available_preflight,
     )
 
     assert artifacts.classification == "PAPER_STRATEGY_INTENT_BLOCKED"
@@ -2416,7 +2462,8 @@ def test_direct_bridge_submit_blocked_on_snapshot_target_mismatch(tmp_path: Path
             manual_frozen_preview_path=tmp_path / "frozen_preview.json",
             approval_digest="digest",
             approval_phrase="phrase",
-        )
+        ),
+        submit_client_availability_preflight=_submit_client_available_preflight,
     )
 
     assert artifacts.classification == "PAPER_STRATEGY_INTENT_BLOCKED"
@@ -2438,7 +2485,8 @@ def test_direct_bridge_submit_blocked_when_supervisor_not_trade_capable(tmp_path
             manual_frozen_preview_path=tmp_path / "frozen_preview.json",
             approval_digest="digest",
             approval_phrase="phrase",
-        )
+        ),
+        submit_client_availability_preflight=_submit_client_available_preflight,
     )
 
     assert artifacts.classification == "PAPER_STRATEGY_INTENT_BLOCKED"
@@ -2505,7 +2553,8 @@ def test_lifecycle_validation_entry_uses_dedicated_authority_not_runtime_start_g
                 "paper_only": True,
                 "live_money_eligible": False,
             },
-        )
+        ),
+        submit_client_availability_preflight=_submit_client_available_preflight,
     )
 
     validation = artifacts.report["pre_action_snapshot_validation"]
@@ -2778,6 +2827,7 @@ def test_lifecycle_validation_entry_reaches_submit_boundary_with_current_readine
             },
         ),
         transport_factory=_transport_factory,
+        submit_client_availability_preflight=_submit_client_available_preflight,
         sleep_fn=lambda _seconds: None,
     )
 
@@ -3100,7 +3150,8 @@ def test_leak_test_caller_requires_valid_authorization(tmp_path: Path) -> None:
                 "paper_only": True,
                 "live_money_eligible": False,
             },
-        )
+        ),
+        submit_client_availability_preflight=_submit_client_available_preflight,
     )
 
     checks = {row["name"]: row for row in artifacts.report["preflight_checks"]}
@@ -3138,7 +3189,8 @@ def test_leak_test_caller_with_valid_authorization_satisfies_manual_bundle_gate(
                 "paper_only": True,
                 "live_money_eligible": False,
             },
-        )
+        ),
+        submit_client_availability_preflight=_submit_client_available_preflight,
     )
 
     checks = {row["name"]: row for row in artifacts.report["preflight_checks"]}
@@ -3258,7 +3310,8 @@ def test_leak_test_caller_uses_lifecycle_validation_entry_authority_without_pre_
                 "paper_only": True,
                 "live_money_eligible": False,
             },
-        )
+        ),
+        submit_client_availability_preflight=_submit_client_available_preflight,
     )
 
     validation = artifacts.report["pre_action_snapshot_validation"]
@@ -3880,6 +3933,7 @@ def test_leak_test_submit_handshake_failure_reports_paper_connection_config(tmp_
         ),
         transport_factory=_HandshakeFailureTransport,
         sleep_fn=lambda _seconds: None,
+        submit_client_availability_preflight=_submit_client_available_preflight,
     )
 
     report = artifacts.report
@@ -3982,6 +4036,86 @@ def test_lifecycle_validation_entry_502_blocks_as_broker_unavailable_retryable_b
     assert artifacts.report["lifecycle_validation_failed"] is False
 
 
+def test_lifecycle_validation_entry_submit_client_502_blocks_before_transport(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    auth_path, digest = _write_leak_authorization(tmp_path)
+    governance_status = _healthy_lane_governance()
+    governance_status["generated_at"] = "2999-01-01T00:00:00+00:00"
+    governance_status["strategies"] = [governance_status["selected_strategy"]]
+    _write_runtime_files(tmp_path, governance_status=governance_status)
+    _write_phase1_reconciliation(tmp_path)
+    _write_fresh_broker_truth(tmp_path)
+    _write_strategy_bridge_snapshot(
+        tmp_path,
+        target_identity={
+            "strategy_id": "gc_1x_asia_london_participation__asia_london_long_v5",
+            "lane_id": "gc_1x_asia_london_participation__asia_london_long_v5",
+            "symbol": "GC",
+            "contract_month": "202606",
+            "action": "BUY",
+            "quantity": "1.0",
+            "intent_type": "BUY_TO_OPEN",
+            "caller_path": "track_b_paper_leak_test_apply",
+        },
+    )
+    monkeypatch.setattr(
+        bridge_module,
+        "evaluate_paper_strategy_exposure_gate",
+        lambda **_kwargs: _healthy_exposure(),
+    )
+    transport_called = False
+
+    def _transport_factory(**kwargs: object) -> _HandshakeFailureTransport:
+        nonlocal transport_called
+        transport_called = True
+        return _HandshakeFailureTransport(**kwargs)
+
+    artifacts = run_ibkr_paper_strategy_bridge(
+        config=_config(
+            tmp_path,
+            strategy_id="gc_1x_asia_london_participation__asia_london_long_v5",
+            symbol="GC",
+            contract_month="202606",
+            client_id=10940,
+            submit=True,
+            caller_path="track_b_paper_leak_test_apply",
+            leak_test_authorization_path=auth_path,
+            leak_test_authorization_digest=digest,
+            caller_metadata={
+                "caller_type": "track_b_paper_leak_test",
+                "lane_id": "gc_1x_asia_london_participation__asia_london_long_v5",
+                "strategy_id": "asia_london_participation_core_v1__GC",
+                "route_destination": "ibkr_paper_bridge_submit_capable",
+                "intent_type": "BUY_TO_OPEN",
+                "intent_action": "BUY",
+                "account_id": "DUM882026",
+                "mode": "PAPER",
+                "host": "127.0.0.1",
+                "port": 7497,
+                "local_symbol": "GCM6",
+                "paper_only": True,
+                "live_money_eligible": False,
+            },
+        ),
+        transport_factory=_transport_factory,
+        submit_client_availability_preflight=_submit_client_502_preflight,
+        sleep_fn=lambda _seconds: None,
+    )
+
+    assert transport_called is False
+    assert artifacts.classification == "PAPER_STRATEGY_BROKER_SUBMIT_CLIENT_UNAVAILABLE_RETRYABLE"
+    assert artifacts.report["submit_client_availability_blocker"] == "broker_submit_client_unavailable_retryable"
+    assert artifacts.report["submit_client_availability"]["classification"] == "BROKER_SUBMIT_CLIENT_UNAVAILABLE_RETRYABLE"
+    assert artifacts.report["submit_client_availability"]["client_id"] == 10940
+    assert artifacts.report["submit_client_availability"]["failure_code"] == 502
+    assert artifacts.report["submit_attempted"] is False
+    assert artifacts.report["strategy_authority_failed"] is False
+    assert artifacts.report["entry_authority_failed"] is False
+    assert artifacts.report["lifecycle_validation_failed"] is False
+
+
 def test_lifecycle_validation_entry_broker_available_reaches_existing_submit_path(tmp_path: Path) -> None:
     auth_path, digest = _write_leak_authorization(tmp_path)
     governance_status = _healthy_lane_governance()
@@ -4038,6 +4172,7 @@ def test_lifecycle_validation_entry_broker_available_reaches_existing_submit_pat
             },
         ),
         transport_factory=_transport_factory,
+        submit_client_availability_preflight=_submit_client_available_preflight,
         sleep_fn=lambda _seconds: None,
     )
 

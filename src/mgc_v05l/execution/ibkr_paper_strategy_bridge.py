@@ -12,7 +12,7 @@ import uuid
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, Mapping
 
 from ..app.shared_strategy_identities import get_shared_strategy_identity
 from ..brokers.ibkr import IbkrClient, IbkrSession, build_default_ibkr_order_id_policy
@@ -207,6 +207,14 @@ _BROKER_AVAILABILITY_AVAILABLE = "BROKER_AVAILABLE"
 _BROKER_AVAILABILITY_RETRYABLE_BLOCK = "broker_unavailable_retryable"
 _BROKER_AVAILABILITY_FATAL_BLOCK = "broker_unavailable_fatal"
 _BROKER_AVAILABILITY_UNKNOWN_BLOCK = "broker_availability_unknown"
+_BROKER_SUBMIT_CLIENT_AVAILABLE = "BROKER_SUBMIT_CLIENT_AVAILABLE"
+_BROKER_SUBMIT_CLIENT_UNAVAILABLE_RETRYABLE = "BROKER_SUBMIT_CLIENT_UNAVAILABLE_RETRYABLE"
+_BROKER_SUBMIT_CLIENT_UNAVAILABLE_FATAL = "BROKER_SUBMIT_CLIENT_UNAVAILABLE_FATAL"
+_BROKER_SUBMIT_CLIENT_AVAILABILITY_UNKNOWN = "BROKER_SUBMIT_CLIENT_AVAILABILITY_UNKNOWN"
+_BROKER_SUBMIT_CLIENT_RETRYABLE_BLOCK = "broker_submit_client_unavailable_retryable"
+_BROKER_SUBMIT_CLIENT_FATAL_BLOCK = "broker_submit_client_unavailable_fatal"
+_BROKER_SUBMIT_CLIENT_UNKNOWN_BLOCK = "broker_submit_client_availability_unknown"
+_BROKER_SUBMIT_CLIENT_RETRYABLE_ERROR_CODES = {326, 502, 504, 1100, 1101, 1102, 1300}
 _LIFECYCLE_VALIDATION_BROKER_RISK_BLOCKER = "BROKER_RISK_BLOCKER"
 _LIFECYCLE_VALIDATION_LIVE_OR_PROOF_BLOCKER = "LIVE_OR_PROOF_BLOCKER"
 _LIFECYCLE_VALIDATION_ACCOUNT_DOMAIN_BLOCKER = "ACCOUNT_DOMAIN_BLOCKER"
@@ -586,6 +594,7 @@ def run_ibkr_paper_strategy_bridge(
     module_loader: Callable[[str], Any] | None = None,
     sleep_fn: Callable[[float], None] = time.sleep,
     stack_provider: Callable[[], list[Any]] = inspect.stack,
+    submit_client_availability_preflight: Callable[..., dict[str, Any]] | None = None,
 ) -> IbkrPaperStrategyBridgeArtifacts:
     started_at = datetime.now(timezone.utc)
     audit_events: list[dict[str, Any]] = []
@@ -872,6 +881,60 @@ def run_ibkr_paper_strategy_bridge(
                     report=report,
                     audit_events=audit_events,
                 )
+            if config.submit:
+                submit_client_availability = (
+                    submit_client_availability_preflight
+                    or _submit_client_availability_preflight
+                )(
+                    config=config,
+                    transport_factory=transport_factory,
+                    module_loader=module_loader,
+                    sleep_fn=sleep_fn,
+                )
+                submit_client_blocker = _submit_client_availability_boundary_blocker(submit_client_availability)
+                if submit_client_blocker:
+                    detail = (
+                        "Submit-client availability blocked final PAPER lifecycle-validation submit boundary: "
+                        f"{submit_client_availability.get('classification')}."
+                    )
+                    _record_bridge_audit(
+                        audit_events,
+                        event_type="submit_client_availability_blocked",
+                        detail=detail,
+                        config=config,
+                        extra={
+                            "submit_client_availability": submit_client_availability,
+                            "submit_client_availability_blocker": submit_client_blocker,
+                        },
+                    )
+                    report = _pre_runtime_blocked_report(
+                        config=config,
+                        started_at=started_at,
+                        intent=intent,
+                        caller_gate=caller_gate,
+                        environment_lock=environment_lock,
+                        monitor_status=monitor_status,
+                        governance_status=governance_status,
+                        exposure_status=exposure_status,
+                        preflight_checks=static_checks,
+                        detail=detail,
+                        pre_action_snapshot_validation=pre_action_snapshot_validation,
+                        runtime_control_plane_authorization=runtime_control_plane_authorization,
+                    )
+                    report["classification"] = f"PAPER_STRATEGY_{submit_client_blocker.upper()}"
+                    report["submit_client_availability"] = submit_client_availability
+                    report["submit_client_availability_blocker"] = submit_client_blocker
+                    report["primary_blocker"] = submit_client_blocker
+                    report["submit_attempted"] = False
+                    report["broker_state_mutated"] = False
+                    report["strategy_authority_failed"] = False
+                    report["entry_authority_failed"] = False
+                    report["lifecycle_validation_failed"] = False
+                    return IbkrPaperStrategyBridgeArtifacts(
+                        classification=str(report["classification"]),
+                        report=report,
+                        audit_events=audit_events,
+                    )
     try:
         runtime = _build_runtime(config=config, transport_factory=transport_factory, module_loader=module_loader)
         runtime.transport.connect()
@@ -1827,6 +1890,140 @@ def _broker_availability_boundary_blocker(broker_availability: Mapping[str, Any]
     if classification == "BROKER_UNAVAILABLE_FATAL":
         return _BROKER_AVAILABILITY_FATAL_BLOCK
     return _BROKER_AVAILABILITY_UNKNOWN_BLOCK
+
+
+def _submit_client_availability_preflight(
+    *,
+    config: IbkrPaperStrategyBridgeConfig,
+    transport_factory: Callable[..., Any],
+    module_loader: Callable[[str], Any] | None,
+    sleep_fn: Callable[[float], None],
+) -> dict[str, Any]:
+    generated_at = datetime.now(timezone.utc)
+    runtime: _Runtime | None = None
+    try:
+        runtime = _build_runtime(config=config, transport_factory=transport_factory, module_loader=module_loader)
+        runtime.transport.connect()
+        _start_runtime(runtime)
+        if not _wait_for_connection_ready(
+            transport=runtime.transport,
+            collector=runtime.collector,
+            timeout_seconds=config.timeout_seconds,
+            sleep_fn=sleep_fn,
+        ):
+            latest_error = _latest_submit_client_error(runtime)
+            return _submit_client_availability_report(
+                config=config,
+                classification=_submit_client_unavailable_classification(latest_error),
+                generated_at=generated_at,
+                runtime=runtime,
+                latest_error=latest_error,
+                failure_message=_submit_client_failure_message(latest_error, config=config),
+            )
+        selected_account_id = _collect_managed_account_context(
+            config=_position_like_config(config),
+            runtime=runtime,
+            sleep_fn=sleep_fn,
+        )
+        return _submit_client_availability_report(
+            config=config,
+            classification=_BROKER_SUBMIT_CLIENT_AVAILABLE,
+            generated_at=generated_at,
+            runtime=runtime,
+            selected_account_id=selected_account_id,
+        )
+    except Exception as exc:
+        latest_error = _latest_submit_client_error(runtime)
+        return _submit_client_availability_report(
+            config=config,
+            classification=_submit_client_unavailable_classification(latest_error),
+            generated_at=generated_at,
+            runtime=runtime,
+            latest_error=latest_error,
+            failure_message=str(exc),
+        )
+    finally:
+        if runtime is not None:
+            try:
+                runtime.transport.disconnect()
+            except Exception:
+                pass
+
+
+def _submit_client_availability_report(
+    *,
+    config: IbkrPaperStrategyBridgeConfig,
+    classification: str,
+    generated_at: datetime,
+    runtime: _Runtime | None,
+    selected_account_id: str | None = None,
+    latest_error: Mapping[str, Any] | None = None,
+    failure_message: str | None = None,
+) -> dict[str, Any]:
+    error = dict(latest_error or {})
+    failure_code = error.get("code")
+    connected = classification == _BROKER_SUBMIT_CLIENT_AVAILABLE
+    return {
+        "classification": classification,
+        "generated_at": generated_at.isoformat(),
+        "host": config.host,
+        "port": int(config.port),
+        "client_id": int(config.client_id),
+        "account_id": config.account_id,
+        "selected_account_id": selected_account_id,
+        "read_only": True,
+        "submit_attempted": False,
+        "broker_state_mutated": False,
+        "connected": connected,
+        "account_visible": bool(selected_account_id and selected_account_id == config.account_id),
+        "retryable": classification == _BROKER_SUBMIT_CLIENT_UNAVAILABLE_RETRYABLE,
+        "failure_code": failure_code,
+        "failure_message": failure_message or error.get("message"),
+        "latest_error": error or None,
+        "connection_diagnostics": _bridge_connection_diagnostics(config=config, runtime=runtime),
+    }
+
+
+def _submit_client_unavailable_classification(latest_error: Mapping[str, Any] | None) -> str:
+    code = _int_or_none((latest_error or {}).get("code"))
+    if code in _BROKER_SUBMIT_CLIENT_RETRYABLE_ERROR_CODES:
+        return _BROKER_SUBMIT_CLIENT_UNAVAILABLE_RETRYABLE
+    return _BROKER_SUBMIT_CLIENT_AVAILABILITY_UNKNOWN
+
+
+def _submit_client_failure_message(
+    latest_error: Mapping[str, Any] | None,
+    *,
+    config: IbkrPaperStrategyBridgeConfig,
+) -> str:
+    if latest_error is not None:
+        message = str(latest_error.get("message") or "").strip()
+        code = latest_error.get("code")
+        return f"IBKR submit-client handshake failed for client {config.client_id}: {code} {message}".strip()
+    return f"IBKR submit-client handshake did not complete within {float(config.timeout_seconds):.1f}s."
+
+
+def _latest_submit_client_error(runtime: _Runtime | None) -> dict[str, Any] | None:
+    collector = getattr(runtime, "collector", None) if runtime is not None else None
+    latest_error_fn = getattr(collector, "latest_error", None)
+    if not callable(latest_error_fn):
+        return None
+    try:
+        error = latest_error_fn(codes=_SEVERE_CONNECTION_ERROR_CODES) or latest_error_fn()
+    except Exception:
+        return None
+    return dict(error) if isinstance(error, Mapping) else None
+
+
+def _submit_client_availability_boundary_blocker(submit_client_availability: Mapping[str, Any]) -> str | None:
+    classification = str(submit_client_availability.get("classification") or "").strip().upper()
+    if classification == _BROKER_SUBMIT_CLIENT_AVAILABLE:
+        return None
+    if classification == _BROKER_SUBMIT_CLIENT_UNAVAILABLE_RETRYABLE:
+        return _BROKER_SUBMIT_CLIENT_RETRYABLE_BLOCK
+    if classification == _BROKER_SUBMIT_CLIENT_UNAVAILABLE_FATAL:
+        return _BROKER_SUBMIT_CLIENT_FATAL_BLOCK
+    return _BROKER_SUBMIT_CLIENT_UNKNOWN_BLOCK
 
 
 def _runtime_caller_metadata_is_authorized(
