@@ -523,6 +523,77 @@ def test_clean_current_flat_authority_beats_historical_managed_review_projection
     assert ods["first_blocker"] is None
 
 
+def test_post_v1_1_close_flat_authority_beats_stale_managed_and_lifecycle_debris(tmp_path: Path) -> None:
+    _seed_sources(tmp_path)
+    lease_path = tmp_path / "outputs/operator_dashboard/runtime/latest_broker_truth_lease.json"
+    lease = json.loads(lease_path.read_text(encoding="utf-8"))
+    lease["track_b_broker_position_count"] = 0
+    lease["track_b_broker_open_order_count"] = 0
+    lease["unknown_broker_open_order_count"] = 0
+    lease["positions"] = [
+        {
+            "account_id": "DUM882026",
+            "local_symbol": "MESM6",
+            "quantity": "-1.0",
+            "source": "stale_pre_close_projection",
+        }
+    ]
+    _write(lease_path, lease)
+    reconciliation_path = (
+        tmp_path / "outputs/reports/track_b_paper_broker_reconciliation/latest_track_b_paper_broker_reconciliation.json"
+    )
+    reconciliation = json.loads(reconciliation_path.read_text(encoding="utf-8"))
+    reconciliation.update(
+        {
+            "classification": "TRACK_B_PAPER_BROKER_RECONCILED",
+            "broker_reconciled": True,
+            "track_b_broker_position_count": 0,
+            "track_b_broker_positions": [],
+            "track_b_broker_open_order_count": 0,
+            "track_b_broker_open_orders": [],
+            "unknown_broker_open_order_count": 0,
+            "unknown_broker_open_orders": [],
+            "current_scope_lifecycle_open_position_count": 0,
+            "current_scope_review_required_count": 0,
+            "track_b_lifecycle_positions": [],
+            "review_required_positions": [],
+        }
+    )
+    _write(reconciliation_path, reconciliation)
+    _write(
+        tmp_path / "outputs/track_b_execution_core/managed_positions/latest_managed_positions.json",
+        {
+            "schema_version": "track_b_managed_positions_v1",
+            "generated_at": NOW.isoformat(),
+            "classification": "REVIEW_REQUIRED",
+            "managed_positions": [
+                {
+                    "classification": "REVIEW_REQUIRED",
+                    "local_symbol": "MESM6",
+                    "lifecycle_id": "reserved_submit_mes_london_open_active_participation_short_old",
+                    "current_hot_path_scope": "HISTORICAL_UNRESOLVED_FULL_AUDIT_ONLY",
+                    "historical_only": True,
+                }
+            ],
+            "historical_review_positions": [
+                {
+                    "local_symbol": "MESM6",
+                    "lifecycle_id": "reserved_submit_mes_london_open_active_participation_short_old",
+                    "historical_only": True,
+                }
+            ],
+            "live_money_eligible": False,
+            "paper_proof_invoked": False,
+        },
+    )
+
+    ods = build_operator_decision_surface(repo_root=tmp_path, now=NOW)
+
+    assert ods["broker_state"] == "FLAT"
+    assert ods["first_blocker"] is None
+    assert ods["next_safe_action"] == "NO_ACTION"
+
+
 def test_stale_reconciliation_still_makes_broker_state_unknown(tmp_path: Path) -> None:
     _seed_sources(tmp_path)
     reconciliation_path = (

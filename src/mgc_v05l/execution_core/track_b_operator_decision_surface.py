@@ -272,26 +272,27 @@ def _broker_state(
     open_order_classification = str(open_order_truth.get("classification") or "")
     if open_order_classification and open_order_classification != "NO_OPEN_ORDERS":
         return "OPEN_ORDERS" if "ORDER" in open_order_classification else "UNKNOWN"
+    reconciliation_classification = str(reconciliation.get("classification") or "")
+    broker_reconciled = (
+        lease.get("broker_reconciled") is True or reconciliation.get("broker_reconciled") is True
+    ) and reconciliation_classification in {"", "TRACK_B_PAPER_BROKER_RECONCILED"}
+    if _current_scope_flat_authority_clean(
+        reconciliation=reconciliation,
+        open_order_truth=open_order_truth,
+        managed_positions=managed_positions,
+        managed_orders=managed_orders,
+        broker_reconciled=broker_reconciled,
+    ):
+        return "FLAT"
     broker_positions = max(
         _count(lease, "track_b_broker_position_count"),
         _count(reconciliation, "track_b_broker_position_count"),
         _nonzero_position_count(lease.get("positions")),
         _nonzero_position_count(reconciliation.get("track_b_broker_positions")),
     )
-    reconciliation_classification = str(reconciliation.get("classification") or "")
-    broker_reconciled = (
-        lease.get("broker_reconciled") is True or reconciliation.get("broker_reconciled") is True
-    ) and reconciliation_classification in {"", "TRACK_B_PAPER_BROKER_RECONCILED"}
     managed_classification = str(managed_positions.get("classification") or "")
     managed_order_classification = str(managed_orders.get("classification") or "")
     if broker_positions == 0:
-        if _current_scope_flat_authority_clean(
-            reconciliation=reconciliation,
-            open_order_truth=open_order_truth,
-            managed_orders=managed_orders,
-            broker_reconciled=broker_reconciled,
-        ):
-            return "FLAT"
         if (
             broker_reconciled
             and managed_classification in {"", "NO_MANAGED_POSITIONS"}
@@ -312,6 +313,7 @@ def _current_scope_flat_authority_clean(
     *,
     reconciliation: Mapping[str, Any],
     open_order_truth: Mapping[str, Any],
+    managed_positions: Mapping[str, Any],
     managed_orders: Mapping[str, Any],
     broker_reconciled: bool,
 ) -> bool:
@@ -337,12 +339,32 @@ def _current_scope_flat_authority_clean(
         return False
     if str(open_order_truth.get("classification") or "") != "NO_OPEN_ORDERS":
         return False
+    if not _managed_positions_current_scope_flat(managed_positions):
+        return False
     managed_order_classification = str(managed_orders.get("classification") or "")
     if managed_order_classification not in {"", "NO_MANAGED_ORDERS"}:
         return False
     if _list(managed_orders.get("managed_orders")):
         return False
     return True
+
+
+def _managed_positions_current_scope_flat(managed_positions: Mapping[str, Any]) -> bool:
+    classification = str(managed_positions.get("classification") or "")
+    rows = _list(managed_positions.get("managed_positions"))
+    if classification in {"", "NO_MANAGED_POSITIONS"} and not rows:
+        return True
+    return bool(rows) and all(_managed_position_row_is_diagnostic_only(row) for row in rows)
+
+
+def _managed_position_row_is_diagnostic_only(row: Any) -> bool:
+    position = _mapping(row)
+    if position.get("historical_only") is True or position.get("diagnostic_only") is True:
+        return True
+    scope = str(position.get("current_hot_path_scope") or position.get("scope") or "").upper()
+    if "HISTORICAL" in scope or "FULL_AUDIT_ONLY" in scope or "DIAGNOSTIC" in scope:
+        return True
+    return False
 
 
 def _submit_allowed(
