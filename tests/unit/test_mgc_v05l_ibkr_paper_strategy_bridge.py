@@ -263,7 +263,35 @@ def _write_canonical_current_scope(tmp_path: Path) -> None:
         {
             "generated_at": "2999-01-01T00:00:00+00:00",
             "classification": "NO_OPEN_ORDERS",
-            "summary": {"open_order_count": 0},
+            "summary": {"open_order_count": 0, "unknown_open_order_count": 0},
+            "open_order_count": 0,
+            "unknown_open_order_count": 0,
+        },
+    )
+    _write_json(
+        tmp_path / "outputs/reports/ibkr_read_only_verification/ibkr_broker_truth_refresh_status.json",
+        {
+            "generated_at": "2999-01-01T00:00:00+00:00",
+            "classification": "BROKER_TRUTH_REFRESH_READY",
+            "positions_complete": True,
+            "open_orders_complete": True,
+            "position_count": 0,
+            "open_order_count": 0,
+            "live_money_eligible": False,
+            "paper_proof_invoked": False,
+        },
+    )
+    _write_json(
+        tmp_path / "outputs/track_b_execution_core/safe_state/latest_runtime_safe_state_envelope.json",
+        {
+            "generated_at": "2999-01-01T00:00:00+00:00",
+            "classification": "SAFE_STATE_NORMAL",
+            "broker_mutation_allowed": True,
+            "submit_allowed": True,
+            "entry_mutation_allowed": True,
+            "observe_only": False,
+            "live_money_eligible": False,
+            "paper_proof_invoked": False,
         },
     )
 
@@ -2348,6 +2376,73 @@ def test_direct_bridge_submit_blocked_when_supervisor_not_trade_capable(tmp_path
     assert "safe_to_start_runtime" in trade_gate["detail"]
 
 
+def test_lifecycle_validation_entry_uses_dedicated_authority_not_runtime_start_gate(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    auth_path, digest = _write_leak_authorization(tmp_path)
+    _write_runtime_files(tmp_path, governance_status=_healthy_lane_governance())
+    _write_strategy_bridge_snapshot(
+        tmp_path,
+        target_identity={
+            "strategy_id": "gc_1x_asia_london_participation__asia_london_long_v5",
+            "symbol": "GC",
+            "contract_month": "202606",
+            "contract": "GCM6",
+            "con_id": "",
+            "action": "BUY",
+            "quantity": "1.0",
+            "caller_path": "track_b_paper_leak_test_apply",
+        },
+        supervisor_classification="SUPERVISOR_RUNTIME_ALREADY_HEALTHY",
+        safe_to_start_runtime=False,
+    )
+    monkeypatch.setattr(
+        bridge_module,
+        "_build_runtime",
+        lambda **_kwargs: (_ for _ in ()).throw(RuntimeError("runtime next gate reached")),
+    )
+    monkeypatch.setattr(
+        bridge_module,
+        "evaluate_paper_strategy_exposure_gate",
+        lambda **_kwargs: _healthy_exposure(),
+    )
+
+    artifacts = run_ibkr_paper_strategy_bridge(
+        config=_config(
+            tmp_path,
+            strategy_id="gc_1x_asia_london_participation__asia_london_long_v5",
+            symbol="GC",
+            contract_month="202606",
+            submit=True,
+            caller_path="track_b_paper_leak_test_apply",
+            leak_test_authorization_path=auth_path,
+            leak_test_authorization_digest=digest,
+            caller_metadata={
+                "caller_type": "track_b_paper_leak_test",
+                "lane_id": "gc_1x_asia_london_participation__asia_london_long_v5",
+                "strategy_id": "asia_london_participation_core_v1__GC",
+                "route_destination": "ibkr_paper_bridge_submit_capable",
+                "intent_type": "BUY_TO_OPEN",
+                "intent_action": "BUY",
+                "account_id": "DUM882026",
+                "mode": "PAPER",
+                "host": "127.0.0.1",
+                "port": 7497,
+                "local_symbol": "GCM6",
+                "paper_only": True,
+                "live_money_eligible": False,
+            },
+        )
+    )
+
+    validation = artifacts.report["pre_action_snapshot_validation"]
+    assert validation["classification"] == "LIFECYCLE_VALIDATION_ENTRY_AUTHORITY_VALID"
+    assert validation["authority_classification"] == "PAPER_LIFECYCLE_VALIDATION_ENTRY_ALLOWED"
+    assert validation["not_runtime_start_authority"] is True
+    assert "runtime next gate reached" in artifacts.report["detail"]
+
+
 def test_runtime_supervised_bridge_reaches_existing_next_gate_with_snapshot(monkeypatch, tmp_path: Path) -> None:
     _write_runtime_files(tmp_path, governance_status=_healthy_lane_governance())
     snapshot = _write_strategy_bridge_snapshot(tmp_path)
@@ -2535,7 +2630,10 @@ def test_explicit_metals_leak_test_flow_bypasses_only_legacy_runtime_loop_govern
     assert "explicit metals-only Leak Test v2 lane flow" in by_name["paper_strategy_governance_submit_gate"]["detail"]
 
 
-def test_leak_test_caller_writes_matching_bridge_pre_action_plan(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+def test_leak_test_caller_uses_lifecycle_validation_entry_authority_without_pre_action_plan(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
     auth_path, digest = _write_leak_authorization(tmp_path)
     _write_runtime_files(tmp_path, governance_status=_healthy_lane_governance())
     _write_strategy_bridge_snapshot(tmp_path)
@@ -2580,11 +2678,10 @@ def test_leak_test_caller_writes_matching_bridge_pre_action_plan(monkeypatch: py
         )
     )
 
-    plan = json.loads(plan_path.read_text(encoding="utf-8"))
     validation = artifacts.report["pre_action_snapshot_validation"]
-    assert plan["classification"] == _PLAN_STRATEGY_BRIDGE_SUBMIT
-    assert plan["proposed_actions"][0]["action_type"] == _ACTION_STRATEGY_BRIDGE_SUBMIT
-    assert validation["classification"] == "PRE_ACTION_SNAPSHOT_VALID"
+    assert not plan_path.exists()
+    assert validation["classification"] == "LIFECYCLE_VALIDATION_ENTRY_AUTHORITY_VALID"
+    assert validation["authority_classification"] == "PAPER_LIFECYCLE_VALIDATION_ENTRY_ALLOWED"
     assert "runtime next gate reached" in artifacts.report["detail"]
 
 

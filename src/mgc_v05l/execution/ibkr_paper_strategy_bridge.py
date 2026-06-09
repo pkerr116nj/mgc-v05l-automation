@@ -75,6 +75,11 @@ from ..execution_core.track_b_pre_action_snapshot_validator import (
     TrackBPreActionSnapshotValidatorConfig,
     validate_track_b_pre_action_snapshot,
 )
+from ..execution_core.track_b_paper_lifecycle_validation_entry_authority import (
+    PAPER_LIFECYCLE_VALIDATION_ENTRY_ALLOWED,
+    PAPER_LIFECYCLE_VALIDATION_ENTRY_DEGRADED_ALLOWED,
+    build_paper_lifecycle_validation_entry_authority_from_repo,
+)
 from ..execution_core.track_b_submit_intent_ownership import (
     DEFAULT_TRACK_B_SUBMIT_INTENT_OWNERSHIP_JSONL,
     DEFAULT_TRACK_B_SUBMIT_INTENT_OWNERSHIP_LATEST_JSON,
@@ -233,6 +238,7 @@ _PLAN_STRATEGY_BRIDGE_SUBMIT = "PLAN_STRATEGY_BRIDGE_SUBMIT"
 _ACTION_STRATEGY_BRIDGE_SUBMIT = "STRATEGY_BRIDGE_SUBMIT"
 _RUNTIME_CONTROL_PLANE_AUTHORIZATION_VALID = "RUNTIME_CONTROL_PLANE_AUTHORIZATION_VALID"
 _RUNTIME_CONTROL_PLANE_AUTHORIZATION_BLOCKED = "RUNTIME_CONTROL_PLANE_AUTHORIZATION_BLOCKED"
+_LIFECYCLE_VALIDATION_ENTRY_AUTHORITY_VALID = "LIFECYCLE_VALIDATION_ENTRY_AUTHORITY_VALID"
 
 
 class IbkrPaperStrategyBridgeError(RuntimeError):
@@ -709,54 +715,96 @@ def run_ibkr_paper_strategy_bridge(
                     audit_events=audit_events,
                 )
         else:
-            pre_action_snapshot_validation = _pre_action_snapshot_validation_for_bridge(
-                config=config,
-                intent=intent,
-                now=started_at,
-            )
-            snapshot_trade_capable = _strategy_bridge_snapshot_trade_capable(pre_action_snapshot_validation)
-            if pre_action_snapshot_validation.get("classification") != PRE_ACTION_SNAPSHOT_VALID or not snapshot_trade_capable.get("passed"):
-                detail = (
-                    "Pre-action Control Plane Snapshot validation blocked direct strategy bridge submit: "
-                    f"{pre_action_snapshot_validation.get('classification')} - "
-                    f"{pre_action_snapshot_validation.get('reason') if snapshot_trade_capable.get('passed') else snapshot_trade_capable.get('detail')}"
-                )
-                _record_bridge_audit(
-                    audit_events,
-                    event_type="strategy_bridge_pre_action_snapshot_blocked",
-                    detail=detail,
+            if _bridge_paper_lifecycle_validation_entry_invocation(config=config, intent=intent):
+                pre_action_snapshot_validation = _paper_lifecycle_validation_entry_authority_for_bridge(
                     config=config,
-                    extra={
-                        "pre_action_snapshot_validation": pre_action_snapshot_validation,
-                        "snapshot_trade_capable": snapshot_trade_capable,
-                    },
+                    intent=intent,
+                    now=started_at,
                 )
+                if pre_action_snapshot_validation.get("classification") not in {
+                    _LIFECYCLE_VALIDATION_ENTRY_AUTHORITY_VALID,
+                    PAPER_LIFECYCLE_VALIDATION_ENTRY_ALLOWED,
+                    PAPER_LIFECYCLE_VALIDATION_ENTRY_DEGRADED_ALLOWED,
+                }:
+                    detail = (
+                        "PAPER lifecycle-validation entry authority blocked direct strategy bridge submit: "
+                        f"{pre_action_snapshot_validation.get('classification')} - "
+                        f"{', '.join(list(pre_action_snapshot_validation.get('block_reasons') or [])) or pre_action_snapshot_validation.get('reason') or 'unknown_reason'}"
+                    )
+                    _record_bridge_audit(
+                        audit_events,
+                        event_type="paper_lifecycle_validation_entry_authority_blocked",
+                        detail=detail,
+                        config=config,
+                        extra={"paper_lifecycle_validation_entry_authority": pre_action_snapshot_validation},
+                    )
+                    return IbkrPaperStrategyBridgeArtifacts(
+                        classification="PAPER_STRATEGY_INTENT_BLOCKED",
+                        report=_pre_runtime_blocked_report(
+                            config=config,
+                            started_at=started_at,
+                            intent=intent,
+                            caller_gate=caller_gate,
+                            environment_lock=environment_lock,
+                            monitor_status=monitor_status,
+                            governance_status=governance_status,
+                            exposure_status=exposure_status,
+                            preflight_checks=static_checks,
+                            detail=detail,
+                            pre_action_snapshot_validation=pre_action_snapshot_validation,
+                            runtime_control_plane_authorization=runtime_control_plane_authorization,
+                        ),
+                        audit_events=audit_events,
+                    )
+            else:
+                pre_action_snapshot_validation = _pre_action_snapshot_validation_for_bridge(
+                    config=config,
+                    intent=intent,
+                    now=started_at,
+                )
+                snapshot_trade_capable = _strategy_bridge_snapshot_trade_capable(pre_action_snapshot_validation)
+                if pre_action_snapshot_validation.get("classification") != PRE_ACTION_SNAPSHOT_VALID or not snapshot_trade_capable.get("passed"):
+                    detail = (
+                        "Pre-action Control Plane Snapshot validation blocked direct strategy bridge submit: "
+                        f"{pre_action_snapshot_validation.get('classification')} - "
+                        f"{pre_action_snapshot_validation.get('reason') if snapshot_trade_capable.get('passed') else snapshot_trade_capable.get('detail')}"
+                    )
+                    _record_bridge_audit(
+                        audit_events,
+                        event_type="strategy_bridge_pre_action_snapshot_blocked",
+                        detail=detail,
+                        config=config,
+                        extra={
+                            "pre_action_snapshot_validation": pre_action_snapshot_validation,
+                            "snapshot_trade_capable": snapshot_trade_capable,
+                        },
+                    )
+                    pre_action_snapshot_validation = {
+                        **pre_action_snapshot_validation,
+                        "snapshot_trade_capable": snapshot_trade_capable,
+                    }
+                    return IbkrPaperStrategyBridgeArtifacts(
+                        classification="PAPER_STRATEGY_INTENT_BLOCKED",
+                        report=_pre_runtime_blocked_report(
+                            config=config,
+                            started_at=started_at,
+                            intent=intent,
+                            caller_gate=caller_gate,
+                            environment_lock=environment_lock,
+                            monitor_status=monitor_status,
+                            governance_status=governance_status,
+                            exposure_status=exposure_status,
+                            preflight_checks=static_checks,
+                            detail=detail,
+                            pre_action_snapshot_validation=pre_action_snapshot_validation,
+                            runtime_control_plane_authorization=runtime_control_plane_authorization,
+                        ),
+                        audit_events=audit_events,
+                    )
                 pre_action_snapshot_validation = {
                     **pre_action_snapshot_validation,
                     "snapshot_trade_capable": snapshot_trade_capable,
                 }
-                return IbkrPaperStrategyBridgeArtifacts(
-                    classification="PAPER_STRATEGY_INTENT_BLOCKED",
-                    report=_pre_runtime_blocked_report(
-                        config=config,
-                        started_at=started_at,
-                        intent=intent,
-                        caller_gate=caller_gate,
-                        environment_lock=environment_lock,
-                        monitor_status=monitor_status,
-                        governance_status=governance_status,
-                        exposure_status=exposure_status,
-                        preflight_checks=static_checks,
-                        detail=detail,
-                        pre_action_snapshot_validation=pre_action_snapshot_validation,
-                        runtime_control_plane_authorization=runtime_control_plane_authorization,
-                    ),
-                    audit_events=audit_events,
-                )
-            pre_action_snapshot_validation = {
-                **pre_action_snapshot_validation,
-                "snapshot_trade_capable": snapshot_trade_capable,
-            }
     try:
         runtime = _build_runtime(config=config, transport_factory=transport_factory, module_loader=module_loader)
         runtime.transport.connect()
@@ -1348,6 +1396,75 @@ def _bridge_direct_invocation(config: IbkrPaperStrategyBridgeConfig) -> bool:
 
 def _bridge_runtime_supervised_invocation(config: IbkrPaperStrategyBridgeConfig) -> bool:
     return str(config.caller_path or "").strip() in _APPROVED_RUNTIME_CALLER_PATHS
+
+
+def _bridge_paper_lifecycle_validation_entry_invocation(
+    *,
+    config: IbkrPaperStrategyBridgeConfig,
+    intent: IbkrPaperStrategyOrderIntent,
+) -> bool:
+    metadata = dict(config.caller_metadata or {})
+    intent_type = str(metadata.get("intent_type") or "").strip().upper()
+    return (
+        str(config.caller_path or "").strip() == _LEAK_TEST_CALLER_PATH
+        and _is_entry_intent(config=config, intent=intent)
+        and intent_type in {"BUY_TO_OPEN", "SELL_TO_OPEN"}
+    )
+
+
+def _paper_lifecycle_validation_entry_authority_for_bridge(
+    *,
+    config: IbkrPaperStrategyBridgeConfig,
+    intent: IbkrPaperStrategyOrderIntent,
+    now: datetime,
+) -> dict[str, Any]:
+    metadata = dict(config.caller_metadata or {})
+    authorization_check = _leak_test_authorization_check(config=config, intent=intent)
+    authorization_artifact = _load_leak_test_authorization(config.leak_test_authorization_path)
+    authority = build_paper_lifecycle_validation_entry_authority_from_repo(
+        repo_root=config.repo_root,
+        execution_domain="TRACK_B_PAPER",
+        mode=config.mode,
+        account_id=config.account_id,
+        symbol=config.symbol or intent.symbol,
+        local_symbol=str(metadata.get("local_symbol") or authorization_artifact.get("local_symbol") or "").strip()
+        or None,
+        con_id=metadata.get("con_id") or authorization_artifact.get("con_id"),
+        action=config.action or intent.action,
+        intent_type=str(metadata.get("intent_type") or "").strip().upper(),
+        quantity=float(config.quantity or intent.quantity or 0.0),
+        paper_only=bool(config.paper_only and intent.paper_only),
+        caller_path=str(config.caller_path or ""),
+        caller_metadata=metadata,
+        authorization_check=authorization_check,
+        authorization_artifact=authorization_artifact,
+        generated_trade_id=str(metadata.get("trade_id") or intent.intent_id or intent.default_intent_id or "").strip()
+        or None,
+        now=now,
+    )
+    if authority.get("classification") in {
+        PAPER_LIFECYCLE_VALIDATION_ENTRY_ALLOWED,
+        PAPER_LIFECYCLE_VALIDATION_ENTRY_DEGRADED_ALLOWED,
+    }:
+        return {
+            **authority,
+            "classification": _LIFECYCLE_VALIDATION_ENTRY_AUTHORITY_VALID,
+            "authority_classification": authority.get("classification"),
+            "valid": True,
+            "reason": (
+                "Dedicated PAPER lifecycle-validation entry authority allowed this controlled entry; "
+                "runtime-start authority is diagnostic only for this caller."
+            ),
+            "control_plane_snapshot_id": "",
+            "shared_truth_refresh_generation_id": "",
+        }
+    return {
+        **authority,
+        "valid": False,
+        "reason": "Dedicated PAPER lifecycle-validation entry authority blocked this controlled entry.",
+        "control_plane_snapshot_id": "",
+        "shared_truth_refresh_generation_id": "",
+    }
 
 
 def _pre_action_snapshot_validation_for_bridge(
