@@ -32,6 +32,10 @@ from mgc_v05l.execution_core.track_b_live_trade_registry import load_live_trade_
 from mgc_v05l.execution_core.track_b_terminal_registry_truth import (
     filter_terminal_superseded_current_rows,
 )
+from mgc_v05l.execution_core.track_b_strategy_attrition_funnel import (
+    events_from_managed_position_registry,
+    try_record_strategy_funnel_events,
+)
 
 
 NO_MANAGED_POSITIONS = "NO_MANAGED_POSITIONS"
@@ -388,6 +392,10 @@ def write_track_b_managed_position_registry(
         with event_log_path.open("a", encoding="utf-8") as handle:
             for event in events:
                 handle.write(json.dumps(event, sort_keys=True) + "\n")
+    try_record_strategy_funnel_events(
+        events_from_managed_position_registry(payload),
+        repo_root=config.repo_root,
+    )
     return output_path, events
 
 

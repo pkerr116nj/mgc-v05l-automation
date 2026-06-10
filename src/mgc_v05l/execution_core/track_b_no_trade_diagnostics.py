@@ -16,6 +16,10 @@ from pathlib import Path
 from typing import Any
 
 from .models import to_jsonable
+from .track_b_strategy_attrition_funnel import (
+    events_from_no_trade_diagnostic,
+    try_record_strategy_funnel_events,
+)
 
 
 NO_TRADE_DIAGNOSTICS_ROOT = Path("outputs/track_b_execution_core/no_trade_diagnostics")
@@ -182,6 +186,7 @@ def write_no_trade_diagnostic(
     finally:
         if tmp_path.exists():
             tmp_path.unlink(missing_ok=True)
+    try_record_strategy_funnel_events(events_from_no_trade_diagnostic(record), repo_root=repo_root)
     return {"latest": latest_path, "jsonl": jsonl_path}
 
 

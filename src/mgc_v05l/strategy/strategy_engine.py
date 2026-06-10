@@ -39,6 +39,12 @@ from ..execution_core.track_b_no_trade_diagnostics import (
     diagnostics_root_from_artifact_dir,
     write_no_trade_diagnostic,
 )
+from ..execution_core.track_b_strategy_attrition_funnel import (
+    events_from_blocked_strategy_intent,
+    events_from_filled_bridge_result,
+    events_from_submit_attempt,
+    try_record_strategy_funnel_events,
+)
 from ..execution_core.track_b_broker_backed_entry_auto_adoption import auto_adopt_broker_backed_entry
 from ..execution_core.track_b_position_management_manifest import (
     DEFAULT_TRACK_B_POSITION_MANAGEMENT_MANIFEST_ROOT,
@@ -618,6 +624,15 @@ class StrategyEngine:
                                 "broker_ack_at": pending.acknowledged_at.isoformat() if pending.acknowledged_at is not None else None,
                                 "broker_order_status": pending.broker_order_status,
                             }
+                            try_record_strategy_funnel_events(
+                                events_from_submit_attempt(
+                                    {
+                                        **live_intent_summary,
+                                        "created_at": pending.submitted_at.isoformat(),
+                                        "broker_order_id": pending.broker_order_id,
+                                    }
+                                )
+                            )
                             events.append(
                                 OrderIntentCreatedEvent(
                                     order_intent_id=maybe_intent.order_intent_id,
@@ -2384,6 +2399,7 @@ class StrategyEngine:
                 self._structured_logger.log_filled_bridge_result(payload)
             if hasattr(self._structured_logger, "write_filled_bridge_result_state"):
                 self._structured_logger.write_filled_bridge_result_state(payload)
+        try_record_strategy_funnel_events(events_from_filled_bridge_result(payload))
         self._latest_live_intent_summary = {
             **self._latest_live_intent_summary,
             "filled_bridge_result": payload,
@@ -2454,6 +2470,7 @@ class StrategyEngine:
         if self._structured_logger is not None:
             self._structured_logger.log_blocked_strategy_intent(payload)
             self._structured_logger.write_blocked_strategy_intent_state(payload)
+        try_record_strategy_funnel_events(events_from_blocked_strategy_intent(payload))
         return payload
 
     def _runtime_alert_dedup_key(self, *parts: object) -> str:

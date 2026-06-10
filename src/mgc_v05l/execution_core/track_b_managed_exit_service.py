@@ -45,6 +45,10 @@ from mgc_v05l.execution_core.track_b_order_adjustment_planner import (
     build_track_b_order_adjustment_plan,
     write_track_b_order_adjustment_plan,
 )
+from mgc_v05l.execution_core.track_b_strategy_attrition_funnel import (
+    events_from_managed_exit_service_status,
+    try_record_strategy_funnel_events,
+)
 
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
@@ -428,7 +432,13 @@ def read_track_b_managed_exit_service_status(
 def write_track_b_managed_exit_service_status(
     *, config: TrackBManagedExitServiceConfig, payload: Mapping[str, Any]
 ) -> Path:
-    return write_json_atomic(config.resolve(config.status_path), to_jsonable(dict(payload)))
+    record = to_jsonable(dict(payload))
+    path = write_json_atomic(config.resolve(config.status_path), record)
+    try_record_strategy_funnel_events(
+        events_from_managed_exit_service_status(record),
+        repo_root=config.repo_root,
+    )
+    return path
 
 
 def _service_payload(
