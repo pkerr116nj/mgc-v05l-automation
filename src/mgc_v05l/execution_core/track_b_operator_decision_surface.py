@@ -31,6 +31,7 @@ BROKER_SESSION_AUTHORITY_PATH = "outputs/operator_dashboard/runtime/latest_broke
 OPEN_ORDER_TRUTH_PATH = "outputs/track_b_execution_core/open_order_truth/latest_open_order_truth.json"
 MANAGED_POSITIONS_PATH = "outputs/track_b_execution_core/managed_positions/latest_managed_positions.json"
 MANAGED_ORDERS_PATH = "outputs/track_b_execution_core/managed_orders/latest_managed_orders.json"
+CURRENT_SCOPE_STATE_PATH = "outputs/track_b_execution_core/current_scope_state/latest_current_scope_state.json"
 OPERATOR_READINESS_REFRESHER_STATUS_PATH = (
     "outputs/reports/track_b_operator_readiness_refresher/latest_track_b_operator_readiness_refresher_status.json"
 )
@@ -93,39 +94,55 @@ def build_operator_decision_surface(
             "CONTROL_PLANE_OWNS_OPERATIONAL_SAFETY",
             "FRESH_CURRENT_SCOPE_TRUTH_BEATS_HISTORICAL_DEBRIS",
             "NEWER_DIAGNOSTICS_DO_NOT_OVERRIDE_HEALTHY_HOT_AUTHORITY",
+            "CURRENT_SCOPE_STATE_OWNS_POST_MUTATION_BROKER_STATE",
         ],
     }
     runtime_live = _runtime_live(sources["runtime_truth"], sources["canonical_readiness"])
-    broker_state = _broker_state(
-        sources["broker_truth_lease"],
-        sources["broker_reconciliation"],
-        sources["open_order_truth"],
-        sources["managed_positions"],
-        sources["managed_orders"],
-    )
-    refresh_failure = _refresh_failure(sources["operator_readiness_refresher"])
-    refresh_failure_superseded = _refresh_failure_superseded_by_current_authority(
-        refresh_failure=refresh_failure,
-        sources=sources,
-        broker_state=broker_state,
-    )
-    submit_allowed = _submit_allowed(
-        sources["canonical_readiness"],
-        sources["operator_readiness_refresher"],
-        refresh_failure=refresh_failure,
-        refresh_failure_superseded=refresh_failure_superseded,
-    )
     authority_health = _authority_health(sources["broker_authority_ownership"], sources["broker_session_authority"])
     control_plane_state = _control_plane_state(sources["control_plane"])
     latest_accepted_signal = _latest_accepted_signal(repo_root=repo_root, now=now)
-    first_blocker = _first_blocker(
-        runtime_live=runtime_live,
-        broker_state=broker_state,
-        submit_allowed=submit_allowed,
-        authority_health=authority_health,
-        control_plane_state=control_plane_state,
-        sources=sources,
-    )
+    current_scope_override = _current_scope_override(sources["current_scope_state"])
+    refresh_failure = _refresh_failure(sources["operator_readiness_refresher"])
+    if current_scope_override is not None:
+        broker_state = current_scope_override["broker_state"]
+        submit_allowed = current_scope_override["submit_allowed"]
+        first_blocker = current_scope_override["first_blocker"]
+        next_safe_action = current_scope_override["next_safe_action"]
+        refresh_failure_superseded = refresh_failure is not None and broker_state == "FLAT"
+    else:
+        broker_state = _broker_state(
+            sources["broker_truth_lease"],
+            sources["broker_reconciliation"],
+            sources["open_order_truth"],
+            sources["managed_positions"],
+            sources["managed_orders"],
+        )
+        refresh_failure_superseded = _refresh_failure_superseded_by_current_authority(
+            refresh_failure=refresh_failure,
+            sources=sources,
+            broker_state=broker_state,
+        )
+        submit_allowed = _submit_allowed(
+            sources["canonical_readiness"],
+            sources["operator_readiness_refresher"],
+            refresh_failure=refresh_failure,
+            refresh_failure_superseded=refresh_failure_superseded,
+        )
+        first_blocker = _first_blocker(
+            runtime_live=runtime_live,
+            broker_state=broker_state,
+            submit_allowed=submit_allowed,
+            authority_health=authority_health,
+            control_plane_state=control_plane_state,
+            sources=sources,
+        )
+        next_safe_action = _next_safe_action(
+            first_blocker=first_blocker,
+            runtime_live=runtime_live,
+            submit_allowed=submit_allowed,
+            authority_health=authority_health,
+            control_plane_state=control_plane_state,
+        )
     ods.update(
         {
             "runtime_live": runtime_live,
@@ -133,15 +150,10 @@ def build_operator_decision_surface(
             "submit_allowed": submit_allowed,
             "first_blocker": first_blocker,
             "latest_accepted_signal": latest_accepted_signal,
-            "next_safe_action": _next_safe_action(
-                first_blocker=first_blocker,
-                runtime_live=runtime_live,
-                submit_allowed=submit_allowed,
-                authority_health=authority_health,
-                control_plane_state=control_plane_state,
-            ),
+            "next_safe_action": next_safe_action,
             "authority_health": authority_health,
             "control_plane_state": control_plane_state,
+            "current_scope_state": current_scope_override,
             "diagnostic_warnings": _diagnostic_warnings(
                 refresh_failure=refresh_failure,
                 refresh_failure_superseded=refresh_failure_superseded,
@@ -178,6 +190,7 @@ def _load_sources(*, repo_root: Path, now: datetime) -> dict[str, SourceArtifact
         "open_order_truth": _read_source(repo_root / OPEN_ORDER_TRUTH_PATH, now=now),
         "managed_positions": _read_source(repo_root / MANAGED_POSITIONS_PATH, now=now),
         "managed_orders": _read_source(repo_root / MANAGED_ORDERS_PATH, now=now),
+        "current_scope_state": _read_source(repo_root / CURRENT_SCOPE_STATE_PATH, now=now),
         "operator_readiness_refresher": _read_source(
             repo_root / OPERATOR_READINESS_REFRESHER_STATUS_PATH,
             now=now,
@@ -666,6 +679,40 @@ def _next_safe_action(
     if code:
         return "WAIT"
     return "OPERATOR_REVIEW_REQUIRED"
+
+
+def _current_scope_override(source: SourceArtifact) -> dict[str, Any] | None:
+    if not source.available:
+        return None
+    payload = source.payload
+    if payload.get("schema_version") != "track_b_current_scope_state_v1":
+        return None
+    classification = str(payload.get("classification") or "")
+    broker_state = str(payload.get("broker_state_for_ods") or "")
+    if broker_state not in BROKER_STATE_VALUES:
+        return None
+    canonical = _mapping(payload.get("canonical_readiness"))
+    first_blocker = payload.get("first_blocker_for_ods")
+    if first_blocker is not None and not isinstance(first_blocker, Mapping):
+        first_blocker = {"code": "current_scope_state_blocked", "detail": str(first_blocker), "source": "current_scope_state"}
+    next_safe_action = str(payload.get("next_safe_action_for_ods") or "")
+    if next_safe_action not in NEXT_SAFE_ACTION_VALUES:
+        next_safe_action = "REFRESH_AUTHORITY"
+    return {
+        "classification": classification,
+        "broker_state": broker_state,
+        "submit_allowed": {
+            "canonical_readiness": canonical.get("classification"),
+            "submit_allowed": canonical.get("submit_allowed") is True,
+            "source": "current_scope_state",
+        },
+        "first_blocker": dict(first_blocker) if isinstance(first_blocker, Mapping) else None,
+        "next_safe_action": next_safe_action,
+        "diagnostics": _list(payload.get("diagnostics")),
+        "source_state": source.source_state,
+        "age_seconds": source.age_seconds,
+        "artifact_path": str(source.path),
+    }
 
 
 def _latest_accepted_signal(*, repo_root: Path, now: datetime) -> dict[str, Any] | None:

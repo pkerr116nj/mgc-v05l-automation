@@ -257,6 +257,46 @@ def test_ods_v1_summarizes_clean_submit_ready_state(tmp_path: Path) -> None:
     assert ods["submit_attempted"] is False
 
 
+def test_ods_prefers_fresh_current_scope_state_over_stale_projection_blockers(tmp_path: Path) -> None:
+    _seed_sources(tmp_path, submit_allowed=True, bsa_new_entry=False)
+    _write(
+        tmp_path / "outputs/track_b_execution_core/current_scope_state/latest_current_scope_state.json",
+        {
+            "schema_version": "track_b_current_scope_state_v1",
+            "generated_at": NOW.isoformat(),
+            "classification": "FLAT",
+            "broker_state_for_ods": "FLAT",
+            "first_blocker_for_ods": None,
+            "next_safe_action_for_ods": "NO_ACTION",
+            "canonical_readiness": {
+                "classification": "READY_SUBMIT_CAPABLE",
+                "submit_allowed": True,
+            },
+            "diagnostics": [
+                {
+                    "code": "shared_truth_stale",
+                    "source": "shared_truth",
+                    "diagnostic_only": True,
+                }
+            ],
+            "live_money_eligible": False,
+            "paper_proof_invoked": False,
+        },
+    )
+
+    ods = build_operator_decision_surface(repo_root=tmp_path, now=NOW)
+
+    assert ods["broker_state"] == "FLAT"
+    assert ods["submit_allowed"] == {
+        "canonical_readiness": "READY_SUBMIT_CAPABLE",
+        "submit_allowed": True,
+        "source": "current_scope_state",
+    }
+    assert ods["first_blocker"] is None
+    assert ods["next_safe_action"] == "NO_ACTION"
+    assert ods["current_scope_state"]["classification"] == "FLAT"
+
+
 def test_degraded_refresher_failure_overrides_submit_and_surfaces_blocker(tmp_path: Path) -> None:
     _seed_sources(tmp_path, submit_allowed=True, bsa_new_entry=True)
     _seed_managed_mes_position(tmp_path)
@@ -636,6 +676,71 @@ def test_post_v1_1_close_flat_authority_beats_stale_managed_and_lifecycle_debris
     assert ods["broker_state"] == "FLAT"
     assert ods["first_blocker"] is None
     assert ods["next_safe_action"] == "NO_ACTION"
+
+
+def test_ods_consumes_current_scope_flat_after_post_close_refresh_degradation(tmp_path: Path) -> None:
+    _seed_sources(tmp_path, submit_allowed=False, bsa_new_entry=False)
+    _write(
+        tmp_path / "outputs/track_b_execution_core/current_scope_state/latest_current_scope_state.json",
+        {
+            "schema_version": "track_b_current_scope_state_v1",
+            "generated_at": NOW.isoformat(),
+            "classification": "FLAT",
+            "broker_state_for_ods": "FLAT",
+            "first_blocker_for_ods": None,
+            "next_safe_action_for_ods": "NO_ACTION",
+            "broker_positions": [],
+            "broker_open_orders": [],
+            "unknown_broker_open_order_count": 0,
+            "canonical_readiness": {
+                "classification": "NOT_READY_DEPENDENCY",
+                "submit_allowed": False,
+            },
+            "diagnostics": [
+                {
+                    "code": "post_mutation_refresh_degraded",
+                    "source": "post_mutation_refresh",
+                    "diagnostic_only": True,
+                },
+                {
+                    "code": "reconciliation_stale",
+                    "source": "reconciliation",
+                    "diagnostic_only": True,
+                },
+            ],
+            "live_money_eligible": False,
+            "paper_proof_invoked": False,
+        },
+    )
+    _write(
+        tmp_path / "outputs/track_b_execution_core/managed_positions/latest_managed_positions.json",
+        {
+            "schema_version": "track_b_managed_positions_v1",
+            "generated_at": NOW.isoformat(),
+            "classification": "OPEN_MANAGED_EXIT_DUE",
+            "managed_positions": [{"local_symbol": "MNQM6", "quantity": "-1"}],
+            "live_money_eligible": False,
+            "paper_proof_invoked": False,
+        },
+    )
+    _write(
+        tmp_path / "outputs/track_b_execution_core/managed_orders/latest_managed_orders.json",
+        {
+            "schema_version": "track_b_managed_orders_v1",
+            "generated_at": NOW.isoformat(),
+            "classification": "POSITION_WITHOUT_CLOSE_ORDER",
+            "managed_orders": [{"local_symbol": "MNQM6", "action": "BUY", "quantity": "1"}],
+            "live_money_eligible": False,
+            "paper_proof_invoked": False,
+        },
+    )
+
+    ods = build_operator_decision_surface(repo_root=tmp_path, now=NOW)
+
+    assert ods["broker_state"] == "FLAT"
+    assert ods["first_blocker"] is None
+    assert ods["next_safe_action"] == "NO_ACTION"
+    assert ods["current_scope_state"]["diagnostics"][0]["code"] == "post_mutation_refresh_degraded"
 
 
 def test_stale_reconciliation_still_makes_broker_state_unknown(tmp_path: Path) -> None:
