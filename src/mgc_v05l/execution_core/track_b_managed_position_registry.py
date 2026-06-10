@@ -1058,7 +1058,6 @@ def _review_required_positions(
         str(item.get("lifecycle_id") or "").strip()
         for item in [
             *_list(reconciliation.get("track_b_lifecycle_positions")),
-            *_list(reconciliation.get("review_required_positions")),
         ]
         if str(item.get("lifecycle_id") or "").strip()
     }
@@ -1067,7 +1066,6 @@ def _review_required_positions(
         for item in [
             *_list(reconciliation.get("track_b_broker_positions")),
             *_list(reconciliation.get("track_b_lifecycle_positions")),
-            *_list(reconciliation.get("review_required_positions")),
             *_list(live_position_status.get("positions")),
             *_list(live_position_status.get("open_positions")),
         ]
@@ -1077,16 +1075,7 @@ def _review_required_positions(
         live_position_status.get("review_required_positions")
     )
     if values:
-        return [
-            value
-            for value in values
-            if not _retryable_unmutated_managed_close_review(value)
-            if _review_position_matches_active_context(
-                value,
-                active_lifecycle_ids=active_lifecycle_ids,
-                active_position_keys=active_position_keys,
-            )
-        ] or ([] if (active_lifecycle_ids or active_position_keys) else values)
+        return [value for value in values if not _retryable_unmutated_managed_close_review(value)]
     return [
         report
         for report in lifecycle_reports
@@ -1117,36 +1106,62 @@ def _classify_review_position_scope(
         str(item.get("lifecycle_id") or "").strip()
         for item in [
             *lifecycle_positions,
-            *_list(reconciliation.get("review_required_positions")),
             *unresolved_ownership,
         ]
         if str(item.get("lifecycle_id") or "").strip()
     }
     current_trade_ids = {
         str(item.get("trade_id") or _mapping(item.get("extra")).get("trade_id") or "").strip()
-        for item in unresolved_ownership
+        for item in [*lifecycle_positions, *unresolved_ownership]
         if str(item.get("trade_id") or _mapping(item.get("extra")).get("trade_id") or "").strip()
     }
     registry = _mapping(reconciliation.get("registry_reconciliation"))
     if registry.get("blocking") is True:
         current_trade_ids.update(str(item).strip() for item in registry.get("review_required_trade_ids") or [] if str(item).strip())
-    current_keys = {
+    current_exposure_keys = {
         key
         for item in [
             *broker_positions,
             *lifecycle_positions,
-            *_list(reconciliation.get("review_required_positions")),
+        ]
+        for key in _current_linkage_keys(item)
+    }
+    explicit_linkage_keys = {
+        key
+        for item in [
             *open_order_states,
             *managed_order_states,
             *unresolved_ownership,
         ]
         for key in _current_linkage_keys(item)
     }
-    linked = bool(
-        (lifecycle_id and lifecycle_id in current_ids)
-        or (trade_id and trade_id in current_trade_ids)
-        or (key and key in current_keys)
+    identity_linked = bool(
+        (lifecycle_id and lifecycle_id in current_ids) or (trade_id and trade_id in current_trade_ids)
     )
+    reconciliation_review_ids = {
+        str(item.get("lifecycle_id") or "").strip()
+        for item in _list(reconciliation.get("review_required_positions"))
+        if str(item.get("lifecycle_id") or "").strip()
+    }
+    reconciliation_review_trade_ids = {
+        str(item.get("trade_id") or _mapping(item.get("extra")).get("trade_id") or "").strip()
+        for item in _list(reconciliation.get("review_required_positions"))
+        if str(item.get("trade_id") or _mapping(item.get("extra")).get("trade_id") or "").strip()
+    }
+    reconciliation_review_linked = bool(
+        (lifecycle_id and lifecycle_id in reconciliation_review_ids)
+        or (trade_id and trade_id in reconciliation_review_trade_ids)
+    )
+    same_key_current_lifecycle = bool(
+        key and any(_position_key(item) == key for item in lifecycle_positions if isinstance(item, Mapping))
+    )
+    has_current_context = bool(current_ids or current_trade_ids or current_exposure_keys or explicit_linkage_keys)
+    if same_key_current_lifecycle and not identity_linked:
+        linked = False
+    elif not has_current_context:
+        linked = reconciliation_review_linked
+    else:
+        linked = bool(identity_linked or (key and (key in explicit_linkage_keys or key in current_exposure_keys)))
     scoped_row = dict(row)
     scoped_row["current_hot_path_scope"] = "CURRENT_SCOPE" if linked else _historical_scope_classification(row, registry)
     scoped_row["current_scope_linked"] = linked

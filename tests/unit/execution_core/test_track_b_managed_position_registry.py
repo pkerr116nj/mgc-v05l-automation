@@ -477,6 +477,35 @@ def test_historical_review_required_same_contract_does_not_pollute_active_matche
     assert payload["managed_positions"][0]["lifecycle_id"] == "current_managed_mnq"
 
 
+def test_reconciliation_review_row_same_contract_does_not_pollute_active_matched_position(tmp_path: Path) -> None:
+    lifecycle = _lifecycle_position(lifecycle_id="current_managed_mnq", bars_since_fill=1)
+    lifecycle["trade_id"] = "current_trade"
+    stale_review = _lifecycle_position(lifecycle_id="old_review_required_mnq", bars_since_fill=99)
+    stale_review["trade_id"] = "old_trade"
+    stale_review["review_required"] = True
+    stale_review["paper_lifecycle_classification"] = "TRACK_B_STRATEGY_PAPER_REVIEW_REQUIRED"
+    _seed_base(
+        tmp_path,
+        broker_positions=[_broker_position()],
+        lifecycle_positions=[lifecycle],
+        review_positions=[stale_review],
+    )
+    _write_lifecycle_report(tmp_path, lifecycle_id=lifecycle["lifecycle_id"], bars_since_fill=1)
+
+    payload = build_track_b_managed_position_registry(
+        config=TrackBManagedPositionRegistryConfig(repo_root=tmp_path),
+        now=NOW,
+    )
+
+    assert payload["classification"] == OPEN_MANAGED_MATCHED
+    assert payload["review_required_positions"] == []
+    assert payload["managed_positions"][0]["lifecycle_id"] == "current_managed_mnq"
+    assert payload["managed_positions"][0]["trade_id"] == "current_trade"
+    assert payload["historical_review_positions"][0]["lifecycle_id"] == "old_review_required_mnq"
+    assert payload["historical_review_positions"][0]["current_scope_linked"] is False
+    assert payload["historical_review_positions"][0]["historical_only"] is True
+
+
 def test_exit_due_from_policy_and_completed_bars(tmp_path: Path) -> None:
     lifecycle = _lifecycle_position(bars_since_fill=3)
     _seed_base(tmp_path, broker_positions=[_broker_position()], lifecycle_positions=[lifecycle])
