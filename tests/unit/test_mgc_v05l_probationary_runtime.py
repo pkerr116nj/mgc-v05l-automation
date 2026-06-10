@@ -8014,6 +8014,82 @@ def test_startup_catchup_signal_is_diagnostic_only_before_readiness_convergence(
     assert latest_diag["extra"]["intended_quantity"] == 1
 
 
+def test_lane_startup_route_hold_uses_minimal_broker_truth_authority(monkeypatch) -> None:
+    lane_runtime = object.__new__(ProbationaryPaperLaneRuntime)
+    lane_runtime._runtime_started_at = datetime(2026, 6, 10, 23, 0, tzinfo=timezone.utc)
+    lane_runtime._startup_route_enable_after_ts = None
+    lane_runtime._startup_route_convergence_source = {}
+
+    monkeypatch.setattr(
+        probationary_runtime_module,
+        "build_track_b_paper_minimal_startup",
+        lambda **kwargs: {
+            "allowed": True,
+            "classification": "PAPER_MINIMAL_STARTUP_ALLOWED",
+            "blockers": [],
+            "warnings": [{"code": "broker_reconciliation_dirty_diagnostic"}],
+        },
+    )
+    monkeypatch.setattr(
+        probationary_runtime_module,
+        "_read_json",
+        lambda path: {
+            "canonical_readiness": "READY_OBSERVATION_ONLY",
+            "generated_at": "2026-06-10T23:01:00+00:00",
+            "readiness_blockers": ["legacy_reconciliation_dirty"],
+            "runtime": {"runtime_ingestion_fresh": False},
+            "phase1_reconciliation": {"classification": "BROKER_TRUTH_SETTLEMENT_TIMEOUT"},
+            "broker_truth_lease": {"lease_state": "INVALIDATED_CONTRADICTION"},
+            "live_money_eligible": False,
+        },
+    )
+
+    bar = _build_bar(datetime(2026, 6, 10, 19, 5, tzinfo=ZoneInfo("America/New_York")))
+
+    assert lane_runtime._startup_route_hold_reason_for_bar(bar) is None
+    source = lane_runtime._startup_route_convergence_source
+    assert source["clean"] is True
+    assert source["legacy_convergence_clean"] is False
+    assert source["diagnostics"]["minimal_startup_warnings"][0]["code"] == "broker_reconciliation_dirty_diagnostic"
+
+
+def test_lane_startup_route_hold_blocks_on_minimal_broker_truth_blocker(monkeypatch) -> None:
+    lane_runtime = object.__new__(ProbationaryPaperLaneRuntime)
+    lane_runtime._runtime_started_at = datetime(2026, 6, 10, 23, 0, tzinfo=timezone.utc)
+    lane_runtime._startup_route_enable_after_ts = None
+    lane_runtime._startup_route_convergence_source = {}
+
+    monkeypatch.setattr(
+        probationary_runtime_module,
+        "build_track_b_paper_minimal_startup",
+        lambda **kwargs: {
+            "allowed": False,
+            "classification": "PAPER_MINIMAL_STARTUP_BLOCKED",
+            "blockers": [{"code": "unknown_open_orders_present"}],
+            "warnings": [],
+        },
+    )
+    monkeypatch.setattr(
+        probationary_runtime_module,
+        "_read_json",
+        lambda path: {
+            "canonical_readiness": "READY_SUBMIT_CAPABLE",
+            "generated_at": "2026-06-10T23:01:00+00:00",
+            "readiness_blockers": [],
+            "runtime": {"runtime_ingestion_fresh": True},
+            "phase1_reconciliation": {"classification": "TRACK_B_PAPER_BROKER_RECONCILED"},
+            "broker_truth_lease": {"lease_state": "ACTIVE"},
+            "live_money_eligible": False,
+        },
+    )
+
+    bar = _build_bar(datetime(2026, 6, 10, 19, 5, tzinfo=ZoneInfo("America/New_York")))
+
+    reason = lane_runtime._startup_route_hold_reason_for_bar(bar)
+    assert reason == "PAPER_STARTUP_BROKER_TRUTH_BLOCKED: unknown_open_orders_present"
+    assert lane_runtime._startup_route_convergence_source["clean"] is False
+
+
 def test_stale_lane_db_to_fresh_artifact_jump_is_diagnostic_only(tmp_path: Path) -> None:
     settings = _build_probationary_settings(tmp_path)
     repositories = RepositorySet(build_engine(settings.database_url))

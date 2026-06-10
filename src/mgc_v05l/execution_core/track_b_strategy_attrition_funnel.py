@@ -37,6 +37,7 @@ STAGES = {
     "risk_fail",
     "governance_pass",
     "governance_fail",
+    "route_hold_diagnostic",
     "submit_attempted",
     "broker_accepted",
     "fill_observed",
@@ -196,6 +197,17 @@ def events_from_no_trade_diagnostic(payload: Mapping[str, Any]) -> list[dict[str
                 pass_fail="FAIL",
                 reason=blocker,
                 blocker_classification="GOVERNANCE_BLOCKED",
+                **common,
+            )
+        )
+    elif final_decision in {"STARTUP_CATCHUP_DIAGNOSTIC_ONLY", "STARTUP_CATCHUP_NOT_ROUTABLE"}:
+        events.append(build_strategy_funnel_event(stage="rule_pass", pass_fail="PASS", **common))
+        events.append(
+            build_strategy_funnel_event(
+                stage="route_hold_diagnostic",
+                pass_fail="DIAGNOSTIC",
+                reason=blocker,
+                blocker_classification=final_decision,
                 **common,
             )
         )

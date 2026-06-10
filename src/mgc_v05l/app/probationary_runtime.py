@@ -120,6 +120,10 @@ from ..execution_core.track_b_live_runtime_environment_watchdog import (
     TrackBLiveRuntimeEnvironmentWatchdogConfig,
     run_track_b_live_runtime_environment_watchdog_if_due,
 )
+from ..execution_core.track_b_paper_minimal_startup import (
+    TrackBPaperMinimalStartupConfig,
+    build_track_b_paper_minimal_startup,
+)
 from ..execution_core.track_b_managed_open_position_maintenance import (
     DEFAULT_TRACK_B_LIVE_POSITION_STATUS_JSON,
     DEFAULT_TRACK_B_MANAGED_OPEN_POSITION_MAINTENANCE_JSON,
@@ -3855,6 +3859,21 @@ class ProbationaryPaperLaneRuntime:
         return self.structured_logger.write_live_timing_state(payload)
 
     def _startup_route_hold_reason_for_bar(self, bar: Bar) -> str | None:
+        del bar
+        convergence = self._startup_readiness_convergence_snapshot()
+        self._startup_route_convergence_source = convergence
+        if convergence.get("clean"):
+            return None
+        blockers = [
+            str(row.get("code") or row.get("detail") or row)
+            for row in list(convergence.get("blockers") or [])
+            if str(row.get("code") or row.get("detail") or row)
+        ]
+        if not blockers:
+            blockers = ["paper_minimal_startup_not_allowed"]
+        return "PAPER_STARTUP_BROKER_TRUTH_BLOCKED: " + ",".join(blockers)
+
+    def _startup_route_hold_legacy_diagnostics_for_bar(self, bar: Bar) -> str | None:
         if self._startup_route_enable_after_ts is None:
             return (
                 "STARTUP_CATCHUP_DIAGNOSTIC_ONLY: startup canonical readiness has "
@@ -3875,6 +3894,10 @@ class ProbationaryPaperLaneRuntime:
 
     def _startup_readiness_convergence_snapshot(self) -> dict[str, Any]:
         repo_root = Path(__file__).resolve().parents[3]
+        minimal = build_track_b_paper_minimal_startup(
+            config=TrackBPaperMinimalStartupConfig(repo_root=repo_root),
+            now=datetime.now(timezone.utc),
+        )
         path = repo_root / "outputs" / "operator_dashboard" / "runtime" / "latest_canonical_readiness.json"
         payload = _read_json(path)
         canonical = str(payload.get("canonical_readiness") or payload.get("state") or "").strip().upper()
@@ -3899,7 +3922,9 @@ class ProbationaryPaperLaneRuntime:
         return {
             "path": str(path),
             "available": bool(payload),
-            "clean": clean,
+            "clean": bool(minimal.get("allowed")),
+            "broker_truth_authority": minimal,
+            "legacy_convergence_clean": clean,
             "canonical_readiness": canonical or None,
             "generated_at": payload.get("generated_at"),
             "generated_after_runtime_start": generated_after_runtime_start,
@@ -3909,6 +3934,19 @@ class ProbationaryPaperLaneRuntime:
             "reconciliation_state": phase1.get("classification"),
             "broker_truth_lease_state": broker_lease.get("lease_state"),
             "live_money_eligible": payload.get("live_money_eligible"),
+            "blockers": list(minimal.get("blockers") or []),
+            "diagnostics": {
+                "minimal_startup_warnings": list(minimal.get("warnings") or []),
+                "legacy_convergence": {
+                    "clean": clean,
+                    "canonical_readiness": canonical or None,
+                    "generated_after_runtime_start": generated_after_runtime_start,
+                    "readiness_blocker_count": len(blockers),
+                    "runtime_ingestion_fresh": runtime.get("runtime_ingestion_fresh"),
+                    "reconciliation_state": phase1.get("classification"),
+                    "broker_truth_lease_state": broker_lease.get("lease_state"),
+                },
+            },
         }
 
     def _maybe_release_startup_route_hold(self, observed_at: datetime) -> None:

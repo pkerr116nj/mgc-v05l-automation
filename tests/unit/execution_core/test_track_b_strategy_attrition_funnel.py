@@ -89,6 +89,30 @@ def test_no_trade_diagnostic_derives_candidate_and_governance_events() -> None:
     assert by_stage["governance_fail"]["blocker_classification"] == "GOVERNANCE_BLOCKED"
 
 
+def test_no_trade_diagnostic_emits_route_hold_diagnostic_event() -> None:
+    events = funnel.events_from_no_trade_diagnostic(
+        {
+            "generated_at": NOW.isoformat(),
+            "bar_timestamp": NOW.isoformat(),
+            "lane_id": "mnq_lane",
+            "symbol": "MNQ",
+            "session": "ASIA_EARLY",
+            "session_allowed": True,
+            "setup_detected": True,
+            "final_decision": "STARTUP_CATCHUP_DIAGNOSTIC_ONLY",
+            "blocker_reason": "STARTUP_CATCHUP_DIAGNOSTIC_ONLY: legacy convergence diagnostic",
+            "order_intent_id": "intent-1",
+            "runtime_identity": {"strategy_family": "paper_active_evidence"},
+        }
+    )
+
+    by_stage = {event["stage"]: event for event in events}
+    assert by_stage["candidate_generated"]["pass_fail"] == "PASS"
+    assert by_stage["rule_pass"]["pass_fail"] == "PASS"
+    assert by_stage["route_hold_diagnostic"]["pass_fail"] == "DIAGNOSTIC"
+    assert by_stage["route_hold_diagnostic"]["blocker_classification"] == "STARTUP_CATCHUP_DIAGNOSTIC_ONLY"
+
+
 def test_blocked_submit_and_fill_and_adoption_events_are_derived() -> None:
     blocked = funnel.events_from_blocked_strategy_intent(
         {
