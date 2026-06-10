@@ -280,6 +280,7 @@ def reconcile_track_b_paper_broker_truth(
         position_match_report=position_match_report,
         runtime_restore_orders=_runtime_restore_known_managed_exit_orders(config.repo_root, config.symbols),
         persisted_known_orders=_persisted_known_managed_exit_orders(config.repo_root, config.symbols),
+        registry_known_orders=_managed_order_registry_known_managed_exit_orders(config),
         config=config,
         now=actual_now,
     )
@@ -913,11 +914,26 @@ def _registry_reconciliation_state(
             for record in records
             if record.trade_id in set(review_trade_ids)
         ]
+        flat_stale_open_record_review = (
+            not broker_positions
+            and not current_scope_lifecycle_positions
+            and not broker_open_orders
+            and _registry_blockers_are_flat_stale_open_records(blockers)
+        )
         return {
             **base,
-            "classification": "REGISTRY_RECONCILIATION_REVIEW_REQUIRED",
-            "detail": "Central trade registry could not map current broker/lifecycle truth to exactly one trade chain.",
-            "blocking": True,
+            "classification": (
+                "REGISTRY_RECONCILIATION_FLAT_WITH_STALE_OPEN_RECORD_REVIEW"
+                if flat_stale_open_record_review
+                else "REGISTRY_RECONCILIATION_REVIEW_REQUIRED"
+            ),
+            "detail": (
+                "Current broker/lifecycle truth is flat; stale central registry open rows are diagnostic cleanup evidence only."
+                if flat_stale_open_record_review
+                else "Central trade registry could not map current broker/lifecycle truth to exactly one trade chain."
+            ),
+            "blocking": not flat_stale_open_record_review,
+            "registry_observability_stale": flat_stale_open_record_review,
             "blockers": blockers,
             "mapped_trade_ids": sorted(mapped_trade_ids),
             "mapped_records": [mapped_records[key] for key in sorted(mapped_records)],
@@ -938,6 +954,13 @@ def _registry_reconciliation_state(
         "superseded_lifecycle_only_records": active_scope["superseded_lifecycle_only_records"],
         "superseded_unmatched_lifecycle_positions": [dict(row) for row in superseded_lifecycle_positions],
     }
+
+
+def _registry_blockers_are_flat_stale_open_records(blockers: Sequence[Mapping[str, Any]]) -> bool:
+    return bool(blockers) and all(
+        str(blocker.get("code") or "") == "REGISTRY_OPEN_TRADE_WITH_FLAT_BROKER_LIFECYCLE_REVIEW_REQUIRED"
+        for blocker in blockers
+    )
 
 
 def _closed_flat_lifecycle_projection_precedence(
@@ -3499,11 +3522,13 @@ def _known_managed_exit_orders(
     now: datetime,
     runtime_restore_orders: Sequence[Mapping[str, Any]] = (),
     persisted_known_orders: Sequence[Mapping[str, Any]] = (),
+    registry_known_orders: Sequence[Mapping[str, Any]] = (),
 ) -> list[dict[str, Any]]:
     declared_orders = _declared_known_managed_exit_orders(lifecycle_status)
     declared_orders.extend(_lifecycle_report_known_managed_exit_orders(lifecycle_status=lifecycle_status, repo_root=config.repo_root))
     declared_orders.extend(dict(row) for row in runtime_restore_orders if isinstance(row, Mapping))
     declared_orders.extend(dict(row) for row in persisted_known_orders if isinstance(row, Mapping))
+    declared_orders.extend(dict(row) for row in registry_known_orders if isinstance(row, Mapping))
     if not declared_orders:
         return []
     matched_positions = [
@@ -3620,6 +3645,57 @@ def _persisted_known_managed_exit_orders(repo_root: Path, symbols: Sequence[str]
         if status in {"CANCELLED", "CANCELED", "REJECTED", "FILLED", "EXPIRED"}:
             continue
         rows.append(dict(item))
+    return rows
+
+
+def _managed_order_registry_known_managed_exit_orders(config: ReconciliationConfig) -> list[dict[str, Any]]:
+    payload = _load_json(config.managed_order_registry_path)
+    rows_payload = payload.get("managed_orders") if isinstance(payload, Mapping) else None
+    if not isinstance(rows_payload, list):
+        return []
+    allowed_symbols = {item.upper() for item in config.symbols}
+    rows: list[dict[str, Any]] = []
+    for item in rows_payload:
+        if not isinstance(item, Mapping):
+            continue
+        if item.get("is_close_order") is not True or item.get("working") is not True:
+            continue
+        symbol = str(item.get("symbol") or "").strip().upper()
+        if symbol and symbol not in allowed_symbols:
+            continue
+        status = str(item.get("broker_status") or item.get("status") or "").strip().upper()
+        if status in {"CANCELLED", "CANCELED", "REJECTED", "FILLED", "EXPIRED", "INACTIVE", "APICANCELLED"}:
+            continue
+        broker_order_id = _order_id_text(item)
+        if not broker_order_id:
+            continue
+        rows.append(
+            {
+                "managed_order_status": "KNOWN_MANAGED_EXIT_ORDER_WORKING",
+                "source": "TRACK_B_MANAGED_ORDER_REGISTRY_KNOWN_MANAGED_EXIT_ORDER",
+                "source_artifact_path": str(config.managed_order_registry_path),
+                "account_id": item.get("account_id") or _nested_mapping(item, "source_order").get("account_id") or config.account,
+                "symbol": symbol or item.get("symbol"),
+                "local_symbol": item.get("local_symbol") or item.get("contract"),
+                "con_id": item.get("con_id"),
+                "action": item.get("action"),
+                "qty": item.get("quantity"),
+                "quantity": item.get("quantity"),
+                "order_type": item.get("order_type"),
+                "limit_price": item.get("limit_price"),
+                "tif": item.get("time_in_force"),
+                "broker_order_id": broker_order_id,
+                "client_id": item.get("client_id"),
+                "perm_id": item.get("perm_id"),
+                "lifecycle_id": item.get("lifecycle_id"),
+                "trade_id": item.get("trade_id"),
+                "strategy_id": item.get("strategy_id"),
+                "lane_id": item.get("lane_id"),
+                "order_intent_id": item.get("ownership_id") or item.get("manifest_id"),
+                "paper_proof_invoked": False,
+                "live_money_eligible": False,
+            }
+        )
     return rows
 
 

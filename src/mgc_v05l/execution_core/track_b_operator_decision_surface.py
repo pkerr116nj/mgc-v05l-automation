@@ -252,7 +252,9 @@ def _broker_state(
     managed_positions_source: SourceArtifact | None = None,
     managed_orders_source: SourceArtifact | None = None,
 ) -> str:
-    if not lease_source.available or not reconciliation_source.available:
+    if not reconciliation_source.available:
+        return "UNKNOWN"
+    if lease_source.source_state in {"MISSING", "INVALID_SCHEMA"}:
         return "UNKNOWN"
     if open_order_truth_source is not None and not open_order_truth_source.available:
         return "UNKNOWN"
@@ -260,30 +262,52 @@ def _broker_state(
         return "UNKNOWN"
     if managed_orders_source is not None and not managed_orders_source.available:
         return "UNKNOWN"
-    lease = lease_source.payload
+    lease = lease_source.payload if lease_source.available else {}
     reconciliation = reconciliation_source.payload
     open_order_truth = open_order_truth_source.payload if open_order_truth_source and open_order_truth_source.available else {}
     managed_positions = managed_positions_source.payload if managed_positions_source and managed_positions_source.available else {}
     managed_orders = managed_orders_source.payload if managed_orders_source and managed_orders_source.available else {}
-    if _count(lease, "unknown_broker_open_order_count") > 0 or _count(reconciliation, "unknown_broker_open_order_count") > 0:
-        return "OPEN_ORDERS"
-    if _count(lease, "track_b_broker_open_order_count") > 0 or _count(reconciliation, "track_b_broker_open_order_count") > 0:
-        return "OPEN_ORDERS"
     open_order_classification = str(open_order_truth.get("classification") or "")
+    open_order_truth_supersedes_lease = open_order_classification == "NO_OPEN_ORDERS" and _generated_at_newer(
+        open_order_truth,
+        lease,
+    )
     if open_order_classification and open_order_classification != "NO_OPEN_ORDERS":
         return "OPEN_ORDERS" if "ORDER" in open_order_classification else "UNKNOWN"
+    if _count(reconciliation, "unknown_broker_open_order_count") > 0:
+        return "OPEN_ORDERS"
+    if _count(reconciliation, "track_b_broker_open_order_count") > 0:
+        return "OPEN_ORDERS"
+    if not open_order_truth_supersedes_lease:
+        if _count(lease, "unknown_broker_open_order_count") > 0:
+            return "OPEN_ORDERS"
+        if _count(lease, "track_b_broker_open_order_count") > 0:
+            return "OPEN_ORDERS"
     reconciliation_classification = str(reconciliation.get("classification") or "")
+    reconciliation_broker_reconciled = (
+        reconciliation.get("broker_reconciled") is True
+        and reconciliation_classification in {"", "TRACK_B_PAPER_BROKER_RECONCILED"}
+    )
     broker_reconciled = (
-        lease.get("broker_reconciled") is True or reconciliation.get("broker_reconciled") is True
+        lease.get("broker_reconciled") is True or reconciliation_broker_reconciled
     ) and reconciliation_classification in {"", "TRACK_B_PAPER_BROKER_RECONCILED"}
     if _current_scope_flat_authority_clean(
         reconciliation=reconciliation,
         open_order_truth=open_order_truth,
         managed_positions=managed_positions,
         managed_orders=managed_orders,
-        broker_reconciled=broker_reconciled,
+        broker_reconciled=reconciliation_broker_reconciled or broker_reconciled,
     ):
         return "FLAT"
+    if not lease_source.available:
+        return "UNKNOWN"
+    if open_order_truth_supersedes_lease and _current_scope_flat_counts(
+        reconciliation=reconciliation,
+        open_order_truth=open_order_truth,
+        managed_positions=managed_positions,
+        managed_orders=managed_orders,
+    ):
+        return "UNKNOWN"
     broker_positions = max(
         _count(lease, "track_b_broker_position_count"),
         _count(reconciliation, "track_b_broker_position_count"),
@@ -307,6 +331,42 @@ def _broker_state(
     if broker_reconciled and owner_classification in {"OWNED_MANAGED_EXPOSURE", "NO_OPEN_EXPOSURE"}:
         return "EXPOSED_MANAGED"
     return "EXPOSED_AMBIGUOUS"
+
+
+def _generated_at_newer(left: Mapping[str, Any], right: Mapping[str, Any]) -> bool:
+    left_at = _parse_dt(left.get("generated_at"))
+    right_at = _parse_dt(right.get("generated_at"))
+    if left_at is None:
+        return False
+    if right_at is None:
+        return True
+    return left_at > right_at
+
+
+def _current_scope_flat_counts(
+    *,
+    reconciliation: Mapping[str, Any],
+    open_order_truth: Mapping[str, Any],
+    managed_positions: Mapping[str, Any],
+    managed_orders: Mapping[str, Any],
+) -> bool:
+    if _count(reconciliation, "track_b_broker_position_count") != 0:
+        return False
+    if _count(reconciliation, "track_b_broker_open_order_count") != 0:
+        return False
+    if _count(reconciliation, "unknown_broker_open_order_count") != 0:
+        return False
+    if _list(reconciliation.get("track_b_broker_positions")):
+        return False
+    if _list(reconciliation.get("track_b_broker_open_orders")):
+        return False
+    if str(open_order_truth.get("classification") or "") != "NO_OPEN_ORDERS":
+        return False
+    if not _managed_positions_current_scope_flat(managed_positions):
+        return False
+    if str(managed_orders.get("classification") or "") not in {"", "NO_MANAGED_ORDERS"}:
+        return False
+    return True
 
 
 def _current_scope_flat_authority_clean(
@@ -491,11 +551,9 @@ def _refresh_failure_superseded_by_current_authority(
     if refresher is None or not refresher.available:
         return False
     current_names = (
-        "broker_truth_lease",
-        "broker_reconciliation",
-        "open_order_truth",
-        "managed_positions",
-        "managed_orders",
+        ("broker_reconciliation", "open_order_truth", "managed_positions", "managed_orders")
+        if broker_state == "FLAT"
+        else ("broker_truth_lease", "broker_reconciliation", "open_order_truth", "managed_positions", "managed_orders")
     )
     current_sources = [sources.get(name) for name in current_names]
     if any(source is None or not source.available for source in current_sources):
@@ -505,6 +563,20 @@ def _refresh_failure_superseded_by_current_authority(
         return False
     if any((_source_generated_at(source) is None or _source_generated_at(source) <= refresher_ts) for source in current_sources if source):
         return False
+    if broker_state == "FLAT":
+        reconciliation = sources["broker_reconciliation"].payload
+        open_order_truth = sources["open_order_truth"].payload
+        managed_positions = sources["managed_positions"].payload
+        managed_orders = sources["managed_orders"].payload
+        reconciliation_classification = str(reconciliation.get("classification") or "")
+        return _current_scope_flat_authority_clean(
+            reconciliation=reconciliation,
+            open_order_truth=open_order_truth,
+            managed_positions=managed_positions,
+            managed_orders=managed_orders,
+            broker_reconciled=reconciliation.get("broker_reconciled") is True
+            and reconciliation_classification in {"", "TRACK_B_PAPER_BROKER_RECONCILED"},
+        )
     return broker_state in {"FLAT", "EXPOSED_MANAGED"}
 
 

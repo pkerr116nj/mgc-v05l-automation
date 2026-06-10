@@ -285,26 +285,25 @@ def test_live_money_evidence_blocks_modify(tmp_path: Path) -> None:
     assert "live_money_eligible" in report["detail"]
 
 
-def test_modify_apply_blocked_without_snapshot(tmp_path: Path) -> None:
+def test_modify_apply_treats_missing_pre_action_snapshot_as_diagnostic(tmp_path: Path) -> None:
     _seed_authorities(tmp_path)
 
     def _raise_if_called(_config: ManagedOrderModifyInPlaceConfig) -> dict:
-        raise AssertionError("snapshot gate should block before broker hooks")
+        raise AssertionError("missing broker hooks should block before broker refresh")
 
     report = run_track_b_managed_order_modify_in_place(
         config=_config(tmp_path, apply=True, operator_authorized_modify=True),
         now=NOW,
-        pre_modify_open_order_refresh=_raise_if_called,
-        modify_order_limit=_raise_if_called,
-        post_modify_open_order_refresh=_raise_if_called,
     )
 
-    assert report["classification"] == MODIFY_IN_PLACE_BLOCKED_SHARED_TRUTH
+    assert report["classification"] == MODIFY_IN_PLACE_VERIFICATION_FAILED
     assert report["pre_action_snapshot_validation"]["classification"] == "PRE_ACTION_BLOCKED_SNAPSHOT_MISSING"
+    assert report["pre_action_snapshot_required_for_apply"] is False
+    assert report["pre_action_snapshot_diagnostic_only_for_managed_close_modify"] is True
     assert report["broker_mutation_attempted"] is False
 
 
-def test_modify_apply_blocked_on_pre_action_plan_mismatch(tmp_path: Path) -> None:
+def test_modify_apply_treats_pre_action_plan_mismatch_as_diagnostic(tmp_path: Path) -> None:
     _seed_authorities(tmp_path)
     _write_pre_action_snapshot_for_modify(
         tmp_path,
@@ -314,11 +313,12 @@ def test_modify_apply_blocked_on_pre_action_plan_mismatch(tmp_path: Path) -> Non
 
     report = _run(tmp_path, apply=True, operator_authorized_modify=True)
 
-    assert report["classification"] == MODIFY_IN_PLACE_BLOCKED_SHARED_TRUTH
+    assert report["classification"] == MODIFY_IN_PLACE_VERIFICATION_FAILED
     assert report["pre_action_snapshot_validation"]["classification"] == "PRE_ACTION_BLOCKED_PLAN_MISMATCH"
+    assert report["pre_action_snapshot_required_for_apply"] is False
 
 
-def test_modify_apply_blocked_on_pre_action_target_mismatch(tmp_path: Path) -> None:
+def test_modify_apply_treats_pre_action_target_mismatch_as_diagnostic(tmp_path: Path) -> None:
     _seed_authorities(tmp_path)
     target = _modify_pre_action_target()
     target["contract"] = "MGCM6"
@@ -326,8 +326,9 @@ def test_modify_apply_blocked_on_pre_action_target_mismatch(tmp_path: Path) -> N
 
     report = _run(tmp_path, apply=True, operator_authorized_modify=True)
 
-    assert report["classification"] == MODIFY_IN_PLACE_BLOCKED_SHARED_TRUTH
+    assert report["classification"] == MODIFY_IN_PLACE_VERIFICATION_FAILED
     assert report["pre_action_snapshot_validation"]["classification"] == "PRE_ACTION_BLOCKED_TARGET_IDENTITY_MISMATCH"
+    assert report["pre_action_snapshot_required_for_apply"] is False
 
 
 def test_modify_apply_valid_snapshot_reaches_existing_next_gate(tmp_path: Path) -> None:
@@ -338,8 +339,35 @@ def test_modify_apply_valid_snapshot_reaches_existing_next_gate(tmp_path: Path) 
 
     assert report["classification"] == MODIFY_IN_PLACE_VERIFICATION_FAILED
     assert report["pre_action_snapshot_validation"]["classification"] == PRE_ACTION_SNAPSHOT_VALID
-    assert "adapter hooks" in report["detail"]
+
+
+def test_runtime_supervisor_stale_is_diagnostic_for_exact_modify(tmp_path: Path) -> None:
+    _seed_authorities(tmp_path, runtime_supervisor_classification="SUPERVISOR_SHARED_TRUTH_STALE")
+
+    report = _run(tmp_path)
+
+    assert report["classification"] == MODIFY_IN_PLACE_DRY_RUN_READY
+    diagnostics = report["shared_truth_evidence"]["diagnostic_only_blockers"]
+    assert any("SUPERVISOR_SHARED_TRUTH_STALE" in item for item in diagnostics)
+    assert not report["shared_truth_evidence"]["blockers"]
     assert report["broker_mutation_attempted"] is False
+
+
+def test_lifecycle_plus_ownership_id_is_sufficient_without_manifest(tmp_path: Path) -> None:
+    _seed_authorities(tmp_path)
+    managed_path = tmp_path / "outputs/track_b_execution_core/managed_orders/latest_managed_orders.json"
+    managed_payload = json.loads(managed_path.read_text(encoding="utf-8"))
+    managed_payload["managed_orders"][0]["manifest_id"] = None
+    managed_path.write_text(json.dumps(managed_payload), encoding="utf-8")
+    plan_path = tmp_path / "outputs/track_b_execution_core/managed_orders/latest_order_adjustment_plan.json"
+    plan_payload = json.loads(plan_path.read_text(encoding="utf-8"))
+    plan_payload["plans"][0]["manifest_id"] = None
+    plan_path.write_text(json.dumps(plan_payload), encoding="utf-8")
+
+    report = _run(tmp_path)
+
+    assert report["classification"] == MODIFY_IN_PLACE_DRY_RUN_READY
+    assert report["target_evidence"]["managed_order_match"]["ownership_id"] == "owner_mnq"
 
 
 def test_cli_writes_dry_run_audit(tmp_path: Path, capsys) -> None:
@@ -483,6 +511,7 @@ def _seed_authorities(
     broker_positions: list[dict] | None = None,
     managed_positions: list[dict] | None = None,
     live_money_eligible: bool = False,
+    runtime_supervisor_classification: str = "SUPERVISOR_NO_ACTION_NEEDED",
 ) -> None:
     broker_positions = [_position()] if broker_positions is None else broker_positions
     managed_positions = [_managed_position()] if managed_positions is None else managed_positions
@@ -537,7 +566,7 @@ def _seed_authorities(
     )
     simple_authorities = {
         "outputs/track_b_execution_core/runtime_supervisor/latest_runtime_supervisor_authority.json": {
-            "classification": "SUPERVISOR_NO_ACTION_NEEDED"
+            "classification": runtime_supervisor_classification
         },
         "outputs/track_b_execution_core/self_recover/latest_self_recover_rules.json": {
             "classification": "NO_ACTION_NEEDED"

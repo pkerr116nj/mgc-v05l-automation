@@ -255,7 +255,14 @@ def build_track_b_managed_exit_attach_plan(
         selected_position=selected_managed_position,
     )
     duplicate_close = _duplicate_close_order(config=config, managed_orders=managed_orders, open_order_truth=open_order_truth, close_action=close_action)
-    prior_lifecycle_close = _prior_lifecycle_close_submit_blocker(lifecycle_report)
+    raw_prior_lifecycle_close = _prior_lifecycle_close_submit_blocker(lifecycle_report)
+    prior_lifecycle_close_is_stale_diagnostic = _prior_lifecycle_close_is_stale_diagnostic(
+        prior_lifecycle_close=raw_prior_lifecycle_close,
+        exit_authority_allows=exit_authority_allows,
+        position_ok=position_ok,
+        duplicate_close=duplicate_close,
+    )
+    prior_lifecycle_close = None if prior_lifecycle_close_is_stale_diagnostic else raw_prior_lifecycle_close
     aggregate_lifecycle_blocker = _aggregate_lifecycle_unit_blocker(
         config=config,
         managed_exit_policy_id=managed_exit_policy_id,
@@ -363,7 +370,8 @@ def build_track_b_managed_exit_attach_plan(
                 "lifecycle_identity_ok": lifecycle_ok,
                 "lifecycle_identity_reason": lifecycle_reason,
                 "duplicate_close": duplicate_close,
-                "prior_lifecycle_close": prior_lifecycle_close,
+                "prior_lifecycle_close": raw_prior_lifecycle_close,
+                "prior_lifecycle_close_stale_diagnostic": prior_lifecycle_close_is_stale_diagnostic,
                 "aggregate_lifecycle_blocker": aggregate_lifecycle_blocker,
             },
         },
@@ -392,6 +400,9 @@ def build_track_b_managed_exit_attach_plan(
         "lifecycle_identity_verified": lifecycle_ok,
         "duplicate_close_order_detected": bool(duplicate_close or prior_lifecycle_close),
         "prior_lifecycle_close_submit_blocker": prior_lifecycle_close,
+        "prior_lifecycle_close_stale_diagnostic": raw_prior_lifecycle_close
+        if prior_lifecycle_close_is_stale_diagnostic
+        else None,
         "managed_exit_policy_id": managed_exit_policy_id,
         "exit_profile": exit_profile.to_json_dict(),
         "exit_strategy_id": exit_profile.exit_strategy_id,
@@ -1572,6 +1583,22 @@ def _prior_lifecycle_close_submit_blocker(lifecycle_report: Mapping[str, Any]) -
             f"{broker_order_id}; duplicate managed-exit attach is blocked until broker/order truth converges."
         )
     return None
+
+
+def _prior_lifecycle_close_is_stale_diagnostic(
+    *,
+    prior_lifecycle_close: str | None,
+    exit_authority_allows: bool,
+    position_ok: bool,
+    duplicate_close: str | None,
+) -> bool:
+    if not prior_lifecycle_close:
+        return False
+    if "close fill" not in prior_lifecycle_close.lower():
+        return False
+    if duplicate_close:
+        return False
+    return exit_authority_allows and position_ok
 
 
 def _aggregate_lifecycle_unit_blocker(

@@ -15,6 +15,7 @@ import sys
 import time
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Any, Callable, Mapping, Sequence
 
@@ -29,6 +30,20 @@ from mgc_v05l.execution_core.track_b_managed_exit_actuator import (
     MANAGED_EXIT_ACTUATOR_DRY_RUN_READY,
     MANAGED_EXIT_ACTUATOR_PARTIAL,
     TrackBManagedExitActuatorConfig,
+)
+from mgc_v05l.execution_core.track_b_managed_order_modify_in_place import (
+    IbkrPaperManagedOrderModifyAdapter,
+    ManagedOrderModifyInPlaceConfig,
+    run_track_b_managed_order_modify_in_place,
+)
+from mgc_v05l.execution_core.track_b_managed_order_registry import (
+    DEFAULT_MANAGED_ORDER_REGISTRY_ARTIFACT,
+)
+from mgc_v05l.execution_core.track_b_order_adjustment_planner import (
+    MODIFY_IN_PLACE_ELIGIBLE,
+    TrackBOrderAdjustmentPlannerConfig,
+    build_track_b_order_adjustment_plan,
+    write_track_b_order_adjustment_plan,
 )
 
 
@@ -84,6 +99,7 @@ ActuatorRunner = Callable[[TrackBManagedExitActuatorConfig, datetime, float], Ma
 AuthorityRefresher = Callable[[TrackBManagedExitServiceConfig, str], Mapping[str, Any]]
 CommandRunner = Callable[[Sequence[str], Path, float], subprocess.CompletedProcess[str]]
 PipelineBuilder = Callable[[TrackBManagedExitServiceConfig, datetime], Mapping[str, Any]]
+OrderMaintenanceRunner = Callable[[TrackBManagedExitServiceConfig, datetime, float], Mapping[str, Any]]
 SleepFunc = Callable[[float], None]
 
 
@@ -95,6 +111,7 @@ def run_track_b_managed_exit_service_once(
     authority_refresher: AuthorityRefresher | None = None,
     command_runner: CommandRunner | None = None,
     pipeline_builder: PipelineBuilder | None = None,
+    order_maintenance_runner: OrderMaintenanceRunner | None = None,
     write: bool = True,
 ) -> dict[str, Any]:
     actual_now = now or datetime.now(UTC)
@@ -109,8 +126,10 @@ def run_track_b_managed_exit_service_once(
     )
     authority_refresher = authority_refresher or _refresh_operator_authority
     pipeline_builder = pipeline_builder or _run_pipeline_dry_run
+    order_maintenance_runner = order_maintenance_runner or _run_managed_order_maintenance
     authority_refreshes: list[dict[str, Any]] = []
     actuator_reports: list[dict[str, Any]] = []
+    order_maintenance_reports: list[dict[str, Any]] = []
     phase_timings: list[dict[str, Any]] = [
         {
             "phase": "pipeline_candidate_discovery",
@@ -159,6 +178,35 @@ def run_track_b_managed_exit_service_once(
     executable_intents = list(execution_plan.get("executable_intents") or [])
     if not executable_intents:
         blocked_intents = list(execution_plan.get("blocked_intents") or [])
+        if not blocked_intents:
+            phase_started = time.monotonic()
+            maintenance_report = dict(
+                order_maintenance_runner(config, actual_now, config.actuator_timeout_seconds)
+            )
+            phase_timings.append(
+                {
+                    **_phase_timing("working_close_order_maintenance", phase_started),
+                    "classification": maintenance_report.get("classification"),
+                    "managed_order_count": maintenance_report.get("managed_order_count"),
+                    "mutation_attempted": maintenance_report.get("broker_mutation_attempted") is True,
+                    "mutation_performed": maintenance_report.get("broker_mutation_performed") is True,
+                }
+            )
+            if maintenance_report.get("classification") != "MANAGED_ORDER_MAINTENANCE_NO_ACTION":
+                order_maintenance_reports.append(maintenance_report)
+                payload = _service_payload(
+                    config=config,
+                    now=actual_now,
+                    classification=_classification_from_order_maintenance(maintenance_report),
+                    authority_refreshes=authority_refreshes,
+                    actuator_reports=actuator_reports,
+                    phase_timings=phase_timings,
+                    execution_plan=execution_plan,
+                    order_maintenance_reports=order_maintenance_reports,
+                )
+                if write:
+                    write_track_b_managed_exit_service_status(config=config, payload=payload)
+                return payload
         payload = _service_payload(
             config=config,
             now=actual_now,
@@ -167,6 +215,7 @@ def run_track_b_managed_exit_service_once(
             actuator_reports=actuator_reports,
             phase_timings=phase_timings,
             execution_plan=execution_plan,
+            order_maintenance_reports=order_maintenance_reports,
         )
         if write:
             write_track_b_managed_exit_service_status(config=config, payload=payload)
@@ -235,6 +284,7 @@ def run_track_b_managed_exit_service_once(
         actuator_reports=actuator_reports,
         phase_timings=phase_timings,
         execution_plan=execution_plan,
+        order_maintenance_reports=order_maintenance_reports,
     )
     if write:
         write_track_b_managed_exit_service_status(config=config, payload=payload)
@@ -338,6 +388,7 @@ def _service_payload(
     actuator_reports: Sequence[Mapping[str, Any]],
     phase_timings: Sequence[Mapping[str, Any]],
     execution_plan: Mapping[str, Any] | None = None,
+    order_maintenance_reports: Sequence[Mapping[str, Any]] = (),
 ) -> dict[str, Any]:
     attempted = [row for report in actuator_reports for row in report.get("attempted_closes") or []]
     final_classification = _final_cycle_classification(classification=classification, actuator_reports=actuator_reports)
@@ -396,13 +447,25 @@ def _service_payload(
         "phase_timings": list(phase_timings),
         "actuator_invocation_count": len(actuator_reports),
         "actuator_reports": list(actuator_reports),
+        "managed_order_maintenance_invocation_count": len(order_maintenance_reports),
+        "managed_order_maintenance_reports": list(order_maintenance_reports),
+        "latest_managed_order_maintenance_classification": order_maintenance_reports[-1].get("classification")
+        if order_maintenance_reports
+        else None,
         "latest_actuator_classification": actuator_reports[-1].get("classification") if actuator_reports else None,
         "exit_due_count": _max_int(actuator_reports, "exit_due_count"),
         "eligible_count": _max_int(actuator_reports, "eligible_count"),
         "attempted_count": len(attempted),
         "submitted_count": sum(int(report.get("submitted_count") or 0) for report in actuator_reports),
         "submit_attempted": any(report.get("submit_attempted") is True for report in actuator_reports),
-        "broker_state_mutated": any(report.get("broker_state_mutated") is True for report in actuator_reports),
+        "broker_state_mutated": any(report.get("broker_state_mutated") is True for report in actuator_reports)
+        or any(report.get("broker_mutation_performed") is True for report in order_maintenance_reports),
+        "managed_order_maintenance_mutation_attempted": any(
+            report.get("broker_mutation_attempted") is True for report in order_maintenance_reports
+        ),
+        "managed_order_maintenance_mutation_performed": any(
+            report.get("broker_mutation_performed") is True for report in order_maintenance_reports
+        ),
         "attempted_closes": attempted,
         "required_next_action": _next_action(final_classification),
         "status_path": str(config.resolve(config.status_path)),
@@ -452,6 +515,19 @@ def _service_classification(actuator_reports: Sequence[Mapping[str, Any]]) -> st
     if any("BLOCKED" in item for item in classifications):
         return MANAGED_EXIT_SERVICE_BLOCKED
     return MANAGED_EXIT_SERVICE_NOOP
+
+
+def _classification_from_order_maintenance(report: Mapping[str, Any]) -> str:
+    classification = str(report.get("classification") or "")
+    if report.get("broker_mutation_performed") is True:
+        return MANAGED_EXIT_SERVICE_APPLY_SUCCEEDED
+    if report.get("broker_mutation_attempted") is True:
+        return MANAGED_EXIT_SERVICE_APPLY_ATTEMPTED
+    if classification == "MANAGED_ORDER_MAINTENANCE_DRY_RUN_READY":
+        return MANAGED_EXIT_SERVICE_DRY_RUN_READY
+    if "BLOCKED" in classification or "REVIEW" in classification:
+        return MANAGED_EXIT_SERVICE_APPLY_BLOCKED
+    return MANAGED_EXIT_SERVICE_NO_ELIGIBLE_EXITS
 
 
 def _final_cycle_classification(*, classification: str, actuator_reports: Sequence[Mapping[str, Any]]) -> str:
@@ -506,6 +582,222 @@ def _next_action(classification: str) -> str:
     if classification == MANAGED_EXIT_SERVICE_ERROR:
         return "OPERATOR_REVIEW_REQUIRED"
     return "NO_ACTION"
+
+
+def _run_managed_order_maintenance(
+    config: TrackBManagedExitServiceConfig,
+    now: datetime,
+    timeout_seconds: float,
+) -> Mapping[str, Any]:
+    planner_config = TrackBOrderAdjustmentPlannerConfig(repo_root=config.repo_root)
+    order_adjustment_plan = build_track_b_order_adjustment_plan(config=planner_config, now=now)
+    write_track_b_order_adjustment_plan(config=planner_config, payload=order_adjustment_plan)
+    managed_orders = _read_json(config.resolve(DEFAULT_MANAGED_ORDER_REGISTRY_ARTIFACT))
+    plans_by_order = {
+        str(plan.get("broker_order_id") or ""): plan
+        for plan in order_adjustment_plan.get("plans") or []
+        if isinstance(plan, Mapping)
+    }
+    results: list[dict[str, Any]] = []
+    for order in managed_orders.get("managed_orders") or []:
+        if not isinstance(order, Mapping):
+            continue
+        if str(order.get("classification") or "") not in {
+            "WORKING_CLOSE_ORDER",
+            "CLOSE_ORDER_MODIFIABLE",
+            "CLOSE_ORDER_CANCEL_REPLACE_REQUIRED",
+        }:
+            continue
+        if order.get("is_close_order") is not True:
+            continue
+        broker_order_id = str(order.get("broker_order_id") or "")
+        plan = plans_by_order.get(broker_order_id)
+        if not plan:
+            results.append(
+                {
+                    "classification": "MANAGED_ORDER_MAINTENANCE_BLOCKED_NO_PLAN",
+                    "broker_order_id": broker_order_id,
+                    "lifecycle_id": order.get("lifecycle_id"),
+                    "broker_mutation_attempted": False,
+                    "broker_mutation_performed": False,
+                    "detail": "No current order-adjustment plan matched the known managed close order.",
+                }
+            )
+            continue
+        if str(plan.get("classification") or "") != MODIFY_IN_PLACE_ELIGIBLE:
+            results.append(
+                {
+                    "classification": "MANAGED_ORDER_MAINTENANCE_WAIT",
+                    "broker_order_id": broker_order_id,
+                    "perm_id": order.get("perm_id"),
+                    "lifecycle_id": order.get("lifecycle_id"),
+                    "order_adjustment_classification": plan.get("classification"),
+                    "recommended_operator_action": plan.get("recommended_operator_action"),
+                    "broker_mutation_attempted": False,
+                    "broker_mutation_performed": False,
+                    "detail": plan.get("rationale") or "Managed close order does not require modify-in-place.",
+                }
+            )
+            continue
+        modify_config = _modify_config_from_order_plan(
+            service_config=config,
+            order=order,
+            plan=plan,
+            timeout_seconds=timeout_seconds,
+        )
+        if modify_config is None:
+            results.append(
+                {
+                    "classification": "MANAGED_ORDER_MAINTENANCE_BLOCKED_INCOMPLETE_IDENTITY",
+                    "broker_order_id": broker_order_id,
+                    "perm_id": order.get("perm_id"),
+                    "lifecycle_id": order.get("lifecycle_id"),
+                    "order_adjustment_classification": plan.get("classification"),
+                    "broker_mutation_attempted": False,
+                    "broker_mutation_performed": False,
+                    "detail": "Modify-in-place was eligible, but exact identity or target price was incomplete.",
+                }
+            )
+            continue
+        adapter: IbkrPaperManagedOrderModifyAdapter | None = None
+        hooks: dict[str, Any] = {}
+        if config.apply:
+            adapter = IbkrPaperManagedOrderModifyAdapter(config=modify_config)
+            hooks = {
+                "pre_modify_open_order_refresh": adapter.refresh_open_orders,
+                "modify_order_limit": adapter.modify_order_limit,
+                "post_modify_open_order_refresh": adapter.refresh_open_orders,
+            }
+        try:
+            report = run_track_b_managed_order_modify_in_place(config=modify_config, now=now, **hooks)
+        finally:
+            if adapter is not None:
+                adapter.disconnect()
+        results.append(
+            {
+                "classification": report.get("classification"),
+                "broker_order_id": broker_order_id,
+                "perm_id": order.get("perm_id"),
+                "lifecycle_id": order.get("lifecycle_id"),
+                "order_adjustment_classification": plan.get("classification"),
+                "current_known_limit": modify_config.current_known_limit,
+                "new_limit": modify_config.new_limit,
+                "apply": modify_config.apply,
+                "broker_mutation_attempted": report.get("broker_mutation_attempted") is True,
+                "broker_mutation_performed": report.get("broker_mutation_performed") is True,
+                "new_order_created": report.get("new_order_created") is True,
+                "artifact_path": report.get("artifact_path"),
+                "detail": report.get("detail"),
+                "report": report,
+            }
+        )
+        break
+    return _managed_order_maintenance_report(
+        now=now,
+        managed_orders=managed_orders,
+        order_adjustment_plan=order_adjustment_plan,
+        results=results,
+    )
+
+
+def _managed_order_maintenance_report(
+    *,
+    now: datetime,
+    managed_orders: Mapping[str, Any],
+    order_adjustment_plan: Mapping[str, Any],
+    results: Sequence[Mapping[str, Any]],
+) -> dict[str, Any]:
+    if not results:
+        classification = "MANAGED_ORDER_MAINTENANCE_NO_ACTION"
+    elif any(row.get("broker_mutation_performed") is True for row in results):
+        classification = "MANAGED_ORDER_MAINTENANCE_APPLIED"
+    elif any(str(row.get("classification") or "") == "MODIFY_IN_PLACE_DRY_RUN_READY" for row in results):
+        classification = "MANAGED_ORDER_MAINTENANCE_DRY_RUN_READY"
+    elif any("BLOCKED" in str(row.get("classification") or "") for row in results):
+        classification = "MANAGED_ORDER_MAINTENANCE_BLOCKED"
+    else:
+        classification = "MANAGED_ORDER_MAINTENANCE_WAIT"
+    return {
+        "schema_version": "track_b_managed_exit_service_order_maintenance_v1",
+        "generated_at": now.isoformat(),
+        "classification": classification,
+        "close_only": True,
+        "entry_allowed": False,
+        "broad_cancel_allowed": False,
+        "global_cancel_allowed": False,
+        "live_money_eligible": False,
+        "paper_proof_invoked": False,
+        "managed_order_classification": managed_orders.get("classification"),
+        "order_adjustment_classification": order_adjustment_plan.get("classification"),
+        "managed_order_count": len(managed_orders.get("managed_orders") or []),
+        "result_count": len(results),
+        "results": list(results),
+        "broker_mutation_attempted": any(row.get("broker_mutation_attempted") is True for row in results),
+        "broker_mutation_performed": any(row.get("broker_mutation_performed") is True for row in results),
+    }
+
+
+def _modify_config_from_order_plan(
+    *,
+    service_config: TrackBManagedExitServiceConfig,
+    order: Mapping[str, Any],
+    plan: Mapping[str, Any],
+    timeout_seconds: float,
+) -> ManagedOrderModifyInPlaceConfig | None:
+    identity = _mapping(plan.get("identity"))
+    source_order = _mapping(plan.get("source_order"))
+    broker_order_id = _string_or_none(order.get("broker_order_id") or plan.get("broker_order_id") or identity.get("broker_order_id"))
+    perm_id = _string_or_none(order.get("perm_id") or plan.get("perm_id") or identity.get("perm_id"))
+    action = _string_or_none(order.get("action") or plan.get("action") or identity.get("action"))
+    quantity = _string_or_none(order.get("quantity") or plan.get("quantity") or identity.get("quantity"))
+    contract = _string_or_none(order.get("contract") or order.get("local_symbol") or plan.get("contract") or identity.get("contract"))
+    symbol = _string_or_none(order.get("symbol") or plan.get("symbol") or source_order.get("symbol"))
+    account_id = _string_or_none(order.get("account_id") or identity.get("account_id") or source_order.get("account_id") or "DUM882026")
+    current_limit = _decimal(order.get("limit_price") or plan.get("limit_price"))
+    new_limit = _decimal(_mapping(plan.get("managed_close_reprice_policy")).get("limit_price"))
+    client_id = _int_or_none(
+        order.get("client_id")
+        or plan.get("client_id")
+        or source_order.get("client_id")
+        or _mapping(order.get("source_order")).get("client_id")
+    )
+    if new_limit is None:
+        new_limit = _marketable_limit_from_plan(order=order, plan=plan)
+    if not all([broker_order_id, perm_id, action, quantity, contract, symbol, account_id, current_limit, new_limit]):
+        return None
+    return ManagedOrderModifyInPlaceConfig(
+        repo_root=service_config.repo_root,
+        broker_order_id=str(broker_order_id),
+        perm_id=str(perm_id),
+        symbol=str(symbol).upper(),
+        contract=str(contract).upper(),
+        con_id=_string_or_none(order.get("con_id") or plan.get("con_id") or identity.get("con_id")),
+        action=str(action).upper(),
+        quantity=str(_decimal(quantity) or quantity),
+        current_known_limit=str(current_limit),
+        new_limit=str(new_limit),
+        account_id=str(account_id),
+        apply=service_config.apply is True,
+        operator_authorized_modify=service_config.apply is True,
+        broker_timeout_seconds=float(timeout_seconds),
+        tws_client_id=int(client_id) if client_id is not None else 1967,
+    )
+
+
+def _marketable_limit_from_plan(*, order: Mapping[str, Any], plan: Mapping[str, Any]) -> Decimal | None:
+    market_ref = _mapping(plan.get("market_reference")) or _mapping(_mapping(order.get("marketability")).get("market_reference"))
+    reference = _decimal(market_ref.get("reference_price"))
+    if reference is None:
+        return None
+    action = str(order.get("action") or plan.get("action") or "").upper()
+    symbol = str(order.get("symbol") or plan.get("symbol") or "").upper()
+    tick = Decimal("0.25") if symbol in {"MNQ", "MES", "NQ", "ES"} else Decimal("0.1")
+    offset = tick * Decimal("4")
+    if action == "SELL":
+        return reference - offset
+    if action == "BUY":
+        return reference + offset
+    return None
 
 
 def _run_actuator_child(
@@ -719,6 +1011,37 @@ def _mapping(value: Any) -> dict[str, Any]:
 
 def _list(value: Any) -> list[Any]:
     return value if isinstance(value, list) else []
+
+
+def _read_json(path: Path) -> dict[str, Any]:
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (FileNotFoundError, json.JSONDecodeError, OSError):
+        return {}
+    return dict(payload) if isinstance(payload, Mapping) else {}
+
+
+def _decimal(value: object) -> Decimal | None:
+    if value in {None, ""}:
+        return None
+    try:
+        return Decimal(str(value))
+    except (InvalidOperation, ValueError):
+        return None
+
+
+def _string_or_none(value: object) -> str | None:
+    text = str(value or "").strip()
+    return text or None
+
+
+def _int_or_none(value: object) -> int | None:
+    if value in {None, ""}:
+        return None
+    try:
+        return int(str(value))
+    except (TypeError, ValueError):
+        return None
 
 
 def _refresh_operator_authority(config: TrackBManagedExitServiceConfig, phase: str) -> Mapping[str, Any]:

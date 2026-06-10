@@ -72,7 +72,32 @@ PAPER_ACCOUNT = "DUM882026"
 _TERMINAL_STATUSES = {"FILLED", "CANCELLED", "APICANCELLED", "INACTIVE"}
 _SENTINEL_FILLED_QUANTITY = Decimal("1e100")
 _TOLERABLE_IBKR_STATUS_GAPS = {"sentinel_filled_quantity", "missing_remaining_quantity"}
-_MODIFY_DIAGNOSTIC_ONLY_FRESHNESS_ARTIFACTS = {"runtime_resume_semantics", "crash_loop_protection"}
+_MODIFY_DIAGNOSTIC_ONLY_FRESHNESS_ARTIFACTS = {
+    "runtime_supervisor_authority",
+    "self_recover_rules",
+    "runtime_resume_semantics",
+    "crash_loop_protection",
+}
+_MODIFY_DIAGNOSTIC_ONLY_CLASSIFICATIONS: dict[str, set[str]] = {
+    "runtime_supervisor_authority": {
+        "SUPERVISOR_RESTART_BLOCKED_OPERATOR_ACK",
+        "SUPERVISOR_RESTART_BLOCKED_CRASH_LOOP",
+        "SUPERVISOR_SHARED_TRUTH_STALE",
+        "SUPERVISOR_UNKNOWN_REVIEW_REQUIRED",
+    },
+    "runtime_resume_semantics": {
+        "RESUME_BLOCKED_CRASH_LOOP",
+        "RESUME_BLOCKED_OPERATOR_ACK_REQUIRED",
+        "RESUME_UNKNOWN_REVIEW_REQUIRED",
+    },
+    "crash_loop_protection": {
+        "RESTART_COOLDOWN_ACTIVE",
+        "REPEATED_RUNTIME_FAILURE",
+        "REPEATED_MARKET_DATA_FAILURE",
+        "REPEATED_BROKER_LEASE_FAILURE",
+        "OPERATOR_ACK_REQUIRED",
+    },
+}
 
 
 @dataclass(frozen=True)
@@ -163,16 +188,17 @@ def run_track_b_managed_order_modify_in_place(
     pre_action_validation = _pre_action_snapshot_validation(config=config, now=actual_now)
     report["pre_action_snapshot_validation"] = _jsonable(pre_action_validation)
     _attach_pre_action_summary(report, pre_action_validation)
-    report["pre_action_snapshot_required_for_apply"] = True
+    report["pre_action_snapshot_required_for_apply"] = False
+    report["pre_action_snapshot_diagnostic_only_for_managed_close_modify"] = True
     if pre_action_validation.get("classification") != PRE_ACTION_SNAPSHOT_VALID:
-        report["classification"] = MODIFY_IN_PLACE_BLOCKED_SHARED_TRUTH
-        report["detail"] = (
-            "Pre-action Control Plane Snapshot validation blocked modify-in-place: "
-            f"{pre_action_validation.get('classification')} - {pre_action_validation.get('reason')}"
-        )
-        report["broker_mutation_attempted"] = False
-        _write_report(config=config, report=report)
-        return report
+        report["diagnostic_pre_action_snapshot_blocker"] = {
+            "classification": pre_action_validation.get("classification"),
+            "reason": pre_action_validation.get("reason"),
+            "detail": (
+                "Pre-action Control Plane Snapshot validation is diagnostic for exact managed "
+                "close-order modify-in-place; broker/open-order identity checks remain hard gates."
+            ),
+        }
 
     if pre_modify_open_order_refresh is None or modify_order_limit is None or post_modify_open_order_refresh is None:
         report["classification"] = MODIFY_IN_PLACE_VERIFICATION_FAILED
@@ -409,12 +435,23 @@ def _classify_readiness(
     plan = target.get("order_adjustment_plan_match")
     if not isinstance(plan, Mapping):
         return _blocked(MODIFY_IN_PLACE_BLOCKED_NOT_MANAGED_ORDER, "Order Adjustment Planner has no exact order plan match.")
-    missing_linkage = [
-        name
-        for name in ("lifecycle_id", "manifest_id", "ownership_id")
-        if not (order.get(name) or plan.get(name))
-    ]
-    if missing_linkage:
+    lifecycle_id = order.get("lifecycle_id") or plan.get("lifecycle_id")
+    ownership_link = (
+        order.get("manifest_id")
+        or plan.get("manifest_id")
+        or order.get("ownership_id")
+        or plan.get("ownership_id")
+        or order.get("trade_id")
+        or plan.get("trade_id")
+        or order.get("order_intent_id")
+        or plan.get("order_intent_id")
+    )
+    if not lifecycle_id or not ownership_link:
+        missing_linkage = []
+        if not lifecycle_id:
+            missing_linkage.append("lifecycle_id")
+        if not ownership_link:
+            missing_linkage.append("manifest_id_or_ownership_id_or_trade_id")
         return _blocked(
             MODIFY_IN_PLACE_BLOCKED_NOT_MANAGED_ORDER,
             f"Managed order is missing lifecycle/manifest/ownership linkage: {', '.join(missing_linkage)}.",
@@ -474,10 +511,14 @@ def _shared_truth_evidence(*, config: ManagedOrderModifyInPlaceConfig, now: date
         for name, payload in payloads.items()
     }
     blockers: list[str] = []
+    diagnostic_only_blockers: list[str] = []
     if config.require_shared_truth_evidence:
         for name, payload in payloads.items():
             if not payload:
-                blockers.append(f"Shared authority artifact missing: {name}.")
+                if name in _MODIFY_DIAGNOSTIC_ONLY_FRESHNESS_ARTIFACTS:
+                    diagnostic_only_blockers.append(f"Shared authority artifact missing but diagnostic for modify-in-place: {name}.")
+                else:
+                    blockers.append(f"Shared authority artifact missing: {name}.")
         if not reconciliation:
             blockers.append("Shared authority artifact missing: reconciliation.")
         for name, state in freshness.items():
@@ -506,13 +547,10 @@ def _shared_truth_evidence(*, config: ManagedOrderModifyInPlaceConfig, now: date
         "ORDER_NOT_FOUND",
     }:
         blockers.append(f"Order Adjustment Planner blocks modify-in-place: {classifications['order_adjustment_plan']}.")
-    if classifications["runtime_supervisor_authority"] in {
-        "SUPERVISOR_RESTART_BLOCKED_OPERATOR_ACK",
-        "SUPERVISOR_RESTART_BLOCKED_CRASH_LOOP",
-        "SUPERVISOR_SHARED_TRUTH_STALE",
-        "SUPERVISOR_UNKNOWN_REVIEW_REQUIRED",
-    }:
-        blockers.append(f"Runtime Supervisor Authority blocks modify-in-place: {classifications['runtime_supervisor_authority']}.")
+    if classifications["runtime_supervisor_authority"] in _MODIFY_DIAGNOSTIC_ONLY_CLASSIFICATIONS["runtime_supervisor_authority"]:
+        diagnostic_only_blockers.append(
+            f"Runtime Supervisor Authority is diagnostic for modify-in-place: {classifications['runtime_supervisor_authority']}."
+        )
     if classifications["self_recover_rules"] in {
         "OPERATOR_REVIEW_REQUIRED",
         "MANUAL_TWS_REVIEW_REQUIRED",
@@ -520,20 +558,14 @@ def _shared_truth_evidence(*, config: ManagedOrderModifyInPlaceConfig, now: date
         "REFRESH_SHARED_TRUTH",
     }:
         blockers.append(f"Self-Recover Rules block modify-in-place: {classifications['self_recover_rules']}.")
-    if classifications["runtime_resume_semantics"] in {
-        "RESUME_BLOCKED_CRASH_LOOP",
-        "RESUME_BLOCKED_OPERATOR_ACK_REQUIRED",
-        "RESUME_UNKNOWN_REVIEW_REQUIRED",
-    }:
-        blockers.append(f"Runtime Resume Semantics blocks modify-in-place: {classifications['runtime_resume_semantics']}.")
-    if classifications["crash_loop_protection"] in {
-        "RESTART_COOLDOWN_ACTIVE",
-        "REPEATED_RUNTIME_FAILURE",
-        "REPEATED_MARKET_DATA_FAILURE",
-        "REPEATED_BROKER_LEASE_FAILURE",
-        "OPERATOR_ACK_REQUIRED",
-    }:
-        blockers.append(f"Crash Loop Protection blocks modify-in-place: {classifications['crash_loop_protection']}.")
+    if classifications["runtime_resume_semantics"] in _MODIFY_DIAGNOSTIC_ONLY_CLASSIFICATIONS["runtime_resume_semantics"]:
+        diagnostic_only_blockers.append(
+            f"Runtime Resume Semantics is diagnostic for modify-in-place: {classifications['runtime_resume_semantics']}."
+        )
+    if classifications["crash_loop_protection"] in _MODIFY_DIAGNOSTIC_ONLY_CLASSIFICATIONS["crash_loop_protection"]:
+        diagnostic_only_blockers.append(
+            f"Crash Loop Protection is diagnostic for modify-in-place: {classifications['crash_loop_protection']}."
+        )
     if classifications["broker_lease"] in {
         "INVALIDATED_CONTRADICTION",
         "INVALIDATED_UNKNOWN_OPEN_ORDERS",
@@ -562,6 +594,7 @@ def _shared_truth_evidence(*, config: ManagedOrderModifyInPlaceConfig, now: date
         "classifications": classifications,
         "freshness": freshness,
         "blockers": blockers,
+        "diagnostic_only_blockers": diagnostic_only_blockers,
     }
 
 
@@ -853,6 +886,7 @@ def _redacted_shared(shared: Mapping[str, Any]) -> dict[str, Any]:
         "classifications": shared.get("classifications"),
         "freshness": shared.get("freshness"),
         "blockers": shared.get("blockers"),
+        "diagnostic_only_blockers": shared.get("diagnostic_only_blockers"),
     }
 
 

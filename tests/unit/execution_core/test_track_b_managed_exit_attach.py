@@ -117,6 +117,62 @@ def test_blocked_when_lifecycle_already_has_prior_close_submit(tmp_path: Path) -
     assert "broker order 36" in payload["prior_lifecycle_close_submit_blocker"]
 
 
+def test_prior_lifecycle_close_fill_is_diagnostic_when_broker_risk_still_open_and_v11_allows(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    config = _seed(
+        tmp_path,
+        completed_bars=12,
+        config_overrides={"apply": True, "operator_authorized_managed_exit": True},
+        open_order_overrides={"classification": "NO_OPEN_ORDERS", "unknown_open_order_count": 0},
+    )
+    lifecycle_path = (
+        tmp_path
+        / "outputs/track_b_execution_core/track_b_strategy_managed_paper_lifecycle"
+        / config.lifecycle_id
+        / "track_b_strategy_managed_paper_lifecycle_report.json"
+    )
+    lifecycle = json.loads(lifecycle_path.read_text(encoding="utf-8"))
+    lifecycle["close_fill"] = {
+        "broker_order_id": "84",
+        "perm_id": "629785906",
+        "execution_id": "exec-old-close",
+        "price": "7418.75",
+        "quantity": "1",
+        "filled_at": "2026-06-08T09:23:54+00:00",
+    }
+    _write_json(lifecycle_path, lifecycle)
+
+    class Result:
+        report_json = lifecycle_path
+        report = {
+            **lifecycle,
+            "paper_lifecycle_classification": "TRACK_B_STRATEGY_PAPER_OPEN_MANAGED",
+            "final_position_status": "OPEN_MANAGED",
+            "broker_state_mutated": False,
+            "submit_attempted": False,
+        }
+
+    called: dict[str, Any] = {}
+
+    def fake_maintain(**kwargs: Any) -> Result:
+        called["maintain"] = kwargs
+        return Result()
+
+    monkeypatch.setattr(attach_module, "maintain_open_track_b_strategy_managed_paper_lifecycle", fake_maintain)
+
+    payload = build_track_b_managed_exit_attach_plan(config=config, now=NOW)
+
+    assert payload["classification"] == "TRACK_B_STRATEGY_PAPER_OPEN_MANAGED"
+    assert payload["apply_enabled"] is True
+    assert payload["duplicate_close_order_detected"] is False
+    assert payload["prior_lifecycle_close_submit_blocker"] is None
+    assert "close fill" in payload["prior_lifecycle_close_stale_diagnostic"]
+    assert payload["exit_authority_contract"]["decision"]["decision"] in {"ALLOWED", "DEGRADED_ALLOWED"}
+    assert called["maintain"]["existing_lifecycle_report"]["close_fill"]["broker_order_id"] == "84"
+
+
 def test_previous_attach_guard_review_state_can_retry_when_broker_identity_matches(tmp_path: Path) -> None:
     config = _seed(tmp_path, completed_bars=3)
     lifecycle_path = (

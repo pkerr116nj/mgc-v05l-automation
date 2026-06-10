@@ -335,6 +335,46 @@ def test_later_clean_current_authority_supersedes_earlier_refresher_failure(tmp_
     ]
 
 
+def test_flat_reconciliation_supersedes_refresh_failure_when_broker_lease_is_stale(tmp_path: Path) -> None:
+    _seed_sources(tmp_path, submit_allowed=True, bsa_new_entry=True)
+    lease_path = tmp_path / "outputs/operator_dashboard/runtime/latest_broker_truth_lease.json"
+    lease = json.loads(lease_path.read_text(encoding="utf-8"))
+    lease.update(
+        {
+            "generated_at": (NOW - timedelta(seconds=600)).isoformat(),
+            "broker_reconciled": False,
+            "lease_state": "INVALIDATED_CONTRADICTION",
+            "blockers": ["stale_lifecycle_projection"],
+        }
+    )
+    _write(lease_path, lease)
+    _write(
+        tmp_path / "outputs/reports/track_b_operator_readiness_refresher/latest_track_b_operator_readiness_refresher_status.json",
+        {
+            "schema_version": "track_b_operator_readiness_refresher_status_v1",
+            "generated_at": (NOW - timedelta(seconds=120)).isoformat(),
+            "classification": "TRACK_B_OPERATOR_READINESS_REFRESH_FAILED",
+            "dependency_refresh_failures": [
+                {
+                    "step": "shared_truth",
+                    "code": "shared_truth_refresh_failed",
+                    "returncode": 2,
+                }
+            ],
+            "live_money_eligible": False,
+            "paper_proof_invoked": False,
+        },
+    )
+
+    ods = build_operator_decision_surface(repo_root=tmp_path, now=NOW)
+
+    assert ods["broker_state"] == "FLAT"
+    assert ods["submit_allowed"] == {"submit_allowed": True, "canonical_readiness": "READY_SUBMIT_CAPABLE"}
+    assert ods["first_blocker"] is None
+    assert ods["next_safe_action"] == "NO_ACTION"
+    assert ods["diagnostic_warnings"][0]["code"] == "operator_readiness_refresh_failure_superseded"
+
+
 def test_later_current_managed_exposure_supersedes_earlier_refresher_failure(tmp_path: Path) -> None:
     _seed_sources(tmp_path, submit_allowed=False, bsa_new_entry=False)
     _seed_managed_mes_position(tmp_path)
@@ -403,6 +443,10 @@ def test_newer_broker_position_without_current_managed_owner_is_ambiguous(tmp_pa
     reconciliation["current_scope_lifecycle_open_position_count"] = 0
     reconciliation["current_exposure_owner_resolution"] = {"classification": "UNKNOWN_OWNER"}
     _write(reconciliation_path, reconciliation)
+    open_order_path = tmp_path / "outputs/track_b_execution_core/open_order_truth/latest_open_order_truth.json"
+    open_order_truth = json.loads(open_order_path.read_text(encoding="utf-8"))
+    open_order_truth["generated_at"] = (NOW + timedelta(seconds=30)).isoformat()
+    _write(open_order_path, open_order_truth)
 
     ods = build_operator_decision_surface(repo_root=tmp_path, now=NOW)
 
@@ -619,6 +663,45 @@ def test_dirty_reconciliation_keeps_flat_projection_unknown(tmp_path: Path) -> N
     reconciliation["classification"] = "TRACK_B_PAPER_BROKER_POSITION_MISMATCH"
     reconciliation["broker_reconciled"] = False
     _write(reconciliation_path, reconciliation)
+
+    ods = build_operator_decision_surface(repo_root=tmp_path, now=NOW)
+
+    assert ods["broker_state"] == "UNKNOWN"
+    assert ods["first_blocker"]["code"] == "broker_state_unknown"
+
+
+def test_current_flat_open_order_truth_overrides_stale_lease_open_order_projection(tmp_path: Path) -> None:
+    _seed_sources(tmp_path)
+    lease_path = tmp_path / "outputs/operator_dashboard/runtime/latest_broker_truth_lease.json"
+    lease = json.loads(lease_path.read_text(encoding="utf-8"))
+    lease.update(
+        {
+            "track_b_broker_position_count": 1,
+            "track_b_broker_open_order_count": 1,
+            "unknown_broker_open_order_count": 0,
+        }
+    )
+    _write(lease_path, lease)
+    reconciliation_path = (
+        tmp_path / "outputs/reports/track_b_paper_broker_reconciliation/latest_track_b_paper_broker_reconciliation.json"
+    )
+    reconciliation = json.loads(reconciliation_path.read_text(encoding="utf-8"))
+    reconciliation.update(
+        {
+            "classification": "TRACK_B_PAPER_BROKER_RECONCILIATION_BLOCKED",
+            "broker_reconciled": False,
+            "track_b_broker_position_count": 0,
+            "track_b_broker_open_order_count": 0,
+            "unknown_broker_open_order_count": 0,
+            "track_b_broker_positions": [],
+            "track_b_broker_open_orders": [],
+        }
+    )
+    _write(reconciliation_path, reconciliation)
+    open_order_path = tmp_path / "outputs/track_b_execution_core/open_order_truth/latest_open_order_truth.json"
+    open_order_truth = json.loads(open_order_path.read_text(encoding="utf-8"))
+    open_order_truth["generated_at"] = (NOW + timedelta(seconds=30)).isoformat()
+    _write(open_order_path, open_order_truth)
 
     ods = build_operator_decision_surface(repo_root=tmp_path, now=NOW)
 

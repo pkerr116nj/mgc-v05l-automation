@@ -1867,7 +1867,7 @@ def test_current_broker_exposure_prevents_lifecycle_only_supersession(tmp_path: 
     assert report["registry_reconciliation"]["superseded_lifecycle_only_records"] == []
 
 
-def test_missing_broker_backed_exit_prevents_lifecycle_only_supersession(tmp_path: Path) -> None:
+def test_missing_broker_backed_exit_is_diagnostic_when_broker_and_lifecycle_are_flat(tmp_path: Path) -> None:
     config = _write_base_artifacts(tmp_path)
     _write_registry_lifecycle_only_open_trade(
         config,
@@ -1902,12 +1902,13 @@ def test_missing_broker_backed_exit_prevents_lifecycle_only_supersession(tmp_pat
 
     report = reconcile_track_b_paper_broker_truth(config=config, now=NOW)
 
-    assert report["registry_reconciliation"]["classification"] == "REGISTRY_RECONCILIATION_REVIEW_REQUIRED"
-    assert report["registry_reconciliation"]["superseded_lifecycle_only_records"] == []
+    assert report["broker_reconciled"] is True
+    assert report["registry_reconciliation"]["classification"] == "REGISTRY_RECONCILIATION_FLAT_WITH_STALE_OPEN_RECORD_REVIEW"
+    assert report["registry_reconciliation"]["blocking"] is False
     assert "trade_original_mnq_globex_short" in report["registry_reconciliation"]["review_required_trade_ids"]
 
 
-def test_identity_mismatch_prevents_lifecycle_only_supersession(tmp_path: Path) -> None:
+def test_identity_mismatch_is_diagnostic_when_broker_and_lifecycle_are_flat(tmp_path: Path) -> None:
     config = _write_base_artifacts(tmp_path)
     _write_registry_lifecycle_only_open_trade(
         config,
@@ -1943,8 +1944,9 @@ def test_identity_mismatch_prevents_lifecycle_only_supersession(tmp_path: Path) 
 
     report = reconcile_track_b_paper_broker_truth(config=config, now=NOW)
 
-    assert report["registry_reconciliation"]["classification"] == "REGISTRY_RECONCILIATION_REVIEW_REQUIRED"
-    assert report["registry_reconciliation"]["superseded_lifecycle_only_records"] == []
+    assert report["broker_reconciled"] is True
+    assert report["registry_reconciliation"]["classification"] == "REGISTRY_RECONCILIATION_FLAT_WITH_STALE_OPEN_RECORD_REVIEW"
+    assert report["registry_reconciliation"]["blocking"] is False
     assert "trade_original_mnq_globex_short" in report["registry_reconciliation"]["review_required_trade_ids"]
 
 
@@ -2660,7 +2662,7 @@ def test_registry_aware_reconciliation_does_not_resurrect_stale_closed_trade(tmp
     assert not any(event["event_type"] == "RECONCILED_OPEN" for event in events if event["trade_id"] == trade_id)
 
 
-def test_registry_stale_open_trade_can_be_resolved_only_with_explicit_historical_flat_cleanup(
+def test_registry_stale_open_trade_is_diagnostic_when_current_broker_and_lifecycle_are_flat(
     tmp_path: Path,
 ) -> None:
     trade_id = "trade_registry_historical_flat_cleanup"
@@ -2679,12 +2681,21 @@ def test_registry_stale_open_trade_can_be_resolved_only_with_explicit_historical
     )
     _write_broker_truth(config)
 
-    blocked = reconcile_track_b_paper_broker_truth(config=config, now=NOW)
+    report = reconcile_track_b_paper_broker_truth(config=config, now=NOW)
 
-    assert blocked["broker_reconciled"] is False
-    assert any(
+    assert report["classification"] == "TRACK_B_PAPER_BROKER_RECONCILED"
+    assert report["broker_reconciled"] is True
+    registry = report["registry_reconciliation"]
+    assert registry["classification"] == "REGISTRY_RECONCILIATION_FLAT_WITH_STALE_OPEN_RECORD_REVIEW"
+    assert registry["blocking"] is False
+    assert registry["registry_observability_stale"] is True
+    assert registry["review_required_trade_ids"] == [trade_id]
+    assert report["track_b_broker_position_count"] == 0
+    assert report["track_b_broker_open_order_count"] == 0
+    assert report["current_scope_lifecycle_open_position_count"] == 0
+    assert not any(
         blocker["code"] == "REGISTRY_RECONCILIATION_REVIEW_REQUIRED"
-        for blocker in blocked["blockers"]
+        for blocker in report["blockers"]
     )
 
     cleanup_payload = {
@@ -2749,11 +2760,12 @@ def test_registry_review_event_is_not_broker_backed_without_perm_and_exec_id(tmp
     )
     _write_broker_truth(config)
 
-    reconcile_track_b_paper_broker_truth(config=config, now=NOW)
+    report = reconcile_track_b_paper_broker_truth(config=config, now=NOW)
 
     review_events = [event for event in _read_registry_events(config) if event["event_type"] == "REVIEW_REQUIRED"]
-    assert review_events
-    assert all(not event.get("perm_id") and not event.get("exec_id") for event in review_events)
+    assert report["broker_reconciled"] is True
+    assert report["registry_reconciliation"]["blocking"] is False
+    assert review_events == []
 
 
 def test_blocks_when_track_b_open_order_exists(tmp_path: Path) -> None:
@@ -3047,6 +3059,95 @@ def test_lifecycle_report_known_managed_exit_order_is_not_unknown_open_order_blo
     assert report["unknown_broker_open_order_count"] == 0
     assert report["open_order_truth_classification"] == "OPEN_CLOSE_ORDER_WORKING"
     assert report["known_managed_exit_orders"][0]["source"] == "TRACK_B_LIFECYCLE_REPORT_KNOWN_MANAGED_EXIT_ORDER"
+
+
+def test_managed_order_registry_known_exit_order_is_not_unknown_open_order_blocker(tmp_path: Path) -> None:
+    open_position = {
+        "strategy_id": "mes_globex_active_participation_long",
+        "lifecycle_id": "reserved_submit_mes_long",
+        "instrument_family": "MES",
+        "contract_key": "MES-202606",
+        "local_symbol": "MESM6",
+        "con_id": 770561194,
+        "side": "LONG",
+        "quantity": "1",
+        "avg_entry_price": "7400.5",
+    }
+    config = _write_base_artifacts(tmp_path, open_position=open_position)
+    _write_json(
+        config.managed_order_registry_path,
+        {
+            "schema_version": "track_b_managed_order_registry_v1",
+            "generated_at": NOW.isoformat(),
+            "classification": "CLOSE_ORDER_CANCEL_REPLACE_REQUIRED",
+            "paper_proof_invoked": False,
+            "live_money_eligible": False,
+            "managed_orders": [
+                {
+                    "classification": "CLOSE_ORDER_CANCEL_REPLACE_REQUIRED",
+                    "broker_order_id": "91",
+                    "client_id": 17086,
+                    "perm_id": 68652733,
+                    "symbol": "MES",
+                    "contract": "MESM6",
+                    "local_symbol": "MESM6",
+                    "con_id": 770561194,
+                    "action": "SELL",
+                    "quantity": "1",
+                    "limit_price": "7388.0",
+                    "broker_status": "Submitted",
+                    "is_close_order": True,
+                    "working": True,
+                    "lifecycle_id": "reserved_submit_mes_long",
+                    "trade_id": "trade-mes-long",
+                    "strategy_id": "mes_globex_active_participation_long",
+                    "lane_id": "mes_globex_active_participation_long",
+                }
+            ],
+        },
+    )
+    _write_broker_truth(
+        config,
+        positions=[
+            {
+                "account_id": "DUM882026",
+                "symbol": "MES",
+                "local_symbol": "MESM6",
+                "security_type": "FUT",
+                "quantity": "1",
+                "average_cost": "36949.37",
+                "multiplier": "5",
+                "con_id": 770561194,
+            }
+        ],
+        open_orders=[
+            {
+                "broker_order_id": "91",
+                "client_id": 17086,
+                "perm_id": 68652733,
+                "symbol": "MES",
+                "local_symbol": "MESM6",
+                "security_type": "FUT",
+                "expiry": "20260618",
+                "con_id": 770561194,
+                "action": "SELL",
+                "order_type": "LMT",
+                "limit_price": "7388.0",
+                "quantity": "1",
+                "remaining_quantity": "1",
+                "status": "Submitted",
+            }
+        ],
+    )
+
+    report = reconcile_track_b_paper_broker_truth(config=config, now=NOW)
+
+    assert report["classification"] == "TRACK_B_PAPER_BROKER_RECONCILED_WITH_KNOWN_MANAGED_EXIT_ORDER"
+    assert report["broker_reconciled"] is True
+    assert report["known_managed_exit_order_count"] == 1
+    assert report["known_managed_exit_orders"][0]["source"] == "TRACK_B_MANAGED_ORDER_REGISTRY_KNOWN_MANAGED_EXIT_ORDER"
+    assert report["unknown_broker_open_order_count"] == 0
+    assert not any(blocker["code"] == "UNKNOWN_BROKER_OPEN_ORDER" for blocker in report["blockers"])
 
 
 def test_known_leak_test_entry_order_is_not_unknown_open_order_blocker(tmp_path: Path) -> None:

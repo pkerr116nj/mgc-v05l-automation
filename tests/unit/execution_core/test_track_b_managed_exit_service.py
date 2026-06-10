@@ -22,6 +22,7 @@ from mgc_v05l.execution_core.track_b_managed_exit_service import (
     MANAGED_EXIT_SERVICE_PIPELINE_UNAVAILABLE,
     TrackBManagedExitServiceConfig,
     _build_pipeline_execution_plan,
+    _modify_config_from_order_plan,
     read_track_b_managed_exit_service_status,
     run_track_b_managed_exit_service,
     run_track_b_managed_exit_service_once,
@@ -356,6 +357,95 @@ def test_no_candidates_produces_no_eligible_exits(tmp_path: Path) -> None:
     assert payload["classification"] == MANAGED_EXIT_SERVICE_NO_ELIGIBLE_EXITS
     assert payload["required_next_action"] == "NO_ACTION"
     assert payload["actuator_invocation_count"] == 0
+
+
+def test_no_exit_intents_invokes_working_close_order_maintenance(tmp_path: Path) -> None:
+    maintenance_calls = []
+    actuator_calls = []
+
+    def _maintenance(config, now, timeout):
+        maintenance_calls.append((config, timeout))
+        return {
+            "classification": "MANAGED_ORDER_MAINTENANCE_DRY_RUN_READY",
+            "broker_mutation_attempted": False,
+            "broker_mutation_performed": False,
+            "results": [{"broker_order_id": "91", "classification": "MODIFY_IN_PLACE_DRY_RUN_READY"}],
+        }
+
+    payload = run_track_b_managed_exit_service_once(
+        config=TrackBManagedExitServiceConfig(repo_root=tmp_path),
+        now=NOW,
+        actuator_runner=lambda config, now, timeout: actuator_calls.append(config) or {},
+        authority_refresher=_refresh_ok,
+        pipeline_builder=lambda config, now: _pipeline_report(decisions=(), classification="HOLD_ONLY"),
+        order_maintenance_runner=_maintenance,
+        write=False,
+    )
+
+    assert payload["classification"] == MANAGED_EXIT_SERVICE_DRY_RUN_READY
+    assert payload["actuator_invocation_count"] == 0
+    assert len(maintenance_calls) == 1
+    assert payload["managed_order_maintenance_invocation_count"] == 1
+    assert payload["latest_managed_order_maintenance_classification"] == "MANAGED_ORDER_MAINTENANCE_DRY_RUN_READY"
+    assert payload["broker_state_mutated"] is False
+
+
+def test_apply_service_reports_working_close_order_maintenance_mutation(tmp_path: Path) -> None:
+    payload = run_track_b_managed_exit_service_once(
+        config=TrackBManagedExitServiceConfig(repo_root=tmp_path, apply=True),
+        now=NOW,
+        actuator_runner=lambda config, now, timeout: {},
+        authority_refresher=_refresh_ok,
+        pipeline_builder=lambda config, now: _pipeline_report(decisions=(), classification="HOLD_ONLY"),
+        order_maintenance_runner=lambda config, now, timeout: {
+            "classification": "MANAGED_ORDER_MAINTENANCE_APPLIED",
+            "broker_mutation_attempted": True,
+            "broker_mutation_performed": True,
+            "results": [
+                {
+                    "broker_order_id": "91",
+                    "classification": "MODIFY_IN_PLACE_APPLIED",
+                    "current_known_limit": "7388.0",
+                    "new_limit": "7378.0",
+                }
+            ],
+        },
+        write=False,
+    )
+
+    assert payload["classification"] == MANAGED_EXIT_SERVICE_APPLY_SUCCEEDED
+    assert payload["actuator_invocation_count"] == 0
+    assert payload["broker_state_mutated"] is True
+    assert payload["managed_order_maintenance_mutation_attempted"] is True
+    assert payload["managed_order_maintenance_mutation_performed"] is True
+
+
+def test_modify_config_uses_known_order_owner_client_id(tmp_path: Path) -> None:
+    config = _modify_config_from_order_plan(
+        service_config=TrackBManagedExitServiceConfig(repo_root=tmp_path, apply=True),
+        order={
+            "broker_order_id": "91",
+            "perm_id": 68652733,
+            "client_id": 17086,
+            "account_id": "DUM882026",
+            "symbol": "MES",
+            "contract": "MESM6",
+            "con_id": 770561194,
+            "action": "SELL",
+            "quantity": "1",
+            "limit_price": "7388.0",
+        },
+        plan={
+            "classification": "MODIFY_IN_PLACE_ELIGIBLE",
+            "managed_close_reprice_policy": {"limit_price": "7374.25"},
+        },
+        timeout_seconds=30.0,
+    )
+
+    assert config is not None
+    assert config.tws_client_id == 17086
+    assert config.broker_order_id == "91"
+    assert config.new_limit == "7374.25"
 
 
 def _refresh_ok(config, phase):
