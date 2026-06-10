@@ -74,6 +74,7 @@ MANAGED_EXIT_SERVICE_ACTUATOR_TIMEOUT = "ACTUATOR_TIMEOUT"
 MANAGED_EXIT_SERVICE_ERROR = "SERVICE_ERROR"
 MANAGED_EXIT_SERVICE_REFRESH_DEGRADED_ACTUATOR_ATTEMPTED = "REFRESH_DEGRADED_ACTUATOR_ATTEMPTED"
 MANAGED_EXIT_SERVICE_PIPELINE_UNAVAILABLE = "MANAGED_EXIT_SERVICE_PIPELINE_UNAVAILABLE"
+MANAGED_EXIT_SERVICE_AUTHORITY_REFRESH_TIMEOUT_BEFORE_MUTATION = "AUTHORITY_REFRESH_TIMEOUT_BEFORE_MUTATION"
 
 
 @dataclass(frozen=True)
@@ -134,7 +135,7 @@ def run_track_b_managed_exit_service_once(
         {
             "phase": "pipeline_candidate_discovery",
             "duration_seconds": 0.0,
-            "classification": "DEFERRED_UNTIL_AFTER_REFRESH",
+            "classification": "STARTS_BEFORE_AUTHORITY_REFRESH",
         }
     ]
 
@@ -143,12 +144,6 @@ def run_track_b_managed_exit_service_once(
             config=config,
             payload=_cycle_started_payload(config=config, now=actual_now),
         )
-
-    if config.authority_refresh_before_apply:
-        phase_started = time.monotonic()
-        pre_refresh = _run_authority_refresh(authority_refresher, config, "before_actuator")
-        phase_timings.append(_phase_timing("authority_refresh", phase_started))
-        authority_refreshes.append(pre_refresh)
 
     phase_started = time.monotonic()
     execution_plan = _build_pipeline_execution_plan(config=config, now=actual_now, pipeline_builder=pipeline_builder)
@@ -178,7 +173,39 @@ def run_track_b_managed_exit_service_once(
     executable_intents = list(execution_plan.get("executable_intents") or [])
     if not executable_intents:
         blocked_intents = list(execution_plan.get("blocked_intents") or [])
-        if not blocked_intents:
+        if not blocked_intents and _working_close_order_maintenance_needed(config):
+            if config.apply and config.authority_refresh_before_apply:
+                phase_started = time.monotonic()
+                pre_refresh = _run_authority_refresh(authority_refresher, config, "before_order_maintenance")
+                phase_timings.append(
+                    {
+                        **_phase_timing("authority_refresh_before_order_maintenance", phase_started),
+                        "classification": pre_refresh.get("classification"),
+                    }
+                )
+                authority_refreshes.append(pre_refresh)
+                if not _authority_refresh_succeeded(pre_refresh):
+                    payload = _service_payload(
+                        config=config,
+                        now=actual_now,
+                        classification=MANAGED_EXIT_SERVICE_APPLY_BLOCKED,
+                        authority_refreshes=authority_refreshes,
+                        actuator_reports=actuator_reports,
+                        phase_timings=phase_timings,
+                        execution_plan=execution_plan,
+                        order_maintenance_reports=order_maintenance_reports,
+                        service_diagnostics=[
+                            {
+                                "code": MANAGED_EXIT_SERVICE_AUTHORITY_REFRESH_TIMEOUT_BEFORE_MUTATION,
+                                "phase": "before_order_maintenance",
+                                "classification": pre_refresh.get("classification"),
+                                "detail": "Authority refresh failed before managed close order maintenance; no broker mutation was attempted.",
+                            }
+                        ],
+                    )
+                    if write:
+                        write_track_b_managed_exit_service_status(config=config, payload=payload)
+                    return payload
             phase_started = time.monotonic()
             maintenance_report = dict(
                 order_maintenance_runner(config, actual_now, config.actuator_timeout_seconds)
@@ -223,6 +250,38 @@ def run_track_b_managed_exit_service_once(
 
     max_cycles = min(max(int(config.max_cycles_per_tick or 0), 1), len(executable_intents))
     for cycle_index in range(max_cycles):
+        if config.authority_refresh_before_apply:
+            phase_started = time.monotonic()
+            pre_refresh = _run_authority_refresh(authority_refresher, config, "before_actuator")
+            phase_timings.append(
+                {
+                    **_phase_timing("authority_refresh_before_actuator", phase_started),
+                    "classification": pre_refresh.get("classification"),
+                }
+            )
+            authority_refreshes.append(pre_refresh)
+            if not _authority_refresh_succeeded(pre_refresh):
+                payload = _service_payload(
+                    config=config,
+                    now=actual_now,
+                    classification=MANAGED_EXIT_SERVICE_APPLY_BLOCKED,
+                    authority_refreshes=authority_refreshes,
+                    actuator_reports=actuator_reports,
+                    phase_timings=phase_timings,
+                    execution_plan=execution_plan,
+                    order_maintenance_reports=order_maintenance_reports,
+                    service_diagnostics=[
+                        {
+                            "code": MANAGED_EXIT_SERVICE_AUTHORITY_REFRESH_TIMEOUT_BEFORE_MUTATION,
+                            "phase": "before_actuator",
+                            "classification": pre_refresh.get("classification"),
+                            "detail": "Authority refresh failed before managed-exit actuator invocation; no broker mutation was attempted.",
+                        }
+                    ],
+                )
+                if write:
+                    write_track_b_managed_exit_service_status(config=config, payload=payload)
+                return payload
         phase_started = time.monotonic()
         actuator_config = TrackBManagedExitActuatorConfig(
             repo_root=config.repo_root,
@@ -389,6 +448,7 @@ def _service_payload(
     phase_timings: Sequence[Mapping[str, Any]],
     execution_plan: Mapping[str, Any] | None = None,
     order_maintenance_reports: Sequence[Mapping[str, Any]] = (),
+    service_diagnostics: Sequence[Mapping[str, Any]] = (),
 ) -> dict[str, Any]:
     attempted = [row for report in actuator_reports for row in report.get("attempted_closes") or []]
     final_classification = _final_cycle_classification(classification=classification, actuator_reports=actuator_reports)
@@ -434,6 +494,7 @@ def _service_payload(
         "execution_plan": plan,
         "pipeline_classification": plan.get("classification"),
         "pipeline_diagnostics": list(plan.get("diagnostics") or []),
+        "service_diagnostics": list(service_diagnostics),
         "exit_intent_count": len(plan.get("exit_intents") or []),
         "authority_decision_count": len(plan.get("authority_decisions") or []),
         "executable_intent_count": len(plan.get("executable_intents") or []),
@@ -698,6 +759,26 @@ def _run_managed_order_maintenance(
         order_adjustment_plan=order_adjustment_plan,
         results=results,
     )
+
+
+def _working_close_order_maintenance_needed(config: TrackBManagedExitServiceConfig) -> bool:
+    managed_orders = _read_json(config.resolve(DEFAULT_MANAGED_ORDER_REGISTRY_ARTIFACT))
+    for order in managed_orders.get("managed_orders") or []:
+        if not isinstance(order, Mapping):
+            continue
+        if order.get("is_close_order") is not True:
+            continue
+        if str(order.get("classification") or "") in {
+            "WORKING_CLOSE_ORDER",
+            "CLOSE_ORDER_MODIFIABLE",
+            "CLOSE_ORDER_CANCEL_REPLACE_REQUIRED",
+        }:
+            return True
+    return False
+
+
+def _authority_refresh_succeeded(refresh: Mapping[str, Any]) -> bool:
+    return refresh.get("succeeded") is True
 
 
 def _managed_order_maintenance_report(

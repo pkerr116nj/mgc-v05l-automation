@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import subprocess
 from datetime import UTC, datetime
 from pathlib import Path
@@ -20,6 +21,7 @@ from mgc_v05l.execution_core.track_b_managed_exit_service import (
     MANAGED_EXIT_SERVICE_DRY_RUN_READY,
     MANAGED_EXIT_SERVICE_NO_ELIGIBLE_EXITS,
     MANAGED_EXIT_SERVICE_PIPELINE_UNAVAILABLE,
+    MANAGED_EXIT_SERVICE_AUTHORITY_REFRESH_TIMEOUT_BEFORE_MUTATION,
     TrackBManagedExitServiceConfig,
     _build_pipeline_execution_plan,
     _modify_config_from_order_plan,
@@ -27,6 +29,7 @@ from mgc_v05l.execution_core.track_b_managed_exit_service import (
     run_track_b_managed_exit_service,
     run_track_b_managed_exit_service_once,
 )
+from mgc_v05l.execution_core.track_b_managed_order_registry import DEFAULT_MANAGED_ORDER_REGISTRY_ARTIFACT
 
 
 NOW = datetime(2026, 6, 8, 15, 5, tzinfo=UTC)
@@ -50,16 +53,22 @@ def test_pipeline_execution_plan_splits_v1_allowed_degraded_and_blocked(tmp_path
 
 def test_service_dry_run_uses_v1_allowed_plan_without_apply(tmp_path: Path) -> None:
     actuator_calls = []
+    call_order = []
 
     def _actuator(config, now, timeout):
+        call_order.append("actuator")
         actuator_calls.append(config)
         return _actuator_report(MANAGED_EXIT_ACTUATOR_DRY_RUN_READY, eligible=1)
+
+    def _refresh(config, phase):
+        call_order.append(f"refresh:{phase}")
+        return _refresh_ok(config, phase)
 
     payload = run_track_b_managed_exit_service_once(
         config=TrackBManagedExitServiceConfig(repo_root=tmp_path),
         now=NOW,
         actuator_runner=_actuator,
-        authority_refresher=_refresh_ok,
+        authority_refresher=_refresh,
         pipeline_builder=lambda config, now: _pipeline_report(decisions=("ALLOWED",)),
         write=False,
     )
@@ -71,6 +80,7 @@ def test_service_dry_run_uses_v1_allowed_plan_without_apply(tmp_path: Path) -> N
     assert payload["apply_requested"] is False
     assert actuator_calls[0].apply is False
     assert actuator_calls[0].max_closes_per_run == 1
+    assert call_order == ["refresh:before_actuator", "actuator"]
 
 
 def test_apply_service_processes_v1_executable_intents_one_at_a_time_with_refresh_between(tmp_path: Path) -> None:
@@ -117,7 +127,13 @@ def test_apply_service_processes_v1_executable_intents_one_at_a_time_with_refres
     assert [call.apply for call in actuator_calls] == [True, True, True]
     assert [call.operator_authorized_managed_exit for call in actuator_calls] == [True, True, True]
     assert [call.max_closes_per_run for call in actuator_calls] == [1, 1, 1]
-    assert refresh_phases == ["before_actuator", "after_actuator_attempt", "after_actuator_attempt"]
+    assert refresh_phases == [
+        "before_actuator",
+        "after_actuator_attempt",
+        "before_actuator",
+        "after_actuator_attempt",
+        "before_actuator",
+    ]
 
 
 def test_service_preserves_actuator_close_quantity_for_v1_plan(tmp_path: Path) -> None:
@@ -152,7 +168,7 @@ def test_service_preserves_actuator_close_quantity_for_v1_plan(tmp_path: Path) -
     assert payload["execution_plan"]["executable_intents"][0]["close_qty"] == 3
 
 
-def test_refresh_failure_does_not_block_v1_allowed_close_plan(tmp_path: Path) -> None:
+def test_refresh_failure_blocks_v1_allowed_close_plan_before_actuator(tmp_path: Path) -> None:
     calls = []
 
     payload = run_track_b_managed_exit_service_once(
@@ -178,22 +194,25 @@ def test_refresh_failure_does_not_block_v1_allowed_close_plan(tmp_path: Path) ->
         write=False,
     )
 
-    assert calls
-    assert payload["classification"] == MANAGED_EXIT_SERVICE_APPLY_SUCCEEDED
+    assert calls == []
+    assert payload["classification"] == MANAGED_EXIT_SERVICE_APPLY_BLOCKED
     assert payload["authority_refresh_failed"] is True
-    assert payload["authority_refresh_degraded_actuator_attempted"] is True
+    assert payload["authority_refresh_degraded_actuator_attempted"] is False
+    assert payload["service_diagnostics"][0]["code"] == MANAGED_EXIT_SERVICE_AUTHORITY_REFRESH_TIMEOUT_BEFORE_MUTATION
     assert payload["pipeline_diagnostics"][0]["kind"] == "legacy_source_classifications"
-    assert payload["submitted_count"] == 1
+    assert payload["submitted_count"] == 0
+    assert payload["submit_attempted"] is False
 
 
 def test_v1_blocked_plan_does_not_invoke_actuator(tmp_path: Path) -> None:
     calls = []
+    refresh_calls = []
 
     payload = run_track_b_managed_exit_service_once(
         config=TrackBManagedExitServiceConfig(repo_root=tmp_path, apply=True),
         now=NOW,
         actuator_runner=lambda config, now, timeout: calls.append(config) or {},
-        authority_refresher=_refresh_ok,
+        authority_refresher=lambda config, phase: refresh_calls.append(phase) or _refresh_ok(config, phase),
         pipeline_builder=lambda config, now: _pipeline_report(decisions=("BLOCKED",), block_reasons=("over_close_risk",)),
         write=False,
     )
@@ -203,6 +222,7 @@ def test_v1_blocked_plan_does_not_invoke_actuator(tmp_path: Path) -> None:
     assert payload["blocked_exit_intent_ids"] == ["exit-mes"]
     assert payload["required_next_action"] == "OPERATOR_REVIEW_REQUIRED"
     assert calls == []
+    assert refresh_calls == []
 
 
 def test_pipeline_unavailable_does_not_invoke_actuator(tmp_path: Path) -> None:
@@ -345,11 +365,14 @@ def test_actuator_timeout_produces_terminal_status_without_further_apply(tmp_pat
 
 
 def test_no_candidates_produces_no_eligible_exits(tmp_path: Path) -> None:
+    def _refresh_should_not_run(config, phase):
+        raise AssertionError("HOLD/no-candidate cycles must not refresh operator authority")
+
     payload = run_track_b_managed_exit_service_once(
         config=TrackBManagedExitServiceConfig(repo_root=tmp_path),
         now=NOW,
         actuator_runner=lambda config, now, timeout: _actuator_report(MANAGED_EXIT_ACTUATOR_NOOP, eligible=0),
-        authority_refresher=_refresh_ok,
+        authority_refresher=_refresh_should_not_run,
         pipeline_builder=lambda config, now: _pipeline_report(decisions=(), classification="NO_POSITIONS"),
         write=False,
     )
@@ -357,11 +380,36 @@ def test_no_candidates_produces_no_eligible_exits(tmp_path: Path) -> None:
     assert payload["classification"] == MANAGED_EXIT_SERVICE_NO_ELIGIBLE_EXITS
     assert payload["required_next_action"] == "NO_ACTION"
     assert payload["actuator_invocation_count"] == 0
+    assert payload["authority_refreshes"] == []
+
+
+def test_hold_only_cycle_skips_slow_authority_refresh_and_actuator(tmp_path: Path) -> None:
+    def _refresh_should_not_run(config, phase):
+        raise AssertionError("HOLD_ONLY cycle reached slow authority refresh")
+
+    def _actuator_should_not_run(config, now, timeout):
+        raise AssertionError("HOLD_ONLY cycle reached actuator")
+
+    payload = run_track_b_managed_exit_service_once(
+        config=TrackBManagedExitServiceConfig(repo_root=tmp_path, apply=True),
+        now=NOW,
+        actuator_runner=_actuator_should_not_run,
+        authority_refresher=_refresh_should_not_run,
+        pipeline_builder=lambda config, now: _pipeline_report(decisions=(), classification="HOLD_ONLY"),
+        write=False,
+    )
+
+    assert payload["classification"] == MANAGED_EXIT_SERVICE_NO_ELIGIBLE_EXITS
+    assert payload["pipeline_classification"] == "HOLD_ONLY"
+    assert payload["authority_refreshes"] == []
+    assert payload["actuator_invocation_count"] == 0
+    assert payload["managed_order_maintenance_invocation_count"] == 0
 
 
 def test_no_exit_intents_invokes_working_close_order_maintenance(tmp_path: Path) -> None:
     maintenance_calls = []
     actuator_calls = []
+    _write_managed_close_order_registry(tmp_path)
 
     def _maintenance(config, now, timeout):
         maintenance_calls.append((config, timeout))
@@ -391,6 +439,8 @@ def test_no_exit_intents_invokes_working_close_order_maintenance(tmp_path: Path)
 
 
 def test_apply_service_reports_working_close_order_maintenance_mutation(tmp_path: Path) -> None:
+    _write_managed_close_order_registry(tmp_path)
+
     payload = run_track_b_managed_exit_service_once(
         config=TrackBManagedExitServiceConfig(repo_root=tmp_path, apply=True),
         now=NOW,
@@ -418,6 +468,35 @@ def test_apply_service_reports_working_close_order_maintenance_mutation(tmp_path
     assert payload["broker_state_mutated"] is True
     assert payload["managed_order_maintenance_mutation_attempted"] is True
     assert payload["managed_order_maintenance_mutation_performed"] is True
+
+
+def test_working_close_order_maintenance_refresh_timeout_blocks_before_mutation(tmp_path: Path) -> None:
+    _write_managed_close_order_registry(tmp_path)
+    maintenance_calls = []
+
+    payload = run_track_b_managed_exit_service_once(
+        config=TrackBManagedExitServiceConfig(repo_root=tmp_path, apply=True),
+        now=NOW,
+        actuator_runner=lambda config, now, timeout: {},
+        authority_refresher=lambda config, phase: {
+            "phase": phase,
+            "succeeded": False,
+            "classification": "TRACK_B_OPERATOR_READINESS_REFRESH_TIMEOUT",
+        },
+        pipeline_builder=lambda config, now: _pipeline_report(decisions=(), classification="HOLD_ONLY"),
+        order_maintenance_runner=lambda config, now, timeout: maintenance_calls.append(config) or {
+            "classification": "MANAGED_ORDER_MAINTENANCE_APPLIED",
+            "broker_mutation_attempted": True,
+            "broker_mutation_performed": True,
+        },
+        write=False,
+    )
+
+    assert maintenance_calls == []
+    assert payload["classification"] == MANAGED_EXIT_SERVICE_APPLY_BLOCKED
+    assert payload["service_diagnostics"][0]["code"] == MANAGED_EXIT_SERVICE_AUTHORITY_REFRESH_TIMEOUT_BEFORE_MUTATION
+    assert payload["managed_order_maintenance_invocation_count"] == 0
+    assert payload["managed_order_maintenance_mutation_attempted"] is False
 
 
 def test_modify_config_uses_known_order_owner_client_id(tmp_path: Path) -> None:
@@ -470,6 +549,36 @@ def _actuator_report(classification: str, *, eligible: int, submitted: int = 0, 
         if local_symbol is None
         else [{"identity": {"local_symbol": local_symbol}, "submit_attempted": submitted > 0}],
     }
+
+
+def _write_managed_close_order_registry(repo_root: Path) -> None:
+    path = repo_root / DEFAULT_MANAGED_ORDER_REGISTRY_ARTIFACT
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        json.dumps(
+            {
+                "classification": "CLOSE_ORDER_CANCEL_REPLACE_REQUIRED",
+                "managed_orders": [
+                    {
+                        "classification": "CLOSE_ORDER_CANCEL_REPLACE_REQUIRED",
+                        "is_close_order": True,
+                        "broker_order_id": "91",
+                        "perm_id": 68652733,
+                        "client_id": 17086,
+                        "account_id": "DUM882026",
+                        "symbol": "MES",
+                        "contract": "MESM6",
+                        "con_id": 770561194,
+                        "action": "SELL",
+                        "quantity": "1",
+                        "limit_price": "7388.0",
+                        "lifecycle_id": "life-mes",
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
 
 
 def _pipeline_report(
