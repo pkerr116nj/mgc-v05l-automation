@@ -270,7 +270,7 @@ def _record_matches_identity(record: TradeRegistryRecord, identity: Mapping[str,
 
 
 def _has_linked_broker_position(identity: Mapping[str, Any], broker_positions: Sequence[Mapping[str, Any]]) -> bool:
-    return any(_row_matches_identity(row, identity) for row in broker_positions)
+    return any(_is_nonzero_broker_position(row) and _row_matches_identity(row, identity) for row in broker_positions)
 
 
 def _has_linked_open_order(identity: Mapping[str, Any], broker_open_orders: Sequence[Mapping[str, Any]]) -> bool:
@@ -293,6 +293,11 @@ def _row_matches_identity(row: Mapping[str, Any], identity: Mapping[str, Any]) -
     if not _direction_compatible(row, identity):
         return False
     return bool(row_con is not None or ident_con is not None or row_local or ident_local or row_symbol or ident_symbol)
+
+
+def _is_nonzero_broker_position(row: Mapping[str, Any]) -> bool:
+    quantity = _decimal_or_none(row.get("quantity") or row.get("position") or row.get("qty"))
+    return quantity is not None and quantity != 0
 
 
 def _identity_from_row(row: Any) -> Mapping[str, Any]:

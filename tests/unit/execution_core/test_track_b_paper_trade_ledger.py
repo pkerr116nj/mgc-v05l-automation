@@ -96,13 +96,18 @@ def _registry_event(
     trade_id: str,
     lifecycle_id: str,
     action: str = "SELL",
+    generated_at: datetime | None = None,
+    order_id: str = "2",
+    client_id: str = "10973",
+    perm_id: str = "665735662",
+    exec_id: str = "0000e1a7.6a2e7d30.01.01",
     reason_codes: tuple[str, ...] = (),
     metadata: dict[str, object] | None = None,
 ) -> TradeEvent:
     return TradeEvent(
         event_id=f"{event_type.value}_{lifecycle_id}",
         event_type=event_type,
-        generated_at=aware_now(),
+        generated_at=generated_at or aware_now(),
         trade_id=trade_id,
         lifecycle_id=lifecycle_id,
         lane_id="mes_us_active_participation_short",
@@ -116,10 +121,10 @@ def _registry_event(
         action=action,
         qty=Decimal("1"),
         source_artifact_path="outputs/reports/track_b_paper_broker_reconciliation/latest_track_b_paper_broker_reconciliation.json",
-        order_id="2",
-        client_id="10973",
-        perm_id="665735662",
-        exec_id="0000e1a7.6a2e7d30.01.01",
+        order_id=order_id,
+        client_id=client_id,
+        perm_id=perm_id,
+        exec_id=exec_id,
         reason_codes=reason_codes,
         metadata=metadata or {},
     )
@@ -1250,6 +1255,127 @@ def test_evidence_gated_broker_flat_cleanup_suppresses_stale_live_position(tmp_p
     terminal = live_status["terminal_superseded_open_records"][0]["terminal_registry_truth"]
     assert terminal["classification"] == "BROKER_FLAT_EVIDENCE_GATED_CLEANUP_TERMINAL"
     assert terminal["broker_backed_exit"] is False
+
+
+def test_flat_broker_rows_do_not_merge_terminal_same_contract_round_trips(tmp_path: Path) -> None:
+    old_trade_id = "trade_old_mes_short"
+    old_lifecycle_id = "reserved_submit_mes_short_old"
+    current_trade_id = "trade_current_mes_short"
+    current_lifecycle_id = "reserved_submit_mes_short_current"
+    ledger_root = tmp_path / "outputs" / "track_b_execution_core" / "paper_trade_ledger"
+    registry_path = tmp_path / "outputs" / "track_b_execution_core" / "trade_registry" / "live_trade_events.jsonl"
+    registry_path.parent.mkdir(parents=True, exist_ok=True)
+    broker_truth_root = tmp_path / "outputs" / "reports" / "ibkr_read_only_verification"
+    broker_truth_root.mkdir(parents=True, exist_ok=True)
+    (broker_truth_root / "ibkr_positions_snapshot.json").write_text(
+        json.dumps(
+            {
+                "positions": [
+                    {
+                        "account_id": "DUM882026",
+                        "local_symbol": "MESM6",
+                        "con_id": 770561194,
+                        "quantity": "0.0",
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    (broker_truth_root / "ibkr_open_orders_snapshot.json").write_text(
+        json.dumps({"open_orders": []}),
+        encoding="utf-8",
+    )
+    registry_events = [
+        _registry_event(
+            TradeEventType.ENTRY_FILL_BROKER_BACKED,
+            trade_id=old_trade_id,
+            lifecycle_id=old_lifecycle_id,
+        ),
+        _registry_event(
+            TradeEventType.RECONCILED_FLAT_HISTORICAL_CLEANUP,
+            trade_id=old_trade_id,
+            lifecycle_id=old_lifecycle_id,
+            action="HISTORICAL_FLAT_CLEANUP",
+            reason_codes=(
+                "HISTORICAL_SUBMIT_INTENT_RESOLVED_FLAT",
+                "BROKER_FLAT_PROOF_CONFIRMED",
+                "NO_OPEN_ORDER_PROOF_CONFIRMED",
+                "NOT_CURRENT_EXPOSURE",
+                "NOT_CURRENT_OPEN_ORDER",
+            ),
+            metadata={
+                "historical_only": True,
+                "not_current_exposure": True,
+                "not_current_open_order": True,
+                "broker_flat_proof_path": "outputs/reports/ibkr_read_only_verification/ibkr_positions_snapshot.json",
+                "open_orders_proof_path": "outputs/reports/ibkr_read_only_verification/ibkr_open_orders_snapshot.json",
+            },
+        ),
+        _registry_event(
+            TradeEventType.ENTRY_FILL_BROKER_BACKED,
+            trade_id=current_trade_id,
+            lifecycle_id=current_lifecycle_id,
+            generated_at=aware_now(),
+        ),
+        _registry_event(
+            TradeEventType.EXIT_FILL_BROKER_BACKED,
+            trade_id=current_trade_id,
+            lifecycle_id=current_lifecycle_id,
+            action="BUY",
+            generated_at=aware_now(),
+            order_id="92",
+            client_id="17086",
+            perm_id="68652741",
+            exec_id="0000e1a7.exit.01.01",
+            reason_codes=("BROKER_BACKED_FILL_CONFIRMED",),
+        ),
+    ]
+    registry_path.write_text("\n".join(json.dumps(event.to_dict(), sort_keys=True) for event in registry_events) + "\n")
+    old_row = _open_unit(
+        old_lifecycle_id,
+        "2",
+        "629788343",
+        "7601.25",
+        "2026-06-08T22:18:08+00:00",
+        strategy_id="mes_globex_active_participation_short",
+        lane_id="mes_globex_active_participation_short",
+        contract_key="MES-202606",
+        local_symbol="MESM6",
+        con_id=770561194,
+    )
+    current_row = _open_unit(
+        current_lifecycle_id,
+        "2",
+        "68652734",
+        "7604.25",
+        "2026-06-10T02:28:26+00:00",
+        strategy_id="mes_globex_active_participation_short",
+        lane_id="mes_globex_active_participation_short",
+        contract_key="MES-202606",
+        local_symbol="MESM6",
+        con_id=770561194,
+    )
+    old_row["trade_id"] = old_trade_id
+    current_row["trade_id"] = current_trade_id
+
+    summaries = build_track_b_paper_trade_summaries(
+        ledger_records=[old_row, current_row],
+        ledger_jsonl=ledger_root / "track_b_paper_trade_ledger.jsonl",
+        trade_summary_json=ledger_root / "latest_track_b_paper_trade_summary.json",
+        live_position_status_json=ledger_root / "latest_track_b_live_position_status.json",
+        pnl_summary_json=ledger_root / "latest_track_b_pnl_summary.json",
+        now=aware_now(),
+    )
+
+    live_status = summaries["live_position_status"]
+    assert live_status["open_position_count"] == 0
+    assert live_status["positions_by_instrument"] == {}
+    assert len(live_status["terminal_superseded_open_records"]) == 2
+    assert {row["terminal_registry_truth"]["trade_id"] for row in live_status["terminal_superseded_open_records"]} == {
+        old_trade_id,
+        current_trade_id,
+    }
 
 
 def test_malformed_manual_cleanup_is_excluded_from_clean_trade_stats(tmp_path: Path) -> None:

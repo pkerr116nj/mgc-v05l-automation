@@ -88,6 +88,20 @@ def test_cleanup_terminal_blocks_when_broker_position_still_linked() -> None:
     assert terminal.reason_codes == ("CURRENT_BROKER_EXPOSURE_OR_ORDER_LINKED",)
 
 
+def test_flat_broker_position_row_does_not_block_terminal_cleanup() -> None:
+    record = _cleanup_record()
+
+    terminal = resolve_terminal_registry_truth(
+        records=[record],
+        identity=_identity(),
+        broker_positions=[{"account_id": "DUM882026", "local_symbol": "MESM6", "con_id": 770561194, "quantity": "0.0"}],
+        broker_open_orders=[],
+    )
+
+    assert terminal.classification == BROKER_FLAT_EVIDENCE_GATED_CLEANUP_TERMINAL
+    assert terminal.terminal_closed_flat is True
+
+
 def test_cleanup_terminal_blocks_when_open_order_still_linked() -> None:
     record = _cleanup_record()
 
