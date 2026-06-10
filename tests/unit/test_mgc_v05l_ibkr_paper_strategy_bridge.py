@@ -4843,6 +4843,79 @@ def test_new_entry_blocks_if_stale_phase1_reconciliation_refresh_is_incomplete(
     assert "BROKER_TRUTH_STATUS_FLAG_MISMATCH" in str(phase1["exit_block_reason"])
 
 
+def test_new_entry_demotes_phase1_reconciliation_when_paper_minimal_startup_allowed(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _write_phase1_reconciliation(
+        tmp_path,
+        classification="TRACK_B_PAPER_BROKER_RECONCILIATION_BLOCKED",
+        broker_reconciled=False,
+        review_required_count=1,
+        block_reasons=["STALE_LIFECYCLE_DEBRIS"],
+    )
+    refresh_calls: list[Path] = []
+
+    def _fake_refresh(*, config: IbkrPaperStrategyBridgeConfig) -> dict[str, object]:
+        refresh_calls.append(config.repo_root)
+        return {"classification": "SHOULD_NOT_REFRESH_WHEN_MINIMAL_STARTUP_ALLOWED"}
+
+    monkeypatch.setattr(bridge_module, "_refresh_phase1_broker_reconciliation_artifacts", _fake_refresh)
+    monkeypatch.setattr(
+        bridge_module,
+        "_paper_minimal_startup_for_bridge",
+        lambda *, config: {
+            "allowed": True,
+            "classification": "PAPER_MINIMAL_STARTUP_ALLOWED",
+            "blockers": [],
+            "warnings": [{"code": "broker_reconciliation_dirty_diagnostic"}],
+        },
+    )
+    config = _config(
+        tmp_path,
+        submit=True,
+        caller_path="probationary_paper_runtime_lane",
+        caller_metadata=_approved_runtime_metadata(
+            strategy_id="ATP_COMPANION_V1_ASIA_US",
+            runtime_pid=os.getpid(),
+            runtime_cwd=str(tmp_path),
+        ),
+    )
+    intent = IbkrPaperStrategyOrderIntent(
+        strategy_id=config.strategy_id,
+        symbol=config.symbol,
+        contract_month=config.contract_month,
+        action=config.action,
+        quantity=config.quantity,
+        order_type=config.order_type,
+        limit_price_model=config.limit_price_model,
+        time_in_force=config.time_in_force,
+        reason=config.reason,
+        timestamp="2026-05-15T07:48:00+00:00",
+        risk_tags=config.risk_tags,
+        paper_only=config.paper_only,
+    )
+
+    checks = _build_static_preflight_checks(
+        config=config,
+        intent=intent,
+        environment_lock=evaluate_paper_preview_environment_lock(mode=config.mode, host=config.host, port=config.port),
+        caller_gate={"passed": True, "detail": "approved runtime caller"},
+        monitor_status={},
+        governance_status=_stale_phase1_governance(),
+        exposure_status=_healthy_exposure(),
+    )
+
+    phase1 = next(row for row in checks if row["name"] == "phase1_broker_reconciliation_submit_gate")
+    governance_gate = next(row for row in checks if row["name"] == "paper_strategy_governance_submit_gate")
+    assert refresh_calls == []
+    assert phase1["passed"] is True
+    assert phase1["paper_minimal_startup_allowed"] is True
+    assert phase1["paper_minimal_startup_classification"] == "PAPER_MINIMAL_STARTUP_ALLOWED"
+    assert "phase1_broker_reconciliation_not_reconciled" in phase1["diagnostic_block_reasons"]
+    assert governance_gate["passed"] is True
+
+
 def test_stale_governance_reconciliation_block_clears_after_successful_bridge_refresh(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

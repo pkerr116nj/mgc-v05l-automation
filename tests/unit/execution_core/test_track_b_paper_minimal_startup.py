@@ -141,6 +141,10 @@ def _codes(payload: dict) -> set[str]:
     return {str(row.get("code")) for row in payload.get("blockers") or []}
 
 
+def _warning_codes(payload: dict) -> set[str]:
+    return {str(row.get("code")) for row in payload.get("warnings") or []}
+
+
 def test_flat_broker_known_orders_price_profile_paper_route_qty_cap_allows_submit_capable(tmp_path: Path) -> None:
     _seed_minimal_ready(tmp_path)
 
@@ -213,6 +217,77 @@ def test_unknown_or_conflicting_open_orders_block(tmp_path: Path) -> None:
     result = _classification(tmp_path)
 
     assert "unknown_open_orders_present" in _codes(result)
+
+
+def test_nonzero_broker_position_blocks_flat_required_startup(tmp_path: Path) -> None:
+    config = _seed_minimal_ready(tmp_path)
+    payload_path = tmp_path / config.broker_truth_lease_path
+    payload = json.loads(payload_path.read_text(encoding="utf-8"))
+    payload["track_b_broker_position_count"] = 1
+    payload_path.write_text(json.dumps(payload), encoding="utf-8")
+
+    result = _classification(tmp_path)
+
+    assert result["allowed"] is False
+    assert "broker_positions_present" in _codes(result)
+
+
+def test_stale_dirty_reconciliation_is_diagnostic_when_broker_truth_is_flat_and_clean(tmp_path: Path) -> None:
+    config = _seed_minimal_ready(tmp_path)
+    reconciliation_path = tmp_path / config.reconciliation_path
+    reconciliation = json.loads(reconciliation_path.read_text(encoding="utf-8"))
+    reconciliation.update(
+        {
+            "classification": "BROKER_TRUTH_SETTLEMENT_TIMEOUT",
+            "broker_reconciled": False,
+            "review_required_count": 2,
+            "current_scope_review_required_count": 2,
+            "track_b_broker_position_count": 2,
+            "track_b_broker_open_order_count": 1,
+        }
+    )
+    reconciliation_path.write_text(json.dumps(reconciliation), encoding="utf-8")
+
+    result = _classification(tmp_path)
+
+    assert result["allowed"] is True
+    assert "broker_reconciliation_dirty" not in _codes(result)
+    assert "review_required_current_scope" not in _codes(result)
+    assert {
+        "broker_reconciliation_dirty_diagnostic",
+        "review_required_current_scope_diagnostic",
+        "reconciliation_position_count_mismatch_diagnostic",
+        "reconciliation_open_order_count_mismatch_diagnostic",
+    }.issubset(_warning_codes(result))
+
+
+def test_stale_open_order_truth_classification_is_diagnostic_when_broker_orders_are_zero(tmp_path: Path) -> None:
+    config = _seed_minimal_ready(tmp_path)
+    truth_path = tmp_path / config.open_order_truth_path
+    truth = json.loads(truth_path.read_text(encoding="utf-8"))
+    truth["classification"] = "UNKNOWN_BROKER_OPEN_ORDER"
+    truth["unknown_open_order_count"] = 0
+    truth["summary"] = {"open_order_count": 0, "unknown_open_order_count": 0}
+    truth_path.write_text(json.dumps(truth), encoding="utf-8")
+
+    result = _classification(tmp_path)
+
+    assert result["allowed"] is True
+    assert "open_order_truth_not_clean" not in _codes(result)
+    assert "open_order_truth_stale_diagnostic" in _warning_codes(result)
+
+
+def test_aggregate_broker_lease_contradiction_is_diagnostic_when_evidence_leases_are_fresh(tmp_path: Path) -> None:
+    config = _seed_minimal_ready(tmp_path)
+    lease_path = tmp_path / config.broker_truth_lease_path
+    lease = json.loads(lease_path.read_text(encoding="utf-8"))
+    lease["lease_state"] = "INVALIDATED_CONTRADICTION"
+    lease_path.write_text(json.dumps(lease), encoding="utf-8")
+
+    result = _classification(tmp_path)
+
+    assert result["allowed"] is True
+    assert "broker_truth_aggregate_state_diagnostic" in _warning_codes(result)
 
 
 def test_missing_current_price_blocks(tmp_path: Path) -> None:

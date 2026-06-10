@@ -84,6 +84,10 @@ from ..execution_core.track_b_paper_lifecycle_validation_entry_authority import 
     PAPER_LIFECYCLE_VALIDATION_ENTRY_DEGRADED_ALLOWED,
     build_paper_lifecycle_validation_entry_authority_from_repo,
 )
+from ..execution_core.track_b_paper_minimal_startup import (
+    TrackBPaperMinimalStartupConfig,
+    build_track_b_paper_minimal_startup,
+)
 from ..execution_core.track_b_post_broker_mutation_refresh import (
     PostBrokerMutationRefreshConfig,
     post_position_order_change_refresh,
@@ -3286,6 +3290,27 @@ def _phase1_reconciliation_gate_for_bridge(
     if not config.submit:
         return gate
     is_close_intent = _is_close_intent(config=config, intent=intent)
+    if not is_close_intent and not bool(gate.get("ready")):
+        minimal_startup = _paper_minimal_startup_for_bridge(config=config)
+        if minimal_startup.get("allowed") is True:
+            diagnostic_reasons = [
+                str(reason or "").strip()
+                for reason in list(gate.get("block_reasons") or [])
+                if str(reason or "").strip()
+            ]
+            gate["classification"] = "PHASE1_RECONCILIATION_DIAGNOSTIC_UNDER_PAPER_BROKER_TRUTH"
+            gate["ready"] = True
+            gate["block_reasons"] = []
+            gate["diagnostic_block_reasons"] = diagnostic_reasons
+            gate["paper_minimal_startup_allowed"] = True
+            gate["paper_minimal_startup_classification"] = minimal_startup.get("classification")
+            gate["paper_minimal_startup"] = minimal_startup
+            gate["submit_allowed_after_refresh"] = True
+            gate["detail"] = (
+                "Phase-1 reconciliation is diagnostic for this PAPER new-entry submit because "
+                "PAPER_MINIMAL_STARTUP_V1 broker-truth authority is allowed."
+            )
+            return gate
     reasons = {
         str(reason or "").strip()
         for reason in list(gate.get("block_reasons") or [])
@@ -3320,6 +3345,15 @@ def _phase1_reconciliation_gate_for_bridge(
             "route/governance/exposure gates still apply."
         )
     return refreshed_gate
+
+
+def _paper_minimal_startup_for_bridge(*, config: IbkrPaperStrategyBridgeConfig) -> dict[str, Any]:
+    return build_track_b_paper_minimal_startup(
+        config=TrackBPaperMinimalStartupConfig(
+            repo_root=config.repo_root,
+            account_id=config.account_id,
+        )
+    )
 
 
 def _refresh_phase1_broker_reconciliation_artifacts(*, config: IbkrPaperStrategyBridgeConfig) -> dict[str, Any]:
@@ -3402,6 +3436,9 @@ def _phase1_reconciliation_gate_check(
         "exit_allowed_after_refresh",
         "submit_allowed_after_refresh",
         "exit_block_reason",
+        "diagnostic_block_reasons",
+        "paper_minimal_startup_allowed",
+        "paper_minimal_startup_classification",
     ):
         check[key] = phase1_reconciliation_gate.get(key)
     return check

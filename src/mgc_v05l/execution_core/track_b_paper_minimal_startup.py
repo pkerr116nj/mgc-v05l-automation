@@ -112,53 +112,24 @@ def build_track_b_paper_minimal_startup(
     def warn(code: str, detail: str, *, source: str) -> None:
         warnings.append({"code": code, "detail": detail, "source": source})
 
-    account_id = str(
-        lease.get("account_id")
-        or bsa.get("account_id")
-        or _config_account_id(config_in_force)
-        or ""
-    ).strip()
-    if account_id != config.account_id:
-        block("paper_account_not_allowed", f"Expected {config.account_id}, got {account_id or 'UNKNOWN'}.", source="account")
-
-    if _any_true(lease, bsa, reconciliation, config_in_force, runtime_truth, key="live_money_eligible"):
-        block("live_money_eligible_true", "live_money_eligible=true is forbidden for PAPER minimal startup.", source="paper_safety")
-    if _any_true(lease, bsa, reconciliation, open_order_truth, runtime_truth, key="paper_proof_invoked"):
-        block("paper_proof_invoked_true", "paper_proof=true/invoked is forbidden for PAPER minimal startup.", source="paper_safety")
-
-    position_lease = _mapping(lease.get("broker_position_lease"))
-    open_order_lease = _mapping(lease.get("broker_open_order_lease"))
-    broker_positions_available = bool(position_lease.get("complete") is True or lease.get("broker_positions_complete") is True)
-    broker_open_orders_available = bool(open_order_lease.get("complete") is True or lease.get("broker_open_orders_complete") is True)
-    if not broker_positions_available:
-        block("broker_positions_unavailable", "Broker positions are not available/complete.", source="broker_truth")
-    if not broker_open_orders_available:
-        block("broker_open_orders_unavailable", "Broker open orders are not available/complete.", source="broker_truth")
-
-    unknown_open_orders = max(
-        _int_first(lease.get("unknown_broker_open_order_count")),
-        _int_first(open_order_truth.get("unknown_open_order_count")),
-        _int_first(_mapping(open_order_truth.get("summary")).get("unknown_open_order_count")),
-        _int_first(reconciliation.get("unknown_broker_open_order_count")),
+    broker_truth_authority = classify_track_b_paper_broker_truth_authority(
+        config=config,
+        lease=lease,
+        bsa=bsa,
+        open_order_truth=open_order_truth,
+        reconciliation=reconciliation,
+        config_in_force=config_in_force,
+        runtime_truth=runtime_truth,
+        now=actual_now,
     )
-    if unknown_open_orders != 0:
-        block("unknown_open_orders_present", f"Unknown open order count is {unknown_open_orders}.", source="open_order_truth")
-
-    broker_open_order_count = max(
-        _int_first(lease.get("track_b_broker_open_order_count")),
-        _int_first(reconciliation.get("track_b_broker_open_order_count")),
-        _int_first(_mapping(open_order_truth.get("summary")).get("open_order_count")),
-    )
-    open_order_classification = str(open_order_truth.get("classification") or "").strip().upper()
-    if broker_open_order_count != 0:
-        block("broker_open_orders_present", f"Broker open order count is {broker_open_order_count}.", source="broker_truth")
-    if open_order_classification and open_order_classification != "NO_OPEN_ORDERS":
-        block("open_order_truth_not_clean", f"Open Order Truth is {open_order_classification}.", source="open_order_truth")
-
-    if reconciliation and reconciliation.get("broker_reconciled") is False:
-        block("broker_reconciliation_dirty", "Broker reconciliation explicitly reports broker_reconciled=false.", source="reconciliation")
-    if _int_first(reconciliation.get("current_scope_review_required_count"), reconciliation.get("review_required_count")) != 0:
-        block("review_required_current_scope", "Current-scope review_required rows are present.", source="reconciliation")
+    blockers.extend(list(broker_truth_authority.get("blockers") or []))
+    warnings.extend(list(broker_truth_authority.get("warnings") or []))
+    account_id = str(broker_truth_authority.get("account_id") or "").strip()
+    broker_positions_available = bool(broker_truth_authority.get("broker_positions_available"))
+    broker_open_orders_available = bool(broker_truth_authority.get("broker_open_orders_available"))
+    broker_position_count = _int_first(broker_truth_authority.get("broker_position_count"))
+    broker_open_order_count = _int_first(broker_truth_authority.get("broker_open_order_count"))
+    unknown_open_orders = _int_first(broker_truth_authority.get("unknown_open_order_count"))
 
     explicit_profile = _explicit_paper_profile(config_paths)
     if not explicit_profile:
@@ -227,7 +198,7 @@ def build_track_b_paper_minimal_startup(
         "max_paper_order_qty": int(config.max_paper_order_qty),
         "broker_positions_available": broker_positions_available,
         "broker_open_orders_available": broker_open_orders_available,
-        "broker_position_count": _int_first(lease.get("track_b_broker_position_count"), reconciliation.get("track_b_broker_position_count")),
+        "broker_position_count": broker_position_count,
         "broker_open_order_count": broker_open_order_count,
         "unknown_open_order_count": unknown_open_orders,
         "price_availability": price_rows,
@@ -254,6 +225,159 @@ def build_track_b_paper_minimal_startup(
             "paper_runtime_truth": str(config.resolve(config.paper_runtime_truth_path)),
             "phase1_market_data_root": str(config.resolve(config.phase1_market_data_root)),
         },
+}
+
+
+def classify_track_b_paper_broker_truth_authority(
+    *,
+    config: TrackBPaperMinimalStartupConfig,
+    lease: Mapping[str, Any],
+    bsa: Mapping[str, Any],
+    open_order_truth: Mapping[str, Any],
+    reconciliation: Mapping[str, Any],
+    config_in_force: Mapping[str, Any],
+    runtime_truth: Mapping[str, Any],
+    now: datetime,
+) -> dict[str, Any]:
+    """Classify PAPER startup/new-entry authority from broker truth first."""
+
+    blockers: list[dict[str, Any]] = []
+    warnings: list[dict[str, Any]] = []
+
+    def block(code: str, detail: str, *, source: str) -> None:
+        blockers.append({"code": code, "detail": detail, "source": source})
+
+    def warn(code: str, detail: str, *, source: str) -> None:
+        warnings.append({"code": code, "detail": detail, "source": source})
+
+    account_id = str(
+        lease.get("account_id")
+        or bsa.get("account_id")
+        or _config_account_id(config_in_force)
+        or ""
+    ).strip()
+    if account_id != config.account_id:
+        block("paper_account_not_allowed", f"Expected {config.account_id}, got {account_id or 'UNKNOWN'}.", source="account")
+
+    if _any_true(lease, bsa, reconciliation, config_in_force, runtime_truth, key="live_money_eligible"):
+        block("live_money_eligible_true", "live_money_eligible=true is forbidden for PAPER minimal startup.", source="paper_safety")
+    if _any_true(lease, bsa, reconciliation, open_order_truth, runtime_truth, key="paper_proof_invoked"):
+        block("paper_proof_invoked_true", "paper_proof=true/invoked is forbidden for PAPER minimal startup.", source="paper_safety")
+
+    position_lease = _mapping(lease.get("broker_position_lease"))
+    open_order_lease = _mapping(lease.get("broker_open_order_lease"))
+    broker_positions_available = _lease_complete_and_not_stale(
+        lease,
+        lease_key="broker_position_lease",
+        complete_key="broker_positions_complete",
+        stale_block_code="broker_positions_stale",
+        block=block,
+    )
+    broker_open_orders_available = _lease_complete_and_not_stale(
+        lease,
+        lease_key="broker_open_order_lease",
+        complete_key="broker_open_orders_complete",
+        stale_block_code="broker_open_orders_stale",
+        block=block,
+    )
+    if not broker_positions_available:
+        block("broker_positions_unavailable", "Broker positions are not available/complete.", source="broker_truth")
+    if not broker_open_orders_available:
+        block("broker_open_orders_unavailable", "Broker open orders are not available/complete.", source="broker_truth")
+
+    broker_position_count = _int_first(
+        lease.get("track_b_broker_position_count"),
+        position_lease.get("position_count"),
+        position_lease.get("count"),
+    )
+    if broker_positions_available and broker_position_count != 0:
+        block("broker_positions_present", f"Broker position count is {broker_position_count}; flat start is required.", source="broker_truth")
+
+    unknown_open_orders = max(
+        _int_first(lease.get("unknown_broker_open_order_count")),
+        _int_first(open_order_truth.get("unknown_open_order_count")),
+        _int_first(_mapping(open_order_truth.get("summary")).get("unknown_open_order_count")),
+    )
+    if unknown_open_orders != 0:
+        block("unknown_open_orders_present", f"Unknown open order count is {unknown_open_orders}.", source="broker_truth")
+
+    broker_open_order_count = max(
+        _int_first(lease.get("track_b_broker_open_order_count"), open_order_lease.get("open_order_count"), open_order_lease.get("count")),
+        _int_first(open_order_truth.get("open_order_count"), _mapping(open_order_truth.get("summary")).get("open_order_count")),
+    )
+    if broker_open_orders_available and broker_open_order_count != 0:
+        block("broker_open_orders_present", f"Broker open order count is {broker_open_order_count}.", source="broker_truth")
+
+    lease_state = str(lease.get("lease_state") or "").strip().upper()
+    if lease_state and lease_state != "ACTIVE" and broker_positions_available and broker_open_orders_available:
+        warn(
+            "broker_truth_aggregate_state_diagnostic",
+            f"Aggregate broker truth lease_state is {lease_state}; current position/open-order evidence leases remain authoritative.",
+            source="broker_truth",
+        )
+
+    open_order_classification = str(open_order_truth.get("classification") or "").strip().upper()
+    if open_order_classification and open_order_classification != "NO_OPEN_ORDERS":
+        if broker_open_order_count or unknown_open_orders or not broker_open_orders_available:
+            block("open_order_truth_not_clean", f"Open Order Truth is {open_order_classification}.", source="open_order_truth")
+        else:
+            warn(
+                "open_order_truth_stale_diagnostic",
+                f"Open Order Truth is {open_order_classification}, but current broker open-order truth is zero/known.",
+                source="open_order_truth",
+            )
+
+    if reconciliation:
+        if reconciliation.get("broker_reconciled") is False:
+            warn(
+                "broker_reconciliation_dirty_diagnostic",
+                "Legacy reconciliation reports broker_reconciled=false; broker truth is startup authority when current and safe.",
+                source="reconciliation",
+            )
+        review_count = _int_first(
+            reconciliation.get("current_scope_review_required_count"),
+            reconciliation.get("review_required_count"),
+        )
+        if review_count != 0:
+            warn(
+                "review_required_current_scope_diagnostic",
+                f"Legacy reconciliation review_required count is {review_count}; diagnostic unless broker truth shows current exposure/order risk.",
+                source="reconciliation",
+            )
+        recon_position_count = _int_first(reconciliation.get("track_b_broker_position_count"))
+        if recon_position_count != 0 and broker_position_count == 0:
+            warn(
+                "reconciliation_position_count_mismatch_diagnostic",
+                f"Legacy reconciliation reports broker position count {recon_position_count}, but broker truth reports flat.",
+                source="reconciliation",
+            )
+        recon_open_order_count = _int_first(reconciliation.get("track_b_broker_open_order_count"))
+        if recon_open_order_count != 0 and broker_open_order_count == 0:
+            warn(
+                "reconciliation_open_order_count_mismatch_diagnostic",
+                f"Legacy reconciliation reports open order count {recon_open_order_count}, but broker truth reports zero.",
+                source="reconciliation",
+            )
+
+    bsa_classification = str(bsa.get("classification") or "").strip().upper()
+    if bsa_classification and "ORDER_STATUS_UNRELIABLE" in bsa_classification and broker_open_orders_available:
+        warn(
+            "broker_session_authority_order_status_unreliable_diagnostic",
+            "BSA order-status reliability is diagnostic when broker open-order truth is current and complete.",
+            source="broker_session_authority",
+        )
+
+    return {
+        "classification": "PAPER_BROKER_TRUTH_AUTHORITY_ALLOWED" if not blockers else "PAPER_BROKER_TRUTH_AUTHORITY_BLOCKED",
+        "allowed": not blockers,
+        "account_id": account_id or None,
+        "broker_positions_available": broker_positions_available,
+        "broker_open_orders_available": broker_open_orders_available,
+        "broker_position_count": broker_position_count,
+        "broker_open_order_count": broker_open_order_count,
+        "unknown_open_order_count": unknown_open_orders,
+        "blockers": blockers,
+        "warnings": warnings,
     }
 
 
@@ -390,6 +514,24 @@ def _read_text_lines(path: Path) -> list[str]:
 
 def _mapping(value: Any) -> Mapping[str, Any]:
     return value if isinstance(value, Mapping) else {}
+
+
+def _lease_complete_and_not_stale(
+    payload: Mapping[str, Any],
+    *,
+    lease_key: str,
+    complete_key: str,
+    stale_block_code: str,
+    block: Any,
+) -> bool:
+    lease = _mapping(payload.get(lease_key))
+    complete = bool(lease.get("complete") is True or payload.get(complete_key) is True)
+    if not complete:
+        return False
+    if lease.get("fresh") is False or payload.get(f"{complete_key}_fresh") is False:
+        block(stale_block_code, f"{lease_key} is explicitly stale.", source="broker_truth")
+        return False
+    return True
 
 
 def _any_true(*payloads: Mapping[str, Any], key: str) -> bool:
