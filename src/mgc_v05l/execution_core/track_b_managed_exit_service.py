@@ -74,7 +74,11 @@ MANAGED_EXIT_SERVICE_ACTUATOR_TIMEOUT = "ACTUATOR_TIMEOUT"
 MANAGED_EXIT_SERVICE_ERROR = "SERVICE_ERROR"
 MANAGED_EXIT_SERVICE_REFRESH_DEGRADED_ACTUATOR_ATTEMPTED = "REFRESH_DEGRADED_ACTUATOR_ATTEMPTED"
 MANAGED_EXIT_SERVICE_PIPELINE_UNAVAILABLE = "MANAGED_EXIT_SERVICE_PIPELINE_UNAVAILABLE"
-MANAGED_EXIT_SERVICE_AUTHORITY_REFRESH_TIMEOUT_BEFORE_MUTATION = "AUTHORITY_REFRESH_TIMEOUT_BEFORE_MUTATION"
+MANAGED_PAPER_RISK_REDUCING_EXIT_AUTHORITY_ALLOWED = "MANAGED_PAPER_RISK_REDUCING_EXIT_AUTHORITY_ALLOWED"
+MANAGED_PAPER_RISK_REDUCING_EXIT_AUTHORITY_BLOCKED = "MANAGED_PAPER_RISK_REDUCING_EXIT_AUTHORITY_BLOCKED"
+
+_PAPER_ACCOUNT_ID = "DUM882026"
+_PAPER_EXECUTION_DOMAIN = "TRACK_B_PAPER"
 
 
 @dataclass(frozen=True)
@@ -131,6 +135,7 @@ def run_track_b_managed_exit_service_once(
     authority_refreshes: list[dict[str, Any]] = []
     actuator_reports: list[dict[str, Any]] = []
     order_maintenance_reports: list[dict[str, Any]] = []
+    service_diagnostics: list[dict[str, Any]] = []
     phase_timings: list[dict[str, Any]] = [
         {
             "phase": "pipeline_candidate_discovery",
@@ -175,16 +180,8 @@ def run_track_b_managed_exit_service_once(
         blocked_intents = list(execution_plan.get("blocked_intents") or [])
         if not blocked_intents and _working_close_order_maintenance_needed(config):
             if config.apply and config.authority_refresh_before_apply:
-                phase_started = time.monotonic()
-                pre_refresh = _run_authority_refresh(authority_refresher, config, "before_order_maintenance")
-                phase_timings.append(
-                    {
-                        **_phase_timing("authority_refresh_before_order_maintenance", phase_started),
-                        "classification": pre_refresh.get("classification"),
-                    }
-                )
-                authority_refreshes.append(pre_refresh)
-                if not _authority_refresh_succeeded(pre_refresh):
+                maintenance_authority = _classify_working_close_order_maintenance_authority(config)
+                if not _managed_paper_exit_authority_allowed(maintenance_authority):
                     payload = _service_payload(
                         config=config,
                         now=actual_now,
@@ -195,17 +192,14 @@ def run_track_b_managed_exit_service_once(
                         execution_plan=execution_plan,
                         order_maintenance_reports=order_maintenance_reports,
                         service_diagnostics=[
-                            {
-                                "code": MANAGED_EXIT_SERVICE_AUTHORITY_REFRESH_TIMEOUT_BEFORE_MUTATION,
-                                "phase": "before_order_maintenance",
-                                "classification": pre_refresh.get("classification"),
-                                "detail": "Authority refresh failed before managed close order maintenance; no broker mutation was attempted.",
-                            }
+                            *service_diagnostics,
+                            maintenance_authority,
                         ],
                     )
                     if write:
                         write_track_b_managed_exit_service_status(config=config, payload=payload)
                     return payload
+                service_diagnostics.append(_legacy_refresh_diagnostic_skipped("before_order_maintenance", maintenance_authority))
             phase_started = time.monotonic()
             maintenance_report = dict(
                 order_maintenance_runner(config, actual_now, config.actuator_timeout_seconds)
@@ -230,6 +224,7 @@ def run_track_b_managed_exit_service_once(
                     phase_timings=phase_timings,
                     execution_plan=execution_plan,
                     order_maintenance_reports=order_maintenance_reports,
+                    service_diagnostics=service_diagnostics,
                 )
                 if write:
                     write_track_b_managed_exit_service_status(config=config, payload=payload)
@@ -243,6 +238,7 @@ def run_track_b_managed_exit_service_once(
             phase_timings=phase_timings,
             execution_plan=execution_plan,
             order_maintenance_reports=order_maintenance_reports,
+            service_diagnostics=service_diagnostics,
         )
         if write:
             write_track_b_managed_exit_service_status(config=config, payload=payload)
@@ -250,38 +246,31 @@ def run_track_b_managed_exit_service_once(
 
     max_cycles = min(max(int(config.max_cycles_per_tick or 0), 1), len(executable_intents))
     for cycle_index in range(max_cycles):
-        if config.authority_refresh_before_apply:
-            phase_started = time.monotonic()
-            pre_refresh = _run_authority_refresh(authority_refresher, config, "before_actuator")
-            phase_timings.append(
-                {
-                    **_phase_timing("authority_refresh_before_actuator", phase_started),
-                    "classification": pre_refresh.get("classification"),
-                }
+        executable_intent = _mapping(executable_intents[cycle_index])
+        mutation_authority = _classify_managed_paper_risk_reducing_exit_authority(
+            executable_intent=executable_intent,
+            execution_plan=execution_plan,
+        )
+        if not _managed_paper_exit_authority_allowed(mutation_authority):
+            payload = _service_payload(
+                config=config,
+                now=actual_now,
+                classification=MANAGED_EXIT_SERVICE_APPLY_BLOCKED,
+                authority_refreshes=authority_refreshes,
+                actuator_reports=actuator_reports,
+                phase_timings=phase_timings,
+                execution_plan=execution_plan,
+                order_maintenance_reports=order_maintenance_reports,
+                service_diagnostics=[
+                    *service_diagnostics,
+                    mutation_authority,
+                ],
             )
-            authority_refreshes.append(pre_refresh)
-            if not _authority_refresh_succeeded(pre_refresh):
-                payload = _service_payload(
-                    config=config,
-                    now=actual_now,
-                    classification=MANAGED_EXIT_SERVICE_APPLY_BLOCKED,
-                    authority_refreshes=authority_refreshes,
-                    actuator_reports=actuator_reports,
-                    phase_timings=phase_timings,
-                    execution_plan=execution_plan,
-                    order_maintenance_reports=order_maintenance_reports,
-                    service_diagnostics=[
-                        {
-                            "code": MANAGED_EXIT_SERVICE_AUTHORITY_REFRESH_TIMEOUT_BEFORE_MUTATION,
-                            "phase": "before_actuator",
-                            "classification": pre_refresh.get("classification"),
-                            "detail": "Authority refresh failed before managed-exit actuator invocation; no broker mutation was attempted.",
-                        }
-                    ],
-                )
-                if write:
-                    write_track_b_managed_exit_service_status(config=config, payload=payload)
-                return payload
+            if write:
+                write_track_b_managed_exit_service_status(config=config, payload=payload)
+            return payload
+        if config.authority_refresh_before_apply:
+            service_diagnostics.append(_legacy_refresh_diagnostic_skipped("before_actuator", mutation_authority))
         phase_started = time.monotonic()
         actuator_config = TrackBManagedExitActuatorConfig(
             repo_root=config.repo_root,
@@ -307,7 +296,10 @@ def run_track_b_managed_exit_service_once(
             break
 
         submitted = int(actuator_report.get("submitted_count") or 0)
-        should_refresh_after = config.authority_refresh_after_attempt and (
+        should_refresh_after = (
+            config.authority_refresh_after_attempt
+            and not _managed_paper_exit_authority_allowed(mutation_authority)
+        ) and (
             submitted > 0 or actuator_report.get("submit_attempted") is True
         )
         if should_refresh_after:
@@ -344,6 +336,7 @@ def run_track_b_managed_exit_service_once(
         phase_timings=phase_timings,
         execution_plan=execution_plan,
         order_maintenance_reports=order_maintenance_reports,
+        service_diagnostics=service_diagnostics,
     )
     if write:
         write_track_b_managed_exit_service_status(config=config, payload=payload)
@@ -779,6 +772,205 @@ def _working_close_order_maintenance_needed(config: TrackBManagedExitServiceConf
 
 def _authority_refresh_succeeded(refresh: Mapping[str, Any]) -> bool:
     return refresh.get("succeeded") is True
+
+
+def _managed_paper_exit_authority_allowed(authority: Mapping[str, Any]) -> bool:
+    return str(authority.get("classification") or "") == MANAGED_PAPER_RISK_REDUCING_EXIT_AUTHORITY_ALLOWED
+
+
+def _legacy_refresh_diagnostic_skipped(phase: str, authority: Mapping[str, Any]) -> dict[str, Any]:
+    return {
+        "code": "LEGACY_OPERATOR_READINESS_REFRESH_DIAGNOSTIC_ONLY",
+        "phase": phase,
+        "classification": "LEGACY_OPERATOR_READINESS_REFRESH_SKIPPED",
+        "detail": (
+            "Legacy operator readiness refresh is diagnostic-only because managed PAPER "
+            "risk-reducing exit authority is satisfied."
+        ),
+        "managed_paper_risk_reducing_exit_authority": dict(authority),
+    }
+
+
+def _classify_managed_paper_risk_reducing_exit_authority(
+    *,
+    executable_intent: Mapping[str, Any],
+    execution_plan: Mapping[str, Any],
+) -> dict[str, Any]:
+    blockers: list[str] = []
+    diagnostics: list[dict[str, Any]] = []
+    authority = _mapping(executable_intent.get("authority_decision"))
+    decision = _mapping(authority.get("authority_decision"))
+    if not decision:
+        decision = authority
+
+    _require(blockers, str(executable_intent.get("account_id") or executable_intent.get("account") or "") == _PAPER_ACCOUNT_ID, "wrong_account")
+    _require(blockers, str(executable_intent.get("execution_domain") or "") == _PAPER_EXECUTION_DOMAIN, "non_paper_execution_domain")
+    _require(blockers, executable_intent.get("live_money_eligible") is not True, "live_money_eligible")
+    _require(blockers, executable_intent.get("live_money_allowed") is not True, "live_money_allowed")
+    _require(blockers, executable_intent.get("paper_proof_invoked") is not True, "paper_proof_invoked")
+    _require(blockers, executable_intent.get("broad_flatten_allowed") is not True, "broad_flatten_requested")
+    _require(blockers, executable_intent.get("global_flatten_allowed") is not True, "global_flatten_requested")
+    _require(blockers, str(executable_intent.get("decision") or decision.get("decision") or "") == "ALLOWED", "exit_authority_decision_not_allowed")
+    _require(blockers, _decimal(executable_intent.get("close_qty")) is not None and _decimal(executable_intent.get("close_qty")) > 0, "close_qty_missing_or_zero")
+    _require(blockers, str(executable_intent.get("close_action") or "").upper() in {"BUY", "SELL"}, "close_action_invalid")
+    _require(blockers, bool(_managed_lifecycle_identity(executable_intent)), "managed_lifecycle_identity_missing")
+    _require(blockers, bool(executable_intent.get("source_policy_id") or executable_intent.get("exit_reason")), "exit_policy_evidence_missing")
+
+    _require_check_passed(blockers, decision, "known_current_broker_position", "broker_position_unavailable")
+    _require_check_passed(blockers, decision, "account_matches", "account_mismatch")
+    _require_check_passed(blockers, decision, "execution_domain_matches", "execution_domain_mismatch")
+    _require_check_passed(blockers, decision, "contract_matches", "contract_mismatch")
+    _require_check_passed(blockers, decision, "close_qty_within_broker_position", "over_close_risk")
+    _require_check_passed(blockers, decision, "risk_reducing_action", "not_risk_reducing")
+    _require_check_passed(blockers, decision, "same_contract_working_close_does_not_over_close", "same_contract_working_close_over_close_risk")
+    _require_check_passed(blockers, decision, "safe_state_no_hard_halt", "safe_state_hard_halt")
+    _require_check_passed(blockers, decision, "live_money_domain_allowed", "live_money_not_allowed")
+    _require_check_passed(blockers, decision, "paper_proof_not_invoked", "paper_proof_invoked")
+    _require_check_passed(blockers, decision, "broad_or_global_flatten_not_requested", "broad_or_global_flatten_requested")
+    _require_conditional_check_passed(blockers, decision, "same_contract_unknown_order_risk", "same_contract_unknown_order_over_close_risk")
+
+    source_classifications = _source_classifications(execution_plan)
+    open_order_truth = str(source_classifications.get("open_order_truth") or source_classifications.get("Open Order Truth") or "")
+    if open_order_truth and open_order_truth not in {"NO_OPEN_ORDERS", "BROKER_POSITION_WITHOUT_CLOSE_ORDER"}:
+        blockers.append(f"open_order_truth_not_clean:{open_order_truth}")
+    managed_positions = str(source_classifications.get("managed_positions") or source_classifications.get("Managed Position Registry") or "")
+    if managed_positions and managed_positions not in {"OPEN_MANAGED_EXIT_DUE", "OPEN_MANAGED_MATCHED", "OPEN_MANAGED_CLOSE_WORKING"}:
+        blockers.append(f"managed_position_not_current:{managed_positions}")
+    managed_orders = str(source_classifications.get("managed_orders") or source_classifications.get("Managed Order Registry") or "")
+    if managed_orders and managed_orders not in {
+        "POSITION_WITHOUT_CLOSE_ORDER",
+        "ACTIVE_HOLD_MANAGED_TIMED_EXIT_PENDING",
+        "WORKING_CLOSE_ORDER",
+        "CLOSE_ORDER_MODIFIABLE",
+        "CLOSE_ORDER_CANCEL_REPLACE_REQUIRED",
+    }:
+        blockers.append(f"managed_order_not_current:{managed_orders}")
+    if source_classifications:
+        diagnostics.append({"kind": "source_classifications", "rows": source_classifications})
+
+    return {
+        "classification": MANAGED_PAPER_RISK_REDUCING_EXIT_AUTHORITY_ALLOWED
+        if not blockers
+        else MANAGED_PAPER_RISK_REDUCING_EXIT_AUTHORITY_BLOCKED,
+        "code": "managed_paper_risk_reducing_exit_authority",
+        "exit_intent_id": executable_intent.get("exit_intent_id"),
+        "blockers": blockers,
+        "diagnostics": diagnostics,
+        "account_id": executable_intent.get("account_id") or executable_intent.get("account"),
+        "execution_domain": executable_intent.get("execution_domain"),
+        "close_action": executable_intent.get("close_action"),
+        "close_qty": executable_intent.get("close_qty"),
+        "lifecycle_identity": _managed_lifecycle_identity(executable_intent),
+    }
+
+
+def _classify_working_close_order_maintenance_authority(config: TrackBManagedExitServiceConfig) -> dict[str, Any]:
+    managed_orders = _read_json(config.resolve(DEFAULT_MANAGED_ORDER_REGISTRY_ARTIFACT))
+    blockers: list[str] = []
+    diagnostics: list[dict[str, Any]] = []
+    candidates: list[dict[str, Any]] = []
+    for order in managed_orders.get("managed_orders") or []:
+        order = _mapping(order)
+        if not order or order.get("is_close_order") is not True:
+            continue
+        if str(order.get("classification") or "") not in {
+            "WORKING_CLOSE_ORDER",
+            "CLOSE_ORDER_MODIFIABLE",
+            "CLOSE_ORDER_CANCEL_REPLACE_REQUIRED",
+        }:
+            continue
+        candidates.append(order)
+
+    if not candidates:
+        blockers.append("working_close_order_missing")
+    if len(candidates) > 1:
+        blockers.append("multiple_working_close_orders")
+    order = candidates[0] if candidates else {}
+    _require(blockers, str(order.get("account_id") or "") == _PAPER_ACCOUNT_ID, "wrong_account")
+    _require(blockers, order.get("live_money_eligible") is not True, "live_money_eligible")
+    _require(blockers, order.get("paper_proof_invoked") is not True, "paper_proof_invoked")
+    _require(blockers, str(order.get("broker_order_id") or ""), "broker_order_id_missing")
+    _require(blockers, str(order.get("perm_id") or ""), "perm_id_missing")
+    _require(blockers, str(order.get("action") or "").upper() in {"BUY", "SELL"}, "close_order_action_invalid")
+    quantity = _decimal(order.get("quantity"))
+    _require(blockers, quantity is not None and quantity > 0, "close_order_quantity_missing_or_zero")
+
+    managed_position = _mapping(order.get("canonical_managed_position")) or _mapping(_mapping(order.get("broker_position")).get("canonical_managed_position"))
+    broker_position = _mapping(order.get("broker_position")) or _mapping(managed_position.get("broker_position"))
+    broker_qty = _decimal(broker_position.get("quantity") or managed_position.get("aggregate_qty"))
+    action = str(order.get("action") or "").upper()
+    if broker_qty is not None and quantity is not None:
+        expected_action = "SELL" if broker_qty > 0 else "BUY"
+        _require(blockers, action == expected_action, "close_order_not_risk_reducing")
+        _require(blockers, quantity <= abs(broker_qty), "close_order_over_close_risk")
+    else:
+        blockers.append("broker_position_unavailable")
+    _require(blockers, bool(order.get("lifecycle_id") or managed_position.get("lifecycle_id")), "managed_lifecycle_identity_missing")
+    diagnostics.append({"kind": "managed_order_registry", "classification": managed_orders.get("classification")})
+
+    return {
+        "classification": MANAGED_PAPER_RISK_REDUCING_EXIT_AUTHORITY_ALLOWED
+        if not blockers
+        else MANAGED_PAPER_RISK_REDUCING_EXIT_AUTHORITY_BLOCKED,
+        "code": "managed_paper_risk_reducing_working_close_authority",
+        "blockers": blockers,
+        "diagnostics": diagnostics,
+        "broker_order_id": order.get("broker_order_id"),
+        "perm_id": order.get("perm_id"),
+        "account_id": order.get("account_id"),
+        "close_action": order.get("action"),
+        "close_qty": order.get("quantity"),
+    }
+
+
+def _source_classifications(execution_plan: Mapping[str, Any]) -> dict[str, Any]:
+    pipeline = _mapping(execution_plan.get("pipeline"))
+    source_classifications = _mapping(pipeline.get("source_classifications"))
+    if source_classifications:
+        return source_classifications
+    for diagnostic in _list(execution_plan.get("diagnostics")):
+        diagnostic = _mapping(diagnostic)
+        if diagnostic.get("kind") == "legacy_source_classifications":
+            return _mapping(diagnostic.get("rows"))
+    return {}
+
+
+def _managed_lifecycle_identity(intent: Mapping[str, Any]) -> dict[str, Any]:
+    attribution = _mapping(intent.get("attribution"))
+    lifecycle_id = str(intent.get("lifecycle_id") or attribution.get("lifecycle_id") or "").strip()
+    trade_id = str(intent.get("trade_id") or attribution.get("trade_id") or "").strip()
+    strategy_id = str(intent.get("strategy_id") or attribution.get("strategy_id") or "").strip()
+    lane_id = str(intent.get("lane_id") or attribution.get("lane_id") or "").strip()
+    if not lifecycle_id or not trade_id:
+        return {}
+    return {
+        "lifecycle_id": lifecycle_id,
+        "trade_id": trade_id,
+        "strategy_id": strategy_id or None,
+        "lane_id": lane_id or None,
+    }
+
+
+def _require(blockers: list[str], condition: object, code: str) -> None:
+    if not condition:
+        blockers.append(code)
+
+
+def _require_check_passed(blockers: list[str], decision: Mapping[str, Any], check_name: str, code: str) -> None:
+    checks = _mapping(decision.get("hard_required_checks"))
+    if not checks:
+        blockers.append("hard_required_checks_missing")
+        return
+    if _mapping(checks.get(check_name)).get("passed") is not True:
+        blockers.append(code)
+
+
+def _require_conditional_check_passed(blockers: list[str], decision: Mapping[str, Any], check_name: str, code: str) -> None:
+    checks = _mapping(decision.get("conditional_risk_checks") or decision.get("conditional_checks"))
+    if not checks:
+        return
+    if _mapping(checks.get(check_name)).get("passed") is not True:
+        blockers.append(code)
 
 
 def _managed_order_maintenance_report(

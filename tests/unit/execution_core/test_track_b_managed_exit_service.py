@@ -21,7 +21,8 @@ from mgc_v05l.execution_core.track_b_managed_exit_service import (
     MANAGED_EXIT_SERVICE_DRY_RUN_READY,
     MANAGED_EXIT_SERVICE_NO_ELIGIBLE_EXITS,
     MANAGED_EXIT_SERVICE_PIPELINE_UNAVAILABLE,
-    MANAGED_EXIT_SERVICE_AUTHORITY_REFRESH_TIMEOUT_BEFORE_MUTATION,
+    MANAGED_PAPER_RISK_REDUCING_EXIT_AUTHORITY_ALLOWED,
+    MANAGED_PAPER_RISK_REDUCING_EXIT_AUTHORITY_BLOCKED,
     TrackBManagedExitServiceConfig,
     _build_pipeline_execution_plan,
     _modify_config_from_order_plan,
@@ -80,7 +81,7 @@ def test_service_dry_run_uses_v1_allowed_plan_without_apply(tmp_path: Path) -> N
     assert payload["apply_requested"] is False
     assert actuator_calls[0].apply is False
     assert actuator_calls[0].max_closes_per_run == 1
-    assert call_order == ["refresh:before_actuator", "actuator"]
+    assert call_order == ["actuator"]
 
 
 def test_apply_service_processes_v1_executable_intents_one_at_a_time_with_refresh_between(tmp_path: Path) -> None:
@@ -127,13 +128,7 @@ def test_apply_service_processes_v1_executable_intents_one_at_a_time_with_refres
     assert [call.apply for call in actuator_calls] == [True, True, True]
     assert [call.operator_authorized_managed_exit for call in actuator_calls] == [True, True, True]
     assert [call.max_closes_per_run for call in actuator_calls] == [1, 1, 1]
-    assert refresh_phases == [
-        "before_actuator",
-        "after_actuator_attempt",
-        "before_actuator",
-        "after_actuator_attempt",
-        "before_actuator",
-    ]
+    assert refresh_phases == []
 
 
 def test_service_preserves_actuator_close_quantity_for_v1_plan(tmp_path: Path) -> None:
@@ -168,15 +163,17 @@ def test_service_preserves_actuator_close_quantity_for_v1_plan(tmp_path: Path) -
     assert payload["execution_plan"]["executable_intents"][0]["close_qty"] == 3
 
 
-def test_refresh_failure_blocks_v1_allowed_close_plan_before_actuator(tmp_path: Path) -> None:
+def test_refresh_failure_is_diagnostic_for_v1_allowed_paper_risk_reducing_close(tmp_path: Path) -> None:
     calls = []
+    refresh_calls = []
 
     payload = run_track_b_managed_exit_service_once(
         config=TrackBManagedExitServiceConfig(repo_root=tmp_path, apply=True, max_cycles_per_tick=1),
         now=NOW,
         actuator_runner=lambda config, now, timeout: calls.append(config)
         or _actuator_report(MANAGED_EXIT_ACTUATOR_APPLIED_OR_PENDING, eligible=2, submitted=1, local_symbol="MESM6"),
-        authority_refresher=lambda config, phase: {
+        authority_refresher=lambda config, phase: refresh_calls.append(phase)
+        or {
             "phase": phase,
             "succeeded": False,
             "classification": "TRACK_B_OPERATOR_READINESS_REFRESH_FAILED",
@@ -194,14 +191,41 @@ def test_refresh_failure_blocks_v1_allowed_close_plan_before_actuator(tmp_path: 
         write=False,
     )
 
+    assert calls
+    assert payload["classification"] == MANAGED_EXIT_SERVICE_APPLY_SUCCEEDED
+    assert refresh_calls == []
+    assert payload["authority_refresh_failed"] is False
+    assert payload["authority_refresh_degraded_actuator_attempted"] is False
+    assert payload["service_diagnostics"][0]["code"] == "LEGACY_OPERATOR_READINESS_REFRESH_DIAGNOSTIC_ONLY"
+    assert (
+        payload["service_diagnostics"][0]["managed_paper_risk_reducing_exit_authority"]["classification"]
+        == MANAGED_PAPER_RISK_REDUCING_EXIT_AUTHORITY_ALLOWED
+    )
+    assert payload["pipeline_diagnostics"][0]["kind"] == "legacy_source_classifications"
+    assert payload["submitted_count"] == 1
+    assert payload["submit_attempted"] is True
+
+
+def test_v1_allowed_close_with_real_broker_risk_blocker_stops_before_actuator(tmp_path: Path) -> None:
+    calls = []
+
+    payload = run_track_b_managed_exit_service_once(
+        config=TrackBManagedExitServiceConfig(repo_root=tmp_path, apply=True, max_cycles_per_tick=1),
+        now=NOW,
+        actuator_runner=lambda config, now, timeout: calls.append(config)
+        or _actuator_report(MANAGED_EXIT_ACTUATOR_APPLIED_OR_PENDING, eligible=1, submitted=1),
+        authority_refresher=_refresh_ok,
+        pipeline_builder=lambda config, now: _pipeline_report(
+            decisions=("ALLOWED",),
+            failed_hard_checks=("same_contract_working_close_does_not_over_close",),
+        ),
+        write=False,
+    )
+
     assert calls == []
     assert payload["classification"] == MANAGED_EXIT_SERVICE_APPLY_BLOCKED
-    assert payload["authority_refresh_failed"] is True
-    assert payload["authority_refresh_degraded_actuator_attempted"] is False
-    assert payload["service_diagnostics"][0]["code"] == MANAGED_EXIT_SERVICE_AUTHORITY_REFRESH_TIMEOUT_BEFORE_MUTATION
-    assert payload["pipeline_diagnostics"][0]["kind"] == "legacy_source_classifications"
-    assert payload["submitted_count"] == 0
-    assert payload["submit_attempted"] is False
+    assert payload["service_diagnostics"][0]["classification"] == MANAGED_PAPER_RISK_REDUCING_EXIT_AUTHORITY_BLOCKED
+    assert "same_contract_working_close_over_close_risk" in payload["service_diagnostics"][0]["blockers"]
 
 
 def test_v1_blocked_plan_does_not_invoke_actuator(tmp_path: Path) -> None:
@@ -472,6 +496,10 @@ def test_apply_service_reports_working_close_order_maintenance_mutation(tmp_path
 
 def test_working_close_order_maintenance_refresh_timeout_blocks_before_mutation(tmp_path: Path) -> None:
     _write_managed_close_order_registry(tmp_path)
+    path = tmp_path / DEFAULT_MANAGED_ORDER_REGISTRY_ARTIFACT
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    payload["managed_orders"][0]["account_id"] = "WRONG"
+    path.write_text(json.dumps(payload), encoding="utf-8")
     maintenance_calls = []
 
     payload = run_track_b_managed_exit_service_once(
@@ -494,9 +522,44 @@ def test_working_close_order_maintenance_refresh_timeout_blocks_before_mutation(
 
     assert maintenance_calls == []
     assert payload["classification"] == MANAGED_EXIT_SERVICE_APPLY_BLOCKED
-    assert payload["service_diagnostics"][0]["code"] == MANAGED_EXIT_SERVICE_AUTHORITY_REFRESH_TIMEOUT_BEFORE_MUTATION
+    assert payload["service_diagnostics"][0]["classification"] == MANAGED_PAPER_RISK_REDUCING_EXIT_AUTHORITY_BLOCKED
+    assert "wrong_account" in payload["service_diagnostics"][0]["blockers"]
     assert payload["managed_order_maintenance_invocation_count"] == 0
     assert payload["managed_order_maintenance_mutation_attempted"] is False
+
+
+def test_working_close_order_maintenance_refresh_timeout_is_diagnostic_when_close_order_is_risk_reducing(
+    tmp_path: Path,
+) -> None:
+    _write_managed_close_order_registry(tmp_path)
+    maintenance_calls = []
+    refresh_calls = []
+
+    payload = run_track_b_managed_exit_service_once(
+        config=TrackBManagedExitServiceConfig(repo_root=tmp_path, apply=True),
+        now=NOW,
+        actuator_runner=lambda config, now, timeout: {},
+        authority_refresher=lambda config, phase: refresh_calls.append(phase) or {
+            "phase": phase,
+            "succeeded": False,
+            "classification": "TRACK_B_OPERATOR_READINESS_REFRESH_TIMEOUT",
+        },
+        pipeline_builder=lambda config, now: _pipeline_report(decisions=(), classification="HOLD_ONLY"),
+        order_maintenance_runner=lambda config, now, timeout: maintenance_calls.append(config) or {
+            "classification": "MANAGED_ORDER_MAINTENANCE_APPLIED",
+            "broker_mutation_attempted": True,
+            "broker_mutation_performed": True,
+        },
+        write=False,
+    )
+
+    assert len(maintenance_calls) == 1
+    assert refresh_calls == []
+    assert payload["classification"] == MANAGED_EXIT_SERVICE_APPLY_SUCCEEDED
+    assert payload["service_diagnostics"][0]["managed_paper_risk_reducing_exit_authority"]["classification"] == (
+        MANAGED_PAPER_RISK_REDUCING_EXIT_AUTHORITY_ALLOWED
+    )
+    assert payload["managed_order_maintenance_mutation_performed"] is True
 
 
 def test_modify_config_uses_known_order_owner_client_id(tmp_path: Path) -> None:
@@ -573,6 +636,7 @@ def _write_managed_close_order_registry(repo_root: Path) -> None:
                         "quantity": "1",
                         "limit_price": "7388.0",
                         "lifecycle_id": "life-mes",
+                        "broker_position": {"quantity": "1", "local_symbol": "MESM6"},
                     }
                 ],
             }
@@ -590,6 +654,8 @@ def _pipeline_report(
     source_classifications: dict[str, str] | None = None,
     pipeline_errors: tuple[dict[str, Any], ...] = (),
     pipeline_blockers: tuple[dict[str, Any], ...] = (),
+    failed_hard_checks: tuple[str, ...] = (),
+    failed_conditional_checks: tuple[str, ...] = (),
 ) -> dict[str, Any]:
     default_intents = [
         {
@@ -599,6 +665,27 @@ def _pipeline_report(
             "close_qty": 1,
             "execution_domain": "TRACK_B_PAPER",
             "account": "DUM882026",
+            "account_id": "DUM882026",
+            "position_side": "SHORT",
+            "owned_qty": "1",
+            "remaining_qty_after": "0",
+            "source_policy_id": "GLOBEX_ACTIVE_EVIDENCE_TIMEBOX_60M_EXIT_V1",
+            "exit_reason": "timebox_exit_due",
+            "lifecycle_id": "life-mes",
+            "trade_id": "trade-mes",
+            "strategy_id": "strategy-mes",
+            "lane_id": "lane-mes",
+            "live_money_eligible": False,
+            "live_money_allowed": False,
+            "paper_proof_invoked": False,
+            "broad_flatten_allowed": False,
+            "global_flatten_allowed": False,
+            "attribution": {
+                "lifecycle_id": "life-mes",
+                "trade_id": "trade-mes",
+                "strategy_id": "strategy-mes",
+                "lane_id": "lane-mes",
+            },
         },
         {
             "exit_intent_id": "exit-mnq",
@@ -607,6 +694,20 @@ def _pipeline_report(
             "close_qty": 1,
             "execution_domain": "TRACK_B_PAPER",
             "account": "DUM882026",
+            "account_id": "DUM882026",
+            "position_side": "SHORT",
+            "owned_qty": "1",
+            "remaining_qty_after": "0",
+            "source_policy_id": "GLOBEX_ACTIVE_EVIDENCE_TIMEBOX_60M_EXIT_V1",
+            "exit_reason": "timebox_exit_due",
+            "lifecycle_id": "life-mnq",
+            "trade_id": "trade-mnq",
+            "live_money_eligible": False,
+            "live_money_allowed": False,
+            "paper_proof_invoked": False,
+            "broad_flatten_allowed": False,
+            "global_flatten_allowed": False,
+            "attribution": {"lifecycle_id": "life-mnq", "trade_id": "trade-mnq"},
         },
         {
             "exit_intent_id": "exit-mgc",
@@ -615,9 +716,27 @@ def _pipeline_report(
             "close_qty": 1,
             "execution_domain": "TRACK_B_PAPER",
             "account": "DUM882026",
+            "account_id": "DUM882026",
+            "position_side": "LONG",
+            "owned_qty": "1",
+            "remaining_qty_after": "0",
+            "source_policy_id": "GLOBEX_ACTIVE_EVIDENCE_TIMEBOX_60M_EXIT_V1",
+            "exit_reason": "timebox_exit_due",
+            "lifecycle_id": "life-mgc",
+            "trade_id": "trade-mgc",
+            "live_money_eligible": False,
+            "live_money_allowed": False,
+            "paper_proof_invoked": False,
+            "broad_flatten_allowed": False,
+            "global_flatten_allowed": False,
+            "attribution": {"lifecycle_id": "life-mgc", "trade_id": "trade-mgc"},
         },
     ]
-    selected_intents = (intents if intents is not None else default_intents)[: len(decisions)]
+    if intents is not None:
+        selected_intents = [{**default_intents[index], **intent} for index, intent in enumerate(intents)]
+    else:
+        selected_intents = default_intents
+    selected_intents = selected_intents[: len(decisions)]
     authority_decisions = []
     for intent, decision in zip(selected_intents, decisions):
         authority_decisions.append(
@@ -629,6 +748,12 @@ def _pipeline_report(
                 "authority_decision": {
                     "decision": decision,
                     "block_reasons": list(block_reasons if decision == "BLOCKED" else ()),
+                    "account_id": intent.get("account_id") or intent.get("account"),
+                    "execution_domain": intent.get("execution_domain"),
+                    "live_money_eligible": intent.get("live_money_eligible") is True,
+                    "paper_proof_invoked": intent.get("paper_proof_invoked") is True,
+                    "hard_required_checks": _authority_hard_checks(failed_hard_checks),
+                    "conditional_risk_checks": _authority_conditional_checks(failed_conditional_checks),
                 },
             }
         )
@@ -638,5 +763,33 @@ def _pipeline_report(
         "exit_authority_decisions": authority_decisions,
         "pipeline_errors": list(pipeline_errors),
         "pipeline_blockers": list(pipeline_blockers),
-        "source_classifications": source_classifications or {},
+        "source_classifications": source_classifications
+        or {
+            "open_order_truth": "NO_OPEN_ORDERS",
+            "managed_positions": "OPEN_MANAGED_EXIT_DUE" if decisions else "OPEN_MANAGED_MATCHED",
+            "managed_orders": "POSITION_WITHOUT_CLOSE_ORDER" if decisions else "ACTIVE_HOLD_MANAGED_TIMED_EXIT_PENDING",
+            "reconciliation": "TRACK_B_PAPER_BROKER_RECONCILED",
+        },
     }
+
+
+def _authority_hard_checks(failed: tuple[str, ...]) -> dict[str, dict[str, Any]]:
+    names = (
+        "known_current_broker_position",
+        "account_matches",
+        "execution_domain_matches",
+        "contract_matches",
+        "close_qty_within_broker_position",
+        "risk_reducing_action",
+        "same_contract_working_close_does_not_over_close",
+        "safe_state_no_hard_halt",
+        "live_money_domain_allowed",
+        "paper_proof_not_invoked",
+        "broad_or_global_flatten_not_requested",
+    )
+    return {name: {"passed": name not in failed} for name in names}
+
+
+def _authority_conditional_checks(failed: tuple[str, ...]) -> dict[str, dict[str, Any]]:
+    names = ("same_contract_unknown_order_risk",)
+    return {name: {"passed": name not in failed} for name in names}
