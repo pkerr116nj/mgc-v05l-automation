@@ -3554,6 +3554,44 @@ def test_leak_test_entry_unknown_persists_known_entry_order_state(tmp_path: Path
     assert row["live_money_eligible"] is False
 
 
+def test_bridge_delegated_entry_fill_triggers_post_broker_mutation_refresh(tmp_path: Path) -> None:
+    config = _config(tmp_path, submit=True)
+    report = {
+        "classification": "PAPER_STRATEGY_ORDER_FILLED",
+        "broker_effect_classification": "BROKER_EFFECT_CONFIRMED",
+    }
+    calls = []
+
+    bridge_module._attach_post_broker_mutation_refresh_if_needed(
+        config=config,
+        report=report,
+        mapped_classification="PAPER_STRATEGY_ORDER_FILLED",
+        delegated_result={"classification": "PAPER_STRATEGY_ORDER_FILLED"},
+        trigger="paper_strategy_bridge_delegated_submit",
+        refresher=lambda **kwargs: calls.append(kwargs)
+        or {"classification": "POST_BROKER_MUTATION_REFRESH_SUCCEEDED", "trigger": kwargs["trigger"]},
+    )
+
+    assert report["post_broker_mutation_refresh"]["classification"] == "POST_BROKER_MUTATION_REFRESH_SUCCEEDED"
+    assert calls[0]["trigger"] == "paper_strategy_bridge_delegated_submit"
+    assert calls[0]["mutation_report"]["classification"] == "PAPER_STRATEGY_ORDER_FILLED"
+
+
+def test_bridge_non_mutating_blocked_result_does_not_trigger_post_refresh(tmp_path: Path) -> None:
+    report = {"classification": "PAPER_STRATEGY_INTENT_BLOCKED"}
+
+    bridge_module._attach_post_broker_mutation_refresh_if_needed(
+        config=_config(tmp_path, submit=True),
+        report=report,
+        mapped_classification="PAPER_STRATEGY_INTENT_BLOCKED",
+        delegated_result={"classification": "PAPER_STRATEGY_INTENT_BLOCKED"},
+        trigger="paper_strategy_bridge_delegated_submit",
+        refresher=lambda **kwargs: (_ for _ in ()).throw(AssertionError("refresh should not run")),
+    )
+
+    assert "post_broker_mutation_refresh" not in report
+
+
 def test_submit_intent_ownership_pre_submit_writes_reserved_entry_context(tmp_path: Path) -> None:
     config = _config(
         tmp_path,

@@ -34,6 +34,9 @@ from .track_b_paper_broker_reconciliation import (
     reconcile_track_b_paper_broker_truth,
 )
 from .track_b_paper_trade_ledger import update_track_b_paper_trade_ledger_from_filled_bridge_result
+from .track_b_post_broker_mutation_refresh import (
+    PostBrokerMutationRefreshConfig,
+)
 from .track_b_position_truth_monitor import DEFAULT_POSITION_TRUTH_ARTIFACT
 from .track_b_pre_action_snapshot_validator import (
     PRE_ACTION_SNAPSHOT_VALID,
@@ -135,6 +138,7 @@ def run_guarded_managed_exit_cancel_replace(
     reconciliation_runner: Callable[[ReconciliationConfig], Mapping[str, Any]] | None = None,
     broker_truth_refresh: Callable[[], Mapping[str, Any]] | None = None,
     ledger_update_runner: Callable[..., Any] = update_track_b_paper_trade_ledger_from_filled_bridge_result,
+    post_mutation_refresher: Callable[..., Mapping[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """Validate and optionally execute one exact guarded cancel/replace."""
 
@@ -280,6 +284,12 @@ def run_guarded_managed_exit_cancel_replace(
             _persist_known_managed_exit_order(config=config, ready=ready, replacement=report["replacement"])
             report["classification"] = GUARDED_CANCEL_REPLACE_REPLACEMENT_WORKING
             report["replacement"]["classification"] = GUARDED_CANCEL_REPLACE_REPLACEMENT_WORKING
+            _attach_post_broker_mutation_refresh(
+                config=config,
+                report=report,
+                trigger="managed_exit_cancel_replace_working",
+                post_mutation_refresher=post_mutation_refresher,
+            )
             _write_report(config, report)
             return report
 
@@ -299,6 +309,12 @@ def run_guarded_managed_exit_cancel_replace(
             "persisted": bool(getattr(ledger_result, "trade_record_written", False)),
             "ledger_jsonl": str(getattr(ledger_result, "ledger_jsonl", "")),
         }
+        _attach_post_broker_mutation_refresh(
+            config=config,
+            report=report,
+            trigger="managed_exit_cancel_replace_filled",
+            post_mutation_refresher=post_mutation_refresher,
+        )
         _write_report(config, report)
         return report
     except Exception as exc:  # noqa: BLE001 - broker action failures must become audit artifacts.
@@ -1115,6 +1131,33 @@ def _filled_result_path(config: ManagedExitCancelReplaceConfig) -> Path:
 
 def _write_report(config: ManagedExitCancelReplaceConfig, report: Mapping[str, Any]) -> None:
     _write_json(_report_path(config), report)
+
+
+def _attach_post_broker_mutation_refresh(
+    *,
+    config: ManagedExitCancelReplaceConfig,
+    report: dict[str, Any],
+    trigger: str,
+    post_mutation_refresher: Callable[..., Mapping[str, Any]] | None,
+) -> None:
+    if post_mutation_refresher is None or report.get("broker_mutation_performed") is not True:
+        return
+    try:
+        report["post_broker_mutation_refresh"] = post_mutation_refresher(
+            config=PostBrokerMutationRefreshConfig(repo_root=config.repo_root),
+            trigger=trigger,
+            mutation_report=report,
+        )
+    except Exception as exc:  # defensive: publication convergence must not unwind cancel/replace.
+        report["post_broker_mutation_refresh"] = {
+            "classification": "POST_BROKER_MUTATION_REFRESH_EXCEPTION",
+            "trigger": trigger,
+            "error": str(exc),
+            "live_money_eligible": False,
+            "paper_proof_invoked": False,
+            "global_cancel_allowed": False,
+            "broad_flatten_allowed": False,
+        }
 
 
 def _write_json(path: Path, payload: Mapping[str, Any]) -> None:

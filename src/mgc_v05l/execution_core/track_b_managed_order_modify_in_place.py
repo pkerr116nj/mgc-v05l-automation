@@ -33,6 +33,10 @@ from mgc_v05l.execution_core.track_b_order_adjustment_planner import (
     MODIFY_IN_PLACE_ELIGIBLE,
 )
 from mgc_v05l.execution_core.track_b_paper_autonomous_recovery_planner import PLAN_MANAGED_ORDER_MODIFY
+from mgc_v05l.execution_core.track_b_post_broker_mutation_refresh import (
+    PostBrokerMutationRefreshConfig,
+    post_position_order_change_refresh,
+)
 from mgc_v05l.execution_core.track_b_position_truth_monitor import DEFAULT_POSITION_TRUTH_ARTIFACT
 from mgc_v05l.execution_core.track_b_pre_action_snapshot_validator import (
     PRE_ACTION_SNAPSHOT_VALID,
@@ -155,6 +159,7 @@ def run_track_b_managed_order_modify_in_place(
     pre_modify_open_order_refresh: BrokerOrderRefresh | None = None,
     modify_order_limit: BrokerOrderModify | None = None,
     post_modify_open_order_refresh: BrokerOrderRefresh | None = None,
+    post_mutation_refresher: Callable[..., Mapping[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """Plan or execute one exact managed close-order limit modification."""
 
@@ -262,6 +267,12 @@ def run_track_b_managed_order_modify_in_place(
         report["broker_mutation_performed"] = bool(modify_result.get("accepted", True))
         report["pre_modify_refresh"] = pre_refresh
         report["modify_result"] = _jsonable(modify_result)
+        _attach_post_broker_mutation_refresh(
+            config=config,
+            report=report,
+            trigger="managed_order_modify_in_place_post_refresh_failed",
+            post_mutation_refresher=post_mutation_refresher,
+        )
         _write_report(config=config, report=report)
         return report
     post_order = _matching_order(config=config, rows=post_refresh, expected_limit=config.new_limit)
@@ -288,6 +299,12 @@ def run_track_b_managed_order_modify_in_place(
             "same_quantity_required": config.quantity,
             "updated_limit_required": config.new_limit,
         }
+        _attach_post_broker_mutation_refresh(
+            config=config,
+            report=report,
+            trigger="managed_order_modify_in_place_verification_failed",
+            post_mutation_refresher=post_mutation_refresher,
+        )
         _write_report(config=config, report=report)
         return report
 
@@ -315,6 +332,12 @@ def run_track_b_managed_order_modify_in_place(
         "broker_limit_omitted_or_not_echoed": post_limit is None,
         "updated_limit_required": config.new_limit,
     }
+    _attach_post_broker_mutation_refresh(
+        config=config,
+        report=report,
+        trigger="managed_order_modify_in_place_applied",
+        post_mutation_refresher=post_mutation_refresher,
+    )
     _write_report(config=config, report=report)
     return report
 
@@ -393,6 +416,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             "pre_modify_open_order_refresh": adapter.refresh_open_orders,
             "modify_order_limit": adapter.modify_order_limit,
             "post_modify_open_order_refresh": adapter.refresh_open_orders,
+            "post_mutation_refresher": post_position_order_change_refresh,
         }
     try:
         report = run_track_b_managed_order_modify_in_place(config=config, **hooks)
@@ -975,6 +999,33 @@ def _write_report(*, config: ManagedOrderModifyInPlaceConfig, report: Mapping[st
     path = config.resolve(config.output_path)
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(report, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+
+
+def _attach_post_broker_mutation_refresh(
+    *,
+    config: ManagedOrderModifyInPlaceConfig,
+    report: dict[str, Any],
+    trigger: str,
+    post_mutation_refresher: Callable[..., Mapping[str, Any]] | None,
+) -> None:
+    if post_mutation_refresher is None or report.get("broker_mutation_performed") is not True:
+        return
+    try:
+        report["post_broker_mutation_refresh"] = post_mutation_refresher(
+            config=PostBrokerMutationRefreshConfig(repo_root=config.repo_root),
+            trigger=trigger,
+            mutation_report=report,
+        )
+    except Exception as exc:  # defensive: publication convergence must not unwind an accepted broker modify.
+        report["post_broker_mutation_refresh"] = {
+            "classification": "POST_BROKER_MUTATION_REFRESH_EXCEPTION",
+            "trigger": trigger,
+            "error": str(exc),
+            "live_money_eligible": False,
+            "paper_proof_invoked": False,
+            "global_cancel_allowed": False,
+            "broad_flatten_allowed": False,
+        }
 
 
 class IbkrPaperManagedOrderModifyAdapter:

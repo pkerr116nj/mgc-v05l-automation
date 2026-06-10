@@ -84,6 +84,10 @@ from ..execution_core.track_b_paper_lifecycle_validation_entry_authority import 
     PAPER_LIFECYCLE_VALIDATION_ENTRY_DEGRADED_ALLOWED,
     build_paper_lifecycle_validation_entry_authority_from_repo,
 )
+from ..execution_core.track_b_post_broker_mutation_refresh import (
+    PostBrokerMutationRefreshConfig,
+    post_position_order_change_refresh,
+)
 from ..execution_core.track_b_submit_intent_ownership import (
     DEFAULT_TRACK_B_SUBMIT_INTENT_OWNERSHIP_JSONL,
     DEFAULT_TRACK_B_SUBMIT_INTENT_OWNERSHIP_LATEST_JSON,
@@ -1323,6 +1327,13 @@ def run_ibkr_paper_strategy_bridge(
             report["broker_effect_classification"] = broker_effect_classification
         if live_trade_registry_events:
             report["live_trade_registry_events"] = live_trade_registry_events
+        _attach_post_broker_mutation_refresh_if_needed(
+            config=config,
+            report=report,
+            mapped_classification=classification,
+            delegated_result=delegated_result,
+            trigger="paper_strategy_bridge_delegated_submit",
+        )
         return IbkrPaperStrategyBridgeArtifacts(classification=classification, report=report, audit_events=audit_events)
     except Exception as exc:
         classification = "PAPER_STRATEGY_INTENT_BLOCKED"
@@ -3831,6 +3842,71 @@ def _build_report(
         "callback_timeline_event_count": callback_timeline_event_count,
         "errors": errors,
     }
+
+
+def _attach_post_broker_mutation_refresh_if_needed(
+    *,
+    config: IbkrPaperStrategyBridgeConfig,
+    report: dict[str, Any],
+    mapped_classification: str,
+    delegated_result: Mapping[str, Any] | None,
+    trigger: str,
+    refresher: Callable[..., Mapping[str, Any]] = post_position_order_change_refresh,
+) -> None:
+    if not _bridge_delegated_result_changed_broker_state(
+        mapped_classification=mapped_classification,
+        delegated_result=delegated_result,
+        broker_effect_classification=report.get("broker_effect_classification"),
+    ):
+        return
+    refresh_config = PostBrokerMutationRefreshConfig(repo_root=config.repo_root)
+    try:
+        report["post_broker_mutation_refresh"] = dict(
+            refresher(
+                config=refresh_config,
+                trigger=trigger,
+                mutation_report=report,
+            )
+        )
+    except Exception as exc:  # defensive: convergence publication must not unwind a delegated broker result.
+        report["post_broker_mutation_refresh"] = {
+            "classification": "POST_BROKER_MUTATION_REFRESH_EXCEPTION",
+            "trigger": trigger,
+            "error": str(exc),
+            "live_money_eligible": False,
+            "paper_proof_invoked": False,
+            "global_cancel_allowed": False,
+            "broad_flatten_allowed": False,
+        }
+
+
+def _bridge_delegated_result_changed_broker_state(
+    *,
+    mapped_classification: str,
+    delegated_result: Mapping[str, Any] | None,
+    broker_effect_classification: object,
+) -> bool:
+    mapped = str(mapped_classification or "").strip().upper()
+    if mapped in {
+        "PAPER_STRATEGY_ORDER_FILLED",
+        "PAPER_STRATEGY_ORDER_WORKING",
+        "PAPER_STRATEGY_ORDER_NOT_FILLED_CANCELLED",
+        "PAPER_STRATEGY_ENTRY_MISSED_CANCELLED_ACCEPTED",
+    }:
+        return True
+    delegated = dict(delegated_result or {})
+    if delegated.get("broker_state_mutated") is True:
+        return True
+    if str(broker_effect_classification or "").strip().upper() == "BROKER_EFFECT_CONFIRMED":
+        return True
+    lifecycle = dict(delegated.get("submit_cancel_lifecycle") or delegated.get("report", {}).get("submit_cancel_lifecycle") or {})
+    return bool(
+        lifecycle.get("submitted_order_id")
+        or lifecycle.get("submitted_perm_id")
+        or lifecycle.get("cancel_order_called")
+        or lifecycle.get("positions_after_submit")
+        or lifecycle.get("positions_after_close_fill")
+    )
 
 
 def _persist_submit_intent_ownership_before_delegate(

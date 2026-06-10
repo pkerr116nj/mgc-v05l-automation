@@ -206,6 +206,31 @@ def test_refresh_failure_is_diagnostic_for_v1_allowed_paper_risk_reducing_close(
     assert payload["submit_attempted"] is True
 
 
+def test_managed_close_fill_triggers_post_broker_mutation_refresh(tmp_path: Path) -> None:
+    refresh_calls = []
+
+    payload = run_track_b_managed_exit_service_once(
+        config=TrackBManagedExitServiceConfig(repo_root=tmp_path, apply=True, max_cycles_per_tick=1),
+        now=NOW,
+        actuator_runner=lambda config, now, timeout: _actuator_report(
+            MANAGED_EXIT_ACTUATOR_APPLIED_OR_PENDING,
+            eligible=1,
+            submitted=1,
+            local_symbol="MESM6",
+        ),
+        authority_refresher=_refresh_ok,
+        pipeline_builder=lambda config, now: _pipeline_report(decisions=("ALLOWED",)),
+        post_mutation_refresher=lambda **kwargs: refresh_calls.append(kwargs)
+        or {"classification": "POST_BROKER_MUTATION_REFRESH_SUCCEEDED", "trigger": kwargs["trigger"]},
+    )
+
+    assert payload["classification"] == MANAGED_EXIT_SERVICE_APPLY_SUCCEEDED
+    assert payload["broker_state_mutated"] is True
+    assert payload["post_broker_mutation_refresh"]["classification"] == "POST_BROKER_MUTATION_REFRESH_SUCCEEDED"
+    assert payload["post_broker_mutation_refresh"]["trigger"] == "managed_exit_service_actuator"
+    assert refresh_calls[0]["mutation_report"]["broker_state_mutated"] is True
+
+
 def test_v1_allowed_close_with_real_broker_risk_blocker_stops_before_actuator(tmp_path: Path) -> None:
     calls = []
 
@@ -560,6 +585,32 @@ def test_working_close_order_maintenance_refresh_timeout_is_diagnostic_when_clos
         MANAGED_PAPER_RISK_REDUCING_EXIT_AUTHORITY_ALLOWED
     )
     assert payload["managed_order_maintenance_mutation_performed"] is True
+
+
+def test_managed_order_maintenance_mutation_triggers_post_broker_mutation_refresh(tmp_path: Path) -> None:
+    _write_managed_close_order_registry(tmp_path)
+    refresh_calls = []
+
+    payload = run_track_b_managed_exit_service_once(
+        config=TrackBManagedExitServiceConfig(repo_root=tmp_path, apply=True),
+        now=NOW,
+        actuator_runner=lambda config, now, timeout: {},
+        authority_refresher=_refresh_ok,
+        pipeline_builder=lambda config, now: _pipeline_report(decisions=(), classification="HOLD_ONLY"),
+        order_maintenance_runner=lambda config, now, timeout: {
+            "classification": "MANAGED_ORDER_MAINTENANCE_APPLIED",
+            "broker_mutation_attempted": True,
+            "broker_mutation_performed": True,
+        },
+        post_mutation_refresher=lambda **kwargs: refresh_calls.append(kwargs)
+        or {"classification": "POST_BROKER_MUTATION_REFRESH_DEGRADED", "trigger": kwargs["trigger"]},
+    )
+
+    assert payload["classification"] == MANAGED_EXIT_SERVICE_APPLY_SUCCEEDED
+    assert payload["managed_order_maintenance_mutation_performed"] is True
+    assert payload["post_broker_mutation_refresh"]["classification"] == "POST_BROKER_MUTATION_REFRESH_DEGRADED"
+    assert payload["post_broker_mutation_refresh"]["trigger"] == "managed_exit_service_order_maintenance"
+    assert len(refresh_calls) == 1
 
 
 def test_modify_config_uses_known_order_owner_client_id(tmp_path: Path) -> None:

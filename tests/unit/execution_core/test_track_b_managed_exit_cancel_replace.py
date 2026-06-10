@@ -200,11 +200,14 @@ def test_apply_cancels_exact_order_and_persists_working_replacement(tmp_path: Pa
     _write_shared_truth_for_cancel_replace(tmp_path)
     _write_pre_action_snapshot_for_cancel_replace(tmp_path)
     fake = _FakeAdapter(fill=None)
+    refresh_calls = []
     report = run_guarded_managed_exit_cancel_replace(
         config=_config(tmp_path, apply=True, skip_shared_truth_write=True),
         now=NOW,
         reconciliation_runner=lambda _config: _reconciliation_report(),
         adapter_factory=lambda **_kwargs: fake,
+        post_mutation_refresher=lambda **kwargs: refresh_calls.append(kwargs)
+        or {"classification": "POST_BROKER_MUTATION_REFRESH_SUCCEEDED", "trigger": kwargs["trigger"]},
     )
 
     assert report["classification"] == GUARDED_CANCEL_REPLACE_REPLACEMENT_WORKING
@@ -216,6 +219,8 @@ def test_apply_cancels_exact_order_and_persists_working_replacement(tmp_path: Pa
     state_path = tmp_path / "outputs" / "track_b_execution_core" / "managed_exit_orders" / "latest_known_managed_exit_orders.json"
     assert state_path.exists()
     assert "2" in state_path.read_text(encoding="utf-8")
+    assert report["post_broker_mutation_refresh"]["trigger"] == "managed_exit_cancel_replace_working"
+    assert refresh_calls[0]["mutation_report"]["broker_mutation_performed"] is True
 
 
 def test_cancel_replace_allowlist_canonicalizes_mes_shorthand_expiry() -> None:

@@ -169,12 +169,15 @@ def test_applied_path_uses_same_order_identity_and_no_replacement(tmp_path: Path
         calls.append("post")
         return {"open_orders": [_broker_order(limit_price=config.new_limit)]}
 
+    refresh_calls = []
     report = run_track_b_managed_order_modify_in_place(
         config=_config(tmp_path, apply=True, operator_authorized_modify=True),
         now=NOW,
         pre_modify_open_order_refresh=pre_refresh,
         modify_order_limit=modify,
         post_modify_open_order_refresh=post_refresh,
+        post_mutation_refresher=lambda **kwargs: refresh_calls.append(kwargs)
+        or {"classification": "POST_BROKER_MUTATION_REFRESH_SUCCEEDED", "trigger": kwargs["trigger"]},
     )
 
     assert calls == ["pre", "modify", "post"]
@@ -188,6 +191,8 @@ def test_applied_path_uses_same_order_identity_and_no_replacement(tmp_path: Path
     assert report["shared_truth_refresh_generation_id"] == "generation-managed-order-modify"
     assert report["post_modify_verification"]["verified"] is True
     assert report["post_modify_verification"]["updated_limit_observed"] is True
+    assert report["post_broker_mutation_refresh"]["trigger"] == "managed_order_modify_in_place_applied"
+    assert refresh_calls[0]["mutation_report"]["broker_mutation_performed"] is True
 
 
 def test_apply_tolerates_exact_single_order_with_sentinel_status_gap_and_missing_limit(tmp_path: Path) -> None:

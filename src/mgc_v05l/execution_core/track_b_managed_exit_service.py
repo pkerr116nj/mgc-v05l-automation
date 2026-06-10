@@ -45,6 +45,10 @@ from mgc_v05l.execution_core.track_b_order_adjustment_planner import (
     build_track_b_order_adjustment_plan,
     write_track_b_order_adjustment_plan,
 )
+from mgc_v05l.execution_core.track_b_post_broker_mutation_refresh import (
+    PostBrokerMutationRefreshConfig,
+    post_position_order_change_refresh,
+)
 from mgc_v05l.execution_core.track_b_strategy_attrition_funnel import (
     events_from_managed_exit_service_status,
     try_record_strategy_funnel_events,
@@ -109,6 +113,7 @@ AuthorityRefresher = Callable[[TrackBManagedExitServiceConfig, str], Mapping[str
 CommandRunner = Callable[[Sequence[str], Path, float], subprocess.CompletedProcess[str]]
 PipelineBuilder = Callable[[TrackBManagedExitServiceConfig, datetime], Mapping[str, Any]]
 OrderMaintenanceRunner = Callable[[TrackBManagedExitServiceConfig, datetime, float], Mapping[str, Any]]
+PostMutationRefresher = Callable[..., Mapping[str, Any]]
 SleepFunc = Callable[[float], None]
 
 
@@ -121,6 +126,7 @@ def run_track_b_managed_exit_service_once(
     command_runner: CommandRunner | None = None,
     pipeline_builder: PipelineBuilder | None = None,
     order_maintenance_runner: OrderMaintenanceRunner | None = None,
+    post_mutation_refresher: PostMutationRefresher | None = None,
     write: bool = True,
 ) -> dict[str, Any]:
     actual_now = now or datetime.now(UTC)
@@ -136,6 +142,7 @@ def run_track_b_managed_exit_service_once(
     authority_refresher = authority_refresher or _refresh_operator_authority
     pipeline_builder = pipeline_builder or _run_pipeline_dry_run
     order_maintenance_runner = order_maintenance_runner or _run_managed_order_maintenance
+    post_mutation_refresher = post_mutation_refresher or post_position_order_change_refresh
     authority_refreshes: list[dict[str, Any]] = []
     actuator_reports: list[dict[str, Any]] = []
     order_maintenance_reports: list[dict[str, Any]] = []
@@ -229,6 +236,13 @@ def run_track_b_managed_exit_service_once(
                     execution_plan=execution_plan,
                     order_maintenance_reports=order_maintenance_reports,
                     service_diagnostics=service_diagnostics,
+                )
+                payload = _attach_post_broker_mutation_refresh(
+                    config=config,
+                    payload=payload,
+                    trigger="managed_exit_service_order_maintenance",
+                    post_mutation_refresher=post_mutation_refresher,
+                    write=write,
                 )
                 if write:
                     write_track_b_managed_exit_service_status(config=config, payload=payload)
@@ -341,6 +355,13 @@ def run_track_b_managed_exit_service_once(
         execution_plan=execution_plan,
         order_maintenance_reports=order_maintenance_reports,
         service_diagnostics=service_diagnostics,
+    )
+    payload = _attach_post_broker_mutation_refresh(
+        config=config,
+        payload=payload,
+        trigger="managed_exit_service_actuator",
+        post_mutation_refresher=post_mutation_refresher,
+        write=write,
     )
     if write:
         write_track_b_managed_exit_service_status(config=config, payload=payload)
@@ -534,6 +555,40 @@ def _service_payload(
         "required_next_action": _next_action(final_classification),
         "status_path": str(config.resolve(config.status_path)),
     }
+
+
+def _attach_post_broker_mutation_refresh(
+    *,
+    config: TrackBManagedExitServiceConfig,
+    payload: Mapping[str, Any],
+    trigger: str,
+    post_mutation_refresher: PostMutationRefresher,
+    write: bool,
+) -> dict[str, Any]:
+    enriched = dict(payload)
+    if write is not True or enriched.get("broker_state_mutated") is not True:
+        return enriched
+    refresh_config = PostBrokerMutationRefreshConfig(repo_root=config.repo_root)
+    try:
+        refresh = dict(
+            post_mutation_refresher(
+                config=refresh_config,
+                trigger=trigger,
+                mutation_report=enriched,
+            )
+        )
+    except Exception as exc:  # defensive: convergence publication must not unwind broker mutation.
+        refresh = {
+            "classification": "POST_BROKER_MUTATION_REFRESH_EXCEPTION",
+            "trigger": trigger,
+            "error": str(exc),
+            "live_money_eligible": False,
+            "paper_proof_invoked": False,
+            "global_cancel_allowed": False,
+            "broad_flatten_allowed": False,
+        }
+    enriched["post_broker_mutation_refresh"] = refresh
+    return enriched
 
 
 def _cycle_started_payload(*, config: TrackBManagedExitServiceConfig, now: datetime) -> dict[str, Any]:
