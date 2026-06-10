@@ -1,0 +1,469 @@
+"""Minimal Track B PAPER submit-capable startup contract.
+
+This module is intentionally small and broker-risk focused. It does not grant
+strategy authority, lifecycle authority, or live-money capability; it only
+answers whether an explicitly selected Track B PAPER runtime has the current
+facts needed to be submit-capable.
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+from dataclasses import dataclass
+from datetime import UTC, datetime
+from pathlib import Path
+from typing import Any, Mapping, Sequence
+
+
+REPO_ROOT = Path(__file__).resolve().parents[3]
+DEFAULT_ACCOUNT_ID = "DUM882026"
+DEFAULT_MAX_PAPER_ORDER_QTY = 1
+DEFAULT_PRICE_MAX_AGE_SECONDS = 600.0
+
+DEFAULT_OUTPUT_PATH = (
+    Path("outputs")
+    / "track_b_execution_core"
+    / "paper_minimal_startup"
+    / "latest_paper_minimal_startup.json"
+)
+DEFAULT_BROKER_TRUTH_LEASE_PATH = (
+    Path("outputs") / "operator_dashboard" / "runtime" / "latest_broker_truth_lease.json"
+)
+DEFAULT_BROKER_SESSION_AUTHORITY_PATH = (
+    Path("outputs") / "operator_dashboard" / "runtime" / "latest_broker_session_authority.json"
+)
+DEFAULT_OPEN_ORDER_TRUTH_PATH = (
+    Path("outputs") / "track_b_execution_core" / "open_order_truth" / "latest_open_order_truth.json"
+)
+DEFAULT_RECONCILIATION_PATH = (
+    Path("outputs")
+    / "reports"
+    / "track_b_paper_broker_reconciliation"
+    / "latest_track_b_paper_broker_reconciliation.json"
+)
+DEFAULT_CONFIG_IN_FORCE_PATH = (
+    Path("outputs")
+    / "probationary_pattern_engine"
+    / "paper_session"
+    / "runtime"
+    / "paper_config_in_force.json"
+)
+DEFAULT_CONFIG_PATHS_FILE = (
+    Path("outputs")
+    / "probationary_pattern_engine"
+    / "paper_session"
+    / "runtime"
+    / "paper_runtime_config_paths.txt"
+)
+DEFAULT_PAPER_RUNTIME_TRUTH_PATH = (
+    Path("outputs")
+    / "probationary_pattern_engine"
+    / "paper_session"
+    / "runtime"
+    / "paper_runtime_truth.json"
+)
+DEFAULT_PHASE1_MARKET_DATA_ROOT = (
+    Path("outputs") / "track_b_execution_core" / "phase1_runtime_market_data"
+)
+
+
+@dataclass(frozen=True)
+class TrackBPaperMinimalStartupConfig:
+    repo_root: Path = REPO_ROOT
+    account_id: str = DEFAULT_ACCOUNT_ID
+    max_paper_order_qty: int = DEFAULT_MAX_PAPER_ORDER_QTY
+    price_max_age_seconds: float = DEFAULT_PRICE_MAX_AGE_SECONDS
+    output_path: Path = DEFAULT_OUTPUT_PATH
+    broker_truth_lease_path: Path = DEFAULT_BROKER_TRUTH_LEASE_PATH
+    broker_session_authority_path: Path = DEFAULT_BROKER_SESSION_AUTHORITY_PATH
+    open_order_truth_path: Path = DEFAULT_OPEN_ORDER_TRUTH_PATH
+    reconciliation_path: Path = DEFAULT_RECONCILIATION_PATH
+    config_in_force_path: Path = DEFAULT_CONFIG_IN_FORCE_PATH
+    config_paths_file: Path = DEFAULT_CONFIG_PATHS_FILE
+    paper_runtime_truth_path: Path = DEFAULT_PAPER_RUNTIME_TRUTH_PATH
+    phase1_market_data_root: Path = DEFAULT_PHASE1_MARKET_DATA_ROOT
+
+    def resolve(self, path: Path) -> Path:
+        return path if path.is_absolute() else self.repo_root / path
+
+
+def build_track_b_paper_minimal_startup(
+    *,
+    config: TrackBPaperMinimalStartupConfig | None = None,
+    now: datetime | None = None,
+) -> dict[str, Any]:
+    config = config or TrackBPaperMinimalStartupConfig()
+    actual_now = _ensure_utc(now or datetime.now(UTC))
+    lease = _read_json(config.resolve(config.broker_truth_lease_path))
+    bsa = _read_json(config.resolve(config.broker_session_authority_path))
+    open_order_truth = _read_json(config.resolve(config.open_order_truth_path))
+    reconciliation = _read_json(config.resolve(config.reconciliation_path))
+    config_in_force = _read_json(config.resolve(config.config_in_force_path))
+    runtime_truth = _read_json(config.resolve(config.paper_runtime_truth_path))
+    config_paths = _read_text_lines(config.resolve(config.config_paths_file))
+
+    blockers: list[dict[str, Any]] = []
+    warnings: list[dict[str, Any]] = []
+
+    def block(code: str, detail: str, *, source: str) -> None:
+        blockers.append({"code": code, "detail": detail, "source": source})
+
+    def warn(code: str, detail: str, *, source: str) -> None:
+        warnings.append({"code": code, "detail": detail, "source": source})
+
+    account_id = str(
+        lease.get("account_id")
+        or bsa.get("account_id")
+        or _config_account_id(config_in_force)
+        or ""
+    ).strip()
+    if account_id != config.account_id:
+        block("paper_account_not_allowed", f"Expected {config.account_id}, got {account_id or 'UNKNOWN'}.", source="account")
+
+    if _any_true(lease, bsa, reconciliation, config_in_force, runtime_truth, key="live_money_eligible"):
+        block("live_money_eligible_true", "live_money_eligible=true is forbidden for PAPER minimal startup.", source="paper_safety")
+    if _any_true(lease, bsa, reconciliation, open_order_truth, runtime_truth, key="paper_proof_invoked"):
+        block("paper_proof_invoked_true", "paper_proof=true/invoked is forbidden for PAPER minimal startup.", source="paper_safety")
+
+    position_lease = _mapping(lease.get("broker_position_lease"))
+    open_order_lease = _mapping(lease.get("broker_open_order_lease"))
+    broker_positions_available = bool(position_lease.get("complete") is True or lease.get("broker_positions_complete") is True)
+    broker_open_orders_available = bool(open_order_lease.get("complete") is True or lease.get("broker_open_orders_complete") is True)
+    if not broker_positions_available:
+        block("broker_positions_unavailable", "Broker positions are not available/complete.", source="broker_truth")
+    if not broker_open_orders_available:
+        block("broker_open_orders_unavailable", "Broker open orders are not available/complete.", source="broker_truth")
+
+    unknown_open_orders = max(
+        _int_first(lease.get("unknown_broker_open_order_count")),
+        _int_first(open_order_truth.get("unknown_open_order_count")),
+        _int_first(_mapping(open_order_truth.get("summary")).get("unknown_open_order_count")),
+        _int_first(reconciliation.get("unknown_broker_open_order_count")),
+    )
+    if unknown_open_orders != 0:
+        block("unknown_open_orders_present", f"Unknown open order count is {unknown_open_orders}.", source="open_order_truth")
+
+    broker_open_order_count = max(
+        _int_first(lease.get("track_b_broker_open_order_count")),
+        _int_first(reconciliation.get("track_b_broker_open_order_count")),
+        _int_first(_mapping(open_order_truth.get("summary")).get("open_order_count")),
+    )
+    open_order_classification = str(open_order_truth.get("classification") or "").strip().upper()
+    if broker_open_order_count != 0:
+        block("broker_open_orders_present", f"Broker open order count is {broker_open_order_count}.", source="broker_truth")
+    if open_order_classification and open_order_classification != "NO_OPEN_ORDERS":
+        block("open_order_truth_not_clean", f"Open Order Truth is {open_order_classification}.", source="open_order_truth")
+
+    if reconciliation and reconciliation.get("broker_reconciled") is False:
+        block("broker_reconciliation_dirty", "Broker reconciliation explicitly reports broker_reconciled=false.", source="reconciliation")
+    if _int_first(reconciliation.get("current_scope_review_required_count"), reconciliation.get("review_required_count")) != 0:
+        block("review_required_current_scope", "Current-scope review_required rows are present.", source="reconciliation")
+
+    explicit_profile = _explicit_paper_profile(config_paths)
+    if not explicit_profile:
+        block("explicit_paper_profile_missing", "No explicit paper_stack_* profile overlay is selected.", source="config")
+
+    active_lanes = _active_lanes(config_in_force)
+    if not active_lanes:
+        block("active_paper_lanes_missing", "No active PAPER lanes are configured.", source="config")
+    bad_accounts = sorted(_lane_id(row) for row in active_lanes if _lane_account(row) not in {"", config.account_id})
+    if bad_accounts:
+        block("lane_account_not_allowed", f"Active lanes have non-PAPER account ids: {bad_accounts[:5]}.", source="config")
+    not_paper_lanes = sorted(_lane_id(row) for row in active_lanes if row.get("paper_only") is not True)
+    if not_paper_lanes:
+        block("submit_route_not_paper_only", f"Active lanes are not paper_only: {not_paper_lanes[:5]}.", source="config")
+    runtime_mode = str(runtime_truth.get("runtime_mode") or config_in_force.get("runtime_mode") or "PAPER").strip().upper()
+    if runtime_mode != "PAPER":
+        block("runtime_route_not_paper", f"Runtime mode is {runtime_mode or 'UNKNOWN'}, expected PAPER.", source="runtime")
+
+    oversize_lanes = [
+        {"lane_id": _lane_id(row), "max_position_quantity": _int_first(row.get("max_position_quantity"))}
+        for row in active_lanes
+        if _int_first(row.get("max_position_quantity")) > int(config.max_paper_order_qty)
+    ]
+    if oversize_lanes:
+        block("paper_order_size_limit_exceeded", f"Active lane max quantity exceeds {config.max_paper_order_qty}.", source="config")
+
+    instruments = _active_instruments(active_lanes)
+    price_rows = _price_availability_rows(
+        config=config,
+        instruments=instruments,
+        now=actual_now,
+    )
+    missing_price = [row for row in price_rows if row.get("available") is not True]
+    if not instruments:
+        block("configured_traded_contracts_missing", "No configured traded contracts could be inferred.", source="config")
+    elif missing_price:
+        block(
+            "current_market_price_unavailable",
+            f"Current price/candle unavailable for {[row.get('instrument') for row in missing_price]}.",
+            source="market_data",
+        )
+
+    _diagnostic_if_present(warnings, "stale_dashboard_backend_artifacts_diagnostic", "Dashboard/backend freshness is diagnostic under PAPER_MINIMAL_STARTUP_V1.", "diagnostics")
+    _diagnostic_if_present(warnings, "stale_pid_runtime_truth_diagnostic", "Stale PID/runtime-truth artifacts are diagnostic unless they affect PAPER/account/broker/order/price/config/size invariants.", "diagnostics")
+    _diagnostic_if_present(warnings, "control_plane_publication_diagnostic", "Control-plane/shared-services/ODS publication freshness is diagnostic unless it proves a hard PAPER invariant false.", "diagnostics")
+    if reconciliation:
+        recon_age = _age_seconds(reconciliation.get("generated_at"), actual_now)
+        if recon_age is not None and recon_age > 180.0 and broker_positions_available and broker_open_orders_available:
+            warn(
+                "reconciliation_freshness_lag_diagnostic",
+                "Reconciliation freshness lag is diagnostic because broker position/order truth is current and complete.",
+                source="reconciliation",
+            )
+
+    classification = "PAPER_MINIMAL_STARTUP_ALLOWED" if not blockers else "PAPER_MINIMAL_STARTUP_BLOCKED"
+    return {
+        "schema_version": "track_b_paper_minimal_startup_v1",
+        "generated_at": actual_now.isoformat(),
+        "classification": classification,
+        "allowed": not blockers,
+        "account_id": account_id or None,
+        "execution_domain": "TRACK_B_PAPER",
+        "submit_route": "PAPER",
+        "profile_overlay": explicit_profile,
+        "configured_instruments": instruments,
+        "max_paper_order_qty": int(config.max_paper_order_qty),
+        "broker_positions_available": broker_positions_available,
+        "broker_open_orders_available": broker_open_orders_available,
+        "broker_position_count": _int_first(lease.get("track_b_broker_position_count"), reconciliation.get("track_b_broker_position_count")),
+        "broker_open_order_count": broker_open_order_count,
+        "unknown_open_order_count": unknown_open_orders,
+        "price_availability": price_rows,
+        "blockers": blockers,
+        "warnings": warnings,
+        "diagnostics_only_categories": [
+            "stale_dashboard_backend_artifacts",
+            "stale_pid_runtime_truth_artifacts",
+            "stale_ready_observation_publication",
+            "stale_or_incoherent_control_plane_publication",
+            "stale_shared_services_authority",
+            "guarded_loop_status_without_hard_invariant_failure",
+            "ods_publication_delay",
+            "historical_registry_lifecycle_debris_contradicted_by_flat_broker_truth",
+            "reconciliation_freshness_lag_with_current_flat_broker_truth",
+        ],
+        "source_artifact_refs": {
+            "broker_truth_lease": str(config.resolve(config.broker_truth_lease_path)),
+            "broker_session_authority": str(config.resolve(config.broker_session_authority_path)),
+            "open_order_truth": str(config.resolve(config.open_order_truth_path)),
+            "reconciliation": str(config.resolve(config.reconciliation_path)),
+            "config_in_force": str(config.resolve(config.config_in_force_path)),
+            "config_paths_file": str(config.resolve(config.config_paths_file)),
+            "paper_runtime_truth": str(config.resolve(config.paper_runtime_truth_path)),
+            "phase1_market_data_root": str(config.resolve(config.phase1_market_data_root)),
+        },
+    }
+
+
+def write_track_b_paper_minimal_startup(
+    *,
+    config: TrackBPaperMinimalStartupConfig | None = None,
+    payload: Mapping[str, Any] | None = None,
+    now: datetime | None = None,
+) -> Path:
+    config = config or TrackBPaperMinimalStartupConfig()
+    payload = dict(payload or build_track_b_paper_minimal_startup(config=config, now=now))
+    path = config.resolve(config.output_path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    return path
+
+
+def _active_lanes(config_in_force: Mapping[str, Any]) -> list[Mapping[str, Any]]:
+    active_ids = {str(value).strip() for value in list(config_in_force.get("active_lane_ids") or []) if str(value).strip()}
+    rows = [row for row in list(config_in_force.get("lanes") or []) if isinstance(row, Mapping)]
+    if not active_ids:
+        return rows
+    return [row for row in rows if _lane_id(row) in active_ids]
+
+
+def _active_instruments(active_lanes: Sequence[Mapping[str, Any]]) -> list[str]:
+    values: set[str] = set()
+    for row in active_lanes:
+        raw = row.get("instrument") or row.get("symbol") or row.get("contract_symbol") or ""
+        text = str(raw).strip().upper()
+        if not text:
+            lane_id = _lane_id(row).upper()
+            text = lane_id.split("_", 1)[0] if "_" in lane_id else ""
+        if text:
+            values.add(text)
+    return sorted(values)
+
+
+def _price_availability_rows(
+    *,
+    config: TrackBPaperMinimalStartupConfig,
+    instruments: Sequence[str],
+    now: datetime,
+) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    for instrument in instruments:
+        path = config.resolve(config.phase1_market_data_root) / instrument / "1m" / "latest_runtime_candles.json"
+        payload = _read_json(path)
+        generated_at = _parse_datetime(payload.get("generated_at"))
+        age_seconds = None if generated_at is None else max((now - generated_at).total_seconds(), 0.0)
+        bars = list(payload.get("bars") or payload.get("candles") or [])
+        latest_bar = bars[-1] if bars and isinstance(bars[-1], Mapping) else {}
+        price = _float_first(latest_bar.get("close"), payload.get("latest_price"), payload.get("price"))
+        blockers: list[str] = []
+        if not payload:
+            blockers.append("price_artifact_missing")
+        if not bars:
+            blockers.append("price_candles_missing")
+        if price is None:
+            blockers.append("price_missing")
+        if generated_at is None:
+            blockers.append("price_generated_at_missing")
+        elif age_seconds is not None and age_seconds > float(config.price_max_age_seconds):
+            blockers.append("price_artifact_stale")
+        if payload and payload.get("live_money_eligible") is True:
+            blockers.append("price_artifact_live_money_eligible_true")
+        source_category = str(payload.get("source_category") or payload.get("source") or "").upper()
+        if any(marker in source_category for marker in ("RESEARCH", "REPLAY", "OFFLINE")):
+            blockers.append("price_artifact_not_runtime_source")
+        rows.append(
+            {
+                "instrument": instrument,
+                "available": not blockers,
+                "artifact_path": str(path),
+                "generated_at": payload.get("generated_at"),
+                "age_seconds": None if age_seconds is None else round(age_seconds, 3),
+                "latest_bar_end_ts": latest_bar.get("bar_end") or payload.get("last_completed_bar_ts"),
+                "price": price,
+                "blockers": blockers,
+            }
+        )
+    return rows
+
+
+def _explicit_paper_profile(config_paths: Sequence[str]) -> str | None:
+    for raw_path in reversed(config_paths):
+        name = Path(str(raw_path)).name
+        if name.startswith("paper_stack_") and name.endswith(".yaml"):
+            return str(raw_path)
+    return None
+
+
+def _config_account_id(config_in_force: Mapping[str, Any]) -> str | None:
+    for row in _active_lanes(config_in_force):
+        account = _lane_account(row)
+        if account:
+            return account
+    return None
+
+
+def _lane_account(row: Mapping[str, Any]) -> str:
+    overlay = _mapping(row.get("runtime_overlay_params"))
+    return str(
+        overlay.get("expected_account_id")
+        or row.get("expected_account_id")
+        or row.get("paper_account_id")
+        or row.get("account_id")
+        or ""
+    ).strip()
+
+
+def _lane_id(row: Mapping[str, Any]) -> str:
+    return str(row.get("lane_id") or row.get("strategy_id") or row.get("id") or "").strip()
+
+
+def _diagnostic_if_present(rows: list[dict[str, Any]], code: str, detail: str, source: str) -> None:
+    rows.append({"code": code, "detail": detail, "source": source})
+
+
+def _read_json(path: Path) -> dict[str, Any]:
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+    return payload if isinstance(payload, dict) else {}
+
+
+def _read_text_lines(path: Path) -> list[str]:
+    try:
+        return [line.strip() for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
+    except OSError:
+        return []
+
+
+def _mapping(value: Any) -> Mapping[str, Any]:
+    return value if isinstance(value, Mapping) else {}
+
+
+def _any_true(*payloads: Mapping[str, Any], key: str) -> bool:
+    return any(payload.get(key) is True for payload in payloads if isinstance(payload, Mapping))
+
+
+def _int_first(*values: Any) -> int:
+    for value in values:
+        if value is None:
+            continue
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            try:
+                return int(float(str(value)))
+            except (TypeError, ValueError):
+                continue
+    return 0
+
+
+def _float_first(*values: Any) -> float | None:
+    for value in values:
+        if value is None:
+            continue
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            continue
+    return None
+
+
+def _parse_datetime(value: Any) -> datetime | None:
+    if not value:
+        return None
+    try:
+        parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return _ensure_utc(parsed)
+
+
+def _age_seconds(value: Any, now: datetime) -> float | None:
+    parsed = _parse_datetime(value)
+    if parsed is None:
+        return None
+    return max((now - parsed).total_seconds(), 0.0)
+
+
+def _ensure_utc(value: datetime) -> datetime:
+    if value.tzinfo is None:
+        return value.replace(tzinfo=UTC)
+    return value.astimezone(UTC)
+
+
+def main(argv: Sequence[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(description="Build Track B PAPER minimal startup classification.")
+    parser.add_argument("--repo-root", type=Path, default=REPO_ROOT)
+    parser.add_argument("--account-id", default=DEFAULT_ACCOUNT_ID)
+    parser.add_argument("--max-paper-order-qty", type=int, default=DEFAULT_MAX_PAPER_ORDER_QTY)
+    parser.add_argument("--no-write", action="store_true")
+    parser.add_argument("--json", action="store_true")
+    args = parser.parse_args(argv)
+    config = TrackBPaperMinimalStartupConfig(
+        repo_root=args.repo_root,
+        account_id=args.account_id,
+        max_paper_order_qty=args.max_paper_order_qty,
+    )
+    payload = build_track_b_paper_minimal_startup(config=config)
+    if not args.no_write:
+        write_track_b_paper_minimal_startup(config=config, payload=payload)
+    if args.json:
+        print(json.dumps(payload, indent=2, sort_keys=True))
+    return 0 if payload.get("allowed") is True else 2
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

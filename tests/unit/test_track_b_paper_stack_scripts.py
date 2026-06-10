@@ -88,6 +88,16 @@ def test_paper_stack_start_refreshes_authority_evidence_before_carrier_launch() 
     )
 
 
+def test_paper_stack_start_has_minimal_startup_v1_path_for_explicit_paper_starts() -> None:
+    source = START_SCRIPT.read_text(encoding="utf-8")
+
+    assert "PAPER_MINIMAL_STARTUP_V1" in source
+    assert "track_b_paper_minimal_startup" in source
+    assert "BLOCKED_PAPER_MINIMAL_STARTUP_V1" in source
+    assert "run_paper_minimal_startup_preflight" in source
+    assert "TRACK_B_PAPER_MINIMAL_STARTUP_V1" in source
+
+
 def test_paper_stack_start_blocks_before_carrier_when_preflight_refresh_fails() -> None:
     source = START_SCRIPT.read_text(encoding="utf-8")
 
@@ -409,6 +419,30 @@ def test_paper_stack_start_blocks_control_plane_not_start_safe_with_primary_reas
     codes = {row["code"] for row in result["remaining_start_blockers"]}
     assert result["classification"] == "STARTUP_PREFLIGHT_REFRESH_BLOCKED"
     assert "control_plane_start_not_allowed" in codes
+    assert "control_plane_primary_blocker" in codes
+
+
+def test_paper_stack_start_treats_control_plane_blocked_exit_as_published_authority(tmp_path: Path) -> None:
+    result = _run_startup_preflight_decision(
+        tmp_path,
+        control={
+            "classification": "CONTROL_PLANE_SNAPSHOT_BLOCKED",
+            "safe_to_start_runtime": False,
+            "top_line_classification": "CONTROL_PLANE_BLOCKED",
+            "blockers": [{"code": "agent_health_blocks_runtime_submit", "detail": "runtime down"}],
+            "primary_blocking_agent_id": "agent_health",
+            "primary_blocking_reason": "runtime down",
+        },
+        control_rc=2,
+    )
+
+    codes = {row["code"] for row in result["remaining_start_blockers"]}
+    assert result["classification"] == "STARTUP_PREFLIGHT_REFRESH_BLOCKED"
+    assert result["dependency_refresh_failures"] == []
+    assert "control_plane_snapshot_refresh_failed" not in codes
+    assert "control_plane_refresh_failed" not in codes
+    assert "control_plane_start_not_allowed" in codes
+    assert "control_plane_reported_blockers" in codes
     assert "control_plane_primary_blocker" in codes
 
 

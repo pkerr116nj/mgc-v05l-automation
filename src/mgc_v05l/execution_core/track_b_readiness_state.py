@@ -26,6 +26,10 @@ from mgc_v05l.execution_core.track_b_live_market_data_symbols import (
 from mgc_v05l.execution_core.track_b_pre_action_snapshot_validator import (
     DEFAULT_CONTROL_PLANE_SNAPSHOT_ARTIFACT,
 )
+from mgc_v05l.execution_core.track_b_paper_minimal_startup import (
+    TrackBPaperMinimalStartupConfig,
+    build_track_b_paper_minimal_startup,
+)
 from mgc_v05l.execution_core.track_b_strategy_exit_coverage import (
     DEFAULT_EXIT_COVERAGE_REPORT_PATH,
     TrackBStrategyExitCoverageConfig,
@@ -175,6 +179,7 @@ def classify_canonical_readiness(inputs: Mapping[str, Any]) -> dict[str, Any]:
     submit_bridge = _mapping(inputs.get("submit_bridge"))
     control_plane_authorization = _mapping(inputs.get("control_plane_authorization"))
     strategy_exit_coverage = _mapping(inputs.get("strategy_exit_coverage"))
+    paper_minimal_startup = _mapping(inputs.get("paper_minimal_startup"))
 
     blockers: list[dict[str, Any]] = []
     warnings: list[dict[str, Any]] = []
@@ -225,6 +230,26 @@ def classify_canonical_readiness(inputs: Mapping[str, Any]) -> dict[str, Any]:
         return _readiness_result(
             generated_at=generated_at,
             state="NOT_READY_CONFIG",
+            reasons=reasons,
+            blockers=blockers,
+            warnings=warnings,
+            inputs=inputs,
+        )
+
+    runtime_running = _bool(runtime.get("running"))
+    runtime_healthy = _bool(runtime.get("healthy"))
+    if runtime_running and runtime_healthy and paper_minimal_startup.get("allowed") is True:
+        for row in list(paper_minimal_startup.get("warnings") or []):
+            if isinstance(row, Mapping):
+                warn(
+                    str(row.get("code") or "paper_minimal_startup_warning"),
+                    str(row.get("detail") or "PAPER minimal startup diagnostic warning."),
+                    source=str(row.get("source") or "paper_minimal_startup"),
+                )
+        reasons.append("PAPER_MINIMAL_STARTUP_V1 is allowed from current broker, order, price, profile, route, and size facts.")
+        return _readiness_result(
+            generated_at=generated_at,
+            state="READY_SUBMIT_CAPABLE",
             reasons=reasons,
             blockers=blockers,
             warnings=warnings,
@@ -476,8 +501,6 @@ def classify_canonical_readiness(inputs: Mapping[str, Any]) -> dict[str, Any]:
             source="runtime_truth_heartbeat",
         )
 
-    runtime_running = _bool(runtime.get("running"))
-    runtime_healthy = _bool(runtime.get("healthy"))
     loaded_lane_count = int(runtime.get("loaded_lane_count") or 0)
     eligible_lane_count = int(runtime.get("eligible_lane_count") or 0)
     live_bars_fresh = _bool(market_data.get("fresh"))
@@ -757,6 +780,10 @@ def build_readiness_inputs(
         now=now,
         config_in_force=config_in_force,
     )
+    paper_minimal_startup = build_track_b_paper_minimal_startup(
+        config=TrackBPaperMinimalStartupConfig(repo_root=repo_root),
+        now=now,
+    )
     submit_bridge = _submit_bridge_input(repo_root, operator_status, _mapping(artifacts.get("live_timing_summary")))
     backend = _backend_input(_mapping(artifacts.get("dashboard_health")), root_guard)
     live_money_eligible = any(
@@ -790,6 +817,7 @@ def build_readiness_inputs(
         "execution_core_shared_truth": execution_core_shared_truth,
         "control_plane_authorization": control_plane_authorization,
         "strategy_exit_coverage": strategy_exit_coverage,
+        "paper_minimal_startup": paper_minimal_startup,
         "market_data": market_data,
         "lane_quarantine": lane_quarantine,
         "submit_bridge": submit_bridge,

@@ -24,6 +24,34 @@ def _config(tmp_path: Path) -> IbkrPaperStrategyGovernanceConfig:
     )
 
 
+def test_backend_source_readiness_uses_minimal_startup_as_authority(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        governance_module,
+        "build_track_b_paper_minimal_startup",
+        lambda **kwargs: {
+            "allowed": True,
+            "classification": "PAPER_MINIMAL_STARTUP_ALLOWED",
+            "profile_overlay": "/tmp/paper_stack_mnq_mes_full_session_active_evidence.yaml",
+            "configured_instruments": ["MES"],
+            "blockers": [],
+            "warnings": [],
+        },
+    )
+
+    readiness = governance_module._backend_source_live_readiness(
+        config=_config(tmp_path),
+        required_instruments=["MES"],
+    )
+
+    assert readiness["live_ready"] is True
+    assert readiness["block_reasons"] == []
+    assert readiness["diagnostic_block_reasons"]
+    assert readiness["paper_minimal_startup_allowed"] is True
+
+
 def _write_monitor(tmp_path: Path, **overrides: object) -> None:
     payload = {
         "classification": "PAPER_STRATEGY_MONITOR_ACTIVE",

@@ -48,6 +48,7 @@ STARTUP_PREFLIGHT_DEPENDENCY_REFRESH_STEPS_JSON="[]"
 STARTUP_PREFLIGHT_DEPENDENCY_REFRESH_FAILURES_JSON="[]"
 STARTUP_MODE="STANDARD_START"
 STARTUP_OWNED_MANAGED_EXPOSURE_RESTORE_JSON="{}"
+PAPER_MINIMAL_STARTUP_V1="${TRACK_B_PAPER_MINIMAL_STARTUP_V1:-1}"
 
 CANONICAL_CONFIGS=(
   "${REPO_ROOT}/config/base.yaml"
@@ -899,6 +900,8 @@ dependency_steps = [
 ]
 
 for step in dependency_steps:
+    if step["step"] == "control_plane_snapshot" and step["return_code"] == 2 and control:
+        continue
     if step["return_code"] != 0:
         code = f"{step['step']}_refresh_failed"
         add_failure(dependency_refresh_failures, step["step"], code, detail=f"return_code={step['return_code']}")
@@ -906,7 +909,7 @@ for step in dependency_steps:
 
 if to_int(readiness_rc) != 0:
     add_blocker(blockers, "canonical_readiness_refresh_failed", source="canonical_readiness")
-if to_int(control_rc) != 0:
+if to_int(control_rc) != 0 and not (to_int(control_rc) == 2 and control):
     add_blocker(blockers, "control_plane_refresh_failed", source="control_plane")
 if to_int(status_rc) != 0:
     add_blocker(blockers, "paper_stack_status_refresh_failed", source="paper_stack_status")
@@ -1251,6 +1254,8 @@ dependency_return_codes = [
     to_int(status_rc),
 ]
 effective_dependency_return_codes = list(dependency_return_codes)
+if to_int(control_rc) == 2 and control:
+    effective_dependency_return_codes[7] = 0
 if maintenance_restore["allowed"]:
     effective_dependency_return_codes[7] = 0
 
@@ -1298,6 +1303,31 @@ PY
   return 0
 }
 
+run_paper_minimal_startup_preflight() {
+  STARTUP_PREFLIGHT_REFRESH_ATTEMPTED="true"
+  STARTUP_PREFLIGHT_DEPENDENCY_REFRESH_ATTEMPTED="false"
+  STARTUP_MODE="PAPER_MINIMAL_STARTUP_V1"
+  local result_json="${STACK_DIR}/.paper_minimal_startup_v1.$$.json"
+  set +e
+  "${PYTHON_BIN}" -m mgc_v05l.execution_core.track_b_paper_minimal_startup \
+    --repo-root "${REPO_ROOT}" \
+    --account-id DUM882026 \
+    --json \
+    > "${result_json}"
+  local minimal_rc=$?
+  set -e
+  STARTUP_PREFLIGHT_REFRESH_CLASSIFICATION="$("${PYTHON_BIN}" -c 'import json,sys; print(json.load(open(sys.argv[1])).get("classification") or "UNKNOWN")' "${result_json}")"
+  STARTUP_PREFLIGHT_REFRESHED_ARTIFACT_PATHS_JSON="$("${PYTHON_BIN}" -c 'import json,sys; print(json.dumps(list((json.load(open(sys.argv[1])).get("source_artifact_refs") or {}).values())))' "${result_json}")"
+  STARTUP_PREFLIGHT_REMAINING_START_BLOCKERS_JSON="$("${PYTHON_BIN}" -c 'import json,sys; print(json.dumps(json.load(open(sys.argv[1])).get("blockers") or []))' "${result_json}")"
+  STARTUP_PREFLIGHT_DEPENDENCY_REFRESH_STEPS_JSON="$("${PYTHON_BIN}" -c 'import json,sys; p=json.load(open(sys.argv[1])); print(json.dumps([{"step":"paper_minimal_startup_v1","return_code":0 if p.get("allowed") is True else 2,"classification":p.get("classification"),"artifact_path":p.get("source_artifact_refs",{}).get("config_in_force")}]))' "${result_json}")"
+  STARTUP_PREFLIGHT_DEPENDENCY_REFRESH_FAILURES_JSON="$("${PYTHON_BIN}" -c 'import json,sys; p=json.load(open(sys.argv[1])); print(json.dumps([] if p.get("allowed") is True else [{"step":"paper_minimal_startup_v1","code":"paper_minimal_startup_v1_blocked"}]))' "${result_json}")"
+  if [[ "${minimal_rc}" != "0" || "${STARTUP_PREFLIGHT_REFRESH_CLASSIFICATION}" != "PAPER_MINIMAL_STARTUP_ALLOWED" ]]; then
+    write_startup_artifact "BLOCKED_PAPER_MINIMAL_STARTUP_V1" "PAPER_MINIMAL_STARTUP_V1 did not satisfy the minimal PAPER submit-capable startup contract." ""
+    return 1
+  fi
+  return 0
+}
+
 screen_available() {
   local smoke_name="track_b_screen_smoke_$(date -u +%Y%m%dT%H%M%SZ)_$$"
   screen -wipe >/dev/null 2>&1 || true
@@ -1314,10 +1344,26 @@ launchctl_available() {
   command -v launchctl >/dev/null 2>&1
 }
 
-status_json="$("${STATUS_SCRIPT}" --json)"
-already_running="$("${PYTHON_BIN}" -c 'import json,sys; print(str(json.loads(sys.stdin.read())["runtime"]["running"]).lower())' <<<"${status_json}")"
-if [[ "${already_running}" == "true" ]]; then
+if [[ "${PAPER_MINIMAL_STARTUP_V1}" == "1" || "${PAPER_MINIMAL_STARTUP_V1}" == "true" || "${PAPER_MINIMAL_STARTUP_V1}" == "TRUE" ]]; then
+  if ! run_paper_minimal_startup_preflight; then
+    exit 2
+  fi
+  pid=""
+  if [[ -s "${PID_FILE}" ]]; then
+    pid="$(tr -dc '0-9' < "${PID_FILE}" || true)"
+  fi
+  if [[ -n "${pid}" ]] && ps -p "${pid}" >/dev/null 2>&1; then
+    already_running="true"
+  else
+    already_running="false"
+  fi
+  status_json="{}"
+else
+  status_json="$("${STATUS_SCRIPT}" --json)"
+  already_running="$("${PYTHON_BIN}" -c 'import json,sys; print(str(json.loads(sys.stdin.read())["runtime"]["running"]).lower())' <<<"${status_json}")"
   pid="$("${PYTHON_BIN}" -c 'import json,sys; print(json.loads(sys.stdin.read())["runtime"]["pid"] or "")' <<<"${status_json}")"
+fi
+if [[ "${already_running}" == "true" ]]; then
   if [[ "${RESTART_REQUESTED}" != "1" ]]; then
     write_startup_artifact "ALREADY_RUNNING" "Track B PAPER runtime is already running; no start action taken." "${pid}"
     exit 0
@@ -1336,9 +1382,21 @@ if [[ "${already_running}" == "true" ]]; then
   fi
   write_startup_artifact "${restart_precheck_classification}" "${restart_precheck_detail}" "${pid}" >/dev/null
   PROBATIONARY_PAPER_PID_FILE="${PID_FILE}" bash "${SCRIPT_DIR}/stop_probationary_paper_soak.sh"
-  status_json="$("${STATUS_SCRIPT}" --json)"
+  if [[ "${PAPER_MINIMAL_STARTUP_V1}" == "1" || "${PAPER_MINIMAL_STARTUP_V1}" == "true" || "${PAPER_MINIMAL_STARTUP_V1}" == "TRUE" ]]; then
+    status_json="{}"
+  else
+    status_json="$("${STATUS_SCRIPT}" --json)"
+  fi
 fi
 
+if [[ "${PAPER_MINIMAL_STARTUP_V1}" == "1" || "${PAPER_MINIMAL_STARTUP_V1}" == "true" || "${PAPER_MINIMAL_STARTUP_V1}" == "TRUE" ]]; then
+  restart_allowed="true"
+  runtime_start_allowed="true"
+  blocker_count="0"
+  launch_guard_restart_allowed="false"
+  restart_authority_allowed="true"
+  scoped_profile_allowed="true"
+else
 restart_allowed="$("${PYTHON_BIN}" -c 'import json,sys; print(str(json.loads(sys.stdin.read())["readiness"]["restart_allowed_if_runtime_down"]).lower())' <<<"${status_json}")"
 runtime_start_allowed="$("${PYTHON_BIN}" -c 'import json,sys; print(str(json.loads(sys.stdin.read())["readiness"].get("runtime_start_allowed") is True).lower())' <<<"${status_json}")"
 blocker_count="$("${PYTHON_BIN}" -c 'import json,sys; print(len(json.loads(sys.stdin.read())["readiness"]["blockers"]))' <<<"${status_json}")"
@@ -1372,12 +1430,15 @@ print(str(ok).lower())
 restart_authority="$("${PYTHON_BIN}" -m mgc_v05l.execution_core.track_b_paper_stack_restart_precheck <<<"${status_json}")"
 restart_authority_allowed="$("${PYTHON_BIN}" -c 'import json,sys; p=json.loads(sys.stdin.read()); print(str(p.get("restart_allowed") is True).lower())' <<<"${restart_authority}")"
 scoped_profile_allowed="$(scoped_profile_start_allowed || true)"
+fi
 if [[ ( "${runtime_start_allowed}" != "true" || "${blocker_count}" != "0" ) && ( "${restart_allowed}" != "true" || "${blocker_count}" != "0" ) && "${launch_guard_restart_allowed}" != "true" && "${restart_authority_allowed}" != "true" && "${scoped_profile_allowed}" != "true" ]]; then
   write_startup_artifact "BLOCKED_PRECHECK" "Canonical readiness does not allow a clean PAPER runtime start." ""
   exit 2
 fi
-if ! run_startup_preflight_evidence_refresh; then
-  exit 2
+if [[ "${PAPER_MINIMAL_STARTUP_V1}" != "1" && "${PAPER_MINIMAL_STARTUP_V1}" != "true" && "${PAPER_MINIMAL_STARTUP_V1}" != "TRUE" ]]; then
+  if ! run_startup_preflight_evidence_refresh; then
+    exit 2
+  fi
 fi
 write_approved_profile_artifact
 
@@ -1539,6 +1600,39 @@ elif [[ "${carrier}" == "launchctl" ]]; then
     rm -f "${LAUNCHCTL_LABEL_FILE}"
     exit 1
   fi
+fi
+
+if [[ "${PAPER_MINIMAL_STARTUP_V1}" == "1" || "${PAPER_MINIMAL_STARTUP_V1}" == "true" || "${PAPER_MINIMAL_STARTUP_V1}" == "TRUE" ]]; then
+  deadline=$((SECONDS + WAIT_SECONDS))
+  ready_since=0
+  ready_pid=""
+  while [[ "${SECONDS}" -lt "${deadline}" ]]; do
+    sleep 2
+    pid=""
+    if [[ -s "${PID_FILE}" ]]; then
+      pid="$(tr -dc '0-9' < "${PID_FILE}" || true)"
+    fi
+    if [[ -n "${pid}" ]] && ps -p "${pid}" >/dev/null 2>&1; then
+      if run_paper_minimal_startup_preflight >/dev/null; then
+        if [[ "${ready_since}" == "0" || "${ready_pid}" != "${pid}" ]]; then
+          ready_since="${SECONDS}"
+          ready_pid="${pid}"
+          write_startup_artifact "RUNTIME_RUNNING_WAITING_FOR_MINIMAL_STARTUP_STABILITY" "Runtime is alive and PAPER_MINIMAL_STARTUP_V1 is allowed; waiting for ${STABLE_SECONDS}s sustained minimal readiness." "${pid}" >/dev/null
+        elif [[ $((SECONDS - ready_since)) -ge "${STABLE_SECONDS}" ]]; then
+          write_startup_artifact "READY_SUBMIT_CAPABLE" "Track B PAPER runtime started through PAPER_MINIMAL_STARTUP_V1 and remained minimally submit-capable for ${STABLE_SECONDS}s." "${pid}"
+          exit 0
+        fi
+      else
+        ready_since=0
+        ready_pid=""
+      fi
+    elif [[ -n "${ready_pid}" ]]; then
+      write_startup_artifact "BLOCKED_RUNTIME_EXITED_DURING_STARTUP" "Runtime reached initial minimal readiness, then exited before ${STABLE_SECONDS}s sustained readiness." "${ready_pid}"
+      exit 1
+    fi
+  done
+  write_startup_artifact "BLOCKED_START_TIMEOUT" "Runtime did not remain PAPER_MINIMAL_STARTUP_V1 submit-capable for ${STABLE_SECONDS}s before timeout." ""
+  exit 1
 fi
 
 deadline=$((SECONDS + WAIT_SECONDS))

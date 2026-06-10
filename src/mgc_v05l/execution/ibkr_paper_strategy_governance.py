@@ -26,6 +26,10 @@ from ..execution_core.track_b_runtime_authority_resolver import (
     RuntimeAuthorityResolverConfig,
     resolve_track_b_runtime_authority,
 )
+from ..execution_core.track_b_paper_minimal_startup import (
+    TrackBPaperMinimalStartupConfig,
+    build_track_b_paper_minimal_startup,
+)
 from ..execution_core.track_b_strategy_exit_coverage import (
     DEFAULT_EXIT_COVERAGE_REPORT_PATH,
     TrackBStrategyExitCoverageConfig,
@@ -649,7 +653,8 @@ def _build_governance_row(
     if "broker_ledger_mismatch" in inventory_blockers:
         pause_reasons.append("broker_ledger_mismatch")
         reconciliation_error_count += 1
-    if not bool(phase1_reconciliation_gate.get("ready")):
+    paper_minimal_startup_allowed = bool(backend_source_readiness.get("paper_minimal_startup_allowed"))
+    if not bool(phase1_reconciliation_gate.get("ready")) and not paper_minimal_startup_allowed:
         submit_block_reasons.append("phase1_broker_reconciliation_not_clear")
     if daily_order_count is not None and int(daily_order_count) >= int(config.daily_order_limit):
         submit_block_reasons.append("daily_order_limit_reached")
@@ -1127,6 +1132,9 @@ def _backend_source_live_readiness(
     instrument: str | None = None,
     required_instruments: list[str] | None = None,
 ) -> dict[str, Any]:
+    paper_minimal_startup = build_track_b_paper_minimal_startup(
+        config=TrackBPaperMinimalStartupConfig(repo_root=config.repo_root)
+    )
     freshness_window = float(config.freshness_window_seconds)
     canonical = _load_json(config.repo_root / _DEFAULT_CANONICAL_READINESS_PATH)
     paper_runtime_truth = _load_json(config.repo_root / _DEFAULT_PAPER_RUNTIME_TRUTH_PATH)
@@ -1306,8 +1314,20 @@ def _backend_source_live_readiness(
             block_reasons.extend(shared_service_block_reasons)
 
     block_reasons = list(dict.fromkeys(block_reasons))
+    diagnostic_block_reasons = list(block_reasons)
+    paper_minimal_allowed = paper_minimal_startup.get("allowed") is True
+    if paper_minimal_allowed:
+        block_reasons = []
     live_ready = not block_reasons
-    if canonical_authoritative and live_ready:
+    if paper_minimal_allowed:
+        detail = (
+            "backend/source readiness ready from PAPER_MINIMAL_STARTUP_V1; "
+            "legacy canonical/control-plane/dashboard/runtime-governance readiness is diagnostic only; "
+            f"required_instruments={required_instrument_list}; "
+            f"minimal_profile={paper_minimal_startup.get('profile_overlay')} "
+            f"minimal_instruments={paper_minimal_startup.get('configured_instruments')}"
+        )
+    elif canonical_authoritative and live_ready:
         detail = (
             "backend/source readiness ready from canonical_paper_stack_runtime_authority; "
             "deprecated guarded-loop artifacts treated as diagnostic only; "
@@ -1348,6 +1368,7 @@ def _backend_source_live_readiness(
     return {
         "live_ready": live_ready,
         "block_reasons": block_reasons,
+        "diagnostic_block_reasons": diagnostic_block_reasons if paper_minimal_allowed else [],
         "detail": detail,
         "freshness_window_seconds": freshness_window,
         "artifacts": artifacts,
@@ -1370,6 +1391,8 @@ def _backend_source_live_readiness(
         "canonical_readiness_authoritative": canonical_authoritative,
         **broker_session_diagnostic,
         "paper_stack_authority": paper_stack_authority,
+        "paper_minimal_startup": paper_minimal_startup,
+        "paper_minimal_startup_allowed": paper_minimal_allowed,
         "canonical_readiness_artifact": artifacts["canonical_readiness"],
         "presentation_readiness_authority": "DIAGNOSTIC_ONLY_WHEN_CANONICAL_PRESENT",
         "source": (
