@@ -4861,7 +4861,7 @@ def test_stale_governance_reconciliation_block_clears_after_successful_bridge_re
     assert "consumed the bridge read-only Phase-1 reconciliation refresh" in governance_gate["detail"]
 
 
-def test_stale_governance_reconciliation_block_remains_if_no_successful_refresh(tmp_path: Path) -> None:
+def test_stale_governance_reconciliation_status_is_diagnostic_when_live_phase1_is_clean(tmp_path: Path) -> None:
     config = _config(
         tmp_path,
         submit=True,
@@ -4901,8 +4901,50 @@ def test_stale_governance_reconciliation_block_remains_if_no_successful_refresh(
     governance_gate = next(row for row in checks if row["name"] == "paper_strategy_governance_submit_gate")
     assert phase1["passed"] is True
     assert phase1["stale_reconciliation_refresh_attempted"] is False
-    assert governance_gate["passed"] is False
+    assert governance_gate["passed"] is True
     assert "phase1_broker_reconciliation_not_clear" in governance_gate["detail"]
+    assert "demoted stale cached Phase-1 reconciliation status" in governance_gate["detail"]
+
+
+def test_stale_governance_reconciliation_status_kept_as_diagnostic_reason_when_live_phase1_is_clean(
+    tmp_path: Path,
+) -> None:
+    config = _config(
+        tmp_path,
+        submit=True,
+        caller_path="probationary_paper_runtime_lane",
+        caller_metadata=_approved_runtime_metadata(
+            strategy_id="ATP_COMPANION_V1_ASIA_US",
+            runtime_pid=os.getpid(),
+            runtime_cwd=str(tmp_path),
+        ),
+    )
+    intent = IbkrPaperStrategyOrderIntent(
+        strategy_id=config.strategy_id,
+        symbol=config.symbol,
+        contract_month=config.contract_month,
+        action=config.action,
+        quantity=config.quantity,
+        order_type=config.order_type,
+        limit_price_model=config.limit_price_model,
+        time_in_force=config.time_in_force,
+        reason=config.reason,
+        timestamp="2026-05-15T07:48:00+00:00",
+        risk_tags=config.risk_tags,
+        paper_only=config.paper_only,
+    )
+
+    governance_status = bridge_module._governance_status_after_phase1_reconciliation_refresh(
+        governance_status=_stale_phase1_governance(),
+        phase1_reconciliation_gate=bridge_module._phase1_reconciliation_gate_for_bridge(config=config, intent=intent),
+    )
+
+    assert governance_status["submit_allowed"] is True
+    assert governance_status["block_reasons"] == []
+    assert "phase1_broker_reconciliation_not_clear" in governance_status["diagnostic_block_reasons"]
+    selected = governance_status["selected_strategy"]
+    assert "phase1_broker_reconciliation_not_clear" in selected["diagnostic_submit_block_reasons"]
+    assert selected["phase1_broker_reconciliation_gate"]["source"] == "bridge_live_submit_boundary"
 
 
 def test_stale_governance_reconciliation_block_remains_if_refresh_fails(

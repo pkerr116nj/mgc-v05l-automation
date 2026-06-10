@@ -3401,12 +3401,11 @@ def _governance_status_after_phase1_reconciliation_refresh(
     governance_status: dict[str, Any],
     phase1_reconciliation_gate: dict[str, Any],
 ) -> dict[str, Any]:
-    if not bool(phase1_reconciliation_gate.get("stale_reconciliation_refresh_attempted")):
-        return governance_status
     if not bool(phase1_reconciliation_gate.get("ready")):
         return governance_status
     refresh_result = dict(phase1_reconciliation_gate.get("stale_reconciliation_refresh_result") or {})
-    if str(refresh_result.get("classification") or "").strip() != "TRACK_B_PHASE1_RECONCILIATION_REFRESH_CLEAN":
+    refresh_attempted = bool(phase1_reconciliation_gate.get("stale_reconciliation_refresh_attempted"))
+    if refresh_attempted and str(refresh_result.get("classification") or "").strip() != "TRACK_B_PHASE1_RECONCILIATION_REFRESH_CLEAN":
         return governance_status
 
     stale_blocker = "phase1_broker_reconciliation_not_clear"
@@ -3428,6 +3427,13 @@ def _governance_status_after_phase1_reconciliation_refresh(
 
     refreshed_status = dict(governance_status)
     refreshed_selected = dict(selected)
+    demoted_reasons = list(
+        dict.fromkeys(
+            list(refreshed_selected.get("diagnostic_submit_block_reasons") or [])
+            + list(refreshed_status.get("diagnostic_block_reasons") or [])
+            + [stale_blocker]
+        )
+    )
     refreshed_selected["phase1_broker_reconciliation_gate"] = {
         "classification": phase1_reconciliation_gate.get("classification"),
         "ready": phase1_reconciliation_gate.get("ready"),
@@ -3435,8 +3441,9 @@ def _governance_status_after_phase1_reconciliation_refresh(
         "detail": phase1_reconciliation_gate.get("detail"),
         "generated_at": phase1_reconciliation_gate.get("generated_at"),
         "age_seconds": phase1_reconciliation_gate.get("age_seconds"),
-        "source": "bridge_read_only_refresh",
+        "source": "bridge_read_only_refresh" if refresh_attempted else "bridge_live_submit_boundary",
     }
+    refreshed_selected["diagnostic_submit_block_reasons"] = demoted_reasons
 
     remaining_selected_reasons = [reason for reason in selected_block_reasons if reason != stale_blocker]
     remaining_status_reasons = [reason for reason in status_block_reasons if reason != stale_blocker]
@@ -3451,19 +3458,28 @@ def _governance_status_after_phase1_reconciliation_refresh(
     refreshed_status["selected_strategy"] = refreshed_selected
     refreshed_status["submit_allowed"] = bool(refreshed_selected.get("submit_allowed"))
     refreshed_status["block_reasons"] = remaining_reasons
+    refreshed_status["diagnostic_block_reasons"] = demoted_reasons
 
     if bool(refreshed_status.get("submit_allowed")):
-        refreshed_status["detail"] = (
-            "Paper strategy governance consumed the bridge read-only Phase-1 reconciliation refresh; "
-            "fresh reconciliation is clean and other governance gates remain enforced."
-        )
+        if refresh_attempted:
+            refreshed_status["detail"] = (
+                "Paper strategy governance consumed the bridge read-only Phase-1 reconciliation refresh; "
+                "fresh reconciliation is clean and other governance gates remain enforced."
+            )
+        else:
+            refreshed_status["detail"] = (
+                "Paper strategy governance demoted stale cached Phase-1 reconciliation status; "
+                "the bridge live submit-boundary Phase-1 reconciliation gate is clean and other governance gates remain enforced; "
+                f"diagnostics={', '.join(demoted_reasons)}."
+            )
     else:
         blockers = list(refreshed_status.get("block_reasons") or [])
         refreshed_status["detail"] = (
-            "Paper strategy governance blocked submit after bridge read-only Phase-1 reconciliation refresh: "
+            "Paper strategy governance blocked submit after stale cached Phase-1 reconciliation status was demoted: "
             f"{', '.join(blockers) or 'unknown_reason'}"
         )
-    refreshed_status["phase1_reconciliation_refresh_consumed"] = True
+    refreshed_status["phase1_reconciliation_refresh_consumed"] = refresh_attempted
+    refreshed_status["stale_cached_phase1_governance_demoted"] = True
     return refreshed_status
 
 
