@@ -824,6 +824,13 @@ PY
 }
 
 run_control_plane_snapshot_start_preflight() {
+  if [[ "${MGC_TRACK_B_PAPER_MINIMAL_STARTUP_V1:-0}" == "1" || "${MGC_TRACK_B_PAPER_MINIMAL_STARTUP_V1:-0}" == "true" || "${MGC_TRACK_B_PAPER_MINIMAL_STARTUP_V1:-0}" == "TRUE" ]]; then
+    if [[ "${MGC_TRACK_B_PAPER_MINIMAL_STARTUP_CLASSIFICATION:-}" == "PAPER_MINIMAL_STARTUP_ALLOWED" ]]; then
+      echo "Track B Control Plane Snapshot start preflight: diagnostic only under PAPER_MINIMAL_STARTUP_V1."
+      write_launch_status "PAPER_MINIMAL_STARTUP_CONTROL_PLANE_DIAGNOSTIC" "" "PAPER_MINIMAL_STARTUP_V1 is allowed; legacy Control Plane start preflight is diagnostic only." "0"
+      return 0
+    fi
+  fi
   local tmp_file="${CONTROL_PLANE_SNAPSHOT_FILE}.runtime_start.$$.${RANDOM}.tmp"
   local stderr_file="${CONTROL_PLANE_SNAPSHOT_FILE}.runtime_start.stderr.log"
   local status=0

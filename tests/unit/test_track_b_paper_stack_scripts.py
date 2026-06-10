@@ -96,6 +96,32 @@ def test_paper_stack_start_has_minimal_startup_v1_path_for_explicit_paper_starts
     assert "BLOCKED_PAPER_MINIMAL_STARTUP_V1" in source
     assert "run_paper_minimal_startup_preflight" in source
     assert "TRACK_B_PAPER_MINIMAL_STARTUP_V1" in source
+    assert "MGC_TRACK_B_PAPER_MINIMAL_STARTUP_V1" in source
+    assert "MGC_TRACK_B_PAPER_MINIMAL_STARTUP_CLASSIFICATION" in source
+
+
+def test_paper_stack_minimal_startup_owns_restart_authority() -> None:
+    source = START_SCRIPT.read_text(encoding="utf-8")
+
+    already_running_block = source[
+        source.index('if [[ "${already_running}" == "true" ]]; then') : source.index(
+            'write_startup_artifact "${restart_precheck_classification}"'
+        )
+    ]
+    assert "RESTART_ALLOWED_PAPER_MINIMAL_STARTUP_V1" in already_running_block
+    assert "legacy restart precheck is diagnostic only" in already_running_block
+    assert "track_b_paper_stack_restart_precheck" in already_running_block
+
+    minimal_start = already_running_block.index(
+        'restart_precheck_classification="RESTART_ALLOWED_PAPER_MINIMAL_STARTUP_V1"'
+    )
+    legacy_start = already_running_block.index('else\n    restart_precheck=')
+    minimal_branch = already_running_block[
+        minimal_start:legacy_start
+    ]
+    legacy_branch = already_running_block[legacy_start:]
+    assert "track_b_paper_stack_restart_precheck" not in minimal_branch
+    assert "track_b_paper_stack_restart_precheck" in legacy_branch
 
 
 def test_paper_stack_start_blocks_before_carrier_when_preflight_refresh_fails() -> None:

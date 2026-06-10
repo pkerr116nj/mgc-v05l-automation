@@ -1372,13 +1372,18 @@ if [[ "${already_running}" == "true" ]]; then
     write_startup_artifact "BLOCKED_RESTART_REQUIRES_PROFILE" "Set TRACK_B_PAPER_STACK_PROFILE for an explicit restart generation." "${pid}"
     exit 2
   fi
-  restart_precheck="$("${PYTHON_BIN}" -m mgc_v05l.execution_core.track_b_paper_stack_restart_precheck <<<"${status_json}")"
-  restart_precheck_allowed="$("${PYTHON_BIN}" -c 'import json,sys; print(str(json.loads(sys.stdin.read()).get("restart_allowed") is True).lower())' <<<"${restart_precheck}")"
-  restart_precheck_classification="$("${PYTHON_BIN}" -c 'import json,sys; print(json.loads(sys.stdin.read()).get("classification") or "")' <<<"${restart_precheck}")"
-  restart_precheck_detail="$("${PYTHON_BIN}" -c 'import json,sys; print(json.loads(sys.stdin.read()).get("detail") or "")' <<<"${restart_precheck}")"
-  if [[ "${restart_precheck_allowed}" != "true" ]]; then
-    write_startup_artifact "${restart_precheck_classification:-BLOCKED_RESTART_PRECHECK}" "${restart_precheck_detail:-Broker/lifecycle/safety state is not clean enough for a controlled restart.}" "${pid}"
-    exit 2
+  if [[ "${PAPER_MINIMAL_STARTUP_V1}" == "1" || "${PAPER_MINIMAL_STARTUP_V1}" == "true" || "${PAPER_MINIMAL_STARTUP_V1}" == "TRUE" ]]; then
+    restart_precheck_classification="RESTART_ALLOWED_PAPER_MINIMAL_STARTUP_V1"
+    restart_precheck_detail="PAPER_MINIMAL_STARTUP_V1 allowed controlled PAPER restart; legacy restart precheck is diagnostic only."
+  else
+    restart_precheck="$("${PYTHON_BIN}" -m mgc_v05l.execution_core.track_b_paper_stack_restart_precheck <<<"${status_json}")"
+    restart_precheck_allowed="$("${PYTHON_BIN}" -c 'import json,sys; print(str(json.loads(sys.stdin.read()).get("restart_allowed") is True).lower())' <<<"${restart_precheck}")"
+    restart_precheck_classification="$("${PYTHON_BIN}" -c 'import json,sys; print(json.loads(sys.stdin.read()).get("classification") or "")' <<<"${restart_precheck}")"
+    restart_precheck_detail="$("${PYTHON_BIN}" -c 'import json,sys; print(json.loads(sys.stdin.read()).get("detail") or "")' <<<"${restart_precheck}")"
+    if [[ "${restart_precheck_allowed}" != "true" ]]; then
+      write_startup_artifact "${restart_precheck_classification:-BLOCKED_RESTART_PRECHECK}" "${restart_precheck_detail:-Broker/lifecycle/safety state is not clean enough for a controlled restart.}" "${pid}"
+      exit 2
+    fi
   fi
   write_startup_artifact "${restart_precheck_classification}" "${restart_precheck_detail}" "${pid}" >/dev/null
   PROBATIONARY_PAPER_PID_FILE="${PID_FILE}" bash "${SCRIPT_DIR}/stop_probationary_paper_soak.sh"
@@ -1485,6 +1490,8 @@ export MGC_TRACK_B_EXPECTED_PROJECT_ROOT="${REPO_ROOT}"
 export MGC_TRACK_B_EXPECTED_SOURCE_COMMIT="${source_commit}"
 export MGC_TRACK_B_PAPER_STACK_STARTUP_MODE="${STARTUP_MODE}"
 export MGC_TRACK_B_PAPER_STACK_OWNED_MANAGED_EXPOSURE_RESTORE_JSON='${STARTUP_OWNED_MANAGED_EXPOSURE_RESTORE_JSON}'
+export MGC_TRACK_B_PAPER_MINIMAL_STARTUP_V1="${PAPER_MINIMAL_STARTUP_V1}"
+export MGC_TRACK_B_PAPER_MINIMAL_STARTUP_CLASSIFICATION="${STARTUP_PREFLIGHT_REFRESH_CLASSIFICATION}"
 mkdir -p "${RUNTIME_DIR}"
 if "${PYTHON_BIN}" - <<'PY' "${RUNTIME_DIR}/paper_runtime_truth.json" "\$\$"
 import json

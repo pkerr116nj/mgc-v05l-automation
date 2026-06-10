@@ -302,6 +302,21 @@ def test_runtime_start_consults_control_plane_snapshot_before_spawn() -> None:
     assert "runtime_supervisor_start_gate" not in start_flow[: start_flow.index("nohup \"${LAUNCH_PYTHON_BIN}\"")]
 
 
+def test_runtime_start_demotes_control_plane_snapshot_under_minimal_startup() -> None:
+    script = PROBATIONARY_PAPER_SOAK_SCRIPT.read_text(encoding="utf-8")
+    preflight = script.split("run_control_plane_snapshot_start_preflight() {", 1)[1].split(
+        'local tmp_file="${CONTROL_PLANE_SNAPSHOT_FILE}.runtime_start.$$.${RANDOM}.tmp"',
+        1,
+    )[0]
+
+    assert "MGC_TRACK_B_PAPER_MINIMAL_STARTUP_V1" in preflight
+    assert "MGC_TRACK_B_PAPER_MINIMAL_STARTUP_CLASSIFICATION" in preflight
+    assert "PAPER_MINIMAL_STARTUP_ALLOWED" in preflight
+    assert "PAPER_MINIMAL_STARTUP_CONTROL_PLANE_DIAGNOSTIC" in preflight
+    assert "legacy Control Plane start preflight is diagnostic only" in preflight
+    assert "return 0" in preflight
+
+
 def test_headless_launch_uses_control_plane_snapshot_as_final_pre_spawn_gate() -> None:
     script = RUN_SCRIPT.read_text(encoding="utf-8")
 
