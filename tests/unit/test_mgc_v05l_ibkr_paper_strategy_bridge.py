@@ -1661,6 +1661,137 @@ def test_futures_contract_resolver_blocks_new_mgc_june_entry_before_submit(tmp_p
     assert resolver["recommended_contract"]["contract_month"] == "202608"
 
 
+def test_futures_contract_resolver_replaces_near_expiry_index_contract_for_bridge_entry(tmp_path: Path) -> None:
+    config = _config(
+        tmp_path,
+        submit=True,
+        strategy_id="mnq_london_late_active_participation_short",
+        symbol="MNQ",
+        contract_month="202606",
+        action="SELL",
+        limit_price_model="DELAYED_BID_MINUS_1T_MARKETABLE_SELL",
+        reason="PAPER_ACTIVE_EVIDENCE_MNQ_LONDON_LATE_PARTICIPATION_SHORT_V1",
+        caller_metadata={
+            **_approved_runtime_metadata(
+                strategy_id="mnq_london_late_active_participation_short",
+                source_instrument="MNQ",
+                executable_proxy="MNQ",
+                action="SELL",
+                intent_type="SELL_TO_OPEN",
+                bridge_proxy_mode="MNQ_SIGNAL_DIRECT_PHASE1",
+            ),
+        },
+    )
+    intent = _intent_from_config(config)
+    target = bridge_module._bridge_phase1_target(config=config, intent=intent)
+    front_report = {
+        "ok": True,
+        "qualified_contract": {
+            "symbol": "MNQ",
+            "broker_symbol": "MNQ",
+            "expiry": "20260618",
+            "con_id": 770561201,
+            "local_symbol": "MNQM6",
+            "exchange": "CME",
+            "currency": "USD",
+            "multiplier": "2",
+            "trading_class": "MNQ",
+            "min_tick": 0.25,
+        },
+        "api_contract_details": [
+            {
+                "symbol": "MNQ",
+                "expiry": "20260618",
+                "con_id": 770561201,
+                "local_symbol": "MNQM6",
+                "exchange": "CME",
+                "currency": "USD",
+                "multiplier": "2",
+                "trading_class": "MNQ",
+                "min_tick": 0.25,
+                "updated_at": "2026-06-11T11:59:00+00:00",
+            }
+        ],
+    }
+    replacement_report = {
+        "ok": True,
+        "qualified_contract": {
+            "symbol": "MNQ",
+            "broker_symbol": "MNQ",
+            "expiry": "20260918",
+            "con_id": 880000201,
+            "local_symbol": "MNQU6",
+            "exchange": "CME",
+            "currency": "USD",
+            "multiplier": "2",
+            "trading_class": "MNQ",
+            "min_tick": 0.25,
+        },
+        "api_contract_details": [
+            {
+                "symbol": "MNQ",
+                "expiry": "20260918",
+                "con_id": 880000201,
+                "local_symbol": "MNQU6",
+                "exchange": "CME",
+                "currency": "USD",
+                "multiplier": "2",
+                "trading_class": "MNQ",
+                "min_tick": 0.25,
+                "updated_at": "2026-06-11T11:59:00+00:00",
+            }
+        ],
+    }
+
+    resolver_status = bridge_module._futures_contract_resolver_for_bridge(
+        config=config,
+        intent=intent,
+        target=target,
+        qualified_contract_report=front_report,
+        recommendation_contract_report=replacement_report,
+        now=datetime(2026, 6, 11, 12, 0, tzinfo=timezone.utc),
+    )
+    resolved_target, resolved_report, replacement_applied = bridge_module._resolved_execution_contract_from_resolver(
+        resolver_status=resolver_status,
+        current_target=target,
+        current_qualified_contract_report=front_report,
+        recommendation_contract_report=replacement_report,
+    )
+    effective_config = bridge_module._config_with_resolved_execution_contract(
+        config=config,
+        resolved_target=resolved_target,
+    )
+    checks = _build_preflight_checks(
+        config=effective_config,
+        intent=intent,
+        selected_account_id="DUM882026",
+        open_orders={"open_order_count": 0},
+        current_position_quantity=0.0,
+        quote_context=_quote_context(),
+        exact_contract_report={"exact_contract": {}},
+        qualified_contract_report=resolved_report,
+        audit_events=[],
+        entry_execution_pricing={
+            "is_entry": True,
+            "execution_price_source": "RUNTIME_DATABENTO_1M_CLOSE",
+            "block_submit": False,
+        },
+        futures_contract_resolver_status=resolver_status,
+    )
+
+    assert replacement_applied is True
+    assert resolved_target["contract_month"] == "202609"
+    assert resolved_target["local_symbol"] == "MNQU6"
+    assert resolved_target["con_id"] == 880000201
+    assert effective_config.contract_month == "202609"
+    assert dict(effective_config.caller_metadata or {})["resolved_execution_contract"]["local_symbol"] == "MNQU6"
+    exact = next(row for row in checks if row["name"] == "exact_qualified_contract")
+    resolver = next(row for row in checks if row["name"] == "futures_contract_resolver")
+    assert exact["passed"] is True
+    assert resolver["passed"] is True
+    assert resolver["roll_status"] == "ROLL_REPLACED_NEAR_EXPIRY"
+
+
 def test_futures_contract_resolver_does_not_rewrite_existing_lifecycle_exit_contract(tmp_path: Path) -> None:
     config = _config(
         tmp_path,

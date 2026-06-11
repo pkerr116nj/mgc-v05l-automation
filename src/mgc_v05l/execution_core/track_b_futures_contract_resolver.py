@@ -23,6 +23,7 @@ _INDEX_SYMBOLS = {"MNQ", "MES", "NQ", "ES"}
 _GOLD_ROLL_BLOCK_DAYS = 30
 _INDEX_ROLL_WARN_DAYS = 21
 _INDEX_ROLL_BLOCK_DAYS = 7
+_INDEX_QUARTER_MONTHS = ("03", "06", "09", "12")
 _DEFAULT_CONTRACT_DETAILS_MAX_AGE_SECONDS = 24 * 60 * 60
 _GOLD_RECOMMENDATION_MONTH = "202608"
 _MONTH_CODE_BY_NUMBER = {
@@ -196,13 +197,42 @@ def evaluate_futures_contract_pre_submit(
                 detail="IBKR warning/roll-preference evidence blocks new index entries on the selected contract.",
             )
         if days_to_expiry <= _INDEX_ROLL_BLOCK_DAYS:
+            replacement = _index_recommendation(
+                symbol=symbol,
+                current_contract_month=str(selected.get("contract_month") or request.contract_month or ""),
+                recommendation_report=request.recommendation_contract_report,
+                now=now,
+                max_age_seconds=request.contract_details_max_age_seconds,
+            )
+            base = {
+                **base,
+                "original_selected_contract": selected,
+                "recommended_contract": replacement,
+                "roll_status": "ROLL_REPLACED_NEAR_EXPIRY" if replacement.get("confirmed") else "ROLL_BLOCKED_NEAR_EXPIRY",
+            }
+            if bool(replacement.get("confirmed")):
+                return {
+                    **base,
+                    "classification": CONTRACT_ALLOWED,
+                    "submit_allowed": True,
+                    "blocking": False,
+                    "blocker": None,
+                    "selected_contract": replacement,
+                    "contract_month": replacement.get("contract_month"),
+                    "days_to_expiry": days_to_expiry,
+                    "replacement_applied": True,
+                    "detail": (
+                        f"Index contract {selected.get('local_symbol') or selected.get('contract_month')} is "
+                        f"{days_to_expiry} days from expiry; using next eligible "
+                        f"{replacement.get('local_symbol') or replacement.get('contract_month')} for new PAPER entry."
+                    ),
+                }
             return _blocked(
-                {**base, "roll_status": "ROLL_BLOCKED_NEAR_EXPIRY"},
+                base,
                 blocker=CONTRACT_NEAR_EXPIRY,
                 detail=(
                     f"Index contract {selected.get('local_symbol') or selected.get('contract_month')} is "
-                    f"{days_to_expiry} days from expiry; new entries fail closed inside "
-                    f"{_INDEX_ROLL_BLOCK_DAYS} days."
+                    f"{days_to_expiry} days from expiry; no fresh eligible replacement contract was confirmed."
                 ),
             )
         roll_status = "ROLL_WARNING_ONLY" if days_to_expiry <= _INDEX_ROLL_WARN_DAYS else "OK"
@@ -229,6 +259,22 @@ def recommended_gold_contract_month() -> str:
 
 def recommended_gold_local_symbol(symbol: str) -> str:
     return _local_symbol_for_month(_normalize_symbol(symbol), _GOLD_RECOMMENDATION_MONTH)
+
+
+def recommended_index_contract_month(contract_month: str) -> str | None:
+    text = str(contract_month or "").strip()
+    if len(text) != 6 or not text.isdigit():
+        return None
+    year = int(text[:4])
+    month = text[4:6]
+    for candidate in _INDEX_QUARTER_MONTHS:
+        if candidate > month:
+            return f"{year}{candidate}"
+    return f"{year + 1}03"
+
+
+def recommended_index_local_symbol(symbol: str, contract_month: str) -> str:
+    return _local_symbol_for_month(_normalize_symbol(symbol), contract_month)
 
 
 def _blocked(base: Mapping[str, Any], *, blocker: str, detail: str) -> dict[str, Any]:
@@ -434,6 +480,56 @@ def _gold_recommendation(
         "confirmed": True,
         "contract_details_freshness": freshness,
         "detail": "August 2026 recommendation confirmed by fresh IBKR contractDetails.",
+    }
+
+
+def _index_recommendation(
+    *,
+    symbol: str,
+    current_contract_month: str,
+    recommendation_report: Mapping[str, Any] | None,
+    now: datetime,
+    max_age_seconds: float,
+) -> dict[str, Any]:
+    recommended_month = recommended_index_contract_month(current_contract_month)
+    if not recommended_month:
+        return {
+            "symbol": symbol,
+            "contract_month": "",
+            "confirmed": False,
+            "detail": "Index replacement month could not be derived from the selected contract month.",
+        }
+    desired = {
+        "symbol": symbol,
+        "contract_month": recommended_month,
+        "local_symbol": recommended_index_local_symbol(symbol, recommended_month),
+        "confirmed": False,
+    }
+    if not recommendation_report:
+        return {**desired, "detail": "Index replacement contract has not been contractDetails-confirmed."}
+    details = _details_from_report(recommendation_report)
+    freshness = _contract_details_freshness(details=details, now=now, max_age_seconds=max_age_seconds)
+    matches = [
+        _contract_from_detail(row)
+        for row in details
+        if _normalize_symbol(row.get("symbol")) == symbol
+        and str(row.get("expiry") or row.get("lastTradeDateOrContractMonth") or "").startswith(recommended_month)
+    ]
+    if len(matches) != 1 or not bool(freshness.get("fresh")):
+        return {
+            **desired,
+            "contract_details_freshness": freshness,
+            "match_count": len(matches),
+            "detail": "Index replacement contract could not be confirmed uniquely with fresh IBKR contractDetails.",
+        }
+    match = matches[0]
+    return {
+        **desired,
+        **match,
+        "contract_month": recommended_month,
+        "confirmed": True,
+        "contract_details_freshness": freshness,
+        "detail": "Index replacement contract confirmed by fresh IBKR contractDetails.",
     }
 
 

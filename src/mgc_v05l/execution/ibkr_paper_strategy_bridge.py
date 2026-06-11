@@ -69,6 +69,7 @@ from ..execution_core.track_b_futures_contract_resolver import (
     FuturesContractResolverInput,
     evaluate_futures_contract_pre_submit,
     recommended_gold_contract_month,
+    recommended_index_contract_month,
 )
 from ..execution_core.track_b_paper_broker_reconciliation import (
     ReconciliationConfig,
@@ -421,6 +422,10 @@ def _bridge_phase1_target(
                 approved = bool(target)
             except KeyError:
                 target = {}
+    resolved_execution_contract = metadata.get("resolved_execution_contract")
+    if isinstance(resolved_execution_contract, Mapping):
+        target = {**target, **dict(resolved_execution_contract)}
+        approved = bool(target)
     symbol = str(target.get("symbol") or config.symbol or intent.symbol or "").strip().upper()
     contract_month = str(target.get("contract_month") or config.contract_month or intent.contract_month or "").strip()
     caller_path = str(config.caller_path or "").strip()
@@ -1021,6 +1026,32 @@ def run_ibkr_paper_strategy_bridge(
             runtime=runtime,
             now=started_at,
         )
+        resolved_target, resolved_qualified_contract_report, replacement_applied = _resolved_execution_contract_from_resolver(
+            resolver_status=futures_contract_resolver_status,
+            current_target=expected_target,
+            current_qualified_contract_report=qualified_contract_report,
+            recommendation_contract_report=recommendation_contract_report,
+        )
+        if replacement_applied:
+            config = _config_with_resolved_execution_contract(config=config, resolved_target=resolved_target)
+            qualified_contract_report = resolved_qualified_contract_report
+            futures_contract_resolver_status = {
+                **futures_contract_resolver_status,
+                "resolved_execution_contract": dict(resolved_target),
+            }
+            _record_bridge_audit(
+                audit_events,
+                event_type="futures_contract_roll_replacement_selected",
+                detail=(
+                    "Futures contract resolver selected the next eligible contract for a near-expiry "
+                    "PAPER new entry."
+                ),
+                config=config,
+                extra={
+                    "resolved_execution_contract": dict(resolved_target),
+                    "futures_contract_resolver_status": futures_contract_resolver_status,
+                },
+            )
         quote_context = _probe_delayed_quote_context(
             transport=runtime.transport,
             collector=runtime.collector,
@@ -2496,6 +2527,26 @@ def _recommendation_contract_report_for_bridge(
         return {}
     symbol = str(target.get("symbol") or config.symbol or intent.symbol or "").strip().upper()
     contract_month = str(target.get("contract_month") or config.contract_month or intent.contract_month or "").strip()
+    if symbol in {"MNQ", "MES", "NQ", "ES"}:
+        recommendation_month = recommended_index_contract_month(contract_month)
+        if not recommendation_month:
+            return {}
+        try:
+            return _qualify_futures_contract(
+                transport=runtime.transport,
+                collector=runtime.collector,
+                symbol=symbol,
+                expiry=recommendation_month,
+                timeout_seconds=config.timeout_seconds,
+                sleep_fn=sleep_fn,
+            )
+        except Exception as exc:
+            return {
+                "ok": False,
+                "detail": f"Index replacement contractDetails qualification failed: {exc}",
+                "api_contract_details": [],
+                "qualified_contract": {},
+            }
     if symbol not in {"GC", "MGC"} or contract_month != "202606":
         return {}
     try:
@@ -2514,6 +2565,72 @@ def _recommendation_contract_report_for_bridge(
             "api_contract_details": [],
             "qualified_contract": {},
         }
+
+
+def _resolved_execution_contract_from_resolver(
+    *,
+    resolver_status: Mapping[str, Any],
+    current_target: Mapping[str, Any],
+    current_qualified_contract_report: Mapping[str, Any],
+    recommendation_contract_report: Mapping[str, Any] | None,
+) -> tuple[dict[str, Any], dict[str, Any], bool]:
+    if resolver_status.get("replacement_applied") is not True:
+        return dict(current_target), dict(current_qualified_contract_report), False
+    replacement = dict(resolver_status.get("selected_contract") or resolver_status.get("recommended_contract") or {})
+    replacement_report = dict(recommendation_contract_report or {})
+    replacement_qualified = dict(replacement_report.get("qualified_contract") or {})
+    if not replacement or not replacement_qualified:
+        return dict(current_target), dict(current_qualified_contract_report), False
+    replacement_month = str(
+        replacement.get("contract_month")
+        or str(replacement.get("expiry") or replacement_qualified.get("expiry") or "")[:6]
+        or ""
+    ).strip()
+    replacement_target = {
+        **dict(current_target),
+        **replacement,
+        "symbol": str(replacement.get("symbol") or current_target.get("symbol") or replacement_qualified.get("symbol") or "").strip().upper(),
+        "contract_month": replacement_month,
+        "expiry": str(replacement.get("expiry") or replacement_qualified.get("expiry") or "").strip(),
+        "con_id": replacement.get("con_id") if replacement.get("con_id") is not None else replacement_qualified.get("con_id"),
+        "local_symbol": str(replacement.get("local_symbol") or replacement_qualified.get("local_symbol") or "").strip(),
+        "exchange": str(replacement.get("exchange") or replacement_qualified.get("exchange") or current_target.get("exchange") or "").strip(),
+        "currency": str(replacement.get("currency") or replacement_qualified.get("currency") or current_target.get("currency") or "").strip(),
+        "multiplier": str(replacement.get("multiplier") or replacement_qualified.get("multiplier") or current_target.get("multiplier") or "").strip(),
+        "trading_class": str(
+            replacement.get("trading_class")
+            or replacement_qualified.get("trading_class")
+            or current_target.get("trading_class")
+            or ""
+        ).strip(),
+        "approved": True,
+        "roll_replacement_applied": True,
+        "original_contract": dict(resolver_status.get("original_selected_contract") or {}),
+    }
+    replacement_report = {
+        **replacement_report,
+        "roll_replacement_applied": True,
+        "original_qualified_contract_report": dict(current_qualified_contract_report),
+    }
+    return replacement_target, replacement_report, True
+
+
+def _config_with_resolved_execution_contract(
+    *,
+    config: IbkrPaperStrategyBridgeConfig,
+    resolved_target: Mapping[str, Any],
+) -> IbkrPaperStrategyBridgeConfig:
+    metadata = dict(config.caller_metadata or {})
+    metadata["resolved_execution_contract"] = dict(resolved_target)
+    metadata["local_symbol"] = resolved_target.get("local_symbol") or metadata.get("local_symbol")
+    metadata["con_id"] = resolved_target.get("con_id") or metadata.get("con_id")
+    metadata["contract_month"] = resolved_target.get("contract_month") or metadata.get("contract_month")
+    metadata["expiry"] = resolved_target.get("expiry") or metadata.get("expiry")
+    return replace(
+        config,
+        contract_month=str(resolved_target.get("contract_month") or config.contract_month or "").strip(),
+        caller_metadata=metadata,
+    )
 
 
 def _futures_contract_resolver_for_bridge(

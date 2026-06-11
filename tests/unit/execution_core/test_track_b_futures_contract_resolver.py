@@ -11,6 +11,7 @@ from mgc_v05l.execution_core.track_b_futures_contract_resolver import (
     CONTRACT_ROLL_BLOCKED,
     FuturesContractResolverInput,
     evaluate_futures_contract_pre_submit,
+    recommended_index_contract_month,
 )
 
 NOW = datetime(2026, 5, 29, 12, 0, tzinfo=timezone.utc)
@@ -148,6 +149,93 @@ def test_mnq_and_mes_june_allowed_with_warning_only_roll_watch() -> None:
         assert result["warning_only"] is True
         assert result["roll_status"] == "ROLL_WARNING_ONLY"
         assert result["days_to_expiry"] == 20
+
+
+def test_index_near_expiry_uses_confirmed_next_contract_for_new_entry() -> None:
+    now = datetime(2026, 6, 11, 12, 0, tzinfo=timezone.utc)
+    cases = [
+        ("MNQ", 770561201, "MNQM6", 880000201, "MNQU6"),
+        ("MES", 770561194, "MESM6", 880000194, "MESU6"),
+    ]
+    for symbol, front_con_id, front_local, next_con_id, next_local in cases:
+        result = evaluate_futures_contract_pre_submit(
+            FuturesContractResolverInput(
+                strategy_id=f"{symbol.lower()}_lane",
+                symbol=symbol,
+                contract_month="202606",
+                action="BUY",
+                intent_type="BUY_TO_OPEN",
+                selected_target=_target(
+                    symbol=symbol,
+                    contract_month="202606",
+                    expiry=None,
+                    con_id=None,
+                    local_symbol=None,
+                ),
+                qualified_contract_report=_report(
+                    symbol=symbol,
+                    expiry="20260618",
+                    con_id=front_con_id,
+                    local_symbol=front_local,
+                    updated_at="2026-06-11T11:59:00+00:00",
+                ),
+                recommendation_contract_report=_report(
+                    symbol=symbol,
+                    expiry="20260918",
+                    con_id=next_con_id,
+                    local_symbol=next_local,
+                    updated_at="2026-06-11T11:59:00+00:00",
+                ),
+                now=now,
+            )
+        )
+
+        assert result["classification"] == CONTRACT_ALLOWED
+        assert result["submit_allowed"] is True
+        assert result["replacement_applied"] is True
+        assert result["roll_status"] == "ROLL_REPLACED_NEAR_EXPIRY"
+        assert result["original_selected_contract"]["local_symbol"] == front_local
+        assert result["selected_contract"]["contract_month"] == "202609"
+        assert result["selected_contract"]["local_symbol"] == next_local
+        assert result["selected_contract"]["con_id"] == next_con_id
+
+
+def test_index_near_expiry_blocks_when_no_replacement_confirmed() -> None:
+    result = evaluate_futures_contract_pre_submit(
+        FuturesContractResolverInput(
+            strategy_id="mnq_lane",
+            symbol="MNQ",
+            contract_month="202606",
+            action="SELL",
+            intent_type="SELL_TO_OPEN",
+            selected_target=_target(
+                symbol="MNQ",
+                contract_month="202606",
+                expiry=None,
+                con_id=None,
+                local_symbol=None,
+            ),
+            qualified_contract_report=_report(
+                symbol="MNQ",
+                expiry="20260618",
+                con_id=770561201,
+                local_symbol="MNQM6",
+                updated_at="2026-06-11T11:59:00+00:00",
+            ),
+            recommendation_contract_report={},
+            now=datetime(2026, 6, 11, 12, 0, tzinfo=timezone.utc),
+        )
+    )
+
+    assert result["classification"] == CONTRACT_NEAR_EXPIRY
+    assert result["submit_allowed"] is False
+    assert result["roll_status"] == "ROLL_BLOCKED_NEAR_EXPIRY"
+
+
+def test_index_recommendation_rolls_to_next_quarter() -> None:
+    assert recommended_index_contract_month("202606") == "202609"
+    assert recommended_index_contract_month("202609") == "202612"
+    assert recommended_index_contract_month("202612") == "202703"
 
 
 def test_stale_contract_details_fail_closed() -> None:
