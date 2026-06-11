@@ -72,7 +72,21 @@ recovery_service_opted_out() {
   esac
 }
 
+paper_minimal_startup_enabled() {
+  case "${PAPER_MINIMAL_STARTUP_V1}" in
+    1|true|TRUE|yes|YES)
+      return 0
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+}
+
 ensure_recovery_service_enabled() {
+  if paper_minimal_startup_enabled; then
+    return 0
+  fi
   if recovery_service_opted_out; then
     return 0
   fi
@@ -1419,6 +1433,124 @@ launchctl_available() {
   command -v launchctl >/dev/null 2>&1
 }
 
+nohup_available() {
+  command -v nohup >/dev/null 2>&1
+}
+
+stop_exact_runtime_pid_for_minimal_restart() {
+  local pid="$1"
+  if [[ -z "${pid}" ]]; then
+    rm -f "${PID_FILE}" "${PID_METADATA_FILE}" "${PID_FILE}.screen_session" "${LAUNCHCTL_LABEL_FILE}"
+    return 0
+  fi
+  if ! ps -p "${pid}" >/dev/null 2>&1; then
+    rm -f "${PID_FILE}" "${PID_METADATA_FILE}" "${PID_FILE}.screen_session" "${LAUNCHCTL_LABEL_FILE}"
+    return 0
+  fi
+
+  kill -TERM "${pid}" >/dev/null 2>&1 || true
+  local deadline=$((SECONDS + 15))
+  while [[ "${SECONDS}" -lt "${deadline}" ]]; do
+    if ! ps -p "${pid}" >/dev/null 2>&1; then
+      rm -f "${PID_FILE}" "${PID_METADATA_FILE}" "${PID_FILE}.screen_session" "${LAUNCHCTL_LABEL_FILE}"
+      return 0
+    fi
+    sleep 1
+  done
+
+  kill -KILL "${pid}" >/dev/null 2>&1 || true
+  deadline=$((SECONDS + 5))
+  while [[ "${SECONDS}" -lt "${deadline}" ]]; do
+    if ! ps -p "${pid}" >/dev/null 2>&1; then
+      rm -f "${PID_FILE}" "${PID_METADATA_FILE}" "${PID_FILE}.screen_session" "${LAUNCHCTL_LABEL_FILE}"
+      return 0
+    fi
+    sleep 1
+  done
+
+  write_startup_artifact "BLOCKED_EXACT_PID_STOP_FAILED" "Controlled PAPER restart could not stop exact runtime PID ${pid}; no broad process stop attempted." "${pid}"
+  exit 1
+}
+
+verify_direct_paper_runtime_shape() {
+  local pid="$1"
+  local expected_commit="$2"
+  "${PYTHON_BIN}" - "${REPO_ROOT}" "${RUNTIME_DIR}" "${pid}" "${expected_commit}" "${STACK_PROFILE}" <<'PY'
+import json
+import subprocess
+import sys
+from pathlib import Path
+
+repo_root = Path(sys.argv[1])
+runtime_dir = Path(sys.argv[2])
+pid = int(sys.argv[3])
+expected_commit = sys.argv[4]
+expected_profile = sys.argv[5]
+truth_path = runtime_dir / "paper_runtime_truth.json"
+config_path = runtime_dir / "paper_config_in_force.json"
+
+try:
+    truth = json.loads(truth_path.read_text(encoding="utf-8"))
+    config = json.loads(config_path.read_text(encoding="utf-8"))
+except (OSError, json.JSONDecodeError):
+    raise SystemExit(1)
+
+try:
+    truth_pid = int(truth.get("producer_pid") or truth.get("pid"))
+except (TypeError, ValueError):
+    raise SystemExit(1)
+if truth_pid != pid:
+    raise SystemExit(1)
+if truth.get("source_commit") != expected_commit:
+    raise SystemExit(1)
+if config.get("profile") != expected_profile:
+    raise SystemExit(1)
+
+lanes = [row for row in config.get("lanes") or [] if isinstance(row, dict)]
+active_lane_ids = [str(value) for value in config.get("active_lane_ids") or [] if str(value)]
+if expected_profile == "mnq_mes_full_session_active_evidence":
+    expected_lane_count = 13
+else:
+    expected_lane_count = len(active_lane_ids) or len(lanes)
+if len(lanes) != expected_lane_count:
+    raise SystemExit(1)
+if int(truth.get("lane_count") or 0) != expected_lane_count:
+    raise SystemExit(1)
+if active_lane_ids and len(active_lane_ids) != expected_lane_count:
+    raise SystemExit(1)
+
+execution_modes = {
+    str(row.get("execution_mode") or (row.get("runtime_overlay_params") or {}).get("execution_mode") or "")
+    for row in lanes
+}
+if execution_modes != {"IBKR_PAPER_BRIDGE"}:
+    raise SystemExit(1)
+if any("SIMULATION" in mode for mode in execution_modes):
+    raise SystemExit(1)
+
+ps = subprocess.run(
+    ["ps", "-axo", "pid=,command="],
+    text=True,
+    check=False,
+    capture_output=True,
+)
+runtime_pids = []
+for line in ps.stdout.splitlines():
+    parts = line.strip().split(None, 1)
+    if len(parts) != 2:
+        continue
+    row_pid, command = parts
+    if (
+        str(repo_root) in command
+        and "mgc_v05l.app.main" in command
+        and "probationary-paper-soak" in command
+    ):
+        runtime_pids.append(int(row_pid))
+if runtime_pids != [pid]:
+    raise SystemExit(1)
+PY
+}
+
 write_runtime_config_paths_file() {
   for config_path in "${CANONICAL_CONFIGS[@]}"; do
     if [[ ! -f "${config_path}" ]]; then
@@ -1439,7 +1571,7 @@ write_runtime_config_paths_file() {
 
 write_runtime_config_paths_file
 
-if [[ "${PAPER_MINIMAL_STARTUP_V1}" == "1" || "${PAPER_MINIMAL_STARTUP_V1}" == "true" || "${PAPER_MINIMAL_STARTUP_V1}" == "TRUE" ]]; then
+if paper_minimal_startup_enabled; then
   if ! run_paper_minimal_startup_preflight; then
     exit 2
   fi
@@ -1467,7 +1599,7 @@ if [[ "${already_running}" == "true" ]]; then
     write_startup_artifact "BLOCKED_RESTART_REQUIRES_PROFILE" "Set TRACK_B_PAPER_STACK_PROFILE for an explicit restart generation." "${pid}"
     exit 2
   fi
-  if [[ "${PAPER_MINIMAL_STARTUP_V1}" == "1" || "${PAPER_MINIMAL_STARTUP_V1}" == "true" || "${PAPER_MINIMAL_STARTUP_V1}" == "TRUE" ]]; then
+  if paper_minimal_startup_enabled; then
     restart_precheck_classification="RESTART_ALLOWED_PAPER_MINIMAL_STARTUP_V1"
     restart_precheck_detail="PAPER_MINIMAL_STARTUP_V1 allowed controlled PAPER restart; legacy restart precheck is diagnostic only."
   else
@@ -1481,15 +1613,16 @@ if [[ "${already_running}" == "true" ]]; then
     fi
   fi
   write_startup_artifact "${restart_precheck_classification}" "${restart_precheck_detail}" "${pid}" >/dev/null
-  PROBATIONARY_PAPER_PID_FILE="${PID_FILE}" bash "${SCRIPT_DIR}/stop_probationary_paper_soak.sh"
-  if [[ "${PAPER_MINIMAL_STARTUP_V1}" == "1" || "${PAPER_MINIMAL_STARTUP_V1}" == "true" || "${PAPER_MINIMAL_STARTUP_V1}" == "TRUE" ]]; then
+  if paper_minimal_startup_enabled; then
+    stop_exact_runtime_pid_for_minimal_restart "${pid}"
     status_json="{}"
   else
+    PROBATIONARY_PAPER_PID_FILE="${PID_FILE}" bash "${SCRIPT_DIR}/stop_probationary_paper_soak.sh"
     status_json="$("${STATUS_SCRIPT}" --json)"
   fi
 fi
 
-if [[ "${PAPER_MINIMAL_STARTUP_V1}" == "1" || "${PAPER_MINIMAL_STARTUP_V1}" == "true" || "${PAPER_MINIMAL_STARTUP_V1}" == "TRUE" ]]; then
+if paper_minimal_startup_enabled; then
   restart_allowed="true"
   runtime_start_allowed="true"
   blocker_count="0"
@@ -1535,7 +1668,7 @@ if [[ ( "${runtime_start_allowed}" != "true" || "${blocker_count}" != "0" ) && (
   write_startup_artifact "BLOCKED_PRECHECK" "Canonical readiness does not allow a clean PAPER runtime start." ""
   exit 2
 fi
-if [[ "${PAPER_MINIMAL_STARTUP_V1}" != "1" && "${PAPER_MINIMAL_STARTUP_V1}" != "true" && "${PAPER_MINIMAL_STARTUP_V1}" != "TRUE" ]]; then
+if ! paper_minimal_startup_enabled; then
   if ! run_startup_preflight_evidence_refresh; then
     exit 2
   fi
@@ -1649,9 +1782,30 @@ WRAPPER
 chmod +x "${WRAPPER_PATH}"
 
 carrier="screen"
-if [[ "${PREFERRED_CARRIER}" == "nohup" ]]; then
-  write_startup_artifact "BLOCKED_UNSUPPORTED_CARRIER" "nohup is not a durable Track B PAPER runtime carrier in this environment; use auto, screen, or launchctl." ""
-  exit 1
+if paper_minimal_startup_enabled; then
+  if [[ "${PREFERRED_CARRIER}" == "launchctl" ]]; then
+    write_startup_artifact "BLOCKED_LAUNCHCTL_DISABLED_FOR_PAPER_MINIMAL_STARTUP" "Controlled PAPER_MINIMAL_STARTUP_V1 restarts use direct screen/nohup process ownership, not launchctl." ""
+    exit 1
+  elif [[ "${PREFERRED_CARRIER}" == "nohup" ]]; then
+    if ! nohup_available; then
+      write_startup_artifact "BLOCKED_NOHUP_UNAVAILABLE" "nohup carrier was explicitly requested but nohup is unavailable." ""
+      exit 1
+    fi
+    carrier="nohup"
+  elif [[ "${PREFERRED_CARRIER}" == "screen" ]]; then
+    if ! screen_available; then
+      write_startup_artifact "BLOCKED_SCREEN_UNAVAILABLE" "screen carrier was explicitly requested but detached screen sessions are not usable." ""
+      exit 1
+    fi
+    carrier="screen"
+  elif screen_available; then
+    carrier="screen"
+  elif nohup_available; then
+    carrier="nohup"
+  else
+    write_startup_artifact "BLOCKED_NO_DIRECT_CARRIER" "Neither screen nor nohup is available for direct controlled PAPER runtime ownership." ""
+    exit 1
+  fi
 elif [[ "${PREFERRED_CARRIER}" == "screen" ]]; then
   if ! screen_available; then
     write_startup_artifact "BLOCKED_SCREEN_UNAVAILABLE" "screen carrier was explicitly requested but detached screen sessions are not usable." ""
@@ -1676,6 +1830,9 @@ if [[ "${carrier}" == "screen" ]]; then
   printf '%s\n' "${session_name}" > "${PID_FILE}.screen_session"
   rm -f "${LAUNCHCTL_LABEL_FILE}"
   screen -dmS "${session_name}" /bin/bash "${WRAPPER_PATH}"
+elif [[ "${carrier}" == "nohup" ]]; then
+  rm -f "${PID_FILE}.screen_session" "${LAUNCHCTL_LABEL_FILE}"
+  nohup /bin/bash "${WRAPPER_PATH}" >/dev/null 2>&1 &
 elif [[ "${carrier}" == "launchctl" ]]; then
   label="com.mgc-v05l.track-b-paper-stack.$(date -u +%Y%m%d%H%M%S).$$"
   printf '%s\n' "${label}" > "${LAUNCHCTL_LABEL_FILE}"
@@ -1691,9 +1848,8 @@ elif [[ "${carrier}" == "launchctl" ]]; then
   fi
 fi
 
-if [[ "${PAPER_MINIMAL_STARTUP_V1}" == "1" || "${PAPER_MINIMAL_STARTUP_V1}" == "true" || "${PAPER_MINIMAL_STARTUP_V1}" == "TRUE" ]]; then
+if paper_minimal_startup_enabled; then
   deadline=$((SECONDS + WAIT_SECONDS))
-  ready_since=0
   ready_pid=""
   while [[ "${SECONDS}" -lt "${deadline}" ]]; do
     sleep 2
@@ -1703,24 +1859,18 @@ if [[ "${PAPER_MINIMAL_STARTUP_V1}" == "1" || "${PAPER_MINIMAL_STARTUP_V1}" == "
     fi
     if [[ -n "${pid}" ]] && ps -p "${pid}" >/dev/null 2>&1; then
       if run_paper_minimal_startup_preflight >/dev/null; then
-        if [[ "${ready_since}" == "0" || "${ready_pid}" != "${pid}" ]]; then
-          ready_since="${SECONDS}"
-          ready_pid="${pid}"
-          write_startup_artifact "RUNTIME_RUNNING_WAITING_FOR_MINIMAL_STARTUP_STABILITY" "Runtime is alive and PAPER_MINIMAL_STARTUP_V1 is allowed; waiting for ${STABLE_SECONDS}s sustained minimal readiness." "${pid}" >/dev/null
-        elif [[ $((SECONDS - ready_since)) -ge "${STABLE_SECONDS}" ]]; then
-          write_startup_artifact "READY_SUBMIT_CAPABLE" "Track B PAPER runtime started through PAPER_MINIMAL_STARTUP_V1 and remained minimally submit-capable for ${STABLE_SECONDS}s." "${pid}"
+        if verify_direct_paper_runtime_shape "${pid}" "${source_commit}" >/dev/null 2>&1; then
+          write_startup_artifact "READY_SUBMIT_CAPABLE" "Track B PAPER runtime started through direct PAPER_MINIMAL_STARTUP_V1 process path and matched required runtime shape." "${pid}"
           exit 0
         fi
-      else
-        ready_since=0
-        ready_pid=""
       fi
+      ready_pid="${pid}"
     elif [[ -n "${ready_pid}" ]]; then
-      write_startup_artifact "BLOCKED_RUNTIME_EXITED_DURING_STARTUP" "Runtime reached initial minimal readiness, then exited before ${STABLE_SECONDS}s sustained readiness." "${ready_pid}"
+      write_startup_artifact "BLOCKED_RUNTIME_EXITED_DURING_STARTUP" "Runtime reached initial minimal process ownership, then exited before required runtime shape was verified." "${ready_pid}"
       exit 1
     fi
   done
-  write_startup_artifact "BLOCKED_START_TIMEOUT" "Runtime did not remain PAPER_MINIMAL_STARTUP_V1 submit-capable for ${STABLE_SECONDS}s before timeout." ""
+  write_startup_artifact "BLOCKED_START_TIMEOUT" "Runtime did not reach the required PAPER_MINIMAL_STARTUP_V1 direct-process runtime shape before timeout." ""
   exit 1
 fi
 

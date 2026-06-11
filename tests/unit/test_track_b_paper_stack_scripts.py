@@ -33,12 +33,26 @@ def test_paper_stack_start_launches_foreground_runtime_inside_screen() -> None:
     assert "run_probationary_paper_soak.sh" in source
 
 
-def test_paper_stack_start_uses_launchctl_not_nohup_as_fallback() -> None:
+def test_paper_minimal_start_uses_direct_process_carrier_not_launchctl() -> None:
     source = START_SCRIPT.read_text(encoding="utf-8")
 
+    minimal_carrier_block = source[
+        source.index("if paper_minimal_startup_enabled; then", source.index('carrier="screen"'))
+        : source.index(
+            'elif [[ "${PREFERRED_CARRIER}" == "screen" ]]; then',
+            source.index("BLOCKED_NO_DIRECT_CARRIER"),
+        )
+    ]
+
+    assert "BLOCKED_LAUNCHCTL_DISABLED_FOR_PAPER_MINIMAL_STARTUP" in minimal_carrier_block
+    assert "Controlled PAPER_MINIMAL_STARTUP_V1 restarts use direct screen/nohup" in minimal_carrier_block
+    assert "screen_available" in minimal_carrier_block
+    assert "nohup_available" in minimal_carrier_block
+    assert "carrier=\"nohup\"" in minimal_carrier_block
+    assert "launchctl submit" not in minimal_carrier_block
+
+    assert "nohup /bin/bash" in source
     assert "launchctl submit" in source
-    assert "BLOCKED_UNSUPPORTED_CARRIER" in source
-    assert "nohup /bin/bash" not in source
 
 
 def test_paper_stack_start_requires_sustained_readiness() -> None:
@@ -50,6 +64,20 @@ def test_paper_stack_start_requires_sustained_readiness() -> None:
     assert "remained READY_SUBMIT_CAPABLE" in source
     assert "READY_TO_START_DIAGNOSTIC_ONLY" in source
     assert "submit remains disabled" in source
+
+
+def test_paper_minimal_start_verifies_shape_without_sustained_readiness_wait() -> None:
+    source = START_SCRIPT.read_text(encoding="utf-8")
+    minimal_wait_block = source[
+        source.index("if paper_minimal_startup_enabled; then", source.index('if [[ "${carrier}" == "screen" ]]'))
+        : source.index("\ndeadline=$((SECONDS + WAIT_SECONDS))", source.index("if paper_minimal_startup_enabled; then", source.index('if [[ "${carrier}" == "screen" ]]')))
+    ]
+
+    assert "verify_direct_paper_runtime_shape" in minimal_wait_block
+    assert "READY_SUBMIT_CAPABLE" in minimal_wait_block
+    assert "direct PAPER_MINIMAL_STARTUP_V1 process path" in minimal_wait_block
+    assert "RUNTIME_RUNNING_WAITING_FOR_MINIMAL_STARTUP_STABILITY" not in minimal_wait_block
+    assert "STABLE_SECONDS" not in minimal_wait_block
 
 
 def test_paper_stack_start_refreshes_authority_evidence_before_carrier_launch() -> None:
@@ -151,6 +179,35 @@ def test_paper_stack_minimal_startup_owns_restart_authority() -> None:
     legacy_branch = already_running_block[legacy_start:]
     assert "track_b_paper_stack_restart_precheck" not in minimal_branch
     assert "track_b_paper_stack_restart_precheck" in legacy_branch
+
+
+def test_paper_minimal_restart_stops_only_exact_pid_without_legacy_wrapper() -> None:
+    source = START_SCRIPT.read_text(encoding="utf-8")
+
+    assert "stop_exact_runtime_pid_for_minimal_restart" in source
+    stop_function = source[
+        source.index("stop_exact_runtime_pid_for_minimal_restart() {")
+        : source.index("\nverify_direct_paper_runtime_shape() {")
+    ]
+    assert 'kill -TERM "${pid}"' in stop_function
+    assert 'kill -KILL "${pid}"' in stop_function
+    assert "BLOCKED_EXACT_PID_STOP_FAILED" in stop_function
+    assert "pkill" not in stop_function
+    assert "killall" not in stop_function
+    assert "stop_probationary_paper_soak.sh" not in stop_function
+
+    restart_block = source[
+        source.index('write_startup_artifact "${restart_precheck_classification}"')
+        : source.index("\nfi\n\nif paper_minimal_startup_enabled; then", source.index('write_startup_artifact "${restart_precheck_classification}"'))
+    ]
+    minimal_branch = restart_block[
+        restart_block.index("if paper_minimal_startup_enabled; then")
+        : restart_block.index("else")
+    ]
+    legacy_branch = restart_block[restart_block.index("else") :]
+    assert 'stop_exact_runtime_pid_for_minimal_restart "${pid}"' in minimal_branch
+    assert "stop_probationary_paper_soak.sh" not in minimal_branch
+    assert "stop_probationary_paper_soak.sh" in legacy_branch
 
 
 def test_paper_stack_start_blocks_before_carrier_when_preflight_refresh_fails() -> None:
@@ -1122,6 +1179,14 @@ def test_paper_stack_start_enables_recovery_service_unless_operator_opts_out() -
     source = START_SCRIPT.read_text(encoding="utf-8")
 
     assert "ensure_recovery_service_enabled" in source
+    ensure_block = source[
+        source.index("ensure_recovery_service_enabled() {")
+        : source.index("\nensure_recovery_service_enabled", source.index("ensure_recovery_service_enabled() {"))
+    ]
+    assert "paper_minimal_startup_enabled" in ensure_block
+    assert ensure_block.index("paper_minimal_startup_enabled") < ensure_block.index(
+        "track_b_hourly_paper_runtime_recovery.sh"
+    )
     assert "track_b_hourly_paper_runtime_recovery.sh\" enable" in source
     assert "TRACK_B_PAPER_STACK_DISABLE_RECOVERY_SERVICE" in source
     assert "MGC_TRACK_B_DISABLE_STANDALONE_RECOVERY" in source
