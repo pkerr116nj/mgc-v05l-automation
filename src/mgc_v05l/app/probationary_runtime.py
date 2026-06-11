@@ -215,6 +215,9 @@ _RUNTIME_EVENT_RESTORE_LIMIT = 512
 _RUNTIME_TRADE_RESTORE_LIMIT = 128
 _RUNTIME_PROCESSED_BAR_RESTORE_LIMIT = 720
 PAPER_RUNTIME_TRUTH_TTL_SECONDS = 180.0
+PAPER_EXECUTION_MODE_SIMULATION = "SIMULATION"
+PAPER_EXECUTION_MODE_IBKR_BRIDGE = "IBKR_PAPER_BRIDGE"
+PAPER_EXECUTION_ROUTE_IBKR_BRIDGE = "ibkr_paper_bridge_submit_capable"
 
 
 @dataclass(frozen=True)
@@ -661,6 +664,7 @@ def _probationary_lane_spec_runtime_row(
         "strategy_identity_root": spec.strategy_identity_root,
         "identity_components": list(spec.identity_components),
         "runtime_kind": spec.runtime_kind,
+        "execution_mode": _effective_probationary_paper_execution_mode(spec),
         "long_sources": list(spec.long_sources),
         "short_sources": list(spec.short_sources),
         "session_restriction": spec.session_restriction,
@@ -768,6 +772,7 @@ class ProbationaryPaperLaneSpec:
     strategy_family: str = "UNKNOWN"
     strategy_identity_root: str | None = None
     runtime_kind: str = "strategy_engine"
+    execution_mode: str | None = None
     execution_timeframe: str | None = None
     structural_signal_timeframe: str | None = None
     artifact_timeframe: str | None = None
@@ -798,6 +803,92 @@ class ProbationaryPaperLaneSpec:
     runtime_overlay_params: dict[str, Any] = field(default_factory=dict)
     allow_pre_5m_context_participation: bool = False
     atp_context_timeframe: str = "5m"
+
+
+def _normalize_probationary_paper_execution_mode(value: Any) -> str:
+    normalized = str(value or PAPER_EXECUTION_MODE_SIMULATION).strip().upper()
+    aliases = {
+        "PAPER": PAPER_EXECUTION_MODE_SIMULATION,
+        "PAPER_SIMULATION": PAPER_EXECUTION_MODE_SIMULATION,
+        "INTERNAL_PAPER": PAPER_EXECUTION_MODE_SIMULATION,
+        "IBKR": PAPER_EXECUTION_MODE_IBKR_BRIDGE,
+        "IBKR_BRIDGE": PAPER_EXECUTION_MODE_IBKR_BRIDGE,
+        "IBKR_PAPER": PAPER_EXECUTION_MODE_IBKR_BRIDGE,
+    }
+    normalized = aliases.get(normalized, normalized)
+    if normalized not in {PAPER_EXECUTION_MODE_SIMULATION, PAPER_EXECUTION_MODE_IBKR_BRIDGE}:
+        raise ValueError(f"Unsupported probationary paper execution_mode: {value!r}")
+    return normalized
+
+
+def _source_instrument_from_lane_spec(spec: ProbationaryPaperLaneSpec) -> str:
+    source = str(spec.symbol or "").strip().upper()
+    if source:
+        return source
+    for value in (*spec.observed_instruments, *spec.long_sources, *spec.short_sources):
+        candidate = str(value or "").strip().upper()
+        for instrument in ("MNQ", "MES", "MGC", "GC", "NQ", "ES"):
+            if instrument in candidate:
+                return instrument
+    return source
+
+
+def _active_evidence_bridge_adapter_for_spec(spec: ProbationaryPaperLaneSpec) -> dict[str, Any] | None:
+    source_instrument = _source_instrument_from_lane_spec(spec)
+    if source_instrument not in {"MNQ", "MES", "MGC", "GC", "NQ", "ES"}:
+        return None
+    lane_tokens = " ".join(
+        str(value or "")
+        for value in (
+            spec.lane_id,
+            spec.strategy_family,
+            spec.strategy_identity_root,
+            *spec.long_sources,
+            *spec.short_sources,
+        )
+    ).upper()
+    if "ACTIVE_EVIDENCE" not in lane_tokens and "_ACTIVE_PARTICIPATION_" not in spec.lane_id:
+        return None
+    from ..execution.ibkr_phase1_futures_scope import phase1_execution_target_for_source
+
+    return {
+        "lane_id": spec.lane_id,
+        "source_instrument": source_instrument,
+        "bridge_execution_target": dict(phase1_execution_target_for_source(source_instrument) or {}),
+        "current_order_destination": PAPER_EXECUTION_ROUTE_IBKR_BRIDGE,
+        "bridge_proxy_mode": f"{source_instrument}_SIGNAL_DIRECT_PHASE1",
+        "entry_execution_intent": "PARTICIPATE_NOW",
+        "entry_execution_policy": "MARKETABLE_LIMIT_FROM_RUNTIME_TAPE",
+        "entry_marketable_limit_offset_ticks": 4,
+        "entry_execution_note": (
+            "Active-evidence lanes participate from the fresh runtime tape "
+            "with the bounded ordinary PAPER marketable limit cap."
+        ),
+    }
+
+
+def _effective_probationary_paper_execution_mode(spec: ProbationaryPaperLaneSpec) -> str:
+    if spec.execution_mode:
+        return _normalize_probationary_paper_execution_mode(spec.execution_mode)
+    if lane_submit_bridge_adapter(lane_id=spec.lane_id) is not None:
+        return PAPER_EXECUTION_MODE_IBKR_BRIDGE
+    return PAPER_EXECUTION_MODE_SIMULATION
+
+
+def _bridge_adapter_for_probationary_lane(spec: ProbationaryPaperLaneSpec) -> dict[str, Any] | None:
+    execution_mode = _effective_probationary_paper_execution_mode(spec)
+    if execution_mode == PAPER_EXECUTION_MODE_SIMULATION:
+        return None
+    adapter = lane_submit_bridge_adapter(lane_id=spec.lane_id)
+    if adapter is None:
+        adapter = _active_evidence_bridge_adapter_for_spec(spec)
+    if adapter is None:
+        return None
+    return {
+        **adapter,
+        "managed_exit_policy_id": spec.managed_exit_policy_id,
+        "execution_mode": PAPER_EXECUTION_MODE_IBKR_BRIDGE,
+    }
 
 
 @dataclass(frozen=True)
@@ -3809,7 +3900,14 @@ class ProbationaryPaperLaneRuntime:
             set_logger(self.structured_logger.log_market_data_recovery_event)
 
     def config_row_extras(self) -> dict[str, Any]:
+        broker = getattr(self.execution_engine, "broker", None)
+        bridge_adapter = dict(getattr(broker, "_bridge_adapter", {}) or {}) if isinstance(broker, _IbkrPaperBridgeRuntimeBroker) else {}
         return {
+            "execution_mode": _effective_probationary_paper_execution_mode(self.spec),
+            "current_order_destination": getattr(broker, "route_destination", "legacy_app_paper_runtime"),
+            "bridge_adapter_ready": bool(bridge_adapter),
+            "bridge_proxy_mode": bridge_adapter.get("bridge_proxy_mode"),
+            "bridge_execution_target": dict(bridge_adapter.get("bridge_execution_target") or {}),
             "experimental_status": self.spec.experimental_status,
             "paper_only": self.spec.paper_only,
             "non_approved": self.spec.non_approved,
@@ -8555,6 +8653,15 @@ def _coerce_probationary_paper_lane_specs(
                     str(raw_spec["strategy_identity_root"]) if raw_spec.get("strategy_identity_root") else None
                 ),
                 runtime_kind=str(raw_spec.get("runtime_kind") or "strategy_engine"),
+                execution_mode=(
+                    _normalize_probationary_paper_execution_mode(
+                        raw_spec.get("execution_mode")
+                        or (raw_spec.get("runtime_overlay_params") or {}).get("execution_mode")
+                    )
+                    if raw_spec.get("execution_mode")
+                    or (raw_spec.get("runtime_overlay_params") or {}).get("execution_mode")
+                    else None
+                ),
                 execution_timeframe=(
                     str(raw_spec["execution_timeframe"]) if raw_spec.get("execution_timeframe") else None
                 ),
@@ -8883,6 +8990,7 @@ def _build_probationary_paper_lanes(
                     "strategy_identity_root": spec.strategy_identity_root,
                     "identity_components": list(spec.identity_components),
                     "runtime_kind": spec.runtime_kind,
+                    "execution_mode": spec.execution_mode,
                     "long_sources": list(spec.long_sources),
                     "short_sources": list(spec.short_sources),
                     "session_restriction": spec.session_restriction,
@@ -8920,9 +9028,12 @@ def _build_probationary_paper_lanes(
             lane_logger=StructuredLogger(lane_settings.probationary_artifacts_path),
         )
         alert_dispatcher = AlertDispatcher(lane_logger, repositories.alerts, source_subsystem="probationary_paper_lane")
-        bridge_adapter = lane_submit_bridge_adapter(lane_id=spec.lane_id)
-        if bridge_adapter is not None:
-            bridge_adapter = {**bridge_adapter, "managed_exit_policy_id": spec.managed_exit_policy_id}
+        bridge_adapter = _bridge_adapter_for_probationary_lane(spec)
+        if _effective_probationary_paper_execution_mode(spec) == PAPER_EXECUTION_MODE_IBKR_BRIDGE and bridge_adapter is None:
+            raise ValueError(
+                "Broker-backed PAPER execution requires an IBKR PAPER bridge adapter "
+                f"for probationary lane {spec.lane_id}."
+            )
         broker = (
             _IbkrPaperBridgeRuntimeBroker(
                 lane_id=spec.lane_id,
@@ -9383,6 +9494,7 @@ def _write_probationary_paper_config_in_force(
                 "strategy_family": getattr(lane.spec, "strategy_family", "UNKNOWN"),
                 "strategy_identity_root": getattr(lane.spec, "strategy_identity_root", None),
                 "runtime_kind": getattr(lane.spec, "runtime_kind", "strategy_engine"),
+                "execution_mode": _effective_probationary_paper_execution_mode(lane.spec),
                 "long_sources": list(lane.spec.long_sources),
                 "short_sources": list(lane.spec.short_sources),
                 "session_restriction": lane.spec.session_restriction,

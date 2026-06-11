@@ -1202,6 +1202,56 @@ def test_paper_stack_start_has_full_session_active_evidence_profile() -> None:
     ]
 
 
+def test_paper_stack_full_session_materializes_thirteen_lane_specs(tmp_path: Path) -> None:
+    source = START_SCRIPT.read_text(encoding="utf-8")
+    assert "materialize_scoped_lane_config_from_roster" in source
+
+    block = source.split('elif [[ "${STACK_PROFILE}" == "mnq_mes_full_session_active_evidence" ]]; then', 1)[1]
+    assert "probationary_paper_lanes_json: '[]'" not in block.split("elif [[", 1)[0]
+    roster_json = block.split("cat > \"${SCOPED_ROSTER_PATH}\" <<'JSON'", 1)[1].split("\nJSON", 1)[0]
+    roster = json.loads(roster_json)
+
+    helper_block = source.split("materialize_scoped_lane_config_from_roster() {", 1)[1]
+    helper_python = helper_block.split("<<'PY'\n", 1)[1].split("\nPY\n", 1)[0]
+    roster_path = tmp_path / "roster.json"
+    source_config_path = tmp_path / "paper_config_in_force.json"
+    output_config_path = tmp_path / "paper_stack_mnq_mes_full_session_active_evidence.yaml"
+    roster_path.write_text(json.dumps(roster), encoding="utf-8")
+    source_config_path.write_text(
+        json.dumps(
+            {
+                "lanes": [
+                    {
+                        "lane_id": f"lane_{index}",
+                        "long_sources": [strategy_id],
+                        "short_sources": [],
+                        "symbol": "MNQ" if "MNQ" in strategy_id else "MES",
+                    }
+                    for index, strategy_id in enumerate(roster["enabled_strategy_ids"])
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    subprocess.run(
+        [sys.executable, "-", str(roster_path), str(source_config_path), str(output_config_path)],
+        input=helper_python,
+        text=True,
+        check=True,
+    )
+
+    generated = output_config_path.read_text(encoding="utf-8")
+    assert "probationary_paper_runtime_exclusive_config: true" in generated
+    raw_lanes = generated.split("probationary_paper_lanes_json: ", 1)[1].strip()
+    lanes = json.loads(raw_lanes)
+    assert len(lanes) == 13
+    assert [lane["long_sources"][0] for lane in lanes] == roster["enabled_strategy_ids"]
+    assert {lane["execution_mode"] for lane in lanes} == {"IBKR_PAPER_BRIDGE"}
+    assert {lane["current_order_destination"] for lane in lanes} == {"ibkr_paper_bridge_submit_capable"}
+    assert {lane["runtime_overlay_params"]["execution_mode"] for lane in lanes} == {"IBKR_PAPER_BRIDGE"}
+
+
 def test_paper_stack_generated_profile_rosters_carry_authority_contract() -> None:
     source = START_SCRIPT.read_text(encoding="utf-8")
     blocks = source.split("cat > \"${SCOPED_ROSTER_PATH}\" <<'JSON'")[1:]

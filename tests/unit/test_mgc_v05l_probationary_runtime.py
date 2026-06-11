@@ -5306,6 +5306,89 @@ def test_submit_capable_us_early_long_lanes_use_runtime_ibkr_route_broker(
     assert lanes[0].strategy_engine._shadow_mode_no_submit is False  # noqa: SLF001
 
 
+def test_active_evidence_broker_backed_lane_uses_runtime_ibkr_route_broker(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = _build_probationary_settings(tmp_path)
+    spec = probationary_runtime_module.ProbationaryPaperLaneSpec(
+        lane_id="mnq_globex_active_participation_short",
+        display_name="mnq globex active short",
+        symbol="MNQ",
+        long_sources=(),
+        short_sources=("PAPER_ACTIVE_EVIDENCE_MNQ_GLOBEX_PARTICIPATION_SHORT_V1",),
+        session_restriction="GLOBEX",
+        point_value=Decimal("2"),
+        strategy_family="paper_active_evidence",
+        runtime_kind=TRACK_B_RULE_RUNNER_PAPER_RUNTIME_KIND,
+        execution_mode=probationary_runtime_module.PAPER_EXECUTION_MODE_IBKR_BRIDGE,
+        managed_exit_policy_id="GLOBEX_ACTIVE_EVIDENCE_TIMEBOX_60M_EXIT_V1",
+        paper_only=True,
+    )
+    root_logger = StructuredLogger(tmp_path / "root")
+
+    class FakePollingService:
+        def poll_bars(self, *args, **kwargs):
+            return []
+
+    monkeypatch.setattr(
+        probationary_runtime_module,
+        "_build_live_polling_service",
+        lambda *args, **kwargs: FakePollingService(),
+    )
+
+    lanes = probationary_runtime_module._build_probationary_paper_lanes(  # noqa: SLF001
+        settings=settings,
+        lane_specs=[spec],
+        root_logger=root_logger,
+        schwab_config_path=None,
+    )
+
+    broker = lanes[0].execution_engine.broker
+    assert isinstance(broker, probationary_runtime_module._IbkrPaperBridgeRuntimeBroker)  # noqa: SLF001
+    assert broker.route_destination == "ibkr_paper_bridge_submit_capable"
+
+
+def test_explicit_simulation_lane_still_uses_paper_broker(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = _build_probationary_settings(tmp_path)
+    spec = probationary_runtime_module.ProbationaryPaperLaneSpec(
+        lane_id="mnq_london_open_active_participation_long",
+        display_name="mnq simulation",
+        symbol="MNQ",
+        long_sources=("PAPER_ACTIVE_EVIDENCE_MNQ_LONDON_OPEN_PARTICIPATION_LONG_V1",),
+        short_sources=(),
+        session_restriction="LONDON_OPEN",
+        point_value=Decimal("2"),
+        strategy_family="paper_active_evidence",
+        runtime_kind=TRACK_B_RULE_RUNNER_PAPER_RUNTIME_KIND,
+        execution_mode=probationary_runtime_module.PAPER_EXECUTION_MODE_SIMULATION,
+        paper_only=True,
+    )
+    root_logger = StructuredLogger(tmp_path / "root")
+
+    class FakePollingService:
+        def poll_bars(self, *args, **kwargs):
+            return []
+
+    monkeypatch.setattr(
+        probationary_runtime_module,
+        "_build_live_polling_service",
+        lambda *args, **kwargs: FakePollingService(),
+    )
+
+    lanes = probationary_runtime_module._build_probationary_paper_lanes(  # noqa: SLF001
+        settings=settings,
+        lane_specs=[spec],
+        root_logger=root_logger,
+        schwab_config_path=None,
+    )
+
+    assert isinstance(lanes[0].execution_engine.broker, PaperBroker)
+
+
 def test_current_supervised_route_rejects_legacy_submit_gate_wiring(tmp_path: Path) -> None:
     settings = _build_probationary_settings(tmp_path)
     spec = probationary_runtime_module.ProbationaryPaperLaneSpec(

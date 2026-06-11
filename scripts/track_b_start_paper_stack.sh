@@ -85,6 +85,58 @@ ensure_recovery_service_enabled() {
 
 ensure_recovery_service_enabled
 
+materialize_scoped_lane_config_from_roster() {
+  local roster_path="$1"
+  local source_config_path="$2"
+  local output_config_path="$3"
+  "${PYTHON_BIN}" - "${roster_path}" "${source_config_path}" "${output_config_path}" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+roster_path = Path(sys.argv[1])
+source_config_path = Path(sys.argv[2])
+output_config_path = Path(sys.argv[3])
+
+roster = json.loads(roster_path.read_text(encoding="utf-8"))
+source = json.loads(source_config_path.read_text(encoding="utf-8"))
+enabled = [str(value) for value in roster.get("enabled_strategy_ids") or [] if str(value)]
+enabled_set = set(enabled)
+lanes = []
+seen_sources: set[str] = set()
+for row in source.get("lanes") or []:
+    sources = {str(value) for value in [*list(row.get("long_sources") or []), *list(row.get("short_sources") or [])]}
+    matched = sources & enabled_set
+    if matched:
+        lane = dict(row)
+        lane["execution_mode"] = "IBKR_PAPER_BRIDGE"
+        lane["current_order_destination"] = "ibkr_paper_bridge_submit_capable"
+        lane["bridge_adapter_required"] = True
+        runtime_overlay = dict(lane.get("runtime_overlay_params") or {})
+        runtime_overlay["execution_mode"] = "IBKR_PAPER_BRIDGE"
+        runtime_overlay["current_order_destination"] = "ibkr_paper_bridge_submit_capable"
+        lane["runtime_overlay_params"] = runtime_overlay
+        lanes.append(lane)
+        seen_sources.update(matched)
+
+missing = [source_id for source_id in enabled if source_id not in seen_sources]
+if missing:
+    raise SystemExit(f"BLOCKED_PROFILE_LANE_MATERIALIZATION_MISSING_SPECS: {','.join(missing)}")
+if len(lanes) != len(enabled):
+    raise SystemExit(
+        "BLOCKED_PROFILE_LANE_MATERIALIZATION_COUNT_MISMATCH: "
+        f"enabled={len(enabled)} lanes={len(lanes)}"
+    )
+
+lanes_json = json.dumps(lanes, separators=(",", ":"), sort_keys=True)
+output_config_path.write_text(
+    "probationary_paper_runtime_exclusive_config: true\n"
+    f"probationary_paper_lanes_json: {lanes_json}\n",
+    encoding="utf-8",
+)
+PY
+}
+
 if [[ "${STACK_PROFILE}" == "mnq_mes_active_evidence" ]]; then
   cat > "${SCOPED_CONFIG_PATH}" <<'YAML'
 probationary_paper_runtime_exclusive_config: true
@@ -248,10 +300,6 @@ JSON
   ROSTER_ENV_PATH="${SCOPED_ROSTER_PATH}"
   PROOF_REQUIRED_SYMBOLS="MNQ,MES"
 elif [[ "${STACK_PROFILE}" == "mnq_mes_full_session_active_evidence" ]]; then
-  cat > "${SCOPED_CONFIG_PATH}" <<'YAML'
-probationary_paper_runtime_exclusive_config: true
-probationary_paper_lanes_json: '[]'
-YAML
   cat > "${SCOPED_ROSTER_PATH}" <<'JSON'
 {
   "schema_version": "track_b_guarded_paper_roster_v1",
@@ -288,6 +336,7 @@ YAML
   "max_quantity_per_strategy": 1
 }
 JSON
+  materialize_scoped_lane_config_from_roster "${SCOPED_ROSTER_PATH}" "${RUNTIME_DIR}/paper_config_in_force.json" "${SCOPED_CONFIG_PATH}"
   CANONICAL_CONFIGS+=("${SCOPED_CONFIG_PATH}")
   ROSTER_ENV_PATH="${SCOPED_ROSTER_PATH}"
   PROOF_REQUIRED_SYMBOLS="MNQ,MES"
