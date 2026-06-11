@@ -501,7 +501,7 @@ def test_allows_second_strategy_buy_when_another_strategy_is_already_long(tmp_pa
         allow_stacking=True,
     )
 
-    assert gate["classification"] == "PAPER_EXPOSURE_BLOCKED_REGISTRY_TRUTH_ENTRY"
+    assert gate["classification"] == "PAPER_EXPOSURE_BLOCKED_BROKER_TRUTH_ENTRY"
     assert gate["submit_allowed"] is False
     assert "current_broker_position_without_registry_trade" in gate["block_reasons"]
     assert gate["max_total_mgc_contracts"] == 20.0
@@ -574,7 +574,7 @@ def test_opposite_direction_pending_fill_blocks_same_symbol_entry(tmp_path: Path
     )
 
     assert gate["submit_allowed"] is False
-    assert gate["classification"] == "PAPER_EXPOSURE_BLOCKED_REGISTRY_TRUTH_ENTRY"
+    assert gate["classification"] == "PAPER_EXPOSURE_BLOCKED_BROKER_TRUTH_ENTRY"
     assert "SAME_SYMBOL_PENDING_FILL_ANTI_FLIP_LOCK" in gate["block_reasons"]
     lock = gate["registry_truth_result"]["same_symbol_pending_fill_lock"]
     assert lock["matching_records"][0]["direction"] == "LONG"
@@ -784,6 +784,135 @@ def test_broker_quantity_zero_does_not_trigger_same_symbol_anti_flip_lock(tmp_pa
 
     assert gate["submit_allowed"] is True
     assert gate["registry_truth_result"]["same_symbol_broker_quantity_lock"] is None
+
+
+def test_broker_truth_flat_allows_entry_despite_registry_projection_exposure(tmp_path: Path) -> None:
+    _write_monitor(tmp_path, broker_quantity=0.0)
+    _write_ledger(tmp_path, [])
+    _write_governance(tmp_path, [_governance_row("mnq_london_open_active_participation_long", "PAPER_ACTIVE_EVIDENCE_MNQ_LONDON_OPEN_PARTICIPATION_LONG_V1")])
+    _write_broker_positions_snapshot(tmp_path, positions=[])
+    _write_broker_open_orders_snapshot(tmp_path, open_orders=[])
+    _write_phase1_reconciliation(
+        tmp_path,
+        classification="BROKER_TRUTH_SETTLEMENT_TIMEOUT",
+        broker_reconciled=False,
+        lifecycle_open_position_count=1,
+        lifecycle_positions=[
+            {
+                "account_id": "MULTIPLE",
+                "instrument_family": "MNQ",
+                "local_symbol": "MNQM6",
+                "con_id": 770561201,
+                "quantity": "2",
+                "side": "SHORT",
+                "trade_id": "MULTIPLE",
+            }
+        ],
+    )
+    _write_canonical_current_scope(
+        tmp_path,
+        registry_classification="TRACK_B_DIAGNOSTICS_STALE_AUTHORITY",
+        managed_position_count=1,
+        managed_position_review_count=1,
+    )
+
+    gate = evaluate_paper_strategy_exposure_gate(
+        repo_root=tmp_path,
+        strategy_id="mnq_london_open_active_participation_long",
+        bridge_strategy_id="PAPER_ACTIVE_EVIDENCE_MNQ_LONDON_OPEN_PARTICIPATION_LONG_V1",
+        action="BUY",
+        intent_type="BUY_TO_OPEN",
+        quantity=1.0,
+        executable_symbol="MNQ",
+        account_id="DUM882026",
+        con_id=770561201,
+        local_symbol="MNQM6",
+    )
+
+    assert gate["submit_allowed"] is True
+    assert gate["classification"] == "PAPER_EXPOSURE_ENTRY_ALLOWED_BROKER_TRUTH_INTERNAL_DIAGNOSTIC"
+    assert gate["authoritative_source"] == "BROKER_TRUTH"
+    assert gate["broker_truth_result"]["allowed"] is True
+    assert gate["registry_truth_result"]["allowed"] is False
+    assert "CANONICAL_CURRENT_EXPOSURE_PRESENT" in gate["diagnostic_reason_codes"]
+    assert "broker_lifecycle_reconciliation_not_clean" in gate["diagnostic_reason_codes"]
+    assert gate["block_reasons"] == []
+
+
+def test_broker_truth_nonflat_blocks_flat_start_even_when_registry_is_clean(tmp_path: Path) -> None:
+    _write_monitor(tmp_path, broker_quantity=0.0)
+    _write_ledger(tmp_path, [])
+    _write_governance(tmp_path, [_governance_row("mes_london_open_active_participation_long", "PAPER_ACTIVE_EVIDENCE_MES_LONDON_OPEN_PARTICIPATION_LONG_V1")])
+    _write_broker_positions_snapshot(
+        tmp_path,
+        positions=[
+            {
+                "account_id": "DUM882026",
+                "symbol": "MES",
+                "local_symbol": "MESM6",
+                "con_id": 770561194,
+                "quantity": "-1",
+            }
+        ],
+    )
+    _write_broker_open_orders_snapshot(tmp_path, open_orders=[])
+
+    gate = evaluate_paper_strategy_exposure_gate(
+        repo_root=tmp_path,
+        strategy_id="mes_london_open_active_participation_long",
+        bridge_strategy_id="PAPER_ACTIVE_EVIDENCE_MES_LONDON_OPEN_PARTICIPATION_LONG_V1",
+        action="BUY",
+        intent_type="BUY_TO_OPEN",
+        quantity=1.0,
+        executable_symbol="MES",
+        account_id="DUM882026",
+        con_id=770561194,
+        local_symbol="MESM6",
+    )
+
+    assert gate["submit_allowed"] is False
+    assert gate["classification"] == "PAPER_EXPOSURE_BLOCKED_BROKER_TRUTH_ENTRY"
+    assert gate["blocker_classification"] == "BROKER_POSITION_FLAT_START_VIOLATION"
+    assert "SAME_SYMBOL_BROKER_QTY_ANTI_FLIP_LOCK" in gate["block_reasons"]
+
+
+def test_broker_truth_open_order_blocks_entry(tmp_path: Path) -> None:
+    _write_monitor(tmp_path, broker_quantity=0.0)
+    _write_ledger(tmp_path, [])
+    _write_governance(tmp_path, [_governance_row("mes_london_open_active_participation_long", "PAPER_ACTIVE_EVIDENCE_MES_LONDON_OPEN_PARTICIPATION_LONG_V1")])
+    _write_broker_positions_snapshot(tmp_path, positions=[])
+    _write_broker_open_orders_snapshot(
+        tmp_path,
+        open_orders=[
+            {
+                "account_id": "DUM882026",
+                "symbol": "MES",
+                "local_symbol": "MESM6",
+                "con_id": 770561194,
+                "order_id": 11,
+                "action": "BUY",
+                "quantity": "1",
+            }
+        ],
+    )
+
+    gate = evaluate_paper_strategy_exposure_gate(
+        repo_root=tmp_path,
+        strategy_id="mes_london_open_active_participation_long",
+        bridge_strategy_id="PAPER_ACTIVE_EVIDENCE_MES_LONDON_OPEN_PARTICIPATION_LONG_V1",
+        action="BUY",
+        intent_type="BUY_TO_OPEN",
+        quantity=1.0,
+        executable_symbol="MES",
+        account_id="DUM882026",
+        con_id=770561194,
+        local_symbol="MESM6",
+    )
+
+    assert gate["submit_allowed"] is False
+    assert gate["classification"] == "PAPER_EXPOSURE_BLOCKED_BROKER_TRUTH_ENTRY"
+    assert gate["blocker_classification"] == "BROKER_OPEN_ORDER_CONFLICT"
+    assert "current_open_order_conflict" in gate["block_reasons"]
 
 
 def test_same_symbol_pending_fill_different_contract_does_not_lock(tmp_path: Path) -> None:
@@ -2681,11 +2810,11 @@ def test_blocks_mnq_entry_when_non_mgc_broker_truth_is_stale(tmp_path: Path) -> 
     )
 
     assert gate["submit_allowed"] is False
-    assert gate["classification"] == "PAPER_EXPOSURE_BLOCKED_REGISTRY_TRUTH_ENTRY"
+    assert gate["classification"] == "PAPER_EXPOSURE_BLOCKED_BROKER_TRUTH_ENTRY"
     assert gate["blocker_classification"] == "BROKER_TRUTH_STALE_OR_MISSING"
     assert gate["review_required"] is True
     assert "broker_position_truth_stale_or_missing" in gate["block_reasons"]
-    assert gate["detail"] == "Registry/truth current-hot-path authority blocked this new entry."
+    assert gate["detail"] == "Broker-truth entry authority blocked this new PAPER entry."
     broker_truth = gate["broker_truth"]
     assert broker_truth["symbol"] == "MNQ"
     assert broker_truth["positions_snapshot"]["path"].endswith("ibkr_positions_snapshot.json")
@@ -2716,7 +2845,7 @@ def test_blocks_non_mgc_entry_when_broker_truth_refresh_is_incomplete(tmp_path: 
     )
 
     assert gate["submit_allowed"] is False
-    assert gate["classification"] == "PAPER_EXPOSURE_BLOCKED_REGISTRY_TRUTH_ENTRY"
+    assert gate["classification"] == "PAPER_EXPOSURE_BLOCKED_BROKER_TRUTH_ENTRY"
     assert gate["broker_truth"]["positions_snapshot"]["reason"] == "positions_complete_false_or_missing"
 
 

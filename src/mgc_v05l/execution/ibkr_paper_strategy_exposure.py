@@ -74,6 +74,7 @@ _DEFAULT_MAX_PER_STRATEGY_MGC_CONTRACTS = 1.0
 _DEFAULT_BROKER_TRUTH_MAX_AGE_SECONDS = 300.0
 _DEFAULT_CANONICAL_CURRENT_SCOPE_MAX_AGE_SECONDS = 300.0
 _ENTRY_EXPOSURE_AUTHORITY_REGISTRY_TRUTH = "REGISTRY_TRUTH"
+_ENTRY_EXPOSURE_AUTHORITY_BROKER_TRUTH = "BROKER_TRUTH"
 _MANAGED_EXIT_AUTHORITY_REGISTRY_TRUTH = "REGISTRY_TRUTH"
 _ENTRY_ACTIVE_REGISTRY_STATES = {
     TradeCurrentState.PENDING_ENTRY,
@@ -722,6 +723,7 @@ def _evaluate_strategy_gate(
     managed_exit_parity_status: str | None = None
     managed_exit_authoritative_source: str | None = None
     managed_exit_diagnostic_reason_codes: list[str] = []
+    entry_broker_truth_result: dict[str, Any] | None = None
 
     if semantics.operation == "OPEN":
         submit_intent_blocker = _unresolved_submit_intent_new_entry_blocker(
@@ -791,7 +793,7 @@ def _evaluate_strategy_gate(
             "authority_source": "LEGACY_EXPOSURE_ATTRIBUTION",
             "diagnostic_only": True,
         }
-        entry_authoritative_source = _ENTRY_EXPOSURE_AUTHORITY_REGISTRY_TRUTH
+        entry_authoritative_source = _ENTRY_EXPOSURE_AUTHORITY_BROKER_TRUTH
         entry_registry_truth_result = _entry_registry_truth_result(
             config=config,
             aggregate_state=aggregate_state,
@@ -803,40 +805,49 @@ def _evaluate_strategy_gate(
             requested_direction=semantics.direction,
             unresolved_submit_intents=unresolved_submit_intents,
         )
+        entry_broker_truth_result = _entry_broker_truth_result(
+            config=config,
+            aggregate_state=aggregate_state,
+            quantity=quantity,
+            requested_direction=semantics.direction,
+            allow_stacking=bool(config.allow_stacking),
+        )
+        broker_truth_allowed = bool(entry_broker_truth_result.get("allowed"))
         registry_allowed = bool(entry_registry_truth_result.get("allowed"))
         legacy_allowed = bool(entry_legacy_result.get("allowed"))
-        if registry_allowed and legacy_allowed:
+        if broker_truth_allowed and registry_allowed and legacy_allowed:
             entry_parity_status = "MATCH_ALLOWED"
-            block_reasons = []
-            submit_allowed = True
-        elif registry_allowed and not legacy_allowed:
-            entry_parity_status = "REGISTRY_TRUTH_ALLOWED_LEGACY_BLOCKED_DIAGNOSTIC"
-            entry_diagnostic_reason_codes = list(entry_legacy_result.get("reason_codes") or [])
-            block_reasons = []
-            submit_allowed = True
-        elif not registry_allowed and legacy_allowed:
-            entry_parity_status = "LEGACY_ALLOWED_REGISTRY_TRUTH_BLOCKED_FAIL_CLOSED"
-            block_reasons = list(entry_registry_truth_result.get("reason_codes") or [])
-            block_reasons.append("legacy_allowed_registry_truth_blocked_fail_closed")
-            submit_allowed = False
+        elif broker_truth_allowed:
+            entry_parity_status = "BROKER_TRUTH_ALLOWED_INTERNAL_DIAGNOSTIC"
+            entry_diagnostic_reason_codes = list(
+                dict.fromkeys(
+                    [
+                        str(reason)
+                        for reason in (
+                            list(entry_legacy_result.get("reason_codes") or [])
+                            + list(entry_registry_truth_result.get("reason_codes") or [])
+                        )
+                        if str(reason or "").strip()
+                    ]
+                )
+            )
         else:
-            entry_parity_status = "MATCH_BLOCKED"
-            block_reasons = list(entry_registry_truth_result.get("reason_codes") or [])
-            block_reasons.extend(str(reason) for reason in list(entry_legacy_result.get("reason_codes") or []))
-            submit_allowed = False
+            entry_parity_status = "BROKER_TRUTH_BLOCKED"
+        block_reasons = list(entry_broker_truth_result.get("reason_codes") or [])
+        submit_allowed = broker_truth_allowed
 
         if block_reasons:
-            classification = "PAPER_EXPOSURE_BLOCKED_REGISTRY_TRUTH_ENTRY"
-            detail = "Registry/truth current-hot-path authority blocked this new entry."
-        elif entry_parity_status == "REGISTRY_TRUTH_ALLOWED_LEGACY_BLOCKED_DIAGNOSTIC":
-            classification = "PAPER_EXPOSURE_ENTRY_ALLOWED_REGISTRY_TRUTH_LEGACY_DIAGNOSTIC"
-            detail = "Registry/truth current-hot-path authority allowed this entry; legacy exposure blockers are diagnostic only."
+            classification = "PAPER_EXPOSURE_BLOCKED_BROKER_TRUTH_ENTRY"
+            detail = "Broker-truth entry authority blocked this new PAPER entry."
+        elif entry_parity_status == "BROKER_TRUTH_ALLOWED_INTERNAL_DIAGNOSTIC":
+            classification = "PAPER_EXPOSURE_ENTRY_ALLOWED_BROKER_TRUTH_INTERNAL_DIAGNOSTIC"
+            detail = "Broker truth allows this PAPER entry; registry/lifecycle/current-hot-path exposure opinions are diagnostic only."
         elif stacking_observed and bool(config.allow_stacking):
             classification = "PAPER_EXPOSURE_STACK_ALLOWED"
-            detail = "Another strategy already owns executable-contract exposure, but registry/truth current-hot-path authority allows this entry."
+            detail = "Another strategy already owns executable-contract exposure, but broker truth allows this PAPER entry."
         else:
             classification = "PAPER_EXPOSURE_ENTRY_ALLOWED"
-            detail = "Registry/truth current-hot-path authority allows this new entry."
+            detail = "Broker truth allows this PAPER entry."
     elif semantics.operation == "CLOSE":
         legacy_block_reasons = list(block_reasons)
         if exit_identity_requested and not requested_lifecycle_id and any(
@@ -940,6 +951,7 @@ def _evaluate_strategy_gate(
         "registry_exit_validation": registry_exit_validation,
         "legacy_result": entry_legacy_result if semantics.operation == "OPEN" else managed_exit_legacy_result,
         "registry_truth_result": entry_registry_truth_result if semantics.operation == "OPEN" else managed_exit_registry_truth_result,
+        "broker_truth_result": entry_broker_truth_result if semantics.operation == "OPEN" else None,
         "parity_status": entry_parity_status if semantics.operation == "OPEN" else managed_exit_parity_status,
         "authoritative_source": entry_authoritative_source if semantics.operation == "OPEN" else managed_exit_authoritative_source,
         "diagnostic_reason_codes": list(
@@ -963,7 +975,24 @@ def _evaluate_strategy_gate(
             if _UNRESOLVED_SUBMIT_INTENT_BLOCK_REASON in block_reasons
             else "BROKER_LEDGER_POSITION_MISMATCH"
             if any(reason in block_reasons for reason in {"ledger_broker_mismatch", "orphan_broker_position"})
-            else ("BROKER_TRUTH_STALE_OR_MISSING" if "broker_position_truth_stale_or_missing" in block_reasons else None)
+            else "BROKER_TRUTH_STALE_OR_MISSING"
+            if any(
+                reason in block_reasons
+                for reason in {"broker_position_truth_stale_or_missing", "broker_open_order_truth_stale_or_missing"}
+            )
+            else "BROKER_OPEN_ORDER_CONFLICT"
+            if any(reason in block_reasons for reason in {"current_open_order_conflict", "unknown_open_order_conflict"})
+            else "BROKER_POSITION_FLAT_START_VIOLATION"
+            if any(
+                reason in block_reasons
+                for reason in {
+                    "current_broker_position_without_registry_trade",
+                    _SAME_SYMBOL_PENDING_FILL_ANTI_FLIP_REASON,
+                    _SAME_SYMBOL_UNRESOLVED_EXPOSURE_REASON,
+                    _SAME_SYMBOL_BROKER_QTY_ANTI_FLIP_REASON,
+                }
+            )
+            else None
         ),
         "review_required": any(
             reason in block_reasons
@@ -979,6 +1008,184 @@ def _evaluate_strategy_gate(
             }
         ),
     }
+
+
+def _entry_broker_truth_result(
+    *,
+    config: IbkrPaperStrategyExposureConfig,
+    aggregate_state: dict[str, Any],
+    quantity: float,
+    requested_direction: str | None,
+    allow_stacking: bool,
+) -> dict[str, Any]:
+    reason_codes: list[str] = []
+    broker_truth = dict(aggregate_state.get("broker_truth") or {})
+    broker_truth_available = bool(broker_truth.get("truth_available"))
+    positions_snapshot = dict(broker_truth.get("positions_snapshot") or {})
+    open_orders_snapshot = dict(broker_truth.get("open_orders_snapshot") or {})
+    source = str(broker_truth.get("source") or "").strip()
+
+    if quantity <= 0.0:
+        reason_codes.append("entry_quantity_must_be_positive")
+
+    if not broker_truth_available:
+        reason_codes.append("broker_position_truth_stale_or_missing")
+    if positions_snapshot and positions_snapshot.get("fresh") is not True:
+        reason_codes.append("broker_position_truth_stale_or_missing")
+    if open_orders_snapshot and open_orders_snapshot.get("fresh") is not True:
+        reason_codes.append("broker_open_order_truth_stale_or_missing")
+    if source != "paper_strategy_monitor_runtime_status" and not open_orders_snapshot:
+        reason_codes.append("broker_open_order_truth_stale_or_missing")
+
+    account_result = _entry_broker_truth_account_result(config=config, broker_truth=broker_truth)
+    if account_result.get("reason_code"):
+        reason_codes.append(str(account_result["reason_code"]))
+
+    open_order_result = _entry_broker_open_order_result(config=config, broker_truth=broker_truth)
+    if open_order_result.get("reason_code"):
+        reason_codes.append(str(open_order_result["reason_code"]))
+
+    unknown_order_result = _entry_unknown_open_order_result(config=config)
+    if unknown_order_result.get("reason_code"):
+        reason_codes.append(str(unknown_order_result["reason_code"]))
+
+    same_symbol_broker_qty_lock = _same_symbol_broker_quantity_entry_lock(
+        config=config,
+        requested_direction=requested_direction,
+        allow_stacking=allow_stacking,
+    )
+    if same_symbol_broker_qty_lock:
+        reason_codes.extend(str(reason) for reason in list(same_symbol_broker_qty_lock.get("reason_codes") or []))
+
+    broker_net_position = abs(float(aggregate_state.get("broker_net_position") or 0.0))
+    if broker_net_position > 0.0 and not same_symbol_broker_qty_lock:
+        reason_codes.append("current_broker_position_without_registry_trade")
+
+    return {
+        "allowed": not reason_codes,
+        "reason_codes": list(dict.fromkeys(reason_codes)),
+        "authority_source": _ENTRY_EXPOSURE_AUTHORITY_BROKER_TRUTH,
+        "broker_truth": broker_truth,
+        "account_result": account_result,
+        "open_order_result": open_order_result,
+        "unknown_order_result": unknown_order_result,
+        "same_symbol_broker_quantity_lock": same_symbol_broker_qty_lock,
+    }
+
+
+def _entry_broker_truth_account_result(
+    *,
+    config: IbkrPaperStrategyExposureConfig,
+    broker_truth: dict[str, Any],
+) -> dict[str, Any]:
+    expected_account = _valid_owner_identity_value(config.account_id)
+    if not expected_account:
+        return {"account_checked": False, "reason_code": None}
+    observed_account = _valid_owner_identity_value(broker_truth.get("account"))
+    if observed_account and observed_account != expected_account:
+        return {
+            "account_checked": True,
+            "reason_code": "broker_account_mismatch",
+            "expected_account": expected_account,
+            "observed_account": observed_account,
+        }
+    return {
+        "account_checked": True,
+        "reason_code": None,
+        "expected_account": expected_account,
+        "observed_account": observed_account or None,
+    }
+
+
+def _entry_broker_open_order_result(
+    *,
+    config: IbkrPaperStrategyExposureConfig,
+    broker_truth: dict[str, Any],
+) -> dict[str, Any]:
+    snapshot = dict(broker_truth.get("open_orders_snapshot") or {})
+    path_text = str(snapshot.get("path") or "").strip()
+    if not path_text:
+        return {"reason_code": None, "open_order_count": None}
+    payload = _load_json(Path(path_text))
+    if not payload:
+        return {"reason_code": "broker_open_order_truth_stale_or_missing", "path": path_text}
+    open_orders = list(payload.get("open_orders") or payload.get("orders") or [])
+    open_order_count = _int_value(payload.get("open_order_count") or len(open_orders))
+    matching_orders = [
+        dict(row)
+        for row in open_orders
+        if isinstance(row, dict)
+        and _broker_open_order_row_same_account_contract(
+            row=row,
+            config=config,
+            default_account=payload.get("selected_account_id"),
+        )
+    ]
+    if open_order_count > 0:
+        return {
+            "reason_code": "current_open_order_conflict",
+            "open_order_count": open_order_count,
+            "matching_order_count": len(matching_orders),
+            "matching_orders": matching_orders,
+            "path": path_text,
+        }
+    return {
+        "reason_code": None,
+        "open_order_count": open_order_count,
+        "matching_order_count": len(matching_orders),
+        "path": path_text,
+    }
+
+
+def _entry_unknown_open_order_result(*, config: IbkrPaperStrategyExposureConfig) -> dict[str, Any]:
+    path = config.repo_root / _DEFAULT_OPEN_ORDER_TRUTH_PATH
+    payload = _load_json(path)
+    if not payload:
+        return {"reason_code": None, "path": str(path)}
+    freshness = _artifact_freshness(payload, max_age_seconds=_DEFAULT_CANONICAL_CURRENT_SCOPE_MAX_AGE_SECONDS)
+    if not freshness.get("fresh"):
+        return {"reason_code": None, "path": str(path), "freshness": freshness}
+    summary = dict(payload.get("summary") or {})
+    unknown_count = _int_value(
+        payload.get("unknown_order_count")
+        or payload.get("unknown_open_order_count")
+        or summary.get("unknown_order_count")
+        or summary.get("unknown_open_order_count")
+    )
+    if unknown_count > 0:
+        return {
+            "reason_code": "unknown_open_order_conflict",
+            "unknown_open_order_count": unknown_count,
+            "path": str(path),
+            "freshness": freshness,
+        }
+    return {
+        "reason_code": None,
+        "unknown_open_order_count": unknown_count,
+        "path": str(path),
+        "freshness": freshness,
+    }
+
+
+def _broker_open_order_row_same_account_contract(
+    *,
+    row: dict[str, Any],
+    config: IbkrPaperStrategyExposureConfig,
+    default_account: Any = None,
+) -> bool:
+    requested_account = _valid_owner_identity_value(config.account_id)
+    row_account = _valid_owner_identity_value(row.get("account_id") or row.get("account") or default_account)
+    if requested_account and row_account and requested_account != row_account:
+        return False
+    config_con_id = _int_or_none(config.con_id)
+    row_con_id = _int_or_none(row.get("con_id") or row.get("conId"))
+    if config_con_id is not None and row_con_id is not None:
+        return config_con_id == row_con_id
+    config_local = str(config.local_symbol or "").strip().upper()
+    row_local = str(row.get("local_symbol") or row.get("localSymbol") or "").strip().upper()
+    if config_local and row_local:
+        return config_local == row_local
+    return bool(requested_account and row_account == requested_account)
 
 
 def _entry_registry_truth_result(
