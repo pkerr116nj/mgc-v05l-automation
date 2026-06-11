@@ -38,9 +38,30 @@ def test_plan_ready_when_3x5m_elapsed(tmp_path: Path) -> None:
     assert payload["close_intent_preview"]["quantity"] == 1
     assert payload["close_intent_preview"]["expiry"] == config.expiry
     assert payload["close_intent_preview"]["would_submit"] is False
+    assert payload["runtime_pricing_reference"]["pricing_source"] == "DATABENTO_RUNTIME"
+    assert payload["runtime_pricing_reference"]["reference_age_seconds"] == 60.0
+    assert payload["close_pricing_policy"]["classification"] == "MANAGED_CLOSE_PRICED"
     assert payload["broker_state_mutated"] is False
     assert payload["exit_roster_compatible"] is True
     assert payload["exit_strategy_id"] == "timeboxed_3x5m_managed_limit_close_v1"
+
+
+def test_plan_blocks_close_price_when_runtime_market_data_is_stale(tmp_path: Path) -> None:
+    config = _seed(tmp_path, completed_bars=3)
+    _write_json(
+        tmp_path / "outputs/track_b_execution_core/phase1_runtime_market_data" / config.instrument_family / "1m/latest_runtime_candles.json",
+        {
+            "generated_at": "2026-05-25T07:40:00+00:00",
+            "bars": [{"bar_end": "2026-05-25T07:40:00+00:00", "close": "29965.5"}],
+        },
+    )
+
+    payload = build_track_b_managed_exit_attach_plan(config=config, now=NOW)
+
+    assert payload["close_pricing_policy"]["classification"] == "MANAGED_CLOSE_PRICING_BLOCKED"
+    assert payload["close_pricing_policy"]["stale_reference_blocker"] == "MANAGED_CLOSE_REFERENCE_STALE"
+    assert payload["close_intent_preview"]["submit_allowed"] is False
+    assert "Current executable close price is unavailable." in payload["blockers"]
 
 
 def test_not_eligible_before_3x5m(tmp_path: Path) -> None:
@@ -776,7 +797,7 @@ def test_exact_exit_due_close_allows_degraded_managed_order_topline_without_exac
     assert payload["exit_authority_contract"]["decision"]["decision"] in {"ALLOWED", "DEGRADED_ALLOWED"}
 
 
-def test_exact_exit_due_close_respects_control_plane_hard_hold(tmp_path: Path) -> None:
+def test_exact_exit_due_close_demotes_stale_control_plane_guardian_hard_hold(tmp_path: Path) -> None:
     config = _seed(
         tmp_path,
         completed_bars=3,
@@ -793,8 +814,8 @@ def test_exact_exit_due_close_respects_control_plane_hard_hold(tmp_path: Path) -
 
     payload = build_track_b_managed_exit_attach_plan(config=config, now=NOW)
 
-    assert payload["classification"] == "MANAGED_EXIT_BLOCKED_CONTROL_PLANE"
-    assert "explicit hard safety hold" in payload["blockers"][0]
+    assert payload["classification"] == MANAGED_EXIT_TIMEBOX_CLOSE_ELIGIBLE
+    assert payload["blockers"] == []
     assert payload["submit_attempted"] is False
     assert payload["broker_state_mutated"] is False
 

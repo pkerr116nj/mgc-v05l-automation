@@ -93,6 +93,7 @@ def build_track_b_order_adjustment_plan(
             order=order,
             position_truth=position_truth,
             config=config,
+            now=actual_now,
         )
         for order in managed_orders
     ]
@@ -189,6 +190,7 @@ def _plan_for_managed_order(
     order: Mapping[str, Any],
     position_truth: Mapping[str, Any],
     config: TrackBOrderAdjustmentPlannerConfig,
+    now: datetime,
 ) -> dict[str, Any]:
     source_classification = str(order.get("classification") or "")
     status = str(order.get("broker_status") or "").upper()
@@ -206,9 +208,11 @@ def _plan_for_managed_order(
     blocking_suspicious_reasons = [
         reason for reason in suspicious_reasons if reason not in set(tolerated_status_gaps)
     ]
-    reference = marketability.get("market_reference") or _phase1_market_reference(
+    legacy_market_reference = marketability.get("market_reference")
+    reference = _phase1_market_reference(
         config=config,
         symbol=str(order.get("symbol") or ""),
+        now=now,
     )
     close_reprice_policy = _managed_close_reprice_policy(order=order, reference=reference)
     classification: str
@@ -282,6 +286,7 @@ def _plan_for_managed_order(
         "broker_status": order.get("broker_status"),
         "limit_price": order.get("limit_price"),
         "market_reference": reference,
+        "legacy_market_reference_diagnostic": legacy_market_reference if isinstance(legacy_market_reference, Mapping) else {},
         "managed_close_reprice_policy": close_reprice_policy,
         "identity": identity,
         "identity_complete_for_modify": _identity_complete(identity),
@@ -389,17 +394,25 @@ def _tolerated_ibkr_status_gaps(
     return []
 
 
-def _phase1_market_reference(*, config: TrackBOrderAdjustmentPlannerConfig, symbol: str) -> dict[str, Any]:
+def _phase1_market_reference(*, config: TrackBOrderAdjustmentPlannerConfig, symbol: str, now: datetime) -> dict[str, Any]:
     if not symbol:
         return {}
-    payload = _read_json(config.resolve(config.market_data_root) / symbol.upper() / "1m" / "latest_runtime_candles.json")
+    path = config.resolve(config.market_data_root) / symbol.upper() / "1m" / "latest_runtime_candles.json"
+    payload = _read_json(path)
     bars = _list(payload.get("candles") or payload.get("bars"))
     if not bars:
         return {}
     last = _mapping(bars[-1])
+    generated_at = _parse_datetime(payload.get("generated_at"))
+    bar_end = _parse_datetime(last.get("bar_end") or last.get("timestamp") or last.get("candle_timestamp"))
+    freshness_anchor = generated_at or bar_end
+    age_seconds = None if freshness_anchor is None else max((now - freshness_anchor).total_seconds(), 0.0)
     return {
         "reference_price": last.get("close") or last.get("last_price"),
-        "reference_source": str(config.resolve(config.market_data_root) / symbol.upper() / "1m" / "latest_runtime_candles.json"),
+        "reference_source": str(path),
+        "reference_source_type": "phase1_runtime_market_data",
+        "pricing_source": "DATABENTO_RUNTIME_1M",
+        "reference_age_seconds": age_seconds,
         "bar_end": last.get("bar_end") or last.get("timestamp") or last.get("candle_timestamp"),
         "generated_at": payload.get("generated_at"),
     }
@@ -458,6 +471,18 @@ def _shared_truth_summary(payload: Mapping[str, Any]) -> dict[str, Any]:
         "classifications": payload.get("classifications") or {},
         "unsafe_blockers": payload.get("unsafe_blockers") or [],
     }
+
+
+def _parse_datetime(value: Any) -> datetime | None:
+    if value in {None, ""}:
+        return None
+    try:
+        parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=UTC)
+    return parsed.astimezone(UTC)
 
 
 def _working_order_status(status: str) -> bool:

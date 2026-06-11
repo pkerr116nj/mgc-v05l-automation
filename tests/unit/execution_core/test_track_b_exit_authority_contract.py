@@ -295,7 +295,45 @@ def test_paper_proof_blocks() -> None:
 def test_safe_state_hard_halt_blocks() -> None:
     decision = validate_exit_authority(
         intent=_intent(),
-        current_state=_state(safe_state_hard_halt=True),
+        current_state=_state(
+            safe_state_hard_halt=True,
+            same_contract_unknown_order_count=1,
+            same_contract_unknown_order_could_over_close=True,
+            same_contract_unknown_order_over_close_ruled_out=False,
+        ),
+        validated_at=NOW,
+    )
+
+    assert decision.decision == ExitAuthorityDecisionValue.BLOCKED
+    assert "safe_state_hard_halt" in decision.block_reasons
+
+
+def test_safe_state_hard_halt_is_diagnostic_for_exact_paper_risk_reducing_exit() -> None:
+    decision = validate_exit_authority(
+        intent=_intent(),
+        current_state=_state(
+            safe_state_hard_halt=True,
+            reconciliation_clean=False,
+            safe_state_allows_managed_close=False,
+            guardian_allows_exact_close=False,
+        ),
+        validated_at=NOW,
+    )
+
+    assert decision.decision == ExitAuthorityDecisionValue.ALLOWED
+    assert decision.hard_required_checks["safe_state_no_hard_halt"]["passed"] is True
+    assert decision.diagnostic_checks["safe_state_allows_managed_close"]["passed"] is False
+
+
+def test_safe_state_hard_halt_still_blocks_non_paper_exit() -> None:
+    decision = validate_exit_authority(
+        intent=_intent(execution_domain="TRACK_B_LIVE", live_money_eligible=True, live_money_allowed=True),
+        current_state=_state(
+            execution_domain="TRACK_B_LIVE",
+            safe_state_hard_halt=True,
+            live_money_eligible=True,
+            live_money_allowed=True,
+        ),
         validated_at=NOW,
     )
 

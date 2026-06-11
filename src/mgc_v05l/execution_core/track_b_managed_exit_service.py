@@ -897,10 +897,34 @@ def _classify_managed_paper_risk_reducing_exit_authority(
     source_classifications = _source_classifications(execution_plan)
     open_order_truth = str(source_classifications.get("open_order_truth") or source_classifications.get("Open Order Truth") or "")
     if open_order_truth and open_order_truth not in {"NO_OPEN_ORDERS", "BROKER_POSITION_WITHOUT_CLOSE_ORDER"}:
-        blockers.append(f"open_order_truth_not_clean:{open_order_truth}")
+        if _exit_authority_checks_clear_order_risk(decision):
+            diagnostics.append(
+                {
+                    "kind": "diagnostic_open_order_truth_classification",
+                    "classification": open_order_truth,
+                    "detail": (
+                        "Open-order truth publication is diagnostic because ExitAuthority V1.1 "
+                        "proved same-contract working-close and unknown-order risk are clear."
+                    ),
+                }
+            )
+        else:
+            blockers.append(f"open_order_truth_not_clean:{open_order_truth}")
     managed_positions = str(source_classifications.get("managed_positions") or source_classifications.get("Managed Position Registry") or "")
     if managed_positions and managed_positions not in {"OPEN_MANAGED_EXIT_DUE", "OPEN_MANAGED_MATCHED", "OPEN_MANAGED_CLOSE_WORKING"}:
-        blockers.append(f"managed_position_not_current:{managed_positions}")
+        if _exit_authority_checks_prove_current_managed_exposure(decision, executable_intent):
+            diagnostics.append(
+                {
+                    "kind": "diagnostic_managed_position_classification",
+                    "classification": managed_positions,
+                    "detail": (
+                        "Managed-position publication is diagnostic because ExitAuthority V1.1 "
+                        "proved an attributed current broker-backed managed exposure."
+                    ),
+                }
+            )
+        else:
+            blockers.append(f"managed_position_not_current:{managed_positions}")
     managed_orders = str(source_classifications.get("managed_orders") or source_classifications.get("Managed Order Registry") or "")
     if managed_orders and managed_orders not in {
         "POSITION_WITHOUT_CLOSE_ORDER",
@@ -927,6 +951,35 @@ def _classify_managed_paper_risk_reducing_exit_authority(
         "close_qty": executable_intent.get("close_qty"),
         "lifecycle_identity": _managed_lifecycle_identity(executable_intent),
     }
+
+
+def _exit_authority_checks_clear_order_risk(decision: Mapping[str, Any]) -> bool:
+    hard_checks = _mapping(decision.get("hard_required_checks"))
+    conditional_checks = _mapping(decision.get("conditional_risk_checks") or decision.get("conditional_checks"))
+    working_close = _mapping(hard_checks.get("same_contract_working_close_does_not_over_close"))
+    unknown_order = _mapping(conditional_checks.get("same_contract_unknown_order_risk"))
+    return working_close.get("passed") is True and unknown_order.get("passed") is True
+
+
+def _exit_authority_checks_prove_current_managed_exposure(
+    decision: Mapping[str, Any],
+    executable_intent: Mapping[str, Any],
+) -> bool:
+    hard_checks = _mapping(decision.get("hard_required_checks"))
+    required = (
+        "known_current_broker_position",
+        "account_matches",
+        "execution_domain_matches",
+        "contract_matches",
+        "close_qty_within_broker_position",
+        "risk_reducing_action",
+    )
+    if any(_mapping(hard_checks.get(name)).get("passed") is not True for name in required):
+        return False
+    attribution = _mapping(decision.get("attribution_diagnostics"))
+    if attribution and attribution.get("blocks_authority") is True:
+        return False
+    return bool(_managed_lifecycle_identity(executable_intent))
 
 
 def _classify_working_close_order_maintenance_authority(config: TrackBManagedExitServiceConfig) -> dict[str, Any]:

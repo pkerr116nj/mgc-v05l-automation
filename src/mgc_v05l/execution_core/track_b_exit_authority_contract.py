@@ -558,9 +558,10 @@ def _hard_required_checks(intent: ExitIntent, state: ExitAuthorityCurrentState) 
         ),
         "safe_state_no_hard_halt": _check(
             ExitAuthorityCheckCategory.HARD_REQUIRED,
-            state.safe_state_hard_halt is False,
+            state.safe_state_hard_halt is False
+            or _safe_state_hard_halt_is_diagnostic_for_paper_risk_reducing_exit(intent, state),
             "safe_state_hard_halt",
-            "Safe-State hard halt blocks exit authority.",
+            "Safe-State hard halt blocks exit authority unless current broker truth proves an exact PAPER risk-reducing close.",
         ),
         "broad_or_global_flatten_not_requested": _check(
             ExitAuthorityCheckCategory.HARD_REQUIRED,
@@ -803,6 +804,37 @@ def _close_action_reduces_position(intent: ExitIntent) -> bool:
         or intent.position_side == PositionSide.SHORT
         and intent.close_action == CloseAction.BUY
     )
+
+
+def _safe_state_hard_halt_is_diagnostic_for_paper_risk_reducing_exit(
+    intent: ExitIntent,
+    state: ExitAuthorityCurrentState,
+) -> bool:
+    if intent.execution_domain != ExecutionDomain.TRACK_B_PAPER or state.execution_domain != ExecutionDomain.TRACK_B_PAPER:
+        return False
+    if intent.live_money_eligible or intent.live_money_allowed or state.live_money_eligible or state.live_money_allowed:
+        return False
+    if intent.paper_proof_invoked or state.paper_proof_invoked:
+        return False
+    if intent.broad_flatten_allowed or intent.global_flatten_allowed or state.broad_flatten_allowed or state.global_flatten_allowed:
+        return False
+    if not state.known_position:
+        return False
+    if intent.account_id != state.account_id:
+        return False
+    if intent.local_symbol != state.local_symbol or intent.con_id != state.con_id:
+        return False
+    if intent.position_side != state.broker_position_side:
+        return False
+    if not (Decimal("0") < intent.close_qty <= state.broker_position_qty):
+        return False
+    if not _close_action_reduces_position(intent):
+        return False
+    if state.same_contract_working_close_qty + intent.close_qty > state.broker_position_qty:
+        return False
+    if state.same_contract_unknown_order_count and not state.same_contract_unknown_order_over_close_ruled_out:
+        return False
+    return True
 
 
 def _normalize_execution_domain(value: ExecutionDomain | str) -> ExecutionDomain:

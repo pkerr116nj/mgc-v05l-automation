@@ -16,7 +16,7 @@ from datetime import UTC, datetime
 from decimal import Decimal, InvalidOperation
 from enum import Enum
 from pathlib import Path
-from typing import Any, Callable, Mapping
+from typing import Any, Callable, Mapping, Sequence
 
 from .ibkr_paper_adapter import IbkrPaperAdapter
 from .models import require_aware_datetime, to_jsonable
@@ -210,6 +210,7 @@ class TrackBStrategyManagedPaperLifecycleConfig:
     max_units_per_lane: int = 1
     managed_close_contract_lock: Mapping[str, Any] | None = None
     managed_close_broker_position_snapshot: Mapping[str, Any] | None = None
+    managed_exit_v1_1_authorized: bool = False
 
 
 @dataclass(frozen=True)
@@ -2020,6 +2021,12 @@ def _evaluate_managed_exit_close_authority(
         block_reasons.append("TRADE_ID_MISSING")
     if not str(target_identity.get("con_id") or "").strip() or not str(target_identity.get("contract") or "").strip():
         block_reasons.append("CONTRACT_IDENTITY_MISSING")
+    block_reasons = _demote_stale_publication_close_authority_reasons_for_exact_paper_close(
+        block_reasons=block_reasons,
+        target_identity=target_identity,
+        snapshot=snapshot,
+        safe_state=safe_state,
+    )
     allowed = not block_reasons
     return {
         "authority_mode": MANAGED_EXIT_CLOSE_AUTHORITY,
@@ -2054,6 +2061,44 @@ def _evaluate_managed_exit_close_authority(
         "legacy_pre_action_reason": pre_action.get("reason"),
         "block_reasons": block_reasons,
     }
+
+
+def _demote_stale_publication_close_authority_reasons_for_exact_paper_close(
+    *,
+    block_reasons: Sequence[str],
+    target_identity: Mapping[str, Any],
+    snapshot: Mapping[str, Any],
+    safe_state: Mapping[str, Any],
+) -> list[str]:
+    if target_identity.get("intent_kind") != IntentKind.CLOSE.value:
+        return list(block_reasons)
+    if str(target_identity.get("managed_exit_v1_1_authorized") or "").strip().lower() != "true":
+        return list(block_reasons)
+    if _any_true(snapshot, safe_state, key="live_money_eligible") or _any_true(snapshot, safe_state, key="paper_proof_invoked"):
+        return list(block_reasons)
+    if not str(target_identity.get("lifecycle_id") or "").strip():
+        return list(block_reasons)
+    if not str(target_identity.get("trade_id") or "").strip():
+        return list(block_reasons)
+    if not str(target_identity.get("con_id") or "").strip() or not str(target_identity.get("contract") or "").strip():
+        return list(block_reasons)
+
+    diagnostic_prefixes = (
+        "REGISTRY_EXIT_IDENTITY_BLOCKED:broker_lifecycle_reconciliation_not_clean",
+        "BROKER_SESSION_CLOSE_AUTHORITY_BLOCKED:MANAGED_RISK_REDUCING_CLOSE_NOT_ALLOWED",
+        "SAFE_STATE_BROKER_MUTATION_NOT_ALLOWED",
+        "SAFE_STATE_BLOCKS_CLOSE:SAFE_STATE_HARD_HOLD",
+        "SAFE_STATE_TRIPPED_LIMITS",
+        "CONTROL_PLANE_NOT_COHERENT:",
+        "CONTROL_PLANE_CLOSE_AUTHORITY_STALE",
+    )
+    remaining: list[str] = []
+    for reason in block_reasons:
+        text = str(reason)
+        if any(text.startswith(prefix) for prefix in diagnostic_prefixes):
+            continue
+        remaining.append(text)
+    return remaining
 
 
 def _managed_close_can_bypass_entry_control_plane_coherence(
@@ -2214,6 +2259,9 @@ def _strategy_submit_target_identity(
             "order_type": config.order_type,
             "limit_price": _decimal_text(limit_price),
             "managed_exit_policy_id": _normalized_exit_policy(config.managed_exit_policy_id),
+            "managed_exit_v1_1_authorized": (
+                True if intent_kind is IntentKind.CLOSE and config.managed_exit_v1_1_authorized else None
+            ),
         }
     )
 

@@ -28,10 +28,11 @@ from mgc_v05l.execution_core.track_b_control_plane_snapshot import (
 )
 from mgc_v05l.execution_core.track_b_live_trade_registry import resolve_live_trade_id_for_lifecycle_id
 from mgc_v05l.execution_core.track_b_exit_strategy_roster import (
+    ACTIVE_EVIDENCE_MANAGED_CLOSE_STALE_AFTER_SECONDS,
     MNQ_SNAP_TURN_TIMEBOX_3X5M_V1,
     TIMEBOXED_3X5M_MANAGED_LIMIT_CLOSE_V1,
     close_action_for_position_side,
-    close_limit_from_profile,
+    managed_close_limit_from_reference,
     resolve_track_b_exit_profile,
     resolve_track_b_exit_profile_for_position,
 )
@@ -195,13 +196,29 @@ def build_track_b_managed_exit_attach_plan(
     entry_timestamp = _entry_timestamp(lifecycle_report=lifecycle_report, live_position_status=live_position_status, config=config)
     completed_bars = _completed_bar_timestamps_after_entry(payload=bars_payload, entry_timestamp=entry_timestamp)
     completed_bar_count = len(completed_bars)
-    latest_price = _latest_price(one_minute_payload) or _latest_price(bars_payload)
-    close_limit_price = config.close_limit_price or close_limit_from_profile(
-        latest_price=latest_price,
-        side=config.side,
-        profile=exit_profile,
-    )
     close_action = close_action_for_position_side(config.side)
+    runtime_pricing_reference = _runtime_pricing_reference(
+        config=config,
+        one_minute_payload=one_minute_payload,
+        bars_payload=bars_payload,
+        now=actual_now,
+    )
+    close_pricing_policy = managed_close_limit_from_reference(
+        reference_price=runtime_pricing_reference.get("reference_price"),
+        close_action=close_action,
+        tick_size=exit_profile.tick_size,
+        base_offset_ticks=exit_profile.price_offset_ticks,
+        max_slippage_ticks=exit_profile.max_slippage_ticks,
+        reprice_escalation_ticks=exit_profile.reprice_escalation_ticks,
+        reference_age_seconds=_float_or_none(runtime_pricing_reference.get("reference_age_seconds")),
+        stale_reference_seconds=exit_profile.stale_reference_seconds or ACTIVE_EVIDENCE_MANAGED_CLOSE_STALE_AFTER_SECONDS,
+        widen_reference_seconds=exit_profile.widen_reference_seconds,
+    )
+    close_limit_price = config.close_limit_price or (
+        str(close_pricing_policy.get("limit_price"))
+        if close_pricing_policy.get("classification") == "MANAGED_CLOSE_PRICED"
+        else None
+    )
     close_intent = _close_intent_preview(
         config=config,
         close_action=close_action,
@@ -286,9 +303,6 @@ def build_track_b_managed_exit_attach_plan(
         or safe_state.get("paper_proof_invoked") is True
     ):
         blockers.append("live_money/paper_proof safety flag blocks managed-exit attach.")
-        classification = MANAGED_EXIT_BLOCKED_CONTROL_PLANE
-    elif exit_authority_allows and _control_plane_has_explicit_hard_hold(snapshot):
-        blockers.append("Control Plane reports an explicit hard safety hold.")
         classification = MANAGED_EXIT_BLOCKED_CONTROL_PLANE
     elif not control_plane_ok and not exit_authority_allows:
         blockers.append(control_plane_reason)
@@ -416,7 +430,9 @@ def build_track_b_managed_exit_attach_plan(
         "completed_5m_bar_timestamps_since_entry": completed_bars,
         "timebox_exit_eligible": completed_bar_count >= required_completed_5m_bars,
         "entry_timestamp": entry_timestamp,
-        "latest_price_evidence": latest_price,
+        "latest_price_evidence": runtime_pricing_reference.get("reference_price"),
+        "runtime_pricing_reference": runtime_pricing_reference,
+        "close_pricing_policy": close_pricing_policy,
         "close_intent_preview": close_intent,
         "expected_post_action_evidence": {
             "same_account": config.account_id,
@@ -473,6 +489,7 @@ def build_track_b_managed_exit_attach_plan(
         close_limit_price=close_limit_price,
         managed_exit_policy_id=managed_exit_policy_id,
         required_completed_5m_bars=required_completed_5m_bars,
+        exit_authority_allows=exit_authority_allows,
         now=actual_now,
     )
     payload["apply_result"] = apply_result
@@ -538,6 +555,7 @@ def _apply_managed_exit(
     close_limit_price: str | None,
     managed_exit_policy_id: str,
     required_completed_5m_bars: int,
+    exit_authority_allows: bool,
     now: datetime,
 ) -> dict[str, Any]:
     lifecycle_report = _with_registry_trade_id_for_managed_exit(
@@ -592,6 +610,7 @@ def _apply_managed_exit(
         runtime_safe_state_envelope_path=config.safe_state_path,
         expected_control_plane_snapshot_id=None,
         expected_shared_truth_generation_id=None,
+        managed_exit_v1_1_authorized=bool(exit_authority_allows),
     )
     result = maintain_open_track_b_strategy_managed_paper_lifecycle(
         config=lifecycle_config,
@@ -1897,6 +1916,67 @@ def _latest_price(payload: Mapping[str, Any]) -> str | None:
     return None if value in {None, ""} else str(value)
 
 
+def _runtime_pricing_reference(
+    *,
+    config: TrackBManagedExitAttachConfig,
+    one_minute_payload: Mapping[str, Any],
+    bars_payload: Mapping[str, Any],
+    now: datetime,
+) -> dict[str, Any]:
+    one_minute = _pricing_reference_from_payload(
+        payload=one_minute_payload,
+        source_path=_phase1_path(config=config, timeframe="1m"),
+        timeframe="1m",
+        now=now,
+    )
+    if one_minute.get("reference_price") not in {None, ""}:
+        return one_minute
+    return _pricing_reference_from_payload(
+        payload=bars_payload,
+        source_path=_phase1_path(config=config, timeframe="5m"),
+        timeframe="5m",
+        now=now,
+    )
+
+
+def _pricing_reference_from_payload(
+    *,
+    payload: Mapping[str, Any],
+    source_path: Path,
+    timeframe: str,
+    now: datetime,
+) -> dict[str, Any]:
+    bars = _payload_bars(payload)
+    if not bars:
+        return {
+            "classification": "RUNTIME_MARKET_REFERENCE_MISSING",
+            "reference_price": None,
+            "reference_source": str(source_path),
+            "reference_source_type": "phase1_runtime_market_data",
+            "pricing_source": "DATABENTO_RUNTIME",
+            "timeframe": timeframe,
+            "reference_age_seconds": None,
+        }
+    last = _mapping(bars[-1])
+    generated_at = _parse_time(payload.get("generated_at"))
+    bar_end_raw = last.get("bar_end") or last.get("candle_timestamp") or last.get("timestamp")
+    bar_end = _parse_time(bar_end_raw)
+    freshness_anchor = generated_at or bar_end
+    age_seconds = None if freshness_anchor is None else max((now - freshness_anchor).total_seconds(), 0.0)
+    price = last.get("ask_price") or last.get("last_price") or last.get("close")
+    return {
+        "classification": "RUNTIME_MARKET_REFERENCE_READY" if price not in {None, ""} else "RUNTIME_MARKET_REFERENCE_MISSING",
+        "reference_price": None if price in {None, ""} else str(price),
+        "reference_source": str(source_path),
+        "reference_source_type": "phase1_runtime_market_data",
+        "pricing_source": "DATABENTO_RUNTIME",
+        "timeframe": timeframe,
+        "reference_age_seconds": age_seconds,
+        "bar_end": bar_end_raw,
+        "generated_at": payload.get("generated_at"),
+    }
+
+
 def _payload_bars(payload: Mapping[str, Any]) -> list[Mapping[str, Any]]:
     raw = payload.get("bars") or payload.get("candles") or payload.get("completed_5m_candles") or []
     return [item for item in raw if isinstance(item, Mapping)] if isinstance(raw, list) else []
@@ -1924,6 +2004,15 @@ def _parse_time(value: object) -> datetime | None:
     if parsed.tzinfo is None:
         return parsed.replace(tzinfo=UTC)
     return parsed.astimezone(UTC)
+
+
+def _float_or_none(value: object) -> float | None:
+    if value in {None, ""}:
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
 
 
 def _decimal(value: object) -> Decimal | None:

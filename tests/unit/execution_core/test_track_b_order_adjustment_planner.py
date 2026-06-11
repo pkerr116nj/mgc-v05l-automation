@@ -95,12 +95,43 @@ def test_stale_working_close_reference_blocks_reprice_policy(tmp_path: Path) -> 
         ],
         broker_positions=[_broker_position()],
     )
+    _write_json(
+        tmp_path / "outputs/track_b_execution_core/phase1_runtime_market_data/MNQ/1m/latest_runtime_candles.json",
+        {
+            "generated_at": "2026-05-23T14:27:30+00:00",
+            "candles": [{"bar_end": "2026-05-23T14:27:30+00:00", "close": "29549.75"}],
+        },
+    )
 
     payload = _build(tmp_path)
 
     policy = payload["plans"][0]["managed_close_reprice_policy"]
     assert policy["classification"] == "MANAGED_CLOSE_PRICING_BLOCKED"
     assert policy["stale_reference_blocker"] == "MANAGED_CLOSE_REFERENCE_STALE"
+
+
+def test_reprice_uses_fresh_runtime_market_data_before_legacy_market_reference(tmp_path: Path) -> None:
+    _seed_base(
+        tmp_path,
+        managed_orders=[
+            {
+                **_managed_order(classification="WORKING_CLOSE_ORDER", marketable=False),
+                "marketability": {
+                    "marketable": False,
+                    "market_reference": {"reference_price": "1", "reference_age_seconds": 1.0},
+                },
+            }
+        ],
+        broker_positions=[_broker_position()],
+    )
+
+    payload = _build(tmp_path)
+
+    plan = payload["plans"][0]
+    assert plan["market_reference"]["pricing_source"] == "DATABENTO_RUNTIME_1M"
+    assert plan["market_reference"]["reference_age_seconds"] == 0.0
+    assert plan["legacy_market_reference_diagnostic"]["reference_price"] == "1"
+    assert plan["managed_close_reprice_policy"]["limit_price"] == "29547.75"
 
 
 def test_suspicious_sentinel_order_requires_review_not_auto_replace(tmp_path: Path) -> None:

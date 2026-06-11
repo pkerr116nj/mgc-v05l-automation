@@ -131,6 +131,37 @@ def test_apply_service_processes_v1_executable_intents_one_at_a_time_with_refres
     assert refresh_phases == []
 
 
+def test_apply_service_treats_stale_publication_as_diagnostic_when_v11_broker_risk_is_clear(tmp_path: Path) -> None:
+    actuator_calls = []
+
+    payload = run_track_b_managed_exit_service_once(
+        config=TrackBManagedExitServiceConfig(repo_root=tmp_path, apply=True, max_cycles_per_tick=1),
+        now=NOW,
+        actuator_runner=lambda config, now, timeout: actuator_calls.append(config)
+        or _actuator_report(MANAGED_EXIT_ACTUATOR_APPLIED_OR_PENDING, eligible=1, submitted=1),
+        authority_refresher=_refresh_ok,
+        pipeline_builder=lambda config, now: _pipeline_report(
+            decisions=("ALLOWED",),
+            source_classifications={
+                "open_order_truth": "ORDER_TRUTH_STALE",
+                "managed_positions": "LIFECYCLE_WITHOUT_BROKER",
+                "managed_orders": "POSITION_WITHOUT_CLOSE_ORDER",
+                "reconciliation": "TRACK_B_PAPER_BROKER_RECONCILIATION_BLOCKED",
+            },
+        ),
+        write=False,
+    )
+
+    assert payload["classification"] == MANAGED_EXIT_SERVICE_APPLY_SUCCEEDED
+    assert payload["submitted_count"] == 1
+    assert len(actuator_calls) == 1
+    diagnostics = payload["service_diagnostics"][0]["managed_paper_risk_reducing_exit_authority"]["diagnostics"]
+    assert {row["kind"] for row in diagnostics} >= {
+        "diagnostic_open_order_truth_classification",
+        "diagnostic_managed_position_classification",
+    }
+
+
 def test_service_preserves_actuator_close_quantity_for_v1_plan(tmp_path: Path) -> None:
     payload = run_track_b_managed_exit_service_once(
         config=TrackBManagedExitServiceConfig(repo_root=tmp_path, apply=True, max_cycles_per_tick=1),
