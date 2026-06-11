@@ -5605,6 +5605,75 @@ def test_runtime_bridge_manifest_created_before_submit_for_b_plus_entry(tmp_path
     assert result.manifest["managed_exit_policy_id"] == "PAPER_DIAGNOSTIC_TIME_BOXED_3X5M_EXIT_V1"
 
 
+def test_runtime_bridge_manifest_resolves_active_evidence_policy_when_adapter_policy_missing(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    config_path = tmp_path / "outputs/probationary_pattern_engine/paper_session/runtime/paper_config_in_force.json"
+    config_path.parent.mkdir(parents=True)
+    config_path.write_text(
+        json.dumps(
+            {
+                "lanes": [
+                    {
+                        "lane_id": "mnq_globex_active_participation_short",
+                        "strategy_family": "paper_active_evidence",
+                        "standalone_strategy_id": "PAPER_ACTIVE_EVIDENCE_MNQ_GLOBEX_PARTICIPATION_SHORT_V1",
+                        "managed_exit_policy_id": None,
+                        "runtime_overlay_params": {
+                            "rule_id": "PAPER_ACTIVE_EVIDENCE_MNQ_GLOBEX_PARTICIPATION_SHORT_V1",
+                        },
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    order_intent = OrderIntent(
+        order_intent_id="MNQ|1m|2026-06-11T06:36:00Z|SELL_TO_OPEN",
+        bar_id="MNQ|1m|2026-06-11T06:36:00Z",
+        symbol="MNQ",
+        intent_type=OrderIntentType.SELL_TO_OPEN,
+        quantity=1,
+        created_at=datetime(2026, 6, 11, 6, 36, tzinfo=timezone.utc),
+        reason_code="PAPER_ACTIVE_EVIDENCE_MNQ_GLOBEX_PARTICIPATION_SHORT_V1",
+    )
+    bridge_adapter = {
+        "current_order_destination": "ibkr_paper_bridge_submit_capable",
+        "bridge_proxy_mode": "MNQ_SIGNAL_DIRECT_PHASE1",
+        "bridge_execution_target": {
+            "symbol": "MNQ",
+            "contract_month": "202606",
+            "contract_key": "MNQ-202606",
+            "local_symbol": "MNQM6",
+            "qualified_contract_identifier": 770561201,
+        },
+    }
+    config = probationary_runtime_module._runtime_bridge_config_for_lane(  # noqa: SLF001
+        repo_root=tmp_path,
+        lane_id="mnq_globex_active_participation_short",
+        source_symbol="MNQ",
+        order_intent=order_intent,
+        bridge_adapter=bridge_adapter,
+    )
+
+    result = probationary_runtime_module._create_runtime_bridge_position_manifest(  # noqa: SLF001
+        order_intent=order_intent,
+        bridge_config=config,
+        bridge_adapter=bridge_adapter,
+        repo_root=tmp_path,
+        source_symbol="MNQ",
+    )
+
+    assert result is not None
+    assert result.manifest["entry_intent_id"] == order_intent.order_intent_id
+    assert result.manifest["managed_exit_policy_id"] == "GLOBEX_ACTIVE_EVIDENCE_TIMEBOX_60M_EXIT_V1"
+    assert result.manifest["contract"]["local_symbol"] == "MNQM6"
+    assert result.manifest["contract"]["con_id"] == "770561201"
+    assert result.manifest["policy_config_refs"]["metadata_resolution_source"] == "lane_registry"
+
+
 def test_submit_capable_lane_entry_invokes_ibkr_bridge_without_local_fill(tmp_path: Path) -> None:
     settings = _build_probationary_settings(tmp_path)
     repositories = RepositorySet(build_engine(settings.database_url))
@@ -5688,7 +5757,7 @@ def test_submit_capable_lane_entry_invokes_ibkr_bridge_without_local_fill(tmp_pa
 
 def test_submit_capable_entry_blocks_before_bridge_when_manifest_policy_missing(tmp_path: Path) -> None:
     broker = probationary_runtime_module._IbkrPaperBridgeRuntimeBroker(  # noqa: SLF001
-        lane_id="mnq_1x_ny_early_core__us_midday_long",
+        lane_id="unconfigured_bridge_lane",
         source_symbol="MNQ",
         bridge_adapter={
             "current_order_destination": "ibkr_paper_bridge_submit_capable",
@@ -5719,7 +5788,11 @@ def test_submit_capable_entry_blocks_before_bridge_when_manifest_policy_missing(
         broker.submit_order(order_intent)
 
     manifest_root = tmp_path / "outputs" / "track_b_execution_core" / "position_management_manifests"
-    assert not list(manifest_root.glob("*.json")) if manifest_root.exists() else True
+    manifests = list(manifest_root.glob("*.json"))
+    assert len(manifests) == 1
+    manifest = json.loads(manifests[0].read_text(encoding="utf-8"))
+    assert manifest["managed_exit_policy_id"] is None
+    assert "managed_exit_policy_id" in manifest["policy_config_refs"]["metadata_resolution_blockers"]
 
 
 def test_runtime_bridge_filled_entry_updates_position_manifest(tmp_path: Path) -> None:

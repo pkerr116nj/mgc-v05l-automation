@@ -13886,8 +13886,6 @@ def _create_runtime_bridge_position_manifest(
         "contract_key": bridge_target.get("contract_key") or bridge_config.contract_month,
         "managed_exit_policy_id": caller_metadata.get("managed_exit_policy_id") or bridge_adapter.get("managed_exit_policy_id"),
     }
-    if not str(runtime_identity.get("managed_exit_policy_id") or "").strip():
-        return None
     manifest_result = create_manifest_from_order_intent(
         order_intent=order_intent,
         runtime_identity=runtime_identity,
@@ -13897,9 +13895,23 @@ def _create_runtime_bridge_position_manifest(
     if manifest_result is None:
         return None
     manifest = dict(manifest_result.manifest)
-    if not str(manifest.get("managed_exit_policy_id") or "").strip():
+    if not _runtime_bridge_position_manifest_complete(manifest):
         return None
     return manifest_result
+
+
+def _runtime_bridge_position_manifest_complete(manifest: Mapping[str, Any]) -> bool:
+    contract = manifest.get("contract") if isinstance(manifest.get("contract"), Mapping) else {}
+    required_values = (
+        manifest.get("entry_intent_id"),
+        manifest.get("lane_id"),
+        manifest.get("strategy_id"),
+        manifest.get("side"),
+        manifest.get("quantity"),
+        manifest.get("managed_exit_policy_id"),
+        contract.get("contract_key") or contract.get("local_symbol") or contract.get("con_id"),
+    )
+    return all(str(value or "").strip() for value in required_values)
 
 
 def _update_runtime_bridge_position_manifest_from_fill(
