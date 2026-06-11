@@ -44,7 +44,11 @@ from .ibkr_paper_order_preview import (
     evaluate_paper_preview_environment_lock,
 )
 from .ibkr_paper_strategy_exposure import evaluate_paper_strategy_exposure_gate
-from .ibkr_paper_strategy_governance import load_paper_strategy_governance_status
+from .ibkr_paper_strategy_governance import (
+    IbkrPaperStrategyGovernanceConfig,
+    load_paper_strategy_governance_status,
+    run_ibkr_paper_strategy_governance,
+)
 from .ibkr_paper_strategy_monitor import load_paper_strategy_monitor_status
 from .ibkr_paper_strategy_porting import lane_submit_bridge_adapter
 from .ibkr_position_reconciliation import (
@@ -3000,6 +3004,12 @@ def _build_static_preflight_checks(
         governance_status=governance_status,
         phase1_reconciliation_gate=phase1_reconciliation_gate,
     )
+    governance_status = _governance_status_after_active_profile_live_evaluation(
+        config=config,
+        intent=intent,
+        governance_status=governance_status,
+        expected_target=expected_target,
+    )
     governance_row = dict(governance_status.get("selected_strategy") or {})
     monitor_contract_matches = _monitor_exact_contract_matches_target(
         monitor_exact_contract=monitor_exact_contract,
@@ -3763,6 +3773,136 @@ def _governance_status_after_phase1_reconciliation_refresh(
     refreshed_status["phase1_reconciliation_refresh_consumed"] = refresh_attempted
     refreshed_status["stale_cached_phase1_governance_demoted"] = True
     return refreshed_status
+
+
+def _governance_status_after_active_profile_live_evaluation(
+    *,
+    config: IbkrPaperStrategyBridgeConfig,
+    intent: IbkrPaperStrategyOrderIntent,
+    governance_status: dict[str, Any],
+    expected_target: dict[str, Any],
+) -> dict[str, Any]:
+    active_profile_lane = dict(expected_target.get("active_profile_lane") or {})
+    if active_profile_lane.get("passed") is not True:
+        return governance_status
+
+    route_destination = str(expected_target.get("route_destination") or "").strip()
+    if route_destination != "ibkr_paper_bridge_submit_capable":
+        return governance_status
+    if str(config.caller_path or "").strip() not in _APPROVED_RUNTIME_CALLER_PATHS:
+        return governance_status
+    if bool(governance_status.get("submit_allowed")):
+        return governance_status
+
+    try:
+        artifacts = run_ibkr_paper_strategy_governance(
+            config=IbkrPaperStrategyGovernanceConfig(repo_root=config.repo_root),
+        )
+    except Exception as exc:
+        status = dict(governance_status)
+        diagnostics = list(status.get("diagnostic_block_reasons") or [])
+        diagnostics.append("active_profile_live_governance_evaluation_failed")
+        status["diagnostic_block_reasons"] = list(dict.fromkeys(str(reason) for reason in diagnostics if str(reason)))
+        status["active_profile_live_governance_error"] = str(exc)
+        return status
+
+    live_status = _select_live_governance_status(
+        payload=dict(artifacts.status_payload or {}),
+        strategy_id=str(config.strategy_id or intent.strategy_id or "").strip(),
+    )
+    live_selected = dict(live_status.get("selected_strategy") or {})
+    if not live_selected:
+        return live_status
+
+    cached_selected = dict(governance_status.get("selected_strategy") or {})
+    cached_reasons = _governance_block_reasons(governance_status)
+    cached_selected_reasons = [
+        str(reason or "").strip()
+        for reason in list(cached_selected.get("submit_block_reasons") or [])
+        if str(reason or "").strip()
+    ]
+    cached_diagnostics = list(
+        dict.fromkeys(
+            [
+                *[str(reason) for reason in list(governance_status.get("diagnostic_block_reasons") or []) if str(reason)],
+                *[str(reason) for reason in list(cached_selected.get("diagnostic_submit_block_reasons") or []) if str(reason)],
+                *cached_reasons,
+                *cached_selected_reasons,
+            ]
+        )
+    )
+
+    live_status = dict(live_status)
+    live_selected = dict(live_selected)
+    live_status["active_profile_live_governance_evaluated"] = True
+    live_status["cached_governance_status_diagnostic"] = True
+    live_status["cached_governance_block_reasons"] = cached_reasons
+    live_status["cached_governance_selected_block_reasons"] = cached_selected_reasons
+    live_selected["cached_governance_status_diagnostic"] = True
+    live_selected["cached_submit_block_reasons"] = cached_selected_reasons
+    live_selected["diagnostic_submit_block_reasons"] = list(
+        dict.fromkeys(
+            [
+                *[str(reason) for reason in list(live_selected.get("diagnostic_submit_block_reasons") or []) if str(reason)],
+                *cached_diagnostics,
+            ]
+        )
+    )
+    live_status["selected_strategy"] = live_selected
+    live_status["diagnostic_block_reasons"] = list(
+        dict.fromkeys(
+            [
+                *[str(reason) for reason in list(live_status.get("diagnostic_block_reasons") or []) if str(reason)],
+                *cached_diagnostics,
+            ]
+        )
+    )
+    if bool(live_status.get("submit_allowed")):
+        live_status["detail"] = (
+            "Paper strategy governance uses live active-profile evaluation for this IBKR_PAPER_BRIDGE lane; "
+            "cached per-strategy governance status is diagnostic only."
+        )
+    return live_status
+
+
+def _select_live_governance_status(*, payload: dict[str, Any], strategy_id: str) -> dict[str, Any]:
+    rows = list(payload.get("strategies") or [])
+    selected: dict[str, Any] | None = None
+    for row in rows:
+        if not isinstance(row, Mapping):
+            continue
+        row_map = dict(row)
+        identifiers = {
+            str(row_map.get("strategy_id") or "").strip(),
+            str(row_map.get("bridge_strategy_id") or "").strip(),
+            str(row_map.get("standalone_strategy_id") or "").strip(),
+        }
+        if strategy_id in identifiers:
+            selected = row_map
+            break
+
+    selected_status = dict(payload)
+    selected_status["selected_strategy"] = selected
+    selected_status["submit_allowed"] = bool(selected.get("submit_allowed")) if selected is not None else False
+    selected_status["block_reasons"] = (
+        list(selected.get("submit_block_reasons") or [])
+        if selected is not None
+        else ["paper_strategy_governance_strategy_missing"]
+    )
+    if selected is None:
+        selected_status["detail"] = f"Paper strategy governance has no row for strategy identity {strategy_id}."
+    elif not bool(selected.get("submit_allowed")):
+        reasons = [str(reason or "").strip() for reason in list(selected.get("submit_block_reasons") or []) if str(reason or "").strip()]
+        selected_status["detail"] = f"Paper strategy governance blocked submit: {', '.join(reasons) or 'unknown_reason'}"
+    return selected_status
+
+
+def _governance_block_reasons(governance_status: dict[str, Any]) -> list[str]:
+    return [
+        str(reason or "").strip()
+        for reason in list(governance_status.get("block_reasons") or [])
+        if str(reason or "").strip()
+    ]
 
 
 def _runtime_exit_override_identity_is_current(*, config: IbkrPaperStrategyBridgeConfig) -> bool:
