@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import mgc_v05l.execution.ibkr_paper_strategy_governance as governance_module
 from mgc_v05l.execution.ibkr_paper_strategy_governance import (
     GOVERNANCE_SHADOW_ONLY_NOT_BROKER_AUTHORIZED,
     IbkrPaperStrategyGovernanceConfig,
@@ -264,6 +265,12 @@ def _write_paper_config_in_force(tmp_path: Path) -> None:
             "live_money_eligible": False,
             "paper_proof_invoked": False,
             "trade_size": 1,
+            "execution_mode": "IBKR_PAPER_BRIDGE",
+            "current_order_destination": "ibkr_paper_bridge_submit_capable",
+            "runtime_overlay_params": {
+                "execution_mode": "IBKR_PAPER_BRIDGE",
+                "current_order_destination": "ibkr_paper_bridge_submit_capable",
+            },
         }
         for lane_id, symbol in ACTIVE_EVIDENCE_LANES.items()
     ]
@@ -281,7 +288,7 @@ def _write_paper_config_in_force(tmp_path: Path) -> None:
     )
     path = tmp_path / "outputs" / "probationary_pattern_engine" / "paper_session" / "runtime" / "paper_config_in_force.json"
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps({"lanes": lanes}), encoding="utf-8")
+    path.write_text(json.dumps({"profile": "mnq_mes_full_session_active_evidence", "lanes": lanes}), encoding="utf-8")
 
 
 def _append_london_late_configured_lane(
@@ -345,7 +352,7 @@ def test_active_evidence_lanes_generate_submit_capable_governance_rows(tmp_path:
     assert status["selected_strategy"]["live_money_eligible"] is False
 
 
-def test_exit_coverage_gap_blocks_governance_submit_for_entry_lane(tmp_path: Path, monkeypatch) -> None:
+def test_exit_coverage_gap_is_diagnostic_for_active_profile_entry_lane(tmp_path: Path, monkeypatch) -> None:
     _write_clean_governance_inputs(tmp_path)
 
     def _gap_report(**_: object) -> dict:
@@ -370,10 +377,205 @@ def test_exit_coverage_gap_blocks_governance_submit_for_entry_lane(tmp_path: Pat
     rows = {str(row["strategy_id"]): row for row in artifacts.performance_rows}
 
     row = rows["mnq_us_active_participation_long"]
-    assert row["submit_allowed"] is False
-    assert row["bridge_invocation_allowed"] is False
-    assert "strategy_exit_coverage_incomplete" in row["submit_block_reasons"]
+    assert row["submit_allowed"] is True
+    assert row["bridge_invocation_allowed"] is True
+    assert "strategy_exit_coverage_incomplete" not in row["submit_block_reasons"]
+    assert "strategy_exit_coverage_incomplete" in row["diagnostic_submit_porting_reasons"]
     assert row["strategy_exit_coverage"]["classification"] == "EXIT_POLICY_MISSING"
+
+
+def test_active_profile_submit_porting_demotes_stale_porting_and_exit_coverage_reasons(tmp_path: Path) -> None:
+    _write_clean_governance_inputs(tmp_path)
+    lane_id = "mnq_us_active_participation_long"
+    row = governance_module._build_governance_row(
+        config=_governance_config(tmp_path),
+        now="2999-01-01T00:00:00+00:00",
+        inventory_row={
+            "strategy_id": lane_id,
+            "standalone_strategy_id": lane_id,
+            "instrument": "MNQ",
+            "current_app_runtime_status": "ACTIVE_RUNTIME_READY",
+            "current_position_state": "FLAT",
+            "current_quantity": 0.0,
+            "current_signal_state": "ENTRY_BUY",
+            "blockers_to_ibkr_paper_routing": [
+                "lane_not_yet_submit_ported",
+                "strategy_lane_not_yet_submit_ported",
+            ],
+            "current_order_destination": "ibkr_paper_bridge_submit_capable",
+            "bridge_adapter_ready": True,
+            "entries_enabled": True,
+        },
+        performance_row={},
+        signal_row={},
+        intent_row={},
+        tracked_details={},
+        ledger_positions=[],
+        monitor_status={"health_classification": "HEALTHY", "stale": False},
+        phase1_reconciliation_gate={"ready": True, "classification": "TRACK_B_PAPER_BROKER_RECONCILED"},
+        strategy_exit_coverage={
+            "classification": "TRACK_B_STRATEGY_EXIT_COVERAGE_GAPS_FOUND",
+            "strategies": [
+                {
+                    "lane_id": lane_id,
+                    "classification": "EXIT_POLICY_MISSING",
+                    "missing_or_weak_pieces": ["explicit_exit_policy"],
+                }
+            ],
+        },
+        trade_stats={},
+        shared_strategy_id=None,
+        global_monitor_owner="",
+    )
+
+    assert row["active_profile_submit_porting_authority"]["classification"] == "ACTIVE_PROFILE_SUBMIT_PORTING_ALLOWED"
+    assert row["submit_allowed"] is True
+    assert row["bridge_invocation_allowed"] is True
+    assert "lane_not_yet_submit_ported" not in row["submit_block_reasons"]
+    assert "strategy_exit_coverage_incomplete" not in row["submit_block_reasons"]
+    assert set(row["diagnostic_submit_porting_reasons"]) == {
+        "lane_not_yet_submit_ported",
+        "strategy_lane_not_yet_submit_ported",
+        "strategy_exit_coverage_incomplete",
+    }
+
+
+def test_active_profile_submit_porting_still_blocks_unrostered_lane(tmp_path: Path) -> None:
+    _write_clean_governance_inputs(tmp_path)
+
+    row = governance_module._build_governance_row(
+        config=_governance_config(tmp_path),
+        now="2999-01-01T00:00:00+00:00",
+        inventory_row={
+            "strategy_id": "unrostered_active_participation_long",
+            "standalone_strategy_id": "unrostered_active_participation_long",
+            "instrument": "MNQ",
+            "current_app_runtime_status": "ACTIVE_RUNTIME_READY",
+            "current_position_state": "FLAT",
+            "current_quantity": 0.0,
+            "current_signal_state": "ENTRY_BUY",
+            "blockers_to_ibkr_paper_routing": ["lane_not_yet_submit_ported"],
+            "current_order_destination": "ibkr_paper_bridge_submit_capable",
+            "bridge_adapter_ready": True,
+            "entries_enabled": True,
+        },
+        performance_row={},
+        signal_row={},
+        intent_row={},
+        tracked_details={},
+        ledger_positions=[],
+        monitor_status={"health_classification": "HEALTHY", "stale": False},
+        phase1_reconciliation_gate={"ready": True, "classification": "TRACK_B_PAPER_BROKER_RECONCILED"},
+        strategy_exit_coverage={"classification": "TRACK_B_STRATEGY_EXIT_COVERAGE_COMPLETE", "strategies": []},
+        trade_stats={},
+        shared_strategy_id=None,
+        global_monitor_owner="",
+    )
+
+    assert row["active_profile_submit_porting_authority"]["classification"] == "ACTIVE_PROFILE_LANE_NOT_LOADED"
+    assert row["submit_allowed"] is False
+    assert "lane_not_yet_submit_ported" in row["submit_block_reasons"]
+
+
+def test_active_profile_submit_porting_still_blocks_non_bridge_mode(tmp_path: Path) -> None:
+    _write_clean_governance_inputs(tmp_path)
+    path = tmp_path / "outputs/probationary_pattern_engine/paper_session/runtime/paper_config_in_force.json"
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    payload["lanes"][0]["execution_mode"] = "SIMULATION"
+    payload["lanes"][0]["runtime_overlay_params"]["execution_mode"] = "SIMULATION"
+    path.write_text(json.dumps(payload), encoding="utf-8")
+    lane_id = payload["lanes"][0]["lane_id"]
+
+    row = governance_module._build_governance_row(
+        config=_governance_config(tmp_path),
+        now="2999-01-01T00:00:00+00:00",
+        inventory_row={
+            "strategy_id": lane_id,
+            "standalone_strategy_id": lane_id,
+            "instrument": "MNQ",
+            "current_app_runtime_status": "ACTIVE_RUNTIME_READY",
+            "current_position_state": "FLAT",
+            "current_quantity": 0.0,
+            "current_signal_state": "ENTRY_BUY",
+            "blockers_to_ibkr_paper_routing": ["lane_not_yet_submit_ported"],
+            "current_order_destination": "ibkr_paper_bridge_submit_capable",
+            "bridge_adapter_ready": True,
+            "entries_enabled": True,
+        },
+        performance_row={},
+        signal_row={},
+        intent_row={},
+        tracked_details={},
+        ledger_positions=[],
+        monitor_status={"health_classification": "HEALTHY", "stale": False},
+        phase1_reconciliation_gate={"ready": True, "classification": "TRACK_B_PAPER_BROKER_RECONCILED"},
+        strategy_exit_coverage={"classification": "TRACK_B_STRATEGY_EXIT_COVERAGE_COMPLETE", "strategies": []},
+        trade_stats={},
+        shared_strategy_id=None,
+        global_monitor_owner="",
+    )
+
+    assert row["active_profile_submit_porting_authority"]["classification"] == "ACTIVE_PROFILE_LANE_WRONG_EXECUTION_MODE"
+    assert row["submit_allowed"] is False
+    assert "lane_not_yet_submit_ported" in row["submit_block_reasons"]
+
+
+def test_active_profile_submit_porting_still_blocks_missing_exit_policy(tmp_path: Path) -> None:
+    _write_clean_governance_inputs(tmp_path)
+    lane_id = "custom_loaded_lane"
+    path = tmp_path / "outputs/probationary_pattern_engine/paper_session/runtime/paper_config_in_force.json"
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    payload["lanes"].append(
+        {
+            "lane_id": lane_id,
+            "symbol": "MNQ",
+            "strategy_family": "custom",
+            "lane_mode": "CUSTOM_PAPER_LANE",
+            "paper_only": True,
+            "live_money_eligible": False,
+            "paper_proof_invoked": False,
+            "execution_mode": "IBKR_PAPER_BRIDGE",
+            "current_order_destination": "ibkr_paper_bridge_submit_capable",
+            "runtime_overlay_params": {
+                "execution_mode": "IBKR_PAPER_BRIDGE",
+                "current_order_destination": "ibkr_paper_bridge_submit_capable",
+            },
+        }
+    )
+    path.write_text(json.dumps(payload), encoding="utf-8")
+
+    row = governance_module._build_governance_row(
+        config=_governance_config(tmp_path),
+        now="2999-01-01T00:00:00+00:00",
+        inventory_row={
+            "strategy_id": lane_id,
+            "standalone_strategy_id": lane_id,
+            "instrument": "MNQ",
+            "current_app_runtime_status": "ACTIVE_RUNTIME_READY",
+            "current_position_state": "FLAT",
+            "current_quantity": 0.0,
+            "current_signal_state": "ENTRY_BUY",
+            "blockers_to_ibkr_paper_routing": ["lane_not_yet_submit_ported"],
+            "current_order_destination": "ibkr_paper_bridge_submit_capable",
+            "bridge_adapter_ready": True,
+            "entries_enabled": True,
+        },
+        performance_row={},
+        signal_row={},
+        intent_row={},
+        tracked_details={},
+        ledger_positions=[],
+        monitor_status={"health_classification": "HEALTHY", "stale": False},
+        phase1_reconciliation_gate={"ready": True, "classification": "TRACK_B_PAPER_BROKER_RECONCILED"},
+        strategy_exit_coverage={"classification": "TRACK_B_STRATEGY_EXIT_COVERAGE_COMPLETE", "strategies": []},
+        trade_stats={},
+        shared_strategy_id=None,
+        global_monitor_owner="",
+    )
+
+    assert row["active_profile_submit_porting_authority"]["classification"] == "ACTIVE_PROFILE_MANAGED_EXIT_POLICY_MISSING"
+    assert row["submit_allowed"] is False
+    assert "lane_not_yet_submit_ported" in row["submit_block_reasons"]
 
 
 def test_active_evidence_governance_uses_canonical_ready_when_legacy_loop_probe_is_stale(tmp_path: Path) -> None:

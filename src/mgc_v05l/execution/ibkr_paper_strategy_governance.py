@@ -30,6 +30,9 @@ from ..execution_core.track_b_paper_minimal_startup import (
     TrackBPaperMinimalStartupConfig,
     build_track_b_paper_minimal_startup,
 )
+from ..execution_core.track_b_position_management_manifest import (
+    PAPER_ACTIVE_EVIDENCE_MANAGED_EXIT_POLICY_ID,
+)
 from ..execution_core.track_b_strategy_exit_coverage import (
     DEFAULT_EXIT_COVERAGE_REPORT_PATH,
     TrackBStrategyExitCoverageConfig,
@@ -97,6 +100,11 @@ _ACTIVE_EVIDENCE_LANE_MODES = {
     "PAPER_ONLY_LONDON_LATE_ACTIVE_EVIDENCE_LANE",
 }
 _LONDON_LATE_ACTIVE_EVIDENCE_LANE_MODE = "PAPER_ONLY_LONDON_LATE_ACTIVE_EVIDENCE_LANE"
+_ACTIVE_PROFILE_SUBMIT_PORTING_DIAGNOSTIC_REASONS = {
+    "lane_not_yet_submit_ported",
+    "strategy_lane_not_yet_submit_ported",
+    "strategy_exit_coverage_incomplete",
+}
 
 
 @dataclass(frozen=True)
@@ -255,6 +263,8 @@ def run_ibkr_paper_strategy_governance(
         if not _configured_runtime_lane_needs_governance_row(configured_row):
             continue
         bridge_adapter = lane_submit_bridge_adapter(lane_id=lane_id)
+        if bridge_adapter is None:
+            bridge_adapter = _active_profile_bridge_adapter(configured_row=configured_row, paper_config_in_force=paper_config_in_force)
         if not bridge_adapter:
             continue
         row = _build_governance_row(
@@ -369,6 +379,34 @@ def _configured_runtime_lane_shadow_only_blockers(configured_row: dict[str, Any]
     if lane_mode == _LONDON_LATE_ACTIVE_EVIDENCE_LANE_MODE and submit_authority != _BROKER_AUTHORIZED_SUBMIT_AUTHORITY:
         return [GOVERNANCE_SHADOW_ONLY_NOT_BROKER_AUTHORIZED]
     return []
+
+
+def _active_profile_bridge_adapter(
+    *,
+    configured_row: dict[str, Any],
+    paper_config_in_force: dict[str, Any],
+) -> dict[str, Any] | None:
+    if str(paper_config_in_force.get("profile") or "").strip() != "mnq_mes_full_session_active_evidence":
+        return None
+    if _lane_execution_mode(configured_row) != "IBKR_PAPER_BRIDGE":
+        return None
+    overlay = dict(configured_row.get("runtime_overlay_params") or {})
+    destination = str(
+        configured_row.get("current_order_destination")
+        or overlay.get("current_order_destination")
+        or ""
+    ).strip()
+    if destination != "ibkr_paper_bridge_submit_capable":
+        return None
+    target = dict(configured_row.get("bridge_execution_target") or {})
+    return {
+        "lane_id": configured_row.get("lane_id"),
+        "source_instrument": configured_row.get("symbol") or configured_row.get("instrument"),
+        "current_order_destination": destination,
+        "bridge_proxy_mode": configured_row.get("bridge_proxy_mode") or overlay.get("bridge_proxy_mode"),
+        "bridge_execution_target": target,
+        "active_profile_roster_adapter": True,
+    }
 
 
 def write_ibkr_paper_strategy_governance_artifacts(
@@ -638,13 +676,21 @@ def _build_governance_row(
             instrument=instrument,
         ),
     )
+    active_profile_submit_porting_authority = _active_profile_submit_porting_authority(
+        config=config,
+        lane_id=lane_id,
+        inventory_row=inventory_row,
+    )
 
     pause_reasons: list[str] = []
     submit_block_reasons: list[str] = []
     inventory_blockers = list(inventory_row.get("blockers_to_ibkr_paper_routing") or [])
     if "unsupported_instrument_scope" in inventory_blockers:
         submit_block_reasons.append("unsupported_instrument_scope")
-    if "lane_not_yet_submit_ported" in inventory_blockers or "strategy_lane_not_yet_submit_ported" in inventory_blockers:
+    if (
+        "lane_not_yet_submit_ported" in inventory_blockers
+        or "strategy_lane_not_yet_submit_ported" in inventory_blockers
+    ) and not bool(active_profile_submit_porting_authority.get("allowed")):
         submit_block_reasons.append("lane_not_yet_submit_ported")
     if GOVERNANCE_SHADOW_ONLY_NOT_BROKER_AUTHORIZED in inventory_blockers:
         submit_block_reasons.append(GOVERNANCE_SHADOW_ONLY_NOT_BROKER_AUTHORIZED)
@@ -665,7 +711,9 @@ def _build_governance_row(
     if not bool(backend_source_readiness.get("live_ready")):
         submit_block_reasons.append("backend_or_source_not_live_ready")
     exit_coverage = lane_exit_coverage_for(lane_id, strategy_exit_coverage)
-    if exit_coverage.get("classification") != "EXIT_COVERAGE_COMPLETE":
+    if exit_coverage.get("classification") != "EXIT_COVERAGE_COMPLETE" and not bool(
+        active_profile_submit_porting_authority.get("allowed")
+    ):
         submit_block_reasons.append("strategy_exit_coverage_incomplete")
 
     strategy_status = _strategy_governance_status(
@@ -776,6 +824,12 @@ def _build_governance_row(
         "intent_action": intent_row.get("action"),
         "intent_reason": intent_row.get("reason"),
         "route_blockers": inventory_blockers,
+        "active_profile_submit_porting_authority": active_profile_submit_porting_authority,
+        "diagnostic_submit_porting_reasons": _diagnostic_submit_porting_reasons(
+            inventory_blockers=inventory_blockers,
+            exit_coverage=exit_coverage,
+            active_profile_submit_porting_authority=active_profile_submit_porting_authority,
+        ),
         "pause_reasons": list(dict.fromkeys(pause_reasons)),
         "submit_block_reasons": list(dict.fromkeys(submit_block_reasons)),
         "submit_allowed": submit_allowed,
@@ -822,6 +876,112 @@ def _strategy_state(*, current_position_state: str, current_quantity: float, blo
     if current_position_state == "FLAT" and current_quantity == 0.0:
         return "FLAT"
     return "UNKNOWN"
+
+
+def _active_profile_submit_porting_authority(
+    *,
+    config: IbkrPaperStrategyGovernanceConfig,
+    lane_id: str,
+    inventory_row: dict[str, Any],
+) -> dict[str, Any]:
+    payload = _load_json(config.repo_root / _DEFAULT_PAPER_CONFIG_IN_FORCE_PATH)
+    profile = str(payload.get("profile") or "").strip()
+    if profile != "mnq_mes_full_session_active_evidence":
+        return {
+            "allowed": False,
+            "classification": "ACTIVE_PROFILE_SUBMIT_PORTING_NOT_APPLICABLE",
+            "detail": "Active-profile submit-porting authority applies only to the explicit full-session PAPER profile.",
+        }
+    row = _active_profile_lane_row(payload=payload, lane_id=lane_id)
+    if row is None:
+        return {
+            "allowed": False,
+            "classification": "ACTIVE_PROFILE_LANE_NOT_LOADED",
+            "detail": "Lane is not present in the loaded active profile roster.",
+        }
+    execution_mode = _lane_execution_mode(row)
+    if execution_mode != "IBKR_PAPER_BRIDGE":
+        return {
+            "allowed": False,
+            "classification": "ACTIVE_PROFILE_LANE_WRONG_EXECUTION_MODE",
+            "execution_mode": execution_mode,
+            "detail": "Loaded lane is not configured for IBKR_PAPER_BRIDGE.",
+        }
+    destination = str(
+        row.get("current_order_destination")
+        or dict(row.get("runtime_overlay_params") or {}).get("current_order_destination")
+        or inventory_row.get("current_order_destination")
+        or ""
+    ).strip()
+    if destination != "ibkr_paper_bridge_submit_capable":
+        return {
+            "allowed": False,
+            "classification": "ACTIVE_PROFILE_LANE_WRONG_DESTINATION",
+            "current_order_destination": destination,
+            "detail": "Loaded lane is not routed to the IBKR PAPER bridge submit destination.",
+        }
+    managed_exit_policy_id = _active_profile_managed_exit_policy_id(row)
+    if not managed_exit_policy_id:
+        return {
+            "allowed": False,
+            "classification": "ACTIVE_PROFILE_MANAGED_EXIT_POLICY_MISSING",
+            "detail": "Loaded lane does not resolve a managed_exit_policy_id for broker-backed managed PAPER entry.",
+        }
+    return {
+        "allowed": True,
+        "classification": "ACTIVE_PROFILE_SUBMIT_PORTING_ALLOWED",
+        "profile": profile,
+        "lane_id": lane_id,
+        "execution_mode": execution_mode,
+        "current_order_destination": destination,
+        "managed_exit_policy_id": managed_exit_policy_id,
+        "detail": "Loaded active-profile IBKR PAPER bridge lane supplies submit-porting and managed-exit policy authority.",
+    }
+
+
+def _active_profile_lane_row(*, payload: dict[str, Any], lane_id: str) -> dict[str, Any] | None:
+    for row in list(payload.get("lanes") or []):
+        if not isinstance(row, dict):
+            continue
+        if str(row.get("lane_id") or "").strip() == lane_id:
+            return dict(row)
+    return None
+
+
+def _lane_execution_mode(row: dict[str, Any]) -> str:
+    overlay = dict(row.get("runtime_overlay_params") or {})
+    return str(row.get("execution_mode") or overlay.get("execution_mode") or "").strip()
+
+
+def _active_profile_managed_exit_policy_id(row: dict[str, Any]) -> str | None:
+    overlay = dict(row.get("runtime_overlay_params") or {})
+    explicit = str(row.get("managed_exit_policy_id") or overlay.get("managed_exit_policy_id") or "").strip()
+    if explicit:
+        return explicit
+    lane_id = str(row.get("lane_id") or "").strip()
+    family = str(row.get("strategy_family") or row.get("source_family") or "").strip()
+    lane_mode = str(row.get("lane_mode") or "").strip()
+    if "paper_active_evidence" in family or "ACTIVE_EVIDENCE" in lane_mode or "_active_participation_" in lane_id:
+        return PAPER_ACTIVE_EVIDENCE_MANAGED_EXIT_POLICY_ID
+    return None
+
+
+def _diagnostic_submit_porting_reasons(
+    *,
+    inventory_blockers: list[str],
+    exit_coverage: dict[str, Any],
+    active_profile_submit_porting_authority: dict[str, Any],
+) -> list[str]:
+    if not bool(active_profile_submit_porting_authority.get("allowed")):
+        return []
+    reasons = [
+        str(reason)
+        for reason in inventory_blockers
+        if str(reason) in _ACTIVE_PROFILE_SUBMIT_PORTING_DIAGNOSTIC_REASONS
+    ]
+    if exit_coverage.get("classification") != "EXIT_COVERAGE_COMPLETE":
+        reasons.append("strategy_exit_coverage_incomplete")
+    return list(dict.fromkeys(reasons))
 
 
 def _strategy_governance_status(
