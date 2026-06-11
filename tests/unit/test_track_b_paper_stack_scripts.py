@@ -100,6 +100,35 @@ def test_paper_stack_start_has_minimal_startup_v1_path_for_explicit_paper_starts
     assert "MGC_TRACK_B_PAPER_MINIMAL_STARTUP_CLASSIFICATION" in source
 
 
+def test_paper_stack_writes_selected_config_paths_before_minimal_startup() -> None:
+    source = START_SCRIPT.read_text(encoding="utf-8")
+    start_block = source[
+        source.index("write_runtime_config_paths_file()") : source.index(
+            'if [[ "${already_running}" == "true" ]]; then'
+        )
+    ]
+
+    assert 'CANONICAL_CONFIGS+=("${SCOPED_CONFIG_PATH}")' in source
+    assert 'printf \'%s\\n\' "${config_path}" >> "${CONFIG_PATHS_FILE}"' in start_block
+    assert start_block.index("\nwrite_runtime_config_paths_file\n") < start_block.index(
+        "run_paper_minimal_startup_preflight"
+    )
+
+
+def test_full_session_profile_materialization_prefers_existing_scoped_overlay() -> None:
+    source = START_SCRIPT.read_text(encoding="utf-8")
+    full_session_block = source[
+        source.index('elif [[ "${STACK_PROFILE}" == "mnq_mes_full_session_active_evidence" ]]')
+        : source.index('elif [[ "${STACK_PROFILE}" != "canonical" ]]')
+    ]
+
+    assert "scoped_profile_lane_source_config" in source
+    assert "_load_source_lanes" in source
+    assert "$(scoped_profile_lane_source_config" in full_session_block
+    assert '"${SCOPED_CONFIG_PATH}" "${RUNTIME_DIR}/paper_config_in_force.json"' in full_session_block
+    assert 'export MGC_TRACK_B_PAPER_STACK_PROFILE="${STACK_PROFILE}"' in source
+
+
 def test_paper_stack_minimal_startup_owns_restart_authority() -> None:
     source = START_SCRIPT.read_text(encoding="utf-8")
 

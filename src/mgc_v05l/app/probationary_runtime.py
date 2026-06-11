@@ -9457,6 +9457,7 @@ def _current_runtime_identity_payload() -> dict[str, Any]:
         "source_runtime_command": " ".join(argv),
         "source_runtime_argv": argv,
         "source_runtime_git_head": git_head,
+        "profile": str(os.environ.get("MGC_TRACK_B_PAPER_STACK_PROFILE") or "").strip() or None,
     }
 
 

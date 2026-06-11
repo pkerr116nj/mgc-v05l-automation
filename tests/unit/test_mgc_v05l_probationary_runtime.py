@@ -10810,6 +10810,14 @@ def test_supervisor_operator_status_keeps_lane_specific_halts_from_poisoning_glo
     assert payload["halted_lane_count"] == 1
 
 
+def test_runtime_identity_payload_includes_selected_paper_stack_profile(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("MGC_TRACK_B_PAPER_STACK_PROFILE", "mnq_mes_full_session_active_evidence")
+
+    payload = probationary_runtime_module._current_runtime_identity_payload()  # noqa: SLF001
+
+    assert payload["profile"] == "mnq_mes_full_session_active_evidence"
+
+
 def test_probationary_supervisor_survives_lane_auth_read_failure(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     settings = _build_probationary_paper_settings(tmp_path)
     root_logger = StructuredLogger(tmp_path / "root")

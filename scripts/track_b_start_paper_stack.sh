@@ -98,13 +98,29 @@ roster_path = Path(sys.argv[1])
 source_config_path = Path(sys.argv[2])
 output_config_path = Path(sys.argv[3])
 
+
+def _load_source_lanes(path: Path) -> list[dict]:
+    text = path.read_text(encoding="utf-8")
+    try:
+        payload = json.loads(text)
+    except json.JSONDecodeError:
+        for line in text.splitlines():
+            if not line.startswith("probationary_paper_lanes_json:"):
+                continue
+            raw = line.split(":", 1)[1].strip()
+            if (raw.startswith("'") and raw.endswith("'")) or (raw.startswith('"') and raw.endswith('"')):
+                raw = raw[1:-1]
+            parsed = json.loads(raw)
+            return [dict(row) for row in parsed if isinstance(row, dict)]
+        return []
+    return [dict(row) for row in payload.get("lanes") or [] if isinstance(row, dict)]
+
 roster = json.loads(roster_path.read_text(encoding="utf-8"))
-source = json.loads(source_config_path.read_text(encoding="utf-8"))
 enabled = [str(value) for value in roster.get("enabled_strategy_ids") or [] if str(value)]
 enabled_set = set(enabled)
 lanes = []
 seen_sources: set[str] = set()
-for row in source.get("lanes") or []:
+for row in _load_source_lanes(source_config_path):
     sources = {str(value) for value in [*list(row.get("long_sources") or []), *list(row.get("short_sources") or [])]}
     matched = sources & enabled_set
     if matched:
@@ -135,6 +151,16 @@ output_config_path.write_text(
     encoding="utf-8",
 )
 PY
+}
+
+scoped_profile_lane_source_config() {
+  local existing_scoped_config="$1"
+  local fallback_config="$2"
+  if [[ -f "${existing_scoped_config}" ]]; then
+    printf '%s\n' "${existing_scoped_config}"
+  else
+    printf '%s\n' "${fallback_config}"
+  fi
 }
 
 if [[ "${STACK_PROFILE}" == "mnq_mes_active_evidence" ]]; then
@@ -336,7 +362,7 @@ elif [[ "${STACK_PROFILE}" == "mnq_mes_full_session_active_evidence" ]]; then
   "max_quantity_per_strategy": 1
 }
 JSON
-  materialize_scoped_lane_config_from_roster "${SCOPED_ROSTER_PATH}" "${RUNTIME_DIR}/paper_config_in_force.json" "${SCOPED_CONFIG_PATH}"
+  materialize_scoped_lane_config_from_roster "${SCOPED_ROSTER_PATH}" "$(scoped_profile_lane_source_config "${SCOPED_CONFIG_PATH}" "${RUNTIME_DIR}/paper_config_in_force.json")" "${SCOPED_CONFIG_PATH}"
   CANONICAL_CONFIGS+=("${SCOPED_CONFIG_PATH}")
   ROSTER_ENV_PATH="${SCOPED_ROSTER_PATH}"
   PROOF_REQUIRED_SYMBOLS="MNQ,MES"
@@ -1393,6 +1419,26 @@ launchctl_available() {
   command -v launchctl >/dev/null 2>&1
 }
 
+write_runtime_config_paths_file() {
+  for config_path in "${CANONICAL_CONFIGS[@]}"; do
+    if [[ ! -f "${config_path}" ]]; then
+      write_startup_artifact "BLOCKED_MISSING_CONFIG" "Missing canonical config: ${config_path}" ""
+      exit 2
+    fi
+  done
+  if [[ " ${CANONICAL_CONFIGS[*]} " == *" ${FORBIDDEN_REVIEW_OVERLAY} "* ]]; then
+    write_startup_artifact "BLOCKED_FORBIDDEN_REVIEW_OVERLAY" "Forbidden 27-lane review overlay is in canonical config stack." ""
+    exit 2
+  fi
+
+  : > "${CONFIG_PATHS_FILE}"
+  for config_path in "${CANONICAL_CONFIGS[@]}"; do
+    printf '%s\n' "${config_path}" >> "${CONFIG_PATHS_FILE}"
+  done
+}
+
+write_runtime_config_paths_file
+
 if [[ "${PAPER_MINIMAL_STARTUP_V1}" == "1" || "${PAPER_MINIMAL_STARTUP_V1}" == "true" || "${PAPER_MINIMAL_STARTUP_V1}" == "TRUE" ]]; then
   if ! run_paper_minimal_startup_preflight; then
     exit 2
@@ -1496,21 +1542,7 @@ if [[ "${PAPER_MINIMAL_STARTUP_V1}" != "1" && "${PAPER_MINIMAL_STARTUP_V1}" != "
 fi
 write_approved_profile_artifact
 
-for config_path in "${CANONICAL_CONFIGS[@]}"; do
-  if [[ ! -f "${config_path}" ]]; then
-    write_startup_artifact "BLOCKED_MISSING_CONFIG" "Missing canonical config: ${config_path}" ""
-    exit 2
-  fi
-done
-if [[ " ${CANONICAL_CONFIGS[*]} " == *" ${FORBIDDEN_REVIEW_OVERLAY} "* ]]; then
-  write_startup_artifact "BLOCKED_FORBIDDEN_REVIEW_OVERLAY" "Forbidden 27-lane review overlay is in canonical config stack." ""
-  exit 2
-fi
-
-: > "${CONFIG_PATHS_FILE}"
-for config_path in "${CANONICAL_CONFIGS[@]}"; do
-  printf '%s\n' "${config_path}" >> "${CONFIG_PATHS_FILE}"
-done
+write_runtime_config_paths_file
 
 session_name="track_b_paper_stack_$(date -u +%Y%m%dT%H%M%SZ)_$$"
 config_stack="$(IFS=":"; printf "%s" "${CANONICAL_CONFIGS[*]}")"
@@ -1535,6 +1567,7 @@ export MGC_TRACK_B_PAPER_PID_METADATA_FILE="${PID_METADATA_FILE}"
 export MGC_HEADLESS_PAPER_LOG_FILE="${RUNTIME_LOG}"
 export MGC_TRACK_B_RUNTIME_INSTANCE_ID="${runtime_instance_id}"
 export MGC_TRACK_B_PAPER_RUNTIME_RESTART_GENERATION="1"
+export MGC_TRACK_B_PAPER_STACK_PROFILE="${STACK_PROFILE}"
 export MGC_TRACK_B_EXPECTED_PROJECT_ROOT="${REPO_ROOT}"
 export MGC_TRACK_B_EXPECTED_SOURCE_COMMIT="${source_commit}"
 export MGC_TRACK_B_PAPER_STACK_STARTUP_MODE="${STARTUP_MODE}"
