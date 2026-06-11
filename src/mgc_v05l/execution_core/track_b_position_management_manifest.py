@@ -39,6 +39,7 @@ DEFAULT_TRACK_B_PROBATIONARY_LANE_CONFIG_YAML = Path(
 )
 POSITION_MANAGEMENT_MANIFEST_SCHEMA_VERSION = "track_b_position_management_manifest_v1"
 PAPER_EXECUTION_TEST_MULE_MANAGED_EXIT_POLICY_ID = "PAPER_DIAGNOSTIC_TIME_BOXED_3X5M_EXIT_V1"
+PAPER_ACTIVE_EVIDENCE_MANAGED_EXIT_POLICY_ID = "GLOBEX_ACTIVE_EVIDENCE_TIMEBOX_60M_EXIT_V1"
 PAPER_EXECUTION_TEST_MULE_LANE_IDS = {
     "track_b_paper_execution_test_mule_v1__mgc",
     "track_b_paper_execution_test_mule_v1__mnq",
@@ -184,23 +185,57 @@ def create_manifest_from_order_intent(
     if getattr(order_intent, "is_entry", False) is not True:
         return None
     side = "LONG" if str(getattr(order_intent, "intent_type", "")).endswith("BUY_TO_OPEN") else "SHORT"
+    lane_id = _first_text(runtime_identity.get("lane_id"))
+    strategy_id = _first_text(runtime_identity.get("standalone_strategy_id"), runtime_identity.get("strategy_id"))
+    instrument_family = _first_text(runtime_identity.get("instrument"), getattr(order_intent, "symbol", None))
+    contract_key = _first_text(runtime_identity.get("contract_key"))
+    local_symbol = _first_text(runtime_identity.get("local_symbol"))
+    con_id = runtime_identity.get("con_id")
+    managed_exit_policy_id = _first_text(runtime_identity.get("managed_exit_policy_id"))
+    metadata_resolution: TrackBManagementMetadataResolution | None = None
+    if not managed_exit_policy_id:
+        metadata_resolution = resolve_management_metadata(
+            source={
+                "entry_intent_id": str(getattr(order_intent, "order_intent_id")),
+                "order_intent_id": str(getattr(order_intent, "order_intent_id")),
+                "lane_id": lane_id,
+                "strategy_id": strategy_id,
+                "instrument": instrument_family,
+                "contract_key": contract_key,
+                "local_symbol": local_symbol,
+                "con_id": con_id,
+                "side": side,
+                "quantity": getattr(order_intent, "quantity", None),
+            },
+            output_root=output_root,
+        )
+        managed_exit_policy_id = metadata_resolution.managed_exit_policy_id
+    policy_config_refs = {
+        "source": "runtime_identity" if _first_text(runtime_identity.get("managed_exit_policy_id")) else "management_metadata_resolution",
+        "strategy_family": runtime_identity.get("strategy_family"),
+        "config_source": runtime_identity.get("config_source"),
+    }
+    if metadata_resolution is not None:
+        policy_config_refs.update(
+            {
+                "metadata_resolution_source": metadata_resolution.source,
+                "metadata_resolution_classification": metadata_resolution.classification,
+                "metadata_resolution_blockers": list(metadata_resolution.blockers),
+            }
+        )
     return create_or_update_position_management_manifest(
         entry_intent_id=str(getattr(order_intent, "order_intent_id")),
-        lane_id=_first_text(runtime_identity.get("lane_id")),
-        strategy_id=_first_text(runtime_identity.get("standalone_strategy_id"), runtime_identity.get("strategy_id")),
-        instrument_family=_first_text(runtime_identity.get("instrument"), getattr(order_intent, "symbol", None)),
-        contract_key=_first_text(runtime_identity.get("contract_key")),
-        local_symbol=_first_text(runtime_identity.get("local_symbol")),
-        con_id=runtime_identity.get("con_id"),
+        lane_id=lane_id,
+        strategy_id=strategy_id,
+        instrument_family=instrument_family,
+        contract_key=contract_key,
+        local_symbol=local_symbol,
+        con_id=con_id,
         side=side,
         quantity=getattr(order_intent, "quantity", None),
-        managed_exit_policy_id=_first_text(runtime_identity.get("managed_exit_policy_id")),
+        managed_exit_policy_id=managed_exit_policy_id,
         lifecycle_status="INTENT_CREATED",
-        policy_config_refs={
-            "source": "runtime_identity",
-            "strategy_family": runtime_identity.get("strategy_family"),
-            "config_source": runtime_identity.get("config_source"),
-        },
+        policy_config_refs=policy_config_refs,
         output_root=output_root,
         now=now,
     )
@@ -338,16 +373,63 @@ def _policy_from_lane_registry(
     paths.extend([DEFAULT_TRACK_B_RUNTIME_CONFIG_IN_FORCE_JSON, DEFAULT_TRACK_B_PROBATIONARY_LANE_CONFIG_YAML])
     for path in paths:
         for lane in _lane_rows_from_path(Path(path)):
-            if lane_id and str(lane.get("lane_id") or "") == lane_id:
-                policy = _first_text(lane.get("managed_exit_policy_id"))
-                if policy:
-                    return policy
-            if strategy_id and str(lane.get("standalone_strategy_id") or "") == strategy_id:
-                policy = _first_text(lane.get("managed_exit_policy_id"))
+            if _lane_matches_source(lane, lane_id=lane_id, strategy_id=strategy_id):
+                policy = _first_text(lane.get("managed_exit_policy_id"), _active_evidence_policy_from_lane(lane))
                 if policy:
                     return policy
     if lane_id in PAPER_EXECUTION_TEST_MULE_LANE_IDS or strategy_id in PAPER_EXECUTION_TEST_MULE_LANE_IDS:
         return PAPER_EXECUTION_TEST_MULE_MANAGED_EXIT_POLICY_ID
+    return None
+
+
+def _lane_matches_source(lane: Mapping[str, Any], *, lane_id: str | None, strategy_id: str | None) -> bool:
+    if lane_id and str(lane.get("lane_id") or "") == lane_id:
+        return True
+    if not strategy_id:
+        return False
+    return strategy_id in _strategy_ids_from_lane(lane)
+
+
+def _strategy_ids_from_lane(lane: Mapping[str, Any]) -> set[str]:
+    values: set[str] = set()
+    for key in (
+        "standalone_strategy_id",
+        "strategy_id",
+        "strategy_identity_root",
+        "rule_id",
+        "rule_mode",
+    ):
+        text = _first_text(lane.get(key))
+        if text:
+            values.add(text)
+    overlay = lane.get("runtime_overlay_params")
+    if isinstance(overlay, Mapping):
+        for key in ("strategy_id", "rule_id", "rule_mode", "entry_source"):
+            text = _first_text(overlay.get(key))
+            if text:
+                values.add(text)
+    for key in ("long_sources", "short_sources"):
+        raw_values = lane.get(key)
+        if isinstance(raw_values, Iterable) and not isinstance(raw_values, (str, bytes)):
+            for raw in raw_values:
+                text = _first_text(raw)
+                if text:
+                    values.add(text)
+    return values
+
+
+def _active_evidence_policy_from_lane(lane: Mapping[str, Any]) -> str | None:
+    strategy_ids = _strategy_ids_from_lane(lane)
+    lane_id = str(lane.get("lane_id") or "")
+    family = str(lane.get("strategy_family") or lane.get("source_family") or "")
+    mode = str(lane.get("lane_mode") or "")
+    if (
+        "paper_active_evidence" in family
+        or "ACTIVE_EVIDENCE" in mode
+        or "_active_participation_" in lane_id
+        or any(value.startswith("PAPER_ACTIVE_EVIDENCE_") and "PARTICIPATION" in value for value in strategy_ids)
+    ):
+        return PAPER_ACTIVE_EVIDENCE_MANAGED_EXIT_POLICY_ID
     return None
 
 

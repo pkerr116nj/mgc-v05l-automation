@@ -4,11 +4,14 @@ import json
 from datetime import datetime, timezone
 from pathlib import Path
 
+from mgc_v05l.domain.enums import OrderIntentType
+from mgc_v05l.execution.order_models import OrderIntent
 from mgc_v05l.execution_core.track_b_position_management_manifest import (
     BLOCKED_NO_BROKER_EFFECT,
     BROKER_BACKED_FILL_EVIDENCE_INCOMPLETE,
     OPEN_MANAGED_METADATA_INCOMPLETE,
     broker_backed_fill_evidence_complete,
+    create_manifest_from_order_intent,
     create_or_update_position_management_manifest,
     lifecycle_metadata_complete,
     manifest_path_for_intent,
@@ -241,6 +244,143 @@ def test_metadata_recovers_from_lane_registry_when_manifest_missing(tmp_path: Pa
     assert result.complete is True
     assert result.source == "lane_registry"
     assert result.managed_exit_policy_id == "PAPER_DIAGNOSTIC_TIME_BOXED_3X5M_EXIT_V1"
+
+
+def test_entry_manifest_resolves_active_participation_policy_from_lane_config(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    config_path = tmp_path / "outputs/probationary_pattern_engine/paper_session/runtime/paper_config_in_force.json"
+    config_path.parent.mkdir(parents=True)
+    config_path.write_text(
+        json.dumps(
+            {
+                "lanes": [
+                    {
+                        "lane_id": "mnq_globex_active_participation_short",
+                        "standalone_strategy_id": "PAPER_ACTIVE_EVIDENCE_MNQ_GLOBEX_PARTICIPATION_SHORT_V1",
+                        "managed_exit_policy_id": "GLOBEX_ACTIVE_EVIDENCE_TIMEBOX_60M_EXIT_V1",
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    intent = OrderIntent(
+        order_intent_id="MNQ|1m|2026-06-10T23:29:00Z|SELL_TO_OPEN",
+        bar_id="MNQ|1m|2026-06-10T23:29:00Z",
+        symbol="MNQ",
+        intent_type=OrderIntentType.SELL_TO_OPEN,
+        quantity=1,
+        created_at=aware_now(),
+        reason_code="firstBearSnapTurn",
+    )
+
+    result = create_manifest_from_order_intent(
+        order_intent=intent,
+        runtime_identity={
+            "lane_id": "mnq_globex_active_participation_short",
+            "standalone_strategy_id": "PAPER_ACTIVE_EVIDENCE_MNQ_GLOBEX_PARTICIPATION_SHORT_V1",
+            "instrument": "MNQ",
+            "local_symbol": "MNQM6",
+            "con_id": 770561201,
+        },
+        output_root=tmp_path / "manifests",
+        now=aware_now(),
+    )
+
+    assert result is not None
+    assert result.manifest["managed_exit_policy_id"] == "GLOBEX_ACTIVE_EVIDENCE_TIMEBOX_60M_EXIT_V1"
+    assert result.manifest["lifecycle_status"] == "INTENT_CREATED"
+    assert result.manifest["policy_config_refs"]["source"] == "management_metadata_resolution"
+
+
+def test_entry_manifest_resolves_active_evidence_policy_from_runtime_lane_family(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    config_path = tmp_path / "outputs/probationary_pattern_engine/paper_session/runtime/paper_config_in_force.json"
+    config_path.parent.mkdir(parents=True)
+    config_path.write_text(
+        json.dumps(
+            {
+                "lanes": [
+                    {
+                        "lane_id": "mes_globex_active_participation_short",
+                        "source_family": "paper_active_evidence",
+                        "strategy_family": "paper_active_evidence",
+                        "lane_mode": "PAPER_ONLY_GLOBEX_ACTIVE_EVIDENCE_LANE",
+                        "runtime_overlay_params": {
+                            "strategy_id": "PAPER_ACTIVE_EVIDENCE_MES_GLOBEX_PARTICIPATION_SHORT_V1",
+                            "rule_id": "PAPER_ACTIVE_EVIDENCE_MES_GLOBEX_PARTICIPATION_SHORT_V1",
+                        },
+                        "short_sources": ["PAPER_ACTIVE_EVIDENCE_MES_GLOBEX_PARTICIPATION_SHORT_V1"],
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    intent = OrderIntent(
+        order_intent_id="MES|1m|2026-06-10T23:29:00Z|SELL_TO_OPEN",
+        bar_id="MES|1m|2026-06-10T23:29:00Z",
+        symbol="MES",
+        intent_type=OrderIntentType.SELL_TO_OPEN,
+        quantity=1,
+        created_at=aware_now(),
+        reason_code="firstBearSnapTurn",
+    )
+
+    result = create_manifest_from_order_intent(
+        order_intent=intent,
+        runtime_identity={
+            "lane_id": "mes_globex_active_participation_short",
+            "standalone_strategy_id": "PAPER_ACTIVE_EVIDENCE_MES_GLOBEX_PARTICIPATION_SHORT_V1",
+            "instrument": "MES",
+            "local_symbol": "MESM6",
+            "con_id": 770561194,
+        },
+        output_root=tmp_path / "manifests",
+        now=aware_now(),
+    )
+
+    assert result is not None
+    assert result.manifest["managed_exit_policy_id"] == "GLOBEX_ACTIVE_EVIDENCE_TIMEBOX_60M_EXIT_V1"
+    assert result.manifest["policy_config_refs"]["metadata_resolution_source"] == "lane_registry"
+
+
+def test_entry_manifest_without_configured_policy_remains_incomplete(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.chdir(tmp_path)
+    intent = OrderIntent(
+        order_intent_id="MNQ|1m|2026-06-10T23:29:00Z|SELL_TO_OPEN",
+        bar_id="MNQ|1m|2026-06-10T23:29:00Z",
+        symbol="MNQ",
+        intent_type=OrderIntentType.SELL_TO_OPEN,
+        quantity=1,
+        created_at=aware_now(),
+        reason_code="firstBearSnapTurn",
+    )
+
+    result = create_manifest_from_order_intent(
+        order_intent=intent,
+        runtime_identity={
+            "lane_id": "unconfigured_lane",
+            "standalone_strategy_id": "UNCONFIGURED_STRATEGY",
+            "instrument": "MNQ",
+            "local_symbol": "MNQM6",
+            "con_id": 770561201,
+        },
+        output_root=tmp_path / "manifests",
+        now=aware_now(),
+    )
+
+    assert result is not None
+    assert result.manifest["managed_exit_policy_id"] is None
+    assert result.manifest["lifecycle_status"] == "INTENT_CREATED"
+    assert result.manifest["policy_config_refs"]["metadata_resolution_classification"] == OPEN_MANAGED_METADATA_INCOMPLETE
+    assert "managed_exit_policy_id" in result.manifest["policy_config_refs"]["metadata_resolution_blockers"]
 
 
 def test_metadata_recovers_test_mule_policy_without_registry() -> None:
