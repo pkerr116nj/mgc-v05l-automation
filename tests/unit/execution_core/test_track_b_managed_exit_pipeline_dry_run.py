@@ -72,6 +72,50 @@ def test_timebox_due_with_broker_missing_con_id_uses_enriched_position_identity(
     assert payload["exit_authority_decisions"][0]["decision"] == "ALLOWED"
 
 
+def test_due_replacement_contract_short_builds_buy_intent_with_enriched_identity(tmp_path: Path) -> None:
+    inputs = _inputs(
+        broker_positions=[
+            _broker_position(quantity="-1", local_symbol="", con_id=0, symbol="MNQ")
+        ],
+        managed_side="SHORT",
+        managed_qty="1",
+    )
+    inputs["managed_positions"]["managed_positions"][0].update(
+        {
+            "classification": "OPEN_MANAGED_EXIT_DUE",
+            "local_symbol": "MNQU6",
+            "con_id": 793356225,
+            "symbol": "MNQ",
+            "contract_key": "MNQ-202609",
+            "exit_due": True,
+            "managed_exit_policy_id": "GLOBEX_ACTIVE_EVIDENCE_TIMEBOX_60M_EXIT_V1",
+        }
+    )
+    inputs["managed_orders"]["managed_orders"][0].update(
+        {
+            "local_symbol": "MNQU6",
+            "con_id": 793356225,
+            "symbol": "MNQ",
+            "required_close_action": "BUY",
+            "required_close_quantity": "1",
+            "working": False,
+        }
+    )
+
+    payload = _build(tmp_path, inputs)
+
+    position = payload["position_state"]["positions"][0]
+    assert position["con_id"] == 793356225
+    assert position["local_symbol"] == "MNQU6"
+    assert position["instrument"] == "MNQ"
+    intent = payload["generated_exit_intents"][0]
+    assert intent["local_symbol"] == "MNQU6"
+    assert intent["con_id"] == 793356225
+    assert intent["close_action"] == "BUY"
+    assert intent["close_qty"] == "1"
+    assert payload["exit_authority_decisions"][0]["decision"] == "ALLOWED"
+
+
 def test_timebox_due_short_builds_buy_intent_and_allowed_decision(tmp_path: Path) -> None:
     payload = _build(tmp_path, _inputs(), decision_inputs={"life-mes": {"timebox_due": True}})
 

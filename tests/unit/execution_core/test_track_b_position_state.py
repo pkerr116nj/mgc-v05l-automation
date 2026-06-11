@@ -71,6 +71,38 @@ def test_exact_lifecycle_match_attributes_position(tmp_path: Path) -> None:
     assert position["lane_id"] == "lane_1"
 
 
+def test_replacement_contract_identity_enriched_from_current_managed_position(tmp_path: Path) -> None:
+    report = _report(
+        tmp_path,
+        broker_positions=[
+            _broker_position(
+                local_symbol="",
+                con_id=0,
+                symbol="MNQ",
+                quantity="-1",
+            )
+        ],
+        managed_positions=[
+            _managed_position(
+                local_symbol="MNQU6",
+                con_id=793356225,
+                side="SHORT",
+                lifecycle_id="life-mnq",
+                trade_id="trade-mnq",
+                strategy_id="mnq_strategy",
+                lane_id="mnq_lane",
+            )
+        ],
+    )
+
+    position = report["positions"][0]
+    assert position["con_id"] == 793356225
+    assert position["local_symbol"] == "MNQU6"
+    assert position["instrument"] == "MNQ"
+    assert position["attribution_status"] == "ATTRIBUTED"
+    assert any(row.get("kind") == "contract_identity_enrichment" for row in position["diagnostic_rows"])
+
+
 def test_missing_lifecycle_is_unattributed_but_still_broker_risk(tmp_path: Path) -> None:
     report = _report(tmp_path, broker_positions=[_broker_position(quantity="1")], managed_positions=[])
 

@@ -474,17 +474,24 @@ def _source_refs(
 
 
 def _broker_position_for_intent(*, intent: ExitIntent, reconciliation: Mapping[str, Any]) -> dict[str, Any]:
+    fallback_candidates: list[dict[str, Any]] = []
     for row in (_mapping(item) for item in _list(reconciliation.get("track_b_broker_positions"))):
         account = str(row.get("account_id") or row.get("account") or intent.account_id)
         local_symbol = str(row.get("local_symbol") or "").upper()
         row_con_id = _int(row.get("con_id"))
+        quantity = _decimal(row.get("quantity"))
+        if account != intent.account_id or abs(quantity) <= Decimal("0"):
+            continue
         if (
-            account == intent.account_id
-            and local_symbol == intent.local_symbol
+            local_symbol == intent.local_symbol
             and (row_con_id == intent.con_id or row_con_id == 0)
-            and abs(_decimal(row.get("quantity"))) > Decimal("0")
         ):
             return row
+        row_instrument = str(row.get("track_b_root") or row.get("symbol") or "").upper()
+        if not local_symbol and row_con_id == 0 and row_instrument == intent.instrument:
+            fallback_candidates.append(row)
+    if len(fallback_candidates) == 1:
+        return fallback_candidates[0]
     return {}
 
 

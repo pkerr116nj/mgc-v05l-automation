@@ -282,6 +282,11 @@ def _position_state(
     source_refs: tuple[SourceArtifactRef, ...],
     diagnostics: list[dict[str, Any]],
 ) -> TrackBPositionState:
+    broker_position = _enriched_broker_position_identity(
+        broker_position=broker_position,
+        managed_match=managed_match,
+        diagnostics=diagnostics,
+    )
     qty = abs(_decimal(broker_position.get("quantity") or broker_position.get("position") or broker_position.get("signed_qty")))
     side = PositionSide.LONG if _decimal(broker_position.get("quantity") or broker_position.get("position") or broker_position.get("signed_qty")) > 0 else PositionSide.SHORT
     match = _mapping(managed_match)
@@ -304,6 +309,83 @@ def _position_state(
         source_artifact_refs=source_refs,
         diagnostic_rows=tuple(diagnostics),
     )
+
+
+def _enriched_broker_position_identity(
+    *,
+    broker_position: Mapping[str, Any],
+    managed_match: Mapping[str, Any] | None,
+    diagnostics: list[dict[str, Any]],
+) -> dict[str, Any]:
+    enriched = dict(broker_position)
+    match = _mapping(managed_match)
+    broker_nested = _mapping(match.get("broker_position"))
+    identity = _contract_identity_from_managed_match(match)
+    enriched_fields: list[str] = []
+    for field, aliases in {
+        "con_id": ("con_id", "conId"),
+        "local_symbol": ("local_symbol", "localSymbol"),
+        "expiry": ("expiry",),
+        "symbol": ("symbol", "instrument", "track_b_root"),
+        "track_b_root": ("track_b_root", "instrument", "symbol"),
+    }.items():
+        current = enriched.get(field)
+        if field == "con_id":
+            missing = _int(current) <= 0
+        else:
+            missing = not str(current or "").strip()
+        if not missing:
+            continue
+        replacement = next(
+            (
+                identity.get(alias)
+                for alias in aliases
+                if str(identity.get(alias) or "").strip()
+            ),
+            None,
+        )
+        if replacement is None and broker_nested:
+            replacement = next(
+                (
+                    broker_nested.get(alias)
+                    for alias in aliases
+                    if str(broker_nested.get(alias) or "").strip()
+                ),
+                None,
+            )
+        if replacement is None:
+            continue
+        enriched[field] = replacement
+        enriched_fields.append(field)
+    if enriched_fields:
+        diagnostics.append(
+            {
+                "source": "managed_positions",
+                "kind": "contract_identity_enrichment",
+                "fields": enriched_fields,
+                "lifecycle_id": match.get("lifecycle_id"),
+                "trade_id": match.get("trade_id"),
+                "local_symbol": enriched.get("local_symbol"),
+                "con_id": enriched.get("con_id"),
+            }
+        )
+    return enriched
+
+
+def _contract_identity_from_managed_match(row: Mapping[str, Any]) -> dict[str, Any]:
+    broker_nested = _mapping(row.get("broker_position"))
+    lifecycle_nested = _mapping(row.get("lifecycle_position"))
+    manifest_nested = _mapping(row.get("position_management_manifest") or row.get("manifest"))
+    lifecycle_units = [_mapping(item) for item in _list(row.get("lifecycle_units"))]
+    sources = [row, broker_nested, lifecycle_nested, manifest_nested, *lifecycle_units]
+    identity: dict[str, Any] = {}
+    for field in ("con_id", "conId", "local_symbol", "localSymbol", "expiry", "symbol", "instrument", "track_b_root"):
+        for source in sources:
+            value = source.get(field)
+            if str(value or "").strip():
+                identity[field] = value
+                break
+    return identity
 
 
 def _matching_current_managed_position(
