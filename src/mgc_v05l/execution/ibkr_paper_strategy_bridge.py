@@ -126,6 +126,13 @@ _EXPECTED_TIF = "DAY"
 _EXPECTED_QUANTITY = 1.0
 _DEFAULT_TIMEOUT_SECONDS = 15.0
 _DEFAULT_KILL_SWITCH_PATH = Path("var") / "ibkr_paper_strategy_bridge.disabled"
+_DEFAULT_PAPER_CONFIG_IN_FORCE_PATH = (
+    Path("outputs")
+    / "probationary_pattern_engine"
+    / "paper_session"
+    / "runtime"
+    / "paper_config_in_force.json"
+)
 _SCHEMA_PATH = Path("strategy_order_intent_schema.json")
 _MANUAL_HARNESS_CLIENT_ID_OFFSET = 1000
 _SUPPORTED_STRATEGY_IDS = {
@@ -387,7 +394,10 @@ def _bridge_phase1_target(
     intent: IbkrPaperStrategyOrderIntent,
 ) -> dict[str, Any]:
     metadata = dict(config.caller_metadata or {})
+    active_profile_lane = _active_profile_bridge_lane(config=config, intent=intent)
     lane_adapter = lane_submit_bridge_adapter(lane_id=intent.strategy_id)
+    if lane_adapter is None and active_profile_lane.get("passed") is True:
+        lane_adapter = _lane_adapter_from_active_profile_row(active_profile_lane.get("row"))
     target = dict(lane_adapter.get("bridge_execution_target") or {}) if lane_adapter is not None else {}
     approved = bool(target)
     if not target:
@@ -461,9 +471,99 @@ def _bridge_phase1_target(
         "route_destination": route_destination,
         "lane_adapter_present": lane_adapter is not None,
         "lane_adapter": dict(lane_adapter or {}),
+        "active_profile_lane": active_profile_lane,
         "supervised_runtime_route": supervised_runtime_route,
         "friendly_label": str(target.get("friendly_label") or f"{symbol} {contract_month}".strip()).strip(),
     }
+
+
+def _active_profile_bridge_lane(
+    *,
+    config: IbkrPaperStrategyBridgeConfig,
+    intent: IbkrPaperStrategyOrderIntent,
+) -> dict[str, Any]:
+    metadata = dict(config.caller_metadata or {})
+    payload = _read_json(_resolve_repo_path(config.repo_root, _DEFAULT_PAPER_CONFIG_IN_FORCE_PATH))
+    rows = [row for row in list(payload.get("lanes") or []) if isinstance(row, Mapping)]
+    identity_candidates = {
+        str(value or "").strip()
+        for value in (
+            intent.strategy_id,
+            config.strategy_id,
+            metadata.get("lane_id"),
+            metadata.get("strategy_id"),
+            metadata.get("rule_id"),
+            metadata.get("entry_source"),
+        )
+        if str(value or "").strip()
+    }
+    for row in rows:
+        row_map = dict(row)
+        overlay = dict(row_map.get("runtime_overlay_params") or {})
+        row_identities = {
+            str(value or "").strip()
+            for value in (
+                row_map.get("lane_id"),
+                row_map.get("strategy_id"),
+                row_map.get("rule_id"),
+                row_map.get("entry_source"),
+                overlay.get("lane_id"),
+                overlay.get("strategy_id"),
+                overlay.get("rule_id"),
+                overlay.get("entry_source"),
+            )
+            if str(value or "").strip()
+        }
+        if not identity_candidates.intersection(row_identities):
+            continue
+        execution_mode = str(row_map.get("execution_mode") or overlay.get("execution_mode") or "").strip()
+        if execution_mode != "IBKR_PAPER_BRIDGE":
+            return {
+                "passed": False,
+                "row": row_map,
+                "execution_mode": execution_mode,
+                "detail": "Active profile lane exists, but its execution_mode is not IBKR_PAPER_BRIDGE.",
+            }
+        return {
+            "passed": True,
+            "row": row_map,
+            "execution_mode": execution_mode,
+            "detail": "Active runtime profile lane roster allows this IBKR_PAPER_BRIDGE lane.",
+        }
+    return {
+        "passed": False,
+        "row": {},
+        "execution_mode": None,
+        "detail": "Lane identity is not present in the active runtime profile roster.",
+    }
+
+
+def _lane_adapter_from_active_profile_row(row: object) -> dict[str, Any] | None:
+    if not isinstance(row, Mapping):
+        return None
+    row_map = dict(row)
+    overlay = dict(row_map.get("runtime_overlay_params") or {})
+    target = dict(row_map.get("bridge_execution_target") or {})
+    return {
+        "lane_id": row_map.get("lane_id") or overlay.get("lane_id"),
+        "source_instrument": row_map.get("symbol") or row_map.get("instrument") or overlay.get("source_instrument"),
+        "current_order_destination": row_map.get("current_order_destination") or overlay.get("current_order_destination"),
+        "bridge_proxy_mode": row_map.get("bridge_proxy_mode") or overlay.get("bridge_proxy_mode"),
+        "bridge_execution_target": target,
+        "active_profile_roster_adapter": True,
+    }
+
+
+def _resolve_repo_path(repo_root: Path, path: Path) -> Path:
+    return path if path.is_absolute() else repo_root / path
+
+
+def _read_json(path: Path) -> dict[str, Any]:
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (FileNotFoundError, OSError, json.JSONDecodeError):
+        return {}
+    return dict(payload) if isinstance(payload, Mapping) else {}
 
 
 def _phase1_target_detail_label(target: dict[str, Any]) -> str:
@@ -2891,6 +2991,8 @@ def _build_static_preflight_checks(
     expected_target = _bridge_phase1_target(config=config, intent=intent)
     expected_label = _phase1_target_detail_label(expected_target)
     lane_adapter = dict(expected_target.get("lane_adapter") or {})
+    active_profile_lane = dict(expected_target.get("active_profile_lane") or {})
+    active_profile_lane_allowed = active_profile_lane.get("passed") is True
     runtime_route = _authorized_supervised_runtime_route_check(config=config, intent=intent)
     leak_test_authorization = _leak_test_authorization_check(config=config, intent=intent)
     phase1_reconciliation_gate = _phase1_reconciliation_gate_for_bridge(config=config, intent=intent)
@@ -3010,7 +3112,16 @@ def _build_static_preflight_checks(
         ),
         _check("paper_environment_lock", environment_lock["passed"], True, str(environment_lock.get("port_policy") or environment_lock.get("detail") or "Environment lock failed.")),
         _check("paper_only_intent", bool(intent.paper_only), True, "Intent must remain explicitly paper-only."),
-        _check("strategy_allowlist", intent.strategy_id in _SUPPORTED_STRATEGY_IDS or bool(lane_adapter), True, "Only the ATP Companion baseline and explicitly ported paper strategy lane identities are allowed in the paper bridge."),
+        _check(
+            "strategy_allowlist",
+            intent.strategy_id in _SUPPORTED_STRATEGY_IDS or bool(lane_adapter) or active_profile_lane_allowed,
+            True,
+            (
+                str(active_profile_lane.get("detail") or "")
+                if active_profile_lane
+                else "Only the ATP Companion baseline and explicitly ported paper strategy lane identities are allowed in the paper bridge."
+            ),
+        ),
         _check(
             "executable_contract_whitelist",
             _phase1_target_is_configured(expected_target) and intent.symbol == str(expected_target.get("symbol") or "").strip().upper(),
@@ -3033,9 +3144,15 @@ def _build_static_preflight_checks(
         ),
         _check(
             "selected_lane_adapter_present",
-            bool(lane_adapter) if intent.strategy_id not in {"ATP_COMPANION_V1_ASIA_US", "ATP_COMPANION_V1_GC_ASIA_US", "ATP_COMPANION_V1_GC_ASIA_US_PRODUCTION_TRACK"} else True,
+            (bool(lane_adapter) or active_profile_lane_allowed)
+            if intent.strategy_id not in {"ATP_COMPANION_V1_ASIA_US", "ATP_COMPANION_V1_GC_ASIA_US", "ATP_COMPANION_V1_GC_ASIA_US_PRODUCTION_TRACK"}
+            else True,
             True,
-            "Non-ATP paper strategy lanes require an explicit bridge adapter before submit-capable routing is allowed.",
+            (
+                "Active runtime profile lane roster supplies the PAPER bridge adapter."
+                if active_profile_lane_allowed
+                else "Non-ATP paper strategy lanes require an explicit bridge adapter before submit-capable routing is allowed."
+            ),
         ),
         _check("quantity_cap", float(intent.quantity) == _EXPECTED_QUANTITY, True, "Quantity must equal exactly one contract."),
         _check("order_type_lock", intent.order_type == _EXPECTED_ORDER_TYPE, True, "Only LMT orders are allowed in the phase-1 paper bridge."),

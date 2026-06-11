@@ -534,6 +534,53 @@ def _config(tmp_path: Path, **overrides: object) -> IbkrPaperStrategyBridgeConfi
     return IbkrPaperStrategyBridgeConfig(**payload)
 
 
+def _write_active_profile_roster(tmp_path: Path, lanes: list[dict[str, object]]) -> None:
+    path = (
+        tmp_path
+        / "outputs"
+        / "probationary_pattern_engine"
+        / "paper_session"
+        / "runtime"
+        / "paper_config_in_force.json"
+    )
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        json.dumps(
+            {
+                "profile": "mnq_mes_full_session_active_evidence",
+                "lanes": lanes,
+            }
+        ),
+        encoding="utf-8",
+    )
+
+
+def _active_profile_lane(lane_id: str, *, symbol: str = "MNQ", execution_mode: str = "IBKR_PAPER_BRIDGE") -> dict[str, object]:
+    strategy_id = f"PAPER_ACTIVE_EVIDENCE_{symbol}_US_PARTICIPATION_LONG_V1"
+    return {
+        "lane_id": lane_id,
+        "symbol": symbol,
+        "execution_mode": execution_mode,
+        "current_order_destination": "ibkr_paper_bridge_submit_capable",
+        "bridge_proxy_mode": f"{symbol}_SIGNAL_DIRECT_PHASE1",
+        "bridge_execution_target": {
+            "symbol": symbol,
+            "contract_month": "202606",
+            "exchange": "CME",
+            "currency": "USD",
+            "multiplier": "2" if symbol == "MNQ" else "5",
+        },
+        "runtime_overlay_params": {
+            "lane_id": lane_id,
+            "strategy_id": strategy_id,
+            "rule_id": strategy_id,
+            "entry_source": strategy_id,
+            "execution_mode": execution_mode,
+            "current_order_destination": "ibkr_paper_bridge_submit_capable",
+        },
+    }
+
+
 class _HandshakeFailureTransport:
     def __init__(self, *, client: object, collector: object, config: object, module_loader: object | None = None) -> None:
         del client, module_loader
@@ -2280,6 +2327,172 @@ def test_ported_es_lane_passes_static_submit_gate_with_full_size_es_execution_ta
     )
 
     assert all(row["passed"] for row in checks)
+
+
+def test_active_profile_roster_lanes_pass_paper_bridge_allowlist(tmp_path: Path) -> None:
+    lane_ids = [
+        "mnq_us_active_participation_long",
+        "mnq_us_active_participation_short",
+        "mes_us_active_participation_long",
+        "mes_us_active_participation_short",
+        "mnq_globex_active_participation_long",
+        "mnq_globex_active_participation_short",
+        "mes_globex_active_participation_long",
+        "mes_globex_active_participation_short",
+        "mnq_london_open_active_participation_long",
+        "mnq_london_open_active_participation_short",
+        "mes_london_open_active_participation_long",
+        "mes_london_open_active_participation_short",
+        "mnq_london_late_active_participation_short",
+    ]
+    _write_active_profile_roster(
+        tmp_path,
+        [
+            _active_profile_lane(lane_id, symbol="MES" if lane_id.startswith("mes_") else "MNQ")
+            for lane_id in lane_ids
+        ],
+    )
+
+    for lane_id in lane_ids:
+        symbol = "MES" if lane_id.startswith("mes_") else "MNQ"
+        config = _config(
+            tmp_path,
+            submit=True,
+            strategy_id=lane_id,
+            symbol=symbol,
+            caller_path="probationary_paper_runtime_lane",
+            caller_metadata=_approved_runtime_metadata(
+                strategy_id=lane_id,
+                source_instrument=symbol,
+                executable_proxy=symbol,
+                bridge_proxy_mode=f"{symbol}_SIGNAL_DIRECT_PHASE1",
+            ),
+            manual_frozen_preview_path=None,
+            approval_digest=None,
+            approval_phrase=None,
+        )
+        intent = IbkrPaperStrategyOrderIntent(
+            strategy_id=config.strategy_id,
+            symbol=config.symbol,
+            contract_month=config.contract_month,
+            action=config.action,
+            quantity=config.quantity,
+            order_type=config.order_type,
+            limit_price_model=config.limit_price_model,
+            time_in_force=config.time_in_force,
+            reason=config.reason,
+            timestamp="2026-06-11T14:35:00+00:00",
+            risk_tags=config.risk_tags,
+            paper_only=config.paper_only,
+        )
+
+        checks = _build_static_preflight_checks(
+            config=config,
+            intent=intent,
+            environment_lock=evaluate_paper_preview_environment_lock(mode=config.mode, host=config.host, port=config.port),
+            caller_gate={"passed": True, "detail": "runtime"},
+            monitor_status={},
+            governance_status=_healthy_lane_governance(),
+            exposure_status=_healthy_exposure(),
+        )
+
+        assert next(row for row in checks if row["name"] == "strategy_allowlist")["passed"] is True
+        assert next(row for row in checks if row["name"] == "selected_lane_adapter_present")["passed"] is True
+
+
+def test_active_profile_roster_blocks_lane_not_loaded(tmp_path: Path) -> None:
+    _write_active_profile_roster(tmp_path, [_active_profile_lane("mnq_us_active_participation_long")])
+    config = _config(
+        tmp_path,
+        submit=True,
+        strategy_id="mnq_us_active_participation_short",
+        symbol="MNQ",
+        caller_path="probationary_paper_runtime_lane",
+        caller_metadata=_approved_runtime_metadata(
+            strategy_id="mnq_us_active_participation_short",
+            source_instrument="MNQ",
+            executable_proxy="MNQ",
+            bridge_proxy_mode="MNQ_SIGNAL_DIRECT_PHASE1",
+        ),
+        manual_frozen_preview_path=None,
+        approval_digest=None,
+        approval_phrase=None,
+    )
+    intent = IbkrPaperStrategyOrderIntent(
+        strategy_id=config.strategy_id,
+        symbol=config.symbol,
+        contract_month=config.contract_month,
+        action=config.action,
+        quantity=config.quantity,
+        order_type=config.order_type,
+        limit_price_model=config.limit_price_model,
+        time_in_force=config.time_in_force,
+        reason=config.reason,
+        timestamp="2026-06-11T14:35:00+00:00",
+        risk_tags=config.risk_tags,
+        paper_only=config.paper_only,
+    )
+
+    checks = _build_static_preflight_checks(
+        config=config,
+        intent=intent,
+        environment_lock=evaluate_paper_preview_environment_lock(mode=config.mode, host=config.host, port=config.port),
+        caller_gate={"passed": True, "detail": "runtime"},
+        monitor_status={},
+        governance_status=_healthy_lane_governance(),
+        exposure_status=_healthy_exposure(),
+    )
+
+    assert next(row for row in checks if row["name"] == "strategy_allowlist")["passed"] is False
+
+
+def test_active_profile_roster_blocks_wrong_execution_mode(tmp_path: Path) -> None:
+    lane_id = "mnq_us_active_participation_long"
+    _write_active_profile_roster(tmp_path, [_active_profile_lane(lane_id, execution_mode="SIMULATION")])
+    config = _config(
+        tmp_path,
+        submit=True,
+        strategy_id=lane_id,
+        symbol="MNQ",
+        caller_path="probationary_paper_runtime_lane",
+        caller_metadata=_approved_runtime_metadata(
+            strategy_id=lane_id,
+            source_instrument="MNQ",
+            executable_proxy="MNQ",
+            bridge_proxy_mode="MNQ_SIGNAL_DIRECT_PHASE1",
+        ),
+        manual_frozen_preview_path=None,
+        approval_digest=None,
+        approval_phrase=None,
+    )
+    intent = IbkrPaperStrategyOrderIntent(
+        strategy_id=config.strategy_id,
+        symbol=config.symbol,
+        contract_month=config.contract_month,
+        action=config.action,
+        quantity=config.quantity,
+        order_type=config.order_type,
+        limit_price_model=config.limit_price_model,
+        time_in_force=config.time_in_force,
+        reason=config.reason,
+        timestamp="2026-06-11T14:35:00+00:00",
+        risk_tags=config.risk_tags,
+        paper_only=config.paper_only,
+    )
+
+    checks = _build_static_preflight_checks(
+        config=config,
+        intent=intent,
+        environment_lock=evaluate_paper_preview_environment_lock(mode=config.mode, host=config.host, port=config.port),
+        caller_gate={"passed": True, "detail": "runtime"},
+        monitor_status={},
+        governance_status=_healthy_lane_governance(),
+        exposure_status=_healthy_exposure(),
+    )
+
+    allowlist = next(row for row in checks if row["name"] == "strategy_allowlist")
+    assert allowlist["passed"] is False
+    assert "execution_mode is not IBKR_PAPER_BRIDGE" in allowlist["detail"]
 
 
 def test_supervised_runtime_route_uses_lane_authoritative_target_matrix_even_with_stale_monitor_exact_contract(tmp_path: Path) -> None:
