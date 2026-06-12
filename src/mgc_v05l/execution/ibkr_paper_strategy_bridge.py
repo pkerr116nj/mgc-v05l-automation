@@ -25,13 +25,17 @@ from .ibkr_manual_paper_submit import (
     IbkrManualPaperSubmitConfig,
     IbkrManualPaperSubmitTransport,
     _build_callback_timeline,
+    _contract_for_order_submission,
     _exact_contract_position_quantity,
+    _find_open_order,
     artifact_stem_for_test_mode,
     frozen_preview_path_for_config,
     _probe_delayed_quote_context,
     _qualify_futures_contract,
+    _refresh_execution_truth,
     _refresh_open_orders_snapshot,
     _refresh_positions_snapshot,
+    _wait_for_submitted_order_visibility,
     run_ibkr_manual_paper_submit_test,
     write_ibkr_manual_paper_submit_artifacts,
 )
@@ -1374,14 +1378,26 @@ def run_ibkr_paper_strategy_bridge(
                 extra={"submit_intent_ownership": submit_intent_ownership_pre_submit},
             )
             try:
-                delegated_result = _delegate_to_manual_harness(
-                    config=config,
-                    intent=intent,
-                    exit_attempt_policy=exit_attempt_policy,
-                    entry_execution_pricing=entry_execution_pricing,
-                    pre_action_snapshot_validation=pre_action_snapshot_validation
-                    or _pre_action_context_from_runtime_authorization(runtime_control_plane_authorization),
-                )
+                if _bridge_runtime_supervised_invocation(config):
+                    delegated_result = _direct_runtime_paper_submit(
+                        config=config,
+                        intent=intent,
+                        runtime=runtime,
+                        selected_account_id=selected_account_id,
+                        qualified_contract_report=qualified_contract_report,
+                        entry_execution_pricing=entry_execution_pricing,
+                        exit_attempt_policy=exit_attempt_policy,
+                        sleep_fn=sleep_fn,
+                    )
+                else:
+                    delegated_result = _delegate_to_manual_harness(
+                        config=config,
+                        intent=intent,
+                        exit_attempt_policy=exit_attempt_policy,
+                        entry_execution_pricing=entry_execution_pricing,
+                        pre_action_snapshot_validation=pre_action_snapshot_validation
+                        or _pre_action_context_from_runtime_authorization(runtime_control_plane_authorization),
+                    )
             except Exception as delegate_exc:
                 submit_intent_ownership_update = _persist_submit_intent_ownership_delegate_exception(
                     config=config,
@@ -1444,8 +1460,16 @@ def run_ibkr_paper_strategy_bridge(
             )
             _record_bridge_audit(
                 audit_events,
-                event_type="delegated_manual_harness_completed",
-                detail="Paper strategy bridge delegated to the proven manual paper harness.",
+                event_type=(
+                    "direct_runtime_paper_submit_completed"
+                    if _bridge_runtime_supervised_invocation(config)
+                    else "delegated_manual_harness_completed"
+                ),
+                detail=(
+                    "Paper strategy bridge submitted directly through the supervised IBKR PAPER runtime adapter."
+                    if _bridge_runtime_supervised_invocation(config)
+                    else "Paper strategy bridge delegated to the proven manual paper harness."
+                ),
                 config=config,
                 extra={
                     "delegated_classification": delegated_result.get("classification"),
@@ -4251,6 +4275,283 @@ def _paper_strategy_monitor_submit_gate_detail(monitor_status: dict[str, Any]) -
     return detail or (
         f"Paper strategy monitor blocked submit: {', '.join(list(monitor_status.get('block_reasons') or [])) or 'unknown_reason'}"
     )
+
+
+def _direct_runtime_paper_submit(
+    *,
+    config: IbkrPaperStrategyBridgeConfig,
+    intent: IbkrPaperStrategyOrderIntent,
+    runtime: _Runtime,
+    selected_account_id: str,
+    qualified_contract_report: dict[str, Any],
+    entry_execution_pricing: dict[str, Any] | None,
+    exit_attempt_policy: ExitAttemptPolicy,
+    sleep_fn: Callable[[float], None],
+) -> dict[str, Any]:
+    """Submit one guarded PAPER order through the already-connected runtime bridge."""
+
+    limit_price_text = _submit_ownership_limit_price(dict(entry_execution_pricing or {}))
+    limit_price = _float_or_none(limit_price_text)
+    if limit_price is None:
+        return _direct_runtime_submit_result(
+            classification="PAPER_STRATEGY_INTENT_BLOCKED",
+            status="blocked",
+            detail="DIRECT_RUNTIME_SUBMIT_BLOCKED_NO_LIMIT_PRICE",
+            config=config,
+            intent=intent,
+            entry_execution_pricing=entry_execution_pricing,
+            exit_attempt_policy=exit_attempt_policy,
+        )
+    order_id = runtime.session.allocate_order_id()
+    runtime.collector.reset_order_status_event(order_id)
+    order_ref = _runtime_direct_order_ref(config=config, intent=intent, order_id=order_id)
+    runtime.transport.place_limit_order(
+        order_id=order_id,
+        account_id=selected_account_id,
+        contract=_contract_for_order_submission(qualified_contract_report),
+        action=str(intent.action or "").strip().upper(),
+        quantity=float(intent.quantity),
+        limit_price=float(limit_price),
+        time_in_force=_EXPECTED_TIF,
+        order_ref=order_ref,
+    )
+    after_submit = _wait_for_submitted_order_visibility(
+        runtime=runtime,
+        config=_direct_runtime_submit_config(
+            config=config,
+            intent=intent,
+            limit_price=limit_price,
+            order_ref=order_ref,
+            exit_attempt_policy=exit_attempt_policy,
+            entry_execution_pricing=entry_execution_pricing,
+        ),
+        selected_account_id=selected_account_id,
+        order_id=order_id,
+        timeout_seconds=float(config.timeout_seconds),
+        sleep_fn=sleep_fn,
+    )
+    submitted_row = _find_open_order(after_submit, order_id)
+    latest_status = runtime.collector.latest_order_status(order_id)
+    execution_truth = _direct_runtime_execution_truth(
+        runtime=runtime,
+        config=config,
+        intent=intent,
+        selected_account_id=selected_account_id,
+        limit_price=limit_price,
+        order_ref=order_ref,
+        exit_attempt_policy=exit_attempt_policy,
+        entry_execution_pricing=entry_execution_pricing,
+        sleep_fn=sleep_fn,
+    )
+    executions = list(execution_truth.get("executions") or [])
+    matching_execution = _matching_execution_for_order(order_id=order_id, executions=executions)
+    perm_id = (
+        (submitted_row or {}).get("perm_id")
+        or (latest_status or {}).get("perm_id")
+        or (matching_execution or {}).get("perm_id")
+    )
+    filled = bool(matching_execution) or str((latest_status or {}).get("status") or "").strip().upper() == "FILLED"
+    visible = submitted_row is not None
+    status = "filled" if filled else ("working_submitted" if visible else "submit_verification_failed")
+    classification = (
+        "PAPER_STRATEGY_ORDER_FILLED"
+        if filled
+        else ("PAPER_STRATEGY_ORDER_WORKING" if visible else "PAPER_STRATEGY_SUBMIT_VERIFICATION_UNKNOWN")
+    )
+    detail = (
+        "Direct supervised IBKR PAPER submit filled."
+        if filled
+        else (
+            "Direct supervised IBKR PAPER submit produced a visible working order."
+            if visible
+            else "Direct supervised IBKR PAPER submit was sent but broker visibility could not be confirmed."
+        )
+    )
+    return _direct_runtime_submit_result(
+        classification=classification,
+        status=status,
+        detail=detail,
+        config=config,
+        intent=intent,
+        entry_execution_pricing=entry_execution_pricing,
+        exit_attempt_policy=exit_attempt_policy,
+        order_id=order_id,
+        perm_id=_int_or_none(perm_id),
+        client_id=int(config.client_id),
+        order_ref=order_ref,
+        limit_price=limit_price,
+        latest_order_status=latest_status,
+        open_order_after_submit=after_submit,
+        executions_after_submit=executions,
+        matching_execution=matching_execution,
+    )
+
+
+def _direct_runtime_submit_result(
+    *,
+    classification: str,
+    status: str,
+    detail: str,
+    config: IbkrPaperStrategyBridgeConfig,
+    intent: IbkrPaperStrategyOrderIntent,
+    entry_execution_pricing: dict[str, Any] | None,
+    exit_attempt_policy: ExitAttemptPolicy,
+    order_id: int | None = None,
+    perm_id: int | None = None,
+    client_id: int | None = None,
+    order_ref: str | None = None,
+    limit_price: float | None = None,
+    latest_order_status: dict[str, Any] | None = None,
+    open_order_after_submit: dict[str, Any] | None = None,
+    executions_after_submit: list[dict[str, Any]] | None = None,
+    matching_execution: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    lifecycle = {
+        "status": status,
+        "detail": detail,
+        "submitted_order_id": order_id,
+        "broker_order_id": order_id,
+        "order_id": order_id,
+        "submitted_perm_id": perm_id,
+        "perm_id": perm_id,
+        "client_id": client_id,
+        "order_ref": order_ref,
+        "limit_price": limit_price,
+        "latest_order_status": latest_order_status or {},
+        "open_order_after_submit": open_order_after_submit or {},
+        "executions_after_submit": executions_after_submit or [],
+    }
+    if matching_execution:
+        lifecycle.update(
+            {
+                "exec_id": matching_execution.get("execution_id") or matching_execution.get("exec_id"),
+                "execution_id": matching_execution.get("execution_id") or matching_execution.get("exec_id"),
+                "fill_price": matching_execution.get("price"),
+                "fill_timestamp": matching_execution.get("executed_at") or matching_execution.get("time"),
+            }
+        )
+    return {
+        "classification": classification,
+        "status": status,
+        "detail": detail,
+        "broker_state_mutated": order_id is not None,
+        "submit_path": "DIRECT_IBKR_PAPER_RUNTIME_ADAPTER",
+        "manual_harness_used": False,
+        "entry_execution_pricing": dict(entry_execution_pricing or {}),
+        "report": {
+            "classification": classification,
+            "status": status,
+            "detail": detail,
+            "submit_path": "DIRECT_IBKR_PAPER_RUNTIME_ADAPTER",
+            "manual_harness_used": False,
+            "environment": {
+                "mode": config.mode,
+                "host": config.host,
+                "port": config.port,
+                "client_id": config.client_id,
+                "account_id": config.account_id,
+            },
+            "intent": intent.to_dict(),
+            "entry_execution_pricing": dict(entry_execution_pricing or {}),
+            "exit_attempt_policy": exit_attempt_policy.to_json_dict(),
+            "submit_cancel_lifecycle": lifecycle,
+        },
+    }
+
+
+def _direct_runtime_submit_config(
+    *,
+    config: IbkrPaperStrategyBridgeConfig,
+    intent: IbkrPaperStrategyOrderIntent,
+    limit_price: float,
+    order_ref: str,
+    exit_attempt_policy: ExitAttemptPolicy,
+    entry_execution_pricing: dict[str, Any] | None,
+) -> IbkrManualPaperSubmitConfig:
+    expected_target = _bridge_phase1_target(config=config, intent=intent)
+    return IbkrManualPaperSubmitConfig(
+        repo_root=config.repo_root,
+        mode=config.mode,
+        host=config.host,
+        port=config.port,
+        client_id=config.client_id,
+        account_id=config.account_id,
+        symbol=str(expected_target.get("symbol") or intent.symbol or "").strip().upper(),
+        expiry=str(expected_target.get("contract_month") or intent.contract_month or "").strip(),
+        action=str(intent.action or "").strip().upper(),
+        quantity=float(intent.quantity),
+        order_type=_EXPECTED_ORDER_TYPE,
+        limit_price=float(limit_price),
+        time_in_force=_EXPECTED_TIF,
+        test_mode=_intent_test_mode(config=config, intent=intent),
+        timeout_seconds=float(config.timeout_seconds),
+        fill_timeout_seconds=_bridge_fill_timeout_seconds(
+            exit_attempt_policy=exit_attempt_policy,
+            entry_execution_pricing=entry_execution_pricing,
+        ),
+        caller_path="probationary_paper_runtime_lane",
+        submit=True,
+        order_ref=order_ref,
+    )
+
+
+def _runtime_direct_order_ref(
+    *,
+    config: IbkrPaperStrategyBridgeConfig,
+    intent: IbkrPaperStrategyOrderIntent,
+    order_id: int,
+) -> str:
+    metadata = dict(config.caller_metadata or {})
+    lane = str(metadata.get("lane_id") or config.strategy_id or intent.strategy_id or "lane").strip()
+    symbol = str(intent.symbol or config.symbol or "").strip().upper()
+    action = str(intent.action or config.action or "").strip().upper()
+    lane_token = "".join(ch if ch.isalnum() else "_" for ch in lane.upper())[:36]
+    return f"TRACK_B_RUNTIME_{symbol}_{action}_OID{int(order_id)}_{lane_token}"
+
+
+def _direct_runtime_execution_truth(
+    *,
+    runtime: _Runtime,
+    config: IbkrPaperStrategyBridgeConfig,
+    intent: IbkrPaperStrategyOrderIntent,
+    selected_account_id: str,
+    limit_price: float,
+    order_ref: str,
+    exit_attempt_policy: ExitAttemptPolicy,
+    entry_execution_pricing: dict[str, Any] | None,
+    sleep_fn: Callable[[float], None],
+) -> dict[str, Any]:
+    try:
+        return _refresh_execution_truth(
+            runtime=runtime,
+            config=_direct_runtime_submit_config(
+                config=config,
+                intent=intent,
+                limit_price=limit_price,
+                order_ref=order_ref,
+                exit_attempt_policy=exit_attempt_policy,
+                entry_execution_pricing=entry_execution_pricing,
+            ),
+            selected_account_id=selected_account_id,
+            timeout_seconds=float(config.timeout_seconds),
+            sleep_fn=sleep_fn,
+        )
+    except Exception as exc:
+        return {
+            "classification": "DIRECT_RUNTIME_EXECUTION_TRUTH_REFRESH_FAILED",
+            "error": str(exc),
+            "executions": [],
+            "completed_orders": [],
+        }
+
+
+def _matching_execution_for_order(*, order_id: int, executions: list[dict[str, Any]]) -> dict[str, Any] | None:
+    for row in executions:
+        if not isinstance(row, dict):
+            continue
+        if _int_or_none(row.get("broker_order_id") or row.get("order_id")) == int(order_id):
+            return row
+    return None
 
 
 def _delegate_to_manual_harness(

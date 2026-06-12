@@ -7359,3 +7359,192 @@ def test_autonomous_runtime_cannot_delegate_to_manual_harness_broker_submit(tmp_
         )
 
     assert "MANUAL_HARNESS_SUBMIT_DISABLED_UNLESS_EXPLICIT_OPERATOR_FLAG" in str(exc_info.value)
+
+
+class _FakeDirectRuntimeSession:
+    def __init__(self, order_id: int = 7001) -> None:
+        self.order_id = int(order_id)
+
+    def allocate_order_id(self) -> int:
+        return self.order_id
+
+
+class _FakeDirectRuntimeCollector:
+    def __init__(self, *, perm_id: int = 88001) -> None:
+        self.perm_id = int(perm_id)
+
+    def reset_order_status_event(self, order_id: int) -> None:
+        self.reset_order_id = int(order_id)
+
+    def latest_order_status(self, order_id: int) -> dict[str, object]:
+        return {
+            "order_id": int(order_id),
+            "perm_id": self.perm_id,
+            "status": "Submitted",
+        }
+
+
+class _FakeDirectRuntimeTransport:
+    def __init__(self) -> None:
+        self.place_calls: list[dict[str, object]] = []
+
+    def place_limit_order(self, **kwargs: object) -> None:
+        self.place_calls.append(dict(kwargs))
+
+
+@pytest.mark.parametrize(
+    ("lane_id", "symbol", "action", "intent_type", "intent_id", "limit_price"),
+    [
+        (
+            "mnq_us_active_participation_long",
+            "MNQ",
+            "BUY",
+            "BUY_TO_OPEN",
+            "MNQ|1m|2026-06-12T15:10:00Z|BUY_TO_OPEN",
+            29450.0,
+        ),
+        (
+            "mnq_us_active_participation_short",
+            "MNQ",
+            "SELL",
+            "SELL_TO_OPEN",
+            "MNQ|1m|2026-06-12T14:52:00Z|SELL_TO_OPEN",
+            29390.0,
+        ),
+        (
+            "mes_us_active_participation_long",
+            "MES",
+            "BUY",
+            "BUY_TO_OPEN",
+            "MES|1m|2026-06-12T15:11:00Z|BUY_TO_OPEN",
+            7478.0,
+        ),
+        (
+            "mes_us_active_participation_short",
+            "MES",
+            "SELL",
+            "SELL_TO_OPEN",
+            "MES|1m|2026-06-12T14:52:00Z|SELL_TO_OPEN",
+            7462.0,
+        ),
+    ],
+)
+def test_active_profile_runtime_intents_use_direct_ibkr_submit_not_manual_harness(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    lane_id: str,
+    symbol: str,
+    action: str,
+    intent_type: str,
+    intent_id: str,
+    limit_price: float,
+) -> None:
+    config = _config(
+        tmp_path,
+        submit=True,
+        strategy_id=lane_id,
+        symbol=symbol,
+        contract_month="202609",
+        action=action,
+        caller_path="probationary_paper_runtime_lane",
+        caller_metadata=_approved_runtime_metadata(
+            strategy_id=lane_id,
+            source_instrument=symbol,
+            executable_proxy=symbol,
+            action=action,
+            intent_type=intent_type,
+            bridge_proxy_mode=f"{symbol}_SIGNAL_DIRECT_PHASE1",
+        ),
+    )
+    intent = IbkrPaperStrategyOrderIntent(
+        strategy_id=lane_id,
+        symbol=symbol,
+        contract_month="202609",
+        action=action,
+        quantity=1.0,
+        order_type="LMT",
+        limit_price_model=config.limit_price_model,
+        time_in_force=config.time_in_force,
+        reason="ACTIVE_PROFILE_DIRECT_SUBMIT_DRY_RUN",
+        timestamp="2026-06-12T15:10:00+00:00",
+        risk_tags=config.risk_tags,
+        paper_only=True,
+        intent_id=intent_id,
+    )
+    policy = _exit_attempt_policy_for_bridge(
+        config=config,
+        intent=intent,
+        history_events=[],
+        current_position_quantity=0.0,
+        open_orders={"open_order_count": 0},
+        phase1_gate={"ready": True},
+    )
+    fake_transport = _FakeDirectRuntimeTransport()
+    fake_runtime = SimpleNamespace(
+        session=_FakeDirectRuntimeSession(order_id=7001),
+        collector=_FakeDirectRuntimeCollector(perm_id=88001),
+        transport=fake_transport,
+    )
+    monkeypatch.setattr(bridge_module, "_contract_for_order_submission", lambda _report: object())
+    monkeypatch.setattr(
+        bridge_module,
+        "_wait_for_submitted_order_visibility",
+        lambda **_kwargs: {
+            "open_order_count": 1,
+            "open_orders": [
+                {
+                    "broker_order_id": 7001,
+                    "perm_id": 88001,
+                    "client_id": config.client_id,
+                    "account_id": "DUM882026",
+                    "con_id": 770561201 if symbol == "MNQ" else 770561194,
+                    "local_symbol": "MNQU6" if symbol == "MNQ" else "MESU6",
+                    "action": action,
+                    "quantity": 1,
+                    "status": "Submitted",
+                }
+            ],
+        },
+    )
+    monkeypatch.setattr(
+        bridge_module,
+        "_direct_runtime_execution_truth",
+        lambda **_kwargs: {"executions": [], "completed_orders": []},
+    )
+    monkeypatch.setattr(
+        bridge_module,
+        "_delegate_to_manual_harness",
+        lambda **_kwargs: (_ for _ in ()).throw(AssertionError("manual harness must not be used")),
+    )
+
+    result = bridge_module._direct_runtime_paper_submit(
+        config=config,
+        intent=intent,
+        runtime=fake_runtime,
+        selected_account_id="DUM882026",
+        qualified_contract_report={"qualified_contract_object": object(), "api_contract_details": []},
+        entry_execution_pricing={
+            "is_entry": True,
+            "limit_price": limit_price,
+            "entry_execution_intent": "MARKETABLE_PAPER_ENTRY",
+        },
+        exit_attempt_policy=policy,
+        sleep_fn=lambda _seconds: None,
+    )
+
+    assert result["classification"] == "PAPER_STRATEGY_ORDER_WORKING"
+    assert result["manual_harness_used"] is False
+    assert result["submit_path"] == "DIRECT_IBKR_PAPER_RUNTIME_ADAPTER"
+    assert fake_transport.place_calls == [
+        {
+            "order_id": 7001,
+            "account_id": "DUM882026",
+            "contract": fake_transport.place_calls[0]["contract"],
+            "action": action,
+            "quantity": 1.0,
+            "limit_price": limit_price,
+            "time_in_force": "DAY",
+            "order_ref": fake_transport.place_calls[0]["order_ref"],
+        }
+    ]
+    assert str(fake_transport.place_calls[0]["order_ref"]).startswith(f"TRACK_B_RUNTIME_{symbol}_{action}_OID7001")
