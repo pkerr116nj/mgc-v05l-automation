@@ -3,9 +3,11 @@ from __future__ import annotations
 import json
 import subprocess
 from datetime import UTC, datetime
+from decimal import Decimal
 from pathlib import Path
 from typing import Any
 
+from mgc_v05l.execution_core.track_b_central_trade_registry import TradeEvent, TradeEventType
 from mgc_v05l.execution_core.track_b_managed_exit_actuator import (
     MANAGED_EXIT_ACTUATOR_APPLIED_OR_PENDING,
     MANAGED_EXIT_ACTUATOR_BLOCKED,
@@ -80,6 +82,42 @@ def _broker_truth(
     )
 
 
+def _write_live_entry_fill(
+    tmp_path: Path,
+    *,
+    trade_id: str,
+    lifecycle_id: str,
+    lane_id: str,
+    generated_at: datetime,
+) -> None:
+    path = tmp_path / "outputs/track_b_execution_core/trade_registry/live_trade_events.jsonl"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    event = TradeEvent(
+        event_id=f"{trade_id}_entry_fill",
+        event_type=TradeEventType.ENTRY_FILL_BROKER_BACKED,
+        generated_at=generated_at,
+        trade_id=trade_id,
+        lifecycle_id=lifecycle_id,
+        lane_id=lane_id,
+        thesis_strategy_id=lane_id,
+        account_id="DUM882026",
+        symbol="MES",
+        con_id=793356217,
+        local_symbol="MESU6",
+        expiry="20260918",
+        side="LONG",
+        action="BUY",
+        qty=Decimal("1"),
+        source_artifact_path="outputs/track_b_execution_core/test_entry.json",
+        order_id="1",
+        client_id="10110",
+        perm_id="1871421812",
+        exec_id="0000e1a7.6a4255b6.01.01",
+        price=Decimal("7496.5"),
+    )
+    path.write_text(json.dumps(event.to_dict(), sort_keys=True) + "\n", encoding="utf-8")
+
+
 def test_broker_truth_sweeper_repairs_stale_managed_contract_identity(tmp_path: Path) -> None:
     _broker_truth(tmp_path)
     registry = tmp_path / "outputs/track_b_execution_core/managed_positions/latest_managed_positions.json"
@@ -115,6 +153,66 @@ def test_broker_truth_sweeper_repairs_stale_managed_contract_identity(tmp_path: 
     assert updated["managed_positions"][0]["con_id"] == 793356217
     assert updated["managed_positions"][0]["local_symbol"] == "MESU6"
     assert updated["managed_positions"][0]["expiry"] == "20260918"
+
+
+def test_broker_truth_sweeper_recovers_entry_fill_metadata_for_existing_active_position(tmp_path: Path) -> None:
+    _broker_truth(tmp_path, quantity="1.0")
+    registry = tmp_path / "outputs/track_b_execution_core/managed_positions/latest_managed_positions.json"
+    _write_json(
+        registry,
+        {
+            "classification": "OPEN_MANAGED_MATCHED",
+            "managed_positions": [
+                {
+                    "classification": "OPEN_MANAGED_MATCHED",
+                    "account_id": "DUM882026",
+                    "local_symbol": "MESU6",
+                    "con_id": 793356217,
+                    "quantity": "1",
+                    "side": "LONG",
+                    "lane_id": "mes_us_active_participation_long",
+                    "lifecycle_id": "life-mes",
+                    "trade_id": "trade-mes",
+                    "managed_exit_policy_id": None,
+                    "entry_time": None,
+                    "entry_order_ids": ["1"],
+                    "entry_perm_ids": ["1871421812"],
+                    "entry_exec_ids": ["0000e1a7.6a4255b6.01.01"],
+                    "lifecycle_units": [
+                        {
+                            "lifecycle_id": "life-mes",
+                            "trade_id": "trade-mes",
+                            "lane_id": "mes_us_active_participation_long",
+                            "managed_exit_policy_id": None,
+                            "entry_time": None,
+                        }
+                    ],
+                }
+            ],
+        },
+    )
+    _write_live_entry_fill(
+        tmp_path,
+        trade_id="trade-mes",
+        lifecycle_id="life-mes",
+        lane_id="mes_us_active_participation_long",
+        generated_at=datetime(2026, 6, 8, 14, 50, tzinfo=UTC),
+    )
+
+    report = _run_broker_truth_sweeper(
+        config=TrackBManagedExitServiceConfig(repo_root=tmp_path),
+        now=NOW,
+        write=True,
+    )
+
+    updated = json.loads(registry.read_text(encoding="utf-8"))
+    position = updated["managed_positions"][0]
+    assert report["classification"] == "MANAGED_EXIT_BROKER_TRUTH_SWEEP_REPAIRED"
+    assert position["managed_exit_policy_id"] == "GLOBEX_ACTIVE_EVIDENCE_TIMEBOX_15M_EXIT_V1"
+    assert position["entry_time"] == "2026-06-08T14:50:00+00:00"
+    assert position["entry_price"] == "7496.5"
+    assert position["lifecycle_units"][0]["managed_exit_policy_id"] == "GLOBEX_ACTIVE_EVIDENCE_TIMEBOX_15M_EXIT_V1"
+    assert position["lifecycle_units"][0]["entry_time"] == "2026-06-08T14:50:00+00:00"
 
 
 def test_broker_truth_sweeper_enriches_missing_broker_con_id_from_managed_registry(tmp_path: Path) -> None:

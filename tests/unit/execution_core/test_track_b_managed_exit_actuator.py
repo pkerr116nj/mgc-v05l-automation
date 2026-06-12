@@ -332,7 +332,7 @@ def test_ambiguous_ownership_blocks_before_attach(tmp_path: Path) -> None:
     assert "COMPETING_MANAGED_POSITION_CANDIDATE" in payload["blocked_positions"][0]["blockers"]
 
 
-def test_guardian_safe_state_and_bsa_block_before_attach(tmp_path: Path) -> None:
+def test_guardian_safe_state_and_bsa_are_diagnostic_when_v11_exact_close_allows(tmp_path: Path) -> None:
     inputs = _inputs(runtime_down=True)
     inputs["guardian"]["managed_close_authority"]["allowed"] = False
     inputs["safe_state"]["classification"] = "SAFE_STATE_HARD_HOLD"
@@ -347,12 +347,12 @@ def test_guardian_safe_state_and_bsa_block_before_attach(tmp_path: Path) -> None
         write=False,
     )
 
-    blockers = payload["blocked_positions"][0]["blockers"]
-    assert payload["classification"] == MANAGED_EXIT_ACTUATOR_BLOCKED
-    assert "GUARDIAN_CLOSE_AUTHORITY_NOT_ALLOWED" in blockers
-    assert "SAFE_STATE_CLOSE_NOT_ALLOWED" in blockers
-    assert "BROKER_SESSION_MANAGED_RISK_REDUCING_CLOSE_NOT_ALLOWED" in blockers
-    assert payload["submit_attempted"] is False
+    diagnostics = payload["eligible_positions"][0]["legacy_apply_blockers_diagnostic"]
+    assert payload["classification"] == "MANAGED_EXIT_ACTUATOR_APPLIED_OR_PENDING"
+    assert "GUARDIAN_CLOSE_AUTHORITY_NOT_ALLOWED" in diagnostics
+    assert "SAFE_STATE_CLOSE_NOT_ALLOWED" in diagnostics
+    assert "BROKER_SESSION_MANAGED_RISK_REDUCING_CLOSE_NOT_ALLOWED" in diagnostics
+    assert payload["submit_attempted"] is True
 
 
 def test_live_money_or_paper_proof_blocks_before_attach(tmp_path: Path) -> None:

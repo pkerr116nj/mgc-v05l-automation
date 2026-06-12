@@ -2022,12 +2022,14 @@ def _evaluate_managed_exit_close_authority(
         block_reasons.append("TRADE_ID_MISSING")
     if not str(target_identity.get("con_id") or "").strip() or not str(target_identity.get("contract") or "").strip():
         block_reasons.append("CONTRACT_IDENTITY_MISSING")
+    original_block_reasons = list(block_reasons)
     block_reasons = _demote_stale_publication_close_authority_reasons_for_exact_paper_close(
         block_reasons=block_reasons,
         target_identity=target_identity,
         snapshot=snapshot,
         safe_state=safe_state,
     )
+    diagnostic_block_reasons = [reason for reason in original_block_reasons if reason not in block_reasons]
     allowed = not block_reasons
     return {
         "authority_mode": MANAGED_EXIT_CLOSE_AUTHORITY,
@@ -2061,6 +2063,7 @@ def _evaluate_managed_exit_close_authority(
         "legacy_pre_action_classification": pre_action.get("classification"),
         "legacy_pre_action_reason": pre_action.get("reason"),
         "block_reasons": block_reasons,
+        "diagnostic_block_reasons": diagnostic_block_reasons,
     }
 
 
@@ -2085,7 +2088,6 @@ def _demote_stale_publication_close_authority_reasons_for_exact_paper_close(
         return list(block_reasons)
 
     diagnostic_prefixes = (
-        "REGISTRY_EXIT_IDENTITY_BLOCKED:broker_lifecycle_reconciliation_not_clean",
         "BROKER_SESSION_CLOSE_AUTHORITY_BLOCKED:MANAGED_RISK_REDUCING_CLOSE_NOT_ALLOWED",
         "SAFE_STATE_BROKER_MUTATION_NOT_ALLOWED",
         "SAFE_STATE_BLOCKS_CLOSE:SAFE_STATE_HARD_HOLD",
@@ -2096,10 +2098,30 @@ def _demote_stale_publication_close_authority_reasons_for_exact_paper_close(
     remaining: list[str] = []
     for reason in block_reasons:
         text = str(reason)
+        if _is_diagnostic_registry_exit_identity_blocker(text):
+            continue
         if any(text.startswith(prefix) for prefix in diagnostic_prefixes):
             continue
         remaining.append(text)
     return remaining
+
+
+def _is_diagnostic_registry_exit_identity_blocker(reason: str) -> bool:
+    prefix = "REGISTRY_EXIT_IDENTITY_BLOCKED:"
+    if not reason.startswith(prefix):
+        return False
+    registry_reasons = {
+        item.strip()
+        for item in reason.removeprefix(prefix).split(",")
+        if item.strip()
+    }
+    diagnostic_reasons = {
+        "broker_lifecycle_reconciliation_not_clean",
+        "trade_registry_state_not_open_managed",
+        "registry_current_state_not_open_managed",
+        "competing_registry_candidate",
+    }
+    return bool(registry_reasons) and registry_reasons.issubset(diagnostic_reasons)
 
 
 def _managed_close_can_bypass_entry_control_plane_coherence(

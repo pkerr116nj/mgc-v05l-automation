@@ -215,6 +215,7 @@ def build_track_b_managed_position_registry(
         lifecycle_reports=lifecycle_reports,
         manifests=manifests,
         market_data_root=config.resolve(config.market_data_root),
+        terminal_records=terminal_records,
         source_stale=source_stale,
     )
     managed_positions, projection_authority_diagnostics = _apply_current_owner_projection_overlay(
@@ -225,6 +226,7 @@ def build_track_b_managed_position_registry(
         lifecycle_reports=lifecycle_reports,
         manifests=manifests,
         market_data_root=config.resolve(config.market_data_root),
+        terminal_records=terminal_records,
         source_stale=source_stale,
     )
     managed_positions, projection_authority_diagnostics = _enforce_owned_exposure_projection_invariant(
@@ -236,6 +238,7 @@ def build_track_b_managed_position_registry(
         lifecycle_reports=lifecycle_reports,
         manifests=manifests,
         market_data_root=config.resolve(config.market_data_root),
+        terminal_records=terminal_records,
         source_stale=source_stale,
     )
     classification = _overall_classification(
@@ -444,6 +447,7 @@ def _managed_positions(
     lifecycle_reports: list[dict[str, Any]],
     manifests: list[dict[str, Any]],
     market_data_root: Path,
+    terminal_records: tuple[Any, ...],
     source_stale: Mapping[str, Any],
 ) -> list[dict[str, Any]]:
     positions: list[dict[str, Any]] = []
@@ -465,6 +469,13 @@ def _managed_positions(
             lifecycle_report=lifecycle_report,
             manifests=manifests,
         )
+        lifecycle = _recover_lifecycle_metadata(
+            lifecycle=lifecycle,
+            lifecycle_report=lifecycle_report,
+            manifest=manifest,
+            broker=broker,
+            terminal_records=terminal_records,
+        )
         close_order_state = _close_order_state(key=key, open_order_states=open_order_states)
         managed_order_state = _managed_order_state(key=key, managed_order_states=managed_order_states)
         effective_close_order_state = close_order_state or managed_order_state
@@ -481,6 +492,7 @@ def _managed_positions(
             lifecycle=lifecycle,
             lifecycle_report=lifecycle_report,
             market_data_root=market_data_root,
+            terminal_records=terminal_records,
         )
         due_classification = _exit_due_classification(
             classification=classification,
@@ -550,7 +562,9 @@ def _managed_positions(
             "manifest_id": (manifest or {}).get("entry_intent_id"),
             "manifest_path": _manifest_path(manifest),
             "entry_time": (lifecycle or review or lifecycle_report or {}).get("entry_timestamp")
-            or _mapping(lifecycle_report.get("entry_fill")).get("filled_at"),
+            or _isoformat_or_none(
+                _entry_time(lifecycle=lifecycle, lifecycle_report=lifecycle_report, terminal_records=terminal_records)
+            ),
             "entry_price": (lifecycle or review or {}).get("avg_entry_price")
             or _mapping(lifecycle_report.get("entry_fill")).get("price"),
             "managed_exit_policy_id": _managed_exit_policy_id(lifecycle, review, lifecycle_report, manifest),
@@ -601,6 +615,7 @@ def _apply_current_owner_projection_overlay(
     lifecycle_reports: list[dict[str, Any]],
     manifests: list[dict[str, Any]],
     market_data_root: Path,
+    terminal_records: tuple[Any, ...],
     source_stale: Mapping[str, Any],
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     """Keep managed-position authority aligned with the shared owner resolver."""
@@ -665,6 +680,7 @@ def _apply_current_owner_projection_overlay(
             lifecycle_reports=lifecycle_reports,
             manifests=manifests,
             market_data_root=market_data_root,
+            terminal_records=terminal_records,
             source_stale=source_stale,
         )
         if not repaired:
@@ -762,6 +778,7 @@ def _enforce_owned_exposure_projection_invariant(
     lifecycle_reports: list[dict[str, Any]],
     manifests: list[dict[str, Any]],
     market_data_root: Path,
+    terminal_records: tuple[Any, ...],
     source_stale: Mapping[str, Any],
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     positions = [dict(item) for item in managed_positions]
@@ -809,6 +826,7 @@ def _enforce_owned_exposure_projection_invariant(
             lifecycle_reports=lifecycle_reports,
             manifests=manifests,
             market_data_root=market_data_root,
+            terminal_records=terminal_records,
             source_stale=source_stale,
         )
         if repaired:
@@ -1675,8 +1693,85 @@ def _managed_exit_policy_id(
         or (review or {}).get("managed_exit_policy_id")
         or lifecycle_report.get("managed_exit_policy_id")
         or (manifest or {}).get("managed_exit_policy_id")
+        or _managed_exit_policy_from_lane(
+            (lifecycle or {}).get("lane_id")
+            or (lifecycle or {}).get("strategy_id")
+            or (review or {}).get("lane_id")
+            or (review or {}).get("strategy_id")
+            or lifecycle_report.get("lane_id")
+            or lifecycle_report.get("strategy_id")
+            or (manifest or {}).get("lane_id")
+            or (manifest or {}).get("strategy_id")
+        )
         or ""
     )
+
+
+def _recover_lifecycle_metadata(
+    *,
+    lifecycle: Mapping[str, Any] | None,
+    lifecycle_report: Mapping[str, Any],
+    manifest: Mapping[str, Any] | None,
+    broker: Mapping[str, Any] | None,
+    terminal_records: tuple[Any, ...],
+) -> Mapping[str, Any] | None:
+    if not lifecycle:
+        return lifecycle
+    recovered = dict(lifecycle)
+    policy_id = _managed_exit_policy_id(recovered, None, lifecycle_report, manifest)
+    if policy_id and not recovered.get("managed_exit_policy_id"):
+        recovered["managed_exit_policy_id"] = policy_id
+        recovered["metadata_repair"] = {
+            **_mapping(recovered.get("metadata_repair")),
+            "managed_exit_policy_id": "recovered_from_lane_or_manifest",
+        }
+        recovered["lifecycle_units"] = [
+            {
+                **dict(unit),
+                "managed_exit_policy_id": unit.get("managed_exit_policy_id") or policy_id,
+            }
+            for unit in _list(recovered.get("lifecycle_units"))
+            if isinstance(unit, Mapping)
+        ] or recovered.get("lifecycle_units")
+
+    entry_time = _entry_time(
+        lifecycle=recovered,
+        lifecycle_report=lifecycle_report,
+        terminal_records=terminal_records,
+    )
+    if entry_time is not None and not recovered.get("entry_timestamp"):
+        recovered["entry_timestamp"] = entry_time.isoformat()
+        recovered["metadata_repair"] = {
+            **_mapping(recovered.get("metadata_repair")),
+            "entry_timestamp": "recovered_from_broker_fill_evidence",
+        }
+        recovered["lifecycle_units"] = [
+            {
+                **dict(unit),
+                "entry_time": unit.get("entry_time") or entry_time.isoformat(),
+            }
+            for unit in _list(recovered.get("lifecycle_units"))
+            if isinstance(unit, Mapping)
+        ] or recovered.get("lifecycle_units")
+
+    entry_fill = _entry_fill_event_from_registry(
+        lifecycle=recovered,
+        lifecycle_report=lifecycle_report,
+        broker=broker,
+        terminal_records=terminal_records,
+    )
+    if entry_fill is not None and not recovered.get("avg_entry_price"):
+        price = getattr(entry_fill, "price", None)
+        if price is not None:
+            recovered["avg_entry_price"] = str(price)
+    return recovered
+
+
+def _managed_exit_policy_from_lane(lane_id: object) -> str | None:
+    text = str(lane_id or "")
+    if "_active_participation_" in text:
+        return "GLOBEX_ACTIVE_EVIDENCE_TIMEBOX_15M_EXIT_V1"
+    return None
 
 
 def _bars_since_entry(
@@ -1684,11 +1779,13 @@ def _bars_since_entry(
     lifecycle: Mapping[str, Any] | None,
     lifecycle_report: Mapping[str, Any],
     market_data_root: Path,
+    terminal_records: tuple[Any, ...] = (),
 ) -> int | None:
     from_phase1 = _phase1_completed_5m_bars_since_entry(
         lifecycle=lifecycle,
         lifecycle_report=lifecycle_report,
         market_data_root=market_data_root,
+        terminal_records=terminal_records,
     )
     if from_phase1 is not None:
         return from_phase1
@@ -1709,9 +1806,14 @@ def _phase1_completed_5m_bars_since_entry(
     lifecycle: Mapping[str, Any] | None,
     lifecycle_report: Mapping[str, Any],
     market_data_root: Path,
+    terminal_records: tuple[Any, ...] = (),
 ) -> int | None:
     symbol = _symbol(lifecycle or lifecycle_report)
-    entry_time = _entry_time(lifecycle=lifecycle, lifecycle_report=lifecycle_report)
+    entry_time = _entry_time(
+        lifecycle=lifecycle,
+        lifecycle_report=lifecycle_report,
+        terminal_records=terminal_records,
+    )
     if not symbol or entry_time is None:
         return None
     payload = _read_json(market_data_root / symbol / "5m" / "latest_runtime_candles.json")
@@ -1742,12 +1844,119 @@ def _bar_end_time(bar: Mapping[str, Any]) -> datetime | None:
     return None
 
 
-def _entry_time(*, lifecycle: Mapping[str, Any] | None, lifecycle_report: Mapping[str, Any]) -> datetime | None:
-    return _parse_time(
+def _entry_time(
+    *,
+    lifecycle: Mapping[str, Any] | None,
+    lifecycle_report: Mapping[str, Any],
+    terminal_records: tuple[Any, ...] = (),
+) -> datetime | None:
+    explicit = _parse_time(
         (lifecycle or {}).get("entry_timestamp")
+        or (lifecycle or {}).get("entry_time")
         or lifecycle_report.get("entry_timestamp")
         or _mapping(lifecycle_report.get("entry_fill")).get("filled_at")
     )
+    if explicit is not None:
+        return explicit
+    entry_fill = _entry_fill_event_from_registry(
+        lifecycle=lifecycle,
+        lifecycle_report=lifecycle_report,
+        broker=None,
+        terminal_records=terminal_records,
+    )
+    return _ensure_utc(getattr(entry_fill, "generated_at", None)) if entry_fill is not None else None
+
+
+def _entry_fill_event_from_registry(
+    *,
+    lifecycle: Mapping[str, Any] | None,
+    lifecycle_report: Mapping[str, Any],
+    broker: Mapping[str, Any] | None,
+    terminal_records: tuple[Any, ...],
+) -> Any | None:
+    if not terminal_records:
+        return None
+    lifecycle = _mapping(lifecycle)
+    lifecycle_units = [_mapping(item) for item in _list(lifecycle.get("lifecycle_units"))]
+    lifecycle_ids = {
+        str(value or "").strip()
+        for value in [
+            lifecycle.get("lifecycle_id"),
+            lifecycle_report.get("lifecycle_id"),
+            *[unit.get("lifecycle_id") for unit in lifecycle_units],
+        ]
+        if str(value or "").strip()
+    }
+    trade_ids = {
+        str(value or "").strip()
+        for value in [
+            lifecycle.get("trade_id"),
+            lifecycle_report.get("trade_id"),
+            *[unit.get("trade_id") for unit in lifecycle_units],
+        ]
+        if str(value or "").strip()
+    }
+    exec_ids = _identity_set(lifecycle.get("entry_exec_ids"), lifecycle.get("entry_exec_id"), *[unit.get("entry_exec_id") for unit in lifecycle_units])
+    perm_ids = _identity_set(lifecycle.get("entry_perm_ids"), lifecycle.get("entry_perm_id"), *[unit.get("entry_perm_id") for unit in lifecycle_units])
+    order_ids = _identity_set(lifecycle.get("entry_order_ids"), lifecycle.get("entry_order_id"), *[unit.get("entry_order_id") for unit in lifecycle_units])
+    con_id = _int_or_none(lifecycle.get("con_id") or _mapping(broker).get("con_id"))
+    local_symbol = str(lifecycle.get("local_symbol") or _mapping(broker).get("local_symbol") or "").strip().upper()
+    lane_id = str(lifecycle.get("lane_id") or lifecycle.get("strategy_id") or lifecycle_report.get("lane_id") or lifecycle_report.get("strategy_id") or "").strip()
+
+    candidates: list[Any] = []
+    for record in terminal_records:
+        for event in getattr(record, "event_chain", ()) or ():
+            if _event_type_value(getattr(event, "event_type", "")) != "ENTRY_FILL_BROKER_BACKED":
+                continue
+            event_lifecycle_id = str(getattr(event, "lifecycle_id", "") or "").strip()
+            event_trade_id = str(getattr(event, "trade_id", "") or "").strip()
+            event_exec_id = str(getattr(event, "exec_id", "") or "").strip()
+            event_perm_id = str(getattr(event, "perm_id", "") or "").strip()
+            event_order_id = str(getattr(event, "order_id", "") or "").strip()
+            if lifecycle_ids and event_lifecycle_id in lifecycle_ids:
+                candidates.append(event)
+                continue
+            if trade_ids and event_trade_id in trade_ids:
+                candidates.append(event)
+                continue
+            if exec_ids and event_exec_id in exec_ids:
+                candidates.append(event)
+                continue
+            if perm_ids and event_perm_id in perm_ids:
+                candidates.append(event)
+                continue
+            if order_ids and event_order_id in order_ids and _event_contract_matches(event, con_id=con_id, local_symbol=local_symbol, lane_id=lane_id):
+                candidates.append(event)
+                continue
+            if _event_contract_matches(event, con_id=con_id, local_symbol=local_symbol, lane_id=lane_id):
+                candidates.append(event)
+    if not candidates:
+        return None
+    return max(candidates, key=lambda event: getattr(event, "generated_at", datetime.min.replace(tzinfo=UTC)))
+
+
+def _event_type_value(value: Any) -> str:
+    return str(getattr(value, "value", value) or "")
+
+
+def _event_contract_matches(event: Any, *, con_id: int | None, local_symbol: str, lane_id: str) -> bool:
+    if con_id is not None and _int_or_none(getattr(event, "con_id", None)) != con_id:
+        return False
+    if local_symbol and str(getattr(event, "local_symbol", "") or "").strip().upper() != local_symbol:
+        return False
+    if lane_id and str(getattr(event, "lane_id", "") or "").strip() != lane_id:
+        return False
+    return bool(con_id or local_symbol or lane_id)
+
+
+def _identity_set(*values: Any) -> set[str]:
+    identities: set[str] = set()
+    for value in values:
+        if isinstance(value, (list, tuple, set)):
+            identities.update(str(item or "").strip() for item in value if str(item or "").strip())
+        elif str(value or "").strip():
+            identities.add(str(value or "").strip())
+    return identities
 
 
 def _exit_due_state(exit_due: bool) -> str:
@@ -1875,6 +2084,10 @@ def _ensure_utc(value: datetime) -> datetime:
     if value.tzinfo is None:
         return value.replace(tzinfo=UTC)
     return value.astimezone(UTC)
+
+
+def _isoformat_or_none(value: datetime | None) -> str | None:
+    return None if value is None else _ensure_utc(value).isoformat()
 
 
 def _parse_time(value: object) -> datetime | None:

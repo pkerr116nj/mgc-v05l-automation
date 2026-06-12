@@ -281,6 +281,15 @@ def build_track_b_managed_exit_attach_plan(
         config=config,
         managed_exit_policy_id=managed_exit_policy_id,
     )
+    aggregate_lifecycle_blocker_is_diagnostic = (
+        bool(aggregate_lifecycle_blocker)
+        and exit_authority_allows
+        and position_ok
+        and not duplicate_close
+    )
+    effective_aggregate_lifecycle_blocker = (
+        None if aggregate_lifecycle_blocker_is_diagnostic else aggregate_lifecycle_blocker
+    )
 
     if exit_authority_candidate and not exit_authority_allows:
         blockers.extend(exit_authority_block_reasons or ["ExitAuthorityDecision V1.1 blocked exact close."])
@@ -310,11 +319,11 @@ def build_track_b_managed_exit_attach_plan(
     elif (not position_ok or not lifecycle_ok) and not exit_authority_allows:
         blockers.extend(reason for reason in (position_reason, lifecycle_reason) if reason)
         classification = MANAGED_EXIT_BLOCKED_POSITION_MISMATCH
-    elif duplicate_close or prior_lifecycle_close or aggregate_lifecycle_blocker:
+    elif duplicate_close or prior_lifecycle_close or effective_aggregate_lifecycle_blocker:
         blockers.append(
             duplicate_close
             or prior_lifecycle_close
-            or aggregate_lifecycle_blocker
+            or effective_aggregate_lifecycle_blocker
             or "Existing managed close state blocks duplicate attach."
         )
         classification = MANAGED_EXIT_BLOCKED_DUPLICATE_CLOSE_ORDER
@@ -384,6 +393,9 @@ def build_track_b_managed_exit_attach_plan(
                 "prior_lifecycle_close": raw_prior_lifecycle_close,
                 "prior_lifecycle_close_stale_diagnostic": prior_lifecycle_close_is_stale_diagnostic,
                 "aggregate_lifecycle_blocker": aggregate_lifecycle_blocker,
+                "aggregate_lifecycle_blocker_diagnostic": aggregate_lifecycle_blocker
+                if aggregate_lifecycle_blocker_is_diagnostic
+                else None,
             },
         },
         "open_order_truth_classification": open_order_truth.get("classification"),
@@ -466,9 +478,18 @@ def build_track_b_managed_exit_attach_plan(
 
     broker_availability = _broker_availability_for_attach(config=config, now=actual_now)
     broker_availability_blocker = _broker_availability_boundary_blocker(broker_availability)
+    broker_availability_blocker_is_diagnostic = _broker_availability_blocker_is_diagnostic(
+        blocker=broker_availability_blocker,
+        exit_authority_allows=exit_authority_allows,
+    )
     payload["broker_availability"] = broker_availability
-    payload["broker_availability_blocker"] = broker_availability_blocker
-    if broker_availability_blocker:
+    payload["broker_availability_blocker"] = (
+        None if broker_availability_blocker_is_diagnostic else broker_availability_blocker
+    )
+    payload["broker_availability_diagnostic_blocker"] = (
+        broker_availability_blocker if broker_availability_blocker_is_diagnostic else None
+    )
+    if broker_availability_blocker and not broker_availability_blocker_is_diagnostic:
         payload["classification"] = _managed_exit_classification_for_broker_availability_blocker(broker_availability_blocker)
         payload["apply_enabled"] = False
         payload["apply_boundary_classification"] = broker_availability_blocker
@@ -533,6 +554,14 @@ def _broker_availability_boundary_blocker(broker_availability: Mapping[str, Any]
     if classification == "BROKER_UNAVAILABLE_FATAL":
         return "broker_unavailable_fatal"
     return "broker_availability_unknown"
+
+
+def _broker_availability_blocker_is_diagnostic(
+    *,
+    blocker: str | None,
+    exit_authority_allows: bool,
+) -> bool:
+    return blocker == "broker_availability_unknown" and exit_authority_allows
 
 
 def _managed_exit_classification_for_broker_availability_blocker(blocker: str) -> str:

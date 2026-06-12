@@ -1227,6 +1227,127 @@ def test_apply_blocks_with_broker_unavailable_retryable_before_lifecycle_submit(
     assert payload["exit_authority_contract"]["decision"]["decision"] in {"ALLOWED", "DEGRADED_ALLOWED"}
 
 
+def test_broker_availability_unknown_is_diagnostic_when_v11_exact_close_allowed(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    config = _seed(
+        tmp_path,
+        completed_bars=12,
+        config_overrides={
+            "apply": True,
+            "operator_authorized_managed_exit": True,
+        },
+    )
+
+    class Result:
+        report_json = (
+            tmp_path
+            / "outputs/track_b_execution_core/track_b_strategy_managed_paper_lifecycle"
+            / config.lifecycle_id
+            / "track_b_strategy_managed_paper_lifecycle_report.json"
+        )
+        report = {
+            "paper_lifecycle_classification": "TRACK_B_STRATEGY_PAPER_CLOSE_SUBMITTED",
+            "broker_state_mutated": True,
+            "submit_attempted": True,
+            "close_submit_attempt": {
+                "broker_order_id": "94",
+                "perm_id": "1871410001",
+                "action": "SELL",
+                "quantity": "1",
+                "local_symbol": config.local_symbol,
+                "con_id": config.con_id,
+            },
+        }
+
+    def fake_broker_availability(**kwargs: Any) -> Mapping[str, Any]:
+        return {
+            "classification": "BROKER_AVAILABILITY_DIAGNOSTIC_UNKNOWN",
+            "diagnostic": "publication artifact stale",
+        }
+
+    def fake_maintain(**kwargs: Any) -> Result:
+        return Result()
+
+    monkeypatch.setattr(attach_module, "build_broker_availability_report", fake_broker_availability)
+    monkeypatch.setattr(attach_module, "maintain_open_track_b_strategy_managed_paper_lifecycle", fake_maintain)
+
+    payload = build_track_b_managed_exit_attach_plan(config=config, now=NOW)
+
+    assert payload["classification"] == "TRACK_B_STRATEGY_PAPER_CLOSE_SUBMITTED"
+    assert payload["apply_enabled"] is True
+    assert payload["broker_availability_blocker"] is None
+    assert payload["broker_availability_diagnostic_blocker"] == "broker_availability_unknown"
+    assert payload["submit_attempted"] is True
+    assert payload["broker_state_mutated"] is True
+
+
+def test_aggregate_lifecycle_blocker_is_diagnostic_when_v11_exact_close_allowed(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    config = _seed(
+        tmp_path,
+        completed_bars=12,
+        config_overrides={
+            "apply": True,
+            "operator_authorized_managed_exit": True,
+            "aggregate_lifecycle_units": (
+                {
+                    "lifecycle_id": "stale_unit_a",
+                    "trade_id": "trade-stale-a",
+                    "quantity": "1",
+                    "paper_lifecycle_report_path": str(tmp_path / "missing-a.json"),
+                },
+                {
+                    "lifecycle_id": "stale_unit_b",
+                    "trade_id": "trade-stale-b",
+                    "quantity": "1",
+                    "paper_lifecycle_report_path": str(tmp_path / "missing-b.json"),
+                },
+            ),
+        },
+    )
+
+    class Result:
+        report_json = (
+            tmp_path
+            / "outputs/track_b_execution_core/track_b_strategy_managed_paper_lifecycle"
+            / config.lifecycle_id
+            / "track_b_strategy_managed_paper_lifecycle_report.json"
+        )
+        report = {
+            "paper_lifecycle_classification": "TRACK_B_STRATEGY_PAPER_CLOSE_SUBMITTED",
+            "broker_state_mutated": True,
+            "submit_attempted": True,
+            "close_submit_attempt": {
+                "broker_order_id": "95",
+                "perm_id": "1871410002",
+                "action": "SELL",
+                "quantity": "1",
+                "local_symbol": config.local_symbol,
+                "con_id": config.con_id,
+            },
+        }
+
+    monkeypatch.setattr(
+        attach_module,
+        "maintain_open_track_b_strategy_managed_paper_lifecycle",
+        lambda **kwargs: Result(),
+    )
+
+    payload = build_track_b_managed_exit_attach_plan(config=config, now=NOW)
+
+    diagnostics = payload["exit_authority_contract"]["legacy_diagnostics"]
+    assert payload["classification"] == "TRACK_B_STRATEGY_PAPER_CLOSE_SUBMITTED"
+    assert payload["apply_enabled"] is True
+    assert payload["submit_attempted"] is True
+    assert payload["broker_state_mutated"] is True
+    assert diagnostics["aggregate_lifecycle_blocker"]
+    assert diagnostics["aggregate_lifecycle_blocker_diagnostic"] == diagnostics["aggregate_lifecycle_blocker"]
+
+
 def test_auto_selected_mgc_due_position_resolves_mgc_exit_profile_not_default_mnq(tmp_path: Path) -> None:
     current_lifecycle_id = "reserved_submit_mgc_1x_all_lanes_asia_early_short"
     strategy_id = "gc_mgc_forced_session_baseline_v2__mgc_1x_all_lanes__asia_early_short"

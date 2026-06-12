@@ -2303,6 +2303,82 @@ def test_managed_exit_close_authority_allows_exact_close_when_runtime_identity_u
     assert authorization["managed_exit_close_authority"]["control_plane_coherence_bypassed_for_exact_managed_close"] is True
 
 
+def test_managed_exit_close_authority_demotes_stale_registry_state_when_v11_exact_close_allows(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    config = base_config(
+        tmp_path,
+        strategy_id="mes_us_active_participation_long",
+        lane_id="mes_us_active_participation_long",
+        instrument_family="MES",
+        contract_key="MES-202609",
+        local_symbol="MESU6",
+        con_id=793356217,
+        side="LONG",
+        close_limit_price="7472",
+        managed_exit_policy_id=TrackBManagedExitPolicy.GLOBEX_ACTIVE_EVIDENCE_TIMEBOX_15M_EXIT_V1.value,
+        managed_exit_v1_1_authorized=True,
+    )
+    close_intent = {
+        "lifecycle_id": "reserved-submit-mes",
+        "trade_id": "trade-mes-managed",
+        "order_action": "SELL",
+        "quantity": 1,
+        "close_limit_price": "7472",
+    }
+    seed_strategy_submit_authority(
+        tmp_path,
+        config=config,
+        intent_payload=close_intent,
+        intent_kind=IntentKind.CLOSE,
+        limit_price="7472",
+        safe_state_overrides={
+            "submit_allowed": False,
+            "broker_mutation_allowed": False,
+            "managed_close_mutation_allowed": True,
+            "close_authority_reason_codes": [],
+        },
+        snapshot_overrides={
+            "shared_truth_coherence_status": "STALE_OR_MIXED",
+            "position_truth_classification": "OPEN_MANAGED_MATCHED",
+            "managed_position_registry_classification": "OPEN_MANAGED_EXIT_DUE",
+            "managed_order_registry_classification": "POSITION_WITHOUT_CLOSE_ORDER",
+        },
+    )
+
+    def stale_registry_validation(**kwargs: Any) -> Mapping[str, Any]:
+        return {
+            "allowed": False,
+            "block_reasons": [
+                "trade_registry_state_not_open_managed",
+                "broker_lifecycle_reconciliation_not_clean",
+                "competing_registry_candidate",
+            ],
+            "registry_current_state": "CLOSED_FLAT",
+            "broker_backed_entry": True,
+        }
+
+    monkeypatch.setattr(lifecycle_module, "validate_registry_managed_exit_identity", stale_registry_validation)
+
+    authorization = lifecycle_module.build_strategy_managed_submit_authorization(
+        config=config,
+        intent_payload=close_intent,
+        intent_kind=IntentKind.CLOSE,
+        limit_price="7472",
+        now=aware_now(),
+    )
+
+    close_authority = authorization["managed_exit_close_authority"]
+    assert authorization["classification"] == lifecycle_module.STRATEGY_SUBMIT_AUTHORIZED
+    assert close_authority["allowed"] is True
+    assert close_authority["block_reasons"] == []
+    assert close_authority["diagnostic_block_reasons"] == [
+        "REGISTRY_EXIT_IDENTITY_BLOCKED:trade_registry_state_not_open_managed,broker_lifecycle_reconciliation_not_clean,competing_registry_candidate",
+        "CONTROL_PLANE_NOT_COHERENT:STALE_OR_MIXED",
+    ]
+
+
 def test_entry_submit_remains_blocked_when_control_plane_entry_coherence_stale(tmp_path: Path) -> None:
     config = base_config(tmp_path)
     entry_intent = {

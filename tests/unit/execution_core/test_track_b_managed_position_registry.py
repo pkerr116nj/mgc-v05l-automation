@@ -563,6 +563,134 @@ def test_globex_active_15m_exit_policy_due_after_three_completed_5m_bars(tmp_pat
     assert payload["managed_positions"][0]["exit_due"] is True
 
 
+def test_swept_active_position_recovers_fill_time_and_policy_for_15m_due(tmp_path: Path) -> None:
+    lifecycle = {
+        **_lifecycle_position(policy="", bars_since_fill=0),
+        "instrument_family": "MES",
+        "track_b_root": "MES",
+        "symbol": "MES",
+        "contract_key": "MES-202609",
+        "local_symbol": "MESU6",
+        "con_id": 793356217,
+        "quantity": "1",
+        "aggregate_qty": "1",
+        "side": "LONG",
+        "strategy_id": "mes_us_active_participation_long",
+        "lane_id": "mes_us_active_participation_long",
+        "lifecycle_id": "life-mes-active",
+        "trade_id": "trade-mes-active",
+        "entry_timestamp": None,
+        "managed_exit_policy_id": None,
+        "bars_since_fill": None,
+        "lifecycle_units": [
+            {
+                "lifecycle_id": "life-mes-active",
+                "trade_id": "trade-mes-active",
+                "lane_id": "mes_us_active_participation_long",
+                "entry_order_id": "1",
+                "entry_perm_id": "1871421812",
+                "entry_exec_id": "0000e1a7.6a4255b6.01.01",
+                "entry_time": None,
+                "managed_exit_policy_id": None,
+            }
+        ],
+    }
+    _seed_base(tmp_path, broker_positions=[_broker_position_mes_long()], lifecycle_positions=[lifecycle])
+    _write_phase1_5m_bars(
+        tmp_path,
+        symbol="MES",
+        bar_ends=[
+            "2026-05-22T16:25:00+00:00",
+            "2026-05-22T16:30:00+00:00",
+            "2026-05-22T16:35:00+00:00",
+        ],
+    )
+    _write_entry_fill_event(
+        tmp_path,
+        trade_id="trade-mes-active",
+        lifecycle_id="life-mes-active",
+        lane_id="mes_us_active_participation_long",
+        symbol="MES",
+        local_symbol="MESU6",
+        con_id=793356217,
+        generated_at=datetime(2026, 5, 22, 16, 20, tzinfo=UTC),
+        side="LONG",
+        action="BUY",
+        order_id="1",
+        perm_id="1871421812",
+        exec_id="0000e1a7.6a4255b6.01.01",
+    )
+
+    payload = build_track_b_managed_position_registry(
+        config=TrackBManagedPositionRegistryConfig(repo_root=tmp_path),
+        now=NOW,
+    )
+
+    position = payload["managed_positions"][0]
+    assert payload["classification"] == OPEN_MANAGED_EXIT_DUE
+    assert position["managed_exit_policy_id"] == "GLOBEX_ACTIVE_EVIDENCE_TIMEBOX_15M_EXIT_V1"
+    assert position["entry_time"] == "2026-05-22T16:20:00+00:00"
+    assert position["lifecycle_units"][0]["managed_exit_policy_id"] == "GLOBEX_ACTIVE_EVIDENCE_TIMEBOX_15M_EXIT_V1"
+    assert position["lifecycle_units"][0]["entry_time"] == "2026-05-22T16:20:00+00:00"
+    assert position["bars_since_entry"] == 3
+    assert position["exit_due"] is True
+
+
+def test_swept_active_position_with_two_completed_bars_remains_hold(tmp_path: Path) -> None:
+    lifecycle = {
+        **_lifecycle_position(policy="", bars_since_fill=0),
+        "instrument_family": "MES",
+        "track_b_root": "MES",
+        "symbol": "MES",
+        "contract_key": "MES-202609",
+        "local_symbol": "MESU6",
+        "con_id": 793356217,
+        "quantity": "1",
+        "aggregate_qty": "1",
+        "side": "LONG",
+        "strategy_id": "mes_us_active_participation_long",
+        "lane_id": "mes_us_active_participation_long",
+        "lifecycle_id": "life-mes-young",
+        "trade_id": "trade-mes-young",
+        "entry_timestamp": None,
+        "managed_exit_policy_id": None,
+        "bars_since_fill": None,
+    }
+    _seed_base(tmp_path, broker_positions=[_broker_position_mes_long()], lifecycle_positions=[lifecycle])
+    _write_phase1_5m_bars(
+        tmp_path,
+        symbol="MES",
+        bar_ends=[
+            "2026-05-22T16:25:00+00:00",
+            "2026-05-22T16:30:00+00:00",
+        ],
+    )
+    _write_entry_fill_event(
+        tmp_path,
+        trade_id="trade-mes-young",
+        lifecycle_id="life-mes-young",
+        lane_id="mes_us_active_participation_long",
+        symbol="MES",
+        local_symbol="MESU6",
+        con_id=793356217,
+        generated_at=datetime(2026, 5, 22, 16, 20, tzinfo=UTC),
+        side="LONG",
+        action="BUY",
+        order_id="1",
+        perm_id="1871421812",
+        exec_id="0000e1a7.6a4255b6.01.01",
+    )
+
+    payload = build_track_b_managed_position_registry(
+        config=TrackBManagedPositionRegistryConfig(repo_root=tmp_path),
+        now=NOW,
+    )
+
+    assert payload["classification"] == OPEN_MANAGED_MATCHED
+    assert payload["managed_positions"][0]["bars_since_entry"] == 2
+    assert payload["managed_positions"][0]["exit_due"] is False
+
+
 def test_existing_globex_active_60m_placeholder_is_due_after_three_completed_5m_bars(tmp_path: Path) -> None:
     lifecycle = _lifecycle_position(policy="GLOBEX_ACTIVE_EVIDENCE_TIMEBOX_60M_EXIT_V1", bars_since_fill=3)
     _seed_base(tmp_path, broker_positions=[_broker_position()], lifecycle_positions=[lifecycle])
@@ -1117,6 +1245,19 @@ def _broker_position() -> dict:
     }
 
 
+def _broker_position_mes_long() -> dict:
+    return {
+        "account_id": "DUM882026",
+        "symbol": "MES",
+        "track_b_root": "MES",
+        "local_symbol": "MESU6",
+        "con_id": 793356217,
+        "expiry": "20260918",
+        "quantity": "1.0",
+        "average_cost": "37483.12",
+    }
+
+
 def _lifecycle_position(
     *,
     policy: str = "PAPER_DIAGNOSTIC_TIME_BOXED_3X5M_EXIT_V1",
@@ -1333,6 +1474,51 @@ def _write_registry_open_managed_events_for(
     with path.open(mode, encoding="utf-8") as handle:
         for event in events:
             handle.write(json.dumps(event.to_dict(), sort_keys=True) + "\n")
+
+
+def _write_entry_fill_event(
+    root: Path,
+    *,
+    trade_id: str,
+    lifecycle_id: str,
+    lane_id: str,
+    symbol: str,
+    local_symbol: str,
+    con_id: int,
+    generated_at: datetime,
+    side: str,
+    action: str,
+    order_id: str,
+    perm_id: str,
+    exec_id: str,
+) -> None:
+    path = root / "outputs" / "track_b_execution_core" / "trade_registry" / "live_trade_events.jsonl"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    event = TradeEvent(
+        event_id=f"{trade_id}_entry_fill",
+        event_type=TradeEventType.ENTRY_FILL_BROKER_BACKED,
+        generated_at=generated_at,
+        trade_id=trade_id,
+        lifecycle_id=lifecycle_id,
+        lane_id=lane_id,
+        thesis_strategy_id=lane_id,
+        account_id="DUM882026",
+        symbol=symbol,
+        con_id=con_id,
+        local_symbol=local_symbol,
+        expiry="20260918",
+        side=side,
+        action=action,
+        qty=Decimal("1"),
+        source_artifact_path="outputs/track_b_execution_core/test_entry.json",
+        order_id=order_id,
+        client_id="10110",
+        perm_id=perm_id,
+        exec_id=exec_id,
+        price=Decimal("7496.5"),
+    )
+    with path.open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps(event.to_dict(), sort_keys=True) + "\n")
 
 
 def _write_registry_closed_flat_events(root: Path, *, trade_id: str, lifecycle_id: str) -> None:

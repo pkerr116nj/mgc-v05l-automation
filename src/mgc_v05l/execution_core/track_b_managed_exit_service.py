@@ -53,6 +53,7 @@ from mgc_v05l.execution_core.track_b_strategy_attrition_funnel import (
     events_from_managed_exit_service_status,
     try_record_strategy_funnel_events,
 )
+from mgc_v05l.execution_core.track_b_live_trade_registry import load_live_trade_registry_records
 
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
@@ -1377,6 +1378,7 @@ def _run_broker_truth_sweeper(
     registry_path = config.resolve(DEFAULT_MANAGED_POSITION_REGISTRY_ARTIFACT)
     registry = _read_json(registry_path)
     managed_positions = [_mapping(row) for row in _list(registry.get("managed_positions"))]
+    terminal_records = load_live_trade_registry_records(repo_root=config.repo_root)
     diagnostics: list[dict[str, Any]] = []
     changed = False
     visible_positions: list[dict[str, Any]] = []
@@ -1406,6 +1408,7 @@ def _run_broker_truth_sweeper(
             adopted = _adopt_broker_position(
                 broker_position=broker_position,
                 lifecycle=lifecycle,
+                terminal_records=terminal_records,
                 now=now,
             )
             managed_positions.append(adopted)
@@ -1422,7 +1425,12 @@ def _run_broker_truth_sweeper(
                 }
             )
             continue
-        repaired = _repair_managed_position_from_broker(existing, broker_position, now=now)
+        repaired = _repair_managed_position_from_broker(
+            existing,
+            broker_position,
+            terminal_records=terminal_records,
+            now=now,
+        )
         visible_positions.append(repaired)
         if repaired != existing:
             managed_positions[index] = repaired
@@ -1535,6 +1543,7 @@ def _repair_managed_position_from_broker(
     managed_position: Mapping[str, Any],
     broker_position: Mapping[str, Any],
     *,
+    terminal_records: Sequence[Any] = (),
     now: datetime,
 ) -> dict[str, Any]:
     repaired = dict(managed_position)
@@ -1555,6 +1564,32 @@ def _repair_managed_position_from_broker(
     repaired["broker_truth_swept_at"] = now.isoformat()
     if not repaired.get("managed_exit_policy_id"):
         repaired["managed_exit_policy_id"] = _managed_exit_policy_from_lane(repaired.get("lane_id") or repaired.get("strategy_id"))
+    entry_fill = _entry_fill_event_from_registry(
+        position=repaired,
+        broker_position=broker_position,
+        terminal_records=terminal_records,
+    )
+    if entry_fill is not None:
+        if not repaired.get("entry_time"):
+            repaired["entry_time"] = getattr(entry_fill, "generated_at").isoformat()
+        if not repaired.get("entry_price") and getattr(entry_fill, "price", None) is not None:
+            repaired["entry_price"] = str(getattr(entry_fill, "price"))
+        if not repaired.get("entry_order_ids") and getattr(entry_fill, "order_id", None):
+            repaired["entry_order_ids"] = [str(getattr(entry_fill, "order_id"))]
+        if not repaired.get("entry_perm_ids") and getattr(entry_fill, "perm_id", None):
+            repaired["entry_perm_ids"] = [str(getattr(entry_fill, "perm_id"))]
+        if not repaired.get("entry_exec_ids") and getattr(entry_fill, "exec_id", None):
+            repaired["entry_exec_ids"] = [str(getattr(entry_fill, "exec_id"))]
+    if repaired.get("managed_exit_policy_id"):
+        repaired["lifecycle_units"] = [
+            {
+                **dict(unit),
+                "managed_exit_policy_id": unit.get("managed_exit_policy_id") or repaired.get("managed_exit_policy_id"),
+                "entry_time": unit.get("entry_time") or repaired.get("entry_time"),
+            }
+            for unit in _list(repaired.get("lifecycle_units"))
+            if isinstance(unit, Mapping)
+        ] or repaired.get("lifecycle_units")
     if not repaired.get("managed_exit_policy_id"):
         repaired["classification"] = "STRAY_POSITION_REVIEW_REQUIRED"
         repaired["attention_required"] = True
@@ -1567,6 +1602,7 @@ def _adopt_broker_position(
     *,
     broker_position: Mapping[str, Any],
     lifecycle: Mapping[str, Any] | None,
+    terminal_records: Sequence[Any] = (),
     now: datetime,
 ) -> dict[str, Any]:
     identity = _broker_position_identity(broker_position)
@@ -1580,6 +1616,17 @@ def _adopt_broker_position(
     classification = "OPEN_MANAGED_MATCHED" if policy_id else "STRAY_POSITION_REVIEW_REQUIRED"
     lifecycle_id = _string_or_none(lifecycle.get("lifecycle_id")) or f"broker_truth_adopted_{identity['local_symbol']}"
     trade_id = _string_or_none(lifecycle.get("trade_id")) or f"trade_broker_truth_adopted_{identity['local_symbol']}"
+    entry_fill = _entry_fill_event_from_registry(
+        position={**lifecycle, "lifecycle_id": lifecycle_id, "trade_id": trade_id, "lane_id": lane_id},
+        broker_position=broker_position,
+        terminal_records=terminal_records,
+    )
+    entry_time = lifecycle.get("entry_timestamp") or lifecycle.get("entry_time")
+    if not entry_time and entry_fill is not None:
+        entry_time = getattr(entry_fill, "generated_at").isoformat()
+    entry_price = lifecycle.get("entry_price") or lifecycle.get("avg_entry_price")
+    if not entry_price and entry_fill is not None and getattr(entry_fill, "price", None) is not None:
+        entry_price = str(getattr(entry_fill, "price"))
     return {
         "classification": classification,
         "source": "BROKER_TRUTH_SWEEPER",
@@ -1601,8 +1648,8 @@ def _adopt_broker_position(
         "lifecycle_id": lifecycle_id,
         "trade_id": trade_id,
         "managed_exit_policy_id": policy_id,
-        "entry_time": lifecycle.get("entry_timestamp") or lifecycle.get("entry_time"),
-        "entry_price": lifecycle.get("entry_price") or lifecycle.get("avg_entry_price"),
+        "entry_time": entry_time,
+        "entry_price": entry_price,
         "entry_order_ids": lifecycle.get("entry_order_ids") or ([lifecycle.get("entry_order_id")] if lifecycle.get("entry_order_id") else []),
         "entry_perm_ids": lifecycle.get("entry_perm_ids") or ([lifecycle.get("entry_perm_id")] if lifecycle.get("entry_perm_id") else []),
         "entry_exec_ids": lifecycle.get("entry_exec_ids") or ([lifecycle.get("entry_exec_id")] if lifecycle.get("entry_exec_id") else []),
@@ -1654,6 +1701,70 @@ def _best_lifecycle_for_broker_position(
             }
         )
     return max(candidates, key=lambda row: str(row.get("entry_timestamp") or "")) if candidates else None
+
+
+def _entry_fill_event_from_registry(
+    *,
+    position: Mapping[str, Any],
+    broker_position: Mapping[str, Any],
+    terminal_records: Sequence[Any],
+) -> Any | None:
+    if not terminal_records:
+        return None
+    identity = _broker_position_identity(broker_position)
+    lifecycle_id = _string_or_none(position.get("lifecycle_id"))
+    trade_id = _string_or_none(position.get("trade_id"))
+    lane_id = _string_or_none(position.get("lane_id") or position.get("strategy_id"))
+    exec_ids = _identity_set(position.get("entry_exec_ids"), position.get("entry_exec_id"))
+    perm_ids = _identity_set(position.get("entry_perm_ids"), position.get("entry_perm_id"))
+    order_ids = _identity_set(position.get("entry_order_ids"), position.get("entry_order_id"))
+    candidates: list[Any] = []
+    for record in terminal_records:
+        for event in getattr(record, "event_chain", ()) or ():
+            if str(getattr(getattr(event, "event_type", ""), "value", getattr(event, "event_type", ""))) != "ENTRY_FILL_BROKER_BACKED":
+                continue
+            if lifecycle_id and str(getattr(event, "lifecycle_id", "") or "") == lifecycle_id:
+                candidates.append(event)
+                continue
+            if trade_id and str(getattr(event, "trade_id", "") or "") == trade_id:
+                candidates.append(event)
+                continue
+            if exec_ids and str(getattr(event, "exec_id", "") or "") in exec_ids:
+                candidates.append(event)
+                continue
+            if perm_ids and str(getattr(event, "perm_id", "") or "") in perm_ids:
+                candidates.append(event)
+                continue
+            if order_ids and str(getattr(event, "order_id", "") or "") in order_ids and _event_matches_broker_position(event, identity, lane_id):
+                candidates.append(event)
+                continue
+            if _event_matches_broker_position(event, identity, lane_id):
+                candidates.append(event)
+    if not candidates:
+        return None
+    return max(candidates, key=lambda event: getattr(event, "generated_at", datetime.min.replace(tzinfo=UTC)))
+
+
+def _event_matches_broker_position(event: Any, identity: Mapping[str, Any], lane_id: str | None) -> bool:
+    con_id = identity.get("con_id")
+    local_symbol = identity.get("local_symbol")
+    if con_id is not None and _int_or_none(getattr(event, "con_id", None)) != con_id:
+        return False
+    if local_symbol and str(getattr(event, "local_symbol", "") or "").strip() != local_symbol:
+        return False
+    if lane_id and str(getattr(event, "lane_id", "") or "").strip() != lane_id:
+        return False
+    return bool(con_id or local_symbol or lane_id)
+
+
+def _identity_set(*values: Any) -> set[str]:
+    identities: set[str] = set()
+    for value in values:
+        if isinstance(value, (list, tuple, set)):
+            identities.update(str(item or "").strip() for item in value if str(item or "").strip())
+        elif str(value or "").strip():
+            identities.add(str(value or "").strip())
+    return identities
 
 
 def _managed_exit_policy_from_lane(lane_id: object) -> str | None:
