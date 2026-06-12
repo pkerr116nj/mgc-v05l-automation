@@ -48,6 +48,7 @@ def build_parser() -> argparse.ArgumentParser:
         help="How long the manual harness waits for the operator to handle the TWS confirmation dialog.",
     )
     parser.add_argument("--submit", action="store_true", help="Explicitly attempt one paper submit/cancel lifecycle after preview and approval validation.")
+    parser.add_argument("--explicit-operator-submit", action="store_true", help="Required one-shot operator flag for any manual harness broker mutation. Defaults to dry-run/no-submit.")
     parser.add_argument("--approval-digest", default=None, help="Exact preview digest required for submit.")
     parser.add_argument("--approval-phrase", default=None, help="Exact typed confirmation phrase required for submit.")
     parser.add_argument("--order-ref", default=None, help="Optional explicit IBKR orderRef for the single approved PAPER test order.")
@@ -90,6 +91,7 @@ def main(argv: list[str] | None = None) -> int:
         manual_confirmation_timeout_seconds=float(args.manual_confirmation_timeout_seconds),
         caller_path="manual_cli",
         submit=bool(args.submit),
+        explicit_operator_submit=bool(args.explicit_operator_submit),
         approval_digest=str(args.approval_digest or "").strip() or None,
         approval_phrase=str(args.approval_phrase or "").strip() or None,
         order_ref=str(args.order_ref or "").strip() or None,

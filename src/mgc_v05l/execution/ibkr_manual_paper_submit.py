@@ -159,6 +159,7 @@ class IbkrManualPaperSubmitConfig:
     pre_action_snapshot_already_validated: bool = False
     pre_action_snapshot_validation_context: dict[str, Any] | None = None
     order_ref: str | None = None
+    explicit_operator_submit: bool = False
 
 
 @dataclass(frozen=True)
@@ -636,6 +637,19 @@ def run_ibkr_manual_paper_submit_test(
     )
     if frozen_preview_bundle is not None:
         guardrail_checks.extend(_frozen_preview_bundle_guardrails(config=config, frozen_preview_bundle=frozen_preview_bundle))
+    if config.submit:
+        guardrail_checks.append(
+            _guardrail_check(
+                "manual_harness_submit_disabled_unless_explicit_operator_flag",
+                passed=bool(config.explicit_operator_submit) or str(config.caller_path or "").strip() == "manual_cli",
+                blocking=True,
+                detail=(
+                    "MANUAL_HARNESS_SUBMIT_DISABLED_UNLESS_EXPLICIT_OPERATOR_FLAG: "
+                    "manual/lifecycle PAPER harness defaults to dry-run and cannot mutate broker orders "
+                    "unless an explicit one-shot operator flag is set; manual CLI --submit is the only legacy operator path."
+                ),
+            )
+        )
     _record_audit(
         audit_events,
         event_type="environment_lock_checked",
@@ -3689,6 +3703,8 @@ def _build_report(
         "lower_level_manual_submit_harness": True,
         "preferred_path": "runtime_supervised_strategy_bridge_or_managed_order_service",
         "manual_harness_emergency_only": bool(config.submit),
+        "manual_harness_submit_guard": "MANUAL_HARNESS_SUBMIT_DISABLED_UNLESS_EXPLICIT_OPERATOR_FLAG",
+        "explicit_operator_submit": bool(config.explicit_operator_submit),
         "pre_action_snapshot_validation": pre_action_snapshot_validation or {},
         "connection_check": context["connection_check"],
         "manual_caller_check": caller_check,

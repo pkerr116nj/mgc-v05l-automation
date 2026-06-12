@@ -4270,6 +4270,11 @@ def _delegate_to_manual_harness(
     leak_test_route = caller_path == _LEAK_TEST_CALLER_PATH and bool(
         _leak_test_authorization_check(config=config, intent=intent).get("passed")
     )
+    if supervised_runtime_route and not bool(config.caller_metadata.get("explicit_operator_manual_harness_submit")):
+        raise IbkrPaperStrategyPreSubmitNoBrokerEffectError(
+            "MANUAL_HARNESS_SUBMIT_DISABLED_UNLESS_EXPLICIT_OPERATOR_FLAG: "
+            "autonomous PAPER runtime cannot delegate into the manual/lifecycle harness broker-submit path."
+        )
     if manual_frozen_preview_path is None or approval_digest is None or approval_phrase is None:
         if not supervised_runtime_route and not leak_test_route:
             raise IbkrPaperStrategyPreSubmitNoBrokerEffectError(
@@ -4328,6 +4333,7 @@ def _delegate_to_manual_harness(
         manual_confirmation_timeout_seconds=90.0,
         caller_path="manual_cli",
         submit=True,
+        explicit_operator_submit=bool(config.caller_metadata.get("explicit_operator_manual_harness_submit")),
         approval_digest=approval_digest,
         approval_phrase=approval_phrase,
         output_dir=delegated_output_dir,

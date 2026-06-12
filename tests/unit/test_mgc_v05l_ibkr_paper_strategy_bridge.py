@@ -7318,3 +7318,43 @@ def test_submit_blocks_when_exposure_gate_rejects_duplicate_strategy_buy(tmp_pat
 
     assert artifacts.classification == "PAPER_STRATEGY_INTENT_BLOCKED"
     assert "duplicate_strategy_entry_while_position_open" in json.dumps(artifacts.report)
+
+
+def test_autonomous_runtime_cannot_delegate_to_manual_harness_broker_submit(tmp_path: Path) -> None:
+    strategy_id = "mnq_london_open_active_participation_long"
+    config = _config(
+        tmp_path,
+        submit=True,
+        strategy_id=strategy_id,
+        symbol="MNQ",
+        contract_month="202609",
+        action="BUY",
+        caller_path="probationary_paper_runtime_lane",
+        caller_metadata=_approved_runtime_metadata(
+            strategy_id=strategy_id,
+            source_instrument="MNQ",
+            executable_proxy="MNQ",
+            action="BUY",
+            intent_type="BUY_TO_OPEN",
+            bridge_proxy_mode="MNQ_SIGNAL_DIRECT_PHASE1",
+        ),
+    )
+    intent = _intent_from_config(config)
+    policy = _exit_attempt_policy_for_bridge(
+        config=config,
+        intent=intent,
+        history_events=[],
+        current_position_quantity=0.0,
+        open_orders={"open_order_count": 0},
+        phase1_gate={"ready": True},
+    )
+
+    with pytest.raises(bridge_module.IbkrPaperStrategyPreSubmitNoBrokerEffectError) as exc_info:
+        bridge_module._delegate_to_manual_harness(
+            config=config,
+            intent=intent,
+            exit_attempt_policy=policy,
+            entry_execution_pricing={"is_entry": True, "runtime_last_or_close": 29500.0},
+        )
+
+    assert "MANUAL_HARNESS_SUBMIT_DISABLED_UNLESS_EXPLICIT_OPERATOR_FLAG" in str(exc_info.value)

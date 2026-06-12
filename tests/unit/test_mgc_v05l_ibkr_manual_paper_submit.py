@@ -2258,3 +2258,16 @@ def test_probe_delayed_quote_context_accepts_delayed_frozen_fallback(monkeypatch
     assert result["has_quote"] is True
     assert result["quote_source_label"] == "DELAYED_FROZEN"
     assert "delayed-frozen" in str(result["live_market_data_warning"]).lower()
+
+
+def test_manual_harness_submit_guard_label_is_reported_on_preview(monkeypatch) -> None:
+    _patch_harness_context(monkeypatch)
+
+    artifacts = run_ibkr_manual_paper_submit_test(
+        config=_config(submit=False),
+        stack_provider=_manual_stack,
+    )
+
+    assert artifacts.report["manual_harness_submit_guard"] == "MANUAL_HARNESS_SUBMIT_DISABLED_UNLESS_EXPLICIT_OPERATOR_FLAG"
+    assert artifacts.report["explicit_operator_submit"] is False
+    assert artifacts.report["submit_cancel_lifecycle"]["status"] == "preview_only"
