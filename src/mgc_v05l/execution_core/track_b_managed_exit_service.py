@@ -64,6 +64,21 @@ DEFAULT_STATUS_PATH = (
 )
 DEFAULT_HEARTBEAT_PATH = Path("var") / "track_b_managed_exit_service_heartbeat.json"
 DEFAULT_CADENCE_SECONDS = 45.0
+DEFAULT_BROKER_POSITIONS_SNAPSHOT = (
+    Path("outputs") / "reports" / "ibkr_read_only_verification" / "ibkr_positions_snapshot.json"
+)
+DEFAULT_BROKER_OPEN_ORDERS_SNAPSHOT = (
+    Path("outputs") / "reports" / "ibkr_read_only_verification" / "ibkr_open_orders_snapshot.json"
+)
+DEFAULT_MANAGED_POSITION_REGISTRY_ARTIFACT = (
+    Path("outputs") / "track_b_execution_core" / "managed_positions" / "latest_managed_positions.json"
+)
+DEFAULT_OPERATOR_MANAGED_POSITION_ARTIFACT = (
+    Path("outputs") / "operator_dashboard" / "runtime" / "latest_track_b_managed_positions.json"
+)
+DEFAULT_STRATEGY_LIFECYCLE_ROOT = (
+    Path("outputs") / "track_b_execution_core" / "track_b_strategy_managed_paper_lifecycle"
+)
 
 MANAGED_EXIT_SERVICE_NOOP = "TRACK_B_MANAGED_EXIT_SERVICE_NOOP"
 MANAGED_EXIT_SERVICE_DRY_RUN_READY = "TRACK_B_MANAGED_EXIT_SERVICE_DRY_RUN_READY"
@@ -160,6 +175,10 @@ def run_track_b_managed_exit_service_once(
             config=config,
             payload=_cycle_started_payload(config=config, now=actual_now),
         )
+
+    sweeper_report = _run_broker_truth_sweeper(config=config, now=actual_now, write=write)
+    if _publish_broker_truth_sweeper_diagnostic(sweeper_report):
+        service_diagnostics.append({"kind": "broker_truth_sweeper", **sweeper_report})
 
     phase_started = time.monotonic()
     execution_plan = _build_pipeline_execution_plan(config=config, now=actual_now, pipeline_builder=pipeline_builder)
@@ -1329,6 +1348,362 @@ def _run_pipeline_dry_run(config: TrackBManagedExitServiceConfig, now: datetime)
         config=TrackBManagedExitPipelineDryRunConfig(repo_root=config.repo_root),
         now=now,
     )
+
+
+def _run_broker_truth_sweeper(
+    *,
+    config: TrackBManagedExitServiceConfig,
+    now: datetime,
+    write: bool,
+) -> dict[str, Any]:
+    positions_snapshot = _read_json(config.resolve(DEFAULT_BROKER_POSITIONS_SNAPSHOT))
+    open_orders_snapshot = _read_json(config.resolve(DEFAULT_BROKER_OPEN_ORDERS_SNAPSHOT))
+    if _positions_complete(positions_snapshot) is not True:
+        return {
+            "classification": "MANAGED_EXIT_BROKER_TRUTH_SWEEP_BLOCKED",
+            "reason": "broker_positions_unavailable",
+            "broker_state_mutated": False,
+            "submit_attempted": False,
+        }
+    broker_positions = _current_track_b_broker_positions(positions_snapshot)
+    if not broker_positions:
+        return {
+            "classification": "MANAGED_EXIT_BROKER_TRUTH_SWEEP_NO_POSITIONS",
+            "broker_position_count": 0,
+            "broker_open_order_count": len(_list(open_orders_snapshot.get("open_orders"))),
+            "broker_state_mutated": False,
+            "submit_attempted": False,
+        }
+    registry_path = config.resolve(DEFAULT_MANAGED_POSITION_REGISTRY_ARTIFACT)
+    registry = _read_json(registry_path)
+    managed_positions = [_mapping(row) for row in _list(registry.get("managed_positions"))]
+    diagnostics: list[dict[str, Any]] = []
+    changed = False
+    visible_positions: list[dict[str, Any]] = []
+    for broker_position in broker_positions:
+        identity = _broker_position_identity(broker_position)
+        if not identity.get("local_symbol"):
+            diagnostics.append(
+                {
+                    "classification": "MANAGED_EXIT_SERVICE_RESTART_OR_SCHEMA_REPAIR_REQUIRED",
+                    "reason": "broker_contract_identity_unparseable",
+                    "broker_position": broker_position,
+                }
+            )
+            continue
+        index, existing = _matching_managed_position(managed_positions, broker_position)
+        if existing is None:
+            lifecycle = _best_lifecycle_for_broker_position(config=config, broker_position=broker_position)
+            if not identity.get("con_id") and not _int_or_none(_mapping(lifecycle).get("con_id")):
+                diagnostics.append(
+                    {
+                        "classification": "MANAGED_EXIT_SERVICE_RESTART_OR_SCHEMA_REPAIR_REQUIRED",
+                        "reason": "broker_contract_identity_unparseable",
+                        "broker_position": broker_position,
+                    }
+                )
+                continue
+            adopted = _adopt_broker_position(
+                broker_position=broker_position,
+                lifecycle=lifecycle,
+                now=now,
+            )
+            managed_positions.append(adopted)
+            visible_positions.append(adopted)
+            changed = True
+            diagnostics.append(
+                {
+                    "classification": adopted.get("classification"),
+                    "reason": "broker_truth_position_adopted",
+                    "local_symbol": adopted.get("local_symbol"),
+                    "con_id": adopted.get("con_id"),
+                    "lifecycle_id": adopted.get("lifecycle_id"),
+                    "managed_exit_policy_id": adopted.get("managed_exit_policy_id"),
+                }
+            )
+            continue
+        repaired = _repair_managed_position_from_broker(existing, broker_position, now=now)
+        visible_positions.append(repaired)
+        if repaired != existing:
+            managed_positions[index] = repaired
+            changed = True
+            diagnostics.append(
+                {
+                    "classification": "MANAGED_EXIT_BROKER_TRUTH_POSITION_REPAIRED",
+                    "reason": "broker_truth_contract_identity_refreshed",
+                    "local_symbol": repaired.get("local_symbol"),
+                    "con_id": repaired.get("con_id"),
+                    "lifecycle_id": repaired.get("lifecycle_id"),
+                }
+            )
+    classification = _sweeper_classification(visible_positions=visible_positions, diagnostics=diagnostics)
+    if changed and write:
+        payload = dict(registry)
+        payload.update(
+            {
+                "schema_version": payload.get("schema_version") or "track_b_managed_position_registry_v1",
+                "generated_at": now.isoformat(),
+                "classification": _managed_registry_classification(managed_positions),
+                "managed_positions": managed_positions,
+                "managed_position_count": len(managed_positions),
+                "broker_truth_sweeper": {
+                    "classification": classification,
+                    "generated_at": now.isoformat(),
+                    "diagnostics": diagnostics,
+                },
+            }
+        )
+        write_json_atomic(registry_path, to_jsonable(payload))
+        write_json_atomic(config.resolve(DEFAULT_OPERATOR_MANAGED_POSITION_ARTIFACT), to_jsonable(payload))
+    return {
+        "classification": classification,
+        "broker_position_count": len(broker_positions),
+        "managed_position_count": len(visible_positions),
+        "registry_updated": changed and write,
+        "broker_open_order_count": len(_list(open_orders_snapshot.get("open_orders"))),
+        "diagnostics": diagnostics,
+        "broker_state_mutated": False,
+        "submit_attempted": False,
+    }
+
+
+def _positions_complete(snapshot: Mapping[str, Any]) -> bool:
+    if snapshot.get("positions_complete") is True or snapshot.get("ok") is True:
+        return True
+    return bool(snapshot.get("positions")) and str(snapshot.get("selected_account_id") or snapshot.get("account") or "") == _PAPER_ACCOUNT_ID
+
+
+def _current_track_b_broker_positions(snapshot: Mapping[str, Any]) -> list[dict[str, Any]]:
+    positions: list[dict[str, Any]] = []
+    for row in (_mapping(item) for item in _list(snapshot.get("positions"))):
+        if str(row.get("account_id") or row.get("account") or snapshot.get("account") or "") != _PAPER_ACCOUNT_ID:
+            continue
+        if not _is_track_b_futures_broker_position(row):
+            continue
+        quantity = _decimal(row.get("quantity") or row.get("position") or row.get("signed_qty")) or Decimal("0")
+        if quantity == 0:
+            continue
+        positions.append(row)
+    return positions
+
+
+def _is_track_b_futures_broker_position(row: Mapping[str, Any]) -> bool:
+    sec_type = str(row.get("security_type") or row.get("secType") or "").strip().upper()
+    if sec_type and sec_type != "FUT":
+        return False
+    return _instrument_from_position(row) in {"MES", "MNQ", "MGC", "ES", "NQ", "GC"}
+
+
+def _instrument_from_position(row: Mapping[str, Any]) -> str:
+    symbol = str(row.get("symbol") or row.get("track_b_root") or row.get("instrument") or row.get("instrument_family") or "").strip().upper()
+    if symbol:
+        return symbol
+    local_symbol = str(row.get("local_symbol") or row.get("localSymbol") or "").strip().upper()
+    return "".join(ch for ch in local_symbol if ch.isalpha())[:3]
+
+
+def _broker_position_identity(row: Mapping[str, Any]) -> dict[str, Any]:
+    return {
+        "account_id": str(row.get("account_id") or row.get("account") or _PAPER_ACCOUNT_ID),
+        "con_id": _int_or_none(row.get("con_id") or row.get("conId")),
+        "local_symbol": _string_or_none(row.get("local_symbol") or row.get("localSymbol")),
+        "expiry": _string_or_none(row.get("expiry") or row.get("lastTradeDateOrContractMonth")),
+        "instrument_family": _instrument_from_position(row),
+    }
+
+
+def _matching_managed_position(
+    managed_positions: Sequence[Mapping[str, Any]],
+    broker_position: Mapping[str, Any],
+) -> tuple[int, dict[str, Any] | None]:
+    identity = _broker_position_identity(broker_position)
+    for index, row in enumerate(managed_positions):
+        broker_nested = _mapping(row.get("broker_position"))
+        row_con_id = _int_or_none(row.get("con_id") or broker_nested.get("con_id"))
+        row_symbol = _string_or_none(row.get("local_symbol") or broker_nested.get("local_symbol"))
+        row_account = str(broker_nested.get("account_id") or row.get("account_id") or _PAPER_ACCOUNT_ID)
+        if row_account != identity["account_id"]:
+            continue
+        if row_con_id and identity["con_id"] and row_con_id == identity["con_id"]:
+            return index, dict(row)
+        if row_symbol and identity["local_symbol"] and row_symbol == identity["local_symbol"]:
+            return index, dict(row)
+    return -1, None
+
+
+def _repair_managed_position_from_broker(
+    managed_position: Mapping[str, Any],
+    broker_position: Mapping[str, Any],
+    *,
+    now: datetime,
+) -> dict[str, Any]:
+    repaired = dict(managed_position)
+    identity = _broker_position_identity(broker_position)
+    con_id = identity["con_id"] or _int_or_none(managed_position.get("con_id") or _mapping(managed_position.get("broker_position")).get("con_id"))
+    repaired["broker_position"] = dict(broker_position)
+    repaired["account_id"] = identity["account_id"]
+    repaired["con_id"] = con_id
+    repaired["local_symbol"] = identity["local_symbol"]
+    repaired["expiry"] = identity["expiry"] or repaired.get("expiry")
+    repaired["symbol"] = identity["instrument_family"] or repaired.get("symbol")
+    repaired["track_b_root"] = identity["instrument_family"] or repaired.get("track_b_root")
+    repaired["side"] = repaired.get("side") or _side_from_signed_quantity(broker_position.get("quantity"))
+    repaired["quantity"] = repaired.get("quantity") or str(abs(_decimal(broker_position.get("quantity")) or Decimal("0")))
+    repaired["aggregate_qty"] = repaired.get("aggregate_qty") or str(broker_position.get("quantity") or "")
+    repaired["freshness_state"] = "FRESH"
+    repaired["broker_qty_match"] = True
+    repaired["broker_truth_swept_at"] = now.isoformat()
+    if not repaired.get("managed_exit_policy_id"):
+        repaired["managed_exit_policy_id"] = _managed_exit_policy_from_lane(repaired.get("lane_id") or repaired.get("strategy_id"))
+    if not repaired.get("managed_exit_policy_id"):
+        repaired["classification"] = "STRAY_POSITION_REVIEW_REQUIRED"
+        repaired["attention_required"] = True
+    elif str(repaired.get("classification") or "") in {"", "LIFECYCLE_WITHOUT_BROKER", "NO_MANAGED_POSITIONS"}:
+        repaired["classification"] = "OPEN_MANAGED_MATCHED"
+    return repaired
+
+
+def _adopt_broker_position(
+    *,
+    broker_position: Mapping[str, Any],
+    lifecycle: Mapping[str, Any] | None,
+    now: datetime,
+) -> dict[str, Any]:
+    identity = _broker_position_identity(broker_position)
+    lifecycle = _mapping(lifecycle)
+    con_id = identity["con_id"] or _int_or_none(lifecycle.get("con_id"))
+    local_symbol = identity["local_symbol"] or _string_or_none(lifecycle.get("local_symbol"))
+    lane_id = _string_or_none(lifecycle.get("lane_id") or lifecycle.get("strategy_id"))
+    policy_id = _string_or_none(lifecycle.get("managed_exit_policy_id")) or _managed_exit_policy_from_lane(lane_id)
+    quantity = abs(_decimal(broker_position.get("quantity")) or Decimal("0"))
+    signed_quantity = _decimal(broker_position.get("quantity")) or Decimal("0")
+    classification = "OPEN_MANAGED_MATCHED" if policy_id else "STRAY_POSITION_REVIEW_REQUIRED"
+    lifecycle_id = _string_or_none(lifecycle.get("lifecycle_id")) or f"broker_truth_adopted_{identity['local_symbol']}"
+    trade_id = _string_or_none(lifecycle.get("trade_id")) or f"trade_broker_truth_adopted_{identity['local_symbol']}"
+    return {
+        "classification": classification,
+        "source": "BROKER_TRUTH_SWEEPER",
+        "account_id": identity["account_id"],
+        "symbol": identity["instrument_family"],
+        "track_b_root": identity["instrument_family"],
+        "instrument_family": identity["instrument_family"],
+        "local_symbol": local_symbol,
+        "con_id": con_id,
+        "expiry": identity["expiry"],
+        "side": _side_from_signed_quantity(signed_quantity),
+        "quantity": str(quantity),
+        "aggregate_qty": str(signed_quantity),
+        "signed_broker_qty": str(signed_quantity),
+        "broker_qty_match": True,
+        "broker_position": dict(broker_position),
+        "lane_id": lane_id,
+        "strategy_id": lane_id,
+        "lifecycle_id": lifecycle_id,
+        "trade_id": trade_id,
+        "managed_exit_policy_id": policy_id,
+        "entry_time": lifecycle.get("entry_timestamp") or lifecycle.get("entry_time"),
+        "entry_price": lifecycle.get("entry_price") or lifecycle.get("avg_entry_price"),
+        "entry_order_ids": lifecycle.get("entry_order_ids") or ([lifecycle.get("entry_order_id")] if lifecycle.get("entry_order_id") else []),
+        "entry_perm_ids": lifecycle.get("entry_perm_ids") or ([lifecycle.get("entry_perm_id")] if lifecycle.get("entry_perm_id") else []),
+        "entry_exec_ids": lifecycle.get("entry_exec_ids") or ([lifecycle.get("entry_exec_id")] if lifecycle.get("entry_exec_id") else []),
+        "freshness_state": "FRESH",
+        "attention_required": not bool(policy_id),
+        "diagnostic_only": False,
+        "broker_truth_swept_at": now.isoformat(),
+        "review_reason": None if policy_id else "managed_exit_policy_unresolved",
+    }
+
+
+def _best_lifecycle_for_broker_position(
+    *,
+    config: TrackBManagedExitServiceConfig,
+    broker_position: Mapping[str, Any],
+) -> dict[str, Any] | None:
+    identity = _broker_position_identity(broker_position)
+    lifecycle_root = config.resolve(DEFAULT_STRATEGY_LIFECYCLE_ROOT)
+    candidates: list[dict[str, Any]] = []
+    if not lifecycle_root.exists():
+        return None
+    for report_path in lifecycle_root.glob("*/track_b_strategy_managed_paper_lifecycle_report.json"):
+        report = _read_json(report_path)
+        if not report or report.get("close_fill"):
+            continue
+        local_symbol = _string_or_none(report.get("local_symbol") or _mapping(report.get("entry_intent")).get("local_symbol"))
+        con_id = _int_or_none(report.get("con_id") or _mapping(report.get("entry_intent")).get("con_id"))
+        if identity["local_symbol"] and local_symbol and local_symbol != identity["local_symbol"]:
+            continue
+        if identity["con_id"] and con_id and con_id != identity["con_id"]:
+            continue
+        if not local_symbol and not con_id:
+            continue
+        entry_fill = _mapping(report.get("entry_fill"))
+        entry_intent = _mapping(report.get("entry_intent"))
+        candidates.append(
+            {
+                "lifecycle_id": report.get("lifecycle_id"),
+                "trade_id": report.get("trade_id"),
+                "lane_id": report.get("lane_id") or report.get("strategy_id") or entry_intent.get("lane_id"),
+                "strategy_id": report.get("strategy_id") or entry_intent.get("strategy_id"),
+                "managed_exit_policy_id": report.get("managed_exit_policy_id") or entry_intent.get("managed_exit_policy_id"),
+                "entry_timestamp": entry_fill.get("filled_at") or _mapping(report.get("open_state")).get("entry_timestamp"),
+                "entry_price": entry_fill.get("price") or _mapping(report.get("open_state")).get("entry_price"),
+                "entry_order_id": entry_fill.get("broker_order_id"),
+                "entry_perm_id": entry_fill.get("perm_id"),
+                "entry_exec_id": entry_fill.get("execution_id") or entry_fill.get("exec_id"),
+                "report_path": str(report_path),
+            }
+        )
+    return max(candidates, key=lambda row: str(row.get("entry_timestamp") or "")) if candidates else None
+
+
+def _managed_exit_policy_from_lane(lane_id: object) -> str | None:
+    text = str(lane_id or "")
+    if "_active_participation_" in text:
+        return "GLOBEX_ACTIVE_EVIDENCE_TIMEBOX_60M_EXIT_V1"
+    return None
+
+
+def _side_from_signed_quantity(value: object) -> str:
+    quantity = _decimal(value) or Decimal("0")
+    return "LONG" if quantity > 0 else "SHORT"
+
+
+def _sweeper_classification(
+    *,
+    visible_positions: Sequence[Mapping[str, Any]],
+    diagnostics: Sequence[Mapping[str, Any]],
+) -> str:
+    if any(str(row.get("classification") or "") == "MANAGED_EXIT_SERVICE_RESTART_OR_SCHEMA_REPAIR_REQUIRED" for row in diagnostics):
+        return "MANAGED_EXIT_SERVICE_RESTART_OR_SCHEMA_REPAIR_REQUIRED"
+    if any(str(row.get("classification") or "") == "STRAY_POSITION_REVIEW_REQUIRED" for row in visible_positions):
+        return "MANAGED_EXIT_BROKER_TRUTH_SWEEP_REVIEW_REQUIRED"
+    if any(str(row.get("reason") or "") == "broker_truth_position_adopted" for row in diagnostics):
+        return "MANAGED_EXIT_BROKER_TRUTH_SWEEP_ADOPTED"
+    if any(str(row.get("reason") or "") == "broker_truth_contract_identity_refreshed" for row in diagnostics):
+        return "MANAGED_EXIT_BROKER_TRUTH_SWEEP_REPAIRED"
+    return "MANAGED_EXIT_BROKER_TRUTH_SWEEP_OK"
+
+
+def _publish_broker_truth_sweeper_diagnostic(report: Mapping[str, Any]) -> bool:
+    return str(report.get("classification") or "") in {
+        "MANAGED_EXIT_BROKER_TRUTH_SWEEP_ADOPTED",
+        "MANAGED_EXIT_BROKER_TRUTH_SWEEP_REPAIRED",
+        "MANAGED_EXIT_BROKER_TRUTH_SWEEP_REVIEW_REQUIRED",
+        "MANAGED_EXIT_SERVICE_RESTART_OR_SCHEMA_REPAIR_REQUIRED",
+    }
+
+
+def _managed_registry_classification(managed_positions: Sequence[Mapping[str, Any]]) -> str:
+    classifications = {str(row.get("classification") or "") for row in managed_positions}
+    if "STRAY_POSITION_REVIEW_REQUIRED" in classifications:
+        return "STRAY_POSITION_REVIEW_REQUIRED"
+    if "OPEN_MANAGED_EXIT_DUE" in classifications:
+        return "OPEN_MANAGED_EXIT_DUE"
+    if "OPEN_MANAGED_CLOSE_WORKING" in classifications:
+        return "OPEN_MANAGED_CLOSE_WORKING"
+    if "OPEN_MANAGED_MATCHED" in classifications:
+        return "OPEN_MANAGED_MATCHED"
+    return "NO_MANAGED_POSITIONS"
 
 
 def _build_pipeline_execution_plan(

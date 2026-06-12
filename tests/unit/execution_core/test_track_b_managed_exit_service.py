@@ -26,6 +26,7 @@ from mgc_v05l.execution_core.track_b_managed_exit_service import (
     TrackBManagedExitServiceConfig,
     _build_pipeline_execution_plan,
     _modify_config_from_order_plan,
+    _run_broker_truth_sweeper,
     read_track_b_managed_exit_service_status,
     run_track_b_managed_exit_service,
     run_track_b_managed_exit_service_once,
@@ -34,6 +35,204 @@ from mgc_v05l.execution_core.track_b_managed_order_registry import DEFAULT_MANAG
 
 
 NOW = datetime(2026, 6, 8, 15, 5, tzinfo=UTC)
+
+
+def _write_json(path: Path, payload: dict[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(payload), encoding="utf-8")
+
+
+def _broker_truth(
+    tmp_path: Path,
+    *,
+    symbol: str = "MES",
+    local_symbol: str = "MESU6",
+    con_id: int = 793356217,
+    quantity: str = "-1.0",
+) -> None:
+    _write_json(
+        tmp_path / "outputs/reports/ibkr_read_only_verification/ibkr_positions_snapshot.json",
+        {
+            "account": "DUM882026",
+            "selected_account_id": "DUM882026",
+            "positions_complete": True,
+            "positions": [
+                {
+                    "account_id": "DUM882026",
+                    "security_type": "FUT",
+                    "symbol": symbol,
+                    "local_symbol": local_symbol,
+                    "con_id": con_id,
+                    "expiry": "20260918",
+                    "quantity": quantity,
+                }
+            ],
+        },
+    )
+    _write_json(
+        tmp_path / "outputs/reports/ibkr_read_only_verification/ibkr_open_orders_snapshot.json",
+        {
+            "account": "DUM882026",
+            "selected_account_id": "DUM882026",
+            "open_orders_complete": True,
+            "open_orders": [],
+        },
+    )
+
+
+def test_broker_truth_sweeper_repairs_stale_managed_contract_identity(tmp_path: Path) -> None:
+    _broker_truth(tmp_path)
+    registry = tmp_path / "outputs/track_b_execution_core/managed_positions/latest_managed_positions.json"
+    _write_json(
+        registry,
+        {
+            "classification": "OPEN_MANAGED_MATCHED",
+            "managed_positions": [
+                {
+                    "classification": "OPEN_MANAGED_MATCHED",
+                    "account_id": "DUM882026",
+                    "local_symbol": "MESU6",
+                    "con_id": 0,
+                    "quantity": "1",
+                    "side": "SHORT",
+                    "lane_id": "mes_globex_active_participation_short",
+                    "lifecycle_id": "life-mes",
+                    "trade_id": "trade-mes",
+                    "managed_exit_policy_id": "GLOBEX_ACTIVE_EVIDENCE_TIMEBOX_60M_EXIT_V1",
+                }
+            ],
+        },
+    )
+
+    report = _run_broker_truth_sweeper(
+        config=TrackBManagedExitServiceConfig(repo_root=tmp_path),
+        now=NOW,
+        write=True,
+    )
+
+    updated = json.loads(registry.read_text(encoding="utf-8"))
+    assert report["classification"] == "MANAGED_EXIT_BROKER_TRUTH_SWEEP_REPAIRED"
+    assert updated["managed_positions"][0]["con_id"] == 793356217
+    assert updated["managed_positions"][0]["local_symbol"] == "MESU6"
+    assert updated["managed_positions"][0]["expiry"] == "20260918"
+
+
+def test_broker_truth_sweeper_enriches_missing_broker_con_id_from_managed_registry(tmp_path: Path) -> None:
+    _broker_truth(tmp_path, con_id=0)
+    registry = tmp_path / "outputs/track_b_execution_core/managed_positions/latest_managed_positions.json"
+    _write_json(
+        registry,
+        {
+            "classification": "OPEN_MANAGED_MATCHED",
+            "managed_positions": [
+                {
+                    "classification": "OPEN_MANAGED_MATCHED",
+                    "account_id": "DUM882026",
+                    "local_symbol": "MESU6",
+                    "con_id": 793356217,
+                    "quantity": "1",
+                    "side": "SHORT",
+                    "lane_id": "mes_globex_active_participation_short",
+                    "lifecycle_id": "life-mes",
+                    "trade_id": "trade-mes",
+                    "managed_exit_policy_id": "GLOBEX_ACTIVE_EVIDENCE_TIMEBOX_60M_EXIT_V1",
+                }
+            ],
+        },
+    )
+
+    report = _run_broker_truth_sweeper(
+        config=TrackBManagedExitServiceConfig(repo_root=tmp_path),
+        now=NOW,
+        write=True,
+    )
+
+    updated = json.loads(registry.read_text(encoding="utf-8"))
+    assert report["classification"] == "MANAGED_EXIT_BROKER_TRUTH_SWEEP_REPAIRED"
+    assert updated["managed_positions"][0]["con_id"] == 793356217
+    assert updated["managed_positions"][0]["broker_position"]["local_symbol"] == "MESU6"
+
+
+def test_broker_truth_sweeper_adopts_broker_position_from_lifecycle_report(tmp_path: Path) -> None:
+    _broker_truth(tmp_path)
+    _write_json(
+        tmp_path / "outputs/track_b_execution_core/managed_positions/latest_managed_positions.json",
+        {"classification": "NO_MANAGED_POSITIONS", "managed_positions": []},
+    )
+    _write_json(
+        tmp_path
+        / "outputs/track_b_execution_core/track_b_strategy_managed_paper_lifecycle/bridge_fill_MES|1m|2026-06-12T00:58:00Z|SELL_TO_OPEN/track_b_strategy_managed_paper_lifecycle_report.json",
+        {
+            "lifecycle_id": "life-mes",
+            "trade_id": "trade-mes",
+            "lane_id": "mes_globex_active_participation_short",
+            "strategy_id": "mes_globex_active_participation_short",
+            "local_symbol": "MESU6",
+            "con_id": 793356217,
+            "managed_exit_policy_id": "GLOBEX_ACTIVE_EVIDENCE_TIMEBOX_60M_EXIT_V1",
+            "entry_fill": {
+                "filled_at": "2026-06-12T01:01:15+00:00",
+                "price": "7472.25",
+                "broker_order_id": "2",
+                "perm_id": 472240307,
+                "execution_id": "exec-mes",
+            },
+        },
+    )
+
+    report = _run_broker_truth_sweeper(
+        config=TrackBManagedExitServiceConfig(repo_root=tmp_path),
+        now=NOW,
+        write=True,
+    )
+
+    registry = json.loads(
+        (tmp_path / "outputs/track_b_execution_core/managed_positions/latest_managed_positions.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    adopted = registry["managed_positions"][0]
+    assert report["classification"] == "MANAGED_EXIT_BROKER_TRUTH_SWEEP_ADOPTED"
+    assert adopted["classification"] == "OPEN_MANAGED_MATCHED"
+    assert adopted["con_id"] == 793356217
+    assert adopted["local_symbol"] == "MESU6"
+    assert adopted["managed_exit_policy_id"] == "GLOBEX_ACTIVE_EVIDENCE_TIMEBOX_60M_EXIT_V1"
+
+
+def test_broker_truth_sweeper_marks_missing_policy_for_review(tmp_path: Path) -> None:
+    _broker_truth(tmp_path)
+    _write_json(
+        tmp_path / "outputs/track_b_execution_core/managed_positions/latest_managed_positions.json",
+        {"classification": "NO_MANAGED_POSITIONS", "managed_positions": []},
+    )
+
+    report = _run_broker_truth_sweeper(
+        config=TrackBManagedExitServiceConfig(repo_root=tmp_path),
+        now=NOW,
+        write=True,
+    )
+
+    registry = json.loads(
+        (tmp_path / "outputs/track_b_execution_core/managed_positions/latest_managed_positions.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    assert report["classification"] == "MANAGED_EXIT_BROKER_TRUTH_SWEEP_REVIEW_REQUIRED"
+    assert registry["managed_positions"][0]["classification"] == "STRAY_POSITION_REVIEW_REQUIRED"
+    assert registry["managed_positions"][0]["review_reason"] == "managed_exit_policy_unresolved"
+
+
+def test_broker_truth_sweeper_flags_unparseable_contract_identity(tmp_path: Path) -> None:
+    _broker_truth(tmp_path, con_id=0, local_symbol="")
+
+    report = _run_broker_truth_sweeper(
+        config=TrackBManagedExitServiceConfig(repo_root=tmp_path),
+        now=NOW,
+        write=False,
+    )
+
+    assert report["classification"] == "MANAGED_EXIT_SERVICE_RESTART_OR_SCHEMA_REPAIR_REQUIRED"
+
 
 
 def test_pipeline_execution_plan_splits_v1_allowed_degraded_and_blocked(tmp_path: Path) -> None:
