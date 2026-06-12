@@ -2657,6 +2657,168 @@ def test_active_profile_live_governance_block_still_blocks_submit(
     assert "active_profile_managed_exit_policy_missing" in governance_gate["detail"]
 
 
+def test_broker_market_truth_authority_demotes_stale_software_vetoes_for_active_profile_entry(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    lane_id = "mnq_us_active_participation_long"
+    _write_fresh_broker_truth(tmp_path)
+    _write_phase1_reconciliation(
+        tmp_path,
+        classification="BROKER_TRUTH_SETTLEMENT_TIMEOUT",
+        broker_reconciled=False,
+        block_reasons=["phase1_broker_reconciliation_not_clear"],
+    )
+    _write_runtime_1m_candle(tmp_path, symbol="MNQ", close=29525.25, bar_end="2999-01-01T00:00:00+00:00")
+    _write_active_profile_roster(tmp_path, [_active_profile_lane(lane_id, symbol="MNQ")])
+    config = _config(
+        tmp_path,
+        submit=True,
+        strategy_id=lane_id,
+        symbol="MNQ",
+        caller_path="probationary_paper_runtime_lane",
+        caller_metadata=_approved_runtime_metadata(
+            strategy_id=lane_id,
+            source_instrument="MNQ",
+            executable_proxy="MNQ",
+            bridge_proxy_mode="MNQ_SIGNAL_DIRECT_PHASE1",
+        ),
+        manual_frozen_preview_path=None,
+        approval_digest=None,
+        approval_phrase=None,
+    )
+    intent = IbkrPaperStrategyOrderIntent(
+        strategy_id=config.strategy_id,
+        symbol=config.symbol,
+        contract_month=config.contract_month,
+        action=config.action,
+        quantity=config.quantity,
+        order_type=config.order_type,
+        limit_price_model=config.limit_price_model,
+        time_in_force=config.time_in_force,
+        reason=config.reason,
+        timestamp="2026-06-11T14:35:00+00:00",
+        risk_tags=config.risk_tags,
+        paper_only=config.paper_only,
+    )
+    monkeypatch.setattr(
+        bridge_module,
+        "run_ibkr_paper_strategy_governance",
+        lambda *, config: SimpleNamespace(
+            status_payload={
+                "classification": "PAPER_STRATEGY_GOVERNANCE_PARTIAL",
+                "strategies": [
+                    {
+                        "strategy_id": lane_id,
+                        "bridge_strategy_id": lane_id,
+                        "strategy_status": "PROBATION_ACTIVE",
+                        "submit_allowed": False,
+                        "submit_block_reasons": ["lane_not_yet_submit_ported"],
+                    }
+                ],
+            }
+        ),
+    )
+
+    checks = _build_static_preflight_checks(
+        config=config,
+        intent=intent,
+        environment_lock=evaluate_paper_preview_environment_lock(mode=config.mode, host=config.host, port=config.port),
+        caller_gate={"passed": True, "detail": "runtime"},
+        monitor_status={},
+        governance_status={
+            "classification": "PAPER_STRATEGY_GOVERNANCE_PARTIAL",
+            "submit_allowed": False,
+            "block_reasons": ["lane_not_yet_submit_ported", "strategy_exit_coverage_incomplete"],
+            "selected_strategy": {
+                "strategy_id": lane_id,
+                "bridge_strategy_id": lane_id,
+                "strategy_status": "PROBATION_ACTIVE",
+                "submit_allowed": False,
+                "submit_block_reasons": ["lane_not_yet_submit_ported", "strategy_exit_coverage_incomplete"],
+            },
+        },
+        exposure_status={
+            "classification": "PAPER_EXPOSURE_BLOCKED_REGISTRY_DIAGNOSTIC",
+            "submit_allowed": False,
+            "block_reasons": ["current_hot_path_registry_exposure"],
+            "detail": "Registry/truth current-hot-path authority blocked this new entry.",
+        },
+    )
+
+    by_name = {row["name"]: row for row in checks}
+    assert by_name["broker_market_truth_entry_authority"]["passed"] is True
+    assert by_name["phase1_broker_reconciliation_submit_gate"]["passed"] is True
+    assert by_name["phase1_broker_reconciliation_submit_gate"]["diagnostic_only"] is True
+    assert by_name["paper_strategy_governance_submit_gate"]["passed"] is True
+    assert by_name["paper_strategy_exposure_gate"]["passed"] is True
+
+
+def test_broker_market_truth_authority_blocks_active_profile_entry_when_broker_truth_nonflat(
+    tmp_path: Path,
+) -> None:
+    lane_id = "mnq_us_active_participation_long"
+    _write_fresh_broker_truth(tmp_path)
+    positions_path = tmp_path / "outputs" / "reports" / "ibkr_read_only_verification" / "ibkr_positions_snapshot.json"
+    positions = json.loads(positions_path.read_text(encoding="utf-8"))
+    positions["positions"] = [
+        {
+            "account_id": "DUM882026",
+            "security_type": "FUT",
+            "symbol": "MNQ",
+            "local_symbol": "MNQU6",
+            "quantity": "-1",
+        }
+    ]
+    positions_path.write_text(json.dumps(positions), encoding="utf-8")
+    _write_runtime_1m_candle(tmp_path, symbol="MNQ", close=29525.25, bar_end="2999-01-01T00:00:00+00:00")
+    _write_active_profile_roster(tmp_path, [_active_profile_lane(lane_id, symbol="MNQ")])
+    config = _config(
+        tmp_path,
+        submit=True,
+        strategy_id=lane_id,
+        symbol="MNQ",
+        caller_path="probationary_paper_runtime_lane",
+        caller_metadata=_approved_runtime_metadata(
+            strategy_id=lane_id,
+            source_instrument="MNQ",
+            executable_proxy="MNQ",
+            bridge_proxy_mode="MNQ_SIGNAL_DIRECT_PHASE1",
+        ),
+        manual_frozen_preview_path=None,
+        approval_digest=None,
+        approval_phrase=None,
+    )
+    intent = IbkrPaperStrategyOrderIntent(
+        strategy_id=config.strategy_id,
+        symbol=config.symbol,
+        contract_month=config.contract_month,
+        action=config.action,
+        quantity=config.quantity,
+        order_type=config.order_type,
+        limit_price_model=config.limit_price_model,
+        time_in_force=config.time_in_force,
+        reason=config.reason,
+        timestamp="2026-06-11T14:35:00+00:00",
+        risk_tags=config.risk_tags,
+        paper_only=config.paper_only,
+    )
+
+    checks = _build_static_preflight_checks(
+        config=config,
+        intent=intent,
+        environment_lock=evaluate_paper_preview_environment_lock(mode=config.mode, host=config.host, port=config.port),
+        caller_gate={"passed": True, "detail": "runtime"},
+        monitor_status={},
+        governance_status=_healthy_lane_governance(),
+        exposure_status=_healthy_exposure(),
+    )
+
+    authority = next(row for row in checks if row["name"] == "broker_market_truth_entry_authority")
+    assert authority["passed"] is False
+    assert "broker_nonflat_flat_start_violation" in authority["detail"]
+
+
 def test_supervised_runtime_route_uses_lane_authoritative_target_matrix_even_with_stale_monitor_exact_contract(tmp_path: Path) -> None:
     cases = [
         (

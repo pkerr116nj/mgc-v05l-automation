@@ -163,6 +163,27 @@ def _blocked_intent_classification(reason: str, submit_attempt: dict[str, object
     return "PRE_SUBMIT_GATE_BLOCKED"
 
 
+def _position_manifest_market_identity_blocker(position_manifest: object | None) -> str | None:
+    if position_manifest is None:
+        return f"{OPEN_MANAGED_METADATA_INCOMPLETE}: missing position-management manifest"
+    manifest = dict(getattr(position_manifest, "manifest", {}) or {})
+    contract = dict(manifest.get("contract") or {})
+    missing: list[str] = []
+    if not str(contract.get("instrument_family") or manifest.get("instrument") or manifest.get("symbol") or "").strip():
+        missing.append("instrument")
+    if not str(manifest.get("side") or "").strip():
+        missing.append("side")
+    try:
+        quantity = float(manifest.get("quantity") or manifest.get("qty") or 0.0)
+    except (TypeError, ValueError):
+        quantity = 0.0
+    if quantity <= 0.0:
+        missing.append("quantity")
+    if missing:
+        return f"{OPEN_MANAGED_METADATA_INCOMPLETE}: missing broker/market identity fields: {', '.join(missing)}"
+    return None
+
+
 def _blocked_intent_route_target(submit_attempt: dict[str, object], intent: OrderIntent) -> dict[str, object]:
     metadata = dict(submit_attempt.get("caller_metadata") or {})
     return {
@@ -522,10 +543,7 @@ class StrategyEngine:
                             if position_manifest is None
                             else position_manifest.manifest.get("managed_exit_policy_id"),
                         }
-                        if not (position_manifest and position_manifest.manifest.get("managed_exit_policy_id")):
-                            position_manifest_blocker = (
-                                f"{OPEN_MANAGED_METADATA_INCOMPLETE}: missing managed_exit_policy_id"
-                            )
+                        position_manifest_blocker = _position_manifest_market_identity_blocker(position_manifest)
                     submit_attempt_was_executed = False
                     pending = None
                     route_hold_blocker = (

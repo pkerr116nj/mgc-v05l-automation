@@ -63,6 +63,12 @@ from ..execution_core.track_b_broker_availability import (
     BrokerAvailabilityReportConfig,
     build_broker_availability_report,
 )
+from ..execution_core.track_b_broker_market_truth_entry_authority import (
+    BROKER_MARKET_TRUTH_ENTRY_ALLOWED,
+    build_broker_market_truth_entry_authority_from_repo,
+    evaluate_broker_market_truth_entry_authority,
+    BrokerMarketTruthEntryAuthorityInput,
+)
 from ..execution_core.track_b_exit_safety import (
     ExitAttemptPolicy,
     classify_exit_attempt_policy,
@@ -832,6 +838,31 @@ def run_ibkr_paper_strategy_bridge(
                 intent=intent,
                 now=started_at,
             )
+            static_broker_market_authority = next(
+                (
+                    dict(row.get("authority") or {})
+                    for row in static_checks
+                    if row.get("name") == "broker_market_truth_entry_authority"
+                ),
+                {},
+            )
+            if (
+                _is_entry_intent(config=config, intent=intent)
+                and static_broker_market_authority.get("classification") == BROKER_MARKET_TRUTH_ENTRY_ALLOWED
+                and runtime_control_plane_authorization.get("classification") != _RUNTIME_CONTROL_PLANE_AUTHORIZATION_VALID
+            ):
+                runtime_control_plane_authorization = {
+                    **runtime_control_plane_authorization,
+                    "diagnostic_only": True,
+                    "original_classification": runtime_control_plane_authorization.get("classification"),
+                    "classification": _RUNTIME_CONTROL_PLANE_AUTHORIZATION_VALID,
+                    "valid": True,
+                    "reason": (
+                        "Control Plane authorization is diagnostic for this active-profile PAPER bridge entry; "
+                        "BrokerMarketTruthEntryAuthority broker/market truth is allowed."
+                    ),
+                    "broker_market_truth_entry_authority": static_broker_market_authority,
+                }
             if runtime_control_plane_authorization.get("classification") != _RUNTIME_CONTROL_PLANE_AUTHORIZATION_VALID:
                 detail = (
                     "Runtime-supervised strategy bridge submit lacks fresh Control Plane Snapshot authorization: "
@@ -1202,6 +1233,32 @@ def run_ibkr_paper_strategy_bridge(
             exit_attempt_policy=exit_attempt_policy,
             entry_execution_pricing=entry_execution_pricing,
             futures_contract_resolver_status=futures_contract_resolver_status,
+        )
+        live_expected_target = _bridge_phase1_target(config=config, intent=intent)
+        live_broker_market_authority = _broker_market_truth_entry_authority_for_bridge(
+            config=config,
+            intent=intent,
+            expected_target=live_expected_target,
+            require_resolved_contract=True,
+            diagnostics={
+                "phase1_reconciliation_gate": phase1_gate,
+                "governance_status": governance_status,
+                "exposure_status": exposure_status,
+                "futures_contract_resolver_status": futures_contract_resolver_status,
+            },
+            positions_snapshot=positions,
+            open_orders_snapshot=open_orders,
+            runtime_price=_runtime_price_for_broker_market_authority(entry_execution_pricing),
+        )
+        dynamic_checks.append(
+            _broker_market_truth_entry_authority_check(
+                authority=live_broker_market_authority,
+                applies=_broker_market_truth_entry_authority_applies(
+                    config=config,
+                    intent=intent,
+                    expected_target=live_expected_target,
+                ),
+            )
         )
         preflight_checks = [*static_checks, *dynamic_checks]
         blocking_failures = [row for row in preflight_checks if row.get("blocking") and not row.get("passed")]
@@ -3110,9 +3167,59 @@ def _build_static_preflight_checks(
         config=config,
         phase1_reconciliation_gate=phase1_reconciliation_gate,
     )
+    broker_market_authority = _broker_market_truth_entry_authority_for_bridge(
+        config=config,
+        intent=intent,
+        expected_target=expected_target,
+        require_resolved_contract=False,
+        diagnostics={
+            "phase1_reconciliation_gate": phase1_reconciliation_gate,
+            "governance_status": governance_status,
+            "exposure_status": exposure_status,
+            "monitor_status": monitor_status,
+        },
+    )
+    broker_market_authority_applies = _broker_market_truth_entry_authority_applies(
+        config=config,
+        intent=intent,
+        expected_target=expected_target,
+    )
+    broker_market_authority_allowed = (
+        broker_market_authority_applies
+        and broker_market_authority.get("classification") == BROKER_MARKET_TRUTH_ENTRY_ALLOWED
+    )
+    if broker_market_authority_allowed:
+        if not bool(phase1_reconciliation_check.get("passed")):
+            phase1_reconciliation_check = {
+                **phase1_reconciliation_check,
+                "passed": True,
+                "diagnostic_only": True,
+                "original_passed": False,
+                "detail": (
+                    "Phase-1 reconciliation is diagnostic for this active-profile PAPER bridge entry; "
+                    "BrokerMarketTruthEntryAuthority broker/market truth is allowed."
+                ),
+            }
+        if not governance_submit_allowed:
+            governance_detail = (
+                "Paper strategy governance is diagnostic for this active-profile PAPER bridge entry; "
+                "BrokerMarketTruthEntryAuthority broker/market truth is allowed."
+            )
+            governance_submit_allowed = True
+        if not bool(exposure_status.get("submit_allowed")) and not lifecycle_validation_exposure_allowed:
+            exposure_detail = (
+                "Registry/lifecycle/current-hot-path exposure is diagnostic for this active-profile PAPER bridge entry; "
+                "BrokerMarketTruthEntryAuthority broker/market truth is allowed."
+            )
+            lifecycle_validation_exposure_allowed = True
+    broker_market_authority_check = _broker_market_truth_entry_authority_check(
+        authority=broker_market_authority,
+        applies=broker_market_authority_applies,
+    )
     return [
         _check("approved_paper_caller_path", caller_gate["passed"], True, caller_gate["detail"]),
         dict(runtime_route.get("metadata_check") or _runtime_caller_metadata_check(config=config, intent=intent)),
+        broker_market_authority_check,
         leak_test_authorization,
         _check(
             "deprecated_submit_root_block",
@@ -3280,6 +3387,155 @@ def _build_static_preflight_checks(
             exposure_detail,
         ),
     ]
+
+
+def _broker_market_truth_entry_authority_applies(
+    *,
+    config: IbkrPaperStrategyBridgeConfig,
+    intent: IbkrPaperStrategyOrderIntent,
+    expected_target: Mapping[str, Any],
+) -> bool:
+    if not config.submit or not _is_entry_intent(config=config, intent=intent):
+        return False
+    if str(config.caller_path or "").strip() not in _APPROVED_RUNTIME_CALLER_PATHS:
+        return False
+    route_destination = str(expected_target.get("route_destination") or "").strip()
+    active_profile_lane = dict(expected_target.get("active_profile_lane") or {})
+    return route_destination == "ibkr_paper_bridge_submit_capable" or bool(active_profile_lane)
+
+
+def _broker_market_truth_entry_authority_for_bridge(
+    *,
+    config: IbkrPaperStrategyBridgeConfig,
+    intent: IbkrPaperStrategyOrderIntent,
+    expected_target: Mapping[str, Any],
+    require_resolved_contract: bool,
+    diagnostics: Mapping[str, Any] | None = None,
+    positions_snapshot: Mapping[str, Any] | None = None,
+    open_orders_snapshot: Mapping[str, Any] | None = None,
+    runtime_price: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    if not _broker_market_truth_entry_authority_applies(
+        config=config,
+        intent=intent,
+        expected_target=expected_target,
+    ):
+        return {
+            "classification": "BROKER_MARKET_TRUTH_ENTRY_NOT_APPLICABLE",
+            "allowed": False,
+            "diagnostic_only": True,
+            "detail": "BrokerMarketTruthEntryAuthority applies only to active-profile PAPER bridge new entries.",
+        }
+    metadata = dict(config.caller_metadata or {})
+    active_profile_lane = dict(expected_target.get("active_profile_lane") or {})
+    active_profile_row = dict(active_profile_lane.get("row") or {})
+    overlay = dict(active_profile_row.get("runtime_overlay_params") or {})
+    execution_mode = str(
+        active_profile_lane.get("execution_mode")
+        or active_profile_row.get("execution_mode")
+        or overlay.get("execution_mode")
+        or metadata.get("execution_mode")
+        or ""
+    ).strip()
+    route_destination = str(
+        expected_target.get("route_destination")
+        or active_profile_row.get("current_order_destination")
+        or overlay.get("current_order_destination")
+        or metadata.get("route_destination")
+        or ""
+    ).strip()
+    lane_ids = _active_profile_lane_ids_for_bridge(config.repo_root)
+    contract = dict(expected_target)
+    if positions_snapshot is None or open_orders_snapshot is None or runtime_price is None:
+        return build_broker_market_truth_entry_authority_from_repo(
+            repo_root=config.repo_root,
+            account_id=config.account_id,
+            mode=config.mode,
+            route_destination=route_destination,
+            execution_mode=execution_mode,
+            lane_id=str(metadata.get("lane_id") or config.strategy_id or intent.strategy_id or "").strip(),
+            instrument=str(expected_target.get("symbol") or config.symbol or intent.symbol or "").strip().upper(),
+            action=str(intent.action or config.action or "").strip().upper(),
+            quantity=float(intent.quantity or config.quantity or 0.0),
+            contract=contract,
+            require_resolved_contract=require_resolved_contract,
+            paper_only=bool(intent.paper_only),
+            live_money_eligible=bool(metadata.get("live_money_eligible") is True),
+            paper_proof=bool(metadata.get("paper_proof") is True or metadata.get("paper_proof_invoked") is True),
+            flat_start_required=True,
+            max_quantity=_EXPECTED_QUANTITY,
+            diagnostics=diagnostics or {},
+        )
+    return evaluate_broker_market_truth_entry_authority(
+        BrokerMarketTruthEntryAuthorityInput(
+            account_id=config.account_id,
+            mode=config.mode,
+            route_destination=route_destination,
+            execution_mode=execution_mode,
+            lane_id=str(metadata.get("lane_id") or config.strategy_id or intent.strategy_id or "").strip(),
+            instrument=str(expected_target.get("symbol") or config.symbol or intent.symbol or "").strip().upper(),
+            action=str(intent.action or config.action or "").strip().upper(),
+            quantity=float(intent.quantity or config.quantity or 0.0),
+            paper_only=bool(intent.paper_only),
+            live_money_eligible=bool(metadata.get("live_money_eligible") is True),
+            paper_proof=bool(metadata.get("paper_proof") is True or metadata.get("paper_proof_invoked") is True),
+            flat_start_required=True,
+            max_quantity=_EXPECTED_QUANTITY,
+            active_profile_lane_ids=tuple(lane_ids),
+            broker_positions_snapshot=positions_snapshot,
+            broker_open_orders_snapshot=open_orders_snapshot,
+            open_order_truth=_read_json(
+                config.repo_root
+                / "outputs"
+                / "track_b_execution_core"
+                / "open_order_truth"
+                / "latest_open_order_truth.json"
+            ),
+            runtime_price=runtime_price,
+            contract=contract,
+            require_resolved_contract=require_resolved_contract,
+            diagnostics=diagnostics or {},
+        )
+    )
+
+
+def _broker_market_truth_entry_authority_check(
+    *,
+    authority: Mapping[str, Any],
+    applies: bool,
+) -> dict[str, Any]:
+    if not applies:
+        return _check(
+            "broker_market_truth_entry_authority",
+            True,
+            False,
+            "BrokerMarketTruthEntryAuthority is not applicable to this legacy/non-entry route.",
+        )
+    allowed = authority.get("classification") == BROKER_MARKET_TRUTH_ENTRY_ALLOWED
+    blockers = list(authority.get("block_reasons") or [])
+    return {
+        **_check(
+            "broker_market_truth_entry_authority",
+            allowed,
+            True,
+            (
+                "BrokerMarketTruthEntryAuthority allows PAPER new entry using broker and market truth."
+                if allowed
+                else "BrokerMarketTruthEntryAuthority blocked PAPER new entry: "
+                + (", ".join(str(reason) for reason in blockers) or "unknown_reason")
+            ),
+        ),
+        "authority": dict(authority),
+    }
+
+
+def _active_profile_lane_ids_for_bridge(repo_root: Path) -> list[str]:
+    payload = _read_json(_resolve_repo_path(repo_root, _DEFAULT_PAPER_CONFIG_IN_FORCE_PATH))
+    lane_ids = [str(value or "").strip() for value in list(payload.get("active_lane_ids") or [])]
+    for row in list(payload.get("lanes") or []):
+        if isinstance(row, Mapping):
+            lane_ids.append(str(row.get("lane_id") or row.get("strategy_id") or "").strip())
+    return sorted({value for value in lane_ids if value})
 
 
 def _governance_exit_override_allowed(
@@ -6087,6 +6343,24 @@ def _entry_limit_override(entry_execution_pricing: dict[str, Any] | None) -> flo
     }:
         return None
     return _float_or_none(pricing.get("limit_price"))
+
+
+def _runtime_price_for_broker_market_authority(entry_execution_pricing: dict[str, Any] | None) -> dict[str, Any]:
+    pricing = dict(entry_execution_pricing or {})
+    return {
+        "source": pricing.get("execution_price_source") or pricing.get("source") or _ENTRY_RUNTIME_PRICE_SOURCE,
+        "price": (
+            pricing.get("runtime_reference_price")
+            or pricing.get("runtime_close")
+            or pricing.get("runtime_market_reference")
+            or pricing.get("limit_price")
+        ),
+        "timestamp": (
+            pricing.get("runtime_candle_timestamp")
+            or pricing.get("runtime_price_timestamp")
+            or pricing.get("generated_at")
+        ),
+    }
 
 
 def _qualified_contract_min_tick(qualified_contract_report: dict[str, Any]) -> float | None:
