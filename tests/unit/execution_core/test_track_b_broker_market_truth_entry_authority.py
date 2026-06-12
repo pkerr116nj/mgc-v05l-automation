@@ -1,11 +1,14 @@
 from __future__ import annotations
 
+import json
 from datetime import datetime, timezone
+from pathlib import Path
 
 from mgc_v05l.execution_core.track_b_broker_market_truth_entry_authority import (
     BROKER_MARKET_TRUTH_ENTRY_ALLOWED,
     BROKER_MARKET_TRUTH_ENTRY_BLOCKED,
     BrokerMarketTruthEntryAuthorityInput,
+    build_broker_market_truth_entry_authority_from_repo,
     evaluate_broker_market_truth_entry_authority,
 )
 
@@ -241,6 +244,224 @@ def test_unresolved_contract_blocks() -> None:
     assert "unresolved_con_id" in reasons
 
 
+def test_repo_authority_enriches_missing_con_id_from_zero_broker_position(tmp_path: Path) -> None:
+    _write_json(
+        tmp_path / "outputs/probationary_pattern_engine/paper_session/runtime/paper_config_in_force.json",
+        {"active_lane_ids": ["mnq_globex_active_participation_short"]},
+    )
+    _write_json(
+        tmp_path / "outputs/reports/ibkr_read_only_verification/ibkr_positions_snapshot.json",
+        _positions(
+            rows=[
+                {
+                    "account_id": "DUM882026",
+                    "security_type": "FUT",
+                    "symbol": "MNQ",
+                    "local_symbol": "MNQU6",
+                    "con_id": 793356225,
+                    "expiry": "20260918",
+                    "quantity": "0.0",
+                    "multiplier": "2",
+                    "currency": "USD",
+                }
+            ]
+        ),
+    )
+    _write_json(
+        tmp_path / "outputs/reports/ibkr_read_only_verification/ibkr_open_orders_snapshot.json",
+        _orders(),
+    )
+    _write_json(
+        tmp_path / "outputs/track_b_execution_core/open_order_truth/latest_open_order_truth.json",
+        {"classification": "NO_OPEN_ORDERS", "unknown_open_order_count": 0},
+    )
+    _write_json(
+        tmp_path / "outputs/track_b_execution_core/phase1_runtime_market_data/MNQ/1m/latest_runtime_candles.json",
+        {
+            "bars": [
+                {
+                    "bar_end": "2026-06-11T14:00:00+00:00",
+                    "close": 29000.25,
+                }
+            ]
+        },
+    )
+
+    result = build_broker_market_truth_entry_authority_from_repo(
+        repo_root=tmp_path,
+        account_id="DUM882026",
+        mode="PAPER",
+        route_destination="ibkr_paper_bridge_submit_capable",
+        execution_mode="IBKR_PAPER_BRIDGE",
+        lane_id="mnq_globex_active_participation_short",
+        instrument="MNQ",
+        action="SELL_TO_OPEN",
+        quantity=1,
+        contract={"symbol": "MNQ", "contract_month": "202606", "exchange": "CME", "currency": "USD"},
+        now=datetime(2026, 6, 11, 14, 1, tzinfo=timezone.utc),
+    )
+
+    assert result["classification"] == BROKER_MARKET_TRUTH_ENTRY_ALLOWED
+    assert result["market_truth"]["contract"]["con_id"] == 793356225
+    assert result["market_truth"]["contract"]["local_symbol"] == "MNQU6"
+
+
+def test_repo_authority_enriches_missing_con_id_from_trade_ledger_identity(tmp_path: Path) -> None:
+    _write_json(
+        tmp_path / "outputs/probationary_pattern_engine/paper_session/runtime/paper_config_in_force.json",
+        {"active_lane_ids": ["mes_globex_active_participation_long"]},
+    )
+    _write_json(
+        tmp_path / "outputs/reports/ibkr_read_only_verification/ibkr_positions_snapshot.json",
+        _positions(
+            rows=[
+                {
+                    "account_id": "DUM882026",
+                    "security_type": "FUT",
+                    "symbol": "MES",
+                    "local_symbol": "MESU6",
+                    "expiry": "20260918",
+                    "quantity": "0.0",
+                    "currency": "USD",
+                }
+            ]
+        ),
+    )
+    _write_json(
+        tmp_path
+        / "outputs/track_b_execution_core/paper_trade_ledger/latest_track_b_broker_reconciled_live_position_status.json",
+        {
+            "broker_reconciled_state": "BROKER_AND_LIFECYCLE_FLAT",
+            "positions_by_instrument": {
+                "MES-U6": {
+                    "instrument_family": "MES",
+                    "local_symbol": "MESU6",
+                    "con_id": 793356217,
+                    "expiry": "20260918",
+                    "exchange": "CME",
+                    "currency": "USD",
+                }
+            },
+        },
+    )
+    _write_json(tmp_path / "outputs/reports/ibkr_read_only_verification/ibkr_open_orders_snapshot.json", _orders())
+    _write_json(
+        tmp_path / "outputs/track_b_execution_core/open_order_truth/latest_open_order_truth.json",
+        {"classification": "NO_OPEN_ORDERS", "unknown_open_order_count": 0},
+    )
+    _write_json(
+        tmp_path / "outputs/track_b_execution_core/phase1_runtime_market_data/MES/1m/latest_runtime_candles.json",
+        {"bars": [{"bar_end": "2026-06-11T14:00:00+00:00", "close": 7400.25}]},
+    )
+
+    result = build_broker_market_truth_entry_authority_from_repo(
+        repo_root=tmp_path,
+        account_id="DUM882026",
+        mode="PAPER",
+        route_destination="ibkr_paper_bridge_submit_capable",
+        execution_mode="IBKR_PAPER_BRIDGE",
+        lane_id="mes_globex_active_participation_long",
+        instrument="MES",
+        action="BUY_TO_OPEN",
+        quantity=1,
+        contract={"symbol": "MES", "contract_month": "202606", "exchange": "CME", "currency": "USD"},
+        now=datetime(2026, 6, 11, 14, 1, tzinfo=timezone.utc),
+    )
+
+    assert result["classification"] == BROKER_MARKET_TRUTH_ENTRY_ALLOWED
+    assert result["market_truth"]["contract"]["con_id"] == 793356217
+    assert result["market_truth"]["contract"]["local_symbol"] == "MESU6"
+
+
+def test_repo_authority_prefers_next_contract_identity_when_broker_snapshot_lacks_symbol(tmp_path: Path) -> None:
+    _write_json(
+        tmp_path / "outputs/probationary_pattern_engine/paper_session/runtime/paper_config_in_force.json",
+        {"active_lane_ids": ["mnq_globex_active_participation_short"]},
+    )
+    _write_json(tmp_path / "outputs/reports/ibkr_read_only_verification/ibkr_positions_snapshot.json", _positions())
+    _write_json(
+        tmp_path
+        / "outputs/track_b_execution_core/paper_trade_ledger/latest_track_b_broker_reconciled_paper_trade_summary.json",
+        {
+            "recent_trades": [
+                {
+                    "instrument_family": "MNQ",
+                    "local_symbol": "MNQM6",
+                    "con_id": 770561201,
+                    "contract_key": "MNQ-M6",
+                },
+                {
+                    "instrument_family": "MNQ",
+                    "local_symbol": "MNQU6",
+                    "con_id": 793356225,
+                    "contract_key": "MNQ-U6",
+                },
+            ]
+        },
+    )
+    _write_json(tmp_path / "outputs/reports/ibkr_read_only_verification/ibkr_open_orders_snapshot.json", _orders())
+    _write_json(
+        tmp_path / "outputs/track_b_execution_core/open_order_truth/latest_open_order_truth.json",
+        {"classification": "NO_OPEN_ORDERS", "unknown_open_order_count": 0},
+    )
+    _write_json(
+        tmp_path / "outputs/track_b_execution_core/phase1_runtime_market_data/MNQ/1m/latest_runtime_candles.json",
+        {"bars": [{"bar_end": "2026-06-11T14:00:00+00:00", "close": 29000.25}]},
+    )
+
+    result = build_broker_market_truth_entry_authority_from_repo(
+        repo_root=tmp_path,
+        account_id="DUM882026",
+        mode="PAPER",
+        route_destination="ibkr_paper_bridge_submit_capable",
+        execution_mode="IBKR_PAPER_BRIDGE",
+        lane_id="mnq_globex_active_participation_short",
+        instrument="MNQ",
+        action="SELL_TO_OPEN",
+        quantity=1,
+        contract={"symbol": "MNQ", "contract_month": "202606", "exchange": "CME", "currency": "USD"},
+        now=datetime(2026, 6, 11, 14, 1, tzinfo=timezone.utc),
+    )
+
+    assert result["classification"] == BROKER_MARKET_TRUTH_ENTRY_ALLOWED
+    assert result["market_truth"]["contract"]["con_id"] == 793356225
+    assert result["market_truth"]["contract"]["local_symbol"] == "MNQU6"
+
+
+def test_repo_authority_still_blocks_when_contract_identity_cannot_be_enriched(tmp_path: Path) -> None:
+    _write_json(
+        tmp_path / "outputs/probationary_pattern_engine/paper_session/runtime/paper_config_in_force.json",
+        {"active_lane_ids": ["mnq_globex_active_participation_short"]},
+    )
+    _write_json(tmp_path / "outputs/reports/ibkr_read_only_verification/ibkr_positions_snapshot.json", _positions())
+    _write_json(tmp_path / "outputs/reports/ibkr_read_only_verification/ibkr_open_orders_snapshot.json", _orders())
+    _write_json(
+        tmp_path / "outputs/track_b_execution_core/open_order_truth/latest_open_order_truth.json",
+        {"classification": "NO_OPEN_ORDERS", "unknown_open_order_count": 0},
+    )
+    _write_json(
+        tmp_path / "outputs/track_b_execution_core/phase1_runtime_market_data/MNQ/1m/latest_runtime_candles.json",
+        {"bars": [{"bar_end": "2026-06-11T14:00:00+00:00", "close": 29000.25}]},
+    )
+
+    result = build_broker_market_truth_entry_authority_from_repo(
+        repo_root=tmp_path,
+        account_id="DUM882026",
+        mode="PAPER",
+        route_destination="ibkr_paper_bridge_submit_capable",
+        execution_mode="IBKR_PAPER_BRIDGE",
+        lane_id="mnq_globex_active_participation_short",
+        instrument="MNQ",
+        action="SELL_TO_OPEN",
+        quantity=1,
+        contract={"symbol": "MNQ", "contract_month": "202606"},
+        now=datetime(2026, 6, 11, 14, 1, tzinfo=timezone.utc),
+    )
+
+    assert result["classification"] == BROKER_MARKET_TRUTH_ENTRY_BLOCKED
+    assert "unresolved_con_id" in result["block_reasons"]
+
+
 def test_wrong_account_live_proof_and_non_paper_block() -> None:
     classification, reasons = _classification(
         account_id="DU_BAD",
@@ -258,3 +479,8 @@ def test_wrong_account_live_proof_and_non_paper_block() -> None:
         "live_money_eligible",
         "paper_proof_true",
     }.issubset(set(reasons))
+
+
+def _write_json(path: Path, payload: dict[str, object]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(payload), encoding="utf-8")

@@ -216,6 +216,12 @@ def build_broker_market_truth_entry_authority_from_repo(
     orders = _load_json(root / "outputs" / "reports" / "ibkr_read_only_verification" / "ibkr_open_orders_snapshot.json")
     order_truth = _load_json(root / "outputs" / "track_b_execution_core" / "open_order_truth" / "latest_open_order_truth.json")
     runtime_price = _load_runtime_price(root=root, instrument=instrument)
+    resolved_contract = _enrich_contract_from_broker_truth(
+        root=root,
+        contract=dict(contract or {}),
+        instrument=instrument,
+        broker_positions_snapshot=positions,
+    )
     return evaluate_broker_market_truth_entry_authority(
         BrokerMarketTruthEntryAuthorityInput(
             account_id=account_id,
@@ -236,7 +242,7 @@ def build_broker_market_truth_entry_authority_from_repo(
             broker_open_orders_snapshot=orders,
             open_order_truth=order_truth,
             runtime_price=runtime_price,
-            contract=dict(contract or {}),
+            contract=resolved_contract,
             require_resolved_contract=require_resolved_contract,
             price_max_age_seconds=price_max_age_seconds,
             now=now,
@@ -281,6 +287,290 @@ def _load_runtime_price(*, root: Path, instrument: str) -> dict[str, Any]:
         "timestamp": latest.get("bar_end") or latest.get("timestamp") or payload.get("generated_at"),
         "bar_count": payload.get("bar_count") or len(bars),
     }
+
+
+def _enrich_contract_from_broker_truth(
+    *,
+    root: Path,
+    contract: Mapping[str, Any],
+    instrument: str,
+    broker_positions_snapshot: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Fill missing active-profile contract identity from fresh broker truth.
+
+    Active-profile PAPER bridge lanes are configured by source instrument. Near
+    expiry, the submit bridge can roll the static target to the next contract,
+    but the startup-route authority runs earlier and needs the same concrete
+    identity. IBKR position snapshots often retain zero-quantity rows for the
+    current scoped futures contracts after flat settlement; those rows are
+    broker truth for conId/localSymbol/expiry and are safe to use for identity
+    enrichment. If no positive conId is available, the authority still blocks.
+    """
+
+    enriched = dict(contract or {})
+    if _int_or_none(enriched.get("con_id")) is not None and enriched.get("local_symbol") and enriched.get("expiry"):
+        return enriched
+    expected = str(instrument or enriched.get("symbol") or "").strip().upper()
+    if not expected:
+        return enriched
+    broker_identity = _broker_position_contract_identity(
+        instrument=expected,
+        broker_positions_snapshot=broker_positions_snapshot,
+    )
+    ledger_identities = _trade_ledger_contract_identities(root=root, instrument=expected)
+    candidates: list[dict[str, Any]] = []
+    if broker_identity:
+        broker_local_symbol = str(broker_identity.get("local_symbol") or "").strip().upper()
+        broker_expiry = str(broker_identity.get("expiry") or "").strip()
+        broker_con_id = _int_or_none(broker_identity.get("con_id"))
+        if broker_con_id is not None and broker_con_id > 0 and broker_local_symbol:
+            candidates.append(broker_identity)
+        else:
+            for row in ledger_identities:
+                row_local_symbol = str(row.get("local_symbol") or "").strip().upper()
+                if broker_local_symbol and row_local_symbol != broker_local_symbol:
+                    continue
+                con_id = _int_or_none(row.get("con_id"))
+                if con_id is None or con_id <= 0 or not row_local_symbol:
+                    continue
+                candidates.append(
+                    {
+                        **broker_identity,
+                        **row,
+                        "expiry": broker_expiry or row.get("expiry") or enriched.get("expiry"),
+                        "contract_month": (broker_expiry or str(row.get("expiry") or ""))[:6]
+                        or row.get("contract_month")
+                        or enriched.get("contract_month"),
+                        "contract_identity_source": "broker_positions_snapshot_plus_trade_ledger_identity",
+                    }
+                )
+    else:
+        candidates.extend(
+            _select_unanchored_identity_candidates(
+                ledger_identities,
+                selected_contract_month=str(enriched.get("contract_month") or "").strip(),
+            )
+        )
+    candidates = _dedupe_contract_identities(candidates)
+    if len(candidates) != 1:
+        return enriched
+    return {**enriched, **candidates[0]}
+
+
+def _broker_position_contract_identity(
+    *,
+    instrument: str,
+    broker_positions_snapshot: Mapping[str, Any],
+) -> dict[str, Any]:
+    candidates: list[dict[str, Any]] = []
+    for row in _broker_positions(broker_positions_snapshot):
+        if not _is_track_b_futures_position(row):
+            continue
+        if not _position_matches_instrument(row, instrument):
+            continue
+        con_id = _int_or_none(row.get("con_id") or row.get("conId"))
+        local_symbol = str(row.get("local_symbol") or row.get("localSymbol") or "").strip()
+        expiry = str(row.get("expiry") or row.get("lastTradeDateOrContractMonth") or "").strip()
+        if not local_symbol:
+            continue
+        candidates.append(
+            {
+                "symbol": instrument,
+                "contract_month": expiry[:6] if len(expiry) >= 6 else None,
+                "expiry": expiry or None,
+                "con_id": con_id,
+                "local_symbol": local_symbol,
+                "exchange": row.get("exchange") or "CME",
+                "currency": row.get("currency") or "USD",
+                "multiplier": row.get("multiplier"),
+                "trading_class": row.get("trading_class") or row.get("tradingClass") or instrument,
+                "contract_identity_source": "broker_positions_snapshot",
+            }
+        )
+    if len(candidates) != 1:
+        return {}
+    return candidates[0]
+
+
+def _trade_ledger_contract_identities(*, root: Path, instrument: str) -> list[dict[str, Any]]:
+    paths = (
+        root
+        / "outputs"
+        / "track_b_execution_core"
+        / "paper_trade_ledger"
+        / "latest_track_b_broker_reconciled_live_position_status.json",
+        root
+        / "outputs"
+        / "track_b_execution_core"
+        / "paper_trade_ledger"
+        / "latest_track_b_live_position_status.json",
+        root
+        / "outputs"
+        / "track_b_execution_core"
+        / "paper_trade_ledger"
+        / "latest_track_b_broker_reconciled_paper_trade_summary.json",
+    )
+    candidates: list[dict[str, Any]] = []
+    for path in paths:
+        payload = _load_json(path)
+        if not payload:
+            continue
+        for row in _iter_contract_identity_rows(payload):
+            candidate = _contract_identity_candidate(row, instrument=instrument, source=str(path))
+            if candidate:
+                candidates.append(candidate)
+    return _dedupe_contract_identities(candidates)
+
+
+def _iter_contract_identity_rows(payload: Mapping[str, Any]) -> list[Mapping[str, Any]]:
+    rows: list[Mapping[str, Any]] = [payload]
+    for key in (
+        "positions_by_instrument",
+        "positions_by_strategy",
+        "broker_positions_by_instrument",
+    ):
+        value = payload.get(key)
+        if isinstance(value, Mapping):
+            rows.extend(dict(row) for row in value.values() if isinstance(row, Mapping))
+    for key in (
+        "recent_trades",
+        "lifecycle_units",
+        "broker_track_b_positions",
+        "positions",
+        "current_positions",
+        "terminal_superseded_open_records",
+        "terminal_suppressed_open_records",
+    ):
+        value = payload.get(key)
+        if isinstance(value, list):
+            rows.extend(dict(row) for row in value if isinstance(row, Mapping))
+    expanded: list[Mapping[str, Any]] = []
+    for row in rows:
+        expanded.append(row)
+        for nested_key in (
+            "entry_broker_identity",
+            "broker_identity",
+            "contract",
+            "contract_identity",
+            "resolved_contract",
+        ):
+            nested = row.get(nested_key)
+            if isinstance(nested, Mapping):
+                expanded.append(nested)
+        nested_row = row.get("row")
+        if isinstance(nested_row, Mapping):
+            expanded.append(nested_row)
+        units = row.get("lifecycle_units")
+        if isinstance(units, list):
+            expanded.extend(dict(unit) for unit in units if isinstance(unit, Mapping))
+    return expanded
+
+
+def _contract_identity_candidate(row: Mapping[str, Any], *, instrument: str, source: str) -> dict[str, Any]:
+    local_symbol = str(row.get("local_symbol") or row.get("localSymbol") or "").strip()
+    con_id = _int_or_none(row.get("con_id") or row.get("conId"))
+    if con_id is None or con_id <= 0 or not local_symbol:
+        return {}
+    symbol = str(
+        row.get("symbol")
+        or row.get("instrument")
+        or row.get("instrument_family")
+        or row.get("track_b_root")
+        or ""
+    ).strip().upper()
+    if not symbol:
+        symbol = "".join(ch for ch in local_symbol.upper() if ch.isalpha())[:3]
+    if symbol != instrument:
+        return {}
+    expiry = str(row.get("expiry") or row.get("lastTradeDateOrContractMonth") or "").strip()
+    contract_month = str(row.get("contract_month") or row.get("contractMonth") or "").strip()
+    if not contract_month and len(expiry) >= 6:
+        contract_month = expiry[:6]
+    if not contract_month:
+        contract_month = _contract_month_from_local_symbol(local_symbol)
+    return {
+        "symbol": instrument,
+        "contract_month": contract_month or None,
+        "expiry": expiry or None,
+        "con_id": con_id,
+        "local_symbol": local_symbol,
+        "exchange": row.get("exchange") or "CME",
+        "currency": row.get("currency") or "USD",
+        "multiplier": row.get("multiplier"),
+        "trading_class": row.get("trading_class") or row.get("tradingClass") or instrument,
+        "contract_identity_source": source,
+    }
+
+
+def _select_unanchored_identity_candidates(
+    candidates: Sequence[Mapping[str, Any]],
+    *,
+    selected_contract_month: str,
+) -> list[dict[str, Any]]:
+    """Prefer a single next/current identity when no broker row anchors localSymbol.
+
+    This is still identity-only: exposure and order truth continue to come from
+    broker snapshots. The active profile can carry a stale front-month target
+    while the bridge resolver has already been using the next quarterly
+    contract. When historical identity artifacts contain both, choose the
+    nearest later contract month. If that cannot be determined uniquely, fail
+    closed by returning all candidates so the caller treats it as ambiguous.
+    """
+
+    deduped = _dedupe_contract_identities(candidates)
+    if len(deduped) <= 1:
+        return deduped
+    selected_month = _int_or_none(selected_contract_month)
+    if selected_month is None:
+        return deduped
+    later = [
+        row
+        for row in deduped
+        if (_int_or_none(row.get("contract_month")) is not None and _int_or_none(row.get("contract_month")) > selected_month)
+    ]
+    if not later:
+        return deduped
+    earliest_month = min(int(row.get("contract_month")) for row in later if _int_or_none(row.get("contract_month")) is not None)
+    selected = [row for row in later if _int_or_none(row.get("contract_month")) == earliest_month]
+    return selected if len(selected) == 1 else deduped
+
+
+def _dedupe_contract_identities(candidates: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
+    deduped: dict[tuple[int, str], dict[str, Any]] = {}
+    for row in candidates:
+        con_id = _int_or_none(row.get("con_id"))
+        local_symbol = str(row.get("local_symbol") or "").strip().upper()
+        if con_id is None or con_id <= 0 or not local_symbol:
+            continue
+        normalized = {key: value for key, value in dict(row).items() if value not in (None, "")}
+        deduped[(con_id, local_symbol)] = normalized
+    return list(deduped.values())
+
+
+def _contract_month_from_local_symbol(local_symbol: str) -> str:
+    text = str(local_symbol or "").strip().upper()
+    if len(text) < 3:
+        return ""
+    month_by_code = {
+        "F": "01",
+        "G": "02",
+        "H": "03",
+        "J": "04",
+        "K": "05",
+        "M": "06",
+        "N": "07",
+        "Q": "08",
+        "U": "09",
+        "V": "10",
+        "X": "11",
+        "Z": "12",
+    }
+    code = text[-2:-1]
+    year_code = text[-1:]
+    month = month_by_code.get(code)
+    if not month or not year_code.isdigit():
+        return ""
+    return f"202{year_code}{month}"
 
 
 def _broker_positions(snapshot: Mapping[str, Any]) -> list[dict[str, Any]]:
