@@ -361,8 +361,19 @@ case "${mode}" in
       pid="$(tr -dc '0-9' < "${RUNTIME_DIR}/probationary_paper.pid" || true)"
     fi
     if [[ -n "${pid}" ]] && ps -p "${pid}" >/dev/null 2>&1; then
-      write_tick_artifact "NO_ACTION_RUNTIME_RUNNING" "" "Exact runtime PID artifact is alive; thin recovery did not start anything."
-      echo "Track B recovery tick: runtime already running; no action."
+      if TRACK_B_PAPER_STACK_PROFILE="mnq_mes_full_session_active_evidence" bash "${THIN_RECOVERY_SCRIPT}" check >/dev/null; then
+        write_tick_artifact "NO_ACTION_RUNTIME_RUNNING" "" "Exact runtime PID artifact is alive and matches thin PAPER runtime shape."
+        echo "Track B recovery tick: runtime already running with expected shape; no action."
+        exit 0
+      fi
+      thin_classification="$(json_value "${STATE_DIR}/latest_thin_paper_runtime_recovery.json" "classification")"
+      if [[ "${thin_classification}" == "BROKER_TRUTH_NOT_CLEAN_RECOVERY_BLOCKED" ]]; then
+        write_tick_artifact "NO_ACTION_BROKER_TRUTH_NOT_CLEAN" "BROKER_TRUTH_NOT_CLEAN_RECOVERY_BLOCKED" "Runtime shape check could not restart because broker truth is not clean."
+        echo "Track B recovery tick: broker truth is not clean; no restart."
+        exit 0
+      fi
+      write_tick_artifact "THIN_RECOVERY_RESTART_REQUIRED" "" "Exact runtime PID artifact is alive but failed thin runtime shape verification; invoking thin restart."
+      TRACK_B_PAPER_STACK_PROFILE="mnq_mes_full_session_active_evidence" bash "${THIN_RECOVERY_SCRIPT}" restart
       exit 0
     fi
     write_tick_artifact "START_REQUESTED_THIN_PAPER_RECOVERY" "" "Runtime PID artifact is absent/dead; invoking thin broker-truth PAPER recovery path."

@@ -1199,7 +1199,12 @@ def test_recovery_tick_uses_thin_runtime_recovery_without_legacy_status_gates() 
 
     assert 'THIN_RECOVERY_SCRIPT="${REPO_ROOT}/scripts/track_b_thin_paper_runtime_recovery.sh"' in source
     tick_block = source[source.index("  tick)\n") : source.index("  enable)\n")]
+    assert 'bash "${THIN_RECOVERY_SCRIPT}" check' in tick_block
     assert 'bash "${THIN_RECOVERY_SCRIPT}" start' in tick_block
+    assert 'bash "${THIN_RECOVERY_SCRIPT}" restart' in tick_block
+    assert "THIN_RECOVERY_RESTART_REQUIRED" in tick_block
+    assert "BROKER_TRUTH_NOT_CLEAN_RECOVERY_BLOCKED" in tick_block
+    assert "NO_ACTION_BROKER_TRUTH_NOT_CLEAN" in tick_block
     assert "START_REQUESTED_THIN_PAPER_RECOVERY" in tick_block
     assert "track_b_status_paper_stack.sh" not in tick_block
     assert "track_b_paper_stack_restart_precheck" not in tick_block
@@ -1491,7 +1496,12 @@ def test_recovery_tick_actions_are_safe_and_profile_preserving() -> None:
     source = RECOVERY_SCRIPT.read_text(encoding="utf-8")
 
     assert "NO_ACTION_RUNTIME_RUNNING" in source
+    assert "THIN_RECOVERY_RESTART_REQUIRED" in source
+    assert "NO_ACTION_BROKER_TRUTH_NOT_CLEAN" in source
+    assert "BROKER_TRUTH_NOT_CLEAN_RECOVERY_BLOCKED" in source
     assert "START_REQUESTED_THIN_PAPER_RECOVERY" in source
+    assert 'TRACK_B_PAPER_STACK_PROFILE="mnq_mes_full_session_active_evidence" bash "${THIN_RECOVERY_SCRIPT}" check' in source
+    assert 'TRACK_B_PAPER_STACK_PROFILE="mnq_mes_full_session_active_evidence" bash "${THIN_RECOVERY_SCRIPT}" restart' in source
     assert 'TRACK_B_PAPER_STACK_PROFILE="mnq_mes_full_session_active_evidence" bash "${THIN_RECOVERY_SCRIPT}" start' in source
     assert "START_REQUESTED_CANONICAL_PAPER_STACK" not in source
     assert "START_REQUESTED_APPROVED_PAPER_STACK" not in source
@@ -1515,6 +1525,8 @@ def test_recovery_tick_does_not_mutate_broker_before_thin_restart() -> None:
     assert "mgc_v05l.execution_core.track_b_managed_exit_actuator" not in tick_block
     assert "--apply" not in tick_block
     assert "--operator-authorized-managed-exit" not in tick_block
+    assert 'bash "${THIN_RECOVERY_SCRIPT}" check' in tick_block
+    assert 'bash "${THIN_RECOVERY_SCRIPT}" restart' in tick_block
     assert 'bash "${THIN_RECOVERY_SCRIPT}" start' in tick_block
 
 
