@@ -8,6 +8,7 @@ PLIST_PATH="${HOME}/Library/LaunchAgents/${LABEL}.plist"
 TEMPLATE_PATH="${REPO_ROOT}/var/launchd/track_b/${LABEL}.plist"
 STATUS_SCRIPT="${REPO_ROOT}/scripts/track_b_status_paper_stack.sh"
 START_SCRIPT="${REPO_ROOT}/scripts/track_b_start_paper_stack.sh"
+THIN_RECOVERY_SCRIPT="${REPO_ROOT}/scripts/track_b_thin_paper_runtime_recovery.sh"
 AUDIT_MODULE="mgc_v05l.execution_core.track_b_hourly_runtime_recovery_audit"
 PYTHON_BIN="${REPO_ROOT}/.venv/bin/python"
 RUNTIME_DIR="${REPO_ROOT}/outputs/probationary_pattern_engine/paper_session/runtime"
@@ -190,9 +191,9 @@ payload = {
     "disable_command": "bash scripts/track_b_hourly_paper_runtime_recovery.sh disable",
     "status_command": "bash scripts/track_b_hourly_paper_runtime_recovery.sh status",
     "tick_command": "bash scripts/track_b_hourly_paper_runtime_recovery.sh tick",
-    "runtime_start_path": "scripts/track_b_start_paper_stack.sh",
-    "runtime_status_path": "scripts/track_b_status_paper_stack.sh",
-    "restart_authority_source": "canonical_paper_stack_restart_precheck",
+    "runtime_start_path": "scripts/track_b_thin_paper_runtime_recovery.sh",
+    "runtime_status_path": "runtime_pid_artifact_only",
+    "restart_authority_source": "thin_broker_truth_recovery",
     "paper_only": True,
     "live_money_eligible": False,
     "paper_proof_invoked": False,
@@ -355,69 +356,17 @@ case "${mode}" in
       echo "Track B recovery tick: disabled by operator; no action."
       exit 0
     fi
-    run_audit
-    status_tmp="$(mktemp "${TMPDIR:-/tmp}/track_b_paper_stack_status.XXXXXX.json")"
-    profile_resolution_tmp=""
-    managed_exit_actuator_tmp=""
-    trap 'rm -f "${status_tmp}" "${profile_resolution_tmp:-}" "${managed_exit_actuator_tmp:-}"' EXIT
-    bash "${STATUS_SCRIPT}" --json > "${status_tmp}"
-    runtime_running="$(json_value "${status_tmp}" runtime.running)"
-    live_runtime_classification="$(json_value "${status_tmp}" live_runtime_environment.classification)"
-    live_runtime_pid_alive="$(json_value "${status_tmp}" live_runtime_environment.runtime.pid_alive)"
-    ready_submit_capable="$(json_value "${status_tmp}" readiness.ready_submit_capable)"
-    restart_allowed="$(json_value "${status_tmp}" readiness.restart_allowed_if_runtime_down)"
-    next_action="$(json_value "${status_tmp}" next_action)"
-    restart_authority="$("${PYTHON_BIN}" -m mgc_v05l.execution_core.track_b_paper_stack_restart_precheck < "${status_tmp}")"
-    restart_authority_allowed="$(printf '%s' "${restart_authority}" | "${PYTHON_BIN}" -c 'import json,sys; print(str(json.loads(sys.stdin.read()).get("restart_allowed") is True).lower())')"
-    restart_authority_classification="$(printf '%s' "${restart_authority}" | "${PYTHON_BIN}" -c 'import json,sys; print(json.loads(sys.stdin.read()).get("classification") or "")')"
-    duplicate_writer_detected="$(json_value "${status_tmp}" duplicate_writer.duplicate_writer_detected)"
-    if [[ "${duplicate_writer_detected}" == "true" ]]; then
-      write_tick_artifact "NO_ACTION_DUPLICATE_WRITER" "duplicate_writer_detected" "Duplicate writer guard blocks recovery start." "${status_tmp}"
-      echo "Track B recovery tick: duplicate writer detected; no action."
-      exit 0
+    pid=""
+    if [[ -s "${RUNTIME_DIR}/probationary_paper.pid" ]]; then
+      pid="$(tr -dc '0-9' < "${RUNTIME_DIR}/probationary_paper.pid" || true)"
     fi
-    if [[ "${runtime_running}" == "true" && "${live_runtime_classification}" == "RUNTIME_DOWN_WITH_BROKER_EXPOSURE" ]]; then
-      runtime_running="false"
-    fi
-    if [[ "${runtime_running}" == "true" && "${live_runtime_pid_alive}" == "false" ]]; then
-      runtime_running="false"
-    fi
-    if [[ "${runtime_running}" == "true" ]]; then
-      write_tick_artifact "NO_ACTION_RUNTIME_RUNNING" "" "Runtime is healthy/running; recovery did not start anything." "${status_tmp}"
+    if [[ -n "${pid}" ]] && ps -p "${pid}" >/dev/null 2>&1; then
+      write_tick_artifact "NO_ACTION_RUNTIME_RUNNING" "" "Exact runtime PID artifact is alive; thin recovery did not start anything."
       echo "Track B recovery tick: runtime already running; no action."
       exit 0
     fi
-    managed_exit_actuator_tmp="$(mktemp "${TMPDIR:-/tmp}/track_b_managed_exit_actuator.XXXXXX.json")"
-    if run_managed_exit_actuator "${managed_exit_actuator_tmp}"; then
-      managed_exit_actuator_classification="$(json_value "${managed_exit_actuator_tmp}" classification)"
-      managed_exit_actuator_submit_attempted="$(json_value "${managed_exit_actuator_tmp}" submit_attempted)"
-      managed_exit_actuator_submitted_count="$(json_value "${managed_exit_actuator_tmp}" submitted_count)"
-      if [[ "${managed_exit_actuator_submit_attempted}" == "true" ]]; then
-        write_tick_artifact "${managed_exit_actuator_classification:-MANAGED_EXIT_ACTUATOR_APPLIED_OR_PENDING}" "" "Runtime down; close-only managed exit actuator submitted ${managed_exit_actuator_submitted_count:-0} exact risk-reducing close(s). Runtime restart deferred until broker/managed truth refreshes." "${status_tmp}"
-        echo "Track B recovery tick: managed-exit actuator submitted ${managed_exit_actuator_submitted_count:-0} exact close(s); restart deferred."
-        exit 0
-      fi
-    else
-      managed_exit_actuator_classification="$(json_value "${managed_exit_actuator_tmp}" classification)"
-      echo "Track B recovery tick: managed-exit actuator did not apply (${managed_exit_actuator_classification:-unavailable}); continuing restart gate evaluation."
-    fi
-    if [[ ( "${restart_allowed}" != "true" || "${next_action}" != "run scripts/track_b_start_paper_stack.sh" ) && "${restart_authority_allowed}" != "true" ]]; then
-      write_tick_artifact "NO_ACTION_BLOCKED_GATES" "restart_not_allowed" "restart_allowed=${restart_allowed} restart_authority_allowed=${restart_authority_allowed} restart_authority=${restart_authority_classification} ready=${ready_submit_capable} next_action=${next_action}" "${status_tmp}"
-      echo "Track B recovery tick: PAUSED by safety/status; restart_allowed=${restart_allowed} restart_authority_allowed=${restart_authority_allowed} restart_authority=${restart_authority_classification} ready=${ready_submit_capable} next_action=${next_action}."
-      exit 0
-    fi
-    profile_resolution_tmp="$(mktemp "${TMPDIR:-/tmp}/track_b_recovery_profile.XXXXXX.json")"
-    resolve_recovery_profile "${status_tmp}" > "${profile_resolution_tmp}"
-    recovery_requested_profile="$(json_value "${profile_resolution_tmp}" recovery_requested_profile)"
-    recovery_profile_approved="$(json_value "${profile_resolution_tmp}" recovery_profile_approved)"
-    recovery_profile_blocker="$(json_value "${profile_resolution_tmp}" recovery_profile_blocker)"
-    if [[ "${recovery_profile_approved}" != "true" ]]; then
-      write_tick_artifact "RECOVERY_BLOCKED_PROFILE_NOT_APPROVED" "${recovery_profile_blocker:-RECOVERY_BLOCKED_PROFILE_NOT_APPROVED}" "Runtime down and restart gates allow recovery start, but no approved PAPER stack profile was resolved; refusing canonical fallback." "${status_tmp}" "${profile_resolution_tmp}"
-      echo "Track B recovery tick: blocked; approved PAPER stack profile missing or unsafe (${recovery_profile_blocker:-RECOVERY_BLOCKED_PROFILE_NOT_APPROVED})."
-      exit 0
-    fi
-    write_tick_artifact "START_REQUESTED_APPROVED_PAPER_STACK" "" "Runtime down and restart gates allow recovery start; restart_authority=${restart_authority_classification}; profile=${recovery_requested_profile}." "${status_tmp}" "${profile_resolution_tmp}"
-    TRACK_B_PAPER_STACK_PROFILE="${recovery_requested_profile}" bash "${START_SCRIPT}"
+    write_tick_artifact "START_REQUESTED_THIN_PAPER_RECOVERY" "" "Runtime PID artifact is absent/dead; invoking thin broker-truth PAPER recovery path."
+    TRACK_B_PAPER_STACK_PROFILE="mnq_mes_full_session_active_evidence" bash "${THIN_RECOVERY_SCRIPT}" start
     ;;
   enable)
     bash "${REPO_ROOT}/scripts/generate_track_b_launchd_plists.sh" --json >/dev/null

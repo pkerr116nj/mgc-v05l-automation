@@ -8,6 +8,7 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 START_SCRIPT = REPO_ROOT / "scripts" / "track_b_start_paper_stack.sh"
 STATUS_SCRIPT = REPO_ROOT / "scripts" / "track_b_status_paper_stack.sh"
 RECOVERY_SCRIPT = REPO_ROOT / "scripts" / "track_b_hourly_paper_runtime_recovery.sh"
+THIN_RECOVERY_SCRIPT = REPO_ROOT / "scripts" / "track_b_thin_paper_runtime_recovery.sh"
 PAPER_CONFIG = REPO_ROOT / "config" / "probationary_pattern_engine_paper.yaml"
 GUARDED_ROSTER_CONFIG = REPO_ROOT / "config" / "track_b_guarded_paper_roster.json"
 
@@ -1193,15 +1194,41 @@ def test_paper_stack_start_enables_recovery_service_unless_operator_opts_out() -
     assert "WARNING_RECOVERY_SERVICE_ENABLE_FAILED" in source
 
 
-def test_recovery_tick_does_not_treat_absent_runtime_with_broker_exposure_as_running() -> None:
+def test_recovery_tick_uses_thin_runtime_recovery_without_legacy_status_gates() -> None:
     source = RECOVERY_SCRIPT.read_text(encoding="utf-8")
 
-    assert "live_runtime_environment.classification" in source
-    assert "live_runtime_environment.runtime.pid_alive" in source
-    assert '"${live_runtime_classification}" == "RUNTIME_DOWN_WITH_BROKER_EXPOSURE"' in source
-    assert '"${live_runtime_pid_alive}" == "false"' in source
-    runtime_running_block = source.split('if [[ "${runtime_running}" == "true" ]]; then', 1)[0]
-    assert "NO_ACTION_RUNTIME_RUNNING" not in runtime_running_block
+    assert 'THIN_RECOVERY_SCRIPT="${REPO_ROOT}/scripts/track_b_thin_paper_runtime_recovery.sh"' in source
+    tick_block = source[source.index("  tick)\n") : source.index("  enable)\n")]
+    assert 'bash "${THIN_RECOVERY_SCRIPT}" start' in tick_block
+    assert "START_REQUESTED_THIN_PAPER_RECOVERY" in tick_block
+    assert "track_b_status_paper_stack.sh" not in tick_block
+    assert "track_b_paper_stack_restart_precheck" not in tick_block
+    assert "run_managed_exit_actuator" not in tick_block
+    assert "next_action" not in tick_block
+    assert "broker_lifecycle" not in tick_block
+
+
+def test_thin_recovery_script_uses_broker_truth_and_direct_minimal_start_only() -> None:
+    source = THIN_RECOVERY_SCRIPT.read_text(encoding="utf-8")
+
+    assert "ibkr_broker_truth_refresher" in source
+    assert "BROKER_TRUTH_NOT_CLEAN_RECOVERY_BLOCKED" in source
+    assert "WORKTREE_NOT_CLEAN_RECOVERY_BLOCKED" in source
+    assert "TRACK_B_PAPER_STACK_RESTART=1" in source
+    assert "TRACK_B_PAPER_MINIMAL_STARTUP_V1=1" in source
+    assert "TRACK_B_PAPER_STACK_DISABLE_RECOVERY_SERVICE=1" in source
+    assert "verify_runtime_shape" in source
+    assert "mnq_mes_full_session_active_evidence" in source
+    assert "IBKR_PAPER_BRIDGE" in source
+    assert "expected_lanes = int" in source
+    assert "track_b_status_paper_stack.sh" not in source
+    assert "track_b_paper_stack_restart_precheck" not in source
+    assert "track_b_control_plane_snapshot" not in source
+    assert "latest_track_b_paper_broker_reconciliation" not in source
+    assert "launchctl" not in source
+    assert "stop_probationary_paper_soak.sh" not in source
+    assert "pkill" not in source
+    assert "paper_proof" not in source.lower().replace("paper_proof_invoked", "")
 
 
 def test_paper_stack_start_has_session_coverage_active_evidence_profile() -> None:
@@ -1408,38 +1435,31 @@ def test_recovery_tick_actions_are_safe_and_profile_preserving() -> None:
     source = RECOVERY_SCRIPT.read_text(encoding="utf-8")
 
     assert "NO_ACTION_RUNTIME_RUNNING" in source
-    assert "NO_ACTION_BLOCKED_GATES" in source
-    assert "NO_ACTION_DUPLICATE_WRITER" in source
-    assert "START_REQUESTED_APPROVED_PAPER_STACK" in source
-    assert "RECOVERY_BLOCKED_PROFILE_NOT_APPROVED" in source
-    assert "duplicate_writer.duplicate_writer_detected" in source
-    assert "restart_allowed_if_runtime_down" in source
-    assert "track_b_paper_stack_restart_precheck" in source
-    assert "restart_authority_allowed" in source
-    assert "restart_authority_classification" in source
-    assert "resolve_recovery_profile" in source
-    assert "approved PAPER stack profile missing or unsafe" in source
-    assert "TRACK_B_PAPER_STACK_PROFILE=\"${recovery_requested_profile}\" bash \"${START_SCRIPT}\"" in source
-    assert "\n    bash \"${START_SCRIPT}\"" not in source
+    assert "START_REQUESTED_THIN_PAPER_RECOVERY" in source
+    assert 'TRACK_B_PAPER_STACK_PROFILE="mnq_mes_full_session_active_evidence" bash "${THIN_RECOVERY_SCRIPT}" start' in source
     assert "START_REQUESTED_CANONICAL_PAPER_STACK" not in source
+    assert "START_REQUESTED_APPROVED_PAPER_STACK" not in source
+    assert "NO_ACTION_BLOCKED_GATES" not in source
+    assert "NO_ACTION_DUPLICATE_WRITER" not in source
+    assert "restart_allowed_if_runtime_down" not in source
+    assert "duplicate_writer.duplicate_writer_detected" not in source
+    assert "track_b_paper_stack_restart_precheck" not in source
+    assert "resolve_recovery_profile" in source
+    assert "resolve_recovery_profile" not in source[source.index("  tick)\n") : source.index("  enable)\n")]
     assert "placeorder" not in source.lower()
     assert "cancelorder" not in source.lower()
     assert "flatten" not in source.lower()
 
 
-def test_recovery_tick_runs_close_only_managed_exit_actuator_before_restart() -> None:
+def test_recovery_tick_does_not_mutate_broker_before_thin_restart() -> None:
     source = RECOVERY_SCRIPT.read_text(encoding="utf-8")
+    tick_block = source[source.index("  tick)\n") : source.index("  enable)\n")]
 
-    assert "mgc_v05l.execution_core.track_b_managed_exit_actuator" in source
-    assert "--apply" in source
-    assert "--operator-authorized-managed-exit" in source
-    assert "managed-exit actuator submitted" in source
-
-    actuator_call = source.index("run_managed_exit_actuator")
-    restart_gate = source.index('if [[ ( "${restart_allowed}" != "true"')
-    runtime_start = source.index('TRACK_B_PAPER_STACK_PROFILE="${recovery_requested_profile}" bash "${START_SCRIPT}"')
-    assert actuator_call < restart_gate
-    assert actuator_call < runtime_start
+    assert "run_managed_exit_actuator" not in tick_block
+    assert "mgc_v05l.execution_core.track_b_managed_exit_actuator" not in tick_block
+    assert "--apply" not in tick_block
+    assert "--operator-authorized-managed-exit" not in tick_block
+    assert 'bash "${THIN_RECOVERY_SCRIPT}" start' in tick_block
 
 
 def test_recovery_profile_status_fields_are_reported() -> None:

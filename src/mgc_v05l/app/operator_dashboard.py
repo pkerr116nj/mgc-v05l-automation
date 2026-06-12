@@ -10031,12 +10031,12 @@ class OperatorDashboardService:
         }
         if unresolved_lane_ids:
             return None, metadata
+        metadata["thin_recovery_path"] = "scripts/track_b_thin_paper_runtime_recovery.sh"
+        metadata["legacy_run_probationary_paper_soak_disabled"] = True
         return [
             "bash",
-            "scripts/run_probationary_paper_soak.sh",
-            *self._paper_runtime_config_args(),
-            *sorted(set(requested_flags)),
-            "--background",
+            "scripts/track_b_thin_paper_runtime_recovery.sh",
+            "start",
         ], metadata
 
     def _paper_temporary_paper_runtime_integrity_payload(self, paper: dict[str, Any]) -> dict[str, Any]:
