@@ -107,6 +107,14 @@ _LONDON_LANE_SPECS: dict[str, _LondonLaneSpec] = {
         output_family="london_late_active_evidence",
         expected_direction="SHORT",
     ),
+    "mes_london_late_active_participation_short": _LondonLaneSpec(
+        lane_id="mes_london_late_active_participation_short",
+        strategy_id="PAPER_ACTIVE_EVIDENCE_MES_LONDON_LATE_PARTICIPATION_SHORT_V1",
+        session="LONDON_LATE",
+        anchor_type="LONDON_LATE_0530_REFERENCE",
+        output_family="london_late_active_evidence",
+        expected_direction="SHORT",
+    ),
 }
 
 

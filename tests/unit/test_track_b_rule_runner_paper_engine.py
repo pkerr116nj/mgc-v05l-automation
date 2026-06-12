@@ -11,6 +11,7 @@ from mgc_v05l.app.track_b_rule_runner_paper_engine import (
     CHANGEOVER_0700_MNQ_LONG_CONTINUATION_ID,
     CHANGEOVER_CONTINUATION_SPECS,
     PAPER_ACTIVE_EVIDENCE_MES_GLOBEX_SHORT_ID,
+    PAPER_ACTIVE_EVIDENCE_MES_LONDON_LATE_SHORT_ID,
     PAPER_ACTIVE_EVIDENCE_MES_LONDON_OPEN_SHORT_ID,
     PAPER_ACTIVE_EVIDENCE_MNQ_GLOBEX_LONG_ID,
     PAPER_ACTIVE_EVIDENCE_MNQ_LONDON_LATE_SHORT_ID,
@@ -686,6 +687,52 @@ def test_london_late_active_evidence_short_accepts_with_canonical_0530_reference
     assert decision["accepted"] is True
     assert decision["primary_blocker"] is None
     assert decision["session_open_price"] == "21000"
+    assert decision["session_anchor_status"] == "READY"
+    assert decision["session_anchor_source"] == "RECOVERED_PHASE1_1M"
+
+
+def test_london_late_mes_active_evidence_short_accepts_with_canonical_0530_reference(tmp_path) -> None:
+    ny = ZoneInfo("America/New_York")
+    anchor_path = tmp_path / "outputs/track_b_execution_core/session_anchors/MES/2026-05-28/LONDON_LATE_0530_REFERENCE.json"
+    anchor_path.parent.mkdir(parents=True, exist_ok=True)
+    anchor_path.write_text(
+        json.dumps(
+            {
+                "status": "READY",
+                "reason_code": "ANCHOR_READY_FROM_CANONICAL_ARTIFACT",
+                "session_date_et": "2026-05-28",
+                "anchor_time_utc": datetime(2026, 5, 28, 9, 30, tzinfo=UTC).isoformat(),
+                "timeframe": "1m",
+                "reference_price": "7450",
+                "source": "RECOVERED_PHASE1_1M",
+                "source_artifact_path": "anchor.json",
+                "bar": {
+                    "bar_start": datetime(2026, 5, 28, 5, 30, tzinfo=ny).astimezone(UTC).isoformat(),
+                    "bar_end": datetime(2026, 5, 28, 5, 31, tzinfo=ny).astimezone(UTC).isoformat(),
+                    "open": "7450",
+                    "high": "7451",
+                    "low": "7449",
+                    "close": "7449.5",
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    engine = object.__new__(TrackBRuleRunnerPaperStrategyEngine)
+    engine._bar_history = [
+        _bar(datetime(2026, 5, 28, 5, 45, tzinfo=ny), open_="7448", close="7444"),
+        _bar(datetime(2026, 5, 28, 5, 50, tzinfo=ny), open_="7444", close="7440"),
+    ]
+    engine._settings = SimpleNamespace(symbol="MES", trade_size=1)
+    engine._track_b_repo_root = tmp_path
+
+    decision = engine._paper_active_evidence_decision_for_source(
+        PAPER_ACTIVE_EVIDENCE_MES_LONDON_LATE_SHORT_ID
+    )
+
+    assert decision["accepted"] is True
+    assert decision["primary_blocker"] is None
+    assert decision["session_open_price"] == "7450"
     assert decision["session_anchor_status"] == "READY"
     assert decision["session_anchor_source"] == "RECOVERED_PHASE1_1M"
 

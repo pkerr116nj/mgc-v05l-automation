@@ -1291,14 +1291,15 @@ def test_paper_stack_start_has_full_session_active_evidence_profile() -> None:
     assert '"PAPER_ACTIVE_EVIDENCE_MES_LONDON_OPEN_PARTICIPATION_LONG_V1"' in source
     assert '"PAPER_ACTIVE_EVIDENCE_MES_LONDON_OPEN_PARTICIPATION_SHORT_V1"' in source
     assert '"PAPER_ACTIVE_EVIDENCE_MNQ_LONDON_LATE_PARTICIPATION_SHORT_V1"' in source
+    assert '"PAPER_ACTIVE_EVIDENCE_MES_LONDON_LATE_PARTICIPATION_SHORT_V1"' in source
     assert '"PAPER_WATCH_ACTIVE_EVIDENCE_MNQ_LONDON_LATE_LONG_SHADOW_V1"' in source
     assert '"PAPER_WATCH_ACTIVE_EVIDENCE_MES_LONDON_LATE_LONG_SHADOW_V1"' in source
-    assert '"PAPER_WATCH_ACTIVE_EVIDENCE_MES_LONDON_LATE_SHORT_SHADOW_V1"' in source
-    assert "FULL_SESSION_PROFILE_INITIAL_LONDON_LATE_MNQ_SHORT_ONLY_ELEVATION" in source
+    assert "FULL_SESSION_PROFILE_INITIAL_LONDON_LATE_SHORT_ONLY_ELEVATION" in source
     assert 'PROOF_REQUIRED_SYMBOLS="MNQ,MES"' in source
 
     block = source.split('elif [[ "${STACK_PROFILE}" == "mnq_mes_full_session_active_evidence" ]]; then', 1)[1]
     roster_json = block.split("cat > \"${SCOPED_ROSTER_PATH}\" <<'JSON'", 1)[1].split("\nJSON", 1)[0]
+    assert '"PAPER_WATCH_ACTIVE_EVIDENCE_MES_LONDON_LATE_SHORT_SHADOW_V1"' not in roster_json
     roster = json.loads(roster_json)
     assert roster["enabled_strategy_ids"] == [
         "PAPER_ACTIVE_EVIDENCE_MNQ_US_PARTICIPATION_LONG_V1",
@@ -1314,16 +1315,16 @@ def test_paper_stack_start_has_full_session_active_evidence_profile() -> None:
         "PAPER_ACTIVE_EVIDENCE_MES_LONDON_OPEN_PARTICIPATION_LONG_V1",
         "PAPER_ACTIVE_EVIDENCE_MES_LONDON_OPEN_PARTICIPATION_SHORT_V1",
         "PAPER_ACTIVE_EVIDENCE_MNQ_LONDON_LATE_PARTICIPATION_SHORT_V1",
+        "PAPER_ACTIVE_EVIDENCE_MES_LONDON_LATE_PARTICIPATION_SHORT_V1",
     ]
-    assert len(roster["enabled_strategy_ids"]) == 13
+    assert len(roster["enabled_strategy_ids"]) == 14
     assert roster["shadow_only_strategy_ids"] == [
         "PAPER_WATCH_ACTIVE_EVIDENCE_MNQ_LONDON_LATE_LONG_SHADOW_V1",
         "PAPER_WATCH_ACTIVE_EVIDENCE_MES_LONDON_LATE_LONG_SHADOW_V1",
-        "PAPER_WATCH_ACTIVE_EVIDENCE_MES_LONDON_LATE_SHORT_SHADOW_V1",
     ]
 
 
-def test_paper_stack_full_session_materializes_thirteen_lane_specs(tmp_path: Path) -> None:
+def test_paper_stack_full_session_materializes_fourteen_lane_specs(tmp_path: Path) -> None:
     source = START_SCRIPT.read_text(encoding="utf-8")
     assert "materialize_scoped_lane_config_from_roster" in source
 
@@ -1356,7 +1357,7 @@ def test_paper_stack_full_session_materializes_thirteen_lane_specs(tmp_path: Pat
     )
 
     subprocess.run(
-        [sys.executable, "-", str(roster_path), str(source_config_path), str(output_config_path)],
+        [sys.executable, "-", str(roster_path), str(source_config_path), str(output_config_path), str(REPO_ROOT)],
         input=helper_python,
         text=True,
         check=True,
@@ -1366,11 +1367,66 @@ def test_paper_stack_full_session_materializes_thirteen_lane_specs(tmp_path: Pat
     assert "probationary_paper_runtime_exclusive_config: true" in generated
     raw_lanes = generated.split("probationary_paper_lanes_json: ", 1)[1].strip()
     lanes = json.loads(raw_lanes)
-    assert len(lanes) == 13
+    assert len(lanes) == 14
     assert [lane["long_sources"][0] for lane in lanes] == roster["enabled_strategy_ids"]
     assert {lane["execution_mode"] for lane in lanes} == {"IBKR_PAPER_BRIDGE"}
     assert {lane["current_order_destination"] for lane in lanes} == {"ibkr_paper_bridge_submit_capable"}
     assert {lane["runtime_overlay_params"]["execution_mode"] for lane in lanes} == {"IBKR_PAPER_BRIDGE"}
+
+
+def test_paper_stack_full_session_materializer_fills_missing_lane_specs_from_contract(tmp_path: Path) -> None:
+    source = START_SCRIPT.read_text(encoding="utf-8")
+    block = source.split('elif [[ "${STACK_PROFILE}" == "mnq_mes_full_session_active_evidence" ]]; then', 1)[1]
+    roster_json = block.split("cat > \"${SCOPED_ROSTER_PATH}\" <<'JSON'", 1)[1].split("\nJSON", 1)[0]
+    roster = json.loads(roster_json)
+    helper_block = source.split("materialize_scoped_lane_config_from_roster() {", 1)[1]
+    helper_python = helper_block.split("<<'PY'\n", 1)[1].split("\nPY\n", 1)[0]
+    existing_ids = [
+        strategy_id
+        for strategy_id in roster["enabled_strategy_ids"]
+        if strategy_id != "PAPER_ACTIVE_EVIDENCE_MES_LONDON_LATE_PARTICIPATION_SHORT_V1"
+    ]
+    roster_path = tmp_path / "roster.json"
+    source_config_path = tmp_path / "paper_config_in_force.json"
+    output_config_path = tmp_path / "paper_stack_mnq_mes_full_session_active_evidence.yaml"
+    roster_path.write_text(json.dumps(roster), encoding="utf-8")
+    source_config_path.write_text(
+        json.dumps(
+            {
+                "lanes": [
+                    {
+                        "lane_id": f"lane_{index}",
+                        "long_sources": [strategy_id],
+                        "short_sources": [],
+                        "symbol": "MNQ" if "MNQ" in strategy_id else "MES",
+                    }
+                    for index, strategy_id in enumerate(existing_ids)
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    subprocess.run(
+        [sys.executable, "-", str(roster_path), str(source_config_path), str(output_config_path), str(REPO_ROOT)],
+        input=helper_python,
+        text=True,
+        check=True,
+    )
+
+    raw_lanes = output_config_path.read_text(encoding="utf-8").split("probationary_paper_lanes_json: ", 1)[1].strip()
+    lanes = json.loads(raw_lanes)
+    by_source = {
+        next(iter([*lane.get("long_sources", []), *lane.get("short_sources", [])]), None): lane
+        for lane in lanes
+    }
+    mes_late = by_source["PAPER_ACTIVE_EVIDENCE_MES_LONDON_LATE_PARTICIPATION_SHORT_V1"]
+    assert len(lanes) == 14
+    assert mes_late["lane_id"] == "mes_london_late_active_participation_short"
+    assert mes_late["symbol"] == "MES"
+    assert mes_late["session_restriction"] == "LONDON_LATE"
+    assert mes_late["execution_mode"] == "IBKR_PAPER_BRIDGE"
+    assert mes_late["runtime_overlay_params"]["current_order_destination"] == "ibkr_paper_bridge_submit_capable"
 
 
 def test_paper_stack_generated_profile_rosters_carry_authority_contract() -> None:

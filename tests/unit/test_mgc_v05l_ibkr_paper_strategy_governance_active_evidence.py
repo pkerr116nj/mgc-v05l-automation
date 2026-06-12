@@ -22,6 +22,7 @@ ACTIVE_EVIDENCE_LANES = {
     "mnq_globex_active_participation_short": "MNQ",
     "mes_globex_active_participation_long": "MES",
     "mes_globex_active_participation_short": "MES",
+    "mes_london_late_active_participation_short": "MES",
 }
 LONDON_LATE_SHADOW_LANE_ID = "mnq_london_late_active_participation_short"
 LONDON_LATE_PROMOTED_STRATEGY_ID = "PAPER_ACTIVE_EVIDENCE_MNQ_LONDON_LATE_PARTICIPATION_SHORT_V1"

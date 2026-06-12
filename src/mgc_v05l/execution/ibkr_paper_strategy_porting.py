@@ -107,6 +107,7 @@ _ES_PHASE1_SUBMIT_LANE_IDS = (
 _MES_PHASE1_SUBMIT_LANE_IDS = (
     "mes_london_open_active_participation_long",
     "mes_london_open_active_participation_short",
+    "mes_london_late_active_participation_short",
     "mes_1x_ny_early_core__us_early_long",
     "mes_1x_ny_early_core__us_early_short_breakdown",
     "mes_1x_ny_early_core__us_early_short_reclaim_fail",
@@ -266,6 +267,7 @@ for lane_id in (
     "mnq_london_open_active_participation_short",
     "mes_london_open_active_participation_long",
     "mes_london_open_active_participation_short",
+    "mes_london_late_active_participation_short",
     "mnq_london_late_active_participation_short",
 ):
     adapter = _SUBMIT_CAPABLE_LANE_ADAPTERS.get(lane_id)

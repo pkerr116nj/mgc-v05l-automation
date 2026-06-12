@@ -27,6 +27,7 @@ ACTIVE_LANES = (
     "mes_london_open_active_participation_long",
     "mes_london_open_active_participation_short",
     "mnq_london_late_active_participation_short",
+    "mes_london_late_active_participation_short",
 )
 
 

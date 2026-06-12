@@ -2391,6 +2391,7 @@ def test_active_profile_roster_lanes_pass_paper_bridge_allowlist(tmp_path: Path)
         "mes_london_open_active_participation_long",
         "mes_london_open_active_participation_short",
         "mnq_london_late_active_participation_short",
+        "mes_london_late_active_participation_short",
     ]
     _write_active_profile_roster(
         tmp_path,

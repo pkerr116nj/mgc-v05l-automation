@@ -500,6 +500,34 @@ APPROVED_TRACK_B_POSITION_INTENT_TEMPLATES: Mapping[str, _StrategyContractTempla
         session_tags=("LONDON_LATE",),
         regime_tags=("PAPER_ONLY_LONDON_LATE_ACTIVE_EVIDENCE_LANE", "TREND_PARTICIPATION"),
     ),
+    "PAPER_ACTIVE_EVIDENCE_MES_LONDON_LATE_PARTICIPATION_SHORT_V1": _StrategyContractTemplate(
+        strategy_id="PAPER_ACTIVE_EVIDENCE_MES_LONDON_LATE_PARTICIPATION_SHORT_V1",
+        lane_id="mes_london_late_active_participation_short",
+        instrument_family="MES",
+        contract_key="MES-202606",
+        local_symbol="MESM6",
+        con_id=770561194,
+        expiry="20260618",
+        side="SHORT",
+        quantity=1,
+        thesis_type=ThesisType.TREND_PARTICIPATION,
+        thesis_summary=(
+            "PAPER-only London Late active participation short evidence lane: enter when MES is below "
+            "VWAP or the canonical 05:30 ET London Late reference and the latest completed runtime bar "
+            "confirms downward participation."
+        ),
+        expected_hold_type=ExpectedHoldType.TIMEBOXED,
+        intended_exit_family="LONDON_LATE_ACTIVE_EVIDENCE_TIMEBOX_EXIT",
+        managed_exit_policy_id="GLOBEX_ACTIVE_EVIDENCE_TIMEBOX_15M_EXIT_V1",
+        exit_profile_id=MES_GLOBEX_ACTIVE_EVIDENCE_TIMEBOX_15M_V1,
+        invalidation_conditions=("price_recovers_london_late_reference", "opposite_recent_close_confirms"),
+        max_hold_policy="3_COMPLETED_5M_BARS",
+        expected_hold_bars_5m=3,
+        conflict_group="equity_index_mnq_mes_london_late_active_evidence",
+        strategy_family="paper_active_evidence",
+        session_tags=("LONDON_LATE",),
+        regime_tags=("PAPER_ONLY_LONDON_LATE_ACTIVE_EVIDENCE_LANE", "TREND_PARTICIPATION"),
+    ),
     "GLOBEX_REOPEN_MNQ_1M_STRONG_GREEN_SECOND_CANDLE_CONFIRM_SHADOW_V1": _StrategyContractTemplate(
         strategy_id="GLOBEX_REOPEN_MNQ_1M_STRONG_GREEN_SECOND_CANDLE_CONFIRM_SHADOW_V1",
         lane_id="globex_reopen_mnq_1m_strong_green_second_candle_confirm_shadow",

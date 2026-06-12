@@ -103,7 +103,8 @@ materialize_scoped_lane_config_from_roster() {
   local roster_path="$1"
   local source_config_path="$2"
   local output_config_path="$3"
-  "${PYTHON_BIN}" - "${roster_path}" "${source_config_path}" "${output_config_path}" <<'PY'
+  local repo_root="$4"
+  "${PYTHON_BIN}" - "${roster_path}" "${source_config_path}" "${output_config_path}" "${repo_root}" <<'PY'
 import json
 import sys
 from pathlib import Path
@@ -111,6 +112,7 @@ from pathlib import Path
 roster_path = Path(sys.argv[1])
 source_config_path = Path(sys.argv[2])
 output_config_path = Path(sys.argv[3])
+repo_root = Path(sys.argv[4])
 
 
 def _load_source_lanes(path: Path) -> list[dict]:
@@ -129,6 +131,19 @@ def _load_source_lanes(path: Path) -> list[dict]:
         return []
     return [dict(row) for row in payload.get("lanes") or [] if isinstance(row, dict)]
 
+
+def _normalize_lane(row: dict) -> dict:
+    lane = dict(row)
+    lane["execution_mode"] = "IBKR_PAPER_BRIDGE"
+    lane["current_order_destination"] = "ibkr_paper_bridge_submit_capable"
+    lane["bridge_adapter_required"] = True
+    runtime_overlay = dict(lane.get("runtime_overlay_params") or {})
+    runtime_overlay["execution_mode"] = "IBKR_PAPER_BRIDGE"
+    runtime_overlay["current_order_destination"] = "ibkr_paper_bridge_submit_capable"
+    lane["runtime_overlay_params"] = runtime_overlay
+    return lane
+
+
 roster = json.loads(roster_path.read_text(encoding="utf-8"))
 enabled = [str(value) for value in roster.get("enabled_strategy_ids") or [] if str(value)]
 enabled_set = set(enabled)
@@ -138,16 +153,20 @@ for row in _load_source_lanes(source_config_path):
     sources = {str(value) for value in [*list(row.get("long_sources") or []), *list(row.get("short_sources") or [])]}
     matched = sources & enabled_set
     if matched:
-        lane = dict(row)
-        lane["execution_mode"] = "IBKR_PAPER_BRIDGE"
-        lane["current_order_destination"] = "ibkr_paper_bridge_submit_capable"
-        lane["bridge_adapter_required"] = True
-        runtime_overlay = dict(lane.get("runtime_overlay_params") or {})
-        runtime_overlay["execution_mode"] = "IBKR_PAPER_BRIDGE"
-        runtime_overlay["current_order_destination"] = "ibkr_paper_bridge_submit_capable"
-        lane["runtime_overlay_params"] = runtime_overlay
-        lanes.append(lane)
+        lanes.append(_normalize_lane(row))
         seen_sources.update(matched)
+
+missing = [source_id for source_id in enabled if source_id not in seen_sources]
+if missing:
+    sys.path.insert(0, str(repo_root / "src"))
+    from mgc_v05l.execution_core.track_b_shadow_promotion_contract import promoted_probationary_paper_lane_rows
+
+    for row in promoted_probationary_paper_lane_rows({"enabled_strategy_ids": missing}):
+        sources = {str(value) for value in [*list(row.get("long_sources") or []), *list(row.get("short_sources") or [])]}
+        matched = sources & set(missing)
+        if matched:
+            lanes.append(_normalize_lane(row))
+            seen_sources.update(matched)
 
 missing = [source_id for source_id in enabled if source_id not in seen_sources]
 if missing:
@@ -361,22 +380,22 @@ elif [[ "${STACK_PROFILE}" == "mnq_mes_full_session_active_evidence" ]]; then
     "PAPER_ACTIVE_EVIDENCE_MNQ_LONDON_OPEN_PARTICIPATION_SHORT_V1",
     "PAPER_ACTIVE_EVIDENCE_MES_LONDON_OPEN_PARTICIPATION_LONG_V1",
     "PAPER_ACTIVE_EVIDENCE_MES_LONDON_OPEN_PARTICIPATION_SHORT_V1",
-    "PAPER_ACTIVE_EVIDENCE_MNQ_LONDON_LATE_PARTICIPATION_SHORT_V1"
+    "PAPER_ACTIVE_EVIDENCE_MNQ_LONDON_LATE_PARTICIPATION_SHORT_V1",
+    "PAPER_ACTIVE_EVIDENCE_MES_LONDON_LATE_PARTICIPATION_SHORT_V1"
   ],
   "shadow_only_strategy_ids": [
     "PAPER_WATCH_ACTIVE_EVIDENCE_MNQ_LONDON_LATE_LONG_SHADOW_V1",
-    "PAPER_WATCH_ACTIVE_EVIDENCE_MES_LONDON_LATE_LONG_SHADOW_V1",
-    "PAPER_WATCH_ACTIVE_EVIDENCE_MES_LONDON_LATE_SHORT_SHADOW_V1"
+    "PAPER_WATCH_ACTIVE_EVIDENCE_MES_LONDON_LATE_LONG_SHADOW_V1"
   ],
   "shadow_only_reason_codes": [
-    "FULL_SESSION_PROFILE_INITIAL_LONDON_LATE_MNQ_SHORT_ONLY_ELEVATION",
+    "FULL_SESSION_PROFILE_INITIAL_LONDON_LATE_SHORT_ONLY_ELEVATION",
     "COMBINED_MNQ_MES_LONDON_CONFLICT_GROUP_LIMITS_SESSION_TO_ONE_TRADE"
   ],
   "disabled_strategy_ids": [],
   "max_quantity_per_strategy": 1
 }
 JSON
-  materialize_scoped_lane_config_from_roster "${SCOPED_ROSTER_PATH}" "$(scoped_profile_lane_source_config "${SCOPED_CONFIG_PATH}" "${RUNTIME_DIR}/paper_config_in_force.json")" "${SCOPED_CONFIG_PATH}"
+  materialize_scoped_lane_config_from_roster "${SCOPED_ROSTER_PATH}" "$(scoped_profile_lane_source_config "${SCOPED_CONFIG_PATH}" "${RUNTIME_DIR}/paper_config_in_force.json")" "${SCOPED_CONFIG_PATH}" "${REPO_ROOT}"
   CANONICAL_CONFIGS+=("${SCOPED_CONFIG_PATH}")
   ROSTER_ENV_PATH="${SCOPED_ROSTER_PATH}"
   PROOF_REQUIRED_SYMBOLS="MNQ,MES"
@@ -1509,7 +1528,7 @@ if config.get("profile") != expected_profile:
 lanes = [row for row in config.get("lanes") or [] if isinstance(row, dict)]
 active_lane_ids = [str(value) for value in config.get("active_lane_ids") or [] if str(value)]
 if expected_profile == "mnq_mes_full_session_active_evidence":
-    expected_lane_count = 13
+    expected_lane_count = 14
 else:
     expected_lane_count = len(active_lane_ids) or len(lanes)
 if len(lanes) != expected_lane_count:

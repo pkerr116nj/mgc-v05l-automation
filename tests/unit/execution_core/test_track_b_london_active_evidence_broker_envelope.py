@@ -71,6 +71,27 @@ def test_london_late_mnq_short_accepted_intent_produces_broker_envelope(tmp_path
     assert result.envelope["anchor_reference"]["anchor_type"] == "LONDON_LATE_0530_REFERENCE"
 
 
+def test_london_late_mes_short_accepted_intent_produces_broker_envelope(tmp_path: Path) -> None:
+    result = build_london_active_evidence_broker_envelope(
+        lane_id="mes_london_late_active_participation_short",
+        order_intent=_intent(OrderIntentType.SELL_TO_OPEN),
+        rule_report=_rule_report(anchor_type="LONDON_LATE_0530_REFERENCE"),
+        source_candle_timestamp=NOW,
+        config=LondonActiveEvidenceBrokerEnvelopeConfig(repo_root=tmp_path),
+        generated_at=NOW,
+    )
+
+    assert result.classification == BRIDGE_SUBMIT_CAPABLE_CLASSIFICATION
+    assert result.envelope is not None
+    assert result.envelope["broker_submit_enabled"] is True
+    assert result.envelope["submit_allowed"] is True
+    assert result.envelope["session"] == "LONDON_LATE"
+    assert result.envelope["action"] == "SELL"
+    assert result.envelope["localSymbol"] == "MESM6"
+    assert result.envelope["conId"] == 770561194
+    assert result.envelope["anchor_reference"]["anchor_type"] == "LONDON_LATE_0530_REFERENCE"
+
+
 def test_no_setup_or_rejected_intent_produces_no_broker_envelope(tmp_path: Path) -> None:
     result = build_london_active_evidence_broker_envelope(
         lane_id="mnq_london_open_active_participation_long",
@@ -111,6 +132,7 @@ def test_approved_london_lanes_register_as_submit_capable() -> None:
         "mes_london_open_active_participation_long",
         "mes_london_open_active_participation_short",
         "mnq_london_late_active_participation_short",
+        "mes_london_late_active_participation_short",
     ):
         adapter = lane_submit_bridge_adapter(lane_id=lane_id)
 

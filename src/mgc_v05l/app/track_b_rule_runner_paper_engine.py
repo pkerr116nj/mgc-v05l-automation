@@ -63,6 +63,7 @@ PAPER_ACTIVE_EVIDENCE_MNQ_LONDON_OPEN_SHORT_ID = "PAPER_ACTIVE_EVIDENCE_MNQ_LOND
 PAPER_ACTIVE_EVIDENCE_MES_LONDON_OPEN_LONG_ID = "PAPER_ACTIVE_EVIDENCE_MES_LONDON_OPEN_PARTICIPATION_LONG_V1"
 PAPER_ACTIVE_EVIDENCE_MES_LONDON_OPEN_SHORT_ID = "PAPER_ACTIVE_EVIDENCE_MES_LONDON_OPEN_PARTICIPATION_SHORT_V1"
 PAPER_ACTIVE_EVIDENCE_MNQ_LONDON_LATE_SHORT_ID = "PAPER_ACTIVE_EVIDENCE_MNQ_LONDON_LATE_PARTICIPATION_SHORT_V1"
+PAPER_ACTIVE_EVIDENCE_MES_LONDON_LATE_SHORT_ID = "PAPER_ACTIVE_EVIDENCE_MES_LONDON_LATE_PARTICIPATION_SHORT_V1"
 NEW_YORK_TZ = ZoneInfo("America/New_York")
 
 
@@ -292,6 +293,18 @@ PAPER_ACTIVE_EVIDENCE_SPECS: dict[str, _PaperActiveEvidenceSpec] = {
     ),
     PAPER_ACTIVE_EVIDENCE_MNQ_LONDON_LATE_SHORT_ID: _PaperActiveEvidenceSpec(
         strategy_id=PAPER_ACTIVE_EVIDENCE_MNQ_LONDON_LATE_SHORT_ID,
+        direction="SHORT",
+        overlay_label="PAPER_ONLY_LONDON_LATE_ACTIVE_EVIDENCE_LANE",
+        start_time_et=time(5, 30),
+        end_time_et=time(8, 20),
+        benchmark_hold_bars_5m=12,
+        condition_label="05:30-08:20_ET_close_below_vwap_or_london_late_reference",
+        reference_time_et=time(5, 30),
+        reference_label="05_30_london_late_reference",
+        require_reference_bar=True,
+    ),
+    PAPER_ACTIVE_EVIDENCE_MES_LONDON_LATE_SHORT_ID: _PaperActiveEvidenceSpec(
+        strategy_id=PAPER_ACTIVE_EVIDENCE_MES_LONDON_LATE_SHORT_ID,
         direction="SHORT",
         overlay_label="PAPER_ONLY_LONDON_LATE_ACTIVE_EVIDENCE_LANE",
         start_time_et=time(5, 30),

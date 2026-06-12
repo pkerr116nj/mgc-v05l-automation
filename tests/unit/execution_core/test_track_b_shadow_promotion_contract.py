@@ -10,6 +10,7 @@ from mgc_v05l.execution_core.track_b_shadow_promotion_contract import (
     LONDON_LATE_PAUSE_RESUME_SHORT_PROMOTED_ID,
     PAPER_ACTIVE_EVIDENCE_MES_LONDON_OPEN_LONG_PROMOTED_ID,
     PAPER_ACTIVE_EVIDENCE_MES_LONDON_OPEN_SHORT_PROMOTED_ID,
+    PAPER_ACTIVE_EVIDENCE_MES_LONDON_LATE_SHORT_PROMOTED_ID,
     PAPER_ACTIVE_EVIDENCE_MNQ_LONDON_OPEN_LONG_PROMOTED_ID,
     PAPER_ACTIVE_EVIDENCE_MNQ_LONDON_OPEN_SHORT_PROMOTED_ID,
     PAPER_ACTIVE_EVIDENCE_MNQ_LONDON_LATE_SHORT_PROMOTED_ID,
@@ -164,6 +165,32 @@ def test_london_late_mnq_short_active_evidence_cohort_exports_single_guarded_row
     assert row["symbol"] == "MNQ"
     assert row["local_symbol"] == "MNQM6"
     assert row["con_id"] == 770561201
+    assert row["lane_mode"] == "PAPER_ONLY_LONDON_LATE_ACTIVE_EVIDENCE_LANE"
+    assert row["runtime_kind"] == TRACK_B_RULE_RUNNER_PAPER_RUNTIME_KIND
+    assert row["session_restriction"] == "LONDON_LATE"
+    assert row["managed_exit_policy_id"] == "GLOBEX_ACTIVE_EVIDENCE_TIMEBOX_15M_EXIT_V1"
+    assert row["participation_policy"] == "SINGLE_ENTRY_ONLY"
+    assert row["max_position_quantity"] == 1
+    assert row["max_concurrent_entries"] == 1
+    assert row["conflict_group"] == "equity_index_mnq_mes_london_late_active_evidence"
+    assert row["live_money_eligible"] is False
+    assert row["paper_proof_invoked"] is False
+    assert row["broad_cancel_flatten_allowed"] is False
+    assert row["unguarded_broker_mutation_allowed"] is False
+
+
+def test_london_late_mes_short_active_evidence_cohort_exports_guarded_row() -> None:
+    rows = promoted_probationary_paper_lane_rows(
+        {"enabled_strategy_ids": [PAPER_ACTIVE_EVIDENCE_MES_LONDON_LATE_SHORT_PROMOTED_ID]}
+    )
+
+    assert len(rows) == 1
+    row = rows[0]
+    assert row["standalone_strategy_id"] == PAPER_ACTIVE_EVIDENCE_MES_LONDON_LATE_SHORT_PROMOTED_ID
+    assert row["lane_id"] == "mes_london_late_active_participation_short"
+    assert row["symbol"] == "MES"
+    assert row["local_symbol"] == "MESM6"
+    assert row["con_id"] == 770561194
     assert row["lane_mode"] == "PAPER_ONLY_LONDON_LATE_ACTIVE_EVIDENCE_LANE"
     assert row["runtime_kind"] == TRACK_B_RULE_RUNNER_PAPER_RUNTIME_KIND
     assert row["session_restriction"] == "LONDON_LATE"

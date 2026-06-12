@@ -31,7 +31,7 @@ def _seed_sources(tmp_path: Path, *, submit_allowed: bool = True, bsa_new_entry:
                 "pid": 12345,
                 "current_head": "abc123",
                 "profile": "mnq_mes_full_session_active_evidence",
-                "lane_count": 13,
+                "lane_count": 14,
                 "runtime_truth_age_seconds": 5,
             },
         },
