@@ -124,6 +124,10 @@ from ..execution_core.track_b_paper_minimal_startup import (
     TrackBPaperMinimalStartupConfig,
     build_track_b_paper_minimal_startup,
 )
+from ..execution_core.track_b_broker_market_truth_entry_authority import (
+    BROKER_MARKET_TRUTH_ENTRY_ALLOWED,
+    build_broker_market_truth_entry_authority_from_repo,
+)
 from ..execution_core.track_b_managed_open_position_maintenance import (
     DEFAULT_TRACK_B_LIVE_POSITION_STATUS_JSON,
     DEFAULT_TRACK_B_MANAGED_OPEN_POSITION_MAINTENANCE_JSON,
@@ -3987,8 +3991,65 @@ class ProbationaryPaperLaneRuntime:
         return None
 
     def _startup_route_hold_blocker(self, bar: Bar, state: Any, intent: OrderIntent) -> str | None:
-        del state, intent
+        del state
+        if self._uses_active_profile_bridge_entry_authority() and intent.is_entry:
+            return self._startup_route_hold_reason_for_intent(bar=bar, intent=intent)
         return self._startup_route_hold_reason_for_bar(bar)
+
+    def _uses_active_profile_bridge_entry_authority(self) -> bool:
+        if _effective_probationary_paper_execution_mode(self.spec) != PAPER_EXECUTION_MODE_IBKR_BRIDGE:
+            return False
+        return _active_evidence_bridge_adapter_for_spec(self.spec) is not None
+
+    def _startup_route_hold_reason_for_intent(self, *, bar: Bar, intent: OrderIntent) -> str | None:
+        repo_root = Path(__file__).resolve().parents[3]
+        broker = getattr(self.execution_engine, "broker", None)
+        bridge_adapter = dict(getattr(broker, "_bridge_adapter", {}) or {}) if isinstance(broker, _IbkrPaperBridgeRuntimeBroker) else {}
+        bridge_target = dict(bridge_adapter.get("bridge_execution_target") or {})
+        route_destination = str(
+            getattr(broker, "route_destination", "")
+            or bridge_adapter.get("current_order_destination")
+            or PAPER_EXECUTION_ROUTE_IBKR_BRIDGE
+        ).strip()
+        instrument = str(bridge_adapter.get("source_instrument") or intent.symbol or self.spec.symbol or "").strip().upper()
+        authority = build_broker_market_truth_entry_authority_from_repo(
+            repo_root=repo_root,
+            account_id="DUM882026",
+            mode="PAPER",
+            route_destination=route_destination,
+            execution_mode=PAPER_EXECUTION_MODE_IBKR_BRIDGE,
+            lane_id=self.spec.lane_id,
+            instrument=instrument,
+            action=str(intent.intent_type.value),
+            quantity=float(intent.quantity),
+            contract=bridge_target,
+            require_resolved_contract=True,
+            paper_only=True,
+            live_money_eligible=False,
+            paper_proof=False,
+            flat_start_required=True,
+            max_quantity=float(self.spec.trade_size or 1),
+            now=bar.end_ts.astimezone(timezone.utc),
+            diagnostics={
+                "startup_route_scope": "active_profile_paper_bridge_lane",
+                "legacy_minimal_startup": self._startup_readiness_convergence_snapshot(),
+            },
+        )
+        self._startup_route_convergence_source = {
+            "clean": authority.get("classification") == BROKER_MARKET_TRUTH_ENTRY_ALLOWED,
+            "broker_truth_authority": authority,
+            "authority_scope": "instrument_scoped_active_profile_paper_bridge",
+        }
+        if authority.get("classification") == BROKER_MARKET_TRUTH_ENTRY_ALLOWED:
+            return None
+        blockers = [
+            str(row.get("reason") or row.get("detail") or row)
+            for row in list(authority.get("blockers") or [])
+            if str(row.get("reason") or row.get("detail") or row)
+        ]
+        if not blockers:
+            blockers = ["broker_market_truth_entry_not_allowed"]
+        return "PAPER_STARTUP_BROKER_TRUTH_BLOCKED: " + ",".join(blockers)
 
     def _startup_readiness_convergence_snapshot(self) -> dict[str, Any]:
         repo_root = Path(__file__).resolve().parents[3]

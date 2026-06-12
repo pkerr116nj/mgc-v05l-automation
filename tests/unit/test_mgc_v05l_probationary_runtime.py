@@ -8246,6 +8246,102 @@ def test_lane_startup_route_hold_blocks_on_minimal_broker_truth_blocker(monkeypa
     assert lane_runtime._startup_route_convergence_source["clean"] is False
 
 
+def test_active_profile_route_hold_uses_instrument_scoped_entry_authority(monkeypatch) -> None:
+    lane_runtime = object.__new__(ProbationaryPaperLaneRuntime)
+    lane_runtime._startup_route_convergence_source = {}
+    lane_runtime._startup_readiness_convergence_snapshot = lambda: {  # type: ignore[method-assign]
+        "clean": False,
+        "blockers": [{"code": "broker_positions_present"}],
+    }
+    lane_runtime.spec = probationary_runtime_module.ProbationaryPaperLaneSpec(
+        lane_id="mnq_globex_active_participation_short",
+        display_name="mnq globex active short",
+        symbol="MNQ",
+        long_sources=(),
+        short_sources=("PAPER_ACTIVE_EVIDENCE_MNQ_GLOBEX_PARTICIPATION_SHORT_V1",),
+        session_restriction="GLOBEX",
+        point_value=Decimal("2"),
+        strategy_family="paper_active_evidence",
+        runtime_kind=TRACK_B_RULE_RUNNER_PAPER_RUNTIME_KIND,
+        execution_mode=probationary_runtime_module.PAPER_EXECUTION_MODE_IBKR_BRIDGE,
+        managed_exit_policy_id="GLOBEX_ACTIVE_EVIDENCE_TIMEBOX_60M_EXIT_V1",
+        paper_only=True,
+    )
+    lane_runtime.execution_engine = ExecutionEngine()
+    captured: dict[str, object] = {}
+
+    def fake_authority(**kwargs):
+        captured.update(kwargs)
+        return {
+            "classification": "BROKER_MARKET_TRUTH_ENTRY_ALLOWED",
+            "allowed": True,
+            "blockers": [],
+        }
+
+    monkeypatch.setattr(probationary_runtime_module, "build_broker_market_truth_entry_authority_from_repo", fake_authority)
+    bar = _build_bar(datetime(2026, 6, 11, 20, 38, tzinfo=ZoneInfo("America/New_York")))
+    intent = OrderIntent(
+        order_intent_id=f"{bar.bar_id}|SELL_TO_OPEN",
+        bar_id=bar.bar_id,
+        symbol="MNQ",
+        intent_type=OrderIntentType.SELL_TO_OPEN,
+        quantity=1,
+        created_at=bar.end_ts,
+        reason_code="activeEvidenceShort",
+    )
+
+    assert lane_runtime._startup_route_hold_blocker(bar, object(), intent) is None
+    assert captured["lane_id"] == "mnq_globex_active_participation_short"
+    assert captured["instrument"] == "MNQ"
+    assert lane_runtime._startup_route_convergence_source["clean"] is True
+    assert lane_runtime._startup_route_convergence_source["authority_scope"] == "instrument_scoped_active_profile_paper_bridge"
+
+
+def test_active_profile_route_hold_blocks_same_instrument_flat_start(monkeypatch) -> None:
+    lane_runtime = object.__new__(ProbationaryPaperLaneRuntime)
+    lane_runtime._startup_route_convergence_source = {}
+    lane_runtime._startup_readiness_convergence_snapshot = lambda: {"clean": False}  # type: ignore[method-assign]
+    lane_runtime.spec = probationary_runtime_module.ProbationaryPaperLaneSpec(
+        lane_id="mes_globex_active_participation_short",
+        display_name="mes globex active short",
+        symbol="MES",
+        long_sources=(),
+        short_sources=("PAPER_ACTIVE_EVIDENCE_MES_GLOBEX_PARTICIPATION_SHORT_V1",),
+        session_restriction="GLOBEX",
+        point_value=Decimal("5"),
+        strategy_family="paper_active_evidence",
+        runtime_kind=TRACK_B_RULE_RUNNER_PAPER_RUNTIME_KIND,
+        execution_mode=probationary_runtime_module.PAPER_EXECUTION_MODE_IBKR_BRIDGE,
+        managed_exit_policy_id="GLOBEX_ACTIVE_EVIDENCE_TIMEBOX_60M_EXIT_V1",
+        paper_only=True,
+    )
+    lane_runtime.execution_engine = ExecutionEngine()
+
+    monkeypatch.setattr(
+        probationary_runtime_module,
+        "build_broker_market_truth_entry_authority_from_repo",
+        lambda **kwargs: {
+            "classification": "BROKER_MARKET_TRUTH_ENTRY_BLOCKED",
+            "allowed": False,
+            "blockers": [{"reason": "broker_nonflat_flat_start_violation"}],
+        },
+    )
+    bar = _build_bar(datetime(2026, 6, 11, 20, 38, tzinfo=ZoneInfo("America/New_York")))
+    intent = OrderIntent(
+        order_intent_id=f"{bar.bar_id}|SELL_TO_OPEN",
+        bar_id=bar.bar_id,
+        symbol="MES",
+        intent_type=OrderIntentType.SELL_TO_OPEN,
+        quantity=1,
+        created_at=bar.end_ts,
+        reason_code="activeEvidenceShort",
+    )
+
+    reason = lane_runtime._startup_route_hold_blocker(bar, object(), intent)
+    assert reason == "PAPER_STARTUP_BROKER_TRUTH_BLOCKED: broker_nonflat_flat_start_violation"
+    assert lane_runtime._startup_route_convergence_source["clean"] is False
+
+
 def test_stale_lane_db_to_fresh_artifact_jump_is_diagnostic_only(tmp_path: Path) -> None:
     settings = _build_probationary_settings(tmp_path)
     repositories = RepositorySet(build_engine(settings.database_url))
