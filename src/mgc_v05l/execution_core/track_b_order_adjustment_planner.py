@@ -57,6 +57,8 @@ DEFAULT_ORDER_ADJUSTMENT_PLAN_ARTIFACT = (
     Path("outputs") / "track_b_execution_core" / "managed_orders" / "latest_order_adjustment_plan.json"
 )
 DEFAULT_MARKET_DATA_ROOT = Path("outputs") / "track_b_execution_core" / "phase1_runtime_market_data"
+PAPER_AGGRESSIVE_CLOSE_FALLBACK_MIN_TICKS = 400
+PAPER_AGGRESSIVE_CLOSE_FALLBACK_PERCENT = Decimal("0.02")
 
 _TERMINAL_CANCELLED_STATUSES = {"CANCELLED", "APICANCELLED", "INACTIVE"}
 _TERMINAL_FILLED_STATUSES = {"FILLED"}
@@ -408,7 +410,11 @@ def _phase1_market_reference(*, config: TrackBOrderAdjustmentPlannerConfig, symb
     freshness_anchor = generated_at or bar_end
     age_seconds = None if freshness_anchor is None else max((now - freshness_anchor).total_seconds(), 0.0)
     return {
-        "reference_price": last.get("close") or last.get("last_price"),
+        "reference_price": last.get("ask_price") or last.get("bid_price") or last.get("last_price") or last.get("close"),
+        "ask_price": last.get("ask_price"),
+        "bid_price": last.get("bid_price"),
+        "last_price": last.get("last_price"),
+        "close": last.get("close"),
         "reference_source": str(path),
         "reference_source_type": "phase1_runtime_market_data",
         "pricing_source": "DATABENTO_RUNTIME_1M",
@@ -421,37 +427,128 @@ def _phase1_market_reference(*, config: TrackBOrderAdjustmentPlannerConfig, symb
 def _managed_close_reprice_policy(*, order: Mapping[str, Any], reference: Mapping[str, Any]) -> dict[str, Any]:
     symbol = str(order.get("symbol") or "").upper()
     tick_size = "0.25" if symbol in {"MNQ", "MES", "NQ", "ES"} else "0.1"
-    return managed_close_limit_from_reference(
-        reference_price=reference.get("reference_price"),
+    return _paper_marketable_close_policy(
+        reference=reference,
         close_action=str(order.get("action") or ""),
         tick_size=tick_size,
-        base_offset_ticks=_int_or_default(
-            order.get("managed_close_offset_ticks"),
-            ACTIVE_EVIDENCE_MANAGED_CLOSE_OFFSET_TICKS,
-        ),
-        max_slippage_ticks=_int_or_default(
-            order.get("managed_close_max_slippage_ticks"),
-            ACTIVE_EVIDENCE_MANAGED_CLOSE_MAX_SLIPPAGE_TICKS,
-        ),
-        reprice_attempts=_int_or_default(order.get("reprice_attempt_count") or order.get("modify_attempt_count"), 0),
-        reprice_escalation_ticks=_int_or_default(
-            order.get("managed_close_reprice_escalation_ticks"),
-            ACTIVE_EVIDENCE_MANAGED_CLOSE_REPRICE_ESCALATION_TICKS,
-        ),
-        reference_age_seconds=_float_or_none(
-            reference.get("reference_age_seconds")
-            or reference.get("pricing_reference_age_seconds")
-            or reference.get("age_seconds")
-        ),
         stale_reference_seconds=_int_or_default(
             order.get("managed_close_stale_reference_seconds"),
             ACTIVE_EVIDENCE_MANAGED_CLOSE_STALE_AFTER_SECONDS,
         ),
-        widen_reference_seconds=_int_or_default(
-            order.get("managed_close_widen_reference_seconds"),
-            ACTIVE_EVIDENCE_MANAGED_CLOSE_WIDEN_AFTER_SECONDS,
-        ),
+        reprice_attempts=_int_or_default(order.get("reprice_attempt_count") or order.get("modify_attempt_count"), 0),
     )
+
+
+def _paper_marketable_close_policy(
+    *,
+    reference: Mapping[str, Any],
+    close_action: str,
+    tick_size: str,
+    stale_reference_seconds: int,
+    reprice_attempts: int = 0,
+) -> dict[str, Any]:
+    age_seconds = _float_or_none(
+        reference.get("reference_age_seconds")
+        or reference.get("pricing_reference_age_seconds")
+        or reference.get("age_seconds")
+    )
+    action = str(close_action or "").strip().upper()
+    tick = _decimal_or_none(tick_size)
+    if action not in {"BUY", "SELL"} or tick is None or tick <= Decimal("0"):
+        return managed_close_limit_from_reference(
+            reference_price=None,
+            close_action=action,
+            tick_size=tick_size,
+            base_offset_ticks=ACTIVE_EVIDENCE_MANAGED_CLOSE_OFFSET_TICKS,
+            max_slippage_ticks=ACTIVE_EVIDENCE_MANAGED_CLOSE_MAX_SLIPPAGE_TICKS,
+            reprice_attempts=reprice_attempts,
+            reference_age_seconds=age_seconds,
+            stale_reference_seconds=stale_reference_seconds,
+        )
+    if age_seconds is not None and age_seconds > float(stale_reference_seconds):
+        return managed_close_limit_from_reference(
+            reference_price=reference.get("reference_price"),
+            close_action=action,
+            tick_size=tick_size,
+            base_offset_ticks=ACTIVE_EVIDENCE_MANAGED_CLOSE_OFFSET_TICKS,
+            max_slippage_ticks=ACTIVE_EVIDENCE_MANAGED_CLOSE_MAX_SLIPPAGE_TICKS,
+            reprice_attempts=reprice_attempts,
+            reference_age_seconds=age_seconds,
+            stale_reference_seconds=stale_reference_seconds,
+        )
+
+    preferred_key = "ask_price" if action == "BUY" else "bid_price"
+    preferred = _decimal_or_none(reference.get(preferred_key))
+    if preferred is not None:
+        return _paper_priced_close(
+            action=action,
+            reference_price=preferred,
+            reference_kind=preferred_key,
+            tick=tick,
+            offset_ticks=Decimal("0"),
+            age_seconds=age_seconds,
+            reference=reference,
+            reprice_attempts=reprice_attempts,
+        )
+
+    fallback = _decimal_or_none(reference.get("last_price")) or _decimal_or_none(reference.get("close"))
+    if fallback is None:
+        return managed_close_limit_from_reference(
+            reference_price=None,
+            close_action=action,
+            tick_size=tick_size,
+            base_offset_ticks=ACTIVE_EVIDENCE_MANAGED_CLOSE_OFFSET_TICKS,
+            max_slippage_ticks=ACTIVE_EVIDENCE_MANAGED_CLOSE_MAX_SLIPPAGE_TICKS,
+            reprice_attempts=reprice_attempts,
+            reference_age_seconds=age_seconds,
+            stale_reference_seconds=stale_reference_seconds,
+        )
+    percent_ticks = (fallback * PAPER_AGGRESSIVE_CLOSE_FALLBACK_PERCENT / tick).copy_abs()
+    offset_ticks = max(Decimal(PAPER_AGGRESSIVE_CLOSE_FALLBACK_MIN_TICKS), percent_ticks.to_integral_value())
+    return _paper_priced_close(
+        action=action,
+        reference_price=fallback,
+        reference_kind="last_price" if _decimal_or_none(reference.get("last_price")) is not None else "close",
+        tick=tick,
+        offset_ticks=offset_ticks,
+        age_seconds=age_seconds,
+        reference=reference,
+        reprice_attempts=reprice_attempts,
+    )
+
+
+def _paper_priced_close(
+    *,
+    action: str,
+    reference_price: Decimal,
+    reference_kind: str,
+    tick: Decimal,
+    offset_ticks: Decimal,
+    age_seconds: float | None,
+    reference: Mapping[str, Any],
+    reprice_attempts: int,
+) -> dict[str, Any]:
+    offset = tick * offset_ticks
+    raw = reference_price + offset if action == "BUY" else reference_price - offset
+    rounded = (raw / tick).to_integral_value() * tick
+    return {
+        "classification": "MANAGED_CLOSE_PRICED",
+        "limit_price": format(rounded.normalize(), "f"),
+        "close_action": action,
+        "reference_price": format(reference_price.normalize(), "f"),
+        "reference_price_kind": reference_kind,
+        "reference_age_seconds": age_seconds,
+        "reference_source": reference.get("reference_source"),
+        "reference_source_type": reference.get("reference_source_type"),
+        "pricing_source": reference.get("pricing_source"),
+        "bar_end": reference.get("bar_end"),
+        "generated_at": reference.get("generated_at"),
+        "marketable_limit_offset_ticks": float(offset_ticks),
+        "aggressive_paper_fallback": reference_kind in {"last_price", "close"},
+        "aggressive_paper_fallback_percent": float(PAPER_AGGRESSIVE_CLOSE_FALLBACK_PERCENT),
+        "reprice_attempts": max(int(reprice_attempts), 0),
+        "stale_reference_blocker": None,
+    }
 
 
 def _authority_summary(payload: Mapping[str, Any], path: Path) -> dict[str, Any]:

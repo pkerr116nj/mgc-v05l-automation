@@ -64,6 +64,65 @@ def test_plan_blocks_close_price_when_runtime_market_data_is_stale(tmp_path: Pat
     assert "Current executable close price is unavailable." in payload["blockers"]
 
 
+def test_buy_to_close_without_bid_ask_uses_fresh_close_plus_aggressive_paper_offset(tmp_path: Path) -> None:
+    config = _seed(
+        tmp_path,
+        completed_bars=3,
+        config_overrides={"side": "SHORT"},
+        position_overrides={"quantity": "-1", "side": "SHORT"},
+    )
+
+    payload = build_track_b_managed_exit_attach_plan(config=config, now=NOW)
+
+    policy = payload["close_pricing_policy"]
+    assert policy["classification"] == "MANAGED_CLOSE_PRICED"
+    assert policy["close_action"] == "BUY"
+    assert policy["reference_price_kind"] == "close"
+    assert policy["limit_price"] == "30564.75"
+    assert policy["aggressive_paper_fallback"] is True
+    assert policy["marketable_limit_offset_ticks"] == 2397.0
+    assert payload["close_intent_preview"]["close_limit_price"] == "30564.75"
+
+
+def test_sell_to_close_without_bid_ask_uses_fresh_close_minus_aggressive_paper_offset(tmp_path: Path) -> None:
+    config = _seed(tmp_path, completed_bars=3)
+
+    payload = build_track_b_managed_exit_attach_plan(config=config, now=NOW)
+
+    policy = payload["close_pricing_policy"]
+    assert policy["classification"] == "MANAGED_CLOSE_PRICED"
+    assert policy["close_action"] == "SELL"
+    assert policy["reference_price_kind"] == "close"
+    assert policy["limit_price"] == "29366.25"
+    assert policy["aggressive_paper_fallback"] is True
+    assert policy["marketable_limit_offset_ticks"] == 2397.0
+
+
+def test_attach_prefers_ask_for_buy_to_close_when_bid_ask_available(tmp_path: Path) -> None:
+    config = _seed(
+        tmp_path,
+        completed_bars=3,
+        config_overrides={"side": "SHORT"},
+        position_overrides={"quantity": "-1", "side": "SHORT"},
+    )
+    _write_json(
+        tmp_path / "outputs/track_b_execution_core/phase1_runtime_market_data" / config.instrument_family / "1m/latest_runtime_candles.json",
+        {
+            "generated_at": NOW.isoformat(),
+            "bars": [{"bar_end": "2026-05-25T07:47:00+00:00", "bid_price": "29965.25", "ask_price": "29966.25", "close": "29965.5"}],
+        },
+    )
+
+    payload = build_track_b_managed_exit_attach_plan(config=config, now=NOW)
+
+    policy = payload["close_pricing_policy"]
+    assert policy["classification"] == "MANAGED_CLOSE_PRICED"
+    assert policy["reference_price_kind"] == "ask_price"
+    assert policy["reference_price"] == "29966.25"
+    assert policy["limit_price"] == "29966.25"
+    assert policy["aggressive_paper_fallback"] is False
+
+
 def test_not_eligible_before_3x5m(tmp_path: Path) -> None:
     config = _seed(tmp_path, completed_bars=2)
 

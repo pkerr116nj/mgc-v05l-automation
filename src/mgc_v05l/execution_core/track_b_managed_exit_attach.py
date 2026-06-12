@@ -94,6 +94,8 @@ MANAGED_EXIT_DUE_READY_FOR_APPLY = "MANAGED_EXIT_DUE_READY_FOR_APPLY"
 MANAGED_EXIT_BLOCKED_BROKER_UNAVAILABLE_RETRYABLE = "MANAGED_EXIT_BLOCKED_BROKER_UNAVAILABLE_RETRYABLE"
 MANAGED_EXIT_BLOCKED_BROKER_UNAVAILABLE_FATAL = "MANAGED_EXIT_BLOCKED_BROKER_UNAVAILABLE_FATAL"
 MANAGED_EXIT_BLOCKED_BROKER_AVAILABILITY_UNKNOWN = "MANAGED_EXIT_BLOCKED_BROKER_AVAILABILITY_UNKNOWN"
+PAPER_AGGRESSIVE_CLOSE_FALLBACK_MIN_TICKS = 400
+PAPER_AGGRESSIVE_CLOSE_FALLBACK_PERCENT = Decimal("0.02")
 
 
 @dataclass(frozen=True)
@@ -203,16 +205,11 @@ def build_track_b_managed_exit_attach_plan(
         bars_payload=bars_payload,
         now=actual_now,
     )
-    close_pricing_policy = managed_close_limit_from_reference(
-        reference_price=runtime_pricing_reference.get("reference_price"),
+    close_pricing_policy = _paper_marketable_close_policy(
+        reference=runtime_pricing_reference,
         close_action=close_action,
         tick_size=exit_profile.tick_size,
-        base_offset_ticks=exit_profile.price_offset_ticks,
-        max_slippage_ticks=exit_profile.max_slippage_ticks,
-        reprice_escalation_ticks=exit_profile.reprice_escalation_ticks,
-        reference_age_seconds=_float_or_none(runtime_pricing_reference.get("reference_age_seconds")),
         stale_reference_seconds=exit_profile.stale_reference_seconds or ACTIVE_EVIDENCE_MANAGED_CLOSE_STALE_AFTER_SECONDS,
-        widen_reference_seconds=exit_profile.widen_reference_seconds,
     )
     close_limit_price = config.close_limit_price or (
         str(close_pricing_policy.get("limit_price"))
@@ -1963,10 +1960,14 @@ def _pricing_reference_from_payload(
     bar_end = _parse_time(bar_end_raw)
     freshness_anchor = generated_at or bar_end
     age_seconds = None if freshness_anchor is None else max((now - freshness_anchor).total_seconds(), 0.0)
-    price = last.get("ask_price") or last.get("last_price") or last.get("close")
+    price = last.get("ask_price") or last.get("bid_price") or last.get("last_price") or last.get("close")
     return {
         "classification": "RUNTIME_MARKET_REFERENCE_READY" if price not in {None, ""} else "RUNTIME_MARKET_REFERENCE_MISSING",
         "reference_price": None if price in {None, ""} else str(price),
+        "ask_price": last.get("ask_price"),
+        "bid_price": last.get("bid_price"),
+        "last_price": last.get("last_price"),
+        "close": last.get("close"),
         "reference_source": str(source_path),
         "reference_source_type": "phase1_runtime_market_data",
         "pricing_source": "DATABENTO_RUNTIME",
@@ -1980,6 +1981,106 @@ def _pricing_reference_from_payload(
 def _payload_bars(payload: Mapping[str, Any]) -> list[Mapping[str, Any]]:
     raw = payload.get("bars") or payload.get("candles") or payload.get("completed_5m_candles") or []
     return [item for item in raw if isinstance(item, Mapping)] if isinstance(raw, list) else []
+
+
+def _paper_marketable_close_policy(
+    *,
+    reference: Mapping[str, Any],
+    close_action: str,
+    tick_size: str,
+    stale_reference_seconds: int,
+) -> dict[str, Any]:
+    age_seconds = _float_or_none(reference.get("reference_age_seconds"))
+    action = str(close_action or "").strip().upper()
+    tick = _decimal(tick_size)
+    if action not in {"BUY", "SELL"} or tick is None or tick <= Decimal("0"):
+        return managed_close_limit_from_reference(
+            reference_price=None,
+            close_action=action,
+            tick_size=tick_size,
+            base_offset_ticks=0,
+            reference_age_seconds=age_seconds,
+            stale_reference_seconds=stale_reference_seconds,
+        )
+    if age_seconds is not None and age_seconds > float(stale_reference_seconds):
+        return managed_close_limit_from_reference(
+            reference_price=reference.get("reference_price"),
+            close_action=action,
+            tick_size=tick_size,
+            base_offset_ticks=0,
+            reference_age_seconds=age_seconds,
+            stale_reference_seconds=stale_reference_seconds,
+        )
+
+    preferred_key = "ask_price" if action == "BUY" else "bid_price"
+    preferred = _decimal(reference.get(preferred_key))
+    if preferred is not None:
+        return _paper_priced_close(
+            action=action,
+            reference_price=preferred,
+            reference_kind=preferred_key,
+            tick=tick,
+            offset_ticks=Decimal("0"),
+            age_seconds=age_seconds,
+            reference=reference,
+        )
+
+    last_price = _decimal(reference.get("last_price"))
+    close = _decimal(reference.get("close"))
+    fallback = last_price or close
+    if fallback is None:
+        return managed_close_limit_from_reference(
+            reference_price=None,
+            close_action=action,
+            tick_size=tick_size,
+            base_offset_ticks=0,
+            reference_age_seconds=age_seconds,
+            stale_reference_seconds=stale_reference_seconds,
+        )
+    percent_ticks = (fallback * PAPER_AGGRESSIVE_CLOSE_FALLBACK_PERCENT / tick).copy_abs()
+    offset_ticks = max(Decimal(PAPER_AGGRESSIVE_CLOSE_FALLBACK_MIN_TICKS), percent_ticks.to_integral_value())
+    return _paper_priced_close(
+        action=action,
+        reference_price=fallback,
+        reference_kind="last_price" if last_price is not None else "close",
+        tick=tick,
+        offset_ticks=offset_ticks,
+        age_seconds=age_seconds,
+        reference=reference,
+    )
+
+
+def _paper_priced_close(
+    *,
+    action: str,
+    reference_price: Decimal,
+    reference_kind: str,
+    tick: Decimal,
+    offset_ticks: Decimal,
+    age_seconds: float | None,
+    reference: Mapping[str, Any],
+) -> dict[str, Any]:
+    offset = tick * offset_ticks
+    raw = reference_price + offset if action == "BUY" else reference_price - offset
+    rounded = (raw / tick).to_integral_value() * tick
+    return {
+        "classification": "MANAGED_CLOSE_PRICED",
+        "limit_price": format(rounded.normalize(), "f"),
+        "close_action": action,
+        "reference_price": format(reference_price.normalize(), "f"),
+        "reference_price_kind": reference_kind,
+        "reference_age_seconds": age_seconds,
+        "reference_source": reference.get("reference_source"),
+        "reference_source_type": reference.get("reference_source_type"),
+        "pricing_source": reference.get("pricing_source"),
+        "timeframe": reference.get("timeframe"),
+        "bar_end": reference.get("bar_end"),
+        "generated_at": reference.get("generated_at"),
+        "marketable_limit_offset_ticks": float(offset_ticks),
+        "aggressive_paper_fallback": reference_kind in {"last_price", "close"},
+        "aggressive_paper_fallback_percent": float(PAPER_AGGRESSIVE_CLOSE_FALLBACK_PERCENT),
+        "stale_reference_blocker": None,
+    }
 
 
 def _read_json(path: Path) -> dict[str, Any]:
