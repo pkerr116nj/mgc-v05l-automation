@@ -137,6 +137,89 @@ def test_broker_nonflat_flat_start_blocks() -> None:
     assert "broker_nonflat_flat_start_violation" in reasons
 
 
+def test_mes_position_blocks_mes_but_allows_mnq_flat_start() -> None:
+    mes_position = _positions(
+        rows=[
+            {
+                "account_id": "DUM882026",
+                "security_type": "FUT",
+                "symbol": "MES",
+                "local_symbol": "MESU6",
+                "quantity": "-1",
+            }
+        ]
+    )
+
+    mnq_result = evaluate_broker_market_truth_entry_authority(
+        _input(broker_positions_snapshot=mes_position)
+    )
+    mes_result = evaluate_broker_market_truth_entry_authority(
+        _input(
+            lane_id="mes_globex_active_participation_short",
+            instrument="MES",
+            broker_positions_snapshot=mes_position,
+            runtime_price={
+                "price": 7400.25,
+                "timestamp": "2026-06-11T14:00:00+00:00",
+            },
+            contract={
+                "symbol": "MES",
+                "contract_month": "202609",
+                "expiry": "20260918",
+                "local_symbol": "MESU6",
+                "con_id": 793356217,
+            },
+        )
+    )
+
+    assert mnq_result["classification"] == BROKER_MARKET_TRUTH_ENTRY_ALLOWED
+    assert mnq_result["broker_truth"]["instrument_nonflat_position_count"] == 0
+    assert mes_result["classification"] == BROKER_MARKET_TRUTH_ENTRY_BLOCKED
+    assert "broker_nonflat_flat_start_violation" in mes_result["block_reasons"]
+
+
+def test_mnq_position_blocks_mnq_but_allows_mes_flat_start() -> None:
+    mnq_position = _positions(
+        rows=[
+            {
+                "account_id": "DUM882026",
+                "security_type": "FUT",
+                "symbol": "MNQ",
+                "local_symbol": "MNQU6",
+                "quantity": "-1",
+            }
+        ]
+    )
+
+    mnq_result = evaluate_broker_market_truth_entry_authority(
+        _input(broker_positions_snapshot=mnq_position)
+    )
+    mes_result = evaluate_broker_market_truth_entry_authority(
+        _input(
+            lane_id="mes_globex_active_participation_short",
+            instrument="MES",
+            broker_positions_snapshot=mnq_position,
+            runtime_price={
+                "price": 7400.25,
+                "timestamp": "2026-06-11T14:00:00+00:00",
+            },
+            contract={
+                "symbol": "MES",
+                "contract_month": "202609",
+                "expiry": "20260918",
+                "local_symbol": "MESU6",
+                "con_id": 793356217,
+            },
+        )
+    )
+
+    assert mnq_result["classification"] == BROKER_MARKET_TRUTH_ENTRY_BLOCKED
+    assert "broker_nonflat_flat_start_violation" in mnq_result["block_reasons"]
+    assert mes_result["classification"] == BROKER_MARKET_TRUTH_ENTRY_ALLOWED
+    assert mes_result["broker_truth"]["track_b_nonflat_position_count"] == 1
+    assert mes_result["broker_truth"]["instrument_nonflat_position_count"] == 0
+
+
 def test_unknown_order_blocks() -> None:
     classification, reasons = _classification(open_order_truth={"unknown_open_order_count": 1})
 

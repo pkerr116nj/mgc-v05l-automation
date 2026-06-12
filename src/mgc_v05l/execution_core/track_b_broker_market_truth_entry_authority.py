@@ -105,12 +105,13 @@ def evaluate_broker_market_truth_entry_authority(
         block(BROKER_TRUTH_CRITICAL, "broker_positions_unavailable", "Broker positions are unavailable or incomplete.")
     track_b_positions = [row for row in positions if _is_track_b_futures_position(row)]
     nonflat_positions = [row for row in track_b_positions if abs(_float(row.get("quantity"))) > 1e-9]
-    if authority_input.flat_start_required and nonflat_positions:
+    instrument_nonflat_positions = [row for row in nonflat_positions if _position_matches_instrument(row, instrument)]
+    if authority_input.flat_start_required and instrument_nonflat_positions:
         block(
             BROKER_TRUTH_CRITICAL,
             "broker_nonflat_flat_start_violation",
-            "Flat-start PAPER entry is blocked by actual broker futures exposure.",
-            broker_positions=nonflat_positions,
+            "Flat-start PAPER entry is blocked by actual same-instrument broker futures exposure.",
+            broker_positions=instrument_nonflat_positions,
         )
 
     open_orders = _broker_open_orders(authority_input.broker_open_orders_snapshot)
@@ -166,6 +167,7 @@ def evaluate_broker_market_truth_entry_authority(
             "positions_known": positions_known,
             "track_b_position_count": len(track_b_positions),
             "track_b_nonflat_position_count": len(nonflat_positions),
+            "instrument_nonflat_position_count": len(instrument_nonflat_positions),
             "open_orders_known": open_orders_known,
             "track_b_open_order_count": len(track_b_open_orders),
             "unknown_order_count": unknown_order_count,
@@ -313,6 +315,17 @@ def _is_track_b_futures_position(row: Mapping[str, Any]) -> bool:
         return False
     root = symbol or "".join(ch for ch in local_symbol if ch.isalpha())[:3]
     return root in TRACK_B_FUTURES_SYMBOLS
+
+
+def _position_matches_instrument(row: Mapping[str, Any], instrument: str) -> bool:
+    expected = str(instrument or "").strip().upper()
+    if not expected:
+        return False
+    symbol = str(row.get("symbol") or row.get("track_b_root") or row.get("instrument") or row.get("instrument_family") or "").strip().upper()
+    if symbol == expected:
+        return True
+    local_symbol = str(row.get("local_symbol") or row.get("localSymbol") or "").strip().upper()
+    return bool(local_symbol) and local_symbol.startswith(expected)
 
 
 def _is_track_b_order(row: Mapping[str, Any]) -> bool:

@@ -2819,6 +2819,70 @@ def test_broker_market_truth_authority_blocks_active_profile_entry_when_broker_t
     assert "broker_nonflat_flat_start_violation" in authority["detail"]
 
 
+def test_broker_market_truth_authority_allows_active_profile_entry_when_other_instrument_nonflat(
+    tmp_path: Path,
+) -> None:
+    lane_id = "mnq_us_active_participation_long"
+    _write_fresh_broker_truth(tmp_path)
+    positions_path = tmp_path / "outputs" / "reports" / "ibkr_read_only_verification" / "ibkr_positions_snapshot.json"
+    positions = json.loads(positions_path.read_text(encoding="utf-8"))
+    positions["positions"] = [
+        {
+            "account_id": "DUM882026",
+            "security_type": "FUT",
+            "symbol": "MES",
+            "local_symbol": "MESU6",
+            "quantity": "-1",
+        }
+    ]
+    positions_path.write_text(json.dumps(positions), encoding="utf-8")
+    _write_runtime_1m_candle(tmp_path, symbol="MNQ", close=29525.25, bar_end="2999-01-01T00:00:00+00:00")
+    _write_active_profile_roster(tmp_path, [_active_profile_lane(lane_id, symbol="MNQ")])
+    config = _config(
+        tmp_path,
+        submit=True,
+        strategy_id=lane_id,
+        symbol="MNQ",
+        caller_path="probationary_paper_runtime_lane",
+        caller_metadata=_approved_runtime_metadata(
+            strategy_id=lane_id,
+            source_instrument="MNQ",
+            executable_proxy="MNQ",
+            bridge_proxy_mode="MNQ_SIGNAL_DIRECT_PHASE1",
+        ),
+        manual_frozen_preview_path=None,
+        approval_digest=None,
+        approval_phrase=None,
+    )
+    intent = IbkrPaperStrategyOrderIntent(
+        strategy_id=config.strategy_id,
+        symbol=config.symbol,
+        contract_month=config.contract_month,
+        action=config.action,
+        quantity=config.quantity,
+        order_type=config.order_type,
+        limit_price_model=config.limit_price_model,
+        time_in_force=config.time_in_force,
+        reason=config.reason,
+        timestamp="2026-06-11T14:35:00+00:00",
+        risk_tags=config.risk_tags,
+        paper_only=config.paper_only,
+    )
+
+    checks = _build_static_preflight_checks(
+        config=config,
+        intent=intent,
+        environment_lock=evaluate_paper_preview_environment_lock(mode=config.mode, host=config.host, port=config.port),
+        caller_gate={"passed": True, "detail": "runtime"},
+        monitor_status={},
+        governance_status=_healthy_lane_governance(),
+        exposure_status=_healthy_exposure(),
+    )
+
+    authority = next(row for row in checks if row["name"] == "broker_market_truth_entry_authority")
+    assert authority["passed"] is True
+
+
 def test_supervised_runtime_route_uses_lane_authoritative_target_matrix_even_with_stale_monitor_exact_contract(tmp_path: Path) -> None:
     cases = [
         (
