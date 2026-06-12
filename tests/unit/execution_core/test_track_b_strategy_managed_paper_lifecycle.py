@@ -1125,7 +1125,7 @@ def test_time_boxed_exit_policy_waits_until_required_completed_bars(tmp_path: Pa
     assert result.report["close_intent"] is None
 
 
-def test_globex_active_evidence_policy_waits_for_twelve_completed_5m_bars(tmp_path: Path) -> None:
+def test_globex_active_evidence_15m_policy_waits_before_three_completed_5m_bars(tmp_path: Path) -> None:
     result = run_track_b_strategy_managed_paper_lifecycle(
         config=base_config(
             tmp_path,
@@ -1135,9 +1135,9 @@ def test_globex_active_evidence_policy_waits_for_twelve_completed_5m_bars(tmp_pa
             contract_key="MES-202606",
             local_symbol="MESM6",
             con_id=770561194,
-            managed_exit_policy_id=TrackBManagedExitPolicy.GLOBEX_ACTIVE_EVIDENCE_TIMEBOX_60M_EXIT_V1.value,
-            managed_exit_policy_max_completed_5m_bars=3,
-            completed_5m_bars_since_entry=11,
+            managed_exit_policy_id=TrackBManagedExitPolicy.GLOBEX_ACTIVE_EVIDENCE_TIMEBOX_15M_EXIT_V1.value,
+            managed_exit_policy_max_completed_5m_bars=12,
+            completed_5m_bars_since_entry=2,
         ),
         stages=fake_stages(),
         lifecycle_id="globex-active-wait",
@@ -1145,14 +1145,14 @@ def test_globex_active_evidence_policy_waits_for_twelve_completed_5m_bars(tmp_pa
     )
 
     assert result.classification == TrackBManagedPaperLifecycleClassification.OPEN_MANAGED
-    assert result.report["managed_exit_policy_id"] == "GLOBEX_ACTIVE_EVIDENCE_TIMEBOX_60M_EXIT_V1"
-    assert result.report["managed_exit_policy_max_completed_5m_bars"] == 12
-    assert result.report["expected_exit_condition"] == "TIME_BOXED_EXIT_AFTER_12_COMPLETED_5M_BARS"
+    assert result.report["managed_exit_policy_id"] == "GLOBEX_ACTIVE_EVIDENCE_TIMEBOX_15M_EXIT_V1"
+    assert result.report["managed_exit_policy_max_completed_5m_bars"] == 3
+    assert result.report["expected_exit_condition"] == "TIME_BOXED_EXIT_AFTER_3_COMPLETED_5M_BARS"
     assert result.report["close_intent_status"] == "WAITING_FOR_EXIT_POLICY_CONDITION"
     assert result.report["close_intent"] is None
 
 
-def test_globex_active_evidence_policy_creates_timebox_close_after_twelve_bars(tmp_path: Path) -> None:
+def test_globex_active_evidence_15m_policy_creates_timebox_close_after_three_bars(tmp_path: Path) -> None:
     result = run_track_b_strategy_managed_paper_lifecycle(
         config=base_config(
             tmp_path,
@@ -1162,9 +1162,9 @@ def test_globex_active_evidence_policy_creates_timebox_close_after_twelve_bars(t
             contract_key="MES-202606",
             local_symbol="MESM6",
             con_id=770561194,
-            managed_exit_policy_id=TrackBManagedExitPolicy.GLOBEX_ACTIVE_EVIDENCE_TIMEBOX_60M_EXIT_V1.value,
-            managed_exit_policy_max_completed_5m_bars=3,
-            completed_5m_bars_since_entry=12,
+            managed_exit_policy_id=TrackBManagedExitPolicy.GLOBEX_ACTIVE_EVIDENCE_TIMEBOX_15M_EXIT_V1.value,
+            managed_exit_policy_max_completed_5m_bars=12,
+            completed_5m_bars_since_entry=3,
         ),
         stages=fake_stages(),
         lifecycle_id="globex-active-close",
@@ -1172,19 +1172,19 @@ def test_globex_active_evidence_policy_creates_timebox_close_after_twelve_bars(t
     )
 
     assert result.classification == TrackBManagedPaperLifecycleClassification.CLOSED_FLAT
-    assert result.report["managed_exit_policy_max_completed_5m_bars"] == 12
-    assert result.report["expected_exit_condition"] == "TIME_BOXED_EXIT_AFTER_12_COMPLETED_5M_BARS"
+    assert result.report["managed_exit_policy_max_completed_5m_bars"] == 3
+    assert result.report["expected_exit_condition"] == "TIME_BOXED_EXIT_AFTER_3_COMPLETED_5M_BARS"
     assert result.report["close_intent"]["close_reason"] == "TIME_BOXED_EXIT"
-    assert result.report["close_intent"]["required_completed_5m_bars"] == 12
+    assert result.report["close_intent"]["required_completed_5m_bars"] == 3
 
 
-def test_filled_bridge_result_persists_globex_active_evidence_as_60m_policy(tmp_path: Path) -> None:
+def test_filled_bridge_result_persists_globex_active_evidence_as_15m_policy(tmp_path: Path) -> None:
     path = write_open_managed_lifecycle_report_from_filled_bridge_result(
         filled_bridge_result={
             "intent_type": "BUY_TO_OPEN",
             "paper_proof_invoked": False,
             "live_money_readiness": False,
-            "managed_exit_policy_id": "GLOBEX_ACTIVE_EVIDENCE_TIMEBOX_60M_EXIT_V1",
+            "managed_exit_policy_id": "GLOBEX_ACTIVE_EVIDENCE_TIMEBOX_15M_EXIT_V1",
             "order_intent_id": "MES|1m|2026-05-29T05:51:00Z|BUY_TO_OPEN",
             "instrument": "MES",
             "symbol": "MES",
@@ -1207,10 +1207,10 @@ def test_filled_bridge_result_persists_globex_active_evidence_as_60m_policy(tmp_
 
     assert path is not None
     payload = json.loads(path.read_text(encoding="utf-8"))
-    assert payload["managed_exit_policy_id"] == "GLOBEX_ACTIVE_EVIDENCE_TIMEBOX_60M_EXIT_V1"
-    assert payload["managed_exit_policy_max_completed_5m_bars"] == 12
-    assert payload["expected_exit_condition"] == "TIME_BOXED_EXIT_AFTER_12_COMPLETED_5M_BARS"
-    assert payload["open_state"]["managed_exit_policy_max_completed_5m_bars"] == 12
+    assert payload["managed_exit_policy_id"] == "GLOBEX_ACTIVE_EVIDENCE_TIMEBOX_15M_EXIT_V1"
+    assert payload["managed_exit_policy_max_completed_5m_bars"] == 3
+    assert payload["expected_exit_condition"] == "TIME_BOXED_EXIT_AFTER_3_COMPLETED_5M_BARS"
+    assert payload["open_state"]["managed_exit_policy_max_completed_5m_bars"] == 3
 
 
 def test_continuation_aware_preview_is_diagnostic_only_for_first_p0_strategy(tmp_path: Path) -> None:

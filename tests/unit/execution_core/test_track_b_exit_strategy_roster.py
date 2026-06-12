@@ -3,6 +3,7 @@ from __future__ import annotations
 from mgc_v05l.execution_core.track_b_exit_strategy_roster import (
     MES_CHANGEOVER_0300_LONG_TIMEBOX_6H_V1,
     MES_CHANGEOVER_0700_LONG_TIMEBOX_4H_V1,
+    MES_GLOBEX_ACTIVE_EVIDENCE_TIMEBOX_15M_V1,
     MES_GLOBEX_ACTIVE_EVIDENCE_TIMEBOX_60M_V1,
     MES_US_ACTIVE_EVIDENCE_TIMEBOX_60M_V1,
     MGC_DIAGNOSTIC_TIMEBOX_3X5M_V1,
@@ -10,6 +11,7 @@ from mgc_v05l.execution_core.track_b_exit_strategy_roster import (
     ACTIVE_EVIDENCE_MANAGED_CLOSE_OFFSET_TICKS,
     MNQ_CHANGEOVER_0300_LONG_TIMEBOX_6H_V1,
     MNQ_CHANGEOVER_0700_LONG_TIMEBOX_4H_V1,
+    MNQ_GLOBEX_ACTIVE_EVIDENCE_TIMEBOX_15M_V1,
     MNQ_GLOBEX_ACTIVE_EVIDENCE_TIMEBOX_60M_V1,
     MNQ_SNAP_TURN_TIMEBOX_3X5M_V1,
     MNQ_US_ACTIVE_EVIDENCE_TIMEBOX_60M_V1,
@@ -105,18 +107,26 @@ def test_active_evidence_managed_close_uses_more_aggressive_marketable_offset_th
     assert close_limit_from_profile(latest_price="30525.00", side="LONG", profile=profile) == "30523"
 
 
-def test_globex_active_evidence_profiles_cover_mnq_and_mes_60m_timeboxes() -> None:
-    mnq = resolve_track_b_exit_profile(MNQ_GLOBEX_ACTIVE_EVIDENCE_TIMEBOX_60M_V1)
-    mes = resolve_track_b_exit_profile(MES_GLOBEX_ACTIVE_EVIDENCE_TIMEBOX_60M_V1)
+def test_globex_active_evidence_profiles_cover_mnq_and_mes_15m_test_timeboxes() -> None:
+    mnq = resolve_track_b_exit_profile(MNQ_GLOBEX_ACTIVE_EVIDENCE_TIMEBOX_15M_V1)
+    mes = resolve_track_b_exit_profile(MES_GLOBEX_ACTIVE_EVIDENCE_TIMEBOX_15M_V1)
 
     assert mnq.instrument_family == "MNQ"
     assert mes.instrument_family == "MES"
-    assert mnq.managed_exit_policy_id == "GLOBEX_ACTIVE_EVIDENCE_TIMEBOX_60M_EXIT_V1"
-    assert mes.managed_exit_policy_id == "GLOBEX_ACTIVE_EVIDENCE_TIMEBOX_60M_EXIT_V1"
-    assert mnq.required_completed_5m_bars == 12
-    assert mes.required_completed_5m_bars == 12
+    assert mnq.managed_exit_policy_id == "GLOBEX_ACTIVE_EVIDENCE_TIMEBOX_15M_EXIT_V1"
+    assert mes.managed_exit_policy_id == "GLOBEX_ACTIVE_EVIDENCE_TIMEBOX_15M_EXIT_V1"
+    assert mnq.required_completed_5m_bars == 3
+    assert mes.required_completed_5m_bars == 3
     assert mnq.live_money_eligible is False
     assert mes.paper_proof_allowed is False
+
+
+def test_legacy_globex_active_evidence_60m_profiles_remain_resolvable() -> None:
+    mnq = resolve_track_b_exit_profile(MNQ_GLOBEX_ACTIVE_EVIDENCE_TIMEBOX_60M_V1)
+    mes = resolve_track_b_exit_profile(MES_GLOBEX_ACTIVE_EVIDENCE_TIMEBOX_60M_V1)
+
+    assert mnq.managed_exit_policy_id == "GLOBEX_ACTIVE_EVIDENCE_TIMEBOX_60M_EXIT_V1"
+    assert mes.managed_exit_policy_id == "GLOBEX_ACTIVE_EVIDENCE_TIMEBOX_60M_EXIT_V1"
 
 
 def test_managed_close_reprice_escalates_within_cap_and_does_not_loop_unbounded() -> None:

@@ -521,7 +521,49 @@ def test_exit_due_from_policy_and_completed_bars(tmp_path: Path) -> None:
     assert payload["managed_positions"][0]["recommended_operator_action"].startswith("Observe runtime-managed exit")
 
 
-def test_globex_active_exit_policy_ignores_stale_three_bar_report_threshold(tmp_path: Path) -> None:
+def test_globex_active_15m_exit_policy_holds_before_three_completed_5m_bars(tmp_path: Path) -> None:
+    lifecycle = _lifecycle_position(policy="GLOBEX_ACTIVE_EVIDENCE_TIMEBOX_15M_EXIT_V1", bars_since_fill=2)
+    _seed_base(tmp_path, broker_positions=[_broker_position()], lifecycle_positions=[lifecycle])
+    _write_lifecycle_report(
+        tmp_path,
+        lifecycle_id=lifecycle["lifecycle_id"],
+        policy="GLOBEX_ACTIVE_EVIDENCE_TIMEBOX_15M_EXIT_V1",
+        bars_since_fill=2,
+    )
+
+    payload = build_track_b_managed_position_registry(
+        config=TrackBManagedPositionRegistryConfig(repo_root=tmp_path),
+        now=NOW,
+    )
+
+    assert payload["classification"] == OPEN_MANAGED_MATCHED
+    assert payload["managed_positions"][0]["managed_exit_policy_id"] == "GLOBEX_ACTIVE_EVIDENCE_TIMEBOX_15M_EXIT_V1"
+    assert payload["managed_positions"][0]["bars_since_entry"] == 2
+    assert payload["managed_positions"][0]["exit_due"] is False
+
+
+def test_globex_active_15m_exit_policy_due_after_three_completed_5m_bars(tmp_path: Path) -> None:
+    lifecycle = _lifecycle_position(policy="GLOBEX_ACTIVE_EVIDENCE_TIMEBOX_15M_EXIT_V1", bars_since_fill=3)
+    _seed_base(tmp_path, broker_positions=[_broker_position()], lifecycle_positions=[lifecycle])
+    _write_lifecycle_report(
+        tmp_path,
+        lifecycle_id=lifecycle["lifecycle_id"],
+        policy="GLOBEX_ACTIVE_EVIDENCE_TIMEBOX_15M_EXIT_V1",
+        bars_since_fill=3,
+    )
+
+    payload = build_track_b_managed_position_registry(
+        config=TrackBManagedPositionRegistryConfig(repo_root=tmp_path),
+        now=NOW,
+    )
+
+    assert payload["classification"] == OPEN_MANAGED_EXIT_DUE
+    assert payload["managed_positions"][0]["managed_exit_policy_id"] == "GLOBEX_ACTIVE_EVIDENCE_TIMEBOX_15M_EXIT_V1"
+    assert payload["managed_positions"][0]["bars_since_entry"] == 3
+    assert payload["managed_positions"][0]["exit_due"] is True
+
+
+def test_existing_globex_active_60m_placeholder_is_due_after_three_completed_5m_bars(tmp_path: Path) -> None:
     lifecycle = _lifecycle_position(policy="GLOBEX_ACTIVE_EVIDENCE_TIMEBOX_60M_EXIT_V1", bars_since_fill=3)
     _seed_base(tmp_path, broker_positions=[_broker_position()], lifecycle_positions=[lifecycle])
     _write_lifecycle_report(
@@ -536,30 +578,9 @@ def test_globex_active_exit_policy_ignores_stale_three_bar_report_threshold(tmp_
         now=NOW,
     )
 
-    assert payload["classification"] == OPEN_MANAGED_MATCHED
-    assert payload["managed_positions"][0]["managed_exit_policy_id"] == "GLOBEX_ACTIVE_EVIDENCE_TIMEBOX_60M_EXIT_V1"
-    assert payload["managed_positions"][0]["bars_since_entry"] == 3
-    assert payload["managed_positions"][0]["exit_due"] is False
-
-
-def test_globex_active_exit_policy_due_after_twelve_completed_5m_bars(tmp_path: Path) -> None:
-    lifecycle = _lifecycle_position(policy="GLOBEX_ACTIVE_EVIDENCE_TIMEBOX_60M_EXIT_V1", bars_since_fill=12)
-    _seed_base(tmp_path, broker_positions=[_broker_position()], lifecycle_positions=[lifecycle])
-    _write_lifecycle_report(
-        tmp_path,
-        lifecycle_id=lifecycle["lifecycle_id"],
-        policy="GLOBEX_ACTIVE_EVIDENCE_TIMEBOX_60M_EXIT_V1",
-        bars_since_fill=12,
-    )
-
-    payload = build_track_b_managed_position_registry(
-        config=TrackBManagedPositionRegistryConfig(repo_root=tmp_path),
-        now=NOW,
-    )
-
     assert payload["classification"] == OPEN_MANAGED_EXIT_DUE
     assert payload["managed_positions"][0]["managed_exit_policy_id"] == "GLOBEX_ACTIVE_EVIDENCE_TIMEBOX_60M_EXIT_V1"
-    assert payload["managed_positions"][0]["bars_since_entry"] == 12
+    assert payload["managed_positions"][0]["bars_since_entry"] == 3
     assert payload["managed_positions"][0]["exit_due"] is True
 
 

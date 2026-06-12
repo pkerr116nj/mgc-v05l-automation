@@ -1659,7 +1659,7 @@ def _best_lifecycle_for_broker_position(
 def _managed_exit_policy_from_lane(lane_id: object) -> str | None:
     text = str(lane_id or "")
     if "_active_participation_" in text:
-        return "GLOBEX_ACTIVE_EVIDENCE_TIMEBOX_60M_EXIT_V1"
+        return "GLOBEX_ACTIVE_EVIDENCE_TIMEBOX_15M_EXIT_V1"
     return None
 
 

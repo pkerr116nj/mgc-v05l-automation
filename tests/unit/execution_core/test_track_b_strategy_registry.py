@@ -429,7 +429,7 @@ def test_london_open_active_evidence_registry_metadata_is_valid() -> None:
         assert entry.timeframe == "1m"
         assert entry.paper_eligible is True
         assert entry.live_money_eligible is False
-        assert entry.managed_exit_policy_id == "GLOBEX_ACTIVE_EVIDENCE_TIMEBOX_60M_EXIT_V1"
+        assert entry.managed_exit_policy_id == "GLOBEX_ACTIVE_EVIDENCE_TIMEBOX_15M_EXIT_V1"
         assert entry.exit_not_available is False
         assert entry.calibration_profile == calibration_profile
 
@@ -448,6 +448,6 @@ def test_london_late_mnq_short_active_evidence_registry_metadata_is_valid() -> N
     assert entry.timeframe == "1m"
     assert entry.paper_eligible is True
     assert entry.live_money_eligible is False
-    assert entry.managed_exit_policy_id == "GLOBEX_ACTIVE_EVIDENCE_TIMEBOX_60M_EXIT_V1"
+    assert entry.managed_exit_policy_id == "GLOBEX_ACTIVE_EVIDENCE_TIMEBOX_15M_EXIT_V1"
     assert entry.exit_not_available is False
     assert entry.calibration_profile == "simple_london_late_reference_plus_recent_close_short"

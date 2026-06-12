@@ -24,6 +24,8 @@ MNQ_US_SESSION_CONTINUATION_TIMEBOX_2H_V1 = "MNQ_US_SESSION_CONTINUATION_TIMEBOX
 MES_US_SESSION_CONTINUATION_TIMEBOX_2H_V1 = "MES_US_SESSION_CONTINUATION_TIMEBOX_2H_V1"
 MNQ_US_ACTIVE_EVIDENCE_TIMEBOX_60M_V1 = "MNQ_US_ACTIVE_EVIDENCE_TIMEBOX_60M_V1"
 MES_US_ACTIVE_EVIDENCE_TIMEBOX_60M_V1 = "MES_US_ACTIVE_EVIDENCE_TIMEBOX_60M_V1"
+MNQ_GLOBEX_ACTIVE_EVIDENCE_TIMEBOX_15M_V1 = "MNQ_GLOBEX_ACTIVE_EVIDENCE_TIMEBOX_15M_V1"
+MES_GLOBEX_ACTIVE_EVIDENCE_TIMEBOX_15M_V1 = "MES_GLOBEX_ACTIVE_EVIDENCE_TIMEBOX_15M_V1"
 MNQ_GLOBEX_ACTIVE_EVIDENCE_TIMEBOX_60M_V1 = "MNQ_GLOBEX_ACTIVE_EVIDENCE_TIMEBOX_60M_V1"
 MES_GLOBEX_ACTIVE_EVIDENCE_TIMEBOX_60M_V1 = "MES_GLOBEX_ACTIVE_EVIDENCE_TIMEBOX_60M_V1"
 MNQ_GLOBEX_REOPEN_FIRST_CANDLE_TIMEBOX_60M_SHADOW_V1 = "MNQ_GLOBEX_REOPEN_FIRST_CANDLE_TIMEBOX_60M_SHADOW_V1"
@@ -234,6 +236,46 @@ EXIT_PROFILE_ROSTER: Mapping[str, TrackBExitProfile] = {
             "PAPER active-evidence US-session close profile: after twelve completed 5m bars "
             "(about one hour), submit the managed lifecycle close as an exact opposite-side "
             "limit order for the owned MES position."
+        ),
+    ),
+    MNQ_GLOBEX_ACTIVE_EVIDENCE_TIMEBOX_15M_V1: TrackBExitProfile(
+        exit_strategy_id=TIMEBOXED_MANAGED_LIMIT_CLOSE_V1,
+        exit_profile_id=MNQ_GLOBEX_ACTIVE_EVIDENCE_TIMEBOX_15M_V1,
+        managed_exit_policy_id="GLOBEX_ACTIVE_EVIDENCE_TIMEBOX_15M_EXIT_V1",
+        instrument_family="MNQ",
+        strategy_family="paper_active_evidence",
+        order_type="LMT",
+        required_completed_5m_bars=3,
+        price_offset_ticks=ACTIVE_EVIDENCE_MANAGED_CLOSE_OFFSET_TICKS,
+        tick_size="0.25",
+        max_slippage_ticks=ACTIVE_EVIDENCE_MANAGED_CLOSE_MAX_SLIPPAGE_TICKS,
+        reprice_escalation_ticks=ACTIVE_EVIDENCE_MANAGED_CLOSE_REPRICE_ESCALATION_TICKS,
+        stale_reference_seconds=ACTIVE_EVIDENCE_MANAGED_CLOSE_STALE_AFTER_SECONDS,
+        widen_reference_seconds=ACTIVE_EVIDENCE_MANAGED_CLOSE_WIDEN_AFTER_SECONDS,
+        profile_explanation=(
+            "PAPER active-evidence test close profile: after three completed 5m bars "
+            "(about fifteen minutes), submit the managed lifecycle close as an exact "
+            "opposite-side limit order for the owned MNQ position."
+        ),
+    ),
+    MES_GLOBEX_ACTIVE_EVIDENCE_TIMEBOX_15M_V1: TrackBExitProfile(
+        exit_strategy_id=TIMEBOXED_MANAGED_LIMIT_CLOSE_V1,
+        exit_profile_id=MES_GLOBEX_ACTIVE_EVIDENCE_TIMEBOX_15M_V1,
+        managed_exit_policy_id="GLOBEX_ACTIVE_EVIDENCE_TIMEBOX_15M_EXIT_V1",
+        instrument_family="MES",
+        strategy_family="paper_active_evidence",
+        order_type="LMT",
+        required_completed_5m_bars=3,
+        price_offset_ticks=ACTIVE_EVIDENCE_MANAGED_CLOSE_OFFSET_TICKS,
+        tick_size="0.25",
+        max_slippage_ticks=ACTIVE_EVIDENCE_MANAGED_CLOSE_MAX_SLIPPAGE_TICKS,
+        reprice_escalation_ticks=ACTIVE_EVIDENCE_MANAGED_CLOSE_REPRICE_ESCALATION_TICKS,
+        stale_reference_seconds=ACTIVE_EVIDENCE_MANAGED_CLOSE_STALE_AFTER_SECONDS,
+        widen_reference_seconds=ACTIVE_EVIDENCE_MANAGED_CLOSE_WIDEN_AFTER_SECONDS,
+        profile_explanation=(
+            "PAPER active-evidence test close profile: after three completed 5m bars "
+            "(about fifteen minutes), submit the managed lifecycle close as an exact "
+            "opposite-side limit order for the owned MES position."
         ),
     ),
     MNQ_GLOBEX_ACTIVE_EVIDENCE_TIMEBOX_60M_V1: TrackBExitProfile(

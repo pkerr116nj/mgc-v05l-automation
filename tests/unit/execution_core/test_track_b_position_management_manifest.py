@@ -260,7 +260,7 @@ def test_entry_manifest_resolves_active_participation_policy_from_lane_config(
                     {
                         "lane_id": "mnq_globex_active_participation_short",
                         "standalone_strategy_id": "PAPER_ACTIVE_EVIDENCE_MNQ_GLOBEX_PARTICIPATION_SHORT_V1",
-                        "managed_exit_policy_id": "GLOBEX_ACTIVE_EVIDENCE_TIMEBOX_60M_EXIT_V1",
+                        "managed_exit_policy_id": "GLOBEX_ACTIVE_EVIDENCE_TIMEBOX_15M_EXIT_V1",
                     }
                 ]
             }
@@ -291,7 +291,7 @@ def test_entry_manifest_resolves_active_participation_policy_from_lane_config(
     )
 
     assert result is not None
-    assert result.manifest["managed_exit_policy_id"] == "GLOBEX_ACTIVE_EVIDENCE_TIMEBOX_60M_EXIT_V1"
+    assert result.manifest["managed_exit_policy_id"] == "GLOBEX_ACTIVE_EVIDENCE_TIMEBOX_15M_EXIT_V1"
     assert result.manifest["lifecycle_status"] == "INTENT_CREATED"
     assert result.manifest["policy_config_refs"]["source"] == "management_metadata_resolution"
 
@@ -347,7 +347,7 @@ def test_entry_manifest_resolves_active_evidence_policy_from_runtime_lane_family
     )
 
     assert result is not None
-    assert result.manifest["managed_exit_policy_id"] == "GLOBEX_ACTIVE_EVIDENCE_TIMEBOX_60M_EXIT_V1"
+    assert result.manifest["managed_exit_policy_id"] == "GLOBEX_ACTIVE_EVIDENCE_TIMEBOX_15M_EXIT_V1"
     assert result.manifest["policy_config_refs"]["metadata_resolution_source"] == "lane_registry"
 
 

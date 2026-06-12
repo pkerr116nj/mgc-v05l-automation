@@ -139,7 +139,7 @@ def test_london_open_active_evidence_cohort_exports_canonical_contract_paper_row
         assert row["lane_mode"] == "PAPER_ONLY_LONDON_OPEN_ACTIVE_EVIDENCE_LANE"
         assert row["runtime_kind"] == TRACK_B_RULE_RUNNER_PAPER_RUNTIME_KIND
         assert row["session_restriction"] == "LONDON_OPEN"
-        assert row["managed_exit_policy_id"] == "GLOBEX_ACTIVE_EVIDENCE_TIMEBOX_60M_EXIT_V1"
+        assert row["managed_exit_policy_id"] == "GLOBEX_ACTIVE_EVIDENCE_TIMEBOX_15M_EXIT_V1"
         assert row["structural_signal_timeframe"] == "1m"
         assert row["artifact_timeframe"] == "1m"
         assert row["context_timeframes"] == ["1m"]
@@ -167,7 +167,7 @@ def test_london_late_mnq_short_active_evidence_cohort_exports_single_guarded_row
     assert row["lane_mode"] == "PAPER_ONLY_LONDON_LATE_ACTIVE_EVIDENCE_LANE"
     assert row["runtime_kind"] == TRACK_B_RULE_RUNNER_PAPER_RUNTIME_KIND
     assert row["session_restriction"] == "LONDON_LATE"
-    assert row["managed_exit_policy_id"] == "GLOBEX_ACTIVE_EVIDENCE_TIMEBOX_60M_EXIT_V1"
+    assert row["managed_exit_policy_id"] == "GLOBEX_ACTIVE_EVIDENCE_TIMEBOX_15M_EXIT_V1"
     assert row["participation_policy"] == "SINGLE_ENTRY_ONLY"
     assert row["max_position_quantity"] == 1
     assert row["max_concurrent_entries"] == 1

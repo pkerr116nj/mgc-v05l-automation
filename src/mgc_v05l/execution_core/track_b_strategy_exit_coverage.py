@@ -52,6 +52,7 @@ _ACTIVE_EVIDENCE_LANE_MODES = {
 _BROKER_AUTHORIZED_SUBMIT_AUTHORITY = "PAPER_ONLY_GUARDED_RUNTIME_AFTER_PROMOTION_CONTRACT"
 _SUPPORTED_TIMEBOX_POLICIES = {
     TrackBManagedExitPolicy.PAPER_DIAGNOSTIC_TIME_BOXED_3X5M_EXIT_V1.value,
+    TrackBManagedExitPolicy.GLOBEX_ACTIVE_EVIDENCE_TIMEBOX_15M_EXIT_V1.value,
     TrackBManagedExitPolicy.GLOBEX_ACTIVE_EVIDENCE_TIMEBOX_60M_EXIT_V1.value,
     TrackBManagedExitPolicy.US_ACTIVE_EVIDENCE_TIMEBOX_60M_EXIT_V1.value,
     TrackBManagedExitPolicy.FORCED_SESSION_SEGMENT_LOCAL_EXIT_V1.value,
@@ -216,7 +217,11 @@ def _side_from_lane(lane_id: str) -> str | None:
 
 def _exit_trigger(policy_id: str) -> str | None:
     if policy_id in {
+        TrackBManagedExitPolicy.GLOBEX_ACTIVE_EVIDENCE_TIMEBOX_15M_EXIT_V1.value,
         TrackBManagedExitPolicy.GLOBEX_ACTIVE_EVIDENCE_TIMEBOX_60M_EXIT_V1.value,
+    }:
+        return "3_COMPLETED_5M_BARS"
+    if policy_id in {
         TrackBManagedExitPolicy.US_ACTIVE_EVIDENCE_TIMEBOX_60M_EXIT_V1.value,
     }:
         return "12_COMPLETED_5M_BARS"
