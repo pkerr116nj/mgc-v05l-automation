@@ -29,6 +29,7 @@ from .models import (
 )
 from .pricing import QuoteObservation
 from .track_b_broker_contract_identity import CANONICAL_FUTURES_CONTRACTS
+from .track_b_paper_order_control import TrackBPaperOrderRecord, append_paper_order_control_record
 
 
 class IbkrPaperAdapterError(RuntimeError):
@@ -302,6 +303,7 @@ class IbkrPaperAdapter:
             raw=dict(raw or {}),
         )
         self._broker_orders[broker_order_id] = order
+        self._persist_order_control_record(context=context, order=order)
         return order
 
     def map_exec_details(
@@ -572,6 +574,41 @@ class IbkrPaperAdapter:
             "cancel orderStatus",
             timeout_seconds or self.cancel_timeout_seconds,
         )
+
+    def _persist_order_control_record(self, *, context: SubmitContext, order: BrokerOrder) -> None:
+        entry = dict(self.contract_allowlist.get(order.contract_key) or {})
+        local_symbol = entry.get("local_symbol") or entry.get("localSymbol") or order.contract_key
+        con_id = entry.get("con_id") or entry.get("conId")
+        if con_id in (None, ""):
+            return
+        try:
+            append_paper_order_control_record(
+                TrackBPaperOrderRecord(
+                    order_id=order.broker_order_id,
+                    perm_id=order.perm_id,
+                    client_id=order.client_id,
+                    account_id=order.account_id,
+                    con_id=con_id,
+                    local_symbol=str(local_symbol),
+                    action=order.action.value,
+                    quantity=order.quantity,
+                    order_type=order.order_type,
+                    limit_price=order.limit_price,
+                    order_ref=order.raw.get("order_ref") if isinstance(order.raw, dict) else None,
+                    originating_component="ibkr_paper_adapter",
+                    lane_id=str(context.order_intent.extra_fields.get("lane_id") or context.order_intent.symbol),
+                    timestamp=order.observed_at,
+                    status=order.status,
+                    extra={
+                        "submit_attempt_id": context.submit_attempt.submit_attempt_id,
+                        "order_intent_id": context.order_intent.order_intent_id,
+                        "run_id": context.submit_attempt.run_id,
+                        "contract_key": order.contract_key,
+                    },
+                )
+            )
+        except Exception:
+            return
 
     def _build_bridge(self) -> Any:
         wrapper_module = self._load_module("ibapi.wrapper")

@@ -63,6 +63,10 @@ from ..execution_core.track_b_position_management_manifest import (
     DEFAULT_TRACK_B_POSITION_MANAGEMENT_MANIFEST_ROOT,
     create_manifest_from_order_intent,
 )
+from ..execution_core.track_b_paper_order_control import (
+    TrackBPaperOrderRecord,
+    append_paper_order_control_record,
+)
 from ..execution.reconciliation import (
     RECONCILIATION_CLASS_BROKER_UNAVAILABLE,
     RECONCILIATION_CLASS_SAFE_REPAIR,
@@ -12739,6 +12743,16 @@ class _IbkrPaperBridgeRuntimeBroker:
                 status = OrderStatus.ACKNOWLEDGED
             self._order_status[broker_order_id] = status
             self._order_metadata[broker_order_id] = order_metadata
+            _persist_runtime_bridge_paper_order_control_record(
+                repo_root=self._repo_root,
+                lane_id=self._lane_id,
+                bridge_config=bridge_config,
+                order_intent=order_intent,
+                broker_order_id=broker_order_id,
+                order_metadata=order_metadata,
+                report=report,
+                status=status.value,
+            )
             if status is OrderStatus.ACKNOWLEDGED:
                 self._open_order_ids = [broker_order_id]
             elif status is OrderStatus.FILLED:
@@ -14181,6 +14195,99 @@ def _extract_bridge_order_metadata(report: dict[str, Any], *, broker_order_id: s
         "executions": executions,
     }
     return {key: value for key, value in metadata.items() if value not in (None, "", [])}
+
+
+def _persist_runtime_bridge_paper_order_control_record(
+    *,
+    repo_root: Path,
+    lane_id: str,
+    bridge_config: IbkrPaperStrategyBridgeConfig,
+    order_intent: OrderIntent,
+    broker_order_id: str,
+    order_metadata: Mapping[str, Any],
+    report: Mapping[str, Any],
+    status: str,
+) -> None:
+    """Persist exact broker order identity for later PAPER modify/cancel."""
+
+    contract = dict(order_metadata.get("contract") or {})
+    local_symbol = (
+        order_metadata.get("local_symbol")
+        or contract.get("local_symbol")
+        or contract.get("localSymbol")
+        or _nested_get(dict(report), "qualified_contract_report", "qualified_contract", "local_symbol")
+    )
+    con_id = (
+        order_metadata.get("con_id")
+        or contract.get("con_id")
+        or contract.get("conId")
+        or contract.get("qualified_contract_identifier")
+        or _nested_get(dict(report), "qualified_contract_report", "qualified_contract", "con_id")
+    )
+    limit_price = (
+        _nested_get(dict(report), "entry_execution_pricing", "limit_price")
+        or _nested_get(dict(report), "delegated_result", "entry_execution_pricing", "limit_price")
+        or _nested_get(dict(report), "delegated_result", "report", "preview", "limit_price")
+    )
+    order_ref = (
+        _nested_get(dict(report), "delegated_result", "report", "requested_order", "order_ref")
+        or _nested_get(dict(report), "delegated_result", "report", "preview_payload", "order_ref")
+        or _nested_get(dict(report), "delegated_result", "report", "submit_cancel_lifecycle", "order_ref")
+    )
+    if not broker_order_id or not local_symbol or not con_id:
+        return
+    try:
+        append_paper_order_control_record(
+            TrackBPaperOrderRecord(
+                order_id=broker_order_id,
+                perm_id=order_metadata.get("perm_id"),
+                client_id=order_metadata.get("client_id"),
+                account_id=str(order_metadata.get("account_id") or bridge_config.account_id),
+                con_id=con_id,
+                local_symbol=str(local_symbol),
+                action=str(bridge_config.action or ""),
+                quantity=order_intent.quantity,
+                order_type=str(bridge_config.order_type or "LMT"),
+                limit_price=limit_price,
+                order_ref=str(order_ref) if order_ref else None,
+                originating_component="probationary_runtime_ibkr_paper_bridge",
+                lane_id=str(lane_id),
+                timestamp=order_intent.created_at,
+                status=status,
+                source_artifact_path=str(_bridge_report_path_for_runtime_lane(repo_root=repo_root, lane_id=lane_id)),
+                extra={
+                    "order_intent_id": order_intent.order_intent_id,
+                    "intent_type": order_intent.intent_type.value,
+                    "bridge_classification": report.get("classification"),
+                    "broker_effect_classification": report.get("broker_effect_classification"),
+                },
+            ),
+            jsonl_path=repo_root
+            / "outputs"
+            / "track_b_execution_core"
+            / "paper_order_control"
+            / "track_b_paper_order_control.jsonl",
+            latest_path=repo_root
+            / "outputs"
+            / "track_b_execution_core"
+            / "paper_order_control"
+            / "latest_track_b_paper_order_control.json",
+        )
+    except Exception:
+        # Order-control persistence is diagnostic. Broker submit has already
+        # completed, so never mutate order outcome from artifact write failure.
+        return
+
+
+def _bridge_report_path_for_runtime_lane(*, repo_root: Path, lane_id: str) -> Path:
+    return (
+        repo_root
+        / "outputs"
+        / "reports"
+        / "ibkr_runtime_route_dispatch"
+        / str(lane_id)
+        / "ibkr_paper_strategy_bridge_report.json"
+    )
 
 
 def _select_bridge_execution(

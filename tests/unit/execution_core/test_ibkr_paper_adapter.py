@@ -175,6 +175,48 @@ def test_callback_mapping_creates_broker_order_without_synthetic_fill() -> None:
     assert paper.snapshot_open_orders(contract_key="MGC-202606") == (order,)
 
 
+def test_order_callback_persists_track_b_paper_order_control_identity(monkeypatch) -> None:
+    captured: list[object] = []
+    monkeypatch.setattr(
+        "mgc_v05l.execution_core.ibkr_paper_adapter.append_paper_order_control_record",
+        lambda record: captured.append(record),
+    )
+    paper = adapter(account_id="DUM882026")
+    intent = order_intent(account_id="DUM882026", extra_fields={"lane_id": "mgc_test_lane"})
+    submit = submit_attempt(account_id="DUM882026")
+    paper.register_submit_context(submit_attempt=submit, order_intent=intent, created_at=aware_now())
+
+    paper.map_order_callback(
+        submit_attempt_id=submit.submit_attempt_id,
+        account_id="DUM882026",
+        broker_order_id="1001",
+        perm_id="9001",
+        client_id=77,
+        contract_key="MGC-202606",
+        action="BUY",
+        quantity=1,
+        order_type="LMT",
+        limit_price="2345.2",
+        status="Submitted",
+        filled_quantity=0,
+        remaining_quantity=1,
+        average_fill_price=None,
+        observed_at=aware_now(),
+        raw={"order_ref": "TRACK_B_TEST_ORDER"},
+    )
+
+    assert len(captured) == 1
+    payload = captured[0].to_payload()
+    assert payload["order_id"] == "1001"
+    assert payload["perm_id"] == "9001"
+    assert payload["client_id"] == "77"
+    assert payload["account_id"] == "DUM882026"
+    assert payload["con_id"] == "12345"
+    assert payload["local_symbol"] == "MGCM6"
+    assert payload["order_ref"] == "TRACK_B_TEST_ORDER"
+    assert payload["lane_id"] == "mgc_test_lane"
+
+
 def test_exec_details_mapping_creates_fill_only_with_valid_correlation() -> None:
     paper = adapter()
     paper.register_submit_context(submit_attempt=submit_attempt(), order_intent=order_intent(), created_at=aware_now())
