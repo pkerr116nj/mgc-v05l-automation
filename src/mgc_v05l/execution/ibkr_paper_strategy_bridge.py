@@ -5,6 +5,7 @@ from __future__ import annotations
 import inspect
 import hashlib
 import json
+import math
 import os
 import threading
 import time
@@ -185,6 +186,8 @@ _ACTIVE_EVIDENCE_RUNTIME_MAX_AGE_SECONDS = 90.0
 _ENTRY_RUNTIME_LIMIT_OFFSET_TICKS = 1.0
 _ENTRY_AGGRESSIVE_LIMIT_OFFSET_TICKS = 2.0
 _ENTRY_MAX_LIMIT_OFFSET_TICKS = 4.0
+_ENTRY_PAPER_MARKETABLE_FALLBACK_MIN_TICKS = 400.0
+_ENTRY_PAPER_MARKETABLE_FALLBACK_OFFSET_RATIO = 0.02
 _LEAK_TEST_MAX_LIMIT_OFFSET_TICKS = 40.0
 _ENTRY_PARTICIPATE_TIMEOUT_SECONDS = 60.0
 _ENTRY_DYNAMIC_TIMEOUT_SECONDS = 180.0
@@ -5780,7 +5783,8 @@ def _entry_execution_pricing_for_bridge(
         execution_price_source = str(active_evidence_pricing.get("pricing_source") or "UNKNOWN")
         block_submit = bool(active_evidence_pricing.get("block_submit"))
         block_reason = active_evidence_pricing.get("stale_reference_blocker")
-        limit_offset_ticks = float(active_evidence_pricing.get("marketable_limit_offset_ticks") or limit_offset_ticks)
+        active_offset_ticks = active_evidence_pricing.get("marketable_limit_offset_ticks")
+        limit_offset_ticks = limit_offset_ticks if active_offset_ticks is None else float(active_offset_ticks)
         reference_price = _float_or_none(active_evidence_pricing.get("pricing_reference_price"))
         if not block_submit and reference_price is not None:
             selected_limit = (
@@ -5868,6 +5872,10 @@ def _entry_execution_pricing_for_bridge(
         ),
         "marketable_limit_offset_ticks": limit_offset_ticks if selected_limit is not None else None,
         "max_slippage_ticks": active_evidence_pricing.get("max_slippage_ticks") or _ENTRY_MAX_LIMIT_OFFSET_TICKS,
+        "pricing_reference_kind": active_evidence_pricing.get("pricing_reference_kind"),
+        "paper_marketable_fallback": bool(active_evidence_pricing.get("paper_marketable_fallback")),
+        "paper_marketable_fallback_offset_ratio": active_evidence_pricing.get("paper_marketable_fallback_offset_ratio"),
+        "pricing_offset_points": None if selected_limit is None else limit_offset_ticks * float(min_tick),
         "stale_reference_blocker": active_evidence_pricing.get("stale_reference_blocker"),
         "broker_quote_type": _broker_quote_type(quote_context),
         "delayed_bid": delayed_bid,
@@ -6136,34 +6144,49 @@ def _active_evidence_entry_pricing_reference(
         now=now,
     )
     if quote_reference.get("price") is not None and bool(quote_reference.get("fresh")):
-        offset_ticks = min(max(float(requested_offset_ticks), _ENTRY_RUNTIME_LIMIT_OFFSET_TICKS), max_slippage_ticks)
+        quote_source = str(quote_reference.get("source") or "").strip().upper()
+        side_quote_source = quote_source in {"IBKR_LIVE_ASK", "IBKR_LIVE_BID"}
+        offset_ticks = (
+            0.0
+            if side_quote_source
+            else _entry_paper_marketable_fallback_offset_ticks(
+                reference_price=_float_or_none(quote_reference.get("price")),
+                min_tick=min_tick,
+            )
+        )
         return {
             "is_active_evidence": True,
             "pricing_source": quote_reference.get("source"),
             "pricing_reference_price": quote_reference.get("price"),
+            "pricing_reference_kind": "side_quote" if side_quote_source else "live_last",
             "pricing_reference_ts": quote_reference.get("timestamp"),
             "pricing_reference_age_seconds": quote_reference.get("age_seconds"),
             "marketable_limit_offset_ticks": offset_ticks,
             "max_slippage_ticks": max_slippage_ticks,
+            "paper_marketable_fallback": not side_quote_source,
+            "paper_marketable_fallback_offset_ratio": (
+                None if side_quote_source else _ENTRY_PAPER_MARKETABLE_FALLBACK_OFFSET_RATIO
+            ),
             "stale_reference_blocker": None,
             "block_submit": False,
         }
     runtime_age = _float_or_none(runtime_snapshot.get("runtime_data_age_seconds"))
     if runtime_price is not None and runtime_age is not None and runtime_age <= _ACTIVE_EVIDENCE_RUNTIME_MAX_AGE_SECONDS:
-        offset_floor = _ENTRY_RUNTIME_LIMIT_OFFSET_TICKS
-        if runtime_age > _ACTIVE_EVIDENCE_RUNTIME_WIDEN_SECONDS:
-            offset_floor = _ENTRY_MAX_LIMIT_OFFSET_TICKS
-        elif runtime_age > _ACTIVE_EVIDENCE_REFERENCE_FRESH_SECONDS:
-            offset_floor = _ENTRY_AGGRESSIVE_LIMIT_OFFSET_TICKS
-        offset_ticks = min(max(float(requested_offset_ticks), offset_floor), max_slippage_ticks)
+        offset_ticks = _entry_paper_marketable_fallback_offset_ticks(
+            reference_price=runtime_price,
+            min_tick=min_tick,
+        )
         return {
             "is_active_evidence": True,
             "pricing_source": _ENTRY_RUNTIME_PRICE_SOURCE,
             "pricing_reference_price": runtime_price,
+            "pricing_reference_kind": "runtime_last_or_close",
             "pricing_reference_ts": runtime_snapshot.get("runtime_candle_timestamp"),
             "pricing_reference_age_seconds": runtime_age,
             "marketable_limit_offset_ticks": offset_ticks,
             "max_slippage_ticks": max_slippage_ticks,
+            "paper_marketable_fallback": True,
+            "paper_marketable_fallback_offset_ratio": _ENTRY_PAPER_MARKETABLE_FALLBACK_OFFSET_RATIO,
             "stale_reference_blocker": None,
             "block_submit": False,
         }
@@ -6174,13 +6197,27 @@ def _active_evidence_entry_pricing_reference(
         "is_active_evidence": True,
         "pricing_source": "UNKNOWN",
         "pricing_reference_price": runtime_price or quote_reference.get("price"),
+        "pricing_reference_kind": None,
         "pricing_reference_ts": runtime_snapshot.get("runtime_candle_timestamp") or quote_reference.get("timestamp"),
         "pricing_reference_age_seconds": runtime_age or quote_reference.get("age_seconds"),
         "marketable_limit_offset_ticks": None,
         "max_slippage_ticks": max_slippage_ticks,
+        "paper_marketable_fallback": False,
+        "paper_marketable_fallback_offset_ratio": None,
         "stale_reference_blocker": blocker,
         "block_submit": True,
     }
+
+
+def _entry_paper_marketable_fallback_offset_ticks(
+    *,
+    reference_price: float | None,
+    min_tick: float,
+) -> float:
+    if reference_price is None or min_tick <= 0:
+        return _ENTRY_PAPER_MARKETABLE_FALLBACK_MIN_TICKS
+    percent_ticks = abs(float(reference_price)) * _ENTRY_PAPER_MARKETABLE_FALLBACK_OFFSET_RATIO / float(min_tick)
+    return float(max(_ENTRY_PAPER_MARKETABLE_FALLBACK_MIN_TICKS, math.ceil(percent_ticks)))
 
 
 def _is_active_evidence_participation_entry(

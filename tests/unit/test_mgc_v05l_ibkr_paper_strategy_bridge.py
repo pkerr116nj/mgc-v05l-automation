@@ -905,9 +905,10 @@ def test_entry_pricing_honors_bounded_runtime_marketable_offset_metadata(tmp_pat
     )
 
     assert pricing["execution_price_source"] == "RUNTIME_DATABENTO_1M_CLOSE"
-    assert pricing["limit_offset_ticks"] == 4.0
-    assert pricing["limit_price"] == 29753.0
-    assert pricing["limit_vs_runtime_price_points"] == 1.0
+    assert pricing["limit_offset_ticks"] == 2381.0
+    assert pricing["limit_price"] == 30347.25
+    assert pricing["limit_vs_runtime_price_points"] == 595.25
+    assert pricing["paper_marketable_fallback"] is True
     assert pricing["block_submit"] is False
 
 
@@ -936,8 +937,9 @@ def test_entry_pricing_caps_runtime_marketable_offset_metadata(tmp_path: Path) -
         now=datetime(2026, 5, 14, 12, 25, 30, tzinfo=timezone.utc),
     )
 
-    assert pricing["limit_offset_ticks"] == 4.0
-    assert pricing["limit_price"] == 29753.0
+    assert pricing["limit_offset_ticks"] == 2381.0
+    assert pricing["limit_price"] == 30347.25
+    assert pricing["paper_marketable_fallback"] is True
 
 
 def test_active_evidence_long_prefers_fresh_live_ask_reference(tmp_path: Path) -> None:
@@ -973,9 +975,12 @@ def test_active_evidence_long_prefers_fresh_live_ask_reference(tmp_path: Path) -
     assert pricing["pricing_reference_price"] == 29752.25
     assert pricing["pricing_reference_ts"] == "2026-05-14T12:25:25+00:00"
     assert pricing["pricing_reference_age_seconds"] == 5.0
-    assert pricing["marketable_limit_offset_ticks"] == 1.0
+    assert pricing["pricing_reference_kind"] == "side_quote"
+    assert pricing["marketable_limit_offset_ticks"] == 0.0
     assert pricing["max_slippage_ticks"] == 4.0
-    assert pricing["limit_price"] == 29752.5
+    assert pricing["limit_price"] == 29752.25
+    assert pricing["pricing_offset_points"] == 0.0
+    assert pricing["paper_marketable_fallback"] is False
     assert pricing["block_submit"] is False
 
 
@@ -1013,14 +1018,16 @@ def test_active_evidence_short_prefers_fresh_live_bid_reference(tmp_path: Path) 
 
     assert pricing["pricing_source"] == "IBKR_LIVE_BID"
     assert pricing["pricing_reference_price"] == 29751.75
-    assert pricing["marketable_limit_offset_ticks"] == 1.0
-    assert pricing["limit_price"] == 29751.5
-    assert pricing["limit_vs_runtime_price_points"] == 0.5
+    assert pricing["pricing_reference_kind"] == "side_quote"
+    assert pricing["marketable_limit_offset_ticks"] == 0.0
+    assert pricing["limit_price"] == 29751.75
+    assert pricing["limit_vs_runtime_price_points"] == 0.25
     assert pricing["marketable_by_runtime_context"] is True
+    assert pricing["paper_marketable_fallback"] is False
     assert pricing["block_submit"] is False
 
 
-def test_active_evidence_runtime_reference_near_edge_uses_wider_bounded_offset(tmp_path: Path) -> None:
+def test_active_evidence_buy_runtime_reference_uses_aggressive_paper_offset(tmp_path: Path) -> None:
     _write_runtime_1m_candle(tmp_path, symbol="MNQ", close=29752.0)
     config = _config(
         tmp_path,
@@ -1045,9 +1052,48 @@ def test_active_evidence_runtime_reference_near_edge_uses_wider_bounded_offset(t
 
     assert pricing["pricing_source"] == "RUNTIME_DATABENTO_1M_CLOSE"
     assert pricing["pricing_reference_age_seconds"] == 75.0
-    assert pricing["marketable_limit_offset_ticks"] == 4.0
-    assert pricing["limit_price"] == 29753.0
+    assert pricing["pricing_reference_kind"] == "runtime_last_or_close"
+    assert pricing["marketable_limit_offset_ticks"] == 2381.0
+    assert pricing["pricing_offset_points"] == 595.25
+    assert pricing["limit_price"] == 30347.25
+    assert pricing["paper_marketable_fallback"] is True
+    assert pricing["paper_marketable_fallback_offset_ratio"] == 0.02
     assert pricing["stale_reference_blocker"] is None
+    assert pricing["block_submit"] is False
+
+
+def test_active_evidence_sell_runtime_reference_uses_aggressive_paper_offset(tmp_path: Path) -> None:
+    _write_runtime_1m_candle(tmp_path, symbol="MES", close=7411.25)
+    config = _config(
+        tmp_path,
+        strategy_id="mes_globex_active_participation_short",
+        symbol="MES",
+        contract_month="202606",
+        action="SELL",
+        limit_price_model="DELAYED_BID_MINUS_1T_MARKETABLE_SELL",
+        caller_metadata=_approved_runtime_metadata(
+            strategy_id="mes_globex_active_participation_short",
+            source_instrument="MES",
+            executable_proxy="MES",
+            bridge_proxy_mode="MES_SIGNAL_DIRECT_PHASE1",
+            intent_type="SELL_TO_OPEN",
+        ),
+    )
+
+    pricing = _entry_execution_pricing_for_bridge(
+        config=config,
+        intent=_intent_from_config(config),
+        quote_context=_quote_context(bid=7401.0),
+        qualified_contract_report=_qualified_contract_report(),
+        now=datetime(2026, 5, 14, 12, 26, 15, tzinfo=timezone.utc),
+    )
+
+    assert pricing["pricing_source"] == "RUNTIME_DATABENTO_1M_CLOSE"
+    assert pricing["pricing_reference_kind"] == "runtime_last_or_close"
+    assert pricing["marketable_limit_offset_ticks"] == 593.0
+    assert pricing["pricing_offset_points"] == 148.25
+    assert pricing["limit_price"] == 7263.0
+    assert pricing["paper_marketable_fallback"] is True
     assert pricing["block_submit"] is False
 
 
@@ -1081,7 +1127,7 @@ def test_active_evidence_runtime_reference_too_stale_blocks_submit(tmp_path: Pat
     assert pricing["stale_reference_blocker"] == "ACTIVE_EVIDENCE_ENTRY_REFERENCE_STALE"
 
 
-def test_active_evidence_offset_is_capped_by_max_slippage_ticks(tmp_path: Path) -> None:
+def test_active_evidence_runtime_fallback_ignores_tiny_max_slippage_for_paper_marketability(tmp_path: Path) -> None:
     _write_runtime_1m_candle(tmp_path, symbol="MNQ", close=29752.0)
     config = _config(
         tmp_path,
@@ -1109,8 +1155,9 @@ def test_active_evidence_offset_is_capped_by_max_slippage_ticks(tmp_path: Path) 
     )
 
     assert pricing["max_slippage_ticks"] == 2.0
-    assert pricing["marketable_limit_offset_ticks"] == 2.0
-    assert pricing["limit_price"] == 29752.5
+    assert pricing["marketable_limit_offset_ticks"] == 2381.0
+    assert pricing["limit_price"] == 30347.25
+    assert pricing["paper_marketable_fallback"] is True
     assert pricing["block_submit"] is False
 
 
