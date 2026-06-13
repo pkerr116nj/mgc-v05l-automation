@@ -8,6 +8,7 @@ from mgc_v05l.execution_core.track_b_shadow_promotion_contract import (
     ATP_MGC_ASIA_PROMOTION_1_075R_5M_PROMOTED_ID,
     ATP_MGC_ASIA_PROMOTION_1_075R_PROMOTED_ID,
     LONDON_LATE_PAUSE_RESUME_SHORT_PROMOTED_ID,
+    MNQ_US_DERIVATIVE_BEAR_TURN_PROMOTED_ID,
     PAPER_ACTIVE_EVIDENCE_MES_LONDON_OPEN_LONG_PROMOTED_ID,
     PAPER_ACTIVE_EVIDENCE_MES_LONDON_OPEN_SHORT_PROMOTED_ID,
     PAPER_ACTIVE_EVIDENCE_MES_LONDON_LATE_SHORT_PROMOTED_ID,
@@ -91,10 +92,10 @@ def test_approved_short_side_candidates_export_rule_runner_rows_with_specific_ev
     enabled = [
         ASIA_EARLY_PAUSE_RESUME_SHORT_PROMOTED_ID,
         LONDON_LATE_PAUSE_RESUME_SHORT_PROMOTED_ID,
-    PAPER_ACTIVE_EVIDENCE_MES_LONDON_OPEN_LONG_PROMOTED_ID,
-    PAPER_ACTIVE_EVIDENCE_MES_LONDON_OPEN_SHORT_PROMOTED_ID,
-    PAPER_ACTIVE_EVIDENCE_MNQ_LONDON_OPEN_LONG_PROMOTED_ID,
-    PAPER_ACTIVE_EVIDENCE_MNQ_LONDON_OPEN_SHORT_PROMOTED_ID,
+        PAPER_ACTIVE_EVIDENCE_MES_LONDON_OPEN_LONG_PROMOTED_ID,
+        PAPER_ACTIVE_EVIDENCE_MES_LONDON_OPEN_SHORT_PROMOTED_ID,
+        PAPER_ACTIVE_EVIDENCE_MNQ_LONDON_OPEN_LONG_PROMOTED_ID,
+        PAPER_ACTIVE_EVIDENCE_MNQ_LONDON_OPEN_SHORT_PROMOTED_ID,
         US_DERIVATIVE_BEAR_TURN_PROMOTED_ID,
     ]
     rows = promoted_probationary_paper_lane_rows({"enabled_strategy_ids": enabled})
@@ -115,6 +116,38 @@ def test_approved_short_side_candidates_export_rule_runner_rows_with_specific_ev
         assert row["runtime_overlay_params"]["input_event_path"].startswith(
             "outputs/track_b_execution_core/session_strategy_state/latest_"
         )
+
+
+def test_mnq_us_derivative_bear_turn_exports_reusable_guarded_paper_lane() -> None:
+    report = build_shadow_promotion_contract_report(
+        {"enabled_strategy_ids": [MNQ_US_DERIVATIVE_BEAR_TURN_PROMOTED_ID]}
+    )
+    candidate = next(
+        row
+        for row in report["promotion_candidates"]
+        if row["promoted_strategy_id"] == MNQ_US_DERIVATIVE_BEAR_TURN_PROMOTED_ID
+    )
+    rows = promoted_probationary_paper_lane_rows(
+        {"enabled_strategy_ids": [MNQ_US_DERIVATIVE_BEAR_TURN_PROMOTED_ID]}
+    )
+
+    assert candidate["classification"] == PROMOTION_CANDIDATE_GUARDED_PAPER_READY
+    assert candidate["blockers"] == []
+    assert candidate["submit_allowed"] is True
+    assert len(rows) == 1
+    row = rows[0]
+    assert row["lane_id"] == "mnq_us_derivative_bear_turn"
+    assert row["symbol"] == "MNQ"
+    assert row["runtime_kind"] == TRACK_B_RULE_RUNNER_PAPER_RUNTIME_KIND
+    assert row["short_sources"] == [MNQ_US_DERIVATIVE_BEAR_TURN_PROMOTED_ID]
+    assert row["managed_exit_policy_id"] == "PAPER_DIAGNOSTIC_TIME_BOXED_3X5M_EXIT_V1"
+    assert row["runtime_overlay_params"]["input_event_path"].endswith(
+        "latest_mnq_us_derivative_bear_turn_event_envelope.json"
+    )
+    assert row["live_money_eligible"] is False
+    assert row["paper_proof_invoked"] is False
+    assert row["broad_cancel_flatten_allowed"] is False
+    assert row["unguarded_broker_mutation_allowed"] is False
 
 
 def test_london_open_active_evidence_cohort_exports_canonical_contract_paper_rows() -> None:

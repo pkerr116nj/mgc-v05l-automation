@@ -18,7 +18,7 @@ STATE_DIR="${REPO_ROOT}/outputs/track_b_execution_core/runtime_recovery"
 ARTIFACT_PATH="${STATE_DIR}/latest_thin_paper_runtime_recovery.json"
 START_SCRIPT="${REPO_ROOT}/scripts/track_b_start_paper_stack.sh"
 PROFILE="${TRACK_B_PAPER_STACK_PROFILE:-mnq_mes_full_session_active_evidence}"
-EXPECTED_LANES="${TRACK_B_PAPER_EXPECTED_LANE_COUNT:-14}"
+EXPECTED_LANES="${TRACK_B_PAPER_EXPECTED_LANE_COUNT:-15}"
 EXPECTED_EXECUTION_MODE="${TRACK_B_PAPER_EXPECTED_EXECUTION_MODE:-IBKR_PAPER_BRIDGE}"
 MODE="${1:-start}"
 

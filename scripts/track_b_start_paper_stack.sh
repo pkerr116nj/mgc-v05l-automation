@@ -381,7 +381,8 @@ elif [[ "${STACK_PROFILE}" == "mnq_mes_full_session_active_evidence" ]]; then
     "PAPER_ACTIVE_EVIDENCE_MES_LONDON_OPEN_PARTICIPATION_LONG_V1",
     "PAPER_ACTIVE_EVIDENCE_MES_LONDON_OPEN_PARTICIPATION_SHORT_V1",
     "PAPER_ACTIVE_EVIDENCE_MNQ_LONDON_LATE_PARTICIPATION_SHORT_V1",
-    "PAPER_ACTIVE_EVIDENCE_MES_LONDON_LATE_PARTICIPATION_SHORT_V1"
+    "PAPER_ACTIVE_EVIDENCE_MES_LONDON_LATE_PARTICIPATION_SHORT_V1",
+    "MNQ_US_DERIVATIVE_BEAR_TURN_V1"
   ],
   "shadow_only_strategy_ids": [
     "PAPER_WATCH_ACTIVE_EVIDENCE_MNQ_LONDON_LATE_LONG_SHADOW_V1",
@@ -1528,7 +1529,7 @@ if config.get("profile") != expected_profile:
 lanes = [row for row in config.get("lanes") or [] if isinstance(row, dict)]
 active_lane_ids = [str(value) for value in config.get("active_lane_ids") or [] if str(value)]
 if expected_profile == "mnq_mes_full_session_active_evidence":
-    expected_lane_count = 14
+    expected_lane_count = 15
 else:
     expected_lane_count = len(active_lane_ids) or len(lanes)
 if len(lanes) != expected_lane_count:

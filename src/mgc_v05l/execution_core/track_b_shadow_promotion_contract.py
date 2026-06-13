@@ -17,6 +17,7 @@ from mgc_v05l.execution_core.track_b_exit_strategy_roster import (
     MES_GLOBEX_ACTIVE_EVIDENCE_TIMEBOX_15M_V1,
     MGC_DIAGNOSTIC_TIMEBOX_3X5M_V1,
     MNQ_GLOBEX_ACTIVE_EVIDENCE_TIMEBOX_15M_V1,
+    MNQ_SNAP_TURN_TIMEBOX_3X5M_V1,
 )
 from mgc_v05l.execution_core.track_b_position_intent_contract import APPROVED_TRACK_B_POSITION_INTENT_TEMPLATES
 from mgc_v05l.execution_core.track_b_strategy_hold_exit_policy_registry import (
@@ -50,6 +51,7 @@ PAPER_ACTIVE_EVIDENCE_MES_LONDON_OPEN_SHORT_PROMOTED_ID = "PAPER_ACTIVE_EVIDENCE
 PAPER_ACTIVE_EVIDENCE_MNQ_LONDON_LATE_SHORT_PROMOTED_ID = "PAPER_ACTIVE_EVIDENCE_MNQ_LONDON_LATE_PARTICIPATION_SHORT_V1"
 PAPER_ACTIVE_EVIDENCE_MES_LONDON_LATE_SHORT_PROMOTED_ID = "PAPER_ACTIVE_EVIDENCE_MES_LONDON_LATE_PARTICIPATION_SHORT_V1"
 US_DERIVATIVE_BEAR_TURN_PROMOTED_ID = "US_DERIVATIVE_BEAR_TURN_V1"
+MNQ_US_DERIVATIVE_BEAR_TURN_PROMOTED_ID = "MNQ_US_DERIVATIVE_BEAR_TURN_V1"
 TRACK_B_RULE_RUNNER_PAPER_RUNTIME_KIND = "track_b_rule_runner_paper_strategy_engine"
 ATP_COMPANION_BENCHMARK_PAPER_RUNTIME_KIND = "atp_companion_benchmark_paper"
 DEFAULT_TIMESTAMP_COHERENCE_SECONDS = 360
@@ -310,6 +312,33 @@ PROMOTION_CANDIDATES: Mapping[str, ShadowPromotionCandidate] = {
         display_name="MGC / US derivative bear turn short / PAPER",
         identity_components=("paper", "mgc", "us", "derivative_bear_turn"),
         input_event_path="outputs/track_b_execution_core/session_strategy_state/latest_us_derivative_bear_turn_event_envelope.json",
+    ),
+    MNQ_US_DERIVATIVE_BEAR_TURN_PROMOTED_ID: ShadowPromotionCandidate(
+        shadow_candidate_family="TRACK_B_APPROVED_MNQ_US_DERIVATIVE_BEAR_TURN_V1",
+        promoted_strategy_id=MNQ_US_DERIVATIVE_BEAR_TURN_PROMOTED_ID,
+        lane_id="mnq_us_derivative_bear_turn",
+        instrument_family="MNQ",
+        side="SHORT",
+        session_eligibility=("US",),
+        contract_key="MNQ-202606",
+        local_symbol="MNQM6",
+        con_id=770561201,
+        lifecycle_policy_id=PAPER_DIAGNOSTIC_TIME_BOXED_3X5M_EXIT_V1,
+        exit_profile_id=MNQ_SNAP_TURN_TIMEBOX_3X5M_V1,
+        pyramiding_policy=PYRAMIDING_NOT_ALLOWED_REVIEW_REQUIRED,
+        conflict_group="equity_index_nasdaq_mnq_nq",
+        evidence_summary={
+            "source": "approved_track_b_strategy_registry",
+            "coverage": "mnq_us_short_side",
+            "runtime_event_artifact": "latest_mnq_us_derivative_bear_turn_event_envelope",
+            "candidate_review": "single_strongest_overall_index_candidate",
+        },
+        experimental_reason="production_line_leak_test_mnq_us_derivative_bear_turn_short",
+        display_name="MNQ / US derivative bear turn short / PAPER",
+        identity_components=("paper", "mnq", "us", "derivative_bear_turn"),
+        input_event_path="outputs/track_b_execution_core/session_strategy_state/latest_mnq_us_derivative_bear_turn_event_envelope.json",
+        point_value="2",
+        catastrophic_open_loss="-250",
     ),
     PAPER_ACTIVE_EVIDENCE_MNQ_LONDON_OPEN_LONG_PROMOTED_ID: ShadowPromotionCandidate(
         shadow_candidate_family="PAPER_ONLY_LONDON_OPEN_ACTIVE_EVIDENCE_LANE",

@@ -1297,6 +1297,7 @@ def test_paper_stack_start_has_full_session_active_evidence_profile() -> None:
     assert '"PAPER_ACTIVE_EVIDENCE_MES_LONDON_OPEN_PARTICIPATION_SHORT_V1"' in source
     assert '"PAPER_ACTIVE_EVIDENCE_MNQ_LONDON_LATE_PARTICIPATION_SHORT_V1"' in source
     assert '"PAPER_ACTIVE_EVIDENCE_MES_LONDON_LATE_PARTICIPATION_SHORT_V1"' in source
+    assert '"MNQ_US_DERIVATIVE_BEAR_TURN_V1"' in source
     assert '"PAPER_WATCH_ACTIVE_EVIDENCE_MNQ_LONDON_LATE_LONG_SHADOW_V1"' in source
     assert '"PAPER_WATCH_ACTIVE_EVIDENCE_MES_LONDON_LATE_LONG_SHADOW_V1"' in source
     assert "FULL_SESSION_PROFILE_INITIAL_LONDON_LATE_SHORT_ONLY_ELEVATION" in source
@@ -1321,15 +1322,16 @@ def test_paper_stack_start_has_full_session_active_evidence_profile() -> None:
         "PAPER_ACTIVE_EVIDENCE_MES_LONDON_OPEN_PARTICIPATION_SHORT_V1",
         "PAPER_ACTIVE_EVIDENCE_MNQ_LONDON_LATE_PARTICIPATION_SHORT_V1",
         "PAPER_ACTIVE_EVIDENCE_MES_LONDON_LATE_PARTICIPATION_SHORT_V1",
+        "MNQ_US_DERIVATIVE_BEAR_TURN_V1",
     ]
-    assert len(roster["enabled_strategy_ids"]) == 14
+    assert len(roster["enabled_strategy_ids"]) == 15
     assert roster["shadow_only_strategy_ids"] == [
         "PAPER_WATCH_ACTIVE_EVIDENCE_MNQ_LONDON_LATE_LONG_SHADOW_V1",
         "PAPER_WATCH_ACTIVE_EVIDENCE_MES_LONDON_LATE_LONG_SHADOW_V1",
     ]
 
 
-def test_paper_stack_full_session_materializes_fourteen_lane_specs(tmp_path: Path) -> None:
+def test_paper_stack_full_session_materializes_fifteen_lane_specs(tmp_path: Path) -> None:
     source = START_SCRIPT.read_text(encoding="utf-8")
     assert "materialize_scoped_lane_config_from_roster" in source
 
@@ -1372,7 +1374,7 @@ def test_paper_stack_full_session_materializes_fourteen_lane_specs(tmp_path: Pat
     assert "probationary_paper_runtime_exclusive_config: true" in generated
     raw_lanes = generated.split("probationary_paper_lanes_json: ", 1)[1].strip()
     lanes = json.loads(raw_lanes)
-    assert len(lanes) == 14
+    assert len(lanes) == 15
     assert [lane["long_sources"][0] for lane in lanes] == roster["enabled_strategy_ids"]
     assert {lane["execution_mode"] for lane in lanes} == {"IBKR_PAPER_BRIDGE"}
     assert {lane["current_order_destination"] for lane in lanes} == {"ibkr_paper_bridge_submit_capable"}
@@ -1389,7 +1391,11 @@ def test_paper_stack_full_session_materializer_fills_missing_lane_specs_from_con
     existing_ids = [
         strategy_id
         for strategy_id in roster["enabled_strategy_ids"]
-        if strategy_id != "PAPER_ACTIVE_EVIDENCE_MES_LONDON_LATE_PARTICIPATION_SHORT_V1"
+        if strategy_id
+        not in {
+            "PAPER_ACTIVE_EVIDENCE_MES_LONDON_LATE_PARTICIPATION_SHORT_V1",
+            "MNQ_US_DERIVATIVE_BEAR_TURN_V1",
+        }
     ]
     roster_path = tmp_path / "roster.json"
     source_config_path = tmp_path / "paper_config_in_force.json"
@@ -1426,12 +1432,20 @@ def test_paper_stack_full_session_materializer_fills_missing_lane_specs_from_con
         for lane in lanes
     }
     mes_late = by_source["PAPER_ACTIVE_EVIDENCE_MES_LONDON_LATE_PARTICIPATION_SHORT_V1"]
-    assert len(lanes) == 14
+    assert len(lanes) == 15
     assert mes_late["lane_id"] == "mes_london_late_active_participation_short"
     assert mes_late["symbol"] == "MES"
     assert mes_late["session_restriction"] == "LONDON_LATE"
     assert mes_late["execution_mode"] == "IBKR_PAPER_BRIDGE"
     assert mes_late["runtime_overlay_params"]["current_order_destination"] == "ibkr_paper_bridge_submit_capable"
+    mnq_derivative = by_source["MNQ_US_DERIVATIVE_BEAR_TURN_V1"]
+    assert mnq_derivative["lane_id"] == "mnq_us_derivative_bear_turn"
+    assert mnq_derivative["symbol"] == "MNQ"
+    assert mnq_derivative["runtime_kind"] == "track_b_rule_runner_paper_strategy_engine"
+    assert mnq_derivative["execution_mode"] == "IBKR_PAPER_BRIDGE"
+    assert mnq_derivative["runtime_overlay_params"]["input_event_path"].endswith(
+        "latest_mnq_us_derivative_bear_turn_event_envelope.json"
+    )
 
 
 def test_paper_stack_generated_profile_rosters_carry_authority_contract() -> None:
