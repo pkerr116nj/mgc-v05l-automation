@@ -214,6 +214,58 @@ def test_rule_runner_native_fallback_maps_mnq_us_derivative_bear_turn_to_intent(
     assert intent.quantity == 1
 
 
+def test_rule_runner_native_fallback_maps_mnq_us_midday_pause_resume_short_to_intent() -> None:
+    fallback = _native_runtime_fallback_spec(
+        {"rule_mode": "MNQ_US_MIDDAY_PAUSE_RESUME_SHORT_TURN_V1"},
+        _LaneSpec(),
+    )
+    assert fallback is not None
+    assert fallback.short_family is ShortEntryFamily.MIDDAY_PAUSE_RESUME_SHORT
+
+    payload = _empty_signal_packet_payload("MNQ|5m|2026-05-28T16:35:00Z")
+    payload.update(
+        {
+            "short_entry_raw": True,
+            "recent_short_setup": True,
+            "short_entry": True,
+            "short_entry_source": "usMiddayPauseResumeShortTurn",
+        }
+    )
+    promoted_packet = _promoted_signal_packet_from_native(
+        "MNQ|5m|2026-05-28T16:35:00Z",
+        SignalPacket(**payload),
+        fallback,
+    )
+    bar = _bar(datetime(2026, 5, 28, 12, 35, tzinfo=ZoneInfo("America/New_York")), open_="21020", close="20980")
+    engine = object.__new__(TrackBRuleRunnerPaperStrategyEngine)
+    engine._bar_history = [bar]
+    engine._settings = SimpleNamespace(symbol="MNQ", trade_size=1, warmup_bars_required=lambda: 1)
+    engine._latest_track_b_rule_report = {
+        "classification": "TRACK_B_RULE_RUNNER_PAPER_NATIVE_SIGNAL_FALLBACK_ACCEPTED",
+        "entry_source": "MNQ_US_MIDDAY_PAUSE_RESUME_SHORT_TURN_V1",
+        "primary_blocker": None,
+        "broker_event_envelope_requirement": "SATISFIED_BY_NATIVE_FALLBACK",
+    }
+    state = SimpleNamespace(
+        strategy_status=StrategyStatus.READY,
+        position_side=PositionSide.FLAT,
+        open_broker_order_id=None,
+        entries_enabled=True,
+        operator_halt=False,
+        same_underlying_entry_hold=False,
+        same_underlying_hold_reason=None,
+    )
+
+    intent = engine._maybe_create_order_intent(bar, promoted_packet, state, SimpleNamespace())
+
+    assert promoted_packet.short_entry is True
+    assert promoted_packet.short_entry_source == "MNQ_US_MIDDAY_PAUSE_RESUME_SHORT_TURN_V1"
+    assert intent is not None
+    assert intent.intent_type is OrderIntentType.SELL_TO_OPEN
+    assert intent.reason_code == "MNQ_US_MIDDAY_PAUSE_RESUME_SHORT_TURN_V1"
+    assert intent.quantity == 1
+
+
 def test_changeover_0300_rule_is_recognized_from_promoted_strategy_id() -> None:
     assert _is_changeover_0300_long_rule({}, _ChangeoverLaneSpec()) is True
     assert _is_changeover_0300_long_rule({"rule_mode": CHANGEOVER_0300_LONG_CONTINUATION_ID}, object()) is True

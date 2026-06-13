@@ -61,6 +61,7 @@ ASIA_EARLY_NORMAL_BREAKOUT_RETEST_HOLD_LONG_STRATEGY_ID = (
 )
 US_DERIVATIVE_BEAR_TURN_STRATEGY_ID = "US_DERIVATIVE_BEAR_TURN_V1"
 MNQ_US_DERIVATIVE_BEAR_TURN_STRATEGY_ID = "MNQ_US_DERIVATIVE_BEAR_TURN_V1"
+MNQ_US_MIDDAY_PAUSE_RESUME_SHORT_TURN_STRATEGY_ID = "MNQ_US_MIDDAY_PAUSE_RESUME_SHORT_TURN_V1"
 US_LATE_PAUSE_RESUME_LONG_STRATEGY_ID = "US_LATE_PAUSE_RESUME_LONG_V1"
 LONDON_LATE_PAUSE_RESUME_SHORT_FEATURE_VERSION = "london_late_pause_resume_short_v1_phase1"
 ASIA_LATE_FLAT_PULLBACK_PAUSE_RESUME_LONG_FEATURE_VERSION = (
@@ -72,6 +73,7 @@ ASIA_EARLY_NORMAL_BREAKOUT_RETEST_HOLD_LONG_FEATURE_VERSION = (
 )
 US_DERIVATIVE_BEAR_TURN_FEATURE_VERSION = "us_derivative_bear_turn_v1_phase1"
 MNQ_US_DERIVATIVE_BEAR_TURN_FEATURE_VERSION = "mnq_us_derivative_bear_turn_v1_phase1"
+MNQ_US_MIDDAY_PAUSE_RESUME_SHORT_TURN_FEATURE_VERSION = "mnq_us_midday_pause_resume_short_turn_v1_phase1"
 US_LATE_PAUSE_RESUME_LONG_FEATURE_VERSION = "us_late_pause_resume_long_v1_phase1"
 
 MNQ_CONTRACT_KEY = "MNQ-202606"
@@ -139,6 +141,7 @@ class TrackBSessionStrategyEnvelopeProducerResult:
     asia_early_normal_breakout_retest_hold_long_event_json: Path | None
     us_derivative_bear_turn_event_json: Path | None
     mnq_us_derivative_bear_turn_event_json: Path | None
+    mnq_us_midday_pause_resume_short_turn_event_json: Path | None
     us_late_pause_resume_long_event_json: Path | None
     london_late_pause_resume_short_event: dict[str, Any] | None
     asia_late_flat_pullback_pause_resume_long_event: dict[str, Any] | None
@@ -146,6 +149,7 @@ class TrackBSessionStrategyEnvelopeProducerResult:
     asia_early_normal_breakout_retest_hold_long_event: dict[str, Any] | None
     us_derivative_bear_turn_event: dict[str, Any] | None
     mnq_us_derivative_bear_turn_event: dict[str, Any] | None
+    mnq_us_midday_pause_resume_short_turn_event: dict[str, Any] | None
     us_late_pause_resume_long_event: dict[str, Any] | None
 
 
@@ -244,12 +248,30 @@ def produce_track_b_session_strategy_envelopes(
                 feature_history=feature_history,
                 prior_bars_since_short_setup=prior_bars_since_short_setup,
             )
+            mnq_midday_pause_event = _mnq_us_midday_pause_resume_short_turn_event(
+                runtime_5m_payload=normalized_payload,
+                runtime_5m_payload_path=runtime_5m_payload_path,
+                expected_account_id=expected_account_id,
+                source_id=source_id,
+                now=actual_now,
+                candles=candles,
+                feature_history=feature_history,
+                prior_bars_since_short_setup=prior_bars_since_short_setup,
+            )
             mnq_derivative_bear_json = (
                 output_root / actual_producer_id / "mnq_us_derivative_bear_turn_event_envelope.json"
             )
+            mnq_midday_pause_json = (
+                output_root / actual_producer_id / "mnq_us_midday_pause_resume_short_turn_event_envelope.json"
+            )
             latest_mnq_derivative_bear = output_root / "latest_mnq_us_derivative_bear_turn_event_envelope.json"
+            latest_mnq_midday_pause = (
+                output_root / "latest_mnq_us_midday_pause_resume_short_turn_event_envelope.json"
+            )
             _write_json(mnq_derivative_bear_json, mnq_derivative_bear_event)
+            _write_json(mnq_midday_pause_json, mnq_midday_pause_event)
             _write_json(latest_mnq_derivative_bear, mnq_derivative_bear_event)
+            _write_json(latest_mnq_midday_pause, mnq_midday_pause_event)
 
             report = _base_report(
                 verdict=TrackBSessionStrategyEnvelopeProducerVerdict.WROTE_ENVELOPES,
@@ -267,8 +289,11 @@ def produce_track_b_session_strategy_envelopes(
             report.update(
                 {
                     "mnq_us_derivative_bear_turn_event_json": str(mnq_derivative_bear_json),
+                    "mnq_us_midday_pause_resume_short_turn_event_json": str(mnq_midday_pause_json),
                     "latest_mnq_us_derivative_bear_turn_event_json": str(latest_mnq_derivative_bear),
+                    "latest_mnq_us_midday_pause_resume_short_turn_event_json": str(latest_mnq_midday_pause),
                     "mnq_us_derivative_bear_turn_envelope_ready": True,
+                    "mnq_us_midday_pause_resume_short_turn_envelope_ready": True,
                     "feature_diagnostics": _feature_diagnostics(current_features),
                 }
             )
@@ -284,6 +309,7 @@ def produce_track_b_session_strategy_envelopes(
                 asia_early_normal_breakout_retest_hold_long_event_json=None,
                 us_derivative_bear_turn_event_json=None,
                 mnq_us_derivative_bear_turn_event_json=latest_mnq_derivative_bear,
+                mnq_us_midday_pause_resume_short_turn_event_json=latest_mnq_midday_pause,
                 us_late_pause_resume_long_event_json=None,
                 london_late_pause_resume_short_event=None,
                 asia_late_flat_pullback_pause_resume_long_event=None,
@@ -291,6 +317,7 @@ def produce_track_b_session_strategy_envelopes(
                 asia_early_normal_breakout_retest_hold_long_event=None,
                 us_derivative_bear_turn_event=None,
                 mnq_us_derivative_bear_turn_event=mnq_derivative_bear_event,
+                mnq_us_midday_pause_resume_short_turn_event=mnq_midday_pause_event,
                 us_late_pause_resume_long_event=None,
             )
 
@@ -437,6 +464,7 @@ def produce_track_b_session_strategy_envelopes(
             asia_early_normal_breakout_retest_hold_long_event_json=latest_asia_early_long,
             us_derivative_bear_turn_event_json=latest_derivative_bear,
             mnq_us_derivative_bear_turn_event_json=None,
+            mnq_us_midday_pause_resume_short_turn_event_json=None,
             us_late_pause_resume_long_event_json=latest_us_late_long,
             london_late_pause_resume_short_event=london_event,
             asia_late_flat_pullback_pause_resume_long_event=asia_event,
@@ -444,6 +472,7 @@ def produce_track_b_session_strategy_envelopes(
             asia_early_normal_breakout_retest_hold_long_event=asia_early_long_event,
             us_derivative_bear_turn_event=derivative_bear_event,
             mnq_us_derivative_bear_turn_event=None,
+            mnq_us_midday_pause_resume_short_turn_event=None,
             us_late_pause_resume_long_event=us_late_long_event,
         )
     except Exception as exc:  # noqa: BLE001 - producer failures must become artifacts.
@@ -901,6 +930,93 @@ def _mnq_us_derivative_bear_turn_event(
     return event
 
 
+def _mnq_us_midday_pause_resume_short_turn_event(
+    *,
+    runtime_5m_payload: Mapping[str, Any],
+    runtime_5m_payload_path: Path | None,
+    expected_account_id: str,
+    source_id: str,
+    now: datetime,
+    candles: Sequence[_RuntimeCandle],
+    feature_history: Sequence[_FeaturePacket],
+    prior_bars_since_short_setup: int | None,
+) -> dict[str, Any]:
+    current = candles[-1]
+    previous = candles[-2]
+    setup = candles[-2]
+    features = feature_history[-1]
+    phase = _research_session_phase(current.timestamp)
+    local_time = current.timestamp.astimezone(NY).time()
+    prior_short = prior_bars_since_short_setup if prior_bars_since_short_setup is not None else 1000
+    normalized_slope = _normalized(features.velocity, features.atr)
+    normalized_curvature = _normalized(features.velocity_delta, features.atr)
+    signal_range_expansion_ratio = _range_over_atr(current, features)
+    setup_bar_range_expansion_ratio = _range_over_atr(setup, features)
+    prior_curvatures = [
+        _normalized(item.velocity_delta, item.atr)
+        for item in feature_history[-4:-1]
+        if item.atr > 0
+    ]
+    state = {
+        "derivative_phase": phase,
+        "session_us": phase.startswith("US_"),
+        "allow_us": True,
+        "midday_pause_resume_window_ok": time(10, 30) <= local_time < time(14, 0),
+        "timeframe": "5m",
+    }
+    features_payload = {
+        "feature_version": MNQ_US_MIDDAY_PAUSE_RESUME_SHORT_TURN_FEATURE_VERSION,
+        "calibration_profile": DEFAULT_CALIBRATION_PROFILE,
+        "close": current.close,
+        "open": current.open,
+        "previous_close": previous.close,
+        "vwap": features.vwap,
+        "turn_ema_fast": features.turn_ema_fast,
+        "turn_ema_slow": features.turn_ema_slow,
+        "normalized_slope": normalized_slope,
+        "min_normalized_slope": Decimal("-0.10"),
+        "max_normalized_slope": Decimal("0.10"),
+        "normalized_curvature": normalized_curvature,
+        "min_normalized_curvature": Decimal("-0.50"),
+        "max_normalized_curvature": Decimal("-0.10"),
+        "signal_range_expansion_ratio": signal_range_expansion_ratio,
+        "setup_bar_range_expansion_ratio": setup_bar_range_expansion_ratio,
+        "max_range_expansion_ratio": Decimal("1.25"),
+        "close_below_open": current.close < current.open,
+        "close_below_previous_close": current.close < previous.close,
+        "derivative_bear_close_weak": _close_location_below_threshold(
+            current.low, current.close, features.bar_range, MAX_BEAR_SNAP_CLOSE_LOCATION
+        ),
+        "derivative_bear_range_ok": features.bar_range >= MIN_BEAR_SNAP_BAR_RANGE_ATR * features.atr,
+        "derivative_bear_body_ok": features.body_size >= MIN_BEAR_SNAP_BODY_ATR * features.atr,
+        "derivative_bear_stretch_ok": features.upside_stretch >= MIN_BEAR_SNAP_UP_STRETCH_ATR * features.atr,
+        "one_bar_rebound_before_signal": previous.close > previous.open,
+        "prior_3_any_positive_curvature": any(item > 0 for item in prior_curvatures),
+        "signal_breaks_prior_1_low": current.low < previous.low,
+        "derivative_bear_cooldown_ok": prior_short > ANTI_CHURN_BARS,
+        "prior_bars_since_short_setup": prior_short,
+        "no_competing_bear_short_candidate": True,
+    }
+    return _event_envelope(
+        runtime_5m_payload=runtime_5m_payload,
+        runtime_5m_payload_path=runtime_5m_payload_path,
+        expected_account_id=expected_account_id,
+        source_id=source_id,
+        now=now,
+        candle=current,
+        strategy_id=MNQ_US_MIDDAY_PAUSE_RESUME_SHORT_TURN_STRATEGY_ID,
+        lane_id="mnq_us_midday_pause_resume_short_turn",
+        signal_side="SHORT",
+        state_key="mnq_us_midday_pause_resume_short_turn_state",
+        features_key="mnq_us_midday_pause_resume_short_turn_features",
+        feature_version=MNQ_US_MIDDAY_PAUSE_RESUME_SHORT_TURN_FEATURE_VERSION,
+        state=state,
+        features=features_payload,
+        feature_packet=features,
+        input_bar_count=len(candles),
+    )
+
+
 def _us_late_pause_resume_long_event(
     *,
     runtime_5m_payload: Mapping[str, Any],
@@ -1333,6 +1449,7 @@ def _base_report(
         "asia_early_normal_breakout_retest_hold_long_envelope_ready": False,
         "us_derivative_bear_turn_envelope_ready": False,
         "mnq_us_derivative_bear_turn_envelope_ready": False,
+        "mnq_us_midday_pause_resume_short_turn_envelope_ready": False,
         "us_late_pause_resume_long_envelope_ready": False,
         "primary_blocker": primary_blocker,
         "required_next_action": required_next_action,
@@ -1392,6 +1509,7 @@ def _write_blocked_result(
         asia_early_normal_breakout_retest_hold_long_event_json=None,
         us_derivative_bear_turn_event_json=None,
         mnq_us_derivative_bear_turn_event_json=None,
+        mnq_us_midday_pause_resume_short_turn_event_json=None,
         us_late_pause_resume_long_event_json=None,
         london_late_pause_resume_short_event=None,
         asia_late_flat_pullback_pause_resume_long_event=None,
@@ -1399,6 +1517,7 @@ def _write_blocked_result(
         asia_early_normal_breakout_retest_hold_long_event=None,
         us_derivative_bear_turn_event=None,
         mnq_us_derivative_bear_turn_event=None,
+        mnq_us_midday_pause_resume_short_turn_event=None,
         us_late_pause_resume_long_event=None,
     )
 

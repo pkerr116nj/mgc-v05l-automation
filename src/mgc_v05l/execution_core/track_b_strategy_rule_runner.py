@@ -48,6 +48,7 @@ DEFAULT_LONDON_LATE_PAUSE_RESUME_SHORT_RULE_ID = "LONDON_LATE_PAUSE_RESUME_SHORT
 DEFAULT_ASIA_LATE_FLAT_PULLBACK_PAUSE_RESUME_LONG_RULE_ID = "ASIA_LATE_FLAT_PULLBACK_PAUSE_RESUME_LONG_V1"
 DEFAULT_US_DERIVATIVE_BEAR_TURN_RULE_ID = "US_DERIVATIVE_BEAR_TURN_V1"
 DEFAULT_MNQ_US_DERIVATIVE_BEAR_TURN_RULE_ID = "MNQ_US_DERIVATIVE_BEAR_TURN_V1"
+DEFAULT_MNQ_US_MIDDAY_PAUSE_RESUME_SHORT_TURN_RULE_ID = "MNQ_US_MIDDAY_PAUSE_RESUME_SHORT_TURN_V1"
 DEFAULT_MNQ_FIRST_BEAR_SNAP_TURN_RULE_ID = "MNQ_FIRST_BEAR_SNAP_TURN_V1"
 DEFAULT_MNQ_FIRST_BULL_SNAP_TURN_RULE_ID = "MNQ_FIRST_BULL_SNAP_TURN_V1"
 DEFAULT_US_LATE_PAUSE_RESUME_LONG_RULE_ID = "US_LATE_PAUSE_RESUME_LONG_V1"
@@ -76,6 +77,7 @@ class TrackBStrategyRuleMode(str, Enum):
     ASIA_LATE_FLAT_PULLBACK_PAUSE_RESUME_LONG_V1 = "ASIA_LATE_FLAT_PULLBACK_PAUSE_RESUME_LONG_V1"
     US_DERIVATIVE_BEAR_TURN_V1 = "US_DERIVATIVE_BEAR_TURN_V1"
     MNQ_US_DERIVATIVE_BEAR_TURN_V1 = "MNQ_US_DERIVATIVE_BEAR_TURN_V1"
+    MNQ_US_MIDDAY_PAUSE_RESUME_SHORT_TURN_V1 = "MNQ_US_MIDDAY_PAUSE_RESUME_SHORT_TURN_V1"
     MNQ_FIRST_BEAR_SNAP_TURN_V1 = "MNQ_FIRST_BEAR_SNAP_TURN_V1"
     MNQ_FIRST_BULL_SNAP_TURN_V1 = "MNQ_FIRST_BULL_SNAP_TURN_V1"
     US_LATE_PAUSE_RESUME_LONG_V1 = "US_LATE_PAUSE_RESUME_LONG_V1"
@@ -702,6 +704,12 @@ def _evaluate_rule_decision(
             features_key="mnq_us_derivative_bear_turn_features",
             rule_name="mnq_us_derivative_bear_turn_v1",
             label="MNQ US derivative bear turn v1",
+        )
+    if rule_mode == TrackBStrategyRuleMode.MNQ_US_MIDDAY_PAUSE_RESUME_SHORT_TURN_V1:
+        return _evaluate_mnq_us_midday_pause_resume_short_turn_v1(
+            event=event,
+            quote_evidence=quote_evidence,
+            rule_id=rule_id,
         )
     if rule_mode == TrackBStrategyRuleMode.MNQ_FIRST_BEAR_SNAP_TURN_V1:
         return _evaluate_first_snap_turn_v1(
@@ -1499,6 +1507,101 @@ def _evaluate_us_derivative_bear_turn_v1(
     }
 
 
+def _evaluate_mnq_us_midday_pause_resume_short_turn_v1(
+    *,
+    event: Mapping[str, Any],
+    quote_evidence: Mapping[str, Any],
+    rule_id: str,
+) -> dict[str, Any]:
+    metadata = dict(event.get("metadata") or {}) if isinstance(event.get("metadata") or {}, Mapping) else {}
+    state = (
+        metadata.get("mnq_us_midday_pause_resume_short_turn_state")
+        if isinstance(metadata.get("mnq_us_midday_pause_resume_short_turn_state") or {}, Mapping)
+        else {}
+    )
+    features = (
+        metadata.get("mnq_us_midday_pause_resume_short_turn_features")
+        if isinstance(metadata.get("mnq_us_midday_pause_resume_short_turn_features") or {}, Mapping)
+        else {}
+    )
+    normalized_slope = _decimal_field(features, "normalized_slope")
+    min_slope = _decimal_field(features, "min_normalized_slope") or Decimal("-0.10")
+    max_slope = _decimal_field(features, "max_normalized_slope") or Decimal("0.10")
+    normalized_curvature = _decimal_field(features, "normalized_curvature")
+    min_curvature = _decimal_field(features, "min_normalized_curvature") or Decimal("-0.50")
+    max_curvature = _decimal_field(features, "max_normalized_curvature") or Decimal("-0.10")
+    signal_range_expansion_ratio = _decimal_field(features, "signal_range_expansion_ratio")
+    max_range_expansion_ratio = _decimal_field(features, "max_range_expansion_ratio") or Decimal("1.25")
+
+    conditions: dict[str, bool | None] = {
+        "allow_us": _bool_field(state, "allow_us") is True,
+        "session_us": _bool_field(state, "session_us") is True,
+        "derivative_phase_us_midday": _optional_text(state.get("derivative_phase")) == "US_MIDDAY",
+        "midday_pause_resume_window_ok": _bool_field(state, "midday_pause_resume_window_ok") is True,
+        "close_below_open": _bool_field(features, "close_below_open") is True,
+        "close_below_previous_close": _bool_field(features, "close_below_previous_close") is True,
+        "derivative_bear_close_weak": _bool_field(features, "derivative_bear_close_weak") is True,
+        "derivative_bear_range_ok": _bool_field(features, "derivative_bear_range_ok") is True,
+        "derivative_bear_body_ok": _bool_field(features, "derivative_bear_body_ok") is True,
+        "derivative_bear_stretch_ok": _bool_field(features, "derivative_bear_stretch_ok") is True,
+        "normalized_slope_in_pause_resume_band": (
+            min_slope <= normalized_slope <= max_slope
+            if normalized_slope is not None and min_slope is not None and max_slope is not None
+            else None
+        ),
+        "normalized_curvature_in_pause_resume_band": (
+            min_curvature <= normalized_curvature <= max_curvature
+            if normalized_curvature is not None and min_curvature is not None and max_curvature is not None
+            else None
+        ),
+        "signal_range_expansion_below_threshold": (
+            signal_range_expansion_ratio < max_range_expansion_ratio
+            if signal_range_expansion_ratio is not None and max_range_expansion_ratio is not None
+            else None
+        ),
+        "one_bar_rebound_before_signal": _bool_field(features, "one_bar_rebound_before_signal") is True,
+        "prior_3_any_positive_curvature": _bool_field(features, "prior_3_any_positive_curvature") is True,
+        "signal_breaks_prior_1_low": _bool_field(features, "signal_breaks_prior_1_low") is True,
+        "derivative_bear_cooldown_ok": _bool_field(features, "derivative_bear_cooldown_ok") is True,
+        "no_competing_bear_short_candidate": _bool_field(features, "no_competing_bear_short_candidate") is True,
+    }
+    failed = [name for name, passed in conditions.items() if passed is not True]
+    blockers = [f"{name}=false_or_missing" for name in failed]
+    decision = TrackBStrategyRuleDecision.NO_SIGNAL if failed else TrackBStrategyRuleDecision.SHORT
+    decision_reason = (
+        "MNQ US midday pause-resume short turn v1 conditions did not pass: " + ", ".join(failed)
+        if failed
+        else "MNQ US midday pause-resume short turn v1 explicit feature/state snapshot is entry-ready for SHORT."
+    )
+    return {
+        "rule_name": "mnq_us_midday_pause_resume_short_turn_v1",
+        "decision": decision,
+        "decision_reason": decision_reason,
+        "rule_inputs": {
+            "strategy_id": event.get("strategy_id"),
+            "derivative_phase": state.get("derivative_phase"),
+            "session_us": state.get("session_us"),
+            "allow_us": state.get("allow_us"),
+            "normalized_slope": None if normalized_slope is None else str(normalized_slope),
+            "normalized_curvature": None if normalized_curvature is None else str(normalized_curvature),
+            "signal_range_expansion_ratio": (
+                None if signal_range_expansion_ratio is None else str(signal_range_expansion_ratio)
+            ),
+            "feature_version": features.get("feature_version"),
+            "calibration_profile": features.get("calibration_profile"),
+            "quote_provider_mode": quote_evidence.get("input_quote_provider_mode"),
+        },
+        "rule_conditions": conditions,
+        "rule_blockers": blockers,
+        "research_lineage": (
+            "Mirrors the explicit usMiddayPauseResumeShortTurn predicates in src/mgc_v05l/signals/bear_snap.py. "
+            "Track B consumes a precomputed MNQ state/feature envelope and does not infer these fields from raw candles "
+            "inside the rule adapter."
+        ),
+        "rule_id": rule_id,
+    }
+
+
 def _evaluate_us_late_pause_resume_long_v1(
     *,
     event: Mapping[str, Any],
@@ -1912,6 +2015,8 @@ def _signal_source(rule_mode: TrackBStrategyRuleMode) -> str:
         return "US_DERIVATIVE_BEAR_TURN_V1"
     if rule_mode == TrackBStrategyRuleMode.MNQ_US_DERIVATIVE_BEAR_TURN_V1:
         return "MNQ_US_DERIVATIVE_BEAR_TURN_V1"
+    if rule_mode == TrackBStrategyRuleMode.MNQ_US_MIDDAY_PAUSE_RESUME_SHORT_TURN_V1:
+        return "MNQ_US_MIDDAY_PAUSE_RESUME_SHORT_TURN_V1"
     if rule_mode == TrackBStrategyRuleMode.MNQ_FIRST_BEAR_SNAP_TURN_V1:
         return "MNQ_FIRST_BEAR_SNAP_TURN_V1"
     if rule_mode == TrackBStrategyRuleMode.MNQ_FIRST_BULL_SNAP_TURN_V1:
@@ -1934,6 +2039,7 @@ def _real_strategy_signal(rule_mode: TrackBStrategyRuleMode) -> bool:
         TrackBStrategyRuleMode.ASIA_LATE_FLAT_PULLBACK_PAUSE_RESUME_LONG_V1,
         TrackBStrategyRuleMode.US_DERIVATIVE_BEAR_TURN_V1,
         TrackBStrategyRuleMode.MNQ_US_DERIVATIVE_BEAR_TURN_V1,
+        TrackBStrategyRuleMode.MNQ_US_MIDDAY_PAUSE_RESUME_SHORT_TURN_V1,
         TrackBStrategyRuleMode.MNQ_FIRST_BEAR_SNAP_TURN_V1,
         TrackBStrategyRuleMode.MNQ_FIRST_BULL_SNAP_TURN_V1,
         TrackBStrategyRuleMode.US_LATE_PAUSE_RESUME_LONG_V1,

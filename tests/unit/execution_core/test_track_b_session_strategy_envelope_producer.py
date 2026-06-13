@@ -329,6 +329,71 @@ def test_mnq_us_derivative_bear_rule_runner_consumes_envelope_without_mutation(t
     assert result.report["live_money_readiness"] is False
 
 
+def test_producer_emits_valid_mnq_us_midday_pause_resume_short_envelope(tmp_path: Path) -> None:
+    result = produce_track_b_session_strategy_envelopes(
+        runtime_5m_payload=mnq_runtime_5m_payload(bars=9),
+        output_root=tmp_path / "session",
+        now=aware_now(),
+        producer_id="unit-mnq-producer",
+    )
+
+    assert result.verdict == TrackBSessionStrategyEnvelopeProducerVerdict.WROTE_ENVELOPES
+    assert result.mnq_us_midday_pause_resume_short_turn_event_json == (
+        tmp_path / "session" / "latest_mnq_us_midday_pause_resume_short_turn_event_envelope.json"
+    )
+    assert result.mnq_us_midday_pause_resume_short_turn_event is not None
+    event = result.mnq_us_midday_pause_resume_short_turn_event
+    assert event["strategy_id"] == "MNQ_US_MIDDAY_PAUSE_RESUME_SHORT_TURN_V1"
+    assert event["contract_key"] == "MNQ-202606"
+    assert event["instrument_family"] == "MNQ"
+    assert "mnq_us_midday_pause_resume_short_turn_state" in event["metadata"]
+    assert "mnq_us_midday_pause_resume_short_turn_features" in event["metadata"]
+    entry, blocker = validate_strategy_event_against_registry(
+        event=event,
+        rule_mode="MNQ_US_MIDDAY_PAUSE_RESUME_SHORT_TURN_V1",
+        rule_id="MNQ_US_MIDDAY_PAUSE_RESUME_SHORT_TURN_V1",
+        strategy_id="MNQ_US_MIDDAY_PAUSE_RESUME_SHORT_TURN_V1",
+    )
+    assert blocker is None
+    assert entry is not None
+    assert entry.instrument_family == "MNQ"
+    assert entry.paper_eligible is True
+    assert entry.live_money_eligible is False
+
+
+def test_mnq_us_midday_pause_resume_short_rule_runner_consumes_envelope_without_mutation(tmp_path: Path) -> None:
+    producer = produce_track_b_session_strategy_envelopes(
+        runtime_5m_payload=mnq_runtime_5m_payload(bars=9),
+        output_root=tmp_path / "session",
+        now=aware_now(),
+    )
+    assert producer.mnq_us_midday_pause_resume_short_turn_event is not None
+
+    result = run_track_b_strategy_rule(
+        input_event_payload=producer.mnq_us_midday_pause_resume_short_turn_event,
+        input_event_path=tmp_path / "mnq_us_midday_pause.json",
+        inbox_dir=tmp_path / "inbox",
+        expected_account_id="DUM882026",
+        strategy_id="MNQ_US_MIDDAY_PAUSE_RESUME_SHORT_TURN_V1",
+        lane_id="mnq_us_midday_pause_resume_short_turn",
+        rule_id="MNQ_US_MIDDAY_PAUSE_RESUME_SHORT_TURN_V1",
+        rule_mode="MNQ_US_MIDDAY_PAUSE_RESUME_SHORT_TURN_V1",
+        emit_signal=False,
+        output_root=tmp_path / "rule",
+        now=aware_now(),
+    )
+
+    assert result.verdict == TrackBStrategyRuleRunnerVerdict.NO_SIGNAL
+    assert result.report["strategy_registry_id"] == "MNQ_US_MIDDAY_PAUSE_RESUME_SHORT_TURN_V1"
+    assert result.report["strategy_registry_instrument_family"] == "MNQ"
+    assert result.report["strategy_registry_paper_eligible"] is True
+    assert result.report["strategy_registry_live_money_eligible"] is False
+    assert result.report["broker_state_mutated"] is False
+    assert result.report["live_money_readiness"] is False
+    assert result.report["rule_name"] == "mnq_us_midday_pause_resume_short_turn_v1"
+    assert result.report["decision"] in {"NO_SIGNAL", "SHORT"}
+
+
 def test_runtime_cycle_filters_to_mnq_derivative_bear_strategy(tmp_path: Path) -> None:
     producer = produce_track_b_session_strategy_envelopes(
         runtime_5m_payload=mnq_runtime_5m_payload(bars=9),

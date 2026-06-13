@@ -346,6 +346,15 @@ APPROVED_TRACK_B_POSITION_INTENT_TEMPLATES: Mapping[str, _StrategyContractTempla
         session_tags=("US",),
         regime_tags=("SNAP_TURN_REVERSAL",),
     ),
+    "MNQ_US_MIDDAY_PAUSE_RESUME_SHORT_TURN_V1": _mnq_template(
+        strategy_id="MNQ_US_MIDDAY_PAUSE_RESUME_SHORT_TURN_V1",
+        lane_id="mnq_us_midday_pause_resume_short_turn",
+        side="SHORT",
+        thesis_type=ThesisType.TREND_PARTICIPATION,
+        thesis_summary="US midday MNQ pause/resume short continuation after local weakness resumes.",
+        session_tags=("US_MIDDAY",),
+        regime_tags=("TREND_PARTICIPATION",),
+    ),
     "MNQ_FIRST_BEAR_SNAP_TURN_V1": _mnq_template(
         strategy_id="MNQ_FIRST_BEAR_SNAP_TURN_V1",
         lane_id="mnq_first_bear_snap_turn",

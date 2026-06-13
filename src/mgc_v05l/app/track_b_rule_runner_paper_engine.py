@@ -375,6 +375,16 @@ _NATIVE_RUNTIME_FALLBACKS: dict[str, _NativeRuntimeFallbackSpec] = {
         native_sources=("usDerivativeBearTurn",),
         short_family=ShortEntryFamily.DERIVATIVE_BEAR,
     ),
+    "MNQ_US_MIDDAY_PAUSE_RESUME_SHORT_TURN_V1": _NativeRuntimeFallbackSpec(
+        promoted_source="MNQ_US_MIDDAY_PAUSE_RESUME_SHORT_TURN_V1",
+        direction="SHORT",
+        native_sources=(
+            "usMiddayPauseResumeShortTurn",
+            "usMiddayExpandedPauseResumeShortTurn",
+            "usMiddayCompressedPauseResumeShortTurn",
+        ),
+        short_family=ShortEntryFamily.MIDDAY_PAUSE_RESUME_SHORT,
+    ),
     "US_LATE_PAUSE_RESUME_LONG_V1": _NativeRuntimeFallbackSpec(
         promoted_source="US_LATE_PAUSE_RESUME_LONG_V1",
         direction="LONG",

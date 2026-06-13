@@ -9,6 +9,7 @@ from mgc_v05l.execution_core.track_b_shadow_promotion_contract import (
     ATP_MGC_ASIA_PROMOTION_1_075R_PROMOTED_ID,
     LONDON_LATE_PAUSE_RESUME_SHORT_PROMOTED_ID,
     MNQ_US_DERIVATIVE_BEAR_TURN_PROMOTED_ID,
+    MNQ_US_MIDDAY_PAUSE_RESUME_SHORT_TURN_PROMOTED_ID,
     PAPER_ACTIVE_EVIDENCE_MES_LONDON_OPEN_LONG_PROMOTED_ID,
     PAPER_ACTIVE_EVIDENCE_MES_LONDON_OPEN_SHORT_PROMOTED_ID,
     PAPER_ACTIVE_EVIDENCE_MES_LONDON_LATE_SHORT_PROMOTED_ID,
@@ -148,6 +149,25 @@ def test_mnq_us_derivative_bear_turn_exports_reusable_guarded_paper_lane() -> No
     assert row["paper_proof_invoked"] is False
     assert row["broad_cancel_flatten_allowed"] is False
     assert row["unguarded_broker_mutation_allowed"] is False
+
+
+def test_mnq_us_midday_pause_resume_short_turn_is_future_promotion_shadow_candidate() -> None:
+    report = build_shadow_promotion_contract_report({"enabled_strategy_ids": []})
+    candidate = next(
+        row
+        for row in report["promotion_candidates"]
+        if row["promoted_strategy_id"] == MNQ_US_MIDDAY_PAUSE_RESUME_SHORT_TURN_PROMOTED_ID
+    )
+
+    assert candidate["classification"] == PROMOTION_CANDIDATE_SHADOW_ONLY
+    assert candidate["submit_allowed"] is False
+    assert candidate["live_money_eligible"] is False
+    assert candidate["paper_proof_invoked"] is False
+    assert candidate["probationary_paper_lane_row"]["lane_id"] == "mnq_us_midday_pause_resume_short_turn"
+    assert candidate["probationary_paper_lane_row"]["symbol"] == "MNQ"
+    assert candidate["probationary_paper_lane_row"]["runtime_overlay_params"]["input_event_path"].endswith(
+        "latest_mnq_us_midday_pause_resume_short_turn_event_envelope.json"
+    )
 
 
 def test_london_open_active_evidence_cohort_exports_canonical_contract_paper_rows() -> None:

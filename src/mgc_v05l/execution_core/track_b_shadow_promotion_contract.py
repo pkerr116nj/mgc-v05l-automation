@@ -52,6 +52,7 @@ PAPER_ACTIVE_EVIDENCE_MNQ_LONDON_LATE_SHORT_PROMOTED_ID = "PAPER_ACTIVE_EVIDENCE
 PAPER_ACTIVE_EVIDENCE_MES_LONDON_LATE_SHORT_PROMOTED_ID = "PAPER_ACTIVE_EVIDENCE_MES_LONDON_LATE_PARTICIPATION_SHORT_V1"
 US_DERIVATIVE_BEAR_TURN_PROMOTED_ID = "US_DERIVATIVE_BEAR_TURN_V1"
 MNQ_US_DERIVATIVE_BEAR_TURN_PROMOTED_ID = "MNQ_US_DERIVATIVE_BEAR_TURN_V1"
+MNQ_US_MIDDAY_PAUSE_RESUME_SHORT_TURN_PROMOTED_ID = "MNQ_US_MIDDAY_PAUSE_RESUME_SHORT_TURN_V1"
 TRACK_B_RULE_RUNNER_PAPER_RUNTIME_KIND = "track_b_rule_runner_paper_strategy_engine"
 ATP_COMPANION_BENCHMARK_PAPER_RUNTIME_KIND = "atp_companion_benchmark_paper"
 DEFAULT_TIMESTAMP_COHERENCE_SECONDS = 360
@@ -339,6 +340,37 @@ PROMOTION_CANDIDATES: Mapping[str, ShadowPromotionCandidate] = {
         input_event_path="outputs/track_b_execution_core/session_strategy_state/latest_mnq_us_derivative_bear_turn_event_envelope.json",
         point_value="2",
         catastrophic_open_loss="-250",
+    ),
+    MNQ_US_MIDDAY_PAUSE_RESUME_SHORT_TURN_PROMOTED_ID: ShadowPromotionCandidate(
+        shadow_candidate_family="TRACK_B_RESEARCH_MNQ_US_MIDDAY_PAUSE_RESUME_SHORT_TURN_V1",
+        promoted_strategy_id=MNQ_US_MIDDAY_PAUSE_RESUME_SHORT_TURN_PROMOTED_ID,
+        lane_id="mnq_us_midday_pause_resume_short_turn",
+        instrument_family="MNQ",
+        side="SHORT",
+        session_eligibility=("US_MIDDAY",),
+        contract_key="MNQ-202606",
+        local_symbol="MNQM6",
+        con_id=770561201,
+        lifecycle_policy_id=PAPER_DIAGNOSTIC_TIME_BOXED_3X5M_EXIT_V1,
+        exit_profile_id=MNQ_SNAP_TURN_TIMEBOX_3X5M_V1,
+        pyramiding_policy=PYRAMIDING_NOT_ALLOWED_REVIEW_REQUIRED,
+        conflict_group="equity_index_nasdaq_mnq_nq",
+        evidence_summary={
+            "source": "research_envelope_repair",
+            "coverage": "mnq_us_midday_pause_resume_short_side",
+            "runtime_event_artifact": "latest_mnq_us_midday_pause_resume_short_turn_event_envelope",
+            "promotion_status": "shadow_ready_pending_nonzero_replay_validation",
+        },
+        experimental_reason="research_readiness_repair_for_usMiddayPauseResumeShortTurn",
+        display_name="MNQ / US midday pause-resume short turn / PAPER shadow",
+        identity_components=("paper", "mnq", "us_midday", "pause_resume_short_turn"),
+        input_event_path=(
+            "outputs/track_b_execution_core/session_strategy_state/"
+            "latest_mnq_us_midday_pause_resume_short_turn_event_envelope.json"
+        ),
+        point_value="2",
+        catastrophic_open_loss="-250",
+        recommended=False,
     ),
     PAPER_ACTIVE_EVIDENCE_MNQ_LONDON_OPEN_LONG_PROMOTED_ID: ShadowPromotionCandidate(
         shadow_candidate_family="PAPER_ONLY_LONDON_OPEN_ACTIVE_EVIDENCE_LANE",
