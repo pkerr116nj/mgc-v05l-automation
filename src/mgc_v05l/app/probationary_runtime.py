@@ -698,6 +698,10 @@ def _probationary_lane_spec_runtime_row(
         "runtime_overlay_id": spec.runtime_overlay_id,
         "runtime_overlay_params": dict(spec.runtime_overlay_params or {}),
         "shared_strategy_identity": spec.shared_strategy_identity,
+        "current_order_destination": spec.current_order_destination,
+        "local_symbol": spec.local_symbol,
+        "con_id": spec.con_id,
+        "contract_key": spec.contract_key,
         "config_source": config_source,
     }
 
@@ -809,6 +813,10 @@ class ProbationaryPaperLaneSpec:
     package_label: str | None = None
     runtime_overlay_id: str | None = None
     runtime_overlay_params: dict[str, Any] = field(default_factory=dict)
+    current_order_destination: str | None = None
+    local_symbol: str | None = None
+    con_id: int | str | None = None
+    contract_key: str | None = None
     allow_pre_5m_context_participation: bool = False
     atp_context_timeframe: str = "5m"
 
@@ -875,6 +883,84 @@ def _active_evidence_bridge_adapter_for_spec(spec: ProbationaryPaperLaneSpec) ->
     }
 
 
+def _contract_month_from_probationary_spec(spec: ProbationaryPaperLaneSpec) -> str | None:
+    contract_key = str(spec.contract_key or "").strip()
+    if "-" in contract_key:
+        suffix = contract_key.rsplit("-", 1)[-1].strip()
+        if suffix.isdigit() and len(suffix) == 6:
+            return suffix
+    local_symbol = str(spec.local_symbol or "").strip().upper()
+    if len(local_symbol) >= 2:
+        month_codes = {
+            "F": "01",
+            "G": "02",
+            "H": "03",
+            "J": "04",
+            "K": "05",
+            "M": "06",
+            "N": "07",
+            "Q": "08",
+            "U": "09",
+            "V": "10",
+            "X": "11",
+            "Z": "12",
+        }
+        month = month_codes.get(local_symbol[-2:-1])
+        year_digit = local_symbol[-1:]
+        if month and year_digit.isdigit():
+            return f"202{year_digit}{month}"
+    return None
+
+
+def _promoted_paper_bridge_adapter_for_spec(spec: ProbationaryPaperLaneSpec) -> dict[str, Any] | None:
+    destination = str(
+        spec.current_order_destination
+        or (spec.runtime_overlay_params or {}).get("current_order_destination")
+        or ""
+    ).strip()
+    if destination != PAPER_EXECUTION_ROUTE_IBKR_BRIDGE:
+        return None
+    source_instrument = _source_instrument_from_lane_spec(spec)
+    if not source_instrument:
+        return None
+    from ..execution.ibkr_phase1_futures_scope import phase1_execution_target_for_source
+
+    target = dict(phase1_execution_target_for_source(source_instrument) or {})
+    contract_month = _contract_month_from_probationary_spec(spec)
+    if contract_month:
+        target["contract_month"] = contract_month
+    if spec.local_symbol:
+        target["local_symbol"] = str(spec.local_symbol).strip().upper()
+    if spec.con_id not in (None, ""):
+        target["con_id"] = spec.con_id
+        target["qualified_contract_identifier"] = spec.con_id
+    if spec.contract_key:
+        target["contract_key"] = str(spec.contract_key)
+    if source_instrument:
+        target["symbol"] = source_instrument
+        target.setdefault("trading_class", source_instrument)
+    if target.get("exchange") in (None, ""):
+        target["exchange"] = "CME"
+    if target.get("currency") in (None, ""):
+        target["currency"] = "USD"
+    if target.get("multiplier") in (None, ""):
+        target["multiplier"] = "2" if source_instrument in {"MNQ", "NQ"} else "5" if source_instrument in {"MES", "ES"} else target.get("multiplier")
+    return {
+        "lane_id": spec.lane_id,
+        "source_instrument": source_instrument,
+        "bridge_execution_target": target,
+        "current_order_destination": PAPER_EXECUTION_ROUTE_IBKR_BRIDGE,
+        "bridge_proxy_mode": f"{source_instrument}_SIGNAL_DIRECT_PHASE1",
+        "entry_execution_intent": "PARTICIPATE_NOW",
+        "entry_execution_policy": "MARKETABLE_LIMIT_FROM_RUNTIME_TAPE",
+        "entry_marketable_limit_offset_ticks": 4,
+        "entry_execution_note": (
+            "Promoted PAPER lanes use the reusable promotion contract and fresh runtime tape "
+            "with the bounded ordinary PAPER marketable limit cap."
+        ),
+    }
+
+
 def _effective_probationary_paper_execution_mode(spec: ProbationaryPaperLaneSpec) -> str:
     if spec.execution_mode:
         return _normalize_probationary_paper_execution_mode(spec.execution_mode)
@@ -890,6 +976,8 @@ def _bridge_adapter_for_probationary_lane(spec: ProbationaryPaperLaneSpec) -> di
     adapter = lane_submit_bridge_adapter(lane_id=spec.lane_id)
     if adapter is None:
         adapter = _active_evidence_bridge_adapter_for_spec(spec)
+    if adapter is None:
+        adapter = _promoted_paper_bridge_adapter_for_spec(spec)
     if adapter is None:
         return None
     return {
@@ -8795,6 +8883,22 @@ def _coerce_probationary_paper_lane_specs(
                     str(raw_spec["runtime_overlay_id"]) if raw_spec.get("runtime_overlay_id") else None
                 ),
                 runtime_overlay_params=dict(raw_spec.get("runtime_overlay_params") or {}),
+                current_order_destination=(
+                    str(
+                        raw_spec.get("current_order_destination")
+                        or (raw_spec.get("runtime_overlay_params") or {}).get("current_order_destination")
+                    )
+                    if raw_spec.get("current_order_destination")
+                    or (raw_spec.get("runtime_overlay_params") or {}).get("current_order_destination")
+                    else None
+                ),
+                local_symbol=str(raw_spec["local_symbol"]) if raw_spec.get("local_symbol") else None,
+                con_id=(
+                    raw_spec.get("con_id")
+                    if raw_spec.get("con_id") not in (None, "")
+                    else raw_spec.get("qualified_contract_identifier")
+                ),
+                contract_key=str(raw_spec["contract_key"]) if raw_spec.get("contract_key") else None,
                 allow_pre_5m_context_participation=bool(
                     raw_spec.get("allow_pre_5m_context_participation", False)
                 ),
@@ -9599,6 +9703,11 @@ def _write_probationary_paper_config_in_force(
                 "live_poll_lookback_minutes": lane.settings.live_poll_lookback_minutes,
                 "probationary_paper_market_data_source": lane.settings.probationary_paper_market_data_source.value,
                 **_lane_config_row_extras(lane),
+                "current_order_destination": lane.spec.current_order_destination,
+                "local_symbol": lane.spec.local_symbol,
+                "con_id": lane.spec.con_id,
+                "contract_key": lane.spec.contract_key,
+                "managed_exit_policy_id": lane.spec.managed_exit_policy_id,
             }
             for lane in lanes
         ],

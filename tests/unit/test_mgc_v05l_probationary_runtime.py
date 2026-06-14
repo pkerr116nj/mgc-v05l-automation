@@ -5349,6 +5349,71 @@ def test_active_evidence_broker_backed_lane_uses_runtime_ibkr_route_broker(
     assert broker.route_destination == "ibkr_paper_bridge_submit_capable"
 
 
+def test_promoted_paper_lane_with_contract_identity_uses_runtime_ibkr_route_broker(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = _build_probationary_settings(tmp_path)
+    spec = probationary_runtime_module.ProbationaryPaperLaneSpec(
+        lane_id="mnq_us_derivative_bear_turn",
+        display_name="MNQ derivative bear turn",
+        symbol="MNQ",
+        standalone_strategy_id="MNQ_US_DERIVATIVE_BEAR_TURN_V1",
+        long_sources=(),
+        short_sources=("MNQ_US_DERIVATIVE_BEAR_TURN_V1",),
+        session_restriction="US",
+        point_value=Decimal("2"),
+        strategy_family="TRACK_B_DERIVATIVE_BEAR_TURN",
+        strategy_identity_root="MNQ_US_DERIVATIVE_BEAR_TURN_V1",
+        runtime_kind=TRACK_B_RULE_RUNNER_PAPER_RUNTIME_KIND,
+        execution_mode=probationary_runtime_module.PAPER_EXECUTION_MODE_IBKR_BRIDGE,
+        managed_exit_policy_id="PAPER_DIAGNOSTIC_TIME_BOXED_3X5M_EXIT_V1",
+        current_order_destination="ibkr_paper_bridge_submit_capable",
+        local_symbol="MNQM6",
+        con_id=770561201,
+        contract_key="MNQ-202606",
+        paper_only=True,
+    )
+    root_logger = StructuredLogger(tmp_path / "root")
+
+    class FakePollingService:
+        def poll_bars(self, *args, **kwargs):
+            return []
+
+    monkeypatch.setattr(
+        probationary_runtime_module,
+        "_build_live_polling_service",
+        lambda *args, **kwargs: FakePollingService(),
+    )
+
+    lanes = probationary_runtime_module._build_probationary_paper_lanes(  # noqa: SLF001
+        settings=settings,
+        lane_specs=[spec],
+        root_logger=root_logger,
+        schwab_config_path=None,
+    )
+
+    broker = lanes[0].execution_engine.broker
+    assert isinstance(broker, probationary_runtime_module._IbkrPaperBridgeRuntimeBroker)  # noqa: SLF001
+    assert broker.route_destination == "ibkr_paper_bridge_submit_capable"
+    target = broker._bridge_adapter["bridge_execution_target"]  # noqa: SLF001
+    assert target["symbol"] == "MNQ"
+    assert target["local_symbol"] == "MNQM6"
+    assert target["con_id"] == 770561201
+    assert target["qualified_contract_identifier"] == 770561201
+    assert target["contract_key"] == "MNQ-202606"
+    assert target["contract_month"] == "202606"
+    row = probationary_runtime_module._probationary_lane_spec_runtime_row(  # noqa: SLF001
+        spec,
+        settings,
+        config_source="test",
+    )
+    assert row["local_symbol"] == "MNQM6"
+    assert row["con_id"] == 770561201
+    assert row["contract_key"] == "MNQ-202606"
+    assert row["current_order_destination"] == "ibkr_paper_bridge_submit_capable"
+
+
 def test_explicit_simulation_lane_still_uses_paper_broker(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
