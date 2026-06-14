@@ -409,6 +409,7 @@ scoped_profile_start_allowed() {
   [[ "${STACK_PROFILE}" == "mnq_mes_active_evidence" || "${STACK_PROFILE}" == "mnq_mes_globex_active_evidence" || "${STACK_PROFILE}" == "mnq_mes_session_coverage_active_evidence" || "${STACK_PROFILE}" == "mnq_mes_london_open_active_evidence" || "${STACK_PROFILE}" == "mnq_mes_london_late_mnq_short_active_evidence" || "${STACK_PROFILE}" == "mnq_mes_full_session_active_evidence" ]] || return 1
   "${PYTHON_BIN}" - "${status_json}" "${REPO_ROOT}" <<'PY'
 import json
+import os
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
@@ -552,7 +553,7 @@ payload = {
 }
 path = Path(artifact)
 path.parent.mkdir(parents=True, exist_ok=True)
-tmp = path.with_name(f".{path.name}.tmp")
+tmp = path.with_name(f".{path.name}.{os.getpid()}.tmp")
 tmp.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 tmp.replace(path)
 print(json.dumps(payload, indent=2, sort_keys=True))
@@ -566,6 +567,7 @@ write_approved_profile_artifact() {
   mkdir -p "${RECOVERY_STATE_DIR}"
   "${PYTHON_BIN}" - "$APPROVED_PROFILE_ARTIFACT" "$STACK_PROFILE" "$REPO_ROOT" <<'PY'
 import json
+import os
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
@@ -585,7 +587,7 @@ payload = {
     "broker_mutation": False,
 }
 path = Path(artifact)
-tmp = path.with_name(f".{path.name}.tmp")
+tmp = path.with_name(f".{path.name}.{os.getpid()}.tmp")
 tmp.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 tmp.replace(path)
 PY
@@ -1701,8 +1703,9 @@ session_name="track_b_paper_stack_$(date -u +%Y%m%dT%H%M%SZ)_$$"
 config_stack="$(IFS=":"; printf "%s" "${CANONICAL_CONFIGS[*]}")"
 source_commit="$(git -C "${REPO_ROOT}" rev-parse HEAD)"
 runtime_instance_id="track-b-paper-stack-$(date -u +%Y%m%dT%H%M%SZ)-$$"
+wrapper_tmp="${WRAPPER_PATH}.$$.$RANDOM.tmp"
 
-cat > "${WRAPPER_PATH}" <<WRAPPER
+cat > "${wrapper_tmp}" <<WRAPPER
 #!/usr/bin/env bash
 set -euo pipefail
 cd "${REPO_ROOT}"
@@ -1799,7 +1802,8 @@ exec bash "${SCRIPT_DIR}/run_probationary_paper_soak.sh" \
   --launch-status-file "${LAUNCH_STATUS_FILE}" \
   --schwab-config "${REPO_ROOT}/config/schwab.local.json" >> "${RUNTIME_LOG}" 2>&1
 WRAPPER
-chmod +x "${WRAPPER_PATH}"
+chmod +x "${wrapper_tmp}"
+mv "${wrapper_tmp}" "${WRAPPER_PATH}"
 
 carrier="screen"
 if paper_minimal_startup_enabled; then

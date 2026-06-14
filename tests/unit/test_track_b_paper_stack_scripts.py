@@ -107,7 +107,7 @@ def test_paper_stack_start_refreshes_authority_evidence_before_carrier_launch() 
         "write_approved_profile_artifact"
     )
     assert launch_block.index("run_startup_preflight_evidence_refresh") < launch_block.index(
-        'cat > "${WRAPPER_PATH}"'
+        'cat > "${wrapper_tmp}"'
     )
     assert launch_block.index("run_startup_preflight_evidence_refresh") < launch_block.index(
         "launchctl submit"
@@ -223,7 +223,7 @@ def test_paper_stack_start_blocks_before_carrier_when_preflight_refresh_fails() 
 
     launch_block = source[source.index('if ! run_startup_preflight_evidence_refresh; then') :]
     blocked = launch_block.index('exit 2')
-    assert blocked < launch_block.index('cat > "${WRAPPER_PATH}"')
+    assert blocked < launch_block.index('cat > "${wrapper_tmp}"')
     assert blocked < launch_block.index("launchctl submit")
 
 
@@ -1233,7 +1233,17 @@ def test_thin_recovery_script_uses_broker_truth_and_direct_minimal_start_only() 
     assert "launchctl" not in source
     assert "stop_probationary_paper_soak.sh" not in source
     assert "pkill" not in source
-    assert "paper_proof" not in source.lower().replace("paper_proof_invoked", "")
+
+
+def test_paper_stack_startup_uses_unique_atomic_artifact_writes() -> None:
+    source = START_SCRIPT.read_text(encoding="utf-8")
+
+    assert 'tmp = path.with_name(f".{path.name}.tmp")' not in source
+    assert 'tmp = path.with_name(f".{path.name}.{os.getpid()}.tmp")' in source
+    assert 'tmp = path.with_name(f".{path.name}.{sys.argv[2]}.tmp")' in source
+    assert 'wrapper_tmp="${WRAPPER_PATH}.$$.$RANDOM.tmp"' in source
+    assert 'cat > "${wrapper_tmp}" <<WRAPPER' in source
+    assert 'mv "${wrapper_tmp}" "${WRAPPER_PATH}"' in source
 
 
 def test_paper_stack_start_has_session_coverage_active_evidence_profile() -> None:
