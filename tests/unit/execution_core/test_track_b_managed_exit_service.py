@@ -89,6 +89,16 @@ def _write_live_entry_fill(
     lifecycle_id: str,
     lane_id: str,
     generated_at: datetime,
+    symbol: str = "MES",
+    local_symbol: str = "MESU6",
+    con_id: int = 793356217,
+    side: str = "LONG",
+    action: str = "BUY",
+    order_id: str = "1",
+    perm_id: str = "1871421812",
+    exec_id: str = "0000e1a7.6a4255b6.01.01",
+    price: str = "7496.5",
+    append: bool = False,
 ) -> None:
     path = tmp_path / "outputs/track_b_execution_core/trade_registry/live_trade_events.jsonl"
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -101,21 +111,23 @@ def _write_live_entry_fill(
         lane_id=lane_id,
         thesis_strategy_id=lane_id,
         account_id="DUM882026",
-        symbol="MES",
-        con_id=793356217,
-        local_symbol="MESU6",
+        symbol=symbol,
+        con_id=con_id,
+        local_symbol=local_symbol,
         expiry="20260918",
-        side="LONG",
-        action="BUY",
+        side=side,
+        action=action,
         qty=Decimal("1"),
         source_artifact_path="outputs/track_b_execution_core/test_entry.json",
-        order_id="1",
+        order_id=order_id,
         client_id="10110",
-        perm_id="1871421812",
-        exec_id="0000e1a7.6a4255b6.01.01",
-        price=Decimal("7496.5"),
+        perm_id=perm_id,
+        exec_id=exec_id,
+        price=Decimal(price),
     )
-    path.write_text(json.dumps(event.to_dict(), sort_keys=True) + "\n", encoding="utf-8")
+    mode = "a" if append and path.exists() else "w"
+    with path.open(mode, encoding="utf-8") as handle:
+        handle.write(json.dumps(event.to_dict(), sort_keys=True) + "\n")
 
 
 def test_broker_truth_sweeper_repairs_stale_managed_contract_identity(tmp_path: Path) -> None:
@@ -213,6 +225,102 @@ def test_broker_truth_sweeper_recovers_entry_fill_metadata_for_existing_active_p
     assert position["entry_price"] == "7496.5"
     assert position["lifecycle_units"][0]["managed_exit_policy_id"] == "GLOBEX_ACTIVE_EVIDENCE_TIMEBOX_15M_EXIT_V1"
     assert position["lifecycle_units"][0]["entry_time"] == "2026-06-08T14:50:00+00:00"
+
+
+def test_broker_truth_sweeper_prefers_freshest_broker_backed_same_contract_lifecycle(tmp_path: Path) -> None:
+    _broker_truth(tmp_path, symbol="MNQ", local_symbol="MNQU6", con_id=793356225, quantity="-1.0")
+    registry = tmp_path / "outputs/track_b_execution_core/managed_positions/latest_managed_positions.json"
+    _write_json(
+        registry,
+        {
+            "classification": "OPEN_MANAGED_EXIT_DUE",
+            "managed_positions": [
+                {
+                    "classification": "OPEN_MANAGED_EXIT_DUE",
+                    "account_id": "DUM882026",
+                    "local_symbol": "MNQU6",
+                    "con_id": 793356225,
+                    "quantity": "1",
+                    "aggregate_qty": "-1",
+                    "side": "SHORT",
+                    "lane_id": "mnq_london_open_active_participation_short",
+                    "strategy_id": "mnq_london_open_active_participation_short",
+                    "lifecycle_id": "old-london-life",
+                    "trade_id": "old-london-trade",
+                    "managed_exit_policy_id": "GLOBEX_ACTIVE_EVIDENCE_TIMEBOX_60M_EXIT_V1",
+                    "entry_time": "2026-06-12T07:35:02+00:00",
+                },
+                {
+                    "classification": "OPEN_MANAGED_MATCHED",
+                    "account_id": "DUM882026",
+                    "local_symbol": "MNQU6",
+                    "con_id": 793356225,
+                    "quantity": "1",
+                    "aggregate_qty": "-1",
+                    "side": "SHORT",
+                    "lane_id": "mnq_globex_active_participation_short",
+                    "strategy_id": "mnq_globex_active_participation_short",
+                    "lifecycle_id": "fresh-globex-life",
+                    "trade_id": "fresh-globex-trade",
+                    "managed_exit_policy_id": "GLOBEX_ACTIVE_EVIDENCE_TIMEBOX_15M_EXIT_V1",
+                    "entry_time": None,
+                },
+            ],
+        },
+    )
+    _write_live_entry_fill(
+        tmp_path,
+        trade_id="old-london-trade",
+        lifecycle_id="old-london-life",
+        lane_id="mnq_london_open_active_participation_short",
+        generated_at=datetime(2026, 6, 12, 7, 35, tzinfo=UTC),
+        symbol="MNQ",
+        local_symbol="MNQU6",
+        con_id=793356225,
+        side="SHORT",
+        action="SELL",
+        order_id="1",
+        perm_id="old-perm",
+        exec_id="old-exec",
+        price="29600.5",
+    )
+    _write_live_entry_fill(
+        tmp_path,
+        trade_id="fresh-globex-trade",
+        lifecycle_id="fresh-globex-life",
+        lane_id="mnq_globex_active_participation_short",
+        generated_at=datetime(2026, 6, 14, 22, 20, 14, tzinfo=UTC),
+        symbol="MNQ",
+        local_symbol="MNQU6",
+        con_id=793356225,
+        side="SHORT",
+        action="SELL",
+        order_id="1",
+        perm_id="fresh-perm",
+        exec_id="fresh-exec",
+        price="30369.75",
+        append=True,
+    )
+
+    report = _run_broker_truth_sweeper(
+        config=TrackBManagedExitServiceConfig(repo_root=tmp_path),
+        now=NOW,
+        write=True,
+    )
+
+    updated = json.loads(registry.read_text(encoding="utf-8"))
+    old_row, fresh_row = updated["managed_positions"]
+    assert report["classification"] == "MANAGED_EXIT_BROKER_TRUTH_SWEEP_REPAIRED"
+    assert fresh_row["lifecycle_id"] == "fresh-globex-life"
+    assert fresh_row["entry_time"] == "2026-06-14T22:20:14+00:00"
+    assert fresh_row["entry_price"] == "30369.75"
+    assert old_row["classification"] == "STALE_SUPERSEDED_LIFECYCLE_PROJECTION"
+    assert old_row["diagnostic_only"] is True
+    assert old_row["superseded_by_lifecycle_id"] == "fresh-globex-life"
+    assert any(
+        row.get("reason") == "freshest_broker_backed_same_contract_lifecycle_selected"
+        for row in report["diagnostics"]
+    )
 
 
 def test_broker_truth_sweeper_enriches_missing_broker_con_id_from_managed_registry(tmp_path: Path) -> None:

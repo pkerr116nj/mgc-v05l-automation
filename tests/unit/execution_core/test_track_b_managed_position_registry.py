@@ -1014,6 +1014,96 @@ def test_reconciled_owned_exposure_cannot_publish_no_managed_positions(
     assert payload["managed_positions"][0]["classification"] == "PROJECTION_AUTHORITY_DIVERGENCE"
 
 
+def test_terminal_flat_cleanup_prevents_stale_owner_overlay_from_resurrecting_lifecycle(tmp_path: Path) -> None:
+    lifecycle = _lifecycle_position(
+        lifecycle_id="fresh-globex-life",
+        policy="GLOBEX_ACTIVE_EVIDENCE_TIMEBOX_15M_EXIT_V1",
+    )
+    lifecycle.update(
+        {
+            "trade_id": "fresh-globex-trade",
+            "lane_id": "mnq_globex_active_participation_short",
+            "strategy_id": "mnq_globex_active_participation_short",
+            "local_symbol": "MNQU6",
+            "con_id": 793356225,
+            "contract_key": "MNQ-202609",
+            "expiry": "20260918",
+            "entry_timestamp": "2026-06-14T22:20:14+00:00",
+            "avg_entry_price": "30369.75",
+        }
+    )
+    _seed_base(tmp_path)
+    reconciliation_path = (
+        tmp_path
+        / "outputs"
+        / "reports"
+        / "track_b_paper_broker_reconciliation"
+        / "latest_track_b_paper_broker_reconciliation.json"
+    )
+    reconciliation = json.loads(reconciliation_path.read_text(encoding="utf-8"))
+    reconciliation["current_exposure_owner_resolution"] = {
+        "classification": "OWNED_MANAGED_EXPOSURE",
+        "broker_position_count": 0,
+        "broker_open_order_count": 0,
+        "owned_exposure_count": 1,
+        "owned_exposures": [
+            {
+                "classification": "OWNED_MANAGED_EXPOSURE",
+                "broker_position": {
+                    "account_id": "DUM882026",
+                    "symbol": "MNQ",
+                    "track_b_root": "MNQ",
+                    "local_symbol": "MNQU6",
+                    "con_id": 793356225,
+                    "expiry": "20260918",
+                    "quantity": "-1.0",
+                },
+                "canonical_broker_position": {
+                    "account_id": "DUM882026",
+                    "symbol": "MNQ",
+                    "track_b_root": "MNQ",
+                    "local_symbol": "MNQU6",
+                    "con_id": 793356225,
+                    "expiry": "20260918",
+                    "quantity": "-1.0",
+                },
+                "lifecycle_position": lifecycle,
+                "trade_id": "fresh-globex-trade",
+                "lifecycle_id": "fresh-globex-life",
+                "position_key": "DUM882026|MNQU6|793356225",
+                "reason_codes": ["NEWEST_EXACT_BROKER_BACKED_LIFECYCLE_REPORT_SELECTED"],
+            }
+        ],
+        "resolved_lifecycle_positions": [lifecycle],
+        "read_only": True,
+    }
+    reconciliation_path.write_text(json.dumps(reconciliation), encoding="utf-8")
+    _write_lifecycle_report(
+        tmp_path,
+        lifecycle_id="fresh-globex-life",
+        policy="GLOBEX_ACTIVE_EVIDENCE_TIMEBOX_15M_EXIT_V1",
+    )
+    _write_terminal_cleanup_trade_events(
+        tmp_path,
+        trade_id="fresh-globex-trade",
+        lifecycle_id="fresh-globex-life",
+        lane_id="mnq_globex_active_participation_short",
+        local_symbol="MNQU6",
+        con_id=793356225,
+    )
+
+    payload = build_track_b_managed_position_registry(
+        config=TrackBManagedPositionRegistryConfig(repo_root=tmp_path),
+        now=NOW,
+    )
+
+    assert payload["classification"] == NO_MANAGED_POSITIONS
+    assert payload["managed_positions"] == []
+    repairs = payload["projection_authority_diagnostics"]["repairs"]
+    assert repairs[0]["classification"] == "CURRENT_OWNER_TERMINAL_CLOSED_SUPPRESSED"
+    assert repairs[0]["terminal_registry_truth"]["classification"] == "BROKER_FLAT_EVIDENCE_GATED_CLEANUP_TERMINAL"
+
+
 def test_reconciliation_match_report_owner_cannot_disappear_from_managed_positions(tmp_path: Path) -> None:
     broker = _broker_position()
     lifecycle = _lifecycle_position(policy="GLOBEX_ACTIVE_EVIDENCE_TIMEBOX_60M_EXIT_V1", bars_since_fill=12)
@@ -1611,6 +1701,93 @@ def _write_registry_closed_flat_events(root: Path, *, trade_id: str, lifecycle_i
             qty=Decimal("1"),
             source_artifact_path="outputs/track_b_execution_core/test_reconcile.json",
             reason_codes=("REGISTRY_RECONCILIATION_REVIEW_REQUIRED",),
+        ),
+    ]
+    path.write_text("\n".join(json.dumps(event.to_dict(), sort_keys=True) for event in events) + "\n", encoding="utf-8")
+
+
+def _write_terminal_cleanup_trade_events(
+    root: Path,
+    *,
+    trade_id: str,
+    lifecycle_id: str,
+    lane_id: str,
+    local_symbol: str,
+    con_id: int,
+) -> None:
+    path = root / "outputs" / "track_b_execution_core" / "trade_registry" / "live_trade_events.jsonl"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    events = [
+        TradeEvent(
+            event_id=f"{trade_id}_entry_fill",
+            event_type=TradeEventType.ENTRY_FILL_BROKER_BACKED,
+            generated_at=NOW,
+            trade_id=trade_id,
+            lifecycle_id=lifecycle_id,
+            lane_id=lane_id,
+            thesis_strategy_id=lane_id,
+            account_id="DUM882026",
+            symbol="MNQ",
+            con_id=con_id,
+            local_symbol=local_symbol,
+            expiry="20260918",
+            side="SHORT",
+            action="SELL",
+            qty=Decimal("1"),
+            source_artifact_path="outputs/track_b_execution_core/test_entry.json",
+            order_id="1",
+            client_id="9864",
+            perm_id="1793991637",
+            exec_id="0000e1a7.6a430fc2.01.01",
+            price=Decimal("30369.75"),
+        ),
+        TradeEvent(
+            event_id=f"{trade_id}_open_managed",
+            event_type=TradeEventType.LIFECYCLE_OPEN_MANAGED,
+            generated_at=NOW + timedelta(seconds=1),
+            trade_id=trade_id,
+            lifecycle_id=lifecycle_id,
+            lane_id=lane_id,
+            thesis_strategy_id=lane_id,
+            account_id="DUM882026",
+            symbol="MNQ",
+            con_id=con_id,
+            local_symbol=local_symbol,
+            expiry="20260918",
+            side="SHORT",
+            action="SELL",
+            qty=Decimal("1"),
+            source_artifact_path="outputs/track_b_execution_core/test_lifecycle.json",
+        ),
+        TradeEvent(
+            event_id=f"{trade_id}_flat_cleanup",
+            event_type=TradeEventType.RECONCILED_FLAT_HISTORICAL_CLEANUP,
+            generated_at=NOW + timedelta(seconds=2),
+            trade_id=trade_id,
+            lifecycle_id=lifecycle_id,
+            lane_id=lane_id,
+            thesis_strategy_id=lane_id,
+            account_id="DUM882026",
+            symbol="MNQ",
+            con_id=con_id,
+            local_symbol=local_symbol,
+            expiry="20260918",
+            side="SHORT",
+            action="HISTORICAL_FLAT_CLEANUP",
+            qty=Decimal("1"),
+            source_artifact_path="outputs/track_b_execution_core/test_cleanup.json",
+            reason_codes=(
+                "BROKER_FLAT_PROOF_CONFIRMED",
+                "NO_OPEN_ORDER_PROOF_CONFIRMED",
+                "NOT_CURRENT_EXPOSURE",
+                "NOT_CURRENT_OPEN_ORDER",
+            ),
+            metadata={
+                "not_current_exposure": True,
+                "not_current_open_order": True,
+                "broker_flat_proof_path": "outputs/reports/ibkr_read_only_verification/ibkr_positions_snapshot.json",
+                "open_orders_proof_path": "outputs/reports/ibkr_read_only_verification/ibkr_open_orders_snapshot.json",
+            },
         ),
     ]
     path.write_text("\n".join(json.dumps(event.to_dict(), sort_keys=True) for event in events) + "\n", encoding="utf-8")

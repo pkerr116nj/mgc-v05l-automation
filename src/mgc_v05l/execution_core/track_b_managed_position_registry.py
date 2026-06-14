@@ -31,6 +31,7 @@ from mgc_v05l.execution_core.track_b_projection_metadata import build_projection
 from mgc_v05l.execution_core.track_b_live_trade_registry import load_live_trade_registry_records
 from mgc_v05l.execution_core.track_b_terminal_registry_truth import (
     filter_terminal_superseded_current_rows,
+    resolve_terminal_registry_truth,
 )
 from mgc_v05l.execution_core.track_b_strategy_attrition_funnel import (
     events_from_managed_position_registry,
@@ -221,6 +222,8 @@ def build_track_b_managed_position_registry(
     managed_positions, projection_authority_diagnostics = _apply_current_owner_projection_overlay(
         managed_positions=managed_positions,
         owner_resolution=owner_resolution or pre_restart_exposure_resolution,
+        broker_positions=broker_positions,
+        broker_open_orders=broker_open_orders,
         open_order_states=open_order_states,
         managed_order_states=managed_order_states,
         lifecycle_reports=lifecycle_reports,
@@ -233,6 +236,8 @@ def build_track_b_managed_position_registry(
         managed_positions=managed_positions,
         projection_authority_diagnostics=projection_authority_diagnostics,
         owner_resolution=owner_resolution or pre_restart_exposure_resolution,
+        broker_positions=broker_positions,
+        broker_open_orders=broker_open_orders,
         open_order_states=open_order_states,
         managed_order_states=managed_order_states,
         lifecycle_reports=lifecycle_reports,
@@ -610,6 +615,8 @@ def _apply_current_owner_projection_overlay(
     *,
     managed_positions: list[dict[str, Any]],
     owner_resolution: Mapping[str, Any],
+    broker_positions: list[dict[str, Any]],
+    broker_open_orders: list[dict[str, Any]],
     open_order_states: list[dict[str, Any]],
     managed_order_states: list[dict[str, Any]],
     lifecycle_reports: list[dict[str, Any]],
@@ -662,6 +669,24 @@ def _apply_current_owner_projection_overlay(
             "trade_id": lifecycle.get("trade_id") or owner_trade_id,
             "lifecycle_id": lifecycle.get("lifecycle_id") or owner_lifecycle_id,
         }
+        terminal_truth = resolve_terminal_registry_truth(
+            records=terminal_records,
+            identity=lifecycle or exposure,
+            broker_positions=broker_positions,
+            broker_open_orders=broker_open_orders,
+        )
+        if terminal_truth.terminal_closed_flat:
+            diagnostics["repairs"].append(
+                {
+                    "classification": "CURRENT_OWNER_TERMINAL_CLOSED_SUPPRESSED",
+                    "reason": "Terminal registry truth superseded stale current-owner lifecycle projection.",
+                    "position_key": key,
+                    "owner_trade_id": owner_trade_id,
+                    "owner_lifecycle_id": owner_lifecycle_id,
+                    "terminal_registry_truth": terminal_truth.to_dict(),
+                }
+            )
+            continue
 
         existing_index = by_key.get(key)
         existing = positions[existing_index] if existing_index is not None else None
@@ -773,6 +798,8 @@ def _enforce_owned_exposure_projection_invariant(
     managed_positions: list[dict[str, Any]],
     projection_authority_diagnostics: Mapping[str, Any],
     owner_resolution: Mapping[str, Any],
+    broker_positions: list[dict[str, Any]],
+    broker_open_orders: list[dict[str, Any]],
     open_order_states: list[dict[str, Any]],
     managed_order_states: list[dict[str, Any]],
     lifecycle_reports: list[dict[str, Any]],
@@ -814,6 +841,24 @@ def _enforce_owned_exposure_projection_invariant(
         key = _position_key(broker) or _position_key(lifecycle)
         owner_lifecycle_id = str(exposure.get("lifecycle_id") or lifecycle.get("lifecycle_id") or "").strip()
         owner_trade_id = str(exposure.get("trade_id") or lifecycle.get("trade_id") or "").strip()
+        terminal_truth = resolve_terminal_registry_truth(
+            records=terminal_records,
+            identity=lifecycle or exposure,
+            broker_positions=broker_positions,
+            broker_open_orders=broker_open_orders,
+        )
+        if terminal_truth.terminal_closed_flat:
+            diagnostics["repairs"].append(
+                {
+                    "classification": "OWNED_EXPOSURE_TERMINAL_CLOSED_SUPPRESSED",
+                    "reason": "Invariant skipped stale owned exposure after terminal registry flat proof.",
+                    "position_key": key,
+                    "owner_trade_id": owner_trade_id,
+                    "owner_lifecycle_id": owner_lifecycle_id,
+                    "terminal_registry_truth": terminal_truth.to_dict(),
+                }
+            )
+            continue
         existing = positions[by_key[key]] if key and key in by_key else None
         if existing and str(existing.get("lifecycle_id") or "").strip() == owner_lifecycle_id:
             continue

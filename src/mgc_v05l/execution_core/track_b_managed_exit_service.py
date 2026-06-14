@@ -1393,7 +1393,11 @@ def _run_broker_truth_sweeper(
                 }
             )
             continue
-        index, existing = _matching_managed_position(managed_positions, broker_position)
+        index, existing = _matching_managed_position(
+            managed_positions,
+            broker_position,
+            terminal_records=terminal_records,
+        )
         if existing is None:
             lifecycle = _best_lifecycle_for_broker_position(config=config, broker_position=broker_position)
             if not identity.get("con_id") and not _int_or_none(_mapping(lifecycle).get("con_id")):
@@ -1425,6 +1429,17 @@ def _run_broker_truth_sweeper(
                 }
             )
             continue
+        superseded = _demote_stale_same_contract_managed_positions(
+            managed_positions=managed_positions,
+            selected_index=index,
+            broker_position=broker_position,
+            selected_position=existing,
+            terminal_records=terminal_records,
+            now=now,
+        )
+        if superseded:
+            changed = True
+            diagnostics.extend(superseded)
         repaired = _repair_managed_position_from_broker(
             existing,
             broker_position,
@@ -1523,9 +1538,14 @@ def _broker_position_identity(row: Mapping[str, Any]) -> dict[str, Any]:
 def _matching_managed_position(
     managed_positions: Sequence[Mapping[str, Any]],
     broker_position: Mapping[str, Any],
+    *,
+    terminal_records: Sequence[Any] = (),
 ) -> tuple[int, dict[str, Any] | None]:
     identity = _broker_position_identity(broker_position)
+    candidates: list[tuple[tuple[int, str, str], int, dict[str, Any]]] = []
     for index, row in enumerate(managed_positions):
+        if _managed_position_diagnostic_only(row):
+            continue
         broker_nested = _mapping(row.get("broker_position"))
         row_con_id = _int_or_none(row.get("con_id") or broker_nested.get("con_id"))
         row_symbol = _string_or_none(row.get("local_symbol") or broker_nested.get("local_symbol"))
@@ -1533,10 +1553,121 @@ def _matching_managed_position(
         if row_account != identity["account_id"]:
             continue
         if row_con_id and identity["con_id"] and row_con_id == identity["con_id"]:
-            return index, dict(row)
+            candidates.append((_managed_position_priority(row, broker_position, terminal_records), index, dict(row)))
+            continue
         if row_symbol and identity["local_symbol"] and row_symbol == identity["local_symbol"]:
-            return index, dict(row)
-    return -1, None
+            candidates.append((_managed_position_priority(row, broker_position, terminal_records), index, dict(row)))
+    if not candidates:
+        return -1, None
+    _, index, row = max(candidates, key=lambda item: item[0])
+    return index, row
+
+
+def _demote_stale_same_contract_managed_positions(
+    *,
+    managed_positions: list[dict[str, Any]],
+    selected_index: int,
+    broker_position: Mapping[str, Any],
+    selected_position: Mapping[str, Any],
+    terminal_records: Sequence[Any],
+    now: datetime,
+) -> list[dict[str, Any]]:
+    diagnostics: list[dict[str, Any]] = []
+    selected_lifecycle_id = _string_or_none(selected_position.get("lifecycle_id"))
+    selected_trade_id = _string_or_none(selected_position.get("trade_id"))
+    for index, row in enumerate(list(managed_positions)):
+        if index == selected_index or _managed_position_diagnostic_only(row):
+            continue
+        if not _managed_position_matches_broker_position(row, broker_position):
+            continue
+        row_priority = _managed_position_priority(row, broker_position, terminal_records)
+        selected_priority = _managed_position_priority(selected_position, broker_position, terminal_records)
+        if row_priority >= selected_priority:
+            continue
+        lifecycle_id = _string_or_none(row.get("lifecycle_id"))
+        trade_id = _string_or_none(row.get("trade_id"))
+        managed_positions[index] = {
+            **dict(row),
+            "classification": "STALE_SUPERSEDED_LIFECYCLE_PROJECTION",
+            "diagnostic_only": True,
+            "current_hot_path_scope": "FULL_AUDIT_ONLY",
+            "superseded_by_lifecycle_id": selected_lifecycle_id,
+            "superseded_by_trade_id": selected_trade_id,
+            "superseded_at": now.isoformat(),
+            "superseded_reason": "freshest_broker_backed_same_contract_lifecycle_selected",
+        }
+        diagnostics.append(
+            {
+                "classification": "STALE_SUPERSEDED_LIFECYCLE_PROJECTION",
+                "reason": "freshest_broker_backed_same_contract_lifecycle_selected",
+                "local_symbol": _broker_position_identity(broker_position).get("local_symbol"),
+                "con_id": _broker_position_identity(broker_position).get("con_id"),
+                "superseded_lifecycle_id": lifecycle_id,
+                "superseded_trade_id": trade_id,
+                "selected_lifecycle_id": selected_lifecycle_id,
+                "selected_trade_id": selected_trade_id,
+            }
+        )
+    return diagnostics
+
+
+def _managed_position_priority(
+    row: Mapping[str, Any],
+    broker_position: Mapping[str, Any],
+    terminal_records: Sequence[Any],
+) -> tuple[int, str, str]:
+    record_state = _registry_record_current_state(row, terminal_records)
+    if record_state == "CLOSED_FLAT":
+        state_score = 0
+    elif record_state in {"OPEN_MANAGED", "EXIT_DUE", "WORKING_EXIT"}:
+        state_score = 3
+    else:
+        state_score = 1
+    entry_fill = _entry_fill_event_from_registry(
+        position=row,
+        broker_position=broker_position,
+        terminal_records=terminal_records,
+    )
+    entry_time = (
+        getattr(entry_fill, "generated_at", None).isoformat()
+        if entry_fill is not None and getattr(entry_fill, "generated_at", None) is not None
+        else str(row.get("entry_time") or row.get("entry_timestamp") or "")
+    )
+    lifecycle_id = _string_or_none(row.get("lifecycle_id")) or ""
+    return state_score, entry_time, lifecycle_id
+
+
+def _registry_record_current_state(row: Mapping[str, Any], terminal_records: Sequence[Any]) -> str | None:
+    lifecycle_id = _string_or_none(row.get("lifecycle_id"))
+    trade_id = _string_or_none(row.get("trade_id"))
+    for record in terminal_records:
+        owner = getattr(record, "ownership_identity", None)
+        if trade_id and getattr(record, "trade_id", None) == trade_id:
+            return str(getattr(getattr(record, "current_state", None), "value", getattr(record, "current_state", "")))
+        if lifecycle_id and owner is not None and getattr(owner, "lifecycle_id", None) == lifecycle_id:
+            return str(getattr(getattr(record, "current_state", None), "value", getattr(record, "current_state", "")))
+    return None
+
+
+def _managed_position_diagnostic_only(row: Mapping[str, Any]) -> bool:
+    if row.get("diagnostic_only") is True or row.get("historical_only") is True:
+        return True
+    classification = str(row.get("classification") or "").upper()
+    scope = str(row.get("current_hot_path_scope") or row.get("scope") or "").upper()
+    return "STALE_SUPERSEDED" in classification or "FULL_AUDIT_ONLY" in scope or "DIAGNOSTIC" in scope
+
+
+def _managed_position_matches_broker_position(row: Mapping[str, Any], broker_position: Mapping[str, Any]) -> bool:
+    identity = _broker_position_identity(broker_position)
+    broker_nested = _mapping(row.get("broker_position"))
+    row_account = str(broker_nested.get("account_id") or row.get("account_id") or _PAPER_ACCOUNT_ID)
+    if row_account != identity["account_id"]:
+        return False
+    row_con_id = _int_or_none(row.get("con_id") or broker_nested.get("con_id"))
+    row_symbol = _string_or_none(row.get("local_symbol") or broker_nested.get("local_symbol"))
+    if row_con_id and identity["con_id"] and row_con_id == identity["con_id"]:
+        return True
+    return bool(row_symbol and identity["local_symbol"] and row_symbol == identity["local_symbol"])
 
 
 def _repair_managed_position_from_broker(
