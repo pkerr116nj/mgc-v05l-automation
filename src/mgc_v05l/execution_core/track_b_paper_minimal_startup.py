@@ -166,9 +166,10 @@ def build_track_b_paper_minimal_startup(
     if not instruments:
         block("configured_traded_contracts_missing", "No configured traded contracts could be inferred.", source="config")
     elif missing_price:
-        block(
-            "current_market_price_unavailable",
-            f"Current price/candle unavailable for {[row.get('instrument') for row in missing_price]}.",
+        warn(
+            "current_market_price_unavailable_startup_diagnostic",
+            "Current price/candle unavailable during startup; broker submit remains blocked until market truth is fresh "
+            f"for {[row.get('instrument') for row in missing_price]}.",
             source="market_data",
         )
 

@@ -290,13 +290,15 @@ def test_aggregate_broker_lease_contradiction_is_diagnostic_when_evidence_leases
     assert "broker_truth_aggregate_state_diagnostic" in _warning_codes(result)
 
 
-def test_missing_current_price_blocks(tmp_path: Path) -> None:
+def test_missing_current_price_is_startup_diagnostic(tmp_path: Path) -> None:
     config = _seed_minimal_ready(tmp_path)
     (tmp_path / config.phase1_market_data_root / "MES" / "1m" / "latest_runtime_candles.json").unlink()
 
     result = _classification(tmp_path)
 
-    assert "current_market_price_unavailable" in _codes(result)
+    assert result["allowed"] is True
+    assert result["classification"] == "PAPER_MINIMAL_STARTUP_ALLOWED"
+    assert "current_market_price_unavailable_startup_diagnostic" in _warning_codes(result)
 
 
 def test_missing_profile_config_blocks(tmp_path: Path) -> None:
