@@ -1258,7 +1258,7 @@ def test_paper_stack_start_has_session_coverage_active_evidence_profile() -> Non
     assert '"PAPER_ACTIVE_EVIDENCE_MNQ_GLOBEX_PARTICIPATION_SHORT_V1"' in source
     assert '"PAPER_ACTIVE_EVIDENCE_MES_GLOBEX_PARTICIPATION_LONG_V1"' in source
     assert '"PAPER_ACTIVE_EVIDENCE_MES_GLOBEX_PARTICIPATION_SHORT_V1"' in source
-    assert 'PROOF_REQUIRED_SYMBOLS="MNQ,MES"' in source
+    assert 'PROOF_REQUIRED_SYMBOLS="GC,MGC,NQ,ES,MNQ,MES"' in source
 
 
 def test_paper_stack_start_has_london_open_active_evidence_extension_profile() -> None:
@@ -1311,13 +1311,13 @@ def test_paper_stack_start_has_full_session_active_evidence_profile() -> None:
     assert '"PAPER_WATCH_ACTIVE_EVIDENCE_MNQ_LONDON_LATE_LONG_SHADOW_V1"' in source
     assert '"PAPER_WATCH_ACTIVE_EVIDENCE_MES_LONDON_LATE_LONG_SHADOW_V1"' in source
     assert "FULL_SESSION_PROFILE_INITIAL_LONDON_LATE_SHORT_ONLY_ELEVATION" in source
-    assert 'PROOF_REQUIRED_SYMBOLS="MNQ,MES"' in source
+    assert 'PROOF_REQUIRED_SYMBOLS="GC,MGC,NQ,ES,MNQ,MES"' in source
 
     block = source.split('elif [[ "${STACK_PROFILE}" == "mnq_mes_full_session_active_evidence" ]]; then', 1)[1]
     roster_json = block.split("cat > \"${SCOPED_ROSTER_PATH}\" <<'JSON'", 1)[1].split("\nJSON", 1)[0]
     assert '"PAPER_WATCH_ACTIVE_EVIDENCE_MES_LONDON_LATE_SHORT_SHADOW_V1"' not in roster_json
     roster = json.loads(roster_json)
-    assert roster["enabled_strategy_ids"] == [
+    current_ids = [
         "PAPER_ACTIVE_EVIDENCE_MNQ_US_PARTICIPATION_LONG_V1",
         "PAPER_ACTIVE_EVIDENCE_MNQ_US_PARTICIPATION_SHORT_V1",
         "PAPER_ACTIVE_EVIDENCE_MES_US_PARTICIPATION_LONG_V1",
@@ -1332,16 +1332,32 @@ def test_paper_stack_start_has_full_session_active_evidence_profile() -> None:
         "PAPER_ACTIVE_EVIDENCE_MES_LONDON_OPEN_PARTICIPATION_SHORT_V1",
         "PAPER_ACTIVE_EVIDENCE_MNQ_LONDON_LATE_PARTICIPATION_SHORT_V1",
         "PAPER_ACTIVE_EVIDENCE_MES_LONDON_LATE_PARTICIPATION_SHORT_V1",
-        "MNQ_US_DERIVATIVE_BEAR_TURN_V1",
     ]
-    assert len(roster["enabled_strategy_ids"]) == 15
+    batch1_ids = [
+        f"PAPER_ACTIVE_EVIDENCE_{symbol}_{session}_PARTICIPATION_{side}_V1"
+        for symbol in ("MGC", "GC", "NQ", "ES")
+        for session, side in (
+            ("US", "LONG"),
+            ("US", "SHORT"),
+            ("GLOBEX", "LONG"),
+            ("GLOBEX", "SHORT"),
+            ("LONDON_OPEN", "LONG"),
+            ("LONDON_OPEN", "SHORT"),
+            ("LONDON_LATE", "SHORT"),
+        )
+    ]
+    expected_ids = [*current_ids, *batch1_ids, "MNQ_US_DERIVATIVE_BEAR_TURN_V1"]
+    assert roster["enabled_strategy_ids"] == expected_ids
+    assert len(roster["enabled_strategy_ids"]) == 43
+    assert not any("_ZT_" in strategy_id or "_ZF_" in strategy_id or "_ZN_" in strategy_id for strategy_id in expected_ids)
+    assert not any("_ZB_" in strategy_id or "_PL_" in strategy_id for strategy_id in expected_ids)
     assert roster["shadow_only_strategy_ids"] == [
         "PAPER_WATCH_ACTIVE_EVIDENCE_MNQ_LONDON_LATE_LONG_SHADOW_V1",
         "PAPER_WATCH_ACTIVE_EVIDENCE_MES_LONDON_LATE_LONG_SHADOW_V1",
     ]
 
 
-def test_paper_stack_full_session_materializes_fifteen_lane_specs(tmp_path: Path) -> None:
+def test_paper_stack_full_session_materializes_forty_three_lane_specs(tmp_path: Path) -> None:
     source = START_SCRIPT.read_text(encoding="utf-8")
     assert "materialize_scoped_lane_config_from_roster" in source
 
@@ -1384,7 +1400,7 @@ def test_paper_stack_full_session_materializes_fifteen_lane_specs(tmp_path: Path
     assert "probationary_paper_runtime_exclusive_config: true" in generated
     raw_lanes = generated.split("probationary_paper_lanes_json: ", 1)[1].strip()
     lanes = json.loads(raw_lanes)
-    assert len(lanes) == 15
+    assert len(lanes) == 43
     assert [lane["long_sources"][0] for lane in lanes] == roster["enabled_strategy_ids"]
     assert {lane["execution_mode"] for lane in lanes} == {"IBKR_PAPER_BRIDGE"}
     assert {lane["current_order_destination"] for lane in lanes} == {"ibkr_paper_bridge_submit_capable"}
@@ -1403,6 +1419,7 @@ def test_paper_stack_full_session_materializer_fills_missing_lane_specs_from_con
         for strategy_id in roster["enabled_strategy_ids"]
         if strategy_id
         not in {
+            "PAPER_ACTIVE_EVIDENCE_MGC_US_PARTICIPATION_LONG_V1",
             "PAPER_ACTIVE_EVIDENCE_MES_LONDON_LATE_PARTICIPATION_SHORT_V1",
             "MNQ_US_DERIVATIVE_BEAR_TURN_V1",
         }
@@ -1442,12 +1459,23 @@ def test_paper_stack_full_session_materializer_fills_missing_lane_specs_from_con
         for lane in lanes
     }
     mes_late = by_source["PAPER_ACTIVE_EVIDENCE_MES_LONDON_LATE_PARTICIPATION_SHORT_V1"]
-    assert len(lanes) == 15
+    mgc_us = by_source["PAPER_ACTIVE_EVIDENCE_MGC_US_PARTICIPATION_LONG_V1"]
+    assert len(lanes) == 43
     assert mes_late["lane_id"] == "mes_london_late_active_participation_short"
     assert mes_late["symbol"] == "MES"
     assert mes_late["session_restriction"] == "LONDON_LATE"
     assert mes_late["execution_mode"] == "IBKR_PAPER_BRIDGE"
     assert mes_late["runtime_overlay_params"]["current_order_destination"] == "ibkr_paper_bridge_submit_capable"
+    assert mgc_us["lane_id"] == "mgc_us_active_participation_long"
+    assert mgc_us["symbol"] == "MGC"
+    assert mgc_us["local_symbol"] == "MGCQ6"
+    assert mgc_us["con_id"] == 732156883
+    assert mgc_us["point_value"] == "10"
+    assert mgc_us["session_restriction"] == "US"
+    assert mgc_us["max_position_quantity"] == 1
+    assert mgc_us["runtime_overlay_params"]["input_event_path"].endswith(
+        "latest_mgc_us_active_participation_long_event_envelope.json"
+    )
     mnq_derivative = by_source["MNQ_US_DERIVATIVE_BEAR_TURN_V1"]
     assert mnq_derivative["lane_id"] == "mnq_us_derivative_bear_turn"
     assert mnq_derivative["symbol"] == "MNQ"

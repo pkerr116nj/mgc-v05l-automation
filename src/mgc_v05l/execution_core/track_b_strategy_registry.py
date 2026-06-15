@@ -736,6 +736,61 @@ HUMAN_REVIEW_ONLY = TrackBStrategyRegistryEntry(
     accepted_rule_ids=("human_review_only", "mgc_ema_momentum_reclaim_long_v1"),
 )
 
+_BATCH1_ACTIVE_EVIDENCE_SYMBOLS = ("MGC", "GC", "NQ", "ES")
+_BATCH1_ACTIVE_EVIDENCE_SESSIONS = (
+    ("US", "LONG", "US_ACTIVE_EVIDENCE_TIMEBOX_60M_EXIT_V1"),
+    ("US", "SHORT", "US_ACTIVE_EVIDENCE_TIMEBOX_60M_EXIT_V1"),
+    ("GLOBEX", "LONG", "GLOBEX_ACTIVE_EVIDENCE_TIMEBOX_15M_EXIT_V1"),
+    ("GLOBEX", "SHORT", "GLOBEX_ACTIVE_EVIDENCE_TIMEBOX_15M_EXIT_V1"),
+    ("LONDON_OPEN", "LONG", "GLOBEX_ACTIVE_EVIDENCE_TIMEBOX_15M_EXIT_V1"),
+    ("LONDON_OPEN", "SHORT", "GLOBEX_ACTIVE_EVIDENCE_TIMEBOX_15M_EXIT_V1"),
+    ("LONDON_LATE", "SHORT", "GLOBEX_ACTIVE_EVIDENCE_TIMEBOX_15M_EXIT_V1"),
+)
+
+
+def _active_evidence_feature_version(session: str) -> str:
+    return f"paper_active_evidence_{session.lower()}_participation_v1"
+
+
+def _active_evidence_calibration_profile(session: str, direction: str) -> str:
+    session_label = {
+        "US": "us_session",
+        "GLOBEX": "globex",
+        "LONDON_OPEN": "london_open",
+        "LONDON_LATE": "london_late",
+    }[session]
+    return f"simple_{session_label}_reference_plus_recent_close_{direction.lower()}"
+
+
+def _batch1_active_evidence_registry_entries() -> tuple[TrackBStrategyRegistryEntry, ...]:
+    entries: list[TrackBStrategyRegistryEntry] = []
+    for symbol in _BATCH1_ACTIVE_EVIDENCE_SYMBOLS:
+        for session, direction, managed_exit_policy_id in _BATCH1_ACTIVE_EVIDENCE_SESSIONS:
+            strategy_id = f"PAPER_ACTIVE_EVIDENCE_{symbol}_{session}_PARTICIPATION_{direction}_V1"
+            entries.append(
+                TrackBStrategyRegistryEntry(
+                    strategy_id=strategy_id,
+                    rule_id=strategy_id,
+                    rule_mode=strategy_id,
+                    instrument_family=symbol,
+                    timeframe="1m",
+                    required_feature_schema=(),
+                    required_state_schema=(),
+                    feature_version=_active_evidence_feature_version(session),
+                    calibration_profile=_active_evidence_calibration_profile(session, direction),
+                    paper_eligible=True,
+                    live_money_eligible=False,
+                    required_1m_context_bars=2,
+                    required_5m_context_bars=0,
+                    managed_exit_policy_id=managed_exit_policy_id,
+                    exit_not_available=False,
+                    accepted_strategy_ids=(strategy_id,),
+                    accepted_rule_ids=(strategy_id,),
+                )
+            )
+    return tuple(entries)
+
+
 TRACK_B_STRATEGY_REGISTRY: tuple[TrackBStrategyRegistryEntry, ...] = (
     MGC_EMA_MOMENTUM_RECLAIM_LONG,
     ASIAN_DRIFT_V1,
@@ -758,6 +813,7 @@ TRACK_B_STRATEGY_REGISTRY: tuple[TrackBStrategyRegistryEntry, ...] = (
     PAPER_ACTIVE_EVIDENCE_MNQ_LONDON_LATE_SHORT_V1,
     PAPER_ACTIVE_EVIDENCE_MES_LONDON_LATE_SHORT_V1,
     US_LATE_PAUSE_RESUME_LONG_V1,
+    *_batch1_active_evidence_registry_entries(),
     DEMO_WIRING_PROOF,
     HUMAN_REVIEW_ONLY,
 )

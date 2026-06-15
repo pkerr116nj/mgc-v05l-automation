@@ -392,6 +392,123 @@ APPROVED_TRACK_B_STRATEGY_HOLD_EXIT_POLICIES: Mapping[str, StrategyHoldExitPolic
 }
 
 
+_BATCH1_ACTIVE_EVIDENCE_SYMBOL_CONFLICT_GROUPS = {
+    "MGC": "gold_mgc_gc_active_evidence",
+    "GC": "gold_mgc_gc_active_evidence",
+    "NQ": "equity_index_nasdaq_mnq_nq_active_evidence",
+    "ES": "equity_index_sp500_mes_es_active_evidence",
+}
+_BATCH1_ACTIVE_EVIDENCE_SESSIONS = (
+    (
+        "US",
+        "LONG",
+        "us_active_participation_long",
+        "US_ACTIVE_EVIDENCE_60M_TIMEBOX_HOLD_V1",
+        "US_ACTIVE_EVIDENCE_TIMEBOX_ONLY",
+        ("price_loses_us_session_reference", "opposite_recent_close_confirms"),
+        ("phase1_1m_closes", "us_0930_session_open_reference", "vwap_if_available"),
+        "12_COMPLETED_5M_BARS",
+    ),
+    (
+        "US",
+        "SHORT",
+        "us_active_participation_short",
+        "US_ACTIVE_EVIDENCE_60M_TIMEBOX_HOLD_V1",
+        "US_ACTIVE_EVIDENCE_TIMEBOX_ONLY",
+        ("price_recovers_us_session_reference", "opposite_recent_close_confirms"),
+        ("phase1_1m_closes", "us_0930_session_open_reference", "vwap_if_available"),
+        "12_COMPLETED_5M_BARS",
+    ),
+    (
+        "GLOBEX",
+        "LONG",
+        "globex_active_participation_long",
+        "GLOBEX_ACTIVE_EVIDENCE_15M_TIMEBOX_HOLD_V1",
+        "GLOBEX_ACTIVE_EVIDENCE_TIMEBOX_ONLY",
+        ("price_loses_globex_open_reference", "opposite_recent_close_confirms"),
+        ("phase1_1m_closes", "globex_1800_open_reference", "vwap_if_available"),
+        "3_COMPLETED_5M_BARS",
+    ),
+    (
+        "GLOBEX",
+        "SHORT",
+        "globex_active_participation_short",
+        "GLOBEX_ACTIVE_EVIDENCE_15M_TIMEBOX_HOLD_V1",
+        "GLOBEX_ACTIVE_EVIDENCE_TIMEBOX_ONLY",
+        ("price_recovers_globex_open_reference", "opposite_recent_close_confirms"),
+        ("phase1_1m_closes", "globex_1800_open_reference", "vwap_if_available"),
+        "3_COMPLETED_5M_BARS",
+    ),
+    (
+        "LONDON_OPEN",
+        "LONG",
+        "london_open_active_participation_long",
+        "LONDON_OPEN_ACTIVE_EVIDENCE_15M_TIMEBOX_HOLD_V1",
+        "LONDON_OPEN_ACTIVE_EVIDENCE_TIMEBOX_ONLY",
+        ("price_loses_london_open_reference", "opposite_recent_close_confirms"),
+        ("phase1_1m_closes", "london_0300_open_reference", "vwap_if_available"),
+        "3_COMPLETED_5M_BARS",
+    ),
+    (
+        "LONDON_OPEN",
+        "SHORT",
+        "london_open_active_participation_short",
+        "LONDON_OPEN_ACTIVE_EVIDENCE_15M_TIMEBOX_HOLD_V1",
+        "LONDON_OPEN_ACTIVE_EVIDENCE_TIMEBOX_ONLY",
+        ("price_recovers_london_open_reference", "opposite_recent_close_confirms"),
+        ("phase1_1m_closes", "london_0300_open_reference", "vwap_if_available"),
+        "3_COMPLETED_5M_BARS",
+    ),
+    (
+        "LONDON_LATE",
+        "SHORT",
+        "london_late_active_participation_short",
+        "LONDON_LATE_ACTIVE_EVIDENCE_15M_TIMEBOX_HOLD_V1",
+        "LONDON_LATE_ACTIVE_EVIDENCE_TIMEBOX_ONLY",
+        ("price_recovers_london_late_reference", "opposite_recent_close_confirms"),
+        ("phase1_1m_closes", "london_late_0530_reference", "vwap_if_available"),
+        "3_COMPLETED_5M_BARS",
+    ),
+)
+
+
+def _batch1_active_evidence_hold_exit_policies() -> dict[str, StrategyHoldExitPolicy]:
+    policies: dict[str, StrategyHoldExitPolicy] = {}
+    for symbol, conflict_group in _BATCH1_ACTIVE_EVIDENCE_SYMBOL_CONFLICT_GROUPS.items():
+        for (
+            session,
+            direction,
+            lane_suffix,
+            hold_policy_id,
+            exit_policy_family,
+            thesis_failure_conditions,
+            participation_decay_inputs,
+            max_hold_policy,
+        ) in _BATCH1_ACTIVE_EVIDENCE_SESSIONS:
+            strategy_id = f"PAPER_ACTIVE_EVIDENCE_{symbol}_{session}_PARTICIPATION_{direction}_V1"
+            policies[strategy_id] = _policy(
+                strategy_id=strategy_id,
+                lane_id=f"{symbol.lower()}_{lane_suffix}",
+                lane_family="paper_active_evidence",
+                thesis_type="TREND_PARTICIPATION",
+                expected_hold_type="TIMEBOXED",
+                hold_policy_id=hold_policy_id,
+                exit_policy_family=exit_policy_family,
+                profit_harvest_policy=None,
+                thesis_failure_conditions=thesis_failure_conditions,
+                participation_decay_inputs=participation_decay_inputs,
+                conflict_group=conflict_group,
+                max_hold_policy=max_hold_policy,
+            )
+    return policies
+
+
+APPROVED_TRACK_B_STRATEGY_HOLD_EXIT_POLICIES = {
+    **APPROVED_TRACK_B_STRATEGY_HOLD_EXIT_POLICIES,
+    **_batch1_active_evidence_hold_exit_policies(),
+}
+
+
 REQUIRED_POLICY_FIELDS = (
     "strategy_id",
     "lane_id",

@@ -318,6 +318,96 @@ PAPER_ACTIVE_EVIDENCE_SPECS: dict[str, _PaperActiveEvidenceSpec] = {
 }
 
 
+_BATCH1_ACTIVE_EVIDENCE_SYMBOLS = ("MGC", "GC", "NQ", "ES")
+
+
+def _batch1_active_evidence_specs() -> dict[str, _PaperActiveEvidenceSpec]:
+    specs: dict[str, _PaperActiveEvidenceSpec] = {}
+    for symbol in _BATCH1_ACTIVE_EVIDENCE_SYMBOLS:
+        specs[f"PAPER_ACTIVE_EVIDENCE_{symbol}_US_PARTICIPATION_LONG_V1"] = _PaperActiveEvidenceSpec(
+            strategy_id=f"PAPER_ACTIVE_EVIDENCE_{symbol}_US_PARTICIPATION_LONG_V1",
+            direction="LONG",
+            overlay_label="PAPER_ONLY_ACTIVE_EVIDENCE_LANE",
+            start_time_et=time(9, 35),
+            end_time_et=time(15, 30),
+            benchmark_hold_bars_5m=12,
+            condition_label="09:35-15:30_ET_close_above_vwap_or_us_session_open",
+        )
+        specs[f"PAPER_ACTIVE_EVIDENCE_{symbol}_US_PARTICIPATION_SHORT_V1"] = _PaperActiveEvidenceSpec(
+            strategy_id=f"PAPER_ACTIVE_EVIDENCE_{symbol}_US_PARTICIPATION_SHORT_V1",
+            direction="SHORT",
+            overlay_label="PAPER_ONLY_ACTIVE_EVIDENCE_LANE",
+            start_time_et=time(9, 35),
+            end_time_et=time(15, 30),
+            benchmark_hold_bars_5m=12,
+            condition_label="09:35-15:30_ET_close_below_vwap_or_us_session_open",
+        )
+        specs[f"PAPER_ACTIVE_EVIDENCE_{symbol}_GLOBEX_PARTICIPATION_LONG_V1"] = _PaperActiveEvidenceSpec(
+            strategy_id=f"PAPER_ACTIVE_EVIDENCE_{symbol}_GLOBEX_PARTICIPATION_LONG_V1",
+            direction="LONG",
+            overlay_label="PAPER_ONLY_GLOBEX_ACTIVE_EVIDENCE_LANE",
+            start_time_et=time(18, 5),
+            end_time_et=time(3, 0),
+            benchmark_hold_bars_5m=12,
+            condition_label="18:05-03:00_ET_close_above_vwap_or_globex_session_open",
+            reference_time_et=time(18, 0),
+            reference_label="18_00_globex_session_open",
+            require_reference_bar=False,
+        )
+        specs[f"PAPER_ACTIVE_EVIDENCE_{symbol}_GLOBEX_PARTICIPATION_SHORT_V1"] = _PaperActiveEvidenceSpec(
+            strategy_id=f"PAPER_ACTIVE_EVIDENCE_{symbol}_GLOBEX_PARTICIPATION_SHORT_V1",
+            direction="SHORT",
+            overlay_label="PAPER_ONLY_GLOBEX_ACTIVE_EVIDENCE_LANE",
+            start_time_et=time(18, 5),
+            end_time_et=time(3, 0),
+            benchmark_hold_bars_5m=12,
+            condition_label="18:05-03:00_ET_close_below_vwap_or_globex_session_open",
+            reference_time_et=time(18, 0),
+            reference_label="18_00_globex_session_open",
+            require_reference_bar=False,
+        )
+        specs[f"PAPER_ACTIVE_EVIDENCE_{symbol}_LONDON_OPEN_PARTICIPATION_LONG_V1"] = _PaperActiveEvidenceSpec(
+            strategy_id=f"PAPER_ACTIVE_EVIDENCE_{symbol}_LONDON_OPEN_PARTICIPATION_LONG_V1",
+            direction="LONG",
+            overlay_label="PAPER_ONLY_LONDON_OPEN_ACTIVE_EVIDENCE_LANE",
+            start_time_et=time(3, 5),
+            end_time_et=time(5, 30),
+            benchmark_hold_bars_5m=12,
+            condition_label="03:05-05:30_ET_close_above_vwap_or_london_open",
+            reference_time_et=time(3, 0),
+            reference_label="03_00_london_open",
+            require_reference_bar=True,
+        )
+        specs[f"PAPER_ACTIVE_EVIDENCE_{symbol}_LONDON_OPEN_PARTICIPATION_SHORT_V1"] = _PaperActiveEvidenceSpec(
+            strategy_id=f"PAPER_ACTIVE_EVIDENCE_{symbol}_LONDON_OPEN_PARTICIPATION_SHORT_V1",
+            direction="SHORT",
+            overlay_label="PAPER_ONLY_LONDON_OPEN_ACTIVE_EVIDENCE_LANE",
+            start_time_et=time(3, 5),
+            end_time_et=time(5, 30),
+            benchmark_hold_bars_5m=12,
+            condition_label="03:05-05:30_ET_close_below_vwap_or_london_open",
+            reference_time_et=time(3, 0),
+            reference_label="03_00_london_open",
+            require_reference_bar=True,
+        )
+        specs[f"PAPER_ACTIVE_EVIDENCE_{symbol}_LONDON_LATE_PARTICIPATION_SHORT_V1"] = _PaperActiveEvidenceSpec(
+            strategy_id=f"PAPER_ACTIVE_EVIDENCE_{symbol}_LONDON_LATE_PARTICIPATION_SHORT_V1",
+            direction="SHORT",
+            overlay_label="PAPER_ONLY_LONDON_LATE_ACTIVE_EVIDENCE_LANE",
+            start_time_et=time(5, 30),
+            end_time_et=time(8, 20),
+            benchmark_hold_bars_5m=12,
+            condition_label="05:30-08:20_ET_close_below_vwap_or_london_late_reference",
+            reference_time_et=time(5, 30),
+            reference_label="05_30_london_late_reference",
+            require_reference_bar=True,
+        )
+    return specs
+
+
+PAPER_ACTIVE_EVIDENCE_SPECS.update(_batch1_active_evidence_specs())
+
+
 @dataclass(frozen=True)
 class _NativeRuntimeFallbackSpec:
     promoted_source: str

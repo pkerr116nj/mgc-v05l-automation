@@ -451,3 +451,26 @@ def test_london_late_mnq_short_active_evidence_registry_metadata_is_valid() -> N
     assert entry.managed_exit_policy_id == "GLOBEX_ACTIVE_EVIDENCE_TIMEBOX_15M_EXIT_V1"
     assert entry.exit_not_available is False
     assert entry.calibration_profile == "simple_london_late_reference_plus_recent_close_short"
+
+
+def test_batch1_active_evidence_registry_metadata_is_valid() -> None:
+    for symbol in ("MGC", "GC", "NQ", "ES"):
+        for session, direction, policy_id in (
+            ("US", "LONG", "US_ACTIVE_EVIDENCE_TIMEBOX_60M_EXIT_V1"),
+            ("LONDON_LATE", "SHORT", "GLOBEX_ACTIVE_EVIDENCE_TIMEBOX_15M_EXIT_V1"),
+        ):
+            strategy_id = f"PAPER_ACTIVE_EVIDENCE_{symbol}_{session}_PARTICIPATION_{direction}_V1"
+
+            entry = resolve_track_b_strategy_registry_entry(
+                rule_mode=strategy_id,
+                rule_id=strategy_id,
+                strategy_id=strategy_id,
+            )
+
+            assert entry is not None
+            assert entry.instrument_family == symbol
+            assert entry.timeframe == "1m"
+            assert entry.paper_eligible is True
+            assert entry.live_money_eligible is False
+            assert entry.managed_exit_policy_id == policy_id
+            assert entry.exit_not_available is False

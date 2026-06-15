@@ -26,7 +26,73 @@ _SUPPORTED_EXECUTABLE_INSTRUMENTS = supported_phase1_source_instruments()
 _INITIAL_EXECUTABLE_INSTRUMENT = "MGC"
 _ATP_LANE_ID = "atp_companion_v1_asia_us"
 _ATP_STRATEGY_ID = "ATP_COMPANION_V1_ASIA_US"
+_BATCH1_ACTIVE_EVIDENCE_LANE_SUFFIXES = (
+    "us_active_participation_long",
+    "us_active_participation_short",
+    "globex_active_participation_long",
+    "globex_active_participation_short",
+    "london_open_active_participation_long",
+    "london_open_active_participation_short",
+    "london_late_active_participation_short",
+)
+
+
+def _active_evidence_lane_ids(symbol: str) -> tuple[str, ...]:
+    return tuple(f"{symbol.lower()}_{suffix}" for suffix in _BATCH1_ACTIVE_EVIDENCE_LANE_SUFFIXES)
+
+
+_BATCH1_ACTIVE_EVIDENCE_CONTRACTS: dict[str, dict[str, Any]] = {
+    "MGC": {
+        "symbol": "MGC",
+        "contract_month": "202608",
+        "expiry": "20260827",
+        "con_id": 732156883,
+        "local_symbol": "MGCQ6",
+        "exchange": "COMEX",
+        "currency": "USD",
+        "multiplier": "10",
+        "min_tick": "0.1",
+        "trading_class": "MGC",
+    },
+    "GC": {
+        "symbol": "GC",
+        "contract_month": "202608",
+        "expiry": "20260827",
+        "con_id": 732156872,
+        "local_symbol": "GCQ6",
+        "exchange": "COMEX",
+        "currency": "USD",
+        "multiplier": "100",
+        "min_tick": "0.1",
+        "trading_class": "GC",
+    },
+    "NQ": {
+        "symbol": "NQ",
+        "contract_month": "202609",
+        "expiry": "20260918",
+        "con_id": 770561204,
+        "local_symbol": "NQU6",
+        "exchange": "CME",
+        "currency": "USD",
+        "multiplier": "20",
+        "min_tick": "0.25",
+        "trading_class": "NQ",
+    },
+    "ES": {
+        "symbol": "ES",
+        "contract_month": "202609",
+        "expiry": "20260918",
+        "con_id": 649180671,
+        "local_symbol": "ESU6",
+        "exchange": "CME",
+        "currency": "USD",
+        "multiplier": "50",
+        "min_tick": "0.25",
+        "trading_class": "ES",
+    },
+}
 _GC_PHASE1_SUBMIT_LANE_IDS = (
+    *_active_evidence_lane_ids("gc"),
     "atp_companion_v1_gc_asia_promotion_1_075r_favorable_only",
     "atp_companion_v1_gc_asia_promotion_1_075r_favorable_only_5m",
     "atp_companion_v1_gc_asia_us",
@@ -48,6 +114,7 @@ _GC_PHASE1_SUBMIT_LANE_IDS = (
     "gc_asia_early_normal_breakout_retest_hold_long",
 )
 _MGC_PHASE1_SUBMIT_LANE_IDS = (
+    *_active_evidence_lane_ids("mgc"),
     "track_b_paper_execution_test_mule_v1__mgc",
     "atp_companion_v1_asia_us",
     "atp_companion_v1_asia_us_5m",
@@ -67,6 +134,7 @@ _MGC_PHASE1_SUBMIT_LANE_IDS = (
     "ibkr_paper_route_canary",
 )
 _NQ_PHASE1_SUBMIT_LANE_IDS = (
+    *_active_evidence_lane_ids("nq"),
     "nq_1x_asia_london_participation__asia_london_long_v5",
     "nq_1x_asia_london_participation__asia_london_long_v6",
     "nq_1x_asia_london_participation__asia_london_short_v2",
@@ -95,6 +163,7 @@ _MNQ_PHASE1_SUBMIT_LANE_IDS = (
     "mnq_1x_ny_early_core__us_midday_short_breakdown",
 )
 _ES_PHASE1_SUBMIT_LANE_IDS = (
+    *_active_evidence_lane_ids("es"),
     "es_1x_asia_london_participation__asia_london_long_v6_vol_floor_125",
     "es_1x_ny_early_core__us_early_long",
     "es_1x_ny_early_core__us_early_short_breakdown",
@@ -243,6 +312,19 @@ _SUBMIT_CAPABLE_LANE_ADAPTERS |= {
     for lane_id in _PL_PHASE1_SUBMIT_LANE_IDS
 }
 
+for symbol, target in _BATCH1_ACTIVE_EVIDENCE_CONTRACTS.items():
+    for lane_id in _active_evidence_lane_ids(symbol):
+        adapter = _SUBMIT_CAPABLE_LANE_ADAPTERS.get(lane_id)
+        if adapter is not None:
+            adapter.update(
+                {
+                    "source_instrument": symbol,
+                    "bridge_execution_target": dict(target),
+                    "bridge_proxy_mode": f"{symbol}_SIGNAL_DIRECT_PHASE1",
+                    "validated_contract_identity_source": "noisemaker_contract_tick_readiness",
+                }
+            )
+
 for lane_id in (
     *_NQ_PHASE1_SUBMIT_LANE_IDS,
     *_MNQ_PHASE1_SUBMIT_LANE_IDS,
@@ -263,6 +345,10 @@ for lane_id in (
         )
 
 for lane_id in (
+    *_active_evidence_lane_ids("mgc"),
+    *_active_evidence_lane_ids("gc"),
+    *_active_evidence_lane_ids("nq"),
+    *_active_evidence_lane_ids("es"),
     "mnq_london_open_active_participation_long",
     "mnq_london_open_active_participation_short",
     "mes_london_open_active_participation_long",

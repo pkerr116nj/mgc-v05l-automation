@@ -18,12 +18,20 @@ from typing import Any, Mapping, Sequence
 
 from mgc_v05l.execution_core.track_b_atomic_io import write_json_atomic
 from mgc_v05l.execution_core.track_b_exit_strategy_roster import (
+    ES_GLOBEX_ACTIVE_EVIDENCE_TIMEBOX_15M_V1,
+    ES_US_ACTIVE_EVIDENCE_TIMEBOX_60M_V1,
+    GC_GLOBEX_ACTIVE_EVIDENCE_TIMEBOX_15M_V1,
+    GC_US_ACTIVE_EVIDENCE_TIMEBOX_60M_V1,
     MES_GLOBEX_ACTIVE_EVIDENCE_TIMEBOX_15M_V1,
     MGC_DIAGNOSTIC_TIMEBOX_3X5M_V1,
+    MGC_GLOBEX_ACTIVE_EVIDENCE_TIMEBOX_15M_V1,
+    MGC_US_ACTIVE_EVIDENCE_TIMEBOX_60M_V1,
     MNQ_GLOBEX_ACTIVE_EVIDENCE_TIMEBOX_15M_V1,
     MGC_FORCED_SESSION_SEGMENT_TIMEBOX_3X5M_V1,
     MNQ_SNAP_TURN_TIMEBOX_3X5M_V1,
     MNQ_GLOBEX_REOPEN_FIRST_CANDLE_TIMEBOX_60M_SHADOW_V1,
+    NQ_GLOBEX_ACTIVE_EVIDENCE_TIMEBOX_15M_V1,
+    NQ_US_ACTIVE_EVIDENCE_TIMEBOX_60M_V1,
     PAPER_DIAGNOSTIC_TIME_BOXED_3X5M_EXIT_V1,
 )
 from mgc_v05l.execution_core.track_b_strategy_managed_paper_lifecycle import (
@@ -565,6 +573,148 @@ APPROVED_TRACK_B_POSITION_INTENT_TEMPLATES: Mapping[str, _StrategyContractTempla
         session_tags=("GLOBEX_REOPEN", "ASIA_EARLY"),
         regime_tags=("FIRST_CANDLE_CONTINUATION", "TREND_PARTICIPATION", "SHADOW_CANDIDATE"),
     ),
+}
+
+
+_BATCH1_ACTIVE_EVIDENCE_CONTRACTS = {
+    "MGC": {
+        "contract_key": "MGC-202608",
+        "local_symbol": "MGCQ6",
+        "con_id": 732156883,
+        "expiry": "20260827",
+        "conflict_group": "gold_mgc_gc_active_evidence",
+    },
+    "GC": {
+        "contract_key": "GC-202608",
+        "local_symbol": "GCQ6",
+        "con_id": 732156872,
+        "expiry": "20260827",
+        "conflict_group": "gold_mgc_gc_active_evidence",
+    },
+    "NQ": {
+        "contract_key": "NQ-202609",
+        "local_symbol": "NQU6",
+        "con_id": 770561204,
+        "expiry": "20260918",
+        "conflict_group": "equity_index_nasdaq_mnq_nq_active_evidence",
+    },
+    "ES": {
+        "contract_key": "ES-202609",
+        "local_symbol": "ESU6",
+        "con_id": 649180671,
+        "expiry": "20260918",
+        "conflict_group": "equity_index_sp500_mes_es_active_evidence",
+    },
+}
+_BATCH1_ACTIVE_EVIDENCE_EXIT_PROFILES = {
+    ("MGC", "US"): MGC_US_ACTIVE_EVIDENCE_TIMEBOX_60M_V1,
+    ("GC", "US"): GC_US_ACTIVE_EVIDENCE_TIMEBOX_60M_V1,
+    ("NQ", "US"): NQ_US_ACTIVE_EVIDENCE_TIMEBOX_60M_V1,
+    ("ES", "US"): ES_US_ACTIVE_EVIDENCE_TIMEBOX_60M_V1,
+    ("MGC", "GLOBEX"): MGC_GLOBEX_ACTIVE_EVIDENCE_TIMEBOX_15M_V1,
+    ("GC", "GLOBEX"): GC_GLOBEX_ACTIVE_EVIDENCE_TIMEBOX_15M_V1,
+    ("NQ", "GLOBEX"): NQ_GLOBEX_ACTIVE_EVIDENCE_TIMEBOX_15M_V1,
+    ("ES", "GLOBEX"): ES_GLOBEX_ACTIVE_EVIDENCE_TIMEBOX_15M_V1,
+    ("MGC", "LONDON_OPEN"): MGC_GLOBEX_ACTIVE_EVIDENCE_TIMEBOX_15M_V1,
+    ("GC", "LONDON_OPEN"): GC_GLOBEX_ACTIVE_EVIDENCE_TIMEBOX_15M_V1,
+    ("NQ", "LONDON_OPEN"): NQ_GLOBEX_ACTIVE_EVIDENCE_TIMEBOX_15M_V1,
+    ("ES", "LONDON_OPEN"): ES_GLOBEX_ACTIVE_EVIDENCE_TIMEBOX_15M_V1,
+    ("MGC", "LONDON_LATE"): MGC_GLOBEX_ACTIVE_EVIDENCE_TIMEBOX_15M_V1,
+    ("GC", "LONDON_LATE"): GC_GLOBEX_ACTIVE_EVIDENCE_TIMEBOX_15M_V1,
+    ("NQ", "LONDON_LATE"): NQ_GLOBEX_ACTIVE_EVIDENCE_TIMEBOX_15M_V1,
+    ("ES", "LONDON_LATE"): ES_GLOBEX_ACTIVE_EVIDENCE_TIMEBOX_15M_V1,
+}
+_BATCH1_ACTIVE_EVIDENCE_SESSIONS = (
+    ("US", "LONG", "us_active_participation_long", "US_ACTIVE_EVIDENCE_TIMEBOX_EXIT", "12_COMPLETED_5M_BARS", 12),
+    ("US", "SHORT", "us_active_participation_short", "US_ACTIVE_EVIDENCE_TIMEBOX_EXIT", "12_COMPLETED_5M_BARS", 12),
+    (
+        "GLOBEX",
+        "LONG",
+        "globex_active_participation_long",
+        "GLOBEX_ACTIVE_EVIDENCE_TIMEBOX_EXIT",
+        "3_COMPLETED_5M_BARS",
+        3,
+    ),
+    (
+        "GLOBEX",
+        "SHORT",
+        "globex_active_participation_short",
+        "GLOBEX_ACTIVE_EVIDENCE_TIMEBOX_EXIT",
+        "3_COMPLETED_5M_BARS",
+        3,
+    ),
+    (
+        "LONDON_OPEN",
+        "LONG",
+        "london_open_active_participation_long",
+        "LONDON_OPEN_ACTIVE_EVIDENCE_TIMEBOX_EXIT",
+        "3_COMPLETED_5M_BARS",
+        3,
+    ),
+    (
+        "LONDON_OPEN",
+        "SHORT",
+        "london_open_active_participation_short",
+        "LONDON_OPEN_ACTIVE_EVIDENCE_TIMEBOX_EXIT",
+        "3_COMPLETED_5M_BARS",
+        3,
+    ),
+    (
+        "LONDON_LATE",
+        "SHORT",
+        "london_late_active_participation_short",
+        "LONDON_LATE_ACTIVE_EVIDENCE_TIMEBOX_EXIT",
+        "3_COMPLETED_5M_BARS",
+        3,
+    ),
+)
+
+
+def _batch1_active_evidence_position_intent_templates() -> dict[str, _StrategyContractTemplate]:
+    templates: dict[str, _StrategyContractTemplate] = {}
+    for symbol, contract in _BATCH1_ACTIVE_EVIDENCE_CONTRACTS.items():
+        for session, direction, lane_suffix, intended_exit_family, max_hold_policy, expected_hold_bars in (
+            _BATCH1_ACTIVE_EVIDENCE_SESSIONS
+        ):
+            strategy_id = f"PAPER_ACTIVE_EVIDENCE_{symbol}_{session}_PARTICIPATION_{direction}_V1"
+            managed_exit_policy_id = (
+                "US_ACTIVE_EVIDENCE_TIMEBOX_60M_EXIT_V1"
+                if session == "US"
+                else "GLOBEX_ACTIVE_EVIDENCE_TIMEBOX_15M_EXIT_V1"
+            )
+            templates[strategy_id] = _StrategyContractTemplate(
+                strategy_id=strategy_id,
+                lane_id=f"{symbol.lower()}_{lane_suffix}",
+                instrument_family=symbol,
+                contract_key=str(contract["contract_key"]),
+                local_symbol=str(contract["local_symbol"]),
+                con_id=int(contract["con_id"]),
+                expiry=str(contract["expiry"]),
+                side=direction,
+                quantity=1,
+                thesis_type=ThesisType.TREND_PARTICIPATION,
+                thesis_summary=(
+                    f"PAPER-only {session.replace('_', ' ').title()} active participation "
+                    f"{direction.lower()} evidence lane for {symbol}."
+                ),
+                expected_hold_type=ExpectedHoldType.TIMEBOXED,
+                intended_exit_family=intended_exit_family,
+                managed_exit_policy_id=managed_exit_policy_id,
+                exit_profile_id=_BATCH1_ACTIVE_EVIDENCE_EXIT_PROFILES[(symbol, session)],
+                invalidation_conditions=("opposite_recent_close_confirms", "active_evidence_reference_invalidates"),
+                max_hold_policy=max_hold_policy,
+                expected_hold_bars_5m=expected_hold_bars,
+                conflict_group=str(contract["conflict_group"]),
+                strategy_family="paper_active_evidence",
+                session_tags=(session,),
+                regime_tags=(f"PAPER_ONLY_{session}_ACTIVE_EVIDENCE_LANE", "TREND_PARTICIPATION"),
+            )
+    return templates
+
+
+APPROVED_TRACK_B_POSITION_INTENT_TEMPLATES = {
+    **APPROVED_TRACK_B_POSITION_INTENT_TEMPLATES,
+    **_batch1_active_evidence_position_intent_templates(),
 }
 
 

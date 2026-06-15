@@ -37,6 +37,29 @@ from mgc_v05l.domain.models import SignalPacket
 from mgc_v05l.strategy.strategy_engine import _empty_signal_packet_payload
 
 
+def test_batch1_active_evidence_specs_are_registered() -> None:
+    expected = [
+        f"PAPER_ACTIVE_EVIDENCE_{symbol}_{session}_PARTICIPATION_{side}_V1"
+        for symbol in ("MGC", "GC", "NQ", "ES")
+        for session, side in (
+            ("US", "LONG"),
+            ("US", "SHORT"),
+            ("GLOBEX", "LONG"),
+            ("GLOBEX", "SHORT"),
+            ("LONDON_OPEN", "LONG"),
+            ("LONDON_OPEN", "SHORT"),
+            ("LONDON_LATE", "SHORT"),
+        )
+    ]
+
+    assert set(expected).issubset(PAPER_ACTIVE_EVIDENCE_SPECS)
+    assert PAPER_ACTIVE_EVIDENCE_SPECS["PAPER_ACTIVE_EVIDENCE_MGC_US_PARTICIPATION_LONG_V1"].direction == "LONG"
+    assert (
+        PAPER_ACTIVE_EVIDENCE_SPECS["PAPER_ACTIVE_EVIDENCE_ES_LONDON_LATE_PARTICIPATION_SHORT_V1"].overlay_label
+        == "PAPER_ONLY_LONDON_LATE_ACTIVE_EVIDENCE_LANE"
+    )
+
+
 def test_rule_runner_paper_engine_requires_timestamp_coherent_input() -> None:
     current = datetime(2026, 5, 27, 8, 0, tzinfo=UTC)
 

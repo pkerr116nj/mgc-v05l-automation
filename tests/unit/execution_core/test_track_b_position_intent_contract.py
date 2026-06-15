@@ -123,6 +123,40 @@ def test_london_open_active_evidence_position_intents_use_canonical_current_cont
     assert mes.conflict_group == "equity_index_mnq_mes_london_open_active_evidence"
 
 
+def test_batch1_active_evidence_position_intents_use_validated_contracts() -> None:
+    expected = {
+        "PAPER_ACTIVE_EVIDENCE_MGC_US_PARTICIPATION_LONG_V1": ("MGC", "MGCQ6", 732156883, "20260827", "MGC-202608"),
+        "PAPER_ACTIVE_EVIDENCE_GC_GLOBEX_PARTICIPATION_SHORT_V1": ("GC", "GCQ6", 732156872, "20260827", "GC-202608"),
+        "PAPER_ACTIVE_EVIDENCE_NQ_LONDON_OPEN_PARTICIPATION_LONG_V1": (
+            "NQ",
+            "NQU6",
+            770561204,
+            "20260918",
+            "NQ-202609",
+        ),
+        "PAPER_ACTIVE_EVIDENCE_ES_LONDON_LATE_PARTICIPATION_SHORT_V1": (
+            "ES",
+            "ESU6",
+            649180671,
+            "20260918",
+            "ES-202609",
+        ),
+    }
+
+    for strategy_id, (symbol, local_symbol, con_id, expiry, contract_key) in expected.items():
+        intent = position_intent_from_template(APPROVED_TRACK_B_POSITION_INTENT_TEMPLATES[strategy_id])
+
+        assert intent.instrument_family == symbol
+        assert intent.local_symbol == local_symbol
+        assert intent.con_id == con_id
+        assert intent.expiry == expiry
+        assert intent.contract_key == contract_key
+        assert intent.quantity == 1
+        assert intent.order_policy.submit_authority is False
+        assert intent.live_money_eligible is False
+        assert intent.paper_proof_invoked is False
+
+
 def test_london_late_mnq_short_position_intent_uses_canonical_current_contract() -> None:
     intent = position_intent_from_template(
         APPROVED_TRACK_B_POSITION_INTENT_TEMPLATES["PAPER_ACTIVE_EVIDENCE_MNQ_LONDON_LATE_PARTICIPATION_SHORT_V1"]

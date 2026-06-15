@@ -6,7 +6,13 @@ from mgc_v05l.execution_core.track_b_exit_strategy_roster import (
     MES_GLOBEX_ACTIVE_EVIDENCE_TIMEBOX_15M_V1,
     MES_GLOBEX_ACTIVE_EVIDENCE_TIMEBOX_60M_V1,
     MES_US_ACTIVE_EVIDENCE_TIMEBOX_60M_V1,
+    ES_GLOBEX_ACTIVE_EVIDENCE_TIMEBOX_15M_V1,
+    ES_US_ACTIVE_EVIDENCE_TIMEBOX_60M_V1,
+    GC_GLOBEX_ACTIVE_EVIDENCE_TIMEBOX_15M_V1,
+    GC_US_ACTIVE_EVIDENCE_TIMEBOX_60M_V1,
     MGC_DIAGNOSTIC_TIMEBOX_3X5M_V1,
+    MGC_GLOBEX_ACTIVE_EVIDENCE_TIMEBOX_15M_V1,
+    MGC_US_ACTIVE_EVIDENCE_TIMEBOX_60M_V1,
     ACTIVE_EVIDENCE_MANAGED_CLOSE_MAX_SLIPPAGE_TICKS,
     ACTIVE_EVIDENCE_MANAGED_CLOSE_OFFSET_TICKS,
     MNQ_CHANGEOVER_0300_LONG_TIMEBOX_6H_V1,
@@ -15,6 +21,8 @@ from mgc_v05l.execution_core.track_b_exit_strategy_roster import (
     MNQ_GLOBEX_ACTIVE_EVIDENCE_TIMEBOX_60M_V1,
     MNQ_SNAP_TURN_TIMEBOX_3X5M_V1,
     MNQ_US_ACTIVE_EVIDENCE_TIMEBOX_60M_V1,
+    NQ_GLOBEX_ACTIVE_EVIDENCE_TIMEBOX_15M_V1,
+    NQ_US_ACTIVE_EVIDENCE_TIMEBOX_60M_V1,
     PAPER_DIAGNOSTIC_TIME_BOXED_3X5M_EXIT_V1,
     close_action_for_position_side,
     close_limit_from_profile,
@@ -119,6 +127,34 @@ def test_globex_active_evidence_profiles_cover_mnq_and_mes_15m_test_timeboxes() 
     assert mes.required_completed_5m_bars == 3
     assert mnq.live_money_eligible is False
     assert mes.paper_proof_allowed is False
+
+
+def test_batch1_active_evidence_profiles_cover_validated_symbols() -> None:
+    for symbol, us_profile_id, globex_profile_id, tick_size in (
+        ("MGC", MGC_US_ACTIVE_EVIDENCE_TIMEBOX_60M_V1, MGC_GLOBEX_ACTIVE_EVIDENCE_TIMEBOX_15M_V1, "0.1"),
+        ("GC", GC_US_ACTIVE_EVIDENCE_TIMEBOX_60M_V1, GC_GLOBEX_ACTIVE_EVIDENCE_TIMEBOX_15M_V1, "0.1"),
+        ("NQ", NQ_US_ACTIVE_EVIDENCE_TIMEBOX_60M_V1, NQ_GLOBEX_ACTIVE_EVIDENCE_TIMEBOX_15M_V1, "0.25"),
+        ("ES", ES_US_ACTIVE_EVIDENCE_TIMEBOX_60M_V1, ES_GLOBEX_ACTIVE_EVIDENCE_TIMEBOX_15M_V1, "0.25"),
+    ):
+        us_profile = resolve_track_b_exit_profile_for_position(
+            instrument_family=symbol,
+            managed_exit_policy_id="US_ACTIVE_EVIDENCE_TIMEBOX_60M_EXIT_V1",
+        )
+        globex_profile = resolve_track_b_exit_profile_for_position(
+            instrument_family=symbol,
+            managed_exit_policy_id="GLOBEX_ACTIVE_EVIDENCE_TIMEBOX_15M_EXIT_V1",
+        )
+
+        assert us_profile.exit_profile_id == us_profile_id
+        assert globex_profile.exit_profile_id == globex_profile_id
+        assert us_profile.tick_size == tick_size
+        assert globex_profile.tick_size == tick_size
+        assert us_profile.price_offset_ticks == ACTIVE_EVIDENCE_MANAGED_CLOSE_OFFSET_TICKS
+        assert globex_profile.max_slippage_ticks == ACTIVE_EVIDENCE_MANAGED_CLOSE_MAX_SLIPPAGE_TICKS
+        assert us_profile.live_money_eligible is False
+        assert globex_profile.paper_proof_allowed is False
+        assert globex_profile.broad_cancel_allowed is False
+        assert globex_profile.global_flatten_allowed is False
 
 
 def test_legacy_globex_active_evidence_60m_profiles_remain_resolvable() -> None:

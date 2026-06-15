@@ -14,10 +14,18 @@ from pathlib import Path
 from typing import Any, Mapping
 
 from mgc_v05l.execution_core.track_b_exit_strategy_roster import (
+    ES_GLOBEX_ACTIVE_EVIDENCE_TIMEBOX_15M_V1,
+    ES_US_ACTIVE_EVIDENCE_TIMEBOX_60M_V1,
+    GC_GLOBEX_ACTIVE_EVIDENCE_TIMEBOX_15M_V1,
+    GC_US_ACTIVE_EVIDENCE_TIMEBOX_60M_V1,
     MES_GLOBEX_ACTIVE_EVIDENCE_TIMEBOX_15M_V1,
     MGC_DIAGNOSTIC_TIMEBOX_3X5M_V1,
+    MGC_GLOBEX_ACTIVE_EVIDENCE_TIMEBOX_15M_V1,
+    MGC_US_ACTIVE_EVIDENCE_TIMEBOX_60M_V1,
     MNQ_GLOBEX_ACTIVE_EVIDENCE_TIMEBOX_15M_V1,
     MNQ_SNAP_TURN_TIMEBOX_3X5M_V1,
+    NQ_GLOBEX_ACTIVE_EVIDENCE_TIMEBOX_15M_V1,
+    NQ_US_ACTIVE_EVIDENCE_TIMEBOX_60M_V1,
 )
 from mgc_v05l.execution_core.track_b_position_intent_contract import APPROVED_TRACK_B_POSITION_INTENT_TEMPLATES
 from mgc_v05l.execution_core.track_b_strategy_hold_exit_policy_registry import (
@@ -104,6 +112,131 @@ class ShadowPromotionCandidate:
     submit_allowed: bool = False
     live_money_eligible: bool = False
     paper_proof_invoked: bool = False
+
+
+_BATCH1_ACTIVE_EVIDENCE_CONTRACTS = {
+    "MGC": {
+        "contract_key": "MGC-202608",
+        "local_symbol": "MGCQ6",
+        "con_id": 732156883,
+        "point_value": "10",
+        "conflict_group": "gold_mgc_gc_active_evidence",
+    },
+    "GC": {
+        "contract_key": "GC-202608",
+        "local_symbol": "GCQ6",
+        "con_id": 732156872,
+        "point_value": "100",
+        "conflict_group": "gold_mgc_gc_active_evidence",
+    },
+    "NQ": {
+        "contract_key": "NQ-202609",
+        "local_symbol": "NQU6",
+        "con_id": 770561204,
+        "point_value": "20",
+        "conflict_group": "equity_index_nasdaq_mnq_nq_active_evidence",
+    },
+    "ES": {
+        "contract_key": "ES-202609",
+        "local_symbol": "ESU6",
+        "con_id": 649180671,
+        "point_value": "50",
+        "conflict_group": "equity_index_sp500_mes_es_active_evidence",
+    },
+}
+_BATCH1_ACTIVE_EVIDENCE_EXIT_PROFILES = {
+    ("MGC", "US"): MGC_US_ACTIVE_EVIDENCE_TIMEBOX_60M_V1,
+    ("GC", "US"): GC_US_ACTIVE_EVIDENCE_TIMEBOX_60M_V1,
+    ("NQ", "US"): NQ_US_ACTIVE_EVIDENCE_TIMEBOX_60M_V1,
+    ("ES", "US"): ES_US_ACTIVE_EVIDENCE_TIMEBOX_60M_V1,
+    ("MGC", "GLOBEX"): MGC_GLOBEX_ACTIVE_EVIDENCE_TIMEBOX_15M_V1,
+    ("GC", "GLOBEX"): GC_GLOBEX_ACTIVE_EVIDENCE_TIMEBOX_15M_V1,
+    ("NQ", "GLOBEX"): NQ_GLOBEX_ACTIVE_EVIDENCE_TIMEBOX_15M_V1,
+    ("ES", "GLOBEX"): ES_GLOBEX_ACTIVE_EVIDENCE_TIMEBOX_15M_V1,
+    ("MGC", "LONDON_OPEN"): MGC_GLOBEX_ACTIVE_EVIDENCE_TIMEBOX_15M_V1,
+    ("GC", "LONDON_OPEN"): GC_GLOBEX_ACTIVE_EVIDENCE_TIMEBOX_15M_V1,
+    ("NQ", "LONDON_OPEN"): NQ_GLOBEX_ACTIVE_EVIDENCE_TIMEBOX_15M_V1,
+    ("ES", "LONDON_OPEN"): ES_GLOBEX_ACTIVE_EVIDENCE_TIMEBOX_15M_V1,
+    ("MGC", "LONDON_LATE"): MGC_GLOBEX_ACTIVE_EVIDENCE_TIMEBOX_15M_V1,
+    ("GC", "LONDON_LATE"): GC_GLOBEX_ACTIVE_EVIDENCE_TIMEBOX_15M_V1,
+    ("NQ", "LONDON_LATE"): NQ_GLOBEX_ACTIVE_EVIDENCE_TIMEBOX_15M_V1,
+    ("ES", "LONDON_LATE"): ES_GLOBEX_ACTIVE_EVIDENCE_TIMEBOX_15M_V1,
+}
+_BATCH1_ACTIVE_EVIDENCE_SESSIONS = (
+    ("US", "LONG", "us_active_participation_long", "PAPER_ONLY_ACTIVE_EVIDENCE_LANE"),
+    ("US", "SHORT", "us_active_participation_short", "PAPER_ONLY_ACTIVE_EVIDENCE_LANE"),
+    ("GLOBEX", "LONG", "globex_active_participation_long", "PAPER_ONLY_GLOBEX_ACTIVE_EVIDENCE_LANE"),
+    ("GLOBEX", "SHORT", "globex_active_participation_short", "PAPER_ONLY_GLOBEX_ACTIVE_EVIDENCE_LANE"),
+    (
+        "LONDON_OPEN",
+        "LONG",
+        "london_open_active_participation_long",
+        "PAPER_ONLY_LONDON_OPEN_ACTIVE_EVIDENCE_LANE",
+    ),
+    (
+        "LONDON_OPEN",
+        "SHORT",
+        "london_open_active_participation_short",
+        "PAPER_ONLY_LONDON_OPEN_ACTIVE_EVIDENCE_LANE",
+    ),
+    (
+        "LONDON_LATE",
+        "SHORT",
+        "london_late_active_participation_short",
+        "PAPER_ONLY_LONDON_LATE_ACTIVE_EVIDENCE_LANE",
+    ),
+)
+
+
+def _batch1_active_evidence_promotion_candidates() -> dict[str, ShadowPromotionCandidate]:
+    candidates: dict[str, ShadowPromotionCandidate] = {}
+    for symbol, contract in _BATCH1_ACTIVE_EVIDENCE_CONTRACTS.items():
+        for session, direction, lane_suffix, lane_mode in _BATCH1_ACTIVE_EVIDENCE_SESSIONS:
+            strategy_id = f"PAPER_ACTIVE_EVIDENCE_{symbol}_{session}_PARTICIPATION_{direction}_V1"
+            lane_id = f"{symbol.lower()}_{lane_suffix}"
+            lifecycle_policy_id = (
+                "US_ACTIVE_EVIDENCE_TIMEBOX_60M_EXIT_V1"
+                if session == "US"
+                else "GLOBEX_ACTIVE_EVIDENCE_TIMEBOX_15M_EXIT_V1"
+            )
+            candidates[strategy_id] = ShadowPromotionCandidate(
+                shadow_candidate_family=lane_mode,
+                promoted_strategy_id=strategy_id,
+                lane_id=lane_id,
+                instrument_family=symbol,
+                side=direction,
+                session_eligibility=(session,),
+                contract_key=str(contract["contract_key"]),
+                local_symbol=str(contract["local_symbol"]),
+                con_id=int(contract["con_id"]),
+                lifecycle_policy_id=lifecycle_policy_id,
+                exit_profile_id=_BATCH1_ACTIVE_EVIDENCE_EXIT_PROFILES[(symbol, session)],
+                pyramiding_policy=PYRAMIDING_NOT_ALLOWED_REVIEW_REQUIRED,
+                conflict_group=str(contract["conflict_group"]),
+                evidence_summary={
+                    "activation_batch": "PAPER_NOISEMAKER_CHAOS_BATCH_1",
+                    "contract_identity_source": "noisemaker_contract_tick_readiness",
+                    "max_position_quantity": 1,
+                },
+                experimental_reason="paper_noisemaker_chaos_batch_1_active_evidence_expansion",
+                display_name=f"{symbol} / {session} active participation {direction.lower()} / PAPER noisemaker",
+                identity_components=("paper", symbol.lower(), session.lower(), "active_participation", direction.lower()),
+                long_sources=(strategy_id,) if direction == "LONG" else (),
+                short_sources=(strategy_id,) if direction == "SHORT" else (),
+                lane_mode=lane_mode,
+                strategy_family="paper_active_evidence",
+                strategy_identity_root=strategy_id,
+                observed_instruments=(symbol,),
+                input_event_path=(
+                    "outputs/track_b_execution_core/"
+                    f"{session.lower()}_active_evidence/latest_{lane_id}_event_envelope.json"
+                ),
+                max_position_quantity=1,
+                max_concurrent_entries=1,
+                max_adds_after_entry=0,
+                point_value=str(contract["point_value"]),
+            )
+    return candidates
 
 
 PROMOTION_CANDIDATES: Mapping[str, ShadowPromotionCandidate] = {
@@ -570,6 +703,11 @@ PROMOTION_CANDIDATES: Mapping[str, ShadowPromotionCandidate] = {
         point_value="5",
         catastrophic_open_loss="-300",
     ),
+}
+
+PROMOTION_CANDIDATES = {
+    **PROMOTION_CANDIDATES,
+    **_batch1_active_evidence_promotion_candidates(),
 }
 
 REMAINING_SHADOW_ONLY_EXCEPTIONS: tuple[dict[str, Any], ...] = (

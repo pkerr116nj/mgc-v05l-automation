@@ -273,6 +273,32 @@ def test_mgc_forced_session_lane_migration_does_not_enable_wildcards() -> None:
     assert "mgc_1x_all_lanes__ny_early_short" in adapters
 
 
+def test_batch1_active_evidence_lanes_use_validated_contract_bridge_targets() -> None:
+    expected_targets = {
+        "mgc_us_active_participation_long": ("MGC", "MGCQ6", 732156883, "20260827", "10", "0.1"),
+        "gc_globex_active_participation_short": ("GC", "GCQ6", 732156872, "20260827", "100", "0.1"),
+        "nq_london_open_active_participation_long": ("NQ", "NQU6", 770561204, "20260918", "20", "0.25"),
+        "es_london_late_active_participation_short": ("ES", "ESU6", 649180671, "20260918", "50", "0.25"),
+    }
+
+    for lane_id, (symbol, local_symbol, con_id, expiry, multiplier, min_tick) in expected_targets.items():
+        adapter = lane_submit_bridge_adapter(lane_id=lane_id)
+
+        assert adapter is not None
+        assert adapter["current_order_destination"] == "ibkr_paper_bridge_submit_capable"
+        assert adapter["source_instrument"] == symbol
+        assert adapter["entry_execution_intent"] == "PARTICIPATE_NOW"
+        assert adapter["entry_execution_policy"] == "MARKETABLE_LIMIT_FROM_RUNTIME_TAPE"
+        assert adapter["entry_marketable_limit_offset_ticks"] == 4
+        target = adapter["bridge_execution_target"]
+        assert target["symbol"] == symbol
+        assert target["local_symbol"] == local_symbol
+        assert target["con_id"] == con_id
+        assert target["expiry"] == expiry
+        assert target["multiplier"] == multiplier
+        assert target["min_tick"] == min_tick
+
+
 def test_dormant_paper_config_lanes_are_wired_for_ibkr_paper_submit() -> None:
     expected_targets = {
         "atp_companion_v1_asia_us": "MGC",

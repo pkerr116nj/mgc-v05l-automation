@@ -74,6 +74,41 @@ def test_strategy_specific_policy_is_readable_for_shadow_engine() -> None:
     assert policy["lifecycle_authority"] is False
 
 
+def test_batch1_active_evidence_hold_exit_policies_are_read_only() -> None:
+    for strategy_id, lane_id, hold_policy_id in (
+        (
+            "PAPER_ACTIVE_EVIDENCE_MGC_US_PARTICIPATION_LONG_V1",
+            "mgc_us_active_participation_long",
+            "US_ACTIVE_EVIDENCE_60M_TIMEBOX_HOLD_V1",
+        ),
+        (
+            "PAPER_ACTIVE_EVIDENCE_GC_GLOBEX_PARTICIPATION_SHORT_V1",
+            "gc_globex_active_participation_short",
+            "GLOBEX_ACTIVE_EVIDENCE_15M_TIMEBOX_HOLD_V1",
+        ),
+        (
+            "PAPER_ACTIVE_EVIDENCE_NQ_LONDON_OPEN_PARTICIPATION_LONG_V1",
+            "nq_london_open_active_participation_long",
+            "LONDON_OPEN_ACTIVE_EVIDENCE_15M_TIMEBOX_HOLD_V1",
+        ),
+        (
+            "PAPER_ACTIVE_EVIDENCE_ES_LONDON_LATE_PARTICIPATION_SHORT_V1",
+            "es_london_late_active_participation_short",
+            "LONDON_LATE_ACTIVE_EVIDENCE_15M_TIMEBOX_HOLD_V1",
+        ),
+    ):
+        policy = strategy_hold_exit_policy_for(strategy_id)
+
+        assert policy is not None
+        assert validate_strategy_hold_exit_policy(policy)["classification"] == STRATEGY_HOLD_EXIT_POLICY_VALID
+        assert policy["lane_id"] == lane_id
+        assert policy["hold_policy_id"] == hold_policy_id
+        assert policy["submit_allowed"] is False
+        assert policy["broker_mutation_allowed"] is False
+        assert policy["live_money_eligible"] is False
+        assert policy["paper_proof_invoked"] is False
+
+
 def _write_json(path: Path, payload: dict) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
