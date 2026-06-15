@@ -66,6 +66,15 @@ DEFAULT_PAPER_RUNTIME_TRUTH_PATH = (
 DEFAULT_PHASE1_MARKET_DATA_ROOT = (
     Path("outputs") / "track_b_execution_core" / "phase1_runtime_market_data"
 )
+DEFAULT_IBKR_POSITIONS_SNAPSHOT_PATH = (
+    Path("outputs") / "reports" / "ibkr_read_only_verification" / "ibkr_positions_snapshot.json"
+)
+DEFAULT_IBKR_OPEN_ORDERS_SNAPSHOT_PATH = (
+    Path("outputs") / "reports" / "ibkr_read_only_verification" / "ibkr_open_orders_snapshot.json"
+)
+DEFAULT_IBKR_BROKER_TRUTH_REFRESH_STATUS_PATH = (
+    Path("outputs") / "reports" / "ibkr_read_only_verification" / "ibkr_broker_truth_refresh_status.json"
+)
 
 
 @dataclass(frozen=True)
@@ -83,6 +92,9 @@ class TrackBPaperMinimalStartupConfig:
     config_paths_file: Path = DEFAULT_CONFIG_PATHS_FILE
     paper_runtime_truth_path: Path = DEFAULT_PAPER_RUNTIME_TRUTH_PATH
     phase1_market_data_root: Path = DEFAULT_PHASE1_MARKET_DATA_ROOT
+    ibkr_positions_snapshot_path: Path = DEFAULT_IBKR_POSITIONS_SNAPSHOT_PATH
+    ibkr_open_orders_snapshot_path: Path = DEFAULT_IBKR_OPEN_ORDERS_SNAPSHOT_PATH
+    ibkr_broker_truth_refresh_status_path: Path = DEFAULT_IBKR_BROKER_TRUTH_REFRESH_STATUS_PATH
 
     def resolve(self, path: Path) -> Path:
         return path if path.is_absolute() else self.repo_root / path
@@ -102,6 +114,9 @@ def build_track_b_paper_minimal_startup(
     config_in_force = _read_json(config.resolve(config.config_in_force_path))
     runtime_truth = _read_json(config.resolve(config.paper_runtime_truth_path))
     config_paths = _read_text_lines(config.resolve(config.config_paths_file))
+    ibkr_positions_snapshot = _read_json(config.resolve(config.ibkr_positions_snapshot_path))
+    ibkr_open_orders_snapshot = _read_json(config.resolve(config.ibkr_open_orders_snapshot_path))
+    ibkr_broker_truth_refresh_status = _read_json(config.resolve(config.ibkr_broker_truth_refresh_status_path))
 
     blockers: list[dict[str, Any]] = []
     warnings: list[dict[str, Any]] = []
@@ -120,6 +135,9 @@ def build_track_b_paper_minimal_startup(
         reconciliation=reconciliation,
         config_in_force=config_in_force,
         runtime_truth=runtime_truth,
+        ibkr_positions_snapshot=ibkr_positions_snapshot,
+        ibkr_open_orders_snapshot=ibkr_open_orders_snapshot,
+        ibkr_broker_truth_refresh_status=ibkr_broker_truth_refresh_status,
         now=actual_now,
     )
     blockers.extend(list(broker_truth_authority.get("blockers") or []))
@@ -225,6 +243,9 @@ def build_track_b_paper_minimal_startup(
             "config_paths_file": str(config.resolve(config.config_paths_file)),
             "paper_runtime_truth": str(config.resolve(config.paper_runtime_truth_path)),
             "phase1_market_data_root": str(config.resolve(config.phase1_market_data_root)),
+            "ibkr_positions_snapshot": str(config.resolve(config.ibkr_positions_snapshot_path)),
+            "ibkr_open_orders_snapshot": str(config.resolve(config.ibkr_open_orders_snapshot_path)),
+            "ibkr_broker_truth_refresh_status": str(config.resolve(config.ibkr_broker_truth_refresh_status_path)),
         },
 }
 
@@ -238,6 +259,9 @@ def classify_track_b_paper_broker_truth_authority(
     reconciliation: Mapping[str, Any],
     config_in_force: Mapping[str, Any],
     runtime_truth: Mapping[str, Any],
+    ibkr_positions_snapshot: Mapping[str, Any],
+    ibkr_open_orders_snapshot: Mapping[str, Any],
+    ibkr_broker_truth_refresh_status: Mapping[str, Any],
     now: datetime,
 ) -> dict[str, Any]:
     """Classify PAPER startup/new-entry authority from broker truth first."""
@@ -286,26 +310,63 @@ def classify_track_b_paper_broker_truth_authority(
     if not broker_open_orders_available:
         block("broker_open_orders_unavailable", "Broker open orders are not available/complete.", source="broker_truth")
 
+    fresh_read_only_truth = _fresh_ibkr_read_only_broker_truth(
+        positions_snapshot=ibkr_positions_snapshot,
+        open_orders_snapshot=ibkr_open_orders_snapshot,
+        refresh_status=ibkr_broker_truth_refresh_status,
+        account_id=config.account_id,
+        now=now,
+    )
     broker_position_count = _int_first(
         lease.get("track_b_broker_position_count"),
         position_lease.get("position_count"),
         position_lease.get("count"),
     )
-    if broker_positions_available and broker_position_count != 0:
-        block("broker_positions_present", f"Broker position count is {broker_position_count}; flat start is required.", source="broker_truth")
-
+    broker_open_order_count = max(
+        _int_first(lease.get("track_b_broker_open_order_count"), open_order_lease.get("open_order_count"), open_order_lease.get("count")),
+        _int_first(open_order_truth.get("open_order_count"), _mapping(open_order_truth.get("summary")).get("open_order_count")),
+    )
     unknown_open_orders = max(
         _int_first(lease.get("unknown_broker_open_order_count")),
         _int_first(open_order_truth.get("unknown_open_order_count")),
         _int_first(_mapping(open_order_truth.get("summary")).get("unknown_open_order_count")),
     )
+    if fresh_read_only_truth.get("available") is True:
+        read_only_position_count = _int_first(fresh_read_only_truth.get("track_b_broker_position_count"))
+        read_only_open_order_count = _int_first(fresh_read_only_truth.get("broker_open_order_count"))
+        read_only_unknown_open_orders = _int_first(fresh_read_only_truth.get("unknown_open_order_count"))
+        if broker_position_count != read_only_position_count:
+            warn(
+                "broker_position_lease_count_diagnostic",
+                "Fresh IBKR read-only position truth outranks broker-truth lease aggregate position count "
+                f"({broker_position_count} -> {read_only_position_count}).",
+                source="broker_truth",
+            )
+        if broker_open_order_count != read_only_open_order_count:
+            warn(
+                "broker_open_order_lease_count_diagnostic",
+                "Fresh IBKR read-only open-order truth outranks broker-truth lease aggregate open-order count "
+                f"({broker_open_order_count} -> {read_only_open_order_count}).",
+                source="broker_truth",
+            )
+        if unknown_open_orders != read_only_unknown_open_orders:
+            warn(
+                "unknown_open_order_lease_count_diagnostic",
+                "Fresh IBKR read-only order truth outranks broker-truth lease/open-order aggregate unknown-order count "
+                f"({unknown_open_orders} -> {read_only_unknown_open_orders}).",
+                source="broker_truth",
+            )
+        broker_positions_available = True
+        broker_open_orders_available = True
+        broker_position_count = read_only_position_count
+        broker_open_order_count = read_only_open_order_count
+        unknown_open_orders = read_only_unknown_open_orders
+    if broker_positions_available and broker_position_count != 0:
+        block("broker_positions_present", f"Broker position count is {broker_position_count}; flat start is required.", source="broker_truth")
+
     if unknown_open_orders != 0:
         block("unknown_open_orders_present", f"Unknown open order count is {unknown_open_orders}.", source="broker_truth")
 
-    broker_open_order_count = max(
-        _int_first(lease.get("track_b_broker_open_order_count"), open_order_lease.get("open_order_count"), open_order_lease.get("count")),
-        _int_first(open_order_truth.get("open_order_count"), _mapping(open_order_truth.get("summary")).get("open_order_count")),
-    )
     if broker_open_orders_available and broker_open_order_count != 0:
         block("broker_open_orders_present", f"Broker open order count is {broker_open_order_count}.", source="broker_truth")
 
@@ -461,6 +522,85 @@ def _price_availability_rows(
             }
         )
     return rows
+
+
+def _fresh_ibkr_read_only_broker_truth(
+    *,
+    positions_snapshot: Mapping[str, Any],
+    open_orders_snapshot: Mapping[str, Any],
+    refresh_status: Mapping[str, Any],
+    account_id: str,
+    now: datetime,
+) -> dict[str, Any]:
+    if not positions_snapshot or not open_orders_snapshot:
+        return {"available": False, "reason": "read_only_snapshot_missing"}
+    positions_account = str(
+        positions_snapshot.get("selected_account_id")
+        or positions_snapshot.get("account")
+        or positions_snapshot.get("account_id")
+        or ""
+    ).strip()
+    orders_account = str(
+        open_orders_snapshot.get("selected_account_id")
+        or open_orders_snapshot.get("account")
+        or open_orders_snapshot.get("account_id")
+        or ""
+    ).strip()
+    if positions_account != account_id or orders_account != account_id:
+        return {"available": False, "reason": "read_only_snapshot_wrong_account"}
+    if positions_snapshot.get("ok") is not True or positions_snapshot.get("positions_complete") is not True:
+        return {"available": False, "reason": "read_only_positions_incomplete"}
+    if open_orders_snapshot.get("ok") is not True or open_orders_snapshot.get("open_orders_complete") is not True:
+        return {"available": False, "reason": "read_only_open_orders_incomplete"}
+    positions_age = _age_seconds(positions_snapshot.get("generated_at"), now)
+    orders_age = _age_seconds(open_orders_snapshot.get("generated_at"), now)
+    if positions_age is None or orders_age is None:
+        return {"available": False, "reason": "read_only_snapshot_timestamp_missing"}
+    max_age_seconds = 900.0
+    if positions_age > max_age_seconds or orders_age > max_age_seconds:
+        return {
+            "available": False,
+            "reason": "read_only_snapshot_stale",
+            "positions_age_seconds": round(positions_age, 3),
+            "open_orders_age_seconds": round(orders_age, 3),
+        }
+    track_b_positions = []
+    for row in list(positions_snapshot.get("positions") or []):
+        if not isinstance(row, Mapping):
+            continue
+        if not _is_track_b_futures_position_row(row):
+            continue
+        quantity = _float_first(row.get("quantity"), row.get("position"), row.get("position_quantity")) or 0.0
+        if abs(quantity) > 0:
+            track_b_positions.append(dict(row))
+    open_orders = [dict(row) for row in list(open_orders_snapshot.get("open_orders") or []) if isinstance(row, Mapping)]
+    open_order_count = _int_first(open_orders_snapshot.get("open_order_count"), len(open_orders))
+    unknown_open_orders = 0
+    for payload in (refresh_status, open_orders_snapshot):
+        for key in ("unknown_open_order_count", "unknown_order_count", "unknown_broker_open_order_count", "suspicious_order_count"):
+            unknown_open_orders = max(unknown_open_orders, _int_first(payload.get(key)))
+    return {
+        "available": True,
+        "source": "ibkr_read_only_verification",
+        "track_b_broker_position_count": len(track_b_positions),
+        "broker_open_order_count": max(open_order_count, len(open_orders)),
+        "unknown_open_order_count": unknown_open_orders,
+        "track_b_futures_positions": track_b_positions,
+        "open_orders": open_orders,
+        "positions_generated_at": positions_snapshot.get("generated_at"),
+        "open_orders_generated_at": open_orders_snapshot.get("generated_at"),
+        "positions_age_seconds": round(positions_age, 3),
+        "open_orders_age_seconds": round(orders_age, 3),
+    }
+
+
+def _is_track_b_futures_position_row(row: Mapping[str, Any]) -> bool:
+    security_type = str(row.get("security_type") or row.get("secType") or "").strip().upper()
+    if security_type != "FUT":
+        return False
+    symbol = str(row.get("symbol") or row.get("track_b_root") or "").strip().upper()
+    local_symbol = str(row.get("local_symbol") or row.get("localSymbol") or "").strip().upper()
+    return symbol in {"MES", "MNQ"} or local_symbol.startswith("MES") or local_symbol.startswith("MNQ")
 
 
 def _explicit_paper_profile(config_paths: Sequence[str]) -> str | None:

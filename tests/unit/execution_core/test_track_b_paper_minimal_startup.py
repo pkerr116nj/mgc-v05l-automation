@@ -132,6 +132,73 @@ def _seed_minimal_ready(tmp_path: Path, *, instruments: tuple[str, ...] = ("MES"
     return config
 
 
+def _seed_fresh_ibkr_read_only_truth(
+    tmp_path: Path,
+    config: TrackBPaperMinimalStartupConfig,
+    *,
+    mes_qty: str = "0.0",
+    mnq_qty: str = "0.0",
+    open_orders: list[dict] | None = None,
+    unknown_orders: int = 0,
+) -> None:
+    _write_json(
+        tmp_path / config.ibkr_positions_snapshot_path,
+        {
+            "account": "DUM882026",
+            "selected_account_id": "DUM882026",
+            "generated_at": "2026-06-10T01:57:30+00:00",
+            "ok": True,
+            "positions_complete": True,
+            "positions": [
+                {
+                    "account_id": "DUM882026",
+                    "symbol": "MES",
+                    "local_symbol": "MESU6",
+                    "security_type": "FUT",
+                    "quantity": mes_qty,
+                },
+                {
+                    "account_id": "DUM882026",
+                    "symbol": "MNQ",
+                    "local_symbol": "MNQU6",
+                    "security_type": "FUT",
+                    "quantity": mnq_qty,
+                },
+                {
+                    "account_id": "DUM882026",
+                    "symbol": "AAPL",
+                    "local_symbol": "AAPL",
+                    "security_type": "STK",
+                    "quantity": "900.0",
+                },
+            ],
+        },
+    )
+    _write_json(
+        tmp_path / config.ibkr_open_orders_snapshot_path,
+        {
+            "account": "DUM882026",
+            "selected_account_id": "DUM882026",
+            "generated_at": "2026-06-10T01:57:30+00:00",
+            "ok": True,
+            "open_orders_complete": True,
+            "open_order_count": len(open_orders or []),
+            "open_orders": open_orders or [],
+        },
+    )
+    _write_json(
+        tmp_path / config.ibkr_broker_truth_refresh_status_path,
+        {
+            "account": "DUM882026",
+            "generated_at": "2026-06-10T01:57:30+00:00",
+            "classification": "BROKER_TRUTH_REFRESH_READY",
+            "unknown_open_order_count": unknown_orders,
+            "live_money_eligible": False,
+            "paper_proof_invoked": False,
+        },
+    )
+
+
 def _classification(tmp_path: Path) -> dict:
     config = TrackBPaperMinimalStartupConfig(repo_root=tmp_path)
     return build_track_b_paper_minimal_startup(config=config, now=NOW)
@@ -230,6 +297,68 @@ def test_nonzero_broker_position_blocks_flat_required_startup(tmp_path: Path) ->
 
     assert result["allowed"] is False
     assert "broker_positions_present" in _codes(result)
+
+
+def test_fresh_ibkr_flat_truth_overrides_stale_broker_position_lease_count(tmp_path: Path) -> None:
+    config = _seed_minimal_ready(tmp_path)
+    lease_path = tmp_path / config.broker_truth_lease_path
+    lease = json.loads(lease_path.read_text(encoding="utf-8"))
+    lease["lease_state"] = "INVALIDATED_CONTRADICTION"
+    lease["track_b_broker_position_count"] = 1
+    lease_path.write_text(json.dumps(lease), encoding="utf-8")
+    _seed_fresh_ibkr_read_only_truth(tmp_path, config)
+
+    result = _classification(tmp_path)
+
+    assert result["allowed"] is True
+    assert result["broker_position_count"] == 0
+    assert "broker_positions_present" not in _codes(result)
+    assert "broker_position_lease_count_diagnostic" in _warning_codes(result)
+
+
+def test_fresh_ibkr_nonflat_truth_blocks_even_when_lease_count_is_zero(tmp_path: Path) -> None:
+    config = _seed_minimal_ready(tmp_path)
+    _seed_fresh_ibkr_read_only_truth(tmp_path, config, mes_qty="-1.0")
+
+    result = _classification(tmp_path)
+
+    assert result["allowed"] is False
+    assert result["broker_position_count"] == 1
+    assert "broker_positions_present" in _codes(result)
+
+
+def test_fresh_ibkr_open_order_truth_blocks_even_when_lease_count_is_zero(tmp_path: Path) -> None:
+    config = _seed_minimal_ready(tmp_path)
+    _seed_fresh_ibkr_read_only_truth(
+        tmp_path,
+        config,
+        open_orders=[
+            {
+                "account": "DUM882026",
+                "symbol": "MNQ",
+                "local_symbol": "MNQU6",
+                "order_id": 129,
+                "status": "Submitted",
+            }
+        ],
+    )
+
+    result = _classification(tmp_path)
+
+    assert result["allowed"] is False
+    assert result["broker_open_order_count"] == 1
+    assert "broker_open_orders_present" in _codes(result)
+
+
+def test_fresh_ibkr_unknown_order_truth_blocks_even_when_lease_count_is_zero(tmp_path: Path) -> None:
+    config = _seed_minimal_ready(tmp_path)
+    _seed_fresh_ibkr_read_only_truth(tmp_path, config, unknown_orders=1)
+
+    result = _classification(tmp_path)
+
+    assert result["allowed"] is False
+    assert result["unknown_open_order_count"] == 1
+    assert "unknown_open_orders_present" in _codes(result)
 
 
 def test_stale_dirty_reconciliation_is_diagnostic_when_broker_truth_is_flat_and_clean(tmp_path: Path) -> None:
