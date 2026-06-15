@@ -93,6 +93,26 @@ def test_known_working_close_tolerates_ibkr_sentinel_status_gap(tmp_path: Path) 
     assert report["broker_mutation_attempted"] is False
 
 
+def test_exact_sentinel_suspicious_close_can_still_modify_in_place(tmp_path: Path) -> None:
+    _seed_authorities(
+        tmp_path,
+        open_order_classification="SUSPICIOUS_ORDER_STATE",
+        managed_order_classification="CLOSE_ORDER_SUSPICIOUS",
+        planner_classification="MODIFY_IN_PLACE_ELIGIBLE",
+        filled_quantity="1.7976931348623157e+308",
+        remaining_quantity=None,
+    )
+
+    report = _run(tmp_path)
+
+    assert report["classification"] == MODIFY_IN_PLACE_DRY_RUN_READY
+    diagnostics = report["shared_truth_evidence"]["diagnostic_only_blockers"]
+    assert any("Open Order Truth sentinel quantity state" in item for item in diagnostics)
+    assert any("Managed Order Registry sentinel quantity state" in item for item in diagnostics)
+    assert not report["shared_truth_evidence"]["blockers"]
+    assert report["broker_mutation_attempted"] is False
+
+
 def test_stale_known_close_can_use_modify_in_place_boundary(tmp_path: Path) -> None:
     _seed_authorities(
         tmp_path,

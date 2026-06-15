@@ -494,13 +494,20 @@ def _classify_readiness(
         )
     managed_class = str(order.get("classification") or "")
     plan_class = str(plan.get("classification") or "")
-    if managed_class in {"CLOSE_ORDER_SUSPICIOUS", "ORDER_STATE_UNKNOWN_REVIEW_REQUIRED"}:
+    if managed_class == "CLOSE_ORDER_SUSPICIOUS" and _is_blocking_suspicious_order(config=config, row=order):
+        return _blocked(MODIFY_IN_PLACE_BLOCKED_SUSPICIOUS_ORDER, f"Managed order is suspicious: {managed_class}.")
+    if managed_class in {"ORDER_STATE_UNKNOWN_REVIEW_REQUIRED"}:
         return _blocked(MODIFY_IN_PLACE_BLOCKED_SUSPICIOUS_ORDER, f"Managed order is suspicious: {managed_class}.")
     if managed_class in {"DUPLICATE_CLOSE_ORDER_BLOCKED"}:
         return _blocked(MODIFY_IN_PLACE_BLOCKED_DUPLICATE_RISK, "Managed Order Registry reports duplicate close risk.")
     if managed_class in {"BROKER_FLAT_WITH_WORKING_CLOSE"} or plan_class == "BROKER_FLAT_NO_REPLACE":
         return _blocked(MODIFY_IN_PLACE_BLOCKED_NOT_WORKING_ORDER, "Broker flat with working close order; do not modify.")
-    if managed_class not in {"WORKING_CLOSE_ORDER", "CLOSE_ORDER_MODIFIABLE", "CLOSE_ORDER_CANCEL_REPLACE_REQUIRED"}:
+    if managed_class not in {
+        "WORKING_CLOSE_ORDER",
+        "CLOSE_ORDER_MODIFIABLE",
+        "CLOSE_ORDER_CANCEL_REPLACE_REQUIRED",
+        "CLOSE_ORDER_SUSPICIOUS",
+    }:
         return _blocked(MODIFY_IN_PLACE_BLOCKED_NOT_WORKING_ORDER, f"Managed order is not a working close order: {managed_class}.")
     if plan_class != MODIFY_IN_PLACE_ELIGIBLE:
         if plan_class == "DO_NOT_REPLACE_DUPLICATE_RISK":
@@ -555,17 +562,29 @@ def _shared_truth_evidence(*, config: ManagedOrderModifyInPlaceConfig, now: date
     if classifications["open_order_truth"] in {
         "DUPLICATE_CLOSE_ORDER",
         "UNKNOWN_OPEN_ORDER",
-        "SUSPICIOUS_ORDER_STATE",
         "BROKER_FLAT_WITH_OPEN_CLOSE_ORDER",
     }:
         blockers.append(f"Open Order Truth blocks modify-in-place: {classifications['open_order_truth']}.")
+    if classifications["open_order_truth"] == "SUSPICIOUS_ORDER_STATE":
+        if _payload_has_exact_tolerable_suspicious_order(config=config, payload=payloads["open_order_truth"]):
+            diagnostic_only_blockers.append(
+                "Open Order Truth sentinel quantity state is diagnostic for exact modify-in-place."
+            )
+        else:
+            blockers.append(f"Open Order Truth blocks modify-in-place: {classifications['open_order_truth']}.")
     if classifications["managed_order_registry"] in {
-        "CLOSE_ORDER_SUSPICIOUS",
         "DUPLICATE_CLOSE_ORDER_BLOCKED",
         "ORDER_STATE_UNKNOWN_REVIEW_REQUIRED",
         "BROKER_FLAT_WITH_WORKING_CLOSE",
     }:
         blockers.append(f"Managed Order Registry blocks modify-in-place: {classifications['managed_order_registry']}.")
+    if classifications["managed_order_registry"] == "CLOSE_ORDER_SUSPICIOUS":
+        if _payload_has_exact_tolerable_suspicious_order(config=config, payload=payloads["managed_order_registry"]):
+            diagnostic_only_blockers.append(
+                "Managed Order Registry sentinel quantity state is diagnostic for exact modify-in-place."
+            )
+        else:
+            blockers.append(f"Managed Order Registry blocks modify-in-place: {classifications['managed_order_registry']}.")
     if classifications["order_adjustment_plan"] in {
         "TARGETED_CANCEL_REPLACE_REQUIRED",
         "DO_NOT_REPLACE_DUPLICATE_RISK",
@@ -649,6 +668,20 @@ def _target_evidence(*, config: ManagedOrderModifyInPlaceConfig, shared: Mapping
         "matching_positions": _jsonable(matching_positions),
         "conflicting_positions": _jsonable(conflicting_positions),
     }
+
+
+def _payload_has_exact_tolerable_suspicious_order(
+    *,
+    config: ManagedOrderModifyInPlaceConfig,
+    payload: Mapping[str, Any],
+) -> bool:
+    for row in _authority_order_rows(payload):
+        if not _order_identity_matches(config=config, row=row):
+            continue
+        if not _suspicious_order_reasons(row):
+            continue
+        return not _is_blocking_suspicious_order(config=config, row=row)
+    return False
 
 
 def _base_report(
