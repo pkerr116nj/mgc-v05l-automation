@@ -5903,6 +5903,80 @@ def test_submit_capable_runtime_clears_stale_pending_entry_when_broker_truth_cle
     assert broker.snapshot_state()["last_submit_context"]["pending_state_reconciliation"]["diagnostic_only"] is True
 
 
+def test_submit_capable_restore_skips_stale_synthetic_pending_entry_when_broker_truth_clean(tmp_path: Path) -> None:
+    settings = _build_probationary_paper_settings(tmp_path)
+    repositories = RepositorySet(build_engine(f"sqlite:///{tmp_path / 'mnq_globex_long.sqlite3'}"))
+    structured_logger = StructuredLogger(tmp_path / "artifacts")
+    broker = probationary_runtime_module._IbkrPaperBridgeRuntimeBroker(  # noqa: SLF001
+        lane_id="mnq_globex_active_participation_long",
+        source_symbol="MNQ",
+        bridge_adapter={
+            "current_order_destination": "ibkr_paper_bridge_submit_capable",
+            "bridge_proxy_mode": "MNQ_SIGNAL_DIRECT_PHASE1",
+            "bridge_execution_target": {
+                "symbol": "MNQ",
+                "contract_month": "202609",
+                "expiry": "20260918",
+                "local_symbol": "MNQU6",
+                "con_id": 793356225,
+            },
+            "managed_exit_policy_id": "GLOBEX_ACTIVE_EVIDENCE_TIMEBOX_15M_EXIT_V1",
+        },
+        repo_root=tmp_path,
+        bridge_runner=lambda *, config: pytest.fail("bridge runner should not be invoked during restore"),
+    )
+    broker.connect()
+    broker.load_snapshot = lambda *, force_refresh=False: {  # type: ignore[method-assign]
+        "health": {
+            "orders_fresh": {"ok": True},
+            "positions_fresh": {"ok": True},
+        },
+        "orders": {"open_rows": [], "unknown_open_order_count": 0},
+        "portfolio": {"positions": []},
+    }
+    execution_engine = ExecutionEngine(broker=broker)
+    strategy_engine = StrategyEngine(
+        settings=settings,
+        repositories=repositories,
+        execution_engine=execution_engine,
+        structured_logger=structured_logger,
+        alert_dispatcher=AlertDispatcher(structured_logger),
+    )
+    created_at = datetime(2026, 6, 15, 6, 11, tzinfo=timezone.utc)
+    stale_intent = OrderIntent(
+        order_intent_id="MNQ|1m|2026-06-11T03:01:00Z|BUY_TO_OPEN",
+        bar_id="MNQ|1m|2026-06-11T03:01:00Z",
+        symbol="MNQ",
+        intent_type=OrderIntentType.BUY_TO_OPEN,
+        quantity=1,
+        created_at=created_at,
+        reason_code="stale_restored_pending_entry",
+    )
+    repositories.order_intents.save(
+        stale_intent,
+        order_status=OrderStatus.ACKNOWLEDGED,
+        broker_order_id="paper-MNQ|1m|2026-06-11T03:01:00Z|BUY_TO_OPEN",
+        acknowledged_at=created_at,
+        broker_order_status=OrderStatus.ACKNOWLEDGED.value,
+    )
+
+    _restore_paper_runtime_state(
+        repositories=repositories,
+        strategy_engine=strategy_engine,
+        execution_engine=execution_engine,
+    )
+
+    fresh_intent = replace(
+        stale_intent,
+        order_intent_id="MNQ|1m|2026-06-15T06:17:00Z|BUY_TO_OPEN",
+        bar_id="MNQ|1m|2026-06-15T06:17:00Z",
+        created_at=datetime(2026, 6, 15, 6, 17, tzinfo=timezone.utc),
+        reason_code="fresh_active_evidence_long",
+    )
+    assert execution_engine.pending_executions() == []
+    assert execution_engine.register_intent(fresh_intent) is True
+
+
 def test_submit_capable_runtime_retains_pending_entry_when_broker_order_exists(tmp_path: Path) -> None:
     broker = probationary_runtime_module._IbkrPaperBridgeRuntimeBroker(  # noqa: SLF001
         lane_id="mnq_globex_active_participation_long",
@@ -6009,6 +6083,84 @@ def test_submit_capable_runtime_retains_pending_entry_when_unknown_orders_exist(
         },
         "orders": {"open_rows": [], "unknown_open_order_count": 1},
         "portfolio": {"positions": []},
+    }
+    execution_engine = ExecutionEngine(broker=broker)
+    created_at = datetime(2026, 6, 15, 7, 1, tzinfo=timezone.utc)
+    stale_short = OrderIntent(
+        order_intent_id="MNQ|1m|2026-06-15T07:00:00Z|SELL_TO_OPEN",
+        bar_id="MNQ|1m|2026-06-15T07:00:00Z",
+        symbol="MNQ",
+        intent_type=OrderIntentType.SELL_TO_OPEN,
+        quantity=1,
+        created_at=created_at,
+        reason_code="stale_pending_short_test",
+    )
+    fresh_long = replace(
+        stale_short,
+        order_intent_id="MNQ|1m|2026-06-15T07:01:00Z|BUY_TO_OPEN",
+        bar_id="MNQ|1m|2026-06-15T07:01:00Z",
+        intent_type=OrderIntentType.BUY_TO_OPEN,
+        reason_code="fresh_long_test",
+    )
+    execution_engine.restore_pending_execution(
+        probationary_runtime_module.PendingExecution(
+            intent=stale_short,
+            broker_order_id="stale-memory-order",
+            submitted_at=created_at,
+            acknowledged_at=created_at,
+            broker_order_status=OrderStatus.ACKNOWLEDGED.value,
+            last_status_checked_at=created_at,
+            retry_count=0,
+            signal_bar_id=stale_short.bar_id,
+            long_entry_family=LongEntryFamily.NONE,
+            short_entry_family=ShortEntryFamily.DERIVATIVE_BEAR,
+            short_entry_source="active_evidence",
+            submit_attempt_id="submit-stale-memory-order",
+        )
+    )
+
+    assert execution_engine.register_intent(fresh_long) is False
+
+    assert execution_engine.pending_execution(stale_short.order_intent_id) is not None
+
+
+def test_submit_capable_runtime_retains_pending_entry_when_broker_position_exists(tmp_path: Path) -> None:
+    broker = probationary_runtime_module._IbkrPaperBridgeRuntimeBroker(  # noqa: SLF001
+        lane_id="mnq_globex_active_participation_long",
+        source_symbol="MNQ",
+        bridge_adapter={
+            "current_order_destination": "ibkr_paper_bridge_submit_capable",
+            "bridge_proxy_mode": "MNQ_SIGNAL_DIRECT_PHASE1",
+            "bridge_execution_target": {
+                "symbol": "MNQ",
+                "contract_month": "202609",
+                "expiry": "20260918",
+                "local_symbol": "MNQU6",
+                "con_id": 793356225,
+            },
+            "managed_exit_policy_id": "GLOBEX_ACTIVE_EVIDENCE_TIMEBOX_15M_EXIT_V1",
+        },
+        repo_root=tmp_path,
+        bridge_runner=lambda *, config: pytest.fail("bridge runner should not be invoked by registration"),
+    )
+    broker.connect()
+    broker.load_snapshot = lambda *, force_refresh=False: {  # type: ignore[method-assign]
+        "health": {
+            "orders_fresh": {"ok": True},
+            "positions_fresh": {"ok": True},
+        },
+        "orders": {"open_rows": [], "unknown_open_order_count": 0},
+        "portfolio": {
+            "positions": [
+                {
+                    "symbol": "MNQ",
+                    "local_symbol": "MNQU6",
+                    "con_id": 793356225,
+                    "quantity": 1,
+                    "side": "SHORT",
+                }
+            ]
+        },
     }
     execution_engine = ExecutionEngine(broker=broker)
     created_at = datetime(2026, 6, 15, 7, 1, tzinfo=timezone.utc)

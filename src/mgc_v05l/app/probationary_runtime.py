@@ -20273,7 +20273,14 @@ def _restore_paper_runtime_state(
 
     state = strategy_engine.state
     open_order_rows = _load_open_order_intent_rows(repositories)
-    pending_executions = [_pending_execution_from_row(row) for row in open_order_rows]
+    pending_executions = [
+        pending
+        for pending in (_pending_execution_from_row(row) for row in open_order_rows)
+        if _restore_pending_execution_supported_by_broker_truth(
+            broker=broker,
+            pending=pending,
+        )
+    ]
     for pending in pending_executions:
         execution_engine.restore_pending_execution(pending)
 
@@ -20306,6 +20313,34 @@ def _restore_paper_runtime_state(
         order_status=restored_order_status,
         last_fill_timestamp=_latest_fill_timestamp_from_rows(repositories.fills.list_all()),
     )
+
+
+def _restore_pending_execution_supported_by_broker_truth(
+    *,
+    broker: Any,
+    pending: PendingExecution,
+) -> bool:
+    if not isinstance(broker, _IbkrPaperBridgeRuntimeBroker):
+        return True
+    if not pending.intent.is_entry:
+        return True
+    try:
+        snapshot = broker.load_snapshot(force_refresh=True)
+    except Exception:
+        return True
+    health = dict(snapshot.get("health") or {})
+    orders_fresh = _ibkr_runtime_health_ok(health, "orders_fresh")
+    positions_fresh = _ibkr_runtime_health_ok(health, "positions_fresh")
+    if not orders_fresh or not positions_fresh:
+        return True
+    if _ibkr_runtime_unknown_open_order_count(snapshot) > 0:
+        return True
+    matching_position = broker._matching_broker_truth_position(snapshot=snapshot)  # noqa: SLF001
+    matching_position_quantity = _signed_ibkr_runtime_position_quantity(matching_position or {})
+    if matching_position_quantity != 0:
+        return True
+    matching_open_orders = broker._matching_broker_truth_open_orders(snapshot=snapshot)  # noqa: SLF001
+    return bool(matching_open_orders)
 
 
 def _restore_live_runtime_state(
