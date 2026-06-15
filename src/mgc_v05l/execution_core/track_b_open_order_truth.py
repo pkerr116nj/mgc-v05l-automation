@@ -62,6 +62,7 @@ DEFAULT_LIFECYCLE_ROOT = (
 )
 
 _SENTINEL_FILLED_QUANTITY = Decimal("1e100")
+_TOLERABLE_IBKR_STATUS_GAPS = {"sentinel_filled_quantity", "missing_remaining_quantity"}
 _WORKING_ORDER_STATUSES = {"SUBMITTED", "PRESUBMITTED", "PENDING_SUBMIT", "APIPENDING"}
 _TERMINAL_ORDER_STATUSES = {"FILLED", "CANCELLED", "INACTIVE", "APICANCELLED"}
 _PAPER_TEST_ACCOUNT_ID = "DUM882026"
@@ -336,6 +337,15 @@ def _classify_order(
         lifecycle_positions=lifecycle_positions,
         known_managed_exit_orders=known_managed_exit_orders,
     )
+    diagnostic_status_gaps: list[str] = []
+    if _tolerated_risk_reducing_status_gaps(
+        order=order,
+        reasons=reasons,
+        is_close_order=is_close_order,
+        broker_positions=broker_positions,
+    ):
+        diagnostic_status_gaps = sorted(set(reasons))
+        reasons = []
     is_unknown = _order_in(order, unknown_orders)
     age_seconds = _order_age_seconds(order, now)
     close_attempt = _mapping(lifecycle_report.get("close_submit_attempt"))
@@ -386,6 +396,8 @@ def _classify_order(
         "unknown_open_order": bool(is_unknown),
         "suspicious": bool(reasons) and classification != PAPER_TEST_ORDER_PENDING_CANCEL_QUARANTINED,
         "suspicious_reasons": reasons,
+        "diagnostic_status_gaps": diagnostic_status_gaps,
+        "ibkr_order_status_quantity_unreliable": bool(diagnostic_status_gaps),
         "quarantined": classification == PAPER_TEST_ORDER_PENDING_CANCEL_QUARANTINED,
         "quarantine_evidence": quarantine_evidence,
         "condition_flags": condition_flags,
@@ -440,6 +452,51 @@ def _suspicious_reasons(*, order: Mapping[str, Any], lifecycle_report: Mapping[s
     if close_attempt and diagnostics.get("execDetails_seen") is False:
         reasons.append("open_close_order_without_execDetails")
     return reasons
+
+
+def _tolerated_risk_reducing_status_gaps(
+    *,
+    order: Mapping[str, Any],
+    reasons: list[str],
+    is_close_order: bool,
+    broker_positions: list[dict[str, Any]],
+) -> bool:
+    reason_set = {str(reason) for reason in reasons if str(reason)}
+    return bool(
+        reason_set
+        and reason_set <= _TOLERABLE_IBKR_STATUS_GAPS
+        and is_close_order
+        and _order_working(order)
+        and _risk_reducing_order_matches_broker(order=order, broker_positions=broker_positions)
+    )
+
+
+def _risk_reducing_order_matches_broker(
+    *,
+    order: Mapping[str, Any],
+    broker_positions: list[dict[str, Any]],
+) -> bool:
+    action = _action(order)
+    if action not in {"BUY", "SELL"}:
+        return False
+    order_qty = _quantity(order).copy_abs()
+    if order_qty <= Decimal("0"):
+        return False
+    order_account = str(order.get("account_id") or order.get("account") or "").strip()
+    for position in broker_positions:
+        position_qty = _quantity(position)
+        if position_qty == Decimal("0") or not _same_contract(order, position):
+            continue
+        position_account = str(position.get("account_id") or position.get("account") or "").strip()
+        if order_account and position_account and order_account != position_account:
+            continue
+        if order_qty > abs(position_qty):
+            continue
+        if position_qty > 0 and action == "SELL":
+            return True
+        if position_qty < 0 and action == "BUY":
+            return True
+    return False
 
 
 def paper_test_pending_cancel_quarantine_evidence(

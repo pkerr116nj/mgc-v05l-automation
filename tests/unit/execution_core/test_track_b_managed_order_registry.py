@@ -80,6 +80,38 @@ def test_suspicious_sentinel_order_is_tracked(tmp_path: Path) -> None:
     assert payload["managed_orders"][0]["recommended_next_action"] == TARGETED_CANCEL_REPLACE_CANDIDATE
 
 
+def test_diagnostic_sentinel_status_gap_does_not_block_working_close(tmp_path: Path) -> None:
+    _seed_base(
+        tmp_path,
+        order_states=[
+            _order_state(
+                classification="OPEN_CLOSE_ORDER_WORKING",
+                suspicious=False,
+                suspicious_reasons=[],
+                condition_flags=[],
+            )
+            | {
+                "diagnostic_status_gaps": ["missing_remaining_quantity", "sentinel_filled_quantity"],
+                "ibkr_order_status_quantity_unreliable": True,
+                "order": {
+                    **_order_state()["order"],
+                    "filled_quantity": "1.7976931348623157e+308",
+                    "remaining_quantity": None,
+                },
+            }
+        ],
+    )
+
+    payload = build_track_b_managed_order_registry(
+        config=TrackBManagedOrderRegistryConfig(repo_root=tmp_path),
+        now=NOW,
+    )
+
+    assert payload["classification"] == WORKING_CLOSE_ORDER
+    assert payload["managed_orders"][0]["classification"] == WORKING_CLOSE_ORDER
+    assert payload["managed_orders"][0]["recommended_next_action"] == "WAIT"
+
+
 def test_duplicate_close_order_is_blocked(tmp_path: Path) -> None:
     first = _order_state(order_id="27", perm_id="1001", duplicate_key="DUM882026|770561201|SELL|1")
     second = _order_state(order_id="28", perm_id="1002", duplicate_key="DUM882026|770561201|SELL|1")

@@ -65,7 +65,7 @@ def test_duplicate_close_orders_are_classified(tmp_path: Path) -> None:
     assert payload["summary"]["duplicate_close_order_group_count"] == 1
 
 
-def test_sentinel_filled_quantity_is_suspicious(tmp_path: Path) -> None:
+def test_sentinel_filled_quantity_on_matching_working_close_is_diagnostic(tmp_path: Path) -> None:
     _seed_reconciliation(
         tmp_path,
         broker_positions=[_position("MNQ", "MNQM6", "1")],
@@ -74,6 +74,32 @@ def test_sentinel_filled_quantity_is_suspicious(tmp_path: Path) -> None:
                 symbol="MNQ",
                 local_symbol="MNQM6",
                 action="SELL",
+                order_id=27,
+                filled_quantity="1.7976931348623157e+308",
+                remaining_quantity=None,
+            )
+        ],
+    )
+
+    payload = build_track_b_open_order_truth(config=TrackBOpenOrderTruthConfig(repo_root=tmp_path), now=NOW)
+
+    assert payload["classification"] == OPEN_CLOSE_ORDER_WORKING
+    state = payload["order_states"][0]
+    assert state["classification"] == OPEN_CLOSE_ORDER_WORKING
+    assert state["suspicious"] is False
+    assert state["suspicious_reasons"] == []
+    assert state["diagnostic_status_gaps"] == ["missing_remaining_quantity", "sentinel_filled_quantity"]
+    assert state["ibkr_order_status_quantity_unreliable"] is True
+
+
+def test_sentinel_filled_quantity_on_entry_order_remains_suspicious(tmp_path: Path) -> None:
+    _seed_reconciliation(
+        tmp_path,
+        open_orders=[
+            _order(
+                symbol="MNQ",
+                local_symbol="MNQM6",
+                action="BUY",
                 order_id=27,
                 filled_quantity="1.7976931348623157e+308",
                 remaining_quantity=None,
